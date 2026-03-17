@@ -475,7 +475,7 @@ golangci-lint run
 | 组件 | 技术 |
 |------|------|
 | 语言 | Go 1.25+ |
-| Agent 框架 | [Hexagon](https://github.com/hexagon-codes/hexagon) |
+| Agent 框架 | [Hexagon](https://github.com/hexagon-codes/hexagon) v0.3.1-beta |
 | AI 基础库 | [ai-core](https://github.com/hexagon-codes/ai-core) v0.0.4 |
 | 工具库 | [toolkit](https://github.com/hexagon-codes/toolkit) v0.0.3 |
 | CLI | [Cobra](https://github.com/spf13/cobra) |
@@ -519,7 +519,7 @@ chore: 构建/工具链
 
 | 项目 | 说明 | 仓库 |
 |------|------|------|
-| **Hexagon** | Go AI Agent 框架 (核心引擎) | [hexagon](https://github.com/hexagon-codes/hexagon) |
+| **Hexagon** | Go AI Agent 框架 (核心引擎) v0.3.1-beta | [hexagon](https://github.com/hexagon-codes/hexagon) |
 | **ai-core** | AI 基础能力库 (LLM/Tool/Memory) v0.0.4 | [ai-core](https://github.com/hexagon-codes/ai-core) |
 | **toolkit** | Go 通用工具库 v0.0.3 | [toolkit](https://github.com/hexagon-codes/toolkit) |
 | **hexagon-ui** | Hexagon Dev UI 观测面板 (Vue 3) | [hexagon-ui](https://github.com/hexagon-codes/hexagon-ui) |
