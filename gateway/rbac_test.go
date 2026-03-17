@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/everyday-items/hexclaw/adapter"
-	"github.com/everyday-items/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/config"
 )
 
 // newTestRBACConfig 创建测试用 RBAC 配置

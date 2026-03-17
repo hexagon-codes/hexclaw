@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/everyday-items/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/config"
 )
 
 // TestFeishuAdapter_Challenge 测试 URL 验证回调

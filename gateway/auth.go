@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/everyday-items/hexclaw/adapter"
-	"github.com/everyday-items/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/config"
 )
 
 // AuthLayer 身份认证层 (Layer 1)

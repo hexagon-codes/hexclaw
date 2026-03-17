@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/everyday-items/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/config"
 )
 
 // TestChecker_AllPass 测试全部通过的安全配置

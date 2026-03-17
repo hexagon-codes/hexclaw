@@ -26,9 +26,9 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/everyday-items/hexclaw/adapter"
-	"github.com/everyday-items/hexclaw/config"
-	"github.com/everyday-items/toolkit/util/idgen"
+	"github.com/hexagon-codes/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/toolkit/util/idgen"
 
 	"github.com/gorilla/websocket"
 )

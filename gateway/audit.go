@@ -4,7 +4,7 @@ import (
 	"context"
 	"log"
 
-	"github.com/everyday-items/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/adapter"
 )
 
 // AuditLayer 审计记录层 (Layer 6)

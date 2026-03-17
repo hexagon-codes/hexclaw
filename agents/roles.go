@@ -12,7 +12,7 @@
 package agents
 
 import (
-	"github.com/everyday-items/hexagon"
+	"github.com/hexagon-codes/hexagon"
 )
 
 // 预定义角色

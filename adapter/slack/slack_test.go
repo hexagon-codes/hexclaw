@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/everyday-items/hexclaw/adapter"
-	"github.com/everyday-items/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/config"
 )
 
 // TestNew 测试创建适配器

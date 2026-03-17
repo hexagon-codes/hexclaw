@@ -299,6 +299,53 @@ func (r *Dispatcher) ListRules() []Rule {
 	return rules
 }
 
+// UpdateAgent 更新已注册 Agent 的配置
+func (r *Dispatcher) UpdateAgent(cfg AgentConfig) error {
+	if cfg.Name == "" {
+		return fmt.Errorf("agent 名称不能为空")
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	existing, ok := r.agents[cfg.Name]
+	if !ok {
+		return fmt.Errorf("agent %q 未注册", cfg.Name)
+	}
+
+	// 只更新非空字段
+	if cfg.DisplayName != "" {
+		existing.DisplayName = cfg.DisplayName
+	}
+	if cfg.Description != "" {
+		existing.Description = cfg.Description
+	}
+	if cfg.Model != "" {
+		existing.Model = cfg.Model
+	}
+	if cfg.Provider != "" {
+		existing.Provider = cfg.Provider
+	}
+	if cfg.SystemPrompt != "" {
+		existing.SystemPrompt = cfg.SystemPrompt
+	}
+	if cfg.Skills != nil {
+		existing.Skills = cfg.Skills
+	}
+	if cfg.MaxTokens > 0 {
+		existing.MaxTokens = cfg.MaxTokens
+	}
+	if cfg.Temperature > 0 {
+		existing.Temperature = cfg.Temperature
+	}
+	if cfg.Metadata != nil {
+		existing.Metadata = cfg.Metadata
+	}
+
+	log.Printf("Agent 已更新: %s", cfg.Name)
+	return nil
+}
+
 // GetAgent 获取 Agent 配置
 func (r *Dispatcher) GetAgent(name string) (*AgentConfig, bool) {
 	r.mu.RLock()

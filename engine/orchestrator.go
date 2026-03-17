@@ -7,9 +7,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/everyday-items/hexagon"
-	"github.com/everyday-items/hexclaw/agents"
-	"github.com/everyday-items/hexclaw/llmrouter"
+	"github.com/hexagon-codes/hexagon"
+	"github.com/hexagon-codes/hexclaw/agents"
+	"github.com/hexagon-codes/hexclaw/llmrouter"
 )
 
 // ExecutionMode 多 Agent 协作模式

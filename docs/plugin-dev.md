@@ -2,7 +2,7 @@
 
 ## 概述
 
-HexClaw 的插件系统基于 [Hexagon](https://github.com/everyday-items/hexagon) 框架的 `plugin` 包构建，扩展了 HexClaw 专属插件类型。
+HexClaw 的插件系统基于 [Hexagon](https://github.com/hexagon-codes/hexagon) 框架的 `plugin` 包构建，扩展了 HexClaw 专属插件类型。
 
 ## 插件类型
 
@@ -45,9 +45,9 @@ package myplugin
 import (
     "context"
 
-    "github.com/everyday-items/hexagon/plugin"
-    hcplugin "github.com/everyday-items/hexclaw/plugin"
-    "github.com/everyday-items/hexclaw/skill"
+    "github.com/hexagon-codes/hexagon/plugin"
+    hcplugin "github.com/hexagon-codes/hexclaw/plugin"
+    "github.com/hexagon-codes/hexclaw/skill"
 )
 
 type MyPlugin struct {
@@ -165,6 +165,6 @@ plugins:
 
 ## 参考
 
-- [Hexagon Plugin 包](https://github.com/everyday-items/hexagon/tree/main/plugin) — 基础插件接口和注册表
+- [Hexagon Plugin 包](https://github.com/hexagon-codes/hexagon/tree/main/plugin) — 基础插件接口和注册表
 - [HexClaw Skill 接口](../skill/skill.go) — Skill 接口定义
 - [HexClaw Adapter 接口](../adapter/adapter.go) — 适配器接口定义

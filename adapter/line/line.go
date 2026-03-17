@@ -22,7 +22,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/everyday-items/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/adapter"
 )
 
 // LineAdapter LINE Messaging API 适配器

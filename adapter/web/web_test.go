@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/everyday-items/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/adapter"
 )
 
 // TestNew 测试创建 Web 适配器

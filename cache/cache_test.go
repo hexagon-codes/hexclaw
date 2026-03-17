@@ -11,7 +11,7 @@ func TestCache_PutAndGet(t *testing.T) {
 
 	c.Put("你好", "你好！有什么可以帮你的？", "deepseek", "deepseek-chat")
 
-	resp, ok := c.Get("你好")
+	resp, ok := c.Get("你好", "deepseek")
 	if !ok {
 		t.Fatal("应命中缓存")
 	}
@@ -25,7 +25,7 @@ func TestCache_Normalization(t *testing.T) {
 	c := New(Options{Enabled: true, TTL: time.Hour, MaxEntries: 100})
 
 	// 存入
-	c.Put("  你好  ", "回复", "test", "test")
+	c.Put("  你好  ", "回复", "deepseek", "deepseek-chat")
 
 	// 变体应命中（大小写、空白归一化）
 	tests := []string{
@@ -34,7 +34,7 @@ func TestCache_Normalization(t *testing.T) {
 		"你好",
 	}
 	for _, input := range tests {
-		if _, ok := c.Get(input); !ok {
+		if _, ok := c.Get(input, "deepseek"); !ok {
 			t.Errorf("输入 %q 应命中缓存", input)
 		}
 	}
@@ -44,17 +44,17 @@ func TestCache_Normalization(t *testing.T) {
 func TestCache_Expiry(t *testing.T) {
 	c := New(Options{Enabled: true, TTL: 50 * time.Millisecond, MaxEntries: 100})
 
-	c.Put("test", "response", "p", "m")
+	c.Put("test", "response", "deepseek", "deepseek-chat")
 
 	// 立即应命中
-	if _, ok := c.Get("test"); !ok {
+	if _, ok := c.Get("test", "deepseek"); !ok {
 		t.Fatal("应命中")
 	}
 
 	// 等待过期
 	time.Sleep(100 * time.Millisecond)
 
-	if _, ok := c.Get("test"); ok {
+	if _, ok := c.Get("test", "deepseek"); ok {
 		t.Fatal("过期后不应命中")
 	}
 }
@@ -63,15 +63,15 @@ func TestCache_Expiry(t *testing.T) {
 func TestCache_MaxEntries(t *testing.T) {
 	c := New(Options{Enabled: true, TTL: time.Hour, MaxEntries: 3})
 
-	c.Put("a", "1", "p", "m")
-	c.Put("b", "2", "p", "m")
-	c.Put("c", "3", "p", "m")
-	c.Put("d", "4", "p", "m") // 应淘汰 "a"
+	c.Put("a", "1", "deepseek", "deepseek-chat")
+	c.Put("b", "2", "deepseek", "deepseek-chat")
+	c.Put("c", "3", "deepseek", "deepseek-chat")
+	c.Put("d", "4", "deepseek", "deepseek-chat") // 应淘汰 "a"
 
-	if _, ok := c.Get("a"); ok {
+	if _, ok := c.Get("a", "deepseek"); ok {
 		t.Fatal("a 应被淘汰")
 	}
-	if _, ok := c.Get("d"); !ok {
+	if _, ok := c.Get("d", "deepseek"); !ok {
 		t.Fatal("d 应存在")
 	}
 }
@@ -80,8 +80,8 @@ func TestCache_MaxEntries(t *testing.T) {
 func TestCache_Disabled(t *testing.T) {
 	c := New(Options{Enabled: false})
 
-	c.Put("test", "response", "p", "m")
-	if _, ok := c.Get("test"); ok {
+	c.Put("test", "response", "deepseek", "deepseek-chat")
+	if _, ok := c.Get("test", "deepseek"); ok {
 		t.Fatal("禁用模式不应命中")
 	}
 }
@@ -90,10 +90,10 @@ func TestCache_Disabled(t *testing.T) {
 func TestCache_Stats(t *testing.T) {
 	c := New(Options{Enabled: true, TTL: time.Hour, MaxEntries: 100})
 
-	c.Put("test", "response", "p", "m")
-	c.Get("test") // hit
-	c.Get("test") // hit
-	c.Get("miss") // miss
+	c.Put("test", "response", "deepseek", "deepseek-chat")
+	c.Get("test", "deepseek") // hit
+	c.Get("test", "deepseek") // hit
+	c.Get("miss", "deepseek") // miss
 
 	stats := c.Stats()
 	if stats.Hits != 2 {

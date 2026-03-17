@@ -19,8 +19,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/everyday-items/hexclaw/adapter"
-	"github.com/everyday-items/toolkit/util/idgen"
+	"github.com/hexagon-codes/hexclaw/adapter"
+	"github.com/hexagon-codes/toolkit/util/idgen"
 	"nhooyr.io/websocket"
 	"nhooyr.io/websocket/wsjson"
 )
@@ -57,7 +57,7 @@ func (a *WebAdapter) Platform() adapter.Platform { return adapter.PlatformWeb }
 // 供主 API 服务器挂载到 /ws 路径。
 func (a *WebAdapter) Start(_ context.Context, handler adapter.MessageHandler) error {
 	a.handler = handler
-	log.Println("Web 适配器已就绪")
+	// 启动日志由 main 统一输出
 	return nil
 }
 

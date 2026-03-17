@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/everyday-items/hexclaw/storage"
+	"github.com/hexagon-codes/hexclaw/storage"
 )
 
 // mockStore 测试用存储
@@ -29,6 +29,7 @@ func (s *mockStore) ListSessions(_ context.Context, _ string, _, _ int) ([]*stor
 	return nil, nil
 }
 func (s *mockStore) DeleteSession(_ context.Context, _ string) error { return nil }
+func (s *mockStore) CleanupOldSessions(_ context.Context, _ int) (int64, error) { return 0, nil }
 
 func (s *mockStore) SaveMessage(_ context.Context, msg *storage.MessageRecord) error {
 	s.messages[msg.SessionID] = append(s.messages[msg.SessionID], msg)

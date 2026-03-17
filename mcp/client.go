@@ -29,7 +29,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/everyday-items/hexagon"
+	"github.com/hexagon-codes/hexagon"
 )
 
 // ServerConfig MCP Server 配置

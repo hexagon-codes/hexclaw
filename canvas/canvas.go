@@ -28,7 +28,7 @@ import (
 	"encoding/json"
 	"sync"
 
-	"github.com/everyday-items/toolkit/util/idgen"
+	"github.com/hexagon-codes/toolkit/util/idgen"
 )
 
 // ComponentType 组件类型

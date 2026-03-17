@@ -19,13 +19,13 @@ jobs:
       - name: Checkout hexagon
         uses: actions/checkout@v4
         with:
-          repository: everyday-items/hexagon
+          repository: hexagon-codes/hexagon
           path: ../hexagon
 
       - name: Checkout toolkit
         uses: actions/checkout@v4
         with:
-          repository: everyday-items/toolkit
+          repository: hexagon-codes/toolkit
           path: ../toolkit
 
       - uses: actions/setup-go@v5
@@ -48,13 +48,13 @@ jobs:
       - name: Checkout hexagon
         uses: actions/checkout@v4
         with:
-          repository: everyday-items/hexagon
+          repository: hexagon-codes/hexagon
           path: ../hexagon
 
       - name: Checkout toolkit
         uses: actions/checkout@v4
         with:
-          repository: everyday-items/toolkit
+          repository: hexagon-codes/toolkit
           path: ../toolkit
 
       - uses: actions/setup-go@v5
@@ -75,13 +75,13 @@ jobs:
       - name: Checkout hexagon
         uses: actions/checkout@v4
         with:
-          repository: everyday-items/hexagon
+          repository: hexagon-codes/hexagon
           path: ../hexagon
 
       - name: Checkout toolkit
         uses: actions/checkout@v4
         with:
-          repository: everyday-items/toolkit
+          repository: hexagon-codes/toolkit
           path: ../toolkit
 
       - uses: actions/setup-go@v5

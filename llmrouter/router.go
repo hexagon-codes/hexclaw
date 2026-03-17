@@ -19,8 +19,8 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/everyday-items/hexagon"
-	"github.com/everyday-items/hexclaw/config"
+	"github.com/hexagon-codes/hexagon"
+	"github.com/hexagon-codes/hexclaw/config"
 )
 
 // costPriority 成本优先策略的 Provider 优先级（数字越小越优先）
@@ -76,7 +76,7 @@ func New(cfg config.LLMConfig) (*Selector, error) {
 		}
 		provider := r.createProvider(name, pc)
 		r.providers[name] = provider
-		log.Printf("LLM Provider 已加载: %s (model: %s)", name, pc.Model)
+		// 启动日志由 main 统一输出
 	}
 
 	if len(r.providers) == 0 {

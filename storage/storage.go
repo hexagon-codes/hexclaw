@@ -85,6 +85,9 @@ type Store interface {
 	// DeleteSession 删除会话及其所有消息
 	DeleteSession(ctx context.Context, id string) error
 
+	// CleanupOldSessions 删除超过指定天数未活跃的会话及其消息
+	CleanupOldSessions(ctx context.Context, olderThanDays int) (int64, error)
+
 	// --- 消息管理 ---
 
 	// SaveMessage 保存消息

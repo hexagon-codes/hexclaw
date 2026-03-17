@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/everyday-items/hexclaw/adapter"
-	"github.com/everyday-items/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/config"
 )
 
 // mockTransport 自定义 HTTP 传输，用于拦截请求

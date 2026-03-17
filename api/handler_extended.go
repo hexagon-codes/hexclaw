@@ -12,9 +12,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/everyday-items/hexclaw/adapter"
-	"github.com/everyday-items/hexclaw/router"
-	"github.com/everyday-items/toolkit/util/idgen"
+	"github.com/hexagon-codes/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/router"
+	"github.com/hexagon-codes/toolkit/util/idgen"
 )
 
 // ═══════════════════════════════════════════════

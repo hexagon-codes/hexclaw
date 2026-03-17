@@ -6,12 +6,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/everyday-items/hexagon"
-	"github.com/everyday-items/hexclaw/adapter"
-	"github.com/everyday-items/hexclaw/config"
-	"github.com/everyday-items/hexclaw/llmrouter"
-	"github.com/everyday-items/hexclaw/skill"
-	sqlitestore "github.com/everyday-items/hexclaw/storage/sqlite"
+	"github.com/hexagon-codes/hexagon"
+	"github.com/hexagon-codes/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/llmrouter"
+	"github.com/hexagon-codes/hexclaw/skill"
+	sqlitestore "github.com/hexagon-codes/hexclaw/storage/sqlite"
 )
 
 func TestReActEngine_Lifecycle(t *testing.T) {

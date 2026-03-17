@@ -12,7 +12,7 @@ package engine
 import (
 	"context"
 
-	"github.com/everyday-items/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/adapter"
 )
 
 // Engine Agent 引擎接口

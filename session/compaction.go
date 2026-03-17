@@ -7,10 +7,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/everyday-items/hexagon"
+	"github.com/hexagon-codes/hexagon"
 
-	"github.com/everyday-items/hexclaw/storage"
-	"github.com/everyday-items/toolkit/util/idgen"
+	"github.com/hexagon-codes/hexclaw/storage"
+	"github.com/hexagon-codes/toolkit/util/idgen"
 )
 
 // CompactionConfig 上下文压缩配置

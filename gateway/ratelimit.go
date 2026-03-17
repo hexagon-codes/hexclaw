@@ -5,8 +5,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/everyday-items/hexclaw/adapter"
-	"github.com/everyday-items/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/config"
 )
 
 // RateLimitLayer 速率限制层 (Layer 2)

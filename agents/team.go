@@ -1,7 +1,7 @@
 package agents
 
 import (
-	"github.com/everyday-items/hexagon"
+	"github.com/hexagon-codes/hexagon"
 )
 
 // CreateResearchTeam 创建研究团队

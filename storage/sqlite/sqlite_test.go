@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/everyday-items/hexclaw/storage"
+	"github.com/hexagon-codes/hexclaw/storage"
 )
 
 // newTestStore 创建测试用的 SQLite 存储（使用临时目录）

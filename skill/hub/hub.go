@@ -20,7 +20,7 @@ import (
 // HubConfig 技能市场配置
 type HubConfig struct {
 	Enabled bool   `yaml:"enabled"`
-	RepoURL string `yaml:"repo_url"` // 默认: https://github.com/everyday-items/clawhub
+	RepoURL string `yaml:"repo_url"` // 默认: https://github.com/hexagon-codes/clawhub
 	Branch  string `yaml:"branch"`   // 默认: main
 }
 
@@ -57,7 +57,7 @@ type Hub struct {
 // New 创建技能市场客户端
 func New(cfg HubConfig, skillsDir string) *Hub {
 	if cfg.RepoURL == "" {
-		cfg.RepoURL = "https://github.com/everyday-items/clawhub"
+		cfg.RepoURL = "https://github.com/hexagon-codes/clawhub"
 	}
 	if cfg.Branch == "" {
 		cfg.Branch = "main"

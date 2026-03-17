@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/everyday-items/hexclaw/config"
-	"github.com/everyday-items/hexclaw/skill"
+	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/skill"
 )
 
 // ===================== RegisterAll 测试 =====================

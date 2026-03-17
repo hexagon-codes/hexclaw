@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/everyday-items/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/adapter"
 )
 
 // mockSkill 测试用 Skill 实现

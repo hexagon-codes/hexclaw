@@ -31,7 +31,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/everyday-items/toolkit/util/idgen"
+	"github.com/hexagon-codes/toolkit/util/idgen"
 )
 
 // JobType 任务类型
@@ -112,6 +112,20 @@ func (s *Scheduler) Init(ctx context.Context) error {
 	)`)
 	if err != nil {
 		return fmt.Errorf("初始化 cron 表失败: %w", err)
+	}
+
+	// 执行历史表
+	_, err = s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS cron_job_runs (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		job_id TEXT NOT NULL,
+		status TEXT NOT NULL DEFAULT 'success',
+		error TEXT DEFAULT '',
+		duration_ms INTEGER DEFAULT 0,
+		run_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY (job_id) REFERENCES cron_jobs(id) ON DELETE CASCADE
+	)`)
+	if err != nil {
+		return fmt.Errorf("初始化 cron 历史表失败: %w", err)
 	}
 
 	// 加载所有活跃任务
@@ -236,6 +250,72 @@ func (s *Scheduler) ListJobs(ctx context.Context, userID string) ([]*Job, error)
 	return jobs, rows.Err()
 }
 
+// GetJob 获取单个任务
+func (s *Scheduler) GetJob(_ context.Context, jobID string) (*Job, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	job, ok := s.jobs[jobID]
+	return job, ok
+}
+
+// TriggerJob 手动触发任务执行
+func (s *Scheduler) TriggerJob(ctx context.Context, jobID string) error {
+	s.mu.RLock()
+	job, ok := s.jobs[jobID]
+	executor := s.executor
+	s.mu.RUnlock()
+
+	if !ok {
+		return fmt.Errorf("任务 %q 不存在", jobID)
+	}
+	if executor == nil {
+		return fmt.Errorf("执行器未就绪")
+	}
+
+	// 复制一份避免并发修改
+	j := *job
+	go s.executeJob(&j)
+	return nil
+}
+
+// JobHistory 执行历史记录
+type JobHistory struct {
+	ID         int64     `json:"id"`
+	JobID      string    `json:"job_id"`
+	Status     string    `json:"status"`      // success / failed
+	Error      string    `json:"error,omitempty"`
+	DurationMs int64     `json:"duration_ms"`
+	RunAt      time.Time `json:"run_at"`
+}
+
+// GetJobHistory 获取任务执行历史（最近 50 条，从新到旧）
+func (s *Scheduler) GetJobHistory(ctx context.Context, jobID string) ([]JobHistory, error) {
+	s.mu.RLock()
+	_, ok := s.jobs[jobID]
+	s.mu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("任务 %q 不存在", jobID)
+	}
+
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, job_id, status, error, duration_ms, run_at
+		 FROM cron_job_runs WHERE job_id = ? ORDER BY run_at DESC LIMIT 50`, jobID)
+	if err != nil {
+		return nil, fmt.Errorf("查询执行历史失败: %w", err)
+	}
+	defer rows.Close()
+
+	var history []JobHistory
+	for rows.Next() {
+		var h JobHistory
+		if err := rows.Scan(&h.ID, &h.JobID, &h.Status, &h.Error, &h.DurationMs, &h.RunAt); err != nil {
+			return nil, fmt.Errorf("读取历史记录失败: %w", err)
+		}
+		history = append(history, h)
+	}
+	return history, rows.Err()
+}
+
 // --- 内部方法 ---
 
 // runLoop 调度主循环
@@ -291,8 +371,12 @@ func (s *Scheduler) executeJob(job *Job) {
 
 	log.Printf("Cron 执行任务: %s (%s)", job.Name, job.ID)
 
-	if err := executor(ctx, job); err != nil {
-		log.Printf("Cron 任务执行失败: %s: %v", job.Name, err)
+	startAt := time.Now()
+	execErr := executor(ctx, job)
+	durationMs := time.Since(startAt).Milliseconds()
+
+	if execErr != nil {
+		log.Printf("Cron 任务执行失败: %s: %v", job.Name, execErr)
 	}
 
 	// 更新任务状态
@@ -330,6 +414,19 @@ func (s *Scheduler) executeJob(job *Job) {
 			now, next, job.ID); err != nil {
 			log.Printf("Cron: 更新任务状态失败: %v", err)
 		}
+	}
+
+	// 写入执行历史
+	runStatus := "success"
+	runError := ""
+	if execErr != nil {
+		runStatus = "failed"
+		runError = execErr.Error()
+	}
+	if _, err := s.db.ExecContext(dbCtx,
+		`INSERT INTO cron_job_runs (job_id, status, error, duration_ms, run_at) VALUES (?, ?, ?, ?, ?)`,
+		job.ID, runStatus, runError, durationMs, now); err != nil {
+		log.Printf("Cron: 写入执行历史失败: %v", err)
 	}
 }
 

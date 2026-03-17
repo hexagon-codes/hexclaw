@@ -24,7 +24,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/everyday-items/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/config"
 )
 
 // Severity 严重等级

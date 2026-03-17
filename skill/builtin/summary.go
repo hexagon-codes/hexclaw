@@ -3,7 +3,7 @@ package builtin
 import (
 	"context"
 
-	"github.com/everyday-items/hexclaw/skill"
+	"github.com/hexagon-codes/hexclaw/skill"
 )
 
 // SummarySkill 文本摘要 Skill（占位实现）

@@ -11,7 +11,7 @@ package skill
 import (
 	"context"
 
-	"github.com/everyday-items/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/adapter"
 )
 
 // Skill 技能接口

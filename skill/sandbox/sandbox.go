@@ -19,8 +19,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/everyday-items/hexclaw/config"
-	"github.com/everyday-items/hexclaw/skill"
+	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/skill"
 )
 
 // Sandbox Skill 沙箱执行器

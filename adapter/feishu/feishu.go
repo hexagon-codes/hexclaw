@@ -22,9 +22,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/everyday-items/hexclaw/adapter"
-	"github.com/everyday-items/hexclaw/config"
-	"github.com/everyday-items/toolkit/util/idgen"
+	"github.com/hexagon-codes/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/toolkit/util/idgen"
 )
 
 const (
@@ -141,18 +141,116 @@ func (a *FeishuAdapter) Send(ctx context.Context, chatID string, reply *adapter.
 
 // SendStream 发送流式回复
 //
-// 消费 chunk channel，拼接所有内容后一次性发送。
-// 飞书不支持真正的流式推送，所以先拼接再发送。
+// 先发一条"思考中…"消息，然后每积累一定字符后编辑更新，
+// 最终编辑为完整回复。模拟打字机效果。
 func (a *FeishuAdapter) SendStream(ctx context.Context, chatID string, chunks <-chan *adapter.ReplyChunk) error {
 	var sb strings.Builder
+	var messageID string
+	lastUpdateLen := 0
+	const updateThreshold = 50 // 每积累 50 字符更新一次
+
 	for chunk := range chunks {
 		if chunk.Error != nil {
 			return chunk.Error
 		}
+		if chunk.Done {
+			break
+		}
 		sb.WriteString(chunk.Content)
+
+		// 首次达到阈值时发送初始消息
+		if messageID == "" && sb.Len() >= updateThreshold {
+			var err error
+			messageID, err = a.sendAndGetID(ctx, chatID, sb.String()+"…")
+			if err != nil {
+				// 降级为等待全部完成后发送
+				continue
+			}
+			lastUpdateLen = sb.Len()
+			continue
+		}
+
+		// 后续每积累 updateThreshold 字符编辑一次
+		if messageID != "" && sb.Len()-lastUpdateLen >= updateThreshold {
+			_ = a.patchMessage(ctx, messageID, sb.String()+"…")
+			lastUpdateLen = sb.Len()
+		}
 	}
 
-	return a.Send(ctx, chatID, &adapter.Reply{Content: sb.String()})
+	// 最终发送/编辑完整内容
+	finalContent := sb.String()
+	if finalContent == "" {
+		return nil
+	}
+	if messageID != "" {
+		return a.patchMessage(ctx, messageID, finalContent)
+	}
+	return a.Send(ctx, chatID, &adapter.Reply{Content: finalContent})
+}
+
+// sendAndGetID 发送消息并返回 message_id
+func (a *FeishuAdapter) sendAndGetID(ctx context.Context, chatID, text string) (string, error) {
+	token, err := a.getAccessToken(ctx)
+	if err != nil {
+		return "", err
+	}
+
+	body := map[string]any{
+		"receive_id": chatID,
+		"msg_type":   "text",
+		"content":    marshalTextContent(text),
+	}
+	bodyJSON, _ := json.Marshal(body)
+
+	url := baseURL + "/im/v1/messages?receive_id_type=chat_id"
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(bodyJSON))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Data struct {
+			MessageID string `json:"message_id"`
+		} `json:"data"`
+	}
+	json.NewDecoder(resp.Body).Decode(&result)
+	return result.Data.MessageID, nil
+}
+
+// patchMessage 编辑已发送的消息
+func (a *FeishuAdapter) patchMessage(ctx context.Context, messageID, text string) error {
+	token, err := a.getAccessToken(ctx)
+	if err != nil {
+		return err
+	}
+
+	body := map[string]any{
+		"content": marshalTextContent(text),
+	}
+	bodyJSON, _ := json.Marshal(body)
+
+	url := baseURL + "/im/v1/messages/" + messageID
+	req, err := http.NewRequestWithContext(ctx, "PATCH", url, bytes.NewReader(bodyJSON))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	return nil
 }
 
 // Handler 返回 HTTP Handler（供外部挂载使用）

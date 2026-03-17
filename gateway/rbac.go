@@ -5,8 +5,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/everyday-items/hexclaw/adapter"
-	"github.com/everyday-items/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/config"
 )
 
 // RBACLayer 基于角色的权限控制层

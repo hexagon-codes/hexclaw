@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/everyday-items/hexclaw/storage"
+	"github.com/hexagon-codes/hexclaw/storage"
 )
 
 // newTestStoreV2 创建测试用的临时数据库（含新 schema）

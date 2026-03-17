@@ -3,7 +3,7 @@ package gateway
 import (
 	"context"
 
-	"github.com/everyday-items/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/adapter"
 )
 
 // Layer 安全检查层接口

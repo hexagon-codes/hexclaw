@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/everyday-items/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/adapter"
 )
 
 // DefaultRegistry 默认 Skill 注册中心实现

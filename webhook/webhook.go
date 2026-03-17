@@ -27,7 +27,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/everyday-items/toolkit/util/idgen"
+	"github.com/hexagon-codes/toolkit/util/idgen"
 )
 
 const maxPayloadSize = 1 << 20 // 1MB

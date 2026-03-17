@@ -12,7 +12,7 @@ package gateway
 import (
 	"context"
 
-	"github.com/everyday-items/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/adapter"
 )
 
 // Gateway 安全网关接口

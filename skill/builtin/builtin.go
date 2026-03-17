@@ -12,8 +12,8 @@ package builtin
 import (
 	"log"
 
-	"github.com/everyday-items/hexclaw/config"
-	"github.com/everyday-items/hexclaw/skill"
+	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/skill"
 )
 
 // RegisterAll 注册所有内置 Skill
@@ -51,6 +51,8 @@ func RegisterAll(registry *skill.DefaultRegistry, cfg config.BuiltinConfig) {
 	}
 
 	if cfg.Code {
+		log.Println("[SECURITY WARNING] Code Skill 已启用：将在宿主机上直接执行任意代码（go run / python3 / node），" +
+			"不提供内核级沙箱隔离。请确认当前进程运行于容器化或已隔离的沙箱环境，否则请在配置中关闭 builtin.code。")
 		if err := registry.Register(NewCodeSkill()); err != nil {
 			log.Printf("注册代码执行 Skill 失败: %v", err)
 		}
@@ -62,5 +64,5 @@ func RegisterAll(registry *skill.DefaultRegistry, cfg config.BuiltinConfig) {
 		}
 	}
 
-	log.Printf("内置 Skill 已注册: %d 个", len(registry.All()))
+	// 启动日志由 main 统一输出
 }

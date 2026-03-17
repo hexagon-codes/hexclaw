@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/everyday-items/hexagon/security/guard"
-	"github.com/everyday-items/hexclaw/adapter"
-	"github.com/everyday-items/hexclaw/config"
+	"github.com/hexagon-codes/hexagon/security/guard"
+	"github.com/hexagon-codes/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/config"
 )
 
 // InputSafetyLayer 输入安全层 (Layer 4)

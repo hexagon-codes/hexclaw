@@ -11,10 +11,10 @@ import (
 	"context"
 	"path/filepath"
 
-	"github.com/everyday-items/hexclaw/adapter"
-	"github.com/everyday-items/hexclaw/config"
-	"github.com/everyday-items/hexclaw/storage"
-	sqlitestore "github.com/everyday-items/hexclaw/storage/sqlite"
+	"github.com/hexagon-codes/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/storage"
+	sqlitestore "github.com/hexagon-codes/hexclaw/storage/sqlite"
 )
 
 func newTestStoreForAPI(t *testing.T) storage.Store {

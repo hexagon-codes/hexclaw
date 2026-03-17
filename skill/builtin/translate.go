@@ -4,7 +4,7 @@ import (
 	"context"
 	"strings"
 
-	"github.com/everyday-items/hexclaw/skill"
+	"github.com/hexagon-codes/hexclaw/skill"
 )
 
 // TranslateSkill 翻译 Skill（占位实现）

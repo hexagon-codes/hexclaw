@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/everyday-items/hexagon/store/vector"
+	"github.com/hexagon-codes/hexagon/store/vector"
 )
 
 // VectorMemory 基于向量存储的语义记忆

@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/everyday-items/hexclaw/adapter"
-	"github.com/everyday-items/hexclaw/config"
-	"github.com/everyday-items/hexclaw/gateway"
+	"github.com/hexagon-codes/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/gateway"
 )
 
 // mockEngine 测试用引擎

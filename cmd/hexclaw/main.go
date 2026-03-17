@@ -24,40 +24,40 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/everyday-items/hexclaw/adapter"
-	"github.com/everyday-items/hexclaw/adapter/dingtalk"
-	"github.com/everyday-items/hexclaw/adapter/discord"
-	"github.com/everyday-items/hexclaw/adapter/feishu"
-	"github.com/everyday-items/hexclaw/adapter/slack"
-	"github.com/everyday-items/hexclaw/adapter/telegram"
-	webadapter "github.com/everyday-items/hexclaw/adapter/web"
-	"github.com/everyday-items/hexclaw/adapter/wechat"
-	"github.com/everyday-items/hexclaw/adapter/wecom"
-	"github.com/everyday-items/hexclaw/api"
-	"github.com/everyday-items/hexclaw/audit"
-	"github.com/everyday-items/hexclaw/canvas"
-	"github.com/everyday-items/hexclaw/config"
-	"github.com/everyday-items/hexclaw/desktop"
-	"github.com/everyday-items/hexclaw/cron"
-	"github.com/everyday-items/hexclaw/engine"
-	"github.com/everyday-items/hexclaw/gateway"
-	"github.com/everyday-items/hexclaw/heartbeat"
-	"github.com/everyday-items/hexclaw/knowledge"
-	"github.com/everyday-items/hexclaw/llmrouter"
-	hexmcp "github.com/everyday-items/hexclaw/mcp"
-	"github.com/everyday-items/hexclaw/memory"
-	agentrouter "github.com/everyday-items/hexclaw/router"
-	"github.com/everyday-items/hexclaw/skill"
-	"github.com/everyday-items/hexclaw/skill/builtin"
-	"github.com/everyday-items/hexclaw/skill/marketplace"
-	sqlitestore "github.com/everyday-items/hexclaw/storage/sqlite"
-	"github.com/everyday-items/hexclaw/voice"
-	"github.com/everyday-items/hexclaw/webhook"
+	"github.com/hexagon-codes/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/adapter/dingtalk"
+	"github.com/hexagon-codes/hexclaw/adapter/discord"
+	"github.com/hexagon-codes/hexclaw/adapter/feishu"
+	"github.com/hexagon-codes/hexclaw/adapter/slack"
+	"github.com/hexagon-codes/hexclaw/adapter/telegram"
+	webadapter "github.com/hexagon-codes/hexclaw/adapter/web"
+	"github.com/hexagon-codes/hexclaw/adapter/wechat"
+	"github.com/hexagon-codes/hexclaw/adapter/wecom"
+	"github.com/hexagon-codes/hexclaw/api"
+	"github.com/hexagon-codes/hexclaw/audit"
+	"github.com/hexagon-codes/hexclaw/canvas"
+	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/desktop"
+	"github.com/hexagon-codes/hexclaw/cron"
+	"github.com/hexagon-codes/hexclaw/engine"
+	"github.com/hexagon-codes/hexclaw/gateway"
+	"github.com/hexagon-codes/hexclaw/heartbeat"
+	"github.com/hexagon-codes/hexclaw/knowledge"
+	"github.com/hexagon-codes/hexclaw/llmrouter"
+	hexmcp "github.com/hexagon-codes/hexclaw/mcp"
+	"github.com/hexagon-codes/hexclaw/memory"
+	agentrouter "github.com/hexagon-codes/hexclaw/router"
+	"github.com/hexagon-codes/hexclaw/skill"
+	"github.com/hexagon-codes/hexclaw/skill/builtin"
+	"github.com/hexagon-codes/hexclaw/skill/marketplace"
+	sqlitestore "github.com/hexagon-codes/hexclaw/storage/sqlite"
+	"github.com/hexagon-codes/hexclaw/voice"
+	"github.com/hexagon-codes/hexclaw/webhook"
 )
 
 // 版本信息，通过 -ldflags 注入
 var (
-	version = "dev"
+	version = "v0.0.1"
 	commit  = "none"
 	date    = "unknown"
 )
@@ -195,7 +195,7 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 		cfg.Server.Host = "127.0.0.1"
 		cfg.Platforms.Web.Enabled = true
 		cfg.Security.Auth.AllowAnonymous = true
-		log.Println("桌面模式: 仅监听 localhost，允许匿名访问")
+		// 桌面模式日志在 banner 后统一输出
 	}
 
 	// 命令行参数覆盖配置文件
@@ -211,9 +211,20 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 		cfg.Platforms.Telegram.Token = telegramToken
 	}
 
-	fmt.Printf("HexClaw %s 启动中...\n", version)
-	fmt.Printf("  监听地址: %s:%d\n", cfg.Server.Host, cfg.Server.Port)
-	fmt.Printf("  默认 LLM: %s\n", cfg.LLM.Default)
+	fmt.Println()
+	fmt.Println("  🦀 HexClaw — AI Agent Engine")
+	fmt.Println("  自研引擎 · 多 Agent 协作 · 本地部署 · 数据私有")
+	fmt.Println("  ══════════════════════════════════════════════")
+	fmt.Printf("  Version:  %s (%s)\n", version, commit)
+	fmt.Printf("  Built:    %s\n", date)
+	fmt.Printf("  Engine:   Hexagon (ReAct · Tool 调度 · 声明式编排)\n")
+	fmt.Printf("  Listen:   %s:%d\n", cfg.Server.Host, cfg.Server.Port)
+	fmt.Printf("  LLM:      %s\n", cfg.LLM.Default)
+	fmt.Printf("  PID:      %d\n", os.Getpid())
+	if desktopMode {
+		fmt.Println("  Mode:     desktop (localhost only, anonymous)")
+	}
+	fmt.Println("  ──────────────────────────────────────────────")
 
 	// 2. 初始化存储
 	store, err := sqlitestore.New(cfg.Storage.SQLite.Path)
@@ -226,55 +237,52 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 	if err := store.Init(ctx); err != nil {
 		return fmt.Errorf("初始化数据库表失败: %w", err)
 	}
-	log.Println("存储已初始化: SQLite")
+	fmt.Println("  ✓ Storage     SQLite")
 
 	// 3. 初始化 LLM 路由（允许无 Provider 降级运行）
 	router, err := llmrouter.New(cfg.LLM)
 	if err != nil {
-		log.Printf("LLM 路由初始化跳过: %v（请在设置中配置 API Key）", err)
+		fmt.Printf("  ✗ LLM         跳过 (%v)\n", err)
 	} else {
-		fmt.Printf("  LLM Providers: %v\n", router.Providers())
+		fmt.Printf("  ✓ LLM         %v\n", router.Providers())
 	}
 
 	// 4. 初始化 Skill 注册中心
 	skills := skill.NewRegistry()
 	builtin.RegisterAll(skills, cfg.Skill.Builtin)
+	builtinCount := len(skills.All())
 
 	// 4.5 加载 Markdown 技能（技能市场）
 	var mp *marketplace.Marketplace
+	mdCount := 0
 	if cfg.Skills.Enabled {
 		mp = marketplace.NewMarketplace(cfg.Skills.Dir)
 		if err := mp.Init(); err != nil {
-			log.Printf("技能市场初始化失败: %v", err)
+			// 静默，后面统一报告
 		} else {
-			// 将 Markdown 技能注册到 Skill 注册中心
-			mdSkills := mp.List()
-			registered := 0
-			for _, mdSkill := range mdSkills {
-				// 包装为 skill.Skill 接口
+			for _, mdSkill := range mp.List() {
 				wrapper := &markdownSkillWrapper{skill: mdSkill}
-				if err := skills.Register(wrapper); err != nil {
-					log.Printf("注册 Markdown 技能 %q 失败: %v", mdSkill.Meta.Name, err)
-				} else {
-					registered++
+				if err := skills.Register(wrapper); err == nil {
+					mdCount++
 				}
 			}
-			if registered > 0 {
-				fmt.Printf("  Markdown 技能: %d 个\n", registered)
-			}
 		}
+	}
+	if mdCount > 0 {
+		fmt.Printf("  ✓ Skills      %d 内置 + %d Markdown\n", builtinCount, mdCount)
+	} else {
+		fmt.Printf("  ✓ Skills      %d 内置\n", builtinCount)
 	}
 
 	// 4.6 连接 MCP Server
 	var mcpMgr *hexmcp.Manager
 	if cfg.MCP.Enabled && len(cfg.MCP.Servers) > 0 {
 		mcpMgr = hexmcp.NewManager()
-		// 转换配置格式
 		var mcpConfigs []hexmcp.ServerConfig
 		for _, s := range cfg.MCP.Servers {
 			enabled := s.Enabled
 			if !enabled && (s.Command != "" || s.Endpoint != "") {
-				enabled = true // 兼容未显式设置 enabled 的配置
+				enabled = true
 			}
 			mcpConfigs = append(mcpConfigs, hexmcp.ServerConfig{
 				Name:      s.Name,
@@ -287,27 +295,29 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 		}
 		totalTools, err := mcpMgr.Connect(ctx, mcpConfigs)
 		if err != nil {
-			log.Printf("MCP 连接出错: %v", err)
+			fmt.Printf("  ✗ MCP         连接出错: %v\n", err)
 		}
 		if totalTools > 0 {
-			fmt.Printf("  MCP 工具: %d 个 (来自 %d 个 Server)\n", totalTools, len(mcpMgr.ServerNames()))
+			fmt.Printf("  ✓ MCP         %d 个工具 (%d Server)\n", totalTools, len(mcpMgr.ServerNames()))
+		} else if err == nil {
+			fmt.Println("  ✗ MCP         未连接")
 		}
 		defer mcpMgr.Close()
 	}
 
 	// 5. 初始化安全网关
 	gw := gateway.NewPipeline(&cfg.Security, store)
+	gwLayers := gw.LayerNames()
+	fmt.Printf("  ✓ Gateway     %d 层 (%s)\n", len(gwLayers), strings.Join(gwLayers, " → "))
 
 	// 6. 创建并启动 Agent 引擎
 	eng := engine.NewReActEngine(cfg, router, store, skills)
 
 	// 6.5 初始化知识库（向量搜索 + FTS5 混合检索）
+	kbOK := false
 	if cfg.Knowledge.Enabled {
 		kbStore := knowledge.NewSQLiteStore(store.DB())
-		if err := kbStore.Init(ctx); err != nil {
-			log.Printf("知识库初始化失败: %v", err)
-		} else {
-			// 创建 Embedder（使用配置的 LLM Provider 生成向量）
+		if err := kbStore.Init(ctx); err == nil {
 			var embedder knowledge.Embedder
 			if cfg.Knowledge.Embedding.Provider != "" {
 				providerName := cfg.Knowledge.Embedding.Provider
@@ -321,13 +331,9 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 						opts = append(opts, knowledge.WithBaseURL(pc.BaseURL))
 					}
 					embedder = knowledge.NewOpenAIEmbedder(pc.APIKey, model, opts...)
-					log.Printf("Embedding 已启用: provider=%s, model=%s", providerName, model)
-				} else {
-					log.Printf("Embedding Provider %q 未配置 API Key，退化为纯关键词搜索", providerName)
 				}
 			}
 
-			// 混合检索配置
 			hybridCfg := knowledge.DefaultHybridConfig()
 			if cfg.Knowledge.VectorWeight > 0 {
 				hybridCfg.VectorWeight = cfg.Knowledge.VectorWeight
@@ -340,7 +346,6 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 			}
 			hybridCfg.TimeDecayDays = cfg.Knowledge.TimeDecayDays
 
-			// chunk 配置
 			var opts []knowledge.ManagerOption
 			if cfg.Knowledge.ChunkSize > 0 {
 				opts = append(opts, knowledge.WithChunkSize(cfg.Knowledge.ChunkSize))
@@ -352,12 +357,18 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 
 			kbMgr := knowledge.NewManager(kbStore, embedder, opts...)
 			eng.SetKnowledgeBase(kbMgr)
-			log.Println("知识库已启用（FTS5 + 向量混合检索）")
+			kbOK = true
 		}
+	}
+	if kbOK {
+		fmt.Println("  ✓ Knowledge   FTS5 + 向量混合检索")
+	} else {
+		fmt.Println("  ✗ Knowledge   未启用")
 	}
 
 	// 7. 初始化文件记忆系统
 	var fileMem *memory.FileMemory
+	var memCtxLen int
 	if cfg.FileMemory.Enabled {
 		var err error
 		fileMem, err = memory.New(memory.Options{
@@ -366,15 +377,15 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 			MaxMemory: cfg.FileMemory.MaxMemory,
 			DailyDays: cfg.FileMemory.DailyDays,
 		})
-		if err != nil {
-			log.Printf("文件记忆初始化失败: %v", err)
-		} else {
-			// 加载记忆上下文注入引擎
+		if err == nil {
 			memCtx := fileMem.LoadContext()
-			if memCtx != "" {
-				log.Printf("文件记忆已加载 (%d 字符)", len(memCtx))
-			}
+			memCtxLen = len(memCtx)
 		}
+	}
+	if memCtxLen > 0 {
+		fmt.Printf("  ✓ Memory      文件记忆 (%d 字符)\n", memCtxLen)
+	} else {
+		fmt.Println("  ✗ Memory      未启用")
 	}
 
 	if err := eng.Start(ctx); err != nil {
@@ -384,6 +395,33 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 
 	// 8. 启动 HTTP 服务
 	srv := api.NewServer(cfg, eng, gw, store)
+	srv.SetVersion(version)
+	lc := srv.LogCollector()
+
+	// 桥接 Go 标准 log 到 LogCollector（让 log.Printf 的输出也进入日志系统）
+	log.SetOutput(lc.StdLogWriter())
+
+	// 写入启动摘要日志
+	lc.Info("system", fmt.Sprintf("🦀 HexClaw %s 启动 — 自研引擎 · 多 Agent 协作 · 本地部署 · 数据私有", version))
+	lc.Info("system", fmt.Sprintf("Engine: Hexagon (ReAct · Tool 调度 · 声明式编排) | PID: %d", os.Getpid()))
+	lc.Info("system", fmt.Sprintf("Listen: %s:%d | LLM: %s", cfg.Server.Host, cfg.Server.Port, cfg.LLM.Default))
+	if desktopMode {
+		lc.Info("system", "Mode: desktop — Sidecar 架构，零云端依赖，数据完全私有")
+	}
+	lc.Info("storage", "SQLite 已初始化 — 会话持久化就绪")
+	if router != nil {
+		lc.Info("llm", fmt.Sprintf("LLM Providers: %v — 多模型统一适配，运行时热切换", router.Providers()))
+	}
+	lc.Info("gateway", fmt.Sprintf("安全网关 %d 层: %s", len(gwLayers), strings.Join(gwLayers, " → ")))
+	lc.Info("skills", fmt.Sprintf("Skills: %d 内置 — 搜索/天气/翻译/摘要等开箱即用", builtinCount))
+	if kbOK {
+		lc.Info("knowledge", "知识库已启用 — FTS5 + 向量混合检索，RAG 增强问答")
+	}
+	if memCtxLen > 0 {
+		lc.Info("memory", fmt.Sprintf("文件记忆已加载 (%d 字符) — 跨会话长期记忆", memCtxLen))
+	}
+	lc.Info("system", fmt.Sprintf("Web UI: http://%s:%d | Chat API: POST /api/v1/chat", cfg.Server.Host, cfg.Server.Port))
+	lc.Info("system", "🦀 HexClaw 已就绪 — 数据全在本地，横行无忧")
 
 	// 挂载知识库 API
 	if eng.KnowledgeBase() != nil {
@@ -392,13 +430,12 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 
 	// 9. 初始化定时任务调度器
 	var scheduler *cron.Scheduler
+	cronOK := false
 	if cfg.Cron.Enabled {
 		scheduler = cron.NewScheduler(store.DB())
 		if err := scheduler.Init(ctx); err != nil {
-			log.Printf("定时任务数据库初始化失败: %v", err)
 			scheduler = nil
 		} else {
-			// 启动调度器，设置任务执行回调（通过引擎处理）
 			scheduler.Start(ctx, func(ctx context.Context, job *cron.Job) error {
 				_, err := eng.Process(ctx, &adapter.Message{
 					Platform: adapter.PlatformAPI,
@@ -408,19 +445,23 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 				})
 				return err
 			})
-			log.Println("定时任务调度器已启动")
+			cronOK = true
 		}
+	}
+	if cronOK {
+		fmt.Println("  ✓ Cron        调度器已启动")
+	} else {
+		fmt.Println("  ✗ Cron        未启用")
 	}
 
 	// 10. 初始化 Webhook 管理器
 	var webhookMgr *webhook.Manager
+	webhookOK := false
 	if cfg.Webhook.Enabled {
 		webhookMgr = webhook.NewManager(store.DB())
 		if err := webhookMgr.Init(ctx); err != nil {
-			log.Printf("Webhook 初始化失败: %v", err)
 			webhookMgr = nil
 		} else {
-			// 设置事件处理回调
 			webhookMgr.SetHandler(func(ctx context.Context, event *webhook.Event, prompt string) error {
 				content := fmt.Sprintf("[Webhook: %s] %s\n\n指令: %s\n\nPayload 摘要: %s",
 					event.WebhookName, event.EventType, prompt, event.Summary)
@@ -433,8 +474,13 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 				return err
 			})
 			srv.SetWebhookManager(webhookMgr)
-			log.Println("Webhook 管理器已启用")
+			webhookOK = true
 		}
+	}
+	if webhookOK {
+		fmt.Println("  ✓ Webhook     已启用")
+	} else {
+		fmt.Println("  ✗ Webhook     未启用")
 	}
 
 	// 11. 初始化心跳巡查
@@ -470,12 +516,13 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 			return reply.Content, nil
 		}
 		notifier := func(ctx context.Context, message string) error {
-			log.Printf("Heartbeat 通知: %s", message)
-			// TODO: 通过已启用的适配器推送通知
+			lc.Info("heartbeat", message)
 			return nil
 		}
 		hb.Start(ctx, executor, notifier)
-		log.Printf("心跳巡查已启动（间隔 %d 分钟）", intervalMins)
+		fmt.Printf("  ✓ Heartbeat   每 %d 分钟巡查\n", intervalMins)
+	} else {
+		fmt.Println("  ✗ Heartbeat   未启用")
 	}
 
 	// 挂载 Phase 3 API 端点
@@ -496,15 +543,18 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 
 	// 12. 初始化多 Agent 路由（桌面端必须，始终启用）
 	agentRouter := agentrouter.New()
+	eng.SetAgentRouter(agentRouter)
 	srv.SetAgentRouter(agentRouter)
-	log.Println("多 Agent 路由已启用")
+	fmt.Println("  ✓ Agents      多 Agent 路由")
 
 	// 13. 初始化 Canvas/A2UI 服务（Phase 5）
 	var canvasSvc *canvas.Service
 	if cfg.Canvas.Enabled {
 		canvasSvc = canvas.NewService()
 		srv.SetCanvas(canvasSvc)
-		log.Println("Canvas/A2UI 已启用")
+		fmt.Println("  ✓ Canvas      A2UI")
+	} else {
+		fmt.Println("  ✗ Canvas      未启用")
 	}
 
 	// 14. 初始化语音服务（Phase 5）
@@ -513,9 +563,6 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 		var stt voice.STTProvider
 		var tts voice.TTSProvider
 
-		// 创建 STT Provider
-		// 从 provider 名称中提取 LLM provider 名用于获取 API Key
-		// 如 "openai-whisper" → "openai"
 		if cfg.Voice.STT.Provider != "" {
 			llmName := extractLLMName(cfg.Voice.STT.Provider)
 			if pc, ok := cfg.LLM.Providers[llmName]; ok && pc.APIKey != "" {
@@ -527,7 +574,6 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 			}
 		}
 
-		// 创建 TTS Provider
 		if cfg.Voice.TTS.Provider != "" {
 			llmName := extractLLMName(cfg.Voice.TTS.Provider)
 			if pc, ok := cfg.LLM.Providers[llmName]; ok && pc.APIKey != "" {
@@ -541,24 +587,24 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 
 		voiceSvc = voice.NewService(stt, tts)
 		srv.SetVoice(voiceSvc)
-		log.Printf("语音服务已启用 (STT: %s, TTS: %s)", voiceSvc.STTName(), voiceSvc.TTSName())
+		fmt.Printf("  ✓ Voice       STT=%s, TTS=%s\n", voiceSvc.STTName(), voiceSvc.TTSName())
+	} else {
+		fmt.Println("  ✗ Voice       未启用")
 	}
 
 	// 15. 初始化桌面集成服务（Phase 6）
 	desktopSvc := desktop.NewService(version)
 	srv.SetDesktop(desktopSvc)
 
-	// 抑制未使用变量警告（后续模块集成时使用）
+	// 抑制未使用变量警告
 	_ = agentRouter
 	_ = canvasSvc
 	_ = voiceSvc
 
-	// 8. 启动平台适配器
+	// 启动平台适配器
 	var adapters []adapter.Adapter
 
-	// 消息处理回调（适配器收到消息后调用）
 	messageHandler := func(ctx context.Context, msg *adapter.Message) (*adapter.Reply, error) {
-		// 安全网关检查
 		if err := gw.Check(ctx, msg); err != nil {
 			return &adapter.Reply{Content: "安全检查未通过: " + err.Error()}, nil
 		}
@@ -569,9 +615,8 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 	if cfg.Platforms.Web.Enabled {
 		wa := webadapter.New()
 		if err := wa.Start(ctx, messageHandler); err != nil {
-			log.Printf("Web 适配器启动失败: %v", err)
+			fmt.Printf("  ✗ Adapter     Web 启动失败: %v\n", err)
 		} else {
-			// 注册流式处理器，WebSocket 消息优先走流式通道
 			wa.SetStreamHandler(func(ctx context.Context, msg *adapter.Message) (<-chan *adapter.ReplyChunk, error) {
 				if err := gw.Check(ctx, msg); err != nil {
 					return nil, fmt.Errorf("安全检查未通过: %w", err)
@@ -580,88 +625,54 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 			})
 			srv.SetWebSocketHandler(wa.Handler())
 			adapters = append(adapters, wa)
-			fmt.Println("  WebSocket: ws://" + fmt.Sprintf("%s:%d/ws", cfg.Server.Host, cfg.Server.Port))
+		}
+	}
+
+	// 启动适配器的辅助函数
+	startAdapter := func(a adapter.Adapter) {
+		if err := a.Start(ctx, messageHandler); err != nil {
+			fmt.Printf("  ✗ Adapter     %s 启动失败: %v\n", a.Name(), err)
+		} else {
+			adapters = append(adapters, a)
 		}
 	}
 
 	// 飞书 Bot 适配器
 	if cfg.Platforms.Feishu.Enabled {
-		fa := feishu.New(cfg.Platforms.Feishu)
-		if err := fa.Start(ctx, messageHandler); err != nil {
-			log.Printf("飞书适配器启动失败: %v", err)
-		} else {
-			adapters = append(adapters, fa)
-			fmt.Println("  飞书 Webhook: http://0.0.0.0:6061/feishu/webhook")
-		}
+		startAdapter(feishu.New(cfg.Platforms.Feishu))
 	}
 
 	// Telegram Bot 适配器
 	if cfg.Platforms.Telegram.Enabled {
-		ta := telegram.New(cfg.Platforms.Telegram)
-		if err := ta.Start(ctx, messageHandler); err != nil {
-			log.Printf("Telegram 适配器启动失败: %v", err)
-		} else {
-			adapters = append(adapters, ta)
-			fmt.Println("  Telegram Bot: 长轮询模式")
-		}
+		startAdapter(telegram.New(cfg.Platforms.Telegram))
 	}
 
 	// 钉钉 Bot 适配器
 	if cfg.Platforms.Dingtalk.Enabled {
-		da := dingtalk.New(cfg.Platforms.Dingtalk)
-		if err := da.Start(ctx, messageHandler); err != nil {
-			log.Printf("钉钉适配器启动失败: %v", err)
-		} else {
-			adapters = append(adapters, da)
-			fmt.Println("  钉钉 Webhook: http://0.0.0.0:6062/dingtalk/webhook")
-		}
+		startAdapter(dingtalk.New(cfg.Platforms.Dingtalk))
 	}
 
 	// Discord Bot 适配器
 	if cfg.Platforms.Discord.Enabled {
-		da := discord.New(cfg.Platforms.Discord)
-		if err := da.Start(ctx, messageHandler); err != nil {
-			log.Printf("Discord 适配器启动失败: %v", err)
-		} else {
-			adapters = append(adapters, da)
-			fmt.Println("  Discord Bot: Gateway WebSocket 模式")
-		}
+		startAdapter(discord.New(cfg.Platforms.Discord))
 	}
 
 	// Slack Bot 适配器
 	if cfg.Platforms.Slack.Enabled {
-		sa := slack.New(cfg.Platforms.Slack)
-		if err := sa.Start(ctx, messageHandler); err != nil {
-			log.Printf("Slack 适配器启动失败: %v", err)
-		} else {
-			adapters = append(adapters, sa)
-			fmt.Println("  Slack Events: http://0.0.0.0:6063/slack/events")
-		}
+		startAdapter(slack.New(cfg.Platforms.Slack))
 	}
 
 	// 企业微信适配器
 	if cfg.Platforms.Wecom.Enabled {
-		wa := wecom.New(cfg.Platforms.Wecom)
-		if err := wa.Start(ctx, messageHandler); err != nil {
-			log.Printf("企业微信适配器启动失败: %v", err)
-		} else {
-			adapters = append(adapters, wa)
-			fmt.Println("  企业微信回调: http://0.0.0.0:6064/wecom/callback")
-		}
+		startAdapter(wecom.New(cfg.Platforms.Wecom))
 	}
 
 	// 微信公众号适配器
 	if cfg.Platforms.Wechat.Enabled {
-		wca := wechat.New(cfg.Platforms.Wechat)
-		if err := wca.Start(ctx, messageHandler); err != nil {
-			log.Printf("微信公众号适配器启动失败: %v", err)
-		} else {
-			adapters = append(adapters, wca)
-			fmt.Println("  微信公众号回调: http://0.0.0.0:6065/wechat/callback")
-		}
+		startAdapter(wechat.New(cfg.Platforms.Wechat))
 	}
 
-	// 9. 监听退出信号，优雅关闭
+	// 监听退出信号，优雅关闭
 	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -673,15 +684,30 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 		close(errCh)
 	}()
 
-	fmt.Println("HexClaw 已启动")
-	fmt.Printf("  Web UI: http://%s:%d\n", cfg.Server.Host, cfg.Server.Port)
-	fmt.Printf("  健康检查: http://%s:%d/health\n", cfg.Server.Host, cfg.Server.Port)
-	fmt.Printf("  聊天 API: POST http://%s:%d/api/v1/chat\n", cfg.Server.Host, cfg.Server.Port)
+	// 适配器列表
+	if len(adapters) > 0 {
+		var names []string
+		for _, a := range adapters {
+			names = append(names, a.Name())
+		}
+		fmt.Printf("  ✓ Adapters    %s\n", strings.Join(names, ", "))
+	}
+
+	fmt.Println("  ──────────────────────────────────────────────")
+	fmt.Println()
+	fmt.Println("  🦀 HexClaw 已就绪 — 数据全在本地，横行无忧")
+	fmt.Println()
+	fmt.Printf("    Web UI:   http://%s:%d\n", cfg.Server.Host, cfg.Server.Port)
+	fmt.Printf("    Health:   http://%s:%d/health\n", cfg.Server.Host, cfg.Server.Port)
+	fmt.Printf("    Chat:     POST http://%s:%d/api/v1/chat\n", cfg.Server.Host, cfg.Server.Port)
+	fmt.Println()
+	fmt.Println("  ══════════════════════════════════════════════")
+	fmt.Println()
 
 	// 等待退出信号或服务器错误
 	select {
 	case <-sigCtx.Done():
-		log.Println("收到退出信号，正在关闭...")
+		fmt.Println("\n  🦀 收到退出信号，正在关闭...")
 	case err := <-errCh:
 		if err != nil {
 			return fmt.Errorf("服务器异常: %w", err)
@@ -711,7 +737,7 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 		}
 	}
 
-	log.Println("HexClaw 已停止")
+	fmt.Println("  🦀 HexClaw 已停止")
 	return nil
 }
 

@@ -2,13 +2,15 @@ package api
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"path/filepath"
 	"strings"
 
-	"github.com/everyday-items/hexclaw/canvas"
-	"github.com/everyday-items/hexclaw/engine"
-	"github.com/everyday-items/hexclaw/router"
+	"github.com/hexagon-codes/hexclaw/canvas"
+	"github.com/hexagon-codes/hexclaw/engine"
+	"github.com/hexagon-codes/hexclaw/router"
+	"github.com/hexagon-codes/hexclaw/voice"
 )
 
 // --- 角色 API ---
@@ -345,4 +347,102 @@ func (s *Server) handleVoiceStatus(w http.ResponseWriter, r *http.Request) {
 		"stt_provider": s.voiceSvc.STTName(),
 		"tts_provider": s.voiceSvc.TTSName(),
 	})
+}
+
+// handleVoiceTranscribe POST /api/v1/voice/transcribe
+//
+// 接收音频数据（multipart/form-data 的 audio 字段或 raw body），返回转录文本。
+// 限制 10MB。
+func (s *Server) handleVoiceTranscribe(w http.ResponseWriter, r *http.Request) {
+	if !s.voiceSvc.HasSTT() {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "STT 服务未配置"})
+		return
+	}
+
+	const maxAudioSize = 10 << 20 // 10MB
+	r.Body = http.MaxBytesReader(w, r.Body, maxAudioSize)
+
+	var audioData []byte
+	var err error
+
+	// 支持 multipart 和 raw body 两种方式
+	if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/") {
+		file, _, fErr := r.FormFile("audio")
+		if fErr != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少 audio 文件字段"})
+			return
+		}
+		defer file.Close()
+		audioData, err = io.ReadAll(file)
+	} else {
+		audioData, err = io.ReadAll(r.Body)
+	}
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "读取音频数据失败: " + err.Error()})
+		return
+	}
+
+	lang := r.URL.Query().Get("language")
+	format := r.URL.Query().Get("format")
+	if format == "" {
+		format = "wav"
+	}
+
+	result, err := s.voiceSvc.Transcribe(r.Context(), audioData, voice.TranscribeOptions{
+		Language: lang,
+		Format:   voice.AudioFormat(format),
+	})
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "转录失败: " + err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, result)
+}
+
+// handleVoiceSynthesize POST /api/v1/voice/synthesize
+//
+// 接收文本，返回合成的音频数据。
+func (s *Server) handleVoiceSynthesize(w http.ResponseWriter, r *http.Request) {
+	if !s.voiceSvc.HasTTS() {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "TTS 服务未配置"})
+		return
+	}
+
+	var req struct {
+		Text  string `json:"text"`
+		Voice string `json:"voice,omitempty"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误: " + err.Error()})
+		return
+	}
+	if req.Text == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "text 不能为空"})
+		return
+	}
+
+	result, err := s.voiceSvc.Synthesize(r.Context(), req.Text, voice.SynthesizeOptions{
+		Voice: req.Voice,
+	})
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "合成失败: " + err.Error()})
+		return
+	}
+
+	// 直接返回音频二进制
+	contentType := "audio/mpeg" // 默认 mp3
+	switch result.Format {
+	case voice.FormatWAV:
+		contentType = "audio/wav"
+	case voice.FormatOGG:
+		contentType = "audio/ogg"
+	case voice.FormatFLAC:
+		contentType = "audio/flac"
+	case voice.FormatPCM:
+		contentType = "audio/pcm"
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.WriteHeader(http.StatusOK)
+	w.Write(result.Audio)
 }

@@ -11,6 +11,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,9 +19,9 @@ import (
 
 	_ "modernc.org/sqlite" // 纯 Go SQLite 驱动
 
-	"github.com/everyday-items/hexclaw/storage"
-	"github.com/everyday-items/toolkit/lang/stringx"
-	"github.com/everyday-items/toolkit/util/idgen"
+	"github.com/hexagon-codes/hexclaw/storage"
+	"github.com/hexagon-codes/toolkit/lang/stringx"
+	"github.com/hexagon-codes/toolkit/util/idgen"
 )
 
 // Store SQLite 存储实现
@@ -48,14 +49,19 @@ func New(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("创建数据目录失败: %w", err)
 	}
 
-	db, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL&_busy_timeout=5000")
+	db, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL&_busy_timeout=5000&_pragma=foreign_keys(1)")
 	if err != nil {
 		return nil, fmt.Errorf("打开数据库失败: %w", err)
 	}
 
-	// SQLite 优化参数
-	db.SetMaxOpenConns(1) // SQLite 写入单连接
-	db.SetMaxIdleConns(1)
+	// 确保外键约束对已有连接生效（连接池复用时 DSN pragma 可能不触发）
+	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
+		return nil, fmt.Errorf("启用外键约束失败: %w", err)
+	}
+
+	// SQLite WAL 模式下允许多个并发读连接
+	db.SetMaxOpenConns(4)
+	db.SetMaxIdleConns(4)
 	db.SetConnMaxLifetime(0)
 
 	return &Store{db: db}, nil
@@ -63,13 +69,13 @@ func New(dbPath string) (*Store, error) {
 
 // Init 初始化数据库表
 func (s *Store) Init(ctx context.Context) error {
-	// 先执行增量迁移：对已有数据库添加新字段，确保旧表结构兼容新 schema
-	s.runMigrations(ctx)
-
-	_, err := s.db.ExecContext(ctx, schema)
-	if err != nil {
+	// 先建表（CREATE TABLE IF NOT EXISTS），确保表存在后再执行 ALTER TABLE 迁移
+	if _, err := s.db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("初始化数据库表失败: %w", err)
 	}
+
+	// 再执行增量迁移：对已有表添加新字段/索引/触发器
+	s.runMigrations(ctx)
 	return nil
 }
 
@@ -93,8 +99,7 @@ func (s *Store) runMigrations(ctx context.Context) {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
 			// 忽略 "duplicate column" 等已存在的错误
 			if !strings.Contains(err.Error(), "duplicate") && !strings.Contains(err.Error(), "already exists") {
-				// FTS5/trigger 创建失败需要记录
-				_ = err // 非致命错误，静默忽略
+				log.Printf("sqlite migration warning: %v (stmt: %.80s)", err, stmt)
 			}
 		}
 	}
@@ -177,6 +182,34 @@ func (s *Store) DeleteSession(ctx context.Context, id string) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+// CleanupOldSessions 删除超过指定天数未活跃的会话及其消息
+func (s *Store) CleanupOldSessions(ctx context.Context, olderThanDays int) (int64, error) {
+	cutoff := time.Now().AddDate(0, 0, -olderThanDays)
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	// 先删子表消息，再删父表会话（维护引用完整性）
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM messages WHERE session_id IN (SELECT id FROM sessions WHERE updated_at < ?)`, cutoff,
+	); err != nil {
+		return 0, err
+	}
+
+	result, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE updated_at < ?`, cutoff)
+	if err != nil {
+		return 0, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 // SaveMessage 保存消息（事务保证原子性）

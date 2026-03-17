@@ -18,7 +18,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/everyday-items/toolkit/util/idgen"
+	"github.com/hexagon-codes/toolkit/util/idgen"
 )
 
 // Embedder 向量嵌入接口

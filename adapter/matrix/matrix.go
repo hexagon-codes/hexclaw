@@ -20,8 +20,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/everyday-items/hexclaw/adapter"
-	"github.com/everyday-items/toolkit/util/idgen"
+	"github.com/hexagon-codes/hexclaw/adapter"
+	"github.com/hexagon-codes/toolkit/util/idgen"
 )
 
 // MatrixAdapter Matrix 协议适配器

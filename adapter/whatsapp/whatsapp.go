@@ -19,7 +19,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/everyday-items/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/adapter"
 )
 
 // WhatsAppAdapter WhatsApp Business API 适配器

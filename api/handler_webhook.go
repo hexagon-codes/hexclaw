@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/everyday-items/hexclaw/webhook"
+	"github.com/hexagon-codes/hexclaw/webhook"
 )
 
 // --- Webhook API ---

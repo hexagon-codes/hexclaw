@@ -5,9 +5,9 @@ import (
 	"log"
 	"time"
 
-	"github.com/everyday-items/hexclaw/adapter"
-	"github.com/everyday-items/hexclaw/config"
-	"github.com/everyday-items/hexclaw/storage"
+	"github.com/hexagon-codes/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/storage"
 )
 
 // Pipeline 六层安全网关管道实现
@@ -62,12 +62,16 @@ func NewPipeline(cfg *config.SecurityConfig, store storage.Store) *Pipeline {
 	// Layer 6: 审计记录（始终启用，记录所有请求）
 	p.layers = append(p.layers, NewAuditLayer())
 
-	log.Printf("安全网关已初始化: %d 层检查", len(p.layers))
-	for _, l := range p.layers {
-		log.Printf("  - %s", l.Name())
-	}
-
 	return p
+}
+
+// LayerNames 返回所有安全层名称
+func (p *Pipeline) LayerNames() []string {
+	names := make([]string, len(p.layers))
+	for i, l := range p.layers {
+		names[i] = l.Name()
+	}
+	return names
 }
 
 // Check 执行全部安全检查

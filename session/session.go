@@ -14,12 +14,12 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/everyday-items/hexagon"
-	"github.com/everyday-items/hexclaw/adapter"
-	"github.com/everyday-items/hexclaw/config"
-	"github.com/everyday-items/hexclaw/storage"
-	"github.com/everyday-items/toolkit/lang/stringx"
-	"github.com/everyday-items/toolkit/util/idgen"
+	"github.com/hexagon-codes/hexagon"
+	"github.com/hexagon-codes/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/storage"
+	"github.com/hexagon-codes/toolkit/lang/stringx"
+	"github.com/hexagon-codes/toolkit/util/idgen"
 )
 
 // Manager 会话管理器
@@ -136,6 +136,11 @@ func (m *Manager) ListSessions(ctx context.Context, userID string, limit, offset
 // DeleteSession 删除会话
 func (m *Manager) DeleteSession(ctx context.Context, sessionID string) error {
 	return m.store.DeleteSession(ctx, sessionID)
+}
+
+// CleanupOldSessions 清理超过指定天数未活跃的会话
+func (m *Manager) CleanupOldSessions(ctx context.Context, olderThanDays int) (int64, error) {
+	return m.store.CleanupOldSessions(ctx, olderThanDays)
 }
 
 // toRole 将字符串角色转换为 hexagon.LLMRole

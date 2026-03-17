@@ -125,12 +125,16 @@ func Save(cfg *Config, configFile string) error {
 
 // MaskAPIKey 对 API Key 脱敏显示
 //
-// 保留最后 4 位，前面用 **** 替代。空 key 返回空字符串。
+// 长度 > 8 时显示 **** + 最后4位；长度 <= 8（含空字符串）时显示 ****。
+// 空 key 返回空字符串。
 func MaskAPIKey(key string) string {
-	if len(key) <= 4 {
-		return key
+	if key == "" {
+		return ""
 	}
-	return "****" + key[len(key)-4:]
+	if len(key) > 8 {
+		return "****" + key[len(key)-4:]
+	}
+	return "****"
 }
 
 // IsMaskedKey 检查是否为脱敏后的 Key（以 **** 开头）

@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/everyday-items/hexclaw/skill"
+	"github.com/hexagon-codes/hexclaw/skill"
 )
 
 // BrowserSkill 网页浏览技能

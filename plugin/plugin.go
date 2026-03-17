@@ -11,9 +11,9 @@ package plugin
 import (
 	"context"
 
-	"github.com/everyday-items/hexagon/plugin"
-	"github.com/everyday-items/hexclaw/adapter"
-	"github.com/everyday-items/hexclaw/skill"
+	"github.com/hexagon-codes/hexagon/plugin"
+	"github.com/hexagon-codes/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/skill"
 )
 
 // HexClaw 扩展插件类型

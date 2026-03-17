@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/everyday-items/hexagon"
-	"github.com/everyday-items/hexclaw/config"
+	"github.com/hexagon-codes/hexagon"
+	"github.com/hexagon-codes/hexclaw/config"
 )
 
 func TestNew_NoProviders(t *testing.T) {

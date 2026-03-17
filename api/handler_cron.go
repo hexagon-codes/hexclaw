@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/everyday-items/hexclaw/cron"
+	"github.com/hexagon-codes/hexclaw/cron"
 )
 
 // --- Cron API ---

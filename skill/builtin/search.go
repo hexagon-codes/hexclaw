@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/everyday-items/hexclaw/skill"
+	"github.com/hexagon-codes/hexclaw/skill"
 )
 
 // SearchSkill 网络搜索 Skill

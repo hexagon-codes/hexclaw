@@ -5,7 +5,7 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/everyday-items/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/config"
 )
 
 // LLMConfigResponse GET /api/v1/config/llm 响应

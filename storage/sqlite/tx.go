@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/everyday-items/hexclaw/storage"
+	"github.com/hexagon-codes/hexclaw/storage"
 )
 
 // txStore 事务内的存储包装
@@ -180,4 +180,8 @@ func (s *txStore) ListSessionBranches(_ context.Context, _ string) ([]*storage.S
 
 func (s *txStore) WithTx(_ context.Context, _ func(storage.Store) error) error {
 	return fmt.Errorf("不支持嵌套事务")
+}
+
+func (s *txStore) CleanupOldSessions(_ context.Context, _ int) (int64, error) {
+	return 0, fmt.Errorf("不能在事务中调用 CleanupOldSessions")
 }

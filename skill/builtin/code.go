@@ -4,27 +4,31 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/everyday-items/hexclaw/skill"
+	"github.com/hexagon-codes/hexclaw/skill"
 )
 
 // CodeSkill 代码执行 Skill
 //
-// 支持在沙箱中执行代码片段，当前支持：
+// 支持在宿主机上执行代码片段，当前支持：
 //   - Go: go run
 //   - Python: python3
 //   - JavaScript/TypeScript: node
 //
 // 安全措施：
 //   - 超时限制（默认 30 秒）
-//   - 输出大小限制（最大 64KB）
-//   - 临时目录隔离
+//   - stdout/stderr 实时写入上限 1MB（limitedWriter），防止 OOM
+//   - 临时目录隔离 + 最小化环境变量
 //   - 配置开关（默认关闭）
+//
+// WARNING: 此 Skill 直接在宿主机上执行任意代码，不提供内核级沙箱。
+// 仅应在容器化或已隔离的沙箱环境中启用。
 type CodeSkill struct {
 	timeout time.Duration
 }
@@ -166,9 +170,10 @@ func runCommand(ctx context.Context, timeout time.Duration, dir, name string, ar
 		"GOMODCACHE=" + filepath.Join(dir, "modcache"),
 	}
 
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	stdout := newLimitedWriter()
+	stderr := newLimitedWriter()
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 
 	err := cmd.Run()
 
@@ -245,3 +250,48 @@ func truncateOutput(s string, maxLen int) string {
 	}
 	return s[:maxLen] + "\n... (输出已截断)"
 }
+
+// limitedWriter 是一个带上限的 io.Writer。
+// 写入超过 maxBytes 字节后，后续写入被静默丢弃，并在最终输出中追加截断提示。
+// 设计目的：在子进程仍在运行期间即时限制缓冲区增长，防止 OOM。
+type limitedWriter struct {
+	buf      bytes.Buffer
+	maxBytes int
+	truncated bool
+}
+
+const outputLimitBytes = 1 << 20 // 1 MB
+
+func newLimitedWriter() *limitedWriter {
+	return &limitedWriter{maxBytes: outputLimitBytes}
+}
+
+func (w *limitedWriter) Write(p []byte) (int, error) {
+	remaining := w.maxBytes - w.buf.Len()
+	if remaining <= 0 {
+		w.truncated = true
+		// 丢弃多余写入，但向调用方报告全部字节已"消费"，避免 exec 报错
+		return len(p), nil
+	}
+	if len(p) > remaining {
+		p = p[:remaining]
+		w.truncated = true
+	}
+	n, err := w.buf.Write(p)
+	return n, err
+}
+
+// String 返回已捕获的输出，超限时附加截断提示。
+func (w *limitedWriter) String() string {
+	s := w.buf.String()
+	if w.truncated {
+		s += "\n... (输出已超过 1MB，已截断)"
+	}
+	return s
+}
+
+// Len 返回当前缓冲字节数。
+func (w *limitedWriter) Len() int { return w.buf.Len() }
+
+// ensure limitedWriter satisfies io.Writer
+var _ io.Writer = (*limitedWriter)(nil)

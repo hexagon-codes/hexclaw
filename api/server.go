@@ -16,6 +16,7 @@ package api
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -24,22 +25,22 @@ import (
 	"strings"
 	"time"
 
-	"github.com/everyday-items/hexclaw/adapter"
-	"github.com/everyday-items/hexclaw/canvas"
-	"github.com/everyday-items/hexclaw/config"
-	"github.com/everyday-items/hexclaw/cron"
-	"github.com/everyday-items/hexclaw/desktop"
-	"github.com/everyday-items/hexclaw/engine"
-	"github.com/everyday-items/hexclaw/gateway"
-	"github.com/everyday-items/hexclaw/knowledge"
-	"github.com/everyday-items/hexclaw/memory"
-	hexmcp "github.com/everyday-items/hexclaw/mcp"
-	"github.com/everyday-items/hexclaw/router"
-	"github.com/everyday-items/hexclaw/skill/marketplace"
-	"github.com/everyday-items/hexclaw/storage"
-	"github.com/everyday-items/hexclaw/voice"
-	"github.com/everyday-items/hexclaw/webhook"
-	"github.com/everyday-items/toolkit/util/idgen"
+	"github.com/hexagon-codes/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/canvas"
+	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/cron"
+	"github.com/hexagon-codes/hexclaw/desktop"
+	"github.com/hexagon-codes/hexclaw/engine"
+	"github.com/hexagon-codes/hexclaw/gateway"
+	"github.com/hexagon-codes/hexclaw/knowledge"
+	"github.com/hexagon-codes/hexclaw/memory"
+	hexmcp "github.com/hexagon-codes/hexclaw/mcp"
+	"github.com/hexagon-codes/hexclaw/router"
+	"github.com/hexagon-codes/hexclaw/skill/marketplace"
+	"github.com/hexagon-codes/hexclaw/storage"
+	"github.com/hexagon-codes/hexclaw/voice"
+	"github.com/hexagon-codes/hexclaw/webhook"
+	"github.com/hexagon-codes/toolkit/util/idgen"
 )
 
 // Server HTTP API 服务器
@@ -57,9 +58,12 @@ type Server struct {
 	agentRouter *router.Dispatcher            // 多 Agent 路由器（可选）
 	canvasSvc   *canvas.Service           // Canvas/A2UI 服务（可选）
 	voiceSvc    *voice.Service            // 语音服务（可选）
-	desktopSvc  *desktop.Service          // 桌面集成服务（可选）
-	wsHandler   http.Handler              // WebSocket Handler（可选）
-	server      *http.Server
+	desktopSvc    *desktop.Service         // 桌面集成服务（可选）
+	wsHandler     http.Handler             // WebSocket Handler（可选）
+	logCollector  *LogCollector            // 日志收集器
+	workflowStore *WorkflowStore           // 工作流存储
+	version       string                   // 版本号
+	server        *http.Server
 }
 
 // NewServer 创建 API 服务器
@@ -68,10 +72,12 @@ type Server struct {
 // store 可为 nil，此时会话/搜索/分支 API 不可用。
 func NewServer(cfg *config.Config, eng engine.Engine, gw gateway.Gateway, store storage.Store) *Server {
 	return &Server{
-		cfg:     cfg,
-		engine:  eng,
-		gateway: gw,
-		store:   store,
+		cfg:           cfg,
+		engine:        eng,
+		gateway:       gw,
+		store:         store,
+		logCollector:  NewLogCollector(5000),
+		workflowStore: NewWorkflowStore(),
 	}
 }
 
@@ -145,6 +151,16 @@ func (s *Server) SetVoice(svc *voice.Service) {
 	s.voiceSvc = svc
 }
 
+// LogCollector 返回日志收集器，供外部模块写入日志
+func (s *Server) LogCollector() *LogCollector {
+	return s.logCollector
+}
+
+// SetVersion 设置版本号
+func (s *Server) SetVersion(v string) {
+	s.version = v
+}
+
 // SetDesktop 设置桌面集成服务
 //
 // 设置后启用桌面通知、剪贴板等 API。
@@ -171,6 +187,8 @@ func (s *Server) Start(ctx context.Context) error {
 		mux.HandleFunc("GET /api/v1/knowledge/documents", s.handleListDocuments)
 		mux.HandleFunc("DELETE /api/v1/knowledge/documents/{id}", s.handleDeleteDocument)
 		mux.HandleFunc("POST /api/v1/knowledge/search", s.handleSearchKnowledge)
+	} else {
+		mux.HandleFunc("GET /api/v1/knowledge/documents", emptyList("documents"))
 	}
 
 	// 会话 / 搜索 / 分支 API
@@ -206,19 +224,45 @@ func (s *Server) Start(ctx context.Context) error {
 		mux.HandleFunc("DELETE /api/v1/cron/jobs/{id}", s.handleDeleteCronJob)
 		mux.HandleFunc("POST /api/v1/cron/jobs/{id}/pause", s.handlePauseCronJob)
 		mux.HandleFunc("POST /api/v1/cron/jobs/{id}/resume", s.handleResumeCronJob)
+		mux.HandleFunc("POST /api/v1/cron/jobs/{id}/trigger", s.handleTriggerCronJob)
+		mux.HandleFunc("GET /api/v1/cron/jobs/{id}/history", s.handleCronJobHistory)
 	}
 
 	// 文件记忆 API
 	if s.fileMem != nil {
 		mux.HandleFunc("GET /api/v1/memory", s.handleGetMemory)
 		mux.HandleFunc("POST /api/v1/memory", s.handleSaveMemory)
+		mux.HandleFunc("PUT /api/v1/memory", s.handleUpdateMemory)
+		mux.HandleFunc("DELETE /api/v1/memory", s.handleDeleteMemory)
+		mux.HandleFunc("DELETE /api/v1/memory/{id}", s.handleDeleteMemoryItem)
 		mux.HandleFunc("GET /api/v1/memory/search", s.handleSearchMemory)
+	} else {
+		mux.HandleFunc("GET /api/v1/memory", func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, http.StatusOK, map[string]string{"content": "", "type": "memory"})
+		})
+		mux.HandleFunc("PUT /api/v1/memory", func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, http.StatusOK, map[string]string{"message": "记忆模块未启用"})
+		})
+		mux.HandleFunc("DELETE /api/v1/memory", func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, http.StatusOK, map[string]string{"message": "记忆模块未启用"})
+		})
 	}
 
 	// MCP API
 	if s.mcpMgr != nil {
 		mux.HandleFunc("GET /api/v1/mcp/tools", s.handleListMCPTools)
 		mux.HandleFunc("GET /api/v1/mcp/servers", s.handleListMCPServers)
+		mux.HandleFunc("POST /api/v1/mcp/tools/call", s.handleCallMCPTool)
+		mux.HandleFunc("GET /api/v1/mcp/status", s.handleMCPStatus)
+	} else {
+		mux.HandleFunc("GET /api/v1/mcp/servers", emptyList("servers"))
+		mux.HandleFunc("GET /api/v1/mcp/tools", emptyList("tools"))
+		mux.HandleFunc("GET /api/v1/mcp/status", func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, http.StatusOK, map[string]any{"servers": []any{}, "total": 0})
+		})
+		mux.HandleFunc("POST /api/v1/mcp/tools/call", func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, http.StatusOK, map[string]string{"error": "MCP 模块未启用"})
+		})
 	}
 
 	// 技能市场 API
@@ -232,6 +276,7 @@ func (s *Server) Start(ctx context.Context) error {
 	if s.agentRouter != nil {
 		mux.HandleFunc("GET /api/v1/agents", s.handleListAgents)
 		mux.HandleFunc("POST /api/v1/agents", s.handleRegisterAgent)
+		mux.HandleFunc("PUT /api/v1/agents/{name}", s.handleUpdateAgent)
 		mux.HandleFunc("DELETE /api/v1/agents/{name}", s.handleUnregisterAgent)
 	}
 
@@ -242,10 +287,34 @@ func (s *Server) Start(ctx context.Context) error {
 		mux.HandleFunc("POST /api/v1/canvas/events", s.handleCanvasEvent)
 	}
 
+	// Canvas Workflow API（始终启用，内存存储）
+	mux.HandleFunc("GET /api/v1/canvas/workflows", s.handleListWorkflows)
+	mux.HandleFunc("POST /api/v1/canvas/workflows", s.handleSaveWorkflow)
+	mux.HandleFunc("DELETE /api/v1/canvas/workflows/{id}", s.handleDeleteWorkflow)
+	mux.HandleFunc("POST /api/v1/canvas/workflows/{id}/run", s.handleRunWorkflow)
+	mux.HandleFunc("GET /api/v1/canvas/runs/{id}", s.handleGetWorkflowRun)
+
 	// 语音 API
 	if s.voiceSvc != nil {
 		mux.HandleFunc("GET /api/v1/voice/status", s.handleVoiceStatus)
+		mux.HandleFunc("POST /api/v1/voice/transcribe", s.handleVoiceTranscribe)
+		mux.HandleFunc("POST /api/v1/voice/synthesize", s.handleVoiceSynthesize)
 	}
+
+	// 日志 API（始终启用）
+	mux.HandleFunc("GET /api/v1/logs", s.handleGetLogs)
+	mux.HandleFunc("GET /api/v1/logs/stats", s.handleGetLogStats)
+	mux.HandleFunc("GET /api/v1/logs/stream", s.handleLogStream)
+
+	// 系统 API（始终启用）
+	mux.HandleFunc("GET /api/v1/stats", s.handleStats)
+	mux.HandleFunc("GET /api/v1/version", s.handleVersion)
+	mux.HandleFunc("GET /api/v1/config", s.handleGetFullConfig)
+	mux.HandleFunc("PUT /api/v1/config", s.handleUpdateFullConfig)
+	mux.HandleFunc("GET /api/v1/models", s.handleListModels)
+
+	// ClawHub 搜索（Skill 市场）
+	mux.HandleFunc("GET /api/v1/clawhub/search", s.handleClawHubSearch)
 
 	// 桌面集成 API
 	if s.desktopSvc != nil {
@@ -272,8 +341,14 @@ func (s *Server) Start(ctx context.Context) error {
 		},
 	}
 
-	log.Printf("HTTP 服务启动: %s", addr)
 	return s.server.ListenAndServe()
+}
+
+// emptyList 返回空列表响应（用于未启用模块的 fallback）
+func emptyList(key string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{key: []any{}, "total": 0})
+	}
 }
 
 // Stop 优雅关闭服务器
@@ -386,15 +461,18 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 调用引擎处理
+	// 调用引擎处理（日志只记录长度，不记录原文，防止 PII 泄露）
+	s.logCollector.Info("chat", fmt.Sprintf("← %s (%d 字符)", userID, len([]rune(req.Message))))
 	reply, err := s.engine.Process(r.Context(), msg)
 	if err != nil {
-		log.Printf("处理消息失败: %v", err)
+		s.logCollector.Error("chat", fmt.Sprintf("处理失败: user=%s err=%v", userID, err))
 		writeJSON(w, http.StatusInternalServerError, map[string]string{
 			"error": "处理消息失败，请稍后重试",
 		})
 		return
 	}
+
+	s.logCollector.Info("chat", fmt.Sprintf("→ %s (%d 字符)", userID, len([]rune(reply.Content))))
 
 	// 返回响应
 	writeJSON(w, http.StatusOK, ChatResponse{
@@ -454,12 +532,14 @@ func corsMiddleware(next http.Handler) http.Handler {
 // GET 请求和 /health、/ws 不需要认证。
 func (s *Server) apiAuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// 只对 /api/v1/ 下的写操作进行认证
+		// 认证规则：
+		// 1. 所有写操作（POST/PUT/DELETE）需认证，除 /api/v1/chat 和 webhook 接收
+		// 2. 日志 API（GET /api/v1/logs*）需认证（可能含敏感信息）
 		path := r.URL.Path
 		isWriteOp := r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodDelete
-		// 排除聊天端点和 webhook 事件接收端点（外部服务用自己的签名验证）
 		isWebhookReceiver := r.Method == http.MethodPost && strings.HasPrefix(path, "/api/v1/webhooks/") && path != "/api/v1/webhooks"
-		needsAuth := isWriteOp && strings.HasPrefix(path, "/api/v1/") && path != "/api/v1/chat" && !isWebhookReceiver
+		isLogsAPI := path == "/api/v1/logs" || strings.HasPrefix(path, "/api/v1/logs/")
+		needsAuth := isLogsAPI || (isWriteOp && strings.HasPrefix(path, "/api/v1/") && path != "/api/v1/chat" && !isWebhookReceiver)
 
 		if !needsAuth {
 			next.ServeHTTP(w, r)
@@ -468,9 +548,10 @@ func (s *Server) apiAuthMiddleware(next http.Handler) http.Handler {
 
 		token := s.cfg.Server.APIToken
 		if token != "" {
-			// 配置了 Token：验证 Authorization header
+			// 配置了 Token：验证 Authorization header（constant-time 防时序攻击）
 			auth := r.Header.Get("Authorization")
-			if auth == "" || auth != "Bearer "+token {
+			expected := "Bearer " + token
+			if subtle.ConstantTimeCompare([]byte(auth), []byte(expected)) != 1 {
 				writeJSON(w, http.StatusUnauthorized, map[string]string{
 					"error": "未授权：需要有效的 API Token",
 				})
@@ -495,5 +576,7 @@ func (s *Server) apiAuthMiddleware(next http.Handler) http.Handler {
 func writeJSON(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(data)
+	if err := json.NewEncoder(w).Encode(data); err != nil {
+		log.Printf("writeJSON encode error: %v", err)
+	}
 }
