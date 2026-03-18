@@ -172,7 +172,7 @@ func (a *DiscordAdapter) connect() error {
 	a.mu.Unlock()
 
 	defer func() {
-		conn.Close()
+		_ = conn.Close()
 		a.mu.Lock()
 		a.conn = nil
 		a.mu.Unlock()
@@ -430,7 +430,7 @@ func (a *DiscordAdapter) editMessage(ctx context.Context, channelID, messageID, 
 	if err != nil {
 		return fmt.Errorf("编辑 Discord 消息失败: %w", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	return nil
 }
 

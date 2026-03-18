@@ -444,5 +444,5 @@ func (s *Server) handleVoiceSynthesize(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", contentType)
 	w.WriteHeader(http.StatusOK)
-	w.Write(result.Audio)
+	_, _ = w.Write(result.Audio)
 }

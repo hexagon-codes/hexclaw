@@ -157,7 +157,7 @@ func (a *TelegramAdapter) editMessage(ctx context.Context, chatID string, messag
 	if err != nil {
 		return err
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	return nil
 }
 

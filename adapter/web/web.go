@@ -65,7 +65,7 @@ func (a *WebAdapter) Start(_ context.Context, handler adapter.MessageHandler) er
 func (a *WebAdapter) Stop(_ context.Context) error {
 	a.conns.Range(func(key, value any) bool {
 		if conn, ok := value.(*websocket.Conn); ok {
-			conn.Close(websocket.StatusGoingAway, "服务关闭")
+			_ = conn.Close(websocket.StatusGoingAway, "服务关闭")
 		}
 		a.conns.Delete(key)
 		return true
@@ -142,7 +142,7 @@ func (a *WebAdapter) handleWS(w http.ResponseWriter, r *http.Request) {
 	a.conns.Store(chatID, conn)
 	defer func() {
 		a.conns.Delete(chatID)
-		conn.Close(websocket.StatusNormalClosure, "")
+		_ = conn.Close(websocket.StatusNormalClosure, "")
 	}()
 
 	log.Printf("WebSocket 连接建立: %s", chatID)

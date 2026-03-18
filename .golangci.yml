@@ -1,0 +1,6 @@
+linters-settings:
+  errcheck:
+    exclude-functions:
+      - (io.Closer).Close
+      - (net/http.ResponseWriter).Write
+      - (*encoding/json.Encoder).Encode

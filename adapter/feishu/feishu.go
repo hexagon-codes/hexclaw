@@ -129,7 +129,7 @@ func (a *FeishuAdapter) Send(ctx context.Context, chatID string, reply *adapter.
 	if err != nil {
 		return fmt.Errorf("发送消息失败: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
@@ -214,14 +214,14 @@ func (a *FeishuAdapter) sendAndGetID(ctx context.Context, chatID, text string) (
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var result struct {
 		Data struct {
 			MessageID string `json:"message_id"`
 		} `json:"data"`
 	}
-	json.NewDecoder(resp.Body).Decode(&result)
+	_ = json.NewDecoder(resp.Body).Decode(&result)
 	return result.Data.MessageID, nil
 }
 
@@ -249,7 +249,7 @@ func (a *FeishuAdapter) patchMessage(ctx context.Context, messageID, text string
 	if err != nil {
 		return err
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	return nil
 }
 
@@ -267,7 +267,7 @@ func (a *FeishuAdapter) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "读取请求体失败", http.StatusBadRequest)
 		return
 	}
-	defer r.Body.Close()
+	defer func() { _ = r.Body.Close() }()
 
 	// 解析通用事件结构
 	var event feishuEvent
@@ -279,7 +279,7 @@ func (a *FeishuAdapter) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	// URL 验证请求（challenge）
 	if event.Challenge != "" {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{
+		_ = json.NewEncoder(w).Encode(map[string]string{
 			"challenge": event.Challenge,
 		})
 		return

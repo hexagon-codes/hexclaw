@@ -127,7 +127,7 @@ func (a *WechatAdapter) handleVerify(w http.ResponseWriter, r *http.Request) {
 	echoStr := r.URL.Query().Get("echostr")
 
 	if a.checkSignature(signature, timestamp, nonce) {
-		w.Write([]byte(echoStr))
+		_, _ = w.Write([]byte(echoStr))
 	} else {
 		http.Error(w, "签名验证失败", http.StatusForbidden)
 	}
@@ -160,7 +160,7 @@ func (a *WechatAdapter) handleMessage(w http.ResponseWriter, r *http.Request) {
 	if msg.MsgType != "text" {
 		// 返回空响应（表示不处理）
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("success"))
+		_, _ = w.Write([]byte("success"))
 		return
 	}
 
@@ -212,7 +212,7 @@ func (a *WechatAdapter) handleMessage(w http.ResponseWriter, r *http.Request) {
 	case <-ctx.Done():
 		// 超时，先返回空响应，后续通过客服消息推送
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("success"))
+		_, _ = w.Write([]byte("success"))
 
 		// 等待异步结果并通过客服消息发送
 		go func() {

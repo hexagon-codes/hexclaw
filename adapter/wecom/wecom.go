@@ -148,7 +148,7 @@ func (a *WecomAdapter) handleVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Write([]byte(plaintext))
+	_, _ = w.Write([]byte(plaintext))
 }
 
 // handleCallback 处理消息回调
@@ -196,7 +196,7 @@ func (a *WecomAdapter) handleCallback(w http.ResponseWriter, r *http.Request) {
 
 	// 立即返回空响应
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("success"))
+	_, _ = w.Write([]byte("success"))
 
 	// 异步处理消息
 	go a.processMessage(msg)
