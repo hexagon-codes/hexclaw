@@ -16,28 +16,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout hexagon
-        uses: actions/checkout@v4
-        with:
-          repository: hexagon-codes/hexagon
-          path: ../hexagon
-
-      - name: Checkout toolkit
-        uses: actions/checkout@v4
-        with:
-          repository: hexagon-codes/toolkit
-          path: ../toolkit
+      - name: Configure private modules
+        run: |
+          git config --global url."https://${{ secrets.PRIVATE_REPO_TOKEN }}@github.com/".insteadOf "https://github.com/"
 
       - uses: actions/setup-go@v5
         with:
           go-version: "1.25"
           cache-dependency-path: go.sum
+        env:
+          GOPRIVATE: github.com/hexagon-codes/*
 
       - name: Run tests
         run: go test -race -count=1 ./...
+        env:
+          GOPRIVATE: github.com/hexagon-codes/*
 
       - name: Run vet
         run: go vet ./...
+        env:
+          GOPRIVATE: github.com/hexagon-codes/*
 
   lint:
     name: Lint
@@ -45,26 +43,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout hexagon
-        uses: actions/checkout@v4
-        with:
-          repository: hexagon-codes/hexagon
-          path: ../hexagon
-
-      - name: Checkout toolkit
-        uses: actions/checkout@v4
-        with:
-          repository: hexagon-codes/toolkit
-          path: ../toolkit
+      - name: Configure private modules
+        run: |
+          git config --global url."https://${{ secrets.PRIVATE_REPO_TOKEN }}@github.com/".insteadOf "https://github.com/"
 
       - uses: actions/setup-go@v5
         with:
           go-version: "1.25"
           cache-dependency-path: go.sum
+        env:
+          GOPRIVATE: github.com/hexagon-codes/*
 
       - uses: golangci/golangci-lint-action@v6
         with:
           version: latest
+        env:
+          GOPRIVATE: github.com/hexagon-codes/*
 
   build:
     name: Build
@@ -72,22 +66,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout hexagon
-        uses: actions/checkout@v4
-        with:
-          repository: hexagon-codes/hexagon
-          path: ../hexagon
-
-      - name: Checkout toolkit
-        uses: actions/checkout@v4
-        with:
-          repository: hexagon-codes/toolkit
-          path: ../toolkit
+      - name: Configure private modules
+        run: |
+          git config --global url."https://${{ secrets.PRIVATE_REPO_TOKEN }}@github.com/".insteadOf "https://github.com/"
 
       - uses: actions/setup-go@v5
         with:
           go-version: "1.25"
           cache-dependency-path: go.sum
+        env:
+          GOPRIVATE: github.com/hexagon-codes/*
 
       - name: Build
         run: make build
+        env:
+          GOPRIVATE: github.com/hexagon-codes/*

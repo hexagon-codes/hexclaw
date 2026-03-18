@@ -28,27 +28,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout hexagon
-        uses: actions/checkout@v4
-        with:
-          repository: hexagon-codes/hexagon
-          path: ../hexagon
-
-      - name: Checkout toolkit
-        uses: actions/checkout@v4
-        with:
-          repository: hexagon-codes/toolkit
-          path: ../toolkit
+      - name: Configure private modules
+        run: |
+          git config --global url."https://${{ secrets.PRIVATE_REPO_TOKEN }}@github.com/".insteadOf "https://github.com/"
 
       - uses: actions/setup-go@v5
         with:
           go-version: "1.25"
           cache-dependency-path: go.sum
+        env:
+          GOPRIVATE: github.com/hexagon-codes/*
 
       - name: Build
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
+          GOPRIVATE: github.com/hexagon-codes/*
         run: |
           VERSION=${GITHUB_REF#refs/tags/}
           COMMIT=$(git rev-parse --short HEAD)
@@ -91,17 +86,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout hexagon
-        uses: actions/checkout@v4
-        with:
-          repository: hexagon-codes/hexagon
-          path: ../hexagon
-
-      - name: Checkout toolkit
-        uses: actions/checkout@v4
-        with:
-          repository: hexagon-codes/toolkit
-          path: ../toolkit
+      - name: Configure private modules
+        run: |
+          git config --global url."https://${{ secrets.PRIVATE_REPO_TOKEN }}@github.com/".insteadOf "https://github.com/"
 
       - uses: docker/login-action@v3
         with:
@@ -124,3 +111,5 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            GOPRIVATE=github.com/hexagon-codes/*
