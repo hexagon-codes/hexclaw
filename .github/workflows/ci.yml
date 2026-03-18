@@ -56,7 +56,7 @@ jobs:
 
       - uses: golangci/golangci-lint-action@v7
         with:
-          version: v2
+          version: v2.11.3
         env:
           GOPRIVATE: github.com/hexagon-codes/*
 
