@@ -1,7 +1,13 @@
 // Package dingtalk 提供钉钉 Bot 适配器
 //
-// 通过 HTTP Webhook 接收钉钉事件回调，将消息转换为统一格式。
+// 通过 Stream 长连接（WebSocket）接收钉钉事件，无需公网地址。
 // 回复通过钉钉 OpenAPI 发送。
+//
+// Stream 模式流程：
+//  1. 调用 /v1.0/gateway/connections/open 获取 WebSocket 端点
+//  2. 客户端主动连接 WebSocket
+//  3. 通过 WebSocket 接收消息事件
+//  4. 发送回复通过 REST API
 package dingtalk
 
 import (
@@ -17,8 +23,10 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/config"
 	"github.com/hexagon-codes/toolkit/util/idgen"
@@ -30,13 +38,16 @@ const apiBase = "https://api.dingtalk.com"
 type DingtalkAdapter struct {
 	cfg     config.DingtalkConfig
 	handler adapter.MessageHandler
-	server  *http.Server
 	client  *http.Client
 	queue   *adapter.SendQueue
 
 	mu          sync.RWMutex
 	accessToken string
 	tokenExpiry time.Time
+
+	conn    *websocket.Conn
+	connMu  sync.Mutex
+	stopped atomic.Bool
 }
 
 // New 创建钉钉适配器
@@ -57,59 +68,268 @@ func (a *DingtalkAdapter) Name() string {
 }
 func (a *DingtalkAdapter) Platform() adapter.Platform { return adapter.PlatformDingtalk }
 
-// Attach 注册消息处理器，但不启动独立 HTTP 服务器。
+// Attach 注册消息处理器。
 func (a *DingtalkAdapter) Attach(handler adapter.MessageHandler) error {
 	a.handler = handler
 	return nil
 }
 
-// Start 启动钉钉 Webhook 服务器
+// Start 启动钉钉 Stream 长连接
 func (a *DingtalkAdapter) Start(_ context.Context, handler adapter.MessageHandler) error {
 	if err := a.Attach(handler); err != nil {
 		return err
 	}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /dingtalk/webhook", a.handleWebhook)
-
-	port := a.cfg.WebhookPort
-	if port <= 0 {
-		port = 6062
-	}
-	addr := fmt.Sprintf(":%d", port)
-
-	a.server = &http.Server{
-		Addr:              addr,
-		Handler:           mux,
-		ReadHeaderTimeout: 10 * time.Second,
-		WriteTimeout:      30 * time.Second,
-	}
-
-	log.Printf("钉钉适配器 [%s] 已启动: %s/dingtalk/webhook", a.Name(), addr)
-	go func() {
-		if err := a.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Printf("钉钉 Webhook 服务器错误: %v", err)
-		}
-	}()
-
+	a.stopped.Store(false)
+	go a.connectLoop()
+	log.Printf("钉钉适配器 [%s] 已启动（Stream 长连接模式）", a.Name())
 	return nil
 }
 
 // Stop 停止钉钉适配器
 func (a *DingtalkAdapter) Stop(ctx context.Context) error {
+	a.stopped.Store(true)
 	if a.queue != nil {
 		_ = a.queue.Stop(context.Background())
 	}
-	if a.server == nil {
-		return nil
+
+	a.connMu.Lock()
+	if a.conn != nil {
+		_ = a.conn.WriteMessage(websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+		_ = a.conn.Close()
+		a.conn = nil
 	}
-	return a.server.Shutdown(ctx)
+	a.connMu.Unlock()
+
+	return nil
 }
 
-// Handler 返回统一 ingress 使用的处理器。
+// Handler 返回 HTTP Handler（保留向后兼容）
 func (a *DingtalkAdapter) Handler() http.Handler {
 	return http.HandlerFunc(a.handleWebhook)
 }
+
+// ============== Stream 长连接 ==============
+
+// connectLoop 自动重连循环
+func (a *DingtalkAdapter) connectLoop() {
+	backoff := time.Second
+	const maxBackoff = 30 * time.Second
+
+	for !a.stopped.Load() {
+		if err := a.connectAndListen(); err != nil {
+			if !a.stopped.Load() {
+				log.Printf("钉钉 Stream 断开: %v，%v 后重连...", err, backoff)
+				time.Sleep(backoff)
+				backoff = min(backoff*2, maxBackoff)
+			}
+		} else {
+			backoff = time.Second
+		}
+	}
+}
+
+// connectAndListen 建立 Stream 连接并监听
+func (a *DingtalkAdapter) connectAndListen() error {
+	endpoint, ticket, err := a.openConnection()
+	if err != nil {
+		return fmt.Errorf("打开 Stream 连接失败: %w", err)
+	}
+
+	wsURL := endpoint + "?ticket=" + ticket
+	dialer := websocket.Dialer{
+		HandshakeTimeout: 15 * time.Second,
+	}
+	conn, _, err := dialer.Dial(wsURL, nil)
+	if err != nil {
+		return fmt.Errorf("WebSocket 连接失败: %w", err)
+	}
+
+	a.connMu.Lock()
+	a.conn = conn
+	a.connMu.Unlock()
+
+	defer func() {
+		_ = conn.Close()
+		a.connMu.Lock()
+		a.conn = nil
+		a.connMu.Unlock()
+	}()
+
+	log.Printf("钉钉 Stream 连接已建立")
+
+	stopPing := make(chan struct{})
+	go a.pingLoop(conn, 30*time.Second, stopPing)
+	defer close(stopPing)
+
+	for !a.stopped.Load() {
+		_, msg, err := conn.ReadMessage()
+		if err != nil {
+			if !a.stopped.Load() {
+				return fmt.Errorf("读取消息失败: %w", err)
+			}
+			return nil
+		}
+		a.handleStreamMessage(conn, msg)
+	}
+	return nil
+}
+
+// openConnection 调用钉钉 Stream API 获取 WebSocket 端点
+func (a *DingtalkAdapter) openConnection() (endpoint, ticket string, err error) {
+	body, _ := json.Marshal(map[string]any{
+		"clientId":     a.cfg.AppKey,
+		"clientSecret": a.cfg.AppSecret,
+		"subscriptions": []map[string]string{
+			{"type": "EVENT", "id": "*"},
+			{"type": "CALLBACK", "id": "chat_bot_message_receive"},
+		},
+		"ua": "hexclaw",
+	})
+
+	req, err := http.NewRequest("POST", apiBase+"/v1.0/gateway/connections/open", bytes.NewReader(body))
+	if err != nil {
+		return "", "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return "", "", fmt.Errorf("请求 Stream 端点失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Endpoint string `json:"endpoint"`
+		Ticket   string `json:"ticket"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", "", fmt.Errorf("解析响应失败: %w", err)
+	}
+	if result.Endpoint == "" || result.Ticket == "" {
+		respBody, _ := io.ReadAll(resp.Body)
+		return "", "", fmt.Errorf("钉钉返回端点为空: %s", string(respBody))
+	}
+
+	return result.Endpoint, result.Ticket, nil
+}
+
+// streamFrame 钉钉 Stream 消息帧
+type streamFrame struct {
+	SpecVersion string            `json:"specVersion,omitempty"`
+	Type        string            `json:"type"`
+	Headers     map[string]string `json:"headers,omitempty"`
+	Data        string            `json:"data,omitempty"`
+}
+
+// handleStreamMessage 处理 Stream 收到的消息
+func (a *DingtalkAdapter) handleStreamMessage(conn *websocket.Conn, raw []byte) {
+	var frame streamFrame
+	if err := json.Unmarshal(raw, &frame); err != nil {
+		log.Printf("钉钉 Stream: 解析消息失败: %v", err)
+		return
+	}
+
+	switch frame.Type {
+	case "SYSTEM":
+		if frame.Headers["topic"] == "ping" {
+			a.sendStreamAck(conn, frame, "")
+		}
+	case "EVENT", "CALLBACK":
+		go a.handleStreamEvent(conn, frame)
+	default:
+		log.Printf("钉钉 Stream: 未知消息类型: %s", frame.Type)
+	}
+}
+
+// sendStreamAck 发送 ack 确认
+func (a *DingtalkAdapter) sendStreamAck(conn *websocket.Conn, frame streamFrame, body string) {
+	msgID := frame.Headers["messageId"]
+	ack := map[string]any{
+		"code":      200,
+		"headers":   map[string]string{"contentType": "application/json", "messageId": msgID},
+		"message":   "OK",
+		"data":      body,
+	}
+	data, _ := json.Marshal(ack)
+
+	a.connMu.Lock()
+	defer a.connMu.Unlock()
+	if conn != nil {
+		_ = conn.WriteMessage(websocket.TextMessage, data)
+	}
+}
+
+// handleStreamEvent 处理 Stream 事件
+func (a *DingtalkAdapter) handleStreamEvent(conn *websocket.Conn, frame streamFrame) {
+	a.sendStreamAck(conn, frame, "")
+
+	if frame.Data == "" {
+		return
+	}
+
+	var event dtEvent
+	if err := json.Unmarshal([]byte(frame.Data), &event); err != nil {
+		log.Printf("钉钉 Stream: 解析事件数据失败: %v", err)
+		return
+	}
+
+	if event.Text.Content != "" {
+		a.handleMessage(event)
+	}
+}
+
+// pingLoop 定期发送 ping
+func (a *DingtalkAdapter) pingLoop(conn *websocket.Conn, interval time.Duration, stop <-chan struct{}) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			a.connMu.Lock()
+			err := conn.WriteMessage(websocket.PingMessage, nil)
+			a.connMu.Unlock()
+			if err != nil {
+				return
+			}
+		case <-stop:
+			return
+		}
+	}
+}
+
+// handleWebhook 处理钉钉回调（向后兼容 HTTP Webhook）
+func (a *DingtalkAdapter) handleWebhook(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "读取请求体失败", http.StatusBadRequest)
+		return
+	}
+	defer func() { _ = r.Body.Close() }()
+
+	timestamp := r.Header.Get("timestamp")
+	sign := r.Header.Get("sign")
+	if a.cfg.AppSecret != "" && !a.verifySign(timestamp, sign) {
+		http.Error(w, "签名验证失败", http.StatusUnauthorized)
+		return
+	}
+
+	var event dtEvent
+	if err := json.Unmarshal(body, &event); err != nil {
+		http.Error(w, "解析事件失败", http.StatusBadRequest)
+		return
+	}
+
+	if event.Text.Content != "" {
+		go a.handleMessage(event)
+	}
+
+	w.WriteHeader(http.StatusOK)
+}
+
+// ============== 消息处理 ==============
 
 // Send 发送消息
 func (a *DingtalkAdapter) Send(ctx context.Context, chatID string, reply *adapter.Reply) error {
@@ -168,38 +388,6 @@ func (a *DingtalkAdapter) SendStream(ctx context.Context, chatID string, chunks 
 	return a.Send(ctx, chatID, &adapter.Reply{Content: sb.String()})
 }
 
-// handleWebhook 处理钉钉回调
-func (a *DingtalkAdapter) handleWebhook(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "读取请求体失败", http.StatusBadRequest)
-		return
-	}
-	defer func() { _ = r.Body.Close() }()
-
-	// 验证签名
-	timestamp := r.Header.Get("timestamp")
-	sign := r.Header.Get("sign")
-	if a.cfg.AppSecret != "" && !a.verifySign(timestamp, sign) {
-		log.Println("钉钉: 签名验证失败")
-		http.Error(w, "签名验证失败", http.StatusUnauthorized)
-		return
-	}
-
-	// 解析消息
-	var event dtEvent
-	if err := json.Unmarshal(body, &event); err != nil {
-		http.Error(w, "解析事件失败", http.StatusBadRequest)
-		return
-	}
-
-	if event.Text.Content != "" {
-		go a.handleMessage(event)
-	}
-
-	w.WriteHeader(http.StatusOK)
-}
-
 // handleMessage 处理消息
 func (a *DingtalkAdapter) handleMessage(event dtEvent) {
 	if a.handler == nil {
@@ -243,6 +431,8 @@ func (a *DingtalkAdapter) handleMessage(event dtEvent) {
 		log.Printf("钉钉: 发送回复失败: %v", err)
 	}
 }
+
+// ============== Token 管理 ==============
 
 // getAccessToken 获取钉钉 Access Token（带缓存）
 func (a *DingtalkAdapter) getAccessToken(ctx context.Context) (string, error) {
@@ -291,7 +481,7 @@ func (a *DingtalkAdapter) getAccessToken(ctx context.Context) (string, error) {
 	return a.accessToken, nil
 }
 
-// verifySign 验证钉钉签名
+// verifySign 验证钉钉签名（用于向后兼容 Webhook 模式）
 func (a *DingtalkAdapter) verifySign(timestamp, sign string) bool {
 	if timestamp == "" || sign == "" {
 		return false
@@ -302,6 +492,27 @@ func (a *DingtalkAdapter) verifySign(timestamp, sign string) bool {
 	expected := base64.StdEncoding.EncodeToString(h.Sum(nil))
 	return hmac.Equal([]byte(expected), []byte(sign))
 }
+
+// Health 返回适配器健康状态。
+func (a *DingtalkAdapter) Health(_ context.Context) error {
+	if a.handler == nil {
+		return fmt.Errorf("dingtalk handler 未附加")
+	}
+	if a.cfg.AppKey == "" || a.cfg.AppSecret == "" || a.cfg.RobotCode == "" {
+		return fmt.Errorf("dingtalk app_key/app_secret/robot_code 未配置")
+	}
+	if a.stopped.Load() {
+		return fmt.Errorf("dingtalk adapter stopped")
+	}
+	a.connMu.Lock()
+	defer a.connMu.Unlock()
+	if a.conn == nil {
+		return fmt.Errorf("dingtalk Stream 未连接")
+	}
+	return nil
+}
+
+// ============== 数据模型 ==============
 
 // dtEvent 钉钉消息事件
 type dtEvent struct {
@@ -315,19 +526,7 @@ type dtEvent struct {
 	MsgType string `json:"msgtype"`
 }
 
-// marshalTextContent 安全地序列化文本消息内容为 JSON 字符串
 func marshalTextContent(text string) string {
 	b, _ := json.Marshal(map[string]string{"content": text})
 	return string(b)
-}
-
-// Health 返回适配器健康状态。
-func (a *DingtalkAdapter) Health(_ context.Context) error {
-	if a.handler == nil {
-		return fmt.Errorf("dingtalk handler 未附加")
-	}
-	if a.cfg.AppKey == "" || a.cfg.AppSecret == "" || a.cfg.RobotCode == "" {
-		return fmt.Errorf("dingtalk app_key/app_secret/robot_code 未配置")
-	}
-	return nil
 }

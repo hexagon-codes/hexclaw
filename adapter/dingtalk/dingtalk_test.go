@@ -567,10 +567,9 @@ func TestSendStreamError(t *testing.T) {
 	}
 }
 
-// TestStopNilServer 测试 server 为 nil 时 Stop 不报错
-func TestStopNilServer(t *testing.T) {
+// TestStopNoConnection 测试无连接时 Stop 不报错
+func TestStopNoConnection(t *testing.T) {
 	a := newTestAdapter()
-	a.server = nil
 
 	err := a.Stop(context.Background())
 	if err != nil {

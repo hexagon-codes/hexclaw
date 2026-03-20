@@ -190,7 +190,8 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 		cfg.Server.Host = "127.0.0.1"
 		cfg.Platforms.Web.Enabled = true
 		cfg.Security.Auth.AllowAnonymous = true
-		// 桌面模式日志在 banner 后统一输出
+		cfg.Cron.Enabled = true
+		cfg.Canvas.Enabled = true
 	}
 
 	// 命令行参数覆盖配置文件（向 slice 首元素写入，无则创建）
