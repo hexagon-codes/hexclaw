@@ -93,21 +93,21 @@ hexclaw serve
 ```bash
 docker run -d \
   --name hexclaw \
-  -p 6060:6060 \
+  -p 16060:16060 \
   -e DEEPSEEK_API_KEY="sk-xxx" \
   -v hexclaw-data:/data/.hexclaw \
   ghcr.io/hexagon-codes/hexclaw:latest
 ```
 
 服务启动后：
-- Web UI: `http://127.0.0.1:6060`
-- 健康检查: `GET http://127.0.0.1:6060/health`
-- 聊天 API: `POST http://127.0.0.1:6060/api/v1/chat`
+- Web UI: `http://127.0.0.1:16060`
+- 健康检查: `GET http://127.0.0.1:16060/health`
+- 聊天 API: `POST http://127.0.0.1:16060/api/v1/chat`
 
 ### 使用 API
 
 ```bash
-curl -X POST http://127.0.0.1:6060/api/v1/chat \
+curl -X POST http://127.0.0.1:16060/api/v1/chat \
   -H "Content-Type: application/json" \
   -d '{"message": "你好", "user_id": "test-user"}'
 ```
@@ -138,7 +138,7 @@ hexclaw serve --config ~/.hexclaw/hexclaw.yaml
 ```yaml
 server:
   host: 127.0.0.1
-  port: 6060
+  port: 16060
 
 llm:
   default: deepseek
@@ -304,7 +304,7 @@ hexclaw/
 └── Makefile
 ```
 
-## API 端点（71 个路由）
+## API 端点（常用接口摘录，完整路由按模块启用）
 
 ### 核心
 | 方法 | 路径 | 说明 |
@@ -334,14 +334,17 @@ hexclaw/
 | PUT | `/api/v1/config` | 更新配置 |
 | GET | `/api/v1/config/llm` | 获取 LLM 配置 |
 | PUT | `/api/v1/config/llm` | 更新 LLM 配置 |
+| POST | `/api/v1/config/llm/test` | 测试单个 Provider 连通性（不落盘） |
 
 ### 知识库
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | POST | `/api/v1/knowledge/documents` | 上传文档 |
+| POST | `/api/v1/knowledge/upload` | 上传文件并返回索引结果 |
 | GET | `/api/v1/knowledge/documents` | 文档列表 |
 | DELETE | `/api/v1/knowledge/documents/{id}` | 删除文档 |
-| POST | `/api/v1/knowledge/search` | 搜索 |
+| POST | `/api/v1/knowledge/documents/{id}/reindex` | 重建/重试单个文档索引 |
+| POST | `/api/v1/knowledge/search` | 结构化搜索（返回分片、来源、分数） |
 
 ### 定时任务
 | 方法 | 路径 | 说明 |
@@ -384,6 +387,7 @@ hexclaw/
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/api/v1/skills` | 已安装技能 |
+| PUT | `/api/v1/skills/{name}/status` | 启用/禁用技能（返回运行态字段） |
 | POST | `/api/v1/skills/install` | 安装技能 |
 | DELETE | `/api/v1/skills/{name}` | 卸载技能 |
 | GET | `/api/v1/clawhub/search` | ClawHub 技能搜索 |
@@ -395,6 +399,25 @@ hexclaw/
 | POST | `/api/v1/agents` | 注册 Agent |
 | PUT | `/api/v1/agents/{name}` | 更新 Agent |
 | DELETE | `/api/v1/agents/{name}` | 删除 Agent |
+| POST | `/api/v1/agents/default` | 设置默认 Agent |
+| GET | `/api/v1/agents/rules` | 路由规则列表 |
+| POST | `/api/v1/agents/rules` | 新增路由规则 |
+| POST | `/api/v1/agents/rules/test` | 测试路由并返回命中规则 |
+| DELETE | `/api/v1/agents/rules/{id}` | 删除路由规则 |
+
+### 平台实例 / IM 通道
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/v1/platforms/instances` | 平台实例列表 |
+| GET | `/api/v1/platforms/instances/health` | 全部实例健康状态 |
+| POST | `/api/v1/platforms/instances` | 创建实例 |
+| PUT | `/api/v1/platforms/instances/{name}` | 更新实例 |
+| DELETE | `/api/v1/platforms/instances/{name}` | 删除实例 |
+| GET | `/api/v1/platforms/instances/{name}/health` | 单实例健康状态 |
+| POST | `/api/v1/platforms/instances/{name}/test` | 测试实例配置 |
+| POST | `/api/v1/platforms/instances/{name}/start` | 启动实例 |
+| POST | `/api/v1/platforms/instances/{name}/stop` | 停止实例 |
+| POST | `/api/v1/im/channels/{provider}/test` | 测试 IM 通道配置 |
 
 ### Canvas / 工作流
 | 方法 | 路径 | 说明 |
@@ -425,12 +448,31 @@ hexclaw/
 | GET | `/api/v1/desktop/clipboard` | 读取剪贴板 |
 | POST | `/api/v1/desktop/clipboard` | 写入剪贴板 |
 
+### 团队协作
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/v1/team/agents` | 团队共享 Agent 列表 |
+| POST | `/api/v1/team/agents` | 共享 Agent 到团队 |
+| DELETE | `/api/v1/team/agents/{id}` | 删除共享 Agent |
+| GET | `/api/v1/team/members` | 团队成员列表 |
+| POST | `/api/v1/team/members` | 邀请成员 |
+| DELETE | `/api/v1/team/members/{id}` | 移除成员 |
+
 ### 日志与监控
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/v1/logs` | 查询日志（支持 level/source/keyword 过滤 + 分页） |
+| GET | `/api/v1/logs` | 查询日志（支持 level/source/domain/keyword 过滤 + 分页） |
 | GET | `/api/v1/logs/stats` | 日志统计（按 level/source 分类计数） |
 | GET | `/api/v1/logs/stream` | 实时日志流 (WebSocket，需 Token 认证) |
+
+### 与桌面端对齐的响应语义
+
+- `POST /api/v1/config/llm/test` 返回 `ok`、`message`、`provider`、`model`、`latency_ms`，用于 Welcome 页真实测试 Key/模型可用性。
+- `GET /api/v1/skills` 稳定返回 `enabled`；`PUT /api/v1/skills/{name}/status` 额外返回 `effective_enabled`、`requires_restart`、`message`。
+- `POST /api/v1/knowledge/search` 返回结构化结果数组，包含文档标题、来源、chunk 位置、内容和相似度分数，适合直接在前端展示引用来源。
+- `GET /api/v1/knowledge/documents` 返回 `status`、`error_message`、`updated_at`、`source_type`；`POST /api/v1/knowledge/upload` 返回 `status`、`source`、`chunk_count`、`warnings`。
+- `POST /api/v1/agents/rules/test` 会返回命中规则与分数，便于解释“为什么路由到这个 Agent”。
+- `GET /api/v1/logs` 的日志项包含稳定 `domain` 字段，可按 `chat / knowledge / integration / automation / engine` 等功能域过滤。
 
 ## 开发
 

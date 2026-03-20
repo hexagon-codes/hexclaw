@@ -13,7 +13,7 @@ services:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "6060:6060"
+      - "16060:16060"
     volumes:
       - hexclaw-data:/data
     environment:

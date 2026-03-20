@@ -40,7 +40,7 @@ Verify installation:
 
 ```bash
 hexclaw version
-# HexClaw v0.1.1
+# HexClaw v0.0.2
 ```
 
 ### Method 2: Build from source
@@ -51,7 +51,7 @@ cd hexclaw
 go build -o hexclaw ./cmd/hexclaw/
 
 # Optional: build with version info
-go build -ldflags "-X main.version=v0.1.1 -X main.commit=$(git rev-parse --short HEAD) -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o hexclaw ./cmd/hexclaw/
+go build -ldflags "-X main.version=v0.0.2 -X main.commit=$(git rev-parse --short HEAD) -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o hexclaw ./cmd/hexclaw/
 
 # Move to PATH
 sudo mv hexclaw /usr/local/bin/
@@ -77,14 +77,14 @@ sudo mv hexclaw /usr/local/bin/
 # Use official image
 docker run -d \
   --name hexclaw \
-  -p 6060:6060 \
+  -p 16060:16060 \
   -e DEEPSEEK_API_KEY="sk-xxx" \
-  -v hexclaw-data:/root/.hexclaw \
+  -v hexclaw-data:/data/.hexclaw \
   ghcr.io/hexagon-codes/hexclaw:latest
 
 # Or build from source
 docker build -t hexclaw .
-docker run -d --name hexclaw -p 6060:6060 -e DEEPSEEK_API_KEY="sk-xxx" hexclaw
+docker run -d --name hexclaw -p 16060:16060 -e DEEPSEEK_API_KEY="sk-xxx" hexclaw
 ```
 
 ---
@@ -252,16 +252,16 @@ services:
     container_name: hexclaw
     restart: unless-stopped
     ports:
-      - "6060:6060"
+      - "16060:16060"
     environment:
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
       # - OPENAI_API_KEY=${OPENAI_API_KEY}
       # - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
     volumes:
-      - hexclaw-data:/root/.hexclaw
-      - ./hexclaw.yaml:/root/.hexclaw/hexclaw.yaml:ro
+      - hexclaw-data:/data/.hexclaw
+      - ./hexclaw.yaml:/data/.hexclaw/hexclaw.yaml:ro
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:6060/health"]
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:16060/health"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -302,7 +302,7 @@ spec:
         - name: hexclaw
           image: ghcr.io/hexagon-codes/hexclaw:latest
           ports:
-            - containerPort: 6060
+            - containerPort: 16060
           env:
             - name: DEEPSEEK_API_KEY
               valueFrom:
@@ -311,14 +311,14 @@ spec:
                   key: deepseek-api-key
           volumeMounts:
             - name: data
-              mountPath: /root/.hexclaw
+              mountPath: /data/.hexclaw
             - name: config
-              mountPath: /root/.hexclaw/hexclaw.yaml
+              mountPath: /data/.hexclaw/hexclaw.yaml
               subPath: hexclaw.yaml
           livenessProbe:
             httpGet:
               path: /health
-              port: 6060
+              port: 16060
             initialDelaySeconds: 10
             periodSeconds: 30
           resources:
@@ -344,8 +344,8 @@ spec:
   selector:
     app: hexclaw
   ports:
-    - port: 6060
-      targetPort: 6060
+    - port: 16060
+      targetPort: 16060
   type: ClusterIP
 ```
 
@@ -370,7 +370,7 @@ kubectl apply -f hexclaw-k8s.yaml
 
 ### Web UI
 
-Enabled by default. Access at `http://127.0.0.1:6060` after startup.
+Enabled by default. Access at `http://127.0.0.1:16060` after startup.
 
 ```yaml
 platforms:
@@ -496,9 +496,52 @@ platforms:
 ### Health Check
 
 ```bash
-curl http://127.0.0.1:6060/health
+curl http://127.0.0.1:16060/health
 # {"status":"healthy"}
 ```
+
+### Post-Startup Integration Checks
+
+If `server.api_token` is configured, add `Authorization: Bearer <TOKEN>` to all write requests below.
+
+```bash
+# 1. Test a real LLM config without persisting it
+curl -X POST http://127.0.0.1:16060/api/v1/config/llm/test \
+  -H "Content-Type: application/json" \
+  -d '{
+    "provider": {
+      "type": "openai",
+      "base_url": "https://api.openai.com/v1",
+      "api_key": "sk-xxx",
+      "model": "gpt-4o-mini"
+    }
+  }'
+
+# 2. Check runtime skill status fields
+curl http://127.0.0.1:16060/api/v1/skills
+curl -X PUT http://127.0.0.1:16060/api/v1/skills/example/status \
+  -H "Content-Type: application/json" \
+  -d '{"enabled":true}'
+
+# 3. Verify structured knowledge search
+curl -X POST http://127.0.0.1:16060/api/v1/knowledge/search \
+  -H "Content-Type: application/json" \
+  -d '{"query":"RAG","limit":5}'
+
+# 4. Check platform instances and IM channel test APIs
+curl http://127.0.0.1:16060/api/v1/platforms/instances
+curl -X POST http://127.0.0.1:16060/api/v1/im/channels/telegram/test \
+  -H "Content-Type: application/json" \
+  -d '{"token":"123:abc"}'
+```
+
+Key response semantics:
+
+- `/api/v1/config/llm/test` returns `ok/message/provider/model/latency_ms`
+- `/api/v1/skills` and `/api/v1/skills/{name}/status` return `enabled/effective_enabled/requires_restart/message`
+- `/api/v1/knowledge/search` returns structured chunk results instead of one concatenated context string
+- `/api/v1/knowledge/documents` returns `status/error_message/updated_at/source_type`
+- `/api/v1/logs` supports `domain` filtering for functional diagnostics
 
 ### Logs
 
@@ -518,13 +561,13 @@ hexclaw serve 2>&1 | tee /var/log/hexclaw.log
 Real-time logs also available via API:
 
 ```bash
-# Query logs (supports level/source/keyword filtering)
+# Query logs (supports level/source/domain/keyword filtering)
 curl -H "Authorization: Bearer TOKEN" \
-  "http://127.0.0.1:6060/api/v1/logs?level=error&limit=50"
+  "http://127.0.0.1:16060/api/v1/logs?domain=knowledge&level=error&limit=50"
 
 # WebSocket real-time stream
 wscat -H "Authorization: Bearer TOKEN" \
-  -c "ws://127.0.0.1:6060/api/v1/logs/stream"
+  -c "ws://127.0.0.1:16060/api/v1/logs/stream"
 ```
 
 ### Data Backup
@@ -637,7 +680,7 @@ llm:
 3. Use ngrok or frp for intranet tunneling (development stage):
 
 ```bash
-ngrok http 6060
+ngrok http 16060
 # Use the HTTPS URL provided by ngrok to configure the webhook
 ```
 

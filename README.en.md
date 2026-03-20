@@ -93,21 +93,21 @@ hexclaw serve
 ```bash
 docker run -d \
   --name hexclaw \
-  -p 6060:6060 \
+  -p 16060:16060 \
   -e DEEPSEEK_API_KEY="sk-xxx" \
   -v hexclaw-data:/data/.hexclaw \
   ghcr.io/hexagon-codes/hexclaw:latest
 ```
 
 After startup:
-- Web UI: `http://127.0.0.1:6060`
-- Health check: `GET http://127.0.0.1:6060/health`
-- Chat API: `POST http://127.0.0.1:6060/api/v1/chat`
+- Web UI: `http://127.0.0.1:16060`
+- Health check: `GET http://127.0.0.1:16060/health`
+- Chat API: `POST http://127.0.0.1:16060/api/v1/chat`
 
 ### Use the API
 
 ```bash
-curl -X POST http://127.0.0.1:6060/api/v1/chat \
+curl -X POST http://127.0.0.1:16060/api/v1/chat \
   -H "Content-Type: application/json" \
   -d '{"message": "Hello", "user_id": "test-user"}'
 ```
@@ -138,7 +138,7 @@ Configuration file `~/.hexclaw/hexclaw.yaml`:
 ```yaml
 server:
   host: 127.0.0.1
-  port: 6060
+  port: 16060
 
 llm:
   default: deepseek
@@ -304,7 +304,7 @@ hexclaw/
 └── Makefile
 ```
 
-## API Endpoints (71 routes)
+## API Endpoints (selected endpoints; full routing is module-dependent)
 
 ### Core
 | Method | Path | Description |
@@ -334,14 +334,17 @@ hexclaw/
 | PUT | `/api/v1/config` | Update config |
 | GET | `/api/v1/config/llm` | Get LLM config |
 | PUT | `/api/v1/config/llm` | Update LLM config |
+| POST | `/api/v1/config/llm/test` | Test one provider config without persisting it |
 
 ### Knowledge Base
 | Method | Path | Description |
 |--------|------|-------------|
 | POST | `/api/v1/knowledge/documents` | Upload document |
+| POST | `/api/v1/knowledge/upload` | Upload file and return indexing result |
 | GET | `/api/v1/knowledge/documents` | Document list |
 | DELETE | `/api/v1/knowledge/documents/{id}` | Delete document |
-| POST | `/api/v1/knowledge/search` | Search |
+| POST | `/api/v1/knowledge/documents/{id}/reindex` | Reindex/retry one document |
+| POST | `/api/v1/knowledge/search` | Structured search with chunks, sources, and scores |
 
 ### Cron Jobs
 | Method | Path | Description |
@@ -384,6 +387,7 @@ hexclaw/
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/v1/skills` | Installed skills |
+| PUT | `/api/v1/skills/{name}/status` | Enable/disable a skill with runtime status fields |
 | POST | `/api/v1/skills/install` | Install skill |
 | DELETE | `/api/v1/skills/{name}` | Uninstall skill |
 | GET | `/api/v1/clawhub/search` | ClawHub skill search |
@@ -395,6 +399,25 @@ hexclaw/
 | POST | `/api/v1/agents` | Register agent |
 | PUT | `/api/v1/agents/{name}` | Update agent |
 | DELETE | `/api/v1/agents/{name}` | Delete agent |
+| POST | `/api/v1/agents/default` | Set default agent |
+| GET | `/api/v1/agents/rules` | List routing rules |
+| POST | `/api/v1/agents/rules` | Create routing rule |
+| POST | `/api/v1/agents/rules/test` | Test routing and return matched rules |
+| DELETE | `/api/v1/agents/rules/{id}` | Delete routing rule |
+
+### Platform Instances / IM Channels
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/v1/platforms/instances` | Platform instance list |
+| GET | `/api/v1/platforms/instances/health` | Health of all instances |
+| POST | `/api/v1/platforms/instances` | Create instance |
+| PUT | `/api/v1/platforms/instances/{name}` | Update instance |
+| DELETE | `/api/v1/platforms/instances/{name}` | Delete instance |
+| GET | `/api/v1/platforms/instances/{name}/health` | Health of one instance |
+| POST | `/api/v1/platforms/instances/{name}/test` | Test instance config |
+| POST | `/api/v1/platforms/instances/{name}/start` | Start instance |
+| POST | `/api/v1/platforms/instances/{name}/stop` | Stop instance |
+| POST | `/api/v1/im/channels/{provider}/test` | Test IM channel config |
 
 ### Canvas / Workflow
 | Method | Path | Description |
@@ -425,12 +448,31 @@ hexclaw/
 | GET | `/api/v1/desktop/clipboard` | Read clipboard |
 | POST | `/api/v1/desktop/clipboard` | Write clipboard |
 
+### Team Collaboration
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/v1/team/agents` | List shared team agents |
+| POST | `/api/v1/team/agents` | Share an agent with the team |
+| DELETE | `/api/v1/team/agents/{id}` | Delete shared agent |
+| GET | `/api/v1/team/members` | Team member list |
+| POST | `/api/v1/team/members` | Invite member |
+| DELETE | `/api/v1/team/members/{id}` | Remove member |
+
 ### Logs & Monitoring
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/v1/logs` | Query logs (level/source/keyword filter + pagination) |
+| GET | `/api/v1/logs` | Query logs (level/source/domain/keyword filter + pagination) |
 | GET | `/api/v1/logs/stats` | Log statistics (count by level/source) |
 | GET | `/api/v1/logs/stream` | Real-time log stream (WebSocket, requires token auth) |
+
+### Desktop-Aligned Response Semantics
+
+- `POST /api/v1/config/llm/test` returns `ok`, `message`, `provider`, `model`, and `latency_ms` so the Welcome flow can verify real API credentials and model availability.
+- `GET /api/v1/skills` always returns `enabled`; `PUT /api/v1/skills/{name}/status` additionally returns `effective_enabled`, `requires_restart`, and `message`.
+- `POST /api/v1/knowledge/search` returns structured chunk results with document title, source, chunk position, content, and similarity score so the UI can show citations directly.
+- `GET /api/v1/knowledge/documents` includes `status`, `error_message`, `updated_at`, and `source_type`; `POST /api/v1/knowledge/upload` returns `status`, `source`, `chunk_count`, and `warnings`.
+- `POST /api/v1/agents/rules/test` returns matched rules and scores so the UI can explain why a request was routed to a given agent.
+- Log entries returned by `GET /api/v1/logs` include a stable `domain` field for filtering by functional area such as `chat`, `knowledge`, `integration`, `automation`, or `engine`.
 
 ## Development
 

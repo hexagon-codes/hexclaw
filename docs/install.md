@@ -40,7 +40,7 @@ go install github.com/hexagon-codes/hexclaw/cmd/hexclaw@latest
 
 ```bash
 hexclaw version
-# HexClaw v0.1.1
+# HexClaw v0.0.2
 ```
 
 ### 方式二：从源码编译
@@ -51,7 +51,7 @@ cd hexclaw
 go build -o hexclaw ./cmd/hexclaw/
 
 # 可选：带版本信息编译
-go build -ldflags "-X main.version=v0.1.1 -X main.commit=$(git rev-parse --short HEAD) -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o hexclaw ./cmd/hexclaw/
+go build -ldflags "-X main.version=v0.0.2 -X main.commit=$(git rev-parse --short HEAD) -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o hexclaw ./cmd/hexclaw/
 
 # 移动到 PATH
 sudo mv hexclaw /usr/local/bin/
@@ -77,14 +77,14 @@ sudo mv hexclaw /usr/local/bin/
 # 使用官方镜像
 docker run -d \
   --name hexclaw \
-  -p 6060:6060 \
+  -p 16060:16060 \
   -e DEEPSEEK_API_KEY="sk-xxx" \
-  -v hexclaw-data:/root/.hexclaw \
+  -v hexclaw-data:/data/.hexclaw \
   ghcr.io/hexagon-codes/hexclaw:latest
 
 # 或从源码构建
 docker build -t hexclaw .
-docker run -d --name hexclaw -p 6060:6060 -e DEEPSEEK_API_KEY="sk-xxx" hexclaw
+docker run -d --name hexclaw -p 16060:16060 -e DEEPSEEK_API_KEY="sk-xxx" hexclaw
 ```
 
 ---
@@ -252,16 +252,16 @@ services:
     container_name: hexclaw
     restart: unless-stopped
     ports:
-      - "6060:6060"
+      - "16060:16060"
     environment:
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
       # - OPENAI_API_KEY=${OPENAI_API_KEY}
       # - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
     volumes:
-      - hexclaw-data:/root/.hexclaw
-      - ./hexclaw.yaml:/root/.hexclaw/hexclaw.yaml:ro
+      - hexclaw-data:/data/.hexclaw
+      - ./hexclaw.yaml:/data/.hexclaw/hexclaw.yaml:ro
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:6060/health"]
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:16060/health"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -302,7 +302,7 @@ spec:
         - name: hexclaw
           image: ghcr.io/hexagon-codes/hexclaw:latest
           ports:
-            - containerPort: 6060
+            - containerPort: 16060
           env:
             - name: DEEPSEEK_API_KEY
               valueFrom:
@@ -311,14 +311,14 @@ spec:
                   key: deepseek-api-key
           volumeMounts:
             - name: data
-              mountPath: /root/.hexclaw
+              mountPath: /data/.hexclaw
             - name: config
-              mountPath: /root/.hexclaw/hexclaw.yaml
+              mountPath: /data/.hexclaw/hexclaw.yaml
               subPath: hexclaw.yaml
           livenessProbe:
             httpGet:
               path: /health
-              port: 6060
+              port: 16060
             initialDelaySeconds: 10
             periodSeconds: 30
           resources:
@@ -344,8 +344,8 @@ spec:
   selector:
     app: hexclaw
   ports:
-    - port: 6060
-      targetPort: 6060
+    - port: 16060
+      targetPort: 16060
   type: ClusterIP
 ```
 
@@ -370,7 +370,7 @@ kubectl apply -f hexclaw-k8s.yaml
 
 ### Web UI
 
-默认启用。启动后访问 `http://127.0.0.1:6060`。
+默认启用。启动后访问 `http://127.0.0.1:16060`。
 
 ```yaml
 platforms:
@@ -496,9 +496,52 @@ platforms:
 ### 健康检查
 
 ```bash
-curl http://127.0.0.1:6060/health
+curl http://127.0.0.1:16060/health
 # {"status":"healthy"}
 ```
+
+### 启动后联调检查
+
+如果配置了 `server.api_token`，下面所有写请求都需要追加 `Authorization: Bearer <TOKEN>`。
+
+```bash
+# 1. 真实测试 LLM 配置，不写入磁盘
+curl -X POST http://127.0.0.1:16060/api/v1/config/llm/test \
+  -H "Content-Type: application/json" \
+  -d '{
+    "provider": {
+      "type": "openai",
+      "base_url": "https://api.openai.com/v1",
+      "api_key": "sk-xxx",
+      "model": "gpt-4o-mini"
+    }
+  }'
+
+# 2. 检查 Skills 运行态字段
+curl http://127.0.0.1:16060/api/v1/skills
+curl -X PUT http://127.0.0.1:16060/api/v1/skills/example/status \
+  -H "Content-Type: application/json" \
+  -d '{"enabled":true}'
+
+# 3. 验证知识库结构化搜索
+curl -X POST http://127.0.0.1:16060/api/v1/knowledge/search \
+  -H "Content-Type: application/json" \
+  -d '{"query":"RAG","limit":5}'
+
+# 4. 检查平台实例与 IM 通道测试接口
+curl http://127.0.0.1:16060/api/v1/platforms/instances
+curl -X POST http://127.0.0.1:16060/api/v1/im/channels/telegram/test \
+  -H "Content-Type: application/json" \
+  -d '{"token":"123:abc"}'
+```
+
+重点返回语义：
+
+- `/api/v1/config/llm/test` 返回 `ok/message/provider/model/latency_ms`
+- `/api/v1/skills` 和 `/api/v1/skills/{name}/status` 返回 `enabled/effective_enabled/requires_restart/message`
+- `/api/v1/knowledge/search` 返回结构化 chunk 结果，不再只是拼接后的上下文字符串
+- `/api/v1/knowledge/documents` 返回 `status/error_message/updated_at/source_type`
+- `/api/v1/logs` 支持 `domain` 过滤，便于按功能域诊断问题
 
 ### 日志
 
@@ -518,13 +561,13 @@ hexclaw serve 2>&1 | tee /var/log/hexclaw.log
 实时日志也可通过 API 获取：
 
 ```bash
-# 查询日志（支持 level/source/keyword 过滤）
+# 查询日志（支持 level/source/domain/keyword 过滤）
 curl -H "Authorization: Bearer TOKEN" \
-  "http://127.0.0.1:6060/api/v1/logs?level=error&limit=50"
+  "http://127.0.0.1:16060/api/v1/logs?domain=knowledge&level=error&limit=50"
 
 # WebSocket 实时流
 wscat -H "Authorization: Bearer TOKEN" \
-  -c "ws://127.0.0.1:6060/api/v1/logs/stream"
+  -c "ws://127.0.0.1:16060/api/v1/logs/stream"
 ```
 
 ### 数据备份
@@ -637,7 +680,7 @@ llm:
 3. 使用 ngrok 或 frp 进行内网穿透（开发阶段）：
 
 ```bash
-ngrok http 6060
+ngrok http 16060
 # 使用 ngrok 提供的 HTTPS URL 配置 Webhook
 ```
 

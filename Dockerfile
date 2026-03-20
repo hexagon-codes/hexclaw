@@ -33,6 +33,6 @@ COPY --from=builder /hexclaw /usr/local/bin/hexclaw
 RUN mkdir -p /data/.hexclaw
 ENV HOME=/data
 
-EXPOSE 6060
+EXPOSE 16060
 ENTRYPOINT ["hexclaw"]
 CMD ["serve", "--config", "/data/.hexclaw/hexclaw.yaml"]
