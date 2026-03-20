@@ -159,6 +159,12 @@ type HealthChecker interface {
 	Health(ctx context.Context) error
 }
 
+// ConfigValidator validates adapter configuration without requiring Start().
+// Used by the channel config test endpoint for pre-save validation.
+type ConfigValidator interface {
+	ValidateConfig(ctx context.Context) error
+}
+
 func sendQueueConfig(platform Platform) (ratePerSecond, queueSize int) {
 	switch platform {
 	case PlatformSlack:

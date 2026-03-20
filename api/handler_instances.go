@@ -190,7 +190,16 @@ func (s *Server) handleTestChannelConfig(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if hc, ok := adp.(adapter.HealthChecker); ok {
+	if cv, ok := adp.(adapter.ConfigValidator); ok {
+		if err := cv.ValidateConfig(r.Context()); err != nil {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"success":  false,
+				"provider": provider,
+				"message":  err.Error(),
+			})
+			return
+		}
+	} else if hc, ok := adp.(adapter.HealthChecker); ok {
 		if err := hc.Health(r.Context()); err != nil {
 			writeJSON(w, http.StatusOK, map[string]any{
 				"success":  false,

@@ -624,9 +624,9 @@ func BuildAdapter(inst *Instance) (adapter.Adapter, error) {
 
 func modeForProvider(provider string) (string, error) {
 	switch provider {
-	case "feishu", "dingtalk", "wecom", "wechat", "slack", "line", "whatsapp":
+	case "wecom", "wechat", "slack", "line", "whatsapp":
 		return "webhook", nil
-	case "telegram", "discord", "matrix":
+	case "feishu", "dingtalk", "telegram", "discord", "matrix":
 		return "runtime", nil
 	default:
 		return "", fmt.Errorf("unsupported provider %q", provider)

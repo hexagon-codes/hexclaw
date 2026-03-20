@@ -1,14 +1,7 @@
 // Package feishu 提供飞书（Lark）Bot 适配器
 //
-// 通过 WebSocket 长连接接收飞书事件，无需公网地址。
+// 使用飞书官方 Go SDK（larkws）建立 WebSocket 长连接接收事件，无需公网地址。
 // 回复通过飞书 OpenAPI 发送。
-//
-// 支持的功能：
-//   - WebSocket 长连接（客户端主动连接飞书服务器）
-//   - 接收文本消息（单聊/群聊 @机器人）
-//   - Access Token 缓存（2 小时有效期）
-//   - 消息回复（同步/流式拼接后发送）
-//   - 自动重连与心跳维持
 package feishu
 
 import (
@@ -24,7 +17,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/gorilla/websocket"
+	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
+	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
+	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
+	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
+
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/config"
 	"github.com/hexagon-codes/toolkit/util/idgen"
@@ -36,9 +33,6 @@ const (
 )
 
 // FeishuAdapter 飞书 Bot 适配器
-//
-// 通过 WebSocket 长连接接收飞书事件，将文本消息转换为统一 Message。
-// 回复通过飞书 OpenAPI 发送。
 type FeishuAdapter struct {
 	cfg     config.FeishuConfig
 	handler adapter.MessageHandler
@@ -49,9 +43,9 @@ type FeishuAdapter struct {
 	accessToken string
 	tokenExpiry time.Time
 
-	conn    *websocket.Conn
-	connMu  sync.Mutex
-	stopped atomic.Bool
+	wsClient  *larkws.Client
+	connected atomic.Bool
+	stopped   atomic.Bool
 }
 
 // New 创建飞书适配器
@@ -74,43 +68,48 @@ func (a *FeishuAdapter) Name() string {
 }
 func (a *FeishuAdapter) Platform() adapter.Platform { return adapter.PlatformFeishu }
 
-// Attach 注册消息处理器。
-func (a *FeishuAdapter) Attach(handler adapter.MessageHandler) error {
-	a.handler = handler
-	return nil
-}
-
-// Start 启动飞书 WebSocket 长连接
-//
-// 向飞书申请 WebSocket 端点，建立长连接接收事件。
-// 支持自动重连和心跳维持。
+// Start 启动飞书 WebSocket 长连接（使用官方 larkws SDK）
 func (a *FeishuAdapter) Start(_ context.Context, handler adapter.MessageHandler) error {
-	if err := a.Attach(handler); err != nil {
-		return err
+	a.handler = handler
+	a.stopped.Store(false)
+
+	if a.cfg.AppID == "" || a.cfg.AppSecret == "" {
+		return fmt.Errorf("feishu app_id/app_secret 未配置")
 	}
 
-	a.stopped.Store(false)
-	go a.connectLoop()
-	log.Printf("飞书适配器 [%s] 已启动（WebSocket 长连接模式）", a.Name())
+	eventHandler := dispatcher.NewEventDispatcher("", "").
+		OnP2MessageReceiveV1(func(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
+			go a.handleSDKMessage(event)
+			return nil
+		})
+
+	a.wsClient = larkws.NewClient(a.cfg.AppID, a.cfg.AppSecret,
+		larkws.WithEventHandler(eventHandler),
+		larkws.WithLogLevel(larkcore.LogLevelInfo),
+	)
+
+	go func() {
+		log.Printf("飞书适配器 [%s] 正在连接 WebSocket...", a.Name())
+		a.connected.Store(true)
+		if err := a.wsClient.Start(context.Background()); err != nil {
+			a.connected.Store(false)
+			if !a.stopped.Load() {
+				log.Printf("飞书 WebSocket 连接失败: %v", err)
+			}
+		}
+	}()
+
+	log.Printf("飞书适配器 [%s] 已启动（WebSocket 长连接模式 - 官方 SDK）", a.Name())
 	return nil
 }
 
 // Stop 停止飞书适配器
-func (a *FeishuAdapter) Stop(ctx context.Context) error {
+func (a *FeishuAdapter) Stop(_ context.Context) error {
 	a.stopped.Store(true)
+	a.connected.Store(false)
 	if a.queue != nil {
 		_ = a.queue.Stop(context.Background())
 	}
-
-	a.connMu.Lock()
-	if a.conn != nil {
-		_ = a.conn.WriteMessage(websocket.CloseMessage,
-			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
-		_ = a.conn.Close()
-		a.conn = nil
-	}
-	a.connMu.Unlock()
-
 	log.Println("飞书适配器停止中...")
 	return nil
 }
@@ -120,203 +119,91 @@ func (a *FeishuAdapter) Handler() http.Handler {
 	return http.HandlerFunc(a.handleWebhook)
 }
 
-// ============== WebSocket 长连接 ==============
-
-// connectLoop 自动重连循环
-func (a *FeishuAdapter) connectLoop() {
-	backoff := time.Second
-	const maxBackoff = 30 * time.Second
-
-	for !a.stopped.Load() {
-		if err := a.connectAndListen(); err != nil {
-			if !a.stopped.Load() {
-				log.Printf("飞书 WebSocket 断开: %v，%v 后重连...", err, backoff)
-				time.Sleep(backoff)
-				backoff = min(backoff*2, maxBackoff)
-			}
-		} else {
-			backoff = time.Second
-		}
-	}
-}
-
-// connectAndListen 建立 WebSocket 连接并监听事件
-func (a *FeishuAdapter) connectAndListen() error {
-	ctx := context.Background()
-
-	token, err := a.getAccessToken(ctx)
-	if err != nil {
-		return fmt.Errorf("获取 Access Token 失败: %w", err)
-	}
-
-	wsURL, pingInterval, err := a.getWSEndpoint(ctx, token)
-	if err != nil {
-		return fmt.Errorf("获取 WebSocket 端点失败: %w", err)
-	}
-
-	dialer := websocket.Dialer{
-		HandshakeTimeout: 15 * time.Second,
-	}
-	conn, _, err := dialer.DialContext(ctx, wsURL, nil)
-	if err != nil {
-		return fmt.Errorf("WebSocket 连接失败: %w", err)
-	}
-
-	a.connMu.Lock()
-	a.conn = conn
-	a.connMu.Unlock()
-
-	defer func() {
-		_ = conn.Close()
-		a.connMu.Lock()
-		a.conn = nil
-		a.connMu.Unlock()
-	}()
-
-	log.Printf("飞书 WebSocket 连接已建立")
-
-	if pingInterval <= 0 {
-		pingInterval = 120
-	}
-
-	stopPing := make(chan struct{})
-	go a.pingLoop(conn, time.Duration(pingInterval)*time.Second, stopPing)
-	defer close(stopPing)
-
-	for !a.stopped.Load() {
-		_, msg, err := conn.ReadMessage()
-		if err != nil {
-			if !a.stopped.Load() {
-				return fmt.Errorf("读取消息失败: %w", err)
-			}
-			return nil
-		}
-		a.handleWSMessage(msg)
-	}
-	return nil
-}
-
-// getWSEndpoint 获取飞书 WebSocket 连接端点
-func (a *FeishuAdapter) getWSEndpoint(ctx context.Context, token string) (wsURL string, pingInterval int, err error) {
-	req, err := http.NewRequestWithContext(ctx, "POST", baseURL+"/callback/ws/endpoint", nil)
-	if err != nil {
-		return "", 0, err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := a.client.Do(req)
-	if err != nil {
-		return "", 0, fmt.Errorf("请求 WebSocket 端点失败: %w", err)
-	}
-	defer resp.Body.Close()
-
-	var result struct {
-		Code int    `json:"code"`
-		Msg  string `json:"msg"`
-		Data struct {
-			URL          string `json:"URL"`
-			ClientConfig struct {
-				ReconnectCount    int `json:"ReconnectCount"`
-				ReconnectInterval int `json:"ReconnectInterval"`
-				ReconnectNonce    int `json:"ReconnectNonce"`
-				PingInterval      int `json:"PingInterval"`
-			} `json:"ClientConfig"`
-		} `json:"data"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", 0, fmt.Errorf("解析 WebSocket 端点响应失败: %w", err)
-	}
-	if result.Code != 0 {
-		return "", 0, fmt.Errorf("飞书 API 错误: code=%d, msg=%s", result.Code, result.Msg)
-	}
-	if result.Data.URL == "" {
-		return "", 0, fmt.Errorf("飞书返回的 WebSocket URL 为空")
-	}
-
-	return result.Data.URL, result.Data.ClientConfig.PingInterval, nil
-}
-
-// wsFrame 飞书 WebSocket 消息帧
-type wsFrame struct {
-	Type    string            `json:"type"`
-	Headers map[string]string `json:"headers,omitempty"`
-	Data    string            `json:"data,omitempty"`
-}
-
-// handleWSMessage 处理 WebSocket 收到的消息
-func (a *FeishuAdapter) handleWSMessage(raw []byte) {
-	var frame wsFrame
-	if err := json.Unmarshal(raw, &frame); err != nil {
-		log.Printf("飞书 WebSocket: 解析消息帧失败: %v", err)
+// handleSDKMessage 处理官方 SDK 收到的消息事件
+func (a *FeishuAdapter) handleSDKMessage(event *larkim.P2MessageReceiveV1) {
+	if a.handler == nil || event == nil || event.Event == nil || event.Event.Message == nil {
 		return
 	}
 
-	switch frame.Type {
-	case "ping":
-		a.sendWSPong(frame)
-	case "pong":
-		// 收到 pong 响应，无需处理
-	case "event":
-		a.handleWSEvent(frame)
-	default:
-		log.Printf("飞书 WebSocket: 未知消息类型: %s", frame.Type)
-	}
-}
-
-// sendWSPong 响应 ping 消息
-func (a *FeishuAdapter) sendWSPong(ping wsFrame) {
-	pong := wsFrame{
-		Type:    "pong",
-		Headers: ping.Headers,
-	}
-	data, _ := json.Marshal(pong)
-
-	a.connMu.Lock()
-	defer a.connMu.Unlock()
-	if a.conn != nil {
-		_ = a.conn.WriteMessage(websocket.TextMessage, data)
-	}
-}
-
-// pingLoop 定期发送 ping 保持连接
-func (a *FeishuAdapter) pingLoop(conn *websocket.Conn, interval time.Duration, stop <-chan struct{}) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			ping := wsFrame{
-				Type: "ping",
-			}
-			data, _ := json.Marshal(ping)
-			a.connMu.Lock()
-			err := conn.WriteMessage(websocket.TextMessage, data)
-			a.connMu.Unlock()
-			if err != nil {
-				return
-			}
-		case <-stop:
-			return
+	msgEvent := event.Event
+	if msgEvent.Message.MessageType == nil || *msgEvent.Message.MessageType != "text" {
+		if msgEvent.Message.MessageType != nil {
+			log.Printf("飞书: 暂不支持 %s 类型消息", *msgEvent.Message.MessageType)
 		}
-	}
-}
-
-// handleWSEvent 处理 WebSocket 事件消息
-func (a *FeishuAdapter) handleWSEvent(frame wsFrame) {
-	if frame.Data == "" {
 		return
 	}
 
-	var event feishuEvent
-	if err := json.Unmarshal([]byte(frame.Data), &event); err != nil {
-		log.Printf("飞书 WebSocket: 解析事件数据失败: %v", err)
+	if msgEvent.Message.Content == nil {
 		return
 	}
 
-	if event.Header.EventType == "im.message.receive_v1" {
-		go a.handleMessage(event)
+	var textContent struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal([]byte(*msgEvent.Message.Content), &textContent); err != nil {
+		log.Printf("飞书: 解析文本内容失败: %v", err)
+		return
+	}
+
+	content := strings.TrimSpace(textContent.Text)
+	if content == "" {
+		return
+	}
+
+	chatID := ""
+	if msgEvent.Message.ChatId != nil {
+		chatID = *msgEvent.Message.ChatId
+	}
+	userID := ""
+	if msgEvent.Sender != nil && msgEvent.Sender.SenderId != nil && msgEvent.Sender.SenderId.OpenId != nil {
+		userID = *msgEvent.Sender.SenderId.OpenId
+	}
+	messageID := ""
+	if msgEvent.Message.MessageId != nil {
+		messageID = *msgEvent.Message.MessageId
+	}
+	chatType := ""
+	if msgEvent.Message.ChatType != nil {
+		chatType = *msgEvent.Message.ChatType
+	}
+	messageType := ""
+	if msgEvent.Message.MessageType != nil {
+		messageType = *msgEvent.Message.MessageType
+	}
+
+	msg := &adapter.Message{
+		ID:         "feishu-" + idgen.ShortID(),
+		Platform:   adapter.PlatformFeishu,
+		InstanceID: a.Name(),
+		ChatID:     chatID,
+		UserID:     userID,
+		UserName:   userID,
+		Content:    content,
+		Timestamp:  time.Now(),
+		Metadata: map[string]string{
+			"message_id":   messageID,
+			"chat_type":    chatType,
+			"message_type": messageType,
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	reply, err := a.handler(ctx, msg)
+	if err != nil {
+		log.Printf("飞书: 处理消息失败: %v", err)
+		_ = a.Send(ctx, msg.ChatID, &adapter.Reply{
+			Content: "处理消息时出现错误，请稍后重试。",
+		})
+		return
+	}
+
+	if reply == nil {
+		return
+	}
+	if err := a.Send(ctx, msg.ChatID, reply); err != nil {
+		log.Printf("飞书: 发送回复失败: %v", err)
 	}
 }
 
@@ -512,7 +399,7 @@ func (a *FeishuAdapter) patchMessage(ctx context.Context, messageID, text string
 	return nil
 }
 
-// handleMessage 处理消息事件
+// handleMessage 处理消息事件（webhook 兼容路径）
 func (a *FeishuAdapter) handleMessage(event feishuEvent) {
 	if a.handler == nil {
 		return
@@ -573,20 +460,26 @@ func (a *FeishuAdapter) handleMessage(event feishuEvent) {
 	}
 }
 
-// Health 返回适配器健康状态。
-func (a *FeishuAdapter) Health(_ context.Context) error {
-	if a.handler == nil {
-		return fmt.Errorf("feishu handler 未附加")
-	}
+// ValidateConfig 仅校验配置是否完整（不需要 Start）
+func (a *FeishuAdapter) ValidateConfig(_ context.Context) error {
 	if a.cfg.AppID == "" || a.cfg.AppSecret == "" {
 		return fmt.Errorf("feishu app_id/app_secret 未配置")
+	}
+	return nil
+}
+
+// Health 返回适配器运行时健康状态
+func (a *FeishuAdapter) Health(_ context.Context) error {
+	if a.cfg.AppID == "" || a.cfg.AppSecret == "" {
+		return fmt.Errorf("feishu app_id/app_secret 未配置")
+	}
+	if a.handler == nil {
+		return fmt.Errorf("feishu handler 未附加")
 	}
 	if a.stopped.Load() {
 		return fmt.Errorf("feishu adapter stopped")
 	}
-	a.connMu.Lock()
-	defer a.connMu.Unlock()
-	if a.conn == nil {
+	if !a.connected.Load() {
 		return fmt.Errorf("feishu WebSocket 未连接")
 	}
 	return nil
@@ -651,7 +544,7 @@ func (a *FeishuAdapter) getAccessToken(ctx context.Context) (string, error) {
 
 // ============== 数据模型 ==============
 
-// feishuEvent 飞书事件通用结构
+// feishuEvent 飞书事件通用结构（webhook 兼容）
 type feishuEvent struct {
 	Challenge string `json:"challenge,omitempty"`
 	Token     string `json:"token,omitempty"`

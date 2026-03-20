@@ -68,18 +68,9 @@ func (a *DingtalkAdapter) Name() string {
 }
 func (a *DingtalkAdapter) Platform() adapter.Platform { return adapter.PlatformDingtalk }
 
-// Attach 注册消息处理器。
-func (a *DingtalkAdapter) Attach(handler adapter.MessageHandler) error {
-	a.handler = handler
-	return nil
-}
-
 // Start 启动钉钉 Stream 长连接
 func (a *DingtalkAdapter) Start(_ context.Context, handler adapter.MessageHandler) error {
-	if err := a.Attach(handler); err != nil {
-		return err
-	}
-
+	a.handler = handler
 	a.stopped.Store(false)
 	go a.connectLoop()
 	log.Printf("钉钉适配器 [%s] 已启动（Stream 长连接模式）", a.Name())
@@ -494,12 +485,19 @@ func (a *DingtalkAdapter) verifySign(timestamp, sign string) bool {
 }
 
 // Health 返回适配器健康状态。
-func (a *DingtalkAdapter) Health(_ context.Context) error {
-	if a.handler == nil {
-		return fmt.Errorf("dingtalk handler 未附加")
-	}
+func (a *DingtalkAdapter) ValidateConfig(_ context.Context) error {
 	if a.cfg.AppKey == "" || a.cfg.AppSecret == "" || a.cfg.RobotCode == "" {
 		return fmt.Errorf("dingtalk app_key/app_secret/robot_code 未配置")
+	}
+	return nil
+}
+
+func (a *DingtalkAdapter) Health(_ context.Context) error {
+	if a.cfg.AppKey == "" || a.cfg.AppSecret == "" || a.cfg.RobotCode == "" {
+		return fmt.Errorf("dingtalk app_key/app_secret/robot_code 未配置")
+	}
+	if a.handler == nil {
+		return fmt.Errorf("dingtalk handler 未附加")
 	}
 	if a.stopped.Load() {
 		return fmt.Errorf("dingtalk adapter stopped")
