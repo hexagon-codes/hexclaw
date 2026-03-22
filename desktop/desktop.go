@@ -1,13 +1,14 @@
 // Package desktop 提供桌面客户端集成能力
 //
-// 为 HexClaw 桌面应用提供后端支持，包括：
+// 为 HexClaw 桌面应用提供本地系统辅助能力，包括：
 //   - 系统托盘通知推送
 //   - 剪贴板内容读写
-//   - 文件拖放上传到知识库
-//   - 快捷键事件接收
 //   - 本地系统信息获取
 //
-// 桌面客户端（Wails/Tauri）通过 REST API 与本模块交互。
+// 聊天、知识库上传、语音等业务能力复用 HexClaw 通用 API，
+// 不在本包中重复实现。
+//
+// 桌面客户端（Wails/Tauri/Tauri sidecar）通过 REST API 与本模块交互。
 //
 // 对标 OpenClaw Desktop Mode。
 package desktop
@@ -60,9 +61,9 @@ type SystemInfo struct {
 // 通过 HTTP API 与桌面客户端通信。
 type Service struct {
 	mu            sync.RWMutex
-	notifications []Notification  // 通知队列
-	maxNotify     int             // 最大通知保留数
-	version       string          // HexClaw 版本
+	notifications []Notification       // 通知队列
+	maxNotify     int                  // 最大通知保留数
+	version       string               // HexClaw 版本
 	onNotify      func(n Notification) // 通知回调（可选）
 }
 

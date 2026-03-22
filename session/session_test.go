@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -30,6 +31,15 @@ func newTestManager(t *testing.T) (*Manager, storage.Store) {
 		},
 	}
 	return NewManager(store, cfg), store
+}
+
+type getSessionErrorStore struct {
+	*mockStore
+	err error
+}
+
+func (s *getSessionErrorStore) GetSession(context.Context, string) (*storage.Session, error) {
+	return nil, s.err
 }
 
 func TestGetOrCreate_NewSession(t *testing.T) {
@@ -87,6 +97,57 @@ func TestGetOrCreate_RestoreSession(t *testing.T) {
 	}
 }
 
+func TestGetOrCreate_RejectsCrossUserSessionRestore(t *testing.T) {
+	mgr, store := newTestManager(t)
+	ctx := context.Background()
+
+	sess, err := mgr.GetOrCreate(ctx, &adapter.Message{
+		Platform: adapter.PlatformWeb,
+		UserID:   "user-a",
+		Content:  "第一条消息",
+	})
+	if err != nil {
+		t.Fatalf("创建首个会话失败: %v", err)
+	}
+
+	restored, err := mgr.GetOrCreate(ctx, &adapter.Message{
+		Platform:  adapter.PlatformWeb,
+		UserID:    "user-b",
+		SessionID: sess.ID,
+		Content:   "第二条消息",
+	})
+	if err == nil {
+		t.Fatalf("不同用户不应恢复到同一会话: %+v", restored)
+	}
+
+	userBSessions, err := store.ListSessions(ctx, "user-b", 10, 0)
+	if err != nil {
+		t.Fatalf("列出 user-b 会话失败: %v", err)
+	}
+	if len(userBSessions) != 0 {
+		t.Fatalf("越权恢复失败时不应创建 user-b 会话，实际 %d", len(userBSessions))
+	}
+}
+
+func TestGetOrCreate_PropagatesGetSessionError(t *testing.T) {
+	expectedErr := errors.New("storage down")
+	store := &getSessionErrorStore{
+		mockStore: newMockStore(),
+		err:       expectedErr,
+	}
+	mgr := NewManager(store, config.MemoryConfig{})
+
+	sess, err := mgr.GetOrCreate(context.Background(), &adapter.Message{
+		Platform:  adapter.PlatformWeb,
+		UserID:    "user-001",
+		SessionID: "sess-existing",
+		Content:   "你好",
+	})
+	if !errors.Is(err, expectedErr) {
+		t.Fatalf("GetSession 非 not found 错误应上抛, session=%+v err=%v", sess, err)
+	}
+}
+
 func TestBuildContext(t *testing.T) {
 	mgr, _ := newTestManager(t)
 	ctx := context.Background()
@@ -99,9 +160,9 @@ func TestBuildContext(t *testing.T) {
 	}
 	sess, _ := mgr.GetOrCreate(ctx, msg)
 
-	mgr.SaveUserMessage(ctx, sess.ID, "你好")
+	mgr.SaveUserMessage(ctx, sess.ID, &adapter.Message{Content: "你好"})
 	mgr.SaveAssistantMessage(ctx, sess.ID, "你好！有什么可以帮你的？")
-	mgr.SaveUserMessage(ctx, sess.ID, "帮我翻译 hello")
+	mgr.SaveUserMessage(ctx, sess.ID, &adapter.Message{Content: "帮我翻译 hello"})
 
 	// 构建上下文
 	messages, err := mgr.BuildContext(ctx, sess.ID)
@@ -118,6 +179,41 @@ func TestBuildContext(t *testing.T) {
 	}
 	if messages[2].Content != "帮我翻译 hello" {
 		t.Errorf("第三条消息内容不匹配: %s", messages[2].Content)
+	}
+}
+
+func TestBuildContextPreservesImageAttachments(t *testing.T) {
+	mgr, _ := newTestManager(t)
+	ctx := context.Background()
+
+	sess, err := mgr.GetOrCreate(ctx, &adapter.Message{
+		Platform: adapter.PlatformWeb,
+		UserID:   "user-001",
+		Content:  "描述图片",
+	})
+	if err != nil {
+		t.Fatalf("创建会话失败: %v", err)
+	}
+
+	err = mgr.SaveUserMessage(ctx, sess.ID, &adapter.Message{
+		Content: "描述图片",
+		Attachments: []adapter.Attachment{
+			{Type: "image", Mime: "image/png", Data: "abc123"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("保存用户消息失败: %v", err)
+	}
+
+	messages, err := mgr.BuildContext(ctx, sess.ID)
+	if err != nil {
+		t.Fatalf("构建上下文失败: %v", err)
+	}
+	if len(messages) != 1 {
+		t.Fatalf("期望 1 条消息，实际为 %d", len(messages))
+	}
+	if !messages[0].HasMultiContent() {
+		t.Fatal("历史中的图片消息应保留 MultiContent")
 	}
 }
 
@@ -182,5 +278,16 @@ func TestGenerateTitle(t *testing.T) {
 		if got != tt.expected {
 			t.Errorf("generateTitle(%q) = %q, want %q", tt.input, got, tt.expected)
 		}
+	}
+}
+
+func TestGenerateTitleForImageOnlyMessage(t *testing.T) {
+	title := generateTitleForMessage(&adapter.Message{
+		Attachments: []adapter.Attachment{
+			{Type: "image", Mime: "image/png", Data: "abc123"},
+		},
+	})
+	if title != "图片消息" {
+		t.Fatalf("图片消息标题不匹配: %q", title)
 	}
 }

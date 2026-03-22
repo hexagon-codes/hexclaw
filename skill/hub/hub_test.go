@@ -146,3 +146,73 @@ func TestCatalogURL(t *testing.T) {
 		t.Errorf("catalogURL 不匹配:\n期望: %s\n得到: %s", expected, got)
 	}
 }
+
+func TestCatalogURL_LocalFileRepo(t *testing.T) {
+	dir := t.TempDir()
+	h := New(HubConfig{
+		RepoURL: "file://" + dir,
+		Branch:  "main",
+	}, "")
+
+	expected := filepath.Join(dir, "index.json")
+	if got := h.catalogURL(); got != expected {
+		t.Errorf("catalogURL 本地路径不匹配:\n期望: %s\n得到: %s", expected, got)
+	}
+}
+
+func TestHubRefreshFromLocalRepo(t *testing.T) {
+	repoDir := t.TempDir()
+	catalog := `{"version":"1.0.0","updated_at":"2026-03-22T00:00:00Z","skills":[{"name":"lawyer","display_name":"Lawyer","description":"desc","category":"productivity","tags":["legal"]}]}`
+	if err := os.WriteFile(filepath.Join(repoDir, "index.json"), []byte(catalog), 0o644); err != nil {
+		t.Fatalf("写入本地 index.json 失败: %v", err)
+	}
+
+	h := New(HubConfig{
+		RepoURL: "file://" + repoDir,
+		Branch:  "main",
+	}, t.TempDir())
+
+	if err := h.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh 本地目录失败: %v", err)
+	}
+
+	results := h.Search("lawyer")
+	if len(results) != 1 || results[0].Name != "lawyer" {
+		t.Fatalf("本地目录搜索失败，结果=%v", results)
+	}
+}
+
+func TestHubInstallFromLocalRepo(t *testing.T) {
+	repoDir := t.TempDir()
+	skillsDir := t.TempDir()
+	skillContent := "---\nname: lawyer\n---\n# Lawyer Skill"
+
+	if err := os.MkdirAll(filepath.Join(repoDir, "skills"), 0o755); err != nil {
+		t.Fatalf("创建 skills 目录失败: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "skills", "lawyer.md"), []byte(skillContent), 0o644); err != nil {
+		t.Fatalf("写入本地 skill 失败: %v", err)
+	}
+
+	h := New(HubConfig{
+		RepoURL: "file://" + repoDir,
+		Branch:  "main",
+	}, skillsDir)
+	h.catalog = &Catalog{
+		Skills: []SkillMeta{
+			{Name: "lawyer"},
+		},
+	}
+
+	if err := h.Install(context.Background(), "lawyer"); err != nil {
+		t.Fatalf("从本地 hub 安装失败: %v", err)
+	}
+
+	installed, err := os.ReadFile(filepath.Join(skillsDir, "lawyer.md"))
+	if err != nil {
+		t.Fatalf("读取已安装 skill 失败: %v", err)
+	}
+	if string(installed) != skillContent {
+		t.Fatalf("安装内容不匹配:\n期望=%q\n得到=%q", skillContent, string(installed))
+	}
+}

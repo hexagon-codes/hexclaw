@@ -60,7 +60,8 @@ func (s *mockStore) ListMessages(_ context.Context, sessionID string, limit, _ i
 	return msgs, nil
 }
 
-func (s *mockStore) UpdateSession(_ context.Context, _ *storage.Session) error { return nil }
+func (s *mockStore) UpdateMessageFeedback(_ context.Context, _, _ string) error { return nil }
+func (s *mockStore) UpdateSession(_ context.Context, _ *storage.Session) error  { return nil }
 func (s *mockStore) SearchMessages(_ context.Context, _, _ string, _, _ int) ([]*storage.SearchResult, int, error) {
 	return nil, 0, nil
 }

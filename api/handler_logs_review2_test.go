@@ -56,7 +56,7 @@ func TestLogCollector_Add_EmptyLevelStats(t *testing.T) {
 	// 因为 Add 总是 ++ level，即使 level=""
 	c := NewLogCollector(2)
 
-	c.Add("", "s", "m1", nil)   // byLevel[""] = 1
+	c.Add("", "s", "m1", nil)     // byLevel[""] = 1
 	c.Add("info", "s", "m2", nil) // byLevel["info"] = 1
 
 	// 覆盖 m1: old.Level="" → byLevel[""]-- → 0 → delete
@@ -266,6 +266,8 @@ func TestEmptyList_TotalIsInt(t *testing.T) {
 
 // ── 7. 基准：快速路径 vs 全量 snapshot ──
 
+var benchmarkLogEntriesSink []LogEntry
+
 func BenchmarkLogCollector_Query_Unfiltered_10of5000(b *testing.B) {
 	c := NewLogCollector(5000)
 	for i := range 5000 {
@@ -273,12 +275,31 @@ func BenchmarkLogCollector_Query_Unfiltered_10of5000(b *testing.B) {
 	}
 	b.ResetTimer()
 	for range b.N {
-		c.Query("", "", "", 10, 0) // 只需 10 条但 snapshot 复制了 5000
+		c.Query("", "", "", 10, 0)
+	}
+}
+
+func BenchmarkLogCollector_Query_Unfiltered_10of5000_DetachedCopy(b *testing.B) {
+	// 公平基线：模拟 Query 需要返回一个可变结果切片给调用方，因此结果会逃逸到堆上。
+	c := NewLogCollector(5000)
+	for i := range 5000 {
+		c.Add("info", "test", fmt.Sprintf("msg-%d", i), nil)
+	}
+	b.ResetTimer()
+	for range b.N {
+		c.mu.RLock()
+		result := make([]LogEntry, 10)
+		for i := range 10 {
+			idx := (c.head - 1 - i + c.capacity) % c.capacity
+			result[i] = c.entries[idx]
+		}
+		c.mu.RUnlock()
+		benchmarkLogEntriesSink = result
 	}
 }
 
 func BenchmarkLogCollector_Query_Unfiltered_10of5000_DirectSlice(b *testing.B) {
-	// 对比：如果直接从 ring buffer 读 10 条而不 snapshot 全部
+	// 理论下界：结果不逃逸，编译器可将切片留在栈上。
 	c := NewLogCollector(5000)
 	for i := range 5000 {
 		c.Add("info", "test", fmt.Sprintf("msg-%d", i), nil)

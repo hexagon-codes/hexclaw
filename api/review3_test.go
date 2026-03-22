@@ -178,6 +178,107 @@ func TestApiAuth_PathBypass(t *testing.T) {
 	}
 }
 
+func TestApiAuth_DesktopRoutes_RemoteRequiresToken_LocalhostAllowed(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Server.APIToken = "secret-token"
+	s := &Server{cfg: cfg, logCollector: NewLogCollector(10)}
+
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := s.apiAuthMiddleware(inner)
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		addr   string
+		token  string
+		expect int
+	}{
+		{
+			name:   "远程读取系统信息需认证",
+			method: http.MethodGet,
+			path:   "/api/v1/desktop/info",
+			addr:   "192.168.1.100:12345",
+			expect: http.StatusUnauthorized,
+		},
+		{
+			name:   "远程读取剪贴板需认证",
+			method: http.MethodGet,
+			path:   "/api/v1/desktop/clipboard",
+			addr:   "192.168.1.100:12345",
+			expect: http.StatusUnauthorized,
+		},
+		{
+			name:   "远程桌面写接口有token可通过",
+			method: http.MethodPost,
+			path:   "/api/v1/desktop/notifications",
+			addr:   "192.168.1.100:12345",
+			token:  "Bearer secret-token",
+			expect: http.StatusOK,
+		},
+		{
+			name:   "localhost桌面读接口免token",
+			method: http.MethodGet,
+			path:   "/api/v1/desktop/notifications",
+			addr:   "127.0.0.1:12345",
+			expect: http.StatusOK,
+		},
+		{
+			name:   "localhost桌面写接口免token",
+			method: http.MethodPost,
+			path:   "/api/v1/desktop/clipboard",
+			addr:   "127.0.0.1:12345",
+			expect: http.StatusOK,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+			req.RemoteAddr = tt.addr
+			if tt.token != "" {
+				req.Header.Set("Authorization", tt.token)
+			}
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+
+			if w.Code != tt.expect {
+				t.Fatalf("status=%d, want %d", w.Code, tt.expect)
+			}
+		})
+	}
+}
+
+func TestApiAuth_LocalhostBypassesManagementAuthEvenWithToken(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Server.APIToken = "secret-token"
+	s := &Server{cfg: cfg, logCollector: NewLogCollector(10)}
+
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := s.apiAuthMiddleware(inner)
+
+	for _, tc := range []struct {
+		method string
+		path   string
+	}{
+		{http.MethodPut, "/api/v1/config/llm"},
+		{http.MethodPost, "/api/v1/platforms/instances"},
+		{http.MethodPut, "/api/v1/messages/msg-feedback/feedback"},
+	} {
+		req := httptest.NewRequest(tc.method, tc.path, nil)
+		req.RemoteAddr = "127.0.0.1:12345"
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s %s localhost with token-configured server should pass, got %d", tc.method, tc.path, w.Code)
+		}
+	}
+}
+
 func TestApiAuth_NoToken_LocalhostAllowed(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Server.APIToken = ""

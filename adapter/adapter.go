@@ -35,22 +35,34 @@ const (
 	PlatformMatrix   Platform = "matrix"   // Matrix
 )
 
+// Attachment 消息附件。
+//
+// 当前引擎仅消费图片附件，其余类型会在入口校验阶段被拒绝。
+type Attachment struct {
+	Type string `json:"type"`           // 当前仅支持 "image"
+	Name string `json:"name"`           // 文件名
+	Mime string `json:"mime"`           // MIME 类型 (image/png, application/pdf, ...)
+	Data string `json:"data,omitempty"` // base64 编码的文件内容
+	URL  string `json:"url,omitempty"`  // 文件 URL（与 Data 二选一）
+}
+
 // Message 统一消息模型
 //
 // 所有平台的消息都被转换为此格式，引擎层只处理 Message。
 // 适配器负责将平台特定格式与 Message 互相转换。
 type Message struct {
-	ID         string            // 消息唯一 ID
-	Platform   Platform          // 来源平台
-	InstanceID string            // 平台实例标识（如 "feishu-support"），支持同平台多实例
-	ChatID     string            // 会话 ID（平台维度，如飞书群 ID）
-	UserID     string            // 用户 ID（平台内唯一）
-	UserName   string            // 用户名（展示用）
-	SessionID  string            // HexClaw 会话 ID（跨平台统一）
-	Content    string            // 消息文本内容
-	ReplyTo    string            // 引用的消息 ID（可选）
-	Metadata   map[string]string // 平台特定的元数据
-	Timestamp  time.Time         // 消息时间
+	ID          string            // 消息唯一 ID
+	Platform    Platform          // 来源平台
+	InstanceID  string            // 平台实例标识（如 "feishu-support"），支持同平台多实例
+	ChatID      string            // 会话 ID（平台维度，如飞书群 ID）
+	UserID      string            // 用户 ID（平台内唯一）
+	UserName    string            // 用户名（展示用）
+	SessionID   string            // HexClaw 会话 ID（跨平台统一）
+	Content     string            // 消息文本内容
+	ReplyTo     string            // 引用的消息 ID（可选）
+	Attachments []Attachment      // 附件列表（当前仅支持图片，可选）
+	Metadata    map[string]string // 平台特定的元数据
+	Timestamp   time.Time         // 消息时间
 }
 
 // Usage Token 使用统计
@@ -70,10 +82,10 @@ type Usage struct {
 // 记录 Agent 在处理过程中调用的工具，
 // 让前端可以结构化展示工具调用链。
 type ToolCall struct {
-	ID        string `json:"id"`                  // 调用 ID
-	Name      string `json:"name"`                // 工具/技能名称
-	Arguments string `json:"arguments"`           // 调用参数（JSON 字符串）
-	Result    string `json:"result,omitempty"`     // 调用结果
+	ID        string `json:"id"`               // 调用 ID
+	Name      string `json:"name"`             // 工具/技能名称
+	Arguments string `json:"arguments"`        // 调用参数（JSON 字符串）
+	Result    string `json:"result,omitempty"` // 调用结果
 }
 
 // Reply 同步回复
@@ -92,11 +104,12 @@ type Reply struct {
 // 用于流式输出场景，引擎通过 channel 逐块发送回复。
 // Done=true 表示流式输出结束，此时 Usage 和 ToolCalls 字段可被填充。
 type ReplyChunk struct {
-	Content   string     // 当前片段的文本内容（增量）
-	Done      bool       // 是否为最后一个片段
-	Error     error      // 出错时的错误信息
-	Usage     *Usage     // Token 使用统计（仅在 Done=true 时填充）
-	ToolCalls []ToolCall // 工具调用记录（仅在 Done=true 时填充）
+	Content   string            // 当前片段的文本内容（增量）
+	Done      bool              // 是否为最后一个片段
+	Error     error             // 出错时的错误信息
+	Metadata  map[string]string // 附加元数据（仅在 Done=true 时填充）
+	Usage     *Usage            // Token 使用统计（仅在 Done=true 时填充）
+	ToolCalls []ToolCall        // 工具调用记录（仅在 Done=true 时填充）
 }
 
 // MessageHandler 消息处理回调（同步模式）

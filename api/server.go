@@ -237,6 +237,7 @@ func (s *Server) routes() http.Handler {
 		mux.HandleFunc("GET /api/v1/sessions/{id}/branches", s.handleListBranches)
 		mux.HandleFunc("POST /api/v1/sessions/{id}/fork", s.handleForkSession)
 		mux.HandleFunc("GET /api/v1/messages/search", s.handleSearchMessages)
+		mux.HandleFunc("PUT /api/v1/messages/{id}/feedback", s.handleUpdateMessageFeedback)
 	}
 
 	// 配置 API
@@ -468,19 +469,21 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 // ChatRequest 聊天请求
 type ChatRequest struct {
-	Message   string `json:"message"`              // 用户消息内容
-	SessionID string `json:"session_id,omitempty"` // 会话 ID（可选，空则创建新会话）
-	UserID    string `json:"user_id,omitempty"`    // 用户 ID（可选）
-	Role      string `json:"role,omitempty"`       // Agent 角色（可选：assistant/researcher/writer/coder/translator/analyst）
+	Message     string               `json:"message"`               // 用户消息内容
+	SessionID   string               `json:"session_id,omitempty"`  // 会话 ID（可选，空则创建新会话）
+	UserID      string               `json:"user_id,omitempty"`     // 用户 ID（可选）
+	Role        string               `json:"role,omitempty"`        // Agent 角色（可选：assistant/researcher/writer/coder/translator/analyst）
+	Platform    string               `json:"platform,omitempty"`    // 来源平台（可选：api/desktop，未传时自动推断）
+	Attachments []adapter.Attachment `json:"attachments,omitempty"` // 图片附件列表（可选）
 }
 
 // ChatResponse 聊天回复
 type ChatResponse struct {
-	Reply     string              `json:"reply"`                // 回复内容
-	SessionID string              `json:"session_id"`           // 会话 ID
-	Metadata  map[string]string   `json:"metadata,omitempty"`   // 元数据
-	Usage     *adapter.Usage      `json:"usage,omitempty"`      // Token 使用统计
-	ToolCalls []adapter.ToolCall  `json:"tool_calls,omitempty"` // 工具调用记录
+	Reply     string             `json:"reply"`                // 回复内容
+	SessionID string             `json:"session_id"`           // 会话 ID
+	Metadata  map[string]string  `json:"metadata,omitempty"`   // 元数据
+	Usage     *adapter.Usage     `json:"usage,omitempty"`      // Token 使用统计
+	ToolCalls []adapter.ToolCall `json:"tool_calls,omitempty"` // 工具调用记录
 }
 
 // handleChat 同步聊天端点
@@ -495,8 +498,8 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 解析请求（限制请求体大小为 1MB，防止 OOM 攻击）
-	const maxRequestBodySize = 1 << 20 // 1MB
+	// 解析请求（限制请求体大小为 20MB，支持图片附件）
+	const maxRequestBodySize = 20 << 20 // 20MB
 	var req ChatRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRequestBodySize)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{
@@ -505,9 +508,23 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Message == "" {
+	if !adapter.HasMessageInput(req.Message, req.Attachments) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{
 			"error": "message 不能为空",
+		})
+		return
+	}
+	if err := adapter.ValidateAttachments(req.Attachments); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	platform, err := resolveChatPlatform(req, r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": err.Error(),
 		})
 		return
 	}
@@ -515,18 +532,23 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	// 构建统一消息
 	userID := req.UserID
 	if userID == "" {
-		userID = "api-user" // API 调用的默认用户
+		if platform == adapter.PlatformDesktop {
+			userID = defaultDesktopUserID
+		} else {
+			userID = "api-user" // API 调用的默认用户
+		}
 	}
 
 	msg := &adapter.Message{
-		ID:        "msg-" + idgen.ShortID(),
-		Platform:  adapter.PlatformAPI,
-		UserID:    userID,
-		UserName:  userID,
-		SessionID: req.SessionID,
-		Content:   req.Message,
-		Timestamp: time.Now(),
-		Metadata:  make(map[string]string),
+		ID:          "msg-" + idgen.ShortID(),
+		Platform:    platform,
+		UserID:      userID,
+		UserName:    userID,
+		SessionID:   req.SessionID,
+		Content:     req.Message,
+		Attachments: req.Attachments,
+		Timestamp:   time.Now(),
+		Metadata:    make(map[string]string),
 	}
 
 	// 如果指定了角色，通过元数据传递给引擎
@@ -576,6 +598,25 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+const defaultDesktopUserID = "desktop-user"
+
+func resolveChatPlatform(req ChatRequest, r *http.Request) (adapter.Platform, error) {
+	if raw := strings.ToLower(strings.TrimSpace(req.Platform)); raw != "" {
+		switch adapter.Platform(raw) {
+		case adapter.PlatformAPI, adapter.PlatformDesktop:
+			return adapter.Platform(raw), nil
+		default:
+			return "", fmt.Errorf("platform 仅支持 api 或 desktop")
+		}
+	}
+
+	if isDesktopOrigin(r.Header.Get("Origin")) || strings.TrimSpace(req.UserID) == defaultDesktopUserID {
+		return adapter.PlatformDesktop, nil
+	}
+
+	return adapter.PlatformAPI, nil
+}
+
 // corsMiddleware 处理跨域请求
 //
 // 允许 Tauri 桌面端 (tauri://localhost, http://tauri.localhost)
@@ -597,8 +638,7 @@ func corsMiddleware(next http.Handler) http.Handler {
 				}
 			}
 		}
-		if origin == "tauri://localhost" ||
-			origin == "http://tauri.localhost" ||
+		if isDesktopOrigin(origin) ||
 			isLocalhost {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
@@ -616,26 +656,45 @@ func corsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+func isDesktopOrigin(origin string) bool {
+	return origin == "tauri://localhost" || origin == "http://tauri.localhost"
+}
+
+func isLoopbackRequest(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	return host == "127.0.0.1" || host == "::1" || host == "localhost"
+}
+
 // apiAuthMiddleware 管理 API 认证中间件
 //
-// 对 /api/v1/ 下的写操作（POST/PUT/DELETE）进行认证。
+// 对 /api/v1/ 下的管理写操作进行认证，日志和桌面端点也受保护。
 // 如果配置了 APIToken，需要 Authorization: Bearer <token>。
-// 未配置 Token 时，仅允许 localhost 访问管理端点。
-// GET 请求和 /health、/ws 不需要认证。
+// 为兼容本地桌面客户端和本机管理操作，localhost 请求始终允许访问。
+// 非 localhost 请求在未配置 Token 时会被拒绝。
 func (s *Server) apiAuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// 认证规则：
 		// 1. 所有写操作（POST/PUT/DELETE）需认证，除 /api/v1/chat 和 webhook 接收
 		// 2. 日志 API（GET /api/v1/logs*）需认证（可能含敏感信息）
+		// 3. 所有 localhost 请求始终放行，兼容桌面客户端 sidecar / 本机管理
 		path := r.URL.Path
 		isWriteOp := r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodDelete
 		isWebhookReceiver := (r.Method == http.MethodPost && strings.HasPrefix(path, "/api/v1/webhooks/") && path != "/api/v1/webhooks") ||
 			((r.Method == http.MethodGet || r.Method == http.MethodPost) &&
 				strings.HasPrefix(path, "/api/v1/platforms/hooks/"))
 		isLogsAPI := path == "/api/v1/logs" || strings.HasPrefix(path, "/api/v1/logs/")
-		needsAuth := isLogsAPI || (isWriteOp && strings.HasPrefix(path, "/api/v1/") && path != "/api/v1/chat" && !isWebhookReceiver)
+		isDesktopAPI := strings.HasPrefix(path, "/api/v1/desktop/")
+		needsAuth := isDesktopAPI || isLogsAPI || (isWriteOp && strings.HasPrefix(path, "/api/v1/") && path != "/api/v1/chat" && !isWebhookReceiver)
 
 		if !needsAuth {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		if isLoopbackRequest(r) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -653,8 +712,7 @@ func (s *Server) apiAuthMiddleware(next http.Handler) http.Handler {
 			}
 		} else {
 			// 未配置 Token：仅允许 localhost
-			host, _, _ := net.SplitHostPort(r.RemoteAddr)
-			if host != "127.0.0.1" && host != "::1" && host != "localhost" {
+			if !isLoopbackRequest(r) {
 				writeJSON(w, http.StatusForbidden, map[string]string{
 					"error": "未配置 API Token，仅允许本地访问管理端点",
 				})

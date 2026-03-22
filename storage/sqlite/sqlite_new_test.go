@@ -276,6 +276,60 @@ func TestForkSession_Basic(t *testing.T) {
 	}
 }
 
+func TestForkSession_CopiesAllMessagesBeyondTenThousand(t *testing.T) {
+	store := newTestStoreV2(t)
+	ctx := context.Background()
+
+	const messageCount = 10005
+	lastMessageID := ""
+	baseTime := time.Now()
+
+	err := store.WithTx(ctx, func(tx storage.Store) error {
+		if err := tx.CreateSession(ctx, &storage.Session{
+			ID: "sess-large-fork", UserID: "user-1", Platform: "web", Title: "大分支测试",
+		}); err != nil {
+			return err
+		}
+
+		for i := range messageCount {
+			lastMessageID = fmt.Sprintf("msg-large-%05d", i)
+			if err := tx.SaveMessage(ctx, &storage.MessageRecord{
+				ID:        lastMessageID,
+				SessionID: "sess-large-fork",
+				Role:      "user",
+				Content:   fmt.Sprintf("消息 %05d", i),
+				Metadata:  "{}",
+				CreatedAt: baseTime.Add(time.Duration(i) * time.Millisecond),
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("准备大分支测试数据失败: %v", err)
+	}
+
+	newSess, err := store.ForkSession(ctx, "sess-large-fork", lastMessageID, "user-1")
+	if err != nil {
+		t.Fatalf("ForkSession 失败: %v", err)
+	}
+
+	msgs, err := store.ListMessages(ctx, newSess.ID, messageCount+1, 0)
+	if err != nil {
+		t.Fatalf("获取分支消息失败: %v", err)
+	}
+	if len(msgs) != messageCount {
+		t.Fatalf("分支消息数=%d, want %d", len(msgs), messageCount)
+	}
+	if msgs[0].Content != "消息 00000" {
+		t.Fatalf("第一条消息=%q, want %q", msgs[0].Content, "消息 00000")
+	}
+	if msgs[len(msgs)-1].Content != "消息 10004" {
+		t.Fatalf("最后一条消息=%q, want %q", msgs[len(msgs)-1].Content, "消息 10004")
+	}
+}
+
 func TestForkSession_NonexistentSession(t *testing.T) {
 	store := newTestStoreV2(t)
 	ctx := context.Background()

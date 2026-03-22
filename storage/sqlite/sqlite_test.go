@@ -118,6 +118,48 @@ func TestMessageCRUD(t *testing.T) {
 	}
 }
 
+func TestUpdateMessageFeedback(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	if err := store.CreateSession(ctx, &storage.Session{
+		ID: "sess-feedback", UserID: "user-001", Platform: "web", Title: "反馈测试",
+	}); err != nil {
+		t.Fatalf("创建会话失败: %v", err)
+	}
+	if err := store.SaveMessage(ctx, &storage.MessageRecord{
+		ID: "msg-feedback", SessionID: "sess-feedback", Role: "assistant", Content: "答复", Metadata: "{}",
+	}); err != nil {
+		t.Fatalf("保存消息失败: %v", err)
+	}
+
+	if err := store.UpdateMessageFeedback(ctx, "msg-feedback", "like"); err != nil {
+		t.Fatalf("设置 like 失败: %v", err)
+	}
+
+	var feedback string
+	if err := store.db.QueryRowContext(ctx, `SELECT feedback FROM messages WHERE id = ?`, "msg-feedback").Scan(&feedback); err != nil {
+		t.Fatalf("读取反馈失败: %v", err)
+	}
+	if feedback != "like" {
+		t.Fatalf("feedback=%q, want like", feedback)
+	}
+
+	if err := store.UpdateMessageFeedback(ctx, "msg-feedback", ""); err != nil {
+		t.Fatalf("清空反馈失败: %v", err)
+	}
+	if err := store.db.QueryRowContext(ctx, `SELECT feedback FROM messages WHERE id = ?`, "msg-feedback").Scan(&feedback); err != nil {
+		t.Fatalf("读取清空后的反馈失败: %v", err)
+	}
+	if feedback != "" {
+		t.Fatalf("feedback=%q, want empty", feedback)
+	}
+
+	if err := store.UpdateMessageFeedback(ctx, "msg-feedback", "bad"); err == nil {
+		t.Fatal("非法反馈值应报错")
+	}
+}
+
 func TestCostTracking(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()

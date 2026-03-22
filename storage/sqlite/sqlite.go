@@ -166,6 +166,7 @@ func (s *Store) runMigrations(ctx context.Context) {
 		`ALTER TABLE sessions ADD COLUMN chat_id TEXT NOT NULL DEFAULT ''`,
 		`CREATE INDEX IF NOT EXISTS idx_sessions_scope ON sessions(user_id, platform, instance_id, chat_id, updated_at)`,
 		`ALTER TABLE messages ADD COLUMN parent_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE messages ADD COLUMN feedback TEXT NOT NULL DEFAULT ''`,
 		`CREATE INDEX IF NOT EXISTS idx_messages_parent_id ON messages(parent_id)`,
 		`CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(content, content='messages', content_rowid='rowid')`,
 		`CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content); END`,
@@ -308,6 +309,9 @@ func (s *Store) GetSession(ctx context.Context, id string) (*storage.Session, er
 	)
 	var sess storage.Session
 	if err := row.Scan(&sess.ID, &sess.UserID, &sess.Platform, &sess.InstanceID, &sess.ChatID, &sess.Title, &sess.ParentSessionID, &sess.BranchMessageID, &sess.CreatedAt, &sess.UpdatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, storage.ErrNotFound
+		}
 		return nil, err
 	}
 	return &sess, nil
@@ -474,6 +478,29 @@ func (s *Store) ListMessages(ctx context.Context, sessionID string, limit, offse
 		messages = append(messages, &msg)
 	}
 	return messages, rows.Err()
+}
+
+// UpdateMessageFeedback 更新消息反馈。
+func (s *Store) UpdateMessageFeedback(ctx context.Context, id, feedback string) error {
+	switch feedback {
+	case "", "like", "dislike":
+	default:
+		return fmt.Errorf("无效反馈值: %s", feedback)
+	}
+
+	result, err := s.db.ExecContext(ctx, `UPDATE messages SET feedback = ? WHERE id = ?`, feedback, id)
+	if err != nil {
+		return err
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return storage.ErrNotFound
+	}
+	s.invalidateSearchCache()
+	return nil
 }
 
 // SaveCost 记录成本
@@ -716,14 +743,12 @@ func (s *Store) ForkSession(ctx context.Context, sourceSessionID, messageID, use
 	// 3. 复制源会话中 messageID 之前（含）的所有消息到新会话
 	// 使用 rowid <= ? 而非 created_at <= ?，避免精度丢失
 	// 不依赖插入顺序；读取时仍按 created_at 排序
-	// LIMIT 10000 防止超大会话 fork 导致长时间事务锁
 	forkPrefix := "msg-fork-" + strings.TrimPrefix(newSessionID, "sess-") + "-"
 	_, err = tx.ExecContext(ctx,
-		`INSERT INTO messages (id, session_id, parent_id, role, content, metadata, created_at)
-		 SELECT ? || rowid, ?, parent_id, role, content, metadata, created_at
-		 FROM messages
-		 WHERE session_id = ? AND rowid <= ?
-		 LIMIT 10000`,
+		`INSERT INTO messages (id, session_id, parent_id, role, content, metadata, feedback, created_at)
+			 SELECT ? || rowid, ?, parent_id, role, content, metadata, feedback, created_at
+			 FROM messages
+			 WHERE session_id = ? AND rowid <= ?`,
 		forkPrefix, newSessionID, sourceSessionID, msgRowID,
 	)
 	if err != nil {
@@ -812,6 +837,7 @@ CREATE TABLE IF NOT EXISTS messages (
     role       TEXT NOT NULL,
     content    TEXT NOT NULL,
     metadata   TEXT NOT NULL DEFAULT '{}',
+    feedback   TEXT NOT NULL DEFAULT '',
     created_at DATETIME NOT NULL
 );
 

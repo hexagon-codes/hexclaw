@@ -83,10 +83,11 @@ type logQueryKey struct {
 }
 
 type logQueryCacheEntry struct {
-	version uint64
-	total   int
-	entries []LogEntry
-	body    []byte
+	version   uint64
+	total     int
+	hasFields bool
+	entries   []LogEntry
+	body      []byte
 }
 
 const maxLogQueryCacheEntries = 64
@@ -228,6 +229,16 @@ func (c *LogCollector) getCachedQueryBody(key logQueryKey, version uint64) ([]by
 	return entry.body, true
 }
 
+func (c *LogCollector) getCachedQueryResult(key logQueryKey, version uint64) ([]LogEntry, int, bool) {
+	c.queryCacheMu.RLock()
+	entry, ok := c.queryCache[key]
+	c.queryCacheMu.RUnlock()
+	if !ok || entry.version != version {
+		return nil, 0, false
+	}
+	return cloneLogEntriesIfNeeded(entry.entries, entry.hasFields), entry.total, true
+}
+
 func (c *LogCollector) cacheQueryBody(key logQueryKey, version uint64, body []byte) {
 	c.queryCacheMu.Lock()
 	defer c.queryCacheMu.Unlock()
@@ -247,11 +258,71 @@ func (c *LogCollector) cacheQueryBody(key logQueryKey, version uint64, body []by
 	c.queryCache[key] = entry
 }
 
+func (c *LogCollector) cacheQueryResult(key logQueryKey, version uint64, total int, entries []LogEntry) {
+	c.queryCacheMu.Lock()
+	defer c.queryCacheMu.Unlock()
+
+	entry, ok := c.queryCache[key]
+	if !ok {
+		c.queryOrder = append(c.queryOrder, key)
+		if len(c.queryOrder) > maxLogQueryCacheEntries {
+			evict := c.queryOrder[0]
+			c.queryOrder = c.queryOrder[1:]
+			delete(c.queryCache, evict)
+		}
+		entry = logQueryCacheEntry{}
+	}
+	entry.version = version
+	entry.total = total
+	entry.hasFields = logEntriesHaveFields(entries)
+	entry.entries = cloneLogEntriesIfNeeded(entries, entry.hasFields)
+	c.queryCache[key] = entry
+}
+
+func copyLogEntries(entries []LogEntry) []LogEntry {
+	if len(entries) == 0 {
+		return nil
+	}
+	cloned := make([]LogEntry, len(entries))
+	copy(cloned, entries)
+	return cloned
+}
+
+func cloneLogEntryFields(entries []LogEntry) {
+	for i := range entries {
+		if len(entries[i].Fields) == 0 {
+			continue
+		}
+		fields := make(map[string]any, len(entries[i].Fields))
+		for k, v := range entries[i].Fields {
+			fields[k] = v
+		}
+		entries[i].Fields = fields
+	}
+}
+
+func logEntriesHaveFields(entries []LogEntry) bool {
+	for i := range entries {
+		if len(entries[i].Fields) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func cloneLogEntriesIfNeeded(entries []LogEntry, hasFields bool) []LogEntry {
+	cloned := copyLogEntries(entries)
+	if hasFields {
+		cloneLogEntryFields(cloned)
+	}
+	return cloned
+}
+
 // Query 查询日志
 //
 // 优化点：
 //   - keyword 只 ToLower 一次
-//   - 无过滤时直接 snapshot + 分页，跳过逐条匹配
+//   - 无过滤时按需从 ring buffer 读取分页结果，跳过逐条匹配
 //   - 有过滤时支持早停（匹配到 offset+limit 条后立即停止计数后续总数）
 func (c *LogCollector) Query(level, source, keyword string, limit, offset int) ([]LogEntry, int) {
 	return c.QueryWithDomain(level, source, "", keyword, limit, offset)
@@ -265,8 +336,29 @@ func (c *LogCollector) QueryWithDomain(level, source, domain, keyword string, li
 		offset = 0
 	}
 
-	c.mu.RLock()
 	noFilter := level == "" && source == "" && domain == "" && keyword == ""
+	useResultCache := !noFilter
+
+	var (
+		key     logQueryKey
+		version uint64
+	)
+	if useResultCache {
+		key = logQueryKey{
+			level:   level,
+			source:  source,
+			domain:  domain,
+			keyword: keyword,
+			limit:   limit,
+			offset:  offset,
+		}
+		version = c.Version()
+		if entries, total, ok := c.getCachedQueryResult(key, version); ok {
+			return entries, total
+		}
+	}
+
+	c.mu.RLock()
 
 	// 快速路径：无过滤条件，直接从 ring buffer 按需读取（不复制全量）
 	if noFilter {
@@ -278,15 +370,20 @@ func (c *LogCollector) QueryWithDomain(level, source, domain, keyword string, li
 		n := min(limit, total-offset)
 		result := make([]LogEntry, n)
 		idx := c.head - 1 - offset
+		hasFields := false
 		if idx < 0 {
 			idx += c.capacity
 		}
 		for i := range n {
 			result[i] = c.entries[idx]
+			hasFields = hasFields || len(result[i].Fields) > 0
 			idx--
 			if idx < 0 {
 				idx = c.capacity - 1
 			}
+		}
+		if hasFields {
+			cloneLogEntryFields(result)
 		}
 		c.mu.RUnlock()
 		return result, total
@@ -297,10 +394,20 @@ func (c *LogCollector) QueryWithDomain(level, source, domain, keyword string, li
 		switch {
 		case level != "" && source == "" && domain == "":
 			total := c.byLevel[level]
-			return c.collectMatching(level, source, domain, limit, offset, total, nil), total
+			result, hasFields := c.collectMatching(level, source, domain, limit, offset, total, nil)
+			if hasFields {
+				cloneLogEntryFields(result)
+			}
+			c.cacheQueryResult(key, version, total, result)
+			return result, total
 		case source != "" && level == "" && domain == "":
 			total := c.bySource[source]
-			return c.collectMatching(level, source, domain, limit, offset, total, nil), total
+			result, hasFields := c.collectMatching(level, source, domain, limit, offset, total, nil)
+			if hasFields {
+				cloneLogEntryFields(result)
+			}
+			c.cacheQueryResult(key, version, total, result)
+			return result, total
 		}
 	}
 
@@ -313,6 +420,7 @@ func (c *LogCollector) QueryWithDomain(level, source, domain, keyword string, li
 		result = make([]LogEntry, 0, limit)
 	}
 	total := 0
+	hasFields := false
 	for i := range c.size {
 		idx := (c.head - 1 - i + c.capacity) % c.capacity
 		e := c.entries[idx]
@@ -336,21 +444,28 @@ func (c *LogCollector) QueryWithDomain(level, source, domain, keyword string, li
 		// 收集 limit 条之后只计数不 append
 		if len(result) < limit {
 			result = append(result, e)
+			hasFields = hasFields || len(e.Fields) > 0
 		}
 	}
 
 	if offset >= total {
+		c.cacheQueryResult(key, version, total, nil)
 		return nil, total
 	}
+	if hasFields {
+		cloneLogEntryFields(result)
+	}
+	c.cacheQueryResult(key, version, total, result)
 	return result, total
 }
 
-func (c *LogCollector) collectMatching(level, source, domain string, limit, offset, total int, keyword func(string) bool) []LogEntry {
+func (c *LogCollector) collectMatching(level, source, domain string, limit, offset, total int, keyword func(string) bool) ([]LogEntry, bool) {
 	if offset >= total || limit == 0 {
-		return nil
+		return nil, false
 	}
 	result := make([]LogEntry, 0, min(limit, total-offset))
 	skipped := 0
+	hasFields := false
 	for i := range c.size {
 		idx := (c.head - 1 - i + c.capacity) % c.capacity
 		e := c.entries[idx]
@@ -371,11 +486,12 @@ func (c *LogCollector) collectMatching(level, source, domain string, limit, offs
 			continue
 		}
 		result = append(result, e)
+		hasFields = hasFields || len(e.Fields) > 0
 		if len(result) == limit {
 			break
 		}
 	}
-	return result
+	return result, hasFields
 }
 
 func (c *LogCollector) Total() int {

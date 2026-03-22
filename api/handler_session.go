@@ -2,20 +2,62 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/hexagon-codes/hexclaw/storage"
 )
 
 // --- 会话管理 API ---
 
+func sessionUserIDFromRequest(r *http.Request) string {
+	userID := strings.TrimSpace(r.URL.Query().Get("user_id"))
+	if userID == "" {
+		return "api-user"
+	}
+	return userID
+}
+
+func validMessageFeedback(feedback string) bool {
+	switch feedback {
+	case "", "like", "dislike":
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) getOwnedSession(r *http.Request, sessionID, userID string) (*storage.Session, error) {
+	sess, err := s.store.GetSession(r.Context(), sessionID)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return nil, storage.ErrNotFound
+		}
+		return nil, err
+	}
+	if sess.UserID != userID {
+		return nil, storage.ErrNotFound
+	}
+	return sess, nil
+}
+
+func writeSessionLookupError(w http.ResponseWriter, err error) {
+	if errors.Is(err, storage.ErrNotFound) {
+		writeJSON(w, http.StatusNotFound, map[string]string{
+			"error": "会话不存在",
+		})
+		return
+	}
+	writeJSON(w, http.StatusInternalServerError, map[string]string{
+		"error": "获取会话失败: " + err.Error(),
+	})
+}
+
 // handleListSessions 列出用户的会话
 func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
-	userID := r.URL.Query().Get("user_id")
-	if userID == "" {
-		userID = "api-user"
-	}
+	userID := sessionUserIDFromRequest(r)
 
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
@@ -43,11 +85,9 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 // handleGetSession 获取单个会话详情
 func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	sess, err := s.store.GetSession(r.Context(), id)
+	sess, err := s.getOwnedSession(r, id, sessionUserIDFromRequest(r))
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{
-			"error": "会话不存在",
-		})
+		writeSessionLookupError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, sess)
@@ -56,6 +96,10 @@ func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 // handleDeleteSession 删除会话
 func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	if _, err := s.getOwnedSession(r, id, sessionUserIDFromRequest(r)); err != nil {
+		writeSessionLookupError(w, err)
+		return
+	}
 	if err := s.store.DeleteSession(r.Context(), id); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{
 			"error": "删除会话失败: " + err.Error(),
@@ -68,6 +112,10 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 // handleListMessages 获取会话的消息历史
 func (s *Server) handleListMessages(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.PathValue("id")
+	if _, err := s.getOwnedSession(r, sessionID, sessionUserIDFromRequest(r)); err != nil {
+		writeSessionLookupError(w, err)
+		return
+	}
 
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
@@ -89,6 +137,52 @@ func (s *Server) handleListMessages(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"messages": messages,
 		"total":    len(messages),
+	})
+}
+
+type updateMessageFeedbackRequest struct {
+	Feedback string `json:"feedback"`
+}
+
+// handleUpdateMessageFeedback 更新消息点赞/点踩反馈。
+func (s *Server) handleUpdateMessageFeedback(w http.ResponseWriter, r *http.Request) {
+	messageID := r.PathValue("id")
+	if messageID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "消息 ID 不能为空",
+		})
+		return
+	}
+
+	var req updateMessageFeedbackRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "请求格式错误: " + err.Error(),
+		})
+		return
+	}
+	if !validMessageFeedback(req.Feedback) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "更新消息反馈失败: 无效反馈值: " + req.Feedback,
+		})
+		return
+	}
+
+	if err := s.store.UpdateMessageFeedback(r.Context(), messageID, req.Feedback); err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, storage.ErrNotFound) {
+			status = http.StatusNotFound
+		} else if strings.HasPrefix(err.Error(), "无效反馈值:") {
+			status = http.StatusBadRequest
+		}
+		writeJSON(w, status, map[string]string{
+			"error": "更新消息反馈失败: " + err.Error(),
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{
+		"message": "反馈已更新",
 	})
 }
 
@@ -168,6 +262,10 @@ func (s *Server) handleForkSession(w http.ResponseWriter, r *http.Request) {
 	if userID == "" {
 		userID = "api-user"
 	}
+	if _, err := s.getOwnedSession(r, sessionID, userID); err != nil {
+		writeSessionLookupError(w, err)
+		return
+	}
 
 	newSession, err := s.store.ForkSession(r.Context(), sessionID, req.MessageID, userID)
 	if err != nil {
@@ -186,6 +284,10 @@ func (s *Server) handleForkSession(w http.ResponseWriter, r *http.Request) {
 // handleListBranches 列出会话的所有分支
 func (s *Server) handleListBranches(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.PathValue("id")
+	if _, err := s.getOwnedSession(r, sessionID, sessionUserIDFromRequest(r)); err != nil {
+		writeSessionLookupError(w, err)
+		return
+	}
 
 	branches, err := s.store.ListSessionBranches(r.Context(), sessionID)
 	if err != nil {

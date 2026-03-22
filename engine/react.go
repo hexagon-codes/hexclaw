@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/hexagon-codes/ai-core/streamx"
 	"github.com/hexagon-codes/hexagon"
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/agents"
@@ -178,6 +180,10 @@ func (e *ReActEngine) Health(_ context.Context) error {
 //  6. 保存助手回复
 //  7. 返回回复
 func (e *ReActEngine) Process(ctx context.Context, msg *adapter.Message) (*adapter.Reply, error) {
+	if err := validateIncomingMessage(msg); err != nil {
+		return nil, err
+	}
+
 	// 1. 获取或创建会话
 	sess, err := e.sessions.GetOrCreate(ctx, msg)
 	if err != nil {
@@ -187,7 +193,7 @@ func (e *ReActEngine) Process(ctx context.Context, msg *adapter.Message) (*adapt
 
 	// 2. 尝试快速路径: Skill 关键词匹配
 	if matched, ok := e.skills.Match(msg); ok {
-		if err := e.sessions.SaveUserMessage(ctx, sess.ID, msg.Content); err != nil {
+		if err := e.sessions.SaveUserMessage(ctx, sess.ID, msg); err != nil {
 			log.Printf("保存用户消息失败: %v", err)
 		}
 		skillArgs := map[string]any{
@@ -199,14 +205,17 @@ func (e *ReActEngine) Process(ctx context.Context, msg *adapter.Message) (*adapt
 			return nil, fmt.Errorf("skill %s 执行失败: %w", matched.Name(), err)
 		}
 
-		if err := e.sessions.SaveAssistantMessage(ctx, sess.ID, result.Content); err != nil {
+		assistantMessageID := ""
+		if record, err := e.sessions.SaveAssistantMessageRecord(ctx, sess.ID, result.Content); err != nil {
 			log.Printf("保存助手回复失败: %v", err)
+		} else {
+			assistantMessageID = record.ID
 		}
 
 		argsJSON, _ := json.Marshal(skillArgs)
 		return &adapter.Reply{
 			Content:  result.Content,
-			Metadata: result.Metadata,
+			Metadata: withAssistantMessageID(result.Metadata, assistantMessageID),
 			ToolCalls: []adapter.ToolCall{{
 				ID:        "tc-" + idgen.ShortID(),
 				Name:      matched.Name(),
@@ -216,18 +225,23 @@ func (e *ReActEngine) Process(ctx context.Context, msg *adapter.Message) (*adapt
 		}, nil
 	}
 
+	cacheInput := adapter.AttachmentCacheKey(msg.Content, msg.Attachments)
+
 	// 3. 语义缓存查询
-	if cached, ok := e.cache.Get(msg.Content, e.cfg.LLM.Default); ok {
+	if cached, ok := e.cache.Get(cacheInput, e.cfg.LLM.Default); ok {
 		log.Printf("语义缓存命中: %s", msg.Content[:min(20, len(msg.Content))])
-		if err := e.sessions.SaveUserMessage(ctx, sess.ID, msg.Content); err != nil {
+		if err := e.sessions.SaveUserMessage(ctx, sess.ID, msg); err != nil {
 			log.Printf("保存用户消息失败: %v", err)
 		}
-		if err := e.sessions.SaveAssistantMessage(ctx, sess.ID, cached); err != nil {
+		assistantMessageID := ""
+		if record, err := e.sessions.SaveAssistantMessageRecord(ctx, sess.ID, cached); err != nil {
 			log.Printf("保存助手回复失败: %v", err)
+		} else {
+			assistantMessageID = record.ID
 		}
 		return &adapter.Reply{
 			Content:  cached,
-			Metadata: map[string]string{"source": "cache"},
+			Metadata: withAssistantMessageID(map[string]string{"source": "cache"}, assistantMessageID),
 		}, nil
 	}
 
@@ -238,7 +252,7 @@ func (e *ReActEngine) Process(ctx context.Context, msg *adapter.Message) (*adapt
 	}
 
 	// 5. 保存用户消息（在 BuildContext 之后，确保 history 不含当前消息）
-	if err := e.sessions.SaveUserMessage(ctx, sess.ID, msg.Content); err != nil {
+	if err := e.sessions.SaveUserMessage(ctx, sess.ID, msg); err != nil {
 		log.Printf("保存用户消息失败: %v", err)
 	}
 
@@ -262,6 +276,10 @@ func (e *ReActEngine) Process(ctx context.Context, msg *adapter.Message) (*adapt
 	provider, providerName, err := e.resolveProvider(ctx, msg.Metadata["provider"], msg)
 	if err != nil {
 		return nil, fmt.Errorf("llm 路由失败: %w", err)
+	}
+
+	if shouldUseDirectCompletion(history, kbContext, msg.Attachments) {
+		return e.completeDirect(ctx, sess.ID, msg, history, kbContext, provider, providerName, cacheInput)
 	}
 
 	// 7. 创建 Agent（支持角色选择）
@@ -307,13 +325,16 @@ func (e *ReActEngine) Process(ctx context.Context, msg *adapter.Message) (*adapt
 	}
 
 	// 7. 保存助手回复
-	if err := e.sessions.SaveAssistantMessage(ctx, sess.ID, output.Content); err != nil {
+	assistantMessageID := ""
+	if record, err := e.sessions.SaveAssistantMessageRecord(ctx, sess.ID, output.Content); err != nil {
 		log.Printf("保存助手回复失败: %v", err)
+	} else {
+		assistantMessageID = record.ID
 	}
 
 	// 8. 写入语义缓存（安全获取 model 名称，避免 map 访问空值）
 	modelName := e.getProviderModel(providerName)
-	e.cache.Put(msg.Content, output.Content, providerName, modelName)
+	e.cache.Put(cacheInput, output.Content, providerName, modelName)
 
 	// 9. 记录 Token 使用（用于成本控制）
 	if output.Usage.TotalTokens > 0 {
@@ -342,18 +363,7 @@ func (e *ReActEngine) Process(ctx context.Context, msg *adapter.Message) (*adapt
 		}
 	}
 
-	replyMeta := map[string]string{
-		"provider": providerName,
-		"model":    modelName,
-	}
-	if msg.Metadata != nil {
-		if v := msg.Metadata["route_source"]; v != "" {
-			replyMeta["route_source"] = v
-		}
-		if v := msg.Metadata["routed_agent"]; v != "" {
-			replyMeta["routed_agent"] = v
-		}
-	}
+	replyMeta := buildReplyMetadata(msg.Metadata, providerName, modelName, assistantMessageID)
 
 	var toolCalls []adapter.ToolCall
 	for _, tc := range output.ToolCalls {
@@ -416,6 +426,10 @@ func (e *ReActEngine) getProviderModel(providerName string) string {
 //
 // 对于快速路径（Skill/缓存命中）降级为单 chunk 输出。
 func (e *ReActEngine) ProcessStream(ctx context.Context, msg *adapter.Message) (<-chan *adapter.ReplyChunk, error) {
+	if err := validateIncomingMessage(msg); err != nil {
+		return nil, err
+	}
+
 	// 1. 获取或创建会话
 	sess, err := e.sessions.GetOrCreate(ctx, msg)
 	if err != nil {
@@ -425,7 +439,7 @@ func (e *ReActEngine) ProcessStream(ctx context.Context, msg *adapter.Message) (
 
 	// 2. 尝试快速路径: Skill 匹配 → 单 chunk 返回
 	if matched, ok := e.skills.Match(msg); ok {
-		if err := e.sessions.SaveUserMessage(ctx, sess.ID, msg.Content); err != nil {
+		if err := e.sessions.SaveUserMessage(ctx, sess.ID, msg); err != nil {
 			log.Printf("保存用户消息失败: %v", err)
 		}
 		skillArgs := map[string]any{
@@ -436,8 +450,11 @@ func (e *ReActEngine) ProcessStream(ctx context.Context, msg *adapter.Message) (
 		if err != nil {
 			return nil, fmt.Errorf("skill %s 执行失败: %w", matched.Name(), err)
 		}
-		if err := e.sessions.SaveAssistantMessage(ctx, sess.ID, result.Content); err != nil {
+		assistantMessageID := ""
+		if record, err := e.sessions.SaveAssistantMessageRecord(ctx, sess.ID, result.Content); err != nil {
 			log.Printf("保存助手回复失败: %v", err)
+		} else {
+			assistantMessageID = record.ID
 		}
 		argsJSON, _ := json.Marshal(skillArgs)
 		tc := []adapter.ToolCall{{
@@ -446,19 +463,24 @@ func (e *ReActEngine) ProcessStream(ctx context.Context, msg *adapter.Message) (
 			Arguments: string(argsJSON),
 			Result:    truncateResult(result.Content, 500),
 		}}
-		return singleChunkWithTools(result.Content, tc), nil
+		return singleChunkWithTools(result.Content, withAssistantMessageID(result.Metadata, assistantMessageID), tc), nil
 	}
 
+	cacheInput := adapter.AttachmentCacheKey(msg.Content, msg.Attachments)
+
 	// 3. 语义缓存命中 → 单 chunk 返回
-	if cached, ok := e.cache.Get(msg.Content, e.cfg.LLM.Default); ok {
+	if cached, ok := e.cache.Get(cacheInput, e.cfg.LLM.Default); ok {
 		log.Printf("语义缓存命中: %s", msg.Content[:min(20, len(msg.Content))])
-		if err := e.sessions.SaveUserMessage(ctx, sess.ID, msg.Content); err != nil {
+		if err := e.sessions.SaveUserMessage(ctx, sess.ID, msg); err != nil {
 			log.Printf("保存用户消息失败: %v", err)
 		}
-		if err := e.sessions.SaveAssistantMessage(ctx, sess.ID, cached); err != nil {
+		assistantMessageID := ""
+		if record, err := e.sessions.SaveAssistantMessageRecord(ctx, sess.ID, cached); err != nil {
 			log.Printf("保存助手回复失败: %v", err)
+		} else {
+			assistantMessageID = record.ID
 		}
-		return singleChunk(cached), nil
+		return singleChunk(cached, withAssistantMessageID(map[string]string{"source": "cache"}, assistantMessageID)), nil
 	}
 
 	// 4. 构建对话上下文（在保存用户消息之前，避免 history 中重复包含当前消息）
@@ -468,7 +490,7 @@ func (e *ReActEngine) ProcessStream(ctx context.Context, msg *adapter.Message) (
 	}
 
 	// 5. 保存用户消息（在 BuildContext 之后，确保 history 不含当前消息）
-	if err := e.sessions.SaveUserMessage(ctx, sess.ID, msg.Content); err != nil {
+	if err := e.sessions.SaveUserMessage(ctx, sess.ID, msg); err != nil {
 		log.Printf("保存用户消息失败: %v", err)
 	}
 
@@ -495,25 +517,7 @@ func (e *ReActEngine) ProcessStream(ctx context.Context, msg *adapter.Message) (
 	}
 
 	// 7. 构建 CompletionRequest（含 system prompt + 历史 + 知识库 + 用户消息）
-	roleName := msg.Metadata["role"]
-	messages := e.buildStreamMessages(roleName, history, kbContext, msg.Content, msg.Metadata)
-	req := hexagon.CompletionRequest{
-		Messages: messages,
-	}
-	if m := msg.Metadata["agent_model"]; m != "" {
-		req.Model = m
-	}
-	if v := msg.Metadata["agent_max_tokens"]; v != "" {
-		if n, err := fmt.Sscanf(v, "%d", new(int)); n == 1 && err == nil {
-			fmt.Sscanf(v, "%d", &req.MaxTokens)
-		}
-	}
-	if v := msg.Metadata["agent_temperature"]; v != "" {
-		var t float64
-		if _, err := fmt.Sscanf(v, "%f", &t); err == nil {
-			req.Temperature = &t
-		}
-	}
+	req := e.buildCompletionRequest(msg, history, kbContext)
 
 	// 8. 调用 provider.Stream()
 	llmStream, err := provider.Stream(ctx, req)
@@ -533,7 +537,7 @@ func (e *ReActEngine) ProcessStream(ctx context.Context, msg *adapter.Message) (
 
 	// 9. 启动 goroutine 将 LLMStreamChunk 转发为 adapter.ReplyChunk
 	ch := make(chan *adapter.ReplyChunk, 16)
-	go e.pipeStream(ctx, ch, llmStream, sess.ID, msg, providerName)
+	go e.pipeStream(ctx, ch, llmStream, sess.ID, msg, providerName, cacheInput)
 
 	return ch, nil
 }
@@ -546,6 +550,7 @@ func (e *ReActEngine) pipeStream(
 	sessionID string,
 	msg *adapter.Message,
 	providerName string,
+	cacheInput string,
 ) {
 	defer close(ch)
 	defer llmStream.Close()
@@ -569,10 +574,30 @@ func (e *ReActEngine) pipeStream(
 	// 获取最终结果（含 Usage 统计）
 	result := llmStream.Result()
 
-	// 发送结束标记（携带 Usage 信息）
-	doneChunk := &adapter.ReplyChunk{Done: true}
+	content := fullContent.String()
+
+	// 使用独立 context 进行后续操作，避免请求 ctx 取消后无法保存
+	saveCtx, saveCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer saveCancel()
+
+	// 保存助手回复
+	assistantMessageID := ""
+	if record, err := e.sessions.SaveAssistantMessageRecord(saveCtx, sessionID, content); err != nil {
+		log.Printf("保存助手回复失败: %v", err)
+	} else {
+		assistantMessageID = record.ID
+	}
+
+	// 写入语义缓存
+	modelName := e.getProviderModel(providerName)
+	e.cache.Put(cacheInput, content, providerName, modelName)
+
+	// 发送结束标记（携带 Usage 和元数据）
+	doneChunk := &adapter.ReplyChunk{
+		Done:     true,
+		Metadata: buildReplyMetadata(msg.Metadata, providerName, modelName, assistantMessageID),
+	}
 	if result != nil && result.Usage.TotalTokens > 0 {
-		modelName := e.getProviderModel(providerName)
 		doneChunk.Usage = &adapter.Usage{
 			InputTokens:  result.Usage.PromptTokens,
 			OutputTokens: result.Usage.CompletionTokens,
@@ -582,20 +607,6 @@ func (e *ReActEngine) pipeStream(
 		}
 	}
 	ch <- doneChunk
-	content := fullContent.String()
-
-	// 使用独立 context 进行后续操作，避免请求 ctx 取消后无法保存
-	saveCtx, saveCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer saveCancel()
-
-	// 保存助手回复
-	if err := e.sessions.SaveAssistantMessage(saveCtx, sessionID, content); err != nil {
-		log.Printf("保存助手回复失败: %v", err)
-	}
-
-	// 写入语义缓存
-	modelName := e.getProviderModel(providerName)
-	e.cache.Put(msg.Content, content, providerName, modelName)
 
 	// 记录 Token 使用
 	if result != nil && result.Usage.TotalTokens > 0 {
@@ -614,7 +625,10 @@ func (e *ReActEngine) pipeStream(
 }
 
 // buildStreamMessages 构建流式请求的消息列表
-func (e *ReActEngine) buildStreamMessages(roleName string, history []hexagon.Message, kbContext, userQuery string, metadata map[string]string) []hexagon.Message {
+//
+// 当 attachments 包含图片时，用户消息会构建为 MultiContent 格式（文本 + image_url），
+// 底层 ai-core Provider 会自动识别并发送为多模态 API 请求。
+func (e *ReActEngine) buildStreamMessages(roleName string, history []hexagon.Message, kbContext, userQuery string, metadata map[string]string, attachments []adapter.Attachment) []hexagon.Message {
 	var messages []hexagon.Message
 
 	// System prompt 优先级: 角色名 > Agent 路由注入 > 默认
@@ -637,26 +651,190 @@ func (e *ReActEngine) buildStreamMessages(roleName string, history []hexagon.Mes
 	// 历史消息
 	messages = append(messages, history...)
 
-	// 当前用户消息
-	messages = append(messages, hexagon.Message{
-		Role:    "user",
-		Content: userQuery,
-	})
+	// 当前用户消息（支持多模态附件）
+	messages = append(messages, adapter.BuildUserMessage(userQuery, attachments))
 
 	return messages
 }
 
+func (e *ReActEngine) buildCompletionRequest(msg *adapter.Message, history []hexagon.Message, kbContext string) hexagon.CompletionRequest {
+	req := hexagon.CompletionRequest{
+		Messages: e.buildStreamMessages(msg.Metadata["role"], history, kbContext, msg.Content, msg.Metadata, msg.Attachments),
+	}
+	applyCompletionOverrides(&req, msg.Metadata)
+	return req
+}
+
+func (e *ReActEngine) completeDirect(
+	ctx context.Context,
+	sessionID string,
+	msg *adapter.Message,
+	history []hexagon.Message,
+	kbContext string,
+	provider hexagon.Provider,
+	providerName string,
+	cacheInput string,
+) (*adapter.Reply, error) {
+	req := e.buildCompletionRequest(msg, history, kbContext)
+	resp, err := provider.Complete(ctx, req)
+	if err != nil {
+		fallbackP, fbName, fbErr := e.router.Fallback(providerName)
+		if fbErr != nil {
+			return nil, fmt.Errorf("多模态补全失败且无可用备用: %w", err)
+		}
+		log.Printf("Provider %s 多模态补全失败，降级到 %s: %v", providerName, fbName, err)
+		resp, err = fallbackP.Complete(ctx, req)
+		if err != nil {
+			return nil, fmt.Errorf("多模态补全失败（降级后）: %w", err)
+		}
+		providerName = fbName
+	}
+
+	assistantMessageID := ""
+	if record, err := e.sessions.SaveAssistantMessageRecord(ctx, sessionID, resp.Content); err != nil {
+		log.Printf("保存助手回复失败: %v", err)
+	} else {
+		assistantMessageID = record.ID
+	}
+
+	modelName := e.getProviderModel(providerName)
+	e.cache.Put(cacheInput, resp.Content, providerName, modelName)
+
+	if resp.Usage.TotalTokens > 0 {
+		costRecord := &storage.CostRecord{
+			ID:        "cost-" + idgen.ShortID(),
+			UserID:    msg.UserID,
+			Provider:  providerName,
+			Model:     modelName,
+			Tokens:    resp.Usage.TotalTokens,
+			CreatedAt: time.Now(),
+		}
+		if err := e.store.SaveCost(ctx, costRecord); err != nil {
+			log.Printf("记录成本失败: %v", err)
+		}
+	}
+
+	return &adapter.Reply{
+		Content:   resp.Content,
+		Metadata:  buildReplyMetadata(msg.Metadata, providerName, modelName, assistantMessageID),
+		Usage:     buildUsage(resp.Usage, providerName, modelName),
+		ToolCalls: translateProviderToolCalls(resp.ToolCalls),
+	}, nil
+}
+
+func shouldUseDirectCompletion(history []hexagon.Message, kbContext string, attachments []adapter.Attachment) bool {
+	if len(history) > 0 || kbContext != "" {
+		return true
+	}
+	if len(adapter.FilterImageAttachments(attachments)) > 0 {
+		return true
+	}
+	for _, msg := range history {
+		if msg.HasMultiContent() {
+			return true
+		}
+	}
+	return false
+}
+
+func applyCompletionOverrides(req *hexagon.CompletionRequest, metadata map[string]string) {
+	if metadata == nil {
+		return
+	}
+	if model := metadata["agent_model"]; model != "" {
+		req.Model = model
+	}
+	if raw := metadata["agent_max_tokens"]; raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil {
+			req.MaxTokens = n
+		}
+	}
+	if raw := metadata["agent_temperature"]; raw != "" {
+		if temperature, err := strconv.ParseFloat(raw, 64); err == nil {
+			req.Temperature = &temperature
+		}
+	}
+}
+
+func buildUsage(usage hexagon.Usage, providerName, modelName string) *adapter.Usage {
+	if usage.TotalTokens == 0 {
+		return nil
+	}
+	return &adapter.Usage{
+		InputTokens:  usage.PromptTokens,
+		OutputTokens: usage.CompletionTokens,
+		TotalTokens:  usage.TotalTokens,
+		Provider:     providerName,
+		Model:        modelName,
+	}
+}
+
+func buildReplyMetadata(metadata map[string]string, providerName, modelName, assistantMessageID string) map[string]string {
+	replyMeta := map[string]string{
+		"provider": providerName,
+		"model":    modelName,
+	}
+	if metadata == nil {
+		return withAssistantMessageID(replyMeta, assistantMessageID)
+	}
+	if v := metadata["route_source"]; v != "" {
+		replyMeta["route_source"] = v
+	}
+	if v := metadata["routed_agent"]; v != "" {
+		replyMeta["routed_agent"] = v
+	}
+	return withAssistantMessageID(replyMeta, assistantMessageID)
+}
+
+func withAssistantMessageID(metadata map[string]string, assistantMessageID string) map[string]string {
+	if assistantMessageID == "" {
+		return metadata
+	}
+
+	merged := make(map[string]string, len(metadata)+1)
+	for key, value := range metadata {
+		merged[key] = value
+	}
+	merged["backend_message_id"] = assistantMessageID
+	return merged
+}
+
+func translateProviderToolCalls(toolCalls []streamx.ToolCall) []adapter.ToolCall {
+	if len(toolCalls) == 0 {
+		return nil
+	}
+	result := make([]adapter.ToolCall, 0, len(toolCalls))
+	for _, tc := range toolCalls {
+		result = append(result, adapter.ToolCall{
+			ID:        tc.ID,
+			Name:      tc.Name,
+			Arguments: tc.Arguments,
+		})
+	}
+	return result
+}
+
+func validateIncomingMessage(msg *adapter.Message) error {
+	if !adapter.HasMessageInput(msg.Content, msg.Attachments) {
+		return fmt.Errorf("message 不能为空")
+	}
+	if err := adapter.ValidateAttachments(msg.Attachments); err != nil {
+		return fmt.Errorf("附件校验失败: %w", err)
+	}
+	return nil
+}
+
 // singleChunk 将完整内容包装为单 chunk channel（用于快速路径）
-func singleChunk(content string) <-chan *adapter.ReplyChunk {
+func singleChunk(content string, metadata map[string]string) <-chan *adapter.ReplyChunk {
 	ch := make(chan *adapter.ReplyChunk, 1)
-	ch <- &adapter.ReplyChunk{Content: content, Done: true}
+	ch <- &adapter.ReplyChunk{Content: content, Done: true, Metadata: metadata}
 	close(ch)
 	return ch
 }
 
-func singleChunkWithTools(content string, toolCalls []adapter.ToolCall) <-chan *adapter.ReplyChunk {
+func singleChunkWithTools(content string, metadata map[string]string, toolCalls []adapter.ToolCall) <-chan *adapter.ReplyChunk {
 	ch := make(chan *adapter.ReplyChunk, 1)
-	ch <- &adapter.ReplyChunk{Content: content, Done: true, ToolCalls: toolCalls}
+	ch <- &adapter.ReplyChunk{Content: content, Done: true, Metadata: metadata, ToolCalls: toolCalls}
 	close(ch)
 	return ch
 }

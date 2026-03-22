@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -74,6 +75,9 @@ func New(cfg HubConfig, skillsDir string) *Hub {
 
 // catalogURL 构造 index.json 的 raw URL
 func (h *Hub) catalogURL() string {
+	if dir, ok := h.localRepoDir(); ok {
+		return filepath.Join(dir, "index.json")
+	}
 	// https://github.com/org/repo → https://raw.githubusercontent.com/org/repo/branch/index.json
 	repoURL := strings.TrimSuffix(h.cfg.RepoURL, ".git")
 	repoURL = strings.Replace(repoURL, "github.com", "raw.githubusercontent.com", 1)
@@ -82,24 +86,9 @@ func (h *Hub) catalogURL() string {
 
 // Refresh 从远程获取最新技能目录
 func (h *Hub) Refresh(ctx context.Context) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, h.catalogURL(), nil)
+	body, err := h.readCatalog(ctx)
 	if err != nil {
-		return fmt.Errorf("创建请求失败: %w", err)
-	}
-
-	resp, err := h.client.Do(req)
-	if err != nil {
-		return fmt.Errorf("获取技能目录失败: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("获取技能目录失败: HTTP %d", resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20)) // 10MB limit
-	if err != nil {
-		return fmt.Errorf("读取响应失败: %w", err)
+		return err
 	}
 
 	var catalog Catalog
@@ -179,30 +168,19 @@ func (h *Hub) Install(ctx context.Context, name string) error {
 
 	downloadURL := target.URL
 	if downloadURL == "" {
-		// 默认 URL 模式
-		repoURL := strings.TrimSuffix(h.cfg.RepoURL, ".git")
-		repoURL = strings.Replace(repoURL, "github.com", "raw.githubusercontent.com", 1)
-		downloadURL = repoURL + "/" + h.cfg.Branch + "/skills/" + name + ".md"
+		if dir, ok := h.localRepoDir(); ok {
+			downloadURL = filepath.Join(dir, "skills", name+".md")
+		} else {
+			// 默认 URL 模式
+			repoURL := strings.TrimSuffix(h.cfg.RepoURL, ".git")
+			repoURL = strings.Replace(repoURL, "github.com", "raw.githubusercontent.com", 1)
+			downloadURL = repoURL + "/" + h.cfg.Branch + "/skills/" + name + ".md"
+		}
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
+	content, err := h.readSkillContent(ctx, downloadURL)
 	if err != nil {
-		return fmt.Errorf("创建下载请求失败: %w", err)
-	}
-
-	resp, err := h.client.Do(req)
-	if err != nil {
-		return fmt.Errorf("下载技能失败: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("下载技能失败: HTTP %d", resp.StatusCode)
-	}
-
-	content, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1MB limit
-	if err != nil {
-		return fmt.Errorf("读取技能内容失败: %w", err)
+		return err
 	}
 
 	// 路径安全：防止路径穿越
@@ -228,6 +206,103 @@ func (h *Hub) Install(ctx context.Context, name string) error {
 	}
 
 	return nil
+}
+
+func (h *Hub) localRepoDir() (string, bool) {
+	repoURL := strings.TrimSpace(h.cfg.RepoURL)
+	if repoURL == "" {
+		return "", false
+	}
+	if strings.HasPrefix(repoURL, "file://") {
+		u, err := url.Parse(repoURL)
+		if err != nil {
+			return "", false
+		}
+		if u.Path == "" {
+			return "", false
+		}
+		return filepath.Clean(u.Path), true
+	}
+	if strings.HasPrefix(repoURL, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", false
+		}
+		return filepath.Join(home, repoURL[2:]), true
+	}
+	if filepath.IsAbs(repoURL) || strings.HasPrefix(repoURL, "./") || strings.HasPrefix(repoURL, "../") {
+		return filepath.Clean(repoURL), true
+	}
+	return "", false
+}
+
+func (h *Hub) readCatalog(ctx context.Context) ([]byte, error) {
+	if dir, ok := h.localRepoDir(); ok {
+		path := filepath.Join(dir, "index.json")
+		body, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("读取本地技能目录失败: %w", err)
+		}
+		return body, nil
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, h.catalogURL(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("创建请求失败: %w", err)
+	}
+
+	resp, err := h.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("获取技能目录失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("获取技能目录失败: HTTP %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+	if err != nil {
+		return nil, fmt.Errorf("读取响应失败: %w", err)
+	}
+	return body, nil
+}
+
+func (h *Hub) readSkillContent(ctx context.Context, source string) ([]byte, error) {
+	if dir, ok := h.localRepoDir(); ok && isLocalSkillSource(source, dir) {
+		content, err := os.ReadFile(filepath.Clean(source))
+		if err != nil {
+			return nil, fmt.Errorf("读取本地技能内容失败: %w", err)
+		}
+		return content, nil
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, source, nil)
+	if err != nil {
+		return nil, fmt.Errorf("创建下载请求失败: %w", err)
+	}
+
+	resp, err := h.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("下载技能失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("下载技能失败: HTTP %d", resp.StatusCode)
+	}
+
+	content, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, fmt.Errorf("读取技能内容失败: %w", err)
+	}
+	return content, nil
+}
+
+func isLocalSkillSource(source, repoDir string) bool {
+	cleanSource := filepath.Clean(source)
+	cleanRepo := filepath.Clean(repoDir) + string(filepath.Separator)
+	return strings.HasPrefix(cleanSource, cleanRepo)
 }
 
 // Uninstall 卸载本地技能

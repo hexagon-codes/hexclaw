@@ -207,6 +207,55 @@ func TestLogCollector_QueryWithLevel(t *testing.T) {
 	}
 }
 
+func TestLogCollector_QueryReturnsDetachedFields_NoFilter(t *testing.T) {
+	c := NewLogCollector(100)
+	fields := map[string]any{"team": "alpha"}
+	c.Add("info", "test", "msg1", fields)
+
+	entries, total := c.Query("", "", "", 10, 0)
+	if total != 1 || len(entries) != 1 {
+		t.Fatalf("首次查询 total=%d len=%d, want 1/1", total, len(entries))
+	}
+	if got := entries[0].Fields["team"]; got != "alpha" {
+		t.Fatalf("首次查询 fields[team]=%v, want alpha", got)
+	}
+
+	entries[0].Fields["team"] = "mutated"
+	fields["team"] = "caller-mutated"
+
+	entries, total = c.Query("", "", "", 10, 0)
+	if total != 1 || len(entries) != 1 {
+		t.Fatalf("再次查询 total=%d len=%d, want 1/1", total, len(entries))
+	}
+	if got := entries[0].Fields["team"]; got != "alpha" {
+		t.Fatalf("再次查询 fields[team]=%v, want alpha", got)
+	}
+}
+
+func TestLogCollector_QueryReturnsDetachedFields_Filtered(t *testing.T) {
+	c := NewLogCollector(100)
+	c.Add("info", "chat", "msg1", map[string]any{"team": "alpha"})
+	c.Add("warn", "chat", "msg2", map[string]any{"team": "beta"})
+
+	entries, total := c.Query("warn", "", "", 10, 0)
+	if total != 1 || len(entries) != 1 {
+		t.Fatalf("首次过滤查询 total=%d len=%d, want 1/1", total, len(entries))
+	}
+	if got := entries[0].Fields["team"]; got != "beta" {
+		t.Fatalf("首次过滤查询 fields[team]=%v, want beta", got)
+	}
+
+	entries[0].Fields["team"] = "mutated"
+
+	entries, total = c.Query("warn", "", "", 10, 0)
+	if total != 1 || len(entries) != 1 {
+		t.Fatalf("再次过滤查询 total=%d len=%d, want 1/1", total, len(entries))
+	}
+	if got := entries[0].Fields["team"]; got != "beta" {
+		t.Fatalf("再次过滤查询 fields[team]=%v, want beta", got)
+	}
+}
+
 // ════════════════════════════════════════════════
 // 4. 并发竞态条件测试
 // ════════════════════════════════════════════════

@@ -54,8 +54,8 @@ var latencyPriority = map[string]int{
 type Selector struct {
 	mu        sync.RWMutex
 	providers map[string]hexagon.Provider // 已初始化的 Provider
-	cfg       config.LLMConfig           // LLM 配置
-	defaultP  string                     // 默认 Provider 名称
+	cfg       config.LLMConfig            // LLM 配置
+	defaultP  string                      // 默认 Provider 名称
 }
 
 // New 创建 LLM 路由器
@@ -93,6 +93,27 @@ func New(cfg config.LLMConfig) (*Selector, error) {
 	}
 
 	return r, nil
+}
+
+// NewWithProviders 使用显式注入的 Provider 创建路由器。
+//
+// 主要用于测试和自定义 Provider 装配，避免依赖真实网络 Provider。
+func NewWithProviders(cfg config.LLMConfig, providers map[string]hexagon.Provider) *Selector {
+	r := &Selector{
+		providers: make(map[string]hexagon.Provider, len(providers)),
+		cfg:       cfg,
+		defaultP:  cfg.Default,
+	}
+	for name, provider := range providers {
+		r.providers[name] = provider
+	}
+	if _, ok := r.providers[r.defaultP]; !ok {
+		for name := range r.providers {
+			r.defaultP = name
+			break
+		}
+	}
+	return r
 }
 
 // createProvider 根据配置创建 Provider 实例

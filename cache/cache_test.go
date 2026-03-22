@@ -106,3 +106,18 @@ func TestCache_Stats(t *testing.T) {
 		t.Fatalf("期望 1 条目，实际 %d", stats.Entries)
 	}
 }
+
+func TestCache_StatsExcludesExpiredEntries(t *testing.T) {
+	c := New(Options{Enabled: true, TTL: 20 * time.Millisecond, MaxEntries: 10})
+
+	c.Put("hello", "world", "deepseek", "deepseek-chat")
+	time.Sleep(50 * time.Millisecond)
+
+	stats := c.Stats()
+	if stats.Entries != 0 {
+		t.Fatalf("过期条目不应计入当前条目数，实际 %d", stats.Entries)
+	}
+	if _, ok := c.Get("hello", "deepseek"); ok {
+		t.Fatal("过期条目在统计清理后不应再命中")
+	}
+}

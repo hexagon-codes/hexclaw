@@ -48,7 +48,7 @@ func New() *WebAdapter {
 	return &WebAdapter{}
 }
 
-func (a *WebAdapter) Name() string              { return "web" }
+func (a *WebAdapter) Name() string               { return "web" }
 func (a *WebAdapter) Platform() adapter.Platform { return adapter.PlatformWeb }
 
 // Start 注册消息处理器
@@ -91,8 +91,9 @@ func (a *WebAdapter) Send(ctx context.Context, chatID string, reply *adapter.Rep
 	}
 
 	msg := wsMessage{
-		Type:    "reply",
-		Content: reply.Content,
+		Type:     "reply",
+		Content:  reply.Content,
+		Metadata: reply.Metadata,
 	}
 	return wsjson.Write(ctx, conn, msg)
 }
@@ -115,6 +116,7 @@ func (a *WebAdapter) SendStream(ctx context.Context, chatID string, chunks <-cha
 			Type:      "chunk",
 			Content:   chunk.Content,
 			Done:      chunk.Done,
+			Metadata:  chunk.Metadata,
 			Usage:     chunk.Usage,
 			ToolCalls: chunk.ToolCalls,
 		}
@@ -136,8 +138,8 @@ func (a *WebAdapter) handleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 限制客户端消息大小为 64KB，防止 OOM
-	conn.SetReadLimit(64 * 1024)
+	// 限制客户端消息大小为 20MB，支持图片附件
+	conn.SetReadLimit(20 * 1024 * 1024)
 
 	chatID := "ws-" + idgen.ShortID()
 	a.conns.Store(chatID, conn)
@@ -162,21 +164,29 @@ func (a *WebAdapter) handleWS(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		if incoming.Type != "message" || incoming.Content == "" {
+		if incoming.Type != "message" || !adapter.HasMessageInput(incoming.Content, incoming.Attachments) {
+			continue
+		}
+		if err := adapter.ValidateAttachments(incoming.Attachments); err != nil {
+			_ = wsjson.Write(r.Context(), conn, wsMessage{
+				Type:    "error",
+				Content: err.Error(),
+			})
 			continue
 		}
 
 		// 构建统一消息
 		msg := &adapter.Message{
-			ID:         "web-" + idgen.ShortID(),
-			Platform:   adapter.PlatformWeb,
-			InstanceID: a.Name(),
-			ChatID:     chatID,
-			UserID:    "web-user",
-			UserName:  "Web User",
-			SessionID: incoming.SessionID,
-			Content:   incoming.Content,
-			Timestamp: time.Now(),
+			ID:          "web-" + idgen.ShortID(),
+			Platform:    adapter.PlatformWeb,
+			InstanceID:  a.Name(),
+			ChatID:      chatID,
+			UserID:      "web-user",
+			UserName:    "Web User",
+			SessionID:   incoming.SessionID,
+			Content:     incoming.Content,
+			Attachments: incoming.Attachments,
+			Timestamp:   time.Now(),
 		}
 
 		// 异步处理消息
@@ -217,6 +227,7 @@ func (a *WebAdapter) handleWS(w http.ResponseWriter, r *http.Request) {
 				Type:      "reply",
 				Content:   reply.Content,
 				SessionID: msg.SessionID,
+				Metadata:  reply.Metadata,
 			}
 			if err := wsjson.Write(ctx, conn, respMsg); err != nil {
 				log.Printf("Web: 发送回复失败: %v", err)
@@ -236,12 +247,14 @@ func (a *WebAdapter) getConn(chatID string) (*websocket.Conn, bool) {
 
 // wsMessage WebSocket 消息格式
 type wsMessage struct {
-	Type      string              `json:"type"`                 // message / reply / chunk / error
-	Content   string              `json:"content"`              // 消息内容
-	SessionID string              `json:"session_id,omitempty"` // 会话 ID
-	Done      bool                `json:"done,omitempty"`       // 流式输出是否结束
-	Usage     *adapter.Usage      `json:"usage,omitempty"`      // Token 使用统计（仅在 done=true 时）
-	ToolCalls []adapter.ToolCall  `json:"tool_calls,omitempty"` // 工具调用记录（仅在 done=true 时）
+	Type        string               `json:"type"`                  // message / reply / chunk / error
+	Content     string               `json:"content"`               // 消息内容
+	SessionID   string               `json:"session_id,omitempty"`  // 会话 ID
+	Done        bool                 `json:"done,omitempty"`        // 流式输出是否结束
+	Metadata    map[string]string    `json:"metadata,omitempty"`    // 附加元数据
+	Usage       *adapter.Usage       `json:"usage,omitempty"`       // Token 使用统计（仅在 done=true 时）
+	ToolCalls   []adapter.ToolCall   `json:"tool_calls,omitempty"`  // 工具调用记录（仅在 done=true 时）
+	Attachments []adapter.Attachment `json:"attachments,omitempty"` // 图片附件列表
 }
 
 // MarshalJSON 自定义序列化（省略空字段）

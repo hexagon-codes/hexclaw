@@ -46,6 +46,9 @@ func (s *txStore) GetSession(ctx context.Context, id string) (*storage.Session, 
 	)
 	var sess storage.Session
 	if err := row.Scan(&sess.ID, &sess.UserID, &sess.Platform, &sess.InstanceID, &sess.ChatID, &sess.Title, &sess.ParentSessionID, &sess.BranchMessageID, &sess.CreatedAt, &sess.UpdatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, storage.ErrNotFound
+		}
 		return nil, err
 	}
 	return &sess, nil
@@ -140,6 +143,27 @@ func (s *txStore) ListMessages(ctx context.Context, sessionID string, limit, off
 		messages = append(messages, &msg)
 	}
 	return messages, rows.Err()
+}
+
+func (s *txStore) UpdateMessageFeedback(ctx context.Context, id, feedback string) error {
+	switch feedback {
+	case "", "like", "dislike":
+	default:
+		return fmt.Errorf("无效反馈值: %s", feedback)
+	}
+
+	result, err := s.tx.ExecContext(ctx, `UPDATE messages SET feedback = ? WHERE id = ?`, feedback, id)
+	if err != nil {
+		return err
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return storage.ErrNotFound
+	}
+	return nil
 }
 
 func (s *txStore) SaveCost(ctx context.Context, record *storage.CostRecord) error {

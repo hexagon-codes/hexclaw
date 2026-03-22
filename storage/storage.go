@@ -104,6 +104,9 @@ type Store interface {
 	// ListMessages 获取会话的消息历史（按创建时间正序）
 	ListMessages(ctx context.Context, sessionID string, limit, offset int) ([]*MessageRecord, error)
 
+	// UpdateMessageFeedback 更新消息反馈（like / dislike / 空字符串清除）
+	UpdateMessageFeedback(ctx context.Context, id, feedback string) error
+
 	// UpdateSession 更新会话信息（标题等）
 	UpdateSession(ctx context.Context, session *Session) error
 

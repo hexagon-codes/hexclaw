@@ -150,6 +150,20 @@ func TestWsMessageJSON(t *testing.T) {
 				"content": "something went wrong",
 			},
 		},
+		{
+			name: "带附件消息",
+			msg: wsMessage{
+				Type:    "message",
+				Content: "",
+				Attachments: []adapter.Attachment{
+					{Type: "image", Mime: "image/png", Data: "abc123"},
+				},
+			},
+			want: map[string]any{
+				"type":    "message",
+				"content": "",
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -188,6 +202,12 @@ func TestWsMessageJSON(t *testing.T) {
 					t.Errorf("done = %v, 期望 %v", got["done"], wantDone)
 				}
 			}
+			if len(tt.msg.Attachments) > 0 {
+				raw, ok := got["attachments"].([]any)
+				if !ok || len(raw) != len(tt.msg.Attachments) {
+					t.Fatalf("attachments 序列化结果不符合预期: %#v", got["attachments"])
+				}
+			}
 		})
 	}
 }
@@ -209,6 +229,21 @@ func TestWsMessageJSONDeserialization(t *testing.T) {
 	}
 	if msg.SessionID != "sess-abc" {
 		t.Errorf("SessionID = %q, 期望 %q", msg.SessionID, "sess-abc")
+	}
+}
+
+func TestWsMessageJSONDeserializationWithAttachments(t *testing.T) {
+	input := `{"type":"message","content":"","attachments":[{"type":"image","mime":"image/png","data":"abc123"}]}`
+
+	var msg wsMessage
+	if err := json.Unmarshal([]byte(input), &msg); err != nil {
+		t.Fatalf("Unmarshal 失败: %v", err)
+	}
+	if len(msg.Attachments) != 1 {
+		t.Fatalf("期望 1 个附件，实际 %d", len(msg.Attachments))
+	}
+	if msg.Attachments[0].Mime != "image/png" {
+		t.Fatalf("附件 MIME 不匹配: %q", msg.Attachments[0].Mime)
 	}
 }
 

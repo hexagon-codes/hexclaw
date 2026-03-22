@@ -11,6 +11,7 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -50,7 +51,13 @@ func (m *Manager) GetOrCreate(ctx context.Context, msg *adapter.Message) (*stora
 	if msg.SessionID != "" {
 		sess, err := m.store.GetSession(ctx, msg.SessionID)
 		if err == nil {
+			if sess.UserID != msg.UserID {
+				return nil, fmt.Errorf("会话 %s 不属于当前用户", msg.SessionID)
+			}
 			return sess, nil
+		}
+		if err != nil && !errors.Is(err, storage.ErrNotFound) {
+			return nil, fmt.Errorf("加载会话失败: %w", err)
 		}
 	}
 
@@ -77,7 +84,7 @@ func (m *Manager) GetOrCreate(ctx context.Context, msg *adapter.Message) (*stora
 		Platform:   string(msg.Platform),
 		InstanceID: msg.InstanceID,
 		ChatID:     msg.ChatID,
-		Title:      generateTitle(msg.Content),
+		Title:      generateTitleForMessage(msg),
 		CreatedAt:  time.Now(),
 		UpdatedAt:  time.Now(),
 	}
@@ -89,21 +96,36 @@ func (m *Manager) GetOrCreate(ctx context.Context, msg *adapter.Message) (*stora
 	return sess, nil
 }
 
-// SaveUserMessage 保存用户消息到会话
-func (m *Manager) SaveUserMessage(ctx context.Context, sessionID, content string) error {
-	msg := &storage.MessageRecord{
+type messageMetadata struct {
+	Attachments []adapter.Attachment `json:"attachments,omitempty"`
+}
+
+// SaveUserMessage 保存用户消息到会话。
+func (m *Manager) SaveUserMessage(ctx context.Context, sessionID string, msg *adapter.Message) error {
+	metadata, err := encodeMessageMetadata(msg.Attachments)
+	if err != nil {
+		return fmt.Errorf("编码消息元数据失败: %w", err)
+	}
+
+	record := &storage.MessageRecord{
 		ID:        "msg-" + idgen.ShortID(),
 		SessionID: sessionID,
 		Role:      "user",
-		Content:   content,
-		Metadata:  "{}",
+		Content:   msg.Content,
+		Metadata:  metadata,
 		CreatedAt: time.Now(),
 	}
-	return m.store.SaveMessage(ctx, msg)
+	return m.store.SaveMessage(ctx, record)
 }
 
 // SaveAssistantMessage 保存助手回复到会话
 func (m *Manager) SaveAssistantMessage(ctx context.Context, sessionID, content string) error {
+	_, err := m.SaveAssistantMessageRecord(ctx, sessionID, content)
+	return err
+}
+
+// SaveAssistantMessageRecord 保存助手回复并返回消息记录。
+func (m *Manager) SaveAssistantMessageRecord(ctx context.Context, sessionID, content string) (*storage.MessageRecord, error) {
 	msg := &storage.MessageRecord{
 		ID:        "msg-" + idgen.ShortID(),
 		SessionID: sessionID,
@@ -112,7 +134,10 @@ func (m *Manager) SaveAssistantMessage(ctx context.Context, sessionID, content s
 		Metadata:  "{}",
 		CreatedAt: time.Now(),
 	}
-	return m.store.SaveMessage(ctx, msg)
+	if err := m.store.SaveMessage(ctx, msg); err != nil {
+		return nil, err
+	}
+	return msg, nil
 }
 
 // BuildContext 构建对话上下文
@@ -133,6 +158,11 @@ func (m *Manager) BuildContext(ctx context.Context, sessionID string) ([]hexagon
 
 	messages := make([]hexagon.Message, 0, len(records))
 	for _, r := range records {
+		if r.Role == "user" {
+			attachments := decodeMessageAttachments(r.Metadata)
+			messages = append(messages, adapter.BuildUserMessage(r.Content, attachments))
+			continue
+		}
 		messages = append(messages, hexagon.Message{
 			Role:    toRole(r.Role),
 			Content: r.Content,
@@ -179,4 +209,37 @@ func toRole(role string) hexagon.LLMRole {
 // 后续可接入 LLM 自动生成更好的标题。
 func generateTitle(content string) string {
 	return stringx.Truncate(content, 30)
+}
+
+func generateTitleForMessage(msg *adapter.Message) string {
+	if title := generateTitle(msg.Content); title != "" {
+		return title
+	}
+	if len(msg.Attachments) > 0 {
+		return "图片消息"
+	}
+	return ""
+}
+
+func encodeMessageMetadata(attachments []adapter.Attachment) (string, error) {
+	if len(attachments) == 0 {
+		return "{}", nil
+	}
+	data, err := json.Marshal(messageMetadata{Attachments: attachments})
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+func decodeMessageAttachments(raw string) []adapter.Attachment {
+	if raw == "" || raw == "{}" {
+		return nil
+	}
+
+	var metadata messageMetadata
+	if err := json.Unmarshal([]byte(raw), &metadata); err != nil {
+		return nil
+	}
+	return metadata.Attachments
 }

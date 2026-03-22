@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -16,6 +17,15 @@ import (
 	"github.com/hexagon-codes/hexclaw/storage"
 	sqlitestore "github.com/hexagon-codes/hexclaw/storage/sqlite"
 )
+
+type getSessionErrorStore struct {
+	storage.Store
+	err error
+}
+
+func (s *getSessionErrorStore) GetSession(context.Context, string) (*storage.Session, error) {
+	return nil, s.err
+}
 
 func newTestStoreForAPI(t *testing.T) storage.Store {
 	t.Helper()
@@ -132,6 +142,133 @@ func TestListMessages_NegativeLimit(t *testing.T) {
 	// 负数 limit 不应导致 panic 或 500
 	if w.Code == http.StatusInternalServerError {
 		t.Errorf("负数 limit 不应导致 500: %s", w.Body.String())
+	}
+}
+
+func TestUpdateMessageFeedback(t *testing.T) {
+	store := newTestStoreForAPI(t)
+	cfg := config.DefaultConfig()
+	eng := &mockEngine{reply: &adapter.Reply{Content: "ok"}}
+	srv := NewServer(cfg, eng, nil, store)
+
+	if err := store.CreateSession(context.Background(), &storage.Session{
+		ID: "sess-feedback", UserID: "test", Platform: "web", Title: "反馈测试",
+	}); err != nil {
+		t.Fatalf("创建会话失败: %v", err)
+	}
+	if err := store.SaveMessage(context.Background(), &storage.MessageRecord{
+		ID: "msg-feedback", SessionID: "sess-feedback", Role: "assistant", Content: "答复", Metadata: "{}",
+	}); err != nil {
+		t.Fatalf("保存消息失败: %v", err)
+	}
+
+	req := httptest.NewRequest("PUT", "/api/v1/messages/msg-feedback/feedback", strings.NewReader(`{"feedback":"like"}`))
+	req.SetPathValue("id", "msg-feedback")
+	w := httptest.NewRecorder()
+
+	srv.handleUpdateMessageFeedback(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("期望 200，实际 %d: %s", w.Code, w.Body.String())
+	}
+
+	sqliteStore, ok := store.(*sqlitestore.Store)
+	if !ok {
+		t.Fatal("测试存储类型断言失败")
+	}
+
+	var feedback string
+	if err := sqliteStore.DB().QueryRowContext(context.Background(), `SELECT feedback FROM messages WHERE id = ?`, "msg-feedback").Scan(&feedback); err != nil {
+		t.Fatalf("读取反馈失败: %v", err)
+	}
+	if feedback != "like" {
+		t.Fatalf("feedback=%q, want like", feedback)
+	}
+}
+
+func TestUpdateMessageFeedback_InvalidValue(t *testing.T) {
+	store := newTestStoreForAPI(t)
+	cfg := config.DefaultConfig()
+	eng := &mockEngine{reply: &adapter.Reply{Content: "ok"}}
+	srv := NewServer(cfg, eng, nil, store)
+
+	req := httptest.NewRequest("PUT", "/api/v1/messages/msg-feedback/feedback", strings.NewReader(`{"feedback":"bad"}`))
+	req.SetPathValue("id", "msg-feedback")
+	w := httptest.NewRecorder()
+
+	srv.handleUpdateMessageFeedback(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("期望 400，实际 %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestGetSession_RejectsCrossUserRead(t *testing.T) {
+	store := newTestStoreForAPI(t)
+	cfg := config.DefaultConfig()
+	eng := &mockEngine{reply: &adapter.Reply{Content: "ok"}}
+	srv := NewServer(cfg, eng, nil, store)
+
+	if err := store.CreateSession(context.Background(), &storage.Session{
+		ID: "sess-private", UserID: "user-a", Platform: "web", Title: "机密会话",
+	}); err != nil {
+		t.Fatalf("创建会话失败: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/sess-private?user_id=user-b", nil)
+	req.SetPathValue("id", "sess-private")
+	w := httptest.NewRecorder()
+
+	srv.handleGetSession(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("跨用户读取应返回 404，实际 %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestListMessages_RejectsCrossUserRead(t *testing.T) {
+	store := newTestStoreForAPI(t)
+	cfg := config.DefaultConfig()
+	eng := &mockEngine{reply: &adapter.Reply{Content: "ok"}}
+	srv := NewServer(cfg, eng, nil, store)
+
+	if err := store.CreateSession(context.Background(), &storage.Session{
+		ID: "sess-private", UserID: "user-a", Platform: "web", Title: "机密会话",
+	}); err != nil {
+		t.Fatalf("创建会话失败: %v", err)
+	}
+	if err := store.SaveMessage(context.Background(), &storage.MessageRecord{
+		ID: "msg-secret", SessionID: "sess-private", Role: "user", Content: "机密内容", Metadata: "{}",
+	}); err != nil {
+		t.Fatalf("保存消息失败: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/sess-private/messages?user_id=user-b", nil)
+	req.SetPathValue("id", "sess-private")
+	w := httptest.NewRecorder()
+
+	srv.handleListMessages(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("跨用户读取消息历史应返回 404，实际 %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestGetSession_StorageErrorReturns500(t *testing.T) {
+	baseStore := newTestStoreForAPI(t)
+	store := &getSessionErrorStore{Store: baseStore, err: errors.New("storage down")}
+	cfg := config.DefaultConfig()
+	eng := &mockEngine{reply: &adapter.Reply{Content: "ok"}}
+	srv := NewServer(cfg, eng, nil, store)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/sess-1?user_id=test", nil)
+	req.SetPathValue("id", "sess-1")
+	w := httptest.NewRecorder()
+
+	srv.handleGetSession(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("非 not found 存储错误应返回 500，实际 %d: %s", w.Code, w.Body.String())
 	}
 }
 

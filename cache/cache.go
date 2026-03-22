@@ -195,16 +195,20 @@ func (c *Cache) Put(input, response, provider, model string) {
 
 // Stats 返回缓存统计
 type Stats struct {
-	Entries int   // 当前条目数
-	Hits    int64 // 命中次数
-	Misses  int64 // 未命中次数
+	Entries int     // 当前条目数
+	Hits    int64   // 命中次数
+	Misses  int64   // 未命中次数
 	HitRate float64 // 命中率
 }
 
 // Stats 获取缓存统计信息
 func (c *Cache) Stats() Stats {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.enabled {
+		c.evictLocked()
+	}
 
 	total := c.hits + c.misses
 	var hitRate float64
