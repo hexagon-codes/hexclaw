@@ -136,4 +136,4 @@ jobs:
         if: matrix.live_network == '1' && env.RUN_LIVE_NETWORK == 'true'
         env:
           HEXCLAW_CODE_EXEC_LIVE_NETWORK: "1"
-        run: go test -v -count=1 -timeout 180s ./skill/builtin -run 'TestCodeExecSkill_Execute_PythonCrawlerNetworkPolicy'
+        run: go test -v -count=1 -timeout 180s ./skill/builtin -run '^TestCodeExecSkill_Execute_PythonCrawlerPublicNetwork$'

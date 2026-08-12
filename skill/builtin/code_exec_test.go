@@ -6,13 +6,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1120,13 +1125,35 @@ func TestCodeExecSkill_Execute_RealSnippetNoMkdirNoise(t *testing.T) {
 }
 
 func TestCodeExecSkill_Execute_PythonCrawlerNetworkPolicy(t *testing.T) {
-	if os.Getenv("HEXCLAW_CODE_EXEC_LIVE_NETWORK") != "1" {
-		t.Skip("set HEXCLAW_CODE_EXEC_LIVE_NETWORK=1 to run the crawler network policy contract")
+	requireCodeExecSandbox(t)
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		if _, err := io.WriteString(w, "<html><title>Controlled Crawler Fixture</title></html>"); err != nil {
+			t.Error(err)
+		}
+	}))
+	defer server.Close()
+	online := runPythonCrawlerNetworkContract(t, server.URL)
+	if requests.Load() != 1 || !strings.Contains(online, "title=Controlled Crawler Fixture") {
+		t.Fatalf("crawler did not receive the controlled response: requests=%d output=%s", requests.Load(), online)
 	}
+}
+
+func TestCodeExecSkill_Execute_PythonCrawlerPublicNetwork(t *testing.T) {
+	if os.Getenv("HEXCLAW_CODE_EXEC_LIVE_NETWORK") != "1" {
+		t.Skip("set HEXCLAW_CODE_EXEC_LIVE_NETWORK=1 to run the public crawler check")
+	}
+	requireCodeExecSandbox(t)
+	runPythonCrawlerNetworkContract(t, "http://example.com/")
+}
+
+func runPythonCrawlerNetworkContract(t *testing.T, target string) string {
+	t.Helper()
 	code := strings.Join([]string{
 		"import re",
 		"import urllib.request",
-		"url = 'http://example.com/'",
+		"url = " + strconv.Quote(target),
 		"req = urllib.request.Request(url, headers={'User-Agent': 'HexClawCrawlerTest/1.0'})",
 		"try:",
 		"    with urllib.request.urlopen(req, timeout=8) as resp:",
@@ -1188,6 +1215,7 @@ func TestCodeExecSkill_Execute_PythonCrawlerNetworkPolicy(t *testing.T) {
 	if !strings.Contains(online, "CRAWL_OK status=") || strings.Contains(online, "CRAWL_ERROR") {
 		t.Fatalf("network=true should allow the crawler, got:\n%s", online)
 	}
+	return online
 }
 
 func TestBUG20260727001_CodeExecProjectGoCommandUsesSelfContainedStagedWorkspace(t *testing.T) {
