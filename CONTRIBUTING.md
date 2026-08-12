@@ -10,6 +10,8 @@ hexclaw 是 Hexagon 生态的 **L3 应用**（IM 适配器 / 网关 / Skill / �
 
 macOS CI 固定使用 `macos-15`。`macos-14` runner 已退役；迁移保留现有任务、矩阵与门禁，不使用浮动 `macos-latest` 替代版本管理。
 
+跨仓 CodeExec 合同通过 `python scripts/verify-code-exec.py --output <结果文件>` 执行，输出稳定行为 ID、平台和 pass/fail/skip 结果，调用方核对必需行为集合。内部测试名称变化不改变行为 ID；合同版本仅在行为或协议变化时调整。现有手动工作流保留完整测试范围，以同一次 JSON 结果核验合同，不重复执行必需子集；公网用例仍由手动开关控制。
+
 先核对改动涉及的行为与已有证据，再选择对应的构建或已有测试。以下命令分别用于编译检查和已有用例验证，不要求每次改动全部执行：
 
 ```bash

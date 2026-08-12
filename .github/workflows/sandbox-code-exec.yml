@@ -122,18 +122,16 @@ jobs:
         run: go test -v -count=1 -timeout 240s ./os/sandbox
 
       - name: Test hexclaw code_exec
+        shell: bash
         env:
           HEXCLAW_P0_SANDBOX_PROOF: "1"
-        run: >-
-          go test -v -count=1 -timeout 900s ./skill/builtin
-          -run '^(TestCodeExec|TestCloseCodeExecSandbox|TestJoinCodeExecSandboxClose|TestToolkitSandboxMigration|TestDetectMissingPackages|TestBuildInstallCommand|TestRegisterAdvancedCodeExec|TestEnsureCodeExecConfigDefaults|TestNewCodeExecSkill|TestPrepareCodeExecCommand|TestSandboxP0)'
-
-      - name: Test macOS connector readable paths
-        if: runner.os == 'macOS'
-        run: go test -v -count=1 -timeout 180s ./skill/builtin -run 'TestBug20260626_CodeExecReadsConnectorAuthorizedDir'
-
-      - name: Test live code_exec crawler network policy
-        if: matrix.live_network == '1' && env.RUN_LIVE_NETWORK == 'true'
-        env:
-          HEXCLAW_CODE_EXEC_LIVE_NETWORK: "1"
-        run: go test -v -count=1 -timeout 180s ./skill/builtin -run '^TestCodeExecSkill_Execute_PythonCrawlerPublicNetwork$'
+          HEXCLAW_CODE_EXEC_LIVE_NETWORK: ${{ matrix.live_network == '1' && env.RUN_LIVE_NETWORK == 'true' && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          pattern='TestCodeExec|TestCloseCodeExecSandbox|TestJoinCodeExecSandboxClose|TestToolkitSandboxMigration|TestDetectMissingPackages|TestBuildInstallCommand|TestRegisterAdvancedCodeExec|TestEnsureCodeExecConfigDefaults|TestNewCodeExecSkill|TestPrepareCodeExecCommand|TestSandboxP0'
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            pattern="$pattern|TestBug20260626_CodeExecReadsConnectorAuthorizedDir"
+          fi
+          events="$RUNNER_TEMP/hexclaw-code-exec.jsonl"
+          go test -json -count=1 -timeout 900s ./skill/builtin -run "^($pattern)" | tee "$events"
+          python scripts/verify-code-exec.py --events "$events" --output "$RUNNER_TEMP/code-exec-result.json"
