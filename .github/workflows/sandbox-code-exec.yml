@@ -55,7 +55,7 @@ jobs:
             os: ubuntu-22.04
             live_network: "1"
           - name: macOS sandbox/code_exec
-            os: macos-14
+            os: macos-15
             live_network: "1"
           - name: Windows sandbox/code_exec
             os: windows-2022

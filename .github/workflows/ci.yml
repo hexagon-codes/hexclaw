@@ -119,7 +119,7 @@ jobs:
         include:
           - os: windows-2022
             platform: Windows
-          - os: macos-14
+          - os: macos-15
             platform: macOS
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
