@@ -180,6 +180,21 @@ func TestREGK12C02NullProgressRestore20260810001(t *testing.T) {
 	if track := regK12C02Track(t, planBefore, k12.WeeklySectionTextbookConsolidation); track["status"] != k12.WeeklyTrackReady {
 		t.Fatalf("temporary textbook track=%v want ready", track)
 	}
+	if _, err := db.ExecContext(ctx, `UPDATE kb_documents SET deleted=1 WHERE id='doc-six-upper'`); err != nil {
+		t.Fatal(err)
+	}
+	if rec, body := do(t, h, http.MethodGet,
+		"/textbook-binding-options?agent=mingming&subject=math", ""); rec.Code != http.StatusOK {
+		t.Fatalf("refresh deleted textbook status=%d body=%v", rec.Code, body)
+	}
+	var invalidatedStatus string
+	if err := db.QueryRowContext(ctx, `SELECT status FROM k12_textbook_bindings
+		WHERE textbook_binding_id=?`, bindingID).Scan(&invalidatedStatus); err != nil {
+		t.Fatal(err)
+	}
+	if invalidatedStatus != "invalidated" {
+		t.Fatalf("deleted textbook binding=%s want invalidated", invalidatedStatus)
+	}
 
 	restoreBody := regK12C02ProfileBundleBody(
 		"reg-c02-restore-null", "五年级下", "", 2, 1, 1,
@@ -299,10 +314,19 @@ func TestREGK12C02NullProgressRestore20260810001(t *testing.T) {
 	if got := nullHeadPlan["plan"].(map[string]any)["curriculum_progress_revision"]; got != float64(2) {
 		t.Fatalf("null progress plan lifecycle revision=%v want 2", got)
 	}
+	seedBUG20260726034A02Manifest(
+		t, db, "manifest-six-upper-new", "desktop-user", "doc-six-upper-new", 1,
+		"ready_for_confirmation", "",
+	)
+	if _, err := db.ExecContext(ctx, `UPDATE k12_textbook_manifests
+		SET catalog_json=?,catalog_digest=? WHERE manifest_id='manifest-six-upper-new'`,
+		regK12C02SixUpperCatalogJSON, "sha256:reg-k12-c02-six-upper-new"); err != nil {
+		t.Fatal(err)
+	}
 
 	recreateBody := regK12C02ProfileBundleBody(
 		"reg-c02-recreate-after-null", "六年级上", "上册", 3, 2, 2,
-		regK12C02SixUpperProgressJSON("manifest-six-upper", "上册"), true, true,
+		regK12C02SixUpperProgressJSON("manifest-six-upper-new", "上册"), true, true,
 	)
 	rec, recreated := do(t, h, http.MethodPut, "/profile-bundle", recreateBody)
 	if rec.Code != http.StatusOK {

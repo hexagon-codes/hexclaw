@@ -328,7 +328,8 @@ func (s *Store) UpdateProfileBundle(ctx context.Context, in ProfileBundleMutatio
 			}
 			if !legacyBinding {
 				if bindingOwner != in.OwnerID || bindingAgent != in.AgentName ||
-					bindingSubject != in.ProgressSubject || bindingStatus != "active" {
+					bindingSubject != in.ProgressSubject ||
+					(bindingStatus != "active" && bindingStatus != "invalidated") {
 					return k12.ProfileBundleResult{}, false, records.ErrNotFound
 				}
 				currentCanonicalBindingID = currentBindingID
@@ -384,12 +385,14 @@ func (s *Store) UpdateProfileBundle(ctx context.Context, in ProfileBundleMutatio
 
 	nextProgressRevision := progressRevision + 1
 	if in.Progress == nil {
+		// 已失效来源只解除当前进度明确引用的绑定，保留其他历史失效记录。
 		result, execErr := tx.ExecContext(ctx, `UPDATE k12_textbook_bindings
 			SET status='superseded',updated_at=?
-			WHERE owner_id=? AND agent_name=? AND subject=? AND status='active'
+			WHERE owner_id=? AND agent_name=? AND subject=?
+			  AND (status='active' OR (status='invalidated' AND textbook_binding_id=?))
 			  AND (?='' OR textbook_binding_id=?)`,
 			in.At, in.OwnerID, in.AgentName, in.ProgressSubject,
-			currentCanonicalBindingID, currentCanonicalBindingID)
+			currentCanonicalBindingID, currentCanonicalBindingID, currentCanonicalBindingID)
 		if execErr != nil {
 			return k12.ProfileBundleResult{}, false, execErr
 		}
