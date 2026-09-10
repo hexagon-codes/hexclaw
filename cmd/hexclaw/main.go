@@ -1130,7 +1130,7 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 				); err != nil {
 					logger.Warn("[knowledge] 异步文档对象存储初始化失败，上传入口保持不可用", "error", err)
 				} else {
-					kbSemanticRuntime.Worker.SetDocumentIngestProcessor(
+					kbSemanticRuntime.IngestWorker.SetDocumentIngestProcessor(
 						api.NewKnowledgeDocumentIngestProcessor(
 							kbMgr, api.WithKnowledgeResourceGovernor(processResources),
 						),
@@ -3347,9 +3347,18 @@ Set source only when the material explicitly names a work, title, or another rel
 		semanticWorkerDone = make(chan struct{})
 		go func() {
 			defer close(semanticWorkerDone)
-			runKnowledgeSemanticIndexWorker(embeddingLifecycleCtx, kbSemanticRuntime.Worker, 500*time.Millisecond, func(workerErr error) {
-				logger.Warn("[knowledge] worker iteration failed", "error_type", fmt.Sprintf("%T", workerErr))
-			})
+			// 两条固定串行通道共用原算力协调器，退出时共同等待，不让长 OCR 阻塞索引认领。
+			var workers sync.WaitGroup
+			for _, worker := range []*knowledge.SemanticIndexWorker{kbSemanticRuntime.IngestWorker, kbSemanticRuntime.Worker} {
+				workers.Add(1)
+				go func() {
+					defer workers.Done()
+					runKnowledgeSemanticIndexWorker(embeddingLifecycleCtx, worker, 500*time.Millisecond, func(workerErr error) {
+						logger.Warn("[knowledge] worker iteration failed", "error_type", fmt.Sprintf("%T", workerErr))
+					})
+				}()
+			}
+			workers.Wait()
 		}()
 	}
 	if k12Runtime != nil && k12Runtime.CatalogWorker != nil {

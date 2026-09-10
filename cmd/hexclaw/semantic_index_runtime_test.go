@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1445,6 +1446,14 @@ func TestSetupKnowledgeSemanticIndexBackfillsLegacyCorpusThroughWorker(t *testin
 
 func TestManualDocumentSemanticChildReachesSucceededWithRuntimeWorker(t *testing.T) {
 	db, ctx := newKnowledgeSemanticRuntimeTestDB(t)
+	if err := migrate.Run(ctx, db, []migrate.Migration{
+		migrate.KnowledgeIngestV24, migrate.KnowledgeIngestGenerationsV26,
+		migrate.KnowledgeDocumentScopeV27, migrate.KnowledgeIngestCheckpointV28,
+		migrate.KnowledgeIngestExecutionV46, migrate.KnowledgeUploadOperationsV71,
+		migrate.KnowledgeOCRRouteReceiptsV87, migrate.K12KnowledgeInvocationLedgersV91,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	cfg := config.DefaultConfig()
 	cfg.Knowledge.Embedding.Provider = "fixture"
 	cfg.Knowledge.Embedding.Model = "fixture-embedding"
@@ -1468,6 +1477,20 @@ func TestManualDocumentSemanticChildReachesSucceededWithRuntimeWorker(t *testing
 	}
 	if policy.ActiveRevision == nil || policy.DesiredRevision != nil {
 		t.Fatalf("initial manual-document policy = %+v, want active revision without staged rebuild", policy)
+	}
+	if err := runtime.Service.ConfigureDocumentIngest(filepath.Join(t.TempDir(), "objects")); err != nil {
+		t.Fatal(err)
+	}
+	ingestBody := "queued extraction source"
+	ingest, err := runtime.Service.CreateDocument(ctx, knowledgeDesktopOwnerID, knowledgeDefaultCorpusID, knowledge.CreateDocumentInput{
+		IdempotencyKey: "queued-extraction", Filename: "queued.txt", MediaType: "text/plain",
+		SizeBytes: int64(len(ingestBody)), Body: strings.NewReader(ingestBody),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE kb_knowledge_jobs SET created_at=created_at-1000 WHERE job_id=?`, ingest.JobID); err != nil {
+		t.Fatal(err)
 	}
 
 	store := knowledge.NewSQLiteStore(db,
@@ -1518,6 +1541,10 @@ func TestManualDocumentSemanticChildReachesSucceededWithRuntimeWorker(t *testing
 	}
 	if len(embedder.inputs) == 0 {
 		t.Fatal("manual semantic child did not invoke the local fake embedding executor")
+	}
+	ingestJob, err := runtime.Service.GetJobForCorpus(ctx, knowledgeDesktopOwnerID, knowledgeDefaultCorpusID, ingest.JobID)
+	if err != nil || ingestJob.State != knowledge.KnowledgeJobQueued || ingestJob.Attempt != 0 {
+		t.Fatalf("semantic lane consumed queued ingest: job=%+v err=%v", ingestJob, err)
 	}
 }
 

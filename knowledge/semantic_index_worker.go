@@ -207,10 +207,20 @@ func (p workerIngestPageProgress) MarkOCRPageInvocationFailedContext(
 	return p.MarkOCRPageInvocationFailed(ctx, p.lease(), p.now(), invocation, lastError)
 }
 
+// SemanticIndexWorkerLane 将摄取与索引调度隔离，空值保留原单通道调用语义。
+type SemanticIndexWorkerLane string
+
+const (
+	SemanticWorkerLaneAll    SemanticIndexWorkerLane = ""
+	SemanticWorkerLaneIngest SemanticIndexWorkerLane = "ingest"
+	SemanticWorkerLaneIndex  SemanticIndexWorkerLane = "index"
+)
+
 type SemanticIndexWorkerConfig struct {
 	OwnerID       string
 	CorpusID      string
 	WorkerID      string
+	Lane          SemanticIndexWorkerLane
 	BatchSize     int
 	LeaseDuration time.Duration
 	RetryDelay    time.Duration
@@ -294,14 +304,29 @@ func (w *SemanticIndexWorker) RunOnce(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("knowledge: invalid semantic index worker configuration")
 	}
 	now := w.now()
-	job, claimed, err := w.repository.ClaimNextJobForCorpus(
-		ctx, w.config.OwnerID, w.config.CorpusID, w.config.WorkerID, now, w.config.LeaseDuration,
-	)
+	claimStartedAt := time.Now()
+	var job KnowledgeJob
+	var claimed bool
+	var err error
+	if w.config.Lane == SemanticWorkerLaneAll {
+		job, claimed, err = w.repository.ClaimNextJobForCorpus(
+			ctx, w.config.OwnerID, w.config.CorpusID, w.config.WorkerID, now, w.config.LeaseDuration,
+		)
+	} else if repository, ok := w.repository.(interface {
+		ClaimNextJobForCorpusInLane(context.Context, string, string, string, time.Time, time.Duration, SemanticIndexWorkerLane) (KnowledgeJob, bool, error)
+	}); ok {
+		job, claimed, err = repository.ClaimNextJobForCorpusInLane(
+			ctx, w.config.OwnerID, w.config.CorpusID, w.config.WorkerID, now, w.config.LeaseDuration, w.config.Lane,
+		)
+	} else {
+		return false, fmt.Errorf("knowledge: worker repository does not support lane %q", w.config.Lane)
+	}
 	if err != nil {
 		logger.Error("[knowledge] job claim failed",
 			"owner_id", w.config.OwnerID,
 			"corpus_id", w.config.CorpusID,
 			"worker_id", w.config.WorkerID,
+			"lane", w.config.Lane,
 			"error", err,
 		)
 		return false, err
@@ -311,6 +336,9 @@ func (w *SemanticIndexWorker) RunOnce(ctx context.Context) (bool, error) {
 	}
 	startedAt := time.Now()
 	logger.Info("[knowledge] job claimed",
+		"lane", w.config.Lane,
+		"claim_elapsed_ms", time.Since(claimStartedAt).Milliseconds(),
+		"queue_age_ms", max(int64(0), now.Sub(job.CreatedAt).Milliseconds()),
 		"job_id", job.JobID,
 		"parent_job_id", job.ParentJobID,
 		"job_kind", job.Kind,
@@ -356,6 +384,7 @@ func (w *SemanticIndexWorker) RunOnce(ctx context.Context) (bool, error) {
 		}
 		if !terminalRead {
 			logger.Info("[knowledge] job completed",
+				"lane", w.config.Lane,
 				"job_id", job.JobID,
 				"parent_job_id", job.ParentJobID,
 				"owner_id", job.OwnerID,
@@ -382,6 +411,7 @@ func (w *SemanticIndexWorker) RunOnce(ctx context.Context) (bool, error) {
 			chunksTotal = *terminal.ChunksTotal
 		}
 		logger.Info("[knowledge] job completed",
+			"lane", w.config.Lane,
 			"job_id", terminal.JobID,
 			"parent_job_id", terminal.ParentJobID,
 			"job_kind", terminal.Kind,
@@ -461,6 +491,7 @@ func (w *SemanticIndexWorker) RunOnce(ctx context.Context) (bool, error) {
 			failureCode = failed.Failure.Code
 		}
 		logger.Warn("[knowledge] job failed",
+			"lane", w.config.Lane,
 			"job_id", failed.JobID,
 			"parent_job_id", failed.ParentJobID,
 			"job_kind", failed.Kind,
@@ -503,6 +534,7 @@ func (w *SemanticIndexWorker) RunOnce(ctx context.Context) (bool, error) {
 		return true, errors.Join(err, transitionErr)
 	}
 	logger.Warn("[knowledge] job retry scheduled",
+		"lane", w.config.Lane,
 		"job_id", retried.JobID,
 		"parent_job_id", retried.ParentJobID,
 		"job_kind", retried.Kind,

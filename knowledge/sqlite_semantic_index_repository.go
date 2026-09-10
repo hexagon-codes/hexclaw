@@ -1458,8 +1458,30 @@ func (r *SQLiteSemanticIndexRepository) ClaimNextJobForCorpus(
 	now time.Time,
 	leaseDuration time.Duration,
 ) (KnowledgeJob, bool, error) {
+	return r.ClaimNextJobForCorpusInLane(ctx, ownerID, corpusID, workerID, now, leaseDuration, SemanticWorkerLaneAll)
+}
+
+// ClaimNextJobForCorpusInLane 在原认领事务内筛选通道，保留原租约和调用恢复边界。
+func (r *SQLiteSemanticIndexRepository) ClaimNextJobForCorpusInLane(
+	ctx context.Context,
+	ownerID, corpusID string,
+	workerID string,
+	now time.Time,
+	leaseDuration time.Duration,
+	lane SemanticIndexWorkerLane,
+) (KnowledgeJob, bool, error) {
 	if err := validateSemanticScope(ownerID, corpusID); err != nil {
 		return KnowledgeJob{}, false, err
+	}
+	kindFilter := ""
+	switch lane {
+	case SemanticWorkerLaneAll:
+	case SemanticWorkerLaneIngest:
+		kindFilter = " AND kind='ingest'"
+	case SemanticWorkerLaneIndex:
+		kindFilter = " AND kind<>'ingest'"
+	default:
+		return KnowledgeJob{}, false, fmt.Errorf("knowledge: invalid worker lane %q", lane)
 	}
 	if strings.TrimSpace(workerID) == "" || leaseDuration <= 0 {
 		return KnowledgeJob{}, false, fmt.Errorf("knowledge: invalid worker lease")
@@ -1476,7 +1498,7 @@ func (r *SQLiteSemanticIndexRepository) ClaimNextJobForCorpus(
 	nowMillis := now.UTC().UnixMilli()
 	var jobID string
 	err = tx.QueryRowContext(ctx, `SELECT job_id FROM kb_knowledge_jobs
-		WHERE owner_id=? AND corpus_uid=? AND cancel_requested=0 AND (
+		WHERE owner_id=? AND corpus_uid=? AND cancel_requested=0`+kindFilter+` AND (
 		 state='queued' OR
 		 (state='retry_wait' AND next_attempt_at IS NOT NULL AND next_attempt_at<=?) OR
 		 (state='running' AND lease_expires_at IS NOT NULL AND lease_expires_at<=?)

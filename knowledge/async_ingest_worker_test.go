@@ -35,17 +35,31 @@ func (deterministicIngestProcessor) Prepare(
 	}, nil
 }
 
-type delayedIngestProcessor struct{ delay time.Duration }
+type delayedIngestProcessor struct {
+	delay   time.Duration
+	started chan struct{}
+	release chan struct{}
+}
 
 func (p delayedIngestProcessor) Prepare(ctx context.Context, source PersistedIngestDocument) (PreparedIngestDocument, error) {
+	if p.started != nil {
+		close(p.started)
+	}
 	timer := time.NewTimer(p.delay)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
 		return PreparedIngestDocument{}, ctx.Err()
 	case <-timer.C:
-		return deterministicIngestProcessor{}.Prepare(ctx, source)
 	}
+	if p.release != nil {
+		select {
+		case <-ctx.Done():
+			return PreparedIngestDocument{}, ctx.Err()
+		case <-p.release:
+		}
+	}
+	return deterministicIngestProcessor{}.Prepare(ctx, source)
 }
 
 type blockingPageCaptionerProcessor struct {
@@ -373,25 +387,78 @@ func TestCompletedIngestQueuesRevisionScopedEmbeddingAsChildJob(t *testing.T) {
 }
 
 func TestIngestWorkerRenewsLeaseDuringSlowExtraction(t *testing.T) {
-	db, service, ctx := newAsyncIngestHarness(t)
+	h := newSemanticMutationHarness(t)
+	ctx, cancel := context.WithCancel(h.ctx)
+	defer cancel()
+	if err := h.service.ConfigureDocumentIngest(filepath.Join(t.TempDir(), "objects")); err != nil {
+		t.Fatal(err)
+	}
+	doc, chunks := semanticMutationDocument()
+	if err := h.store.Add(ctx, doc, chunks); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.db.ExecContext(ctx, `UPDATE kb_knowledge_jobs SET created_at=created_at-1000 WHERE document_id=?`, doc.ID); err != nil {
+		t.Fatal(err)
+	}
 	body := "slow extraction source"
-	accepted, err := service.CreateDocument(ctx, "desktop-user", "default", CreateDocumentInput{
+	accepted, err := h.service.CreateDocument(ctx, "owner-1", "default", CreateDocumentInput{
 		IdempotencyKey: "slow-heartbeat", Filename: "slow.txt", MediaType: "text/plain",
 		SizeBytes: int64(len(body)), Body: strings.NewReader(body),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	worker := NewSemanticIndexWorker(NewSQLiteSemanticIndexRepository(db), nil, SemanticIndexWorkerConfig{
-		OwnerID: "desktop-user", CorpusID: "default", WorkerID: "heartbeat-worker",
-		LeaseDuration: 150 * time.Millisecond,
+	worker := NewSemanticIndexWorker(h.repo, nil, SemanticIndexWorkerConfig{
+		OwnerID: "owner-1", CorpusID: "default", WorkerID: "heartbeat-worker",
+		LeaseDuration: 150 * time.Millisecond, Lane: SemanticWorkerLaneIngest,
 	})
-	worker.SetDocumentIngestProcessor(delayedIngestProcessor{delay: 350 * time.Millisecond})
-	if worked, err := worker.RunOnce(ctx); err != nil || !worked {
-		t.Fatalf("slow ingest worked=%v err=%v", worked, err)
+	started, release := make(chan struct{}), make(chan struct{})
+	worker.SetDocumentIngestProcessor(delayedIngestProcessor{delay: 350 * time.Millisecond, started: started, release: release})
+	done := make(chan struct{})
+	var worked bool
+	var runErr error
+	go func() {
+		worked, runErr = worker.RunOnce(ctx)
+		close(done)
+	}()
+	defer func() { cancel(); <-done }()
+	select {
+	case <-started:
+	case <-done:
+		t.Fatalf("ingest lane did not enter extraction: worked=%v err=%v", worked, runErr)
+	case <-time.After(time.Second):
+		t.Fatal("ingest lane did not start")
 	}
-	job, err := service.GetJob(ctx, "desktop-user", accepted.JobID)
+	executor := &scriptedWorkerExecutor{dimension: 3}
+	indexWorker := NewSemanticIndexWorker(h.repo, &workerExecutorRegistry{
+		executors: map[string]ProfileEmbeddingExecutor{"profile-a": executor},
+	}, SemanticIndexWorkerConfig{
+		OwnerID: "owner-1", CorpusID: "default", WorkerID: "index-worker", Lane: SemanticWorkerLaneIndex,
+	})
+	if indexed, err := indexWorker.RunOnce(ctx); err != nil || !indexed || executor.calls != 1 {
+		t.Fatalf("index did not advance during extraction: worked=%v calls=%d err=%v", indexed, executor.calls, err)
+	}
+	job, err := h.service.GetJob(ctx, "owner-1", accepted.JobID)
+	if err != nil || job.State != KnowledgeJobRunning || job.LeaseOwner != "heartbeat-worker" {
+		t.Fatalf("ingest must remain independently leased while index advances: job=%+v err=%v", job, err)
+	}
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("ingest lane did not finish")
+	}
+	if runErr != nil || !worked {
+		t.Fatalf("slow ingest worked=%v err=%v", worked, runErr)
+	}
+	job, err = h.service.GetJob(ctx, "owner-1", accepted.JobID)
 	if err != nil || job.State != KnowledgeJobSucceeded || job.LeaseEpoch < 2 {
 		t.Fatalf("slow ingest job=%+v err=%v", job, err)
+	}
+	if worked, err := worker.RunOnce(ctx); err != nil || worked {
+		t.Fatalf("ingest lane claimed its embedding child: worked=%v err=%v", worked, err)
+	}
+	if worked, err := indexWorker.RunOnce(ctx); err != nil || !worked || executor.calls != 2 {
+		t.Fatalf("index lane did not complete ingest child: worked=%v calls=%d err=%v", worked, executor.calls, err)
 	}
 }

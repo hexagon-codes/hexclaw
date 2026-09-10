@@ -1252,12 +1252,13 @@ func semanticCatalogVersionForProfiles(profiles []knowledge.EmbeddingProfile) in
 // policy API without also installing revision-bound search and the durable
 // worker that can advance its jobs.
 type knowledgeSemanticIndexRuntime struct {
-	Repository *knowledge.SQLiteSemanticIndexRepository
-	Service    *knowledge.SemanticIndexService
-	Searcher   *knowledge.SQLiteRevisionSemanticSearcher
-	Worker     *knowledge.SemanticIndexWorker
-	Gate       *knowledgeSemanticRuntimeGate
-	Profiles   *knowledgeEmbeddingRuntimeHolder
+	Repository   *knowledge.SQLiteSemanticIndexRepository
+	Service      *knowledge.SemanticIndexService
+	Searcher     *knowledge.SQLiteRevisionSemanticSearcher
+	Worker       *knowledge.SemanticIndexWorker
+	IngestWorker *knowledge.SemanticIndexWorker
+	Gate         *knowledgeSemanticRuntimeGate
+	Profiles     *knowledgeEmbeddingRuntimeHolder
 }
 
 type knowledgeSemanticRuntimeAssembly struct {
@@ -1355,11 +1356,18 @@ func setupKnowledgeSemanticIndex(
 	worker := knowledge.NewSemanticIndexWorker(repository, registry, knowledge.SemanticIndexWorkerConfig{
 		OwnerID: knowledgeDesktopOwnerID, CorpusID: knowledgeDefaultCorpusID,
 		WorkerID: workerID, BatchSize: 64, LeaseDuration: 5 * time.Minute,
-		RetryDelay: 30 * time.Second,
+		RetryDelay: 30 * time.Second, Lane: knowledge.SemanticWorkerLaneIndex,
+	}, workerOptions...)
+	// 两通道复用同一协调器，调度并行不增加本地推理容量。
+	ingestWorker := knowledge.NewSemanticIndexWorker(repository, registry, knowledge.SemanticIndexWorkerConfig{
+		OwnerID: knowledgeDesktopOwnerID, CorpusID: knowledgeDefaultCorpusID,
+		WorkerID: workerID + "-ingest", BatchSize: 64, LeaseDuration: 5 * time.Minute,
+		RetryDelay: 30 * time.Second, Lane: knowledge.SemanticWorkerLaneIngest,
 	}, workerOptions...)
 	runtime := &knowledgeSemanticIndexRuntime{
 		Repository: repository, Service: service, Searcher: searcher, Worker: worker,
-		Gate: selectKnowledgeSemanticRuntimeGate([]*knowledgeSemanticRuntimeGate{assembly.gate}),
+		IngestWorker: ingestWorker,
+		Gate:         selectKnowledgeSemanticRuntimeGate([]*knowledgeSemanticRuntimeGate{assembly.gate}),
 	}
 	if holder, ok := resolver.(*knowledgeEmbeddingRuntimeHolder); ok {
 		runtime.Profiles = holder
