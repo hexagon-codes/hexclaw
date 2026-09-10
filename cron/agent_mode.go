@@ -75,6 +75,9 @@ type Notifier func(job *Job, level, title, body string)
 // (review L2).
 type Deliverer func(job *Job, target, content string) error
 
+// ResultDeliverer 可接管成功结果的投递；未接管时继续使用任务原有目标路由。
+type ResultDeliverer func(job *Job, content string) (handled bool, err error)
+
 // agentSupport is the Scheduler's agent-mode extension state.
 //
 // Tradeoff: healTimes/quotaNotices are in-memory only — a process restart
@@ -82,13 +85,14 @@ type Deliverer func(job *Job, target, content string) error
 // rare and the worst case is a few extra heal attempts, never an unbounded
 // loop within one process lifetime. Entries are pruned on RemoveJob.
 type agentSupport struct {
-	mu           sync.Mutex
-	runner       AgentRunner
-	notifier     Notifier
-	deliverer    Deliverer
-	healTimes    map[string][]time.Time // jobID → heal-attempt timestamps inside the 24h window
-	quotaNotices map[string]time.Time   // jobID → last failure-class notification (anti-bombing)
-	pendingHeals map[string]string      // 无 DB 测试路径的自愈候选标记
+	mu              sync.Mutex
+	runner          AgentRunner
+	notifier        Notifier
+	deliverer       Deliverer
+	resultDeliverer ResultDeliverer
+	healTimes       map[string][]time.Time // jobID → heal-attempt timestamps inside the 24h window
+	quotaNotices    map[string]time.Time   // jobID → last failure-class notification (anti-bombing)
+	pendingHeals    map[string]string      // 无 DB 测试路径的自愈候选标记
 }
 
 // SetDeliverer injects the IM delivery callback. Without it, non-desktop
@@ -97,6 +101,13 @@ func (s *Scheduler) SetDeliverer(fn Deliverer) {
 	s.agent.mu.Lock()
 	defer s.agent.mu.Unlock()
 	s.agent.deliverer = fn
+}
+
+// SetResultDeliverer 注入可选结果投递接缝，不改变任务执行及历史记录。
+func (s *Scheduler) SetResultDeliverer(fn ResultDeliverer) {
+	s.agent.mu.Lock()
+	defer s.agent.mu.Unlock()
+	s.agent.resultDeliverer = fn
 }
 
 // SetNotifier injects the notification callback. Without it notifications are
@@ -615,9 +626,21 @@ func (s *Scheduler) deliverResult(job *Job, result *RunResult) {
 	}
 	s.agent.mu.Lock()
 	deliverer := s.agent.deliverer
+	resultDeliverer := s.agent.resultDeliverer
 	s.agent.mu.Unlock()
 
 	var deliverErrs []string
+	if resultDeliverer != nil {
+		handled, err := resultDeliverer(job, content)
+		if err != nil {
+			deliverErrs = append(deliverErrs, err.Error())
+			slog.Warn("[cron] result delivery failed", "source", "cron", "id", job.ID, "err", err)
+		}
+		if handled || err != nil {
+			s.recordDeliveryOutcomeForGeneration(job, deliverErrs)
+			return
+		}
+	}
 	notified := false
 	for _, target := range EffectiveDeliver(job) {
 		if !s.jobGenerationCurrentFresh(job) {

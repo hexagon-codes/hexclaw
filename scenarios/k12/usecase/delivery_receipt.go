@@ -17,6 +17,7 @@ import (
 	"github.com/hexagon-codes/hexclaw/messagecontent"
 	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
+	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
 )
 
 func deliveryDigest(value string) string {
@@ -116,6 +117,70 @@ func deliveryPartDedupeKey(
 
 func deliveryBatchDedupeKey(agentName, objectKind, objectID, contentDigest string) string {
 	return deliveryDigest(strings.Join([]string{agentName, objectKind, objectID, contentDigest}, "\x00"))
+}
+
+// deliverAutomationText 以业务执行周期冻结一次投递，文案变化不创建第二批消息。
+// 重放只查询未知结果、重试明确失败及继续尚未开始的目标。
+func (d Deps) deliverAutomationText(ctx context.Context, agentName, kind, commandID, content string) (k12.DeliveryBatch, error) {
+	if d.Records == nil || d.Delivery == nil {
+		return k12.DeliveryBatch{}, ErrDeliveryUnavailable
+	}
+	objectKind := "automation_" + kind
+	dedupeKey := deliveryDigest(strings.Join([]string{"automation:v1", agentName, kind, commandID}, "\x00"))
+	batch, err := d.Records.GetDeliveryBatchByDedupe(ctx, agentName, dedupeKey)
+	created := false
+	if errors.Is(err, records.ErrNotFound) {
+		batch, err = d.buildPreparedTextBatch(ctx, agentName, objectKind, commandID, content, nil)
+		if err != nil {
+			return batch, err
+		}
+		batch.DedupeKey = dedupeKey
+		batch, created, err = d.Records.PrepareDeliveryBatch(ctx, batch)
+		if errors.Is(err, k12storage.ErrDeliveryBatchConflict) {
+			// 并行执行期间首个批次已冻结正文，后到者只复用该批次。
+			batch, err = d.Records.GetDeliveryBatchByDedupe(ctx, agentName, dedupeKey)
+		}
+	}
+	if err != nil {
+		return batch, err
+	}
+	if automationBatchAccepted(batch) {
+		return batch, nil
+	}
+	var queryErr error
+	if !created {
+		batch, queryErr = d.QueryDeliveryBatch(ctx, agentName, batch.BatchID)
+		if batch.BatchID == "" {
+			return batch, queryErr
+		}
+		// 一个未知目标暂不可查时，不阻断其它明确失败或尚未尝试的目标。
+		batch, err = d.RetryDeliveryBatch(ctx, agentName, batch.BatchID)
+		if err != nil {
+			return batch, errors.Join(queryErr, err)
+		}
+	}
+	batch, err = d.sendDeliveryBatch(ctx, batch)
+	if err != nil {
+		return batch, errors.Join(queryErr, err)
+	}
+	if !automationBatchAccepted(batch) {
+		return batch, errors.Join(queryErr, fmt.Errorf("automation delivery is incomplete: %s", batch.Status))
+	}
+	return batch, nil
+}
+
+// automationBatchAccepted 只承认真实受理编号或送达回执，不将受理升级为送达。
+func automationBatchAccepted(batch k12.DeliveryBatch) bool {
+	if len(batch.Receipts) == 0 {
+		return false
+	}
+	for _, receipt := range batch.Receipts {
+		if receipt.Status != k12.DeliveryDelivered &&
+			!(receipt.Status == k12.DeliverySending && receipt.ExternalMessageID != "") {
+			return false
+		}
+	}
+	return true
 }
 
 // GetDeliveryBatchForMessageIdentity 只读取与当前正文及附件身份完全一致的冻结批次。

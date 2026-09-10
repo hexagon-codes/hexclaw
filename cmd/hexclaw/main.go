@@ -2966,6 +2966,11 @@ Set source only when the material explicitly names a work, title, or another rel
 			}
 			desktopSvc.NotifySource(title, body, nt, "cron")
 		})
+		if k12Runtime != nil {
+			scheduler.SetResultDeliverer(newK12CronResultDeliver(ctx, &k12Runtime.Deps, agentRouter, func(job *cron.Job, content string) {
+				desktopSvc.NotifySource(job.Name, content, desktop.NotifyInfo, "cron")
+			}))
+		}
 		// Start only after the agent runner AND the notifier are wired
 		// (review L7): jobs due right at boot would otherwise run before
 		// delivery / heal notifications were possible.

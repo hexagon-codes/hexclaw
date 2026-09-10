@@ -14,8 +14,7 @@ import (
 	"github.com/hexagon-codes/hexclaw/storage/migrate"
 )
 
-// GET /cron/return-reminder 契约（§3.13 回传提醒）：昨日固化未回传 → 有文案（含
-// paper_no）；重复调用（cron 重触发）→ 第二次空 body（每卷最多一次）；缺 agent → 400。
+// GET /cron/return-reminder 只读投影昨日固化未回传卷的文案，重复读取不消费发送事实。
 func TestCronReturnReminder_Endpoint(t *testing.T) {
 	loc := time.FixedZone("Asia/Shanghai", 8*3600)
 	finalizeAt := time.Date(2026, 7, 16, 15, 0, 0, 0, loc)
@@ -64,10 +63,10 @@ func TestCronReturnReminder_Endpoint(t *testing.T) {
 	if !strings.Contains(body, v.Fields.PaperNo) {
 		t.Errorf("提醒应含卷面号 %s, got %q", v.Fields.PaperNo, body)
 	}
-	// cron 重触发：每卷最多提醒一次 → 第二次空 body（脚本静默跳过）。
+	// 未发生投递时，重复读取仍返回同一卷的提醒。
 	code, body = getText(t, h, "/cron/return-reminder?agent=mingming")
-	if code != 200 || strings.TrimSpace(body) != "" {
-		t.Errorf("第二次调用应空 body, got code=%d body=%q", code, body)
+	if code != 200 || !strings.Contains(body, v.Fields.PaperNo) {
+		t.Errorf("未投递前重复读取应仍有文案, got code=%d body=%q", code, body)
 	}
 
 	code, _ = getText(t, h, "/cron/return-reminder")

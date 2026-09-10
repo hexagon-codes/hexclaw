@@ -305,6 +305,10 @@ func TestExecuteJob_AgentResultDelivered(t *testing.T) {
 	})
 	var got []string
 	s.SetNotifier(func(_ *Job, level, title, body string) { got = append(got, level+"|"+title+"|"+body) })
+	s.SetResultDeliverer(func(job *Job, content string) (bool, error) {
+		got = append(got, job.Name+"|"+content)
+		return true, nil
+	})
 
 	job, err := s.AddJobFromPrompt(ctx, AddJobRequest{
 		Name: "晨报", Schedule: "@daily", Prompt: "每天总结要点", UserID: "u1",

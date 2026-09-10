@@ -11,11 +11,8 @@ import (
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/usecase"
 )
 
-// 回传提醒契约（架构设计-v0.5.0 §3.13 回传提醒规则，2026-07-18 补）：
-//   - 扫 finalized_at=昨日（T+1）且仍未回传（assigned）的固化卷 → 生成提醒文案；
-//   - 文案含 paper_no 与题数，家长向用语（§4.11：禁「篮子/验证器」等机制词）；
-//   - 已回传（submitted+）不提醒；每卷最多提醒一次（reminder_sent_at 持久幂等）；
-//   - 家长手动关闭（reminder_dismissed）不提醒；非昨日固化不提醒。
+// 回传提醒只读生成昨日固化且尚缺回传题目的卷面文案；发送事实由实际投递回执决定。
+// 部分回传仍需提醒，全部回传、关闭提醒及不在时间窗内的卷不再提醒。
 
 // 回传提醒时区口径：§3.13 默认时区 Asia/Shanghai（无夏令时，固定 +8）。
 var reminderLoc = time.FixedZone("Asia/Shanghai", 8*3600)
@@ -74,12 +71,12 @@ func TestReturnReminder_YesterdayUnreturnedHasText(t *testing.T) {
 	}
 }
 
-func TestReturnReminder_AlreadyReturnedSkips(t *testing.T) {
+func TestReturnReminder_PartiallyReturnedStillReminds(t *testing.T) {
 	d := newDataDeps(t)
 	finalizeAt := time.Date(2026, 7, 16, 15, 0, 0, 0, reminderLoc)
 	remindAt := time.Date(2026, 7, 17, 20, 0, 0, 0, reminderLoc)
 	id, _ := finalizeYesterdaySet(t, d, "xiaoming", finalizeAt)
-	// 昨日卷已回传（哪怕部分回传，状态离开 assigned）→ 不提醒。
+	// 部分回传仍有题目未交，不能仅凭整卷 submitted 状态跳过。
 	t.Setenv("HEXCLAW_ASSET_ROOT", t.TempDir())
 	assetID := saveReturnAsset(t, "xiaoming")
 	if _, err := d.SubmitReturn(context.Background(), "xiaoming", id, "return-reminder", assetID, []string{"q1"}); err != nil {
@@ -91,8 +88,8 @@ func TestReturnReminder_AlreadyReturnedSkips(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !skip || text != "" {
-		t.Fatalf("已回传卷不应提醒, got skip=%v text=%q", skip, text)
+	if skip || text == "" {
+		t.Fatalf("部分回传卷仍应提醒, got skip=%v text=%q", skip, text)
 	}
 }
 
@@ -100,19 +97,56 @@ func TestReturnReminder_OncePerPaper(t *testing.T) {
 	d := newDataDeps(t)
 	finalizeAt := time.Date(2026, 7, 16, 15, 0, 0, 0, reminderLoc)
 	remindAt := time.Date(2026, 7, 17, 20, 0, 0, 0, reminderLoc)
-	finalizeYesterdaySet(t, d, "xiaoming", finalizeAt)
+	id, _ := finalizeYesterdaySet(t, d, "xiaoming", finalizeAt)
 
 	d.Now = func() int64 { return remindAt.Unix() }
 	if _, skip, err := d.ReturnReminder(context.Background(), "xiaoming"); err != nil || skip {
 		t.Fatalf("第一次应有提醒, skip=%v err=%v", skip, err)
 	}
-	// 每卷最多提醒一次：reminder_sent_at 持久化，第二次调用（cron 重触发）静默。
+	// 连续读取文案不消费提醒，发送事实只能由真正投递后写入。
 	text, skip, err := d.ReturnReminder(context.Background(), "xiaoming")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !skip || text != "" {
-		t.Fatalf("同卷第二次不应再提醒, got skip=%v text=%q", skip, text)
+	if skip || text == "" {
+		t.Fatalf("未投递的同卷仍应可读取提醒, got skip=%v text=%q", skip, text)
+	}
+	fake := &batchTransport{
+		targets: batchTargets(),
+		send: []usecase.DeliveryTransportAck{
+			{Status: k12.DeliveryDelivered, ExternalMessageID: "reminder-a"},
+			{Status: k12.DeliveryFailed},
+			{Status: k12.DeliveryOutcomeUnknown, ExternalMessageID: "reminder-b"},
+		},
+		query: []usecase.DeliveryTransportAck{{Status: k12.DeliverySending, ExternalMessageID: "reminder-b"}},
+	}
+	d.Delivery = fake
+	ctx := context.Background()
+	if err := d.DeliverCronResult(ctx, "xiaoming", usecase.KindReturnReminder, text, nil); err == nil {
+		t.Fatal("部分投递失败不能消费提醒")
+	}
+	v, err := d.GetPracticeSet(ctx, "xiaoming", id)
+	if err != nil || v.Fields.ReminderSentAt != 0 {
+		t.Fatalf("未全部受理不应记录已提醒: sent=%d err=%v", v.Fields.ReminderSentAt, err)
+	}
+	if err := d.DeliverCronResult(ctx, "xiaoming", usecase.KindReturnReminder, text, nil); err == nil {
+		t.Fatal("结果未知不能消费提醒")
+	}
+	if len(fake.sends) != 3 || fake.sends[1].DeliveryID != fake.sends[2].DeliveryID {
+		t.Fatalf("重放只能重试失败目标的原回执: sends=%+v", fake.sends)
+	}
+	if err := d.DeliverCronResult(ctx, "xiaoming", usecase.KindReturnReminder, text, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.sends) != 3 || len(fake.queries) != 1 || fake.prepareCalls != 1 {
+		t.Fatalf("未知结果只能查询原批次: sends=%d queries=%d prepares=%d", len(fake.sends), len(fake.queries), fake.prepareCalls)
+	}
+	v, err = d.GetPracticeSet(ctx, "xiaoming", id)
+	if err != nil || v.Fields.ReminderSentAt != remindAt.Unix() {
+		t.Fatalf("真实受理后应记录已提醒: sent=%d err=%v", v.Fields.ReminderSentAt, err)
+	}
+	if text, skip, err := d.ReturnReminder(ctx, "xiaoming"); err != nil || !skip || text != "" {
+		t.Fatalf("同卷实际提醒后不重复: skip=%v text=%q err=%v", skip, text, err)
 	}
 }
 

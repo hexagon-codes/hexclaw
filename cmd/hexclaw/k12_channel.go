@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/channel"
@@ -808,6 +809,48 @@ func (b *k12IMBinder) Bind(ctx context.Context, platform, instanceID, chatID, ag
 		}
 		return b.store.ReplaceRuleScope(ctx, persisted)
 	})
+}
+
+// newK12CronResultDeliver 仅接管四类默认辅导任务，使用实例当前直接绑定及持久回执。
+func newK12CronResultDeliver(
+	ctx context.Context,
+	deps *k12usecase.Deps,
+	router *agentrouter.Dispatcher,
+	notify func(*cron.Job, string),
+) cron.ResultDeliverer {
+	return func(job *cron.Job, content string) (bool, error) {
+		if job == nil || deps == nil || router == nil {
+			return false, nil
+		}
+		separator := strings.LastIndex(job.SourceKey, "/")
+		if separator < 1 {
+			return false, nil
+		}
+		agentName := job.SourceKey[:separator]
+		kind := k12usecase.K12CronKind(job.SourceKey[separator+1:])
+		switch kind {
+		case k12usecase.KindWeeklySheet, k12usecase.KindReturnReminder,
+			k12usecase.KindSemesterSpring, k12usecase.KindSemesterFall:
+		default:
+			return false, nil
+		}
+		agent, ok := router.GetAgent(agentName)
+		if !ok || agent.Metadata["scenario"] != k12TutorScenario {
+			return false, nil
+		}
+		deliveryCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		defer cancel()
+		err := deps.DeliverCronResult(deliveryCtx, agentName, kind, content, func(body string) error {
+			if notify == nil {
+				return fmt.Errorf("automation desktop notifier is unavailable")
+			}
+			notify(job, body)
+			return nil
+		})
+		slog.Info("K12 automation result delivery finished", "job_id", job.ID,
+			"agent_id", agentName, "kind", kind, "error", err)
+		return true, err
+	}
 }
 
 // newCronIMDeliver 把平台 cron 的 IM 投递接到通道注册表：已注册通道（钉钉）的投递走
