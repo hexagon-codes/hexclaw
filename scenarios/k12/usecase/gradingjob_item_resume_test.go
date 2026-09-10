@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -71,11 +72,16 @@ type itemResumeGrader struct {
 	failFirst      map[string]error
 	outcomeUnknown map[string]error
 	outcomes       map[string]GradeOutcome
+	inputProblem   string
+	inputSolution  string
 }
 
-func (g *itemResumeGrader) Grade(_ context.Context, problem, _, _ string) (GradeOutcome, error) {
+func (g *itemResumeGrader) Grade(_ context.Context, problem, _, solution string) (GradeOutcome, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.inputProblem = problem
+	g.inputSolution = solution
+	problem = strings.SplitN(problem, "\n\nFrozen practice reference (", 2)[0]
 	g.calls[problem]++
 	if err := g.outcomeUnknown[problem]; err != nil {
 		return GradeOutcome{}, err
@@ -273,21 +279,36 @@ func TestGradingOrchestratorItemResume_One503DoesNotCompleteAndRetriesOnlyMissin
 }
 
 func TestGradingOrchestratorItemResume_SolveSucceededRetryRunsOnlyGrade(t *testing.T) {
+	runDir := t.TempDir()
 	solver := &itemResumeSolver{calls: map[string]int{}}
 	grader := &itemResumeGrader{
 		calls:     map[string]int{},
 		failFirst: map[string]error{"q1": errItemResumeProvider503},
 	}
-	o := newItemResumeOrchestrator(t, t.TempDir(), []RecognizedQuestion{{
-		Question: "q1", Subject: "数学", StudentAnswer: "1", AnswerState: AnswerStatePresent,
+	o := newItemResumeOrchestrator(t, runDir, []RecognizedQuestion{{
+		Question: "answer only", Subject: "数学", StudentAnswer: "1", AnswerState: AnswerStatePresent,
 	}}, solver, grader)
 	jobID := runItemResumeJobToAssessing(t, o, "item-resume-grade-only")
+	run := o.lookup(jobID)
+	run.req.PracticePaperSize = 1
+	run.req.PracticeReferences = []PracticeGradingReference{{
+		ItemID: "practice-item-1", PracticeProblemID: "practice-problem-1", PaperSeq: 1,
+		Subject: "数学", QuestionMarkdown: "q1", ExpectedAnswerMarkdown: "999",
+	}}
+	if err := o.persistRun(jobID, run); err != nil {
+		t.Fatal(err)
+	}
 
 	failed, err := o.ConfirmAndRun(context.Background(), jobID, nil)
 	if !errors.Is(err, errItemResumeProvider503) || failed.Record.Status != k12.GradingStageFailedRetryable {
 		t.Fatalf("first grade failure: stage=%s err=%v", failed.Record.Status, err)
 	}
-	completed, err := o.RetryAndRun(context.Background(), jobID)
+	restored := trackGradingOrchestrator(t, NewGradingOrchestrator(o.deps, orchestratorSnapshotResolver, WithGradingRunDir(runDir)))
+	restoredRun, err := restored.ensureRun(context.Background(), jobID)
+	if err != nil || restoredRun.req.PracticePaperSize != 1 || !reflect.DeepEqual(restoredRun.req.PracticeReferences, run.req.PracticeReferences) {
+		t.Fatalf("frozen practice reference was not restored: run=%+v err=%v", restoredRun, err)
+	}
+	completed, err := restored.RetryAndRun(context.Background(), jobID)
 	if err != nil || completed.Record.Status != k12.GradingStageCompleted {
 		t.Fatalf("grade-only retry: stage=%s err=%v", completed.Record.Status, err)
 	}
@@ -296,6 +317,16 @@ func TestGradingOrchestratorItemResume_SolveSucceededRetryRunsOnlyGrade(t *testi
 	}
 	if got := grader.callCount("q1"); got != 2 {
 		t.Fatalf("grader calls=%d, want failure plus one safe retry", got)
+	}
+	if !strings.Contains(grader.inputProblem, "Frozen practice reference (") ||
+		!strings.HasSuffix(grader.inputProblem, "999") || grader.inputSolution != "2" {
+		t.Fatalf("reference must not replace independently solved answer: problem=%q solution=%q", grader.inputProblem, grader.inputSolution)
+	}
+	result, ok := restored.PhotoResult(jobID)
+	if !ok || len(result.Items) != 1 || result.Items[0].PracticeItemID != "practice-item-1" ||
+		result.Items[0].PracticeProblemID != "practice-problem-1" || result.Items[0].Recognized.Question != "answer only" ||
+		result.Items[0].Grade.Solution != "2" || result.Items[0].Grade.Evidence.EvidenceType != EvidenceNumericExec {
+		t.Fatalf("durable result lost OCR, frozen identity, or independent evidence: %+v", result)
 	}
 }
 
@@ -401,11 +432,17 @@ func TestGradingOrchestratorItemResume_ExactSetCompletes(t *testing.T) {
 	solver := &itemResumeSolver{calls: map[string]int{}}
 	grader := &itemResumeGrader{calls: map[string]int{}}
 	o := newItemResumeOrchestrator(t, t.TempDir(), []RecognizedQuestion{
-		{Question: "q1", Subject: "数学", StudentAnswer: "1", AnswerState: AnswerStatePresent},
-		{Question: "q2", Subject: "数学", StudentAnswer: "2", AnswerState: AnswerStatePresent},
-		{Question: "q3", Subject: "数学", StudentAnswer: "3", AnswerState: AnswerStatePresent},
+		{Question: "q1", SourceNumberPath: []string{"2"}, DisplayLabel: "2", Subject: "数学", StudentAnswer: "1", AnswerState: AnswerStatePresent},
+		{Question: "q2", SourceNumberPath: []string{"1"}, DisplayLabel: "1", Subject: "数学", StudentAnswer: "2", AnswerState: AnswerStatePresent},
+		{Question: "q3", SourceNumberPath: []string{"99"}, DisplayLabel: "99", Subject: "数学", StudentAnswer: "3", AnswerState: AnswerStatePresent},
 	}, solver, grader)
 	jobID := runItemResumeJobToAssessing(t, o, "item-resume-exact-set")
+	run := o.lookup(jobID)
+	run.req.PracticePaperSize = 2
+	run.req.PracticeReferences = []PracticeGradingReference{
+		{ItemID: "item-1", PracticeProblemID: "practice-1", PaperSeq: 1, Subject: "数学", QuestionMarkdown: "q2", ExpectedAnswerMarkdown: "2"},
+		{ItemID: "item-2", PracticeProblemID: "practice-2", PaperSeq: 2, Subject: "数学", QuestionMarkdown: "q1", ExpectedAnswerMarkdown: "2"},
+	}
 
 	completed, err := o.ConfirmAndRun(context.Background(), jobID, nil)
 	if err != nil || completed.Record.Status != k12.GradingStageCompleted {
@@ -415,8 +452,15 @@ func TestGradingOrchestratorItemResume_ExactSetCompletes(t *testing.T) {
 	if !ok || len(result.Items) != 3 {
 		t.Fatalf("completed result exact set: ok=%v items=%d", ok, len(result.Items))
 	}
+	if result.Items[0].PracticeItemID != "item-2" || result.Items[1].PracticeItemID != "item-1" ||
+		result.Items[2].PracticeItemID != "" || result.Items[2].Status != PhotoAnswerUnclear ||
+		result.Items[2].Recognized.AnswerState != AnswerStatePresent ||
+		!strings.Contains(result.Markdown, "cannot be uniquely matched") || strings.Contains(result.Markdown, "作答待补录") ||
+		solver.callCount("q3") != 0 || grader.callCount("q3") != 0 {
+		t.Fatalf("unmatched answer must have a needs-review receipt without blocking clear items: %+v", result.Items)
+	}
 	assertAssessStageInvocationStatuses(t, o, jobID, k12.ModelInvocationSucceeded)
-	for _, problem := range []string{"q1", "q2", "q3"} {
+	for _, problem := range []string{"q1", "q2"} {
 		if got := solver.callCount(problem); got != 1 {
 			t.Errorf("solver calls for %s=%d, want one", problem, got)
 		}

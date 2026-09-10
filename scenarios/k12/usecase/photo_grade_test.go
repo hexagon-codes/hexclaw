@@ -73,8 +73,8 @@ func TestGradeHomeworkPhoto_AnsweredSheetGradesAndAnnotatesTrustedBBox(t *testin
 	)
 	d.ParentTeachingGuide = &parentTeachingGuideSpy{}
 	d.Recognizer = photoRecognizerFake{questions: []RecognizedQuestion{
-		{Question: "1+1=", Subject: "数学", StudentAnswer: "2"},
-		{Question: "2+2=", Subject: "数学", StudentAnswer: ""},
+		{Question: "第2题", SourceNumberPath: []string{"2"}, DisplayLabel: "2", Subject: "数学", StudentAnswer: "2"},
+		{Question: "第1题", SourceNumberPath: []string{"1"}, DisplayLabel: "1", Subject: "数学", StudentAnswer: ""},
 	}}
 	anchorer := &photoAnchorerFake{boxes: map[int]BBox{0: {X: 0.2, Y: 0.3, W: 0.1, H: 0.05}}}
 	d.AnswerAnchorer = anchorer
@@ -83,6 +83,11 @@ func TestGradeHomeworkPhoto_AnsweredSheetGradesAndAnnotatesTrustedBBox(t *testin
 
 	got, err := d.GradeHomeworkPhoto(context.Background(), PhotoGradeRequest{
 		AgentName: "mingming", Grade: "五年级上", SourceSession: "dt-1", Image: []byte("jpeg"),
+		PracticePaperSize: 2,
+		PracticeReferences: []PracticeGradingReference{
+			{ItemID: "item-1", PracticeProblemID: "practice-1", PaperSeq: 1, Subject: "数学", QuestionMarkdown: "2+2=", ExpectedAnswerMarkdown: "4"},
+			{ItemID: "item-2", PracticeProblemID: "practice-2", PaperSeq: 2, Subject: "数学", QuestionMarkdown: "1+1=", ExpectedAnswerMarkdown: "2"},
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -92,6 +97,11 @@ func TestGradeHomeworkPhoto_AnsweredSheetGradesAndAnnotatesTrustedBBox(t *testin
 	}
 	if got.Items[0].Status != PhotoCorrect || got.Items[1].Status != PhotoBlankSolved {
 		t.Fatalf("unexpected statuses: %#v", got.Items)
+	}
+	if got.Items[0].Recognized.Question != "第2题" || got.Items[0].PracticeItemID != "item-2" ||
+		got.Items[0].PracticeProblemID != "practice-2" || got.Items[1].PracticeItemID != "item-1" ||
+		!strings.Contains(got.Items[1].Solve.Solution, "2+2=") || !strings.HasSuffix(got.Items[1].Solve.Solution, "**4**") {
+		t.Fatalf("frozen paper identity/input must preserve raw OCR: %#v", got.Items)
 	}
 	if got.AnnotatedImage == nil || string(got.AnnotatedImage.Data) != "png" {
 		t.Fatalf("trusted answered bbox should produce annotated PNG: %#v", got.AnnotatedImage)

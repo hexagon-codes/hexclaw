@@ -405,7 +405,7 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 	mode PhotoMode,
 	q RecognizedQuestion,
 ) (PhotoGradeItem, error) {
-	item := PhotoGradeItem{Recognized: q}
+	item := photoItemWithPracticeReference(req, q)
 	if strings.TrimSpace(q.ProblemID) == "" || strings.TrimSpace(q.AttemptID) == "" ||
 		q.ConfirmedVersion < 1 || strings.TrimSpace(q.InputDigest) == "" {
 		return item, fmt.Errorf("%w: durable assessment problem/attempt identity is incomplete", ErrInvalidInput)
@@ -422,12 +422,12 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 	} else if !errors.Is(err, records.ErrNotFound) {
 		return item, err
 	}
-
-	gradeReq := GradeRequest{
-		AgentName: req.AgentName, Subject: firstNonEmpty(q.Subject, req.Subject), Grade: req.Grade,
-		SourceSession: req.SourceSession, Problem: q.Question, StudentAnswer: q.StudentAnswer,
-		KnowledgePoints: photoGradeKnowledgePoints(q),
+	if item.Status == PhotoAnswerUnclear {
+		return commitGradingAssessmentItem(ctx, deps, job, q, item, "", "", "",
+			k12storage.GradingAssessmentEffects{})
 	}
+
+	gradeReq := photoItemGradeRequest(req, q)
 	if mode == PhotoModeGrade && q.AnswerState == AnswerStateBlank {
 		// 页级仍是批改卷，清晰空白条目仅复用求解链，不产生学生批改事实。
 		mode = PhotoModeSolve

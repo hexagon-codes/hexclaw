@@ -78,16 +78,31 @@ type PhotoGradeRequest struct {
 	// TaskIntent is frozen by ImageTaskDispatch. Empty preserves the legacy
 	// direct-photo path which infers intent from recognition evidence.
 	TaskIntent PhotoTaskIntent
+	// PracticeReferences 是服务端冻结的练习引用，不改写识别原始事实。
+	PracticeReferences []PracticeGradingReference `json:"practice_references,omitempty"`
+	PracticePaperSize  int                        `json:"practice_paper_size,omitempty"`
+	practiceReference  *PracticeGradingReference
+}
+
+type PracticeGradingReference struct {
+	ItemID                 string `json:"item_id"`
+	PracticeProblemID      string `json:"practice_problem_id"`
+	PaperSeq               int    `json:"paper_seq"`
+	Subject                string `json:"subject"`
+	QuestionMarkdown       string `json:"question_markdown"`
+	ExpectedAnswerMarkdown string `json:"expected_answer_markdown"`
 }
 
 type PhotoGradeItem struct {
-	Recognized  RecognizedQuestion
-	Status      PhotoItemStatus
-	ResultKind  PhotoItemResultKind
-	Grade       GradeResult
-	Solve       SolveHomeworkResult
-	ParentGuide *ParentTeachingGuide
-	Warning     string
+	Recognized        RecognizedQuestion
+	Status            PhotoItemStatus
+	ResultKind        PhotoItemResultKind
+	Grade             GradeResult
+	Solve             SolveHomeworkResult
+	ParentGuide       *ParentTeachingGuide
+	Warning           string
+	PracticeItemID    string `json:"practice_item_id,omitempty"`
+	PracticeProblemID string `json:"practice_problem_id,omitempty"`
 }
 
 type PhotoGradeResult struct {
@@ -203,6 +218,7 @@ func (d Deps) gradeHomeworkPhotoWithAssessorInput(
 	if len(questions) == 0 {
 		return PhotoGradeResult{}, fmt.Errorf("%w: 未识别到可作答的独立题目", ErrInvalidInput)
 	}
+	practiceReferences := practiceQuestionReferences(req.PracticeReferences, req.PracticePaperSize, questions)
 	mode := classifyPhotoMode(questions)
 	if mode == PhotoModeSolve && hasUnclear && !anchorVerified {
 		// An unavailable evidence adapter must fail closed: a genuinely answered but unreadable page
@@ -272,7 +288,11 @@ func (d Deps) gradeHomeworkPhotoWithAssessorInput(
 				if !ok {
 					return
 				}
-				item, itemErr := assess(ctx, req, mode, questions[i])
+				itemReq := req
+				if len(req.PracticeReferences) > 0 {
+					itemReq.practiceReference = practiceReferences[i]
+				}
+				item, itemErr := assess(ctx, itemReq, mode, questions[i])
 				if itemErr != nil {
 					item.Status, item.Warning = PhotoFailed, itemErr.Error()
 					firstItemErrOnce.Do(func() { firstItemErr = itemErr })
@@ -329,12 +349,11 @@ func (d Deps) assessPhotoItem(
 	mode PhotoMode,
 	q RecognizedQuestion,
 ) (PhotoGradeItem, error) {
-	item := PhotoGradeItem{Recognized: q}
-	gradeReq := GradeRequest{
-		AgentName: req.AgentName, Subject: firstNonEmpty(q.Subject, req.Subject), Grade: req.Grade,
-		SourceSession: req.SourceSession, Problem: q.Question, StudentAnswer: q.StudentAnswer,
-		KnowledgePoints: photoGradeKnowledgePoints(q),
+	item := photoItemWithPracticeReference(req, q)
+	if item.Status == PhotoAnswerUnclear {
+		return item, nil
 	}
+	gradeReq := photoItemGradeRequest(req, q)
 	if mode == PhotoModeGrade && q.AnswerState != AnswerStateBlank {
 		switch q.AnswerState {
 		case AnswerStateUnclear:
@@ -367,6 +386,33 @@ func (d Deps) assessPhotoItem(
 		item.Warning = "Independent programmatic verification is unavailable for this answer."
 	}
 	return item, nil
+}
+
+// photoItemWithPracticeReference 在回执固化前绑定练习身份，保留识别事实。
+func photoItemWithPracticeReference(req PhotoGradeRequest, q RecognizedQuestion) PhotoGradeItem {
+	item := PhotoGradeItem{Recognized: q}
+	if req.practiceReference != nil {
+		item.PracticeItemID = req.practiceReference.ItemID
+		item.PracticeProblemID = req.practiceReference.PracticeProblemID
+	} else if len(req.PracticeReferences) > 0 {
+		item.Status = PhotoAnswerUnclear
+		item.Warning = "The answer cannot be uniquely matched to this practice paper."
+	}
+	return item
+}
+
+// photoItemGradeRequest 只替换批改输入副本，OCR 题目、作答与持久身份保持不变。
+func photoItemGradeRequest(req PhotoGradeRequest, q RecognizedQuestion) GradeRequest {
+	input := GradeRequest{
+		AgentName: req.AgentName, Subject: firstNonEmpty(q.Subject, req.Subject), Grade: req.Grade,
+		SourceSession: req.SourceSession, Problem: q.Question, StudentAnswer: q.StudentAnswer,
+		KnowledgePoints: photoGradeKnowledgePoints(q), PracticeReference: req.practiceReference,
+	}
+	if req.practiceReference != nil {
+		input.Subject = req.practiceReference.Subject
+		input.Problem = req.practiceReference.QuestionMarkdown
+	}
+	return input
 }
 
 func classifyPhotoMode(questions []RecognizedQuestion) PhotoMode {
@@ -673,7 +719,11 @@ func photoGradeMarkdown(result PhotoGradeResult) string {
 		case PhotoBlankSolved:
 			solved++
 		case PhotoAnswerUnclear:
-			unclear++
+			if item.Recognized.AnswerState == AnswerStateUnclear {
+				unclear++
+			} else {
+				pending++
+			}
 		default:
 			pending++
 		}
@@ -803,6 +853,11 @@ func photoGradeMarkdown(result PhotoGradeResult) string {
 		fmt.Fprintf(&b, "### ⚠️ 待核对（%d）\n\n", pending)
 		for _, item := range result.Items {
 			switch item.Status {
+			case PhotoAnswerUnclear:
+				if item.Recognized.AnswerState != AnswerStateUnclear {
+					fmt.Fprintf(&b, "- %s %s\n",
+						photoQuestionReference(item.Recognized), photoInline(item.Warning, 240))
+				}
 			case PhotoOutOfScope:
 				fmt.Fprintf(&b, "- %s 超出当前年级范围：%s\n",
 					photoQuestionReference(item.Recognized), photoInline(item.Grade.OutOfScopeKP, 120))

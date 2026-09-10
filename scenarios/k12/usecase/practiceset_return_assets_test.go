@@ -87,17 +87,6 @@ func TestSubmitReturn_AppendsAssetEvidenceAndIsExactlyIdempotent(t *testing.T) {
 	if !v.Fields.Items[0].Returned || v.Fields.Items[1].Returned {
 		t.Fatalf("题级 returned 映射错误: %+v", v.Fields.Items)
 	}
-	version := v.Record.Version
-
-	// 完全相同的 return_id 重投只能返回既有结果，不追加、不推进 version。
-	v, err = d.SubmitReturn(context.Background(), "xiaoming", id, "return-1", assetID, []string{"q1"})
-	if err != nil {
-		t.Fatalf("幂等重投: %v", err)
-	}
-	if len(v.Fields.ReturnAssets) != 1 || v.Record.Version != version {
-		t.Fatalf("幂等重投产生了副作用: version %d→%d assets=%d", version, v.Record.Version, len(v.Fields.ReturnAssets))
-	}
-
 	// 同一题允许由下一批照片再次覆盖；旧证据不可覆盖。
 	v, err = d.SubmitReturn(context.Background(), "xiaoming", id, "return-2", assetID, []string{"q1", "q2"})
 	if err != nil {
@@ -105,6 +94,28 @@ func TestSubmitReturn_AppendsAssetEvidenceAndIsExactlyIdempotent(t *testing.T) {
 	}
 	if len(v.Fields.ReturnAssets) != 2 || !v.Fields.Items[0].Returned || !v.Fields.Items[1].Returned {
 		t.Fatalf("补传应只追加且更新题级投影: %+v", v.Fields)
+	}
+	if _, err = d.GradePracticeSetItems(context.Background(), "xiaoming", id, []usecase.PracticeGradeResult{
+		{ItemID: "q1", Correct: true}, {ItemID: "q2", Correct: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err = d.ClosePracticeSet(context.Background(), "xiaoming", id, "manual"); err != nil {
+		t.Fatal(err)
+	}
+	v, err = d.GetPracticeSet(context.Background(), "xiaoming", id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	version := v.Record.Version
+
+	// 关闭后重投仍须回放原批次，不能重新开卷或增加版本。
+	v, err = d.SubmitReturn(context.Background(), "xiaoming", id, "return-1", assetID, []string{"q1"})
+	if err != nil {
+		t.Fatalf("幂等重投: %v", err)
+	}
+	if len(v.Fields.ReturnAssets) != 2 || v.Record.Version != version || v.Record.Status != k12.PracticeStatusClosed {
+		t.Fatalf("幂等重投产生了副作用: version %d→%d status=%s assets=%d", version, v.Record.Version, v.Record.Status, len(v.Fields.ReturnAssets))
 	}
 }
 

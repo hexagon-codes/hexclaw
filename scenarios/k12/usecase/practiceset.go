@@ -636,9 +636,6 @@ func (d Deps) SubmitReturns(ctx context.Context, agentName, recordID string, inp
 	if err != nil {
 		return PracticeSetView{}, err
 	}
-	if v.Record.Status != k12.PracticeStatusAssigned && v.Record.Status != k12.PracticeStatusSubmitted {
-		return PracticeSetView{}, fmt.Errorf("usecase: 只有待完成/已回传卷可回传作答，当前 %s", v.Record.Status)
-	}
 	byID := make(map[string]int, len(v.Fields.Items))
 	for i := range v.Fields.Items {
 		byID[v.Fields.Items[i].ItemID] = i
@@ -686,7 +683,13 @@ func (d Deps) SubmitReturns(ctx context.Context, agentName, recordID string, inp
 			if prior.ReturnID != returnID {
 				continue
 			}
-			if prior.AssetID == assetID && equalStringSlice(prior.ItemIDs, canonical) {
+			sameItems := len(prior.ItemIDs) == len(requested)
+			for _, id := range prior.ItemIDs {
+				if _, selected := requested[id]; !selected {
+					sameItems = false
+				}
+			}
+			if prior.AssetID == assetID && sameItems {
 				replayed = true
 				break
 			}
@@ -694,6 +697,14 @@ func (d Deps) SubmitReturns(ctx context.Context, agentName, recordID string, inp
 		}
 		if replayed {
 			continue
+		}
+		// 新回传按卷面序固化；历史批次仅核对原题目集合，不重写其顺序。
+		sort.SliceStable(canonical, func(i, j int) bool {
+			return v.Fields.Items[byID[canonical[i]]].PaperSeq < v.Fields.Items[byID[canonical[j]]].PaperSeq
+		})
+		// 终态仍可回放原批次，只有新增照片事实才受卷状态限制。
+		if v.Record.Status != k12.PracticeStatusAssigned && v.Record.Status != k12.PracticeStatusSubmitted {
+			return PracticeSetView{}, fmt.Errorf("usecase: new returns require assigned or submitted status, got %s", v.Record.Status)
 		}
 		for _, id := range canonical {
 			i := byID[id]
@@ -832,6 +843,24 @@ func (d Deps) gradePracticeSetItems(
 	results []PracticeGradeResult,
 	evidence string,
 ) (PracticeSetView, error) {
+	var view PracticeSetView
+	err := d.Records.WithPracticeSetTransaction(ctx, agentName, recordID, func(txCtx context.Context) error {
+		var err error
+		view, err = d.gradePracticeSetItemsInTransaction(txCtx, agentName, recordID, results, evidence)
+		return err
+	})
+	if err != nil {
+		return PracticeSetView{}, err
+	}
+	return view, nil
+}
+
+func (d Deps) gradePracticeSetItemsInTransaction(
+	ctx context.Context,
+	agentName, recordID string,
+	results []PracticeGradeResult,
+	evidence string,
+) (PracticeSetView, error) {
 	if evidence != k12.PracticeResultSystemVerified && evidence != k12.PracticeResultHumanConfirmed {
 		return PracticeSetView{}, fmt.Errorf("%w: 复批证据等级非法 %q", ErrInvalidInput, evidence)
 	}
@@ -903,6 +932,9 @@ func (d Deps) applyHumanConfirmedRegradeOutcome(ctx context.Context, sourceID st
 	if err != nil {
 		return fmt.Errorf("usecase: 取人工复批来源题 %s: %w", sourceID, err)
 	}
+	if rec.Status == k12.StatusArchived {
+		return nil
+	}
 	now := d.now()
 	switch rec.Collection {
 	case k12.CollectionMistakes:
@@ -962,6 +994,10 @@ func (d Deps) applyRegradeOutcome(ctx context.Context, sourceID string, correct 
 	rec, err := d.Records.Get(ctx, sourceID)
 	if err != nil {
 		return fmt.Errorf("usecase: 取复批来源题 %s: %w", sourceID, err)
+	}
+	// 历史卷可以完成，但归档来源不再累积复习效果，也不重新进入到期队列。
+	if rec.Status == k12.StatusArchived {
+		return nil
 	}
 	// 抽查复验结论优先路由（§3.6）：scheduled 的错题在卷面上的那道题就是抽查题，
 	// 结论写 spot_check_state 而非普通复习联动。

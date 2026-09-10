@@ -597,6 +597,7 @@ func (o *GradingOrchestrator) assessClearWorksheetQuestions(ctx context.Context,
 	run.anchored = candidate.anchored
 	questions := RecognizedQuestionsForAssessment(candidate.questions)
 	req := candidate.req
+	practiceReferences := practiceQuestionReferences(req.PracticeReferences, req.PracticePaperSize, questions)
 	done := make(chan struct{})
 	run.clearAssessmentQuestions = clear
 	run.clearAssessmentDone = done
@@ -610,11 +611,13 @@ func (o *GradingOrchestrator) assessClearWorksheetQuestions(ctx context.Context,
 		close(done)
 	}()
 	l.Unlock()
-	for _, q := range questions {
+	for i, q := range questions {
 		if !clear[q.ProblemID] {
 			continue
 		}
-		if _, err := o.assessDurablePhotoItem(ctx, o.deps, job, req, mode, q); err != nil {
+		itemReq := req
+		itemReq.practiceReference = practiceReferences[i]
+		if _, err := o.assessDurablePhotoItem(ctx, o.deps, job, itemReq, mode, q); err != nil {
 			return err
 		}
 	}
@@ -760,13 +763,16 @@ func (o *GradingOrchestrator) ConfirmAndRun(ctx context.Context, jobID string, c
 		if candidate.req.TaskIntent == PhotoTaskBlankWorksheet {
 			mode = PhotoModeSolve
 		}
-		for _, q := range candidate.questions {
+		practiceReferences := practiceQuestionReferences(run.req.PracticeReferences, run.req.PracticePaperSize, candidate.questions)
+		for i, q := range candidate.questions {
 			q = NormalizeRecognizedQuestion(q)
 			if recognizedQuestionRequiresGuardianConfirmation(q, candidate.req.TaskIntent) {
 				continue
 			}
+			itemReq := run.req
+			itemReq.practiceReference = practiceReferences[i]
 			if _, itemErr := o.assessDurablePhotoItem(
-				ctx, o.deps, job, run.req, mode, q,
+				ctx, o.deps, job, itemReq, mode, q,
 			); itemErr != nil {
 				l.Unlock()
 				return GradingJobView{}, itemErr

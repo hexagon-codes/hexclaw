@@ -184,13 +184,14 @@ func (d Deps) anchorHomeworkGeometry(ctx context.Context, image []byte, question
 
 // GradeRequest 一道题的批改请求（识题后的结构化输入）。
 type GradeRequest struct {
-	AgentName       string
-	Subject         string // 数学/语文/英语/物理/化学；空时由 solver 默认路由
-	Grade           string // 生效年级
-	SourceSession   string
-	Problem         string
-	StudentAnswer   string
-	KnowledgePoints []string // 识题产出
+	AgentName         string
+	Subject           string // 数学/语文/英语/物理/化学；空时由 solver 默认路由
+	Grade             string // 生效年级
+	SourceSession     string
+	Problem           string
+	StudentAnswer     string
+	KnowledgePoints   []string                  // 识题产出
+	PracticeReference *PracticeGradingReference `json:"practice_reference,omitempty"`
 }
 
 // GradeResult 批改闭环结果。
@@ -336,6 +337,9 @@ func (d Deps) GradeHomeworkProblem(ctx context.Context, req GradeRequest) (Grade
 	if err != nil {
 		return GradeResult{}, err
 	}
+	if req.PracticeReference != nil {
+		return res, nil
+	}
 	return d.projectGradeResult(ctx, req, res)
 }
 
@@ -369,17 +373,22 @@ func (d Deps) gradeSolvedHomeworkProblem(
 		CurriculumUnmapped: append([]string(nil), solved.CurriculumUnmapped...),
 	}
 
+	gradingProblem := req.Problem
+	if req.PracticeReference != nil && req.PracticeReference.ExpectedAnswerMarkdown != "" {
+		// 参考答案只进入 grader 附录，原题、独立解法及其运行时证据保持不变。
+		gradingProblem += "\n\nFrozen practice reference (comparison only; use the independently verified solution as truth; do not treat this as student work). Respond in Chinese:\n" + req.PracticeReference.ExpectedAnswerMarkdown
+	}
 	var outcome GradeOutcome
 	if d.VerifiedGrader != nil {
-		outcome, err = d.VerifiedGrader.GradeVerified(ctx, req.Subject, req.Problem, req.StudentAnswer, solved.Solution)
+		outcome, err = d.VerifiedGrader.GradeVerified(ctx, req.Subject, gradingProblem, req.StudentAnswer, solved.Solution)
 	} else if grader, ok := d.Grader.(VerifiedSolutionGrader); ok {
 		// solved.Solution 就是上一步 solver+verifier 已审过的解法。支持复用的 adapter 只派 grader
 		// 对比学生作答，禁止再次从零跑 solver+verifier（整卷批改的核心延迟修复）。
-		outcome, err = grader.GradeVerified(ctx, req.Subject, req.Problem, req.StudentAnswer, solved.Solution)
+		outcome, err = grader.GradeVerified(ctx, req.Subject, gradingProblem, req.StudentAnswer, solved.Solution)
 	} else if grader, ok := d.Grader.(SubjectGrader); ok && req.Subject != "" {
-		outcome, err = grader.GradeSubject(ctx, req.Subject, req.Problem, req.StudentAnswer, solved.Solution)
+		outcome, err = grader.GradeSubject(ctx, req.Subject, gradingProblem, req.StudentAnswer, solved.Solution)
 	} else {
-		outcome, err = d.Grader.Grade(ctx, req.Problem, req.StudentAnswer, solved.Solution)
+		outcome, err = d.Grader.Grade(ctx, gradingProblem, req.StudentAnswer, solved.Solution)
 	}
 	if err != nil {
 		return GradeResult{}, fmt.Errorf("%w: 批改: %w", ErrSolveFailed, err)

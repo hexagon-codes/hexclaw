@@ -465,6 +465,12 @@ func getDeliveryBatchByDedupeVia(
 }
 
 func (s *Store) GetDeliveryBatch(ctx context.Context, agentName, batchID string) (k12.DeliveryBatch, error) {
+	if bound := s.recordTransaction(ctx); bound != nil {
+		if strings.TrimSpace(agentName) != bound.agentName {
+			return k12.DeliveryBatch{}, records.ErrNotFound
+		}
+		return getDeliveryBatchVia(ctx, bound.tx, strings.TrimSpace(agentName), strings.TrimSpace(batchID))
+	}
 	return getDeliveryBatchVia(
 		ctx, s.db, strings.TrimSpace(agentName), strings.TrimSpace(batchID),
 	)

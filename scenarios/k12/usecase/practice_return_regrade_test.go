@@ -34,6 +34,17 @@ func (f *practiceReturnGradingFake) RunGradingJob(
 }
 
 func (f *practiceReturnGradingFake) PhotoResult(string) (PhotoGradeResult, bool) {
+	questions := make([]RecognizedQuestion, len(f.result.Items))
+	for i := range f.result.Items {
+		questions[i] = f.result.Items[i].Recognized
+	}
+	refs := practiceQuestionReferences(f.started.Photo.PracticeReferences, f.started.Photo.PracticePaperSize, questions)
+	for i, ref := range refs {
+		if ref != nil {
+			f.result.Items[i].PracticeItemID = ref.ItemID
+			f.result.Items[i].PracticeProblemID = ref.PracticeProblemID
+		}
+	}
 	return f.result, true
 }
 
@@ -75,9 +86,9 @@ func TestPracticeReturnRegradeCoordinator_AppliesClearResultsAndPersistsAnnotate
 			TaskIntent:    PhotoTaskCompletedHomework,
 			ResultSurface: PhotoSurfaceAnnotatedHomework,
 			Items: []PhotoGradeItem{
-				{Status: PhotoCorrect},
+				{Status: PhotoCorrect, Recognized: RecognizedQuestion{SourceNumberPath: []string{"2"}, DisplayLabel: "2"}},
 				{
-					Status: PhotoWrong,
+					Status: PhotoWrong, Recognized: RecognizedQuestion{SourceNumberPath: []string{"1"}, DisplayLabel: "1"},
 					ParentGuide: &ParentTeachingGuide{
 						Answer:           "1.82",
 						GradeLevelMethod: "先把小数乘法看成整数乘法，再点小数点。",
@@ -117,9 +128,15 @@ func TestPracticeReturnRegradeCoordinator_AppliesClearResultsAndPersistsAnnotate
 		grading.started.Photo.TaskIntent != PhotoTaskCompletedHomework {
 		t.Fatalf("复批任务没有冻结为练习回传语义: %+v", grading.started)
 	}
+	refs := grading.started.Photo.PracticeReferences
+	if len(refs) != 2 || grading.started.Photo.PracticePaperSize != 2 || refs[0].ItemID != "item-a" ||
+		refs[0].PracticeProblemID != set.Fields.Items[0].PracticeProblemID ||
+		refs[0].QuestionMarkdown != "3.8×3=?" || refs[0].ExpectedAnswerMarkdown != "11.4" {
+		t.Fatalf("missing frozen practice references: %+v", grading.started.Photo)
+	}
 	for index, item := range got.Fields.Items {
 		if item.ResultCorrect == nil ||
-			*item.ResultCorrect != (index == 0) ||
+			*item.ResultCorrect != (index == 1) ||
 			item.ResultEvidence != k12.PracticeResultSystemVerified {
 			t.Fatalf("题 %d 自动结论/证据错误: %+v", index, item)
 		}
@@ -146,8 +163,8 @@ func TestPracticeReturnRegradeCoordinator_OnlyProjectsTrueUncertainty(t *testing
 		},
 		result: PhotoGradeResult{
 			Items: []PhotoGradeItem{
-				{Status: PhotoCorrect},
-				{Status: PhotoUntrusted},
+				{Status: PhotoCorrect, Recognized: RecognizedQuestion{SourceNumberPath: []string{"1"}, DisplayLabel: "1"}},
+				{Status: PhotoCorrect, Recognized: RecognizedQuestion{SourceNumberPath: []string{"99"}, DisplayLabel: "99"}},
 			},
 			Markdown: "第 2 题看不清，需要家长核对。",
 		},

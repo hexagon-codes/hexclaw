@@ -47,6 +47,22 @@ func TestGradeResults_FeedbackToMistakes(t *testing.T) {
 	ctx := context.Background()
 	mid := seedMistake(t, d, "s1", "小数乘法", "计算失误", 500)
 	setID := seedRegradePaper(t, d, mid)
+	archivedID := seedMistake(t, d, "s-archived", "分数乘法", "计算失误", 500)
+	archived, err := d.Records.Get(ctx, archivedID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Records.UpdateStatusFields(ctx, archivedID, k12.StatusArchived, nil, archived.Fields, archived.Version); err != nil {
+		t.Fatal(err)
+	}
+	fixture, err := d.GetPracticeSet(ctx, "mingming", setID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.Fields.Items[1].SourceProblemID = archivedID
+	if err := d.savePracticeFields(ctx, fixture, fixture.Record.Status); err != nil {
+		t.Fatal(err)
+	}
 
 	// ① 部分结论：item-a 未通过 → 错题轮次回首档，due 使用 v1 的 1 天；卷保持 submitted。
 	v, err := d.GradePracticeSetItems(ctx, "mingming", setID, []PracticeGradeResult{{ItemID: "item-a", Correct: false}})
@@ -112,20 +128,33 @@ func TestGradeResults_FeedbackToMistakes(t *testing.T) {
 	if f2.ReviewStage != 1 || rec2.Status != k12.StatusRetried {
 		t.Errorf("重复结论不得二次推进阶梯: stage=%d status=%s", f2.ReviewStage, rec2.Status)
 	}
+	archivedAfter, err := d.Records.Get(ctx, archivedID)
+	if err != nil || archivedAfter.Status != k12.StatusArchived || archivedAfter.Version != archived.Version+1 {
+		t.Errorf("复批不得修改已归档来源: record=%+v err=%v", archivedAfter, err)
+	}
 }
 
 func TestGradeResults_RejectUnknownAndBlockedItems(t *testing.T) {
 	d, _ := newPipeline(t, fakeSolver{}, fakeGrader{}, &fakeInsights{})
 	ctx := context.Background()
-	setID := seedRegradePaper(t, d, seedMistake(t, d, "s2", "小数乘法", "计算失误", 500))
+	mid := seedMistake(t, d, "s2", "小数乘法", "计算失误", 500)
+	setID := seedRegradePaper(t, d, mid)
+	before, err := d.Records.Get(ctx, mid)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	if _, err := d.GradePracticeSetItems(ctx, "mingming", setID, []PracticeGradeResult{{ItemID: "no-such", Correct: true}}); err == nil {
+	if _, err := d.GradePracticeSetItems(ctx, "mingming", setID, []PracticeGradeResult{{ItemID: "item-a", Correct: true}, {ItemID: "no-such", Correct: true}}); err == nil {
 		t.Error("卷外题给结论应被拒")
 	}
 	// 卷仍是 submitted，未被部分失败污染成 graded。
 	v, _ := d.GetPracticeSet(ctx, "mingming", setID)
 	if v.Record.Status != k12.PracticeStatusSubmitted {
 		t.Errorf("失败调用不得改卷状态，got %s", v.Record.Status)
+	}
+	after, err := d.Records.Get(ctx, mid)
+	if err != nil || after.Version != before.Version || after.Fields != before.Fields || after.Status != before.Status {
+		t.Errorf("失败调用不得部分推进来源: before=%+v after=%+v err=%v", before, after, err)
 	}
 }
 

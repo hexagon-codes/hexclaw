@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -144,6 +146,11 @@ func (c *PracticeReturnRegradeCoordinator) Process(
 	if ret.RegradeStatus == k12.PracticeRegradeCompleted {
 		return nil
 	}
+	references, paperSize, err := freezePracticeGradingReferences(view.Fields, ret.ItemIDs)
+	if err != nil {
+		return c.projectFailure(ctx, agentName, setID, returnID, ret,
+			k12.PracticeRegradeFailedTerminal, err)
+	}
 	path, err := assetstore.PathFromID(ret.AssetID)
 	if err != nil {
 		return c.projectFailure(ctx, agentName, setID, returnID, ret,
@@ -156,10 +163,11 @@ func (c *PracticeReturnRegradeCoordinator) Process(
 	}
 	job, _, err := c.Grading.StartPhotoGradingJob(ctx, StartPhotoGradingInput{
 		Photo: PhotoGradeRequest{
-			AgentName:     agentName,
-			SourceSession: view.Record.SourceSession,
-			Image:         image,
-			TaskIntent:    PhotoTaskCompletedHomework,
+			AgentName:          agentName,
+			SourceSession:      view.Record.SourceSession,
+			Image:              image,
+			TaskIntent:         PhotoTaskCompletedHomework,
+			PracticeReferences: references, PracticePaperSize: paperSize,
 		},
 		SourceKind: PracticeReturnGradingSourceKind,
 		SourceKey:  setID + ":" + returnID,
@@ -180,13 +188,17 @@ func (c *PracticeReturnRegradeCoordinator) Process(
 		job, runErr := c.Grading.RunGradingJob(ctx, job.Record.RecordID)
 		switch job.Record.Status {
 		case k12.GradingStageCompleted:
-			return c.projectCompleted(ctx, agentName, setID, returnID, ret.ItemIDs, job)
+			if err := c.projectCompleted(ctx, agentName, setID, returnID, references, paperSize, job); err != nil {
+				return c.projectFailure(ctx, agentName, setID, returnID, ret,
+					k12.PracticeRegradeFailedRetryable, err)
+			}
+			return nil
 		case k12.GradingStageAwaitingConfirmation:
 			if job.Fields.ConfirmationState == k12.GradingConfirmationPending {
 				questions, _ := c.Grading.RecognizedQuestionsForOwner(
 					ctx, agentName, job.Record.RecordID,
 				)
-				unresolved := unresolvedPracticeReturnItems(ret.ItemIDs, questions)
+				unresolved := unresolvedPracticeReturnItems(references, paperSize, questions)
 				return c.updateProjection(ctx, agentName, setID, returnID,
 					practiceReturnRegradeProjection{
 						JobID: job.Record.RecordID, Status: k12.PracticeRegradeNeedsReview,
@@ -227,7 +239,8 @@ func (c *PracticeReturnRegradeCoordinator) Process(
 func (c *PracticeReturnRegradeCoordinator) projectCompleted(
 	ctx context.Context,
 	agentName, setID, returnID string,
-	itemIDs []string,
+	references []PracticeGradingReference,
+	paperSize int,
 	job GradingJobView,
 ) error {
 	result, ok := c.Grading.PhotoResult(job.Record.RecordID)
@@ -238,7 +251,7 @@ func (c *PracticeReturnRegradeCoordinator) projectCompleted(
 				RouteSnapshot: job.Fields.ModelSnapshot,
 			})
 	}
-	grades, unresolved := alignedPracticeReturnResults(itemIDs, result.Items)
+	grades, unresolved := alignedPracticeReturnResults(references, paperSize, result.Items)
 	if len(grades) > 0 {
 		if _, err := c.Deps.GradePracticeSetItems(ctx, agentName, setID, grades); err != nil {
 			return err
@@ -268,46 +281,139 @@ func (c *PracticeReturnRegradeCoordinator) projectCompleted(
 }
 
 func alignedPracticeReturnResults(
-	itemIDs []string,
+	references []PracticeGradingReference,
+	paperSize int,
 	items []PhotoGradeItem,
 ) ([]PracticeGradeResult, []string) {
-	if len(itemIDs) != len(items) {
-		return nil, append([]string(nil), itemIDs...)
+	questions := make([]RecognizedQuestion, len(items))
+	for i := range items {
+		questions[i] = items[i].Recognized
 	}
-	grades := make([]PracticeGradeResult, 0, len(itemIDs))
-	unresolved := make([]string, 0)
+	matched := practiceQuestionReferences(references, paperSize, questions)
+	grades := make([]PracticeGradeResult, 0, len(references))
+	resolved := make(map[string]bool, len(references))
 	for index, item := range items {
+		ref := matched[index]
+		if ref == nil || item.PracticeItemID != ref.ItemID || item.PracticeProblemID != ref.PracticeProblemID {
+			continue
+		}
 		switch item.Status {
 		case PhotoCorrect:
-			grades = append(grades, PracticeGradeResult{ItemID: itemIDs[index], Correct: true})
+			grades = append(grades, PracticeGradeResult{ItemID: ref.ItemID, Correct: true})
+			resolved[ref.ItemID] = true
 		case PhotoWrong:
-			grades = append(grades, PracticeGradeResult{ItemID: itemIDs[index], Correct: false})
-		default:
-			unresolved = append(unresolved, itemIDs[index])
+			grades = append(grades, PracticeGradeResult{ItemID: ref.ItemID, Correct: false})
+			resolved[ref.ItemID] = true
+		}
+	}
+	unresolved := make([]string, 0)
+	for _, ref := range references {
+		if !resolved[ref.ItemID] {
+			unresolved = append(unresolved, ref.ItemID)
 		}
 	}
 	return grades, unresolved
 }
 
 func unresolvedPracticeReturnItems(
-	itemIDs []string,
+	references []PracticeGradingReference,
+	paperSize int,
 	questions []RecognizedQuestion,
 ) []string {
-	if len(itemIDs) != len(questions) {
-		return append([]string(nil), itemIDs...)
+	matched := practiceQuestionReferences(references, paperSize, questions)
+	clear := make(map[string]bool, len(references))
+	for index, question := range questions {
+		if matched[index] != nil && !NormalizeRecognizedQuestion(question).ConfirmationRequired {
+			clear[matched[index].ItemID] = true
+		}
 	}
 	unresolved := make([]string, 0)
-	for index, question := range questions {
-		if NormalizeRecognizedQuestion(question).ConfirmationRequired {
-			unresolved = append(unresolved, itemIDs[index])
+	for _, ref := range references {
+		if !clear[ref.ItemID] {
+			unresolved = append(unresolved, ref.ItemID)
 		}
 	}
 	if len(unresolved) == 0 {
-		// Awaiting confirmation is itself evidence of an unresolved condition;
-		// fail closed if a legacy recognizer omitted typed reasons.
-		return append([]string(nil), itemIDs...)
+		for _, ref := range references {
+			unresolved = append(unresolved, ref.ItemID)
+		}
 	}
 	return unresolved
+}
+
+func freezePracticeGradingReferences(fields k12.PracticeSetFields, itemIDs []string) ([]PracticeGradingReference, int, error) {
+	selected := make(map[string]bool, len(itemIDs))
+	for _, id := range itemIDs {
+		selected[id] = true
+	}
+	refs := make([]PracticeGradingReference, 0, len(itemIDs))
+	paperSize := 0
+	for _, item := range fields.Items {
+		if !k12.PracticeItemPublishable(item) {
+			continue
+		}
+		paperSize++
+		if !selected[item.ItemID] {
+			continue
+		}
+		if item.PracticeProblemID == "" || item.PaperSeq <= 0 {
+			return nil, 0, fmt.Errorf("%w: practice item has no frozen paper identity", ErrInvalidInput)
+		}
+		refs = append(refs, PracticeGradingReference{ItemID: item.ItemID, PracticeProblemID: item.PracticeProblemID,
+			PaperSeq: item.PaperSeq, Subject: item.Subject, QuestionMarkdown: item.QuestionMarkdown,
+			ExpectedAnswerMarkdown: item.ExpectedAnswerMarkdown})
+	}
+	if len(refs) != len(selected) || len(refs) == 0 {
+		return nil, 0, fmt.Errorf("%w: practice return includes items outside the frozen paper", ErrInvalidInput)
+	}
+	sort.Slice(refs, func(i, j int) bool { return refs[i].PaperSeq < refs[j].PaperSeq })
+	return refs, paperSize, nil
+}
+
+// practiceQuestionReferences 优先使用原卷题号；整卷均无题号时才按卷面顺序对齐。
+func practiceQuestionReferences(refs []PracticeGradingReference, paperSize int, questions []RecognizedQuestion) []*PracticeGradingReference {
+	matched := make([]*PracticeGradingReference, len(questions))
+	bySeq := make(map[int]*PracticeGradingReference, len(refs))
+	refCounts := make(map[int]int, len(refs))
+	for i := range refs {
+		refCounts[refs[i].PaperSeq]++
+		bySeq[refs[i].PaperSeq] = &refs[i]
+	}
+	seqs := make([]int, len(questions))
+	counts := make(map[int]int, len(questions))
+	hasNumber := false
+	for i, q := range questions {
+		if len(q.SourceNumberPath) == 0 && strings.TrimSpace(q.DisplayLabel) == "" {
+			continue
+		}
+		hasNumber = true
+		if len(q.SourceNumberPath) != 1 {
+			continue
+		}
+		number := strings.Trim(strings.TrimSpace(q.SourceNumberPath[0]), "第题.．、()（）[]【】 ")
+		seq, err := strconv.Atoi(number)
+		if err == nil && seq > 0 {
+			seqs[i] = seq
+			counts[seq]++
+		}
+	}
+	if hasNumber {
+		for i, seq := range seqs {
+			if seq > 0 && counts[seq] == 1 && refCounts[seq] == 1 {
+				matched[i] = bySeq[seq]
+			}
+		}
+		return matched
+	}
+	if paperSize <= 0 || len(questions) != paperSize {
+		return matched
+	}
+	for i := range questions {
+		if refCounts[i+1] == 1 {
+			matched[i] = bySeq[i+1]
+		}
+	}
+	return matched
 }
 
 func (c *PracticeReturnRegradeCoordinator) loadReturn(

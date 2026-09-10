@@ -51,6 +51,52 @@ func NewStore(db *sql.DB, registry *records.RecordSchemaRegistry) *Store {
 // DB 暴露底层句柄（组合层跨聚合共享事务用，与 records.Store 的 Tx 缝对齐）。
 func (s *Store) DB() *sql.DB { return s.db }
 
+type recordTransactionKey struct{}
+
+type recordTransaction struct {
+	store     *Store
+	tx        *sql.Tx
+	agentName string
+}
+
+func (s *Store) recordTransaction(ctx context.Context) *recordTransaction {
+	bound, _ := ctx.Value(recordTransactionKey{}).(*recordTransaction)
+	if bound != nil && bound.store == s {
+		return bound
+	}
+	return nil
+}
+
+// WithPracticeSetTransaction 将本卷结论及同实例来源记录的读取、CAS 写入绑定到一个短事务。
+// 回调仅使用 Get/UpdateStatusFields，不跨模型、文件处理或消息投递。
+func (s *Store) WithPracticeSetTransaction(ctx context.Context, agentName, recordID string, apply func(context.Context) error) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("k12storage: begin practice transaction: %w", err)
+	}
+	defer tx.Rollback()
+	// 首语句取得写锁，避免先读再写时 SQLite 锁升级失败；不改变业务版本或时间。
+	res, err := tx.ExecContext(ctx, `UPDATE k12_practice_sets SET version=version WHERE record_id=? AND agent_name=?`, recordID, agentName)
+	if err != nil {
+		return fmt.Errorf("k12storage: lock practice set: %w", err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows != 1 {
+		return records.ErrNotFound
+	}
+	bound := &recordTransaction{store: s, tx: tx, agentName: agentName}
+	if err := apply(context.WithValue(ctx, recordTransactionKey{}, bound)); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("k12storage: commit practice transaction: %w", err)
+	}
+	return nil
+}
+
 // SetOutboxNotifier 绑定 Outbox 追加通知（Dispatcher 醒来立即消费；可空 = 仅轮询）。
 func (s *Store) SetOutboxNotifier(fn func()) { s.notifyOutbox = fn }
 
@@ -299,6 +345,16 @@ func deleteChildren(ctx context.Context, ex dbExecer, mp rowMapper, recordID, ag
 
 // Get 按 record_id 取记录（跨五表探测）。
 func (s *Store) Get(ctx context.Context, recordID string) (*records.AgentRecord, error) {
+	if bound := s.recordTransaction(ctx); bound != nil {
+		rec, err := s.getVia(ctx, bound.tx, recordID)
+		if err != nil {
+			return nil, err
+		}
+		if rec.AgentName != bound.agentName {
+			return nil, records.ErrNotFound
+		}
+		return rec, nil
+	}
 	return s.getVia(ctx, s.db, recordID)
 }
 
@@ -448,11 +504,17 @@ func (s *Store) UpdateStatusFields(ctx context.Context, recordID, newStatus stri
 		return err
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("k12storage: 开启更新事务: %w", err)
+	bound := s.recordTransaction(ctx)
+	var tx *sql.Tx
+	if bound != nil {
+		tx = bound.tx
+	} else {
+		tx, err = s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("k12storage: begin update transaction: %w", err)
+		}
+		defer tx.Rollback()
 	}
-	defer tx.Rollback()
 
 	cols := mp.domainCols()
 	assigns := make([]string, 0, len(cols))
@@ -475,8 +537,10 @@ func (s *Store) UpdateStatusFields(ctx context.Context, recordID, newStatus stri
 	if err := mp.syncChildren(ctx, tx, recordID, fieldsJSON); err != nil {
 		return err
 	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("k12storage: 提交更新事务: %w", err)
+	if bound == nil {
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("k12storage: commit update transaction: %w", err)
+		}
 	}
 	return nil
 }
