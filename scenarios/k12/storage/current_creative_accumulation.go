@@ -913,7 +913,41 @@ WHERE generation_id=? AND agent_name=?`, generationID, agentName))
 	if err != nil {
 		return k12.WorkFeedbackGeneration{}, err
 	}
+	if err := projectWorkFeedbackRecovery(ctx, q, &generation); err != nil {
+		return k12.WorkFeedbackGeneration{}, err
+	}
 	return generation, nil
+}
+
+// 恢复许可只读取本代次的最新物理调用；没有调用记录的失败发生在发送前，可重试。
+func projectWorkFeedbackRecovery(ctx context.Context, q dbQueryer, generation *k12.WorkFeedbackGeneration) error {
+	generation.RecoveryState, generation.RetrySafe = "", false
+	if generation.Status == k12.WorkFeedbackSucceeded {
+		return nil
+	}
+	var status k12.ImageTaskInvocationStatus
+	var retrySafe bool
+	err := q.QueryRowContext(ctx, `SELECT status,retry_safe
+		FROM k12_image_task_invocations
+		WHERE agent_name=? AND work_record_id=? AND operation='work_feedback' AND operation_key=?
+		ORDER BY attempt DESC LIMIT 1`, generation.AgentName, generation.WorkID,
+		"work:"+generation.WorkID+":version:"+generation.GenerationID+":feedback",
+	).Scan(&status, &retrySafe)
+	if err == sql.ErrNoRows {
+		generation.RetrySafe = generation.Status == k12.WorkFeedbackFailed
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	generation.RetrySafe = generation.Status == k12.WorkFeedbackFailed && status == k12.ImageTaskInvocationFailed && retrySafe
+	if status == k12.ImageTaskInvocationOutcomeUnknown {
+		generation.RecoveryState = "outcome_unknown"
+	} else if status == k12.ImageTaskInvocationSucceeded &&
+		(generation.Status == k12.WorkFeedbackQueued || generation.Status == k12.WorkFeedbackRunning) {
+		generation.RecoveryState = "recovering"
+	}
+	return nil
 }
 
 func (s *Store) GetWorkFeedbackGeneration(
@@ -995,6 +1029,14 @@ func (s *Store) PrepareWorkFeedbackGeneration(
 	if agentName == "" || workID == "" || commandKey == "" || requestDigest == "" {
 		return k12.WorkFeedbackGeneration{}, false, ErrCurrentCommandConflict
 	}
+	expiryNow := nowUnix()
+	if len(nowAt) > 0 {
+		expiryNow = nowAt[0]
+	}
+	// 过期结算独立提交，后续拒绝未知调用重发时不能把结算一起回滚。
+	if _, err := s.ExpirePreparedWorkFeedbackGenerations(ctx, agentName, workID, expiryNow); err != nil {
+		return k12.WorkFeedbackGeneration{}, false, err
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return k12.WorkFeedbackGeneration{}, false, err
@@ -1013,13 +1055,6 @@ func (s *Store) PrepareWorkFeedbackGeneration(
 	}
 	if deletedAt.Valid {
 		return k12.WorkFeedbackGeneration{}, false, records.ErrNotFound
-	}
-	expiryNow := nowUnix()
-	if len(nowAt) > 0 {
-		expiryNow = nowAt[0]
-	}
-	if _, err := expirePreparedWorkFeedbackGenerations(ctx, tx, agentName, workID, expiryNow); err != nil {
-		return k12.WorkFeedbackGeneration{}, false, err
 	}
 	if initialID == "" {
 		source, err := legacyCreativeWorkSourceSnapshot(ctx, tx, agentName, workID)
@@ -1062,6 +1097,9 @@ func (s *Store) PrepareWorkFeedbackGeneration(
 	if latestID == "" {
 		switch initial.Status {
 		case k12.WorkFeedbackFailed:
+			if !initial.RetrySafe {
+				return k12.WorkFeedbackGeneration{}, false, records.ErrVersionConflict
+			}
 			now := nowUnix()
 			if _, err := tx.ExecContext(ctx, `UPDATE k12_work_feedback_generations
 				SET status='queued', failure_reason='', attempt=attempt+1, updated_at=?
@@ -1079,6 +1117,7 @@ func (s *Store) PrepareWorkFeedbackGeneration(
 			}
 			initial.Status = k12.WorkFeedbackQueued
 			initial.FailureReason = ""
+			initial.RetrySafe = false
 			initial.Attempt++
 			initial.UpdatedAt = now
 		case k12.WorkFeedbackQueued, k12.WorkFeedbackRunning:
@@ -1106,12 +1145,35 @@ SELECT generation_id, work_id, agent_name, generation_no, command_key,
        feedback_json, projection_markdown, failure_reason, attempt,
        created_at, updated_at
 FROM k12_work_feedback_generations
-WHERE work_id=? AND agent_name=? AND command_key=?`,
-		workID, agentName, commandKey,
+WHERE work_id=? AND agent_name=? AND (command_key=? OR generation_id=?)`,
+		workID, agentName, commandKey, commandKey,
 	))
 	if err == nil {
 		if existing.RequestDigest != requestDigest {
 			return k12.WorkFeedbackGeneration{}, false, ErrCurrentCommandConflict
+		}
+		if err := projectWorkFeedbackRecovery(ctx, tx, &existing); err != nil {
+			return k12.WorkFeedbackGeneration{}, false, err
+		}
+		if existing.Status == k12.WorkFeedbackFailed {
+			if !existing.RetrySafe {
+				return k12.WorkFeedbackGeneration{}, false, records.ErrVersionConflict
+			}
+			var newerCount int
+			if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM k12_work_feedback_generations
+				WHERE agent_name=? AND work_id=? AND generation_no>?`, agentName, workID, existing.GenerationNo).Scan(&newerCount); err != nil {
+				return k12.WorkFeedbackGeneration{}, false, err
+			}
+			if newerCount != 0 {
+				return k12.WorkFeedbackGeneration{}, false, records.ErrVersionConflict
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE k12_work_feedback_generations
+				SET status='queued',failure_reason='',attempt=attempt+1,updated_at=?
+				WHERE agent_name=? AND generation_id=? AND status='failed'`, nowUnix(), agentName, existing.GenerationID); err != nil {
+				return k12.WorkFeedbackGeneration{}, false, err
+			}
+			existing.Status, existing.FailureReason, existing.RetrySafe = k12.WorkFeedbackQueued, "", false
+			existing.Attempt++
 		}
 		if err := tx.Commit(); err != nil {
 			return k12.WorkFeedbackGeneration{}, false, err
@@ -1129,6 +1191,18 @@ WHERE work_id=? AND agent_name=? AND command_key=?`,
 		return k12.WorkFeedbackGeneration{}, false, err
 	}
 	if activeCount != 0 {
+		return k12.WorkFeedbackGeneration{}, false, records.ErrVersionConflict
+	}
+	var currentID string
+	if err := tx.QueryRowContext(ctx, `SELECT generation_id FROM k12_work_feedback_generations
+		WHERE work_id=? AND agent_name=? ORDER BY generation_no DESC LIMIT 1`, workID, agentName).Scan(&currentID); err != nil {
+		return k12.WorkFeedbackGeneration{}, false, err
+	}
+	current, err := getWorkFeedbackGenerationVia(ctx, tx, agentName, currentID)
+	if err != nil {
+		return k12.WorkFeedbackGeneration{}, false, err
+	}
+	if current.Status == k12.WorkFeedbackFailed && !current.RetrySafe {
 		return k12.WorkFeedbackGeneration{}, false, records.ErrVersionConflict
 	}
 	var generationNo int
@@ -1159,7 +1233,7 @@ WHERE work_id=? AND agent_name=? AND command_key=?`,
 	return next, true, nil
 }
 
-// ExpirePreparedWorkFeedbackGenerations 原子收敛未发送的过期点评与代次，保留成功的 latest。
+// ExpirePreparedWorkFeedbackGenerations 原子收敛过期 prepared/sent 及未知调用对应的点评，保留成功的 latest。
 func (s *Store) ExpirePreparedWorkFeedbackGenerations(
 	ctx context.Context, agentName, workID string, now int64,
 ) (int, error) {
@@ -1179,11 +1253,13 @@ func expirePreparedWorkFeedbackGenerations(
 	ctx context.Context, tx *sql.Tx, agentName, workID string, now int64,
 ) (int, error) {
 	rows, err := tx.QueryContext(ctx, `UPDATE k12_image_task_invocations AS i
-		SET status='failed',error_kind='interactive_deadline_exceeded',retry_safe=1,
+		SET status=CASE WHEN status='sent' THEN 'outcome_unknown' ELSE 'failed' END,
+		    error_kind=CASE WHEN status='sent' THEN 'work_feedback_outcome_unknown' ELSE 'interactive_deadline_exceeded' END,
+		    retry_safe=CASE WHEN status='sent' THEN 0 ELSE 1 END,
 		    finished_at=?,updated_at=?
 		WHERE i.agent_name=? AND i.work_record_id=? AND i.operation='work_feedback'
-		  AND i.status='prepared' AND i.deadline_at>0 AND i.deadline_at<=?
-		  AND i.started_at=0 AND i.provider_request_key=''
+		  AND i.deadline_at>0 AND i.deadline_at<=?
+		  AND (i.status='sent' OR (i.status='prepared' AND i.started_at=0 AND i.provider_request_key=''))
 		  AND NOT EXISTS (SELECT 1 FROM k12_image_task_invocations newer
 		      WHERE newer.agent_name=i.agent_name AND newer.operation_key=i.operation_key
 		        AND newer.attempt>i.attempt)
@@ -1211,16 +1287,39 @@ func expirePreparedWorkFeedbackGenerations(
 	if err := rows.Close(); err != nil {
 		return 0, err
 	}
+	var count int64
+	// 只消费本次刚过期的失败；历史可重试失败不能取消已重新排队的尝试。
 	for _, key := range operationKeys {
-		if _, err := tx.ExecContext(ctx, `UPDATE k12_work_feedback_generations
-			SET status='failed',failure_reason='interactive_deadline_exceeded',updated_at=?
+		result, err := tx.ExecContext(ctx, `UPDATE k12_work_feedback_generations
+			SET status='failed',failure_reason='work_feedback_incomplete',updated_at=?
 			WHERE agent_name=? AND work_id=? AND status IN ('queued','running')
-			  AND 'work:'||work_id||':version:'||generation_id||':feedback'=?`,
-			now, agentName, workID, key); err != nil {
+			  AND 'work:'||work_id||':version:'||generation_id||':feedback'=?`, now, agentName, workID, key)
+		if err != nil {
 			return 0, err
 		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return 0, err
+		}
+		count += affected
 	}
-	if len(operationKeys) > 0 {
+	result, err := tx.ExecContext(ctx, `UPDATE k12_work_feedback_generations AS g
+		SET status='failed',failure_reason='work_feedback_incomplete',updated_at=?
+		WHERE g.agent_name=? AND g.work_id=? AND g.status IN ('queued','running')
+		  AND (SELECT i.status FROM k12_image_task_invocations i
+		    WHERE i.agent_name=g.agent_name AND i.work_record_id=g.work_id
+		      AND i.operation='work_feedback'
+		      AND i.operation_key='work:'||g.work_id||':version:'||g.generation_id||':feedback'
+		    ORDER BY i.attempt DESC LIMIT 1)='outcome_unknown'`, now, agentName, workID)
+	if err != nil {
+		return 0, err
+	}
+	unknownCount, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	count += unknownCount
+	if count > 0 {
 		if _, err := tx.ExecContext(ctx, `UPDATE k12_creative_works
 			SET feedback_state='failed',row_version=row_version+1
 			WHERE agent_name=? AND record_id=? AND deleted_at IS NULL
@@ -1231,7 +1330,7 @@ func expirePreparedWorkFeedbackGenerations(
 			return 0, err
 		}
 	}
-	return len(operationKeys), nil
+	return int(count), nil
 }
 
 func legacyCreativeWorkSourceSnapshot(
@@ -1306,6 +1405,9 @@ func (s *Store) FailWorkFeedbackGeneration(
 		generation.Status = k12.WorkFeedbackFailed
 		generation.FailureReason = strings.TrimSpace(reason)
 		generation.UpdatedAt = now
+	}
+	if err := projectWorkFeedbackRecovery(ctx, tx, &generation); err != nil {
+		return k12.WorkFeedbackGeneration{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		return k12.WorkFeedbackGeneration{}, err
@@ -1393,6 +1495,7 @@ func (s *Store) CompleteWorkFeedbackGeneration(
 	generation.Status = k12.WorkFeedbackSucceeded
 	generation.Feedback = &feedback
 	generation.FailureReason = ""
+	generation.RecoveryState, generation.RetrySafe = "", false
 	generation.UpdatedAt = now
 	return generation, nil
 }
@@ -1403,7 +1506,13 @@ func (s *Store) GetCreativeWorkGenerationState(
 ) (k12.CreativeWorkGenerationState, error) {
 	var initialID, latestID string
 	var state k12.CreativeWorkGenerationState
-	if err := s.db.QueryRowContext(ctx, `SELECT initial_feedback_generation_id,
+	// 当前生成与最近成功结果来自同一快照，避免完成提交穿过多次读取。
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return state, err
+	}
+	defer tx.Rollback()
+	if err := tx.QueryRowContext(ctx, `SELECT initial_feedback_generation_id,
 		latest_feedback_generation_id, row_version
 		FROM k12_creative_works
 		WHERE record_id=? AND agent_name=? AND deleted_at IS NULL`,
@@ -1414,20 +1523,37 @@ func (s *Store) GetCreativeWorkGenerationState(
 		return state, err
 	}
 	if initialID != "" {
-		initial, err := s.GetWorkFeedbackGeneration(ctx, agentName, initialID)
+		initial, err := getWorkFeedbackGenerationVia(ctx, tx, agentName, initialID)
 		if err != nil {
 			return state, err
 		}
 		state.Initial = &initial
 	}
 	if latestID != "" {
-		latest, err := s.GetWorkFeedbackGeneration(ctx, agentName, latestID)
+		latest, err := getWorkFeedbackGenerationVia(ctx, tx, agentName, latestID)
 		if err != nil {
 			return state, err
 		}
 		state.Latest = &latest
 	}
-	return state, nil
+	var currentID string
+	err = tx.QueryRowContext(ctx, `SELECT generation_id FROM k12_work_feedback_generations
+		WHERE work_id=? AND agent_name=? ORDER BY generation_no DESC LIMIT 1`, workID, agentName).Scan(&currentID)
+	if err != nil && err != sql.ErrNoRows {
+		return state, err
+	}
+	if currentID == initialID {
+		state.Current = state.Initial
+	} else if currentID == latestID {
+		state.Current = state.Latest
+	} else if currentID != "" {
+		current, err := getWorkFeedbackGenerationVia(ctx, tx, agentName, currentID)
+		if err != nil {
+			return state, err
+		}
+		state.Current = &current
+	}
+	return state, tx.Commit()
 }
 
 func scanAccumulationDictationGeneration(

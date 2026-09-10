@@ -32,6 +32,8 @@ type workFeedbackGenerationDTO struct {
 	Status         string           `json:"status"`
 	Feedback       *workFeedbackDTO `json:"feedback,omitempty"`
 	FailureMessage string           `json:"failure_message,omitempty"`
+	RecoveryState  string           `json:"recovery_state,omitempty"`
+	RetrySafe      bool             `json:"retry_safe"`
 }
 
 type creativeWorkDTO struct {
@@ -44,6 +46,7 @@ type creativeWorkDTO struct {
 	RowVersion         int                        `json:"row_version"`
 	InitialFeedback    *workFeedbackGenerationDTO `json:"initial_feedback,omitempty"`
 	LatestFeedback     *workFeedbackGenerationDTO `json:"latest_feedback,omitempty"`
+	CurrentFeedback    *workFeedbackGenerationDTO `json:"current_feedback,omitempty"`
 	DeliveryBatchID    string                     `json:"delivery_batch_id,omitempty"`
 	CreatedAt          int64                      `json:"created_at"`
 	LatestGenerationAt *int64                     `json:"latest_generation_at"`
@@ -59,6 +62,8 @@ func feedbackGenerationDTO(
 		GenerationID:   generation.GenerationID,
 		Status:         generation.Status,
 		FailureMessage: generation.FailureReason,
+		RecoveryState:  generation.RecoveryState,
+		RetrySafe:      generation.RetrySafe,
 	}
 	if generation.Feedback == nil {
 		return dto
@@ -128,6 +133,7 @@ func toCreativeWorkDTO(v usecase.CreativeWorkView) creativeWorkDTO {
 		RowVersion:         v.GenerationState.RowVersion,
 		InitialFeedback:    feedbackGenerationDTO(v.GenerationState.Initial),
 		LatestFeedback:     feedbackGenerationDTO(v.GenerationState.Latest),
+		CurrentFeedback:    feedbackGenerationDTO(v.GenerationState.Current),
 		CreatedAt:          v.Record.CreatedAt,
 		LatestGenerationAt: latestGenerationAt,
 	}

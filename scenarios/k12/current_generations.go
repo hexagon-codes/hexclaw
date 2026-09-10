@@ -44,14 +44,18 @@ type WorkFeedbackGeneration struct {
 	Source        CreativeWorkSourceSnapshot `json:"-"`
 	Feedback      *WorkFeedback              `json:"feedback,omitempty"`
 	FailureReason string                     `json:"failure_message,omitempty"`
-	Attempt       int                        `json:"-"`
-	CreatedAt     int64                      `json:"-"`
-	UpdatedAt     int64                      `json:"-"`
+	// 恢复状态和重试许可由调用账本投影，不单独持久化。
+	RecoveryState string `json:"recovery_state,omitempty"`
+	RetrySafe     bool   `json:"retry_safe"`
+	Attempt       int    `json:"-"`
+	CreatedAt     int64  `json:"-"`
+	UpdatedAt     int64  `json:"-"`
 }
 
 type CreativeWorkGenerationState struct {
 	Initial    *WorkFeedbackGeneration
 	Latest     *WorkFeedbackGeneration
+	Current    *WorkFeedbackGeneration
 	RowVersion int
 }
 

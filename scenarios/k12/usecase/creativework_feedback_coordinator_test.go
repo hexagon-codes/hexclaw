@@ -257,4 +257,31 @@ func TestCreativeWorkFeedbackCoordinatorRecoversQueuedDirectWorkAfterRestart(t *
 	); err != nil || recovered != 0 {
 		t.Fatalf("terminal generation must not recover again: %d %v", recovered, err)
 	}
+	next, _, err := d.Records.PrepareWorkFeedbackGeneration(context.Background(), "xiaoming", workID,
+		"recover-sent-regeneration", "sha256:recover-sent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	invocation, _, err := d.Records.PrepareImageTaskInvocation(context.Background(), k12.ImageTaskInvocation{
+		InvocationID: "recover-sent", AgentName: "xiaoming", WorkRecordID: workID,
+		Operation:     k12.ImageTaskOperationWorkFeedback,
+		OperationKey:  "work:" + workID + ":version:" + next.GenerationID + ":feedback",
+		RequestDigest: "sha256:recover-sent", RouteSnapshot: currentFeedbackRoute(), Attempt: 1, DeadlineAt: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, claimed, err := d.Records.ClaimImageTaskInvocationSend(context.Background(), "xiaoming", invocation.InvocationID, "lost-provider-receipt", 0); err != nil || !claimed {
+		t.Fatalf("prepare interrupted sent invocation: claimed=%v err=%v", claimed, err)
+	}
+	if recovered, err := restarted.Recover(context.Background(), []string{"xiaoming"}); err != nil || recovered != 0 {
+		t.Fatalf("expired sent invocation must settle without a new worker: %d %v", recovered, err)
+	}
+	view, err = d.GetCreativeWork(context.Background(), "xiaoming", workID)
+	if err != nil || view.GenerationState.Current == nil || view.GenerationState.Latest == nil ||
+		view.GenerationState.Current.Status != k12.WorkFeedbackFailed || view.GenerationState.Current.RetrySafe ||
+		view.GenerationState.Current.RecoveryState != "outcome_unknown" ||
+		view.GenerationState.Latest.GenerationID != generationID || solver.calls != 1 {
+		t.Fatalf("sent restart recovery changed latest or called provider: state=%+v calls=%d err=%v", view.GenerationState, solver.calls, err)
+	}
 }

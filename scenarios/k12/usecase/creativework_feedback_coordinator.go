@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
@@ -20,13 +21,13 @@ type CreativeWorkFeedbackCoordinator struct {
 	Records     *k12storage.Store
 	BaseContext context.Context
 
-	workerMu    sync.Mutex
-	runCtx      context.Context
-	runCancel   context.CancelCauseFunc
+	workerMu     sync.Mutex
+	runCtx       context.Context
+	runCancel    context.CancelCauseFunc
 	agentWorkers agentWorkerFenceRegistry
-	workerCount int
-	workerIdle  chan struct{}
-	sealed      bool
+	workerCount  int
+	workerIdle   chan struct{}
+	sealed       bool
 }
 
 func (c *CreativeWorkFeedbackCoordinator) validate() error {
@@ -159,6 +160,41 @@ func (c *CreativeWorkFeedbackCoordinator) Run(
 	default:
 		return k12storage.ErrImageTaskInvalidState
 	}
+	invocation, invocationErr := c.Records.GetLatestWorkFeedbackInvocation(ctx, agentName, generation.WorkID,
+		"work:"+generation.WorkID+":version:"+generation.GenerationID+":feedback")
+	if invocationErr != nil && !errors.Is(invocationErr, k12storage.ErrImageTaskNotFound) {
+		return invocationErr
+	}
+	if invocationErr == nil && invocation.Status == k12.ImageTaskInvocationSent {
+		// 重启后的在途调用只等原截止时间，不延长预算或再次发送。
+		slog.Info("K12 work feedback recovery waiting for original deadline", "agent_id", agentName,
+			"work_id", generation.WorkID, "generation_id", generationID,
+			"invocation_id", invocation.InvocationID, "deadline_at", invocation.DeadlineAt)
+		if invocation.DeadlineAt > 0 {
+			timer := time.NewTimer(time.Until(time.Unix(invocation.DeadlineAt, 0)))
+			defer timer.Stop()
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-timer.C:
+			}
+		} else if err := c.Records.FailWorkFeedbackInvocation(ctx, agentName, invocation.InvocationID,
+			"work_feedback_outcome_unknown", true, false); err != nil {
+			return err
+		}
+	}
+	count, err := c.Records.ExpirePreparedWorkFeedbackGenerations(ctx, agentName, generation.WorkID, time.Now().Unix())
+	if err != nil {
+		return err
+	}
+	if count > 0 {
+		slog.Info("K12 work feedback recovery settled invocation", "agent_id", agentName,
+			"work_id", generation.WorkID, "generation_id", generationID, "settled_generations", count)
+	}
+	generation, err = c.Records.GetWorkFeedbackGeneration(ctx, agentName, generationID)
+	if err != nil || generation.Status == k12.WorkFeedbackFailed {
+		return err
+	}
 	_, err = c.Deps.GenerateWorkFeedbackCommand(
 		ctx, generation.AgentName, generation.WorkID, generation.CommandKey,
 	)
@@ -181,12 +217,10 @@ func (c *CreativeWorkFeedbackCoordinator) recoverySafe(
 		return false, err
 	}
 	switch invocation.Status {
-	case k12.ImageTaskInvocationPrepared, k12.ImageTaskInvocationSucceeded:
+	case k12.ImageTaskInvocationPrepared, k12.ImageTaskInvocationSucceeded, k12.ImageTaskInvocationSent:
 		return true, nil
 	default:
-		// sent/outcome_unknown and failed are deliberately parked. The former
-		// requires provider result-query reconciliation; the latter requires an
-		// explicit user retry of the same initial generation.
+		// 已终结的调用由恢复结算为失败；未知结果不再次发送。
 		return false, nil
 	}
 }
@@ -207,6 +241,14 @@ func (c *CreativeWorkFeedbackCoordinator) Recover(
 			return recovered, err
 		}
 		for _, generation := range generations {
+			count, err := c.Records.ExpirePreparedWorkFeedbackGenerations(ctx, generation.AgentName, generation.WorkID, time.Now().Unix())
+			if err != nil {
+				return recovered, err
+			}
+			if count > 0 {
+				slog.Info("K12 work feedback startup recovery settled invocation", "agent_id", generation.AgentName,
+					"work_id", generation.WorkID, "generation_id", generation.GenerationID, "settled_generations", count)
+			}
 			safe, err := c.recoverySafe(ctx, generation)
 			if err != nil {
 				return recovered, err

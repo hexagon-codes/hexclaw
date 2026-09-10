@@ -180,6 +180,9 @@ func TestWorkFeedbackInitialRetryReusesGenerationAndFailedRegenerationPreservesL
 		t.Fatalf("initial retry must reuse generation: created=%v got=%+v initial=%+v",
 			created, retried, initial)
 	}
+	if count, err := store.ExpirePreparedWorkFeedbackGenerations(context.Background(), "mingming", rec.RecordID, 2); err != nil || count != 0 {
+		t.Fatalf("past failed invocation must not cancel the accepted retry: count=%d err=%v", count, err)
+	}
 
 	feedback := k12.WorkFeedback{
 		FeedbackID: "feedback-1", VersionID: "internal-generation",
@@ -253,11 +256,12 @@ func TestWorkFeedbackInitialRetryReusesGenerationAndFailedRegenerationPreservesL
 		t.Fatalf("sent generation must remain parked: %v", err)
 	}
 	sent, err = store.GetImageTaskInvocation(context.Background(), "mingming", sent.InvocationID)
-	if err != nil || sent.Status != k12.ImageTaskInvocationSent {
-		t.Fatalf("sent invocation was changed by prepared expiry: %+v err=%v", sent, err)
+	if err != nil || sent.Status != k12.ImageTaskInvocationOutcomeUnknown || sent.RetrySafe {
+		t.Fatalf("expired sent invocation must converge without allowing resend: %+v err=%v", sent, err)
 	}
-	if err := store.FailWorkFeedbackInvocation(context.Background(), "mingming", sent.InvocationID, "outcome_unknown", true, false); err != nil {
-		t.Fatal(err)
+	third, err = store.GetWorkFeedbackGeneration(context.Background(), "mingming", third.GenerationID)
+	if err != nil || third.Status != k12.WorkFeedbackFailed || third.RetrySafe || third.RecoveryState != "outcome_unknown" {
+		t.Fatalf("expired sent generation did not converge: %+v err=%v", third, err)
 	}
 	if _, _, err := store.PrepareWorkFeedbackGeneration(context.Background(), "mingming", rec.RecordID, "must-not-resend-unknown", "sha256:fourth"); !errors.Is(err, records.ErrVersionConflict) {
 		t.Fatalf("unknown generation must remain parked: %v", err)
@@ -275,6 +279,11 @@ func TestWorkFeedbackInitialRetryReusesGenerationAndFailedRegenerationPreservesL
 	if state.Latest == nil || state.Latest.GenerationID != initial.GenerationID ||
 		state.Initial == nil || state.Initial.Status != k12.WorkFeedbackSucceeded {
 		t.Fatalf("failed regeneration replaced latest: %+v", state)
+	}
+	if state.Current == nil || state.Current.GenerationID != third.GenerationID ||
+		state.Current.Status != k12.WorkFeedbackFailed || state.Current.RetrySafe ||
+		state.Current.RecoveryState != "outcome_unknown" {
+		t.Fatalf("current regeneration recovery was not projected independently of latest: %+v", state)
 	}
 }
 

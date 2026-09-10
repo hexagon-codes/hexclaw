@@ -147,7 +147,12 @@ func TestGenerateWorkFeedbackHTTPProviderFailureIsHonest(t *testing.T) {
 }
 
 func TestGenerateWorkFeedbackHTTPCommandReplayAndRegeneration(t *testing.T) {
+	calls := 0
 	h := newFeedbackServer(t, func(context.Context, string, string, string) (string, error) {
+		calls++
+		if calls == 2 {
+			return "", nil
+		}
 		return "好句在开头；建议结尾具体化。", nil
 	})
 	id := createWritingWorkHTTP(t, h)
@@ -158,8 +163,18 @@ func TestGenerateWorkFeedbackHTTPCommandReplayAndRegeneration(t *testing.T) {
 	firstID := currentFeedbackGeneration(t, first)["generation_id"]
 
 	rec, regenerated := generateWritingFeedbackHTTP(t, h, id, "feedback-regenerate", "mingming")
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("failed regeneration must remain honest: %d %v", rec.Code, regenerated)
+	}
+	_, failed := doCurrent(t, h, http.MethodGet, "/creative-works/"+id+"?agent=mingming", "", nil)
+	current, _ := failed["current_feedback"].(map[string]any)
+	if current["status"] != k12.WorkFeedbackFailed || current["retry_safe"] != true ||
+		currentFeedbackGeneration(t, failed)["generation_id"] != firstID {
+		t.Fatalf("failed regeneration must project retry safety and preserve latest: %v", failed)
+	}
+	rec, regenerated = generateWritingFeedbackHTTP(t, h, id, "feedback-regenerate", "mingming")
 	regeneratedID := currentFeedbackGeneration(t, regenerated)["generation_id"]
-	if rec.Code != http.StatusOK || regeneratedID == firstID {
+	if rec.Code != http.StatusOK || regeneratedID == firstID || regeneratedID != current["generation_id"] {
 		t.Fatalf(
 			"首次生成完成后的新命令必须追加 generation: status=%d first=%v regenerated=%v body=%v",
 			rec.Code,
