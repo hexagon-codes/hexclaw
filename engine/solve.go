@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/hexagon-codes/ai-core/llm"
+	"github.com/hexagon-codes/hexagon/observe/trace"
 	"github.com/hexagon-codes/hexclaw/egress"
 	"github.com/hexagon-codes/hexclaw/skill"
 	"github.com/hexagon-codes/toolkit/util/idgen"
@@ -149,8 +150,11 @@ type answerGroup struct {
 
 const verifiedTextbookEvidenceSeparator = "\n\nVerified textbook evidence ("
 
-// deterministicProblemStem 只给本地确定性求解器取原题；模型路径仍消费完整教材证据。
+// deterministicProblemStem 只给本地确定性求解器取原题，教材证据与练习参考答案不作为题干。
 func deterministicProblemStem(problem string) string {
+	if index := strings.Index(problem, "\n\nFrozen practice reference ("); index >= 0 {
+		problem = strings.TrimSpace(problem[:index])
+	}
 	if index := strings.Index(problem, verifiedTextbookEvidenceSeparator); index >= 0 {
 		return strings.TrimSpace(problem[:index])
 	}
@@ -356,7 +360,7 @@ func (o *SolveSkill) Execute(ctx context.Context, args map[string]any) (*skill.R
 	}
 
 	// 3) 组装教学结果 + 置信徽标 + 结构化回执。
-	content := formatSolve(groups, verdict, computed, len(sols), methodDiversity)
+	content := formatSolve(groups, verdict, computed, len(sols), methodDiversity, numericGrounded)
 	reports := []SubAgentReport{
 		{Agent: solverAgentName, Status: subAgentStatusOK},
 		newVerifierReport(verdict),
@@ -500,7 +504,7 @@ func deterministicGradeResult(studentAnswer, groundTruth, mode string, assess gr
 }
 
 // evidenceKind 把「是否有 code_exec 数值 ground truth」映射成 adapter 认得的证据类型串。
-// numeric_exec = verifier 真跑代码算出并客观相等（强）；model = 仅模型口头判定（弱）。
+// numeric_exec 表示本题实际执行所得的可比较结果；是否一致由 verdict 独立表达。
 func evidenceKind(numericGrounded bool) string {
 	if numericGrounded {
 		return "numeric_exec"
@@ -526,8 +530,13 @@ func (o *SolveSkill) solverSpecs(problem, subject, grade, constraint string, met
 
 // runSolveAgent 跑一个子 Agent（solver/verifier/grader）并登记注册表，返回其输出。
 func (o *SolveSkill) runSolveAgent(ctx context.Context, spec SubAgentSpec) (string, error) {
+	res, err := o.runSolveAgentResult(ctx, spec)
+	return res.Output, err
+}
+
+func (o *SolveSkill) runSolveAgentResult(ctx context.Context, spec SubAgentSpec) (SubAgentResult, error) {
 	if o.executeFunc == nil {
-		return "", fmt.Errorf("executor not available")
+		return SubAgentResult{}, fmt.Errorf("executor not available")
 	}
 	o.registry.Start(newSubAgentRecord(ctx, spec))
 	// 受信内部授权（设计⑤根治）：仅对真 solve 派生盖不可伪造的 grant 到子 ctx，permission 据它放行
@@ -541,13 +550,29 @@ func (o *SolveSkill) runSolveAgent(ctx context.Context, spec SubAgentSpec) (stri
 		classes = []egress.DataClass{egress.ClassGeneral}
 	}
 	execCtx = egress.WithRequest(execCtx, egress.PurposeSolveVerify, spec.RunID, classes...)
-	res, err := runSubAgentWithRetry(execCtx, o.executeFunc, spec, defaultSubAgentTimeout)
+	execute := o.executeFunc
+	if spec.Source == solveDispatchSource && spec.Agent == verifierAgentName {
+		// 在物理调用拦截器内部收集回执，使持久化结果与正文一同保存；重放直接读取原回执。
+		execute = func(callCtx context.Context, callSpec SubAgentSpec) (SubAgentResult, error) {
+			sink := &codeExecutionReceiptSink{inputDigest: executionInputDigest(callSpec.Task)}
+			result, callErr := o.executeFunc(context.WithValue(callCtx, codeExecutionReceiptKey{}, sink), callSpec)
+			sink.mu.Lock()
+			defer sink.mu.Unlock()
+			result.ExecutionReceipt = nil
+			if callErr == nil {
+				result.ExecutionReceipt = sink.receipt
+			}
+			return result, callErr
+		}
+	}
+	res, err := runSubAgentWithRetry(execCtx, execute, spec, defaultSubAgentTimeout)
 	status, errStr := subAgentStatusOK, ""
 	if err != nil {
 		status, errStr = subAgentStatusError, err.Error()
+		res.ExecutionReceipt = nil
 	}
 	o.registry.Finish(spec.RunID, status, res.Output, errStr, res.SessionID)
-	return res.Output, err
+	return res, err
 }
 
 // verify 用 code_exec 独立重算。verifier 不可用/出错/不可解析 → unverifiable（不阻断）。
@@ -555,39 +580,58 @@ func (o *SolveSkill) verify(ctx context.Context, problem, candidate, constraint 
 	return o.verifySolution(ctx, problem, "", candidate, constraint)
 }
 
-// verifySolution independently recomputes the answer, then audits the supplied
-// worked solution. A final answer alone cannot reveal an invalid or out-of-scope derivation.
+// verifySolution 从执行回执取数值依据，模型正文只提供过程审计及弱判断。
 func (o *SolveSkill) verifySolution(ctx context.Context, problem, solution, candidate, constraint string) (v verifyVerdict, computed string, numericGrounded bool) {
 	if o.executeFunc == nil || ctx.Err() != nil {
 		return verdictUnverifiable, "", false
 	}
-	out := o.runValidated(ctx, verifierSpecWithSolution(problem, solution, candidate, constraint), verdictParseable)
-	if strings.TrimSpace(out) == "" {
+	spec := verifierSpecWithSolution(problem, solution, candidate, constraint)
+	result, usedSpec := o.runValidatedResult(ctx, spec, func(result SubAgentResult, attempt SubAgentSpec) bool {
+		if !verdictParseable(result.Output) {
+			return false
+		}
+		verdict, reported := parseVerdict(result.Output)
+		if verdict == verdictOutOfScope || (verdict == verdictUnverifiable && reported == "") {
+			return true
+		}
+		_, executed := result.ExecutionReceipt.computed(attempt.Task)
+		return executed
+	})
+	if strings.TrimSpace(result.Output) == "" {
 		return verdictUnverifiable, "", false
 	}
-	verdict, computed := parseVerdict(out)
-	// 交叉校验硬化：verifier 真算出一个数（computed）时，以「算出的数 vs 候选」的客观比对为准，
-	// 纠正模型口头判定词与自己算出的数自相矛盾的两种危险情形——
-	//   • BUG-D（真模型实测 Qwen2.5-72B 算对 computed=2550 却说 DISAGREE）：computed≡候选却判 DISAGREE → 纠为 AGREE。
-	//   • ① false-AGREE（最坏失效）：computed 与候选**可确信不等**却判 AGREE → 降为 DISAGREE，错答案绝不当「已验证」。
-	// 用数值/分数/集合容差等值，不靠脆字符串比对：既认出 0.5≡1/2、'12和8'≡'8和12'，又只在「能解析且确不等」
-	// 时才下调 AGREE——带单位/等价文字形式解析不了 → 不武断（信模型对「42支==42」这类等价的判断）。
+	verdict, computed := parseVerdict(result.Output)
+	actualComputed, executed := result.ExecutionReceipt.computed(usedSpec.Task)
+	if executed {
+		computed = actualComputed
+	}
+	process := ""
+	if match := processLineRe.FindStringSubmatch(result.Output); len(match) > 1 {
+		process = strings.ToUpper(match[1])
+	}
+	if process == "INVALID" && verdict != verdictOutOfScope {
+		verdict = verdictDisagree
+	}
+	// 完整解法只有明确通过过程审计时才允许数值等值纠偏；缺字段不猜测过程正确。
+	allowNumericAgreement := process != "INVALID" && (strings.TrimSpace(solution) == "" || process == "VALID")
+	// 有执行回执时只比较实际 stdout；过程否决与超纲否决不因最终数值相同而失效。
 	if computed != "" {
 		switch {
-		case verdict == verdictUnverifiable && answersEqual(computed, candidate):
+		case verdict == verdictUnverifiable && allowNumericAgreement && answersEqual(computed, candidate):
 			verdict = verdictAgree
 		case verdict == verdictUnverifiable && answersDefinitelyDiffer(computed, candidate):
 			verdict = verdictDisagree
-		case verdict == verdictDisagree && answersEqual(computed, candidate):
+		case verdict == verdictDisagree && allowNumericAgreement && answersEqual(computed, candidate):
 			verdict = verdictAgree
 		case verdict == verdictAgree && answersDefinitelyDiffer(computed, candidate):
 			verdict = verdictDisagree
 		}
 	}
-	// 强证据（numericGrounded）= verifier 真算出了 computed 且它与候选客观相等——
-	// 此时 agree 有 code_exec ground truth 撑腰（强徽章）；否则 agree 只是模型口头判定（弱徽章）。
-	// out_of_scope 是解法合规性判定，与数值验算正交，不算强数值证据。
-	numericGrounded = verdict == verdictAgree && computed != "" && answersEqual(computed, candidate)
+	numericGrounded = executed && (verdict == verdictAgree || verdict == verdictDisagree) &&
+		(answersEqual(computed, candidate) || answersDefinitelyDiffer(computed, candidate))
+	trace.L(ctx).Info("solve execution evidence evaluated", "input_digest", executionInputDigest(usedSpec.Task),
+		"executed", executed, "computed", computed, "candidate", candidate, "process", process,
+		"verdict", verdictString(verdict), "evidence", evidenceKind(numericGrounded))
 	return verdict, computed, numericGrounded
 }
 
@@ -599,20 +643,34 @@ const strictFormatReminder = "\n\n⚠️ 上一次输出未按要求的固定格
 // 对标 Hermes JSON-mode 的「校验 + 失败重提示」：让 verdict/批改在弱/本地模型上也能被稳定解析，
 // 不静默退化成 unverifiable/兜底。仅首次解析失败才多花一次调用（按需付费；首次成功零额外成本）。
 func (o *SolveSkill) runValidated(ctx context.Context, spec SubAgentSpec, ok func(string) bool) string {
-	out, err := o.runSolveAgent(ctx, spec)
-	if err == nil && ok(out) {
-		return out
+	result, _ := o.runValidatedResult(ctx, spec, func(result SubAgentResult, _ SubAgentSpec) bool {
+		return ok(result.Output)
+	})
+	return result.Output
+}
+
+// runValidatedResult 沿用原有一次补验额度，连同产生结果的输入返回，避免重试时串用回执。
+func (o *SolveSkill) runValidatedResult(ctx context.Context, spec SubAgentSpec, ok func(SubAgentResult, SubAgentSpec) bool) (SubAgentResult, SubAgentSpec) {
+	result, err := o.runSolveAgentResult(ctx, spec)
+	if err == nil && ok(result, spec) {
+		return result, spec
 	}
-	if ctx.Err() != nil {
-		return out
+	// 物理调用失败由既有传输层决定能否安全重试，不用新任务绕过未知结果账本。
+	if err != nil || ctx.Err() != nil {
+		return result, spec
 	}
 	retry := spec
 	retry.RunID = spec.RunID + "-retry"
 	retry.Task = spec.Task + strictFormatReminder
-	if out2, err2 := o.runSolveAgent(ctx, retry); err2 == nil && ok(out2) {
-		return out2
+	if spec.Agent == verifierAgentName {
+		retry.Task += "\nA valid execution receipt is required for a numeric verdict. Run code_exec and print one COMPUTED: <final answer> line to stdout; do not only describe executing code."
 	}
-	return out // 两次都没解析干净：交给宽容解析 + 兜底，绝不更差。
+	if result2, err2 := o.runSolveAgentResult(ctx, retry); err2 == nil {
+		if ok(result2, retry) || (spec.Agent == verifierAgentName && verdictParseable(result2.Output)) {
+			return result2, retry
+		}
+	}
+	return result, spec
 }
 
 // verdictParseable 报告 verifier 输出是否含可识别判定。
@@ -872,15 +930,17 @@ func buildVerifierPromptWithSolution(problem, solution, candidate, constraint st
 待校验答案：%s
 
 步骤：
-1. 自己**逐步**审题、列式，用 code_exec（language=python）把**每一步**都算出来（别跳步、别口算），得到你独立的最终答案。
+1. 自己**逐步**审题、列式，用 code_exec（language=python）把**每一步**都算出来（别跳步、别口算），得到你独立的最终答案。程序最后必须向 stdout 输出一行 COMPUTED: <最终数值答案，保留必要单位>，不能仅在回复正文里写执行结果。
 2. 再逐步核对：待校验完整解法的**推理过程是否正确**、每一步是否站得住，最后比对你的答案与待校验答案是否一致。
    ——「答案凑对但过程/推理错」也要当作不一致，不要只看最终那个数。%s
 
-最后严格按以下格式输出（三行）：
+最后严格按以下格式输出（四行）：
 VERDICT: AGREE 或 DISAGREE 或 UNVERIFIABLE%s
+PROCESS: VALID 或 INVALID 或 NOT_PROVIDED
 COMPUTED: <你独立算出的答案；若本题无法用代码计算则写 N/A>
 说明：<一句话>
 
+PROCESS 单独判断待校验解法：每一步推理正确才为 VALID；任何错误步骤或无依据推导为 INVALID，即使最终答案相同也必须判 DISAGREE；仅在未提供完整解法时填 NOT_PROVIDED。超纲仍优先判 OUT_OF_SCOPE。
 判定规则：你的结果与待校验答案在数值/含义上一致、且提供的完整解法经得起逐步检查 → AGREE；数值不一致或提供的推理过程明显错误 → DISAGREE；本题非计算题、无法用代码客观判定 → UNVERIFIABLE%s。`, problem, solutionBlock, candidate, scopeStep, scopeVerdict, scopeRule)
 }
 
@@ -913,7 +973,7 @@ func normalizeAnswer(s string) string {
 // 为何不是字符串比对：0.5≡1/2、'12和8'≡'8和12'、2550≡2550 在字符串上不等，靠 normalizeAnswer
 // 认不出（BUG #② 取证）。verify() 的两向硬化（BUG-D / false-AGREE）与 method-diversity 分组都共用
 // 这一原语：相等判断用 answersEqual（能确信相等才为真），不等判断用 answersDefinitelyDiffer
-// （仅两边都能解析成数/数集且确不等才为真，带单位/等价文字形式解析不了 → 不武断，信模型的等价判断）。
+// （仅两边都能解析成数/数集或同单位单量且确不等才为真，其余文字形式不武断）。
 
 // answerTol 数值等值容差（相对或绝对取其一满足即等）；既认 exact 分数≡小数，又能抓出作业量级的真实算错（42 vs 48）。
 const answerTol = 1e-6
@@ -986,23 +1046,39 @@ func numberSetsEqual(as, bs []float64) bool {
 	return true
 }
 
-// answersEqual 报告两答案是否「可确信相等」：数集容差相等，或归一化字符串完全相同。
+// sameUnitAnswersEqual 仅比较单个数值与相同的明确单位，不剥单位、不转换单位或猜测文字含义。
+func sameUnitAnswersEqual(a, b string) (equal, comparable bool) {
+	am := bareQuantityRe.FindStringSubmatch(normalizeAnswer(a))
+	bm := bareQuantityRe.FindStringSubmatch(normalizeAnswer(b))
+	if len(am) != 3 || len(bm) != 3 || am[2] == "" || am[2] != bm[2] {
+		return false, false
+	}
+	av, aok := numericValue(am[1])
+	bv, bok := numericValue(bm[1])
+	return aok && bok && floatsClose(av, bv), aok && bok
+}
+
+// answersEqual 报告两答案是否「可确信相等」：数集或同单位单量容差相等，或归一化字符串完全相同。
 func answersEqual(a, b string) bool {
 	as, aok := numberSet(a)
 	bs, bok := numberSet(b)
 	if aok && bok {
 		return numberSetsEqual(as, bs)
 	}
+	if equal, comparable := sameUnitAnswersEqual(a, b); comparable {
+		return equal
+	}
 	return normalizeAnswer(a) == normalizeAnswer(b)
 }
 
-// answersDefinitelyDiffer 报告两答案是否「可确信不等」：仅当两边都能解析成数集且不等才为真。
-// 解析不了（带单位/等价文字形式如 "42支"≡"42"）→ 返回 false，绝不武断下调 AGREE。
+// answersDefinitelyDiffer 报告两答案是否「可确信不等」：数集或同单位单量可解析且不等才为真。
+// 缺单位、不同单位及其它文字形式保持不可确信，绝不武断下调 AGREE。
 func answersDefinitelyDiffer(a, b string) bool {
 	as, aok := numberSet(a)
 	bs, bok := numberSet(b)
 	if !aok || !bok {
-		return false
+		equal, comparable := sameUnitAnswersEqual(a, b)
+		return comparable && !equal
 	}
 	return !numberSetsEqual(as, bs)
 }
@@ -1044,6 +1120,9 @@ var computedMarker = regexp.MustCompile(`(?im)COMPUTED\s*[:：]\s*(.+?)\s*$`)
 // verdictLineRe 抓「VERDICT: <token>」判定行。只在此行内识别关键词，避免说明文字里的
 // 「not out of scope」「不是不一致」等否定表述被全文 substring 误伤（BUG-20260708）。
 var verdictLineRe = regexp.MustCompile(`(?im)^\s*VERDICT\s*[:：]\s*(.+?)\s*$`)
+
+// 过程结论只接受独立字段的完整枚举值，不从说明文字推断。
+var processLineRe = regexp.MustCompile(`(?im)^PROCESS[ \t]*[:：][ \t]*(VALID|INVALID|NOT_PROVIDED)[ \t]*\r?$`)
 
 // parseVerdict 解析 verifier 输出的判定 + 独立算出的答案。不可解析 → unverifiable（不阻断）。
 func parseVerdict(out string) (verifyVerdict, string) {
@@ -1096,12 +1175,12 @@ func hasCleanFinalAnswer(output, answer string) bool {
 }
 
 // formatSolve 组装教学正文 + 置信徽标 + 分歧裁决。
-func formatSolve(groups []answerGroup, verdict verifyVerdict, computed string, total int, methodDiversity bool) string {
+func formatSolve(groups []answerGroup, verdict verifyVerdict, computed string, total int, methodDiversity, numericGrounded bool) string {
 	primary := groups[0]
 
 	// 解法之间分歧（method_diversity 多组）：用 code_exec 核验充当裁决者。
 	if len(groups) > 1 {
-		if verdict != verdictUnverifiable && computed != "" {
+		if numericGrounded && verdict != verdictUnverifiable && computed != "" {
 			if g := findGroup(groups, computed); g != nil {
 				var b strings.Builder
 				b.WriteString(g.sols[0].output) // 用核验正确的那份解法当正文
@@ -1130,15 +1209,20 @@ func formatSolve(groups []answerGroup, verdict verifyVerdict, computed string, t
 	}
 	switch verdict {
 	case verdictAgree:
-		// AP-122：只有「真有干净最终答案」才敢盖高置信。solver 截断/无『答案：』行时 extractFinalAnswer
-		// 回退成末行垃圾推理句，verifier 对非数值候选不降级 → 不能据此宣称「已核验一致」。
-		if hasCleanFinalAnswer(primary.sols[0].output, primary.answer) {
+		// 明确最终答案与当前输入的真实执行证据必须同时存在。
+		if !hasCleanFinalAnswer(primary.sols[0].output, primary.answer) {
+			b.WriteString("> ℹ️ 本题未给出明确的最终答案（解题可能中途截断），校验环节虽未报异常，仍请人工复核关键步骤与结论后再采信。\n")
+		} else if numericGrounded {
 			b.WriteString("> ✅ 最终答案已由独立校验员用代码重算核验一致（高置信）。\n")
 		} else {
-			b.WriteString("> ℹ️ 本题未给出明确的最终答案（解题可能中途截断），校验环节虽未报异常，仍请人工复核关键步骤与结论后再采信。\n")
+			b.WriteString("> ℹ️ AI 自检一致 · 未程序验算\n")
 		}
 	case verdictDisagree:
-		fmt.Fprintf(&b, "> ⚠️ 注意：独立代码核验得到**不同**答案——解题得「%s」，代码核验得「%s」。两者不一致，请勿直接采信，建议复核关键步骤再下结论。\n", primary.answer, fallbackStr(computed, "（未给出）"))
+		if numericGrounded {
+			fmt.Fprintf(&b, "> ⚠️ 注意：独立代码核验得到**不同**答案——解题得「%s」，代码核验得「%s」。两者不一致，请勿直接采信，建议复核关键步骤再下结论。\n", primary.answer, fallbackStr(computed, "（未给出）"))
+		} else {
+			fmt.Fprintf(&b, "> ⚠️ AI 自检结果不一致：%s / %s · 未程序验算，请复核。\n", primary.answer, fallbackStr(computed, "（未给出）"))
+		}
 	default:
 		b.WriteString("> ℹ️ 本题无法用代码自动核验（非纯计算题），请人工复核关键步骤与结论。\n")
 	}

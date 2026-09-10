@@ -80,8 +80,10 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolName string, args map[st
 			return e.executeWithHooks(ctx, call, func(ctx context.Context) (string, error) {
 				result, err := s.Execute(ctx, call.Arguments)
 				if err != nil {
+					captureCodeExecutionReceipt(ctx, skillName, nil)
 					return "", err
 				}
+				captureCodeExecutionReceipt(ctx, skillName, result)
 				// BUG-1：skill 结构化 reply-safe 元数据（如 record chip）经 ctx sink 带到 reply。
 				stampToolReplyMeta(ctx, result.Metadata)
 				return result.Content, nil
@@ -245,6 +247,7 @@ func runAfterHook(ctx context.Context, h AfterToolHook, call *ToolCallInfo, resu
 //
 // flag OFF 时由调用方退化到 s.Execute；本函数假设 flag 已 ON。
 func (e *ToolExecutor) runSkillViaPipeline(ctx context.Context, toolName string, args map[string]any) (string, error) {
+	captureCodeExecutionReceipt(ctx, toolName, nil)
 	if e.skills == nil {
 		return "", fmt.Errorf("runSkillViaPipeline: nil skill registry")
 	}
@@ -262,6 +265,7 @@ func (e *ToolExecutor) runSkillViaPipeline(ctx context.Context, toolName string,
 	if res.Skill != nil && res.Skill.Name() != toolName {
 		return "", fmt.Errorf("runSkillViaPipeline: pipeline routed %q → %q (refusing to execute mismatched skill)", toolName, res.Skill.Name())
 	}
+	captureCodeExecutionReceipt(ctx, toolName, res.Result)
 	// BUG-1：pipeline 路径同样透传结构化 reply-safe 元数据（record chip 等）。
 	stampToolReplyMeta(ctx, res.Result.Metadata)
 	return res.Result.Content, nil

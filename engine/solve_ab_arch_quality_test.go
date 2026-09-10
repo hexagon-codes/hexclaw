@@ -420,7 +420,7 @@ func TestSolve_AB_RealEngine(t *testing.T) {
 func TestSolve_Audit_HighConfidenceFramingClaim(t *testing.T) {
 	agree := formatSolve(
 		[]answerGroup{{answer: "42", sols: []solverSolution{{output: "解题过程…\n答案：42", answer: "42"}}}},
-		verdictAgree, "42", 1, false)
+		verdictAgree, "42", 1, false, true)
 	for _, kw := range []string{"✅", "高置信", "核验"} {
 		if !strings.Contains(agree, kw) {
 			t.Errorf("solve 同意路径徽标应含 %q（坐实其高置信宣称），实得：%s", kw, agree)

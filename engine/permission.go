@@ -1211,13 +1211,18 @@ func (h *PermissionHook) revokeRememberedToolGrant(ctx context.Context, toolName
 	}
 }
 
-// authorizeUntrustedEvidenceTool is the authority firewall between retrieved
-// document data and tool execution. Interactive requests use the existing
-// approval source of truth. Unattended requests deliberately ignore the
-// global autonomy matrix and legacy broad task grants; only an evidence-aware
-// grant bound to owner/task/tool/argument scope can authorize them.
+// authorizeUntrustedEvidenceTool 隔离资料内容与执行授权。全权限下的内部验算只消费
+// 运行时已有的 solve grant；其余无人值守调用仍要求证据作用域授权，不能由资料提权。
 func (h *PermissionHook) authorizeUntrustedEvidenceTool(ctx context.Context, call *ToolCallInfo, risk string) error {
 	if src := systemDispatchSource(ctx); src != "" {
+		if src == solveDispatchSource && solveGrantFromContext(ctx) &&
+			h.DispatchPolicy().Profile() == SystemDispatchProfileFullAccess &&
+			call.Source == "skill" && canonicalEvidenceToolName(call.Name) == codeExecToolName {
+			logger.Info("[permission] solve-internal code_exec auto-approved with evidence",
+				"tool_name", call.Name, "source", src, "profile", SystemDispatchProfileFullAccess)
+			h.recordDecision(ctx, call.Name, "allow", "solve_grant", "全权限下消费运行时内部验算授权")
+			return nil
+		}
 		taskRef := systemDispatchTaskRef(ctx)
 		scopeDigest, err := untrustedEvidenceSecurityScopeDigest(call.Arguments)
 		if err != nil {

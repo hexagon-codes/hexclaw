@@ -34,8 +34,8 @@ func TestSolve_FalseAgreeHardened(t *testing.T) {
 // AP-151：真模型偶发把可计算题口头标成 UNVERIFIABLE，但同时给出 COMPUTED 数值。
 // 只要 computed 与候选可客观比较，就必须用数值纠偏，不能把 2550/2500 这种明确对错降成不可验证。
 func TestSolve_UnverifiableWithComputedHardened(t *testing.T) {
-	o := NewSolveSkill((&solveExec{verifierOut: "VERDICT: UNVERIFIABLE\nCOMPUTED: 2550"}).fn, nil)
-	if v, c, _ := o.verify(context.Background(), "求 1 到 100 所有偶数的和。", "2550", ""); v != verdictAgree {
+	o := NewSolveSkill((&solveExec{verifierOut: "VERDICT: UNVERIFIABLE\nPROCESS: VALID\nCOMPUTED: 2550", verifierStdout: "COMPUTED: 2550\n"}).fn, nil)
+	if v, c, _ := o.verifySolution(context.Background(), "求 1 到 100 所有偶数的和。", "50 个偶数，和为 (2+100)×50÷2=2550。", "2550", ""); v != verdictAgree {
 		t.Errorf("回归(AP-151): computed=%q 与候选2550相等时应纠为 AGREE，得 %s", c, verdictString(v))
 	}
 
@@ -55,10 +55,19 @@ func TestSolve_EquivAnswerSemanticEqual(t *testing.T) {
 			t.Errorf("回归(BUG②): answersEqual(%q,%q) 应等值", c.a, c.b)
 		}
 	}
-	se := &solveExec{verifierOut: "VERDICT: DISAGREE\nCOMPUTED: 0.5"}
+	se := &solveExec{verifierOut: "VERDICT: DISAGREE\nPROCESS: VALID\nCOMPUTED: 11250 千克", verifierStdout: "COMPUTED: 11250.00 千克\n"}
 	o := NewSolveSkill(se.fn, nil)
-	if v, _, _ := o.verify(context.Background(), "1 除以 2", "1/2", ""); v == verdictDisagree {
-		t.Errorf("回归(BUG②): 0.5≡1/2，模型误判 DISAGREE 应被代码纠回（仍得 disagree）")
+	if v, _, grounded := o.verifySolution(context.Background(), "5000平方米鱼塘每平方米产鱼2.25千克，一共产鱼多少？", "5000×2.25=11250千克。", "11250 千克", ""); v != verdictAgree || !grounded {
+		t.Errorf("valid process and executed equivalent answer must agree: verdict=%s grounded=%v", verdictString(v), grounded)
+	}
+	se.verifierStdout = ""
+	if _, _, grounded := o.verifySolution(context.Background(), "鱼塘产鱼量", "5000×2.25=11250千克。", "11250 千克", ""); grounded {
+		t.Error("equal quantities without an execution receipt must remain weak evidence")
+	}
+	se.verifierStdout = "COMPUTED: 11250.00 千克\n"
+	se.verifierOut = "VERDICT: DISAGREE\nPROCESS: INVALID\nCOMPUTED: 11250 千克"
+	if v, _, _ := o.verifySolution(context.Background(), "鱼塘产鱼量", "5000×2.25=11200，再加50。", "11250 千克", ""); v != verdictDisagree {
+		t.Errorf("equal quantities must preserve process veto: got %s", verdictString(v))
 	}
 }
 
@@ -87,6 +96,32 @@ func TestSolve_VerifierProcessLevelCheck(t *testing.T) {
 	if !hasStepCheck {
 		t.Errorf("回归(BUG④): verifier prompt 应含过程级(逐步)校验语义，治『答案对但推理错』")
 	}
+	if !strings.Contains(p, "PROCESS: VALID 或 INVALID 或 NOT_PROVIDED") {
+		t.Error("verifier prompt must request a structured process judgment")
+	}
+	se := &solveExec{verifierOut: "VERDICT: DISAGREE\nPROCESS: INVALID\nCOMPUTED: 42\n说明：6×7=40，再加2没有依据。", verifierStdout: "COMPUTED: 42\n"}
+	o := NewSolveSkill(se.fn, nil)
+	solution := "6×7=40，再加2，答案：42"
+	v, _, grounded := o.verifySolution(context.Background(), "6×7", solution, "42", "")
+	if v != verdictDisagree || !grounded || len(se.specs) != 1 {
+		t.Errorf("equal executed answer must preserve process veto without an extra call: verdict=%s grounded=%v calls=%d", verdictString(v), grounded, len(se.specs))
+	}
+	se.verifierOut = "VERDICT: AGREE\nPROCESS: INVALID\nCOMPUTED: 42"
+	if v, _, _ := o.verifySolution(context.Background(), "6×7", solution, "42", ""); v != verdictDisagree {
+		t.Errorf("invalid process must veto a contradictory agreement: got %s", verdictString(v))
+	}
+	se.verifierOut = "VERDICT: DISAGREE\nCOMPUTED: 42\n说明：过程可能正确。"
+	if v, _, _ := o.verifySolution(context.Background(), "6×7", solution, "42", ""); v != verdictDisagree {
+		t.Errorf("missing process judgment must not upgrade a full solution: got %s", verdictString(v))
+	}
+	se.verifierOut = "VERDICT: UNVERIFIABLE\nPROCESS: NOT_PROVIDED\nCOMPUTED: 42"
+	if v, _, _ := o.verifySolution(context.Background(), "6×7", solution, "42", ""); v != verdictUnverifiable {
+		t.Errorf("not-provided process judgment must not upgrade a full solution: got %s", verdictString(v))
+	}
+	se.verifierOut = "VERDICT: OUT_OF_SCOPE\nPROCESS: INVALID\nCOMPUTED: 42"
+	if v, _, _ := o.verifySolution(context.Background(), "6×7", solution, "42", "整数乘法"); v != verdictOutOfScope {
+		t.Errorf("scope rejection must retain precedence over process judgment: got %s", verdictString(v))
+	}
 }
 
 // AP-122 回归锁：solver 输出无干净最终答案（截断、无『答案：』行，末行=垃圾推理句）时，
@@ -111,7 +146,7 @@ func TestSolve_NoCleanFinalAnswer_NoFalseHighConfidence(t *testing.T) {
 		t.Errorf("回归(AP-122): 应降级为『…请复核』而非高置信，得：%s", res.Content)
 	}
 	// 不误伤：solver 有干净『答案：』行 + AGREE → 仍应盖高置信。
-	se2 := &solveExec{solverOuts: []string{"解题…\n答案：15"}, verifierOut: "VERDICT: AGREE\nCOMPUTED: 15"}
+	se2 := &solveExec{solverOuts: []string{"解题…\n答案：15"}, verifierOut: "VERDICT: AGREE\nCOMPUTED: 15", verifierStdout: "COMPUTED: 15\n"}
 	res2, _ := NewSolveSkill(se2.fn, nil).Execute(context.Background(), solveArgs("一根木头锯成 6 段，每锯断一次 3 分钟，一共多少分钟？"))
 	if !strings.Contains(res2.Content, "高置信") {
 		t.Errorf("回归(AP-122): 有干净最终答案『答案：15』+AGREE 仍应盖高置信(防过度抑制)，得：%s", res2.Content)
@@ -120,6 +155,27 @@ func TestSolve_NoCleanFinalAnswer_NoFalseHighConfidence(t *testing.T) {
 
 // 语义等值原语（①②③ 与 BUG-D 硬化共用）的直接单元锁：相等/确不等/规范键三向边界。
 func TestSolve_SemanticEqualityPrimitive(t *testing.T) {
+	if !answersEqual("11250.00 千克", "11250 千克") || answersDefinitelyDiffer("11250.00 千克", "11250 千克") {
+		t.Error("trailing decimal zeros must not change an equal same-unit quantity")
+	}
+	if answersEqual("11250.00 千克", "11300 千克") || !answersDefinitelyDiffer("11250.00 千克", "11300 千克") {
+		t.Error("different values with the same explicit unit must be distinguishable")
+	}
+	if !answersEqual("0.5 米", "1/2 米") || !answersEqual("1.0000001 米", "1 米") {
+		t.Error("same-unit quantities must retain fractional equality and the existing tolerance")
+	}
+	if answersEqual("1000.00 千克", "1000 克") || answersDefinitelyDiffer("1000.00 千克", "1000 克") {
+		t.Error("different units must not be stripped or converted for numeric comparison")
+	}
+	if answersEqual("11250.00 千克", "11250") || answersDefinitelyDiffer("11250.00 千克", "11250") {
+		t.Error("a missing unit must not manufacture comparable quantities")
+	}
+	if answersEqual("11250.00 次预估", "11250 次预估") || answersDefinitelyDiffer("11250.00 次预估", "11300 次预估") {
+		t.Error("unknown text must not be treated as a numeric unit")
+	}
+	if answersEqual("100.00 米 50 千克", "100 米 50 千克") || answersDefinitelyDiffer("100.00 米 50 千克", "101 米 50 千克") {
+		t.Error("multiple quantities must retain conservative comparison")
+	}
 	// answersDefinitelyDiffer 仅在两边都可解析成数且确不等时为真（保守，避免误伤）。
 	if !answersDefinitelyDiffer("42", "48") {
 		t.Error("42 vs 48 应可确信不等")
