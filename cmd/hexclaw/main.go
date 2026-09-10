@@ -1470,9 +1470,9 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 	}
 	lc := srv.LogCollector()
 
-	// 初始化 slog → LogCollector 桥接（结构化日志 + trace ID 贯穿）
+	// 将 toolkit logger 与 slog 共同接入 LogCollector，保留结构化日志和 trace ID。
 	slogHandler := trace.NewCollectorHandler(lc, slog.LevelInfo)
-	slog.SetDefault(slog.New(slogHandler))
+	logger.UseHandler(slogHandler)
 	// 桥接 Go 标准 log 到 LogCollector（兼容遗留 log.Printf）
 	log.SetOutput(lc.StdLogWriter())
 
