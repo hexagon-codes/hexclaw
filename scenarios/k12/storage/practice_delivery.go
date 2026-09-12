@@ -10,10 +10,8 @@ import (
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 )
 
-// PracticeDeliveryBatchFactory freezes the exact question-paper payload for
-// the transaction-reserved paper number. Implementations must be
-// side-effect-free: provider calls are only legal after this transaction
-// commits.
+// PracticeDeliveryBatchFactory 为事务预占的卷面号冻结题目卷与投递载荷。
+// Artifact/PDF 使用传入上下文的同一事务；渠道上传和发送只能在提交后执行。
 type PracticeDeliveryBatchFactory func(
 	context.Context,
 	k12.PracticeSetFields,
@@ -100,7 +98,10 @@ func (s *Store) FinalizePracticeSetWithDeliveryBatch(
 	base.DeliveryBatchID = ""
 	base.DeliveryTarget = ""
 
-	batch, err := build(ctx, base)
+	factoryCtx := context.WithValue(ctx, recordTransactionKey{}, &recordTransaction{
+		store: s, tx: tx, agentName: agentName,
+	})
+	batch, err := build(factoryCtx, base)
 	if err != nil {
 		return k12.DeliveryBatch{}, false, err
 	}

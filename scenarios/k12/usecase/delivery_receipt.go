@@ -130,7 +130,18 @@ func (d Deps) deliverAutomationText(ctx context.Context, agentName, kind, comman
 	batch, err := d.Records.GetDeliveryBatchByDedupe(ctx, agentName, dedupeKey)
 	created := false
 	if errors.Is(err, records.ErrNotFound) {
-		batch, err = d.buildPreparedTextBatch(ctx, agentName, objectKind, commandID, content, nil)
+		message := DeliveryMessage{Content: content}
+		if kind == string(KindWeeklySheet) {
+			artifact, _, prepareErr := d.PreparePrintableArtifact(ctx, PreparePrintableArtifactRequest{
+				AgentName: agentName, SourceKind: k12.PrintSourcePracticeQuestion,
+				SourceRef: objectKind + ":" + commandID, Title: "本周错题卷", CanonicalMarkdown: content,
+			})
+			if prepareErr != nil {
+				return k12.DeliveryBatch{}, prepareErr
+			}
+			message = printableArtifactDeliveryMessage(artifact)
+		}
+		batch, err = d.buildPreparedMessageBatch(ctx, agentName, objectKind, commandID, message, nil)
 		if err != nil {
 			return batch, err
 		}

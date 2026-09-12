@@ -66,7 +66,10 @@ func (s *imageTaskHTTPFeedbackSolver) GenerateWorkFeedback(
 ) (usecase.WorkFeedbackOutput, error) {
 	s.calls.Add(1)
 	return usecase.WorkFeedbackOutput{
-		Feedback:   "画面中的人物和小猫位置清楚；建议补充地面上的可见阴影细节。",
+		Feedback: "## 可见证据\n画面中的人物和小猫位置清楚。\n\n" +
+			"## 先这样肯定\n人物和小猫的位置安排得很清楚。\n\n" +
+			"## 家长可以这样问或讲\n可以问孩子地面上的光从哪里照过来。\n\n" +
+			"## 下一次只试一个点\n补充地面上的可见阴影细节。",
 		SkillStamp: "art-feedback@1.0.0/test",
 	}, nil
 }
@@ -336,6 +339,9 @@ func newImageTaskHTTPFixture(t *testing.T) imageTaskHTTPFixture {
 	coordinator := &usecase.ImageTaskCoordinator{
 		Records: wired.Records, Classifier: classifier, WritingOCR: ocr,
 		WorkFeedback: &feedbackDeps,
+		ResolveWorkFeedbackRoute: func(ctx context.Context, workType string, _ k12.ImageTaskRouteSnapshot) (k12.ImageTaskRouteSnapshot, error) {
+			return feedbackDeps.WorkFeedbackRoute(ctx, workType)
+		},
 		ResolveRoute: func(requested k12.ImageTaskRouteSnapshot) (k12.ImageTaskRouteSnapshot, error) {
 			if requested.Provider == "" {
 				requested.Provider = "hexclaw-gpt"
@@ -568,8 +574,8 @@ func TestImageTaskPublicSurfaceExactSetAndNoInternalLeak(t *testing.T) {
 		"generation_id", "projection_markdown", "structured_feedback")
 	rawStructured := rawFeedback["structured_feedback"].(map[string]any)
 	assertJSONExactKeys(t, rawStructured,
-		"evidence_refs", "feedback_id", "feedback_type",
-		"limitations", "observations", "projection_markdown", "source_snapshot",
+		"affirmation", "evidence_refs", "feedback_id", "feedback_type",
+		"limitations", "next_step", "observations", "parent_guidance", "projection_markdown", "source_snapshot",
 		"suggestions", "version_id")
 
 	workID := result.Result.Payload.Work.WorkID
@@ -619,13 +625,19 @@ func TestImageTaskPublicSurfaceExactSetAndNoInternalLeak(t *testing.T) {
 func TestImageTaskHTTPRejectsCrossOwnerAssetBeforeClassifier(t *testing.T) {
 	fixture := newImageTaskHTTPFixture(t)
 	other := strings.Replace(fixture.assetID, "asset://mingming/", "asset://gege/", 1)
+	body := strings.Replace(createImageTaskBody(fixture.assetID, "message-cross-owner"),
+		fmt.Sprintf("[%q]", fixture.assetID), fmt.Sprintf("[%q,%q]", fixture.assetID, other), 1)
 	rec, out := do(t, fixture.handler, http.MethodPost, "/image-tasks",
-		createImageTaskBody(other, "message-cross-owner"))
+		body)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("cross-owner asset got %d want 400: %#v", rec.Code, out)
 	}
 	if fixture.classifier.calls != 0 {
 		t.Fatalf("classifier called before owner fail-close: %d", fixture.classifier.calls)
+	}
+	var count int
+	if err := fixture.db.QueryRow("SELECT COUNT(*) FROM k12_image_task_dispatches").Scan(&count); err != nil || count != 0 {
+		t.Fatalf("invalid later image must not leave a partially accepted task: count=%d err=%v", count, err)
 	}
 }
 
@@ -812,40 +824,66 @@ func TestImageTaskHTTPManualWritingClearOCRRequiresFreezeBeforeCommit(t *testing
 	}
 	body := fmt.Sprintf(`{
 		"agent":"mingming","source_session":"session-1","source_kind":"desktop",
-		"source_ref":"manual-writing-1","source_asset_refs":[%q],
+		"source_ref":"manual-writing-1","source_asset_refs":[%q,%q],
 		"attempt_generation":1,
 		"route_request":{"provider":"hexclaw-gpt","model":"gpt-5.6-sol","selection_source":"explicit"},
 		"creative_entry":{"kind":"new_work","task_intent":"writing"}
-	}`, fixture.assetID)
+	}`, fixture.assetID, fixture.assetID)
 	rec, out := do(t, fixture.handler, http.MethodPost, "/image-tasks", body)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("manual writing create: %d %#v", rec.Code, out)
 	}
-	dispatchID := out["dispatch"].(map[string]any)["dispatch_id"].(string)
-	_, out = waitImageTaskHTTPState(t, fixture, dispatchID, func(dispatch map[string]any) bool {
-		target, _ := dispatch["target_projection"].(map[string]any)
-		return target["status"] == string(k12.CreativeWorkIntakeAwaitingConfirmation)
-	})
-	dispatch := out["dispatch"].(map[string]any)
-	target := dispatch["target_projection"].(map[string]any)
-	if _, invented := target["conflicts"]; invented ||
-		target["canonical_content"] != "我的好爸爸" ||
-		target["commit_required"] != true {
-		t.Fatalf("manual clear OCR projection drift: %#v", target)
+	tasks, ok := out["tasks"].([]any)
+	if !ok || len(tasks) != 2 {
+		t.Fatalf("two writing images must produce two ordered tasks: %#v", out)
 	}
-	freeze := fmt.Sprintf(`{
+	ids := make([]string, 0, len(tasks))
+	for _, task := range tasks {
+		created := task.(map[string]any)
+		dispatchID := created["dispatch"].(map[string]any)["dispatch_id"].(string)
+		ids = append(ids, dispatchID)
+		_, out = waitImageTaskHTTPState(t, fixture, dispatchID, func(dispatch map[string]any) bool {
+			target, _ := dispatch["target_projection"].(map[string]any)
+			return target["status"] == string(k12.CreativeWorkIntakeAwaitingConfirmation)
+		})
+		dispatch := out["dispatch"].(map[string]any)
+		target := dispatch["target_projection"].(map[string]any)
+		if _, invented := target["conflicts"]; invented ||
+			target["canonical_content"] != "我的好爸爸" ||
+			target["commit_required"] != true {
+			t.Fatalf("manual clear OCR projection drift: %#v", target)
+		}
+		freeze := fmt.Sprintf(`{
 		"agent":"mingming","version":%v,
 		"creative":{"action":"freeze_ocr","canonical_version":1,
 		"canonical_content":"我的好爸爸"}
 	}`, dispatch["version"])
-	rec, out = do(t, fixture.handler, http.MethodPost,
-		"/image-tasks/"+dispatchID+"/confirm", freeze)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("freeze manual OCR: %d %#v", rec.Code, out)
+		rec, out = do(t, fixture.handler, http.MethodPost,
+			"/image-tasks/"+dispatchID+"/confirm", freeze)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("freeze manual OCR: %d %#v", rec.Code, out)
+		}
+		target = out["dispatch"].(map[string]any)["target_projection"].(map[string]any)
+		if target["status"] != "ready" || target["commit_state"] != "pending" {
+			t.Fatalf("freeze_ocr did not stop before commit: %#v", target)
+		}
 	}
-	target = out["dispatch"].(map[string]any)["target_projection"].(map[string]any)
-	if target["status"] != "ready" || target["commit_state"] != "pending" {
-		t.Fatalf("freeze_ocr did not stop before commit: %#v", target)
+	if ids[0] == ids[1] {
+		t.Fatal("each writing image must retain its own task identity")
+	}
+	rec, out = do(t, fixture.handler, http.MethodPost, "/image-tasks", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("replay writing images: %d %#v", rec.Code, out)
+	}
+	for index, task := range out["tasks"].([]any) {
+		item := task.(map[string]any)
+		if item["created"] != false || item["dispatch"].(map[string]any)["dispatch_id"] != ids[index] {
+			t.Fatalf("replay changed page %d identity: %#v", index, item)
+		}
+	}
+	var invocations int
+	if err := fixture.db.QueryRow("SELECT COUNT(*) FROM k12_image_task_invocations WHERE operation = ?", "writing_ocr").Scan(&invocations); err != nil || invocations != 2 {
+		t.Fatalf("each page must retain exactly one OCR invocation: count=%d err=%v", invocations, err)
 	}
 }
 

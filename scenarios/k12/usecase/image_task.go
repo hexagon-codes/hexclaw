@@ -137,6 +137,12 @@ type CreateImageTaskInput struct {
 	CreativeEntry     *k12.ImageTaskCreativeEntry
 }
 
+// CreatedImageTask 保留批量接入中每张图片的独立接纳事实。
+type CreatedImageTask struct {
+	View    ImageTaskView
+	Created bool
+}
+
 type ImageTaskView struct {
 	Dispatch k12.ImageTaskDispatch
 	// ClassificationInvocationStatus 只供内部编排区分明确失败与结果未知，不进入公开 DTO。
@@ -375,6 +381,60 @@ func imageBytesDigest(images [][]byte) string {
 	return "sha256:" + hex.EncodeToString(hash.Sum(nil))
 }
 
+// CreateMany 只按输入顺序包装既有单图创建，不建立另一套任务状态。
+// 返回的失败序号从零开始；已接纳项保留原身份，可沿同一入口继续。
+func (c *ImageTaskCoordinator) CreateMany(
+	ctx context.Context,
+	input CreateImageTaskInput,
+) ([]CreatedImageTask, int, error) {
+	if err := c.validate(); err != nil {
+		return nil, 0, err
+	}
+	in, err := normalizeCreateImageTaskInput(input)
+	if err != nil {
+		return nil, 0, err
+	}
+	if len(in.SourceAssetRefs) == 1 {
+		view, created, err := c.Create(ctx, in)
+		if err != nil {
+			return nil, 0, err
+		}
+		return []CreatedImageTask{{View: view, Created: created}}, -1, nil
+	}
+	// 旧版整组接纳的请求只能查询原记录，不能拆成新命令重发未知调用。
+	legacyKey := fmt.Sprintf("%s:%s:g%d", in.SourceKind, in.SourceRef, in.AttemptGeneration)
+	if _, err := c.Records.GetImageTaskDispatchByIdempotency(ctx, in.AgentName, legacyKey); err == nil {
+		return nil, 0, k12storage.ErrImageTaskConflict
+	} else if !errors.Is(err, k12storage.ErrImageTaskNotFound) {
+		return nil, 0, err
+	}
+	// 在创建或启动任何一页之前核对整组资产，避免后一页无效时先处理前页。
+	for index, ref := range in.SourceAssetRefs {
+		owner, _, err := assetstore.Parse(ref)
+		if err != nil || owner != in.AgentName {
+			return nil, index, fmt.Errorf("%w: image %d is outside the current agent", ErrInvalidInput, index)
+		}
+		if _, err := c.readSourceImages(ctx, in.OwnerScope, in.AgentName, []string{ref}); err != nil {
+			return nil, index, err
+		}
+	}
+	accepted := make([]CreatedImageTask, 0, len(in.SourceAssetRefs))
+	for index, ref := range in.SourceAssetRefs {
+		page := in
+		page.SourceRef = fmt.Sprintf("%s:image:%d", in.SourceRef, index+1)
+		page.SourceAssetRefs = []string{ref}
+		view, created, err := c.Create(ctx, page)
+		if err != nil {
+			return accepted, index, err
+		}
+		accepted = append(accepted, CreatedImageTask{View: view, Created: created})
+		slog.Info("K12 image page accepted", "agent_id", in.AgentName,
+			"source_ref", in.SourceRef, "page_index", index, "page_count", len(in.SourceAssetRefs),
+			"dispatch_id", view.Dispatch.DispatchID, "created", created)
+	}
+	return accepted, -1, nil
+}
+
 func (c *ImageTaskCoordinator) Create(
 	ctx context.Context,
 	input CreateImageTaskInput,
@@ -385,6 +445,9 @@ func (c *ImageTaskCoordinator) Create(
 	in, err := normalizeCreateImageTaskInput(input)
 	if err != nil {
 		return ImageTaskView{}, false, err
+	}
+	if len(in.SourceAssetRefs) != 1 {
+		return ImageTaskView{}, false, fmt.Errorf("%w: one image is required for each task", ErrInvalidInput)
 	}
 	if in.CreativeEntry == nil && (c.Classifier == nil || c.ResolveRoute == nil) {
 		return ImageTaskView{}, false, fmt.Errorf("usecase: image task classifier/route resolver 未配置")

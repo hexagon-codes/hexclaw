@@ -220,12 +220,19 @@ func (d Deps) FinalizeBasket(ctx context.Context, agentName, recordID, via strin
 					k12.PaperKindQuestion,
 					k12.PaperMeta{Term: term, Date: ts, Preview: false},
 				)
-				return d.buildPreparedTextBatch(
+				artifact, _, err := d.PreparePrintableArtifact(factoryCtx, PreparePrintableArtifactRequest{
+					AgentName: agentName, SourceKind: k12.PrintSourcePracticeQuestion,
+					SourceRef: recordID, Title: fields.Title, CanonicalMarkdown: markdown,
+				})
+				if err != nil {
+					return k12.DeliveryBatch{}, err
+				}
+				return d.buildPreparedMessageBatch(
 					factoryCtx,
 					agentName,
 					"practice_set_question",
 					recordID,
-					markdown,
+					printableArtifactDeliveryMessage(artifact),
 					deliveryTargets,
 				)
 			},
@@ -276,14 +283,22 @@ func (d Deps) finishPracticeSetDelivery(
 	if err != nil {
 		return v, err
 	}
-	batch, _, err := d.prepareAndSendTextBatchWithTargets(
-		ctx,
-		v.Record.AgentName,
-		"practice_set_question",
-		v.Record.RecordID,
-		paper.Markdown,
-		targets,
-	)
+	// 旧正文批次先按原身份恢复，不因输出格式变化补发附件。
+	batch, err := d.GetDeliveryBatchForMessageIdentity(ctx, v.Record.AgentName,
+		"practice_set_question", v.Record.RecordID, paper.Markdown, nil)
+	if err == nil {
+		batch, err = d.sendDeliveryBatch(ctx, batch)
+	} else if errors.Is(err, records.ErrNotFound) {
+		artifact, _, prepareErr := d.PreparePrintableArtifact(ctx, PreparePrintableArtifactRequest{
+			AgentName: v.Record.AgentName, SourceKind: k12.PrintSourcePracticeQuestion,
+			SourceRef: v.Record.RecordID, Title: paper.Title, CanonicalMarkdown: paper.Markdown,
+		})
+		if prepareErr != nil {
+			return v, prepareErr
+		}
+		batch, _, err = d.PrepareAndSendMessageBatchForTargets(ctx, v.Record.AgentName,
+			"practice_set_question", v.Record.RecordID, printableArtifactDeliveryMessage(artifact), targets)
+	}
 	if err != nil {
 		return v, err
 	}

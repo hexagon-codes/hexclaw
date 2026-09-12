@@ -2,6 +2,7 @@ package usecase_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -88,17 +89,11 @@ func batchTargets() []usecase.ResolvedDeliveryTarget {
 	}
 }
 
-func attachDeliveredPracticeTransport(d *usecase.Deps, sends int) *batchTransport {
-	fake := &batchTransport{
-		targets: batchTargets()[:1],
-		send:    make([]usecase.DeliveryTransportAck, sends),
-	}
-	for i := range fake.send {
-		fake.send[i] = usecase.DeliveryTransportAck{
-			Status: k12.DeliveryDelivered, ExternalMessageID: fmt.Sprintf("practice-%d", i+1),
-		}
-	}
+func attachDeliveredPracticeTransport(d *usecase.Deps, _ int) *messagePartTransport {
+	fake := newMessagePartTransport()
+	fake.targets = batchTargets()[:1]
 	d.Delivery = fake
+	d.Renderer = &weeklyDeliveryRenderer{payload: []byte("%PDF-1.7\npractice-paper")}
 	return fake
 }
 
@@ -245,14 +240,11 @@ func TestPracticeFinalizeDeliveryTransactionFailureRollsBackEverythingBeforeProv
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			d := newDataDeps(t)
-			fake := &batchTransport{
-				targets: batchTargets(),
-				send: []usecase.DeliveryTransportAck{
-					{Status: k12.DeliveryDelivered, ExternalMessageID: "must-not-send-a"},
-					{Status: k12.DeliveryDelivered, ExternalMessageID: "must-not-send-b"},
-				},
-			}
+			d.Records.DB().SetMaxOpenConns(1)
+			fake := newMessagePartTransport()
 			d.Delivery = fake
+			renderer := &weeklyDeliveryRenderer{payload: []byte("%PDF-1.7\natomic-paper")}
+			d.Renderer = renderer
 			id, created, err := d.CreatePracticeSet(
 				context.Background(),
 				"xiaoming",
@@ -274,7 +266,9 @@ func TestPracticeFinalizeDeliveryTransactionFailureRollsBackEverythingBeforeProv
 				t.Fatal(err)
 			}
 
-			_, _, err = d.FinalizeBasket(context.Background(), "xiaoming", id, "send")
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_, _, err = d.FinalizeBasket(ctx, "xiaoming", id, "send")
 			if err == nil || !strings.Contains(err.Error(), tt.wantMarker) {
 				t.Fatalf("finalize error=%v want marker %q", err, tt.wantMarker)
 			}
@@ -303,6 +297,13 @@ func TestPracticeFinalizeDeliveryTransactionFailureRollsBackEverythingBeforeProv
 			if rows := countDeliveryDomainRows(t, d); rows != 0 {
 				t.Fatalf("failed atomic finalize left batch rows=%d", rows)
 			}
+			var artifactRows int
+			if err := d.Records.DB().QueryRow(`SELECT (SELECT count(*) FROM k12_print_artifacts)+(SELECT count(*) FROM k12_print_artifact_renders)`).Scan(&artifactRows); err != nil {
+				t.Fatal(err)
+			}
+			if artifactRows != 0 || renderer.calls != 1 {
+				t.Fatalf("PDF must render before batch preparation and roll back with it: artifacts=%d renders=%d", artifactRows, renderer.calls)
+			}
 			var paperCounterRows int
 			if err := d.Records.DB().QueryRow(
 				`SELECT count(*) FROM k12_paper_no_counters WHERE agent_name='xiaoming'`,
@@ -317,7 +318,7 @@ func TestPracticeFinalizeDeliveryTransactionFailureRollsBackEverythingBeforeProv
 				t.Fatal(err)
 			}
 			retried, skipped, err := d.FinalizeBasket(
-				context.Background(), "xiaoming", id, "send",
+				ctx, "xiaoming", id, "send",
 			)
 			if err != nil || skipped != 0 {
 				t.Fatalf("retry after rollback: skipped=%d set=%+v err=%v", skipped, retried, err)
@@ -325,7 +326,7 @@ func TestPracticeFinalizeDeliveryTransactionFailureRollsBackEverythingBeforeProv
 			wantPaperNo := k12.FormatPaperNo(time.Unix(1000, 0), 1)
 			if retried.Record.Status != k12.PracticeStatusAssigned ||
 				retried.Fields.PaperNo != wantPaperNo ||
-				len(fake.sends) != len(batchTargets()) {
+				len(fake.sends) != len(batchTargets())*2 || !strings.Contains(renderer.markdown, wantPaperNo) {
 				t.Fatalf("retry must consume first paper number and send frozen children: set=%+v sends=%d",
 					retried, len(fake.sends))
 			}
@@ -335,21 +336,18 @@ func TestPracticeFinalizeDeliveryTransactionFailureRollsBackEverythingBeforeProv
 
 func TestPracticeFinalizeReplayUsesFrozenBatchWithoutRebindingOrResending(t *testing.T) {
 	d := newDataDeps(t)
-	fake := &batchTransport{
-		targets: batchTargets(),
-		send: []usecase.DeliveryTransportAck{
-			{Status: k12.DeliveryDelivered, ExternalMessageID: "paper-a"},
-			{Status: k12.DeliveryDelivered, ExternalMessageID: "paper-b"},
-		},
-	}
+	d.Records.DB().SetMaxOpenConns(1)
+	fake := newMessagePartTransport()
 	d.Delivery = fake
+	renderer := &weeklyDeliveryRenderer{payload: []byte("%PDF-1.7\nfrozen-paper")}
+	d.Renderer = renderer
 	id, created, err := d.CreatePracticeSet(
 		context.Background(),
 		"xiaoming",
 		"atomic-finalize-replay",
 		k12.PracticeSetFields{
 			SourceKind: k12.PracticeSourceWeekly,
-			Title:      "原子发送重放卷",
+			Title:      "数学专项 · 09/12",
 			Items:      []k12.PracticeItem{verifiedItem("q1", "1+1=?", "2")},
 		},
 	)
@@ -357,13 +355,26 @@ func TestPracticeFinalizeReplayUsesFrozenBatchWithoutRebindingOrResending(t *tes
 		t.Fatalf("seed practice set: created=%v err=%v", created, err)
 	}
 
-	first, _, err := d.FinalizeBasket(context.Background(), "xiaoming", id, "send")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	first, _, err := d.FinalizeBasket(ctx, "xiaoming", id, "send")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.Fields.DeliveryBatchID == "" || len(fake.sends) != 2 {
-		t.Fatalf("first finalize did not freeze and send two children: set=%+v sends=%d",
+	if first.Fields.DeliveryBatchID == "" || len(fake.sends) != 4 {
+		t.Fatalf("first finalize did not freeze title/PDF for both targets: set=%+v sends=%d",
 			first, len(fake.sends))
+	}
+	var title weeklyDeliveryPayload
+	if err := json.Unmarshal([]byte(fake.sends[0].PayloadJSON), &title); err != nil || title.Content != first.Fields.Title {
+		t.Fatalf("practice message must contain only the existing title: got=%q err=%v", title.Content, err)
+	}
+	var pdf weeklyDeliveryPayload
+	if err := json.Unmarshal([]byte(fake.sends[1].PayloadJSON), &pdf); err != nil || pdf.Name != "数学专项 · 09-12.pdf" {
+		t.Fatalf("PDF attachment must preserve the full paper title: name=%q err=%v", pdf.Name, err)
+	}
+	if title.Content != "数学专项 · 09/12" || !strings.Contains(renderer.markdown, title.Content) {
+		t.Fatalf("filename normalization changed the message or PDF title: title=%q markdown=%q", title.Content, renderer.markdown)
 	}
 
 	// Mutable bindings can disappear after the command commits. Replaying the
@@ -377,11 +388,11 @@ func TestPracticeFinalizeReplayUsesFrozenBatchWithoutRebindingOrResending(t *tes
 		replay.Fields.PaperNo != first.Fields.PaperNo ||
 		fake.resolveCalls != 1 ||
 		fake.prepareCalls != 1 ||
-		len(fake.sends) != 2 {
+		len(fake.sends) != 4 || renderer.calls != 1 {
 		t.Fatalf("replay rebound, rebuilt or resent: first=%+v replay=%+v resolve=%d prepare=%d sends=%d",
 			first, replay, fake.resolveCalls, fake.prepareCalls, len(fake.sends))
 	}
-	if rows := countDeliveryDomainRows(t, d); rows != 3 {
+	if rows := countDeliveryDomainRows(t, d); rows != 5 {
 		t.Fatalf("replay changed frozen root/children row count: %d", rows)
 	}
 }

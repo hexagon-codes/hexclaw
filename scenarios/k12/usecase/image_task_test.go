@@ -171,7 +171,10 @@ func (s *imageTaskFeedbackSolver) GenerateWorkFeedback(
 		}
 	}
 	return WorkFeedbackOutput{
-		Feedback:   "画面中的人物和小猫位置清楚；建议补充地面上的可见阴影细节。",
+		Feedback: "## 可见证据\n画面中的人物和小猫位置清楚。\n\n" +
+			"## 先这样肯定\n人物和小猫的位置安排得很清楚。\n\n" +
+			"## 家长可以这样问或讲\n可以问孩子地面上的光从哪里照过来。\n\n" +
+			"## 下一次只试一个点\n补充地面上的可见阴影细节。",
 		SkillStamp: "art-feedback@1.0.0/test",
 	}, s.err
 }

@@ -965,15 +965,24 @@ func (d Deps) SendWeeklyPracticeSnapshot(ctx context.Context, agent, snapshotID,
 	if err != nil {
 		return k12.DeliveryBatch{}, err
 	}
-	batch, _, err := d.PrepareAndSendMessageBatch(ctx, agent,
-		k12.PrintSourceWeeklyPracticeSnapshot, snapshotID, DeliveryMessage{
-			Content: artifact.Artifact.CanonicalMarkdown,
-			Attachments: []DeliveryAttachment{{
-				Name: artifact.Artifact.Title + ".pdf",
-				MIME: "application/pdf",
-				Data: artifact.Render.Payload,
-			}},
-		})
+	message := printableArtifactDeliveryMessage(artifact)
+	// 旧快照已投递的长正文身份仍有效，换命令键也不创建第二批消息。
+	legacyDigest := deliveryMessageDigest(DeliveryMessage{
+		Content: artifact.Artifact.CanonicalMarkdown,
+		Attachments: []DeliveryAttachment{{
+			Name: artifact.Artifact.Title + ".pdf",
+			MIME: "application/pdf",
+			Data: artifact.Render.Payload,
+		}},
+	})
+	batch, err := d.Records.GetDeliveryBatchByDedupe(ctx, agent,
+		deliveryBatchDedupeKey(agent, k12.PrintSourceWeeklyPracticeSnapshot, snapshotID, legacyDigest))
+	if errors.Is(err, records.ErrNotFound) {
+		batch, _, err = d.PrepareAndSendMessageBatch(ctx, agent,
+			k12.PrintSourceWeeklyPracticeSnapshot, snapshotID, message)
+	} else if err == nil {
+		batch, err = d.sendDeliveryBatch(ctx, batch)
+	}
 	if err != nil {
 		return k12.DeliveryBatch{}, err
 	}

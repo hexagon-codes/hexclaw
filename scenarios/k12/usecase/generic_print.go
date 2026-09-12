@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/hexagon-codes/hexclaw/records"
+	"github.com/hexagon-codes/hexclaw/render"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 )
 
@@ -40,6 +41,19 @@ type PreparePrintableArtifactRequest struct {
 type PrintableArtifactView struct {
 	Artifact k12.PrintArtifact
 	Render   k12.PrintArtifactRender
+}
+
+// printableArtifactDeliveryMessage 仅投递既有卷名与冻结 PDF，完整题面保留在 Artifact。
+func printableArtifactDeliveryMessage(view PrintableArtifactView) DeliveryMessage {
+	_, filename := render.SanitizeFilename(strings.ReplaceAll(view.Artifact.Title, "/", "-"), "pdf")
+	return DeliveryMessage{
+		Content: view.Artifact.Title,
+		Attachments: []DeliveryAttachment{{
+			Name: filename,
+			MIME: "application/pdf",
+			Data: view.Render.Payload,
+		}},
+	}
 }
 
 type GenericPrintView struct {

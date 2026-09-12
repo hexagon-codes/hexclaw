@@ -375,6 +375,27 @@ func (s *Store) ReconcileModelInvocationNotExecuted(ctx context.Context, agentNa
 		"", "", "", "reconciled_not_executed")
 }
 
+// ReconcileModelInvocationPartialSucceeded 保留聚合部分完成的对账证据。
+// 调用方必须先证明已完成题有确定回执、其余题未发送；它不授予已发请求重试权限。
+func (s *Store) ReconcileModelInvocationPartialSucceeded(
+	ctx context.Context,
+	agentName, invocationID, resultDigest string,
+) (k12.ModelInvocation, error) {
+	if strings.TrimSpace(resultDigest) == "" {
+		return k12.ModelInvocation{}, fmt.Errorf("k12storage: partial reconciliation requires result digest")
+	}
+	stored, err := s.transitionModelInvocation(ctx, agentName, invocationID,
+		[]k12.ModelInvocationStatus{k12.ModelInvocationOutcomeUnknown}, k12.ModelInvocationReconciled,
+		"", resultDigest, "", "reconciled_partial_succeeded")
+	if err != nil {
+		return k12.ModelInvocation{}, err
+	}
+	if stored.FailureKind != "reconciled_partial_succeeded" || stored.ResultDigest != resultDigest {
+		return k12.ModelInvocation{}, fmt.Errorf("%w: partial reconciliation evidence changed", ErrModelInvocationConflict)
+	}
+	return stored, nil
+}
+
 // ReconcileModelInvocationSucceeded records conclusive, already-durable result
 // evidence for a request whose transport outcome was previously unknown. It is
 // a ledger-only reconciliation: callers must validate the durable artifact

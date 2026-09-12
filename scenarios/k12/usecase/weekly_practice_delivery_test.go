@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"strings"
 	"testing"
 
 	"github.com/hexagon-codes/hexclaw/messagecontent"
@@ -13,16 +12,18 @@ import (
 )
 
 type weeklyDeliveryRenderer struct {
-	calls   int
-	payload []byte
+	calls    int
+	payload  []byte
+	markdown string
 }
 
 func (r *weeklyDeliveryRenderer) Render(
-	context.Context,
-	string,
-	string,
+	_ context.Context,
+	markdown string,
+	_ string,
 ) ([]byte, string, error) {
 	r.calls++
+	r.markdown = markdown
 	return append([]byte(nil), r.payload...), "application/pdf", nil
 }
 
@@ -98,9 +99,9 @@ func TestWeeklyPracticeSendUsesFrozenArtifactMarkdownAndPDFForEveryDirectTarget(
 		switch wantOrdinal {
 		case 1:
 			if receipt.PartKind != messagecontent.PartMarkdown || receipt.PartMIME != "" ||
-				payload.Content != strings.TrimSpace(prepared.Artifact.Artifact.CanonicalMarkdown) {
-				t.Fatalf("weekly Markdown did not reuse the frozen artifact source: receipt=%+v got=%q want=%q",
-					receipt, payload.Content, prepared.Artifact.Artifact.CanonicalMarkdown)
+				payload.Content != prepared.Artifact.Artifact.Title {
+				t.Fatalf("weekly message must contain only the existing title: got=%q want=%q",
+					payload.Content, prepared.Artifact.Artifact.Title)
 			}
 		case 2:
 			if receipt.PartKind != messagecontent.PartArtifact ||
@@ -125,5 +126,23 @@ func TestWeeklyPracticeSendUsesFrozenArtifactMarkdownAndPDFForEveryDirectTarget(
 		len(transport.sends) != sends || renderer.calls != renderCalls {
 		t.Fatalf("weekly send replay crossed preparation/render/provider boundaries: first=%+v replay=%+v",
 			batch, replayed)
+	}
+
+	const sheet = "# 本周错题卷\n\n1. 12 ÷ 4 = ?"
+	if err := d.DeliverCronResult(context.Background(), "xiaoming", usecase.KindWeeklySheet, sheet, nil); err != nil {
+		t.Fatal(err)
+	}
+	if renderer.calls != renderCalls+1 || renderer.markdown != sheet || len(transport.sends) != sends+wantReceiptCount {
+		t.Fatalf("weekly cron must render the complete sheet once and send title/PDF: renders=%d sends=%d", renderer.calls, len(transport.sends))
+	}
+	var title weeklyDeliveryPayload
+	if err := json.Unmarshal([]byte(transport.sends[sends].PayloadJSON), &title); err != nil || title.Content != "本周错题卷" {
+		t.Fatalf("weekly cron title=%q err=%v", title.Content, err)
+	}
+	if err := d.DeliverCronResult(context.Background(), "xiaoming", usecase.KindWeeklySheet, sheet+"\n\n2. 1 + 1 = ?", nil); err != nil {
+		t.Fatal(err)
+	}
+	if renderer.calls != renderCalls+1 || len(transport.sends) != sends+wantReceiptCount {
+		t.Fatalf("same-week replay rendered or resent: renders=%d sends=%d", renderer.calls, len(transport.sends))
 	}
 }

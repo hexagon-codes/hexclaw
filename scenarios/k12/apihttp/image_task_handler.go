@@ -436,6 +436,24 @@ func (h *handler) createImageTask(w http.ResponseWriter, r *http.Request) {
 			Kind: req.CreativeEntry.Kind, TaskIntent: req.CreativeEntry.TaskIntent,
 		}
 	}
+	if len(input.SourceAssetRefs) > 1 {
+		accepted, failedIndex, err := h.rt.ImageTasks.CreateMany(r.Context(), input)
+		tasks := make([]map[string]any, 0, len(accepted))
+		for _, item := range accepted {
+			h.rt.ImageTasks.StartAsync(req.Agent, item.View.Dispatch.DispatchID)
+			tasks = append(tasks, map[string]any{
+				"created": item.Created, "dispatch": publicImageTask(item.View),
+			})
+		}
+		if err != nil {
+			writeJSON(w, httpStatusForK12Error(err, http.StatusBadGateway), map[string]any{
+				"error": err.Error(), "failed_index": failedIndex, "tasks": tasks,
+			})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"tasks": tasks})
+		return
+	}
 	view, created, err := h.rt.ImageTasks.Create(r.Context(), input)
 	if err != nil {
 		writeErr(w, httpStatusForK12Error(err, http.StatusBadGateway), err.Error())

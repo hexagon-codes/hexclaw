@@ -114,7 +114,7 @@ func TestPracticeSetFullLifecycle(t *testing.T) {
 			listed[0].Fields.DeliveryStatus, finalized.Fields.DeliveryStatus)
 	}
 	batchAfter, err := d.Records.GetDeliveryBatch(ctx, "xiaoming", finalized.Fields.DeliveryBatchID)
-	if err != nil || !reflect.DeepEqual(batchBefore, batchAfter) || len(transport.sends) != 1 || len(transport.queries) != 0 {
+	if err != nil || !reflect.DeepEqual(batchBefore, batchAfter) || len(transport.sends) != 2 || len(transport.queries) != 0 {
 		t.Fatalf("list must not mutate delivery facts or contact transport: err=%v sends=%d queries=%d",
 			err, len(transport.sends), len(transport.queries))
 	}

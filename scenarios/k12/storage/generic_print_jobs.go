@@ -112,6 +112,12 @@ func (s *Store) GetPrintArtifact(ctx context.Context, agentName, artifactID stri
 	if strings.TrimSpace(agentName) == "" || strings.TrimSpace(artifactID) == "" {
 		return k12.PrintArtifact{}, records.ErrNotFound
 	}
+	if bound := s.recordTransaction(ctx); bound != nil {
+		if agentName != bound.agentName {
+			return k12.PrintArtifact{}, records.ErrNotFound
+		}
+		return getPrintArtifactVia(ctx, bound.tx, agentName, artifactID)
+	}
 	return getPrintArtifactVia(ctx, s.db, agentName, artifactID)
 }
 
@@ -119,6 +125,12 @@ func (s *Store) GetPrintArtifactRender(ctx context.Context, agentName,
 	artifactID string) (k12.PrintArtifactRender, error) {
 	if strings.TrimSpace(agentName) == "" || strings.TrimSpace(artifactID) == "" {
 		return k12.PrintArtifactRender{}, records.ErrNotFound
+	}
+	if bound := s.recordTransaction(ctx); bound != nil {
+		if agentName != bound.agentName {
+			return k12.PrintArtifactRender{}, records.ErrNotFound
+		}
+		return getPrintArtifactRenderVia(ctx, bound.tx, agentName, artifactID)
 	}
 	return getPrintArtifactRenderVia(ctx, s.db, agentName, artifactID)
 }
@@ -139,9 +151,8 @@ func validPrintArtifactRender(artifact k12.PrintArtifact, render k12.PrintArtifa
 	return hex.EncodeToString(sum[:]) == render.ByteDigest
 }
 
-// FreezePrintArtifact stores the canonical Markdown and its first valid PDF in
-// one short transaction. Rendering happens before this boundary. Concurrent
-// callers converge on the first committed PDF and receive those frozen bytes.
+// FreezePrintArtifact 在同一事务冻结正文和首份有效 PDF；已有卷面事务时复用它。
+// 并行调用复用首先提交的 PDF 字节，普通调用仍自主管理短事务。
 func (s *Store) FreezePrintArtifact(ctx context.Context, artifact k12.PrintArtifact,
 	render k12.PrintArtifactRender) (storedArtifact k12.PrintArtifact,
 	storedRender k12.PrintArtifactRender, replay bool, err error) {
@@ -153,6 +164,12 @@ func (s *Store) FreezePrintArtifact(ctx context.Context, artifact k12.PrintArtif
 		return k12.PrintArtifact{}, k12.PrintArtifactRender{}, false,
 			fmt.Errorf("k12storage: 冻结打印 Artifact/PDF 字段不完整")
 	}
+	if bound := s.recordTransaction(ctx); bound != nil {
+		if artifact.AgentName != bound.agentName {
+			return k12.PrintArtifact{}, k12.PrintArtifactRender{}, false, records.ErrNotFound
+		}
+		return freezePrintArtifactVia(ctx, bound.tx, artifact, render)
+	}
 	if err := ensureAgentRegistered(ctx, s.db, artifact.AgentName); err != nil {
 		return k12.PrintArtifact{}, k12.PrintArtifactRender{}, false, err
 	}
@@ -161,6 +178,19 @@ func (s *Store) FreezePrintArtifact(ctx context.Context, artifact k12.PrintArtif
 		return k12.PrintArtifact{}, k12.PrintArtifactRender{}, false, err
 	}
 	defer tx.Rollback()
+	storedArtifact, storedRender, replay, err = freezePrintArtifactVia(ctx, tx, artifact, render)
+	if err != nil {
+		return k12.PrintArtifact{}, k12.PrintArtifactRender{}, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return k12.PrintArtifact{}, k12.PrintArtifactRender{}, false, err
+	}
+	return storedArtifact, storedRender, replay, nil
+}
+
+func freezePrintArtifactVia(ctx context.Context, tx *sql.Tx, artifact k12.PrintArtifact,
+	render k12.PrintArtifactRender) (storedArtifact k12.PrintArtifact,
+	storedRender k12.PrintArtifactRender, replay bool, err error) {
 	if _, err := tx.ExecContext(ctx, `INSERT INTO k12_print_artifacts
         (artifact_id,agent_name,source_kind,source_ref,title,canonical_markdown,source_digest,created_at)
         VALUES(?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING`, artifact.ArtifactID, artifact.AgentName,
@@ -199,9 +229,6 @@ func (s *Store) FreezePrintArtifact(ctx context.Context, artifact k12.PrintArtif
 	}
 	affected, _ := res.RowsAffected()
 	replay = affected == 0
-	if err := tx.Commit(); err != nil {
-		return k12.PrintArtifact{}, k12.PrintArtifactRender{}, false, err
-	}
 	return storedArtifact, storedRender, replay, nil
 }
 

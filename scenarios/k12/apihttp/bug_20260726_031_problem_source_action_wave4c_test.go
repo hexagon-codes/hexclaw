@@ -23,6 +23,17 @@ const sourceActionRetakePNGB64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAA
 
 func TestPROG026F_CorrectTextAppendsCanonicalOverrideWithoutMutatingRawEvidence(t *testing.T) {
 	seed := seedProblemSourceActionHTTP(t)
+	// 首次核对前作答尚未确认，也尚未生成输入版本头。
+	if _, err := seed.fixture.db.Exec(`
+		UPDATE k12_attempts SET confirmed_version=0,input_digest=''
+		WHERE agent_name='mingming' AND problem_id=?`, seed.problemID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := seed.fixture.db.Exec(`
+		DELETE FROM k12_problem_input_revisions
+		WHERE agent_name='mingming' AND problem_id=?`, seed.problemID); err != nil {
+		t.Fatal(err)
+	}
 	const body = `{
 		"action":"correct_text",
 		"structure_version":1,
