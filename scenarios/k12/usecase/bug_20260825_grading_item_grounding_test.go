@@ -369,6 +369,10 @@ func TestK12GradingTypedGroundingItemsFreezesOnceAndPersistsOneEvidenceIdentity(
 			AnswerState: AnswerStatePresent, KnowledgePoints: []string{"两位数加法"},
 		},
 		{
+			Question: "Translate into English: 苹果.", Subject: "英语", StudentAnswer: "apple",
+			AnswerState: AnswerStatePresent,
+		},
+		{
 			Question: "26×3=", Subject: "数学", StudentAnswer: "78",
 			AnswerState: AnswerStatePresent, KnowledgePoints: []string{"两位数乘一位数"},
 		},
@@ -384,6 +388,19 @@ func TestK12GradingTypedGroundingItemsFreezesOnceAndPersistsOneEvidenceIdentity(
 	seedGradingItemActiveTextbookBinding(t, o)
 
 	jobID := runItemResumeJobToAssessing(t, o, "typed-grounding-items")
+	job, err := o.deps.GetGradingJob(context.Background(), "mingming", jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job.Fields.BudgetSnapshot.ItemConcurrency = 1
+	fields, err := json.Marshal(job.Fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := o.deps.Records.UpdateStatusFields(context.Background(), jobID, job.Record.Status,
+		job.Record.DueAt, string(fields), job.Record.Version); err != nil {
+		t.Fatal(err)
+	}
 	completed, err := o.ConfirmAndRun(context.Background(), jobID, nil)
 	if err != nil {
 		t.Fatalf("complete grounded grading: %v", err)
@@ -391,8 +408,8 @@ func TestK12GradingTypedGroundingItemsFreezesOnceAndPersistsOneEvidenceIdentity(
 	if completed.Record.Status != k12.GradingStageCompleted {
 		t.Fatalf("grounded grading stage=%s want completed", completed.Record.Status)
 	}
-	if solver.callCount() != 2 || grader.callCount() != 2 {
-		t.Fatalf("provider solve/grade calls=%d/%d want 2/2", solver.callCount(), grader.callCount())
+	if solver.callCount() != 3 || grader.callCount() != 3 {
+		t.Fatalf("provider solve/grade calls=%d/%d want 3/3", solver.callCount(), grader.callCount())
 	}
 	freezes, legacyUse, queries := grounding.snapshot()
 	if freezes != 1 {
@@ -419,17 +436,33 @@ func TestK12GradingTypedGroundingItemsFreezesOnceAndPersistsOneEvidenceIdentity(
 		t.Fatal(err)
 	}
 	groundedOperations := 0
+	nonMathOperations := 0
+	snapshot, err := o.deps.Records.GetProblemAttemptSnapshot(context.Background(), "mingming", job.Fields.SubmissionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	subjects := make(map[string]string, len(snapshot.Problems))
+	for _, problem := range snapshot.Problems {
+		subjects[problem.ProblemID] = problem.Subject
+	}
 	problemEvidenceIdentities := make(map[string]string)
 	for _, invocation := range invocations {
 		if invocation.Operation != k12.GradingItemOperationSolveVerify &&
 			invocation.Operation != k12.GradingItemOperationGrade {
 			continue
 		}
-		groundedOperations++
 		var envelope gradingItemGroundingEnvelope
 		if err := json.Unmarshal([]byte(invocation.ResultJSON), &envelope); err != nil {
 			t.Fatalf("decode grounded invocation %s: %v", invocation.InvocationID, err)
 		}
+		if subjects[invocation.ProblemID] == "英语" {
+			nonMathOperations++
+			if envelope.Schema != "" {
+				t.Fatalf("English invocation unexpectedly carries math grounding: %s", invocation.InvocationID)
+			}
+			continue
+		}
+		groundedOperations++
 		if envelope.Schema != "k12_grading_grounded_physical_v1" ||
 			envelope.Grounding.Snapshot.VectorRevisionID != "revision-a" ||
 			len(envelope.Grounding.Receipts) == 0 ||
@@ -448,6 +481,17 @@ func TestK12GradingTypedGroundingItemsFreezesOnceAndPersistsOneEvidenceIdentity(
 	if groundedOperations != 4 {
 		t.Fatalf("grounded solve/grade invocations=%d want 4", groundedOperations)
 	}
+	if nonMathOperations != 2 {
+		t.Fatalf("English solve/grade invocations=%d want 2", nonMathOperations)
+	}
+	inspection, err := inspectGradingGroundingInvocations(context.Background(), o.deps, "mingming", jobID)
+	if err != nil {
+		t.Fatalf("inspect mixed-subject grounding: %v", err)
+	}
+	if !inspection.found || inspection.envelopedSucceeded != 4 || inspection.directSucceeded != 0 ||
+		inspection.snapshot.VectorRevisionID != "revision-a" {
+		t.Fatalf("mixed-subject grounding evidence drifted: %+v", inspection)
+	}
 
 	artifact, err := o.deps.Records.GetGradingFinalArtifactByJob(
 		context.Background(), "mingming", jobID,
@@ -455,24 +499,9 @@ func TestK12GradingTypedGroundingItemsFreezesOnceAndPersistsOneEvidenceIdentity(
 	if err != nil {
 		t.Fatal(err)
 	}
-	invocation, err := o.deps.Records.GetModelInvocation(
-		context.Background(), "mingming", artifact.SummaryInvocationID,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var tips TutoringTips
-	if err := json.Unmarshal([]byte(invocation.ResultJSON), &tips); err != nil {
-		t.Fatal(err)
-	}
-	if len(tips.GroundingEvidenceReceipts) == 0 {
-		t.Fatal("final summary omitted grounding receipts")
-	}
-	for _, receipt := range tips.GroundingEvidenceReceipts {
-		if receipt.VectorRevisionID != "revision-a" || receipt.DocumentID != "doc-math" ||
-			receipt.SourceDigest != gradingItemGroundingSourceDigest {
-			t.Fatalf("final summary drifted from item grounding: %+v", receipt)
-		}
+	if artifact.CoverageStatus != k12.GradingFinalArtifactCoverageComplete || artifact.PublishedCount != 3 ||
+		artifact.SummaryInvocationID != "" || artifact.ArtifactDigest != k12.ComputeGradingFinalArtifactDigest(artifact) {
+		t.Fatalf("canonical final artifact drifted from three item receipts: %+v", artifact)
 	}
 }
 

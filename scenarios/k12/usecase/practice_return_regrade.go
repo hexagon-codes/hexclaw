@@ -520,6 +520,60 @@ func (c *PracticeReturnRegradeCoordinator) Recover(
 					if c.StartAsync(agentName, set.Record.RecordID, ret.ReturnID) {
 						count++
 					}
+				case k12.PracticeRegradeFailedRetryable, k12.PracticeRegradeOutcomeUnknown:
+					if ret.RegradeJobID == "" {
+						continue
+					}
+					// 底层 Job 可独立恢复；只同步其权威状态，不在投影恢复中重试任务。
+					job, err := c.Deps.GetGradingJob(ctx, agentName, ret.RegradeJobID)
+					if err != nil {
+						return count, err
+					}
+					projection := practiceReturnRegradeProjection{
+						JobID: job.Record.RecordID, RouteSnapshot: job.Fields.ModelSnapshot,
+					}
+					switch job.Record.Status {
+					case k12.GradingStageCompleted:
+						if _, loaded := c.Grading.PhotoResult(job.Record.RecordID); !loaded {
+							// 已完成 Job 只加载持久产物，不推进模型阶段。
+							job, err = c.Grading.RunGradingJob(ctx, job.Record.RecordID)
+							if err != nil {
+								return count, err
+							}
+							if job.Record == nil || job.Record.Status != k12.GradingStageCompleted {
+								return count, fmt.Errorf("completed grading result could not be loaded")
+							}
+						}
+						references, paperSize, err := freezePracticeGradingReferences(set.Fields, ret.ItemIDs)
+						if err != nil {
+							return count, err
+						}
+						if err := c.projectCompleted(ctx, agentName, set.Record.RecordID, ret.ReturnID,
+							references, paperSize, job); err != nil {
+							return count, err
+						}
+					case k12.GradingStageOutcomeUnknown:
+						projection.Status = k12.PracticeRegradeOutcomeUnknown
+					case k12.GradingStageFailedRetryable:
+						projection.Status = k12.PracticeRegradeFailedRetryable
+					case k12.GradingStageFailedTerminal, k12.GradingStageCancelled:
+						projection.Status = k12.PracticeRegradeFailedTerminal
+					case k12.GradingStageQueued, k12.GradingStageNormalizing, k12.GradingStageRecognizing,
+						k12.GradingStageAwaitingConfirmation, k12.GradingStageAssessing,
+						k12.GradingStageRendering, k12.GradingStageProjecting:
+						if c.StartAsync(agentName, set.Record.RecordID, ret.ReturnID) {
+							count++
+						}
+						continue
+					default:
+						continue
+					}
+					if projection.Status != "" {
+						if err := c.updateProjection(ctx, agentName, set.Record.RecordID, ret.ReturnID, projection); err != nil {
+							return count, err
+						}
+					}
+					count++
 				}
 			}
 		}

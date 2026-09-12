@@ -2537,6 +2537,21 @@ func TestProblemSourceFullCoverageCompletesCanonicalJobAndRestartReplayDoesNotRe
 		AnswerEvidenceTranscriptions: []string{"4"},
 	}})
 	assessSourceFixtureUnrelatedForFullCoverage(t, fixture)
+	// 来源核对前，整页仍等待确认；单题输入提交不会推进整页状态。
+	if _, err := fixture.coordinator.Records.DB().Exec(`
+		UPDATE k12_grading_jobs SET status='awaiting_confirmation',confirmation_state='pending'
+		WHERE record_id=?`, fixture.job.Record.RecordID); err != nil {
+		t.Fatal(err)
+	}
+	var err error
+	fixture.job, err = fixture.orchestrator.deps.GetGradingJob(
+		context.Background(), fixture.job.Record.AgentName, fixture.job.Record.RecordID,
+	)
+	if err != nil || fixture.job.Record.Status != k12.GradingStageAwaitingConfirmation ||
+		fixture.job.Fields.ConfirmationState != k12.GradingConfirmationPending ||
+		(fixture.job.Fields.AnchorState != k12.GradingAnchorLocated && fixture.job.Fields.AnchorState != k12.GradingAnchorDegraded) {
+		t.Fatalf("source waiting fixture=%+v err=%v", fixture.job, err)
+	}
 	work := fixture.claimCorrectText(
 		t, "corrected affected full", "source-reprocess-full-closure",
 	)

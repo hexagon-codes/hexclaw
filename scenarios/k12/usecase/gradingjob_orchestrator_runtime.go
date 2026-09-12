@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -1262,7 +1263,7 @@ func (o *GradingOrchestrator) reconcileDurableGradingOutcome(
 			return false, GradingJobView{}, resultErr
 		}
 		if !durable {
-			return false, GradingJobView{}, nil
+			return o.reconcileUnsentAssessmentItems(ctx, run, job, *invocation)
 		}
 		candidate := *run
 		candidate.result = result
@@ -1288,6 +1289,104 @@ func (o *GradingOrchestrator) reconcileDurableGradingOutcome(
 	default:
 		return false, GradingJobView{}, nil
 	}
+}
+
+// reconcileUnsentAssessmentItems 仅恢复已完成题与完全未发送题之间的本地误停。
+// 缺少题目结果却已有调用、调用真相未知或版本漂移时，仍保持原未知状态。
+func (o *GradingOrchestrator) reconcileUnsentAssessmentItems(
+	ctx context.Context,
+	run *gradingRun,
+	job GradingJobView,
+	invocation k12.ModelInvocation,
+) (bool, GradingJobView, error) {
+	if !job.Fields.BudgetSnapshot.IsFrozen() ||
+		job.Fields.FailureKind != "item_invocation_outcome_unknown" ||
+		(invocation.Status != k12.ModelInvocationOutcomeUnknown &&
+			!(invocation.Status == k12.ModelInvocationReconciled && invocation.FailureKind == "reconciled_partial_succeeded")) {
+		return false, GradingJobView{}, nil
+	}
+	questions := RecognizedQuestionsForAssessment(run.questions)
+	byProblem := make(map[string]RecognizedQuestion, len(questions))
+	for _, q := range questions {
+		byProblem[q.ProblemID] = q
+	}
+	snapshot, err := o.deps.Records.GetProblemAttemptSnapshot(ctx, run.agentName, job.Fields.SubmissionID)
+	if err != nil {
+		return false, GradingJobView{}, err
+	}
+	if len(snapshot.Attempts) != len(questions) {
+		return false, GradingJobView{}, nil
+	}
+	for _, attempt := range snapshot.Attempts {
+		q, ok := byProblem[attempt.ProblemID]
+		if !ok || q.AttemptID != attempt.AttemptID || q.ConfirmedVersion != attempt.ConfirmedVersion ||
+			q.InputDigest == "" || q.InputDigest != attempt.InputDigest {
+			return false, GradingJobView{}, nil
+		}
+	}
+	receipts, err := o.deps.Records.ListGradingAssessmentItems(ctx, run.agentName, job.Record.RecordID)
+	if err != nil {
+		return false, GradingJobView{}, err
+	}
+	if len(receipts) == 0 || len(receipts) >= len(questions) {
+		return false, GradingJobView{}, nil
+	}
+	completed := make(map[string]bool, len(receipts))
+	evidence := make([]string, 0, len(receipts))
+	for _, receipt := range receipts {
+		q, ok := byProblem[receipt.ProblemID]
+		if !ok || receipt.CurrentDisposition != k12.GradingAssessmentDispositionCurrent {
+			return false, GradingJobView{}, nil
+		}
+		if _, err := replayGradingAssessmentItem(q, receipt); err != nil {
+			return false, GradingJobView{}, err
+		}
+		completed[q.ProblemID] = true
+		evidence = append(evidence, q.ProblemID+":"+receipt.ResultDigest)
+	}
+	children, err := o.deps.Records.ListGradingItemInvocations(ctx, run.agentName, job.Record.RecordID)
+	if err != nil {
+		return false, GradingJobView{}, err
+	}
+	if len(children) == 0 {
+		return false, GradingJobView{}, nil
+	}
+	for _, child := range children {
+		q, ok := byProblem[child.ProblemID]
+		if !ok || !completed[child.ProblemID] || child.Status != k12.ModelInvocationSucceeded {
+			return false, GradingJobView{}, nil
+		}
+		if err := validateGradingItemInvocationIdentity(child, job, q, child.RequestDigest, child.ExecutionKind); err != nil {
+			return false, GradingJobView{}, err
+		}
+		if !json.Valid([]byte(child.ResultJSON)) || child.ResultDigest != modelInvocationDigest([]byte(child.ResultJSON)) {
+			return false, GradingJobView{}, fmt.Errorf("partial assessment invocation result digest drift")
+		}
+		evidence = append(evidence, child.InvocationID+":"+child.ResultDigest)
+	}
+	if _, err := inspectGradingGroundingInvocations(ctx, o.deps, run.agentName, job.Record.RecordID); err != nil {
+		return false, GradingJobView{}, err
+	}
+	sort.Strings(evidence)
+	resultDigest := modelInvocationDigest([]byte(invocation.RequestDigest), []byte(strings.Join(evidence, "\n")))
+	if _, err := o.deps.Records.ReconcileModelInvocationPartialSucceeded(ctx,
+		run.agentName, invocation.InvocationID, resultDigest); err != nil {
+		return false, GradingJobView{}, err
+	}
+	job.Fields.AttemptCount = invocation.Attempt
+	job.Fields.FailureKind = "reconciled_partial_succeeded"
+	job.Fields.Retryable = true
+	job.Fields.Deadline = 0
+	if _, err := o.deps.saveGradingJob(ctx, job, k12.GradingStageFailedRetryable); err != nil {
+		return false, GradingJobView{}, err
+	}
+	queued, err := o.deps.RetryGradingJob(ctx, run.agentName, job.Record.RecordID)
+	if err == nil {
+		slog.Info("K12 partial assessment reconciled", "job", job.Record.RecordID,
+			"completed_items", len(completed), "unsent_items", len(questions)-len(completed),
+			"invocation_id", invocation.InvocationID, "evidence_digest", resultDigest)
+	}
+	return true, queued, err
 }
 
 // durableAssessmentResult accepts only a complete run artifact or an exact

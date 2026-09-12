@@ -3,6 +3,7 @@ package usecase
 import (
 	"context"
 	"encoding/base64"
+	"reflect"
 	"testing"
 
 	"github.com/hexagon-codes/hexclaw/records"
@@ -13,9 +14,13 @@ import (
 const practiceReturnOnePixelPNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 
 type practiceReturnGradingFake struct {
-	started StartPhotoGradingInput
-	job     GradingJobView
-	result  PhotoGradeResult
+	started        StartPhotoGradingInput
+	job            GradingJobView
+	result         PhotoGradeResult
+	starts         int
+	runs           int
+	resultUnloaded bool
+	runJobID       string
 }
 
 func (f *practiceReturnGradingFake) StartPhotoGradingJob(
@@ -23,17 +28,24 @@ func (f *practiceReturnGradingFake) StartPhotoGradingJob(
 	in StartPhotoGradingInput,
 ) (GradingJobView, bool, error) {
 	f.started = in
+	f.starts++
 	return f.job, true, nil
 }
 
 func (f *practiceReturnGradingFake) RunGradingJob(
-	context.Context,
-	string,
+	_ context.Context,
+	jobID string,
 ) (GradingJobView, error) {
+	f.runs++
+	f.runJobID = jobID
+	f.resultUnloaded = false
 	return f.job, nil
 }
 
 func (f *practiceReturnGradingFake) PhotoResult(string) (PhotoGradeResult, bool) {
+	if f.resultUnloaded {
+		return PhotoGradeResult{}, false
+	}
 	questions := make([]RecognizedQuestion, len(f.result.Items))
 	for i := range f.result.Items {
 		questions[i] = f.result.Items[i].Recognized
@@ -140,6 +152,77 @@ func TestPracticeReturnRegradeCoordinator_AppliesClearResultsAndPersistsAnnotate
 			item.ResultEvidence != k12.PracticeResultSystemVerified {
 			t.Fatalf("题 %d 自动结论/证据错误: %+v", index, item)
 		}
+	}
+
+	// 回传投影可能落后于独立恢复的持久 Job；未知态只同步，完成态只回放结果。
+	jobRecord, err := k12.NewGradingJobRecord("mingming", "", k12.GradingJobFields{
+		SubmissionID: "return-submission", SourceKind: PracticeReturnGradingSourceKind,
+		IdempotencyKey: "return-recovery", ModelSnapshot: route,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobRecord.RecordID = grading.job.Record.RecordID
+	jobRecord.Status = k12.GradingStageOutcomeUnknown
+	if _, err := d.Records.Put(context.Background(), jobRecord); err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.updateProjection(context.Background(), "mingming", setID, ret.ReturnID,
+		practiceReturnRegradeProjection{JobID: jobRecord.RecordID, Status: k12.PracticeRegradeFailedRetryable}); err != nil {
+		t.Fatal(err)
+	}
+	starts, runs := grading.starts, grading.runs
+	if recovered, err := coordinator.Recover(context.Background(), []string{"mingming"}); err != nil || recovered != 1 {
+		t.Fatalf("recover stale return projection: count=%d err=%v", recovered, err)
+	}
+	unknown, err := d.GetPracticeSet(context.Background(), "mingming", setID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unknown.Fields.ReturnAssets[0].RegradeStatus != k12.PracticeRegradeOutcomeUnknown ||
+		grading.starts != starts || grading.runs != runs {
+		t.Fatalf("unknown return must only synchronize persisted status: return=%+v starts=%d runs=%d",
+			unknown.Fields.ReturnAssets[0], grading.starts, grading.runs)
+	}
+	persisted, err := d.GetGradingJob(context.Background(), "mingming", jobRecord.RecordID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, status := range []string{
+		k12.GradingStageFailedRetryable, k12.GradingStageQueued, k12.GradingStageNormalizing,
+		k12.GradingStageRecognizing, k12.GradingStageAwaitingConfirmation, k12.GradingStageAssessing,
+		k12.GradingStageRendering, k12.GradingStageProjecting, k12.GradingStageCompleted,
+	} {
+		persisted, err = d.saveGradingJob(context.Background(), persisted, status)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	grading.resultUnloaded = true
+	if recovered, err := coordinator.Recover(context.Background(), []string{"mingming"}); err != nil || recovered != 1 {
+		t.Fatalf("recover completed return projection: count=%d err=%v", recovered, err)
+	}
+	recovered, err := d.GetPracticeSet(context.Background(), "mingming", setID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.Fields.ReturnAssets[0].RegradeStatus != k12.PracticeRegradeCompleted ||
+		recovered.Fields.ReturnAssets[0].RegradeJobID != jobRecord.RecordID ||
+		!reflect.DeepEqual(recovered.Fields.Items, got.Fields.Items) ||
+		grading.starts != starts || grading.runs != runs+1 || grading.runJobID != jobRecord.RecordID {
+		t.Fatalf("completed return must load the original terminal job once: return=%+v starts=%d runs=%d",
+			recovered.Fields.ReturnAssets[0], grading.starts, grading.runs)
+	}
+	if count, err := coordinator.Recover(context.Background(), []string{"mingming"}); err != nil || count != 0 {
+		t.Fatalf("completed return must not be recovered again: count=%d err=%v", count, err)
+	}
+	replayed, err := d.GetPracticeSet(context.Background(), "mingming", setID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayed.Record.Version != recovered.Record.Version || grading.starts != starts || grading.runs != runs+1 {
+		t.Fatalf("completed recovery must not resubmit results: version=%d starts=%d runs=%d",
+			replayed.Record.Version, grading.starts, grading.runs)
 	}
 }
 

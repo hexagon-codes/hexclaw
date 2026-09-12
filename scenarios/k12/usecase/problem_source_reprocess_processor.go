@@ -501,7 +501,8 @@ func (o *GradingOrchestrator) processProblemSourceReprocess(
 	if job.Record.Status == k12.GradingStageCompleted {
 		return o.requireCurrentSourceReprocessFinalArtifact(ctx, job)
 	}
-	if job.Record.Status == k12.GradingStageFailedRetryable && work.Action == "correct_text" {
+	if work.Action == "correct_text" &&
+		(job.Record.Status == k12.GradingStageFailedRetryable || job.Record.Status == k12.GradingStageAwaitingConfirmation) {
 		invocations, err := o.deps.Records.ListGradingItemInvocations(ctx, agentName, jobID)
 		if err != nil {
 			return err
@@ -873,6 +874,17 @@ func (o *GradingOrchestrator) finalizeSourceReprocessIfCurrentExactSet(
 	completed := job
 	for completed.Record != nil && completed.Record.Status != k12.GradingStageCompleted {
 		switch completed.Record.Status {
+		case k12.GradingStageAwaitingConfirmation:
+			// 仅完整当前产物允许整页确认；锚点未汇合时保留等待，不启动整页批改。
+			completed, err = o.deps.ConfirmGradingJob(
+				ctx,
+				completed.Record.AgentName,
+				completed.Record.RecordID,
+				[]string{"source-reprocess-final:" + current.ArtifactDigest},
+			)
+			if err == nil && completed.Record.Status == k12.GradingStageAwaitingConfirmation {
+				return completed, false, nil
+			}
 		case k12.GradingStageAssessing, k12.GradingStageRendering:
 			completed, err = o.advanceOK(
 				ctx,

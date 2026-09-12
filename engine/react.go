@@ -1353,6 +1353,10 @@ func (e *ReActEngine) completeWithTools(
 	if len(req.Tools) == 0 {
 		resp, thinkingTimedOut, err := e.completeWithThinkingTimeout(ctx, provider, providerName, modelName, req)
 		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				trace.L(ctx).Info("model request canceled; fallback stopped", "ctx_err", ctxErr, "provider", providerName, "session", sessionID)
+				return nil, ctxErr
+			}
 			if thinkingTimedOut {
 				ensureMessageMetadata(msg)
 				msg.Metadata["finish_reason"] = "thinking_timeout"
@@ -1367,7 +1371,7 @@ func (e *ReActEngine) completeWithTools(
 			// 直到某个成功或全部试完。exclude 集合累积防死循环；显式 pin 不改派（尊重用户选择）。
 			if err != nil && !explicitProvider && isProviderUnavailableError(err) {
 				tried := map[string]bool{providerName: true}
-				for isProviderUnavailableError(err) {
+				for ctx.Err() == nil && isProviderUnavailableError(err) {
 					e.failoverMarkUnhealthy(providerName, causeReason(err))
 					fallbackP, fbName, fbErr := e.router.Fallback(mapKeys(tried)...)
 					if fbErr != nil || fbName == "" || tried[fbName] {
@@ -1390,6 +1394,10 @@ func (e *ReActEngine) completeWithTools(
 				}
 			}
 			if err != nil {
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					trace.L(ctx).Info("model request canceled; fallback stopped", "ctx_err", ctxErr, "provider", providerName, "session", sessionID)
+					return nil, ctxErr
+				}
 				if explicitProvider {
 					// 显式 pin：透传底层原因（既有契约，方便用户排障），不友好翻译、不改派 provider。
 					return nil, fmt.Errorf("provider %s 调用失败: %w", providerName, err)
@@ -1482,7 +1490,7 @@ func (e *ReActEngine) completeWithTools(
 	// BUG-20260711-A：模型/provider 明确“不支持工具调用”（openrouter 免费 Nemotron 等）
 	// → 去掉 tools 重试一次，让对话正常出内容（降级而非把 404 硬失败甩给用户）。错误发生
 	// 在首个 provider 调用、尚未产出任何结果，去工具重试安全。
-	if err != nil && len(req.Tools) > 0 && isToolUnsupportedError(err) {
+	if err != nil && ctx.Err() == nil && len(req.Tools) > 0 && isToolUnsupportedError(err) {
 		trace.L(ctx).Warn("模型不支持工具调用，去工具重试", appendModelErrorLogFields([]any{"provider", providerName, "model", modelName, "session", sessionID}, err)...)
 		result, err = runner.Run(ctx, hruntime.Request{
 			ID:           messageRequestID(msg),
@@ -1499,7 +1507,7 @@ func (e *ReActEngine) completeWithTools(
 	// provider 一轮——用同一 runner+selector 重跑（failoverAdvance 已熔断失败者并把 current 推进
 	// 到下一个未尝试的健康 provider，Select 会返回它）。exclude 集合累积防死循环，全失败落
 	// friendlyLLMError。显式 pin 由 failoverAdvance 内部拒绝（尊重用户选择，不静默改派）。
-	for err != nil && isProviderUnavailableError(err) && selector.failoverAdvance(err) {
+	for err != nil && ctx.Err() == nil && isProviderUnavailableError(err) && selector.failoverAdvance(err) {
 		_, fbName, fbModel := selector.Current()
 		trace.L(ctx).Warn("Provider 回退重试", appendModelErrorLogFields([]any{"to", fbName, "model", fbModel, "session", sessionID}, err)...)
 		// BUG-20260712：按目标 provider locality 重建 cloud-safe 请求（回退到云端时 buildTurnContext
@@ -1520,7 +1528,7 @@ func (e *ReActEngine) completeWithTools(
 			Limits:       hruntime.Limits{MaxTurns: maxTurns},
 		})
 		// 新 provider 若又不支持工具调用，同样去工具重试一次（与首个 provider 对称）。
-		if err != nil && len(req.Tools) > 0 && isToolUnsupportedError(err) {
+		if err != nil && ctx.Err() == nil && len(req.Tools) > 0 && isToolUnsupportedError(err) {
 			result, err = runner.Run(ctx, hruntime.Request{
 				ID:           messageRequestID(msg),
 				Messages:     req.Messages,
@@ -1531,6 +1539,10 @@ func (e *ReActEngine) completeWithTools(
 				Limits:       hruntime.Limits{MaxTurns: maxTurns},
 			})
 		}
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		trace.L(ctx).Info("model request canceled; fallback stopped", "ctx_err", ctxErr, "provider", providerName, "session", sessionID)
+		return nil, ctxErr
 	}
 	// 用一等终止原因判断（而非 errors.Is 反查错误）：达到轮次上限时 runtime 仍带回模型已
 	// 产出的部分结果（含已计费 token），不当硬错误丢弃——照常落库/返回 + 追加轮次上限提示，
@@ -2617,7 +2629,7 @@ func (e *ReActEngine) processStreamRuntime(
 		// BUG-20260711-A：模型/provider 明确“不支持工具调用”→ 去掉 tools 用同 sink 重试一次
 		// （降级而非把 404 硬失败甩给用户）。错误发生在 header/首个 provider 调用、还没 emit
 		// 任何内容，此处不 notify error、不往 ch 塞 error，重试安全。
-		if err != nil && len(req.Tools) > 0 && isToolUnsupportedError(err) {
+		if err != nil && ctx.Err() == nil && len(req.Tools) > 0 && isToolUnsupportedError(err) {
 			trace.L(ctx).Warn("模型不支持工具调用，去工具重试（流式）", appendModelErrorLogFields([]any{"provider", selection.providerName, "model", selection.modelName, "session", sessionID}, err)...)
 			result, err = runner.Stream(streamCtx, hruntime.Request{
 				ID:           messageRequestID(msg),
@@ -2634,7 +2646,7 @@ func (e *ReActEngine) processStreamRuntime(
 		// 不可用且非显式 pin 时，遍历剩余健康 provider 一轮，用同一 runner+selector+sink 重跑。
 		// 错误发生在 Stream 建连/首个 provider 调用、还没 emit 内容时，重试前不 notify/不塞
 		// error，回退安全；failoverAdvance 已熔断失败者并推进 current，Select 返回它。
-		for err != nil && isProviderUnavailableError(err) && selector.failoverAdvance(err) {
+		for err != nil && ctx.Err() == nil && isProviderUnavailableError(err) && selector.failoverAdvance(err) {
 			_, fbName, fbModel := selector.Current()
 			trace.L(ctx).Warn("Provider 回退重试（流式）", appendModelErrorLogFields([]any{"to", fbName, "model", fbModel, "session", sessionID}, err)...)
 			// BUG-20260712：按目标 provider locality 重建 cloud-safe 请求（回退到云端时不注入跨会话
@@ -2658,7 +2670,7 @@ func (e *ReActEngine) processStreamRuntime(
 				Limits:       hruntime.Limits{MaxTurns: maxTurns},
 				StreamMode:   streamMode,
 			}, sink)
-			if err != nil && len(req.Tools) > 0 && isToolUnsupportedError(err) {
+			if err != nil && ctx.Err() == nil && len(req.Tools) > 0 && isToolUnsupportedError(err) {
 				result, err = runner.Stream(streamCtx, hruntime.Request{
 					ID:           messageRequestID(msg),
 					Messages:     req.Messages,
@@ -2670,6 +2682,13 @@ func (e *ReActEngine) processStreamRuntime(
 					StreamMode:   streamMode,
 				}, sink)
 			}
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			lifecycleErr = ctxErr
+			trace.L(ctx).Info("model request canceled; fallback stopped", "ctx_err", ctxErr, "provider", selection.providerName, "session", sessionID)
+			sink.notifyStarted(ctxErr)
+			ch <- &adapter.ReplyChunk{Error: ctxErr, Done: true}
+			return
 		}
 		// 用一等终止原因判断（而非 errors.Is 反查错误）：达到轮次上限时 runtime 仍带回模型
 		// 已产出的部分内容（多半已经流式给了客户端），不当硬错误丢弃——继续走 finalize，尾部
@@ -4073,13 +4092,8 @@ func (e *ReActEngine) buildCompletionRequest(ctx context.Context, msg *adapter.M
 // 只有 egress 信封被 labelMessageEgress 用一个全新的 envelope 覆盖（WithRequest 不继承父信封）。
 // 工具沿用原 tools（helper 不负责挂 tools，调用方在返回后重新挂上 req.Tools），别把 tools 丢了。
 func (e *ReActEngine) rebuildRequestForFailover(ctx context.Context, msg *adapter.Message, history []hexagon.Message, kbContext, providerName string) (context.Context, hexagon.CompletionRequest) {
-	// BUG-20260712-b：本地 provider 的 header 超时会 cancel 共享请求 ctx（错误呈 "context
-	// canceled"）——回退重试若继承这个已取消的 ctx，会对健康的目标 provider（如智谱）立刻
-	// "context canceled" 失败，回退白回退。用 WithoutCancel 脱离上游取消，让回退能真正打到
-	// 健康 provider；各 provider 客户端自带超时兜底，不会无限挂。真机取证：本地 Ollama 超时
-	// 取消后，回退到智谱 glm-4v-flash 立刻 context canceled → 整条对话仍失败。
-	base := context.WithoutCancel(ctx)
-	fresh := labelMessageEgress(base, msg) // 干净 general_chat 信封（含附件/文档类，但不含 memory）
+	// 回退只替换目标信封，保留调用方的取消、截止时间和上下文值。
+	fresh := labelMessageEgress(ctx, msg) // 干净 general_chat 信封（含附件/文档类，但不含 memory）
 	fresh = withProviderLocality(fresh, e.providerIsLocal(providerName))
 	return fresh, e.buildCompletionRequest(fresh, msg, history, kbContext)
 }
@@ -4104,6 +4118,10 @@ func (e *ReActEngine) completeDirect(
 	applyPerTurnRequestPolicy(ctx, &req, modelName, e.visionRoutingStrategy(), msg, history)
 	resp, err := provider.Complete(ctx, req)
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			trace.L(ctx).Info("model request canceled; fallback stopped", "ctx_err", ctxErr, "provider", providerName, "session", sessionID)
+			return nil, ctxErr
+		}
 		if explicitProvider {
 			return nil, fmt.Errorf("provider %s 调用失败: %w", providerName, err)
 		}

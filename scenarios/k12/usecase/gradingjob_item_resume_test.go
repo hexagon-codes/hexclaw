@@ -473,9 +473,10 @@ func TestGradingOrchestratorItemResume_ExactSetCompletes(t *testing.T) {
 func TestGradingOrchestratorItemResume_SentAggregateReplaysCommittedItemWithoutResend(t *testing.T) {
 	solver := &itemResumeSolver{calls: map[string]int{}}
 	grader := &itemResumeGrader{calls: map[string]int{}}
-	o := newItemResumeOrchestrator(t, t.TempDir(), []RecognizedQuestion{{
-		Question: "q1", Subject: "数学", StudentAnswer: "1", AnswerState: AnswerStatePresent,
-	}}, solver, grader)
+	o := newItemResumeOrchestrator(t, t.TempDir(), []RecognizedQuestion{
+		{Question: "q1", Subject: "数学", StudentAnswer: "1", AnswerState: AnswerStatePresent},
+		{Question: "q2", Subject: "数学", StudentAnswer: "2", AnswerState: AnswerStatePresent},
+	}, solver, grader)
 	jobID := runItemResumeJobToAssessing(t, o, "item-resume-sent-aggregate")
 	run, job := confirmItemResumeJobWithoutRun(t, o, jobID)
 
@@ -492,15 +493,31 @@ func TestGradingOrchestratorItemResume_SentAggregateReplaysCommittedItemWithoutR
 			solver.callCount("q1"), grader.callCount("q1"))
 	}
 
-	view, err := o.runAssessItems(context.Background(), run, job)
-	if err != nil || view.Record.Status != k12.GradingStageRendering {
-		t.Fatalf("resume sent aggregate: stage=%s err=%v", view.Record.Status, err)
+	if _, err := o.deps.Records.MarkModelInvocationOutcomeUnknown(context.Background(), run.agentName,
+		invocation.InvocationID, "item_invocation_outcome_unknown"); err != nil {
+		t.Fatal(err)
+	}
+	job, err = o.markGradingOutcomeUnknown(context.Background(), run, jobID, "item_invocation_outcome_unknown")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconciled, queued, err := o.reconcileDurableGradingOutcome(context.Background(), run, job)
+	if err != nil || !reconciled || queued.Record.Status != k12.GradingStageQueued {
+		t.Fatalf("reconcile completed item and unsent item: reconciled=%v job=%+v err=%v", reconciled, queued, err)
+	}
+	view, err := o.RunGradingJob(context.Background(), jobID)
+	if err != nil || view.Record.Status != k12.GradingStageCompleted {
+		t.Fatalf("resume partial aggregate: stage=%s err=%v", view.Record.Status, err)
 	}
 	if solver.callCount("q1") != 1 || grader.callCount("q1") != 1 {
 		t.Fatalf("committed item was resent: solver=%d grader=%d",
 			solver.callCount("q1"), grader.callCount("q1"))
 	}
-	assertAssessStageInvocationStatuses(t, o, jobID, k12.ModelInvocationSucceeded)
+	if solver.callCount("q2") != 1 || grader.callCount("q2") != 1 {
+		t.Fatalf("unsent item did not run exactly once: solver=%d grader=%d",
+			solver.callCount("q2"), grader.callCount("q2"))
+	}
+	assertAssessStageInvocationStatuses(t, o, jobID, k12.ModelInvocationReconciled, k12.ModelInvocationSucceeded)
 }
 
 func TestGradingOrchestratorItemResume_RejectsUnconfirmedAttemptBeforeAnyModelCall(t *testing.T) {

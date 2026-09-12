@@ -741,6 +741,7 @@ type problemInputRevisionHead struct {
 	AnswerBBoxJSON            string
 	QuestionCanonicalMarkdown string
 	AnswerCanonicalMarkdown   string
+	InitialUnconfirmedAttempt bool
 }
 
 // currentProblemInputRevisionHead lazily creates the legacy v1 input head.
@@ -756,10 +757,11 @@ func currentProblemInputRevisionHead(
 ) (problemInputRevisionHead, error) {
 	var head problemInputRevisionHead
 	var inputDigest string
+	var confirmedVersion int
 	if err := tx.QueryRowContext(ctx, `
 		SELECT p.page_asset_id,p.stem_raw,COALESCE(a.answer_raw,''),
 		       COALESCE(a.bbox_json,''),p.stem_markdown,
-		       COALESCE(a.answer_markdown,''),COALESCE(a.input_digest,'')
+		       COALESCE(a.answer_markdown,''),COALESCE(a.input_digest,''),a.confirmed_version
 		FROM k12_problems p
 		JOIN k12_attempts a
 		  ON a.agent_name=p.agent_name
@@ -777,6 +779,7 @@ func currentProblemInputRevisionHead(
 		&head.QuestionCanonicalMarkdown,
 		&head.AnswerCanonicalMarkdown,
 		&inputDigest,
+		&confirmedVersion,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return problemInputRevisionHead{}, ErrProblemSourceActionNotFound
@@ -786,7 +789,7 @@ func currentProblemInputRevisionHead(
 	if inputDigest == "" {
 		inputDigest = problemSourceInputDigest("legacy", problemID, expectedRevision)
 	}
-	if _, err := tx.ExecContext(ctx, `
+	initialResult, err := tx.ExecContext(ctx, `
 		INSERT OR IGNORE INTO k12_problem_input_revisions (
 			agent_name,submission_id,structure_version,problem_id,input_revision,
 			page_asset_id,source_region_json,stem_raw,answer_raw,answer_bbox_json,
@@ -808,9 +811,16 @@ func currentProblemInputRevisionHead(
 		inputDigest,
 		now,
 		now,
-	); err != nil {
+	)
+	if err != nil {
 		return problemInputRevisionHead{}, err
 	}
+	initialRows, err := initialResult.RowsAffected()
+	if err != nil {
+		return problemInputRevisionHead{}, err
+	}
+	// 初始输入可以先于作答确认建立；仅本事务新建的首版沿用未确认版本。
+	head.InitialUnconfirmedAttempt = expectedRevision == 1 && confirmedVersion == 0 && initialRows == 1
 	var sourceRegion sql.NullString
 	if err := tx.QueryRowContext(ctx, `
 		SELECT page_asset_id,source_region_json,stem_raw,answer_raw,answer_bbox_json,
@@ -934,6 +944,10 @@ func appendProblemInputRevision(
 		return fmt.Errorf("%w: structure input CAS lost for problem %s",
 			ErrProblemSourceActionConflict, problemID)
 	}
+	expectedConfirmedVersion := expectedRevision
+	if head.InitialUnconfirmedAttempt {
+		expectedConfirmedVersion = 0
+	}
 	attemptResult, err := tx.ExecContext(ctx, `
 		UPDATE k12_attempts
 		SET confirmed_version=?,input_digest=?,updated_at=?
@@ -945,7 +959,7 @@ func appendProblemInputRevision(
 		scope.AgentName,
 		scope.SubmissionID,
 		problemID,
-		expectedRevision,
+		expectedConfirmedVersion,
 	)
 	if err != nil {
 		return err

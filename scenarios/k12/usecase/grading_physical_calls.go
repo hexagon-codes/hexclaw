@@ -771,9 +771,29 @@ func inspectGradingGroundingInvocations(
 	if err != nil {
 		return inspection, err
 	}
+	if len(invocations) == 0 {
+		return inspection, nil
+	}
+	job, err := deps.GetGradingJob(ctx, agentName, jobID)
+	if err != nil {
+		return inspection, err
+	}
+	problems, err := deps.Records.GetProblemAttemptSnapshot(ctx, agentName, job.Fields.SubmissionID)
+	if err != nil {
+		return inspection, err
+	}
+	nonMath := make(map[string]bool, len(problems.Problems))
+	for _, problem := range problems.Problems {
+		subject := strings.TrimSpace(problem.Subject)
+		nonMath[problem.ProblemID] = subject != "" && subject != "数学"
+	}
 	for _, invocation := range invocations {
 		if invocation.Status != k12.ModelInvocationSucceeded ||
 			!gradingGroundingRelevantOperation(invocation.Operation) {
+			continue
+		}
+		// 教材封套只适用于数学，非数学的正常回执不参与其完整性判断。
+		if nonMath[invocation.ProblemID] {
 			continue
 		}
 		inspection.relevantSucceeded++
