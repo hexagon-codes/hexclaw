@@ -26,6 +26,7 @@ var (
 	ErrInvalidDocumentRetry          = errors.New("knowledge: invalid document retry")
 	ErrDocumentRetryRequiresReupload = errors.New("knowledge: cancelled or deleted document must be uploaded again")
 	ErrDocumentRetryNotAllowed       = errors.New("knowledge: document has no failed indexing job to retry")
+	ErrUploadDismissNotAllowed       = errors.New("knowledge: only failed unaccepted uploads can be dismissed")
 )
 
 type TextIndexState string
@@ -86,21 +87,23 @@ const (
 // and corpus UID remain private so transport adapters cannot accidentally
 // expose authorization scope or use them as caller-provided routing fields.
 type UploadOperationProjection struct {
-	OperationID   string               `json:"operation_id"`
-	OwnerID       string               `json:"-"`
-	CorpusID      string               `json:"corpus_id"`
-	DocumentID    string               `json:"document_id,omitempty"`
-	JobID         string               `json:"job_id,omitempty"`
-	DisplayName   string               `json:"display_name"`
-	MediaType     string               `json:"media_type"`
-	SizeBytes     int64                `json:"size_bytes"`
-	ContentDigest string               `json:"content_digest,omitempty"`
-	State         UploadOperationState `json:"state"`
-	Stage         string               `json:"stage"`
-	Terminal      bool                 `json:"terminal"`
-	Error         string               `json:"error,omitempty"`
-	CreatedAt     time.Time            `json:"created_at"`
-	UpdatedAt     time.Time            `json:"updated_at"`
+	OperationID     string               `json:"operation_id"`
+	IdempotencyKey  string               `json:"idempotency_key,omitempty"`
+	DocumentDeleted bool                 `json:"document_deleted,omitempty"`
+	OwnerID         string               `json:"-"`
+	CorpusID        string               `json:"corpus_id"`
+	DocumentID      string               `json:"document_id,omitempty"`
+	JobID           string               `json:"job_id,omitempty"`
+	DisplayName     string               `json:"display_name"`
+	MediaType       string               `json:"media_type"`
+	SizeBytes       int64                `json:"size_bytes"`
+	ContentDigest   string               `json:"content_digest,omitempty"`
+	State           UploadOperationState `json:"state"`
+	Stage           string               `json:"stage"`
+	Terminal        bool                 `json:"terminal"`
+	Error           string               `json:"error,omitempty"`
+	CreatedAt       time.Time            `json:"created_at"`
+	UpdatedAt       time.Time            `json:"updated_at"`
 }
 
 type IngestBlob struct {

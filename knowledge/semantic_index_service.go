@@ -218,6 +218,32 @@ func (s *SemanticIndexService) ListUploadOperationsForCorpus(
 	return uploads.ListUploadOperationsForCorpus(ctx, ownerID, corpusID)
 }
 
+// ListUploadOperationHistoryForCorpus 只为显式上传准备读取历史，不恢复旧任务。
+func (s *SemanticIndexService) ListUploadOperationHistoryForCorpus(
+	ctx context.Context, ownerID, corpusID string,
+) ([]UploadOperationProjection, error) {
+	uploads, ok := s.ingestRepo.(interface {
+		ListUploadOperationHistoryForCorpus(context.Context, string, string) ([]UploadOperationProjection, error)
+	})
+	if !ok {
+		return nil, ErrDocumentIngestUnavailable
+	}
+	return uploads.ListUploadOperationHistoryForCorpus(ctx, ownerID, corpusID)
+}
+
+// DismissUploadOperation 由原上传仓库持久化提醒状态，不操作文件或任务。
+func (s *SemanticIndexService) DismissUploadOperation(
+	ctx context.Context, ownerID, corpusID, operationID string,
+) error {
+	uploads, ok := s.ingestRepo.(interface {
+		DismissUploadOperation(context.Context, string, string, string) error
+	})
+	if !ok {
+		return ErrDocumentIngestUnavailable
+	}
+	return uploads.DismissUploadOperation(ctx, ownerID, corpusID, operationID)
+}
+
 // MarkUploadResponseDelivered advances only the transport acknowledgement
 // boundary. The worker job remains independently durable and authoritative.
 func (s *SemanticIndexService) MarkUploadResponseDelivered(

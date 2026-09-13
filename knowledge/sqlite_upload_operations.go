@@ -120,7 +120,7 @@ func (r *SQLiteSemanticIndexRepository) beginUploadOperationOnce(
 		projection.State == UploadOperationFailed && projection.Error == "upload_failed" &&
 		projection.DocumentID == "" && projection.JobID == "" {
 		result, err = tx.ExecContext(ctx, `UPDATE kb_upload_operations
-			SET state='receiving',last_error='',updated_at=?
+			SET state='receiving',last_error='',dismissed_at=NULL,updated_at=?
 			WHERE operation_id=? AND owner_id=? AND corpus_uid=? AND idempotency_key=?
 			  AND request_fingerprint=? AND state='failed' AND last_error='upload_failed'
 			  AND document_id IS NULL AND job_id IS NULL`,
@@ -171,6 +171,7 @@ func loadUploadOperationByKeyTx(
 		return UploadOperationProjection{}, "", err
 	}
 	projection.DocumentID = documentID.String
+	projection.IdempotencyKey = idempotencyKey
 	projection.JobID = jobID.String
 	projection.ContentDigest = contentDigest.String
 	projection.State = UploadOperationState(state)
@@ -372,6 +373,19 @@ func (r *SQLiteSemanticIndexRepository) ListUploadOperationsForCorpus(
 	ctx context.Context,
 	ownerID, corpusID string,
 ) ([]UploadOperationProjection, error) {
+	return r.listUploadOperationsForCorpus(ctx, ownerID, corpusID, false)
+}
+
+// ListUploadOperationHistoryForCorpus 为显式重新上传保留原取消/删除代次身份。
+func (r *SQLiteSemanticIndexRepository) ListUploadOperationHistoryForCorpus(
+	ctx context.Context, ownerID, corpusID string,
+) ([]UploadOperationProjection, error) {
+	return r.listUploadOperationsForCorpus(ctx, ownerID, corpusID, true)
+}
+
+func (r *SQLiteSemanticIndexRepository) listUploadOperationsForCorpus(
+	ctx context.Context, ownerID, corpusID string, includeHistory bool,
+) ([]UploadOperationProjection, error) {
 	if err := validateSemanticScope(ownerID, corpusID); err != nil {
 		return nil, err
 	}
@@ -380,18 +394,21 @@ func (r *SQLiteSemanticIndexRepository) ListUploadOperationsForCorpus(
 		return nil, err
 	}
 	rows, err := r.db.QueryContext(ctx, `SELECT
-		o.operation_id,o.owner_id,c.corpus_alias,
+		o.operation_id,o.idempotency_key,o.owner_id,c.corpus_alias,
 		COALESCE(o.document_id,''),COALESCE(o.job_id,''),o.display_name,o.media_type,
 		o.size_bytes,COALESCE(o.content_digest,''),o.state,o.last_error,
 		o.created_at,o.updated_at,COALESCE(j.state,''),COALESCE(j.stage,''),
-		COALESCE(j.last_error,''),COALESCE(j.updated_at,0)
+		COALESCE(j.last_error,''),COALESCE(j.updated_at,0),
+		(o.document_id IS NOT NULL AND (d.id IS NULL OR d.deleted=1))
 		FROM kb_upload_operations o
 		JOIN kb_semantic_corpora c
 		  ON c.owner_id=o.owner_id AND c.corpus_uid=o.corpus_uid
 		LEFT JOIN kb_knowledge_jobs j
 		  ON j.job_id=o.job_id AND j.owner_id=o.owner_id AND j.corpus_uid=o.corpus_uid
+		LEFT JOIN kb_documents d ON d.id=o.document_id AND d.corpus_uid=o.corpus_uid
 		WHERE o.owner_id=? AND o.corpus_uid=?
-		ORDER BY o.updated_at DESC,o.operation_id`, ownerID, semanticState.corpusUID)
+		  AND (? OR (o.dismissed_at IS NULL AND (o.document_id IS NULL OR d.deleted=0)))
+		ORDER BY o.updated_at DESC,o.operation_id`, ownerID, semanticState.corpusUID, includeHistory)
 	if err != nil {
 		return nil, err
 	}
@@ -402,11 +419,11 @@ func (r *SQLiteSemanticIndexRepository) ListUploadOperationsForCorpus(
 		var persistedState, jobState, jobStage, jobError string
 		var createdAt, operationUpdatedAt, jobUpdatedAt int64
 		if err := rows.Scan(
-			&operation.OperationID, &operation.OwnerID, &operation.CorpusID,
+			&operation.OperationID, &operation.IdempotencyKey, &operation.OwnerID, &operation.CorpusID,
 			&operation.DocumentID, &operation.JobID, &operation.DisplayName,
 			&operation.MediaType, &operation.SizeBytes, &operation.ContentDigest,
 			&persistedState, &operation.Error, &createdAt, &operationUpdatedAt,
-			&jobState, &jobStage, &jobError, &jobUpdatedAt,
+			&jobState, &jobStage, &jobError, &jobUpdatedAt, &operation.DocumentDeleted,
 		); err != nil {
 			return nil, err
 		}
@@ -430,6 +447,55 @@ func (r *SQLiteSemanticIndexRepository) ListUploadOperationsForCorpus(
 		return nil, err
 	}
 	return operations, nil
+}
+
+// DismissUploadOperation 只结束接纳前失败的提醒，不改失败审计或已接纳任务。
+func (r *SQLiteSemanticIndexRepository) DismissUploadOperation(
+	ctx context.Context, ownerID, corpusID, operationID string,
+) error {
+	if err := validateSemanticScope(ownerID, corpusID); err != nil {
+		return err
+	}
+	operationID = strings.TrimSpace(operationID)
+	if operationID == "" {
+		return ErrSemanticIndexNotFound
+	}
+	return sqliteutil.RetryOnBusy(ctx, func() error {
+		tx, err := r.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		state, err := loadSemanticPolicyState(ctx, tx, ownerID, corpusID)
+		if err != nil {
+			return err
+		}
+		result, err := tx.ExecContext(ctx, `UPDATE kb_upload_operations
+			SET dismissed_at=COALESCE(dismissed_at,?)
+			WHERE operation_id=? AND owner_id=? AND corpus_uid=?
+			  AND state='failed' AND document_id IS NULL AND job_id IS NULL`,
+			semanticNowMillis(), operationID, ownerID, state.corpusUID)
+		if err != nil {
+			return err
+		}
+		rows, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if rows == 0 {
+			var found bool
+			if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM kb_upload_operations
+				WHERE operation_id=? AND owner_id=? AND corpus_uid=?)`,
+				operationID, ownerID, state.corpusUID).Scan(&found); err != nil {
+				return err
+			}
+			if !found {
+				return ErrSemanticIndexNotFound
+			}
+			return ErrUploadDismissNotAllowed
+		}
+		return tx.Commit()
+	})
 }
 
 func uploadOperationStage(state UploadOperationState, jobStage string) string {

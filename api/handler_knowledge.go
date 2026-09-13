@@ -26,18 +26,20 @@ import (
 // document state remains authoritative in the Sidecar; browser storage is not
 // an execution ledger.
 type KnowledgeOperationProjection struct {
-	OperationID   string                         `json:"operation_id"`
-	JobID         string                         `json:"job_id"`
-	DocumentID    string                         `json:"document_id"`
-	Title         string                         `json:"title"`
-	DisplayName   string                         `json:"display_name"`
-	ContentDigest string                         `json:"content_digest,omitempty"`
-	State         knowledge.UploadOperationState `json:"state"`
-	Stage         string                         `json:"stage"`
-	Terminal      bool                           `json:"terminal"`
-	Error         string                         `json:"error,omitempty"`
-	CreatedAt     time.Time                      `json:"created_at"`
-	UpdatedAt     time.Time                      `json:"updated_at"`
+	OperationID     string                         `json:"operation_id"`
+	IdempotencyKey  string                         `json:"idempotency_key,omitempty"`
+	DocumentDeleted bool                           `json:"document_deleted,omitempty"`
+	JobID           string                         `json:"job_id"`
+	DocumentID      string                         `json:"document_id"`
+	Title           string                         `json:"title"`
+	DisplayName     string                         `json:"display_name"`
+	ContentDigest   string                         `json:"content_digest,omitempty"`
+	State           knowledge.UploadOperationState `json:"state"`
+	Stage           string                         `json:"stage"`
+	Terminal        bool                           `json:"terminal"`
+	Error           string                         `json:"error,omitempty"`
+	CreatedAt       time.Time                      `json:"created_at"`
+	UpdatedAt       time.Time                      `json:"updated_at"`
 }
 
 // handleKnowledgeOperations GET /api/v1/knowledge/operations returns the
@@ -64,7 +66,20 @@ func (s *Server) handleKnowledgeOperations(w http.ResponseWriter, r *http.Reques
 	if !requireSupportedKnowledgeCorpus(w, corpusID) {
 		return
 	}
-	projected, err := service.ListUploadOperationsForCorpus(r.Context(), ownerID, corpusID)
+	var projected []knowledge.UploadOperationProjection
+	var err error
+	if r.URL.Query().Get("include_history") == "true" {
+		history, ok := s.semanticIndex.(interface {
+			ListUploadOperationHistoryForCorpus(context.Context, string, string) ([]knowledge.UploadOperationProjection, error)
+		})
+		if !ok {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "knowledge history unavailable"})
+			return
+		}
+		projected, err = history.ListUploadOperationHistoryForCorpus(r.Context(), ownerID, corpusID)
+	} else {
+		projected, err = service.ListUploadOperationsForCorpus(r.Context(), ownerID, corpusID)
+	}
 	if err != nil {
 		writeSemanticIndexError(w, err)
 		return
@@ -72,21 +87,56 @@ func (s *Server) handleKnowledgeOperations(w http.ResponseWriter, r *http.Reques
 	operations := make([]KnowledgeOperationProjection, 0, len(projected))
 	for _, operation := range projected {
 		operations = append(operations, KnowledgeOperationProjection{
-			OperationID:   operation.OperationID,
-			JobID:         operation.JobID,
-			DocumentID:    operation.DocumentID,
-			Title:         operation.DisplayName,
-			DisplayName:   operation.DisplayName,
-			ContentDigest: operation.ContentDigest,
-			State:         operation.State,
-			Stage:         operation.Stage,
-			Terminal:      operation.Terminal,
-			Error:         operation.Error,
-			CreatedAt:     operation.CreatedAt,
-			UpdatedAt:     operation.UpdatedAt,
+			OperationID:     operation.OperationID,
+			IdempotencyKey:  operation.IdempotencyKey,
+			DocumentDeleted: operation.DocumentDeleted,
+			JobID:           operation.JobID,
+			DocumentID:      operation.DocumentID,
+			Title:           operation.DisplayName,
+			DisplayName:     operation.DisplayName,
+			ContentDigest:   operation.ContentDigest,
+			State:           operation.State,
+			Stage:           operation.Stage,
+			Terminal:        operation.Terminal,
+			Error:           operation.Error,
+			CreatedAt:       operation.CreatedAt,
+			UpdatedAt:       operation.UpdatedAt,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"operations": operations})
+}
+
+// handleDismissKnowledgeOperation 仅结束当前身份下的失败提醒。
+func (s *Server) handleDismissKnowledgeOperation(w http.ResponseWriter, r *http.Request) {
+	ownerID := strings.TrimSpace(skill.AuthenticatedUserID(r.Context()))
+	if ownerID == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authenticated principal is required"})
+		return
+	}
+	service, ok := s.semanticIndex.(interface {
+		DismissUploadOperation(context.Context, string, string, string) error
+	})
+	if !ok {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "knowledge recovery unavailable"})
+		return
+	}
+	corpusID := strings.TrimSpace(r.URL.Query().Get("corpus_id"))
+	if corpusID == "" {
+		corpusID = knowledgeDefaultCorpusID
+	}
+	if !requireSupportedKnowledgeCorpus(w, corpusID) {
+		return
+	}
+	err := service.DismissUploadOperation(r.Context(), ownerID, corpusID, r.PathValue("operation_id"))
+	if errors.Is(err, knowledge.ErrUploadDismissNotAllowed) {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error(), "code": "knowledge_upload_dismiss_not_allowed"})
+		return
+	}
+	if err != nil {
+		writeSemanticIndexError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // handleAcknowledgeKnowledgeOperation is the explicit client-receipt boundary.

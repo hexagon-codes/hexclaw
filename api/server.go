@@ -686,6 +686,7 @@ func (s *Server) routes() http.Handler {
 	if s.semanticIndex != nil {
 		mux.HandleFunc("GET /api/v1/knowledge/operations", s.handleKnowledgeOperations)
 		mux.HandleFunc("POST /api/v1/knowledge/operations/{operation_id}/ack", s.handleAcknowledgeKnowledgeOperation)
+		mux.HandleFunc("POST /api/v1/knowledge/operations/{operation_id}/dismiss", s.handleDismissKnowledgeOperation)
 		mux.HandleFunc("POST /api/v1/knowledge/documents/{id}/retry", s.handleRetryKnowledgeDocument)
 		mux.HandleFunc("GET /api/v1/knowledge/corpora/{corpus_id}/embedding-policy", s.handleGetKnowledgeEmbeddingPolicy)
 		mux.HandleFunc("POST /api/v1/knowledge/corpora/{corpus_id}/embedding-policy:apply", s.handleApplyKnowledgeEmbeddingPolicy)
