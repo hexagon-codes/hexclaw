@@ -207,6 +207,11 @@ type mcpServerSummary struct {
 	Status      string `json:"status"`
 	Transport   string `json:"transport"`
 	ToolCount   int    `json:"tool_count"`
+	LastError   string `json:"last_error,omitempty"`
+	Retryable   bool   `json:"retryable,omitempty"`
+	RetryState  string `json:"retry_state,omitempty"`
+	RetryCount  int    `json:"retry_count,omitempty"`
+	NextRetryAt string `json:"next_retry_at,omitempty"`
 }
 
 func mcpServerDescription(kind string) string {
@@ -283,6 +288,11 @@ func (s *Server) mcpServerSummaries() []mcpServerSummary {
 			Status:      serverState,
 			Transport:   mcpServerTransport(cfg),
 			ToolCount:   status.ToolCount,
+			LastError:   status.LastError,
+			Retryable:   status.Retryable,
+			RetryState:  status.RetryState,
+			RetryCount:  status.RetryCount,
+			NextRetryAt: status.NextRetryAt,
 		})
 	}
 	return summaries

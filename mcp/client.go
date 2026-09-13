@@ -80,7 +80,8 @@ type Manager struct {
 	configs   []ServerConfig // 保存配置用于重连
 	stopCh    chan struct{}
 	closeOnce sync.Once
-	revisions map[string]uint64 // per-name lifecycle generation; guarded by mu
+	revisions map[string]uint64         // per-name lifecycle generation; guarded by mu
+	failures  map[string]connectFailure // 最近一次连接失败事实；guarded by mu
 
 	hooks hooksRegistry // v0.4.0 H3 LifecycleHook 列表
 }
@@ -91,6 +92,7 @@ func NewManager() *Manager {
 		servers:   make(map[string]*connectedServer),
 		stopCh:    make(chan struct{}),
 		revisions: make(map[string]uint64),
+		failures:  make(map[string]connectFailure),
 	}
 }
 
@@ -138,12 +140,13 @@ func (m *Manager) Connect(ctx context.Context, configs []ServerConfig) (int, err
 			m.mu.Unlock()
 			return totalTools, fmt.Errorf("MCP Manager 已关闭")
 		}
+		delete(m.failures, cfg.Name)
 		revision := m.bumpRevisionLocked(cfg.Name)
 		m.mu.Unlock()
 
 		server, err := m.connectServer(ctx, cfg)
 		if err != nil {
-			logger.Error("MCP Server", "name", cfg.Name, "error", err)
+			m.recordConnectFailureForRevision(cfg.Name, revision, err)
 			continue
 		}
 
@@ -160,6 +163,7 @@ func (m *Manager) Connect(ctx context.Context, configs []ServerConfig) (int, err
 		m.servers[cfg.Name] = server
 		m.mu.Unlock()
 		closeServer(old)
+		m.clearConnectFailure(cfg.Name)
 
 		totalTools += len(server.tools)
 		logger.Info("MCP Server", "name", cfg.Name, "len", len(server.tools))
@@ -174,6 +178,17 @@ func (m *Manager) Connect(ctx context.Context, configs []ServerConfig) (int, err
 		return totalTools, fmt.Errorf("MCP Manager 已关闭")
 	}
 	m.configs = configs
+	configured := make(map[string]struct{}, len(configs))
+	for _, cfg := range configs {
+		if cfg.Enabled {
+			configured[cfg.Name] = struct{}{}
+		}
+	}
+	for name := range m.failures {
+		if _, ok := configured[name]; !ok {
+			delete(m.failures, name)
+		}
+	}
 	m.mu.Unlock()
 
 	// 启动后台重连监控
@@ -197,10 +212,12 @@ func (m *Manager) RegisterServer(ctx context.Context, cfg ServerConfig) error {
 		m.mu.Unlock()
 		return fmt.Errorf("RegisterServer: manager closed")
 	}
+	delete(m.failures, cfg.Name)
 	revision := m.bumpRevisionLocked(cfg.Name)
 	if !cfg.Enabled {
 		// 不抛错，但也不连接 —— 调用方意图明确：先注册到 configs，后续手动 enable
 		m.configs = appendOrReplaceConfig(m.configs, cfg)
+		delete(m.failures, cfg.Name)
 		m.mu.Unlock()
 		return nil
 	}
@@ -223,6 +240,7 @@ func (m *Manager) RegisterServer(ctx context.Context, cfg ServerConfig) error {
 	}
 	m.servers[cfg.Name] = server
 	m.configs = appendOrReplaceConfig(m.configs, cfg)
+	delete(m.failures, cfg.Name)
 	m.mu.Unlock()
 	closeServer(old)
 
@@ -251,6 +269,7 @@ func (m *Manager) UnregisterServer(ctx context.Context, name string) bool {
 	server.connected = false
 	delete(m.servers, name)
 	m.configs = removeConfig(m.configs, name)
+	delete(m.failures, name)
 	m.bumpRevisionLocked(name)
 	m.mu.Unlock()
 	closeServer(server)
@@ -330,9 +349,10 @@ func (m *Manager) tryReconnect() {
 		needReconnect := !exists || !server.connected
 		revision := m.revisions[cfg.Name]
 		closed := m.closedLocked()
+		failure, failed := m.failures[cfg.Name]
 		m.mu.RUnlock()
 
-		if closed || !needReconnect {
+		if closed || !needReconnect || (failed && !mcpRetryDue(failure, time.Now())) {
 			continue
 		}
 
@@ -341,7 +361,7 @@ func (m *Manager) tryReconnect() {
 		cancel()
 
 		if err != nil {
-			logger.Error("MCP Server", "name", cfg.Name, "error", err)
+			m.recordConnectFailureForRevision(cfg.Name, revision, err)
 			continue
 		}
 
@@ -366,6 +386,7 @@ func (m *Manager) tryReconnect() {
 		}
 		m.servers[cfg.Name] = newServer
 		m.bumpRevisionLocked(cfg.Name)
+		delete(m.failures, cfg.Name)
 		m.mu.Unlock()
 		closeServer(old)
 
@@ -648,10 +669,15 @@ func isMCPConnClosed(err error) bool {
 
 // ServerStatus MCP Server 状态信息
 type ServerStatus struct {
-	Name      string `json:"name"`
-	Kind      string `json:"kind,omitempty"`
-	Connected bool   `json:"connected"`
-	ToolCount int    `json:"tool_count"`
+	Name        string `json:"name"`
+	Kind        string `json:"kind,omitempty"`
+	Connected   bool   `json:"connected"`
+	ToolCount   int    `json:"tool_count"`
+	LastError   string `json:"last_error,omitempty"`
+	Retryable   bool   `json:"retryable,omitempty"`
+	RetryState  string `json:"retry_state,omitempty"`
+	RetryCount  int    `json:"retry_count,omitempty"`
+	NextRetryAt string `json:"next_retry_at,omitempty"`
 }
 
 func classifyServerKind(cfg ServerConfig) string {
@@ -696,6 +722,9 @@ func (m *Manager) ServerStatuses() []ServerStatus {
 			st.Connected = server.connected
 			st.ToolCount = len(server.tools)
 		}
+		if failure, ok := m.failures[cfg.Name]; ok {
+			failureStatusFields(&st, failure)
+		}
 		statuses = append(statuses, st)
 	}
 	// 防御：任何已连接但未登记 configs 的 server（理论不应出现）也并入，避免漏报。
@@ -704,12 +733,16 @@ func (m *Manager) ServerStatuses() []ServerStatus {
 			continue
 		}
 		seen[name] = true
-		statuses = append(statuses, ServerStatus{
+		st := ServerStatus{
 			Name:      name,
 			Kind:      "mcp",
 			Connected: server.connected,
 			ToolCount: len(server.tools),
-		})
+		}
+		if failure, ok := m.failures[name]; ok {
+			failureStatusFields(&st, failure)
+		}
+		statuses = append(statuses, st)
 	}
 	return statuses
 }
@@ -801,6 +834,7 @@ func (m *Manager) AddServer(ctx context.Context, cfg ServerConfig) error {
 		m.mu.Unlock()
 		return fmt.Errorf("Manager 已关闭")
 	}
+	delete(m.failures, cfg.Name)
 	revision := m.bumpRevisionLocked(cfg.Name)
 	m.mu.Unlock()
 
@@ -821,6 +855,7 @@ func (m *Manager) AddServer(ctx context.Context, cfg ServerConfig) error {
 	}
 	m.servers[cfg.Name] = server
 	m.configs = appendOrReplaceConfig(m.configs, cfg)
+	delete(m.failures, cfg.Name)
 	m.mu.Unlock()
 	closeServer(old)
 
@@ -851,6 +886,7 @@ func (m *Manager) AddServerBestEffort(ctx context.Context, cfg ServerConfig) (bo
 		m.mu.Unlock()
 		return false, fmt.Errorf("Manager 已关闭")
 	}
+	delete(m.failures, cfg.Name)
 	revision := m.bumpRevisionLocked(cfg.Name)
 	m.mu.Unlock()
 
@@ -867,7 +903,7 @@ func (m *Manager) AddServerBestEffort(ctx context.Context, cfg ServerConfig) (bo
 	m.configs = appendOrReplaceConfig(m.configs, cfg)
 	if connErr != nil {
 		m.mu.Unlock()
-		logger.Warn("MCP Server", "name", cfg.Name, "即时连接失败，转后台重连", connErr)
+		m.recordConnectFailureForRevision(cfg.Name, revision, connErr)
 		return false, nil
 	}
 	old := m.servers[cfg.Name]
@@ -875,6 +911,7 @@ func (m *Manager) AddServerBestEffort(ctx context.Context, cfg ServerConfig) (bo
 		old.connected = false
 	}
 	m.servers[cfg.Name] = server
+	delete(m.failures, cfg.Name)
 	m.mu.Unlock()
 	closeServer(old)
 
@@ -909,6 +946,7 @@ func (m *Manager) RemoveServer(name string) error {
 		server.connected = false
 		delete(m.servers, name)
 	}
+	delete(m.failures, name)
 
 	// 既不在 configs 也不在 servers → 确实不存在。
 	if !inConfigs && !connected {
@@ -939,6 +977,7 @@ func (m *Manager) Close() {
 			m.bumpRevisionLocked(name)
 		}
 		m.servers = make(map[string]*connectedServer)
+		m.failures = make(map[string]connectFailure)
 		m.mu.Unlock()
 
 		for name, server := range servers {

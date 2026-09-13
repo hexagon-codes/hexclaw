@@ -36,11 +36,13 @@ func (m *Manager) RestartServer(ctx context.Context, name string) error {
 	}
 	// Reserving a revision at invocation time gives deterministic "latest
 	// invocation wins" semantics even when an older connector finishes later.
+	delete(m.failures, name)
 	revision := m.bumpRevisionLocked(name)
 	m.mu.Unlock()
 
 	newServer, err := m.connectServer(ctx, *cfg)
 	if err != nil {
+		m.recordConnectFailureForRevision(name, revision, err)
 		return fmt.Errorf("mcp: restart %q: %w", name, err)
 	}
 
@@ -72,6 +74,7 @@ func (m *Manager) RestartServer(ctx context.Context, name string) error {
 		old.connected = false
 	}
 	m.servers[name] = newServer
+	delete(m.failures, name)
 	m.mu.Unlock()
 
 	// Never invoke arbitrary transport cleanup under Manager.mu.
