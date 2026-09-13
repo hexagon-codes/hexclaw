@@ -698,7 +698,8 @@ func (s *Scheduler) buildJobFromPromptWithProgress(
 }
 
 // ReplaceJobForOwner 在锁外构建新任务，在同一 scheduler 锁和数据库事务内完成
-// owner 校验、插入新任务和删除旧任务。构建或事务任一步失败都会回滚旧任务。
+// owner 校验、删除旧任务和插入新任务，先释放旧名称的唯一约束。
+// 构建或事务任一步失败都会回滚旧任务；仅提交成功后更新内存映射。
 // runtime/script 保留统一 update 对预编译脚本任务的既有支持。
 func (s *Scheduler) ReplaceJobForOwner(
 	ctx context.Context,
@@ -752,23 +753,6 @@ func (s *Scheduler) ReplaceJobForOwner(
 		return nil, ErrCronJobNotFound
 	}
 
-	insertResult, err := tx.ExecContext(ctx,
-		`INSERT INTO cron_jobs (id, name, type, schedule, spec_json, source_prompt, user_id, platform, chat_id, status, next_run_at, created_at, meta)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		job.ID, job.Name, job.Type, job.Schedule, specJSON, job.SourcePrompt,
-		job.UserID, job.Platform, job.ChatID, job.Status, job.NextRunAt, job.CreatedAt, metaJSON,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("insert cron replacement: %w", err)
-	}
-	inserted, err := insertResult.RowsAffected()
-	if err != nil {
-		return nil, fmt.Errorf("read inserted cron replacement row count: %w", err)
-	}
-	if inserted != 1 {
-		return nil, fmt.Errorf("insert cron replacement affected %d rows", inserted)
-	}
-
 	deleteResult, err := tx.ExecContext(ctx,
 		`DELETE FROM cron_jobs WHERE id = ? AND user_id = ?`, jobID, ownerID,
 	)
@@ -784,6 +768,22 @@ func (s *Scheduler) ReplaceJobForOwner(
 	}
 	if deleted != 1 {
 		return nil, fmt.Errorf("delete replaced cron job affected %d rows", deleted)
+	}
+	insertResult, err := tx.ExecContext(ctx,
+		`INSERT INTO cron_jobs (id, name, type, schedule, spec_json, source_prompt, user_id, platform, chat_id, status, next_run_at, created_at, meta)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		job.ID, job.Name, job.Type, job.Schedule, specJSON, job.SourcePrompt,
+		job.UserID, job.Platform, job.ChatID, job.Status, job.NextRunAt, job.CreatedAt, metaJSON,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("insert cron replacement: %w", err)
+	}
+	inserted, err := insertResult.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("read inserted cron replacement row count: %w", err)
+	}
+	if inserted != 1 {
+		return nil, fmt.Errorf("insert cron replacement affected %d rows", inserted)
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit cron replacement: %w", err)

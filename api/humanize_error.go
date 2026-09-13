@@ -79,6 +79,7 @@ func humanizeError(err error) string {
 		{"json: cannot unmarshal", "数据格式不对"},
 		{"sql: no rows", "找不到对应记录"},
 		{"unique constraint", "已存在同名记录"},
+		{"UNIQUE constraint", "已存在同名记录"},
 		{"compiler 未注入", "定时任务编译器未就绪"},
 		{"无效的调度表达式", "时间表达式不对，请用「每天 9 点」这样的描述"},
 		{"invalid", "参数不合法"},
