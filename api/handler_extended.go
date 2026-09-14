@@ -179,8 +179,9 @@ func (s *Server) setMemoryPinned(w http.ResponseWriter, r *http.Request, pinned 
 // ─── MCP: POST /api/v1/mcp/tools/call ──
 
 type MCPToolCallRequest struct {
-	Name      string         `json:"name"`
-	Arguments map[string]any `json:"arguments"`
+	ServerName string         `json:"server_name,omitempty"`
+	Name       string         `json:"name"`
+	Arguments  map[string]any `json:"arguments"`
 }
 
 func (s *Server) handleCallMCPTool(w http.ResponseWriter, r *http.Request) {
@@ -197,7 +198,7 @@ func (s *Server) handleCallMCPTool(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "MCP 未启用"})
 		return
 	}
-	result, err := s.mcpMgr.CallTool(r.Context(), req.Name, req.Arguments)
+	result, err := s.mcpMgr.CallServerTool(r.Context(), req.ServerName, req.Name, req.Arguments)
 	if err != nil {
 		// CallTool 已返回完整可读的错误（含工具名 + 失败原因），此处原样透出。
 		// 不再叠加 `工具 "<name>" 执行失败:` 前缀——否则与 CallTool 内部前缀重复，

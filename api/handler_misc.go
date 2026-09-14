@@ -365,6 +365,12 @@ func (s *Server) handleAddMCPServer(w http.ResponseWriter, r *http.Request) {
 			transport = "stdio"
 		}
 	}
+	switch transport {
+	case "stdio", "sse", "streamable", "http":
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Unsupported MCP transport"})
+		return
+	}
 
 	if transport == "stdio" && req.Command == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "stdio 模式需要指定 command"})
@@ -374,16 +380,20 @@ func (s *Server) handleAddMCPServer(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "sse 模式需要指定 endpoint"})
 		return
 	}
+	if (transport == "streamable" || transport == "http") && req.Endpoint == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Streamable HTTP transport requires an endpoint"})
+		return
+	}
 
-	// 安全校验：stdio command 必须是已知安全的可执行文件，禁止 shell 元字符
+	// 校验命令结构，保留自定义可执行文件及参数的支持。
 	if transport == "stdio" {
 		if err := validateMCPCommand(req.Command, req.Args); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
 	}
-	// 安全校验：sse/streamable endpoint 必须是合法 URL
-	if (transport == "sse" || transport == "streamable") && req.Endpoint != "" {
+	// 网络传输共用端点格式校验。
+	if transport == "sse" || transport == "streamable" || transport == "http" {
 		if err := validateMCPEndpoint(req.Endpoint); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
@@ -432,6 +442,22 @@ func (s *Server) handleAddMCPServer(w http.ResponseWriter, r *http.Request) {
 		persistedSecretConfig = &merged
 	}
 
+	// 先保存配置；写盘失败时保留现有运行态，避免显示成功却在重启后丢失。
+	if s.cfgWriter != nil && persistedSecretConfig == nil {
+		if err := s.cfgWriter.UpsertMCPServer(config.MCPServerConfig{
+			Name:      req.Name,
+			Transport: transport,
+			Command:   req.Command,
+			Args:      req.Args,
+			Env:       req.Env,
+			Endpoint:  req.Endpoint,
+			Enabled:   true,
+		}); err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "MCP configuration could not be saved"})
+			return
+		}
+	}
+
 	cfg := hexmcp.ServerConfig{
 		Name:      req.Name,
 		Transport: transport,
@@ -455,20 +481,7 @@ func (s *Server) handleAddMCPServer(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	// 持久化到配置文件：无论是否已连接都持久化——未连上者重启后仍由 reconnectLoop 自动拉起。
-	if s.cfgWriter != nil && persistedSecretConfig == nil {
-		if err := s.cfgWriter.UpsertMCPServer(config.MCPServerConfig{
-			Name:      req.Name,
-			Transport: transport,
-			Command:   req.Command,
-			Args:      req.Args,
-			Env:       req.Env,
-			Endpoint:  req.Endpoint,
-			Enabled:   true,
-		}); err != nil {
-			logger.Error("MCP Server", "name", req.Name, "添加成功但持久化失败", err)
-		}
-	}
+
 	s.rememberMCPServerConfig(config.MCPServerConfig{
 		Name:      req.Name,
 		Transport: transport,
@@ -497,13 +510,31 @@ func (s *Server) handleRemoveMCPServer(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "MCP 未启用"})
 		return
 	}
+	// 先移除持久化配置；失败时保留运行态，允许用户修复写盘条件后重试。
+	if s.cfgWriter != nil {
+		persisted, err := s.cfgWriter.GetMCPServer(name)
+		if err == nil && persisted != nil {
+			err = s.cfgWriter.RemoveMCPServer(name)
+		}
+		if err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "MCP configuration could not be removed"})
+			return
+		}
+	}
 	if err := s.mcpMgr.RemoveServer(name); err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 		return
 	}
-	// 从配置文件中移除
-	if s.cfgWriter != nil {
-		_ = s.cfgWriter.RemoveMCPServer(name)
+	if s.cfg != nil {
+		s.cfgMu.Lock()
+		servers := s.cfg.MCP.Servers[:0]
+		for _, server := range s.cfg.MCP.Servers {
+			if server.Name != name {
+				servers = append(servers, server)
+			}
+		}
+		s.cfg.MCP.Servers = servers
+		s.cfgMu.Unlock()
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"message": fmt.Sprintf("MCP Server %q 已移除", name)})
 }
@@ -846,7 +877,16 @@ func (s *Server) installMCPFromClawHubEntry(w http.ResponseWriter, r *http.Reque
 		Transport: "stdio",
 		Command:   entry.Command(),
 		Args:      entry.Args(),
+		Env:       entry.Env(),
 		Enabled:   true,
+	}
+
+	// 先保存市场配置，写盘失败时不创建仅本次运行可见的连接。
+	if s.cfgWriter != nil {
+		if err := s.cfgWriter.AppendMCPServer(entry.Name(), cfg.Transport, cfg.Command, cfg.Args, cfg.Env, cfg.Endpoint); err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "MCP configuration could not be saved"})
+			return
+		}
 	}
 
 	// best-effort：即时连接给较短窗口，冷装 npx/uvx 首次下载超时则转后台 reconnectLoop(30s)，不硬失败
@@ -862,12 +902,11 @@ func (s *Server) installMCPFromClawHubEntry(w http.ResponseWriter, r *http.Reque
 		})
 		return
 	}
-	// 无论是否已连上都持久化——未连上者重启后仍由 reconnectLoop 自动拉起。
-	if s.cfgWriter != nil {
-		if err := s.cfgWriter.AppendMCPServer(entry.Name(), cfg.Transport, cfg.Command, cfg.Args, cfg.Env, cfg.Endpoint); err != nil {
-			logger.Error("MCP Server", "name", entry.Name(), "添加成功但持久化失败", err)
-		}
-	}
+
+	s.rememberMCPServerConfig(config.MCPServerConfig{
+		Name: cfg.Name, Transport: cfg.Transport, Command: cfg.Command,
+		Args: cfg.Args, Env: cfg.Env, Endpoint: cfg.Endpoint, Enabled: true,
+	})
 	msg := "MCP 条目已从 ClawHub 安装并已连接"
 	if !connected {
 		msg = "MCP 条目已从 ClawHub 安装，正在后台连接（首次需下载组件）"

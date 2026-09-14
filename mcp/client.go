@@ -23,11 +23,13 @@ package mcp
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -50,10 +52,11 @@ type ServerConfig struct {
 
 // ToolInfo 已发现的 MCP 工具信息
 type ToolInfo struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	ServerName  string `json:"server_name"`            // 来源 MCP Server
-	InputSchema any    `json:"input_schema,omitempty"` // 参数 JSON Schema
+	Name         string `json:"name"`
+	OriginalName string `json:"-"` // 上游原名，仅供内部调用钩子识别工具语义
+	Description  string `json:"description"`
+	ServerName   string `json:"server_name"`            // 来源 MCP Server
+	InputSchema  any    `json:"input_schema,omitempty"` // 参数 JSON Schema
 }
 
 // connectedServer 已连接的 MCP Server
@@ -399,8 +402,32 @@ func (m *Manager) tryReconnect() {
 }
 
 // connectServer 连接单个 MCP Server
-func (m *Manager) connectServer(ctx context.Context, cfg ServerConfig) (*connectedServer, error) {
-	server := &connectedServer{name: cfg.Name, connected: true}
+func (m *Manager) connectServer(ctx context.Context, cfg ServerConfig) (server *connectedServer, err error) {
+	server = &connectedServer{name: cfg.Name, connected: true}
+	// 所有传输在连接阶段跟随请求取消，成功后由 Manager 持有连接生命周期。
+	connectionCtx, cancelConnection := context.WithCancel(context.WithoutCancel(ctx))
+	stopCancellation := context.AfterFunc(ctx, cancelConnection)
+	defer func() {
+		if !stopCancellation() && err == nil {
+			closeServer(server)
+			server = nil
+			err = ctx.Err()
+		}
+		if err != nil {
+			cancelConnection()
+			if ctxErr := ctx.Err(); ctxErr != nil && !errors.Is(err, ctxErr) {
+				err = errors.Join(err, ctxErr)
+			}
+			return
+		}
+		cleanup := server.cleanup
+		server.cleanup = func() {
+			defer cancelConnection()
+			if cleanup != nil {
+				cleanup()
+			}
+		}
+	}()
 
 	switch cfg.Transport {
 	case "stdio":
@@ -427,7 +454,7 @@ func (m *Manager) connectServer(ctx context.Context, cfg ServerConfig) (*connect
 			}
 			resolvedArgs[i] = arg
 		}
-		tools, cleanup, err := hexagon.ConnectMCPStdioWithEnv(ctx, cfg.Command, cfg.Env, resolvedArgs...)
+		tools, cleanup, err := hexagon.ConnectMCPStdioWithEnv(connectionCtx, cfg.Command, cfg.Env, resolvedArgs...)
 		if err != nil {
 			return nil, fmt.Errorf("stdio 连接失败: %w", err)
 		}
@@ -438,7 +465,7 @@ func (m *Manager) connectServer(ctx context.Context, cfg ServerConfig) (*connect
 		if cfg.Endpoint == "" {
 			return nil, fmt.Errorf("sse 传输需要指定 endpoint")
 		}
-		tools, closer, err := hexagon.ConnectMCPSSE(ctx, cfg.Endpoint)
+		tools, closer, err := hexagon.ConnectMCPSSE(connectionCtx, cfg.Endpoint)
 		if err != nil {
 			return nil, fmt.Errorf("sse 连接失败: %w", err)
 		}
@@ -449,7 +476,7 @@ func (m *Manager) connectServer(ctx context.Context, cfg ServerConfig) (*connect
 		if cfg.Endpoint == "" {
 			return nil, fmt.Errorf("streamable HTTP 传输需要指定 endpoint")
 		}
-		tools, closer, err := hexagon.ConnectMCPStreamable(ctx, cfg.Endpoint)
+		tools, closer, err := hexagon.ConnectMCPStreamable(connectionCtx, cfg.Endpoint)
 		if err != nil {
 			return nil, fmt.Errorf("streamable HTTP 连接失败: %w", err)
 		}
@@ -500,6 +527,53 @@ func (m *Manager) ToolInfos() []ToolInfo {
 	return infos
 }
 
+// callableTool 将 Agent 调用名绑定到确切服务器和上游工具。
+type callableTool struct {
+	name   string
+	tool   hexagon.Tool
+	server *connectedServer
+}
+
+// callableToolsLocked 在读锁内生成一致的调用视图；展示接口继续使用上游原名。
+func (m *Manager) callableToolsLocked() []callableTool {
+	counts := make(map[string]int)
+	var bindings []callableTool
+	for _, server := range m.servers {
+		if !server.connected {
+			continue
+		}
+		for _, t := range server.tools {
+			counts[t.Name()]++
+			bindings = append(bindings, callableTool{name: t.Name(), tool: t, server: server})
+		}
+	}
+	// 固定分配顺序，避免 map 遍历使调用标识随请求变化。
+	sort.Slice(bindings, func(i, j int) bool {
+		if bindings[i].server.name != bindings[j].server.name {
+			return bindings[i].server.name < bindings[j].server.name
+		}
+		return bindings[i].name < bindings[j].name
+	})
+	for i := range bindings {
+		b := &bindings[i]
+		if counts[b.tool.Name()] < 2 {
+			continue
+		}
+		// 长度前缀避免服务器名与工具名拼接歧义；摘要不受原名长度/字符集限制。
+		identity := fmt.Sprintf("%d:%s%s", len(b.server.name), b.server.name, b.tool.Name())
+		for attempt := 0; ; attempt++ {
+			digest := sha256.Sum256([]byte(fmt.Sprintf("%d:%s", attempt, identity)))
+			name := fmt.Sprintf("mcp_%x", digest[:28])
+			if counts[name] == 0 {
+				b.name = name
+				counts[name] = 1
+				break
+			}
+		}
+	}
+	return bindings
+}
+
 // ListToolDefinitions returns all discovered MCP tools as LLM tool definitions.
 // Used by ToolCollector to inject MCP tools into LLM requests.
 func (m *Manager) ListToolDefinitions() []llm.ToolDefinition {
@@ -507,28 +581,29 @@ func (m *Manager) ListToolDefinitions() []llm.ToolDefinition {
 	defer m.mu.RUnlock()
 
 	var defs []llm.ToolDefinition
-	for _, srv := range m.servers {
-		if !srv.connected {
+	for _, binding := range m.callableToolsLocked() {
+		srv, t := binding.server, binding.tool
+		if path, err := validateLLMToolSchema(t.Schema()); err != nil {
+			logger.Warn(
+				"MCP 工具 Schema 无法安全注入 LLM，已隔离该工具",
+				"server", srv.name,
+				"tool", t.Name(),
+				"path", path,
+				"error", err,
+			)
 			continue
 		}
-		for _, t := range srv.tools {
-			if path, err := validateLLMToolSchema(t.Schema()); err != nil {
-				logger.Warn(
-					"MCP 工具 Schema 无法安全注入 LLM，已隔离该工具",
-					"server", srv.name,
-					"tool", t.Name(),
-					"path", path,
-					"error", err,
-				)
-				continue
-			}
-			// Convert hexagon.Tool (ai-core/tool.Tool) to llm.ToolDefinition
-			// tool.Tool has: Name(), Description(), Schema() *schema.Schema
-			// llm.ToolDefinition has: Type="function", Function{Name, Description, Parameters *Schema}
-			// llm.Schema = schema.Schema, so Schema() output can be used directly
-			def := llm.NewToolDefinition(t.Name(), t.Description(), t.Schema())
-			defs = append(defs, def)
+		// Convert hexagon.Tool (ai-core/tool.Tool) to llm.ToolDefinition
+		// tool.Tool has: Name(), Description(), Schema() *schema.Schema
+		// llm.ToolDefinition has: Type="function", Function{Name, Description, Parameters *Schema}
+		// llm.Schema = schema.Schema, so Schema() output can be used directly
+		description := t.Description()
+		if binding.name != t.Name() {
+			// 模型必须能从定义识别目标服务器，而不必解释内部摘要。
+			description = fmt.Sprintf("MCP server: %s; tool: %s.\n%s", srv.name, t.Name(), description)
 		}
+		def := llm.NewToolDefinition(binding.name, description, t.Schema())
+		defs = append(defs, def)
 	}
 	return defs
 }
@@ -539,17 +614,13 @@ func (m *Manager) ListToolInfos() []ToolInfo {
 	defer m.mu.RUnlock()
 
 	var infos []ToolInfo
-	for _, srv := range m.servers {
-		if !srv.connected {
-			continue
-		}
-		for _, t := range srv.tools {
-			infos = append(infos, ToolInfo{
-				Name:        t.Name(),
-				Description: t.Description(),
-				ServerName:  srv.name,
-			})
-		}
+	for _, binding := range m.callableToolsLocked() {
+		infos = append(infos, ToolInfo{
+			Name:         binding.name,
+			OriginalName: binding.tool.Name(),
+			Description:  binding.tool.Description(),
+			ServerName:   binding.server.name,
+		})
 	}
 	return infos
 }
@@ -579,23 +650,36 @@ func (m *Manager) CallTool(ctx context.Context, toolName string, args map[string
 // and concurrent lifecycle changes could otherwise pair the result with a
 // different server.
 func (m *Manager) CallToolWithOwner(ctx context.Context, toolName string, args map[string]any) (string, string, error) {
-	// Copy the tool reference under lock, then release before executing
+	return m.callTool(ctx, "", toolName, args)
+}
+
+// CallServerTool 按明确服务器归属调用上游原名；空归属沿用无歧义调用方式。
+func (m *Manager) CallServerTool(ctx context.Context, serverName, toolName string, args map[string]any) (string, error) {
+	result, _, err := m.callTool(ctx, serverName, toolName, args)
+	return result, err
+}
+
+func (m *Manager) callTool(ctx context.Context, serverName, toolName string, args map[string]any) (string, string, error) {
 	m.mu.RLock()
 	var found hexagon.Tool
-	var owner string                 // 属主 server 名——进程死亡时用于翻转其连接状态
-	var ownerServer *connectedServer // 选中时的连接世代；重启替换后旧调用不得污染新连接
-	for name, server := range m.servers {
-		for _, t := range server.tools {
-			if t.Name() == toolName {
-				found = t
-				owner = name
-				ownerServer = server
-				break
-			}
+	var owner string
+	var ownerServer *connectedServer
+	for _, binding := range m.callableToolsLocked() {
+		if serverName != "" && binding.server.name != serverName {
+			continue
+		}
+		matches := binding.tool.Name() == toolName
+		if serverName == "" {
+			matches = matches || binding.name == toolName
+		}
+		if !matches {
+			continue
 		}
 		if found != nil {
-			break
+			m.mu.RUnlock()
+			return "", "", fmt.Errorf("MCP tool %q is ambiguous; specify server_name", toolName)
 		}
+		found, owner, ownerServer = binding.tool, binding.server.name, binding.server
 	}
 	m.mu.RUnlock()
 
@@ -902,7 +986,14 @@ func (m *Manager) AddServerBestEffort(ctx context.Context, cfg ServerConfig) (bo
 	// 登记 config（替换同名或追加），使 reconnectLoop 拥有它——连接失败时由后台 30s 周期重试拉起。
 	m.configs = appendOrReplaceConfig(m.configs, cfg)
 	if connErr != nil {
+		// 新配置已生效，旧连接不能继续承接该名称的调用。
+		old := m.servers[cfg.Name]
+		if old != nil {
+			old.connected = false
+			delete(m.servers, cfg.Name)
+		}
 		m.mu.Unlock()
+		closeServer(old)
 		m.recordConnectFailureForRevision(cfg.Name, revision, connErr)
 		return false, nil
 	}

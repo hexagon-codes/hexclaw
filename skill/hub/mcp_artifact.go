@@ -24,6 +24,9 @@ func (v ValidatedMCPServer) Command() string     { return v.meta.Command }
 func (v ValidatedMCPServer) ConfigHint() string  { return v.meta.ConfigHint }
 func (v ValidatedMCPServer) Description() string { return v.meta.Description }
 func (v ValidatedMCPServer) Args() []string      { return append([]string(nil), v.meta.Args...) }
+
+// Env 返回独立副本，供安装入口传递目录声明的环境配置。
+func (v ValidatedMCPServer) Env() map[string]string { return cloneStringMap(v.meta.Env) }
 func (v ValidatedMCPServer) Artifact() MCPArtifact {
 	return *v.meta.Artifact
 }

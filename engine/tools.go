@@ -130,7 +130,15 @@ func (tc *ToolCollector) CollectFiltered(query string, act skill.Activation) []l
 
 	// 2. MCP tools（不参与激活过滤）
 	if tc.mcpMgr != nil {
+		originalNames := make(map[string]string)
+		for _, info := range tc.mcpMgr.ListToolInfos() {
+			originalNames[info.Name] = info.OriginalName
+		}
 		for _, def := range tc.mcpMgr.ListToolDefinitions() {
+			// 内部消歧名称不改变已有 Skill 对同名上游工具的优先级。
+			if seen[originalNames[def.Function.Name]] {
+				continue
+			}
 			if def.Function.Name == "" {
 				continue
 			}

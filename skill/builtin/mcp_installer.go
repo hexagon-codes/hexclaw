@@ -91,6 +91,7 @@ func (m *McpInstallerSkill) Execute(ctx context.Context, args map[string]any) (*
 			Transport: "stdio",
 			Command:   validated.Command(),
 			Args:      validated.Args(),
+			Env:       validated.Env(),
 			Enabled:   true,
 		}
 		if err := m.mcpMgr.AddServer(ctx, cfg); err != nil {
@@ -98,7 +99,7 @@ func (m *McpInstallerSkill) Execute(ctx context.Context, args map[string]any) (*
 		}
 		// Persist to config file so it survives restart
 		if m.cfgWriter != nil {
-			if err := m.cfgWriter.AppendMCPServer(validated.Name(), "stdio", validated.Command(), validated.Args(), nil, ""); err != nil {
+			if err := m.cfgWriter.AppendMCPServer(validated.Name(), "stdio", validated.Command(), validated.Args(), validated.Env(), ""); err != nil {
 				// Non-fatal: server is running but won't persist
 				return &skill.Result{
 					Content: fmt.Sprintf("MCP server '%s' installed (running), but failed to persist config: %v. Will be lost on restart.", validated.Name(), err),
@@ -115,11 +116,18 @@ func (m *McpInstallerSkill) Execute(ctx context.Context, args map[string]any) (*
 		if keyword == "" {
 			return nil, fmt.Errorf("keyword (server name) is required for remove")
 		}
+		// 先完成持久化删除，失败时保留运行态，避免重启后重新出现。
+		if m.cfgWriter != nil {
+			persisted, err := m.cfgWriter.GetMCPServer(keyword)
+			if err == nil && persisted != nil {
+				err = m.cfgWriter.RemoveMCPServer(keyword)
+			}
+			if err != nil {
+				return nil, fmt.Errorf("failed to remove MCP configuration: %w", err)
+			}
+		}
 		if err := m.mcpMgr.RemoveServer(keyword); err != nil {
 			return nil, fmt.Errorf("failed to remove MCP server: %w", err)
-		}
-		if m.cfgWriter != nil {
-			_ = m.cfgWriter.RemoveMCPServer(keyword)
 		}
 		return &skill.Result{Content: fmt.Sprintf("MCP server '%s' removed.", keyword)}, nil
 

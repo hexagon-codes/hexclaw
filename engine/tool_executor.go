@@ -91,8 +91,19 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolName string, args map[st
 		}
 	}
 
+	// MCP 内部调用标识只用于路由，既有钩子继续按上游原名识别功能。
+	if e.mcpMgr != nil {
+		for _, info := range e.mcpMgr.ListToolInfos() {
+			if info.Name == toolName {
+				call.Name = info.OriginalName
+				call.ServerName = info.ServerName
+				break
+			}
+		}
+	}
+
 	// 2. Prevent MCP tools from shadowing builtin skill names
-	if e.skills != nil && e.isBuiltinSkillName(toolName) {
+	if e.skills != nil && e.isBuiltinSkillName(call.Name) {
 		return "", fmt.Errorf("tool %q is a reserved builtin skill name", toolName)
 	}
 
