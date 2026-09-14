@@ -4,6 +4,8 @@ import "strings"
 
 // 孩子档案存 agents.metadata（map[string]string）。K12 键 namespace 化（AP-1：平台不 typed K12 字段）。
 const (
+	MetaKeyScenario                      = "scenario"
+	MetaKeyAvatar                        = "avatar"
 	MetaKeyChildName                     = "k12.child_name"
 	MetaKeyGradeTerm                     = "k12.grade_term"
 	MetaKeyTextbook                      = "k12.textbook_edition"
@@ -13,7 +15,22 @@ const (
 	MetaKeyTextbookScience               = "k12.textbook_edition.science"
 	MetaKeyTextbookInformationTechnology = "k12.textbook_edition.information_technology"
 	MetaKeyTextbookArt                   = "k12.textbook_edition.art"
+	DefaultTutorAvatar                   = "🎓"
 )
+
+// EnsureTutorAvatar 归一化 K12 辅导实例的稳定身份投影。
+// 头像属于 Agent metadata 的共享展示事实；只为缺失值补默认头像，保留用户已选值。
+// 返回克隆，避免修改 Dispatcher 或持久化层正在持有的 map。
+func EnsureTutorAvatar(meta map[string]string) map[string]string {
+	clone := make(map[string]string, len(meta)+1)
+	for key, value := range meta {
+		clone[key] = value
+	}
+	if clone[MetaKeyScenario] == "k12-tutor" && strings.TrimSpace(clone[MetaKeyAvatar]) == "" {
+		clone[MetaKeyAvatar] = DefaultTutorAvatar
+	}
+	return clone
+}
 
 // SubjectTextbooks is the canonical six-subject textbook map.
 type SubjectTextbooks struct {

@@ -61,10 +61,10 @@ func (a *ProfileAdapter) PublishProfile(agentName string, result k12.ProfileBund
 		updated.Model = committed.Model
 		updated.Skills = append([]string(nil), committed.Skills...)
 	}
-	updated.Metadata = k12.ApplyProfileToMeta(cfg.Metadata, k12.ChildProfile{
+	updated.Metadata = k12.EnsureTutorAvatar(k12.ApplyProfileToMeta(cfg.Metadata, k12.ChildProfile{
 		ChildName: result.Profile.ChildName, GradeTerm: result.Profile.GradeTerm,
 		SubjectTextbooks: result.Profile.SubjectTextbooks, TextbookEdition: result.Profile.TextbookEdition,
-	})
+	}))
 	return a.rw.UpdateAgent(updated)
 }
 
@@ -107,7 +107,7 @@ func (a *ProfileAdapter) writeProfile(ctx context.Context, agentName string, app
 	if rw, ok := a.rw.(persistedAgentReadWriter); ok {
 		return rw.UpdateAgentPersisted(agentName,
 			func(current router.AgentConfig) (router.AgentConfig, error) {
-				current.Metadata = apply(current.Metadata)
+				current.Metadata = k12.EnsureTutorAvatar(apply(current.Metadata))
 				return current, nil
 			},
 			func(updated *router.AgentConfig) error {
@@ -126,7 +126,7 @@ func (a *ProfileAdapter) writeProfile(ctx context.Context, agentName string, app
 		return fmt.Errorf("profile: 实例 %q 不存在", agentName)
 	}
 	updated := *cfg
-	updated.Metadata = apply(cfg.Metadata)
+	updated.Metadata = k12.EnsureTutorAvatar(apply(cfg.Metadata))
 	if a.store != nil {
 		if err := a.store.SaveAgent(ctx, &updated); err != nil {
 			return fmt.Errorf("profile: 持久化档案: %w", err)

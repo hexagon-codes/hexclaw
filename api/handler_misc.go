@@ -24,6 +24,7 @@ import (
 	hexmcp "github.com/hexagon-codes/hexclaw/mcp"
 	"github.com/hexagon-codes/hexclaw/memory"
 	"github.com/hexagon-codes/hexclaw/router"
+	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	"github.com/hexagon-codes/hexclaw/skill/hub"
 	"github.com/hexagon-codes/hexclaw/skill/marketplace"
 	"github.com/hexagon-codes/toolkit/util/logger"
@@ -1408,6 +1409,7 @@ func (s *Server) handleRegisterAgent(w http.ResponseWriter, r *http.Request) {
 		Temperature:     req.Temperature,
 		Metadata:        req.Metadata,
 	}
+	cfg.Metadata = k12.EnsureTutorAvatar(cfg.Metadata)
 	if err := normalizeAPIReasoningPolicy(&cfg.ReasoningPolicy); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
@@ -1506,6 +1508,7 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 	if req.Metadata != nil {
 		cfg.Metadata = *req.Metadata
 	}
+	cfg.Metadata = k12.EnsureTutorAvatar(cfg.Metadata)
 	if err := s.validateAgentMetadataCapabilities(cfg.Metadata); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return

@@ -354,6 +354,7 @@ func (s *Store) UpdateProfileBundle(ctx context.Context, in ProfileBundleMutatio
 	if unmarshalErr := json.Unmarshal([]byte(metadata), &meta); unmarshalErr != nil {
 		return k12.ProfileBundleResult{}, false, unmarshalErr
 	}
+	meta = k12.EnsureTutorAvatar(meta)
 	meta = k12.ApplyProfileToMeta(meta, in.Profile)
 	metadataBytes, err := json.Marshal(meta)
 	if err != nil {

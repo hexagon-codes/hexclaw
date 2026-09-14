@@ -1765,6 +1765,18 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 			defaultName = cfg.Router.DefaultAgent
 		}
 	}
+	// 统一修复历史 K12 Agent 缺失的稳定头像投影；显式自定义头像不覆盖。
+	// 归一化结果在加载后立即进入路由，持久化库中的旧行也同步修复，避免
+	// 会话列表与智能体卡片各自猜测场景身份。
+	for i := range agents {
+		before := agents[i].Metadata[k12.MetaKeyAvatar]
+		agents[i].Metadata = k12.EnsureTutorAvatar(agents[i].Metadata)
+		if loadedAgentsFromStore && before != agents[i].Metadata[k12.MetaKeyAvatar] {
+			if err := agentStore.SaveAgent(ctx, &agents[i]); err != nil {
+				logger.Warn("K12 Agent 头像投影修复失败", "agent", agents[i].Name, "error", err)
+			}
+		}
+	}
 
 	agentRouter.LoadAll(agents, defaultName, rules)
 
