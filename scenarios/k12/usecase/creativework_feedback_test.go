@@ -482,26 +482,28 @@ func TestGenerateWorkFeedback_Art_StructuredProjectionKeepsSuggestionsOutOfObser
 }
 
 func TestBuildStructuredWorkFeedback_StripsProjectionMarkdownFromCanonicalFields(t *testing.T) {
-	raw := `### 1. 总体评价
+	raw := `## 可见证据
 文章围绕爸爸帮助孩子学习展开，中心明确。
 
-### 2. 亮点与证据
 - **维度：表达**：原文中的对话让人物更真实。
 - **维度：结构**：开头、中间和结尾衔接清楚。
 
-### 3. 维度与问题
+## 先这样肯定
+原文中的对话让人物更真实。
+
+## 家长可以这样问或讲
+### 维度与问题
 - **维度与问题：语言细节**
   - **原句**：“爸爸每天工作很忙。”
   - **建议**：补充一个爸爸陪伴孩子的具体动作。
 
-### 4. 基础规范清单
+### 基础规范清单
 没有发现需要家长确认的确定性字词问题。
 
-### 5. 下一步小任务
-只修改一个段落，补充一处真实互动。
+先请孩子朗读，再由孩子决定最想修改的一处。
 
-### 6. 给家长的一句话
-先请孩子朗读，再由孩子决定最想修改的一处。`
+## 下一次只试一个点
+只修改一个段落，补充一处真实互动。`
 
 	d := newDataDeps(t)
 	d.Solver = &fakeWorkFeedbackSolver{feedback: raw}

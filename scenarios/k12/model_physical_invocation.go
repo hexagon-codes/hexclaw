@@ -603,7 +603,7 @@ func RecognitionLayoutTargetExactSetDigestV2(
 // 它重新计算计划器所有的摘要，并证明主批次对全部目标构成有序、两两不相交的精确覆盖。
 func ValidateRecognitionLayoutPlanV2(plan RecognitionLayoutPlanV2) error {
 	if plan.Version != RecognitionPlanVersionV2 ||
-		(plan.RecognitionFormat != "" && plan.RecognitionFormat != RecognitionLayoutCompactV1) ||
+		(plan.RecognitionFormat != "" && plan.RecognitionFormat != RecognitionLayoutCompactV1 && plan.RecognitionFormat != RecognitionLayoutCompactV2) ||
 		!validRecognitionLayoutSHA256(plan.PageDigest) ||
 		!validRecognitionLayoutSHA256(plan.ManifestResultDigest) ||
 		len(plan.Targets) < 1 || len(plan.Targets) > recognitionLayoutTargetLimitV2 {

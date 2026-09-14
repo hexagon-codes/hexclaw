@@ -404,7 +404,7 @@ func (d Deps) GenerateWorkFeedbackCommand(
 	}
 	structured, err := buildStructuredWorkFeedback(
 		v.Fields.WorkType, last, feedback, k12.FeedbackSourceAI,
-		strings.TrimSpace(out.SkillStamp),
+		strings.TrimSpace(out.SkillStamp), true,
 	)
 	if err == nil {
 		err = structured.Validate()

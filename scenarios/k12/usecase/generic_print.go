@@ -17,7 +17,7 @@ import (
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 )
 
-const printPDFRenderContractVersion = "k12-pdf-v1"
+const printPDFRenderContractVersion = "k12-pdf-v2"
 
 type PrepareGenericPrintRequest struct {
 	AgentName         string
@@ -375,7 +375,7 @@ func (d Deps) gradingFinalArtifactPrintRequest(
 	req := PreparePrintableArtifactRequest{
 		AgentName:         artifact.AgentName,
 		SourceKind:        k12.PrintSourceGradingFinalArtifact,
-		SourceRef:         "final_artifact:" + artifact.ArtifactID + ":" + artifact.ArtifactDigest,
+		SourceRef:         "final_artifact:" + artifact.ArtifactID + ":" + artifact.ArtifactDigest + ":" + printPDFRenderContractVersion,
 		Title:             title,
 		CanonicalMarkdown: canonical,
 	}

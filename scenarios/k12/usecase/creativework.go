@@ -210,7 +210,7 @@ func (d Deps) attachAIFeedback(ctx context.Context, agentName, recordID, feedbac
 	return d.GetCreativeWork(ctx, agentName, recordID)
 }
 
-func buildStructuredWorkFeedback(workType string, version k12.CreativeWorkVersion, feedback, source, methodRef string) (k12.WorkFeedback, error) {
+func buildStructuredWorkFeedback(workType string, version k12.CreativeWorkVersion, feedback, source, methodRef string, currentContract ...bool) (k12.WorkFeedback, error) {
 	refs := make([]string, 0, 2)
 	if version.OCRJobID != "" && version.OCRVersion > 0 && version.OCRConfirmedDigest != "" {
 		refs = append(refs, fmt.Sprintf("ocr-confirmed:%s:v%d:sha256:%s",
@@ -235,7 +235,7 @@ func buildStructuredWorkFeedback(workType string, version k12.CreativeWorkVersio
 	strictFeedback := (workType == k12.WorkTypeArt || workType == k12.WorkTypeWriting) && source == k12.FeedbackSourceAI
 	// 写作历史记录可能仍是旧的六段标题；新生成结果带四个固定标题时继续严格校验，
 	// 旧格式只走原兼容解析，避免读取既有作品时把可用点评误判为非法。
-	if strictFeedback && workType == k12.WorkTypeWriting &&
+	if strictFeedback && workType == k12.WorkTypeWriting && !(len(currentContract) > 0 && currentContract[0]) &&
 		!strings.Contains(feedback, "## 可见证据") {
 		strictFeedback = false
 	}
@@ -256,7 +256,10 @@ func buildStructuredWorkFeedback(workType string, version k12.CreativeWorkVersio
 				continue
 			}
 			if isHeading {
-				if workType == k12.WorkTypeWriting && artSection == "guidance" && strings.HasPrefix(rawLine, "### ") {
+				headingLevel := len(rawLine) - len(strings.TrimLeft(rawLine, "#"))
+				// 家长讲法内的子标题保留 Markdown 层级，不参与四个主章节的识别。
+				if workType == k12.WorkTypeWriting && artSection == "guidance" && headingLevel >= 3 && headingLevel <= 6 &&
+					len(rawLine) > headingLevel && (rawLine[headingLevel] == ' ' || rawLine[headingLevel] == '\t') {
 					guidanceLines = append(guidanceLines, line)
 					continue
 				}

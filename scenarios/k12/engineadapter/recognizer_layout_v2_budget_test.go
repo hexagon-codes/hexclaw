@@ -153,9 +153,13 @@ func (e *recognitionLayoutV2BatchExecutor) LoadRecognitionLayoutPlanV2Runtime(
 
 func recognitionLayoutV2NonQuestionPayload(
 	call k12.RecognitionPhysicalCall,
+	format ...string,
 ) (string, error) {
 	items := make([]map[string]any, 0, len(call.TargetIDs))
-	for _, targetID := range call.TargetIDs {
+	for index, targetID := range call.TargetIDs {
+		if len(format) > 0 && format[0] == k12.RecognitionLayoutCompactV2 {
+			targetID = fmt.Sprintf("t%d", index+1)
+		}
 		items = append(items, map[string]any{
 			"target_id":   targetID,
 			"kind":        "non_question",
@@ -414,7 +418,7 @@ func TestREGK12RecognitionDurabilityBudget20260808001AuthorizedRuntimeGuardsPrim
 				if call.Unit == k12.RecognitionPhysicalUnitWholePage {
 					return manifestPayload, nil
 				}
-				return recognitionLayoutV2NonQuestionPayload(call)
+				return recognitionLayoutV2NonQuestionPayload(call, k12.RecognitionLayoutCompactV2)
 			}).Recognize(ctx, pagePNG)
 			if !errors.Is(err, test.wantError) {
 				t.Fatalf("recognition error=%v want errors.Is(%v)", err, test.wantError)
@@ -480,7 +484,7 @@ func TestREGK12RecognitionDurabilityBudget20260808001RuntimeConcurrencyAndBatchD
 				providerDeadlines[call.Unit] = deadline
 				providerRemaining[call.Unit] = time.Until(deadline)
 				deadlineMu.Unlock()
-				return recognitionLayoutV2NonQuestionPayload(call)
+				return recognitionLayoutV2NonQuestionPayload(call, k12.RecognitionLayoutCompactV2)
 			}
 
 			parent, cancel := context.WithTimeout(context.Background(), 20*time.Minute)

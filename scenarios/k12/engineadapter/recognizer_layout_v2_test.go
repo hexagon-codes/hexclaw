@@ -211,8 +211,9 @@ func TestREGK12RecognitionBatchRepair20260808001PrimaryBatchesBoundedExactSet(t 
 			}
 			lastOffset := -1
 			items := make([]map[string]any, 0, len(call.TargetIDs))
-			for _, targetID := range call.TargetIDs {
-				offset := strings.Index(prompt, targetID)
+			for index, targetID := range call.TargetIDs {
+				modelRef := fmt.Sprintf("t%d", index+1)
+				offset := strings.Index(prompt, `"target_id":"`+modelRef+`"`)
 				if offset <= lastOffset {
 					return "", fmt.Errorf("batch %q prompt lost ordered target IDs", call.Unit)
 				}
@@ -222,7 +223,7 @@ func TestREGK12RecognitionBatchRepair20260808001PrimaryBatchesBoundedExactSet(t 
 					return "", fmt.Errorf("batch %q includes unauthorized target %q", call.Unit, targetID)
 				}
 				items = append(items, map[string]any{
-					"target_id": targetID,
+					"target_id": modelRef,
 					"kind":      "question",
 					"recognition": map[string]any{
 						"problem_kind":         "standalone",
@@ -446,7 +447,7 @@ func TestREGK12RecognitionManifest20260808001CanonicalPageBytes(t *testing.T) {
 					manifestImage = append([]byte(nil), imageBytes...)
 					return manifestPayload, nil
 				}
-				return recognitionLayoutV2NonQuestionPayload(call)
+				return recognitionLayoutV2NonQuestionPayload(call, k12.RecognitionLayoutCompactV2)
 			}).recognizeLayoutPlanV2(ctx, sourceBytes, headerDigest)
 			if err != nil {
 				t.Fatal(err)

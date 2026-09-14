@@ -21,6 +21,7 @@ package mathtext
 import (
 	"regexp"
 	"strings"
+	"unicode"
 )
 
 // latexSymbols 是确定性符号映射词表（精确全词匹配；\left/\right 剥除、\quad 降为空格）。
@@ -246,6 +247,8 @@ func findMatchingBacktickRun(s string, from, runLength int) int {
 // convertSegment 处理一个非保护段：先剥数学定界符（内部按数学模式转换，未知命令可降级），
 // 再对剩余文本做精确词表转换（定界符外未知命令绝不动）。
 func convertSegment(s string) string {
+	// 仅还原明确的空白编码；代码与 URL 已由调用方隔离，数学命令保持原意。
+	s = strings.NewReplacer(`\u3000`, "　", `\n\(`, "\n\\(", `\n\[`, "\n\\[", `\n=`, "\n=", `\n答：`, "\n答：", `\n答:`, "\n答:").Replace(s)
 	s = stripDelimited(s, `\(`, `\)`)
 	s = stripDelimited(s, `\[`, `\]`)
 	s = stripDollarMath(s)
@@ -591,9 +594,15 @@ func expandStructural(s string, math bool) string {
 			continue
 		}
 		if out, next, ok := expandStructuralAt(s, i, math); ok {
-			if i > 0 && s[i-1] >= '0' && s[i-1] <= '9' &&
-				(strings.HasPrefix(s[i:], `\frac`) || strings.HasPrefix(s[i:], `\dfrac`) || strings.HasPrefix(s[i:], `\tfrac`)) {
-				b.WriteByte(' ')
+			fraction := strings.HasPrefix(s[i:], `\frac`) || strings.HasPrefix(s[i:], `\dfrac`) || strings.HasPrefix(s[i:], `\tfrac`)
+			if fraction {
+				prefix := strings.TrimRightFunc(s[:i], unicode.IsSpace)
+				// 分数作除数时整体加括号，避免线性投影改变除法结合顺序。
+				if strings.HasSuffix(prefix, `\div`) || strings.HasSuffix(prefix, "÷") || strings.HasSuffix(prefix, "/") {
+					out = "(" + out + ")"
+				} else if i > 0 && s[i-1] >= '0' && s[i-1] <= '9' {
+					b.WriteByte(' ')
+				}
 			}
 			b.WriteString(out)
 			i = next

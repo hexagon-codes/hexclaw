@@ -152,7 +152,8 @@ func (r *PandocRenderer) buildArgs(format Format, outPath string, opts RenderOpt
 		reader += "-raw_tex"
 	}
 	// 保留 LLM 输出常用扩展
-	reader += "+pipe_tables+task_lists"
+	// 数学定界符交给 reader 解析；不开放原始 TeX 执行，代码区仍按代码处理。
+	reader += "+pipe_tables+task_lists+tex_math_single_backslash+tex_math_double_backslash"
 	args = append(args, "--from="+reader)
 
 	// writer

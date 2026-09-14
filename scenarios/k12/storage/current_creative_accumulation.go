@@ -940,7 +940,9 @@ func projectWorkFeedbackRecovery(ctx context.Context, q dbQueryer, generation *k
 	if err != nil {
 		return err
 	}
-	generation.RetrySafe = generation.Status == k12.WorkFeedbackFailed && status == k12.ImageTaskInvocationFailed && retrySafe
+	// 成功物理回执只恢复本地投影；发送中和未知调用仍不能重新发送。
+	generation.RetrySafe = generation.Status == k12.WorkFeedbackFailed &&
+		(status == k12.ImageTaskInvocationSucceeded || (status == k12.ImageTaskInvocationFailed && retrySafe))
 	if status == k12.ImageTaskInvocationOutcomeUnknown {
 		generation.RecoveryState = "outcome_unknown"
 	} else if status == k12.ImageTaskInvocationSucceeded &&
