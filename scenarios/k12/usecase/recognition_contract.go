@@ -739,6 +739,9 @@ func RecognizedQuestionsForAssessment(questions []RecognizedQuestion) []Recogniz
 				// RecognizeHomework 的统一 Normalize。run.json 中的父/子 canonical 事实不变。
 				question.CanonicalMarkdown = composed
 				question.Question = composed
+				// 子题解答依赖公共题干；只向其传递真实内容风险，不改变原始父/子事实。
+				parent = NormalizeRecognizedQuestion(parent)
+				question.parentSourceUnclear = parent.ConfirmationRequired
 			}
 		}
 		out = append(out, question)

@@ -163,7 +163,7 @@ func (f *fakeK12ImageTaskFacade) Get(
 			Version: 2,
 		},
 		HomeworkProjection: &k12usecase.ImageTaskHomeworkProjection{
-			Stage: k12.GradingStageAwaitingConfirmation,
+			Stage: k12.GradingStageAwaitingConfirmation, ConfirmationState: k12.GradingConfirmationConfirmed,
 		},
 	}, nil
 }
@@ -359,9 +359,6 @@ func (f *fakeK12ImageTaskFacade) Result(
 	agentName, dispatchID string,
 ) (k12usecase.ImageTaskResult, error) {
 	f.events = append(f.events, "result")
-	if f.confirmCalls == 0 && f.result.Kind != "creative" {
-		return k12usecase.ImageTaskResult{Kind: "pending"}, nil
-	}
 	return f.result, nil
 }
 
@@ -385,7 +382,7 @@ func TestMaybeHandleK12DingtalkPhoto_RoutesOnlyThroughImageTaskFacade(t *testing
 	if err != nil || !handled {
 		t.Fatalf("ImageTask 路径应接管: handled=%v err=%v", handled, err)
 	}
-	if got := strings.Join(facade.events, ","); got != "persist,create,start,get,confirm,result" {
+	if got := strings.Join(facade.events, ","); got != "persist,create,start,get,result" {
 		t.Fatalf("入口必须先固化 dispatch，再启动并只经统一门面推进: %s", got)
 	}
 	in := facade.createInput
@@ -402,7 +399,7 @@ func TestMaybeHandleK12DingtalkPhoto_RoutesOnlyThroughImageTaskFacade(t *testing
 	if !ok || owner != "child-tutor" {
 		t.Fatalf("资产 owner=%q ok=%v", owner, ok)
 	}
-	if facade.startCalls != 1 || facade.confirmCalls != 1 {
+	if facade.startCalls != 1 || facade.confirmCalls != 0 {
 		t.Fatalf("启动/现有 IM 自动确认语义错误: start=%d confirm=%d",
 			facade.startCalls, facade.confirmCalls)
 	}

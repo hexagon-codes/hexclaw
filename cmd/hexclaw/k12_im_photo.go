@@ -572,7 +572,6 @@ func waitK12IMImageTaskResult(
 ) (*adapter.Reply, error) {
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()
-	homeworkConfirmed := false
 	for {
 		view, err := imageTasks.Get(ctx, agentName, dispatchID)
 		if err != nil {
@@ -586,17 +585,7 @@ func waitK12IMImageTaskResult(
 		case k12.ImageTaskStatusAwaitingConfirmation:
 			return k12PhotoRoutingConfirmationReply()
 		}
-		if !homeworkConfirmed && view.HomeworkProjection != nil &&
-			view.HomeworkProjection.Stage == k12.GradingStageAwaitingConfirmation {
-			if _, err := imageTasks.Confirm(ctx, k12usecase.ConfirmImageTaskInput{
-				AgentName: agentName, DispatchID: dispatchID,
-				ExpectedVersion: view.Dispatch.Version, Intent: view.Dispatch.TaskIntent,
-				Subject: view.HomeworkProjection.Subject,
-			}); err != nil {
-				return nil, err
-			}
-			homeworkConfirmed = true
-		}
+		// 题目输入由共享编排器自动冻结；渠道等待器不与其竞争确认命令。
 		result, err := imageTasks.Result(ctx, agentName, dispatchID)
 		if err != nil {
 			return nil, err

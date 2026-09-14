@@ -125,6 +125,9 @@ func BuildRecognitionLayoutPlanV2(input RecognitionLayoutPlanInputV2) (Recogniti
 	}
 	for index := range targets {
 		region := targets[index].Region
+		// 紧框可能切掉首位数字；在冻结裁图前补充页内左侧上下文，最多半个题框高度。
+		// 邻题之间只取空隙的一半，不能把邻题文字并入当前目标。
+		leftPadding := min(region.Height/2, 32, region.X)
 		rightmost := true
 		for otherIndex := range targets {
 			if otherIndex == index {
@@ -133,16 +136,20 @@ func BuildRecognitionLayoutPlanV2(input RecognitionLayoutPlanInputV2) (Recogniti
 			other := targets[otherIndex].Region
 			verticalOverlap := region.Y < other.Y+other.Height &&
 				other.Y < region.Y+region.Height
+			if verticalOverlap && other.X < region.X {
+				leftPadding = min(leftPadding, max(0, region.X-other.X-other.Width)/2)
+			}
 			if verticalOverlap && other.X > region.X {
 				rightmost = false
-				break
 			}
 		}
 		if rightmost {
 			// 页边最右题目的手写答案可能越出模型紧框；只补一段页内右侧证据上下文。
 			region.Width += min(region.Height, pageBounds.Dx()-region.X-region.Width)
-			targets[index].Region = region
 		}
+		region.X -= leftPadding
+		region.Width += leftPadding
+		targets[index].Region = region
 	}
 	// 同一视觉行的题框会有少量纵坐标噪声；先按中心纵坐标归入行带，再在行内从左到右排序。
 	sort.SliceStable(targets, func(left, right int) bool {
@@ -200,7 +207,7 @@ func BuildRecognitionLayoutPlanV2(input RecognitionLayoutPlanInputV2) (Recogniti
 			),
 			SourceNumberPath:   append([]string{}, target.SourceNumberPath...),
 			DisplayLabel:       target.DisplayLabel,
-			SourceSectionPath:  append([]string{}, target.SourceSectionPath...),
+			SourceSectionPath:  append([]string(nil), target.SourceSectionPath...),
 			SourceSectionLabel: target.SourceSectionLabel,
 			Region:             target.Region,
 			CropDigest:         recognitionLayoutSHA256(crop),

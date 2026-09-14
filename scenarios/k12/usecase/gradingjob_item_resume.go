@@ -436,7 +436,7 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 		switch q.AnswerState {
 		case AnswerStateUnclear:
 			item.Status = PhotoAnswerUnclear
-			item.Warning = "检测到学生笔迹，但未能可靠读出；请家长补录后再批改"
+			item.Warning = "Unable to reliably recognize the handwriting. No correctness judgment was produced."
 			return commitGradingAssessmentItem(ctx, deps, job, q, item, "", "", "",
 				k12storage.GradingAssessmentEffects{})
 		}
@@ -1021,6 +1021,12 @@ func replayGradingAssessmentItem(q RecognizedQuestion, receipt k12.GradingAssess
 	}
 	if err := validateGradingAssessmentTerminalItem(item, receipt); err != nil {
 		return PhotoGradeItem{Recognized: q}, err
+	}
+	// 原图尺寸属于同一资产的展示事实，旧批改回执可能尚未携带。
+	// 使用已通过身份与输入摘要校验的当前投影补齐，不修改冻结题面或批改结论。
+	if item.Recognized.PageAssetID == q.PageAssetID && q.SourceWidth > 0 && q.SourceHeight > 0 {
+		item.Recognized.SourceWidth = q.SourceWidth
+		item.Recognized.SourceHeight = q.SourceHeight
 	}
 	// Projection metadata is storage-owned because only the atomic receipt
 	// transaction knows whether the Mistake insert won or hit an existing row.

@@ -225,15 +225,17 @@ func TestREGK12RecognitionBatchRepair20260808001PrimaryBatchesBoundedExactSet(t 
 					"target_id": targetID,
 					"kind":      "question",
 					"recognition": map[string]any{
-						"problem_kind":       "standalone",
-						"parent_problem_id":  "",
-						"subproblem_no":      "",
-						"source_number_path": target.SourceNumberPath,
-						"display_label":      target.DisplayLabel,
-						"question":           "题目-" + targetID,
-						"subject":            "数学",
-						"answer_state":       "blank",
-						"student_answer":     "",
+						"problem_kind":         "standalone",
+						"parent_problem_id":    "",
+						"subproblem_no":        "",
+						"source_number_path":   target.SourceNumberPath,
+						"display_label":        target.DisplayLabel,
+						"source_section_path":  append([]string{}, target.SourceSectionPath...),
+						"source_section_label": target.SourceSectionLabel,
+						"question":             "题目-" + targetID,
+						"subject":              "数学",
+						"answer_state":         "blank",
+						"student_answer":       "",
 					},
 				})
 			}
@@ -407,10 +409,12 @@ func TestREGK12RecognitionManifest20260808001CanonicalPageBytes(t *testing.T) {
 
 	manifestPayloadBytes, err := json.Marshal(map[string]any{
 		"targets": []map[string]any{{
-			"manifest_ref":       "manifest_0001",
-			"manifest_order":     1,
-			"source_number_path": []string{},
-			"display_label":      "",
+			"manifest_ref":         "manifest_0001",
+			"manifest_order":       1,
+			"source_number_path":   []string{},
+			"display_label":        "",
+			"source_section_path":  []string{},
+			"source_section_label": "",
 			"region": map[string]int{
 				"x": 1, "y": 1, "width": 32, "height": 24,
 			},
@@ -518,13 +522,15 @@ func recognitionLayoutV2ManifestPayload(t *testing.T, count int) string {
 	for index := 0; index < count; index++ {
 		row, column := index/3, index%3
 		targets = append(targets, map[string]any{
-			"manifest_ref":       fmt.Sprintf("manifest_%04d", index+1),
-			"manifest_order":     index + 1,
-			"source_number_path": []string{fmt.Sprintf("%d", index+1)},
-			"display_label":      fmt.Sprintf("%d.", index+1),
+			"manifest_ref":         fmt.Sprintf("manifest_%04d", index+1),
+			"manifest_order":       index + 1,
+			"source_number_path":   []string{fmt.Sprintf("%d", index+1)},
+			"display_label":        fmt.Sprintf("%d.", index+1),
+			"source_section_path":  []string{},
+			"source_section_label": "",
 			"region": map[string]int{
 				"x": 40 + column*300, "y": 40 + row*500,
-				"width": 260, "height": 420,
+				"width": 260, "height": 180,
 			},
 		})
 	}

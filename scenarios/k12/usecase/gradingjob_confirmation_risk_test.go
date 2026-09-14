@@ -145,7 +145,7 @@ func TestImageTaskPhotoGrading_ClearFormattedOCRAutoFreezesAndCompletes(t *testi
 	}
 }
 
-func TestImageTaskPhotoGrading_MissingConfidenceRequiresConfirmation(t *testing.T) {
+func TestImageTaskPhotoGrading_MissingConfidenceFinalizesWithoutJudgment(t *testing.T) {
 	ctx := context.Background()
 	rec := &countingRecognizer{questions: []RecognizedQuestion{{
 		Question: "7+8=", Subject: "数学",
@@ -154,8 +154,10 @@ func TestImageTaskPhotoGrading_MissingConfidenceRequiresConfirmation(t *testing.
 	d := recoveryDeps(t, rec, nil, nil)
 	seedGradingImageTaskOwnerScopeForTest(t, d, "missing-confidence")
 	o := newRecoverableOrchestrator(t, d, t.TempDir())
+	photo := orchestratorPhotoRequest()
+	photo.TaskIntent = PhotoTaskCompletedHomework
 	v, _, err := o.StartPhotoGradingJob(ctx, StartPhotoGradingInput{
-		Photo: orchestratorPhotoRequest(), SourceKind: "image_task", SourceKey: "missing-confidence",
+		Photo: photo, SourceKind: "image_task", SourceKey: "missing-confidence",
 		BudgetSnapshot:            frozenWiringBudget(),
 		ParentAutomaticAttemptID:  "missing-confidence:1",
 		ParentAutomaticDeadlineAt: d.now() + 300,
@@ -168,11 +170,11 @@ func TestImageTaskPhotoGrading_MissingConfidenceRequiresConfirmation(t *testing.
 	if err != nil {
 		t.Fatalf("RunGradingJob: %v", err)
 	}
-	if v.Record.Status != k12.GradingStageAwaitingConfirmation ||
-		v.Fields.ConfirmationState != k12.GradingConfirmationPending {
-		t.Fatalf("missing confidence must stop for confirmation, got stage=%s confirmation=%s",
+	if v.Fields.ConfirmationState != k12.GradingConfirmationConfirmed {
+		t.Fatalf("uncertain content must freeze without guardian confirmation, got stage=%s confirmation=%s",
 			v.Record.Status, v.Fields.ConfirmationState)
 	}
+	v = waitForStage(t, d, "mingming", jobID, k12.GradingStageCompleted)
 	questions, ok := o.RecognizedQuestions(ctx, jobID)
 	if !ok || len(questions) != 1 || !questions[0].ConfirmationRequired {
 		t.Fatalf("missing confidence risk was not projected: %#v", questions)
@@ -196,15 +198,15 @@ func TestImageTaskPhotoGrading_MissingConfidenceRequiresConfirmation(t *testing.
 	if err != nil {
 		t.Fatalf("list pending immutable input heads: %v", err)
 	}
-	if len(currentInputs) != 0 {
-		t.Fatalf("unconfirmed questions acquired immutable input heads: %+v", currentInputs)
+	if len(currentInputs) != 1 {
+		t.Fatalf("finalized observation must retain its immutable input: %+v", currentInputs)
 	}
 	if current, loadErr := d.loadCurrentConfirmedQuestions(
 		ctx,
 		"mingming",
 		job.Fields.SubmissionID,
-	); !errors.Is(loadErr, ErrInvalidInput) || current != nil {
-		t.Fatalf("load-current overlaid unconfirmed facts as confirmed: questions=%+v err=%v",
+	); loadErr != nil || len(current) != 1 || !current[0].ConfirmationRequired {
+		t.Fatalf("finalized observation lost its uncertainty: questions=%+v err=%v",
 			current, loadErr)
 	}
 	projection, err := o.ImageTaskHomeworkProjection(ctx, "mingming", jobID)
@@ -212,9 +214,15 @@ func TestImageTaskPhotoGrading_MissingConfidenceRequiresConfirmation(t *testing.
 		t.Fatalf("read pending progressive projection: %v", err)
 	}
 	if len(projection.Questions) != 1 ||
-		projection.Questions[0].ConfirmedVersion != 0 ||
-		projection.Questions[0].InputDigest != "" {
-		t.Fatalf("progressive projection fabricated confirmation: %+v", projection.Questions)
+		projection.Questions[0].ConfirmedVersion != 1 ||
+		projection.Questions[0].InputDigest == "" {
+		t.Fatalf("progressive projection lost frozen observation identity: %+v", projection.Questions)
+	}
+	receipts, err := d.Records.ListGradingAssessmentItems(ctx, "mingming", jobID)
+	if err != nil || len(receipts) != 1 || receipts[0].Status != k12.GradingAssessmentAnswerUnclear ||
+		receipts[0].SolveInvocationID != "" || receipts[0].GradeInvocationID != "" ||
+		receipts[0].ParentGuideInvocationID != "" || receipts[0].ProjectionCreated {
+		t.Fatalf("uncertain content produced a model judgment or learning effect: %+v err=%v", receipts, err)
 	}
 }
 

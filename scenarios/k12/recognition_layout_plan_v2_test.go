@@ -321,7 +321,7 @@ func TestREGK12RecognitionManifest20260808001TargetIdentityUsesOnlyLocalSpatialF
 	changedOrdinal := build(t, []RecognitionLayoutManifestTargetV2{spatiallySecond, prefix})
 	var sameBBoxSecondOrdinal *RecognitionLayoutTargetV2
 	for index := range changedOrdinal.Targets {
-		if changedOrdinal.Targets[index].Region == baseTarget.Region {
+		if changedOrdinal.Targets[index].Region == base.Targets[0].Region {
 			sameBBoxSecondOrdinal = &changedOrdinal.Targets[index]
 			break
 		}

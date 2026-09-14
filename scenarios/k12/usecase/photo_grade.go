@@ -78,6 +78,8 @@ type PhotoGradeRequest struct {
 	// TaskIntent is frozen by ImageTaskDispatch. Empty preserves the legacy
 	// direct-photo path which infers intent from recognition evidence.
 	TaskIntent PhotoTaskIntent
+	// 自动任务可将无法可靠识别的内容冻结为无判分终态；不改写原始观察。
+	SourceUncertaintyFinalized bool `json:"source_uncertainty_finalized,omitempty"`
 	// PracticeReferences 是服务端冻结的练习引用，不改写识别原始事实。
 	PracticeReferences []PracticeGradingReference `json:"practice_references,omitempty"`
 	PracticePaperSize  int                        `json:"practice_paper_size,omitempty"`
@@ -358,7 +360,7 @@ func (d Deps) assessPhotoItem(
 		switch q.AnswerState {
 		case AnswerStateUnclear:
 			item.Status = PhotoAnswerUnclear
-			item.Warning = "检测到学生笔迹，但未能可靠读出；请家长补录后再批改"
+			item.Warning = "Unable to reliably recognize the handwriting. No correctness judgment was produced."
 			return item, nil
 		}
 		graded, err := d.GradeHomeworkProblem(ctx, gradeReq)
@@ -391,12 +393,16 @@ func (d Deps) assessPhotoItem(
 // photoItemWithPracticeReference 在回执固化前绑定练习身份，保留识别事实。
 func photoItemWithPracticeReference(req PhotoGradeRequest, q RecognizedQuestion) PhotoGradeItem {
 	item := PhotoGradeItem{Recognized: q}
+	if req.SourceUncertaintyFinalized && recognizedQuestionRequiresGuardianConfirmation(q, req.TaskIntent) {
+		item.Status = PhotoAnswerUnclear
+		item.Warning = "Unable to reliably recognize this content. No answer or correctness judgment was produced."
+	}
 	if req.practiceReference != nil {
 		item.PracticeItemID = req.practiceReference.ItemID
 		item.PracticeProblemID = req.practiceReference.PracticeProblemID
 	} else if len(req.PracticeReferences) > 0 {
 		item.Status = PhotoAnswerUnclear
-		item.Warning = "The answer cannot be uniquely matched to this practice paper."
+		item.Warning = "Unable to uniquely match this content to the practice paper. No correctness judgment was produced."
 	}
 	return item
 }
@@ -558,7 +564,7 @@ func trustedPhotoMarks(items []PhotoGradeItem) []PhotoAnnotation {
 func photoAnnotations(items []PhotoGradeItem) []PhotoAnnotation {
 	marks := make([]PhotoAnnotation, 0, len(items))
 	for i, item := range items {
-		if item.Status != PhotoCorrect && item.Status != PhotoCorrectWithProcessIssue && item.Status != PhotoWrong {
+		if item.Status != PhotoCorrect && item.Status != PhotoCorrectWithProcessIssue && item.Status != PhotoWrong && item.Status != PhotoAnswerUnclear {
 			continue
 		}
 		mark := PhotoAnnotation{
@@ -568,6 +574,16 @@ func photoAnnotations(items []PhotoGradeItem) []PhotoAnnotation {
 		}
 		if anchor := item.Recognized.BBox; anchor != nil {
 			mark.BBox = *anchor
+		} else if item.Status == PhotoAnswerUnclear && item.Recognized.SourceRegion != nil &&
+			item.Recognized.SourceWidth > 0 && item.Recognized.SourceHeight > 0 {
+			// 无判分问号可定位到已知题目区域；绝不把该区域当作正确/错误答案框。
+			region := item.Recognized.SourceRegion
+			mark.BBox = BBox{
+				X: float64(region.X) / float64(item.Recognized.SourceWidth),
+				Y: float64(region.Y) / float64(item.Recognized.SourceHeight),
+				W: float64(region.Width) / float64(item.Recognized.SourceWidth),
+				H: float64(region.Height) / float64(item.Recognized.SourceHeight),
+			}
 		}
 		marks = append(marks, mark)
 	}
@@ -697,6 +713,8 @@ func photoGradeMarkdown(result PhotoGradeResult) string {
 				}
 			case PhotoOutOfScope:
 				fmt.Fprintf(&b, "> ⛔ 超出当前年级范围：%s", item.Solve.OutOfScopeKP)
+			case PhotoAnswerUnclear:
+				b.WriteString("> ? 无法识别，未生成答案或判断对错。")
 			default:
 				fmt.Fprintf(&b, "> ⚠️ 本题暂未完成：%s", photoClip(item.Warning, 240))
 			}
@@ -719,11 +737,7 @@ func photoGradeMarkdown(result PhotoGradeResult) string {
 		case PhotoBlankSolved:
 			solved++
 		case PhotoAnswerUnclear:
-			if item.Recognized.AnswerState == AnswerStateUnclear {
-				unclear++
-			} else {
-				pending++
-			}
+			unclear++
 		default:
 			pending++
 		}
@@ -741,7 +755,7 @@ func photoGradeMarkdown(result PhotoGradeResult) string {
 		fmt.Fprintf(&b, "，已解答 **%d** 题", solved)
 	}
 	if unclear > 0 {
-		fmt.Fprintf(&b, "，作答待补录 **%d** 题", unclear)
+		fmt.Fprintf(&b, "，无法识别 **%d** 题", unclear)
 	}
 	if pending > 0 {
 		fmt.Fprintf(&b, "，待核对 **%d** 题", pending)
@@ -753,7 +767,11 @@ func photoGradeMarkdown(result PhotoGradeResult) string {
 	determined := correct + processIssue + wrong
 	annotated := 0
 	if result.AnnotatedImage != nil && len(result.AnnotatedImage.Data) > 0 {
-		annotated = len(trustedPhotoMarks(result.Items))
+		for _, mark := range trustedPhotoMarks(result.Items) {
+			if mark.Status != PhotoAnswerUnclear {
+				annotated++
+			}
+		}
 	}
 	if result.AnnotatedImage != nil && len(result.AnnotatedImage.Data) > 0 && annotated < determined {
 		fmt.Fprintf(&b, "> ℹ️ 本次 %d 题已判定，其中 %d 题在原作答位置标注；其余 %d 题仅作文字汇总，未在图上猜测位置。\n\n",
@@ -853,11 +871,6 @@ func photoGradeMarkdown(result PhotoGradeResult) string {
 		fmt.Fprintf(&b, "### ⚠️ 待核对（%d）\n\n", pending)
 		for _, item := range result.Items {
 			switch item.Status {
-			case PhotoAnswerUnclear:
-				if item.Recognized.AnswerState != AnswerStateUnclear {
-					fmt.Fprintf(&b, "- %s %s\n",
-						photoQuestionReference(item.Recognized), photoInline(item.Warning, 240))
-				}
 			case PhotoOutOfScope:
 				fmt.Fprintf(&b, "- %s 超出当前年级范围：%s\n",
 					photoQuestionReference(item.Recognized), photoInline(item.Grade.OutOfScopeKP, 120))
@@ -869,6 +882,15 @@ func photoGradeMarkdown(result PhotoGradeResult) string {
 					photoQuestionReference(item.Recognized), photoInline(item.Warning, 240))
 			}
 		}
+	}
+	if unclear > 0 {
+		fmt.Fprintf(&b, "### ? 无法识别（%d）\n\n", unclear)
+		for _, item := range result.Items {
+			if item.Status == PhotoAnswerUnclear {
+				fmt.Fprintf(&b, "- %s：无法可靠识别，未判断对错。\n", photoQuestionReference(item.Recognized))
+			}
+		}
+		b.WriteString("\n")
 	}
 	return strings.TrimSpace(b.String())
 }

@@ -257,6 +257,7 @@ Each items entry must contain exactly target_id, kind, and recognition:
 - For every standalone recognition, parent_problem_id and subproblem_no must both be empty strings. Printed numbering belongs only in source_number_path and display_label; never copy it into subproblem_no.
 - When kind=non_question, recognition must be null.
 A question recognition uses these structured-recognition fields: problem_id, problem_kind, parent_problem_id, subproblem_no, source_number_path, display_label, source_section_path, source_section_label, question, canonical_markdown, subject, knowledge_points, answer_state, student_answer, answer_canonical_markdown, recognition_confidence, ocr_signals, evidence_transcriptions, answer_evidence_transcriptions. Do not output any field outside this list.
+student_answer must transcribe ALL visible handwritten working lines in their original order, including incorrect steps and the final answer, separated by newlines. Never reduce multi-line working to its final value. answer_evidence_transcriptions contains those same visible lines, not alternative answers. Both canonical Markdown fields must enclose every TeX expression in \\( ... \\) or \\[ ... \\]; never return bare TeX commands.
 Printed numbers in the question, choices, or candidate list are never student answers merely because they are visible. For fill-in prompts such as 划去数（ ）, present is allowed only when separate handwriting is visibly written inside or beside the blank, or in an independent working area. With no separate handwriting, return blank with empty student_answer and answer_canonical_markdown; never solve the problem or copy a printed candidate. answer_evidence_transcriptions may contain only independently visible student handwriting.
 answer_state must be blank, present, or unclear. present requires a legible student_answer; blank and unclear require an empty student_answer. subject must be 数学, 语文, 英语, 物理, 化学, or empty.
 recognition_confidence measures only the printed question transcription, not a solution or student answer. Empty answer areas and erased answers must not lower confidence in a clear printed question. Recheck uncertain source digits, operators and decimal points against the image before returning; never guess an unreadable source. Use unclear only for independently visible unreadable handwriting, not blank space or printed answer lines.
@@ -2198,6 +2199,10 @@ func parseWholePageSelfInventory(raw string) ([]usecase.RecognizedQuestion, erro
 			"%w: recognizer: whole-page self-inventory questions and printed_inventory must both be JSON arrays",
 			k12.ErrRecognitionProtocolInvalid,
 		)
+	}
+	// 两份清单同时为空是合法的零题识别结果，不应触发分段重识别。
+	if len(questionEntries) == 0 && len(inventoryEntries) == 0 {
+		return []usecase.RecognizedQuestion{}, nil
 	}
 	if len(questionEntries) == 0 || len(inventoryEntries) == 0 {
 		return nil, fmt.Errorf(

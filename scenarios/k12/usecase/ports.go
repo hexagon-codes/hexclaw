@@ -220,6 +220,8 @@ type RecognizedQuestion struct {
 	AnswerEvidenceTranscriptions []string        `json:"answer_evidence_transcriptions,omitempty"`
 	ConfirmationRequired         bool            `json:"confirmation_required,omitempty"`
 	ConfirmationReasons          []OCRRiskReason `json:"confirmation_reasons,omitempty"`
+	// 仅评估副本使用的父题依赖风险；从冻结父题推导，不写回学生或题干事实。
+	parentSourceUnclear bool
 
 	Question        string
 	KnowledgePoints []string
@@ -298,6 +300,23 @@ func normalizeRecognizedQuestionFacts(q RecognizedQuestion) RecognizedQuestion {
 	}
 	if q.AnswerCanonicalMarkdown == "" && legacyAnswer != "" {
 		q.AnswerCanonicalMarkdown = strings.TrimSpace(legacyAnswer)
+	}
+	// 尚未冻结的识题结果可能只把末行答案写进答案字段，而把完整竖排过程放进证据。
+	// 只接纳逐行前导等号、前序含运算且末行与原答案完全一致的连续过程，不代算对错。
+	if q.ConfirmedVersion == 0 && q.AnswerState == AnswerStatePresent && len(q.AnswerEvidenceTranscriptions) > 1 {
+		steps := q.AnswerEvidenceTranscriptions
+		answer := strings.TrimSpace(CanonicalPlainTextFallback(q.AnswerRawTranscription))
+		last := strings.TrimSpace(strings.TrimLeft(CanonicalPlainTextFallback(steps[len(steps)-1]), "=＝ "))
+		continuous := answer != "" && answer == last && !strings.ContainsAny(answer, "\n=＝")
+		for _, step := range steps[:len(steps)-1] {
+			text := strings.TrimSpace(CanonicalPlainTextFallback(step))
+			continuous = continuous && strings.HasPrefix(text, "=") &&
+				strings.ContainsAny(strings.TrimPrefix(text, "="), "+−-×÷*/") && !strings.ContainsAny(text, "\r\n")
+		}
+		if continuous {
+			q.AnswerRawTranscription = strings.Join(steps, "\n")
+			q.AnswerCanonicalMarkdown = q.AnswerRawTranscription
+		}
 	}
 	if q.CanonicalVersion <= 0 && (q.CanonicalMarkdown != "" || q.AnswerCanonicalMarkdown != "") {
 		q.CanonicalVersion = 1

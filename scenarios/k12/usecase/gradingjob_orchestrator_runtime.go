@@ -1074,8 +1074,8 @@ func (o *GradingOrchestrator) RecoverGradingJobs(ctx context.Context, agents []s
 			recovered++
 			switch v.Record.Status {
 			case k12.GradingStageAwaitingConfirmation:
-				// 真实风险继续等待家长；ImageTask 清晰事实还会补跑自动冻结。锚点未回位
-				// 时同一次续跑也会恢复独立锚点分支。
+				// 图片任务补跑自动冻结，内容风险随后形成无判分终态；锚点未回位时
+				// 同一次续跑也恢复独立锚点分支。旧直接入口保留显式确认。
 				if v.Fields.AnchorState == k12.GradingAnchorPending ||
 					(automaticPhotoConfirmationSource(v.Fields.SourceKind) &&
 						v.Fields.ConfirmationState == k12.GradingConfirmationPending) {
@@ -1616,20 +1616,21 @@ func joinOCRRiskReasons(reasons []OCRRiskReason) string {
 
 // gradingRunFile run.json 结构（原图独立存 image.bin，避免每次改写都重写大字节）。
 type gradingRunFile struct {
-	AgentName          string                     `json:"agent_name"`
-	TextOnly           bool                       `json:"text_only,omitempty"`
-	Subject            string                     `json:"subject,omitempty"`
-	Grade              string                     `json:"grade,omitempty"`
-	SourceSession      string                     `json:"source_session,omitempty"`
-	SourcePageAssetID  string                     `json:"source_page_asset_id,omitempty"`
-	TaskIntent         PhotoTaskIntent            `json:"task_intent,omitempty"`
-	PracticeReferences []PracticeGradingReference `json:"practice_references,omitempty"`
-	PracticePaperSize  int                        `json:"practice_paper_size,omitempty"`
-	Questions          []RecognizedQuestion       `json:"questions,omitempty"`
-	Anchored           []RecognizedQuestion       `json:"anchored,omitempty"`
-	AnchorFailed       bool                       `json:"anchor_failed,omitempty"`
-	RenderFailure      string                     `json:"render_failure,omitempty"`
-	Result             *PhotoGradeResult          `json:"result,omitempty"`
+	AgentName                  string                     `json:"agent_name"`
+	TextOnly                   bool                       `json:"text_only,omitempty"`
+	Subject                    string                     `json:"subject,omitempty"`
+	Grade                      string                     `json:"grade,omitempty"`
+	SourceSession              string                     `json:"source_session,omitempty"`
+	SourcePageAssetID          string                     `json:"source_page_asset_id,omitempty"`
+	TaskIntent                 PhotoTaskIntent            `json:"task_intent,omitempty"`
+	SourceUncertaintyFinalized bool                       `json:"source_uncertainty_finalized,omitempty"`
+	PracticeReferences         []PracticeGradingReference `json:"practice_references,omitempty"`
+	PracticePaperSize          int                        `json:"practice_paper_size,omitempty"`
+	Questions                  []RecognizedQuestion       `json:"questions,omitempty"`
+	Anchored                   []RecognizedQuestion       `json:"anchored,omitempty"`
+	AnchorFailed               bool                       `json:"anchor_failed,omitempty"`
+	RenderFailure              string                     `json:"render_failure,omitempty"`
+	Result                     *PhotoGradeResult          `json:"result,omitempty"`
 }
 
 type gradingRecognitionAuditFile struct {
@@ -1689,8 +1690,9 @@ func (o *GradingOrchestrator) persistRun(jobID string, run *gradingRun) error {
 	meta := gradingRunFile{
 		AgentName: run.agentName, TextOnly: run.textOnly, Subject: run.req.Subject, Grade: run.req.Grade,
 		SourceSession: run.req.SourceSession, SourcePageAssetID: run.req.SourcePageAssetID,
-		TaskIntent:         run.req.TaskIntent,
-		PracticeReferences: run.req.PracticeReferences, PracticePaperSize: run.req.PracticePaperSize,
+		TaskIntent:                 run.req.TaskIntent,
+		SourceUncertaintyFinalized: run.req.SourceUncertaintyFinalized,
+		PracticeReferences:         run.req.PracticeReferences, PracticePaperSize: run.req.PracticePaperSize,
 		Questions: run.questions, Anchored: run.anchored, AnchorFailed: run.anchorFailed,
 		RenderFailure: run.renderFailure, Result: run.result,
 	}
@@ -1778,7 +1780,8 @@ func (o *GradingOrchestrator) ensureRun(ctx context.Context, jobID string) (*gra
 			AgentName: meta.AgentName, Subject: meta.Subject, Grade: meta.Grade,
 			SourceSession: meta.SourceSession, SourcePageAssetID: meta.SourcePageAssetID,
 			TaskIntent: taskIntent, Image: image,
-			PracticeReferences: meta.PracticeReferences, PracticePaperSize: meta.PracticePaperSize,
+			SourceUncertaintyFinalized: meta.SourceUncertaintyFinalized,
+			PracticeReferences:         meta.PracticeReferences, PracticePaperSize: meta.PracticePaperSize,
 		},
 		questions: questions, anchored: meta.Anchored, anchorFailed: meta.AnchorFailed,
 		renderFailure: meta.RenderFailure, result: meta.Result,

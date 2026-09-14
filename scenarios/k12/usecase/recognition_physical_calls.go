@@ -1592,12 +1592,12 @@ func validModelInvocationDigest(value string) bool {
 	return err == nil
 }
 
-func (o *GradingOrchestrator) recognitionPhysicalCallStarted(
+func (o *GradingOrchestrator) recognitionPhysicalCallState(
 	ctx context.Context,
 	parent k12.ModelInvocation,
-) (bool, error) {
+) (started, unresolved bool, err error) {
 	if parent.RequestPolicySnapshot.IsZero() {
-		return false, nil
+		return false, false, nil
 	}
 	children, err := o.deps.Records.ListModelPhysicalInvocations(
 		ctx,
@@ -1605,7 +1605,7 @@ func (o *GradingOrchestrator) recognitionPhysicalCallStarted(
 		parent.JobID,
 	)
 	if err != nil {
-		return false, fmt.Errorf(
+		return false, false, fmt.Errorf(
 			"%w: list recognizing physical receipts: %v",
 			ErrModelInvocationRequiresReconciliation,
 			err,
@@ -1613,10 +1613,15 @@ func (o *GradingOrchestrator) recognitionPhysicalCallStarted(
 	}
 	for _, child := range children {
 		if child.ParentInvocationID == parent.InvocationID {
-			return true, nil
+			if child.Status != k12.ModelInvocationPrepared && child.FailureKind != "provider_request_not_sent" {
+				started = true
+			}
+			if child.Status == k12.ModelInvocationSent || child.Status == k12.ModelInvocationOutcomeUnknown {
+				unresolved = true
+			}
 		}
 	}
-	return false, nil
+	return started, unresolved, nil
 }
 
 // rebuildInitialRecognitionPhysicalCall 是初始 whole_page 子项唯一基于持久化事实的

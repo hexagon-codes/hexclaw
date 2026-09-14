@@ -785,7 +785,7 @@ func gradingAssessmentParentStatus(status k12.GradingAssessmentStatus) string {
 	case k12.GradingAssessmentUnanswered:
 		return "⏸ 未作答"
 	case k12.GradingAssessmentAnswerUnclear:
-		return "⚠ 作答待补录"
+		return "? 无法识别 · 未判断对错"
 	case k12.GradingAssessmentBlankSolved:
 		return "📘 已生成家长辅导指南"
 	case k12.GradingAssessmentOutOfScope:

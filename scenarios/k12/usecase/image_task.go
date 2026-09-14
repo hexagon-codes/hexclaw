@@ -2765,7 +2765,8 @@ func (c *ImageTaskCoordinator) Confirm(
 			}
 			return view, err
 		}
-		return view, nil
+		// 确认成功后重新投影同一任务，不能将确认前的 pending 快照返回给界面。
+		return c.projectTarget(ctx, dispatch)
 	}
 	if view.Creative == nil || input.Creative == nil ||
 		input.Intent != "" || input.Subject != "" || input.Grade != "" ||

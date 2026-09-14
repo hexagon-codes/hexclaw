@@ -481,12 +481,13 @@ func (o *GradingOrchestrator) runLoop(ctx context.Context, run *gradingRun, jobI
 			if v.Fields.AnchorState == k12.GradingAnchorPending {
 				o.startAnchorAsync(jobID, run, v.Fields.ModelSnapshot)
 			}
-			// ImageTask facade 对清晰、证据充足的事实直接自动冻结；只有稳定风险原因
-			// 存在时才停下来等家长确认。旧 GradingJob 入口保持原显式确认语义。
+			// 图片任务冻结已有观察并继续；内容风险交由无判分逐题终态承载，
+			// 不将识别完成误作所有内容均可信。旧直接入口保留显式确认语义。
 			if automaticPhotoConfirmationSource(v.Fields.SourceKind) &&
 				v.Fields.ConfirmationState == k12.GradingConfirmationPending &&
-				!recognizedQuestionsRequireGuardianConfirmation(run.questions, run.req.TaskIntent) {
-				if v, err = o.autoFreezeClearRecognition(ctx, run, v); err != nil {
+				(run.req.TaskIntent == PhotoTaskBlankWorksheet || run.req.TaskIntent == PhotoTaskCompletedHomework ||
+					!recognizedQuestionsRequireGuardianConfirmation(run.questions, run.req.TaskIntent)) {
+				if v, err = o.autoFreezeRecognition(ctx, run, v); err != nil {
 					return v, err
 				}
 				if v.Record.Status == k12.GradingStageAssessing {
@@ -628,6 +629,9 @@ func recognizedQuestionRequiresGuardianConfirmation(
 	question RecognizedQuestion,
 	taskIntent PhotoTaskIntent,
 ) bool {
+	if question.parentSourceUnclear {
+		return true
+	}
 	question = NormalizeRecognizedQuestion(question)
 	if !question.ConfirmationRequired {
 		return false
@@ -653,10 +657,9 @@ func automaticPhotoConfirmationSource(sourceKind string) bool {
 	return sourceKind == "image_task" || sourceKind == PracticeReturnGradingSourceKind
 }
 
-// autoFreezeClearRecognition runs with the Job lock held. It follows the same
-// persist-before-checkpoint order as an explicit confirmation, but supplies no
-// parent correction because every recognized fact passed the risk policy.
-func (o *GradingOrchestrator) autoFreezeClearRecognition(
+// autoFreezeRecognition 持 Job 锁冻结观察及处理策略，再推进确认检查点。
+// 冻结不是确认内容正确；原风险保留，评估入口据此生成无判分终态。
+func (o *GradingOrchestrator) autoFreezeRecognition(
 	ctx context.Context,
 	run *gradingRun,
 	job GradingJobView,
@@ -664,8 +667,21 @@ func (o *GradingOrchestrator) autoFreezeClearRecognition(
 	candidate := *run
 	candidate.questions = cloneRecognizedQuestions(run.questions)
 	candidate.anchored = cloneRecognizedQuestions(run.anchored)
-	if err := applyAndValidateGradingConfirmation(&candidate, ConfirmPhotoGradingInput{}); err != nil {
-		return GradingJobView{}, err
+	candidate.req.SourceUncertaintyFinalized = true
+	for i := range candidate.questions {
+		q := NormalizeRecognizedQuestion(candidate.questions[i])
+		if !CanonicalMarkdownValid(q.CanonicalMarkdown) ||
+			(q.AnswerState == AnswerStatePresent && !CanonicalMarkdownValid(q.AnswerCanonicalMarkdown)) {
+			return GradingJobView{}, fmt.Errorf("%w: invalid recognition canonical content", ErrInvalidInput)
+		}
+		if q.ConfirmedVersion == 0 {
+			q.ConfirmedVersion = 1
+		}
+		candidate.questions[i] = q
+	}
+	candidate.questions = FreezeRecognizedQuestionInputDigests(candidate.questions, candidate.req.Grade)
+	if candidate.anchored != nil {
+		candidate.anchored = mergeAnchorGeometry(candidate.questions, candidate.anchored)
 	}
 	confirmedFacts := candidate.questions
 	if candidate.anchored != nil {
@@ -691,6 +707,7 @@ func (o *GradingOrchestrator) autoFreezeClearRecognition(
 	}
 	run.questions = candidate.questions
 	run.anchored = candidate.anchored
+	run.req.SourceUncertaintyFinalized = candidate.req.SourceUncertaintyFinalized
 	return view, nil
 }
 
@@ -1108,25 +1125,24 @@ func (o *GradingOrchestrator) runRecognize(ctx context.Context, run *gradingRun,
 			}
 			beforePhysicalSend = definiteNoSend
 		}
-		if !beforePhysicalSend && usesDurableRecognition {
-			physicalStarted, inspectErr :=
-				o.recognitionPhysicalCallStarted(
+		physicalUnknown := false
+		if usesDurableRecognition {
+			physicalStarted, unresolved, inspectErr :=
+				o.recognitionPhysicalCallState(
 					context.WithoutCancel(ctx),
 					invocation,
 				)
-			if inspectErr == nil && !physicalStarted {
-				// 持久调用链中的 Provider 请求必须先跨过子项 prepared→sent 边界。
-				// 精确的零调用证据表明失败发生在 Provider 请求发送之前。
-				beforePhysicalSend = true
-			}
+			// 子调用账本优先于聚合错误；局部未发送不能覆盖其他子项的未知结果。
+			physicalUnknown = unresolved || inspectErr != nil
+			beforePhysicalSend = inspectErr == nil && !physicalStarted
 		}
 		protocolInvalid := errors.Is(
 			err,
 			k12.ErrRecognitionProtocolInvalid,
 		)
-		if !beforePhysicalSend &&
+		if physicalUnknown || (!beforePhysicalSend &&
 			!protocolInvalid &&
-			sentProviderOutcomeUnknown(err, nil) {
+			sentProviderOutcomeUnknown(err, nil)) {
 			_, _ = o.deps.Records.MarkModelInvocationOutcomeUnknown(context.WithoutCancel(ctx), run.agentName, invocation.InvocationID, "provider_outcome_unknown")
 			if current, readErr := o.deps.GetGradingJob(context.WithoutCancel(ctx), run.agentName, jobID); readErr == nil && current.Record.Status == k12.GradingStageCancelled {
 				return current, nil
@@ -1400,6 +1416,30 @@ func (o *GradingOrchestrator) persistRecognizedPhotoFacts(
 	run *gradingRun,
 	submissionID string,
 ) error {
+	for i := range run.questions {
+		run.questions[i] = NormalizeRecognizedQuestion(run.questions[i])
+		// 原始模型回执摘要保持不变；入库前才收敛非确定答案，raw 继续保留。
+		if run.questions[i].AnswerState == AnswerStateUnclear && run.questions[i].ConfirmedVersion == 0 {
+			run.questions[i].AnswerCanonicalMarkdown = ""
+		}
+	}
+	// 题目像素区域与当前原图共用尺寸事实；识别回执重放也经过同一入口。
+	for _, q := range run.questions {
+		if q.SourceRegion == nil || (q.SourceWidth > 0 && q.SourceHeight > 0) {
+			continue
+		}
+		config, err := decodeProblemSourceActionImageConfig(run.req.Image)
+		if err != nil {
+			return err
+		}
+		for i := range run.questions {
+			if run.questions[i].SourceRegion != nil {
+				run.questions[i].SourceWidth = config.Width
+				run.questions[i].SourceHeight = config.Height
+			}
+		}
+		break
+	}
 	if o.deps.PageAssets == nil {
 		// Compatibility for embedded/test compositions and historical page-* facts.
 		// Production assembly always injects PageAssets.
