@@ -178,12 +178,14 @@ const (
 )
 
 // PracticeReturnAsset 是一次不可变的作答照片回传批次（DD-028）。补传只能追加新记录，
-// 不得覆盖旧 asset 与题目映射；ReturnID 同时是命令幂等键。Regrade* 是同一
-// PracticeSet 聚合内的自动复批投影，可在 CAS 下推进，但永远不能改写原始回传 exact-set。
+// 不得覆盖旧 asset 与显式题目映射；ReturnID 同时是命令幂等键。自动模式冻结候选集合，
+// ItemIDs 由同一复批任务投影实际覆盖；Regrade* 在同一聚合内通过 CAS 推进。
 type PracticeReturnAsset struct {
 	ReturnID          string               `json:"return_id"`
 	AssetID           string               `json:"asset_id"`
 	ItemIDs           []string             `json:"item_ids"`
+	AutoMatch         bool                 `json:"auto_match,omitempty"`
+	CandidateItemIDs  []string             `json:"candidate_item_ids,omitempty"`
 	ReturnedAt        int64                `json:"returned_at"`
 	RegradeJobID      string               `json:"regrade_job_id,omitempty"`
 	RegradeStatus     string               `json:"regrade_status,omitempty"`
@@ -477,11 +479,27 @@ func validatePracticeSetFields(fieldsJSON string) error {
 			return fmt.Errorf("回传资产 return_id 重复: %q", ra.ReturnID)
 		}
 		returnIDs[ra.ReturnID] = struct{}{}
-		if len(ra.ItemIDs) == 0 {
+		if len(ra.ItemIDs) == 0 && !ra.AutoMatch {
 			return fmt.Errorf("回传资产 #%d 至少覆盖一道题", i)
+		}
+		candidates := map[string]struct{}{}
+		if ra.AutoMatch != (len(ra.CandidateItemIDs) > 0) {
+			return fmt.Errorf("return asset #%d has invalid automatic matching candidates", i)
+		}
+		for _, id := range ra.CandidateItemIDs {
+			if _, exists := itemIDs[id]; !exists {
+				return fmt.Errorf("return asset #%d has an unknown candidate", i)
+			}
+			if _, exists := candidates[id]; exists {
+				return fmt.Errorf("return asset #%d has a duplicate candidate", i)
+			}
+			candidates[id] = struct{}{}
 		}
 		seen := map[string]struct{}{}
 		for _, id := range ra.ItemIDs {
+			if _, exists := candidates[id]; ra.AutoMatch && !exists {
+				return fmt.Errorf("return asset #%d covers an item outside its candidates", i)
+			}
 			if _, exists := itemIDs[id]; !exists {
 				return fmt.Errorf("回传资产 #%d 引用了不属于本卷的 item_id %q", i, id)
 			}

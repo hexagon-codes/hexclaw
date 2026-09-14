@@ -228,12 +228,18 @@ func TestPracticeReturnRegradeCoordinator_AppliesClearResultsAndPersistsAnnotate
 
 func TestPracticeReturnRegradeCoordinator_OnlyProjectsTrueUncertainty(t *testing.T) {
 	d, _ := newPipeline(t, fakeSolver{}, fakeGrader{}, &fakeInsights{})
-	setID := seedRegradePaper(t, d, "")
+	setID := seedRegradePaper(t, d, "", true)
 	set, err := d.GetPracticeSet(context.Background(), "mingming", setID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ret := set.Fields.ReturnAssets[0]
+	// 自动模式只冻结候选，照片实际覆盖不能预先标成全卷。
+	input := PracticeReturnInput{ReturnID: ret.ReturnID, AssetID: ret.AssetID, AutoMatch: true}
+	set, err = d.SubmitReturns(context.Background(), "mingming", setID, []PracticeReturnInput{input})
+	if err != nil || len(set.Fields.ReturnAssets[0].ItemIDs) != 0 || len(set.Fields.ReturnAssets[0].CandidateItemIDs) != 2 {
+		t.Fatalf("automatic matching must freeze candidates without coverage: set=%+v err=%v", set, err)
+	}
 	grading := &practiceReturnGradingFake{
 		job: GradingJobView{
 			Record: &records.AgentRecord{
@@ -263,14 +269,18 @@ func TestPracticeReturnRegradeCoordinator_OnlyProjectsTrueUncertainty(t *testing
 	}
 	projected := got.Fields.ReturnAssets[0]
 	if projected.RegradeStatus != k12.PracticeRegradeNeedsReview ||
-		len(projected.UnresolvedItemIDs) != 1 ||
-		projected.UnresolvedItemIDs[0] != got.Fields.Items[1].ItemID {
+		len(projected.UnresolvedItemIDs) != 0 ||
+		len(projected.ItemIDs) != 1 || projected.ItemIDs[0] != got.Fields.Items[0].ItemID {
 		t.Fatalf("只应降级真实不确定题: %+v", projected)
 	}
 	if got.Fields.Items[0].ResultCorrect == nil || !*got.Fields.Items[0].ResultCorrect {
 		t.Fatalf("清晰题不应被同批不确定题阻断: %+v", got.Fields.Items[0])
 	}
-	if got.Fields.Items[1].ResultCorrect != nil {
+	if got.Fields.Items[1].ResultCorrect != nil || got.Fields.Items[1].Returned {
 		t.Fatalf("不确定题不得猜测结论: %+v", got.Fields.Items[1])
+	}
+	replayed, err := d.SubmitReturns(context.Background(), "mingming", setID, []PracticeReturnInput{input})
+	if err != nil || replayed.Record.Version != got.Record.Version || len(replayed.Fields.ReturnAssets) != 1 {
+		t.Fatalf("automatic return replay must preserve the original batch: err=%v", err)
 	}
 }

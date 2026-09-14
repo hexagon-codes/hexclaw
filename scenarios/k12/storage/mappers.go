@@ -215,6 +215,10 @@ func (practiceSetMapper) syncChildren(ctx context.Context, ex dbExecer, recordID
 	// 只允许完全相同的载荷重放，任何改写尝试都让整个外层事务回滚。
 	queryer, queryOK := ex.(dbQueryer)
 	for i, ra := range f.ReturnAssets {
+		candidatesJSON, err := json.Marshal(append([]string{}, ra.CandidateItemIDs...))
+		if err != nil {
+			return fmt.Errorf("k12storage: encode return candidates: %w", err)
+		}
 		itemIDsJSON, err := json.Marshal(ra.ItemIDs)
 		if err != nil {
 			return fmt.Errorf("k12storage: 编码回传资产 #%d item_ids: %w", i, err)
@@ -233,12 +237,12 @@ func (practiceSetMapper) syncChildren(ctx context.Context, ex dbExecer, recordID
 		res, err := ex.ExecContext(ctx, `INSERT INTO k12_practice_return_assets
             (set_record_id, return_index, return_id, asset_id, item_ids_json, returned_at,
              regrade_job_id, regrade_status, route_snapshot_json, annotated_asset_id,
-             result_markdown, unresolved_item_ids_json, regrade_updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             result_markdown, unresolved_item_ids_json, regrade_updated_at, auto_match, candidate_item_ids_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(set_record_id, return_id) DO NOTHING`,
 			recordID, i, ra.ReturnID, ra.AssetID, string(itemIDsJSON), ra.ReturnedAt,
 			ra.RegradeJobID, ra.RegradeStatus, string(routeJSON), ra.AnnotatedAssetID,
-			ra.ResultMarkdown, string(unresolvedJSON), ra.RegradeUpdatedAt)
+			ra.ResultMarkdown, string(unresolvedJSON), ra.RegradeUpdatedAt, boolInt(ra.AutoMatch), string(candidatesJSON))
 		if err != nil {
 			return fmt.Errorf("k12storage: 追加回传资产 #%d: %w", i, err)
 		}
@@ -246,24 +250,26 @@ func (practiceSetMapper) syncChildren(ctx context.Context, ex dbExecer, recordID
 			if !queryOK {
 				return fmt.Errorf("k12storage: 回查回传资产需要可查询事务句柄")
 			}
-			var storedAsset, storedItems string
+			var storedAsset, storedItems, storedCandidates, storedJob string
+			var storedAuto int64
 			var storedAt int64
-			if err := queryer.QueryRowContext(ctx, `SELECT asset_id, item_ids_json, returned_at
+			if err := queryer.QueryRowContext(ctx, `SELECT asset_id, item_ids_json, returned_at, auto_match, candidate_item_ids_json, regrade_job_id
                     FROM k12_practice_return_assets WHERE set_record_id = ? AND return_id = ?`,
-				recordID, ra.ReturnID).Scan(&storedAsset, &storedItems, &storedAt); err != nil {
+				recordID, ra.ReturnID).Scan(&storedAsset, &storedItems, &storedAt, &storedAuto, &storedCandidates, &storedJob); err != nil {
 				return fmt.Errorf("k12storage: 回查回传资产 #%d: %w", i, err)
 			}
-			if storedAsset != ra.AssetID || storedItems != string(itemIDsJSON) || storedAt != ra.ReturnedAt {
+			if storedAsset != ra.AssetID || storedAt != ra.ReturnedAt || storedAuto != boolInt(ra.AutoMatch) || storedCandidates != string(candidatesJSON) ||
+				(!ra.AutoMatch && storedItems != string(itemIDsJSON)) || (ra.AutoMatch && storedJob != "" && storedJob != ra.RegradeJobID) {
 				return fmt.Errorf("k12storage: return_id %q 已存在且载荷不同，禁止覆盖", ra.ReturnID)
 			}
 			if _, err := ex.ExecContext(ctx, `UPDATE k12_practice_return_assets SET
 					regrade_job_id=?, regrade_status=?, route_snapshot_json=?,
 					annotated_asset_id=?, result_markdown=?, unresolved_item_ids_json=?,
-					regrade_updated_at=?
+					regrade_updated_at=?, item_ids_json=?
 				WHERE set_record_id=? AND return_id=?`,
 				ra.RegradeJobID, ra.RegradeStatus, string(routeJSON),
 				ra.AnnotatedAssetID, ra.ResultMarkdown, string(unresolvedJSON),
-				ra.RegradeUpdatedAt, recordID, ra.ReturnID); err != nil {
+				ra.RegradeUpdatedAt, string(itemIDsJSON), recordID, ra.ReturnID); err != nil {
 				return fmt.Errorf("k12storage: 更新回传资产 #%d 复批投影: %w", i, err)
 			}
 		}
@@ -317,7 +323,7 @@ func (practiceSetMapper) attachChildren(ctx context.Context, q dbQueryer, record
 
 	returnRows, err := q.QueryContext(ctx, `SELECT return_id, asset_id, item_ids_json, returned_at,
 			regrade_job_id, regrade_status, route_snapshot_json, annotated_asset_id,
-			result_markdown, unresolved_item_ids_json, regrade_updated_at
+			result_markdown, unresolved_item_ids_json, regrade_updated_at, auto_match, candidate_item_ids_json
         FROM k12_practice_return_assets WHERE set_record_id = ? ORDER BY return_index`, recordID)
 	if err != nil {
 		return "", fmt.Errorf("k12storage: 读回传资产: %w", err)
@@ -326,12 +332,18 @@ func (practiceSetMapper) attachChildren(ctx context.Context, q dbQueryer, record
 	returnedItemIDs := make(map[string]struct{})
 	for returnRows.Next() {
 		var ra k12.PracticeReturnAsset
-		var itemIDsJSON, routeJSON, unresolvedJSON string
+		var itemIDsJSON, routeJSON, unresolvedJSON, candidatesJSON string
+		var autoMatch int
 		if err := returnRows.Scan(&ra.ReturnID, &ra.AssetID, &itemIDsJSON, &ra.ReturnedAt,
 			&ra.RegradeJobID, &ra.RegradeStatus, &routeJSON, &ra.AnnotatedAssetID,
-			&ra.ResultMarkdown, &unresolvedJSON, &ra.RegradeUpdatedAt); err != nil {
+			&ra.ResultMarkdown, &unresolvedJSON, &ra.RegradeUpdatedAt, &autoMatch, &candidatesJSON); err != nil {
 			returnRows.Close()
 			return "", fmt.Errorf("k12storage: 扫描回传资产: %w", err)
+		}
+		ra.AutoMatch = autoMatch != 0
+		if err := json.Unmarshal([]byte(candidatesJSON), &ra.CandidateItemIDs); err != nil {
+			returnRows.Close()
+			return "", fmt.Errorf("k12storage: decode return candidates: %w", err)
 		}
 		if err := json.Unmarshal([]byte(itemIDsJSON), &ra.ItemIDs); err != nil {
 			returnRows.Close()

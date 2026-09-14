@@ -627,9 +627,10 @@ func (d Deps) countFinalizedSets(ctx context.Context, agentName string) (int, er
 // 多批；SubmitReturns 会先验证完整集合，再用一次聚合写事务提交，禁止“前一批成功、
 // 后一批失败”的半状态。
 type PracticeReturnInput struct {
-	ReturnID string
-	AssetID  string
-	ItemIDs  []string
+	ReturnID  string
+	AssetID   string
+	ItemIDs   []string
+	AutoMatch bool
 }
 
 // SubmitReturn 保留单批命令面，内部统一进入原子多批实现。
@@ -659,8 +660,8 @@ func (d Deps) SubmitReturns(ctx context.Context, agentName, recordID string, inp
 	for _, input := range inputs {
 		returnID := strings.TrimSpace(input.ReturnID)
 		assetID := strings.TrimSpace(input.AssetID)
-		if returnID == "" || assetID == "" || len(input.ItemIDs) == 0 {
-			return PracticeSetView{}, fmt.Errorf("%w: return_id / asset_id / item_ids 均必填", ErrInvalidInput)
+		if returnID == "" || assetID == "" || input.AutoMatch == (len(input.ItemIDs) > 0) {
+			return PracticeSetView{}, fmt.Errorf("%w: return_id, asset_id and either auto_match or item_ids are required", ErrInvalidInput)
 		}
 		owner, ok := assetstore.OwnerOf(assetID)
 		if !ok || owner != agentName {
@@ -704,7 +705,7 @@ func (d Deps) SubmitReturns(ctx context.Context, agentName, recordID string, inp
 					sameItems = false
 				}
 			}
-			if prior.AssetID == assetID && sameItems {
+			if prior.AssetID == assetID && prior.AutoMatch == input.AutoMatch && (input.AutoMatch || sameItems) {
 				replayed = true
 				break
 			}
@@ -712,6 +713,16 @@ func (d Deps) SubmitReturns(ctx context.Context, agentName, recordID string, inp
 		}
 		if replayed {
 			continue
+		}
+		if input.AutoMatch {
+			for _, item := range v.Fields.Items {
+				if k12.PracticeItemPublishable(item) {
+					canonical = append(canonical, item.ItemID)
+				}
+			}
+			if len(canonical) == 0 {
+				return PracticeSetView{}, fmt.Errorf("%w: no published practice items to match", ErrInvalidInput)
+			}
 		}
 		// 新回传按卷面序固化；历史批次仅核对原题目集合，不重写其顺序。
 		sort.SliceStable(canonical, func(i, j int) bool {
@@ -726,12 +737,20 @@ func (d Deps) SubmitReturns(ctx context.Context, agentName, recordID string, inp
 			if !k12.PracticeItemPublishable(v.Fields.Items[i]) {
 				return PracticeSetView{}, fmt.Errorf("%w: 练习项 %s 是被跳过的阻断题，不在卷面上", ErrInvalidInput, id)
 			}
-			v.Fields.Items[i].Returned = true
+			if !input.AutoMatch {
+				v.Fields.Items[i].Returned = true
+			}
 		}
-		v.Fields.ReturnAssets = append(v.Fields.ReturnAssets, k12.PracticeReturnAsset{
+		ret := k12.PracticeReturnAsset{
 			ReturnID: returnID, AssetID: assetID, ItemIDs: canonical, ReturnedAt: d.now(),
 			RegradeStatus: k12.PracticeRegradeQueued, RegradeUpdatedAt: d.now(),
-		})
+		}
+		if input.AutoMatch {
+			ret.AutoMatch = true
+			ret.CandidateItemIDs = canonical
+			ret.ItemIDs = []string{}
+		}
+		v.Fields.ReturnAssets = append(v.Fields.ReturnAssets, ret)
 		changed = true
 	}
 	if !changed {
@@ -764,6 +783,13 @@ func practiceReturnsContain(prior []k12.PracticeReturnAsset, inputs []PracticeRe
 		found := false
 		for _, item := range prior {
 			if item.ReturnID == strings.TrimSpace(input.ReturnID) && item.AssetID == strings.TrimSpace(input.AssetID) {
+				if item.AutoMatch != input.AutoMatch {
+					continue
+				}
+				if input.AutoMatch {
+					found = true
+					break
+				}
 				requested := append([]string(nil), input.ItemIDs...)
 				sort.Strings(requested)
 				actual := append([]string(nil), item.ItemIDs...)

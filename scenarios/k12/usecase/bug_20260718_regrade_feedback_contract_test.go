@@ -14,7 +14,7 @@ import (
 //     全部入卷题都有结论后卷才转 graded（§3.8 第 4 条）。
 
 // seedRegradePaper 造一张两题卷：item-a 关联错题 mid，item-b 无来源题；固化并整卷回传（submitted）。
-func seedRegradePaper(t *testing.T, d Deps, mid string) string {
+func seedRegradePaper(t *testing.T, d Deps, mid string, automatic ...bool) string {
 	t.Helper()
 	ctx := context.Background()
 	itemA := k12.PracticeItem{
@@ -38,7 +38,7 @@ func seedRegradePaper(t *testing.T, d Deps, mid string) string {
 	if _, _, err := d.FinalizeBasket(ctx, "mingming", setID, "print", ""); err != nil {
 		t.Fatalf("固化: %v", err)
 	}
-	submitWholeSetInternal(t, d, "mingming", setID)
+	submitWholeSetInternal(t, d, "mingming", setID, automatic...)
 	return setID
 }
 

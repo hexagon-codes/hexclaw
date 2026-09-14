@@ -38,6 +38,8 @@ type practiceReturnAssetDTO struct {
 	ReturnID          string                   `json:"return_id"`
 	AssetID           string                   `json:"asset_id"`
 	ItemIDs           []string                 `json:"item_ids"`
+	AutoMatch         bool                     `json:"auto_match,omitempty"`
+	CandidateItemIDs  []string                 `json:"candidate_item_ids,omitempty"`
 	ReturnedAt        int64                    `json:"returned_at"`
 	RegradeJobID      string                   `json:"regrade_job_id,omitempty"`
 	RegradeStatus     string                   `json:"regrade_status,omitempty"`
@@ -134,6 +136,7 @@ func toPracticeSetDTO(v usecase.PracticeSetView) practiceSetDTO {
 	for _, ra := range v.Fields.ReturnAssets {
 		returnAssets = append(returnAssets, practiceReturnAssetDTO{
 			ReturnID: ra.ReturnID, AssetID: ra.AssetID, ItemIDs: ra.ItemIDs, ReturnedAt: ra.ReturnedAt,
+			AutoMatch: ra.AutoMatch, CandidateItemIDs: ra.CandidateItemIDs,
 			RegradeJobID: ra.RegradeJobID, RegradeStatus: ra.RegradeStatus,
 			RouteSnapshot: ra.RouteSnapshot, AnnotatedAssetID: ra.AnnotatedAssetID,
 			ResultMarkdown: ra.ResultMarkdown, UnresolvedItemIDs: ra.UnresolvedItemIDs,
@@ -738,13 +741,13 @@ func (h *handler) retryPracticePrintJob(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, map[string]any{"print_job": toPracticePrintJobDTO(v)})
 }
 
-// submitPracticeSet 回传作答（DD-028）：每次必须携带真实照片资产、幂等 return_id 与
-// 本批覆盖题目；缺任何字段都拒绝，绝不再把空 item_ids 猜成整卷回传。
+// submitPracticeSet 接纳照片及幂等键；显式覆盖与自动匹配互斥，空题集不等于整卷覆盖。
 type submitReturnReq struct {
-	Agent    string   `json:"agent"`
-	ReturnID string   `json:"return_id"`
-	AssetID  string   `json:"asset_id"`
-	ItemIDs  []string `json:"item_ids"`
+	Agent     string   `json:"agent"`
+	ReturnID  string   `json:"return_id"`
+	AssetID   string   `json:"asset_id"`
+	ItemIDs   []string `json:"item_ids"`
+	AutoMatch bool     `json:"auto_match,omitempty"`
 }
 
 func (h *handler) submitPracticeSet(w http.ResponseWriter, r *http.Request) {
@@ -752,11 +755,13 @@ func (h *handler) submitPracticeSet(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	if req.Agent == "" || req.ReturnID == "" || req.AssetID == "" || len(req.ItemIDs) == 0 {
-		writeErr(w, http.StatusBadRequest, "agent / return_id / asset_id / item_ids 必填")
+	if req.Agent == "" || req.ReturnID == "" || req.AssetID == "" || req.AutoMatch == (len(req.ItemIDs) > 0) {
+		writeErr(w, http.StatusBadRequest, "agent, return_id, asset_id and either auto_match or item_ids are required")
 		return
 	}
-	v, err := h.rt.Deps.SubmitReturn(r.Context(), req.Agent, r.PathValue("id"), req.ReturnID, req.AssetID, req.ItemIDs)
+	v, err := h.rt.Deps.SubmitReturns(r.Context(), req.Agent, r.PathValue("id"), []usecase.PracticeReturnInput{{
+		ReturnID: req.ReturnID, AssetID: req.AssetID, ItemIDs: req.ItemIDs, AutoMatch: req.AutoMatch,
+	}})
 	if err != nil {
 		writeErr(w, httpStatusForK12Error(err, http.StatusConflict), err.Error())
 		return

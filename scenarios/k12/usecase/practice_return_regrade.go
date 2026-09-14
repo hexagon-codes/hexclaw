@@ -55,6 +55,7 @@ type practiceReturnRegradeProjection struct {
 	AnnotatedAssetID string
 	ResultMarkdown   string
 	Unresolved       []string
+	Covered          []string
 }
 
 func (c *PracticeReturnRegradeCoordinator) initLocked() {
@@ -146,7 +147,11 @@ func (c *PracticeReturnRegradeCoordinator) Process(
 	if ret.RegradeStatus == k12.PracticeRegradeCompleted {
 		return nil
 	}
-	references, paperSize, err := freezePracticeGradingReferences(view.Fields, ret.ItemIDs)
+	matchingIDs := ret.ItemIDs
+	if ret.AutoMatch {
+		matchingIDs = ret.CandidateItemIDs
+	}
+	references, paperSize, err := freezePracticeGradingReferences(view.Fields, matchingIDs)
 	if err != nil {
 		return c.projectFailure(ctx, agentName, setID, returnID, ret,
 			k12.PracticeRegradeFailedTerminal, err)
@@ -198,12 +203,17 @@ func (c *PracticeReturnRegradeCoordinator) Process(
 				questions, _ := c.Grading.RecognizedQuestionsForOwner(
 					ctx, agentName, job.Record.RecordID,
 				)
-				unresolved := unresolvedPracticeReturnItems(references, paperSize, questions)
+				reviewReferences := references
+				var covered []string
+				if ret.AutoMatch {
+					reviewReferences, covered, _ = matchedPracticeReturnCoverage(references, paperSize, questions)
+				}
+				unresolved := unresolvedPracticeReturnItems(reviewReferences, paperSize, questions)
 				return c.updateProjection(ctx, agentName, setID, returnID,
 					practiceReturnRegradeProjection{
 						JobID: job.Record.RecordID, Status: k12.PracticeRegradeNeedsReview,
 						RouteSnapshot: job.Fields.ModelSnapshot, ReplaceResult: true,
-						Unresolved: unresolved,
+						Unresolved: unresolved, Covered: covered,
 					})
 			}
 			// Clear recognition has already auto-frozen but the independent
@@ -251,6 +261,25 @@ func (c *PracticeReturnRegradeCoordinator) projectCompleted(
 				RouteSnapshot: job.Fields.ModelSnapshot,
 			})
 	}
+	_, ret, err := c.loadReturn(ctx, agentName, setID, returnID)
+	if err != nil {
+		return err
+	}
+	var covered []string
+	unmatched := false
+	if ret.AutoMatch {
+		questions := make([]RecognizedQuestion, len(result.Items))
+		for i := range result.Items {
+			questions[i] = result.Items[i].Recognized
+		}
+		references, covered, unmatched = matchedPracticeReturnCoverage(references, paperSize, questions)
+		// 实际照片覆盖先持久化；复批结论不得反向伪造 Returned。
+		if err := c.updateProjection(ctx, agentName, setID, returnID, practiceReturnRegradeProjection{
+			JobID: job.Record.RecordID, Covered: covered,
+		}); err != nil {
+			return err
+		}
+	}
 	grades, unresolved := alignedPracticeReturnResults(references, paperSize, result.Items)
 	if len(grades) > 0 {
 		if _, err := c.Deps.GradePracticeSetItems(ctx, agentName, setID, grades); err != nil {
@@ -266,7 +295,7 @@ func (c *PracticeReturnRegradeCoordinator) projectCompleted(
 		annotatedAssetID = saved
 	}
 	status := k12.PracticeRegradeCompleted
-	if len(unresolved) > 0 {
+	if len(unresolved) > 0 || unmatched || (ret.AutoMatch && len(covered) == 0) {
 		status = k12.PracticeRegradeNeedsReview
 	}
 	return c.updateProjection(ctx, agentName, setID, returnID,
@@ -277,7 +306,31 @@ func (c *PracticeReturnRegradeCoordinator) projectCompleted(
 			AnnotatedAssetID: annotatedAssetID,
 			ResultMarkdown:   result.Markdown,
 			Unresolved:       unresolved,
+			Covered:          covered,
 		})
+}
+
+// matchedPracticeReturnCoverage 只投影实际出现且可唯一绑定的题目，不把候选中的缺页算作歧义。
+func matchedPracticeReturnCoverage(references []PracticeGradingReference, paperSize int, questions []RecognizedQuestion) ([]PracticeGradingReference, []string, bool) {
+	matched := practiceQuestionReferences(references, paperSize, questions)
+	seen := make(map[string]bool, len(matched))
+	unmatched := false
+	for _, ref := range matched {
+		if ref == nil {
+			unmatched = true
+		} else {
+			seen[ref.ItemID] = true
+		}
+	}
+	coveredRefs := make([]PracticeGradingReference, 0, len(seen))
+	covered := make([]string, 0, len(seen))
+	for _, ref := range references {
+		if seen[ref.ItemID] {
+			coveredRefs = append(coveredRefs, ref)
+			covered = append(covered, ref.ItemID)
+		}
+	}
+	return coveredRefs, covered, unmatched
 }
 
 func alignedPracticeReturnResults(
@@ -461,6 +514,16 @@ func (c *PracticeReturnRegradeCoordinator) updateProjection(
 			}
 			if projection.RouteSnapshot.Provider != "" || projection.RouteSnapshot.Model != "" {
 				ret.RouteSnapshot = k12.NormalizeGradingModelSnapshot(projection.RouteSnapshot)
+			}
+			if ret.AutoMatch && projection.Covered != nil {
+				for _, id := range projection.Covered {
+					for itemIndex := range view.Fields.Items {
+						if view.Fields.Items[itemIndex].ItemID == id {
+							view.Fields.Items[itemIndex].Returned = true
+						}
+					}
+				}
+				ret.ItemIDs = append([]string{}, projection.Covered...)
 			}
 			if projection.ReplaceResult {
 				ret.AnnotatedAssetID = projection.AnnotatedAssetID

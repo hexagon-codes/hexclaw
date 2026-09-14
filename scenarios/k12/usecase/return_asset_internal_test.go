@@ -9,7 +9,7 @@ import (
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/assetstore"
 )
 
-func submitWholeSetInternal(t *testing.T, d Deps, agent, setID string) PracticeSetView {
+func submitWholeSetInternal(t *testing.T, d Deps, agent, setID string, automatic ...bool) PracticeSetView {
 	t.Helper()
 	t.Setenv("HEXCLAW_ASSET_ROOT", t.TempDir())
 	raw, err := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
@@ -30,7 +30,13 @@ func submitWholeSetInternal(t *testing.T, d Deps, agent, setID string) PracticeS
 			ids = append(ids, it.ItemID)
 		}
 	}
-	v, err = d.SubmitReturn(context.Background(), agent, setID, "return-test-"+setID, assetID, ids)
+	autoMatch := len(automatic) > 0 && automatic[0]
+	if autoMatch {
+		ids = nil
+	}
+	v, err = d.SubmitReturns(context.Background(), agent, setID, []PracticeReturnInput{{
+		ReturnID: "return-test-" + setID, AssetID: assetID, ItemIDs: ids, AutoMatch: autoMatch,
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
