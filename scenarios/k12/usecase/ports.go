@@ -203,6 +203,8 @@ type RecognizedQuestion struct {
 	SourceWidth          int                    `json:"source_width,omitempty"`
 	SourceHeight         int                    `json:"source_height,omitempty"`
 	SourceRegion         *k12.SourcePixelRegion `json:"source_region,omitempty"`
+	// ObservedAnswerRegion 是成功识别回执内的原图答案候选框；仅经 anchor 本地核验后使用。
+	ObservedAnswerRegion *k12.SourcePixelRegion `json:"observed_answer_region,omitempty"`
 	AttemptID            string                 `json:"attempt_id,omitempty"`
 
 	// OCR 原始转写与 canonical Markdown/LaTeX 是两份独立事实。Raw* 一经识别不得被

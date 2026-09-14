@@ -3,10 +3,12 @@ package engineadapter
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"reflect"
 	"regexp"
 	"slices"
@@ -112,6 +114,7 @@ func (a *RecognizerAdapter) callRecognitionVisionPhysical(
 	call k12.RecognitionPhysicalCall,
 	prompt string,
 ) (k12.RecognitionPhysicalCallResult, error) {
+	waitStarted := time.Now()
 	if a.governor != nil {
 		permit, err := a.governor.Acquire(
 			ctx,
@@ -123,6 +126,7 @@ func (a *RecognizerAdapter) callRecognitionVisionPhysical(
 		}
 		defer permit.Release()
 	}
+	slog.Info("K12 recognition capacity acquired", "unit", call.Unit, "queue_ms", time.Since(waitStarted).Milliseconds())
 	physicalCtx := ctx
 	if a.providerTransportSendBoundary {
 		physicalCtx = k12.WithRecognitionPhysicalTransportSendBoundary(
@@ -143,7 +147,9 @@ func (a *RecognizerAdapter) callRecognitionVisionPhysical(
 		physicalCtx,
 		call,
 		func(sendCtx context.Context) (string, error) {
+			started := time.Now()
 			raw, callErr := a.vision(sendCtx, call.Image, prompt)
+			slog.Info("K12 recognition provider finished", "unit", call.Unit, "elapsed_ms", time.Since(started).Milliseconds(), "response_bytes", len(raw), "succeeded", callErr == nil)
 			return raw, providerResponseError(callErr)
 		},
 	)
@@ -263,6 +269,22 @@ answer_state must be blank, present, or unclear. present requires a legible stud
 recognition_confidence measures only the printed question transcription, not a solution or student answer. Empty answer areas and erased answers must not lower confidence in a clear printed question. Recheck uncertain source digits, operators and decimal points against the image before returning; never guess an unreadable source. Use unclear only for independently visible unreadable handwriting, not blank space or printed answer lines.
 - If a watermark, overlay, fold, handwriting, or crop obscures any printed glyph, including a fraction numerator, fraction bar, fraction denominator, decimal point, or operator, preserve only what is visibly supported and set recognition_confidence below 0.90. Never infer a missing fraction part from arithmetic, a neighboring target, or the student's answer; keep student_answer empty when the answer is not independently legible.
 The authorized target list, in order, follows:
+`
+
+// 紧凑协议不让模型重复生成已经冻结的身份或同一题的多份转写。
+const recognitionLayoutCompactPromptV1 = `Recognize the authorized worksheet crops, in contact-sheet order. Do not solve, grade, or correct any printed question or student calculation.
+Return compact JSON only: {"items":[{"target_id":"exact authorized ID","kind":"question","recognition":{"question":"printed source only","subject":"数学","answer_state":"present","student_answer":"all active handwritten steps and final answer","recognition_confidence":0.99,"ocr_signals":[],"answer_bbox":{"x":0,"y":0,"width":1,"height":1}}}]}.
+Rules:
+- Return every authorized target exactly once. Do not add, merge, split, or duplicate targets. A title, instruction such as 把下面每题的得数化简, decoration, or watermark is kind=non_question with recognition=null. Never hallucinate an expression from an instruction or scribble.
+- For kind=question, output only question, subject, answer_state, student_answer, recognition_confidence, ocr_signals, answer_bbox. Source numbering/section and identity are already frozen by the server; do not repeat them. subject is 数学/语文/英语/物理/化学 or empty.
+- Copy all visible fraction numerators, bars, denominators, decimals, signs and units exactly. Never infer a clipped symbol from the answer or nearby question. Keep math readable using TeX enclosed in \( ... \), using normal JSON string escaping once. Do not output a second canonical copy or repeated evidence arrays.
+- Separate printed source from handwriting even when the student's answer is written on the SAME LINE after the printed equals sign. That handwritten value belongs only in student_answer, never in question. Differentiate typeface and handwriting before declaring an answer area blank. Do not include a neighboring crop's text.
+- Before returning, independently rescan the printed line from left to right against this image: verify every operand, plus/minus sign, decimal point, and each stacked fraction. Do not omit a middle term or a leading zero. Check the pixels, not whether the student's answer would be correct.
+- student_answer contains all ACTIVE handwritten calculation lines in order, including incorrect steps, separated by newlines. Clearly crossed-out abandoned work is not the active answer; do not insert an unreadable-draft description into an otherwise readable active answer. If whether a line is cancelled is genuinely ambiguous, preserve that risk in ocr_signals. Never repair a wrong calculation.
+- answer_state is present only with readable active handwriting; blank for an empty answer area; unclear only for visible active handwriting that cannot be transcribed reliably. blank/unclear requires student_answer="". Nearby handwriting outside this crop's question is not its answer.
+- recognition_confidence evaluates only printed source readability. ocr_signals contains only unresolved source/active-answer risks, not routine descriptions of legible text. Unreadable cancelled drafts do not lower a readable printed question's confidence.
+- answer_bbox is the tight rectangle around the active final handwritten answer (or active handwritten working if there is no final value). Use integer pixels RELATIVE TO THIS CROP, not the contact sheet or full page. Respect the supplied crop width/height. Never return the whole question rectangle or printed text. For blank/unclear or an uncertain location use null; do not guess coordinates.
+Authorized crops:
 `
 
 var recognitionLayoutManifestTargetFieldsV2 = map[string]struct{}{
@@ -654,6 +676,21 @@ func (a *RecognizerAdapter) recognizeLayoutPlanV2(
 	if err != nil {
 		return nil, err
 	}
+	// 已授权的计划是裁片与输出协议的唯一事实源，恢复时不按当前规则重新派生。
+	stored, exists, loadErr := k12.LookupRecognitionLayoutPlanV2(ctx)
+	if loadErr != nil {
+		return nil, loadErr
+	}
+	if exists {
+		storedRuntime, err := k12.LoadRecognitionLayoutPlanV2Runtime(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if storedRuntime.HeaderDigest != headerDigest || stored.ManifestInvocationID != manifest.InvocationID || stored.ManifestResultDigest != manifest.ResultDigest || stored.PageDigest != fmt.Sprintf("sha256:%x", sha256.Sum256(canonicalPage.PNG)) {
+			return nil, fmt.Errorf("%w: persisted layout plan source mismatch", k12.ErrRecognitionLayoutPlanV2Unauthorized)
+		}
+		return a.recognizeLayoutPrimaryBatchesV2(ctx, canonicalPage.PNG, stored, storedRuntime)
+	}
 	plan, err := buildRecognitionLayoutPlanV2(
 		canonicalPage.PNG,
 		manifest,
@@ -745,7 +782,8 @@ func buildRecognitionLayoutPlanV2(
 			InvocationID: manifest.InvocationID,
 			ResultDigest: manifest.ResultDigest,
 		},
-		Targets: targets,
+		Targets:           targets,
+		RecognitionFormat: k12.RecognitionLayoutCompactV2,
 	})
 	if err != nil {
 		return k12.RecognitionLayoutPlanV2{}, err
@@ -1066,6 +1104,7 @@ func RecognizedQuestionsFromLayoutFinalizationV2(
 			question, parseErr := parseRecognitionLayoutQuestionV2(
 				candidate.ResultJSON,
 				target,
+				plan.RecognitionFormat,
 			)
 			if parseErr != nil {
 				return fail("candidate %q question: %v", target.TargetID, parseErr)
@@ -1228,6 +1267,7 @@ func (a *RecognizerAdapter) recognizeLayoutRepairV2(
 	}
 	prompt, err := buildRecognitionLayoutBatchPromptV2(
 		[]k12.RecognitionLayoutTargetV2{target},
+		plan.RecognitionFormat,
 	)
 	if err != nil {
 		result.err = err
@@ -1251,6 +1291,7 @@ func (a *RecognizerAdapter) recognizeLayoutRepairV2(
 	candidate, outcome := classifyRecognitionLayoutRepairV2(
 		physical.Payload,
 		target,
+		plan.RecognitionFormat,
 	)
 	settlement := k12.RecognitionLayoutRepairSettlementV2{
 		PlanDigest:                 plan.AuthorizedPlanDigest,
@@ -1321,6 +1362,7 @@ func recognitionLayoutTargetV2(
 func classifyRecognitionLayoutRepairV2(
 	raw string,
 	target k12.RecognitionLayoutTargetV2,
+	format ...string,
 ) (k12.RecognitionLayoutCandidateSettlementV2, *recognitionLayoutBatchOutcomeV2) {
 	invalid := k12.RecognitionLayoutCandidateSettlementV2{
 		CandidateID:    target.TargetID,
@@ -1329,6 +1371,7 @@ func classifyRecognitionLayoutRepairV2(
 	decision := classifyRecognitionLayoutBatchV2(
 		raw,
 		[]k12.RecognitionLayoutTargetV2{target},
+		format...,
 	)
 	if decision.classification != k12.RecognitionLayoutBatchClassifiedV2 ||
 		len(decision.candidates) != 1 ||
@@ -1412,7 +1455,7 @@ func (a *RecognizerAdapter) recognizeLayoutPrimaryBatchV2(
 		result.err = err
 		return result
 	}
-	prompt, err := buildRecognitionLayoutBatchPromptV2(targets)
+	prompt, err := buildRecognitionLayoutBatchPromptV2(targets, plan.RecognitionFormat)
 	if err != nil {
 		result.err = err
 		return result
@@ -1432,10 +1475,13 @@ func (a *RecognizerAdapter) recognizeLayoutPrimaryBatchV2(
 		result.err = fmt.Errorf("vision model call failed: %w", err)
 		return result
 	}
+	parseStarted := time.Now()
 	decision := classifyRecognitionLayoutBatchV2(
 		physical.Payload,
 		targets,
+		plan.RecognitionFormat,
 	)
+	slog.Info("K12 recognition batch parsed", "unit", batch.Unit, "elapsed_ms", time.Since(parseStarted).Milliseconds(), "classification", decision.classification, "candidate_count", len(decision.candidates))
 	settlement := k12.RecognitionLayoutPrimaryBatchSettlementV2{
 		PlanDigest:                 plan.AuthorizedPlanDigest,
 		SourcePhysicalInvocationID: physical.InvocationID,
@@ -1508,7 +1554,31 @@ func recognitionLayoutBatchTargetsV2(
 
 func buildRecognitionLayoutBatchPromptV2(
 	targets []k12.RecognitionLayoutTargetV2,
+	format ...string,
 ) (string, error) {
+	if len(format) > 0 && (format[0] == k12.RecognitionLayoutCompactV1 || format[0] == k12.RecognitionLayoutCompactV2) {
+		descriptors := make([]struct {
+			TargetID string `json:"target_id"`
+			Width    int    `json:"width"`
+			Height   int    `json:"height"`
+		}, 0, len(targets))
+		for index, target := range targets {
+			modelRef := target.TargetID
+			if format[0] == k12.RecognitionLayoutCompactV2 {
+				modelRef = fmt.Sprintf("t%d", index+1)
+			}
+			descriptors = append(descriptors, struct {
+				TargetID string `json:"target_id"`
+				Width    int    `json:"width"`
+				Height   int    `json:"height"`
+			}{modelRef, target.Region.Width, target.Region.Height})
+		}
+		encoded, err := json.Marshal(descriptors)
+		if err != nil {
+			return "", err
+		}
+		return recognitionLayoutCompactPromptV1 + string(encoded), nil
+	}
 	descriptors := make([]struct {
 		TargetID           string   `json:"target_id"`
 		SourceNumberPath   []string `json:"source_number_path"`
@@ -1633,6 +1703,7 @@ func parseRecognitionLayoutRegionV2(
 func classifyRecognitionLayoutBatchV2(
 	raw string,
 	targets []k12.RecognitionLayoutTargetV2,
+	format ...string,
 ) recognitionLayoutBatchClassificationDecisionV2 {
 	terminal := func(
 		kind k12.RecognitionLayoutBatchAmbiguityKindV2,
@@ -1679,6 +1750,17 @@ func classifyRecognitionLayoutBatchV2(
 		if !hasTargetID || json.Unmarshal(targetIDRaw, &targetID) != nil {
 			hasUnattributable = true
 			continue
+		}
+		if len(format) > 0 && format[0] == k12.RecognitionLayoutCompactV2 {
+			// 短引用只在当前冻结批次内精确匹配，不接受相似摘要或跨批次身份。
+			var resolved string
+			for index, candidate := range targets {
+				if targetID == fmt.Sprintf("t%d", index+1) {
+					resolved = candidate.TargetID
+					break
+				}
+			}
+			targetID = resolved
 		}
 		target, authorized := targetByID[targetID]
 		if !authorized {
@@ -1745,6 +1827,7 @@ func classifyRecognitionLayoutBatchV2(
 					question, err := parseRecognitionLayoutQuestionV2(
 						item.fields["recognition"],
 						item.target,
+						format...,
 					)
 					if errors.Is(err, errRecognitionLayoutSourceConflictV2) {
 						return terminal(k12.RecognitionLayoutAmbiguitySourceConflictV2)
@@ -1913,14 +1996,23 @@ func recognitionLayoutQuestionSourceIdentityV2(
 	if json.Unmarshal(raw, &fields) != nil || fields == nil {
 		return false, false
 	}
+	// 旧计划没有章节事实时，旧响应也可能省略这两个字段；只兼容双方均缺席。
+	_, hasSectionPath := fields["source_section_path"]
+	_, hasSectionLabel := fields["source_section_label"]
+	if !hasSectionPath && !hasSectionLabel && len(target.SourceSectionPath) == 0 && target.SourceSectionLabel == "" {
+		fields["source_section_path"] = json.RawMessage(`[]`)
+		fields["source_section_label"] = json.RawMessage(`""`)
+	}
 	var sourceNumberPath []string
 	var displayLabel *string
 	var sourceSectionPath []string
 	var sourceSectionLabel *string
 	if json.Unmarshal(fields["source_number_path"], &sourceNumberPath) != nil ||
+		sourceNumberPath == nil ||
 		json.Unmarshal(fields["display_label"], &displayLabel) != nil ||
 		displayLabel == nil ||
 		json.Unmarshal(fields["source_section_path"], &sourceSectionPath) != nil ||
+		sourceSectionPath == nil ||
 		json.Unmarshal(fields["source_section_label"], &sourceSectionLabel) != nil ||
 		sourceSectionLabel == nil {
 		return false, false
@@ -1934,11 +2026,55 @@ func recognitionLayoutQuestionSourceIdentityV2(
 func parseRecognitionLayoutQuestionV2(
 	raw json.RawMessage,
 	target k12.RecognitionLayoutTargetV2,
+	format ...string,
 ) (usecase.RecognizedQuestion, error) {
 	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &fields); err != nil ||
-		!recognitionLayoutFieldsAllowedV2(fields, recognitionLayoutRecognizedFieldsV2) {
+	if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
 		return usecase.RecognizedQuestion{}, fmt.Errorf("recognition fields are invalid")
+	}
+	var observed *k12.SourcePixelRegion
+	if len(format) > 0 && (format[0] == k12.RecognitionLayoutCompactV1 || format[0] == k12.RecognitionLayoutCompactV2) {
+		if boxJSON, exists := fields["answer_bbox"]; exists {
+			var box k12.SourcePixelRegion
+			if json.Unmarshal(boxJSON, &box) == nil && box.X >= 0 && box.Y >= 0 && box.Width > 0 && box.Height > 0 && box.Width <= target.Region.Width && box.Height <= target.Region.Height && box.X <= target.Region.Width-box.Width && box.Y <= target.Region.Height-box.Height && (box.Width < target.Region.Width || box.Height < target.Region.Height) {
+				box.X += target.Region.X
+				box.Y += target.Region.Y
+				observed = &box
+			}
+			delete(fields, "answer_bbox")
+		}
+		if _, full := fields["problem_kind"]; !full {
+			if !recognitionLayoutFieldsAllowedV2(fields, map[string]struct{}{"question": {}, "subject": {}, "answer_state": {}, "student_answer": {}, "recognition_confidence": {}, "ocr_signals": {}}) {
+				return usecase.RecognizedQuestion{}, fmt.Errorf("compact recognition fields are invalid")
+			}
+			// 来源身份由计划回填；题干与作答各保留一次观察，不伪造独立核验次数。
+			for key, value := range map[string]any{"problem_id": target.TargetID, "problem_kind": "standalone", "source_number_path": append([]string{}, target.SourceNumberPath...), "display_label": target.DisplayLabel, "source_section_path": append([]string{}, target.SourceSectionPath...), "source_section_label": target.SourceSectionLabel} {
+				encoded, err := json.Marshal(value)
+				if err != nil {
+					return usecase.RecognizedQuestion{}, err
+				}
+				fields[key] = encoded
+			}
+		}
+		var err error
+		raw, err = json.Marshal(fields)
+		if err != nil {
+			return usecase.RecognizedQuestion{}, err
+		}
+	}
+	if !recognitionLayoutFieldsAllowedV2(fields, recognitionLayoutRecognizedFieldsV2) {
+		return usecase.RecognizedQuestion{}, fmt.Errorf("recognition fields are invalid")
+	}
+	if _, hasPath := fields["source_section_path"]; !hasPath && len(target.SourceSectionPath) == 0 && target.SourceSectionLabel == "" {
+		if _, hasLabel := fields["source_section_label"]; !hasLabel {
+			fields["source_section_path"] = json.RawMessage(`[]`)
+			fields["source_section_label"] = json.RawMessage(`""`)
+			var err error
+			raw, err = json.Marshal(fields)
+			if err != nil {
+				return usecase.RecognizedQuestion{}, err
+			}
+		}
 	}
 	for _, required := range []string{
 		"problem_kind", "source_number_path", "display_label",
@@ -1972,6 +2108,9 @@ func parseRecognitionLayoutQuestionV2(
 	questions[0] = clearPrintedFillBlankCandidateV2(questions[0])
 	if err := validateRecognitionProtocolResult(questions); err != nil {
 		return usecase.RecognizedQuestion{}, err
+	}
+	if questions[0].AnswerState == usecase.AnswerStatePresent {
+		questions[0].ObservedAnswerRegion = observed
 	}
 	return questions[0], nil
 }

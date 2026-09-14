@@ -123,6 +123,55 @@ func (value *semanticJSONInt) UnmarshalJSON(raw []byte) error {
 	return nil
 }
 
+// ReuseRecognitionAnswerGeometry 仅核验成功识别回执携带的答案框，不发起模型调用。
+// 任一待定位题缺少可信框时仍走原定位入口，不用题目框替代答案框。
+func (a *RecognizerAdapter) ReuseRecognitionAnswerGeometry(ctx context.Context, rawImage []byte, questions []usecase.RecognizedQuestion) ([]usecase.RecognizedQuestion, bool) {
+	if ctx.Err() != nil {
+		return nil, false
+	}
+	count := 0
+	for _, q := range questions {
+		if q.AnswerState == usecase.AnswerStateBlank {
+			continue
+		}
+		if q.AnswerState != usecase.AnswerStatePresent || q.ObservedAnswerRegion == nil || q.SourceRegion == nil {
+			return nil, false
+		}
+		count++
+	}
+	if count == 0 {
+		return nil, false
+	}
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(rawImage))
+	if err != nil || cfg.Width <= 0 || cfg.Height <= 0 || int64(cfg.Width)*int64(cfg.Height) > answerAnchorMaxPixels {
+		return nil, false
+	}
+	src, _, err := image.Decode(bytes.NewReader(rawImage))
+	if err != nil {
+		return nil, false
+	}
+	out := append([]usecase.RecognizedQuestion(nil), questions...)
+	for i, q := range out {
+		if q.AnswerState == usecase.AnswerStateBlank {
+			continue
+		}
+		if ctx.Err() != nil || q.SourceWidth != cfg.Width || q.SourceHeight != cfg.Height {
+			return nil, false
+		}
+		r := q.ObservedAnswerRegion
+		s := q.SourceRegion
+		if r.X < s.X || r.Y < s.Y || r.Width <= 0 || r.Height <= 0 || r.Width > s.Width || r.Height > s.Height || r.X-s.X > s.Width-r.Width || r.Y-s.Y > s.Height-r.Height || (r.Width == s.Width && r.Height == s.Height) {
+			return nil, false
+		}
+		box := usecase.BBox{X: float64(r.X) / float64(cfg.Width), Y: float64(r.Y) / float64(cfg.Height), W: float64(r.Width) / float64(cfg.Width), H: float64(r.Height) / float64(cfg.Height)}
+		if !validPhotoBBox(box) || !answerBBoxBelongsToSourceRegion(src.Bounds(), box, s) || !semanticBBoxHasVisibleInk(src, semanticBBoxRect(src.Bounds(), box)) {
+			return nil, false
+		}
+		out[i].BBox = &box
+	}
+	return out, true
+}
+
 // AnchorAnswerGeometry implements the low-latency page-batch geometry pass
 // after core recognition. It performs no answer transcription and therefore
 // cannot rewrite answer_state/student_answer supplied by the core phase.

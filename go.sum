@@ -121,6 +121,8 @@ github.com/hexagon-codes/dingtalk-stream-sdk-go v0.9.1-hexclaw.1 h1:n0d/y633PCHQ
 github.com/hexagon-codes/dingtalk-stream-sdk-go v0.9.1-hexclaw.1/go.mod h1:ln3IqPYYocZbYvl9TAOrG/cxGR9xcn4pnZRLdCTEGEU=
 github.com/hexagon-codes/hexagon v0.5.13 h1:bG6Pr2qqsxI5wvB19VsPDJ8cyxk/T8t2niB//Y9uQe4=
 github.com/hexagon-codes/hexagon v0.5.13/go.mod h1:3i2Zw0KUULY7spzpNg98/OKh4ef+EdZRMrLmCn/qdxs=
+github.com/hexagon-codes/hexagon v0.5.14 h1:4QUA7hgb3pnXgdXGh1i4qpWcC3VGT5U5gHJaRxXhYho=
+github.com/hexagon-codes/hexagon v0.5.14/go.mod h1:PHEdNHZfg//2OMwCbps07IX0KM3WBg8+yjU5FrKQ1RU=
 github.com/hexagon-codes/toolkit v0.3.4 h1:JLAmIocPUFztHx+2SrWZTZnS/qs0snEA9T2TOME1+sI=
 github.com/hexagon-codes/toolkit v0.3.4/go.mod h1:+oLoF5ffE+Y4KpjTAYtCdR/INWcS0vTOn53tUk8Lols=
 github.com/inconshreveable/mousetrap v1.1.0 h1:wN+x4NVGpMsO7ErUn/mUI3vEoE6Jt13X2s0bqwp9tc8=

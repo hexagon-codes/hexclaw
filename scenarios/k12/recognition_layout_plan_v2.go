@@ -22,6 +22,10 @@ const (
 	RecognitionPlanVersionV1 = 1
 	// RecognitionPlanVersionV2 标识密集页清单与受限布局批次计划。
 	RecognitionPlanVersionV2 = 2
+	// RecognitionLayoutCompactV1 只用于新计划，空值保持历史识别输出协议。
+	RecognitionLayoutCompactV1 = "compact_v1"
+	// RecognitionLayoutCompactV2 用批内短引用代替模型抄写持久摘要，旧格式保持可恢复。
+	RecognitionLayoutCompactV2 = "compact_v2"
 
 	RecognitionLayoutBatchTargetLimitV2 = 4
 	recognitionLayoutTargetLimitV2      = 32
@@ -29,6 +33,8 @@ const (
 	recognitionLayoutContactPaddingV2   = 8
 	recognitionLayoutContactGapV2       = 8
 	recognitionLayoutContactHeightV2    = 640
+	// 紧凑协议为上下文补边预留像素，避免相同行带因补边拆成更多模型调用。
+	recognitionLayoutCompactHeightV1 = 768
 )
 
 var ErrRecognitionLayoutPlanInvalid = errors.New("recognition layout plan invalid")
@@ -53,9 +59,10 @@ type RecognitionLayoutManifestTargetV2 struct {
 }
 
 type RecognitionLayoutPlanInputV2 struct {
-	PagePNG  []byte
-	Manifest RecognitionLayoutManifestSuccessV2
-	Targets  []RecognitionLayoutManifestTargetV2
+	PagePNG           []byte
+	Manifest          RecognitionLayoutManifestSuccessV2
+	Targets           []RecognitionLayoutManifestTargetV2
+	RecognitionFormat string
 }
 
 // RecognitionLayoutTargetV2 仅包含本地派生的持久事实。
@@ -80,6 +87,7 @@ type RecognitionLayoutBatchV2 struct {
 // 但绝不包含源图像或裁剪字节。
 type RecognitionLayoutPlanV2 struct {
 	Version              int                         `json:"version"`
+	RecognitionFormat    string                      `json:"recognition_format,omitempty"`
 	PageDigest           string                      `json:"page_digest"`
 	ManifestInvocationID string                      `json:"manifest_invocation_id"`
 	ManifestResultDigest string                      `json:"manifest_result_digest"`
@@ -92,6 +100,9 @@ type RecognitionLayoutPlanV2 struct {
 // 所有顺序和持久标识均在本地生成，因此模型输出顺序和模型提供的标识都不会成为
 // 存储标识。
 func BuildRecognitionLayoutPlanV2(input RecognitionLayoutPlanInputV2) (RecognitionLayoutPlanV2, error) {
+	if input.RecognitionFormat != "" && input.RecognitionFormat != RecognitionLayoutCompactV1 && input.RecognitionFormat != RecognitionLayoutCompactV2 {
+		return RecognitionLayoutPlanV2{}, fmt.Errorf("%w: unsupported recognition format", ErrRecognitionLayoutPlanInvalid)
+	}
 	if err := validateRecognitionLayoutManifestSuccessV2(input.Manifest); err != nil {
 		return RecognitionLayoutPlanV2{}, err
 	}
@@ -125,6 +136,10 @@ func BuildRecognitionLayoutPlanV2(input RecognitionLayoutPlanInputV2) (Recogniti
 	}
 	for index := range targets {
 		region := targets[index].Region
+		if input.RecognitionFormat == RecognitionLayoutCompactV1 || input.RecognitionFormat == RecognitionLayoutCompactV2 {
+			targets[index].Region = expandRecognitionLayoutRegionV2(input.Targets, index, pageBounds)
+			continue
+		}
 		// 紧框可能切掉首位数字；在冻结裁图前补充页内左侧上下文，最多半个题框高度。
 		// 邻题之间只取空隙的一半，不能把邻题文字并入当前目标。
 		leftPadding := min(region.Height/2, 32, region.X)
@@ -189,6 +204,7 @@ func BuildRecognitionLayoutPlanV2(input RecognitionLayoutPlanInputV2) (Recogniti
 	pageDigest := recognitionLayoutSHA256(input.PagePNG)
 	plan := RecognitionLayoutPlanV2{
 		Version:              RecognitionPlanVersionV2,
+		RecognitionFormat:    input.RecognitionFormat,
 		PageDigest:           pageDigest,
 		ManifestInvocationID: input.Manifest.InvocationID,
 		ManifestResultDigest: input.Manifest.ResultDigest,
@@ -214,6 +230,10 @@ func BuildRecognitionLayoutPlanV2(input RecognitionLayoutPlanInputV2) (Recogniti
 		})
 	}
 
+	contactHeight := recognitionLayoutContactHeightV2
+	if plan.RecognitionFormat == RecognitionLayoutCompactV1 || plan.RecognitionFormat == RecognitionLayoutCompactV2 {
+		contactHeight = recognitionLayoutCompactHeightV1
+	}
 	for start, ordinal := 0, 1; start < len(plan.Targets); ordinal++ {
 		end := start
 		height := 2 * recognitionLayoutContactPaddingV2
@@ -222,7 +242,7 @@ func BuildRecognitionLayoutPlanV2(input RecognitionLayoutPlanInputV2) (Recogniti
 			if end > start {
 				nextHeight += recognitionLayoutContactGapV2
 			}
-			if end > start && nextHeight > recognitionLayoutContactHeightV2 {
+			if end > start && nextHeight > contactHeight {
 				break
 			}
 			height = nextHeight
@@ -620,6 +640,39 @@ func recognitionLayoutTargetIDV2(
 	return "layout_target_v2_" + hex.EncodeToString(digest[:])
 }
 
+// expandRecognitionLayoutRegionV2 在原图及相邻题边界内补充四侧上下文，保留分数上下沿。
+// 使用未扩张的同一组框计算，结果不依赖遍历先后，不改变已授权的历史裁片。
+func expandRecognitionLayoutRegionV2(targets []RecognitionLayoutManifestTargetV2, index int, bounds image.Rectangle) SourcePixelRegion {
+	r := targets[index].Region
+	padding := min(32, max(8, r.Height/2))
+	horizontalPadding := min(64, max(16, r.Height))
+	left, right := min(horizontalPadding, r.X), min(horizontalPadding, bounds.Dx()-r.X-r.Width)
+	top, bottom := min(padding, r.Y), min(padding, bounds.Dy()-r.Y-r.Height)
+	for i, target := range targets {
+		if i == index {
+			continue
+		}
+		n := target.Region
+		if r.Y < n.Y+n.Height && n.Y < r.Y+r.Height {
+			if n.X < r.X {
+				left = min(left, max(0, r.X-n.X-n.Width))
+			}
+			if n.X > r.X {
+				right = min(right, max(0, n.X-r.X-r.Width))
+			}
+		}
+		if r.X < n.X+n.Width && n.X < r.X+r.Width {
+			if n.Y < r.Y {
+				top = min(top, max(0, r.Y-n.Y-n.Height)/2)
+			}
+			if n.Y > r.Y {
+				bottom = min(bottom, max(0, n.Y-r.Y-r.Height)/2)
+			}
+		}
+	}
+	return SourcePixelRegion{X: r.X - left, Y: r.Y - top, Width: r.Width + left + right, Height: r.Height + top + bottom}
+}
+
 func recognitionLayoutCropPNG(source image.Image, region SourcePixelRegion) ([]byte, error) {
 	crop := image.NewRGBA(image.Rect(0, 0, region.Width, region.Height))
 	draw.Draw(
@@ -700,6 +753,7 @@ func recognitionLayoutAuthorizedPlanDigestV2(plan RecognitionLayoutPlanV2) (stri
 	canonical := struct {
 		Contract             string                      `json:"contract"`
 		Version              int                         `json:"version"`
+		RecognitionFormat    string                      `json:"recognition_format,omitempty"`
 		PageDigest           string                      `json:"page_digest"`
 		ManifestInvocationID string                      `json:"manifest_invocation_id"`
 		ManifestResultDigest string                      `json:"manifest_result_digest"`
@@ -708,6 +762,7 @@ func recognitionLayoutAuthorizedPlanDigestV2(plan RecognitionLayoutPlanV2) (stri
 	}{
 		Contract:             "recognition_layout_authorized_plan_v2",
 		Version:              plan.Version,
+		RecognitionFormat:    plan.RecognitionFormat,
 		PageDigest:           plan.PageDigest,
 		ManifestInvocationID: plan.ManifestInvocationID,
 		ManifestResultDigest: plan.ManifestResultDigest,

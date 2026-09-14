@@ -1677,6 +1677,14 @@ func (o *GradingOrchestrator) executeAnchorForTask(
 		return nil, k12.GradingAnchorDegraded, "anchor:absent", false
 	}
 	baseCtx := k12.WithGradingModelSnapshot(o.gradingBaseContext(), snapshot)
+	if reuser, ok := o.deps.AnswerAnchorer.(interface {
+		ReuseRecognitionAnswerGeometry(context.Context, []byte, []RecognizedQuestion) ([]RecognizedQuestion, bool)
+	}); ok {
+		if anchored, reused := reuser.ReuseRecognitionAnswerGeometry(baseCtx, image, frozen); reused {
+			slog.Info("K12 answer geometry reused", "job_id", jobID, "question_count", len(frozen), "physical_calls", 0)
+			return anchored, k12.GradingAnchorLocated, "anchor:recognition:" + modelInvocationResultDigest(anchored), false
+		}
+	}
 	job, err := o.deps.GetGradingJob(baseCtx, agentName, jobID)
 	if err != nil {
 		return nil, k12.GradingAnchorDegraded, "anchor:ledger_job_missing", true
@@ -2596,6 +2604,19 @@ func (o *GradingOrchestrator) recoverRecognizeInvocation(ctx context.Context, ru
 				advanceErr,
 			)
 		}
+	}
+	// 恢复必须补齐本地事实与运行时文件，不能仅把已有模型结果标成功后跳过落盘。
+	job, readErr := o.deps.GetGradingJob(ctx, run.agentName, jobID)
+	if readErr != nil {
+		return true, GradingJobView{}, readErr
+	}
+	if persistErr := o.persistRecognizedPhotoFacts(ctx, run, job.Fields.SubmissionID); persistErr != nil {
+		v, err := o.failStage(context.WithoutCancel(ctx), run, jobID, "typed_result_not_durable", persistErr)
+		return true, v, err
+	}
+	if persistErr := o.persistRun(jobID, run); persistErr != nil {
+		v, err := o.failStage(context.WithoutCancel(ctx), run, jobID, "result_not_durable", persistErr)
+		return true, v, err
 	}
 	digest := modelInvocationResultDigest(run.questions)
 	if invocation.Status == k12.ModelInvocationSucceeded && invocation.ResultDigest != digest {

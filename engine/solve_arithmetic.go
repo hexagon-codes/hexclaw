@@ -171,6 +171,8 @@ func arithmeticAnswerValue(answer string) (string, bool) {
 // 本机计算器可读文本；持久化与用户展示仍保留原始 canonical 内容。
 func normalizeArithmeticAnswerMarkup(answer string) string {
 	s := strings.TrimSpace(answer)
+	// 只解开明确的步骤分隔，避免把 \neq、\nabla 等命令误当换行；原始作答不回写。
+	s = strings.NewReplacer(`\r\n=`, "\n=", `\n=`, "\n=", `\n答：`, "\n答：", `\n答:`, "\n答:").Replace(s)
 	for {
 		next := answerLatexFractionRe.ReplaceAllString(s, `($1/$2)`)
 		if next == s {

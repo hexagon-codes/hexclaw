@@ -521,6 +521,21 @@ func (e *durableRecognitionPhysicalCallExecutor) AuthorizeRecognitionLayoutPlanV
 	)
 }
 
+// LookupRecognitionLayoutPlanV2 在 manifest 后读取已冻结计划，避免恢复时重新裁图。
+func (e *durableRecognitionPhysicalCallExecutor) LookupRecognitionLayoutPlanV2(ctx context.Context) (k12.RecognitionLayoutPlanV2, bool, error) {
+	runtime, err := e.LoadRecognitionLayoutPlanV2Runtime(ctx)
+	if err != nil {
+		return k12.RecognitionLayoutPlanV2{}, false, err
+	}
+	if runtime.AuthorizedPlan == nil {
+		return k12.RecognitionLayoutPlanV2{}, false, nil
+	}
+	if err := k12.ValidateRecognitionLayoutPlanV2(*runtime.AuthorizedPlan); err != nil {
+		return k12.RecognitionLayoutPlanV2{}, false, err
+	}
+	return *runtime.AuthorizedPlan, true, nil
+}
+
 func (e *durableRecognitionPhysicalCallExecutor) LoadRecognitionLayoutPlanV2Runtime(
 	ctx context.Context,
 ) (k12.RecognitionLayoutPlanRuntimeV2, error) {

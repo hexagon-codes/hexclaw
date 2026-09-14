@@ -492,6 +492,19 @@ func AuthorizeRecognitionLayoutPlanV2(
 	return nil
 }
 
+// LookupRecognitionLayoutPlanV2 只查询已有计划；缺少可选查询能力时仍走原授权入口。
+// 查询结果不授予发送权，发送前仍必须通过完整运行态校验。
+func LookupRecognitionLayoutPlanV2(ctx context.Context) (RecognitionLayoutPlanV2, bool, error) {
+	if ctx != nil {
+		if reader, ok := ctx.Value(recognitionPhysicalCallContextKey{}).(interface {
+			LookupRecognitionLayoutPlanV2(context.Context) (RecognitionLayoutPlanV2, bool, error)
+		}); ok {
+			return reader.LookupRecognitionLayoutPlanV2(ctx)
+		}
+	}
+	return RecognitionLayoutPlanV2{}, false, nil
+}
+
 // LoadRecognitionLayoutPlanV2Runtime 通过已绑定到当前识别上下文的持久执行器，
 // 读取已授权运行态。轻量测试必须安装显式的加载器替身；缺失绝不会被解释为
 // 可以自行构造运行时策略。
