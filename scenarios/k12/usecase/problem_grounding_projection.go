@@ -65,7 +65,8 @@ func resolveProblemGroundingInvocation(
 	switch ref.operation {
 	case string(k12.GradingItemOperationSolve):
 		if invocation.Operation != k12.GradingItemOperationSolve &&
-			invocation.Operation != k12.GradingItemOperationSolveVerify {
+			invocation.Operation != k12.GradingItemOperationSolveVerify &&
+			!(item.Status == k12.GradingAssessmentBlankSolved && invocation.Operation == k12.GradingItemOperationSolveGenerate) {
 			return resolvedProblemGroundingInvocation{}, fmt.Errorf(
 				"usecase: problem grounding solve operation mismatch",
 			)

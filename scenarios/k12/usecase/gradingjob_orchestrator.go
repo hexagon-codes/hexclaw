@@ -1276,23 +1276,12 @@ func (o *GradingOrchestrator) runRecognize(ctx context.Context, run *gradingRun,
 		return v, receiptErr
 	}
 	if perr := o.persistRecognizedPhotoFacts(ctx, run, job.Fields.SubmissionID); perr != nil {
-		_, _ = o.deps.Records.MarkModelInvocationOutcomeUnknown(context.WithoutCancel(ctx), run.agentName,
-			invocation.InvocationID, "typed_result_not_durable")
-		v, aerr := o.markGradingOutcomeUnknown(context.WithoutCancel(ctx), run, jobID, "typed_result_not_durable")
-		if aerr != nil {
-			return v, aerr
-		}
-		return v, perr
+		// 物理调用和原始回执已成功，失败仅属于本地投影，不能改称传输结果未知。
+		return o.failStage(context.WithoutCancel(ctx), run, jobID, "typed_result_not_durable", perr)
 	}
 	// 先固化产物再写检查点（§6.15：检查点存在即产物可回放，崩溃窗口不产生"有检查点无产物"）。
 	if perr := o.persistRun(jobID, run); perr != nil {
-		_, _ = o.deps.Records.MarkModelInvocationOutcomeUnknown(context.WithoutCancel(ctx), run.agentName,
-			invocation.InvocationID, "result_not_durable")
-		v, aerr := o.markGradingOutcomeUnknown(context.WithoutCancel(ctx), run, jobID, "result_not_durable")
-		if aerr != nil {
-			return v, aerr
-		}
-		return v, perr
+		return o.failStage(context.WithoutCancel(ctx), run, jobID, "result_not_durable", perr)
 	}
 	if _, err := o.deps.Records.MarkModelInvocationSucceeded(context.WithoutCancel(ctx), run.agentName,
 		invocation.InvocationID, modelInvocationResultDigest(run.questions), ""); err != nil {
@@ -1415,7 +1404,11 @@ func (o *GradingOrchestrator) persistRecognizedPhotoFacts(
 	ctx context.Context,
 	run *gradingRun,
 	submissionID string,
-) error {
+) (resultErr error) {
+	started := time.Now()
+	defer func() {
+		slog.Info("K12 recognized facts persisted", "submission_id", submissionID, "elapsed_ms", time.Since(started).Milliseconds(), "question_count", len(run.questions), "succeeded", resultErr == nil)
+	}()
 	for i := range run.questions {
 		run.questions[i] = NormalizeRecognizedQuestion(run.questions[i])
 		// 原始模型回执摘要保持不变；入库前才收敛非确定答案，raw 继续保留。
@@ -2538,7 +2531,15 @@ func (o *GradingOrchestrator) loadInitialRecognitionLayoutRuntimeV2(
 }
 
 func (o *GradingOrchestrator) recoverRecognizeInvocation(ctx context.Context, run *gradingRun, jobID string, invocation k12.ModelInvocation) (bool, GradingJobView, error) {
-	if (invocation.Status != k12.ModelInvocationSent && invocation.Status != k12.ModelInvocationSucceeded) || len(run.questions) == 0 {
+	if invocation.Status != k12.ModelInvocationSent && invocation.Status != k12.ModelInvocationSucceeded {
+		return false, GradingJobView{}, nil
+	}
+	if len(run.questions) == 0 {
+		if receipt, ok := o.readRecognitionReceipt(jobID); ok && receipt.AgentName == run.agentName && receipt.InvocationID == invocation.InvocationID {
+			run.questions = cloneRecognizedQuestions(receipt.Questions)
+		}
+	}
+	if len(run.questions) == 0 {
 		return false, GradingJobView{}, nil
 	}
 	physicalChildren, physicalErr := o.recognitionPhysicalSuccessSet(

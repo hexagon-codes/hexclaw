@@ -270,12 +270,16 @@ func (s *Store) CommitGradingAssessmentItem(ctx context.Context, item k12.Gradin
 	if err := ensureGradingItemScope(ctx, s.db, item.AgentName, item.JobID, item.ProblemID, item.AttemptID); err != nil {
 		return k12.GradingAssessmentItem{}, false, err
 	}
+	solveOperations := []k12.GradingItemOperation{k12.GradingItemOperationSolve, k12.GradingItemOperationSolveVerify}
+	if item.Status == k12.GradingAssessmentBlankSolved {
+		// 非判分的解题结果可直接引用生成回执，不将生成冒充独立校验。
+		solveOperations = append(solveOperations, k12.GradingItemOperationSolveGenerate)
+	}
 	if err := s.validateAssessmentInvocationRef(
 		ctx,
 		item,
 		item.SolveInvocationID,
-		k12.GradingItemOperationSolve,
-		k12.GradingItemOperationSolveVerify,
+		solveOperations...,
 	); err != nil {
 		return k12.GradingAssessmentItem{}, false, err
 	}

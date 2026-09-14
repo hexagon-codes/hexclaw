@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -250,6 +251,27 @@ func (e *durableRecognitionPhysicalCallExecutor) ExecuteRecognitionPhysicalCall(
 			invocation.PhysicalInvocationID,
 			invocation.Status,
 		)}
+	}
+
+	if planVersion == k12.RecognitionPlanVersionV2 {
+		reused, found, reuseErr := e.o.deps.Records.ReuseSucceededRecognitionPhysicalInvocation(
+			ctx, invocation.AgentName, invocation.PhysicalInvocationID,
+		)
+		if reuseErr != nil {
+			return zero, fmt.Errorf("%w: reuse recognition receipt: %w", ErrRecognitionPhysicalCallBeforeSend, reuseErr)
+		}
+		if found {
+			payload, loadErr := e.o.deps.Records.LoadSucceededModelPhysicalInvocationResultContent(
+				ctx, reused.AgentName, reused.PhysicalInvocationID, reused.ResultDigest,
+			)
+			if loadErr != nil {
+				return zero, fmt.Errorf("%w: load reused recognition receipt: %w", ErrRecognitionPhysicalCallBeforeSend, loadErr)
+			}
+			slog.Info("K12 recognition receipt reused", "job_id", reused.JobID,
+				"physical_invocation_id", reused.PhysicalInvocationID,
+				"reused_from", reused.ReusedFromPhysicalInvocationID, "unit", reused.PhysicalUnit, "provider_requests", 0)
+			return k12.RecognitionPhysicalCallResult{Payload: payload, InvocationID: reused.PhysicalInvocationID, ResultDigest: reused.ResultDigest}, nil
+		}
 	}
 
 	transportBinder, transportBoundary :=

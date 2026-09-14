@@ -22,11 +22,13 @@ var ErrModelPhysicalInvocationConflict = errors.New(
 	"model physical invocation immutable identity conflict",
 )
 
-const modelPhysicalInvocationColumns = `physical_invocation_id,parent_invocation_id,
+const modelPhysicalInvocationInsertColumns = `physical_invocation_id,parent_invocation_id,
     agent_name,job_id,stage,physical_unit,request_digest,route_snapshot_json,
     request_policy_snapshot_json,status,attempt,result_digest,external_request_id,
     failure_kind,created_at,updated_at,recognition_plan_version,plan_digest,
     candidate_exact_set_digest`
+
+const modelPhysicalInvocationColumns = modelPhysicalInvocationInsertColumns + `,reused_from_physical_invocation_id`
 
 func scanModelPhysicalInvocation(
 	row rowScanner,
@@ -53,6 +55,7 @@ func scanModelPhysicalInvocation(
 		&planVersion,
 		&invocation.PlanDigest,
 		&invocation.CandidateExactSetDigest,
+		&invocation.ReusedFromPhysicalInvocationID,
 	)
 	if err != nil {
 		return k12.ModelPhysicalInvocation{}, err
@@ -979,7 +982,7 @@ func (s *Store) prepareRecognizingInvocationWithInitialWholePageOnce(
 		res, insertErr := tx.ExecContext(
 			ctx,
 			`INSERT INTO k12_model_physical_invocations (`+
-				modelPhysicalInvocationColumns+
+				modelPhysicalInvocationInsertColumns+
 				`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                  ON CONFLICT DO NOTHING`,
 			child.PhysicalInvocationID,
@@ -1340,7 +1343,7 @@ func (s *Store) PrepareModelPhysicalInvocation(
 	res, err := s.db.ExecContext(
 		ctx,
 		`INSERT INTO k12_model_physical_invocations (`+
-			modelPhysicalInvocationColumns+
+			modelPhysicalInvocationInsertColumns+
 			`) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
              FROM k12_model_invocations AS parent
              WHERE invocation_id=? AND status=?
@@ -1502,7 +1505,7 @@ func (s *Store) prepareLayoutModelPhysicalInvocationOnce(
 	res, opErr := tx.ExecContext(
 		ctx,
 		`INSERT INTO k12_model_physical_invocations (`+
-			modelPhysicalInvocationColumns+
+			modelPhysicalInvocationInsertColumns+
 			`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
              ON CONFLICT DO NOTHING`,
 		invocation.PhysicalInvocationID,
@@ -2075,7 +2078,7 @@ func (s *Store) prepareFallbackModelPhysicalInvocationOnce(
 	res, opErr := tx.ExecContext(
 		ctx,
 		`INSERT INTO k12_model_physical_invocations (`+
-			modelPhysicalInvocationColumns+
+			modelPhysicalInvocationInsertColumns+
 			`) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
              FROM k12_model_invocations AS parent
              WHERE invocation_id=? AND status=?
@@ -2587,7 +2590,7 @@ func validateRecognitionLayoutPlanClaimReplayVia(
 	return nil
 }
 
-// MarkModelPhysicalInvocationSucceededWithContent 是唯一的物理调用成功转换。
+// MarkModelPhysicalInvocationSucceededWithContent 处理真实 Provider 请求的成功转换。
 // Store 而非调用方根据精确的 Provider 内容计算摘要，并私有保留该内容以支持重启安全的
 // 对账。ModelPhysicalInvocation 及其 JSON 表示仅暴露摘要。
 func (s *Store) MarkModelPhysicalInvocationSucceededWithContent(
