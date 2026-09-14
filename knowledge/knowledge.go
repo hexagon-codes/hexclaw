@@ -68,6 +68,7 @@ type Document struct {
 	VectorChunksTotal    *int64            `json:"vector_chunks_total,omitempty"`
 	VectorError          string            `json:"vector_error,omitempty"`
 	VectorOutcomeUnknown bool              `json:"vector_outcome_unknown,omitempty"`
+	TextOutcomeUnknown   bool              `json:"text_outcome_unknown,omitempty"`
 }
 
 // Chunk 文档片段

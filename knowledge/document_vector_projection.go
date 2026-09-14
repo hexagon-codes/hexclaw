@@ -20,6 +20,8 @@ type DocumentVectorProjection struct {
 	ChunksTotal      *int64            `json:"vector_chunks_total,omitempty"`
 	LastError        string            `json:"vector_error,omitempty"`
 	OutcomeUnknown   bool              `json:"vector_outcome_unknown,omitempty"`
+	// OCR 与向量调用分别投影未知状态，避免把文本失败当作可重发的向量失败。
+	TextOutcomeUnknown bool `json:"text_outcome_unknown,omitempty"`
 }
 
 type documentVectorProjectionRepository interface {
@@ -56,6 +58,14 @@ func (r *SQLiteSemanticIndexRepository) ListDocumentVectorProjections(
 		EXISTS(
 		  SELECT 1 FROM kb_embedding_batch_manifests bm
 		  WHERE bm.job_id=j.job_id AND bm.state='outcome_unknown'
+		),
+		EXISTS(
+		  SELECT 1 FROM kb_ingest_page_invocations i
+		  JOIN kb_knowledge_jobs ij ON ij.job_id=i.job_id
+		  WHERE ij.owner_id=b.owner_id AND ij.corpus_uid=b.corpus_uid
+		    AND ij.document_id=b.document_id AND ij.document_generation=b.content_generation
+		    AND ij.kind='ingest'
+		    AND (i.status='outcome_unknown' OR (i.status='running' AND ij.state='failed'))
 		)
 	FROM kb_semantic_corpora c
 	JOIN kb_embedding_policies p ON p.corpus_uid=c.corpus_uid
@@ -88,10 +98,10 @@ func (r *SQLiteSemanticIndexRepository) ListDocumentVectorProjections(
 		var projection DocumentVectorProjection
 		var vectorState, jobState, stage string
 		var chunksDone, chunksTotal sql.NullInt64
-		var outcomeUnknown int
+		var outcomeUnknown, textOutcomeUnknown int
 		if err := rows.Scan(&projection.DocumentID, &vectorState, &projection.JobID,
 			&jobState, &stage, &chunksDone, &chunksTotal, &projection.LastError,
-			&outcomeUnknown); err != nil {
+			&outcomeUnknown, &textOutcomeUnknown); err != nil {
 			return nil, err
 		}
 		projection.VectorIndexState = VectorIndexState(vectorState)
@@ -104,6 +114,7 @@ func (r *SQLiteSemanticIndexRepository) ListDocumentVectorProjections(
 		projection.ChunksDone = int64Pointer(chunksDone)
 		projection.ChunksTotal = int64Pointer(chunksTotal)
 		projection.OutcomeUnknown = outcomeUnknown != 0
+		projection.TextOutcomeUnknown = textOutcomeUnknown != 0
 		result[projection.DocumentID] = projection
 	}
 	return result, rows.Err()

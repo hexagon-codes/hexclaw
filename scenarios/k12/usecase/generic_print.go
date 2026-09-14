@@ -100,12 +100,17 @@ func normalizePrintableArtifactRequest(req PreparePrintableArtifactRequest) (Pre
 }
 
 func buildPrintArtifact(req PreparePrintableArtifactRequest, at int64) k12.PrintArtifact {
+	renderContract := ""
+	if req.SourceKind == k12.PrintSourceGradingFinalArtifact {
+		renderContract = printPDFRenderContractVersion
+	}
 	artifactBytes, _ := json.Marshal(struct {
 		SourceKind        string `json:"source_kind"`
 		SourceRef         string `json:"source_ref"`
 		Title             string `json:"title"`
 		CanonicalMarkdown string `json:"canonical_markdown"`
-	}{req.SourceKind, req.SourceRef, req.Title, req.CanonicalMarkdown})
+		RenderContract    string `json:"render_contract,omitempty"`
+	}{req.SourceKind, req.SourceRef, req.Title, req.CanonicalMarkdown, renderContract})
 	sourceSum := sha256.Sum256(artifactBytes)
 	sourceDigest := hex.EncodeToString(sourceSum[:])
 	artifactIDSum := sha256.Sum256([]byte(req.AgentName + "\x00" + sourceDigest))
@@ -375,7 +380,7 @@ func (d Deps) gradingFinalArtifactPrintRequest(
 	req := PreparePrintableArtifactRequest{
 		AgentName:         artifact.AgentName,
 		SourceKind:        k12.PrintSourceGradingFinalArtifact,
-		SourceRef:         "final_artifact:" + artifact.ArtifactID + ":" + artifact.ArtifactDigest + ":" + printPDFRenderContractVersion,
+		SourceRef:         "final_artifact:" + artifact.ArtifactID + ":" + artifact.ArtifactDigest,
 		Title:             title,
 		CanonicalMarkdown: canonical,
 	}

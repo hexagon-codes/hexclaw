@@ -216,6 +216,11 @@ func (s *Server) handleRetryKnowledgeDocument(w http.ResponseWriter, r *http.Req
 
 func writeDocumentRetryError(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, knowledge.ErrOCRPageInvocationOutcomeUnknown):
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error": "OCR result is unknown; the file and completed pages are preserved. Retrying cannot safely resend this request.",
+			"code":  "knowledge_document_ocr_outcome_unknown",
+		})
 	case errors.Is(err, knowledge.ErrInvalidDocumentRetry):
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error(), "code": "knowledge_document_retry_invalid"})
 	case errors.Is(err, knowledge.ErrIdempotencyConflict):

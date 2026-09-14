@@ -700,6 +700,7 @@ func applyKnowledgeDocumentVectorProjection(
 	document.VectorChunksTotal = projection.ChunksTotal
 	document.VectorError = projection.LastError
 	document.VectorOutcomeUnknown = projection.OutcomeUnknown
+	document.TextOutcomeUnknown = projection.TextOutcomeUnknown
 }
 
 func applyKnowledgeDocumentVectorPayload(
@@ -714,6 +715,7 @@ func applyKnowledgeDocumentVectorPayload(
 	payload["vector_chunks_total"] = projection.ChunksTotal
 	payload["vector_error"] = projection.LastError
 	payload["vector_outcome_unknown"] = projection.OutcomeUnknown
+	payload["text_outcome_unknown"] = projection.TextOutcomeUnknown
 }
 
 func (s *Server) knowledgeDocumentDetail(

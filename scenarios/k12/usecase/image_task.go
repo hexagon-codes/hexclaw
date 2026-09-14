@@ -1645,8 +1645,8 @@ func (c *ImageTaskCoordinator) projectTarget(
 				if view.CreativeFeedback != "feedback_ready" && view.CreativeFeedback != "feedback_failed" {
 					view.CreativeFeedback = publicCreativeFeedbackInvocationState(invocation)
 				}
-				view.CreativeFeedbackRetryable =
-					invocation.Status == k12.ImageTaskInvocationFailed && invocation.RetrySafe
+				// 作品恢复投影统一判断成功回执重放与已知失败重试，不在图片入口另设状态规则。
+				view.CreativeFeedbackRetryable = generation.RetrySafe
 				view.feedbackInvocation = &invocation
 				if invocation.Status == k12.ImageTaskInvocationPrepared ||
 					invocation.Status == k12.ImageTaskInvocationSent {

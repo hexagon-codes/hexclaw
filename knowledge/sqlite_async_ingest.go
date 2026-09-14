@@ -468,7 +468,7 @@ func queueFailedTextRetryTx(
 		return err
 	}
 	if unresolvedOCR > 0 {
-		return ErrDocumentRetryNotAllowed
+		return fmt.Errorf("%w: %w", ErrDocumentRetryNotAllowed, ErrOCRPageInvocationOutcomeUnknown)
 	}
 	res, err := tx.ExecContext(ctx, `UPDATE kb_documents
 		SET status='processing',error_message='',updated_at=?
