@@ -2,7 +2,6 @@ package mcp
 
 import (
 	"errors"
-	"fmt"
 	"regexp"
 	"strings"
 	"time"
@@ -38,9 +37,9 @@ type failureLogEvent struct {
 }
 
 var (
-	mcpCredentialPattern    = regexp.MustCompile(`(?i)(password|passwd|pass|token|secret|api[_-]?key|authorization|credential)(\s*[:=]\s*)([^\s,;]+)`)
+	mcpCredentialPattern    = regexp.MustCompile(`(?i)((?:password|passwd|pass|token|secret|api[_-]?key|authorization|credential)["']?\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|(?:bearer|basic)\s+[^\s,;]+|[^\s,;]+)`)
 	mcpURLCredentialPattern = regexp.MustCompile(`(?i)([a-z][a-z0-9+.-]*://)([^/@\s]+)@`)
-	mcpBearerPattern        = regexp.MustCompile(`(?i)(bearer\s+)[^\s,;]+`)
+	mcpBearerPattern        = regexp.MustCompile(`(?i)\b(bearer|basic)(\s+)[^\s,;]+`)
 )
 
 func (m *Manager) recordConnectFailure(name string, err error) {
@@ -173,11 +172,11 @@ func safeMCPErrorText(err error) string {
 		return ""
 	}
 	s := strings.TrimSpace(err.Error())
-	s = mcpCredentialPattern.ReplaceAllString(s, `$1$2[REDACTED]`)
 	s = mcpURLCredentialPattern.ReplaceAllString(s, `$1[REDACTED]@`)
-	s = mcpBearerPattern.ReplaceAllString(s, `$1[REDACTED]`)
+	s = mcpCredentialPattern.ReplaceAllString(s, `$1[REDACTED]`)
+	s = mcpBearerPattern.ReplaceAllString(s, `$1$2[REDACTED]`)
 	if len(s) > maxMCPFailureText {
-		s = s[:maxMCPFailureText] + "…"
+		s = strings.ToValidUTF8(s[:maxMCPFailureText], "") + "…"
 	}
 	if s == "" {
 		return "MCP connection failed"
@@ -214,7 +213,8 @@ func failureStatusFields(st *ServerStatus, failure connectFailure) {
 		return
 	}
 	st.LastError = failure.lastError
-	st.Retryable = failure.retryable
+	retryable := failure.retryable
+	st.Retryable = &retryable
 	st.RetryCount = failure.retryCount
 	if failure.retryable {
 		st.RetryState = "retrying"
@@ -224,8 +224,4 @@ func failureStatusFields(st *ServerStatus, failure connectFailure) {
 	} else {
 		st.RetryState = "blocked"
 	}
-}
-
-func (f connectFailure) String() string {
-	return fmt.Sprintf("%s (retryable=%t, count=%d)", f.lastError, f.retryable, f.retryCount)
 }

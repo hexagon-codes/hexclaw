@@ -674,7 +674,7 @@ type ServerStatus struct {
 	Connected   bool   `json:"connected"`
 	ToolCount   int    `json:"tool_count"`
 	LastError   string `json:"last_error,omitempty"`
-	Retryable   bool   `json:"retryable,omitempty"`
+	Retryable   *bool  `json:"retryable,omitempty"`
 	RetryState  string `json:"retry_state,omitempty"`
 	RetryCount  int    `json:"retry_count,omitempty"`
 	NextRetryAt string `json:"next_retry_at,omitempty"`
