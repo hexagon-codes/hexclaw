@@ -349,7 +349,8 @@ func CanonicalPlainTextFallback(markdown string) string {
 	out = strings.NewReplacer(
 		`\times`, "×", `\div`, "÷", `\cdot`, "·",
 		`\leq`, "≤", `\geq`, "≥", `\neq`, "≠",
-		`\(`, "", `\)`, "", `\[`, "", `\]`, "", "$", "",
+		`\(`, "", `\)`, "", `\（`, "（", `\）`, "）",
+		`\[`, "", `\]`, "", "$", "",
 	).Replace(out)
 	return strings.TrimSpace(out)
 }

@@ -375,6 +375,12 @@ func (o *GradingOrchestrator) StartPhotoGradingJob(ctx context.Context, in Start
 			return GradingJobView{}, false, err
 		}
 	}
+	if !created {
+		// 幂等重放必须先恢复原检查点，不能用当前请求的空运行时覆盖历史产物。
+		if _, err := o.ensureRun(ctx, v.Record.RecordID); err != nil {
+			return GradingJobView{}, false, err
+		}
+	}
 	o.mu.Lock()
 	run, ok := o.runs[v.Record.RecordID]
 	if !ok {
@@ -520,6 +526,25 @@ func (o *GradingOrchestrator) runLoop(ctx context.Context, run *gradingRun, jobI
 			if v, err = o.runProject(ctx, run, jobID); err != nil {
 				return v, err
 			}
+		case k12.GradingStageCompleted:
+			if run.result == nil {
+				// 仅恢复已提交的识别与判定事实，不重启任何模型阶段。
+				if len(run.questions) == 0 {
+					run.questions, _ = o.typedRecognizedQuestions(ctx, jobID, run.agentName)
+				}
+				result, durable, resultErr := o.durableAssessmentResult(ctx, run, v)
+				if resultErr != nil {
+					return v, resultErr
+				}
+				if !durable {
+					return v, fmt.Errorf("completed grading result has no complete durable assessment set")
+				}
+				run.result = result
+				if err := o.persistRun(jobID, run); err != nil {
+					return v, err
+				}
+			}
+			return v, nil
 		default:
 			// completed / cancelled / failed_retryable / failed_terminal：推进结束。
 			return v, nil
@@ -1281,7 +1306,19 @@ func (o *GradingOrchestrator) runRecognize(ctx context.Context, run *gradingRun,
 	}
 	// 先固化产物再写检查点（§6.15：检查点存在即产物可回放，崩溃窗口不产生"有检查点无产物"）。
 	if perr := o.persistRun(jobID, run); perr != nil {
-		return o.failStage(context.WithoutCancel(ctx), run, jobID, "result_not_durable", perr)
+		// Provider 已成功且任务级回执/题目事实已经落库；只有本地检查点写入失败
+		// 时不能回退到普通可重试失败，否则恢复会重复识别。
+		_, ledgerErr := o.deps.Records.MarkModelInvocationOutcomeUnknown(
+			context.WithoutCancel(ctx), run.agentName, invocation.InvocationID,
+			"result_not_durable",
+		)
+		v, aerr := o.markGradingOutcomeUnknown(
+			context.WithoutCancel(ctx), run, jobID, "result_not_durable",
+		)
+		if aerr != nil {
+			return v, errors.Join(perr, ledgerErr, aerr)
+		}
+		return v, errors.Join(perr, ledgerErr)
 	}
 	if _, err := o.deps.Records.MarkModelInvocationSucceeded(context.WithoutCancel(ctx), run.agentName,
 		invocation.InvocationID, modelInvocationResultDigest(run.questions), ""); err != nil {

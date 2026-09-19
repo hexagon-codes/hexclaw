@@ -298,13 +298,21 @@ func (c *PracticeReturnRegradeCoordinator) projectCompleted(
 	if len(unresolved) > 0 || unmatched || (ret.AutoMatch && len(covered) == 0) {
 		status = k12.PracticeRegradeNeedsReview
 	}
+	markdown := result.Markdown
+	for _, item := range result.Items {
+		if photoPracticeUnmatched(item) {
+			// 匹配失败的汇总沿用当前共享投影，其他既有结果和冻结判定保持不变。
+			markdown = photoGradeMarkdown(result)
+			break
+		}
+	}
 	return c.updateProjection(ctx, agentName, setID, returnID,
 		practiceReturnRegradeProjection{
 			JobID: job.Record.RecordID, Status: status,
 			RouteSnapshot:    job.Fields.ModelSnapshot,
 			ReplaceResult:    true,
 			AnnotatedAssetID: annotatedAssetID,
-			ResultMarkdown:   result.Markdown,
+			ResultMarkdown:   markdown,
 			Unresolved:       unresolved,
 			Covered:          covered,
 		})

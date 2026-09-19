@@ -901,7 +901,7 @@ func (o *GradingOrchestrator) CanRetryPhotoGradingWithParentAutomaticWindow(
 	if err != nil {
 		return false, err
 	}
-	return gradingInteractiveDeadlineRetryEligible(v), nil
+	return gradingInteractiveDeadlineRetryEligible(v, o.deps.now()), nil
 }
 
 func (o *GradingOrchestrator) RetryPhotoGradingJobWithParentAutomaticWindow(

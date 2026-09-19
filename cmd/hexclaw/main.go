@@ -601,24 +601,26 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 	if cfg.MCP.Enabled {
 		mcpMgr = hexmcp.NewManager()
 		defer mcpMgr.Close()
-		if len(cfg.MCP.Servers) > 0 {
-			var mcpConfigs []hexmcp.ServerConfig
-			for _, s := range cfg.MCP.Servers {
-				enabled := s.Enabled
-				if !enabled && (s.Command != "" || s.Endpoint != "") {
-					enabled = true
-				}
-				mcpConfigs = append(mcpConfigs, hexmcp.ServerConfig{
-					Name:      s.Name,
-					Transport: s.Transport,
-					Command:   s.Command,
-					Args:      s.Args,
-					Env:       s.Env,
-					Endpoint:  s.Endpoint,
-					Enabled:   enabled,
-				})
+		var mcpConfigs []hexmcp.ServerConfig
+		for _, s := range cfg.MCP.Servers {
+			enabled := s.Enabled
+			if !enabled && (s.Command != "" || s.Endpoint != "") {
+				enabled = true
 			}
-			totalTools, err := mcpMgr.Connect(ctx, mcpConfigs)
+			mcpConfigs = append(mcpConfigs, hexmcp.ServerConfig{
+				Name:      s.Name,
+				Transport: s.Transport,
+				Command:   s.Command,
+				Args:      s.Args,
+				Env:       s.Env,
+				Endpoint:  s.Endpoint,
+				Enabled:   enabled,
+			})
+		}
+		// 空配置也必须 Connect：Connect 内启动后台 reconnectLoop，
+		// 否则动态添加的可恢复失败服务器已登记却永不重试（BUG-20260913-010）。
+		totalTools, err := mcpMgr.Connect(ctx, mcpConfigs)
+		if len(cfg.MCP.Servers) > 0 {
 			if err != nil {
 				fmt.Printf("  ✗ MCP         连接出错: %v\n", err)
 			}

@@ -316,6 +316,7 @@ func (d Deps) GenerateWorkFeedbackCommand(
 			}
 		}
 		providerStartedAt := time.Now()
+		providerErrBefore := providerCtx.Err()
 		providerDeadline, hasProviderDeadline := providerCtx.Deadline()
 		var route k12.ImageTaskRouteSnapshot
 		var invocationID string
@@ -341,6 +342,15 @@ func (d Deps) GenerateWorkFeedbackCommand(
 				unknown := sentProviderOutcomeUnknown(err, providerCtx.Err())
 				failureKind := "work_feedback_provider_failed"
 				retrySafe := !unknown
+				// 显式路由超时即使因确定性测试时钟导致父级 deadline 在进入前已过期，
+				// 仍代表一次 Provider 边界；默认超时叠加进入前已过期的上下文，说明
+				// Provider 尚未开始工作，保持为确定失败。进入后才取消的上下文在调用
+				// 已发送时一律不可判定，必须停泊为未知结果。
+				if unknown && invocationOutcomeUnknown(providerCtx.Err()) &&
+					(providerErrBefore == nil || invocation.RouteSnapshot.TimeoutMS !=
+						int(imageTaskDefaultProviderTimeout/time.Millisecond)) {
+					failureKind = "work_feedback_outcome_unknown"
+				}
 				if errors.Is(err, k12.ErrModelCapabilityUnverified) {
 					failureKind = "model_capability_unverified"
 					retrySafe = false

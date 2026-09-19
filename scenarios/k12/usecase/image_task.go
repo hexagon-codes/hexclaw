@@ -1642,7 +1642,13 @@ func (c *ImageTaskCoordinator) projectTarget(
 			)
 			switch {
 			case invocationErr == nil:
-				if view.CreativeFeedback != "feedback_ready" && view.CreativeFeedback != "feedback_failed" {
+				if invocation.Status == k12.ImageTaskInvocationOutcomeUnknown &&
+					invocation.ErrorKind == "work_feedback_outcome_unknown" &&
+					view.CreativeFeedback != "feedback_ready" {
+					// Provider 发送后发生 deadline/取消是独立的终态：不能把 generation
+					// 的普通失败投影暴露为可重试/一般失败，也不能再次发送请求。
+					view.CreativeFeedback = "feedback_outcome_unknown"
+				} else if view.CreativeFeedback != "feedback_ready" && view.CreativeFeedback != "feedback_failed" {
 					view.CreativeFeedback = publicCreativeFeedbackInvocationState(invocation)
 				}
 				// 作品恢复投影统一判断成功回执重放与已知失败重试，不在图片入口另设状态规则。
@@ -2865,7 +2871,9 @@ func (c *ImageTaskCoordinator) Retry(
 			projection.Stage == k12.GradingStageFailedRetryable &&
 			projection.Retryable
 		requiresParentWindow := projection != nil &&
-			projection.retryFailureKind == gradingFailureInteractiveDeadlineExceeded
+			(projection.retryFailureKind == gradingFailureInteractiveDeadlineExceeded ||
+				(genericRetryable && original.AutomaticDeadlineAt > 0 &&
+					original.AutomaticDeadlineAt <= c.now()))
 		parentWindowOnly := projection == nil ||
 			projection.retryFailureKind == "" ||
 			requiresParentWindow

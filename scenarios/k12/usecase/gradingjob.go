@@ -603,10 +603,11 @@ func (d Deps) RetryGradingJob(ctx context.Context, agentName, recordID string) (
 	return d.saveGradingJob(ctx, v, k12.GradingStageQueued)
 }
 
-func gradingInteractiveDeadlineRetryEligible(v GradingJobView) bool {
+func gradingInteractiveDeadlineRetryEligible(v GradingJobView, now int64) bool {
 	return v.Record.Status == k12.GradingStageFailedRetryable &&
 		v.Fields.Retryable &&
-		v.Fields.FailureKind == gradingFailureInteractiveDeadlineExceeded
+		(v.Fields.FailureKind == gradingFailureInteractiveDeadlineExceeded ||
+			parentAutomaticDeadlineExceeded(v.Fields, now))
 }
 
 func (d Deps) RetryGradingJobWithParentAutomaticWindow(
@@ -618,7 +619,7 @@ func (d Deps) RetryGradingJobWithParentAutomaticWindow(
 	if err != nil {
 		return GradingJobView{}, err
 	}
-	if !gradingInteractiveDeadlineRetryEligible(v) {
+	if !gradingInteractiveDeadlineRetryEligible(v, d.now()) {
 		return GradingJobView{}, errGradingStageConflict(
 			"阶段 %s/failure_kind=%s 不可刷新 parent automatic window",
 			v.Record.Status, v.Fields.FailureKind,

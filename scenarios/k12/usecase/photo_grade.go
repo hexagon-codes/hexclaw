@@ -390,6 +390,8 @@ func (d Deps) assessPhotoItem(
 	return item, nil
 }
 
+const practiceUnmatchedWarning = "This content cannot be uniquely matched to the practice paper. No correctness judgment was produced."
+
 // photoItemWithPracticeReference 在回执固化前绑定练习身份，保留识别事实。
 func photoItemWithPracticeReference(req PhotoGradeRequest, q RecognizedQuestion) PhotoGradeItem {
 	item := PhotoGradeItem{Recognized: q}
@@ -402,7 +404,7 @@ func photoItemWithPracticeReference(req PhotoGradeRequest, q RecognizedQuestion)
 		item.PracticeProblemID = req.practiceReference.PracticeProblemID
 	} else if len(req.PracticeReferences) > 0 {
 		item.Status = PhotoAnswerUnclear
-		item.Warning = "Unable to uniquely match this content to the practice paper. No correctness judgment was produced."
+		item.Warning = practiceUnmatchedWarning
 	}
 	return item
 }
@@ -694,6 +696,13 @@ func photoQuestionReference(question RecognizedQuestion) string {
 	return photoClip(photoQuestionStem(question), 120)
 }
 
+// 只识别程序生成的明确匹配原因，兼容既有回执，不从模型自由文本推测分类。
+func photoPracticeUnmatched(item PhotoGradeItem) bool {
+	return item.Status == PhotoAnswerUnclear && item.PracticeItemID == "" &&
+		(item.Warning == practiceUnmatchedWarning ||
+			item.Warning == "Unable to uniquely match this content to the practice paper. No correctness judgment was produced.")
+}
+
 func photoGradeMarkdown(result PhotoGradeResult) string {
 	var b strings.Builder
 	if result.Mode == PhotoModeSolve {
@@ -723,7 +732,7 @@ func photoGradeMarkdown(result PhotoGradeResult) string {
 		return strings.TrimSpace(b.String())
 	}
 
-	correct, processIssue, wrong, unanswered, solved, unclear, pending := 0, 0, 0, 0, 0, 0, 0
+	correct, processIssue, wrong, unanswered, solved, unclear, unmatched, pending := 0, 0, 0, 0, 0, 0, 0, 0
 	for _, item := range result.Items {
 		switch item.Status {
 		case PhotoCorrect:
@@ -737,7 +746,11 @@ func photoGradeMarkdown(result PhotoGradeResult) string {
 		case PhotoBlankSolved:
 			solved++
 		case PhotoAnswerUnclear:
-			unclear++
+			if photoPracticeUnmatched(item) {
+				unmatched++
+			} else {
+				unclear++
+			}
 		default:
 			pending++
 		}
@@ -756,6 +769,9 @@ func photoGradeMarkdown(result PhotoGradeResult) string {
 	}
 	if unclear > 0 {
 		fmt.Fprintf(&b, "，无法识别 **%d** 题", unclear)
+	}
+	if unmatched > 0 {
+		fmt.Fprintf(&b, "，无法匹配练习卷 **%d** 题", unmatched)
 	}
 	if pending > 0 {
 		fmt.Fprintf(&b, "，待核对 **%d** 题", pending)
@@ -886,8 +902,21 @@ func photoGradeMarkdown(result PhotoGradeResult) string {
 	if unclear > 0 {
 		fmt.Fprintf(&b, "### ? 无法识别（%d）\n\n", unclear)
 		for _, item := range result.Items {
-			if item.Status == PhotoAnswerUnclear {
-				fmt.Fprintf(&b, "- %s：无法可靠识别，未判断对错。\n", photoQuestionReference(item.Recognized))
+			if item.Status == PhotoAnswerUnclear && !photoPracticeUnmatched(item) {
+				warning := strings.TrimSpace(item.Warning)
+				if warning == "" {
+					warning = "无法可靠识别，未判断对错。"
+				}
+				fmt.Fprintf(&b, "- %s：%s\n", photoQuestionReference(item.Recognized), photoInline(warning, 240))
+			}
+		}
+		b.WriteString("\n")
+	}
+	if unmatched > 0 {
+		fmt.Fprintf(&b, "### ? 无法匹配练习卷（%d）\n\n", unmatched)
+		for _, item := range result.Items {
+			if photoPracticeUnmatched(item) {
+				fmt.Fprintf(&b, "- %s：%s\n", photoQuestionReference(item.Recognized), photoInline(item.Warning, 240))
 			}
 		}
 		b.WriteString("\n")
