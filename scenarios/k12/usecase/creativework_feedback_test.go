@@ -289,10 +289,10 @@ func TestBUG20260726003_GenerateWorkFeedback_PacksVerboseEvidenceIntoValidAtoms(
 	labels := []rune("甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未申酉戌亥天地玄黄宇宙洪荒日月盈昃辰宿列张")
 	for i := 0; i < 36; i++ {
 		raw.WriteRune(labels[i])
-		raw.WriteString("原文写出了爸爸下班后仍陪孩子分析题目的具体动作，人物关系清楚。")
+		raw.WriteString("原文写出了爸爸下班后仍陪孩子分析题目的具体动作，人物关系清楚。\n")
 	}
-	raw.WriteString("建议下一次只补充一处能听见的生活细节。")
-	d.Solver = &fakeWorkFeedbackSolver{feedback: raw.String()}
+	d.Solver = &fakeWorkFeedbackSolver{feedback: "## 可见证据\n" + raw.String() +
+		"\n## 先这样肯定\n爸爸的动作写得具体。\n## 家长可以这样问或讲\n请孩子说说当时听到了什么。\n## 下一次只试一个点\n下一次只补充一处能听见的生活细节。"}
 	ctx := context.Background()
 	id := newWritingWork(t, d, "xiaoming")
 
@@ -323,8 +323,8 @@ func TestBUG20260726003_GenerateWorkFeedback_PacksVerboseEvidenceIntoValidAtoms(
 
 func TestBUG20260726003_GenerateWorkFeedback_SplitsOneOversizedEvidenceAtom(t *testing.T) {
 	d := newDataDeps(t)
-	raw := strings.Repeat("原文里能看到爸爸陪孩子分析题目的具体动作", 40) +
-		"收尾证据。建议下一次只补充一处能听见的生活细节。"
+	raw := "## 可见证据\n" + strings.Repeat("原文里能看到爸爸陪孩子分析题目的具体动作", 40) +
+		"收尾证据。\n## 先这样肯定\n爸爸的动作写得具体。\n## 家长可以这样问或讲\n请孩子说说当时听到了什么。\n## 下一次只试一个点\n下一次只补充一处能听见的生活细节。"
 	d.Solver = &fakeWorkFeedbackSolver{feedback: raw}
 	ctx := context.Background()
 	id := newWritingWork(t, d, "xiaoming")

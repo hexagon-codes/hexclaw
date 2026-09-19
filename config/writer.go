@@ -17,14 +17,40 @@ import (
 // 支持追加/移除 MCP server 配置到 hexclaw.yaml，
 // 保留用户手动编辑的注释和格式。
 type Writer struct {
-	mu   sync.Mutex
-	path string
-	box  *secret.Box // 注入后：MCP server 的 env 凭证静态加密落盘（保险箱接管 MCP 凭证）。
+	mu       sync.Locker
+	path     string
+	box      *secret.Box // 注入后：MCP server 的 env 凭证静态加密落盘（保险箱接管 MCP 凭证）。
+	onCommit func(*Config)
 }
 
 // NewWriter 创建配置写入器
 func NewWriter(path string) *Writer {
-	return &Writer{path: path}
+	return &Writer{path: path, mu: &sync.Mutex{}}
+}
+
+// SetCommitCoordinator 在启动装配时接入所有设置共用的提交锁和内存投影。
+func (w *Writer) SetCommitCoordinator(lock sync.Locker, onCommit func(*Config)) {
+	w.mu, w.onCommit = lock, onCommit
+}
+
+// SaveRuntimeLocked 保存已经持有共享提交锁的运行时候选，避免递归加锁。
+// Writer 管理的字段从锁内最新文件读取，不能被其他设置的旧快照覆盖。
+func (w *Writer) SaveRuntimeLocked(cfg *Config) error {
+	next := *cfg
+	if _, err := os.Stat(w.path); err == nil {
+		latest, err := w.readConfig()
+		if err != nil {
+			return err
+		}
+		next.MCP, next.Knowledge = latest.MCP, latest.Knowledge
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if err := w.writeConfig(&next); err != nil {
+		return err
+	}
+	cfg.MCP, cfg.Knowledge = next.MCP, next.Knowledge
+	return nil
 }
 
 // SetSecretBox 注入静态加密保险箱。注入后 readConfig 解密、writeConfig 加密 MCP env 凭证；
@@ -184,7 +210,11 @@ type KnowledgeRetrievalSettings struct {
 func (w *Writer) UpdateKnowledgeRetrieval(s KnowledgeRetrievalSettings) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	return w.UpdateKnowledgeRetrievalLocked(s)
+}
 
+// UpdateKnowledgeRetrievalLocked 供已持有配置提交锁的运行时事务调用。
+func (w *Writer) UpdateKnowledgeRetrievalLocked(s KnowledgeRetrievalSettings) error {
 	cfg, err := w.readConfig()
 	if err != nil {
 		return err
@@ -203,7 +233,11 @@ func (w *Writer) UpdateKnowledgeRetrieval(s KnowledgeRetrievalSettings) error {
 func (w *Writer) ReadKnowledge() (KnowledgeConfig, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	return w.ReadKnowledgeLocked()
+}
 
+// ReadKnowledgeLocked 与同一提交锁内的候选更新共享读取快照。
+func (w *Writer) ReadKnowledgeLocked() (KnowledgeConfig, error) {
 	cfg, err := w.readConfig()
 	if err != nil {
 		return KnowledgeConfig{}, err
@@ -242,16 +276,32 @@ func (w *Writer) writeConfig(cfg *Config) error {
 	}
 	// 写盘前把 MCP env/secret args 静态加密。新 secret metadata 没有 Box 时
 	// fail-closed；无 metadata 的历史普通 MCP 配置保留兼容。
-	if err := EncryptMCPSecrets(cfg.MCP.Servers, w.box); err != nil {
+	// 加密只修改持久化副本，运行态和调用者仍保留解密值。
+	persisted := *cfg
+	persisted.MCP.Servers = append([]MCPServerConfig(nil), cfg.MCP.Servers...)
+	for i := range persisted.MCP.Servers {
+		server := &persisted.MCP.Servers[i]
+		server.Args = append([]string(nil), server.Args...)
+		server.Env = cloneMCPStringMapForWriter(server.Env)
+		server.ArgsSecretRefs = cloneMCPArgRefsForWriter(server.ArgsSecretRefs)
+		server.EnvSecretRefs = cloneMCPStringMapForWriter(server.EnvSecretRefs)
+	}
+	if err := EncryptMCPSecrets(persisted.MCP.Servers, w.box); err != nil {
 		return err
 	}
-	data, err := marshalConfigForPersistence(cfg)
+	data, err := marshalConfigForPersistence(&persisted)
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
 	}
 	// 仅所有者可访问的 YAML 中可能包含 Provider Key 和 MCP 凭据。
 	// 所有写入路径都必须确保整个文件仅所有者可访问。
-	return ReconcileCommittedWrite(atomicWriteFile(w.path, data, 0o600))
+	if err := ReconcileCommittedWrite(atomicWriteFile(w.path, data, 0o600)); err != nil {
+		return err
+	}
+	if w.onCommit != nil {
+		w.onCommit(cfg)
+	}
+	return nil
 }
 
 type atomicWriteOps struct {

@@ -492,7 +492,7 @@ func (s *Server) disableEmbeddingAutoInstallForDeletedModel(name string) error {
 	nextEmbedding.DisableAutoInstall = true
 	nextKnowledge.Embedding = nextEmbedding
 	nextCfg.Knowledge = nextKnowledge
-	if err := config.Save(&nextCfg, ""); err != nil {
+	if err := s.saveRuntimeConfig(&nextCfg); err != nil {
 		return fmt.Errorf("保存知识库嵌入模型自动安装设置: %w", err)
 	}
 	s.cfg.Knowledge = nextKnowledge

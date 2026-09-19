@@ -433,6 +433,10 @@ func buildStructuredWorkFeedback(workType string, version k12.CreativeWorkVersio
 			observationEvidence = append(observationEvidence, clause)
 		}
 	}
+	needsPacking := !strictFeedback || len(observationEvidence) > 3
+	for _, evidence := range observationEvidence {
+		needsPacking = needsPacking || len([]rune(evidence)) > 500
+	}
 	if len(observationEvidence) == 0 {
 		for _, item := range clauses {
 			if clause := k12.NormalizeWorkFeedbackAtom(item.text); clause != "" && !isScaffold(clause) {
@@ -448,7 +452,7 @@ func buildStructuredWorkFeedback(workType string, version k12.CreativeWorkVersio
 				}
 			}
 		}
-	} else if !strictFeedback || len(observationEvidence) > 3 {
+	} else if needsPacking {
 		// 模型换行不等于独立观察条目。复用句界合并，将不同证据保存为
 		// 最多三条、每条不超过五百字的观察；已合法的当前格式保持原样。
 		const maxObservationRunes = 500

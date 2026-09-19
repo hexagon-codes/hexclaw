@@ -80,7 +80,10 @@ import (
 
 // Server HTTP API 服务器
 type Server struct {
-	cfg *config.Config
+	cfg             *config.Config
+	runtimeCfgPath  string
+	backendID       string
+	desktopAPIToken string
 	// cfgMu 串行化 s.cfg 的 read-copy-save-apply 写路径（GO-7/BUG-20260703）：
 	// 各配置写 handler 都做「整结构浅拷贝→落盘→回写」，无锁时既有同址读写
 	// 竞争（拷贝读 vs 字段写），也有 lost-update（旧副本落盘抹掉他人变更）。
@@ -292,6 +295,9 @@ func (s *Server) SetSidecarCapabilityToken(token string) {
 	s.sidecarCapabilityToken = strings.TrimSpace(token)
 }
 
+// SetDesktopAPIToken 仅保存原生层注入的本机业务凭据，不写入 YAML。
+func (s *Server) SetDesktopAPIToken(token string) { s.desktopAPIToken = token }
+
 // SetStreamStateProvider 设置流式 in-flight 状态提供器。
 func (s *Server) SetStreamStateProvider(p streamstate.Provider) {
 	s.streamStates = p
@@ -363,6 +369,25 @@ func (s *Server) SetMCPManager(mgr *hexmcp.Manager) {
 // SetCfgWriter 设置配置文件写入器（MCP 动态添加持久化用）
 func (s *Server) SetCfgWriter(w *config.Writer) {
 	s.cfgWriter = w
+	if w != nil {
+		w.SetCommitCoordinator(&s.cfgMu, func(next *config.Config) {
+			s.cfg.MCP, s.cfg.Knowledge = next.MCP, next.Knowledge
+		})
+	}
+}
+
+// SetRuntimeConfigPath 固定当前服务所有设置写入和补偿的实际启动路径。
+func (s *Server) SetRuntimeConfigPath(path string) { s.runtimeCfgPath = path }
+
+// SetBackendID 注入随数据库持久化的数据实例身份。
+func (s *Server) SetBackendID(id string) { s.backendID = id }
+
+// saveRuntimeConfig 由已经持有 cfgMu 的设置事务调用。
+func (s *Server) saveRuntimeConfig(cfg *config.Config) error {
+	if s.cfgWriter != nil {
+		return s.cfgWriter.SaveRuntimeLocked(cfg)
+	}
+	return config.Save(cfg, s.runtimeCfgPath)
 }
 
 // SetSemanticRuntimeInvalidator installs the fail-closed boundary used by
@@ -726,6 +751,8 @@ func (s *Server) routes() http.Handler {
 
 	// 配置 API
 	mux.HandleFunc("GET /api/v1/config/llm", s.handleGetLLMConfig)
+	mux.HandleFunc("POST /api/v1/config/llm/providers/{provider_instance_id}/reveal-key", s.handleRevealProviderKey)
+	mux.HandleFunc("GET /api/v1/config/mutations/{request_id}", s.handleGetConfigMutation)
 	mux.HandleFunc("PUT /api/v1/config/llm", s.handleUpdateLLMConfig)
 	mux.HandleFunc("POST /api/v1/config/llm/test", s.handleTestLLMConfig)
 	mux.HandleFunc("POST /api/v1/config/llm/probe", s.handleProbeModelCapability)
@@ -1743,6 +1770,12 @@ func (s *Server) apiAuthMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
+		if isLoopbackRequest(r) && tokenMatchesBearer(r, s.desktopAPIToken) {
+			next.ServeHTTP(w, withAuthenticatedHTTPPrincipal(r, authenticatedHTTPPrincipal{
+				userID: defaultDesktopUserID, platform: adapter.PlatformDesktop,
+			}))
+			return
+		}
 		if tokenMatchesBearer(r, s.cfg.Server.APIToken) {
 			next.ServeHTTP(w, withAuthenticatedHTTPPrincipal(r, authenticatedHTTPPrincipal{
 				userID: "api-user", platform: adapter.PlatformAPI,
@@ -1755,18 +1788,8 @@ func (s *Server) apiAuthMiddleware(next http.Handler) http.Handler {
 			}))
 			return
 		}
-		// Compatibility transition: old Desktop builds have no token transport.
-		// The fallback is loopback-only and disappears automatically as soon as a
-		// per-start capability is configured. It is never available remotely.
-		if isLoopbackRequest(r) && s.sidecarCapabilityToken == "" {
-			next.ServeHTTP(w, withAuthenticatedHTTPPrincipal(r, authenticatedHTTPPrincipal{
-				userID: defaultDesktopUserID, platform: adapter.PlatformDesktop,
-			}))
-			return
-		}
-
 		writeJSON(w, http.StatusUnauthorized, map[string]string{
-			"error": "未授权：需要有效的 capability token",
+			"error": "Valid access token required",
 		})
 	})
 }

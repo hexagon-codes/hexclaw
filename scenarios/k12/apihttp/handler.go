@@ -1701,13 +1701,16 @@ func (h *handler) cronReconcileDefaults(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusBadRequest, "base_url required（Runtime.BaseURL 未配）")
 		return
 	}
-	const desktopPrincipal = "desktop-user"
-	claimedUserID := strings.TrimSpace(req.UserID)
-	if claimedUserID != "" && claimedUserID != desktopPrincipal {
-		writeErr(w, http.StatusBadRequest, "user_id must match desktop principal")
+	userID, err := h.authorizedAgentOwnerScope(r.Context(), req.Agent)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "Agent scope not found")
 		return
 	}
-	userID := desktopPrincipal
+	claimedUserID := strings.TrimSpace(req.UserID)
+	if claimedUserID != "" && claimedUserID != userID {
+		writeErr(w, http.StatusBadRequest, "user_id must match service owner")
+		return
+	}
 	specs := usecase.DefaultCronSpecs(base, req.Agent, req.Deliver)
 	out := make([]provisionedJob, 0, len(specs))
 	for _, spec := range specs {
@@ -1748,13 +1751,16 @@ func (h *handler) cronProvision(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "base_url required（Runtime.BaseURL 未配）")
 		return
 	}
-	const desktopPrincipal = "desktop-user"
-	claimedUserID := strings.TrimSpace(req.UserID)
-	if claimedUserID != "" && claimedUserID != desktopPrincipal {
-		writeErr(w, http.StatusBadRequest, "user_id must match desktop principal")
+	userID, err := h.authorizedAgentOwnerScope(r.Context(), req.Agent)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "Agent scope not found")
 		return
 	}
-	userID := desktopPrincipal
+	claimedUserID := strings.TrimSpace(req.UserID)
+	if claimedUserID != "" && claimedUserID != userID {
+		writeErr(w, http.StatusBadRequest, "user_id must match service owner")
+		return
+	}
 	// 任务集与 kind 都以描述符（DefaultCronSpecs，对齐 §3.13）为单一事实源——
 	// 原平行 kinds 数组随 monthly-report/year-archive 描述符撤下而删除，防 kind/spec 错位。
 	specs := usecase.DefaultCronSpecs(base, req.Agent, req.Deliver)

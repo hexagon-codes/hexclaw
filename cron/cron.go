@@ -331,6 +331,13 @@ func (s *Scheduler) SetLoopbackCapabilityToken(token string) {
 	}
 }
 
+// SetServiceAPIAuth 接线当前服务实际地址及业务凭据。
+func (s *Scheduler) SetServiceAPIAuth(baseURL, token string) {
+	if eng, ok := s.engines[RuntimeStarlark].(*StarlarkEngine); ok {
+		eng.SetServiceAPIAuth(baseURL, token)
+	}
+}
+
 // engineFor resolves the script engine for a runtime, or nil for an unknown one.
 // Returning nil (rather than silently falling back to Starlark) lets executeJob
 // surface an explicit "no engine for runtime X" error instead of running, say, a

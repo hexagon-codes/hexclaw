@@ -409,6 +409,14 @@ func newRuntimeConfigWriter(configFile string, box *secret.Box) (*config.Writer,
 }
 
 func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, desktopMode bool) error {
+	desktopAPIToken, err := desktopAPITokenFromEnv(desktopMode)
+	if err != nil {
+		return err
+	}
+	configFile, err = runtimeConfigPath(configFile)
+	if err != nil {
+		return err
+	}
 	// 1. 加载配置
 	cfg, err := config.Load(configFile)
 	if err != nil {
@@ -1319,6 +1327,13 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 
 	// 8. 启动 HTTP 服务
 	srv := api.NewServer(cfg, eng, gw, store)
+	srv.SetDesktopAPIToken(desktopAPIToken)
+	srv.SetRuntimeConfigPath(configFile)
+	var backendID string
+	if err := store.DB().QueryRowContext(ctx, "SELECT value FROM backend_metadata WHERE key = 'backend_id'").Scan(&backendID); err != nil {
+		return fmt.Errorf("load backend identity: %w", err)
+	}
+	srv.SetBackendID(backendID)
 	// 会话删除后同步清理 PermissionHub 进程内 pending/remembered 状态
 	// （durable 撤销已由 Store.DeleteSession 事务内完成）。
 	wireToolApprovalSessionLifecycle(srv, permHub)
@@ -1547,7 +1562,11 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 			compiler := cron.NewLLMCompiler(resolver)
 			scriptExec := cron.NewScriptExecutor()
 			scheduler = cron.NewScheduler(store.DB(), compiler, scriptExec)
-			scheduler.SetLoopbackCapabilityToken(sidecarCapabilityToken)
+			businessToken := cfg.Server.APIToken
+			if desktopMode {
+				businessToken = desktopAPIToken
+			}
+			scheduler.SetServiceAPIAuth(fmt.Sprintf("http://localhost:%d", cfg.Server.Port), businessToken)
 			if err := scheduler.Init(ctx); err != nil {
 				scheduler = nil
 				fmt.Printf("  ✗ Cron        Init 失败 (%v)\n", err)
@@ -2684,6 +2703,37 @@ Set source only when the material explicitly names a work, title, or another rel
 				PracticeGeneration:    k12PracticeGeneration,
 				PracticeReturnRegrade: k12PracticeReturnRegrade,
 				OwnerScope:            k12usecase.DefaultLocalOwnerScope,
+				PrincipalMode: func() string {
+					if desktopMode {
+						return "local_loopback"
+					}
+					return "remote"
+				}(),
+				AuthenticatedOwnerScope: func(requestCtx context.Context) (string, error) {
+					if skill.AuthenticatedUserID(requestCtx) != "api-user" {
+						return "", fmt.Errorf("authenticated service principal required")
+					}
+					return k12usecase.DefaultLocalOwnerScope, nil
+				},
+				AuthorizeAgentScope: func(requestCtx context.Context, owner, agent string) error {
+					if owner != k12usecase.DefaultLocalOwnerScope {
+						return fmt.Errorf("agent owner mismatch")
+					}
+					// 单用户服务的已登记辅导实例共享既有 owner；显式历史归属不可覆盖。
+					var allowed bool
+					err := store.DB().QueryRowContext(requestCtx, `SELECT EXISTS (
+						SELECT 1 FROM agents WHERE name=? AND json_extract(metadata, '$.scenario')='k12-tutor'
+						AND NOT EXISTS (SELECT 1 FROM k12_image_task_owner_scopes WHERE agent_name=? AND owner_scope<>?)
+						AND NOT EXISTS (SELECT 1 FROM k12_page_assets WHERE agent_name=? AND owner_scope<>?)
+					)`, agent, agent, owner, agent, owner).Scan(&allowed)
+					if err != nil {
+						return err
+					}
+					if !allowed {
+						return fmt.Errorf("registered agent owner not found")
+					}
+					return nil
+				},
 			})
 			srv.Mount(
 				k12rt.Manifest.MountPath,

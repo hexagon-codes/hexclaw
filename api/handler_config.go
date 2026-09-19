@@ -222,7 +222,7 @@ func (s *Server) rollbackCommittedLLMTransaction(
 		_ = rollbackTx.Rollback()
 		return fmt.Errorf("stage compensation: %w", err)
 	}
-	if err := config.Save(rollbackCfg, ""); err != nil {
+	if err := s.saveRuntimeConfig(rollbackCfg); err != nil {
 		_ = rollbackTx.Rollback()
 		return fmt.Errorf("persist compensation: %w", err)
 	}
@@ -247,7 +247,7 @@ func (s *Server) rollbackLegacyLLMTransition(
 			rollbackErrors = append(rollbackErrors, fmt.Errorf("restore LLM runtime: %w", err))
 		}
 	}
-	if err := config.Save(previousCfg, ""); err != nil {
+	if err := s.saveRuntimeConfig(previousCfg); err != nil {
 		rollbackErrors = append(rollbackErrors, fmt.Errorf("restore config file: %w", err))
 	}
 	if err := s.restoreSemanticRuntime(previousCfg.LLM); err != nil {
@@ -929,7 +929,7 @@ func (s *Server) handleUpdateLLMConfig(w http.ResponseWriter, r *http.Request) {
 				})
 				return
 			}
-			if saveErr := config.Save(&nextCfg, ""); saveErr != nil {
+			if saveErr := s.saveRuntimeConfig(&nextCfg); saveErr != nil {
 				_ = tx.Rollback()
 				logger.Error("error", "error", saveErr)
 				writeJSON(w, http.StatusInternalServerError, map[string]string{
@@ -941,7 +941,7 @@ func (s *Server) handleUpdateLLMConfig(w http.ResponseWriter, r *http.Request) {
 				// Commit 内部已逆序回滚已 Apply 的 Applier；这里只需把磁盘配置回滚
 				rollbackCfg := *s.cfg
 				rollbackCfg.LLM = oldLLM
-				if saveErr := config.Save(&rollbackCfg, ""); saveErr != nil {
+				if saveErr := s.saveRuntimeConfig(&rollbackCfg); saveErr != nil {
 					logger.Error("LLM 事务 Commit 失败且回滚磁盘失败", "commit", commitErr, "rollback", saveErr)
 				}
 				writeJSON(w, http.StatusInternalServerError, map[string]string{
@@ -978,7 +978,7 @@ func (s *Server) handleUpdateLLMConfig(w http.ResponseWriter, r *http.Request) {
 
 	// 老路径（flag OFF 或未注入 manager）：先持久化到文件，再热更新引擎；
 	// 热更新失败时回滚文件，保证磁盘与运行时一致。
-	if err := config.Save(&nextCfg, ""); err != nil {
+	if err := s.saveRuntimeConfig(&nextCfg); err != nil {
 		logger.Error("error", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{
 			"error": "保存配置失败: " + err.Error(),
@@ -991,7 +991,7 @@ func (s *Server) handleUpdateLLMConfig(w http.ResponseWriter, r *http.Request) {
 		if err := runtime.ReloadLLMConfig(r.Context(), nextLLM); err != nil {
 			rollbackCfg := *s.cfg
 			rollbackCfg.LLM = oldLLM
-			if saveErr := config.Save(&rollbackCfg, ""); saveErr != nil {
+			if saveErr := s.saveRuntimeConfig(&rollbackCfg); saveErr != nil {
 				logger.Error("LLM 热更新失败且回滚配置失败: reload", "reload", err, "rollback", saveErr)
 			}
 			writeJSON(w, http.StatusInternalServerError, map[string]string{
@@ -1528,7 +1528,7 @@ func (s *Server) handleUpdateMemoryConfig(w http.ResponseWriter, r *http.Request
 
 	nextCfg := *s.cfg
 	nextCfg.FileMemory = nextFM
-	if err := config.Save(&nextCfg, ""); err != nil {
+	if err := s.saveRuntimeConfig(&nextCfg); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "保存配置失败: " + err.Error()})
 		return
 	}

@@ -1023,10 +1023,10 @@ func (s *Server) handlePutKnowledgeConfig(w http.ResponseWriter, r *http.Request
 	// 落 yaml 持久化；rerank_model 是否变化决定“需重启”提示。
 	restartRequired := false
 	if s.cfgWriter != nil {
-		if prev, err := s.cfgWriter.ReadKnowledge(); err == nil {
+		if prev, err := s.cfgWriter.ReadKnowledgeLocked(); err == nil {
 			restartRequired = strings.TrimSpace(prev.RerankModel) != req.RerankModel
 		}
-		if err := s.cfgWriter.UpdateKnowledgeRetrieval(config.KnowledgeRetrievalSettings{
+		if err := s.cfgWriter.UpdateKnowledgeRetrievalLocked(config.KnowledgeRetrievalSettings{
 			Rerank:      req.Rerank,
 			RerankModel: req.RerankModel,
 			QueryExpand: req.QueryExpand,

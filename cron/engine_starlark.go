@@ -38,6 +38,7 @@ type StarlarkEngine struct {
 	stateStore              StateStore // §13.3(2) per-job 跨运行 KV，nil → state_get 返默认 / state_set 报错
 	capabilityMu            sync.RWMutex
 	loopbackCapabilityToken string
+	serviceAPIOrigins       map[string]bool
 }
 
 // KBIngestFunc persists a document into the local knowledge base in-process and
@@ -69,9 +70,57 @@ func NewStarlarkEngine() *StarlarkEngine {
 
 // SetLoopbackCapabilityToken 只在进程内保存本次 Sidecar 的回环鉴权 token。
 func (e *StarlarkEngine) SetLoopbackCapabilityToken(token string) {
+	e.SetServiceAPIAuth("http://localhost:16060", token)
+}
+
+// SetServiceAPIAuth 将自动凭据限定到当前服务实际端口的 API。
+func (e *StarlarkEngine) SetServiceAPIAuth(baseURL, token string) {
 	e.capabilityMu.Lock()
+	defer e.capabilityMu.Unlock()
 	e.loopbackCapabilityToken = strings.TrimSpace(token)
-	e.capabilityMu.Unlock()
+	e.serviceAPIOrigins = make(map[string]bool)
+	base, err := url.Parse(baseURL)
+	if err != nil {
+		return
+	}
+	e.serviceAPIOrigins[base.Scheme+"://"+base.Host] = true
+	if base.Hostname() == "localhost" {
+		for _, host := range []string{"127.0.0.1", "[::1]"} {
+			if base.Port() != "" {
+				host += ":" + base.Port()
+			}
+			e.serviceAPIOrigins[base.Scheme+"://"+host] = true
+		}
+	}
+}
+
+type serviceAPITransport struct {
+	base    http.RoundTripper
+	origins map[string]bool
+	token   string
+}
+
+// RoundTrip 的副本承载凭据，原请求、脚本和日志不接触自动注入值。
+func (t serviceAPITransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	path := r.URL.Path
+	if t.token != "" && r.URL.User == nil && t.origins[r.URL.Scheme+"://"+r.URL.Host] &&
+		(strings.HasPrefix(path, "/api/v1/") || strings.HasPrefix(path, "/api/k12/") || path == "/ws") {
+		r = r.Clone(r.Context())
+		r.Header.Set("Authorization", "Bearer "+t.token)
+	}
+	return t.base.RoundTrip(r)
+}
+
+func (e *StarlarkEngine) serviceClient() *http.Client {
+	e.capabilityMu.RLock()
+	defer e.capabilityMu.RUnlock()
+	client := *e.client
+	base := client.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	client.Transport = serviceAPITransport{base: base, origins: e.serviceAPIOrigins, token: e.loopbackCapabilityToken}
+	return &client
 }
 
 func (e *StarlarkEngine) loopbackCapability() string {
@@ -383,12 +432,8 @@ func (e *StarlarkEngine) builtinHTTP(ctx context.Context, method string) func(*s
 				req.Header.Set(k, v)
 			}
 		}
-		// 回环鉴权由宿主覆盖脚本 header，token 不进入脚本或外部请求。
-		if token := e.loopbackCapability(); token != "" && isLoopbackURL(url) {
-			req.Header.Set("Authorization", "Bearer "+token)
-		}
 		started := time.Now()
-		resp, err := e.client.Do(req)
+		resp, err := e.serviceClient().Do(req)
 		if err != nil {
 			slog.Info("[cron] starlark external call",
 				"source", "cron", "job", stateJobIDFrom(ctx), "runtime", RuntimeStarlark,

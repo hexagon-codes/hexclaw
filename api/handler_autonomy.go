@@ -11,7 +11,6 @@ import (
 	"github.com/hexagon-codes/toolkit/util/logger"
 
 	"github.com/hexagon-codes/hexclaw/autonomy"
-	"github.com/hexagon-codes/hexclaw/config"
 	"github.com/hexagon-codes/hexclaw/cron"
 	"github.com/hexagon-codes/hexclaw/engine"
 )
@@ -36,6 +35,9 @@ func (s *Server) SetAutonomy(hook *engine.PermissionHook, decisions *autonomy.De
 	s.autonomyDecisions = decisions
 	s.autonomyGrants = grants
 	s.autonomyCfgPath = cfgPath
+	if s.runtimeCfgPath == "" {
+		s.runtimeCfgPath = cfgPath
+	}
 }
 
 // autonomyPolicy 返回当前生效策略（hook 未注入时从配置重建，测试友好）。
@@ -153,7 +155,7 @@ func (s *Server) handleUpdateAutonomyProfile(w http.ResponseWriter, r *http.Requ
 	s.cfgMu.Lock()
 	nextCfg := *s.cfg
 	nextCfg.Security.Autonomy.Profile = profile
-	if err := config.Save(&nextCfg, s.autonomyCfgPath); err != nil {
+	if err := s.saveRuntimeConfig(&nextCfg); err != nil {
 		s.cfgMu.Unlock()
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "持久化配置失败: " + err.Error()})
 		return

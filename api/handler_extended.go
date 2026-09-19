@@ -245,14 +245,15 @@ func (s *Server) handleGetFullConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"server":    map[string]any{"host": s.cfg.Server.Host, "port": s.cfg.Server.Port, "mode": s.cfg.Server.Mode},
-		"llm":       map[string]any{"default": llmCfg.Default, "providers": providers},
-		"knowledge": map[string]any{"enabled": s.cfg.Knowledge.Enabled},
-		"mcp":       map[string]any{"enabled": s.cfg.MCP.Enabled},
-		"cron":      map[string]any{"enabled": s.cfg.Cron.Enabled},
-		"webhook":   map[string]any{"enabled": s.cfg.Webhook.Enabled},
-		"canvas":    map[string]any{"enabled": s.cfg.Canvas.Enabled},
-		"voice":     map[string]any{"enabled": s.cfg.Voice.Enabled},
+		"backend_id": s.backendID,
+		"server":     map[string]any{"host": s.cfg.Server.Host, "port": s.cfg.Server.Port, "mode": s.cfg.Server.Mode},
+		"llm":        map[string]any{"default": llmCfg.Default, "providers": providers},
+		"knowledge":  map[string]any{"enabled": s.cfg.Knowledge.Enabled},
+		"mcp":        map[string]any{"enabled": s.cfg.MCP.Enabled},
+		"cron":       map[string]any{"enabled": s.cfg.Cron.Enabled},
+		"webhook":    map[string]any{"enabled": s.cfg.Webhook.Enabled},
+		"canvas":     map[string]any{"enabled": s.cfg.Canvas.Enabled},
+		"voice":      map[string]any{"enabled": s.cfg.Voice.Enabled},
 		"security": map[string]any{
 			"gateway_enabled":     s.cfg.Security.Auth.Enabled,
 			"injection_detection": s.cfg.Security.InjectionDetection.Enabled,
@@ -426,7 +427,7 @@ func (s *Server) handleUpdateFullConfig(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// 候选验证完成后先原子落盘；Commit 只做不可失败的运行时代际交换。
-	if err := config.Save(&nextCfg, ""); err != nil {
+	if err := s.saveRuntimeConfig(&nextCfg); err != nil {
 		logger.Error("Failed to persist configuration", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to save configuration"})
 		return
