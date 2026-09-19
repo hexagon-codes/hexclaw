@@ -10,6 +10,73 @@ import (
 
 func float64Ptr(v float64) *float64 { return &v }
 
+func TestEvaluateOCRConfirmationRisk_IndependentReadNumberIdentity(t *testing.T) {
+	const plain = `8的\(\frac{1}{4}\)的\(\frac{4}{5}\)是多少？`
+	for _, tt := range []struct {
+		name         string
+		path         []string
+		read         string
+		wantConflict bool
+	}{
+		{"known number prefix", []string{"2"}, "2、" + plain, false},
+		{"missing number identity", nil, "2、" + plain, true},
+		{"different number identity", []string{"1"}, "2、" + plain, true},
+		{"decimal is content", []string{"2"}, "2." + plain, true},
+		{"different denominator", []string{"2"}, "2、" + strings.Replace(plain, "{5}", "{3}", 1), true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			q := RecognizedQuestion{Question: tt.read, RawTranscription: tt.read,
+				Subject: "数学", SourceNumberPath: tt.path, RecognitionConfidence: float64Ptr(.99),
+				EvidenceTranscriptions: []string{plain, tt.read}}
+			original := append([]string(nil), q.EvidenceTranscriptions...)
+			got := EvaluateOCRConfirmationRisk(q)
+			conflict := false
+			for _, reason := range got.ConfirmationReasons {
+				conflict = conflict || reason == OCRRiskEvidenceConflict
+			}
+			if conflict != tt.wantConflict {
+				t.Fatalf("evidence conflict = %v, want %v; reasons=%v", conflict, tt.wantConflict, got.ConfirmationReasons)
+			}
+			if got.RawTranscription != q.RawTranscription || !reflect.DeepEqual(got.EvidenceTranscriptions, original) || !reflect.DeepEqual(q.EvidenceTranscriptions, original) {
+				t.Fatal("comparison changed source evidence")
+			}
+		})
+	}
+}
+
+func TestEvaluateOCRConfirmationRisk_IndependentReadUnitFormatting(t *testing.T) {
+	const first = `\(300÷2÷2=50（m）\)` + "\n" + `\(50×2=100（m）\)` + "\n" + `\(50×100=5000（m^2）\)` + "\n" + `\(5000×2.25=11250（kg）\)` + "\n答：一共产鱼11250千克。"
+	const second = `\(300\div2\div2=50\,(m)\)` + "\n" + `\(50\times2=100\,(m)\)` + "\n" + `\(50\times100=5000\,(m^2)\)` + "\n" + `\(5000\times2.25=11250\,(kg)\)` + "\n答：一共产鱼11250千克。"
+	for _, tt := range []struct {
+		name, read   string
+		wantConflict bool
+	}{
+		{"same working with spacing and bracket width", second, false},
+		{"same working with escaped spaces", strings.ReplaceAll(second, `\,`, `\ `), false},
+		{"different divisor", strings.Replace(second, `\div2\div2`, `\div2\div3`, 1), true},
+		{"different unit", strings.Replace(second, "(kg)", "(g)", 1), true},
+		{"different exponent", strings.Replace(second, "m^2", "m^3", 1), true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			q := RecognizedQuestion{Question: "求鱼塘产量", Subject: "数学", AnswerState: AnswerStatePresent,
+				StudentAnswer: tt.read, AnswerRawTranscription: tt.read, RecognitionConfidence: float64Ptr(.99),
+				AnswerEvidenceTranscriptions: []string{first, tt.read}}
+			original := append([]string(nil), q.AnswerEvidenceTranscriptions...)
+			got := EvaluateOCRConfirmationRisk(q)
+			conflict := false
+			for _, reason := range got.ConfirmationReasons {
+				conflict = conflict || reason == OCRRiskEvidenceConflict
+			}
+			if conflict != tt.wantConflict {
+				t.Fatalf("evidence conflict = %v, want %v; reasons=%v", conflict, tt.wantConflict, got.ConfirmationReasons)
+			}
+			if got.AnswerRawTranscription != q.AnswerRawTranscription || !reflect.DeepEqual(got.AnswerEvidenceTranscriptions, original) || !reflect.DeepEqual(q.AnswerEvidenceTranscriptions, original) {
+				t.Fatal("comparison changed source evidence")
+			}
+		})
+	}
+}
+
 func TestEvaluateOCRConfirmationRisk_Table(t *testing.T) {
 	tests := []struct {
 		name string

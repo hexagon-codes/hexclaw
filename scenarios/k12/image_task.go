@@ -378,6 +378,7 @@ const (
 	CreativeWorkIntakePromoted             CreativeWorkIntakeStatus = "promoted"
 	CreativeWorkIntakeFailed               CreativeWorkIntakeStatus = "failed"
 	CreativeWorkIntakeCancelled            CreativeWorkIntakeStatus = "cancelled"
+	CreativeWorkIntakeUnreadable           CreativeWorkIntakeStatus = "unreadable"
 )
 
 type CreativeWorkPromotionPolicy string
@@ -407,9 +408,10 @@ type CreativeWorkCommitCommand struct {
 type CreativeWorkConfirmationProvenance string
 
 const (
-	CreativeWorkEvidenceAutoFreeze CreativeWorkConfirmationProvenance = "evidence_auto_freeze"
-	CreativeWorkParentConfirmed    CreativeWorkConfirmationProvenance = "parent_confirmed"
-	CreativeWorkParentCorrected    CreativeWorkConfirmationProvenance = "parent_corrected"
+	CreativeWorkEvidenceAutoFreeze    CreativeWorkConfirmationProvenance = "evidence_auto_freeze"
+	CreativeWorkEvidenceBoundedReview CreativeWorkConfirmationProvenance = "evidence_bounded_review"
+	CreativeWorkParentConfirmed       CreativeWorkConfirmationProvenance = "parent_confirmed"
+	CreativeWorkParentCorrected       CreativeWorkConfirmationProvenance = "parent_corrected"
 )
 
 type CreativeWorkIntakeOCRRisk struct {
@@ -425,6 +427,11 @@ type CreativeWorkIntakeOCRCorrection struct {
 }
 
 type CreativeWorkIntakeOCREvidence struct {
+	// 初始观察始终保留；自动复核只产生独立片段回执及新的可评价正文。
+	Outcome                string                             `json:"outcome,omitempty"`
+	OriginalCanonical      string                             `json:"original_canonical,omitempty"`
+	Review                 []CreativeWorkOCRReviewSegment     `json:"review,omitempty"`
+	UnresolvedSegments     []CreativeWorkIntakeOCRRisk        `json:"unresolved_segments,omitempty"`
 	Raw                    string                             `json:"raw"`
 	CanonicalContent       string                             `json:"canonical_content"`
 	CanonicalVersion       int                                `json:"canonical_version"`
@@ -434,6 +441,27 @@ type CreativeWorkIntakeOCREvidence struct {
 	SegmentCorrections     []CreativeWorkIntakeOCRCorrection  `json:"segment_corrections,omitempty"`
 	ConfirmationProvenance CreativeWorkConfirmationProvenance `json:"confirmation_provenance"`
 	FrozenAt               int64                              `json:"frozen_at,omitempty"`
+}
+
+type CreativeWorkOCRReviewSegment struct {
+	SegmentID      string `json:"segment_id"`
+	Text           string `json:"text"`
+	Readable       bool   `json:"readable"`
+	VisualEvidence string `json:"visual_evidence"`
+}
+
+// WritingResultNotice 是领域结果范围，不由各渠道重判可读性。
+func (i CreativeWorkIntake) WritingResultNotice() string {
+	if i.WorkType != WorkTypeWriting || i.OCREvidence == nil {
+		return ""
+	}
+	switch i.OCREvidence.Outcome {
+	case "partial":
+		return "部分文字无法可靠识别，仅点评可辨认内容；未识别部分不作评价。"
+	case "unreadable":
+		return "原图文字无法可靠识别，本次无法形成可靠点评。原图已保留。"
+	}
+	return ""
 }
 
 type CreativeWorkIntake struct {
@@ -537,6 +565,10 @@ func (i CreativeWorkIntake) Validate() error {
 		return fmt.Errorf("creative work intake idempotency identity 不完整")
 	}
 	switch i.Status {
+	case CreativeWorkIntakeUnreadable:
+		if i.WorkType != WorkTypeWriting || i.OCREvidence == nil || i.OCREvidence.Outcome != "unreadable" || i.PromotedWorkID != "" {
+			return fmt.Errorf("unreadable writing intake must have evidence and no promoted work")
+		}
 	case CreativeWorkIntakePreparing, CreativeWorkIntakeFailed, CreativeWorkIntakeCancelled:
 	case CreativeWorkIntakeAwaitingConfirmation:
 		if i.WorkType != WorkTypeWriting || i.OCREvidence == nil {
@@ -561,7 +593,7 @@ func (i CreativeWorkIntake) Validate() error {
 				return fmt.Errorf("writing intake 未冻结 canonical OCR evidence")
 			}
 			switch i.ConfirmationProvenance {
-			case CreativeWorkEvidenceAutoFreeze, CreativeWorkParentConfirmed, CreativeWorkParentCorrected:
+			case CreativeWorkEvidenceAutoFreeze, CreativeWorkEvidenceBoundedReview, CreativeWorkParentConfirmed, CreativeWorkParentCorrected:
 			default:
 				return fmt.Errorf("writing intake confirmation_provenance 非法")
 			}
@@ -571,7 +603,11 @@ func (i CreativeWorkIntake) Validate() error {
 					len(i.OCREvidence.SegmentCorrections) != 0) {
 				return fmt.Errorf("writing intake 缺少自动冻结的清晰一致证据")
 			}
-			if i.ConfirmationProvenance != CreativeWorkEvidenceAutoFreeze {
+			if i.ConfirmationProvenance == CreativeWorkEvidenceBoundedReview &&
+				(i.OCREvidence.OriginalCanonical == "" || (i.OCREvidence.Outcome != "complete" && i.OCREvidence.Outcome != "partial")) {
+				return fmt.Errorf("bounded writing review requires original evidence and result scope")
+			}
+			if i.ConfirmationProvenance == CreativeWorkParentConfirmed || i.ConfirmationProvenance == CreativeWorkParentCorrected {
 				risks := make(map[string]string, len(i.OCREvidence.RiskSegments))
 				for _, risk := range i.OCREvidence.RiskSegments {
 					segmentID := strings.TrimSpace(risk.SegmentID)

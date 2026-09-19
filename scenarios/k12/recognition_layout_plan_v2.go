@@ -26,6 +26,10 @@ const (
 	RecognitionLayoutCompactV1 = "compact_v1"
 	// RecognitionLayoutCompactV2 用批内短引用代替模型抄写持久摘要，旧格式保持可恢复。
 	RecognitionLayoutCompactV2 = "compact_v2"
+	// RecognitionLayoutCompactV3 保留短引用协议，在新计划中启用冻结前的单轮来源复核。
+	RecognitionLayoutCompactV3 = "compact_v3"
+	// RecognitionLayoutCompactV4 将首读与复读作为独立来源证据共同冻结。
+	RecognitionLayoutCompactV4 = "compact_v4"
 
 	RecognitionLayoutBatchTargetLimitV2 = 4
 	recognitionLayoutTargetLimitV2      = 32
@@ -100,7 +104,7 @@ type RecognitionLayoutPlanV2 struct {
 // 所有顺序和持久标识均在本地生成，因此模型输出顺序和模型提供的标识都不会成为
 // 存储标识。
 func BuildRecognitionLayoutPlanV2(input RecognitionLayoutPlanInputV2) (RecognitionLayoutPlanV2, error) {
-	if input.RecognitionFormat != "" && input.RecognitionFormat != RecognitionLayoutCompactV1 && input.RecognitionFormat != RecognitionLayoutCompactV2 {
+	if input.RecognitionFormat != "" && input.RecognitionFormat != RecognitionLayoutCompactV1 && input.RecognitionFormat != RecognitionLayoutCompactV2 && input.RecognitionFormat != RecognitionLayoutCompactV3 && input.RecognitionFormat != RecognitionLayoutCompactV4 {
 		return RecognitionLayoutPlanV2{}, fmt.Errorf("%w: unsupported recognition format", ErrRecognitionLayoutPlanInvalid)
 	}
 	if err := validateRecognitionLayoutManifestSuccessV2(input.Manifest); err != nil {
@@ -136,7 +140,7 @@ func BuildRecognitionLayoutPlanV2(input RecognitionLayoutPlanInputV2) (Recogniti
 	}
 	for index := range targets {
 		region := targets[index].Region
-		if input.RecognitionFormat == RecognitionLayoutCompactV1 || input.RecognitionFormat == RecognitionLayoutCompactV2 {
+		if input.RecognitionFormat == RecognitionLayoutCompactV1 || input.RecognitionFormat == RecognitionLayoutCompactV2 || input.RecognitionFormat == RecognitionLayoutCompactV3 || input.RecognitionFormat == RecognitionLayoutCompactV4 {
 			targets[index].Region = expandRecognitionLayoutRegionV2(input.Targets, index, pageBounds)
 			continue
 		}
@@ -231,7 +235,7 @@ func BuildRecognitionLayoutPlanV2(input RecognitionLayoutPlanInputV2) (Recogniti
 	}
 
 	contactHeight := recognitionLayoutContactHeightV2
-	if plan.RecognitionFormat == RecognitionLayoutCompactV1 || plan.RecognitionFormat == RecognitionLayoutCompactV2 {
+	if plan.RecognitionFormat == RecognitionLayoutCompactV1 || plan.RecognitionFormat == RecognitionLayoutCompactV2 || plan.RecognitionFormat == RecognitionLayoutCompactV3 || plan.RecognitionFormat == RecognitionLayoutCompactV4 {
 		contactHeight = recognitionLayoutCompactHeightV1
 	}
 	for start, ordinal := 0, 1; start < len(plan.Targets); ordinal++ {

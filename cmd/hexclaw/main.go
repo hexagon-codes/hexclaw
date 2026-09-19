@@ -3100,6 +3100,7 @@ Set source only when the material explicitly names a work, title, or another rel
 					return ensureK12DingTalkDirectBinding(bindCtx, msg, agentRouter, k12InboundBinder)
 				},
 				ResolveInstanceID: instanceMgr.ResolveRunningInstanceID,
+				ResolveRoute:      k12ImageTasks.ResolveRoute,
 				Inbound:           k12InboundPhotos, ImageTasks: k12ImageTasks,
 				PracticeSets: practiceReturns, PracticeReturns: practiceReturns,
 				Artifacts: k12Runtime.Records, ReplyBatches: &k12Runtime.Deps,

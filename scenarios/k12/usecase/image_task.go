@@ -54,6 +54,11 @@ type ImageTaskWritingOCR interface {
 	RecognizeImageTaskWriting(context.Context, []byte) (ImageTaskWritingOCRResult, error)
 }
 
+// ImageTaskWritingOCRReviewer 只复核既有风险片段，不重写整篇原稿。
+type ImageTaskWritingOCRReviewer interface {
+	ReviewImageTaskWriting(context.Context, []byte, []k12.CreativeWorkIntakeOCRRisk) ([]k12.CreativeWorkOCRReviewSegment, error)
+}
+
 type imageTaskGradingStarter interface {
 	StartPhotoGradingJob(context.Context, StartPhotoGradingInput) (GradingJobView, bool, error)
 	ConfirmPhotoGradingJob(context.Context, string, ConfirmPhotoGradingInput) (GradingJobView, bool, error)
@@ -1318,7 +1323,8 @@ func (c *ImageTaskCoordinator) recoverySafe(
 			return false, invocationErr
 		}
 		return invocationErr == nil &&
-			invocation.Status == k12.ImageTaskInvocationPrepared, invocationErr
+			(invocation.Status == k12.ImageTaskInvocationPrepared ||
+				(invocation.Status == k12.ImageTaskInvocationSucceeded && view.Creative.OCREvidence != nil)), invocationErr
 	case k12.CreativeWorkIntakeReady:
 		return true, nil
 	case k12.CreativeWorkIntakePromoted:
@@ -2035,13 +2041,17 @@ func (c *ImageTaskCoordinator) continueTarget(
 			); yes || expireErr != nil {
 				return expired, expireErr
 			}
-			intake, err = c.executeWritingOCR(
-				ctx,
-				view.Dispatch,
-				intake,
-				prepared,
-				images,
-			)
+			if intake.OCREvidence != nil && intake.PromotionPolicy == k12.CreativeWorkPromotionAutomatic {
+				intake, err = c.reviewWritingOCR(ctx, view.Dispatch, intake, prepared, images)
+			} else {
+				intake, err = c.executeWritingOCR(
+					ctx,
+					view.Dispatch,
+					intake,
+					prepared,
+					images,
+				)
+			}
 			if err != nil {
 				return view, err
 			}
@@ -2063,6 +2073,18 @@ func (c *ImageTaskCoordinator) continueTarget(
 			return view, nil
 		default:
 			return view, k12storage.ErrImageTaskInvalidState
+		}
+		if view.Creative.Status == k12.CreativeWorkIntakePreparing && view.Creative.OCREvidence != nil &&
+			view.Creative.PromotionPolicy == k12.CreativeWorkPromotionAutomatic {
+			latest, getErr := c.Records.GetLatestWritingOCRInvocation(ctx, intake.AgentName, intake.IntakeID)
+			if getErr != nil {
+				return view, getErr
+			}
+			updated, reviewErr := c.reviewWritingOCR(ctx, view.Dispatch, *view.Creative, latest, images)
+			if reviewErr != nil {
+				return view, reviewErr
+			}
+			view.Creative = &updated
 		}
 	}
 	if view.Creative.Status == k12.CreativeWorkIntakeReady {
@@ -2247,6 +2269,7 @@ func (c *ImageTaskCoordinator) executeWritingOCR(
 		)
 	}
 	if ocr.Confidence >= 0.95 && len(ocr.RiskSegments) == 0 {
+		evidence.Outcome = "complete"
 		evidence.ConfirmationProvenance = k12.CreativeWorkEvidenceAutoFreeze
 		evidence.FrozenAt = c.now()
 		return c.Records.FreezeCreativeWorkIntakeOCR(
@@ -2329,6 +2352,10 @@ func (c *ImageTaskCoordinator) Result(
 	if view.Dispatch.Status == k12.ImageTaskStatusAwaitingConfirmation ||
 		(view.Creative != nil && view.Creative.Status == k12.CreativeWorkIntakeAwaitingConfirmation) {
 		result.Kind = "awaiting_confirmation"
+		return result, nil
+	}
+	if view.Creative != nil && view.Creative.Status == k12.CreativeWorkIntakeUnreadable {
+		result.Kind = "creative"
 		return result, nil
 	}
 	if view.Creative != nil && view.Creative.Status == k12.CreativeWorkIntakePromoted &&

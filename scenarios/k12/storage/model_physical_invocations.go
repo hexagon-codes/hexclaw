@@ -1911,6 +1911,7 @@ func validateRecognitionLayoutRepairAuthorizationEvidenceVia(
 	for _, classification := range []k12.RecognitionLayoutCandidateClassificationV2{
 		k12.RecognitionLayoutCandidateMissingV2,
 		k12.RecognitionLayoutCandidateInvalidV2,
+		k12.RecognitionLayoutCandidateReviewRequiredV2,
 	} {
 		candidate := k12.RecognitionLayoutCandidateSettlementV2{
 			CandidateID:    candidateID,
@@ -3341,7 +3342,8 @@ func (s *Store) settleRecognitionLayoutPrimaryBatchV2Once(
 						fmt.Errorf("k12storage: freeze candidate result %d: %w", index+1, err)
 				}
 			case k12.RecognitionLayoutCandidateMissingV2,
-				k12.RecognitionLayoutCandidateInvalidV2:
+				k12.RecognitionLayoutCandidateInvalidV2,
+				k12.RecognitionLayoutCandidateReviewRequiredV2:
 				var frozenCount int
 				if err := tx.QueryRowContext(
 					ctx,
@@ -3474,7 +3476,8 @@ func validateRecognitionLayoutPrimaryBatchSettlementV2(
 				return err
 			}
 		case k12.RecognitionLayoutCandidateMissingV2,
-			k12.RecognitionLayoutCandidateInvalidV2:
+			k12.RecognitionLayoutCandidateInvalidV2,
+			k12.RecognitionLayoutCandidateReviewRequiredV2:
 			if candidate.ResultKind != "" || len(candidate.ResultJSON) != 0 {
 				return fmt.Errorf(
 					"%w: repairable candidate must not carry a result",
@@ -3754,7 +3757,8 @@ func buildRecognitionLayoutPrimaryBatchProjectionV2(
 				},
 			)
 		case k12.RecognitionLayoutCandidateMissingV2,
-			k12.RecognitionLayoutCandidateInvalidV2:
+			k12.RecognitionLayoutCandidateInvalidV2,
+			k12.RecognitionLayoutCandidateReviewRequiredV2:
 			unit, err := k12.RecognitionLayoutRepairUnitV2(
 				authority.MemberOrdinals[index],
 			)
@@ -4094,7 +4098,8 @@ func validateStoredRecognitionLayoutPrimaryBatchSettlementV2(
 				)
 			}
 		case k12.RecognitionLayoutCandidateMissingV2,
-			k12.RecognitionLayoutCandidateInvalidV2:
+			k12.RecognitionLayoutCandidateInvalidV2,
+			k12.RecognitionLayoutCandidateReviewRequiredV2:
 			authorization := nextRecognitionLayoutRepairAuthorizationV2(
 				projection.RepairAuthorizations,
 				candidate.CandidateID,
@@ -5847,6 +5852,7 @@ func inferRecognitionLayoutFinalRepairClassificationV2(
 	for _, classification := range []k12.RecognitionLayoutCandidateClassificationV2{
 		k12.RecognitionLayoutCandidateMissingV2,
 		k12.RecognitionLayoutCandidateInvalidV2,
+		k12.RecognitionLayoutCandidateReviewRequiredV2,
 	} {
 		candidate := k12.RecognitionLayoutCandidateSettlementV2{
 			CandidateID:    repair.CandidateID,

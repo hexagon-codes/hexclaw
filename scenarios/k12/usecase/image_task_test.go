@@ -138,6 +138,7 @@ type imageTaskOCRStub struct {
 
 type imageTaskFeedbackSolver struct {
 	calls          int
+	requests       []WorkFeedbackRequest
 	routeCalls     int
 	err            error
 	routeErr       error
@@ -154,9 +155,10 @@ func (s *imageTaskFeedbackSolver) Solve(
 
 func (s *imageTaskFeedbackSolver) GenerateWorkFeedback(
 	ctx context.Context,
-	_ WorkFeedbackRequest,
+	req WorkFeedbackRequest,
 ) (WorkFeedbackOutput, error) {
 	s.calls++
+	s.requests = append(s.requests, req)
 	if snapshot, ok := k12.GradingModelSnapshotFromContext(ctx); ok {
 		s.snapshots = append(s.snapshots, snapshot)
 	}
@@ -286,6 +288,7 @@ func newImageTaskCoordinatorForTest(t *testing.T, classifier *imageTaskClassifie
 				"dispatch":             "dispatch-1",
 				"classification":       "classification-1",
 				"writing_ocr":          "writing-ocr-1",
+				"writing_review":       "writing-review-1",
 				"solve_preflight":      "solve-preflight-1",
 				"classification_retry": "classification-2",
 				"writing_ocr_retry":    "writing-ocr-2",
@@ -1765,7 +1768,7 @@ func TestImageTaskCoordinatorWritingFreezesOCRAndPromotesWithoutPlaceholderFacts
 	}
 }
 
-func TestImageTaskCoordinatorRiskyWritingAwaitsMinimumConfirmationAndGetIsPure(t *testing.T) {
+func TestImageTaskCoordinatorRiskyWritingWithoutReviewUsesReliableContentAndGetIsPure(t *testing.T) {
 	classifier := &imageTaskClassifierStub{result: ImageTaskClassification{
 		Intent:         k12.ImageTaskIntentWriting,
 		IntentEvidence: []string{"continuous handwritten essay paragraphs"},
@@ -1786,9 +1789,10 @@ func TestImageTaskCoordinatorRiskyWritingAwaitsMinimumConfirmationAndGetIsPure(t
 		t.Fatalf("Create: view=%+v created=%v err=%v", view, created, err)
 	}
 	if grading.starts != 0 || view.Creative == nil ||
-		view.Creative.Status != k12.CreativeWorkIntakeAwaitingConfirmation ||
-		view.Creative.PromotedWorkID != "" {
-		t.Fatalf("risky writing must await confirmation without grading/promotion: %+v", view)
+		view.Creative.Status != k12.CreativeWorkIntakePromoted ||
+		view.Creative.OCREvidence.Outcome != "partial" ||
+		view.Creative.OCREvidence.CanonicalContent != "我的[无法识别]爸爸" {
+		t.Fatalf("risky writing must exclude unreadable content without parent confirmation: %+v", view)
 	}
 	beforeCalls := ocr.calls
 	projected, err := coordinator.Get(context.Background(), "mingming", view.Dispatch.DispatchID)
@@ -1796,7 +1800,7 @@ func TestImageTaskCoordinatorRiskyWritingAwaitsMinimumConfirmationAndGetIsPure(t
 		t.Fatal(err)
 	}
 	if ocr.calls != beforeCalls || projected.Creative == nil ||
-		projected.Creative.Status != k12.CreativeWorkIntakeAwaitingConfirmation {
+		projected.Creative.Status != k12.CreativeWorkIntakePromoted {
 		t.Fatalf("GET caused OCR/provider side effect: calls=%d->%d view=%+v",
 			beforeCalls, ocr.calls, projected)
 	}

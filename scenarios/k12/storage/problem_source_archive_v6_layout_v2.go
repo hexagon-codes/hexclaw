@@ -772,6 +772,7 @@ func validateProblemSourceArchiveRecognitionLayoutV2(
 			for _, classification := range []k12.RecognitionLayoutCandidateClassificationV2{
 				k12.RecognitionLayoutCandidateMissingV2,
 				k12.RecognitionLayoutCandidateInvalidV2,
+				k12.RecognitionLayoutCandidateReviewRequiredV2,
 			} {
 				candidate := k12.RecognitionLayoutCandidateSettlementV2{
 					CandidateID:    candidateID,

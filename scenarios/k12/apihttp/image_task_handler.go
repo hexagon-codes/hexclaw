@@ -166,6 +166,8 @@ type imageTaskCreativeProjectionDTO struct {
 	PromotedGenerationID string                          `json:"promoted_generation_id,omitempty"`
 	CanonicalVersion     int                             `json:"canonical_version,omitempty"`
 	CanonicalContent     string                          `json:"canonical_content,omitempty"`
+	Outcome              string                          `json:"outcome,omitempty"`
+	Notice               string                          `json:"notice,omitempty"`
 	Conflicts            []imageTaskCreativeConflictDTO  `json:"conflicts,omitempty"`
 	Work                 *imageTaskCreativeWorkDTO       `json:"work,omitempty"`
 }
@@ -308,6 +310,8 @@ func publicImageTask(view usecase.ImageTaskView) publicImageTaskDispatch {
 			}
 		}
 		if view.Creative.OCREvidence != nil {
+			projection.Outcome = view.Creative.OCREvidence.Outcome
+			projection.Notice = view.Creative.WritingResultNotice()
 			projection.CanonicalVersion = view.Creative.OCREvidence.CanonicalVersion
 			projection.CanonicalContent = view.Creative.OCREvidence.CanonicalContent
 			if len(view.Creative.OCREvidence.RiskSegments) > 0 {
@@ -826,6 +830,10 @@ func (h *handler) getImageTaskResult(w http.ResponseWriter, r *http.Request) {
 				"intake_id": result.Creative.IntakeID,
 				"status":    result.Creative.Status,
 			},
+		}
+		if result.Creative.OCREvidence != nil {
+			payload["outcome"] = result.Creative.OCREvidence.Outcome
+			payload["notice"] = result.Creative.WritingResultNotice()
 		}
 		if result.Creative.PromotedWorkID != "" {
 			payload["work"] = map[string]any{

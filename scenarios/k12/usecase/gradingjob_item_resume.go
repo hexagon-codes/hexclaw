@@ -576,7 +576,9 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 	}
 	item.Status, item.Warning = photoAssessmentStatus(graded)
 	effects := k12storage.GradingAssessmentEffects{}
-	if job.Fields.SourceKind != PracticeReturnGradingSourceKind {
+	// 副作用与已收敛的图片判定一致，证据不足时不消费模型初步对错。
+	if job.Fields.SourceKind != PracticeReturnGradingSourceKind &&
+		(item.Status == PhotoCorrect || item.Status == PhotoWrong) {
 		var effectsErr error
 		effects, effectsErr = deps.gradingAssessmentEffects(durableCtx, gradeReq, graded)
 		if effectsErr != nil {

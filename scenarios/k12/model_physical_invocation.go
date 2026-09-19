@@ -91,6 +91,8 @@ const (
 	RecognitionLayoutCandidateValidV2   RecognitionLayoutCandidateClassificationV2 = "valid"
 	RecognitionLayoutCandidateMissingV2 RecognitionLayoutCandidateClassificationV2 = "missing"
 	RecognitionLayoutCandidateInvalidV2 RecognitionLayoutCandidateClassificationV2 = "invalid"
+	// 来源复核与协议无效分开记账，共用冻结前的单轮原图读取授权。
+	RecognitionLayoutCandidateReviewRequiredV2 RecognitionLayoutCandidateClassificationV2 = "review_required"
 )
 
 type RecognitionLayoutCandidateResultKindV2 string
@@ -603,7 +605,7 @@ func RecognitionLayoutTargetExactSetDigestV2(
 // 它重新计算计划器所有的摘要，并证明主批次对全部目标构成有序、两两不相交的精确覆盖。
 func ValidateRecognitionLayoutPlanV2(plan RecognitionLayoutPlanV2) error {
 	if plan.Version != RecognitionPlanVersionV2 ||
-		(plan.RecognitionFormat != "" && plan.RecognitionFormat != RecognitionLayoutCompactV1 && plan.RecognitionFormat != RecognitionLayoutCompactV2) ||
+		(plan.RecognitionFormat != "" && plan.RecognitionFormat != RecognitionLayoutCompactV1 && plan.RecognitionFormat != RecognitionLayoutCompactV2 && plan.RecognitionFormat != RecognitionLayoutCompactV3 && plan.RecognitionFormat != RecognitionLayoutCompactV4) ||
 		!validRecognitionLayoutSHA256(plan.PageDigest) ||
 		!validRecognitionLayoutSHA256(plan.ManifestResultDigest) ||
 		len(plan.Targets) < 1 || len(plan.Targets) > recognitionLayoutTargetLimitV2 {

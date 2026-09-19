@@ -2215,7 +2215,7 @@ func (s *Store) FreezeCreativeWorkIntakeOCR(
 ) (k12.CreativeWorkIntake, error) {
 	sum := sha256.Sum256([]byte(evidence.CanonicalContent))
 	wantDigest := "sha256:" + hex.EncodeToString(sum[:])
-	if strings.TrimSpace(evidence.CanonicalContent) == "" || evidence.CanonicalVersion < 1 ||
+	if (strings.TrimSpace(evidence.CanonicalContent) == "" && evidence.Outcome != "unreadable") || evidence.CanonicalVersion < 1 ||
 		evidence.CanonicalDigest != wantDigest {
 		return k12.CreativeWorkIntake{}, fmt.Errorf("%w: invalid canonical OCR evidence", ErrImageTaskInvalidState)
 	}
@@ -2245,20 +2245,31 @@ func (s *Store) FreezeCreativeWorkIntakeOCR(
 	if err != nil || inv.IntakeID != intakeID || inv.Operation != k12.ImageTaskOperationWritingOCR {
 		return intake, ErrImageTaskConflict
 	}
-	resultJSON, _ := jsonString(map[string]any{
-		"canonical_digest":  evidence.CanonicalDigest,
-		"canonical_version": evidence.CanonicalVersion,
-	})
+	nextStatus := k12.CreativeWorkIntakeReady
+	if evidence.Outcome == "unreadable" {
+		nextStatus = k12.CreativeWorkIntakeUnreadable
+	}
+	validated := intake
+	validated.Status, validated.OCREvidence, validated.ConfirmationProvenance = nextStatus, &evidence, provenance
+	if err := validated.Validate(); err != nil {
+		return intake, err
+	}
+	resultJSON, _ := jsonString(evidence)
 	now := nowUnix()
-	res, err := tx.ExecContext(ctx, `UPDATE k12_image_task_invocations
+	var res sql.Result
+	if inv.Status != k12.ImageTaskInvocationSucceeded {
+		res, err = tx.ExecContext(ctx, `UPDATE k12_image_task_invocations
         SET status='succeeded',result_digest=?,result_json=?,retry_safe=0,
             finished_at=?,updated_at=?
         WHERE agent_name=? AND invocation_id=? AND status IN ('prepared','sent')`,
-		evidence.CanonicalDigest, resultJSON, now, now, agentName, invocationID)
-	if err != nil {
-		return intake, err
-	}
-	if n, _ := res.RowsAffected(); n != 1 {
+			evidence.CanonicalDigest, resultJSON, now, now, agentName, invocationID)
+		if err != nil {
+			return intake, err
+		}
+		if n, _ := res.RowsAffected(); n != 1 {
+			return intake, ErrImageTaskInvalidState
+		}
+	} else if intake.OCREvidence == nil || intake.OCREvidence.Raw != evidence.Raw {
 		return intake, ErrImageTaskInvalidState
 	}
 	invocations := append([]string(nil), intake.OperationInvocations...)
@@ -2271,11 +2282,11 @@ func (s *Store) FreezeCreativeWorkIntakeOCR(
 	}
 	invocationsJSON, _ := jsonString(invocations)
 	res, err = tx.ExecContext(ctx, `UPDATE k12_creative_work_intakes
-        SET ocr_evidence_json=?,operation_invocations_json=?,status='ready',
+        SET ocr_evidence_json=?,operation_invocations_json=?,status=?,
             confirmation_provenance=?,retry_safe=0,failure_kind='',
             version=version+1,updated_at=?
         WHERE agent_name=? AND intake_id=? AND version=?`,
-		evidenceJSON, invocationsJSON, provenance, now, agentName, intakeID, expectedVersion)
+		evidenceJSON, invocationsJSON, nextStatus, provenance, now, agentName, intakeID, expectedVersion)
 	if err != nil {
 		return intake, err
 	}
@@ -2288,10 +2299,8 @@ func (s *Store) FreezeCreativeWorkIntakeOCR(
 	return getCreativeWorkIntake(ctx, s.db, agentName, intakeID)
 }
 
-// HoldCreativeWorkIntakeOCRConfirmation persists a successful but uncertain
-// OCR receipt and parks only the minimum risky segments for parent review.
-// The model result is immutable; a later confirmation creates a new canonical
-// version instead of rewriting this evidence.
+// HoldCreativeWorkIntakeOCRConfirmation 持久化不确定的原始识别回执。
+// 自动任务继续局部复核，手工草稿保持显式提交；后续冻结创建新 canonical 版本，不改原始回执。
 func (s *Store) HoldCreativeWorkIntakeOCRConfirmation(
 	ctx context.Context,
 	agentName, intakeID string,
@@ -2335,11 +2344,7 @@ func (s *Store) HoldCreativeWorkIntakeOCRConfirmation(
 		invocation.Operation != k12.ImageTaskOperationWritingOCR {
 		return intake, ErrImageTaskConflict
 	}
-	resultJSON, _ := jsonString(map[string]any{
-		"canonical_digest": evidence.CanonicalDigest,
-		"risk_segments":    evidence.RiskSegments,
-		"confidence":       evidence.Confidence,
-	})
+	resultJSON, _ := jsonString(evidence)
 	now := nowUnix()
 	res, err := tx.ExecContext(ctx, `UPDATE k12_image_task_invocations
         SET status='succeeded',result_digest=?,result_json=?,retry_safe=0,
@@ -2355,22 +2360,28 @@ func (s *Store) HoldCreativeWorkIntakeOCRConfirmation(
 	invocations := append([]string(nil), intake.OperationInvocations...)
 	invocations = append(invocations, invocationID)
 	invocationsJSON, _ := jsonString(invocations)
+	nextStatus := k12.CreativeWorkIntakeAwaitingConfirmation
+	if intake.PromotionPolicy == k12.CreativeWorkPromotionAutomatic {
+		nextStatus = k12.CreativeWorkIntakePreparing
+	}
 	res, err = tx.ExecContext(ctx, `UPDATE k12_creative_work_intakes
         SET ocr_evidence_json=?,operation_invocations_json=?,
-            status='awaiting_confirmation',confirmation_provenance='',
+            status=?,confirmation_provenance='',
             retry_safe=0,failure_kind='',version=version+1,updated_at=?
         WHERE agent_name=? AND intake_id=? AND status='preparing' AND version=?`,
-		evidenceJSON, invocationsJSON, now, agentName, intakeID, expectedVersion)
+		evidenceJSON, invocationsJSON, nextStatus, now, agentName, intakeID, expectedVersion)
 	if err != nil {
 		return intake, err
 	}
 	if n, _ := res.RowsAffected(); n != 1 {
 		return intake, ErrImageTaskVersionConflict
 	}
-	if _, err := pauseImageTaskAutomaticWindow(
-		ctx, tx, agentName, intake.DispatchID, now,
-	); err != nil {
-		return intake, err
+	if intake.PromotionPolicy == k12.CreativeWorkPromotionExplicitCommit {
+		if _, err := pauseImageTaskAutomaticWindow(
+			ctx, tx, agentName, intake.DispatchID, now,
+		); err != nil {
+			return intake, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return intake, err

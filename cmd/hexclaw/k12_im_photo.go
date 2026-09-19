@@ -151,8 +151,13 @@ func resolveK12InboundPhotoPracticeRoute(
 	}
 
 	recent := make([]k12usecase.PracticeSetView, 0, 1)
+	hasUnreturned := false
 	for _, set := range sets {
-		if !k12InboundPhotoUnreturnedPracticeSet(set) || set.Fields.FinalizedAt <= 0 ||
+		if !k12InboundPhotoUnreturnedPracticeSet(set) {
+			continue
+		}
+		hasUnreturned = true
+		if set.Fields.FinalizedAt <= 0 ||
 			input.Now < set.Fields.FinalizedAt ||
 			input.Now-set.Fields.FinalizedAt > k12InboundPhotoRecentPracticeWindow {
 			continue
@@ -164,6 +169,9 @@ func resolveK12InboundPhotoPracticeRoute(
 			Decision:      k12usecase.InboundPhotoRouteRegrade,
 			PracticeSetID: strings.TrimSpace(recent[0].Record.RecordID),
 		}
+	}
+	if !hasUnreturned {
+		return k12InboundPhotoPracticeRoute{Decision: k12usecase.InboundPhotoRouteNewSubmission}
 	}
 	return k12InboundPhotoPracticeRoute{
 		Decision:   k12usecase.InboundPhotoRouteAskedUser,
@@ -665,6 +673,14 @@ func k12PhotoRoutingCandidateReply(snapshot k12usecase.InboundPhotoRoutingSnapsh
 }
 
 func k12CreativeWorkReply(result k12usecase.ImageTaskResult) (*adapter.Reply, error) {
+	if result.Creative != nil && result.Creative.Status == k12.CreativeWorkIntakeUnreadable {
+		notice := result.Creative.WritingResultNotice()
+		msg, err := channel.NewCanonicalMarkdownMessageWithAttachments(messagecontent.ProducerK12, "zh-CN", notice, notice, "", nil)
+		if err != nil {
+			return nil, err
+		}
+		return adapterReplyFromChannelMessage(msg), nil
+	}
 	if result.CreativeWork == nil || len(result.CreativeWork.Fields.Versions) == 0 {
 		return nil, fmt.Errorf("K12 作品任务已完成但点评缺失")
 	}

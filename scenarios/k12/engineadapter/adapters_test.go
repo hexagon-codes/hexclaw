@@ -109,3 +109,21 @@ func TestBug20260712_RecognizeParsesLatexEscapes(t *testing.T) {
 		t.Fatalf("题干应降级为 Unicode 数学符号: %q / %q", qs[0].Question, qs[1].Question)
 	}
 }
+
+func TestRecognizerPreservesLatexMultiplicationBeforeDigits(t *testing.T) {
+	raw := `[{"question":"18\times2=36","knowledge_points":["乘法"]},{"question":"50\times100=5000","knowledge_points":["乘法"]},{"question":"19\\times2=38","knowledge_points":["乘法"]}]`
+	a := NewRecognizerAdapter(func(context.Context, []byte, string) (string, error) { return raw, nil })
+	qs, err := a.Recognize(context.Background(), []byte{1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"18×2=36", "50×100=5000", "19×2=38"}
+	if len(qs) != len(want) {
+		t.Fatalf("got %d questions, want %d", len(qs), len(want))
+	}
+	for i := range want {
+		if qs[i].Question != want[i] {
+			t.Errorf("question %d: got %q, want %q", i, qs[i].Question, want[i])
+		}
+	}
+}

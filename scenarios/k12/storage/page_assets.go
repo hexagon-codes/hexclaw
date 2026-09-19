@@ -360,6 +360,22 @@ func normalizePageAssetScope(
 	return ownerScope, agentName, pageAssetID, nil
 }
 
+// ReadyPageAssetOwnerForAgent 为已绑定资产的后台任务取得持久归属，不代替面向请求的归属校验。
+func (s *Store) ReadyPageAssetOwnerForAgent(ctx context.Context, agentName, pageAssetID string) (string, error) {
+	agentName, pageAssetID = strings.TrimSpace(agentName), strings.TrimSpace(pageAssetID)
+	if agentName == "" || pageAssetID == "" {
+		return "", ErrPageAssetNotFound
+	}
+	asset, err := s.getPageAssetByAgentIdentity(ctx, agentName, pageAssetID)
+	if err != nil {
+		return "", err
+	}
+	if asset.StorageState != PageAssetStorageReady || asset.OwnerScope == "" {
+		return "", ErrPageAssetNotFound
+	}
+	return asset.OwnerScope, nil
+}
+
 // GetReadyPageAsset is the only consumer read. Non-ready and cross-owner rows
 // are deliberately indistinguishable from missing identities.
 func (s *Store) GetReadyPageAsset(

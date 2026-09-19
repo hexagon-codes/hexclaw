@@ -1065,6 +1065,21 @@ func (o *GradingOrchestrator) RecoverGradingJobs(ctx context.Context, agents []s
 				continue
 			}
 			jobID := v.Record.RecordID
+			if v.Record.Status == k12.GradingStageFailedRetryable {
+				previousFailureKind := v.Fields.FailureKind
+				l := o.jobLock(jobID)
+				l.Lock()
+				v, err = o.deps.reconcileRetryableRecognitionOutcome(ctx, agent, jobID)
+				l.Unlock()
+				if err != nil {
+					slog.Warn("K12 recovery could not reconcile recognition receipts; retry withheld", "job", jobID, "err", err)
+					continue
+				}
+				if v.Record.Status == k12.GradingStageOutcomeUnknown {
+					slog.Warn("K12 recovery corrected retryable job from unresolved recognition receipts",
+						"job", jobID, "previous_failure_kind", previousFailureKind, "failure_kind", v.Fields.FailureKind)
+				}
+			}
 			run, err := o.ensureRun(ctx, jobID)
 			if err != nil {
 				slog.Warn("K12 批改任务崩溃恢复: 运行时产物缺失/校验失败，任务留在当前状态等人工处置",
@@ -1097,6 +1112,7 @@ func (o *GradingOrchestrator) RecoverGradingJobs(ctx context.Context, agents []s
 				}
 			case k12.GradingStageFailedRetryable:
 				if !v.Fields.Retryable ||
+					v.Fields.FailureKind == "reconciled_partial_succeeded" ||
 					v.Fields.FailureKind == gradingFailureInteractiveDeadlineExceeded {
 					continue // 不可重试残留（正常应已收敛 failed_terminal）：留人工处置
 				}
@@ -1194,12 +1210,8 @@ func (o *GradingOrchestrator) reconcileDurableGradingOutcome(
 			run.req.Image,
 		)
 		if physicalErr != nil {
-			// A local recognition result file cannot prove that the ambiguous
-			// provider operation completed. Reconciliation is eligible only
-			// when the exact approved 1-or-7 physical child set is durable and
-			// every child is terminal succeeded; otherwise keep the same Job
-			// parked without resending.
-			return false, GradingJobView{}, nil
+			// 未最终化的识别只能按持久物理回执证明局部完成，不能把本地文件当作成功。
+			return o.reconcilePartialRecognition(ctx, run, job, *invocation)
 		}
 		// A source-scoped Problem/Attempt snapshot can still contain facts from an
 		// earlier invocation of this Job. Only this Job's append-only recognition

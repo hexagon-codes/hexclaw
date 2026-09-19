@@ -22,13 +22,15 @@ import (
 // WorkFeedbackRequest 是作品点评生成请求：只携带作品的可见证据（题目要求、原文/原图、
 // 孩子意图），Skill 层据此生成，不发明输入（PRD §3.10）。
 type WorkFeedbackRequest struct {
-	WorkType        string // writing / art
-	Title           string
-	Task            string // 题目要求或创作任务
-	Intent          string // 孩子想表达的内容（美术）
-	ContentMarkdown string // 最新版本文字内容（写作）
-	SourceAssetID   string // 最新版本原图（美术）
-	Grade           string // 生效年级（约束点评口径）
+	WorkType           string // writing / art
+	Title              string
+	Task               string // 题目要求或创作任务
+	Intent             string // 孩子想表达的内容（美术）
+	ContentMarkdown    string // 最新版本文字内容（写作）
+	PartialContent     bool   // 只评价可靠片段，不生成整篇结论或完整参考稿
+	ContentLimitations string
+	SourceAssetID      string // 最新版本原图（美术）
+	Grade              string // 生效年级（约束点评口径）
 }
 
 // WorkFeedbackOutput 是作品点评生成结果：点评正文 + 方法论基座来源戳。
@@ -174,6 +176,14 @@ func (d Deps) GenerateWorkFeedbackCommand(
 		Intent:          v.Fields.Intent,
 		ContentMarkdown: strings.TrimSpace(last.ContentMarkdown),
 		SourceAssetID:   last.SourceAssetID,
+	}
+	if v.Fields.WorkType == k12.WorkTypeWriting && v.Fields.SourceIntakeID != "" {
+		intake, readErr := d.Records.GetCreativeWorkIntake(ctx, agentName, v.Fields.SourceIntakeID)
+		if readErr != nil {
+			return CreativeWorkView{}, readErr
+		}
+		req.PartialContent = intake.OCREvidence != nil && intake.OCREvidence.Outcome == "partial"
+		req.ContentLimitations = intake.WritingResultNotice()
 	}
 	// 无任何可见证据（无文字也无原图）不生成——点评必须有依据（INV-011 的另一半：不虚构）。
 	if req.ContentMarkdown == "" && req.SourceAssetID == "" {
@@ -417,6 +427,10 @@ func (d Deps) GenerateWorkFeedbackCommand(
 		strings.TrimSpace(out.SkillStamp), true,
 	)
 	if err == nil {
+		if req.PartialContent {
+			structured.Limitations = req.ContentLimitations
+			structured.ProjectionMarkdown = k12.ProjectWorkFeedbackMarkdown(structured)
+		}
 		err = structured.Validate()
 	}
 	if err != nil {
@@ -469,6 +483,8 @@ func (d Deps) validatePromotedWritingFeedbackSnapshot(
 		return fmt.Errorf("%w: 作文正文与接入 OCR 确认摘要不一致", ErrInvalidInput)
 	}
 	switch intake.ConfirmationProvenance {
+	case k12.CreativeWorkEvidenceBoundedReview:
+		return intake.Validate()
 	case k12.CreativeWorkEvidenceAutoFreeze,
 		k12.CreativeWorkParentConfirmed,
 		k12.CreativeWorkParentCorrected:

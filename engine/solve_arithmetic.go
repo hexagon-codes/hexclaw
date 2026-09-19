@@ -26,10 +26,27 @@ var answerSpacedMixedFractionRe = regexp.MustCompile(`([0-9]+)\s+([0-9]+/[0-9]+)
 var itemNumberPrefixRe = regexp.MustCompile(`^[0-9]{1,3}\s*(?:[、)）]|[.．]\s)\s*`)
 var mixedNumberAnswerRe = regexp.MustCompile(`^([+\-]?)([0-9]+)(?:\s+|又)([0-9]+)\s*/\s*([0-9]+)$`)
 var simplestFractionRequestRe = regexp.MustCompile(`^计算[ \t]*(.+?)[ \t]*[，,][ \t]*并把结果化成最简分数[。.]?$`)
+
 // 识别模型常见的“计算：表达式=”输出；问号是可选的，不能因缺少问号而把确定性算式
 // 降级到模型 solver/verifier 链。等号右侧仍必须为空，后续字符白名单继续 fail-closed。
 var standaloneArithmeticRequestRe = regexp.MustCompile(`^计算：[ \t]*([0-9.+*/() \t-]+?)[ \t]*(?:。|=[ \t]*\??)$`)
 var separatedArithmeticNumberRe = regexp.MustCompile(`[0-9.][ \t]+[0-9.]`)
+
+// ArithmeticTranscriptionConsistent 仅为原图复核分流提供算术一致性证据，不确认原图内容
+// 或生成批改结论；无法完整复算、最终答案不同或任一步不成立时均需另行复核。
+func ArithmeticTranscriptionConsistent(problem, studentAnswer string) bool {
+	problem = normalizeArithmeticAnswerMarkup(problem)
+	_, computed, ok := solveTrivialArithmetic(problem)
+	if !ok {
+		return false
+	}
+	answer, ok := arithmeticAnswerValue(studentAnswer)
+	if !ok || answer != computed {
+		return false
+	}
+	valid, conclusive := validateStudentArithmeticWork(problem, normalizeArithmeticAnswerMarkup(studentAnswer))
+	return valid && conclusive
+}
 
 // solveTrivialArithmetic 对“只含数字、四则运算、括号，等号右侧为空/问号”的一步算式做
 // 本机精确求值。它刻意不接受变量、函数、单位或自然语言，避免把方程/应用题误判成纯计算。

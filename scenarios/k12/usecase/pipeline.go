@@ -2,7 +2,6 @@ package usecase
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -458,6 +457,20 @@ func (d Deps) gradingAssessmentEffects(
 	req GradeRequest,
 	res GradeResult,
 ) (k12storage.GradingAssessmentEffects, error) {
+	status := res.Outcome.AssessmentStatus()
+	if status == k12.GradingAssessmentCorrect && problemSourceCorrection(ctx) {
+		return k12storage.GradingAssessmentEffects{SourceCorrection: true}, nil
+	}
+	if (status == k12.GradingAssessmentCorrect || status == k12.GradingAssessmentWrong) &&
+		d.Records != nil && strings.TrimSpace(req.StudentAnswer) != "" && !problemSourceCorrection(ctx) {
+		existing, err := d.findGradingReviewSource(ctx, req)
+		if err != nil {
+			return k12storage.GradingAssessmentEffects{}, err
+		}
+		if existing != nil {
+			return d.gradingReviewEffect(existing, status == k12.GradingAssessmentCorrect)
+		}
+	}
 	switch res.Outcome.AssessmentStatus() {
 	case k12.GradingAssessmentWrong:
 		due := d.now() + FirstReviewInterval
@@ -475,53 +488,126 @@ func (d Deps) gradingAssessmentEffects(
 			},
 		}}, nil
 	case k12.GradingAssessmentCorrect:
-		if problemSourceCorrection(ctx) {
-			return k12storage.GradingAssessmentEffects{SourceCorrection: true}, nil
-		}
-		if d.Records == nil || strings.TrimSpace(req.Problem) == "" {
-			return k12storage.GradingAssessmentEffects{}, nil
-		}
-		probe, err := k12.NewMistakeRecord(req.AgentName, req.SourceSession,
-			k12.MistakeFields{Question: req.Problem})
-		if err != nil {
-			return k12storage.GradingAssessmentEffects{}, err
-		}
-		existing, err := d.Records.FindDuplicate(ctx, probe)
-		if errors.Is(err, records.ErrNotFound) {
-			return k12storage.GradingAssessmentEffects{}, nil
-		}
-		if err != nil {
-			return k12storage.GradingAssessmentEffects{}, fmt.Errorf("usecase: 查找待推进错题: %w", err)
-		}
-		switch existing.Status {
-		case k12.StatusNew, k12.StatusExplained, k12.StatusRetried:
-		default:
-			return k12storage.GradingAssessmentEffects{}, nil
-		}
-		fields, err := k12.ParseMistakeFields(existing.Fields)
-		if err != nil {
-			return k12storage.GradingAssessmentEffects{}, fmt.Errorf("usecase: 解析待推进错题: %w", err)
-		}
-		now := d.now()
-		newStatus := k12.StatusRetried
-		var due *int64
-		if existing.Status == k12.StatusRetried && fields.LastRetriedAt > 0 &&
-			now-fields.LastRetriedAt >= MasteryGapInterval {
-			newStatus = k12.StatusMastered
-			fields.LastRetriedAt = now
-		} else {
-			fields.ReviewStage++
-			fields.LastRetriedAt = now
-			nextDue := now + reviewIntervalForStage(fields.ReviewStage)
-			due = &nextDue
-		}
-		return k12storage.GradingAssessmentEffects{Review: &k12storage.GradingReviewEffect{
-			RecordID: existing.RecordID, ExpectedVersion: existing.Version,
-			NewStatus: newStatus, Fields: fields, DueAt: due,
-		}}, nil
+		return k12storage.GradingAssessmentEffects{}, nil
 	default:
 		return k12storage.GradingAssessmentEffects{}, nil
 	}
+}
+
+// findGradingReviewSource 只接受当前孩子的唯一精确来源；不按知识点、答案或近期卷猜测。
+func (d Deps) findGradingReviewSource(ctx context.Context, req GradeRequest) (*records.AgentRecord, error) {
+	// 只合并等价的全角运算符，不删除条件、数字、单位或公式结构。
+	normalize := func(question string) string {
+		question = k12.NormalizeQuestion(strings.NewReplacer("＋", "+", "－", "-", "＝", "=", "（", "(", "）", ")").Replace(question))
+		for _, delimiters := range [][2]string{{`\(`, `\)`}, {`\[`, `\]`}, {"$$", "$$"}, {"$", "$"}} {
+			if len(question) > len(delimiters[0])+len(delimiters[1]) &&
+				strings.HasPrefix(question, delimiters[0]) && strings.HasSuffix(question, delimiters[1]) {
+				question = strings.TrimSuffix(strings.TrimPrefix(question, delimiters[0]), delimiters[1])
+				break
+			}
+		}
+		// 仅基础纯算式允许省略计算指令；文字条件与单位保持逐字对应。
+		for _, prefix := range []string{"计算：", "计算:"} {
+			if remainder, found := strings.CutPrefix(question, prefix); found && remainder != "" &&
+				strings.IndexFunc(remainder, func(r rune) bool { return !strings.ContainsRune("0123456789.+-*/()=×÷", r) }) < 0 {
+				question = remainder
+			}
+		}
+		return question
+	}
+	question := normalize(req.Problem)
+	if question == "" {
+		return nil, nil
+	}
+	mistakes, err := d.Records.ListByScope(ctx, req.AgentName, k12.CollectionMistakes, "")
+	if err != nil {
+		return nil, fmt.Errorf("usecase: read grading review sources: %w", err)
+	}
+	byID := make(map[string]*records.AgentRecord, len(mistakes))
+	candidates := make(map[string]*records.AgentRecord)
+	for _, record := range mistakes {
+		if record.Status == k12.StatusArchived {
+			continue
+		}
+		fields, err := k12.ParseMistakeFields(record.Fields)
+		if err != nil {
+			return nil, fmt.Errorf("usecase: parse grading review source: %w", err)
+		}
+		if fields.Subject != req.Subject {
+			continue
+		}
+		byID[record.RecordID] = record
+		if normalize(fields.Question) == question {
+			candidates[record.RecordID] = record
+		}
+	}
+	sets, err := d.Records.ListByScope(ctx, req.AgentName, k12.CollectionPracticeSet, "")
+	if err != nil {
+		return nil, fmt.Errorf("usecase: read grading practice sources: %w", err)
+	}
+	for _, set := range sets {
+		fields, err := k12.ParsePracticeSetFields(set.Fields)
+		if err != nil {
+			return nil, fmt.Errorf("usecase: parse grading practice source: %w", err)
+		}
+		if fields.FinalizedAt <= 0 || set.Status == k12.PracticeStatusCancelled {
+			continue
+		}
+		for _, item := range fields.Items {
+			if item.Subject == req.Subject && item.VerificationStatus == k12.PracticeItemVerified &&
+				item.PaperSeq > 0 && normalize(item.QuestionMarkdown) == question {
+				if source := byID[item.SourceProblemID]; source != nil {
+					candidates[source.RecordID] = source
+				}
+			}
+		}
+	}
+	if len(candidates) == 1 {
+		for _, record := range candidates {
+			return record, nil
+		}
+	}
+	return nil, nil
+}
+
+// gradingReviewEffect 复用判定回执事务；错误复习只能重排，不能积累掌握证据。
+func (d Deps) gradingReviewEffect(existing *records.AgentRecord, correct bool) (k12storage.GradingAssessmentEffects, error) {
+	fields, err := k12.ParseMistakeFields(existing.Fields)
+	if err != nil {
+		return k12storage.GradingAssessmentEffects{}, fmt.Errorf("usecase: parse grading review effect: %w", err)
+	}
+	now := d.now()
+	newStatus := k12.StatusRetried
+	var due *int64
+	if !correct {
+		newStatus = existing.Status
+		if newStatus == k12.StatusMastered {
+			newStatus = k12.StatusRetried
+		}
+		fields.ReviewStage = 0
+		nextDue := now + reviewIntervalForStage(0)
+		due = &nextDue
+		if fields.SpotCheckState == k12.SpotCheckScheduled {
+			fields.SpotCheckState = k12.SpotCheckFailed
+		}
+	} else {
+		if fields.SpotCheckState == k12.SpotCheckScheduled {
+			fields.SpotCheckState = k12.SpotCheckPassed
+		}
+		if existing.Status == k12.StatusMastered || (existing.Status == k12.StatusRetried &&
+			fields.LastRetriedAt > 0 && now-fields.LastRetriedAt >= MasteryGapInterval) {
+			newStatus = k12.StatusMastered
+		} else {
+			fields.ReviewStage++
+			nextDue := now + reviewIntervalForStage(fields.ReviewStage)
+			due = &nextDue
+		}
+		fields.LastRetriedAt = now
+	}
+	return k12storage.GradingAssessmentEffects{Review: &k12storage.GradingReviewEffect{
+		RecordID: existing.RecordID, ExpectedVersion: existing.Version,
+		NewStatus: newStatus, Fields: fields, DueAt: due,
+	}}, nil
 }
 
 // sanitizeErrorCause 把 grader 偶发 dump 的 verifier 自查过程/评审链原文剥离，只留简洁错因。

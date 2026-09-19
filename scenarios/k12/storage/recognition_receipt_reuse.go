@@ -12,7 +12,7 @@ import (
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 )
 
-// ReuseSucceededRecognitionPhysicalInvocation 仅在同任务可重试失败后复用成功清单或主批次。
+// ReuseSucceededRecognitionPhysicalInvocation 在同任务可恢复失败后复用成功清单、主批次或已授权复核。
 // 读取不可变输入证明后，事务内再次确认当前所有权及成功载荷；不进入模型发送边界。
 func (s *Store) ReuseSucceededRecognitionPhysicalInvocation(
 	ctx context.Context, agentName, physicalID string,
@@ -24,8 +24,9 @@ func (s *Store) ReuseSucceededRecognitionPhysicalInvocation(
 	if current.Status == k12.ModelInvocationSucceeded && current.ReusedFromPhysicalInvocationID != "" {
 		return current, true, nil
 	}
+	isRepair := strings.HasPrefix(string(current.PhysicalUnit), "layout_repair_")
 	if current.Status != k12.ModelInvocationPrepared || current.RecognitionPlanVersion != k12.RecognitionPlanVersionV2 ||
-		(current.PhysicalUnit != k12.RecognitionPhysicalUnitWholePage && !strings.HasPrefix(string(current.PhysicalUnit), "layout_batch_")) {
+		(current.PhysicalUnit != k12.RecognitionPhysicalUnitWholePage && !strings.HasPrefix(string(current.PhysicalUnit), "layout_batch_") && !isRepair) {
 		return current, false, nil
 	}
 	parent, err := s.getModelInvocationByID(ctx, current.ParentInvocationID)
@@ -45,13 +46,19 @@ func (s *Store) ReuseSucceededRecognitionPhysicalInvocation(
 		if getErr != nil {
 			return current, false, getErr
 		}
-		if prior.Status != k12.ModelInvocationFailed || prior.Attempt >= parent.Attempt ||
-			prior.AgentName != parent.AgentName || prior.JobID != parent.JobID || prior.Stage != parent.Stage ||
+		partial := prior.Status == k12.ModelInvocationReconciled && prior.FailureKind == "reconciled_partial_succeeded"
+		if (prior.Status != k12.ModelInvocationFailed && !partial) || prior.Attempt >= parent.Attempt {
+			continue
+		}
+		if prior.AgentName != parent.AgentName || prior.JobID != parent.JobID || prior.Stage != parent.Stage ||
 			prior.RequestDigest != parent.RequestDigest ||
 			!reflect.DeepEqual(prior.RouteSnapshot, parent.RouteSnapshot) ||
 			!reflect.DeepEqual(prior.RequestPolicySnapshot, parent.RequestPolicySnapshot) ||
 			!reflect.DeepEqual(source.RouteSnapshot, current.RouteSnapshot) ||
 			!reflect.DeepEqual(source.RequestPolicySnapshot, current.RequestPolicySnapshot) {
+			if partial {
+				return current, false, fmt.Errorf("%w: partial recognition replay identity changed", ErrModelPhysicalInvocationConflict)
+			}
 			continue
 		}
 		currentPlan, loadErr := s.LoadRecognitionLayoutPlanRuntimeV2(ctx, agentName, parent.InvocationID)
@@ -63,15 +70,21 @@ func (s *Store) ReuseSucceededRecognitionPhysicalInvocation(
 			return current, false, loadErr
 		}
 		if currentPlan.Header.PageDigest != priorPlan.Header.PageDigest || priorPlan.AuthorizedPlan == nil {
+			if partial || isRepair {
+				return current, false, fmt.Errorf("%w: recognition replay page or authority changed", ErrModelPhysicalInvocationConflict)
+			}
 			continue
 		}
 		if current.PhysicalUnit == k12.RecognitionPhysicalUnitWholePage {
 			if currentPlan.ManifestPhysicalInvocationID != current.PhysicalInvocationID ||
 				priorPlan.ManifestPhysicalInvocationID != source.PhysicalInvocationID ||
 				currentPlan.HeaderDigest != current.PlanDigest || priorPlan.HeaderDigest != source.PlanDigest {
+				if partial {
+					return current, false, fmt.Errorf("%w: partial recognition replay manifest changed", ErrModelPhysicalInvocationConflict)
+				}
 				continue
 			}
-		} else {
+		} else if !isRepair {
 			var classified bool
 			if queryErr := s.db.QueryRowContext(ctx, `SELECT EXISTS(
                 SELECT 1 FROM k12_recognition_layout_batch_settlements
@@ -80,11 +93,19 @@ func (s *Store) ReuseSucceededRecognitionPhysicalInvocation(
 				return current, false, queryErr
 			}
 			if !classified {
+				if partial {
+					return current, false, fmt.Errorf("%w: partial recognition replay batch is unsettled", ErrModelPhysicalInvocationConflict)
+				}
 				continue
 			}
+		}
+		if current.PhysicalUnit != k12.RecognitionPhysicalUnitWholePage {
 			if currentPlan.AuthorizedPlan == nil || priorPlan.AuthorizedPlan == nil ||
 				current.PlanDigest != currentPlan.AuthorizedPlan.AuthorizedPlanDigest ||
 				source.PlanDigest != priorPlan.AuthorizedPlan.AuthorizedPlanDigest {
+				if partial || isRepair {
+					return current, false, fmt.Errorf("%w: recognition replay plan authority changed", ErrModelPhysicalInvocationConflict)
+				}
 				continue
 			}
 			left, right := *currentPlan.AuthorizedPlan, *priorPlan.AuthorizedPlan
@@ -92,7 +113,28 @@ func (s *Store) ReuseSucceededRecognitionPhysicalInvocation(
 			left.ManifestInvocationID, right.ManifestInvocationID = "", ""
 			left.AuthorizedPlanDigest, right.AuthorizedPlanDigest = "", ""
 			if !reflect.DeepEqual(left, right) {
+				if isRepair || partial {
+					return current, false, fmt.Errorf("%w: partial recognition replay plan changed", ErrModelPhysicalInvocationConflict)
+				}
 				continue
+			}
+			if isRepair {
+				if source.CandidateExactSetDigest != current.CandidateExactSetDigest {
+					return current, false, fmt.Errorf("%w: repair replay target changed", ErrModelPhysicalInvocationConflict)
+				}
+				for _, pair := range []struct {
+					parent k12.ModelInvocation
+					child  k12.ModelPhysicalInvocation
+				}{{parent, current}, {prior, source}} {
+					var planID string
+					if err := s.db.QueryRowContext(ctx, `SELECT plan_id FROM k12_recognition_layout_plans WHERE parent_invocation_id=? AND agent_name=?`, pair.parent.InvocationID, agentName).Scan(&planID); err != nil {
+						return current, false, err
+					}
+					// 复用同一单轮授权的原图复读，不要求旧回执已完成本地结算。
+					if err := validateRecognitionLayoutRepairAuthorizationEvidenceVia(ctx, s.db, pair.parent, pair.child, planID, pair.child.PlanDigest, false); err != nil {
+						return current, false, err
+					}
+				}
 			}
 		}
 		var reused k12.ModelPhysicalInvocation

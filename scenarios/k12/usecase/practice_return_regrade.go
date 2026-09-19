@@ -288,11 +288,20 @@ func (c *PracticeReturnRegradeCoordinator) projectCompleted(
 	}
 	annotatedAssetID := ""
 	if result.AnnotatedImage != nil && len(result.AnnotatedImage.Data) > 0 {
-		saved, err := assetstore.Save(agentName, result.AnnotatedImage.Data)
+		ownerScope, err := c.Deps.Records.ReadyPageAssetOwnerForAgent(ctx, agentName, ret.AssetID)
 		if err != nil {
 			return err
 		}
-		annotatedAssetID = saved
+		assets := &PageAssetRepository{Records: c.Deps.Records}
+		if _, err := assets.OpenReady(ctx, ownerScope, agentName, ret.AssetID); err != nil {
+			return err
+		}
+		// 批注图继承本次回传原图的归属，完成登记后才能发布可读取的引用。
+		saved, err := assets.Persist(ctx, ownerScope, agentName, result.AnnotatedImage.Data)
+		if err != nil {
+			return err
+		}
+		annotatedAssetID = saved.Metadata.PageAssetID
 	}
 	status := k12.PracticeRegradeCompleted
 	if len(unresolved) > 0 || unmatched || (ret.AutoMatch && len(covered) == 0) {
@@ -448,10 +457,24 @@ func practiceQuestionReferences(refs []PracticeGradingReference, paperSize int, 
 			continue
 		}
 		hasNumber = true
-		if len(q.SourceNumberPath) != 1 {
+		numberPath := q.SourceNumberPath
+		// 章节不是卷面题号；只剥离识别事实中明确且完全一致的章节前缀。
+		if len(q.SourceSectionPath) > 0 && len(numberPath) == len(q.SourceSectionPath)+1 {
+			sectionMatches := true
+			for j, section := range q.SourceSectionPath {
+				if strings.TrimSpace(numberPath[j]) != strings.TrimSpace(section) {
+					sectionMatches = false
+					break
+				}
+			}
+			if sectionMatches {
+				numberPath = numberPath[len(q.SourceSectionPath):]
+			}
+		}
+		if len(numberPath) != 1 {
 			continue
 		}
-		number := strings.Trim(strings.TrimSpace(q.SourceNumberPath[0]), "第题.．、()（）[]【】 ")
+		number := strings.Trim(strings.TrimSpace(numberPath[0]), "第题.．、()（）[]【】 ")
 		seq, err := strconv.Atoi(number)
 		if err == nil && seq > 0 {
 			seqs[i] = seq

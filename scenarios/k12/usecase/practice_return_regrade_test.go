@@ -76,6 +76,20 @@ func TestPracticeReturnRegradeCoordinator_AppliesClearResultsAndPersistsAnnotate
 		t.Fatal(err)
 	}
 	ret := set.Fields.ReturnAssets[0]
+	_, sourceFile, err := assetstore.Parse(ret.AssetID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceData, _, err := assetstore.Read("mingming", sourceFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 复用真实上传的资产登记前置，不用裸文件代替已接纳的回传素材。
+	if _, err := (&PageAssetRepository{Records: d.Records}).Persist(
+		context.Background(), "guardian-test", "mingming", sourceData,
+	); err != nil {
+		t.Fatal(err)
+	}
 	route := k12.GradingModelSnapshot{
 		Provider: "provider-a",
 		Model:    "vision-a",

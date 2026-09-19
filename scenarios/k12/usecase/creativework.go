@@ -448,12 +448,9 @@ func buildStructuredWorkFeedback(workType string, version k12.CreativeWorkVersio
 				}
 			}
 		}
-	} else if !strictFeedback {
-		// BUG-20260726-003: a detailed provider response can contain many valid
-		// short observations. Joining every item after the second into one row
-		// made that row exceed the canonical 500-rune atom limit and rejected
-		// the entire first feedback generation. Deduplicate repeated evidence,
-		// then pack at existing clause boundaries into at most three valid atoms.
+	} else if !strictFeedback || len(observationEvidence) > 3 {
+		// 模型换行不等于独立观察条目。复用句界合并，将不同证据保存为
+		// 最多三条、每条不超过五百字的观察；已合法的当前格式保持原样。
 		const maxObservationRunes = 500
 		const maxObservationAtoms = 3
 		unique := make([]string, 0, len(observationEvidence))
@@ -472,9 +469,7 @@ func buildStructuredWorkFeedback(workType string, version k12.CreativeWorkVersio
 				cut := len(runes)
 				if cut > maxObservationRunes {
 					cut = maxObservationRunes
-					// Prefer a sentence boundary near the end of the allowed
-					// atom. A provider may still emit one unpunctuated span;
-					// the hard rune boundary is the safe final fallback.
+					// 优先在接近上限的句界切分，无标点时按字数边界切分。
 					for i := cut - 1; i >= maxObservationRunes*3/4; i-- {
 						if strings.ContainsRune("。！？；.!?;", runes[i]) {
 							cut = i + 1
@@ -503,6 +498,8 @@ func buildStructuredWorkFeedback(workType string, version k12.CreativeWorkVersio
 			}
 			if len(packed) < maxObservationAtoms {
 				packed = append(packed, evidence)
+			} else if strictFeedback {
+				return k12.WorkFeedback{}, fmt.Errorf("work feedback observations exceed the storage capacity")
 			}
 		}
 		observationEvidence = packed

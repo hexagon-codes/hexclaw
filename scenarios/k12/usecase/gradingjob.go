@@ -583,11 +583,36 @@ func (d Deps) CancelGradingJob(ctx context.Context, agentName, recordID string) 
 	return d.saveGradingJob(ctx, v, k12.GradingStageCancelled)
 }
 
+// reconcileRetryableRecognitionOutcome 以物理回执纠正旧的可重试投影。
+// 各重试入口和启动恢复共用此核对；不改写调用历史，也不发送模型请求。
+func (d Deps) reconcileRetryableRecognitionOutcome(ctx context.Context, agentName, recordID string) (GradingJobView, error) {
+	v, err := d.GetGradingJob(ctx, agentName, recordID)
+	if err != nil || v.Record.Status != k12.GradingStageFailedRetryable {
+		return v, err
+	}
+	children, err := d.Records.ListModelPhysicalInvocations(ctx, agentName, recordID)
+	if err != nil {
+		return GradingJobView{}, fmt.Errorf("%w: inspect recognition receipts before retry: %v", ErrModelInvocationRequiresReconciliation, err)
+	}
+	for _, child := range children {
+		if child.Stage != k12.GradingStageRecognizing ||
+			(child.Status != k12.ModelInvocationSent && child.Status != k12.ModelInvocationOutcomeUnknown) {
+			continue
+		}
+		v.Fields.FailedStage = k12.GradingStageRecognizing
+		v.Fields.FailureKind = "provider_outcome_unknown"
+		v.Fields.Retryable = false
+		v.Fields.Deadline = 0
+		return d.saveGradingJob(ctx, v, k12.GradingStageOutcomeUnknown)
+	}
+	return v, nil
+}
+
 // RetryGradingJob 安全重试（§6.7 公共命令④）：仅 failed_retryable 且 retryable=true 可重试，
 // 回 queued 从最近成功阶段的检查点恢复（规则 3；恢复目标 = GradingResumeStage，由编排器
 // 经 AdvanceGradingStage(ok) 起跑）。重试上限在失败落库时已收敛 failed_terminal（规则 4）。
 func (d Deps) RetryGradingJob(ctx context.Context, agentName, recordID string) (GradingJobView, error) {
-	v, err := d.GetGradingJob(ctx, agentName, recordID)
+	v, err := d.reconcileRetryableRecognitionOutcome(ctx, agentName, recordID)
 	if err != nil {
 		return GradingJobView{}, err
 	}
@@ -615,7 +640,7 @@ func (d Deps) RetryGradingJobWithParentAutomaticWindow(
 	agentName, recordID, parentAutomaticAttemptID string,
 	parentAutomaticDeadlineAt int64,
 ) (GradingJobView, error) {
-	v, err := d.GetGradingJob(ctx, agentName, recordID)
+	v, err := d.reconcileRetryableRecognitionOutcome(ctx, agentName, recordID)
 	if err != nil {
 		return GradingJobView{}, err
 	}

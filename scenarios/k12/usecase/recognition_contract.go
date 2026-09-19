@@ -96,7 +96,7 @@ func EvaluateOCRConfirmationRisk(q RecognizedQuestion) RecognizedQuestion {
 			reasons[OCRRiskLowConfidence] = struct{}{}
 		}
 	}
-	if evidenceTranscriptionsConflict(q.RawTranscription, q.EvidenceTranscriptions, q.AnswerRawTranscription) ||
+	if questionEvidenceTranscriptionsConflict(q) ||
 		evidenceTranscriptionsConflict(q.AnswerRawTranscription, q.AnswerEvidenceTranscriptions, "") {
 		reasons[OCRRiskEvidenceConflict] = struct{}{}
 	}
@@ -160,6 +160,33 @@ func distinctEvidenceCount(values []string) int {
 	return len(set)
 }
 
+// questionEvidenceTranscriptionsConflict 仅在比较视图去掉明确属于本题的题号。
+// 作答及缺少可靠题号身份的文本保持原样，不能把小数或正文枚举当作编号删除。
+func questionEvidenceTranscriptionsConflict(q RecognizedQuestion) bool {
+	if len(q.SourceNumberPath) != 1 {
+		return evidenceTranscriptionsConflict(q.RawTranscription, q.EvidenceTranscriptions, q.AnswerRawTranscription)
+	}
+	number := q.SourceNumberPath[0]
+	if number == "" || strings.Trim(number, "0123456789") != "" {
+		return evidenceTranscriptionsConflict(q.RawTranscription, q.EvidenceTranscriptions, q.AnswerRawTranscription)
+	}
+	trimNumber := func(value string) string {
+		return strings.TrimPrefix(strings.TrimSpace(value), number+"、")
+	}
+	values := make([]string, len(q.EvidenceTranscriptions))
+	for i, value := range q.EvidenceTranscriptions {
+		switch {
+		case strings.HasPrefix(value, "手写："):
+			values[i] = value
+		case strings.HasPrefix(value, "印刷体："):
+			values[i] = "印刷体：" + trimNumber(strings.TrimPrefix(value, "印刷体："))
+		default:
+			values[i] = trimNumber(value)
+		}
+	}
+	return evidenceTranscriptionsConflict(trimNumber(q.RawTranscription), values, q.AnswerRawTranscription)
+}
+
 // evidenceTranscriptionsConflict 区分同一多行作答的互补片段与真正互斥的独立读数。
 // 各片段按原顺序覆盖完整抄录时，它们共同构成一次证据；只允许首行前导等号
 // 和原文中单个连接运算符的间隙，不改写数值、片段顺序或片段内运算符。
@@ -169,8 +196,10 @@ func evidenceTranscriptionsConflict(transcription string, values []string, answe
 		// 空白归一后将带分数的整数部分并入分子，也不移除运算分组括号。
 		value = evidenceNewline.ReplaceAllString(value, "\n")
 		value = evidenceNumericFraction.ReplaceAllString(value, `\frac{$1}{$2}`)
+		value = strings.ReplaceAll(value, `\ `, " ")
 		value = strings.Join(strings.Fields(CanonicalPlainTextFallback(value)), "")
 		return strings.NewReplacer(
+			`\,`, "", "（", "(", "）", ")",
 			"。", "", "；", "", "，", "", "：", "", "、", "", ";", "", ":", "",
 		).Replace(value)
 	}
@@ -207,6 +236,17 @@ func evidenceTranscriptionsConflict(transcription string, values []string, answe
 	whole := normalize(transcription)
 	if whole == "" || len(parts) == 0 {
 		return true
+	}
+	// 两次完整读数仅排版、空白或标点不同，不构成来源冲突；不放宽数值或运算符。
+	allMatch := true
+	for _, part := range parts {
+		if part != whole {
+			allMatch = false
+			break
+		}
+	}
+	if allMatch {
+		return false
 	}
 	trimLeadingEquals := func(value string) string {
 		if strings.HasPrefix(value, "＝") {

@@ -18,6 +18,7 @@ import (
 
 	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/engine"
 	"github.com/hexagon-codes/hexclaw/resourcegov"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/usecase"
@@ -342,6 +343,7 @@ var recognitionLayoutSHA256DigestV2 = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`
 type recognitionLayoutBatchExecutionV2 struct {
 	index                int
 	outcomes             []recognitionLayoutBatchOutcomeV2
+	reviewSources        []recognitionLayoutBatchOutcomeV2
 	repairAuthorizations []k12.RecognitionLayoutRepairAuthorizationV2
 	err                  error
 }
@@ -435,7 +437,7 @@ var wholePageShortQuestionFieldOrder = []string{
 
 // invalidJSONEscape 匹配 JSON 字符串中的非法转义（\x 且 x ∉ "\/bfnrtu）——视觉模型在题干里
 // 输出 LaTeX（\div 等）时 \d 会让 json.Unmarshal 直接失败（BUG-20260712-U 真机取证）。
-var latexJSONCommandEscape = regexp.MustCompile(`\\(?:times|div|cdot|pm|mp|leq|geq|neq|le|ge|ne|approx|infty|pi|degree|sqrt|frac|text|mathrm|mathbf|mathit|mathsf|mathtt|operatorname)\b`)
+var latexJSONCommandEscape = regexp.MustCompile(`\\(?:times|div|cdot|pm|mp|leq|geq|neq|le|ge|ne|approx|infty|pi|degree|sqrt|frac|text|mathrm|mathbf|mathit|mathsf|mathtt|operatorname)`)
 var sectionHeading = regexp.MustCompile(`^(?:[一二三四五六七八九十]+[、.．]\s*[^?？=]{0,20}(?:题|得数|计算|解方程|简算)|选择合适的数填空)$`)
 var leadingChineseQuestionNumber = regexp.MustCompile(`^\s*\d+\s*、\s*`)
 
@@ -480,11 +482,15 @@ func sanitizeModelJSON(s string) string {
 		// \times、\text、\frac、\ne 等分别以 JSON 的合法 \t/\f/\n 开头；如果不先保护，
 		// json.Unmarshal 会把它们吞成制表符/换页符/换行，字段级数学规范化已无法恢复。
 		if match := latexJSONCommandEscape.FindStringIndex(s[i:]); match != nil && match[0] == 0 {
-			command := s[i : i+match[1]]
-			out.WriteByte('\\')
-			out.WriteString(command)
-			i += len(command) - 1
-			continue
+			end := i + match[1]
+			// LaTeX 命令只由英文字母组成；后接数字时也必须保护反斜杠。
+			hasLetterSuffix := end < len(s) && ((s[end] >= 'a' && s[end] <= 'z') || (s[end] >= 'A' && s[end] <= 'Z'))
+			if !hasLetterSuffix {
+				out.WriteByte('\\')
+				out.WriteString(s[i:end])
+				i = end - 1
+				continue
+			}
 		}
 
 		if i+1 >= len(s) {
@@ -783,7 +789,7 @@ func buildRecognitionLayoutPlanV2(
 			ResultDigest: manifest.ResultDigest,
 		},
 		Targets:           targets,
-		RecognitionFormat: k12.RecognitionLayoutCompactV2,
+		RecognitionFormat: k12.RecognitionLayoutCompactV4,
 	})
 	if err != nil {
 		return k12.RecognitionLayoutPlanV2{}, err
@@ -900,7 +906,11 @@ func (a *RecognizerAdapter) recognizeLayoutPrimaryBatchesV2(
 		map[string]k12.RecognitionLayoutRepairAuthorizationV2,
 		len(plan.Targets),
 	)
+	reviewSources := make(map[string]*usecase.RecognizedQuestion)
 	for _, result := range ordered {
+		for _, source := range result.reviewSources {
+			reviewSources[source.targetID] = source.question
+		}
 		for _, outcome := range result.outcomes {
 			if _, duplicate := outcomeByTarget[outcome.targetID]; duplicate {
 				return nil, fmt.Errorf(
@@ -970,6 +980,7 @@ func (a *RecognizerAdapter) recognizeLayoutPrimaryBatchesV2(
 			plan,
 			runtime,
 			repairAuthorizations,
+			reviewSources,
 		)
 		if err != nil {
 			return nil, err
@@ -1136,6 +1147,7 @@ func (a *RecognizerAdapter) recognizeLayoutRepairWaveV2(
 	plan k12.RecognitionLayoutPlanV2,
 	runtime k12.RecognitionLayoutPlanRuntimeV2,
 	authorizations []k12.RecognitionLayoutRepairAuthorizationV2,
+	reviewSources map[string]*usecase.RecognizedQuestion,
 ) ([]recognitionLayoutBatchOutcomeV2, error) {
 	if len(authorizations) == 0 {
 		return nil, nil
@@ -1166,6 +1178,7 @@ func (a *RecognizerAdapter) recognizeLayoutRepairWaveV2(
 				runtime,
 				authorizations[index],
 				index,
+				reviewSources[authorizations[index].CandidateID],
 			)
 		}()
 	}
@@ -1239,6 +1252,7 @@ func (a *RecognizerAdapter) recognizeLayoutRepairV2(
 	runtime k12.RecognitionLayoutPlanRuntimeV2,
 	authorization k12.RecognitionLayoutRepairAuthorizationV2,
 	index int,
+	primarySource *usecase.RecognizedQuestion,
 ) recognitionLayoutRepairExecutionV2 {
 	result := recognitionLayoutRepairExecutionV2{index: index}
 	physicalCtx, cancelPhysical, err := recognitionLayoutPhysicalCallContextV2(
@@ -1273,6 +1287,10 @@ func (a *RecognizerAdapter) recognizeLayoutRepairV2(
 		result.err = err
 		return result
 	}
+	if plan.RecognitionFormat == k12.RecognitionLayoutCompactV3 || plan.RecognitionFormat == k12.RecognitionLayoutCompactV4 {
+		// 不附带初读文本或答案，独立读取原像素，避免用作答反推印刷题。
+		prompt = "Independently transcribe this original-image crop. Inspect the entire printed expression from left to right, including every numerator, denominator, operator and decimal point. Read printed content and handwriting separately; do not solve, correct, complete missing pixels, or infer either from the other. If any content remains unreadable, preserve that uncertainty using the existing OCR signals and answer_state fields.\n\n" + prompt
+	}
 	physical, err := a.callRecognitionVisionPhysical(
 		physicalCtx,
 		k12.RecognitionPhysicalCall{
@@ -1293,6 +1311,43 @@ func (a *RecognizerAdapter) recognizeLayoutRepairV2(
 		target,
 		plan.RecognitionFormat,
 	)
+	if plan.RecognitionFormat == k12.RecognitionLayoutCompactV4 && primarySource != nil && outcome != nil && outcome.question != nil {
+		// 保留两份实际转写，交给既有冲突规则；不按先后或自报分数选信。
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(candidate.ResultJSON, &fields); err != nil {
+			result.err = err
+			return result
+		}
+		// 原模型的逐行片段仍在不可变物理回执内，不能与完整独立读数拼接成第三份证据。
+		// 先保留片段自身已成立的冲突，再用两份完整转写进行独立来源比较。
+		risk := usecase.EvaluateOCRConfirmationRisk(*outcome.question)
+		for _, reason := range risk.ConfirmationReasons {
+			if reason == usecase.OCRRiskEvidenceConflict {
+				fields["ocr_signals"], _ = json.Marshal(append(outcome.question.OCRSignals, "evidence_conflict"))
+				break
+			}
+		}
+		fields["evidence_transcriptions"], _ = json.Marshal([]string{
+			primarySource.RawTranscription, outcome.question.RawTranscription})
+		fields["answer_evidence_transcriptions"], _ = json.Marshal([]string{
+			primarySource.AnswerRawTranscription, outcome.question.AnswerRawTranscription})
+		raw, err := json.Marshal(fields)
+		if err != nil {
+			result.err = err
+			return result
+		}
+		candidate.ResultJSON, err = canonicalRecognitionLayoutResultJSONV2(raw)
+		if err != nil {
+			result.err = err
+			return result
+		}
+		question, err := parseRecognitionLayoutQuestionV2(candidate.ResultJSON, target, plan.RecognitionFormat)
+		if err != nil {
+			result.err = err
+			return result
+		}
+		outcome.question = &question
+	}
 	settlement := k12.RecognitionLayoutRepairSettlementV2{
 		PlanDigest:                 plan.AuthorizedPlanDigest,
 		AuthorizationID:            authorization.AuthorizationID,
@@ -1481,6 +1536,10 @@ func (a *RecognizerAdapter) recognizeLayoutPrimaryBatchV2(
 		targets,
 		plan.RecognitionFormat,
 	)
+	if plan.RecognitionFormat == k12.RecognitionLayoutCompactV3 || plan.RecognitionFormat == k12.RecognitionLayoutCompactV4 {
+		result.reviewSources = append([]recognitionLayoutBatchOutcomeV2(nil), decision.outcomes...)
+		selectRecognitionSourceReviewV3(&decision)
+	}
 	slog.Info("K12 recognition batch parsed", "unit", batch.Unit, "elapsed_ms", time.Since(parseStarted).Milliseconds(), "classification", decision.classification, "candidate_count", len(decision.candidates))
 	settlement := k12.RecognitionLayoutPrimaryBatchSettlementV2{
 		PlanDigest:                 plan.AuthorizedPlanDigest,
@@ -1556,7 +1615,7 @@ func buildRecognitionLayoutBatchPromptV2(
 	targets []k12.RecognitionLayoutTargetV2,
 	format ...string,
 ) (string, error) {
-	if len(format) > 0 && (format[0] == k12.RecognitionLayoutCompactV1 || format[0] == k12.RecognitionLayoutCompactV2) {
+	if len(format) > 0 && (format[0] == k12.RecognitionLayoutCompactV1 || format[0] == k12.RecognitionLayoutCompactV2 || format[0] == k12.RecognitionLayoutCompactV3 || format[0] == k12.RecognitionLayoutCompactV4) {
 		descriptors := make([]struct {
 			TargetID string `json:"target_id"`
 			Width    int    `json:"width"`
@@ -1564,7 +1623,7 @@ func buildRecognitionLayoutBatchPromptV2(
 		}, 0, len(targets))
 		for index, target := range targets {
 			modelRef := target.TargetID
-			if format[0] == k12.RecognitionLayoutCompactV2 {
+			if format[0] == k12.RecognitionLayoutCompactV2 || format[0] == k12.RecognitionLayoutCompactV3 || format[0] == k12.RecognitionLayoutCompactV4 {
 				modelRef = fmt.Sprintf("t%d", index+1)
 			}
 			descriptors = append(descriptors, struct {
@@ -1751,7 +1810,7 @@ func classifyRecognitionLayoutBatchV2(
 			hasUnattributable = true
 			continue
 		}
-		if len(format) > 0 && format[0] == k12.RecognitionLayoutCompactV2 {
+		if len(format) > 0 && (format[0] == k12.RecognitionLayoutCompactV2 || format[0] == k12.RecognitionLayoutCompactV3 || format[0] == k12.RecognitionLayoutCompactV4) {
 			// 短引用只在当前冻结批次内精确匹配，不接受相似摘要或跨批次身份。
 			var resolved string
 			for index, candidate := range targets {
@@ -1879,6 +1938,41 @@ func classifyRecognitionLayoutBatchV2(
 	return decision
 }
 
+// selectRecognitionSourceReviewV3 只在首读结算前运行。简单算术的一致性只是免除额外
+// 复核的证据，不是原图已被数学证明；来源风险优先，复核结果不再进入此分流。
+func selectRecognitionSourceReviewV3(decision *recognitionLayoutBatchClassificationDecisionV2) {
+	if decision.classification != k12.RecognitionLayoutBatchClassifiedV2 {
+		return
+	}
+	review := make(map[string]struct{})
+	retained := decision.outcomes[:0]
+	for _, outcome := range decision.outcomes {
+		if outcome.question == nil {
+			retained = append(retained, outcome)
+			continue
+		}
+		question := usecase.EvaluateOCRConfirmationRisk(*outcome.question)
+		if !question.ConfirmationRequired && question.AnswerState == usecase.AnswerStatePresent &&
+			engine.ArithmeticTranscriptionConsistent(question.Question, question.StudentAnswer) {
+			retained = append(retained, outcome)
+			continue
+		}
+		review[outcome.targetID] = struct{}{}
+	}
+	decision.outcomes = retained
+	for index := range decision.candidates {
+		candidate := &decision.candidates[index]
+		if _, required := review[candidate.CandidateID]; required {
+			candidate.Classification = k12.RecognitionLayoutCandidateReviewRequiredV2
+			candidate.ResultKind = ""
+			candidate.ResultJSON = nil
+		}
+	}
+	if len(review) > 0 {
+		slog.Info("K12 recognition source review selected", "candidate_count", len(review), "policy", k12.RecognitionLayoutCompactV3)
+	}
+}
+
 func canonicalRecognitionLayoutResultJSONV2(
 	raw json.RawMessage,
 ) (json.RawMessage, error) {
@@ -1943,7 +2037,8 @@ func validateRecognitionLayoutPrimarySettlementProjectionV2(
 		case k12.RecognitionLayoutCandidateValidV2:
 			validCandidates = append(validCandidates, candidate)
 		case k12.RecognitionLayoutCandidateMissingV2,
-			k12.RecognitionLayoutCandidateInvalidV2:
+			k12.RecognitionLayoutCandidateInvalidV2,
+			k12.RecognitionLayoutCandidateReviewRequiredV2:
 			repairCandidateIDs = append(repairCandidateIDs, candidate.CandidateID)
 		default:
 			return fail("unknown candidate classification")
@@ -2033,7 +2128,7 @@ func parseRecognitionLayoutQuestionV2(
 		return usecase.RecognizedQuestion{}, fmt.Errorf("recognition fields are invalid")
 	}
 	var observed *k12.SourcePixelRegion
-	if len(format) > 0 && (format[0] == k12.RecognitionLayoutCompactV1 || format[0] == k12.RecognitionLayoutCompactV2) {
+	if len(format) > 0 && (format[0] == k12.RecognitionLayoutCompactV1 || format[0] == k12.RecognitionLayoutCompactV2 || format[0] == k12.RecognitionLayoutCompactV3 || format[0] == k12.RecognitionLayoutCompactV4) {
 		if boxJSON, exists := fields["answer_bbox"]; exists {
 			var box k12.SourcePixelRegion
 			if json.Unmarshal(boxJSON, &box) == nil && box.X >= 0 && box.Y >= 0 && box.Width > 0 && box.Height > 0 && box.Width <= target.Region.Width && box.Height <= target.Region.Height && box.X <= target.Region.Width-box.Width && box.Y <= target.Region.Height-box.Height && (box.Width < target.Region.Width || box.Height < target.Region.Height) {
@@ -2044,7 +2139,13 @@ func parseRecognitionLayoutQuestionV2(
 			delete(fields, "answer_bbox")
 		}
 		if _, full := fields["problem_kind"]; !full {
-			if !recognitionLayoutFieldsAllowedV2(fields, map[string]struct{}{"question": {}, "subject": {}, "answer_state": {}, "student_answer": {}, "recognition_confidence": {}, "ocr_signals": {}}) {
+			compactFields := map[string]struct{}{"question": {}, "subject": {}, "answer_state": {}, "student_answer": {}, "recognition_confidence": {}, "ocr_signals": {}}
+			if format[0] == k12.RecognitionLayoutCompactV4 {
+				// 来源复核将两份完整读数写入既有证据字段，结算和回放共用此合同。
+				compactFields["evidence_transcriptions"] = struct{}{}
+				compactFields["answer_evidence_transcriptions"] = struct{}{}
+			}
+			if !recognitionLayoutFieldsAllowedV2(fields, compactFields) {
 				return usecase.RecognizedQuestion{}, fmt.Errorf("compact recognition fields are invalid")
 			}
 			// 来源身份由计划回填；题干与作答各保留一次观察，不伪造独立核验次数。

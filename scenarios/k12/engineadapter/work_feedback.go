@@ -367,7 +367,11 @@ func buildWorkFeedbackPrompt(req usecase.WorkFeedbackRequest, loader SkillConten
 			b.WriteString("1. 好句摘出：原样引用 1～2 个原文好句，各用一句话说明好在哪里；\n")
 			b.WriteString("2. 一处具体建议：只挑最值得改的一处，指出在原文哪里、怎么改，控制在两三句话。\n")
 		}
-		b.WriteString("给家长修改示范与完整参考稿，并说明先讲什么、怎样追问、卡住时如何引导、如何检查理解。原稿与参考稿分开，不编造孩子事实；不打分、不评级、不排名。直接给内容与讲法，不输出原则声明。\n")
+		if req.PartialContent {
+			b.WriteString("本次原图仅部分可靠。只点评下文可辨认片段，不作整篇总评、结构/主题完整性结论，不生成完整参考稿。标记 [无法识别] 是识别缺口，不是孩子错误；不得猜写、引用、扣分或据此推断能力。只给可见片段的讲法和局部改句，不打分、不评级、不排名。\n")
+		} else {
+			b.WriteString("给家长修改示范与完整参考稿，并说明先讲什么、怎样追问、卡住时如何引导、如何检查理解。原稿与参考稿分开，不编造孩子事实；不打分、不评级、不排名。直接给内容与讲法，不输出原则声明。\n")
+		}
 		if req.Title != "" {
 			b.WriteString("作文题目：" + req.Title + "\n")
 		}
@@ -379,10 +383,22 @@ func buildWorkFeedbackPrompt(req usecase.WorkFeedbackRequest, loader SkillConten
 		}
 		b.WriteString("作文原文：\n" + req.ContentMarkdown)
 		b.WriteString("\n最终呈现使用以下四个固定二级标题，按顺序完整输出，代替技能中的六段标题；保留技能的评价方法、原文证据与教学内容，只聚焦一处最值得讲的改法，不附长篇分析或原则声明：\n")
-		b.WriteString("## 可见证据\n简短总评并引用原稿依据，必要的基础规范只列明确位置与原句，不把讲法或参考稿混入观察。\n")
+		if req.PartialContent {
+			b.WriteString("## 可见证据\n只引用可靠原句并描述该片段，不作整篇总评。\n")
+		} else {
+			b.WriteString("## 可见证据\n简短总评并引用原稿依据，必要的基础规范只列明确位置与原句，不把讲法或参考稿混入观察。\n")
+		}
 		b.WriteString("## 先这样肯定\n只保留首项有据亮点，原样引用孩子的一句并具体说明好在哪里。\n")
-		b.WriteString("## 家长可以这样问或讲\n围绕一处重点给原句、修改理由、参考改句，以及先讲什么、怎样问、卡住如何引导和检查理解；再给完整家长参考稿，原稿未提供的经历不补成事实。保留多段正文与引用，内部小标题和参考稿标题只用三级标题，不新增二级标题。\n")
-		b.WriteString("## 下一次只试一个点\n给同一重点的一项可完成的修改动作及检查标准。除第三段的完整讲法与参考稿外，各段用简短正文，不再追加其他章节、开场或尾声。\n")
+		if req.PartialContent {
+			b.WriteString("## 家长可以这样问或讲\n只围绕可靠片段的一处给原句、理由、局部参考改句和讲解/追问/检查方法。不补缺口，不生成完整参考稿。内部小标题只用三级标题，不新增二级标题。\n")
+		} else {
+			b.WriteString("## 家长可以这样问或讲\n围绕一处重点给原句、修改理由、参考改句，以及先讲什么、怎样问、卡住如何引导和检查理解；再给完整家长参考稿，原稿未提供的经历不补成事实。保留多段正文与引用，内部小标题和参考稿标题只用三级标题，不新增二级标题。\n")
+		}
+		if req.PartialContent {
+			b.WriteString("## 下一次只试一个点\n只针对可靠片段给同一重点的一项可完成的修改动作及检查标准。各段用简短正文，不补写未识别部分，不再追加其他章节、开场或尾声。\n")
+		} else {
+			b.WriteString("## 下一次只试一个点\n给同一重点的一项可完成的修改动作及检查标准。除第三段的完整讲法与参考稿外，各段用简短正文，不再追加其他章节、开场或尾声。\n")
+		}
 	case k12.WorkTypeArt:
 		subject = "美术"
 		if body, stamp, ok := resolveWorkFeedbackSkill(loader, artFeedbackSkillName, artFeedbackSkillFile, artFeedbackRedlineAnchors); ok {

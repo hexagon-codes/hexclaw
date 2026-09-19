@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -1629,13 +1630,92 @@ func validModelInvocationDigest(value string) bool {
 	return err == nil
 }
 
+// reconcilePartialRecognition 只对账尚未最终化、所有已发送子项均成功的识别阶段。
+// 结果保留为可恢复失败；由原任务续窗入口推进，避免本地投影错误形成自动重试循环。
+func (o *GradingOrchestrator) reconcilePartialRecognition(
+	ctx context.Context, run *gradingRun, job GradingJobView, parent k12.ModelInvocation,
+) (bool, GradingJobView, error) {
+	if parent.Status != k12.ModelInvocationOutcomeUnknown &&
+		!(parent.Status == k12.ModelInvocationReconciled && parent.FailureKind == "reconciled_partial_succeeded") {
+		return false, GradingJobView{}, nil
+	}
+	runtime, err := o.deps.Records.LoadRecognitionLayoutPlanRuntimeV2(ctx, run.agentName, parent.InvocationID)
+	if err != nil || runtime.Status == "succeeded" || runtime.AuthorizedPlan == nil ||
+		runtime.AuthorizedPlan.RecognitionFormat != k12.RecognitionLayoutCompactV4 {
+		return false, GradingJobView{}, nil
+	}
+	page, err := k12.CanonicalizeRecognitionPageV2(run.req.Image)
+	if err != nil || page.Digest != runtime.Header.PageDigest || page.Digest != runtime.AuthorizedPlan.PageDigest {
+		return false, GradingJobView{}, nil
+	}
+	plan := *runtime.AuthorizedPlan
+	children, err := o.deps.Records.ListModelPhysicalInvocations(ctx, run.agentName, job.Record.RecordID)
+	if err != nil {
+		return false, GradingJobView{}, err
+	}
+	evidence := []string{parent.RequestDigest, runtime.HeaderDigest, plan.AuthorizedPlanDigest}
+	seen := make(map[k12.RecognitionPhysicalUnit]bool)
+	for _, child := range children {
+		if child.ParentInvocationID != parent.InvocationID {
+			continue
+		}
+		if child.Status != k12.ModelInvocationSucceeded || seen[child.PhysicalUnit] {
+			return false, GradingJobView{}, nil
+		}
+		seen[child.PhysicalUnit] = true
+		call := k12.RecognitionPhysicalCall{PlanVersion: k12.RecognitionPlanVersionV2,
+			PlanDigest: plan.AuthorizedPlanDigest, Unit: child.PhysicalUnit}
+		if child.PhysicalUnit == k12.RecognitionPhysicalUnitWholePage {
+			call.PlanDigest, call.Image = runtime.HeaderDigest, page.PNG
+		} else {
+			for _, batch := range plan.Batches {
+				if batch.Unit == child.PhysicalUnit {
+					call.TargetIDs = batch.TargetIDs
+					call.Image, err = k12.BuildRecognitionLayoutBatchImageV2(page.PNG, plan, batch.Unit)
+					break
+				}
+			}
+			if len(call.TargetIDs) == 0 {
+				for i, target := range plan.Targets {
+					unit, unitErr := k12.RecognitionLayoutRepairUnitV2(i + 1)
+					if unitErr == nil && unit == child.PhysicalUnit {
+						call.TargetIDs = []string{target.TargetID}
+						call.Image, err = k12.BuildRecognitionLayoutRepairImageV2(page.PNG, plan, target.TargetID)
+						break
+					}
+				}
+			}
+		}
+		if err != nil || !recognitionPhysicalChildMatchesCall(parent, child, call) ||
+			!validModelInvocationDigest(child.ResultDigest) {
+			return false, GradingJobView{}, nil
+		}
+		if err := o.deps.Records.ValidateModelPhysicalInvocationResultContent(ctx, child.AgentName, child.PhysicalInvocationID); err != nil {
+			return false, GradingJobView{}, err
+		}
+		evidence = append(evidence, child.PhysicalInvocationID+":"+child.ResultDigest)
+	}
+	if len(seen) < 2 || !seen[k12.RecognitionPhysicalUnitWholePage] {
+		return false, GradingJobView{}, nil
+	}
+	sort.Strings(evidence)
+	digest := modelInvocationDigest([]byte(strings.Join(evidence, "\n")))
+	if _, err := o.deps.Records.ReconcileModelInvocationPartialSucceeded(ctx, run.agentName, parent.InvocationID, digest); err != nil {
+		return false, GradingJobView{}, err
+	}
+	job.Fields.AttemptCount = parent.Attempt
+	job.Fields.FailureKind = "reconciled_partial_succeeded"
+	job.Fields.Retryable = true
+	job.Fields.Deadline = 0
+	next, err := o.deps.saveGradingJob(ctx, job, k12.GradingStageFailedRetryable)
+	return err == nil, next, err
+}
+
 func (o *GradingOrchestrator) recognitionPhysicalCallState(
 	ctx context.Context,
 	parent k12.ModelInvocation,
 ) (started, unresolved bool, err error) {
-	if parent.RequestPolicySnapshot.IsZero() {
-		return false, false, nil
-	}
+	// 默认请求参数同样会发送物理调用，是否已发送只能由子回执判断。
 	children, err := o.deps.Records.ListModelPhysicalInvocations(
 		ctx,
 		parent.AgentName,

@@ -291,10 +291,11 @@ func GradingJobSchema() *records.RecordSchema {
 				GradingStageCancelled,
 				GradingStageOutcomeUnknown,
 			},
-			GradingStageAssessing:       {GradingStageRendering, GradingStageCancelled, GradingStageOutcomeUnknown, GradingStageFailedRetryable},
-			GradingStageRendering:       {GradingStageProjecting},
-			GradingStageProjecting:      {GradingStageCompleted, GradingStageFailedRetryable},
-			GradingStageFailedRetryable: {GradingStageQueued, GradingStageFailedTerminal},
+			GradingStageAssessing:  {GradingStageRendering, GradingStageCancelled, GradingStageOutcomeUnknown, GradingStageFailedRetryable},
+			GradingStageRendering:  {GradingStageProjecting},
+			GradingStageProjecting: {GradingStageCompleted, GradingStageFailedRetryable},
+			// 未决物理回执可纠正旧的可重试投影，不授予未知请求重发权限。
+			GradingStageFailedRetryable: {GradingStageQueued, GradingStageFailedTerminal, GradingStageOutcomeUnknown},
 			// Only an explicit reconciliation command may take outcome_unknown
 			// to failed_retryable; ordinary RetryGradingJob cannot.
 			GradingStageOutcomeUnknown: {GradingStageFailedRetryable, GradingStageCancelled},

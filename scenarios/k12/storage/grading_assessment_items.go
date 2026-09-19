@@ -130,7 +130,9 @@ func validateGradingAssessmentEffectsForStatus(
 	}
 	switch status {
 	case k12.GradingAssessmentWrong:
-		if effects.Review != nil || effects.SourceCorrection {
+		if effects.SourceCorrection || (effects.Review != nil &&
+			(effects.Review.Fields.ReviewStage != 0 || effects.Review.DueAt == nil ||
+				effects.Review.NewStatus == k12.StatusMastered || effects.Review.NewStatus == k12.StatusArchived)) {
 			return fmt.Errorf("k12storage: wrong assessment cannot advance review state")
 		}
 	case k12.GradingAssessmentCorrect:
@@ -463,6 +465,13 @@ func (s *Store) CommitGradingAssessmentItem(ctx context.Context, item k12.Gradin
 		}
 	} else if effects.Review != nil {
 		effectErr = s.commitAssessmentReviewTx(ctx, tx, item.AgentName, *effects.Review)
+		if effectErr == nil {
+			item.ProjectionRecordID = effects.Review.RecordID
+			_, effectErr = tx.ExecContext(ctx, `UPDATE k12_grading_assessment_items
+				SET projection_record_id=?
+				WHERE agent_name=? AND job_id=? AND problem_id=? AND input_revision=?`,
+				item.ProjectionRecordID, item.AgentName, item.JobID, item.ProblemID, item.InputRevision)
+		}
 	} else if effects.SourceCorrection {
 		effectErr = s.commitAssessmentSourceCorrectionTx(ctx, tx, item)
 	}

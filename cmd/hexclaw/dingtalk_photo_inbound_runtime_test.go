@@ -829,18 +829,18 @@ func TestDingTalkPhotoWorkerResolvesPracticeRouteBeforeNewHomeworkPipeline(t *te
 			name:         "exact paper number",
 			view:         inboundPhotoRoutingView("", "页脚 OCR：卷面号 P-2629-02"),
 			sets:         []k12usecase.PracticeSetView{recentA, recentB},
-			wantDecision: k12usecase.InboundPhotoRouteRegrade, wantSetID: "set-b",
+			wantDecision: k12usecase.InboundPhotoRouteNewSubmission, wantNewStarted: true,
 		},
 		{
 			name: "unique recent unreturned paper",
 			view: inboundPhotoRoutingView(""), sets: []k12usecase.PracticeSetView{recentA},
-			wantDecision: k12usecase.InboundPhotoRouteRegrade, wantSetID: "set-a",
+			wantDecision: k12usecase.InboundPhotoRouteNewSubmission, wantNewStarted: true,
 		},
 		{
 			name:         "multiple candidates",
 			view:         inboundPhotoRoutingView(""),
 			sets:         []k12usecase.PracticeSetView{recentA, recentB},
-			wantDecision: k12usecase.InboundPhotoRouteAskedUser, wantPrompt: true,
+			wantDecision: k12usecase.InboundPhotoRouteNewSubmission, wantNewStarted: true,
 		},
 		{
 			name:         "explicit new homework",
@@ -924,8 +924,8 @@ func TestDingTalkPhotoImageTaskGateReadsFrozenV88DecisionWithoutSideEffects(t *t
 		decision k12usecase.InboundPhotoRoutingDecision
 		allow    bool
 	}{
-		{decision: k12usecase.InboundPhotoRoutePending},
-		{decision: k12usecase.InboundPhotoRouteAskedUser},
+		{decision: k12usecase.InboundPhotoRoutePending, allow: true},
+		{decision: k12usecase.InboundPhotoRouteAskedUser, allow: true},
 		{decision: k12usecase.InboundPhotoRouteRegrade},
 		{decision: k12usecase.InboundPhotoRouteNewSubmission, allow: true},
 	}

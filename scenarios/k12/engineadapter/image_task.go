@@ -18,7 +18,7 @@ const imageTaskClassifierPrompt = `你是图片任务分流器，只依据当前
 
 const imageTaskWritingOCRPrompt = `逐字转写这张语文作文原稿，并同时报告转写质量。不要润色、纠错、补句、概括或点评；无法辨认、涂改覆盖、多个读法冲突的片段不得猜。严格只输出 JSON：
 {"raw":"逐字原稿","canonical_content":"只有清晰一致片段才可规范换行，文字不得改写","confidence":0.0,"risk_segments":[{"segment_id":"稳定位置标识","raw_text":"原片段","reasons":["illegible|overwrite|conflicting_reading"],"alternatives":["候选读法"]}]}
-清晰一致且无需家长确认时 risk_segments 必须为空；存在任何风险必须逐段列出。`
+清晰一致时 risk_segments 必须为空；存在任何风险必须逐段列出。raw_text 必须是 canonical_content 中可唯一定位的原始片段，无法读出的字原位写 [无法识别]，不得填猜测字；关键内容或整篇/大部分无法辨认时用 segment_id=document，reasons=["document_unreadable"]，raw 和 canonical_content 仍保留可见观察或 [无法识别]。`
 
 type ImageTaskAdapter struct{ vision VisionFunc }
 
@@ -43,6 +43,41 @@ func NewImageTaskAdapter(vision VisionFunc) *ImageTaskAdapter {
 
 var _ usecase.ImageTaskClassifier = (*ImageTaskAdapter)(nil)
 var _ usecase.ImageTaskWritingOCR = (*ImageTaskAdapter)(nil)
+var _ usecase.ImageTaskWritingOCRReviewer = (*ImageTaskAdapter)(nil)
+
+func (a *ImageTaskAdapter) ReviewImageTaskWriting(ctx context.Context, image []byte, risks []k12.CreativeWorkIntakeOCRRisk) ([]k12.CreativeWorkOCRReviewSegment, error) {
+	if a == nil || a.vision == nil || len(image) == 0 {
+		return nil, fmt.Errorf("writing local review requires image and vision model")
+	}
+	segments, err := json.Marshal(risks)
+	if err != nil {
+		return nil, err
+	}
+	prompt := `仅复核图片中下列已定位的作文转写风险片段，不重写整篇，不润色、纠错或按通顺程度选读法。原文中的错字照抄。
+只输出 JSON：{"segments":[{"segment_id":"原标识","text":"实际可辨认的原文","readable":true,"visual_evidence":"图中行列位置及可见笔画依据"}]}。
+仍看不清就 readable=false、text=""；不得猜测。每个原标识最多一项，不新增片段。风险片段：` + string(segments)
+	raw, err := a.vision(ctx, image, prompt)
+	if err != nil {
+		return nil, fmt.Errorf("writing local review provider failed: %w", providerResponseError(err))
+	}
+	var result struct {
+		Segments []k12.CreativeWorkOCRReviewSegment `json:"segments"`
+	}
+	if err := strictImageTaskJSON(raw, &result); err != nil {
+		return nil, definitiveImageTaskResponse(fmt.Errorf("invalid writing local review response: %w", err))
+	}
+	allowed := make(map[string]bool, len(risks))
+	for _, risk := range risks {
+		allowed[risk.SegmentID] = true
+	}
+	for _, segment := range result.Segments {
+		if !allowed[segment.SegmentID] || (segment.Readable && (strings.TrimSpace(segment.Text) == "" || strings.TrimSpace(segment.VisualEvidence) == "")) {
+			return nil, definitiveImageTaskResponse(fmt.Errorf("writing local review contains invalid segment evidence"))
+		}
+		delete(allowed, segment.SegmentID)
+	}
+	return result.Segments, nil
+}
 
 func strictImageTaskJSON(raw string, target any) error {
 	raw = strings.TrimSpace(raw)

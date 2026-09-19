@@ -331,6 +331,14 @@ func TestVerifiedFullSolutionStepsDoesNotCorruptLeadingDecimal(t *testing.T) {
 	}
 }
 
+func TestVerifiedFullSolutionStepsPreserveNumericEnumeration(t *testing.T) {
+	const solution = "## 方法\n1、先列式\n\n5、14、23\n\n5、14、23、29\n\n5、12、23\n\n2. 核对各数之和\n## 答案\n29"
+	want := []string{"先列式", "5、14、23", "5、14、23、29", "5、12、23", "核对各数之和"}
+	if got := verifiedFullSolutionSteps(solution); !reflect.DeepEqual(got, want) {
+		t.Fatalf("numeric enumeration or ordered steps changed: got %#v, want %#v", got, want)
+	}
+}
+
 func TestAnswerAnchorRejectsEmptyExplicitAnswerSection(t *testing.T) {
 	const solution = "## 方法\n45×2=90，再点回小数点得到9。\n## 答案\n"
 	if answerAnchoredInVerifiedSolution("90", solution) {

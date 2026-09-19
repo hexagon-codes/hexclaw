@@ -80,6 +80,7 @@ type k12DingtalkPhotoInboundRuntimeConfig struct {
 	// BindDirect 在适配器事件进入 ACK 前，把 direct sender 提升为耐久 K12 物理目标绑定。
 	BindDirect        func(context.Context, *adapter.Message) error
 	ResolveInstanceID func(string, string) (string, error)
+	ResolveRoute      func(k12.ImageTaskRouteSnapshot) (k12.ImageTaskRouteSnapshot, error)
 	Inbound           k12InboundPhotoCoordinatorPort
 	ImageTasks        k12InboundPhotoImageTaskPort
 	PracticeSets      k12InboundPhotoPracticeSetReader
@@ -100,6 +101,7 @@ type k12DingtalkPhotoInboundRuntime struct {
 	check             func(context.Context, *adapter.Message) error
 	bindDirect        func(context.Context, *adapter.Message) error
 	resolveInstanceID func(string, string) (string, error)
+	resolveRoute      func(k12.ImageTaskRouteSnapshot) (k12.ImageTaskRouteSnapshot, error)
 	inbound           k12InboundPhotoCoordinatorPort
 	imageTasks        k12InboundPhotoImageTaskPort
 	practiceSets      k12InboundPhotoPracticeSetReader
@@ -139,6 +141,7 @@ func newK12DingtalkPhotoInboundRuntime(
 		baseCtx: baseCtx, router: config.Router, check: config.Check,
 		bindDirect:        config.BindDirect,
 		resolveInstanceID: config.ResolveInstanceID,
+		resolveRoute:      config.ResolveRoute,
 		inbound:           config.Inbound, imageTasks: config.ImageTasks,
 		practiceSets: config.PracticeSets, practiceReturns: config.PracticeReturns,
 		artifacts: config.Artifacts, replyBatches: config.ReplyBatches,
@@ -212,6 +215,23 @@ func (r *k12DingtalkPhotoInboundRuntime) AdmitInboundPhoto(
 
 	// 完整 provider identity 的首次冻结值优先于当前可变路由。
 	existing, resumeErr := r.inbound.ResumeByIdentity(ctx, identity)
+	if errors.Is(resumeErr, records.ErrNotFound) && r.resolveInstanceID != nil {
+		instanceID, resolveErr := r.resolveInstanceID(identity.Platform, identity.InstanceID)
+		if resolveErr != nil {
+			return false, fmt.Errorf("resolve DingTalk inbound instance: %w", resolveErr)
+		}
+		if instanceID != identity.InstanceID {
+			// 旧回执仍按首次接纳身份恢复；新消息以稳定实例身份匹配绑定。
+			normalized := *msg
+			normalized.InstanceID = instanceID
+			msg = &normalized
+			identity, err = k12DingtalkInboundIdentity(msg)
+			if err != nil {
+				return false, err
+			}
+			existing, resumeErr = r.inbound.ResumeByIdentity(ctx, identity)
+		}
+	}
 	if resumeErr == nil {
 		if r.check != nil {
 			if err := r.check(ctx, msg); err != nil {
@@ -265,6 +285,16 @@ func (r *k12DingtalkPhotoInboundRuntime) AdmitInboundPhoto(
 	provider, model, exactRoute := normalizeK12DingtalkInboundPhotoRoute(
 		routed.AgentConfig.Provider, routed.AgentConfig.Model,
 	)
+	if !exactRoute && r.resolveRoute != nil {
+		// 未独立选模型的助手沿用桌面图片任务的唯一默认路由解析器。
+		resolved, resolveErr := r.resolveRoute(k12.ImageTaskRouteSnapshot{
+			Provider: provider, Model: model,
+		})
+		if resolveErr != nil {
+			return false, fmt.Errorf("resolve DingTalk inbound photo route: %w", resolveErr)
+		}
+		provider, model, exactRoute = normalizeK12DingtalkInboundPhotoRoute(resolved.Provider, resolved.Model)
+	}
 	if !exactRoute {
 		return false, fmt.Errorf("DingTalk inbound TutorAgent route is incomplete")
 	}
@@ -579,33 +609,9 @@ func (r *k12DingtalkPhotoInboundRuntime) advanceImageTask(
 	}
 	if practiceRoutingConfigured &&
 		bundle.Dispatch.RoutingDecision == k12usecase.InboundPhotoRouteAskedUser {
-		if err := r.sendRoutingConfirmation(ctx, bundle); err != nil {
-			return false, err
-		}
-		return true, nil
-	}
-	if practiceRoutingConfigured &&
-		bundle.Dispatch.RoutingDecision == k12usecase.InboundPhotoRoutePending &&
-		view.Dispatch.TaskIntent == k12.ImageTaskIntentCompletedHomework {
-		route, err := r.resolvePracticeRoute(ctx, bundle, view)
-		if err != nil {
-			return false, err
-		}
-		switch route.Decision {
-		case k12usecase.InboundPhotoRouteRegrade:
-			return r.advancePracticeReturn(ctx, bundle, view, route.PracticeSetID)
-		case k12usecase.InboundPhotoRouteAskedUser:
-			dispatch, err := r.requestRoutingConfirmation(ctx, bundle, route.Candidates)
-			if err != nil {
-				return false, err
-			}
-			bundle.Dispatch = dispatch
-			if err := r.sendRoutingConfirmation(ctx, bundle); err != nil {
-				return false, err
-			}
-			return true, nil
-		case k12usecase.InboundPhotoRouteNewSubmission:
-			dispatch, err := r.inbound.RecordRoutingDecision(
+		// 已确定是作业的旧分类停点沿同一任务恢复，历史关联由共享批改处理。
+		if view.Dispatch.TaskIntent == k12.ImageTaskIntentCompletedHomework {
+			dispatch, err := r.inbound.ConfirmRouting(
 				ctx, bundle.Receipt.AgentName, bundle.Receipt.ReceiptID,
 				bundle.Dispatch.Version, k12usecase.InboundPhotoRouteNewSubmission,
 			)
@@ -613,9 +619,24 @@ func (r *k12DingtalkPhotoInboundRuntime) advanceImageTask(
 				return false, err
 			}
 			bundle.Dispatch = dispatch
-		default:
-			return false, fmt.Errorf("DingTalk practice-return routing is unresolved")
+		} else {
+			if err := r.sendRoutingConfirmation(ctx, bundle); err != nil {
+				return false, err
+			}
+			return true, nil
 		}
+	}
+	if bundle.Dispatch.RoutingDecision == k12usecase.InboundPhotoRoutePending &&
+		view.Dispatch.TaskIntent == k12.ImageTaskIntentCompletedHomework {
+		// 新图片不按练习候选分流，统一使用已经接纳的图片任务及判定回执。
+		dispatch, err := r.inbound.RecordRoutingDecision(
+			ctx, bundle.Receipt.AgentName, bundle.Receipt.ReceiptID,
+			bundle.Dispatch.Version, k12usecase.InboundPhotoRouteNewSubmission,
+		)
+		if err != nil {
+			return false, err
+		}
+		bundle.Dispatch = dispatch
 	}
 	switch view.Dispatch.Status {
 	case k12.ImageTaskStatusFailed:
@@ -1205,8 +1226,7 @@ func (r *k12DingtalkPhotoInboundRuntime) StartAsync(agentName, dispatchID string
 	return r.imageTasks.StartAsync(agentName, dispatchID)
 }
 
-// AllowIMCompletedHomeworkGrading 是 ImageTask 在创建 GradingJob 前的只读门；
-// 只有 V88 已冻结为新作业时放行，其他分流由入站 worker 继续处理。
+// AllowIMCompletedHomeworkGrading 校验入站身份；只有已经绑定旧复批的任务继续原管道。
 func (r *k12DingtalkPhotoInboundRuntime) AllowIMCompletedHomeworkGrading(
 	ctx context.Context,
 	dispatch k12.ImageTaskDispatch,
@@ -1236,11 +1256,11 @@ func (r *k12DingtalkPhotoInboundRuntime) AllowIMCompletedHomeworkGrading(
 		return false, fmt.Errorf("DingTalk inbound photo routing identity drifted")
 	}
 	switch bundle.Dispatch.RoutingDecision {
-	case k12usecase.InboundPhotoRouteNewSubmission:
+	case k12usecase.InboundPhotoRouteNewSubmission,
+		k12usecase.InboundPhotoRoutePending,
+		k12usecase.InboundPhotoRouteAskedUser:
 		return true, nil
-	case k12usecase.InboundPhotoRoutePending,
-		k12usecase.InboundPhotoRouteAskedUser,
-		k12usecase.InboundPhotoRouteRegrade:
+	case k12usecase.InboundPhotoRouteRegrade:
 		return false, nil
 	default:
 		return false, fmt.Errorf("DingTalk inbound photo routing decision is invalid")

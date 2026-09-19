@@ -457,6 +457,10 @@ func stripSolutionStepMarker(line string) (string, bool) {
 	for index < len(runes) && unicode.IsSpace(runes[index]) {
 		index++
 	}
+	// 顿号后的数字仍属于枚举内容，不能把首个数误当步骤编号删除。
+	if marker == '、' && index < len(runes) && unicode.IsDigit(runes[index]) {
+		return line, false
+	}
 	return strings.TrimSpace(string(runes[index:])), true
 }
 
