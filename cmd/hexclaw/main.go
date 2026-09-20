@@ -423,6 +423,15 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 		return fmt.Errorf("加载配置失败: %w", err)
 	}
 
+	if err := config.InitializeAgentInstructions(); err != nil {
+		logger.Warn("Agent instructions initialization failed; embedded fallback remains available", "error", err)
+	}
+	if !desktopMode {
+		if err := config.EnsureAPIToken(cfg, configFile); err != nil {
+			return fmt.Errorf("initialize persistent API token: %w", err)
+		}
+	}
+
 	// 1.5 桌面端单实例锁：避免重复启动 / stale 进程占端口。
 	// 服务端模式（desktopMode=false）通常用容器编排，无需 lock。
 	var sidecarLock *SidecarLock
@@ -473,7 +482,7 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 	fmt.Printf("  LLM:      %s\n", cfg.LLM.Default)
 	fmt.Printf("  PID:      %d\n", os.Getpid())
 	if desktopMode {
-		fmt.Println("  Mode:     desktop (localhost only, anonymous)")
+		fmt.Println("  Mode:     desktop (localhost, authenticated)")
 	}
 	fmt.Println("  ──────────────────────────────────────────────")
 
@@ -1328,6 +1337,7 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 	// 8. 启动 HTTP 服务
 	srv := api.NewServer(cfg, eng, gw, store)
 	srv.SetDesktopAPIToken(desktopAPIToken)
+	srv.SetOllamaProcessManaged(desktopMode)
 	srv.SetRuntimeConfigPath(configFile)
 	var backendID string
 	if err := store.DB().QueryRowContext(ctx, "SELECT value FROM backend_metadata WHERE key = 'backend_id'").Scan(&backendID); err != nil {

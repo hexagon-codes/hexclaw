@@ -1,6 +1,7 @@
 package config
 
 import (
+	"crypto/rand"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -140,11 +141,74 @@ func Init() (string, error) {
 	}
 
 	// 写入默认配置模板
-	if err := os.WriteFile(cfgPath, []byte(defaultConfigYAML), 0600); err != nil {
+	content := strings.Replace(defaultConfigYAML, "  mode: \"production\"", "  mode: \"production\"\n  api_token: \""+rand.Text()+"\"", 1)
+	if err := os.WriteFile(cfgPath, []byte(content), 0600); err != nil {
 		return "", fmt.Errorf("写入配置文件失败: %w", err)
 	}
 
 	return cfgPath, nil
+}
+
+// EnsureAPIToken 为独立服务首次启动补齐持久业务令牌，保留原文件中的环境引用与其他配置。
+// Desktop 使用原生层 auth.json，不调用此函数。
+func EnsureAPIToken(cfg *Config, configFile string) error {
+	if cfg.Server.APIToken != "" {
+		return nil
+	}
+	data, err := os.ReadFile(configFile)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read API token configuration: %w", err)
+	}
+	var document yaml.Node
+	if len(data) == 0 {
+		data = []byte("server: {}\n")
+	}
+	if err := yaml.Unmarshal(data, &document); err != nil {
+		return fmt.Errorf("decode API token configuration: %w", err)
+	}
+	if len(document.Content) != 1 || document.Content[0].Kind != yaml.MappingNode {
+		return fmt.Errorf("API token configuration must be a mapping")
+	}
+	root := document.Content[0]
+	var server *yaml.Node
+	for i := 0; i < len(root.Content); i += 2 {
+		if root.Content[i].Value == "server" {
+			server = root.Content[i+1]
+			break
+		}
+	}
+	if server == nil {
+		server = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+		root.Content = append(root.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "server"}, server)
+	}
+	if server.Kind != yaml.MappingNode {
+		return fmt.Errorf("server configuration must be a mapping")
+	}
+	token := rand.Text()
+	value := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: token}
+	found := false
+	for i := 0; i < len(server.Content); i += 2 {
+		if server.Content[i].Value == "api_token" {
+			server.Content[i+1] = value
+			found = true
+			break
+		}
+	}
+	if !found {
+		server.Content = append(server.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "api_token"}, value)
+	}
+	data, err = yaml.Marshal(&document)
+	if err != nil {
+		return fmt.Errorf("encode API token configuration: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(configFile), 0o700); err != nil {
+		return err
+	}
+	if err := ReconcileCommittedWrite(atomicWriteFile(configFile, data, 0o600)); err != nil {
+		return err
+	}
+	cfg.Server.APIToken = token
+	return nil
 }
 
 // Save 将当前配置持久化到 YAML 文件

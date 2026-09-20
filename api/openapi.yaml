@@ -2,12 +2,11 @@ openapi: 3.1.0
 info:
   title: HexClaw API
   description: |
-    HexClaw 桌面端 sidecar HTTP API。
+    HexClaw 本机与云端 HTTP API。
 
-    所有 endpoint 都在 `http://127.0.0.1:16060` 监听，桌面端模式下：
-      - 仅 localhost 可达
-      - 默认匿名（无认证）
-      - 端到端 SSE / WebSocket 支持
+    Desktop 管理的本机 Sidecar 监听回环；云端按 server.host 与代理入口访问。
+    两者业务接口均要求对应持久 Bearer 令牌；公开存活端点不证明业务鉴权成功。
+    HTTP、SSE、WebSocket 与资产请求使用同一选定后端，支持代理路径前缀。
 
     Contract 测试见 `api/contract_test.go`，CI 跑 `spectral lint api/openapi.yaml` 校验规范。
 
@@ -17,6 +16,9 @@ info:
 servers:
   - url: http://127.0.0.1:16060
     description: 桌面端本地 sidecar
+
+security:
+  - bearerAuth: []
 
 paths:
   /api/v1/cron/jobs:
@@ -181,6 +183,11 @@ paths:
                     items: { $ref: '#/components/schemas/JobHistory' }
 
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: 当前服务的持久业务访问令牌，本机与远端分别保存。
   schemas:
     CronJob:
       type: object

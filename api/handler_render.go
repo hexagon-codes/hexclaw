@@ -25,8 +25,7 @@ type renderRequest struct {
 // 非缓存 file 在响应完成后清理。
 //
 // 鉴权：本端点处于 /api/v1/ 前缀下，自动经 apiAuthMiddleware 校验：
-//   - localhost：放行
-//   - 非 localhost：必须 Authorization: Bearer <APIToken>
+//   - 本机与远端均校验各自的持久业务令牌。
 func (s *Server) handleRender(w http.ResponseWriter, r *http.Request) {
 	if s.renderSvc == nil {
 		writeRenderError(w, &render.RenderError{
