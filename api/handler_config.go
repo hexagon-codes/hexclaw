@@ -129,6 +129,8 @@ type llmConnectionTestProvider struct {
 	Model                string                              `json:"model"`
 	Locality             string                              `json:"locality,omitempty"`
 	PrivateNetworkAccess config.ProviderPrivateNetworkAccess `json:"private_network_access,omitempty"`
+	// 仅由服务端已保存目标派生，客户端不能通过请求体声明传输范围。
+	OllamaTargetBaseURL string `json:"-"`
 }
 
 type LLMConnectionTestRequest struct {
@@ -354,6 +356,7 @@ var llmTestProviderFactory = func(cfg llmConnectionTestProvider) completionProvi
 		APIKey:               cfg.APIKey,
 		Model:                cfg.Model,
 		PrivateNetworkAccess: cfg.PrivateNetworkAccess,
+		OllamaTargetBaseURL:  cfg.OllamaTargetBaseURL,
 	})
 }
 
@@ -516,6 +519,7 @@ func (s *Server) providerProbePersistenceCandidate(
 				Model:                strings.TrimSpace(saved.Model),
 				Locality:             saved.Locality,
 				PrivateNetworkAccess: saved.PrivateNetworkAccess,
+				OllamaTargetBaseURL:  saved.OllamaTargetBaseURL,
 			},
 		}, true
 	}
@@ -674,6 +678,11 @@ func (s *Server) handleUpdateLLMConfig(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	s.updateLLMConfig(w, r, req, nil)
+}
+
+// 联合目标编辑沿用凭据、配置持久化和运行时提交管线。
+func (s *Server) updateLLMConfig(w http.ResponseWriter, r *http.Request, req LLMConfigUpdateRequest, joint *ollamaTargetUpdateRequest) {
 	if req.DefaultReasoningPolicy != nil {
 		if err := req.DefaultReasoningPolicy.Validate(false); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -681,6 +690,9 @@ func (s *Server) handleUpdateLLMConfig(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	mutationProof, err := newLLMConfigMutationProof(req, r.Header.Get("Idempotency-Key"))
+	if joint != nil {
+		mutationProof, err = newOllamaTargetMutationProof(*joint, r.Header.Get("Idempotency-Key"))
+	}
 	if err != nil {
 		status := http.StatusBadRequest
 		if errors.Is(err, errLLMConfigMutationIDRequired) {
@@ -696,6 +708,8 @@ func (s *Server) handleUpdateLLMConfig(w http.ResponseWriter, r *http.Request) {
 	s.cfgMu.Lock()
 	defer s.cfgMu.Unlock()
 	oldLLM := s.cfg.LLM
+	oldOllama := s.cfg.Ollama
+	nextOllama := oldOllama
 	if replay, replayErr := replayLLMConfigMutation(oldLLM, mutationProof); replayErr != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(replayErr, errLLMConfigMutationConflict) {
@@ -739,7 +753,10 @@ func (s *Server) handleUpdateLLMConfig(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		if err := config.ValidateProviderEndpointAccess(p.BaseURL, p.PrivateNetworkAccess); err != nil {
+		targetBase, _ := oldOllama.Resolve(s.ollamaBaseURL)
+		matchesOllamaTarget := llmrouter.UsesOllamaNativeAdapter(name, config.LLMProviderConfig{BaseURL: p.BaseURL}) &&
+			(strings.TrimRight(p.BaseURL, "/") == targetBase || strings.TrimRight(p.BaseURL, "/") == targetBase+"/v1")
+		if err := config.ValidateProviderEndpointAccess(p.BaseURL, p.PrivateNetworkAccess); err != nil && !matchesOllamaTarget && !(oldLLM.Providers[name].HasOllamaTarget() && oldLLM.Providers[name].BaseURL == p.BaseURL) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{
 				"error": fmt.Sprintf("provider %q 的 base_url 不安全: %v", name, err),
 			})
@@ -845,6 +862,16 @@ func (s *Server) handleUpdateLLMConfig(w http.ResponseWriter, r *http.Request) {
 				KeepAlive:             p.KeepAlive,
 				NumCtx:                p.NumCtx,
 			}
+			if candidate.BaseURL == credentialOld.BaseURL {
+				candidate.OllamaTargetBaseURL = credentialOld.OllamaTargetBaseURL
+			}
+			if llmrouter.UsesOllamaNativeAdapter(name, candidate) {
+				targetBase, _ := oldOllama.Resolve(s.ollamaBaseURL)
+				if strings.TrimRight(candidate.BaseURL, "/") == targetBase || strings.TrimRight(candidate.BaseURL, "/") == targetBase+"/v1" {
+					candidate.BaseURL = targetBase
+					candidate.OllamaTargetBaseURL = targetBase
+				}
+			}
 			if err := config.ValidateProviderModelSpecs(candidate); err != nil {
 				writeJSON(w, http.StatusBadRequest, map[string]string{
 					"error": fmt.Sprintf("provider %q 的模型能力配置非法: %v", name, err),
@@ -905,6 +932,22 @@ func (s *Server) handleUpdateLLMConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if joint != nil {
+		var targetErr error
+		nextOllama, nextLLM, targetErr = s.prepareOllamaTargetUpdate(*joint, oldOllama, nextLLM)
+		if targetErr != nil {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": targetErr.Error()})
+			return
+		}
+		base, _ := nextOllama.Resolve(s.ollamaBaseURL)
+		mutationProof.targetRevision = nextOllama.TargetRevision
+		mutationProof.targetDigest = nextOllama.Digest(base)
+		before, _ := digestLLMConfig(oldLLM)
+		after, _ := digestLLMConfig(nextLLM)
+		mutationProof.preserveRevision = before == after
+	} else {
+		nextOllama = reconcileOllamaProviderAssociations(oldOllama, &nextLLM)
+	}
 	mutationResponse, err := finalizeLLMConfigMutation(oldLLM, &nextLLM, mutationProof)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "LLM 配置提交证明生成失败"})
@@ -913,6 +956,7 @@ func (s *Server) handleUpdateLLMConfig(w http.ResponseWriter, r *http.Request) {
 
 	nextCfg := *s.cfg
 	nextCfg.LLM = nextLLM
+	nextCfg.Ollama = nextOllama
 	semanticProvidersChanged := !reflect.DeepEqual(oldLLM.Providers, nextLLM.Providers)
 
 	// v0.4.0 F9：当注入了 cfgTxMgr 且 flag config.tx.hotload.v1 ON 时，
@@ -941,6 +985,7 @@ func (s *Server) handleUpdateLLMConfig(w http.ResponseWriter, r *http.Request) {
 				// Commit 内部已逆序回滚已 Apply 的 Applier；这里只需把磁盘配置回滚
 				rollbackCfg := *s.cfg
 				rollbackCfg.LLM = oldLLM
+				rollbackCfg.Ollama = oldOllama
 				if saveErr := s.saveRuntimeConfig(&rollbackCfg); saveErr != nil {
 					logger.Error("LLM 事务 Commit 失败且回滚磁盘失败", "commit", commitErr, "rollback", saveErr)
 				}
@@ -953,6 +998,7 @@ func (s *Server) handleUpdateLLMConfig(w http.ResponseWriter, r *http.Request) {
 				if drainErr := s.drainSemanticRuntime(r.Context(), nextLLM); drainErr != nil {
 					rollbackCfg := *s.cfg
 					rollbackCfg.LLM = oldLLM
+					rollbackCfg.Ollama = oldOllama
 					configRollbackErr := s.rollbackCommittedLLMTransaction(r.Context(), &rollbackCfg)
 					semanticRollbackErr := s.restoreSemanticRuntime(oldLLM)
 					if rollbackErr := errors.Join(configRollbackErr, semanticRollbackErr); rollbackErr != nil {
@@ -965,6 +1011,7 @@ func (s *Server) handleUpdateLLMConfig(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			s.cfg.LLM = nextLLM
+			s.cfg.Ollama = nextOllama
 			if s.reloadGenServices != nil {
 				s.reloadGenServices()
 			}
@@ -991,6 +1038,7 @@ func (s *Server) handleUpdateLLMConfig(w http.ResponseWriter, r *http.Request) {
 		if err := runtime.ReloadLLMConfig(r.Context(), nextLLM); err != nil {
 			rollbackCfg := *s.cfg
 			rollbackCfg.LLM = oldLLM
+			rollbackCfg.Ollama = oldOllama
 			if saveErr := s.saveRuntimeConfig(&rollbackCfg); saveErr != nil {
 				logger.Error("LLM 热更新失败且回滚配置失败: reload", "reload", err, "rollback", saveErr)
 			}
@@ -1005,6 +1053,7 @@ func (s *Server) handleUpdateLLMConfig(w http.ResponseWriter, r *http.Request) {
 		if drainErr := s.drainSemanticRuntime(r.Context(), nextLLM); drainErr != nil {
 			rollbackCfg := *s.cfg
 			rollbackCfg.LLM = oldLLM
+			rollbackCfg.Ollama = oldOllama
 			if rollbackErr := s.rollbackLegacyLLMTransition(&rollbackCfg, runtime); rollbackErr != nil {
 				logger.Error("语义运行时热更新失败且旧配置补偿不完整", "reload", drainErr, "rollback", rollbackErr)
 			}
@@ -1015,6 +1064,7 @@ func (s *Server) handleUpdateLLMConfig(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.cfg.LLM = nextLLM
+	s.cfg.Ollama = nextOllama
 
 	// LLM 配置变更后，重建 image/video/voice 生成服务（用新 API Key 构建 Provider）
 	if s.reloadGenServices != nil {
@@ -1070,7 +1120,11 @@ func (s *Server) handleTestLLMConfig(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	if err := config.ValidateProviderEndpointAccess(baseURL, probeDescriptor.PrivateNetworkAccess); err != nil {
+	if probeDescriptor.OllamaTargetBaseURL == "" && strings.EqualFold(providerType, "ollama") {
+		probeDescriptor.OllamaTargetBaseURL = s.configuredOllamaTargetFor(baseURL)
+	}
+	configuredOllama := config.LLMProviderConfig{BaseURL: baseURL, OllamaTargetBaseURL: probeDescriptor.OllamaTargetBaseURL}
+	if err := config.ValidateProviderEndpointAccess(baseURL, probeDescriptor.PrivateNetworkAccess); err != nil && !configuredOllama.HasOllamaTarget() {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
@@ -1082,6 +1136,7 @@ func (s *Server) handleTestLLMConfig(w http.ResponseWriter, r *http.Request) {
 		Model:                model,
 		Locality:             probeDescriptor.Locality,
 		PrivateNetworkAccess: probeDescriptor.PrivateNetworkAccess,
+		OllamaTargetBaseURL:  probeDescriptor.OllamaTargetBaseURL,
 	})
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
@@ -1169,6 +1224,7 @@ func (s *Server) handleTestLLMConfig(w http.ResponseWriter, r *http.Request) {
 // 动态获取 Provider 的可用模型列表。
 // 向 {base_url}/models 发请求（OpenAI 兼容格式），返回标准化的模型列表。
 func (s *Server) handleFetchProviderModels(w http.ResponseWriter, r *http.Request) {
+	ollamaTargetBase := ""
 	var req struct {
 		ProviderInstanceID   string                              `json:"provider_instance_id,omitempty"`
 		BaseURL              string                              `json:"base_url"`
@@ -1194,6 +1250,9 @@ func (s *Server) handleFetchProviderModels(w http.ResponseWriter, r *http.Reques
 			req.APIKey = provider.APIKey
 			req.Locality = provider.Locality
 			req.PrivateNetworkAccess = provider.PrivateNetworkAccess
+			if provider.HasOllamaTarget() {
+				ollamaTargetBase = provider.OllamaTargetBaseURL
+			}
 			providerFound = true
 			break
 		}
@@ -1207,11 +1266,21 @@ func (s *Server) handleFetchProviderModels(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "base_url 不能为空"})
 		return
 	}
-	if err := config.ValidateProviderEndpointAccess(baseURL, req.PrivateNetworkAccess); err != nil {
+	if ollamaTargetBase == "" {
+		ollamaTargetBase = s.configuredOllamaTargetFor(baseURL)
+	}
+	if err := config.ValidateProviderEndpointAccess(baseURL, req.PrivateNetworkAccess); err != nil && ollamaTargetBase == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	providerClient, err := egress.NewProviderHTTPClient(baseURL, req.PrivateNetworkAccess)
+	var providerClient *http.Client
+	var err error
+	if ollamaTargetBase != "" {
+		providerClient = egress.NewConfiguredOllamaClient(10 * time.Second)
+		baseURL = strings.TrimRight(ollamaTargetBase, "/") + "/v1"
+	} else {
+		providerClient, err = egress.NewProviderHTTPClient(baseURL, req.PrivateNetworkAccess)
+	}
 	if err != nil {
 		writeJSON(w, http.StatusOK, map[string]any{"models": []any{}, "error": err.Error()})
 		return

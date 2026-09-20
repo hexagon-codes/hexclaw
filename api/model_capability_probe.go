@@ -211,7 +211,7 @@ func (s *Server) modelCapabilityProbeCandidate(
 			return modelCapabilityProbeCandidate{}, errors.New("model is not declared in the saved provider configuration")
 		}
 		providerType := canonicalProviderProbeType(providerKey, provider)
-		if err := config.ValidateProviderEndpointAccess(provider.BaseURL, provider.PrivateNetworkAccess); err != nil {
+		if err := config.ValidateProviderEndpointAccess(provider.BaseURL, provider.PrivateNetworkAccess); err != nil && !provider.HasOllamaTarget() {
 			return modelCapabilityProbeCandidate{}, err
 		}
 		if strings.TrimSpace(provider.APIKey) == "" && !strings.EqualFold(providerType, "ollama") {
@@ -230,6 +230,7 @@ func (s *Server) modelCapabilityProbeCandidate(
 				Model:                modelID,
 				Locality:             provider.Locality,
 				PrivateNetworkAccess: provider.PrivateNetworkAccess,
+				OllamaTargetBaseURL:  provider.OllamaTargetBaseURL,
 			},
 		}, nil
 	}
@@ -367,7 +368,15 @@ func (s *Server) executeModelCapabilityCatalogProbe(
 	candidate modelCapabilityProbeCandidate,
 ) error {
 	baseURL := strings.TrimRight(strings.TrimSpace(candidate.descriptor.BaseURL), "/")
-	providerClient, err := egress.NewProviderHTTPClient(baseURL, candidate.descriptor.PrivateNetworkAccess)
+	var providerClient *http.Client
+	var err error
+	provider := config.LLMProviderConfig{BaseURL: baseURL, OllamaTargetBaseURL: candidate.descriptor.OllamaTargetBaseURL}
+	if provider.HasOllamaTarget() {
+		providerClient = egress.NewConfiguredOllamaClient(10 * time.Second)
+		baseURL = strings.TrimRight(provider.OllamaTargetBaseURL, "/") + "/v1"
+	} else {
+		providerClient, err = egress.NewProviderHTTPClient(baseURL, candidate.descriptor.PrivateNetworkAccess)
+	}
 	if err != nil {
 		return err
 	}

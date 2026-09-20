@@ -20,6 +20,7 @@ import (
 
 // Config HexClaw 全局配置
 type Config struct {
+	Ollama           OllamaTargetConfig     `yaml:"ollama,omitempty"`
 	Server           ServerConfig           `yaml:"server"`
 	LLM              LLMConfig              `yaml:"llm"`
 	Platforms        PlatformsConfig        `yaml:"platforms"`
@@ -393,7 +394,7 @@ type ServerConfig struct {
 	Port     int    `yaml:"port"`      // 主服务端口，默认 16060
 	MCPPort  int    `yaml:"mcp_port"`  // MCP Server 端口，默认 16070 (预留，暂未启用)
 	Mode     string `yaml:"mode"`      // 运行模式: production / development
-	APIToken string `yaml:"api_token"` // 管理 API Token（为空则允许 localhost 免认证）
+	APIToken string `yaml:"api_token"` // 独立服务业务令牌；本机 Sidecar 另接收原生层注入令牌。
 }
 
 // LLMConfig LLM 配置
@@ -615,11 +616,14 @@ func (p *ReasoningPolicy) UnmarshalYAML(node *yaml.Node) error {
 // HTTP response after later commits or restart without replaying a credential
 // transition or guessing whether the original write committed.
 type LLMConfigMutationReceipt struct {
-	RequestID     string `yaml:"request_id" json:"request_id"`
-	RequestDigest string `yaml:"request_digest" json:"request_digest"`
-	ConfigDigest  string `yaml:"config_digest" json:"config_digest"`
-	Revision      uint64 `yaml:"revision" json:"revision"`
-	CommittedAt   int64  `yaml:"committed_at" json:"committed_at"`
+	OperationKind  string `yaml:"operation_kind,omitempty" json:"operation_kind,omitempty"`
+	TargetRevision uint64 `yaml:"target_revision,omitempty" json:"target_revision,omitempty"`
+	TargetDigest   string `yaml:"target_digest,omitempty" json:"target_digest,omitempty"`
+	RequestID      string `yaml:"request_id" json:"request_id"`
+	RequestDigest  string `yaml:"request_digest" json:"request_digest"`
+	ConfigDigest   string `yaml:"config_digest" json:"config_digest"`
+	Revision       uint64 `yaml:"revision" json:"revision"`
+	CommittedAt    int64  `yaml:"committed_at" json:"committed_at"`
 }
 
 // strongTextProviderTokens 已知擅长多步文本推理的云端 provider 名 token（reasoning 兜底优先序）。
@@ -679,16 +683,17 @@ type LLMToolsConfig struct {
 
 // LLMProviderConfig 单个 LLM Provider 配置
 type LLMProviderConfig struct {
-	ProviderInstanceID string                 `yaml:"provider_instance_id,omitempty" json:"provider_instance_id,omitempty"` // 稳定内部身份，不随名称/Key/端点变化
-	DisplayName        string                 `yaml:"display_name,omitempty" json:"display_name,omitempty"`                 // 用户配置的展示名；不参与 Provider 路由
-	CredentialRef      string                 `yaml:"credential_ref,omitempty" json:"credential_ref,omitempty"`             // 原生协调器使用的稳定引用；不得覆盖 owner YAML 中持久化的 APIKey
-	APIKey             string                 `yaml:"api_key"`                                                              // API Key
-	BaseURL            string                 `yaml:"base_url"`                                                             // 自定义 API 端点（支持中转/私有部署）
-	Model              string                 `yaml:"model"`                                                                // 当前选中的文本模型；可空
-	Models             []string               `yaml:"models,omitempty"`                                                     // 已配置的模型 ID 列表（legacy API 兼容）
-	ModelSpecsMode     string                 `yaml:"model_specs_mode,omitempty"`                                           // legacy / explicit；区分 omitted 与显式 []
-	ModelSpecs         []LLMProviderModelSpec `yaml:"model_specs,omitempty"`                                                // 模型级能力声明
-	Compatible         string                 `yaml:"compatible"`                                                           // 兼容协议: "openai"（用于中转/私有部署）
+	OllamaTargetBaseURL string                 `yaml:"ollama_target_base_url,omitempty" json:"ollama_target_base_url,omitempty"`
+	ProviderInstanceID  string                 `yaml:"provider_instance_id,omitempty" json:"provider_instance_id,omitempty"` // 稳定内部身份，不随名称/Key/端点变化
+	DisplayName         string                 `yaml:"display_name,omitempty" json:"display_name,omitempty"`                 // 用户配置的展示名；不参与 Provider 路由
+	CredentialRef       string                 `yaml:"credential_ref,omitempty" json:"credential_ref,omitempty"`             // 原生协调器使用的稳定引用；不得覆盖 owner YAML 中持久化的 APIKey
+	APIKey              string                 `yaml:"api_key"`                                                              // API Key
+	BaseURL             string                 `yaml:"base_url"`                                                             // 自定义 API 端点（支持中转/私有部署）
+	Model               string                 `yaml:"model"`                                                                // 当前选中的文本模型；可空
+	Models              []string               `yaml:"models,omitempty"`                                                     // 已配置的模型 ID 列表（legacy API 兼容）
+	ModelSpecsMode      string                 `yaml:"model_specs_mode,omitempty"`                                           // legacy / explicit；区分 omitted 与显式 []
+	ModelSpecs          []LLMProviderModelSpec `yaml:"model_specs,omitempty"`                                                // 模型级能力声明
+	Compatible          string                 `yaml:"compatible"`                                                           // 兼容协议: "openai"（用于中转/私有部署）
 	// Locality 描述模型算力/数据最终位置，而非 HTTP 监听地址：
 	//   - auto/空：按 endpoint host 自动判断
 	//   - local：本机/LAN 私有部署

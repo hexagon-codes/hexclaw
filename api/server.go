@@ -159,6 +159,9 @@ type Server struct {
 	statsJSON              []byte
 	statsCacheAt           time.Time
 	ollamaBaseURL          string
+	ollamaProcessManaged   bool
+	ollamaPullMu           sync.Mutex
+	ollamaPulls            map[string]*ollamaPullOperation
 	onOllamaModelInstalled func(context.Context, string)
 	serviceLifecycleCtx    context.Context
 }
@@ -288,9 +291,8 @@ func (s *Server) SetWebSocketHandler(h http.Handler) {
 	s.wsHandler = h
 }
 
-// SetSidecarCapabilityToken installs the per-start Desktop capability. When
-// configured, anonymous loopback access is disabled and HTTP/WebSocket clients
-// must present this value as a Bearer token. The token is never persisted.
+// SetSidecarCapabilityToken 设置本次启动的本机内部能力令牌，不持久化。
+// 常规业务使用独立的持久凭据；回环地址不会恢复匿名访问。
 func (s *Server) SetSidecarCapabilityToken(token string) {
 	s.sidecarCapabilityToken = strings.TrimSpace(token)
 }
@@ -980,6 +982,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/models", s.handleListModels)
 	mux.HandleFunc("GET /api/v1/ollama/status", s.handleOllamaStatus)
 	mux.HandleFunc("POST /api/v1/ollama/pull", s.handleOllamaPull)
+	mux.HandleFunc("GET /api/v1/ollama/pulls/{operation_id}", s.handleGetOllamaPull)
+	mux.HandleFunc("GET /api/v1/ollama/pulls/{operation_id}/events", s.handleOllamaPullEvents)
 	mux.HandleFunc("GET /api/v1/ollama/running", s.handleOllamaRunning)
 	mux.HandleFunc("POST /api/v1/ollama/load", s.handleOllamaLoad)
 	mux.HandleFunc("POST /api/v1/ollama/unload", s.handleOllamaUnload)

@@ -24,7 +24,8 @@ func (s *Server) handleRevealProviderKey(w http.ResponseWriter, r *http.Request)
 
 // handleGetConfigMutation 只查询持久提交证明，不能据未找到结果自动重发。
 func (s *Server) handleGetConfigMutation(w http.ResponseWriter, r *http.Request) {
-	if strings.TrimSpace(r.URL.Query().Get("operation_kind")) != "llm" {
+	kind := strings.TrimSpace(r.URL.Query().Get("operation_kind"))
+	if kind != "llm" && kind != "ollama_target" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Unsupported operation kind"})
 		return
 	}
@@ -43,8 +44,17 @@ func (s *Server) handleGetConfigMutation(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "Committed mutation not found"})
 		return
 	}
+	receiptKind := receipt.OperationKind
+	if receiptKind == "" {
+		receiptKind = "llm"
+	}
+	if receiptKind != kind {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "Mutation operation kind conflict"})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status": "ok", "operation_kind": "llm", "request_id": receipt.RequestID,
+		"target_revision": receipt.TargetRevision, "target_digest": receipt.TargetDigest,
+		"status": "ok", "operation_kind": receiptKind, "request_id": receipt.RequestID,
 		"config_revision": receipt.Revision, "config_digest": receipt.ConfigDigest,
 		"committed_at": receipt.CommittedAt, "replayed": true,
 	})

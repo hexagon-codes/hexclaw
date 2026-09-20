@@ -501,11 +501,11 @@ func buildSelectorState(cfg config.LLMConfig) (map[string]hexagon.Provider, conf
 			logger.Info("[router] 跳过已禁用 provider（配置/Key 保留，不参与路由）", "provider", name)
 			continue
 		}
-		if err := config.ValidateProviderEndpointAccess(pc.BaseURL, pc.PrivateNetworkAccess); err != nil {
+		if err := config.ValidateProviderEndpointAccess(pc.BaseURL, pc.PrivateNetworkAccess); err != nil && !pc.HasOllamaTarget() {
 			logger.Warn("[router] 跳过未授权或不安全的 provider endpoint", "provider", name, "error", err)
 			continue
 		}
-		if strings.TrimSpace(pc.APIKey) == "" && !isLocalProviderNamed(name, pc) {
+		if strings.TrimSpace(pc.APIKey) == "" && !isLocalProviderNamed(name, pc) && !pc.HasOllamaTarget() {
 			logger.Warn("[router] 跳过无 API Key 的远程 provider", "provider", name, "base_url", pc.BaseURL)
 			continue
 		}
@@ -637,6 +637,9 @@ const (
 
 func providerEndpointBaseURL(name string, pc config.LLMProviderConfig) string {
 	baseURL := strings.TrimSpace(pc.BaseURL)
+	if pc.HasOllamaTarget() {
+		return baseURL
+	}
 	if isOllamaProviderConfig(name, pc) {
 		if baseURL == "" {
 			return defaultOllamaProviderBaseURL
@@ -653,6 +656,9 @@ func providerEndpointBaseURL(name string, pc config.LLMProviderConfig) string {
 }
 
 func providerHTTPClient(name string, pc config.LLMProviderConfig) *http.Client {
+	if pc.HasOllamaTarget() {
+		return egress.NewConfiguredOllamaClient(ollamaResponseHeaderTimeout)
+	}
 	options := []egress.ProviderHTTPClientOption(nil)
 	if isOllamaProviderConfig(name, pc) {
 		options = append(options,
@@ -720,7 +726,16 @@ func NewProviderFromConfig(name string, pc config.LLMProviderConfig) hexagon.Pro
 	return hexagon.NewOpenAI(pc.APIKey, opts...)
 }
 
+// UsesOllamaNativeAdapter 返回实际工厂选择的协议，供关联目标复用。
+func UsesOllamaNativeAdapter(name string, pc config.LLMProviderConfig) bool {
+	return isOllamaProviderConfig(name, pc)
+}
+
 func isOllamaProviderConfig(name string, pc config.LLMProviderConfig) bool {
+	// 联合提交以原生服务根或兼容端点保留原适配器，地址变化不重新猜测协议。
+	if pc.HasOllamaTarget() {
+		return strings.TrimRight(pc.BaseURL, "/") == pc.OllamaTargetBaseURL
+	}
 	lowerName := strings.ToLower(strings.TrimSpace(name))
 	lowerBase := strings.ToLower(strings.TrimSpace(pc.BaseURL))
 	return strings.Contains(lowerName, "ollama") ||

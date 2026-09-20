@@ -246,6 +246,7 @@ func (s *Server) handleGetFullConfig(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"backend_id": s.backendID,
+		"ollama":     s.ollamaTargetLocked(),
 		"server":     map[string]any{"host": s.cfg.Server.Host, "port": s.cfg.Server.Port, "mode": s.cfg.Server.Mode},
 		"llm":        map[string]any{"default": llmCfg.Default, "providers": providers},
 		"knowledge":  map[string]any{"enabled": s.cfg.Knowledge.Enabled},
@@ -271,7 +272,7 @@ func (s *Server) handleGetFullConfig(w http.ResponseWriter, r *http.Request) {
 func fullConfigProviderStatus(name string, p config.LLMProviderConfig) map[string]any {
 	enabled := p.Enabled == nil || *p.Enabled
 	hasKey := strings.TrimSpace(p.APIKey) != ""
-	local := isLocalLLMProvider(name, p.BaseURL)
+	local := isLocalLLMProvider(name, p.BaseURL) || p.HasOllamaTarget()
 	switchable := enabled && (hasKey || local)
 	reason := ""
 	if !enabled {
@@ -320,6 +321,7 @@ func isOpenRouterFreeModel(baseURL, model string) bool {
 
 func (s *Server) handleUpdateFullConfig(w http.ResponseWriter, r *http.Request) {
 	var body struct {
+		ollamaTargetUpdateRequest
 		Security *struct {
 			GatewayEnabled     *bool `json:"gateway_enabled"`
 			InjectionDetection *bool `json:"injection_detection"`
@@ -337,6 +339,15 @@ func (s *Server) handleUpdateFullConfig(w http.ResponseWriter, r *http.Request) 
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid request body"})
+		return
+	}
+
+	if body.Ollama != nil {
+		if body.Security != nil || body.Sandbox != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Ollama target update must be submitted separately"})
+			return
+		}
+		s.updateLLMConfig(w, r, LLMConfigUpdateRequest{ExpectedConfigRevision: body.ExpectedConfigRevision, ExpectedConfigDigest: body.ExpectedConfigDigest}, &body.ollamaTargetUpdateRequest)
 		return
 	}
 

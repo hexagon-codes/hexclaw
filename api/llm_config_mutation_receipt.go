@@ -29,11 +29,18 @@ var (
 const maxLLMConfigMutationReceipts = 1024
 
 type llmConfigMutationProof struct {
-	requestID     string
-	requestDigest string
+	operationKind    string
+	targetRevision   uint64
+	targetDigest     string
+	preserveRevision bool
+	requestID        string
+	requestDigest    string
 }
 
 type llmConfigMutationResponse struct {
+	OperationKind  string `json:"operation_kind,omitempty"`
+	TargetRevision uint64 `json:"target_revision,omitempty"`
+	TargetDigest   string `json:"target_digest,omitempty"`
 	Status         string `json:"status"`
 	RequestID      string `json:"request_id,omitempty"`
 	ConfigRevision uint64 `json:"config_revision"`
@@ -73,11 +80,12 @@ func replayLLMConfigMutation(old config.LLMConfig, proof llmConfigMutationProof)
 	}
 	receipt, found := old.MutationReceipts[proof.requestID]
 	if found {
-		if receipt.RequestID != proof.requestID || receipt.RequestDigest != proof.requestDigest || receipt.Revision == 0 || receipt.ConfigDigest == "" {
+		if receipt.RequestID != proof.requestID || receipt.RequestDigest != proof.requestDigest || receipt.OperationKind != proof.operationKind || (receipt.Revision == 0 && receipt.OperationKind != "ollama_target") || receipt.ConfigDigest == "" {
 			return nil, errLLMConfigMutationConflict
 		}
 		return &llmConfigMutationResponse{
 			Status: "ok", RequestID: receipt.RequestID, ConfigRevision: receipt.Revision,
+			OperationKind: receipt.OperationKind, TargetRevision: receipt.TargetRevision, TargetDigest: receipt.TargetDigest,
 			ConfigDigest: receipt.ConfigDigest, CommittedAt: receipt.CommittedAt, Replayed: true,
 		}, nil
 	}
@@ -88,7 +96,7 @@ func replayLLMConfigMutation(old config.LLMConfig, proof llmConfigMutationProof)
 		return nil, nil
 	}
 	receipt = *old.LastMutationReceipt
-	if receipt.RequestDigest != proof.requestDigest || receipt.Revision != old.ConfigRevision {
+	if receipt.RequestDigest != proof.requestDigest || receipt.OperationKind != proof.operationKind || receipt.Revision != old.ConfigRevision {
 		return nil, errLLMConfigMutationConflict
 	}
 	currentDigest, err := digestLLMConfig(old)
@@ -100,6 +108,7 @@ func replayLLMConfigMutation(old config.LLMConfig, proof llmConfigMutationProof)
 	}
 	return &llmConfigMutationResponse{
 		Status: "ok", RequestID: receipt.RequestID, ConfigRevision: receipt.Revision,
+		OperationKind: receipt.OperationKind, TargetRevision: receipt.TargetRevision, TargetDigest: receipt.TargetDigest,
 		ConfigDigest: receipt.ConfigDigest, CommittedAt: receipt.CommittedAt, Replayed: true,
 	}, nil
 }
@@ -117,12 +126,16 @@ func finalizeLLMConfigMutation(old config.LLMConfig, next *config.LLMConfig, pro
 	}
 	next.MutationReceipts = receipts
 	next.ConfigRevision = old.ConfigRevision + 1
+	if proof.preserveRevision {
+		next.ConfigRevision = old.ConfigRevision
+	}
 	configDigest, err := digestLLMConfig(*next)
 	if err != nil {
 		return llmConfigMutationResponse{}, err
 	}
 	response := llmConfigMutationResponse{
 		Status: "ok", RequestID: proof.requestID, ConfigRevision: next.ConfigRevision,
+		OperationKind: proof.operationKind, TargetRevision: proof.targetRevision, TargetDigest: proof.targetDigest,
 		ConfigDigest: configDigest,
 	}
 	if proof.requestID == "" {
@@ -134,6 +147,7 @@ func finalizeLLMConfigMutation(old config.LLMConfig, next *config.LLMConfig, pro
 	committedAt := time.Now().UTC().UnixMilli()
 	receipt := config.LLMConfigMutationReceipt{
 		RequestID: proof.requestID, RequestDigest: proof.requestDigest,
+		OperationKind: proof.operationKind, TargetRevision: proof.targetRevision, TargetDigest: proof.targetDigest,
 		ConfigDigest: configDigest, Revision: next.ConfigRevision, CommittedAt: committedAt,
 	}
 	next.MutationReceipts[proof.requestID] = receipt
