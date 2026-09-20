@@ -233,10 +233,10 @@ func TestREGK12RecognitionBatchRepair20260808001PrimaryBatchesBoundedExactSet(t 
 						"display_label":        target.DisplayLabel,
 						"source_section_path":  append([]string{}, target.SourceSectionPath...),
 						"source_section_label": target.SourceSectionLabel,
-						"question":             "题目-" + targetID,
+						"question":             target.SourceNumberPath[0] + "+0=",
 						"subject":              "数学",
-						"answer_state":         "blank",
-						"student_answer":       "",
+						"answer_state":         "present",
+						"student_answer":       target.SourceNumberPath[0],
 					},
 				})
 			}
@@ -351,11 +351,11 @@ func TestREGK12RecognitionBatchRepair20260808001PrimaryBatchesBoundedExactSet(t 
 		t.Fatalf("primary batch target union=%d want=%d", len(seenTargets), len(plan.Targets))
 	}
 	wantQuestions := make([]string, 0, len(plan.Targets))
-	for _, target := range plan.Targets {
+	for index, target := range plan.Targets {
 		if _, exists := seenTargets[target.TargetID]; !exists {
 			t.Fatalf("authorized target %q missing from primary batch union", target.TargetID)
 		}
-		wantQuestions = append(wantQuestions, "题目-"+target.TargetID)
+		wantQuestions = append(wantQuestions, fmt.Sprintf("%d+0=", index+1))
 	}
 	if fmt.Sprint(result.questions) != fmt.Sprint(wantQuestions) {
 		t.Fatalf("questions are not in plan target order\ngot=%v\nwant=%v", result.questions, wantQuestions)

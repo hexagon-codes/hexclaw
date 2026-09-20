@@ -1672,7 +1672,7 @@ func parseRecognitionLayoutManifestV2(
 ) ([]k12.RecognitionLayoutManifestTargetV2, error) {
 	payload := []byte(sanitizeModelJSON(extractJSONObject(raw)))
 	var envelope map[string]json.RawMessage
-	if err := json.Unmarshal(payload, &envelope); err != nil ||
+	if err := decodeRecognitionLayoutManifestEnvelopeV2(payload, &envelope); err != nil ||
 		!recognitionLayoutExactFieldsV2(envelope, map[string]struct{}{"targets": {}}) {
 		return nil, fmt.Errorf(
 			"%w: recognizer: v2 manifest top level must contain only targets",
@@ -1700,6 +1700,39 @@ func parseRecognitionLayoutManifestV2(
 		targets = append(targets, target)
 	}
 	return targets, nil
+}
+
+// 只兼容数组成员分隔处多余的“},”；不修改字符串、字段、坐标或原始模型回执。
+// 只尝试一次，修复后的完整 JSON 和后续字段精确集合仍须全部通过校验。
+func decodeRecognitionLayoutManifestEnvelopeV2(payload []byte, envelope *map[string]json.RawMessage) error {
+	err := json.Unmarshal(payload, envelope)
+	if err == nil {
+		return nil
+	}
+	var syntax *json.SyntaxError
+	if !errors.As(err, &syntax) {
+		return err
+	}
+	index := int(syntax.Offset) - 1
+	if index <= 0 || index >= len(payload) || payload[index] != '}' {
+		return err
+	}
+	before := strings.TrimSpace(string(payload[:index]))
+	after := strings.TrimSpace(string(payload[index+1:]))
+	if !strings.HasSuffix(before, ",") || !strings.HasPrefix(after, ",") {
+		return err
+	}
+	remainder := strings.TrimSpace(after[1:])
+	if !strings.HasPrefix(remainder, "{") {
+		return err
+	}
+	candidate := append(append([]byte(nil), payload[:index]...), remainder...)
+	var repaired map[string]json.RawMessage
+	if json.Unmarshal(candidate, &repaired) != nil {
+		return err
+	}
+	*envelope = repaired
+	return nil
 }
 
 func parseRecognitionLayoutManifestTargetV2(

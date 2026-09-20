@@ -197,6 +197,8 @@ func evidenceTranscriptionsConflict(transcription string, values []string, answe
 		value = evidenceNewline.ReplaceAllString(value, "\n")
 		value = evidenceNumericFraction.ReplaceAllString(value, `\frac{$1}{$2}`)
 		value = strings.ReplaceAll(value, `\ `, " ")
+		// 平方、立方的 Unicode 与 LaTeX 写法只影响排版；指数值仍参与逐字比较。
+		value = strings.NewReplacer("²", "^2", "³", "^3", "^{2}", "^2", "^{3}", "^3").Replace(value)
 		value = strings.Join(strings.Fields(CanonicalPlainTextFallback(value)), "")
 		return strings.NewReplacer(
 			`\,`, "", "（", "(", "）", ")",

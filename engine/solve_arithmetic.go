@@ -205,6 +205,7 @@ func normalizeArithmeticAnswerMarkup(answer string) string {
 	s = strings.NewReplacer(
 		`\begin{aligned}`, "", `\end{aligned}`, "",
 		`\left`, "", `\right`, "", `\times`, "×", `\div`, "÷", `\cdot`, "×",
+		`\ `, " ",
 		`\\`, "\n", "$", "", "&", "",
 	).Replace(s)
 	s = answerMixedFractionRe.ReplaceAllString(s, `$1+($2)`)
