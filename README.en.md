@@ -125,26 +125,22 @@ export DEEPSEEK_API_KEY="sk-xxx"
 hexclaw serve
 ```
 
-### Docker
+### Docker / Kubernetes
+
+Build the cloud-enabled image from this source tree; use Compose for a single server:
 
 ```bash
-docker run -d \
-  --name hexclaw \
-  -p 16060:16060 \
-  -e DEEPSEEK_API_KEY="sk-xxx" \
-  -v hexclaw-data:/data/.hexclaw \
-  ghcr.io/hexagon-codes/hexclaw:latest
+docker compose build
+docker compose up -d
 ```
 
-After startup:
-- Web UI: `http://127.0.0.1:16060`
-- Health check: `GET http://127.0.0.1:16060/health`
-- Chat API: `POST http://127.0.0.1:16060/api/v1/chat`
+The initial API token and all configuration live in the persistent HOME volume. Configure the selected remote backend in Desktop. See [cloud deployment, Kubernetes and backup](docs/cloud-deployment.md).
 
 ### Use the API
 
 ```bash
 curl -X POST http://127.0.0.1:16060/api/v1/chat \
+  -H "Authorization: Bearer ${HEXCLAW_API_TOKEN}" \
   -H "Content-Type: application/json" \
   -d '{"message": "Hello", "user_id": "test-user"}'
 ```

@@ -24,7 +24,7 @@
 | 磁盘 | 100 MB | 1 GB+（含知识库数据） |
 | 网络 | 可访问 LLM API | 低延迟连接 |
 
-HexClaw 编译为单二进制文件，无外部运行时依赖（SQLite 使用纯 Go 实现）。
+HexClaw 核心为单二进制（SQLite 使用纯 Go）；文档导出、中文/数学渲染及题目计算还需要 Pandoc、Typst、字体和 Python/SymPy，云端镜像已包含。
 
 ---
 
@@ -75,18 +75,11 @@ sudo mv hexclaw /usr/local/bin/
 ### 方式四：Docker
 
 ```bash
-# 使用官方镜像
-docker run -d \
-  --name hexclaw \
-  -p 16060:16060 \
-  -e DEEPSEEK_API_KEY="sk-xxx" \
-  -v hexclaw-data:/data/.hexclaw \
-  ghcr.io/hexagon-codes/hexclaw:latest
-
-# 或从源码构建
-docker build -t hexclaw .
-docker run -d --name hexclaw -p 16060:16060 -e DEEPSEEK_API_KEY="sk-xxx" hexclaw
+docker compose build
+docker compose up -d
 ```
+
+使用本仓库 Compose 文件。镜像当前为 Linux amd64；首次生成持久令牌，运行配置可写，完整 HOME 卷及渲染工具随部署就绪。详见[云端部署指南](cloud-deployment.md)。
 
 ---
 
@@ -103,6 +96,8 @@ hexclaw init
 
 ```
 ~/.hexclaw/
+├── AGENTS.md       # 公共工作规则，缺失时初始化，已有内容不覆盖
+├── auth.json       # Desktop 原生层管理的本机/远端连接凭据
 ├── hexclaw.yaml     # 主配置文件
 ├── data.db          # SQLite 数据库（自动创建）
 ├── master.key       # 静态凭据加密主密钥（自动创建，权限 0600）
@@ -190,10 +185,10 @@ hexclaw serve
 ```bash
 hexclaw serve
 hexclaw serve --config /path/to/hexclaw.yaml
-hexclaw serve --desktop  # 桌面单用户模式：本地匿名访问，启用桌面通知/cron/canvas/webhook 集成
+# Desktop 由原生层携带持久令牌启动；独立服务使用 hexclaw serve。
 ```
 
-### 2. systemd 服务（Linux 生产部署推荐）
+### 2. systemd 服务（直接管理二进制）
 
 创建服务文件 `/etc/systemd/system/hexclaw.service`：
 
@@ -257,104 +252,10 @@ sudo systemctl status hexclaw
 sudo journalctl -u hexclaw -f
 ```
 
-### 3. Docker Compose（容器化部署推荐）
+### 3. Docker Compose 与 Kubernetes
 
-创建 `docker-compose.yml`：
+使用维护中的 [Compose 文件](../docker-compose.yml)或 [Kubernetes 单实例清单](../docker/kubernetes.yaml)，按[云端部署指南](cloud-deployment.md)操作。两者均持久化整个可写 HOME `/data`，仅首次初始化凭据。不要把只读配置挂到运行 YAML，或在日常启动环境变量中重复注入 Provider Key，否则远端配置不能正常保存或删除。Kubernetes 使用单副本和 Recreate；初始化种子、Ollama 地址、停机、更新与完整备份均见指南。
 
-```yaml
-version: "3.8"
-
-services:
-  hexclaw:
-    image: ghcr.io/hexagon-codes/hexclaw:latest
-    # 或使用本地构建
-    # build: .
-    container_name: hexclaw
-    restart: unless-stopped
-    ports:
-      - "16060:16060"
-    environment:
-      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
-      # - OPENAI_API_KEY=${OPENAI_API_KEY}
-      # - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
-    volumes:
-      - hexclaw-data:/data/.hexclaw
-      - ./hexclaw.yaml:/data/.hexclaw/hexclaw.yaml:ro
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:16060/health"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-
-volumes:
-  hexclaw-data:
-```
-
-```bash
-# 启动
-docker compose up -d
-
-# 查看日志
-docker compose logs -f hexclaw
-
-# 停止
-docker compose down
-```
-
-### 4. Kubernetes
-
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: hexclaw
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: hexclaw
-  template:
-    metadata:
-      labels:
-        app: hexclaw
-    spec:
-      containers:
-        - name: hexclaw
-          image: ghcr.io/hexagon-codes/hexclaw:latest
-          ports:
-            - containerPort: 16060
-          env:
-            - name: DEEPSEEK_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: hexclaw-secrets
-                  key: deepseek-api-key
-          volumeMounts:
-            - name: data
-              mountPath: /data/.hexclaw
-            - name: config
-              mountPath: /data/.hexclaw/hexclaw.yaml
-              subPath: hexclaw.yaml
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: 16060
-            initialDelaySeconds: 10
-            periodSeconds: 30
-          resources:
-            requests:
-              memory: "128Mi"
-              cpu: "100m"
-            limits:
-              memory: "512Mi"
-              cpu: "500m"
-      volumes:
-        - name: data
-          persistentVolumeClaim:
-            claimName: hexclaw-data
-        - name: config
-          configMap:
-            name: hexclaw-config
 ---
 apiVersion: v1
 kind: Service
@@ -526,7 +427,7 @@ curl http://127.0.0.1:16060/health
 
 ```bash
 # 1. 真实测试 LLM 配置，不写入磁盘
-curl -X POST http://127.0.0.1:16060/api/v1/config/llm/test \
+curl -H "Authorization: Bearer ${HEXCLAW_API_TOKEN}" -X POST http://127.0.0.1:16060/api/v1/config/llm/test \
   -H "Content-Type: application/json" \
   -d '{
     "provider": {
@@ -538,7 +439,7 @@ curl -X POST http://127.0.0.1:16060/api/v1/config/llm/test \
   }'
 
 # 1b. 本地 Ollama 连通性测试可不填 api_key
-curl -X POST http://127.0.0.1:16060/api/v1/config/llm/test \
+curl -H "Authorization: Bearer ${HEXCLAW_API_TOKEN}" -X POST http://127.0.0.1:16060/api/v1/config/llm/test \
   -H "Content-Type: application/json" \
   -d '{
     "provider": {
@@ -550,38 +451,38 @@ curl -X POST http://127.0.0.1:16060/api/v1/config/llm/test \
   }'
 
 # 2. 搜索并在线安装 ClawHub 技能
-curl "http://127.0.0.1:16060/api/v1/clawhub/search?q=calendar&category=automation"
-curl -X POST http://127.0.0.1:16060/api/v1/skills/install \
+curl -H "Authorization: Bearer ${HEXCLAW_API_TOKEN}" "http://127.0.0.1:16060/api/v1/clawhub/search?q=calendar&category=automation"
+curl -H "Authorization: Bearer ${HEXCLAW_API_TOKEN}" -X POST http://127.0.0.1:16060/api/v1/skills/install \
   -H "Content-Type: application/json" \
   -d '{"source":"clawhub://<SKILL_NAME>"}'
 
 # 3. 检查 Skills 运行态字段
-curl http://127.0.0.1:16060/api/v1/skills
-curl -X PUT http://127.0.0.1:16060/api/v1/skills/example/status \
+curl -H "Authorization: Bearer ${HEXCLAW_API_TOKEN}" http://127.0.0.1:16060/api/v1/skills
+curl -H "Authorization: Bearer ${HEXCLAW_API_TOKEN}" -X PUT http://127.0.0.1:16060/api/v1/skills/example/status \
   -H "Content-Type: application/json" \
   -d '{"enabled":true}'
 
 # 4. 查看 Cron 历史结果字段
-curl http://127.0.0.1:16060/api/v1/cron/jobs/<JOB_ID>/history
+curl -H "Authorization: Bearer ${HEXCLAW_API_TOKEN}" http://127.0.0.1:16060/api/v1/cron/jobs/<JOB_ID>/history
 
 # 5. 验证知识库结构化搜索
-curl -X POST http://127.0.0.1:16060/api/v1/knowledge/search \
+curl -H "Authorization: Bearer ${HEXCLAW_API_TOKEN}" -X POST http://127.0.0.1:16060/api/v1/knowledge/search \
   -H "Content-Type: application/json" \
   -d '{"query":"RAG","limit":5}'
 
 # 6. 检查平台实例与 IM 通道测试接口
-curl http://127.0.0.1:16060/api/v1/platforms/instances
-curl -X POST http://127.0.0.1:16060/api/v1/im/channels/telegram/test \
+curl -H "Authorization: Bearer ${HEXCLAW_API_TOKEN}" http://127.0.0.1:16060/api/v1/platforms/instances
+curl -H "Authorization: Bearer ${HEXCLAW_API_TOKEN}" -X POST http://127.0.0.1:16060/api/v1/im/channels/telegram/test \
   -H "Content-Type: application/json" \
   -d '{"token":"123:abc"}'
 
 # 7. 检查 autonomy 权限治理和媒体 Provider 状态
-curl http://127.0.0.1:16060/api/v1/autonomy/summary
-curl http://127.0.0.1:16060/api/v1/images/status
-curl http://127.0.0.1:16060/api/v1/videos/status
+curl -H "Authorization: Bearer ${HEXCLAW_API_TOKEN}" http://127.0.0.1:16060/api/v1/autonomy/summary
+curl -H "Authorization: Bearer ${HEXCLAW_API_TOKEN}" http://127.0.0.1:16060/api/v1/images/status
+curl -H "Authorization: Bearer ${HEXCLAW_API_TOKEN}" http://127.0.0.1:16060/api/v1/videos/status
 
 # 8. 检查内置 K12 场景包挂载
-curl http://127.0.0.1:16060/api/k12/view-descriptor
+curl -H "Authorization: Bearer ${HEXCLAW_API_TOKEN}" http://127.0.0.1:16060/api/k12/view-descriptor
 ```
 
 重点返回语义：

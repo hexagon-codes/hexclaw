@@ -1,0 +1,27 @@
+# 将 HEXCLAW_CERT_NAME 替换为 Certbot 实际证书名称。
+map $http_upgrade $connection_upgrade { default upgrade; '' close; }
+resolver 127.0.0.11 valid=10s;
+upstream hexclaw_backend {
+    zone hexclaw_backend 64k;
+    server hexclaw:16060 resolve;
+}
+server {
+    listen 443 ssl;
+    server_name _;
+    ssl_certificate /etc/letsencrypt/live/HEXCLAW_CERT_NAME/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/HEXCLAW_CERT_NAME/privkey.pem;
+    # 上传大小沿用应用自身合同，代理不再增加一层限制。
+    client_max_body_size 0;
+    location /hexclaw/ {
+        proxy_pass http://hexclaw_backend/;
+        proxy_http_version 1.1;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_buffering off;
+        proxy_read_timeout 600s;
+        proxy_send_timeout 600s;
+    }
+}

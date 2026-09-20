@@ -125,26 +125,22 @@ export DEEPSEEK_API_KEY="sk-xxx"
 hexclaw serve
 ```
 
-### Docker
+### Docker / Kubernetes
+
+从本仓库源码构建包含云端支持的镜像，单机推荐 Compose：
 
 ```bash
-docker run -d \
-  --name hexclaw \
-  -p 16060:16060 \
-  -e DEEPSEEK_API_KEY="sk-xxx" \
-  -v hexclaw-data:/data/.hexclaw \
-  ghcr.io/hexagon-codes/hexclaw:latest
+docker compose build
+docker compose up -d
 ```
 
-服务启动后：
-- Web UI: `http://127.0.0.1:16060`
-- 健康检查: `GET http://127.0.0.1:16060/health`
-- 聊天 API: `POST http://127.0.0.1:16060/api/v1/chat`
+首次启动生成持久访问令牌，整个 HOME 数据卷持久化。连接 Desktop 后配置当前远端的模型与渠道。详见[云端部署、Kubernetes 与备份](docs/cloud-deployment.md)。
 
 ### 使用 API
 
 ```bash
 curl -X POST http://127.0.0.1:16060/api/v1/chat \
+  -H "Authorization: Bearer ${HEXCLAW_API_TOKEN}" \
   -H "Content-Type: application/json" \
   -d '{"message": "你好", "user_id": "test-user"}'
 ```

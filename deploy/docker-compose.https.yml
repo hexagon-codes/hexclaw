@@ -1,0 +1,10 @@
+# 与仓库根 docker-compose.yml 合并使用；证书和站点配置由部署目录提供。
+services:
+  gateway:
+    image: nginx:stable-alpine
+    ports:
+      - "${HEXCLAW_HTTPS_PORT:-16061}:443"
+    volumes:
+      - ${HEXCLAW_TLS_DIR:?Set HEXCLAW_TLS_DIR}/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ${HEXCLAW_TLS_DIR:?Set HEXCLAW_TLS_DIR}/letsencrypt:/etc/letsencrypt:ro
+    restart: unless-stopped
