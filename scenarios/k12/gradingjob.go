@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/hexagon-codes/hexclaw/config"
+
 	"github.com/hexagon-codes/hexclaw/records"
 )
 
@@ -56,8 +58,10 @@ const GradingMaxStageAttempts = 3
 
 // GradingModelSnapshot 实际模型路由快照（§5.4 model_snapshot：provider/model/capability/timeout/fallback）。
 type GradingModelSnapshot struct {
-	Provider string `json:"provider"`
-	Model    string `json:"model"`
+	// ParentInstructions 只用于家长表达，不注入识别、求解和评分请求。
+	ParentInstructions config.AgentInstructionsSnapshot `json:"parent_instructions,omitzero"`
+	Provider           string                           `json:"provider"`
+	Model              string                           `json:"model"`
 	// ProviderInstanceID 冻结配置实体身份，避免 Provider 展示名或 map key 变化时
 	// 旧任务把新配置误认为同一路由。
 	ProviderInstanceID string `json:"provider_instance_id,omitempty"`

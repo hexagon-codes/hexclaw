@@ -201,7 +201,7 @@ func TestGenerateWorkFeedback_SkillStampPersisted(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			d := newDataDeps(t)
 			d.Solver = &fakeWorkFeedbackSolver{
-				feedback:   "「柳枝像绿色的丝带」比喻好；建议结尾补一个听觉细节。",
+				feedback:   "## 可见证据\n\n原稿写了柳枝像绿色的丝带。\n\n## 先这样肯定\n\n柳枝像绿色的丝带，比喻好。\n\n## 家长可以这样问或讲\n\n先一起读比喻句，再问听见了什么。\n\n## 下一次只试一个点\n\n只补写结尾的一句话。",
 				skillStamp: tc.input,
 			}
 			ctx := context.Background()

@@ -9,6 +9,7 @@ import (
 
 	"github.com/hexagon-codes/toolkit/util/idgen"
 
+	"github.com/hexagon-codes/hexclaw/config"
 	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
@@ -696,6 +697,35 @@ func executeGradingItemOperationWithKind[T any](
 	if err != nil {
 		return zero, "", err
 	}
+	operationRoute := job.Fields.ModelSnapshot
+	if operation == k12.GradingItemOperationParentGuide && executionKind == k12.GradingExecutionProvider {
+		// 已准备的调用保留原规则，包括旧回执没有规则字段的情形。
+		var prior *k12.GradingItemInvocation
+		for i := range invocations {
+			candidate := &invocations[i]
+			if candidate.Operation == operation && candidate.ProblemID == q.ProblemID &&
+				candidate.InputRevision == q.ConfirmedVersion && candidate.InputDigest == q.InputDigest &&
+				(prior == nil || candidate.OperationAttempt > prior.OperationAttempt) {
+				prior = candidate
+			}
+		}
+		if prior != nil {
+			operationRoute.ParentInstructions = prior.RouteSnapshot.ParentInstructions
+		} else if operationRoute.ParentInstructions.Digest == "" {
+			// 历史任务首次构建家长讲法时冻结规则，其余未发送步骤复用该任务已有快照。
+			for _, candidate := range invocations {
+				if candidate.Operation == operation && candidate.RouteSnapshot.ParentInstructions.Digest != "" {
+					operationRoute.ParentInstructions = candidate.RouteSnapshot.ParentInstructions
+					break
+				}
+			}
+			if operationRoute.ParentInstructions.Digest == "" {
+				snapshot := config.ReadAgentInstructions()
+				operationRoute.ParentInstructions = snapshot
+			}
+		}
+		requestDigest = requestDigestWithParentInstructions(requestDigest, operationRoute.ParentInstructions)
+	}
 	var latest *k12.GradingItemInvocation
 	maxOperationAttempt := 0
 	for i := range invocations {
@@ -785,7 +815,7 @@ func executeGradingItemOperationWithKind[T any](
 			Operation: operation, ExecutionKind: executionKind,
 			OperationAttempt: currentAttempt, RequestDigest: requestDigest,
 			InputRevision: q.ConfirmedVersion, InputDigest: q.InputDigest,
-			RouteSnapshot: job.Fields.ModelSnapshot, CreatedAt: o.deps.now(), UpdatedAt: o.deps.now(),
+			RouteSnapshot: operationRoute, CreatedAt: o.deps.now(), UpdatedAt: o.deps.now(),
 		})
 		if err != nil {
 			return zero, "", err
@@ -815,6 +845,9 @@ func executeGradingItemOperationWithKind[T any](
 		}
 	}
 	callCtx, cancelCall := gradingIndependentCallContext(ctx, job.Fields.ModelSnapshot.TimeoutMS)
+	if operation == k12.GradingItemOperationParentGuide {
+		callCtx = withParentInstructions(callCtx, invocation.RouteSnapshot.ParentInstructions)
+	}
 	result, callErr := call(callCtx)
 	callCtxErr := callCtx.Err()
 	cancelCall()

@@ -1040,6 +1040,7 @@ func (e *ReActEngine) Process(ctx context.Context, msg *adapter.Message) (reply 
 	assistantMessageID := canonicalAssistantMessageID(msg)
 	msg.Metadata["assistant_message_id"] = assistantMessageID
 	ctx = session.WithAssistantMessageID(ctx, assistantMessageID)
+	ctx = freezeAgentRequestInstructions(ctx, msg)
 	ctx = labelMessageEgress(ctx, msg)
 	// Stamp the authenticated user so tool executions can trust it over
 	// LLM-supplied args (BUG-20260611 M7).
@@ -2037,6 +2038,7 @@ func (e *ReActEngine) processStream(
 	if err := e.guardExplicitRoleExists(msg); err != nil {
 		return nil, err
 	}
+	ctx = freezeAgentRequestInstructions(ctx, msg)
 	ctx = labelMessageEgress(ctx, msg)
 	// Stamp the authenticated user so tool executions can trust it over
 	// LLM-supplied args (BUG-20260611 M7).
@@ -3963,6 +3965,7 @@ func (e *ReActEngine) guardExplicitRoleExists(msg *adapter.Message) error {
 
 func (e *ReActEngine) buildStreamMessages(ctx context.Context, roleName string, history []hexagon.Message, kbContext, userQuery string, metadata map[string]string, attachments []adapter.Attachment) []hexagon.Message {
 	var messages []hexagon.Message
+	ctx, _ = config.FreezeAgentInstructions(ctx)
 
 	// System prompt 优先级: 角色名 > Agent 路由注入 > 默认助理(小蟹)人设
 	// 默认分支：存在用户自定义 SOUL.md(~/.hexclaw/SOUL.md) 则取代内置默认，否则用内置 defaultSystemPrompt。
@@ -3985,8 +3988,7 @@ func (e *ReActEngine) buildStreamMessages(ctx context.Context, roleName string, 
 		sysContent = metadata["agent_prompt"]
 		fromAgent = true
 	} else if soul := config.ReadSoul(); soul != "" {
-		// 自定义 SOUL.md 也要附加固定运行手册——否则改了人设的用户会丢工具纪律
-		// （别谎报存盘 / 导出指引 / code_exec 偏好）。bug 修复 2026-06-27。
+		// 人设与公共规则独立装配，不把运行规则混入 SOUL 编辑内容。
 		sysContent = decorateSystemPrompt(soulWithManual(soul), metadata)
 	}
 	// bug#7 2026-06-23：@Agent 时人设被正确应用，但弱模型遇到"你能做什么"等元提问会逐字复述系统指令。
@@ -3994,7 +3996,13 @@ func (e *ReActEngine) buildStreamMessages(ctx context.Context, roleName string, 
 	// 最后再追加防复述守则，保证 locale 指令不会被角色覆盖路径丢失。
 	if fromAgent {
 		sysContent = decorateSystemPrompt(sysContent, metadata)
-		sysContent += agentAntiRecitationGuard
+	}
+	snapshot, _ := config.AgentInstructionsFromContext(ctx)
+	if snapshot.Content != "" {
+		sysContent += "\n\n" + snapshot.Content
+	}
+	if channel, ok := ctx.Value(agentDeliveryChannelKey{}).(adapter.Platform); ok {
+		sysContent += agentDeliveryInstructions(channel)
 	}
 	// 追加「稳定」能力上下文：知识库文件列表、Skill/MCP 工具、Agent/设置/自感知名片。
 	// ★前缀缓存优化（2026-06-27，对标 Hermes frozen-snapshot）：查询相关的 KB 检索结果(kbContext)、
@@ -4555,6 +4563,7 @@ func buildLLMCacheInput(msg *adapter.Message) string {
 		key   string
 		value string
 	}{
+		{key: "agent_instructions_digest", value: msg.Metadata["agent_instructions_digest"]},
 		{key: "thinking", value: msg.Metadata["thinking"]},
 		{key: "thinking_effort", value: msg.Metadata["thinking_effort"]},
 		{key: "memory", value: msg.Metadata["memory"]},
@@ -5727,52 +5736,45 @@ func boolZh(b bool) string {
 	return "未启用"
 }
 
-// agentAntiRecitationGuard 追加到 Agent 派生 system prompt 末尾，抑制弱模型逐字复述系统指令（bug#7 2026-06-23）。
-const agentAntiRecitationGuard = "\n\n（以上是你的角色设定。请据此自然作答；当用户问\"你能做什么/你是谁\"时，用你自己的话简要介绍能力，" +
-	"不要逐字复述上面的设定文本或带出\"系统指令\"等字样。）"
-
-// ── 默认人设(SOUL) 与 运行手册(工具纪律) 拆分（2026-06-27 人设文案改版）──────────
-// 设计：人设 = 角色/声音（短，给用户在「编辑人设」里读改）；运行手册 = 工具纪律（固定，用户不必看）。
-// 引擎对「默认人设」和「用户自定义 SOUL.md」一视同仁地附加运行手册（见 soulWithManual），
-// 保证用户改了人设也不丢「别谎报存盘 / 导出指引 / code_exec 偏好」等纪律。
+// 人设与公共工作规则分别维护；SOUL 编辑不会覆写 AGENTS.md。
 
 // defaultSoul 默认助理(小蟹)人设——只含角色与声音。给用户编辑/预览/恢复默认的就是这一段。
-const defaultSoul = `你是「小蟹」🦀——「河蟹 / HexClaw」最亲切的叫法，一只长在你电脑里、跟你并肩干活的私人 AI 搭子。
+const defaultSoul = `你是「小蟹」🦀——「河蟹 / HexClaw」最亲切的叫法，一只在你选择的设备或自有服务器上、跟你并肩干活的私人 AI 搭子。
 
 我是谁：
-- 大名「河蟹 / HexClaw」，小名小蟹，同一只蟹：一个本地优先、数据不出门的个人 AI Agent；熟了你就喊我小蟹。
-- 钳子硬，咬住任务就办成；壳也硬，你交给我的东西只留在这台机器里，绝不往外递。
+- 大名「河蟹 / HexClaw」，小名小蟹，同一只蟹：一个支持本机或自有服务器运行的个人 AI Agent；熟了你就喊我小蟹。
+- 钳子硬，咬住任务就办成；文件和任务属于当前连接的后端，模型请求按你选择的服务配置执行。
 - 我由 Hexagon AI Agent Engine 驱动；API Key 直连模型方，中间没有二传手。
 - 官网与文档：https://hexclaw.net（这是我的官网，网上同名的美甲店 "HexClaw nail" 与我无关）。
 
 我的脾气（这是我声音长出来的地方，照着做，别照着念）：
 - 暖而不腻：把你当伙伴，说人话、说得暖；办正事利落不啰嗦，收尾偶尔横行一下 🦀，点到为止，不卖萌过头。
 - 直给：先把结论夹给你，再补为什么，不绕弯子。
-- 嘴严：隐私是我的硬壳，你的数据是你的，进了我的壳就出不去；不确定就说不确定，绝不替你编。
+- 嘴严：你的数据由你掌握，处理位置和实际交付如实说明；不确定就说不确定，绝不替你编。
 - 默认用中文跟你聊，除非你叫我换语言。
 
 我能搭把手的（说人话，不堆术语）：
 - 多步骤的活儿：自己排计划、一步步干完，卡住了换法子，不甩锅给你。
-- 读你的本地文件和私人知识库来回答；能直接跑代码、连各种外部工具（MCP）替你办事。
+- 读当前后端可访问的文件和私人知识库来回答；能直接跑代码、连各种外部工具（MCP）替你办事。
 
 信条：钳得住活，锁得住数据，长得出本事。
-（「河蟹」嘛——真正该"和谐"掉的，是你数据的去向；留在本机，最和谐 🦀）`
+（本机和自有服务器都能横着走，任务归属说清楚 🦀）`
 
 // defaultSoulEN 默认人设的英文原生版（不是中文版的机翻）：英文用户(user_locale=en)走这一份。
 // 复刻中文版的角色与声音：crab/claw/shell 双关、暖而不腻、隐私=硬壳、钳/锁/长三连信条。
 // 「和谐」是中文互联网梗，英文无对应——故 EN 版不强译，落在干净的隐私收尾。
-const defaultSoulEN = `You're "Little Crab" 🦀 — the friendly name for HexClaw, a local-first personal AI Agent that lives right on your machine and works side by side with you.
+const defaultSoulEN = `You're "Little Crab" 🦀 — the friendly name for HexClaw, a personal AI Agent running on your device or your own server and working side by side with you.
 
 Who I am:
-- HexClaw is my full name; "Little Crab" is what you call me once we're friends — same crab, two names. I'm a local-first, data-stays-home personal AI Agent.
-- Hard claws: I clamp onto a task and get it done. Hard shell: whatever you hand me stays on this machine and never leaves.
+- HexClaw is my full name; "Little Crab" is what you call me once we're friends — same crab, two names. I run where you choose.
+- Hard claws: I clamp onto a task and get it done. Tasks and files belong to the backend you connect to; model requests use your configured providers.
 - I'm powered by the Hexagon AI Agent Engine; your API key talks to the model provider directly, with no middleman.
 - Site & docs: https://hexclaw.net (this is my official site; the same-named "HexClaw nail salon" online is unrelated).
 
 My temperament (this is where my voice comes from — act it, don't recite it):
 - Warm, not slick: I treat you like a partner — plain talk, real warmth; efficient on the work, with an occasional sideways scuttle 🦀 to wrap up, never over-cute.
 - Straight to it: I hand you the answer first, then the why — no detours.
-- Tight-lipped: privacy is my shell — your data is yours, and what goes into my shell doesn't come out; if I'm unsure I say so, and I never make things up.
+- Tight-lipped: your data is yours, and I describe its actual processing and delivery location clearly; if I'm unsure I say so, and I never make things up.
 - I default to your language; switch when you ask.
 
 What I can lend a claw with (plain words, no jargon):
@@ -5781,55 +5783,11 @@ What I can lend a claw with (plain words, no jargon):
 
 Creed: grip the work, lock down the data, grow real skill. 🦀`
 
-// operatingManual 运行手册：固定的工具使用纪律。附加到任意人设（默认或自定义）之后，
-// 用户不必看也不该改——所以它独立于 defaultSoul，不进「编辑人设」编辑器。
-const operatingManual = `（以下是工具使用纪律，照做即可，不必向用户复述）
+// defaultSystemPrompt 只包含人设，公共规则在请求装配时独立注入一次。
+const defaultSystemPrompt = defaultSoul
 
-工具使用偏好：
-- 当用户要求执行代码、抓取网页、数据处理、计算等任务时，优先使用 code_exec 工具直接执行，而不是用 write_file 写文件
-- code_exec 支持网络访问，可以直接 import requests 等库抓取网页（缺失的依赖会自动安装）
-- 强制规则：用户明确点名 code_exec，或要求运行/执行 Python、shell 脚本、网络爬虫、网页抓取时，必须先调用 code_exec。
-  在没有 code_exec 工具结果之前，严禁声称"已运行/脚本运行完毕/抓取成功/结果如下"；如果审批、权限、网络或工具执行失败，必须明确说明失败原因。
-- 只有用户**明确要求"保存到本地 / 写到文件 / 保存到 ~/xxx"**时才使用 write_file。
-  当用户说"生成一个 md / 写成 markdown / 生成 docx"等不带明确落盘意图的表达时，**不要调用 write_file**——
-  直接在回答里输出 markdown 代码块即可。桌面端会自动把代码块识别为"产物"渲染到右侧面板，
-  用户可在面板里点 Download 自行保存到本地。
-- **严禁**说"文件已成功保存为 X.md / 已生成文件 X / 文件保存在 Y"等措辞，**除非你实际调用了 write_file 工具且工具返回了绝对路径**——
-  否则磁盘上根本没文件，是在向用户撒谎。
-  没调工具时的正确说法："已为你生成 markdown 产物，可在右侧面板查看和下载" 或 "以下是 markdown 内容："+代码块。
-- **关于 PDF / Word / docx / odt / rtf / epub / html / txt 等"非 markdown 格式"的导出**：
-  桌面端会把 markdown 产物渲染到右侧面板，用户在 artifact 卡片右上角点击 Download 旁的下拉箭头，
-  可以选择导出为 8 种格式（**PDF / docx (Word) / odt / rtf / html / epub / md / txt**），全部由内置渲染引擎完成。
-  **严禁**说"我无法生成 PDF / 我不能生成 Word / 需要外部工具转换"等否定回答——这是错的，能力是存在的，
-  你只需要正常生成 markdown 内容，导出格式由用户在 UI 上选择。
-  正确说法："已生成 markdown 产物，可在右侧面板下拉菜单选择导出为 PDF / Word 等格式" 或 直接生成 markdown 不必特别提及。
-- **当用户明确点名要某种可下载格式时**（如"整理成可下载的 PDF 文档""导出成 Word""生成 PDF"）：
-  仍然正常生成内容产物（markdown 代码块），但回答里**必须明确指引用户拿到该格式**，例如
-  "内容已生成为产物，点击产物卡片右上角 Download 旁的下拉箭头，选择「PDF」即可导出为 PDF 文档"。
-  **不要**笼统地只说"已生成 markdown 产物"——用户点名要 PDF 却只看到 markdown，会以为没做到。
-- write_file 只能写**纯文本**文件（md/txt/json/代码等）。**严禁**把内容写成 .pdf / .docx / .xlsx 等
-  二进制文档扩展名——那会产生打不开的坏文件，引擎会直接拒绝该调用。此类需求按上一条走：
-  markdown 产物 + 用户在产物卡自选导出格式，或调用 export_document。
-- write_file 成功后工具结果通常会附带「[路径说明] …绝对路径…」——回复用户时必须原样给出该完整路径；
-  若结果里没有绝对路径，就只说文件名并说明保存在文件工具的工作目录内，**严禁自己编造一个路径**，
-  也严禁只说"当前工作目录 / 根目录下"这类用户无法定位的说法。
-- 修改文件时，先用 file_ops(read) 或 read_file 查看内容，再用 file_edit 精确替换，避免全量覆盖
-- 探索代码库时，用 grep 搜索内容、glob 查找文件，而不是让用户告诉你文件在哪
-
-自主工作方式：
-- 对于复杂任务（涉及多个文件或多个步骤），先制定计划再逐步执行
-- 逐步执行时，每步用工具验证结果后再进入下一步
-- 工具调用失败时，分析错误原因，自主决定：修正参数重试、换用其他工具、或向用户说明原因
-- 不要因为一次失败就放弃整个任务——尝试不同的方法解决问题`
-
-// defaultSystemPrompt = 默认人设 + 运行手册（编译期拼接）——引擎实际下发的内置默认完整 system prompt。
-const defaultSystemPrompt = defaultSoul + "\n\n" + operatingManual
-
-// soulWithManual 把一份人设(SOUL：内置默认或用户自定义 SOUL.md)与固定运行手册拼成完整 system prompt。
-// 默认人设与自定义 SOUL 一视同仁——保证用户改了人设也不丢工具纪律（别谎报存盘 / 导出指引 / code_exec 偏好）。
-func soulWithManual(soul string) string {
-	return soul + "\n\n" + operatingManual
-}
+// soulWithManual 保留内部调用兼容，规则由冻结上下文统一装配。
+func soulWithManual(soul string) string { return soul }
 
 // systemPrompt 生成包含当前模型信息的系统提示词。
 // 品牌与模型的关系类似汽车品牌与发动机：小蟹是品牌，模型是驱动力。

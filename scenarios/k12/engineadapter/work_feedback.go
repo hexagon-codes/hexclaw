@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/hexagon-codes/hexclaw"
+	"github.com/hexagon-codes/hexclaw/config"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/assetstore"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/usecase"
@@ -72,6 +73,7 @@ func (a *SolveAdapter) GenerateWorkFeedback(ctx context.Context, req usecase.Wor
 	if err != nil {
 		return usecase.WorkFeedbackOutput{}, err
 	}
+	prompt = config.ParentExpressionInstructions(ctx) + prompt
 	if req.WorkType == k12.WorkTypeArt {
 		out, aerr := a.generateArtFeedback(ctx, req, prompt)
 		if aerr != nil {

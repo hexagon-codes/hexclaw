@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/hexagon-codes/hexclaw/config"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/usecase"
 )
@@ -84,6 +85,7 @@ func (a *SolveAdapter) GenerateParentTeachingGuide(
 		return usecase.ParentTeachingGuide{}, fmt.Errorf("parent teaching guide: encode exact problem facts: %w", err)
 	}
 	var promptBuilder strings.Builder
+	promptBuilder.WriteString(config.ParentExpressionInstructions(ctx))
 	if methodology := buildParentTeachingSkillMethodology(req.Subject, a.parentTeachingSkillLoader); methodology != "" {
 		promptBuilder.WriteString(methodology)
 		promptBuilder.WriteString("\n\n——以下是本题冻结事实与输出合同——\n")

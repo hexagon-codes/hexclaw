@@ -3,6 +3,8 @@ package k12
 import (
 	"fmt"
 	"strings"
+
+	"github.com/hexagon-codes/hexclaw/config"
 )
 
 // ImageTaskIntent is the only public image-dispatch discriminator. The
@@ -84,10 +86,12 @@ func (e ImageTaskCreativeEntry) Validate() error {
 // writing OCR and work feedback each persist their own value; a retry never
 // re-resolves a mutable default route.
 type ImageTaskRouteSnapshot struct {
-	Provider            string `json:"provider"`
-	ProviderDisplayName string `json:"provider_display_name,omitempty"`
-	Model               string `json:"model"`
-	ModelID             string `json:"model_id,omitempty"`
+	// ParentInstructions 随反馈调用冻结，识别与分类不消费此字段。
+	ParentInstructions  config.AgentInstructionsSnapshot `json:"parent_instructions,omitzero"`
+	Provider            string                           `json:"provider"`
+	ProviderDisplayName string                           `json:"provider_display_name,omitempty"`
+	Model               string                           `json:"model"`
+	ModelID             string                           `json:"model_id,omitempty"`
 	// ProviderInstanceID 冻结配置实体身份，避免展示名或路由键变化后误复用新配置。
 	ProviderInstanceID string `json:"provider_instance_id,omitempty"`
 	// ConfigFingerprint 绑定实际执行配置；静态声明能力仍由 Provider 配置独立表达。

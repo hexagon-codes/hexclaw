@@ -10,6 +10,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/hexagon-codes/hexclaw/config"
 	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 )
@@ -131,6 +132,8 @@ func (d Deps) CreateGradingJob(ctx context.Context, agentName, sourceSession str
 		)
 	}
 	in.ModelSnapshot = k12.NormalizeGradingModelSnapshot(in.ModelSnapshot)
+	instructions := config.ReadAgentInstructions()
+	in.ModelSnapshot.ParentInstructions = instructions
 	if err := k12.ValidateGradingRecognizingRequestPolicy(in.ModelSnapshot); err != nil {
 		return GradingJobView{}, false, fmt.Errorf(
 			"%w: invalid recognizing request policy: %v",

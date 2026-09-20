@@ -15,6 +15,7 @@ import (
 	"github.com/hexagon-codes/toolkit/util/idgen"
 	"github.com/hexagon-codes/toolkit/util/logger"
 
+	"github.com/hexagon-codes/hexclaw/config"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
 )
@@ -333,6 +334,7 @@ func (d Deps) GenerateWorkFeedbackCommand(
 		if invocation != nil {
 			route, invocationID = invocation.RouteSnapshot, invocation.InvocationID
 		}
+		providerCtx = withParentInstructions(providerCtx, route.ParentInstructions)
 		providerCtx = logger.ContextWithLogger(providerCtx, logger.NewWithHandler(slog.Default().Handler()).With(
 			"agent_id", agentName, "work_id", recordID, "generation_id", generationID,
 			"invocation_id", invocationID, "stage", "work_feedback",
@@ -530,6 +532,9 @@ func (d Deps) prepareWorkFeedbackInvocation(
 	prior, err := d.Records.GetLatestWorkFeedbackInvocation(
 		ctx, work.Record.AgentName, work.Record.RecordID, operationKey,
 	)
+	if err == nil {
+		requestDigest = requestDigestWithParentInstructions(requestDigest, prior.RouteSnapshot.ParentInstructions)
+	}
 	switch {
 	case err == nil && prior.Status == k12.ImageTaskInvocationSucceeded:
 		var out WorkFeedbackOutput
@@ -581,6 +586,9 @@ func (d Deps) prepareWorkFeedbackInvocation(
 	if err := route.Validate(); err != nil {
 		return nil, nil, err
 	}
+	snapshot := config.ReadAgentInstructions()
+	route.ParentInstructions = snapshot
+	requestDigest = requestDigestWithParentInstructions(requestDigest, snapshot)
 	invocation := k12.ImageTaskInvocation{
 		InvocationID: idgen.NanoID(), AgentName: work.Record.AgentName,
 		WorkRecordID: work.Record.RecordID,

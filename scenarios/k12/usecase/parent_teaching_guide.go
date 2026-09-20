@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"unicode"
+
+	"github.com/hexagon-codes/hexclaw/config"
 )
 
 // ParentTeachingGuide is the fixed seven-item per-question contract for blank
@@ -109,6 +111,7 @@ func (d Deps) generateParentTeachingGuide(
 			ErrSolveFailed,
 		)
 	}
+	ctx, _ = config.FreezeAgentInstructions(ctx)
 	req.Subject = strings.TrimSpace(req.Subject)
 	req.Grade = strings.TrimSpace(req.Grade)
 	req.Problem = strings.TrimSpace(req.Problem)
