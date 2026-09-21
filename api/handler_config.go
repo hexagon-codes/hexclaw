@@ -419,6 +419,20 @@ func normalizeProviderProbePrivateHost(host string) string {
 	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
 }
 
+// 纯向量服务没有聊天默认值；显式连接测试选择其第一个已启用向量模型。
+func providerProbeModel(provider config.LLMProviderConfig) string {
+	if model := strings.TrimSpace(provider.Model); model != "" {
+		return model
+	}
+	_, specs := config.NormalizeProviderModelSpecs(provider)
+	for _, spec := range specs {
+		if config.ModelHasCapability(provider, spec.ID, config.LLMModelCapabilityEmbedding) {
+			return spec.ID
+		}
+	}
+	return ""
+}
+
 func providerProbeConfigFingerprint(
 	providerType string,
 	provider config.LLMProviderConfig,
@@ -432,7 +446,7 @@ func providerProbeConfigFingerprint(
 		ProviderType:         strings.ToLower(strings.TrimSpace(providerType)),
 		BaseURL:              normalizeProviderProbeBaseURL(provider.BaseURL),
 		APIKeyRevision:       fmt.Sprintf("%x", apiKeyRevision),
-		Model:                strings.TrimSpace(provider.Model),
+		Model:                providerProbeModel(provider),
 		Locality:             normalizeProviderProbeLocality(provider.Locality),
 		PrivateNetworkHost:   privateHost,
 		PrivateNetworkAccess: provider.PrivateNetworkAccess.Allowed,
@@ -516,7 +530,7 @@ func (s *Server) providerProbePersistenceCandidate(
 				Type:                 providerType,
 				BaseURL:              strings.TrimSpace(saved.BaseURL),
 				APIKey:               saved.APIKey,
-				Model:                strings.TrimSpace(saved.Model),
+				Model:                providerProbeModel(saved),
 				Locality:             saved.Locality,
 				PrivateNetworkAccess: saved.PrivateNetworkAccess,
 				OllamaTargetBaseURL:  saved.OllamaTargetBaseURL,
@@ -1106,13 +1120,8 @@ func (s *Server) handleTestLLMConfig(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	llmCfg := s.activeLLMConfig()
-	if isEmbeddingOnlyCompletionModel(llmCfg, providerType, baseURL, model) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "embedding-only 模型不能执行 completion 连接测试",
-		})
-		return
-	}
+	llmCfg := s.persistedLLMConfig()
+	embeddingOnly := isEmbeddingOnlyCompletionModel(llmCfg, providerType, baseURL, model)
 	// Ollama 本地通常无需 API Key
 	if apiKey == "" && !strings.EqualFold(providerType, "ollama") {
 		writeJSON(w, http.StatusBadRequest, map[string]string{
@@ -1143,13 +1152,18 @@ func (s *Server) handleTestLLMConfig(w http.ResponseWriter, r *http.Request) {
 	ctx = egress.WithRequest(ctx, egress.PurposeProviderProbe, "", egress.ClassGeneral)
 
 	start := time.Now()
-	_, err := provider.Complete(ctx, hexagon.CompletionRequest{
-		Messages: []hexagon.Message{{
-			Role:    "user",
-			Content: "Reply with OK.",
-		}},
-		MaxTokens: 8,
-	})
+	var err error
+	if embeddingOnly {
+		// 复用现有 Embedding 探测，保留连接回执的身份和时序约束。
+		err = s.executeModelCapabilityProbe(ctx, modelCapabilityProbeCandidate{
+			modelID: model, descriptor: probeDescriptor,
+		}, modelCapabilityProbeKindEmbedding)
+	} else {
+		_, err = provider.Complete(ctx, hexagon.CompletionRequest{
+			Messages:  []hexagon.Message{{Role: "user", Content: "Reply with OK."}},
+			MaxTokens: 8,
+		})
+	}
 	latency := time.Since(start).Milliseconds()
 	testedAt := time.Now().UnixMilli()
 
@@ -1290,6 +1304,12 @@ func (s *Server) handleFetchProviderModels(w http.ResponseWriter, r *http.Reques
 	defer cancel()
 
 	modelsURL := baseURL + "/models"
+	// Google 兼容目录只有 ID；同域原生目录提供生成方法，调用仍使用保存的兼容地址。
+	googleCatalog := baseURL == "https://generativelanguage.googleapis.com/v1beta/openai" ||
+		baseURL == "https://generativelanguage.googleapis.com/v1beta"
+	if googleCatalog {
+		modelsURL = "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000"
+	}
 	httpReq, err := http.NewRequestWithContext(ctx, "GET", modelsURL, nil)
 	if err != nil {
 		writeJSON(w, http.StatusOK, map[string]any{"models": []any{}, "error": err.Error()})
@@ -1297,6 +1317,9 @@ func (s *Server) handleFetchProviderModels(w http.ResponseWriter, r *http.Reques
 	}
 	if apiKey := strings.TrimSpace(req.APIKey); apiKey != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+		if googleCatalog {
+			httpReq.Header.Set("x-goog-api-key", apiKey)
+		}
 	}
 
 	resp, err := providerClient.Do(httpReq)
@@ -1352,6 +1375,7 @@ func (s *Server) handleFetchProviderModels(w http.ResponseWriter, r *http.Reques
 // （pricing / architecture.input_modalities / supported_parameters / context_length）。
 // 标准 OpenAI /models 只有裸 id，这些字段会缺省——前端按"有则展示、无则启发式兜底"处理。
 type providerModelInfo struct {
+	Capabilities     *[]string                       `json:"capabilities,omitempty"`
 	ID               string                          `json:"id"`
 	Name             string                          `json:"name,omitempty"`
 	ContextLength    int64                           `json:"context_length,omitempty"`
@@ -1376,12 +1400,33 @@ func parseProviderModel(raw json.RawMessage) (providerModelInfo, bool) {
 	if id == "" {
 		id, _ = m["model_id"].(string)
 	}
+	if id == "" && m["supportedGenerationMethods"] != nil {
+		id, _ = m["name"].(string)
+	}
 	if id == "" {
 		return providerModelInfo{}, false
 	}
 	info := providerModelInfo{ID: id, Name: id}
 	if name, _ := m["name"].(string); name != "" {
 		info.Name = name
+	}
+	if methods, ok := m["supportedGenerationMethods"].([]any); ok {
+		capabilities := []string{}
+		for _, method := range methods {
+			switch method {
+			case "generateContent":
+				capabilities = append(capabilities, "text")
+			case "embedContent":
+				capabilities = append(capabilities, "embedding")
+			}
+		}
+		info.Capabilities = &capabilities
+		if name, _ := m["displayName"].(string); name != "" {
+			info.Name = name
+		}
+		if limit, ok := m["inputTokenLimit"].(float64); ok && limit > 0 {
+			info.ContextLength = int64(limit)
+		}
 	}
 	if ctx, ok := m["context_length"].(float64); ok && ctx > 0 {
 		info.ContextLength = int64(ctx)

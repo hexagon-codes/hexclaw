@@ -173,12 +173,11 @@ func TestHandleUpdateLLMConfig_RejectsEmbeddingOnlyDefaultProvider(t *testing.T)
 	}
 }
 
-func TestHandleTestLLMConfig_RejectsEmbeddingOnlyBeforeCompletionProbe(t *testing.T) {
+func TestHandleTestLLMConfig_DoesNotSendEmbeddingToCompletion(t *testing.T) {
 	oldFactory := llmTestProviderFactory
-	probeCalls := 0
+	recording := &modelCapabilityProbeRecordingProvider{}
 	llmTestProviderFactory = func(llmConnectionTestProvider) completionProvider {
-		probeCalls++
-		return &mockCompletionProvider{}
+		return recording
 	}
 	defer func() { llmTestProviderFactory = oldFactory }()
 
@@ -214,13 +213,14 @@ func TestHandleTestLLMConfig_RejectsEmbeddingOnlyBeforeCompletionProbe(t *testin
 			body := `{"provider":{"type":"custom","api_key":"sk-test","model":"` + tt.model + `"}}`
 			w := httptest.NewRecorder()
 			srv.handleTestLLMConfig(w, httptest.NewRequest(http.MethodPost, "/api/v1/config/llm/test", strings.NewReader(body)))
-			if w.Code != http.StatusBadRequest || !strings.Contains(strings.ToLower(w.Body.String()), "embedding") {
-				t.Fatalf("status=%d body=%s, want embedding-only rejection", w.Code, w.Body.String())
+			var result LLMConnectionTestResponse
+			if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil || w.Code != http.StatusOK || result.OK {
+				t.Fatalf("status=%d body=%s, want unsupported embedding probe result", w.Code, w.Body.String())
 			}
 		})
 	}
-	if probeCalls != 0 {
-		t.Fatalf("embedding-only models reached completion probe %d times", probeCalls)
+	if len(recording.requests) != 0 {
+		t.Fatalf("embedding-only models reached completion probe %d times", len(recording.requests))
 	}
 }
 
