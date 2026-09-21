@@ -1142,7 +1142,7 @@ func (h *PermissionHook) BeforeToolCall(ctx context.Context, call *ToolCallInfo)
 		// Retrieved document content is a data-plane input, never an authority
 		// source. Explicit static deny remains first; every other policy outcome
 		// is narrowed by the evidence-aware gate before allow/matrix/solve paths.
-		if dec.Action != ActionDeny && hasUntrustedKnowledgeEvidence(ctx) {
+		if dec.Action != ActionDeny && hasUntrustedKnowledgeEvidence(ctx) && !userRequestedEvidenceTool(ctx, call) {
 			risk := dec.Risk
 			if risk == "" || risk == "safe" {
 				risk = "sensitive"
@@ -1182,7 +1182,7 @@ func (h *PermissionHook) BeforeToolCall(ctx context.Context, call *ToolCallInfo)
 
 	// Legacy path: hardcoded dangerous/sensitive lists
 	risk := h.classifyRisk(call.Name)
-	if hasUntrustedKnowledgeEvidence(ctx) {
+	if hasUntrustedKnowledgeEvidence(ctx) && !userRequestedEvidenceTool(ctx, call) {
 		if risk == "safe" {
 			risk = "sensitive"
 		}

@@ -74,14 +74,29 @@ func encodeKnowledgeEvidence(hits []knowledge.SearchHit) string {
 }
 
 type untrustedKnowledgeEvidenceContextKey struct{}
+type evidenceUserCodeIntentContextKey struct{}
 
 // withUntrustedKnowledgeEvidence stamps a host-only authority taint. It is not
 // derived from message metadata and cannot be set or cleared by a model/tool.
-func withUntrustedKnowledgeEvidence(ctx context.Context) context.Context {
+func withUntrustedKnowledgeEvidence(ctx context.Context, userContent ...string) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// 只从本轮原始用户输入冻结意图；检索正文和工具参数不是授权来源。
+	if len(userContent) > 0 {
+		ctx = context.WithValue(ctx, evidenceUserCodeIntentContextKey{}, shouldForceCodeExecTool(userContent[0]))
+	}
 	return context.WithValue(ctx, untrustedKnowledgeEvidenceContextKey{}, true)
+}
+
+// userRequestedEvidenceTool 只恢复用户明确要求的交互代码执行，仍须通过既有权限策略。
+func userRequestedEvidenceTool(ctx context.Context, call *ToolCallInfo) bool {
+	if ctx == nil || call == nil || systemDispatchSource(ctx) != "" || call.Source != "skill" ||
+		canonicalEvidenceToolName(call.Name) != codeExecToolName {
+		return false
+	}
+	requested, _ := ctx.Value(evidenceUserCodeIntentContextKey{}).(bool)
+	return requested
 }
 
 func hasUntrustedKnowledgeEvidence(ctx context.Context) bool {

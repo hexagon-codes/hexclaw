@@ -46,7 +46,7 @@ const residentBudgetRunes = 4000
 //
 // 双层（方案 §4.1）：
 //   - 常驻层（rule/identity/instruction/preference/pinned）→ SelectResident 保证带、bounded。
-//   - 检索层（fact/context）→ 三维打分排序（query 空时退化按 importance+recency），填充剩余预算。
+//   - 检索层（有效原始条目）→ 按本轮问题排序，常驻命中复用已注入内容；空 query 仅补充非恒驻事实。
 //
 // 关键取舍：桌面默认无 embedding，检索层 minScore=0 → **只排序不硬砍**，避免漏召回归；
 // 超预算时按打分丢弃「最不相关」而非任意截尾（修 bug#3b 的真正解，非把上限调大）。
@@ -60,6 +60,9 @@ func (e *ReActEngine) buildLongTermMemoryBlock(ctx context.Context, role, query 
 	}
 	parsed := e.fileMem.ParseEntriesForRole(role)
 	if len(parsed) == 0 {
+		if len([]rune(strings.TrimSpace(query))) >= 4 {
+			recordMemoryHits(ctx, role, nil)
+		}
 		return ""
 	}
 	now := time.Now()
@@ -68,10 +71,13 @@ func (e *ReActEngine) buildLongTermMemoryBlock(ctx context.Context, role, query 
 	// 常驻层：保证带，bounded。
 	resident, _ := recall.SelectResident(all, now, residentBudgetRunes)
 
-	// 检索层：fact/context（当前有效），三维打分排序。
+	// 原始常驻条目也参与本轮检索；派生画像不是第二份事实来源。
 	var facts []recall.Entry
-	for _, en := range all {
-		if !en.IsResident() && recall.IsCurrentlyValid(en, now) {
+	for i, en := range all {
+		if parsed[i].Source == "reflect_profile" || parsed[i].Subject == memory.ProfileSubject {
+			continue
+		}
+		if recall.IsCurrentlyValid(en, now) && (!en.IsResident() || strings.TrimSpace(query) != "") {
 			facts = append(facts, en)
 		}
 	}
@@ -82,29 +88,48 @@ func (e *ReActEngine) buildLongTermMemoryBlock(ctx context.Context, role, query 
 	used := 0
 	var recalledFactIDs []string    // 缺陷F：被真正注入的检索层事实 = 一次召回
 	var recalledHits []recall.Entry // U9：**按相关性召回**并注入的条目 → 结构化命中回传前端
+	var residentHits []recall.Entry
+	written := make(map[string]bool)
+	recorded := make(map[string]bool)
 	write := func(entries []recall.Entry, trackRecall bool) {
 		for _, en := range entries {
 			line := "- " + strings.TrimSpace(en.Content)
-			cost := len([]rune(line)) + 1
-			if used+cost > longTermMemoryBudgetRunes && used > 0 {
-				return // 已选高优先在前；超预算停止，最不相关者被丢
+			key := "id:" + en.ID
+			if en.ID == "" {
+				key = "content:" + line
 			}
-			b.WriteString(line + "\n")
-			used += cost
+			if !written[key] {
+				cost := len([]rune(line)) + 1
+				if used+cost > longTermMemoryBudgetRunes && used > 0 {
+					continue
+				}
+				b.WriteString(line + "\n")
+				used += cost
+				written[key] = true
+			}
+			if trackRecall && recorded[key] {
+				continue
+			}
+			if trackRecall {
+				recorded[key] = true
+			}
 			if trackRecall {
 				recalledHits = append(recalledHits, en)
 				if en.ID != "" {
 					recalledFactIDs = append(recalledFactIDs, en.ID)
 				}
+			} else {
+				residentHits = append(residentHits, en)
 			}
 		}
 	}
-	write(resident, false) // 常驻恒注入，不计入「按相关性被召回」的频次信号
+	write(resident, false) // 常驻本身不计入检索频次；下方只给实际相关者累计。
 	write(ranked, true)
 
-	// U9：只把**检索层真命中**记入命中 sink（BUG-20260712-L：「记忆命中」语义=按相关性召回；
-	// 常驻层（pinned/rule/preference）是恒注入不是命中——pinned 垃圾对着 1+1 显示命中卡纯属误导）。
-	recordMemoryHits(ctx, role, recalledHits)
+	// 过程区分常驻与本轮相关命中；两类可以引用同一条目，但注入与命中频次不重复。
+	if len(residentHits) > 0 || len([]rune(strings.TrimSpace(query))) >= 4 {
+		recordMemoryHits(ctx, role, recalledHits, residentHits...)
+	}
 
 	// 缺陷F：query 驱动的真召回里被注入的事实 → 自增 HitCount，复活行为 importance/晋升/做梦保护反馈环。
 	// 空 query（每轮 dump）不计：那不是「因相关被召回」，避免频次被无意义灌水。best-effort、不阻断。
@@ -275,10 +300,11 @@ func (s *memEntrySource) Candidates(ctx context.Context, _, _, query string, _ i
 
 	out := make([]recall.Candidate, 0, len(s.entries))
 	for i, e := range s.entries {
-		c := recall.Candidate{
-			Entry:     e,
-			BM25Score: recall.LexicalSim(query, e.Content),
+		lexicalScore := recall.LexicalSim(query, e.Content)
+		if e.IsResident() {
+			lexicalScore = residentMemoryLexicalScore(query, e.Content)
 		}
+		c := recall.Candidate{Entry: e, BM25Score: lexicalScore}
 		if len(s.memoQVec) > 0 && s.memoContent != nil {
 			c.VectorScore = recall.Cosine(s.memoQVec, s.memoContent[i])
 			c.HasVector = true
@@ -286,6 +312,32 @@ func (s *memEntrySource) Candidates(ctx context.Context, _, _, query string, _ i
 		out = append(out, c)
 	}
 	return out, nil
+}
+
+// residentMemoryLexicalScore 判断常驻条目是否与本轮主题有足够词法重叠。
+// 疑问词本身不是主题证据；仅共享少量词语的常驻偏好仍注入，但不冒充本轮检索命中。
+// 向量检索继续消费完整原问题，不受此词法判据替代。
+func residentMemoryLexicalScore(query, content string) float64 {
+	q := strings.NewReplacer("是什么", " ", "为什么", " ", "什么", " ", "如何", " ", "怎么", " ", "哪些", " ", "是否", " ").Replace(query)
+	q = strings.ToLower(strings.Join(strings.Fields(q), ""))
+	body := strings.ToLower(strings.Join(strings.Fields(content), ""))
+	runes := []rune(q)
+	terms := make(map[string]bool)
+	matched := 0
+	for i := 0; i+1 < len(runes); i++ {
+		term := string(runes[i : i+2])
+		if terms[term] {
+			continue
+		}
+		terms[term] = true
+		if strings.Contains(body, term) {
+			matched++
+		}
+	}
+	if len(terms) == 0 || matched*2 < len(terms) {
+		return 0
+	}
+	return recall.LexicalSim(q, body)
 }
 
 // toRecallEntries 把 FileMemory 解析条目映射为 recall.Entry。

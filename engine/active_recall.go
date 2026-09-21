@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/storage"
 	"github.com/hexagon-codes/toolkit/lang/stringx"
 )
@@ -105,8 +106,11 @@ func (ar *ActiveRecall) Prefetch(ctx context.Context, userID, query, injectedMem
 
 	cctx, cancel := context.WithTimeout(ctx, activeRecallTimeout)
 	defer cancel()
+	activity := adapter.RetrievalActivity{Kind: "memory", Source: "history", Status: "completed"}
+	defer func() { recordRetrievalActivity(ctx, activity) }()
 	results, _, err := ar.store.SearchMessages(cctx, userID, query, activeRecallSearchK, 0)
 	if err != nil {
+		activity.Status = "failed"
 		ar.recordFailure(now)
 		return ""
 	}
@@ -143,6 +147,7 @@ func (ar *ActiveRecall) Prefetch(ctx context.Context, userID, query, injectedMem
 		} else {
 			lines = append(lines, "- ["+when+"] "+snippet)
 		}
+		activity.MemoryHits = append(activity.MemoryHits, adapter.MemoryHit{Content: snippet, Source: strings.TrimSpace(r.SessionTitle + " · " + when)})
 		if len(lines) >= activeRecallTopK {
 			break
 		}
