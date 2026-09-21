@@ -36,7 +36,7 @@ func isPersonSubject(subject string) bool {
 const profileMaxRunes = 600
 
 // defaultMinFactsForProfile 蒸馏门控：少于此事实数不画像（证据不足不杜撰，对齐 OpenClaw deep 相 minRecallCount）。
-const defaultMinFactsForProfile = 3
+const defaultMinFactsForProfile = 1
 
 // ProfileSynthesizer 把零碎事实 LLM 蒸馏成稳定画像（**注入实现**，memory 包不依赖 llmrouter）。
 //
@@ -48,8 +48,9 @@ type ProfileSynthesizer interface {
 
 // DistillProfileConfig 画像蒸馏配置。
 type DistillProfileConfig struct {
-	MinFacts int // 少于此事实数不蒸馏，<=0 → defaultMinFactsForProfile
-	MaxRunes int // 画像正文 rune 上限，<=0 → profileMaxRunes
+	RetryRejected bool // 用户主动刷新可再次核对明确拒绝的路由；后台不循环重试。
+	MinFacts      int  // 少于此事实数不蒸馏，<=0 → defaultMinFactsForProfile
+	MaxRunes      int  // 画像正文 rune 上限，<=0 → profileMaxRunes
 }
 
 func (c DistillProfileConfig) minFacts() int {
@@ -77,55 +78,23 @@ func (fm *FileMemory) DistillProfileForRole(ctx context.Context, role string, sy
 	if syn == nil {
 		return "skip", nil
 	}
-	facts, prev := fm.collectProfileInputs(role, now)
-	if len(facts) < cfg.minFacts() {
-		return "skip", nil // 证据不足 → 不画像（防杜撰）
-	}
-	out, err := syn.Synthesize(ctx, facts, prev)
-	if err != nil {
-		return "skip", err
-	}
-	out = flattenProfile(out)
-	if out == "" {
-		return "skip", nil
-	}
-	if !isUsableSynthesis(out) { // 修缺陷D：拒答/碎片不落库（防把「抱歉，我无法生成画像」写成每轮必注入的 Pinned 画像）
-		return "skip", nil
-	}
-	if r := []rune(out); len(r) > cfg.maxRunes() {
-		out = strings.TrimSpace(string(r[:cfg.maxRunes()]))
-	}
-	if out == prev {
-		return "skip", nil // 无变化 → 不重写
-	}
-	return fm.UpsertProfileForRole(out, role)
+	fm.profileRunMu.Lock()
+	defer fm.profileRunMu.Unlock()
+	return fm.distillCurrentProfile(ctx, role, syn, cfg, now)
 }
 
 // collectProfileInputs 收集角色**当前有效的描述性事实**正文（identity/preference/fact/context；
 // 排除画像条自身、已失效（ValidTo 过期）与已归档条），以及现有画像正文（供时序更新参照）。
 // 排除 rule/instruction（祈使指令非画像）。读取经 ParseEntriesForRole（global+role 合并 + 角色隔离）。
 func (fm *FileMemory) collectProfileInputs(role string, now time.Time) (facts []string, prevProfile string) {
-	for _, e := range fm.ParseEntriesForRole(role) {
-		if e.Subject == ProfileSubject {
-			if entryValidAt(e, now) {
-				prevProfile = strings.TrimSpace(e.Content)
-			}
-			continue // 画像不喂回自身（防自我放大）
-		}
-		if e.Status == "archived" || !entryValidAt(e, now) {
-			continue
-		}
-		// 第三方具名人物事实（用户让 Agent 记住的他人简介、人设等）描述的是**别人**，
-		// 不是当前使用者 —— 隔离出画像输入，否则会把被谈论的人蒸馏成软件使用者（BUG-20260704）。
-		if isPersonSubject(e.Subject) {
-			continue
-		}
-		switch e.Type {
-		case "identity", "preference", "fact", "context":
-			if c := strings.TrimSpace(e.Content); c != "" {
-				facts = append(facts, c)
-			}
-		}
+	fm.mu.RLock()
+	defer fm.mu.RUnlock()
+	snapshot := fm.profileSnapshotUnlocked(role, now)
+	for _, entry := range snapshot.Entries {
+		facts = append(facts, entry.Content)
+	}
+	if snapshot.Profile.ProfileDigest == snapshot.Digest {
+		prevProfile = snapshot.Profile.Content
 	}
 	return facts, prevProfile
 }
@@ -142,18 +111,26 @@ func (fm *FileMemory) UpsertProfileForRole(content, role string) (string, error)
 	}
 	fm.mu.Lock()
 	defer fm.mu.Unlock()
+	return fm.upsertProfileUnlocked(content, role, fm.profileSnapshotUnlocked(role, time.Now()).Digest)
+}
+
+func (fm *FileMemory) upsertProfileUnlocked(content, role, digest string) (string, error) {
 	now := time.Now()
 	nowStr := now.UTC().Format(metaTimeFormat)
 
 	var oldID string
-	for _, e := range fm.parseEntriesForRoleUnlocked(role) {
+	for _, e := range fm.parseEntriesFromDirUnlocked(fm.roleDir(role)) {
 		if e.Subject == ProfileSubject && entryValidAt(e, now) {
 			oldID = e.ID
 			break
 		}
 	}
-	meta := EntryMeta{Pinned: true, Subject: ProfileSubject, ValidFrom: nowStr}
+	meta := EntryMeta{Pinned: true, Subject: ProfileSubject, ValidFrom: nowStr, ProfileDigest: digest}
 	if oldID != "" {
+		// 画像更新替换正文，保留同一条记录的稳定标识和命中信息。
+		meta = fm.readEntryMetaUnlocked(oldID)
+		meta.Pinned, meta.Subject, meta.ValidFrom, meta.ProfileDigest = true, ProfileSubject, nowStr, digest
+		meta.ProfileOperation = ""
 		if err := fm.rewriteEntryContentMetaUnlocked(oldID, content, meta); err != nil {
 			return "", err
 		}
@@ -181,21 +158,33 @@ func (fm *FileMemory) DistillProfileAll(ctx context.Context, syn ProfileSynthesi
 
 // StartProfileDistillation 启动周期画像蒸馏后台循环（deep 相、低频、**默认关 opt-in**）。
 //
-// 镜像 StartReflection：ticker 驱动、不阻塞启动、返回 stop；**不在启动时立即跑**。
+// 定时维护与源事实变更唤醒共用同一任务，不阻塞在线写入；返回 stop 释放两种触发。
 // 未注入 synthesizer → 直接返回 no-op stop（不启动 goroutine）。与机械反思各跑各的、互不替换；
 // 写盘经单写器写锁串行，与在线写入/反思互斥。
 func (fm *FileMemory) StartProfileDistillation(ctx context.Context, interval time.Duration, syn ProfileSynthesizer, cfg DistillProfileConfig) func() {
 	if syn == nil {
 		return func() {}
 	}
-	// 墙钟持久化 + 开机补跑（scheduled_phase.go）：关机→重启不再清零计时。
-	return fm.StartScheduledPhase(ctx, PhaseProfile, interval, 24*time.Hour, func(runCtx context.Context, _ time.Time) error {
-		if err := fm.DistillProfileAll(runCtx, syn, cfg, nowFunc()); err != nil {
-			logger.Warn("[memory.profile] 画像蒸馏失败", "error", err)
+	runCtx, cancel := context.WithCancel(ctx)
+	run := func(ctx context.Context, _ time.Time) error {
+		if err := fm.DistillProfileAll(ctx, syn, cfg, nowFunc()); err != nil {
+			logger.Warn("[memory.profile] Profile refresh failed", "error", err)
 			return err
 		}
 		return nil
-	})
+	}
+	stopScheduled := fm.StartScheduledPhase(runCtx, PhaseProfile, interval, 24*time.Hour, run)
+	go func() {
+		for {
+			select {
+			case <-runCtx.Done():
+				return
+			case <-fm.profileWake:
+				_ = run(runCtx, time.Now())
+			}
+		}
+	}()
+	return func() { cancel(); stopScheduled() }
 }
 
 // flattenProfile 把多行/多空白画像折叠为单行（首行内联 meta 标签与行号 ID 要求条目首行单行）。

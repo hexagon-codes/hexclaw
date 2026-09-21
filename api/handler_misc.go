@@ -98,11 +98,12 @@ func (s *Server) handleGetMemory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	result, err := s.fileMem.ListEntries(memory.ListOptions{
-		View:   q.Get("view"),
-		Limit:  limit,
-		Cursor: q.Get("cursor"),
-		Type:   q.Get("type"),
-		Source: q.Get("source"),
+		View:      q.Get("view"),
+		Limit:     limit,
+		Cursor:    q.Get("cursor"),
+		Type:      q.Get("type"),
+		Source:    q.Get("source"),
+		ExcludeID: q.Get("exclude_id"),
 	})
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -170,7 +171,8 @@ func (s *Server) handleSearchMemory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 1. FileMemory 关键词搜索
-	fileResults := s.fileMem.Search(query)
+	excludeID := r.URL.Query().Get("exclude_id")
+	fileResults := s.fileMem.SearchExcluding(query, excludeID)
 
 	// 2. VectorMemory 语义搜索 (D7: 链路④ 记忆闭环)
 	type vectorResult struct {

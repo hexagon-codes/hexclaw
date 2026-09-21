@@ -131,9 +131,9 @@ func TestDistillProfile_UpdatesInPlace(t *testing.T) {
 	if !strings.Contains(prof.Content, "上海") {
 		t.Fatalf("画像应已时序更新含上海，得 %q", prof.Content)
 	}
-	// 第二次 synthesizer 应收到上一版画像作 prev。
-	if !strings.Contains(syn.prev, "住在北京") {
-		t.Fatalf("二次蒸馏应把上版画像作 prev 传入，得 %q", syn.prev)
+	// 源版本变化后旧画像不能作为事实回灌。
+	if syn.prev != "" {
+		t.Fatalf("source changes must exclude the old profile, got %q", syn.prev)
 	}
 	// prev/facts 都不含画像自身（防自我放大）：facts 应是 4 条事实，不含画像。
 	for _, f := range syn.facts {
@@ -198,6 +198,7 @@ func TestDistillProfile_SynthErrorPreservesMemory(t *testing.T) {
 // ⑦ 绕过 dedup：直接两次写近乎相同画像，仍更新（不被 discard）。
 func TestUpsertProfile_BypassesDedup(t *testing.T) {
 	fm := newFM(t)
+	mustSaveProfileFact(t, fm, "用户是 Go 工程师，住在北京", "identity")
 	if act, _ := fm.UpsertProfileForRole("Go 工程师；住在北京", ""); act != "insert" {
 		t.Fatalf("首次应 insert")
 	}

@@ -17,6 +17,7 @@ const (
 	PurposeVisionOCR       Purpose = "vision_ocr"         // 图像/OCR 识别
 	PurposeVisionChat      Purpose = "vision_chat"        // 用户主动附图的聊天（图片明确意图发给视觉模型）
 	PurposeSolveVerify     Purpose = "solve_verify"       // 受验证的推理（需程序/工具验证的推理）
+	PurposeMemoryProfile   Purpose = "memory_profile"     // 已启用画像维护或用户主动修正
 	PurposeGeneralChat     Purpose = "general_chat"       // 通用对话
 	PurposeRAGEmbed        Purpose = "rag_embed"          // 文档向量化
 	PurposeRAGEnrich       Purpose = "rag_enrich"         // 查询扩展/重排/文档描述等检索增强
@@ -38,9 +39,10 @@ const (
 
 // Request 一次出网请求的元数据。
 type Request struct {
-	Purpose   Purpose
-	DataClass DataClass
-	AuditID   string // 关联审计条目（可空，分期留痕）
+	Purpose           Purpose
+	DataClass         DataClass
+	AuditID           string // 关联审计条目（可空，分期留痕）
+	ChatMemoryEnabled bool   // 仅当前聊天已启用的记忆
 }
 
 // Decision 判定结果。
@@ -62,6 +64,7 @@ var knownPurposes = map[Purpose]bool{
 	PurposeVisionChat:      true,
 	PurposeSolveVerify:     true,
 	PurposeGeneralChat:     true,
+	PurposeMemoryProfile:   true,
 	PurposeRAGEmbed:        true,
 	PurposeRAGEnrich:       true,
 	PurposeProviderProbe:   true,
@@ -79,6 +82,7 @@ var knownDataClasses = map[DataClass]bool{
 
 // purposeAllowsSensitive 白名单：允许携带敏感数据出网的用途 → 该用途允许的敏感类。
 var purposeAllowsSensitive = map[Purpose]map[DataClass]bool{
+	PurposeMemoryProfile: {ClassMemory: true},
 	// 图像识别：敏感媒体（含手写/姓名的图片）必须出网给云端 vision。
 	PurposeVisionOCR: {ClassSensitiveMedia: true},
 	// 用户主动附图聊天：图片是明确意图（发给已配置的视觉模型看），允许上云；且图片只会发给
@@ -118,6 +122,9 @@ func (p *Policy) decide(req Request) Decision {
 	}
 	if !sensitiveClasses[req.DataClass] {
 		return Decision{AllowCloud: true, Reason: "非敏感数据类"}
+	}
+	if req.DataClass == ClassMemory && req.ChatMemoryEnabled && (req.Purpose == PurposeGeneralChat || req.Purpose == PurposeVisionChat) {
+		return Decision{AllowCloud: true, Reason: "Memory enabled for this chat request"}
 	}
 	if allowed, ok := purposeAllowsSensitive[req.Purpose]; ok && allowed[req.DataClass] {
 		return Decision{AllowCloud: true, Reason: fmt.Sprintf("用途 %s 白名单允许 %s 出网", req.Purpose, req.DataClass)}

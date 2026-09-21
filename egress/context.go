@@ -79,10 +79,11 @@ func ProviderRequestResponseHeaderTimeoutFromContext(ctx context.Context) (time.
 // envelope is request-scoped and concurrency-safe so helper goroutines can only
 // make the final decision more restrictive, never silently remove a class.
 type requestEnvelope struct {
-	mu      sync.RWMutex
-	purpose Purpose
-	auditID string
-	classes map[DataClass]struct{}
+	mu                sync.RWMutex
+	purpose           Purpose
+	auditID           string
+	classes           map[DataClass]struct{}
+	chatMemoryEnabled bool
 }
 
 // WithRequest starts an isolated egress envelope. It intentionally does not
@@ -126,6 +127,20 @@ func AddDataClasses(ctx context.Context, classes ...DataClass) context.Context {
 	return ctx
 }
 
+// EnableChatMemory 标记当前聊天实际启用了记忆；新建子请求不会继承此状态。
+func EnableChatMemory(ctx context.Context) {
+	if ctx == nil {
+		return
+	}
+	env, _ := ctx.Value(contextKey{}).(*requestEnvelope)
+	if env == nil {
+		return
+	}
+	env.mu.Lock()
+	env.chatMemoryEnabled = true
+	env.mu.Unlock()
+}
+
 // RequestsFromContext returns one policy request per distinct data class. The
 // stable ordering makes audits and regression tests deterministic.
 func RequestsFromContext(ctx context.Context) ([]Request, bool) {
@@ -137,7 +152,7 @@ func RequestsFromContext(ctx context.Context) ([]Request, bool) {
 		return nil, false
 	}
 	env.mu.RLock()
-	purpose, auditID := env.purpose, env.auditID
+	purpose, auditID, chatMemoryEnabled := env.purpose, env.auditID, env.chatMemoryEnabled
 	classes := make([]DataClass, 0, len(env.classes))
 	for class := range env.classes {
 		classes = append(classes, class)
@@ -146,7 +161,7 @@ func RequestsFromContext(ctx context.Context) ([]Request, bool) {
 	sort.Slice(classes, func(i, j int) bool { return classes[i] < classes[j] })
 	requests := make([]Request, 0, len(classes))
 	for _, class := range classes {
-		requests = append(requests, Request{Purpose: purpose, DataClass: class, AuditID: auditID})
+		requests = append(requests, Request{Purpose: purpose, DataClass: class, AuditID: auditID, ChatMemoryEnabled: chatMemoryEnabled})
 	}
 	return requests, true
 }

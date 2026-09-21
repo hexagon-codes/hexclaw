@@ -25,7 +25,7 @@ import (
 //
 // 旧行为：第 2 轮带 history → 信封获得 ClassMemory → general_chat+memory 被守卫拒绝 →
 // "runtime stream 失败: cloud provider ... egress: egress 拦截"。
-// 新行为：history 归 general + 云端不注入跨会话记忆 → 守卫放行，多轮对话正常。
+// 新行为：history 归 general + 已启用记忆使用当前聊天信封 → 守卫放行，多轮对话正常。
 func newEgressGuardedCloudEngine(t *testing.T, provider hexagon.Provider, mem *memory.FileMemory) *ReActEngine {
 	t.Helper()
 	dir := t.TempDir()
@@ -121,32 +121,57 @@ func TestE2E_MultiTurnCloudChat_NotBlockedByEgress(t *testing.T) {
 	requireNoEgressClass(t, reqs, egress.ClassMemory)
 }
 
-// 云端 + 开启长期记忆：记忆不出本机（不注入），但对话照样不被拦死（优雅降级）。
-func TestE2E_CloudChatWithMemory_DropsMemoryButSucceeds(t *testing.T) {
-	fm, err := memory.New(memory.Options{Enabled: true, Dir: t.TempDir(), MaxMemory: 200, DailyDays: 0})
-	if err != nil {
-		t.Fatalf("创建 FileMemory 失败: %v", err)
+// 实际引擎与出口规则装配：开启记忆时到达 Provider 的请求包含记忆，关闭时没有。
+func TestE2E_CloudChatWithMemory_FollowsSetting(t *testing.T) {
+	for _, off := range []bool{false, true} {
+		name := "enabled"
+		if off {
+			name = "disabled"
+		}
+		t.Run(name, func(t *testing.T) {
+			fm, err := memory.New(memory.Options{Enabled: true, Dir: t.TempDir(), MaxMemory: 200})
+			if err != nil {
+				t.Fatal(err)
+			}
+			const marker = "MEMORY_E2E_偏好先解释依据再讲计算步骤"
+			if err := fm.SaveStructuredEntry(marker, "preference", "manual", "", memory.EntryMeta{Pinned: true}); err != nil {
+				t.Fatal(err)
+			}
+			provider := &egressCaptureProvider{}
+			eng := newEgressGuardedCloudEngine(t, provider, fm)
+			metadata := map[string]string{}
+			if off {
+				metadata["memory"] = "off"
+			}
+			msg := &adapter.Message{ID: "e2e-mem", SessionID: "s-mem", UserID: "u1", Platform: adapter.PlatformAPI, Content: "介绍下我", Metadata: metadata}
+			ch, err := eng.ProcessStream(context.Background(), msg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out, err := drainStream(t, ch)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(out, "ok") {
+				t.Fatalf("missing provider result: %q", out)
+			}
+			if off {
+				requireNoEgressClass(t, provider.last(t), egress.ClassMemory)
+			} else {
+				requireEgressRequest(t, provider.last(t), egress.PurposeGeneralChat, egress.ClassMemory)
+			}
+			provider.mu.Lock()
+			defer provider.mu.Unlock()
+			if len(provider.messages) != 1 {
+				t.Fatalf("expected one model call, got %d", len(provider.messages))
+			}
+			var payload strings.Builder
+			for _, m := range provider.messages[0] {
+				payload.WriteString(m.Content)
+			}
+			if strings.Contains(payload.String(), marker) != !off {
+				t.Fatalf("actual provider payload memory mismatch: %q", payload.String())
+			}
+		})
 	}
-	const marker = "E2EMEM_用户住在杭州"
-	if err := fm.SaveMemory("跨会话事实：" + marker); err != nil {
-		t.Fatalf("写入记忆失败: %v", err)
-	}
-
-	provider := &egressCaptureProvider{}
-	eng := newEgressGuardedCloudEngine(t, provider, fm)
-
-	msg := &adapter.Message{ID: "e2e-mem", SessionID: "s-mem", UserID: "u1", Platform: adapter.PlatformAPI, Content: "介绍下我"}
-	ch, err := eng.ProcessStream(context.Background(), msg)
-	if err != nil {
-		t.Fatalf("ProcessStream 建流失败: %v", err)
-	}
-	out, err := drainStream(t, ch)
-	if err != nil {
-		t.Fatalf("云端 + 记忆开启不应被拦死（应静默丢记忆），got err=%v", err)
-	}
-	if !strings.Contains(out, "ok") {
-		t.Fatalf("应正常拿到云端回复，got %q", out)
-	}
-	// 记忆没出本机：发给 provider 的信封不含 memory 类。
-	requireNoEgressClass(t, provider.last(t), egress.ClassMemory)
 }

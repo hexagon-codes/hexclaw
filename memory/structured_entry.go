@@ -23,19 +23,22 @@ const (
 
 // EntryMeta 是一条记忆的结构化元数据。
 type EntryMeta struct {
-	ID         string // 稳定内容寻址 ID（修缺陷H）：append 时生成、随条目持久化，删/改/移行后不漂移；旧条目无标签 → "" → 回退行号 ID。
-	Pinned     bool
-	Subject    string
-	ValidFrom  string
-	ValidTo    string
-	Supersedes string
-	Confidence float32
-	HitCount   int // 召回频次（行为 importance / 深度整合权重的真实驱动；旧条目无标签 → 0）
+	ProfileOperation string
+	ProfileDigest    string
+	ManualCorrection bool
+	ID               string // 稳定内容寻址 ID（修缺陷H）：append 时生成、随条目持久化，删/改/移行后不漂移；旧条目无标签 → "" → 回退行号 ID。
+	Pinned           bool
+	Subject          string
+	ValidFrom        string
+	ValidTo          string
+	Supersedes       string
+	Confidence       float32
+	HitCount         int // 召回频次（行为 importance / 深度整合权重的真实驱动；旧条目无标签 → 0）
 }
 
 func (m EntryMeta) isZero() bool {
 	return m.ID == "" && !m.Pinned && m.Subject == "" && m.ValidFrom == "" &&
-		m.ValidTo == "" && m.Supersedes == "" && m.Confidence == 0 && m.HitCount == 0
+		m.ValidTo == "" && m.Supersedes == "" && m.Confidence == 0 && m.HitCount == 0 && m.ProfileDigest == "" && m.ProfileOperation == "" && !m.ManualCorrection
 }
 
 // serialize 编码为内联标签；全零返回 ""。Subject 经 url 转义防 `;=` 冲突。
@@ -44,6 +47,15 @@ func (m EntryMeta) serialize() string {
 		return ""
 	}
 	var p []string
+	if m.ProfileOperation != "" {
+		p = append(p, "po="+m.ProfileOperation)
+	}
+	if m.ProfileDigest != "" {
+		p = append(p, "pd="+m.ProfileDigest)
+	}
+	if m.ManualCorrection {
+		p = append(p, "mc=1")
+	}
 	if m.ID != "" {
 		p = append(p, "eid="+m.ID)
 	}
@@ -91,6 +103,12 @@ func splitEntryMeta(content string) (string, EntryMeta) {
 			continue
 		}
 		switch k {
+		case "po":
+			m.ProfileOperation = v
+		case "pd":
+			m.ProfileDigest = v
+		case "mc":
+			m.ManualCorrection = v == "1"
 		case "eid":
 			m.ID = v
 		case "pin":
@@ -121,6 +139,7 @@ func splitEntryMeta(content string) (string, EntryMeta) {
 // SaveStructuredEntry 保存带结构化元数据的记忆条目（地基 A 写入入口）。
 // Pinned 或全局类型（identity/preference/instruction/rule）→ 落 _global 常驻。
 func (fm *FileMemory) SaveStructuredEntry(content, memType, source, role string, meta EntryMeta) error {
+	defer fm.requestProfileRefresh()
 	content = strings.TrimSpace(content)
 	if content == "" {
 		return nil
@@ -333,14 +352,11 @@ func (fm *FileMemory) rewriteEntryContentMetaUnlocked(id, content string, meta E
 	pureOld, _ := splitEntryMeta(strings.TrimSpace(lines[blockStart]))
 	newContent := strings.TrimSpace(content)
 	newFirst := rebuildEntryLine(pureOld, newContent)
-	// 内联 meta 是单行构造（缺陷H 边界）：仅当新正文单行时挂回标签；多行则退化为无 meta 多行条目，
-	// 杜绝标签落到续行——否则后续 BumpHitCount/SetPinned 改首行会造成双标签、正文被存储层标签污染。
-	if !strings.Contains(newContent, "\n") {
-		if tag := meta.serialize(); tag != "" {
-			newFirst += " " + tag
-		}
+	// 与解析、置顶和命中计数统一：元数据只保存在最后一行正文末尾。
+	if tag := meta.serialize(); tag != "" {
+		newFirst += " " + tag
 	}
-	newLines := append(lines[:blockStart], newFirst)
+	newLines := append(lines[:blockStart:blockStart], newFirst)
 	newLines = append(newLines, lines[blockEnd:]...)
 	return atomicWriteFile(path, []byte(strings.Join(newLines, "\n")), 0644)
 }

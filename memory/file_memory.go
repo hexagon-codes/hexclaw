@@ -23,6 +23,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/hexagon-codes/hexclaw/memory/recall"
 	fileutil "github.com/hexagon-codes/toolkit/util/file"
@@ -133,7 +134,9 @@ type FileMemory struct {
 	dreamOpts    *DreamOptions  // nil → DefaultDreamOptions（调参）
 
 	// 低频后台相墙钟（scheduled_phase.go）：持久化 last_run，支持开机补跑。
-	clock *phaseClock
+	clock        *phaseClock
+	profileWake  chan struct{}
+	profileRunMu sync.Mutex
 }
 
 // New 创建文件记忆系统
@@ -169,9 +172,10 @@ func New(cfg Options) (*FileMemory, error) {
 	}
 
 	fm := &FileMemory{
-		config: cfg,
-		dir:    dir,
-		clock:  newPhaseClock(dir),
+		config:      cfg,
+		dir:         dir,
+		clock:       newPhaseClock(dir),
+		profileWake: make(chan struct{}, 1),
 	}
 
 	logger.Info("dir", "dir", dir)
@@ -213,7 +217,7 @@ func (fm *FileMemory) GetMemory() string {
 func (fm *FileMemory) GetMemoryForPrompt() string {
 	fm.mu.RLock()
 	defer fm.mu.RUnlock()
-	return stripInlineMetaLines(fm.readFileFrom(fm.roleDir(""), memoryActiveFile))
+	return stripInlineMetaLines(fm.currentMemoryTextUnlocked(fm.roleDir("")))
 }
 
 // stripInlineMetaLines 逐行剥掉行尾内联 meta 标签，保留前缀与正文。无标签则原样返回。
@@ -242,9 +246,18 @@ func (fm *FileMemory) GetDaily(date time.Time) string {
 // 在所有记忆文件中搜索包含关键词的行。
 // 返回匹配的行及其来源文件名。
 func (fm *FileMemory) Search(query string) []SearchResult {
+	return fm.SearchExcluding(query, "")
+}
+
+// SearchExcluding 仅从搜索投影排除指定条目块，不修改原始记忆。
+func (fm *FileMemory) SearchExcluding(query, excludeID string) []SearchResult {
 	fm.mu.RLock()
 	defer fm.mu.RUnlock()
 
+	excludeDir, excludeFile, excludeLine := "", "", -1
+	if excludeID != "" {
+		excludeDir, excludeFile, excludeLine = fm.resolveEntryLocationUnlocked(excludeID)
+	}
 	keywords := strings.Fields(strings.ToLower(query))
 	if len(keywords) == 0 {
 		return nil
@@ -271,11 +284,25 @@ func (fm *FileMemory) Search(query string) []SearchResult {
 			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
 				continue
 			}
-			content := fm.readFileFrom(d.dir, entry.Name())
+			raw, _ := os.ReadFile(filepath.Join(d.dir, entry.Name()))
+			if entry.Name() == memoryActiveFile {
+				raw = []byte(fm.currentMemoryTextUnlocked(d.dir))
+			}
+			content := strings.TrimSpace(string(raw))
+			skipStart, skipEnd := -1, -1
+			if excludeLine >= 0 && d.dir == excludeDir && entry.Name() == excludeFile {
+				skipStart, skipEnd = findBlockByStartLine(string(raw), excludeLine)
+				leadingLines := strings.Count(string(raw[:len(raw)-len(strings.TrimLeftFunc(string(raw), unicode.IsSpace))]), "\n")
+				skipStart -= leadingLines
+				skipEnd -= leadingLines
+			}
 			if content == "" {
 				continue
 			}
 			for lineNum, line := range strings.Split(content, "\n") {
+				if lineNum >= skipStart && lineNum < skipEnd {
+					continue
+				}
 				lineLower := strings.ToLower(line)
 				matchCount := 0
 				for _, kw := range keywords {
@@ -315,15 +342,18 @@ type SearchResult struct {
 
 // MemoryEntry 结构化记忆条目（从 MEMORY.md 行解析而来）
 type MemoryEntry struct {
-	ID         string `json:"id"`         // 稳定内容寻址 ID（如 "e1a2b3…"，缺陷H）；旧条目无内联 ID → 回退行号 ID（如 "m-7"）
-	Content    string `json:"content"`    // 记忆正文
-	Type       string `json:"type"`       // identity/preference/fact/instruction/context
-	Source     string `json:"source"`     // manual/chat_explicit/chat_extract/system
-	CreatedAt  string `json:"created_at"` // ISO 时间
-	UpdatedAt  string `json:"updated_at"` // ISO 时间
-	HitCount   int    `json:"hit_count"`  // 命中次数（预留）
-	Status     string `json:"status"`     // active/archived
-	ArchivedAt string `json:"archived_at,omitempty"`
+	ProfileDigest    string `json:"profile_digest,omitempty"`
+	ProfileRevision  string `json:"profile_revision,omitempty"`
+	ManualCorrection bool   `json:"manual_correction,omitempty"`
+	ID               string `json:"id"`         // 稳定内容寻址 ID（如 "e1a2b3…"，缺陷H）；旧条目无内联 ID → 回退行号 ID（如 "m-7"）
+	Content          string `json:"content"`    // 记忆正文
+	Type             string `json:"type"`       // identity/preference/fact/instruction/context
+	Source           string `json:"source"`     // manual/chat_explicit/chat_extract/system
+	CreatedAt        string `json:"created_at"` // ISO 时间
+	UpdatedAt        string `json:"updated_at"` // ISO 时间
+	HitCount         int    `json:"hit_count"`  // 命中次数（预留）
+	Status           string `json:"status"`     // active/archived
+	ArchivedAt       string `json:"archived_at,omitempty"`
 	// 地基 A：结构化元数据（内联 meta 标签持久化，G3 时序留史 + Pinned）。
 	Pinned     bool    `json:"pinned,omitempty"`
 	Subject    string  `json:"subject,omitempty"`
@@ -345,11 +375,12 @@ type MemoryCapacity struct {
 
 // ListOptions 记忆列表查询选项。
 type ListOptions struct {
-	View   string
-	Limit  int
-	Cursor string
-	Type   string
-	Source string
+	ExcludeID string
+	View      string
+	Limit     int
+	Cursor    string
+	Type      string
+	Source    string
 }
 
 // ListResult 记忆列表分页结果。
@@ -453,11 +484,14 @@ func (fm *FileMemory) ListEntries(opts ListOptions) (ListResult, error) {
 }
 
 func filterMemoryEntries(entries []MemoryEntry, opts ListOptions) []MemoryEntry {
-	if opts.Type == "" && opts.Source == "" {
+	if opts.Type == "" && opts.Source == "" && opts.ExcludeID == "" {
 		return entries
 	}
 	filtered := make([]MemoryEntry, 0, len(entries))
 	for _, entry := range entries {
+		if opts.ExcludeID != "" && entry.ID == opts.ExcludeID {
+			continue
+		}
 		if opts.Type != "" && entry.Type != opts.Type {
 			continue
 		}
@@ -479,6 +513,7 @@ func (fm *FileMemory) SaveEntry(content, memType, source string) error {
 
 // SaveEntryForRole 保存记忆到指定角色的目录
 func (fm *FileMemory) SaveEntryForRole(content, memType, source, role string) error {
+	defer fm.requestProfileRefresh()
 	if memType == "" {
 		memType = "fact"
 	}
@@ -592,7 +627,7 @@ func (fm *FileMemory) LoadContextForRole(role string) string {
 	var sb strings.Builder
 
 	// 全局记忆
-	globalMem := fm.readFileFrom(fm.roleDir(""), memoryActiveFile)
+	globalMem := fm.currentMemoryTextUnlocked(fm.roleDir(""))
 	if globalMem != "" {
 		lines := strings.Split(globalMem, "\n")
 		if len(lines) > fm.config.MaxMemory {
@@ -605,7 +640,7 @@ func (fm *FileMemory) LoadContextForRole(role string) string {
 
 	// 角色专属记忆
 	if role != "" {
-		roleMem := fm.readFileFrom(fm.roleDir(role), memoryActiveFile)
+		roleMem := fm.currentMemoryTextUnlocked(fm.roleDir(role))
 		if roleMem != "" {
 			sb.WriteString(fmt.Sprintf("## 角色记忆 (%s)\n\n", role))
 			sb.WriteString(roleMem)
@@ -783,7 +818,9 @@ func (fm *FileMemory) evictIfNeededUnlocked(dir string) {
 
 // parseEntriesFromDir 从指定目录解析活跃 MEMORY.md（带 RLock）
 func (fm *FileMemory) parseEntriesFromDir(dir string) []MemoryEntry {
-	return fm.parseEntriesFromFile(dir, memoryActiveFile, MemoryStatusActive, "m")
+	fm.mu.RLock()
+	defer fm.mu.RUnlock()
+	return fm.currentProfilesUnlocked(dir, fm.parseEntriesFromDirUnlocked(dir))
 }
 
 // parseEntriesFromDirUnlocked 从指定目录解析活跃 MEMORY.md（调用方已持有锁）
@@ -865,8 +902,14 @@ func (fm *FileMemory) parseEntriesFromFileUnlocked(dir, filename, status, idPref
 			e.ID = emeta.ID
 		}
 		e.Pinned = emeta.Pinned
+		e.ProfileDigest = emeta.ProfileDigest
+		e.ManualCorrection = emeta.ManualCorrection
 		e.Subject = emeta.Subject
 		e.ValidFrom = emeta.ValidFrom
+		// 画像更新时间来自本次摘要生效时刻，保留原记录的创建时间和标识。
+		if isProfileEntry(e) && e.ProfileDigest != "" && e.ValidFrom != "" {
+			e.UpdatedAt = e.ValidFrom
+		}
 		e.ValidTo = emeta.ValidTo
 		e.Supersedes = emeta.Supersedes
 		e.Confidence = emeta.Confidence
@@ -1005,8 +1048,13 @@ func (fm *FileMemory) capArchiveUnlocked(dir string) {
 // 支持多行条目：保留首行的时间戳和元数据前缀，替换内容部分。
 // 新内容可以包含换行（多行记忆）。
 func (fm *FileMemory) UpdateEntry(id, content string) error {
+	defer fm.requestProfileRefresh()
 	fm.mu.Lock()
 	defer fm.mu.Unlock()
+	meta := fm.readEntryMetaUnlocked(id)
+	if meta.Subject == ProfileSubject {
+		return fmt.Errorf("Profile changes must use the profile correction endpoint")
+	}
 	return fm.updateEntryUnlocked(id, content)
 }
 
@@ -1029,16 +1077,12 @@ func (fm *FileMemory) updateEntryUnlocked(id, content string) error {
 		return fmt.Errorf("记忆条目不存在: %s", id)
 	}
 
-	// 保留首行的时间戳和类型前缀，替换正文。
-	// 修缺陷H：保留条目既有内联 meta（稳定 ID/Pinned/Subject/时序锚）——内容编辑不应让条目丢失稳定标识或常驻位。
-	// meta 是单行构造：仅当新正文也是单行时重新挂回；新正文多行则退化为无 meta 的多行条目（与既有多行约定一致）。
+	// 元数据位于完整条目块的末尾；单行与多行编辑均保留身份、来源及命中信息。
 	oldFirstLine := strings.TrimSpace(lines[blockStart])
-	_, meta := splitEntryMeta(stripEntryPrefix(oldFirstLine))
+	_, meta := splitEntryMeta(strings.TrimSpace(lines[metaLineIdx(lines, blockStart, blockEnd)]))
 	newContent := strings.TrimSpace(content)
-	if !strings.Contains(newContent, "\n") {
-		if tag := meta.serialize(); tag != "" {
-			newContent += " " + tag
-		}
+	if tag := meta.serialize(); tag != "" {
+		newContent += " " + tag
 	}
 	newFirstLine := rebuildEntryLine(oldFirstLine, newContent)
 
@@ -1054,6 +1098,7 @@ func (fm *FileMemory) updateEntryUnlocked(id, content string) error {
 //
 // 支持多行条目：删除条目的所有行。
 func (fm *FileMemory) DeleteEntry(id string) error {
+	defer fm.requestProfileRefresh()
 	fm.mu.Lock()
 	defer fm.mu.Unlock()
 
@@ -1082,6 +1127,7 @@ func (fm *FileMemory) DeleteEntry(id string) error {
 // ArchiveEntry 将活跃记忆降级到归档。
 // 解析与移动同持一把写锁：稳定 ID 现扫现定位，杜绝解析后行号漂移的 TOCTOU。
 func (fm *FileMemory) ArchiveEntry(id string) error {
+	defer fm.requestProfileRefresh()
 	fm.mu.Lock()
 	defer fm.mu.Unlock()
 	dir, filename, lineIdx := fm.resolveEntryLocationUnlocked(id)
@@ -1093,6 +1139,7 @@ func (fm *FileMemory) ArchiveEntry(id string) error {
 
 // RestoreEntry 将归档记忆恢复为活跃记忆。
 func (fm *FileMemory) RestoreEntry(id string) error {
+	defer fm.requestProfileRefresh()
 	fm.mu.Lock()
 	defer fm.mu.Unlock()
 	dir, filename, lineIdx := fm.resolveEntryLocationUnlocked(id)
@@ -1248,6 +1295,7 @@ func rebuildEntryLine(oldLine, newContent string) string {
 
 // UpdateMemory 替换 MEMORY.md 全部内容
 func (fm *FileMemory) UpdateMemory(content string) error {
+	defer fm.requestProfileRefresh()
 	fm.mu.Lock()
 	defer fm.mu.Unlock()
 
@@ -1259,6 +1307,7 @@ func (fm *FileMemory) UpdateMemory(content string) error {
 
 // ClearAll 清空所有记忆文件
 func (fm *FileMemory) ClearAll() error {
+	defer fm.requestProfileRefresh()
 	fm.mu.Lock()
 	defer fm.mu.Unlock()
 

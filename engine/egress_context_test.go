@@ -17,24 +17,28 @@ import (
 type egressCaptureProvider struct {
 	mu       sync.Mutex
 	requests [][]egress.Request
+	messages [][]llm.Message
 }
 
 func (p *egressCaptureProvider) Name() string { return "egress-capture" }
 
-func (p *egressCaptureProvider) capture(ctx context.Context) {
+func (p *egressCaptureProvider) capture(ctx context.Context, payload ...hexagon.CompletionRequest) {
 	reqs, _ := egress.RequestsFromContext(ctx)
 	p.mu.Lock()
 	p.requests = append(p.requests, reqs)
+	if len(payload) > 0 {
+		p.messages = append(p.messages, append([]llm.Message(nil), payload[0].Messages...))
+	}
 	p.mu.Unlock()
 }
 
-func (p *egressCaptureProvider) Complete(ctx context.Context, _ hexagon.CompletionRequest) (*hexagon.CompletionResponse, error) {
-	p.capture(ctx)
+func (p *egressCaptureProvider) Complete(ctx context.Context, req hexagon.CompletionRequest) (*hexagon.CompletionResponse, error) {
+	p.capture(ctx, req)
 	return &hexagon.CompletionResponse{Content: "ok"}, nil
 }
 
-func (p *egressCaptureProvider) Stream(ctx context.Context, _ hexagon.CompletionRequest) (*hexagon.LLMStream, error) {
-	p.capture(ctx)
+func (p *egressCaptureProvider) Stream(ctx context.Context, req hexagon.CompletionRequest) (*hexagon.LLMStream, error) {
+	p.capture(ctx, req)
 	body := strings.Join([]string{
 		`data: {"id":"c1","model":"mock-model","choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}`,
 		`data: [DONE]`,
