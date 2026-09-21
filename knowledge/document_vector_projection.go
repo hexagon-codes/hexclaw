@@ -66,6 +66,7 @@ func (r *SQLiteSemanticIndexRepository) ListDocumentVectorProjections(
 		    AND ij.document_id=b.document_id AND ij.document_generation=b.content_generation
 		    AND ij.kind='ingest'
 		    AND (i.status='outcome_unknown' OR (i.status='running' AND ij.state='failed'))
+		    AND `+unsupersededOCRInvocation+`
 		)
 	FROM kb_semantic_corpora c
 	JOIN kb_embedding_policies p ON p.corpus_uid=c.corpus_uid

@@ -115,6 +115,9 @@ func semanticIndexTestMigrations() []migrate.Migration {
 		migrate.KnowledgeIngestExecutionV46,
 		migrate.KnowledgeUploadOperationsV71,
 		migrate.KnowledgeOCRRouteReceiptsV87,
+		migrate.K12KnowledgeInvocationLedgersV91,
+		migrate.KnowledgeReparseV105,
+		migrate.KnowledgeRecoveryV106,
 	}
 }
 

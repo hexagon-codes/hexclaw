@@ -127,7 +127,10 @@ func (s *sqliteSemanticMutationScope) documentReplacedTx(
 	if err := fenceDocumentJobsTx(ctx, tx, state.corpusUID, document.ID, now); err != nil {
 		return err
 	}
-	generation := previousGeneration + 1
+	generation, err := nextDocumentGeneration(ctx, tx, state.corpusUID, document.ID)
+	if err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO kb_semantic_document_generations
 		(owner_id,corpus_uid,document_id,content_generation,created_at)
 		VALUES(?,?,?,?,?)`, s.ownerID, state.corpusUID, document.ID, generation, now); err != nil {
@@ -258,7 +261,10 @@ func (s *sqliteSemanticMutationScope) documentDeletedTx(
 	if affected, _ := res.RowsAffected(); affected != 1 {
 		return ErrSemanticIndexNotFound
 	}
-	tombstoneGeneration := previousGeneration + 1
+	tombstoneGeneration, err := nextDocumentGeneration(ctx, tx, state.corpusUID, documentID)
+	if err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO kb_semantic_document_generations
 		(owner_id,corpus_uid,document_id,content_generation,created_at)
 		VALUES(?,?,?,?,?)`, s.ownerID, state.corpusUID, documentID, tombstoneGeneration, now); err != nil {
@@ -719,4 +725,11 @@ func reconcileActiveRevisionTx(
 	return advanceActiveRevisionWatermarkIfCompleteTx(
 		ctx, tx, state.corpusUID, state.activeRevision, state.contentVersion, now,
 	)
+}
+
+// nextDocumentGeneration 跳过仍在构建或已保留的候选代次，避免覆盖其不可变回执。
+func nextDocumentGeneration(ctx context.Context, q semanticDBQueryer, corpusUID, documentID string) (int64, error) {
+	var generation int64
+	err := q.QueryRowContext(ctx, `SELECT COALESCE(MAX(content_generation),0)+1 FROM kb_semantic_document_generations WHERE corpus_uid=? AND document_id=?`, corpusUID, documentID).Scan(&generation)
+	return generation, err
 }

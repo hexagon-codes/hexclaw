@@ -278,3 +278,34 @@ func writeSemanticIndexError(w http.ResponseWriter, err error) {
 	}
 	writeJSON(w, status, map[string]string{"error": message, "code": code})
 }
+
+// KnowledgeDocumentReparseAPI 为保留旧版本的解析升级提供独立命令。
+type KnowledgeDocumentReparseAPI interface {
+	ReparseDocument(context.Context, string, string, string, string, int64) (knowledge.CreateDocumentResult, error)
+}
+
+func (s *Server) handleReparseKnowledgeDocument(w http.ResponseWriter, r *http.Request) {
+	service, ok := s.semanticIndex.(KnowledgeDocumentReparseAPI)
+	if !ok {
+		writeDocumentIngestError(w, knowledge.ErrDocumentIngestUnavailable)
+		return
+	}
+	var input struct {
+		ExpectedGeneration int64 `json:"expected_generation"`
+	}
+	if err := decodeSemanticIndexRequest(r, &input); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	result, err := service.ReparseDocument(r.Context(), knowledgePrincipalID(r), knowledgeDefaultCorpusID,
+		strings.TrimSpace(r.PathValue("id")), strings.TrimSpace(r.Header.Get("Idempotency-Key")), input.ExpectedGeneration)
+	if errors.Is(err, knowledge.ErrEmbeddingBatchOutcomeUnknown) {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "Embedding result is unknown; the current document is preserved.", "code": "knowledge_document_embedding_outcome_unknown"})
+		return
+	}
+	if err != nil {
+		writeDocumentRetryError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, result)
+}

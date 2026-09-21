@@ -39,7 +39,7 @@ func EmbeddingExecutionProfileForModel(model string) (EmbeddingExecutionProfile,
 		BatchMaxRunes:           800,
 		BatchTimeout:            120 * time.Second,
 		QueryTimeout:            60 * time.Second,
-		AutoInjectionMinScore:   0.65,
+		AutoInjectionMinScore:   0.68,
 		AutoInjectionMaxResults: 1,
 	}, true
 }

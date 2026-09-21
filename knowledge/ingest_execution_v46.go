@@ -156,10 +156,10 @@ func PlanAdaptiveIngestSegments(pages []IngestPagePlan, visualPageCap int) ([]In
 			end++
 		}
 		segments = append(segments, IngestSegmentPlan{
-			Ordinal: len(segments) + 1,
+			Ordinal:   len(segments) + 1,
 			PageStart: page.PageNumber,
-			PageEnd: pages[end].PageNumber,
-			Mode: page.Mode,
+			PageEnd:   pages[end].PageNumber,
+			Mode:      page.Mode,
 		})
 		index = end + 1
 	}
@@ -208,12 +208,12 @@ func KnowledgeJobFailureFromError(err error) KnowledgeJobFailure {
 	var visionFailure *VisionModelRequiredError
 	if errors.As(err, &visionFailure) {
 		return KnowledgeJobFailure{
-			Code: VisionModelRequiredFailureCode,
-			Message: visionFailure.Error(),
-			AffectedPages: append([]int(nil), visionFailure.AffectedPages...),
+			Code:                VisionModelRequiredFailureCode,
+			Message:             visionFailure.Error(),
+			AffectedPages:       append([]int(nil), visionFailure.AffectedPages...),
 			ProviderDisplayName: visionFailure.Route.ProviderDisplayName,
-			Model: visionFailure.Route.Model,
-			ActionCode: "configure_default_vision_model",
+			Model:               visionFailure.Route.Model,
+			ActionCode:          "configure_default_vision_model",
 		}
 	}
 	return KnowledgeJobFailure{Code: "job_failed", Message: err.Error()}
@@ -262,6 +262,23 @@ func (r *SQLiteSemanticIndexRepository) GetIngestDocumentForJob(
 	source, err := r.GetIngestDocumentForCorpusUID(ctx, ownerID, corpusUID, documentID)
 	if err != nil {
 		return PersistedIngestDocument{}, err
+	}
+	job, err := r.GetJob(ctx, ownerID, jobID)
+	if err != nil {
+		return PersistedIngestDocument{}, err
+	}
+	if job.CorpusUID != corpusUID || job.DocumentID != documentID {
+		return PersistedIngestDocument{}, ErrJobFenced
+	}
+	candidate, err := reparseForJob(ctx, r.db, job)
+	if err != nil {
+		return PersistedIngestDocument{}, err
+	}
+	if candidate != nil {
+		if err := validateReparseBase(ctx, r.db, candidate); err != nil {
+			return PersistedIngestDocument{}, err
+		}
+		source.ContentGeneration = candidate.Generation
 	}
 	source.JobID = jobID
 	var snapshot VisionRouteSnapshot
@@ -366,8 +383,8 @@ func refreshIngestSegmentStatesTx(
 		return err
 	}
 	type segmentState struct {
-		ordinal            int
-		pageStart, pageEnd int
+		ordinal             int
+		pageStart, pageEnd  int
 		mode, digest, state string
 	}
 	segments := []segmentState{}

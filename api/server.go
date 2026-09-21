@@ -700,6 +700,7 @@ func (s *Server) routes() http.Handler {
 		mux.HandleFunc("POST /api/v1/knowledge/documents", s.handleAddDocument)
 		mux.HandleFunc("GET /api/v1/knowledge/documents", s.handleListDocuments)
 		mux.HandleFunc("GET /api/v1/knowledge/documents/{id}", s.handleGetDocument)
+		mux.HandleFunc("GET /api/v1/knowledge/documents/{id}/source", s.handleKnowledgeDocumentSource)
 		mux.HandleFunc("DELETE /api/v1/knowledge/documents/{id}", s.handleDeleteDocument)
 		mux.HandleFunc("POST /api/v1/knowledge/documents/{id}/reindex", s.handleReindexDocument)
 		mux.HandleFunc("POST /api/v1/knowledge/search", s.handleSearchKnowledge)
@@ -715,6 +716,9 @@ func (s *Server) routes() http.Handler {
 		mux.HandleFunc("POST /api/v1/knowledge/operations/{operation_id}/ack", s.handleAcknowledgeKnowledgeOperation)
 		mux.HandleFunc("POST /api/v1/knowledge/operations/{operation_id}/dismiss", s.handleDismissKnowledgeOperation)
 		mux.HandleFunc("POST /api/v1/knowledge/documents/{id}/retry", s.handleRetryKnowledgeDocument)
+		mux.HandleFunc("GET /api/v1/knowledge/documents/{id}/recovery", s.handleKnowledgeDocumentRecovery)
+		mux.HandleFunc("POST /api/v1/knowledge/documents/{id}/recovery", s.handleKnowledgeDocumentRecovery)
+		mux.HandleFunc("POST /api/v1/knowledge/documents/{id}/reparse", s.handleReparseKnowledgeDocument)
 		mux.HandleFunc("GET /api/v1/knowledge/corpora/{corpus_id}/embedding-policy", s.handleGetKnowledgeEmbeddingPolicy)
 		mux.HandleFunc("POST /api/v1/knowledge/corpora/{corpus_id}/embedding-policy:apply", s.handleApplyKnowledgeEmbeddingPolicy)
 		mux.HandleFunc("GET /api/v1/knowledge/jobs/{job_id}", s.handleGetKnowledgeJob)
@@ -830,6 +834,8 @@ func (s *Server) routes() http.Handler {
 
 	// 文件记忆 API
 	if s.fileMem != nil {
+		mux.HandleFunc("POST /api/v1/memory/profile/refresh", s.handleRefreshMemoryProfile)
+		mux.HandleFunc("PUT /api/v1/memory/profile", s.handleEditMemoryProfile)
 		mux.HandleFunc("GET /api/v1/memory", s.handleGetMemory)
 		mux.HandleFunc("POST /api/v1/memory", s.handleSaveMemory)
 		mux.HandleFunc("PUT /api/v1/memory", s.handleUpdateMemory)

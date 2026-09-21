@@ -1528,6 +1528,28 @@ func (r *SQLiteSemanticIndexRepository) ClaimNextJobForCorpusInLane(
 	if err != nil {
 		return KnowledgeJob{}, false, err
 	}
+	// 已失效的候选任务停止调度，成功页与未知调用账本仍完整保留。
+	candidate, err := reparseForJob(ctx, tx, job)
+	if err != nil {
+		return KnowledgeJob{}, false, err
+	}
+	if candidate != nil {
+		if err := validateReparseBase(ctx, tx, candidate); err != nil {
+			if !errors.Is(err, ErrJobFenced) {
+				return KnowledgeJob{}, false, err
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE kb_knowledge_jobs SET state='cancelled',cancel_requested=1,
+                lease_owner='',lease_expires_at=NULL,heartbeat_at=NULL,lease_epoch=lease_epoch+1,
+                last_error='Reparse source or index has changed',updated_at=?,finished_at=?
+                WHERE job_id=?`, nowMillis, nowMillis, job.JobID); err != nil {
+				return KnowledgeJob{}, false, err
+			}
+			if err := tx.Commit(); err != nil {
+				return KnowledgeJob{}, false, err
+			}
+			return KnowledgeJob{}, false, nil
+		}
+	}
 	// 旧租约的调用已开始但没有完成事实，恢复只能停在对账状态。
 	if _, err := tx.ExecContext(ctx, `UPDATE kb_embedding_batch_manifests
 		SET state='outcome_unknown',next_attempt_at=NULL,
@@ -1942,6 +1964,15 @@ func loadLiveJob(
 	if err := validateLiveLease(job, lease, now); err != nil {
 		return KnowledgeJob{}, err
 	}
+	candidate, err := reparseForJob(ctx, q, job)
+	if err != nil {
+		return KnowledgeJob{}, err
+	}
+	if candidate != nil {
+		if err := validateReparseBase(ctx, q, candidate); err != nil {
+			return KnowledgeJob{}, err
+		}
+	}
 	return job, nil
 }
 
@@ -2046,6 +2077,10 @@ func (r *SQLiteSemanticIndexRepository) ListRevisionChunkInputs(
 	if err != nil {
 		return nil, err
 	}
+	prefix, err := reparseBuildPrefix(ctx, r.db, job)
+	if err != nil {
+		return nil, err
+	}
 	if job.TargetRevisionID == "" {
 		return nil, ErrJobFenced
 	}
@@ -2053,7 +2088,7 @@ func (r *SQLiteSemanticIndexRepository) ListRevisionChunkInputs(
 	if after != nil {
 		documentID, chunkIndex, chunkID = after.DocumentID, after.ChunkIndex, after.ChunkID
 	}
-	rows, err := r.db.QueryContext(ctx, `SELECT b.document_id,b.content_generation,c.id,c.chunk_index,c.content
+	rows, err := r.db.QueryContext(ctx, prefix+`SELECT b.document_id,b.content_generation,c.id,c.chunk_index,c.content
 		FROM kb_revision_documents rd
 		JOIN kb_semantic_document_bindings b
 		  ON b.corpus_uid=rd.corpus_uid AND b.document_id=rd.document_id
@@ -2104,7 +2139,11 @@ func (r *SQLiteSemanticIndexRepository) GetRevisionBuildSummary(
 	if err != nil {
 		return RevisionBuildSummary{}, err
 	}
-	rows, err := r.db.QueryContext(ctx, `SELECT b.document_id,b.content_generation,c.id,c.chunk_index,c.content
+	prefix, err := reparseBuildPrefix(ctx, r.db, job)
+	if err != nil {
+		return RevisionBuildSummary{}, err
+	}
+	rows, err := r.db.QueryContext(ctx, prefix+`SELECT b.document_id,b.content_generation,c.id,c.chunk_index,c.content
 		FROM kb_revision_documents rd
 		JOIN kb_semantic_document_bindings b
 		  ON b.corpus_uid=rd.corpus_uid AND b.document_id=rd.document_id
@@ -2214,13 +2253,17 @@ func (r *SQLiteSemanticIndexRepository) CreateEmbeddingBatchManifest(
 	if err != nil {
 		return EmbeddingBatchManifest{}, err
 	}
+	prefix, err := reparseBuildPrefix(ctx, tx, job)
+	if err != nil {
+		return EmbeddingBatchManifest{}, err
+	}
 	plan, err := loadExecutionPlanVia(ctx, tx, job)
 	if err != nil {
 		return EmbeddingBatchManifest{}, err
 	}
 	for _, chunk := range manifest.Chunks {
 		var content string
-		err := tx.QueryRowContext(ctx, `SELECT c.content
+		err := tx.QueryRowContext(ctx, prefix+`SELECT c.content
 			FROM kb_revision_documents rd
 			JOIN kb_semantic_document_bindings b
 			 ON b.corpus_uid=rd.corpus_uid AND b.document_id=rd.document_id
@@ -2767,6 +2810,10 @@ func (r *SQLiteSemanticIndexRepository) CommitEmbeddingBatch(
 	if err != nil {
 		return err
 	}
+	prefix, err := reparseBuildPrefix(ctx, tx, job)
+	if err != nil {
+		return err
+	}
 	plan, err := loadExecutionPlanVia(ctx, tx, job)
 	if err != nil {
 		return err
@@ -2789,7 +2836,7 @@ func (r *SQLiteSemanticIndexRepository) CommitEmbeddingBatch(
 		profileHash != plan.Snapshot.ProfileConfigHash || manifestEpoch != lease.Epoch {
 		return ErrJobFenced
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT b.document_id,b.content_generation,c.id,c.chunk_index,bc.content_hash,c.content
+	rows, err := tx.QueryContext(ctx, prefix+`SELECT b.document_id,b.content_generation,c.id,c.chunk_index,bc.content_hash,c.content
 		FROM kb_embedding_batch_chunks bc
 		JOIN kb_embedding_batch_manifests bm ON bm.batch_id=bc.batch_id
 		JOIN kb_chunks c ON c.id=bc.chunk_id
@@ -2883,16 +2930,20 @@ func (r *SQLiteSemanticIndexRepository) CommitEmbeddingBatch(
 		nowMillis, nowMillis, plan.RevisionID, plan.CorpusUID, job.Kind); err != nil {
 		return err
 	}
-	revisionUpdate, err := tx.ExecContext(ctx, `UPDATE kb_index_revisions
+	// 候选向量在发布前不计入当前可见 revision 的进度。
+	if prefix == "" {
+		revisionUpdate, err := tx.ExecContext(ctx, `UPDATE kb_index_revisions
 		SET embedded_chunks=embedded_chunks+?,updated_at=? WHERE revision_id=? AND corpus_uid=?
 		 AND (expected_chunks IS NULL OR embedded_chunks+?<=expected_chunks)`,
-		len(commit.Vectors), nowMillis, plan.RevisionID, plan.CorpusUID, len(commit.Vectors))
-	if err != nil {
-		return err
+			len(commit.Vectors), nowMillis, plan.RevisionID, plan.CorpusUID, len(commit.Vectors))
+		if err != nil {
+			return err
+		}
+		if affected, _ := revisionUpdate.RowsAffected(); affected != 1 {
+			return ErrInvalidRevisionVector
+		}
 	}
-	if affected, _ := revisionUpdate.RowsAffected(); affected != 1 {
-		return ErrInvalidRevisionVector
-	}
+
 	if commit.Checkpoint != nil {
 		cp := commit.Checkpoint
 		if _, err := tx.ExecContext(ctx, `INSERT INTO kb_job_stage_checkpoints
@@ -2951,6 +3002,15 @@ func (r *SQLiteSemanticIndexRepository) CompleteActiveRevisionJob(
 	}
 	if job.Kind != KnowledgeJobEmbedDocument || job.DocumentID == "" || job.TargetRevisionID == "" {
 		return ErrJobFenced
+	}
+	candidate, err := reparseForJob(ctx, tx, job)
+	if err != nil {
+		return err
+	}
+	if candidate != nil {
+		if err := r.publishReparseTx(ctx, tx, job, candidate, now.UTC()); err != nil {
+			return err
+		}
 	}
 	// Join through the current binding as well as the immutable generation
 	// fact. A superseded generation can therefore never become query-visible

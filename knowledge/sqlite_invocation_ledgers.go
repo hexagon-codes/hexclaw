@@ -96,6 +96,13 @@ func (r *SQLiteSemanticIndexRepository) ClaimOCRPageInvocation(
 			return OCRPageInvocation{}, fmt.Errorf("%w: OCR invocation route identity changed", ErrInvalidDocumentUpload)
 		}
 		if invocation.Status == OCRPageInvocationStatusFailed {
+			var replacement int
+			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM kb_ocr_recovery_decisions WHERE replacement_invocation_id=?`, invocation.InvocationID).Scan(&replacement); err != nil {
+				return OCRPageInvocation{}, err
+			}
+			if replacement != 0 {
+				return OCRPageInvocation{}, ErrDocumentRetryNotAllowed
+			}
 			res, err := tx.ExecContext(ctx, `UPDATE kb_ingest_page_invocations
 				SET status='running',lease_epoch=?,updated_at=?
 				WHERE invocation_id=? AND job_id=? AND status='failed'`,
@@ -137,6 +144,9 @@ func (r *SQLiteSemanticIndexRepository) ClaimOCRPageInvocation(
 		RequestDigest: claim.RequestDigest, Provider: claim.Provider, Model: claim.Model,
 		Operation: OCRRouteOperationPDFPage, Status: OCRPageInvocationStatusRunning,
 		LeaseEpoch: lease.Epoch, CreatedAt: now.UTC(), UpdatedAt: now.UTC(), Fresh: true,
+	}
+	if err := consumeOCRRecoveryTx(ctx, tx, job, claim, invocationID, nowMillis); err != nil {
+		return OCRPageInvocation{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		return OCRPageInvocation{}, err

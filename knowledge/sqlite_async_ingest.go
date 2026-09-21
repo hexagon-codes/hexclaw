@@ -77,7 +77,10 @@ func (r *SQLiteSemanticIndexRepository) CreateIngestDocument(
 			return CreateDocumentResult{}, err
 		}
 	}
-	generation := previousGeneration + 1
+	generation, err := nextDocumentGeneration(ctx, tx, state.corpusUID, documentID)
+	if err != nil {
+		return CreateDocumentResult{}, err
+	}
 	jobID, err := semanticID("job")
 	if err != nil {
 		return CreateDocumentResult{}, err
@@ -434,6 +437,7 @@ func queueFailedTextRetryTx(
 	storageKey, jobID string,
 	nowMillis int64,
 	visionRoute *VisionRouteSnapshot,
+	recoveryPlans ...*DocumentRecoveryPlan,
 ) error {
 	var predecessorJobID string
 	err := tx.QueryRowContext(ctx, `SELECT job_id FROM kb_knowledge_jobs
@@ -463,11 +467,18 @@ func queueFailedTextRetryTx(
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM kb_ingest_page_invocations i
 		JOIN kb_knowledge_jobs j ON j.job_id=i.job_id
 		WHERE j.owner_id=? AND j.corpus_uid=? AND j.document_id=? AND j.document_generation=?
-		  AND j.kind='ingest' AND i.source_digest=? AND i.status IN ('running','outcome_unknown')`,
+		  AND j.kind='ingest' AND i.source_digest=? AND i.status IN ('running','outcome_unknown') AND `+unsupersededOCRInvocation,
 		ownerID, corpusUID, documentID, generation, digest).Scan(&unresolvedOCR); err != nil {
 		return err
 	}
-	if unresolvedOCR > 0 {
+	var recovery *DocumentRecoveryPlan
+	if len(recoveryPlans) == 1 {
+		recovery = recoveryPlans[0]
+	}
+	if recovery != nil && (recovery.FailedJobID != predecessorJobID || recovery.Generation != generation || recovery.SourceDigest != digest || len(recovery.Pages) != unresolvedOCR) {
+		return ErrJobFenced
+	}
+	if unresolvedOCR > 0 && recovery == nil {
 		return fmt.Errorf("%w: %w", ErrDocumentRetryNotAllowed, ErrOCRPageInvocationOutcomeUnknown)
 	}
 	res, err := tx.ExecContext(ctx, `UPDATE kb_documents
@@ -513,6 +524,21 @@ func queueFailedTextRetryTx(
 	}
 	if err := inheritSucceededOCRPagesTx(ctx, tx, predecessorJobID, jobID, digest); err != nil {
 		return err
+	}
+	if recovery != nil {
+		var inherited int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM kb_ingest_page_checkpoints WHERE job_id=?`, jobID).Scan(&inherited); err != nil {
+			return err
+		}
+		if inherited != recovery.CompletedPages {
+			return ErrJobFenced
+		}
+		for _, page := range recovery.Pages {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO kb_ocr_recovery_decisions(original_invocation_id,replacement_job_id,plan_fingerprint,owner_id,corpus_uid,document_id,content_generation,source_digest,page_number,created_at)
+ VALUES(?,?,?,?,?,?,?,?,?,?)`, page.InvocationID, jobID, recovery.Fingerprint, ownerID, corpusUID, documentID, generation, digest, page.PageNumber, nowMillis); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
@@ -1483,6 +1509,15 @@ func (r *SQLiteSemanticIndexRepository) CompleteIngestDocument(
 		return ErrJobFenced
 	}
 
+	candidate, err := reparseForJob(ctx, tx, job)
+	if err != nil {
+		return err
+	}
+	bindingPredicate := "b.content_generation=s.content_generation AND b.text_state IN ('pending','building')"
+	if candidate != nil {
+		bindingPredicate = "b.content_generation<>s.content_generation AND b.text_state='ready'"
+	}
+
 	var source PersistedIngestDocument
 	err = tx.QueryRowContext(ctx, `SELECT s.document_id,s.owner_id,s.corpus_uid,c.corpus_alias,
 		s.content_generation,s.original_name,s.extension,s.media_type,s.size_bytes,s.blob_sha256,
@@ -1494,7 +1529,7 @@ func (r *SQLiteSemanticIndexRepository) CompleteIngestDocument(
 		JOIN kb_semantic_document_bindings b ON b.document_id=s.document_id
 		WHERE s.owner_id=? AND s.corpus_uid=? AND s.document_id=?
 		  AND s.content_generation=? AND b.lifecycle_state='active'
-		  AND b.content_generation=s.content_generation AND b.text_state IN ('pending','building')`,
+		  AND `+bindingPredicate,
 		job.OwnerID, job.CorpusUID, job.DocumentID, job.DocumentGeneration).Scan(
 		&source.DocumentID, &source.OwnerID, &source.CorpusUID, &source.CorpusAlias,
 		&source.ContentGeneration, &source.Filename, &source.Extension, &source.MediaType,
@@ -1559,6 +1594,13 @@ func (r *SQLiteSemanticIndexRepository) CompleteIngestDocument(
 		} else if chunk.SourceDigest != source.SHA256 {
 			return fmt.Errorf("%w: chunk source digest mismatch", ErrInvalidDocumentUpload)
 		}
+	}
+
+	if candidate != nil {
+		if err := r.prepareReparseTx(ctx, tx, job, candidate, prepared, now); err != nil {
+			return err
+		}
+		return tx.Commit()
 	}
 
 	res, err := tx.ExecContext(ctx, `UPDATE kb_documents SET title=?,content=?,source=?,chunk_count=?,
