@@ -57,6 +57,7 @@ type renderedPDFPage struct {
 
 var pdftoppmKnownPaths = []string{"/opt/homebrew/bin/pdftoppm", "/usr/local/bin/pdftoppm", "/usr/bin/pdftoppm"}
 var pdfinfoKnownPaths = []string{"/opt/homebrew/bin/pdfinfo", "/usr/local/bin/pdfinfo", "/usr/bin/pdfinfo"}
+var pdfimagesKnownPaths = []string{"/opt/homebrew/bin/pdfimages", "/usr/local/bin/pdfimages", "/usr/bin/pdfimages"}
 var errPDFPageByteBudget = errors.New("rendered PDF page exceeds byte budget")
 var errPDFTextByteBudget = errors.New("decompressed PDF text output exceeds byte budget")
 
@@ -438,6 +439,15 @@ func extractPDFForAsyncIngestWithProgress(
 	if textWarning != "" {
 		result.Warnings = append(result.Warnings, textWarning)
 	}
+	imagePages, imageErr := runGovernedCPU(ctx, governor, func() (map[int]bool, error) {
+		return inspectPDFImagePages(ctx, path, info.PageCount)
+	})
+	if imageErr != nil {
+		if ctx.Err() != nil {
+			return result, ctx.Err()
+		}
+		result.Warnings = append(result.Warnings, "PDF image inspection unavailable; page vision extraction is required: "+imageErr.Error())
+	}
 	result.Pages = make([]documentPageExtraction, info.PageCount)
 	visualPages := make([]int, 0, info.PageCount)
 	for page := 1; page <= info.PageCount; page++ {
@@ -453,7 +463,7 @@ func extractPDFForAsyncIngestWithProgress(
 			PageNumber: page, SourcePageFrom: page, SourcePageTo: page,
 			Mode: "text", Text: text,
 		}
-		if !pdfPageHasUsableTextLayer(text) {
+		if imageErr != nil || imagePages[page] || !pdfPageHasUsableTextLayer(text) {
 			result.Pages[page-1].Mode = "ocr_vlm"
 			result.Pages[page-1].Text = ""
 			visualPages = append(visualPages, page)
@@ -880,7 +890,59 @@ func pdfPageHasUsableTextLayer(text string) bool {
 			visible++
 		}
 	}
-	return visible >= minPDFTextRunesPerPage
+	if visible < minPDFTextRunesPerPage {
+		return false
+	}
+	// 多列间距与拆行公式不能作为自然阅读顺序的正文直接入库。
+	columns, formulaFragments := 0, 0
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.Contains(line, "    ") || strings.Contains(line, "\t") {
+			columns++
+		}
+		if line != "" && strings.Trim(line, "0123456789 +-−×÷=()（）.,， ") == "" && len([]rune(line)) <= 16 {
+			formulaFragments++
+		}
+	}
+	return columns < 2 && formulaFragments < 3
+}
+
+// inspectPDFImagePages 只读取页面图像清单，不提取像素或建立第二份图片资产。
+func inspectPDFImagePages(ctx context.Context, path string, pageCount int) (map[int]bool, error) {
+	bin := findTool("pdfimages", pdfimagesKnownPaths...)
+	if bin == "" {
+		return nil, fmt.Errorf("pdfimages is not available")
+	}
+	cmd := exec.CommandContext(ctx, bin, "-list", path)
+	cmd.Env = append(os.Environ(), "LC_ALL=C", "LANG=C")
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	pages := make(map[int]bool)
+	scanner := bufio.NewScanner(stdout)
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) < 3 || fields[2] != "image" {
+			continue
+		}
+		page, err := strconv.Atoi(fields[0])
+		if err == nil && page >= 1 && page <= pageCount {
+			pages[page] = true
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return nil, err
+	}
+	if err := cmd.Wait(); err != nil {
+		return nil, err
+	}
+	return pages, nil
 }
 
 func markRemainingPDFPagesFailed(failed map[int]string, pages []int, reason string) {

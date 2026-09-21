@@ -97,7 +97,7 @@ import (
 
 const sidecarVersionIdentityAnnotation = "hexclaw.internal/sidecar-version-identity"
 
-const knowledgePDFPageOCRPrompt = "Faithfully transcribe all visible text, mathematical formulas, question numbers, tables, and diagram labels on this textbook page while preserving the original hierarchy. Preserve the reading order, headings, paragraphs, lists, and meaning of formulas; prefer Markdown/LaTeX for mathematical formulas. Mark illegible content explicitly with a Chinese-language illegibility marker. Do not summarize. Do not explain. Do not complete. Do not infer. Respond in Chinese and output only the transcription."
+const knowledgePDFPageOCRPrompt = "Faithfully transcribe all visible text, mathematical formulas, question numbers, tables, and diagram labels on this textbook page while preserving the original hierarchy. Preserve the natural reading order, headings, paragraphs, lists, and meaning of formulas; use Markdown/LaTeX for mathematical formulas, keeping fractions together instead of placing numerators and denominators on separate lines. Keep separate columns and callouts as separate blocks. For diagrams, include a brief bracketed description of directly visible shapes and relationships; do not infer hidden values. Preserve unfilled blanks without completing answers. Do not invent image URLs. Mark illegible content explicitly with a Chinese-language illegibility marker. Do not summarize. Do not explain. Do not complete. Do not infer. Respond in Chinese and output only the transcription."
 
 // completeKnowledgePDFPageOCR 只在 Provider 成功返回后生成 fake=false 的执行回执。
 func completeKnowledgePDFPageOCR(
