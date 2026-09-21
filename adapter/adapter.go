@@ -90,6 +90,8 @@ type Usage struct {
 // 经此透传给客户端——客户端据此渲染成功/失败/耗时，无需对结果正文做字符串嗅探。
 // omitempty：老路径/未填充时不出现在 wire，前端可选字段优雅降级。
 type ToolCall struct {
+	Origin         *ToolOrigin                    `json:"origin,omitempty"`
+	Execution      *SandboxExecution              `json:"execution,omitempty"`
 	ID             string                         `json:"id"`                        // 调用 ID
 	Name           string                         `json:"name"`                      // 工具/技能名称
 	Arguments      string                         `json:"arguments"`                 // 调用参数（JSON 字符串）
@@ -106,7 +108,9 @@ type ToolCall struct {
 // 富数据（status/duration/result）仍走扁平 ToolCalls；前端按 Block 顺序渲染、
 // 在每个 tool_use 处用 id 到 ToolCalls 里取完整数据。
 type Block struct {
-	Type           string                         `json:"type"` // text | tool_use | tool_result
+	Retrieval      *RetrievalActivity             `json:"retrieval,omitempty"`
+	Thinking       string                         `json:"thinking,omitempty"`
+	Type           string                         `json:"type"` // text | thinking | tool_use | tool_result | retrieval
 	MessageContent *messagecontent.MessageContent `json:"message_content,omitempty"`
 	// text
 	Text string `json:"text,omitempty"`
@@ -127,16 +131,22 @@ type Block struct {
 // 故命中以独立结构化字段回传（而非塞进字符串 map）。字段名对齐前端 ChatView 的
 // getHitTitle（doc_title/source）与 getHitSubtitle（content）消费路径。
 type KnowledgeHit struct {
-	DocTitle       string                         `json:"doc_title,omitempty"` // 文档标题
-	Source         string                         `json:"source,omitempty"`    // 来源
-	Content        string                         `json:"content,omitempty"`   // 命中片段正文
-	Score          float64                        `json:"score,omitempty"`     // 相关度分数
-	MessageContent *messagecontent.MessageContent `json:"message_content,omitempty"`
+	DocID              string                         `json:"doc_id,omitempty"`
+	DocumentGeneration int64                          `json:"document_generation,omitempty"`
+	SourceDigest       string                         `json:"source_digest,omitempty"`
+	PageStart          int                            `json:"page_start,omitempty"`
+	PageEnd            int                            `json:"page_end,omitempty"`
+	DocTitle           string                         `json:"doc_title,omitempty"` // 文档标题
+	Source             string                         `json:"source,omitempty"`    // 来源
+	Content            string                         `json:"content,omitempty"`   // 命中片段正文
+	Score              float64                        `json:"score,omitempty"`     // 相关度分数
+	MessageContent     *messagecontent.MessageContent `json:"message_content,omitempty"`
 }
 
 // MemoryHit 长期记忆召回命中（结构化，驱动前端「记忆命中」标签+详情）。
 // 字段名对齐前端 ChatView 记忆命中渲染（content/source）。
 type MemoryHit struct {
+	ID             string                         `json:"id,omitempty"`
 	Content        string                         `json:"content,omitempty"` // 记忆内容
 	Source         string                         `json:"source,omitempty"`  // 记忆来源（角色/文件等）
 	MessageContent *messagecontent.MessageContent `json:"message_content,omitempty"`

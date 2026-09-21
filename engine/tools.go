@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/hexagon-codes/ai-core/llm"
+	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/mcp"
 	"github.com/hexagon-codes/hexclaw/skill"
 )
@@ -180,4 +181,44 @@ func hasActivation(act skill.Activation) bool {
 // Refresh re-collects tools. Call after MCP/Skill changes.
 func (tc *ToolCollector) Refresh() []llm.ToolDefinition {
 	return tc.Collect()
+}
+
+// originsFor 冻结本轮已选工具的注册名称，只生成展示元数据，不参与执行路由。
+func (tc *ToolCollector) originsFor(tools []llm.ToolDefinition) map[string]*adapter.ToolOrigin {
+	if tc == nil || len(tools) == 0 {
+		return nil
+	}
+	selected := make(map[string]bool, len(tools))
+	for _, tool := range tools {
+		selected[tool.Function.Name] = true
+	}
+	origins := make(map[string]*adapter.ToolOrigin)
+	if tc.skills != nil {
+		for _, s := range tc.skills.All() {
+			if _, contentOnly := s.(skill.ContentLoader); contentOnly {
+				continue
+			}
+			name := s.ToolDefinition().Function.Name
+			if name == "" {
+				continue
+			}
+			name = llmToolNameSlug(name)
+			if selected[name] && origins[name] == nil {
+				origins[name] = &adapter.ToolOrigin{Kind: "skill", Name: s.Name()}
+			}
+		}
+	}
+	if tc.mcpMgr != nil {
+		for _, info := range tc.mcpMgr.ListToolInfos() {
+			if !selected[info.Name] || origins[info.Name] != nil {
+				continue
+			}
+			name := info.OriginalName
+			if name == "" {
+				name = info.Name
+			}
+			origins[info.Name] = &adapter.ToolOrigin{Kind: "mcp", Name: name, ServerName: info.ServerName}
+		}
+	}
+	return origins
 }

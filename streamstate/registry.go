@@ -173,10 +173,11 @@ func (r *Registry) Append(requestID string, chunk *adapter.ReplyChunk) *Snapshot
 		item.Usage = &usage
 	}
 	if len(chunk.ToolCalls) > 0 {
-		item.ToolCalls = append([]adapter.ToolCall(nil), chunk.ToolCalls...)
+		item.ToolCalls = adapter.MergeProcessCalls(item.ToolCalls, chunk.ToolCalls)
 	}
-	if len(chunk.Blocks) > 0 {
-		item.Blocks = append([]adapter.Block(nil), chunk.Blocks...)
+	item.Blocks = adapter.AppendProcessChunk(item.Blocks, chunk)
+	if chunk.ReasoningDisclosure.Visibility == adapter.ReasoningNotExposed {
+		item.Blocks = adapter.WithoutThinkingBlocks(item.Blocks)
 	}
 	if chunk.ReasoningDisclosure.Visibility != "" {
 		item.ReasoningDisclosure = chunk.ReasoningDisclosure

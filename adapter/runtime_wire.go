@@ -83,6 +83,8 @@ type SequencedRuntimeEvent struct {
 }
 
 type RuntimeSnapshot struct {
+	Blocks              []Block             `json:"blocks,omitempty"`
+	ToolCalls           []ToolCall          `json:"tool_calls,omitempty"`
 	AssistantMessageID  string              `json:"assistant_message_id"`
 	BackendMessageID    string              `json:"backend_message_id"`
 	MessageID           string              `json:"message_id"`
@@ -131,6 +133,8 @@ type RuntimeWire struct {
 	receipt         ReasoningReceipt
 	receiptSet      bool
 	events          []SequencedRuntimeEvent
+	blocks          []Block
+	toolCalls       []ToolCall
 }
 
 func NewRuntimeWire(messageID string, disclosure ReasoningDisclosure) *RuntimeWire {
@@ -160,6 +164,7 @@ func (w *RuntimeWire) hasTrustedVisibleDisclosure(disclosure ReasoningDisclosure
 
 func (w *RuntimeWire) clearPublicReasoning() {
 	w.publicReasoning = ""
+	w.blocks = WithoutThinkingBlocks(w.blocks)
 	w.disclosure = ReasoningDisclosure{
 		Visibility: ReasoningNotExposed,
 		Provider:   w.route.Provider,
@@ -237,6 +242,36 @@ func (w *RuntimeWire) Decorate(chunk *ReplyChunk) *ReplyChunk {
 			Event:    *copy.RuntimeEvent,
 		})
 	}
+	// 终态的工具报告补齐原调用；实时片段保留实际发生顺序。
+	w.toolCalls = MergeProcessCalls(w.toolCalls, copy.ToolCalls)
+	if len(w.blocks) > 0 && copy.Done {
+		w.blocks = mergeProcessRetrievals(w.blocks, copy.Blocks)
+		// 某些兼容路径仅在终态返回工具块，不能被不完整的实时轨迹覆盖。
+		if hasMissingProcessCalls(w.blocks, copy.Blocks) {
+			var prefix []Block
+			for _, block := range w.blocks {
+				if block.Type == "retrieval" {
+					prefix = append(prefix, block)
+				}
+			}
+			for _, block := range copy.Blocks {
+				if block.Type != "retrieval" {
+					prefix = append(prefix, block)
+				}
+			}
+			copy.Blocks = prefix
+		} else {
+			copy.Blocks = nil
+		}
+	}
+	w.blocks = AppendProcessChunk(w.blocks, &copy)
+	if w.disclosure.Visibility != ReasoningVisible {
+		w.blocks = WithoutThinkingBlocks(w.blocks)
+	}
+	if copy.RuntimeEvent != nil || copy.Done {
+		copy.Blocks = append([]Block(nil), w.blocks...)
+		copy.ToolCalls = append([]ToolCall(nil), w.toolCalls...)
+	}
 	return &copy
 }
 
@@ -253,6 +288,8 @@ func (w *RuntimeWire) Snapshot() RuntimeSnapshot {
 		MessageID:           w.messageID,
 		ReasoningDisclosure: w.disclosure,
 		Reasoning:           w.publicReasoning,
+		Blocks:              append([]Block(nil), w.blocks...),
+		ToolCalls:           append([]ToolCall(nil), w.toolCalls...),
 		ReasoningReceipt:    w.receipt,
 		RuntimeEvents:       events,
 		LastSequence:        w.sequence,

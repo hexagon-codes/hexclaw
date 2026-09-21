@@ -417,19 +417,44 @@ func (runtimeCompactionMiddleware) AfterTool(context.Context, *hruntime.State, l
 
 func (runtimeCompactionMiddleware) Finalize(context.Context, *hruntime.State) error { return nil }
 
-func runtimeToolCallsToAdapter(calls []hruntime.ToolCallRecord) []adapter.ToolCall {
+func runtimeToolCallsToAdapter(calls []hruntime.ToolCallRecord, origins ...map[string]*adapter.ToolOrigin) []adapter.ToolCall {
 	result := make([]adapter.ToolCall, 0, len(calls))
 	for _, c := range calls {
-		displayResult := truncateToolResultForDisplay(c.Name, c.Result.Content)
+		var origin *adapter.ToolOrigin
+		if len(origins) > 0 {
+			origin = origins[0][c.Name]
+		}
+		execution := sandboxExecutionForDisplay(c.Name, c.Result.Content)
+		if origin != nil && origin.Kind == "mcp" {
+			execution = nil
+		}
+		displayContent := c.Result.Content
+		if execution != nil {
+			displayContent = displayContent[:strings.LastIndex(displayContent, "\n[hexclaw_sandbox_result]\n")]
+		}
+		displayResult := truncateToolResultForDisplay(c.Name, displayContent)
+		status := string(c.Result.Status)
+		// 兼容执行前拦截回执：结束事件不等于工具成功，沿用既有错误信封契约。
+		if strings.HasPrefix(strings.TrimSpace(c.Result.Content), "Error executing tool \"") {
+			status = "error"
+		}
+		if execution != nil && (execution.Status != "success" || execution.ExitCode != 0 || execution.Timeout) {
+			status = "error"
+		}
+		if execution != nil && execution.Status == "success" && status == "" {
+			status = "success"
+		}
 		result = append(result, adapter.ToolCall{
 			ID:        c.ID,
 			Name:      c.Name,
+			Origin:    origin,
 			Arguments: c.Arguments,
 			// 多 Agent 工具(orchestrate/spawn)放宽展示上限以保全尾部 hexclaw-subagents 哨兵块。
 			Result:         displayResult,
 			MessageContent: canonicalProducerContent(messagecontent.ProducerTool, displayResult, "und"),
 			// 透传 hexagon 框架在执行点产出的执行真相（状态/耗时），客户端免去正文嗅探。
-			Status:     string(c.Result.Status),
+			Status:     status,
+			Execution:  execution,
 			DurationMs: c.Result.DurationMs,
 		})
 	}

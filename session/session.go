@@ -361,6 +361,12 @@ func (m *Manager) PersistAssistantRuntimeSnapshot(
 	meta["reasoning_disclosure"] = disclosure
 	meta["reasoning_receipt"] = adapter.NormalizeReasoningReceipt(&snapshot.ReasoningReceipt)
 	meta["runtime_events"] = snapshot.RuntimeEvents
+	if len(snapshot.Blocks) > 0 {
+		meta["blocks"] = snapshot.Blocks
+	}
+	if len(snapshot.ToolCalls) > 0 {
+		meta["tool_calls"] = snapshot.ToolCalls
+	}
 	meta["last_sequence"] = snapshot.LastSequence
 	raw, err := json.Marshal(meta)
 	if err != nil {
