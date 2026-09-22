@@ -60,7 +60,9 @@ func (s *Server) handleKnowledgeDocumentSource(w http.ResponseWriter, r *http.Re
 	}
 	file, doc, err := service.OpenDocumentSource(r.Context(), knowledgePrincipalID(r), knowledgeDefaultCorpusID, r.PathValue("id"))
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) || errors.Is(err, knowledge.ErrSemanticIndexNotFound) {
+		if errors.Is(err, knowledge.ErrDocumentSourceDeleted) {
+			writeJSON(w, http.StatusGone, map[string]string{"code": "knowledge_document_deleted", "error": "File deleted. The original is no longer available."})
+		} else if errors.Is(err, os.ErrNotExist) || errors.Is(err, knowledge.ErrSemanticIndexNotFound) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "Document source not found"})
 		} else {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to read document source"})
