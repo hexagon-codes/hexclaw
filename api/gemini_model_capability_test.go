@@ -22,7 +22,9 @@ func TestGeminiCatalogCapabilities(t *testing.T) {
 	w := httptest.NewRecorder()
 	srv.handleFetchProviderModels(w, httptest.NewRequest(http.MethodPost, "/api/v1/config/llm/models", strings.NewReader(`{"base_url":"`+upstream.URL+`/v1beta","api_key":"fixture"}`)))
 	var body struct {
-		Models []providerModelInfo `json:"models"`
+		Models []struct {
+			Capabilities *[]string `json:"capabilities"`
+		} `json:"models"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil || len(body.Models) != 5 {
 		t.Fatalf("catalog: %s, %v", w.Body.String(), err)

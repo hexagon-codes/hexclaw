@@ -1316,9 +1316,10 @@ func (s *Server) handleFetchProviderModels(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if apiKey := strings.TrimSpace(req.APIKey); apiKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 		if googleCatalog {
 			httpReq.Header.Set("x-goog-api-key", apiKey)
+		} else {
+			httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 		}
 	}
 
