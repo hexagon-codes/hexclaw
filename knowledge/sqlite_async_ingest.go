@@ -481,33 +481,41 @@ func queueFailedTextRetryTx(
 	if unresolvedOCR > 0 && recovery == nil {
 		return fmt.Errorf("%w: %w", ErrDocumentRetryNotAllowed, ErrOCRPageInvocationOutcomeUnknown)
 	}
-	res, err := tx.ExecContext(ctx, `UPDATE kb_documents
+	var parentJobID any
+	if recovery != nil && recovery.reparse != nil {
+		if err := validateReparseBase(ctx, tx, recovery.reparse); err != nil {
+			return err
+		}
+		parentJobID = recovery.reparse.JobID
+	} else {
+		res, err := tx.ExecContext(ctx, `UPDATE kb_documents
 		SET status='processing',error_message='',updated_at=?
 		WHERE id=? AND corpus_uid=? AND deleted=0 AND status='failed'`,
-		time.UnixMilli(nowMillis).UTC(), documentID, corpusUID)
-	if err != nil {
-		return err
-	}
-	if rows, _ := res.RowsAffected(); rows != 1 {
-		return ErrJobFenced
-	}
-	res, err = tx.ExecContext(ctx, `UPDATE kb_semantic_document_bindings
+			time.UnixMilli(nowMillis).UTC(), documentID, corpusUID)
+		if err != nil {
+			return err
+		}
+		if rows, _ := res.RowsAffected(); rows != 1 {
+			return ErrJobFenced
+		}
+		res, err = tx.ExecContext(ctx, `UPDATE kb_semantic_document_bindings
 		SET text_state='pending',version=version+1,updated_at=?
 		WHERE owner_id=? AND corpus_uid=? AND document_id=? AND content_generation=?
 		  AND lifecycle_state='active' AND text_state='failed'`, nowMillis,
-		ownerID, corpusUID, documentID, generation)
-	if err != nil {
-		return err
-	}
-	if rows, _ := res.RowsAffected(); rows != 1 {
-		return ErrJobFenced
+			ownerID, corpusUID, documentID, generation)
+		if err != nil {
+			return err
+		}
+		if rows, _ := res.RowsAffected(); rows != 1 {
+			return ErrJobFenced
+		}
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO kb_knowledge_jobs
 		(job_id,parent_job_id,kind,owner_id,corpus_uid,document_id,document_generation,
 		 target_revision_id,idempotency_key,state,stage,attempt,cancel_requested,lease_owner,
 		 lease_epoch,last_error,created_at,updated_at)
-		VALUES(?,NULL,'ingest',?,?,?,?,NULL,?,'queued','extracting',0,0,'',0,'',?,?)`,
-		jobID, ownerID, corpusUID, documentID, generation, storageKey, nowMillis, nowMillis); err != nil {
+		VALUES(?,?,'ingest',?,?,?,?,NULL,?,'queued','extracting',0,0,'',0,'',?,?)`,
+		jobID, parentJobID, ownerID, corpusUID, documentID, generation, storageKey, nowMillis, nowMillis); err != nil {
 		if isUniqueConstraintErr(err) {
 			return ErrIdempotencyConflict
 		}

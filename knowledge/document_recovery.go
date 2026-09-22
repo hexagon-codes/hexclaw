@@ -32,6 +32,7 @@ type DocumentRecoveryPlan struct {
 	Pages          []DocumentRecoveryPage `json:"pages"`
 	Fingerprint    string                 `json:"fingerprint"`
 	route          VisionRouteSnapshot
+	reparse        *documentReparse
 }
 
 type documentRecoveryRepository interface {
@@ -80,7 +81,26 @@ func loadDocumentRecoveryPlan(ctx context.Context, q *sql.Tx, ownerID, corpusUID
  WHERE b.owner_id=? AND b.corpus_uid=? AND b.document_id=? AND b.lifecycle_state='active'
  AND b.text_state='failed' AND d.deleted=0 AND d.status='failed'`, ownerID, corpusUID, documentID).Scan(&p.Generation, &bindingVersion, &p.SourceDigest)
 	if errors.Is(err, sql.ErrNoRows) {
-		return p, ErrDocumentRetryNotAllowed
+		// 旧版正文仍可用时，恢复未发布候选，不将正式版本改为处理中。
+		var root string
+		err = q.QueryRowContext(ctx, `SELECT c.job_id,c.content_generation,c.base_binding_version,c.source_digest
+ FROM kb_document_reparses c JOIN kb_semantic_document_bindings b ON b.document_id=c.document_id
+ WHERE c.owner_id=? AND c.corpus_uid=? AND c.document_id=? AND c.published_at IS NULL
+ AND b.owner_id=c.owner_id AND b.corpus_uid=c.corpus_uid AND b.lifecycle_state='active'
+ AND b.text_state='ready' AND b.content_generation=c.base_generation AND b.version=c.base_binding_version
+ ORDER BY c.content_generation DESC LIMIT 1`, ownerID, corpusUID, documentID).Scan(&root, &p.Generation, &bindingVersion, &p.SourceDigest)
+		if errors.Is(err, sql.ErrNoRows) {
+			return p, ErrDocumentRetryNotAllowed
+		}
+		if err == nil {
+			p.reparse, err = reparseForJob(ctx, q, KnowledgeJob{JobID: root, OwnerID: ownerID, CorpusUID: corpusUID, DocumentID: documentID, DocumentGeneration: p.Generation})
+			if err == nil && p.reparse == nil {
+				err = ErrJobFenced
+			}
+			if err == nil {
+				err = validateReparseBase(ctx, q, p.reparse)
+			}
+		}
 	}
 	if err != nil {
 		return p, err
@@ -203,8 +223,20 @@ func (r *SQLiteSemanticIndexRepository) RecoverDocument(ctx context.Context, own
 	if err = queueFailedTextRetryTx(ctx, tx, ownerID, state.corpusUID, documentID, plan.Generation, storageKey, jobID, now, &plan.route, &plan); err != nil {
 		return CreateDocumentResult{}, err
 	}
-	if err = r.reconcileDocumentIngestLifecycleTx(ctx, tx, KnowledgeJob{JobID: jobID, Kind: KnowledgeJobIngest, OwnerID: ownerID, CorpusUID: state.corpusUID, DocumentID: documentID, DocumentGeneration: plan.Generation}, time.UnixMilli(now)); err != nil {
-		return CreateDocumentResult{}, err
+	if plan.reparse == nil {
+		if err = r.reconcileDocumentIngestLifecycleTx(ctx, tx, KnowledgeJob{JobID: jobID, Kind: KnowledgeJobIngest, OwnerID: ownerID, CorpusUID: state.corpusUID, DocumentID: documentID, DocumentGeneration: plan.Generation}, time.UnixMilli(now)); err != nil {
+			return CreateDocumentResult{}, err
+		}
+	}
+	if plan.reparse != nil {
+		result, err := documentReparseResult(ctx, tx, state.corpusUID, documentID, jobID)
+		if err != nil {
+			return CreateDocumentResult{}, err
+		}
+		if err = tx.Commit(); err != nil {
+			return CreateDocumentResult{}, err
+		}
+		return result, nil
 	}
 	vector, err := vectorStateForPolicyTx(ctx, tx, state)
 	if err != nil {

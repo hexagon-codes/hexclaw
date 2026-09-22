@@ -44,6 +44,17 @@ func reparseForJob(ctx context.Context, q semanticDBQueryer, job KnowledgeJob) (
 	if err != nil {
 		return nil, err
 	}
+	// 恢复任务的嵌入子任务沿父链回到同一个候选，避免读取已发布的旧块。
+	if strings.HasPrefix(key, documentRecoveryPrefix) {
+		err = q.QueryRowContext(ctx, `SELECT p.job_id,p.idempotency_key FROM kb_knowledge_jobs j
+ JOIN kb_knowledge_jobs p ON p.job_id=j.parent_job_id WHERE j.job_id=?`, root).Scan(&root, &key)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
 	if !strings.HasPrefix(key, documentReparsePrefix) {
 		return nil, nil
 	}
@@ -257,7 +268,7 @@ func (r *SQLiteSemanticIndexRepository) prepareReparseTx(ctx context.Context, tx
 	}
 	for i, chunk := range prepared.Chunks {
 		chunk.ID = fmt.Sprintf("%s-g%d-%d", job.DocumentID, job.DocumentGeneration, i)
-		if _, err := tx.ExecContext(ctx, `INSERT INTO kb_reparse_chunks(job_id,id,doc_id,content,chunk_index) VALUES(?,?,?,?,?)`, job.JobID, chunk.ID, job.DocumentID, chunk.Content, i); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO kb_reparse_chunks(job_id,id,doc_id,content,chunk_index) VALUES(?,?,?,?,?)`, c.JobID, chunk.ID, job.DocumentID, chunk.Content, i); err != nil {
 			return err
 		}
 	}

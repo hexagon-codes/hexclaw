@@ -156,6 +156,128 @@ func TestDocumentReparseKeepsOldUntilAtomicPublish(t *testing.T) {
 }
 
 func TestDocumentReparseRestartUnknownAndPublicationFences(t *testing.T) {
+	for _, unresolved := range []bool{false, true} {
+		name := "explicit_recovery_publishes_candidate_vectors"
+		if unresolved {
+			name = "explicit_recovery_unknown_keeps_old_version"
+		}
+		t.Run(name, func(t *testing.T) {
+			h, old, worker, _ := newReparseFixture(t, true)
+			h.service.ConfigureVisionRouteResolver(VisionRouteSnapshotResolverFunc(func(context.Context) (VisionRouteSnapshot, error) { return testOCRVisionRoute(), nil }))
+			accepted, err := h.service.ReparseDocument(h.ctx, "owner-1", "default", old.DocumentID, "recover-candidate", 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now().UTC()
+			job, ok, err := h.repo.ClaimNextJobForCorpus(h.ctx, "owner-1", "default", "candidate", now, time.Minute)
+			if err != nil || !ok {
+				t.Fatalf("candidate claim=%v %v", ok, err)
+			}
+			source, err := h.repo.GetIngestDocumentForJob(h.ctx, "owner-1", job.CorpusUID, old.DocumentID, job.JobID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = h.repo.SetIngestPageTotal(h.ctx, job.Lease(), now, source.SHA256, 2); err != nil {
+				t.Fatal(err)
+			}
+			claim := OCRPageInvocationClaim{PageNumber: 1, PagesTotal: 2, SourceDigest: source.SHA256, RequestDigest: strings.Repeat("a", 64), Provider: source.VisionRoute.ProviderName, Model: source.VisionRoute.Model}
+			first, err := h.repo.ClaimOCRPageInvocation(h.ctx, job.Lease(), now, claim)
+			if err != nil {
+				t.Fatal(err)
+			}
+			receipt := *testOCRRouteReceipt()
+			if err = h.repo.SaveOCRPageInvocation(h.ctx, job.Lease(), now, first, OCRPageInvocationResult{Content: "preserved page one", RouteReceipt: receipt}); err != nil {
+				t.Fatal(err)
+			}
+			if err = h.repo.SaveIngestPageCheckpoint(h.ctx, job.Lease(), now, IngestPageCheckpoint{PageNumber: 1, PagesTotal: 2, SourceDigest: source.SHA256, ExtractionMode: "ocr_vlm", Content: "preserved page one", OCRRouteReceipt: &receipt}); err != nil {
+				t.Fatal(err)
+			}
+			claim.PageNumber = 2
+			claim.RequestDigest = strings.Repeat("b", 64)
+			unknown, err := h.repo.ClaimOCRPageInvocation(h.ctx, job.Lease(), now, claim)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = h.repo.MarkOCRPageInvocationOutcomeUnknown(h.ctx, job.Lease(), now, unknown, "upstream timeout"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = h.repo.FailJob(h.ctx, job.Lease(), now, "upstream timeout"); err != nil {
+				t.Fatal(err)
+			}
+			original, err := scanOCRPageInvocation(h.db.QueryRowContext(h.ctx, ocrPageInvocationSelect+` WHERE invocation_id=?`, unknown.InvocationID))
+			if err != nil {
+				t.Fatal(err)
+			}
+			plan, err := h.service.DocumentRecoveryPlan(h.ctx, "owner-1", "default", old.DocumentID)
+			if err != nil || plan.Generation != 2 || plan.CompletedPages != 1 || len(plan.Pages) != 1 || plan.Pages[0].PageNumber != 2 {
+				t.Fatalf("candidate plan=%+v %v", plan, err)
+			}
+			resumed, err := h.service.RecoverDocument(h.ctx, "owner-1", "default", old.DocumentID, "approved-once", plan.Fingerprint)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resumed.TextIndexState != TextIndexReady || resumed.VectorIndexState != VectorIndexReady {
+				t.Fatalf("published state changed=%+v", resumed)
+			}
+			replay, err := h.service.RecoverDocument(h.ctx, "owner-1", "default", old.DocumentID, "approved-once", plan.Fingerprint)
+			if err != nil || replay.JobID != resumed.JobID {
+				t.Fatalf("replay=%+v %v", replay, err)
+			}
+			assertReparseSearch(t, h, old.DocumentID, "oldquartz", "newcobalt")
+			job, ok, err = h.repo.ClaimNextJobForCorpus(h.ctx, "owner-1", "default", "recovery", now, time.Minute)
+			if err != nil || !ok || job.JobID != resumed.JobID || job.ParentJobID != accepted.JobID {
+				t.Fatalf("resumed claim=%+v %v %v", job, ok, err)
+			}
+			pages, err := h.repo.LoadIngestPageCheckpoints(h.ctx, job.Lease(), now, source.SHA256, 2)
+			if err != nil || len(pages) != 1 || pages[0].Content != "preserved page one" {
+				t.Fatalf("inherited=%+v %v", pages, err)
+			}
+			replacement, err := h.repo.ClaimOCRPageInvocation(h.ctx, job.Lease(), now, claim)
+			if err != nil || !replacement.Fresh {
+				t.Fatalf("replacement=%+v %v", replacement, err)
+			}
+			duplicate, err := h.repo.ClaimOCRPageInvocation(h.ctx, job.Lease(), now, claim)
+			if err != nil || duplicate.Fresh || duplicate.InvocationID != replacement.InvocationID {
+				t.Fatalf("duplicate=%+v %v", duplicate, err)
+			}
+			if unresolved {
+				if err = h.repo.MarkOCRPageInvocationOutcomeUnknown(h.ctx, job.Lease(), now, replacement, "another timeout"); err != nil {
+					t.Fatal(err)
+				}
+				if _, err = h.repo.FailJob(h.ctx, job.Lease(), now, "another timeout"); err != nil {
+					t.Fatal(err)
+				}
+				if _, err = h.service.ReparseDocument(h.ctx, "owner-1", "default", old.DocumentID, "cannot-bypass", 1); !errors.Is(err, ErrOCRPageInvocationOutcomeUnknown) {
+					t.Fatalf("unknown bypass=%v", err)
+				}
+				assertReparseSearch(t, h, old.DocumentID, "oldquartz", "newcobalt")
+			} else {
+				if err = h.repo.SaveOCRPageInvocation(h.ctx, job.Lease(), now, replacement, OCRPageInvocationResult{Content: "newcobalt lesson", RouteReceipt: receipt}); err != nil {
+					t.Fatal(err)
+				}
+				prepared, err := (reparseFixtureProcessor{"newcobalt lesson"}).Prepare(h.ctx, source)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err = h.repo.CompleteIngestDocument(h.ctx, job.Lease(), now, prepared); err != nil {
+					t.Fatal(err)
+				}
+				assertReparseSearch(t, h, old.DocumentID, "oldquartz", "newcobalt")
+				if worked, err := worker.RunOnce(h.ctx); err != nil || !worked {
+					t.Fatalf("candidate embedding=%v %v", worked, err)
+				}
+				assertReparseSearch(t, h, old.DocumentID, "newcobalt", "oldquartz")
+			}
+			preserved, err := scanOCRPageInvocation(h.db.QueryRowContext(h.ctx, ocrPageInvocationSelect+` WHERE invocation_id=?`, unknown.InvocationID))
+			if err != nil || preserved != original {
+				t.Fatalf("original receipt changed=%+v %v", preserved, err)
+			}
+			var count int
+			if err = h.db.QueryRowContext(h.ctx, `SELECT COUNT(*) FROM kb_ingest_page_invocations WHERE job_id=?`, resumed.JobID).Scan(&count); err != nil || count != 1 {
+				t.Fatalf("new calls=%d %v", count, err)
+			}
+		})
+	}
 	t.Run("restart_reuses_receipt_and_unknown_cannot_create_new_generation", func(t *testing.T) {
 		h, old, _, _ := newReparseFixture(t, false)
 		accepted, err := h.service.ReparseDocument(h.ctx, "owner-1", "default", old.DocumentID, "restart", 1)
