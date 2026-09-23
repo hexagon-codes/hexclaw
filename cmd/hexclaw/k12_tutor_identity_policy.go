@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 
 	"github.com/hexagon-codes/hexclaw/engine"
 	agentrouter "github.com/hexagon-codes/hexclaw/router"
@@ -33,9 +35,7 @@ func (p *k12TutorIdentityPolicy) CompileTerminalDirective(
 	}
 	if input.Agent.Metadata[k12.MetaKeyPromptContractVersion] == k12.TutorIdentityPromptContractVersion {
 		content, err := k12.CompileTutorIdentityDirective(input.Agent.Metadata)
-		return engine.AgentSystemPromptDirective{
-			Key: k12.TutorIdentityPromptContractVersion, Content: content,
-		}, err
+		return k12TutorDirective(content), err
 	}
 
 	var content string
@@ -76,8 +76,13 @@ func (p *k12TutorIdentityPolicy) CompileTerminalDirective(
 	if content == "" {
 		return engine.AgentSystemPromptDirective{}, nil
 	}
-	return engine.AgentSystemPromptDirective{
-		Key: k12.TutorIdentityPromptContractVersion, Content: content,
-	}, nil
+	return k12TutorDirective(content), nil
 }
 
+// 档案变化即改变缓存身份，避免同一句追问沿用旧孩子或旧课程的回答。
+func k12TutorDirective(content string) engine.AgentSystemPromptDirective {
+	sum := sha256.Sum256([]byte(content))
+	return engine.AgentSystemPromptDirective{
+		Key: k12.TutorIdentityPromptContractVersion + ":" + hex.EncodeToString(sum[:]), Content: content,
+	}
+}

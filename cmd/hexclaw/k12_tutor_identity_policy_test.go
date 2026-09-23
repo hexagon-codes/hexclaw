@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/hexagon-codes/hexclaw/engine"
@@ -41,7 +42,7 @@ func TestK12TutorIdentityPolicy_StampsVersionWithoutRewritingSystemPrompt(t *tes
 	if err != nil {
 		t.Fatalf("CompileTerminalDirective: %v", err)
 	}
-	if directive.Key != k12.TutorIdentityPromptContractVersion || directive.Content == "" {
+	if !strings.HasPrefix(directive.Key, k12.TutorIdentityPromptContractVersion+":") || directive.Content == "" {
 		t.Fatalf("directive 不完整：%+v", directive)
 	}
 	updated, _ := dispatcher.GetAgent(agentName)
@@ -85,4 +86,3 @@ func TestK12TutorIdentityPolicy_MissingChildDoesNotStamp(t *testing.T) {
 		t.Fatalf("失败时不得 stamp，保存次数=%d", len(store.saves))
 	}
 }
-
