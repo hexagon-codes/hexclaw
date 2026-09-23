@@ -2514,6 +2514,10 @@ func (c *ImageTaskCoordinator) Result(
 		}
 		result.Kind = string(view.Dispatch.TaskIntent)
 		result.Photo = &photo
+		if err := c.registerTutorResult(ctx, result, assessments); err != nil {
+			// 关联可在下一次结果读取时补齐，不能因派生记录失败丢失完整批改产物。
+			slog.Warn("K12 tutor context registration failed", "dispatch_id", dispatchID, "error", err)
+		}
 	}
 	return result, nil
 }

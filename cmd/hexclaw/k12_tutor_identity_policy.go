@@ -4,10 +4,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"strings"
 
+	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/engine"
 	agentrouter "github.com/hexagon-codes/hexclaw/router"
 	k12 "github.com/hexagon-codes/hexclaw/scenarios/k12"
+	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
+	"github.com/hexagon-codes/hexclaw/scenarios/k12/usecase"
 )
 
 type tutorIdentityAgentStore interface {
@@ -15,8 +19,9 @@ type tutorIdentityAgentStore interface {
 }
 
 type k12TutorIdentityPolicy struct {
-	router *agentrouter.Dispatcher
-	store  tutorIdentityAgentStore
+	router   *agentrouter.Dispatcher
+	store    tutorIdentityAgentStore
+	followup *usecase.Deps
 }
 
 func newK12TutorIdentityPolicy(
@@ -27,6 +32,33 @@ func newK12TutorIdentityPolicy(
 }
 
 func (p *k12TutorIdentityPolicy) CompileTerminalDirective(
+	ctx context.Context,
+	input engine.AgentSystemPromptPolicyInput,
+) (engine.AgentSystemPromptDirective, error) {
+	directive, err := p.compileIdentity(ctx, input)
+	if err != nil || directive.Content == "" || p.followup == nil {
+		return directive, err
+	}
+	msg := input.Message
+	conversation := k12storage.TutorConversationKey("desktop", "", msg.SessionID)
+	if msg.Platform == adapter.PlatformDingtalk {
+		conversation = k12storage.TutorConversationKey(string(msg.Platform), msg.InstanceID, msg.ChatID)
+	}
+	contextText, err := p.followup.TutorFollowupDirective(ctx, usecase.TutorFollowupInput{
+		OwnerScope: usecase.DefaultLocalOwnerScope, AgentName: input.Agent.Name,
+		ConversationKey: conversation, MessageID: msg.ID, ReplyTo: msg.ReplyTo,
+		Query: input.UserQuery, HasAttachments: len(msg.Attachments) > 0,
+	})
+	if err != nil {
+		return engine.AgentSystemPromptDirective{}, err
+	}
+	if strings.TrimSpace(contextText) != "" {
+		return k12TutorDirective(directive.Content + "\n\n" + contextText), nil
+	}
+	return directive, nil
+}
+
+func (p *k12TutorIdentityPolicy) compileIdentity(
 	ctx context.Context,
 	input engine.AgentSystemPromptPolicyInput,
 ) (engine.AgentSystemPromptDirective, error) {

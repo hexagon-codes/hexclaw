@@ -1760,7 +1760,8 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 	}
 
 	eng.SetAgentRouter(agentRouter)
-	eng.SetAgentSystemPromptPolicy(newK12TutorIdentityPolicy(agentRouter, agentStore))
+	k12TutorPolicy := newK12TutorIdentityPolicy(agentRouter, agentStore)
+	eng.SetAgentSystemPromptPolicy(k12TutorPolicy)
 	srv.SetAgentRouter(agentRouter)
 	srv.SetAgentStore(agentStore)
 	srv.SetAgentMetadataGuard(func(metadata map[string]string) error {
@@ -2435,6 +2436,7 @@ Set source only when the material explicitly names a work, title, or another rel
 			}
 			k12rt.Deps.GradingBudgetSnapshot = k12GradingBudgetSnapshotFromConfig(gradingBudget)
 			k12Runtime = k12rt
+			k12TutorPolicy.followup = &k12rt.Deps
 			k12InboundPhotos = k12usecase.NewInboundPhotoCoordinator(k12rt.Records)
 			logger.Info("K12 场景已按 Manifest v2 安装",
 				"scenario", k12rt.Manifest.ID, "version", k12rt.Manifest.Version,

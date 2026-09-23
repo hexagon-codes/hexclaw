@@ -19,6 +19,8 @@ const (
 type AgentSystemPromptPolicyInput struct {
 	Agent     agentrouter.AgentConfig
 	UserQuery string
+	// Message 保留已路由会话身份，供场景复用持久任务上下文。
+	Message adapter.Message
 }
 
 // AgentSystemPromptDirective is appended after every editable and mounted
@@ -67,7 +69,7 @@ func (e *ReActEngine) prepareAgentSystemPromptPolicy(ctx context.Context, msg *a
 		return nil
 	}
 	directive, err := policy.CompileTerminalDirective(ctx, AgentSystemPromptPolicyInput{
-		Agent: *cfg, UserQuery: msg.Content,
+		Agent: *cfg, UserQuery: msg.Content, Message: *msg,
 	})
 	if err != nil {
 		return fmt.Errorf("agent %q system prompt policy: %w", cfg.Name, err)
@@ -130,4 +132,3 @@ func appendPreparedAgentSystemPromptDirective(base string, metadata map[string]s
 	return strings.TrimRight(base, "\n") +
 		"\n\n[Agent system prompt terminal policy: " + key + "]\n" + directive
 }
-
