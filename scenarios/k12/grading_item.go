@@ -129,6 +129,7 @@ var ErrGradingAssessmentTerminalInvariant = errors.New("grading assessment termi
 // problem. Invocation references are status-dependent: unanswered/unclear make
 // no model call, blank_solved has solve only, and a graded verdict has both.
 type GradingAssessmentItem struct {
+	AnswerSource            *ProblemAnswerSource    `json:"answer_source,omitempty"`
 	AgentName               string                  `json:"agent_name"`
 	JobID                   string                  `json:"job_id"`
 	ProblemID               string                  `json:"problem_id"`
@@ -172,17 +173,32 @@ func (v *GradingAssessmentItem) Validate() error {
 		v.ProjectionStatus != GradingProjectionCommitted {
 		return fmt.Errorf("grading assessment item missing owner/job/problem/attempt/version/digest/result/status")
 	}
+
+	hasSolve := v.SolveInvocationID != ""
+	if v.AnswerSource != nil {
+		if err := v.AnswerSource.Validate(); err != nil {
+			return err
+		}
+		if v.AnswerSource.Kind == ProblemAnswerAsset {
+			if hasSolve {
+				return fmt.Errorf("asset adoption must not claim a solve invocation")
+			}
+			hasSolve = true
+		} else if v.AnswerSource.InvocationID != v.SolveInvocationID {
+			return fmt.Errorf("answer source invocation mismatch")
+		}
+	}
 	switch v.Status {
 	case GradingAssessmentCorrect, GradingAssessmentProcessIssue, GradingAssessmentWrong, GradingAssessmentUntrusted:
-		if v.SolveInvocationID == "" || v.GradeInvocationID == "" {
+		if !hasSolve || v.GradeInvocationID == "" {
 			return fmt.Errorf("grading assessment %s requires solve and grade invocations", v.Status)
 		}
 	case GradingAssessmentBlankSolved:
-		if v.SolveInvocationID == "" || v.GradeInvocationID != "" {
+		if !hasSolve || v.GradeInvocationID != "" {
 			return fmt.Errorf("blank_solved requires solve only")
 		}
 	case GradingAssessmentUnanswered, GradingAssessmentAnswerUnclear:
-		if v.SolveInvocationID != "" || v.GradeInvocationID != "" {
+		if hasSolve || v.GradeInvocationID != "" {
 			return fmt.Errorf("grading assessment %s must not claim model invocations", v.Status)
 		}
 	case GradingAssessmentOutOfScope:

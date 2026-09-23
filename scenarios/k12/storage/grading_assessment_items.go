@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 
 	"github.com/hexagon-codes/toolkit/util/idgen"
@@ -24,6 +25,8 @@ var ErrGradingAssessmentItemConflict = errors.New("grading assessment item immut
 // projection, never more than one effect. An idempotent receipt replay
 // executes neither effect again.
 type GradingAssessmentEffects struct {
+	// 已完成验证的候选随本次批改原子入队，后台失败不撤销批改。
+	AssetPublication *k12.ProblemAssetPublication
 	Mistake          *GradingMistakeEffect
 	Review           *GradingReviewEffect
 	SourceCorrection bool
@@ -46,21 +49,27 @@ type GradingReviewEffect struct {
 const gradingAssessmentItemColumns = `agent_name,job_id,problem_id,attempt_id,confirmed_version,
     input_revision,published_revision,current_disposition,structure_version,input_digest,
     status,result_json,result_digest,solve_invocation_id,grade_invocation_id,
-    parent_guide_invocation_id,projection_record_id,projection_created,projection_status,created_at,updated_at`
+    answer_source_json,parent_guide_invocation_id,projection_record_id,projection_created,projection_status,created_at,updated_at`
 
 func scanGradingAssessmentItem(row rowScanner) (k12.GradingAssessmentItem, error) {
 	var item k12.GradingAssessmentItem
-	var status string
+	var status, answerSource string
 	var solveID, gradeID, parentGuideID sql.NullString
 	var projectionCreated int64
 	err := row.Scan(&item.AgentName, &item.JobID, &item.ProblemID, &item.AttemptID,
 		&item.ConfirmedVersion, &item.InputRevision, &item.PublishedRevision,
 		&item.CurrentDisposition, &item.StructureVersion, &item.InputDigest,
 		&status, &item.ResultJSON, &item.ResultDigest,
-		&solveID, &gradeID, &parentGuideID, &item.ProjectionRecordID, &projectionCreated,
+		&solveID, &gradeID, &answerSource, &parentGuideID, &item.ProjectionRecordID, &projectionCreated,
 		&item.ProjectionStatus, &item.CreatedAt, &item.UpdatedAt)
 	if err != nil {
 		return k12.GradingAssessmentItem{}, err
+	}
+
+	if answerSource != "{}" {
+		if err := json.Unmarshal([]byte(answerSource), &item.AnswerSource); err != nil {
+			return item, err
+		}
 	}
 	item.Status = k12.GradingAssessmentStatus(status)
 	item.ProjectionCreated = projectionCreated != 0
@@ -87,7 +96,7 @@ func sameGradingAssessmentReceipt(a, b k12.GradingAssessmentItem) bool {
 		a.InputRevision == b.InputRevision && a.StructureVersion == b.StructureVersion &&
 		a.InputDigest == b.InputDigest && a.Status == b.Status && a.ResultJSON == b.ResultJSON &&
 		a.ResultDigest == b.ResultDigest && a.SolveInvocationID == b.SolveInvocationID &&
-		a.GradeInvocationID == b.GradeInvocationID &&
+		a.GradeInvocationID == b.GradeInvocationID && reflect.DeepEqual(a.AnswerSource, b.AnswerSource) &&
 		a.ParentGuideInvocationID == b.ParentGuideInvocationID &&
 		a.ProjectionStatus == b.ProjectionStatus
 }
@@ -415,12 +424,24 @@ func (s *Store) CommitGradingAssessmentItem(ctx context.Context, item k12.Gradin
 		return k12.GradingAssessmentItem{}, false, err
 	}
 
+	// 已取得写锁，资格核对与批改提交原子完成；已提交历史重放在此之前返回。
+	if err := validateAssessmentAssetSource(ctx, tx, item); err != nil {
+		return k12.GradingAssessmentItem{}, false, err
+	}
+	sourceJSON := "{}"
+	if item.AnswerSource != nil {
+		raw, err := json.Marshal(item.AnswerSource)
+		if err != nil {
+			return k12.GradingAssessmentItem{}, false, err
+		}
+		sourceJSON = string(raw)
+	}
 	res, insertErr := tx.ExecContext(ctx, `INSERT INTO k12_grading_assessment_items (`+gradingAssessmentItemColumns+`)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(job_id,problem_id,input_revision) DO NOTHING`,
 		item.AgentName, item.JobID, item.ProblemID, item.AttemptID, item.ConfirmedVersion,
 		item.InputRevision, item.PublishedRevision, item.CurrentDisposition, item.StructureVersion,
-		item.InputDigest, item.Status, item.ResultJSON, item.ResultDigest, solveID, gradeID, parentGuideID,
+		item.InputDigest, item.Status, item.ResultJSON, item.ResultDigest, solveID, gradeID, sourceJSON, parentGuideID,
 		item.ProjectionRecordID, boolInt(item.ProjectionCreated), item.ProjectionStatus,
 		item.CreatedAt, item.UpdatedAt)
 	if insertErr != nil {
@@ -481,6 +502,23 @@ func (s *Store) CommitGradingAssessmentItem(ctx context.Context, item k12.Gradin
 	assessmentEmitted, eventErr := appendGradingAssessmentCommittedEvent(ctx, tx, item)
 	if eventErr != nil {
 		return k12.GradingAssessmentItem{}, false, eventErr
+	}
+	if p := effects.AssetPublication; p != nil {
+		if p.Verification.AgentName != item.AgentName || p.Verification.InvocationID != item.SolveInvocationID || p.Verification.InputDigest != item.InputDigest {
+			return k12.GradingAssessmentItem{}, false, ErrProblemAssetEvidence
+		}
+		payload, err := json.Marshal(p)
+		if err != nil {
+			return k12.GradingAssessmentItem{}, false, err
+		}
+		assetEmitted, err := appendOutboxEvent(ctx, tx, OutboxEvent{
+			EventID: gradingAssessmentEventID(item, "asset_prepare"), AgentName: item.AgentName,
+			AggregateID: item.JobID, EventType: EventProblemAssetPrepare, PayloadVersion: 1, Payload: string(payload),
+		})
+		if err != nil {
+			return k12.GradingAssessmentItem{}, false, err
+		}
+		emitted = emitted || assetEmitted
 	}
 	emitted = emitted || assessmentEmitted
 	if err := tx.Commit(); err != nil {
@@ -811,4 +849,21 @@ func (s *Store) ListGradingAssessmentItems(ctx context.Context, agentName, jobID
 		return nil, fmt.Errorf("k12storage: close grading assessment items: %w", err)
 	}
 	return out, nil
+}
+
+// validateAssessmentAssetSource 使用服务端采用回执核对来源和本次输入，不把候选当作已采用。
+func validateAssessmentAssetSource(ctx context.Context, db dbHandle, item k12.GradingAssessmentItem) error {
+	source := item.AnswerSource
+	if source == nil || source.Kind != k12.ProblemAnswerAsset {
+		return nil
+	}
+	a, err := scanProblemAssetAdoption(db.QueryRowContext(ctx, `SELECT `+assetAdoptionColumns+` FROM k12_problem_asset_adoptions WHERE adoption_id=?`, source.AdoptionID))
+	if err != nil {
+		return err
+	}
+	if a.JobID != item.JobID || a.ProblemID != item.ProblemID || a.InputRevision != item.InputRevision || a.InputDigest != item.InputDigest ||
+		a.AssetID != source.AssetID || a.AssetVersion != source.AssetVersion || a.AssetRevision != source.AssetRevision || a.FactsDigest != source.FactsDigest {
+		return ErrProblemAssetConflict
+	}
+	return validateProblemAssetCurrent(ctx, db, a)
 }

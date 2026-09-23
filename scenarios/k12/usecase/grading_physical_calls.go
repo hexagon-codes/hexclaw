@@ -1235,7 +1235,7 @@ func usesGradingPhysicalCalls(candidate any) bool {
 	return ok && caller.UsesGradingPhysicalCalls()
 }
 
-func executeDurableSolveOperation(
+func executeUncachedDurableSolveOperation(
 	ctx context.Context,
 	o *GradingOrchestrator,
 	deps Deps,

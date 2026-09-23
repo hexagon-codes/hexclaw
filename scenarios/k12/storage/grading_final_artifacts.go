@@ -477,8 +477,37 @@ func (s *Store) CommitGradingFinalArtifact(
 			expectedGeneration,
 		)
 	}
+
+	// 历史终稿可重放；首次发布时，采用资产仍须有效，核对与终稿提交共用写事务。
+	if _, existingErr := getGradingFinalArtifactByJobVia(ctx, tx, artifact.AgentName, artifact.JobID); errors.Is(existingErr, records.ErrNotFound) {
+		rows, queryErr := tx.QueryContext(ctx, `SELECT `+gradingAssessmentItemColumns+` FROM k12_grading_assessment_items WHERE agent_name=? AND job_id=? AND current_disposition='current'`, artifact.AgentName, artifact.JobID)
+		if queryErr != nil {
+			return k12.GradingFinalArtifact{}, false, queryErr
+		}
+		var assessments []k12.GradingAssessmentItem
+		for rows.Next() {
+			item, scanErr := scanGradingAssessmentItem(rows)
+			if scanErr != nil {
+				rows.Close()
+				return k12.GradingFinalArtifact{}, false, scanErr
+			}
+			assessments = append(assessments, item)
+		}
+		rowsErr := rows.Err()
+		rows.Close()
+		if rowsErr != nil {
+			return k12.GradingFinalArtifact{}, false, rowsErr
+		}
+		for _, item := range assessments {
+			if err := validateAssessmentAssetSource(ctx, tx, item); err != nil {
+				return k12.GradingFinalArtifact{}, false, err
+			}
+		}
+	} else if existingErr != nil {
+		return k12.GradingFinalArtifact{}, false, existingErr
+	}
 	result, err := tx.ExecContext(ctx, `
-		INSERT INTO k12_grading_final_artifacts (`+gradingFinalArtifactColumns+`,
+  INSERT INTO k12_grading_final_artifacts (`+gradingFinalArtifactColumns+`,
 			finalization_generation)
 		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT DO NOTHING`,

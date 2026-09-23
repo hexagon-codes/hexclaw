@@ -252,7 +252,8 @@ func WireInto(ctx context.Context, reg *scenario.Registry, db *sql.DB, solveSkil
 	}
 	// Outbox 投递器 + 学情信号消费者（§6.9：投影失败不撤销域写，重试只补投影）。
 	// 消费者持 Deps.Insights（opts 应用后再建，确保拿到注入的 adapter）。
-	outbox := k12storage.NewDispatcher(store, usecase.InsightsConsumer{Insights: deps.Insights})
+	outbox := k12storage.NewDispatcher(store, usecase.InsightsConsumer{Insights: deps.Insights},
+		usecase.ProblemAssetConsumer{Records: store})
 	catalogWorker := usecase.NewTextbookCatalogWorker(
 		store,
 		usecase.TextbookCatalogCheckpointExtractor{},

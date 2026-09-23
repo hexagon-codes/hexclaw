@@ -96,6 +96,8 @@ type PracticeGradingReference struct {
 }
 
 type PhotoGradeItem struct {
+	assetPublication  *k12.ProblemAssetPublication
+	AnswerSource      *k12.ProblemAnswerSource `json:"answer_source,omitempty"`
 	Recognized        RecognizedQuestion
 	Status            PhotoItemStatus
 	ResultKind        PhotoItemResultKind

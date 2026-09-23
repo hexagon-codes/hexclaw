@@ -458,6 +458,8 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 		}
 		item.Status = PhotoOutOfScope
 		if mode == PhotoModeSolve {
+			item.assetPublication = solved.assetPublication
+			item.AnswerSource = solved.AnswerSource
 			item.Solve = solved
 		} else {
 			item.Grade = GradeResult{
@@ -472,6 +474,8 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 		solved, solveInvocationID, err := executeDurableSolveOperation(
 			ctx, o, deps, job, q, gradeReq,
 		)
+		item.assetPublication = solved.assetPublication
+		item.AnswerSource = solved.AnswerSource
 		item.Solve = solved
 		if err != nil {
 			return item, err
@@ -529,6 +533,8 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 	solved, solveInvocationID, err := executeDurableSolveOperation(
 		ctx, o, deps, job, q, gradeReq,
 	)
+	item.assetPublication = solved.assetPublication
+	item.AnswerSource = solved.AnswerSource
 	item.Solve = solved
 	if err != nil {
 		return item, err
@@ -1025,10 +1031,11 @@ func commitGradingAssessmentItem(
 		ProblemID: q.ProblemID, AttemptID: q.AttemptID,
 		ConfirmedVersion: q.ConfirmedVersion, InputDigest: q.InputDigest,
 		Status: status, ResultJSON: string(raw), ResultDigest: modelInvocationDigest(raw),
-		SolveInvocationID: solveInvocationID, GradeInvocationID: gradeInvocationID,
+		AnswerSource: item.AnswerSource, SolveInvocationID: solveInvocationID, GradeInvocationID: gradeInvocationID,
 		ParentGuideInvocationID: parentGuideInvocationID,
 		ProjectionStatus:        k12.GradingProjectionCommitted, CreatedAt: deps.now(), UpdatedAt: deps.now(),
 	}
+	effects.AssetPublication = item.assetPublication
 	stored, _, err := deps.Records.CommitGradingAssessmentItem(ctx, receipt, effects)
 	if err != nil {
 		return item, err
@@ -1176,6 +1183,9 @@ func validateGradingAssessmentTerminalItem(
 	item PhotoGradeItem,
 	receipt k12.GradingAssessmentItem,
 ) error {
+	if (item.AnswerSource == nil) != (receipt.AnswerSource == nil) || (item.AnswerSource != nil && *item.AnswerSource != *receipt.AnswerSource) {
+		return fmt.Errorf("%w: answer source mismatch", ErrGradingAssessmentExactSet)
+	}
 	if err := receipt.ValidateTerminalParentGuideReference(); err != nil {
 		return fmt.Errorf(
 			"%w: problem=%s: %v",

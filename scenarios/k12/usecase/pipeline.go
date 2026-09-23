@@ -214,10 +214,13 @@ type GradeResult struct {
 // SolveResult2 解题分叉结果（空白题只求解，不批改）。
 // 复用证据对象体系，但不产 GradeOutcome / 不入库。
 type SolveHomeworkResult struct {
-	Solution     string
-	Evidence     SolveEvidence
-	OutOfScope   bool
-	OutOfScopeKP string
+	// 资产整理在批改回执提交后通过 Outbox 执行，不进入用户结果正文。
+	assetPublication *k12.ProblemAssetPublication
+	AnswerSource     *k12.ProblemAnswerSource `json:"answer_source,omitempty"`
+	Solution         string
+	Evidence         SolveEvidence
+	OutOfScope       bool
+	OutOfScopeKP     string
 	// CurriculumUnmapped 词表外知识点（fail-visible，见 GradeResult 同名字段）。
 	CurriculumUnmapped []string
 }

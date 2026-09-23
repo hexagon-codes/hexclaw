@@ -25,6 +25,7 @@ import (
 
 // 事件类型。
 const (
+	EventProblemAssetPrepare        = "k12.problem_asset.prepare"
 	EventMistakeRecorded            = "k12.mistake.recorded"
 	EventGradingAssessmentCommitted = "k12.grading.assessment.committed"
 )
