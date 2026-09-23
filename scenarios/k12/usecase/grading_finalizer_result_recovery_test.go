@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -12,7 +13,7 @@ import (
 	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
 )
 
-func TestBuildFinalTutoringTipsSettlesProjectionWhenReviewIgnoresBudget(t *testing.T) {
+func TestBuildFinalTutoringTipsDoesNotSendAdditionalReview(t *testing.T) {
 	fixture := prepareFinalSummaryCrashFixture(t)
 	generator := newProjectingDeadlineIgnoringTipsGenerator()
 	fixture.orchestrator.deps.TutoringTipsReview = generator
@@ -21,11 +22,6 @@ func TestBuildFinalTutoringTipsSettlesProjectionWhenReviewIgnoresBudget(t *testi
 	oldBudget := tutoringTipsBuildBudget
 	tutoringTipsBuildBudget = time.Second
 	t.Cleanup(func() { tutoringTipsBuildBudget = oldBudget })
-	releaseDelay := 2 * tutoringTipsBuildBudget
-	go func() {
-		time.Sleep(releaseDelay)
-		generator.unblock()
-	}()
 
 	job := fixture.job
 	job.Fields.AttemptCount = 1 // 保留夹具中已发送的尝试，再触发一次新的逻辑尝试。
@@ -49,8 +45,8 @@ func TestBuildFinalTutoringTipsSettlesProjectionWhenReviewIgnoresBudget(t *testi
 	if invocationID == "" || strings.Contains(tips.Sections[0].Content, "late provider text") {
 		t.Fatalf("late page-summary result leaked: invocation=%q tips=%+v", invocationID, tips)
 	}
-	if calls := generator.callCount(); calls != 1 {
-		t.Fatalf("deadline-insensitive page-summary calls=%d want 1", calls)
+	if calls := generator.callCount(); calls != 0 {
+		t.Fatalf("page summary sent %d additional review calls, want 0", calls)
 	}
 	invocation, err := fixture.orchestrator.deps.Records.GetModelInvocationByAttempt(
 		context.Background(),
@@ -219,11 +215,12 @@ func prepareFinalSummaryCrashFixture(t *testing.T) finalSummaryCrashFixture {
 		t.Fatalf("mark summary sent: %v", err)
 	}
 	tips := TutoringTips{
-		GradingJobID:    jobRecord.RecordID,
-		SubmissionID:    job.Fields.SubmissionID,
-		Grade:           "五年级下",
-		Subject:         "数学",
-		KnowledgePoints: []string{"加法"},
+		GradingJobID:              jobRecord.RecordID,
+		SubmissionID:              job.Fields.SubmissionID,
+		Grade:                     "五年级下",
+		Subject:                   "数学",
+		KnowledgePoints:           []string{"加法"},
+		GroundingEvidenceReceipts: []GroundingEvidenceReceipt{},
 		Sections: []TutoringTipsSection{
 			{
 				Title: "这页在练什么", Content: "练习加法。",
@@ -268,7 +265,7 @@ func (f finalSummaryCrashFixture) restartedFinalizer() *GradingOrchestrator {
 // K12-FINAL-SUMMARY-RECOVERY-001: crash after the provider result and atomic
 // invocation success, but before final-artifact commit, must replay the typed
 // durable payload and never send the summary request again.
-func TestGradingFinalizerRecoversSucceededSummaryPayloadWithoutProviderResend(t *testing.T) {
+func TestBuildFinalTutoringTipsRecoversSucceededPayloadWithoutProviderResend(t *testing.T) {
 	fixture := prepareFinalSummaryCrashFixture(t)
 	stored, err := fixture.orchestrator.deps.Records.MarkModelInvocationSucceededWithResult(
 		context.Background(),
@@ -287,21 +284,20 @@ func TestGradingFinalizerRecoversSucceededSummaryPayloadWithoutProviderResend(t 
 		t.Fatal("crash fixture unexpectedly has a final artifact")
 	}
 
-	artifact, err := fixture.restartedFinalizer().finalizeGradingPage(
-		context.Background(), fixture.run, fixture.job,
-	)
+	tips, invocationID, err := fixture.restoreSummary(context.Background())
 	if err != nil {
 		t.Fatalf("restart finalization from durable summary payload: %v", err)
 	}
 	if fixture.provider.calls != 0 {
 		t.Fatalf("restart resent page summary provider %d times, want 0", fixture.provider.calls)
 	}
-	if artifact.SummaryInvocationID != fixture.invocation.InvocationID {
-		t.Fatalf("artifact summary invocation=%q want %q",
-			artifact.SummaryInvocationID, fixture.invocation.InvocationID)
+	if invocationID != fixture.invocation.InvocationID || !reflect.DeepEqual(tips, fixture.tips) {
+		t.Fatalf("summary recovery changed result: %q %+v", invocationID, tips)
 	}
-	if artifact.ArtifactDigest == "" {
-		t.Fatal("restart did not commit the final artifact")
+	// 当前终稿确定性汇总逐题结果，不为旧讲解回执恢复额外 Provider 调用。
+	artifact, err := fixture.restartedFinalizer().finalizeGradingPage(context.Background(), fixture.run, fixture.job)
+	if err != nil || artifact.ArtifactDigest == "" || artifact.SummaryInvocationID != "" || fixture.provider.calls != 0 {
+		t.Fatalf("deterministic final artifact: %+v %v", artifact, err)
 	}
 }
 
@@ -309,7 +305,7 @@ func TestGradingFinalizerRecoversSucceededSummaryPayloadWithoutProviderResend(t 
 // consume a conclusive, already-durable page-summary result. The restriction
 // applies to creating/sending external work, not to committing local effects
 // from an exact succeeded ledger payload.
-func TestGradingFinalizerReconciliationOnlyRecoversSucceededSummaryPayload(t *testing.T) {
+func TestBuildFinalTutoringTipsReconciliationOnlyRecoversSucceededPayload(t *testing.T) {
 	fixture := prepareFinalSummaryCrashFixture(t)
 	if _, err := fixture.orchestrator.deps.Records.MarkModelInvocationSucceededWithResult(
 		context.Background(),
@@ -322,24 +318,19 @@ func TestGradingFinalizerReconciliationOnlyRecoversSucceededSummaryPayload(t *te
 		t.Fatalf("persist successful summary payload: %v", err)
 	}
 
-	artifact, err := fixture.restartedFinalizer().finalizeGradingPage(
-		withProblemSourceReconciliationOnly(context.Background()),
-		fixture.run,
-		fixture.job,
-	)
+	tips, invocationID, err := fixture.restoreSummary(withProblemSourceReconciliationOnly(context.Background()))
 	if err != nil {
 		t.Fatalf("reconciliation-only durable summary recovery: %v", err)
 	}
 	if fixture.provider.calls != 0 {
 		t.Fatalf("reconciliation-only recovery resent provider %d times, want 0", fixture.provider.calls)
 	}
-	if artifact.SummaryInvocationID != fixture.invocation.InvocationID ||
-		artifact.ArtifactDigest == "" {
-		t.Fatalf("reconciliation-only recovery did not commit exact artifact: %+v", artifact)
+	if invocationID != fixture.invocation.InvocationID || !reflect.DeepEqual(tips, fixture.tips) {
+		t.Fatalf("reconciliation-only recovery changed result: %q %+v", invocationID, tips)
 	}
 }
 
-func TestGradingFinalizerReconciliationOnlyNeverCreatesOrSendsMissingOrPreparedSummary(t *testing.T) {
+func TestBuildFinalTutoringTipsReconciliationOnlyNeverCreatesOrSendsMissingOrPreparedSummary(t *testing.T) {
 	tests := []struct {
 		name       string
 		mutate     func(t *testing.T, fixture finalSummaryCrashFixture)
@@ -377,11 +368,7 @@ func TestGradingFinalizerReconciliationOnlyNeverCreatesOrSendsMissingOrPreparedS
 		t.Run(test.name, func(t *testing.T) {
 			fixture := prepareFinalSummaryCrashFixture(t)
 			test.mutate(t, fixture)
-			_, err := fixture.restartedFinalizer().finalizeGradingPage(
-				withProblemSourceReconciliationOnly(context.Background()),
-				fixture.run,
-				fixture.job,
-			)
+			_, _, err := fixture.restoreSummary(withProblemSourceReconciliationOnly(context.Background()))
 			if !errors.Is(err, ErrModelInvocationRequiresReconciliation) {
 				t.Fatalf("reconciliation-only %s summary err=%v", test.name, err)
 			}
@@ -410,7 +397,7 @@ func TestGradingFinalizerReconciliationOnlyNeverCreatesOrSendsMissingOrPreparedS
 	}
 }
 
-func TestGradingFinalizerRejectsMissingOrCorruptSucceededSummaryPayloadWithoutResend(t *testing.T) {
+func TestBuildFinalTutoringTipsRejectsMissingOrCorruptSucceededPayloadWithoutResend(t *testing.T) {
 	tests := []struct {
 		name   string
 		mutate func(t *testing.T, fixture finalSummaryCrashFixture)
@@ -479,9 +466,7 @@ func TestGradingFinalizerRejectsMissingOrCorruptSucceededSummaryPayloadWithoutRe
 		t.Run(test.name, func(t *testing.T) {
 			fixture := prepareFinalSummaryCrashFixture(t)
 			test.mutate(t, fixture)
-			_, err := fixture.restartedFinalizer().finalizeGradingPage(
-				context.Background(), fixture.run, fixture.job,
-			)
+			_, _, err := fixture.restoreSummary(context.Background())
 			if !errors.Is(err, ErrModelInvocationRequiresReconciliation) {
 				t.Fatalf("corrupt summary err=%v, want reconciliation required", err)
 			}
@@ -502,4 +487,9 @@ func TestGradingFinalizerRejectsMissingOrCorruptSucceededSummaryPayloadWithoutRe
 			}
 		})
 	}
+}
+
+// restoreSummary 核对保留的讲解恢复入口；整页终稿不再承担发起该调用的职责。
+func (f finalSummaryCrashFixture) restoreSummary(ctx context.Context) (TutoringTips, string, error) {
+	return f.restartedFinalizer().buildFinalTutoringTips(ctx, f.job, 1, []byte(`["sha256:summary-result-crash-assessment"]`))
 }
