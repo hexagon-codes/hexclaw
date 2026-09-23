@@ -2,6 +2,7 @@ package engineadapter
 
 import (
 	"context"
+	"errors"
 
 	"github.com/hexagon-codes/hexclaw/memory"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/usecase"
@@ -10,6 +11,23 @@ import (
 // memoryWriter 是 Insights adapter 依赖的最小写入接口（*memory.FileMemory 满足）。
 type memoryWriter interface {
 	SaveStructuredEvent(eventID, content, memType, source, role string, meta memory.EntryMeta) error
+}
+
+// ReviseWeakness 不追加第二条同源薄弱信号，也不把撤回解释为掌握证据。
+func (a *InsightsAdapter) ReviseWeakness(_ context.Context, eventID string, revision int, agentName, knowledgePoint, note string) error {
+	if a.mem == nil || agentName == "" {
+		return nil
+	}
+	writer, ok := a.mem.(interface {
+		ReviseStructuredEvent(string, int, string, string, string, string, memory.EntryMeta) error
+	})
+	if !ok {
+		return errors.New("memory writer does not support insight corrections")
+	}
+	if note != "" {
+		note = "[学情] " + note
+	}
+	return writer.ReviseStructuredEvent(eventID, revision, note, "fact", "学情", agentName, memory.EntryMeta{Subject: knowledgePoint})
 }
 
 // InsightsAdapter 把学情薄弱信号写进 hexclaw 的 FileMemory。

@@ -530,6 +530,11 @@ type Insights interface {
 	WriteWeakness(ctx context.Context, eventID, agentName, knowledgePoint, note string) error
 }
 
+// RevisableInsights 以原始来源和有效修订更新派生摘要；空 note 撤回旧信号。
+type RevisableInsights interface {
+	ReviseWeakness(ctx context.Context, eventID string, revision int, agentName, knowledgePoint, note string) error
+}
+
 // Grounding retrieves textbook evidence for the first tutoring-tips section
 // (adapter = knowledge/RAG, scoped by agent_id).
 type Grounding interface {

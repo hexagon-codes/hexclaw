@@ -2,7 +2,9 @@ package usecase
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
@@ -22,6 +24,9 @@ import (
 // 不同作答的事件 ID 不同，即使薄弱点文字相同也保留独立证据。
 type InsightsConsumer struct {
 	Insights Insights
+	Records  interface {
+		LatestInsightCorrection(context.Context, string, string) (k12.GradingAssessmentCorrection, error)
+	}
 }
 
 // Name 消费者标识（outbox_consumptions 去重键的一半）。
@@ -29,8 +34,31 @@ func (c InsightsConsumer) Name() string { return "learning-insights" }
 
 // Handle 消费一条事件。未接线 Insights 时静默跳过（与原 d.Insights != nil 判定同语义）。
 func (c InsightsConsumer) Handle(ctx context.Context, ev k12storage.OutboxEvent) error {
-	if ev.EventType != k12storage.EventMistakeRecorded || c.Insights == nil {
+	if c.Insights == nil || (ev.EventType != k12storage.EventMistakeRecorded && ev.EventType != k12storage.EventAssessmentCorrected) {
 		return nil
+	}
+	sourceID := ev.EventID
+	if ev.EventType == k12storage.EventAssessmentCorrected {
+		var corrected k12storage.AssessmentCorrectedPayload
+		if err := json.Unmarshal([]byte(ev.Payload), &corrected); err != nil {
+			return err
+		}
+		if corrected.AgentName != ev.AgentName || corrected.OriginalEventID == "" {
+			return errors.New("insight correction source mismatch")
+		}
+		sourceID = corrected.OriginalEventID
+	}
+	if c.Records != nil {
+		correction, err := c.Records.LatestInsightCorrection(ctx, ev.AgentName, sourceID)
+		if err == nil {
+			return c.applyCorrection(ctx, sourceID, correction)
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+	}
+	if ev.EventType == k12storage.EventAssessmentCorrected {
+		return errors.New("insight correction could not be loaded")
 	}
 	var p k12storage.MistakeRecordedPayload
 	if err := json.Unmarshal([]byte(ev.Payload), &p); err != nil {
@@ -49,4 +77,23 @@ func (c InsightsConsumer) Handle(ctx context.Context, ev k12storage.OutboxEvent)
 		note = fmt.Sprintf("在「%s」出错：%s", p.KnowledgePoint, p.ErrorCause)
 	}
 	return c.Insights.WriteWeakness(ctx, ev.EventID, p.AgentName, p.KnowledgePoint, note)
+}
+
+func (c InsightsConsumer) applyCorrection(ctx context.Context, sourceID string, correction k12.GradingAssessmentCorrection) error {
+	writer, ok := c.Insights.(RevisableInsights)
+	if !ok {
+		return errors.New("insight writer does not support corrections")
+	}
+	var note, knowledgePoint string
+	if correction.Assessment.Status == k12.GradingAssessmentWrong {
+		var result PhotoGradeItem
+		if err := json.Unmarshal([]byte(correction.Assessment.ResultJSON), &result); err != nil {
+			return err
+		}
+		knowledgePoint = result.Grade.Outcome.KnowledgePoint
+		if knowledgePoint != "" {
+			note = fmt.Sprintf("在「%s」出错：%s", knowledgePoint, result.Grade.Outcome.ErrorCause)
+		}
+	}
+	return writer.ReviseWeakness(ctx, sourceID, correction.Revision, correction.Assessment.AgentName, knowledgePoint, note)
 }
