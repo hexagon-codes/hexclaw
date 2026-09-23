@@ -31,6 +31,20 @@ func knowledgePrincipalID(r *http.Request) string {
 	return knowledgeDesktopPrincipalID
 }
 
+// SetKnowledgeOwnerScope 在启动装配时绑定单用户服务的业务归属，不改变认证身份。
+func (s *Server) SetKnowledgeOwnerScope(ownerID string) {
+	s.knowledgeOwnerID = strings.TrimSpace(ownerID)
+}
+
+func (s *Server) knowledgeOwnerScope(r *http.Request) string {
+	principal := knowledgePrincipalID(r)
+	if s.knowledgeOwnerID != "" && r != nil && skill.AuthenticatedUserID(r.Context()) != "" &&
+		(principal == "api-user" || principal == knowledgeDesktopPrincipalID) {
+		return s.knowledgeOwnerID
+	}
+	return principal
+}
+
 func requireSupportedKnowledgeCorpus(w http.ResponseWriter, corpusID string) bool {
 	if corpusID == knowledgeDefaultCorpusID {
 		return true
@@ -107,7 +121,7 @@ func (s *Server) handleGetKnowledgeEmbeddingPolicy(w http.ResponseWriter, r *htt
 	if !requireSupportedKnowledgeCorpus(w, corpusID) {
 		return
 	}
-	projection, err := s.semanticIndex.GetPolicy(r.Context(), knowledgePrincipalID(r), corpusID)
+	projection, err := s.semanticIndex.GetPolicy(r.Context(), s.knowledgeOwnerScope(r), corpusID)
 	if err != nil {
 		writeSemanticIndexError(w, err)
 		return
@@ -142,7 +156,7 @@ func (s *Server) handleApplyKnowledgeEmbeddingPolicy(w http.ResponseWriter, r *h
 	}
 
 	result, err := s.semanticIndex.ApplyPolicy(
-		r.Context(), knowledgePrincipalID(r), corpusID,
+		r.Context(), s.knowledgeOwnerScope(r), corpusID,
 		*req.ExpectedPolicyVersion, req.Selection,
 	)
 	if err != nil {
@@ -159,7 +173,7 @@ func (s *Server) handleGetKnowledgeJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	job, err := s.semanticIndex.GetJobForCorpus(
-		r.Context(), knowledgePrincipalID(r), knowledgeDefaultCorpusID, jobID,
+		r.Context(), s.knowledgeOwnerScope(r), knowledgeDefaultCorpusID, jobID,
 	)
 	if err != nil {
 		writeSemanticIndexError(w, err)
@@ -175,7 +189,7 @@ func (s *Server) handleCancelKnowledgeJob(w http.ResponseWriter, r *http.Request
 		return
 	}
 	job, err := s.semanticIndex.CancelJobForCorpus(
-		r.Context(), knowledgePrincipalID(r), knowledgeDefaultCorpusID, jobID,
+		r.Context(), s.knowledgeOwnerScope(r), knowledgeDefaultCorpusID, jobID,
 	)
 	if err != nil {
 		writeSemanticIndexError(w, err)
@@ -205,7 +219,7 @@ func (s *Server) handleRetryKnowledgeDocument(w http.ResponseWriter, r *http.Req
 		return
 	}
 	result, err := service.RetryDocument(
-		r.Context(), knowledgePrincipalID(r), knowledgeDefaultCorpusID, documentID, idempotencyKey,
+		r.Context(), s.knowledgeOwnerScope(r), knowledgeDefaultCorpusID, documentID, idempotencyKey,
 	)
 	if err != nil {
 		writeDocumentRetryError(w, err)
@@ -297,7 +311,7 @@ func (s *Server) handleReparseKnowledgeDocument(w http.ResponseWriter, r *http.R
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	result, err := service.ReparseDocument(r.Context(), knowledgePrincipalID(r), knowledgeDefaultCorpusID,
+	result, err := service.ReparseDocument(r.Context(), s.knowledgeOwnerScope(r), knowledgeDefaultCorpusID,
 		strings.TrimSpace(r.PathValue("id")), strings.TrimSpace(r.Header.Get("Idempotency-Key")), input.ExpectedGeneration)
 	if errors.Is(err, knowledge.ErrEmbeddingBatchOutcomeUnknown) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "Embedding result is unknown; the current document is preserved.", "code": "knowledge_document_embedding_outcome_unknown"})

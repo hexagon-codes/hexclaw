@@ -838,96 +838,12 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 	if cfg.Knowledge.Enabled {
 		kbStore := knowledge.NewSQLiteStore(store.DB())
 		if err := kbStore.Init(ctx); err == nil {
-			// 1. 构造 embedder: ai-core Provider → hexagon embedder 包装
-			var emb *hexagon.OpenAIEmbedder
-
-			// 显式配置优先；auto 只发现真实存在的 Ollama 能力，不再把任意 chat API
-			// 猜成 text-embedding-3-small，避免计费、404 和 map 遍历随机选路。
-			embeddingPlan := resolveKnowledgeEmbeddingPlan(ctx, cfg)
-			embProviderName := embeddingPlan.Provider
-			embModel := embeddingPlan.Model
-			if embeddingPlan.Configured {
-				if pc, ok := cfg.LLM.Providers[embProviderName]; ok {
-					runtimeProvider := classifyKnowledgeEmbeddingRuntimeProvider(
-						embProviderName, pc, embeddingPlan,
-					)
-					// 本地兼容服务可以无 API Key；云服务仍要求显式凭证。
-					if runtimeProvider.credentialsReady {
-						effectiveBaseURL := knowledgeEmbeddingEffectiveBaseURL(embeddingPlan, pc)
-						var providerOpts []hexagon.OpenAIOption
-						if effectiveBaseURL != "" {
-							providerOpts = append(providerOpts, hexagon.OpenAIWithBaseURL(effectiveBaseURL))
-						}
-						providerTransportReady := true
-						providerClient, clientErr := newKnowledgeEmbeddingProviderHTTPClient(embeddingPlan, pc)
-						if clientErr != nil {
-							providerTransportReady = false
-							logger.Warn("[knowledge] embedding endpoint 被安全策略拒绝",
-								"provider", embProviderName, "error", clientErr)
-						} else {
-							providerOpts = append(providerOpts, hexagon.OpenAIWithHTTPClient(providerClient))
-						}
-						apiKey := knowledgeEmbeddingProviderAPIKey(embeddingPlan, pc)
-						if providerTransportReady {
-							dim := knowledgeEmbeddingDimensionForProvider(pc, embModel)
-							if dim <= 0 {
-								logger.Warn("[knowledge] embedding 向量维度未知，旧版共享向量路径保持关闭",
-									"provider", embProviderName, "model", embModel)
-							} else {
-								aiProvider := hexagon.NewOpenAI(apiKey, providerOpts...)
-								emb = hexagon.NewOpenAIEmbedder(aiProvider,
-									hexagon.WithEmbedderModel(embModel),
-									hexagon.WithEmbedderDimension(dim),
-								)
-								kbEmbedProvider, kbEmbedModel = embProviderName, embModel
-								kbEmbedBaseURL = effectiveBaseURL
-								kbEmbedLocal = runtimeProvider.local
-								kbEmbedNativeOllama = runtimeProvider.nativeOllama
-								kbEmbedReady = embeddingPlan.Ready
-								kbEmbedServiceAvailable = embeddingPlan.ServiceAvailable
-							}
-						}
-					}
-				}
-			} else if embProviderName != "" {
-				logger.Warn("[knowledge] embedding 配置不完整，保持 FTS5 检索",
-					"provider", embProviderName, "model", embModel)
-			} else {
-				logger.Info("[knowledge] 未配置可验证的 embedding 能力，使用 FTS5 检索")
-			}
-
-			if emb != nil {
-				var guardedEmbedder hexagon.VectorEmbedder = emb
-				if pc, ok := cfg.LLM.Providers[embProviderName]; ok && !isLocalEmbeddingProvider(embProviderName, pc) {
-					// Guard the actual remote embedding boundary. The cache stays
-					// outside it: a cache hit performs no network egress, while every
-					// miss requires an explicit RAG purpose/data classification.
-					guardedEmbedder = egress.NewCloudEmbedder(emb, cloudEgress)
-				}
-				var readinessProbe func(context.Context) bool
-				if kbEmbedNativeOllama {
-					baseURL := kbEmbedBaseURL
-					model := kbEmbedModel
-					// Ollama 不可用/模型未安装时，缓存 miss 直接快速降级；周期实探使
-					// 一键安装或稍后启动 Ollama 后无需重启即可激活向量检索。
-					readinessProbe = func(probeCtx context.Context) bool {
-						return knowledge.OllamaModelInstalled(probeCtx, baseURL, model)
-					}
-				}
-				// 精确模型应用校准后的截断、批量和物理调用预算；未知兼容
-				// 模型保留通用截断闸。cache 在 readiness/admission 外层，命中
-				// 不探活也不占本地物理槽位。
-				sharedEmbedder = assembleKnowledgeSharedEmbedder(
-					guardedEmbedder, embModel, kbEmbedLocal, kbEmbedNativeOllama,
-					localInference, kbEmbedReady, readinessProbe,
-				)
-				if kbEmbedReady {
-					logger.Info("[knowledge] embedding 已就绪", "provider", embProviderName, "model", embModel)
-				} else {
-					logger.Info("[knowledge] embedding 待机，当前使用 FTS5；模型就位后自动激活",
-						"provider", embProviderName, "model", embModel)
-				}
-			}
+			sharedMemory := prepareSharedMemoryEmbedding(ctx, cfg, cloudEgress, localInference)
+			sharedEmbedder = sharedMemory.embedder
+			kbEmbedProvider, kbEmbedModel, kbEmbedBaseURL = sharedMemory.provider, sharedMemory.model, sharedMemory.baseURL
+			kbEmbedLocal, kbEmbedNativeOllama = sharedMemory.local, sharedMemory.nativeOllama
+			kbEmbedReady, kbEmbedServiceAvailable = sharedMemory.ready, sharedMemory.serviceAvailable
+			embProviderName, embModel := sharedMemory.plan.Provider, sharedMemory.plan.Model
 			// 2. 构造 splitter: MarkdownSplitter（#7 保留 header_path 结构元数据；
 			//    对纯文本/无标题内容会自动按 chunkSize 退化为递归切分，无回归）
 			chunkSize := cfg.Knowledge.ChunkSize
@@ -971,46 +887,44 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 			hybridCfg.EmbedQueryPrefix = qp
 			hybridCfg.EmbedDocPrefix = dp
 
-			// Desktop's legacy KB is one authenticated local corpus. Bind it once,
-			// then install the revision-scoped API/search/worker bundle before any
-			// document writes can enter the Manager.
+			// 本机和服务端共享持久化运行时，业务 owner 由单用户服务装配显式绑定。
 			var managerEmbedder = sharedEmbedder
-			if desktopMode {
-				semanticRuntimeGate := newKnowledgeSemanticRuntimeGate()
-				embeddingProfiles := buildKnowledgeEmbeddingRuntimeProfiles(
-					ctx, cfg, cloudEgress, semanticRuntimeGate,
-					withKnowledgeEmbeddingLocalInferenceCoordinator(localInference),
-				)
-				profiles, profilesErr := newKnowledgeEmbeddingRuntimeHolder(embeddingProfiles)
-				var semanticRuntime *knowledgeSemanticIndexRuntime
-				semanticErr := profilesErr
-				if profilesErr == nil {
-					semanticOptions := []knowledgeSemanticRuntimeOption{
-						withKnowledgeSemanticRuntimeGate(semanticRuntimeGate),
-					}
-					if localInference != nil {
-						semanticOptions = append(semanticOptions,
-							withKnowledgeSemanticLocalInferenceCoordinator(localInference))
-					} else {
-						semanticOptions = append(semanticOptions,
-							withKnowledgeSemanticResourceGovernor(processResources))
-					}
-					semanticRuntime, semanticErr = setupKnowledgeSemanticIndex(
-						ctx, store.DB(), profiles, profiles, "desktop-"+idgen.NanoID(),
-						semanticOptions...,
-					)
+			semanticRuntimeGate := newKnowledgeSemanticRuntimeGate()
+			embeddingProfiles := buildKnowledgeEmbeddingRuntimeProfiles(
+				ctx, cfg, cloudEgress, semanticRuntimeGate,
+				withKnowledgeEmbeddingLocalInferenceCoordinator(localInference),
+			)
+			embeddingProfiles.MemoryEmbedder = sharedEmbedder
+			profiles, profilesErr := newKnowledgeEmbeddingRuntimeHolder(embeddingProfiles)
+			var semanticRuntime *knowledgeSemanticIndexRuntime
+			semanticErr := profilesErr
+			if profilesErr == nil {
+				semanticOptions := []knowledgeSemanticRuntimeOption{
+					withKnowledgeSemanticRuntimeGate(semanticRuntimeGate),
+					withKnowledgeSemanticScope(k12usecase.DefaultLocalOwnerScope, knowledgeDefaultCorpusID),
 				}
-				if semanticRuntime == nil {
-					logger.Warn("[knowledge] 语义索引运行时初始化失败，保持旧版 FTS 路径", "error", semanticErr)
+				if localInference != nil {
+					semanticOptions = append(semanticOptions,
+						withKnowledgeSemanticLocalInferenceCoordinator(localInference))
 				} else {
-					kbSemanticRuntime = semanticRuntime
-					kbSemanticResolver = profiles
-					kbStore = knowledge.NewSQLiteStore(store.DB(),
-						knowledge.WithSQLiteSemanticMutations(knowledgeDesktopOwnerID, knowledgeDefaultCorpusID))
-					managerEmbedder = nil // revision worker owns document/query embedding; never double-write legacy vectors.
-					if semanticErr != nil {
-						logger.Warn("[knowledge] 默认语义策略初始化失败，保持受作用域保护的 FTS 路径", "error", semanticErr)
-					}
+					semanticOptions = append(semanticOptions,
+						withKnowledgeSemanticResourceGovernor(processResources))
+				}
+				semanticRuntime, semanticErr = setupKnowledgeSemanticIndex(
+					ctx, store.DB(), profiles, profiles, "knowledge-"+idgen.NanoID(),
+					semanticOptions...,
+				)
+			}
+			if semanticRuntime == nil {
+				logger.Warn("[knowledge] 语义索引运行时初始化失败，保持旧版 FTS 路径", "error", semanticErr)
+			} else {
+				kbSemanticRuntime = semanticRuntime
+				kbSemanticResolver = profiles
+				kbStore = knowledge.NewSQLiteStore(store.DB(),
+					knowledge.WithSQLiteSemanticMutations(semanticRuntime.OwnerID, semanticRuntime.CorpusID))
+				managerEmbedder = nil // 文档与查询嵌入由版本化运行时负责，避免旧向量双写。
+				if semanticErr != nil {
+					logger.Warn("[knowledge] 默认语义策略初始化失败，保持受作用域保护的 FTS 路径", "error", semanticErr)
 				}
 			}
 
@@ -1214,10 +1128,13 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 	if fileMem != nil {
 		eng.SetFileMemory(fileMem)
 		fmt.Printf("  ✓ Memory      文件记忆 (%d 字符) + 自动记忆\n", len(fileMem.LoadContext()))
-		// 增量 G①：配了 embedding 时为长期记忆召回接入向量化器 → hybrid（0.7 向量 + 0.3 BM25）。
-		// 复用 KB 共享 embedder（已含 LRU 缓存 + 截断闸）；没配 embedding 则不接线，召回降级纯 BM25（行为不变）。
-		if sharedEmbedder != nil {
+		// 长期记忆使用当前配置代的客户端；未配置时降级 BM25，后续配置无需重启。
+		if kbSemanticResolver != nil {
+			eng.SetMemoryEmbedder(&runtimeMemoryEmbedder{holder: kbSemanticResolver})
+		} else if sharedEmbedder != nil {
 			eng.SetMemoryEmbedder(sharedEmbedder)
+		}
+		if sharedEmbedder != nil {
 			if kbEmbedReady {
 				fmt.Println("  ✓ Memory      长期记忆 hybrid 召回 (向量 + BM25)")
 			} else {
@@ -1355,6 +1272,7 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 		srv.SetSidecarCapabilityToken(sidecarCapabilityToken)
 	}
 	if kbSemanticRuntime != nil {
+		srv.SetKnowledgeOwnerScope(kbSemanticRuntime.OwnerID)
 		srv.SetSemanticIndexService(kbSemanticRuntime.Service)
 		srv.SetSemanticRuntimeInvalidator(kbSemanticRuntime.Revoke)
 		if kbSemanticResolver != nil {
@@ -1366,6 +1284,7 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 					reloadCtx, &nextCfg, cloudEgress, nextGate,
 					withKnowledgeEmbeddingLocalInferenceCoordinator(localInference),
 				)
+				nextProfiles.MemoryEmbedder = prepareSharedMemoryEmbedding(reloadCtx, &nextCfg, cloudEgress, localInference).embedder
 				return kbSemanticResolver.Replace(reloadCtx, nextProfiles)
 			})
 		}

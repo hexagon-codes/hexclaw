@@ -1451,6 +1451,7 @@ func TestManualDocumentSemanticChildReachesSucceededWithRuntimeWorker(t *testing
 		migrate.KnowledgeDocumentScopeV27, migrate.KnowledgeIngestCheckpointV28,
 		migrate.KnowledgeIngestExecutionV46, migrate.KnowledgeUploadOperationsV71,
 		migrate.KnowledgeOCRRouteReceiptsV87, migrate.K12KnowledgeInvocationLedgersV91,
+		migrate.KnowledgeRecoveryV106,
 	}); err != nil {
 		t.Fatal(err)
 	}

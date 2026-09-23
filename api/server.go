@@ -96,6 +96,7 @@ type Server struct {
 	sessionDeletedHook func(sessionID string)
 	kb                 *knowledge.Manager            // 知识库管理器（可选）
 	semanticIndex      SemanticIndexAPI              // corpus 级语义索引策略/持久 Job（可选）
+	knowledgeOwnerID   string                        // 单用户部署显式绑定的知识库业务归属
 	webhookMgr         *webhook.Manager              // Webhook 管理器（可选）
 	scheduler          *cron.Scheduler               // Cron 调度器（可选）
 	promptStore        *library.PromptStore          // §11.8 Prompt 库（可选）

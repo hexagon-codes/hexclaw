@@ -24,8 +24,9 @@ const knowledgeEmbeddingProbeText = "hexclaw-embedding-connectivity-probe-v1"
 // immutable entries so the catalog can never advertise a vector space whose
 // executor was built from different model metadata.
 type knowledgeEmbeddingRuntimeProfiles struct {
-	Resolver *knowledgeEmbeddingProfileResolver
-	Registry *knowledgeEmbeddingExecutorRegistry
+	Resolver       *knowledgeEmbeddingProfileResolver
+	Registry       *knowledgeEmbeddingExecutorRegistry
+	MemoryEmbedder hexagon.VectorEmbedder
 }
 
 type knowledgeEmbeddingRuntimeProfileBuildConfig struct {

@@ -60,11 +60,13 @@ func TestKnowledgeHTTPQueryUserIDCannotEscapeDesktopDefaultScope(t *testing.T) {
 	}
 
 	srv := NewServer(config.DefaultConfig(), nil, nil, nil)
+	srv.SetDesktopAPIToken("knowledge-scope-fixture")
 	srv.SetKnowledgeBase(desktopManager)
 	handler := srv.routes()
 	request := func(method, path, body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, path, strings.NewReader(body))
 		req.RemoteAddr = "127.0.0.1:54321"
+		req.Header.Set("Authorization", "Bearer knowledge-scope-fixture")
 		if body != "" {
 			req.Header.Set("Content-Type", "application/json")
 		}

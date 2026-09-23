@@ -129,6 +129,11 @@ func knowledgeEmbeddingDimension(model string) int {
 		return 1536
 	case "text-embedding-3-large":
 		return 3072
+	case "gemini-embedding-001", "models/gemini-embedding-001",
+		"gemini-embedding-2", "models/gemini-embedding-2",
+		"gemini-embedding-2-preview", "models/gemini-embedding-2-preview":
+		// Gemini 已发布模型默认输出 3072 维；显式配置仍由调用方优先采用。
+		return 3072
 	case "nvidia/nemotron-3-embed-1b",
 		"nvidia/nemotron-3-embed-1b:free",
 		"nvidia/llama-nemotron-embed-vl-1b-v2",

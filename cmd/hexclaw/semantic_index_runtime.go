@@ -505,9 +505,10 @@ type knowledgeEmbeddingExecutorRegistry struct {
 }
 
 type knowledgeEmbeddingRuntimeHolderState struct {
-	resolver *knowledgeEmbeddingProfileResolver
-	registry *knowledgeEmbeddingExecutorRegistry
-	gate     *knowledgeSemanticRuntimeGate
+	memoryEmbedder hexagon.VectorEmbedder
+	resolver       *knowledgeEmbeddingProfileResolver
+	registry       *knowledgeEmbeddingExecutorRegistry
+	gate           *knowledgeSemanticRuntimeGate
 }
 
 // knowledgeEmbeddingRuntimeHolder is the stable dependency installed into
@@ -542,6 +543,7 @@ func knowledgeEmbeddingRuntimeHolderStateFor(
 	}
 	return &knowledgeEmbeddingRuntimeHolderState{
 		resolver: bundle.Resolver, registry: bundle.Registry, gate: bundle.Resolver.runtimeGate,
+		memoryEmbedder: bundle.MemoryEmbedder,
 	}, nil
 }
 
@@ -1252,6 +1254,8 @@ func semanticCatalogVersionForProfiles(profiles []knowledge.EmbeddingProfile) in
 // policy API without also installing revision-bound search and the durable
 // worker that can advance its jobs.
 type knowledgeSemanticIndexRuntime struct {
+	OwnerID      string
+	CorpusID     string
 	Repository   *knowledge.SQLiteSemanticIndexRepository
 	Service      *knowledge.SemanticIndexService
 	Searcher     *knowledge.SQLiteRevisionSemanticSearcher
@@ -1262,12 +1266,22 @@ type knowledgeSemanticIndexRuntime struct {
 }
 
 type knowledgeSemanticRuntimeAssembly struct {
+	ownerID        string
+	corpusID       string
 	gate           *knowledgeSemanticRuntimeGate
 	governor       *resourcegov.Governor
 	localInference *localinfer.Coordinator
 }
 
 type knowledgeSemanticRuntimeOption func(*knowledgeSemanticRuntimeAssembly)
+
+// withKnowledgeSemanticScope 让 HTTP、检索与后台任务共用装配时确定的业务归属。
+func withKnowledgeSemanticScope(ownerID, corpusID string) knowledgeSemanticRuntimeOption {
+	return func(assembly *knowledgeSemanticRuntimeAssembly) {
+		assembly.ownerID = strings.TrimSpace(ownerID)
+		assembly.corpusID = strings.TrimSpace(corpusID)
+	}
+}
 
 func withKnowledgeSemanticRuntimeGate(gate *knowledgeSemanticRuntimeGate) knowledgeSemanticRuntimeOption {
 	return func(assembly *knowledgeSemanticRuntimeAssembly) { assembly.gate = gate }
@@ -1310,7 +1324,7 @@ func activateInstalledKnowledgeSemanticIndex(
 	}
 	resolver.invalidateAvailability()
 	_, err := runtime.Service.EnsureDefaultPolicy(
-		ctx, knowledgeDesktopOwnerID, knowledgeDefaultCorpusID,
+		ctx, runtime.OwnerID, runtime.CorpusID,
 	)
 	return err
 }
@@ -1326,15 +1340,20 @@ func setupKnowledgeSemanticIndex(
 	if db == nil || resolver == nil || registry == nil || strings.TrimSpace(workerID) == "" {
 		return nil, fmt.Errorf("knowledge: invalid semantic index runtime configuration")
 	}
-	assembly := &knowledgeSemanticRuntimeAssembly{}
+	assembly := &knowledgeSemanticRuntimeAssembly{
+		ownerID: knowledgeDesktopOwnerID, corpusID: knowledgeDefaultCorpusID,
+	}
 	for _, option := range options {
 		if option != nil {
 			option(assembly)
 		}
 	}
+	if assembly.ownerID == "" || assembly.corpusID == "" {
+		return nil, fmt.Errorf("knowledge: semantic index owner and corpus are required")
+	}
 	repository := knowledge.NewSQLiteSemanticIndexRepository(db)
-	if _, err := repository.BindLegacyDefaultCorpus(ctx, knowledgeDesktopOwnerID, knowledgeDefaultCorpusID); err != nil {
-		return nil, fmt.Errorf("knowledge: bind desktop corpus: %w", err)
+	if _, err := repository.BindLegacyDefaultCorpus(ctx, assembly.ownerID, assembly.corpusID); err != nil {
+		return nil, fmt.Errorf("knowledge: bind service corpus: %w", err)
 	}
 	service := knowledge.NewSemanticIndexService(repository, resolver)
 	searchOptions := []knowledge.RevisionSearchOption{}
@@ -1351,20 +1370,21 @@ func setupKnowledgeSemanticIndex(
 			knowledge.WithSemanticWorkerResourceGovernor(assembly.governor))
 	}
 	searcher := knowledge.NewSQLiteRevisionSemanticSearcher(
-		db, knowledgeDesktopOwnerID, knowledgeDefaultCorpusID, registry, searchOptions...,
+		db, assembly.ownerID, assembly.corpusID, registry, searchOptions...,
 	)
 	worker := knowledge.NewSemanticIndexWorker(repository, registry, knowledge.SemanticIndexWorkerConfig{
-		OwnerID: knowledgeDesktopOwnerID, CorpusID: knowledgeDefaultCorpusID,
+		OwnerID: assembly.ownerID, CorpusID: assembly.corpusID,
 		WorkerID: workerID, BatchSize: 64, LeaseDuration: 5 * time.Minute,
 		RetryDelay: 30 * time.Second, Lane: knowledge.SemanticWorkerLaneIndex,
 	}, workerOptions...)
 	// 两通道复用同一协调器，调度并行不增加本地推理容量。
 	ingestWorker := knowledge.NewSemanticIndexWorker(repository, registry, knowledge.SemanticIndexWorkerConfig{
-		OwnerID: knowledgeDesktopOwnerID, CorpusID: knowledgeDefaultCorpusID,
+		OwnerID: assembly.ownerID, CorpusID: assembly.corpusID,
 		WorkerID: workerID + "-ingest", BatchSize: 64, LeaseDuration: 5 * time.Minute,
 		RetryDelay: 30 * time.Second, Lane: knowledge.SemanticWorkerLaneIngest,
 	}, workerOptions...)
 	runtime := &knowledgeSemanticIndexRuntime{
+		OwnerID: assembly.ownerID, CorpusID: assembly.corpusID,
 		Repository: repository, Service: service, Searcher: searcher, Worker: worker,
 		IngestWorker: ingestWorker,
 		Gate:         selectKnowledgeSemanticRuntimeGate([]*knowledgeSemanticRuntimeGate{assembly.gate}),
@@ -1372,7 +1392,7 @@ func setupKnowledgeSemanticIndex(
 	if holder, ok := resolver.(*knowledgeEmbeddingRuntimeHolder); ok {
 		runtime.Profiles = holder
 	}
-	if _, err := service.EnsureDefaultPolicy(ctx, knowledgeDesktopOwnerID, knowledgeDefaultCorpusID); err != nil &&
+	if _, err := service.EnsureDefaultPolicy(ctx, assembly.ownerID, assembly.corpusID); err != nil &&
 		!errors.Is(err, knowledge.ErrProfileUnavailable) {
 		// BindLegacyDefaultCorpus has already committed an owner/generation
 		// boundary. Return the usable text-only semantic runtime alongside the

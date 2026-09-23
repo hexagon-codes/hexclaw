@@ -26,7 +26,7 @@ func (s *Server) handleKnowledgeDocumentRecovery(w http.ResponseWriter, r *http.
 		writeDocumentIngestError(w, knowledge.ErrDocumentIngestUnavailable)
 		return
 	}
-	owner, id := knowledgePrincipalID(r), strings.TrimSpace(r.PathValue("id"))
+	owner, id := s.knowledgeOwnerScope(r), strings.TrimSpace(r.PathValue("id"))
 	if r.Method == http.MethodGet {
 		plan, err := service.DocumentRecoveryPlan(r.Context(), owner, knowledgeDefaultCorpusID, id)
 		if err != nil {
@@ -58,7 +58,7 @@ func (s *Server) handleKnowledgeDocumentSource(w http.ResponseWriter, r *http.Re
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "Document source unavailable"})
 		return
 	}
-	file, doc, err := service.OpenDocumentSource(r.Context(), knowledgePrincipalID(r), knowledgeDefaultCorpusID, r.PathValue("id"))
+	file, doc, err := service.OpenDocumentSource(r.Context(), s.knowledgeOwnerScope(r), knowledgeDefaultCorpusID, r.PathValue("id"))
 	if err != nil {
 		if errors.Is(err, knowledge.ErrDocumentSourceDeleted) {
 			writeJSON(w, http.StatusGone, map[string]string{"code": "knowledge_document_deleted", "error": "File deleted. The original is no longer available."})

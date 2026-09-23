@@ -54,6 +54,7 @@ func (s *Server) handleKnowledgeOperations(w http.ResponseWriter, r *http.Reques
 		})
 		return
 	}
+	ownerID = s.knowledgeOwnerScope(r)
 	service, ok := s.semanticIndex.(KnowledgeOperationProjectionAPI)
 	if !ok {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "knowledge recovery unavailable"})
@@ -113,6 +114,7 @@ func (s *Server) handleDismissKnowledgeOperation(w http.ResponseWriter, r *http.
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authenticated principal is required"})
 		return
 	}
+	ownerID = s.knowledgeOwnerScope(r)
 	service, ok := s.semanticIndex.(interface {
 		DismissUploadOperation(context.Context, string, string, string) error
 	})
@@ -151,6 +153,7 @@ func (s *Server) handleAcknowledgeKnowledgeOperation(w http.ResponseWriter, r *h
 		})
 		return
 	}
+	ownerID = s.knowledgeOwnerScope(r)
 	service, ok := s.semanticIndex.(KnowledgeUploadResponseAcknowledger)
 	if !ok {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
@@ -334,7 +337,7 @@ func (s *Server) handleCreateKnowledgeDocument(w http.ResponseWriter, r *http.Re
 				mediaType = inferred
 			}
 		}
-		result, createErr := service.CreateDocument(r.Context(), knowledgePrincipalID(r), corpusID,
+		result, createErr := service.CreateDocument(r.Context(), s.knowledgeOwnerScope(r), corpusID,
 			knowledge.CreateDocumentInput{
 				IdempotencyKey: idempotencyKey,
 				Filename:       filename,
@@ -586,7 +589,7 @@ func (s *Server) handleListDocuments(w http.ResponseWriter, r *http.Request) {
 	}
 	if projectionService, ok := s.semanticIndex.(KnowledgeDocumentVectorProjectionAPI); ok {
 		projections, projectionErr := projectionService.ListDocumentVectorProjections(
-			r.Context(), knowledgePrincipalID(r), knowledgeDefaultCorpusID,
+			r.Context(), s.knowledgeOwnerScope(r), knowledgeDefaultCorpusID,
 		)
 		if projectionErr != nil && !errors.Is(projectionErr, knowledge.ErrSemanticIndexNotFound) {
 			writeSemanticIndexError(w, projectionErr)
@@ -632,7 +635,7 @@ func (s *Server) handleGetDocument(w http.ResponseWriter, r *http.Request) {
 
 	if projectionService, ok := s.semanticIndex.(KnowledgeDocumentProjectionAPI); ok {
 		projection, projectionErr := projectionService.GetIngestDocumentProjectionForCorpus(
-			r.Context(), knowledgePrincipalID(r), knowledgeDefaultCorpusID, docID,
+			r.Context(), s.knowledgeOwnerScope(r), knowledgeDefaultCorpusID, docID,
 		)
 		if projectionErr == nil {
 			if projection.CorpusID != knowledgeDefaultCorpusID {
@@ -642,7 +645,7 @@ func (s *Server) handleGetDocument(w http.ResponseWriter, r *http.Request) {
 			payload := s.knowledgeDocumentDetail(r, projection)
 			if vectorService, vectorOK := s.semanticIndex.(KnowledgeDocumentVectorProjectionAPI); vectorOK {
 				vectors, vectorErr := vectorService.ListDocumentVectorProjections(
-					r.Context(), knowledgePrincipalID(r), knowledgeDefaultCorpusID,
+					r.Context(), s.knowledgeOwnerScope(r), knowledgeDefaultCorpusID,
 				)
 				if vectorErr != nil && !errors.Is(vectorErr, knowledge.ErrSemanticIndexNotFound) {
 					writeSemanticIndexError(w, vectorErr)
@@ -674,7 +677,7 @@ func (s *Server) handleGetDocument(w http.ResponseWriter, r *http.Request) {
 	}
 	if vectorService, vectorOK := s.semanticIndex.(KnowledgeDocumentVectorProjectionAPI); vectorOK {
 		vectors, vectorErr := vectorService.ListDocumentVectorProjections(
-			r.Context(), knowledgePrincipalID(r), knowledgeDefaultCorpusID,
+			r.Context(), s.knowledgeOwnerScope(r), knowledgeDefaultCorpusID,
 		)
 		if vectorErr != nil && !errors.Is(vectorErr, knowledge.ErrSemanticIndexNotFound) {
 			writeSemanticIndexError(w, vectorErr)
@@ -829,7 +832,7 @@ func (s *Server) handleReindexDocument(w http.ResponseWriter, r *http.Request) {
 	}
 	if projectionService, ok := s.semanticIndex.(KnowledgeDocumentVectorProjectionAPI); ok {
 		projections, projectionErr := projectionService.ListDocumentVectorProjections(
-			r.Context(), knowledgePrincipalID(r), knowledgeDefaultCorpusID,
+			r.Context(), s.knowledgeOwnerScope(r), knowledgeDefaultCorpusID,
 		)
 		if projectionErr == nil {
 			if projection, found := projections[doc.ID]; found && strings.TrimSpace(projection.JobID) != "" {
