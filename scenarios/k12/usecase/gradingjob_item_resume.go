@@ -418,8 +418,31 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 	if skipped {
 		return item, nil
 	}
-	if receipt, err := deps.Records.GetGradingAssessmentItem(ctx, req.AgentName, job.Record.RecordID, q.ProblemID); err == nil {
-		return replayGradingAssessmentItem(q, receipt)
+	if view, err := deps.Records.GetEffectiveGradingAssessment(ctx, req.AgentName, job.Record.RecordID, q.ProblemID); err == nil {
+		if recovery, _ := ctx.Value(assessmentRecoveryContextKey{}).(bool); !recovery {
+			return replayGradingAssessmentItem(q, view.Original)
+		}
+		if err = deps.Records.ValidateGradingAssessmentAnswer(ctx, view.Current); err == nil {
+			return replayGradingAssessmentItem(q, view.Current)
+		} else if !errors.Is(err, k12storage.ErrProblemAssetUnavailable) {
+			return item, err
+		}
+		if _, finalErr := deps.Records.GetGradingFinalArtifactByJob(ctx, req.AgentName, job.Record.RecordID); finalErr == nil {
+			return replayGradingAssessmentItem(q, view.Current)
+		} else if !errors.Is(finalErr, records.ErrNotFound) {
+			return item, finalErr
+		}
+		item.correction = &view
+		owner, ownerErr := resolveGradingGroundingTextbookOwner(ctx, deps, job)
+		if ownerErr != nil {
+			return item, ownerErr
+		}
+		asset, assetErr := deps.Records.GetProblemAssetVersion(ctx, owner, view.Current.AnswerSource.AssetID, view.Current.AnswerSource.AssetVersion)
+		if assetErr != nil {
+			return item, assetErr
+		}
+		req.Grade = asset.Facts.AnswerContext["grade_term"]
+		ctx = context.WithValue(ctx, assessmentCorrectionContextKey{}, assessmentCorrectionIdentity(view))
 	} else if !errors.Is(err, records.ErrNotFound) {
 		return item, err
 	}
@@ -688,6 +711,9 @@ func executeGradingItemOperationWithKind[T any](
 		return zero, "", err
 	}
 	requestDigest := modelInvocationResultDigest(request)
+	if correctionID, ok := ctx.Value(assessmentCorrectionContextKey{}).(string); ok {
+		requestDigest = modelInvocationResultDigest([]string{requestDigest, correctionID})
+	}
 	var expectedGrounding *gradingProviderGrounding
 	if grounding, ok := gradingProviderGroundingFromContext(ctx); ok {
 		expectedGrounding = &grounding
@@ -1036,6 +1062,13 @@ func commitGradingAssessmentItem(
 		ProjectionStatus:        k12.GradingProjectionCommitted, CreatedAt: deps.now(), UpdatedAt: deps.now(),
 	}
 	effects.AssetPublication = item.assetPublication
+	if item.correction != nil {
+		stored, err := commitAssetAssessmentCorrection(ctx, deps, *item.correction, receipt, effects)
+		if err != nil {
+			return item, err
+		}
+		return replayGradingAssessmentItem(q, stored)
+	}
 	stored, _, err := deps.Records.CommitGradingAssessmentItem(ctx, receipt, effects)
 	if err != nil {
 		return item, err

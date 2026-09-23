@@ -499,6 +499,12 @@ func (s *Store) CommitGradingFinalArtifact(
 			return k12.GradingFinalArtifact{}, false, rowsErr
 		}
 		for _, item := range assessments {
+			correction, correctionErr := latestAssessmentCorrection(ctx, tx, item)
+			if correctionErr == nil {
+				item = correction.Assessment
+			} else if !errors.Is(correctionErr, sql.ErrNoRows) {
+				return k12.GradingFinalArtifact{}, false, correctionErr
+			}
 			if err := validateAssessmentAssetSource(ctx, tx, item); err != nil {
 				return k12.GradingFinalArtifact{}, false, err
 			}

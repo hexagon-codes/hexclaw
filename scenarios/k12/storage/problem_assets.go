@@ -125,6 +125,17 @@ func (s *Store) publishProblemAsset(ctx context.Context, p k12.ProblemAssetPubli
 		if !current {
 			return k12.ProblemAssetVersion{}, false, ErrProblemAssetUnavailable
 		}
+		assessment, err := getGradingAssessmentItemRevisionVia(ctx, tx, inv.AgentName, inv.JobID, inv.ProblemID, inv.InputRevision)
+		if err != nil {
+			return k12.ProblemAssetVersion{}, false, err
+		}
+		correction, err := latestAssessmentCorrection(ctx, tx, assessment)
+		if err == nil && correction.Assessment.SolveInvocationID != inv.InvocationID {
+			return k12.ProblemAssetVersion{}, false, ErrProblemAssetUnavailable
+		}
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return k12.ProblemAssetVersion{}, false, err
+		}
 	}
 	var generator *k12.GradingItemInvocation
 	switch p.Verification.Kind {

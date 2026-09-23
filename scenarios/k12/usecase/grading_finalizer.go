@@ -34,6 +34,9 @@ func (o *GradingOrchestrator) finalizeGradingPage(
 	} else if !errors.Is(err, records.ErrNotFound) {
 		return k12.GradingFinalArtifact{}, err
 	}
+	if err := o.recoverInvalidAssetAssessments(ctx, run, job); err != nil {
+		return k12.GradingFinalArtifact{}, err
+	}
 	finalizationGeneration, err := o.deps.Records.GetGradingFinalizationGeneration(
 		ctx,
 		job.Record.AgentName,
@@ -42,7 +45,7 @@ func (o *GradingOrchestrator) finalizeGradingPage(
 	if err != nil {
 		return k12.GradingFinalArtifact{}, err
 	}
-	assessments, err := o.deps.Records.ListGradingAssessmentItems(
+	assessments, err := o.deps.Records.ListEffectiveGradingAssessments(
 		ctx, job.Record.AgentName, job.Record.RecordID,
 	)
 	if err != nil {

@@ -5,6 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"github.com/hexagon-codes/hexclaw/records"
+	"reflect"
 	"testing"
 
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
@@ -15,6 +18,91 @@ import (
 type assetReuseSolver struct {
 	calls int
 	model bool
+}
+
+func TestProblemAssets_FinalizationRecoversInvalidCommittedAnswer(t *testing.T) {
+	for _, outcomeUnknown := range []bool{false, true} {
+		t.Run(map[bool]string{false: "success", true: "unknown"}[outcomeUnknown], func(t *testing.T) {
+			ctx := context.Background()
+			solver := &assetReuseSolver{}
+			grader := &assetReuseGrader{}
+			o := newParallelAnchorOrchestrator(t, &countingRecognizer{}, nil, WithGradingRunDir(t.TempDir()))
+			o.deps.Solver, o.deps.Grader, o.deps.VerifiedGrader = solver, grader, nil
+			o.deps.TextbookOwnerID = DefaultLocalOwnerScope
+			o.deps.Recognizer = &countingRecognizer{questions: []RecognizedQuestion{{Question: "2+2=", Subject: "数学", StudentAnswer: "4", AnswerState: AnswerStatePresent}}}
+			dispatcher := k12storage.NewDispatcher(o.deps.Records, ProblemAssetConsumer{Records: o.deps.Records})
+			seedJob := runItemResumeJobToAssessing(t, o, "final-correction-seed")
+			if _, err := o.ConfirmAndRun(ctx, seedJob, nil); err != nil {
+				t.Fatal(err)
+			}
+			if err := dispatcher.ProcessPending(ctx); err != nil {
+				t.Fatal(err)
+			}
+			jobID := runItemResumeJobToAssessing(t, o, "final-correction-target")
+			_, job := confirmItemResumeJobWithoutRun(t, o, jobID)
+			run := o.lookup(jobID)
+			q := run.questions[0]
+			job, err := o.runAssessItems(ctx, run, job)
+			if err != nil {
+				t.Fatal(err)
+			}
+			original, err := o.deps.Records.GetGradingAssessmentItem(ctx, "mingming", jobID, q.ProblemID)
+			if err != nil || original.AnswerSource == nil {
+				t.Fatalf("original asset receipt: %+v %v", original, err)
+			}
+			source := original.AnswerSource
+			if err = o.deps.Records.ArchiveProblemAsset(ctx, DefaultLocalOwnerScope, source.AssetID, source.AssetRevision); err != nil {
+				t.Fatal(err)
+			}
+			if outcomeUnknown {
+				grader.failure = context.DeadlineExceeded
+			}
+			artifact, err := o.finalizeGradingPage(ctx, run, job)
+			if outcomeUnknown {
+				if !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("first recovery must retain unknown: %v", err)
+				}
+				if _, err = o.finalizeGradingPage(ctx, run, job); err == nil {
+					t.Fatal("unknown recovery falsely succeeded")
+				}
+				view, readErr := o.deps.Records.GetEffectiveGradingAssessment(ctx, "mingming", jobID, q.ProblemID)
+				if readErr != nil || view.Correction != nil || !reflect.DeepEqual(view.Original, original) {
+					t.Fatalf("unknown changed assessment: %+v %v", view, readErr)
+				}
+				if _, err = o.deps.Records.GetGradingFinalArtifactByJob(ctx, "mingming", jobID); !errors.Is(err, records.ErrNotFound) {
+					t.Fatalf("unknown published artifact: %v", err)
+				}
+				if solver.calls != 2 || len(grader.answers) != 3 {
+					t.Fatalf("unknown resent: solve=%d grade=%d", solver.calls, len(grader.answers))
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if artifact.ArtifactID == "" || artifact.CanonicalMarkdown == "" {
+				t.Fatal("missing final artifact")
+			}
+			view, err := o.deps.Records.GetEffectiveGradingAssessment(ctx, "mingming", jobID, q.ProblemID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if view.Correction == nil || view.Current.SolveInvocationID == "" || view.Current.GradeInvocationID == original.GradeInvocationID || view.Current.AnswerSource != nil {
+				t.Fatalf("correction did not bind new proof: %+v", view)
+			}
+			if !reflect.DeepEqual(original, view.Original) {
+				t.Fatal("recovery overwrote historical assessment")
+			}
+			if solver.calls != 2 || len(grader.answers) != 3 {
+				t.Fatalf("solve=%d grade=%d", solver.calls, len(grader.answers))
+			}
+			replayed, err := o.finalizeGradingPage(ctx, run, job)
+			if err != nil || !reflect.DeepEqual(artifact, replayed) || solver.calls != 2 || len(grader.answers) != 3 {
+				t.Fatalf("final replay repeated recovery: %v", err)
+			}
+		})
+	}
+
 }
 
 func (s *assetReuseSolver) UsesGradingPhysicalCalls() bool { return true }
@@ -38,10 +126,16 @@ func (s *assetReuseSolver) Solve(ctx context.Context, _ string, _ string, _ stri
 	return SolveResult{Solution: "4", Evidence: SolveEvidence{Verdict: VerdictAgree, EvidenceType: EvidenceNumericExec}}, nil
 }
 
-type assetReuseGrader struct{ answers []string }
+type assetReuseGrader struct {
+	answers []string
+	failure error
+}
 
 func (g *assetReuseGrader) Grade(_ context.Context, _ string, answer, solution string) (GradeOutcome, error) {
 	g.answers = append(g.answers, answer)
+	if g.failure != nil {
+		return GradeOutcome{}, g.failure
+	}
 	correct := answer == solution
 	if correct {
 		return GradeOutcome{Verdict: VerdictAgree, FinalAnswerCorrect: &correct}, nil

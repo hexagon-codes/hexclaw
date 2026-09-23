@@ -852,6 +852,10 @@ func (s *Store) ListGradingAssessmentItems(ctx context.Context, agentName, jobID
 }
 
 // validateAssessmentAssetSource 使用服务端采用回执核对来源和本次输入，不把候选当作已采用。
+func (s *Store) ValidateGradingAssessmentAnswer(ctx context.Context, item k12.GradingAssessmentItem) error {
+	return validateAssessmentAssetSource(ctx, s.db, item)
+}
+
 func validateAssessmentAssetSource(ctx context.Context, db dbHandle, item k12.GradingAssessmentItem) error {
 	source := item.AnswerSource
 	if source == nil || source.Kind != k12.ProblemAnswerAsset {
