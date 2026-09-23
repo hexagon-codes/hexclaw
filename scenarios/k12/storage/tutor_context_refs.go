@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -45,8 +46,13 @@ func scanTutorContext(row rowScanner) (TutorContextRef, error) {
 
 // TutorSourceIdentity 只投影已存在的任务入站身份，不从展示文本猜测消息或 owner。
 func (s *Store) TutorSourceIdentity(ctx context.Context, dispatch k12.ImageTaskDispatch) (TutorContextRef, error) {
-	owner, err := s.GetImageTaskOwnerScope(ctx, dispatch.AgentName, dispatch.DispatchID)
-	if errors.Is(err, ErrImageTaskNotFound) {
+	return tutorSourceIdentityVia(ctx, s.db, dispatch)
+}
+
+func tutorSourceIdentityVia(ctx context.Context, q dbQueryer, dispatch k12.ImageTaskDispatch) (TutorContextRef, error) {
+	var owner string
+	err := q.QueryRowContext(ctx, `SELECT owner_scope FROM k12_image_task_owner_scopes WHERE agent_name=? AND dispatch_id=?`, dispatch.AgentName, dispatch.DispatchID).Scan(&owner)
+	if errors.Is(err, sql.ErrNoRows) {
 		return TutorContextRef{}, records.ErrNotFound
 	}
 	if err != nil {
@@ -61,7 +67,7 @@ func (s *Store) TutorSourceIdentity(ctx context.Context, dispatch k12.ImageTaskD
 		ref.ConversationKey = TutorConversationKey("desktop", "", dispatch.SourceSessionID)
 	case k12.ImageTaskSourceIM:
 		var platform, instance, chat string
-		err = s.db.QueryRowContext(ctx, `SELECT r.platform,r.instance_id,r.chat_id,r.provider_message_id
+		err = q.QueryRowContext(ctx, `SELECT r.platform,r.instance_id,r.chat_id,r.provider_message_id
 			FROM k12_im_inbound_receipts r JOIN k12_im_inbound_dispatches d ON d.receipt_id=r.receipt_id
 			WHERE d.image_task_id=? AND r.owner_scope=? AND r.agent_name=?`,
 			dispatch.DispatchID, owner, dispatch.AgentName).Scan(&platform, &instance, &chat, &ref.MessageID)
@@ -88,6 +94,13 @@ func (s *Store) SaveTutorSourceRefs(ctx context.Context, refs []TutorContextRef)
 		return err
 	}
 	defer tx.Rollback()
+	if err := saveTutorSourceRefsTx(ctx, tx, refs); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func saveTutorSourceRefsTx(ctx context.Context, tx *sql.Tx, refs []TutorContextRef) error {
 	for _, ref := range refs {
 		if ref.Kind != "source" || ref.OwnerScope == "" || ref.AgentName == "" || ref.ConversationKey == "" || ref.MessageID == "" || !json.Valid([]byte(ref.QuestionJSON)) {
 			return fmt.Errorf("tutor source identity is incomplete")
@@ -113,7 +126,7 @@ func (s *Store) SaveTutorSourceRefs(ctx context.Context, refs []TutorContextRef)
 			return ErrTutorContextConflict
 		}
 	}
-	return tx.Commit()
+	return nil
 }
 
 func insertTutorRef(ctx context.Context, tx *sql.Tx, ref TutorContextRef) error {
@@ -121,6 +134,73 @@ func insertTutorRef(ctx context.Context, tx *sql.Tx, ref TutorContextRef) error 
 		ref.OwnerScope, ref.AgentName, ref.ConversationKey, ref.MessageID, ref.Kind, ref.JobID,
 		ref.ProblemID, ref.InputRevision, ref.ResultDigest, ref.PrintedNumber, ref.QuestionJSON, ref.RequestDigest, ref.CreatedAt)
 	return err
+}
+
+// commitTutorFinalReferences 将原题关联和终稿一起提交，重启不依赖页面再次读取。
+func commitTutorFinalReferences(ctx context.Context, tx *sql.Tx, artifact k12.GradingFinalArtifact) error {
+	var dispatchID string
+	err := tx.QueryRowContext(ctx, `SELECT dispatch_id FROM k12_homework_submissions WHERE agent_name=? AND grading_job_id=?`, artifact.AgentName, artifact.JobID).Scan(&dispatchID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	dispatch, err := getImageTaskDispatch(ctx, tx, artifact.AgentName, dispatchID, "")
+	if err != nil {
+		return err
+	}
+	base, err := tutorSourceIdentityVia(ctx, tx, dispatch)
+	if errors.Is(err, records.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT problem_id,input_revision,result_digest,result_json FROM k12_grading_assessment_items WHERE agent_name=? AND job_id=? AND current_disposition='current'`, artifact.AgentName, artifact.JobID)
+	if err != nil {
+		return err
+	}
+	var refs []TutorContextRef
+	for rows.Next() {
+		ref := base
+		ref.JobID = artifact.JobID
+		var result string
+		if err := rows.Scan(&ref.ProblemID, &ref.InputRevision, &ref.ResultDigest, &result); err != nil {
+			rows.Close()
+			return err
+		}
+		var payload struct{ Recognized json.RawMessage }
+		if err := json.Unmarshal([]byte(result), &payload); err != nil {
+			rows.Close()
+			return err
+		}
+		var question struct {
+			ProblemID        string   `json:"problem_id"`
+			SourceNumberPath []string `json:"source_number_path"`
+		}
+		if len(payload.Recognized) == 0 {
+			continue
+		}
+		if err := json.Unmarshal(payload.Recognized, &question); err != nil {
+			rows.Close()
+			return err
+		}
+		if question.ProblemID != ref.ProblemID {
+			continue
+		}
+		ref.QuestionJSON = string(payload.Recognized)
+		if len(question.SourceNumberPath) > 0 {
+			ref.PrintedNumber = NormalizeTutorPrintedNumber(question.SourceNumberPath[len(question.SourceNumberPath)-1])
+		}
+		refs = append(refs, ref)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	return saveTutorSourceRefsTx(ctx, tx, refs)
 }
 
 // ResolveTutorContext 重放保持同一作答；无明确引用时要求任务和原印刷题号均唯一。
@@ -192,4 +272,35 @@ func (s *Store) ResolveTutorContext(ctx context.Context, scope TutorContextRef, 
 		return ref, false, err
 	}
 	return ref, false, tx.Commit()
+}
+
+// NormalizeTutorPrintedNumber 只规范化原文中明确存在的题号。
+func NormalizeTutorPrintedNumber(raw string) string {
+	raw = strings.Trim(strings.TrimSpace(raw), "（）().、． ")
+	if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+		return strconv.Itoa(n)
+	}
+	digits := map[rune]int{'一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9}
+	n, last := 0, 0
+	for _, r := range raw {
+		if r == '十' || r == '百' {
+			unit := 10
+			if r == '百' {
+				unit = 100
+			}
+			if last == 0 {
+				last = 1
+			}
+			n += last * unit
+			last = 0
+		} else if v, ok := digits[r]; ok {
+			last = v
+		} else {
+			return ""
+		}
+	}
+	if n+last == 0 {
+		return ""
+	}
+	return strconv.Itoa(n + last)
 }

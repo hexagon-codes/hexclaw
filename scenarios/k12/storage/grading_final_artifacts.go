@@ -606,6 +606,9 @@ func (s *Store) CommitGradingFinalArtifact(
 		return k12.GradingFinalArtifact{}, false, err
 	}
 	replay = affected == 0
+	if err := commitTutorFinalReferences(ctx, tx, stored); err != nil {
+		return k12.GradingFinalArtifact{}, false, err
+	}
 	if err := tx.Commit(); err != nil {
 		return k12.GradingFinalArtifact{}, false, fmt.Errorf(
 			"k12storage: commit grading final artifact transaction: %w",

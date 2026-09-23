@@ -2,6 +2,7 @@ package usecase
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -1663,6 +1664,11 @@ func (s *sourceCurrentTipsSpy) saw(concept string) bool {
 	return false
 }
 
+// 只暂停自动调度，以真实仓储和识别回执构造旧任务的待确认检查点。
+type pausedSourceReprocessGrading struct{ *GradingOrchestrator }
+
+func (pausedSourceReprocessGrading) StartAsync(string) bool { return false }
+
 func newSourceReprocessIntegrationFixture(
 	t *testing.T,
 	retakeQuestions []RecognizedQuestion,
@@ -1723,10 +1729,6 @@ func newSourceReprocessIntegrationFixture(
 			deps, resolveSnapshot, WithGradingRunDir(t.TempDir()),
 		),
 	)
-	// 固化旧版待确认检查点，避免新版自动推进提前生成不可变终稿。
-	if err := orchestrator.Shutdown(context.Background()); err != nil {
-		t.Fatal(err)
-	}
 	repository := &PageAssetRepository{Records: deps.Records}
 	coordinator := &ImageTaskCoordinator{
 		Records: deps.Records, PageAssets: repository,
@@ -1734,7 +1736,7 @@ func newSourceReprocessIntegrationFixture(
 			Intent:         k12.ImageTaskIntentCompletedHomework,
 			IntentEvidence: []string{"completed homework"}, Confidence: 1,
 		}},
-		Grading: orchestrator, ResolveRoute: imageTaskRouteForTest,
+		Grading: pausedSourceReprocessGrading{orchestrator}, ResolveRoute: imageTaskRouteForTest,
 		ResolveGrade: func(context.Context, string) (string, error) {
 			return "五年级上", nil
 		},
@@ -1793,12 +1795,12 @@ func newSourceReprocessIntegrationFixture(
 	if _, err := orchestrator.runRecognize(context.Background(), run, jobID); err != nil {
 		t.Fatal(err)
 	}
-	run, job := confirmSourceReprocessFixtureWithoutRun(t, orchestrator, jobID)
-	orchestrator = trackGradingOrchestrator(t, NewGradingOrchestrator(deps, resolveSnapshot, WithGradingRunDir(orchestrator.runDir)))
-	if _, err := orchestrator.ensureRun(context.Background(), jobID); err != nil {
+	orchestrator.startAnchorAsync(jobID, run, jobView.Fields.ModelSnapshot)
+	if err := orchestrator.WaitForIdle(waitCtx); err != nil {
 		t.Fatal(err)
 	}
 	coordinator.Grading = orchestrator
+	run, job := confirmSourceReprocessFixtureWithoutRun(t, orchestrator, jobID)
 	return sourceReprocessIntegrationFixture{
 		coordinator: coordinator, orchestrator: orchestrator,
 		recognizer: recognizer, repository: repository,
@@ -2589,6 +2591,14 @@ func TestProblemSourceFullCoverageCompletesCanonicalJobAndRestartReplayDoesNotRe
 	if err != nil || completed.Record.Status != k12.GradingStageCompleted {
 		t.Fatalf("canonical grading job after full source coverage=%+v err=%v", completed, err)
 	}
+	// 尚未读取 ImageTask 结果页，终稿事务已经保存原题关联。
+	ref, ambiguous, err := fixture.coordinator.Records.ResolveTutorContext(context.Background(), k12storage.TutorContextRef{
+		OwnerScope: "guardian-1", AgentName: "mingming",
+		ConversationKey: k12storage.TutorConversationKey("desktop", "", "source-reprocess-session"), MessageID: "followup-after-final",
+	}, "source-reprocess-message", "1", "第1题再简单点")
+	if err != nil || ambiguous || ref.JobID != work.JobID || ref.InputRevision != work.InputRevision {
+		t.Fatalf("atomic final reference=%+v ambiguous=%v err=%v", ref, ambiguous, err)
+	}
 
 	beforeSolverAffected := fixture.solver.callCount("corrected affected full")
 	beforeGraderAffected := fixture.grader.callCount("corrected affected full")
@@ -2635,7 +2645,7 @@ func TestProblemSourceFullCoverageCompletesCanonicalJobAndRestartReplayDoesNotRe
 	}
 }
 
-func TestProblemSourceRetakeFinalTutoringTipsUseCurrentV73Facts(t *testing.T) {
+func TestProblemSourceRetakeFinalResultUsesCurrentV73Facts(t *testing.T) {
 	fixture := newSourceReprocessIntegrationFixture(t, []RecognizedQuestion{{
 		Question: "retaken affected current", SourceNumberPath: []string{"1"}, DisplayLabel: "1",
 		Subject: "数学", AnswerState: AnswerStatePresent, StudentAnswer: "4",
@@ -2646,6 +2656,7 @@ func TestProblemSourceRetakeFinalTutoringTipsUseCurrentV73Facts(t *testing.T) {
 	}})
 	tips := &sourceCurrentTipsSpy{}
 	fixture.orchestrator.deps.TutoringTipsReview = tips
+	fixture.grader.outcomes = map[string]GradeOutcome{"retaken affected current": {Verdict: VerdictDisagree, ErrorCause: "计算失误", WrongStep: "错误步骤"}}
 	assessSourceFixtureUnrelatedForFullCoverage(t, fixture)
 	work := fixture.claimRetake(t)
 	if err := fixture.coordinator.ProcessProblemSourceReprocess(
@@ -2663,18 +2674,33 @@ func TestProblemSourceRetakeFinalTutoringTipsUseCurrentV73Facts(t *testing.T) {
 		strings.Contains(artifact.CanonicalMarkdown, "old affected") {
 		t.Fatalf("retake final artifact mixed source revisions:\n%s", artifact.CanonicalMarkdown)
 	}
-	if !tips.saw("分数乘法") {
-		t.Fatalf("retake tutoring tips concepts=%v, want current V73 concept", tips.concepts)
+	assessment, err := fixture.coordinator.Records.GetGradingAssessmentItem(
+		context.Background(), "mingming", work.JobID, work.ProblemID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var current PhotoGradeItem
+	if err := json.Unmarshal([]byte(assessment.ResultJSON), &current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Recognized.Question != "retaken affected current" ||
+		len(current.Recognized.KnowledgePoints) != 1 || current.Recognized.KnowledgePoints[0] != "分数乘法" {
+		t.Fatalf("retake result retained stale question facts: %+v", current.Recognized)
+	}
+	if len(tips.concepts) != 0 || artifact.SummaryInvocationID != "" {
+		t.Fatal("finalization started a redundant full-page tutoring call")
 	}
 }
 
-func TestProblemSourceCorrectTextFinalTutoringTipsUseCurrentV72Stem(t *testing.T) {
+func TestProblemSourceCorrectTextFinalResultUsesCurrentV72Stem(t *testing.T) {
 	fixture := newSourceReprocessIntegrationFixture(t, []RecognizedQuestion{{
 		Question: "unused retake batch", SourceNumberPath: []string{"1"}, DisplayLabel: "1",
 		Subject: "数学", AnswerState: AnswerStatePresent, StudentAnswer: "4",
 		KnowledgePoints: []string{"整数加法"},
 	}})
 	fixture.orchestrator.deps.TutoringTipsReview = &sourceCurrentTipsSpy{}
+	fixture.grader.outcomes = map[string]GradeOutcome{"corrected affected current": {Verdict: VerdictDisagree, ErrorCause: "计算失误", WrongStep: "错误步骤"}}
 	assessSourceFixtureUnrelatedForFullCoverage(t, fixture)
 	affected := fixture.run.questions[0]
 	if _, err := fixture.coordinator.Records.DB().Exec(`
@@ -2715,14 +2741,8 @@ func TestProblemSourceCorrectTextFinalTutoringTipsUseCurrentV72Stem(t *testing.T
 	if err != nil {
 		t.Fatalf("load correct_text final artifact: %v", err)
 	}
-	tipsMarker := "# 这份作业的辅导要点"
-	tipsOffset := strings.Index(artifact.CanonicalMarkdown, tipsMarker)
-	if tipsOffset < 0 {
-		t.Fatalf("correct_text final artifact missing tutoring tips section:\n%s", artifact.CanonicalMarkdown)
-	}
-	tipsMarkdown := artifact.CanonicalMarkdown[tipsOffset:]
-	if !strings.Contains(tipsMarkdown, "corrected affected current") ||
-		strings.Contains(tipsMarkdown, "old affected") {
+	if !strings.Contains(artifact.CanonicalMarkdown, "corrected affected current") ||
+		strings.Contains(artifact.CanonicalMarkdown, "old affected") {
 		t.Fatalf("correct_text final artifact mixed source revisions:\n%s", artifact.CanonicalMarkdown)
 	}
 }

@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"regexp"
-	"strconv"
 	"strings"
 
 	"github.com/hexagon-codes/hexclaw/records"
@@ -21,36 +20,6 @@ type TutorFollowupInput struct {
 	OwnerScope, AgentName, ConversationKey, MessageID string
 	ReplyTo, Query                                    string
 	HasAttachments                                    bool
-}
-
-func printedTutorNumber(raw string) string {
-	raw = strings.Trim(strings.TrimSpace(raw), "（）().、． ")
-	if n, err := strconv.Atoi(raw); err == nil && n > 0 {
-		return strconv.Itoa(n)
-	}
-	digits := map[rune]int{'一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9}
-	n, last := 0, 0
-	for _, r := range raw {
-		if r == '十' || r == '百' {
-			unit := 10
-			if r == '百' {
-				unit = 100
-			}
-			if last == 0 {
-				last = 1
-			}
-			n += last * unit
-			last = 0
-		} else if v, ok := digits[r]; ok {
-			last = v
-		} else {
-			return ""
-		}
-	}
-	if n+last == 0 {
-		return ""
-	}
-	return strconv.Itoa(n + last)
 }
 
 func (c *ImageTaskCoordinator) registerTutorResult(ctx context.Context, result ImageTaskResult, assessments []k12.GradingAssessmentItem) error {
@@ -78,13 +47,17 @@ func (c *ImageTaskCoordinator) registerTutorResult(ctx context.Context, result I
 		ref := base
 		ref.JobID, ref.ProblemID, ref.InputRevision, ref.ResultDigest = a.JobID, a.ProblemID, a.InputRevision, a.ResultDigest
 		if len(q.SourceNumberPath) > 0 {
-			ref.PrintedNumber = printedTutorNumber(q.SourceNumberPath[len(q.SourceNumberPath)-1])
+			ref.PrintedNumber = k12storage.NormalizeTutorPrintedNumber(q.SourceNumberPath[len(q.SourceNumberPath)-1])
 		}
-		raw, err := json.Marshal(q)
-		if err != nil {
+		// 读取投影可能规范化显示字段，关联身份沿用原评估中的不可变题目快照。
+		var persisted struct{ Recognized json.RawMessage }
+		if err := json.Unmarshal([]byte(a.ResultJSON), &persisted); err != nil {
 			return err
 		}
-		ref.QuestionJSON = string(raw)
+		if len(persisted.Recognized) == 0 {
+			continue
+		}
+		ref.QuestionJSON = string(persisted.Recognized)
 		refs = append(refs, ref)
 	}
 	return c.Records.SaveTutorSourceRefs(ctx, refs)
@@ -97,7 +70,7 @@ func (d *Deps) TutorFollowupDirective(ctx context.Context, input TutorFollowupIn
 	}
 	number := ""
 	if match := tutorQuestionNumber.FindStringSubmatch(input.Query); len(match) > 1 {
-		number = printedTutorNumber(match[1])
+		number = k12storage.NormalizeTutorPrintedNumber(match[1])
 	}
 	requested := input.ReplyTo != "" || number != ""
 	for _, phrase := range []string{"这道题", "这题", "再讲", "再简单", "换个讲法", "没听懂"} {
@@ -113,7 +86,7 @@ func (d *Deps) TutorFollowupDirective(ctx context.Context, input TutorFollowupIn
 		return "The homework reference is ambiguous. Ask only which existing worksheet or printed subquestion the parent means; do not guess or repeat recognition, solving, grading, or a learning-state update.", nil
 	}
 	if errors.Is(err, records.ErrNotFound) {
-		return "", nil
+		return "No stored homework reference matches this message. Use only a question explicitly included in the message; otherwise ask which existing worksheet and printed question is meant. Do not infer an answer or learning progress from an unrelated task.", nil
 	}
 	if err != nil {
 		return "", err
