@@ -45,14 +45,14 @@ type MaterialPreparation struct {
 // ReconcileMaterialPreparation 在知识发布原事务内保存原解析快照与独立候选队列。
 // 通用知识流程不调用模型；不能完整识别的范围保留为待复核。
 func (s *Store) ReconcileMaterialPreparation(ctx context.Context, tx *sql.Tx, ev TextbookManifestLifecycleEvent) error {
-	var content, digest, ext, grade, subject, agent, lifecycle, textState string
+	var content, title, digest, ext, grade, subject, agent, lifecycle, textState string
 	var generation int64
 	var deleted bool
-	err := tx.QueryRowContext(ctx, `SELECT d.content,s.blob_sha256,s.extension,s.grade,s.subject,s.agent_id,b.lifecycle_state,b.text_state,b.content_generation,d.deleted
+	err := tx.QueryRowContext(ctx, `SELECT d.content,d.title,s.blob_sha256,s.extension,s.grade,s.subject,s.agent_id,b.lifecycle_state,b.text_state,b.content_generation,d.deleted
  FROM kb_documents d JOIN kb_semantic_document_bindings b ON b.document_id=d.id
  JOIN kb_ingest_document_sources s ON s.document_id=d.id AND s.content_generation=b.content_generation
  WHERE b.owner_id=? AND b.document_id=?`, ev.OwnerID, ev.DocumentID).
-		Scan(&content, &digest, &ext, &grade, &subject, &agent, &lifecycle, &textState, &generation, &deleted)
+		Scan(&content, &title, &digest, &ext, &grade, &subject, &agent, &lifecycle, &textState, &generation, &deleted)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
@@ -78,6 +78,13 @@ func (s *Store) ReconcileMaterialPreparation(ctx context.Context, tx *sql.Tx, ev
 	}
 	if exists {
 		return nil
+	}
+	// 标题中只有一个明确年级学期时采用来源原文，不从用户偏好猜测。
+	if grade == "" {
+		grade = materialTitleGrade(title)
+	}
+	if subject == "" && strings.Contains(title, "数学") {
+		subject = "数学"
 	}
 	// 只有来源明确绑定的本机孩子档案可补充课程范围，未知来源不猜年级。
 	if grade == "" && agent != "" && ev.OwnerID == "desktop-user" {
@@ -135,6 +142,24 @@ func (s *Store) ReconcileMaterialPreparation(ctx context.Context, tx *sql.Tx, ev
 		}
 	}
 	return nil
+}
+
+var materialGradeInTitle = regexp.MustCompile(`([一二三四五六七八九1-9])年级[ ·\t]*([上下])(?:册|学期)?`)
+
+func materialTitleGrade(title string) string {
+	matches := materialGradeInTitle.FindAllStringSubmatch(title, -1)
+	grade := ""
+	for _, m := range matches {
+		value := m[1] + "年级" + m[2]
+		if strings.Contains("123456789", m[1]) {
+			value = string([]rune("一二三四五六七八九")[int(m[1][0]-'1')]) + "年级" + m[2]
+		}
+		if grade != "" && grade != value {
+			return ""
+		}
+		grade = value
+	}
+	return grade
 }
 
 var materialNumberPrefix = regexp.MustCompile(`^\s*(?:[-*]\s+)?(?:[0-9]+[.、)]\s+)?(.+?)\s*$`)
@@ -286,4 +311,10 @@ func (s *Store) MaterialForegroundBusy(ctx context.Context) (bool, error) {
 	var busy bool
 	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM k12_grading_jobs WHERE status IN ('queued','normalizing','recognizing','assessing','finalizing'))`).Scan(&busy)
 	return busy, err
+}
+
+// StopStaleMaterialPreparation 只终止已失效来源；原回执与已发布资产保留。
+func (s *Store) StopStaleMaterialPreparation(ctx context.Context, p MaterialPreparation) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE k12_material_preparations SET state='stopped',reason='Source changed or removed',updated_at=? WHERE task_id=? AND state IN ('queued','running','verified') AND NOT EXISTS(SELECT 1 FROM kb_semantic_document_bindings b JOIN kb_documents d ON d.id=b.document_id WHERE b.owner_id=? AND b.document_id=? AND b.content_generation=? AND b.lifecycle_state='active' AND b.text_state='ready' AND d.deleted=0)`, nowUnix(), p.TaskID, p.OwnerID, p.DocumentID, p.SourceRevision)
+	return err
 }

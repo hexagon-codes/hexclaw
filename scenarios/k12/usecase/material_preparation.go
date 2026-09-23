@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"sync/atomic"
 	"time"
 
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
@@ -22,7 +23,7 @@ type MaterialPreparationWorker struct {
 	ResolveModel func(context.Context, k12.GradingModelSnapshot) (k12.GradingModelSnapshot, error)
 }
 
-func (w *MaterialPreparationWorker) RunOnce(ctx context.Context) (bool, error) {
+func (w *MaterialPreparationWorker) RunOnce(ctx context.Context) (did bool, err error) {
 	busy, err := w.Records.MaterialForegroundBusy(ctx)
 	if err != nil || busy {
 		return false, err
@@ -34,6 +35,11 @@ func (w *MaterialPreparationWorker) RunOnce(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	defer func() {
+		if errors.Is(err, k12storage.ErrMaterialPreparationFenced) {
+			err = errors.Join(err, w.Records.StopStaleMaterialPreparation(context.WithoutCancel(ctx), p))
+		}
+	}()
 	if p.State == "verified" {
 		_, err = w.Records.PublishPreparedMaterialAsset(ctx, p.TaskID)
 		return true, err
@@ -76,11 +82,15 @@ func (w *MaterialPreparationWorker) RunOnce(ctx context.Context) (bool, error) {
 		modelCtx, stop := context.WithTimeout(ctx, timeout)
 		defer stop()
 		modelCtx = k12.WithGradingModelSnapshot(modelCtx, policy.Model)
-		modelCtx = WithGradingPhysicalCallExecutor(modelCtx, &materialPhysicalExecutor{records: w.Records, task: p})
+		executor := &materialPhysicalExecutor{records: w.Records, task: p}
+		modelCtx = WithGradingPhysicalCallExecutor(modelCtx, executor)
 		if solver, ok := w.Solver.(SubjectSolver); ok {
 			result, err = solver.SolveSubject(modelCtx, p.Candidate.Facts.Subject, p.Candidate.Facts.Stem, p.Candidate.Facts.AnswerContext["grade_term"], "")
 		} else {
 			result, err = w.Solver.Solve(modelCtx, p.Candidate.Facts.Stem, p.Candidate.Facts.AnswerContext["grade_term"], "")
+		}
+		if executor.deferred.Load() {
+			err = errors.Join(err, errMaterialForegroundDeferred)
 		}
 	}
 	unknown, receiptErr := w.Records.MaterialHasUnknownInvocation(context.WithoutCancel(ctx), p.TaskID)
@@ -155,8 +165,9 @@ func (w *MaterialPreparationWorker) Run(ctx context.Context, onError func(error)
 
 // materialPhysicalExecutor 只复用调用拦截接口，实际回执始终属于资料候选。
 type materialPhysicalExecutor struct {
-	records *k12storage.Store
-	task    k12storage.MaterialPreparation
+	records  *k12storage.Store
+	task     k12storage.MaterialPreparation
+	deferred atomic.Bool
 }
 
 func (e *materialPhysicalExecutor) ExecuteGradingPhysicalCall(ctx context.Context, spec GradingPhysicalCallSpec, send func(context.Context) (string, error)) (GradingPhysicalCallResult, error) {
@@ -165,6 +176,7 @@ func (e *materialPhysicalExecutor) ExecuteGradingPhysicalCall(ctx context.Contex
 		return GradingPhysicalCallResult{}, gradingPhysicalNoRetryError{cause: err}
 	}
 	if busy {
+		e.deferred.Store(true)
 		return GradingPhysicalCallResult{}, gradingPhysicalNoRetryError{cause: errMaterialForegroundDeferred}
 	}
 	invocation, fresh, err := e.records.ClaimMaterialInvocation(ctx, e.task, string(spec.Operation), spec.RequestDigest)

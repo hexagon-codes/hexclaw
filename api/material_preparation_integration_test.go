@@ -337,3 +337,76 @@ func TestMaterialPreparationFreezesOnlyExplicitSourceChildScope(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestMaterialPreparationTitleScopeAndUnknownScopeRemainDistinct(t *testing.T) {
+	for _, name := range []string{"数学六年级上册.md", "练习.md"} {
+		t.Run(name, func(t *testing.T) {
+			_, records, _, _ := materialImportFixture(t, "1. 4.5×2=\n", func(_ *sql.DB, input *knowledge.CreateDocumentInput) { input.Grade = ""; input.Filename = name })
+			p, err := records.NextMaterialPreparation(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := ""
+			if name == "数学六年级上册.md" {
+				want = "六年级上"
+			}
+			if p.Candidate.Facts.AnswerContext["grade_term"] != want {
+				t.Fatalf("scope: %+v", p.Candidate.Facts)
+			}
+		})
+	}
+}
+func TestMaterialPreparationModelDefersOnlyUnsentVerification(t *testing.T) {
+	db, records, worker, doc := materialImportFixture(t, "1. 商店3本书售价18元，7本同样的书一共多少元？\n")
+	boundary := &materialControlledSolver{t: t, afterGenerate: func() {
+		if _, err := db.Exec(`INSERT INTO agents(name) VALUES('foreground')`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`INSERT INTO k12_grading_jobs(record_id,agent_name,status,dedupe_key,created_at,updated_at) VALUES('foreground-job','foreground','recognizing','foreground-job',1,1)`); err != nil {
+			t.Fatal(err)
+		}
+	}}
+	worker.Solver = boundary
+	worker.ResolveModel = materialModelRoute
+	if _, err := worker.RunOnce(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if boundary.calls != 1 {
+		t.Fatalf("verification should remain unsent: %d", boundary.calls)
+	}
+	if _, err := db.Exec(`UPDATE k12_grading_jobs SET status='completed'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := worker.RunOnce(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	summary, err := records.GetMaterialPreparationSummary(t.Context(), "desktop-user", doc)
+	if err != nil || summary.State != "ready" || boundary.calls != 2 {
+		t.Fatalf("reuse generation: %+v %v calls=%d", summary, err, boundary.calls)
+	}
+}
+func TestMaterialPreparationSourceRevisionFencesInFlightModel(t *testing.T) {
+	db, records, worker, _ := materialImportFixture(t, "1. 商店3本书售价18元，7本同样的书一共多少元？\n")
+	boundary := &materialControlledSolver{t: t, afterGenerate: func() {
+		if _, err := db.Exec(`UPDATE kb_semantic_document_bindings SET lifecycle_state='tombstoned',deleted_at=1`); err != nil {
+			t.Fatal(err)
+		}
+	}}
+	worker.Solver = boundary
+	worker.ResolveModel = materialModelRoute
+	if _, err := worker.RunOnce(t.Context()); !errors.Is(err, k12storage.ErrMaterialPreparationFenced) {
+		t.Fatalf("source fence: %v", err)
+	}
+	var assets int
+	var state string
+	if err := db.QueryRow(`SELECT COUNT(*) FROM k12_problem_assets`).Scan(&assets); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT state FROM k12_material_preparations`).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	if assets != 0 || state != "stopped" || boundary.calls != 1 {
+		t.Fatalf("stale source: assets=%d state=%s calls=%d", assets, state, boundary.calls)
+	}
+	_ = records
+}
