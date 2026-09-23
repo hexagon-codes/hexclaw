@@ -505,6 +505,10 @@ hexclaw/
 | GET | `/api/v1/documents/preview/{token}` | 预览/下载暂存原文件 |
 | POST | `/api/v1/render` | Markdown 渲染为 md/html/docx/pdf/epub/odt/rtf/txt（启用 render 服务时） |
 
+### 自动化能力状态
+
+`GET /api/v1/automation/status` 使用业务接口相同的 Bearer 鉴权；Cron 或 Webhook 未启用时，该接口仍可读取。响应分别包含 `cron`、`webhook` 的 `enabled`（配置值）和 `state`（`ready`、`disabled`、`unavailable`）。对应能力 `ready` 后才读取列表；成功零条、未启用、初始化失败和接口不兼容分开处理，不能把 404 推断为未启用。
+
 ### 定时任务
 统一入口 `POST /api/v1/cronjob` 以请求体中的 `action` 字段分发（`create` / `update` / `remove` / `pause` / `resume` / `run` / `list` / `history`），支持 `idempotency_key` 幂等重放。
 

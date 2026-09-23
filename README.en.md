@@ -507,6 +507,10 @@ hexclaw/
 | GET | `/api/v1/documents/preview/{token}` | Preview/download staged original file |
 | POST | `/api/v1/render` | Render Markdown to md/html/docx/pdf/epub/odt/rtf/txt when render service is enabled |
 
+### Automation Capability Status
+
+`GET /api/v1/automation/status` requires the business API Bearer token and remains available when cron or webhooks are disabled. It returns `cron` and `webhook`, each containing `enabled` (configuration) and `state` (`ready`, `disabled`, or `unavailable`). Read the feature list after `ready`; a successful zero-item response is distinct from a disabled component, initialization failure or missing endpoint. A 404 does not prove that the feature is disabled.
+
 ### Cron Jobs
 The unified entrypoint `POST /api/v1/cronjob` dispatches on the request body's `action` field (`create` / `update` / `remove` / `pause` / `resume` / `run` / `list` / `history`) and supports `idempotency_key` replay.
 

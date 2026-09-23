@@ -811,6 +811,7 @@ func (s *Server) routes() http.Handler {
 	}
 
 	// 自动化权限治理 API（Profile / 预检 / 总览 / 决策日志 / 任务级授权）
+	mux.HandleFunc("GET /api/v1/automation/status", s.handleAutomationStatus)
 	mux.HandleFunc("GET /api/v1/autonomy/profile", s.handleGetAutonomyProfile)
 	mux.HandleFunc("PUT /api/v1/autonomy/profile", s.handleUpdateAutonomyProfile)
 	mux.HandleFunc("POST /api/v1/autonomy/preflight", s.handleAutonomyPreflight)

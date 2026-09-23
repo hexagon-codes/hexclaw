@@ -1647,6 +1647,7 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 	if cfg.Webhook.Enabled {
 		webhookMgr = webhook.NewManager(store.DB())
 		if err := webhookMgr.Init(ctx); err != nil {
+			logger.Error("[webhook] 初始化失败", "error", err)
 			webhookMgr = nil
 		} else {
 			webhookMgr.SetHandler(func(ctx context.Context, event *webhook.Event, prompt string) error {
