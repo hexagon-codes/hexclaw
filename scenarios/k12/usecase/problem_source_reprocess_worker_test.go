@@ -1723,6 +1723,10 @@ func newSourceReprocessIntegrationFixture(
 			deps, resolveSnapshot, WithGradingRunDir(t.TempDir()),
 		),
 	)
+	// 固化旧版待确认检查点，避免新版自动推进提前生成不可变终稿。
+	if err := orchestrator.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	repository := &PageAssetRepository{Records: deps.Records}
 	coordinator := &ImageTaskCoordinator{
 		Records: deps.Records, PageAssets: repository,
@@ -1774,10 +1778,27 @@ func newSourceReprocessIntegrationFixture(
 	}
 	jobID := view.Homework.GradingJobID
 	jobView, err := deps.GetGradingJob(context.Background(), "mingming", jobID)
-	if err != nil || jobView.Record.Status != k12.GradingStageAwaitingConfirmation {
+	if err != nil || jobView.Record.Status != k12.GradingStageQueued {
 		t.Fatalf("initial grading stage=%v err=%v", jobView.Record.Status, err)
 	}
+	run := orchestrator.lookup(jobID)
+	if run == nil {
+		t.Fatal("missing queued source grading runtime")
+	}
+	for range 2 {
+		if _, err := orchestrator.advanceOK(context.Background(), run, jobID, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := orchestrator.runRecognize(context.Background(), run, jobID); err != nil {
+		t.Fatal(err)
+	}
 	run, job := confirmSourceReprocessFixtureWithoutRun(t, orchestrator, jobID)
+	orchestrator = trackGradingOrchestrator(t, NewGradingOrchestrator(deps, resolveSnapshot, WithGradingRunDir(orchestrator.runDir)))
+	if _, err := orchestrator.ensureRun(context.Background(), jobID); err != nil {
+		t.Fatal(err)
+	}
+	coordinator.Grading = orchestrator
 	return sourceReprocessIntegrationFixture{
 		coordinator: coordinator, orchestrator: orchestrator,
 		recognizer: recognizer, repository: repository,
