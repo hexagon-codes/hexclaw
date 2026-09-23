@@ -14,10 +14,11 @@ import (
 
 // eventEntryReceipt 独立于可编辑记忆保存投递回执，删除正文不撤销已完成的事件。
 type eventEntryReceipt struct {
-	Digest     string `json:"digest"`
-	EntryID    string `json:"entry_id"`
-	BeforeHash string `json:"before_hash"`
-	Applied    bool   `json:"applied"`
+	Digest     string                `json:"digest"`
+	EntryID    string                `json:"entry_id"`
+	BeforeHash string                `json:"before_hash"`
+	Applied    bool                  `json:"applied"`
+	Projection *eventEntryProjection `json:"projection,omitempty"`
 }
 
 func memoryEventHash(data []byte) string {
@@ -66,6 +67,10 @@ func (fm *FileMemory) SaveStructuredEvent(eventID, content, memType, source, rol
 	if !fresh {
 		if err := json.Unmarshal(data, &receipt); err != nil {
 			return fmt.Errorf("decode memory event receipt: %w", err)
+		}
+		// 已有纠正的来源不再接受原始事件，包含先收到撤回、后收到初始事件的顺序。
+		if receipt.Projection != nil {
+			return fm.confirmEventProjectionUnlocked(receiptPath, &receipt)
 		}
 		if receipt.Digest != digest || receipt.EntryID != meta.ID {
 			return errors.New("memory event identity conflicts with its saved input")
@@ -142,6 +147,12 @@ func (fm *FileMemory) confirmMemoryEventsUnlocked() error {
 		var receipt eventEntryReceipt
 		if err := json.Unmarshal(data, &receipt); err != nil {
 			return err
+		}
+		if receipt.Projection != nil {
+			if err := fm.confirmEventProjectionUnlocked(path, &receipt); err != nil {
+				return err
+			}
+			continue
 		}
 		if receipt.Applied {
 			continue

@@ -1059,6 +1059,9 @@ func (fm *FileMemory) UpdateEntry(id, content string) error {
 	defer fm.requestProfileRefresh()
 	fm.mu.Lock()
 	defer fm.mu.Unlock()
+	if err := fm.detachEventProjectionUnlocked(id); err != nil {
+		return err
+	}
 	meta := fm.readEntryMetaUnlocked(id)
 	if meta.Subject == ProfileSubject {
 		return fmt.Errorf("Profile changes must use the profile correction endpoint")
@@ -1109,6 +1112,9 @@ func (fm *FileMemory) DeleteEntry(id string) error {
 	defer fm.requestProfileRefresh()
 	fm.mu.Lock()
 	defer fm.mu.Unlock()
+	if err := fm.detachEventProjectionUnlocked(id); err != nil {
+		return err
+	}
 	if err := fm.confirmMemoryEventsUnlocked(); err != nil {
 		return fmt.Errorf("confirm memory events before deletion: %w", err)
 	}
@@ -1141,6 +1147,9 @@ func (fm *FileMemory) ArchiveEntry(id string) error {
 	defer fm.requestProfileRefresh()
 	fm.mu.Lock()
 	defer fm.mu.Unlock()
+	if err := fm.detachEventProjectionUnlocked(id); err != nil {
+		return err
+	}
 	dir, filename, lineIdx := fm.resolveEntryLocationUnlocked(id)
 	if filename != memoryActiveFile || lineIdx < 0 {
 		return fmt.Errorf("只能归档活跃记忆: %s", id)
