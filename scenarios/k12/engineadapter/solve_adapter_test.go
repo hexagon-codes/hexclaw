@@ -72,8 +72,10 @@ func TestSolveAdapterTranslatesOnlyDefinitiveProviderResponses(t *testing.T) {
 func TestSolveAdapter_Solve_AgreeStrong(t *testing.T) {
 	a := NewSolveAdapter(&fakeExec{
 		solveResult: &skill.Result{
-			Content:  "解题：3.8×3=11.4\n\n```hexclaw-subagents\n[{\"Agent\":\"solver\"}]\n```",
-			Metadata: map[string]string{"solve_verdict": "agree", "solve_evidence": "numeric_exec"},
+			Content: "解题：3.8×3=11.4\n\n```hexclaw-subagents\n[{\"Agent\":\"solver\"}]\n```",
+			Metadata: map[string]string{"solve_verdict": "agree", "solve_evidence": "numeric_exec",
+				"solve_primary_digest": "selected-solution", "solve_verification_input_digest": "verification-input",
+				"solve_verification_run_id": "actual-code-run"},
 		},
 	})
 	sr, err := a.Solve(context.Background(), "3.8×3=?", "五年级上", "小数乘法")
@@ -85,6 +87,10 @@ func TestSolveAdapter_Solve_AgreeStrong(t *testing.T) {
 	}
 	if !sr.Evidence.StrongTrust() {
 		t.Error("code_exec 一致应强证据")
+	}
+	if sr.Evidence.SolverOutputDigest != "selected-solution" || sr.Evidence.VerificationInputDigest != "verification-input" ||
+		sr.Evidence.VerificationRunID != "actual-code-run" {
+		t.Fatalf("execution proof lost at adapter boundary: %+v", sr.Evidence)
 	}
 	if !strings.HasPrefix(sr.Solution, "## 解答\n\n") || !strings.Contains(sr.Solution, "解题：3.8×3=11.4") || strings.Contains(sr.Solution, "hexclaw-subagents") {
 		t.Errorf("解题正文应是 Markdown 且剥掉回执围栏, got %q", sr.Solution)

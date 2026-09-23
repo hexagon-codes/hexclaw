@@ -2,6 +2,8 @@ package engine
 
 import (
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -109,6 +111,9 @@ func TestSolve_VerifiedAgreement(t *testing.T) {
 	if res.Metadata["solve_evidence"] == "numeric_exec" || strings.Contains(res.Content, "高置信") {
 		t.Errorf("model-only agreement must not produce execution evidence: metadata=%v content=%s", res.Metadata, res.Content)
 	}
+	if res.Metadata["solve_primary_digest"] != "" || res.Metadata["solve_verification_run_id"] != "" {
+		t.Fatal("model-only agreement must not create a reusable execution proof")
+	}
 }
 
 // ④ verifier 被限定为「只有 code_exec 工具」。
@@ -208,6 +213,17 @@ func TestSolve_MethodDiversity_VerifierAdjudicates(t *testing.T) {
 	}
 	if !strings.Contains(res.Content, "核验") {
 		t.Errorf("应说明由代码核验裁决，得：%s", res.Content)
+	}
+	selectedDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(se.solverOuts[0])))
+	verifier, ok := se.specFor(verifierAgentName)
+	if !ok {
+		t.Fatal("missing actual verifier request")
+	}
+	verificationDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(verifier.Task)))
+	if res.Metadata["solve_primary_digest"] != selectedDigest ||
+		res.Metadata["solve_verification_input_digest"] != verificationDigest ||
+		res.Metadata["solve_verification_run_id"] != "fixture-execution" {
+		t.Fatalf("proof must bind the selected solution and actual execution: %v", res.Metadata)
 	}
 }
 

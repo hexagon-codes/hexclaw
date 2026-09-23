@@ -366,7 +366,10 @@ func gradeOutcomeFromResult(res *skill.Result, err error) (usecase.GradeOutcome,
 // **不再对任意 agree 都标强证据**。solve_evidence=model（仅模型口头 agree）→ 弱证据 heuristic。
 func evidenceFromMeta(m map[string]string) usecase.SolveEvidence {
 	verdict := usecase.Verdict(m["solve_verdict"])
-	ev := usecase.SolveEvidence{Verdict: verdict}
+	ev := usecase.SolveEvidence{Verdict: verdict,
+		SolverOutputDigest: m["solve_primary_digest"], VerificationInputDigest: m["solve_verification_input_digest"],
+		VerificationRunID: m["solve_verification_run_id"],
+	}
 	// 归一非标准 verdict（如 "skipped"）为 unverifiable。
 	switch verdict {
 	case usecase.VerdictAgree, usecase.VerdictDisagree, usecase.VerdictUnverifiable, usecase.VerdictOutOfScope:

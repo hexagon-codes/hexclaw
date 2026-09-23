@@ -308,7 +308,7 @@ func (o *SolveSkill) Execute(ctx context.Context, args map[string]any) (*skill.R
 	}
 
 	// 2) Verifier 阶段：code_exec 独立重算（fresh-context、只许 code_exec）。
-	verdict, computed, numericGrounded := o.verifySolution(childCtx, problem, primary.sols[0].output, primary.answer, constraint)
+	verdict, computed, numericGrounded, verificationReceipt := o.verifySolutionWithReceipt(childCtx, problem, primary.sols[0].output, primary.answer, constraint)
 
 	// 2.5) 学段内重解：verifier 判解法超纲（out_of_scope）→ 强化约束重解一次，只用学过的方法。
 	// 仅在有约束、非批改、还有墙钟时尝试一次，避免无界重试。
@@ -322,7 +322,7 @@ func (o *SolveSkill) Execute(ctx context.Context, args map[string]any) (*skill.R
 			primary = answerGroup{answer: resolved.answer, sols: []solverSolution{resolved}}
 			groups = []answerGroup{primary}
 			// 重解后仍按原约束复验完整过程；答案正确但方法再次超纲不能放行。
-			verdict, computed, numericGrounded = o.verifySolution(childCtx, problem, resolved.output, primary.answer, constraint)
+			verdict, computed, numericGrounded, verificationReceipt = o.verifySolutionWithReceipt(childCtx, problem, resolved.output, primary.answer, constraint)
 		}
 	}
 
@@ -365,14 +365,17 @@ func (o *SolveSkill) Execute(ctx context.Context, args map[string]any) (*skill.R
 		{Agent: solverAgentName, Status: subAgentStatusOK},
 		newVerifierReport(verdict),
 	}
-	return &skill.Result{
-		Content: content + encodeSubAgentReports(reports),
-		Metadata: map[string]string{
-			"solve_run_id":   solveRunID,
-			"solve_verdict":  verdictString(verdict),
-			"solve_evidence": evidenceKind(numericGrounded),
-		},
-	}, nil
+	metadata := map[string]string{
+		"solve_run_id": solveRunID, "solve_verdict": verdictString(verdict),
+		"solve_evidence": evidenceKind(numericGrounded),
+	}
+	// 资产发布绑定实际选中的解法和本次执行证据；不能取最后一份生成结果代替多数选择。
+	if verdict == verdictAgree && numericGrounded && verificationReceipt != nil && hasCleanFinalAnswer(primary.sols[0].output, primary.answer) {
+		metadata["solve_primary_digest"] = executionInputDigest(primary.sols[0].output)
+		metadata["solve_verification_input_digest"] = verificationReceipt.InputDigest
+		metadata["solve_verification_run_id"] = verificationReceipt.RunID
+	}
+	return &skill.Result{Content: content + encodeSubAgentReports(reports), Metadata: metadata}, nil
 }
 
 // GradeVerified 是场景层内部批改快口：verifiedSolution 已由同一请求前序 Execute 的
@@ -581,9 +584,14 @@ func (o *SolveSkill) verify(ctx context.Context, problem, candidate, constraint 
 }
 
 // verifySolution 从执行回执取数值依据，模型正文只提供过程审计及弱判断。
-func (o *SolveSkill) verifySolution(ctx context.Context, problem, solution, candidate, constraint string) (v verifyVerdict, computed string, numericGrounded bool) {
+func (o *SolveSkill) verifySolution(ctx context.Context, problem, solution, candidate, constraint string) (verifyVerdict, string, bool) {
+	verdict, computed, grounded, _ := o.verifySolutionWithReceipt(ctx, problem, solution, candidate, constraint)
+	return verdict, computed, grounded
+}
+
+func (o *SolveSkill) verifySolutionWithReceipt(ctx context.Context, problem, solution, candidate, constraint string) (v verifyVerdict, computed string, numericGrounded bool, receipt *CodeExecutionReceipt) {
 	if o.executeFunc == nil || ctx.Err() != nil {
-		return verdictUnverifiable, "", false
+		return verdictUnverifiable, "", false, nil
 	}
 	spec := verifierSpecWithSolution(problem, solution, candidate, constraint)
 	result, usedSpec := o.runValidatedResult(ctx, spec, func(result SubAgentResult, attempt SubAgentSpec) bool {
@@ -598,7 +606,7 @@ func (o *SolveSkill) verifySolution(ctx context.Context, problem, solution, cand
 		return executed
 	})
 	if strings.TrimSpace(result.Output) == "" {
-		return verdictUnverifiable, "", false
+		return verdictUnverifiable, "", false, nil
 	}
 	verdict, computed := parseVerdict(result.Output)
 	actualComputed, executed := result.ExecutionReceipt.computed(usedSpec.Task)
@@ -632,7 +640,7 @@ func (o *SolveSkill) verifySolution(ctx context.Context, problem, solution, cand
 	trace.L(ctx).Info("solve execution evidence evaluated", "input_digest", executionInputDigest(usedSpec.Task),
 		"executed", executed, "computed", computed, "candidate", candidate, "process", process,
 		"verdict", verdictString(verdict), "evidence", evidenceKind(numericGrounded))
-	return verdict, computed, numericGrounded
+	return verdict, computed, numericGrounded, result.ExecutionReceipt
 }
 
 // strictFormatReminder 在校验重试时附加，逼模型只吐固定格式。
