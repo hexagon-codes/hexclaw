@@ -2482,6 +2482,7 @@ Set source only when the material explicitly names a work, title, or another rel
 					requestCtx, router, k12ModelCapabilityReceipts, requested,
 				)
 			}
+			k12rt.MaterialWorker.ResolveModel = k12rt.Deps.PracticeGenerationRoute
 			k12GradingOrch = k12usecase.NewGradingOrchestrator(k12rt.Deps, k12ModelSnapshot,
 				k12usecase.WithGradingRunDir(filepath.Join(dataDir, "k12", "grading-runs")),
 				k12usecase.WithGradingBaseContext(ctx),
@@ -3345,6 +3346,7 @@ Set source only when the material explicitly names a work, title, or another rel
 	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	var semanticWorkerDone chan struct{}
 	var catalogWorkerDone chan struct{}
+	var materialWorkerDone chan struct{}
 	if kbSemanticRuntime != nil {
 		semanticWorkerDone = make(chan struct{})
 		go func() {
@@ -3361,6 +3363,15 @@ Set source only when the material explicitly names a work, title, or another rel
 				}()
 			}
 			workers.Wait()
+		}()
+	}
+	if k12Runtime != nil && k12Runtime.MaterialWorker != nil {
+		materialWorkerDone = make(chan struct{})
+		go func() {
+			defer close(materialWorkerDone)
+			k12Runtime.MaterialWorker.Run(embeddingLifecycleCtx, func(workerErr error) {
+				logger.Warn("[k12] Material preparation failed", "error", workerErr)
+			})
 		}()
 	}
 	if k12Runtime != nil && k12Runtime.CatalogWorker != nil {
@@ -3385,6 +3396,9 @@ Set source only when the material explicitly names a work, title, or another rel
 			case <-time.After(6 * time.Second):
 				logger.Warn("[knowledge] 等待语义索引 Worker 异常路径退出超时")
 			}
+		}
+		if materialWorkerDone != nil {
+			<-materialWorkerDone
 		}
 		if catalogWorkerDone != nil {
 			select {

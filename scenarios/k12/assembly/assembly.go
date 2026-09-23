@@ -36,8 +36,9 @@ type K12 struct {
 	Outbox *k12storage.Dispatcher
 	// CatalogWorker consumes the restart-durable textbook catalog queue using
 	// only persisted Knowledge checkpoints and exact source spans.
-	CatalogWorker *usecase.TextbookCatalogWorker
-	Deps          usecase.Deps
+	CatalogWorker  *usecase.TextbookCatalogWorker
+	MaterialWorker *usecase.MaterialPreparationWorker
+	Deps           usecase.Deps
 }
 
 // Option 装配可选项（注入 Insights/Grounding 等 adapter）。
@@ -266,6 +267,6 @@ func WireInto(ctx context.Context, reg *scenario.Registry, db *sql.DB, solveSkil
 	)
 	return &K12{
 		Registry: reg, Manifest: man, Receipt: receipt, Records: store,
-		Outbox: outbox, CatalogWorker: catalogWorker, Deps: deps,
+		Outbox: outbox, CatalogWorker: catalogWorker, MaterialWorker: &usecase.MaterialPreparationWorker{Records: store, Solver: solveAdapter}, Deps: deps,
 	}, nil
 }

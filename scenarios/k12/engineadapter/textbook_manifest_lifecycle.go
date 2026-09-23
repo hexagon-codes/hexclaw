@@ -37,7 +37,7 @@ func (a *TextbookManifestLifecycleAdapter) ReconcileDocumentIngestLifecycle(
 	tx *sql.Tx,
 	event knowledge.DocumentIngestLifecycleEvent,
 ) error {
-	return a.projector.ReconcileTextbookManifestLifecycle(
+	if err := a.projector.ReconcileTextbookManifestLifecycle(
 		ctx,
 		tx,
 		k12storage.TextbookManifestLifecycleEvent{
@@ -47,5 +47,13 @@ func (a *TextbookManifestLifecycleAdapter) ReconcileDocumentIngestLifecycle(
 			DocumentGeneration: event.DocumentGeneration,
 			At:                 event.At,
 		},
-	)
+	); err != nil {
+		return err
+	}
+	if materials, ok := a.projector.(interface {
+		ReconcileMaterialPreparation(context.Context, *sql.Tx, k12storage.TextbookManifestLifecycleEvent) error
+	}); ok {
+		return materials.ReconcileMaterialPreparation(ctx, tx, k12storage.TextbookManifestLifecycleEvent{OwnerID: event.OwnerID, CorpusUID: event.CorpusUID, DocumentID: event.DocumentID, DocumentGeneration: event.DocumentGeneration, At: event.At})
+	}
+	return nil
 }

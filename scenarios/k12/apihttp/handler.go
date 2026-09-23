@@ -126,6 +126,8 @@ func NewHandler(rt Runtime) http.Handler {
 	mux := http.NewServeMux()
 	h := &handler{rt: rt}
 	mux.HandleFunc("GET /view-descriptor", h.viewDescriptor)
+	mux.HandleFunc("GET /materials/{document_id}/preparation", h.materialPreparation)
+	mux.HandleFunc("GET /materials/preparations", h.materialPreparationList)
 	// POST /recognize、POST /recognize/anchors 与全部 /grading-jobs* 公开路由已删除：
 	// 图片任务统一走 /image-tasks exact-set，识题、锚点和 GradingJob 只属于内部作业子链。
 	// /grade（单题补批）与 /solve（空白题求解）为甄别保留项：仍被 Job 外合法路径消费。
