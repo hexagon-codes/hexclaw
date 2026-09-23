@@ -2420,7 +2420,8 @@ func (s *Store) HoldCreativeWorkIntakeOCRConfirmation(
 	if err != nil {
 		return intake, err
 	}
-	automaticReview := dispatch.RoutingProvenance != k12.ImageTaskRoutingParentSelected
+	// 历史分类歧义在明确选择后保留候选集合，路由来源自身不改写。
+	automaticReview := dispatch.RoutingProvenance != k12.ImageTaskRoutingParentSelected && len(dispatch.ConfirmationCandidates) < 2
 	nextStatus := k12.CreativeWorkIntakeAwaitingConfirmation
 	if automaticReview {
 		nextStatus = k12.CreativeWorkIntakePreparing
