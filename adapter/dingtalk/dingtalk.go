@@ -1865,6 +1865,10 @@ func (a *DingtalkAdapter) admitInboundPhotoBeforeACK(
 func (a *DingtalkAdapter) messageFromEvent(
 	event dtEvent, attachments []adapter.Attachment,
 ) *adapter.Message {
+	replyTo := ""
+	if event.Text.IsReplyMsg {
+		replyTo = strings.TrimSpace(event.Text.RepliedMsg.MsgID)
+	}
 	return &adapter.Message{
 		ID:          event.MsgID,
 		Platform:    adapter.PlatformDingtalk,
@@ -1873,6 +1877,7 @@ func (a *DingtalkAdapter) messageFromEvent(
 		UserID:      event.SenderStaffId,
 		UserName:    event.SenderNick,
 		Content:     strings.TrimSpace(event.Text.Content),
+		ReplyTo:     replyTo,
 		Attachments: append([]adapter.Attachment(nil), attachments...),
 		Timestamp:   time.Now(),
 		Metadata: map[string]string{
@@ -2125,7 +2130,11 @@ type dtEvent struct {
 	SenderStaffId    string `json:"senderStaffId"`
 	SenderNick       string `json:"senderNick"`
 	Text             struct {
-		Content string `json:"content"`
+		Content    string `json:"content"`
+		IsReplyMsg bool   `json:"isReplyMsg"`
+		RepliedMsg struct {
+			MsgID string `json:"msgId"`
+		} `json:"repliedMsg"`
 	} `json:"text"`
 	MsgType string `json:"msgtype"`
 	// Content 承载富媒体载荷（BUG-20260709：picture 消息的 downloadCode 在此，
