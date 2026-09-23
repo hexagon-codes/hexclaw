@@ -21,7 +21,7 @@ const (
 
 // EffectiveGradingAssessment 区分历史回执与当前结论，不能把纠正伪装成输入修订。
 type EffectiveGradingAssessment struct {
-	Original   GradingAssessmentItem     `json:"original"`
-	Current    GradingAssessmentItem     `json:"current"`
+	Original   GradingAssessmentItem        `json:"original"`
+	Current    GradingAssessmentItem        `json:"current"`
 	Correction *GradingAssessmentCorrection `json:"correction,omitempty"`
 }

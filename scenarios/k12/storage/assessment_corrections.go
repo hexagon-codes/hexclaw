@@ -50,6 +50,15 @@ func (s *Store) GetAssessmentCorrection(ctx context.Context, agentName, correcti
 		WHERE agent_name=? AND correction_id=?`, agentName, correctionID))
 }
 
+// LatestInsightCorrection 按原始事件读取最新纠正，迟到初始事件也必须采用同一结论。
+func (s *Store) LatestInsightCorrection(ctx context.Context, agentName, eventID string) (k12.GradingAssessmentCorrection, error) {
+	return readAssessmentCorrection(s.db.QueryRowContext(ctx, `SELECT c.correction_json
+		FROM k12_assessment_corrections c JOIN outbox_events e
+		ON e.event_id='assessment-corrected:' || c.correction_id AND e.agent_name=c.agent_name
+		WHERE c.agent_name=? AND e.event_type=? AND json_extract(e.payload_json,'$.original_event_id')=?
+		ORDER BY c.correction_revision DESC LIMIT 1`, agentName, EventAssessmentCorrected, eventID))
+}
+
 // GetEffectiveGradingAssessment 显式解析当前纠正；原历史读取接口仍返回原始回执。
 func (s *Store) GetEffectiveGradingAssessment(ctx context.Context, agentName, jobID, problemID string) (k12.EffectiveGradingAssessment, error) {
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
@@ -69,6 +78,22 @@ func (s *Store) GetEffectiveGradingAssessment(ctx context.Context, agentName, jo
 		return view, err
 	}
 	return view, tx.Commit()
+}
+
+// ListEffectiveGradingAssessments 供尚未交付的终稿读取有效结论，历史读取接口保持原语义。
+func (s *Store) ListEffectiveGradingAssessments(ctx context.Context, agentName, jobID string) ([]k12.GradingAssessmentItem, error) {
+	items, err := s.ListGradingAssessmentItems(ctx, agentName, jobID)
+	if err != nil {
+		return nil, err
+	}
+	for i := range items {
+		view, err := s.GetEffectiveGradingAssessment(ctx, agentName, jobID, items[i].ProblemID)
+		if err != nil {
+			return nil, err
+		}
+		items[i] = view.Current
+	}
+	return items, nil
 }
 
 func correctionInvocationMatches(ctx context.Context, tx *sql.Tx, item k12.GradingAssessmentItem, id string, operations ...k12.GradingItemOperation) error {
@@ -178,7 +203,7 @@ func (s *Store) AppendGradingAssessmentCorrection(ctx context.Context, requested
 		return k12.GradingAssessmentCorrection{}, false, errors.New("assessment correction requires a new grading receipt")
 	}
 	for _, proof := range []struct {
-		id string
+		id         string
 		operations []k12.GradingItemOperation
 	}{
 		{item.SolveInvocationID, []k12.GradingItemOperation{k12.GradingItemOperationSolve, k12.GradingItemOperationSolveVerify}},
@@ -214,15 +239,34 @@ func (s *Store) AppendGradingAssessmentCorrection(ctx context.Context, requested
 			(effects.Review.NewStatus == k12.StatusMastered && rows[0].Status != k12.StatusMastered) {
 			return k12.GradingAssessmentCorrection{}, false, errors.New("correction cannot add mastery or retry evidence")
 		}
-		if err = s.commitAssessmentReviewTx(ctx, tx, item.AgentName, *effects.Review); err != nil {
-			return k12.GradingAssessmentCorrection{}, false, err
+		// 同一错题可由不同作答支持；撤回一个来源不能撤销其他仍有效的复习依据。
+		var otherWrong bool
+		if item.Status != k12.GradingAssessmentWrong {
+			err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM k12_grading_assessment_items a
+				LEFT JOIN k12_assessment_corrections c ON c.agent_name=a.agent_name AND c.job_id=a.job_id
+				AND c.problem_id=a.problem_id AND c.input_revision=a.input_revision
+				AND c.correction_revision=(SELECT MAX(latest.correction_revision) FROM k12_assessment_corrections latest
+				WHERE latest.agent_name=a.agent_name AND latest.job_id=a.job_id AND latest.problem_id=a.problem_id AND latest.input_revision=a.input_revision)
+				WHERE a.agent_name=? AND a.current_disposition='current'
+				AND COALESCE(json_extract(c.correction_json,'$.assessment.status'),a.status)='wrong'
+				AND COALESCE(json_extract(c.correction_json,'$.assessment.projection_record_id'),a.projection_record_id)=?
+				AND NOT(a.job_id=? AND a.problem_id=? AND a.input_revision=?))`, item.AgentName, effects.Review.RecordID,
+				item.JobID, item.ProblemID, item.InputRevision).Scan(&otherWrong)
+			if err != nil {
+				return k12.GradingAssessmentCorrection{}, false, err
+			}
+		}
+		if !otherWrong {
+			if err = s.commitAssessmentReviewTx(ctx, tx, item.AgentName, *effects.Review); err != nil {
+				return k12.GradingAssessmentCorrection{}, false, err
+			}
 		}
 		item.ProjectionRecordID, item.ProjectionCreated = effects.Review.RecordID, previous.ProjectionCreated
 	} else if effects.Mistake != nil {
 		if previous.ProjectionRecordID != "" {
 			return k12.GradingAssessmentCorrection{}, false, ErrAssessmentCorrectionConflict
 		}
-		item.ProjectionRecordID, item.ProjectionCreated, _, err = s.commitAssessmentMistakeTx(ctx, tx, item.AgentName, *effects.Mistake, requested.CorrectionID+":mistake")
+		item.ProjectionRecordID, item.ProjectionCreated, _, err = s.commitAssessmentMistakeTx(ctx, tx, item.AgentName, *effects.Mistake, gradingAssessmentEventID(original, "mistake_recorded"))
 		if err != nil {
 			return k12.GradingAssessmentCorrection{}, false, err
 		}
@@ -242,10 +286,16 @@ func (s *Store) AppendGradingAssessmentCorrection(ctx context.Context, requested
 	if err != nil {
 		return k12.GradingAssessmentCorrection{}, false, err
 	}
+	// 未交付终稿的在途渲染必须重新读取纠正；已交付终稿不改变代次或内容。
+	if _, err = tx.ExecContext(ctx, `UPDATE k12_grading_jobs SET finalization_generation=finalization_generation+1
+		WHERE agent_name=? AND record_id=? AND NOT EXISTS(SELECT 1 FROM k12_grading_final_artifacts WHERE agent_name=? AND job_id=?)`,
+		item.AgentName, item.JobID, item.AgentName, item.JobID); err != nil {
+		return k12.GradingAssessmentCorrection{}, false, err
+	}
 	payload, _ := json.Marshal(AssessmentCorrectedPayload{CorrectionID: requested.CorrectionID, AgentName: item.AgentName, JobID: item.JobID,
 		ProblemID: item.ProblemID, InputRevision: item.InputRevision, Revision: requested.Revision, OriginalEventID: gradingAssessmentEventID(original, "mistake_recorded")})
-	_, err = appendOutboxEvent(ctx, tx, OutboxEvent{EventID: "assessment-corrected:"+requested.CorrectionID, AgentName: item.AgentName,
-		AggregateID: item.JobID+":"+item.ProblemID, EventType: EventAssessmentCorrected, PayloadVersion: 1, Payload: string(payload)})
+	_, err = appendOutboxEvent(ctx, tx, OutboxEvent{EventID: "assessment-corrected:" + requested.CorrectionID, AgentName: item.AgentName,
+		AggregateID: item.JobID + ":" + item.ProblemID, EventType: EventAssessmentCorrected, PayloadVersion: 1, Payload: string(payload)})
 	if err != nil {
 		return k12.GradingAssessmentCorrection{}, false, err
 	}
