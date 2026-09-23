@@ -125,6 +125,9 @@ type lineAction struct {
 // reflectDirUnlocked 反思单个目录的活跃记忆（调用方已持写锁）。
 func (fm *FileMemory) reflectDirUnlocked(dir string, now time.Time) (ReflectReport, error) {
 	var rep ReflectReport
+	if err := fm.confirmMemoryEventsUnlocked(); err != nil {
+		return rep, err
+	}
 	activePath := filepath.Join(dir, memoryActiveFile)
 	raw, err := os.ReadFile(activePath)
 	if err != nil {

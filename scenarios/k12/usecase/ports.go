@@ -527,7 +527,7 @@ type VerifiedSolutionGrader interface {
 // Insights 学情信号写入 port（adapter = memory 反思管线）。
 // 错题**不入记忆**（AP-3）；这里只写"薄弱点画像"信号。
 type Insights interface {
-	WriteWeakness(ctx context.Context, agentName, knowledgePoint, note string) error
+	WriteWeakness(ctx context.Context, eventID, agentName, knowledgePoint, note string) error
 }
 
 // Grounding retrieves textbook evidence for the first tutoring-tips section

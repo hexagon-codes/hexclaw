@@ -35,7 +35,7 @@ func (fakeSolveExec) Execute(_ context.Context, args map[string]any) (*skill.Res
 
 type capturedInsights struct{ n int }
 
-func (c *capturedInsights) WriteWeakness(context.Context, string, string, string) error {
+func (c *capturedInsights) WriteWeakness(context.Context, string, string, string, string) error {
 	c.n++
 	return nil
 }

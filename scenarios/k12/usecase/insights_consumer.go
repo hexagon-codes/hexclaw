@@ -18,8 +18,8 @@ import (
 //   - manual（家长手动记入）：「在「kp」出错（家长手动记入）：错因」，仅新建时写
 //     （与原 RecordMistake 行为一致）。
 //
-// 幂等：Dispatcher 以 (consumer, event_id) 去重；本消费者对同一事件重放安全
-// （WriteWeakness 是画像追加信号，去重表挡住常规重复，崩溃窗口内 at-least-once 可接受）。
+// 事件身份贯穿文件投影；文件侧回执覆盖写入成功但消费标记尚未提交的重放窗口。
+// 不同作答的事件 ID 不同，即使薄弱点文字相同也保留独立证据。
 type InsightsConsumer struct {
 	Insights Insights
 }
@@ -48,5 +48,5 @@ func (c InsightsConsumer) Handle(ctx context.Context, ev k12storage.OutboxEvent)
 	} else {
 		note = fmt.Sprintf("在「%s」出错：%s", p.KnowledgePoint, p.ErrorCause)
 	}
-	return c.Insights.WriteWeakness(ctx, p.AgentName, p.KnowledgePoint, note)
+	return c.Insights.WriteWeakness(ctx, ev.EventID, p.AgentName, p.KnowledgePoint, note)
 }

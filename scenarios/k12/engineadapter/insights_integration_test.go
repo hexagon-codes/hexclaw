@@ -21,7 +21,7 @@ func TestInsightsAdapter_RealFileMemory(t *testing.T) {
 	// *memory.FileMemory 满足 memoryWriter（编译期即证 adapter 接口对齐）
 	a := NewInsightsAdapter(fm)
 
-	if err := a.WriteWeakness(context.Background(), "mingming", "小数乘法", "在「小数乘法」出错：计算失误"); err != nil {
+	if err := a.WriteWeakness(context.Background(), "event-1", "mingming", "小数乘法", "在「小数乘法」出错：计算失误"); err != nil {
 		t.Fatalf("WriteWeakness: %v", err)
 	}
 

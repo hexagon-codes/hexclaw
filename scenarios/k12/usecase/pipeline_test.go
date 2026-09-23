@@ -28,7 +28,7 @@ func (f fakeGrader) Grade(context.Context, string, string, string) (GradeOutcome
 
 type fakeInsights struct{ notes []string }
 
-func (f *fakeInsights) WriteWeakness(_ context.Context, _, _, note string) error {
+func (f *fakeInsights) WriteWeakness(_ context.Context, _, _, _, note string) error {
 	f.notes = append(f.notes, note)
 	return nil
 }

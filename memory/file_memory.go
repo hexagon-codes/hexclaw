@@ -178,6 +178,10 @@ func New(cfg Options) (*FileMemory, error) {
 		profileWake: make(chan struct{}, 1),
 	}
 
+	if err := fm.confirmMemoryEventsUnlocked(); err != nil {
+		return nil, fmt.Errorf("confirm saved memory events: %w", err)
+	}
+
 	logger.Info("dir", "dir", dir)
 	return fm, nil
 }
@@ -970,6 +974,10 @@ func extractLineRange(lines []string, start, end int) string {
 //
 // 如果步骤 2 失败，条目同时存在于两个文件中（重复优于丢失）。
 func (fm *FileMemory) moveEntryLineUnlocked(dir, fromFile, toFile string, lineIdx int) error {
+	if err := fm.confirmMemoryEventsUnlocked(); err != nil {
+		return fmt.Errorf("confirm memory events before replacement: %w", err)
+	}
+
 	fromPath := filepath.Join(dir, fromFile)
 	raw, err := os.ReadFile(fromPath)
 	if err != nil {
@@ -1101,6 +1109,9 @@ func (fm *FileMemory) DeleteEntry(id string) error {
 	defer fm.requestProfileRefresh()
 	fm.mu.Lock()
 	defer fm.mu.Unlock()
+	if err := fm.confirmMemoryEventsUnlocked(); err != nil {
+		return fmt.Errorf("confirm memory events before deletion: %w", err)
+	}
 
 	dir, filename, lineIdx := fm.resolveEntryLocationUnlocked(id)
 	if lineIdx < 0 {
@@ -1298,6 +1309,9 @@ func (fm *FileMemory) UpdateMemory(content string) error {
 	defer fm.requestProfileRefresh()
 	fm.mu.Lock()
 	defer fm.mu.Unlock()
+	if err := fm.confirmMemoryEventsUnlocked(); err != nil {
+		return fmt.Errorf("confirm memory events before replacement: %w", err)
+	}
 
 	dir := fm.roleDir("")
 	_ = fileutil.MkdirAll(dir)
@@ -1310,6 +1324,9 @@ func (fm *FileMemory) ClearAll() error {
 	defer fm.requestProfileRefresh()
 	fm.mu.Lock()
 	defer fm.mu.Unlock()
+	if err := fm.confirmMemoryEventsUnlocked(); err != nil {
+		return fmt.Errorf("confirm memory events before deletion: %w", err)
+	}
 
 	if err := filepath.WalkDir(fm.dir, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {

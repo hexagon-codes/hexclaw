@@ -17,7 +17,7 @@ type fakeMem struct {
 	called                         int
 }
 
-func (f *fakeMem) SaveStructuredEntry(content, memType, source, role string, meta memory.EntryMeta) error {
+func (f *fakeMem) SaveStructuredEvent(eventID, content, memType, source, role string, meta memory.EntryMeta) error {
 	f.content, f.memType, f.source, f.role, f.subject = content, memType, source, role, meta.Subject
 	f.called++
 	return nil
@@ -26,7 +26,7 @@ func (f *fakeMem) SaveStructuredEntry(content, memType, source, role string, met
 func TestInsightsAdapter_WriteWeakness(t *testing.T) {
 	m := &fakeMem{}
 	a := NewInsightsAdapter(m)
-	if err := a.WriteWeakness(context.Background(), "mingming", "小数乘法", "在「小数乘法」出错：计算失误"); err != nil {
+	if err := a.WriteWeakness(context.Background(), "event-1", "mingming", "小数乘法", "在「小数乘法」出错：计算失误"); err != nil {
 		t.Fatal(err)
 	}
 	if m.role != "mingming" {
@@ -43,7 +43,7 @@ func TestInsightsAdapter_WriteWeakness(t *testing.T) {
 	}
 	// 空 agentName 不写
 	m2 := &fakeMem{}
-	NewInsightsAdapter(m2).WriteWeakness(context.Background(), "", "x", "y")
+	NewInsightsAdapter(m2).WriteWeakness(context.Background(), "event-1", "", "x", "y")
 	if m2.called != 0 {
 		t.Error("空 agentName 不应写入")
 	}
