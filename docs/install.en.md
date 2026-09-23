@@ -74,12 +74,16 @@ sudo mv hexclaw /usr/local/bin/
 
 ### Method 4: Docker
 
+Use Docker Compose for a single server. In the private deployment `.env`, set `HEXCLAW_IMAGE=ghcr.io/hexagon-codes/hexclaw@sha256:<actual-digest>` using a digest from an available build:
+
 ```bash
-docker compose build
-docker compose up -d
+docker compose pull hexclaw
+docker compose up -d --no-build hexclaw
 ```
 
-[Cloud deployment guide](cloud-deployment.md): persistent API token, writable configuration, full HOME volume, image rendering and first-time setup. The image in this source tree targets Linux amd64.
+For local source development, run `docker compose build hexclaw` first; the default image is `hexclaw:dev`. Published images use version and full commit SHA tags; `latest` is reserved for stable releases. Keep the existing project, data volume and complete Compose override set when updating.
+
+The source image targets Linux amd64 and persists the complete writable HOME. The default Compose setup **does not install Ollama or download models**. Configure model and Embedding APIs for the selected remote backend in Desktop. Knowledge data and indexes belong to that server; keyword retrieval and vector availability are separate when no effective Embedding configuration exists. See the [cloud deployment guide](cloud-deployment.md) for initialization, Kubernetes, backup, automation and current verification limits.
 
 ---
 
@@ -528,15 +532,9 @@ wscat -H "Authorization: Bearer TOKEN" \
 
 ### Data Backup
 
-SQLite database and memory files are located in `~/.hexclaw/`:
+For Compose, use the [consistent backup and isolated restore procedure](cloud-deployment.md#完整备份与恢复). Stop writes, archive the full HOME and deployment configuration, restart the original service, then transfer the completed archive off-host. A local archive is not an off-host backup. Restore to a new volume and check its contents before switching the active deployment.
 
-```bash
-# Backup
-tar czf hexclaw-backup-$(date +%Y%m%d).tar.gz ~/.hexclaw/
-
-# Restore
-tar xzf hexclaw-backup-20260318.tar.gz -C ~/
-```
+For a standalone binary, first stop the service and all other writers of the same data directory. Archive the complete `~/.hexclaw/`, external object/configuration paths and required rendering assets; SQLite main and WAL files must come from the same stopped state. Extract to a new directory for verification instead of overwriting the running instance. Do not copy only a live `data.db`.
 
 ### Security Audit
 
@@ -568,11 +566,11 @@ sudo mv hexclaw /usr/local/bin/
 sudo systemctl restart hexclaw
 
 # Docker
-docker compose pull
-docker compose up -d
+docker compose pull hexclaw
+docker compose up -d --no-build hexclaw
 ```
 
-Config files are backward-compatible — upgrades typically require no config changes.
+Create a consistent backup before updating. For database migrations, follow the [deployment recovery rules](cloud-deployment.md#按提交自动部署); replacing the image alone does not establish data compatibility.
 
 ---
 

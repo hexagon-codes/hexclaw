@@ -74,12 +74,16 @@ sudo mv hexclaw /usr/local/bin/
 
 ### 方式四：Docker
 
+单机日常部署推荐 Docker Compose。在部署目录私有 `.env` 设置 `HEXCLAW_IMAGE=ghcr.io/hexagon-codes/hexclaw@sha256:<实际摘要>`，摘要须来自已可拉取的构建产物：
+
 ```bash
-docker compose build
-docker compose up -d
+docker compose pull hexclaw
+docker compose up -d --no-build hexclaw
 ```
 
-使用本仓库 Compose 文件。镜像当前为 Linux amd64；首次生成持久令牌，运行配置可写，完整 HOME 卷及渲染工具随部署就绪。详见[云端部署指南](cloud-deployment.md)。
+本地源码开发先执行 `docker compose build hexclaw`，默认镜像为 `hexclaw:dev`。发布镜像使用版本号及完整提交 SHA 标签，`latest` 仅用于正式稳定版；更新保留现有项目、数据卷及完整 Compose override 文件集合。
+
+源码镜像当前面向 Linux amd64，持久化完整可写 HOME。默认 Compose **不安装 Ollama，也不下载模型**；在 Desktop 为当前远端配置模型和 Embedding API，知识数据与索引保存在服务器。未配置有效 Embedding 时，关键词检索与向量可用性分别判断。初始化令牌、Kubernetes、备份恢复、自动部署及当前验收边界见[云端部署指南](cloud-deployment.md)。
 
 ---
 
@@ -527,15 +531,9 @@ wscat -H "Authorization: Bearer TOKEN" \
 
 ### 数据备份
 
-SQLite 数据库和记忆文件位于 `~/.hexclaw/`：
+Compose 使用[一致备份与隔离恢复流程](cloud-deployment.md#完整备份与恢复)：停止写入，归档完整 HOME 和部署配置，恢复原服务后再异机复制。同机归档不等于异机备份；恢复先进入新卷并检查实际内容，再明确切换。
 
-```bash
-# 备份
-tar czf hexclaw-backup-$(date +%Y%m%d).tar.gz ~/.hexclaw/
-
-# 恢复
-tar xzf hexclaw-backup-20260318.tar.gz -C ~/
-```
+直接运行二进制时，先停止服务及同目录的其他写入者，再归档完整 `~/.hexclaw/`、外部对象／配置路径和必要渲染资源；SQLite 主库及 WAL 必须来自同一次停写状态。解包到新目录核对，不直接覆盖运行实例，也不单独复制正在写入的 `data.db`。
 
 ### 安全审计
 
@@ -567,11 +565,11 @@ sudo mv hexclaw /usr/local/bin/
 sudo systemctl restart hexclaw
 
 # Docker
-docker compose pull
-docker compose up -d
+docker compose pull hexclaw
+docker compose up -d --no-build hexclaw
 ```
 
-配置文件向后兼容，通常无需修改即可升级。
+更新前完成一致备份；涉及数据库迁移时按[部署恢复约定](cloud-deployment.md#按提交自动部署)处理，不能仅替换旧镜像而假设数据格式可回退。
 
 ---
 

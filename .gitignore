@@ -47,3 +47,11 @@ Thumbs.db
 /verify-release
 /.codex-write-check
 .planning/
+
+# 单机部署的私有状态与完整备份
+/.hexclaw-deploy/
+/.hexclaw-deploy-tools/
+/.hexclaw-image.env
+/.hexclaw-maintenance.lock
+/deployment-target.json
+/backups/

@@ -127,14 +127,16 @@ hexclaw serve
 
 ### Docker / Kubernetes
 
-从本仓库源码构建包含云端支持的镜像，单机推荐 Compose：
+单机日常部署推荐 Docker Compose。在部署目录私有 `.env` 设置 `HEXCLAW_IMAGE=ghcr.io/hexagon-codes/hexclaw@sha256:<实际摘要>`，摘要须来自已可拉取的构建产物：
 
 ```bash
-docker compose build
-docker compose up -d
+docker compose pull hexclaw
+docker compose up -d --no-build hexclaw
 ```
 
-首次启动生成持久访问令牌，整个 HOME 数据卷持久化。连接 Desktop 后配置当前远端的模型与渠道。详见[云端部署、Kubernetes 与备份](docs/cloud-deployment.md)。
+本地源码开发先执行 `docker compose build hexclaw`，默认镜像为 `hexclaw:dev`。发布镜像使用版本号及完整提交 SHA 标签，`latest` 仅用于正式稳定版；更新保留现有项目、数据卷及完整 Compose override 文件集合。
+
+源码镜像当前面向 Linux amd64，持久化完整可写 HOME。默认 Compose **不安装 Ollama，也不下载模型**；在 Desktop 为当前远端配置模型和 Embedding API，知识数据与索引保存在服务器。未配置有效 Embedding 时，关键词检索与向量可用性分别判断。初始化令牌、Kubernetes、备份恢复、自动部署及当前验收边界见[云端部署指南](docs/cloud-deployment.md)。
 
 ### 使用 API
 

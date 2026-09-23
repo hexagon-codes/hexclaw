@@ -4,13 +4,17 @@
 
 ## Docker Compose
 
-在源码目录执行：
+日常服务器拉取已发布镜像，沿用现有项目名、数据卷和完整 Compose 文件集合。在部署目录的私有 `.env` 中设置 `HEXCLAW_IMAGE=ghcr.io/hexagon-codes/hexclaw@sha256:<实际摘要>`，摘要从对应构建产物取得；不要原样使用占位符。
 
 ```bash
-docker compose build
-docker compose up -d
+docker compose pull hexclaw
+docker compose up -d --no-build hexclaw
 docker compose ps
 ```
+
+发布镜像使用 `ghcr.io/hexagon-codes/hexclaw:<版本>` 和 `sha-<完整提交 SHA>` 标签；`latest` 只指向正式稳定版，日常部署仍固定 digest。上述命令不表示镜像已发布或自动部署已启用。
+
+本地源码开发可执行 `docker compose build hexclaw`，默认镜像名为 `hexclaw:dev`；随后执行 `docker compose up -d --no-build hexclaw`。源码构建与日常服务器拉取使用同一 Compose 文件，后者不得省略 `--no-build`。
 
 `HOME=/data`，命名卷覆盖整个 `/data`。首次启动创建 `/data/.hexclaw/hexclaw.yaml` 和随机 `server.api_token`；正常重启和重建保留令牌、配置及数据库身份。缺少模型时服务仍可启动，连接 Desktop 后在当前远端的「模型服务」配置模型。连接成功不表示模型或钉钉已经配置完成。
 
@@ -53,15 +57,64 @@ services:
 
 ### 更新和停止
 
+更新前记录当前 digest，取得一致备份并核对新版本迁移兼容性；将 `.env` 的 `HEXCLAW_IMAGE` 改为本次实际 digest 后执行：
+
 ```bash
-docker compose build
-docker compose up -d --force-recreate
+docker compose pull hexclaw
+docker compose up -d --no-build hexclaw
 docker compose logs --tail 100 hexclaw
 # 停止服务，保留数据卷
-docker compose stop
+docker compose stop hexclaw
 ```
 
+拉取失败不停止原服务；新版本已修改数据后，不根据健康检查失败直接切回旧镜像或覆盖旧备份。无迁移或明确向后兼容时可保留当前数据恢复原 digest；不兼容迁移须保留当前数据及调用回执后按该版本恢复方案处理。自动部署、定时异机备份仍须完成对应配置和验收，不把手动命令当作已启用自动化。
+
 Compose 留出 60 秒停止窗口，覆盖服务当前 30 秒收尾预算。已接纳任务按原回执恢复，结果未知的调用不自动重发。不要使用 `down -v` 删除交付数据，也不要同时运行两个共享该卷的容器。
+
+## 按提交自动部署
+
+源码已提供 `.github/workflows/deploy.yml` 和 `scripts/ops/deploy.py`。当前尚未在交付服务器启用，脚本的完整 Docker 故障恢复验证仍待完成。开启前先完成隔离恢复并确定部署分支；不要将源码存在或语法检查通过等同于运维验收。
+
+部署目录放置私有 `deployment-target.json`，按该服务器的实际项目填写。例如：
+
+```json
+{
+  "repository": "https://github.com/hexagon-codes/hexclaw.git",
+  "ref": "refs/heads/<已确认的部署分支>",
+  "project_name": "<当前Compose项目名>",
+  "compose_files": ["docker-compose.yml", "docker-compose.https.yml"],
+  "env_files": [".env"],
+  "backup_directory": "backups",
+  "minimum_free_bytes": 0
+}
+```
+
+`compose_files` 必须使用该项目现有文件，不照抄示例中的 HTTPS 文件名；也可省略该字段并沿用 `.env` 的完整 `COMPOSE_FILE`。`minimum_free_bytes` 为运维确定的预留空间，`0` 不额外设置空间门槛，实际备份写入失败仍停止更新。服务器需有 Python 3、Git、Docker Compose 和镜像拉取权限；私有仓库的 Git／GHCR 凭据由服务器自己的登录配置提供。
+
+GitHub 配置项：
+
+| 位置 | 配置 |
+| --- | --- |
+| Repository variables | `HEXCLAW_DEPLOY_BRANCH`：上述同一分支；`HEXCLAW_DEPLOY_ENABLED=true`：完成恢复验收后启用 |
+| Environment `hexclaw-cloud` variables | `HEXCLAW_DEPLOY_PROJECT`：服务器部署目录绝对路径 |
+| Environment `hexclaw-cloud` secrets | `HEXCLAW_DEPLOY_HOST`、`HEXCLAW_DEPLOY_SSH_KEY`、`HEXCLAW_DEPLOY_KNOWN_HOSTS`：沿用服务器已有 SSH 身份及主机信任信息 |
+
+CI 对指定分支的 push 完成且成功后，构建对应的完整提交 SHA，推送 `sha-<commit>` 镜像；部署任务传递构建返回的 digest。构建可取消过期任务，进入服务器变更的部署不被下一次提交自动取消。服务端与备份共用 `.hexclaw-maintenance.lock`，取得锁后及备份完成后再次向仓库核对绑定分支的当前提交，过期任务只记录 `superseded`。
+
+手工发布同样调用该脚本，使用已经核实的提交和 digest，不另起绕过锁的自动更新命令：
+
+```bash
+python3 scripts/ops/deploy.py \
+  --project-dir <当前部署目录> --target-config <当前部署目录>/deployment-target.json \
+  --image ghcr.io/hexagon-codes/hexclaw@sha256:<镜像摘要> \
+  --commit <完整提交SHA> --run-id <发布记录编号>
+```
+
+脚本先拉取镜像并核对 OCI revision，然后检查原项目、原卷及配置；停止旧进程、完整备份、只重建 HexClaw，再启动唯一的新进程。就绪检查包含健康端点、受保护配置／知识库读取、原 backend ID 和配置摘要，记录前后 schema 版本。该检查不发送模型或 IM 请求，不能替代实际批改、图片附件和语义召回验收。
+
+成功后 `.hexclaw-image.env` 固定当前 digest，`.hexclaw-deploy/current.json` 和独立历史回执记录结果。此后手工 Compose 操作也须在原参数之后追加 `--env-file .hexclaw-image.env`，并保留原 `.env`，避免退回其中的旧镜像。部署回执、展开后的 Compose 配置和备份属于私有运维资料，不提交 Git。
+
+新程序尚未启动时的失败使用冻结的原 Compose 配置和原镜像恢复原卷；一旦请求启动，新迁移和业务副作用便可能已经发生，失败标记 `recovery_required`，保留现场及备份。管理员按前后迁移记录判定无迁移、向后兼容或不兼容，再选择原镜像保留现数据、前向修复或隔离恢复；不自动覆盖数据库。主机断电或 SIGKILL 后同样先核对持久回执，不盲重发部署或业务请求。
 
 ## Kubernetes
 
@@ -82,6 +135,8 @@ kubectl -n hexclaw port-forward service/hexclaw 16060:16060
 
 ## Ollama 的地址归属
 
+默认 Compose 不包含 Ollama，也不自动下载模型。云端可直接使用已配置的 Embedding API 和服务器持久化索引；未配置有效 Embedding 时，关键词检索与向量检索的可用状态分开判断。2 GB 日常服务器不安装 Ollama。
+
 「默认地址」指当前 HexClaw 后端所在运行环境的 `127.0.0.1:11434`。Docker 容器或 Pod 的回环不是宿主机，也不是 Desktop 所在电脑。使用宿主机或另一容器的 Ollama 时在模型服务设置「自定义地址」，填写该容器可访问的完整 HTTP/HTTPS 地址。目标可以包含路径前缀，管理、下载及已关联 Provider 的推理一起保存。目标变更不改变已发送的模型调用；下载断线只查询原操作，服务重启后无法确认的下载不会自动重下。
 
 仓库提供可选 [`deploy/docker-compose.ollama.yml`](../deploy/docker-compose.ollama.yml)，与根 Compose 合并启动后，Ollama 模型保存在独立卷，HexClaw 自定义目标填写 `http://ollama:11434`。它不暴露宿主端口；管理、拉取模型与推理均经当前 HexClaw 后端访问。
@@ -96,7 +151,33 @@ Desktop 只对其管理的本机服务提供恢复操作；远端服务生命周
 
 ## 完整备份与恢复
 
-备份需要数据库及 WAL、原图、批注、导出文件、YAML、`master.key`、AGENTS、记忆、技能、工作区和任务回执保持同一时点。最简单的单机方法是停止该实例后归档整个 HOME 卷，再启动：
+仓库提供 [`scripts/ops/backup.py`](../scripts/ops/backup.py)，需要部署主机的 Python 3、Docker Compose；异机传输另需 SSH，接收主机需 `sha256sum`。脚本已落源码，尚未在交付服务器启用定时任务或完成恢复验收。
+
+```bash
+python3 scripts/ops/backup.py backup \
+  --project-dir /opt/hexclaw --output /opt/hexclaw/backups \
+  --remote-host <已配置的异机SSH别名> --remote-dir <异机备份目录>
+```
+
+沿用部署目录 `.env` 的完整 `COMPOSE_FILE` 和项目身份；需要覆盖时使用重复的 `--compose-file`、`--env-file` 及 `--project-name`。不要只传根 Compose 而丢失 HTTPS override。HOME 之外的其他业务文件用重复的 `--include` 指定；当前 gateway 的证书／配置 bind mount 会按实际容器自动归档。
+
+脚本在同一项目的 `.hexclaw-maintenance.lock` 内停止原容器，完整归档 `/data` 与部署文件，然后启动原容器；不会用变动后的 `.env` 重建服务。停止期间即使归档失败也尝试恢复原容器，恢复失败单独报错。恢复服务之后才计算摘要并传输异机副本，上传失败保留本地副本和失败状态，不自动删除旧备份。
+
+每次生成私有 `.tar` 归档及同名 JSON 状态，分别记录 `local_complete`、`service_restored`、`remote_complete`。缺少异机参数时只完成本地归档，不能当作容灾备份；调度器须核对预期状态，而非只看到文件存在。正常终止会尝试恢复服务；强制杀进程或主机断电后需核对原容器和状态文件。
+
+先在恢复主机取得状态 JSON 中的 SHA256，并准备归档记录的同一镜像，再恢复到全新隔离卷：
+
+```bash
+python3 scripts/ops/backup.py restore \
+  --archive <本次归档.tar> --sha256 <状态文件中的摘要> \
+  --volume hexclaw-restore-<本次唯一标识>
+```
+
+恢复先核对整个归档和内部文件摘要，拒绝覆盖已有卷；失败保留隔离卷供排查，不删除交付数据。脚本不启动恢复副本，不接入 IM 或自动执行任务。部署文件留在归档的 `deployment.tar.gz`、`compose.json` 与 `deployment-paths.json` 中供管理员核对；不能直接将恢复副本作为第二个业务消费者启动。完成隔离文件／数据库核对及恢复点后副作用对账后，再按所需迁移兼容方案恢复业务。
+
+定时周期、异机目的地和保留策略确定后再启用调度；当前源码不自动创建 cron／systemd 任务，也不删除备份。
+
+备份须包含记忆目录的 `.event-receipts/` 和数据库中的 Outbox／题目资产回执，不能只复制可见记忆正文。备份需要数据库及 WAL、原图、批注、导出文件、YAML、`master.key`、AGENTS、记忆、技能、工作区和任务回执保持同一时点。最简单的单机方法是停止该实例后归档整个 HOME 卷，再启动：
 
 ```bash
 docker compose stop hexclaw

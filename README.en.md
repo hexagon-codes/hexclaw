@@ -127,14 +127,16 @@ hexclaw serve
 
 ### Docker / Kubernetes
 
-Build the cloud-enabled image from this source tree; use Compose for a single server:
+Use Docker Compose for a single server. In the private deployment `.env`, set `HEXCLAW_IMAGE=ghcr.io/hexagon-codes/hexclaw@sha256:<actual-digest>` using a digest from an available build:
 
 ```bash
-docker compose build
-docker compose up -d
+docker compose pull hexclaw
+docker compose up -d --no-build hexclaw
 ```
 
-The initial API token and all configuration live in the persistent HOME volume. Configure the selected remote backend in Desktop. See [cloud deployment, Kubernetes and backup](docs/cloud-deployment.md).
+For local source development, run `docker compose build hexclaw` first; the default image is `hexclaw:dev`. Published images use version and full commit SHA tags; `latest` is reserved for stable releases. Keep the existing project, data volume and complete Compose override set when updating.
+
+The source image targets Linux amd64 and persists the complete writable HOME. The default Compose setup **does not install Ollama or download models**. Configure model and Embedding APIs for the selected remote backend in Desktop. Knowledge data and indexes belong to that server; keyword retrieval and vector availability are separate when no effective Embedding configuration exists. See the [cloud deployment guide](docs/cloud-deployment.md) for initialization, Kubernetes, backup, automation and current verification limits.
 
 ### Use the API
 

@@ -1,7 +1,7 @@
 # 单机日常部署：整个 HOME 持久化；初始化种子不覆盖已经保存的运行配置。
 services:
   hexclaw:
-    image: ${HEXCLAW_IMAGE:-hexclaw:local}
+    image: ${HEXCLAW_IMAGE:-hexclaw:dev}
     platform: linux/amd64
     build:
       context: .

@@ -1,0 +1,104 @@
+name: Deploy
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    name: Build checked revision
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      vars.HEXCLAW_DEPLOY_ENABLED == 'true' &&
+      github.event.workflow_run.head_branch == vars.HEXCLAW_DEPLOY_BRANCH
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    concurrency:
+      group: deploy-image-${{ github.event.workflow_run.head_branch }}
+      cancel-in-progress: true
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        id: build
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64
+          tags: ghcr.io/hexagon-codes/hexclaw:sha-${{ github.event.workflow_run.head_sha }}
+          labels: org.opencontainers.image.revision=${{ github.event.workflow_run.head_sha }}
+          build-args: |
+            VERSION=dev-${{ github.event.workflow_run.head_sha }}
+            COMMIT=${{ github.event.workflow_run.head_sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Update Compose service
+    needs: image
+    runs-on: ubuntu-24.04
+    environment: hexclaw-cloud
+    concurrency:
+      group: deploy-hexclaw-cloud
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+      - name: Prepare deployment transport
+        env:
+          DEPLOY_KEY: ${{ secrets.HEXCLAW_DEPLOY_SSH_KEY }}
+          DEPLOY_HOST_KEYS: ${{ secrets.HEXCLAW_DEPLOY_KNOWN_HOSTS }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          os.umask(0o077)
+          directory = Path.home() / '.ssh'
+          directory.mkdir(exist_ok=True)
+          (directory / 'id_ed25519').write_text(os.environ['DEPLOY_KEY'] + '\n')
+          (directory / 'known_hosts').write_text(os.environ['DEPLOY_HOST_KEYS'] + '\n')
+          PY
+      - name: Deploy exact digest
+        env:
+          DEPLOY_HOST: ${{ secrets.HEXCLAW_DEPLOY_HOST }}
+          DEPLOY_PROJECT: ${{ vars.HEXCLAW_DEPLOY_PROJECT }}
+          DEPLOY_COMMIT: ${{ github.event.workflow_run.head_sha }}
+          DEPLOY_DIGEST: ${{ needs.image.outputs.digest }}
+          DEPLOY_RUN: ${{ github.run_id }}
+        run: |
+          python3 - <<'PY'
+          import io, os, posixpath, shlex, subprocess, tarfile
+          project = os.environ['DEPLOY_PROJECT']
+          if not posixpath.isabs(project): raise SystemExit('An absolute deployment project directory is required')
+          commit = os.environ['DEPLOY_COMMIT']
+          directory = posixpath.join(project, '.hexclaw-deploy-tools', commit)
+          stream = io.BytesIO()
+          with tarfile.open(fileobj=stream, mode='w') as archive:
+              for name in ('backup.py', 'deploy.py'):
+                  archive.add('scripts/ops/' + name, arcname=name)
+          upload = 'umask 077; mkdir -p -- ' + shlex.quote(directory) + ' && tar -xf - -C ' + shlex.quote(directory)
+          subprocess.run(['ssh', '--', os.environ['DEPLOY_HOST'], upload], input=stream.getvalue(), check=True)
+          args = ['python3', directory + '/deploy.py', '--project-dir', project,
+                  '--target-config', project + '/deployment-target.json',
+                  '--image', 'ghcr.io/hexagon-codes/hexclaw@' + os.environ['DEPLOY_DIGEST'],
+                  '--commit', commit, '--run-id', os.environ['DEPLOY_RUN']]
+          subprocess.run(['ssh', '--', os.environ['DEPLOY_HOST'], shlex.join(args)], check=True)
+          PY
