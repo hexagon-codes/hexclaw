@@ -174,6 +174,13 @@ func (m *Manager) Init(ctx context.Context) error {
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
+		`CREATE TABLE IF NOT EXISTS platform_test_requests (
+            instance_id TEXT NOT NULL,
+            request_id TEXT NOT NULL,
+            deliveries_json TEXT NOT NULL,
+            deadline_ms INTEGER NOT NULL,
+            PRIMARY KEY (instance_id, request_id)
+        )`,
 		`CREATE TABLE IF NOT EXISTS platform_events (
 			instance_name TEXT NOT NULL,
 			event_id TEXT NOT NULL,

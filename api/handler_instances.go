@@ -24,8 +24,9 @@ type UpsertInstanceRequest struct {
 }
 
 type sendTestRequest struct {
-	Target  string `json:"target"`
-	Content string `json:"content"`
+	RequestID string `json:"request_id"`
+	Target    string `json:"target"`
+	Content   string `json:"content"`
 }
 
 type instanceResponse struct {
@@ -518,6 +519,10 @@ func (s *Server) handleSendTestInstanceByID(w http.ResponseWriter, r *http.Reque
 	var req sendTestRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误: " + err.Error()})
+		return
+	}
+	if strings.TrimSpace(req.RequestID) != "" {
+		s.handleBoundInstanceTest(w, r, inst, strings.TrimSpace(req.RequestID), req.Content)
 		return
 	}
 	req.Target = strings.TrimSpace(req.Target)
