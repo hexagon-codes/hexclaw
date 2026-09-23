@@ -16,6 +16,27 @@ import (
 
 const writingUnreadableMarker = "[无法识别]"
 
+func classificationOCREvidence(classified ImageTaskClassification) *k12.CreativeWorkIntakeOCREvidence {
+	if classified.Intent != k12.ImageTaskIntentWriting || classified.WritingOCR == nil {
+		return nil
+	}
+	ocr := classified.WritingOCR
+	canonical := strings.TrimSpace(ocr.CanonicalContent)
+	if strings.TrimSpace(ocr.Raw) == "" || canonical == "" {
+		return nil
+	}
+	sum := sha256.Sum256([]byte(canonical))
+	evidence := &k12.CreativeWorkIntakeOCREvidence{
+		Raw: strings.TrimSpace(ocr.Raw), CanonicalContent: canonical,
+		CanonicalVersion: 1, CanonicalDigest: "sha256:" + hex.EncodeToString(sum[:]),
+		Confidence: ocr.Confidence, RiskSegments: append([]k12.CreativeWorkIntakeOCRRisk(nil), ocr.RiskSegments...),
+	}
+	if len(evidence.RiskSegments) == 0 && (ocr.Confidence < .95 || strings.Contains(canonical, writingUnreadableMarker)) {
+		evidence.RiskSegments = []k12.CreativeWorkIntakeOCRRisk{{SegmentID: "document", RawText: canonical, Reasons: []string{"document_unreadable"}}}
+	}
+	return evidence
+}
+
 // 唯一定位是局部复核和排除的前提；整篇/关键歧义不能用部分文字冒充完整原稿。
 func writingRisksLocatable(e k12.CreativeWorkIntakeOCREvidence) bool {
 	seen := make(map[string]bool)

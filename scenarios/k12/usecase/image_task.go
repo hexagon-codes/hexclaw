@@ -24,8 +24,9 @@ import (
 // ImageTaskClassificationInput keeps image evidence mandatory. MessageIntent
 // is contextual evidence only; adapters must never classify from it alone.
 type ImageTaskClassificationInput struct {
-	Images        [][]byte
-	MessageIntent string
+	Images            [][]byte
+	MessageIntent     string
+	IncludeWritingOCR bool
 }
 
 type ImageTaskClassification struct {
@@ -35,6 +36,7 @@ type ImageTaskClassification struct {
 	ConfirmationCandidates   []k12.ImageTaskIntent
 	WorkTitleCandidate       *k12.FactCandidate
 	TaskRequirementCandidate *k12.FactCandidate
+	WritingOCR               *ImageTaskWritingOCRResult
 }
 
 type ImageTaskClassifier interface {
@@ -42,10 +44,10 @@ type ImageTaskClassifier interface {
 }
 
 type ImageTaskWritingOCRResult struct {
-	Raw              string
-	CanonicalContent string
-	Confidence       float64
-	RiskSegments     []k12.CreativeWorkIntakeOCRRisk
+	Raw              string                          `json:"raw"`
+	CanonicalContent string                          `json:"canonical_content"`
+	Confidence       float64                         `json:"confidence"`
+	RiskSegments     []k12.CreativeWorkIntakeOCRRisk `json:"risk_segments"`
 }
 
 // ImageTaskWritingOCR returns explicit quality evidence. A string-only OCR
@@ -454,7 +456,7 @@ func (c *ImageTaskCoordinator) Create(
 	if len(in.SourceAssetRefs) != 1 {
 		return ImageTaskView{}, false, fmt.Errorf("%w: one image is required for each task", ErrInvalidInput)
 	}
-	if in.CreativeEntry == nil && (c.Classifier == nil || c.ResolveRoute == nil) {
+	if (in.CreativeEntry == nil || in.CreativeEntry.TaskIntent == k12.ImageTaskIntentUnknown) && (c.Classifier == nil || c.ResolveRoute == nil) {
 		return ImageTaskView{}, false, fmt.Errorf("usecase: image task classifier/route resolver 未配置")
 	}
 	if c.PageAssets != nil && in.OwnerScope == "" {
@@ -514,7 +516,7 @@ func (c *ImageTaskCoordinator) Create(
 		return ImageTaskView{}, false, err
 	}
 	sourceDigest := imageBytesDigest(images)
-	if in.CreativeEntry != nil {
+	if in.CreativeEntry != nil && in.CreativeEntry.TaskIntent != k12.ImageTaskIntentUnknown {
 		operationRouteRequest := in.RouteRequest
 		if c.ResolveRouteDisplay != nil {
 			// Parent-selected creative creation must not resolve an unexecuted
@@ -569,6 +571,9 @@ func (c *ImageTaskCoordinator) Create(
 		)
 	}
 	route = k12.NormalizeImageTaskRouteSnapshot(route)
+	if in.CreativeEntry != nil && in.CreativeEntry.Kind == k12.CreativeWorkEntryNewWork && in.CreativeEntry.TaskIntent == k12.ImageTaskIntentUnknown {
+		route.PromptVersion = "creative-work-classification-ocr-v1"
+	}
 	if route.TimeoutMS <= 0 {
 		route.TimeoutMS = int(imageTaskDefaultProviderTimeout / time.Millisecond)
 	}
@@ -595,6 +600,8 @@ func (c *ImageTaskCoordinator) Create(
 		MessageIntent: in.MessageIntent, TaskIntent: k12.ImageTaskIntentUnknown,
 		IntentEvidence: []string{}, Status: k12.ImageTaskStatusRouting,
 		RoutingProvenance:           k12.ImageTaskRoutingModelClassified,
+		CreativeEntry:               in.CreativeEntry,
+		OperationRouteRequest:       in.RouteRequest,
 		ClassificationRouteSnapshot: route, ClassificationInvocationID: invocationID,
 		RoutePolicySnapshot: route, IdempotencyKey: idempotencyKey,
 		RequestDigest: requestDigest, AttemptGeneration: in.AttemptGeneration,
@@ -632,7 +639,7 @@ func sameCreateImageTaskRouteRequest(
 	existing k12.ImageTaskDispatch,
 	input CreateImageTaskInput,
 ) bool {
-	if input.CreativeEntry != nil {
+	if input.CreativeEntry != nil && input.CreativeEntry.TaskIntent != k12.ImageTaskIntentUnknown {
 		return sameImageTaskRouteRequest(
 			existing.OperationRouteRequest,
 			input.RouteRequest,
@@ -1439,6 +1446,7 @@ func (c *ImageTaskCoordinator) Run(
 			providerCtx,
 			ImageTaskClassificationInput{
 				Images: images, MessageIntent: dispatch.MessageIntent,
+				IncludeWritingOCR: invocation.RouteSnapshot.PromptVersion == "creative-work-classification-ocr-v1",
 			},
 		)
 		providerCtxErr := providerCtx.Err()
@@ -1482,6 +1490,7 @@ func (c *ImageTaskCoordinator) Run(
 				WorkTitleCandidate:       classified.WorkTitleCandidate,
 				TaskRequirementCandidate: classified.TaskRequirementCandidate,
 				InvocationResultDigest:   digestJSON(classified),
+				WritingOCR:               classificationOCREvidence(classified),
 			},
 		)
 		slog.Info("K12 ImageTask routing commit finished", "agent_id", dispatch.AgentName,
@@ -1988,9 +1997,24 @@ func (c *ImageTaskCoordinator) continueTarget(
 			intake.AgentName,
 			intake.IntakeID,
 		)
+		if errors.Is(err, k12storage.ErrImageTaskNotFound) && intake.OCREvidence != nil && intake.OCREvidence.SourceInvocationID != "" {
+			// 分类已提供原始转写，直接复核其风险片段，不再发送整篇 OCR。
+			prior, priorErr := c.Records.GetImageTaskInvocation(ctx, intake.AgentName, intake.OCREvidence.SourceInvocationID)
+			if priorErr != nil {
+				return view, priorErr
+			}
+			if prior.DispatchID != intake.DispatchID || prior.Operation != k12.ImageTaskOperationClassification || prior.Status != k12.ImageTaskInvocationSucceeded {
+				return view, k12storage.ErrImageTaskConflict
+			}
+			updated, reviewErr := c.reviewWritingOCR(ctx, view.Dispatch, intake, prior, images)
+			view.Creative = &updated
+			return view, reviewErr
+		}
 		if errors.Is(err, k12storage.ErrImageTaskNotFound) {
 			ocrRoute := intake.RoutePolicySnapshot
-			if intake.PromotionPolicy == k12.CreativeWorkPromotionExplicitCommit {
+			if intake.PromotionPolicy == k12.CreativeWorkPromotionExplicitCommit && view.Dispatch.RoutingProvenance == k12.ImageTaskRoutingModelClassified {
+				ocrRoute = view.Dispatch.RoutePolicySnapshot
+			} else if intake.PromotionPolicy == k12.CreativeWorkPromotionExplicitCommit {
 				if c.ResolveRoute == nil {
 					return view, fmt.Errorf("usecase: writing OCR route resolver 未配置")
 				}
@@ -2041,7 +2065,7 @@ func (c *ImageTaskCoordinator) continueTarget(
 			); yes || expireErr != nil {
 				return expired, expireErr
 			}
-			if intake.OCREvidence != nil && intake.PromotionPolicy == k12.CreativeWorkPromotionAutomatic {
+			if intake.OCREvidence != nil && view.Dispatch.RoutingProvenance != k12.ImageTaskRoutingParentSelected {
 				intake, err = c.reviewWritingOCR(ctx, view.Dispatch, intake, prepared, images)
 			} else {
 				intake, err = c.executeWritingOCR(
@@ -2075,7 +2099,7 @@ func (c *ImageTaskCoordinator) continueTarget(
 			return view, k12storage.ErrImageTaskInvalidState
 		}
 		if view.Creative.Status == k12.CreativeWorkIntakePreparing && view.Creative.OCREvidence != nil &&
-			view.Creative.PromotionPolicy == k12.CreativeWorkPromotionAutomatic {
+			view.Dispatch.RoutingProvenance != k12.ImageTaskRoutingParentSelected {
 			latest, getErr := c.Records.GetLatestWritingOCRInvocation(ctx, intake.AgentName, intake.IntakeID)
 			if getErr != nil {
 				return view, getErr
@@ -2262,11 +2286,15 @@ func (c *ImageTaskCoordinator) executeWritingOCR(
 		Confidence:      ocr.Confidence,
 		RiskSegments:    append([]k12.CreativeWorkIntakeOCRRisk(nil), ocr.RiskSegments...),
 	}
-	if intake.PromotionPolicy == k12.CreativeWorkPromotionExplicitCommit {
+	if intake.PromotionPolicy == k12.CreativeWorkPromotionExplicitCommit && dispatch.RoutingProvenance == k12.ImageTaskRoutingParentSelected {
 		return c.Records.HoldCreativeWorkIntakeOCRConfirmation(
 			ctx, intake.AgentName, intake.IntakeID, intake.Version,
 			invocation.InvocationID, evidence,
 		)
+	}
+	if ocr.CanonicalContent == "" {
+		evidence.Outcome = "unreadable"
+		return c.Records.FreezeCreativeWorkIntakeOCR(ctx, intake.AgentName, intake.IntakeID, intake.Version, invocation.InvocationID, evidence, k12.CreativeWorkEvidenceBoundedReview)
 	}
 	if ocr.Confidence >= 0.95 && len(ocr.RiskSegments) == 0 {
 		evidence.Outcome = "complete"
@@ -3093,7 +3121,8 @@ func (c *ImageTaskCoordinator) Retry(
 			"timeout_ms", invocation.RouteSnapshot.TimeoutMS, "images", len(images))
 		classified, err := c.Classifier.ClassifyImageTask(
 			providerCtx,
-			ImageTaskClassificationInput{Images: images, MessageIntent: dispatch.MessageIntent},
+			ImageTaskClassificationInput{Images: images, MessageIntent: dispatch.MessageIntent,
+				IncludeWritingOCR: invocation.RouteSnapshot.PromptVersion == "creative-work-classification-ocr-v1"},
 		)
 		providerCtxErr := providerCtx.Err()
 		slog.Info("K12 ImageTask classification retry finished", "agent_id", agentName,
@@ -3127,6 +3156,7 @@ func (c *ImageTaskCoordinator) Retry(
 				WorkTitleCandidate:       classified.WorkTitleCandidate,
 				TaskRequirementCandidate: classified.TaskRequirementCandidate,
 				InvocationResultDigest:   digestJSON(classified),
+				WritingOCR:               classificationOCREvidence(classified),
 			},
 		)
 		if err != nil {

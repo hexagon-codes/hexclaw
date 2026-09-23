@@ -62,3 +62,22 @@ func TestImageTaskAdapterRejectsUnknownFields(t *testing.T) {
 		t.Fatal("unknown classifier fields must fail closed")
 	}
 }
+
+func TestImageTaskAdapterCombinedOCRKeepsOnlyWritingEvidence(t *testing.T) {
+	for _, intent := range []string{"writing", "artwork", "completed_homework"} {
+		t.Run(intent, func(t *testing.T) {
+			calls := 0
+			adapter := NewImageTaskAdapter(func(_ context.Context, _ []byte, prompt string) (string, error) {
+				calls++
+				if !strings.Contains(prompt, "writing_ocr") || !strings.Contains(prompt, "不得润色") {
+					t.Fatal("combined request lacks transcription constraints")
+				}
+				return `{"task_intent":"` + intent + `","intent_evidence":["可见原图"],"confidence":0.99,"confirmation_candidates":[],"writing_ocr":{"raw":"春天到了。","canonical_content":"春天到了。","confidence":0.98,"risk_segments":[]}}`, nil
+			})
+			got, err := adapter.ClassifyImageTask(context.Background(), usecase.ImageTaskClassificationInput{Images: [][]byte{[]byte("image")}, IncludeWritingOCR: true})
+			if err != nil || calls != 1 || (got.WritingOCR != nil) != (intent == "writing") {
+				t.Fatalf("classification/transcription mismatch: %+v calls=%d err=%v", got, calls, err)
+			}
+		})
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"strings"
 
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
@@ -116,6 +117,13 @@ func (a *ImageTaskAdapter) ClassifyImageTask(
 		return usecase.ImageTaskClassification{}, fmt.Errorf("image task classifier: 当前分流调用必须有且仅有一张真实图片")
 	}
 	prompt := imageTaskClassifierPrompt
+	if input.IncludeWritingOCR {
+		prompt += `
+本次来自新建作品入口。仍须区分作文、美术、试卷和歧义；不能按字数阈值把课文、题目或说明书当作文。
+当且仅当 task_intent=writing 时，在同一个 JSON object 增加 writing_ocr 字段，值为逐字转写对象：
+{"raw":"原稿逐字文字","canonical_content":"原稿正文，仅整理换行","confidence":0.0,"risk_segments":[{"segment_id":"稳定行列标识","raw_text":"正文中可唯一定位的原片段","reasons":["illegible|overwrite|conflicting_reading"],"alternatives":[]}]}
+不得润色、纠错、补句或点评；看不清的字写 [无法识别] 并列入 risk_segments，不能猜读。整篇或关键内容不可靠时使用 segment_id=document、reasons=["document_unreadable"]。清晰一致时 risk_segments 为空。其他类型 writing_ocr=null。`
+	}
 	if message := strings.TrimSpace(input.MessageIntent); message != "" {
 		prompt += "\n附带消息（仅作指代上下文）：" + message
 	}
@@ -126,12 +134,13 @@ func (a *ImageTaskAdapter) ClassifyImageTask(
 		)
 	}
 	var envelope struct {
-		TaskIntent             k12.ImageTaskIntent   `json:"task_intent"`
-		IntentEvidence         []string              `json:"intent_evidence"`
-		Confidence             float64               `json:"confidence"`
-		ConfirmationCandidates []k12.ImageTaskIntent `json:"confirmation_candidates"`
-		WorkTitleCandidate     *k12.FactCandidate    `json:"work_title_candidate"`
-		TaskRequirement        *k12.FactCandidate    `json:"task_requirement_candidate"`
+		TaskIntent             k12.ImageTaskIntent                `json:"task_intent"`
+		IntentEvidence         []string                           `json:"intent_evidence"`
+		Confidence             float64                            `json:"confidence"`
+		ConfirmationCandidates []k12.ImageTaskIntent              `json:"confirmation_candidates"`
+		WorkTitleCandidate     *k12.FactCandidate                 `json:"work_title_candidate"`
+		TaskRequirement        *k12.FactCandidate                 `json:"task_requirement_candidate"`
+		WritingOCR             *usecase.ImageTaskWritingOCRResult `json:"writing_ocr"`
 	}
 	if err := strictImageTaskJSON(raw, &envelope); err != nil {
 		return usecase.ImageTaskClassification{}, definitiveImageTaskResponse(
@@ -144,6 +153,10 @@ func (a *ImageTaskAdapter) ClassifyImageTask(
 		ConfirmationCandidates:   envelope.ConfirmationCandidates,
 		WorkTitleCandidate:       envelope.WorkTitleCandidate,
 		TaskRequirementCandidate: envelope.TaskRequirement,
+	}
+	// 非作文或不完整转写不进入草稿；旧响应缺少该字段时沿既有 OCR 链处理。
+	if input.IncludeWritingOCR && result.Intent == k12.ImageTaskIntentWriting && validClassificationOCR(envelope.WritingOCR) {
+		result.WritingOCR = envelope.WritingOCR
 	}
 	bindImageTaskCandidate := func(candidate *k12.FactCandidate) {
 		if candidate == nil {
@@ -184,6 +197,22 @@ func (a *ImageTaskAdapter) ClassifyImageTask(
 		}
 	}
 	return result, nil
+}
+
+func validClassificationOCR(ocr *usecase.ImageTaskWritingOCRResult) bool {
+	if ocr == nil || strings.TrimSpace(ocr.Raw) == "" || strings.TrimSpace(ocr.CanonicalContent) == "" ||
+		math.IsNaN(ocr.Confidence) || math.IsInf(ocr.Confidence, 0) || ocr.Confidence < 0 || ocr.Confidence > 1 {
+		return false
+	}
+	for _, risk := range ocr.RiskSegments {
+		if strings.TrimSpace(risk.SegmentID) == "" || len(risk.Reasons) == 0 {
+			return false
+		}
+	}
+	if strings.Contains(ocr.CanonicalContent, "[无法识别]") && len(ocr.RiskSegments) == 0 {
+		ocr.RiskSegments = []k12.CreativeWorkIntakeOCRRisk{{SegmentID: "document", RawText: ocr.CanonicalContent, Reasons: []string{"document_unreadable"}}}
+	}
+	return true
 }
 
 func (a *ImageTaskAdapter) RecognizeImageTaskWriting(

@@ -34,6 +34,7 @@ type ImageTaskRoutingDecision struct {
 	WorkTitleCandidate       *k12.FactCandidate
 	TaskRequirementCandidate *k12.FactCandidate
 	InvocationResultDigest   string
+	WritingOCR               *k12.CreativeWorkIntakeOCREvidence `json:",omitempty"`
 }
 
 type ImageTaskRouteTarget struct {
@@ -224,6 +225,17 @@ func (s *Store) PrepareImageTaskDispatch(
 	if err != nil {
 		return k12.ImageTaskDispatch{}, false, err
 	}
+	creativeEntryJSON, operationRouteJSON := "", ""
+	if dispatch.CreativeEntry != nil {
+		creativeEntryJSON, err = jsonString(dispatch.CreativeEntry)
+		if err != nil {
+			return k12.ImageTaskDispatch{}, false, err
+		}
+		operationRouteJSON, err = jsonString(dispatch.OperationRouteRequest)
+		if err != nil {
+			return k12.ImageTaskDispatch{}, false, err
+		}
+	}
 	invocationRouteJSON, err := jsonString(invocation.RouteSnapshot)
 	if err != nil {
 		return k12.ImageTaskDispatch{}, false, err
@@ -271,7 +283,7 @@ func (s *Store) PrepareImageTaskDispatch(
 		classificationRouteJSON, dispatch.ClassificationInvocationID, routePolicyJSON,
 		dispatch.IdempotencyKey, dispatch.RequestDigest, dispatch.AttemptGeneration,
 		boolInt(dispatch.RetrySafe), dispatch.FailureKind, dispatch.Version,
-		dispatch.CreatedAt, dispatch.UpdatedAt, dispatch.RoutingProvenance, "", "",
+		dispatch.CreatedAt, dispatch.UpdatedAt, dispatch.RoutingProvenance, creativeEntryJSON, operationRouteJSON,
 		dispatch.AutomaticBudgetSeconds, dispatch.AutomaticStartedAt,
 		dispatch.AutomaticDeadlineAt, dispatch.AutomaticRemainingSeconds)
 	if err != nil {
@@ -878,7 +890,14 @@ func (s *Store) CommitImageTaskRouting(
 	dispatch.UpdatedAt = now
 
 	var target ImageTaskRouteTarget
-	if len(decision.ConfirmationCandidates) >= 2 || decision.Intent == k12.ImageTaskIntentUnknown {
+	if dispatch.CreativeEntry != nil && dispatch.CreativeEntry.TaskIntent == k12.ImageTaskIntentUnknown &&
+		(len(decision.ConfirmationCandidates) >= 2 || (decision.Intent != k12.ImageTaskIntentWriting && decision.Intent != k12.ImageTaskIntentArtwork)) {
+		// 分类回执保持真实成功；无法确定作品类型是内容终态，不转人工选择或作业任务。
+		dispatch.Status = k12.ImageTaskStatusFailed
+		dispatch.FailureKind = "creative_type_unrecognized"
+		dispatch.ConfirmationCandidates = nil
+		candidatesJSON = "[]"
+	} else if len(decision.ConfirmationCandidates) >= 2 || decision.Intent == k12.ImageTaskIntentUnknown {
 		dispatch.Status = k12.ImageTaskStatusAwaitingConfirmation
 		dispatch.AutomaticRemainingSeconds = remainingImageTaskAutomaticSeconds(dispatch, now)
 		dispatch.AutomaticDeadlineAt = 0
@@ -891,15 +910,45 @@ func (s *Store) CommitImageTaskRouting(
 		if err != nil {
 			return dispatch, target, err
 		}
+		if decision.WritingOCR != nil && target.CreativeIntake != nil && decision.Intent == k12.ImageTaskIntentWriting &&
+			dispatch.CreativeEntry != nil && dispatch.CreativeEntry.Kind == k12.CreativeWorkEntryNewWork &&
+			dispatch.CreativeEntry.TaskIntent == k12.ImageTaskIntentUnknown {
+			intake := target.CreativeIntake
+			evidence := *decision.WritingOCR
+			sum := sha256.Sum256([]byte(evidence.CanonicalContent))
+			if strings.TrimSpace(evidence.Raw) == "" || strings.TrimSpace(evidence.CanonicalContent) == "" ||
+				evidence.CanonicalVersion != 1 || evidence.CanonicalDigest != "sha256:"+hex.EncodeToString(sum[:]) ||
+				evidence.Confidence < 0 || evidence.Confidence > 1 {
+				return dispatch, target, ErrImageTaskInvalidState
+			}
+			evidence.SourceInvocationID = activeInvocation.InvocationID
+			if evidence.Confidence >= .95 && len(evidence.RiskSegments) == 0 {
+				evidence.Outcome, evidence.FrozenAt = "complete", now
+				evidence.ConfirmationProvenance = k12.CreativeWorkEvidenceAutoFreeze
+				intake.Status, intake.ConfirmationProvenance = k12.CreativeWorkIntakeReady, k12.CreativeWorkEvidenceAutoFreeze
+			}
+			intake.OCREvidence = &evidence
+			if err := intake.Validate(); err != nil {
+				return dispatch, target, err
+			}
+			ocrJSON, err := jsonString(evidence)
+			if err != nil {
+				return dispatch, target, err
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE k12_creative_work_intakes SET ocr_evidence_json=?,status=?,confirmation_provenance=? WHERE agent_name=? AND intake_id=?`,
+				ocrJSON, intake.Status, intake.ConfirmationProvenance, agentName, intake.IntakeID); err != nil {
+				return dispatch, target, err
+			}
+		}
 	}
 	res, err := tx.ExecContext(ctx, `UPDATE k12_image_task_dispatches
         SET task_intent=?,intent_evidence_json=?,intent_confidence=?,
             confirmation_candidates_json=?,status=?,target_object_type=?,target_object_id=?,
-            retry_safe=0,failure_kind='',version=version+1,updated_at=?,
+            retry_safe=0,failure_kind=?,version=version+1,updated_at=?,
             automatic_deadline_at=?,automatic_remaining_seconds=?
         WHERE agent_name=? AND dispatch_id=? AND version=?`,
 		dispatch.TaskIntent, evidenceJSON, dispatch.IntentConfidence, candidatesJSON,
-		dispatch.Status, dispatch.TargetObjectType, dispatch.TargetObjectID, now,
+		dispatch.Status, dispatch.TargetObjectType, dispatch.TargetObjectID, dispatch.FailureKind, now,
 		dispatch.AutomaticDeadlineAt, dispatch.AutomaticRemainingSeconds,
 		agentName, dispatchID, expectedVersion)
 	if err != nil {
@@ -961,6 +1010,10 @@ func createImageTaskRouteTarget(
 			targetWorkID = strings.TrimSpace(dispatch.CreativeEntry.WorkID)
 			baseVersionID = strings.TrimSpace(dispatch.CreativeEntry.BaseVersionID)
 		}
+		routePolicy := dispatch.RoutePolicySnapshot
+		if promotionPolicy == k12.CreativeWorkPromotionExplicitCommit {
+			routePolicy = k12.ImageTaskRouteSnapshot{}
+		}
 		intake := k12.CreativeWorkIntake{
 			IntakeID: intakeID, DispatchID: dispatch.DispatchID,
 			AgentName: dispatch.AgentName, LearnerID: dispatch.LearnerID,
@@ -968,7 +1021,7 @@ func createImageTaskRouteTarget(
 			SourceDigest:             dispatch.SourceDigest,
 			WorkTitleCandidate:       workTitle,
 			TaskRequirementCandidate: taskRequirement,
-			RoutePolicySnapshot:      dispatch.RoutePolicySnapshot,
+			RoutePolicySnapshot:      routePolicy,
 			EntryKind:                entryKind,
 			PromotionPolicy:          promotionPolicy,
 			TargetWorkID:             targetWorkID,
@@ -2242,7 +2295,10 @@ func (s *Store) FreezeCreativeWorkIntakeOCR(
 		return intake, ErrImageTaskVersionConflict
 	}
 	inv, err := getImageTaskInvocation(ctx, tx, agentName, invocationID)
-	if err != nil || inv.IntakeID != intakeID || inv.Operation != k12.ImageTaskOperationWritingOCR {
+	classificationSource := err == nil && inv.Operation == k12.ImageTaskOperationClassification &&
+		inv.DispatchID == intake.DispatchID && inv.Status == k12.ImageTaskInvocationSucceeded &&
+		intake.OCREvidence != nil && intake.OCREvidence.SourceInvocationID == invocationID
+	if err != nil || (!classificationSource && (inv.IntakeID != intakeID || inv.Operation != k12.ImageTaskOperationWritingOCR)) {
 		return intake, ErrImageTaskConflict
 	}
 	nextStatus := k12.CreativeWorkIntakeReady
@@ -2277,7 +2333,7 @@ func (s *Store) FreezeCreativeWorkIntakeOCR(
 	for _, id := range invocations {
 		found = found || id == invocationID
 	}
-	if !found {
+	if !found && !classificationSource {
 		invocations = append(invocations, invocationID)
 	}
 	invocationsJSON, _ := jsonString(invocations)
@@ -2360,8 +2416,13 @@ func (s *Store) HoldCreativeWorkIntakeOCRConfirmation(
 	invocations := append([]string(nil), intake.OperationInvocations...)
 	invocations = append(invocations, invocationID)
 	invocationsJSON, _ := jsonString(invocations)
+	dispatch, err := getImageTaskDispatch(ctx, tx, agentName, intake.DispatchID, "")
+	if err != nil {
+		return intake, err
+	}
+	automaticReview := dispatch.RoutingProvenance != k12.ImageTaskRoutingParentSelected
 	nextStatus := k12.CreativeWorkIntakeAwaitingConfirmation
-	if intake.PromotionPolicy == k12.CreativeWorkPromotionAutomatic {
+	if automaticReview {
 		nextStatus = k12.CreativeWorkIntakePreparing
 	}
 	res, err = tx.ExecContext(ctx, `UPDATE k12_creative_work_intakes
@@ -2376,7 +2437,7 @@ func (s *Store) HoldCreativeWorkIntakeOCRConfirmation(
 	if n, _ := res.RowsAffected(); n != 1 {
 		return intake, ErrImageTaskVersionConflict
 	}
-	if intake.PromotionPolicy == k12.CreativeWorkPromotionExplicitCommit {
+	if !automaticReview {
 		if _, err := pauseImageTaskAutomaticWindow(
 			ctx, tx, agentName, intake.DispatchID, now,
 		); err != nil {

@@ -60,8 +60,7 @@ const (
 	CreativeWorkEntryRevision CreativeWorkEntryKind = "revision"
 )
 
-// ImageTaskCreativeEntry is the closed create-time union for a manually
-// selected creative image. A nil entry is the existing automatic chat path.
+// ImageTaskCreativeEntry 限定档案草稿入口；unknown 复用自动分类，nil 保持会话自动入库。
 type ImageTaskCreativeEntry struct {
 	Kind          CreativeWorkEntryKind `json:"kind"`
 	TaskIntent    ImageTaskIntent       `json:"task_intent"`
@@ -70,8 +69,8 @@ type ImageTaskCreativeEntry struct {
 }
 
 func (e ImageTaskCreativeEntry) Validate() error {
-	if e.TaskIntent != ImageTaskIntentWriting && e.TaskIntent != ImageTaskIntentArtwork {
-		return fmt.Errorf("creative_entry task_intent must be writing or artwork")
+	if e.TaskIntent != ImageTaskIntentWriting && e.TaskIntent != ImageTaskIntentArtwork && e.TaskIntent != ImageTaskIntentUnknown {
+		return fmt.Errorf("creative_entry task_intent must be writing, artwork or unknown")
 	}
 	if e.Kind != CreativeWorkEntryNewWork {
 		return fmt.Errorf("creative_entry kind must be new_work")
@@ -294,7 +293,12 @@ func (d ImageTaskDispatch) Validate() error {
 	switch provenance {
 	case ImageTaskRoutingModelClassified:
 		if d.CreativeEntry != nil {
-			return fmt.Errorf("model_classified dispatch 不得携带 creative_entry")
+			if err := d.CreativeEntry.Validate(); err != nil {
+				return err
+			}
+			if d.CreativeEntry.TaskIntent != ImageTaskIntentUnknown {
+				return fmt.Errorf("model-classified creative entry must use unknown intent")
+			}
 		}
 		if err := d.ClassificationRouteSnapshot.Validate(); err != nil {
 			return err
@@ -312,7 +316,7 @@ func (d ImageTaskDispatch) Validate() error {
 		if err := d.CreativeEntry.Validate(); err != nil {
 			return err
 		}
-		if d.TaskIntent != d.CreativeEntry.TaskIntent {
+		if d.CreativeEntry.TaskIntent == ImageTaskIntentUnknown || d.TaskIntent != d.CreativeEntry.TaskIntent {
 			return fmt.Errorf("parent_selected intent 与 creative_entry 不一致")
 		}
 		if d.ClassificationRouteSnapshot != (ImageTaskRouteSnapshot{}) ||
@@ -431,6 +435,8 @@ type CreativeWorkIntakeOCRCorrection struct {
 }
 
 type CreativeWorkIntakeOCREvidence struct {
+	// 合并分类与转写时关联同一次真实调用，不另造 OCR 调用回执。
+	SourceInvocationID string `json:"source_invocation_id,omitempty"`
 	// 初始观察始终保留；自动复核只产生独立片段回执及新的可评价正文。
 	Outcome                string                             `json:"outcome,omitempty"`
 	OriginalCanonical      string                             `json:"original_canonical,omitempty"`
