@@ -27,6 +27,9 @@ var (
 const imageTaskAutomaticBudgetSeconds = 300
 
 type ImageTaskRoutingDecision struct {
+	ImageTaskClassificationResponse
+	OriginalParseFailure     *ImageTaskClassificationParseFailure `json:"original_parse_failure,omitempty"`
+	ReparseInvocationID      string                               `json:"-"`
 	Intent                   k12.ImageTaskIntent
 	Evidence                 []string
 	Confidence               float64
@@ -844,33 +847,54 @@ func (s *Store) CommitImageTaskRouting(
 		}
 		return dispatch, target, tx.Commit()
 	}
+	reparse := decision.ReparseInvocationID != ""
 	if dispatch.Status != k12.ImageTaskStatusRouting &&
 		dispatch.Status != k12.ImageTaskStatusAwaitingConfirmation {
-		return dispatch, ImageTaskRouteTarget{}, fmt.Errorf("%w: dispatch status=%s", ErrImageTaskInvalidState, dispatch.Status)
+		if !reparse || dispatch.Status != k12.ImageTaskStatusFailed || !dispatch.RetrySafe || dispatch.TargetObjectID != "" {
+			return dispatch, ImageTaskRouteTarget{}, fmt.Errorf("%w: dispatch status=%s", ErrImageTaskInvalidState, dispatch.Status)
+		}
 	}
 	if dispatch.Version != expectedVersion {
 		return dispatch, ImageTaskRouteTarget{}, ErrImageTaskVersionConflict
 	}
 	evidenceJSON, _ := jsonString(decision.Evidence)
 	candidatesJSON, _ := jsonString(decision.ConfirmationCandidates)
-	resultJSON, _ := jsonString(decision)
 	now := nowUnix()
-	resultDigest := strings.TrimSpace(decision.InvocationResultDigest)
-	if resultDigest == "" {
-		sum := sha256.Sum256([]byte(resultJSON))
-		resultDigest = "sha256:" + hex.EncodeToString(sum[:])
-	}
 	activeInvocation, err := getLatestImageTaskInvocation(
 		ctx, tx, agentName, k12.ImageTaskOperationClassification, dispatchID, "",
 	)
 	if err != nil {
 		return dispatch, ImageTaskRouteTarget{}, err
 	}
+	response, responsePresent, err := ReadImageTaskClassificationResponse(activeInvocation)
+	if err != nil {
+		return dispatch, ImageTaskRouteTarget{}, err
+	}
+	decision.ImageTaskClassificationResponse = response
+	statusCondition := "status IN ('prepared','sent')"
+	if reparse {
+		if dispatch.Status != k12.ImageTaskStatusFailed || activeInvocation.InvocationID != decision.ReparseInvocationID ||
+			activeInvocation.Status != k12.ImageTaskInvocationFailed || !activeInvocation.RetrySafe || !responsePresent {
+			return dispatch, ImageTaskRouteTarget{}, ErrImageTaskInvalidState
+		}
+		decision.OriginalParseFailure = &ImageTaskClassificationParseFailure{
+			Kind: activeInvocation.ErrorKind, FinishedAt: activeInvocation.FinishedAt, DispatchVersion: expectedVersion,
+		}
+		statusCondition = "status='failed'"
+		dispatch.FailureKind = ""
+		dispatch.RetrySafe = false
+	}
+	resultJSON, _ := jsonString(decision)
+	resultDigest := strings.TrimSpace(decision.InvocationResultDigest)
+	if resultDigest == "" {
+		sum := sha256.Sum256([]byte(resultJSON))
+		resultDigest = "sha256:" + hex.EncodeToString(sum[:])
+	}
 	invRes, err := tx.ExecContext(ctx, `UPDATE k12_image_task_invocations
         SET status='succeeded',result_digest=?,result_json=?,retry_safe=0,
             finished_at=?,updated_at=?
         WHERE agent_name=? AND invocation_id=? AND operation='classification'
-          AND status IN ('prepared','sent')`,
+          AND `+statusCondition,
 		resultDigest, resultJSON, now, now, agentName, activeInvocation.InvocationID)
 	if err != nil {
 		return dispatch, ImageTaskRouteTarget{}, fmt.Errorf("commit classification invocation: %w", err)
@@ -2479,6 +2503,13 @@ func (s *Store) ExpireImageTaskInvocation(
 		return dispatch, invocation, false, tx.Commit()
 	}
 	if strings.TrimSpace(invocationID) == "" {
+		completed, completionErr := hasCompletedImageTaskHomeworkVia(ctx, tx, agentName, dispatchID)
+		if completionErr != nil {
+			return dispatch, k12.ImageTaskInvocation{}, false, completionErr
+		}
+		if completed {
+			return dispatch, k12.ImageTaskInvocation{}, false, tx.Commit()
+		}
 		var active int
 		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*)
             FROM k12_image_task_invocations i
@@ -2551,6 +2582,18 @@ func (s *Store) ExpireImageTaskInvocation(
 		failureKind = "interactive_deadline_outcome_unknown"
 		nextStatus = k12.ImageTaskInvocationOutcomeUnknown
 		retrySafe = false
+		if invocation.Operation == k12.ImageTaskOperationClassification {
+			_, present, responseErr := ReadImageTaskClassificationResponse(invocation)
+			if responseErr != nil {
+				return dispatch, invocation, false, responseErr
+			}
+			if present {
+				// 已落盘完整回复只缺本地解析，不再冒充上游结果未知。
+				failureKind = "classification_response_pending_parse"
+				nextStatus = k12.ImageTaskInvocationFailed
+				retrySafe = true
+			}
+		}
 	}
 	res, err := tx.ExecContext(ctx, `UPDATE k12_image_task_invocations
         SET status=?,error_kind=?,retry_safe=?,finished_at=?,updated_at=?

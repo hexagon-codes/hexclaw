@@ -234,6 +234,22 @@ func (s *Store) ResolveTutorContext(ctx context.Context, scope TutorContextRef, 
 	if strings.TrimSpace(replyTo) != "" {
 		filter = " AND message_id=?"
 		args = append(args, replyTo)
+	} else {
+		// 只有已明确绑定的追问可以延续当前题；新来源到达后重新消除歧义。
+		// rowid 表示事务内登记次序，避免同秒消息依靠时间戳猜先后。
+		last, lastErr := scanTutorContext(tx.QueryRowContext(ctx, `SELECT `+tutorContextColumns+` FROM k12_tutor_context_refs
+			WHERE owner_scope=? AND agent_name=? AND conversation_key=? ORDER BY rowid DESC LIMIT 1`, args...))
+		if lastErr != nil && !errors.Is(lastErr, sql.ErrNoRows) {
+			return ref, false, lastErr
+		}
+		if lastErr == nil && last.Kind == "followup" {
+			filter += " AND job_id=?"
+			args = append(args, last.JobID)
+			if number == "" {
+				filter += " AND problem_id=? AND input_revision=?"
+				args = append(args, last.ProblemID, last.InputRevision)
+			}
+		}
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT `+tutorContextColumns+` FROM k12_tutor_context_refs WHERE owner_scope=? AND agent_name=? AND conversation_key=?`+filter, args...)
 	if err != nil {

@@ -117,6 +117,68 @@ func TestTextbookCatalogCheckpointExtractorAcceptsUnicodeTOCWhitespace(t *testin
 	}
 }
 
+func TestTextbookCatalogCheckpointExtractorUsesNamedFootersAndCoverYear(t *testing.T) {
+	source := syntheticTextbookCatalogSource()
+	contents := []string{
+		"义务教育教科书\n# 数学\n## 六年级\n### 上册\n人民教育出版社\n2024\n",
+		"目录\n一 确定位置 1\n二 分数乘法 4\n",
+		"确定位置\n正文\n1\n",
+		"正文\n2　确定位置\n",
+		"正文没有页脚\n",
+		"分数乘法\n正文\n4　分数乘法\n",
+		"正文\n5\n",
+		"后记\n依据《义务教育数学课程标准（2022年版）》编写。\n",
+	}
+	source.Pages = nil
+	offset := int64(0)
+	for i, content := range contents {
+		source.Pages = append(source.Pages, k12storage.TextbookCatalogSourcePage{
+			PDFPage: i + 1, Content: content, ContentDigest: testTextbookContentDigest(content),
+			SourceOffsetFrom: offset, SourceOffsetTo: offset + int64(len(content)),
+			SegmentRefs: []string{fmt.Sprintf("chunk-%d", i+1)},
+		})
+		offset += int64(len(content))
+	}
+	publication, err := (TextbookCatalogCheckpointExtractor{}).Extract(context.Background(), source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var catalog textbookCatalogJSON
+	if err := json.Unmarshal(publication.CatalogJSON, &catalog); err != nil {
+		t.Fatal(err)
+	}
+	if catalog.TextbookVersion != "2024" || len(catalog.PageRefs) != 5 || len(catalog.Units) != 2 {
+		t.Fatalf("catalog metadata=%+v", catalog)
+	}
+	for i, ref := range catalog.PageRefs {
+		if ref.LogicalPage != i+1 || ref.PDFPage != i+3 {
+			t.Fatalf("page map[%d]=%+v", i, ref)
+		}
+	}
+	if publication.PageProofs[2].Method != "adjacent_printed_anchors" {
+		t.Fatalf("missing footer proof=%+v", publication.PageProofs[2])
+	}
+	proof := publication.PageProofs[1]
+	if proof.Method != "printed_anchor" || source.Pages[3].Content[proof.EvidenceOffsetFrom:proof.EvidenceOffsetTo] != "2" {
+		t.Fatalf("named footer must retain exact digit span: %+v", proof)
+	}
+	for _, tc := range []struct{ name, footer string }{
+		{"conflicting page", "20　确定位置"},
+		{"unrelated body title", "2　练习题答案"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			changed := source
+			changed.Pages = append([]k12storage.TextbookCatalogSourcePage(nil), source.Pages...)
+			changed.Pages[3].Content = "正文\n" + tc.footer + "\n"
+			changed.Pages[3].ContentDigest = testTextbookContentDigest(changed.Pages[3].Content)
+			changed.Pages[3].SourceOffsetTo = changed.Pages[3].SourceOffsetFrom + int64(len(changed.Pages[3].Content))
+			if _, err := (TextbookCatalogCheckpointExtractor{}).Extract(context.Background(), changed); !errors.Is(err, ErrTextbookCatalogEvidenceInsufficient) {
+				t.Fatalf("unproved mapping error=%v", err)
+			}
+		})
+	}
+}
+
 func TestTextbookCatalogCheckpointExtractorFailsClosedOnMissingVersionOrPage(t *testing.T) {
 	tests := []struct {
 		name   string

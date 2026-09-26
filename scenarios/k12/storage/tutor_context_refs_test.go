@@ -112,6 +112,11 @@ func TestTutorContextUsesCurrentCorrectionWithoutNewAssessment(t *testing.T) {
 	if err != nil || strings.Contains(after, original.ResultDigest) || !strings.Contains(after, "no reliable current assessment") {
 		t.Fatalf("stale context: %q %v", after, err)
 	}
+	input.MessageID, input.Query = "continued-after-correction", "再简单点"
+	continued, err := d.TutorFollowupDirective(ctx, input)
+	if err != nil || strings.Contains(continued, original.ResultDigest) || !strings.Contains(continued, "no reliable current assessment") {
+		t.Fatalf("continued followup reused the withdrawn assessment: %q %v", continued, err)
+	}
 	var assessments int
 	if err := s.DB().QueryRow(`SELECT count(*) FROM k12_grading_assessment_items`).Scan(&assessments); err != nil || assessments != 1 {
 		t.Fatalf("followup created assessment: %d %v", assessments, err)
@@ -148,6 +153,69 @@ func TestTutorContextRepeatedPrintedNumberDoesNotGuess(t *testing.T) {
 	var count int
 	if err := s.DB().QueryRow(`SELECT count(*) FROM k12_tutor_context_refs WHERE kind='followup'`).Scan(&count); err != nil || count != 0 {
 		t.Fatalf("ambiguous reference persisted: %d %v", count, err)
+	}
+}
+
+func TestTutorContextExplicitResolutionContinuesAfterRestart(t *testing.T) {
+	s, path := problemAssetStore(t)
+	ctx := context.Background()
+	first, _, _ := tutorRefFixture(t, s, "im-first", "photo-first")
+	second, _, _ := tutorRefFixture(t, s, "im-second", "photo-second")
+	third, _, _ := tutorRefFixture(t, s, "im-third", "photo-third")
+	conversation := k12storage.TutorConversationKey("dingtalk", "family-bot", "parent")
+	first.ConversationKey, second.ConversationKey = conversation, conversation
+	third.ConversationKey = conversation
+	if err := s.SaveTutorSourceRefs(ctx, []k12storage.TutorContextRef{first, second}); err != nil {
+		t.Fatal(err)
+	}
+	scope := first
+	scope.MessageID = "ambiguous-followup"
+	if _, ambiguous, err := s.ResolveTutorContext(ctx, scope, "", "3", "第3题再简单点"); err != nil || !ambiguous {
+		t.Fatalf("multiple worksheets were not clarified: ambiguous=%v err=%v", ambiguous, err)
+	}
+	// 外部回执查询键不能冒充被引用消息；未知引用也不能回退到最近作业。
+	scope.MessageID = "unknown-reference"
+	if _, _, err := s.ResolveTutorContext(ctx, scope, "process-query-key", "3", "第3题"); !errors.Is(err, records.ErrNotFound) {
+		t.Fatalf("unknown reference was guessed: %v", err)
+	}
+	scope.MessageID = "explicit-selection"
+	selected, ambiguous, err := s.ResolveTutorContext(ctx, scope, "photo-first", "3", "这份的第3题")
+	if err != nil || ambiguous || selected.JobID != first.JobID {
+		t.Fatalf("explicit selection: %+v ambiguous=%v err=%v", selected, ambiguous, err)
+	}
+	if err := s.DB().Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", path+"?_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s = k12storage.NewStore(db, nil)
+	scope.MessageID = "continued-followup"
+	continued, ambiguous, err := s.ResolveTutorContext(ctx, scope, "", "", "再简单点")
+	if err != nil || ambiguous || continued.JobID != first.JobID || continued.ProblemID != first.ProblemID {
+		t.Fatalf("resolved worksheet was lost after restart: %+v ambiguous=%v err=%v", continued, ambiguous, err)
+	}
+	// 重放已登记的原图不改变当前题；新的作业到达才重新进入歧义判断。
+	if err := s.SaveTutorSourceRefs(ctx, []k12storage.TutorContextRef{second}); err != nil {
+		t.Fatal(err)
+	}
+	scope.MessageID = "after-source-replay"
+	continued, ambiguous, err = s.ResolveTutorContext(ctx, scope, "", "3", "第3题再讲一下")
+	if err != nil || ambiguous || continued.JobID != first.JobID {
+		t.Fatalf("source replay changed the active worksheet: %+v ambiguous=%v err=%v", continued, ambiguous, err)
+	}
+	if err := s.SaveTutorSourceRefs(ctx, []k12storage.TutorContextRef{third}); err != nil {
+		t.Fatal(err)
+	}
+	scope.MessageID = "after-new-worksheet"
+	if _, ambiguous, err := s.ResolveTutorContext(ctx, scope, "", "3", "第3题再简单点"); err != nil || !ambiguous {
+		t.Fatalf("new worksheet inherited the previous selection: ambiguous=%v err=%v", ambiguous, err)
+	}
+	var count int
+	if err := s.DB().QueryRow(`SELECT count(*) FROM k12_grading_assessment_items`).Scan(&count); err != nil || count != 3 {
+		t.Fatalf("followup changed assessments: count=%d err=%v", count, err)
 	}
 }
 

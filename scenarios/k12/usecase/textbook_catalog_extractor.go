@@ -36,10 +36,8 @@ func (fn TextbookCatalogExtractorFunc) Extract(
 	return fn(ctx, source)
 }
 
-// TextbookCatalogCheckpointExtractor is deliberately local and deterministic.
-// It accepts only a complete persisted Knowledge page manifest, exact TOC
-// rows, and a standalone printed footer on every mapped body page. It never
-// assumes that logical page N is PDF page N and has no model fallback.
+// TextbookCatalogCheckpointExtractor 从持久页面、目录与印刷页脚提取目录。
+// 页码可独占一行或与目录章节名同行；不将逻辑页码直接当作 PDF 页码。
 type TextbookCatalogCheckpointExtractor struct{}
 
 var (
@@ -125,7 +123,6 @@ func (TextbookCatalogCheckpointExtractor) Extract(
 		return fail("invalid persisted source snapshot")
 	}
 
-	allText := strings.Builder{}
 	anchors := make([]printedPageAnchor, 0, len(source.Pages))
 	tocStart := -1
 	for index, page := range source.Pages {
@@ -137,10 +134,11 @@ func (TextbookCatalogCheckpointExtractor) Extract(
 			textbookContentDigest(page.Content) != page.ContentDigest {
 			return fail("corrupt or incomplete page checkpoint")
 		}
-		allText.WriteString(page.Content)
-		allText.WriteByte('\n')
 		if tocStart < 0 && strings.Contains(removeTextbookWhitespace(page.Content), "目录") {
 			tocStart = index
+		}
+		if tocStart < 0 || index == tocStart {
+			continue
 		}
 		logicalPage, from, to, ok := trailingPrintedPageAnchor(page.Content)
 		if !ok {
@@ -159,9 +157,38 @@ func (TextbookCatalogCheckpointExtractor) Extract(
 			Segments: segments,
 		})
 	}
-	if tocStart < 0 || len(anchors) < 2 {
+	if tocStart < 0 || len(anchors) == 0 {
 		return fail("table of contents or printed footer is missing")
 	}
+	firstBodyPDF := anchors[0].PDFPage
+	lastBodyPDF := anchors[len(anchors)-1].PDFPage
+	units, err := parseTextbookTOC(source.Pages[tocStart : firstBodyPDF-1])
+	if err != nil {
+		return fail(err.Error())
+	}
+	footerTitles := make(map[string]bool, len(units))
+	for _, unit := range units {
+		footerTitles[normalizeTextbookEvidence(unit.Title)] = true
+	}
+	// 章节名必须来自同一份目录；数字证据仍保存原文偏移并参与全局连续性检查。
+	for pdfPage := firstBodyPDF; pdfPage <= lastBodyPDF; pdfPage++ {
+		page := source.Pages[pdfPage-1]
+		logicalPage, from, to, ok := namedPrintedPageAnchor(page.Content, footerTitles)
+		if !ok {
+			continue
+		}
+		segments := append([]string(nil), page.SegmentRefs...)
+		sort.Strings(segments)
+		if len(segments) == 0 || hasEmptyOrDuplicateTextbookString(segments) {
+			return fail("printed page has no exact chunk proof")
+		}
+		anchors = append(anchors, printedPageAnchor{
+			LogicalPage: logicalPage, PDFPage: pdfPage, EvidencePage: pdfPage,
+			OffsetFrom: from, OffsetTo: to, Digest: page.ContentDigest,
+			Method: "printed_anchor", Segments: segments,
+		})
+	}
+	sort.Slice(anchors, func(i, j int) bool { return anchors[i].PDFPage < anchors[j].PDFPage })
 	pageOffset := anchors[0].LogicalPage - anchors[0].PDFPage
 	for index, anchor := range anchors {
 		if anchor.LogicalPage-anchor.PDFPage != pageOffset {
@@ -209,24 +236,30 @@ func (TextbookCatalogCheckpointExtractor) Extract(
 	}
 	anchors = completedAnchors
 
-	fullText := allText.String()
-	if !strings.Contains(fullText, "人民教育出版社") {
+	// 封面元数据只取目录前页面，Markdown 标题不改变年级与册次语义。
+	var metadataText strings.Builder
+	for _, page := range source.Pages[:tocStart] {
+		metadataText.WriteString(page.Content)
+		metadataText.WriteByte('\n')
+	}
+	metadata := strings.ReplaceAll(metadataText.String(), "#", "")
+	if !strings.Contains(metadata, "人民教育出版社") {
 		return fail("publisher evidence is missing")
 	}
-	volumeMatch := textbookVolumePattern.FindStringSubmatch(fullText)
+	volumeMatch := textbookVolumePattern.FindStringSubmatch(metadata)
 	if len(volumeMatch) != 3 {
 		return fail("grade or volume evidence is missing")
 	}
-	// PDF text extraction may insert a physical line break inside a semantic
-	// phrase (the frozen PEP fixture splits “专家委员会”). Collapse whitespace
-	// only for metadata evidence matching so the current approval year is not
-	// lost and silently replaced by an older “base edition” year.
-	versionEvidence := removeTextbookWhitespace(fullText)
+	// 正文引用的课程标准年份不是本册教材版本。
+	versionEvidence := removeTextbookWhitespace(metadata)
 	version := ""
 	if match := textbookApprovalYearPattern.FindStringSubmatch(versionEvidence); len(match) == 2 {
 		version = match[1]
 	} else if match := textbookEditionYearPattern.FindStringSubmatch(versionEvidence); len(match) == 2 {
 		version = match[1]
+	}
+	if version == "" {
+		version = textbookCoverYear(source.Pages[:tocStart])
 	}
 	if version == "" {
 		return fail("copyright or edition year evidence is missing")
@@ -242,10 +275,6 @@ func (TextbookCatalogCheckpointExtractor) Extract(
 
 	if tocStart+1 >= firstAnchorPDF {
 		return fail("table of contents is not before textbook body")
-	}
-	units, err := parseTextbookTOC(source.Pages[tocStart : firstAnchorPDF-1])
-	if err != nil {
-		return fail(err.Error())
 	}
 	pageMin, pageMax := anchors[0].LogicalPage, anchors[len(anchors)-1].LogicalPage
 	if len(units) == 0 || units[0].PageFrom != pageMin {
@@ -403,6 +432,52 @@ func trailingPrintedPageAnchor(content string) (logicalPage, from, to int, ok bo
 		return 0, 0, 0, false
 	}
 	return page, start, end, true
+}
+
+func namedPrintedPageAnchor(content string, titles map[string]bool) (logicalPage, from, to int, ok bool) {
+	trimmed := strings.TrimRightFunc(content, unicode.IsSpace)
+	start := strings.LastIndexByte(trimmed, '\n') + 1
+	line := strings.TrimLeftFunc(trimmed[start:], unicode.IsSpace)
+	start = len(trimmed) - len(line)
+	digits := 0
+	for digits < len(line) && line[digits] >= '0' && line[digits] <= '9' {
+		digits++
+	}
+	if digits == 0 || digits == len(line) {
+		return 0, 0, 0, false
+	}
+	title := strings.TrimSpace(line[digits:])
+	if title == line[digits:] || !titles[normalizeTextbookEvidence(title)] {
+		return 0, 0, 0, false
+	}
+	page, err := strconv.Atoi(line[:digits])
+	if err != nil || page < 1 {
+		return 0, 0, 0, false
+	}
+	return page, start, start + digits, true
+}
+
+func textbookCoverYear(pages []k12storage.TextbookCatalogSourcePage) string {
+	year := ""
+	for _, page := range pages {
+		text := removeTextbookWhitespace(page.Content)
+		if !strings.Contains(text, "义务教育教科书") || !strings.Contains(text, "人民教育出版社") ||
+			!strings.Contains(text, "数学") || !strings.Contains(text, "年级") {
+			continue
+		}
+		for _, line := range strings.Split(page.Content, "\n") {
+			value := strings.TrimSpace(line)
+			number, err := strconv.Atoi(value)
+			if err != nil || len(value) != 4 || number < 1900 || number > 2099 {
+				continue
+			}
+			if year != "" && year != value {
+				return ""
+			}
+			year = value
+		}
+	}
+	return year
 }
 
 func isTextbookASCIIWhitespace(value byte) bool {

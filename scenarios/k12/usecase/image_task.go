@@ -27,6 +27,8 @@ type ImageTaskClassificationInput struct {
 	Images            [][]byte
 	MessageIntent     string
 	IncludeWritingOCR bool
+	// RecordResponse 在解析前保存完整回复，失败时不得丢弃错误继续提交分类。
+	RecordResponse func(context.Context, string) error
 }
 
 type ImageTaskClassification struct {
@@ -163,6 +165,7 @@ type ImageTaskView struct {
 	// CreativeFeedbackRetryable 只投影当前作品点评调用账本的安全重试事实。
 	CreativeFeedbackRetryable  bool
 	ActiveInvocationDeadlineAt int64
+	homeworkCompleted          bool
 	solveInvocation            *k12.ImageTaskInvocation
 	feedbackInvocation         *k12.ImageTaskInvocation
 }
@@ -235,6 +238,7 @@ type ImageTaskResult struct {
 	SourceAttachments         []ImageTaskSourceAttachmentReceipt
 	OperationReceipts         []ImageTaskOperationReceipt
 	Photo                     *PhotoGradeResult
+	GradingJobID              string
 	Creative                  *k12.CreativeWorkIntake
 	CreativeDisplayName       string
 	CreativeWork              *CreativeWorkView
@@ -1381,6 +1385,9 @@ func (c *ImageTaskCoordinator) Run(
 	if err != nil {
 		return ImageTaskView{}, err
 	}
+	if view.homeworkCompleted {
+		return view, nil
+	}
 	switch dispatch.Status {
 	case k12.ImageTaskStatusRouting:
 		if c.Classifier == nil {
@@ -1447,6 +1454,7 @@ func (c *ImageTaskCoordinator) Run(
 			ImageTaskClassificationInput{
 				Images: images, MessageIntent: dispatch.MessageIntent,
 				IncludeWritingOCR: invocation.RouteSnapshot.PromptVersion == "creative-work-classification-ocr-v1",
+				RecordResponse:    c.classificationResponseRecorder(dispatch.AgentName, invocation.InvocationID),
 			},
 		)
 		providerCtxErr := providerCtx.Err()
@@ -1598,6 +1606,27 @@ func (c *ImageTaskCoordinator) projectTarget(
 				return ImageTaskView{}, projectErr
 			}
 			view.HomeworkProjection = &projection
+			if projection.Stage == k12.GradingStageCompleted && projection.FinalArtifact != nil &&
+				projection.FinalArtifact.Validate() == nil &&
+				(dispatch.Status == k12.ImageTaskStatusRouted ||
+					(dispatch.Status == k12.ImageTaskStatusFailed && dispatch.RetrySafe &&
+						dispatch.FailureKind == imageTaskFailureInteractiveDeadlineExceeded)) {
+				completed, completionErr := c.Records.HasCompletedImageTaskHomework(ctx, dispatch.AgentName, dispatch.DispatchID)
+				if completionErr != nil {
+					return ImageTaskView{}, completionErr
+				}
+				if completed {
+					// 当前完成事实优先于旧间隙超时投影；持久失败回执保持原样。
+					view.homeworkCompleted = true
+					view.Dispatch.Status = k12.ImageTaskStatusRouted
+					view.Dispatch.FailureKind = ""
+					view.Dispatch.RetrySafe = false
+					view.Dispatch.AutomaticDeadlineAt = 0
+					view.Dispatch.AutomaticRemainingSeconds = 0
+					view.ActiveInvocationDeadlineAt = 0
+					view.HomeworkProjection.Retryable = false
+				}
+			}
 		}
 	}
 	if view.Homework != nil && view.Homework.GradingJobID == "" {
@@ -1877,6 +1906,9 @@ func (c *ImageTaskCoordinator) continueTarget(
 	view ImageTaskView,
 	images [][]byte,
 ) (ImageTaskView, error) {
+	if view.homeworkCompleted {
+		return view, nil
+	}
 	if expired, yes, err := c.expireImageTaskGapIfDue(
 		ctx,
 		view.Dispatch,
@@ -2393,6 +2425,7 @@ func (c *ImageTaskCoordinator) Result(
 		return result, nil
 	}
 	if view.Homework != nil && view.Homework.GradingJobID != "" {
+		result.GradingJobID = view.Homework.GradingJobID
 		if view.HomeworkProjection != nil {
 			result.GroundingEvidenceReceipts = cloneGroundingEvidenceReceipts(
 				view.HomeworkProjection.GroundingEvidenceReceipts,
@@ -3126,7 +3159,8 @@ func (c *ImageTaskCoordinator) Retry(
 		classified, err := c.Classifier.ClassifyImageTask(
 			providerCtx,
 			ImageTaskClassificationInput{Images: images, MessageIntent: dispatch.MessageIntent,
-				IncludeWritingOCR: invocation.RouteSnapshot.PromptVersion == "creative-work-classification-ocr-v1"},
+				IncludeWritingOCR: invocation.RouteSnapshot.PromptVersion == "creative-work-classification-ocr-v1",
+				RecordResponse:    c.classificationResponseRecorder(agentName, invocation.InvocationID)},
 		)
 		providerCtxErr := providerCtx.Err()
 		slog.Info("K12 ImageTask classification retry finished", "agent_id", agentName,

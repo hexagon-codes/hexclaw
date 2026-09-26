@@ -143,12 +143,20 @@ func (d Deps) createWeeklyArithmeticBatch(
 	key string,
 ) (k12.WeeklyArithmeticBatch, bool, error) {
 	progress, err := d.GetCurriculumProgress(ctx, agentName, "math")
-	if err != nil || progress == nil {
+	if err != nil {
+		return k12.WeeklyArithmeticBatch{}, false, err
+	}
+	_, production := d.WeeklyCandidates.(weeklyCandidateRequestFreezer)
+	if progress == nil && !production {
 		return k12.WeeklyArithmeticBatch{}, false, records.ErrIllegalTransition
 	}
 	checkpoint := WeeklyPracticeCandidateRequest{
 		AgentName: agentName, PlanSection: k12.WeeklySectionArithmeticWarmup,
-		MaxItems: itemCount, ArithmeticMinutes: max(1, (itemCount+1)/2), Progress: *progress,
+		MaxItems: itemCount, ArithmeticMinutes: max(1, (itemCount+1)/2),
+	}
+	// 口算范围来自已确认教学目标；课程仅在实际存在时进入冻结请求。
+	if progress != nil {
+		checkpoint.Progress = *progress
 	}
 	checkpointJSON, _ := json.Marshal(checkpoint)
 	digest := digestValue(struct {
@@ -159,8 +167,22 @@ func (d Deps) createWeeklyArithmeticBatch(
 	batch, replay, err := d.Records.PrepareWeeklyArithmeticBatch(
 		ctx, agentName, planID, expectedRevision, key, digest,
 		string(checkpointJSON), d.now())
-	if err != nil || replay {
+	if err != nil {
 		return batch, replay, err
+	}
+	if replay {
+		if _, production := d.WeeklyCandidates.(weeklyCandidateRequestFreezer); production {
+			current, getErr := d.Records.GetWeeklyArithmeticBatch(ctx, agentName, batch.BatchID)
+			if getErr != nil {
+				return batch, true, getErr
+			}
+			if current.State == k12.WeeklyArithmeticPreparing {
+				if finishErr := d.finishWeeklyArithmeticGeneration(ctx, current); finishErr != nil {
+					return batch, true, finishErr
+				}
+			}
+		}
+		return batch, true, nil
 	}
 	if err := d.finishWeeklyArithmeticGeneration(ctx, batch); err != nil {
 		return batch, false, fmt.Errorf("finish weekly arithmetic generation: %w", err)
@@ -189,10 +211,29 @@ func (d Deps) finishWeeklyArithmeticGeneration(
 		}
 		return nil
 	}
+	if freezer, production := d.WeeklyCandidates.(weeklyCandidateRequestFreezer); production {
+		request.Checkpoint = WeeklyCandidateCheckpointRef{Kind: "arithmetic", AgentName: batch.AgentName, PlanID: batch.PlanID, BatchID: batch.BatchID}
+		if request.Generation == nil {
+			frozen, freezeErr := freezer.FreezeWeeklyPracticeCandidateRequest(ctx, request)
+			if freezeErr != nil {
+				return d.Records.FinishWeeklyArithmeticGeneration(ctx, batch.AgentName, batch.BatchID,
+					k12.WeeklyArithmeticFailedRetryable, nil, nil, "", freezeErr.Error(), d.now())
+			}
+			request = frozen
+			raw, _ := json.Marshal(request)
+			if err := d.Records.SaveWeeklyCandidateCheckpoint(ctx, request.Checkpoint, batch.GenerationCheckpoint, string(raw)); err != nil {
+				return err
+			}
+		}
+	}
 	candidates, err := d.WeeklyCandidates.GenerateWeeklyPracticeCandidates(ctx, request)
 	if err != nil {
-		if finishErr := d.Records.FinishWeeklyArithmeticGeneration(ctx, batch.AgentName,
-			batch.BatchID, k12.WeeklyArithmeticFailedRetryable, nil, nil, "",
+		failureState := k12.WeeklyArithmeticFailedRetryable
+		if errors.Is(err, ErrModelInvocationRequiresReconciliation) {
+			failureState = k12.WeeklyArithmeticFailedTerminal
+		}
+		if finishErr := d.Records.FinishWeeklyArithmeticGeneration(context.WithoutCancel(ctx), batch.AgentName,
+			batch.BatchID, failureState, nil, nil, "",
 			err.Error(), d.now()); finishErr != nil {
 			return finishErr
 		}
@@ -214,6 +255,10 @@ func (d Deps) finishWeeklyArithmeticGeneration(
 	if err := d.Records.FinishWeeklyArithmeticGeneration(ctx, batch.AgentName,
 		batch.BatchID, k12.WeeklyArithmeticReady, items, keys,
 		contentDigest, "", d.now()); err != nil {
+		if errors.Is(err, k12storage.ErrProblemAssetUnavailable) {
+			return d.Records.FinishWeeklyArithmeticGeneration(ctx, batch.AgentName, batch.BatchID,
+				k12.WeeklyArithmeticFailedRetryable, nil, nil, "", err.Error(), d.now())
+		}
 		return err
 	}
 	return nil
@@ -249,6 +294,7 @@ func weeklyArithmeticItems(
 				EvidenceRefs: append([]string(nil), candidate.EvidenceRefs...),
 			},
 			PromptMarkdown: candidate.PromptMarkdown,
+			Subject:        candidate.Subject, KnowledgePoint: candidate.KnowledgePoint, AssetSource: candidate.AssetSource, SourceQuestion: candidate.SourceQuestion,
 		})
 		keys[itemID] = answer
 	}
@@ -279,8 +325,35 @@ func (d Deps) RetryWeeklyArithmeticBatch(
 	digest := digestValue(struct{ Agent, Batch string }{agentName, batchID})
 	batch, replay, err := d.Records.PrepareWeeklyArithmeticRetry(
 		ctx, agentName, batchID, key, digest, d.now())
-	if err != nil || replay {
+	if err != nil {
 		return batch, replay, err
+	}
+	if replay {
+		if _, production := d.WeeklyCandidates.(weeklyCandidateRequestFreezer); production {
+			current, getErr := d.Records.GetWeeklyArithmeticBatch(ctx, agentName, batch.BatchID)
+			if getErr != nil {
+				return batch, true, getErr
+			}
+			if current.State == k12.WeeklyArithmeticPreparing {
+				if finishErr := d.finishWeeklyArithmeticGeneration(ctx, current); finishErr != nil {
+					return batch, true, finishErr
+				}
+			}
+		}
+		return batch, true, nil
+	}
+	if _, production := d.WeeklyCandidates.(weeklyCandidateRequestFreezer); production {
+		var request WeeklyPracticeCandidateRequest
+		if err := json.Unmarshal([]byte(batch.GenerationCheckpoint), &request); err != nil {
+			return batch, false, err
+		}
+		resetWeeklyKnownFailures(&request)
+		raw, _ := json.Marshal(request)
+		ref := WeeklyCandidateCheckpointRef{Kind: "arithmetic", AgentName: agentName, PlanID: batch.PlanID, BatchID: batchID}
+		if err := d.Records.SaveWeeklyCandidateCheckpoint(ctx, ref, batch.GenerationCheckpoint, string(raw)); err != nil {
+			return batch, false, err
+		}
+		batch.GenerationCheckpoint = string(raw)
 	}
 	if err := d.finishWeeklyArithmeticGeneration(ctx, batch); err != nil {
 		return batch, false, fmt.Errorf("finish weekly arithmetic generation: %w", err)
@@ -510,9 +583,12 @@ func (d Deps) RefreshWeeklyTextbookTrack(
 		}
 	}
 	budget := max(0, 600-len(plan.Tracks[0].Items)*60)
-	nextTrack, nextKeys, _ := d.weeklySupplementTrack(
-		ctx, request.AgentName, request.PlanSection, true, &request.Progress,
-		request.MaxItems, request.ArithmeticMinutes, budget)
+	resetWeeklyKnownFailures(&request)
+	request, err = d.prepareWeeklyCandidateCommand(ctx, request, plan, "refresh", key, requestDigest)
+	if err != nil {
+		return k12.WeeklyPracticePlan{}, false, false, err
+	}
+	nextTrack, nextKeys, _ := d.weeklySupplementRequest(ctx, request, true, budget)
 	next := plan
 	next.Tracks = append([]k12.WeeklyPracticeTrack(nil), plan.Tracks...)
 	next.Tracks[index] = nextTrack
@@ -534,7 +610,7 @@ func (d Deps) RefreshWeeklyTextbookTrack(
 		Revision int
 		Track    k12.WeeklyPracticeTrack
 	}{next.PlanID, next.Revision, nextTrack})
-	checkpointJSON, _ := json.Marshal(request)
+	checkpointJSON := d.weeklyCandidateCheckpointJSON(ctx, request)
 	return d.Records.CommitWeeklyTextbookRefresh(
 		ctx, agentName, planID, expectedRevision, key, requestDigest,
 		next, createdRevision, 0, string(checkpointJSON), d.now())

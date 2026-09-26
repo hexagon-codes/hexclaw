@@ -771,6 +771,31 @@ func (h *handler) retryImageTask(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"dispatch": publicImageTask(view)})
 }
 
+func (h *handler) reparseImageTask(w http.ResponseWriter, r *http.Request) {
+	if h.rt.ImageTasks == nil {
+		writeErr(w, http.StatusServiceUnavailable, "image task facade unavailable")
+		return
+	}
+	var req imageTaskVersionReq
+	if !decodeStrict(w, r, &req) {
+		return
+	}
+	req.Agent = strings.TrimSpace(req.Agent)
+	if req.Agent == "" {
+		writeErr(w, http.StatusBadRequest, "agent required")
+		return
+	}
+	if _, ok := h.authorizeImageTaskDispatch(w, r, req.Agent, r.PathValue("id")); !ok {
+		return
+	}
+	view, err := h.rt.ImageTasks.ReparseClassification(r.Context(), req.Agent, r.PathValue("id"), req.Version)
+	if err != nil {
+		writeErr(w, httpStatusForK12Error(err, http.StatusConflict), err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"dispatch": publicImageTask(view)})
+}
+
 func (h *handler) cancelImageTask(w http.ResponseWriter, r *http.Request) {
 	if h.rt.ImageTasks == nil {
 		writeErr(w, http.StatusServiceUnavailable, "image task facade unavailable")
@@ -808,9 +833,10 @@ func (h *handler) getImageTaskResult(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "agent required")
 		return
 	}
-	if _, ok := h.authorizeImageTaskDispatch(
+	ownerScope, authorized := h.authorizeImageTaskDispatch(
 		w, r, agent, r.PathValue("id"),
-	); !ok {
+	)
+	if !authorized {
 		return
 	}
 	result, err := h.rt.ImageTasks.Result(r.Context(), agent, r.PathValue("id"))
@@ -822,7 +848,7 @@ func (h *handler) getImageTaskResult(w http.ResponseWriter, r *http.Request) {
 	if result.Photo != nil {
 		projection = map[string]any{
 			"kind":    string(result.Dispatch.TaskIntent),
-			"payload": photoResultDTO(*result.Photo),
+			"payload": h.photoResultWithReuse(r.Context(), ownerScope, result.GradingJobID, *result.Photo),
 		}
 	} else if result.Kind == "creative" && result.Creative != nil {
 		payload := map[string]any{

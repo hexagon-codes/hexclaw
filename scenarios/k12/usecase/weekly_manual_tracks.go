@@ -2,7 +2,6 @@ package usecase
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -43,6 +42,7 @@ func (d Deps) projectWeeklyManualRecommendations(
 	}
 	syncAvailability := k12.WeeklyManualTrackAvailable
 	arithmeticAvailability := k12.WeeklyManualTrackAvailable
+	arithmeticSetupMessage := "curriculum progress setup required"
 	if plan.Status != k12.WeeklyPlanDraft {
 		syncAvailability = k12.WeeklyManualTrackFailedTerminal
 		arithmeticAvailability = k12.WeeklyManualTrackFailedTerminal
@@ -50,6 +50,20 @@ func (d Deps) projectWeeklyManualRecommendations(
 		progress.EvidenceSource != "parent_confirmed" {
 		syncAvailability = k12.WeeklyManualTrackSetupRequired
 		arithmeticAvailability = k12.WeeklyManualTrackSetupRequired
+	}
+	if freezer, production := d.WeeklyCandidates.(weeklyCandidateRequestFreezer); production && plan.Status == k12.WeeklyPlanDraft {
+		_, targetErr := freezer.FreezeWeeklyPracticeCandidateRequest(ctx, WeeklyPracticeCandidateRequest{
+			AgentName: plan.AgentName, PlanSection: k12.WeeklySectionArithmeticWarmup, MaxItems: 1,
+		})
+		switch {
+		case targetErr == nil:
+			arithmeticAvailability = k12.WeeklyManualTrackAvailable
+		case errors.Is(targetErr, errWeeklyLearningTargetUnavailable), errors.Is(targetErr, records.ErrNotFound):
+			arithmeticAvailability = k12.WeeklyManualTrackSetupRequired
+			arithmeticSetupMessage = "weekly learning target evidence unavailable"
+		default:
+			return k12.WeeklyPracticePlan{}, targetErr
+		}
 	}
 	for index := range plan.Tracks {
 		track := &plan.Tracks[index]
@@ -62,7 +76,7 @@ func (d Deps) projectWeeklyManualRecommendations(
 			}
 		case k12.WeeklySectionArithmeticWarmup:
 			if arithmeticAvailability == k12.WeeklyManualTrackSetupRequired {
-				track.FailureMessage = "curriculum progress setup required"
+				track.FailureMessage = arithmeticSetupMessage
 			}
 			if track.ArithmeticBatch == nil {
 				continue
@@ -143,9 +157,13 @@ func (d Deps) PrepareWeeklyTextbookTrack(
 	if len(plan.Tracks) > 0 {
 		budget = max(0, 600-len(plan.Tracks[0].Items)*60)
 	}
-	nextTrack, nextKeys, _ := d.weeklySupplementTrack(
-		ctx, agentName, k12.WeeklySectionTextbookConsolidation,
-		true, progress, itemCount, 0, budget)
+	request := WeeklyPracticeCandidateRequest{AgentName: agentName, PlanSection: k12.WeeklySectionTextbookConsolidation,
+		MaxItems: itemCount, Progress: *progress}
+	request, err = d.prepareWeeklyCandidateCommand(ctx, request, plan, "refresh", key, requestDigest)
+	if err != nil {
+		return k12.WeeklyPracticePlan{}, false, err
+	}
+	nextTrack, nextKeys, _ := d.weeklySupplementRequest(ctx, request, true, budget)
 	if nextTrack.Status != k12.WeeklyTrackReady {
 		return k12.WeeklyPracticePlan{}, false,
 			fmt.Errorf("%w: %s", ErrSolveFailed, nextTrack.FailureMessage)
@@ -172,10 +190,7 @@ func (d Deps) PrepareWeeklyTextbookTrack(
 		ItemCount int
 		Track     k12.WeeklyPracticeTrack
 	}{next.PlanID, itemCount, nextTrack})
-	checkpointJSON, _ := json.Marshal(WeeklyPracticeCandidateRequest{
-		AgentName: agentName, PlanSection: k12.WeeklySectionTextbookConsolidation,
-		MaxItems: itemCount, Progress: *progress,
-	})
+	checkpointJSON := d.weeklyCandidateCheckpointJSON(ctx, request)
 	stored, replay, _, err := d.Records.CommitWeeklyTextbookRefresh(
 		ctx, agentName, planID, expectedRevision, key, requestDigest,
 		next, true, itemCount, string(checkpointJSON), d.now())

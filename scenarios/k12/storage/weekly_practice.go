@@ -600,6 +600,9 @@ func (s *Store) ReplayWeeklyPracticePlan(ctx context.Context, agentName,
 		if storedDigest != requestDigest {
 			return k12.WeeklyPracticePlan{}, false, records.ErrVersionConflict
 		}
+		if weeklyCandidateResponsePending(responseJSON) {
+			return k12.WeeklyPracticePlan{}, false, tx.Commit()
+		}
 		var plan k12.WeeklyPracticePlan
 		if unmarshalErr := json.Unmarshal([]byte(responseJSON), &plan); unmarshalErr != nil {
 			return k12.WeeklyPracticePlan{}, false, unmarshalErr
@@ -620,6 +623,14 @@ func (s *Store) ReplayWeeklyPracticePlan(ctx context.Context, agentName,
 		return k12.WeeklyPracticePlan{}, false, err
 	}
 	if plan.SourceDigest != requestDigest {
+		return k12.WeeklyPracticePlan{}, false, tx.Commit()
+	}
+	var pending int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM k12_weekly_practice_plan_commands
+		WHERE agent_name=? AND plan_id=? AND json_extract(response_json,'$._weekly_pending')=1`, agentName, plan.PlanID).Scan(&pending); err != nil {
+		return k12.WeeklyPracticePlan{}, false, err
+	}
+	if pending > 0 {
 		return k12.WeeklyPracticePlan{}, false, tx.Commit()
 	}
 	responseBytes, _ := json.Marshal(plan)
@@ -649,7 +660,7 @@ func (s *Store) UpsertWeeklyPracticePlan(ctx context.Context, plan k12.WeeklyPra
 	err = tx.QueryRowContext(ctx, `SELECT request_digest,response_json
         FROM k12_weekly_practice_plan_commands WHERE agent_name=? AND idempotency_key=?`,
 		plan.AgentName, idempotencyKey).Scan(&digest, &responseJSON)
-	if err == nil {
+	if err == nil && !weeklyCandidateResponsePending(responseJSON) {
 		if digest != requestDigest {
 			return k12.WeeklyPracticePlan{}, false, records.ErrVersionConflict
 		}
@@ -659,8 +670,11 @@ func (s *Store) UpsertWeeklyPracticePlan(ctx context.Context, plan k12.WeeklyPra
 		}
 		return frozen, true, tx.Commit()
 	}
-	if err != sql.ErrNoRows {
+	if err != nil && err != sql.ErrNoRows {
 		return k12.WeeklyPracticePlan{}, false, err
+	}
+	if err == nil && digest != requestDigest {
+		return k12.WeeklyPracticePlan{}, false, records.ErrVersionConflict
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE k12_weekly_practice_plans
         SET status=CASE WHEN EXISTS(
@@ -676,7 +690,18 @@ func (s *Store) UpsertWeeklyPracticePlan(ctx context.Context, plan k12.WeeklyPra
 	current, getErr := getWeeklyPlanVia(ctx, tx, plan.AgentName,
 		`iso_week_year=? AND iso_week_number=? AND timezone=?`,
 		plan.ISOWeekYear, plan.ISOWeekNumber, plan.Timezone)
+	if (getErr == records.ErrNotFound || (getErr == nil && current.Status == k12.WeeklyPlanDraft)) &&
+		(current.SourceDigest != requestDigest || weeklyCandidateResponsePending(responseJSON)) {
+		if err := validateWeeklyPracticeAssets(ctx, tx, plan.AgentName, plan.Tracks, plan.AnswerKeys); err != nil {
+			return k12.WeeklyPracticePlan{}, false, err
+		}
+	}
 	switch {
+	case getErr == nil && current.SourceDigest == requestDigest && weeklyCandidateResponsePending(responseJSON):
+		plan.Revision, plan.CreatedAt = current.Revision, current.CreatedAt
+		if err := updateWeeklyPlanTx(ctx, tx, plan, requestDigest); err != nil {
+			return k12.WeeklyPracticePlan{}, false, err
+		}
 	case getErr == nil && current.SourceDigest == requestDigest:
 		plan = current
 	case getErr == nil && current.Status == k12.WeeklyPlanDraft:
@@ -696,17 +721,21 @@ func (s *Store) UpsertWeeklyPracticePlan(ctx context.Context, plan k12.WeeklyPra
 	default:
 		return k12.WeeklyPracticePlan{}, false, getErr
 	}
-	responseBytes, _ := json.Marshal(plan)
+	responseBytes, marshalErr := weeklyCandidateFinalResponse(responseJSON, plan)
+	if marshalErr != nil {
+		return k12.WeeklyPracticePlan{}, false, marshalErr
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO k12_weekly_practice_plan_commands
         (agent_name,idempotency_key,request_digest,plan_id,plan_revision,response_json,created_at)
-        VALUES(?,?,?,?,?,?,?)`, plan.AgentName, idempotencyKey, requestDigest,
+		VALUES(?,?,?,?,?,?,?) ON CONFLICT(agent_name,idempotency_key) DO UPDATE SET
+		plan_revision=excluded.plan_revision,response_json=excluded.response_json`, plan.AgentName, idempotencyKey, requestDigest,
 		plan.PlanID, plan.Revision, string(responseBytes), plan.UpdatedAt); err != nil {
 		return k12.WeeklyPracticePlan{}, false, err
 	}
 	if err := tx.Commit(); err != nil {
 		return k12.WeeklyPracticePlan{}, false, err
 	}
-	return plan, getErr == nil && current.SourceDigest == requestDigest, nil
+	return plan, getErr == nil && current.SourceDigest == requestDigest && !weeklyCandidateResponsePending(responseJSON), nil
 }
 
 func insertWeeklyPlanTx(ctx context.Context, tx *sql.Tx, p k12.WeeklyPracticePlan, digest string) error {
@@ -839,6 +868,9 @@ func (s *Store) FreezeWeeklyPracticeSnapshot(ctx context.Context,
 	}
 	if plan.Status != k12.WeeklyPlanDraft {
 		return k12.WeeklyPracticeSnapshot{}, false, records.ErrIllegalTransition
+	}
+	if err := validateWeeklyPracticeAssets(ctx, tx, snapshot.AgentName, snapshot.Tracks, snapshot.AnswerKeys); err != nil {
+		return k12.WeeklyPracticeSnapshot{}, false, err
 	}
 	snapshotJSON, _ := json.Marshal(snapshot)
 	keysJSON, _ := json.Marshal(snapshot.AnswerKeys)
@@ -1013,6 +1045,9 @@ func (s *Store) FreezeWeeklyPracticeOutput(ctx context.Context,
 		if currentLifecycleRevision != *expectedLifecycleRevision {
 			return k12.WeeklyPracticeSnapshot{}, k12.PrintArtifact{},
 				k12.PrintArtifactRender{}, false, records.ErrVersionConflict
+		}
+		if err := validateWeeklyPracticeAssets(ctx, tx, snapshot.AgentName, snapshot.Tracks, snapshot.AnswerKeys); err != nil {
+			return k12.WeeklyPracticeSnapshot{}, k12.PrintArtifact{}, k12.PrintArtifactRender{}, false, err
 		}
 		storedSnapshot = snapshot
 	default:

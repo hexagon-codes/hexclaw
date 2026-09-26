@@ -39,6 +39,13 @@ func (p *k12TutorIdentityPolicy) CompileTerminalDirective(
 	if err != nil || directive.Content == "" || p.followup == nil {
 		return directive, err
 	}
+	courseText, err := p.followup.TutorCurriculumDirective(ctx, input.Agent.Name)
+	if err != nil {
+		return engine.AgentSystemPromptDirective{}, err
+	}
+	if courseText != "" {
+		directive = k12TutorDirective(directive.Content + "\n\n" + courseText)
+	}
 	msg := input.Message
 	conversation := k12storage.TutorConversationKey("desktop", "", msg.SessionID)
 	if msg.Platform == adapter.PlatformDingtalk {

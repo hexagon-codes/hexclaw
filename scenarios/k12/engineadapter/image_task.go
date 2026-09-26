@@ -15,6 +15,7 @@ import (
 
 const imageTaskClassifierPrompt = `你是图片任务分流器，只依据当前图片中可见事实分类；附带消息只能帮助理解指代，绝不能替代图片证据。四类定义：completed_homework=有学生作答痕迹的作业；blank_worksheet=无学生作答、供家长讲题的空白试卷；writing=语文作文/连续文字作品；artwork=绘画/美术作品。证据冲突时输出 unknown，并给出至少两个 confirmation_candidates。严格只输出 JSON：
 {"task_intent":"completed_homework|blank_worksheet|writing|artwork|unknown","intent_evidence":["图片中可复核的短证据"],"confidence":0.0,"confirmation_candidates":[],"work_title_candidate":null,"task_requirement_candidate":null}
+confirmation_candidates 必须是枚举字符串数组，元素仅限 completed_homework、blank_worksheet、writing、artwork，不能是对象。已确定 task_intent 时必须为 []；unknown 时给出至少两个不同的具体意图，例如 ["completed_homework","blank_worksheet"]。不要把标题或任务的对象候选格式用于 confirmation_candidates。
 标题/任务不是必填；只有图片中确实可见时才输出候选，候选格式 {"value":"...","source":"image_vision","confidence":0.0,"evidence_ref":"可复核位置"}，不得用占位标题补齐。`
 
 const imageTaskWritingOCRPrompt = `逐字转写这张语文作文原稿，并同时报告转写质量。不要润色、纠错、补句、概括或点评；无法辨认、涂改覆盖、多个读法冲突的片段不得猜。严格只输出 JSON：
@@ -133,6 +134,18 @@ func (a *ImageTaskAdapter) ClassifyImageTask(
 			"image task classifier: 视觉模型调用失败: %w", providerResponseError(err),
 		)
 	}
+	if input.RecordResponse != nil {
+		if err := input.RecordResponse(context.WithoutCancel(ctx), raw); err != nil {
+			return usecase.ImageTaskClassification{}, definitiveImageTaskResponse(
+				fmt.Errorf("image task classifier: persist response: %w", err),
+			)
+		}
+	}
+	return a.ParseImageTaskClassificationResponse(raw, input.IncludeWritingOCR)
+}
+
+// ParseImageTaskClassificationResponse 只解析已保存原文，不访问视觉模型。
+func (a *ImageTaskAdapter) ParseImageTaskClassificationResponse(raw string, includeWritingOCR bool) (usecase.ImageTaskClassification, error) {
 	var envelope struct {
 		TaskIntent             k12.ImageTaskIntent                `json:"task_intent"`
 		IntentEvidence         []string                           `json:"intent_evidence"`
@@ -155,7 +168,7 @@ func (a *ImageTaskAdapter) ClassifyImageTask(
 		TaskRequirementCandidate: envelope.TaskRequirement,
 	}
 	// 非作文或不完整转写不进入草稿；旧响应缺少该字段时沿既有 OCR 链处理。
-	if input.IncludeWritingOCR && result.Intent == k12.ImageTaskIntentWriting && validClassificationOCR(envelope.WritingOCR) {
+	if includeWritingOCR && result.Intent == k12.ImageTaskIntentWriting && validClassificationOCR(envelope.WritingOCR) {
 		result.WritingOCR = envelope.WritingOCR
 	}
 	bindImageTaskCandidate := func(candidate *k12.FactCandidate) {

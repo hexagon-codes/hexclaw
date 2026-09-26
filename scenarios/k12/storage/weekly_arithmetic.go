@@ -237,6 +237,11 @@ func (s *Store) FinishWeeklyArithmeticGeneration(
 		return err
 	}
 	defer tx.Rollback()
+	if state == k12.WeeklyArithmeticReady {
+		if err := validateWeeklyPracticeAssets(ctx, tx, agentName, []k12.WeeklyPracticeTrack{{Items: items}}, answerKeys); err != nil {
+			return err
+		}
+	}
 	res, err := tx.ExecContext(ctx, `UPDATE k12_weekly_arithmetic_batches
         SET state=?,item_count=?,content_digest=?,retryable=?,failure_message=?,
             items_json=?,answer_keys_json=?,updated_at=?
@@ -629,13 +634,15 @@ func (s *Store) CommitWeeklyTextbookRefresh(
 		if storedDigest != digest {
 			return k12.WeeklyPracticePlan{}, false, false, records.ErrVersionConflict
 		}
-		var plan k12.WeeklyPracticePlan
-		if err := json.Unmarshal([]byte(responseJSON), &plan); err != nil {
-			return k12.WeeklyPracticePlan{}, false, false, err
+		if !weeklyCandidateResponsePending(responseJSON) {
+			var plan k12.WeeklyPracticePlan
+			if err := json.Unmarshal([]byte(responseJSON), &plan); err != nil {
+				return k12.WeeklyPracticePlan{}, false, false, err
+			}
+			return plan, true, storedCreated != 0, tx.Commit()
 		}
-		return plan, true, storedCreated != 0, tx.Commit()
 	}
-	if err != sql.ErrNoRows {
+	if err != nil && err != sql.ErrNoRows {
 		return k12.WeeklyPracticePlan{}, false, false, err
 	}
 	current, err := getWeeklyPlanVia(ctx, tx, agentName, `plan_id=?`, planID)
@@ -644,6 +651,9 @@ func (s *Store) CommitWeeklyTextbookRefresh(
 	}
 	if current.Status != k12.WeeklyPlanDraft || current.Revision != expectedRevision {
 		return k12.WeeklyPracticePlan{}, false, false, records.ErrVersionConflict
+	}
+	if err := validateWeeklyPracticeAssets(ctx, tx, agentName, next.Tracks, next.AnswerKeys); err != nil {
+		return k12.WeeklyPracticePlan{}, false, false, err
 	}
 	if err := updateWeeklyPlanTx(ctx, tx, next, next.SourceDigest); err != nil {
 		return k12.WeeklyPracticePlan{}, false, false, err
@@ -664,10 +674,15 @@ func (s *Store) CommitWeeklyTextbookRefresh(
 			return k12.WeeklyPracticePlan{}, false, false, err
 		}
 	}
-	response, _ := json.Marshal(next)
+	response, marshalErr := weeklyCandidateFinalResponse(responseJSON, next)
+	if marshalErr != nil {
+		return k12.WeeklyPracticePlan{}, false, false, marshalErr
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO k12_weekly_track_refresh_commands
         (agent_name,plan_id,idempotency_key,request_digest,response_json,
-         created_revision,created_at) VALUES(?,?,?,?,?,?,?)`,
+		 created_revision,created_at) VALUES(?,?,?,?,?,?,?)
+		 ON CONFLICT(agent_name,plan_id,idempotency_key) DO UPDATE SET
+		 response_json=excluded.response_json,created_revision=excluded.created_revision`,
 		agentName, planID, key, digest, string(response),
 		boolInt(createdRevision), at); err != nil {
 		return k12.WeeklyPracticePlan{}, false, false, err

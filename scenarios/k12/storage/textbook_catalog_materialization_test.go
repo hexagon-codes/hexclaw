@@ -31,13 +31,16 @@ func TestREGTextbookCatalog_StoreExposesClaimAndProofPublishBoundary(t *testing.
 	}
 }
 
-func seedTextbookCatalogMaterialization(t *testing.T) (*k12storage.Store, string, string) {
+func seedTextbookCatalogMaterialization(t *testing.T, sourcePage ...string) (*k12storage.Store, string, string) {
 	t.Helper()
 	store, db := setup(t)
 	const sourceDigest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	const coverContent = "义务教育教科书\n数学 五年级 下册\n人民教育出版社\n2022年经国家教材委员会专家委员会审核通过"
 	const tocContent = "目 录\n1 第一单元 1"
-	const pageContent = "第一单元\n第1课\n1"
+	pageContent := "第一单元\n第1课\n1"
+	if len(sourcePage) > 0 {
+		pageContent = sourcePage[0]
+	}
 	coverSum := sha256.Sum256([]byte(coverContent))
 	coverDigest := hex.EncodeToString(coverSum[:])
 	tocSum := sha256.Sum256([]byte(tocContent))

@@ -57,3 +57,13 @@ func (a *TextbookManifestLifecycleAdapter) ReconcileDocumentIngestLifecycle(
 	}
 	return nil
 }
+
+// ReconcileDocumentIngestPage 只投影已成功页中的闭合题组，不提前发布教材目录。
+func (a *TextbookManifestLifecycleAdapter) ReconcileDocumentIngestPage(ctx context.Context, tx *sql.Tx, event knowledge.DocumentIngestLifecycleEvent) error {
+	if materials, ok := a.projector.(interface {
+		ReconcileMaterialPreparation(context.Context, *sql.Tx, k12storage.TextbookManifestLifecycleEvent) error
+	}); ok {
+		return materials.ReconcileMaterialPreparation(ctx, tx, k12storage.TextbookManifestLifecycleEvent{OwnerID: event.OwnerID, CorpusUID: event.CorpusUID, DocumentID: event.DocumentID, DocumentGeneration: event.DocumentGeneration, At: event.At})
+	}
+	return nil
+}
