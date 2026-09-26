@@ -1329,6 +1329,10 @@ func newKnowledgeSemanticRuntimeTestDB(t *testing.T) (*sql.DB, context.Context) 
 	if err := migrate.Run(ctx, db, []migrate.Migration{migrate.KnowledgeIndexV23}); err != nil {
 		t.Fatal(err)
 	}
+	// Worker 使用进展列；保留基础版本，后续用例仍可逐段加载摄取表。
+	if _, err := db.ExecContext(ctx, migrate.KnowledgeEmbeddingProgressV116.SQL); err != nil {
+		t.Fatal(err)
+	}
 	return db, ctx
 }
 

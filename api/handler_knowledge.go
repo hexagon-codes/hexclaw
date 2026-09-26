@@ -1,8 +1,6 @@
 package api
 
 import (
-	"archive/zip"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,7 +9,6 @@ import (
 	"mime"
 	"net/http"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -425,7 +422,7 @@ func (s *Server) handleUploadDocument(w http.ResponseWriter, r *http.Request) {
 	defer file.Close()
 
 	ext := strings.ToLower(filepath.Ext(header.Filename))
-	allowed := map[string]bool{".txt": true, ".md": true, ".csv": true, ".json": true, ".docx": true, ".pdf": true, ".doc": true, ".pptx": true,
+	allowed := map[string]bool{".hexbank": true, ".jsonl": true, ".txt": true, ".md": true, ".csv": true, ".json": true, ".docx": true, ".pdf": true, ".doc": true, ".pptx": true,
 		".png": true, ".jpg": true, ".jpeg": true, ".webp": true, ".gif": true}
 	if !allowed[ext] {
 		writeJSON(w, http.StatusBadRequest, map[string]string{
@@ -527,46 +524,8 @@ func readDOCXXMLLimited(reader io.Reader, maxBytes int64) ([]byte, error) {
 
 // extractDocxText 从 DOCX 中提取纯文本（DOCX 为 ZIP，内含 word/document.xml）
 func extractDocxText(data []byte) (string, error) {
-	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
-	if err != nil {
-		return "", err
-	}
-	var docXML *zip.File
-	for _, f := range zr.File {
-		if f.Name == "word/document.xml" {
-			docXML = f
-			break
-		}
-	}
-	if docXML == nil {
-		return "", nil
-	}
-	// 防 zip bomb: 限制解压后读取量（header 中的 UncompressedSize64 可伪造，不可信赖）
-	const maxDocXMLSize = 100 << 20 // 100MB
-	rc, err := docXML.Open()
-	if err != nil {
-		return "", err
-	}
-	defer rc.Close()
-	raw, err := readDOCXXMLLimited(rc, maxDocXMLSize)
-	if err != nil {
-		return "", err
-	}
-	return extractTextFromXML(raw), nil
-}
-
-// extractTextFromXML 从 OOXML word/document.xml 中提取 <w:t> 文本
-var wTRe = regexp.MustCompile(`<w:t[^>]*>([^<]*)</w:t>`)
-
-func extractTextFromXML(data []byte) string {
-	matches := wTRe.FindAllSubmatch(data, -1)
-	var parts []string
-	for _, m := range matches {
-		if len(m) > 1 {
-			parts = append(parts, string(m[1]))
-		}
-	}
-	return strings.Join(parts, " ")
+	text, _, err := extractDOCXStructure(data)
+	return text, err
 }
 
 // handleListDocuments 列出知识库文档。
@@ -643,6 +602,18 @@ func (s *Server) handleGetDocument(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			payload := s.knowledgeDocumentDetail(r, projection)
+			if imagesAPI, ok := s.semanticIndex.(interface {
+				DocumentSourceImageURIs(context.Context, string, string, string, int64) (map[string]string, error)
+			}); ok && strings.HasSuffix(strings.ToLower(projection.Filename), ".md") {
+				images, imageErr := imagesAPI.DocumentSourceImageURIs(r.Context(), s.knowledgeOwnerScope(r), knowledgeDefaultCorpusID, docID, projection.DocumentGeneration)
+				if imageErr != nil {
+					writeSemanticIndexError(w, imageErr)
+					return
+				}
+				if content, ok := payload["content"].(string); ok && len(images) > 0 {
+					payload["content"] = projectMarkdownSourceImages(content, images)
+				}
+			}
 			if vectorService, vectorOK := s.semanticIndex.(KnowledgeDocumentVectorProjectionAPI); vectorOK {
 				vectors, vectorErr := vectorService.ListDocumentVectorProjections(
 					r.Context(), s.knowledgeOwnerScope(r), knowledgeDefaultCorpusID,

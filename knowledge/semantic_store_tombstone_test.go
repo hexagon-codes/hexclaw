@@ -74,6 +74,9 @@ func newSemanticMutationHarness(t *testing.T) *semanticMutationHarness {
 	if err := migrate.Run(ctx, db, semanticIndexTestMigrations()); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := db.ExecContext(ctx, migrate.KnowledgeEmbeddingProgressV116.SQL); err != nil {
+		t.Fatal(err)
+	}
 	repo := NewSQLiteSemanticIndexRepository(db)
 	resolver := &workerTestResolver{profiles: map[string]EmbeddingProfileSnapshot{
 		"profile-a": revisionSearchProfile("profile-a", "ollama", "bge-m3",
@@ -965,6 +968,28 @@ func TestCompleteIngestDocumentRoutesPastFailedDesiredToActive(t *testing.T) {
 	}
 	if activeJobs != 1 || abandonedRows != 0 {
 		t.Fatalf("terminal desired ingest routing: active jobs=%d abandoned rows=%d", activeJobs, abandonedRows)
+	}
+	// 新文档继续使用当前可用索引，文档投影不能引用没有处理过它的失败目标。
+	projections, err := h.repo.ListDocumentVectorProjections(h.ctx, "owner-1", "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projection := projections[accepted.DocumentID]; projection.VectorIndexState != VectorIndexPending ||
+		projection.JobID == "" || projection.JobState != KnowledgeJobQueued {
+		t.Fatalf("queued active document projection=%+v", projection)
+	}
+	h.runWorker(now.Add(5*time.Second), "worker-active-after-failed-desired")
+	projections, err = h.repo.ListDocumentVectorProjections(h.ctx, "owner-1", "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projection := projections[accepted.DocumentID]; projection.VectorIndexState != VectorIndexReady ||
+		projection.JobState != KnowledgeJobSucceeded || projection.LastError != "" {
+		t.Fatalf("ready active document projection=%+v", projection)
+	}
+	failedPolicy, err := h.service.GetPolicy(h.ctx, "owner-1", "default")
+	if err != nil || failedPolicy.DesiredRevision == nil || failedPolicy.DesiredRevision.State != VectorIndexFailed {
+		t.Fatalf("failed target was hidden: policy=%+v err=%v", failedPolicy, err)
 	}
 }
 

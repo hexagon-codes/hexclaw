@@ -48,6 +48,10 @@ type semanticIndexLeaseRenewer interface {
 	RenewJobLease(ctx context.Context, lease JobLease, now time.Time, leaseDuration time.Duration) (JobLease, error)
 }
 
+type semanticIndexRetryBudgetReader interface {
+	GetEmbeddingRetryAttempt(ctx context.Context, lease JobLease, now time.Time) (int, error)
+}
+
 type runningJobCancelRegistrar interface {
 	registerRunningJobCancel(jobID string, cancel context.CancelFunc) func()
 }
@@ -457,7 +461,18 @@ func (w *SemanticIndexWorker) RunOnce(ctx context.Context) (bool, error) {
 	message := err.Error()
 	transitionCtx, cancelTransition := semanticWorkerTransitionContext(ctx)
 	defer cancelTransition()
-	if isPermanentSemanticWorkerError(err) || job.Attempt >= w.config.MaxAttempts {
+	permanent := isPermanentSemanticWorkerError(err)
+	retryAttempt := job.Attempt
+	if !permanent && (job.Kind == KnowledgeJobRebuildRevision || job.Kind == KnowledgeJobEmbedDocument) {
+		if reader, ok := w.repository.(semanticIndexRetryBudgetReader); ok {
+			var budgetErr error
+			retryAttempt, budgetErr = reader.GetEmbeddingRetryAttempt(transitionCtx, lease, failureTime)
+			if budgetErr != nil {
+				return true, errors.Join(err, budgetErr)
+			}
+		}
+	}
+	if permanent || retryAttempt >= w.config.MaxAttempts {
 		var failed KnowledgeJob
 		var transitionErr error
 		if structuredRepository, ok := w.repository.(interface {
@@ -503,6 +518,7 @@ func (w *SemanticIndexWorker) RunOnce(ctx context.Context) (bool, error) {
 			"state", failed.State,
 			"stage", failed.Stage,
 			"attempt", failed.Attempt,
+			"retry_attempt", retryAttempt,
 			"failure_code", failureCode,
 			"last_error", failed.LastError,
 			"failure", failed.Failure,
@@ -513,7 +529,7 @@ func (w *SemanticIndexWorker) RunOnce(ctx context.Context) (bool, error) {
 	}
 	retried, transitionErr := w.repository.RetryJob(
 		transitionCtx, lease, failureTime,
-		failureTime.Add(cappedSemanticRetryDelay(w.config.RetryDelay, w.config.MaxRetryDelay, job.Attempt)),
+		failureTime.Add(cappedSemanticRetryDelay(w.config.RetryDelay, w.config.MaxRetryDelay, retryAttempt)),
 		message,
 	)
 	if transitionErr != nil {
@@ -546,6 +562,7 @@ func (w *SemanticIndexWorker) RunOnce(ctx context.Context) (bool, error) {
 		"state", retried.State,
 		"stage", retried.Stage,
 		"attempt", retried.Attempt,
+		"retry_attempt", retryAttempt,
 		"next_attempt_at", retried.NextAttemptAt,
 		"last_error", retried.LastError,
 		"elapsed_ms", time.Since(startedAt).Milliseconds(),
@@ -1029,6 +1046,9 @@ func (w *SemanticIndexWorker) executeIngest(ctx context.Context, job KnowledgeJo
 
 	prepareStartedAt := time.Now()
 	prepared, err := w.prepareIngestWithHeartbeat(ctx, lease, source)
+	if prepared.ReleaseAttachments != nil {
+		defer prepared.ReleaseAttachments()
+	}
 	logger.Info("[knowledge] ingest preparation finished", "job_id", job.JobID,
 		"document_id", job.DocumentID, "source_digest", source.SHA256,
 		"elapsed_ms", time.Since(prepareStartedAt).Milliseconds(), "pages_total", prepared.PageCount, "error", err)
@@ -1241,6 +1261,9 @@ func (w *SemanticIndexWorker) prepareIngestWithHeartbeat(
 	*lease = state.lease
 	state.Unlock()
 	if heartbeatErr != nil {
+		if prepared.ReleaseAttachments != nil {
+			prepared.ReleaseAttachments()
+		}
 		return PreparedIngestDocument{}, heartbeatErr
 	}
 	return prepared, prepareErr

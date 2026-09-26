@@ -28,10 +28,11 @@ import (
 )
 
 type documentExtractionResult struct {
-	Text      string
-	PageCount int
-	Warnings  []string
-	Pages     []documentPageExtraction
+	SourceManifest *knowledge.SourceManifest
+	Text           string
+	PageCount      int
+	Warnings       []string
+	Pages          []documentPageExtraction
 }
 
 type documentPageExtraction struct {
@@ -45,8 +46,9 @@ type documentPageExtraction struct {
 }
 
 type visualSection struct {
-	Title string
-	Text  string
+	ObjectPath string
+	Title      string
+	Text       string
 }
 
 type renderedPDFPage struct {
@@ -70,16 +72,27 @@ func extractDocumentForKnowledge(ctx context.Context, ext string, data []byte, k
 		err error
 	)
 	switch ext {
+	case ".hexbank", ".jsonl":
+		return extractQuestionExchange(ext, data)
 	case ".txt", ".md", ".csv", ".json":
 		res.Text = string(data)
 	case ".docx":
-		res.Text, err = extractDocxText(data)
+		res.Text, res.SourceManifest, err = extractDOCXStructure(data)
 		if err != nil {
 			return res, err
 		}
 		sections, warnings := extractDocxVisualSections(ctx, data, kb)
 		res.Warnings = append(res.Warnings, warnings...)
 		res.Text = mergeVisualSections(res.Text, sections)
+		if res.SourceManifest != nil {
+			for i := range res.SourceManifest.Objects {
+				for _, section := range sections {
+					if section.ObjectPath == res.SourceManifest.Objects[i].Path {
+						res.SourceManifest.Objects[i].Caption = section.Text
+					}
+				}
+			}
+		}
 	case ".pdf":
 		res.Text, res.PageCount, err = extractPDFText(ctx, data)
 		if err != nil {
@@ -188,8 +201,9 @@ func extractDocxVisualSections(ctx context.Context, data []byte, kb *knowledge.M
 			continue
 		}
 		sections = append(sections, visualSection{
-			Title: fmt.Sprintf("DOCX 内嵌图片 %d（%s）", i+1, img.name),
-			Text:  caption,
+			Title:      fmt.Sprintf("DOCX 内嵌图片 %d（%s）", i+1, img.name),
+			ObjectPath: img.name,
+			Text:       caption,
 		})
 	}
 	return sections, warnings

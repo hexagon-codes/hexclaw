@@ -1059,7 +1059,10 @@ func (r *SQLiteSemanticIndexRepository) IsIngestBlobPathReferenced(ctx context.C
 	)`, path).Scan(&referenced); err != nil {
 		return false, err
 	}
-	return referenced != 0, nil
+	if referenced != 0 {
+		return true, nil
+	}
+	return sourceAttachmentReferenced(ctx, r.db.QueryRowContext, path)
 }
 
 // SetIngestPageTotal publishes the page manifest under the exact live lease.
@@ -1377,6 +1380,14 @@ func (r *SQLiteSemanticIndexRepository) SaveIngestPageCheckpoint(
 	if err := refreshIngestSegmentStatesTx(ctx, tx, job.JobID, nowMillis); err != nil {
 		return err
 	}
+	if observer, ok := r.ingestObserver.(DocumentIngestPageObserver); ok {
+		if err := observer.ReconcileDocumentIngestPage(ctx, tx, DocumentIngestLifecycleEvent{
+			OwnerID: job.OwnerID, CorpusUID: job.CorpusUID, DocumentID: job.DocumentID,
+			DocumentGeneration: job.DocumentGeneration, At: now,
+		}); err != nil {
+			return err
+		}
+	}
 	return tx.Commit()
 }
 
@@ -1602,6 +1613,10 @@ func (r *SQLiteSemanticIndexRepository) CompleteIngestDocument(
 		} else if chunk.SourceDigest != source.SHA256 {
 			return fmt.Errorf("%w: chunk source digest mismatch", ErrInvalidDocumentUpload)
 		}
+	}
+
+	if err := saveSourceManifestTx(ctx, tx, job, source, prepared.SourceManifest, nowMillis); err != nil {
+		return err
 	}
 
 	if candidate != nil {

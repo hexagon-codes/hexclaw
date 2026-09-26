@@ -3,6 +3,7 @@ package knowledge
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -296,14 +297,22 @@ type IngestPageProgress interface {
 	CommitPage(context.Context, IngestPageCheckpoint) error
 }
 
+// DocumentIngestPageObserver 在页事实提交事务内追加领域投影，不执行网络请求。
+type DocumentIngestPageObserver interface {
+	ReconcileDocumentIngestPage(context.Context, *sql.Tx, DocumentIngestLifecycleEvent) error
+}
+
 // PreparedIngestDocument is the parser/splitter output passed to the durable
 // repository. It deliberately carries no vectors: text publication and the
 // optional revision-scoped embedding child job are separate atomic stages.
 type PreparedIngestDocument struct {
-	Document  *Document
-	Chunks    []*Chunk
-	PageCount int64
-	Warnings  []string
+	// ReleaseAttachments 在来源提交后释放本次新附件的对象锁。
+	ReleaseAttachments func() `json:"-"`
+	SourceManifest     *SourceManifest
+	Document           *Document
+	Chunks             []*Chunk
+	PageCount          int64
+	Warnings           []string
 }
 
 // DocumentIngestProcessor performs CPU/IO-heavy parsing, OCR and chunking off
@@ -526,7 +535,7 @@ func validateCreateDocumentInput(input CreateDocumentInput) (string, string, str
 }
 
 var allowedKnowledgeUploadExtensions = map[string]bool{
-	".txt": true, ".md": true, ".csv": true, ".json": true,
+	".txt": true, ".md": true, ".csv": true, ".json": true, ".jsonl": true, ".hexbank": true,
 	".doc": true, ".docx": true, ".pptx": true, ".pdf": true,
 	".png": true, ".jpg": true, ".jpeg": true, ".webp": true, ".gif": true,
 }
@@ -535,6 +544,10 @@ func mediaTypeForKnowledgeExtension(extension string) string {
 	switch extension {
 	case ".pdf":
 		return "application/pdf"
+	case ".jsonl":
+		return "application/x-ndjson"
+	case ".hexbank":
+		return "application/zip"
 	case ".txt", ".md", ".csv", ".json":
 		return "text/plain"
 	case ".png":

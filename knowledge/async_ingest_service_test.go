@@ -49,6 +49,10 @@ func newAsyncIngestHarness(t *testing.T) (*sql.DB, *SemanticIndexService, contex
 	}); err != nil {
 		t.Fatal(err)
 	}
+	// 保留基础迁移版本，后续用例仍可加载来源与重解析表。
+	if _, err := db.ExecContext(ctx, migrate.KnowledgeEmbeddingProgressV116.SQL); err != nil {
+		t.Fatal(err)
+	}
 	repository := NewSQLiteSemanticIndexRepository(db)
 	if _, err := repository.BindLegacyDefaultCorpus(ctx, "desktop-user", "default"); err != nil {
 		t.Fatal(err)

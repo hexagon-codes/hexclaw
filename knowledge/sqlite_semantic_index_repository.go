@@ -655,9 +655,15 @@ func (r *SQLiteSemanticIndexRepository) applyPolicyTx(
 		return r.policyResultTx(ctx, tx, state, ApplyPolicyImmediatePublish)
 	}
 
-	revisionID, _, err := r.createRevisionTx(ctx, tx, state, newVersion, *profile, "staged")
+	revisionID, snapshotID, err := r.createRevisionTx(ctx, tx, state, newVersion, *profile, "staged")
 	if err != nil {
 		return ApplyPolicyResult{}, err
+	}
+	if state.desiredRevision != "" && desiredHash == targetHash {
+		if err := reuseDesiredRevisionVectorsTx(ctx, tx, state.corpusUID, state.desiredRevision,
+			revisionID, snapshotID, *profile); err != nil {
+			return ApplyPolicyResult{}, err
+		}
 	}
 	jobID, err := r.createRevisionJobTx(ctx, tx, state, revisionID, newVersion,
 		KnowledgeJobRebuildRevision, profile.ProfileConfigHash)
@@ -759,6 +765,94 @@ func (r *SQLiteSemanticIndexRepository) createRevisionTx(
 		}
 	}
 	return revisionID, snapshotID, nil
+}
+
+// 显式重建只复用上一目标版本已提交且与当前内容完全匹配的向量。
+// 新版本仍须完成发布校验；旧任务和批次回执保持不变。
+func reuseDesiredRevisionVectorsTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	corpusUID, previousRevisionID, revisionID, snapshotID string,
+	profile EmbeddingProfileSnapshot,
+) error {
+	rows, err := tx.QueryContext(ctx, `SELECT v.document_id,v.content_generation,v.chunk_id,
+		v.chunk_content_hash,c.content,c.chunk_index
+		FROM kb_revision_vectors v
+		JOIN kb_index_revisions r ON r.corpus_uid=v.corpus_uid AND r.revision_id=v.revision_id
+		JOIN kb_embedding_profile_snapshots s ON s.profile_snapshot_id=r.profile_snapshot_id
+		  AND s.profile_snapshot_id=v.profile_snapshot_id AND s.profile_config_hash=v.profile_config_hash
+		JOIN kb_revision_documents rd ON rd.corpus_uid=v.corpus_uid AND rd.revision_id=?
+		  AND rd.document_id=v.document_id AND rd.content_generation=v.content_generation
+		JOIN kb_semantic_document_bindings b ON b.corpus_uid=rd.corpus_uid
+		  AND b.document_id=rd.document_id AND b.content_generation=rd.content_generation
+		JOIN kb_chunks c ON c.doc_id=b.document_id AND c.id=v.chunk_id
+		WHERE v.corpus_uid=? AND v.revision_id=? AND v.profile_config_hash=?
+		  AND v.dimension=? AND b.lifecycle_state='active' AND b.text_state='ready'`,
+		revisionID, corpusUID, previousRevisionID, profile.ProfileConfigHash, profile.Profile.Dimension)
+	if err != nil {
+		return fmt.Errorf("knowledge: find reusable revision vectors: %w", err)
+	}
+	type reusableChunk struct {
+		documentID string
+		generation int64
+		id         string
+		index      int
+	}
+	var chunks []reusableChunk
+	for rows.Next() {
+		var chunk reusableChunk
+		var contentHash, content string
+		if err := rows.Scan(&chunk.documentID, &chunk.generation, &chunk.id,
+			&contentHash, &content, &chunk.index); err != nil {
+			rows.Close()
+			return err
+		}
+		hash := sha256.Sum256([]byte(content))
+		if hex.EncodeToString(hash[:]) == contentHash {
+			chunks = append(chunks, chunk)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if len(chunks) == 0 {
+		return nil
+	}
+	now := semanticNowMillis()
+	for _, chunk := range chunks {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO kb_revision_vectors
+			(revision_id,corpus_uid,document_id,content_generation,chunk_id,chunk_index,
+			 chunk_content_hash,profile_snapshot_id,profile_config_hash,provider_id,
+			 provider_location,model_name,dimension,embedding,created_at)
+			SELECT ?,corpus_uid,document_id,content_generation,chunk_id,?,chunk_content_hash,?,
+			 profile_config_hash,provider_id,provider_location,model_name,dimension,embedding,?
+			FROM kb_revision_vectors WHERE corpus_uid=? AND revision_id=?
+			  AND document_id=? AND content_generation=? AND chunk_id=?`,
+			revisionID, chunk.index, snapshotID, now, corpusUID, previousRevisionID,
+			chunk.documentID, chunk.generation, chunk.id); err != nil {
+			return fmt.Errorf("knowledge: reuse committed revision vector: %w", err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE kb_revision_documents AS rd SET embedded_chunks=(
+		SELECT COUNT(*) FROM kb_revision_vectors v WHERE v.corpus_uid=rd.corpus_uid
+		  AND v.revision_id=rd.revision_id AND v.document_id=rd.document_id
+		  AND v.content_generation=rd.content_generation),updated_at=?
+		WHERE rd.corpus_uid=? AND rd.revision_id=?`, now, corpusUID, revisionID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE kb_revision_documents SET
+		vector_state=CASE WHEN embedded_chunks=expected_chunks THEN 'ready' ELSE 'building' END,
+		visible_at=CASE WHEN embedded_chunks=expected_chunks THEN ? ELSE NULL END
+		WHERE corpus_uid=? AND revision_id=? AND embedded_chunks>0`, now, corpusUID, revisionID); err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `UPDATE kb_index_revisions SET embedded_chunks=?,updated_at=?
+		WHERE corpus_uid=? AND revision_id=?`, len(chunks), now, corpusUID, revisionID)
+	return err
 }
 
 // previousPublishedSelectionTx collapses a chain of uncommitted profile
@@ -2130,6 +2224,31 @@ func (r *SQLiteSemanticIndexRepository) ListRevisionChunkInputs(
 	return inputs, rows.Err()
 }
 
+// GetEmbeddingRetryAttempt 从成功批次提交的进度边界恢复连续无进展的尝试数。
+// 总 Attempt 和批回执保持不变，旧任务未记录进度时沿用原有预算。
+func (r *SQLiteSemanticIndexRepository) GetEmbeddingRetryAttempt(
+	ctx context.Context,
+	lease JobLease,
+	now time.Time,
+) (int, error) {
+	job, err := loadLiveJob(ctx, r.db, lease, now)
+	if err != nil {
+		return 0, err
+	}
+	if job.Kind != KnowledgeJobRebuildRevision && job.Kind != KnowledgeJobEmbedDocument {
+		return job.Attempt, nil
+	}
+	var lastProgressAttempt int
+	if err := r.db.QueryRowContext(ctx, `SELECT last_progress_attempt
+		FROM kb_knowledge_jobs WHERE job_id=?`, job.JobID).Scan(&lastProgressAttempt); err != nil {
+		return 0, err
+	}
+	if lastProgressAttempt == 0 {
+		return job.Attempt, nil
+	}
+	return max(1, job.Attempt-lastProgressAttempt+1), nil
+}
+
 func (r *SQLiteSemanticIndexRepository) GetRevisionBuildSummary(
 	ctx context.Context,
 	lease JobLease,
@@ -2449,12 +2568,8 @@ type documentGCPlan struct {
 	ManagedObjectPaths []string `json:"managed_object_paths"`
 }
 
-// GarbageCollectDocument physically removes one tombstoned document and all
-// of its rebuildable runtime state. Relational cleanup and its managed-object
-// paths are committed first while the GC job remains live. Physical deletion
-// then happens outside the SQLite transaction; only after it succeeds are the
-// zero-reference blob rows and GC job finalized. A crash or filesystem error
-// therefore reuses the prepared checkpoint instead of losing cleanup work.
+// GarbageCollectDocument 清理已删除文档的文件和可重建状态，保留历史来源依赖的身份墓碑。
+// 清理路径先提交到持久检查点，文件删除成功后才完成任务；重启沿用检查点继续清理。
 func (r *SQLiteSemanticIndexRepository) GarbageCollectDocument(
 	ctx context.Context,
 	lease JobLease,
@@ -2618,11 +2733,7 @@ func (r *SQLiteSemanticIndexRepository) prepareDocumentGC(
 		job.OwnerID, job.CorpusUID, documentID); err != nil {
 		return documentGCPlan{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM kb_semantic_document_bindings
-		WHERE owner_id=? AND corpus_uid=? AND document_id=? AND lifecycle_state='tombstoned'`,
-		job.OwnerID, job.CorpusUID, documentID); err != nil {
-		return documentGCPlan{}, err
-	}
+	// 归属墓碑保留，原文查询才能区分已删除与未知文件。
 	if _, err := tx.ExecContext(ctx, `DELETE FROM kb_chunks_fts
 		WHERE chunk_id IN (SELECT id FROM kb_chunks WHERE doc_id=?)`, documentID); err != nil {
 		return documentGCPlan{}, err
@@ -2639,7 +2750,15 @@ func (r *SQLiteSemanticIndexRepository) prepareDocumentGC(
 		job.OwnerID, job.CorpusUID, documentID); err != nil {
 		return documentGCPlan{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM kb_documents
+	if exists, err := sourceManifestTableExists(ctx, tx.QueryRowContext); err != nil {
+		return documentGCPlan{}, err
+	} else if exists {
+		if _, err = tx.ExecContext(ctx, `DELETE FROM kb_ingest_source_manifests WHERE owner_id=? AND document_id=?`, job.OwnerID, documentID); err != nil {
+			return documentGCPlan{}, err
+		}
+	}
+	// 历史教材和题目来源继续引用文档身份，正文与可重建载荷不再保留。
+	if _, err := tx.ExecContext(ctx, `UPDATE kb_documents SET content='',chunk_count=0,error_message=''
 		WHERE id=? AND corpus_uid=? AND deleted=1`, documentID, job.CorpusUID); err != nil {
 		return documentGCPlan{}, err
 	}
@@ -2680,6 +2799,23 @@ func loadDocumentGCManagedPaths(
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	attachments, err := sourceAttachmentGCPaths(ctx, tx, ownerID, documentID)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	for _, path := range paths {
+		seen[path] = true
+	}
+	for _, path := range attachments {
+		if !seen[path] {
+			paths = append(paths, path)
+			seen[path] = true
+		}
 	}
 	sort.Strings(paths)
 	return paths, nil
@@ -2731,6 +2867,13 @@ func (r *SQLiteSemanticIndexRepository) finalizeDocumentGC(
 		return ErrJobFenced
 	}
 	for _, path := range plan.ManagedObjectPaths {
+		referenced, err := sourceAttachmentReferenced(ctx, tx.QueryRowContext, path)
+		if err != nil {
+			return err
+		}
+		if referenced {
+			continue
+		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM kb_ingest_blobs AS blob
 			WHERE blob.owner_id=? AND blob.corpus_uid=? AND blob.storage_path=?
 			  AND NOT EXISTS (
@@ -2958,7 +3101,7 @@ func (r *SQLiteSemanticIndexRepository) CommitEmbeddingBatch(
 			return fmt.Errorf("knowledge: commit embedding checkpoint: %w", err)
 		}
 	}
-	res, err := tx.ExecContext(ctx, `UPDATE kb_knowledge_jobs SET stage='embedding',chunks_done=?,chunks_total=?,
+	res, err := tx.ExecContext(ctx, `UPDATE kb_knowledge_jobs SET stage='embedding',chunks_done=?,chunks_total=?,last_progress_attempt=attempt,
 		heartbeat_at=?,updated_at=? WHERE job_id=? AND owner_id=? AND corpus_uid=? AND state='running'
 		AND cancel_requested=0 AND lease_owner=? AND lease_epoch=? AND lease_expires_at>?`,
 		commit.ChunksDone, commit.ChunksTotal, nowMillis, nowMillis, job.JobID, job.OwnerID,

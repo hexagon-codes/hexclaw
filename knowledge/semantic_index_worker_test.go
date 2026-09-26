@@ -262,6 +262,9 @@ func newWorkerHarness(t *testing.T, chunks ...string) *workerHarness {
 	if err := migrate.Run(ctx, db, semanticIndexTestMigrations()); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := db.ExecContext(ctx, migrate.KnowledgeEmbeddingProgressV116.SQL); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := db.ExecContext(ctx, `INSERT INTO kb_documents(id,title,content,deleted)
 		VALUES('legacy-doc','Legacy','legacy body',0)`); err != nil {
 		t.Fatal(err)

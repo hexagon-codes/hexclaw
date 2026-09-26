@@ -91,6 +91,9 @@ func newSemanticHarness(t *testing.T) *semanticHarness {
 	if err := migrate.Run(ctx, db, semanticIndexTestMigrations()); err != nil {
 		t.Fatalf("migrate semantic index: %v", err)
 	}
+	if _, err := db.ExecContext(ctx, migrate.KnowledgeEmbeddingProgressV116.SQL); err != nil {
+		t.Fatal(err)
+	}
 
 	profiles := map[string]EmbeddingProfileSnapshot{
 		"profile-a": semanticProfile("profile-a", "ollama", "bge-m3", ProviderLocationLocal, ProfileAvailabilityInstalled, 3, "hash-a"),

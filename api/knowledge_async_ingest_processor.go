@@ -29,11 +29,17 @@ const (
 )
 
 type knowledgeDocumentIngestProcessor struct {
-	manager  *knowledge.Manager
-	governor *resourcegov.Governor
+	manager           *knowledge.Manager
+	sourceAttachments *knowledge.SemanticIndexService
+	governor          *resourcegov.Governor
 }
 
 type KnowledgeDocumentIngestOption func(*knowledgeDocumentIngestProcessor)
+
+// WithKnowledgeSourceAttachments 让原文和附件共用同一对象仓库与提交锁。
+func WithKnowledgeSourceAttachments(service *knowledge.SemanticIndexService) KnowledgeDocumentIngestOption {
+	return func(p *knowledgeDocumentIngestProcessor) { p.sourceAttachments = service }
+}
 
 func WithKnowledgeResourceGovernor(governor *resourcegov.Governor) KnowledgeDocumentIngestOption {
 	return func(processor *knowledgeDocumentIngestProcessor) { processor.governor = governor }
@@ -90,7 +96,15 @@ func (p *knowledgeDocumentIngestProcessor) prepare(
 	pageCount := int64(1)
 	warnings := []string{}
 	var content string
+	var sourceManifest *knowledge.SourceManifest
 	var extractedPages []documentPageExtraction
+	var releaseAttachments func()
+	handedOff := false
+	defer func() {
+		if !handedOff && releaseAttachments != nil {
+			releaseAttachments()
+		}
+	}()
 	if source.Extension == ".pdf" {
 		if err := verifyIngestSource(ctx, source); err != nil {
 			return knowledge.PreparedIngestDocument{}, err
@@ -148,10 +162,16 @@ func (p *knowledgeDocumentIngestProcessor) prepare(
 			return knowledge.PreparedIngestDocument{}, extractErr
 		}
 		content = strings.TrimSpace(extracted.Text)
+		sourceManifest = extracted.SourceManifest
 		warnings = append(warnings, extracted.Warnings...)
 		if extracted.PageCount > 0 {
 			pageCount = int64(extracted.PageCount)
 		}
+	}
+	if strings.EqualFold(source.Extension, ".md") {
+		var objectWarnings []string
+		sourceManifest, objectWarnings, releaseAttachments = prepareMarkdownSourceObjects(ctx, source, content, p.sourceAttachments)
+		warnings = append(warnings, objectWarnings...)
 	}
 	if content == "" {
 		return knowledge.PreparedIngestDocument{}, fmt.Errorf("%w: extracted document is empty", knowledge.ErrInvalidDocumentUpload)
@@ -194,8 +214,10 @@ func (p *knowledgeDocumentIngestProcessor) prepare(
 	if err != nil {
 		return knowledge.PreparedIngestDocument{}, err
 	}
+	handedOff = true
 	return knowledge.PreparedIngestDocument{
-		Document: document, Chunks: chunks, PageCount: pageCount, Warnings: warnings,
+		ReleaseAttachments: releaseAttachments,
+		Document:           document, Chunks: chunks, PageCount: pageCount, Warnings: warnings, SourceManifest: sourceManifest,
 	}, nil
 }
 

@@ -73,7 +73,13 @@ func (r *SQLiteSemanticIndexRepository) ListDocumentVectorProjections(
 	JOIN kb_semantic_document_bindings b ON b.corpus_uid=c.corpus_uid
 	LEFT JOIN kb_revision_documents rd
 	  ON rd.corpus_uid=b.corpus_uid
-	 AND rd.revision_id=COALESCE(p.desired_revision_id,c.active_revision_id)
+	 AND rd.revision_id=COALESCE((
+	   SELECT target.revision_id FROM kb_revision_documents target
+	   WHERE target.corpus_uid=b.corpus_uid
+	     AND target.revision_id=p.desired_revision_id
+	     AND target.document_id=b.document_id
+	     AND target.content_generation=b.content_generation
+	 ),c.active_revision_id)
 	 AND rd.document_id=b.document_id
 	 AND rd.content_generation=b.content_generation
 	LEFT JOIN kb_knowledge_jobs j ON j.job_id=(
@@ -82,7 +88,7 @@ func (r *SQLiteSemanticIndexRepository) ListDocumentVectorProjections(
 	    AND candidate.document_id=b.document_id
 	    AND candidate.document_generation=b.content_generation
 	    AND candidate.kind='embed_document'
-	    AND candidate.target_revision_id=COALESCE(p.desired_revision_id,c.active_revision_id)
+	    AND candidate.target_revision_id=rd.revision_id
 	  ORDER BY candidate.created_at DESC,candidate.job_id DESC LIMIT 1
 	)
 	WHERE c.owner_id=? AND c.corpus_alias=?

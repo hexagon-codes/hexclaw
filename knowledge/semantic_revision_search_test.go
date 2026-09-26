@@ -197,6 +197,9 @@ func newRevisionSearchHarness(t *testing.T) *revisionSearchHarness {
 	if err := migrate.Run(ctx, db, semanticIndexTestMigrations()); err != nil {
 		t.Fatalf("migrate semantic index: %v", err)
 	}
+	if _, err := db.ExecContext(ctx, migrate.KnowledgeEmbeddingProgressV116.SQL); err != nil {
+		t.Fatal(err)
+	}
 	profiles := map[string]EmbeddingProfileSnapshot{
 		"profile-a": revisionSearchProfile("profile-a", "ollama", "bge-m3", ProviderLocationLocal, ProfileAvailabilityInstalled, 3, "hash-a"),
 		"profile-b": revisionSearchProfile("profile-b", "openai", "text-embedding-3-small", ProviderLocationCloud, ProfileAvailabilityConnected, 4, "hash-b"),

@@ -39,11 +39,11 @@ func TestKnowledgeJobGCRemovesTombstonedDocumentResidue(t *testing.T) {
 	}
 
 	for table, query := range map[string]string{
-		"documents":          `SELECT COUNT(*) FROM kb_documents WHERE id='doc-1'`,
+		"documents":          `SELECT COUNT(*) FROM kb_documents WHERE id='doc-1' AND (deleted<>1 OR content<>'' OR chunk_count<>0)`,
 		"chunks":             `SELECT COUNT(*) FROM kb_chunks WHERE doc_id='doc-1'`,
 		"fts":                `SELECT COUNT(*) FROM kb_chunks_fts WHERE chunk_id IN ('chunk-a','chunk-b')`,
 		"cjk_fts_v2":         `SELECT COUNT(*) FROM kb_chunks_fts_v2 WHERE chunk_id IN ('chunk-a','chunk-b')`,
-		"bindings":           `SELECT COUNT(*) FROM kb_semantic_document_bindings WHERE document_id='doc-1'`,
+		"bindings":           `SELECT COUNT(*) FROM kb_semantic_document_bindings WHERE document_id='doc-1' AND lifecycle_state<>'tombstoned'`,
 		"generations":        `SELECT COUNT(*) FROM kb_semantic_document_generations WHERE document_id='doc-1'`,
 		"revision_documents": `SELECT COUNT(*) FROM kb_revision_documents WHERE document_id='doc-1'`,
 		"vectors":            `SELECT COUNT(*) FROM kb_revision_vectors WHERE document_id='doc-1'`,
@@ -60,6 +60,14 @@ func TestKnowledgeJobGCRemovesTombstonedDocumentResidue(t *testing.T) {
 		if count != 0 {
 			t.Errorf("GC left %s residue=%d", table, count)
 		}
+	}
+	deleted, err := h.repo.DocumentSourceDeleted(h.ctx, "owner-1", "default", doc.ID)
+	if err != nil || !deleted {
+		t.Fatalf("collected source must retain deletion identity: deleted=%v err=%v", deleted, err)
+	}
+	foreignDeleted, err := h.repo.DocumentSourceDeleted(h.ctx, "another-owner", "default", doc.ID)
+	if err != nil || foreignDeleted {
+		t.Fatalf("foreign source must not expose deletion identity: deleted=%v err=%v", foreignDeleted, err)
 	}
 	var cjkFTSVersion int
 	if err := h.db.QueryRowContext(h.ctx, `SELECT version FROM kb_search_index_metadata
