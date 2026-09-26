@@ -309,6 +309,7 @@ func TestREGK12RecognitionBatchRepair20260808001PersistsPrimarySettlement(
 func prepareRecognitionLayoutSettlementFixture(
 	t *testing.T,
 	ctx context.Context,
+	adjudication ...bool,
 ) (
 	*k12storage.Store,
 	*sql.DB,
@@ -334,7 +335,8 @@ func prepareRecognitionLayoutSettlementFixture(
 	manifestContent := `{"targets":["manifest_0001","manifest_0002","manifest_0003","manifest_0004","manifest_0005"]}`
 	manifestDigest := recognitionLayoutRuntimeTestDigest(manifestContent)
 	plan, err := k12.BuildRecognitionLayoutPlanV2(k12.RecognitionLayoutPlanInputV2{
-		PagePNG: recognitionLayoutRuntimeTestPagePNG(t),
+		EnableSourceAdjudication: len(adjudication) > 0 && adjudication[0],
+		PagePNG:                  recognitionLayoutRuntimeTestPagePNG(t),
 		Manifest: k12.RecognitionLayoutManifestSuccessV2{
 			InvocationID: "physical-settlement-manifest",
 			ResultDigest: manifestDigest,

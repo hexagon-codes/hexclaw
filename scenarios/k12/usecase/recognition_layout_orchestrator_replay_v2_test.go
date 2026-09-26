@@ -216,6 +216,7 @@ func TestREGK12RecognitionDurabilityBudget20260808001OrchestratorMarksFinalizedV
 				SourceNumberPath:      []string{"1"},
 				DisplayLabel:          "1",
 				Question:              "2+2=?",
+				RawTranscription:      "2+2=?",
 				CanonicalMarkdown:     "2+2=?",
 				Subject:               "数学",
 				KnowledgePoints:       []string{"加法"},

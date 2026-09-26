@@ -47,6 +47,7 @@ var (
 	latexText               = regexp.MustCompile(`\\text\s*\{([^{}]*)\}`)
 	evidenceNewline         = regexp.MustCompile(`\\n\b`)
 	evidenceNumericFraction = regexp.MustCompile(`\b([0-9]+(?:\.[0-9]+)?)\s*/\s*([0-9]+(?:\.[0-9]+)?)\b`)
+	explicitAnswerLine      = regexp.MustCompile(`^(?:答\s*[:：]\s*(?:是|为)?|答案\s*(?:是|为|[:：]))\s*`)
 )
 
 var ocrReasonOrder = []OCRRiskReason{
@@ -97,7 +98,7 @@ func EvaluateOCRConfirmationRisk(q RecognizedQuestion) RecognizedQuestion {
 		}
 	}
 	if questionEvidenceTranscriptionsConflict(q) ||
-		evidenceTranscriptionsConflict(q.AnswerRawTranscription, q.AnswerEvidenceTranscriptions, "") {
+		answerEvidenceTranscriptionsConflict(q.AnswerRawTranscription, q.AnswerEvidenceTranscriptions) {
 		reasons[OCRRiskEvidenceConflict] = struct{}{}
 	}
 	if q.RecognitionConfidence != nil && *q.RecognitionConfidence < ocrConfidenceConfirmationThreshold {
@@ -185,6 +186,56 @@ func questionEvidenceTranscriptionsConflict(q RecognizedQuestion) bool {
 		}
 	}
 	return evidenceTranscriptionsConflict(trimNumber(q.RawTranscription), values, q.AnswerRawTranscription)
+}
+
+// answerEvidenceTranscriptionsConflict 只在比较视图统一独立答案行的位置和引导词。
+// 演算行仍逐字、按原顺序比较；不按最终数值一致吞掉缺失步骤或不同演算。
+func answerEvidenceTranscriptionsConflict(transcription string, values []string) bool {
+	if !evidenceTranscriptionsConflict(transcription, values, "") {
+		return false
+	}
+	canonical, ok := canonicalAnswerEvidenceLineOrder(transcription)
+	if !ok {
+		return true
+	}
+	readings := make([]string, len(values))
+	for index, value := range values {
+		readings[index], ok = canonicalAnswerEvidenceLineOrder(value)
+		if !ok {
+			return true
+		}
+	}
+	return evidenceTranscriptionsConflict(canonical, readings, "")
+}
+
+func canonicalAnswerEvidenceLineOrder(value string) (string, bool) {
+	value = evidenceNewline.ReplaceAllString(value, "\n")
+	var lines []string
+	for _, line := range strings.Split(value, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			lines = append(lines, line)
+		}
+	}
+	if len(lines) < 2 {
+		return "", false
+	}
+	answerIndex, answer := -1, ""
+	for index, line := range lines {
+		prefix := explicitAnswerLine.FindStringIndex(line)
+		if prefix == nil {
+			continue
+		}
+		if answerIndex >= 0 || (index != 0 && index != len(lines)-1) {
+			return "", false
+		}
+		answerIndex, answer = index, strings.TrimSpace(line[prefix[1]:])
+	}
+	if answerIndex < 0 || answer == "" {
+		return "", false
+	}
+	working := append([]string(nil), lines[:answerIndex]...)
+	working = append(working, lines[answerIndex+1:]...)
+	return strings.Join(working, "\n") + "\n答：" + answer, true
 }
 
 // evidenceTranscriptionsConflict 区分同一多行作答的互补片段与真正互斥的独立读数。
@@ -276,6 +327,56 @@ func evidenceTranscriptionsConflict(transcription string, values []string, answe
 		whole = whole[index+len(part):]
 	}
 	return whole != ""
+}
+
+// RecognitionSourceReadingsMatch 比较独立核验与已有来源；只容许补全遗漏的清晰行，
+// 不修改任一原转写，不把运算正确性或模型置信分作为采纳依据。
+func RecognitionSourceReadingsMatch(prior, review RecognizedQuestion) (question, answer bool) {
+	prior, review = normalizeRecognizedQuestionFacts(prior), normalizeRecognizedQuestionFacts(review)
+	question = strings.TrimSpace(prior.RawTranscription) != "" && strings.TrimSpace(review.RawTranscription) != "" &&
+		!evidenceTranscriptionsConflict(review.RawTranscription, []string{prior.RawTranscription, review.RawTranscription}, "")
+	if prior.AnswerState != review.AnswerState {
+		return question, false
+	}
+	if review.AnswerState == AnswerStateBlank {
+		return question, prior.StudentAnswer == "" && review.StudentAnswer == ""
+	}
+	if review.AnswerState != AnswerStatePresent {
+		return question, false
+	}
+	if !answerEvidenceTranscriptionsConflict(review.AnswerRawTranscription, []string{prior.AnswerRawTranscription, review.AnswerRawTranscription}) {
+		return question, true
+	}
+	lines := func(value string) []string {
+		if canonical, ok := canonicalAnswerEvidenceLineOrder(value); ok {
+			value = canonical
+		}
+		value = evidenceNewline.ReplaceAllString(value, "\n")
+		var out []string
+		for _, line := range strings.Split(value, "\n") {
+			line = strings.TrimSpace(line)
+			line = explicitAnswerLine.ReplaceAllString(line, "")
+			if line != "" {
+				out = append(out, line)
+			}
+		}
+		return out
+	}
+	before, after := lines(prior.AnswerRawTranscription), lines(review.AnswerRawTranscription)
+	if len(before) == 0 || len(after) < len(before) {
+		return question, false
+	}
+	same := func(a, b string) bool { return !evidenceTranscriptionsConflict(b, []string{a, b}, "") }
+	if !same(before[len(before)-1], after[len(after)-1]) {
+		return question, false
+	}
+	next := 0
+	for _, line := range after {
+		if next < len(before) && same(before[next], line) {
+			next++
+		}
+	}
+	return question, next == len(before)
 }
 
 // CanonicalMarkdownValid 做不猜测语义的结构校验：UTF-8、花括号、\(...\)/\[...\]

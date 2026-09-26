@@ -52,7 +52,7 @@ func (u RecognitionPhysicalUnit) Valid() bool {
 		return true
 	default:
 		return u.validLayoutOrdinal("layout_batch_") ||
-			u.validLayoutOrdinal("layout_repair_")
+			u.validLayoutOrdinal("layout_repair_") || u.validLayoutOrdinal("layout_adjudicate_")
 	}
 }
 
@@ -152,7 +152,7 @@ func (c RecognitionPhysicalCall) Validate() error {
 					RecognitionLayoutBatchTargetLimitV2,
 				)
 			}
-		case c.Unit.validLayoutOrdinal("layout_repair_"):
+		case c.Unit.validLayoutOrdinal("layout_repair_"), c.Unit.validLayoutOrdinal("layout_adjudicate_"):
 			if !validRecognitionLayoutSHA256(c.PlanDigest) || len(c.TargetIDs) != 1 {
 				return fmt.Errorf(
 					"%w: v2 repair requires a canonical plan digest and exactly one target",
@@ -723,7 +723,10 @@ func validateRecognitionLayoutPlanFinalizationV2(
 			continue
 		}
 		repairUnit, repairErr := RecognitionLayoutRepairUnitV2(index + 1)
-		if repairErr != nil || candidate.SourcePhysicalUnit != repairUnit {
+		adjudicationUnit, _ := RecognitionLayoutAdjudicationUnitV2(index + 1)
+		adjudicated := plan.SourceAdjudication && candidate.SourcePhysicalUnit == adjudicationUnit &&
+			candidate.Adjudication != nil && len(candidate.OriginalCandidateJSON) != 0
+		if repairErr != nil || (candidate.SourcePhysicalUnit != repairUnit && !adjudicated) {
 			return fmt.Errorf("candidate result %d has an unauthorized source unit", index+1)
 		}
 		if _, duplicate := repairCandidateByUnit[repairUnit]; duplicate {
@@ -754,6 +757,23 @@ func validateRecognitionLayoutPlanFinalizationV2(
 			planDigest:     plan.AuthorizedPlanDigest,
 			exactSetDigest: repairExactSetDigest,
 		})
+	}
+	for index, target := range plan.Targets {
+		unit, _ := RecognitionLayoutAdjudicationUnitV2(index + 1)
+		for _, evidence := range result.PhysicalResults {
+			if evidence.PhysicalUnit != unit {
+				continue
+			}
+			repair, _ := RecognitionLayoutRepairUnitV2(index + 1)
+			if !plan.SourceAdjudication || repairCandidateByUnit[repair] != target.TargetID {
+				return errors.New("adjudication is detached from a repaired target")
+			}
+			exact, err := RecognitionLayoutTargetExactSetDigestV2([]string{target.TargetID})
+			if err != nil {
+				return err
+			}
+			expected = append(expected, recognitionLayoutExpectedPhysicalResultV2{unit: unit, planDigest: plan.AuthorizedPlanDigest, exactSetDigest: exact})
+		}
 	}
 	if result.PhysicalResultCount != len(expected) ||
 		len(result.PhysicalResults) != len(expected) {

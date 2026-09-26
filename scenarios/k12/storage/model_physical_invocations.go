@@ -28,7 +28,7 @@ const modelPhysicalInvocationInsertColumns = `physical_invocation_id,parent_invo
     failure_kind,created_at,updated_at,recognition_plan_version,plan_digest,
     candidate_exact_set_digest`
 
-const modelPhysicalInvocationColumns = modelPhysicalInvocationInsertColumns + `,reused_from_physical_invocation_id`
+const modelPhysicalInvocationColumns = modelPhysicalInvocationInsertColumns + `,reused_from_physical_invocation_id,effective_timeout_ms`
 
 func scanModelPhysicalInvocation(
 	row rowScanner,
@@ -56,6 +56,7 @@ func scanModelPhysicalInvocation(
 		&invocation.PlanDigest,
 		&invocation.CandidateExactSetDigest,
 		&invocation.ReusedFromPhysicalInvocationID,
+		&invocation.EffectiveTimeoutMS,
 	)
 	if err != nil {
 		return k12.ModelPhysicalInvocation{}, err
@@ -209,7 +210,7 @@ func legacyRecognitionPhysicalUnit(unit k12.RecognitionPhysicalUnit) bool {
 
 func layoutRecognitionPhysicalUnit(unit k12.RecognitionPhysicalUnit) bool {
 	return strings.HasPrefix(string(unit), "layout_batch_") ||
-		strings.HasPrefix(string(unit), "layout_repair_")
+		strings.HasPrefix(string(unit), "layout_repair_") || strings.HasPrefix(string(unit), "layout_adjudicate_")
 }
 
 func recognitionPlanVersionSQL(version int) (string, error) {
@@ -359,7 +360,8 @@ func sameModelPhysicalInvocationIdentity(
 		stored.RecognitionPlanVersion == requested.RecognitionPlanVersion &&
 		stored.PlanDigest == requested.PlanDigest &&
 		stored.CandidateExactSetDigest == requested.CandidateExactSetDigest &&
-		stored.Attempt == requested.Attempt
+		stored.Attempt == requested.Attempt &&
+		stored.EffectiveTimeoutMS == requested.EffectiveTimeoutMS
 }
 
 func physicalInvocationResultDigest(content string) string {
@@ -1451,6 +1453,10 @@ func (s *Store) prepareLayoutModelPhysicalInvocationOnce(
 	if opErr != nil {
 		return k12.ModelPhysicalInvocation{}, false, opErr
 	}
+	invocation.EffectiveTimeoutMS, opErr = recognitionRecoveryEffectiveTimeout(ctx, tx, invocation)
+	if opErr != nil {
+		return k12.ModelPhysicalInvocation{}, false, opErr
+	}
 	if err := validatePhysicalInvocationParent(invocation, parent); err != nil {
 		return k12.ModelPhysicalInvocation{}, false, err
 	}
@@ -1505,8 +1511,8 @@ func (s *Store) prepareLayoutModelPhysicalInvocationOnce(
 	res, opErr := tx.ExecContext(
 		ctx,
 		`INSERT INTO k12_model_physical_invocations (`+
-			modelPhysicalInvocationInsertColumns+
-			`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+			modelPhysicalInvocationInsertColumns+`,effective_timeout_ms`+
+			`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
              ON CONFLICT DO NOTHING`,
 		invocation.PhysicalInvocationID,
 		invocation.ParentInvocationID,
@@ -1527,6 +1533,7 @@ func (s *Store) prepareLayoutModelPhysicalInvocationOnce(
 		"v2",
 		invocation.PlanDigest,
 		invocation.CandidateExactSetDigest,
+		invocation.EffectiveTimeoutMS,
 	)
 	if opErr != nil {
 		return k12.ModelPhysicalInvocation{}, false, fmt.Errorf(
@@ -1577,8 +1584,9 @@ func validateRecognitionLayoutBatchAuthorizationVia(
 	}
 	isPrimary := strings.HasPrefix(string(invocation.PhysicalUnit), "layout_batch_")
 	isRepair := strings.HasPrefix(string(invocation.PhysicalUnit), "layout_repair_")
+	isAdjudication := strings.HasPrefix(string(invocation.PhysicalUnit), "layout_adjudicate_")
 	if invocation.RecognitionPlanVersion != k12.RecognitionPlanVersionV2 ||
-		(!isPrimary && !isRepair) {
+		(!isPrimary && !isRepair && !isAdjudication) {
 		return fmt.Errorf(
 			"%w: only an authorized V2 layout batch or repair may use this gate",
 			records.ErrIllegalTransition,
@@ -1616,6 +1624,9 @@ func validateRecognitionLayoutBatchAuthorizationVia(
 			"%w: layout plan authorization changed or its frozen deadline elapsed",
 			ErrModelPhysicalInvocationConflict,
 		)
+	}
+	if isAdjudication {
+		return validateRecognitionLayoutAdjudicationAuthorizationVia(ctx, q, parent, invocation, planID)
 	}
 	if isRepair {
 		return validateRecognitionLayoutRepairAuthorizationVia(
@@ -2390,6 +2401,9 @@ func (s *Store) claimModelPhysicalInvocationSentOnce(
 		}
 	}
 	fallbackGateSQL := "1=1"
+	if err := validateRecognitionRecoverySend(ctx, tx, before); err != nil {
+		return k12.ModelPhysicalInvocation{}, false, err
+	}
 	var fallbackGateArgs []any
 	if before.RecognitionPlanVersion == k12.RecognitionPlanVersionV1 {
 		fallbackGateSQL, fallbackGateArgs =
@@ -5567,6 +5581,15 @@ func reconstructRecognitionLayoutFinalizationV2(
 				err,
 			)
 	}
+	adjudicationOverlays, adjudicationPhysical, adjudicationErr := loadRecognitionAdjudicationOverlays(ctx, q, authority, true)
+	if adjudicationErr != nil {
+		return k12.RecognitionLayoutPlanFinalizationResultV2{}, nil, adjudicationErr
+	}
+	for _, physical := range adjudicationPhysical {
+		if err := appendPhysical(physical); err != nil {
+			return k12.RecognitionLayoutPlanFinalizationResultV2{}, nil, err
+		}
+	}
 	var physicalCount int
 	if err := q.QueryRowContext(
 		ctx,
@@ -5627,7 +5650,7 @@ func reconstructRecognitionLayoutFinalizationV2(
 					ErrModelPhysicalInvocationConflict,
 				)
 		}
-		candidateResults = append(candidateResults, result)
+		candidateResults = append(candidateResults, applyRecognitionAdjudicationOverlay(result, adjudicationOverlays[target.TargetID]))
 	}
 	var candidateResultCount int
 	if err := q.QueryRowContext(

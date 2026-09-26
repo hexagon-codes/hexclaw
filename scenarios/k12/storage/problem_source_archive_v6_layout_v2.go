@@ -25,6 +25,7 @@ type ProblemSourceArchiveRecognitionLayoutV2 struct {
 	CandidateResults     []ProblemSourceArchiveRecognitionLayoutCandidateResult     `json:"candidate_results"`
 	RepairAuthorizations []ProblemSourceArchiveRecognitionLayoutRepairAuthorization `json:"repair_authorizations"`
 	RepairSettlements    []ProblemSourceArchiveRecognitionLayoutRepairSettlement    `json:"repair_settlements"`
+	Adjudications        []ProblemSourceArchiveRecognitionAdjudication              `json:"adjudications,omitempty"`
 	Finalization         ProblemSourceArchiveRecognitionLayoutFinalization          `json:"finalization"`
 }
 
@@ -429,6 +430,10 @@ func loadProblemSourceArchiveRecognitionLayoutV2(
 	if err := rowsDone(rows); err != nil {
 		return out, err
 	}
+	out.Adjudications, queryErr = loadProblemSourceArchiveRecognitionAdjudications(ctx, q, plan.PlanID)
+	if queryErr != nil {
+		return out, queryErr
+	}
 	if err := q.QueryRowContext(ctx, `SELECT plan_id,parent_invocation_id,
 		authorized_plan_digest,candidate_exact_set_digest,
 		candidate_results_exact_set_digest,physical_results_exact_set_digest,
@@ -465,6 +470,9 @@ func problemSourceArchiveRecognitionLayoutPhysicalIDsV2(
 		}
 		for _, settlement := range layout.RepairSettlements {
 			ids = append(ids, settlement.SourcePhysicalInvocationID)
+		}
+		for _, adjudication := range layout.Adjudications {
+			ids = append(ids, adjudication.SourcePhysicalInvocationID)
 		}
 		for _, physicalID := range ids {
 			if strings.TrimSpace(physicalID) == "" {
@@ -847,6 +855,11 @@ func validateProblemSourceArchiveRecognitionLayoutV2(
 		return errors.New("repair authorization/settlement exact-set drifted")
 	}
 
+	overlays, adjudicationIDs, err := validateProblemSourceArchiveRecognitionAdjudications(aggregate, parent, plan, physical)
+	if err != nil {
+		return err
+	}
+
 	finalRow := aggregate.Finalization
 	var finalEnvelope struct {
 		Contract                       string `json:"contract"`
@@ -880,7 +893,7 @@ func validateProblemSourceArchiveRecognitionLayoutV2(
 		}
 		finalized.CandidateResults = append(
 			finalized.CandidateResults,
-			k12.RecognitionLayoutCandidateFinalResultV2{
+			applyRecognitionAdjudicationOverlay(k12.RecognitionLayoutCandidateFinalResultV2{
 				CandidateID:                target.TargetID,
 				ResultKind:                 k12.RecognitionLayoutCandidateResultKindV2(stored.ResultKind),
 				ResultDigest:               stored.ResultDigest,
@@ -888,7 +901,7 @@ func validateProblemSourceArchiveRecognitionLayoutV2(
 				SourcePhysicalInvocationID: stored.SourcePhysicalInvocationID,
 				SourcePhysicalUnit:         child.PhysicalUnit,
 				SourcePhysicalResultDigest: stored.SourcePhysicalResultDigest,
-			},
+			}, overlays[target.TargetID]),
 		)
 	}
 	physicalOrder := []string{row.ManifestPhysicalInvocationID}
@@ -906,6 +919,7 @@ func validateProblemSourceArchiveRecognitionLayoutV2(
 			)
 		}
 	}
+	physicalOrder = append(physicalOrder, adjudicationIDs...)
 	for _, physicalID := range physicalOrder {
 		child, ok := physical[physicalID]
 		if !ok {
@@ -956,18 +970,7 @@ func validateProblemSourceArchiveRecognitionLayoutV2(
 		len(finalized.PhysicalResults) != finalRow.PhysicalResultCount {
 		return errors.New("layout finalization exact-set is incomplete")
 	}
-	for index, target := range plan.Targets {
-		result := finalized.CandidateResults[index]
-		stored := candidateResults[target.TargetID]
-		if result.CandidateID != target.TargetID ||
-			result.ResultKind != k12.RecognitionLayoutCandidateResultKindV2(stored.ResultKind) ||
-			result.ResultDigest != stored.ResultDigest ||
-			string(result.ResultJSON) != stored.ResultJSON ||
-			result.SourcePhysicalInvocationID != stored.SourcePhysicalInvocationID ||
-			result.SourcePhysicalResultDigest != stored.SourcePhysicalResultDigest {
-			return fmt.Errorf("finalized candidate %d drifted from result table", index+1)
-		}
-	}
+
 	finalPhysical := make(map[string]struct{}, len(finalized.PhysicalResults))
 	for _, evidence := range finalized.PhysicalResults {
 		child, ok := physical[evidence.PhysicalInvocationID]
@@ -1095,6 +1098,9 @@ func insertProblemSourceArchiveRecognitionLayoutsV2(
 				row.ResultJSON, row.CreatedAt); err != nil {
 				return fmt.Errorf("import recognition layout candidate result: %w", err)
 			}
+		}
+		if err := insertProblemSourceArchiveRecognitionAdjudications(ctx, tx, aggregate.Adjudications); err != nil {
+			return err
 		}
 		row := aggregate.Finalization
 		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO k12_recognition_layout_finalizations (

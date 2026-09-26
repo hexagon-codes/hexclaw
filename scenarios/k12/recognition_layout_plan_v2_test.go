@@ -395,3 +395,45 @@ func assertRecognitionLayoutSHA256(t *testing.T, field, value string) {
 		t.Fatalf("%s digest=%q is not hexadecimal: %v", field, value, err)
 	}
 }
+
+func TestRecognitionLayoutAdjudicationPlan_PreservesOriginalAndContext(t *testing.T) {
+	page := recognitionLayoutPlanTestPNG(t, 1280, 1707)
+	targets := []RecognitionLayoutManifestTargetV2{
+		{ManifestRef: "manifest_0001", ManifestOrder: 1, SourceNumberPath: []string{}, Region: SourcePixelRegion{X: 110, Y: 1275, Width: 515, Height: 245}},
+		{ManifestRef: "manifest_0002", ManifestOrder: 2, SourceNumberPath: []string{}, Region: SourcePixelRegion{X: 635, Y: 1275, Width: 515, Height: 205}},
+	}
+	input := RecognitionLayoutPlanInputV2{PagePNG: page, Manifest: RecognitionLayoutManifestSuccessV2{InvocationID: "manifest-1", ResultDigest: "sha256:" + strings.Repeat("a", 64)}, Targets: targets, RecognitionFormat: RecognitionLayoutCompactV4, EnableSourceAdjudication: true}
+	plan, err := BuildRecognitionLayoutPlanV2(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range plan.Targets {
+		if target.OriginalRegion == nil || target.AdjudicationRegion == nil {
+			t.Fatal("missing frozen target/context")
+		}
+		if target.AdjudicationRegion.X >= target.Region.X || target.AdjudicationRegion.X+target.AdjudicationRegion.Width <= target.Region.X+target.Region.Width {
+			t.Fatal("context did not preserve both clipped edges")
+		}
+		first, err := BuildRecognitionLayoutAdjudicationImageV2(page, plan, target.TargetID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		second, err := BuildRecognitionLayoutAdjudicationImageV2(page, plan, target.TargetID)
+		if err != nil || !bytes.Equal(first, second) || recognitionLayoutTestDigest(first) != target.AdjudicationDigest {
+			t.Fatal("context was not reproducible")
+		}
+	}
+	input.EnableSourceAdjudication = false
+	legacy, err := BuildRecognitionLayoutPlanV2(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range legacy.Targets {
+		if target.OriginalRegion != nil || target.AdjudicationRegion != nil || target.AdjudicationDigest != "" {
+			t.Fatal("legacy plan acquired new evidence")
+		}
+	}
+	if _, err := BuildRecognitionLayoutAdjudicationImageV2(page, legacy, legacy.Targets[0].TargetID); err == nil {
+		t.Fatal("legacy plan authorized a new request")
+	}
+}

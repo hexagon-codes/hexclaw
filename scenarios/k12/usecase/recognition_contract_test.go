@@ -77,6 +77,41 @@ func TestEvaluateOCRConfirmationRisk_IndependentReadUnitFormatting(t *testing.T)
 	}
 }
 
+func TestEvaluateOCRConfirmationRisk_IndependentAnswerLinePlacement(t *testing.T) {
+	const calculation = `\(8\times\frac{1}{4}\times\frac{4}{5}=\frac{8}{5}\)`
+	const first = "答：是 \\(\\frac{8}{5}\\)。\n" + calculation
+	const second = calculation + `\n答案是 \(\frac{8}{5}\)。`
+	for _, tt := range []struct {
+		name, first, read string
+		wantConflict      bool
+	}{
+		{"same explicit answer before or after calculation", first, second, false},
+		{"changed final numerator", first, calculation + `\n答案是 \(\frac{9}{5}\)。`, true},
+		{"changed calculation", first, strings.Replace(second, `\frac{1}{4}`, `\frac{1}{3}`, 1), true},
+		{"missing calculation", first, `答案是 \(\frac{8}{5}\)。`, true},
+		{"calculation order changed", "答：8\n2+2=4\n4+4=8", "4+4=8\n2+2=4\n答案是8", true},
+		{"two explicit answers remain ambiguous", "答：8\n2+2=4\n答：4", "2+2=4\n答案是4", true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			q := RecognizedQuestion{Question: "求算式结果", Subject: "数学", AnswerState: AnswerStatePresent,
+				StudentAnswer: tt.read, AnswerRawTranscription: tt.read, RecognitionConfidence: float64Ptr(.99),
+				AnswerEvidenceTranscriptions: []string{tt.first, tt.read}}
+			original := append([]string(nil), q.AnswerEvidenceTranscriptions...)
+			got := EvaluateOCRConfirmationRisk(q)
+			conflict := false
+			for _, reason := range got.ConfirmationReasons {
+				conflict = conflict || reason == OCRRiskEvidenceConflict
+			}
+			if conflict != tt.wantConflict {
+				t.Fatalf("evidence conflict = %v, want %v; reasons=%v", conflict, tt.wantConflict, got.ConfirmationReasons)
+			}
+			if got.AnswerRawTranscription != q.AnswerRawTranscription || !reflect.DeepEqual(got.AnswerEvidenceTranscriptions, original) {
+				t.Fatal("comparison changed source evidence")
+			}
+		})
+	}
+}
+
 func TestEvaluateOCRConfirmationRisk_Table(t *testing.T) {
 	tests := []struct {
 		name string
@@ -810,6 +845,40 @@ func TestApplyGradingCorrections_RejectsUnknownOrDuplicateStableTarget(t *testin
 			}
 			if run.questions[0].ConfirmedVersion != 0 {
 				t.Fatalf("rejected correction mutated confirmation: %#v", run.questions[0])
+			}
+		})
+	}
+}
+
+func TestRecognitionSourceReadingsMatch_IndependentCompleteReview(t *testing.T) {
+	makeRead := func(question, answer string) RecognizedQuestion {
+		state := AnswerStatePresent
+		if answer == "" {
+			state = AnswerStateBlank
+		}
+		return RecognizedQuestion{Question: question, RawTranscription: question, StudentAnswer: answer, AnswerRawTranscription: answer, AnswerState: state, Subject: "数学"}
+	}
+	tests := []struct {
+		name, oldQuestion, oldAnswer, newQuestion, newAnswer string
+		question, answer                                     bool
+	}{
+		{"different numerator remains different", "5/7-1/5=", "14/35", "5/7-1/5=", "18/35", true, false},
+		{"complete independent reading agrees with final fraction", "5/7-1/5=", `\(18/35\)`, "5/7-1/5=", `\(\frac{18}{35}\)`, true, true},
+		{"omitted calculation completed while all prior facts remain", "鱼塘产量", "300÷6=50m\n50×2=100m\n答：225kg", "鱼塘产量", "300÷6=50m\n50×2=100m\n100×2.25=225kg\n答：225kg", true, true},
+		{"same final answer cannot hide changed calculation", "鱼塘产量", "300÷6=60m\n答：225kg", "鱼塘产量", "300÷6=50m\n答：225kg", true, false},
+		{"blank answer can match independently of missing printed glyph", "另外2个数的2倍", "", "另外2个数和的2倍", "", false, true},
+		{"blank cannot replace visible answer", "题目", "225kg", "题目", "", true, false},
+		{"no answer content match from empty prior", "题目", "", "题目", "1", true, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			prior, reviewed := makeRead(tt.oldQuestion, tt.oldAnswer), makeRead(tt.newQuestion, tt.newAnswer)
+			question, answer := RecognitionSourceReadingsMatch(prior, reviewed)
+			if question != tt.question || answer != tt.answer {
+				t.Fatalf("source match = (%t,%t), want (%t,%t)", question, answer, tt.question, tt.answer)
+			}
+			if prior.AnswerRawTranscription != tt.oldAnswer || reviewed.AnswerRawTranscription != tt.newAnswer {
+				t.Fatal("original evidence changed")
 			}
 		})
 	}

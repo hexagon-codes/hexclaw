@@ -18,6 +18,14 @@ import (
 func TestREGK12RecognitionDurabilityBudget20260808005RestoresFinalizedProblemSourceLayoutBeforeV73(
 	t *testing.T,
 ) {
+	testProblemSourceArchiveFinalizedLayoutRoundTrip(t, false)
+}
+
+func TestRecognitionAdjudicationArchiveRoundTrip(t *testing.T) {
+	testProblemSourceArchiveFinalizedLayoutRoundTrip(t, true)
+}
+
+func testProblemSourceArchiveFinalizedLayoutRoundTrip(t *testing.T, adjudication bool) {
 	ctx := context.Background()
 	sourceStore, sourceDB := setup(t)
 	_ = seedProblemSourceRecognitionFixture(t, sourceStore, sourceDB, recognitionWork)
@@ -32,7 +40,7 @@ func TestREGK12RecognitionDurabilityBudget20260808005RestoresFinalizedProblemSou
 		ResultInputRevision: 3,
 	})
 	parent, plan, finalized, pendingResult :=
-		seedFinalizedProblemSourceRecognitionLayoutV2(t, ctx, sourceStore, sourceDB)
+		seedFinalizedProblemSourceRecognitionLayoutV2(t, ctx, sourceStore, sourceDB, adjudication)
 
 	var resultCount int
 	if err := sourceDB.QueryRowContext(ctx, `
@@ -44,6 +52,17 @@ func TestREGK12RecognitionDurabilityBudget20260808005RestoresFinalizedProblemSou
 	archive, err := sourceStore.ExportProblemSourceArchiveV6(ctx, "mingming")
 	if err != nil {
 		t.Fatalf("export finalized pre-V73 V6 archive: %v", err)
+	}
+
+	if adjudication {
+		if len(archive.RecognitionLayoutsV2) != 1 || len(archive.RecognitionLayoutsV2[0].Adjudications) != 1 || finalized.CandidateResults[0].Adjudication == nil {
+			t.Fatal("archive lost independent adjudication evidence")
+		}
+		changed := cloneProblemSourceArchiveV6ForTest(t, archive)
+		changed.RecognitionLayoutsV2[0].Adjudications = nil
+		if err := k12storage.ValidateProblemSourceArchiveV6("mingming", changed); err == nil {
+			t.Fatal("archive accepted missing adjudication evidence")
+		}
 	}
 
 	targetStore, targetDB := setup(t)
@@ -282,6 +301,7 @@ func seedFinalizedProblemSourceRecognitionLayoutV2(
 	ctx context.Context,
 	store *k12storage.Store,
 	db *sql.DB,
+	adjudication ...bool,
 ) (
 	k12.ModelInvocation,
 	k12.RecognitionLayoutPlanV2,
@@ -349,7 +369,8 @@ func seedFinalizedProblemSourceRecognitionLayoutV2(
 	manifestContent := `{"targets":["manifest_0001","manifest_0002"]}`
 	manifestDigest := recognitionLayoutRuntimeTestDigest(manifestContent)
 	plan, err := k12.BuildRecognitionLayoutPlanV2(k12.RecognitionLayoutPlanInputV2{
-		PagePNG: recognitionLayoutRuntimeTestPagePNG(t),
+		EnableSourceAdjudication: len(adjudication) > 0 && adjudication[0],
+		PagePNG:                  recognitionLayoutRuntimeTestPagePNG(t),
 		Manifest: k12.RecognitionLayoutManifestSuccessV2{
 			InvocationID: "problem-source-layout-manifest",
 			ResultDigest: manifestDigest,
@@ -516,6 +537,10 @@ func seedFinalizedProblemSourceRecognitionLayoutV2(
 		if succeedErr != nil {
 			t.Fatal(succeedErr)
 		}
+		resultJSON := json.RawMessage(`{"text":"restored-source-question"}`)
+		if plan.SourceAdjudication && index == 0 {
+			resultJSON = json.RawMessage(`{"answer_evidence_transcriptions":["6","8"],"evidence_transcriptions":["18/3=","18/3="],"text":"18/3="}`)
+		}
 		if _, settleCreated, settleErr := store.SettleRecognitionLayoutRepairV2(
 			ctx,
 			parent.AgentName,
@@ -530,10 +555,37 @@ func seedFinalizedProblemSourceRecognitionLayoutV2(
 				SourcePhysicalResultDigest: succeededRepair.ResultDigest,
 				Classification:             k12.RecognitionLayoutCandidateValidV2,
 				ResultKind:                 k12.RecognitionLayoutCandidateQuestionV2,
-				ResultJSON:                 json.RawMessage(`{"text":"restored-source-question"}`),
+				ResultJSON:                 resultJSON,
 			},
 		); settleErr != nil || !settleCreated {
 			t.Fatalf("settle source archive repair %d: created=%v err=%v", index+1, settleCreated, settleErr)
+		}
+	}
+	if plan.SourceAdjudication {
+		repair, err := store.GetModelPhysicalInvocation(ctx, parent.AgentName, "problem-source-"+string(primary.RepairAuthorizations[0].PhysicalUnit))
+		if err != nil {
+			t.Fatal(err)
+		}
+		auth, _, err := store.AuthorizeRecognitionLayoutAdjudicationV2(ctx, parent.AgentName, parent.InvocationID, k12.RecognitionLayoutAdjudicationRequestV2{PlanDigest: plan.AuthorizedPlanDigest, CandidateID: primary.RepairAuthorizations[0].CandidateID, PrimaryPhysicalInvocationID: succeededBatch.PhysicalInvocationID, PrimaryPhysicalResultDigest: succeededBatch.ResultDigest, RepairPhysicalInvocationID: repair.PhysicalInvocationID, RepairPhysicalResultDigest: repair.ResultDigest, ConflictKind: "answer"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		child := newPhysicalInvocation(parent, "problem-source-adjudication", auth.PhysicalUnit)
+		child.RecognitionPlanVersion, child.PlanDigest = k12.RecognitionPlanVersionV2, plan.AuthorizedPlanDigest
+		child.CandidateExactSetDigest, _ = k12.RecognitionLayoutTargetExactSetDigestV2([]string{auth.CandidateID})
+		if _, _, err := store.PrepareModelPhysicalInvocation(ctx, child); err != nil {
+			t.Fatal(err)
+		}
+		if _, claimed, err := store.ClaimModelPhysicalInvocationSent(ctx, parent.AgentName, child.PhysicalInvocationID); err != nil || !claimed {
+			t.Fatalf("claim adjudication: %v", err)
+		}
+		child, err = store.MarkModelPhysicalInvocationSucceededWithContent(ctx, parent.AgentName, child.PhysicalInvocationID, `{"student_answer":"6","text":"18/3="}`, "provider-adjudication")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _, err = store.SettleRecognitionLayoutAdjudicationV2(ctx, parent.AgentName, parent.InvocationID, k12.RecognitionLayoutAdjudicationSettlementV2{PlanDigest: plan.AuthorizedPlanDigest, AuthorizationID: auth.AuthorizationID, AuthorizationDigest: auth.AuthorizationDigest, CandidateID: auth.CandidateID, SourcePhysicalInvocationID: child.PhysicalInvocationID, SourcePhysicalUnit: child.PhysicalUnit, SourcePhysicalResultDigest: child.ResultDigest, Adopted: true, MatchedQuestionPrior: "both", MatchedAnswerPrior: "primary", ResultKind: k12.RecognitionLayoutCandidateQuestionV2, ResultJSON: json.RawMessage(`{"student_answer":"6","text":"18/3="}`)})
+		if err != nil {
+			t.Fatal(err)
 		}
 	}
 	finalized, created, err := store.FinalizeRecognitionLayoutPlanV2(

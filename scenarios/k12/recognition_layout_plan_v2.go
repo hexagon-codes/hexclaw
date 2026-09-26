@@ -63,10 +63,11 @@ type RecognitionLayoutManifestTargetV2 struct {
 }
 
 type RecognitionLayoutPlanInputV2 struct {
-	PagePNG           []byte
-	Manifest          RecognitionLayoutManifestSuccessV2
-	Targets           []RecognitionLayoutManifestTargetV2
-	RecognitionFormat string
+	PagePNG                  []byte
+	Manifest                 RecognitionLayoutManifestSuccessV2
+	Targets                  []RecognitionLayoutManifestTargetV2
+	RecognitionFormat        string
+	EnableSourceAdjudication bool
 }
 
 // RecognitionLayoutTargetV2 仅包含本地派生的持久事实。
@@ -79,6 +80,10 @@ type RecognitionLayoutTargetV2 struct {
 	SourceSectionLabel string            `json:"source_section_label,omitempty"`
 	Region             SourcePixelRegion `json:"region"`
 	CropDigest         string            `json:"crop_digest"`
+	// 原始目标与独立核验上下文分别冻结，周边像素不改变题目归属。
+	OriginalRegion     *SourcePixelRegion `json:"original_region,omitempty"`
+	AdjudicationRegion *SourcePixelRegion `json:"adjudication_region,omitempty"`
+	AdjudicationDigest string             `json:"adjudication_digest,omitempty"`
 }
 
 type RecognitionLayoutBatchV2 struct {
@@ -92,6 +97,7 @@ type RecognitionLayoutBatchV2 struct {
 type RecognitionLayoutPlanV2 struct {
 	Version              int                         `json:"version"`
 	RecognitionFormat    string                      `json:"recognition_format,omitempty"`
+	SourceAdjudication   bool                        `json:"source_adjudication,omitempty"`
 	PageDigest           string                      `json:"page_digest"`
 	ManifestInvocationID string                      `json:"manifest_invocation_id"`
 	ManifestResultDigest string                      `json:"manifest_result_digest"`
@@ -137,6 +143,10 @@ func BuildRecognitionLayoutPlanV2(input RecognitionLayoutPlanInputV2) (Recogniti
 	targets := append([]RecognitionLayoutManifestTargetV2(nil), input.Targets...)
 	if targetErr := validateRecognitionLayoutManifestTargetsV2(targets, pageBounds); targetErr != nil {
 		return RecognitionLayoutPlanV2{}, targetErr
+	}
+	originalByRef := make(map[string]SourcePixelRegion, len(targets))
+	for _, target := range targets {
+		originalByRef[target.ManifestRef] = target.Region
 	}
 	for index := range targets {
 		region := targets[index].Region
@@ -209,6 +219,7 @@ func BuildRecognitionLayoutPlanV2(input RecognitionLayoutPlanInputV2) (Recogniti
 	plan := RecognitionLayoutPlanV2{
 		Version:              RecognitionPlanVersionV2,
 		RecognitionFormat:    input.RecognitionFormat,
+		SourceAdjudication:   input.EnableSourceAdjudication,
 		PageDigest:           pageDigest,
 		ManifestInvocationID: input.Manifest.InvocationID,
 		ManifestResultDigest: input.Manifest.ResultDigest,
@@ -232,6 +243,17 @@ func BuildRecognitionLayoutPlanV2(input RecognitionLayoutPlanInputV2) (Recogniti
 			Region:             target.Region,
 			CropDigest:         recognitionLayoutSHA256(crop),
 		})
+		if input.EnableSourceAdjudication {
+			original := originalByRef[target.ManifestRef]
+			contextRegion := recognitionLayoutAdjudicationRegion(target.Region, pageBounds)
+			contextImage, contextErr := recognitionLayoutCropPNG(page, contextRegion)
+			if contextErr != nil {
+				return RecognitionLayoutPlanV2{}, contextErr
+			}
+			last := &plan.Targets[len(plan.Targets)-1]
+			last.OriginalRegion, last.AdjudicationRegion = &original, &contextRegion
+			last.AdjudicationDigest = recognitionLayoutSHA256(contextImage)
+		}
 	}
 
 	contactHeight := recognitionLayoutContactHeightV2
@@ -448,6 +470,44 @@ func BuildRecognitionLayoutRepairImageV2(
 		)
 	}
 	return crop, nil
+}
+
+// BuildRecognitionLayoutAdjudicationImageV2 复原一次独立核验的完整上下文；不替换原裁片。
+func BuildRecognitionLayoutAdjudicationImageV2(pagePNG []byte, plan RecognitionLayoutPlanV2, candidateID string) ([]byte, error) {
+	if !plan.SourceAdjudication || recognitionLayoutSHA256(pagePNG) != plan.PageDigest || ValidateRecognitionLayoutPlanV2(plan) != nil {
+		return nil, fmt.Errorf("%w: adjudication source or plan is invalid", ErrRecognitionLayoutPlanInvalid)
+	}
+	page, err := png.Decode(bytes.NewReader(pagePNG))
+	if err != nil {
+		return nil, fmt.Errorf("%w: adjudication page is invalid", ErrRecognitionLayoutPlanInvalid)
+	}
+	for _, target := range plan.Targets {
+		if target.TargetID != candidateID {
+			continue
+		}
+		if target.AdjudicationRegion == nil || validateRecognitionLayoutRegionV2(*target.AdjudicationRegion, page.Bounds()) != nil {
+			return nil, fmt.Errorf("%w: adjudication region is invalid", ErrRecognitionLayoutPlanInvalid)
+		}
+		crop, cropErr := recognitionLayoutCropPNG(page, *target.AdjudicationRegion)
+		if cropErr != nil || recognitionLayoutSHA256(crop) != target.AdjudicationDigest {
+			return nil, fmt.Errorf("%w: adjudication image digest mismatch", ErrRecognitionLayoutPlanInvalid)
+		}
+		return crop, nil
+	}
+	return nil, fmt.Errorf("%w: adjudication target is not in plan", ErrRecognitionLayoutPlanInvalid)
+}
+
+// 核验保留完整边缘上下文，不以相邻题框截断伸出的手写；归属由原目标及印刷身份限定。
+func recognitionLayoutAdjudicationRegion(region SourcePixelRegion, bounds image.Rectangle) SourcePixelRegion {
+	horizontal := min(160, max(96, region.Height))
+	vertical := min(64, max(32, region.Height/4))
+	left, top := max(0, region.X-horizontal), max(0, region.Y-vertical)
+	right, bottom := min(bounds.Dx(), region.X+region.Width+horizontal), min(bounds.Dy(), region.Y+region.Height+vertical)
+	return SourcePixelRegion{X: left, Y: top, Width: right - left, Height: bottom - top}
+}
+
+func RecognitionLayoutAdjudicationUnitV2(ordinal int) (RecognitionPhysicalUnit, error) {
+	return recognitionLayoutPhysicalUnitV2("layout_adjudicate_", ordinal)
 }
 
 func RecognitionLayoutBatchUnitV2(ordinal int) (RecognitionPhysicalUnit, error) {
@@ -751,6 +811,20 @@ func recognitionLayoutContactSheetPNG(
 		)
 	}
 	return encoded.Bytes(), nil
+}
+
+// RebindRecognitionLayoutManifestV2 复用已验证计划，仅绑定新清单回执身份。
+func RebindRecognitionLayoutManifestV2(plan RecognitionLayoutPlanV2, manifestID string) (RecognitionLayoutPlanV2, error) {
+	if err := ValidateRecognitionLayoutPlanV2(plan); err != nil {
+		return RecognitionLayoutPlanV2{}, err
+	}
+	plan.ManifestInvocationID = manifestID
+	var err error
+	plan.AuthorizedPlanDigest, err = recognitionLayoutAuthorizedPlanDigestV2(plan)
+	if err != nil {
+		return RecognitionLayoutPlanV2{}, err
+	}
+	return plan, ValidateRecognitionLayoutPlanV2(plan)
 }
 
 func recognitionLayoutAuthorizedPlanDigestV2(plan RecognitionLayoutPlanV2) (string, error) {

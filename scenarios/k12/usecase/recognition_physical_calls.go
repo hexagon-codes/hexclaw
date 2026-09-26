@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
@@ -165,7 +166,7 @@ func (e *durableRecognitionPhysicalCallExecutor) ExecuteRecognitionPhysicalCall(
 			err = errors.New("atomically published V2 manifest identity drifted")
 		}
 	} else if planVersion == k12.RecognitionPlanVersionV2 &&
-		strings.HasPrefix(string(call.Unit), "layout_repair_") {
+		(strings.HasPrefix(string(call.Unit), "layout_repair_") || strings.HasPrefix(string(call.Unit), "layout_adjudicate_")) {
 		// 已结算的单例已经冻结候选结果，因此 Store 会正确拒绝再次准备。
 		// 恢复时必须先读取稳定子项并重放其私有成功载荷；只有确实不存在的子项
 		// 才能跨越准备边界。
@@ -278,6 +279,14 @@ func (e *durableRecognitionPhysicalCallExecutor) ExecuteRecognitionPhysicalCall(
 	transportBinder, transportBoundary :=
 		k12.RecognitionPhysicalTransportSendBoundaryFromContext(ctx)
 	sendCtx := ctx
+	if invocation.EffectiveTimeoutMS > 0 {
+		var cancelTimeout context.CancelFunc
+		sendCtx, cancelTimeout = context.WithTimeout(sendCtx, time.Duration(invocation.EffectiveTimeoutMS)*time.Millisecond)
+		defer cancelTimeout()
+		effectiveRoute := e.parent.RouteSnapshot
+		effectiveRoute.TimeoutMS = int(invocation.EffectiveTimeoutMS)
+		sendCtx = k12.WithGradingModelSnapshot(sendCtx, effectiveRoute)
+	}
 	const (
 		transportClaimNotReached uint32 = iota
 		transportClaimWon
@@ -365,7 +374,7 @@ func (e *durableRecognitionPhysicalCallExecutor) ExecuteRecognitionPhysicalCall(
 			callErr,
 		)
 	}
-	ctxErr := ctx.Err()
+	ctxErr := sendCtx.Err()
 	if callErr == nil && ctxErr != nil {
 		// A provider that ignores cancellation can return HTTP 200 after the
 		// frozen stage deadline. That late response is not eligible for success.
@@ -557,7 +566,7 @@ func (e *durableRecognitionPhysicalCallExecutor) LoadRecognitionLayoutPlanV2Runt
 		e.parent.AgentName,
 		e.parent.InvocationID,
 	)
-	cancelLoad()
+	defer cancelLoad()
 	if err != nil {
 		return zero, err
 	}
@@ -571,6 +580,21 @@ func (e *durableRecognitionPhysicalCallExecutor) LoadRecognitionLayoutPlanV2Runt
 			"%w: durable runtime drifted from the executor parent",
 			k12.ErrRecognitionLayoutPlanV2Unauthorized,
 		)
+	}
+	a, recoveryErr := e.o.deps.Records.GetRecognitionRecoveryByParent(loadCtx, e.parent.AgentName, e.parent.InvocationID)
+	if recoveryErr != nil && !errors.Is(recoveryErr, records.ErrNotFound) {
+		return zero, recoveryErr
+	}
+	if recoveryErr == nil && a.TimeoutOverrideMS > 0 {
+		source, err := e.o.deps.Records.GetModelPhysicalInvocation(loadCtx, a.AgentName, a.SourcePhysicalID)
+		if err != nil {
+			return zero, err
+		}
+		if a.TimeoutOverrideMS != 180000 || a.SourceTimeoutMS != 120000 || source.ParentInvocationID != a.SourceParentID || source.Status != k12.ModelInvocationOutcomeUnknown || source.RequestDigest != a.SourceRequestDigest {
+			return zero, k12.ErrRecognitionLayoutPlanV2Unauthorized
+		}
+		runtime.RecoveryPhysicalUnit = source.PhysicalUnit
+		runtime.RecoveryTimeoutOverrideMS = a.TimeoutOverrideMS
 	}
 	return runtime, nil
 }
@@ -1371,10 +1395,7 @@ func (o *GradingOrchestrator) recognitionPhysicalSuccessSetV2(
 	parentImage []byte,
 	current []k12.ModelPhysicalInvocation,
 ) ([]k12.ModelPhysicalInvocation, error) {
-	const maxPhysicalResultsV2 = 1 +
-		(32+k12.RecognitionLayoutBatchTargetLimitV2-1)/
-			k12.RecognitionLayoutBatchTargetLimitV2 +
-		32
+	const maxPhysicalResultsV2 = 1 + 32 + 32 + 32
 	if len(current) < 2 || len(current) > maxPhysicalResultsV2 {
 		return nil, fmt.Errorf(
 			"%w: recognizing parent %s has %d v2 physical receipts, want 2..%d",
@@ -1449,20 +1470,12 @@ func (o *GradingOrchestrator) recognitionPhysicalSuccessSetV2(
 		targetsByUnit[batch.Unit] = append([]string(nil), batch.TargetIDs...)
 		primaryUnits[batch.Unit] = struct{}{}
 	}
-	for _, candidate := range finalized.CandidateResults {
-		if _, primary := primaryUnits[candidate.SourcePhysicalUnit]; primary {
-			continue
-		}
-		if existing := targetsByUnit[candidate.SourcePhysicalUnit]; len(existing) != 0 {
-			return nil, fmt.Errorf(
-				"%w: recognizing parent %s duplicates v2 repair unit %s",
-				ErrModelInvocationRequiresReconciliation,
-				parent.InvocationID,
-				candidate.SourcePhysicalUnit,
-			)
-		}
-		targetsByUnit[candidate.SourcePhysicalUnit] = []string{
-			candidate.CandidateID,
+	for index, target := range plan.Targets {
+		repairUnit, _ := k12.RecognitionLayoutRepairUnitV2(index + 1)
+		targetsByUnit[repairUnit] = []string{target.TargetID}
+		if plan.SourceAdjudication {
+			adjudicationUnit, _ := k12.RecognitionLayoutAdjudicationUnitV2(index + 1)
+			targetsByUnit[adjudicationUnit] = []string{target.TargetID}
 		}
 	}
 
@@ -1526,6 +1539,8 @@ func (o *GradingOrchestrator) recognitionPhysicalSuccessSetV2(
 					*plan,
 					evidence.PhysicalUnit,
 				)
+			} else if len(targetIDs) == 1 && strings.HasPrefix(string(call.Unit), "layout_adjudicate_") {
+				call.Image, err = k12.BuildRecognitionLayoutAdjudicationImageV2(canonicalPage.PNG, *plan, targetIDs[0])
 			} else if len(targetIDs) == 1 {
 				call.Image, err = k12.BuildRecognitionLayoutRepairImageV2(
 					canonicalPage.PNG,
@@ -1681,6 +1696,12 @@ func (o *GradingOrchestrator) reconcilePartialRecognition(
 					if unitErr == nil && unit == child.PhysicalUnit {
 						call.TargetIDs = []string{target.TargetID}
 						call.Image, err = k12.BuildRecognitionLayoutRepairImageV2(page.PNG, plan, target.TargetID)
+						break
+					}
+					adjudicationUnit, adjudicationErr := k12.RecognitionLayoutAdjudicationUnitV2(i + 1)
+					if plan.SourceAdjudication && adjudicationErr == nil && adjudicationUnit == child.PhysicalUnit {
+						call.TargetIDs = []string{target.TargetID}
+						call.Image, err = k12.BuildRecognitionLayoutAdjudicationImageV2(page.PNG, plan, target.TargetID)
 						break
 					}
 				}

@@ -55,6 +55,10 @@ func loadStoredRecognitionLayoutFinalizationV2(
 			ErrModelPhysicalInvocationConflict,
 		)
 	}
+	adjudicationOverlays, adjudicationPhysical, adjudicationErr := loadRecognitionAdjudicationOverlays(ctx, q, authority, false)
+	if adjudicationErr != nil {
+		return result, nil, true, adjudicationErr
+	}
 	for _, target := range authority.Plan.Targets {
 		var candidate k12.RecognitionLayoutCandidateFinalResultV2
 		var resultJSON string
@@ -106,7 +110,7 @@ func loadStoredRecognitionLayoutFinalizationV2(
 		}
 		candidate.ResultJSON = append(json.RawMessage(nil), canonicalResult...)
 		candidate.SourcePhysicalUnit = child.PhysicalUnit
-		result.CandidateResults = append(result.CandidateResults, candidate)
+		result.CandidateResults = append(result.CandidateResults, applyRecognitionAdjudicationOverlay(candidate, adjudicationOverlays[target.TargetID]))
 	}
 	physicalIDs := []string{authority.Plan.ManifestInvocationID}
 	for _, batch := range authority.Plan.Batches {
@@ -144,6 +148,9 @@ func loadStoredRecognitionLayoutFinalizationV2(
 			)
 		}
 		physicalIDs = append(physicalIDs, physicalID)
+	}
+	for _, physical := range adjudicationPhysical {
+		physicalIDs = append(physicalIDs, physical.PhysicalInvocationID)
 	}
 	seen := make(map[string]struct{}, len(physicalIDs))
 	for _, physicalID := range physicalIDs {

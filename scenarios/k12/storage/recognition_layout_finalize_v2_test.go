@@ -590,6 +590,7 @@ func settleRecognitionLayoutFinalizationRepair(
 	plan k12.RecognitionLayoutPlanV2,
 	authorization k12.RecognitionLayoutRepairAuthorizationV2,
 	classification k12.RecognitionLayoutCandidateClassificationV2,
+	resultJSON ...json.RawMessage,
 ) {
 	t.Helper()
 	exactSetDigest, err := k12.RecognitionLayoutTargetExactSetDigestV2(
@@ -636,6 +637,9 @@ func settleRecognitionLayoutFinalizationRepair(
 	if classification == k12.RecognitionLayoutCandidateValidV2 {
 		settlement.ResultKind = k12.RecognitionLayoutCandidateQuestionV2
 		settlement.ResultJSON = json.RawMessage(`{"text":"repaired-final"}`)
+		if len(resultJSON) > 0 {
+			settlement.ResultJSON = resultJSON[0]
+		}
 	}
 	if _, settled, err := store.SettleRecognitionLayoutRepairV2(
 		ctx,

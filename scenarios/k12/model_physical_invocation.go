@@ -14,6 +14,8 @@ import (
 // ModelPhysicalInvocation 保存识别请求的不可变子回执；跨重试的本地复用显式记录来源，
 // 不代表新增 Provider 请求。公开投影仅包含摘要和冻结控制面事实，不包含正文或图像。
 type ModelPhysicalInvocation struct {
+	// EffectiveTimeoutMS 仅在该物理回执有明确等待覆盖时记录，零值沿冻结原策略。
+	EffectiveTimeoutMS             int64                      `json:"effective_timeout_ms,omitempty"`
 	PhysicalInvocationID           string                     `json:"physical_invocation_id"`
 	ParentInvocationID             string                     `json:"parent_invocation_id"`
 	AgentName                      string                     `json:"agent_name"`
@@ -67,6 +69,8 @@ type RecognitionLayoutBudgetBucketsV2 struct {
 // 它公开不可变摘要、选定预算和已授权计划，但绝不公开源图像、裁剪、
 // 提示词或 Provider 结果内容。
 type RecognitionLayoutPlanRuntimeV2 struct {
+	RecoveryPhysicalUnit         RecognitionPhysicalUnit       `json:"recovery_physical_unit,omitempty"`
+	RecoveryTimeoutOverrideMS    int64                         `json:"recovery_timeout_override_ms,omitempty"`
 	Header                       RecognitionLayoutPlanHeaderV2 `json:"header"`
 	HeaderDigest                 string                        `json:"header_digest"`
 	ManifestPhysicalInvocationID string                        `json:"manifest_physical_invocation_id"`
@@ -183,13 +187,15 @@ type RecognitionLayoutRepairSettlementResultV2 struct {
 // 仅在 Store 所有的精确集合完成最终化后返回。Provider 响应仍为私有内容；
 // 此对象是已为候选项及其不可变来源回执冻结的规范类型化结果。
 type RecognitionLayoutCandidateFinalResultV2 struct {
-	CandidateID                string                                 `json:"candidate_id"`
-	ResultKind                 RecognitionLayoutCandidateResultKindV2 `json:"result_kind"`
-	ResultDigest               string                                 `json:"result_digest"`
-	ResultJSON                 json.RawMessage                        `json:"result_json"`
-	SourcePhysicalInvocationID string                                 `json:"source_physical_invocation_id"`
-	SourcePhysicalUnit         RecognitionPhysicalUnit                `json:"source_physical_unit"`
-	SourcePhysicalResultDigest string                                 `json:"source_physical_result_digest"`
+	CandidateID                string                                  `json:"candidate_id"`
+	ResultKind                 RecognitionLayoutCandidateResultKindV2  `json:"result_kind"`
+	ResultDigest               string                                  `json:"result_digest"`
+	ResultJSON                 json.RawMessage                         `json:"result_json"`
+	SourcePhysicalInvocationID string                                  `json:"source_physical_invocation_id"`
+	SourcePhysicalUnit         RecognitionPhysicalUnit                 `json:"source_physical_unit"`
+	SourcePhysicalResultDigest string                                  `json:"source_physical_result_digest"`
+	OriginalCandidateJSON      json.RawMessage                         `json:"original_candidate_json,omitempty"`
+	Adjudication               *RecognitionLayoutAdjudicationReceiptV2 `json:"adjudication,omitempty"`
 }
 
 // RecognitionLayoutPhysicalResultEvidenceV2 是最终化精确集合中单次物理调用的
@@ -284,7 +290,7 @@ func RecognitionLayoutPhysicalResultsExactSetDigestV2(
 	results []RecognitionLayoutPhysicalResultEvidenceV2,
 ) (string, error) {
 	const maxPhysicalResults = 1 + recognitionLayoutTargetLimitV2 +
-		recognitionLayoutTargetLimitV2
+		recognitionLayoutTargetLimitV2 + recognitionLayoutTargetLimitV2
 	if len(results) < 2 || len(results) > maxPhysicalResults {
 		return "", fmt.Errorf(
 			"%w: finalized physical result count must be 2..%d",
@@ -315,7 +321,8 @@ func RecognitionLayoutPhysicalResultsExactSetDigestV2(
 				)
 			}
 		} else if (!strings.HasPrefix(string(result.PhysicalUnit), "layout_batch_") &&
-			!strings.HasPrefix(string(result.PhysicalUnit), "layout_repair_")) ||
+			!strings.HasPrefix(string(result.PhysicalUnit), "layout_repair_") &&
+			!strings.HasPrefix(string(result.PhysicalUnit), "layout_adjudicate_")) ||
 			!validRecognitionLayoutSHA256(result.CandidateExactSetDigest) {
 			return "", fmt.Errorf(
 				"%w: finalized V2 child lacks a layout exact-set",
@@ -624,6 +631,18 @@ func ValidateRecognitionLayoutPlanV2(plan RecognitionLayoutPlanV2) error {
 	}
 	targetIDs := make([]string, len(plan.Targets))
 	for index, target := range plan.Targets {
+		if plan.SourceAdjudication {
+			if target.OriginalRegion == nil || target.AdjudicationRegion == nil || !validRecognitionLayoutSHA256(target.AdjudicationDigest) {
+				return fmt.Errorf("%w: adjudication target lacks frozen regions", ErrRecognitionLayoutPlanInvalid)
+			}
+			for _, region := range []*SourcePixelRegion{target.OriginalRegion, target.AdjudicationRegion} {
+				if region.X < 0 || region.Y < 0 || region.Width <= 0 || region.Height <= 0 {
+					return fmt.Errorf("%w: invalid adjudication region", ErrRecognitionLayoutPlanInvalid)
+				}
+			}
+		} else if target.OriginalRegion != nil || target.AdjudicationRegion != nil || target.AdjudicationDigest != "" {
+			return fmt.Errorf("%w: legacy plan contains adjudication regions", ErrRecognitionLayoutPlanInvalid)
+		}
 		if target.TargetID == "" || strings.TrimSpace(target.TargetID) != target.TargetID ||
 			!validRecognitionLayoutSHA256(target.CropDigest) ||
 			target.Region.X < 0 || target.Region.Y < 0 ||

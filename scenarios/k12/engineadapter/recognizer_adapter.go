@@ -285,6 +285,7 @@ Rules:
 - answer_state is present only with readable active handwriting; blank for an empty answer area; unclear only for visible active handwriting that cannot be transcribed reliably. blank/unclear requires student_answer="". Nearby handwriting outside this crop's question is not its answer.
 - recognition_confidence evaluates only printed source readability. ocr_signals contains only unresolved source/active-answer risks, not routine descriptions of legible text. Unreadable cancelled drafts do not lower a readable printed question's confidence.
 - answer_bbox is the tight rectangle around the active final handwritten answer (or active handwritten working if there is no final value). Use integer pixels RELATIVE TO THIS CROP, not the contact sheet or full page. Respect the supplied crop width/height. Never return the whole question rectangle or printed text. For blank/unclear or an uncertain location use null; do not guess coordinates.
+The supplied section and display_label identify the target printed problem. Context from another section or an adjacent problem is not target handwriting, even if visible inside the crop.
 Authorized crops:
 `
 
@@ -319,6 +320,7 @@ var recognitionLayoutRecognizedFieldsV2 = map[string]struct{}{
 type recognitionLayoutBatchOutcomeV2 struct {
 	targetID string
 	question *usecase.RecognizedQuestion
+	source   k12.RecognitionPhysicalCallResult
 }
 
 type recognitionLayoutBatchClassificationDecisionV2 struct {
@@ -788,8 +790,9 @@ func buildRecognitionLayoutPlanV2(
 			InvocationID: manifest.InvocationID,
 			ResultDigest: manifest.ResultDigest,
 		},
-		Targets:           targets,
-		RecognitionFormat: k12.RecognitionLayoutCompactV4,
+		Targets:                  targets,
+		RecognitionFormat:        k12.RecognitionLayoutCompactV4,
+		EnableSourceAdjudication: true,
 	})
 	if err != nil {
 		return k12.RecognitionLayoutPlanV2{}, err
@@ -907,8 +910,10 @@ func (a *RecognizerAdapter) recognizeLayoutPrimaryBatchesV2(
 		len(plan.Targets),
 	)
 	reviewSources := make(map[string]*usecase.RecognizedQuestion)
+	primarySources := make(map[string]recognitionLayoutBatchOutcomeV2)
 	for _, result := range ordered {
 		for _, source := range result.reviewSources {
+			primarySources[source.targetID] = source
 			reviewSources[source.targetID] = source.question
 		}
 		for _, outcome := range result.outcomes {
@@ -1012,6 +1017,11 @@ func (a *RecognizerAdapter) recognizeLayoutPrimaryBatchesV2(
 			k12.ErrRecognitionProtocolInvalid,
 		)
 	}
+	if plan.SourceAdjudication {
+		if err := a.recognizeLayoutAdjudicationsV2(ctx, pagePNG, plan, runtime, primarySources, outcomeByTarget); err != nil {
+			return nil, err
+		}
+	}
 	finalization, _, err := k12.FinalizeRecognitionLayoutPlanV2(ctx)
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -1102,7 +1112,10 @@ func RecognizedQuestionsFromLayoutFinalizationV2(
 		if candidate.SourcePhysicalUnit != primaryUnit {
 			repairUnit, repairErr := k12.RecognitionLayoutRepairUnitV2(index + 1)
 			if repairErr != nil || candidate.SourcePhysicalUnit != repairUnit {
-				return fail("candidate %q has unauthorized source unit", target.TargetID)
+				adjudicationUnit, adjudicationErr := k12.RecognitionLayoutAdjudicationUnitV2(index + 1)
+				if !plan.SourceAdjudication || adjudicationErr != nil || candidate.SourcePhysicalUnit != adjudicationUnit || candidate.Adjudication == nil || len(candidate.OriginalCandidateJSON) == 0 {
+					return fail("candidate %q has unauthorized source unit", target.TargetID)
+				}
 			}
 		}
 		physical, exists := physicalByID[candidate.SourcePhysicalInvocationID]
@@ -1112,9 +1125,13 @@ func RecognizedQuestionsFromLayoutFinalizationV2(
 		}
 		switch candidate.ResultKind {
 		case k12.RecognitionLayoutCandidateQuestionV2:
+			parseTarget := target
+			if candidate.Adjudication != nil && target.AdjudicationRegion != nil {
+				parseTarget.Region = *target.AdjudicationRegion
+			}
 			question, parseErr := parseRecognitionLayoutQuestionV2(
 				candidate.ResultJSON,
-				target,
+				parseTarget,
 				plan.RecognitionFormat,
 			)
 			if parseErr != nil {
@@ -1321,11 +1338,17 @@ func (a *RecognizerAdapter) recognizeLayoutRepairV2(
 		// 原模型的逐行片段仍在不可变物理回执内，不能与完整独立读数拼接成第三份证据。
 		// 先保留片段自身已成立的冲突，再用两份完整转写进行独立来源比较。
 		risk := usecase.EvaluateOCRConfirmationRisk(*outcome.question)
+		// 空白或不清与有作答之间的变化也是来源冲突；空转写不能抹去初读状态。
+		answerStateChanged := primarySource.AnswerState != outcome.question.AnswerState &&
+			(primarySource.AnswerState == usecase.AnswerStatePresent || outcome.question.AnswerState == usecase.AnswerStatePresent)
 		for _, reason := range risk.ConfirmationReasons {
 			if reason == usecase.OCRRiskEvidenceConflict {
-				fields["ocr_signals"], _ = json.Marshal(append(outcome.question.OCRSignals, "evidence_conflict"))
+				answerStateChanged = true
 				break
 			}
+		}
+		if answerStateChanged {
+			fields["ocr_signals"], _ = json.Marshal(append(outcome.question.OCRSignals, "evidence_conflict"))
 		}
 		fields["evidence_transcriptions"], _ = json.Marshal([]string{
 			primarySource.RawTranscription, outcome.question.RawTranscription})
@@ -1383,6 +1406,7 @@ func (a *RecognizerAdapter) recognizeLayoutRepairV2(
 		)
 		return result
 	}
+	outcome.source = physical
 	result.outcome = outcome
 	return result
 }
@@ -1485,17 +1509,25 @@ func (a *RecognizerAdapter) recognizeLayoutPrimaryBatchV2(
 	index int,
 ) recognitionLayoutBatchExecutionV2 {
 	result := recognitionLayoutBatchExecutionV2{index: index}
+	batch := plan.Batches[index]
+	physicalCap := runtime.Header.PhysicalCallCapMillis
+	if runtime.RecoveryPhysicalUnit == batch.Unit {
+		if runtime.RecoveryTimeoutOverrideMS != 180000 {
+			result.err = k12.ErrRecognitionLayoutPlanV2Unauthorized
+			return result
+		}
+		physicalCap = runtime.RecoveryTimeoutOverrideMS
+	}
 	physicalCtx, cancelPhysical, err := recognitionLayoutPhysicalCallContextV2(
 		ctx,
 		time.UnixMilli(runtime.StageDeadlineAtUnixMillis),
-		runtime.Header.PhysicalCallCapMillis,
+		physicalCap,
 	)
 	if err != nil {
 		result.err = err
 		return result
 	}
 	defer cancelPhysical()
-	batch := plan.Batches[index]
 	batchImage, err := k12.BuildRecognitionLayoutBatchImageV2(
 		pagePNG,
 		plan,
@@ -1536,6 +1568,9 @@ func (a *RecognizerAdapter) recognizeLayoutPrimaryBatchV2(
 		targets,
 		plan.RecognitionFormat,
 	)
+	for index := range decision.outcomes {
+		decision.outcomes[index].source = physical
+	}
 	if plan.RecognitionFormat == k12.RecognitionLayoutCompactV3 || plan.RecognitionFormat == k12.RecognitionLayoutCompactV4 {
 		result.reviewSources = append([]recognitionLayoutBatchOutcomeV2(nil), decision.outcomes...)
 		selectRecognitionSourceReviewV3(&decision)
@@ -1616,21 +1651,20 @@ func buildRecognitionLayoutBatchPromptV2(
 	format ...string,
 ) (string, error) {
 	if len(format) > 0 && (format[0] == k12.RecognitionLayoutCompactV1 || format[0] == k12.RecognitionLayoutCompactV2 || format[0] == k12.RecognitionLayoutCompactV3 || format[0] == k12.RecognitionLayoutCompactV4) {
-		descriptors := make([]struct {
-			TargetID string `json:"target_id"`
-			Width    int    `json:"width"`
-			Height   int    `json:"height"`
-		}, 0, len(targets))
+		type descriptor struct {
+			TargetID     string `json:"target_id"`
+			Width        int    `json:"width"`
+			Height       int    `json:"height"`
+			DisplayLabel string `json:"display_label,omitempty"`
+			Section      string `json:"section,omitempty"`
+		}
+		descriptors := make([]descriptor, 0, len(targets))
 		for index, target := range targets {
 			modelRef := target.TargetID
-			if format[0] == k12.RecognitionLayoutCompactV2 || format[0] == k12.RecognitionLayoutCompactV3 || format[0] == k12.RecognitionLayoutCompactV4 {
+			if format[0] != k12.RecognitionLayoutCompactV1 {
 				modelRef = fmt.Sprintf("t%d", index+1)
 			}
-			descriptors = append(descriptors, struct {
-				TargetID string `json:"target_id"`
-				Width    int    `json:"width"`
-				Height   int    `json:"height"`
-			}{modelRef, target.Region.Width, target.Region.Height})
+			descriptors = append(descriptors, descriptor{modelRef, target.Region.Width, target.Region.Height, target.DisplayLabel, target.SourceSectionLabel})
 		}
 		encoded, err := json.Marshal(descriptors)
 		if err != nil {
