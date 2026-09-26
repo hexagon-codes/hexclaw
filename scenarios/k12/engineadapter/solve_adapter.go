@@ -129,6 +129,9 @@ func (a *SolveAdapter) withGradingPhysicalCallInterceptor(ctx context.Context) c
 			case "grader":
 				operation = k12.GradingItemOperationGrade
 			default:
+				if usecase.GradingPhysicalCallsReplayOnly(callCtx) {
+					return engine.SubAgentResult{}, fmt.Errorf("solve adapter: unsupported replay operation")
+				}
 				return next(callCtx, spec)
 			}
 			requestRaw, err := json.Marshal(struct {

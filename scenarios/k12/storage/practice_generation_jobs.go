@@ -973,6 +973,7 @@ func (s *Store) RecordPracticeGenerationFailure(ctx context.Context, job k12.Pra
 // 返回 alreadyCommitted=true 表示并发/重放命中了既有 committed 结果。
 func (s *Store) CommitPracticeGeneration(ctx context.Context, rec *records.AgentRecord, expectedVersion int,
 	job k12.PracticeGenerationJob) (stored *records.AgentRecord, alreadyCommitted bool, err error) {
+	usesAsset := false
 	if rec == nil {
 		return nil, false, fmt.Errorf("k12storage: 组卷提交记录不可空")
 	}
@@ -994,6 +995,9 @@ func (s *Store) CommitPracticeGeneration(ctx context.Context, rec *records.Agent
 		}
 		matches := 0
 		for _, item := range fields.Items {
+			if item.GenerationJobID == job.GenerationJobID && item.AssetSource != nil {
+				usesAsset = true
+			}
 			if item.ItemID == job.ResultItemIDs[0] &&
 				item.GenerationJobID == job.GenerationJobID &&
 				item.GenerationStatus == k12.PracticeItemGenerationReady &&
@@ -1053,9 +1057,10 @@ func (s *Store) CommitPracticeGeneration(ctx context.Context, rec *records.Agent
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		var digest, status, resultSetID string
-		if err := tx.QueryRowContext(ctx, `SELECT request_digest, status, result_set_id
+		var attempt int
+		if err := tx.QueryRowContext(ctx, `SELECT request_digest, status, result_set_id, attempt
             FROM k12_practice_generation_jobs WHERE agent_name=? AND idempotency_key=?`,
-			job.AgentName, job.IdempotencyKey).Scan(&digest, &status, &resultSetID); err != nil {
+			job.AgentName, job.IdempotencyKey).Scan(&digest, &status, &resultSetID, &attempt); err != nil {
 			return nil, false, fmt.Errorf("k12storage: 回查组卷幂等键: %w", err)
 		}
 		if digest != job.RequestDigest {
@@ -1068,11 +1073,18 @@ func (s *Store) CommitPracticeGeneration(ctx context.Context, rec *records.Agent
 			got, getErr := s.Get(ctx, resultSetID)
 			return got, true, getErr
 		}
+		// 只有尚未取得生成调用资格的任务可用资产完成，不能跳过已开始的外部请求。
+		if usesAsset && (status != k12.PracticeGenerationQueued || attempt != 0) {
+			return nil, false, ErrProblemAssetUnavailable
+		}
 		if _, err := tx.ExecContext(ctx, `UPDATE k12_practice_generation_jobs
             SET status=?, failure_reason='', updated_at=? WHERE agent_name=? AND idempotency_key=?`,
 			k12.PracticeGenerationValidating, job.UpdatedAt, job.AgentName, job.IdempotencyKey); err != nil {
 			return nil, false, fmt.Errorf("k12storage: 推进组卷重试: %w", err)
 		}
+	}
+	if err := validatePracticeAssetItems(ctx, tx, rec.Fields, job); err != nil {
+		return nil, false, err
 	}
 	if schema.ValidateFields != nil {
 		if err := schema.ValidateFields(rec.Fields); err != nil {

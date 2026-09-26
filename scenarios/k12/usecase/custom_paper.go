@@ -13,6 +13,7 @@ import (
 
 	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
+	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
 )
 
 // CustomPaperRequest 是 DD-027 正式后端组卷命令的冻结请求。
@@ -189,16 +190,19 @@ func (d Deps) GenerateCustomPaper(ctx context.Context, agentName string, req Cus
 		return CustomPaperResult{}, err
 	}
 	seenQuestions := map[string]struct{}{}
+	var excludedHashes []string
 	if basket != nil {
 		for _, item := range basket.Fields.Items {
 			seenQuestions[normalizeQuestion(item.QuestionMarkdown)] = struct{}{}
+			hash, _, _ := k12.StablePracticeProblemHash(k12.PracticeCandidateProblem{Subject: item.Subject, QuestionMarkdown: item.QuestionMarkdown})
+			excludedHashes = append(excludedHashes, hash)
 		}
 	}
 	generated := make([]k12.PracticeItem, 0, target)
 	deduplicated := 0
 	for _, source := range sources {
 		for variant := 1; variant <= norm.PerSource && len(generated) < target; variant++ {
-			candidate, genErr := d.generateCustomPaperItem(ctx, source, norm, jobID, variant)
+			candidate, genErr := d.generateCustomPaperItem(ctx, source, norm, jobID, variant, excludedHashes)
 			if genErr != nil {
 				d.recordCustomPaperFailure(ctx, job, genErr)
 				return CustomPaperResult{}, genErr
@@ -209,6 +213,8 @@ func (d Deps) GenerateCustomPaper(ctx context.Context, agentName string, req Cus
 				continue
 			}
 			seenQuestions[key] = struct{}{}
+			hash, _, _ := k12.StablePracticeProblemHash(k12.PracticeCandidateProblem{Subject: candidate.Subject, QuestionMarkdown: candidate.QuestionMarkdown})
+			excludedHashes = append(excludedHashes, hash)
 			generated = append(generated, candidate)
 		}
 		if len(generated) >= target {
@@ -364,7 +370,27 @@ func (d Deps) customPaperSources(ctx context.Context, agentName, scope string) (
 }
 
 func (d Deps) generateCustomPaperItem(ctx context.Context, source ReviewItem, req normalizedCustomPaperRequest,
-	jobID string, variant int) (k12.PracticeItem, error) {
+	jobID string, variant int, excludedHashes []string) (k12.PracticeItem, error) {
+	// 只为明确教学目标的同等难度错题变式采用既有答案；其余继续原生成与验算。
+	if req.Difficulty == "same" && source.Record.Collection == k12.CollectionMistakes {
+		asset, err := d.Records.FindPracticeProblemAsset(ctx, k12.PracticeAssetQuery{
+			OwnerID: strings.TrimSpace(d.TextbookOwnerID), AgentName: source.Record.AgentName,
+			Subject: strings.TrimSpace(source.Fields.Subject), GradeTerm: req.Grade, KnowledgePoint: strings.TrimSpace(source.Point()),
+			OriginalQuestion: source.Title(), ExcludedHashes: excludedHashes,
+		})
+		if err == nil {
+			return k12.PracticeItem{
+				ItemID: customPaperItemID(jobID, source.Record.RecordID, variant), SourceProblemID: source.Record.RecordID,
+				Subject: source.Subject(), AddedVia: k12.PracticeAddedViaCustom, GenerationJobID: jobID, VariantIndex: variant,
+				RequestedDifficulty: req.Difficulty, ActualDifficulty: req.Difficulty,
+				QuestionMarkdown: asset.Version.Facts.Stem, ExpectedAnswerMarkdown: asset.Version.Answer,
+				VerificationStatus: k12.PracticeItemVerified, VerificationEvidence: string(EvidenceNumericExec), AssetSource: &asset.Source,
+			}, nil
+		}
+		if !errors.Is(err, k12storage.ErrProblemAssetUnavailable) {
+			return k12.PracticeItem{}, err
+		}
+	}
 	if d.PracticeVariant == nil {
 		return k12.PracticeItem{}, fmt.Errorf("usecase: 未配置练习变式生成器")
 	}

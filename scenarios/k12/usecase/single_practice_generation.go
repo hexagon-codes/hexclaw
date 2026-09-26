@@ -861,16 +861,25 @@ func (d Deps) ProcessSinglePracticeGeneration(
 	if job.Status == k12.PracticeGenerationFailed {
 		return d.singlePracticeView(ctx, source, fields, &job)
 	}
+	var request singlePracticeRequestSnapshot
+	if err := json.Unmarshal([]byte(job.RequestSnapshot), &request); err != nil {
+		return SinglePracticeGenerationView{}, err
+	}
+	if reused, err := d.trySinglePracticeAsset(ctx, job, request); err != nil {
+		return SinglePracticeGenerationView{}, err
+	} else if reused {
+		job, err = d.Records.GetPracticeGenerationJobByID(ctx, agentName, job.GenerationJobID)
+		if err != nil {
+			return SinglePracticeGenerationView{}, err
+		}
+		return d.singlePracticeView(ctx, source, fields, &job)
+	}
 	if d.PracticeVariant == nil || d.Solver == nil {
 		err = fmt.Errorf("usecase: 未配置逐题生成或独立验算能力")
 		_, _ = d.Records.AdvancePracticeGenerationJob(
 			ctx, agentName, job.GenerationJobID,
 			k12.PracticeGenerationFailed, job.Attempt, err.Error(),
 		)
-		return SinglePracticeGenerationView{}, err
-	}
-	var request singlePracticeRequestSnapshot
-	if err := json.Unmarshal([]byte(job.RequestSnapshot), &request); err != nil {
 		return SinglePracticeGenerationView{}, err
 	}
 	var route k12.GradingModelSnapshot

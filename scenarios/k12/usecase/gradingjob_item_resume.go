@@ -427,9 +427,10 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 		} else if !errors.Is(err, k12storage.ErrProblemAssetUnavailable) {
 			return item, err
 		}
-		if _, finalErr := deps.Records.GetGradingFinalArtifactByJob(ctx, req.AgentName, job.Record.RecordID); finalErr == nil {
+		_, historicalCorrection := ctx.Value(historicalAssetCorrectionContextKey{}).(bool)
+		if _, finalErr := deps.Records.GetGradingFinalArtifactByJob(ctx, req.AgentName, job.Record.RecordID); finalErr == nil && !historicalCorrection {
 			return replayGradingAssessmentItem(q, view.Current)
-		} else if !errors.Is(finalErr, records.ErrNotFound) {
+		} else if finalErr != nil && !errors.Is(finalErr, records.ErrNotFound) {
 			return item, finalErr
 		}
 		item.correction = &view
@@ -515,6 +516,9 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 			item.Status = PhotoOutOfScope
 			return commitGradingAssessmentItem(durableCtx, deps, job, q, item,
 				solveInvocationID, "", "", k12storage.GradingAssessmentEffects{})
+		}
+		if historical, _ := ctx.Value(historicalAssetCorrectionContextKey{}).(bool); historical && !photoEvidenceTrusted(solved.Evidence) {
+			return item, fmt.Errorf("historical answer feedback requires verified solve evidence")
 		}
 		guideRequest := parentTeachingGuideRequest(gradeReq, solved, GradeOutcome{})
 		guideExecutionKind := k12.GradingExecutionProvider

@@ -47,7 +47,14 @@ func executeDurableSolveOperation(ctx context.Context, o *GradingOrchestrator, d
 	}
 	adoption, priorErr := deps.Records.FindProblemAssetAdoption(ctx, owner, job.Record.RecordID, q.ProblemID, q.ConfirmedVersion)
 	if priorErr == nil {
-		if adoption.InputDigest != q.InputDigest || adoption.FactsDigest != identity.FactsDigest {
+		if adoption.InputDigest != q.InputDigest {
+			return SolveHomeworkResult{}, "", k12storage.ErrProblemAssetConflict
+		}
+		v, err := deps.Records.GetProblemAssetVersion(ctx, owner, adoption.AssetID, adoption.AssetVersion)
+		if err != nil {
+			return SolveHomeworkResult{}, "", err
+		}
+		if adoption.FactsDigest != identity.FactsDigest && !k12.EquivalentProblemAssetExpression(facts, v.Facts) {
 			return SolveHomeworkResult{}, "", k12storage.ErrProblemAssetConflict
 		}
 		if err := deps.Records.ValidateProblemAssetAdoption(ctx, owner, adoption.AdoptionID); err != nil {
@@ -72,10 +79,6 @@ func executeDurableSolveOperation(ctx context.Context, o *GradingOrchestrator, d
 			}
 			return executeUncachedDurableSolveOperation(ctx, o, deps, job, q, req)
 		}
-		v, err := deps.Records.GetProblemAssetVersion(ctx, owner, adoption.AssetID, adoption.AssetVersion)
-		if err != nil {
-			return SolveHomeworkResult{}, "", err
-		}
 		return adoptedSolveResult(v, adoption)
 	}
 	if priorErr != nil && !errors.Is(priorErr, sql.ErrNoRows) {
@@ -95,10 +98,13 @@ func executeDurableSolveOperation(ctx context.Context, o *GradingOrchestrator, d
 	}
 	if !started {
 		v, lookupErr := deps.Records.FindExactProblemAsset(ctx, owner, facts)
+		if errors.Is(lookupErr, k12storage.ErrProblemAssetUnavailable) {
+			v, lookupErr = deps.Records.FindEquivalentProblemAsset(ctx, owner, facts)
+		}
 		if lookupErr == nil {
 			a, _, adoptErr := deps.Records.AdoptProblemAsset(ctx, k12.ProblemAssetAdoption{
 				OwnerID: owner, JobID: job.Record.RecordID, ProblemID: q.ProblemID, InputRevision: q.ConfirmedVersion,
-				InputDigest: q.InputDigest, AssetID: v.AssetID, AssetVersion: v.Version, AssetRevision: v.Revision, FactsDigest: identity.FactsDigest,
+				InputDigest: q.InputDigest, AssetID: v.AssetID, AssetVersion: v.Version, AssetRevision: v.Revision, FactsDigest: v.FactsDigest,
 			})
 			if adoptErr == nil {
 				return adoptedSolveResult(v, a)

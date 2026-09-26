@@ -117,6 +117,10 @@ func TestAssessmentCorrectionPreservesHistoryAndReplaysInsights(t *testing.T) {
 	if err != nil || view.Status != k12.StatusArchived || view.DueAt != nil {
 		t.Fatalf("future review not withdrawn: %+v %v", view, err)
 	}
+	afterFields, err := k12.ParseMistakeFields(view.Fields)
+	if err != nil || afterFields.ReviewStage != fields.ReviewStage || afterFields.LastRetriedAt != fields.LastRetriedAt || afterFields.ParentConfirmedAt != fields.ParentConfirmedAt {
+		t.Fatalf("correction added learning evidence: before=%+v after=%+v err=%v", fields, afterFields, err)
+	}
 	// 在文件写入和消费标记之间重新装配，再逆序重放早期事件。
 	fm, err = memory.New(memory.Options{Dir: dir})
 	if err != nil {

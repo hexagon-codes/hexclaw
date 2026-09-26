@@ -219,9 +219,36 @@ func (d Deps) GeneratePracticeCandidateBatch(
 		return k12.PracticeCandidateSelection{}, err
 	}
 	modelCtx := k12.WithGradingModelSnapshot(ctx, route)
+	// 候选尚未入篮也占用本次选择的题目身份，换一批不能反复返回同一资产。
+	excludedHashes := make([]string, 0, len(selection.Candidates)+len(reserved))
+	for _, prior := range append(append([]k12.PracticeCandidate(nil), selection.Candidates...), reserved...) {
+		if prior.NormalizedContentHash != "" {
+			excludedHashes = append(excludedHashes, prior.NormalizedContentHash)
+		}
+	}
 	for _, candidate := range reserved {
 		if candidate.State != k12.PracticeCandidateGenerating {
 			continue
+		}
+		asset, assetErr := d.Records.FindPracticeProblemAsset(ctx, k12.PracticeAssetQuery{
+			OwnerID: strings.TrimSpace(d.TextbookOwnerID), AgentName: agentName, Subject: strings.TrimSpace(fields.Subject),
+			GradeTerm: selection.Grade, KnowledgePoint: strings.TrimSpace(fields.KnowledgePoint),
+			OriginalQuestion: fields.Question, ExcludedHashes: excludedHashes,
+		})
+		if assetErr == nil {
+			completed, completeErr := d.Records.CompletePracticeCandidate(ctx, agentName, candidate.CandidateID, k12.PracticeCandidateProblem{
+				Subject: fields.Subject, QuestionMarkdown: asset.Version.Facts.Stem,
+				ExpectedAnswerMarkdown: asset.Version.Answer, AssetSource: &asset.Source,
+			}, "")
+			if completeErr == nil {
+				excludedHashes = append(excludedHashes, completed.NormalizedContentHash)
+				continue
+			}
+			if !errors.Is(completeErr, k12storage.ErrProblemAssetUnavailable) {
+				return k12.PracticeCandidateSelection{}, completeErr
+			}
+		} else if !errors.Is(assetErr, k12storage.ErrProblemAssetUnavailable) {
+			return k12.PracticeCandidateSelection{}, assetErr
 		}
 		if d.PracticeVariant == nil || d.Solver == nil {
 			_, _ = d.Records.CompletePracticeCandidate(
@@ -289,7 +316,7 @@ func (d Deps) GeneratePracticeCandidateBatch(
 			)
 			continue
 		}
-		_, _ = d.Records.CompletePracticeCandidate(
+		completed, completeErr := d.Records.CompletePracticeCandidate(
 			context.WithoutCancel(ctx), agentName, candidate.CandidateID,
 			k12.PracticeCandidateProblem{
 				Subject:                request.Subject,
@@ -298,6 +325,10 @@ func (d Deps) GeneratePracticeCandidateBatch(
 			},
 			"",
 		)
+		if completeErr != nil {
+			return k12.PracticeCandidateSelection{}, completeErr
+		}
+		excludedHashes = append(excludedHashes, completed.NormalizedContentHash)
 	}
 	return d.Records.GetPracticeCandidateSelection(ctx, agentName, selectionID)
 }

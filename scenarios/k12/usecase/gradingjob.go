@@ -602,6 +602,13 @@ func (d Deps) reconcileRetryableRecognitionOutcome(ctx context.Context, agentNam
 			(child.Status != k12.ModelInvocationSent && child.Status != k12.ModelInvocationOutcomeUnknown) {
 			continue
 		}
+		replaced, replacementErr := d.Records.RecognitionUnknownHasReplacement(ctx, agentName, child.PhysicalInvocationID)
+		if replacementErr != nil {
+			return GradingJobView{}, replacementErr
+		}
+		if replaced {
+			continue
+		}
 		v.Fields.FailedStage = k12.GradingStageRecognizing
 		v.Fields.FailureKind = "provider_outcome_unknown"
 		v.Fields.Retryable = false

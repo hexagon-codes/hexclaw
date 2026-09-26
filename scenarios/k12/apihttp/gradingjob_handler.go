@@ -1,6 +1,7 @@
 package apihttp
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
+	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/usecase"
 )
 
@@ -243,20 +245,26 @@ func (h *handler) getGradingJobResult(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusConflict, "grading result unavailable")
 		return
 	}
+	projection := photoResultDTO(result)
+	if owner, ownerErr := h.authorizedAgentOwnerScope(r.Context(), agent); ownerErr == nil {
+		projection = h.photoResultWithReuse(r.Context(), owner, jobID, result)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"job_id": jobID,
-		"result": photoResultDTO(result),
+		"result": projection,
 	})
 }
 
 // photoItemDTO 逐题批改结果（判定五值口径；批改/解题分叉共用 gradeResp wire 形状）。
 type photoItemDTO struct {
-	Question    recognizedQuestionDTO        `json:"question"`
-	Status      string                       `json:"status"`
-	ResultKind  string                       `json:"result_kind"`
-	Warning     string                       `json:"warning,omitempty"`
-	Grade       *gradeResp                   `json:"grade,omitempty"`
-	ParentGuide *usecase.ParentTeachingGuide `json:"parent_guide,omitempty"`
+	Question     recognizedQuestionDTO         `json:"question"`
+	Status       string                        `json:"status"`
+	ResultKind   string                        `json:"result_kind"`
+	Warning      string                        `json:"warning,omitempty"`
+	Grade        *gradeResp                    `json:"grade,omitempty"`
+	ParentGuide  *usecase.ParentTeachingGuide  `json:"parent_guide,omitempty"`
+	AnswerSource *k12.ProblemAnswerSource      `json:"answer_source,omitempty"`
+	Reuse        *k12storage.ProblemAssetReuse `json:"reuse,omitempty"`
 }
 
 func photoResultDTO(res usecase.PhotoGradeResult) map[string]any {
@@ -266,6 +274,7 @@ func photoResultDTO(res usecase.PhotoGradeResult) map[string]any {
 			Question: recognizedQuestionToDTO(it.Recognized, true),
 			Status:   string(it.Status), ResultKind: string(it.EffectiveResultKind()),
 			Warning: it.Warning, ParentGuide: it.ParentGuide,
+			AnswerSource: it.AnswerSource,
 		}
 		switch {
 		case it.Status == usecase.PhotoBlankSolved,
@@ -298,6 +307,26 @@ func photoResultDTO(res usecase.PhotoGradeResult) map[string]any {
 			"digest": fmt.Sprintf("sha256:%x", sum[:]),
 		}
 	}
+	return out
+}
+
+func (h *handler) photoResultWithReuse(ctx context.Context, owner, job string, res usecase.PhotoGradeResult) map[string]any {
+	out := photoResultDTO(res)
+	if h.rt.Records == nil {
+		return out
+	}
+	items := out["items"].([]photoItemDTO)
+	for i := range items {
+		source := items[i].AnswerSource
+		if source == nil || source.Kind != k12.ProblemAnswerAsset {
+			continue
+		}
+		reuse, err := h.rt.Records.GetProblemAssetReuse(ctx, owner, job, items[i].Question.ProblemID, *source)
+		if err == nil {
+			items[i].Reuse = &reuse
+		}
+	}
+	out["items"] = items
 	return out
 }
 

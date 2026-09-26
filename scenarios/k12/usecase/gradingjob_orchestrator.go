@@ -2508,7 +2508,7 @@ func (o *GradingOrchestrator) beginRecognizingLayoutModelInvocationV2(
 	if err != nil {
 		return parent, err
 	}
-	return o.publishInitialRecognitionLayoutV2(
+	published, err := o.publishInitialRecognitionLayoutV2(
 		ctx,
 		parent,
 		canonicalPage,
@@ -2517,6 +2517,10 @@ func (o *GradingOrchestrator) beginRecognizingLayoutModelInvocationV2(
 			StageStartedAtUnixMillis: stageStartedAt,
 		},
 	)
+	if err == nil {
+		err = o.prepareRecognitionRecoveryPlan(ctx, published)
+	}
+	return published, err
 }
 
 func recognitionLayoutStageStartedAtV2(

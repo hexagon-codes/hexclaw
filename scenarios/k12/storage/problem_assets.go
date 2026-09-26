@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	"github.com/hexagon-codes/toolkit/util/idgen"
 )
@@ -23,7 +24,7 @@ var (
 // PublishProblemAsset 只消费用例已完成的题目验证，不调用模型、不猜测缺失事实。
 // 发布回执、不可变版本和后续事件在一个事务提交；响应丢失时复用原发布。
 func (s *Store) PublishProblemAsset(ctx context.Context, p k12.ProblemAssetPublication) (k12.ProblemAssetVersion, bool, error) {
-	return s.publishProblemAsset(ctx, p, "")
+	return s.publishProblemAsset(ctx, p, "", "")
 }
 
 // PublishAssessedProblemAsset 在发布事务内核对后台任务所依赖的批改仍为当前结果。
@@ -31,10 +32,10 @@ func (s *Store) PublishAssessedProblemAsset(ctx context.Context, p k12.ProblemAs
 	if strings.TrimSpace(jobID) == "" {
 		return k12.ProblemAssetVersion{}, false, ErrProblemAssetEvidence
 	}
-	return s.publishProblemAsset(ctx, p, jobID)
+	return s.publishProblemAsset(ctx, p, jobID, "")
 }
 
-func (s *Store) publishProblemAsset(ctx context.Context, p k12.ProblemAssetPublication, assessedJobID string) (k12.ProblemAssetVersion, bool, error) {
+func (s *Store) publishProblemAsset(ctx context.Context, p k12.ProblemAssetPublication, assessedJobID, correctionID string) (k12.ProblemAssetVersion, bool, error) {
 	identity, err := p.Facts.ExactIdentity(p.OwnerID)
 	if err != nil {
 		return k12.ProblemAssetVersion{}, false, err
@@ -113,28 +114,33 @@ func (s *Store) publishProblemAsset(ctx context.Context, p k12.ProblemAssetPubli
 		if inv.JobID != assessedJobID {
 			return k12.ProblemAssetVersion{}, false, ErrProblemAssetEvidence
 		}
-		var current bool
-		err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM k12_grading_assessment_items
-			WHERE agent_name=? AND job_id=? AND problem_id=? AND input_revision=? AND input_digest=?
-			AND current_disposition='current' AND solve_invocation_id=?
-			AND status IN ('correct','wrong','correct_with_process_issue','blank_solved','untrusted'))`,
-			inv.AgentName, inv.JobID, inv.ProblemID, inv.InputRevision, inv.InputDigest, inv.InvocationID).Scan(&current)
-		if err != nil {
-			return k12.ProblemAssetVersion{}, false, err
-		}
-		if !current {
-			return k12.ProblemAssetVersion{}, false, ErrProblemAssetUnavailable
-		}
 		assessment, err := getGradingAssessmentItemRevisionVia(ctx, tx, inv.AgentName, inv.JobID, inv.ProblemID, inv.InputRevision)
+		if errors.Is(err, records.ErrNotFound) {
+			return k12.ProblemAssetVersion{}, false, ErrProblemAssetUnavailable
+		}
 		if err != nil {
 			return k12.ProblemAssetVersion{}, false, err
 		}
-		correction, err := latestAssessmentCorrection(ctx, tx, assessment)
-		if err == nil && correction.Assessment.SolveInvocationID != inv.InvocationID {
+		if assessment.CurrentDisposition != k12.GradingAssessmentDispositionCurrent || assessment.InputDigest != inv.InputDigest {
 			return k12.ProblemAssetVersion{}, false, ErrProblemAssetUnavailable
+		}
+		effective := assessment
+		correction, err := latestAssessmentCorrection(ctx, tx, assessment)
+		if err == nil {
+			effective = correction.Assessment
 		}
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return k12.ProblemAssetVersion{}, false, err
+		}
+		if correctionID != "" && (err != nil || correction.CorrectionID != correctionID || correction.Reason != k12.AssessmentCorrectionAnswer ||
+			assessment.AnswerSource == nil || assessment.AnswerSource.Kind != k12.ProblemAnswerAsset || assessment.AnswerSource.AssetID != assetID ||
+			assessment.AnswerSource.AssetVersion != p.ReplacesVersion) {
+			return k12.ProblemAssetVersion{}, false, ErrProblemAssetUnavailable
+		}
+		if effective.SolveInvocationID != inv.InvocationID || effective.InputDigest != inv.InputDigest ||
+			(effective.Status != k12.GradingAssessmentCorrect && effective.Status != k12.GradingAssessmentWrong &&
+				effective.Status != k12.GradingAssessmentProcessIssue && effective.Status != k12.GradingAssessmentBlankSolved && effective.Status != k12.GradingAssessmentUntrusted) {
+			return k12.ProblemAssetVersion{}, false, ErrProblemAssetUnavailable
 		}
 	}
 	var generator *k12.GradingItemInvocation
@@ -170,6 +176,9 @@ func (s *Store) publishProblemAsset(ctx context.Context, p k12.ProblemAssetPubli
 	}
 	replacing := p.ReplacesVersion > 0
 	if replacing {
+		if correctionID != "" && (state != "archived" || p.ReplacesVersion != version || p.ExpectedRevision != revision) {
+			return k12.ProblemAssetVersion{}, false, ErrProblemAssetUnavailable
+		}
 		if created != 0 || p.ReplacesVersion != version || p.ExpectedRevision != revision {
 			return k12.ProblemAssetVersion{}, false, ErrProblemAssetConflict
 		}

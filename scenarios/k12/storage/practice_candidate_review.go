@@ -508,6 +508,9 @@ func (s *Store) CompletePracticeCandidate(
 		candidate.NormalizedContentHash = ""
 	} else {
 		candidate.Problem = k12.NormalizePracticeCandidateProblem(problem)
+		if err := validatePracticeCandidateAsset(ctx, tx, agentName, selectionID, candidate.Problem); err != nil {
+			return k12.PracticeCandidate{}, err
+		}
 		if candidate.Problem.QuestionMarkdown == "" {
 			return k12.PracticeCandidate{}, fmt.Errorf("k12storage: generated question empty")
 		}
@@ -704,19 +707,32 @@ func (s *Store) CommitPracticeCandidateSelection(
 			alreadyPresent = append(alreadyPresent, candidate.ID)
 			continue
 		}
+		if err := validatePracticeCandidateAsset(ctx, tx, in.AgentName, in.SelectionID, candidate.Problem); err != nil {
+			return PracticeCandidateCommitReceipt{}, err
+		}
+		var assetSourceJSON any
+		verificationEvidence := "candidate-selection:v1"
+		if candidate.Problem.AssetSource != nil {
+			raw, marshalErr := json.Marshal(candidate.Problem.AssetSource)
+			if marshalErr != nil {
+				return PracticeCandidateCommitReceipt{}, marshalErr
+			}
+			assetSourceJSON = string(raw)
+			verificationEvidence = "numeric_exec"
+		}
 		_, err := tx.ExecContext(ctx, `INSERT INTO k12_practice_set_items
 			(set_record_id,item_index,item_id,source_problem_id,subject,added_via,
 			 question_markdown,expected_answer_markdown,verification_status,
 			 verification_evidence,generation_status,source_mistake_summary,
-			 normalized_content_hash)
-			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			 normalized_content_hash,asset_source_json)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			targetSetID, itemIndex, candidate.ID, sourceMistakeID,
 			candidate.Problem.Subject, k12.PracticeAddedViaSingleVariant,
 			candidate.Problem.QuestionMarkdown,
 			candidate.Problem.ExpectedAnswerMarkdown,
-			k12.PracticeItemVerified, "candidate-selection:v1",
+			k12.PracticeItemVerified, verificationEvidence,
 			k12.PracticeItemGenerationReady,
-			candidate.Problem.QuestionMarkdown, candidate.Hash)
+			candidate.Problem.QuestionMarkdown, candidate.Hash, assetSourceJSON)
 		if err != nil {
 			return PracticeCandidateCommitReceipt{}, err
 		}

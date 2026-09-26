@@ -20,10 +20,15 @@ func assessmentCorrectionIdentity(view k12.EffectiveGradingAssessment) string {
 	return fmt.Sprintf("%s:%s:%s", k12storage.CorrectionSourceID(view.Original), view.Original.ResultDigest, predecessor)
 }
 
-// commitAssetAssessmentCorrection 只修正尚未交付且采用来源失效的同一次作答。
+// commitAssetAssessmentCorrection 只修正采用来源失效的同一次作答，保留历史交付。
 func commitAssetAssessmentCorrection(ctx context.Context, deps Deps, view k12.EffectiveGradingAssessment,
 	item k12.GradingAssessmentItem, effects k12storage.GradingAssessmentEffects,
 ) (k12.GradingAssessmentItem, error) {
+	if historical, _ := ctx.Value(historicalAssetCorrectionContextKey{}).(bool); historical &&
+		item.Status != k12.GradingAssessmentCorrect && item.Status != k12.GradingAssessmentWrong &&
+		item.Status != k12.GradingAssessmentProcessIssue && item.Status != k12.GradingAssessmentBlankSolved {
+		return item, fmt.Errorf("historical answer feedback requires a reliable reassessment")
+	}
 	item.InputRevision, item.PublishedRevision = view.Original.InputRevision, view.Original.PublishedRevision
 	item.StructureVersion, item.CurrentDisposition = view.Original.StructureVersion, view.Original.CurrentDisposition
 	request := k12.GradingAssessmentCorrection{

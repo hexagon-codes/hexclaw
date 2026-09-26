@@ -18,6 +18,9 @@ type ProblemAssetConsumer struct {
 func (c ProblemAssetConsumer) Name() string { return "problem-assets" }
 
 func (c ProblemAssetConsumer) Handle(ctx context.Context, ev k12storage.OutboxEvent) error {
+	if ev.EventType == k12storage.EventAssessmentCorrected {
+		return c.publishCorrectedAsset(ctx, ev)
+	}
 	if ev.EventType != k12storage.EventProblemAssetPrepare {
 		return nil
 	}

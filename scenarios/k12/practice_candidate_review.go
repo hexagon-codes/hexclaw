@@ -31,11 +31,12 @@ const (
 )
 
 type PracticeCandidateProblem struct {
-	Subject                string   `json:"subject"`
-	QuestionMarkdown       string   `json:"question_markdown"`
-	Options                []string `json:"options,omitempty"`
-	ResourceDigests        []string `json:"resource_digests,omitempty"`
-	ExpectedAnswerMarkdown string   `json:"expected_answer_markdown,omitempty"`
+	Subject                string               `json:"subject"`
+	QuestionMarkdown       string               `json:"question_markdown"`
+	Options                []string             `json:"options,omitempty"`
+	ResourceDigests        []string             `json:"resource_digests,omitempty"`
+	ExpectedAnswerMarkdown string               `json:"expected_answer_markdown,omitempty"`
+	AssetSource            *PracticeAssetSource `json:"asset_source,omitempty"`
 }
 
 type canonicalPracticeProblem struct {
