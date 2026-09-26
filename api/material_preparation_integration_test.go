@@ -77,9 +77,12 @@ func materialImportFixture(t *testing.T, body string, configure ...func(*sql.DB,
 	}
 	kb := knowledge.NewSQLiteStore(db)
 	manager := knowledge.NewManager(kb, kb, nil, knowledge.WithSplitter(splitter.NewMarkdownSplitter()))
-	prepared, err := NewKnowledgeDocumentIngestProcessor(manager).Prepare(ctx, source)
+	prepared, err := NewKnowledgeDocumentIngestProcessor(manager, WithKnowledgeSourceAttachments(service)).Prepare(ctx, source)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if prepared.ReleaseAttachments != nil {
+		defer prepared.ReleaseAttachments()
 	}
 	if err = repo.CompleteIngestDocument(ctx, job.Lease(), now, prepared); err != nil {
 		t.Fatal(err)
@@ -207,13 +210,20 @@ type materialControlledSolver struct {
 	calls         int
 	verifyError   error
 	invalidProof  bool
+	missingDigest bool
 	afterGenerate func()
+	beforeCall    func(context.Context, k12.GradingItemOperation) error
 }
 
 func (s *materialControlledSolver) Solve(ctx context.Context, problem, grade, constraint string) (usecase.SolveResult, error) {
 	const answer = "先计算单价，再乘数量。答案：42元"
 	_, err := usecase.ExecuteGradingPhysicalCall(ctx, usecase.GradingPhysicalCallSpec{Operation: k12.GradingItemOperationSolveGenerate, RequestDigest: "material-generation"}, func(callCtx context.Context) (string, error) {
 		s.calls++
+		if s.beforeCall != nil {
+			if err := s.beforeCall(callCtx, k12.GradingItemOperationSolveGenerate); err != nil {
+				return "", err
+			}
+		}
 		snapshot, ok := k12.GradingModelSnapshotFromContext(callCtx)
 		if !ok || snapshot.Provider != "controlled" || snapshot.Model != "text-model" || grade != "六年级上" {
 			s.t.Fatalf("unfrozen source scope: %+v %s", snapshot, grade)
@@ -230,22 +240,38 @@ func (s *materialControlledSolver) Solve(ctx context.Context, problem, grade, co
 	if err != nil {
 		return usecase.SolveResult{}, err
 	}
-	_, err = usecase.ExecuteGradingPhysicalCall(ctx, usecase.GradingPhysicalCallSpec{Operation: k12.GradingItemOperationSolveVerify, RequestDigest: "material-verification"}, func(context.Context) (string, error) {
+	_, err = usecase.ExecuteGradingPhysicalCall(ctx, usecase.GradingPhysicalCallSpec{Operation: k12.GradingItemOperationSolveVerify, RequestDigest: "material-verification"}, func(callCtx context.Context) (string, error) {
 		s.calls++
+		if s.beforeCall != nil {
+			if err := s.beforeCall(callCtx, k12.GradingItemOperationSolveVerify); err != nil {
+				return "", err
+			}
+		}
 		if s.verifyError != nil {
 			return "", s.verifyError
 		}
 		return `{"Output":"VERDICT: AGREE\nCOMPUTED: 42","execution_receipt":{"run_id":"material-code-run","input_digest":"independent-verification-task","status":"success","exit_code":0,"stdout":"42","stdout_bytes":2}}`, nil
 	})
 	if err != nil {
+		if s.verifyError != nil {
+			// 模拟同一求解过程切换提示摘要；旧请求未知时不得发送任何下一步。
+			_, retryErr := usecase.ExecuteGradingPhysicalCall(ctx, usecase.GradingPhysicalCallSpec{Operation: k12.GradingItemOperationSolveVerify, RequestDigest: "different-verification-prompt"}, func(context.Context) (string, error) { s.calls++; return "unexpected retry", nil })
+			if !errors.Is(retryErr, k12storage.ErrMaterialPreparationUnknown) {
+				s.t.Fatalf("unknown digest bypass: %v", retryErr)
+			}
+		}
 		return usecase.SolveResult{}, err
 	}
 	digest := sha256.Sum256([]byte(answer))
+	digestText := hex.EncodeToString(digest[:])
+	if s.missingDigest {
+		digestText = ""
+	}
 	runID := "material-code-run"
 	if s.invalidProof {
 		runID = "unrelated-execution"
 	}
-	return usecase.SolveResult{Solution: answer, Evidence: usecase.SolveEvidence{Verdict: usecase.VerdictAgree, EvidenceType: usecase.EvidenceNumericExec, SolverOutputDigest: hex.EncodeToString(digest[:]), VerificationInputDigest: "independent-verification-task", VerificationRunID: runID}}, nil
+	return usecase.SolveResult{Solution: answer, Evidence: usecase.SolveEvidence{Verdict: usecase.VerdictAgree, EvidenceType: usecase.EvidenceNumericExec, SolverOutputDigest: digestText, VerificationInputDigest: "independent-verification-task", VerificationRunID: runID}}, nil
 }
 func materialModelRoute(context.Context, k12.GradingModelSnapshot) (k12.GradingModelSnapshot, error) {
 	return k12.GradingModelSnapshot{Provider: "controlled", Model: "text-model", TimeoutMS: 30000}, nil
@@ -281,12 +307,14 @@ func TestMaterialPreparationModelVerifiesProvidedAndMissingAnswers(t *testing.T)
 	}
 }
 func TestMaterialPreparationModelUnknownAndInvalidProofDoNotPublish(t *testing.T) {
-	for _, mode := range []string{"timeout", "invalid-proof"} {
+	for _, mode := range []string{"timeout", "invalid-proof", "missing-model-proof"} {
 		t.Run(mode, func(t *testing.T) {
 			db, records, worker, doc := materialImportFixture(t, "1. 商店3本书售价18元，7本同样的书一共多少元？\n")
 			boundary := &materialControlledSolver{t: t}
 			if mode == "timeout" {
 				boundary.verifyError = context.DeadlineExceeded
+			} else if mode == "missing-model-proof" {
+				boundary.missingDigest = true
 			} else {
 				boundary.invalidProof = true
 			}
@@ -309,6 +337,10 @@ func TestMaterialPreparationModelUnknownAndInvalidProofDoNotPublish(t *testing.T
 			}
 			if did, err := worker.RunOnce(t.Context()); err != nil || did || boundary.calls != 2 {
 				t.Fatalf("unexpected resend: %v %v calls=%d", did, err, boundary.calls)
+			}
+			var localReceipts int
+			if err = db.QueryRow(`SELECT COUNT(*) FROM k12_material_invocations WHERE execution_kind='local_deterministic'`).Scan(&localReceipts); err != nil || localReceipts != 0 {
+				t.Fatalf("model mislabeled as local: %d %v", localReceipts, err)
 			}
 			var assets int
 			if err = db.QueryRow(`SELECT COUNT(*) FROM k12_problem_assets`).Scan(&assets); err != nil || assets != 0 {
@@ -409,4 +441,62 @@ func TestMaterialPreparationSourceRevisionFencesInFlightModel(t *testing.T) {
 		t.Fatalf("stale source: assets=%d state=%s calls=%d", assets, state, boundary.calls)
 	}
 	_ = records
+}
+
+func TestMaterialPreparationUnavailableAndConflictingAssetsStopRetrying(t *testing.T) {
+	for _, mode := range []string{"archived", "conflicting"} {
+		t.Run(mode, func(t *testing.T) {
+			_, records, worker, doc := materialImportFixture(t, "1. 4.5×2=\n2. 4.5×2=\n")
+			if _, err := worker.RunOnce(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			asset, err := records.FindExactProblemAsset(t.Context(), "desktop-user", k12.ProblemAssetFacts{Subject: "数学", Stem: "4.5×2=", AnswerContext: map[string]string{"grade_term": "六年级上"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if mode == "archived" {
+				err = records.ArchiveProblemAsset(t.Context(), "desktop-user", asset.AssetID, asset.Revision)
+			} else {
+				// 已完成独立求解后才出现发布竞争，不能由求解前复用绕开冲突提交边界。
+				var pending k12storage.MaterialPreparation
+				pending, err = records.NextMaterialPreparation(t.Context())
+				if err == nil {
+					err = records.ClaimMaterialPreparation(t.Context(), pending)
+				}
+				if err == nil {
+					var result usecase.SolveResult
+					result, err = (materialAnswerFormatSolver{base: worker.Solver}).Solve(t.Context(), pending.Candidate.Facts.Stem, "六年级上", "")
+					if err == nil {
+						raw, marshalErr := json.Marshal(usecase.SolveHomeworkResult{Solution: result.Solution, Evidence: result.Evidence})
+						err = marshalErr
+						if err == nil {
+							err = records.SaveMaterialLocalVerification(t.Context(), pending, string(raw))
+						}
+					}
+				}
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if did, err := worker.RunOnce(t.Context()); err != nil || !did {
+				t.Fatalf("resolve publication: %v %v", did, err)
+			}
+			if did, err := worker.RunOnce(t.Context()); err != nil || did {
+				t.Fatalf("publication retried: %v %v", did, err)
+			}
+			summary, err := records.GetMaterialPreparationSummary(t.Context(), "desktop-user", doc)
+			if err != nil || summary.Counts["preparing"] != 0 || summary.Counts["needs_review"] < 1 {
+				t.Fatalf("unresolved shown running: %+v %v", summary, err)
+			}
+		})
+	}
+}
+
+// 第二来源的真实确定性结果使用不同完整讲法，验证发布冲突不会改写既有不可变版本。
+type materialAnswerFormatSolver struct{ base usecase.Solver }
+
+func (s materialAnswerFormatSolver) Solve(ctx context.Context, problem, grade, constraint string) (usecase.SolveResult, error) {
+	r, err := s.base.Solve(ctx, problem, grade, constraint)
+	r.Solution = "独立计算结果：" + r.Solution
+	return r, err
 }

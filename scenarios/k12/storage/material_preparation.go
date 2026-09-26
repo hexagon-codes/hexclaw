@@ -17,25 +17,56 @@ var ErrMaterialPreparationUnknown = errors.New("material preparation outcome req
 
 // MaterialBlock 来自原解析正文或完整页回执，位置不由知识切片推算。
 type MaterialBlock struct {
-	ID   string `json:"block_id"`
-	Text string `json:"text"`
-	Page int    `json:"page,omitempty"`
+	ID         string   `json:"block_id"`
+	Kind       string   `json:"kind,omitempty"`
+	ObjectIDs  []string `json:"object_ids,omitempty"`
+	Incomplete bool     `json:"incomplete,omitempty"`
+	Text       string   `json:"text"`
+	Page       int      `json:"page,omitempty"`
 }
 type MaterialManifest struct {
-	SchemaVersion      int             `json:"schema_version"`
-	SourceDigest       string          `json:"source_digest"`
-	ParserVersion      string          `json:"parser_version"`
-	Blocks             []MaterialBlock `json:"blocks"`
-	ExtractionComplete bool            `json:"extraction_complete"`
+	SchemaVersion         int                            `json:"schema_version"`
+	SourceDigest          string                         `json:"source_digest"`
+	ParserVersion         string                         `json:"parser_version"`
+	Blocks                []MaterialBlock                `json:"blocks"`
+	ExtractionComplete    bool                           `json:"extraction_complete"`
+	Relations             []MaterialSourceRelation       `json:"relations,omitempty"`
+	Objects               json.RawMessage                `json:"objects,omitempty"`
+	Questions             []MaterialStructuredQuestion   `json:"questions,omitempty"`
+	Progress              *MaterialIngestProgress        `json:"progress,omitempty"`
+	ReferenceObservations []MaterialReferenceObservation `json:"reference_observations,omitempty"`
+	SourceIssues          []MaterialSourceIssue          `json:"source_issues,omitempty"`
+}
+type MaterialSourceRelation struct {
+	Kind string `json:"kind"`
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+type MaterialSourceLocation struct {
+	BlockID string `json:"block_id"`
+	Line    int    `json:"line"`
 }
 type MaterialCandidate struct {
-	ID              string                `json:"candidate_id"`
-	BlockID         string                `json:"block_id"`
-	Line            int                   `json:"line"`
-	Facts           k12.ProblemAssetFacts `json:"facts"`
-	ReferenceAnswer string                `json:"reference_answer,omitempty"`
+	VisualPDFPages     []int                    `json:"visual_pdf_pages,omitempty"`
+	VisualObjectIDs    []string                 `json:"visual_object_ids,omitempty"`
+	ID                 string                   `json:"candidate_id"`
+	BlockID            string                   `json:"block_id"`
+	Line               int                      `json:"line"`
+	Facts              k12.ProblemAssetFacts    `json:"facts"`
+	ReferenceAnswer    string                   `json:"reference_answer,omitempty"`
+	SourceBlockIDs     []string                 `json:"source_block_ids,omitempty"`
+	ReferenceBlockIDs  []string                 `json:"reference_block_ids,omitempty"`
+	QuestionNumber     string                   `json:"question_number,omitempty"`
+	SourceRecordID     string                   `json:"source_record_id,omitempty"`
+	SourceLabel        string                   `json:"source_label,omitempty"`
+	SourceLocation     string                   `json:"source_location,omitempty"`
+	SourcePage         int                      `json:"source_page,omitempty"`
+	Issues             []string                 `json:"issues,omitempty"`
+	SourceLocations    []MaterialSourceLocation `json:"source_locations,omitempty"`
+	ReferenceLocations []MaterialSourceLocation `json:"reference_locations,omitempty"`
 }
 type MaterialPreparation struct {
+	VisualEvidence                                               *MaterialVisualEvidence
 	TaskID, OwnerID, DocumentID                                  string
 	SourceRevision                                               int64
 	InputDigest, Policy, State, Reason, ResultJSON, ResultDigest string
@@ -64,11 +95,17 @@ func (s *Store) ReconcileMaterialPreparation(ctx context.Context, tx *sql.Tx, ev
 		nowUnix(), ev.OwnerID, ev.DocumentID, generation, deleted, lifecycle); err != nil {
 		return err
 	}
-	if deleted || lifecycle != "active" || textState != "ready" || generation != ev.DocumentGeneration || strings.TrimSpace(content) == "" {
+	if deleted || lifecycle != "active" || generation != ev.DocumentGeneration {
+		return nil
+	}
+	if strings.EqualFold(ext, ".pdf") {
+		return s.reconcileMaterialPDF(ctx, tx, ev, title, digest, grade, subject, agent, textState == "ready")
+	}
+	if textState != "ready" || strings.TrimSpace(content) == "" {
 		return nil
 	}
 	switch strings.ToLower(ext) {
-	case ".md", ".markdown", ".txt", ".pdf", ".docx":
+	case ".md", ".markdown", ".txt", ".pdf", ".docx", ".hexbank", ".jsonl":
 	default:
 		return nil
 	}
@@ -99,29 +136,39 @@ func (s *Store) ReconcileMaterialPreparation(ctx context.Context, tx *sql.Tx, ev
 		}
 	}
 	manifest := MaterialManifest{SchemaVersion: 1, SourceDigest: digest, ParserVersion: "persisted-text-v1"}
-	if strings.EqualFold(ext, ".pdf") {
-		rows, e := tx.QueryContext(ctx, `SELECT p.page_number,p.content FROM kb_ingest_page_checkpoints p JOIN kb_knowledge_jobs j ON j.job_id=p.job_id
-   WHERE j.owner_id=? AND j.document_id=? AND j.document_generation=? AND p.source_digest=? ORDER BY p.page_number`, ev.OwnerID, ev.DocumentID, generation, digest)
-		if e != nil {
-			return e
+	var sourceManifest string
+	manifestErr := tx.QueryRowContext(ctx, `SELECT manifest_json FROM kb_ingest_source_manifests WHERE owner_id=? AND document_id=? AND content_generation=? AND source_digest=?`, ev.OwnerID, ev.DocumentID, generation, digest).Scan(&sourceManifest)
+	if manifestErr == nil {
+		if err = json.Unmarshal([]byte(sourceManifest), &manifest); err != nil {
+			return err
 		}
-		for rows.Next() {
-			var b MaterialBlock
-			if e = rows.Scan(&b.Page, &b.Text); e != nil {
-				rows.Close()
-				return e
-			}
-			b.ID = fmt.Sprintf("page:%d", b.Page)
-			manifest.Blocks = append(manifest.Blocks, b)
-		}
-		if e = rows.Close(); e != nil {
-			return e
-		}
+	} else if !errors.Is(manifestErr, sql.ErrNoRows) {
+		return manifestErr
 	}
 	if len(manifest.Blocks) == 0 {
 		manifest.Blocks = []MaterialBlock{{ID: "body", Text: content}}
 	}
-	candidates, complete := extractMaterialQuestions(manifest.Blocks, subject, grade)
+	var candidates []MaterialCandidate
+	var complete bool
+	if manifest.Questions != nil {
+		candidates, complete = extractStructuredMaterialQuestions(manifest.Questions)
+	} else {
+		candidates, complete = extractMaterialQuestions(manifest.Blocks, subject, grade)
+	}
+	candidates = prepareMaterialVisualCandidates(manifest, candidates)
+	for _, candidate := range candidates {
+		if len(candidate.Issues) > 0 {
+			complete = false
+		}
+	}
+	for _, c := range candidates {
+		for _, from := range c.SourceBlockIDs {
+			manifest.Relations = append(manifest.Relations, MaterialSourceRelation{Kind: "question_source", From: from, To: c.ID})
+		}
+		for _, from := range c.ReferenceBlockIDs {
+			manifest.Relations = append(manifest.Relations, MaterialSourceRelation{Kind: "answer_for", From: from, To: c.ID})
+		}
+	}
 	manifest.ExtractionComplete = complete
 	raw, _ := json.Marshal(manifest)
 	state := "ready"
@@ -133,11 +180,16 @@ func (s *Store) ReconcileMaterialPreparation(ctx context.Context, tx *sql.Tx, ev
 		return err
 	}
 	for _, candidate := range candidates {
+		state, reason := "queued", ""
+		if len(candidate.Issues) > 0 {
+			state = "needs_review"
+			reason = strings.Join(candidate.Issues, "; ")
+		}
 		raw, _ := json.Marshal(candidate)
 		input := problemAssetRequestDigest(raw)
 		task := problemAssetRequestDigest([]byte(fmt.Sprintf("%s/%s/%d/%s", ev.OwnerID, ev.DocumentID, generation, candidate.ID)))
-		if _, err = tx.ExecContext(ctx, `INSERT INTO k12_material_preparations(task_id,owner_id,document_id,source_revision,candidate_id,input_digest,candidate_json,policy,state,updated_at) VALUES(?,?,?,?,?,?,?,'independent-solve-v1','queued',?)`,
-			task, ev.OwnerID, ev.DocumentID, generation, candidate.ID, input, string(raw), nowUnix()); err != nil {
+		if _, err = tx.ExecContext(ctx, `INSERT INTO k12_material_preparations(task_id,owner_id,document_id,source_revision,candidate_id,input_digest,candidate_json,policy,state,reason,updated_at) VALUES(?,?,?,?,?,?,?,'independent-solve-v1',?,?,?)`,
+			task, ev.OwnerID, ev.DocumentID, generation, candidate.ID, input, string(raw), state, reason, nowUnix()); err != nil {
 			return err
 		}
 	}
@@ -162,74 +214,6 @@ func materialTitleGrade(title string) string {
 	return grade
 }
 
-var materialNumberPrefix = regexp.MustCompile(`^\s*(?:[-*]\s+)?(?:[0-9]+[.、)]\s+)?(.+?)\s*$`)
-var materialQuestionNumber = regexp.MustCompile(`^\s*(?:[-*]\s+)?[0-9]+[.、)]\s+(.+)$`)
-var materialArabicDigit = regexp.MustCompile(`[0-9]`)
-var materialArithmetic = regexp.MustCompile(`^[0-9\s.+\-*/×÷()（）=？?]+$`)
-
-// extractMaterialQuestions 只认独立算式和明确编号的单行完整数学题；引用图表或公共材料时保留待复核。
-func extractMaterialQuestions(blocks []MaterialBlock, subject, grade string) ([]MaterialCandidate, bool) {
-	var out []MaterialCandidate
-	complete := true
-	for _, block := range blocks {
-		for i, line := range strings.Split(block.Text, "\n") {
-			text := strings.TrimSpace(line)
-			if text == "" || strings.HasPrefix(text, "#") || strings.HasPrefix(text, "<!-- source_page_span=") {
-				continue
-			}
-			matches := materialNumberPrefix.FindStringSubmatch(text)
-			if len(matches) != 2 {
-				complete = false
-				continue
-			}
-			stem := matches[1]
-			if !materialArithmetic.MatchString(stem) || !strings.ContainsAny(stem, "+-*/×÷") || !strings.ContainsAny(stem, "=+*/×÷?？") {
-				if (subject == "数学" || subject == "math") && materialQuestionNumber.MatchString(text) && materialArabicDigit.MatchString(stem) && strings.ContainsAny(stem, "?？") && !materialHasExternalDependency(stem) {
-					reference := ""
-					for _, marker := range []string{"参考答案：", "答案：", "参考答案:", "答案:"} {
-						if at := strings.Index(stem, marker); at >= 0 {
-							reference, stem = strings.TrimSpace(stem[at+len(marker):]), strings.TrimSpace(stem[:at])
-							break
-						}
-					}
-					facts := k12.ProblemAssetFacts{Subject: "数学", Stem: stem, AnswerContext: map[string]string{"grade_term": grade}}
-					out = append(out, MaterialCandidate{ID: fmt.Sprintf("%s:line:%d", block.ID, i+1), BlockID: block.ID, Line: i + 1, Facts: facts, ReferenceAnswer: reference})
-				} else {
-					complete = false
-				}
-				continue
-			}
-			if strings.Count(stem, "=") > 1 {
-				complete = false
-				continue
-			}
-			reference := ""
-			if at := strings.Index(stem, "="); at >= 0 {
-				reference = strings.TrimSpace(stem[at+1:])
-				stem = strings.TrimSpace(stem[:at]) + "="
-			}
-			stem = strings.TrimRight(stem, "?？")
-			if strings.TrimSpace(stem) == "" {
-				complete = false
-				continue
-			}
-			reference = strings.Trim(reference, "?？ ")
-			facts := k12.ProblemAssetFacts{Subject: "数学", Stem: stem, AnswerContext: map[string]string{"grade_term": grade}}
-			out = append(out, MaterialCandidate{ID: fmt.Sprintf("%s:line:%d", block.ID, i+1), BlockID: block.ID, Line: i + 1, Facts: facts, ReferenceAnswer: reference})
-		}
-	}
-	return out, complete
-}
-
-func materialHasExternalDependency(stem string) bool {
-	for _, ref := range []string{"如图", "下图", "上图", "表格", "下表", "上表", "图中", "根据材料", "上述", "上题", "下列", "选项", "![", "<img", "书后", "见答案", "同上"} {
-		if strings.Contains(stem, ref) {
-			return true
-		}
-	}
-	return false
-}
-
 const materialColumns = `task_id,owner_id,document_id,source_revision,input_digest,candidate_json,policy,state,reason,result_json,result_digest`
 
 func scanMaterial(row interface{ Scan(...any) error }) (MaterialPreparation, error) {
@@ -247,9 +231,12 @@ func (s *Store) GetMaterialPreparation(ctx context.Context, task string) (Materi
 func (s *Store) NextMaterialPreparation(ctx context.Context) (MaterialPreparation, error) {
 	return scanMaterial(s.db.QueryRowContext(ctx, `SELECT `+materialColumns+` FROM k12_material_preparations WHERE state IN ('queued','verified') ORDER BY updated_at,task_id LIMIT 1`))
 }
+
+const materialCurrentSourcePredicate = `b.owner_id=? AND b.document_id=? AND b.content_generation=? AND b.lifecycle_state='active' AND d.deleted=0 AND (b.text_state='ready' OR EXISTS(SELECT 1 FROM k12_material_manifests m JOIN kb_ingest_document_sources s ON s.owner_id=m.owner_id AND s.document_id=m.document_id AND s.content_generation=m.source_revision WHERE m.owner_id=b.owner_id AND m.document_id=b.document_id AND m.source_revision=b.content_generation AND m.source_digest=s.blob_sha256 AND json_extract(m.manifest_json,'$.progress.pages_ready')>0))`
+
 func materialSourceCurrent(ctx context.Context, db dbHandle, p MaterialPreparation) error {
 	var active bool
-	err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM kb_semantic_document_bindings b JOIN kb_documents d ON d.id=b.document_id WHERE b.owner_id=? AND b.document_id=? AND b.content_generation=? AND b.lifecycle_state='active' AND b.text_state='ready' AND d.deleted=0)`, p.OwnerID, p.DocumentID, p.SourceRevision).Scan(&active)
+	err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM kb_semantic_document_bindings b JOIN kb_documents d ON d.id=b.document_id WHERE `+materialCurrentSourcePredicate+`)`, p.OwnerID, p.DocumentID, p.SourceRevision).Scan(&active)
 	if err != nil {
 		return err
 	}
@@ -304,8 +291,21 @@ func (s *Store) FinishMaterialPreparation(ctx context.Context, p MaterialPrepara
 
 // RecoverMaterialPreparations 不重发进程退出前已进入执行的任务。
 func (s *Store) RecoverMaterialPreparations(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE k12_material_preparations SET state='outcome_unknown',reason='Previous execution requires reconciliation',updated_at=? WHERE state='running'`, nowUnix())
-	return err
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	// 未发送的明确恢复或已保存成功替代回执可继续；已提交 sent 而缺少结果仍停止。
+	_, err = tx.ExecContext(ctx, `UPDATE k12_material_preparations SET state='queued',reason='Explicit verification recovery queued',updated_at=? WHERE state='running' AND EXISTS(SELECT 1 FROM k12_material_recovery_decisions r WHERE r.task_id=k12_material_preparations.task_id AND (r.replacement_invocation_id IS NULL OR EXISTS(SELECT 1 FROM k12_material_invocations replacement WHERE replacement.invocation_id=r.replacement_invocation_id AND replacement.status='succeeded')) AND NOT EXISTS(SELECT 1 FROM k12_material_invocations i WHERE i.task_id=r.task_id AND i.invocation_id<>r.original_invocation_id AND `+materialUnresolvedPredicate+`))`, nowUnix())
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `UPDATE k12_material_preparations SET state='outcome_unknown',reason='Previous execution requires reconciliation',updated_at=? WHERE state='running'`, nowUnix())
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 func (s *Store) MaterialForegroundBusy(ctx context.Context) (bool, error) {
 	var busy bool
@@ -315,6 +315,6 @@ func (s *Store) MaterialForegroundBusy(ctx context.Context) (bool, error) {
 
 // StopStaleMaterialPreparation 只终止已失效来源；原回执与已发布资产保留。
 func (s *Store) StopStaleMaterialPreparation(ctx context.Context, p MaterialPreparation) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE k12_material_preparations SET state='stopped',reason='Source changed or removed',updated_at=? WHERE task_id=? AND state IN ('queued','running','verified') AND NOT EXISTS(SELECT 1 FROM kb_semantic_document_bindings b JOIN kb_documents d ON d.id=b.document_id WHERE b.owner_id=? AND b.document_id=? AND b.content_generation=? AND b.lifecycle_state='active' AND b.text_state='ready' AND d.deleted=0)`, nowUnix(), p.TaskID, p.OwnerID, p.DocumentID, p.SourceRevision)
+	_, err := s.db.ExecContext(ctx, `UPDATE k12_material_preparations SET state='stopped',reason='Source changed or removed',updated_at=? WHERE task_id=? AND state IN ('queued','running','verified') AND NOT EXISTS(SELECT 1 FROM kb_semantic_document_bindings b JOIN kb_documents d ON d.id=b.document_id WHERE `+materialCurrentSourcePredicate+`)`, nowUnix(), p.TaskID, p.OwnerID, p.DocumentID, p.SourceRevision)
 	return err
 }

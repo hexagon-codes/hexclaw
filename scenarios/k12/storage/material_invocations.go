@@ -3,11 +3,13 @@ package k12storage
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 
+	"github.com/hexagon-codes/hexclaw/egress"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 )
 
@@ -40,7 +42,7 @@ type MaterialInvocation struct{ ID, TaskID, Operation, RequestDigest, Status, Re
 // ClaimMaterialInvocation 复用已完成回执；已发送无终态只返回未知，不创建第二次尝试。
 func (s *Store) ClaimMaterialInvocation(ctx context.Context, p MaterialPreparation, operation, request string) (MaterialInvocation, bool, error) {
 	inv := MaterialInvocation{ID: problemAssetRequestDigest([]byte(p.TaskID + "\x00" + operation + "\x00" + request)), TaskID: p.TaskID, Operation: operation, RequestDigest: request}
-	if operation != "solve_generate" && operation != "solve_verify" {
+	if operation != "solve_generate" && operation != "solve_verify" && operation != "visual_extract" {
 		return inv, false, errors.New("unsupported material operation")
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -48,29 +50,93 @@ func (s *Store) ClaimMaterialInvocation(ctx context.Context, p MaterialPreparati
 		return inv, false, err
 	}
 	defer tx.Rollback()
-	res, err := tx.ExecContext(ctx, `INSERT INTO k12_material_invocations(invocation_id,task_id,operation,request_digest,execution_kind,status,created_at,updated_at) VALUES(?,?,?,?,'provider','sent',?,?) ON CONFLICT(task_id,operation,request_digest) DO NOTHING`, inv.ID, p.TaskID, operation, request, nowUnix(), nowUnix())
+	locked, err := tx.ExecContext(ctx, `UPDATE k12_material_preparations SET updated_at=updated_at WHERE task_id=? AND state='running' AND input_digest=?`, p.TaskID, p.InputDigest)
 	if err != nil {
 		return inv, false, err
 	}
-	fresh, _ := res.RowsAffected()
+	active, _ := locked.RowsAffected()
+	if active != 1 {
+		return inv, false, ErrMaterialPreparationUnknown
+	}
 	if err = materialSourceCurrent(ctx, tx, p); err != nil {
 		return inv, false, err
 	}
-	if err = tx.QueryRowContext(ctx, `SELECT status,result_json,result_digest FROM k12_material_invocations WHERE invocation_id=?`, inv.ID).Scan(&inv.Status, &inv.ResultJSON, &inv.ResultDigest); err != nil {
+	decision, err := loadMaterialRecoveryDecision(ctx, tx, p)
+	if err != nil {
 		return inv, false, err
 	}
-	if fresh == 0 && inv.Status != "succeeded" {
+	unresolved, err := materialUnknownIDs(ctx, tx, p.TaskID)
+	if err != nil {
+		return inv, false, err
+	}
+	pendingRecovery := decision != nil && decision.Replacement == "" && len(unresolved) == 1 && unresolved[0] == decision.Original
+	if len(unresolved) > 0 && !pendingRecovery {
 		return inv, false, ErrMaterialPreparationUnknown
 	}
-	if err = tx.Commit(); err != nil {
+	foundErr := tx.QueryRowContext(ctx, `SELECT invocation_id,status,result_json,result_digest FROM k12_material_invocations WHERE task_id=? AND operation=? AND request_digest=? ORDER BY attempt DESC LIMIT 1`, p.TaskID, operation, request).Scan(&inv.ID, &inv.Status, &inv.ResultJSON, &inv.ResultDigest)
+	if foundErr == nil && inv.Status == "succeeded" {
+		if inv.ResultDigest != problemAssetRequestDigest([]byte(inv.ResultJSON)) {
+			return inv, false, ErrProblemAssetEvidence
+		}
+		if decision != nil {
+			var plan MaterialRecoveryPlan
+			if json.Unmarshal([]byte(decision.PlanJSON), &plan) != nil {
+				return inv, false, ErrMaterialRecoveryConflict
+			}
+			reusable := inv.ID == decision.Replacement
+			for _, r := range plan.Reusable {
+				if r.InvocationID == inv.ID && r.Operation == operation && r.RequestDigest == request && r.ResultDigest == inv.ResultDigest {
+					reusable = true
+				}
+			}
+			if !reusable {
+				return inv, false, ErrMaterialRecoveryConflict
+			}
+		}
+		return inv, false, tx.Commit()
+	}
+	if foundErr != nil && !errors.Is(foundErr, sql.ErrNoRows) {
+		return inv, false, foundErr
+	}
+	attempt := 0
+	if decision != nil {
+		if !pendingRecovery || decision.Operation != operation || decision.Request != request || foundErr != nil || inv.ID != decision.Original {
+			return inv, false, ErrMaterialPreparationUnknown
+		}
+		attempt = decision.Attempt
+		inv.ID = problemAssetRequestDigest([]byte(p.TaskID + "\x00" + operation + "\x00" + request + "\x00" + decision.ID))
+	} else if foundErr == nil {
+		if inv.Status == "not_sent" {
+			return inv, false, egress.ErrProviderNotSent
+		}
+		return inv, false, ErrMaterialPreparationUnknown
+	}
+	inv.Status = "sent"
+	inv.ResultJSON = ""
+	inv.ResultDigest = ""
+	_, err = tx.ExecContext(ctx, `INSERT INTO k12_material_invocations(invocation_id,task_id,operation,request_digest,execution_kind,status,created_at,updated_at,attempt) VALUES(?,?,?,?,'provider','sent',?,?,?)`, inv.ID, p.TaskID, operation, request, nowUnix(), nowUnix(), attempt)
+	if err != nil {
 		return inv, false, err
 	}
-	return inv, fresh == 1, nil
+	if decision != nil {
+		res, e := tx.ExecContext(ctx, `UPDATE k12_material_recovery_decisions SET replacement_invocation_id=? WHERE decision_id=? AND replacement_invocation_id IS NULL`, inv.ID, decision.ID)
+		if e != nil {
+			return inv, false, e
+		}
+		n, _ := res.RowsAffected()
+		if n != 1 {
+			return inv, false, ErrMaterialPreparationUnknown
+		}
+	}
+	return inv, true, tx.Commit()
 }
 func (s *Store) FinishMaterialInvocation(ctx context.Context, inv MaterialInvocation, payload string, callErr error) error {
 	status := "succeeded"
 	if callErr != nil {
 		status = "outcome_unknown"
+		if errors.Is(callErr, egress.ErrProviderNotSent) {
+			status = "not_sent"
+		}
 	}
 	res, err := s.db.ExecContext(ctx, `UPDATE k12_material_invocations SET status=?,result_json=?,result_digest=?,updated_at=? WHERE invocation_id=? AND status='sent'`, status, payload, problemAssetRequestDigest([]byte(payload)), nowUnix(), inv.ID)
 	if err != nil {
@@ -149,11 +215,19 @@ func materialModelVerifiedAnswer(ctx context.Context, db dbHandle, p MaterialPre
 	return selected, nil
 }
 func (s *Store) SaveMaterialModelVerification(ctx context.Context, p MaterialPreparation, result string) (string, error) {
+	var visualErr error
+	result, visualErr = materialResultWithVisual(p, result)
+	if visualErr != nil {
+		return "", visualErr
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return "", err
 	}
 	defer tx.Rollback()
+	if _, err = materialFactsForResult(ctx, tx, p, result); err != nil {
+		return "", err
+	}
 	if _, err = tx.ExecContext(ctx, `UPDATE k12_material_preparations SET updated_at=updated_at WHERE task_id=? AND state='running'`, p.TaskID); err != nil {
 		return "", err
 	}
@@ -191,7 +265,6 @@ func materialModelProofJSON(p MaterialPreparation) string {
 
 // MaterialHasUnknownInvocation 以物理回执为准，不把求解器降级文本当成已知完成。
 func (s *Store) MaterialHasUnknownInvocation(ctx context.Context, task string) (bool, error) {
-	var unknown bool
-	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM k12_material_invocations WHERE task_id=? AND status IN ('sent','outcome_unknown'))`, task).Scan(&unknown)
-	return unknown, err
+	ids, err := materialUnknownIDs(ctx, s.db, task)
+	return len(ids) > 0, err
 }

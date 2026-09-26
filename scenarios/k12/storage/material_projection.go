@@ -10,25 +10,27 @@ import (
 
 // MaterialPreparationSummary 以当前来源修订统一生成摘要和题目明细。
 type MaterialPreparationSummary struct {
-	DocumentID         string                    `json:"document_id"`
-	SourceRevision     int64                     `json:"source_revision"`
-	State              string                    `json:"state"`
-	ExtractionComplete bool                      `json:"extraction_complete"`
-	Counts             map[string]int            `json:"counts"`
-	Items              []MaterialPreparationItem `json:"items"`
+	DocumentID         string                         `json:"document_id"`
+	SourceRevision     int64                          `json:"source_revision"`
+	State              string                         `json:"state"`
+	ExtractionComplete bool                           `json:"extraction_complete"`
+	Counts             map[string]int                 `json:"counts"`
+	Items              []MaterialPreparationItem      `json:"items"`
+	SourceObservations []MaterialReferenceObservation `json:"source_observations,omitempty"`
 }
 type MaterialPreparationItem struct {
-	CandidateID     string `json:"candidate_id"`
-	State           string `json:"state"`
-	Stem            string `json:"stem"`
-	ReferenceAnswer string `json:"reference_answer,omitempty"`
-	Answer          string `json:"answer,omitempty"`
-	BlockID         string `json:"block_id"`
-	Page            int    `json:"page,omitempty"`
-	Line            int    `json:"line"`
-	Reason          string `json:"reason,omitempty"`
-	AssetID         string `json:"asset_id,omitempty"`
-	AssetVersion    int    `json:"asset_version,omitempty"`
+	CandidateID     string   `json:"candidate_id"`
+	State           string   `json:"state"`
+	Stem            string   `json:"stem"`
+	ReferenceAnswer string   `json:"reference_answer,omitempty"`
+	Answer          string   `json:"answer,omitempty"`
+	BlockID         string   `json:"block_id"`
+	Page            int      `json:"page,omitempty"`
+	Line            int      `json:"line"`
+	Reason          string   `json:"reason,omitempty"`
+	AssetID         string   `json:"asset_id,omitempty"`
+	AssetVersion    int      `json:"asset_version,omitempty"`
+	SourceWarnings  []string `json:"source_warnings,omitempty"`
 }
 
 func (s *Store) GetMaterialPreparationSummary(ctx context.Context, owner, document string) (MaterialPreparationSummary, error) {
@@ -57,6 +59,9 @@ func (s *Store) materialPreparationSummary(ctx context.Context, owner, document 
 		return out, err
 	}
 	out.ExtractionComplete = manifest.ExtractionComplete
+	if details {
+		out.SourceObservations = manifest.ReferenceObservations
+	}
 	if !details {
 		rows, err := s.db.QueryContext(ctx, `SELECT CASE WHEN p.state='published' AND a.status='active' THEN 'ready' WHEN p.state='published' THEN 'needs_review' WHEN p.state IN ('queued','running','verified') THEN 'preparing' ELSE p.state END,COUNT(*) FROM k12_material_preparations p LEFT JOIN k12_problem_assets a ON a.asset_id=p.asset_id AND a.owner_id=p.owner_id WHERE p.owner_id=? AND p.document_id=? AND p.source_revision=? GROUP BY 1`, owner, document, out.SourceRevision)
 		if err != nil {
@@ -78,8 +83,26 @@ func (s *Store) materialPreparationSummary(ctx context.Context, owner, document 
 		return out, nil
 	}
 	pages := map[string]int{}
+	questionText := map[string]string{}
+	warnings := map[string][]string{}
+	references := map[string]string{}
+	for _, observation := range manifest.ReferenceObservations {
+		if observation.CandidateID == "" {
+			continue
+		}
+		references[observation.CandidateID] = observation.Text
+		if observation.Reason != "" {
+			warnings[observation.CandidateID] = append(warnings[observation.CandidateID], observation.Reason)
+		}
+	}
+	for _, issue := range manifest.SourceIssues {
+		warnings[issue.CandidateID] = append(warnings[issue.CandidateID], issue.Reason)
+	}
 	for _, block := range manifest.Blocks {
 		pages[block.ID] = block.Page
+		if block.Kind == "question" {
+			questionText[block.ID] = block.Text
+		}
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT p.candidate_json,p.state,p.reason,p.result_json,p.asset_id,p.asset_version,COALESCE(a.status,'') FROM k12_material_preparations p LEFT JOIN k12_problem_assets a ON a.asset_id=p.asset_id AND a.owner_id=p.owner_id WHERE p.owner_id=? AND p.document_id=? AND p.source_revision=? ORDER BY p.candidate_id`, owner, document, out.SourceRevision)
 	if err != nil {
@@ -97,6 +120,13 @@ func (s *Store) materialPreparationSummary(ctx context.Context, owner, document 
 			return out, err
 		}
 		item.CandidateID, item.Stem, item.ReferenceAnswer, item.BlockID, item.Line, item.Page = c.ID, c.Facts.Stem, c.ReferenceAnswer, c.BlockID, c.Line, pages[c.BlockID]
+		item.SourceWarnings = warnings[c.ID]
+		if item.ReferenceAnswer == "" {
+			item.ReferenceAnswer = references[c.ID]
+		}
+		if text, ok := questionText[c.BlockID]; ok {
+			item.Stem = text
+		}
 		var answer struct{ Solution string }
 		if strings.TrimSpace(result) != "" {
 			if err = json.Unmarshal([]byte(result), &answer); err != nil {
@@ -142,6 +172,9 @@ func materialSummaryState(out *MaterialPreparationSummary) {
 		out.State = "preparing"
 	} else if out.Counts["outcome_unknown"] > 0 {
 		out.State = "outcome_unknown"
+	} else if out.State == "preparing" && !out.ExtractionComplete {
+		// 页尚未收齐时已完成题仍可用，不把正在解析的尾部误报为解析失败。
+		out.State = "preparing"
 	} else if !out.ExtractionComplete || out.Counts["needs_review"] > 0 {
 		out.State = "needs_review"
 	} else if out.Counts["failed"] > 0 {

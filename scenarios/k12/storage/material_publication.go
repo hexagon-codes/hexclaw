@@ -10,6 +10,11 @@ import (
 
 // SaveMaterialLocalVerification 登记真实本地确定性验算，不伪装为 Provider 调用。
 func (s *Store) SaveMaterialLocalVerification(ctx context.Context, p MaterialPreparation, result string) error {
+	var visualErr error
+	result, visualErr = materialResultWithVisual(p, result)
+	if visualErr != nil {
+		return visualErr
+	}
 	var r struct {
 		Solution string
 		Evidence struct{ Verdict, EvidenceType string }
@@ -22,6 +27,9 @@ func (s *Store) SaveMaterialLocalVerification(ctx context.Context, p MaterialPre
 		return err
 	}
 	defer tx.Rollback()
+	if _, err = materialFactsForResult(ctx, tx, p, result); err != nil {
+		return err
+	}
 	res, err := tx.ExecContext(ctx, `UPDATE k12_material_preparations SET state='verified',result_json=?,result_digest=?,updated_at=? WHERE task_id=? AND state='running' AND input_digest=?`, result, problemAssetRequestDigest([]byte(result)), nowUnix(), p.TaskID, p.InputDigest)
 	if err != nil {
 		return err
@@ -57,7 +65,11 @@ func (s *Store) PublishPreparedMaterialAsset(ctx context.Context, taskID string)
 	if err = materialSourceCurrent(ctx, tx, p); err != nil {
 		return k12.ProblemAssetVersion{}, err
 	}
-	identity, err := p.Candidate.Facts.ExactIdentity(p.OwnerID)
+	verifiedFacts, err := materialFactsForResult(ctx, tx, p, p.ResultJSON)
+	if err != nil {
+		return k12.ProblemAssetVersion{}, err
+	}
+	identity, err := verifiedFacts.ExactIdentity(p.OwnerID)
 	if err != nil {
 		return k12.ProblemAssetVersion{}, err
 	}
@@ -96,7 +108,7 @@ func (s *Store) PublishPreparedMaterialAsset(ctx context.Context, taskID string)
 	if state != "active" {
 		return k12.ProblemAssetVersion{}, ErrProblemAssetUnavailable
 	}
-	facts, _ := json.Marshal(p.Candidate.Facts)
+	facts, _ := json.Marshal(verifiedFacts)
 	_, err = tx.ExecContext(ctx, `INSERT INTO k12_problem_asset_versions(owner_id,asset_id,asset_version,published_revision,facts_json,facts_digest,answer,answer_result_json,created_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(owner_id,asset_id,asset_version) DO NOTHING`, p.OwnerID, assetID, version, revision, string(facts), identity.FactsDigest, answer.Solution, p.ResultJSON, nowUnix())
 	if err != nil {
 		return k12.ProblemAssetVersion{}, err
@@ -118,4 +130,10 @@ func (s *Store) PublishPreparedMaterialAsset(ctx context.Context, taskID string)
 		return v, err
 	}
 	return v, tx.Commit()
+}
+
+// ReviewMaterialPublication 只收敛已验证但无法发布的候选，不撤销其他来源资产。
+func (s *Store) ReviewMaterialPublication(ctx context.Context, task, reason string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE k12_material_preparations SET state='needs_review',reason=?,updated_at=? WHERE task_id=? AND state='verified'`, reason, nowUnix(), task)
+	return err
 }
