@@ -27,7 +27,7 @@ RUN curl -fsSL https://github.com/jgm/pandoc/releases/download/3.9.0.2/pandoc-3.
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates tzdata fontconfig fonts-noto-cjk fonts-dejavu-core fonts-stix \
-    python3 python3-yaml python3-requests python3-sympy curl \
+    python3 python3-yaml python3-requests python3-sympy curl poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /hexclaw /usr/local/bin/hexclaw
 COPY --from=render-tools /usr/local/bin/pandoc /usr/local/bin/typst /usr/local/bin/

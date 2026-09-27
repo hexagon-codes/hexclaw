@@ -1751,11 +1751,14 @@ type JobHistory struct {
 
 // GetJobHistory 获取任务执行历史（最近 50 条，从新到旧）
 func (s *Scheduler) GetJobHistory(ctx context.Context, jobID string, limit ...int) ([]JobHistory, error) {
-	s.mu.RLock()
-	_, ok := s.jobs[jobID]
-	s.mu.RUnlock()
-	if !ok {
+	// 暂停任务重启后不进入活跃调度缓存，历史查询以持久记录为准。
+	var exists int
+	err := s.db.QueryRowContext(ctx, `SELECT 1 FROM cron_jobs WHERE id = ?`, jobID).Scan(&exists)
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("任务 %q 不存在", jobID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("query job for history: %w", err)
 	}
 
 	// limit 可选：缺省 50，传入 >0 时生效并夹到 [1,200]（bug 2026-06-22：前端 ?limit 此前被忽略）。
