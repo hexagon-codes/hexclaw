@@ -30,6 +30,138 @@ func tutorRefFixture(t *testing.T, s *k12storage.Store, key, message string) (k1
 	return k12storage.TutorContextRef{OwnerScope: "guardian", AgentName: "mingming", ConversationKey: k12storage.TutorConversationKey("desktop", "", "session"), MessageID: message, Kind: "source", JobID: job.RecordID, ProblemID: attempt.ProblemID, InputRevision: 1, ResultDigest: stored.ResultDigest, PrintedNumber: "3", QuestionJSON: string(q)}, stored, attempt
 }
 
+func tutorHomeworkFixture(t *testing.T, s *k12storage.Store, ref k12storage.TutorContextRef, dispatchID string) {
+	t.Helper()
+	ctx := context.Background()
+	dispatch := testImageTaskDispatch()
+	dispatch.DispatchID, dispatch.SourceRef = dispatchID, ref.MessageID
+	dispatch.IdempotencyKey, dispatch.ClassificationInvocationID = dispatchID, "classify-"+dispatchID
+	invocation := k12.ImageTaskInvocation{
+		InvocationID: dispatch.ClassificationInvocationID, AgentName: ref.AgentName, DispatchID: dispatchID,
+		Operation: k12.ImageTaskOperationClassification, OperationKey: "dispatch:" + dispatchID + ":classification",
+		RequestDigest: "sha256:classify-request", RouteSnapshot: testImageRoute(),
+		Status: k12.ImageTaskInvocationPrepared, Attempt: 1, CreatedAt: 100, UpdatedAt: 100,
+	}
+	if _, _, err := s.PrepareImageTaskDispatch(ctx, dispatch, invocation); err != nil {
+		t.Fatal(err)
+	}
+	_, err := s.DB().Exec(`INSERT INTO k12_homework_submissions
+		(submission_id,dispatch_id,agent_name,learner_id,source_kind,source_ref,source_asset_refs_json,task_intent,status,grading_job_id,idempotency_key,created_at,updated_at)
+		VALUES(?,?,'mingming','learner-1','desktop',?,'[]','completed_homework','completed',?,?,100,100)`,
+		"submission-"+dispatchID, dispatchID, ref.MessageID, ref.JobID, dispatchID)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTutorHomeworkNumberSummaryUsesExactStoredTaskAndScope(t *testing.T) {
+	s, _ := problemAssetStore(t)
+	ctx := context.Background()
+	first, _, _ := tutorRefFixture(t, s, "number-first", "photo-first")
+	second, _, _ := tutorRefFixture(t, s, "number-second", "photo-second")
+	first.ConversationKey = k12storage.TutorConversationKey("dingtalk", "family-bot", "parent")
+	second.ConversationKey = first.ConversationKey
+	if err := s.SaveTutorSourceRefs(ctx, []k12storage.TutorContextRef{first, second}); err != nil {
+		t.Fatal(err)
+	}
+	tutorHomeworkFixture(t, s, first, "task-first")
+	tutorHomeworkFixture(t, s, second, "task-second")
+	deps := &usecase.Deps{Records: s}
+	input := usecase.TutorFollowupInput{OwnerScope: first.OwnerScope, AgentName: first.AgentName,
+		ConversationKey: first.ConversationKey, MessageID: "summary", ReplyTo: "native-result-id",
+		Query: "这条批改对应哪次作业？作业编号：HW-task-first"}
+	for range 2 {
+		text, err := deps.TutorFollowupDirective(ctx, input)
+		if err != nil || !strings.Contains(text, `"homework_id":"HW-task-first"`) || !strings.Contains(text, first.JobID) || strings.Contains(text, second.JobID) || !strings.Contains(text, `"status":"correct"`) {
+			t.Fatalf("exact summary: %q %v", text, err)
+		}
+	}
+	for _, change := range []func(*usecase.TutorFollowupInput){
+		func(in *usecase.TutorFollowupInput) { in.OwnerScope = "another-owner" },
+		func(in *usecase.TutorFollowupInput) { in.AgentName = "another-child" },
+		func(in *usecase.TutorFollowupInput) {
+			in.ConversationKey = k12storage.TutorConversationKey("dingtalk", "another-bot", "parent")
+		},
+		func(in *usecase.TutorFollowupInput) {
+			in.ConversationKey = k12storage.TutorConversationKey("dingtalk", "family-bot", "another-parent")
+		},
+		func(in *usecase.TutorFollowupInput) { in.Query = "作业编号：HW-unknown" },
+	} {
+		other := input
+		change(&other)
+		text, err := deps.TutorFollowupDirective(ctx, other)
+		if err != nil || !strings.Contains(text, "No stored homework") || strings.Contains(text, first.JobID) {
+			t.Fatalf("scope or absent reference guessed: %q %v", text, err)
+		}
+	}
+	input.Query = "HW-task-first 和 HW-task-second 对应哪次作业"
+	if text, err := deps.TutorFollowupDirective(ctx, input); err != nil || !strings.Contains(text, "multiple homework references") {
+		t.Fatalf("multiple IDs guessed: %q %v", text, err)
+	}
+	input.Query = "这条批改对应哪次作业"
+	if text, err := deps.TutorFollowupDirective(ctx, input); err != nil || !strings.Contains(text, "No stored homework reference") {
+		t.Fatalf("legacy native ID guessed: %q %v", text, err)
+	}
+	var refs, assessments, invocations int
+	err := s.DB().QueryRow(`SELECT (SELECT count(*) FROM k12_tutor_context_refs),
+		(SELECT count(*) FROM k12_grading_assessment_items), (SELECT count(*) FROM k12_grading_item_invocations)`).Scan(&refs, &assessments, &invocations)
+	if err != nil || refs != 2 || assessments != 2 || invocations != 4 {
+		t.Fatalf("summary mutated homework: refs=%d assessments=%d invocations=%d err=%v", refs, assessments, invocations, err)
+	}
+	input.MessageID, input.Query = "question", "HW-task-first 第三题再讲一下"
+	for range 2 {
+		text, err := deps.TutorFollowupDirective(ctx, input)
+		if err != nil || !strings.Contains(text, first.JobID) || strings.Contains(text, second.JobID) || !strings.Contains(text, "Homework follow-up context") {
+			t.Fatalf("numbered question: %q %v", text, err)
+		}
+	}
+	if err := s.DB().QueryRow(`SELECT count(*) FROM k12_tutor_context_refs WHERE kind='followup'`).Scan(&refs); err != nil || refs != 1 {
+		t.Fatalf("replay created duplicate association: %d %v", refs, err)
+	}
+}
+
+func TestTutorHomeworkNumberSummaryDoesNotRequireSubquestion(t *testing.T) {
+	s, _ := problemAssetStore(t)
+	ctx := context.Background()
+	ref, original, attempt := tutorRefFixture(t, s, "worksheet-summary", "photo")
+	second := problemAttemptFixture("mingming", "submission-1").Attempts[1]
+	second.ConfirmedVersion, second.InputDigest = 1, "sha256:input-child-2-v1"
+	solve := correctionProof(t, s, ref.JobID, second, k12.GradingItemOperationSolve, 2, true)
+	grade := correctionProof(t, s, ref.JobID, second, k12.GradingItemOperationGrade, 2, true)
+	item := assessmentReceipt(ref.JobID, second, solve, grade)
+	item.ResultDigest = "sha256:summary-second"
+	stored, _, err := s.CommitGradingAssessmentItem(ctx, item, k12storage.GradingAssessmentEffects{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := ref
+	other.ProblemID, other.ResultDigest = stored.ProblemID, stored.ResultDigest
+	if err := s.SaveTutorSourceRefs(ctx, []k12storage.TutorContextRef{ref, other}); err != nil {
+		t.Fatal(err)
+	}
+	tutorHomeworkFixture(t, s, ref, "worksheet")
+	deps := &usecase.Deps{Records: s}
+	input := usecase.TutorFollowupInput{OwnerScope: ref.OwnerScope, AgentName: ref.AgentName, ConversationKey: ref.ConversationKey, MessageID: "summary", Query: "HW-worksheet 对应哪次作业？"}
+	text, err := deps.TutorFollowupDirective(ctx, input)
+	if err != nil || !strings.Contains(text, `"problem_id":"`+ref.ProblemID+`"`) || !strings.Contains(text, `"problem_id":"`+other.ProblemID+`"`) || strings.Contains(text, "reference is ambiguous") {
+		t.Fatalf("worksheet incorrectly requires one question: %q %v", text, err)
+	}
+	corrected := original
+	corrected.GradeInvocationID = correctionProof(t, s, original.JobID, attempt, k12.GradingItemOperationGrade, 3, true)
+	corrected.Status, corrected.ResultJSON, corrected.ResultDigest = k12.GradingAssessmentUntrusted, `{"Status":"untrusted"}`, "sha256:withdrawn"
+	if _, _, err := s.AppendGradingAssessmentCorrection(ctx, k12.GradingAssessmentCorrection{CorrectionID: "summary-correction", OriginalResultDigest: original.ResultDigest, Reason: k12.AssessmentCorrectionGrading, Assessment: corrected}, k12storage.GradingAssessmentEffects{}); err != nil {
+		t.Fatal(err)
+	}
+	text, err = deps.TutorFollowupDirective(ctx, input)
+	if err != nil || strings.Contains(text, original.ResultDigest) || !strings.Contains(text, `"status":"untrusted"`) {
+		t.Fatalf("summary ignored current correction: %q %v", text, err)
+	}
+	input.MessageID, input.Query = "duplicate-question", "HW-worksheet 第三题再讲"
+	if text, err = deps.TutorFollowupDirective(ctx, input); err != nil || !strings.Contains(text, "reference is ambiguous") {
+		t.Fatalf("duplicate printed question guessed: %q %v", text, err)
+	}
+}
+
 func TestTutorContextReplayRestartAndScope(t *testing.T) {
 	s, path := problemAssetStore(t)
 	ctx := context.Background()

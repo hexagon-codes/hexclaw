@@ -58,3 +58,26 @@ func TestDingTalkStreamFramePreservesExplicitFollowupReference(t *testing.T) {
 		})
 	}
 }
+
+func TestDingTalkStreamPreservesHomeworkNumberInReceivedText(t *testing.T) {
+	captured := make(chan *adapter.Message, 1)
+	a := newTestAdapter()
+	a.openAPI = newFakeDingtalkOpenAPI("tok")
+	a.handler = func(_ context.Context, message *adapter.Message) (*adapter.Reply, error) {
+		captured <- message
+		return nil, nil
+	}
+	const content = "这次作业有哪些问题？作业编号：HW-existing-task"
+	response, err := a.onChatBotFrame(context.Background(), &dtpayload.DataFrame{Data: `{"msgId":"number-followup","conversationType":"1","senderStaffId":"parent","msgtype":"text","text":{"content":"` + content + `","isReplyMsg":true,"repliedMsg":{"msgId":"native-result"}}}`})
+	if err != nil || response == nil {
+		t.Fatalf("callback: %+v %v", response, err)
+	}
+	select {
+	case message := <-captured:
+		if message.Content != content || message.ReplyTo != "native-result" || message.ChatID != "parent" {
+			t.Fatalf("number or native identity changed: %+v", message)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("numbered text did not reach the common handler")
+	}
+}

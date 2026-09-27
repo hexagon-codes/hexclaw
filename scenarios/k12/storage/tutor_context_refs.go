@@ -49,6 +49,43 @@ func (s *Store) TutorSourceIdentity(ctx context.Context, dispatch k12.ImageTaskD
 	return tutorSourceIdentityVia(ctx, s.db, dispatch)
 }
 
+// TutorHomeworkReferences 从明确任务编号读取同一物理会话内已登记的原题。
+func (s *Store) TutorHomeworkReferences(ctx context.Context, scope TutorContextRef, dispatchID string) ([]TutorContextRef, error) {
+	if scope.OwnerScope == "" || scope.AgentName == "" || scope.ConversationKey == "" || dispatchID == "" {
+		return nil, records.ErrNotFound
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT `+tutorContextColumns+` FROM k12_tutor_context_refs r
+		WHERE owner_scope=? AND agent_name=? AND conversation_key=? AND kind='source'
+		AND job_id IN (SELECT grading_job_id FROM k12_homework_submissions WHERE agent_name=? AND dispatch_id=?)
+		AND input_revision=(SELECT input_revision FROM k12_grading_assessment_items a
+			WHERE a.agent_name=r.agent_name AND a.job_id=r.job_id AND a.problem_id=r.problem_id AND a.current_disposition='current')
+		ORDER BY rowid`, scope.OwnerScope, scope.AgentName, scope.ConversationKey, scope.AgentName, dispatchID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var refs []TutorContextRef
+	seen := make(map[string]bool)
+	for rows.Next() {
+		ref, err := scanTutorContext(rows)
+		if err != nil {
+			return nil, err
+		}
+		key := ref.JobID + "\x00" + ref.ProblemID
+		if !seen[key] {
+			seen[key] = true
+			refs = append(refs, ref)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(refs) == 0 {
+		return nil, records.ErrNotFound
+	}
+	return refs, nil
+}
+
 func tutorSourceIdentityVia(ctx context.Context, q dbQueryer, dispatch k12.ImageTaskDispatch) (TutorContextRef, error) {
 	var owner string
 	err := q.QueryRowContext(ctx, `SELECT owner_scope FROM k12_image_task_owner_scopes WHERE agent_name=? AND dispatch_id=?`, dispatch.AgentName, dispatch.DispatchID).Scan(&owner)

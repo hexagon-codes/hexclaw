@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/records"
@@ -1138,6 +1139,27 @@ func (r *k12DingtalkPhotoInboundRuntime) advanceFinalReply(
 	if !errors.Is(lookupErr, records.ErrNotFound) {
 		return false, lookupErr
 	}
+	command.Message.Content = k12DingtalkHomeworkNumberedContent(artifact.CanonicalMarkdown, bundle.Dispatch.ImageTaskID)
+	// 旧内容先查，保留升级前尚未绑定的批次；新内容也须先查，避免崩溃窗口重复外发。
+	if command.Message.Content != artifact.CanonicalMarkdown {
+		existing, lookupErr = r.replyBatches.GetDeliveryBatchForMessageIdentity(
+			ctx, command.AgentName, k12DingtalkPhotoReplyObjectKind, objectID, command.Message.Content, identities,
+		)
+		if lookupErr == nil {
+			if err := validateK12DingtalkPhotoReplyBatch(existing, target, asset.MIME); err != nil {
+				return false, err
+			}
+			bound, err := r.inbound.BindReplyBatch(ctx, bundle.Receipt.AgentName, bundle.Receipt.ReceiptID, bundle.Dispatch.Version, existing.BatchID)
+			if err != nil {
+				return false, err
+			}
+			bundle.Dispatch = bound
+			return r.completeBoundReply(ctx, bundle)
+		}
+		if !errors.Is(lookupErr, records.ErrNotFound) {
+			return false, lookupErr
+		}
+	}
 	deliveryStartedAt := time.Now()
 	batch, _, deliverErr := r.replies.Deliver(ctx, command)
 	if strings.TrimSpace(batch.BatchID) != "" {
@@ -1193,6 +1215,18 @@ func (r *k12DingtalkPhotoInboundRuntime) advanceFinalReply(
 		"part_count", len(batch.Receipts),
 	)
 	return true, nil
+}
+
+// k12DingtalkHomeworkNumberedContent 将稳定作业身份冻结进新投递正文，标签沿用正文语言。
+func k12DingtalkHomeworkNumberedContent(content, dispatchID string) string {
+	if strings.TrimSpace(dispatchID) == "" {
+		return content
+	}
+	label := "Homework ID: "
+	if strings.ContainsFunc(content, func(r rune) bool { return unicode.Is(unicode.Han, r) }) {
+		label = "作业编号："
+	}
+	return strings.TrimSpace(content) + "\n\n" + label + "HW-" + dispatchID
 }
 
 func (r *k12DingtalkPhotoInboundRuntime) reachRestartCheckpoint(

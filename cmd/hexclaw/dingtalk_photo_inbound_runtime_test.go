@@ -580,6 +580,82 @@ func TestDingTalkPhotoReplyBindsCrashWindowBatchThenQueriesWithoutResend(t *test
 	}
 }
 
+type numberedReplyBatchFake struct {
+	finalReplyBatchFake
+	content       string
+	preparedBatch k12.DeliveryBatch
+}
+
+func (f *numberedReplyBatchFake) GetDeliveryBatchForMessageIdentity(
+	_ context.Context, _, _, _, content string, _ []k12usecase.DeliveryAttachmentIdentity,
+) (k12.DeliveryBatch, error) {
+	if f.existing.BatchID != "" && f.content == content {
+		return f.existing, nil
+	}
+	return k12.DeliveryBatch{}, records.ErrNotFound
+}
+
+func (f *numberedReplyBatchFake) PrepareAndSendMessageBatchForTargets(
+	ctx context.Context, agent, kind, id string, message k12usecase.DeliveryMessage, targets []k12usecase.ResolvedDeliveryTarget,
+) (k12.DeliveryBatch, bool, error) {
+	f.existing, f.content = f.preparedBatch, message.Content
+	return f.finalReplyBatchFake.PrepareAndSendMessageBatchForTargets(ctx, agent, kind, id, message, targets)
+}
+
+func TestDingTalkHomeworkNumberOnlyAddedToNewBatch(t *testing.T) {
+	for _, tc := range []struct{ name, content string }{
+		{"new", ""},
+		{"legacy_crash_window", "## 批改结果\n\n订正建议"},
+		{"numbered_crash_window", "## 批改结果\n\n订正建议\n\n作业编号：HW-task-number"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			source := []byte("source-photo")
+			bundle := inboundPhotoBundleFixture(source)
+			bundle.Dispatch.ProcessingStatus = k12usecase.InboundPhotoFinalArtifactReady
+			bundle.Dispatch.RoutingDecision = k12usecase.InboundPhotoRouteNewSubmission
+			bundle.Dispatch.FinalArtifactID, bundle.Dispatch.ImageTaskID = "final-1", "task-number"
+			bundle.Dispatch.ReplyStatus = k12usecase.InboundPhotoReplyReady
+			coordinator := &inboundPhotoCoordinatorFake{bundle: bundle}
+			artifact, annotated := finalArtifactFixture(source)
+			target := k12.DeliveryTarget{Platform: "dingtalk", InstanceID: "family-bot", ChatID: "parent-1"}
+			batch := k12.DeliveryBatch{BatchID: "numbered-batch", AgentName: "student", Status: k12.DeliveryBatchDelivered,
+				Receipts: []k12.DeliveryReceipt{
+					{DeliveryID: "markdown", BindingID: "agent-rule:1", Target: target, PartKind: messagecontent.PartMarkdown, PartOrdinal: 1},
+					{DeliveryID: "image", BindingID: "agent-rule:1", Target: target, PartKind: messagecontent.PartArtifact, PartOrdinal: 2, PartMIME: "image/png"},
+				}}
+			port := &numberedReplyBatchFake{content: tc.content, preparedBatch: batch}
+			if tc.content != "" {
+				port.existing = batch
+			}
+			runtime := newK12DingtalkPhotoInboundRuntime(k12DingtalkPhotoInboundRuntimeConfig{
+				BaseContext: context.Background(), Inbound: coordinator, ReplyBatches: port,
+				Artifacts: finalArtifactReaderFake{artifact: artifact, asset: annotated},
+			})
+			for i := 0; i < 2; i++ {
+				done, err := runtime.advanceFinalReply(context.Background(), coordinator.bundle)
+				if err != nil || !done {
+					t.Fatalf("advance %d: done=%v err=%v", i, done, err)
+				}
+			}
+			wantPrepare := 0
+			if tc.content == "" {
+				wantPrepare = 1
+				if port.lastMessage.Content != "## 批改结果\n\n订正建议\n\n作业编号：HW-task-number" || len(port.lastMessage.Attachments) != 1 || string(port.lastMessage.Attachments[0].Data) != "annotated-image" {
+					t.Fatalf("new reply lost body, ID or image: %+v", port.lastMessage)
+				}
+			} else if port.content != tc.content {
+				t.Fatalf("existing batch content changed: %q", port.content)
+			}
+			if port.prepareCalls != wantPrepare || coordinator.boundBatchID != batch.BatchID {
+				t.Fatalf("batch recreated: prepares=%d bound=%q", port.prepareCalls, coordinator.boundBatchID)
+			}
+		})
+	}
+	if got := k12DingtalkHomeworkNumberedContent("## Homework result\n\nCorrect", "english-task"); got != "## Homework result\n\nCorrect\n\nHomework ID: HW-english-task" {
+		t.Fatalf("English result footer: %q", got)
+	}
+}
+
 func TestDingTalkPhotoFinalArtifactIsNotRecordedBeforeExactSourceValidation(t *testing.T) {
 	source := []byte("source-photo")
 	bundle := inboundPhotoBundleFixture(source)
