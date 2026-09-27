@@ -1,6 +1,6 @@
 # 云端部署与日常运维
 
-适用于本仓库包含云端连接支持的源码构建。当前镜像为 Linux amd64，包含 Pandoc、Typst、中文和数学字体、Python 及 SymPy。服务存储使用 SQLite；同一数据目录只运行一个实例。单机日常运行推荐 Docker Compose；已有 Kubernetes 集群使用相同镜像和独立 PVC。
+适用于本仓库包含云端连接支持的源码构建。当前镜像为 Linux amd64，包含 Pandoc、Typst、Poppler、中文和数学字体、Python 及 SymPy。Poppler 提供 PDF 页数读取、文本提取及原页渲染。服务存储使用 SQLite；同一数据目录只运行一个实例。单机日常运行推荐 Docker Compose；已有 Kubernetes 集群使用相同镜像和独立 PVC。
 
 ## Docker Compose
 
@@ -73,7 +73,9 @@ Compose 留出 60 秒停止窗口，覆盖服务当前 30 秒收尾预算。已�
 
 ## 按提交自动部署
 
-源码已提供 `.github/workflows/deploy.yml` 和 `scripts/ops/deploy.py`。当前尚未在交付服务器启用。备份、按摘要更新、锁内版本复核与失败恢复已通过 8 项本地隔离 Docker 回归，覆盖真实 SQLite／WAL、数据卷、Git 与镜像仓库；模型进程与 SSH 失败为可控边界。该证据不替代实际发行镜像的业务恢复、异机副本和真实 Actions／服务器验收；确定部署分支并完成相应交付核验后再启用。
+源码提供 `.github/workflows/deploy.yml` 和 `scripts/ops/deploy.py`。部署需按下方配置显式启用。备份、按摘要更新、锁内版本复核与失败恢复已通过隔离 Docker 回归；[真实 Actions 部署记录](https://github.com/hexagon-codes/hexclaw/actions/runs/36291184852)已完成镜像发布及 Compose 更新，原数据卷、后端身份、配置及数据库版本保持。部署就绪检查不代替每个环境的模型、IM 与 Desktop 业务验收。
+
+`workflow_run` 的监听文件必须存在于仓库默认分支；实际构建仍检出上游 CI 已通过的 `head_sha`。`HEXCLAW_DEPLOY_BRANCH` 应选择既有 CI 监听的分支，不能只配置变量而没有相应 CI 运行。首次接入时若该提交的 CI 在监听文件合入前已经完成，可重新运行该次 CI，让完成事件接续部署，无需创建空提交。
 
 部署目录放置私有 `deployment-target.json`，按该服务器的实际项目填写。例如：
 
@@ -97,7 +99,7 @@ GitHub 配置项：
 | --- | --- |
 | Repository variables | `HEXCLAW_DEPLOY_BRANCH`：上述同一分支；`HEXCLAW_DEPLOY_ENABLED=true`：完成恢复验收后启用 |
 | Environment `hexclaw-cloud` variables | `HEXCLAW_DEPLOY_PROJECT`：服务器部署目录绝对路径 |
-| Environment `hexclaw-cloud` secrets | `HEXCLAW_DEPLOY_HOST`、`HEXCLAW_DEPLOY_SSH_KEY`、`HEXCLAW_DEPLOY_KNOWN_HOSTS`：沿用服务器已有 SSH 身份及主机信任信息 |
+| Environment `hexclaw-cloud` secrets | `HEXCLAW_DEPLOY_HOST`、`HEXCLAW_DEPLOY_SSH_KEY`、`HEXCLAW_DEPLOY_KNOWN_HOSTS`：配置部署专用 SSH 凭据及已核对的主机信息，保留服务器原有登录方式 |
 
 CI 对指定分支的 push 完成且成功后，构建对应的完整提交 SHA，推送 `sha-<commit>` 镜像；部署任务传递构建返回的 digest。构建可取消过期任务，进入服务器变更的部署不被下一次提交自动取消。服务端与备份共用 `.hexclaw-maintenance.lock`，取得锁后及备份完成后再次向仓库核对绑定分支的当前提交，过期任务只记录 `superseded`。
 
