@@ -1318,6 +1318,11 @@ func (m *Manager) searchResultsModeAtRevision(
 			)
 			observeRetrievalLane(ctx, RetrievalLaneVector, time.Since(vectorStarted), len(vres), vErr, false)
 			if vErr != nil {
+				// 固定版本查询必须返回该版本的真实失败原因，不能把关键词
+				// 降级伪装成有完整向量回执的结果。普通检索仍按原策略降级。
+				if expectedRevisionID != "" {
+					return nil, nil, fmt.Errorf("pinned revision vector search failed: %w", vErr)
+				}
 				if !errors.Is(vErr, ErrEmbeddingUnavailable) {
 					logger.Error("[knowledge] frozen revision 向量搜索失败", "error", vErr)
 				}

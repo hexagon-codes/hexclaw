@@ -4,14 +4,51 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"io"
 	"testing"
 
+	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/hexclaw/knowledge"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/usecase"
 )
 
 const groundingEvidenceSourceDigest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+func TestGroundingEvidencePreservesQueryFailureClassification(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		err     error
+		notSent bool
+		status  int
+	}{
+		{"not sent", errors.Join(knowledge.ErrEmbeddingQueryNotSent, knowledge.ErrEmbeddingUnavailable), true, 0},
+		{"provider rejected", &llm.ProviderError{StatusCode: 403}, false, 403},
+		{"transport lost", io.EOF, false, 0},
+		{"unavailable without send evidence", knowledge.ErrEmbeddingUnavailable, false, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			kb := validGroundingEvidenceKB()
+			kb.pinnedErr = tc.err
+			_, err := NewGroundingAdapter(kb).GroundSnapshotWithEvidence(context.Background(), validGroundingEvidenceSnapshot(), "小数除法", "五年级下")
+			if !errors.Is(err, tc.err) || errors.Is(err, usecase.ErrGroundingQueryNotSent) != tc.notSent {
+				t.Fatalf("failure classification=%v", err)
+			}
+			var response usecase.DefinitiveProviderResponse
+			gotStatus := 0
+			if errors.As(err, &response) {
+				gotStatus = response.ProviderResponseStatusCode()
+			}
+			if gotStatus != tc.status {
+				t.Fatalf("response status=%d want %d", gotStatus, tc.status)
+			}
+			if kb.pinnedCalls != 1 || kb.legacyCalls != 0 || kb.unpinnedCalls != 0 {
+				t.Fatal("failed pinned query used fallback")
+			}
+		})
+	}
+}
 
 type groundingEvidenceKB struct {
 	activeRevision string

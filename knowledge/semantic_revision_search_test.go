@@ -607,7 +607,7 @@ func TestRevisionSemanticSearchActiveOfflineExecutorIsTextOnlyStandby(t *testing
 		t.Fatalf("offline active readiness=%v err=%v, want false/nil", ready, err)
 	}
 	results, routeRan, err := searcher.Search(h.ctx, "must not hit offline embedder", 5, Filter{})
-	if !errors.Is(err, ErrEmbeddingUnavailable) || routeRan || len(results) != 0 || executor.calls != 0 {
+	if !errors.Is(err, ErrEmbeddingUnavailable) || !errors.Is(err, ErrEmbeddingQueryNotSent) || routeRan || len(results) != 0 || executor.calls != 0 {
 		t.Fatalf("offline search: results=%+v route=%v calls=%d err=%v",
 			results, routeRan, executor.calls, err)
 	}

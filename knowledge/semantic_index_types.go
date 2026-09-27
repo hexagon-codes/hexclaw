@@ -16,6 +16,8 @@ var (
 	// ErrProfileUnavailable means a selection cannot currently resolve to an
 	// installed or connected embedding profile. Download is a separate action.
 	ErrProfileUnavailable = errors.New("knowledge: embedding profile unavailable")
+	// ErrEmbeddingQueryNotSent 仅由查询发送前的执行器可用性检查返回。
+	ErrEmbeddingQueryNotSent = errors.New("knowledge: embedding query was not sent")
 	// ErrSemanticIndexNotFound deliberately hides cross-owner existence.
 	ErrSemanticIndexNotFound = errors.New("knowledge: semantic index resource not found")
 	// ErrPolicyVersionConflict is returned before any policy side effects.

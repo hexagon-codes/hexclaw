@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -239,7 +240,10 @@ func (a *GroundingAdapter) GroundSnapshotWithEvidence(
 		ctx, pinned, query, a.topK, filter,
 	)
 	if err != nil {
-		return usecase.GroundingSnapshotResult{}, fmt.Errorf("grounding: pinned retrieval: %w", err)
+		if errors.Is(err, knowledge.ErrEmbeddingQueryNotSent) {
+			return usecase.GroundingSnapshotResult{}, fmt.Errorf("%w: %w", usecase.ErrGroundingQueryNotSent, err)
+		}
+		return usecase.GroundingSnapshotResult{}, fmt.Errorf("grounding: pinned retrieval: %w", providerResponseError(err))
 	}
 	if err := validateGroundingReceipts(receipts, pinned, query); err != nil {
 		return usecase.GroundingSnapshotResult{}, err

@@ -84,6 +84,20 @@ type GroundingRetrievalInvocationResult struct {
 	ProfileConfigHash  string
 }
 
+// GroundingRetrievalFailure 保留可核实的失败分类，不保存上游正文或凭据。
+type GroundingRetrievalFailure struct {
+	Kind       string `json:"kind"`
+	StatusCode int    `json:"status_code,omitempty"`
+}
+
+func (f GroundingRetrievalFailure) Validate() error {
+	if f.Kind == "not_sent" && f.StatusCode == 0 ||
+		f.Kind == "provider_response" && f.StatusCode >= 400 && f.StatusCode <= 599 {
+		return nil
+	}
+	return fmt.Errorf("invalid grounding retrieval failure")
+}
+
 func validateGroundingRetrievalClaim(claim GroundingRetrievalInvocationClaim) error {
 	for name, value := range map[string]string{
 		"owner_id": claim.OwnerID, "agent_name": claim.AgentName, "job_id": claim.JobID,
@@ -307,13 +321,60 @@ func (s *Store) SaveGroundingRetrievalInvocation(
 	return tx.Commit()
 }
 
+// MarkGroundingRetrievalInvocationFailed 保存明确失败；终态只能幂等复用，不能改写。
+func (s *Store) MarkGroundingRetrievalInvocationFailed(
+	ctx context.Context,
+	invocation GroundingRetrievalInvocation,
+	failure GroundingRetrievalFailure,
+) error {
+	if strings.TrimSpace(invocation.InvocationID) == "" || strings.TrimSpace(invocation.InvocationKey) == "" {
+		return fmt.Errorf("invalid grounding retrieval invocation identity")
+	}
+	if err := failure.Validate(); err != nil {
+		return err
+	}
+	raw, err := json.Marshal(failure)
+	if err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	stored, err := scanGroundingRetrievalInvocation(tx.QueryRowContext(ctx,
+		groundingRetrievalInvocationSelect+` WHERE invocation_id=?`, invocation.InvocationID))
+	if err != nil {
+		return err
+	}
+	if stored.InvocationKey != invocation.InvocationKey {
+		return fmt.Errorf("grounding retrieval invocation identity drifted")
+	}
+	if stored.Status == GroundingRetrievalInvocationStatusFailed && stored.ResultJSON == string(raw) {
+		return tx.Commit()
+	}
+	if stored.Status != GroundingRetrievalInvocationStatusPrepared && stored.Status != GroundingRetrievalInvocationStatusRunning {
+		return fmt.Errorf("grounding retrieval invocation terminal result conflicts")
+	}
+	updated, err := tx.ExecContext(ctx, `UPDATE k12_grounding_retrieval_invocations SET
+		status='failed',result_json=?,updated_at=? WHERE invocation_id=? AND invocation_key=? AND status IN ('prepared','running')`,
+		string(raw), time.Now().UTC().UnixMilli(), invocation.InvocationID, invocation.InvocationKey)
+	if err != nil {
+		return err
+	}
+	if changed, err := updated.RowsAffected(); err != nil || changed != 1 {
+		return ErrGroundingRetrievalInvocationOutcomeUnknown
+	}
+	return tx.Commit()
+}
+
 // MarkGroundingRetrievalInvocationOutcomeUnknown 把没有可验证返回的召回停在恢复态。
 func (s *Store) MarkGroundingRetrievalInvocationOutcomeUnknown(
 	ctx context.Context,
 	invocation GroundingRetrievalInvocation,
 	_ string,
 ) error {
-	if strings.TrimSpace(invocation.InvocationID) == "" {
+	if strings.TrimSpace(invocation.InvocationID) == "" || strings.TrimSpace(invocation.InvocationKey) == "" {
 		return fmt.Errorf("invalid grounding retrieval invocation identity")
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -321,14 +382,28 @@ func (s *Store) MarkGroundingRetrievalInvocationOutcomeUnknown(
 		return err
 	}
 	defer tx.Rollback()
-	updated, err := tx.ExecContext(ctx, `UPDATE k12_grounding_retrieval_invocations SET
-		status='outcome_unknown',updated_at=? WHERE invocation_id=? AND status IN ('prepared','running')`,
-		time.Now().UTC().UnixMilli(), invocation.InvocationID)
+	stored, err := scanGroundingRetrievalInvocation(tx.QueryRowContext(ctx,
+		groundingRetrievalInvocationSelect+` WHERE invocation_id=?`, invocation.InvocationID))
 	if err != nil {
 		return err
 	}
-	if changed, _ := updated.RowsAffected(); changed == 0 {
+	if stored.InvocationKey != invocation.InvocationKey {
+		return fmt.Errorf("grounding retrieval invocation identity drifted")
+	}
+	if stored.Status == GroundingRetrievalInvocationStatusOutcomeUnknown {
 		return tx.Commit()
+	}
+	if stored.Status != GroundingRetrievalInvocationStatusPrepared && stored.Status != GroundingRetrievalInvocationStatusRunning {
+		return fmt.Errorf("grounding retrieval invocation terminal result conflicts")
+	}
+	updated, err := tx.ExecContext(ctx, `UPDATE k12_grounding_retrieval_invocations SET
+		status='outcome_unknown',updated_at=? WHERE invocation_id=? AND invocation_key=? AND status IN ('prepared','running')`,
+		time.Now().UTC().UnixMilli(), invocation.InvocationID, invocation.InvocationKey)
+	if err != nil {
+		return err
+	}
+	if changed, err := updated.RowsAffected(); err != nil || changed != 1 {
+		return ErrGroundingRetrievalInvocationOutcomeUnknown
 	}
 	return tx.Commit()
 }

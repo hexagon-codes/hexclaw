@@ -398,10 +398,13 @@ func (s *SQLiteRevisionSemanticSearcher) SearchWithPlanReceipt(
 	}
 	executor, err := s.registry.ExecutorForProfile(ctx, plan.profile)
 	if err != nil {
+		if errors.Is(err, ErrProfileUnavailable) || errors.Is(err, ErrEmbeddingUnavailable) {
+			return nil, false, nil, fmt.Errorf("%w: %w", ErrEmbeddingQueryNotSent, err)
+		}
 		return nil, false, nil, err
 	}
 	if readiness, ok := executor.(ProfileEmbeddingExecutorReadiness); ok && !readiness.EmbeddingReady(ctx) {
-		return nil, false, nil, ErrEmbeddingUnavailable
+		return nil, false, nil, fmt.Errorf("%w: %w", ErrEmbeddingQueryNotSent, ErrEmbeddingUnavailable)
 	}
 	var (
 		permit         *resourcegov.Permit

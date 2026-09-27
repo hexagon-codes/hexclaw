@@ -19,6 +19,8 @@ import (
 var (
 	ErrGradingPhysicalCallOutcomeUnknown = errors.New("grading physical call outcome unknown")
 	ErrGradingGroundingUnavailable       = errors.New("grading grounding unavailable")
+	// ErrGroundingQueryNotSent 表示适配器确认教材查询尚未发往模型。
+	ErrGroundingQueryNotSent = errors.New("grounding query was not sent")
 )
 
 type GradingPhysicalCallSpec struct {
@@ -599,6 +601,16 @@ func (session *gradingGroundingSession) resolveItem(
 		invocation, claimErr := session.retrieval.ClaimGroundingRetrievalInvocation(ctx, claim)
 		if claimErr == nil {
 			if !invocation.Fresh {
+				if invocation.Status == k12storage.GroundingRetrievalInvocationStatusFailed {
+					var failure k12storage.GroundingRetrievalFailure
+					if err := json.Unmarshal([]byte(invocation.ResultJSON), &failure); err != nil || failure.Validate() != nil {
+						state.err = fmt.Errorf("%w: invalid grounding failure receipt", ErrModelInvocationRequiresReconciliation)
+					} else {
+						state.err = fmt.Errorf("%w: pinned textbook query failed: %s (status=%d)",
+							ErrGradingGroundingUnavailable, failure.Kind, failure.StatusCode)
+					}
+					return gradingProviderGrounding{}, state.err
+				}
 				if invocation.Status != k12storage.GroundingRetrievalInvocationStatusSucceeded {
 					state.err = fmt.Errorf(
 						"%w: grounding retrieval invocation=%s status=%s",
@@ -618,15 +630,7 @@ func (session *gradingGroundingSession) resolveItem(
 				ctx, snapshot, query, strings.TrimSpace(req.Grade),
 			)
 			if queryErr != nil {
-				if marker, ok := any(session.retrieval).(interface {
-					MarkGroundingRetrievalInvocationOutcomeUnknown(context.Context, k12storage.GroundingRetrievalInvocation, string) error
-				}); ok {
-					_ = marker.MarkGroundingRetrievalInvocationOutcomeUnknown(ctx, invocation, queryErr.Error())
-				}
-				state.err = fmt.Errorf(
-					"%w: pinned textbook query failed: %v",
-					ErrGradingGroundingUnavailable, queryErr,
-				)
+				state.err = session.recordQueryFailure(ctx, invocation, queryErr)
 				return gradingProviderGrounding{}, state.err
 			}
 			evidence, evidenceErr := newGradingProviderGrounding(snapshot, result)
@@ -640,12 +644,15 @@ func (session *gradingGroundingSession) resolveItem(
 				return gradingProviderGrounding{}, state.err
 			}
 			queryReceiptDigest, hitSetDigest, citationSetDigest := groundingRetrievalResultDigests(result)
-			if saveErr := session.retrieval.SaveGroundingRetrievalInvocation(ctx, invocation,
+			commitCtx, cancelCommit := gradingDurableCommitContext(ctx)
+			defer cancelCommit()
+			if saveErr := session.retrieval.SaveGroundingRetrievalInvocation(commitCtx, invocation,
 				k12storage.GroundingRetrievalInvocationResult{
 					ResultJSON: string(resultJSON), QueryReceiptDigest: queryReceiptDigest,
 					HitSetDigest: hitSetDigest, CitationSetDigest: citationSetDigest,
 				}); saveErr != nil {
-				state.err = fmt.Errorf("%w: persist grounding retrieval result: %v", ErrGradingGroundingUnavailable, saveErr)
+				state.err = errors.Join(ErrGradingGroundingUnavailable, ErrModelInvocationRequiresReconciliation,
+					fmt.Errorf("persist grounding retrieval result: %w", saveErr))
 				return gradingProviderGrounding{}, state.err
 			}
 			state.evidence = evidence
@@ -668,6 +675,45 @@ func (session *gradingGroundingSession) resolveItem(
 	}
 	state.evidence, state.err = newGradingProviderGrounding(snapshot, result)
 	return state.evidence, state.err
+}
+
+// recordQueryFailure 只持久化稳定分类；取消请求也不能跳过已发生调用的记账。
+func (session *gradingGroundingSession) recordQueryFailure(
+	ctx context.Context, invocation k12storage.GroundingRetrievalInvocation, queryErr error,
+) error {
+	commitCtx, cancel := gradingDurableCommitContext(ctx)
+	defer cancel()
+	failure := k12storage.GroundingRetrievalFailure{}
+	if errors.Is(queryErr, ErrGroundingQueryNotSent) {
+		failure.Kind = "not_sent"
+	} else if status, ok := definitiveProviderResponseStatus(queryErr); ok && status >= 400 && status <= 599 {
+		failure.Kind, failure.StatusCode = "provider_response", status
+	}
+	var saveErr error
+	if failure.Kind != "" {
+		if marker, ok := any(session.retrieval).(interface {
+			MarkGroundingRetrievalInvocationFailed(context.Context, k12storage.GroundingRetrievalInvocation, k12storage.GroundingRetrievalFailure) error
+		}); ok {
+			saveErr = marker.MarkGroundingRetrievalInvocationFailed(commitCtx, invocation, failure)
+		} else {
+			saveErr = k12storage.ErrGroundingRetrievalInvocationLedgerUnavailable
+		}
+	} else if marker, ok := any(session.retrieval).(interface {
+		MarkGroundingRetrievalInvocationOutcomeUnknown(context.Context, k12storage.GroundingRetrievalInvocation, string) error
+	}); ok {
+		saveErr = marker.MarkGroundingRetrievalInvocationOutcomeUnknown(commitCtx, invocation, "")
+	} else {
+		saveErr = k12storage.ErrGroundingRetrievalInvocationLedgerUnavailable
+	}
+	if saveErr != nil {
+		return errors.Join(ErrGradingGroundingUnavailable, ErrModelInvocationRequiresReconciliation,
+			fmt.Errorf("persist grounding retrieval failure: %w", saveErr))
+	}
+	if failure.Kind == "" {
+		return errors.Join(ErrGradingGroundingUnavailable, ErrModelInvocationRequiresReconciliation,
+			fmt.Errorf("pinned textbook query outcome unknown: %w", queryErr))
+	}
+	return fmt.Errorf("%w: pinned textbook query failed: %w", ErrGradingGroundingUnavailable, queryErr)
 }
 
 func groundingRetrievalClaim(
