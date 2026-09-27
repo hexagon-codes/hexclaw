@@ -172,10 +172,10 @@ func RequestsFromContext(ctx context.Context) ([]Request, bool) {
 func (p *Policy) GuardContext(ctx context.Context) error {
 	requests, ok := RequestsFromContext(ctx)
 	if !ok {
-		return fmt.Errorf("egress 拦截: 缺少 purpose/data-class envelope")
+		return fmt.Errorf("%w: missing purpose/data-class envelope", ErrDenied)
 	}
 	if len(requests) == 0 {
-		return fmt.Errorf("egress 拦截: data-class envelope 为空")
+		return fmt.Errorf("%w: empty data-class envelope", ErrDenied)
 	}
 	var firstErr error
 	for _, req := range requests {

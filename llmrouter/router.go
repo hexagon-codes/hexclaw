@@ -242,6 +242,8 @@ func (r *Selector) providerLocked(name string) hexagon.Provider {
 	if p == nil {
 		return p
 	}
+	// 在所有出口检查内侧标记；本地或云端已执行后均不能再推断整次操作未发送。
+	p = preserveContextTokenCounter(&providerAttemptProvider{Provider: p}, p)
 	if r.egressPolicy != nil && !r.isLocalProviderName(name) {
 		inner := p
 		p = preserveContextTokenCounter(&cloudEgressProvider{next: inner, policy: r.egressPolicy}, inner)
@@ -264,6 +266,18 @@ func (r *Selector) providerLocked(name string) hexagon.Provider {
 		}, inner)
 	}
 	return p
+}
+
+type providerAttemptProvider struct{ hexagon.Provider }
+
+func (p *providerAttemptProvider) Complete(ctx context.Context, req llm.CompletionRequest) (*llm.CompletionResponse, error) {
+	egress.MarkProviderAttempt(ctx)
+	return p.Provider.Complete(ctx, req)
+}
+
+func (p *providerAttemptProvider) Stream(ctx context.Context, req llm.CompletionRequest) (*llm.Stream, error) {
+	egress.MarkProviderAttempt(ctx)
+	return p.Provider.Stream(ctx, req)
 }
 
 type completionCapabilityProvider struct {
@@ -1054,7 +1068,7 @@ func (r *Selector) selectByPriority(priorities map[string]int) string {
 
 	var candidates []ranked
 	for name := range r.providers {
-		if !r.isProviderHealthyLocked(name) {
+		if !r.isProviderHealthyLocked(name) || !r.hasCompletionModelLocked(name) {
 			continue
 		}
 		p, ok := priorities[name]
@@ -1071,6 +1085,10 @@ func (r *Selector) selectByPriority(priorities map[string]int) string {
 	sort.Slice(candidates, func(i, j int) bool {
 		if candidates[i].priority != candidates[j].priority {
 			return candidates[i].priority < candidates[j].priority
+		}
+		// 同优先级保留用户默认聊天提供方，不因自定义名称排序切换服务。
+		if candidates[i].name == r.defaultP || candidates[j].name == r.defaultP {
+			return candidates[i].name == r.defaultP
 		}
 		return candidates[i].name < candidates[j].name // stable tie-break
 	})
@@ -1102,6 +1120,15 @@ func (r *Selector) Fallback(exclude ...string) (hexagon.Provider, string, error)
 	return nil, "", fmt.Errorf("没有可用的备用 Provider")
 }
 
+// hasCompletionModelLocked 将仅向量提供方留在索引路径，不纳入自动聊天候选。
+func (r *Selector) hasCompletionModelLocked(name string) bool {
+	provider, configured := r.cfg.Providers[name]
+	if !configured {
+		return true
+	}
+	return config.ModelHasCapabilities(provider, provider.Model, config.LLMModelCapabilityText)
+}
+
 func (r *Selector) fallbackNameLocked(exclude []string) string {
 	excludeSet := make(map[string]bool, len(exclude))
 	for _, e := range exclude {
@@ -1114,7 +1141,7 @@ func (r *Selector) fallbackNameLocked(exclude []string) string {
 	// plain alphabetical order made the local provider win every fallback).
 	var remote, local []string
 	for name := range r.providers {
-		if excludeSet[name] || !r.isProviderHealthyLocked(name) {
+		if excludeSet[name] || !r.isProviderHealthyLocked(name) || !r.hasCompletionModelLocked(name) {
 			continue
 		}
 		if r.isLocalProviderName(name) {

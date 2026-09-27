@@ -995,6 +995,13 @@ func numericValue(s string) (float64, bool) {
 	if s == "" {
 		return 0, false
 	}
+	if mixedNumberAnswerRe.MatchString(s) {
+		value, ok := mixedNumberAnswerValue(s)
+		if !ok {
+			return 0, false
+		}
+		return numericValue(value)
+	}
 	if t := strings.TrimRight(s, "%％"); t != s { // 百分数
 		if v, ok := numericValue(t); ok {
 			return v / 100, true
@@ -1018,6 +1025,14 @@ func numberSet(s string) ([]float64, bool) {
 	s = normalizeAnswer(s)
 	if s == "" {
 		return nil, false
+	}
+	// 带分数是一个标量，不能按中间空格拆成两个答案。
+	if mixedNumberAnswerRe.MatchString(s) {
+		value, ok := numericValue(s)
+		if !ok {
+			return nil, false
+		}
+		return []float64{value}, true
 	}
 	var nums []float64
 	for _, p := range answerSetSep.Split(s, -1) {
@@ -1056,6 +1071,15 @@ func numberSetsEqual(as, bs []float64) bool {
 
 // sameUnitAnswersEqual 仅比较单个数值与相同的明确单位，不剥单位、不转换单位或猜测文字含义。
 func sameUnitAnswersEqual(a, b string) (equal, comparable bool) {
+	for _, answer := range []*string{&a, &b} {
+		if equivalentQuantityRe.MatchString(*answer) {
+			quantity, ok := parseAnswerQuantity(*answer)
+			if !ok {
+				return false, false
+			}
+			*answer = quantity.value + " " + quantity.unit
+		}
+	}
 	am := bareQuantityRe.FindStringSubmatch(normalizeAnswer(a))
 	bm := bareQuantityRe.FindStringSubmatch(normalizeAnswer(b))
 	if len(am) != 3 || len(bm) != 3 || am[2] == "" || am[2] != bm[2] {

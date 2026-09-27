@@ -3891,6 +3891,9 @@ func (e *ReActEngine) shouldAutoInjectKB(msg *adapter.Message) bool {
 	if msg == nil {
 		return false
 	}
+	if msg.Metadata["knowledge"] == "off" {
+		return false
+	}
 	content := strings.TrimSpace(msg.Content)
 	if len([]rune(content)) < 4 || explicitlyDeclinesKnowledgeRetrieval(content) {
 		return false

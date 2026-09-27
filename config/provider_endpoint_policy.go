@@ -68,13 +68,9 @@ func providerPlainHTTPAuthorized(
 	return ip == nil || ip.IsPrivate()
 }
 
-// providerEndpointIsClashFakeIP reports whether ip is a synthetic fake IP
-// produced by Clash/Mihomo enhanced-mode DNS (198.18.0.0/16 and the default
-// fdfe:dcba:9876::/64). These addresses are intercepted by the TUN stack and
-// forwarded to the real public origin; they must not be treated as a
-// special-purpose or private block for hostname-based provider endpoints.
-// Literal IP endpoints (e.g. http://198.18.0.1) remain blocked to preserve
-// SSRF protection for IP-literal URLs.
+// providerEndpointIsClashFakeIP 识别 Clash/Mihomo DNS 合成地址。
+// 域名请求由 TUN 转发至真实上游，兼容既有与当前双栈 Fake-IP 范围；
+// 字面 IP 端点继续使用原有地址校验，不按合成地址处理。
 func providerEndpointIsClashFakeIP(logicalHost string, ip net.IP) bool {
 	if net.ParseIP(logicalHost) != nil {
 		return false
@@ -88,7 +84,8 @@ func providerEndpointIsClashFakeIP(logicalHost string, ip net.IP) bool {
 	}
 	addr = addr.Unmap()
 	fakeIPv6Prefix := netip.MustParsePrefix("fdfe:dcba:9876::/64")
-	return fakeIPv6Prefix.Contains(addr)
+	mihomoIPv6Prefix := netip.MustParsePrefix("2001:2::/64")
+	return fakeIPv6Prefix.Contains(addr) || mihomoIPv6Prefix.Contains(addr)
 }
 
 // ValidateProviderResolvedEndpointAccess applies the provider endpoint policy

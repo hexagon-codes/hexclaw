@@ -12,6 +12,7 @@ import (
 	hexagon "github.com/hexagon-codes/hexagon"
 
 	"github.com/hexagon-codes/hexclaw/egress"
+	"github.com/hexagon-codes/hexclaw/llmrouter"
 	"github.com/hexagon-codes/hexclaw/memory"
 )
 
@@ -81,6 +82,10 @@ func (s *llmProfileSynthesizer) complete(ctx context.Context, system, user strin
 		response, callErr := provider.Complete(ctx, request)
 		if callErr == nil {
 			return strings.TrimSpace(response.Content), nil
+		}
+		// 本地能力校验发生在请求发送前，不能记录成上游结果未知。
+		if errors.Is(callErr, llmrouter.ErrModelCapabilityMismatch) || errors.Is(callErr, llmrouter.ErrNoCapableModel) {
+			return "", fmt.Errorf("%w: %v", memory.ErrProfileRejected, callErr)
 		}
 		var providerErr *llm.ProviderError
 		if !errors.As(callErr, &providerErr) {

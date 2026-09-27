@@ -428,3 +428,28 @@ func TestRouter_WithBaseURL(t *testing.T) {
 		t.Fatal("Provider 不应为 nil")
 	}
 }
+
+func TestRouteEmbeddingOnlyDoesNotReplaceChatSelection(t *testing.T) {
+	for _, strategy := range []string{"default", "quality-first", "cost-aware", "latency-first"} {
+		t.Run(strategy, func(t *testing.T) {
+			s := newTestSelectorDirect([]string{"Google Gemini", "hexclaw-gpt", "backup"}, "hexclaw-gpt", config.LLMRoutingConfig{Enabled: true, Strategy: strategy})
+			s.cfg.Providers = map[string]config.LLMProviderConfig{
+				"Google Gemini": {Models: []string{"models/gemini-embedding-2"}, ModelSpecsMode: config.LLMModelSpecsModeExplicit, ModelSpecs: []config.LLMProviderModelSpec{{ID: "models/gemini-embedding-2", Capabilities: []string{config.LLMModelCapabilityEmbedding}}}},
+				"hexclaw-gpt":   {Model: "gpt-5.6-luna"},
+				"backup":        {Model: "chat-model"},
+			}
+			if _, name, err := s.Route(context.Background()); err != nil || name != "hexclaw-gpt" {
+				t.Fatalf("automatic chat did not preserve the equally ranked default: name=%q err=%v", name, err)
+			}
+			if _, name, err := s.Fallback("hexclaw-gpt"); err != nil || name != "backup" {
+				t.Fatalf("chat fallback=%q err=%v", name, err)
+			}
+			if s.DefaultName() != "hexclaw-gpt" {
+				t.Fatal("embedding provider changed the configured chat default")
+			}
+			if _, ok := s.Get("Google Gemini"); !ok {
+				t.Fatal("embedding provider was removed from the registry")
+			}
+		})
+	}
+}

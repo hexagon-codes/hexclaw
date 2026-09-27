@@ -138,7 +138,7 @@ func (p *Policy) decide(req Request) Decision {
 // Guard 便捷断言：若不允许上云则返回 error（供出网调用点前置守卫）。
 func (p *Policy) Guard(req Request) error {
 	if d := p.Evaluate(req); !d.AllowCloud {
-		return fmt.Errorf("egress 拦截: %s", d.Reason)
+		return fmt.Errorf("%w: %s", ErrDenied, d.Reason)
 	}
 	return nil
 }

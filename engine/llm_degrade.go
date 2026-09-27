@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"strings"
+
+	"github.com/hexagon-codes/hexclaw/egress"
 )
 
 // BUG-20260711：模型/provider 侧失败时不再把原始技术错误糊给用户。两条正交能力：
@@ -90,6 +92,8 @@ func (e *friendlyLLMContextError) Unwrap() error { return e.cause }
 
 func newFriendlyLLMError(message string, err error) error {
 	switch {
+	case errors.Is(err, egress.ErrDenied):
+		return &friendlyLLMContextError{message: message, cause: egress.ErrDenied}
 	case errors.Is(err, context.DeadlineExceeded):
 		return &friendlyLLMContextError{message: message, cause: context.DeadlineExceeded}
 	case errors.Is(err, context.Canceled):

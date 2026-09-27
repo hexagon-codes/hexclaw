@@ -10,6 +10,9 @@ import (
 
 const elementaryNumberPattern = `([0-9]+(?:\.[0-9]+)?)`
 
+// 带分数必须在普通分数之前匹配，保留整数与分数之间的分隔。
+const answerQuantityNumberPattern = `([+\-]?(?:[0-9]+(?:[ \t]+|又)[0-9]+[ \t]*/[ \t]*[0-9]+|[0-9]+(?:\.[0-9]+)?(?:/[0-9]+)?))`
+
 var (
 	elementaryParenthesizedFractionRe = regexp.MustCompile(`\(([0-9]+)\)/\(([0-9]+)\)`)
 	inverseFractionProblemRe          = regexp.MustCompile(`^(?:[0-9]+[.．、])?一个数的([0-9]+)/([0-9]+)是` + elementaryNumberPattern + `[，,。.]?(?:求(?:这个数|原数)(?:是多少)?|(?:这个数|原数)(?:是)?多少)[?？。.]?$`)
@@ -19,10 +22,11 @@ var (
 	ticketGCDLCMRe                    = regexp.MustCompile(`^(?:小明)?有(?:一)?张([0-9]+)至([0-9]+)排的电影票[，,]这张票的排数和座位号的最大公约数是([0-9]+)[，,]最小公倍数是([0-9]+)[，,。.](?:小明)?这张电影票是[（(][）)]排[（(][）)]号[。.]?$`)
 	sixNumberBalanceRe                = regexp.MustCompile(`^(?:[0-9]+[.．、])?在下列六个数[:：]([0-9]+)[、,，]([0-9]+)[、,，]([0-9]+)[、,，]([0-9]+)[、,，]([0-9]+)[、,，]([0-9]+)中[，,]?划去(?:一个)?数[（(]?[）)]?后[，,]?能使其中3个数的和(?:是|为)?另外2个数(?:的)?和的2倍[。.]?$`)
 
-	finalQuantityMarkerRe = regexp.MustCompile(`(?i)(?:答案?|答)\s*(?:是|为)?\s*[:：]?\s*([+\-]?[0-9]+(?:\.[0-9]+)?(?:/[0-9]+)?)\s*(平方米|千克|公斤|m²|m2|kg|克|米|g|m)?`)
+	finalQuantityMarkerRe = regexp.MustCompile(`(?i)(?:答案?|答)\s*(?:是|为)?\s*[:：]?\s*` + answerQuantityNumberPattern + `\s*(平方米|千克|公斤|m²|m2|kg|克|米|g|m)?`)
 	removedNumberMarkerRe = regexp.MustCompile(`划去(?:数)?\s*[:：]?\s*([+\-]?[0-9]+)`)
-	bareQuantityRe        = regexp.MustCompile(`(?i)^\s*([+\-]?[0-9]+(?:\.[0-9]+)?(?:/[0-9]+)?)\s*(平方米|千克|公斤|m²|m2|kg|克|米|g|m)?\s*$`)
-	equationQuantityRe    = regexp.MustCompile(`(?i)[=＝]\s*([+\-]?[0-9]+(?:\.[0-9]+)?(?:/[0-9]+)?)(?:\s*(?:[（(]\s*)?(平方米|千克|公斤|m²|m\^?2|kg|克|米|g|m)(?:\s*[）)])?)?`)
+	bareQuantityRe        = regexp.MustCompile(`(?i)^\s*` + answerQuantityNumberPattern + `\s*(平方厘米|cm²|cm\^?2|平方米|千克|公斤|m²|m2|kg|克|米|g|m)?\s*$`)
+	equivalentQuantityRe  = regexp.MustCompile(`^\s*(.+?)[（(]\s*(?:也就是|即)\s*(.+?)[）)]\s*$`)
+	equationQuantityRe    = regexp.MustCompile(`(?i)[=＝]\s*` + answerQuantityNumberPattern + `(?:\s*(?:[（(]\s*)?(平方米|千克|公斤|m²|m\^?2|kg|克|米|g|m)(?:\s*[）)])?)?`)
 	equationUnitSuffixRe  = regexp.MustCompile(`(?i)\s*(?:[（(]\s*)?(?:平方米|千克|公斤|m²|m\^?2|kg|克|米|g|m)(?:\s*[）)])?\s*$`)
 )
 
@@ -242,6 +246,15 @@ func parseAnswerQuantity(answer string) (answerQuantity, bool) {
 	if strings.TrimSpace(answer) == "" || len(answer) > 1024 {
 		return answerQuantity{}, false
 	}
+	if parts := equivalentQuantityRe.FindStringSubmatch(answer); len(parts) == 3 {
+		// 括号内外必须都是完整单量且值、单位一致，不能忽略相互冲突的表示。
+		if !bareQuantityRe.MatchString(parts[1]) || !bareQuantityRe.MatchString(parts[2]) {
+			return answerQuantity{}, false
+		}
+		left, leftOK := parseAnswerQuantity(parts[1])
+		right, rightOK := parseAnswerQuantity(parts[2])
+		return left, leftOK && rightOK && quantitiesEqual(left, right)
+	}
 	if matches := removedNumberMarkerRe.FindAllStringSubmatch(answer, -1); len(matches) > 0 {
 		match := matches[len(matches)-1]
 		_, value, ok := solveTrivialArithmetic(match[1])
@@ -265,6 +278,10 @@ func parseAnswerQuantity(answer string) (answerQuantity, bool) {
 		return answerQuantity{}, false
 	}
 	unit := normalizeAnswerUnit(match[2])
+	if mixedNumberAnswerRe.MatchString(match[1]) {
+		value, ok := mixedNumberAnswerValue(match[1])
+		return answerQuantity{value: value, unit: unit}, ok
+	}
 	if unit == "" {
 		if value, ok := arithmeticAnswerValue(answer); ok {
 			return answerQuantity{value: value}, true
@@ -283,6 +300,8 @@ func normalizeAnswerUnit(unit string) string {
 		return "千克"
 	case "克", "g":
 		return "克"
+	case "平方厘米", "cm²", "cm2", "cm^2":
+		return "平方厘米"
 	case "平方米", "m²", "m2", "m^2":
 		return "平方米"
 	case "米", "m":

@@ -106,9 +106,15 @@ func (fm *FileMemory) listRoles() []string {
 	}
 	var roles []string
 	for _, e := range ents {
-		if e.IsDir() && e.Name() != "_global" {
-			roles = append(roles, e.Name())
+		if !e.IsDir() {
+			continue
 		}
+		// 回执目录不承载角色事实，不能再次合成全局画像。
+		switch e.Name() {
+		case "_global", ".event-receipts", ".profile-operations":
+			continue
+		}
+		roles = append(roles, e.Name())
 	}
 	sort.Strings(roles)
 	return roles
