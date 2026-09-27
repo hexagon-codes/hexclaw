@@ -14,20 +14,23 @@ import (
 
 // weeklyPhysicalReceipt 保存一次物理调用的完整返回；汇总解析不覆盖原始证据。
 type weeklyPhysicalReceipt struct {
-	Operation     k12.GradingItemOperation `json:"operation"`
-	RequestDigest string                   `json:"request_digest"`
-	Status        string                   `json:"status"`
-	Payload       string                   `json:"payload,omitempty"`
-	Error         string                   `json:"error,omitempty"`
+	Operation         k12.GradingItemOperation `json:"operation"`
+	RequestDigest     string                   `json:"request_digest"`
+	Status            string                   `json:"status"`
+	Payload           string                   `json:"payload,omitempty"`
+	Error             string                   `json:"error,omitempty"`
+	ReuseSourceDigest string                   `json:"reuse_source_digest,omitempty"`
 }
 
 type weeklySolveInterpretation struct {
-	IdempotencyKey string      `json:"idempotency_key"`
-	RequestDigest  string      `json:"request_digest"`
-	InputDigest    string      `json:"input_digest"`
-	ReceiptsDigest string      `json:"receipts_digest"`
-	CreatedAt      int64       `json:"created_at"`
-	Result         SolveResult `json:"result"`
+	IdempotencyKey       string      `json:"idempotency_key"`
+	RequestDigest        string      `json:"request_digest"`
+	InputDigest          string      `json:"input_digest"`
+	ReceiptsDigest       string      `json:"receipts_digest"`
+	CreatedAt            int64       `json:"created_at"`
+	Result               SolveResult `json:"result"`
+	SourcePlanRevision   int         `json:"source_plan_revision,omitempty"`
+	ExpectedPlanRevision int         `json:"expected_plan_revision,omitempty"`
 }
 
 type weeklyPhysicalExecutor struct {
@@ -41,6 +44,9 @@ type weeklyPhysicalExecutor struct {
 
 // GradingPhysicalCallsReplayOnly 让适配器在只读回执模式下拒绝未受拦截的调用。
 func GradingPhysicalCallsReplayOnly(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
 	executor, ok := ctx.Value(gradingPhysicalCallContextKey{}).(*weeklyPhysicalExecutor)
 	return ok && executor.replayOnly
 }
@@ -50,10 +56,10 @@ func (e *weeklyPhysicalExecutor) ExecuteGradingPhysicalCall(ctx context.Context,
 	defer e.mu.Unlock()
 	fail := func(err error) (GradingPhysicalCallResult, error) {
 		e.err = err
-		return GradingPhysicalCallResult{}, err
+		return GradingPhysicalCallResult{}, gradingPhysicalNoRetryError{cause: err}
 	}
 	if e.err != nil {
-		return GradingPhysicalCallResult{}, e.err
+		return GradingPhysicalCallResult{}, gradingPhysicalNoRetryError{cause: e.err}
 	}
 	if spec.Operation != k12.GradingItemOperationSolveGenerate && spec.Operation != k12.GradingItemOperationSolveVerify {
 		return fail(fmt.Errorf("weekly physical operation unavailable"))

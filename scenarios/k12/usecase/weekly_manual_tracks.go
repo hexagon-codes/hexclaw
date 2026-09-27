@@ -143,6 +143,26 @@ func (d Deps) PrepareWeeklyTextbookTrack(
 		progress.EvidenceSource != "parent_confirmed" {
 		return k12.WeeklyPracticePlan{}, false, records.ErrIllegalTransition
 	}
+	found := false
+	for _, track := range plan.Tracks {
+		found = found || track.PlanSection == k12.WeeklySectionTextbookConsolidation
+	}
+	if !found {
+		return k12.WeeklyPracticePlan{}, false, records.ErrIllegalTransition
+	}
+	request := WeeklyPracticeCandidateRequest{AgentName: agentName, PlanSection: k12.WeeklySectionTextbookConsolidation,
+		MaxItems: itemCount, Progress: *progress}
+	request, err = d.prepareWeeklyCandidateCommand(ctx, request, plan, "refresh", key, requestDigest)
+	if err != nil {
+		return k12.WeeklyPracticePlan{}, false, err
+	}
+	return d.finishWeeklyTextbookTrack(ctx, plan, request, expectedRevision, key, requestDigest, 0)
+}
+
+// finishWeeklyTextbookTrack 消费已有冻结请求，仅替换当前计划的教材分区。
+func (d Deps) finishWeeklyTextbookTrack(ctx context.Context, plan k12.WeeklyPracticePlan,
+	request WeeklyPracticeCandidateRequest, expectedRevision int, key, requestDigest string, recoverySourceRevision int,
+) (k12.WeeklyPracticePlan, bool, error) {
 	index := -1
 	for i := range plan.Tracks {
 		if plan.Tracks[i].PlanSection == k12.WeeklySectionTextbookConsolidation {
@@ -157,16 +177,15 @@ func (d Deps) PrepareWeeklyTextbookTrack(
 	if len(plan.Tracks) > 0 {
 		budget = max(0, 600-len(plan.Tracks[0].Items)*60)
 	}
-	request := WeeklyPracticeCandidateRequest{AgentName: agentName, PlanSection: k12.WeeklySectionTextbookConsolidation,
-		MaxItems: itemCount, Progress: *progress}
-	request, err = d.prepareWeeklyCandidateCommand(ctx, request, plan, "refresh", key, requestDigest)
-	if err != nil {
-		return k12.WeeklyPracticePlan{}, false, err
-	}
 	nextTrack, nextKeys, _ := d.weeklySupplementRequest(ctx, request, true, budget)
 	if nextTrack.Status != k12.WeeklyTrackReady {
 		return k12.WeeklyPracticePlan{}, false,
 			fmt.Errorf("%w: %s", ErrSolveFailed, nextTrack.FailureMessage)
+	}
+	if recoverySourceRevision > 0 {
+		if err := d.validateWeeklyRecoverySource(ctx, request); err != nil {
+			return k12.WeeklyPracticePlan{}, false, err
+		}
 	}
 	next := plan
 	next.Tracks = append([]k12.WeeklyPracticeTrack(nil), plan.Tracks...)
@@ -182,18 +201,18 @@ func (d Deps) PrepareWeeklyTextbookTrack(
 		next.AnswerKeys[itemID] = answer
 	}
 	next.Revision++
-	revision := progress.Revision
+	revision := request.Progress.Revision
 	next.CurriculumProgressRevision = &revision
 	next.UpdatedAt = d.now()
 	next.SourceDigest = digestValue(struct {
 		PlanID    string
 		ItemCount int
 		Track     k12.WeeklyPracticeTrack
-	}{next.PlanID, itemCount, nextTrack})
+	}{next.PlanID, request.MaxItems, nextTrack})
 	checkpointJSON := d.weeklyCandidateCheckpointJSON(ctx, request)
 	stored, replay, _, err := d.Records.CommitWeeklyTextbookRefresh(
-		ctx, agentName, planID, expectedRevision, key, requestDigest,
-		next, true, itemCount, string(checkpointJSON), d.now())
+		ctx, plan.AgentName, plan.PlanID, expectedRevision, key, requestDigest,
+		next, true, request.MaxItems, string(checkpointJSON), d.now(), recoverySourceRevision)
 	if err != nil {
 		return k12.WeeklyPracticePlan{}, false, err
 	}

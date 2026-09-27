@@ -616,6 +616,7 @@ func (s *Store) CommitWeeklyTextbookRefresh(
 	manualItemCount int,
 	checkpointJSON string,
 	at int64,
+	recoverySourceRevision ...int,
 ) (k12.WeeklyPracticePlan, bool, bool, error) {
 	weeklyArithmeticMu.Lock()
 	defer weeklyArithmeticMu.Unlock()
@@ -651,6 +652,18 @@ func (s *Store) CommitWeeklyTextbookRefresh(
 	}
 	if current.Status != k12.WeeklyPlanDraft || current.Revision != expectedRevision {
 		return k12.WeeklyPracticePlan{}, false, false, records.ErrVersionConflict
+	}
+	if len(recoverySourceRevision) > 1 {
+		return k12.WeeklyPracticePlan{}, false, false, records.ErrVersionConflict
+	}
+	if len(recoverySourceRevision) == 1 && recoverySourceRevision[0] > 0 {
+		current, err = weeklyTextbookRecoveryPlanVia(ctx, tx, agentName, planID)
+		if err != nil {
+			return k12.WeeklyPracticePlan{}, false, false, err
+		}
+		if err := validateWeeklyTextbookRecoveryTarget(ctx, tx, current, recoverySourceRevision[0], expectedRevision, key, responseJSON); err != nil {
+			return k12.WeeklyPracticePlan{}, false, false, err
+		}
 	}
 	if err := validateWeeklyPracticeAssets(ctx, tx, agentName, next.Tracks, next.AnswerKeys); err != nil {
 		return k12.WeeklyPracticePlan{}, false, false, err

@@ -31,6 +31,7 @@ type weeklyCandidateCall struct {
 	Error           string                      `json:"error,omitempty"`
 	InputDigest     string                      `json:"input_digest,omitempty"`
 	PhysicalCalls   []weeklyPhysicalReceipt     `json:"physical_calls,omitempty"`
+	PhysicalHistory []weeklyPhysicalReceipt     `json:"physical_history,omitempty"`
 	Interpretations []weeklySolveInterpretation `json:"interpretations,omitempty"`
 }
 
@@ -480,7 +481,28 @@ func resetWeeklyKnownFailures(request *WeeklyPracticeCandidateRequest) {
 			step.Generate = weeklyCandidateCall{}
 		}
 		if step.Solve.Status == "failed" {
-			step.Solve = weeklyCandidateCall{}
+			if len(step.Solve.PhysicalCalls) == 0 {
+				step.Solve = weeklyCandidateCall{}
+				continue
+			}
+			unknown := false
+			for _, receipt := range step.Solve.PhysicalCalls {
+				unknown = unknown || receipt.Status == "sent" || receipt.Status == "outcome_unknown"
+			}
+			if unknown {
+				continue
+			}
+			successful := make([]weeklyPhysicalReceipt, 0, len(step.Solve.PhysicalCalls))
+			for _, receipt := range step.Solve.PhysicalCalls {
+				if receipt.Status == "succeeded" {
+					successful = append(successful, receipt)
+				} else {
+					step.Solve.PhysicalHistory = append(step.Solve.PhysicalHistory, receipt)
+				}
+			}
+			step.Solve.Status, step.Solve.Error = "", ""
+			step.Solve.Result = nil
+			step.Solve.PhysicalCalls = successful
 		}
 	}
 }

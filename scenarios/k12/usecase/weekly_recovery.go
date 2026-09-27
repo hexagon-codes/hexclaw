@@ -21,6 +21,8 @@ type WeeklyTextbookRecoveryRequest struct {
 	ItemIndex                int    `json:"item_index"`
 	IdempotencyKey           string `json:"idempotency_key"`
 	AcceptDuplicateExecution bool   `json:"accept_duplicate_execution"`
+	SourcePlanRevision       int    `json:"source_plan_revision,omitempty"`
+	ExpectedPlanRevision     int    `json:"expected_plan_revision,omitempty"`
 }
 
 type weeklySolveRecoveryAttempt struct {
@@ -63,13 +65,17 @@ func (d Deps) validateWeeklyRecoverySource(ctx context.Context, request WeeklyPr
 func (d Deps) RecoverWeeklyTextbookTrack(ctx context.Context, agentName, planID string, input WeeklyTextbookRecoveryRequest) (k12.WeeklyPracticePlan, bool, error) {
 	input.SourceCommandKey = strings.TrimSpace(input.SourceCommandKey)
 	input.IdempotencyKey = strings.TrimSpace(input.IdempotencyKey)
-	if agentName == "" || planID == "" || input.SourceCommandKey == "" || input.IdempotencyKey == "" || input.PlanRevision < 1 || input.ItemIndex < 0 || !input.AcceptDuplicateExecution {
+	if agentName == "" || planID == "" || input.SourceCommandKey == "" || input.IdempotencyKey == "" || input.ItemIndex < 0 || !input.AcceptDuplicateExecution {
 		return k12.WeeklyPracticePlan{}, false, fmt.Errorf("%w: invalid weekly recovery authorization", ErrInvalidInput)
 	}
 	if decoded, err := hex.DecodeString(input.CheckpointSHA256); err != nil || len(decoded) != sha256.Size {
 		return k12.WeeklyPracticePlan{}, false, fmt.Errorf("%w: invalid weekly checkpoint digest", ErrInvalidInput)
 	}
-	ref := WeeklyCandidateCheckpointRef{AgentName: agentName, PlanID: planID, Kind: "refresh", Revision: input.PlanRevision, IdempotencyKey: input.SourceCommandKey}
+	sourceRevision, expectedRevision, err := weeklyRecoveryRevisions(input.PlanRevision, input.SourcePlanRevision, input.ExpectedPlanRevision)
+	if err != nil {
+		return k12.WeeklyPracticePlan{}, false, err
+	}
+	ref := WeeklyCandidateCheckpointRef{AgentName: agentName, PlanID: planID, Kind: "refresh", Revision: sourceRevision, IdempotencyKey: input.SourceCommandKey}
 	raw, err := d.Records.GetWeeklyCandidateCheckpoint(ctx, ref)
 	if err != nil {
 		return k12.WeeklyPracticePlan{}, false, err
@@ -89,7 +95,7 @@ func (d Deps) RecoverWeeklyTextbookTrack(ctx context.Context, agentName, planID 
 				if attempt.RequestDigest != digest {
 					return k12.WeeklyPracticePlan{}, false, records.ErrVersionConflict
 				}
-				plan, _, err := d.PrepareWeeklyTextbookTrack(ctx, agentName, planID, input.PlanRevision, request.MaxItems, input.SourceCommandKey)
+				plan, _, err := d.resumeWeeklyTextbookRecovery(ctx, request, expectedRevision)
 				return plan, true, err
 			}
 		}
@@ -98,11 +104,11 @@ func (d Deps) RecoverWeeklyTextbookTrack(ctx context.Context, agentName, planID 
 	if hex.EncodeToString(sum[:]) != input.CheckpointSHA256 {
 		return k12.WeeklyPracticePlan{}, false, records.ErrVersionConflict
 	}
-	plan, err := d.Records.GetWeeklyPracticePlan(ctx, agentName, planID)
+	plan, completed, err := d.weeklyRecoveryPlan(ctx, request, expectedRevision)
 	if err != nil {
 		return k12.WeeklyPracticePlan{}, false, err
 	}
-	if plan.Status != k12.WeeklyPlanDraft || plan.Revision != input.PlanRevision {
+	if completed || plan.Status != k12.WeeklyPlanDraft || plan.Revision != expectedRevision {
 		return k12.WeeklyPracticePlan{}, false, records.ErrVersionConflict
 	}
 	if err := d.validateWeeklyRecoverySource(ctx, request); err != nil {
@@ -132,7 +138,16 @@ func (d Deps) RecoverWeeklyTextbookTrack(ctx context.Context, agentName, planID 
 			return k12.WeeklyPracticePlan{}, false, records.ErrIllegalTransition
 		}
 	}
-	step.SolveRecoveryAttempts = append(step.SolveRecoveryAttempts, weeklySolveRecoveryAttempt{Authorization: input, RequestDigest: digest, CreatedAt: d.now(), Call: weeklyCandidateCall{Status: "prepared"}})
+	nextCall := weeklyCandidateCall{Status: "prepared", InputDigest: prior.InputDigest}
+	// 明确恢复只重试缺失结果；已成功的同输入子调用沿原回执复用。
+	for _, receipt := range prior.PhysicalCalls {
+		if receipt.Status == "succeeded" && json.Valid([]byte(receipt.Payload)) {
+			sourceDigest := digestValue(receipt)
+			receipt.ReuseSourceDigest = sourceDigest
+			nextCall.PhysicalCalls = append(nextCall.PhysicalCalls, receipt)
+		}
+	}
+	step.SolveRecoveryAttempts = append(step.SolveRecoveryAttempts, weeklySolveRecoveryAttempt{Authorization: input, RequestDigest: digest, CreatedAt: d.now(), Call: nextCall})
 	next, err := json.Marshal(request)
 	if err != nil {
 		return k12.WeeklyPracticePlan{}, false, err
@@ -140,6 +155,51 @@ func (d Deps) RecoverWeeklyTextbookTrack(ctx context.Context, agentName, planID 
 	if err := d.Records.SaveWeeklyCandidateCheckpoint(ctx, ref, raw, string(next)); err != nil {
 		return k12.WeeklyPracticePlan{}, false, err
 	}
-	result, _, err := d.PrepareWeeklyTextbookTrack(ctx, agentName, planID, input.PlanRevision, request.MaxItems, input.SourceCommandKey)
+	result, _, err := d.resumeWeeklyTextbookRecovery(ctx, request, expectedRevision)
 	return result, false, err
+}
+
+// weeklyRecoveryRevisions 保持旧请求的字段及摘要不变，新请求显式区分来源与提交版本。
+func weeklyRecoveryRevisions(legacy, source, expected int) (int, int, error) {
+	if source == 0 && expected == 0 && legacy > 0 {
+		return legacy, legacy, nil
+	}
+	if source < 1 || expected < source || (legacy != 0 && legacy != source) {
+		return 0, 0, fmt.Errorf("%w: invalid weekly recovery revisions", ErrInvalidInput)
+	}
+	return source, expected, nil
+}
+
+func weeklyTextbookCommandDigest(request WeeklyPracticeCandidateRequest) string {
+	return digestValue(struct {
+		Agent, Plan         string
+		Revision, ItemCount int
+	}{request.AgentName, request.Checkpoint.PlanID, request.Checkpoint.Revision, request.MaxItems})
+}
+
+func (d Deps) weeklyRecoveryPlan(ctx context.Context, request WeeklyPracticeCandidateRequest, expectedRevision int) (k12.WeeklyPracticePlan, bool, error) {
+	if expectedRevision == request.Checkpoint.Revision {
+		plan, err := d.Records.GetWeeklyPracticePlan(ctx, request.AgentName, request.Checkpoint.PlanID)
+		return plan, false, err
+	}
+	return d.Records.GetWeeklyTextbookRecoveryPlan(ctx, request.Checkpoint, expectedRevision, weeklyTextbookCommandDigest(request))
+}
+
+func (d Deps) resumeWeeklyTextbookRecovery(ctx context.Context, request WeeklyPracticeCandidateRequest, expectedRevision int) (k12.WeeklyPracticePlan, bool, error) {
+	ref := request.Checkpoint
+	if ref.Revision == expectedRevision {
+		return d.PrepareWeeklyTextbookTrack(ctx, request.AgentName, ref.PlanID, expectedRevision, request.MaxItems, ref.IdempotencyKey)
+	}
+	plan, replay, err := d.weeklyRecoveryPlan(ctx, request, expectedRevision)
+	if err != nil {
+		return k12.WeeklyPracticePlan{}, false, err
+	}
+	if replay {
+		projected, projectErr := d.projectWeeklyArithmetic(ctx, plan)
+		return projected, true, projectErr
+	}
+	if err := d.validateWeeklyRecoverySource(ctx, request); err != nil {
+		return k12.WeeklyPracticePlan{}, false, err
+	}
+	return d.finishWeeklyTextbookTrack(ctx, plan, request, expectedRevision, ref.IdempotencyKey, weeklyTextbookCommandDigest(request), ref.Revision)
 }
