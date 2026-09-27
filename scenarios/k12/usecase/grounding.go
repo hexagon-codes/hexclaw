@@ -2,12 +2,26 @@ package usecase
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"strings"
 
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 )
+
+const (
+	GroundingSourceModeSemantic     = "semantic"
+	GroundingSourceModeVerifiedText = "verified_text"
+)
+
+// EffectiveGroundingSourceMode 保持缺省历史快照的语义检索含义。
+func EffectiveGroundingSourceMode(mode string) string {
+	if mode == "" {
+		return GroundingSourceModeSemantic
+	}
+	return mode
+}
 
 // SubjectGroundingWriter 是分科教材写入的可选扩展缝（§4.3：TextbookBinding 按
 // Learner × Subject，不用单一全局教材字段）。subject 为六学科中文名；空 = 不分科旧语义。
@@ -38,6 +52,8 @@ type GroundingSnapshot struct {
 	SegmentRefs        []string
 	PageRefs           []k12.TextbookGroundingPageRef
 	VectorRevisionID   string
+	OwnerID            string `json:",omitempty"`
+	SourceMode         string `json:",omitempty"`
 }
 
 // GroundingEvidenceReceipt 只记录本次批改实际消费的教材命中身份，不包含
@@ -54,6 +70,18 @@ type GroundingEvidenceReceipt struct {
 	PDFPage            int    `json:"pdf_page"`
 	SourceDigest       string `json:"source_digest"`
 	CitationDigest     string `json:"citation_digest"`
+	SourceMode         string `json:"source_mode,omitempty"`
+}
+
+// GroundingTextSource 保存本次实际采用的验证页正文及确定性定位依据。
+type GroundingTextSource struct {
+	LogicalPage    int      `json:"logical_page"`
+	PDFPage        int      `json:"pdf_page"`
+	Content        string   `json:"content"`
+	ContentDigest  string   `json:"content_digest"`
+	SegmentRefs    []string `json:"segment_refs"`
+	LocationMethod string   `json:"location_method"`
+	MatchedTerms   []string `json:"matched_terms"`
 }
 
 // GroundingSnapshotResult 把本次 pinned 查询的可消费正文与命中回执绑定在
@@ -62,6 +90,7 @@ type GroundingSnapshotResult struct {
 	Text     string                     `json:"text"`
 	Found    bool                       `json:"found"`
 	Receipts []GroundingEvidenceReceipt `json:"receipts"`
+	Sources  []GroundingTextSource      `json:"sources,omitempty"`
 }
 
 // SnapshotGrounding is the canonical multi-query retrieval seam.
@@ -81,8 +110,15 @@ type SnapshotGroundingEvidence interface {
 }
 
 func (result GroundingSnapshotResult) validate(snapshot GroundingSnapshot) error {
+	mode := EffectiveGroundingSourceMode(snapshot.SourceMode)
+	if mode != GroundingSourceModeSemantic && mode != GroundingSourceModeVerifiedText {
+		return fmt.Errorf("grounding: invalid source mode")
+	}
+	if mode == GroundingSourceModeVerifiedText && snapshot.VectorRevisionID != "" {
+		return fmt.Errorf("grounding: verified text carries a vector revision")
+	}
 	if !result.Found {
-		if strings.TrimSpace(result.Text) != "" || len(result.Receipts) != 0 {
+		if strings.TrimSpace(result.Text) != "" || len(result.Receipts) != 0 || len(result.Sources) != 0 {
 			return fmt.Errorf("grounding: no-hit result carries evidence")
 		}
 		return nil
@@ -110,6 +146,7 @@ func (result GroundingSnapshotResult) validate(snapshot GroundingSnapshot) error
 	seen := make(map[GroundingEvidenceReceipt]struct{}, len(result.Receipts))
 	for index, receipt := range result.Receipts {
 		if receipt.TextbookBindingID != snapshot.TextbookBindingID ||
+			EffectiveGroundingSourceMode(receipt.SourceMode) != mode ||
 			receipt.TextbookManifestID != snapshot.TextbookManifestID ||
 			receipt.DocumentID != snapshot.DocumentID ||
 			receipt.DocumentGeneration != snapshot.DocumentGeneration ||
@@ -136,15 +173,80 @@ func (result GroundingSnapshotResult) validate(snapshot GroundingSnapshot) error
 		}
 		seen[receipt] = struct{}{}
 	}
+	if mode == GroundingSourceModeVerifiedText {
+		return result.validateTextSources()
+	}
+	if len(result.Sources) != 0 {
+		return fmt.Errorf("grounding: semantic result carries direct text sources")
+	}
+	return nil
+}
+
+func (result GroundingSnapshotResult) validateTextSources() error {
+	if len(result.Sources) == 0 {
+		return fmt.Errorf("grounding: verified text has no frozen source")
+	}
+	type pageKey struct{ logical, physical int }
+	sources := make(map[pageKey]GroundingTextSource, len(result.Sources))
+	var parts []string
+	for _, source := range result.Sources {
+		key := pageKey{source.LogicalPage, source.PDFPage}
+		_, duplicate := sources[key]
+		digest := sha256.Sum256([]byte(source.Content))
+		if duplicate || source.LogicalPage < 1 || source.PDFPage < 1 ||
+			strings.TrimSpace(source.Content) == "" || len(source.SegmentRefs) == 0 ||
+			hex.EncodeToString(digest[:]) != source.ContentDigest ||
+			(source.LocationMethod != "exact_lesson_title" && source.LocationMethod != "exact_knowledge_term") ||
+			len(source.MatchedTerms) == 0 {
+			return fmt.Errorf("grounding: invalid frozen text source")
+		}
+		for _, term := range source.MatchedTerms {
+			if strings.TrimSpace(term) == "" {
+				return fmt.Errorf("grounding: invalid frozen location evidence")
+			}
+		}
+		sources[key] = source
+		parts = append(parts, strings.TrimSpace(source.Content))
+	}
+	if result.Text != strings.Join(parts, "\n\n") {
+		return fmt.Errorf("grounding: frozen text differs from consumed context")
+	}
+	seen := make(map[pageKey]map[string]struct{}, len(sources))
+	for _, receipt := range result.Receipts {
+		key := pageKey{receipt.LogicalPage, receipt.PDFPage}
+		source, found := sources[key]
+		if !found || source.ContentDigest != receipt.CitationDigest {
+			return fmt.Errorf("grounding: citation differs from frozen text")
+		}
+		if seen[key] == nil {
+			seen[key] = make(map[string]struct{})
+		}
+		seen[key][receipt.ChunkID] = struct{}{}
+	}
+	for key, source := range sources {
+		if len(seen[key]) != len(source.SegmentRefs) {
+			return fmt.Errorf("grounding: frozen text segment set differs from receipts")
+		}
+		for _, segment := range source.SegmentRefs {
+			if _, found := seen[key][segment]; !found {
+				return fmt.Errorf("grounding: frozen text segment has no receipt")
+			}
+		}
+	}
 	return nil
 }
 
 func validateGroundingEvidenceReceiptIdentity(receipt GroundingEvidenceReceipt) error {
+	mode := EffectiveGroundingSourceMode(receipt.SourceMode)
+	if mode != GroundingSourceModeSemantic && mode != GroundingSourceModeVerifiedText ||
+		mode == GroundingSourceModeSemantic && (receipt.VectorRevisionID == "" || receipt.VectorRevisionID != strings.TrimSpace(receipt.VectorRevisionID)) ||
+		mode == GroundingSourceModeVerifiedText && receipt.VectorRevisionID != "" {
+		return fmt.Errorf("grounding: invalid durable source mode")
+	}
 	for _, value := range []string{
 		receipt.TextbookBindingID,
 		receipt.TextbookManifestID,
 		receipt.DocumentID,
-		receipt.VectorRevisionID,
 		receipt.ChunkID,
 	} {
 		if value == "" || value != strings.TrimSpace(value) {

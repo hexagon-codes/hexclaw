@@ -45,14 +45,26 @@ type kbRevisionSnapshotter interface {
 	ActiveSemanticRevision(ctx context.Context) (revisionID string, active bool, err error)
 }
 
+// VerifiedTextbookReader 按冻结身份提供经过摘要校验的教材页正文。
+type VerifiedTextbookReader interface {
+	ReadVerifiedTextbookPages(context.Context, k12.VerifiedTextbookReadRequest) ([]k12.VerifiedTextbookPage, error)
+}
+
 // GroundingAdapter retrieves textbook evidence for tutoring tips.
 type GroundingAdapter struct {
-	kb   kbQuerier
-	topK int
+	kb             kbQuerier
+	topK           int
+	verifiedReader VerifiedTextbookReader
 }
 
 // NewGroundingAdapter 创建 adapter。kb 通常是 main.go 的 kbMgr。
-func NewGroundingAdapter(kb kbQuerier) *GroundingAdapter { return &GroundingAdapter{kb: kb, topK: 3} }
+func NewGroundingAdapter(kb kbQuerier, readers ...VerifiedTextbookReader) *GroundingAdapter {
+	a := &GroundingAdapter{kb: kb, topK: 3}
+	if len(readers) > 0 {
+		a.verifiedReader = readers[0]
+	}
+	return a
+}
 
 var _ usecase.Grounding = (*GroundingAdapter)(nil)
 var _ usecase.GroundingWriter = (*GroundingAdapter)(nil)
@@ -152,12 +164,12 @@ func (a *GroundingAdapter) FreezeGroundingSnapshot(
 	ctx context.Context,
 	requested usecase.GroundingSnapshot,
 ) (usecase.GroundingSnapshot, error) {
-	// The revision is server-owned evidence. Never preserve a value supplied by
-	// the caller, including when the active revision lookup fails.
+	// 来源方式与向量版本由服务端冻结，不沿用调用者填入的向量版本。
 	requested.VectorRevisionID = ""
 	requested.AgentName = strings.TrimSpace(requested.AgentName)
 	requested.LearnerID = strings.TrimSpace(requested.LearnerID)
 	requested.Subject = strings.TrimSpace(requested.Subject)
+	requested.OwnerID = strings.TrimSpace(requested.OwnerID)
 	if requested.AgentName == "" || requested.LearnerID == "" || requested.Subject == "" {
 		return usecase.GroundingSnapshot{}, fmt.Errorf("grounding: agent / learner / subject required")
 	}
@@ -168,6 +180,15 @@ func (a *GroundingAdapter) FreezeGroundingSnapshot(
 	}
 	if err := validateTypedGroundingSnapshot(requested, false); err != nil {
 		return usecase.GroundingSnapshot{}, fmt.Errorf("grounding: invalid typed binding scope: %w", err)
+	}
+	if requested.SourceMode == "" && requested.OwnerID != "" && a.verifiedReader != nil {
+		requested.SourceMode = usecase.GroundingSourceModeVerifiedText
+	}
+	if requested.SourceMode == usecase.GroundingSourceModeVerifiedText {
+		if a.verifiedReader == nil || requested.OwnerID == "" {
+			return usecase.GroundingSnapshot{}, fmt.Errorf("grounding: verified textbook reader unavailable")
+		}
+		return requested, nil
 	}
 	revisions, ok := a.kb.(kbRevisionSnapshotter)
 	if !ok {
@@ -216,6 +237,9 @@ func (a *GroundingAdapter) GroundSnapshotWithEvidence(
 	}
 	if err := validateTypedGroundingSnapshot(snapshot, true); err != nil {
 		return usecase.GroundingSnapshotResult{}, fmt.Errorf("grounding: invalid frozen typed scope: %w", err)
+	}
+	if snapshot.SourceMode == usecase.GroundingSourceModeVerifiedText {
+		return a.groundVerifiedText(ctx, snapshot, knowledgePoint, grade)
 	}
 	query := strings.Join(nonEmptyGroundingFacts(
 		snapshot.Edition,
@@ -271,9 +295,18 @@ func validateTypedGroundingSnapshot(
 	if err != nil {
 		return err
 	}
-	if requireRevision && (snapshot.VectorRevisionID == "" ||
-		snapshot.VectorRevisionID != strings.TrimSpace(snapshot.VectorRevisionID)) {
-		return fmt.Errorf("missing frozen vector revision")
+	switch usecase.EffectiveGroundingSourceMode(snapshot.SourceMode) {
+	case usecase.GroundingSourceModeVerifiedText:
+		if snapshot.OwnerID == "" || snapshot.OwnerID != strings.TrimSpace(snapshot.OwnerID) || snapshot.VectorRevisionID != "" {
+			return fmt.Errorf("invalid verified text scope")
+		}
+	case usecase.GroundingSourceModeSemantic:
+		if requireRevision && (snapshot.VectorRevisionID == "" ||
+			snapshot.VectorRevisionID != strings.TrimSpace(snapshot.VectorRevisionID)) {
+			return fmt.Errorf("missing frozen vector revision")
+		}
+	default:
+		return fmt.Errorf("invalid grounding source mode")
 	}
 	return nil
 }
@@ -400,6 +433,7 @@ func groundingResultFromVerifiedHits(
 				PDFPage:            page.PDFPage,
 				SourceDigest:       hit.SourceDigest,
 				CitationDigest:     hit.CitationDigest,
+				SourceMode:         snapshot.SourceMode,
 			})
 		}
 	}
