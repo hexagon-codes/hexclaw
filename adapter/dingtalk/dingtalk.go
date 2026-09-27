@@ -33,6 +33,7 @@ import (
 	"github.com/alibabacloud-go/tea/tea"
 	dtchatbot "github.com/open-dingtalk/dingtalk-stream-sdk-go/chatbot"
 	dtclient "github.com/open-dingtalk/dingtalk-stream-sdk-go/client"
+	dtpayload "github.com/open-dingtalk/dingtalk-stream-sdk-go/payload"
 
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/config"
@@ -815,7 +816,7 @@ func (a *DingtalkAdapter) Start(ctx context.Context, handler adapter.MessageHand
 	cli := dtclient.NewStreamClient(
 		dtclient.WithAppCredential(dtclient.NewAppCredentialConfig(a.cfg.AppKey, a.cfg.AppSecret)),
 	)
-	cli.RegisterChatBotCallbackRouter(a.onChatBotMessage)
+	cli.RegisterCallbackRouter(dtpayload.BotMessageCallbackTopic, a.onChatBotFrame)
 	a.streamClient = cli
 	streamCtx, cancel := context.WithCancel(ctx)
 	a.mu.Lock()
@@ -936,7 +937,30 @@ func (a *DingtalkAdapter) Handler() http.Handler {
 
 // ============== Stream 长连接（官方 SDK 回调）==============
 
-// onChatBotMessage 是注册到官方 SDK 的机器人消息回调。
+// onChatBotFrame 保留平台明确给出的引用；SDK 的文本投影只包含正文。
+func (a *DingtalkAdapter) onChatBotFrame(ctx context.Context, frame *dtpayload.DataFrame) (*dtpayload.DataFrameResponse, error) {
+	if frame == nil {
+		return nil, errors.New("dingtalk inbound frame is required")
+	}
+	raw := []byte(frame.Data)
+	a.logCallbackFrameReceived(raw, frame.GetMessageId())
+	var event dtEvent
+	if err := json.Unmarshal(raw, &event); err != nil {
+		logger.Warn("[dingtalk] callback frame parse failed", "error_type", fmt.Sprintf("%T", err))
+		return nil, err
+	}
+	a.logCallbackFrameParsed(raw, event)
+	a.logReplyIdentityEvidence(raw, event)
+	data, err := a.onChatBotEvent(ctx, event)
+	if err != nil {
+		return nil, err
+	}
+	response := dtpayload.NewSuccessDataFrameResponse()
+	response.SetData(string(data))
+	return response, nil
+}
+
+// onChatBotMessage 兼容已有 SDK 类型调用，处理与原始帧共用同一入口。
 //
 // 普通消息在启动异步处理后立即返回成功 ACK（空串）。注入图片耐久接纳端口时，direct 图片只在
 // 下载和耐久接纳成功后 ACK；完整 LLM 往返仍由恢复型 worker 执行，绝不进入 ACK 同步路径。
@@ -944,14 +968,6 @@ func (a *DingtalkAdapter) onChatBotMessage(ctx context.Context, data *dtchatbot.
 	if data == nil {
 		return []byte(""), nil
 	}
-	if data.ConversationType == "2" {
-		logger.Info("DingTalk group message ignored because v0.5 supports direct messages only")
-		return []byte(""), nil
-	}
-	if strings.TrimSpace(data.MsgId) == "" {
-		return nil, errors.New("dingtalk inbound message is missing provider message id")
-	}
-
 	event := dtEvent{
 		MsgID:            data.MsgId,
 		ConversationId:   data.ConversationId,
@@ -968,7 +984,17 @@ func (a *DingtalkAdapter) onChatBotMessage(ctx context.Context, data *dtchatbot.
 			event.Content.DownloadCode = code
 		}
 	}
+	return a.onChatBotEvent(ctx, event)
+}
 
+func (a *DingtalkAdapter) onChatBotEvent(ctx context.Context, event dtEvent) ([]byte, error) {
+	if event.ConversationType == "2" {
+		logger.Info("DingTalk group message ignored because v0.5 supports direct messages only")
+		return []byte(""), nil
+	}
+	if strings.TrimSpace(event.MsgID) == "" {
+		return nil, errors.New("dingtalk inbound message is missing provider message id")
+	}
 	if strings.TrimSpace(event.Text.Content) != "" || event.Content.DownloadCode != "" {
 		handled, err := a.admitInboundPhotoBeforeACK(ctx, &event)
 		if err != nil {
@@ -1013,6 +1039,7 @@ func (a *DingtalkAdapter) handleWebhook(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "error", http.StatusBadRequest)
 		return
 	}
+	a.logReplyIdentityEvidence(body, event)
 	if event.ConversationType == "2" {
 		logger.Info("DingTalk group message ignored because v0.5 supports direct messages only")
 		w.WriteHeader(http.StatusOK)

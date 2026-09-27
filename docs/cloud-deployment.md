@@ -73,7 +73,7 @@ Compose 留出 60 秒停止窗口，覆盖服务当前 30 秒收尾预算。已�
 
 ## 按提交自动部署
 
-源码已提供 `.github/workflows/deploy.yml` 和 `scripts/ops/deploy.py`。当前尚未在交付服务器启用，脚本的完整 Docker 故障恢复验证仍待完成。开启前先完成隔离恢复并确定部署分支；不要将源码存在或语法检查通过等同于运维验收。
+源码已提供 `.github/workflows/deploy.yml` 和 `scripts/ops/deploy.py`。当前尚未在交付服务器启用。备份、按摘要更新、锁内版本复核与失败恢复已通过 8 项本地隔离 Docker 回归，覆盖真实 SQLite／WAL、数据卷、Git 与镜像仓库；模型进程与 SSH 失败为可控边界。该证据不替代实际发行镜像的业务恢复、异机副本和真实 Actions／服务器验收；确定部署分支并完成相应交付核验后再启用。
 
 部署目录放置私有 `deployment-target.json`，按该服务器的实际项目填写。例如：
 
@@ -151,7 +151,7 @@ Desktop 只对其管理的本机服务提供恢复操作；远端服务生命周
 
 ## 完整备份与恢复
 
-仓库提供 [`scripts/ops/backup.py`](../scripts/ops/backup.py)，需要部署主机的 Python 3、Docker Compose；异机传输另需 SSH，接收主机需 `sha256sum`。脚本已落源码，尚未在交付服务器启用定时任务或完成恢复验收。
+仓库提供 [`scripts/ops/backup.py`](../scripts/ops/backup.py)，需要部署主机的 Python 3、Docker Compose；异机传输另需 SSH，接收主机需 `sha256sum`。本地隔离 Docker 已验证完整快照、新卷恢复、WAL／对象／记忆回执保持及失败后原服务恢复；尚未在交付服务器启用定时任务、验证异机副本或完成实际业务恢复验收。
 
 ```bash
 python3 scripts/ops/backup.py backup \

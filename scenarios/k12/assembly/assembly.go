@@ -38,6 +38,7 @@ type K12 struct {
 	// only persisted Knowledge checkpoints and exact source spans.
 	CatalogWorker  *usecase.TextbookCatalogWorker
 	MaterialWorker *usecase.MaterialPreparationWorker
+	FeedbackWorker *usecase.ProblemAssetFeedbackConsumer
 	Deps           usecase.Deps
 }
 
@@ -253,8 +254,9 @@ func WireInto(ctx context.Context, reg *scenario.Registry, db *sql.DB, solveSkil
 	}
 	// Outbox 投递器 + 学情信号消费者（§6.9：投影失败不撤销域写，重试只补投影）。
 	// 消费者持 Deps.Insights（opts 应用后再建，确保拿到注入的 adapter）。
+	feedbackWorker := usecase.NewProblemAssetFeedbackConsumer(store)
 	outbox := k12storage.NewDispatcher(store, usecase.InsightsConsumer{Insights: deps.Insights, Records: store},
-		usecase.ProblemAssetConsumer{Records: store})
+		usecase.ProblemAssetConsumer{Records: store}, feedbackWorker)
 	catalogWorker := usecase.NewTextbookCatalogWorker(
 		store,
 		usecase.TextbookCatalogCheckpointExtractor{},
@@ -267,6 +269,6 @@ func WireInto(ctx context.Context, reg *scenario.Registry, db *sql.DB, solveSkil
 	)
 	return &K12{
 		Registry: reg, Manifest: man, Receipt: receipt, Records: store,
-		Outbox: outbox, CatalogWorker: catalogWorker, MaterialWorker: &usecase.MaterialPreparationWorker{Records: store, Solver: solveAdapter}, Deps: deps,
+		Outbox: outbox, CatalogWorker: catalogWorker, MaterialWorker: &usecase.MaterialPreparationWorker{Records: store, Solver: solveAdapter}, FeedbackWorker: feedbackWorker, Deps: deps,
 	}, nil
 }

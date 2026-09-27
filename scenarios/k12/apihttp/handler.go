@@ -128,6 +128,8 @@ func NewHandler(rt Runtime) http.Handler {
 	mux.HandleFunc("GET /view-descriptor", h.viewDescriptor)
 	mux.HandleFunc("GET /materials/{document_id}/preparation", h.materialPreparation)
 	mux.HandleFunc("GET /materials/preparations", h.materialPreparationList)
+	mux.HandleFunc("GET /materials/{document_id}/preparation/{task_id}/recovery", h.materialRecovery)
+	mux.HandleFunc("POST /materials/{document_id}/preparation/{task_id}/recovery", h.materialRecovery)
 	// POST /recognize、POST /recognize/anchors 与全部 /grading-jobs* 公开路由已删除：
 	// 图片任务统一走 /image-tasks exact-set，识题、锚点和 GradingJob 只属于内部作业子链。
 	// /grade（单题补批）与 /solve（空白题求解）为甄别保留项：仍被 Job 外合法路径消费。
@@ -202,9 +204,14 @@ func NewHandler(rt Runtime) http.Handler {
 	mux.HandleFunc("GET /image-tasks/{id}", h.getImageTask)
 	mux.HandleFunc("POST /image-tasks/{id}/confirm", h.confirmImageTask)
 	mux.HandleFunc("POST /image-tasks/{id}/retry", h.retryImageTask)
+	mux.HandleFunc("POST /image-tasks/{id}/recognition-recovery-attempts", h.authorizeRecognitionRecovery)
+	mux.HandleFunc("POST /image-tasks/{id}/reparse", h.reparseImageTask)
 	mux.HandleFunc("POST /image-tasks/{id}/cancel", h.cancelImageTask)
 	mux.HandleFunc("GET /image-tasks/{id}/result", h.getImageTaskResult)
 	mux.HandleFunc("POST /image-tasks/{dispatch_id}/problems/{problem_id}/source-actions", h.problemSourceAction)
+	mux.HandleFunc("POST /image-tasks/{dispatch_id}/problems/{problem_id}/answer-feedback", h.createProblemAnswerFeedback)
+	mux.HandleFunc("GET /image-tasks/{dispatch_id}/problems/{problem_id}/answer-feedback", h.getProblemAnswerFeedbackContext)
+	mux.HandleFunc("GET /image-tasks/{dispatch_id}/problems/{problem_id}/answer-feedback/{feedback_id}", h.getProblemAnswerFeedback)
 	// 作品（PRD §3.10）：draft→点评→修改稿→再点评；只点评不打分不代写（INV-011）。
 	mux.HandleFunc("POST /creative-works", h.createCreativeWork)
 	mux.HandleFunc("GET /creative-works", h.listCreativeWorks)
@@ -241,6 +248,7 @@ func NewHandler(rt Runtime) http.Handler {
 	mux.HandleFunc("POST /weekly-practice/arithmetic-batches/{id}/attempts", h.submitWeeklyArithmeticAttempt)
 	mux.HandleFunc("POST /weekly-practice/plans/{id}/tracks/textbook_consolidation/refresh", h.refreshWeeklyTextbookTrack)
 	mux.HandleFunc("POST /weekly-practice/plans/{id}/tracks/textbook_consolidation/prepare", h.prepareWeeklyTextbookTrack)
+	mux.HandleFunc("POST /weekly-practice/plans/{id}/tracks/textbook_consolidation/recovery-attempts", h.recoverWeeklyTextbookTrack)
 	mux.HandleFunc("POST /weekly-practice/plans/{id}/save-to-practice-set", h.saveWeeklyPracticeToPracticeSet)
 	mux.HandleFunc("POST /cold-start", h.coldStart)
 	// GET /study-time 已删除（架构设计 v0.5.0《明确不做》#6：不做学习时长与无证据投入指标）。

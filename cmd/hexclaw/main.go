@@ -1066,6 +1066,7 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 					kbSemanticRuntime.IngestWorker.SetDocumentIngestProcessor(
 						api.NewKnowledgeDocumentIngestProcessor(
 							kbMgr, api.WithKnowledgeResourceGovernor(processResources),
+							api.WithKnowledgeSourceAttachments(kbSemanticRuntime.Service),
 						),
 					)
 				}
@@ -1836,6 +1837,15 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 			Content:  spec.Task,
 		}
 		engine.ApplySpecToMessage(msg, spec)
+		var materialAttempt *egress.ProviderAttempt
+		if k12.IsMaterialPreparation(ctx) {
+			if msg.Metadata == nil {
+				msg.Metadata = map[string]string{}
+			}
+			msg.Metadata["memory"] = "off"
+			msg.Metadata["knowledge"] = "off"
+			ctx, materialAttempt = egress.WithProviderAttempt(ctx)
+		}
 		// DD-018: K12 GradingJob calls pin provider/model in context. Explicit
 		// message routing disables the engine's normal cross-provider fallback;
 		// a settings change therefore affects only newly created Jobs.
@@ -1854,6 +1864,9 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 		}
 		reply, err := eng.Process(ctx, msg)
 		if err != nil {
+			if materialAttempt != nil {
+				err = materialAttempt.Reconcile(err)
+			}
 			return engine.SubAgentResult{}, err
 		}
 		// msg.SessionID 经 Process 解析后即子会话 id；session-mode 回传供后续续聊。
@@ -2482,11 +2495,20 @@ Set source only when the material explicitly names a work, title, or another rel
 					requestCtx, router, k12ModelCapabilityReceipts, requested,
 				)
 			}
+			k12rt.Deps.WeeklyCandidates = k12usecase.NewWeeklyPracticeCandidateSource(&k12rt.Deps)
 			k12rt.MaterialWorker.ResolveModel = k12rt.Deps.PracticeGenerationRoute
+			k12rt.MaterialWorker.ReadVisual = visionFn
+			if kbSemanticRuntime != nil && kbSemanticRuntime.Service != nil {
+				k12rt.MaterialWorker.PreparePDFSource = api.NewMaterialPDFSourcePreparer(kbSemanticRuntime.Service, k12rt.Records)
+			}
+			k12rt.MaterialWorker.ResolveVisualModel = func(requestCtx context.Context, requested k12.GradingModelSnapshot) (k12.GradingModelSnapshot, error) {
+				return resolveK12GradingModelSnapshotWithCapabilityReceipt(requestCtx, router, k12ModelCapabilityReceipts, requested)
+			}
 			k12GradingOrch = k12usecase.NewGradingOrchestrator(k12rt.Deps, k12ModelSnapshot,
 				k12usecase.WithGradingRunDir(filepath.Join(dataDir, "k12", "grading-runs")),
 				k12usecase.WithGradingBaseContext(ctx),
 			)
+			k12rt.FeedbackWorker.SetGrading(k12GradingOrch)
 			k12PracticeGeneration = &k12usecase.SinglePracticeGenerationCoordinator{
 				Deps: &k12rt.Deps, Records: k12rt.Records, BaseContext: ctx,
 			}
