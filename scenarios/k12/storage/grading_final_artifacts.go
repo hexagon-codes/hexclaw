@@ -98,6 +98,11 @@ func getGradingFinalArtifactVia(
 	agentName string,
 	artifactID string,
 ) (k12.GradingFinalArtifact, error) {
+	if revised, err := getFinalRevisionByID(ctx, q, agentName, artifactID); err == nil {
+		return revised, nil
+	} else if !errors.Is(err, records.ErrNotFound) {
+		return k12.GradingFinalArtifact{}, err
+	}
 	artifact, err := scanGradingFinalArtifact(q.QueryRowContext(ctx, `
 		SELECT `+gradingFinalArtifactSelectColumns+`
 		FROM k12_grading_final_artifacts AS artifact
@@ -136,6 +141,11 @@ func getGradingFinalArtifactByJobVia(
 	agentName string,
 	jobID string,
 ) (k12.GradingFinalArtifact, error) {
+	if revised, err := getFinalRevisionHead(ctx, q, agentName, jobID); err == nil {
+		return revised, nil
+	} else if !errors.Is(err, records.ErrNotFound) {
+		return k12.GradingFinalArtifact{}, err
+	}
 	artifact, err := scanGradingFinalArtifact(q.QueryRowContext(ctx, `
 		SELECT `+gradingFinalArtifactSelectColumns+`
 		FROM k12_grading_final_artifacts AS artifact
@@ -205,6 +215,11 @@ func (s *Store) GetCurrentGradingFinalArtifactByJob(
 	jobID = strings.TrimSpace(jobID)
 	if agentName == "" || jobID == "" {
 		return k12.GradingFinalArtifact{}, records.ErrNotFound
+	}
+	if revised, err := getFinalRevisionHead(ctx, s.db, agentName, jobID); err == nil {
+		return revised, nil
+	} else if !errors.Is(err, records.ErrNotFound) {
+		return k12.GradingFinalArtifact{}, err
 	}
 	artifact, err := scanGradingFinalArtifact(s.db.QueryRowContext(ctx, `
 		SELECT `+gradingFinalArtifactSelectColumns+`

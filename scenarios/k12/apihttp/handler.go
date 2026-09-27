@@ -204,6 +204,7 @@ func NewHandler(rt Runtime) http.Handler {
 	mux.HandleFunc("GET /image-tasks/{id}", h.getImageTask)
 	mux.HandleFunc("POST /image-tasks/{id}/confirm", h.confirmImageTask)
 	mux.HandleFunc("POST /image-tasks/{id}/retry", h.retryImageTask)
+	mux.HandleFunc("POST /image-tasks/{id}/problems/{problem_id}/final-source-corrections", h.correctCompletedSource)
 	mux.HandleFunc("POST /image-tasks/{id}/recognition-recovery-attempts", h.authorizeRecognitionRecovery)
 	mux.HandleFunc("POST /image-tasks/{id}/reparse", h.reparseImageTask)
 	mux.HandleFunc("POST /image-tasks/{id}/cancel", h.cancelImageTask)
@@ -249,6 +250,7 @@ func NewHandler(rt Runtime) http.Handler {
 	mux.HandleFunc("POST /weekly-practice/plans/{id}/tracks/textbook_consolidation/refresh", h.refreshWeeklyTextbookTrack)
 	mux.HandleFunc("POST /weekly-practice/plans/{id}/tracks/textbook_consolidation/prepare", h.prepareWeeklyTextbookTrack)
 	mux.HandleFunc("POST /weekly-practice/plans/{id}/tracks/textbook_consolidation/recovery-attempts", h.recoverWeeklyTextbookTrack)
+	mux.HandleFunc("POST /weekly-practice/plans/{id}/tracks/textbook_consolidation/reinterpretations", h.reinterpretWeeklyTextbookTrack)
 	mux.HandleFunc("POST /weekly-practice/plans/{id}/save-to-practice-set", h.saveWeeklyPracticeToPracticeSet)
 	mux.HandleFunc("POST /cold-start", h.coldStart)
 	// GET /study-time 已删除（架构设计 v0.5.0《明确不做》#6：不做学习时长与无证据投入指标）。

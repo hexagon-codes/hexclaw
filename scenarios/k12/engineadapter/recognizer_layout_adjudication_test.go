@@ -253,3 +253,21 @@ func TestRecognitionLayoutAdjudication_AnswerStateConflictSurvivesRepair(t *test
 		})
 	}
 }
+
+func TestCompletedSourceReview_OriginalTargetAndFullReceipt(t *testing.T) {
+	region := k12.SourcePixelRegion{X: 640, Y: 1248, Width: 574, Height: 244}
+	q := usecase.RecognizedQuestion{Question: "5+6=", RawTranscription: "5+6=", CanonicalMarkdown: "5+6=", StudentAnswer: "neighbor answer 29", AnswerState: usecase.AnswerStatePresent, SourceWidth: 1280, SourceHeight: 1707, SourceRegion: &region, SourceSectionLabel: "五、思维题"}
+	raw := `{"verification":{"target_ownership_confirmed":true,"active_answer_complete":true},"items":[{"target_id":"t1","kind":"question","recognition":{"question":"5+6=","subject":"数学","answer_state":"blank","student_answer":"","recognition_confidence":0.99,"ocr_signals":[],"answer_bbox":null}}]}`
+	calls := 0
+	adapter := NewRecognizerAdapter(func(_ context.Context, image []byte, prompt string) (string, error) {
+		calls++
+		if string(image) != "original pixels" || !strings.Contains(prompt, `"target_region":{"x":640,"y":1248,"width":574,"height":244}`) || strings.Contains(prompt, q.StudentAnswer) {
+			t.Fatal("source or independent target contract changed")
+		}
+		return raw, nil
+	})
+	result, err := adapter.ReviewCompletedSource(context.Background(), []byte("original pixels"), q)
+	if err != nil || !result.Verified || result.Question.AnswerState != usecase.AnswerStateBlank || result.Raw != raw || calls != 1 {
+		t.Fatalf("review=%+v err=%v calls=%d", result, err, calls)
+	}
+}

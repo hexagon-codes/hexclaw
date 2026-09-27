@@ -175,3 +175,30 @@ func parseRecognitionLayoutAdjudication(raw string, target k12.RecognitionLayout
 	}
 	return candidate, outcome, true
 }
+
+// ReviewCompletedSource 沿用独立归属复核协议，不发送旧作答或已算出的答案。
+func (a *RecognizerAdapter) ReviewCompletedSource(ctx context.Context, image []byte, q usecase.RecognizedQuestion) (usecase.CompletedSourceReview, error) {
+	out := usecase.CompletedSourceReview{}
+	if q.SourceRegion == nil || q.SourceWidth <= 0 || q.SourceHeight <= 0 {
+		return out, fmt.Errorf("original source region unavailable")
+	}
+	whole := k12.SourcePixelRegion{X: 0, Y: 0, Width: q.SourceWidth, Height: q.SourceHeight}
+	target := k12.RecognitionLayoutTargetV2{TargetID: "t1", SourceNumberPath: q.SourceNumberPath, DisplayLabel: q.DisplayLabel, SourceSectionPath: q.SourceSectionPath, SourceSectionLabel: q.SourceSectionLabel, Region: whole, OriginalRegion: q.SourceRegion, AdjudicationRegion: &whole}
+	prompt, err := buildRecognitionLayoutAdjudicationPrompt(target, k12.RecognitionLayoutCompactV4)
+	if err != nil {
+		return out, err
+	}
+	raw, err := a.callVision(ctx, image, prompt)
+	out.Raw = raw
+	if err != nil {
+		return out, err
+	}
+	_, review, verified := parseRecognitionLayoutAdjudication(raw, target, k12.RecognitionLayoutCompactV4)
+	if review == nil || review.question == nil {
+		return out, nil
+	}
+	out.Question = *review.question
+	sameQuestion, _ := usecase.RecognitionSourceReadingsMatch(q, out.Question)
+	out.Verified = verified && sameQuestion
+	return out, nil
+}

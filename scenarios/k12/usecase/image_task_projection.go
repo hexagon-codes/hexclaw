@@ -44,6 +44,10 @@ func (o *GradingOrchestrator) ImageTaskHomeworkProjection(
 		questions[index].InputDigest = current.InputDigest
 		questions[index].CanonicalVersion = current.InputRevision
 	}
+	questions, err = o.deps.overlayFinalSourceQuestions(ctx, agentName, job.Fields.SubmissionID, questions)
+	if err != nil {
+		return ImageTaskHomeworkProjection{}, err
+	}
 	subject := ""
 	counts := map[string]int{}
 	for _, question := range questions {

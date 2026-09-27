@@ -77,6 +77,10 @@ func (d Deps) loadCurrentConfirmedQuestions(
 			return nil, err
 		}
 	}
+	questions, err = d.overlayFinalSourceQuestions(ctx, agentName, submissionID, questions)
+	if err != nil {
+		return nil, err
+	}
 	for index := range questions {
 		questions[index] = NormalizeRecognizedQuestion(questions[index])
 	}
