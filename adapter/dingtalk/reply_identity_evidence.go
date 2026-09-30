@@ -4,6 +4,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/hexagon-codes/toolkit/util/logger"
@@ -63,6 +66,99 @@ func (a *DingtalkAdapter) logReplyIdentityEvidence(raw []byte, event dtEvent) {
 		"conversation_sha256", dingtalkIdentityHash(event.ConversationId),
 		"identity_fields_sha256", fields,
 	)
+	if quoted, exists := text["repliedMsg"]; exists {
+		shape, truncated := dingtalkReplyContentShape(quoted)
+		logger.Info("[dingtalk] reply content shape",
+			"fields", shape,
+			"truncated", truncated,
+		)
+	}
+}
+
+var (
+	dingtalkReplyShapeField = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,63}$`)
+	dingtalkReplyHomeworkID = regexp.MustCompile(`\bHW-([A-Za-z0-9_-]+)`)
+)
+
+// dingtalkReplyContentShape 只记录引用载荷结构，不保留字段值；采样上限不参与消息处理。
+func dingtalkReplyContentShape(raw json.RawMessage) ([]map[string]any, bool) {
+	const maxFields, maxDepth, maxStringBytes = 48, 6, 16 * 1024
+	var value any
+	if json.Unmarshal(raw, &value) != nil {
+		return nil, false
+	}
+	fields := make([]map[string]any, 0, 12)
+	truncated := false
+	var visit func(string, any, int)
+	visit = func(path string, value any, depth int) {
+		if len(fields) >= maxFields || depth > maxDepth {
+			truncated = true
+			return
+		}
+		field := map[string]any{"path": path}
+		fields = append(fields, field)
+		switch typed := value.(type) {
+		case map[string]any:
+			field["type"] = "object"
+			keys := make([]string, 0, len(typed))
+			for key := range typed {
+				if dingtalkReplyShapeField.MatchString(key) {
+					keys = append(keys, key)
+				} else {
+					truncated = true
+				}
+			}
+			sort.Strings(keys)
+			for _, key := range keys {
+				visit(path+"."+key, typed[key], depth+1)
+				if len(fields) >= maxFields {
+					truncated = true
+					break
+				}
+			}
+		case []any:
+			field["type"] = "array"
+			for index, item := range typed {
+				visit(path+"["+strconv.Itoa(index)+"]", item, depth+1)
+				if len(fields) >= maxFields {
+					truncated = true
+					break
+				}
+			}
+		case string:
+			field["type"] = "string"
+			if len(typed) > maxStringBytes {
+				field["hw_scan_complete"] = false
+				truncated = true
+				return
+			}
+			field["hw_scan_complete"] = true
+			unique := map[string]struct{}{}
+			for _, match := range dingtalkReplyHomeworkID.FindAllString(typed, -1) {
+				unique[match] = struct{}{}
+				if len(unique) == 2 {
+					break
+				}
+			}
+			field["hw_id_count_up_to_two"] = len(unique)
+			var decoded any
+			if json.Unmarshal([]byte(typed), &decoded) == nil {
+				switch decoded.(type) {
+				case map[string]any, []any:
+					field["json_container"] = true
+					visit(path+"{json}", decoded, depth+1)
+				}
+			}
+		case float64:
+			field["type"] = "number"
+		case bool:
+			field["type"] = "boolean"
+		case nil:
+			field["type"] = "null"
+		}
+	}
+	visit("text.repliedMsg", value, 0)
+	return fields, truncated
 }
 
 func collectDingtalkIdentityHashes(out map[string]string, path string, object map[string]json.RawMessage) {

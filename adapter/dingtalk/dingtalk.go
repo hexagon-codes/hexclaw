@@ -977,11 +977,14 @@ func (a *DingtalkAdapter) onChatBotMessage(ctx context.Context, data *dtchatbot.
 	}
 	event.Text.Content = data.Text.Content
 	event.MsgType = data.Msgtype
-	// picture 等富媒体的 downloadCode 在 Content（SDK 为 interface{}，按 map 取）
-	// ——BUG-20260709：此前只拷贝 Text.Content，图片消息被静默丢弃、用户零回复。
-	if m, ok := data.Content.(map[string]interface{}); ok {
-		if code, ok := m["downloadCode"].(string); ok {
-			event.Content.DownloadCode = code
+	// SDK 的 Content 同时承载单图及富文本图片节点，保留完整内容投影。
+	if data.Content != nil {
+		raw, err := json.Marshal(data.Content)
+		if err != nil {
+			return nil, fmt.Errorf("encode dingtalk message content: %w", err)
+		}
+		if err := json.Unmarshal(raw, &event.Content); err != nil {
+			return nil, fmt.Errorf("decode dingtalk message content: %w", err)
 		}
 	}
 	return a.onChatBotEvent(ctx, event)
@@ -994,6 +997,9 @@ func (a *DingtalkAdapter) onChatBotEvent(ctx context.Context, event dtEvent) ([]
 	}
 	if strings.TrimSpace(event.MsgID) == "" {
 		return nil, errors.New("dingtalk inbound message is missing provider message id")
+	}
+	if err := event.normalizeRichText(); err != nil {
+		return nil, err
 	}
 	if strings.TrimSpace(event.Text.Content) != "" || event.Content.DownloadCode != "" {
 		handled, err := a.admitInboundPhotoBeforeACK(ctx, &event)
@@ -1047,6 +1053,10 @@ func (a *DingtalkAdapter) handleWebhook(w http.ResponseWriter, r *http.Request) 
 	}
 	if strings.TrimSpace(event.MsgID) == "" {
 		http.Error(w, "missing provider message id", http.StatusBadRequest)
+		return
+	}
+	if err := event.normalizeRichText(); err != nil {
+		http.Error(w, "invalid dingtalk rich text content", http.StatusBadRequest)
 		return
 	}
 
@@ -1877,11 +1887,19 @@ func (a *DingtalkAdapter) admitInboundPhotoBeforeACK(
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	attachment, err := a.downloadPictureAttachment(ctx, event.Content.DownloadCode)
-	if err != nil {
-		return false, fmt.Errorf("DingTalk inbound photo download before durable admission: %w", err)
+	codes := event.PictureDownloadCodes
+	if len(codes) == 0 {
+		codes = []string{event.Content.DownloadCode}
 	}
-	event.Attachments = []adapter.Attachment{attachment}
+	attachments := make([]adapter.Attachment, 0, len(codes))
+	for _, code := range codes {
+		attachment, err := a.downloadPictureAttachment(ctx, code)
+		if err != nil {
+			return false, fmt.Errorf("DingTalk inbound photo download before durable admission: %w", err)
+		}
+		attachments = append(attachments, attachment)
+	}
+	event.Attachments = attachments
 	handled, err := port.AdmitInboundPhoto(ctx, a.messageFromEvent(*event, event.Attachments))
 	if err != nil {
 		return false, fmt.Errorf("DingTalk inbound photo durable admission failed: %w", err)
@@ -1893,8 +1911,18 @@ func (a *DingtalkAdapter) messageFromEvent(
 	event dtEvent, attachments []adapter.Attachment,
 ) *adapter.Message {
 	replyTo := ""
+	metadata := map[string]string{
+		"conversation_id":   event.ConversationId,
+		"conversation_type": event.ConversationType,
+	}
 	if event.Text.IsReplyMsg {
 		replyTo = strings.TrimSpace(event.Text.RepliedMsg.MsgID)
+		homeworkID, ambiguous := dingtalkQuotedHomeworkReference(event.Text.RepliedMsg.Content)
+		if ambiguous {
+			metadata["quoted_homework_ambiguous"] = "true"
+		} else if homeworkID != "" {
+			metadata["quoted_homework_id"] = homeworkID
+		}
 	}
 	return &adapter.Message{
 		ID:          event.MsgID,
@@ -1907,11 +1935,39 @@ func (a *DingtalkAdapter) messageFromEvent(
 		ReplyTo:     replyTo,
 		Attachments: append([]adapter.Attachment(nil), attachments...),
 		Timestamp:   time.Now(),
-		Metadata: map[string]string{
-			"conversation_id":   event.ConversationId,
-			"conversation_type": event.ConversationType,
-		},
+		Metadata:    metadata,
 	}
+}
+
+// dingtalkQuotedHomeworkReference 只读取引用卡片的正文值，不消费媒体下载码。
+// 正文与当前提问分别传递；重复编号合并，不同编号交给业务层报告歧义。
+func dingtalkQuotedHomeworkReference(content json.RawMessage) (string, bool) {
+	var quoted struct {
+		CardContent []struct {
+			Children []struct {
+				Value json.RawMessage `json:"value"`
+			} `json:"children"`
+		} `json:"cardContent"`
+	}
+	if json.Unmarshal(content, &quoted) != nil {
+		return "", false
+	}
+	homeworkID := ""
+	for _, block := range quoted.CardContent {
+		for _, child := range block.Children {
+			var text string
+			if json.Unmarshal(child.Value, &text) != nil {
+				continue
+			}
+			for _, match := range dingtalkReplyHomeworkID.FindAllStringSubmatch(text, -1) {
+				if homeworkID != "" && homeworkID != match[1] {
+					return "", true
+				}
+				homeworkID = match[1]
+			}
+		}
+	}
+	return homeworkID, false
 }
 
 func (a *DingtalkAdapter) handleMessageContext(baseCtx context.Context, event dtEvent) {
@@ -1961,15 +2017,21 @@ func (a *DingtalkAdapter) handleMessageContext(baseCtx context.Context, event dt
 			return
 		}
 		if len(attachments) == 0 {
-			att, err := a.downloadPictureAttachment(ctx, event.Content.DownloadCode)
-			if err != nil {
-				logger.Error("钉钉: 下载图片消息失败", "error", err)
-				errCtx, errCancel := terminalNotifyCtx()
-				defer errCancel()
-				_ = a.sendReplyToEvent(errCtx, event, &adapter.Reply{Content: "⚠️ 图片获取失败，请重新发送一次。"})
-				return
+			codes := event.PictureDownloadCodes
+			if len(codes) == 0 {
+				codes = []string{event.Content.DownloadCode}
 			}
-			attachments = append(attachments, att)
+			for _, code := range codes {
+				att, err := a.downloadPictureAttachment(ctx, code)
+				if err != nil {
+					logger.Error("钉钉: 下载图片消息失败", "error", err)
+					errCtx, errCancel := terminalNotifyCtx()
+					defer errCancel()
+					_ = a.sendReplyToEvent(errCtx, event, &adapter.Reply{Content: "⚠️ 图片获取失败，请重新发送一次。"})
+					return
+				}
+				attachments = append(attachments, att)
+			}
 		}
 	}
 	if !adapter.HasMessageInput(content, attachments) {
@@ -2160,7 +2222,8 @@ type dtEvent struct {
 		Content    string `json:"content"`
 		IsReplyMsg bool   `json:"isReplyMsg"`
 		RepliedMsg struct {
-			MsgID string `json:"msgId"`
+			MsgID   string          `json:"msgId"`
+			Content json.RawMessage `json:"content"`
 		} `json:"repliedMsg"`
 	} `json:"text"`
 	MsgType string `json:"msgtype"`
@@ -2168,8 +2231,52 @@ type dtEvent struct {
 	// 此前未解析 → 图片消息正文为空被静默丢弃、用户零回复）。
 	Content struct {
 		DownloadCode string `json:"downloadCode"`
+		RichText     []struct {
+			Text                string `json:"text"`
+			Type                string `json:"type"`
+			DownloadCode        string `json:"downloadCode"`
+			PictureDownloadCode string `json:"pictureDownloadCode"`
+		} `json:"richText"`
 	} `json:"content"`
-	Attachments []adapter.Attachment `json:"-"`
+	Attachments          []adapter.Attachment `json:"-"`
+	PictureDownloadCodes []string             `json:"-"`
+}
+
+// normalizeRichText 将明确的图片节点投影到既有图片接纳路径，正文和消息身份保持独立。
+func (event *dtEvent) normalizeRichText() error {
+	if event.MsgType != "richText" {
+		return nil
+	}
+	var texts, codes []string
+	seen := make(map[string]bool)
+	for _, item := range event.Content.RichText {
+		if text := strings.TrimSpace(item.Text); text != "" {
+			texts = append(texts, text)
+		}
+		if item.Type != dtMsgTypePicture {
+			continue
+		}
+		code := strings.TrimSpace(item.DownloadCode)
+		if code == "" {
+			code = strings.TrimSpace(item.PictureDownloadCode)
+		}
+		if code == "" {
+			return errors.New("dingtalk rich text picture is missing download code")
+		}
+		if !seen[code] {
+			codes = append(codes, code)
+			seen[code] = true
+		}
+	}
+	if strings.TrimSpace(event.Text.Content) == "" {
+		event.Text.Content = strings.Join(texts, "\n")
+	}
+	if len(codes) > 0 {
+		event.MsgType = dtMsgTypePicture
+		event.Content.DownloadCode = codes[0]
+		event.PictureDownloadCodes = codes
+	}
+	return nil
 }
 
 // marshalMarkdownContent 生成 sampleMarkdown 的 {"title","text"} 载荷

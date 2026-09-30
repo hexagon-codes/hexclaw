@@ -81,3 +81,100 @@ func TestDingTalkStreamPreservesHomeworkNumberInReceivedText(t *testing.T) {
 		t.Fatal("numbered text did not reach the common handler")
 	}
 }
+
+func TestDingTalkStreamExtractsHomeworkNumberFromQuotedCardText(t *testing.T) {
+	const question = "这条批改结果对应哪次作业？只按已有结果说明。"
+	longChildren := make([]any, 60)
+	for i := range longChildren {
+		longChildren[i] = map[string]any{"value": "已有批改正文"}
+	}
+	longChildren = append(longChildren,
+		map[string]any{"value": "作业编号：HW-existing-task"},
+		map[string]any{"value": "HW-existing-task"},
+	)
+	for _, tc := range []struct {
+		name          string
+		content       any
+		isReply       bool
+		wantID        string
+		wantAmbiguous bool
+	}{
+		{
+			name: "footer_beyond_diagnostic_limit_and_repeated_id",
+			content: map[string]any{"cardContent": []any{
+				map[string]any{"children": longChildren},
+			}},
+			isReply: true, wantID: "existing-task",
+		},
+		{
+			name: "different_numbers_across_blocks_are_ambiguous",
+			content: map[string]any{"cardContent": []any{
+				map[string]any{"children": []any{map[string]any{"value": "HW-first-task"}}},
+				map[string]any{"children": []any{map[string]any{"value": "HW-other-task"}}},
+			}},
+			isReply: true, wantAmbiguous: true,
+		},
+		{
+			name: "download_code_is_not_quoted_text",
+			content: map[string]any{"cardContent": []any{
+				map[string]any{"children": []any{map[string]any{"downloadCode": "HW-media-code"}}},
+			}},
+			isReply: true,
+		},
+		{
+			name: "nonstring_values_do_not_drop_current_message",
+			content: map[string]any{"cardContent": []any{
+				map[string]any{"children": []any{map[string]any{"value": 1}, map[string]any{"value": nil}}},
+			}},
+			isReply: true,
+		},
+		{
+			name: "nonreply_does_not_adopt_quoted_number",
+			content: map[string]any{"cardContent": []any{
+				map[string]any{"children": []any{map[string]any{"value": "HW-unrelated-task"}}},
+			}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			payload, err := json.Marshal(map[string]any{
+				"msgId": "followup", "conversationType": "1", "senderStaffId": "parent", "msgtype": "text",
+				"text": map[string]any{
+					"content": question, "isReplyMsg": tc.isReply,
+					"repliedMsg": map[string]any{"msgId": "native-result", "content": tc.content},
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			captured := make(chan *adapter.Message, 1)
+			a := newTestAdapter()
+			a.openAPI = newFakeDingtalkOpenAPI("tok")
+			a.handler = func(_ context.Context, message *adapter.Message) (*adapter.Reply, error) {
+				captured <- message
+				return nil, nil
+			}
+			response, err := a.onChatBotFrame(context.Background(), &dtpayload.DataFrame{Data: string(payload)})
+			if err != nil || response == nil {
+				t.Fatalf("stream callback: response=%+v err=%v", response, err)
+			}
+			select {
+			case message := <-captured:
+				wantReply := ""
+				if tc.isReply {
+					wantReply = "native-result"
+				}
+				if message.Content != question || message.ReplyTo != wantReply || len(message.Attachments) != 0 {
+					t.Fatalf("current question, explicit reference or attachments changed: %+v", message)
+				}
+				if got := message.Metadata["quoted_homework_id"]; got != tc.wantID {
+					t.Fatalf("quoted homework ID = %q, want %q", got, tc.wantID)
+				}
+				if got := message.Metadata["quoted_homework_ambiguous"] == "true"; got != tc.wantAmbiguous {
+					t.Fatalf("ambiguous = %v, want %v", got, tc.wantAmbiguous)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("quoted message did not reach the common handler")
+			}
+		})
+	}
+}
