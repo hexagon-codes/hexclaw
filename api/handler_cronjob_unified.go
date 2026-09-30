@@ -192,6 +192,9 @@ func (s *Server) cronActionCreate(ctx context.Context, req *CronJobRequest) (*Cr
 		return nil, http.StatusBadRequest, &cronErr{code: CodeBadRequest, msg: "draft 必填"}
 	}
 	d := req.Draft
+	if err := validateCronInputLengths(d.Name, d.Schedule, "", ""); err != nil {
+		return nil, http.StatusBadRequest, &cronErr{code: CodeBadRequest, msg: err.Error()}
+	}
 	if strings.TrimSpace(d.Name) == "" || strings.TrimSpace(d.Schedule) == "" || strings.TrimSpace(d.Prompt) == "" {
 		return nil, http.StatusBadRequest, &cronErr{code: CodeBadRequest, msg: "name、schedule、prompt 必填"}
 	}
@@ -267,6 +270,9 @@ func (s *Server) cronActionUpdate(ctx context.Context, req *CronJobRequest) (*Cr
 		return nil, http.StatusBadRequest, &cronErr{code: CodeBadRequest, msg: "draft 必填"}
 	}
 	d := req.Draft
+	if err := validateCronInputLengths(d.Name, d.Schedule, orig.Name, orig.Schedule); err != nil {
+		return nil, http.StatusBadRequest, &cronErr{code: CodeBadRequest, msg: err.Error()}
+	}
 	if strings.TrimSpace(d.Name) == "" || strings.TrimSpace(d.Schedule) == "" || strings.TrimSpace(d.Prompt) == "" {
 		return nil, http.StatusBadRequest, &cronErr{code: CodeBadRequest, msg: "name、schedule、prompt 必填"}
 	}

@@ -9,6 +9,7 @@ import (
 
 	"github.com/hexagon-codes/toolkit/util/idgen"
 
+	"github.com/hexagon-codes/hexclaw/internal/inputlimits"
 	"github.com/hexagon-codes/hexclaw/webhook"
 )
 
@@ -111,6 +112,14 @@ func (s *Server) handleRegisterWebhook(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{
 			"error": "请求格式错误: " + err.Error(),
 		})
+		return
+	}
+	if err := inputlimits.Text("name", req.Name, "", inputlimits.DisplayName); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if err := inputlimits.Bytes("secret", req.Secret, "", inputlimits.SecretBytes); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 	// K12 与 generic Webhook 共用认证上下文中的可信所有者；仅无认证上下文时兼容直调参数。

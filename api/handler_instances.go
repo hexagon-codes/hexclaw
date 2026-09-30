@@ -239,6 +239,10 @@ func (s *Server) handleUpsertInstance(w http.ResponseWriter, r *http.Request) {
 		Enabled:  req.Enabled,
 		Config:   req.Config,
 	}
+	if err := validateInstanceInputLengths(inst, current); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
 	if err := s.instanceMgr.Upsert(r.Context(), inst); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
@@ -298,14 +302,21 @@ func (s *Server) handleUpdateInstanceByID(w http.ResponseWriter, r *http.Request
 		req.Config = merged
 	}
 
-	_ = s.instanceMgr.Stop(r.Context(), current.Name)
 	next := &instances.Instance{
 		ID:       current.ID,
 		Provider: req.Provider,
-		Name:     strings.TrimSpace(req.Name),
+		Name:     req.Name,
 		Enabled:  req.Enabled,
 		Config:   req.Config,
 	}
+	if err := validateInstanceInputLengths(next, current); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if next.Name != current.Name {
+		next.Name = strings.TrimSpace(next.Name)
+	}
+	_ = s.instanceMgr.Stop(r.Context(), current.Name)
 	if err := s.instanceMgr.UpdateByID(r.Context(), id, next); err != nil {
 		status := http.StatusBadRequest
 		if errors.Is(err, sql.ErrNoRows) {

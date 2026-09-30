@@ -10,6 +10,7 @@ import (
 
 	"github.com/hexagon-codes/hexclaw/config"
 	"github.com/hexagon-codes/hexclaw/egress"
+	"github.com/hexagon-codes/hexclaw/internal/inputlimits"
 	"github.com/hexagon-codes/hexclaw/llmrouter"
 )
 
@@ -131,6 +132,11 @@ func (s *Server) prepareOllamaTargetUpdate(req ollamaTargetUpdateRequest, old co
 		return old, llm, fmt.Errorf("Ollama target configuration changed")
 	}
 	next := *req.Ollama
+	if next.Mode != "default" {
+		if err := inputlimits.Bytes("ollama.custom_base_url", next.CustomBaseURL, old.CustomBaseURL, inputlimits.URLBytes); err != nil {
+			return old, llm, err
+		}
+	}
 	base, err = next.Resolve(s.ollamaBaseURL)
 	if err != nil {
 		return old, llm, err

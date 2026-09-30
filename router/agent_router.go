@@ -26,6 +26,7 @@ import (
 	"sync"
 
 	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/internal/inputlimits"
 	"github.com/hexagon-codes/toolkit/util/logger"
 )
 
@@ -46,6 +47,11 @@ type AgentConfig struct {
 	// 显式 0=确定性采样——float64 零值无法表达这一区分（旧 `>0` 判定把 0 当未设）。
 	Temperature *float64          `json:"temperature,omitempty" yaml:"temperature,omitempty"`
 	Metadata    map[string]string `json:"metadata" yaml:"metadata"` // 自定义元数据
+}
+
+// ValidateAgentDisplayName 校验新建或实际更名的显示名称，不限制稳定路由标识。
+func ValidateAgentDisplayName(name string) error {
+	return inputlimits.Text("display_name", name, "", inputlimits.DisplayName)
 }
 
 // Rule 路由规则

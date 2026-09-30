@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/hexagon-codes/ai-core/llm"
+	"github.com/hexagon-codes/hexclaw/internal/inputlimits"
 	"github.com/hexagon-codes/toolkit/util/idgen"
 	"nhooyr.io/websocket"
 )
@@ -875,6 +876,10 @@ func (s *Server) handleGetLogs(w http.ResponseWriter, r *http.Request) {
 	source := q.Get("source")
 	domain := q.Get("domain")
 	keyword := q.Get("keyword")
+	if err := inputlimits.Text("keyword", keyword, "", inputlimits.Keyword); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
 	limit := 100
 	offset := 0
 	if v := q.Get("limit"); v != "" {

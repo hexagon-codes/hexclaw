@@ -21,6 +21,7 @@ import (
 	"github.com/hexagon-codes/hexclaw/config"
 	"github.com/hexagon-codes/hexclaw/engine"
 	"github.com/hexagon-codes/hexclaw/httpua"
+	"github.com/hexagon-codes/hexclaw/internal/inputlimits"
 	hexmcp "github.com/hexagon-codes/hexclaw/mcp"
 	"github.com/hexagon-codes/hexclaw/memory"
 	"github.com/hexagon-codes/hexclaw/router"
@@ -356,6 +357,35 @@ func (s *Server) handleAddMCPServer(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Name == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name 不能为空"})
+		return
+	}
+	var previousMCP config.MCPServerConfig
+	if s.cfg != nil {
+		s.cfgMu.RLock()
+		for _, current := range s.cfg.MCP.Servers {
+			if current.Name == req.Name {
+				previousMCP = current
+				break
+			}
+		}
+		s.cfgMu.RUnlock()
+	}
+	if s.cfgWriter != nil {
+		current, err := s.cfgWriter.GetMCPServer(req.Name)
+		if err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "MCP configuration is unavailable"})
+			return
+		}
+		if current != nil {
+			previousMCP = *current
+		}
+	}
+	if err := inputlimits.Text("name", req.Name, previousMCP.Name, inputlimits.DisplayName); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if err := inputlimits.Bytes("endpoint", req.Endpoint, previousMCP.Endpoint, inputlimits.URLBytes); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 
@@ -705,6 +735,10 @@ func (s *Server) handleInstallSkill(w http.ResponseWriter, r *http.Request) {
 	case "file":
 		s.installSkillFromFile(w, req.Source)
 	case "url":
+		if err := inputlimits.Bytes("source", req.Source, "", inputlimits.URLBytes); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
 		s.installSkillFromURL(w, r, req.Source)
 	case "content":
 		s.installSkillFromContent(w, req.Content)
@@ -1436,6 +1470,11 @@ func (s *Server) handleRegisterAgent(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name 不能为空"})
 		return
 	}
+	if err := router.ValidateAgentDisplayName(req.DisplayName); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	req.DisplayName = strings.TrimSpace(req.DisplayName)
 
 	cfg := router.AgentConfig{
 		Name:            req.Name,
@@ -1449,6 +1488,10 @@ func (s *Server) handleRegisterAgent(w http.ResponseWriter, r *http.Request) {
 		ReasoningPolicy: req.ReasoningPolicy,
 		Temperature:     req.Temperature,
 		Metadata:        req.Metadata,
+	}
+	if err := validateAgentInputLengths(cfg, router.AgentConfig{}); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
 	}
 	cfg.Metadata = k12.EnsureTutorAvatar(cfg.Metadata)
 	if err := normalizeAPIReasoningPolicy(&cfg.ReasoningPolicy); err != nil {
@@ -1568,13 +1611,20 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 		cfg.Model = existing.Model
 		cfg.Provider = existing.Provider
 	}
-	var persistErr error
+	var persistErr, displayNameErr error
 	err := s.agentRouter.UpdateAgentPersisted(name, func(current router.AgentConfig) (router.AgentConfig, error) {
+		previous := current
 		// Reapply only request-present fields to the value read under the
 		// dispatcher lock. This prevents a concurrent K12 profile restore from
 		// being overwritten by the stale pre-validation snapshot above.
 		if req.DisplayName != nil {
-			current.DisplayName = cfg.DisplayName
+			// 旧长名称原样保留，其他配置更新不要求改名。
+			if cfg.DisplayName != current.DisplayName {
+				if displayNameErr = router.ValidateAgentDisplayName(cfg.DisplayName); displayNameErr != nil {
+					return current, displayNameErr
+				}
+				current.DisplayName = strings.TrimSpace(cfg.DisplayName)
+			}
 		}
 		if req.Description != nil {
 			current.Description = cfg.Description
@@ -1601,6 +1651,9 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 			current.Model = cfg.Model
 			current.Provider = cfg.Provider
 		}
+		if displayNameErr = validateAgentInputLengths(current, previous); displayNameErr != nil {
+			return previous, displayNameErr
+		}
 		return current, nil
 	}, func(updated *router.AgentConfig) error {
 		if s.agentStore == nil {
@@ -1610,7 +1663,9 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 		return persistErr
 	})
 	if err != nil {
-		if persistErr != nil {
+		if displayNameErr != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": displayNameErr.Error()})
+		} else if persistErr != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "持久化失败: " + persistErr.Error()})
 		} else {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})

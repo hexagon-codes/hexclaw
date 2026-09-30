@@ -18,6 +18,7 @@ import (
 	"github.com/hexagon-codes/hexclaw/config"
 	"github.com/hexagon-codes/hexclaw/egress"
 	"github.com/hexagon-codes/hexclaw/engine"
+	"github.com/hexagon-codes/hexclaw/internal/inputlimits"
 	"github.com/hexagon-codes/hexclaw/internal/upstreamerr"
 	"github.com/hexagon-codes/hexclaw/llmrouter"
 	"github.com/hexagon-codes/hexclaw/storage"
@@ -876,6 +877,10 @@ func (s *Server) updateLLMConfig(w http.ResponseWriter, r *http.Request, req LLM
 				KeepAlive:             p.KeepAlive,
 				NumCtx:                p.NumCtx,
 			}
+			if err := validateProviderInputLengths(candidate, credentialOld); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+				return
+			}
 			if candidate.BaseURL == credentialOld.BaseURL {
 				candidate.OllamaTargetBaseURL = credentialOld.OllamaTargetBaseURL
 			}
@@ -1107,11 +1112,20 @@ func (s *Server) handleTestLLMConfig(w http.ResponseWriter, r *http.Request) {
 	persistenceCandidate, canPersist := s.providerProbePersistenceCandidate(req.Provider)
 	if canPersist {
 		probeDescriptor = persistenceCandidate.descriptor
+	} else {
+		if err := inputlimits.Bytes("provider.base_url", probeDescriptor.BaseURL, "", inputlimits.URLBytes); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		if err := inputlimits.Bytes("provider.api_key", probeDescriptor.APIKey, "", inputlimits.SecretBytes); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
 	}
 
 	providerType := strings.TrimSpace(probeDescriptor.Type)
 	model := strings.TrimSpace(probeDescriptor.Model)
-	apiKey := strings.TrimSpace(probeDescriptor.APIKey)
+	apiKey := probeDescriptor.APIKey
 	baseURL := strings.TrimSpace(probeDescriptor.BaseURL)
 	probeStartedAt := nextProviderProbeStartedAt()
 	if providerType == "" || model == "" {
@@ -1123,7 +1137,7 @@ func (s *Server) handleTestLLMConfig(w http.ResponseWriter, r *http.Request) {
 	llmCfg := s.persistedLLMConfig()
 	embeddingOnly := isEmbeddingOnlyCompletionModel(llmCfg, providerType, baseURL, model)
 	// Ollama 本地通常无需 API Key
-	if apiKey == "" && !strings.EqualFold(providerType, "ollama") {
+	if strings.TrimSpace(apiKey) == "" && !strings.EqualFold(providerType, "ollama") {
 		writeJSON(w, http.StatusBadRequest, map[string]string{
 			"error": "provider.api_key 不能为空",
 		})
@@ -1275,6 +1289,16 @@ func (s *Server) handleFetchProviderModels(w http.ResponseWriter, r *http.Reques
 			return
 		}
 	}
+	if strings.TrimSpace(req.ProviderInstanceID) == "" {
+		if err := inputlimits.Bytes("base_url", req.BaseURL, "", inputlimits.URLBytes); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		if err := inputlimits.Bytes("api_key", req.APIKey, "", inputlimits.SecretBytes); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+	}
 	baseURL := strings.TrimRight(strings.TrimSpace(req.BaseURL), "/")
 	if baseURL == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "base_url 不能为空"})
@@ -1315,7 +1339,7 @@ func (s *Server) handleFetchProviderModels(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusOK, map[string]any{"models": []any{}, "error": err.Error()})
 		return
 	}
-	if apiKey := strings.TrimSpace(req.APIKey); apiKey != "" {
+	if apiKey := req.APIKey; strings.TrimSpace(apiKey) != "" {
 		if googleCatalog {
 			httpReq.Header.Set("x-goog-api-key", apiKey)
 		} else {

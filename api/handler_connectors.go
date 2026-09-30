@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/hexagon-codes/hexclaw/connector"
+	"github.com/hexagon-codes/hexclaw/internal/inputlimits"
 )
 
 // 数据连接器 API：token 只读接入 GitHub / Notion，供 Agent / 知识库检索。
@@ -31,6 +32,14 @@ func (s *Server) handleCreateConnector(w http.ResponseWriter, r *http.Request) {
 	var req connectorCreateRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误: " + err.Error()})
+		return
+	}
+	if err := inputlimits.Text("name", req.Name, "", inputlimits.DisplayName); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if err := inputlimits.Bytes("token", req.Token, "", inputlimits.SecretBytes); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), connectorReqTimeout)
@@ -62,6 +71,10 @@ func (s *Server) handleTestConnector(w http.ResponseWriter, r *http.Request) {
 	var req connectorTestRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误: " + err.Error()})
+		return
+	}
+	if err := inputlimits.Bytes("token", req.Token, "", inputlimits.SecretBytes); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), connectorReqTimeout)

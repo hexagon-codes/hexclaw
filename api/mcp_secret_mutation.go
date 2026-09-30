@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/internal/inputlimits"
 )
 
 const sidecarConnectionSecretRefPrefix = "sidecar-connection:v1:"
@@ -166,6 +167,13 @@ func mergeMCPSecretMutations(
 			next.Args[mutation.Index] = preserveMCPSecretValue(current.Args[mutation.Index], next.Args[mutation.Index])
 			next.ArgsSecretRefs[mutation.Index] = ref
 		case "replace":
+			previous := ""
+			if current != nil && mutation.Index < len(current.Args) {
+				previous = current.Args[mutation.Index]
+			}
+			if err := inputlimits.Bytes("secret_arg", next.Args[mutation.Index], previous, inputlimits.SecretBytes); err != nil {
+				return config.MCPServerConfig{}, err
+			}
 			if !validSidecarConnectionSecretRef(ref) {
 				return config.MCPServerConfig{}, fmt.Errorf("secret arg %d credential reference is required", mutation.Index)
 			}
@@ -200,6 +208,13 @@ func mergeMCPSecretMutations(
 			next.Env[mutation.Key] = preserveMCPSecretValue(value, next.Env[mutation.Key])
 			next.EnvSecretRefs[mutation.Key] = ref
 		case "replace":
+			previous := ""
+			if current != nil {
+				previous = current.Env[mutation.Key]
+			}
+			if err := inputlimits.Bytes("secret_env", next.Env[mutation.Key], previous, inputlimits.SecretBytes); err != nil {
+				return config.MCPServerConfig{}, err
+			}
 			if !validSidecarConnectionSecretRef(ref) {
 				return config.MCPServerConfig{}, fmt.Errorf("secret env %q credential reference is required", mutation.Key)
 			}

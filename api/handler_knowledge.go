@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/internal/inputlimits"
 	"github.com/hexagon-codes/hexclaw/knowledge"
 	"github.com/hexagon-codes/hexclaw/skill"
 	"github.com/hexagon-codes/toolkit/util/logger"
@@ -240,6 +241,10 @@ func (s *Server) handleAddDocument(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := inputlimits.Text("title", req.Title, "", inputlimits.Title); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
 	doc, err := s.kb.AddDocument(r.Context(), req.Title, req.Content, req.Source)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/hexagon-codes/hexclaw/internal/inputlimits"
 	"github.com/hexagon-codes/hexclaw/skill"
 	"github.com/hexagon-codes/hexclaw/storage"
 	"github.com/hexagon-codes/toolkit/util/idgen"
@@ -382,11 +383,14 @@ func (s *Server) handleUpdateSession(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "标题不能为空"})
 		return
 	}
-	if utf8.RuneCountInString(title) > maxSessionTitleRunes {
+	if req.Title != sess.Title && utf8.RuneCountInString(req.Title) > maxSessionTitleRunes {
 		writeJSON(w, http.StatusBadRequest, map[string]string{
 			"error": fmt.Sprintf("标题过长（最多 %d 字符）", maxSessionTitleRunes),
 		})
 		return
+	}
+	if req.Title == sess.Title {
+		title = sess.Title
 	}
 
 	sess.Title = title
@@ -517,9 +521,9 @@ func (s *Server) handleSearchMessages(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	// 限制搜索查询长度，防止超长查询给 SQLite 造成压力
-	if len([]rune(query)) > 200 {
-		query = string([]rune(query)[:200])
+	if err := inputlimits.Text("q", query, "", inputlimits.Keyword); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
 	}
 
 	userID := sessionUserIDFromRequest(r)

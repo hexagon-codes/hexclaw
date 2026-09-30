@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/internal/inputlimits"
 	"github.com/hexagon-codes/hexclaw/messagecontent"
 	"github.com/hexagon-codes/hexclaw/skill/hub"
 	"github.com/hexagon-codes/toolkit/util/idgen"
@@ -813,6 +814,11 @@ func (s *Server) handleSaveWorkflow(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now()
 	s.workflowStore.mu.Lock()
+	if err := validateWorkflowInputLengths(wf, s.workflowStore.workflows[wf.ID]); err != nil {
+		s.workflowStore.mu.Unlock()
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
 	if wf.ID == "" {
 		wf.ID = "wf-" + idgen.ShortID()
 		wf.CreatedAt = now
@@ -1281,6 +1287,10 @@ func (s *Server) handleGetWorkflowRun(w http.ResponseWriter, r *http.Request) {
 // ─── ClawHub: GET /api/v1/clawhub/search ──
 
 func (s *Server) handleClawHubSearch(w http.ResponseWriter, r *http.Request) {
+	if err := inputlimits.Text("q", r.URL.Query().Get("q"), "", inputlimits.Keyword); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
 	if s.skillHub == nil {
 		writeJSON(w, http.StatusOK, map[string]any{"skills": []any{}, "total": 0, "source": "clawhub"})
 		return
