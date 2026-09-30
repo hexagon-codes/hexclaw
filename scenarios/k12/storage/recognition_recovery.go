@@ -97,7 +97,11 @@ func (s *Store) authorizeRecognitionRecoveryOnce(ctx context.Context, a k12.Reco
 	if err != nil {
 		return a, false, err
 	}
-	if source.ParentInvocationID != prior.InvocationID || source.JobID != a.JobID || prior.AgentName != a.AgentName || prior.JobID != a.JobID || source.Status != k12.ModelInvocationOutcomeUnknown || prior.Status != k12.ModelInvocationOutcomeUnknown || source.RecognitionPlanVersion != k12.RecognitionPlanVersionV2 || !strings.HasPrefix(string(source.PhysicalUnit), "layout_batch_") || source.RequestDigest != a.SourceRequestDigest || source.PlanDigest != a.SourcePlanDigest || source.CandidateExactSetDigest != a.CandidateExactSetDigest {
+	isRepair := strings.HasPrefix(string(source.PhysicalUnit), "layout_repair_")
+	if source.ParentInvocationID != prior.InvocationID || source.JobID != a.JobID || prior.AgentName != a.AgentName || prior.JobID != a.JobID || source.Status != k12.ModelInvocationOutcomeUnknown || prior.Status != k12.ModelInvocationOutcomeUnknown || source.RecognitionPlanVersion != k12.RecognitionPlanVersionV2 || (!strings.HasPrefix(string(source.PhysicalUnit), "layout_batch_") && !isRepair) || source.RequestDigest != a.SourceRequestDigest || source.PlanDigest != a.SourcePlanDigest || source.CandidateExactSetDigest != a.CandidateExactSetDigest {
+		return a, false, ErrModelInvocationConflict
+	}
+	if isRepair && (source.Stage != k12.GradingStageRecognizing || source.Stage != prior.Stage || !reflect.DeepEqual(source.RouteSnapshot, prior.RouteSnapshot) || !reflect.DeepEqual(source.RequestPolicySnapshot, prior.RequestPolicySnapshot) || a.TimeoutOverrideMS != 0) {
 		return a, false, ErrModelInvocationConflict
 	}
 	sourceTimeout := source.EffectiveTimeoutMS
@@ -119,13 +123,22 @@ func (s *Store) authorizeRecognitionRecoveryOnce(ctx context.Context, a k12.Reco
 	if parent.InvocationID != a.NewParentID || parent.AgentName != a.AgentName || parent.JobID != a.JobID || parent.Stage != prior.Stage || parent.Attempt != prior.Attempt+1 || parent.RequestDigest != prior.RequestDigest || !reflect.DeepEqual(parent.RouteSnapshot, prior.RouteSnapshot) || !reflect.DeepEqual(parent.RequestPolicySnapshot, prior.RequestPolicySnapshot) || next.AttemptCount != prior.Attempt || !reflect.DeepEqual(old.ModelSnapshot, next.ModelSnapshot) || !reflect.DeepEqual(old.BudgetSnapshot, next.BudgetSnapshot) || old.SubmissionID != next.SubmissionID || next.Deadline <= a.CreatedAt || next.ParentAutomaticDeadlineAt != next.Deadline || old.FailedStage != k12.GradingStageRecognizing {
 		return a, false, ErrModelInvocationConflict
 	}
-	var planJSON, pageDigest string
-	if err = tx.QueryRowContext(ctx, `SELECT authorized_plan_json,page_digest FROM k12_recognition_layout_plans WHERE parent_invocation_id=? AND agent_name=? AND authorized_plan_digest=?`, a.SourceParentID, a.AgentName, a.SourcePlanDigest).Scan(&planJSON, &pageDigest); err != nil {
+	var planID, planJSON, pageDigest string
+	if err = tx.QueryRowContext(ctx, `SELECT plan_id,authorized_plan_json,page_digest FROM k12_recognition_layout_plans WHERE parent_invocation_id=? AND agent_name=? AND authorized_plan_digest=?`, a.SourceParentID, a.AgentName, a.SourcePlanDigest).Scan(&planID, &planJSON, &pageDigest); err != nil {
 		return a, false, err
 	}
 	var plan k12.RecognitionLayoutPlanV2
 	if json.Unmarshal([]byte(planJSON), &plan) != nil || k12.ValidateRecognitionLayoutPlanV2(plan) != nil || pageDigest != a.PageDigest {
 		return a, false, ErrModelInvocationConflict
+	}
+	if isRepair {
+		if plan.AuthorizedPlanDigest != a.SourcePlanDigest || plan.PageDigest != a.PageDigest {
+			return a, false, ErrModelInvocationConflict
+		}
+		// 单题恢复沿用原轮次授权，事务内重新核对候选及成功主批次的完整证据。
+		if err = validateRecognitionLayoutRepairAuthorizationEvidenceVia(ctx, tx, prior, source, planID, a.SourcePlanDigest, true); err != nil {
+			return a, false, err
+		}
 	}
 	// 成功来源可沿已持久授权链追溯；中间尝试未复制的批次不要求重新外发。
 	sourceParents, err := recognitionRecoverySourceParents(ctx, tx, a.AgentName, prior.InvocationID)
@@ -226,7 +239,7 @@ func (s *Store) authorizeRecognitionRecoveryOnce(ctx context.Context, a k12.Reco
 	return a, true, nil
 }
 
-// validateRecognitionRecoverySend 约束旧主批次的替代资格，保留原计划内尚未执行的正常复读。
+// validateRecognitionRecoverySend 限定明确恢复的外发单元，保留主批次恢复原有的后续复读。
 func validateRecognitionRecoverySend(ctx context.Context, q dbQueryer, child k12.ModelPhysicalInvocation) error {
 	a, err := getRecognitionRecoveryByParent(ctx, q, child.AgentName, child.ParentInvocationID)
 	if errors.Is(err, records.ErrNotFound) {
@@ -241,6 +254,14 @@ func validateRecognitionRecoverySend(ctx context.Context, q dbQueryer, child k12
 	}
 	if source.Status != k12.ModelInvocationOutcomeUnknown || source.RequestDigest != a.SourceRequestDigest || !reflect.DeepEqual(source.RouteSnapshot, child.RouteSnapshot) || !reflect.DeepEqual(source.RequestPolicySnapshot, child.RequestPolicySnapshot) {
 		return ErrModelPhysicalInvocationConflict
+	}
+	if strings.HasPrefix(string(source.PhysicalUnit), "layout_repair_") {
+		if source.ParentInvocationID != a.SourceParentID || source.JobID != a.JobID || source.RecognitionPlanVersion != k12.RecognitionPlanVersionV2 || source.PlanDigest != a.SourcePlanDigest || source.CandidateExactSetDigest != a.CandidateExactSetDigest || child.JobID != a.JobID || child.RecognitionPlanVersion != k12.RecognitionPlanVersionV2 || a.TimeoutOverrideMS != 0 {
+			return ErrModelPhysicalInvocationConflict
+		}
+		if child.PhysicalUnit != source.PhysicalUnit {
+			return fmt.Errorf("%w: singleton recovery requires reuse of every other recognition unit", ErrModelPhysicalInvocationConflict)
+		}
 	}
 	if child.PhysicalUnit == source.PhysicalUnit {
 		if child.EffectiveTimeoutMS != a.TimeoutOverrideMS || child.PhysicalInvocationID != a.NewPhysicalID || child.RequestDigest != a.NewRequestDigest || child.CandidateExactSetDigest != a.CandidateExactSetDigest {

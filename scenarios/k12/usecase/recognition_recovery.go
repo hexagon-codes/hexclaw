@@ -12,7 +12,7 @@ import (
 	"github.com/hexagon-codes/toolkit/util/idgen"
 )
 
-// RecognitionRecoveryInput 只授权原 unknown 批次的新尝试，不接受替换模型或输入。
+// RecognitionRecoveryInput 只授权原 unknown 批次或单项复核的新尝试，不接受替换模型或输入。
 type RecognitionRecoveryInput struct {
 	TimeoutOverrideMS        int64  `json:"timeout_override_ms,omitempty"`
 	Agent                    string `json:"agent"`
@@ -96,8 +96,13 @@ func (o *GradingOrchestrator) AuthorizeRecognitionRecovery(ctx context.Context, 
 	if err != nil {
 		return zero, err
 	}
-	if runtime.AuthorizedPlan == nil || source.Status != k12.ModelInvocationOutcomeUnknown || !strings.HasPrefix(string(source.PhysicalUnit), "layout_batch_") {
-		return zero, fmt.Errorf("%w: one unknown primary batch with frozen plan required", ErrInvalidInput)
+	isPrimaryRecovery := strings.HasPrefix(string(source.PhysicalUnit), "layout_batch_")
+	isRepairRecovery := strings.HasPrefix(string(source.PhysicalUnit), "layout_repair_") && source.PhysicalUnit.Valid()
+	if runtime.AuthorizedPlan == nil || source.Status != k12.ModelInvocationOutcomeUnknown || (!isPrimaryRecovery && !isRepairRecovery) {
+		return zero, fmt.Errorf("%w: one unknown primary batch or singleton repair with frozen plan required", ErrInvalidInput)
+	}
+	if isRepairRecovery && (in.TimeoutOverrideMS != 0 || source.PlanDigest != runtime.AuthorizedPlan.AuthorizedPlanDigest) {
+		return zero, fmt.Errorf("%w: singleton repair requires the original plan and timeout", ErrInvalidInput)
 	}
 	run, err := o.ensureRun(ctx, source.JobID)
 	if err != nil {
@@ -169,11 +174,31 @@ func (o *GradingOrchestrator) AuthorizeRecognitionRecovery(ctx context.Context, 
 		return zero, err
 	}
 	var call k12.RecognitionPhysicalCall
-	for _, batch := range plan.Batches {
-		if batch.Unit == source.PhysicalUnit {
-			call = k12.RecognitionPhysicalCall{PlanVersion: k12.RecognitionPlanVersionV2, PlanDigest: plan.AuthorizedPlanDigest, Unit: batch.Unit, TargetIDs: batch.TargetIDs}
-			call.Image, err = k12.BuildRecognitionLayoutBatchImageV2(page.PNG, plan, batch.Unit)
+	if isRepairRecovery {
+		// 单项候选与原图裁片保持不变，持久复核授权及成功来源由 Store 在事务内复验。
+		for index, target := range plan.Targets {
+			unit, unitErr := k12.RecognitionLayoutRepairUnitV2(index + 1)
+			if unitErr != nil {
+				return zero, unitErr
+			}
+			if unit != source.PhysicalUnit {
+				continue
+			}
+			call = k12.RecognitionPhysicalCall{PlanVersion: k12.RecognitionPlanVersionV2, PlanDigest: plan.AuthorizedPlanDigest, Unit: unit, TargetIDs: []string{target.TargetID}}
+			exactSetDigest, digestErr := k12.RecognitionLayoutTargetExactSetDigestV2(call.TargetIDs)
+			if digestErr != nil || exactSetDigest != source.CandidateExactSetDigest {
+				return zero, fmt.Errorf("%w: singleton repair candidate changed", ErrInvalidInput)
+			}
+			call.Image, err = k12.BuildRecognitionLayoutRepairImageV2(page.PNG, plan, target.TargetID)
 			break
+		}
+	} else {
+		for _, batch := range plan.Batches {
+			if batch.Unit == source.PhysicalUnit {
+				call = k12.RecognitionPhysicalCall{PlanVersion: k12.RecognitionPlanVersionV2, PlanDigest: plan.AuthorizedPlanDigest, Unit: batch.Unit, TargetIDs: batch.TargetIDs}
+				call.Image, err = k12.BuildRecognitionLayoutBatchImageV2(page.PNG, plan, batch.Unit)
+				break
+			}
 		}
 	}
 	if err != nil {
@@ -193,6 +218,9 @@ func (o *GradingOrchestrator) AuthorizeRecognitionRecovery(ctx context.Context, 
 	oldCall := call
 	oldCall.PlanDigest = runtime.AuthorizedPlan.AuthorizedPlanDigest
 	if !recognitionPhysicalChildMatchesCall(prior, source, oldCall) {
+		if isRepairRecovery {
+			return zero, fmt.Errorf("%w: original repair request no longer matches frozen pixels", ErrInvalidInput)
+		}
 		return zero, fmt.Errorf("%w: original batch request no longer matches frozen pixels", ErrInvalidInput)
 	}
 	a := k12.RecognitionRecoveryAuthorization{SourceTimeoutMS: sourceTimeout, TimeoutOverrideMS: in.TimeoutOverrideMS, AuthorizationID: "recognition-recovery-" + idgen.ShortID(), AgentName: in.Agent, DispatchID: dispatchID, JobID: source.JobID, SourceParentID: prior.InvocationID, SourcePhysicalID: source.PhysicalInvocationID, NewParentID: parent.InvocationID, NewPhysicalID: newID, NewRequestDigest: newDigest, PageDigest: page.Digest, SourcePlanDigest: source.PlanDigest, SourceRequestDigest: source.RequestDigest, CandidateExactSetDigest: source.CandidateExactSetDigest, IdempotencyKey: in.IdempotencyKey, RequestDigest: requestDigest, CreatedAt: now}
