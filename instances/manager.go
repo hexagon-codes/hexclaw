@@ -574,9 +574,9 @@ func (m *Manager) Start(ctx context.Context, name string) error {
 		return m.setStatus(ctx, name, StatusRunning, "")
 	}
 
-	// 实例生命周期不能绑定单次 HTTP start/update 请求：handler 返回后 r.Context() 会取消，
-	// 长连接适配器会被立即杀掉。保留 context values，但由 Manager.Stop → Adapter.Stop 负责取消。
-	lifecycleCtx := context.WithoutCancel(ctx)
+	// 长连接独立于启动请求，不能继承请求的取消信号、认证主体和其他请求级值。
+	// 每条入站消息由适配器建立平台身份，连接仍由 Manager.Stop → Adapter.Stop 负责取消。
+	lifecycleCtx := context.Background()
 	if err := safeStartAdapter(lifecycleCtx, adp, wrapped); err != nil {
 		_ = m.setStatus(ctx, name, StatusError, err.Error())
 		return err

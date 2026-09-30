@@ -318,14 +318,20 @@ func applyEnvProviders(cfg *Config) {
 		}
 	}
 
-	// 如果默认 Provider 在配置中不存在，按名称排序选择第一个（确保确定性）
+	// 默认 Provider 缺失时，只从已启用且可对话的候选中确定性选择。
+	// 没有候选时保留原值，避免重启把禁用或仅向量模型提升为聊天默认项。
 	if _, exists := cfg.LLM.Providers[cfg.LLM.Default]; !exists && len(cfg.LLM.Providers) > 0 {
 		names := make([]string, 0, len(cfg.LLM.Providers))
-		for name := range cfg.LLM.Providers {
+		for name, provider := range cfg.LLM.Providers {
+			if provider.Enabled != nil && !*provider.Enabled || provider.Model == "" || !ModelHasCapability(provider, provider.Model, LLMModelCapabilityText) {
+				continue
+			}
 			names = append(names, name)
 		}
-		sort.Strings(names)
-		cfg.LLM.Default = names[0]
+		if len(names) > 0 {
+			sort.Strings(names)
+			cfg.LLM.Default = names[0]
+		}
 	}
 }
 
