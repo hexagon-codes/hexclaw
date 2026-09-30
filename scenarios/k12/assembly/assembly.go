@@ -55,6 +55,15 @@ func WithGrounding(g usecase.Grounding) Option {
 	return func(d *usecase.Deps) { d.Grounding = g }
 }
 
+// WithGroundingFactory 让教材读取复用当前运行时的同一份记录存储。
+func WithGroundingFactory(build func(*k12storage.Store) usecase.Grounding) Option {
+	return func(d *usecase.Deps) {
+		if build != nil {
+			d.Grounding = build(d.Records)
+		}
+	}
+}
+
 // WithRecognizer 注入识题 adapter（云端 vision）。
 func WithRecognizer(rec usecase.Recognizer) Option {
 	return func(d *usecase.Deps) { d.Recognizer = rec }

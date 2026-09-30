@@ -994,18 +994,37 @@ func (r *k12DingtalkPhotoInboundRuntime) completeBoundReply(
 	if err != nil {
 		return false, err
 	}
-	batch, _, err := r.replies.Deliver(ctx, k12DingtalkPhotoReplyCommand{
+	batch, _, queryErr := r.replies.Deliver(ctx, k12DingtalkPhotoReplyCommand{
 		AgentName:       bundle.Receipt.AgentName,
 		DeliveryBatchID: bundle.Dispatch.DeliveryBatchID,
 	})
-	if err != nil {
-		return false, err
+	if queryErr != nil && !errors.Is(queryErr, k12usecase.ErrDeliveryQueryUnavailable) {
+		return false, queryErr
 	}
 	if len(batch.Receipts) != 2 || !strings.HasPrefix(batch.Receipts[1].PartMIME, "image/") {
 		return false, fmt.Errorf("DingTalk photo bound reply batch is invalid")
 	}
 	if err := validateK12DingtalkPhotoReplyBatch(batch, target, batch.Receipts[1].PartMIME); err != nil {
 		return false, err
+	}
+	if queryErr != nil {
+		if batch.Status != k12.DeliveryBatchOutcomeUnknown {
+			return false, queryErr
+		}
+		for _, receipt := range batch.Receipts {
+			if (receipt.Status == k12.DeliverySending || receipt.Status == k12.DeliveryOutcomeUnknown) &&
+				strings.TrimSpace(receipt.ExternalMessageID) != "" {
+				return false, queryErr
+			}
+		}
+		// 没有可查询证据时仅退出当前 worker；持久化未知态留待后续恢复核对。
+		slog.Warn("K12 DingTalk inbound photo worker waiting for delivery evidence",
+			"agent_ref", k12DingtalkPhotoRestartCheckpointValueDigest(bundle.Receipt.AgentName),
+			"receipt_ref", k12DingtalkPhotoRestartCheckpointValueDigest(bundle.Receipt.ReceiptID),
+			"delivery_batch_ref", k12DingtalkPhotoRestartCheckpointValueDigest(batch.BatchID),
+			"delivery_status", batch.Status,
+		)
+		return true, nil
 	}
 	if batch.Status == k12.DeliveryBatchFailed || batch.Status == k12.DeliveryBatchPartialFailed {
 		failureKind := "delivery_batch_failed"

@@ -15,6 +15,7 @@ import (
 
 	"github.com/hexagon-codes/toolkit/util/idgen"
 
+	"github.com/hexagon-codes/hexclaw/internal/inputlimits"
 	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/assetstore"
@@ -678,18 +679,19 @@ func sameImageTaskRouteRequest(
 
 func gradingSnapshotFromImageRoute(route k12.ImageTaskRouteSnapshot) k12.GradingModelSnapshot {
 	snapshot := k12.GradingModelSnapshot{
-		Provider:                route.Provider,
-		Model:                   route.Model,
-		Route:                   route.Route,
-		ProviderInstanceID:      route.ProviderInstanceID,
-		ConfigFingerprint:       route.ConfigFingerprint,
-		CapabilityReceiptDigest: route.CapabilityReceiptDigest,
-		ProbePolicyVersion:      route.ProbePolicyVersion,
-		Capability:              route.Capability,
-		TimeoutMS:               route.TimeoutMS,
-		Fallback:                route.FallbackPolicy,
+		Provider:                 route.Provider,
+		Model:                    route.Model,
+		Route:                    route.Route,
+		ProviderInstanceID:       route.ProviderInstanceID,
+		ConfigFingerprint:        route.ConfigFingerprint,
+		CapabilityReceiptDigest:  route.CapabilityReceiptDigest,
+		ProbePolicyVersion:       route.ProbePolicyVersion,
+		Capability:               route.Capability,
+		TimeoutMS:                route.TimeoutMS,
+		Fallback:                 route.FallbackPolicy,
+		RecognizingRequestPolicy: route.RecognizingRequestPolicy,
 	}
-	if snapshot.Model == k12.RecognizingPolicyModel {
+	if snapshot.Model == k12.RecognizingPolicyModel && snapshot.RecognizingRequestPolicy.IsZero() {
 		snapshot.RecognizingRequestPolicy = k12.ApprovedRecognizingRequestPolicy()
 	}
 	return k12.NormalizeGradingModelSnapshot(snapshot)
@@ -1435,11 +1437,10 @@ func (c *ImageTaskCoordinator) Run(
 			automaticCtx,
 			invocation.RouteSnapshot,
 		)
-		if k12.NormalizeImageTaskRouteSnapshot(invocation.RouteSnapshot).Model ==
-			k12.RecognizingPolicyModel {
+		if policy := gradingSnapshotFromImageRoute(invocation.RouteSnapshot).RecognizingRequestPolicy; !policy.IsZero() {
 			providerCtx = k12.WithGradingModelRequestPolicy(
 				providerCtx,
-				k12.ApprovedRecognizingRequestPolicy(),
+				policy,
 			)
 		}
 		classificationStartedAt := time.Now()
@@ -2921,6 +2922,16 @@ func (c *ImageTaskCoordinator) Confirm(
 			dispatch.DispatchID, view.Creative.IntakeID, command.WorkTitle,
 			command.TaskRequirement, command.Intent, command.ContentMarkdown,
 		})
+		// 原图标题和已成功提交的重放保留原文；只限制本次手工填写的标题。
+		if view.Creative.WorkType == k12.WorkTypeArt && view.Creative.CommitReceipt == nil {
+			previousTitle := ""
+			if candidate := view.Creative.WorkTitleCandidate; candidate != nil {
+				previousTitle = candidate.Value
+			}
+			if err := inputlimits.Text("work_title", creative.WorkTitle, previousTitle, inputlimits.Title); err != nil {
+				return view, fmt.Errorf("%w: %v", ErrInvalidInput, err)
+			}
+		}
 		intake, err := c.Records.CommitManualCreativeWorkIntake(
 			ctx, input.AgentName, view.Creative.IntakeID,
 			view.Creative.Version, command,

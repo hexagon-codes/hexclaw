@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/hexagon-codes/hexclaw/internal/inputlimits"
 	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 )
@@ -59,6 +60,13 @@ func (d Deps) UpdateProfile(ctx context.Context, agentName string, p k12.ChildPr
 			return k12.ChildProfile{}, fmt.Errorf("usecase: 保存档案: %w", err)
 		}
 		return stored, nil
+	}
+	previous, err := d.Profiles.GetProfile(ctx, agentName)
+	if err != nil {
+		return k12.ChildProfile{}, err
+	}
+	if err := inputlimits.Text("profile.child_name", p.ChildName, previous.ChildName, inputlimits.ChildName); err != nil {
+		return k12.ChildProfile{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 	}
 	if err := d.Profiles.SaveProfile(ctx, agentName, p); err != nil {
 		return k12.ChildProfile{}, fmt.Errorf("usecase: 保存档案: %w", err)

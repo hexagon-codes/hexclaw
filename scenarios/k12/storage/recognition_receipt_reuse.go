@@ -125,6 +125,23 @@ func (s *Store) ReuseSucceededRecognitionPhysicalInvocation(
 				return current, false, queryErr
 			}
 			if !classified {
+				// 只为确定的末项单括号缺失复用原字节，新 attempt 仍须完成全部解析与结算。
+				var content string
+				err := s.db.QueryRowContext(ctx, `SELECT p.result_content
+                        FROM k12_model_physical_invocations p
+                        JOIN k12_recognition_layout_batch_settlements b ON b.source_physical_invocation_id=p.physical_invocation_id
+                        WHERE p.physical_invocation_id=? AND p.agent_name=? AND p.job_id=?
+                          AND p.status='succeeded' AND p.result_digest=? AND b.source_physical_result_digest=p.result_digest
+                          AND b.classification='terminal_ambiguous' AND b.ambiguity_kind='unattributable'`,
+					source.PhysicalInvocationID, agentName, current.JobID, source.ResultDigest).Scan(&content)
+				if err != nil && !errors.Is(err, sql.ErrNoRows) {
+					return current, false, err
+				}
+				if err == nil && physicalInvocationResultDigest(content) == source.ResultDigest {
+					_, classified = k12.CompleteRecognitionLayoutBatchJSON(content)
+				}
+			}
+			if !classified {
 				if partial {
 					return current, false, fmt.Errorf("%w: partial recognition replay batch is unsettled", ErrModelPhysicalInvocationConflict)
 				}

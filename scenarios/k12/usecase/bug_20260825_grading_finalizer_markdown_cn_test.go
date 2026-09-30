@@ -148,3 +148,133 @@ func gradingProcessIssueEntryForMarkdownTest(
 func gradingBoolForMarkdownTest(value bool) *bool {
 	return &value
 }
+
+func TestCanonicalGradingFinalAssetAnswerSourceKeepsCompleteGuide(t *testing.T) {
+	entries := make([]gradingFinalEntry, 0, 3)
+	for index, sample := range []struct {
+		question string
+		answer   string
+		step     string
+	}{
+		{"每朵花用 3/8 张纸，做 2 朵花需要多少张纸？", "3/4 张纸", "3/8 × 2 = 6/8 = 3/4 张纸"},
+		{"每朵花用 3/8 张纸，做 8 朵花需要多少张纸？", "3 张纸", "3/8 × 8 = 24/8 = 3 张纸"},
+		{"一袋面包重 3/10 kg，3 袋重多少千克？", "9/10 kg", "3/10 × 3 = 9/10 kg"},
+	} {
+		identity := strconv.Itoa(index + 1)
+		item := PhotoGradeItem{
+			Recognized: RecognizedQuestion{
+				ProblemID: "problem-" + identity, AttemptID: "attempt-" + identity,
+				InputDigest: "input-" + identity, ConfirmedVersion: 1,
+				DisplayLabel: identity, Question: sample.question, CanonicalMarkdown: sample.question,
+			},
+			Status: PhotoBlankSolved,
+			ParentGuide: &ParentTeachingGuide{
+				Answer: sample.answer, FullSolutionSteps: []string{sample.step},
+				GradeLevelMethod:       "分母不变，分子乘整数。",
+				LikelyMistakes:         []string{"把分母也乘以整数。"},
+				ParentTeachingSequence: []string{"先说出有几个相同的分数，再列式计算。"},
+				FollowUpQuestions:      []string{"为什么分母不变？"},
+				CheckingMethod:         "用重复加法核对结果。",
+			},
+		}
+		if index == 2 {
+			item.AnswerSource = &k12.ProblemAnswerSource{
+				Kind: k12.ProblemAnswerAsset, FactsDigest: "sha256:" + strings.Repeat("a", 64),
+				AssetID: "asset-bread", AssetVersion: 1, AssetRevision: 1, AdoptionID: "adoption-bread",
+			}
+		}
+		raw, err := json.Marshal(gradingAssessmentCanonicalResult(item))
+		if err != nil {
+			t.Fatal(err)
+		}
+		entries = append(entries, gradingFinalEntry{
+			question: item.Recognized,
+			assessment: &k12.GradingAssessmentItem{
+				Status: k12.GradingAssessmentBlankSolved, ResultJSON: string(raw),
+				ResultDigest: modelInvocationDigest(raw),
+			},
+		})
+	}
+
+	t.Run("final contains all answers and steps without changing receipts", func(t *testing.T) {
+		originalBodies := make([]string, len(entries))
+		for index, entry := range entries {
+			originalBodies[index] = entry.assessment.ResultJSON
+		}
+		markdown := renderCanonicalGradingFinal(entries, nil)
+		for _, want := range []string{
+			"**共 3 题 · 3 题已解答**",
+			"**正确答案：** 3/4 张纸", "3/8 × 2 = 6/8 = 3/4 张纸",
+			"**正确答案：** 3 张纸", "3/8 × 8 = 24/8 = 3 张纸",
+			"**正确答案：** 9/10 kg", "3/10 × 3 = 9/10 kg",
+		} {
+			if !strings.Contains(markdown, want) {
+				t.Errorf("final markdown lacks %q", want)
+			}
+		}
+		if strings.Count(markdown, "### 家长辅导指南") != 3 {
+			t.Errorf("final markdown must contain all three parent guides: %s", markdown)
+		}
+		for _, forbidden := range []string{"answer_source", "asset-bread", "adoption-bread"} {
+			if strings.Contains(markdown, forbidden) {
+				t.Errorf("final markdown leaked source identity %q", forbidden)
+			}
+		}
+		for index, entry := range entries {
+			if entry.assessment.ResultJSON != originalBodies[index] ||
+				entry.assessment.ResultDigest != modelInvocationDigest([]byte(originalBodies[index])) {
+				t.Fatalf("render changed durable receipt %d", index)
+			}
+		}
+	})
+
+	assetBody := entries[2].assessment.ResultJSON
+	t.Run("ordinary result remains identical", func(t *testing.T) {
+		var ordinary map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(assetBody), &ordinary); err != nil {
+			t.Fatal(err)
+		}
+		delete(ordinary, "answer_source")
+		raw, err := json.Marshal(ordinary)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assetDetails, assetStatus, assetOK := RenderCanonicalGradingAssessmentDetails(assetBody)
+		ordinaryDetails, ordinaryStatus, ordinaryOK := RenderCanonicalGradingAssessmentDetails(string(raw))
+		if !assetOK || !ordinaryOK || assetStatus != PhotoBlankSolved || ordinaryStatus != PhotoBlankSolved ||
+			assetDetails != ordinaryDetails || !strings.Contains(ordinaryDetails, "**正确答案：** 9/10 kg") {
+			t.Fatalf("source metadata changed visible content: asset=%v ordinary=%v", assetOK, ordinaryOK)
+		}
+	})
+
+	for _, field := range []string{"Grade", "ParentGuide", "Recognized", "ResultKind", "Solve", "Status", "Warning"} {
+		t.Run("missing required "+field, func(t *testing.T) {
+			var object map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(assetBody), &object); err != nil {
+				t.Fatal(err)
+			}
+			delete(object, field)
+			raw, err := json.Marshal(object)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, _, ok := RenderCanonicalGradingAssessmentDetails(string(raw)); ok {
+				t.Fatalf("missing required field %s was accepted", field)
+			}
+		})
+	}
+	t.Run("unknown field remains rejected", func(t *testing.T) {
+		var object map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(assetBody), &object); err != nil {
+			t.Fatal(err)
+		}
+		object["unrecognized_source"] = json.RawMessage(`"must-not-render"`)
+		raw, err := json.Marshal(object)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, ok := RenderCanonicalGradingAssessmentDetails(string(raw)); ok {
+			t.Fatal("unknown field was accepted")
+		}
+	})
+}

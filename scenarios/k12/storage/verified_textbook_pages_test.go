@@ -14,7 +14,8 @@ import (
 
 func verifiedTextbookReadFixture(t *testing.T) (*k12storage.Store, k12.VerifiedTextbookReadRequest) {
 	t.Helper()
-	store, _ := seedTextbookGroundingEvidenceScope(t)
+	deps, _ := weeklyTextbookSourceFixture(t, weeklyLessonPage)
+	store := deps.Records
 	scope, found, err := store.GetActiveTextbookGroundingScope(context.Background(), k12storage.TextbookScope{
 		OwnerID: "desktop-user", AgentName: "mingming", Subject: "math",
 	})
@@ -31,9 +32,9 @@ func TestVerifiedTextbookPages_FrozenSourceSurvivesRestartAndReparse(t *testing.
 	if err != nil || len(want) != 1 {
 		t.Fatalf("read source: pages=%+v err=%v", want, err)
 	}
-	if want[0].LogicalPage != 1 || want[0].PDFPage != 3 || want[0].Content != "第一单元\n第1课\n1" ||
+	if want[0].LogicalPage != 1 || want[0].PDFPage != 3 || want[0].Content != weeklyLessonPage ||
 		!reflect.DeepEqual(want[0].SegmentRefs, []string{"catalog-segment-3"}) ||
-		!reflect.DeepEqual(want[0].LessonTitles, []string{"第1课"}) {
+		len(want[0].LessonTitles) != 0 {
 		t.Fatalf("wrong page or lesson attribution: %+v", want[0])
 	}
 	path := filepath.Join(t.TempDir(), "verified-textbook.db")
@@ -56,7 +57,7 @@ func TestVerifiedTextbookPages_FrozenSourceSurvivesRestartAndReparse(t *testing.
 		`UPDATE kb_documents SET content='new generation content' WHERE id='catalog-doc'`,
 		`DELETE FROM kb_chunks WHERE doc_id='catalog-doc'`,
 		`UPDATE k12_textbook_manifests SET state='stale' WHERE manifest_id='catalog-manifest'`,
-		`UPDATE k12_textbook_bindings SET status='invalidated' WHERE textbook_binding_id='catalog-binding'`,
+		`UPDATE k12_textbook_bindings SET status='invalidated' WHERE textbook_manifest_id='catalog-manifest'`,
 	} {
 		if _, err := reopened.DB().Exec(statement); err != nil {
 			t.Fatal(err)

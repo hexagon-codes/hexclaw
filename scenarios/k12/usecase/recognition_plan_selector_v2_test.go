@@ -20,6 +20,7 @@ func TestREGK12RecognitionPlanVersion20260808001StartPhotoSelectsServerOwnedPlan
 		trusted        k12.GradingBudgetSnapshot
 		callerAttempt  k12.GradingBudgetSnapshot
 		image          []byte
+		intent         PhotoTaskIntent
 		wantVersion    int
 		wantRecognize  int64
 		wantV2Controls bool
@@ -43,6 +44,26 @@ func TestREGK12RecognitionPlanVersion20260808001StartPhotoSelectsServerOwnedPlan
 			wantVersion:   k12.RecognitionPlanVersionV2,
 			wantRecognize: trustedV2.StageSeconds.Recognizing, wantV2Controls: true,
 		},
+		{
+			name:    "blank ordinary page keeps whole-page stage budget",
+			trusted: trustedV2, callerAttempt: trustedV1,
+			image: planSelectorPagePNG(t, 640, 640), intent: PhotoTaskBlankWorksheet,
+			wantVersion:   k12.RecognitionPlanVersionV1,
+			wantRecognize: trustedV2.StageSeconds.Recognizing,
+		},
+		{
+			name:    "blank dense page keeps whole-page stage budget",
+			trusted: trustedV2, callerAttempt: trustedV1,
+			image: planSelectorPagePNG(t, 800, 1200), intent: PhotoTaskBlankWorksheet,
+			wantVersion:   k12.RecognitionPlanVersionV1,
+			wantRecognize: trustedV2.StageSeconds.Recognizing,
+		},
+		{
+			name:    "trusted v1 blank page keeps its existing budget",
+			trusted: trustedV1, callerAttempt: trustedV2,
+			image: planSelectorPagePNG(t, 800, 1200), intent: PhotoTaskBlankWorksheet,
+			wantVersion: k12.RecognitionPlanVersionV1, wantRecognize: 120,
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			deps, _ := newPipeline(t, fakeSolver{}, fakeGrader{}, nil)
@@ -51,15 +72,22 @@ func TestREGK12RecognitionPlanVersion20260808001StartPhotoSelectsServerOwnedPlan
 				deps,
 				orchestratorSnapshotResolver,
 			))
+			sourceKind := "desktop"
+			if test.intent == PhotoTaskBlankWorksheet {
+				sourceKind = "image_task"
+			}
 			job, created, err := orchestrator.StartPhotoGradingJob(
 				context.Background(),
 				StartPhotoGradingInput{
 					Photo: PhotoGradeRequest{
 						AgentName: "mingming", Grade: "五年级上",
 						SourceSession: "plan-selector", Image: test.image,
+						TaskIntent: test.intent,
 					},
-					SourceKind: "desktop", SourceKey: "plan-selector-" + test.name,
-					BudgetSnapshot: test.callerAttempt,
+					SourceKind: sourceKind, SourceKey: "plan-selector-" + test.name,
+					BudgetSnapshot:            test.callerAttempt,
+					ParentAutomaticAttemptID:  "plan-selector-attempt",
+					ParentAutomaticDeadlineAt: deps.now() + 300,
 				},
 			)
 			if err != nil || !created {

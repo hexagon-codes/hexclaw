@@ -9,10 +9,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http/httptrace"
 	"reflect"
 	"regexp"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -149,8 +151,21 @@ func (a *RecognizerAdapter) callRecognitionVisionPhysical(
 		call,
 		func(sendCtx context.Context) (string, error) {
 			started := time.Now()
+			// 仅记录请求阶段耗时，区分连接、发送、等待首字与正文读取；不记录请求内容。
+			var connected, written, firstByte atomic.Int64
+			connected.Store(-1)
+			written.Store(-1)
+			firstByte.Store(-1)
+			sendCtx = httptrace.WithClientTrace(sendCtx, &httptrace.ClientTrace{
+				GotConn:              func(httptrace.GotConnInfo) { connected.CompareAndSwap(-1, time.Since(started).Milliseconds()) },
+				WroteRequest:         func(httptrace.WroteRequestInfo) { written.CompareAndSwap(-1, time.Since(started).Milliseconds()) },
+				GotFirstResponseByte: func() { firstByte.CompareAndSwap(-1, time.Since(started).Milliseconds()) },
+			})
 			raw, callErr := a.vision(sendCtx, call.Image, prompt)
-			slog.Info("K12 recognition provider finished", "unit", call.Unit, "elapsed_ms", time.Since(started).Milliseconds(), "response_bytes", len(raw), "succeeded", callErr == nil)
+			slog.Info("K12 recognition provider finished", "unit", call.Unit, "plan_digest", call.PlanDigest,
+				"started_at", started.UTC().Format(time.RFC3339Nano), "elapsed_ms", time.Since(started).Milliseconds(),
+				"connected_ms", connected.Load(), "request_written_ms", written.Load(), "first_response_byte_ms", firstByte.Load(),
+				"response_bytes", len(raw), "succeeded", callErr == nil)
 			return raw, providerResponseError(callErr)
 		},
 	)
@@ -180,6 +195,7 @@ const recognizePrompt = `识别这张作业图片里的所有题目，并逐题�
 关键规则：
 - 每个独立作答的小题必须对应一个 JSON 元素：即使多个口算、填空或选择小题横排在同一行，也要逐小题拆开，不能合并成一个大题/整行元素；章节标题不是题目，不得把标题单独输出为 standalone。
 - 每个题都要回收所属可见章节标题：source_section_path 只放标题编号层级、source_section_label 抄录完整可见标题，例如 ["一"] / "一、计算题"；没有可见章节标题则两个字段同时为空。
+- For the same source_section_path, use the same numbered heading as source_section_label. An unnumbered practice caption such as “做一做” is not another numbered section and must not be appended to that heading.
 - 标题下每个有可见子题号的可作答小题必须输出完整 source_number_path 与 display_label，例如“一、计算题”下的第 1、2 题分别为 ["一","1"] / "一、1" 与 ["一","2"] / "一、2"。子题必须输出完整层级，不得只输出子题的局部序号，不得用空题号代替标题下可见子题号。
 - 如果小题本身没有可见印刷题号，source_number_path 与 display_label 必须同时为空；保留其 source_section_*，不得按位置补号，也不得输出任何“系统序号”字段。
 - source_number_path 必须逐层保留原卷实际可见题号字符，例如大题“三”下第“1”题输出 ["三","1"]；display_label 必须按原卷层级输出“三、1”。原卷没有题号时两者分别输出 [] 和 ""，禁止按识别顺序自造连续题号。不得让两个独立作答小题复用同一个非空 source_number_path，也不得让两个独立作答小题复用同一个非空 display_label；无法辨认子题号时不得编造。
@@ -192,6 +208,7 @@ const recognizePrompt = `识别这张作业图片里的所有题目，并逐题�
 - recognition_confidence 是印刷原题转写的 0~1 置信度，不是对解题答案或学生字迹的信心。空白作答区、没有学生答案、答案区擦痕不得降低清晰原题的置信度。返回前自行对照原图复核有疑问的数字、运算符和小数点；仍无法辨认才保留不确定性。ocr_signals 只可使用 fraction/decimal_point/negative_sign/unit/erasure/unclear_handwriting。高置信度也必须如实输出格式信号。
 - subject 逐题判定题目学科，只能取以下之一：数学 / 语文 / 英语 / 物理 / 化学；确实判不出学科时才留空字符串 ""。
 - question 题干只抄印刷体/原题内容，绝不能把铅笔、黑笔等手写墨迹拼进题干；student_answer 只如实誊录图中孩子**已经写下**的手写作答（包括紧跟在印刷等号后的数字）。例如印刷题是“4÷0.5=”且等号后手写“8”，必须让 question 写 "4÷0.5="、student_answer 写 "8"，不能把 question 写成“4÷0.5=8”。
+- Printed worked examples, printed answers, coloured cancellation marks and printed solution steps are source material, never student_answer. Preserve their mathematical content as printed context. If there is no actual student handwriting, use answer_state=blank and empty student_answer/answer_canonical_markdown; genuine student handwriting must still be recovered even beside a printed example.
 - answer_state 只能是 blank / present / unclear：
   - blank：可以确认没有任何学生作答，student_answer 必须为 ""；
   - present：可以确认存在作答且能可靠誊录，student_answer 必须是实际可见内容；
@@ -208,6 +225,7 @@ const wholePageRecognitionPrompt = `Recognize every question in this homework im
 Rules:
 - Every independently answerable subquestion must be a separate JSON item. Split horizontal arithmetic, fill-in-the-blank, and multiple-choice questions into individual items. A section heading is not a question and must not be emitted as a standalone item.
 - Recover every visible section heading associated with each question. source_section_path contains only the heading-number hierarchy, and source_section_label copies the complete visible heading, for example ["一"] / "一、计算题". When no heading is visible, both fields must be empty.
+- For the same source_section_path, use the same numbered heading as source_section_label. An unnumbered practice caption such as “做一做” is not another numbered section and must not be appended to that heading.
 - Under a heading, every answerable subquestion with a visible number must include the complete source_number_path and display_label. For example, questions 1 and 2 under “一、计算题” use ["一","1"] / "一、1" and ["一","2"] / "一、2". Never emit only a local subquestion number or replace a visible number with an empty value.
 - When the subquestion itself has no visible printed number, source_number_path and display_label must both be empty. Preserve its source_section_* fields, never invent a number from position, and never emit a system-generated sequence field.
 - Preserve the exact visible source-number characters at every level. For example, question “1” under section “三” uses ["三","1"] and “三、1”. Without printed numbering, use [] and "". Two independent questions must not share the same non-empty source_number_path or display_label. Never invent an unreadable subquestion number.
@@ -220,6 +238,7 @@ Rules:
 - recognition_confidence measures only the printed question transcription, from 0 to 1, not confidence in a solution or the student's handwriting. An empty answer area, missing student answer, or erased answer must not lower confidence in a clearly readable question. Before returning, recheck uncertain digits, operators and decimal points against the image; retain uncertainty only when the source remains unreadable. ocr_signals may contain only fraction, decimal_point, negative_sign, unit, erasure, or unclear_handwriting. Report formatting signals honestly even at high confidence.
 - Determine subject per question. It must be exactly one of 数学, 语文, 英语, 物理, 化学, or an empty string only when the subject truly cannot be determined.
 - question copies only printed source text and must never incorporate pencil, pen, or other handwritten marks. student_answer copies only work the student has already written, including a number immediately following a printed equals sign. If the printed question is “4÷0.5=” and the student wrote “8” after the equals sign, question must be "4÷0.5=" and student_answer must be "8"; never make question "4÷0.5=8".
+- Printed worked examples, printed answers, coloured cancellation marks and printed solution steps are source material, never student_answer. Preserve their mathematical content as printed context. If there is no actual student handwriting, use answer_state=blank and empty student_answer/answer_canonical_markdown; genuine student handwriting must still be recovered even beside a printed example.
 - answer_state must be blank, present, or unclear. blank means no student response is present and requires student_answer="". present means a response exists and can be transcribed reliably, and student_answer must contain the visible response. unclear means handwriting, an erasure, or an answer area is visible but cannot be read reliably, and requires student_answer="".
 - Descriptions such as “unreadable”, “erased”, “unclear”, or “unanswered” are state descriptions and must never appear in student_answer.
 - Do not output bbox in this stage. A separate batched evidence stage handles answer coordinates so optional image enhancement cannot block core recognition.
@@ -235,6 +254,7 @@ This is whole-page recognition. This completeness protocol overrides only the to
 - pi reviews only printed question text and visible source numbering. Without visible numbering use np=[] and dl="". Do not include section, subject, knowledge, answer, bbox, or system sequence fields in pi.
 - Build qs in the same order. Copy np, dl, and qt character for character from the corresponding pi item; do not transcribe printed identity a second time. Add answer, section, subject, and knowledge facts using the complete mapped field protocol.
 - Use compound_parent and subproblem only when every child has a visible, stable printed subproblem label such as (1)/(2) or a/b. In that case pi and qs both include the shared parent once and each visibly labelled child once. If one printed block contains multiple unlabelled question sentences, keep the complete block as one standalone item. Never invent subproblem_no from sentence order or duplicate the parent text as synthetic children.
+- For compound_parent, qt and cm contain only shared givens/material. Put each labelled child's question in that subproblem's own qt/cm, never in the parent's shared text. Preserve every shared condition and every child question across the family.
 - Before returning JSON, compare each corresponding np, dl, and qt byte for byte and correct qs from pi. Verify every pk/pr/sb/as/sa combination against the parent-child rules above; never clear an invalid field merely to pass validation.
 - Ignore title, date, name, time, page labels, QR codes, decoration, section headings, and worksheet instructions. They are not questions and must not appear in either array.
 - The arrays must correspond item by item and completely cover every independently answerable horizontal arithmetic, fill-in-the-blank, and multiple-choice item. Do not omit, invent, merge, or duplicate questions.
@@ -439,7 +459,7 @@ var wholePageShortQuestionFieldOrder = []string{
 
 // invalidJSONEscape 匹配 JSON 字符串中的非法转义（\x 且 x ∉ "\/bfnrtu）——视觉模型在题干里
 // 输出 LaTeX（\div 等）时 \d 会让 json.Unmarshal 直接失败（BUG-20260712-U 真机取证）。
-var latexJSONCommandEscape = regexp.MustCompile(`\\(?:times|div|cdot|pm|mp|leq|geq|neq|le|ge|ne|approx|infty|pi|degree|sqrt|frac|text|mathrm|mathbf|mathit|mathsf|mathtt|operatorname)`)
+var latexJSONCommandEscape = regexp.MustCompile(`\\(?:times|div|cdot|pm|mp|leq|geq|neq|le|ge|ne|approx|infty|pi|degree|sqrt|frac|text|right|mathrm|mathbf|mathit|mathsf|mathtt|operatorname)`)
 var sectionHeading = regexp.MustCompile(`^(?:[一二三四五六七八九十]+[、.．]\s*[^?？=]{0,20}(?:题|得数|计算|解方程|简算)|选择合适的数填空)$`)
 var leadingChineseQuestionNumber = regexp.MustCompile(`^\s*\d+\s*、\s*`)
 
@@ -481,8 +501,8 @@ func sanitizeModelJSON(s string) string {
 			continue
 		}
 
-		// \times、\text、\frac、\ne 等分别以 JSON 的合法 \t/\f/\n 开头；如果不先保护，
-		// json.Unmarshal 会把它们吞成制表符/换页符/换行，字段级数学规范化已无法恢复。
+		// \times、\text、\frac、\ne、\right 等以 JSON 的合法 \t/\f/\n/\r 开头；如果不先保护，
+		// json.Unmarshal 会把它们吞成控制字符，字段级数学规范化已无法恢复。
 		if match := latexJSONCommandEscape.FindStringIndex(s[i:]); match != nil && match[0] == 0 {
 			end := i + match[1]
 			// LaTeX 命令只由英文字母组成；后接数字时也必须保护反斜杠。
@@ -1841,6 +1861,9 @@ func classifyRecognitionLayoutBatchV2(
 	}
 
 	payload := []byte(sanitizeModelJSON(extractJSONObject(raw)))
+	if completed, ok := k12.CompleteRecognitionLayoutBatchJSON(string(payload)); ok {
+		payload = []byte(completed)
+	}
 	var envelope map[string]json.RawMessage
 	if err := json.Unmarshal(payload, &envelope); err != nil ||
 		!recognitionLayoutExactFieldsV2(
@@ -3519,12 +3542,32 @@ func mergeRecognizedQuestions(primary, recovery []usecase.RecognizedQuestion) []
 	for i := range primary {
 		merged[i] = usecase.NormalizeRecognizedQuestion(primary[i])
 	}
-	seen := make(map[string]int, len(merged))
+	// 父题公共材料与其小题、不同小题不能作为同一题的重叠观察相互合并。
+	// 只在相同结构身份内复用原有文本、算式及残题去重规则。
+	identity := func(q usecase.RecognizedQuestion) [3]string {
+		switch q.ProblemKind {
+		case usecase.ProblemKindCompoundParent:
+			return [3]string{string(q.ProblemKind), q.ProblemID, ""}
+		case usecase.ProblemKindSubproblem:
+			return [3]string{string(q.ProblemKind), q.ParentProblemID, q.SubproblemNo}
+		default:
+			return [3]string{string(q.ProblemKind), "", ""}
+		}
+	}
+	seenByIdentity := make(map[[3]string]map[string]int)
+	seenFor := func(q usecase.RecognizedQuestion) map[string]int {
+		key := identity(q)
+		if seenByIdentity[key] == nil {
+			seenByIdentity[key] = make(map[string]int)
+		}
+		return seenByIdentity[key]
+	}
 	for i, q := range merged {
-		seen[recognizedQuestionKey(q.Question)] = i
+		seenFor(q)[recognizedQuestionKey(q.Question)] = i
 	}
 	for _, candidate := range recovery {
 		q := usecase.NormalizeRecognizedQuestion(candidate)
+		seen := seenFor(q)
 		key := recognizedQuestionKey(q.Question)
 		if existing, ok := seen[key]; ok && key != "" {
 			existingQuestion := merged[existing]

@@ -680,6 +680,7 @@ func TestBug20260730RecognizingPolicyReceiptIsAllowlistedAndRedacted(t *testing.
 	for _, key := range []string{
 		"invocation_id",
 		"operation",
+		"execution_kind",
 		"canonical_input_digest",
 		"provider",
 		"model",
@@ -693,8 +694,11 @@ func TestBug20260730RecognizingPolicyReceiptIsAllowlistedAndRedacted(t *testing.
 			t.Fatalf("allowlisted receipt field %q missing: %s", key, raw)
 		}
 	}
-	if len(fields) != 10 {
+	if len(fields) != 11 {
 		t.Fatalf("receipt exposed fields outside the allowlist: %s", raw)
+	}
+	if fields["execution_kind"] != "provider" {
+		t.Fatalf("model receipt execution kind drifted: %s", raw)
 	}
 	if fields["request_policy_digest"] != policy.Digest() {
 		t.Fatalf("policy digest drifted: %s", raw)
@@ -757,6 +761,7 @@ func TestBug20260730RecognizingPhysicalReceiptIsAllowlistedAndRedacted(t *testin
 		"parent_invocation_id",
 		"physical_unit",
 		"operation",
+		"execution_kind",
 		"canonical_input_digest",
 		"provider",
 		"model",
@@ -770,8 +775,11 @@ func TestBug20260730RecognizingPhysicalReceiptIsAllowlistedAndRedacted(t *testin
 			t.Fatalf("allowlisted physical receipt field %q missing: %s", key, raw)
 		}
 	}
-	if len(fields) != 12 {
+	if len(fields) != 13 {
 		t.Fatalf("physical receipt exposed fields outside the allowlist: %s", raw)
+	}
+	if fields["execution_kind"] != "provider" {
+		t.Fatalf("physical receipt execution kind drifted: %s", raw)
 	}
 	if fields["parent_invocation_id"] != "parent-dd036-receipt" ||
 		fields["physical_unit"] != string(k12.RecognitionPhysicalUnitWholePage) ||

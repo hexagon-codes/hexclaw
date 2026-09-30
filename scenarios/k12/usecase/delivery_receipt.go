@@ -884,11 +884,18 @@ func (d Deps) QueryDeliveryBatch(ctx context.Context, agentName, batchID string)
 	if err != nil {
 		return batch, err
 	}
+	var unavailableErr error
 	for _, group := range groups {
 		if group[0].Status != k12.DeliverySending && group[0].Status != k12.DeliveryOutcomeUnknown {
 			continue
 		}
 		if _, queryErr := d.queryPreparedDeliveryEnvelope(ctx, group); queryErr != nil {
+			if errors.Is(queryErr, ErrDeliveryQueryUnavailable) {
+				if unavailableErr == nil {
+					unavailableErr = queryErr
+				}
+				continue
+			}
 			current, getErr := d.GetDeliveryBatch(ctx, batch.AgentName, batch.BatchID)
 			if getErr != nil {
 				return k12.DeliveryBatch{}, getErr
@@ -904,6 +911,13 @@ func (d Deps) QueryDeliveryBatch(ctx context.Context, agentName, batchID string)
 			continue
 		}
 		if _, queryErr := d.QueryDeliveryReceipt(ctx, receipt.AgentName, receipt.DeliveryID); queryErr != nil {
+			// 缺少查询证据的回执保留原状态，不阻断其他独立回执收敛。
+			if errors.Is(queryErr, ErrDeliveryQueryUnavailable) {
+				if unavailableErr == nil {
+					unavailableErr = queryErr
+				}
+				continue
+			}
 			current, getErr := d.GetDeliveryBatch(ctx, batch.AgentName, batch.BatchID)
 			if getErr != nil {
 				return k12.DeliveryBatch{}, getErr
@@ -911,7 +925,11 @@ func (d Deps) QueryDeliveryBatch(ctx context.Context, agentName, batchID string)
 			return current, queryErr
 		}
 	}
-	return d.GetDeliveryBatch(ctx, batch.AgentName, batch.BatchID)
+	current, err := d.GetDeliveryBatch(ctx, batch.AgentName, batch.BatchID)
+	if err != nil {
+		return k12.DeliveryBatch{}, err
+	}
+	return current, unavailableErr
 }
 
 // PrepareAndSendText freezes target/payload/render evidence, creates the

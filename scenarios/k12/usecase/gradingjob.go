@@ -586,9 +586,9 @@ func (d Deps) CancelGradingJob(ctx context.Context, agentName, recordID string) 
 	return d.saveGradingJob(ctx, v, k12.GradingStageCancelled)
 }
 
-// reconcileRetryableRecognitionOutcome 以物理回执纠正旧的可重试投影。
+// reconcileRetryableGradingOutcome 以当前调用回执纠正旧的可重试投影。
 // 各重试入口和启动恢复共用此核对；不改写调用历史，也不发送模型请求。
-func (d Deps) reconcileRetryableRecognitionOutcome(ctx context.Context, agentName, recordID string) (GradingJobView, error) {
+func (d Deps) reconcileRetryableGradingOutcome(ctx context.Context, agentName, recordID string) (GradingJobView, error) {
 	v, err := d.GetGradingJob(ctx, agentName, recordID)
 	if err != nil || v.Record.Status != k12.GradingStageFailedRetryable {
 		return v, err
@@ -615,14 +615,74 @@ func (d Deps) reconcileRetryableRecognitionOutcome(ctx context.Context, agentNam
 		v.Fields.Deadline = 0
 		return d.saveGradingJob(ctx, v, k12.GradingStageOutcomeUnknown)
 	}
+	unresolved, err := d.hasUnresolvedCurrentGradingItemInvocation(ctx, v)
+	if err != nil {
+		return GradingJobView{}, err
+	}
+	if unresolved {
+		v.Fields.FailedStage = k12.GradingStageAssessing
+		v.Fields.FailureKind = "item_invocation_outcome_unknown"
+		v.Fields.Retryable = false
+		v.Fields.Deadline = 0
+		return d.saveGradingJob(ctx, v, k12.GradingStageOutcomeUnknown)
+	}
 	return v, nil
+}
+
+// hasUnresolvedCurrentGradingItemInvocation 用当前题目快照核对未知回执，不依赖可能变化的请求摘要。
+// 仅成功评估明确引用的替代调用能解除原未知；其他任务、旧修订和本地确定性计算不阻断重试。
+func (d Deps) hasUnresolvedCurrentGradingItemInvocation(ctx context.Context, job GradingJobView) (bool, error) {
+	invocations, err := d.Records.ListGradingItemInvocations(ctx, job.Record.AgentName, job.Record.RecordID)
+	if err != nil {
+		return false, fmt.Errorf("%w: inspect assessment receipts: %v", ErrModelInvocationRequiresReconciliation, err)
+	}
+	pending := make([]k12.GradingItemInvocation, 0)
+	byID := make(map[string]k12.GradingItemInvocation, len(invocations))
+	for _, invocation := range invocations {
+		byID[invocation.InvocationID] = invocation
+		if invocation.ExecutionKind != k12.GradingExecutionLocalDeterministic &&
+			(invocation.Status == k12.ModelInvocationSent || invocation.Status == k12.ModelInvocationOutcomeUnknown) {
+			pending = append(pending, invocation)
+		}
+	}
+	if len(pending) == 0 {
+		return false, nil
+	}
+	snapshot, err := d.Records.GetProblemAttemptSnapshot(ctx, job.Record.AgentName, job.Fields.SubmissionID)
+	if err != nil {
+		return false, fmt.Errorf("%w: inspect current assessment input: %v", ErrModelInvocationRequiresReconciliation, err)
+	}
+	assessments, err := d.Records.ListEffectiveGradingAssessments(ctx, job.Record.AgentName, job.Record.RecordID)
+	if err != nil {
+		return false, fmt.Errorf("%w: inspect assessment replacements: %v", ErrModelInvocationRequiresReconciliation, err)
+	}
+	assessmentByProblem := make(map[string]k12.GradingAssessmentItem, len(assessments))
+	for _, assessment := range assessments {
+		assessmentByProblem[assessment.ProblemID] = assessment
+	}
+	for _, invocation := range pending {
+		for _, attempt := range snapshot.Attempts {
+			if invocation.AgentName != job.Record.AgentName || invocation.JobID != job.Record.RecordID ||
+				invocation.ProblemID != attempt.ProblemID || invocation.AttemptID != attempt.AttemptID ||
+				invocation.InputRevision != attempt.ConfirmedVersion || invocation.InputDigest != attempt.InputDigest {
+				continue
+			}
+			assessment := assessmentByProblem[invocation.ProblemID]
+			if assessment.InputRevision == attempt.ConfirmedVersion && assessment.InputDigest == attempt.InputDigest &&
+				gradingOperationSupersededByCurrentAssessment(invocation, assessment, byID) {
+				continue
+			}
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // RetryGradingJob 安全重试（§6.7 公共命令④）：仅 failed_retryable 且 retryable=true 可重试，
 // 回 queued 从最近成功阶段的检查点恢复（规则 3；恢复目标 = GradingResumeStage，由编排器
 // 经 AdvanceGradingStage(ok) 起跑）。重试上限在失败落库时已收敛 failed_terminal（规则 4）。
 func (d Deps) RetryGradingJob(ctx context.Context, agentName, recordID string) (GradingJobView, error) {
-	v, err := d.reconcileRetryableRecognitionOutcome(ctx, agentName, recordID)
+	v, err := d.reconcileRetryableGradingOutcome(ctx, agentName, recordID)
 	if err != nil {
 		return GradingJobView{}, err
 	}
@@ -650,7 +710,7 @@ func (d Deps) RetryGradingJobWithParentAutomaticWindow(
 	agentName, recordID, parentAutomaticAttemptID string,
 	parentAutomaticDeadlineAt int64,
 ) (GradingJobView, error) {
-	v, err := d.reconcileRetryableRecognitionOutcome(ctx, agentName, recordID)
+	v, err := d.reconcileRetryableGradingOutcome(ctx, agentName, recordID)
 	if err != nil {
 		return GradingJobView{}, err
 	}

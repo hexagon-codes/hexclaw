@@ -2,6 +2,7 @@ package engineadapter
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"testing"
 
@@ -18,6 +19,9 @@ type verifiedTextbookReaderProbe struct {
 func (p *verifiedTextbookReaderProbe) ReadVerifiedTextbookPages(_ context.Context, request k12.VerifiedTextbookReadRequest) ([]k12.VerifiedTextbookPage, error) {
 	p.calls++
 	p.request = request
+	if request.Subject != "math" {
+		return nil, fmt.Errorf("verified textbook subject must be math, got %q", request.Subject)
+	}
 	return p.pages, nil
 }
 
@@ -44,7 +48,7 @@ func TestVerifiedTextbookGroundingDoesNotRequireEmbedding(t *testing.T) {
 	if err != nil || !result.Found || result.Text != reader.pages[0].Content || len(result.Sources) != 1 || len(result.Receipts) != 1 {
 		t.Fatalf("verified source unavailable: %+v %v", result, err)
 	}
-	if reader.request.OwnerID != snapshot.OwnerID || reader.request.Scope.DocumentGeneration != snapshot.DocumentGeneration ||
+	if reader.request.Subject != "math" || reader.request.OwnerID != snapshot.OwnerID || reader.request.Scope.DocumentGeneration != snapshot.DocumentGeneration ||
 		reader.request.Scope.SourceDigest != snapshot.SourceDigest || !reflect.DeepEqual(reader.request.Scope.PageRefs, snapshot.PageRefs) {
 		t.Fatalf("source identity changed: %+v", reader.request)
 	}

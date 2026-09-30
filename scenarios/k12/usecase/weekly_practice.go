@@ -253,6 +253,11 @@ func (d Deps) UpdateProfileBundle(ctx context.Context, req UpdateProfileBundleRe
 		req.ExpectedSettingsRevision < 0 {
 		return k12.ProfileBundleResult{}, fmt.Errorf("%w: invalid profile bundle command", ErrInvalidInput)
 	}
+	rawChildName := req.Profile.ChildName
+	var rawDisplayName, rawDescription string
+	if req.AgentConfig != nil {
+		rawDisplayName, rawDescription = req.AgentConfig.DisplayName, req.AgentConfig.Description
+	}
 	req.Profile.ChildName = strings.TrimSpace(req.Profile.ChildName)
 	req.Profile.GradeTerm = strings.TrimSpace(req.Profile.GradeTerm)
 	textbooks, complete := k12.NormalizeSubjectTextbooks(req.Profile.SubjectTextbooks)
@@ -352,6 +357,11 @@ func (d Deps) UpdateProfileBundle(ctx context.Context, req UpdateProfileBundleRe
 	} else {
 		// 非空请求沿用既有摘要字节，避免升级破坏历史幂等命令。
 		digest = digestValue(requestIdentity)
+	}
+	// 摘要沿用原有归一化语义，事务校验使用原始输入以准确保留旧长字段。
+	req.Profile.ChildName = rawChildName
+	if req.AgentConfig != nil {
+		req.AgentConfig.DisplayName, req.AgentConfig.Description = rawDisplayName, rawDescription
 	}
 	result, _, err := d.Records.UpdateProfileBundle(ctx, k12storage.ProfileBundleMutation{
 		OwnerID: req.OwnerID, AgentName: req.AgentName, IdempotencyKey: req.IdempotencyKey,

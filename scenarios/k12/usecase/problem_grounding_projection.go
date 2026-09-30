@@ -116,6 +116,8 @@ func (o *GradingOrchestrator) projectProblemGroundingReceipts(
 	if o == nil || o.deps.Records == nil {
 		return nil, fmt.Errorf("usecase: problem grounding store is unavailable")
 	}
+	// 完整集合与批改输入保持一致；公共父题只提供题干，不产生 assessment。
+	questions = RecognizedQuestionsForAssessment(questions)
 	problemOrder := make([]string, 0, len(questions))
 	publicProblems := make(map[string]struct{}, len(questions))
 	for _, question := range questions {

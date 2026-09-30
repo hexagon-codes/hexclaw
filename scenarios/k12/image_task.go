@@ -98,14 +98,15 @@ type ImageTaskRouteSnapshot struct {
 	// CapabilityReceiptDigest 指向本次图片操作匹配的模型能力探测回执摘要。
 	CapabilityReceiptDigest string `json:"capability_receipt_digest,omitempty"`
 	// ProbePolicyVersion 冻结能力探测回执的探测策略版本。
-	ProbePolicyVersion string `json:"probe_policy_version,omitempty"`
-	Route              string `json:"route"`
-	Capability         string `json:"capability"`
-	SelectionSource    string `json:"selection_source"` // explicit / auto
-	PolicyVersion      string `json:"policy_version"`
-	PromptVersion      string `json:"prompt_version"`
-	TimeoutMS          int    `json:"timeout_ms,omitempty"`
-	FallbackPolicy     string `json:"fallback_policy,omitempty"`
+	ProbePolicyVersion       string                     `json:"probe_policy_version,omitempty"`
+	Route                    string                     `json:"route"`
+	Capability               string                     `json:"capability"`
+	SelectionSource          string                     `json:"selection_source"` // explicit / auto
+	PolicyVersion            string                     `json:"policy_version"`
+	PromptVersion            string                     `json:"prompt_version"`
+	TimeoutMS                int                        `json:"timeout_ms,omitempty"`
+	FallbackPolicy           string                     `json:"fallback_policy,omitempty"`
+	RecognizingRequestPolicy ModelRequestPolicySnapshot `json:"recognizing_request_policy,omitzero"`
 }
 
 func NormalizeImageTaskRouteSnapshot(s ImageTaskRouteSnapshot) ImageTaskRouteSnapshot {
@@ -116,6 +117,7 @@ func NormalizeImageTaskRouteSnapshot(s ImageTaskRouteSnapshot) ImageTaskRouteSna
 	s.ConfigFingerprint = strings.TrimSpace(s.ConfigFingerprint)
 	s.CapabilityReceiptDigest = strings.TrimSpace(s.CapabilityReceiptDigest)
 	s.ProbePolicyVersion = strings.TrimSpace(s.ProbePolicyVersion)
+	s.RecognizingRequestPolicy = NormalizeModelRequestPolicySnapshot(s.RecognizingRequestPolicy)
 	if s.Route == "" && s.Provider != "" && s.Model != "" {
 		s.Route = s.Provider + "/" + s.Model
 	}

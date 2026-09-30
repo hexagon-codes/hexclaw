@@ -1837,19 +1837,21 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 			Content:  spec.Task,
 		}
 		engine.ApplySpecToMessage(msg, spec)
-		var materialAttempt *egress.ProviderAttempt
-		if k12.IsMaterialPreparation(ctx) {
+		var providerAttempt *egress.ProviderAttempt
+		snapshot, gradingCall := k12.GradingModelSnapshotFromContext(ctx)
+		if k12.IsMaterialPreparation(ctx) || gradingCall {
 			if msg.Metadata == nil {
 				msg.Metadata = map[string]string{}
 			}
+			// 独立题目任务已在 spec.Task 中携带课程和核验来源，不混入普通聊天的常驻记忆或全库材料。
 			msg.Metadata["memory"] = "off"
 			msg.Metadata["knowledge"] = "off"
-			ctx, materialAttempt = egress.WithProviderAttempt(ctx)
+			ctx, providerAttempt = egress.WithProviderAttempt(ctx)
 		}
 		// DD-018: K12 GradingJob calls pin provider/model in context. Explicit
 		// message routing disables the engine's normal cross-provider fallback;
 		// a settings change therefore affects only newly created Jobs.
-		if snapshot, ok := k12.GradingModelSnapshotFromContext(ctx); ok {
+		if gradingCall {
 			if err := validateK12FrozenModelCapabilityReceipt(
 				ctx, router, k12ModelCapabilityReceipts, snapshot, k12ProbeKindForSnapshot(snapshot),
 			); err != nil {
@@ -1864,8 +1866,8 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 		}
 		reply, err := eng.Process(ctx, msg)
 		if err != nil {
-			if materialAttempt != nil {
-				err = materialAttempt.Reconcile(err)
+			if providerAttempt != nil {
+				err = providerAttempt.Reconcile(err)
 			}
 			return engine.SubAgentResult{}, err
 		}
@@ -2033,7 +2035,9 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 			k12Opts = append(k12Opts, k12assembly.WithInsights(k12engineadapter.NewInsightsAdapter(fileMem)))
 		}
 		if kb := eng.KnowledgeBase(); kb != nil {
-			k12Opts = append(k12Opts, k12assembly.WithGrounding(k12engineadapter.NewGroundingAdapter(kb)))
+			k12Opts = append(k12Opts, k12assembly.WithGroundingFactory(func(recordStore *k12storage.Store) k12usecase.Grounding {
+				return k12engineadapter.NewGroundingAdapter(kb, recordStore)
+			}))
 		}
 		// 建档/改档：接 agent 路由 + 持久化（读改写 agents.metadata）。
 		k12Opts = append(k12Opts,
@@ -2587,14 +2591,15 @@ Set source only when the material explicitly names a work, title, or another rel
 						Provider: resolved.Provider, ProviderDisplayName: providerDisplayName,
 						Model: resolved.Model, ModelID: resolved.Model,
 						Route: resolved.Route, Capability: resolved.Capability,
-						ProviderInstanceID:      resolved.ProviderInstanceID,
-						ConfigFingerprint:       resolved.ConfigFingerprint,
-						CapabilityReceiptDigest: resolved.CapabilityReceiptDigest,
-						ProbePolicyVersion:      resolved.ProbePolicyVersion,
-						SelectionSource:         selectionSource,
-						PolicyVersion:           "image-task-routing-v1",
-						PromptVersion:           "image-task-classifier-v1",
-						TimeoutMS:               resolved.TimeoutMS,
+						ProviderInstanceID:       resolved.ProviderInstanceID,
+						ConfigFingerprint:        resolved.ConfigFingerprint,
+						CapabilityReceiptDigest:  resolved.CapabilityReceiptDigest,
+						ProbePolicyVersion:       resolved.ProbePolicyVersion,
+						RecognizingRequestPolicy: resolved.RecognizingRequestPolicy,
+						SelectionSource:          selectionSource,
+						PolicyVersion:            "image-task-routing-v1",
+						PromptVersion:            "image-task-classifier-v1",
+						TimeoutMS:                resolved.TimeoutMS,
 					}, nil
 				},
 				ResolveRouteDisplay: func(
@@ -3044,10 +3049,11 @@ Set source only when the material explicitly names a work, title, or another rel
 				return reply, err
 			}
 		}
-		return eng.Process(ctx, msg)
+		return k12TutorPolicy.ProcessDingtalkFollowup(ctx, msg, eng.Process)
 	}
 
 	instanceMgr := instances.NewManager(store.DB())
+	k12TutorPolicy.resolveInstanceID = instanceMgr.ResolveRunningInstanceID
 	k12Deliver.SetInstanceResolver(instanceMgr.ResolveRunningInstanceID)
 	// 回填钉钉通道真实发送函数（ChannelPort 收敛：与 cron Deliverer / send_message 同走
 	// instanceMgr.Send → adapter.Send，per-platform SendQueue 限速同源），并标记

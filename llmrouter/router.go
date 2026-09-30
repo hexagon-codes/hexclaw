@@ -328,6 +328,12 @@ func (p *completionCapabilityProvider) applyReasoningCapability(req *llm.Complet
 	req.Metadata = metadata
 
 	support, control := config.ModelReasoningControl(p.providerConfig, p.requestModel(*req))
+	if expected, frozen := req.Metadata["expected_reasoning_effort"]; frozen {
+		if support != config.LLMReasoningSupportSupported || control == nil ||
+			control.Dialect != config.LLMReasoningDialectEffort || control.Off != expected {
+			return fmt.Errorf("provider %q model %q reasoning mapping differs from frozen request policy", p.providerName, p.requestModel(*req))
+		}
+	}
 	capability := llm.ReasoningCapability{Support: llm.ReasoningSupport(support)}
 	if control != nil {
 		capability.Dialect = llm.ReasoningDialect(control.Dialect)

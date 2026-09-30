@@ -422,6 +422,10 @@ func photoItemGradeRequest(req PhotoGradeRequest, q RecognizedQuestion) GradeReq
 	if req.practiceReference != nil {
 		input.Subject = req.practiceReference.Subject
 		input.Problem = req.practiceReference.QuestionMarkdown
+	} else if q.ProblemKind == ProblemKindSubproblem && strings.TrimSpace(q.SubproblemNo) != "" {
+		// 父题可能保留其他小题，只向模型限定本次作答范围，不改原始题干与摘要。
+		input.Problem += "\n\nFor this request, solve or assess only subproblem " + q.SubproblemNo +
+			". Use the shared material as context; do not answer the other subproblems."
 	}
 	return input
 }

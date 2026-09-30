@@ -46,7 +46,10 @@ func (s *Store) ReadVerifiedTextbookPages(ctx context.Context, requested k12.Ver
 	if err != nil {
 		return nil, fmt.Errorf("k12storage: verified textbook source unavailable: %w", err)
 	}
-	if ingestJobID == "" || sha256Hex([]byte(catalogJSON)) != catalogDigest {
+	if ingestJobID == "" {
+		return nil, fmt.Errorf("%w: verified textbook ingest source missing", records.ErrIllegalTransition)
+	}
+	if sha256Hex([]byte(catalogJSON)) != catalogDigest {
 		return nil, fmt.Errorf("%w: verified textbook catalog changed", records.ErrIllegalTransition)
 	}
 	catalog, err := decodeTextbookCatalog(catalogJSON)

@@ -59,3 +59,19 @@ func TestZeroRecognizingPolicyIsOmittedFromSnapshotJSON(t *testing.T) {
 		t.Fatalf("zero recognizing policy leaked into JSON: %s", raw)
 	}
 }
+
+func TestConfiguredRecognitionPolicyRemainsStageScoped(t *testing.T) {
+	route := GradingModelSnapshot{Provider: "cloud-gpt", Model: "gpt-6-sol", RecognizingRequestPolicy: ConfiguredRecognizingRequestPolicy()}
+	for _, stage := range []string{"solve_generate", "solve_verify", "grading"} {
+		if err := ValidateModelInvocationRequestPolicy(stage, route, route.RecognizingRequestPolicy); err == nil {
+			t.Fatalf("recognition policy accepted for %s", stage)
+		}
+	}
+	if err := ValidateModelInvocationRequestPolicy(GradingStageRecognizing, route, ModelRequestPolicySnapshot{}); err == nil {
+		t.Fatal("new invocation silently lost frozen policy")
+	}
+	route.RecognizingRequestPolicy = ModelRequestPolicySnapshot{}
+	if err := ValidateModelInvocationRequestPolicy(GradingStageRecognizing, route, ModelRequestPolicySnapshot{}); err != nil {
+		t.Fatalf("legacy zero policy rejected: %v", err)
+	}
+}

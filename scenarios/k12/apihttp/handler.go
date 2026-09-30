@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/hexagon-codes/hexclaw/internal/inputlimits"
 	"github.com/hexagon-codes/hexclaw/messagecontent"
 	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/scenario"
@@ -206,6 +207,7 @@ func NewHandler(rt Runtime) http.Handler {
 	mux.HandleFunc("POST /image-tasks/{id}/retry", h.retryImageTask)
 	mux.HandleFunc("POST /image-tasks/{id}/problems/{problem_id}/final-source-corrections", h.correctCompletedSource)
 	mux.HandleFunc("POST /image-tasks/{id}/recognition-recovery-attempts", h.authorizeRecognitionRecovery)
+	mux.HandleFunc("POST /image-tasks/{id}/grounding-source-recovery-attempts", h.authorizeGroundingSourceRecovery)
 	mux.HandleFunc("POST /image-tasks/{id}/reparse", h.reparseImageTask)
 	mux.HandleFunc("POST /image-tasks/{id}/cancel", h.cancelImageTask)
 	mux.HandleFunc("GET /image-tasks/{id}/result", h.getImageTaskResult)
@@ -981,6 +983,10 @@ type groundingReq struct {
 func (h *handler) addGrounding(w http.ResponseWriter, r *http.Request) {
 	var req groundingReq
 	if !decode(w, r, &req) {
+		return
+	}
+	if err := inputlimits.Text("title", req.Title, "", inputlimits.Title); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if err := h.rt.Deps.AddGrounding(r.Context(), req.Agent, req.Subject, req.Title, req.Content); err != nil {

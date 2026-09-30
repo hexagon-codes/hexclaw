@@ -597,11 +597,39 @@ func NormalizeRecognizedProblems(scope string, questions []RecognizedQuestion) (
 		out[i].ProblemID = stableProblemID(scope, i, out[i])
 		out[i].AttemptID = stableRecognitionID("attempt", scope+"\x00"+out[i].ProblemID)
 	}
+	normalizePrintedPracticeSectionLabels(out)
 	out = deriveSystemSectionOrder(out)
 	if err := validateNormalizedRecognizedProblems(out); err != nil {
 		return nil, err
 	}
 	return out, nil
+}
+
+// normalizePrintedPracticeSectionLabels 只把已有同章标题后的未编号练习栏目归回章标题。
+// 原始识题回执保持；真正不同的标题仍交给后续一致性校验拒绝。
+func normalizePrintedPracticeSectionLabels(questions []RecognizedQuestion) {
+	labels := make(map[string]map[string]struct{})
+	for _, question := range questions {
+		if len(question.SourceSectionPath) == 0 {
+			continue
+		}
+		key := strings.Join(question.SourceSectionPath, "\x00")
+		if labels[key] == nil {
+			labels[key] = make(map[string]struct{})
+		}
+		labels[key][question.SourceSectionLabel] = struct{}{}
+	}
+	for i := range questions {
+		parts := strings.Split(questions[i].SourceSectionLabel, "\n")
+		if len(parts) != 2 || strings.TrimSpace(parts[1]) != "做一做" {
+			continue
+		}
+		base := strings.TrimSpace(parts[0])
+		key := strings.Join(questions[i].SourceSectionPath, "\x00")
+		if _, exists := labels[key][base]; exists {
+			questions[i].SourceSectionLabel = base
+		}
+	}
 }
 
 func validateRecognitionEvidence(index int, question RecognizedQuestion) error {

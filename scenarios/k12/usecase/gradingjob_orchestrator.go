@@ -413,8 +413,11 @@ func trustedPhotoRecognitionCreationPolicy(
 		}
 		selected := trusted
 		selected.RecognitionPlanVersion = k12.RecognitionPlanVersionV1
-		selected.StageSeconds.Recognizing =
-			(selected.PhysicalCallCapMillis + 999) / 1000
+		// 空白题页仍识别整页题目，沿用阶段总预算；普通小图使用单次调用预算。
+		if taskIntent != PhotoTaskBlankWorksheet {
+			selected.StageSeconds.Recognizing =
+				(selected.PhysicalCallCapMillis + 999) / 1000
+		}
 		selected.RecognizingBuckets = k12.RecognitionLayoutBudgetBucketsV2{}
 		selected.PhysicalCallCapMillis = 0
 		selected.WorkerHardCap = 0
@@ -1727,7 +1730,8 @@ func (o *GradingOrchestrator) executeAnchorForTask(
 		return nil, k12.GradingAnchorDegraded, "anchor:ledger_job_missing", true
 	}
 	policy := k12.ModelRequestPolicySnapshot{}
-	if k12.NormalizeGradingModelSnapshot(snapshot).Model == k12.RecognizingPolicyModel {
+	if frozen := k12.NormalizeGradingModelSnapshot(snapshot); frozen.Model == k12.RecognizingPolicyModel ||
+		frozen.RecognizingRequestPolicy == k12.ConfiguredRecognizingRequestPolicy() {
 		policy = k12.ApprovedLocatingRequestPolicy()
 	}
 	requestRaw, _ := json.Marshal(struct {

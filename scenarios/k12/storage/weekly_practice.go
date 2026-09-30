@@ -10,7 +10,9 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/hexagon-codes/hexclaw/internal/inputlimits"
 	"github.com/hexagon-codes/hexclaw/records"
+	"github.com/hexagon-codes/hexclaw/router"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 )
 
@@ -81,7 +83,14 @@ func (s *Store) PatchLegacyProfile(ctx context.Context, agentName string,
 	if unmarshalErr := json.Unmarshal([]byte(raw), &meta); unmarshalErr != nil {
 		return k12.ChildProfile{}, unmarshalErr
 	}
+	if err := inputlimits.Text("profile.child_name", profile.ChildName, meta[k12.MetaKeyChildName], inputlimits.ChildName); err != nil {
+		return k12.ChildProfile{}, fmt.Errorf("%w: %v", records.ErrInvalidFields, err)
+	}
+	previousChildName := meta[k12.MetaKeyChildName]
 	meta = k12.ApplyProfileToMeta(meta, profile)
+	if profile.ChildName == previousChildName {
+		meta[k12.MetaKeyChildName] = previousChildName
+	}
 	encoded, err := json.Marshal(meta)
 	if err != nil {
 		return k12.ChildProfile{}, err
@@ -267,15 +276,32 @@ func (s *Store) UpdateProfileBundle(ctx context.Context, in ProfileBundleMutatio
 		return k12.ProfileBundleResult{}, false, err
 	}
 
-	var metadata string
+	var metadata, displayName, description string
 	var profileRevision int
-	if queryErr := tx.QueryRowContext(ctx, `SELECT a.metadata,
+	if queryErr := tx.QueryRowContext(ctx, `SELECT a.metadata,a.display_name,a.description,
 	        COALESCE((SELECT revision FROM k12_profile_revisions r WHERE r.agent_name=a.name),0)
-	        FROM agents a WHERE a.name=?`, in.AgentName).Scan(&metadata, &profileRevision); queryErr != nil {
+	        FROM agents a WHERE a.name=?`, in.AgentName).Scan(&metadata, &displayName, &description, &profileRevision); queryErr != nil {
 		if queryErr == sql.ErrNoRows {
 			return k12.ProfileBundleResult{}, false, records.ErrNotFound
 		}
 		return k12.ProfileBundleResult{}, false, queryErr
+	}
+	// 仅校验实际更名，已有长名称与成功命令重放继续兼容。
+	if in.AgentConfig != nil {
+		agentConfig := *in.AgentConfig
+		in.AgentConfig = &agentConfig
+		if err := inputlimits.Text("agent_config.description", in.AgentConfig.Description, description, inputlimits.Description); err != nil {
+			return k12.ProfileBundleResult{}, false, fmt.Errorf("%w: %s", records.ErrInvalidFields, err)
+		}
+		if in.AgentConfig.Description != description {
+			in.AgentConfig.Description = strings.TrimSpace(in.AgentConfig.Description)
+		}
+		if in.AgentConfig.DisplayName != displayName {
+			if nameErr := router.ValidateAgentDisplayName(in.AgentConfig.DisplayName); nameErr != nil {
+				return k12.ProfileBundleResult{}, false, fmt.Errorf("%w: %s", records.ErrInvalidFields, nameErr)
+			}
+			in.AgentConfig.DisplayName = strings.TrimSpace(in.AgentConfig.DisplayName)
+		}
 	}
 	progressRevision, err := revisionVia(ctx, tx,
 		`SELECT revision FROM k12_curriculum_progress_revisions
@@ -354,8 +380,15 @@ func (s *Store) UpdateProfileBundle(ctx context.Context, in ProfileBundleMutatio
 	if unmarshalErr := json.Unmarshal([]byte(metadata), &meta); unmarshalErr != nil {
 		return k12.ProfileBundleResult{}, false, unmarshalErr
 	}
+	if err := inputlimits.Text("profile.child_name", in.Profile.ChildName, meta[k12.MetaKeyChildName], inputlimits.ChildName); err != nil {
+		return k12.ProfileBundleResult{}, false, fmt.Errorf("%w: %s", records.ErrInvalidFields, err)
+	}
 	meta = k12.EnsureTutorAvatar(meta)
+	previousChildName := meta[k12.MetaKeyChildName]
 	meta = k12.ApplyProfileToMeta(meta, in.Profile)
+	if in.Profile.ChildName == previousChildName {
+		meta[k12.MetaKeyChildName] = previousChildName
+	}
 	metadataBytes, err := json.Marshal(meta)
 	if err != nil {
 		return k12.ProfileBundleResult{}, false, err

@@ -49,6 +49,43 @@ func (s *Store) TutorSourceIdentity(ctx context.Context, dispatch k12.ImageTaskD
 	return tutorSourceIdentityVia(ctx, s.db, dispatch)
 }
 
+// TutorHomeworkDispatchForMessage 只从同作用域的明确消息关联读取作业，不按时间选择来源。
+// 多份作业共享该消息时返回歧义；无当前有效来源时返回 ErrNotFound。
+func (s *Store) TutorHomeworkDispatchForMessage(ctx context.Context, scope TutorContextRef, messageID string) (string, bool, error) {
+	if scope.OwnerScope == "" || scope.AgentName == "" || scope.ConversationKey == "" || messageID == "" {
+		return "", false, records.ErrNotFound
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT h.dispatch_id
+		FROM k12_tutor_context_refs r JOIN k12_homework_submissions h
+		ON h.agent_name=r.agent_name AND h.grading_job_id=r.job_id
+		WHERE r.owner_scope=? AND r.agent_name=? AND r.conversation_key=? AND r.message_id=?
+		AND r.input_revision=(SELECT a.input_revision FROM k12_grading_assessment_items a
+			WHERE a.agent_name=r.agent_name AND a.job_id=r.job_id AND a.problem_id=r.problem_id AND a.current_disposition='current')`,
+		scope.OwnerScope, scope.AgentName, scope.ConversationKey, messageID)
+	if err != nil {
+		return "", false, err
+	}
+	defer rows.Close()
+	var dispatches []string
+	for rows.Next() {
+		var dispatchID string
+		if err := rows.Scan(&dispatchID); err != nil {
+			return "", false, err
+		}
+		dispatches = append(dispatches, dispatchID)
+	}
+	if err := rows.Err(); err != nil {
+		return "", false, err
+	}
+	if len(dispatches) == 0 {
+		return "", false, records.ErrNotFound
+	}
+	if len(dispatches) != 1 {
+		return "", true, nil
+	}
+	return dispatches[0], false, nil
+}
+
 // TutorHomeworkReferences 从明确任务编号读取同一物理会话内已登记的原题。
 func (s *Store) TutorHomeworkReferences(ctx context.Context, scope TutorContextRef, dispatchID string) ([]TutorContextRef, error) {
 	if scope.OwnerScope == "" || scope.AgentName == "" || scope.ConversationKey == "" || dispatchID == "" {

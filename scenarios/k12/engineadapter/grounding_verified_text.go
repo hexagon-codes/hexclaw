@@ -18,8 +18,12 @@ func (a *GroundingAdapter) groundVerifiedText(
 	if a.verifiedReader == nil {
 		return usecase.GroundingSnapshotResult{}, fmt.Errorf("grounding: verified textbook reader unavailable")
 	}
+	subject := snapshot.Subject
+	if subject == "数学" {
+		subject = "math"
+	}
 	pages, err := a.verifiedReader.ReadVerifiedTextbookPages(ctx, k12.VerifiedTextbookReadRequest{
-		OwnerID: snapshot.OwnerID, AgentName: snapshot.AgentName, Subject: snapshot.Subject,
+		OwnerID: snapshot.OwnerID, AgentName: snapshot.AgentName, Subject: subject,
 		Scope: k12.TextbookGroundingScope{
 			TextbookBindingID: snapshot.TextbookBindingID, TextbookManifestID: snapshot.TextbookManifestID,
 			DocumentID: snapshot.DocumentID, DocumentGeneration: snapshot.DocumentGeneration,

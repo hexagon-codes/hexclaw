@@ -47,6 +47,13 @@ func resolveK12GradingModelSnapshot(
 	}
 	if snapshot.Model == k12.RecognizingPolicyModel {
 		snapshot.RecognizingRequestPolicy = k12.ApprovedRecognizingRequestPolicy()
+	} else if snapshot.Provider == "cloud-gpt" && snapshot.Model == "gpt-6-sol" {
+		providerConfig, _ := router.ProviderConfig(snapshot.Provider)
+		support, control := config.ModelReasoningControl(providerConfig, snapshot.Model)
+		if support == config.LLMReasoningSupportSupported && control != nil &&
+			control.Dialect == config.LLMReasoningDialectEffort && control.Off == "none" {
+			snapshot.RecognizingRequestPolicy = k12.ConfiguredRecognizingRequestPolicy()
+		}
 	}
 	return k12.NormalizeGradingModelSnapshot(snapshot), nil
 }
@@ -166,7 +173,11 @@ func k12VisionRequestMetadata(
 	if !policy.IsApprovedRecognizing() && !policy.IsApprovedLocating() {
 		return nil, "", fmt.Errorf("K12 vision request policy is not approved")
 	}
-	return map[string]any{"thinking": policy.Thinking},
+	metadata := map[string]any{"thinking": policy.Thinking}
+	if snapshot.RecognizingRequestPolicy == k12.ConfiguredRecognizingRequestPolicy() {
+		metadata["expected_reasoning_effort"] = policy.ReasoningEffort
+	}
+	return metadata,
 		llm.ReasoningPolicyScopeStructuredVisionRecognition,
 		nil
 }

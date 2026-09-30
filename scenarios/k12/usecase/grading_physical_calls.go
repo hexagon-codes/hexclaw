@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hexagon-codes/hexclaw/egress"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
 )
@@ -78,6 +79,8 @@ type gradingProviderGrounding struct {
 	snapshot       GroundingSnapshot
 	text           string
 	receipts       []GroundingEvidenceReceipt
+	sources        []GroundingTextSource
+	noHit          bool
 	identityDigest string
 }
 
@@ -85,6 +88,9 @@ type gradingStoredGrounding struct {
 	Snapshot       GroundingSnapshot          `json:"snapshot"`
 	Receipts       []GroundingEvidenceReceipt `json:"receipts"`
 	IdentityDigest string                     `json:"identity_digest"`
+	Text           string                     `json:"text,omitempty"`
+	Sources        []GroundingTextSource      `json:"sources,omitempty"`
+	NoHit          bool                       `json:"no_hit,omitempty"`
 }
 
 type gradingGroundedPhysicalEnvelope struct {
@@ -114,6 +120,9 @@ func WithVerifiedGradingGrounding(
 	snapshot GroundingSnapshot,
 	result GroundingSnapshotResult,
 ) (context.Context, error) {
+	if !result.Found {
+		return ctx, fmt.Errorf("%w: verified grounding requires evidence", ErrGradingGroundingUnavailable)
+	}
 	evidence, err := newGradingProviderGrounding(snapshot, result)
 	if err != nil {
 		return ctx, err
@@ -135,6 +144,9 @@ func gradingGroundingIdentityDigest(
 	snapshot GroundingSnapshot,
 	receipts []GroundingEvidenceReceipt,
 ) (string, error) {
+	if EffectiveGroundingSourceMode(snapshot.SourceMode) == GroundingSourceModeVerifiedText && len(receipts) == 0 {
+		receipts = []GroundingEvidenceReceipt{}
+	}
 	raw, err := json.Marshal(struct {
 		Snapshot GroundingSnapshot          `json:"snapshot"`
 		Receipts []GroundingEvidenceReceipt `json:"receipts"`
@@ -157,7 +169,7 @@ func newGradingProviderGrounding(
 			"%w: %v", ErrGradingGroundingUnavailable, err,
 		)
 	}
-	if !result.Found {
+	if !result.Found && EffectiveGroundingSourceMode(snapshot.SourceMode) != GroundingSourceModeVerifiedText {
 		return gradingProviderGrounding{}, fmt.Errorf(
 			"%w: pinned textbook query returned no evidence",
 			ErrGradingGroundingUnavailable,
@@ -171,6 +183,8 @@ func newGradingProviderGrounding(
 		snapshot:       cloneGradingGroundingSnapshot(snapshot),
 		text:           strings.TrimSpace(result.Text),
 		receipts:       cloneGroundingEvidenceReceipts(result.Receipts),
+		sources:        cloneGroundingTextSources(result.Sources),
+		noHit:          !result.Found,
 		identityDigest: digest,
 	}, nil
 }
@@ -182,13 +196,33 @@ func gradingProviderGroundingFromContext(
 		return gradingProviderGrounding{}, false
 	}
 	evidence, ok := ctx.Value(gradingGroundingContextKey{}).(gradingProviderGrounding)
-	if !ok || strings.TrimSpace(evidence.text) == "" ||
-		strings.TrimSpace(evidence.identityDigest) == "" || len(evidence.receipts) == 0 {
+	if !ok || strings.TrimSpace(evidence.identityDigest) == "" {
+		return gradingProviderGrounding{}, false
+	}
+	if evidence.noHit {
+		if EffectiveGroundingSourceMode(evidence.snapshot.SourceMode) != GroundingSourceModeVerifiedText ||
+			strings.TrimSpace(evidence.text) != "" || len(evidence.receipts) != 0 || len(evidence.sources) != 0 {
+			return gradingProviderGrounding{}, false
+		}
+	} else if strings.TrimSpace(evidence.text) == "" || len(evidence.receipts) == 0 {
 		return gradingProviderGrounding{}, false
 	}
 	evidence.snapshot = cloneGradingGroundingSnapshot(evidence.snapshot)
 	evidence.receipts = cloneGroundingEvidenceReceipts(evidence.receipts)
+	evidence.sources = cloneGroundingTextSources(evidence.sources)
 	return evidence, true
+}
+
+func cloneGroundingTextSources(sources []GroundingTextSource) []GroundingTextSource {
+	if sources == nil {
+		return nil
+	}
+	out := append([]GroundingTextSource(nil), sources...)
+	for i := range out {
+		out[i].SegmentRefs = append([]string(nil), out[i].SegmentRefs...)
+		out[i].MatchedTerms = append([]string(nil), out[i].MatchedTerms...)
+	}
+	return out
 }
 
 func cloneGradingGroundingSnapshot(snapshot GroundingSnapshot) GroundingSnapshot {
@@ -203,9 +237,12 @@ func cloneGradingGroundingSnapshot(snapshot GroundingSnapshot) GroundingSnapshot
 }
 
 func validateGradingGroundingSnapshot(snapshot GroundingSnapshot) error {
+	mode := EffectiveGroundingSourceMode(snapshot.SourceMode)
+	validSource := mode == GroundingSourceModeSemantic && strings.TrimSpace(snapshot.VectorRevisionID) != "" ||
+		mode == GroundingSourceModeVerifiedText && snapshot.VectorRevisionID == "" && strings.TrimSpace(snapshot.OwnerID) != ""
 	if snapshot.AgentName == "" || snapshot.AgentName != strings.TrimSpace(snapshot.AgentName) ||
 		snapshot.LearnerID == "" || snapshot.LearnerID != strings.TrimSpace(snapshot.LearnerID) ||
-		snapshot.Subject != "数学" || strings.TrimSpace(snapshot.VectorRevisionID) == "" ||
+		snapshot.Subject != "数学" || !validSource || snapshot.OwnerID != strings.TrimSpace(snapshot.OwnerID) ||
 		snapshot.VectorRevisionID != strings.TrimSpace(snapshot.VectorRevisionID) {
 		return fmt.Errorf("%w: frozen textbook snapshot is incomplete", ErrGradingGroundingUnavailable)
 	}
@@ -234,6 +271,9 @@ func validateFrozenGradingGrounding(
 	}
 	withoutRevision := cloneGradingGroundingSnapshot(frozen)
 	withoutRevision.VectorRevisionID = ""
+	if requested.SourceMode == "" {
+		withoutRevision.SourceMode = ""
+	}
 	if !reflect.DeepEqual(requested, withoutRevision) {
 		return fmt.Errorf(
 			"%w: grounding freeze changed the requested textbook scope",
@@ -244,12 +284,21 @@ func validateFrozenGradingGrounding(
 }
 
 func validateStoredGradingGrounding(value gradingStoredGrounding) error {
-	if strings.TrimSpace(value.IdentityDigest) == "" || len(value.Receipts) == 0 {
+	if strings.TrimSpace(value.IdentityDigest) == "" || !value.NoHit && len(value.Receipts) == 0 {
 		return fmt.Errorf("%w: stored grounding identity is incomplete", ErrGradingGroundingUnavailable)
 	}
 	probe := GroundingSnapshotResult{
 		Text: "verified", Found: true,
 		Receipts: cloneGroundingEvidenceReceipts(value.Receipts),
+	}
+	if EffectiveGroundingSourceMode(value.Snapshot.SourceMode) == GroundingSourceModeVerifiedText {
+		probe.Text, probe.Sources = value.Text, cloneGroundingTextSources(value.Sources)
+	}
+	if value.NoHit {
+		if EffectiveGroundingSourceMode(value.Snapshot.SourceMode) != GroundingSourceModeVerifiedText {
+			return fmt.Errorf("%w: no-hit envelope requires verified text mode", ErrGradingGroundingUnavailable)
+		}
+		probe.Found = false
 	}
 	if err := probe.validate(value.Snapshot); err != nil {
 		return fmt.Errorf("%w: %v", ErrGradingGroundingUnavailable, err)
@@ -275,6 +324,10 @@ func encodeGroundedPhysicalPayload(
 		Snapshot:       evidence.snapshot,
 		Receipts:       cloneGroundingEvidenceReceipts(evidence.receipts),
 		IdentityDigest: evidence.identityDigest,
+		NoHit:          evidence.noHit,
+	}
+	if EffectiveGroundingSourceMode(evidence.snapshot.SourceMode) == GroundingSourceModeVerifiedText {
+		stored.Text, stored.Sources = evidence.text, cloneGroundingTextSources(evidence.sources)
 	}
 	if err := validateStoredGradingGrounding(stored); err != nil {
 		return "", err
@@ -414,6 +467,12 @@ func (session *gradingGroundingSession) initialize(
 	session.ownerID = strings.TrimSpace(textbookOwnerID)
 	session.agentName = strings.TrimSpace(job.Record.AgentName)
 	session.jobID = strings.TrimSpace(job.Record.RecordID)
+	durableSnapshot, sourceFound, priorQueries, sourceErr := loadGradingGroundingSource(ctx, deps,
+		session.ownerID, session.agentName, session.jobID)
+	if sourceErr != nil {
+		session.required, session.err = true, sourceErr
+		return sourceErr
+	}
 
 	inspection, err := inspectGradingGroundingInvocations(
 		ctx, deps, job.Record.AgentName, job.Record.RecordID,
@@ -423,7 +482,12 @@ func (session *gradingGroundingSession) initialize(
 		session.err = err
 		return err
 	}
-	if inspection.found {
+	if sourceFound && inspection.found && !reflect.DeepEqual(durableSnapshot, inspection.snapshot) {
+		session.required = true
+		session.err = fmt.Errorf("%w: stored source differs from provider evidence", ErrModelInvocationRequiresReconciliation)
+		return session.err
+	}
+	if inspection.found || sourceFound {
 		evidenceSource, ok := deps.Grounding.(SnapshotGroundingEvidence)
 		if !ok {
 			session.required = true
@@ -435,6 +499,9 @@ func (session *gradingGroundingSession) initialize(
 		}
 		session.required = true
 		session.snapshot = cloneGradingGroundingSnapshot(inspection.snapshot)
+		if sourceFound {
+			session.snapshot = cloneGradingGroundingSnapshot(durableSnapshot)
+		}
 		session.evidenceSource = evidenceSource
 		return nil
 	}
@@ -497,6 +564,7 @@ func (session *gradingGroundingSession) initialize(
 		return session.err
 	}
 	requested := GroundingSnapshot{
+		OwnerID:            textbookOwnerID,
 		AgentName:          strings.TrimSpace(job.Record.AgentName),
 		LearnerID:          strings.TrimSpace(job.Record.AgentName),
 		Subject:            "数学",
@@ -511,6 +579,13 @@ func (session *gradingGroundingSession) initialize(
 		PageRefs:           append([]k12.TextbookGroundingPageRef(nil), scope.PageRefs...),
 	}
 	requested = cloneGradingGroundingSnapshot(requested)
+	if legacy, exists, err := legacyGroundingSnapshot(requested, priorQueries); err != nil {
+		session.err = err
+		return err
+	} else if exists {
+		session.snapshot, session.evidenceSource = legacy, evidenceSource
+		return nil
+	}
 	frozen, freezeErr := snapshotter.FreezeGroundingSnapshot(ctx, requested)
 	if freezeErr != nil {
 		session.err = fmt.Errorf(
@@ -522,6 +597,13 @@ func (session *gradingGroundingSession) initialize(
 	if err := validateFrozenGradingGrounding(requested, frozen); err != nil {
 		session.err = err
 		return err
+	}
+	if EffectiveGroundingSourceMode(frozen.SourceMode) == GroundingSourceModeVerifiedText {
+		frozen, freezeErr = freezeGradingGroundingSource(ctx, deps, session.ownerID, session.agentName, session.jobID, frozen)
+		if freezeErr != nil {
+			session.err = freezeErr
+			return freezeErr
+		}
 	}
 	session.snapshot = cloneGradingGroundingSnapshot(frozen)
 	session.evidenceSource = evidenceSource
@@ -633,9 +715,8 @@ func (session *gradingGroundingSession) resolveItem(
 				state.err = session.recordQueryFailure(ctx, invocation, queryErr)
 				return gradingProviderGrounding{}, state.err
 			}
-			evidence, evidenceErr := newGradingProviderGrounding(snapshot, result)
-			if evidenceErr != nil {
-				state.err = evidenceErr
+			if validateErr := result.validate(snapshot); validateErr != nil {
+				state.err = fmt.Errorf("%w: invalid grounding result: %v", ErrGradingGroundingUnavailable, validateErr)
 				return gradingProviderGrounding{}, state.err
 			}
 			resultJSON, marshalErr := json.Marshal(result)
@@ -655,8 +736,8 @@ func (session *gradingGroundingSession) resolveItem(
 					fmt.Errorf("persist grounding retrieval result: %w", saveErr))
 				return gradingProviderGrounding{}, state.err
 			}
-			state.evidence = evidence
-			return state.evidence, nil
+			state.evidence, state.err = newGradingProviderGrounding(snapshot, result)
+			return state.evidence, state.err
 		} else if !errors.Is(claimErr, k12storage.ErrGroundingRetrievalInvocationLedgerUnavailable) &&
 			!strings.Contains(strings.ToLower(claimErr.Error()), "no such table") {
 			state.err = fmt.Errorf("%w: claim grounding retrieval invocation: %v", ErrGradingGroundingUnavailable, claimErr)
@@ -684,7 +765,8 @@ func (session *gradingGroundingSession) recordQueryFailure(
 	commitCtx, cancel := gradingDurableCommitContext(ctx)
 	defer cancel()
 	failure := k12storage.GroundingRetrievalFailure{}
-	if errors.Is(queryErr, ErrGroundingQueryNotSent) {
+	if invocation.Operation == "k12_grounding_verified_text" || errors.Is(queryErr, ErrGroundingQueryNotSent) {
+		// 正文读取仅访问本地存储，失败不会产生外部调用未知。
 		failure.Kind = "not_sent"
 	} else if status, ok := definitiveProviderResponseStatus(queryErr); ok && status >= 400 && status <= 599 {
 		failure.Kind, failure.StatusCode = "provider_response", status
@@ -738,9 +820,13 @@ func groundingRetrievalClaim(
 		Pages      []k12.TextbookGroundingPageRef `json:"pages"`
 	}{snapshot.TextbookBindingID, snapshot.TextbookManifestID, snapshot.DocumentID,
 		snapshot.DocumentGeneration, snapshot.SegmentRefs, snapshot.PageRefs})
+	operation := "k12_grounding_retrieval"
+	if EffectiveGroundingSourceMode(snapshot.SourceMode) == GroundingSourceModeVerifiedText {
+		operation = "k12_grounding_verified_text"
+	}
 	return k12storage.GroundingRetrievalInvocationClaim{
 		OwnerID: ownerID, AgentName: agentName, JobID: jobID, ProblemID: problemID,
-		Operation:               "k12_grounding_retrieval",
+		Operation:               operation,
 		GroundingSnapshotDigest: strings.TrimPrefix(modelInvocationDigest(snapshotRaw), "sha256:"),
 		QueryDigest:             strings.TrimPrefix(modelInvocationDigest(queryRaw), "sha256:"),
 		DocumentID:              snapshot.DocumentID, DocumentGeneration: snapshot.DocumentGeneration,
@@ -1148,6 +1234,14 @@ func (e *durableGradingPhysicalCallExecutor) ExecuteGradingPhysicalCall(
 	if callErr != nil {
 		commitCtx, cancelCommit = gradingDurableCommitContext(ctx)
 		defer cancelCommit()
+		if errors.Is(callErr, egress.ErrProviderNotSent) {
+			// 实际出口确认尚未发送；保留失败回执，不能归为上游未知或不存在的 HTTP 状态。
+			_, ledgerErr := e.o.deps.Records.MarkGradingItemInvocationFailed(
+				commitCtx, e.job.Record.AgentName, invocation.InvocationID,
+				"local", "provider_not_sent",
+			)
+			return zero, errors.Join(callErr, ledgerErr)
+		}
 		if sentProviderOutcomeUnknown(callErr, callCtxErr) {
 			_, ledgerErr := e.o.deps.Records.MarkGradingItemInvocationOutcomeUnknown(
 				commitCtx, e.job.Record.AgentName, invocation.InvocationID,

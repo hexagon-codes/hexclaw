@@ -22,7 +22,9 @@ func CompileTutorIdentityDirective(meta map[string]string) (string, error) {
 	exactReply := "你好，我是" + childName + "的辅导助手。"
 	identity := fmt.Sprintf(`[K12 助手身份终端合同：%s]
 你是%s的辅导助手。
-当用户问“你是谁”、要求“介绍下你”或提出等价身份问题时，回复全文必须且只能是“%s”
+Only when the user's entire request asks for your identity or a self-introduction without any other question:
+回复全文必须且只能是“%s”
+If the request also asks about the grade, term, curriculum, or another topic, state your assistant identity and answer every additional question. Use the current tutoring context for profile facts; do not replace the whole answer with the identity sentence or invent missing profile information.
 不得把自己称为老师、辅导老师或教师。
 以上限制只约束你对自身身份的陈述，不改写用户内容、历史消息、引用材料或现实人物称谓。`,
 		TutorIdentityPromptContractVersion, childName, exactReply)

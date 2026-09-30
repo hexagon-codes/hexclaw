@@ -12,9 +12,10 @@ import (
 const (
 	// RecognizingRequestPolicyVersion 控制共享的 DD-036 线上协议策略。
 	// 它有意与 recognition_plan_version V1/V2 保持独立。
-	RecognizingRequestPolicyVersion = "dd036-recognizing-v1"
-	LocatingRequestPolicyVersion    = "k12-locating-v1"
-	RecognizingPolicyModel          = "gpt-5.6-sol"
+	RecognizingRequestPolicyVersion    = "dd036-recognizing-v1"
+	ConfiguredRecognizingPolicyVersion = "k12-recognizing-v2"
+	LocatingRequestPolicyVersion       = "k12-locating-v1"
+	RecognizingPolicyModel             = "gpt-5.6-sol"
 )
 
 // ModelRequestPolicySnapshot is the allowlisted, non-sensitive request policy
@@ -46,6 +47,13 @@ func ApprovedLocatingRequestPolicy() ModelRequestPolicySnapshot {
 	}
 }
 
+// ConfiguredRecognizingRequestPolicy 用于创建时已核实适配映射的新任务。
+func ConfiguredRecognizingRequestPolicy() ModelRequestPolicySnapshot {
+	policy := ApprovedRecognizingRequestPolicy()
+	policy.PolicyVersion = ConfiguredRecognizingPolicyVersion
+	return policy
+}
+
 func NormalizeModelRequestPolicySnapshot(
 	policy ModelRequestPolicySnapshot,
 ) ModelRequestPolicySnapshot {
@@ -61,7 +69,8 @@ func (policy ModelRequestPolicySnapshot) IsZero() bool {
 }
 
 func (policy ModelRequestPolicySnapshot) IsApprovedRecognizing() bool {
-	return NormalizeModelRequestPolicySnapshot(policy) == ApprovedRecognizingRequestPolicy()
+	policy = NormalizeModelRequestPolicySnapshot(policy)
+	return policy == ApprovedRecognizingRequestPolicy() || policy == ConfiguredRecognizingRequestPolicy()
 }
 
 func (policy ModelRequestPolicySnapshot) IsApprovedLocating() bool {
@@ -81,13 +90,12 @@ func (policy ModelRequestPolicySnapshot) Digest() string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
-// ValidateGradingRecognizingRequestPolicy enforces the approved narrow scope:
-// only the frozen gpt-5.6-sol route carries the DD-036 recognizing policy.
+// ValidateGradingRecognizingRequestPolicy 核对任务创建时冻结的识别策略。
 func ValidateGradingRecognizingRequestPolicy(snapshot GradingModelSnapshot) error {
 	snapshot = NormalizeGradingModelSnapshot(snapshot)
 	policy := NormalizeModelRequestPolicySnapshot(snapshot.RecognizingRequestPolicy)
 	if snapshot.Model == RecognizingPolicyModel {
-		if !policy.IsApprovedRecognizing() {
+		if policy != ApprovedRecognizingRequestPolicy() {
 			return fmt.Errorf(
 				"recognizing request policy missing or invalid for model %q",
 				snapshot.Model,
@@ -95,7 +103,7 @@ func ValidateGradingRecognizingRequestPolicy(snapshot GradingModelSnapshot) erro
 		}
 		return nil
 	}
-	if !policy.IsZero() {
+	if !policy.IsZero() && policy != ConfiguredRecognizingRequestPolicy() {
 		return fmt.Errorf(
 			"recognizing request policy is not approved for model %q",
 			snapshot.Model,
@@ -120,7 +128,8 @@ func ValidateModelInvocationRequestPolicy(
 		if policy.IsZero() {
 			return nil
 		}
-		if route.Model != RecognizingPolicyModel || !policy.IsApprovedLocating() {
+		if !policy.IsApprovedLocating() || (route.Model != RecognizingPolicyModel &&
+			route.RecognizingRequestPolicy != ConfiguredRecognizingRequestPolicy()) {
 			return fmt.Errorf("locating request policy is not approved for model %q", route.Model)
 		}
 		return nil
@@ -134,12 +143,8 @@ func ValidateModelInvocationRequestPolicy(
 	if err := ValidateGradingRecognizingRequestPolicy(route); err != nil {
 		return err
 	}
-	if route.Model == RecognizingPolicyModel &&
-		policy != route.RecognizingRequestPolicy {
+	if policy != route.RecognizingRequestPolicy {
 		return fmt.Errorf("recognizing invocation policy does not match frozen route policy")
-	}
-	if route.Model != RecognizingPolicyModel && !policy.IsZero() {
-		return fmt.Errorf("recognizing invocation policy is not approved for model %q", route.Model)
 	}
 	return nil
 }

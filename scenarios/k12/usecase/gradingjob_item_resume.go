@@ -10,6 +10,7 @@ import (
 	"github.com/hexagon-codes/toolkit/util/idgen"
 
 	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/egress"
 	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
@@ -86,6 +87,24 @@ func (o *GradingOrchestrator) runAssessItems(
 			return v, err
 		}
 		return o.failStage(ctx, run, job.Record.RecordID, "assessment_invocation_prepare_failed", err)
+	}
+	unresolved, inspectErr := o.deps.hasUnresolvedCurrentGradingItemInvocation(context.WithoutCancel(ctx), job)
+	if inspectErr != nil {
+		return o.markFrozenAssessLedgerUnknown(ctx, run, job.Record.RecordID, inspectErr)
+	}
+	if unresolved {
+		if stageInvocation.Status == k12.ModelInvocationSent {
+			if ledgerErr := o.markFrozenAssessInvocationOutcomeUnknown(context.WithoutCancel(ctx),
+				stageInvocation, "item_invocation_outcome_unknown"); ledgerErr != nil {
+				return o.markFrozenAssessLedgerUnknown(ctx, run, job.Record.RecordID, ledgerErr)
+			}
+		}
+		v, err := o.markGradingOutcomeUnknown(context.WithoutCancel(ctx), run,
+			job.Record.RecordID, "item_invocation_outcome_unknown")
+		if err != nil {
+			return v, err
+		}
+		return v, ErrModelInvocationRequiresReconciliation
 	}
 	if stageInvocation.Status == k12.ModelInvocationFailed {
 		failureKind := strings.TrimSpace(stageInvocation.FailureKind)
@@ -192,8 +211,13 @@ func (o *GradingOrchestrator) runAssessItems(
 	unregisterProvider()
 
 	if assessErr != nil {
+		unresolved, inspectErr := o.deps.hasUnresolvedCurrentGradingItemInvocation(context.WithoutCancel(ctx), job)
+		if inspectErr != nil {
+			return o.markFrozenAssessLedgerUnknown(ctx, run, job.Record.RecordID,
+				errors.Join(assessErr, inspectErr))
+		}
 		if errors.Is(assessErr, ErrGradingPhysicalCallOutcomeUnknown) ||
-			errors.Is(assessErr, ErrModelInvocationRequiresReconciliation) {
+			errors.Is(assessErr, ErrModelInvocationRequiresReconciliation) || unresolved {
 			if ledgerErr := o.markFrozenAssessInvocationOutcomeUnknown(context.WithoutCancel(ctx),
 				stageInvocation, "item_invocation_outcome_unknown"); ledgerErr != nil {
 				return o.markFrozenAssessLedgerUnknown(ctx, run, job.Record.RecordID,
@@ -973,6 +997,10 @@ func definitiveProviderResponse(err error) bool {
 // prove whether the upstream executed the request. Only a typed provider
 // response makes the failure definitive enough for an ordinary retry policy.
 func sentProviderOutcomeUnknown(callErr, ctxErr error) bool {
+	if errors.Is(callErr, egress.ErrProviderNotSent) {
+		// 出口记录证明没有进入 Provider，不能因本地取消或无 HTTP 状态改成未知。
+		return false
+	}
 	if errors.Is(callErr, k12.ErrModelCapabilityUnverified) {
 		// 配置/回执在发送前即可确定不匹配，绝不能被记录成上游执行结果未知。
 		return false

@@ -849,11 +849,17 @@ func RenderCanonicalGradingAssessmentDetails(resultJSON string) (string, PhotoIt
 		"Solve": {}, "Status": {}, "Warning": {},
 	}
 	var object map[string]json.RawMessage
-	if json.Unmarshal([]byte(resultJSON), &object) != nil || len(object) != len(expectedKeys) {
+	if json.Unmarshal([]byte(resultJSON), &object) != nil {
 		return "", "", false
 	}
+	// 七个正文结构字段仍为必需；已保存的资产来源是可选元数据，不应阻断正文投影。
+	for key := range expectedKeys {
+		if _, ok := object[key]; !ok {
+			return "", "", false
+		}
+	}
 	for key := range object {
-		if _, ok := expectedKeys[key]; !ok {
+		if _, ok := expectedKeys[key]; !ok && key != "answer_source" {
 			return "", "", false
 		}
 	}

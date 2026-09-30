@@ -83,17 +83,29 @@ func TestDD041_PhotoGradeAndFinalProjectionKeepSectionAndMarkedSystemOrderSepara
 		Mode:  PhotoModeGrade,
 		Items: []PhotoGradeItem{{Recognized: question, Status: PhotoCorrect}},
 	})
-	final := renderCanonicalGradingFinal([]gradingFinalEntry{{
+	finalEntries := []gradingFinalEntry{{
 		question:   question,
 		assessment: &k12.GradingAssessmentItem{Status: k12.GradingAssessmentCorrect, ResultJSON: `{}`},
-	}}, nil)
+	}}
+	final := renderCanonicalGradingFinal(finalEntries, nil)
+	if !strings.Contains(graded, "一、直接写得数") ||
+		!strings.Contains(graded, "第 1 题（系统序号）") {
+		t.Fatalf("DD-041 photo projection lost section/system distinction:\n%s", graded)
+	}
+	if !strings.Contains(final, "**共 1 题 · 1 题正确**") ||
+		!strings.Contains(final, "1 题已答对。") {
+		t.Fatalf("DD-041 correct final projection lost its summary:\n%s", final)
+	}
 	for name, projection := range map[string]string{"photo": graded, "final": final} {
-		if !strings.Contains(projection, "一、直接写得数") ||
-			!strings.Contains(projection, "第 1 题（系统序号）") {
-			t.Fatalf("DD-041 %s projection lost section/system distinction:\n%s", name, projection)
-		}
 		if strings.Contains(projection, "一、1") {
 			t.Fatalf("DD-041 %s projection forged an original child number:\n%s", name, projection)
 		}
+	}
+	source := finalEntries[0].question
+	if len(source.SourceSectionPath) != 1 || source.SourceSectionPath[0] != "一" ||
+		source.SourceSectionLabel != "一、直接写得数" ||
+		source.SystemSectionOrdinal != 1 || source.SystemDisplayLabel != "第 1 题（系统序号）" ||
+		len(source.SourceNumberPath) != 0 || source.DisplayLabel != "" || source.Question != "4÷0.5=" {
+		t.Fatalf("DD-041 final rendering rewrote source/system facts: %#v", source)
 	}
 }

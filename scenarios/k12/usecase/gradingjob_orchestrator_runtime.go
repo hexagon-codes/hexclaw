@@ -897,7 +897,10 @@ func (o *GradingOrchestrator) CanRetryPhotoGradingWithParentAutomaticWindow(
 	if err != nil {
 		return false, err
 	}
-	v, err := o.deps.GetGradingJob(ctx, run.agentName, jobID)
+	l := o.jobLock(jobID)
+	l.Lock()
+	v, err := o.deps.reconcileRetryableGradingOutcome(ctx, run.agentName, jobID)
+	l.Unlock()
 	if err != nil {
 		return false, err
 	}
@@ -1069,14 +1072,14 @@ func (o *GradingOrchestrator) RecoverGradingJobs(ctx context.Context, agents []s
 				previousFailureKind := v.Fields.FailureKind
 				l := o.jobLock(jobID)
 				l.Lock()
-				v, err = o.deps.reconcileRetryableRecognitionOutcome(ctx, agent, jobID)
+				v, err = o.deps.reconcileRetryableGradingOutcome(ctx, agent, jobID)
 				l.Unlock()
 				if err != nil {
-					slog.Warn("K12 recovery could not reconcile recognition receipts; retry withheld", "job", jobID, "err", err)
+					slog.Warn("K12 recovery could not reconcile grading receipts; retry withheld", "job", jobID, "err", err)
 					continue
 				}
 				if v.Record.Status == k12.GradingStageOutcomeUnknown {
-					slog.Warn("K12 recovery corrected retryable job from unresolved recognition receipts",
+					slog.Warn("K12 recovery corrected retryable job from unresolved grading receipts",
 						"job", jobID, "previous_failure_kind", previousFailureKind, "failure_kind", v.Fields.FailureKind)
 				}
 			}
