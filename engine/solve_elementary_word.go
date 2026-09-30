@@ -22,12 +22,12 @@ var (
 	ticketGCDLCMRe                    = regexp.MustCompile(`^(?:小明)?有(?:一)?张([0-9]+)至([0-9]+)排的电影票[，,]这张票的排数和座位号的最大公约数是([0-9]+)[，,]最小公倍数是([0-9]+)[，,。.](?:小明)?这张电影票是[（(][）)]排[（(][）)]号[。.]?$`)
 	sixNumberBalanceRe                = regexp.MustCompile(`^(?:[0-9]+[.．、])?在下列六个数[:：]([0-9]+)[、,，]([0-9]+)[、,，]([0-9]+)[、,，]([0-9]+)[、,，]([0-9]+)[、,，]([0-9]+)中[，,]?划去(?:一个)?数[（(]?[）)]?后[，,]?能使其中3个数的和(?:是|为)?另外2个数(?:的)?和的2倍[。.]?$`)
 
-	finalQuantityMarkerRe = regexp.MustCompile(`(?i)(?:答案?|答)\s*(?:是|为)?\s*[:：]?\s*` + answerQuantityNumberPattern + `\s*(平方米|千克|公斤|m²|m2|kg|克|米|g|m)?`)
+	finalQuantityMarkerRe = regexp.MustCompile(`(?i)(?:答案?|答)\s*(?:是|为)?\s*[:：]?\s*` + answerQuantityNumberPattern + `\s*(平方米|千克|公斤|张纸|m²|m2|kg|克|米|g|m)?`)
 	removedNumberMarkerRe = regexp.MustCompile(`划去(?:数)?\s*[:：]?\s*([+\-]?[0-9]+)`)
-	bareQuantityRe        = regexp.MustCompile(`(?i)^\s*` + answerQuantityNumberPattern + `\s*(平方厘米|cm²|cm\^?2|平方米|千克|公斤|m²|m2|kg|克|米|g|m)?\s*$`)
+	bareQuantityRe        = regexp.MustCompile(`(?i)^\s*` + answerQuantityNumberPattern + `\s*(平方厘米|cm²|cm\^?2|平方米|千克|公斤|张纸|m²|m2|kg|克|米|g|m)?\s*$`)
 	equivalentQuantityRe  = regexp.MustCompile(`^\s*(.+?)[（(]\s*(?:也就是|即)\s*(.+?)[）)]\s*$`)
-	equationQuantityRe    = regexp.MustCompile(`(?i)[=＝]\s*` + answerQuantityNumberPattern + `(?:\s*(?:[（(]\s*)?(平方米|千克|公斤|m²|m\^?2|kg|克|米|g|m)(?:\s*[）)])?)?`)
-	equationUnitSuffixRe  = regexp.MustCompile(`(?i)\s*(?:[（(]\s*)?(?:平方米|千克|公斤|m²|m\^?2|kg|克|米|g|m)(?:\s*[）)])?\s*$`)
+	equationQuantityRe    = regexp.MustCompile(`(?i)[=＝]\s*` + answerQuantityNumberPattern + `(?:\s*(?:[（(]\s*)?(平方米|千克|公斤|张纸|m²|m\^?2|kg|克|米|g|m)(?:\s*[）)])?)?`)
+	equationUnitSuffixRe  = regexp.MustCompile(`(?i)\s*(?:[（(]\s*)?(?:平方米|千克|公斤|张纸|m²|m\^?2|kg|克|米|g|m)(?:\s*[）)])?\s*$`)
 )
 
 type elementaryWordSolution struct {
@@ -306,6 +306,8 @@ func normalizeAnswerUnit(unit string) string {
 		return "平方米"
 	case "米", "m":
 		return "米"
+	case "张纸":
+		return "张纸"
 	default:
 		return ""
 	}
@@ -316,8 +318,8 @@ func quantitiesEqual(a, b answerQuantity) bool {
 }
 
 // validateStudentArithmeticWork 对学生已经写出的纯数值等式逐条复算。若有等号却无法完整、
-// 保守地解析，则返回 conclusive=false 交给 grader；能确认某一步算错时才本地判错。
-func validateStudentArithmeticWork(problem, answer string) (valid, conclusive bool) {
+// 保守地解析，则返回 conclusive=false 交给 grader；确认算错时返回首个不成立的原等式。
+func validateStudentArithmeticWork(problem, answer string) (valid, conclusive bool, wrongStep string) {
 	answer = strings.ReplaceAll(answer, "＝", "=")
 	previous := ""
 	if expr, _, ok := normalizeTrivialArithmetic(problem); ok {
@@ -329,6 +331,10 @@ func validateStudentArithmeticWork(problem, answer string) (valid, conclusive bo
 	}) {
 		line = strings.TrimSpace(line)
 		if !strings.Contains(line, "=") {
+			// 多行演算常把原算式单独写一行，下一行才以前导等号接续。
+			if _, _, ok := solveTrivialArithmetic(line); ok {
+				previous = line
+			}
 			continue
 		}
 		parts := strings.Split(line, "=")
@@ -337,20 +343,20 @@ func validateStudentArithmeticWork(problem, answer string) (valid, conclusive bo
 		}
 		if parts[0] == "" {
 			if previous == "" {
-				return false, false
+				return false, false, ""
 			}
 			parts[0] = previous
 		}
 		for i := 0; i+1 < len(parts); i++ {
 			if parts[i] == "" || parts[i+1] == "" {
-				return false, false
+				return false, false, ""
 			}
 			pairs = append(pairs, [2]string{parts[i], parts[i+1]})
 		}
 		previous = parts[len(parts)-1]
 	}
 	if len(pairs) == 0 {
-		return true, true
+		return true, true, ""
 	}
 	for _, pair := range pairs {
 		lhs := strings.NewReplacer("[", "(", "]", ")", "（", "(", "）", ")").Replace(strings.TrimSpace(pair[0]))
@@ -368,13 +374,13 @@ func validateStudentArithmeticWork(problem, answer string) (valid, conclusive bo
 		_, left, leftOK := solveTrivialArithmetic(lhs)
 		_, right, rightOK := solveTrivialArithmetic(rhs)
 		if !leftOK || !rightOK {
-			return false, false
+			return false, false, ""
 		}
 		if left != right {
-			return false, true
+			return false, true, pair[0] + " = " + pair[1]
 		}
 	}
-	return true, true
+	return true, true, ""
 }
 
 func positiveRat(raw string) (*big.Rat, bool) {

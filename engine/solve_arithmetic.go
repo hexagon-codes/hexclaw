@@ -44,7 +44,7 @@ func ArithmeticTranscriptionConsistent(problem, studentAnswer string) bool {
 	if !ok || answer != computed {
 		return false
 	}
-	valid, conclusive := validateStudentArithmeticWork(problem, normalizeArithmeticAnswerMarkup(studentAnswer))
+	valid, conclusive, _ := validateStudentArithmeticWork(problem, normalizeArithmeticAnswerMarkup(studentAnswer))
 	return valid && conclusive
 }
 

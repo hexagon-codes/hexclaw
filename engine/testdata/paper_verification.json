@@ -1,0 +1,34 @@
+[
+  {
+    "output": "VERDICT: AGREE\nPROCESS: VALID\nCOMPUTED: 3/4 张纸\n说明：独立计算得 \\(3/8+3/8=6/8=3/4\\)，待校验解法逐步正确，使用分数乘整数与约分均未超纲，最终答案一致。",
+    "execution_receipt": {
+      "input_digest": "b6e8a5962cec2b8fc913166baacb04d51b56934d6a9ac5115c65a621587218dd",
+      "run_id": "run_1790666644544485000_038a8a02",
+      "status": "success",
+      "exit_code": 0,
+      "timeout": false,
+      "runtime_missing": false,
+      "stdout_bytes": 153,
+      "stdout_truncated": false,
+      "stderr_truncated": false,
+      "truncated": false,
+      "stdout": "Step 1: one flower = 3/8 张纸\nStep 2: two flowers = 3/8 + 3/8 = 3/4 张纸\nStep 3: 3/8 × 2 = 3/4 张纸\nStep 4: 6/8 = 3/4 张纸\nCOMPUTED: 3/4 张纸\n"
+    }
+  },
+  {
+    "output": "VERDICT: AGREE\nPROCESS: VALID\nCOMPUTED: 3张纸\n说明：独立计算得到 \\(\\frac{3}{8}\\times8=\\frac{24}{8}=3\\) 张，待校验解法逐步正确且使用了允许范围内的分数乘法方法。",
+    "execution_receipt": {
+      "input_digest": "be9e8bf7d03112870524c0a08a9de66c56ad809a61da83ad92372b46ebbfc92f",
+      "run_id": "run_1790666652204483000_78be6651",
+      "status": "success",
+      "exit_code": 0,
+      "timeout": false,
+      "runtime_missing": false,
+      "stdout_bytes": 242,
+      "stdout_truncated": false,
+      "stderr_truncated": false,
+      "truncated": false,
+      "stdout": "STEP 1: 每朵花用纸 = 3/8 张\nSTEP 2: 花的朵数 = 8 朵\nSTEP 3: 总用纸 = 3/8 × 8\nSTEP 4: 分子乘整数 = 3 × 8 = 24\nSTEP 5: 分母不变 = 8\nSTEP 6: 乘法结果 = 24 / 8\nSTEP 7: 约分/计算 = 24 / 8 = 3 张\nCOMPUTED: 3张纸\n"
+    }
+  }
+]

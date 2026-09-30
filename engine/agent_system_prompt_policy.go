@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/hexagon-codes/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/knowledge"
 	agentrouter "github.com/hexagon-codes/hexclaw/router"
 )
 
@@ -21,6 +22,8 @@ type AgentSystemPromptPolicyInput struct {
 	UserQuery string
 	// Message 保留已路由会话身份，供场景复用持久任务上下文。
 	Message adapter.Message
+	// KnowledgeRetrievalDisabled 复用引擎现有的显式禁用规则，场景教材不能绕过用户选择。
+	KnowledgeRetrievalDisabled bool
 }
 
 // AgentSystemPromptDirective is appended after every editable and mounted
@@ -28,6 +31,8 @@ type AgentSystemPromptPolicyInput struct {
 type AgentSystemPromptDirective struct {
 	Key     string
 	Content string
+	// KnowledgeHits 只包含本次指令实际注入的来源，与普通和流式回复共用采用记录。
+	KnowledgeHits []knowledge.SearchHit
 }
 
 // AgentSystemPromptPolicy lets a composition root attach scenario invariants
@@ -70,6 +75,7 @@ func (e *ReActEngine) prepareAgentSystemPromptPolicy(ctx context.Context, msg *a
 	}
 	directive, err := policy.CompileTerminalDirective(ctx, AgentSystemPromptPolicyInput{
 		Agent: *cfg, UserQuery: msg.Content, Message: *msg,
+		KnowledgeRetrievalDisabled: msg.Metadata["knowledge"] == "off" || explicitlyDeclinesKnowledgeRetrieval(msg.Content),
 	})
 	if err != nil {
 		return fmt.Errorf("agent %q system prompt policy: %w", cfg.Name, err)
@@ -84,6 +90,9 @@ func (e *ReActEngine) prepareAgentSystemPromptPolicy(ctx context.Context, msg *a
 	}
 	msg.Metadata[metadataAgentSystemPromptPolicyKey] = directive.Key
 	msg.Metadata[metadataAgentSystemPromptPolicyDirective] = directive.Content
+	if len(directive.KnowledgeHits) > 0 {
+		recordKnowledgeHits(ctx, directive.KnowledgeHits)
+	}
 	return nil
 }
 

@@ -414,24 +414,19 @@ func TestSolve_AB_RealEngine(t *testing.T) {
 //   两者合起来 = 数据证明"准确率/高置信"框架名不副实 → 真实价值是安全(诚实标注)而非准确率。
 // ─────────────────────────────────────────────────────────────────────────
 
-// TestSolve_Audit_HighConfidenceFramingClaim 锁住「跑偏」前半（确定性，无需模型）：
-// solve 同意路径会打"✅ 已由独立校验员…核验一致（高置信）"，工具自述也宣称 verified——
-// 即产品确实对外做了"已核验=高置信(≈正确)"的宣称。这正是被 AB 数据证否的那个框架。
+// 解题正文不追加置信徽标，程序验算的存在不等于对完整教学内容作正确性担保。
 func TestSolve_Audit_HighConfidenceFramingClaim(t *testing.T) {
 	agree := formatSolve(
 		[]answerGroup{{answer: "42", sols: []solverSolution{{output: "解题过程…\n答案：42", answer: "42"}}}},
 		verdictAgree, "42", 1, false, true)
 	for _, kw := range []string{"✅", "高置信", "核验"} {
-		if !strings.Contains(agree, kw) {
-			t.Errorf("solve 同意路径徽标应含 %q（坐实其高置信宣称），实得：%s", kw, agree)
+		if strings.Contains(agree, kw) {
+			t.Errorf("教学正文不应追加 %q 声明，实得：%s", kw, agree)
 		}
 	}
-	desc := strings.ToLower((&SolveSkill{}).Description())
-	if !strings.Contains(desc, "verified") {
-		t.Errorf("solve Description 应宣称 verified（坐实正确性框架），实得：%s", desc)
+	if !strings.Contains(agree, "解题过程…\n答案：42") {
+		t.Errorf("应保留教学正文，实得：%s", agree)
 	}
-	t.Logf("✅ 坐实(跑偏前半)：solve 对外宣称『已核验=高置信/verified』。被检验徽标=「%s」", strings.TrimSpace(agree[strings.Index(agree, "✅"):]))
-	t.Logf("ℹ️ 这条只证明『宣称存在』；其名不副实由 AB(p≈0.95 准确率不显著) + TestSolve_Prove_ConfidentButWrong 坐实。")
 }
 
 // TestSolve_Prove_ConfidentButWrong 坐实「跑偏」后半（真模型产线 loop）：用**建模陷阱**题

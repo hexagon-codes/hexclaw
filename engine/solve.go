@@ -22,8 +22,8 @@ import (
 //
 // 流程：Solver 解题（self_consistency 多采样多数表决，或 method_diversity 跑 2 个不同方法）→
 // Verifier 用 code_exec 写代码**独立重算**（fresh-context、只许 code_exec）→ 比对：
-//   - 各解法一致 + 核验一致     → 高置信，输出教学版解题 + ✅
-//   - 解法之间分歧             → 用 code_exec 独立核验充当**裁决者**：判出正确解法、点明另一解法错处
+//   - 各解法一致 + 核验一致     → 输出教学版解题，验证证据保留在结构化回执中
+//   - 解法之间分歧             → 用 code_exec 独立核验充当**裁决者**，选取有证据支持的解法
 //   - 解法一致但核验不一致      → ⚠️ 诚实并列两答 + 请复核（绝不自信采信）
 //   - 不可验证(非计算题)        → 输出解题 + 提示人工复核
 //
@@ -335,7 +335,11 @@ func (o *SolveSkill) Execute(ctx context.Context, args map[string]any) (*skill.R
 		if verdict == verdictAgree && computed != "" {
 			groundTruth = computed
 		}
-		assess := o.grade(childCtx, problem, primary.sols[0].output, groundTruth, studentAnswer)
+		assess, gradeErr := o.grade(childCtx, problem, primary.sols[0].output, groundTruth, studentAnswer)
+		if gradeErr != nil {
+			o.registry.Finish(solveRunID, subAgentStatusError, "", gradeErr.Error(), "")
+			return nil, gradeErr
+		}
 		reports := []SubAgentReport{
 			{Agent: solverAgentName, Status: subAgentStatusOK},
 			newVerifierReport(verdict),
@@ -359,7 +363,7 @@ func (o *SolveSkill) Execute(ctx context.Context, args map[string]any) (*skill.R
 		}, nil
 	}
 
-	// 3) 组装教学结果 + 置信徽标 + 结构化回执。
+	// 3) 组装教学结果与结构化回执。
 	content := formatSolve(groups, verdict, computed, len(sols), methodDiversity, numericGrounded)
 	reports := []SubAgentReport{
 		{Agent: solverAgentName, Status: subAgentStatusOK},
@@ -399,9 +403,9 @@ func (o *SolveSkill) GradeVerified(ctx context.Context, problem, verifiedSolutio
 			normalizedStudent := normalizeArithmeticAnswerMarkup(studentAnswer)
 			if studentValue, arithmeticAnswer := arithmeticAnswerValue(studentAnswer); arithmeticAnswer {
 				finalAnswerCorrect := studentValue == computed
-				workValid, conclusive := validateStudentArithmeticWork(deterministicProblem, normalizedStudent)
+				workValid, conclusive, wrongStep := validateStudentArithmeticWork(deterministicProblem, normalizedStudent)
 				if conclusive {
-					assess := deterministicGradeAssessment(finalAnswerCorrect && workValid, finalAnswerCorrect, !workValid)
+					assess := deterministicGradeAssessment(finalAnswerCorrect && workValid, finalAnswerCorrect, wrongStep)
 					return deterministicGradeResult(studentAnswer, computed, "grading_deterministic_arithmetic", assess), nil
 				}
 			}
@@ -413,7 +417,7 @@ func (o *SolveSkill) GradeVerified(ctx context.Context, problem, verifiedSolutio
 		if verifiedOK && verifiedValue == computed && !strings.ContainsAny(comparisonAnswer, "\r\n") {
 			if studentValue, answerOK := arithmeticAnswerValue(comparisonAnswer); answerOK {
 				finalAnswerCorrect := studentValue == computed
-				assess := deterministicGradeAssessment(finalAnswerCorrect, finalAnswerCorrect, false)
+				assess := deterministicGradeAssessment(finalAnswerCorrect, finalAnswerCorrect, "")
 				return deterministicGradeResult(studentAnswer, "x = "+computed, "grading_deterministic_linear_equation", assess), nil
 			}
 		}
@@ -428,15 +432,15 @@ func (o *SolveSkill) GradeVerified(ctx context.Context, problem, verifiedSolutio
 				finalAnswerCorrect := quantitiesEqual(student, expected)
 				if !finalAnswerCorrect {
 					groundTruthWithUnit := solution.value + solution.unit
-					assess := deterministicGradeAssessment(false, false, false)
+					assess := deterministicGradeAssessment(false, false, "")
 					return deterministicGradeResult(studentAnswer, groundTruthWithUnit, "grading_deterministic_elementary_word", assess), nil
 				}
-				workValid, conclusive := validateStudentArithmeticWork(deterministicProblem, comparisonAnswer)
+				workValid, conclusive, wrongStep := validateStudentArithmeticWork(deterministicProblem, comparisonAnswer)
 				if conclusive {
 					assess := deterministicGradeAssessment(
 						finalAnswerCorrect && workValid,
 						finalAnswerCorrect,
-						!workValid,
+						wrongStep,
 					)
 					groundTruthWithUnit := solution.value + solution.unit
 					return deterministicGradeResult(studentAnswer, groundTruthWithUnit, "grading_deterministic_elementary_word", assess), nil
@@ -456,7 +460,11 @@ func (o *SolveSkill) GradeVerified(ctx context.Context, problem, verifiedSolutio
 	childCtx = context.WithValue(childCtx, solveEgressClassesKey{}, solveEgressClasses(ctx, map[string]any{
 		"problem": problem, "student_answer": studentAnswer,
 	}))
-	assess := o.grade(childCtx, problem, verifiedSolution, groundTruth, studentAnswer)
+	assess, gradeErr := o.grade(childCtx, problem, verifiedSolution, groundTruth, studentAnswer)
+	if gradeErr != nil {
+		o.registry.Finish(runID, subAgentStatusError, "", gradeErr.Error(), "")
+		return nil, gradeErr
+	}
 	o.registry.Finish(runID, subAgentStatusOK, "reused_verified_solution", "", "")
 	return &skill.Result{
 		Content: formatGrading(studentAnswer, groundTruth, assess) + encodeSubAgentReports([]SubAgentReport{
@@ -475,13 +483,13 @@ func (o *SolveSkill) GradeVerified(ctx context.Context, problem, verifiedSolutio
 	}, nil
 }
 
-func deterministicGradeAssessment(correct, finalAnswerCorrect, wrongWork bool) gradeAssessment {
+func deterministicGradeAssessment(correct, finalAnswerCorrect bool, wrongStep string) gradeAssessment {
 	assess := gradeAssessment{correct: correct, finalAnswerCorrect: finalAnswerCorrect}
 	if correct {
 		return assess
 	}
-	if wrongWork {
-		assess.wrongStep = "演算中至少有一个等式不成立"
+	if wrongStep != "" {
+		assess.wrongStep = wrongStep
 	} else {
 		assess.wrongStep = "最终结果或单位与精确计算不一致"
 	}
@@ -594,7 +602,7 @@ func (o *SolveSkill) verifySolutionWithReceipt(ctx context.Context, problem, sol
 		return verdictUnverifiable, "", false, nil
 	}
 	spec := verifierSpecWithSolution(problem, solution, candidate, constraint)
-	result, usedSpec := o.runValidatedResult(ctx, spec, func(result SubAgentResult, attempt SubAgentSpec) bool {
+	result, usedSpec, _ := o.runValidatedResult(ctx, spec, func(result SubAgentResult, attempt SubAgentSpec) bool {
 		if !verdictParseable(result.Output) {
 			return false
 		}
@@ -650,22 +658,25 @@ const strictFormatReminder = "\n\n⚠️ 上一次输出未按要求的固定格
 // runValidated 跑结构化子 Agent 并按 ok() 校验其输出；首次解析失败 → 附加严格格式提醒、fresh 重派一次。
 // 对标 Hermes JSON-mode 的「校验 + 失败重提示」：让 verdict/批改在弱/本地模型上也能被稳定解析，
 // 不静默退化成 unverifiable/兜底。仅首次解析失败才多花一次调用（按需付费；首次成功零额外成本）。
-func (o *SolveSkill) runValidated(ctx context.Context, spec SubAgentSpec, ok func(string) bool) string {
-	result, _ := o.runValidatedResult(ctx, spec, func(result SubAgentResult, _ SubAgentSpec) bool {
+func (o *SolveSkill) runValidated(ctx context.Context, spec SubAgentSpec, ok func(string) bool) (string, error) {
+	result, _, err := o.runValidatedResult(ctx, spec, func(result SubAgentResult, _ SubAgentSpec) bool {
 		return ok(result.Output)
 	})
-	return result.Output
+	return result.Output, err
 }
 
 // runValidatedResult 沿用原有一次补验额度，连同产生结果的输入返回，避免重试时串用回执。
-func (o *SolveSkill) runValidatedResult(ctx context.Context, spec SubAgentSpec, ok func(SubAgentResult, SubAgentSpec) bool) (SubAgentResult, SubAgentSpec) {
+func (o *SolveSkill) runValidatedResult(ctx context.Context, spec SubAgentSpec, ok func(SubAgentResult, SubAgentSpec) bool) (SubAgentResult, SubAgentSpec, error) {
 	result, err := o.runSolveAgentResult(ctx, spec)
 	if err == nil && ok(result, spec) {
-		return result, spec
+		return result, spec, nil
 	}
 	// 物理调用失败由既有传输层决定能否安全重试，不用新任务绕过未知结果账本。
-	if err != nil || ctx.Err() != nil {
-		return result, spec
+	if err != nil {
+		return result, spec, err
+	}
+	if ctx.Err() != nil {
+		return result, spec, ctx.Err()
 	}
 	retry := spec
 	retry.RunID = spec.RunID + "-retry"
@@ -675,10 +686,12 @@ func (o *SolveSkill) runValidatedResult(ctx context.Context, spec SubAgentSpec, 
 	}
 	if result2, err2 := o.runSolveAgentResult(ctx, retry); err2 == nil {
 		if ok(result2, retry) || (spec.Agent == verifierAgentName && verdictParseable(result2.Output)) {
-			return result2, retry
+			return result2, retry, nil
 		}
+	} else {
+		return result, spec, err2
 	}
-	return result, spec
+	return result, spec, fmt.Errorf("sub-agent %s returned no valid structured judgment", spec.Agent)
 }
 
 // verdictParseable 报告 verifier 输出是否含可识别判定。
@@ -711,18 +724,22 @@ type gradeAssessment struct {
 	guidance           string
 }
 
-// grade 派一个 grader 子 Agent 对比学生答案与正确解。解析失败 → 回退按答案文本直接比对。
-func (o *SolveSkill) grade(ctx context.Context, problem, solution, groundTruth, studentAnswer string) gradeAssessment {
-	if o.executeFunc == nil || ctx.Err() != nil {
-		correct := normalizeAnswer(studentAnswer) == normalizeAnswer(groundTruth)
-		return gradeAssessment{correct: correct, finalAnswerCorrect: correct}
+// grade 只消费完整批改判定；调用失败或判定缺失不能转为学生答错的事实。
+func (o *SolveSkill) grade(ctx context.Context, problem, solution, groundTruth, studentAnswer string) (gradeAssessment, error) {
+	if err := ctx.Err(); err != nil {
+		return gradeAssessment{}, err
 	}
-	out := o.runValidated(ctx, graderSpec(problem, solution, groundTruth, studentAnswer), gradingParseable)
-	if strings.TrimSpace(out) == "" {
-		correct := normalizeAnswer(studentAnswer) == normalizeAnswer(groundTruth)
-		return gradeAssessment{correct: correct, finalAnswerCorrect: correct}
+	if o.executeFunc == nil {
+		return gradeAssessment{}, fmt.Errorf("grading executor unavailable")
 	}
-	return parseGrading(out, studentAnswer, groundTruth)
+	out, err := o.runValidated(ctx, graderSpec(problem, solution, groundTruth, studentAnswer), gradingParseable)
+	if err != nil {
+		return gradeAssessment{}, err
+	}
+	if !gradingParseable(out) {
+		return gradeAssessment{}, fmt.Errorf("grading response has no valid judgment")
+	}
+	return parseGrading(out, studentAnswer, groundTruth), nil
 }
 
 // graderSpec 构造批改子 Agent：可用 code_exec 核对学生算术；fresh-context、受信来源、leaf。
@@ -1069,7 +1086,34 @@ func numberSetsEqual(as, bs []float64) bool {
 	return true
 }
 
-// sameUnitAnswersEqual 仅比较单个数值与相同的明确单位，不剥单位、不转换单位或猜测文字含义。
+var singleQuantityEquationLeftRe = regexp.MustCompile(`^[ \t0-9.+*/×÷＋－−()（）-]+$`)
+var singleQuantityEquationRightRe = regexp.MustCompile(`(?i)^[ \t]*` + answerQuantityNumberPattern + `[ \t]*([（(]?)(平方厘米|cm²|cm\^?2|平方米|千克|公斤|张纸|m²|m2|kg|克|米|g|m)([）)]?)[ \t]*$`)
+
+// singleQuantityEquation 仅接纳自身成立且右侧完整保留明确单位的一个数值等式。
+func singleQuantityEquation(answer string) (answerQuantity, bool) {
+	answer = strings.ReplaceAll(normalizeAnswer(answer), "＝", "=")
+	if strings.Count(answer, "=") != 1 {
+		return answerQuantity{}, false
+	}
+	left, right, _ := strings.Cut(answer, "=")
+	if !singleQuantityEquationLeftRe.MatchString(left) || separatedArithmeticNumberRe.MatchString(left) {
+		return answerQuantity{}, false
+	}
+	match := singleQuantityEquationRightRe.FindStringSubmatch(right)
+	if len(match) != 5 || (match[2] == "" && match[4] != "") ||
+		(match[2] == "(" && match[4] != ")") || (match[2] == "（" && match[4] != "）") {
+		return answerQuantity{}, false
+	}
+	_, computed, ok := solveTrivialArithmetic(left)
+	leftValue, leftOK := numericValue(computed)
+	rightValue, rightOK := numericValue(match[1])
+	if !ok || !leftOK || !rightOK || !floatsClose(leftValue, rightValue) {
+		return answerQuantity{}, false
+	}
+	return answerQuantity{value: match[1], unit: normalizeAnswerUnit(match[3])}, true
+}
+
+// sameUnitAnswersEqual 仅比较单量及自身成立的单量等式，不转换单位或猜测文字含义。
 func sameUnitAnswersEqual(a, b string) (equal, comparable bool) {
 	for _, answer := range []*string{&a, &b} {
 		if equivalentQuantityRe.MatchString(*answer) {
@@ -1078,11 +1122,17 @@ func sameUnitAnswersEqual(a, b string) (equal, comparable bool) {
 				return false, false
 			}
 			*answer = quantity.value + " " + quantity.unit
+		} else if strings.ContainsAny(*answer, "=＝") {
+			quantity, ok := singleQuantityEquation(*answer)
+			if !ok {
+				return false, false
+			}
+			*answer = quantity.value + " " + quantity.unit
 		}
 	}
 	am := bareQuantityRe.FindStringSubmatch(normalizeAnswer(a))
 	bm := bareQuantityRe.FindStringSubmatch(normalizeAnswer(b))
-	if len(am) != 3 || len(bm) != 3 || am[2] == "" || am[2] != bm[2] {
+	if len(am) != 3 || len(bm) != 3 || am[2] == "" || normalizeAnswerUnit(am[2]) != normalizeAnswerUnit(bm[2]) {
 		return false, false
 	}
 	av, aok := numericValue(am[1])
@@ -1206,57 +1256,46 @@ func hasCleanFinalAnswer(output, answer string) bool {
 	return ok
 }
 
-// formatSolve 组装教学正文 + 置信徽标 + 分歧裁决。
+// formatSolve 保留教学正文，仅在结论冲突或证据不足时追加必要说明。
 func formatSolve(groups []answerGroup, verdict verifyVerdict, computed string, total int, methodDiversity, numericGrounded bool) string {
 	primary := groups[0]
 
-	// 解法之间分歧（method_diversity 多组）：用 code_exec 核验充当裁决者。
+	// 字面分组不等于结论冲突；同义文字不能仅因未归入同组就判为错误。
 	if len(groups) > 1 {
 		if numericGrounded && verdict != verdictUnverifiable && computed != "" {
 			if g := findGroup(groups, computed); g != nil {
-				var b strings.Builder
-				b.WriteString(g.sols[0].output) // 用核验正确的那份解法当正文
-				b.WriteString("\n\n")
-				fmt.Fprintf(&b, "> ✅ 几种解法结论不一致（%s），但独立代码核验确认正确答案是「%s」。上面是核验通过的解法；其余思路（得「%s」）在某步出了错，建议对照检查哪里偏了。\n",
-					joinAnswers(groups), computed, strings.Join(otherAnswers(groups, computed), "、"))
-				return b.String()
+				return g.sols[0].output
 			}
 			return fmt.Sprintf("%s\n\n> ⚠️ 几种解法结论不一致（%s），且独立代码核验得「%s」与各解法都不符——本题存疑，请务必人工复核。\n",
 				primary.sols[0].output, joinAnswers(groups), computed)
 		}
-		return fmt.Sprintf("%s\n\n> ⚠️ 几种解法得到不一致的结论（%s），且无法用代码客观裁决，请人工复核后再下结论。\n",
-			primary.sols[0].output, joinAnswers(groups))
+		for i := range groups {
+			for j := i + 1; j < len(groups); j++ {
+				if answersDefinitelyDiffer(groups[i].answer, groups[j].answer) {
+					return fmt.Sprintf("%s\n\n> ⚠️ 几种解法得到不一致的结论（%s），且无法用代码客观裁决，请人工复核后再下结论。\n",
+						primary.sols[0].output, joinAnswers(groups))
+				}
+			}
+		}
 	}
 
-	// 所有解法一致。
 	var b strings.Builder
 	b.WriteString(primary.sols[0].output)
-	b.WriteString("\n\n")
-	if total > 1 {
-		if methodDiversity {
-			fmt.Fprintf(&b, "（两种不同解法均得「%s」，相互印证。）\n\n", primary.answer)
-		} else {
-			fmt.Fprintf(&b, "（自洽采样：%d 次解题中 %d 次得「%s」）\n\n", total, len(primary.sols), primary.answer)
-		}
-	}
 	switch verdict {
 	case verdictAgree:
-		// 明确最终答案与当前输入的真实执行证据必须同时存在。
+		// 是否具有程序验算证据由结构化回执表达，不在教学正文追加过程声明。
 		if !hasCleanFinalAnswer(primary.sols[0].output, primary.answer) {
-			b.WriteString("> ℹ️ 本题未给出明确的最终答案（解题可能中途截断），校验环节虽未报异常，仍请人工复核关键步骤与结论后再采信。\n")
-		} else if numericGrounded {
-			b.WriteString("> ✅ 最终答案已由独立校验员用代码重算核验一致（高置信）。\n")
-		} else {
-			b.WriteString("> ℹ️ AI 自检一致 · 未程序验算\n")
+			b.WriteString("\n\n> ℹ️ 本题未给出明确的最终答案（解题可能中途截断），校验环节虽未报异常，仍请人工复核关键步骤与结论后再采信。\n")
 		}
 	case verdictDisagree:
+		b.WriteString("\n\n")
 		if numericGrounded {
 			fmt.Fprintf(&b, "> ⚠️ 注意：独立代码核验得到**不同**答案——解题得「%s」，代码核验得「%s」。两者不一致，请勿直接采信，建议复核关键步骤再下结论。\n", primary.answer, fallbackStr(computed, "（未给出）"))
 		} else {
 			fmt.Fprintf(&b, "> ⚠️ AI 自检结果不一致：%s / %s · 未程序验算，请复核。\n", primary.answer, fallbackStr(computed, "（未给出）"))
 		}
 	default:
-		b.WriteString("> ℹ️ 本题无法用代码自动核验（非纯计算题），请人工复核关键步骤与结论。\n")
+		b.WriteString("\n\n> ℹ️ 本题无法用代码自动核验（非纯计算题），请人工复核关键步骤与结论。\n")
 	}
 	return b.String()
 }
@@ -1324,17 +1363,56 @@ const (
 // triageMultiPart 粗判多问（①②③ / (1)(2) /（一）（二）/ 1. … 2. …）。
 var triageMultiPart = regexp.MustCompile(`[①②③④⑤⑥]|[(（][1-9一二三四][)）]`)
 
+// 数字算术表达式后面的括号分母是数学表示，不能当作另一道子题编号。
+var triageExpressionFractionDenominatorRe = regexp.MustCompile(`(\([0-9+\-×xX*/÷^.\s]+\)|[0-9]+)\s*/\s*\(([0-9]+)\)`)
+
+func complexityMathMarkerInput(problem string) string {
+	input := elementaryParenthesizedFractionRe.ReplaceAllString(problem, "$1/$2")
+	return triageExpressionFractionDenominatorRe.ReplaceAllString(input, "$1/$2")
+}
+
 // triagePureArith 粗判「纯算术表达式」（只含数字/运算符/括号/等号问号百分号）。
 var triagePureArith = regexp.MustCompile(`^[\s\d+\-×xX*/÷^().=?％%]+$`)
 
 // triageHardKeywords 命中即判难题（需多步推理/论证）。
 var triageHardKeywords = []string{"证明", "求证", "讨论", "推导", "解方程", "应用题", "为什么", "解释"}
 
+// complexityProblemStem 剔除附加来源、完整范围包装及已选单题的唯一编号，不改变模型实际输入。
+func complexityProblemStem(problem string) string {
+	p := strings.TrimSpace(deterministicProblemStem(problem))
+	const scopePrefix = "\n\nFor this request, solve or assess only subproblem "
+	const scopeSuffix = ". Use the shared material as context; do not answer the other subproblems."
+	if index := strings.LastIndex(p, scopePrefix); index >= 0 {
+		scope := p[index+len(scopePrefix):]
+		if strings.HasSuffix(scope, scopeSuffix) {
+			label := strings.TrimSuffix(scope, scopeSuffix)
+			if strings.TrimSpace(label) != "" && !strings.ContainsAny(label, "\r\n") {
+				stem := strings.TrimSpace(p[:index])
+				markers := triageMultiPart.FindAllString(complexityMathMarkerInput(stem), -1)
+				// 已选单题的唯一行首编号不是多问，分数括号也不能当作题号。
+				if len(markers) == 1 && strings.Trim(markers[0], "()（）") == strings.Trim(strings.TrimSpace(label), "()（）") {
+					lines := strings.Split(stem, "\n")
+					for i, line := range lines {
+						line = strings.TrimLeft(line, " \t")
+						if strings.HasPrefix(line, markers[0]) {
+							lines[i] = strings.TrimPrefix(line, markers[0])
+							stem = strings.Join(lines, "\n")
+							break
+						}
+					}
+				}
+				return strings.TrimSpace(stem)
+			}
+		}
+	}
+	return p
+}
+
 // assessComplexity 用零成本启发式判题目复杂度（不调模型）。保守取向：拿不准归 standard（照常校验）。
 func assessComplexity(problem string) solveComplexity {
-	p := strings.TrimSpace(problem)
+	p := complexityProblemStem(problem)
 	runes := []rune(p)
-	multiPartInput := elementaryParenthesizedFractionRe.ReplaceAllString(p, "$1/$2")
+	multiPartInput := complexityMathMarkerInput(p)
 	if triageMultiPart.MatchString(multiPartInput) || len(runes) > 120 {
 		return complexityHard
 	}

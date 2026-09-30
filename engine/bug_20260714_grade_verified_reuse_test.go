@@ -2,9 +2,15 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"testing"
 )
+
+type gradingOutcomeUnknownError struct{}
+
+func (*gradingOutcomeUnknownError) Error() string           { return "grading outcome unknown" }
+func (*gradingOutcomeUnknownError) SubAgentRetryable() bool { return false }
 
 // 内部快口只允许追加 grader；若再次出现 solver/verifier，整卷批改延迟会重新翻倍。
 func TestBUG20260714_GradeVerifiedRunsOnlyGrader(t *testing.T) {
@@ -98,6 +104,87 @@ func TestGradeVerifiedArithmeticTreatsMixedNumberAsWholePlusProperFraction(t *te
 				if calls != 0 || res.Metadata["grade_correct"] != "true" || res.Metadata["grade_final_answer_correct"] != "true" {
 					t.Errorf("complete mixed-number work must remain locally correct: calls=%d metadata=%#v", calls, res.Metadata)
 				}
+			}
+		})
+	}
+}
+
+func TestGradeVerifiedElementaryWordMixedNumberMultilineWork(t *testing.T) {
+	for _, tt := range []struct {
+		name, studentAnswer, wantCorrect, wantFinalCorrect string
+	}{
+		{
+			name:          "complete mixed-number work",
+			studentAnswer: "8×1/4×4/5\n=2×4/5\n=8/5=1 3/5\n答：是1 3/5。",
+			wantCorrect:   "true", wantFinalCorrect: "true",
+		},
+		{
+			name:          "wrong intermediate step with correct final answer",
+			studentAnswer: "8×1/4×4/5\n=3×4/5\n=8/5=1 3/5\n答：是1 3/5。",
+			wantCorrect:   "false", wantFinalCorrect: "true",
+		},
+		{
+			name:          "wrong final mixed number",
+			studentAnswer: "8×1/4×4/5\n=2×4/5\n=8/5=1 3/5\n答：是1 2/5。",
+			wantCorrect:   "false", wantFinalCorrect: "false",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			calls := 0
+			s := NewSolveSkill(func(context.Context, SubAgentSpec) (SubAgentResult, error) {
+				calls++
+				return SubAgentResult{Output: "CORRECT: no\nFINAL_ANSWER_CORRECT: no"}, nil
+			}, NewSubAgentRegistry(""))
+			res, err := s.GradeVerified(context.Background(), "8的1/4的4/5是多少？", "答案：1.6", tt.studentAnswer)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if calls != 0 || res.Metadata["solve_mode"] != "grading_deterministic_elementary_word" ||
+				res.Metadata["grade_correct"] != tt.wantCorrect || res.Metadata["grade_final_answer_correct"] != tt.wantFinalCorrect {
+				t.Fatalf("multiline work lost exact comparison: calls=%d metadata=%#v", calls, res.Metadata)
+			}
+		})
+	}
+}
+
+func TestGradeVerifiedRejectsUnavailableJudgment(t *testing.T) {
+	unknown := &gradingOutcomeUnknownError{}
+	for _, tt := range []struct {
+		name, output, student string
+		callErr               error
+		wantCalls             int
+		cancelled, noExecutor bool
+	}{
+		{name: "missing judgment with matching answer", output: "尚未取得批改结论", student: "分子和分母同乘一个非零数", wantCalls: 2},
+		{name: "incomplete judgment", output: "CORRECT: yes", student: "把分子分母分别增加相同的数", wantCalls: 2},
+		{name: "unknown outcome", student: "分子和分母同乘一个非零数", callErr: unknown, wantCalls: 1},
+		{name: "cancelled context", student: "把分子分母分别增加相同的数", cancelled: true},
+		{name: "missing executor", student: "把分子分母分别增加相同的数", noExecutor: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			calls := 0
+			var exec SubAgentExecFunc = func(context.Context, SubAgentSpec) (SubAgentResult, error) {
+				calls++
+				return SubAgentResult{Output: tt.output}, tt.callErr
+			}
+			if tt.noExecutor {
+				exec = nil
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tt.cancelled {
+				cancel()
+			}
+			res, err := NewSolveSkill(exec, NewSubAgentRegistry("")).GradeVerified(ctx,
+				"请解释为什么分数通分不改变大小。", "答案：分子和分母同乘一个非零数", tt.student)
+			if err == nil || res != nil || calls != tt.wantCalls {
+				t.Fatalf("missing judgment became a grading fact: result=%+v err=%v calls=%d", res, err, calls)
+			}
+			if tt.callErr != nil && !errors.Is(err, tt.callErr) {
+				t.Fatalf("provider outcome identity was lost: %v", err)
+			}
+			if tt.cancelled && !errors.Is(err, context.Canceled) {
+				t.Fatalf("cancellation identity was lost: %v", err)
 			}
 		})
 	}

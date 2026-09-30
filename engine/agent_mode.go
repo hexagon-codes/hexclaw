@@ -65,43 +65,22 @@ func DecodeMode(raw string) AgentMode {
 func modePromptPrefix(m AgentMode) string {
 	switch m {
 	case ModePlanExecute:
-		return `你在执行一个多步任务。请先分 3-5 步列出"计划"（用"计划："起头，每步一行），然后按计划依次执行，每一步用"第 N 步："起头。必要时调用工具。全部执行完后给出最终答案（用"答案："起头）。
+		return `Plan and complete the steps the task needs, using tools when necessary. Lead the final response with the result, then include the steps needed to understand or use it. Show a brief plan only when a complex task needs progress updates or the user asks for a plan; do not impose a fixed number of steps or numbered process headings.
 `
 	case ModeReflection:
-		return `你在解答一道需要自查的题目。给出答案后，务必用"自查："起头回顾一遍：
-- 关键条件是否都用到？
-- 计算/推理是否有漏洞？
-- 与常识是否冲突？
-若发现问题，修正后以"最终答案："起头重新给出结论；若无问题，也要显式写出"自查通过"。
+		return `Before answering, check key conditions, calculations and reasoning. Give the checked result and the evidence needed to understand it, without displaying an internal self-check checklist or a "check passed" statement. Correct any errors you find and clearly state any uncertainty that still affects the conclusion.
 `
 	case ModeToT:
-		return `你在解一道可能多解的题目。请用 Tree-of-Thought 思路：
-1. 用"思路 A："起头给出第一种解法（含关键步骤）。
-2. 用"思路 B："起头给出第二种思路（与 A 不同的角度）。
-3. 用"对比："起头评估两条思路的对错/优劣。
-4. 用"最终答案："起头给出最稳妥的结论；如两条思路殊途同归，写出"两路殊途同归"。
+		return `Compare suitable approaches before giving a reliable result and the necessary steps. When the user asks for multiple solutions, explain each solution fully and identify meaningful differences. For ordinary questions, do not require two displayed solutions, a comparison section or a statement that both approaches agree.
 `
 	case ModeSelfReflect:
-		return `你在解一道需要严格自我审视的题。请按以下结构作答：
-1. 用"初步思考："给出原始想法（含假设）。
-2. 用"反思："立即审视该想法可能的纰漏（前提是否成立？步骤是否跳跃？）。
-3. 用"修正："给出改进后的推理。
-4. 用"最终答案："给出确定结论。
-若反思发现初步思考无问题，反思段也要明确写"反思通过"。
+		return `Examine assumptions and key reasoning, correct any issues you find, and answer directly. Keep the derivation needed to understand the answer and identify unresolved gaps. Do not impose sections for initial thoughts, reflection or revision, or add a "reflection passed" statement.
 `
 	case ModeMemAugmented:
-		return `你在为一名熟悉的用户作答。请先做以下检索：
-1. 用"档案回忆："起头，回顾该用户的薄弱点 / 历史记录 / 偏好（基于已注入的 memory 与 RAG 上下文；无信息则写"暂无档案"）。
-2. 用"切入点："起头，说明本次作答如何结合档案（个性化应答 / 避开混淆点）。
-3. 用"答案："起头给出最终回答。
-注意：档案信息只用于个性化应答，不要把档案原文复述给用户。
+		return `Use relevant profile and historical information from the provided memory and retrieved context to answer naturally within the current user, course and task scope. Do not impose profile-recall or personalization sections or repeat the profile verbatim. Explain missing profile information only when it materially affects the current result; never infer facts from missing information.
 `
 	case ModeDebate:
-		return `你需要用双视角辩论方式作答这道争议题：
-1. 用"正方："起头，给出"答案是 X"的最强论据。
-2. 用"反方："起头，给出"答案不是 X"的最强反驳。
-3. 用"裁决："起头，权衡正反双方，指出哪方更有理由及关键依据。
-4. 用"最终答案："起头给出结论；若双方势均力敌且无法判定，也要明确写"暂无定论 + 缺什么信息"。
+		return `For a disputed question, lead with the conclusion and its key evidence. When the user explicitly asks for a debate or multiple perspectives, explain the relevant positions and meaningful differences fully. If the issue cannot be resolved, say that no conclusion is established and identify the missing information. Do not impose sections for an affirmative side, an opposing side, a verdict and a final answer.
 `
 	default:
 		return ""

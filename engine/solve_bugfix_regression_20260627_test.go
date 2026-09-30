@@ -145,11 +145,11 @@ func TestSolve_NoCleanFinalAnswer_NoFalseHighConfidence(t *testing.T) {
 	if !strings.Contains(res.Content, "复核") {
 		t.Errorf("回归(AP-122): 应降级为『…请复核』而非高置信，得：%s", res.Content)
 	}
-	// 不误伤：solver 有干净『答案：』行 + AGREE → 仍应盖高置信。
+	// 明确答案与实际执行证据仍保留，正文不追加置信声明。
 	se2 := &solveExec{solverOuts: []string{"解题…\n答案：15"}, verifierOut: "VERDICT: AGREE\nCOMPUTED: 15", verifierStdout: "COMPUTED: 15\n"}
 	res2, _ := NewSolveSkill(se2.fn, nil).Execute(context.Background(), solveArgs("一根木头锯成 6 段，每锯断一次 3 分钟，一共多少分钟？"))
-	if !strings.Contains(res2.Content, "高置信") {
-		t.Errorf("回归(AP-122): 有干净最终答案『答案：15』+AGREE 仍应盖高置信(防过度抑制)，得：%s", res2.Content)
+	if !strings.Contains(res2.Content, "答案：15") || res2.Metadata["solve_evidence"] != "numeric_exec" || strings.Contains(res2.Content, "高置信") {
+		t.Errorf("应保留明确答案与实际执行证据：metadata=%v content=%s", res2.Metadata, res2.Content)
 	}
 }
 

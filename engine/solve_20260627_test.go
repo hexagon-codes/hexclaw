@@ -28,7 +28,7 @@ func TestSolve_VerifierCodeExecAutoApproved(t *testing.T) {
 }
 
 // P0（K12 正确性）：Solver–Verifier，verifier 走 code_exec 执行验证 + fresh-context 独立重解。
-// 不变量：①验证一致→高置信徽标 ②不一致→诚实并列双答+请复核（不直接采信）③不可验证→标注人工复核
+// 不变量：①验证一致保留正文与证据 ②不一致→诚实并列双答+请复核（不直接采信）③不可验证→标注人工复核
 // ④verifier spec 被限定为「只有 code_exec 工具」⑤self-consistency 多数表决。
 
 type solveExec struct {
@@ -174,7 +174,7 @@ func TestSolve_SelfConsistencyMajority(t *testing.T) {
 	}
 }
 
-// 方法多样：跑 2 个「不同方法」的 solver；两法一致 + 核验 → 高置信。
+// 方法多样：跑 2 个不同方法的 solver；正文保留解法，实际执行证据保留在回执。
 func TestSolve_MethodDiversity_TwoDistinctMethods(t *testing.T) {
 	se := &solveExec{verifierOut: "VERDICT: AGREE\nCOMPUTED: 42", verifierStdout: "COMPUTED: 42\n"}
 	o := NewSolveSkill(se.fn, nil)
@@ -194,12 +194,12 @@ func TestSolve_MethodDiversity_TwoDistinctMethods(t *testing.T) {
 	if len(tasks) == 2 && tasks[0] == tasks[1] {
 		t.Errorf("两个 solver 应使用不同方法（prompt 应不同）")
 	}
-	if !strings.Contains(res.Content, "解法") || !strings.Contains(res.Content, "✅") {
-		t.Errorf("两法一致 + 核验应高置信，得：%s", res.Content)
+	if !strings.Contains(res.Content, "答案：42") || res.Metadata["solve_evidence"] != "numeric_exec" || strings.Contains(res.Content, "✅") {
+		t.Errorf("应保留答案与执行证据，不追加验证徽标：metadata=%v content=%s", res.Metadata, res.Content)
 	}
 }
 
-// 两法分歧 → code_exec 独立核验充当裁决者（判出正确解法 + 提示另一解法有误）。
+// 两法分歧由实际执行证据裁决，正文只保留选中的解法。
 func TestSolve_MethodDiversity_VerifierAdjudicates(t *testing.T) {
 	se := &solveExec{
 		solverOuts:     []string{"用代数解……\n答案：42", "用代入解……\n答案：43"},
@@ -208,11 +208,11 @@ func TestSolve_MethodDiversity_VerifierAdjudicates(t *testing.T) {
 	}
 	o := NewSolveSkill(se.fn, nil)
 	res, _ := o.Execute(context.Background(), map[string]any{"problem": "6×7", "method_diversity": true})
-	if !strings.Contains(res.Content, "42") || !strings.Contains(res.Content, "43") {
-		t.Errorf("两法分歧应并列两个答案，得：%s", res.Content)
+	if !strings.Contains(res.Content, "42") || strings.Contains(res.Content, "43") {
+		t.Errorf("应保留代码裁决选中的答案，得：%s", res.Content)
 	}
-	if !strings.Contains(res.Content, "核验") {
-		t.Errorf("应说明由代码核验裁决，得：%s", res.Content)
+	if res.Metadata["solve_evidence"] != "numeric_exec" || strings.Contains(res.Content, "核验") {
+		t.Errorf("应保留执行证据，不追加核验声明：metadata=%v content=%s", res.Metadata, res.Content)
 	}
 	selectedDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(se.solverOuts[0])))
 	verifier, ok := se.specFor(verifierAgentName)
@@ -320,8 +320,8 @@ func TestSolve_Verifier_ValidateRetryOnBadFormat(t *testing.T) {
 	if se.verifierCalls() != 2 {
 		t.Fatalf("verifier 解析失败应校验重试一次（共 2 次），实得 %d", se.verifierCalls())
 	}
-	if !strings.Contains(res.Content, "✅") {
-		t.Errorf("重试后得到干净 AGREE，应高置信，得：%s", res.Content)
+	if !strings.Contains(res.Content, "答案：42") || res.Metadata["solve_evidence"] != "numeric_exec" || strings.Contains(res.Content, "✅") {
+		t.Errorf("格式重试后应保留答案与实际执行证据：metadata=%v content=%s", res.Metadata, res.Content)
 	}
 }
 
