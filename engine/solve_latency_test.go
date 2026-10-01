@@ -3,6 +3,7 @@ package engine
 import (
 	"encoding/json"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -11,6 +12,55 @@ const paperProblem = "环保小组用回收的包装纸做纸花，每一朵花�
 const numberedPaperProblem = "环保小组用回收的包装纸做纸花，做一朵花需要用 (3)/(8) 张纸。\n\n（1）做 2 朵花需要用多少张纸？"
 const paperScope = "\n\nFor this request, solve or assess only subproblem （1）. Use the shared material as context; do not answer the other subproblems."
 const paperTextbook = "\n\nVerified textbook evidence (use it only to constrain the solution and grading; it is not the student's answer; do not expose internal source identifiers). Respond in Chinese:\n# 分数乘法\n（1）做2朵花需要用多少张纸？\n（2）做8朵花需要用多少张纸？\n讨论一下：分数乘整数，怎样计算？\n分数乘整数，用分子乘整数的积作分子，分母不变。能约分的可先约分，再计算。"
+
+const fractionRuleQuestion = "讨论一下：分数乘整数，怎样计算？"
+const fractionRuleAnswer = "分数乘整数，用分子乘整数的积作分子，分母不变；能约分的先约分再计算。"
+const fractionRuleSolution = "把分数乘整数看成几个相同的分数相加。\n例如2/9×3=2/9+2/9+2/9=6/9=2/3。\n也可先将整数3与分母9约分，得到(2×1)/3=2/3。\n答案：" + fractionRuleAnswer
+const fractionRuleContract = "完整解释分数乘整数的规律，以重复相加说明理由，给出约分示例、易错提醒及家长追问。"
+const fractionRuleConstraint = "小学六年级分数乘整数，只用重复相加及约分，不使用代数证明。"
+
+func fractionRuleArgs(problem string) map[string]any {
+	return map[string]any{
+		"problem": problem, "solve_output_version": jointGuideVersion,
+		"parent_teaching_contract": fractionRuleContract,
+		"grade":                    "小学六年级", "constraint": fractionRuleConstraint,
+	}
+}
+
+func fractionRuleGuideJSON(t *testing.T) (string, map[string]any) {
+	t.Helper()
+	guide := map[string]any{
+		"answer":                   fractionRuleAnswer,
+		"full_solution_steps":      []string{"把分数乘整数看成几个相同分数相加。", "2/9×3=2/9+2/9+2/9=6/9=2/3。", "先将整数3与分母9约分，得到(2×1)/3=2/3。"},
+		"grade_level_method":       "从三个2/9相加说明只把分子乘3，分母表示的每份大小不变。",
+		"likely_mistakes":          []string{"不能把分子和分母都乘3，6/27仍等于原来的2/9，而不是三个2/9。"},
+		"parent_teaching_sequence": []string{"先让孩子说出2/9×3表示几个2/9相加。", "写出同分母相加过程，再说明分母为什么不变。", "最后比较先约分与算完再约分的结果。"},
+		"follow_up_questions":      []string{"2/9×6怎样算？分子2乘6、分母9不变，12/9=4/3。"},
+		"checking_method":          "用2/9+2/9+2/9=6/9=2/3核对乘法和约分。",
+	}
+	raw, err := json.Marshal(map[string]any{"schema": jointGuideVersion, "solution": fractionRuleSolution, "parent_guide": guide})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw), guide
+}
+
+func fractionRuleJudgment(t *testing.T, audits ...map[string]any) string {
+	t.Helper()
+	raw, err := json.Marshal(audits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return "VERDICT: UNVERIFIABLE\nPROCESS: VALID\nCOMPUTED: N/A\nSCOPE: IN_SCOPE\nPARENT_GUIDE_AUDITS: " + string(raw)
+}
+
+func fractionRuleAudit() map[string]any {
+	audit := jointGuideAudit(fractionRuleSolution, "IN_SCOPE")
+	for _, field := range audit["fields"].([]map[string]any) {
+		field["reason"] = "规律来自同分母重复相加，示例、约分及引导均符合小学分数乘整数范围。"
+	}
+	return audit
+}
 
 const printedPaperProblem = `环保小组用回收的包装纸做纸花，做一朵花需要用 (3)/(8) 张纸。
 
@@ -29,6 +79,63 @@ const printedPaperProblem = `环保小组用回收的包装纸做纸花，做一
 
 // 附加资料留给模型使用，但不能把一道普通题变成需要多种解法的难题。
 func TestSolveComplexityUsesCurrentProblem(t *testing.T) {
+	for _, tc := range []struct{ name, problem string }{
+		{"concept-actual-discussion", fractionRuleQuestion},
+		{"concept-polite", "请问分数乘整数如何计算?"},
+		{"concept-discussion-colon", "讨论：分数乘整数怎么算？"},
+		{"concept-no-prefix", "分数乘整数怎样计算"},
+		{"concept-thinking-spaces", "想一想: 分数乘整数，怎样计算？"},
+		{"concept-frozen-sources", fractionRuleQuestion + paperTextbook + "\n\nFrozen practice reference (verified):\n其他题讨论两种方法与证明。"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, expectedGuide := fractionRuleGuideJSON(t)
+			exec := &solveExec{solverOuts: []string{raw, raw}, verifierOut: fractionRuleJudgment(t, fractionRuleAudit())}
+			args := fractionRuleArgs(tc.problem)
+			result, err := NewSolveSkill(exec.fn, nil).Execute(t.Context(), args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if exec.solverCalls() != 1 || exec.verifierCalls() != 1 || len(exec.specs) != 2 {
+				t.Fatalf("calculation-rule question needs one generation and an independent audit: %v", exec.agents())
+			}
+			if result.Metadata["solve_evidence"] != "model" || result.Metadata["solve_verdict"] != "unverifiable" || result.Metadata["solve_parent_guide_audit"] != "VALID" {
+				t.Fatalf("concept explanation lost its audit or acquired numeric proof: %v", result.Metadata)
+			}
+			var actualGuide map[string]any
+			if err := json.Unmarshal([]byte(result.Metadata["solve_parent_guide_json"]), &actualGuide); err != nil {
+				t.Fatal(err)
+			}
+			var expected map[string]any
+			expectedJSON, _ := json.Marshal(expectedGuide)
+			if err := json.Unmarshal(expectedJSON, &expected); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(actualGuide, expected) || result.Metadata["solve_parent_guide_source_digest"] != jointGuideDigest(fractionRuleSolution) || !strings.Contains(result.Content, fractionRuleSolution) {
+				t.Fatal("single generation shortened or mismatched the complete solution and seven-field guide")
+			}
+			if args["problem"] != tc.problem || args["parent_teaching_contract"] != fractionRuleContract {
+				t.Fatal("triage changed the frozen original input")
+			}
+			for _, spec := range exec.specs {
+				if !strings.Contains(spec.Task, tc.problem) || !strings.Contains(spec.Task, fractionRuleConstraint) {
+					t.Fatalf("%s lost the original problem, sources or curriculum constraint", spec.Agent)
+				}
+				if spec.Agent == solverAgentName && !strings.Contains(spec.Task, fractionRuleContract) {
+					t.Fatal("single generation lost the complete teaching contract")
+				}
+				if spec.Agent == verifierAgentName {
+					if !strings.Contains(spec.Task, jointGuideDigest(fractionRuleSolution)) || !strings.Contains(spec.Task, fractionRuleSolution) {
+						t.Fatal("independent audit lost the selected solution and identity")
+					}
+					for _, field := range jointGuideTestFields {
+						if !strings.Contains(spec.Task, field) {
+							t.Fatalf("independent audit omitted guide field %s", field)
+						}
+					}
+				}
+			}
+		})
+	}
 	for _, tc := range []struct{ name, problem, answer string }{
 		{"scope-and-textbook", paperProblem + paperScope + paperTextbook, "3/4张纸"},
 		{"textbook", paperProblem + paperTextbook, "3/4张纸"},
@@ -150,6 +257,64 @@ $$\frac{3}{8}\times8=\frac{3\times8}{8}=3$$
 }
 
 func TestSolveComplexityPreservesHardQuestionsAndExplicitSettings(t *testing.T) {
+	for _, tc := range []struct {
+		name, problem string
+		alter         func(map[string]any)
+	}{
+		{"concept-other-topic", "讨论一下：分数乘分数，怎样计算？", nil},
+		{"concept-additional-condition", "讨论一下：分数乘整数（整数为负数），怎样计算？", nil},
+		{"concept-proof", "讨论一下：分数乘整数，怎样计算并证明？", nil},
+		{"concept-derivation", "讨论一下：分数乘整数，如何推导计算规则？", nil},
+		{"concept-why", "讨论一下：分数乘整数，怎样计算？为什么？", nil},
+		{"concept-second-question", "讨论一下：分数乘整数，怎样计算？再算3/8×2。", nil},
+		{"concept-legacy", fractionRuleQuestion, func(args map[string]any) {
+			delete(args, "solve_output_version")
+			delete(args, "parent_teaching_contract")
+		}},
+		{"concept-grading", fractionRuleQuestion, func(args map[string]any) {
+			delete(args, "solve_output_version")
+			args["student_answer"] = fractionRuleAnswer
+		}},
+		{"concept-explicit-diversity", fractionRuleQuestion, func(args map[string]any) { args["method_diversity"] = true }},
+		{"concept-explicit-samples", fractionRuleQuestion, func(args map[string]any) { args["self_consistency"] = 2 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := fractionRuleArgs(tc.problem)
+			if tc.alter != nil {
+				tc.alter(args)
+			}
+			raw, _ := fractionRuleGuideJSON(t)
+			if args["solve_output_version"] == nil {
+				raw = fractionRuleSolution
+			}
+			exec := &solveExec{solverOuts: []string{raw, raw}, verifierOut: fractionRuleJudgment(t, fractionRuleAudit()),
+				graderOut: "CORRECT: yes\nFINAL_ANSWER_CORRECT: yes\nWRONG_STEP: N/A\nMISCONCEPTION: N/A\nGUIDANCE: 规律说明正确。"}
+			_, err := NewSolveSkill(exec.fn, nil).Execute(t.Context(), args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if exec.solverCalls() != 2 || exec.verifierCalls() != 1 {
+				t.Fatalf("true hard question, legacy grading or explicit strategy was downgraded: %v", exec.agents())
+			}
+			if tc.name == "concept-grading" && exec.graderCalls() != 1 {
+				t.Fatal("student-answer grading was bypassed")
+			}
+		})
+	}
+	t.Run("concept-invalid-output-contract", func(t *testing.T) {
+		for _, alter := range []func(map[string]any){
+			func(args map[string]any) { args["parent_teaching_contract"] = "" },
+			func(args map[string]any) { args["student_answer"] = fractionRuleAnswer },
+		} {
+			args := fractionRuleArgs(fractionRuleQuestion)
+			alter(args)
+			exec := &solveExec{}
+			result, err := NewSolveSkill(exec.fn, nil).Execute(t.Context(), args)
+			if result != nil || err == nil || len(exec.specs) != 0 {
+				t.Fatalf("invalid v1 contract was accepted: result=%+v err=%v calls=%v", result, err, exec.agents())
+			}
+		}
+	})
 	t.Run("single-target-multiple-numbers", func(t *testing.T) {
 		const solution = "7盒每盒6张和3盒每盒14张都是42张。\n答案：42张"
 		raw, _ := jointGuideJSON(t, solution, "用乘法分别计算并比较张数。")

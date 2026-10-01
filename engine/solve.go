@@ -267,6 +267,10 @@ func (o *SolveSkill) Execute(ctx context.Context, args map[string]any) (*skill.R
 		}
 	}
 	complexity := assessComplexity(complexityProblem)
+	// 完整匹配的计算规律问答只减少默认候选采样，讲解内容与独立审计仍走原合同。
+	if auto && outputVersion == solveWithParentGuideV1 && !gradingMode && fractionIntegerCalculationRuleRe.MatchString(strings.TrimSpace(deterministicProblem)) {
+		complexity = complexityStandard
+	}
 	if auto && complexity == complexityHard {
 		methodDiversity = true
 	}
@@ -1449,6 +1453,9 @@ var triagePureArith = regexp.MustCompile(`^[\s\d+\-×xX*/÷^().=?％%]+$`)
 
 // triageHardKeywords 命中即判难题（需多步推理/论证）。
 var triageHardKeywords = []string{"证明", "求证", "讨论", "推导", "解方程", "应用题", "为什么", "解释"}
+
+// 只识别主题、提问引导及计算规则问法；附加条件、证明或另一问不在完整匹配内。
+var fractionIntegerCalculationRuleRe = regexp.MustCompile(`^(?:(?:讨论一下|讨论|想一想|请问)[\s\p{Zs}]*[:：,，]?[\s\p{Zs}]*)?分数乘整数[\s\p{Zs}]*[:：,，]?[\s\p{Zs}]*(?:怎样计算|如何计算|怎么算)[\s\p{Zs}]*[?？]?$`)
 
 // complexityProblemStem 剔除附加来源、完整范围包装及已选单题的唯一编号，不改变模型实际输入。
 func complexityProblemStem(problem string) string {

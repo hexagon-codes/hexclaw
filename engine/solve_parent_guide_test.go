@@ -307,6 +307,51 @@ func TestSolveJointGuideFollowsInScopeReplacement(t *testing.T) {
 
 // 答案正确与讲解合格是独立事实，缺失或歧义的审计不得被数值回执补齐。
 func TestSolveJointGuideRejectsWrongOrIncompleteAudit(t *testing.T) {
+	t.Run("single-concept-audit", func(t *testing.T) {
+		for _, tc := range []struct{ name, want string }{
+			{"missing-explanation", "INVALID"},
+			{"missing-audit", "NOT_PROVIDED"},
+			{"wrong-source", "NOT_PROVIDED"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				raw, guide := fractionRuleGuideJSON(t)
+				audit := fractionRuleAudit()
+				if tc.name == "missing-explanation" {
+					guide["full_solution_steps"] = []string{}
+					envelope, err := json.Marshal(map[string]any{"schema": jointGuideVersion, "solution": fractionRuleSolution, "parent_guide": guide})
+					if err != nil {
+						t.Fatal(err)
+					}
+					raw = string(envelope)
+					fields := audit["fields"].([]map[string]any)
+					fields[1]["valid"] = false
+					fields[1]["reason"] = "讲法没有提供同分母相加和约分的必要解释，不能只给规律。"
+				}
+				if tc.name == "wrong-source" {
+					audit["source_digest"] = jointGuideDigest("另一道题的解法")
+				}
+				judgment := fractionRuleJudgment(t, audit)
+				if tc.name == "missing-audit" {
+					judgment = "VERDICT: UNVERIFIABLE\nPROCESS: VALID\nCOMPUTED: N/A\nSCOPE: IN_SCOPE"
+				}
+				exec := &solveExec{solverOuts: []string{raw, raw}, verifierOut: judgment}
+				result, err := NewSolveSkill(exec.fn, nil).Execute(t.Context(), fractionRuleArgs(fractionRuleQuestion))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if exec.solverCalls() != 1 || exec.verifierCalls() != 1 || result.Metadata["solve_parent_guide_audit"] != tc.want || result.Metadata["solve_evidence"] != "model" {
+					t.Fatalf("single candidate bypassed independent audit or added numeric proof/calls: %v %v", exec.agents(), result.Metadata)
+				}
+				var actual map[string]any
+				if err := json.Unmarshal([]byte(result.Metadata["solve_parent_guide_json"]), &actual); err != nil {
+					t.Fatal(err)
+				}
+				if tc.name == "missing-explanation" && len(actual["full_solution_steps"].([]any)) != 0 {
+					t.Fatal("rejected missing explanation was silently replaced with a generic guide")
+				}
+			})
+		}
+	})
 	const solution = "6×7=42张。\n答案：42张"
 	for _, tc := range []struct {
 		name, want string
@@ -364,6 +409,40 @@ func TestSolveJointGuideRejectsWrongOrIncompleteAudit(t *testing.T) {
 }
 
 func TestSolveJointGuideUnknownVerificationDoesNotInventAudit(t *testing.T) {
+	for _, stage := range []string{"solver", "verifier"} {
+		t.Run("single-concept-"+stage+"-unknown", func(t *testing.T) {
+			raw, _ := fractionRuleGuideJSON(t)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			var solverCalls, verifierCalls int
+			execute := func(_ context.Context, spec SubAgentSpec) (SubAgentResult, error) {
+				switch spec.Agent {
+				case solverAgentName:
+					solverCalls++
+					if stage == "solver" {
+						cancel()
+						return SubAgentResult{}, context.DeadlineExceeded
+					}
+					return SubAgentResult{Output: raw}, nil
+				case verifierAgentName:
+					verifierCalls++
+					cancel()
+					return SubAgentResult{}, context.DeadlineExceeded
+				default:
+					t.Fatalf("unexpected agent %s", spec.Agent)
+					return SubAgentResult{}, nil
+				}
+			}
+			result, err := NewSolveSkill(execute, nil).Execute(ctx, fractionRuleArgs(fractionRuleQuestion))
+			wantVerifierCalls := 1
+			if stage == "solver" {
+				wantVerifierCalls = 0
+			}
+			if result != nil || !errors.Is(err, context.Canceled) || solverCalls != 1 || verifierCalls != wantVerifierCalls {
+				t.Fatalf("unknown %s continued a second method or invented success: solver=%d verifier=%d result=%+v err=%v", stage, solverCalls, verifierCalls, result, err)
+			}
+		})
+	}
 	const solution = "6×7=42张。\n答案：42张"
 	raw, _ := jointGuideJSON(t, solution, "小学乘法。")
 	ctx, cancel := context.WithCancel(t.Context())
