@@ -82,6 +82,11 @@ const (
 	MistakeArchivedReasonSourceCorrection = "source_correction"
 )
 
+// MistakeSourceCorrectionArchived 判断来源纠正是否已撤回这条错题；读取投影不恢复旧复习状态。
+func MistakeSourceCorrectionArchived(status, archivedReason string) bool {
+	return status == StatusArchived && archivedReason == MistakeArchivedReasonSourceCorrection
+}
+
 // MistakeArchiveSnapshot 保留最近一次归档/恢复的审计事实。当前归档态字段只在
 // status=archived 时非空；恢复后清空当前字段，但保留本快照用于审计与迟到命令去重。
 type MistakeArchiveSnapshot struct {

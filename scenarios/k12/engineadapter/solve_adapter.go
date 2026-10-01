@@ -222,6 +222,18 @@ func solveGenerationFromMetadata(version string, metadata map[string]string) *us
 	if version == "" {
 		return nil
 	}
+	// 本机精确求值没有模型教学候选，沿用本地讲法；已有候选或审计信息仍按原合同核对。
+	if metadata["solve_evidence"] == "numeric_exec" {
+		switch metadata["solve_mode"] {
+		case "deterministic_arithmetic", "deterministic_linear_equation", "deterministic_elementary_word":
+			_, hasCandidate := metadata["solve_parent_guide_json"]
+			_, hasAudit := metadata["solve_parent_guide_audit"]
+			_, hasSource := metadata["solve_parent_guide_source_digest"]
+			if !hasCandidate && !hasAudit && !hasSource {
+				return nil
+			}
+		}
+	}
 	generation := &usecase.SolveGeneration{
 		OutputVersion: version, GuideAudit: metadata["solve_parent_guide_audit"],
 		SourceSolutionDigest: metadata["solve_parent_guide_source_digest"],

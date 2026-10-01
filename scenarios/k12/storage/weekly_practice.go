@@ -829,6 +829,18 @@ func getWeeklyPlanVia(ctx context.Context, q weeklyPlanQuerier, agentName, where
 		items := plan.Tracks[trackIndex].Items
 		projected := make([]k12.WeeklyPracticeItem, 0, len(items))
 		for _, item := range items {
+			if item.SourceKind == "mistake" {
+				var sourceStatus, archivedReason string
+				sourceErr := q.QueryRowContext(ctx, `SELECT status,COALESCE(archived_reason,'')
+					FROM k12_mistakes WHERE agent_name=? AND record_id=?`,
+					agentName, item.SourceRef).Scan(&sourceStatus, &archivedReason)
+				if sourceErr != nil && !errors.Is(sourceErr, sql.ErrNoRows) {
+					return k12.WeeklyPracticePlan{}, sourceErr
+				}
+				if sourceErr == nil && k12.MistakeSourceCorrectionArchived(sourceStatus, archivedReason) {
+					continue
+				}
+			}
 			review, reviewErr := getMistakeReviewStateVia(
 				ctx, q, agentName, item.SourceRef,
 			)

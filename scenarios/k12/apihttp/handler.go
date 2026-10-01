@@ -1849,6 +1849,10 @@ func mistakeDTOWithReview(
 	review k12.MistakeReviewState,
 ) mistakeDTO {
 	reviewState := review.State
+	sourceCorrectionArchived := k12.MistakeSourceCorrectionArchived(r.Status, f.ArchivedReason)
+	if sourceCorrectionArchived {
+		reviewState = k12.MistakeReviewSuppressed
+	}
 	if reviewState == "" {
 		switch r.Status {
 		case k12.StatusMastered:
@@ -1866,8 +1870,8 @@ func mistakeDTOWithReview(
 		CreatedAt: r.CreatedAt, EntrySource: f.EntrySource,
 		ReviewState:       reviewState,
 		ParentConfirmedAt: f.ParentConfirmedAt,
-		Restorable: reviewState == k12.MistakeReviewSuppressed ||
-			k12.MistakeRestorable(r.Status, f),
+		Restorable: !sourceCorrectionArchived && (reviewState == k12.MistakeReviewSuppressed ||
+			k12.MistakeRestorable(r.Status, f)),
 	}
 	if r.Status == k12.StatusArchived {
 		dto.ArchivedReason = f.ArchivedReason

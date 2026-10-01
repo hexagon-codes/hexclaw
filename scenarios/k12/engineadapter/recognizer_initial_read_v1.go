@@ -100,8 +100,15 @@ func recognitionInitialReadProjectionV1(entry recognitionInitialReadEntryV1, tar
 		}
 		var shared, question string
 		_ = json.Unmarshal(read["shared_conditions"], &shared)
-		if json.Unmarshal(fields["question"], &question) != nil || (strings.TrimSpace(shared) != "" && !strings.Contains(question, shared)) {
+		if json.Unmarshal(fields["question"], &question) != nil {
 			return nil, fmt.Errorf("initial question does not retain its shared conditions")
+		}
+		if strings.TrimSpace(shared) != "" && !strings.Contains(question, shared) {
+			// 仅固定栏目完整配对时接受冒号排版差异，严格投影仍保存原题干。
+			view, paired := recognitionInitialReadArithmeticViewV1(usecase.RecognizedQuestion{Question: question}, entry)
+			if !paired || view.Question == question {
+				return nil, fmt.Errorf("initial question does not retain its shared conditions")
+			}
 		}
 		var err error
 		recognition, err = json.Marshal(fields)
@@ -267,15 +274,25 @@ func recognitionInitialReadArithmeticViewV1(question usecase.RecognizedQuestion,
 	if json.Unmarshal(entry.read, &observation) != nil {
 		return question, false
 	}
-	for _, label := range []string{"把下面每题的得数化简：", "计算下面各题，能简算的要简算："} {
-		if strings.HasPrefix(question.Question, label) {
-			// 解题 helper 接受标题，不等于首读已有独立冻结的共享条件证据。
-			if observation.SharedConditions != label {
-				return question, false
-			}
-			question.Question = strings.TrimSpace(strings.TrimPrefix(question.Question, label))
-			return question, true
+	for _, label := range []string{"直接写得数", "把下面每题的得数化简", "计算下面各题，能简算的要简算"} {
+		if !strings.HasPrefix(question.Question, label) {
+			continue
 		}
+		remaining := strings.TrimPrefix(question.Question, label)
+		switch {
+		case strings.HasPrefix(remaining, "："):
+			remaining = strings.TrimPrefix(remaining, "：")
+		case strings.HasPrefix(remaining, ":"):
+			remaining = strings.TrimPrefix(remaining, ":")
+		default:
+			return question, false
+		}
+		// 同名共享栏目只能带一个末尾冒号，附加条件不能作为印刷指令去除。
+		if (observation.SharedConditions != label && observation.SharedConditions != label+"：" && observation.SharedConditions != label+":") || strings.HasPrefix(remaining, "：") || strings.HasPrefix(remaining, ":") {
+			return question, false
+		}
+		question.Question = strings.TrimSpace(remaining)
+		return question, true
 	}
 	return question, true
 }
