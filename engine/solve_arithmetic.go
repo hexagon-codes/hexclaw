@@ -91,6 +91,8 @@ func unwrapSimplestFractionRequest(problem string) (string, bool) {
 
 func normalizeTrivialArithmetic(problem string) (expr, display string, ok bool) {
 	s := strings.TrimSpace(problem)
+	// 这一固定印刷指令只要求计算结果化简；原题仍保留，后续只解析完整算式。
+	s = strings.TrimSpace(strings.TrimPrefix(s, "把下面每题的得数化简："))
 	if s == "" || len(s) > 256 {
 		return "", "", false
 	}

@@ -257,7 +257,16 @@ func (o *SolveSkill) Execute(ctx context.Context, args map[string]any) (*skill.R
 	// P0.5 复杂度 triage：调用方未显式指定力度时，按题目复杂度自适应——难题自动上 method_diversity
 	// 加交叉校验，简单题（单步算术）直接作答、省去校验子 Agent 的额外一次调用（桌面延迟优先，
 	// "默认轻、按需重"）。显式传 method_diversity/self_consistency 即视为调用方接管、不再自动 triage。
-	complexity := assessComplexity(problem)
+	complexityProblem := problem
+	if outputVersion == solveWithParentGuideV1 {
+		// 联合讲法已限定当前评估目标；唯一编号可位于共享条件之后，只从复杂度副本排除。
+		complexityProblem = complexityProblemStem(problem)
+		markerInput := complexityMathMarkerInput(complexityProblem)
+		if markers := triageMultiPart.FindAllStringIndex(markerInput, -1); len(markers) == 1 {
+			complexityProblem = markerInput[:markers[0][0]] + markerInput[markers[0][1]:]
+		}
+	}
+	complexity := assessComplexity(complexityProblem)
 	if auto && complexity == complexityHard {
 		methodDiversity = true
 	}
@@ -825,6 +834,7 @@ Use Unicode mathematical symbols throughout (×÷√≤≥, fractions such as a/
 Decision rules:
 - CORRECT is yes only when the final answer and every explicitly written step are correct.
 - FINAL_ANSWER_CORRECT judges only whether the final result, including required units, matches the correct answer, regardless of intermediate work.
+- Apply only the answer-format requirements stated in the problem. For fraction simplification, an improper fraction in lowest terms is valid unless the problem explicitly requires a mixed number.
 - If the final answer is correct but the work contains a clear process error, output CORRECT: no and FINAL_ANSWER_CORRECT: yes, and provide the first incorrect step and misconception.
 
 Output exactly five lines in the following format:
@@ -1452,7 +1462,13 @@ func complexityProblemStem(problem string) string {
 			if strings.TrimSpace(label) != "" && !strings.ContainsAny(label, "\r\n") {
 				stem := strings.TrimSpace(p[:index])
 				// 单题后的印刷提示与完整例解是来源上下文，不增加原题复杂度；实际模型输入保持完整。
-				for _, marker := range []string{"\n印刷提示：", "\n印刷演示：", "\n印刷说明：", "印刷示例："} {
+				// 加粗形式只接纳完整标签，保留各标签原有的行首或行内边界。
+				for _, marker := range []string{
+					"\n印刷提示：", "\n印刷演示：", "\n印刷说明：", "印刷示例：",
+					"\n图示标签：", "\n印刷计算过程：", "\n印刷约分标记：",
+					"\n**印刷提示：**", "\n**印刷演示：**", "\n**印刷说明：**", "**印刷示例：**",
+					"\n**图示标签：**", "\n**印刷计算过程：**", "\n**印刷约分标记：**",
+				} {
 					if printed := strings.Index(stem, marker); printed >= 0 && strings.TrimSpace(stem[:printed]) != "" {
 						stem = strings.TrimSpace(stem[:printed])
 					}

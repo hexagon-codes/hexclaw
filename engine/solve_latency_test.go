@@ -12,6 +12,21 @@ const numberedPaperProblem = "环保小组用回收的包装纸做纸花，做�
 const paperScope = "\n\nFor this request, solve or assess only subproblem （1）. Use the shared material as context; do not answer the other subproblems."
 const paperTextbook = "\n\nVerified textbook evidence (use it only to constrain the solution and grading; it is not the student's answer; do not expose internal source identifiers). Respond in Chinese:\n# 分数乘法\n（1）做2朵花需要用多少张纸？\n（2）做8朵花需要用多少张纸？\n讨论一下：分数乘整数，怎样计算？\n分数乘整数，用分子乘整数的积作分子，分母不变。能约分的可先约分，再计算。"
 
+const printedPaperProblem = `环保小组用回收的包装纸做纸花，做一朵花需要用 (3)/(8) 张纸。
+
+（1）做2朵花需要用多少张纸？
+
+做2朵花需要2个 (3)/(8) 张，可以直接用乘法计算。
+
+(3)/(8)×2=\underline{\qquad}
+
+图示标签：3 个 (1)/(8) 张；3 个 (1)/(8) 张；(3×2) 个 (1)/(8) 张。
+
+印刷计算过程：
+(3)/(8)×2=(3)/(8)+(3)/(8)=(3+3)/(8)=(3×2)/(8)=(6)/(8)=(3)/(4)
+
+印刷约分标记：分子 6 约为 3，分母 8 约为 4。`
+
 // 附加资料留给模型使用，但不能把一道普通题变成需要多种解法的难题。
 func TestSolveComplexityUsesCurrentProblem(t *testing.T) {
 	for _, tc := range []struct{ name, problem, answer string }{
@@ -27,6 +42,28 @@ func TestSolveComplexityUsesCurrentProblem(t *testing.T) {
 印刷演示：(3)/(8)×2=(3)/(8)+(3)/(8)=(3+3)/(8)=(3×2)/(8)=(6)/(8)=(3)/(4)。` + paperScope + paperTextbook, "3/4张纸"},
 		{"selected-inline-printed-example-first", numberedPaperProblem + `做 2 朵花需要 2 个 (3)/(8) 张，可以直接用乘法计算。(3)/(8)×2=\underline{\qquad}。印刷示例：(3)/(8)×2=(3)/(8)+(3)/(8)=(3+3)/(8)=(3×2)/(8)=(6)/(8)=(3)/(4)。` + paperScope + paperTextbook, "3/4张纸"},
 		{"selected-bare-numerator-denominator", numberedPaperProblem + "\n3/(8)×2=3/4" + paperScope + paperTextbook, "3/4张纸"},
+		{"selected-actual-printed-context-first", printedPaperProblem + "\n\nFor this request, solve or assess only subproblem 1. Use the shared material as context; do not answer the other subproblems." + paperTextbook, "3/4张纸"},
+		{"selected-actual-printed-context-second", "环保小组用回收的包装纸做纸花，做一朵花需要用 (3)/(8) 张纸。\n\n（2）做8朵花需要用多少张纸？\n\n印刷计算过程：\n(3)/(8)×8=(3×8)/(8)=3\n\n印刷约分标记：分子中的 8 和分母 8 分别约为 1。\n\nFor this request, solve or assess only subproblem 2. Use the shared material as context; do not answer the other subproblems." + paperTextbook, "3张纸"},
+		{"selected-actual-markdown-context-first", `环保小组用回收的包装纸做纸花，做一朵花需要用 $\frac{3}{8}$ 张纸。
+
+（1）做2朵花需要用多少张纸？
+
+**印刷提示：**做2朵花需要2个 $\frac{3}{8}$ 张，可以直接用乘法计算。
+
+$$\frac{3}{8}\times2=\underline{\qquad}$$
+
+**图示标签：**3个 $\frac{1}{8}$ 张；3个 $\frac{1}{8}$ 张；$(3\times2)$ 个 $\frac{1}{8}$ 张。
+
+**印刷计算过程：**
+$$\frac{3}{8}\times2=\frac{3}{8}+\frac{3}{8}=\frac{3+3}{8}=\frac{3\times2}{8}=\frac{6}{8}=\frac{3}{4}$$` + paperScope + paperTextbook, "3/4张纸"},
+		{"selected-actual-markdown-context-second", `环保小组用回收的包装纸做纸花，做一朵花需要用 $\frac{3}{8}$ 张纸。
+
+（2）做8朵花需要用多少张纸？
+
+**印刷计算过程：**
+$$\frac{3}{8}\times8=\frac{3\times8}{8}=3$$
+
+印刷约分标记将分子中的8和分母8分别约为1。` + "\n\nFor this request, solve or assess only subproblem （2）. Use the shared material as context; do not answer the other subproblems." + paperTextbook, "3张纸"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			exec := &solveExec{
@@ -51,9 +88,87 @@ func TestSolveComplexityUsesCurrentProblem(t *testing.T) {
 			}
 		})
 	}
+	for _, tc := range []struct{ name, problem, solution, answer string }{
+		{"single-target-actual-inline-number", `环保小组用回收的包装纸做纸花，做一朵花需要用 $\frac{3}{8}$ 张纸。（1）做 2 朵花需要用多少张纸？`, "3/8×2=6/8=3/4。\n答案：3/4张纸", "3/4张纸"},
+		{"single-target-actual-leading-number", "（2）做 8 朵花需要用多少张纸？", "3/8×8=24/8=3。\n答案：3张纸", "3张纸"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			guide := map[string]any{
+				"answer":                   tc.answer,
+				"full_solution_steps":      []string{tc.solution},
+				"grade_level_method":       "分数乘整数，把分子乘花朵数量，再约分。",
+				"likely_mistakes":          []string{"不能把每朵用纸量与花朵数相加；应把每朵用纸量乘花朵数。"},
+				"parent_teaching_sequence": []string{"先确认每朵用纸量与花朵数，再列乘法算式。", tc.solution},
+				"follow_up_questions":      []string{"如何用相同加数相加核对乘法？"},
+				"checking_method":          "把每朵用纸量按花朵数相加，与乘法结果核对。",
+			}
+			raw, err := json.Marshal(map[string]any{"schema": jointGuideVersion, "solution": tc.solution, "parent_guide": guide})
+			if err != nil {
+				t.Fatal(err)
+			}
+			audit := jointGuideAudit(tc.solution, "IN_SCOPE")
+			for _, field := range audit["fields"].([]map[string]any) {
+				field["reason"] = "该字段与当前单题的分数乘法步骤一致。"
+			}
+			audits, err := json.Marshal([]map[string]any{audit})
+			if err != nil {
+				t.Fatal(err)
+			}
+			exec := &solveExec{
+				solverOuts:     []string{string(raw), string(raw)},
+				verifierOut:    "VERDICT: AGREE\nPROCESS: VALID\nCOMPUTED: " + tc.answer + "\nPARENT_GUIDE_AUDITS: " + string(audits),
+				verifierStdout: "COMPUTED: " + tc.answer + "\n",
+			}
+			problem := tc.problem + paperTextbook
+			args := map[string]any{
+				"problem": problem, "solve_output_version": jointGuideVersion,
+				"parent_teaching_contract": "用分数乘整数解释当前一道题，并保留单位。",
+			}
+			result, err := NewSolveSkill(exec.fn, nil).Execute(t.Context(), args)
+			if exec.solverCalls() != 1 || len(exec.specs) != 2 || !exec.has(verifierAgentName) {
+				t.Fatalf("single-target guide needs one solver and one verifier: %v", exec.agents())
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Metadata["solve_evidence"] != "numeric_exec" || result.Metadata["solve_parent_guide_audit"] != "VALID" {
+				t.Fatalf("independent verification or guide audit was lost: %v", result.Metadata)
+			}
+			if args["problem"] != problem {
+				t.Fatal("classification changed the original problem")
+			}
+			for _, spec := range exec.specs {
+				if !strings.Contains(spec.Task, problem) {
+					t.Fatalf("%s lost the original problem or source", spec.Agent)
+				}
+			}
+			if assessComplexity(problem) != complexityHard {
+				t.Fatal("ordinary output without a fixed scope lost its conservative classification")
+			}
+		})
+	}
 }
 
 func TestSolveComplexityPreservesHardQuestionsAndExplicitSettings(t *testing.T) {
+	t.Run("single-target-multiple-numbers", func(t *testing.T) {
+		const solution = "7盒每盒6张和3盒每盒14张都是42张。\n答案：42张"
+		raw, _ := jointGuideJSON(t, solution, "用乘法分别计算并比较张数。")
+		exec := &solveExec{
+			solverOuts:     []string{raw, raw},
+			verifierOut:    jointGuideJudgment(t, "AGREE", "VALID", jointGuideAudit(solution, "IN_SCOPE")),
+			verifierStdout: "COMPUTED: 42张\n",
+		}
+		args := jointGuideArgs()
+		delete(args, "self_consistency")
+		args["problem"] = "（1）每盒6张卡片，7盒有多少张？\n（2）每盒14张卡片，3盒合计是否等于第一问？"
+		_, err := NewSolveSkill(exec.fn, nil).Execute(t.Context(), args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if exec.solverCalls() != 2 || len(exec.specs) != 3 || !exec.has(verifierAgentName) {
+			t.Fatalf("multiple numbered questions lost method diversity: %v", exec.agents())
+		}
+	})
 	for _, problem := range []string{
 		"每朵花用3/8张纸。（1）做2朵花需要多少张纸？（2）做8朵花需要多少张纸？",
 		"每朵花用3/8张纸。\n（1）做2朵花需要多少张纸？\n（2）做8朵花需要多少张纸？",
@@ -62,6 +177,7 @@ func TestSolveComplexityPreservesHardQuestionsAndExplicitSettings(t *testing.T) 
 		"每朵花用3/8张纸。\n（2）做2朵花需要多少张纸？",
 		"每朵花用3/8张纸。（1）做2朵花需要多少张纸？",
 		"（1）讨论一下：分数乘整数，怎样计算？",
+		"（1）讨论一下：分数乘整数，怎样计算？\n\n印刷计算过程：3/8×2=3/4。\n印刷约分标记：分子6和分母8同时除以2。",
 		"求证：三角形内角和等于180度。",
 		"学校准备组织六年级学生参加环保活动。第一小组收集了一批包装纸，每张纸可以制作八朵大小相同的纸花，每朵纸花用掉整张纸的八分之一。第二小组制作的纸花数量是第一小组的两倍，第三小组比第二小组少做十六朵。最后三个小组一共完成了八十朵纸花，过程中没有浪费包装纸，每个小组用纸都由公共仓库统一领用。第一小组一共用了多少张包装纸？",
 	} {
