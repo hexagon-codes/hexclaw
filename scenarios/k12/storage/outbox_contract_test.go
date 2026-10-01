@@ -135,6 +135,77 @@ func TestOutbox_DeadLetterAfterMaxAttempts(t *testing.T) {
 	}
 }
 
+func TestOutbox_ExplicitDeadEventRecovery(t *testing.T) {
+	for _, retryFails := range []bool{false, true} {
+		t.Run(map[bool]string{false: "missing_consumer_only", true: "failed_recovery_stays_dead"}[retryFails], func(t *testing.T) {
+			s, db := setup(t)
+			ctx := context.Background()
+			completed := &countingConsumer{name: "already-consumed"}
+			missing := &countingConsumer{name: "missing-consumer", fail: true}
+			d := k12storage.NewDispatcher(s, completed, missing)
+			for _, question := range []string{"6÷2=?", "7×8=?"} {
+				if _, err := s.Put(ctx, newMistake(t, "mingming", "s1", question)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for i := 0; i < k12storage.DispatcherMaxAttempts; i++ {
+				if err := d.ProcessPending(ctx); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, err := k12storage.DeadEvents(ctx, db, 10)
+			if err != nil || len(before) != 2 || len(completed.handled) != 2 {
+				t.Fatalf("two dead events must retain the completed consumer: %+v, err=%v", before, err)
+			}
+			missing.fail = retryFails
+			if err := d.ProcessDeadEvent(ctx, before[0].EventID); err != nil {
+				t.Fatal(err)
+			}
+			var status, lastError string
+			var attempts int
+			if err := db.QueryRow(`SELECT status,attempts,last_error FROM outbox_events WHERE event_id=?`, before[0].EventID).Scan(&status, &attempts, &lastError); err != nil {
+				t.Fatal(err)
+			}
+			if len(completed.handled) != 2 {
+				t.Fatal("recovery must not repeat a completed consumer")
+			}
+			if retryFails {
+				if status != k12storage.OutboxDead || attempts != k12storage.DispatcherMaxAttempts+1 || lastError == "" || len(missing.handled) != 0 {
+					t.Fatalf("failed recovery must retain its evidence: status=%s attempts=%d error=%q", status, attempts, lastError)
+				}
+			} else {
+				if status != k12storage.OutboxDelivered || attempts != before[0].Attempts || lastError != before[0].LastError || len(missing.handled) != 1 {
+					t.Fatalf("successful recovery must preserve old attempts and error: status=%s attempts=%d error=%q", status, attempts, lastError)
+				}
+				// 重建投递器后再次请求同一事件，既有持久消费记录仍阻止重复处理。
+				restarted := k12storage.NewDispatcher(s, completed, missing)
+				if err := restarted.ProcessDeadEvent(ctx, before[0].EventID); err != nil {
+					t.Fatal(err)
+				}
+				if len(missing.handled) != 1 || len(completed.handled) != 2 {
+					t.Fatal("delivered recovery must remain idempotent after restart")
+				}
+			}
+			remaining, err := k12storage.DeadEvents(ctx, db, 10)
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, ev := range remaining {
+				if ev.EventID == before[1].EventID {
+					found = true
+					if ev != before[1] {
+						t.Fatalf("unselected dead event changed: before=%+v after=%+v", before[1], ev)
+					}
+				}
+			}
+			if !found {
+				t.Fatal("unselected dead event must remain dead")
+			}
+		})
+	}
+}
+
 // TestOutbox_ManualVsPhotoNoteParity 学情消费者措辞契约由 usecase.InsightsConsumer 测试钉住；
 // 此处钉 payload 事实：entry_source 与 created 随事件透出。
 func TestOutbox_PayloadFacts(t *testing.T) {

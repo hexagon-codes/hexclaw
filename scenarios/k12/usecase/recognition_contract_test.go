@@ -958,3 +958,67 @@ func TestRecognitionSourceReadingsMatch_IndependentCompleteReview(t *testing.T) 
 		})
 	}
 }
+
+func TestRecognitionSourceReadingsMatch_CompleteAnswerFormatting(t *testing.T) {
+	const q13Question = `一个数的\(\frac{3}{8}\)是24，求这个数？`
+	const q13ReviewQuestion = `一个数的 \(\frac{3}{8}\) 是24，求这个数？`
+	const q14Question = `8的\(\frac{1}{4}\)的\(\frac{4}{5}\)是多少？`
+	const q14ReviewQuestion = `8的 \(\frac{1}{4}\) 的 \(\frac{4}{5}\) 是多少？`
+	const q15Question = "一个周长是300米的长方形鱼塘，长是宽的2倍。如果每平方米产鱼2.25千克，一共产鱼多少千克？"
+	const q13 = `24÷\(\frac{3}{8}\)＝24×\(\frac{8}{3}\)` + "\n＝64\n答：这个数是64。"
+	const q13Review = `\(24\div\frac{3}{8}=24\times\frac{8}{3}\)` + "\n" + `\(=64\)` + "\n答：这个数是64。"
+	const q14 = `8×\(\frac{1}{4}\)×\(\frac{4}{5}\)` + "\n" + `＝2×\(\frac{4}{5}\)` + "\n" +
+		`＝\(\frac{8}{5}\)＝1\(\frac{3}{5}\)` + "\n" + `答：是1\(\frac{3}{5}\)。`
+	const q14Review = `\(8\times\frac{1}{4}\times\frac{4}{5}\)` + "\n" + `\(=2\times\frac{4}{5}\)` + "\n" +
+		`\(=\frac{8}{5}=1\frac{3}{5}\)` + "\n" + `答：是\(1\frac{3}{5}\)。`
+	const q15 = `\(300\div2\div2=50\,(m)\)` + "\n" + `\(50\times2=100\,(m)\)` + "\n" +
+		`\(50\times100=5000\,(m^2)\)` + "\n" + `\(5000\times2.25=11250\,(kg)\)` + "\n答：一共产鱼11250千克。"
+	makeRead := func(question, answer string) RecognizedQuestion {
+		return RecognizedQuestion{Question: question, RawTranscription: question, Subject: "数学",
+			AnswerState: AnswerStatePresent, StudentAnswer: answer, AnswerRawTranscription: answer,
+			RecognitionConfidence: float64Ptr(.99)}
+	}
+	for _, tt := range []struct {
+		name, question, reviewQuestion, primary, review string
+		wantAnswer                                      bool
+	}{
+		{"Q13 equal width and wrappers", q13Question, q13ReviewQuestion, q13, q13Review, true},
+		{"Q14 equal width and wrappers", q14Question, q14ReviewQuestion, q14, q14Review, true},
+		{"Q15 complete erroneous work formatting agrees", q15Question, q15Question, q15, strings.ReplaceAll(q15, "=", "＝"), true},
+		{"Q16 complete erroneous work formatting agrees", sixNumberReviewSource, sixNumberReviewSource, sixNumberStudentWork, strings.ReplaceAll(sixNumberStudentWork, "=", "＝"), true},
+		{"changed intermediate value", q14Question, q14ReviewQuestion, q14, strings.Replace(q14Review, "=2", "=3", 1), false},
+		{"deleted calculation line", q14Question, q14ReviewQuestion, q14, strings.Replace(q14Review, `\(=2\times\frac{4}{5}\)`+"\n", "", 1), false},
+		{"reordered calculation lines", q14Question, q14ReviewQuestion, q14, `\(=2\times\frac{4}{5}\)` + "\n" + `\(8\times\frac{1}{4}\times\frac{4}{5}\)` + "\n" + `\(=\frac{8}{5}=1\frac{3}{5}\)` + "\n" + `答：是\(1\frac{3}{5}\)。`, false},
+		{"changed arithmetic operator", q13Question, q13ReviewQuestion, q13, strings.Replace(q13Review, `24\times`, `24\div`, 1), false},
+		{"bare fraction differs from mixed number", q14Question, q14Question, `1\(\frac{3}{5}\)`, "13/5", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			prior, review := makeRead(tt.question, tt.primary), makeRead(tt.reviewQuestion, tt.review)
+			beforePrior, _ := json.Marshal(prior)
+			beforeReview, _ := json.Marshal(review)
+			question, answer := RecognitionSourceReadingsMatch(prior, review)
+			if !question || answer != tt.wantAnswer {
+				t.Fatalf("source match = (%t,%t), want (true,%t)", question, answer, tt.wantAnswer)
+			}
+			combined := makeRead(tt.reviewQuestion, tt.review)
+			combined.AnswerEvidenceTranscriptions = []string{tt.primary, tt.review}
+			beforeCombined, _ := json.Marshal(combined)
+			got := EvaluateOCRConfirmationRisk(combined)
+			conflict := false
+			for _, reason := range got.ConfirmationReasons {
+				conflict = conflict || reason == OCRRiskEvidenceConflict
+			}
+			if conflict == tt.wantAnswer {
+				t.Fatalf("evidence conflict = %t, want %t; reasons=%v", conflict, !tt.wantAnswer, got.ConfirmationReasons)
+			}
+			afterPrior, _ := json.Marshal(prior)
+			afterReview, _ := json.Marshal(review)
+			afterCombined, _ := json.Marshal(combined)
+			if string(beforePrior) != string(afterPrior) || string(beforeReview) != string(afterReview) ||
+				string(beforeCombined) != string(afterCombined) ||
+				got.AnswerRawTranscription != tt.review || !reflect.DeepEqual(got.AnswerEvidenceTranscriptions, combined.AnswerEvidenceTranscriptions) {
+				t.Fatal("comparison changed original source bytes")
+			}
+		})
+	}
+}

@@ -281,7 +281,7 @@ func evidenceTranscriptionsConflict(transcription string, values []string, answe
 		value = strings.NewReplacer("²", "^2", "³", "^3", "^{2}", "^2", "^{3}", "^3").Replace(value)
 		value = strings.Join(strings.Fields(CanonicalPlainTextFallback(value)), "")
 		return strings.NewReplacer(
-			`\,`, "", "（", "(", "）", ")",
+			`\,`, "", "（", "(", "）", ")", "＝", "=",
 			"。", "", "；", "", "，", "", "：", "", "、", "", ";", "", ":", "",
 		).Replace(value)
 	}

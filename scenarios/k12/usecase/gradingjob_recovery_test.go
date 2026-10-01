@@ -329,6 +329,94 @@ func TestGradingRecovery_FailedRetryableReenqueued(t *testing.T) {
 	if rec.calls != 2 {
 		t.Fatalf("重试应恰好再调一次识别（首次失败+重试成功）, got %d", rec.calls)
 	}
+
+	for _, tc := range []struct {
+		name    string
+		elapsed int64
+		expired bool
+	}{
+		{name: "expired parent preserves known recognition failure", elapsed: 301, expired: true},
+		{name: "active parent retries known recognition failure", elapsed: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			now := time.Now().Unix()
+			dir := t.TempDir()
+			rec := &countingRecognizer{failures: 1, questions: []RecognizedQuestion{{
+				Question: "1+1=", Subject: "数学", StudentAnswer: "3",
+			}}}
+			d := recoveryDeps(t, rec, nil, &photoAnnotatorFake{})
+			d.Now = func() int64 { return now }
+			seedGradingImageTaskOwnerScopeForTest(t, d, "recover-known-failure")
+			photo := orchestratorPhotoRequest()
+			photo.TaskIntent = PhotoTaskCompletedHomework
+			o1 := newRecoverableOrchestrator(t, d, dir)
+			job, _, err := o1.StartPhotoGradingJob(ctx, StartPhotoGradingInput{
+				Photo: photo, SourceKind: "image_task", SourceKey: "recover-known-failure",
+				BudgetSnapshot:            gradingParentFrozenBudget(),
+				ParentAutomaticAttemptID:  "recover-known-failure:1",
+				ParentAutomaticDeadlineAt: now + 300,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			jobID := job.Record.RecordID
+			if _, err := o1.RunGradingJob(ctx, jobID); err == nil {
+				t.Fatal("initial recognition must fail")
+			}
+			before, err := d.GetGradingJob(ctx, "mingming", jobID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if before.Record.Status != k12.GradingStageFailedRetryable || !before.Fields.Retryable ||
+				before.Fields.FailureKind != "recognize_failed" || before.Fields.FailedStage != k12.GradingStageRecognizing ||
+				before.Fields.AttemptCount != 1 || before.Record.Version != 3 {
+				t.Fatalf("unexpected known-failure fixture: status=%s kind=%s stage=%s attempts=%d version=%d",
+					before.Record.Status, before.Fields.FailureKind, before.Fields.FailedStage,
+					before.Fields.AttemptCount, before.Record.Version)
+			}
+			beforeInvocations, err := d.Records.ListModelInvocations(ctx, "mingming", jobID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			now += tc.elapsed
+			o2 := newRecoverableOrchestrator(t, d, dir)
+			if _, err := o2.RecoverGradingJobs(ctx, []string{"mingming"}); err != nil {
+				t.Fatal(err)
+			}
+			idleCtx, cancel := context.WithTimeout(ctx, time.Second)
+			defer cancel()
+			if err := o2.WaitForIdle(idleCtx); err != nil {
+				t.Fatal(err)
+			}
+			after, err := d.GetGradingJob(ctx, "mingming", jobID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.expired {
+				// 对照原始持久视图，避免仅保留状态而悄悄覆盖原因、计数或版本。
+				if !reflect.DeepEqual(before, after) {
+					t.Errorf("expired known failure changed: status=%s kind=%s stage=%s attempts=%d version=%d",
+						after.Record.Status, after.Fields.FailureKind, after.Fields.FailedStage,
+						after.Fields.AttemptCount, after.Record.Version)
+				}
+				afterInvocations, err := d.Records.ListModelInvocations(ctx, "mingming", jobID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(beforeInvocations, afterInvocations) || rec.calls != 1 {
+					t.Fatalf("expired recovery changed model receipts or resent recognition: calls=%d", rec.calls)
+				}
+				return
+			}
+			if rec.calls != 2 || after.Record.Version <= before.Record.Version {
+				t.Fatalf("active window did not resume: calls=%d version=%d", rec.calls, after.Record.Version)
+			}
+			if after.Record.Status != k12.GradingStageCompleted {
+				t.Fatalf("active-window recovery stage=%s failure=%s, want completed", after.Record.Status, after.Fields.FailureKind)
+			}
+		})
+	}
 }
 
 // REG-BUG-20260724-015: if recognition facts were committed but the local

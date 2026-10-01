@@ -71,7 +71,16 @@ func (c ProblemAssetConsumer) correctedAssetPublication(ctx context.Context, sou
 	proof := k12.ProblemAssetVerification{AgentName: inv.AgentName, InvocationID: inv.InvocationID, InputDigest: inv.InputDigest,
 		ResultDigest: inv.ResultDigest, FactsDigest: version.FactsDigest, Kind: k12.ProblemAnswerDeterministic, Policy: "local-deterministic-v1"}
 	answer, answerJSON := solved.Solution, inv.ResultJSON
-	if inv.ExecutionKind != k12.GradingExecutionLocalDeterministic || inv.Operation != k12.GradingItemOperationSolve {
+	if inv.ExecutionKind == k12.GradingExecutionLocalDeterministic && inv.Operation == k12.GradingItemOperationSolve {
+		payload, _, _, err := decodeGroundedPhysicalPayload(inv.ResultJSON, nil)
+		var persisted SolveHomeworkResult
+		if err != nil || json.Unmarshal([]byte(payload), &persisted) != nil || persisted.Solution != answer ||
+			persisted.OutOfScope || persisted.Evidence.Verdict != VerdictAgree || persisted.Evidence.EvidenceType != EvidenceNumericExec {
+			return nil, k12storage.ErrProblemAssetEvidence
+		}
+		// 资产保存原平面解法；验证证明继续绑定完整成功回执。
+		answerJSON = payload
+	} else {
 		if inv.Operation != k12.GradingItemOperationSolveVerify || solved.Evidence.SolverOutputDigest == "" ||
 			solved.Evidence.VerificationInputDigest == "" || solved.Evidence.VerificationRunID == "" {
 			return nil, nil

@@ -143,6 +143,36 @@ func (d *Dispatcher) ProcessPending(ctx context.Context) error {
 	}
 }
 
+// ProcessDeadEvent 仅补投指定的 dead 事件，沿用消费去重与失败记账。
+// 已 delivered 的请求为幂等空操作；pending 不经此入口消费。
+// 成功仍保留旧 attempts/last_error；业务失败由事件状态反映，调用方须读回核对。
+func (d *Dispatcher) ProcessDeadEvent(ctx context.Context, eventID string) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-d.processGate:
+	}
+	defer func() { d.processGate <- struct{}{} }()
+
+	var event OutboxEvent
+	if err := d.db.QueryRowContext(ctx, `SELECT event_id, agent_name, aggregate_id, event_type,
+        payload_version, payload_json, status, attempts, last_error, created_at, updated_at
+        FROM outbox_events WHERE event_id = ?`, eventID).Scan(
+		&event.EventID, &event.AgentName, &event.AggregateID, &event.EventType,
+		&event.PayloadVersion, &event.Payload, &event.Status, &event.Attempts,
+		&event.LastError, &event.CreatedAt, &event.UpdatedAt,
+	); err != nil {
+		return err
+	}
+	if event.Status == OutboxDelivered {
+		return nil
+	}
+	if event.Status != OutboxDead {
+		return fmt.Errorf("outbox event is not dead")
+	}
+	return d.deliverOne(ctx, event)
+}
+
 // deliverOne 逐消费者投递一条事件。消费失败只记账（attempts/last_error/dead），
 // 不向调用方冒泡业务错误——投影失败不撤销成功域写（§6.9），重试只补投影。
 func (d *Dispatcher) deliverOne(ctx context.Context, ev OutboxEvent) error {

@@ -425,6 +425,13 @@ func photoItemGradeRequest(req PhotoGradeRequest, q RecognizedQuestion) GradeReq
 		KnowledgePoints: photoGradeKnowledgePoints(q), PracticeReference: req.practiceReference,
 		SolveOutputVersion: req.SolveOutputVersion, ParentTeachingContract: req.ParentTeachingContract,
 	}
+	// 可读投影可能把上下分式写成斜杠；只在完整作答一致时保留原分式作为计算输入，
+	// 避免将除以分数误解为连续除法。识读、展示和持久身份仍使用原字段。
+	if input.Subject == "数学" && q.AnswerState == AnswerStatePresent &&
+		strings.TrimSpace(q.StudentAnswer) != "" && strings.Contains(q.AnswerRawTranscription, `\frac`) &&
+		!answerEvidenceTranscriptionsConflict(q.StudentAnswer, []string{q.StudentAnswer, q.AnswerRawTranscription}) {
+		input.StudentAnswer = q.AnswerRawTranscription
+	}
 	if req.practiceReference != nil {
 		input.Subject = req.practiceReference.Subject
 		input.Problem = req.practiceReference.QuestionMarkdown

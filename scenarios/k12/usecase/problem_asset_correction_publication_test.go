@@ -23,7 +23,7 @@ type correctedAssetFixture struct {
 }
 
 // 文件 SQLite 中保留真实作答、调用回执、纠正和 Outbox；仅求解及评分边界可控。
-func newCorrectedAssetFixture(t *testing.T, model, unknown, blank bool) correctedAssetFixture {
+func newCorrectedAssetFixture(t *testing.T, model, unknown, blank bool, grounded ...bool) correctedAssetFixture {
 	t.Helper()
 	ctx := context.Background()
 	seedSolver, grader := &feedbackReassessmentSolver{answer: "5"}, &assetReuseGrader{}
@@ -72,6 +72,20 @@ func newCorrectedAssetFixture(t *testing.T, model, unknown, blank bool) correcte
 	restarted := trackGradingOrchestrator(t, NewGradingOrchestrator(o.deps, orchestratorSnapshotResolver))
 	correctionConsumer := NewProblemAssetFeedbackConsumer(o.deps.Records)
 	correctionConsumer.SetGrading(restarted)
+	if len(grounded) > 0 && grounded[0] {
+		receipt := groundingRecoveryReceipt()
+		snapshot := GroundingSnapshot{AgentName: "mingming", LearnerID: "learner", Subject: "数学",
+			TextbookBindingID: receipt.TextbookBindingID, TextbookManifestID: receipt.TextbookManifestID,
+			DocumentID: receipt.DocumentID, DocumentGeneration: receipt.DocumentGeneration,
+			SourceDigest: receipt.SourceDigest, Edition: "人教版", Volume: "下册", VectorRevisionID: receipt.VectorRevisionID,
+			SegmentRefs: []string{receipt.ChunkID}, PageRefs: []k12.TextbookGroundingPageRef{{LogicalPage: receipt.LogicalPage,
+				PDFPage: receipt.PDFPage, SegmentRefs: []string{receipt.ChunkID}}}}
+		ctx, err = WithVerifiedGradingGrounding(ctx, snapshot, GroundingSnapshotResult{
+			Text: "本次批改实际消费的教材命中", Found: true, Receipts: []GroundingEvidenceReceipt{receipt}})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err = k12storage.NewDispatcher(o.deps.Records, correctionConsumer).ProcessPending(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -158,11 +172,12 @@ func (f correctedAssetFixture) learningSnapshot(t *testing.T) string {
 
 func TestProblemAssetCorrectionPublication(t *testing.T) {
 	for _, tc := range []struct {
-		name         string
-		model, blank bool
-	}{{name: "local_receipt"}, {name: "model_execution_receipts", model: true}, {name: "blank_solve_receipt", blank: true}} {
+		name                   string
+		model, blank, grounded bool
+	}{{name: "local_receipt"}, {name: "model_execution_receipts", model: true}, {name: "blank_solve_receipt", blank: true},
+		{name: "grounded_local_receipt", grounded: true}, {name: "grounded_blank_solve_receipt", blank: true, grounded: true}} {
 		t.Run(tc.name, func(t *testing.T) {
-			f := newCorrectedAssetFixture(t, tc.model, false, tc.blank)
+			f := newCorrectedAssetFixture(t, tc.model, false, tc.blank, tc.grounded)
 			ctx := context.Background()
 			s := f.o.deps.Records
 			before := f.learningSnapshot(t)
@@ -170,6 +185,22 @@ func TestProblemAssetCorrectionPublication(t *testing.T) {
 			publication := f.publication(t)
 			if publication.Verification.InvocationID != f.effective.Current.SolveInvocationID {
 				t.Fatal("publication lost fresh solve identity")
+			}
+			invocation, err := s.GetGradingItemInvocation(ctx, "mingming", publication.Verification.InvocationID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.grounded {
+				payload, _, enveloped, err := decodeGroundedPhysicalPayload(invocation.ResultJSON, nil)
+				var answer SolveHomeworkResult
+				if err != nil || !enveloped || publication.AnswerResultJSON != payload ||
+					json.Unmarshal([]byte(publication.AnswerResultJSON), &answer) != nil || answer.Solution != publication.Answer ||
+					answer.Evidence.Verdict != VerdictAgree || answer.Evidence.EvidenceType != EvidenceNumericExec {
+					t.Fatalf("grounded receipt did not export its original flat solve payload: enveloped=%v error=%v", enveloped, err)
+				}
+				if publication.Verification.ResultDigest != invocation.ResultDigest || publication.Verification.InputDigest != invocation.InputDigest {
+					t.Fatal("flat projection changed the original receipt proof")
+				}
 			}
 			if err := k12storage.NewDispatcher(s, f.consumer).ProcessPending(ctx); err != nil {
 				t.Fatal(err)
@@ -201,6 +232,10 @@ func TestProblemAssetCorrectionPublication(t *testing.T) {
 			}
 			if versions != 2 || events != 2 || f.solver.calls != calls || len(f.grader.answers) != grades {
 				t.Fatalf("replay added work: versions=%d events=%d solve=%d grade=%d", versions, events, f.solver.calls, len(f.grader.answers))
+			}
+			after, err := s.GetGradingItemInvocation(ctx, "mingming", invocation.InvocationID)
+			if err != nil || !reflect.DeepEqual(after, invocation) || got.AnswerResultJSON != publication.AnswerResultJSON {
+				t.Fatalf("publication or replay changed the successful receipt or flat asset payload: %v", err)
 			}
 		})
 	}

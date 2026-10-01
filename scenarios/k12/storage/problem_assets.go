@@ -146,8 +146,14 @@ func (s *Store) publishProblemAsset(ctx context.Context, p k12.ProblemAssetPubli
 	var generator *k12.GradingItemInvocation
 	switch p.Verification.Kind {
 	case k12.ProblemAnswerDeterministic:
-		if inv.ExecutionKind != k12.GradingExecutionLocalDeterministic || inv.Operation != k12.GradingItemOperationSolve || inv.ResultJSON != p.AnswerResultJSON {
+		if inv.ExecutionKind != k12.GradingExecutionLocalDeterministic || inv.Operation != k12.GradingItemOperationSolve {
 			return k12.ProblemAssetVersion{}, false, ErrProblemAssetEvidence
+		}
+		if inv.ResultJSON != p.AnswerResultJSON {
+			var payload json.RawMessage
+			if decodeAssetPhysicalResult(inv, &payload) != nil || string(payload) != p.AnswerResultJSON {
+				return k12.ProblemAssetVersion{}, false, ErrProblemAssetEvidence
+			}
 		}
 	case k12.ProblemAnswerModel:
 		if answerResult.Evidence.SolverOutputDigest != p.Verification.SolverOutputDigest ||

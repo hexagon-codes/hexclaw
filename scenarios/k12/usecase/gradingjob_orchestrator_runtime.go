@@ -1119,6 +1119,10 @@ func (o *GradingOrchestrator) RecoverGradingJobs(ctx context.Context, agents []s
 					v.Fields.FailureKind == gradingFailureInteractiveDeadlineExceeded {
 					continue // 不可重试残留（正常应已收敛 failed_terminal）：留人工处置
 				}
+				if parentAutomaticDeadlineExceeded(v.Fields, o.deps.now()) {
+					// 父自动窗口已过期时保留原失败信息，等待显式新窗口重试。
+					continue
+				}
 				l := o.jobLock(jobID)
 				l.Lock()
 				_, rerr := o.deps.RetryGradingJob(ctx, run.agentName, jobID)

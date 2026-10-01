@@ -381,8 +381,10 @@ func TestGradingRecoveryExpiredParentBeforeSendPersistsInteractiveDeadlineWithou
 	d.Now = func() int64 { return now }
 	dir := t.TempDir()
 	o1 := newRecoverableOrchestrator(t, d, dir)
+	photo := orchestratorPhotoRequest()
+	photo.TaskIntent = PhotoTaskCompletedHomework
 	view, created, err := o1.StartPhotoGradingJob(context.Background(), StartPhotoGradingInput{
-		Photo:                     orchestratorPhotoRequest(),
+		Photo:                     photo,
 		SourceKind:                "image_task",
 		SourceKey:                 "dispatch-expired-before-send:1",
 		BudgetSnapshot:            gradingParentFrozenBudget(),

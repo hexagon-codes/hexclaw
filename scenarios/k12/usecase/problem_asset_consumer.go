@@ -31,6 +31,14 @@ func (c ProblemAssetConsumer) Handle(ctx context.Context, ev k12storage.OutboxEv
 	if ev.PayloadVersion != 1 || json.Unmarshal([]byte(ev.Payload), &p) != nil || p.Verification.AgentName != ev.AgentName {
 		return fmt.Errorf("invalid problem asset preparation event")
 	}
+	if p.Verification.Kind == k12.ProblemAnswerDeterministic {
+		payload, _, _, err := decodeGroundedPhysicalPayload(p.AnswerResultJSON, nil)
+		if err != nil {
+			return err
+		}
+		// 资产保存平面解法，原事件与成功调用封套仍作为完整来源保留。
+		p.AnswerResultJSON = payload
+	}
 	_, _, err := c.Records.PublishAssessedProblemAsset(ctx, p, ev.AggregateID)
 	if errors.Is(err, k12storage.ErrProblemAssetUnavailable) {
 		// 已纠正的批改和已停用资产不接受迟到的后台发布。

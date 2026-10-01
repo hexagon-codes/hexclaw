@@ -45,6 +45,7 @@ func executeDurableSolveOperation(ctx context.Context, o *GradingOrchestrator, d
 	if err != nil {
 		return SolveHomeworkResult{}, "", err
 	}
+	allowBlankTemplate := q.AnswerState == AnswerStateBlank && strings.TrimSpace(q.StudentAnswer) == "" && strings.TrimSpace(req.StudentAnswer) == ""
 	adoption, priorErr := deps.Records.FindProblemAssetAdoption(ctx, owner, job.Record.RecordID, q.ProblemID, q.ConfirmedVersion)
 	if priorErr == nil {
 		if adoption.InputDigest != q.InputDigest {
@@ -54,7 +55,8 @@ func executeDurableSolveOperation(ctx context.Context, o *GradingOrchestrator, d
 		if err != nil {
 			return SolveHomeworkResult{}, "", err
 		}
-		if adoption.FactsDigest != identity.FactsDigest && !k12.EquivalentProblemAssetExpression(facts, v.Facts) {
+		if adoption.FactsDigest != identity.FactsDigest && !k12.EquivalentProblemAssetExpression(facts, v.Facts) &&
+			!k12.EquivalentProblemAssetSourceFormat(facts, v.Facts, allowBlankTemplate) {
 			return SolveHomeworkResult{}, "", k12storage.ErrProblemAssetConflict
 		}
 		if err := deps.Records.ValidateProblemAssetAdoption(ctx, owner, adoption.AdoptionID); err != nil {
@@ -98,6 +100,9 @@ func executeDurableSolveOperation(ctx context.Context, o *GradingOrchestrator, d
 	}
 	if !started {
 		v, lookupErr := deps.Records.FindExactProblemAsset(ctx, owner, facts)
+		if errors.Is(lookupErr, k12storage.ErrProblemAssetUnavailable) {
+			v, lookupErr = findSourceFormatProblemAsset(ctx, deps.Records, owner, facts, allowBlankTemplate)
+		}
 		if errors.Is(lookupErr, k12storage.ErrProblemAssetUnavailable) {
 			v, lookupErr = deps.Records.FindEquivalentProblemAsset(ctx, owner, facts)
 		}
@@ -175,6 +180,35 @@ func executeDurableSolveOperation(ctx context.Context, o *GradingOrchestrator, d
 		OwnerID: owner, PublicationID: "solve:" + invocationID, Facts: facts, Answer: assetAnswer, AnswerResultJSON: answerJSON, Verification: proof,
 	}
 	return solved, invocationID, nil
+}
+
+// findSourceFormatProblemAsset 只查询两个确定的历史排版精确键；完整原事实决定采用。
+// 多个有效版本指向不同资产时保留正常求解，不从答案或排序选择来源。
+func findSourceFormatProblemAsset(ctx context.Context, store *k12storage.Store, owner string,
+	facts k12.ProblemAssetFacts, allowBlankTemplate bool,
+) (k12.ProblemAssetVersion, error) {
+	var selected k12.ProblemAssetVersion
+	found := false
+	for _, candidate := range k12.ProblemAssetSourceFormatCandidates(facts, allowBlankTemplate) {
+		asset, err := store.FindExactProblemAsset(ctx, owner, candidate)
+		if errors.Is(err, k12storage.ErrProblemAssetUnavailable) {
+			continue
+		}
+		if err != nil {
+			return k12.ProblemAssetVersion{}, err
+		}
+		if !k12.EquivalentProblemAssetSourceFormat(facts, asset.Facts, allowBlankTemplate) {
+			return k12.ProblemAssetVersion{}, k12storage.ErrProblemAssetUnavailable
+		}
+		if found && (selected.AssetID != asset.AssetID || selected.Version != asset.Version || selected.FactsDigest != asset.FactsDigest) {
+			return k12.ProblemAssetVersion{}, k12storage.ErrProblemAssetUnavailable
+		}
+		selected, found = asset, true
+	}
+	if !found {
+		return k12.ProblemAssetVersion{}, k12storage.ErrProblemAssetUnavailable
+	}
+	return selected, nil
 }
 
 func adoptedSolveResult(v k12.ProblemAssetVersion, a k12.ProblemAssetAdoption) (SolveHomeworkResult, string, error) {

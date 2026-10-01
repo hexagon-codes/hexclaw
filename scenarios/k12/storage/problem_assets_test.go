@@ -2,9 +2,14 @@ package k12storage_test
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/hexagon-codes/hexclaw/scenario"
@@ -125,7 +130,7 @@ func TestProblemAssets_MigrationPreservesHistoricalAssessment(t *testing.T) {
 	}
 }
 
-func problemAssetPublication(t *testing.T, s *k12storage.Store) k12.ProblemAssetPublication {
+func problemAssetPublication(t *testing.T, s *k12storage.Store, grounded ...bool) k12.ProblemAssetPublication {
 	t.Helper()
 	ctx := context.Background()
 	job, attempt := seedItemLedgerFacts(t, s, "asset-publication")
@@ -138,7 +143,53 @@ func problemAssetPublication(t *testing.T, s *k12storage.Store) k12.ProblemAsset
 		t.Fatal(err)
 	}
 	raw := `{"Solution":"4","Evidence":{"Verdict":"agree","EvidenceType":"numeric_exec"}}`
-	if _, err := s.MarkGradingItemInvocationSucceeded(ctx, inv.AgentName, inv.InvocationID, "sha256:verified-four", raw); err != nil {
+	answerJSON, resultDigest := raw, "sha256:verified-four"
+	if len(grounded) > 0 && grounded[0] {
+		snapshot := struct {
+			AgentName, LearnerID, Subject, TextbookBindingID, TextbookManifestID, DocumentID string
+			DocumentGeneration                                                               int64
+			SourceDigest, Edition, Volume                                                    string
+			SegmentRefs                                                                      []string
+			PageRefs                                                                         []k12.TextbookGroundingPageRef
+			VectorRevisionID                                                                 string
+		}{"mingming", "learner", "数学", "binding", "manifest", "document", 1, strings.Repeat("a", 64), "人教版", "下册",
+			[]string{"chunk"}, []k12.TextbookGroundingPageRef{{LogicalPage: 1, PDFPage: 1, SegmentRefs: []string{"chunk"}}}, "revision"}
+		receipts := []struct {
+			TextbookBindingID  string `json:"textbook_binding_id"`
+			TextbookManifestID string `json:"textbook_manifest_id"`
+			DocumentID         string `json:"document_id"`
+			DocumentGeneration int64  `json:"document_generation"`
+			VectorRevisionID   string `json:"vector_revision_id"`
+			QueryDigest        string `json:"query_digest"`
+			ChunkID            string `json:"chunk_id"`
+			LogicalPage        int    `json:"logical_page"`
+			PDFPage            int    `json:"pdf_page"`
+			SourceDigest       string `json:"source_digest"`
+			CitationDigest     string `json:"citation_digest"`
+		}{{"binding", "manifest", "document", 1, "revision", "sha256:" + strings.Repeat("b", 64), "chunk", 1, 1,
+			strings.Repeat("a", 64), strings.Repeat("c", 64)}}
+		identity, err := json.Marshal(struct {
+			Snapshot any `json:"snapshot"`
+			Receipts any `json:"receipts"`
+		}{snapshot, receipts})
+		if err != nil {
+			t.Fatal(err)
+		}
+		identitySum := sha256.Sum256(append(append([]byte{0}, []byte("k12-grading-grounding-v1")...), append([]byte{0}, identity...)...))
+		envelope, err := json.Marshal(struct {
+			Schema    string          `json:"schema"`
+			Payload   json.RawMessage `json:"payload"`
+			Grounding any             `json:"grounding"`
+		}{"k12_grading_grounded_physical_v1", json.RawMessage(raw), map[string]any{
+			"snapshot": snapshot, "receipts": receipts, "identity_digest": "sha256:" + hex.EncodeToString(identitySum[:])}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw = string(envelope)
+		sum := sha256.Sum256(append([]byte{0}, envelope...))
+		resultDigest = "sha256:" + hex.EncodeToString(sum[:])
+	}
+	if _, err := s.MarkGradingItemInvocationSucceeded(ctx, inv.AgentName, inv.InvocationID, resultDigest, raw); err != nil {
 		t.Fatal(err)
 	}
 	facts := k12.ProblemAssetFacts{Subject: "数学", Stem: "2+2=?"}
@@ -146,9 +197,9 @@ func problemAssetPublication(t *testing.T, s *k12storage.Store) k12.ProblemAsset
 	if err != nil {
 		t.Fatal(err)
 	}
-	return k12.ProblemAssetPublication{OwnerID: "desktop-user", PublicationID: "publication-one", Facts: facts, Answer: "4", AnswerResultJSON: raw,
+	return k12.ProblemAssetPublication{OwnerID: "desktop-user", PublicationID: "publication-one", Facts: facts, Answer: "4", AnswerResultJSON: answerJSON,
 		Verification: k12.ProblemAssetVerification{AgentName: inv.AgentName, InvocationID: inv.InvocationID, InputDigest: inv.InputDigest,
-			ResultDigest: "sha256:verified-four", FactsDigest: identity.FactsDigest, Kind: k12.ProblemAnswerDeterministic, Policy: "deterministic-v1"}}
+			ResultDigest: resultDigest, FactsDigest: identity.FactsDigest, Kind: k12.ProblemAnswerDeterministic, Policy: "deterministic-v1"}}
 }
 
 func assetAdoption(v k12.ProblemAssetVersion, job string) k12.ProblemAssetAdoption {
@@ -268,15 +319,45 @@ func TestProblemAssets_ConflictsPreserveOriginal(t *testing.T) {
 }
 
 func TestProblemAssets_VerificationReceiptMustMatch(t *testing.T) {
-	s, _ := problemAssetStore(t)
-	ctx := context.Background()
-	p := problemAssetPublication(t, s)
-	p.Verification.ResultDigest = "sha256:unrelated-result"
-	if _, _, err := s.PublishProblemAsset(ctx, p); !errors.Is(err, k12storage.ErrProblemAssetEvidence) {
-		t.Fatalf("mismatched proof published: %v", err)
-	}
-	var count int
-	if err := s.DB().QueryRow(`SELECT count(*) FROM k12_problem_assets`).Scan(&count); err != nil || count != 0 {
-		t.Fatalf("failed publication leaked head: %d %v", count, err)
+	for _, grounded := range []bool{false, true} {
+		name := "flat"
+		if grounded {
+			name = "grounded_local"
+		}
+		t.Run(name, func(t *testing.T) {
+			s, _ := problemAssetStore(t)
+			ctx := context.Background()
+			p := problemAssetPublication(t, s, grounded)
+			before, err := s.GetGradingItemInvocation(ctx, p.Verification.AgentName, p.Verification.InvocationID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			bad := p
+			bad.Verification.ResultDigest = "sha256:unrelated-result"
+			if _, _, err := s.PublishProblemAsset(ctx, bad); !errors.Is(err, k12storage.ErrProblemAssetEvidence) {
+				t.Fatalf("mismatched proof published: %v", err)
+			}
+			bad = p
+			bad.AnswerResultJSON = `{"Solution":"4","Evidence":{"Verdict":"agree","EvidenceType":"numeric_exec"},"CurriculumUnmapped":true}`
+			if _, _, err := s.PublishProblemAsset(ctx, bad); !errors.Is(err, k12storage.ErrProblemAssetEvidence) {
+				t.Fatalf("same answer with unrelated payload published: %v", err)
+			}
+			var count int
+			if err := s.DB().QueryRow(`SELECT count(*) FROM k12_problem_assets`).Scan(&count); err != nil || count != 0 {
+				t.Fatalf("failed publication leaked head: %d %v", count, err)
+			}
+			version, created, err := s.PublishProblemAsset(ctx, p)
+			if err != nil || !created || version.AnswerResultJSON != p.AnswerResultJSON {
+				t.Fatalf("original flat payload not published: created=%v error=%v", created, err)
+			}
+			replay, created, err := s.PublishProblemAsset(ctx, p)
+			if err != nil || created || !reflect.DeepEqual(replay, version) {
+				t.Fatalf("publication replay changed the asset: created=%v error=%v", created, err)
+			}
+			after, err := s.GetGradingItemInvocation(ctx, p.Verification.AgentName, p.Verification.InvocationID)
+			if err != nil || !reflect.DeepEqual(after, before) {
+				t.Fatalf("publication changed original successful receipt: %v", err)
+			}
+		})
 	}
 }
