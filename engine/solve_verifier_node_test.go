@@ -130,23 +130,77 @@ func TestStandaloneVerificationIdentifiesProcessedResponseFailures(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
+	failedProgram := standaloneVerifierTestProgram("IN_SCOPE", true)
+	failedProgram.Program = "raise RuntimeError('controlled verification program failure')"
+	failedRaw, err := json.Marshal(failedProgram)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, tc := range []struct {
 		name, response, reason string
+		throughSolve           bool
 	}{
-		{"program-parse-failure", "not JSON", "verification program is invalid"},
-		{"missing-execution-receipt", string(raw), "verification execution receipt is invalid"},
+		{"program-parse-failure", "not JSON", "verification program is invalid", false},
+		{"missing-execution-receipt", string(raw), "verification execution receipt is invalid", false},
+		{"execution-failure-through-solve", string(failedRaw), "verification execution receipt is invalid", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			provider := &standaloneVerifierTestProvider{response: tc.response}
 			eng := newEngineWithProvider(t, provider)
 			eng.cfg.LLM.Tools.Enabled = "on"
 			registry := skill.NewRegistry()
-			// 无结构化执行报告的既有技能替身只用于回执失败边界。
-			if err := registry.Register(&syncChildToolPolicySkill{name: codeExecToolName}); err != nil {
+			var codeExec *standaloneVerifierCountingCodeExec
+			var executionSkill skill.Skill = &syncChildToolPolicySkill{name: codeExecToolName}
+			if tc.throughSolve {
+				// 模型边界受控，程序失败由真实沙箱执行产生。
+				sbCfg := sandbox.Config{Workspace: t.TempDir(), Timeout: 30, RequiredCapabilities: sandbox.UntrustedCodeIsolationCapabilities}
+				sb, err := sandbox.New(sbCfg)
+				if err != nil {
+					t.Fatal(err)
+				}
+				codeExec = &standaloneVerifierCountingCodeExec{CodeExecSkill: builtin.NewCodeExecSkill(sb, sbCfg)}
+				executionSkill = codeExec
+			}
+			if err := registry.Register(executionSkill); err != nil {
 				t.Fatal(err)
 			}
 			eng.SetToolCollector(NewToolCollector(registry, nil, 40))
 			eng.SetToolExecutor(NewToolExecutor(registry, nil))
+			if tc.throughSolve {
+				generation, _ := jointGuideJSON(t, "6×7=42张。\n答案：42张", "七个六相加。")
+				var calls int
+				var executionErr error
+				execute := func(ctx context.Context, spec SubAgentSpec) (SubAgentResult, error) {
+					calls++
+					if spec.Agent == solverAgentName {
+						return SubAgentResult{Output: generation}, nil
+					}
+					if spec.Agent != verifierAgentName {
+						t.Fatalf("unexpected separate call: %s", spec.Agent)
+					}
+					msg := &adapter.Message{ID: tc.name, Platform: adapter.PlatformAPI, UserID: "test-user",
+						Content: spec.Task, Metadata: map[string]string{"memory": "off", "knowledge": "off"}}
+					ApplySpecToMessage(msg, spec)
+					reply, err := eng.Process(ctx, msg)
+					executionErr = err
+					if reply != nil || !errors.Is(err, egress.ErrProviderResponseProcessed) || !strings.Contains(err.Error(), tc.reason) {
+						t.Fatalf("execution did not fail as expected: reply=%+v err=%v", reply, err)
+					}
+					return SubAgentResult{}, err
+				}
+				result, err := NewSolveSkill(execute, nil).Execute(t.Context(), jointGuideArgs())
+				if result != nil || !errors.Is(err, executionErr) || !errors.Is(err, egress.ErrProviderResponseProcessed) ||
+					!strings.Contains(err.Error(), tc.reason) || strings.Contains(err.Error(), "no valid independent audit") {
+					t.Fatalf("solve lost the original processed execution failure: result=%+v err=%v original=%v", result, err, executionErr)
+				}
+				provider.mu.Lock()
+				providerCalls := len(provider.requests)
+				provider.mu.Unlock()
+				if calls != 2 || providerCalls != 1 || codeExec.calls.Load() != 1 {
+					t.Fatalf("failed verification repeated calls: subagents=%d providers=%d executions=%d", calls, providerCalls, codeExec.calls.Load())
+				}
+				return
+			}
 			spec := verifierSpecWithSolution("每盒6张卡片，7盒共有多少张？", "6×7=42张。", "42张", "小学乘法")
 			ctx := context.WithValue(withSolveGrant(t.Context()), verificationInputKey{}, spec.verification)
 			ctx = context.WithValue(ctx, codeExecutionReceiptKey{}, &codeExecutionReceiptSink{inputDigest: executionInputDigest(spec.Task)})

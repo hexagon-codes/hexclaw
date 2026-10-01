@@ -317,7 +317,11 @@ func (o *SolveSkill) Execute(ctx context.Context, args map[string]any) (*skill.R
 	}
 
 	// 2) Verifier 阶段：code_exec 独立重算（fresh-context、只许 code_exec）。
-	verdict, computed, numericGrounded, verificationReceipt, guideAudits := o.verifySolutionWithGuides(childCtx, problem, primary.sols[0].output, primary.answer, constraint, guideCandidates(sols))
+	verdict, computed, numericGrounded, verificationReceipt, guideAudits, verifyErr := o.verifySolutionWithGuides(childCtx, problem, primary.sols[0].output, primary.answer, constraint, guideCandidates(sols))
+	if verifyErr != nil {
+		o.registry.Finish(solveRunID, subAgentStatusError, "", verifyErr.Error(), "")
+		return nil, fmt.Errorf("solve: verifier execution failed: %w", verifyErr)
+	}
 
 	// 2.5) 学段内重解：verifier 判解法超纲（out_of_scope）→ 强化约束重解一次，只用学过的方法。
 	// 仅在有约束、非批改、还有墙钟时尝试一次，避免无界重试。
@@ -334,7 +338,11 @@ func (o *SolveSkill) Execute(ctx context.Context, args map[string]any) (*skill.R
 			primary = answerGroup{answer: resolved.answer, sols: []solverSolution{resolved}}
 			groups = []answerGroup{primary}
 			// 重解后仍按原约束复验完整过程；答案正确但方法再次超纲不能放行。
-			verdict, computed, numericGrounded, verificationReceipt, guideAudits = o.verifySolutionWithGuides(childCtx, problem, resolved.output, primary.answer, constraint, guideCandidates([]solverSolution{resolved}))
+			verdict, computed, numericGrounded, verificationReceipt, guideAudits, verifyErr = o.verifySolutionWithGuides(childCtx, problem, resolved.output, primary.answer, constraint, guideCandidates([]solverSolution{resolved}))
+			if verifyErr != nil {
+				o.registry.Finish(solveRunID, subAgentStatusError, "", verifyErr.Error(), "")
+				return nil, fmt.Errorf("solve: verifier execution failed: %w", verifyErr)
+			}
 		}
 	}
 
@@ -626,18 +634,21 @@ func (o *SolveSkill) verifySolution(ctx context.Context, problem, solution, cand
 }
 
 func (o *SolveSkill) verifySolutionWithReceipt(ctx context.Context, problem, solution, candidate, constraint string) (v verifyVerdict, computed string, numericGrounded bool, receipt *CodeExecutionReceipt) {
-	v, computed, numericGrounded, receipt, _ = o.verifySolutionWithGuides(ctx, problem, solution, candidate, constraint, nil)
+	v, computed, numericGrounded, receipt, _, _ = o.verifySolutionWithGuides(ctx, problem, solution, candidate, constraint, nil)
 	return
 }
 
-func (o *SolveSkill) verifySolutionWithGuides(ctx context.Context, problem, solution, candidate, constraint string, guides []guideAuditCandidate) (v verifyVerdict, computed string, numericGrounded bool, receipt *CodeExecutionReceipt, audits []parentGuideAudit) {
-	if o.executeFunc == nil || ctx.Err() != nil {
-		return verdictUnverifiable, "", false, nil, nil
+func (o *SolveSkill) verifySolutionWithGuides(ctx context.Context, problem, solution, candidate, constraint string, guides []guideAuditCandidate) (v verifyVerdict, computed string, numericGrounded bool, receipt *CodeExecutionReceipt, audits []parentGuideAudit, err error) {
+	if err := ctx.Err(); err != nil {
+		return verdictUnverifiable, "", false, nil, nil, err
+	}
+	if o.executeFunc == nil {
+		return verdictUnverifiable, "", false, nil, nil, nil
 	}
 	spec := withParentGuideVerification(verifierSpecWithSolution(problem, solution, candidate, constraint), guides)
 	_, numericCandidate := numberSet(candidate)
 	_, quantityCandidate := parseAnswerQuantity(candidate)
-	result, usedSpec, _ := o.runValidatedResult(ctx, spec, func(result SubAgentResult, attempt SubAgentSpec) bool {
+	result, usedSpec, err := o.runValidatedResult(ctx, spec, func(result SubAgentResult, attempt SubAgentSpec) bool {
 		if !verdictParseable(result.Output) {
 			return false
 		}
@@ -650,8 +661,12 @@ func (o *SolveSkill) verifySolutionWithGuides(ctx context.Context, problem, solu
 		_, executed := result.ExecutionReceipt.computed(attempt.Task)
 		return executed
 	})
+	// 已处理响应后的执行失败与未知停止都保留原错误，不能退化为缺少指南审计。
+	if err != nil {
+		return verdictUnverifiable, "", false, nil, nil, err
+	}
 	if strings.TrimSpace(result.Output) == "" {
-		return verdictUnverifiable, "", false, nil, nil
+		return verdictUnverifiable, "", false, nil, nil, nil
 	}
 	verdict, computed := parseVerdict(result.Output)
 	actualComputed, executed := result.ExecutionReceipt.computed(usedSpec.Task)
@@ -685,7 +700,7 @@ func (o *SolveSkill) verifySolutionWithGuides(ctx context.Context, problem, solu
 	trace.L(ctx).Info("solve execution evidence evaluated", "input_digest", executionInputDigest(usedSpec.Task),
 		"executed", executed, "computed", computed, "candidate", candidate, "process", process,
 		"verdict", verdictString(verdict), "evidence", evidenceKind(numericGrounded))
-	return verdict, computed, numericGrounded, result.ExecutionReceipt, parentGuideAuditsFromOutput(result.Output)
+	return verdict, computed, numericGrounded, result.ExecutionReceipt, parentGuideAuditsFromOutput(result.Output), nil
 }
 
 // strictFormatReminder 在校验重试时附加，逼模型只吐固定格式。
@@ -1436,6 +1451,12 @@ func complexityProblemStem(problem string) string {
 			label := strings.TrimSuffix(scope, scopeSuffix)
 			if strings.TrimSpace(label) != "" && !strings.ContainsAny(label, "\r\n") {
 				stem := strings.TrimSpace(p[:index])
+				// 单题后的印刷提示与完整例解是来源上下文，不增加原题复杂度；实际模型输入保持完整。
+				for _, marker := range []string{"\n印刷提示：", "\n印刷演示：", "\n印刷说明：", "印刷示例："} {
+					if printed := strings.Index(stem, marker); printed >= 0 && strings.TrimSpace(stem[:printed]) != "" {
+						stem = strings.TrimSpace(stem[:printed])
+					}
+				}
 				markers := triageMultiPart.FindAllString(complexityMathMarkerInput(stem), -1)
 				// 已选单题的唯一行首编号不是多问，分数括号也不能当作题号。
 				if len(markers) == 1 && strings.Trim(markers[0], "()（）") == strings.Trim(strings.TrimSpace(label), "()（）") {

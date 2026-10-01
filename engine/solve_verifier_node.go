@@ -75,6 +75,7 @@ func verificationProgramPrompt(input *verificationInput) string {
 Return one JSON object only, with exactly these fields:
 {"program":"Python source", "scope":"IN_SCOPE or OUT_OF_SCOPE", "checks":[{"step":"one proposed step", "valid":true, "reason":"why this step is valid or invalid"}], "note":"brief conclusion"}.
 Independently build the correct calculation from the problem, without copying the candidate as a constant. Use exact fractions when appropriate. Compute each intermediate value in the program. End by printing exactly one line COMPUTED: <final value with the necessary unit>. Do not claim to have executed it: the application executes the program and compares its actual stdout.
+Python Fraction automatically normalizes its numerator and denominator. Preserve the original integer numerator and denominator separately when showing an unreduced intermediate step; never divide the already normalized Fraction numerator and denominator by the original common factor again.
 Audit EVERY reasoning step in the complete proposed solution. A correct final answer does not excuse an invalid equation or inference. Include a concrete reason for each check; if no solution was supplied, checks must be empty. Scope is OUT_OF_SCOPE if any proposed method exceeds the supplied curriculum. Retain the problem's actual unit. Never print a verdict or the candidate merely to make the comparison pass.
 ` + guideContract + string(raw)
 }

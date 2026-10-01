@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -380,12 +381,8 @@ func TestSolveJointGuideUnknownVerificationDoesNotInventAudit(t *testing.T) {
 		return SubAgentResult{}, context.DeadlineExceeded
 	}
 	result, err := NewSolveSkill(execute, nil).Execute(ctx, jointGuideArgs())
-	if err != nil {
-		t.Fatal(err)
-	}
-	jointGuideMetadata(t, result, "小学乘法。", jointGuideDigest(solution), "NOT_PROVIDED")
-	if calls != 2 || result.Metadata["solve_evidence"] == "numeric_exec" || result.Metadata["solve_primary_digest"] != "" {
-		t.Fatalf("unknown verification created an audit, proof or extra call: %d %v", calls, result.Metadata)
+	if result != nil || !errors.Is(err, context.Canceled) || calls != 2 {
+		t.Fatalf("unknown verification lost its error or created a result or extra call: calls=%d result=%+v err=%v", calls, result, err)
 	}
 }
 

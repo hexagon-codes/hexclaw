@@ -21,7 +21,11 @@ func TestSolveComplexityUsesCurrentProblem(t *testing.T) {
 		{"selected-numbered-first", numberedPaperProblem + "\n\nFor this request, solve or assess only subproblem 1. Use the shared material as context; do not answer the other subproblems." + paperTextbook, "3/4张纸"},
 		{"selected-numbered-second", "环保小组用回收的包装纸做纸花，做一朵花需要用 (3)/(8) 张纸。\n\n（2）做 8 朵花需要用多少张纸？\n\nFor this request, solve or assess only subproblem 2. Use the shared material as context; do not answer the other subproblems." + paperTextbook, "3张纸"},
 		{"selected-expression-denominator-second", "环保小组用回收的包装纸做纸花，做一朵花需要用 (3)/(8) 张纸。\n\n（2）做8朵花需要用多少张纸？\n\n(3)/(8)×8=(3×8)/(8)=3（印刷约分标记：分子中的8与分母8均约为1）。\n\nFor this request, solve or assess only subproblem 2. Use the shared material as context; do not answer the other subproblems." + paperTextbook, "3张纸"},
-		{"selected-expression-denominator-first", numberedPaperProblem + "\n(3+3)/(8)=(3×2)/(8)=3/4" + paperScope + paperTextbook, "3/4张纸"},
+		{"selected-expression-denominator-first", numberedPaperProblem + `
+印刷提示：做2朵需要2个(3)/(8)张纸。
+(3)/(8)×2=\underline{\qquad}
+印刷演示：(3)/(8)×2=(3)/(8)+(3)/(8)=(3+3)/(8)=(3×2)/(8)=(6)/(8)=(3)/(4)。` + paperScope + paperTextbook, "3/4张纸"},
+		{"selected-inline-printed-example-first", numberedPaperProblem + `做 2 朵花需要 2 个 (3)/(8) 张，可以直接用乘法计算。(3)/(8)×2=\underline{\qquad}。印刷示例：(3)/(8)×2=(3)/(8)+(3)/(8)=(3+3)/(8)=(3×2)/(8)=(6)/(8)=(3)/(4)。` + paperScope + paperTextbook, "3/4张纸"},
 		{"selected-bare-numerator-denominator", numberedPaperProblem + "\n3/(8)×2=3/4" + paperScope + paperTextbook, "3/4张纸"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
