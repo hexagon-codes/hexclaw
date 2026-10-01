@@ -512,7 +512,7 @@ func (o *GradingOrchestrator) runLoop(ctx context.Context, run *gradingRun, jobI
 			if automaticPhotoConfirmationSource(v.Fields.SourceKind) &&
 				v.Fields.ConfirmationState == k12.GradingConfirmationPending &&
 				(run.req.TaskIntent == PhotoTaskBlankWorksheet || run.req.TaskIntent == PhotoTaskCompletedHomework ||
-					!recognizedQuestionsRequireGuardianConfirmation(run.questions, run.req.TaskIntent)) {
+					!recognizedQuestionsRequireGuardianConfirmationForInitialReadMode(run.questions, run.req.TaskIntent, run.req.InitialReadMode)) {
 				if v, err = o.autoFreezeRecognition(ctx, run, v); err != nil {
 					return v, err
 				}
@@ -576,8 +576,12 @@ func recognizedQuestionsRequireGuardianConfirmation(
 	questions []RecognizedQuestion,
 	taskIntent PhotoTaskIntent,
 ) bool {
+	return recognizedQuestionsRequireGuardianConfirmationForInitialReadMode(questions, taskIntent, "")
+}
+
+func recognizedQuestionsRequireGuardianConfirmationForInitialReadMode(questions []RecognizedQuestion, taskIntent PhotoTaskIntent, initialReadMode string) bool {
 	for _, question := range questions {
-		if recognizedQuestionRequiresGuardianConfirmation(question, taskIntent) {
+		if recognizedQuestionRequiresGuardianConfirmationForInitialReadMode(question, taskIntent, initialReadMode) {
 			return true
 		}
 	}
@@ -587,9 +591,13 @@ func recognizedQuestionsRequireGuardianConfirmation(
 // 清晰题先冻结并按页面意图复用既有逐题账本；疑问题及其公共题干依赖组不执行。
 // 后续整页确认保留这些输入版本和回执，不重复调用模型。
 func clearWorksheetQuestionIDs(questions []RecognizedQuestion, taskIntent PhotoTaskIntent) map[string]bool {
+	return clearWorksheetQuestionIDsForInitialReadMode(questions, taskIntent, "")
+}
+
+func clearWorksheetQuestionIDsForInitialReadMode(questions []RecognizedQuestion, taskIntent PhotoTaskIntent, initialReadMode string) map[string]bool {
 	blocked := make(map[string]bool)
 	for _, q := range questions {
-		if recognizedQuestionRequiresGuardianConfirmation(q, taskIntent) {
+		if recognizedQuestionRequiresGuardianConfirmationForInitialReadMode(q, taskIntent, initialReadMode) {
 			blocked[q.ProblemID] = true
 			if q.ParentProblemID != "" {
 				blocked[q.ParentProblemID] = true
@@ -615,7 +623,7 @@ func (o *GradingOrchestrator) assessClearWorksheetQuestions(ctx context.Context,
 	default:
 		return fmt.Errorf("%w: unsupported frozen photo task intent %q", ErrInvalidInput, run.req.TaskIntent)
 	}
-	clear := clearWorksheetQuestionIDs(run.questions, run.req.TaskIntent)
+	clear := clearWorksheetQuestionIDsForInitialReadMode(run.questions, run.req.TaskIntent, run.req.InitialReadMode)
 	candidate := *run
 	candidate.questions = cloneRecognizedQuestions(run.questions)
 	for i := range candidate.questions {
@@ -633,7 +641,7 @@ func (o *GradingOrchestrator) assessClearWorksheetQuestions(ctx context.Context,
 	if candidate.anchored != nil {
 		candidate.anchored = mergeAnchorGeometry(candidate.questions, candidate.anchored)
 	}
-	if err := o.persistProblemAttemptFacts(ctx, run.agentName, job.Fields.SubmissionID, candidate.questions); err != nil {
+	if err := o.persistProblemAttemptFacts(ctx, run.agentName, job.Fields.SubmissionID, candidate.questions, run.req.InitialReadMode); err != nil {
 		return err
 	}
 	if err := o.persistRun(job.Record.RecordID, &candidate); err != nil {
@@ -641,7 +649,7 @@ func (o *GradingOrchestrator) assessClearWorksheetQuestions(ctx context.Context,
 	}
 	run.questions = candidate.questions
 	run.anchored = candidate.anchored
-	questions := RecognizedQuestionsForAssessment(candidate.questions)
+	questions := RecognizedQuestionsForAssessmentForInitialReadMode(candidate.questions, candidate.req.InitialReadMode)
 	req := candidate.req
 	practiceReferences := practiceQuestionReferences(req.PracticeReferences, req.PracticePaperSize, questions)
 	done := make(chan struct{})
@@ -674,10 +682,14 @@ func recognizedQuestionRequiresGuardianConfirmation(
 	question RecognizedQuestion,
 	taskIntent PhotoTaskIntent,
 ) bool {
+	return recognizedQuestionRequiresGuardianConfirmationForInitialReadMode(question, taskIntent, "")
+}
+
+func recognizedQuestionRequiresGuardianConfirmationForInitialReadMode(question RecognizedQuestion, taskIntent PhotoTaskIntent, initialReadMode string) bool {
 	if question.parentSourceUnclear {
 		return true
 	}
-	question = NormalizeRecognizedQuestion(question)
+	question = NormalizeRecognizedQuestionForInitialReadMode(question, initialReadMode)
 	if !question.ConfirmationRequired {
 		return false
 	}
@@ -714,7 +726,7 @@ func (o *GradingOrchestrator) autoFreezeRecognition(
 	candidate.anchored = cloneRecognizedQuestions(run.anchored)
 	candidate.req.SourceUncertaintyFinalized = true
 	for i := range candidate.questions {
-		q := NormalizeRecognizedQuestion(candidate.questions[i])
+		q := NormalizeRecognizedQuestionForInitialReadMode(candidate.questions[i], candidate.req.InitialReadMode)
 		if !CanonicalMarkdownValid(q.CanonicalMarkdown) ||
 			(q.AnswerState == AnswerStatePresent && !CanonicalMarkdownValid(q.AnswerCanonicalMarkdown)) {
 			return GradingJobView{}, fmt.Errorf("%w: invalid recognition canonical content", ErrInvalidInput)
@@ -733,7 +745,7 @@ func (o *GradingOrchestrator) autoFreezeRecognition(
 		confirmedFacts = candidate.anchored
 	}
 	if err := o.persistProblemAttemptFacts(
-		ctx, run.agentName, job.Fields.SubmissionID, confirmedFacts,
+		ctx, run.agentName, job.Fields.SubmissionID, confirmedFacts, run.req.InitialReadMode,
 	); err != nil {
 		return GradingJobView{}, fmt.Errorf("usecase: 自动冻结 Problem/Attempt: %w", err)
 	}
@@ -801,7 +813,7 @@ func (o *GradingOrchestrator) ConfirmAndRun(ctx context.Context, jobID string, c
 	if candidate.anchored != nil {
 		confirmedFacts = candidate.anchored
 	}
-	if err := o.persistProblemAttemptFacts(ctx, run.agentName, job.Fields.SubmissionID, confirmedFacts); err != nil {
+	if err := o.persistProblemAttemptFacts(ctx, run.agentName, job.Fields.SubmissionID, confirmedFacts, run.req.InitialReadMode); err != nil {
 		l.Unlock()
 		return GradingJobView{}, fmt.Errorf("usecase: 固化确认后的 Problem/Attempt: %w", err)
 	}
@@ -827,8 +839,8 @@ func (o *GradingOrchestrator) ConfirmAndRun(ctx context.Context, jobID string, c
 		}
 		practiceReferences := practiceQuestionReferences(run.req.PracticeReferences, run.req.PracticePaperSize, candidate.questions)
 		for i, q := range candidate.questions {
-			q = NormalizeRecognizedQuestion(q)
-			if recognizedQuestionRequiresGuardianConfirmation(q, candidate.req.TaskIntent) {
+			q = NormalizeRecognizedQuestionForInitialReadMode(q, candidate.req.InitialReadMode)
+			if recognizedQuestionRequiresGuardianConfirmationForInitialReadMode(q, candidate.req.TaskIntent, candidate.req.InitialReadMode) {
 				continue
 			}
 			itemReq := run.req
@@ -1280,7 +1292,7 @@ func (o *GradingOrchestrator) runRecognize(ctx context.Context, run *gradingRun,
 		}
 		return v, err
 	}
-	run.questions, err = NormalizeRecognizedProblems(job.Fields.SubmissionID, cloneRecognizedQuestions(questions))
+	run.questions, err = NormalizeRecognizedProblemsForInitialReadMode(job.Fields.SubmissionID, cloneRecognizedQuestions(questions), run.req.InitialReadMode)
 	if err != nil {
 		_, _ = o.deps.Records.MarkModelInvocationSucceeded(context.WithoutCancel(ctx), run.agentName,
 			invocation.InvocationID, modelInvocationResultDigest(questions), "")
@@ -1301,7 +1313,7 @@ func (o *GradingOrchestrator) runRecognize(ctx context.Context, run *gradingRun,
 				run.questions[i].ConfirmationReasons = append(
 					run.questions[i].ConfirmationReasons, OCRRiskLowConfidence,
 				)
-				run.questions[i] = NormalizeRecognizedQuestion(run.questions[i])
+				run.questions[i] = NormalizeRecognizedQuestionForInitialReadMode(run.questions[i], run.req.InitialReadMode)
 			}
 		}
 	}
@@ -1472,7 +1484,7 @@ func (o *GradingOrchestrator) persistRecognizedPhotoFacts(
 		slog.Info("K12 recognized facts persisted", "submission_id", submissionID, "elapsed_ms", time.Since(started).Milliseconds(), "question_count", len(run.questions), "succeeded", resultErr == nil)
 	}()
 	for i := range run.questions {
-		run.questions[i] = NormalizeRecognizedQuestion(run.questions[i])
+		run.questions[i] = NormalizeRecognizedQuestionForInitialReadMode(run.questions[i], run.req.InitialReadMode)
 		// 原始模型回执摘要保持不变；入库前才收敛非确定答案，raw 继续保留。
 		if run.questions[i].AnswerState == AnswerStateUnclear && run.questions[i].ConfirmedVersion == 0 {
 			run.questions[i].AnswerCanonicalMarkdown = ""
@@ -1498,7 +1510,7 @@ func (o *GradingOrchestrator) persistRecognizedPhotoFacts(
 	if o.deps.PageAssets == nil {
 		// Compatibility for embedded/test compositions and historical page-* facts.
 		// Production assembly always injects PageAssets.
-		return o.persistProblemAttemptFacts(ctx, run.agentName, submissionID, run.questions)
+		return o.persistProblemAttemptFacts(ctx, run.agentName, submissionID, run.questions, run.req.InitialReadMode)
 	}
 	release := o.acquirePageAssetLock(run.agentName, photoImageDigest(run.req.Image))
 	defer release()
@@ -1523,7 +1535,7 @@ func (o *GradingOrchestrator) persistRecognizedPhotoFacts(
 		previousPageIDs[i] = run.questions[i].PageAssetID
 		run.questions[i].PageAssetID = assetID
 	}
-	if err := o.persistProblemAttemptFacts(ctx, run.agentName, submissionID, run.questions); err != nil {
+	if err := o.persistProblemAttemptFacts(ctx, run.agentName, submissionID, run.questions, run.req.InitialReadMode); err != nil {
 		for i := range run.questions {
 			run.questions[i].PageAssetID = previousPageIDs[i]
 		}
@@ -1683,7 +1695,7 @@ func (o *GradingOrchestrator) startAnchorAsync(jobID string, run *gradingRun, sn
 		if run.anchored != nil {
 			facts = run.anchored
 		}
-		if err = o.persistProblemAttemptFacts(ctx, run.agentName, v.Fields.SubmissionID, facts); err == nil {
+		if err = o.persistProblemAttemptFacts(ctx, run.agentName, v.Fields.SubmissionID, facts, run.req.InitialReadMode); err == nil {
 			err = o.persistRun(jobID, run)
 		}
 		if err == nil {
@@ -1853,7 +1865,7 @@ func (o *GradingOrchestrator) runAssess(ctx context.Context, run *gradingRun, jo
 	// remains an unfrozen legacy deadline policy; this cutover is intentionally
 	// limited to the typed text application path so historical photo deadline and
 	// cancellation semantics do not change without their own migration contract.
-	assessmentQuestions := RecognizedQuestionsForAssessment(run.questions)
+	assessmentQuestions := RecognizedQuestionsForAssessmentForInitialReadMode(run.questions, run.req.InitialReadMode)
 	hasDurableItemIdentity := len(assessmentQuestions) > 0
 	for _, question := range assessmentQuestions {
 		if strings.TrimSpace(question.ProblemID) == "" ||

@@ -183,7 +183,7 @@ func (d Deps) gradeHomeworkPhotoWithAssessorInput(
 			return PhotoGradeResult{}, err
 		}
 	} else {
-		questions, err = NormalizeRecognizedProblems("photo-"+shortSHA1(req.Image), questions)
+		questions, err = NormalizeRecognizedProblemsForInitialReadMode("photo-"+shortSHA1(req.Image), questions, req.InitialReadMode)
 		if err != nil {
 			return PhotoGradeResult{}, err
 		}
@@ -222,7 +222,7 @@ func (d Deps) gradeHomeworkPhotoWithAssessorInput(
 	}
 	// 锚点阶段保留父题与所有子题的同序结构；只有在几何回位后，才丢弃不产生
 	// Attempt/Assessment 的公共父题并把公共题干组合到各子题评估副本。
-	questions = RecognizedQuestionsForAssessment(questions)
+	questions = RecognizedQuestionsForAssessmentForInitialReadMode(questions, req.InitialReadMode)
 	if len(questions) == 0 {
 		return PhotoGradeResult{}, fmt.Errorf("%w: 未识别到可作答的独立题目", ErrInvalidInput)
 	}
@@ -403,7 +403,7 @@ const practiceUnmatchedWarning = "This content cannot be uniquely matched to the
 // photoItemWithPracticeReference 在回执固化前绑定练习身份，保留识别事实。
 func photoItemWithPracticeReference(req PhotoGradeRequest, q RecognizedQuestion) PhotoGradeItem {
 	item := PhotoGradeItem{Recognized: q}
-	if req.SourceUncertaintyFinalized && recognizedQuestionRequiresGuardianConfirmation(q, req.TaskIntent) {
+	if req.SourceUncertaintyFinalized && recognizedQuestionRequiresGuardianConfirmationForInitialReadMode(q, req.TaskIntent, req.InitialReadMode) {
 		item.Status = PhotoAnswerUnclear
 		item.Warning = "Unable to reliably recognize this content. No answer or correctness judgment was produced."
 	}

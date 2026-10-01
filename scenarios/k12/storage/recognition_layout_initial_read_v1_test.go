@@ -225,51 +225,93 @@ func TestRecognitionInitialReadV1AtomicReplayAndReview(t *testing.T) {
 		}
 	})
 	t.Run("one_real_review_multiple_targets_and_frozen_input", func(t *testing.T) {
-		f := newInitialReadFixtureV1(t, true)
-		initial := f.settle(t)
-		auth := f.review(t, initial)
-		bad := auth.RecognitionLayoutReviewBatchAuthorizationRequestV1
-		bad.PromptDigest = recognitionLayoutRuntimeTestDigest("changed prompt")
-		bad.InputDigest, _ = k12.RecognitionLayoutReviewBatchInputDigestV1(bad)
-		if _, _, err := f.store.AuthorizeRecognitionLayoutReviewBatchV1(ctx, f.parent.AgentName, f.parent.InvocationID, bad); err == nil {
-			t.Fatal("frozen prompt changed")
-		}
-		child := f.prepareReview(t, auth)
-		child, err := f.store.MarkModelPhysicalInvocationSucceededWithContent(ctx, f.parent.AgentName, child.PhysicalInvocationID, `{"items":["one","two"]}`, "provider-review")
-		if err != nil {
-			t.Fatal(err)
-		}
-		in := k12.RecognitionLayoutReviewBatchSettlementV1{PlanDigest: f.plan.AuthorizedPlanDigest, AuthorizationID: auth.AuthorizationID, AuthorizationDigest: auth.AuthorizationDigest, SourcePhysicalInvocationID: child.PhysicalInvocationID, SourcePhysicalUnit: child.PhysicalUnit, SourcePhysicalResultDigest: child.ResultDigest, Classification: k12.RecognitionLayoutBatchClassifiedV2}
-		for _, candidate := range f.input.Candidates {
-			in.Candidates = append(in.Candidates, k12.RecognitionLayoutCandidateSettlementV2{CandidateID: candidate.CandidateID, Classification: k12.RecognitionLayoutCandidateValidV2, ResultKind: candidate.ResultKind, ResultJSON: candidate.ResultJSON})
-		}
-		settled, created, err := f.store.SettleRecognitionLayoutReviewBatchV1(ctx, f.parent.AgentName, f.parent.InvocationID, in)
-		if err != nil || !created || len(settled.FrozenResults) != 2 {
-			t.Fatalf("review settle %v %v", created, err)
-		}
-		final, _, err := f.store.FinalizeRecognitionLayoutPlanV2(ctx, f.parent.AgentName, f.parent.InvocationID)
-		if err != nil || final.PhysicalResultCount != 2 {
-			t.Fatalf("final review %v %v", final.PhysicalResultCount, err)
-		}
-		for _, candidate := range final.CandidateResults {
-			if candidate.SourcePhysicalInvocationID != child.PhysicalInvocationID {
-				t.Fatal("fabricated per target call")
-			}
-		}
-		if err = f.db.Close(); err != nil {
-			t.Fatal(err)
-		}
-		store, db := openPhysicalLedgerFileStore(t, f.path)
-		defer db.Close()
-		in.Classification = ""
-		in.Candidates = nil
-		again, created, err := store.SettleRecognitionLayoutReviewBatchV1(ctx, f.parent.AgentName, f.parent.InvocationID, in)
-		if err != nil || created || !reflect.DeepEqual(settled, again) {
-			t.Fatalf("review cold replay %v %v", created, err)
-		}
-		runtime, err := store.LoadRecognitionLayoutPlanRuntimeV2(ctx, f.parent.AgentName, f.parent.InvocationID)
-		if err != nil || len(runtime.ReviewBatches) != 1 || !reflect.DeepEqual(runtime.ReviewBatches[0], auth) {
-			t.Fatalf("runtime frozen reviews %v", err)
+		for _, tc := range []struct {
+			name    string
+			members [][]int
+		}{
+			{name: "one_batch_two_targets", members: [][]int{{0, 1}}},
+			{name: "two_batches_frozen_none_policy", members: [][]int{{0}, {1}}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				f := newInitialReadFixtureV1(t, true)
+				if f.parent.RequestPolicySnapshot != k12.ApprovedRecognizingRequestPolicy() {
+					t.Fatal("fixture lost approved off/none request policy")
+				}
+				initial := f.settle(t)
+				var authorizations []k12.RecognitionLayoutReviewBatchAuthorizationV1
+				var inputs []k12.RecognitionLayoutReviewBatchSettlementV1
+				var results []k12.RecognitionLayoutReviewBatchSettlementResultV1
+				sources := make(map[string]string)
+				for index, members := range tc.members {
+					batchInitial := initial
+					batchInitial.ReviewAuthorizations = nil
+					for _, member := range members {
+						batchInitial.ReviewAuthorizations = append(batchInitial.ReviewAuthorizations, initial.ReviewAuthorizations[member])
+					}
+					auth := f.review(t, batchInitial, index+1)
+					authorizations = append(authorizations, auth)
+					bad := auth.RecognitionLayoutReviewBatchAuthorizationRequestV1
+					bad.PromptDigest = recognitionLayoutRuntimeTestDigest("changed prompt")
+					bad.InputDigest, _ = k12.RecognitionLayoutReviewBatchInputDigestV1(bad)
+					if _, _, err := f.store.AuthorizeRecognitionLayoutReviewBatchV1(ctx, f.parent.AgentName, f.parent.InvocationID, bad); err == nil {
+						t.Fatal("frozen prompt changed")
+					}
+					child := f.prepareReview(t, auth)
+					child, err := f.store.MarkModelPhysicalInvocationSucceededWithContent(ctx, f.parent.AgentName, child.PhysicalInvocationID, `{"items":["one","two"]}`, "provider-review")
+					if err != nil {
+						t.Fatal(err)
+					}
+					in := k12.RecognitionLayoutReviewBatchSettlementV1{PlanDigest: f.plan.AuthorizedPlanDigest, AuthorizationID: auth.AuthorizationID, AuthorizationDigest: auth.AuthorizationDigest, SourcePhysicalInvocationID: child.PhysicalInvocationID, SourcePhysicalUnit: child.PhysicalUnit, SourcePhysicalResultDigest: child.ResultDigest, Classification: k12.RecognitionLayoutBatchClassifiedV2}
+					for _, member := range members {
+						candidate := f.input.Candidates[member]
+						in.Candidates = append(in.Candidates, k12.RecognitionLayoutCandidateSettlementV2{CandidateID: candidate.CandidateID, Classification: k12.RecognitionLayoutCandidateValidV2, ResultKind: candidate.ResultKind, ResultJSON: candidate.ResultJSON})
+						sources[candidate.CandidateID] = child.PhysicalInvocationID
+					}
+					settled, created, err := f.store.SettleRecognitionLayoutReviewBatchV1(ctx, f.parent.AgentName, f.parent.InvocationID, in)
+					if err != nil || !created || len(settled.FrozenResults) != len(members) {
+						t.Fatalf("review settle %v %v", created, err)
+					}
+					inputs, results = append(inputs, in), append(results, settled)
+				}
+				final, _, err := f.store.FinalizeRecognitionLayoutPlanV2(ctx, f.parent.AgentName, f.parent.InvocationID)
+				if err != nil || final.PhysicalResultCount != 1+len(tc.members) || final.CandidateResultCount != 2 {
+					t.Fatalf("final review %v %v", final.PhysicalResultCount, err)
+				}
+				for _, candidate := range final.CandidateResults {
+					if candidate.SourcePhysicalInvocationID != sources[candidate.CandidateID] {
+						t.Fatal("fabricated per target call")
+					}
+				}
+				before, err := f.store.ListModelPhysicalInvocations(ctx, f.parent.AgentName, f.parent.JobID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err = f.db.Close(); err != nil {
+					t.Fatal(err)
+				}
+				store, db := openPhysicalLedgerFileStore(t, f.path)
+				defer db.Close()
+				for index, in := range inputs {
+					in.Classification = ""
+					in.Candidates = nil
+					again, created, err := store.SettleRecognitionLayoutReviewBatchV1(ctx, f.parent.AgentName, f.parent.InvocationID, in)
+					if err != nil || created || !reflect.DeepEqual(results[index], again) {
+						t.Fatalf("review cold replay %v %v", created, err)
+					}
+				}
+				runtime, err := store.LoadRecognitionLayoutPlanRuntimeV2(ctx, f.parent.AgentName, f.parent.InvocationID)
+				if err != nil || !reflect.DeepEqual(runtime.ReviewBatches, authorizations) {
+					t.Fatalf("runtime frozen reviews %v", err)
+				}
+				again, created, err := store.FinalizeRecognitionLayoutPlanV2(ctx, f.parent.AgentName, f.parent.InvocationID)
+				if err != nil || created || !reflect.DeepEqual(final, again) {
+					t.Fatalf("cold final replay physical_count=%d want=%d created=%v err=%v", again.PhysicalResultCount, 1+len(tc.members), created, err)
+				}
+				after, err := store.ListModelPhysicalInvocations(ctx, f.parent.AgentName, f.parent.JobID)
+				if err != nil || !reflect.DeepEqual(before, after) {
+					t.Fatalf("cold replay changed physical receipts or request policy: %v", err)
+				}
+			})
 		}
 	})
 	t.Run("review_conflict_uses_existing_adjudication", func(t *testing.T) {

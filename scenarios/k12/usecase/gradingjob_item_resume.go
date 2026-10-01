@@ -1232,7 +1232,7 @@ func validateFrozenAssessReceiptSet(run *gradingRun, receipts []k12.GradingAsses
 	if run.anchored != nil {
 		questions = run.anchored
 	}
-	questions = RecognizedQuestionsForAssessment(cloneRecognizedQuestions(questions))
+	questions = RecognizedQuestionsForAssessmentForInitialReadMode(cloneRecognizedQuestions(questions), run.req.InitialReadMode)
 	if len(questions) != len(receipts) {
 		return fmt.Errorf("%w: confirmed_questions=%d receipts=%d",
 			ErrGradingAssessmentExactSet, len(questions), len(receipts))

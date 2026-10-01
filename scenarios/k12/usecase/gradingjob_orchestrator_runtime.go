@@ -822,7 +822,7 @@ func (o *GradingOrchestrator) confirmRegisteredGradingJob(
 	if candidate.anchored != nil {
 		confirmedFacts = candidate.anchored
 	}
-	if perr := o.persistProblemAttemptFacts(ctx, run.agentName, job.Fields.SubmissionID, confirmedFacts); perr != nil {
+	if perr := o.persistProblemAttemptFacts(ctx, run.agentName, job.Fields.SubmissionID, confirmedFacts, run.req.InitialReadMode); perr != nil {
 		l.Unlock()
 		return GradingJobView{}, true, fmt.Errorf("usecase: 固化确认后的 Problem/Attempt: %w", perr)
 	}
@@ -1321,7 +1321,7 @@ func (o *GradingOrchestrator) reconcileUnsentAssessmentItems(
 			!(invocation.Status == k12.ModelInvocationReconciled && invocation.FailureKind == "reconciled_partial_succeeded")) {
 		return false, GradingJobView{}, nil
 	}
-	questions := RecognizedQuestionsForAssessment(run.questions)
+	questions := RecognizedQuestionsForAssessmentForInitialReadMode(run.questions, run.req.InitialReadMode)
 	byProblem := make(map[string]RecognizedQuestion, len(questions))
 	for _, q := range questions {
 		byProblem[q.ProblemID] = q
@@ -1530,7 +1530,7 @@ func applyGradingCorrections(run *gradingRun, in ConfirmPhotoGradingInput) (map[
 			if canonicalChanged {
 				q.CanonicalVersion++
 			}
-			*q = NormalizeRecognizedQuestion(*q)
+			*q = NormalizeRecognizedQuestionForInitialReadMode(*q, run.req.InitialReadMode)
 			q.RawTranscription, q.AnswerRawTranscription = rawQuestion, rawAnswer
 			if c.Confirmed {
 				confirmed[q.ProblemID] = true
@@ -1558,12 +1558,12 @@ func applyAndValidateGradingConfirmation(run *gradingRun, in ConfirmPhotoGrading
 		return err
 	}
 	for i := range run.questions {
-		q := NormalizeRecognizedQuestion(run.questions[i])
+		q := NormalizeRecognizedQuestionForInitialReadMode(run.questions[i], run.req.InitialReadMode)
 		if !CanonicalMarkdownValid(q.CanonicalMarkdown) ||
 			(q.AnswerState == AnswerStatePresent && !CanonicalMarkdownValid(q.AnswerCanonicalMarkdown)) {
 			return fmt.Errorf("%w: problem %s canonical Markdown/LaTeX 无法解析，请先逐题修正", ErrInvalidInput, q.ProblemID)
 		}
-		if recognizedQuestionRequiresGuardianConfirmation(q, run.req.TaskIntent) &&
+		if recognizedQuestionRequiresGuardianConfirmationForInitialReadMode(q, run.req.TaskIntent, run.req.InitialReadMode) &&
 			!confirmed[q.ProblemID] {
 			return fmt.Errorf("%w: problem %s 需逐题确认（%s）", ErrInvalidInput, q.ProblemID, joinOCRRiskReasons(q.ConfirmationReasons))
 		}
@@ -1593,7 +1593,7 @@ func applyProgressiveGradingConfirmation(run *gradingRun, in ConfirmPhotoGrading
 	}
 	awaitingSource := false
 	for i := range run.questions {
-		q := NormalizeRecognizedQuestion(run.questions[i])
+		q := NormalizeRecognizedQuestionForInitialReadMode(run.questions[i], run.req.InitialReadMode)
 		if !CanonicalMarkdownValid(q.CanonicalMarkdown) ||
 			(q.AnswerState == AnswerStatePresent && !CanonicalMarkdownValid(q.AnswerCanonicalMarkdown)) {
 			return false, fmt.Errorf(
@@ -1601,7 +1601,7 @@ func applyProgressiveGradingConfirmation(run *gradingRun, in ConfirmPhotoGrading
 				ErrInvalidInput, q.ProblemID,
 			)
 		}
-		if recognizedQuestionRequiresGuardianConfirmation(q, run.req.TaskIntent) &&
+		if recognizedQuestionRequiresGuardianConfirmationForInitialReadMode(q, run.req.TaskIntent, run.req.InitialReadMode) &&
 			!confirmed[q.ProblemID] {
 			awaitingSource = true
 		}
@@ -1681,8 +1681,12 @@ func (o *GradingOrchestrator) runPath(jobID string, file string) string {
 	return filepath.Join(o.runDir, jobID, file)
 }
 
-func (o *GradingOrchestrator) persistProblemAttemptFacts(ctx context.Context, agentName, submissionID string, questions []RecognizedQuestion) error {
-	snapshot, err := RecognizedQuestionsProblemAttemptSnapshot(agentName, submissionID, questions, o.deps.now())
+func (o *GradingOrchestrator) persistProblemAttemptFacts(ctx context.Context, agentName, submissionID string, questions []RecognizedQuestion, initialReadModes ...string) error {
+	initialReadMode := ""
+	if len(initialReadModes) > 0 {
+		initialReadMode = initialReadModes[0]
+	}
+	snapshot, err := RecognizedQuestionsProblemAttemptSnapshotForInitialReadMode(agentName, submissionID, questions, o.deps.now(), initialReadMode)
 	if err != nil {
 		return err
 	}
@@ -1774,7 +1778,7 @@ func (o *GradingOrchestrator) ensureRun(ctx context.Context, jobID string) (*gra
 		if err != nil {
 			return nil, fmt.Errorf("usecase: 批改任务 %s typed 文本事实不可读: %w", jobID, err)
 		}
-		questions, err = RecognizedQuestionsFromProblemAttemptSnapshot(typed)
+		questions, err = RecognizedQuestionsFromProblemAttemptSnapshotForInitialReadMode(typed, meta.InitialReadMode)
 		if err != nil {
 			return nil, fmt.Errorf("usecase: 批改任务 %s typed 文本事实损坏: %w", jobID, err)
 		}

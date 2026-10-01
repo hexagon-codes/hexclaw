@@ -1171,7 +1171,7 @@ func RecognizedQuestionsFromLayoutFinalizationV2(
 			}
 			region := target.Region
 			question.SourceRegion = &region
-			questions = append(questions, question)
+			questions = append(questions, usecase.NormalizeRecognizedQuestionForInitialReadMode(question, plan.InitialReadMode))
 		case k12.RecognitionLayoutCandidateNonQuestionV2:
 			if !bytes.Equal(candidate.ResultJSON, []byte(`{}`)) {
 				return fail("candidate %q non_question result is not {}", target.TargetID)

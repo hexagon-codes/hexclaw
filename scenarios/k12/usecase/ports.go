@@ -244,8 +244,13 @@ type RecognizedQuestion struct {
 // NormalizeRecognizedQuestion 把任何 Recognizer 实现的输出收敛到领域不变量。
 // 兼容未显式提供 AnswerState 的旧实现，但绝不使用 BBox 推断作答状态。
 func NormalizeRecognizedQuestion(q RecognizedQuestion) RecognizedQuestion {
+	return NormalizeRecognizedQuestionForInitialReadMode(q, "")
+}
+
+// NormalizeRecognizedQuestionForInitialReadMode 使用当前任务已冻结的识别合同，不从题面推断模式。
+func NormalizeRecognizedQuestionForInitialReadMode(q RecognizedQuestion, initialReadMode string) RecognizedQuestion {
 	q = normalizeRecognizedQuestionFacts(q)
-	q = EvaluateOCRConfirmationRisk(q)
+	q = EvaluateOCRConfirmationRiskForInitialReadMode(q, initialReadMode)
 	return q
 }
 

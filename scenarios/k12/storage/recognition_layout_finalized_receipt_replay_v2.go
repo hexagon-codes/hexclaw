@@ -128,6 +128,34 @@ func loadStoredRecognitionLayoutFinalizationV2(
 		}
 		physicalIDs = append(physicalIDs, physicalID)
 	}
+	if authority.Plan.InitialReadMode == k12.RecognitionLayoutManifestWithContentV1 {
+		// 首读模式的复核批独立冻结，回放按授权顺序纳入真实来源，无需重新读取模型正文。
+		reviews, reviewErr := loadReviewBatchesV1(ctx, q, authority.PlanID, authority.Parent.InvocationID)
+		if reviewErr != nil {
+			return result, nil, true, reviewErr
+		}
+		for _, review := range reviews {
+			settlement, found, settlementErr := loadReviewSettlementV1(ctx, q, authority.PlanID, authority.Parent.InvocationID, review)
+			if settlementErr != nil {
+				return result, nil, true, settlementErr
+			}
+			if !found || settlement.Result.Classification != k12.RecognitionLayoutBatchClassifiedV2 || len(settlement.Result.UnresolvedCandidateIDs) != 0 {
+				return result, nil, true, fmt.Errorf("%w: stored finalized review is not fully settled", ErrModelPhysicalInvocationConflict)
+			}
+			child, childErr := getModelPhysicalInvocationByIDVia(ctx, q, authority.Parent.AgentName, settlement.Settlement.SourcePhysicalInvocationID)
+			if childErr != nil {
+				return result, nil, true, childErr
+			}
+			if parentErr := validatePhysicalInvocationParent(child, authority.Parent); parentErr != nil {
+				return result, nil, true, parentErr
+			}
+			if child.PhysicalUnit != review.PhysicalUnit || child.PlanDigest != review.PlanDigest ||
+				child.CandidateExactSetDigest != review.ExactSetDigest || child.ResultDigest != settlement.Settlement.SourcePhysicalResultDigest {
+				return result, nil, true, fmt.Errorf("%w: stored finalized review source drifted", ErrModelPhysicalInvocationConflict)
+			}
+			physicalIDs = append(physicalIDs, child.PhysicalInvocationID)
+		}
+	}
 	for _, target := range authority.Plan.Targets {
 		var physicalID string
 		repairReadErr := q.QueryRowContext(ctx, `SELECT s.source_physical_invocation_id

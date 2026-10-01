@@ -253,14 +253,16 @@ func TestRecognitionInitialReadV1PublicAdapterCoverageAndIndependentReview(t *te
 		name, question, answer, shared string
 		confidence                     float64
 		needsReview                    bool
+		reviewQuestion                 string
 	}{
-		{"printed fraction instruction", `把下面每题的得数化简：\(\frac{5}{7}-\frac{1}{5}=\)`, `\(\frac{18}{35}\)`, "把下面每题的得数化简：", 0.98, false},
-		{"printed calculation instruction", `计算下面各题，能简算的要简算：\(8.7\times17.4-8.7\times7.4\)`, "= 8.7 × (17.4 − 7.4)\n= 8.7 × 10\n= 87", "计算下面各题，能简算的要简算：", 0.99, false},
-		{"wrong final value", `把下面每题的得数化简：\(\frac{5}{7}-\frac{1}{5}=\)`, `\(\frac{19}{35}\)`, "把下面每题的得数化简：", 0.99, true},
-		{"wrong intermediate step", `计算下面各题，能简算的要简算：\(8.7\times17.4-8.7\times7.4\)`, "= 8.7 × (17.4 − 7.4)\n= 8.7 × 11\n= 87", "计算下面各题，能简算的要简算：", 0.99, true},
-		{"numeric shared condition", "每包2个。3包共有多少个？", "2×3=6\n6个", "每包2个。", 0.99, true},
-		{"instruction without frozen shared fact", "把下面每题的得数化简：2+2=", "4", "", 0.99, true},
-		{"independent OCR uncertainty", "把下面每题的得数化简：2+2=", "4", "把下面每题的得数化简：", 0.60, true},
+		{"printed fraction instruction", `把下面每题的得数化简：\(\frac{5}{7}-\frac{1}{5}=\)`, `\(\frac{18}{35}\)`, "把下面每题的得数化简：", 0.98, false, ""},
+		{"printed calculation instruction", `计算下面各题，能简算的要简算：\(8.7\times17.4-8.7\times7.4\)`, "= 8.7 × (17.4 − 7.4)\n= 8.7 × 10\n= 87", "计算下面各题，能简算的要简算：", 0.99, false, ""},
+		{"wrong final value", `把下面每题的得数化简：\(\frac{5}{7}-\frac{1}{5}=\)`, `\(\frac{19}{35}\)`, "把下面每题的得数化简：", 0.99, true, ""},
+		{"wrong intermediate step", `计算下面各题，能简算的要简算：\(8.7\times17.4-8.7\times7.4\)`, "= 8.7 × (17.4 − 7.4)\n= 8.7 × 11\n= 87", "计算下面各题，能简算的要简算：", 0.99, true, ""},
+		{"numeric shared condition", "每包2个。3包共有多少个？", "2×3=6\n6个", "每包2个。", 0.99, true, ""},
+		{"instruction without frozen shared fact", "把下面每题的得数化简：2+2=", "4", "", 0.99, true, ""},
+		{"independent OCR uncertainty", "把下面每题的得数化简：2+2=", "4", "把下面每题的得数化简：", 0.60, true, ""},
+		{"six-number complete source equivalence", "在下列六个数：5、6、12、14、23、29中划去一个数（ ），后，能使其中3个数的和为另外2个数和的2倍。", "划去：29\n因为：5+23+14=42\n6+12=18\n42=18×2", "", 0.99, true, "在下列六个数：5，6，12，14，23，29中划去数（ ）后，能使其中3个数的和为另外2个数和的2倍。"},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			entry := initialReadAdapterEntryV1("manifest_0001", 1, 40, scenario.question, scenario.answer, scenario.shared, scenario.confidence)
@@ -268,7 +270,11 @@ func TestRecognitionInitialReadV1PublicAdapterCoverageAndIndependentReview(t *te
 			if err != nil {
 				t.Fatal(err)
 			}
-			independentJSON, err := json.Marshal(map[string]any{"items": []any{map[string]any{"target_id": "t1", "kind": "question", "recognition": map[string]any{"question": scenario.question, "subject": "数学", "answer_state": "present", "student_answer": scenario.answer, "recognition_confidence": 0.99, "ocr_signals": []string{}, "answer_bbox": k12.SourcePixelRegion{X: 130, Y: 35, Width: 20, Height: 20}}}}})
+			reviewQuestion := scenario.question
+			if scenario.reviewQuestion != "" {
+				reviewQuestion = scenario.reviewQuestion
+			}
+			independentJSON, err := json.Marshal(map[string]any{"items": []any{map[string]any{"target_id": "t1", "kind": "question", "recognition": map[string]any{"question": reviewQuestion, "subject": "数学", "answer_state": "present", "student_answer": scenario.answer, "recognition_confidence": 0.99, "ocr_signals": []string{}, "answer_bbox": k12.SourcePixelRegion{X: 130, Y: 35, Width: 20, Height: 20}}}}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -291,8 +297,23 @@ func TestRecognitionInitialReadV1PublicAdapterCoverageAndIndependentReview(t *te
 			if len(executor.calls) != expectedCalls || len(executor.initial.ReviewAuthorizations) != expectedCalls-1 {
 				t.Fatalf("printed instruction changed review routing: calls=%d reviews=%d", len(executor.calls), len(executor.initial.ReviewAuthorizations))
 			}
-			if len(questions) != 1 || questions[0].RawTranscription != scenario.question || questions[0].AnswerRawTranscription != scenario.answer || (scenario.shared != "" && !strings.HasPrefix(questions[0].Question, scenario.shared)) {
+			if len(questions) != 1 || questions[0].RawTranscription != reviewQuestion || questions[0].AnswerRawTranscription != scenario.answer || (scenario.shared != "" && !strings.HasPrefix(questions[0].Question, scenario.shared)) {
 				t.Fatalf("comparison view changed source facts: %+v", questions)
+			}
+			if scenario.reviewQuestion != "" {
+				if questions[0].ConfirmationRequired || !reflect.DeepEqual(questions[0].EvidenceTranscriptions, []string{scenario.question, reviewQuestion}) {
+					t.Fatalf("final projection reintroduced a question-only conflict: %+v", questions[0])
+				}
+				final, _, err := executor.FinalizeRecognitionLayoutPlanV2(context.Background())
+				if err != nil {
+					t.Fatal(err)
+				}
+				before, _ := json.Marshal(final)
+				replayed, err := RecognizedQuestionsFromLayoutFinalizationV2(final, *executor.runtime.AuthorizedPlan)
+				after, _ := json.Marshal(final)
+				if err != nil || !reflect.DeepEqual(replayed, questions) || !bytes.Equal(before, after) || len(executor.calls) != 2 {
+					t.Fatalf("frozen final replay changed facts, digests or calls: %v", err)
+				}
 			}
 			var observation struct {
 				InitialRead struct {

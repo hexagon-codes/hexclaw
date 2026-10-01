@@ -11,6 +11,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/hexagon-codes/hexclaw/internal/elementarymath"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 )
 
@@ -67,6 +68,11 @@ var ocrReasonOrder = []OCRRiskReason{
 // 是识别到的内容形态，不等于识别不确定；清晰且高置信的格式事实自动冻结。只有证据
 // 缺失/不足、涂改、字迹不清或多观察冲突才要求家长确认。
 func EvaluateOCRConfirmationRisk(q RecognizedQuestion) RecognizedQuestion {
+	return EvaluateOCRConfirmationRiskForInitialReadMode(q, "")
+}
+
+// EvaluateOCRConfirmationRiskForInitialReadMode 按任务冻结的首读模式重算风险。
+func EvaluateOCRConfirmationRiskForInitialReadMode(q RecognizedQuestion, initialReadMode string) RecognizedQuestion {
 	q = normalizeRecognizedQuestionFacts(q)
 	reasons := make(map[OCRRiskReason]struct{}, len(q.ConfirmationReasons)+4)
 	for _, reason := range q.ConfirmationReasons {
@@ -97,7 +103,7 @@ func EvaluateOCRConfirmationRisk(q RecognizedQuestion) RecognizedQuestion {
 			reasons[OCRRiskLowConfidence] = struct{}{}
 		}
 	}
-	if questionEvidenceTranscriptionsConflict(q) ||
+	if questionEvidenceTranscriptionsConflictForInitialReadMode(q, initialReadMode) ||
 		answerEvidenceTranscriptionsConflict(q.AnswerRawTranscription, q.AnswerEvidenceTranscriptions) {
 		reasons[OCRRiskEvidenceConflict] = struct{}{}
 	}
@@ -164,12 +170,22 @@ func distinctEvidenceCount(values []string) int {
 // questionEvidenceTranscriptionsConflict 仅在比较视图去掉明确属于本题的题号。
 // 作答及缺少可靠题号身份的文本保持原样，不能把小数或正文枚举当作编号删除。
 func questionEvidenceTranscriptionsConflict(q RecognizedQuestion) bool {
+	return questionEvidenceTranscriptionsConflictForInitialReadMode(q, "")
+}
+
+func questionEvidenceTranscriptionsConflictForInitialReadMode(q RecognizedQuestion, initialReadMode string) bool {
+	conflicts := func(raw string, values []string) bool {
+		if sixNumberQuestionSourcesEquivalent(raw, values, initialReadMode) {
+			return false
+		}
+		return evidenceTranscriptionsConflict(raw, values, q.AnswerRawTranscription)
+	}
 	if len(q.SourceNumberPath) != 1 {
-		return evidenceTranscriptionsConflict(q.RawTranscription, q.EvidenceTranscriptions, q.AnswerRawTranscription)
+		return conflicts(q.RawTranscription, q.EvidenceTranscriptions)
 	}
 	number := q.SourceNumberPath[0]
 	if number == "" || strings.Trim(number, "0123456789") != "" {
-		return evidenceTranscriptionsConflict(q.RawTranscription, q.EvidenceTranscriptions, q.AnswerRawTranscription)
+		return conflicts(q.RawTranscription, q.EvidenceTranscriptions)
 	}
 	trimNumber := func(value string) string {
 		return strings.TrimPrefix(strings.TrimSpace(value), number+"、")
@@ -185,7 +201,20 @@ func questionEvidenceTranscriptionsConflict(q RecognizedQuestion) bool {
 			values[i] = trimNumber(value)
 		}
 	}
-	return evidenceTranscriptionsConflict(trimNumber(q.RawTranscription), values, q.AnswerRawTranscription)
+	return conflicts(trimNumber(q.RawTranscription), values)
+}
+
+// 六数题只在首读合同内比较完整题干；角色封套、片段和任一异议观察不能被其余来源覆盖。
+func sixNumberQuestionSourcesEquivalent(raw string, values []string, initialReadMode string) bool {
+	if initialReadMode != k12.RecognitionLayoutManifestWithContentV1 || len(values) == 0 {
+		return false
+	}
+	for _, value := range values {
+		if !elementarymath.SixNumberBalanceSourcesEquivalentV1(raw, value) {
+			return false
+		}
+	}
+	return true
 }
 
 // answerEvidenceTranscriptionsConflict 只在比较视图统一独立答案行的位置和引导词。
@@ -332,9 +361,19 @@ func evidenceTranscriptionsConflict(transcription string, values []string, answe
 // RecognitionSourceReadingsMatch 比较独立核验与已有来源；只容许补全遗漏的清晰行，
 // 不修改任一原转写，不把运算正确性或模型置信分作为采纳依据。
 func RecognitionSourceReadingsMatch(prior, review RecognizedQuestion) (question, answer bool) {
+	return RecognitionSourceReadingsMatchForInitialReadMode(prior, review, "")
+}
+
+// RecognitionSourceReadingsMatchForInitialReadMode 仅对冻结模式内的完整题干应用来源等价规则。
+func RecognitionSourceReadingsMatchForInitialReadMode(prior, review RecognizedQuestion, initialReadMode string) (question, answer bool) {
 	prior, review = normalizeRecognizedQuestionFacts(prior), normalizeRecognizedQuestionFacts(review)
 	question = strings.TrimSpace(prior.RawTranscription) != "" && strings.TrimSpace(review.RawTranscription) != "" &&
 		!evidenceTranscriptionsConflict(review.RawTranscription, []string{prior.RawTranscription, review.RawTranscription}, "")
+	if !question {
+		readings := append([]string{prior.RawTranscription, review.RawTranscription}, prior.EvidenceTranscriptions...)
+		readings = append(readings, review.EvidenceTranscriptions...)
+		question = sixNumberQuestionSourcesEquivalent(review.RawTranscription, readings, initialReadMode)
+	}
 	if prior.AnswerState != review.AnswerState {
 		return question, false
 	}
@@ -517,6 +556,11 @@ func recognizedAnswerDisplayText(q RecognizedQuestion) string {
 
 // NormalizeRecognizedProblems 冻结一次识别结果的结构身份并校验父子不变量。
 func NormalizeRecognizedProblems(scope string, questions []RecognizedQuestion) ([]RecognizedQuestion, error) {
+	return NormalizeRecognizedProblemsForInitialReadMode(scope, questions, "")
+}
+
+// NormalizeRecognizedProblemsForInitialReadMode 保留结构身份生成规则，并按冻结模式计算题干风险。
+func NormalizeRecognizedProblemsForInitialReadMode(scope string, questions []RecognizedQuestion, initialReadMode string) ([]RecognizedQuestion, error) {
 	out := make([]RecognizedQuestion, len(questions))
 	pageAssetID := stableRecognitionID("page", scope)
 	modelParentRefs := make(map[string]string, len(questions))
@@ -527,7 +571,7 @@ func NormalizeRecognizedProblems(scope string, questions []RecognizedQuestion) (
 		if err := validateRecognitionEvidence(i, question); err != nil {
 			return nil, err
 		}
-		question = NormalizeRecognizedQuestion(question)
+		question = NormalizeRecognizedQuestionForInitialReadMode(question, initialReadMode)
 		question.ProblemKind = normalizeProblemKind(question.ProblemKind, parentRefs[i])
 		// Model identity fields are response-local hints, never durable facts. The
 		// server mints all durable identity and confirmation fields below.
@@ -669,13 +713,13 @@ func validateRecognitionEvidence(index int, question RecognizedQuestion) error {
 	return nil
 }
 
-func normalizeAndValidateServerRecognizedProblems(questions []RecognizedQuestion) ([]RecognizedQuestion, error) {
+func normalizeAndValidateServerRecognizedProblems(questions []RecognizedQuestion, initialReadMode string) ([]RecognizedQuestion, error) {
 	out := cloneRecognizedQuestions(questions)
 	for i := range out {
 		if err := validateRecognitionEvidence(i, out[i]); err != nil {
 			return nil, err
 		}
-		out[i] = NormalizeRecognizedQuestion(out[i])
+		out[i] = NormalizeRecognizedQuestionForInitialReadMode(out[i], initialReadMode)
 	}
 	if err := validateNormalizedRecognizedProblems(out); err != nil {
 		return nil, err
@@ -683,7 +727,7 @@ func normalizeAndValidateServerRecognizedProblems(questions []RecognizedQuestion
 	return out, nil
 }
 
-func normalizeRecognizedProblemsForSnapshot(scope string, questions []RecognizedQuestion) ([]RecognizedQuestion, error) {
+func normalizeRecognizedProblemsForSnapshot(scope string, questions []RecognizedQuestion, initialReadMode string) ([]RecognizedQuestion, error) {
 	missingProblemIDs := 0
 	for i := range questions {
 		if strings.TrimSpace(questions[i].ProblemID) == "" {
@@ -692,7 +736,7 @@ func normalizeRecognizedProblemsForSnapshot(scope string, questions []Recognized
 	}
 	if missingProblemIDs == len(questions) {
 		// A not-yet-promoted recognition batch has no durable identity at all.
-		return NormalizeRecognizedProblems(scope, questions)
+		return NormalizeRecognizedProblemsForInitialReadMode(scope, questions, initialReadMode)
 	}
 	if missingProblemIDs > 0 {
 		// Never replace an identity that a legacy checkpoint may already have
@@ -705,7 +749,7 @@ func normalizeRecognizedProblemsForSnapshot(scope string, questions []Recognized
 		if err := validateRecognitionEvidence(i, out[i]); err != nil {
 			return nil, err
 		}
-		out[i] = NormalizeRecognizedQuestion(out[i])
+		out[i] = NormalizeRecognizedQuestionForInitialReadMode(out[i], initialReadMode)
 		if out[i].ProblemKind != ProblemKindCompoundParent && strings.TrimSpace(out[i].AttemptID) == "" {
 			// Pre-V19 run.json can contain an identity already exposed by its
 			// checkpoint but no Attempt. Preserve that historical ProblemID and
@@ -892,6 +936,11 @@ func stableRecognitionID(prefix, seed string) string {
 // RecognizedQuestionsForAssessment 丢弃无 Attempt 的公共父题，并把父题公共题干与子题
 // 增量题干组合成批改输入。子题自己的 ID、答案、锚点与 canonical 事实保持不变。
 func RecognizedQuestionsForAssessment(questions []RecognizedQuestion) []RecognizedQuestion {
+	return RecognizedQuestionsForAssessmentForInitialReadMode(questions, "")
+}
+
+// RecognizedQuestionsForAssessmentForInitialReadMode 让评估副本沿用任务冻结的风险合同。
+func RecognizedQuestionsForAssessmentForInitialReadMode(questions []RecognizedQuestion, initialReadMode string) []RecognizedQuestion {
 	parents := make(map[string]RecognizedQuestion)
 	for _, question := range questions {
 		if question.ProblemKind == ProblemKindCompoundParent {
@@ -903,7 +952,7 @@ func RecognizedQuestionsForAssessment(questions []RecognizedQuestion) []Recogniz
 		if question.ProblemKind == ProblemKindCompoundParent {
 			continue
 		}
-		question = NormalizeRecognizedQuestion(question)
+		question = NormalizeRecognizedQuestionForInitialReadMode(question, initialReadMode)
 		if question.ProblemKind == ProblemKindSubproblem {
 			if parent, ok := parents[question.ParentProblemID]; ok {
 				composed := strings.TrimSpace(RecognizedQuestionDisplayText(parent)) + "\n\n" + strings.TrimSpace(RecognizedQuestionDisplayText(question))
@@ -912,7 +961,7 @@ func RecognizedQuestionsForAssessment(questions []RecognizedQuestion) []Recogniz
 				question.CanonicalMarkdown = composed
 				question.Question = composed
 				// 子题解答依赖公共题干；只向其传递真实内容风险，不改变原始父/子事实。
-				parent = NormalizeRecognizedQuestion(parent)
+				parent = NormalizeRecognizedQuestionForInitialReadMode(parent, initialReadMode)
 				question.parentSourceUnclear = parent.ConfirmationRequired
 			}
 		}
@@ -1017,12 +1066,17 @@ func FreezeRecognizedQuestionInputDigests(questions []RecognizedQuestion, gradin
 // verbatim; a compound parent owns no Attempt; every answerable child keeps its own
 // canonical answer, confirmation version, digest and geometry.
 func RecognizedQuestionsProblemAttemptSnapshot(agentName, submissionID string, questions []RecognizedQuestion, at int64) (k12.ProblemAttemptSnapshot, error) {
+	return RecognizedQuestionsProblemAttemptSnapshotForInitialReadMode(agentName, submissionID, questions, at, "")
+}
+
+// RecognizedQuestionsProblemAttemptSnapshotForInitialReadMode 在类型化投影前沿用冻结的首读风险规则。
+func RecognizedQuestionsProblemAttemptSnapshotForInitialReadMode(agentName, submissionID string, questions []RecognizedQuestion, at int64, initialReadMode string) (k12.ProblemAttemptSnapshot, error) {
 	agentName = strings.TrimSpace(agentName)
 	submissionID = strings.TrimSpace(submissionID)
 	if agentName == "" || submissionID == "" || at <= 0 {
 		return k12.ProblemAttemptSnapshot{}, fmt.Errorf("%w: Problem/Attempt snapshot 缺少 owner/submission/time", ErrInvalidInput)
 	}
-	normalized, err := normalizeRecognizedProblemsForSnapshot(submissionID, questions)
+	normalized, err := normalizeRecognizedProblemsForSnapshot(submissionID, questions, initialReadMode)
 	if err != nil {
 		return k12.ProblemAttemptSnapshot{}, err
 	}
@@ -1073,6 +1127,11 @@ func RecognizedQuestionsProblemAttemptSnapshot(agentName, submissionID string, q
 // objects from typed durable facts. Ordinal, not SQL row order, restores the original
 // page sequence; Attempt lookup is by ProblemID so sibling results cannot cross.
 func RecognizedQuestionsFromProblemAttemptSnapshot(snapshot k12.ProblemAttemptSnapshot) ([]RecognizedQuestion, error) {
+	return RecognizedQuestionsFromProblemAttemptSnapshotForInitialReadMode(snapshot, "")
+}
+
+// RecognizedQuestionsFromProblemAttemptSnapshotForInitialReadMode 从冻结任务恢复类型化事实，不推断新模式。
+func RecognizedQuestionsFromProblemAttemptSnapshotForInitialReadMode(snapshot k12.ProblemAttemptSnapshot, initialReadMode string) ([]RecognizedQuestion, error) {
 	if len(snapshot.Problems) == 0 {
 		return nil, fmt.Errorf("%w: Problem/Attempt snapshot 为空", ErrInvalidInput)
 	}
@@ -1128,10 +1187,10 @@ func RecognizedQuestionsFromProblemAttemptSnapshot(snapshot k12.ProblemAttemptSn
 			}
 			delete(attempts, problem.ProblemID)
 		}
-		questions = append(questions, NormalizeRecognizedQuestion(question))
+		questions = append(questions, NormalizeRecognizedQuestionForInitialReadMode(question, initialReadMode))
 	}
 	if len(attempts) != 0 {
 		return nil, fmt.Errorf("%w: snapshot 含不属于 Problem 的 Attempt", ErrInvalidInput)
 	}
-	return normalizeAndValidateServerRecognizedProblems(questions)
+	return normalizeAndValidateServerRecognizedProblems(questions, initialReadMode)
 }

@@ -50,7 +50,7 @@ func (a *RecognizerAdapter) recognizeLayoutAdjudicationsV2(ctx context.Context, 
 		if !exists || !hasInitial || current.question == nil || initial.question == nil {
 			continue
 		}
-		risk := usecase.EvaluateOCRConfirmationRisk(*current.question)
+		risk := usecase.EvaluateOCRConfirmationRiskForInitialReadMode(*current.question, plan.InitialReadMode)
 		hasConflict := false
 		for _, reason := range risk.ConfirmationReasons {
 			hasConflict = hasConflict || reason == usecase.OCRRiskEvidenceConflict
@@ -65,7 +65,7 @@ func (a *RecognizerAdapter) recognizeLayoutAdjudicationsV2(ctx context.Context, 
 		if reread == nil || reread.question == nil {
 			return fmt.Errorf("%w: adjudication repair source cannot be parsed", k12.ErrRecognitionProtocolInvalid)
 		}
-		questionMatch, answerMatch := usecase.RecognitionSourceReadingsMatch(*initial.question, *reread.question)
+		questionMatch, answerMatch := usecase.RecognitionSourceReadingsMatchForInitialReadMode(*initial.question, *reread.question, plan.InitialReadMode)
 		conflictKind := "both"
 		switch {
 		case questionMatch && !answerMatch:
@@ -110,8 +110,8 @@ func (a *RecognizerAdapter) recognizeLayoutAdjudicationsV2(ctx context.Context, 
 		candidate, reviewed, verified := parseRecognitionLayoutAdjudication(physical.Payload, target, plan.RecognitionFormat)
 		settlement := k12.RecognitionLayoutAdjudicationSettlementV2{PlanDigest: plan.AuthorizedPlanDigest, AuthorizationID: authorization.AuthorizationID, AuthorizationDigest: authorization.AuthorizationDigest, CandidateID: target.TargetID, SourcePhysicalInvocationID: physical.InvocationID, SourcePhysicalUnit: authorization.PhysicalUnit, SourcePhysicalResultDigest: physical.ResultDigest}
 		if verified && reviewed != nil && reviewed.question != nil {
-			qp, ap := usecase.RecognitionSourceReadingsMatch(*initial.question, *reviewed.question)
-			qr, ar := usecase.RecognitionSourceReadingsMatch(*reread.question, *reviewed.question)
+			qp, ap := usecase.RecognitionSourceReadingsMatchForInitialReadMode(*initial.question, *reviewed.question, plan.InitialReadMode)
+			qr, ar := usecase.RecognitionSourceReadingsMatchForInitialReadMode(*reread.question, *reviewed.question, plan.InitialReadMode)
 			settlement.MatchedQuestionPrior = matchedRecognitionPrior(qp, qr)
 			settlement.MatchedAnswerPrior = matchedRecognitionPrior(ap, ar)
 			settlement.Adopted = settlement.MatchedQuestionPrior != "" && settlement.MatchedAnswerPrior != ""

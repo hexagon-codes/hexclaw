@@ -6,11 +6,56 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 )
 
 func float64Ptr(v float64) *float64 { return &v }
 
+const sixNumberInitialSource = "在下列六个数：5、6、12、14、23、29中划去一个数（ ），后，能使其中3个数的和为另外2个数和的2倍。"
+const sixNumberReviewSource = "在下列六个数：5，6，12，14，23，29中划去数（ ）后，能使其中3个数的和为另外2个数和的2倍。"
+const sixNumberStudentWork = "划去：29\n因为：5+23+14=42\n6+12=18\n42=18×2"
+
 func TestEvaluateOCRConfirmationRisk_IndependentReadNumberIdentity(t *testing.T) {
+	for _, tt := range []struct {
+		name, mode string
+		change     func(*RecognizedQuestion)
+		want       []OCRRiskReason
+	}{
+		{name: "B complete six-number sources", mode: k12.RecognitionLayoutManifestWithContentV1},
+		{name: "legacy keeps literal conflict", want: []OCRRiskReason{OCRRiskEvidenceConflict}},
+		{name: "unknown mode keeps literal conflict", mode: "other", want: []OCRRiskReason{OCRRiskEvidenceConflict}},
+		{name: "third source cannot be ignored", mode: k12.RecognitionLayoutManifestWithContentV1, change: func(q *RecognizedQuestion) {
+			q.EvidenceTranscriptions = append(q.EvidenceTranscriptions, strings.Replace(sixNumberReviewSource, "23", "24", 1))
+		}, want: []OCRRiskReason{OCRRiskEvidenceConflict}},
+		{name: "role envelope is not complete question", mode: k12.RecognitionLayoutManifestWithContentV1, change: func(q *RecognizedQuestion) { q.EvidenceTranscriptions[0] = "印刷体：" + sixNumberInitialSource }, want: []OCRRiskReason{OCRRiskEvidenceConflict}},
+		{name: "fragment cannot prove semantic identity", mode: k12.RecognitionLayoutManifestWithContentV1, change: func(q *RecognizedQuestion) { q.EvidenceTranscriptions[0] = "划去一个数（ ），后" }, want: []OCRRiskReason{OCRRiskEvidenceConflict}},
+		{name: "handwritten observation cannot prove question", mode: k12.RecognitionLayoutManifestWithContentV1, change: func(q *RecognizedQuestion) { q.EvidenceTranscriptions[0] = "手写：" + sixNumberInitialSource }, want: []OCRRiskReason{OCRRiskEvidenceConflict}},
+		{name: "different calculation remains conflict", mode: k12.RecognitionLayoutManifestWithContentV1, change: func(q *RecognizedQuestion) {
+			q.AnswerEvidenceTranscriptions[0] = strings.Replace(sixNumberStudentWork, "42=18×2", "36=18×2", 1)
+		}, want: []OCRRiskReason{OCRRiskEvidenceConflict}},
+		{name: "low confidence still requires review", mode: k12.RecognitionLayoutManifestWithContentV1, change: func(q *RecognizedQuestion) { q.RecognitionConfidence = float64Ptr(.60) }, want: []OCRRiskReason{OCRRiskLowConfidence}},
+		{name: "OCR conflict stays independent", mode: k12.RecognitionLayoutManifestWithContentV1, change: func(q *RecognizedQuestion) { q.OCRSignals = []string{"evidence_conflict"} }, want: []OCRRiskReason{OCRRiskEvidenceConflict}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			q := RecognizedQuestion{Question: sixNumberReviewSource, RawTranscription: sixNumberReviewSource, Subject: "数学", AnswerState: AnswerStatePresent, StudentAnswer: sixNumberStudentWork, AnswerRawTranscription: sixNumberStudentWork, RecognitionConfidence: float64Ptr(.99), EvidenceTranscriptions: []string{sixNumberInitialSource, sixNumberReviewSource}, AnswerEvidenceTranscriptions: []string{sixNumberStudentWork, sixNumberStudentWork}}
+			if tt.change != nil {
+				tt.change(&q)
+			}
+			before, _ := json.Marshal(q)
+			got := NormalizeRecognizedQuestionForInitialReadMode(q, tt.mode)
+			if !reflect.DeepEqual(got.ConfirmationReasons, tt.want) || got.ConfirmationRequired != (len(tt.want) != 0) {
+				t.Fatalf("risk = %v, want %v", got.ConfirmationReasons, tt.want)
+			}
+			if got.RawTranscription != q.RawTranscription || got.AnswerRawTranscription != q.AnswerRawTranscription || !reflect.DeepEqual(got.EvidenceTranscriptions, q.EvidenceTranscriptions) || !reflect.DeepEqual(got.AnswerEvidenceTranscriptions, q.AnswerEvidenceTranscriptions) {
+				t.Fatal("source bytes changed")
+			}
+			after, _ := json.Marshal(q)
+			if string(before) != string(after) {
+				t.Fatal("input was mutated")
+			}
+		})
+	}
 	const plain = `8的\(\frac{1}{4}\)的\(\frac{4}{5}\)是多少？`
 	for _, tt := range []struct {
 		name         string
@@ -859,6 +904,34 @@ func TestRecognitionSourceReadingsMatch_IndependentCompleteReview(t *testing.T) 
 			state = AnswerStateBlank
 		}
 		return RecognizedQuestion{Question: question, RawTranscription: question, StudentAnswer: answer, AnswerRawTranscription: answer, AnswerState: state, Subject: "数学"}
+	}
+	for _, tt := range []struct {
+		name, read, answer, mode string
+		wantQuestion, wantAnswer bool
+	}{
+		{"B actual full readings", sixNumberReviewSource, sixNumberStudentWork, k12.RecognitionLayoutManifestWithContentV1, true, true},
+		{"old mode unchanged", sixNumberReviewSource, sixNumberStudentWork, "", false, true},
+		{"changed digit", strings.Replace(sixNumberReviewSource, "23", "24", 1), sixNumberStudentWork, k12.RecognitionLayoutManifestWithContentV1, false, true},
+		{"changed order", strings.Replace(sixNumberReviewSource, "5，6", "6，5", 1), sixNumberStudentWork, k12.RecognitionLayoutManifestWithContentV1, false, true},
+		{"missing number", strings.Replace(sixNumberReviewSource, "14，", "", 1), sixNumberStudentWork, k12.RecognitionLayoutManifestWithContentV1, false, true},
+		{"duplicate number", strings.Replace(sixNumberReviewSource, "14", "12", 1), sixNumberStudentWork, k12.RecognitionLayoutManifestWithContentV1, false, true},
+		{"delete two", strings.Replace(sixNumberReviewSource, "划去数", "划去两个数", 1), sixNumberStudentWork, k12.RecognitionLayoutManifestWithContentV1, false, true},
+		{"changed group count", strings.Replace(sixNumberReviewSource, "其中3个", "其中2个", 1), sixNumberStudentWork, k12.RecognitionLayoutManifestWithContentV1, false, true},
+		{"changed multiplier", strings.Replace(sixNumberReviewSource, "2倍", "3倍", 1), sixNumberStudentWork, k12.RecognitionLayoutManifestWithContentV1, false, true},
+		{"extra condition", sixNumberReviewSource + "剩下的数必须相邻。", sixNumberStudentWork, k12.RecognitionLayoutManifestWithContentV1, false, true},
+		{"different answer process", sixNumberReviewSource, strings.Replace(sixNumberStudentWork, "42=18×2", "36=18×2", 1), k12.RecognitionLayoutManifestWithContentV1, true, false},
+		{"changed ownership", sixNumberReviewSource, "", k12.RecognitionLayoutManifestWithContentV1, true, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			prior, review := makeRead(sixNumberInitialSource, sixNumberStudentWork), makeRead(tt.read, tt.answer)
+			question, answer := RecognitionSourceReadingsMatchForInitialReadMode(prior, review, tt.mode)
+			if question != tt.wantQuestion || answer != tt.wantAnswer {
+				t.Fatalf("source match = (%t,%t), want (%t,%t)", question, answer, tt.wantQuestion, tt.wantAnswer)
+			}
+			if prior.RawTranscription != sixNumberInitialSource || review.RawTranscription != tt.read || prior.StudentAnswer != sixNumberStudentWork || review.StudentAnswer != tt.answer {
+				t.Fatal("source bytes changed")
+			}
+		})
 	}
 	tests := []struct {
 		name, oldQuestion, oldAnswer, newQuestion, newAnswer string

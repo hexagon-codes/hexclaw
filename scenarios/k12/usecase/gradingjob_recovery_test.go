@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"reflect"
 	"testing"
 	"time"
 
@@ -111,6 +112,74 @@ func TestGradingRecovery_QueuedJobResumesToConfirmationStop(t *testing.T) {
 }
 
 func TestGradingRecovery_ClearImageTaskAtConfirmationCheckpointAutoFreezes(t *testing.T) {
+	t.Run("frozen B six-number checkpoint keeps source facts", func(t *testing.T) {
+		ctx := context.Background()
+		dir := t.TempDir()
+		rec := &countingRecognizer{}
+		d := recoveryDeps(t, rec, nil, nil)
+		seedGradingImageTaskOwnerScopeForTest(t, d, "recover-six-number")
+		o1 := newRecoverableOrchestrator(t, d, dir)
+		v, _, err := o1.StartPhotoGradingJob(ctx, StartPhotoGradingInput{
+			Photo: orchestratorPhotoRequest(), SourceKind: "image_task", SourceKey: "recover-six-number",
+			BudgetSnapshot: frozenWiringBudget(), ParentAutomaticAttemptID: "recover-six-number:1", ParentAutomaticDeadlineAt: d.now() + 300,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		run := o1.lookup(v.Record.RecordID)
+		// 直接构造已完成识题、尚未评估的持久检查点；模型边界不参与生成事实。
+		run.req.InitialReadMode = k12.RecognitionLayoutManifestWithContentV1
+		run.req.TaskIntent = PhotoTaskCompletedHomework
+		run.questions, err = NormalizeRecognizedProblemsForInitialReadMode(v.Fields.SubmissionID, []RecognizedQuestion{{Question: sixNumberReviewSource, RawTranscription: sixNumberReviewSource, Subject: "数学", AnswerState: AnswerStatePresent, StudentAnswer: sixNumberStudentWork, AnswerRawTranscription: sixNumberStudentWork, RecognitionConfidence: float64Ptr(.99), EvidenceTranscriptions: []string{sixNumberInitialSource, sixNumberReviewSource}, AnswerEvidenceTranscriptions: []string{sixNumberStudentWork, sixNumberStudentWork}}}, run.req.InitialReadMode)
+		if err != nil {
+			t.Fatal(err)
+		}
+		original := cloneRecognizedQuestions(run.questions)
+		if err := o1.persistProblemAttemptFacts(ctx, run.agentName, v.Fields.SubmissionID, run.questions, run.req.InitialReadMode); err != nil {
+			t.Fatal(err)
+		}
+		if err := o1.persistRun(v.Record.RecordID, run); err != nil {
+			t.Fatal(err)
+		}
+		for _, artifact := range []string{"", "image:test", "recognition:test"} {
+			if v, err = o1.advanceOK(ctx, run, v.Record.RecordID, artifact); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if v.Record.Status != k12.GradingStageAwaitingConfirmation {
+			t.Fatalf("checkpoint stage = %s", v.Record.Status)
+		}
+		if _, err = d.AdvanceGradingStage(ctx, run.agentName, v.Record.RecordID, AdvanceGradingInput{Outcome: GradingOutcomeAnchor, AnchorState: k12.GradingAnchorLocated, ArtifactDigest: "anchor:test"}); err != nil {
+			t.Fatal(err)
+		}
+		o2 := newRecoverableOrchestrator(t, d, dir)
+		restored, err := o2.ensureRun(ctx, v.Record.RecordID)
+		if err != nil || restored.req.InitialReadMode != k12.RecognitionLayoutManifestWithContentV1 || !reflect.DeepEqual(restored.questions, original) {
+			t.Fatalf("checkpoint mode or source changed: %v", err)
+		}
+		if _, err = o2.RecoverGradingJobs(ctx, []string{run.agentName}); err != nil {
+			t.Fatal(err)
+		}
+		v = waitForStage(t, d, run.agentName, v.Record.RecordID, k12.GradingStageCompleted)
+		snapshot, err := d.Records.GetProblemAttemptSnapshot(ctx, run.agentName, v.Fields.SubmissionID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if snapshot.Problems[0].ConfirmationRequired || len(snapshot.Problems[0].ConfirmationReasons) != 0 || snapshot.Problems[0].StemRaw != sixNumberReviewSource || snapshot.Attempts[0].AnswerRaw != sixNumberStudentWork || rec.calls != 0 {
+			t.Fatalf("recovery changed risk, source or recognition calls: snapshot=%+v calls=%d", snapshot, rec.calls)
+		}
+		items, err := d.Records.ListGradingAssessmentItems(ctx, run.agentName, v.Record.RecordID)
+		if err != nil || len(items) != 1 {
+			t.Fatalf("assessment receipt missing: %+v %v", items, err)
+		}
+		var item PhotoGradeItem
+		if err := json.Unmarshal([]byte(items[0].ResultJSON), &item); err != nil {
+			t.Fatal(err)
+		}
+		if item.Status == PhotoAnswerUnclear || item.Recognized.AnswerRawTranscription != sixNumberStudentWork {
+			t.Fatalf("assessment reintroduced uncertainty or rewrote work: %+v", item)
+		}
+	})
 	ctx := context.Background()
 	dir := t.TempDir()
 	rec := &countingRecognizer{questions: []RecognizedQuestion{{

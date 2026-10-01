@@ -187,9 +187,9 @@ func (a *RecognizerAdapter) recognizeLayoutInitialReadV1(ctx context.Context, so
 					parsed := decision.candidates[0]
 					candidate.Classification, candidate.ResultKind, candidate.ResultJSON = parsed.Classification, parsed.ResultKind, parsed.ResultJSON
 					if len(decision.outcomes) == 1 && decision.outcomes[0].question != nil {
-						question := usecase.EvaluateOCRConfirmationRisk(*decision.outcomes[0].question)
-						arithmeticView := recognitionInitialReadArithmeticViewV1(question, entry)
-						if question.ConfirmationRequired || question.AnswerState != usecase.AnswerStatePresent || !engine.ArithmeticTranscriptionConsistent(arithmeticView.Question, question.StudentAnswer) {
+						question := usecase.EvaluateOCRConfirmationRiskForInitialReadMode(*decision.outcomes[0].question, plan.InitialReadMode)
+						arithmeticView, arithmeticEligible := recognitionInitialReadArithmeticViewV1(question, entry)
+						if question.ConfirmationRequired || question.AnswerState != usecase.AnswerStatePresent || !arithmeticEligible || !engine.ArithmeticTranscriptionConsistent(arithmeticView.Question, question.StudentAnswer) {
 							candidate.Classification = k12.RecognitionLayoutCandidateReviewRequiredV2
 						}
 					}
@@ -259,20 +259,24 @@ func (a *RecognizerAdapter) recognizeLayoutInitialReadV1(ctx context.Context, so
 }
 
 // 仅比较副本去掉首读中精确配对的非数值印刷指令，不改题干、学生步骤或来源事实。
-func recognitionInitialReadArithmeticViewV1(question usecase.RecognizedQuestion, entry recognitionInitialReadEntryV1) usecase.RecognizedQuestion {
+func recognitionInitialReadArithmeticViewV1(question usecase.RecognizedQuestion, entry recognitionInitialReadEntryV1) (usecase.RecognizedQuestion, bool) {
 	var observation struct {
 		SharedConditions string `json:"shared_conditions"`
 	}
 	if json.Unmarshal(entry.read, &observation) != nil {
-		return question
+		return question, false
 	}
-	switch observation.SharedConditions {
-	case "把下面每题的得数化简：", "计算下面各题，能简算的要简算：":
-		if strings.HasPrefix(question.Question, observation.SharedConditions) {
-			question.Question = strings.TrimSpace(strings.TrimPrefix(question.Question, observation.SharedConditions))
+	for _, label := range []string{"把下面每题的得数化简：", "计算下面各题，能简算的要简算："} {
+		if strings.HasPrefix(question.Question, label) {
+			// 解题 helper 接受标题，不等于首读已有独立冻结的共享条件证据。
+			if observation.SharedConditions != label {
+				return question, false
+			}
+			question.Question = strings.TrimSpace(strings.TrimPrefix(question.Question, label))
+			return question, true
 		}
 	}
-	return question
+	return question, true
 }
 
 func recognitionInitialReadDigestV1(raw []byte) string {
@@ -537,7 +541,7 @@ func (a *RecognizerAdapter) recognizeReviewBatchV1(ctx context.Context, pagePNG 
 			result.err = parseErr
 			return result
 		}
-		candidate.ResultJSON, err = mergeRecognitionIndependentReadV1(candidate.ResultJSON, *prior.question, question)
+		candidate.ResultJSON, err = mergeRecognitionIndependentReadV1(candidate.ResultJSON, *prior.question, question, plan.InitialReadMode)
 		if err != nil {
 			result.err = err
 			return result
@@ -583,12 +587,12 @@ func (a *RecognizerAdapter) recognizeReviewBatchV1(ctx context.Context, pagePNG 
 	return result
 }
 
-func mergeRecognitionIndependentReadV1(raw json.RawMessage, initial, reread usecase.RecognizedQuestion) (json.RawMessage, error) {
+func mergeRecognitionIndependentReadV1(raw json.RawMessage, initial, reread usecase.RecognizedQuestion, initialReadMode string) (json.RawMessage, error) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &fields); err != nil {
 		return nil, err
 	}
-	risk := usecase.EvaluateOCRConfirmationRisk(reread)
+	risk := usecase.EvaluateOCRConfirmationRiskForInitialReadMode(reread, initialReadMode)
 	ownershipChanged := initial.AnswerState != reread.AnswerState && (initial.AnswerState == usecase.AnswerStatePresent || reread.AnswerState == usecase.AnswerStatePresent)
 	for _, reason := range risk.ConfirmationReasons {
 		ownershipChanged = ownershipChanged || reason == usecase.OCRRiskEvidenceConflict
