@@ -9,6 +9,9 @@ import (
 var ErrDenied = errors.New("egress request blocked before provider dispatch")
 var ErrProviderNotSent = errors.New("provider request was not sent")
 
+// ErrProviderResponseProcessed 标记成功响应后的确定本地处理失败，不冒充HTTP错误。
+var ErrProviderResponseProcessed = errors.New("provider response was processed before local failure")
+
 type providerAttemptKey struct{}
 
 // ProviderAttempt 仅证明已进入 Provider，不把客户端失败解释为未发送。

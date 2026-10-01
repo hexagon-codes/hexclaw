@@ -10,22 +10,25 @@ import (
 // SubAgentSpec 是一次子 Agent 派生的完整参数，替代原来裸的 (agentName, task)。承载工具继承(2)、
 // 模式/会话(4)、注册表 run id(3)、深度——让 spawn/orchestrate 的派生在一套统一参数上扩展。
 type SubAgentSpec struct {
-	RunID     string   // 本次子 Agent 运行的注册表 id（skill 生成）
-	Agent     string   // 角色名
-	Task      string   // 子任务
-	ToolAllow []string // 收窄后的工具白名单（空=不限）
-	ToolDeny  []string // 工具黑名单
-	Mode      string   // run | session
-	SessionID string   // session-mode 续聊：复用已有子会话（空=新建）
-	Depth     int      // 子的派生深度（= 调用方深度 + 1）
-	Source    string   // 派生来源（空=spawn）；SolveSkill 用 "solve" 标记受信内部解题验证
+	RunID             string             // 本次子 Agent 运行的注册表 id（skill 生成）
+	Agent             string             // 角色名
+	Task              string             // 子任务
+	ToolAllow         []string           // 收窄后的工具白名单（空=不限）
+	ToolDeny          []string           // 工具黑名单
+	Mode              string             // run | session
+	SessionID         string             // session-mode 续聊：复用已有子会话（空=新建）
+	Depth             int                // 子的派生深度（= 调用方深度 + 1）
+	Source            string             // 派生来源（空=spawn）；SolveSkill 用 "solve" 标记受信内部解题验证
+	verification      *verificationInput // 仅内部验算构造，原任务正文仍作为持久化输入摘要
+	generationVersion string             // 新解题合同随原任务正文冻结，旧任务保持空值
 }
 
 // SubAgentResult 是子 Agent 执行结果。
 type SubAgentResult struct {
 	Output           string
-	SessionID        string                // 子会话 id，session-mode 回传供后续续聊
-	ExecutionReceipt *CodeExecutionReceipt `json:"execution_receipt,omitempty"` // 随既有结果保存实际执行证据
+	SessionID        string                     // 子会话 id，session-mode 回传供后续续聊
+	ExecutionReceipt *CodeExecutionReceipt      `json:"execution_receipt,omitempty"` // 随既有结果保存实际执行证据
+	Generation       *SolveGenerationAttachment `json:"generation,omitempty"`
 }
 
 // SubAgentExecFunc 执行一个子 Agent spec。由 cmd/hexclaw 注入（内部经 eng.Process 跑子任务）。

@@ -138,8 +138,9 @@ const (
 
 // solverSolution 是一份解题产出。
 type solverSolution struct {
-	output string
-	answer string // 抽出的最终答案（已归一化）
+	output     string
+	answer     string // 抽出的最终答案（已归一化）
+	generation *SolveGenerationAttachment
 }
 
 // answerGroup 是同一答案的一组解题（多数表决 / 分歧分组用）。
@@ -173,6 +174,11 @@ func (o *SolveSkill) Execute(ctx context.Context, args map[string]any) (*skill.R
 	samples := clampSamples(intArg(args["self_consistency"], 1))
 	studentAnswer, _ := args["student_answer"].(string)
 	gradingMode := strings.TrimSpace(studentAnswer) != ""
+	outputVersion, _ := args["solve_output_version"].(string)
+	teachingContract, _ := args["parent_teaching_contract"].(string)
+	if outputVersion != "" && (outputVersion != solveWithParentGuideV1 || gradingMode || strings.TrimSpace(teachingContract) == "") {
+		return nil, fmt.Errorf("solve output contract is invalid")
+	}
 	// 显式传 method_diversity/self_consistency 表示调用方要求完整的 solver/verifier 流程；
 	// 即使题目只是一步算术，也不能被确定性快速路径绕过。
 	auto := !hasArg(args, "method_diversity") && !hasArg(args, "self_consistency")
@@ -255,7 +261,7 @@ func (o *SolveSkill) Execute(ctx context.Context, args map[string]any) (*skill.R
 	if auto && complexity == complexityHard {
 		methodDiversity = true
 	}
-	skipVerify := auto && complexity == complexityTrivial && !gradingMode // 批改需先得正确答案，不跳校验
+	skipVerify := auto && complexity == complexityTrivial && !gradingMode && outputVersion == "" // 新讲法须有独立审计
 
 	// P2 防卡死：整次 solve 套总墙钟（solver 采样/多法 + verifier）。
 	runCtx, cancel := newSubAgentAttemptContext(ctx, orchestrateMaxWall)
@@ -276,13 +282,16 @@ func (o *SolveSkill) Execute(ctx context.Context, args map[string]any) (*skill.R
 		if childCtx.Err() != nil {
 			break
 		}
-		out, err := o.runSolveAgent(childCtx, sp)
+		if outputVersion == solveWithParentGuideV1 {
+			sp = withParentGuideGeneration(sp, teachingContract)
+		}
+		result, err := o.runSolveAgentResult(childCtx, sp)
 		if err != nil {
 			solverErrs = append(solverErrs, err)
 			continue
 		}
-		if strings.TrimSpace(out) != "" {
-			sols = append(sols, solverSolution{output: out, answer: extractFinalAnswer(out)})
+		if strings.TrimSpace(result.Output) != "" {
+			sols = append(sols, solverSolution{output: result.Output, answer: extractFinalAnswer(result.Output), generation: result.Generation})
 		}
 	}
 	if len(sols) == 0 {
@@ -308,21 +317,24 @@ func (o *SolveSkill) Execute(ctx context.Context, args map[string]any) (*skill.R
 	}
 
 	// 2) Verifier 阶段：code_exec 独立重算（fresh-context、只许 code_exec）。
-	verdict, computed, numericGrounded, verificationReceipt := o.verifySolutionWithReceipt(childCtx, problem, primary.sols[0].output, primary.answer, constraint)
+	verdict, computed, numericGrounded, verificationReceipt, guideAudits := o.verifySolutionWithGuides(childCtx, problem, primary.sols[0].output, primary.answer, constraint, guideCandidates(sols))
 
 	// 2.5) 学段内重解：verifier 判解法超纲（out_of_scope）→ 强化约束重解一次，只用学过的方法。
 	// 仅在有约束、非批改、还有墙钟时尝试一次，避免无界重试。
 	if verdict == verdictOutOfScope && !gradingMode && strings.TrimSpace(constraint) != "" && childCtx.Err() == nil {
 		reSpec := solverSpec(problem, subject, "只用「"+constraint+"」范围内、学生已学过的最朴素方法，禁止任何超纲技巧", grade, constraint)
-		if out, _ := o.runSolveAgent(childCtx, reSpec); strings.TrimSpace(out) != "" {
+		if outputVersion == solveWithParentGuideV1 {
+			reSpec = withParentGuideGeneration(reSpec, teachingContract)
+		}
+		if result, err := o.runSolveAgentResult(childCtx, reSpec); err == nil && strings.TrimSpace(result.Output) != "" {
 			// **纠正性替换**（非又一次投票样本）：重解的学段内解法直接取代原超纲解作为 primary。
 			// 若走 append+groupByAnswer，超纲解与重解答案值通常相同 → 归同一组、原解先入仍居首，
 			// 学生仍会看到超纲方法（feature 落空，BUG-20260708）。故这里直接换掉 groups。
-			resolved := solverSolution{output: out, answer: extractFinalAnswer(out)}
+			resolved := solverSolution{output: result.Output, answer: extractFinalAnswer(result.Output), generation: result.Generation}
 			primary = answerGroup{answer: resolved.answer, sols: []solverSolution{resolved}}
 			groups = []answerGroup{primary}
 			// 重解后仍按原约束复验完整过程；答案正确但方法再次超纲不能放行。
-			verdict, computed, numericGrounded, verificationReceipt = o.verifySolutionWithReceipt(childCtx, problem, resolved.output, primary.answer, constraint)
+			verdict, computed, numericGrounded, verificationReceipt, guideAudits = o.verifySolutionWithGuides(childCtx, problem, resolved.output, primary.answer, constraint, guideCandidates([]solverSolution{resolved}))
 		}
 	}
 
@@ -372,6 +384,9 @@ func (o *SolveSkill) Execute(ctx context.Context, args map[string]any) (*skill.R
 	metadata := map[string]string{
 		"solve_run_id": solveRunID, "solve_verdict": verdictString(verdict),
 		"solve_evidence": evidenceKind(numericGrounded),
+	}
+	if outputVersion == solveWithParentGuideV1 {
+		addParentGuideMetadata(metadata, selectedSolverSolution(groups, verdict, computed, numericGrounded), guideAudits)
 	}
 	// 资产发布绑定实际选中的解法和本次执行证据；不能取最后一份生成结果代替多数选择。
 	if verdict == verdictAgree && numericGrounded && verificationReceipt != nil && hasCleanFinalAnswer(primary.sols[0].output, primary.answer) {
@@ -562,11 +577,24 @@ func (o *SolveSkill) runSolveAgentResult(ctx context.Context, spec SubAgentSpec)
 	}
 	execCtx = egress.WithRequest(execCtx, egress.PurposeSolveVerify, spec.RunID, classes...)
 	execute := o.executeFunc
+	if spec.Source == solveDispatchSource && spec.Agent == solverAgentName && spec.generationVersion == solveWithParentGuideV1 {
+		execute = func(callCtx context.Context, callSpec SubAgentSpec) (SubAgentResult, error) {
+			result, err := o.executeFunc(callCtx, callSpec)
+			if err != nil {
+				return result, err
+			}
+			return decodeSolveGeneration(result)
+		}
+	}
 	if spec.Source == solveDispatchSource && spec.Agent == verifierAgentName {
 		// 在物理调用拦截器内部收集回执，使持久化结果与正文一同保存；重放直接读取原回执。
 		execute = func(callCtx context.Context, callSpec SubAgentSpec) (SubAgentResult, error) {
 			sink := &codeExecutionReceiptSink{inputDigest: executionInputDigest(callSpec.Task)}
-			result, callErr := o.executeFunc(context.WithValue(callCtx, codeExecutionReceiptKey{}, sink), callSpec)
+			callCtx = context.WithValue(callCtx, codeExecutionReceiptKey{}, sink)
+			if callSpec.verification != nil {
+				callCtx = context.WithValue(callCtx, verificationInputKey{}, callSpec.verification)
+			}
+			result, callErr := o.executeFunc(callCtx, callSpec)
 			sink.mu.Lock()
 			defer sink.mu.Unlock()
 			result.ExecutionReceipt = nil
@@ -598,23 +626,32 @@ func (o *SolveSkill) verifySolution(ctx context.Context, problem, solution, cand
 }
 
 func (o *SolveSkill) verifySolutionWithReceipt(ctx context.Context, problem, solution, candidate, constraint string) (v verifyVerdict, computed string, numericGrounded bool, receipt *CodeExecutionReceipt) {
+	v, computed, numericGrounded, receipt, _ = o.verifySolutionWithGuides(ctx, problem, solution, candidate, constraint, nil)
+	return
+}
+
+func (o *SolveSkill) verifySolutionWithGuides(ctx context.Context, problem, solution, candidate, constraint string, guides []guideAuditCandidate) (v verifyVerdict, computed string, numericGrounded bool, receipt *CodeExecutionReceipt, audits []parentGuideAudit) {
 	if o.executeFunc == nil || ctx.Err() != nil {
-		return verdictUnverifiable, "", false, nil
+		return verdictUnverifiable, "", false, nil, nil
 	}
-	spec := verifierSpecWithSolution(problem, solution, candidate, constraint)
+	spec := withParentGuideVerification(verifierSpecWithSolution(problem, solution, candidate, constraint), guides)
+	_, numericCandidate := numberSet(candidate)
+	_, quantityCandidate := parseAnswerQuantity(candidate)
 	result, usedSpec, _ := o.runValidatedResult(ctx, spec, func(result SubAgentResult, attempt SubAgentSpec) bool {
 		if !verdictParseable(result.Output) {
 			return false
 		}
 		verdict, reported := parseVerdict(result.Output)
-		if verdict == verdictOutOfScope || (verdict == verdictUnverifiable && reported == "") {
+		// 一般规律的解释没有唯一数值答案，示例计算不成为最终数值回执合同。
+		if verdict == verdictOutOfScope || (verdict == verdictUnverifiable &&
+			(reported == "" || (!numericCandidate && !quantityCandidate))) {
 			return true
 		}
 		_, executed := result.ExecutionReceipt.computed(attempt.Task)
 		return executed
 	})
 	if strings.TrimSpace(result.Output) == "" {
-		return verdictUnverifiable, "", false, nil
+		return verdictUnverifiable, "", false, nil, nil
 	}
 	verdict, computed := parseVerdict(result.Output)
 	actualComputed, executed := result.ExecutionReceipt.computed(usedSpec.Task)
@@ -648,7 +685,7 @@ func (o *SolveSkill) verifySolutionWithReceipt(ctx context.Context, problem, sol
 	trace.L(ctx).Info("solve execution evidence evaluated", "input_digest", executionInputDigest(usedSpec.Task),
 		"executed", executed, "computed", computed, "candidate", candidate, "process", process,
 		"verdict", verdictString(verdict), "evidence", evidenceKind(numericGrounded))
-	return verdict, computed, numericGrounded, result.ExecutionReceipt
+	return verdict, computed, numericGrounded, result.ExecutionReceipt, parentGuideAuditsFromOutput(result.Output)
 }
 
 // strictFormatReminder 在校验重试时附加，逼模型只吐固定格式。
@@ -681,7 +718,13 @@ func (o *SolveSkill) runValidatedResult(ctx context.Context, spec SubAgentSpec, 
 	retry := spec
 	retry.RunID = spec.RunID + "-retry"
 	retry.Task = spec.Task + strictFormatReminder
-	if spec.Agent == verifierAgentName {
+	requiresNumericReceipt := spec.Agent == verifierAgentName
+	if requiresNumericReceipt && spec.verification != nil {
+		_, numeric := numberSet(spec.verification.Candidate)
+		_, quantity := parseAnswerQuantity(spec.verification.Candidate)
+		requiresNumericReceipt = numeric || quantity
+	}
+	if requiresNumericReceipt {
 		retry.Task += "\nA valid execution receipt is required for a numeric verdict. Run code_exec and print one COMPUTED: <final answer> line to stdout; do not only describe executing code."
 	}
 	if result2, err2 := o.runSolveAgentResult(ctx, retry); err2 == nil {
@@ -893,13 +936,14 @@ func verifierSpec(problem, candidate, constraint string) SubAgentSpec {
 
 func verifierSpecWithSolution(problem, solution, candidate, constraint string) SubAgentSpec {
 	return SubAgentSpec{
-		RunID:     "verifier-" + idgen.NanoID(),
-		Agent:     verifierAgentName,
-		Task:      buildVerifierPromptWithSolution(problem, solution, candidate, constraint),
-		ToolAllow: []string{codeExecToolName},
-		Mode:      "run",
-		Depth:     maxSpawnDepth,
-		Source:    solveDispatchSource, // 受信内部来源：放行沙箱 code_exec
+		verification: &verificationInput{Problem: problem, Solution: solution, Candidate: candidate, Constraint: constraint},
+		RunID:        "verifier-" + idgen.NanoID(),
+		Agent:        verifierAgentName,
+		Task:         buildVerifierPromptWithSolution(problem, solution, candidate, constraint),
+		ToolAllow:    []string{codeExecToolName},
+		Mode:         "run",
+		Depth:        maxSpawnDepth,
+		Source:       solveDispatchSource, // 受信内部来源：放行沙箱 code_exec
 	}
 }
 
@@ -948,7 +992,11 @@ func buildVerifierPromptWithSolution(problem, solution, candidate, constraint st
 		scopeVerdict = " 或 OUT_OF_SCOPE"
 		scopeRule = "；解法用了允许范围外的超纲方法 → OUT_OF_SCOPE"
 	}
-	return fmt.Sprintf(`你是一名独立校验员。下面有一道题、一份「待校验完整解法」和最终答案。请先**完全独立地**用 code_exec 写代码重新计算正确答案，不要先相信待校验内容；独立计算后，再逐步审计提供的完整解法。
+	return fmt.Sprintf(`你是一名独立校验员。下面有一道题、一份「待校验完整解法」和最终答案。先判断原题要求的是数值计算，还是解释一般概念或规律。
+
+If the problem asks only for an explanation of a general concept or rule, independently audit every reasoning step and its curriculum scope. Return UNVERIFIABLE, the actual PROCESS judgment, and COMPUTED: N/A; use OUT_OF_SCOPE for an out-of-scope method and DISAGREE for an invalid process. Do not execute example calculations or enumerate arbitrary values to manufacture a numeric final answer. Examples in the proposed explanation do not change what the original problem asks.
+
+对数值计算题，请先**完全独立地**用 code_exec 写代码重新计算正确答案，不要先相信待校验内容；独立计算后，再逐步审计提供的完整解法。以下计算步骤仅适用于数值计算题：
 
 题目：%s
 %s
@@ -1087,7 +1135,7 @@ func numberSetsEqual(as, bs []float64) bool {
 }
 
 var singleQuantityEquationLeftRe = regexp.MustCompile(`^[ \t0-9.+*/×÷＋－−()（）-]+$`)
-var singleQuantityEquationRightRe = regexp.MustCompile(`(?i)^[ \t]*` + answerQuantityNumberPattern + `[ \t]*([（(]?)(平方厘米|cm²|cm\^?2|平方米|千克|公斤|张纸|m²|m2|kg|克|米|g|m)([）)]?)[ \t]*$`)
+var singleQuantityEquationRightRe = regexp.MustCompile(`(?i)^[ \t]*` + answerQuantityNumberPattern + `[ \t]*([（(]?)(平方厘米|cm²|cm\^?2|平方米|千克|公斤|张纸|张|m²|m2|kg|克|米|g|m)([）)]?)[ \t]*$`)
 
 // singleQuantityEquation 仅接纳自身成立且右侧完整保留明确单位的一个数值等式。
 func singleQuantityEquation(answer string) (answerQuantity, bool) {
