@@ -219,8 +219,18 @@ func (o *SolveSkill) Execute(ctx context.Context, args map[string]any) (*skill.R
 	// 超出当前约束时直接返回 out_of_scope，不能再掉进 5 分钟慢模型链；题型本身缺条件/歧义
 	// 才交给 solver + verifier。
 	if auto && !gradingMode {
-		if solution, ok := solveElementaryWordProblemDetailed(deterministicProblem); ok {
-			if !elementaryWordAllowedByConstraint(deterministicProblem, constraint) {
+		solution, ok := solveElementaryWordProblemDetailed(deterministicProblem)
+		quantityPerItem := false
+		if !ok {
+			solution, ok = solveQuantityPerItemProblem(deterministicProblem)
+			quantityPerItem = ok
+		}
+		if ok {
+			allowed := elementaryWordAllowedByConstraint(deterministicProblem, constraint)
+			if quantityPerItem {
+				allowed = strings.TrimSpace(constraint) == "" || strings.Contains(constraint, "分数乘整数") || strings.Contains(constraint, "分数乘法")
+			}
+			if !allowed {
 				return &skill.Result{
 					Content: fmt.Sprintf("本题涉及「%s」，超出当前已学范围。请先确认孩子的年级/学期，再决定是否讲解。", solution.knowledgePoint),
 					Metadata: map[string]string{

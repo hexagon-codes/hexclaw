@@ -23,6 +23,12 @@ var (
 	openCubeFishTankRe                = regexp.MustCompile(`^(?:小明的爸爸)?用玻璃做了一个棱长(?:是|为)?` + elementaryNumberPattern + `(?:dm|分米)的正方体鱼缸[。.]制作(?:这个|该)鱼缸时[，,]?至少需要玻璃多少平方米[?？](?:小明)?在鱼缸里注入` + elementaryNumberPattern + `(?:L|l|升)的水[，,]?水面高度(?:是|为)?多少分米[?？。.]?$`)
 	ticketGCDLCMRe                    = regexp.MustCompile(`^(?:小明)?有(?:一)?张([0-9]+)至([0-9]+)排的电影票[，,]这张票的排数和座位号的最大公约数是([0-9]+)[，,]最小公倍数是([0-9]+)[，,。.](?:小明)?这张电影票是[（(][）)]排[（(][）)]号[。.]?$`)
 
+	// 完整单位用量与唯一总量问法；印刷示范、额外条件和另一问均不能被后缀忽略。
+	elementaryQuantityPerItemRe = regexp.MustCompile(`^(?:\*\*做一做\*\*|做一做)?(?:(?P<actor>[\p{Han}]+?)用(?P<material>[\p{Han}]+?)做(?:(?P<product>[\p{Han}]+?)[，,])?)?(?:做)?(?:一|1|每)(?P<measure>个|件|袋|朵|份|瓶|盒|包|块)(?P<item>[\p{Han}]+?)(?P<verb>需要用|需用|需要|用|重)(?P<numerator>[0-9]+)/(?P<denominator>[0-9]+)(?P<unit>张纸|张|千克|公斤|kg|克|g)[，,。.]?(?:\((?P<label>[0-9]+)\))?(?:做)?(?P<count>[0-9]+)(?P<target_measure>个|件|袋|朵|份|瓶|盒|包|块)(?P<target_item>[\p{Han}]+?)?(?P<target_verb>需要用|需用|需要|用|重)多少(?P<target_unit>张纸|张|千克|公斤|kg|克|g)[?？。.]?(?:□[×*]□=□(?:\((?P<template_unit>张纸|张|千克|公斤|kg|克|g)\))?)?$`)
+	elementaryQuantityAtomRe    = regexp.MustCompile(`\(([0-9]+/[0-9]+)\)`)
+	elementaryQuantityUnitRe    = regexp.MustCompile(`\\mathrm\{(kg|g)\}`)
+	elementaryQuantityScopeRe   = regexp.MustCompile(`^(?:([1-9][0-9]*)|\(([1-9][0-9]*)\)|（([1-9][0-9]*)）)$`)
+
 	finalQuantityMarkerRe = regexp.MustCompile(`(?i)(?:答案?|答)\s*(?:是|为)?\s*[:：]?\s*` + answerQuantityNumberPattern + `\s*(平方米|千克|公斤|张纸|张|m²|m2|kg|克|米|g|m)?`)
 	removedNumberMarkerRe = regexp.MustCompile(`划去(?:数)?\s*[:：]?\s*([+\-]?[0-9]+)`)
 	bareQuantityRe        = regexp.MustCompile(`(?i)^\s*` + answerQuantityNumberPattern + `\s*(平方厘米|cm²|cm\^?2|平方米|千克|公斤|张纸|张|m²|m2|kg|克|米|g|m)?\s*$`)
@@ -204,6 +210,89 @@ func solveElementaryWordProblemDetailed(problem string) (elementaryWordSolution,
 	}
 
 	return elementaryWordSolution{}, false
+}
+
+// solveQuantityPerItemProblem 只投影完整数学包装和单题范围，不从演示答案或图示推导题意。
+func solveQuantityPerItemProblem(problem string) (elementaryWordSolution, bool) {
+	p := strings.TrimSpace(problem)
+	const scopePrefix = "\n\nFor this request, solve or assess only subproblem "
+	const scopeSuffix = ". Use the shared material as context; do not answer the other subproblems."
+	scopeLabel := ""
+	if index := strings.LastIndex(p, scopePrefix); index >= 0 {
+		scope := p[index+len(scopePrefix):]
+		if !strings.HasSuffix(scope, scopeSuffix) {
+			return elementaryWordSolution{}, false
+		}
+		labelParts := elementaryQuantityScopeRe.FindStringSubmatch(strings.TrimSuffix(scope, scopeSuffix))
+		if labelParts == nil {
+			return elementaryWordSolution{}, false
+		}
+		for _, part := range labelParts[1:] {
+			if part != "" {
+				scopeLabel = part
+			}
+		}
+		p = strings.TrimSpace(p[:index])
+	}
+	// 单位、分式和空格算式只改变计算副本，题目和冻结来源保持原文。
+	p = elementaryQuantityUnitRe.ReplaceAllString(p, "$1")
+	p = normalizeArithmeticAnswerMarkup(p)
+	p = strings.NewReplacer(`\,`, " ", `\;`, " ", `\square`, "□", "（", "(", "）", ")").Replace(p)
+	p = compactElementaryProblem(p)
+	p = elementaryQuantityAtomRe.ReplaceAllString(p, "$1")
+	match := elementaryQuantityPerItemRe.FindStringSubmatch(p)
+	if match == nil {
+		return elementaryWordSolution{}, false
+	}
+	field := func(name string) string { return match[elementaryQuantityPerItemRe.SubexpIndex(name)] }
+	if (field("label") != "" && field("label") != scopeLabel) || field("measure") != field("target_measure") ||
+		(field("target_item") != "" && field("target_item") != field("item")) ||
+		(field("verb") == "重") != (field("target_verb") == "重") {
+		return elementaryWordSolution{}, false
+	}
+	// 可选材料用途句不承载数量或条件；包含条件、余量或倍数的句子不属于这一完整语法。
+	productContext := field("product")
+	if productContext == "一"+field("measure")+field("item") {
+		productContext = ""
+	}
+	context := field("actor") + field("material") + productContext
+	if context != "" {
+		if (productContext != "" && !strings.HasSuffix(productContext, field("item"))) || strings.ContainsAny(context, "零〇一二两三四五六七八九十百千万半") {
+			return elementaryWordSolution{}, false
+		}
+		for _, marker := range []string{"如果", "若", "每", "比", "剩", "余", "只", "另", "损耗", "浪费", "倍", "多", "少"} {
+			if strings.Contains(context, marker) {
+				return elementaryWordSolution{}, false
+			}
+		}
+	}
+	unit := normalizeAnswerUnit(field("unit"))
+	targetUnit := normalizeAnswerUnit(field("target_unit"))
+	comparisonUnit := func(value string) string {
+		if value == "张纸" {
+			return "张"
+		}
+		return value
+	}
+	if unit == "" || comparisonUnit(unit) != comparisonUnit(targetUnit) ||
+		(field("template_unit") != "" && comparisonUnit(unit) != comparisonUnit(normalizeAnswerUnit(field("template_unit")))) {
+		return elementaryWordSolution{}, false
+	}
+	numerator, numeratorOK := nonNegativeRat(field("numerator"))
+	denominator, denominatorOK := positiveRat(field("denominator"))
+	count, countOK := positiveRat(field("count"))
+	if !numeratorOK || !denominatorOK || !countOK {
+		return elementaryWordSolution{}, false
+	}
+	value := new(big.Rat).Mul(new(big.Rat).Quo(numerator, denominator), count)
+	answer := value.RatString()
+	product := new(big.Int).Mul(numerator.Num(), count.Num())
+	worked := fmt.Sprintf("每%s%s%s %s/%s %s。\n求 %s%s%s的总量，就是求 %s 个相同用量的和。\n列式：(%s/%s)×%s = (%s×%s)/%s = %s/%s\n约分得到：%s %s\n\n答案：%s %s",
+		field("measure"), field("item"), field("verb"), field("numerator"), field("denominator"), unit,
+		field("count"), field("measure"), field("item"), field("count"),
+		field("numerator"), field("denominator"), field("count"), field("numerator"), field("count"), field("denominator"),
+		product.String(), denominator.Num().String(), answer, targetUnit, answer, targetUnit)
+	return elementaryWordSolution{worked: worked, value: answer, unit: targetUnit, knowledgePoint: "分数乘整数"}, true
 }
 
 func compactElementaryProblem(problem string) string {
