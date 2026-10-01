@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -51,14 +52,15 @@ type Instance struct {
 }
 
 type HealthReport struct {
-	Name        string    `json:"name"`
-	Provider    string    `json:"provider"`
-	Mode        string    `json:"mode"`
-	Status      Status    `json:"status"`
-	Healthy     bool      `json:"healthy"`
-	LastEventAt time.Time `json:"last_event_at,omitempty"`
-	LastError   string    `json:"last_error,omitempty"`
-	CheckedAt   time.Time `json:"checked_at"`
+	Name            string    `json:"name"`
+	Provider        string    `json:"provider"`
+	Mode            string    `json:"mode"`
+	Status          Status    `json:"status"`
+	Healthy         bool      `json:"healthy"`
+	ConnectionState string    `json:"connection_state,omitempty"`
+	LastEventAt     time.Time `json:"last_event_at,omitempty"`
+	LastError       string    `json:"last_error,omitempty"`
+	CheckedAt       time.Time `json:"checked_at"`
 }
 
 type Manager struct {
@@ -264,12 +266,14 @@ func (m *Manager) ListLive(ctx context.Context) ([]*Instance, error) {
 
 		var newStatus Status
 		var lastErr string
+		var connectionState string
 		switch {
 		case started:
 			newStatus = StatusRunning
 			if hc, ok := adp.(adapter.HealthChecker); ok {
 				if herr := hc.Health(ctx); herr != nil {
 					newStatus, lastErr = StatusError, herr.Error()
+					connectionState = healthConnectionState(herr)
 				}
 			}
 		case inst.Status == StatusRunning:
@@ -283,7 +287,10 @@ func (m *Manager) ListLive(ctx context.Context) ([]*Instance, error) {
 		if inst.Status != newStatus || inst.LastError != lastErr {
 			inst.Status = newStatus
 			inst.LastError = lastErr
-			_ = m.setStatus(ctx, inst.Name, newStatus, lastErr)
+			// 首次握手只是瞬态健康结果，不将其保存为实例故障。
+			if connectionState != "connecting" {
+				_ = m.setStatus(ctx, inst.Name, newStatus, lastErr)
+			}
 		}
 	}
 	return list, nil
@@ -874,13 +881,14 @@ func (m *Manager) Health(ctx context.Context, name string) (*HealthReport, error
 	}
 
 	report := &HealthReport{
-		Name:        inst.Name,
-		Provider:    inst.Provider,
-		Mode:        inst.Mode,
-		Status:      inst.Status,
-		LastEventAt: inst.LastEventAt,
-		LastError:   inst.LastError,
-		CheckedAt:   time.Now(),
+		Name:            inst.Name,
+		Provider:        inst.Provider,
+		Mode:            inst.Mode,
+		Status:          inst.Status,
+		LastEventAt:     inst.LastEventAt,
+		LastError:       inst.LastError,
+		CheckedAt:       time.Now(),
+		ConnectionState: "disconnected",
 	}
 
 	m.mu.RLock()
@@ -902,16 +910,32 @@ func (m *Manager) Health(ctx context.Context, name string) (*HealthReport, error
 		if err := hc.Health(ctx); err != nil {
 			report.Status = StatusError
 			report.LastError = err.Error()
-			_ = m.setStatus(ctx, name, StatusError, report.LastError)
+			report.ConnectionState = healthConnectionState(err)
+			if report.ConnectionState != "connecting" {
+				_ = m.setStatus(ctx, name, StatusError, report.LastError)
+			}
 			return report, nil
 		}
 	}
 
 	report.Status = StatusRunning
 	report.Healthy = true
+	report.ConnectionState = "connected"
 	report.LastError = ""
 	_ = m.setStatus(ctx, name, StatusRunning, "")
 	return report, nil
+}
+
+// healthConnectionState 只接纳适配器的明确原因，不从任意错误文案推断凭据失效。
+func healthConnectionState(err error) string {
+	var diagnostic interface{ ConnectionState() string }
+	if errors.As(err, &diagnostic) {
+		switch state := diagnostic.ConnectionState(); state {
+		case "connecting", "credential_invalid":
+			return state
+		}
+	}
+	return "disconnected"
 }
 
 func (m *Manager) HealthAll(ctx context.Context) ([]*HealthReport, error) {

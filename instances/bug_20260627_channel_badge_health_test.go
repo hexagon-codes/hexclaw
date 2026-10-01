@@ -2,6 +2,7 @@ package instances
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"testing"
 )
@@ -135,3 +136,120 @@ func findInstance(t *testing.T, mgr *Manager, name string) *Instance {
 type noHealthAdapter struct{ stubAdapter }
 
 func (a *noHealthAdapter) Health() {} // 故意签名不符 HealthChecker，使类型断言失败
+
+// pendingConnectionHealthError 只控制适配器的握手结果，数据库与管理器使用真实实现。
+type pendingConnectionHealthError struct{}
+
+func (pendingConnectionHealthError) Error() string { return "Stream connection is pending" }
+
+func (pendingConnectionHealthError) ConnectionState() string { return "connecting" }
+
+func TestManagerConnectingDoesNotPersistHealthError(t *testing.T) {
+	for _, entry := range []string{"Health", "ListLive"} {
+		t.Run(entry, func(t *testing.T) {
+			mgr, cleanup := newTestManager(t)
+			defer cleanup()
+			ctx := context.Background()
+			inst := &Instance{Provider: "dingtalk", Name: "connecting", Enabled: true, Config: []byte(`{"app_key":"fixture"}`)}
+			if err := mgr.Upsert(ctx, inst); err != nil {
+				t.Fatal(err)
+			}
+			if err := mgr.setStatus(ctx, inst.Name, StatusRunning, ""); err != nil {
+				t.Fatal(err)
+			}
+			before, err := mgr.Get(ctx, inst.Name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			mgr.running[inst.Name] = &stubAdapter{healthErr: pendingConnectionHealthError{}}
+
+			if entry == "Health" {
+				report, err := mgr.Health(ctx, inst.Name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if report.Healthy || report.Status != StatusError || report.LastError != "Stream connection is pending" {
+					t.Errorf("handshake must remain unhealthy with its original explanation: %+v", report)
+				}
+				assertConnectionStateJSON(t, report, "connecting")
+			} else {
+				projected := findInstance(t, mgr, inst.Name)
+				if projected.Status != StatusError || projected.LastError != "Stream connection is pending" {
+					t.Errorf("live list must not claim an established connection: %+v", projected)
+				}
+			}
+
+			persisted, err := mgr.Get(ctx, inst.Name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if persisted.Status != StatusRunning || persisted.LastError != "" || !persisted.UpdatedAt.Equal(before.UpdatedAt) {
+				t.Errorf("handshake polluted persisted health: status=%q last_error=%q timestamp_changed=%t", persisted.Status, persisted.LastError, !persisted.UpdatedAt.Equal(before.UpdatedAt))
+			}
+		})
+	}
+}
+
+func TestManagerNetworkFailureThenHealthyConnection(t *testing.T) {
+	mgr, cleanup := newTestManager(t)
+	defer cleanup()
+	ctx := context.Background()
+	inst := &Instance{Provider: "dingtalk", Name: "recovering", Enabled: true, Config: []byte(`{"app_key":"fixture"}`)}
+	if err := mgr.Upsert(ctx, inst); err != nil {
+		t.Fatal(err)
+	}
+	const networkError = "dial tcp 127.0.0.1:1: connect: connection refused"
+	runtime := &stubAdapter{healthErr: fmt.Errorf("%s", networkError)}
+	mgr.running[inst.Name] = runtime
+
+	report, err := mgr.Health(ctx, inst.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Healthy || report.Status != StatusError || report.LastError != networkError {
+		t.Errorf("network failure must remain unhealthy with the real error: %+v", report)
+	}
+	assertConnectionStateJSON(t, report, "disconnected")
+	persisted, err := mgr.Get(ctx, inst.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Status != StatusError || persisted.LastError != networkError {
+		t.Errorf("real connection failure was not persisted: %+v", persisted)
+	}
+
+	// 只有适配器实际报告健康成功后，才显示已连接并清理旧故障。
+	runtime.healthErr = nil
+	report, err = mgr.Health(ctx, inst.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Healthy || report.Status != StatusRunning || report.LastError != "" {
+		t.Errorf("healthy connection did not clear the old error: %+v", report)
+	}
+	assertConnectionStateJSON(t, report, "connected")
+	persisted, err = mgr.Get(ctx, inst.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Status != StatusRunning || persisted.LastError != "" {
+		t.Errorf("healthy connection did not clear the persisted error: %+v", persisted)
+	}
+}
+
+func assertConnectionStateJSON(t *testing.T, report *HealthReport, want string) {
+	t.Helper()
+	data, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var projection struct {
+		ConnectionState string `json:"connection_state"`
+	}
+	if err := json.Unmarshal(data, &projection); err != nil {
+		t.Fatal(err)
+	}
+	if projection.ConnectionState != want {
+		t.Errorf("connection_state=%q, want %q", projection.ConnectionState, want)
+	}
+}

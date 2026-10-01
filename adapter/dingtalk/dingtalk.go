@@ -2186,6 +2186,15 @@ func (a *DingtalkAdapter) ValidateConfig(ctx context.Context) error {
 	return nil
 }
 
+// streamConnectingError 区分尚未完成的首次握手与已经发生的连接失败。
+type streamConnectingError struct{}
+
+func (streamConnectingError) Error() string {
+	return "dingtalk Stream 未连接（连接中，请稍候重试）"
+}
+
+func (streamConnectingError) ConnectionState() string { return "connecting" }
+
 func (a *DingtalkAdapter) Health(_ context.Context) error {
 	if a.cfg.AppKey == "" || a.cfg.AppSecret == "" || a.cfg.RobotCode == "" {
 		return fmt.Errorf("dingtalk app_key/app_secret/robot_code 未配置")
@@ -2204,7 +2213,7 @@ func (a *DingtalkAdapter) Health(_ context.Context) error {
 		if lastErr != "" {
 			return fmt.Errorf("dingtalk Stream 未连接: %s", lastErr)
 		}
-		return fmt.Errorf("dingtalk Stream 未连接（连接中，请稍候重试）")
+		return streamConnectingError{}
 	}
 	return nil
 }
