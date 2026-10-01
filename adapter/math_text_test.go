@@ -46,6 +46,29 @@ func TestBug20260712_NormalizeMathText(t *testing.T) {
 	}
 }
 
+func TestNormalizeMathText_MixedNumberAcrossDelimitedFraction(t *testing.T) {
+	const complete = `8×\(\frac{1}{4}\)×\(\frac{4}{5}\)` + "\n" +
+		`＝2×\(\frac{4}{5}\)` + "\n" + `＝\(\frac{8}{5}\)＝1\(\frac{3}{5}\)` + "\n" +
+		`答：是1\(\frac{3}{5}\)。`
+	for _, tt := range []struct{ name, input, want string }{
+		{"integer outside inline delimiters", `1\(\frac{3}{5}\)`, "1 3/5"},
+		{"integer outside display delimiters", `12\[\dfrac{3}{5}\]`, "12 3/5"},
+		{"complete working preserves lines", complete, "8×1/4×4/5\n＝2×4/5\n＝8/5＝1 3/5\n答：是1 3/5。"},
+		{"ordinary fraction", `\(\frac{13}{5}\)`, "13/5"},
+		{"bare fraction is not a mixed number", "13/5", "13/5"},
+		{"existing mixed number inside one segment", `$2\frac{3}{4}$`, "2 3/4"},
+		{"inline code stays literal", "`1\\(\\frac{3}{5}\\)`", "`1\\(\\frac{3}{5}\\)`"},
+		{"fenced code stays literal", "```text\n1\\(\\frac{3}{5}\\)\n```", "```text\n1\\(\\frac{3}{5}\\)\n```"},
+		{"URL stays literal", `https://example.test/math/1\(\frac{3}{5}\)`, `https://example.test/math/1\(\frac{3}{5}\)`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := NormalizeMathText(tt.input); got != tt.want {
+				t.Fatalf("projection = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 // BUG-20260712-Q（真机取证·钉钉）：只发作业图片不带文字 → 模型收到「裸图无指令」的
 // 用户消息，自由发挥成自我介绍；用户被迫补一句「解题」才得到解答。
 // 契约：图片-only 消息必须携带默认意图指令（文字 part），让模型直接处理图片内容。

@@ -267,8 +267,18 @@ func stripDelimited(s, open, close string) string {
 		if j < 0 {
 			break
 		}
-		b.WriteString(s[:i])
-		b.WriteString(strings.TrimSpace(convertMath(s[i+len(open):i+len(open)+j], true)))
+		prefix := s[:i]
+		inner := strings.TrimSpace(s[i+len(open) : i+len(open)+j])
+		fraction := strings.HasPrefix(inner, `\frac`) || strings.HasPrefix(inner, `\dfrac`) || strings.HasPrefix(inner, `\tfrac`)
+		if fraction && len(prefix) > 0 && prefix[len(prefix)-1] >= '0' && prefix[len(prefix)-1] <= '9' {
+			if _, _, ok := expandStructuralAt(inner, 0, true); ok {
+				// 整数与分式跨定界符时共同转换，保留既有带分数间隔。
+				inner = prefix[len(prefix)-1:] + inner
+				prefix = prefix[:len(prefix)-1]
+			}
+		}
+		b.WriteString(prefix)
+		b.WriteString(strings.TrimSpace(convertMath(inner, true)))
 		s = s[i+len(open)+j+len(close):]
 	}
 	b.WriteString(s)
