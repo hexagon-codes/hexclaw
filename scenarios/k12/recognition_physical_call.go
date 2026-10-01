@@ -280,6 +280,7 @@ type recognitionPhysicalTransportSendBoundaryContextKey struct{}
 type recognitionLayoutPlanV2ContextKey struct{}
 type recognitionLayoutFinalizationReplayV2ContextKey struct{}
 type recognitionLayoutInitialReadModeContextKey struct{}
+type recognitionLayoutInitialReadJSONOutputContextKey struct{}
 
 // WithRecognitionLayoutInitialReadMode 将已冻结的新首读协议传入适配器，空值保持历史协议。
 func WithRecognitionLayoutInitialReadMode(ctx context.Context, mode string) context.Context {
@@ -295,6 +296,24 @@ func RecognitionLayoutInitialReadModeFromContext(ctx context.Context) string {
 	}
 	mode, _ := ctx.Value(recognitionLayoutInitialReadModeContextKey{}).(string)
 	return mode
+}
+
+// WithRecognitionLayoutInitialReadJSONOutput 仅为本次整页首读请求选择 JSON 对象输出。
+// 调用方从父上下文派生单次调用上下文，不将标记传入后续复读或裁决。
+func WithRecognitionLayoutInitialReadJSONOutput(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, recognitionLayoutInitialReadJSONOutputContextKey{}, true)
+}
+
+// RecognitionLayoutInitialReadJSONOutputFromContext 查询本次首读的请求局部输出选择。
+func RecognitionLayoutInitialReadJSONOutputFromContext(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	enabled, _ := ctx.Value(recognitionLayoutInitialReadJSONOutputContextKey{}).(bool)
+	return enabled
 }
 
 type RecognitionPhysicalBeforeSendHook func(context.Context) error

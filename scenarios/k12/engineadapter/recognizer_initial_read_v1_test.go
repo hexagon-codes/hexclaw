@@ -175,6 +175,59 @@ func initialReadAdapterEntryV1(ref string, order, y int, question, answer, share
 	return map[string]any{"manifest_ref": ref, "manifest_order": order, "source_number_path": []string{fmt.Sprint(order)}, "display_label": fmt.Sprintf("%d.", order), "source_section_path": []string{}, "source_section_label": "", "region": k12.SourcePixelRegion{X: 30, Y: y, Width: 180, Height: 70}, "initial_read": map[string]any{"kind": "question", "recognition": map[string]any{"question": question, "subject": "数学", "answer_state": "present", "student_answer": answer, "recognition_confidence": confidence, "ocr_signals": []string{}, "answer_bbox": k12.SourcePixelRegion{X: 160, Y: y + 35, Width: 20, Height: 20}}, "shared_conditions": shared, "answer_ownership": "visible active handwriting in this target's answer area"}}
 }
 
+type jsonOutputInitialReadExecutorV1 struct{ *initialReadAdapterExecutorV1 }
+
+func (e *jsonOutputInitialReadExecutorV1) AuthorizeRecognitionLayoutAdjudicationV2(_ context.Context, request k12.RecognitionLayoutAdjudicationRequestV2) (k12.RecognitionLayoutAdjudicationAuthorizationV2, bool, error) {
+	return k12.RecognitionLayoutAdjudicationAuthorizationV2{AuthorizationID: "json-output-adjudication", AuthorizationDigest: recognitionLayoutV2TestDigest("json-output-adjudication"), CandidateID: request.CandidateID, PhysicalUnit: "layout_adjudicate_0001"}, true, nil
+}
+
+// 从公开首读入口观察实际 sender 上下文；独立复读冲突继续触发裁决，均不继承首读输出选择。
+func TestRecognitionInitialReadV1JSONOutputScopeSurvivesPhysicalSender(t *testing.T) {
+	entry := initialReadAdapterEntryV1("manifest_0001", 1, 40, "5+5=", "10", "", 0.80)
+	raw, err := json.Marshal(map[string]any{"targets": []any{entry}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor := &jsonOutputInitialReadExecutorV1{initialReadAdapterExecutorV1: &initialReadAdapterExecutorV1{}}
+	ctx := k12.WithRecognitionLayoutPlanV2(t.Context(), recognitionLayoutV2TestDigest("initial-read-header"))
+	ctx = k12.WithRecognitionLayoutInitialReadMode(ctx, k12.RecognitionLayoutManifestWithContentV1)
+	ctx = k12.WithRecognitionPhysicalCallExecutor(ctx, executor)
+	stop := errors.New("stop after observing adjudication request")
+	var mu sync.Mutex
+	var phases []string
+	var jsonOutput []bool
+	recognizer := NewRecognizerAdapter(func(visionCtx context.Context, _ []byte, prompt string) (string, error) {
+		phase := "review_batch"
+		if strings.Contains(prompt, "SAME JSON response") {
+			phase = "whole_page_initial_read"
+		} else if strings.Contains(prompt, "Independently verify one worksheet target") {
+			phase = "adjudication"
+		}
+		mu.Lock()
+		phases = append(phases, phase)
+		jsonOutput = append(jsonOutput, k12.RecognitionLayoutInitialReadJSONOutputFromContext(visionCtx))
+		mu.Unlock()
+		switch phase {
+		case "whole_page_initial_read":
+			return string(raw), nil
+		case "adjudication":
+			return "", stop
+		default:
+			return `{"items":[{"target_id":"t1","kind":"question","recognition":{"question":"5+5=","subject":"数学","answer_state":"present","student_answer":"12","recognition_confidence":0.99,"ocr_signals":[],"answer_bbox":{"x":130,"y":35,"width":20,"height":20}}}]}`, nil
+		}
+	}, WithRecognizerProviderTransportSendBoundary())
+	_, err = recognizer.Recognize(ctx, denseWorksheetTestImage(t, 320, 320))
+	if !errors.Is(err, stop) {
+		t.Fatalf("adjudication sender was not reached: %v", err)
+	}
+	if !reflect.DeepEqual(phases, []string{"whole_page_initial_read", "review_batch", "adjudication"}) {
+		t.Fatalf("actual provider request phases=%v", phases)
+	}
+	if !reflect.DeepEqual(jsonOutput, []bool{true, false, false}) {
+		t.Fatalf("actual sender JSON output scopes=%v, want first read only", jsonOutput)
+	}
+}
+
 func TestRecognitionInitialReadV1PublicAdapterCoverageAndIndependentReview(t *testing.T) {
 	entries := []map[string]any{initialReadAdapterEntryV1("manifest_0002", 2, 160, "5+5=", "5+5=10\n10", "", 0.80), initialReadAdapterEntryV1("manifest_0001", 1, 40, "每包2个。3包共有多少个？", "2×3=6\n6个", "每包2个。", 0.80)}
 	raw, _ := json.Marshal(map[string]any{"targets": entries})
@@ -255,8 +308,23 @@ func TestRecognitionInitialReadV1PublicAdapterCoverageAndIndependentReview(t *te
 		needsReview                    bool
 		reviewQuestion                 string
 	}{
+		{"printed direct instruction", "直接写得数：4÷0.5=", "8", "直接写得数：", 0.99, false, ""},
+		{"printed direct instruction without shared colon", "直接写得数：4÷0.5=", "8", "直接写得数", 0.99, false, ""},
+		{"printed direct instruction halfwidth colon", "直接写得数:4÷0.5=", "8", "直接写得数:", 0.99, false, ""},
 		{"printed fraction instruction", `把下面每题的得数化简：\(\frac{5}{7}-\frac{1}{5}=\)`, `\(\frac{18}{35}\)`, "把下面每题的得数化简：", 0.98, false, ""},
+		{"printed fraction instruction without shared colon", `把下面每题的得数化简：\(\frac{5}{7}-\frac{1}{5}=\)`, `\(\frac{18}{35}\)`, "把下面每题的得数化简", 0.98, false, ""},
+		{"printed fraction instruction paired colon width", `把下面每题的得数化简:\(\frac{5}{7}-\frac{1}{5}=\)`, `\(\frac{18}{35}\)`, "把下面每题的得数化简：", 0.98, false, ""},
 		{"printed calculation instruction", `计算下面各题，能简算的要简算：\(8.7\times17.4-8.7\times7.4\)`, "= 8.7 × (17.4 − 7.4)\n= 8.7 × 10\n= 87", "计算下面各题，能简算的要简算：", 0.99, false, ""},
+		{"printed calculation instruction without shared colon", `计算下面各题，能简算的要简算：\(8.7\times17.4-8.7\times7.4\)`, "= 8.7 × (17.4 − 7.4)\n= 8.7 × 10\n= 87", "计算下面各题，能简算的要简算", 0.99, false, ""},
+		{"printed calculation instruction paired colon width", "计算下面各题，能简算的要简算：2+2=", "4", "计算下面各题，能简算的要简算:", 0.99, false, ""},
+		{"direct instruction without frozen shared fact", "直接写得数：2+2=", "4", "", 0.99, true, ""},
+		{"different frozen heading", "直接写得数：2+2=", "4", "把下面每题的得数化简", 0.99, true, ""},
+		{"heading with added numeric condition", "直接写得数：每包2个。2+2=", "4", "直接写得数：每包2个。", 0.99, true, ""},
+		{"heading with added unit condition", "直接写得数：单位为米。2+2=", "4", "直接写得数：单位为米。", 0.99, true, ""},
+		{"heading with added method condition", "直接写得数：先乘后加。2+2=", "4", "直接写得数：先乘后加。", 0.99, true, ""},
+		{"heading with repeated shared colon", "直接写得数：：2+2=", "4", "直接写得数：：", 0.99, true, ""},
+		{"heading without question colon", "直接写得数2+2=", "4", "直接写得数", 0.99, true, ""},
+		{"paired direct heading with wrong answer", "直接写得数：2+2=", "5", "直接写得数", 0.99, true, ""},
 		{"wrong final value", `把下面每题的得数化简：\(\frac{5}{7}-\frac{1}{5}=\)`, `\(\frac{19}{35}\)`, "把下面每题的得数化简：", 0.99, true, ""},
 		{"wrong intermediate step", `计算下面各题，能简算的要简算：\(8.7\times17.4-8.7\times7.4\)`, "= 8.7 × (17.4 − 7.4)\n= 8.7 × 11\n= 87", "计算下面各题，能简算的要简算：", 0.99, true, ""},
 		{"numeric shared condition", "每包2个。3包共有多少个？", "2×3=6\n6个", "每包2个。", 0.99, true, ""},
@@ -266,6 +334,10 @@ func TestRecognitionInitialReadV1PublicAdapterCoverageAndIndependentReview(t *te
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			entry := initialReadAdapterEntryV1("manifest_0001", 1, 40, scenario.question, scenario.answer, scenario.shared, scenario.confidence)
+			entryJSON, err := json.Marshal(entry)
+			if err != nil {
+				t.Fatal(err)
+			}
 			wholeJSON, err := json.Marshal(map[string]any{"targets": []any{entry}})
 			if err != nil {
 				t.Fatal(err)
@@ -297,33 +369,43 @@ func TestRecognitionInitialReadV1PublicAdapterCoverageAndIndependentReview(t *te
 			if len(executor.calls) != expectedCalls || len(executor.initial.ReviewAuthorizations) != expectedCalls-1 {
 				t.Fatalf("printed instruction changed review routing: calls=%d reviews=%d", len(executor.calls), len(executor.initial.ReviewAuthorizations))
 			}
-			if len(questions) != 1 || questions[0].RawTranscription != reviewQuestion || questions[0].AnswerRawTranscription != scenario.answer || (scenario.shared != "" && !strings.HasPrefix(questions[0].Question, scenario.shared)) {
+			if len(questions) != 1 || questions[0].RawTranscription != reviewQuestion || questions[0].AnswerRawTranscription != scenario.answer || (scenario.shared != "" && strings.Contains(scenario.question, scenario.shared) && !strings.HasPrefix(questions[0].Question, scenario.shared)) {
 				t.Fatalf("comparison view changed source facts: %+v", questions)
 			}
 			if scenario.reviewQuestion != "" {
 				if questions[0].ConfirmationRequired || !reflect.DeepEqual(questions[0].EvidenceTranscriptions, []string{scenario.question, reviewQuestion}) {
 					t.Fatalf("final projection reintroduced a question-only conflict: %+v", questions[0])
 				}
-				final, _, err := executor.FinalizeRecognitionLayoutPlanV2(context.Background())
-				if err != nil {
-					t.Fatal(err)
-				}
-				before, _ := json.Marshal(final)
-				replayed, err := RecognizedQuestionsFromLayoutFinalizationV2(final, *executor.runtime.AuthorizedPlan)
-				after, _ := json.Marshal(final)
-				if err != nil || !reflect.DeepEqual(replayed, questions) || !bytes.Equal(before, after) || len(executor.calls) != 2 {
-					t.Fatalf("frozen final replay changed facts, digests or calls: %v", err)
-				}
+			}
+			readsBefore, _ := json.Marshal(executor.initial.FirstReads)
+			final, _, err := executor.FinalizeRecognitionLayoutPlanV2(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			before, _ := json.Marshal(final)
+			replayed, err := RecognizedQuestionsFromLayoutFinalizationV2(final, *executor.runtime.AuthorizedPlan)
+			after, _ := json.Marshal(final)
+			readsAfter, _ := json.Marshal(executor.initial.FirstReads)
+			if err != nil || !reflect.DeepEqual(replayed, questions) || !bytes.Equal(before, after) || !bytes.Equal(readsBefore, readsAfter) || len(executor.calls) != expectedCalls {
+				t.Fatalf("frozen final replay changed facts, digests or calls: %v", err)
 			}
 			var observation struct {
 				InitialRead struct {
 					SharedConditions string `json:"shared_conditions"`
 					Recognition      struct {
-						Question string `json:"question"`
+						Question      string `json:"question"`
+						StudentAnswer string `json:"student_answer"`
 					} `json:"recognition"`
 				} `json:"initial_read"`
 			}
-			if err := json.Unmarshal(executor.initial.FirstReads[0].FirstReadJSON, &observation); err != nil || observation.InitialRead.SharedConditions != scenario.shared || observation.InitialRead.Recognition.Question != scenario.question {
+			var original, frozen map[string]any
+			if err := json.Unmarshal(entryJSON, &original); err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(executor.initial.FirstReads[0].FirstReadJSON, &frozen); err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(executor.initial.FirstReads[0].FirstReadJSON, &observation); err != nil || observation.InitialRead.SharedConditions != scenario.shared || observation.InitialRead.Recognition.Question != scenario.question || observation.InitialRead.Recognition.StudentAnswer != scenario.answer || !reflect.DeepEqual(original, frozen) {
 				t.Fatal("comparison view overwrote the private initial observation")
 			}
 		})

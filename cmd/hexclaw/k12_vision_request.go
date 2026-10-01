@@ -10,6 +10,7 @@ import (
 	"github.com/hexagon-codes/ai-core/llm"
 
 	"github.com/hexagon-codes/hexclaw/egress"
+	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 )
 
 // completeK12VisionRequest 是生产代码和真实模型探针共用的唯一 K12 图片与提示词到
@@ -48,7 +49,7 @@ func completeK12VisionRequest(
 	// 调用方的持久 deadline 始终具有权威性。这里只把相同的剩余预算传入受保护的
 	// 请求局部 HTTP transport；绝不修改共享客户端，也不为旧调用虚构 deadline。
 	ctx = withK12StageResponseHeaderDeadline(ctx)
-	response, err := provider.Complete(k12NonIdempotentLLMContext(ctx), llm.CompletionRequest{
+	request := llm.CompletionRequest{
 		Model:                model,
 		Metadata:             requestMetadata,
 		ReasoningPolicyScope: reasoningPolicyScope,
@@ -59,7 +60,11 @@ func completeK12VisionRequest(
 				llm.NewImageURLPart(dataURL, "high"),
 			},
 		}},
-	})
+	}
+	if k12.RecognitionLayoutInitialReadJSONOutputFromContext(ctx) {
+		request.ResponseFormat = &llm.ResponseFormat{Type: "json_object"}
+	}
+	response, err := provider.Complete(k12NonIdempotentLLMContext(ctx), request)
 	if err != nil {
 		return "", err
 	}

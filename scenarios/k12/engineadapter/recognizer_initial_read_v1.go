@@ -131,7 +131,7 @@ func buildRecognitionReviewPromptV1(targets []k12.RecognitionLayoutTargetV2) (st
 	if err != nil {
 		return "", err
 	}
-	return "Independently transcribe these original-image crops. No previous reading or computed answer is supplied. Inspect every printed operand, operator and unit and identify only each target's own active handwriting. Do not solve, correct, infer missing pixels or borrow a neighboring target's answer. Preserve all unresolved source and ownership risks.\n\n" + prompt, nil
+	return "Independently transcribe these original-image crops. No previous reading or computed answer is supplied. Inspect every printed operand, operator and unit and identify only each target's own active handwriting. Do not solve, correct, infer missing pixels or borrow a neighboring target's answer. Preserve all unresolved source and ownership risks. Transcribe every visible active handwritten line verbatim, including the final Chinese answer sentence (for example, \"答：...\"), even when it repeats a value already shown in the calculation; do not summarize or omit any such line.\n\n" + prompt, nil
 }
 
 func (a *RecognizerAdapter) recognizeLayoutInitialReadV1(ctx context.Context, sourceImage []byte, headerDigest string) ([]usecase.RecognizedQuestion, error) {
@@ -144,7 +144,8 @@ func (a *RecognizerAdapter) recognizeLayoutInitialReadV1(ctx context.Context, so
 		cancel()
 		return nil, err
 	}
-	whole, err := a.callRecognitionVisionPhysical(physicalCtx, k12.RecognitionPhysicalCall{PlanVersion: k12.RecognitionPlanVersionV2, PlanDigest: headerDigest, Unit: k12.RecognitionPhysicalUnitWholePage, Image: page.PNG}, recognitionLayoutInitialReadPromptV1)
+	initialReadCtx := k12.WithRecognitionLayoutInitialReadJSONOutput(physicalCtx)
+	whole, err := a.callRecognitionVisionPhysical(initialReadCtx, k12.RecognitionPhysicalCall{PlanVersion: k12.RecognitionPlanVersionV2, PlanDigest: headerDigest, Unit: k12.RecognitionPhysicalUnitWholePage, Image: page.PNG}, recognitionLayoutInitialReadPromptV1)
 	cancel()
 	if err != nil {
 		return nil, fmt.Errorf("recognizer: initial read model call failed: %w", err)

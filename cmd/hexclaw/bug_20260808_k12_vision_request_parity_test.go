@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
+	"image"
+	"image/png"
 	"os"
 	"reflect"
 	"strings"
@@ -13,10 +16,13 @@ import (
 
 	"github.com/hexagon-codes/hexclaw/egress"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
+	k12engineadapter "github.com/hexagon-codes/hexclaw/scenarios/k12/engineadapter"
+	"github.com/hexagon-codes/hexclaw/scenarios/k12/usecase"
 )
 
 type k12VisionRequestCaptureProvider struct {
 	name              string
+	content           string
 	request           llm.CompletionRequest
 	operationSafety   llm.OperationSafety
 	headerBudget      time.Duration
@@ -44,7 +50,11 @@ func (p *k12VisionRequestCaptureProvider) Complete(
 	p.headerBudget, p.hasHeaderBudget = egress.ProviderRequestResponseHeaderTimeoutFromContext(ctx)
 	_, p.hasCallerDeadline = ctx.Deadline()
 	p.egressRequests, p.hasEgressRequest = egress.RequestsFromContext(ctx)
-	return &llm.CompletionResponse{Content: "captured"}, nil
+	content := p.content
+	if content == "" {
+		content = "captured"
+	}
+	return &llm.CompletionResponse{Content: content}, nil
 }
 
 func (*k12VisionRequestCaptureProvider) Stream(
@@ -194,5 +204,84 @@ func TestBUG20260808K12VisionRequestBuilderDoesNotInventARecognizingPolicy(t *te
 	}
 	if provider.hasHeaderBudget {
 		t.Fatalf("deadline-free request extended transport by %s", provider.headerBudget)
+	}
+}
+
+// 首读格式选择只属于一次请求；复读和裁决继续使用同一任务的原始上下文。
+func TestK12VisionRequestInitialReadJSONObjectIsRequestLocal(t *testing.T) {
+	provider := &k12VisionRequestCaptureProvider{}
+	snapshot := k12.GradingModelSnapshot{
+		Provider:                 "hexclaw-gpt",
+		Model:                    "gpt-5.6-sol",
+		RecognizingRequestPolicy: k12.ApprovedRecognizingRequestPolicy(),
+	}
+	parent := k12.WithGradingModelSnapshot(t.Context(), snapshot)
+	parent = k12.WithGradingModelRequestPolicy(parent, snapshot.RecognizingRequestPolicy)
+	parent = k12.WithRecognitionLayoutPlanV2(parent, "sha256:"+strings.Repeat("1", 64))
+	parent = k12.WithRecognitionLayoutInitialReadMode(parent, k12.RecognitionLayoutManifestWithContentV1)
+	first := k12.WithRecognitionLayoutInitialReadJSONOutput(parent)
+	first, cancel := context.WithTimeout(first, 5*time.Second)
+	defer cancel()
+
+	for _, tc := range []struct {
+		name       string
+		ctx        context.Context
+		wantObject bool
+	}{
+		{"whole_page_initial_read", first, true},
+		{"review_batch", parent, false},
+		{"adjudication", parent, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := completeK12VisionRequest(tc.ctx, provider, snapshot.Model, []byte("\x89PNG\r\n\x1a\n"), tc.name); err != nil {
+				t.Fatal(err)
+			}
+			format := provider.request.ResponseFormat
+			if tc.wantObject {
+				if format == nil || format.Type != "json_object" || format.JSONSchema != nil {
+					t.Fatalf("whole-page initial-read response format=%+v, want json_object", format)
+				}
+			} else if format != nil {
+				t.Fatalf("%s inherited first-read response format=%+v", tc.name, format)
+			}
+		})
+	}
+	if provider.calls != 3 {
+		t.Fatalf("provider calls=%d, want one per request", provider.calls)
+	}
+}
+
+// 通过实际非首读适配器与共享请求构建器检查输出合同，模型边界由 capture Provider 替代。
+func TestK12VisionRequestNonBAdaptersKeepUnconstrainedOutput(t *testing.T) {
+	var encoded bytes.Buffer
+	if err := png.Encode(&encoded, image.NewRGBA(image.Rect(0, 0, 32, 32))); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, response string
+	}{
+		{"creative_work_ocr", `{"text":"原稿文字"}`},
+		{"answer_anchor", `[]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := &k12VisionRequestCaptureProvider{content: tc.response}
+			vision := func(ctx context.Context, image []byte, prompt string) (string, error) {
+				return completeK12VisionRequest(ctx, provider, "other-vision-model", image, prompt)
+			}
+			if tc.name == "creative_work_ocr" {
+				text, err := k12engineadapter.NewCreativeWorkOCRAdapter(vision).RecognizeWriting(t.Context(), encoded.Bytes())
+				if err != nil || text != "原稿文字" {
+					t.Fatalf("writing OCR result=%q err=%v", text, err)
+				}
+			} else {
+				questions, err := k12engineadapter.NewRecognizerAdapter(vision).AnchorAnswers(t.Context(), encoded.Bytes(), []usecase.RecognizedQuestion{{Question: "1+1=", Subject: "数学", AnswerState: usecase.AnswerStatePresent, StudentAnswer: "2"}})
+				if err != nil || len(questions) != 1 {
+					t.Fatalf("answer-anchor result count=%d err=%v", len(questions), err)
+				}
+			}
+			if provider.calls != 1 || provider.request.ResponseFormat != nil {
+				t.Fatalf("%s calls=%d response format=%+v, want one unconstrained request", tc.name, provider.calls, provider.request.ResponseFormat)
+			}
+		})
 	}
 }
