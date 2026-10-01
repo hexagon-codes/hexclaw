@@ -549,7 +549,9 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 		guideRequest := parentTeachingGuideRequest(gradeReq, solved, GradeOutcome{})
 		guideExecutionKind := k12.GradingExecutionProvider
 		var deterministicGuide *ParentTeachingGuide
-		if guide, ok := deterministicParentTeachingGuideForEvidence(guideRequest, solved.Evidence); ok {
+		if gradeReq.SolveOutputVersion == SolveOutputWithParentGuideV1 && solved.Generation != nil {
+			guideExecutionKind = k12.GradingExecutionLocalDeterministic
+		} else if guide, ok := deterministicParentTeachingGuideForEvidence(guideRequest, solved.Evidence); ok {
 			guideExecutionKind = k12.GradingExecutionLocalDeterministic
 			deterministicGuide = &guide
 		} else if gradeReq.SolveOutputVersion == SolveOutputWithParentGuideV1 {

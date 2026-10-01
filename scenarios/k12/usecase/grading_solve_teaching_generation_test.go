@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math/big"
 	"reflect"
 	"strings"
 	"testing"
@@ -16,13 +17,15 @@ import (
 
 type solveTeachingPhysicalSolver struct {
 	grading20260726PhysicalSolver
-	contract    string
-	freezeCalls int
-	audit       string
-	missing     bool
-	incomplete  bool
-	verifyErr   error
-	numeric     bool
+	contract      string
+	freezeCalls   int
+	audit         string
+	missing       bool
+	incomplete    bool
+	verifyErr     error
+	numeric       bool
+	noGeneration  bool
+	numericChecks int
 }
 
 func (s *solveTeachingPhysicalSolver) FreezeSolveTeachingContract(context.Context, string, string) (string, error) {
@@ -41,27 +44,44 @@ func solveTeachingTestGuide() ParentTeachingGuide {
 	}
 }
 
+func solveTeachingNumericGuide() ParentTeachingGuide {
+	return ParentTeachingGuide{
+		Answer: "2张纸", FullSolutionSteps: []string{"每朵用1/2张纸，4朵共用1/2×4=2张纸。"},
+		GradeLevelMethod:       "用4个1/2张相加解释分数乘整数。",
+		LikelyMistakes:         []string{"把分母2也乘了4，错误地算成4/8张。"},
+		ParentTeachingSequence: []string{"先用半张纸表示1/2张，再摆出4份，合并成2张。"},
+		FollowUpQuestions:      []string{"4朵纸花为什么仍以1/2张为分数单位？"},
+		CheckingMethod:         "把1/2张逐份相加四次，核对总共2张。",
+	}
+}
+
 func (s *solveTeachingPhysicalSolver) Solve(ctx context.Context, problem, _, _ string) (SolveResult, error) {
 	version, contract := SolveTeachingRequest(ctx)
 	generated, err := grading20260726PhysicalCall(ctx, k12.GradingItemOperationSolveGenerate,
 		problem+"\x00"+version+"\x00"+contract, 0, func() (SolveResult, error) {
 			solution := "## 完整方法\n先数出两个单位。\n## 答案\n**2**"
+			if s.numeric {
+				solution = "## 完整方法\n每朵用1/2张纸，4朵共用1/2×4=2张纸。\n## 答案\n**2张纸**"
+			}
 			digest := sha256.Sum256([]byte(solution))
 			result := SolveResult{Solution: solution, Evidence: SolveEvidence{
 				Verdict: VerdictUnverifiable, EvidenceType: EvidenceNone,
 				SolverOutputDigest: hex.EncodeToString(digest[:]),
 			}}
-			if s.numeric {
-				result.Evidence.Verdict, result.Evidence.EvidenceType = VerdictAgree, EvidenceNumericExec
-			}
-			if version != "" && !s.missing {
+			if version != "" && !s.noGeneration {
 				guide := solveTeachingTestGuide()
+				if s.numeric {
+					guide = solveTeachingNumericGuide()
+				}
 				if s.incomplete {
 					guide.FullSolutionSteps = nil
 				}
 				result.Generation = &SolveGeneration{
 					OutputVersion: version, ParentGuideCandidate: &guide,
 					SourceSolutionDigest: result.Evidence.SolverOutputDigest,
+				}
+				if s.missing {
+					result.Generation.ParentGuideCandidate = nil
 				}
 			}
 			return result, nil
@@ -73,6 +93,15 @@ func (s *solveTeachingPhysicalSolver) Solve(ctx context.Context, problem, _, _ s
 		problem+"\x00"+generated.Solution, 0, func() (SolveResult, error) {
 			if s.verifyErr != nil {
 				return SolveResult{}, s.verifyErr
+			}
+			if s.numeric {
+				// 精确执行固定题目的有理数运算；只有执行结果吻合才提供程序验算证据。
+				computed := new(big.Rat).Mul(big.NewRat(1, 2), big.NewRat(4, 1))
+				if computed.Cmp(big.NewRat(2, 1)) != 0 || !strings.Contains(generated.Solution, "**2张纸**") {
+					return SolveResult{}, errors.New("numeric fixture verification failed")
+				}
+				s.numericChecks++
+				generated.Evidence.Verdict, generated.Evidence.EvidenceType = VerdictAgree, EvidenceNumericExec
 			}
 			if generated.Generation != nil {
 				generated.Generation.GuideAudit = s.audit
@@ -86,6 +115,9 @@ func newSolveTeachingJob(t *testing.T, solver *solveTeachingPhysicalSolver, lega
 	question := RecognizedQuestion{
 		Question: "讨论一下：分数乘整数，怎样计算？", Subject: "数学", AnswerState: AnswerStateBlank,
 		KnowledgePoints: []string{"分数乘整数"},
+	}
+	if solver.numeric {
+		question.Question = "每朵纸花用1/2张纸，做4朵纸花一共需要多少张纸？"
 	}
 	if !legacy {
 		question.StudentAnswer, question.AnswerState = "1", AnswerStatePresent
@@ -143,82 +175,107 @@ func solveTeachingRow(rows []k12.GradingItemInvocation, operation k12.GradingIte
 }
 
 func TestSolveTeachingLocalGuideCrashReplay(t *testing.T) {
-	solver := newSolveTeachingSolver()
-	o, run, job := newSolveTeachingJob(t, solver, false)
-	if run.req.SolveOutputVersion != SolveOutputWithParentGuideV1 || solver.freezeCalls != 1 {
-		t.Fatalf("new solve version not frozen: request=%+v freezes=%d", run.req, solver.freezeCalls)
-	}
-	question := run.questions[0]
-	req := photoItemGradeRequest(run.req, question)
-	solved, _, err := executeDurableSolveOperation(context.Background(), o, o.deps, job, question, req)
-	if err != nil || solved.Generation == nil || solved.Generation.GuideAudit != "VALID" {
-		t.Fatalf("solve checkpoint: result=%+v err=%v", solved, err)
-	}
-	before := gradingVerifierResponseRows(t, o, job)
-	if len(before) != 2 {
-		t.Fatalf("math checkpoints=%+v", before)
-	}
-	// 重建运行时模拟数学回执提交后崩溃，当前 Skill 改动不能改变冻结合同。
-	solver.contract = "changed current pedagogy"
-	restarted := trackGradingOrchestrator(t, NewGradingOrchestrator(o.deps, orchestratorSnapshotResolver, WithGradingRunDir(o.runDir)))
-	restored, err := restarted.ensureRun(context.Background(), job.Record.RecordID)
-	if err != nil || restored.req.ParentTeachingContract != "frozen pedagogy and grade methods" || solver.freezeCalls != 1 {
-		t.Fatalf("frozen run restore: run=%+v freezes=%d err=%v", restored, solver.freezeCalls, err)
-	}
-	item, err := restarted.assessDurablePhotoItem(context.Background(), restarted.deps, job, restored.req, PhotoModeSolve, question)
-	if err != nil || item.Status != PhotoBlankSolved || item.ParentGuide == nil {
-		t.Fatalf("guide commit: item=%+v err=%v", item, err)
-	}
-	if !reflect.DeepEqual(item.ParentGuide.FullSolutionSteps, []string{"先数出两个单位。"}) ||
-		item.Solve.Evidence.EvidenceType != EvidenceNone || item.Warning == "" || item.Recognized.StudentAnswer != "1" {
-		t.Fatalf("guide rewrote solution or fabricated verification: %+v", item)
-	}
-	after := gradingVerifierResponseRows(t, restarted, job)
-	guideRow := solveTeachingRow(after, k12.GradingItemOperationParentGuide)
-	if len(after) != 3 || !reflect.DeepEqual(before, solveTeachingMathRows(after)) || guideRow == nil ||
-		guideRow.ExecutionKind != k12.GradingExecutionLocalDeterministic || guideRow.Status != k12.ModelInvocationSucceeded {
-		t.Fatalf("local guide receipts: before=%+v after=%+v", before, after)
-	}
-	if solver.count(k12.GradingItemOperationSolveGenerate) != 1 || solver.count(k12.GradingItemOperationSolveVerify) != 1 ||
-		len(o.deps.ParentTeachingGuide.(*parentTeachingGuideSpy).snapshot()) != 0 {
-		t.Fatal("crash replay sent another solver/verifier/guide call")
-	}
-	replayed, err := restarted.assessDurablePhotoItem(context.Background(), restarted.deps, job, restored.req, PhotoModeSolve, question)
-	if err != nil || !reflect.DeepEqual(item.ParentGuide, replayed.ParentGuide) ||
-		!reflect.DeepEqual(after, gradingVerifierResponseRows(t, restarted, job)) {
-		t.Fatalf("committed assessment replay changed guide or receipts: item=%+v err=%v", replayed, err)
+	for _, numeric := range []bool{false, true} {
+		name := "unverified_discussion"
+		if numeric {
+			name = "numeric_valid"
+		}
+		t.Run(name, func(t *testing.T) {
+			solver := newSolveTeachingSolver()
+			solver.numeric = numeric
+			o, run, job := newSolveTeachingJob(t, solver, false)
+			if run.req.SolveOutputVersion != SolveOutputWithParentGuideV1 || solver.freezeCalls != 1 {
+				t.Fatalf("new solve version not frozen: request=%+v freezes=%d", run.req, solver.freezeCalls)
+			}
+			question := run.questions[0]
+			req := photoItemGradeRequest(run.req, question)
+			solved, _, err := executeDurableSolveOperation(context.Background(), o, o.deps, job, question, req)
+			if err != nil || solved.Generation == nil || solved.Generation.GuideAudit != "VALID" {
+				t.Fatalf("solve checkpoint: result=%+v err=%v", solved, err)
+			}
+			before := gradingVerifierResponseRows(t, o, job)
+			if len(before) != 2 {
+				t.Fatalf("math checkpoints=%+v", before)
+			}
+			// 重建运行时模拟数学回执提交后崩溃，当前 Skill 改动不能改变冻结合同。
+			solver.contract = "changed current pedagogy"
+			restarted := trackGradingOrchestrator(t, NewGradingOrchestrator(o.deps, orchestratorSnapshotResolver, WithGradingRunDir(o.runDir)))
+			restored, err := restarted.ensureRun(context.Background(), job.Record.RecordID)
+			if err != nil || restored.req.ParentTeachingContract != "frozen pedagogy and grade methods" || solver.freezeCalls != 1 {
+				t.Fatalf("frozen run restore: run=%+v freezes=%d err=%v", restored, solver.freezeCalls, err)
+			}
+			item, err := restarted.assessDurablePhotoItem(context.Background(), restarted.deps, job, restored.req, PhotoModeSolve, question)
+			if err != nil || item.Status != PhotoBlankSolved || item.ParentGuide == nil {
+				t.Fatalf("guide commit: item=%+v err=%v", item, err)
+			}
+			wantGuide, wantEvidence := solveTeachingTestGuide(), EvidenceNone
+			if numeric {
+				wantGuide, wantEvidence = solveTeachingNumericGuide(), EvidenceNumericExec
+			}
+			if !reflect.DeepEqual(item.ParentGuide, &wantGuide) ||
+				item.Solve.Evidence.EvidenceType != wantEvidence || (item.Warning == "") != numeric || item.Recognized.StudentAnswer != "1" {
+				t.Fatalf("guide rewrote solution or fabricated verification: %+v", item)
+			}
+			if numeric && (item.Solve.Evidence.Verdict != VerdictAgree || solver.numericChecks != 1) {
+				t.Fatalf("numeric verification did not execute exactly once: evidence=%+v checks=%d", item.Solve.Evidence, solver.numericChecks)
+			}
+			after := gradingVerifierResponseRows(t, restarted, job)
+			guideRow := solveTeachingRow(after, k12.GradingItemOperationParentGuide)
+			if len(after) != 3 || !reflect.DeepEqual(before, solveTeachingMathRows(after)) || guideRow == nil ||
+				guideRow.ExecutionKind != k12.GradingExecutionLocalDeterministic || guideRow.Status != k12.ModelInvocationSucceeded {
+				t.Fatalf("local guide receipts: before=%+v after=%+v", before, after)
+			}
+			if solver.count(k12.GradingItemOperationSolveGenerate) != 1 || solver.count(k12.GradingItemOperationSolveVerify) != 1 ||
+				len(o.deps.ParentTeachingGuide.(*parentTeachingGuideSpy).snapshot()) != 0 {
+				t.Fatal("crash replay sent another solver/verifier/guide call")
+			}
+			replayed, err := restarted.assessDurablePhotoItem(context.Background(), restarted.deps, job, restored.req, PhotoModeSolve, question)
+			if err != nil || !reflect.DeepEqual(item.ParentGuide, replayed.ParentGuide) ||
+				!reflect.DeepEqual(after, gradingVerifierResponseRows(t, restarted, job)) || (numeric && solver.numericChecks != 1) {
+				t.Fatalf("committed assessment replay changed guide or receipts: item=%+v err=%v", replayed, err)
+			}
+		})
 	}
 }
 
 func TestSolveTeachingFailedAuditKeepsMathReceipts(t *testing.T) {
-	for _, failure := range []string{"invalid", "missing", "incomplete"} {
-		t.Run(failure, func(t *testing.T) {
-			solver := newSolveTeachingSolver()
-			if failure == "invalid" {
-				solver.audit = "INVALID"
-			}
-			solver.missing, solver.incomplete = failure == "missing", failure == "incomplete"
-			o, run, job := newSolveTeachingJob(t, solver, false)
-			question := run.questions[0]
-			_, _, err := executeDurableSolveOperation(context.Background(), o, o.deps, job, question, photoItemGradeRequest(run.req, question))
-			if err != nil {
-				t.Fatal(err)
-			}
-			before := gradingVerifierResponseRows(t, o, job)
-			item, err := o.assessDurablePhotoItem(context.Background(), o.deps, job, run.req, PhotoModeSolve, question)
-			if !errors.Is(err, ErrSolveFailed) || item.ParentGuide != nil || item.Status == PhotoBlankSolved {
-				t.Fatalf("unaudited guide accepted: item=%+v err=%v", item, err)
-			}
-			after := gradingVerifierResponseRows(t, o, job)
-			guideRow := solveTeachingRow(after, k12.GradingItemOperationParentGuide)
-			if len(after) != 3 || !reflect.DeepEqual(before, solveTeachingMathRows(after)) || guideRow == nil || guideRow.Status != k12.ModelInvocationFailed ||
-				guideRow.ExecutionKind != k12.GradingExecutionLocalDeterministic || guideRow.FailureClass != "local_execution" {
-				t.Fatalf("guide failure changed successful math receipts: before=%+v after=%+v", before, after)
-			}
-			_, err = o.assessDurablePhotoItem(context.Background(), o.deps, job, run.req, PhotoModeSolve, question)
-			if !errors.Is(err, ErrGradingItemInvocationFailed) || !reflect.DeepEqual(after, gradingVerifierResponseRows(t, o, job)) ||
-				len(o.deps.ParentTeachingGuide.(*parentTeachingGuideSpy).snapshot()) != 0 {
-				t.Fatalf("guide failure replay resent or changed receipts: %v", err)
+	for _, numeric := range []bool{false, true} {
+		name := "unverified_discussion"
+		if numeric {
+			name = "numeric"
+		}
+		t.Run(name, func(t *testing.T) {
+			for _, failure := range []string{"invalid", "missing", "incomplete"} {
+				t.Run(failure, func(t *testing.T) {
+					solver := newSolveTeachingSolver()
+					solver.numeric = numeric
+					if failure == "invalid" {
+						solver.audit = "INVALID"
+					}
+					solver.missing, solver.incomplete = failure == "missing", failure == "incomplete"
+					o, run, job := newSolveTeachingJob(t, solver, false)
+					question := run.questions[0]
+					_, _, err := executeDurableSolveOperation(context.Background(), o, o.deps, job, question, photoItemGradeRequest(run.req, question))
+					if err != nil {
+						t.Fatal(err)
+					}
+					before := gradingVerifierResponseRows(t, o, job)
+					item, err := o.assessDurablePhotoItem(context.Background(), o.deps, job, run.req, PhotoModeSolve, question)
+					if !errors.Is(err, ErrSolveFailed) || item.ParentGuide != nil || item.Status == PhotoBlankSolved {
+						t.Fatalf("unaudited guide accepted: item=%+v err=%v", item, err)
+					}
+					after := gradingVerifierResponseRows(t, o, job)
+					guideRow := solveTeachingRow(after, k12.GradingItemOperationParentGuide)
+					if len(after) != 3 || !reflect.DeepEqual(before, solveTeachingMathRows(after)) || guideRow == nil || guideRow.Status != k12.ModelInvocationFailed ||
+						guideRow.ExecutionKind != k12.GradingExecutionLocalDeterministic || guideRow.FailureClass != "local_execution" {
+						t.Fatalf("guide failure changed successful math receipts: before=%+v after=%+v", before, after)
+					}
+					_, err = o.assessDurablePhotoItem(context.Background(), o.deps, job, run.req, PhotoModeSolve, question)
+					if !errors.Is(err, ErrGradingItemInvocationFailed) || !reflect.DeepEqual(after, gradingVerifierResponseRows(t, o, job)) ||
+						len(o.deps.ParentTeachingGuide.(*parentTeachingGuideSpy).snapshot()) != 0 {
+						t.Fatalf("guide failure replay resent or changed receipts: %v", err)
+					}
+				})
 			}
 		})
 	}
@@ -245,29 +302,44 @@ func TestSolveTeachingUnknownVerifyDoesNotSendGuideOrRetry(t *testing.T) {
 }
 
 func TestSolveTeachingLegacyAndNumericGuideRoutes(t *testing.T) {
-	for _, legacy := range []bool{true, false} {
-		name := "numeric_priority"
-		if legacy {
-			name = "legacy_provider"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, route := range []struct {
+		name    string
+		legacy  bool
+		numeric bool
+	}{
+		{name: "legacy_provider", legacy: true},
+		{name: "numeric_without_generation", numeric: true},
+		{name: "legacy_numeric", legacy: true, numeric: true},
+	} {
+		t.Run(route.name, func(t *testing.T) {
 			solver := newSolveTeachingSolver()
-			solver.numeric, solver.missing = !legacy, true
-			o, run, job := newSolveTeachingJob(t, solver, legacy)
+			solver.numeric, solver.noGeneration = route.numeric, true
+			o, run, job := newSolveTeachingJob(t, solver, route.legacy)
 			item, err := o.assessDurablePhotoItem(context.Background(), o.deps, job, run.req, PhotoModeSolve, run.questions[0])
 			if err != nil || item.ParentGuide == nil {
 				t.Fatalf("guide route: item=%+v err=%v", item, err)
 			}
 			rows := gradingVerifierResponseRows(t, o, job)
 			wantKind, wantCalls := k12.GradingExecutionLocalDeterministic, 0
-			if legacy {
+			if !route.numeric {
 				wantKind, wantCalls = k12.GradingExecutionProvider, 1
+			}
+			if route.legacy {
 				if solver.freezeCalls != 0 || run.req.SolveOutputVersion != "" {
 					t.Fatal("legacy request unexpectedly frozen")
 				}
 				raw, err := json.Marshal(photoItemGradeRequest(run.req, run.questions[0]))
 				if err != nil || strings.Contains(string(raw), "solve_output_version") || strings.Contains(string(raw), "parent_teaching_contract") {
 					t.Fatalf("legacy request digest input changed: %s err=%v", raw, err)
+				}
+			}
+			if item.Solve.Generation != nil {
+				t.Fatalf("compatibility route unexpectedly has a joint generation: %+v", item.Solve.Generation)
+			}
+			if route.numeric {
+				if item.ParentGuide.Answer != "2张纸" || item.Solve.Evidence.EvidenceType != EvidenceNumericExec || solver.numericChecks != 1 ||
+					!reflect.DeepEqual(item.ParentGuide.LikelyMistakes, []string{"没有先判断本题的「分数乘整数」和运算顺序", "计算完成后没有检查结果"}) {
+					t.Fatalf("numeric compatibility route no longer uses its local guide: item=%+v checks=%d", item, solver.numericChecks)
 				}
 			}
 			guideRow := solveTeachingRow(rows, k12.GradingItemOperationParentGuide)

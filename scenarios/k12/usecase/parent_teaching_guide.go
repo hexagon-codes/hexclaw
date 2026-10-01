@@ -83,6 +83,10 @@ func (d Deps) SolveBlankWorksheetProblem(
 	req.Subject = subject
 	guideRequest := parentTeachingGuideRequest(req, solved, GradeOutcome{})
 	guide, deterministic := deterministicParentTeachingGuideForEvidence(guideRequest, solved.Evidence)
+	// 联合输出已有本题候选时必须保留其审计结果，不能用通用数值讲法覆盖。
+	if req.SolveOutputVersion == SolveOutputWithParentGuideV1 && solved.Generation != nil {
+		deterministic = false
+	}
 	if !deterministic {
 		if req.SolveOutputVersion == SolveOutputWithParentGuideV1 {
 			guide, err = auditedSolveParentTeachingGuide(solved)
