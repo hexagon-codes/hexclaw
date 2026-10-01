@@ -163,6 +163,8 @@ func executeDurableSolveOperation(ctx context.Context, o *GradingOrchestrator, d
 		// 资产只保存实际核验的解法，不携带其他候选答案及本次采样说明。
 		assetResult := solved
 		assetResult.Solution = assetAnswer
+		// 教学候选绑定本次冻结合同，不随可跨任务采用的数学答案资产传播。
+		assetResult.Generation = nil
 		raw, err := json.Marshal(assetResult)
 		if err != nil {
 			return solved, invocationID, err

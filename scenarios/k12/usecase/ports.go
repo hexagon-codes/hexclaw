@@ -438,6 +438,7 @@ type SolveResult struct {
 	Solution     string
 	Evidence     SolveEvidence
 	OutOfScopeKP string
+	Generation   *SolveGeneration `json:"generation,omitempty"`
 }
 
 // Solver 解题验算 port（adapter = engine/solve）。

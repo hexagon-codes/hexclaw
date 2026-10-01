@@ -183,14 +183,16 @@ func (d Deps) anchorHomeworkGeometry(ctx context.Context, image []byte, question
 
 // GradeRequest 一道题的批改请求（识题后的结构化输入）。
 type GradeRequest struct {
-	AgentName         string
-	Subject           string // 数学/语文/英语/物理/化学；空时由 solver 默认路由
-	Grade             string // 生效年级
-	SourceSession     string
-	Problem           string
-	StudentAnswer     string
-	KnowledgePoints   []string                  // 识题产出
-	PracticeReference *PracticeGradingReference `json:"practice_reference,omitempty"`
+	AgentName              string
+	Subject                string // 数学/语文/英语/物理/化学；空时由 solver 默认路由
+	Grade                  string // 生效年级
+	SourceSession          string
+	Problem                string
+	StudentAnswer          string
+	KnowledgePoints        []string                  // 识题产出
+	PracticeReference      *PracticeGradingReference `json:"practice_reference,omitempty"`
+	SolveOutputVersion     string                    `json:"solve_output_version,omitempty"`
+	ParentTeachingContract string                    `json:"parent_teaching_contract,omitempty"`
 }
 
 // GradeResult 批改闭环结果。
@@ -219,6 +221,7 @@ type SolveHomeworkResult struct {
 	AnswerSource     *k12.ProblemAnswerSource `json:"answer_source,omitempty"`
 	Solution         string
 	Evidence         SolveEvidence
+	Generation       *SolveGeneration `json:"generation,omitempty"`
 	OutOfScope       bool
 	OutOfScopeKP     string
 	// CurriculumUnmapped 词表外知识点（fail-visible，见 GradeResult 同名字段）。
@@ -255,6 +258,7 @@ func (d Deps) SolveHomeworkProblem(ctx context.Context, req GradeRequest) (Solve
 		}, nil
 	}
 
+	ctx = withSolveTeachingRequest(ctx, req)
 	sr, err := d.solveProblem(ctx, req.Subject, req.Problem, req.Grade)
 	if err != nil {
 		return SolveHomeworkResult{}, fmt.Errorf("%w: 解题: %w", ErrSolveFailed, err)
@@ -266,7 +270,7 @@ func (d Deps) SolveHomeworkProblem(ctx context.Context, req GradeRequest) (Solve
 			Evidence:           sr.Evidence,
 		}, nil
 	}
-	return SolveHomeworkResult{Solution: sr.Solution, Evidence: sr.Evidence, CurriculumUnmapped: unmapped}, nil
+	return SolveHomeworkResult{Solution: sr.Solution, Evidence: sr.Evidence, Generation: sr.Generation, CurriculumUnmapped: unmapped}, nil
 }
 
 // outOfScope 倒查超纲：任一知识点首学年级晚于生效年级 = 错发（数学硬边界）。

@@ -84,7 +84,11 @@ func (d Deps) SolveBlankWorksheetProblem(
 	guideRequest := parentTeachingGuideRequest(req, solved, GradeOutcome{})
 	guide, deterministic := deterministicParentTeachingGuideForEvidence(guideRequest, solved.Evidence)
 	if !deterministic {
-		guide, err = d.generateParentTeachingGuide(ctx, guideRequest)
+		if req.SolveOutputVersion == SolveOutputWithParentGuideV1 {
+			guide, err = auditedSolveParentTeachingGuide(solved)
+		} else {
+			guide, err = d.generateParentTeachingGuide(ctx, guideRequest)
+		}
 		if err != nil {
 			return result, err
 		}

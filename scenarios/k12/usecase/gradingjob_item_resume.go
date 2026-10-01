@@ -519,6 +519,8 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 	}
 
 	if mode == PhotoModeSolve {
+		// 求解及家长讲解只使用题目，识别到的作答保留在原题事实中。
+		gradeReq.StudentAnswer = ""
 		solved, solveInvocationID, err := executeDurableSolveOperation(
 			ctx, o, deps, job, q, gradeReq,
 		)
@@ -550,6 +552,8 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 		if guide, ok := deterministicParentTeachingGuideForEvidence(guideRequest, solved.Evidence); ok {
 			guideExecutionKind = k12.GradingExecutionLocalDeterministic
 			deterministicGuide = &guide
+		} else if gradeReq.SolveOutputVersion == SolveOutputWithParentGuideV1 {
+			guideExecutionKind = k12.GradingExecutionLocalDeterministic
 		}
 		rawGuide, parentGuideInvocationID, err := executeGradingItemOperationWithKind(ctx, o, job, q,
 			k12.GradingItemOperationParentGuide,
@@ -558,10 +562,14 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 				ExecutionKind k12.GradingExecutionKind   `json:"execution_kind"`
 				InputDigest   string                     `json:"input_digest"`
 				Request       ParentTeachingGuideRequest `json:"request"`
-			}{guideExecutionKind, q.InputDigest, guideRequest},
+				Generation    *SolveGeneration           `json:"generation,omitempty"`
+			}{guideExecutionKind, q.InputDigest, guideRequest, parentGuideGenerationForRequest(gradeReq, solved)},
 			func(callCtx context.Context) (ParentTeachingGuide, error) {
 				if deterministicGuide != nil {
 					return *deterministicGuide, nil
+				}
+				if gradeReq.SolveOutputVersion == SolveOutputWithParentGuideV1 {
+					return auditedSolveParentTeachingGuide(solved)
 				}
 				return deps.generateParentTeachingGuide(callCtx, guideRequest)
 			})
@@ -919,6 +927,13 @@ func executeGradingItemOperationWithKind[T any](
 			cancelCommit()
 			return zero, invocation.InvocationID, errors.Join(callErr, ledgerErr)
 		}
+		if errors.Is(callErr, egress.ErrProviderResponseProcessed) {
+			commitCtx, cancelCommit := gradingDurableCommitContext(ctx)
+			_, ledgerErr := o.deps.Records.MarkGradingItemInvocationFailed(
+				commitCtx, job.Record.AgentName, invocation.InvocationID, "local", "provider_response_processed")
+			cancelCommit()
+			return zero, invocation.InvocationID, errors.Join(callErr, ledgerErr)
+		}
 		ambiguousTransport := !definitiveProviderResponse(callErr)
 		if invocationOutcomeUnknown(callErr) || invocationOutcomeUnknown(callCtxErr) || ambiguousTransport {
 			commitCtx, cancelCommit := gradingDurableCommitContext(ctx)
@@ -997,6 +1012,9 @@ func definitiveProviderResponse(err error) bool {
 // prove whether the upstream executed the request. Only a typed provider
 // response makes the failure definitive enough for an ordinary retry policy.
 func sentProviderOutcomeUnknown(callErr, ctxErr error) bool {
+	if errors.Is(callErr, egress.ErrProviderResponseProcessed) {
+		return false
+	}
 	if errors.Is(callErr, egress.ErrProviderNotSent) {
 		// 出口记录证明没有进入 Provider，不能因本地取消或无 HTTP 状态改成未知。
 		return false

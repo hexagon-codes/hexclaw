@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-// CompleteRecognitionLayoutBatchJSON 只补主批 items 最后一个对象遗漏的单个右括号。
+// CompleteRecognitionLayoutBatchJSON 只补 items 末项遗漏的右括号或完整末项后的封套闭合。
 // 返回值仅供解析；调用者必须继续核对冻结合同，不得覆盖原始物理回执或摘要。
 func CompleteRecognitionLayoutBatchJSON(raw string) (string, bool) {
 	var envelope map[string]json.RawMessage
@@ -16,10 +16,15 @@ func CompleteRecognitionLayoutBatchJSON(raw string) (string, bool) {
 		return raw, false
 	}
 	index := int(syntax.Offset) - 1
-	if index < 0 || index >= len(raw) || raw[index] != ']' || strings.TrimSpace(raw[index+1:]) != "}" {
+	completion, expectedStack := "}", "{[{"
+	if syntax.Offset == int64(len(raw)) && syntax.Error() == "unexpected end of JSON input" {
+		// EOF 只能缺 items 数组和顶层对象的闭合，不补末项内容。
+		index = len(raw)
+		completion, expectedStack = "]}", "{["
+	} else if index < 0 || index >= len(raw) || raw[index] != ']' || strings.TrimSpace(raw[index+1:]) != "}" {
 		return raw, false
 	}
-	// 忽略字符串及转义里的括号；错误位置只能留下顶层对象、items 数组和末项对象。
+	// 忽略字符串及转义里的括号，严格核对缺损位置留下的封套或末项栈。
 	var stack []byte
 	inString := false
 	for i := 0; i < index; i++ {
@@ -44,10 +49,10 @@ func CompleteRecognitionLayoutBatchJSON(raw string) (string, bool) {
 			stack = stack[:len(stack)-1]
 		}
 	}
-	if inString || string(stack) != "{[{" {
+	if inString || string(stack) != expectedStack {
 		return raw, false
 	}
-	candidate := raw[:index] + "}" + raw[index:]
+	candidate := raw[:index] + completion + raw[index:]
 	if json.Unmarshal([]byte(candidate), &envelope) != nil || len(envelope) != 1 {
 		return raw, false
 	}

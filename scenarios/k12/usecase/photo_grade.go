@@ -69,12 +69,14 @@ const (
 )
 
 type PhotoGradeRequest struct {
-	AgentName         string
-	Subject           string
-	Grade             string
-	SourceSession     string
-	SourcePageAssetID string
-	Image             []byte
+	AgentName              string
+	Subject                string
+	Grade                  string
+	SourceSession          string
+	SourcePageAssetID      string
+	Image                  []byte
+	SolveOutputVersion     string `json:"solve_output_version,omitempty"`
+	ParentTeachingContract string `json:"parent_teaching_contract,omitempty"`
 	// TaskIntent is frozen by ImageTaskDispatch. Empty preserves the legacy
 	// direct-photo path which infers intent from recognition evidence.
 	TaskIntent PhotoTaskIntent
@@ -225,7 +227,7 @@ func (d Deps) gradeHomeworkPhotoWithAssessorInput(
 	}
 	practiceReferences := practiceQuestionReferences(req.PracticeReferences, req.PracticePaperSize, questions)
 	mode := classifyPhotoMode(questions)
-	if mode == PhotoModeSolve && hasUnclear && !anchorVerified {
+	if mode == PhotoModeSolve && hasUnclear && !anchorVerified && req.TaskIntent != PhotoTaskBlankWorksheet {
 		// An unavailable evidence adapter must fail closed: a genuinely answered but unreadable page
 		// must never receive generated answers merely because the independent verifier did not run.
 		mode = PhotoModeGrade
@@ -243,7 +245,9 @@ func (d Deps) gradeHomeworkPhotoWithAssessorInput(
 		default:
 			return PhotoGradeResult{}, fmt.Errorf("%w: frozen photo task intent 非法: %q", ErrInvalidInput, req.TaskIntent)
 		}
-		if mode != expectedMode {
+		// 冻结的解题任务只生成解法，识别到的示例或作答仍保留为原始证据，
+		// 不参与学生批改，也不阻止用户请求的讲解。
+		if mode != expectedMode && req.TaskIntent != PhotoTaskBlankWorksheet {
 			return PhotoGradeResult{}, fmt.Errorf(
 				"%w: frozen photo task intent %q 与识别到的作答证据冲突",
 				ErrInvalidInput, req.TaskIntent,
@@ -418,6 +422,7 @@ func photoItemGradeRequest(req PhotoGradeRequest, q RecognizedQuestion) GradeReq
 		AgentName: req.AgentName, Subject: firstNonEmpty(q.Subject, req.Subject), Grade: req.Grade,
 		SourceSession: req.SourceSession, Problem: q.Question, StudentAnswer: q.StudentAnswer,
 		KnowledgePoints: photoGradeKnowledgePoints(q), PracticeReference: req.practiceReference,
+		SolveOutputVersion: req.SolveOutputVersion, ParentTeachingContract: req.ParentTeachingContract,
 	}
 	if req.practiceReference != nil {
 		input.Subject = req.practiceReference.Subject

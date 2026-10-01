@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 
@@ -192,6 +193,11 @@ func (a *SolveAdapter) SolveSubject(ctx context.Context, subject, problem, grade
 	if constraint != "" {
 		args["constraint"] = constraint
 	}
+	version, teachingContract := usecase.SolveTeachingRequest(ctx)
+	if version != "" {
+		args["solve_output_version"] = version
+		args["parent_teaching_contract"] = teachingContract
+	}
 	if usecase.HasGradingPhysicalCallExecutor(ctx) {
 		// 持久批改仍拦截复杂题的真实 solver / verifier 调用；本机可精确计算的题先走
 		// numeric_exec 快路，由用例层单独持久化本地确定性结果。
@@ -208,7 +214,29 @@ func (a *SolveAdapter) SolveSubject(ctx context.Context, subject, problem, grade
 		Solution:     normalizeSolveMarkdown(stripReports(res.Content)),
 		Evidence:     evidenceFromMeta(res.Metadata),
 		OutOfScopeKP: res.Metadata["solve_out_of_scope_kp"],
+		Generation:   solveGenerationFromMetadata(version, res.Metadata),
 	}, nil
+}
+
+func solveGenerationFromMetadata(version string, metadata map[string]string) *usecase.SolveGeneration {
+	if version == "" {
+		return nil
+	}
+	generation := &usecase.SolveGeneration{
+		OutputVersion: version, GuideAudit: metadata["solve_parent_guide_audit"],
+		SourceSolutionDigest: metadata["solve_parent_guide_source_digest"],
+	}
+	if raw := metadata["solve_parent_guide_json"]; raw != "" {
+		var guide usecase.ParentTeachingGuide
+		decoder := json.NewDecoder(strings.NewReader(raw))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&guide); err == nil && decoder.Decode(&struct{}{}) == io.EOF {
+			generation.ParentGuideCandidate = &guide
+		} else {
+			generation.GuideAudit = "INVALID"
+		}
+	}
+	return generation
 }
 
 // SummarizeCause 实现 usecase.CauseSummarizer（BUG-20260712「记一条错题」轻量错因归纳）：

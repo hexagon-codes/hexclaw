@@ -1638,6 +1638,8 @@ type gradingRunFile struct {
 	SourceSession              string                     `json:"source_session,omitempty"`
 	SourcePageAssetID          string                     `json:"source_page_asset_id,omitempty"`
 	TaskIntent                 PhotoTaskIntent            `json:"task_intent,omitempty"`
+	SolveOutputVersion         string                     `json:"solve_output_version,omitempty"`
+	ParentTeachingContract     string                     `json:"parent_teaching_contract,omitempty"`
 	SourceUncertaintyFinalized bool                       `json:"source_uncertainty_finalized,omitempty"`
 	PracticeReferences         []PracticeGradingReference `json:"practice_references,omitempty"`
 	PracticePaperSize          int                        `json:"practice_paper_size,omitempty"`
@@ -1705,7 +1707,8 @@ func (o *GradingOrchestrator) persistRun(jobID string, run *gradingRun) error {
 	meta := gradingRunFile{
 		AgentName: run.agentName, TextOnly: run.textOnly, Subject: run.req.Subject, Grade: run.req.Grade,
 		SourceSession: run.req.SourceSession, SourcePageAssetID: run.req.SourcePageAssetID,
-		TaskIntent:                 run.req.TaskIntent,
+		TaskIntent:         run.req.TaskIntent,
+		SolveOutputVersion: run.req.SolveOutputVersion, ParentTeachingContract: run.req.ParentTeachingContract,
 		SourceUncertaintyFinalized: run.req.SourceUncertaintyFinalized,
 		PracticeReferences:         run.req.PracticeReferences, PracticePaperSize: run.req.PracticePaperSize,
 		Questions: run.questions, Anchored: run.anchored, AnchorFailed: run.anchorFailed,
@@ -1795,6 +1798,7 @@ func (o *GradingOrchestrator) ensureRun(ctx context.Context, jobID string) (*gra
 			AgentName: meta.AgentName, Subject: meta.Subject, Grade: meta.Grade,
 			SourceSession: meta.SourceSession, SourcePageAssetID: meta.SourcePageAssetID,
 			TaskIntent: taskIntent, Image: image,
+			SolveOutputVersion: meta.SolveOutputVersion, ParentTeachingContract: meta.ParentTeachingContract,
 			SourceUncertaintyFinalized: meta.SourceUncertaintyFinalized,
 			PracticeReferences:         meta.PracticeReferences, PracticePaperSize: meta.PracticePaperSize,
 		},

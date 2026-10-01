@@ -194,6 +194,7 @@ const recognizePrompt = `识别这张作业图片里的所有题目，并逐题�
 {"problem_id":"仅用于本次 JSON 内父子关联的临时引用","problem_kind":"standalone","parent_problem_id":"","subproblem_no":"","source_number_path":["三","1"],"display_label":"三、1","source_section_path":["三"],"source_section_label":"三、列式计算","question":"逐字原始转写","canonical_markdown":"规范 Markdown/LaTeX","subject":"数学","knowledge_points":["知识点1"],"answer_state":"present","student_answer":"孩子实际写下且能可靠辨认的原始作答","answer_canonical_markdown":"规范 Markdown/LaTeX","recognition_confidence":0.98,"ocr_signals":[]}
 关键规则：
 - 每个独立作答的小题必须对应一个 JSON 元素：即使多个口算、填空或选择小题横排在同一行，也要逐小题拆开，不能合并成一个大题/整行元素；章节标题不是题目，不得把标题单独输出为 standalone。
+- 可独立回答的讨论、解释、概括规律以及“怎样／为什么”类教材提问也是题目，必须保留；“讨论一下”前缀、没有数值答案、没有填空格或没有手写作答都不是省略理由。没有学生笔迹时诚实返回 blank，不生成答案。
 - 每个题都要回收所属可见章节标题：source_section_path 只放标题编号层级、source_section_label 抄录完整可见标题，例如 ["一"] / "一、计算题"；没有可见章节标题则两个字段同时为空。
 - For the same source_section_path, use the same numbered heading as source_section_label. An unnumbered practice caption such as “做一做” is not another numbered section and must not be appended to that heading.
 - 标题下每个有可见子题号的可作答小题必须输出完整 source_number_path 与 display_label，例如“一、计算题”下的第 1、2 题分别为 ["一","1"] / "一、1" 与 ["一","2"] / "一、2"。子题必须输出完整层级，不得只输出子题的局部序号，不得用空题号代替标题下可见子题号。

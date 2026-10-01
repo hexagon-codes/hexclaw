@@ -1242,6 +1242,11 @@ func (e *durableGradingPhysicalCallExecutor) ExecuteGradingPhysicalCall(
 			)
 			return zero, errors.Join(callErr, ledgerErr)
 		}
+		if errors.Is(callErr, egress.ErrProviderResponseProcessed) {
+			_, ledgerErr := e.o.deps.Records.MarkGradingItemInvocationFailed(
+				commitCtx, e.job.Record.AgentName, invocation.InvocationID, "local", "provider_response_processed")
+			return zero, errors.Join(callErr, ledgerErr)
+		}
 		if sentProviderOutcomeUnknown(callErr, callCtxErr) {
 			_, ledgerErr := e.o.deps.Records.MarkGradingItemInvocationOutcomeUnknown(
 				commitCtx, e.job.Record.AgentName, invocation.InvocationID,

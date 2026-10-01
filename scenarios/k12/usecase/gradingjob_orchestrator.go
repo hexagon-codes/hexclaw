@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hexagon-codes/hexclaw/egress"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
 	"github.com/hexagon-codes/toolkit/util/idgen"
@@ -316,6 +317,18 @@ func (o *GradingOrchestrator) StartPhotoGradingJob(ctx context.Context, in Start
 			)
 		}
 	} else {
+		in.Photo.SolveOutputVersion = ""
+		in.Photo.ParentTeachingContract = ""
+		if in.Photo.TaskIntent == PhotoTaskBlankWorksheet {
+			if freezer, ok := o.deps.Solver.(SolveTeachingContractFreezer); ok {
+				contract, freezeErr := freezer.FreezeSolveTeachingContract(ctx, in.Photo.Subject, in.Photo.Grade)
+				if freezeErr != nil {
+					return GradingJobView{}, false, fmt.Errorf("freeze solve teaching contract: %w", freezeErr)
+				}
+				in.Photo.SolveOutputVersion = SolveOutputWithParentGuideV1
+				in.Photo.ParentTeachingContract = contract
+			}
+		}
 		var trustedRecognitionPolicy *k12.GradingBudgetSnapshot
 		if o.deps.GradingBudgetSnapshot.IsFrozen() {
 			var taskIntent PhotoTaskIntent
@@ -2285,6 +2298,9 @@ func modelInvocationResultDigest(value any) string {
 }
 
 func invocationOutcomeUnknown(err error) bool {
+	if errors.Is(err, egress.ErrProviderResponseProcessed) {
+		return false
+	}
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
 		errors.Is(err, ErrModelInvocationRequiresReconciliation)
 }

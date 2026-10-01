@@ -61,6 +61,22 @@ var parentTeachingSubjectSkills = map[string]parentTeachingSkillSpec{
 }
 
 var _ usecase.ParentTeachingGuideGenerator = (*SolveAdapter)(nil)
+var _ usecase.SolveTeachingContractFreezer = (*SolveAdapter)(nil)
+
+// FreezeSolveTeachingContract 固化教学 Skill、表达要求和年级，求解时同次生成候选指南。
+func (a *SolveAdapter) FreezeSolveTeachingContract(ctx context.Context, subject, grade string) (string, error) {
+	ctx, _ = config.FreezeAgentInstructions(ctx)
+	if strings.TrimSpace(subject) == "" {
+		subject = "数学"
+	}
+	var contract strings.Builder
+	contract.WriteString(config.ParentExpressionInstructions(ctx))
+	contract.WriteString(buildParentTeachingSkillMethodology(subject, a.parentTeachingSkillLoader))
+	contract.WriteString("\nFrozen subject: " + subject + "\nFrozen grade: " + grade + "\n")
+	contract.WriteString(`Generate the complete parent guide together with this candidate solution. The candidate has not yet been independently verified. Use only the frozen grade/curriculum methods and the supplied teaching Skill. The independent verifier must audit the solution and every mathematical method, example and checking step in the guide.
+parent_guide must contain exactly seven fields: answer (concise final answer explicitly in solution), full_solution_steps (nonempty string array in solution order), grade_level_method (grade-appropriate method), likely_mistakes (nonempty string array specific to this problem), parent_teaching_sequence (nonempty string array of concrete explanation and progressive questions), follow_up_questions (nonempty string array), checking_method (a concrete independent check). Do not invent student answers or grading facts. Do not replace or contradict the candidate solution. The usecase will derive the final full_solution_steps from the independently verified solution.`)
+	return contract.String(), nil
+}
 
 func (a *SolveAdapter) GenerateParentTeachingGuide(
 	ctx context.Context,

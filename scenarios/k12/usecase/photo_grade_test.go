@@ -118,7 +118,7 @@ func TestGradeHomeworkPhoto_AnsweredSheetGradesAndAnnotatesTrustedBBox(t *testin
 	}
 }
 
-func TestGradeHomeworkPhotoFrozenDispatchIntentFailsClosedOnRecognitionMismatch(t *testing.T) {
+func TestGradeHomeworkPhotoFrozenDispatchIntentControlsAssessmentMode(t *testing.T) {
 	tests := []struct {
 		name      string
 		intent    PhotoTaskIntent
@@ -133,7 +133,6 @@ func TestGradeHomeworkPhotoFrozenDispatchIntentFailsClosedOnRecognitionMismatch(
 		{
 			name:   "blank dispatch but recognition has answer evidence",
 			intent: PhotoTaskBlankWorksheet, answer: "2",
-			wantError: "与识别到的作答证据冲突",
 		},
 	}
 	for _, tt := range tests {
@@ -145,12 +144,23 @@ func TestGradeHomeworkPhotoFrozenDispatchIntentFailsClosedOnRecognitionMismatch(
 			d.Recognizer = photoRecognizerFake{questions: []RecognizedQuestion{{
 				Question: "1+1=", Subject: "数学", StudentAnswer: tt.answer,
 			}}}
-			_, err := d.GradeHomeworkPhoto(context.Background(), PhotoGradeRequest{
+			got, err := d.GradeHomeworkPhoto(context.Background(), PhotoGradeRequest{
 				AgentName: "mingming", Grade: "五年级上", Image: []byte("jpeg"),
 				TaskIntent: tt.intent,
 			})
-			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
-				t.Fatalf("mismatch must fail closed, got %v", err)
+			if tt.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+					t.Fatalf("completed homework requires answer evidence, got %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Mode != PhotoModeSolve || len(got.Items) != 1 ||
+				got.Items[0].Status != PhotoBlankSolved || got.Items[0].Grade.Outcome.Verdict != "" ||
+				got.Items[0].Recognized.StudentAnswer != tt.answer || got.AnnotatedImage != nil {
+				t.Fatalf("solve must preserve source evidence without grading it: %#v", got)
 			}
 		})
 	}
