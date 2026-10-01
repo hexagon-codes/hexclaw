@@ -44,6 +44,29 @@ func TestSolveElementaryWordProblem(t *testing.T) {
 	}
 }
 
+func TestSolveElementaryWordProblemSixNumberBalanceLegacy(t *testing.T) {
+	for _, problem := range []string{
+		"在下列六个数：5、6、12、14、23、29中划去一个数（ ）后，能使其中3个数的和为另外2个数和的2倍。",
+		"在下列六个数：5，6，12，14，23，29中划去数（ ）后，能使其中3个数的和为另外2个数和的2倍。",
+	} {
+		worked, answer, ok := solveElementaryWordProblem(problem)
+		if !ok || answer != "29" || !strings.Contains(worked, "40 = 20×2") {
+			t.Fatalf("legacy six-number solution = %q, %q, %v; want remove 29 and 40 = 20×2", worked, answer, ok)
+		}
+		if !elementaryWordAllowedByConstraint(problem, "整数的加法与倍数关系") || elementaryWordAllowedByConstraint(problem, "分数的意义") {
+			t.Fatalf("legacy six-number curriculum constraint changed: %q", problem)
+		}
+	}
+	for _, problem := range []string{
+		"在下列六个数：5、6、12、14、23、29中划去一个数（ ），后，能使其中3个数的和为另外2个数和的2倍。",
+		"在下列六个数：5、6、12、14、23、29中划去一个数（ ）后，能使其中3个数的和为另外2个数和的2倍。且剩下的数均为偶数。",
+	} {
+		if _, _, ok := solveElementaryWordProblem(problem); ok || elementaryWordAllowedByConstraint(problem, "整数的加法与倍数关系") {
+			t.Fatalf("legacy solver or constraint accepted unsupported six-number text: %q", problem)
+		}
+	}
+}
+
 func TestSolveElementaryWordProblemFishTankUsesFiveFacesAndCubicDecimeterVolume(t *testing.T) {
 	problem := "小明的爸爸用玻璃做了一个棱长是6dm的正方体鱼缸。制作这个鱼缸时，至少需要玻璃多少平方米？小明在鱼缸里注入144L的水，水面高度是多少分米？"
 	worked, answer, ok := solveElementaryWordProblem(problem)
