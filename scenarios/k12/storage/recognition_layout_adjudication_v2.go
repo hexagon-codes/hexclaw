@@ -52,7 +52,12 @@ func loadRecognitionAdjudicationAuthority(ctx context.Context, q dbQueryer, owne
 		return out, err
 	}
 	var primaryID, primaryDigest, repairID, repairDigest string
-	if err := q.QueryRowContext(ctx, `SELECT a.source_batch_physical_invocation_id,a.source_batch_result_digest,
+	if plan.InitialReadMode == k12.RecognitionLayoutManifestWithContentV1 {
+		primaryID, primaryDigest, repairID, repairDigest, out.originalJSON, out.originalDigest, err = loadInitialReadAdjudicationSourcesV1(ctx, q, owner, parentID, out.planID, in.CandidateID)
+		if err != nil {
+			return out, err
+		}
+	} else if err := q.QueryRowContext(ctx, `SELECT a.source_batch_physical_invocation_id,a.source_batch_result_digest,
 	 s.source_physical_invocation_id,s.source_physical_result_digest,r.result_json,r.result_digest
 	 FROM k12_recognition_layout_repair_authorizations a
 	 JOIN k12_recognition_layout_repair_settlements s ON s.plan_id=a.plan_id AND s.repair_authorization_id=a.repair_authorization_id
@@ -69,7 +74,13 @@ func loadRecognitionAdjudicationAuthority(ctx context.Context, q dbQueryer, owne
 		if err != nil {
 			return out, err
 		}
-		if child.ParentInvocationID != parentID || child.Status != k12.ModelInvocationSucceeded || child.Attempt != 1 || child.ResultDigest != source.digest || child.PlanDigest != digest {
+		expectedPlanDigest := digest
+		if plan.InitialReadMode == k12.RecognitionLayoutManifestWithContentV1 && source.id == primaryID {
+			if err := q.QueryRowContext(ctx, `SELECT header_digest FROM k12_recognition_layout_plans WHERE plan_id=?`, out.planID).Scan(&expectedPlanDigest); err != nil {
+				return out, err
+			}
+		}
+		if child.ParentInvocationID != parentID || child.Status != k12.ModelInvocationSucceeded || child.Attempt != 1 || child.ResultDigest != source.digest || child.PlanDigest != expectedPlanDigest {
 			return out, ErrModelPhysicalInvocationConflict
 		}
 	}

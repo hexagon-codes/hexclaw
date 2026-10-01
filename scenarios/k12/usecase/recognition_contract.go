@@ -45,7 +45,7 @@ const ocrConfidenceConfirmationThreshold = 0.90
 var (
 	latexFraction           = regexp.MustCompile(`\\frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}`)
 	latexText               = regexp.MustCompile(`\\text\s*\{([^{}]*)\}`)
-	evidenceNewline         = regexp.MustCompile(`\\n\b`)
+	evidenceNewline         = regexp.MustCompile(`\\n(?:\b|([0-9]))`)
 	evidenceNumericFraction = regexp.MustCompile(`\b([0-9]+(?:\.[0-9]+)?)\s*/\s*([0-9]+(?:\.[0-9]+)?)\b`)
 	explicitAnswerLine      = regexp.MustCompile(`^(?:答\s*[:：]\s*(?:是|为)?|答案\s*(?:是|为|[:：]))\s*`)
 )
@@ -209,7 +209,7 @@ func answerEvidenceTranscriptionsConflict(transcription string, values []string)
 }
 
 func canonicalAnswerEvidenceLineOrder(value string) (string, bool) {
-	value = evidenceNewline.ReplaceAllString(value, "\n")
+	value = evidenceNewline.ReplaceAllString(value, "\n$1")
 	var lines []string
 	for _, line := range strings.Split(value, "\n") {
 		if line = strings.TrimSpace(line); line != "" {
@@ -245,7 +245,7 @@ func evidenceTranscriptionsConflict(transcription string, values []string, answe
 	normalize := func(value string) string {
 		// 仅在比较视图统一转义换行和数值分数；先保留分数边界，避免
 		// 空白归一后将带分数的整数部分并入分子，也不移除运算分组括号。
-		value = evidenceNewline.ReplaceAllString(value, "\n")
+		value = evidenceNewline.ReplaceAllString(value, "\n$1")
 		value = evidenceNumericFraction.ReplaceAllString(value, `\frac{$1}{$2}`)
 		value = strings.ReplaceAll(value, `\ `, " ")
 		// 平方、立方的 Unicode 与 LaTeX 写法只影响排版；指数值仍参与逐字比较。
@@ -351,7 +351,7 @@ func RecognitionSourceReadingsMatch(prior, review RecognizedQuestion) (question,
 		if canonical, ok := canonicalAnswerEvidenceLineOrder(value); ok {
 			value = canonical
 		}
-		value = evidenceNewline.ReplaceAllString(value, "\n")
+		value = evidenceNewline.ReplaceAllString(value, "\n$1")
 		var out []string
 		for _, line := range strings.Split(value, "\n") {
 			line = strings.TrimSpace(line)

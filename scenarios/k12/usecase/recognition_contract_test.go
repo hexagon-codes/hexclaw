@@ -91,6 +91,8 @@ func TestEvaluateOCRConfirmationRisk_IndependentAnswerLinePlacement(t *testing.T
 		{"missing calculation", first, `答案是 \(\frac{8}{5}\)。`, true},
 		{"calculation order changed", "答：8\n2+2=4\n4+4=8", "4+4=8\n2+2=4\n答案是8", true},
 		{"two explicit answers remain ambiguous", "答：8\n2+2=4\n答：4", "2+2=4\n答案是4", true},
+		{"serialized newlines before integer steps", "划去：29\n因为：5+23+14=42\n6+12=18\n42=18×2", `划去：29\n因为：5+23+14=42\n6+12=18\n42=18×2`, false},
+		{"serialized integer steps preserve changed values", "划去：29\n因为：5+23+14=42\n6+12=18\n42=18×2", `划去：29\n因为：5+23+14=42\n6+12=18\n42=21×2`, true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			q := RecognizedQuestion{Question: "求算式结果", Subject: "数学", AnswerState: AnswerStatePresent,

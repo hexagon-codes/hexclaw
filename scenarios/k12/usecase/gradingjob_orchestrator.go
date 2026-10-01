@@ -317,6 +317,7 @@ func (o *GradingOrchestrator) StartPhotoGradingJob(ctx context.Context, in Start
 			)
 		}
 	} else {
+		in.Photo.InitialReadMode = ""
 		in.Photo.SolveOutputVersion = ""
 		in.Photo.ParentTeachingContract = ""
 		if in.Photo.TaskIntent == PhotoTaskBlankWorksheet {
@@ -386,6 +387,9 @@ func (o *GradingOrchestrator) StartPhotoGradingJob(ctx context.Context, in Start
 		})
 		if err != nil {
 			return GradingJobView{}, false, err
+		}
+		if created && v.Fields.BudgetSnapshot.RecognitionPlanVersion == k12.RecognitionPlanVersionV2 {
+			in.Photo.InitialReadMode = k12.RecognitionLayoutManifestWithContentV1
 		}
 	}
 	if !created {
@@ -962,6 +966,7 @@ func (o *GradingOrchestrator) runRecognize(ctx context.Context, run *gradingRun,
 				run.req.Image,
 				job.Fields.ModelSnapshot,
 				policy,
+				run.req.InitialReadMode,
 			),
 			policy,
 		)
@@ -974,8 +979,10 @@ func (o *GradingOrchestrator) runRecognize(ctx context.Context, run *gradingRun,
 				run.req.Image,
 				job.Fields.ModelSnapshot,
 				policy,
+				run.req.InitialReadMode,
 			),
 			policy,
+			run.req.InitialReadMode,
 		)
 	}
 	if err != nil {
@@ -1075,6 +1082,7 @@ func (o *GradingOrchestrator) runRecognize(ctx context.Context, run *gradingRun,
 			job,
 			invocation,
 			run.req.Image,
+			run.req.InitialReadMode,
 		)
 		if runtimeErr != nil {
 			cancelProvider()
@@ -1084,6 +1092,7 @@ func (o *GradingOrchestrator) runRecognize(ctx context.Context, run *gradingRun,
 			providerCtx,
 			runtime.HeaderDigest,
 		)
+		providerCtx = k12.WithRecognitionLayoutInitialReadMode(providerCtx, runtime.Header.InitialReadMode)
 		if runtime.Status == "succeeded" {
 			// 最终化是持久化精确集合的提交。如果进程在将其投影到父 Job 前退出，
 			// 则通过显式的只读重放标记进入适配器。适配器必须在任何图像拆分或
@@ -2275,11 +2284,19 @@ func recognizingInvocationDigest(
 	image []byte,
 	route k12.GradingModelSnapshot,
 	policy k12.ModelRequestPolicySnapshot,
+	initialReadModes ...string,
 ) string {
 	route = k12.NormalizeGradingModelSnapshot(route)
 	policy = k12.NormalizeModelRequestPolicySnapshot(policy)
 	routeJSON, _ := json.Marshal(route)
 	policyJSON, _ := json.Marshal(policy)
+	if len(initialReadModes) != 0 && initialReadModes[0] != "" {
+		return modelInvocationDigest(
+			[]byte("k12-recognizing-request-initial-content-v1"),
+			[]byte(k12.GradingStageRecognizing), image, routeJSON, policyJSON,
+			[]byte(initialReadModes[0]),
+		)
+	}
 	return modelInvocationDigest(
 		[]byte("k12-recognizing-request-v1"),
 		[]byte(k12.GradingStageRecognizing),
@@ -2355,6 +2372,7 @@ func (o *GradingOrchestrator) beginRecognizingModelInvocationWithPolicy(
 	image []byte,
 	requestDigest string,
 	policy k12.ModelRequestPolicySnapshot,
+	initialReadModes ...string,
 ) (k12.ModelInvocation, error) {
 	recognitionPlanVersion, err :=
 		frozenRecognitionPlanVersion(job.Fields.BudgetSnapshot)
@@ -2368,6 +2386,7 @@ func (o *GradingOrchestrator) beginRecognizingModelInvocationWithPolicy(
 			image,
 			requestDigest,
 			policy,
+			initialReadModes...,
 		)
 	}
 	parent, _, err := o.deps.Records.PrepareModelInvocation(
@@ -2495,6 +2514,7 @@ func (o *GradingOrchestrator) beginRecognizingLayoutModelInvocationV2(
 	image []byte,
 	requestDigest string,
 	policy k12.ModelRequestPolicySnapshot,
+	initialReadModes ...string,
 ) (k12.ModelInvocation, error) {
 	canonicalPage, err := k12.CanonicalizeRecognitionPageV2(image)
 	if err != nil {
@@ -2528,11 +2548,16 @@ func (o *GradingOrchestrator) beginRecognizingLayoutModelInvocationV2(
 	if err != nil {
 		return parent, err
 	}
+	var initialReadMode string
+	if len(initialReadModes) != 0 {
+		initialReadMode = initialReadModes[0]
+	}
 	published, err := o.publishInitialRecognitionLayoutV2(
 		ctx,
 		parent,
 		canonicalPage,
 		initialRecognitionLayoutContractV2{
+			InitialReadMode:          initialReadMode,
 			Budget:                   job.Fields.BudgetSnapshot,
 			StageStartedAtUnixMillis: stageStartedAt,
 		},
@@ -2575,6 +2600,7 @@ func (o *GradingOrchestrator) loadInitialRecognitionLayoutRuntimeV2(
 	job GradingJobView,
 	parent k12.ModelInvocation,
 	image []byte,
+	initialReadModes ...string,
 ) (k12.RecognitionLayoutPlanRuntimeV2, error) {
 	canonicalPage, err := k12.CanonicalizeRecognitionPageV2(image)
 	if err != nil {
@@ -2588,11 +2614,16 @@ func (o *GradingOrchestrator) loadInitialRecognitionLayoutRuntimeV2(
 	if err != nil {
 		return k12.RecognitionLayoutPlanRuntimeV2{}, err
 	}
+	var initialReadMode string
+	if len(initialReadModes) != 0 {
+		initialReadMode = initialReadModes[0]
+	}
 	return o.loadInitialRecognitionLayoutRuntimeForParentV2(
 		ctx,
 		parent,
 		canonicalPage,
 		initialRecognitionLayoutContractV2{
+			InitialReadMode:          initialReadMode,
 			Budget:                   job.Fields.BudgetSnapshot,
 			StageStartedAtUnixMillis: stageStartedAt,
 		},

@@ -12,6 +12,7 @@ import (
 type initialRecognitionLayoutContractV2 struct {
 	Budget                   k12.GradingBudgetSnapshot
 	StageStartedAtUnixMillis int64
+	InitialReadMode          string
 }
 
 func buildInitialRecognitionLayoutHeaderV2(
@@ -28,6 +29,7 @@ func buildInitialRecognitionLayoutHeaderV2(
 		)
 	}
 	return k12.RecognitionLayoutPlanHeaderV2{
+		InitialReadMode:          contract.InitialReadMode,
 		PlanID:                   stableRecognitionLayoutPlanIDV2(parent.InvocationID),
 		ParentInvocationID:       parent.InvocationID,
 		AgentName:                parent.AgentName,

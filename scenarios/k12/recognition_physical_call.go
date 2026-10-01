@@ -52,7 +52,8 @@ func (u RecognitionPhysicalUnit) Valid() bool {
 		return true
 	default:
 		return u.validLayoutOrdinal("layout_batch_") ||
-			u.validLayoutOrdinal("layout_repair_") || u.validLayoutOrdinal("layout_adjudicate_")
+			u.validLayoutOrdinal("layout_repair_") || u.validLayoutOrdinal("layout_adjudicate_") ||
+			u.validLayoutOrdinal("layout_review_batch_")
 	}
 }
 
@@ -142,7 +143,7 @@ func (c RecognitionPhysicalCall) Validate() error {
 				)
 			}
 			return nil
-		case c.Unit.validLayoutOrdinal("layout_batch_"):
+		case c.Unit.validLayoutOrdinal("layout_batch_"), c.Unit.validLayoutOrdinal("layout_review_batch_"):
 			if !validRecognitionLayoutSHA256(c.PlanDigest) ||
 				len(c.TargetIDs) < 1 ||
 				len(c.TargetIDs) > RecognitionLayoutBatchTargetLimitV2 {
@@ -278,6 +279,23 @@ type recognitionPhysicalCallContextKey struct{}
 type recognitionPhysicalTransportSendBoundaryContextKey struct{}
 type recognitionLayoutPlanV2ContextKey struct{}
 type recognitionLayoutFinalizationReplayV2ContextKey struct{}
+type recognitionLayoutInitialReadModeContextKey struct{}
+
+// WithRecognitionLayoutInitialReadMode 将已冻结的新首读协议传入适配器，空值保持历史协议。
+func WithRecognitionLayoutInitialReadMode(ctx context.Context, mode string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, recognitionLayoutInitialReadModeContextKey{}, mode)
+}
+
+func RecognitionLayoutInitialReadModeFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	mode, _ := ctx.Value(recognitionLayoutInitialReadModeContextKey{}).(string)
+	return mode
+}
 
 type RecognitionPhysicalBeforeSendHook func(context.Context) error
 
@@ -677,6 +695,12 @@ func validateRecognitionLayoutPlanFinalizationV2(
 	if result.CandidateResultCount != len(plan.Targets) ||
 		len(result.CandidateResults) != len(plan.Targets) {
 		return errors.New("candidate result cardinality drifted")
+	}
+	if runtime.Header.InitialReadMode != plan.InitialReadMode {
+		return errors.New("initial-read mode drifted")
+	}
+	if plan.InitialReadMode == RecognitionLayoutManifestWithContentV1 {
+		return validateRecognitionLayoutInitialReadFinalizationV1(runtime, result)
 	}
 
 	expected := make([]recognitionLayoutExpectedPhysicalResultV2, 0, 1+len(plan.Batches))

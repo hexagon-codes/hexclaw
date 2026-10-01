@@ -665,6 +665,9 @@ func (a *RecognizerAdapter) recognizeLayoutPlanV2(
 	sourceImage []byte,
 	headerDigest string,
 ) ([]usecase.RecognizedQuestion, error) {
+	if k12.RecognitionLayoutInitialReadModeFromContext(ctx) == k12.RecognitionLayoutManifestWithContentV1 {
+		return a.recognizeLayoutInitialReadV1(ctx, sourceImage, headerDigest)
+	}
 	manifestCtx, cancelManifest, err := recognitionLayoutPhysicalCallContextV2(
 		ctx,
 		time.Time{},
@@ -1127,10 +1130,13 @@ func RecognizedQuestionsFromLayoutFinalizationV2(
 			return fail("candidate %d is outside plan order", index+1)
 		}
 		primaryUnit, exists := primaryUnitByTarget[target.TargetID]
-		if !exists {
+		if plan.InitialReadMode == k12.RecognitionLayoutManifestWithContentV1 {
+			if !recognitionInitialReadFinalSourceV1(candidate, plan, index) {
+				return fail("candidate %q has unauthorized initial-read source", target.TargetID)
+			}
+		} else if !exists {
 			return fail("candidate %q has no primary source", target.TargetID)
-		}
-		if candidate.SourcePhysicalUnit != primaryUnit {
+		} else if candidate.SourcePhysicalUnit != primaryUnit {
 			repairUnit, repairErr := k12.RecognitionLayoutRepairUnitV2(index + 1)
 			if repairErr != nil || candidate.SourcePhysicalUnit != repairUnit {
 				adjudicationUnit, adjudicationErr := k12.RecognitionLayoutAdjudicationUnitV2(index + 1)
@@ -1143,6 +1149,11 @@ func RecognizedQuestionsFromLayoutFinalizationV2(
 		if !exists || physical.PhysicalUnit != candidate.SourcePhysicalUnit ||
 			physical.ResultDigest != candidate.SourcePhysicalResultDigest {
 			return fail("candidate %q is detached from physical evidence", target.TargetID)
+		}
+		if plan.InitialReadMode == k12.RecognitionLayoutManifestWithContentV1 &&
+			candidate.SourcePhysicalUnit != k12.RecognitionPhysicalUnitWholePage &&
+			(physical.PlanDigest != plan.AuthorizedPlanDigest || !recognitionLayoutSHA256DigestV2.MatchString(physical.CandidateExactSetDigest)) {
+			return fail("candidate %q physical source is detached from its authorized target set", target.TargetID)
 		}
 		switch candidate.ResultKind {
 		case k12.RecognitionLayoutCandidateQuestionV2:

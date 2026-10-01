@@ -112,7 +112,7 @@ func (o *GradingOrchestrator) AuthorizeRecognitionRecovery(ctx context.Context, 
 	if err != nil {
 		return zero, err
 	}
-	if page.Digest != runtime.Header.PageDigest || recognizingInvocationDigest(run.req.Image, job.Fields.ModelSnapshot, prior.RequestPolicySnapshot) != prior.RequestDigest {
+	if page.Digest != runtime.Header.PageDigest || recognizingInvocationDigest(run.req.Image, job.Fields.ModelSnapshot, prior.RequestPolicySnapshot, run.req.InitialReadMode) != prior.RequestDigest {
 		return zero, fmt.Errorf("%w: frozen recognition input changed", ErrInvalidInput)
 	}
 	sourceTimeout := source.EffectiveTimeoutMS
@@ -157,7 +157,7 @@ func (o *GradingOrchestrator) AuthorizeRecognitionRecovery(ctx context.Context, 
 	}
 	next.ParentAutomaticDeadlineAt = next.Deadline
 	next.ParentAutomaticRemainingSeconds = next.Deadline - now
-	header, err := buildInitialRecognitionLayoutHeaderV2(parent, page.Digest, initialRecognitionLayoutContractV2{Budget: next.BudgetSnapshot, StageStartedAtUnixMillis: now * 1000})
+	header, err := buildInitialRecognitionLayoutHeaderV2(parent, page.Digest, initialRecognitionLayoutContractV2{Budget: next.BudgetSnapshot, StageStartedAtUnixMillis: now * 1000, InitialReadMode: run.req.InitialReadMode})
 	if err != nil {
 		return zero, err
 	}

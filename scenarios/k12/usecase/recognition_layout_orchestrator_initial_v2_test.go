@@ -21,16 +21,17 @@ var errRecognitionLayoutInitialV2ProbeComplete = errors.New(
 type recognitionLayoutInitialV2Probe struct {
 	records *k12storage.Store
 
-	agentName     string
-	jobID         string
-	calls         int
-	headerDigest  string
-	headerEnabled bool
-	parent        k12.ModelInvocation
-	manifest      k12.ModelPhysicalInvocation
-	runtime       k12.RecognitionLayoutPlanRuntimeV2
-	jobFields     k12.GradingJobFields
-	entryErr      error
+	agentName       string
+	jobID           string
+	calls           int
+	headerDigest    string
+	headerEnabled   bool
+	initialReadMode string
+	parent          k12.ModelInvocation
+	manifest        k12.ModelPhysicalInvocation
+	runtime         k12.RecognitionLayoutPlanRuntimeV2
+	jobFields       k12.GradingJobFields
+	entryErr        error
 }
 
 func (p *recognitionLayoutInitialV2Probe) Recognize(
@@ -40,6 +41,7 @@ func (p *recognitionLayoutInitialV2Probe) Recognize(
 	p.calls++
 	p.headerDigest, p.headerEnabled =
 		k12.RecognitionLayoutPlanV2HeaderDigestFromContext(ctx)
+	p.initialReadMode = k12.RecognitionLayoutInitialReadModeFromContext(ctx)
 	parents, err := p.records.ListModelInvocations(
 		context.Background(),
 		p.agentName,
@@ -177,7 +179,9 @@ func TestREGK12RecognitionDurabilityBudget20260808001OrchestratesInitialV2Header
 		t.Fatalf("recognizer entry runtime=%+v context=%q", probe.runtime, probe.headerDigest)
 	}
 	header := probe.runtime.Header
-	if header.PlanID != recognitionLayoutInitialV2PlanID(probe.parent.InvocationID) ||
+	if probe.initialReadMode != k12.RecognitionLayoutManifestWithContentV1 ||
+		header.InitialReadMode != k12.RecognitionLayoutManifestWithContentV1 ||
+		header.PlanID != recognitionLayoutInitialV2PlanID(probe.parent.InvocationID) ||
 		header.ParentInvocationID != probe.parent.InvocationID ||
 		header.AgentName != probe.parent.AgentName ||
 		header.JobID != probe.parent.JobID ||
@@ -190,6 +194,10 @@ func TestREGK12RecognitionDurabilityBudget20260808001OrchestratesInitialV2Header
 		header.AdapterWorkerHardCap != budget.WorkerHardCap ||
 		header.EffectiveConcurrency != budget.EffectiveConcurrency {
 		t.Fatalf("recognizer entry header drifted: %+v", header)
+	}
+	if probe.parent.RequestDigest == recognizingInvocationDigest(page, probe.parent.RouteSnapshot, policy) ||
+		probe.parent.RequestDigest != recognizingInvocationDigest(page, probe.parent.RouteSnapshot, policy, k12.RecognitionLayoutManifestWithContentV1) {
+		t.Fatal("new initial-read contract reused the legacy parent request digest")
 	}
 	if probe.jobFields.Deadline != nowUnix+901 ||
 		header.StageStartedAtUnixMillis != nowUnix*1000 {
@@ -289,6 +297,8 @@ func TestREGK12RecognitionDurabilityBudget20260808001ReusesPreparedAndSucceededV
 	if err != nil || !created {
 		t.Fatalf("start restart fixture: created=%v err=%v", created, err)
 	}
+	// 历史任务的运行时未保存首读模式，恢复时仍须使用原清单协议。
+	orchestrator.lookup(job.Record.RecordID).req.InitialReadMode = ""
 	job, err = deps.AdvanceGradingStage(
 		ctx,
 		job.Record.AgentName,
@@ -332,6 +342,10 @@ func TestREGK12RecognitionDurabilityBudget20260808001ReusesPreparedAndSucceededV
 	)
 	if err != nil {
 		t.Fatalf("load initial runtime: %v", err)
+	}
+	if initialRuntime.Header.InitialReadMode != "" ||
+		requestDigest != recognizingInvocationDigest(page, job.Fields.ModelSnapshot, policy, "") {
+		t.Fatal("legacy empty mode changed its header or parent digest")
 	}
 	initialManifest, err := deps.Records.GetModelPhysicalInvocation(
 		ctx,
@@ -453,6 +467,7 @@ func TestREGK12RecognitionDurabilityBudget20260808001ReusesPreparedAndSucceededV
 		t.Fatalf("succeeded manifest did not enter recognizer: %v", runErr)
 	}
 	if probe.entryErr != nil || probe.calls != 1 || !probe.headerEnabled ||
+		probe.initialReadMode != "" ||
 		probe.headerDigest != initialRuntime.HeaderDigest ||
 		probe.runtime.Status != "manifest_succeeded" {
 		t.Fatalf(

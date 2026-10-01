@@ -210,7 +210,7 @@ func legacyRecognitionPhysicalUnit(unit k12.RecognitionPhysicalUnit) bool {
 
 func layoutRecognitionPhysicalUnit(unit k12.RecognitionPhysicalUnit) bool {
 	return strings.HasPrefix(string(unit), "layout_batch_") ||
-		strings.HasPrefix(string(unit), "layout_repair_") || strings.HasPrefix(string(unit), "layout_adjudicate_")
+		strings.HasPrefix(string(unit), "layout_repair_") || strings.HasPrefix(string(unit), "layout_adjudicate_") || strings.HasPrefix(string(unit), "layout_review_batch_")
 }
 
 func recognitionPlanVersionSQL(version int) (string, error) {
@@ -1585,8 +1585,9 @@ func validateRecognitionLayoutBatchAuthorizationVia(
 	isPrimary := strings.HasPrefix(string(invocation.PhysicalUnit), "layout_batch_")
 	isRepair := strings.HasPrefix(string(invocation.PhysicalUnit), "layout_repair_")
 	isAdjudication := strings.HasPrefix(string(invocation.PhysicalUnit), "layout_adjudicate_")
+	isReview := strings.HasPrefix(string(invocation.PhysicalUnit), "layout_review_batch_")
 	if invocation.RecognitionPlanVersion != k12.RecognitionPlanVersionV2 ||
-		(!isPrimary && !isRepair && !isAdjudication) {
+		(!isPrimary && !isRepair && !isAdjudication && !isReview) {
 		return fmt.Errorf(
 			"%w: only an authorized V2 layout batch or repair may use this gate",
 			records.ErrIllegalTransition,
@@ -1627,6 +1628,9 @@ func validateRecognitionLayoutBatchAuthorizationVia(
 	}
 	if isAdjudication {
 		return validateRecognitionLayoutAdjudicationAuthorizationVia(ctx, q, parent, invocation, planID)
+	}
+	if isReview {
+		return validateReviewPhysicalAuthorizationV1(ctx, q, parent, invocation, planID)
 	}
 	if isRepair {
 		return validateRecognitionLayoutRepairAuthorizationVia(
@@ -3101,6 +3105,12 @@ func (s *Store) LoadRecognitionLayoutPlanRuntimeV2(
 		)
 	}
 	runtime.AuthorizedPlan = &plan
+	if plan.InitialReadMode == k12.RecognitionLayoutManifestWithContentV1 {
+		runtime.ReviewBatches, opErr = loadReviewBatchesV1(ctx, s.db, canonicalHeader.PlanID, parentInvocationID)
+		if opErr != nil {
+			return k12.RecognitionLayoutPlanRuntimeV2{}, opErr
+		}
+	}
 	return runtime, nil
 }
 
@@ -3114,6 +3124,9 @@ func (s *Store) AuthorizeRecognitionLayoutPlanV2(
 	manifest k12.RecognitionLayoutManifestSuccessV2,
 	plan k12.RecognitionLayoutPlanV2,
 ) error {
+	if plan.InitialReadMode != "" {
+		return fmt.Errorf("%w: combined initial read requires atomic settlement", k12.ErrRecognitionLayoutPlanInvalid)
+	}
 	agentName = strings.TrimSpace(agentName)
 	parentInvocationID = strings.TrimSpace(parentInvocationID)
 	if agentName == "" || parentInvocationID == "" {
@@ -3937,35 +3950,7 @@ func recognitionLayoutCandidateResultDigestV2(
 	settlement k12.RecognitionLayoutPrimaryBatchSettlementV2,
 	candidate k12.RecognitionLayoutCandidateSettlementV2,
 ) (string, error) {
-	canonical, err := canonicalRecognitionLayoutResultJSONV2(candidate.ResultJSON)
-	if err != nil {
-		return "", err
-	}
-	encoded, err := json.Marshal(struct {
-		Contract                   string                                     `json:"contract"`
-		ParentInvocationID         string                                     `json:"parent_invocation_id"`
-		PlanDigest                 string                                     `json:"plan_digest"`
-		CandidateID                string                                     `json:"candidate_id"`
-		SourcePhysicalInvocationID string                                     `json:"source_physical_invocation_id"`
-		SourcePhysicalResultDigest string                                     `json:"source_physical_result_digest"`
-		SourcePhysicalUnit         k12.RecognitionPhysicalUnit                `json:"source_physical_unit"`
-		ResultKind                 k12.RecognitionLayoutCandidateResultKindV2 `json:"result_kind"`
-		Result                     json.RawMessage                            `json:"result"`
-	}{
-		Contract:                   "recognition_layout_candidate_result_v2",
-		ParentInvocationID:         parentInvocationID,
-		PlanDigest:                 settlement.PlanDigest,
-		CandidateID:                candidate.CandidateID,
-		SourcePhysicalInvocationID: settlement.SourcePhysicalInvocationID,
-		SourcePhysicalResultDigest: settlement.SourcePhysicalResultDigest,
-		SourcePhysicalUnit:         settlement.SourcePhysicalUnit,
-		ResultKind:                 candidate.ResultKind,
-		Result:                     canonical,
-	})
-	if err != nil {
-		return "", fmt.Errorf("k12storage: encode candidate result digest: %w", err)
-	}
-	return physicalInvocationResultDigest(string(encoded)), nil
+	return k12.RecognitionLayoutCandidateResultDigestV2(parentInvocationID, settlement, candidate)
 }
 
 func recognitionLayoutRepairAuthorizationDigestV2(
@@ -5169,6 +5154,9 @@ func reconstructRecognitionLayoutFinalizationV2(
 	q dbQueryer,
 	authority recognitionLayoutFinalizationAuthorityV2,
 ) (k12.RecognitionLayoutPlanFinalizationResultV2, []byte, error) {
+	if authority.Plan.InitialReadMode == k12.RecognitionLayoutManifestWithContentV1 {
+		return reconstructRecognitionLayoutInitialReadFinalizationV1(ctx, q, authority)
+	}
 	plan := authority.Plan
 	physicalResults := make([]k12.RecognitionLayoutPhysicalResultEvidenceV2, 0)
 	physicalByID := make(map[string]k12.RecognitionLayoutPhysicalResultEvidenceV2)
@@ -5973,6 +5961,14 @@ func (s *Store) authorizeRecognitionLayoutPlanV2Once(
 	}
 	// 提交成功或主路径失败后，回滚仅用于释放事务；主路径错误保持原样。
 	defer func() { _ = tx.Rollback() }()
+	if err := authorizeRecognitionLayoutPlanV2Via(ctx, tx, agentName, parentInvocationID, manifest, plan); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// 首读合并模式复用相同授权事务，使候选计划和首次正文不可分开发布。
+func authorizeRecognitionLayoutPlanV2Via(ctx context.Context, tx *sql.Tx, agentName, parentInvocationID string, manifest k12.RecognitionLayoutManifestSuccessV2, plan k12.RecognitionLayoutPlanV2) error {
 	var (
 		planID, jobID, manifestID, pageDigest, headerDigest string
 		status, storedManifestDigest, storedPlanDigest      string
@@ -5981,7 +5977,7 @@ func (s *Store) authorizeRecognitionLayoutPlanV2Once(
 		stageStartedAt, stageDeadlineAt                     int64
 		selectedBucketMaxProblems                           int
 	)
-	opErr = tx.QueryRowContext(
+	opErr := tx.QueryRowContext(
 		ctx,
 		`SELECT plan_id,job_id,manifest_physical_invocation_id,page_digest,
                 header_digest,status,manifest_result_digest,
@@ -6038,7 +6034,7 @@ func (s *Store) authorizeRecognitionLayoutPlanV2Once(
 	if opErr != nil || canonicalHeader.Contract != "recognition_layout_plan_header_v2" ||
 		string(headerJSON) != layoutHeaderJSON ||
 		recomputedHeaderDigest != headerDigest ||
-		canonicalHeader.StageStartedAtUnixMillis != stageStartedAt {
+		canonicalHeader.StageStartedAtUnixMillis != stageStartedAt || canonicalHeader.InitialReadMode != plan.InitialReadMode {
 		return fmt.Errorf(
 			"%w: canonical layout header digest or start time drifted",
 			ErrModelPhysicalInvocationConflict,
@@ -6129,7 +6125,7 @@ func (s *Store) authorizeRecognitionLayoutPlanV2Once(
 		); err != nil {
 			return err
 		}
-		return tx.Commit()
+		return nil
 	}
 	if status != "manifest_succeeded" ||
 		storedManifestDigest != manifest.ResultDigest ||
@@ -6238,9 +6234,6 @@ func (s *Store) authorizeRecognitionLayoutPlanV2Once(
 			records.ErrIllegalTransition,
 		)
 	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("k12storage: commit layout authorization: %w", err)
-	}
 	return nil
 }
 
@@ -6292,8 +6285,23 @@ func validateStoredRecognitionLayoutPlanV2(
 	).Scan(&memberCount); err != nil {
 		return fmt.Errorf("k12storage: count layout batch members: %w", err)
 	}
-	if candidateCount != len(plan.Targets) || batchCount != len(plan.Batches) ||
-		memberCount != len(plan.Targets) {
+	expectedBatches, expectedMembers := len(plan.Batches), len(plan.Targets)
+	if plan.InitialReadMode == k12.RecognitionLayoutManifestWithContentV1 {
+		var parentID string
+		if err := q.QueryRowContext(ctx, `SELECT parent_invocation_id FROM k12_recognition_layout_plans WHERE plan_id=?`, planID).Scan(&parentID); err != nil {
+			return err
+		}
+		reviews, err := loadReviewBatchesV1(ctx, q, planID, parentID)
+		if err != nil {
+			return err
+		}
+		expectedBatches, expectedMembers = len(reviews), 0
+		for _, review := range reviews {
+			expectedMembers += len(review.Members)
+		}
+	}
+	if candidateCount != len(plan.Targets) || batchCount != expectedBatches ||
+		memberCount != expectedMembers {
 		return fmt.Errorf(
 			"%w: persisted layout-plan cardinality drifted",
 			ErrModelPhysicalInvocationConflict,

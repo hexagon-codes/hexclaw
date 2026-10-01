@@ -166,7 +166,7 @@ func (e *durableRecognitionPhysicalCallExecutor) ExecuteRecognitionPhysicalCall(
 			err = errors.New("atomically published V2 manifest identity drifted")
 		}
 	} else if planVersion == k12.RecognitionPlanVersionV2 &&
-		(strings.HasPrefix(string(call.Unit), "layout_repair_") || strings.HasPrefix(string(call.Unit), "layout_adjudicate_")) {
+		(strings.HasPrefix(string(call.Unit), "layout_repair_") || strings.HasPrefix(string(call.Unit), "layout_adjudicate_") || strings.HasPrefix(string(call.Unit), "layout_review_batch_")) {
 		// 已结算的单例已经冻结候选结果，因此 Store 会正确拒绝再次准备。
 		// 恢复时必须先读取稳定子项并重放其私有成功载荷；只有确实不存在的子项
 		// 才能跨越准备边界。
@@ -1396,7 +1396,7 @@ func (o *GradingOrchestrator) recognitionPhysicalSuccessSetV2(
 	current []k12.ModelPhysicalInvocation,
 ) ([]k12.ModelPhysicalInvocation, error) {
 	const maxPhysicalResultsV2 = 1 + 32 + 32 + 32
-	if len(current) < 2 || len(current) > maxPhysicalResultsV2 {
+	if len(current) < 1 || len(current) > maxPhysicalResultsV2 {
 		return nil, fmt.Errorf(
 			"%w: recognizing parent %s has %d v2 physical receipts, want 2..%d",
 			ErrModelInvocationRequiresReconciliation,
@@ -1432,8 +1432,15 @@ func (o *GradingOrchestrator) recognitionPhysicalSuccessSetV2(
 			parent.InvocationID,
 		)
 	}
+	minimumPhysicalResults := 2
+	if runtime.Header.InitialReadMode == k12.RecognitionLayoutManifestWithContentV1 {
+		minimumPhysicalResults = 1
+	}
+	if len(current) < minimumPhysicalResults {
+		return nil, fmt.Errorf("%w: recognizing parent physical cardinality drifted", ErrModelInvocationRequiresReconciliation)
+	}
 	durableCtx := k12.WithRecognitionPhysicalCallExecutor(
-		k12.WithRecognitionLayoutPlanV2(ctx, runtime.HeaderDigest),
+		k12.WithRecognitionLayoutInitialReadMode(k12.WithRecognitionLayoutPlanV2(ctx, runtime.HeaderDigest), runtime.Header.InitialReadMode),
 		executor,
 	)
 	finalized, replayed, err :=
@@ -1448,7 +1455,7 @@ func (o *GradingOrchestrator) recognitionPhysicalSuccessSetV2(
 		)
 	}
 	if finalized.PhysicalResultCount != len(finalized.PhysicalResults) ||
-		len(finalized.PhysicalResults) < 2 ||
+		len(finalized.PhysicalResults) < minimumPhysicalResults ||
 		len(finalized.PhysicalResults) > maxPhysicalResultsV2 ||
 		len(current) != len(finalized.PhysicalResults) {
 		return nil, fmt.Errorf(
@@ -1469,6 +1476,13 @@ func (o *GradingOrchestrator) recognitionPhysicalSuccessSetV2(
 	for _, batch := range plan.Batches {
 		targetsByUnit[batch.Unit] = append([]string(nil), batch.TargetIDs...)
 		primaryUnits[batch.Unit] = struct{}{}
+	}
+	reviewUnits := make(map[k12.RecognitionPhysicalUnit]k12.RecognitionLayoutReviewBatchAuthorizationV1, len(runtime.ReviewBatches))
+	if plan.InitialReadMode == k12.RecognitionLayoutManifestWithContentV1 {
+		for _, batch := range runtime.ReviewBatches {
+			targetsByUnit[batch.PhysicalUnit] = append([]string(nil), batch.OrderedTargetIDs...)
+			reviewUnits[batch.PhysicalUnit] = batch
+		}
 	}
 	for index, target := range plan.Targets {
 		repairUnit, _ := k12.RecognitionLayoutRepairUnitV2(index + 1)
@@ -1533,7 +1547,15 @@ func (o *GradingOrchestrator) recognitionPhysicalSuccessSetV2(
 				)
 			}
 			call.TargetIDs = append([]string(nil), targetIDs...)
-			if _, primary := primaryUnits[evidence.PhysicalUnit]; primary {
+			if review, independent := reviewUnits[evidence.PhysicalUnit]; independent {
+				call.Image, err = k12.BuildRecognitionLayoutReviewBatchImageV1(canonicalPage.PNG, *plan, targetIDs)
+				if err == nil {
+					sum := sha256.Sum256(call.Image)
+					if "sha256:"+hex.EncodeToString(sum[:]) != review.ImageDigest {
+						err = errors.New("review original pixels drifted from frozen authorization")
+					}
+				}
+			} else if _, primary := primaryUnits[evidence.PhysicalUnit]; primary {
 				call.Image, err = k12.BuildRecognitionLayoutBatchImageV2(
 					canonicalPage.PNG,
 					*plan,
@@ -1683,6 +1705,21 @@ func (o *GradingOrchestrator) reconcilePartialRecognition(
 		if child.PhysicalUnit == k12.RecognitionPhysicalUnitWholePage {
 			call.PlanDigest, call.Image = runtime.HeaderDigest, page.PNG
 		} else {
+			if plan.InitialReadMode == k12.RecognitionLayoutManifestWithContentV1 {
+				for _, review := range runtime.ReviewBatches {
+					if review.PhysicalUnit == child.PhysicalUnit {
+						call.TargetIDs = append([]string(nil), review.OrderedTargetIDs...)
+						call.Image, err = k12.BuildRecognitionLayoutReviewBatchImageV1(page.PNG, plan, call.TargetIDs)
+						if err == nil {
+							sum := sha256.Sum256(call.Image)
+							if "sha256:"+hex.EncodeToString(sum[:]) != review.ImageDigest {
+								return false, GradingJobView{}, fmt.Errorf("%w: frozen review pixels drifted", ErrModelInvocationRequiresReconciliation)
+							}
+						}
+						break
+					}
+				}
+			}
 			for _, batch := range plan.Batches {
 				if batch.Unit == child.PhysicalUnit {
 					call.TargetIDs = batch.TargetIDs
@@ -1716,7 +1753,11 @@ func (o *GradingOrchestrator) reconcilePartialRecognition(
 		}
 		evidence = append(evidence, child.PhysicalInvocationID+":"+child.ResultDigest)
 	}
-	if len(seen) < 2 || !seen[k12.RecognitionPhysicalUnitWholePage] {
+	minimumPhysicalResults := 2
+	if plan.InitialReadMode == k12.RecognitionLayoutManifestWithContentV1 {
+		minimumPhysicalResults = 1
+	}
+	if len(seen) < minimumPhysicalResults || !seen[k12.RecognitionPhysicalUnitWholePage] {
 		return false, GradingJobView{}, nil
 	}
 	sort.Strings(evidence)

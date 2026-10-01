@@ -275,6 +275,11 @@ func (o *GradingOrchestrator) classifyRecognitionPhysicalExactSetV2(
 		}
 		batchExactSets[batch.Unit] = digest
 	}
+	if runtime.Header.InitialReadMode == k12.RecognitionLayoutManifestWithContentV1 {
+		for _, batch := range runtime.ReviewBatches {
+			batchExactSets[batch.PhysicalUnit] = batch.ExactSetDigest
+		}
+	}
 	for _, target := range runtime.AuthorizedPlan.Targets {
 		digest, digestErr := k12.RecognitionLayoutTargetExactSetDigestV2(
 			[]string{target.TargetID},
@@ -307,7 +312,8 @@ func (o *GradingOrchestrator) classifyRecognitionPhysicalExactSetV2(
 					ErrModelInvocationRequiresReconciliation,
 				)
 			}
-		} else if strings.HasPrefix(string(child.PhysicalUnit), "layout_repair_") {
+		} else if strings.HasPrefix(string(child.PhysicalUnit), "layout_repair_") ||
+			(runtime.Header.InitialReadMode == k12.RecognitionLayoutManifestWithContentV1 && strings.HasPrefix(string(child.PhysicalUnit), "layout_adjudicate_")) {
 			if _, ok := candidateExactSets[child.CandidateExactSetDigest]; !ok {
 				return recognitionPhysicalExactSetClassification{}, fmt.Errorf(
 					"%w: recognition repair exact set drifted",

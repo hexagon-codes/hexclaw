@@ -75,6 +75,7 @@ type PhotoGradeRequest struct {
 	SourceSession          string
 	SourcePageAssetID      string
 	Image                  []byte
+	InitialReadMode        string `json:"initial_read_mode,omitempty"`
 	SolveOutputVersion     string `json:"solve_output_version,omitempty"`
 	ParentTeachingContract string `json:"parent_teaching_contract,omitempty"`
 	// TaskIntent is frozen by ImageTaskDispatch. Empty preserves the legacy

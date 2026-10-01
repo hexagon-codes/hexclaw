@@ -1203,6 +1203,7 @@ func (o *GradingOrchestrator) reconcileDurableGradingOutcome(
 			run.req.Image,
 			job.Fields.ModelSnapshot,
 			wantPolicy,
+			run.req.InitialReadMode,
 		)
 		if invocation.RequestDigest != wantRequestDigest {
 			return false, GradingJobView{}, fmt.Errorf("recognition invocation request digest drift")
@@ -1638,6 +1639,7 @@ type gradingRunFile struct {
 	SourceSession              string                     `json:"source_session,omitempty"`
 	SourcePageAssetID          string                     `json:"source_page_asset_id,omitempty"`
 	TaskIntent                 PhotoTaskIntent            `json:"task_intent,omitempty"`
+	InitialReadMode            string                     `json:"initial_read_mode,omitempty"`
 	SolveOutputVersion         string                     `json:"solve_output_version,omitempty"`
 	ParentTeachingContract     string                     `json:"parent_teaching_contract,omitempty"`
 	SourceUncertaintyFinalized bool                       `json:"source_uncertainty_finalized,omitempty"`
@@ -1708,6 +1710,7 @@ func (o *GradingOrchestrator) persistRun(jobID string, run *gradingRun) error {
 		AgentName: run.agentName, TextOnly: run.textOnly, Subject: run.req.Subject, Grade: run.req.Grade,
 		SourceSession: run.req.SourceSession, SourcePageAssetID: run.req.SourcePageAssetID,
 		TaskIntent:         run.req.TaskIntent,
+		InitialReadMode:    run.req.InitialReadMode,
 		SolveOutputVersion: run.req.SolveOutputVersion, ParentTeachingContract: run.req.ParentTeachingContract,
 		SourceUncertaintyFinalized: run.req.SourceUncertaintyFinalized,
 		PracticeReferences:         run.req.PracticeReferences, PracticePaperSize: run.req.PracticePaperSize,
@@ -1798,6 +1801,7 @@ func (o *GradingOrchestrator) ensureRun(ctx context.Context, jobID string) (*gra
 			AgentName: meta.AgentName, Subject: meta.Subject, Grade: meta.Grade,
 			SourceSession: meta.SourceSession, SourcePageAssetID: meta.SourcePageAssetID,
 			TaskIntent: taskIntent, Image: image,
+			InitialReadMode:    meta.InitialReadMode,
 			SolveOutputVersion: meta.SolveOutputVersion, ParentTeachingContract: meta.ParentTeachingContract,
 			SourceUncertaintyFinalized: meta.SourceUncertaintyFinalized,
 			PracticeReferences:         meta.PracticeReferences, PracticePaperSize: meta.PracticePaperSize,

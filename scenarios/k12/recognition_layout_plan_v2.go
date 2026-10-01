@@ -63,6 +63,7 @@ type RecognitionLayoutManifestTargetV2 struct {
 }
 
 type RecognitionLayoutPlanInputV2 struct {
+	InitialReadMode          string
 	PagePNG                  []byte
 	Manifest                 RecognitionLayoutManifestSuccessV2
 	Targets                  []RecognitionLayoutManifestTargetV2
@@ -95,6 +96,7 @@ type RecognitionLayoutBatchV2 struct {
 // RecognitionLayoutPlanV2 可安全持久化：它包含标识、源像素区域和摘要，
 // 但绝不包含源图像或裁剪字节。
 type RecognitionLayoutPlanV2 struct {
+	InitialReadMode      string                      `json:"initial_read_mode,omitempty"`
 	Version              int                         `json:"version"`
 	RecognitionFormat    string                      `json:"recognition_format,omitempty"`
 	SourceAdjudication   bool                        `json:"source_adjudication,omitempty"`
@@ -110,6 +112,9 @@ type RecognitionLayoutPlanV2 struct {
 // 所有顺序和持久标识均在本地生成，因此模型输出顺序和模型提供的标识都不会成为
 // 存储标识。
 func BuildRecognitionLayoutPlanV2(input RecognitionLayoutPlanInputV2) (RecognitionLayoutPlanV2, error) {
+	if input.InitialReadMode != "" && (input.InitialReadMode != RecognitionLayoutManifestWithContentV1 || input.RecognitionFormat != RecognitionLayoutCompactV4) {
+		return RecognitionLayoutPlanV2{}, fmt.Errorf("%w: invalid initial read mode", ErrRecognitionLayoutPlanInvalid)
+	}
 	if input.RecognitionFormat != "" && input.RecognitionFormat != RecognitionLayoutCompactV1 && input.RecognitionFormat != RecognitionLayoutCompactV2 && input.RecognitionFormat != RecognitionLayoutCompactV3 && input.RecognitionFormat != RecognitionLayoutCompactV4 {
 		return RecognitionLayoutPlanV2{}, fmt.Errorf("%w: unsupported recognition format", ErrRecognitionLayoutPlanInvalid)
 	}
@@ -218,6 +223,7 @@ func BuildRecognitionLayoutPlanV2(input RecognitionLayoutPlanInputV2) (Recogniti
 	pageDigest := recognitionLayoutSHA256(input.PagePNG)
 	plan := RecognitionLayoutPlanV2{
 		Version:              RecognitionPlanVersionV2,
+		InitialReadMode:      input.InitialReadMode,
 		RecognitionFormat:    input.RecognitionFormat,
 		SourceAdjudication:   input.EnableSourceAdjudication,
 		PageDigest:           pageDigest,
@@ -243,6 +249,10 @@ func BuildRecognitionLayoutPlanV2(input RecognitionLayoutPlanInputV2) (Recogniti
 			Region:             target.Region,
 			CropDigest:         recognitionLayoutSHA256(crop),
 		})
+		if input.InitialReadMode == RecognitionLayoutManifestWithContentV1 {
+			original := originalByRef[target.ManifestRef]
+			plan.Targets[len(plan.Targets)-1].OriginalRegion = &original
+		}
 		if input.EnableSourceAdjudication {
 			original := originalByRef[target.ManifestRef]
 			contextRegion := recognitionLayoutAdjudicationRegion(target.Region, pageBounds)
@@ -260,7 +270,7 @@ func BuildRecognitionLayoutPlanV2(input RecognitionLayoutPlanInputV2) (Recogniti
 	if plan.RecognitionFormat == RecognitionLayoutCompactV1 || plan.RecognitionFormat == RecognitionLayoutCompactV2 || plan.RecognitionFormat == RecognitionLayoutCompactV3 || plan.RecognitionFormat == RecognitionLayoutCompactV4 {
 		contactHeight = recognitionLayoutCompactHeightV1
 	}
-	for start, ordinal := 0, 1; start < len(plan.Targets); ordinal++ {
+	for start, ordinal := 0, 1; plan.InitialReadMode == "" && start < len(plan.Targets); ordinal++ {
 		end := start
 		height := 2 * recognitionLayoutContactPaddingV2
 		for end < len(plan.Targets) && end-start < RecognitionLayoutBatchTargetLimitV2 {
@@ -413,6 +423,56 @@ func BuildRecognitionLayoutBatchImageV2(
 			"%w: batch input digest mismatch",
 			ErrRecognitionLayoutPlanInvalid,
 		)
+	}
+	return result, nil
+}
+
+// BuildRecognitionLayoutReviewBatchImageV1 从冻结目标顺序重建独立复读输入，不缩放原像素。
+// 单成员保留原裁图；只有多成员拼图受紧凑高度限制。
+func BuildRecognitionLayoutReviewBatchImageV1(pagePNG []byte, plan RecognitionLayoutPlanV2, targetIDs []string) ([]byte, error) {
+	if err := ValidateRecognitionLayoutPlanV2(plan); err != nil {
+		return nil, err
+	}
+	if plan.InitialReadMode != RecognitionLayoutManifestWithContentV1 || recognitionLayoutSHA256(pagePNG) != plan.PageDigest || len(targetIDs) < 1 || len(targetIDs) > RecognitionLayoutBatchTargetLimitV2 {
+		return nil, fmt.Errorf("%w: invalid review image identity", ErrRecognitionLayoutPlanInvalid)
+	}
+	page, err := png.Decode(bytes.NewReader(pagePNG))
+	if err != nil {
+		return nil, err
+	}
+	targets := make([]RecognitionLayoutTargetV2, 0, len(targetIDs))
+	previous := -1
+	for _, id := range targetIDs {
+		found := false
+		for ordinal, target := range plan.Targets {
+			if target.TargetID != id {
+				continue
+			}
+			if ordinal <= previous {
+				return nil, fmt.Errorf("%w: review target order drifted", ErrRecognitionLayoutPlanInvalid)
+			}
+			crop, cropErr := recognitionLayoutCropPNG(page, target.Region)
+			if cropErr != nil || recognitionLayoutSHA256(crop) != target.CropDigest {
+				return nil, fmt.Errorf("%w: review crop digest mismatch", ErrRecognitionLayoutPlanInvalid)
+			}
+			if len(targetIDs) == 1 {
+				return crop, nil
+			}
+			targets = append(targets, target)
+			previous, found = ordinal, true
+			break
+		}
+		if !found {
+			return nil, fmt.Errorf("%w: review target is not authorized", ErrRecognitionLayoutPlanInvalid)
+		}
+	}
+	result, err := recognitionLayoutContactSheetPNG(page, targets)
+	if err != nil {
+		return nil, err
+	}
+	config, err := png.DecodeConfig(bytes.NewReader(result))
+	if err != nil || config.Height > recognitionLayoutCompactHeightV1 {
+		return nil, fmt.Errorf("%w: review contact sheet exceeds height limit", ErrRecognitionLayoutPlanInvalid)
 	}
 	return result, nil
 }
@@ -829,6 +889,7 @@ func RebindRecognitionLayoutManifestV2(plan RecognitionLayoutPlanV2, manifestID 
 
 func recognitionLayoutAuthorizedPlanDigestV2(plan RecognitionLayoutPlanV2) (string, error) {
 	canonical := struct {
+		InitialReadMode      string                      `json:"initial_read_mode,omitempty"`
 		Contract             string                      `json:"contract"`
 		Version              int                         `json:"version"`
 		RecognitionFormat    string                      `json:"recognition_format,omitempty"`
@@ -838,6 +899,7 @@ func recognitionLayoutAuthorizedPlanDigestV2(plan RecognitionLayoutPlanV2) (stri
 		Targets              []RecognitionLayoutTargetV2 `json:"targets"`
 		Batches              []RecognitionLayoutBatchV2  `json:"batches"`
 	}{
+		InitialReadMode:      plan.InitialReadMode,
 		Contract:             "recognition_layout_authorized_plan_v2",
 		Version:              plan.Version,
 		RecognitionFormat:    plan.RecognitionFormat,

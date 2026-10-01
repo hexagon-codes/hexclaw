@@ -41,6 +41,7 @@ type ModelPhysicalInvocation struct {
 // RecognitionLayoutPlanHeaderV2 冻结发送紧凑清单前已存在的控制面事实。
 // 它有意不包含图像、裁剪、提示词或 Provider 响应内容。
 type RecognitionLayoutPlanHeaderV2 struct {
+	InitialReadMode          string                           `json:"initial_read_mode,omitempty"`
 	PlanID                   string                           `json:"plan_id"`
 	ParentInvocationID       string                           `json:"parent_invocation_id"`
 	AgentName                string                           `json:"agent_name"`
@@ -69,17 +70,18 @@ type RecognitionLayoutBudgetBucketsV2 struct {
 // 它公开不可变摘要、选定预算和已授权计划，但绝不公开源图像、裁剪、
 // 提示词或 Provider 结果内容。
 type RecognitionLayoutPlanRuntimeV2 struct {
-	RecoveryPhysicalUnit         RecognitionPhysicalUnit       `json:"recovery_physical_unit,omitempty"`
-	RecoveryTimeoutOverrideMS    int64                         `json:"recovery_timeout_override_ms,omitempty"`
-	Header                       RecognitionLayoutPlanHeaderV2 `json:"header"`
-	HeaderDigest                 string                        `json:"header_digest"`
-	ManifestPhysicalInvocationID string                        `json:"manifest_physical_invocation_id"`
-	ManifestResultDigest         string                        `json:"manifest_result_digest,omitempty"`
-	CandidateExactSetDigest      string                        `json:"candidate_exact_set_digest,omitempty"`
-	SelectedBucketMaxProblems    int                           `json:"selected_bucket_max_problems,omitempty"`
-	StageDeadlineAtUnixMillis    int64                         `json:"stage_deadline_at_unix_millis,omitempty"`
-	Status                       string                        `json:"status"`
-	AuthorizedPlan               *RecognitionLayoutPlanV2      `json:"authorized_plan,omitempty"`
+	ReviewBatches                []RecognitionLayoutReviewBatchAuthorizationV1 `json:"review_batches,omitempty"`
+	RecoveryPhysicalUnit         RecognitionPhysicalUnit                       `json:"recovery_physical_unit,omitempty"`
+	RecoveryTimeoutOverrideMS    int64                                         `json:"recovery_timeout_override_ms,omitempty"`
+	Header                       RecognitionLayoutPlanHeaderV2                 `json:"header"`
+	HeaderDigest                 string                                        `json:"header_digest"`
+	ManifestPhysicalInvocationID string                                        `json:"manifest_physical_invocation_id"`
+	ManifestResultDigest         string                                        `json:"manifest_result_digest,omitempty"`
+	CandidateExactSetDigest      string                                        `json:"candidate_exact_set_digest,omitempty"`
+	SelectedBucketMaxProblems    int                                           `json:"selected_bucket_max_problems,omitempty"`
+	StageDeadlineAtUnixMillis    int64                                         `json:"stage_deadline_at_unix_millis,omitempty"`
+	Status                       string                                        `json:"status"`
+	AuthorizedPlan               *RecognitionLayoutPlanV2                      `json:"authorized_plan,omitempty"`
 }
 
 type RecognitionLayoutBatchClassificationV2 string
@@ -291,9 +293,9 @@ func RecognitionLayoutPhysicalResultsExactSetDigestV2(
 ) (string, error) {
 	const maxPhysicalResults = 1 + recognitionLayoutTargetLimitV2 +
 		recognitionLayoutTargetLimitV2 + recognitionLayoutTargetLimitV2
-	if len(results) < 2 || len(results) > maxPhysicalResults {
+	if len(results) < 1 || len(results) > maxPhysicalResults {
 		return "", fmt.Errorf(
-			"%w: finalized physical result count must be 2..%d",
+			"%w: finalized physical result count must be 1..%d",
 			ErrRecognitionLayoutPlanInvalid,
 			maxPhysicalResults,
 		)
@@ -322,7 +324,8 @@ func RecognitionLayoutPhysicalResultsExactSetDigestV2(
 			}
 		} else if (!strings.HasPrefix(string(result.PhysicalUnit), "layout_batch_") &&
 			!strings.HasPrefix(string(result.PhysicalUnit), "layout_repair_") &&
-			!strings.HasPrefix(string(result.PhysicalUnit), "layout_adjudicate_")) ||
+			!strings.HasPrefix(string(result.PhysicalUnit), "layout_adjudicate_") &&
+			!strings.HasPrefix(string(result.PhysicalUnit), "layout_review_batch_")) ||
 			!validRecognitionLayoutSHA256(result.CandidateExactSetDigest) {
 			return "", fmt.Errorf(
 				"%w: finalized V2 child lacks a layout exact-set",
@@ -502,7 +505,7 @@ func (b RecognitionLayoutBudgetBucketsV2) Select(
 func CanonicalRecognitionLayoutPlanHeaderV2(
 	header RecognitionLayoutPlanHeaderV2,
 ) ([]byte, string, error) {
-	if header.PlanID == "" || strings.TrimSpace(header.PlanID) != header.PlanID ||
+	if (header.InitialReadMode != "" && header.InitialReadMode != RecognitionLayoutManifestWithContentV1) || header.PlanID == "" || strings.TrimSpace(header.PlanID) != header.PlanID ||
 		header.ParentInvocationID == "" ||
 		strings.TrimSpace(header.ParentInvocationID) != header.ParentInvocationID ||
 		header.AgentName == "" || strings.TrimSpace(header.AgentName) != header.AgentName ||
@@ -611,7 +614,7 @@ func RecognitionLayoutTargetExactSetDigestV2(
 // ValidateRecognitionLayoutPlanV2 是持久化边界校验器。
 // 它重新计算计划器所有的摘要，并证明主批次对全部目标构成有序、两两不相交的精确覆盖。
 func ValidateRecognitionLayoutPlanV2(plan RecognitionLayoutPlanV2) error {
-	if plan.Version != RecognitionPlanVersionV2 ||
+	if (plan.InitialReadMode != "" && (plan.InitialReadMode != RecognitionLayoutManifestWithContentV1 || plan.RecognitionFormat != RecognitionLayoutCompactV4)) || plan.Version != RecognitionPlanVersionV2 ||
 		(plan.RecognitionFormat != "" && plan.RecognitionFormat != RecognitionLayoutCompactV1 && plan.RecognitionFormat != RecognitionLayoutCompactV2 && plan.RecognitionFormat != RecognitionLayoutCompactV3 && plan.RecognitionFormat != RecognitionLayoutCompactV4) ||
 		!validRecognitionLayoutSHA256(plan.PageDigest) ||
 		!validRecognitionLayoutSHA256(plan.ManifestResultDigest) ||
@@ -640,8 +643,11 @@ func ValidateRecognitionLayoutPlanV2(plan RecognitionLayoutPlanV2) error {
 					return fmt.Errorf("%w: invalid adjudication region", ErrRecognitionLayoutPlanInvalid)
 				}
 			}
-		} else if target.OriginalRegion != nil || target.AdjudicationRegion != nil || target.AdjudicationDigest != "" {
+		} else if (target.OriginalRegion != nil && plan.InitialReadMode != RecognitionLayoutManifestWithContentV1) || target.AdjudicationRegion != nil || target.AdjudicationDigest != "" {
 			return fmt.Errorf("%w: legacy plan contains adjudication regions", ErrRecognitionLayoutPlanInvalid)
+		}
+		if plan.InitialReadMode == RecognitionLayoutManifestWithContentV1 && (target.OriginalRegion == nil || target.OriginalRegion.X < 0 || target.OriginalRegion.Y < 0 || target.OriginalRegion.Width <= 0 || target.OriginalRegion.Height <= 0) {
+			return fmt.Errorf("%w: initial read original region is missing", ErrRecognitionLayoutPlanInvalid)
 		}
 		if target.TargetID == "" || strings.TrimSpace(target.TargetID) != target.TargetID ||
 			!validRecognitionLayoutSHA256(target.CropDigest) ||
@@ -687,6 +693,12 @@ func ValidateRecognitionLayoutPlanV2(plan RecognitionLayoutPlanV2) error {
 			return err
 		}
 		union = append(union, batch.TargetIDs...)
+	}
+	if plan.InitialReadMode == RecognitionLayoutManifestWithContentV1 {
+		if len(plan.Batches) != 0 {
+			return fmt.Errorf("%w: combined initial read must not authorize primary batches", ErrRecognitionLayoutPlanInvalid)
+		}
+		union = targetIDs
 	}
 	if len(union) != len(targetIDs) {
 		return fmt.Errorf(
