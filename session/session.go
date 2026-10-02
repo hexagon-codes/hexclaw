@@ -427,7 +427,7 @@ func (m *Manager) BuildContext(ctx context.Context, sessionID string) ([]hexagon
 	for _, r := range records {
 		if r.Role == "user" {
 			attachments := decodeMessageAttachments(r.Metadata)
-			messages = append(messages, adapter.BuildUserMessage(r.Content, attachments))
+			messages = append(messages, buildHistoricalUserMessage(r.Content, attachments))
 			continue
 		}
 		messages = append(messages, hexagon.Message{
@@ -464,6 +464,27 @@ func (m *Manager) BuildContext(ctx context.Context, sessionID string) ([]hexagon
 	}
 
 	return messages, nil
+}
+
+// buildHistoricalUserMessage 保留本地图片来源与已有正文，不把耐久资产引用当成
+// Base64 图片再次提交。当前请求的图片仍由原附件接纳链路处理。
+func buildHistoricalUserMessage(content string, attachments []adapter.Attachment) hexagon.Message {
+	retained := make([]adapter.Attachment, 0, len(attachments))
+	for _, attachment := range attachments {
+		assetRef := strings.TrimSpace(attachment.Data)
+		if !strings.HasPrefix(assetRef, "asset://") {
+			assetRef = strings.TrimSpace(attachment.URL)
+		}
+		if attachment.Type != "image" || !strings.HasPrefix(assetRef, "asset://") {
+			retained = append(retained, attachment)
+			continue
+		}
+		if content != "" {
+			content += "\n\n"
+		}
+		content += "[Historical image source: " + assetRef + "]"
+	}
+	return adapter.BuildUserMessage(content, retained)
 }
 
 // ListSessions 列出用户的会话

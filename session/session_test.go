@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/hexagon-codes/ai-core/llm"
@@ -216,6 +217,69 @@ func TestBuildContextPreservesImageAttachments(t *testing.T) {
 	}
 	if !messages[0].HasMultiContent() {
 		t.Fatal("历史中的图片消息应保留 MultiContent")
+	}
+}
+
+func TestBuildContextProjectsDurableImageSourcesWithoutResending(t *testing.T) {
+	mgr, store := newTestManager(t)
+	ctx := context.Background()
+	sess, err := mgr.GetOrCreate(ctx, &adapter.Message{
+		Platform: adapter.PlatformWeb, UserID: "user-001", Content: "批改这张图",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const source = "asset://k12-tutor-fixture/clear-page.png"
+	if err := mgr.SaveUserMessage(ctx, sess.ID, &adapter.Message{
+		Content:     "批改这张图",
+		Attachments: []adapter.Attachment{{Type: "image", Mime: "image/png", Data: source}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.ListMessages(ctx, sess.ID, 50, 0)
+	if err != nil || len(before) != 1 {
+		t.Fatalf("read saved history: count=%d err=%v", len(before), err)
+	}
+	metadata := before[0].Metadata
+	messages, err := mgr.BuildContext(ctx, sess.ID)
+	if err != nil || len(messages) != 1 {
+		t.Fatalf("build history: count=%d err=%v", len(messages), err)
+	}
+	if messages[0].HasMultiContent() {
+		t.Fatal("durable historical image must not be sent as a new image")
+	}
+	if !strings.Contains(messages[0].Content, "批改这张图") || !strings.Contains(messages[0].Content, source) {
+		t.Fatalf("history lost text or source identity: %q", messages[0].Content)
+	}
+	after, err := store.ListMessages(ctx, sess.ID, 50, 0)
+	if err != nil || len(after) != 1 || after[0].Metadata != metadata {
+		t.Fatalf("history metadata was rewritten: count=%d err=%v", len(after), err)
+	}
+}
+
+func TestHistoricalImageProjectionPreservesOtherAttachmentProtocols(t *testing.T) {
+	message := buildHistoricalUserMessage("继续讲解", []adapter.Attachment{
+		{Type: "image", Mime: "image/png", Data: "asset://k12-tutor-fixture/old.png"},
+		{Type: "image", Mime: "image/png", Data: "YWJj"},
+		{Type: "image", URL: "https://example.com/old.png"},
+	})
+	images := []string{}
+	for _, part := range message.MultiContent {
+		if part.Type == "image_url" && part.ImageURL != nil {
+			images = append(images, part.ImageURL.URL)
+		}
+	}
+	if len(images) != 2 || images[0] != "data:image/png;base64,YWJj" || images[1] != "https://example.com/old.png" {
+		t.Fatalf("legacy image protocols changed: %v", images)
+	}
+	textContent := message.Content
+	for _, part := range message.MultiContent {
+		if part.Type == "text" {
+			textContent += part.Text
+		}
+	}
+	if !strings.Contains(textContent, "asset://k12-tutor-fixture/old.png") {
+		t.Fatal("mixed history lost durable source identity")
 	}
 }
 

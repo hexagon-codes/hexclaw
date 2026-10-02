@@ -107,12 +107,14 @@ func (p *k12TutorIdentityPolicy) CompileTerminalDirective(
 	}
 	msg := input.Message
 	conversation := k12storage.TutorConversationKey("desktop", "", msg.SessionID)
+	sessionID := msg.SessionID
 	if msg.Platform == adapter.PlatformDingtalk {
 		conversation = k12storage.TutorConversationKey(string(msg.Platform), msg.InstanceID, msg.ChatID)
+		sessionID = ""
 	}
 	contextText, err := p.followup.TutorFollowupDirective(ctx, usecase.TutorFollowupInput{
 		OwnerScope: usecase.DefaultLocalOwnerScope, AgentName: input.Agent.Name,
-		ConversationKey: conversation, MessageID: msg.ID, ReplyTo: msg.ReplyTo,
+		ConversationKey: conversation, SessionID: sessionID, MessageID: msg.ID, ReplyTo: msg.ReplyTo,
 		Query: input.UserQuery, HasAttachments: len(msg.Attachments) > 0, Locale: msg.Metadata["user_locale"],
 		QuotedHomeworkID: msg.Metadata["quoted_homework_id"], QuotedHomeworkAmbiguous: msg.Metadata["quoted_homework_ambiguous"] == "true",
 	})

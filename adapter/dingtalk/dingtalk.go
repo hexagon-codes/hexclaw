@@ -382,6 +382,17 @@ func uploadDingtalkImage(
 		return "", fmt.Errorf("构造钉钉图片上传参数失败: %w", err)
 	}
 	name := safeDingTalkAttachmentName(attachment.Name)
+	if path.Ext(name) == "" {
+		// 钉钉图片上传通过扩展名识别文件类型；原附件身份和字节保持不变。
+		switch http.DetectContentType(raw) {
+		case "image/png":
+			name += ".png"
+		case "image/jpeg":
+			name += ".jpg"
+		case "image/gif":
+			name += ".gif"
+		}
+	}
 	part, err := writer.CreateFormFile("media", name)
 	if err != nil {
 		return "", fmt.Errorf("构造钉钉图片上传文件失败: %w", err)
