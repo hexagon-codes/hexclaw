@@ -108,6 +108,34 @@ func (p *modelCapabilityProbeRecordingProvider) Complete(
 	return &hexagon.CompletionResponse{Content: "OK"}, nil
 }
 
+func TestProbeSavedModelCapabilityUsesSamePersistedVisionProtocol(t *testing.T) {
+	oldFactory := llmTestProviderFactory
+	recording := &modelCapabilityProbeRecordingProvider{}
+	llmTestProviderFactory = func(llmConnectionTestProvider) completionProvider { return recording }
+	defer func() { llmTestProviderFactory = oldFactory }()
+	store := bug20260728OpenStore(t)
+	cfg := bug20260728ProviderConfig()
+	provider := cfg.LLM.Providers["custom"]
+	provider.Model = "gpt-5.6-terra"
+	provider.Models = []string{"gpt-5.6-terra"}
+	provider.ModelSpecs = []config.LLMProviderModelSpec{{ID: "gpt-5.6-terra", Capabilities: []string{"text", "vision"}}}
+	cfg.LLM.Providers["custom"] = provider
+	srv := NewServer(cfg, &mockEngine{}, nil, store)
+	if err := srv.ProbeSavedModelCapability(context.Background(), bug20260728ProviderInstanceID, "gpt-5.6-terra", "vision"); err != nil {
+		t.Fatal(err)
+	}
+	if len(recording.requests) != 1 || len(recording.requests[0].Messages) != 1 || len(recording.requests[0].Messages[0].MultiContent) != 2 {
+		t.Fatalf("saved-model probe changed vision protocol: %+v", recording.requests)
+	}
+	receipt, err := store.GetModelCapabilityProbeReceipt(context.Background(), bug20260728ProviderInstanceID, "gpt-5.6-terra", "vision")
+	if err != nil || receipt == nil || receipt.Outcome != "passed" || receipt.ProbePolicyVersion != ModelCapabilityProbePolicyVersion {
+		t.Fatalf("saved-model probe did not persist current evidence: %+v err=%v", receipt, err)
+	}
+	if receipt.ConfigFingerprint != ModelCapabilityProbeConfigFingerprint("custom", provider, "gpt-5.6-terra") {
+		t.Fatal("saved-model probe froze another provider configuration")
+	}
+}
+
 // TestModelCapabilityProbe_VisionBypassesStaticRouteGateForExplicitProbe 锁定静态路由授权与
 // 逐模型能力实验的边界。声明为 text-only 的模型在普通聊天路由中仍保持 text-only，
 // 但显式、已保存配置的 vision probe 必须到达 Provider 并独立记录结果。

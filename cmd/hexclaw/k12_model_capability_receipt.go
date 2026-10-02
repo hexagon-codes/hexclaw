@@ -5,7 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/hexagon-codes/hexclaw/api"
 	"github.com/hexagon-codes/hexclaw/config"
@@ -21,6 +23,10 @@ type k12CapabilityReceiptEvidence struct {
 	ProbePolicyVersion      string
 }
 
+type k12SavedModelCapabilityProbe func(context.Context, string, string, string) error
+
+var k12NewTaskCapabilityProbeMu sync.Mutex
+
 // resolveK12GradingModelSnapshotWithCapabilityReceipt 在静态路由授权后，冻结同一
 // Provider 实例、模型与执行配置下的视觉成功回执。缺失或过期回执不会退化到默认模型。
 func resolveK12GradingModelSnapshotWithCapabilityReceipt(
@@ -28,13 +34,14 @@ func resolveK12GradingModelSnapshotWithCapabilityReceipt(
 	router *llmrouter.Selector,
 	receipts storage.ModelCapabilityProbeReceiptStore,
 	requested k12.GradingModelSnapshot,
+	probes ...k12SavedModelCapabilityProbe,
 ) (k12.GradingModelSnapshot, error) {
 	snapshot, err := resolveK12GradingModelSnapshot(router, requested)
 	if err != nil {
 		return k12.GradingModelSnapshot{}, err
 	}
-	evidence, err := k12CapabilityReceiptEvidenceForRoute(
-		ctx, router, receipts, snapshot.Provider, snapshot.Model, config.LLMModelCapabilityVision,
+	evidence, err := ensureK12NewTaskVisionCapabilityReceipt(
+		ctx, router, receipts, snapshot.Provider, snapshot.Model, probes,
 	)
 	if err != nil {
 		return k12.GradingModelSnapshot{}, err
@@ -44,6 +51,45 @@ func resolveK12GradingModelSnapshotWithCapabilityReceipt(
 	snapshot.CapabilityReceiptDigest = evidence.CapabilityReceiptDigest
 	snapshot.ProbePolicyVersion = evidence.ProbePolicyVersion
 	return k12.NormalizeGradingModelSnapshot(snapshot), nil
+}
+
+// ensureK12NewTaskVisionCapabilityReceipt 只为新任务补齐缺失或过期的当前视觉回执。
+// 当前配置的失败回执不自动重发；运行中冻结任务的校验仍只读，不能换模型或回执。
+func ensureK12NewTaskVisionCapabilityReceipt(
+	ctx context.Context,
+	router *llmrouter.Selector,
+	receipts storage.ModelCapabilityProbeReceiptStore,
+	providerName, modelID string,
+	probes []k12SavedModelCapabilityProbe,
+) (k12CapabilityReceiptEvidence, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	evidence, err := k12CapabilityReceiptEvidenceForRoute(ctx, router, receipts, providerName, modelID, config.LLMModelCapabilityVision)
+	if err == nil || len(probes) == 0 || probes[0] == nil || router == nil || receipts == nil {
+		return evidence, err
+	}
+	// 同时到达的首图在锁内重读，避免为同一模型发送多次前置探测。
+	k12NewTaskCapabilityProbeMu.Lock()
+	defer k12NewTaskCapabilityProbeMu.Unlock()
+	evidence, err = k12CapabilityReceiptEvidenceForRoute(ctx, router, receipts, providerName, modelID, config.LLMModelCapabilityVision)
+	if err == nil {
+		return evidence, nil
+	}
+	provider, configured := router.ProviderConfig(providerName)
+	if !configured {
+		return evidence, err
+	}
+	providerInstanceID := config.EffectiveProviderInstanceID(providerName, provider)
+	fingerprint := api.ModelCapabilityProbeConfigFingerprint(providerName, provider, modelID)
+	receipt, readErr := receipts.GetModelCapabilityProbeReceipt(ctx, providerInstanceID, modelID, config.LLMModelCapabilityVision)
+	if readErr != nil || (receipt != nil && receipt.ConfigFingerprint == fingerprint && receipt.ProbePolicyVersion == api.ModelCapabilityProbePolicyVersion) {
+		return evidence, err
+	}
+	if probeErr := probes[0](ctx, providerInstanceID, modelID, config.LLMModelCapabilityVision); probeErr != nil {
+		return k12CapabilityReceiptEvidence{}, fmt.Errorf("%w: %v", k12.ErrModelCapabilityUnverified, probeErr)
+	}
+	return k12CapabilityReceiptEvidenceForRoute(ctx, router, receipts, providerName, modelID, config.LLMModelCapabilityVision)
 }
 
 // resolveK12PracticeModelSnapshotWithCapabilityReceipt 冻结逐题生成实际发送前需要的

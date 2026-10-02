@@ -473,6 +473,63 @@ func (s *Server) executeModelCapabilityProbe(
 	}
 }
 
+// ProbeSavedModelCapability 供新任务接纳复用保存配置下的单项能力探测。
+// 使用与控制面相同的请求、配置围栏与持久回执，不接受临时 endpoint 或 credential。
+func (s *Server) ProbeSavedModelCapability(ctx context.Context, providerInstanceID, modelID, kind string) error {
+	kinds, err := normalizeModelCapabilityProbeKinds([]string{kind})
+	if err != nil {
+		return err
+	}
+	candidate, err := s.modelCapabilityProbeCandidate(providerInstanceID, modelID)
+	if err != nil {
+		return err
+	}
+	if _, ok := s.store.(storage.ModelCapabilityProbeReceiptStore); !ok {
+		return errors.New("model capability probe receipt storage is unavailable")
+	}
+	result, err := s.executeAndPersistModelCapabilityProbe(ctx, candidate, kinds[0])
+	if err != nil {
+		return err
+	}
+	if result.Outcome != "passed" || !result.Persisted {
+		return fmt.Errorf("model capability probe did not pass: %s", result.FailureCode)
+	}
+	return nil
+}
+
+func (s *Server) executeAndPersistModelCapabilityProbe(
+	ctx context.Context, candidate modelCapabilityProbeCandidate, kind string,
+) (LLMModelCapabilityProbeResult, error) {
+	probeStartedAt := nextProviderProbeStartedAt()
+	probeCtx, cancel := context.WithTimeout(ctx, modelCapabilityProbeTimeout)
+	probeCtx = egress.WithRequest(probeCtx, egress.PurposeProviderProbe, "", egress.ClassGeneral)
+	started := time.Now()
+	probeErr := s.executeModelCapabilityProbe(probeCtx, candidate, kind)
+	latencyMS := time.Since(started).Milliseconds()
+	cancel()
+	testedAt := time.Now().UnixMilli()
+	outcome := "passed"
+	failureCode := ""
+	if probeErr != nil {
+		outcome = "failed"
+		failureCode = modelCapabilityProbeFailureCode(probeErr)
+	}
+	persisted, err := s.persistModelCapabilityProbeReceipt(ctx, candidate, &storage.ModelCapabilityProbeReceipt{
+		ProviderInstanceID: candidate.providerInstanceID,
+		ModelID:            candidate.modelID, ProbeKind: kind,
+		ProbePolicyVersion: ModelCapabilityProbePolicyVersion,
+		ConfigFingerprint:  candidate.configFingerprint,
+		Outcome:            outcome, FailureCode: failureCode,
+		TestedAt: testedAt, ProbeStartedAt: probeStartedAt, LatencyMS: latencyMS,
+	})
+	return LLMModelCapabilityProbeResult{
+		ProbeKind: kind, Outcome: outcome, FailureCode: failureCode,
+		ProbePolicyVersion: ModelCapabilityProbePolicyVersion,
+		TestedAt:           testedAt, ProbeStartedAt: probeStartedAt, LatencyMS: latencyMS,
+		Persisted: persisted,
+	}, err
+}
+
 // handleProbeModelCapability POST /api/v1/config/llm/probe
 //
 // 所有物理调用从保存的 Provider 快照构造；静态能力门只保护普通路由，
@@ -504,32 +561,7 @@ func (s *Server) handleProbeModelCapability(w http.ResponseWriter, r *http.Reque
 		Results:            make([]LLMModelCapabilityProbeResult, 0, len(kinds)),
 	}
 	for _, kind := range kinds {
-		probeStartedAt := nextProviderProbeStartedAt()
-		probeCtx, cancel := context.WithTimeout(r.Context(), modelCapabilityProbeTimeout)
-		probeCtx = egress.WithRequest(probeCtx, egress.PurposeProviderProbe, "", egress.ClassGeneral)
-		started := time.Now()
-		probeErr := s.executeModelCapabilityProbe(probeCtx, candidate, kind)
-		latencyMS := time.Since(started).Milliseconds()
-		cancel()
-		testedAt := time.Now().UnixMilli()
-		outcome := "passed"
-		failureCode := ""
-		if probeErr != nil {
-			outcome = "failed"
-			failureCode = modelCapabilityProbeFailureCode(probeErr)
-		}
-		persisted, persistErr := s.persistModelCapabilityProbeReceipt(r.Context(), candidate, &storage.ModelCapabilityProbeReceipt{
-			ProviderInstanceID: candidate.providerInstanceID,
-			ModelID:            candidate.modelID,
-			ProbeKind:          kind,
-			ProbePolicyVersion: ModelCapabilityProbePolicyVersion,
-			ConfigFingerprint:  candidate.configFingerprint,
-			Outcome:            outcome,
-			FailureCode:        failureCode,
-			TestedAt:           testedAt,
-			ProbeStartedAt:     probeStartedAt,
-			LatencyMS:          latencyMS,
-		})
+		result, persistErr := s.executeAndPersistModelCapabilityProbe(r.Context(), candidate, kind)
 		if errors.Is(persistErr, errModelCapabilityProbeConfigStale) {
 			writeAPIError(w, http.StatusConflict, CodeProbeConfigStale, "model capability probe configuration is stale")
 			return
@@ -539,16 +571,7 @@ func (s *Server) handleProbeModelCapability(w http.ResponseWriter, r *http.Reque
 			writeAPIError(w, http.StatusServiceUnavailable, CodeServiceUnavail, "model capability probe receipt persistence failed")
 			return
 		}
-		response.Results = append(response.Results, LLMModelCapabilityProbeResult{
-			ProbeKind:          kind,
-			Outcome:            outcome,
-			FailureCode:        failureCode,
-			ProbePolicyVersion: ModelCapabilityProbePolicyVersion,
-			TestedAt:           testedAt,
-			ProbeStartedAt:     probeStartedAt,
-			LatencyMS:          latencyMS,
-			Persisted:          persisted,
-		})
+		response.Results = append(response.Results, result)
 	}
 	writeJSON(w, http.StatusOK, response)
 }
