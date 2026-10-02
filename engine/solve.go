@@ -200,6 +200,20 @@ func (o *SolveSkill) Execute(ctx context.Context, args map[string]any) (*skill.R
 			}, nil
 		}
 	}
+	// 完整数值化简比也由本机精确求值；最简单整数比不能被省略冒号的标量替代。
+	if auto && !gradingMode && simplestRatioAllowedByConstraint(constraint) {
+		if worked, computed, ok := solveSimplestRatio(deterministicProblem); ok {
+			return &skill.Result{
+				Content: worked,
+				Metadata: map[string]string{
+					"solve_mode":     "deterministic_arithmetic",
+					"solve_verdict":  verdictString(verdictAgree),
+					"solve_evidence": "numeric_exec",
+					"solve_computed": computed,
+				},
+			}, nil
+		}
+	}
 	// 单变量一次方程同样走本机精确有理数求解：严格白名单解析、左右都必须为 ax+b，
 	// 非线性/变量作除数/无解/无穷解一律 fail-closed 回到完整模型链。
 	if auto && !gradingMode && linearEquationAllowedByConstraint(deterministicProblem, constraint) {
@@ -440,6 +454,17 @@ func (o *SolveSkill) GradeVerified(ctx context.Context, problem, verifiedSolutio
 		return nil, fmt.Errorf("verified solution has no final answer")
 	}
 	deterministicProblem := deterministicProblemStem(problem)
+	if _, computed, ok := solveSimplestRatio(deterministicProblem); ok {
+		verifiedRatio, verifiedOK := positiveIntegerRatioAnswer(groundTruth)
+		if verifiedOK && verifiedRatio == computed {
+			// 只判单个完整整数比；任何步骤仍交给 grader，不能因尾值正确漏掉过程错误。
+			if studentRatio, answerOK := positiveIntegerRatioAnswer(studentAnswer); answerOK {
+				correct := studentRatio == computed
+				assess := deterministicGradeAssessment(correct, correct, "")
+				return deterministicGradeResult(studentAnswer, computed, "grading_deterministic_ratio", assess), nil
+			}
+		}
+	}
 	// 可确定性求解的题已由本机程序复算；但快路只有在“本机复算结果”和调用方传入的
 	// verifiedSolution 完全一致时才能启用。否则必须尊重前序已验证解法，降级给 grader，
 	// 避免规则误匹配反过来覆盖可信 ground truth。
@@ -481,7 +506,12 @@ func (o *SolveSkill) GradeVerified(ctx context.Context, problem, verifiedSolutio
 					assess := deterministicGradeAssessment(false, false, "")
 					return deterministicGradeResult(studentAnswer, groundTruthWithUnit, "grading_deterministic_elementary_word", assess), nil
 				}
-				workValid, conclusive, wrongStep := validateStudentArithmeticWork(deterministicProblem, comparisonAnswer)
+				workComparable := !totalFractionCountRe.MatchString(compactElementaryProblem(deterministicProblem)) ||
+					totalFractionCountWorkComparable(deterministicProblem, comparisonAnswer)
+				workValid, conclusive, wrongStep := false, false, ""
+				if workComparable {
+					workValid, conclusive, wrongStep = validateStudentArithmeticWork(deterministicProblem, comparisonAnswer)
+				}
 				if conclusive {
 					assess := deterministicGradeAssessment(
 						finalAnswerCorrect && workValid,

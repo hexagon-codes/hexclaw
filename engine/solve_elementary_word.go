@@ -2,6 +2,8 @@ package engine
 
 import (
 	"fmt"
+	"go/ast"
+	"go/parser"
 	"math/big"
 	"regexp"
 	"strings"
@@ -19,6 +21,7 @@ var (
 	elementaryParenthesizedFractionRe = regexp.MustCompile(`\(([0-9]+)\)/\(([0-9]+)\)`)
 	inverseFractionProblemRe          = regexp.MustCompile(`^(?:[0-9]+[.．、])?一个数的([0-9]+)/([0-9]+)是` + elementaryNumberPattern + `[，,。.]?(?:求(?:这个数|原数)(?:是多少)?|(?:这个数|原数)(?:是)?多少)[?？。.]?$`)
 	successiveFractionRe              = regexp.MustCompile(`^(?:[0-9]+[.．、])?` + elementaryNumberPattern + `的([0-9]+)/([0-9]+)的([0-9]+)/([0-9]+)(?:是)?多少[?？。.]?$`)
+	totalFractionCountRe              = regexp.MustCompile(`^(?:[0-9]+[.．、])?(?P<context>[\p{Han}]+?)有(?P<total>[0-9]+)(?P<total_unit>本书|人)[，,](?P<part>[\p{Han}]+?)占总数的(?P<numerator>[0-9]+)/(?P<denominator>[0-9]+)[。.](?P<target>[\p{Han}]+?)有多少(?P<target_unit>本|人)[?？。.]?$`)
 	rectangleYieldRe                  = regexp.MustCompile(`^(?:[0-9]+[.．、])?(?:一个)?周长(?:是|为)?` + elementaryNumberPattern + `米的长方形(?:鱼塘)?[，,。.]?长是宽的` + elementaryNumberPattern + `倍[，,。.]?(?:如果)?每平方米(?:鱼塘)?(?:可)?产鱼` + elementaryNumberPattern + `千克[，,。.]?(?:一共|总共)(?:可|能)?产鱼多少千克[?？。.]?$`)
 	openCubeFishTankRe                = regexp.MustCompile(`^(?:小明的爸爸)?用玻璃做了一个棱长(?:是|为)?` + elementaryNumberPattern + `(?:dm|分米)的正方体鱼缸[。.]制作(?:这个|该)鱼缸时[，,]?至少需要玻璃多少平方米[?？](?:小明)?在鱼缸里注入` + elementaryNumberPattern + `(?:L|l|升)的水[，,]?水面高度(?:是|为)?多少分米[?？。.]?$`)
 	ticketGCDLCMRe                    = regexp.MustCompile(`^(?:小明)?有(?:一)?张([0-9]+)至([0-9]+)排的电影票[，,]这张票的排数和座位号的最大公约数是([0-9]+)[，,]最小公倍数是([0-9]+)[，,。.](?:小明)?这张电影票是[（(][）)]排[（(][）)]号[。.]?$`)
@@ -65,6 +68,9 @@ func solveElementaryWordProblem(problem string) (worked, answer string, ok bool)
 
 func solveElementaryWordProblemDetailed(problem string) (elementaryWordSolution, bool) {
 	problem = compactElementaryProblem(problem)
+	if solution, ok := solveTotalFractionCountProblem(problem); ok {
+		return solution, true
+	}
 	if m := inverseFractionProblemRe.FindStringSubmatch(problem); len(m) == 4 {
 		numerator, numeratorOK := positiveRat(m[1])
 		denominator, denominatorOK := positiveRat(m[2])
@@ -215,6 +221,129 @@ func solveElementaryWordProblemDetailed(problem string) (elementaryWordSolution,
 	return elementaryWordSolution{}, false
 }
 
+// 求部分数量必须由完整总数和分率确定，且问句的对象、计数单位与条件一致。
+func solveTotalFractionCountProblem(problem string) (elementaryWordSolution, bool) {
+	match := totalFractionCountRe.FindStringSubmatch(problem)
+	if match == nil {
+		return elementaryWordSolution{}, false
+	}
+	field := func(name string) string { return match[totalFractionCountRe.SubexpIndex(name)] }
+	unit := strings.TrimSuffix(field("total_unit"), "书")
+	if !affirmativeCountLabel(field("context")) || !affirmativeCountLabel(field("part")) ||
+		field("part") != field("target") || unit != field("target_unit") {
+		return elementaryWordSolution{}, false
+	}
+	total, totalOK := nonNegativeRat(field("total"))
+	numerator, numeratorOK := nonNegativeRat(field("numerator"))
+	denominator, denominatorOK := positiveRat(field("denominator"))
+	if !totalOK || !numeratorOK || !denominatorOK || numerator.Cmp(denominator) > 0 {
+		return elementaryWordSolution{}, false
+	}
+	value := new(big.Rat).Mul(total, numerator)
+	value.Quo(value, denominator)
+	if !value.IsInt() {
+		return elementaryWordSolution{}, false
+	}
+	answer := formatArithmeticRat(value)
+	worked := fmt.Sprintf("%s占总数的 %s/%s，就是把 %s %s平均分成 %s 份，取其中 %s 份。\n%s÷%s×%s = %s %s\n\n答案：%s %s",
+		field("part"), field("numerator"), field("denominator"), field("total"), unit,
+		field("denominator"), field("numerator"), field("total"), field("denominator"), field("numerator"), answer, unit, answer, unit)
+	return elementaryWordSolution{worked: worked, value: answer, unit: unit, knowledgePoint: "分数乘法"}, true
+}
+
+// 只让完整直接式或两步份数式进入本地批改；数值成立但与题干无关的式子仍由 grader 判断。
+func totalFractionCountWorkComparable(problem, answer string) bool {
+	match := totalFractionCountRe.FindStringSubmatch(compactElementaryProblem(problem))
+	if match == nil {
+		return false
+	}
+	field := func(name string) string { return match[totalFractionCountRe.SubexpIndex(name)] }
+	total, totalOK := nonNegativeRat(field("total"))
+	denominator, denominatorOK := positiveRat(field("denominator"))
+	if !totalOK || !denominatorOK {
+		return false
+	}
+	unit := field("target_unit")
+	// 括号只剥离 AST 包装，保留除法与乘法的结构，不能把 T÷(D×N)误作 T÷D×N。
+	var expressionKey func(ast.Expr) string
+	expressionKey = func(node ast.Expr) string {
+		switch node := node.(type) {
+		case *ast.ParenExpr:
+			return expressionKey(node.X)
+		case *ast.BasicLit:
+			if value, ok := nonNegativeRat(node.Value); ok {
+				return value.RatString()
+			}
+		case *ast.BinaryExpr:
+			left, right := expressionKey(node.X), expressionKey(node.Y)
+			if left != "" && right != "" {
+				return "(" + left + node.Op.String() + right + ")"
+			}
+		}
+		return ""
+	}
+	key := func(expression string) string {
+		normalized, _, ok := normalizeTrivialArithmetic(expression)
+		if !ok {
+			return ""
+		}
+		node, err := parser.ParseExpr(normalized)
+		if err != nil {
+			return ""
+		}
+		return expressionKey(node)
+	}
+	lhsKeys := make([]string, 0, 2)
+	finalLines := 0
+	for _, line := range strings.FieldsFunc(strings.ReplaceAll(answer, "＝", "="), func(r rune) bool {
+		return r == '\n' || r == ';' || r == '；' || r == '，'
+	}) {
+		line = strings.Trim(strings.TrimSpace(line), "。.；;，,、 ")
+		if !strings.Contains(line, "=") {
+			marker := finalQuantityMarkerRe.FindStringIndex(line)
+			_, namedCount := affirmativeNamedAnswerCount(line)
+			if !bareQuantityRe.MatchString(line) && !namedCount && (marker == nil || marker[0] != 0 || marker[1] != len(line)) {
+				return false
+			}
+			finalLines++
+			if finalLines > 1 {
+				return false
+			}
+			continue
+		}
+		if strings.Count(line, "=") != 1 || len(lhsKeys) == 2 {
+			return false
+		}
+		parts := strings.SplitN(line, "=", 2)
+		rhs := strings.TrimSpace(parts[1])
+		if suffix := equationUnitSuffixRe.FindString(rhs); suffix != "" {
+			writtenUnit := strings.Trim(suffix, "（）() \t")
+			if normalizeAnswerUnit(writtenUnit) != unit {
+				return false
+			}
+		}
+		lhs := key(parts[0])
+		if lhs == "" {
+			return false
+		}
+		lhsKeys = append(lhsKeys, lhs)
+	}
+	if len(lhsKeys) == 1 {
+		t, n, d := field("total"), field("numerator"), field("denominator")
+		for _, expression := range []string{t + "×(" + n + "/" + d + ")", "(" + n + "/" + d + ")×" + t, "(" + t + "×" + n + ")÷" + d, t + "÷" + d + "×" + n} {
+			if lhsKeys[0] == key(expression) {
+				return true
+			}
+		}
+	}
+	if len(lhsKeys) == 2 {
+		share := new(big.Rat).Quo(total, denominator)
+		return lhsKeys[0] == key(field("total")+"÷"+field("denominator")) &&
+			lhsKeys[1] == key(formatArithmeticRat(share)+"×"+field("numerator"))
+	}
+	return false
+}
+
 // solveQuantityPerItemProblem 只投影完整数学包装和单题范围，不从演示答案或图示推导题意。
 func solveQuantityPerItemProblem(problem string) (elementaryWordSolution, bool) {
 	p := strings.TrimSpace(problem)
@@ -316,6 +445,9 @@ func elementaryWordAllowedByConstraint(problem, constraint string) bool {
 	}
 	if inverseFractionProblemRe.MatchString(p) || successiveFractionRe.MatchString(p) {
 		return strings.Contains(c, "分数")
+	}
+	if totalFractionCountRe.MatchString(p) {
+		return strings.Contains(c, "分数乘法") || strings.Contains(c, "分数乘整数")
 	}
 	if rectangleYieldRe.MatchString(p) {
 		return strings.Contains(c, "长方形") || strings.Contains(c, "面积") || strings.Contains(c, "周长")

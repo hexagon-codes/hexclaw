@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -256,5 +257,137 @@ func TestSolveElementaryWordProblemOutsideConstraintReturnsImmediately(t *testin
 	}
 	if res.Metadata["solve_verdict"] != "out_of_scope" || res.Metadata["solve_out_of_scope_kp"] != "分数的意义和性质" {
 		t.Fatalf("unexpected metadata: %#v", res.Metadata)
+	}
+}
+
+func TestSolveTotalFractionCountExactAndScoped(t *testing.T) {
+	for _, tc := range []struct {
+		name, problem, answer, unit string
+	}{
+		{"books", "图书角有240本书，故事书占总数的3/8。故事书有多少本？", "90", "本"},
+		{"different-fraction", "书架有360本书，科技书占总数的5/12。科技书有多少本？", "150", "本"},
+		{"people", "班级有36人，男生占总数的4/9。男生有多少人？", "16", "人"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			solve := NewSolveSkill(func(context.Context, SubAgentSpec) (SubAgentResult, error) {
+				calls++
+				return SubAgentResult{}, errors.New("unexpected model call")
+			}, nil)
+			result, err := solve.Execute(t.Context(), map[string]any{
+				"problem": tc.problem, "grade": "六年级上", "constraint": "分数乘法、分数除法、比",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if calls != 0 || result.Metadata["solve_mode"] != "deterministic_elementary_word" ||
+				result.Metadata["solve_computed"] != tc.answer || result.Metadata["solve_evidence"] != "numeric_exec" ||
+				result.Metadata["solve_verdict"] != "agree" || !strings.Contains(result.Content, "答案："+tc.answer+" "+tc.unit) {
+				t.Fatalf("quantity result=%+v calls=%d; want %s%s with independent exact calculation", result, calls, tc.answer, tc.unit)
+			}
+		})
+	}
+
+	const problem = "图书角有240本书，故事书占总数的3/8。故事书有多少本？"
+	calls := 0
+	solve := NewSolveSkill(func(context.Context, SubAgentSpec) (SubAgentResult, error) {
+		calls++
+		return SubAgentResult{}, errors.New("unexpected model call")
+	}, nil)
+	result, err := solve.Execute(t.Context(), map[string]any{"problem": problem, "constraint": "只使用分数加减法"})
+	if err != nil || calls != 0 || result.Metadata["solve_verdict"] != "out_of_scope" {
+		t.Fatalf("unsupported method changed existing scope behavior: result=%+v err=%v calls=%d", result, err, calls)
+	}
+	if !elementaryWordAllowedByConstraint(problem, "") {
+		t.Fatal("empty method constraint lost its existing behavior")
+	}
+	for _, extra := range []map[string]any{{"self_consistency": 1}, {"method_diversity": false}} {
+		fallback := errors.New("explicit strategy model path")
+		calls := 0
+		solve := NewSolveSkill(func(context.Context, SubAgentSpec) (SubAgentResult, error) {
+			calls++
+			return SubAgentResult{}, fallback
+		}, nil)
+		args := map[string]any{"problem": problem, "constraint": "分数乘法"}
+		for key, value := range extra {
+			args[key] = value
+		}
+		result, err := solve.Execute(t.Context(), args)
+		if result != nil || !errors.Is(err, fallback) || calls == 0 {
+			t.Fatalf("explicit strategy was bypassed: result=%+v err=%v calls=%d", result, err, calls)
+		}
+	}
+}
+
+func TestSolveTotalFractionCountRequiresCompleteSource(t *testing.T) {
+	for _, problem := range []string{
+		"图书角有本书，故事书占总数的3/8。故事书有多少本？",
+		"图书角有240本书，故事书占总数的3/。故事书有多少本？",
+		"图书角有240本书，故事书占总数的3/0。故事书有多少本？",
+		"图书角有240本书，故事书占总数的9/8。故事书有多少本？",
+		"图书角有10本书，故事书占总数的1/3。故事书有多少本？",
+		"图书角有240本书，故事书占总数的3/8。科技书有多少本？",
+		"图书角有240本书，故事书占总数的3/8。故事书有多少人？",
+		"图书角有240本书，故事书占总数的3/8。故事书有多少本？再借出10本。",
+		"图书角有240本书，故事书占总数的3/8，还有20本漫画。故事书有多少本？",
+		"如果图书角有240本书，故事书占总数的3/8。故事书有多少本？",
+		"图书角有240本书，不是故事书占总数的3/8。不是故事书有多少本？",
+	} {
+		if solution, ok := solveElementaryWordProblemDetailed(problem); ok {
+			t.Fatalf("incomplete or conflicting source was accepted: %q -> %+v", problem, solution)
+		}
+	}
+}
+
+func TestGradeVerifiedTotalFractionCountPreservesWorkAndUnits(t *testing.T) {
+	const problem = "图书角有240本书，故事书占总数的3/8。故事书有多少本？"
+	const solution = "故事书占总数的3/8，240÷8×3=90本。\n答案：90本。"
+	for _, tc := range []struct {
+		name, student, verified string
+		correct, finalCorrect   string
+		fallback                bool
+	}{
+		{"direct", "240×3/8=90（本）\n答：90本。", solution, "true", "true", false},
+		{"fraction-first", "(3/8)×240=90本\n答：90本", solution, "true", "true", false},
+		{"product-first", "(240×3)÷8=90本\n答：90本", solution, "true", "true", false},
+		{"share-one-line", "240÷8×3=90本\n答：90本", solution, "true", "true", false},
+		{"two-shares", "240÷8=30本\n30×3=90本\n答：90本", solution, "true", "true", false},
+		{"wrong-final", "240×3/8=80本\n答：80本", solution, "false", "false", false},
+		{"wrong-work-correct-final", "240×3/8=80本\n答：90本", solution, "false", "true", false},
+		{"wrong-unit", "答：90人", solution, "false", "false", false},
+		{"missing-unit", "答：90", solution, "false", "false", false},
+		{"wrong-intermediate-unit", "240×3/8=90（人）\n答：90本", solution, "false", "true", true},
+		{"unrelated-equality", "100−10=90本\n答：90本", solution, "false", "true", true},
+		{"extra-unrelated-equality", "240×3/8=90本\n100−10=90本\n答：90本", solution, "false", "true", true},
+		{"multiple-conclusions", "240×3/8=90本\n答：80本\n答：90本", solution, "false", "true", true},
+		{"division-grouping-conflict", "240÷(8×3)=10本\n答：90本", solution, "false", "true", true},
+		{"complex-explanation", "先画线段图再分成八份，取三份。\n答：90本", solution, "false", "true", true},
+		{"verified-value-conflict", "240×3/8=90本\n答：90本", "答案：80本", "false", "true", true},
+		{"verified-unit-conflict", "240×3/8=90本\n答：90本", "答案：90人", "false", "true", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			exec := &solveExec{graderOut: "CORRECT: no\nFINAL_ANSWER_CORRECT: yes\nWRONG_STEP: 需独立判断完整过程\nMISCONCEPTION: 不能仅按尾值判断"}
+			result, err := NewSolveSkill(exec.fn, nil).GradeVerified(t.Context(), problem, tc.verified, tc.student)
+			if err != nil {
+				t.Fatal(err)
+			}
+			calls := 0
+			if tc.fallback {
+				calls = 1
+			}
+			if exec.graderCalls() != calls || exec.solverCalls() != 0 || exec.verifierCalls() != 0 ||
+				result.Metadata["grade_correct"] != tc.correct || result.Metadata["grade_final_answer_correct"] != tc.finalCorrect {
+				t.Fatalf("grading lost source, process or unit boundary: result=%+v agents=%v", result, exec.agents())
+			}
+			if tc.name == "wrong-work-correct-final" && result.Metadata["grade_wrong_step"] == "" {
+				t.Fatal("wrong arithmetic step was not retained")
+			}
+			if tc.fallback {
+				grader, ok := exec.specFor(graderAgentName)
+				if !ok || !strings.Contains(grader.Task, problem) || !strings.Contains(grader.Task, tc.student) {
+					t.Fatal("fallback lost source or complete original work")
+				}
+			}
+		})
 	}
 }

@@ -27,6 +27,9 @@ var arithmeticFractionLiteralRe = regexp.MustCompile(`[0-9]+/[0-9]+`)
 var itemNumberPrefixRe = regexp.MustCompile(`^[0-9]{1,3}\s*(?:[、)）]|[.．]\s)\s*`)
 var mixedNumberAnswerRe = regexp.MustCompile(`^([+\-]?)([0-9]+)(?:\s+|又)([0-9]+)\s*/\s*([0-9]+)$`)
 var simplestFractionRequestRe = regexp.MustCompile(`^计算[ \t]*(.+?)[ \t]*[，,][ \t]*并把结果化成最简分数[。.]?$`)
+var simplestRatioRequestRe = regexp.MustCompile(`^把[ \t]*([0-9]+(?:[ \t]*/[ \t]*[0-9]+|\.[0-9]+)?)[ \t]*[:：∶][ \t]*([0-9]+(?:[ \t]*/[ \t]*[0-9]+|\.[0-9]+)?)[ \t]*化成(?:最简单的整数比|最簡單的整數比)[。.]?$`)
+var simplestRatioMethodRe = regexp.MustCompile(`(?:^|[、，,；;：:\s（(])比(?:$|[、，,；;。.\s）)])`)
+var positiveIntegerRatioAnswerRe = regexp.MustCompile(`^([0-9]+)[ \t]*[:：∶][ \t]*([0-9]+)$`)
 
 // 识别模型常见的“计算：表达式=”输出；问号是可选的，不能因缺少问号而把确定性算式
 // 降级到模型 solver/verifier 链。等号右侧仍必须为空，后续字符白名单继续 fail-closed。
@@ -76,6 +79,65 @@ func solveTrivialArithmetic(problem string) (worked, answer string, ok bool) {
 	}
 	worked = fmt.Sprintf("按四则运算规则计算：\n%s = %s\n\n答案：%s", display, answer, answer)
 	return worked, answer, true
+}
+
+// solveSimplestRatio 只化简完整数值比题型，保留前后项顺序和最简单整数比的答案要求。
+func solveSimplestRatio(problem string) (worked, answer string, ok bool) {
+	s := strings.TrimSpace(problem)
+	if len(s) > 256 {
+		return "", "", false
+	}
+	s = elementaryParenthesizedFractionRe.ReplaceAllString(s, "$1/$2")
+	match := simplestRatioRequestRe.FindStringSubmatch(s)
+	if len(match) != 3 {
+		return "", "", false
+	}
+	leftText := strings.NewReplacer(" ", "", "\t", "").Replace(match[1])
+	rightText := strings.NewReplacer(" ", "", "\t", "").Replace(match[2])
+	left, leftOK := nonNegativeRat(leftText)
+	right, rightOK := positiveRat(rightText)
+	if !leftOK || !rightOK {
+		return "", "", false
+	}
+	commonDivisor := new(big.Int).GCD(nil, nil, left.Denom(), right.Denom())
+	commonDenominator := new(big.Int).Quo(new(big.Int).Mul(left.Denom(), right.Denom()), commonDivisor)
+	leftInteger := new(big.Int).Mul(left.Num(), new(big.Int).Quo(new(big.Int).Set(commonDenominator), left.Denom()))
+	rightInteger := new(big.Int).Mul(right.Num(), new(big.Int).Quo(new(big.Int).Set(commonDenominator), right.Denom()))
+	divisor := new(big.Int).GCD(nil, nil, leftInteger, rightInteger)
+	first := new(big.Int).Quo(new(big.Int).Set(leftInteger), divisor)
+	second := new(big.Int).Quo(new(big.Int).Set(rightInteger), divisor)
+	answer = first.String() + ":" + second.String()
+	worked = fmt.Sprintf("比的前项和后项同时乘以同一个非零数，比值不变。\n两项同时乘 %s，化成整数比：\n%s:%s = %s:%s\n\n%s 和 %s 的最大公因数是 %s，两项同时除以 %s，得到最简单的整数比 %s。\n\n答案：%s",
+		commonDenominator, leftText, rightText, leftInteger, rightInteger, leftInteger, rightInteger, divisor, divisor, answer, answer)
+	return worked, answer, true
+}
+
+// positiveIntegerRatioAnswer 只规范化单个正整数比，不约去公因数，避免把非最简作答判对。
+func positiveIntegerRatioAnswer(answer string) (string, bool) {
+	match := positiveIntegerRatioAnswerRe.FindStringSubmatch(normalizeAnswer(answer))
+	if len(match) != 3 {
+		return "", false
+	}
+	first, firstOK := new(big.Int).SetString(match[1], 10)
+	second, secondOK := new(big.Int).SetString(match[2], 10)
+	if !firstOK || !secondOK || first.Sign() <= 0 || second.Sign() <= 0 {
+		return "", false
+	}
+	return first.String() + ":" + second.String(), true
+}
+
+func simplestRatioAllowedByConstraint(constraint string) bool {
+	c := strings.TrimSpace(constraint)
+	if c == "" {
+		return true
+	}
+	for _, marker := range []string{"不使用比", "不用比", "不得使用比", "禁止使用比"} {
+		if strings.Contains(c, marker) {
+			return false
+		}
+	}
+	return strings.Contains(c, "化简比") || strings.Contains(c, "整数比") ||
+		strings.Contains(c, "比的") || simplestRatioMethodRe.MatchString(c)
 }
 
 // unwrapSimplestFractionRequest 只接受产品链路使用的这一句固定自然语言包装。包装剥离后仍
