@@ -179,9 +179,6 @@ func (r *PandocRenderer) buildArgs(format Format, outPath string, opts RenderOpt
 		}
 	}
 
-	// 元数据：pin 日期防时间戳抖动击穿缓存
-	args = append(args, "--metadata=date:19700101")
-
 	// locale 元数据
 	locale := opts.effectiveLocale("zh-CN")
 	args = append(args, "--metadata=lang:"+locale)
@@ -268,8 +265,8 @@ var docxFixedTime = time.Date(1980, 1, 1, 0, 0, 0, 0, time.UTC)
 // normalizeDocxTimestamps 把 docx 中 core.xml 的时间戳清空 + zip header 时间戳归零，
 // 避免缓存哈希因时间戳抖动而每次失效。
 //
-// pandoc 默认会把渲染时间写入 dcterms:created/modified；--metadata=date:...
-// 只控制可见日期，影响不到 core.xml。
+// pandoc 默认会把渲染时间写入 dcterms:created/modified；仅规范化内部时间戳，
+// 不覆盖正文或源元数据中的可见日期。
 func normalizeDocxTimestamps(path string) error {
 	r, err := zip.OpenReader(path)
 	if err != nil {
