@@ -169,6 +169,7 @@ type ImageTaskView struct {
 	homeworkCompleted          bool
 	solveInvocation            *k12.ImageTaskInvocation
 	feedbackInvocation         *k12.ImageTaskInvocation
+	ocrInvocation              *k12.ImageTaskInvocation
 }
 
 type ImageTaskHomeworkProjection struct {
@@ -576,7 +577,8 @@ func (c *ImageTaskCoordinator) Create(
 		)
 	}
 	route = k12.NormalizeImageTaskRouteSnapshot(route)
-	if in.CreativeEntry != nil && in.CreativeEntry.Kind == k12.CreativeWorkEntryNewWork && in.CreativeEntry.TaskIntent == k12.ImageTaskIntentUnknown {
+	if (in.SourceKind == k12.ImageTaskSourceIM && in.CreativeEntry == nil) ||
+		(in.CreativeEntry != nil && in.CreativeEntry.Kind == k12.CreativeWorkEntryNewWork && in.CreativeEntry.TaskIntent == k12.ImageTaskIntentUnknown) {
 		route.PromptVersion = "creative-work-classification-ocr-v1"
 	}
 	if route.TimeoutMS <= 0 {
@@ -1589,10 +1591,18 @@ func (c *ImageTaskCoordinator) projectTarget(
 			view.Creative.IntakeID,
 		)
 		switch {
+		case invocationErr == nil && invocation.Status == k12.ImageTaskInvocationOutcomeUnknown:
+			view.ocrInvocation = &invocation
+			// 旧父任务可能已被期限处理误标可重试；投影只采用实际 OCR 回执，不改写历史。
+			view.Dispatch.RetrySafe = false
+			view.Dispatch.FailureKind = invocation.ErrorKind
 		case invocationErr == nil &&
 			(invocation.Status == k12.ImageTaskInvocationPrepared ||
 				invocation.Status == k12.ImageTaskInvocationSent):
+			view.ocrInvocation = &invocation
 			view.ActiveInvocationDeadlineAt = invocation.DeadlineAt
+		case invocationErr == nil:
+			view.ocrInvocation = &invocation
 		case errors.Is(invocationErr, k12storage.ErrImageTaskNotFound):
 		case invocationErr != nil:
 			return ImageTaskView{}, invocationErr
@@ -2410,6 +2420,10 @@ func (c *ImageTaskCoordinator) Result(
 			imageTaskInvocationReceipt(*view.feedbackInvocation, view.Dispatch.SourceDigest),
 		)
 	}
+	if view.ocrInvocation != nil {
+		result.OperationReceipts = append(result.OperationReceipts,
+			imageTaskInvocationReceipt(*view.ocrInvocation, view.Dispatch.SourceDigest))
+	}
 	if view.Dispatch.Status == k12.ImageTaskStatusAwaitingConfirmation ||
 		(view.Creative != nil && view.Creative.Status == k12.CreativeWorkIntakeAwaitingConfirmation) {
 		result.Kind = "awaiting_confirmation"
@@ -2966,6 +2980,10 @@ func (c *ImageTaskCoordinator) Retry(
 	current, err := c.projectTarget(ctx, original)
 	if err != nil {
 		return ImageTaskView{}, err
+	}
+	if current.ocrInvocation != nil &&
+		current.ocrInvocation.Status == k12.ImageTaskInvocationOutcomeUnknown {
+		return current, k12storage.ErrImageTaskInvalidState
 	}
 	if current.Homework != nil &&
 		strings.TrimSpace(current.Homework.GradingJobID) != "" {

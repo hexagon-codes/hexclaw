@@ -935,8 +935,8 @@ func (s *Store) CommitImageTaskRouting(
 			return dispatch, target, err
 		}
 		if decision.WritingOCR != nil && target.CreativeIntake != nil && decision.Intent == k12.ImageTaskIntentWriting &&
-			dispatch.CreativeEntry != nil && dispatch.CreativeEntry.Kind == k12.CreativeWorkEntryNewWork &&
-			dispatch.CreativeEntry.TaskIntent == k12.ImageTaskIntentUnknown {
+			((dispatch.SourceKind == k12.ImageTaskSourceIM && dispatch.CreativeEntry == nil && activeInvocation.RouteSnapshot.PromptVersion == "creative-work-classification-ocr-v1") ||
+				(dispatch.CreativeEntry != nil && dispatch.CreativeEntry.Kind == k12.CreativeWorkEntryNewWork && dispatch.CreativeEntry.TaskIntent == k12.ImageTaskIntentUnknown)) {
 			intake := target.CreativeIntake
 			evidence := *decision.WritingOCR
 			sum := sha256.Sum256([]byte(evidence.CanonicalContent))
@@ -2142,6 +2142,18 @@ func (s *Store) FailImageTaskInvocation(
 	if n, _ := res.RowsAffected(); n != 1 {
 		return ErrImageTaskInvalidState
 	}
+	if invocation.Operation == k12.ImageTaskOperationWritingOCR && outcomeUnknown {
+		// OCR 的未知结果与所属父任务在同一事务落盘，不能被接续期限改为安全重试。
+		if _, err := tx.ExecContext(ctx, `UPDATE k12_image_task_dispatches
+            SET status='failed',failure_kind=?,retry_safe=0,
+                automatic_deadline_at=0,automatic_remaining_seconds=0,
+                version=version+1,updated_at=?
+            WHERE agent_name=? AND target_object_type='creative_work_intake'
+              AND target_object_id=? AND status IN ('routing','routed')`,
+			failureKind, now, agentName, invocation.IntakeID); err != nil {
+			return err
+		}
+	}
 	return tx.Commit()
 }
 
@@ -2525,7 +2537,18 @@ func (s *Store) ExpireImageTaskInvocation(
 			Scan(&active); err != nil {
 			return dispatch, k12.ImageTaskInvocation{}, false, err
 		}
-		if active != 0 ||
+		var unknownOCR int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*)
+            FROM k12_creative_work_intakes c
+            WHERE c.agent_name=? AND c.dispatch_id=? AND c.status='failed'
+              AND c.retry_safe=0 AND EXISTS (
+                SELECT 1 FROM k12_image_task_invocations i
+                WHERE i.agent_name=c.agent_name AND i.intake_id=c.intake_id
+                  AND i.operation='writing_ocr' AND i.status='outcome_unknown'
+              )`, agentName, dispatchID).Scan(&unknownOCR); err != nil {
+			return dispatch, k12.ImageTaskInvocation{}, false, err
+		}
+		if active != 0 || unknownOCR != 0 ||
 			(dispatch.Status != k12.ImageTaskStatusRouting &&
 				dispatch.Status != k12.ImageTaskStatusRouted) {
 			return dispatch, k12.ImageTaskInvocation{}, false, tx.Commit()

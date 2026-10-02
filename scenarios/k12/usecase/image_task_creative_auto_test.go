@@ -156,6 +156,28 @@ func TestAutoCreativeEntryUnknownDoesNotResendOrSave(t *testing.T) {
 	if err != nil || latest.Creative == nil || latest.Creative.PromotedWorkID != "" || c.WorkFeedback.(*Deps).Solver.(*imageTaskFeedbackSolver).calls != 0 {
 		t.Fatalf("unknown OCR created a work: %+v %v", latest, err)
 	}
+	if latest.Dispatch.RetrySafe || latest.Dispatch.FailureKind != "writing_ocr_outcome_unknown" {
+		t.Fatalf("unknown OCR became retryable at parent: %+v", latest.Dispatch)
+	}
+	result, err := c.Result(ctx, "mingming", view.Dispatch.DispatchID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundUnknown := false
+	for _, operation := range result.OperationReceipts {
+		if operation.Operation == "writing_ocr" && operation.Status == "outcome_unknown" {
+			foundUnknown = true
+		}
+	}
+	if !foundUnknown {
+		t.Fatalf("result hid unknown OCR receipt: %+v", result.OperationReceipts)
+	}
+	if _, err := c.Retry(ctx, "mingming", view.Dispatch.DispatchID, latest.Dispatch.Version); err == nil {
+		t.Fatal("ordinary retry accepted unknown OCR")
+	}
+	if ocr.calls != 1 || classifier.calls != 1 {
+		t.Fatalf("retry re-sent unknown OCR: %d/%d", ocr.calls, classifier.calls)
+	}
 }
 
 func TestAutoCreativeCombinedOCRPersistsOneCallAndOneDraft(t *testing.T) {

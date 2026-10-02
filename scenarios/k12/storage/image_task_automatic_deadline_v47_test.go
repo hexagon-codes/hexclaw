@@ -226,6 +226,68 @@ func TestExpireImageTaskInvocationIsTransactionalIdempotentAndSuccessWins(t *tes
 	}
 }
 
+func TestWritingOCRUnknownKeepsParentNonRetryableAcrossDeadline(t *testing.T) {
+	store, db := setup(t)
+	ctx := context.Background()
+	now := time.Now().Unix()
+	dispatch, classification := prepareDeadlineDispatch(t, store, "ocr-unknown-deadline", now)
+	if _, claimed, err := store.ClaimImageTaskInvocationSend(ctx, "mingming",
+		classification.InvocationID, "classification-request", now); err != nil || !claimed {
+		t.Fatalf("classification claim: %v %v", claimed, err)
+	}
+	routed, target, err := store.CommitImageTaskRouting(ctx, "mingming", dispatch.DispatchID,
+		dispatch.Version, k12storage.ImageTaskRoutingDecision{
+			Intent: k12.ImageTaskIntentWriting, Evidence: []string{"essay"}, Confidence: .99,
+			InvocationResultDigest: "sha256:ocr-unknown-classification",
+		})
+	if err != nil || target.CreativeIntake == nil {
+		t.Fatalf("writing route: %+v %v", target, err)
+	}
+	invocation, _, err := store.PrepareImageTaskInvocation(ctx, k12.ImageTaskInvocation{
+		InvocationID: "ocr-unknown-invocation", AgentName: "mingming",
+		IntakeID: target.CreativeIntake.IntakeID, Operation: k12.ImageTaskOperationWritingOCR,
+		OperationKey:  "intake:" + target.CreativeIntake.IntakeID + ":ocr",
+		RequestDigest: "sha256:ocr-unknown", RouteSnapshot: testImageRoute(),
+		Status: k12.ImageTaskInvocationPrepared, Attempt: 1, CreatedAt: now, UpdatedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, claimed, err := store.ClaimImageTaskInvocationSend(ctx, "mingming",
+		invocation.InvocationID, "ocr-request", now); err != nil || !claimed {
+		t.Fatalf("OCR claim: %v %v", claimed, err)
+	}
+	if err := store.FailImageTaskInvocation(ctx, "mingming", invocation.InvocationID,
+		"writing_ocr_outcome_unknown", true, false); err != nil {
+		t.Fatal(err)
+	}
+	parent, err := store.GetImageTaskDispatch(ctx, "mingming", dispatch.DispatchID)
+	if err != nil || parent.Status != k12.ImageTaskStatusFailed || parent.RetrySafe ||
+		parent.FailureKind != "writing_ocr_outcome_unknown" || parent.AutomaticDeadlineAt != 0 {
+		t.Fatalf("parent lost unknown: %+v %v", parent, err)
+	}
+	// 模拟旧版本只保存子回执的父状态，期限处理仍不能把未知结果写成可重试失败。
+	if _, err := db.Exec(`UPDATE k12_image_task_dispatches
+		SET status='routed',failure_kind='',retry_safe=0,automatic_deadline_at=?
+		WHERE agent_name=? AND dispatch_id=?`, routed.AutomaticDeadlineAt, "mingming", dispatch.DispatchID); err != nil {
+		t.Fatal(err)
+	}
+	_, _, changed, err := store.ExpireImageTaskInvocation(ctx, "mingming",
+		dispatch.DispatchID, "", routed.AutomaticDeadlineAt+1)
+	if err != nil || changed {
+		t.Fatalf("deadline rewrote unknown OCR: changed=%v err=%v", changed, err)
+	}
+	stored, err := store.GetImageTaskInvocation(ctx, "mingming", invocation.InvocationID)
+	if err != nil || stored.Status != k12.ImageTaskInvocationOutcomeUnknown || stored.RetrySafe ||
+		stored.ProviderRequestKey != "ocr-request" {
+		t.Fatalf("unknown receipt changed: %+v %v", stored, err)
+	}
+	classification, err = store.GetImageTaskInvocation(ctx, "mingming", classification.InvocationID)
+	if err != nil || classification.Status != k12.ImageTaskInvocationSucceeded {
+		t.Fatalf("successful classification changed: %+v %v", classification, err)
+	}
+}
+
 func TestImageTaskHumanConfirmationPausesAndResumesAutomaticWindow(t *testing.T) {
 	store, db := setup(t)
 	ctx := context.Background()

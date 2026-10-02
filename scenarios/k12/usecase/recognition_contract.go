@@ -319,7 +319,7 @@ func evidenceTranscriptionsConflict(transcription string, values []string, answe
 		// 相邻比号共享中间数字，第二轮保留首轮未重叠匹配的比号。
 		value = evidenceNumericRatio.ReplaceAllString(value, "$1∶$2")
 		return strings.NewReplacer(
-			`\,`, "", "（", "(", "）", ")", "＝", "=",
+			`\,`, "", "（", "(", "）", ")", "＝", "=", "＋", "+",
 			"。", "", "；", "", "，", "", "：", "", "、", "", ";", "", ":", "",
 		).Replace(value)
 	}
