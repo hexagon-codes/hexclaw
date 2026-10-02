@@ -698,6 +698,28 @@ func (r *k12DingtalkPhotoInboundRuntime) advanceImageTask(
 	if err != nil {
 		return false, err
 	}
+	if result.Kind == "creative" && result.CreativeWork != nil {
+		generation := result.CreativeWork.GenerationState.Latest
+		if generation == nil || generation.Status != k12.WorkFeedbackSucceeded || generation.Feedback == nil {
+			return false, fmt.Errorf("DingTalk creative feedback is incomplete")
+		}
+		if bundle.Dispatch.RoutingDecision == k12usecase.InboundPhotoRoutePending {
+			_, err := r.inbound.RecordRoutingDecision(
+				ctx, bundle.Receipt.AgentName, bundle.Receipt.ReceiptID,
+				bundle.Dispatch.Version, k12usecase.InboundPhotoRouteNewSubmission,
+			)
+			return false, err
+		}
+		if bundle.Dispatch.RoutingDecision != k12usecase.InboundPhotoRouteNewSubmission {
+			return false, fmt.Errorf("DingTalk creative routing is unresolved")
+		}
+		// 作品已有独立持久化点评，终稿身份使用该 generation；不要求批改专属批注图。
+		_, err := r.inbound.RecordFinalArtifact(
+			ctx, bundle.Receipt.AgentName, bundle.Receipt.ReceiptID,
+			bundle.Dispatch.Version, generation.GenerationID,
+		)
+		return false, err
+	}
 	if result.FinalArtifact == nil {
 		if view.Homework == nil || strings.TrimSpace(view.Homework.GradingJobID) == "" {
 			r.imageTasks.StartAsync(bundle.Receipt.AgentName, bundle.Dispatch.ImageTaskID)
@@ -1100,6 +1122,19 @@ func (r *k12DingtalkPhotoInboundRuntime) advanceFinalReply(
 	if strings.TrimSpace(bundle.Dispatch.DeliveryBatchID) != "" {
 		return r.completeBoundReply(ctx, bundle)
 	}
+	if r.imageTasks != nil {
+		view, err := r.imageTasks.Get(ctx, bundle.Receipt.AgentName, bundle.Dispatch.ImageTaskID)
+		if err != nil {
+			return false, err
+		}
+		if view.Creative != nil {
+			result, err := r.imageTasks.Result(ctx, bundle.Receipt.AgentName, bundle.Dispatch.ImageTaskID)
+			if err != nil {
+				return false, err
+			}
+			return r.advanceCreativeFinalReply(ctx, bundle, result)
+		}
+	}
 	artifact, asset, err := r.openValidatedFinalArtifact(ctx, bundle)
 	if err != nil {
 		return false, err
@@ -1234,6 +1269,84 @@ func (r *k12DingtalkPhotoInboundRuntime) advanceFinalReply(
 		"part_count", len(batch.Receipts),
 	)
 	return true, nil
+}
+
+func (r *k12DingtalkPhotoInboundRuntime) advanceCreativeFinalReply(
+	ctx context.Context,
+	bundle k12usecase.InboundPhotoBundle,
+	result k12usecase.ImageTaskResult,
+) (bool, error) {
+	if result.Kind != "creative" || result.CreativeWork == nil || result.CreativeWork.Record == nil ||
+		result.CreativeWork.Record.AgentName != bundle.Receipt.AgentName {
+		return false, fmt.Errorf("DingTalk creative work identity is incomplete")
+	}
+	generation := result.CreativeWork.GenerationState.Latest
+	if generation == nil || generation.Status != k12.WorkFeedbackSucceeded || generation.Feedback == nil ||
+		generation.GenerationID != bundle.Dispatch.FinalArtifactID {
+		return false, fmt.Errorf("DingTalk creative feedback identity drifted")
+	}
+	reply, err := k12CreativeWorkReply(result)
+	if err != nil {
+		return false, err
+	}
+	content := reply.Content
+	if reply.MessageContent != nil {
+		content = reply.MessageContent.Markdown
+	}
+	target, err := r.resolveInboundPhotoFrozenTarget(bundle)
+	if err != nil {
+		return false, err
+	}
+	message := k12usecase.DeliveryMessage{
+		Content: content,
+		Attachments: []k12usecase.DeliveryAttachment{{
+			Name: bundle.Asset.Name, MIME: bundle.Asset.MIME,
+			Data: append([]byte(nil), bundle.Asset.Bytes...),
+		}},
+	}
+	identities := []k12usecase.DeliveryAttachmentIdentity{{
+		Name: bundle.Asset.Name, MIME: bundle.Asset.MIME, ContentDigest: bundle.Asset.Digest,
+	}}
+	// 发送与绑定之间发生重启时只绑定既有作品批次，不再次跨越发送边界。
+	batch, lookupErr := r.replyBatches.GetDeliveryBatchForMessageIdentity(
+		ctx, bundle.Receipt.AgentName, "creative_work", result.CreativeWork.Record.RecordID,
+		content, identities,
+	)
+	if lookupErr != nil && !errors.Is(lookupErr, records.ErrNotFound) {
+		return false, lookupErr
+	}
+	var deliverErr error
+	if errors.Is(lookupErr, records.ErrNotFound) {
+		batch, _, deliverErr = r.replyBatches.PrepareAndSendMessageBatchForTargets(
+			ctx, bundle.Receipt.AgentName, "creative_work", result.CreativeWork.Record.RecordID,
+			message, []k12usecase.ResolvedDeliveryTarget{target},
+		)
+	}
+	if strings.TrimSpace(batch.BatchID) == "" {
+		return false, errors.Join(deliverErr, fmt.Errorf("DingTalk creative reply returned no durable batch identity"))
+	}
+	if err := validateK12DingtalkPhotoReplyBatch(batch, target, bundle.Asset.MIME); err != nil {
+		return false, errors.Join(deliverErr, err)
+	}
+	bound, bindErr := r.inbound.BindReplyBatch(
+		context.WithoutCancel(ctx), bundle.Receipt.AgentName, bundle.Receipt.ReceiptID,
+		bundle.Dispatch.Version, batch.BatchID,
+	)
+	if bindErr != nil {
+		return false, errors.Join(deliverErr, bindErr)
+	}
+	bundle.Dispatch = bound
+	slog.Info("K12 DingTalk creative reply delivery batch bound",
+		"agent_ref", k12DingtalkPhotoRestartCheckpointValueDigest(bundle.Receipt.AgentName),
+		"receipt_ref", k12DingtalkPhotoRestartCheckpointValueDigest(bundle.Receipt.ReceiptID),
+		"work_ref", k12DingtalkPhotoRestartCheckpointValueDigest(result.CreativeWork.Record.RecordID),
+		"delivery_batch_ref", k12DingtalkPhotoRestartCheckpointValueDigest(batch.BatchID),
+		"delivery_status", batch.Status,
+	)
+	if deliverErr != nil {
+		return false, deliverErr
+	}
+	return r.completeBoundReply(ctx, bundle)
 }
 
 // k12DingtalkHomeworkNumberedContent 将稳定作业身份冻结进新投递正文，标签沿用正文语言。

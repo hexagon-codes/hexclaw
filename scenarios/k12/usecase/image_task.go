@@ -3048,6 +3048,23 @@ func (c *ImageTaskCoordinator) Retry(
 	}
 	if current.Creative != nil &&
 		current.Creative.Status == k12.CreativeWorkIntakePromoted {
+		if original.Status == k12.ImageTaskStatusFailed &&
+			original.RetrySafe &&
+			original.FailureKind == imageTaskFailureInteractiveDeadlineExceeded &&
+			current.CreativeFeedback == "feedback_ready" &&
+			current.CreativeWork != nil &&
+			current.CreativeWork.GenerationState.Latest != nil &&
+			current.CreativeWork.GenerationState.Latest.Status == k12.WorkFeedbackSucceeded &&
+			current.CreativeWork.GenerationState.Latest.Feedback != nil {
+			// 点评已经成功时只恢复父任务接续窗口，复用当前 generation 与调用回执。
+			dispatch, restartErr := c.Records.RestartImageTaskAutomaticWindow(
+				ctx, agentName, dispatchID, expectedVersion, c.now(),
+			)
+			if restartErr != nil {
+				return current, restartErr
+			}
+			return c.projectTarget(ctx, dispatch)
+		}
 		if current.CreativeFeedback != "feedback_failed" ||
 			!current.CreativeFeedbackRetryable ||
 			c.WorkFeedback == nil {

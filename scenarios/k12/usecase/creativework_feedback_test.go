@@ -618,7 +618,7 @@ func TestGenerateWorkFeedback_OwnerIsolation(t *testing.T) {
 // 新 command key 通过当前命令入口追加新的点评 generation。
 func TestGenerateWorkFeedback_StatusGuard(t *testing.T) {
 	d := newDataDeps(t)
-	gen := &fakeWorkFeedbackSolver{feedback: "好句：开头比喻；建议：结尾补细节。"}
+	gen := &fakeWorkFeedbackSolver{feedback: "## 可见证据\n柳枝像绿色的丝带，随风轻轻摆动。\n## 先这样肯定\n用丝带比喻柳枝，形状和颜色都很具体。\n## 家长可以这样问或讲\n请孩子说说柳枝摆动时像什么。\n## 下一次只试一个点\n下一次只补充一处风吹柳枝的声音。"}
 	d.Solver = gen
 	ctx := context.Background()
 	id := newWritingWork(t, d, "xiaoming")

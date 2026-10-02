@@ -20,6 +20,15 @@ type LearningArchiveObjectCounts struct {
 	CreativeWorks int `json:"creative_works"`
 }
 
+// LearningArchiveAttachment 携带 canonical 相对引用所需的原始图片与内容身份。
+type LearningArchiveAttachment struct {
+	RelativePath string `json:"relative_path"`
+	SHA256       string `json:"sha256"`
+	MediaType    string `json:"media_type"`
+	ByteSize     int64  `json:"byte_size"`
+	DataBase64   string `json:"data_base64"`
+}
+
 // LearningArchiveExportV1 是 Markdown/PDF/Word 共用的冻结导出事实。
 type LearningArchiveExportV1 struct {
 	SchemaVersion     string                      `json:"schema_version"`
@@ -29,4 +38,5 @@ type LearningArchiveExportV1 struct {
 	ObjectCounts      LearningArchiveObjectCounts `json:"object_counts"`
 	ArtifactID        string                      `json:"artifact_id"`
 	CanonicalMarkdown string                      `json:"canonical_markdown"`
+	Attachments       []LearningArchiveAttachment `json:"attachments,omitempty"`
 }

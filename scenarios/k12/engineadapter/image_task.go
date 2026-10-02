@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -156,9 +157,20 @@ func (a *ImageTaskAdapter) ParseImageTaskClassificationResponse(raw string, incl
 		TaskRequirement        *k12.FactCandidate                 `json:"task_requirement_candidate"`
 		WritingOCR             *usecase.ImageTaskWritingOCRResult `json:"writing_ocr"`
 	}
-	if err := strictImageTaskJSON(raw, &envelope); err != nil {
+	parseErr := strictImageTaskJSON(raw, &envelope)
+	if errors.Is(parseErr, io.ErrUnexpectedEOF) {
+		// 只补完整字段后唯一缺失的顶层闭合；有效 JSON 才能继续原字段与事实校验。
+		left, right := strings.IndexByte(raw, '{'), strings.LastIndexByte(raw, '}')
+		if left >= 0 && right > left {
+			completed := raw[left:right+1] + "}"
+			if json.Valid([]byte(completed)) {
+				parseErr = strictImageTaskJSON(completed, &envelope)
+			}
+		}
+	}
+	if parseErr != nil {
 		return usecase.ImageTaskClassification{}, definitiveImageTaskResponse(
-			fmt.Errorf("image task classifier: 解析失败: %w", err),
+			fmt.Errorf("image task classifier: 解析失败: %w", parseErr),
 		)
 	}
 	result := usecase.ImageTaskClassification{

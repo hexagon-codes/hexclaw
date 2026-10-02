@@ -681,13 +681,22 @@ func k12CreativeWorkReply(result k12usecase.ImageTaskResult) (*adapter.Reply, er
 		}
 		return adapterReplyFromChannelMessage(msg), nil
 	}
-	if result.CreativeWork == nil || len(result.CreativeWork.Fields.Versions) == 0 {
+	if result.CreativeWork == nil {
 		return nil, fmt.Errorf("K12 作品任务已完成但点评缺失")
 	}
-	version := result.CreativeWork.Fields.Versions[len(result.CreativeWork.Fields.Versions)-1]
-	markdown := strings.TrimSpace(version.Feedback)
-	if version.StructuredFeedback != nil {
-		markdown = strings.TrimSpace(version.StructuredFeedback.ProjectionMarkdown)
+	markdown := ""
+	if generation := result.CreativeWork.GenerationState.Latest; generation != nil &&
+		generation.Status == k12.WorkFeedbackSucceeded && generation.Feedback != nil {
+		// 当前 generation 是点评事实来源；旧版本列表只用于历史数据兼容。
+		markdown = strings.TrimSpace(generation.Feedback.ProjectionMarkdown)
+	} else if versions := result.CreativeWork.Fields.Versions; len(versions) > 0 {
+		version := versions[len(versions)-1]
+		markdown = strings.TrimSpace(version.Feedback)
+		if version.StructuredFeedback != nil {
+			markdown = strings.TrimSpace(version.StructuredFeedback.ProjectionMarkdown)
+		}
+	} else {
+		return nil, fmt.Errorf("K12 作品任务已完成但点评缺失")
 	}
 	if markdown == "" {
 		return nil, fmt.Errorf("K12 作品任务已完成但点评投影为空")

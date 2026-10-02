@@ -1324,6 +1324,9 @@ func (h *handler) export(w http.ResponseWriter, r *http.Request) {
 		if renderError != "" {
 			response["render_error"] = renderError
 		}
+		if len(archive.Attachments) > 0 {
+			response["attachments"] = archive.Attachments
+		}
 		return response
 	}
 	format := r.URL.Query().Get("format")
@@ -1332,7 +1335,7 @@ func (h *handler) export(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	data, contentType, err := h.rt.Deps.Renderer.Render(
-		r.Context(), archive.CanonicalMarkdown, format,
+		r.Context(), usecase.LearningArchiveRenderMarkdown(archive), format,
 	)
 	if err != nil {
 		writeJSON(w, http.StatusOK, markdownResponse(err.Error()))

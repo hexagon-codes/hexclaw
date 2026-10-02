@@ -3,13 +3,16 @@ package usecase
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
+	"github.com/hexagon-codes/hexclaw/scenarios/k12/assetstore"
 	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
 )
 
@@ -91,6 +94,10 @@ func (d Deps) ExportLearningArchiveMarkdown(
 	if err := validateLearningArchiveWorks(snapshot.CreativeWorks); err != nil {
 		return LearningArchiveExportV1{}, err
 	}
+	attachments, err := packLearningArchiveAttachments(agentName, snapshot.CreativeWorks)
+	if err != nil {
+		return LearningArchiveExportV1{}, err
+	}
 	markdown, err := renderLearningArchiveMarkdown(snapshot)
 	if err != nil {
 		return LearningArchiveExportV1{}, err
@@ -123,7 +130,46 @@ func (d Deps) ExportLearningArchiveMarkdown(
 		Scope:         scope, AsOf: stored.CreatedAt, SourceDigest: stored.SourceDigest,
 		ObjectCounts: counts, ArtifactID: stored.ArtifactID,
 		CanonicalMarkdown: stored.CanonicalMarkdown,
+		Attachments:       attachments,
 	}, nil
+}
+
+func packLearningArchiveAttachments(agent string, works []k12storage.LearningArchiveCreativeWork) ([]k12.LearningArchiveAttachment, error) {
+	seen := map[string]bool{}
+	for _, work := range works {
+		if id := work.Initial.Source.SourceAssetID; id != "" {
+			seen[id] = true
+		}
+	}
+	ids := make([]string, 0, len(seen))
+	for id := range seen {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	assets, err := packHexbakAssetIDs(agent, ids)
+	if err != nil {
+		return nil, fmt.Errorf("usecase: learning archive attachment: %w", err)
+	}
+	attachments := make([]k12.LearningArchiveAttachment, 0, len(assets))
+	for _, asset := range assets {
+		_, file, _ := assetstore.Parse(asset.AssetID)
+		attachments = append(attachments, k12.LearningArchiveAttachment{
+			RelativePath: "attachments/" + file, SHA256: asset.SHA256,
+			MediaType: asset.MIME, ByteSize: int64(len(asset.Data)),
+			DataBase64: base64.StdEncoding.EncodeToString(asset.Data),
+		})
+	}
+	return attachments, nil
+}
+
+// LearningArchiveRenderMarkdown 只为渲染内联同一份原件；冻结正文保留可移植的相对引用。
+func LearningArchiveRenderMarkdown(archive LearningArchiveExportV1) string {
+	markdown := archive.CanonicalMarkdown
+	for _, attachment := range archive.Attachments {
+		markdown = strings.ReplaceAll(markdown, "]("+attachment.RelativePath+")",
+			"](data:"+attachment.MediaType+";base64,"+attachment.DataBase64+")")
+	}
+	return markdown
 }
 
 type learningArchiveRecordDigest struct {
@@ -154,17 +200,19 @@ func learningArchiveSourceDigest(
 	snapshot k12storage.LearningArchiveSourceSnapshot,
 ) (string, error) {
 	canonical := struct {
-		SchemaVersion string                        `json:"schema_version"`
-		Scope         LearningArchiveScope          `json:"scope"`
-		ObjectCounts  LearningArchiveObjectCounts   `json:"object_counts"`
-		WeeklyReview  []k12.WeeklyPracticeItem      `json:"weekly_review"`
-		Mistakes      []learningArchiveRecordDigest `json:"mistakes"`
-		PracticeSets  []learningArchiveRecordDigest `json:"practice_sets"`
-		Accumulation  []learningArchiveRecordDigest `json:"accumulation"`
-		CreativeWorks []learningArchiveWorkDigest   `json:"creative_works"`
+		SchemaVersion     string                        `json:"schema_version"`
+		ProjectionVersion string                        `json:"projection_version"`
+		Scope             LearningArchiveScope          `json:"scope"`
+		ObjectCounts      LearningArchiveObjectCounts   `json:"object_counts"`
+		WeeklyReview      []k12.WeeklyPracticeItem      `json:"weekly_review"`
+		Mistakes          []learningArchiveRecordDigest `json:"mistakes"`
+		PracticeSets      []learningArchiveRecordDigest `json:"practice_sets"`
+		Accumulation      []learningArchiveRecordDigest `json:"accumulation"`
+		CreativeWorks     []learningArchiveWorkDigest   `json:"creative_works"`
 	}{
-		SchemaVersion: k12.LearningArchiveSchemaVersion,
-		Scope:         scope, ObjectCounts: counts, WeeklyReview: snapshot.WeeklyReview,
+		SchemaVersion:     k12.LearningArchiveSchemaVersion,
+		ProjectionVersion: "attachments-v1",
+		Scope:             scope, ObjectCounts: counts, WeeklyReview: snapshot.WeeklyReview,
 		Mistakes:      learningArchiveRecordDigests(snapshot.Mistakes),
 		PracticeSets:  learningArchiveRecordDigests(snapshot.PracticeSets),
 		Accumulation:  learningArchiveRecordDigests(snapshot.Accumulations),
@@ -321,8 +369,15 @@ func renderLearningArchiveMarkdown(
 	for i, work := range snapshot.CreativeWorks {
 		fmt.Fprintf(&b, "### %d\n\n", i+1)
 		writeLearningArchiveMeta(&b, "标题", work.Fields.WorkTitle)
+		b.WriteByte('\n')
 		writeLearningArchiveBlock(&b, work.Initial.Source.ContentMarkdown)
-		writeLearningArchiveMeta(&b, "源文件", work.Initial.Source.SourceAssetID)
+		if id := work.Initial.Source.SourceAssetID; id != "" {
+			_, file, err := assetstore.Parse(id)
+			if err != nil {
+				return "", fmt.Errorf("usecase: learning archive source attachment: %w", err)
+			}
+			fmt.Fprintf(&b, "![原图](attachments/%s)\n\n", file)
+		}
 		if work.Latest != nil && work.Latest.Feedback != nil {
 			writeLearningArchiveBlock(&b, work.Latest.Feedback.ProjectionMarkdown)
 		}
