@@ -98,6 +98,15 @@ func (s *Store) ClaimMaterialInvocation(ctx context.Context, p MaterialPreparati
 	if foundErr != nil && !errors.Is(foundErr, sql.ErrNoRows) {
 		return inv, false, foundErr
 	}
+	if foundErr == nil && inv.Status == "failed" {
+		var failure struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal([]byte(inv.ResultJSON), &failure) != nil || failure.Error == "" {
+			return inv, false, egress.ErrProviderResponseProcessed
+		}
+		return inv, false, errors.Join(egress.ErrProviderResponseProcessed, errors.New(failure.Error))
+	}
 	attempt := 0
 	if decision != nil {
 		if !pendingRecovery || decision.Operation != operation || decision.Request != request || foundErr != nil || inv.ID != decision.Original {
@@ -136,6 +145,13 @@ func (s *Store) FinishMaterialInvocation(ctx context.Context, inv MaterialInvoca
 		status = "outcome_unknown"
 		if errors.Is(callErr, egress.ErrProviderNotSent) {
 			status = "not_sent"
+		} else if errors.Is(callErr, egress.ErrProviderResponseProcessed) {
+			status = "failed"
+			failure, _ := json.Marshal(struct {
+				Error   string `json:"error"`
+				Payload string `json:"payload,omitempty"`
+			}{Error: callErr.Error(), Payload: payload})
+			payload = string(failure)
 		}
 	}
 	res, err := s.db.ExecContext(ctx, `UPDATE k12_material_invocations SET status=?,result_json=?,result_digest=?,updated_at=? WHERE invocation_id=? AND status='sent'`, status, payload, problemAssetRequestDigest([]byte(payload)), nowUnix(), inv.ID)

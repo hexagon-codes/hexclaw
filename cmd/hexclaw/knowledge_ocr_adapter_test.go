@@ -5,24 +5,32 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 	"unicode"
 
 	"github.com/hexagon-codes/ai-core/llm"
+	"github.com/hexagon-codes/hexclaw/egress"
 	"github.com/hexagon-codes/hexclaw/knowledge"
 )
 
 type knowledgeOCRCaptureProvider struct {
-	request llm.CompletionRequest
-	err     error
+	request         llm.CompletionRequest
+	err             error
+	headerBudget    time.Duration
+	hasHeaderBudget bool
+	deadline        time.Time
+	hasDeadline     bool
 }
 
 func (*knowledgeOCRCaptureProvider) Name() string { return "capture" }
 
 func (p *knowledgeOCRCaptureProvider) Complete(
-	_ context.Context,
+	ctx context.Context,
 	request llm.CompletionRequest,
 ) (*llm.CompletionResponse, error) {
 	p.request = request
+	p.headerBudget, p.hasHeaderBudget = egress.ProviderRequestResponseHeaderTimeoutFromContext(ctx)
+	p.deadline, p.hasDeadline = ctx.Deadline()
 	if p.err != nil {
 		return nil, p.err
 	}
@@ -91,5 +99,57 @@ func TestKnowledgeOCRAdapterDoesNotCreateSuccessReceiptOnProviderFailure(t *test
 	if err == nil || result.Content != "" || result.RouteReceipt.Provider != "" ||
 		result.RouteReceipt.Status != "" {
 		t.Fatalf("failed OCR result=%+v err=%v", result, err)
+	}
+}
+
+func TestKnowledgeOCRAdapterKeepsPageDeadlineAndRequestLocalHeaderBudget(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		pageBudget    time.Duration
+		existingGuard time.Duration
+	}{
+		{name: "page_deadline", pageBudget: 180 * time.Second},
+		{name: "no_deadline"},
+		{name: "stricter_existing_guard", pageBudget: 180 * time.Second, existingGuard: 30 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			var deadline time.Time
+			if tc.pageBudget > 0 {
+				deadline = time.Now().Add(tc.pageBudget)
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithDeadline(ctx, deadline)
+				defer cancel()
+			}
+			if tc.existingGuard > 0 {
+				ctx = egress.WithProviderRequestResponseHeaderTimeout(ctx, tc.existingGuard)
+			}
+			provider := &knowledgeOCRCaptureProvider{}
+			if _, err := completeKnowledgePDFPageOCR(ctx, provider, "hexclaw-gpt", "gpt-5.6-sol", []byte("rendered-page"), "image/png"); err != nil {
+				t.Fatal(err)
+			}
+			if tc.pageBudget == 0 {
+				if provider.hasHeaderBudget || provider.hasDeadline {
+					t.Fatal("OCR without a page deadline must keep the default transport guard")
+				}
+				return
+			}
+			if !provider.hasDeadline || !provider.deadline.Equal(deadline) {
+				t.Fatalf("page deadline changed: got=%v want=%v", provider.deadline, deadline)
+			}
+			if !provider.hasHeaderBudget || provider.headerBudget <= 0 {
+				t.Fatal("page deadline did not reach the provider response-header guard")
+			}
+			if tc.existingGuard > 0 {
+				if provider.headerBudget != tc.existingGuard {
+					t.Fatalf("stricter response-header guard changed: got=%v want=%v", provider.headerBudget, tc.existingGuard)
+				}
+			} else if provider.headerBudget <= 120*time.Second || provider.headerBudget > tc.pageBudget {
+				t.Fatalf("180-second page was cut short or extended: header guard=%v", provider.headerBudget)
+			}
+			if ctx.Err() != nil {
+				t.Fatalf("page context unexpectedly cancelled: %v", ctx.Err())
+			}
+		})
 	}
 }

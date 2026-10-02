@@ -135,6 +135,38 @@ func TestMaterialPreparationMarkdownPublishesVerifiedAnswersWithoutLearning(t *t
 	}
 }
 
+func TestMaterialPreparationIgnoresPageDecorationsAndKeepsRealQuestions(t *testing.T) {
+	for _, tc := range []struct {
+		name, subject, body string
+		want                []string
+	}{
+		{"art-page-decorations", "美术", "---\n**5**\n---\n**8**\n**36**\n", nil},
+		{"science-page-decorations", "科学", "---\n7\n* * *\n___\n", nil},
+		{"numbered-question-boundaries", "数学", "1. 12÷3=\n---\n**5**\n2. 7×8=\n", []string{"12÷3=", "7×8="}},
+		{"negative-and-fraction", "数学", "-3+2=\n1/2×4=\n", []string{"-3+2=", "1/2×4="}},
+		{"formatted-expression", "数学", "**5×2=**\n", []string{"5×2="}},
+		{"numbered-missing-operand", "数学", "1. 5×?=10\n", []string{"5×?="}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, records, _, doc := materialImportFixture(t, tc.body, func(_ *sql.DB, input *knowledge.CreateDocumentInput) {
+				input.Subject = tc.subject
+			})
+			summary, err := records.GetMaterialPreparationSummary(t.Context(), "desktop-user", doc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(summary.Items) != len(tc.want) {
+				t.Fatalf("candidate count=%d want=%d: %+v", len(summary.Items), len(tc.want), summary.Items)
+			}
+			for i, want := range tc.want {
+				if summary.Items[i].Stem != want {
+					t.Fatalf("candidate %d stem=%q want=%q", i, summary.Items[i].Stem, want)
+				}
+			}
+		})
+	}
+}
+
 func TestMaterialPreparationUnknownAndSourceChangesDoNotResend(t *testing.T) {
 	db, records, worker, doc := materialImportFixture(t, "1. 4.5×2=\n")
 	p, err := records.NextMaterialPreparation(t.Context())

@@ -62,26 +62,6 @@ func (s *Store) materialPreparationSummary(ctx context.Context, owner, document 
 	if details {
 		out.SourceObservations = manifest.ReferenceObservations
 	}
-	if !details {
-		rows, err := s.db.QueryContext(ctx, `SELECT CASE WHEN p.state='published' AND a.status='active' THEN 'ready' WHEN p.state='published' THEN 'needs_review' WHEN p.state IN ('queued','running','verified') THEN 'preparing' ELSE p.state END,COUNT(*) FROM k12_material_preparations p LEFT JOIN k12_problem_assets a ON a.asset_id=p.asset_id AND a.owner_id=p.owner_id WHERE p.owner_id=? AND p.document_id=? AND p.source_revision=? GROUP BY 1`, owner, document, out.SourceRevision)
-		if err != nil {
-			return out, err
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var state string
-			var count int
-			if err = rows.Scan(&state, &count); err != nil {
-				return out, err
-			}
-			out.Counts[state] = count
-		}
-		if err = rows.Err(); err != nil {
-			return out, err
-		}
-		materialSummaryState(&out)
-		return out, nil
-	}
 	pages := map[string]int{}
 	questionText := map[string]string{}
 	warnings := map[string][]string{}
@@ -109,6 +89,7 @@ func (s *Store) materialPreparationSummary(ctx context.Context, owner, document 
 		return out, err
 	}
 	defer rows.Close()
+	decorationOutcomeUnknown := false
 	for rows.Next() {
 		var item MaterialPreparationItem
 		var raw, result, assetState string
@@ -127,8 +108,13 @@ func (s *Store) materialPreparationSummary(ctx context.Context, owner, document 
 		if text, ok := questionText[c.BlockID]; ok {
 			item.Stem = text
 		}
+		if c.QuestionNumber == "" && materialLayoutDecoration(item.Stem) {
+			// 排版装饰不计为题目，但已发送请求的未知结果仍影响摘要，不能因隐藏装饰而变为就绪。
+			decorationOutcomeUnknown = decorationOutcomeUnknown || item.State == "outcome_unknown"
+			continue
+		}
 		var answer struct{ Solution string }
-		if strings.TrimSpace(result) != "" {
+		if details && strings.TrimSpace(result) != "" {
 			if err = json.Unmarshal([]byte(result), &answer); err != nil {
 				return out, err
 			}
@@ -147,7 +133,9 @@ func (s *Store) materialPreparationSummary(ctx context.Context, owner, document 
 			item.State = "preparing"
 		}
 		out.Counts[item.State]++
-		out.Items = append(out.Items, item)
+		if details {
+			out.Items = append(out.Items, item)
+		}
 	}
 	if err = rows.Err(); err != nil {
 		return out, err
@@ -164,6 +152,9 @@ func (s *Store) materialPreparationSummary(ctx context.Context, owner, document 
 		return a.Line < b.Line
 	})
 	materialSummaryState(&out)
+	if decorationOutcomeUnknown && out.Counts["preparing"] == 0 {
+		out.State = "outcome_unknown"
+	}
 	return out, nil
 }
 

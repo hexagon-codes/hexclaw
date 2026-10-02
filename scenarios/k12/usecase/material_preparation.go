@@ -169,6 +169,9 @@ func (w *MaterialPreparationWorker) RunOnce(ctx context.Context) (did bool, err 
 		if errors.Is(err, egress.ErrProviderNotSent) && !unknown {
 			state, reason = "needs_review", "Material model request was not sent"
 		}
+		if errors.Is(err, egress.ErrProviderResponseProcessed) && !unknown {
+			state, reason = "needs_review", err.Error()
+		}
 		if errors.Is(err, errMaterialModelPreparationRequired) {
 			state, reason = "needs_review", "Model-based material preparation is not available"
 		}

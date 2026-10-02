@@ -11,6 +11,27 @@ import (
 var materialQuestionNumber = regexp.MustCompile(`^\s*(?:[-*]\s+)?(?:第([0-9]+)题[：:.、]?|([0-9]+)[、)]\s*|([0-9]+)\.\s+)(.*)$`)
 var materialArabicDigit = regexp.MustCompile(`[0-9]`)
 var materialArithmetic = regexp.MustCompile(`^[0-9\s.+\-*/×÷()（）=？?]+$`)
+var materialNumber = regexp.MustCompile(`[0-9]+(?:\.[0-9]+)?`)
+var materialBinaryOperator = regexp.MustCompile(`[0-9)）?？]\s*[+\-*/×÷]\s*[+\-]?\s*[0-9(（?？]`)
+var materialSeparator = regexp.MustCompile(`^(?:-\s*){3,}$|^(?:\*\s*){3,}$|^(?:_\s*){3,}$`)
+var materialBarePage = regexp.MustCompile(`^[0-9]+$`)
+
+func materialLayoutDecoration(text string) bool {
+	text = strings.TrimSpace(text)
+	return materialSeparator.MatchString(text) || strings.HasPrefix(text, "**") &&
+		strings.HasSuffix(text, "**") && len(text) > 4 &&
+		materialBarePage.MatchString(strings.TrimSpace(text[2:len(text)-2]))
+}
+
+// materialArithmeticStem 区分真实二元算式与 Markdown 装饰、孤立页码。
+func materialArithmeticStem(text string) (string, bool) {
+	text = strings.TrimSpace(text)
+	if strings.HasPrefix(text, "**") && strings.HasSuffix(text, "**") && len(text) > 4 {
+		text = strings.TrimSpace(text[2 : len(text)-2])
+	}
+	return text, materialArithmetic.MatchString(text) &&
+		len(materialNumber.FindAllString(text, -1)) >= 2 && materialBinaryOperator.MatchString(text)
+}
 
 type materialSourceLine struct {
 	objects []string
@@ -99,6 +120,10 @@ func extractMaterialClosedGroups(blocks []MaterialBlock, subject, grade string, 
 			if text == "" || strings.HasPrefix(text, "<!-- source_page_span=") {
 				continue
 			}
+			if materialSeparator.MatchString(text) || !inAnswers && materialLayoutDecoration(text) {
+				flush()
+				continue
+			}
 			heading := strings.TrimSpace(strings.TrimLeft(text, "#"))
 			if materialAnswerHeading(heading) {
 				flush()
@@ -135,7 +160,7 @@ func extractMaterialClosedGroups(blocks []MaterialBlock, subject, grade string, 
 				shared = append(shared, line)
 				continue
 			}
-			if !inAnswers && materialArithmetic.MatchString(text) && strings.ContainsAny(text, "+-*/×÷") {
+			if _, arithmetic := materialArithmeticStem(text); !inAnswers && arithmetic {
 				if sourceComplete {
 					groups = append(groups, materialQuestionGroup{lines: []materialSourceLine{line}})
 				} else {
@@ -211,8 +236,9 @@ func extractMaterialClosedGroups(blocks []MaterialBlock, subject, grade string, 
 				break
 			}
 		}
-		arithmetic := materialArithmetic.MatchString(stem) && strings.ContainsAny(stem, "+-*/×÷")
+		arithmeticStem, arithmetic := materialArithmeticStem(stem)
 		if arithmetic {
+			stem = arithmeticStem
 			if strings.Count(stem, "=") > 1 {
 				complete = false
 				continue
