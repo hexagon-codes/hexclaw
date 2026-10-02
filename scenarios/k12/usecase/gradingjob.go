@@ -784,6 +784,7 @@ func (d Deps) ReconcileGradingInvocationNotExecuted(ctx context.Context, agentNa
 func (d Deps) ReconcileGradingInvocationSucceeded(
 	ctx context.Context,
 	agentName, recordID, invocationID, resultDigest, artifactDigest, externalRequestID string,
+	resultJSON ...string,
 ) (GradingJobView, error) {
 	if d.Records == nil || strings.TrimSpace(resultDigest) == "" {
 		return GradingJobView{}, fmt.Errorf("%w: durable model result evidence is required", ErrInvalidInput)
@@ -817,12 +818,20 @@ func (d Deps) ReconcileGradingInvocationSucceeded(
 	switch invocation.Status {
 	case k12.ModelInvocationOutcomeUnknown:
 		invocation, err = d.Records.ReconcileModelInvocationSucceeded(
-			ctx, agentName, invocationID, resultDigest, externalRequestID,
+			ctx, agentName, invocationID, resultDigest, externalRequestID, resultJSON...,
 		)
 	case k12.ModelInvocationSent:
-		invocation, err = d.Records.MarkModelInvocationSucceeded(
-			ctx, agentName, invocationID, resultDigest, externalRequestID,
-		)
+		if len(resultJSON) == 1 {
+			invocation, err = d.Records.MarkModelInvocationSucceededWithResult(
+				ctx, agentName, invocationID, resultDigest, resultJSON[0], externalRequestID,
+			)
+		} else if len(resultJSON) == 0 {
+			invocation, err = d.Records.MarkModelInvocationSucceeded(
+				ctx, agentName, invocationID, resultDigest, externalRequestID,
+			)
+		} else {
+			return GradingJobView{}, fmt.Errorf("%w: one durable model result payload is required", ErrInvalidInput)
+		}
 	case k12.ModelInvocationSucceeded, k12.ModelInvocationReconciled:
 		// Validate the already-written conclusive ledger row below.
 	default:

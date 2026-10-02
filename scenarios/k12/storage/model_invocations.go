@@ -404,15 +404,41 @@ func (s *Store) ReconcileModelInvocationPartialSucceeded(
 func (s *Store) ReconcileModelInvocationSucceeded(
 	ctx context.Context,
 	agentName, invocationID, resultDigest, externalRequestID string,
+	resultJSON ...string,
 ) (k12.ModelInvocation, error) {
 	resultDigest = strings.TrimSpace(resultDigest)
 	externalRequestID = strings.TrimSpace(externalRequestID)
 	if resultDigest == "" {
 		return k12.ModelInvocation{}, fmt.Errorf("k12storage: reconciled model success requires result_digest")
 	}
-	stored, err := s.transitionModelInvocation(ctx, agentName, invocationID,
-		[]k12.ModelInvocationStatus{k12.ModelInvocationOutcomeUnknown}, k12.ModelInvocationReconciled,
-		"", resultDigest, externalRequestID, "reconciled_succeeded")
+	var stored k12.ModelInvocation
+	var err error
+	if len(resultJSON) == 0 {
+		stored, err = s.transitionModelInvocation(ctx, agentName, invocationID,
+			[]k12.ModelInvocationStatus{k12.ModelInvocationOutcomeUnknown}, k12.ModelInvocationReconciled,
+			"", resultDigest, externalRequestID, "reconciled_succeeded")
+	} else {
+		if len(resultJSON) != 1 || strings.TrimSpace(resultJSON[0]) == "" || !json.Valid([]byte(resultJSON[0])) {
+			return k12.ModelInvocation{}, fmt.Errorf("k12storage: reconciliation requires one valid result_json")
+		}
+		if modelInvocationResultPayloadDigest(resultJSON[0]) != resultDigest {
+			return k12.ModelInvocation{}, fmt.Errorf("%w: reconciled result digest does not match result_json", ErrModelInvocationConflict)
+		}
+		// 只在原未知回执结算时冻结正文，既有成功回执的空正文不回填。
+		_, err = s.db.ExecContext(ctx, `UPDATE k12_model_invocations SET
+        status=?,result_digest=?,result_json=?,
+        external_request_id=CASE WHEN ?='' THEN external_request_id ELSE ? END,
+        failure_kind='reconciled_succeeded',updated_at=?
+        WHERE invocation_id=? AND agent_name=? AND status=?`,
+			k12.ModelInvocationReconciled, resultDigest, resultJSON[0], externalRequestID, externalRequestID,
+			nowUnix(), invocationID, agentName, k12.ModelInvocationOutcomeUnknown)
+		if err == nil {
+			stored, err = s.GetModelInvocation(ctx, agentName, invocationID)
+		}
+		if err == nil && stored.ResultJSON != resultJSON[0] {
+			return k12.ModelInvocation{}, fmt.Errorf("%w: reconciled result payload changed", ErrModelInvocationConflict)
+		}
+	}
 	if err != nil {
 		return k12.ModelInvocation{}, err
 	}

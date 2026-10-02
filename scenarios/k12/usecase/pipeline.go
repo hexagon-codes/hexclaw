@@ -2,6 +2,7 @@ package usecase
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -176,10 +177,11 @@ func (d Deps) anchorHomeworkGeometry(ctx context.Context, image []byte, question
 		return nil, fmt.Errorf("usecase: answer anchorer does not support geometry-only anchoring")
 	}
 	anchored, err := geometry.AnchorAnswerGeometry(ctx, image, normalized)
-	if err != nil {
+	if err != nil && anchored == nil {
 		return nil, err
 	}
-	return normalizeAnswerAnchorOutput(anchored, normalized)
+	anchored, normalizeErr := normalizeAnswerAnchorOutput(anchored, normalized)
+	return anchored, errors.Join(err, normalizeErr)
 }
 
 // GradeRequest 一道题的批改请求（识题后的结构化输入）。

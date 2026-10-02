@@ -778,10 +778,11 @@ func expandRecognitionLayoutRegionV2(targets []RecognitionLayoutManifestTargetV2
 		}
 		n := target.Region
 		if r.Y < n.Y+n.Height && n.Y < r.Y+r.Height {
-			if n.X < r.X {
+			// 同列题框的轻微横向偏移不代表左右邻题，按两框实际边缘限定上下文。
+			if n.X+n.Width <= r.X {
 				left = min(left, max(0, r.X-n.X-n.Width))
 			}
-			if n.X > r.X {
+			if n.X >= r.X+r.Width {
 				right = min(right, max(0, n.X-r.X-r.Width))
 			}
 		}

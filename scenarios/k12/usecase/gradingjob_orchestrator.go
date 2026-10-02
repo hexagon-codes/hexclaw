@@ -1684,7 +1684,7 @@ func (o *GradingOrchestrator) startAnchorAsync(jobID string, run *gradingRun, sn
 			return
 		}
 		run.anchorFailed = failed
-		if state == k12.GradingAnchorLocated {
+		if anchored != nil {
 			// Adapter 只拥有 geometry 权限：以当前 canonical（可能已被家长确认修正）为底，
 			// 按索引拷贝 BBox，绝不接纳题干/答案/作答态/学科/知识点的反向覆盖。
 			run.anchored = mergeAnchorGeometry(run.questions, anchored)
@@ -1838,12 +1838,12 @@ func (o *GradingOrchestrator) executeAnchorForTask(
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctxErr, context.DeadlineExceeded) {
 			artifact = "anchor:timeout"
 		}
-		return nil, k12.GradingAnchorDegraded, artifact, true
+		return anchored, k12.GradingAnchorDegraded, artifact, true
 	}
 	if err != nil {
 		_, _ = o.deps.Records.MarkModelInvocationFailed(context.WithoutCancel(ctx), agentName,
 			invocation.InvocationID, "anchor_failed")
-		return nil, k12.GradingAnchorDegraded, "anchor:failed", true
+		return anchored, k12.GradingAnchorDegraded, "anchor:failed", true
 	}
 	if _, err := o.deps.Records.MarkModelInvocationSucceeded(context.WithoutCancel(ctx), agentName,
 		invocation.InvocationID, modelInvocationResultDigest(anchored), ""); err != nil {
@@ -1909,10 +1909,10 @@ func (o *GradingOrchestrator) runAssess(ctx context.Context, run *gradingRun, jo
 	// 预置锚点结论：located 回放产物；失败复现失败（触发与现网一致的文字降级文案）；
 	// 缺席保持缺席（GradeHomeworkPhoto 按无核验能力的既有语义 fail-closed）。
 	switch {
+	case run.anchorFailed:
+		assessDeps.AnswerAnchorer = presetAnchorer{questions: run.anchored, err: errors.New("锚点定位在 locating 阶段已失败（检查点回放）")}
 	case run.anchored != nil:
 		assessDeps.AnswerAnchorer = presetAnchorer{questions: run.anchored}
-	case run.anchorFailed:
-		assessDeps.AnswerAnchorer = presetAnchorer{err: errors.New("锚点定位在 locating 阶段已失败（检查点回放）")}
 	default:
 		assessDeps.AnswerAnchorer = nil
 	}
@@ -2007,8 +2007,12 @@ func (o *GradingOrchestrator) runAssess(ctx context.Context, run *gradingRun, jo
 		}
 		return v, perr
 	}
-	if _, err := o.deps.Records.MarkModelInvocationSucceeded(context.WithoutCancel(ctx), run.agentName,
-		invocation.InvocationID, modelInvocationResultDigest(result), ""); err != nil {
+	resultJSON, err := json.Marshal(result)
+	if err != nil {
+		return o.failStage(ctx, run, jobID, "assess_result_invalid", err)
+	}
+	if _, err := o.deps.Records.MarkModelInvocationSucceededWithResult(context.WithoutCancel(ctx), run.agentName,
+		invocation.InvocationID, modelInvocationResultDigest(result), string(resultJSON), ""); err != nil {
 		v, aerr := o.markGradingOutcomeUnknown(context.WithoutCancel(ctx), run, jobID, "invocation_ledger_write_failed")
 		if aerr != nil {
 			return v, aerr
@@ -2781,10 +2785,7 @@ func (p presetAnchorer) AnchorAnswers(context.Context, []byte, []RecognizedQuest
 }
 
 func (p presetAnchorer) AnchorAnswerGeometry(context.Context, []byte, []RecognizedQuestion) ([]RecognizedQuestion, error) {
-	if p.err != nil {
-		return nil, p.err
-	}
-	return append([]RecognizedQuestion(nil), p.questions...), nil
+	return cloneRecognizedQuestions(p.questions), p.err
 }
 
 // recordingAnnotator 包装现网 PhotoAnnotator，捕获渲染是否失败供 rendering 阶段回写（规则 2）。

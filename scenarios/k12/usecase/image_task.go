@@ -1,6 +1,7 @@
 package usecase
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -2524,16 +2525,20 @@ func (c *ImageTaskCoordinator) Result(
 			assessmentByProblem[assessment.ProblemID] = assessment
 		}
 		photo.Items = make([]PhotoGradeItem, 0, len(assessments))
+		assessmentDigests := make([]string, 0, len(assessments))
 		for _, question := range questions {
 			assessment, ok := assessmentByProblem[question.ProblemID]
 			if !ok {
 				continue
 			}
+			// 终稿原图不能用后来补出的 Attempt 框推断批注；默认只读原逐题回执。
+			question.BBox = nil
 			item, replayErr := replayGradingAssessmentItem(question, assessment)
 			if replayErr != nil {
 				return ImageTaskResult{}, replayErr
 			}
 			photo.Items = append(photo.Items, item)
+			assessmentDigests = append(assessmentDigests, assessment.ResultDigest)
 			delete(assessmentByProblem, question.ProblemID)
 		}
 		if len(photo.Items) != result.FinalArtifact.PublishedCount || len(assessmentByProblem) != 0 {
@@ -2560,6 +2565,11 @@ func (c *ImageTaskCoordinator) Result(
 				Data: append([]byte(nil), asset.Data...), MIME: asset.MIME,
 			}
 		}
+		// 已冻结的 aggregate 结果同时证明当时的几何和实际图；旧无正文回执不回填。
+		restoreFinalPhotoGeometry(&photo, *result.FinalArtifact, invocations, assessments, assessmentDigests)
+		if photo.ImageWarning == "" || photo.ImageWarning == "未能可靠定位作答位置，本次仅提供文字批改" {
+			photo.ImageWarning = photoAnnotationCoverageWarning(photo)
+		}
 		result.Kind = string(view.Dispatch.TaskIntent)
 		result.Photo = &photo
 		if err := c.registerTutorResult(ctx, result, assessments); err != nil {
@@ -2568,6 +2578,66 @@ func (c *ImageTaskCoordinator) Result(
 		}
 	}
 	return result, nil
+}
+
+func restoreFinalPhotoGeometry(
+	photo *PhotoGradeResult,
+	artifact k12.GradingFinalArtifact,
+	invocations []k12.ModelInvocation,
+	assessments []k12.GradingAssessmentItem,
+	assessmentDigests []string,
+) {
+	if artifact.SkippedCount != 0 {
+		return
+	}
+	ordered, err := json.Marshal(assessmentDigests)
+	if err != nil || string(ordered) != artifact.OrderedCurrentDigestsJSON {
+		return
+	}
+	for _, invocation := range invocations {
+		complete := invocation.Status == k12.ModelInvocationSucceeded ||
+			(invocation.Status == k12.ModelInvocationReconciled && invocation.FailureKind == "reconciled_succeeded")
+		if invocation.AgentName != artifact.AgentName || invocation.JobID != artifact.JobID ||
+			invocation.Stage != k12.GradingStageAssessing || !complete ||
+			strings.TrimSpace(invocation.ResultJSON) == "" {
+			continue
+		}
+		var frozen PhotoGradeResult
+		if json.Unmarshal([]byte(invocation.ResultJSON), &frozen) != nil ||
+			modelInvocationResultDigest(frozen) != invocation.ResultDigest ||
+			frozen.EffectiveTaskIntent() != photo.EffectiveTaskIntent() || len(frozen.Items) != len(photo.Items) ||
+			validateGradingAssessmentExactSet(frozen, assessments) != nil {
+			continue
+		}
+		if (frozen.AnnotatedImage == nil) != (photo.AnnotatedImage == nil) ||
+			(frozen.AnnotatedImage != nil && (frozen.AnnotatedImage.MIME != photo.AnnotatedImage.MIME ||
+				!bytes.Equal(frozen.AnnotatedImage.Data, photo.AnnotatedImage.Data))) {
+			continue
+		}
+		matches := true
+		for i, item := range frozen.Items {
+			q := photo.Items[i].Recognized
+			if item.Recognized.ProblemID != q.ProblemID || item.Recognized.AttemptID != q.AttemptID ||
+				item.Recognized.ConfirmedVersion != q.ConfirmedVersion || item.Recognized.InputDigest != q.InputDigest ||
+				item.Recognized.PageAssetID != q.PageAssetID ||
+				item.Recognized.SourceWidth != q.SourceWidth || item.Recognized.SourceHeight != q.SourceHeight {
+				matches = false
+				break
+			}
+		}
+		if !matches {
+			continue
+		}
+		for i, item := range frozen.Items {
+			photo.Items[i].Recognized.BBox = nil
+			if item.Recognized.BBox != nil {
+				box := *item.Recognized.BBox
+				photo.Items[i].Recognized.BBox = &box
+			}
+		}
+		photo.ImageWarning = frozen.ImageWarning
+		return
+	}
 }
 
 func gradingItemInvocationReceipt(

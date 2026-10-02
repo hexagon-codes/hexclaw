@@ -437,3 +437,89 @@ func TestRecognitionLayoutAdjudicationPlan_PreservesOriginalAndContext(t *testin
 		t.Fatal("legacy plan authorized a new request")
 	}
 }
+
+func TestRecognitionLayoutCompactContext_UsesHorizontalNeighborEdges(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		pageWidth  int
+		pageHeight int
+		target     SourcePixelRegion
+		neighbors  []SourcePixelRegion
+		visible    []image.Point
+		minX       int
+		maxX       int
+	}{
+		{
+			name: "same_column_right_offset_keeps_question_tail", pageWidth: 1076, pageHeight: 1462,
+			target:    SourcePixelRegion{X: 687, Y: 379, Width: 288, Height: 111},
+			neighbors: []SourcePixelRegion{{X: 689, Y: 281, Width: 286, Height: 111}},
+			visible:   []image.Point{image.Pt(1000, 430)}, minX: 0, maxX: 1076,
+		},
+		{
+			name: "same_column_left_offset_keeps_left_context", pageWidth: 1076, pageHeight: 1462,
+			target:    SourcePixelRegion{X: 687, Y: 379, Width: 288, Height: 111},
+			neighbors: []SourcePixelRegion{{X: 685, Y: 281, Width: 286, Height: 111}},
+			visible:   []image.Point{image.Pt(650, 430)}, minX: 0, maxX: 1076,
+		},
+		{
+			name: "horizontal_neighbors_limit_context_at_their_edges", pageWidth: 300, pageHeight: 200,
+			target:    SourcePixelRegion{X: 100, Y: 60, Width: 70, Height: 60},
+			neighbors: []SourcePixelRegion{{X: 20, Y: 60, Width: 60, Height: 60}, {X: 190, Y: 60, Width: 60, Height: 60}},
+			visible:   []image.Point{image.Pt(90, 80), image.Pt(180, 80)}, minX: 80, maxX: 190,
+		},
+		{
+			name: "page_edges_keep_context_inside_original_image", pageWidth: 100, pageHeight: 90,
+			target:  SourcePixelRegion{X: 5, Y: 5, Width: 90, Height: 80},
+			visible: []image.Point{image.Pt(0, 0), image.Pt(99, 89)}, minX: 0, maxX: 100,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			page := recognitionLayoutPlanTestPNG(t, tt.pageWidth, tt.pageHeight)
+			targets := []RecognitionLayoutManifestTargetV2{{ManifestRef: "manifest_0001", ManifestOrder: 1, Region: tt.target}}
+			for index, region := range tt.neighbors {
+				targets = append(targets, RecognitionLayoutManifestTargetV2{ManifestRef: fmt.Sprintf("manifest_%04d", index+2), ManifestOrder: index + 2, Region: region})
+			}
+			plan, err := BuildRecognitionLayoutPlanV2(RecognitionLayoutPlanInputV2{
+				PagePNG: page, Manifest: RecognitionLayoutManifestSuccessV2{InvocationID: "manifest-context", ResultDigest: "sha256:" + strings.Repeat("a", 64)},
+				Targets: targets, RecognitionFormat: RecognitionLayoutCompactV4, EnableSourceAdjudication: true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var focus *RecognitionLayoutTargetV2
+			for index := range plan.Targets {
+				if plan.Targets[index].OriginalRegion != nil && *plan.Targets[index].OriginalRegion == tt.target {
+					focus = &plan.Targets[index]
+				}
+			}
+			if focus == nil {
+				t.Fatal("focus source identity was lost")
+			}
+			region := focus.Region
+			if region.X < tt.minX || region.X+region.Width > tt.maxX || region.Y < 0 || region.Y+region.Height > tt.pageHeight {
+				t.Fatalf("crop crossed a horizontal neighbor or page boundary: %+v", region)
+			}
+			crop, err := BuildRecognitionLayoutRepairImageV2(page, plan, focus.TargetID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			decoded, err := png.Decode(bytes.NewReader(crop))
+			if err != nil {
+				t.Fatal(err)
+			}
+			original, err := png.Decode(bytes.NewReader(page))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, point := range tt.visible {
+				local := point.Sub(image.Pt(region.X, region.Y))
+				if !local.In(decoded.Bounds()) {
+					t.Fatalf("visible source pixel %v was cut off by crop %+v", point, region)
+				}
+				if decoded.At(local.X, local.Y) != original.At(point.X, point.Y) {
+					t.Fatalf("visible source pixel %v was altered", point)
+				}
+			}
+		})
+	}
+}

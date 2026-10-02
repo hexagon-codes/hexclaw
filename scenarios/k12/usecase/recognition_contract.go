@@ -50,6 +50,7 @@ var (
 	answerDisplayNewline    = regexp.MustCompile(`\\n(?:\b|([0-9]|[xX]\s*[=＝]))`)
 	evidenceNumericFraction = regexp.MustCompile(`\b([0-9]+(?:\.[0-9]+)?)\s*/\s*([0-9]+(?:\.[0-9]+)?)\b`)
 	evidenceNumericRatio    = regexp.MustCompile(`([0-9])[:：∶]([0-9])`)
+	completeRatioQuestion   = regexp.MustCompile(`^把\(([0-9]+)\)/\(([0-9]+)\)[:：∶]\(([0-9]+)\)/\(([0-9]+)\)化成(?:最简单的整数比|最簡單的整數比)。?$`)
 	explicitAnswerLine      = regexp.MustCompile(`^(?:答\s*[:：]\s*(?:是|为)?|答案\s*(?:是|为|[:：]))\s*`)
 )
 
@@ -238,6 +239,31 @@ func sixNumberQuestionSourcesEquivalent(raw string, values []string, initialRead
 	return true
 }
 
+// 只在完整化简比题干的比较副本中容许固定繁简措辞，不改数字、比项顺序或原转写。
+func completeRatioQuestionSourcesEquivalent(raw string, values []string) bool {
+	operands := func(value string) []string {
+		value = evidenceNumericFraction.ReplaceAllString(value, `\frac{$1}{$2}`)
+		value = strings.ReplaceAll(value, `\ `, " ")
+		value = strings.Join(strings.Fields(CanonicalPlainTextFallback(value)), "")
+		match := completeRatioQuestion.FindStringSubmatch(value)
+		if len(match) != 5 {
+			return nil
+		}
+		return match[1:]
+	}
+	base := operands(raw)
+	if len(base) == 0 || len(values) == 0 {
+		return false
+	}
+	for _, value := range values {
+		current := operands(value)
+		if len(current) != len(base) || strings.Join(current, ":") != strings.Join(base, ":") {
+			return false
+		}
+	}
+	return true
+}
+
 // answerEvidenceTranscriptionsConflict 只在比较视图统一独立答案行的位置和引导词。
 // 演算行仍逐字、按原顺序比较；不按最终数值一致吞掉缺失步骤或不同演算。
 func answerEvidenceTranscriptionsConflict(transcription string, values []string) bool {
@@ -410,7 +436,8 @@ func RecognitionSourceReadingsMatchForInitialReadMode(prior, review RecognizedQu
 	if !question {
 		readings := append([]string{prior.RawTranscription, review.RawTranscription}, prior.EvidenceTranscriptions...)
 		readings = append(readings, review.EvidenceTranscriptions...)
-		question = sixNumberQuestionSourcesEquivalent(review.RawTranscription, readings, initialReadMode)
+		question = sixNumberQuestionSourcesEquivalent(review.RawTranscription, readings, initialReadMode) ||
+			completeRatioQuestionSourcesEquivalent(review.RawTranscription, readings)
 	}
 	if prior.AnswerState != review.AnswerState {
 		return question, false

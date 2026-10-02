@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -405,6 +406,88 @@ func TestGradingOrchestratorAnchorTimeoutPersistsDegradedAndTextGradingContinues
 	result, ok := o.PhotoResult(jobID)
 	if !ok || result.Markdown == "" {
 		t.Fatalf("锚点超时不得阻断文字批改: ok=%v result=%+v", ok, result)
+	}
+}
+
+type partialDegradedAnchorer struct {
+	calls atomic.Int32
+	err   error
+}
+
+func (a *partialDegradedAnchorer) AnchorAnswers(ctx context.Context, image []byte, questions []RecognizedQuestion) ([]RecognizedQuestion, error) {
+	return a.AnchorAnswerGeometry(ctx, image, questions)
+}
+
+func (a *partialDegradedAnchorer) AnchorAnswerGeometry(_ context.Context, _ []byte, questions []RecognizedQuestion) ([]RecognizedQuestion, error) {
+	a.calls.Add(1)
+	out := cloneRecognizedQuestions(questions)
+	box := BBox{X: 0.2, Y: 0.3, W: 0.1, H: 0.05}
+	out[0].BBox = &box
+	for i := 1; i < len(out); i++ {
+		out[i].BBox = nil
+	}
+	return out, a.err
+}
+
+func TestGradingOrchestratorPartialAnchorFailureKeepsGeometryAndReceiptsAfterRestart(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		err    error
+		status k12.ModelInvocationStatus
+	}{
+		{"unknown", context.DeadlineExceeded, k12.ModelInvocationOutcomeUnknown},
+		{"failed", errors.New("locator rejected request"), k12.ModelInvocationFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			dir := t.TempDir()
+			anchorer := &partialDegradedAnchorer{err: tc.err}
+			o := newParallelAnchorOrchestrator(t, &countingRecognizer{questions: []RecognizedQuestion{
+				{Question: "1+1=", Subject: "数学", StudentAnswer: "3", AnswerState: AnswerStatePresent, SourceWidth: 1000, SourceHeight: 1000},
+				{Question: "1+2=", Subject: "数学", StudentAnswer: "4", AnswerState: AnswerStatePresent, SourceWidth: 1000, SourceHeight: 1000},
+			}}, anchorer, WithGradingRunDir(dir))
+			jobID := runItemResumeJobToAssessing(t, o, "partial-anchor-"+tc.name)
+			if _, err := o.ConfirmAndRun(ctx, jobID, nil); err != nil {
+				t.Fatal(err)
+			}
+			view := waitGradingView(t, o, jobID, func(v GradingJobView) bool { return v.Record.Status == k12.GradingStageCompleted })
+			result, ok := o.PhotoResult(jobID)
+			if !ok || len(result.Items) != 2 || result.Items[0].Recognized.BBox == nil || result.Items[1].Recognized.BBox != nil || len(trustedPhotoMarks(result.Items)) != 1 {
+				t.Fatalf("trusted geometry was lost or unresolved geometry fabricated: %+v", result)
+			}
+			if view.Fields.AnchorState != k12.GradingAnchorDegraded {
+				t.Fatalf("partial geometry changed degraded truth: %+v", view.Fields)
+			}
+			invocations, err := o.deps.Records.ListModelInvocations(ctx, "mingming", jobID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, inv := range invocations {
+				if inv.Stage == k12.GradingStageLocating {
+					found = inv.Status == tc.status
+				}
+			}
+			if !found {
+				t.Fatalf("locator receipt changed: %+v", invocations)
+			}
+			receipts, err := o.deps.Records.ListGradingAssessmentItems(ctx, "mingming", jobID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			restarted := trackGradingOrchestrator(t, NewGradingOrchestrator(o.deps, orchestratorSnapshotResolver, WithGradingRunDir(dir)))
+			if _, err := restarted.RunGradingJob(ctx, jobID); err != nil {
+				t.Fatal(err)
+			}
+			questions, foundQuestions := restarted.RecognizedQuestionsForOwner(ctx, "mingming", jobID)
+			if !foundQuestions || len(questions) != 2 || questions[0].BBox == nil || questions[1].BBox != nil {
+				t.Fatalf("durable partial geometry missing: found=%v %+v", foundQuestions, questions)
+			}
+			after, err := restarted.deps.Records.ListGradingAssessmentItems(ctx, "mingming", jobID)
+			if err != nil || !reflect.DeepEqual(after, receipts) || anchorer.calls.Load() != 1 {
+				t.Fatalf("restart rewrote receipts or resent locator: calls=%d err=%v", anchorer.calls.Load(), err)
+			}
+		})
 	}
 }
 

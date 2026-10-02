@@ -167,6 +167,75 @@ func TestRecognitionLayoutAdjudication_AdoptsIndependentEvidenceAndStopsUnknown(
 	}
 }
 
+func TestRecognitionLayoutAdjudication_AdoptsTraditionalRatioSource(t *testing.T) {
+	page, base := recognitionLayoutV2DispatchPlan(t, 1)
+	plan, err := k12.BuildRecognitionLayoutPlanV2(k12.RecognitionLayoutPlanInputV2{PagePNG: page,
+		Manifest:          k12.RecognitionLayoutManifestSuccessV2{InvocationID: base.ManifestInvocationID, ResultDigest: base.ManifestResultDigest},
+		Targets:           []k12.RecognitionLayoutManifestTargetV2{{ManifestRef: "manifest_0001", ManifestOrder: 1, Region: base.Targets[0].Region}},
+		RecognitionFormat: k12.RecognitionLayoutCompactV4, InitialReadMode: k12.RecognitionLayoutManifestWithContentV1, EnableSourceAdjudication: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := plan.Targets[0]
+	const primaryQuestion = `把 \(\frac{3}{4}:\frac{1}{2}\) 化成最简单的整数比。`
+	const repairQuestion = `把 \(\frac{3}{4}\div\frac{1}{2}\) 化成最简单的整数比。`
+	payload := func(question string, verification bool) string {
+		v := map[string]any{"items": []any{map[string]any{"target_id": "t1", "kind": "question", "recognition": map[string]any{
+			"question": question, "subject": "数学", "answer_state": "present", "student_answer": `\(3:2\)`,
+			"recognition_confidence": .99, "ocr_signals": []string{}, "answer_bbox": map[string]int{"x": 20, "y": 20, "width": 12, "height": 12}}}}}
+		if verification {
+			v["verification"] = map[string]bool{"target_ownership_confirmed": true, "active_answer_complete": true}
+		}
+		b, _ := json.Marshal(v)
+		return string(b)
+	}
+	for _, tt := range []struct {
+		name, independentQuestion string
+		adopt                     bool
+	}{
+		{"full traditional ratio agrees with primary only", `把 \(\frac{3}{4}:\frac{1}{2}\) 化成最簡單的整數比。`, true},
+		{"same answer cannot hide a changed fraction", `把 \(\frac{5}{4}:\frac{1}{2}\) 化成最簡單的整數比。`, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			firstRaw, repairRaw := payload(primaryQuestion, false), payload(repairQuestion, false)
+			_, first := classifyRecognitionLayoutRepairV2(firstRaw, target, plan.RecognitionFormat)
+			_, repair := classifyRecognitionLayoutRepairV2(repairRaw, target, plan.RecognitionFormat)
+			if first == nil || repair == nil {
+				t.Fatal("fixture did not parse")
+			}
+			first.source = k12.RecognitionPhysicalCallResult{InvocationID: "primary", ResultDigest: recognitionLayoutV2TestDigest(firstRaw), Payload: firstRaw}
+			repair.source = k12.RecognitionPhysicalCallResult{InvocationID: "repair", ResultDigest: recognitionLayoutV2TestDigest(repairRaw), Payload: repairRaw}
+			repair.question.EvidenceTranscriptions = []string{primaryQuestion, repairQuestion}
+			header := recognitionLayoutV2TestDigest("ratio-adjudication-runtime")
+			runtime := recognitionLayoutV2RuntimeFixture(header, plan, 1, time.Now().UnixMilli(), time.Now().Add(time.Minute).UnixMilli())
+			e := &sourceAdjudicationExecutor{recognitionLayoutRepairWaveExecutorV2: &recognitionLayoutRepairWaveExecutorV2{runtime: runtime,
+				cached: map[k12.RecognitionPhysicalUnit]k12.RecognitionPhysicalCallResult{}, providerSends: map[k12.RecognitionPhysicalUnit]int{}}}
+			ctx := k12.WithRecognitionPhysicalCallExecutor(k12.WithRecognitionLayoutPlanV2(context.Background(), header), e)
+			adapter := NewRecognizerAdapter(func(_ context.Context, _ []byte, _ string) (string, error) {
+				return payload(tt.independentQuestion, true), nil
+			})
+			err := adapter.recognizeLayoutAdjudicationsV2(ctx, page, plan, runtime,
+				map[string]recognitionLayoutBatchOutcomeV2{target.TargetID: *first}, map[string]recognitionLayoutBatchOutcomeV2{target.TargetID: *repair})
+			if err != nil || len(e.requests) != 1 || len(e.settlements) != 1 {
+				t.Fatalf("request/settlement chain: %v", err)
+			}
+			s := e.settlements[0]
+			if s.Adopted != tt.adopt {
+				t.Fatalf("adopted=%v want=%v", s.Adopted, tt.adopt)
+			}
+			if tt.adopt && (s.MatchedQuestionPrior != "primary" || s.MatchedAnswerPrior != "both" || len(s.ResultJSON) == 0) {
+				t.Fatalf("ratio source priors not preserved: %+v", s)
+			}
+			if !tt.adopt && (s.MatchedQuestionPrior != "" || s.MatchedAnswerPrior != "" || len(s.ResultJSON) != 0) {
+				t.Fatal("unmatched question was adopted through its identical final answer")
+			}
+			if first.source.Payload != firstRaw || repair.source.Payload != repairRaw || first.question.RawTranscription != primaryQuestion || repair.question.RawTranscription != repairQuestion {
+				t.Fatal("adjudication changed an original source reading")
+			}
+		})
+	}
+}
+
 // 从真实复读合并入口验证空观察不会使作答归属冲突消失。
 func TestRecognitionLayoutAdjudication_AnswerStateConflictSurvivesRepair(t *testing.T) {
 	page, base := recognitionLayoutV2DispatchPlan(t, 1)

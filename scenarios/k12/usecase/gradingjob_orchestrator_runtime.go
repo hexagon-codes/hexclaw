@@ -1291,9 +1291,14 @@ func (o *GradingOrchestrator) reconcileDurableGradingOutcome(
 			return false, GradingJobView{}, persistErr
 		}
 		resultDigest := modelInvocationResultDigest(*result)
+		resultRaw, marshalErr := json.Marshal(*result)
+		if marshalErr != nil {
+			return false, GradingJobView{}, marshalErr
+		}
 		reconciled, reconcileErr := o.deps.ReconcileGradingInvocationSucceeded(
 			ctx, run.agentName, job.Record.RecordID, invocation.InvocationID,
 			resultDigest, fmt.Sprintf("items:%d mode:%s", len(result.Items), result.Mode), "",
+			string(resultRaw),
 		)
 		if reconcileErr != nil {
 			return false, GradingJobView{}, reconcileErr
@@ -1446,10 +1451,10 @@ func (o *GradingOrchestrator) durableAssessmentResult(
 	replayDeps := o.deps
 	replayDeps.Recognizer = presetRecognizer{questions: run.questions}
 	switch {
+	case run.anchorFailed:
+		replayDeps.AnswerAnchorer = presetAnchorer{questions: run.anchored, err: fmt.Errorf("anchor checkpoint degraded")}
 	case run.anchored != nil:
 		replayDeps.AnswerAnchorer = presetAnchorer{questions: run.anchored}
-	case run.anchorFailed:
-		replayDeps.AnswerAnchorer = presetAnchorer{err: fmt.Errorf("anchor checkpoint degraded")}
 	default:
 		replayDeps.AnswerAnchorer = nil
 	}

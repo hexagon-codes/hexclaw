@@ -208,9 +208,11 @@ func (d Deps) gradeHomeworkPhotoWithAssessorInput(
 	anchorVerified := false
 	if (hasPresent || hasUnclear) && d.AnswerAnchorer != nil {
 		anchored, anchorErr := d.anchorHomeworkGeometry(ctx, req.Image, questions)
-		if anchorErr == nil {
-			// 识题完成后题干和作答已冻结；锚点结果只能通过共享边界补充 BBox。
+		if anchored != nil {
+			// 部分几何仍只补充可信 BBox，不改变失败定位的回执或冻结识读事实。
 			questions = mergeAnchorGeometry(questions, anchored)
+		}
+		if anchorErr == nil {
 			anchorVerified = true
 		} else {
 			if hasPresent {
@@ -349,8 +351,39 @@ func (d Deps) gradeHomeworkPhotoWithAssessorInput(
 			}
 		}
 	}
+	if coverageWarning := photoAnnotationCoverageWarning(result); coverageWarning != "" &&
+		(result.ImageWarning == "" || result.ImageWarning == "未能可靠定位作答位置，本次仅提供文字批改") {
+		result.ImageWarning = coverageWarning
+	}
 	result.Markdown = photoGradeMarkdown(result)
 	return result, nil
+}
+
+// photoAnnotationCoverageWarning 只依据这份结果的实际图与可信批注描述覆盖范围。
+func photoAnnotationCoverageWarning(result PhotoGradeResult) string {
+	if result.EffectiveTaskIntent() == PhotoTaskBlankWorksheet {
+		return ""
+	}
+	determined := 0
+	for _, item := range result.Items {
+		if item.Status == PhotoCorrect || item.Status == PhotoCorrectWithProcessIssue || item.Status == PhotoWrong {
+			determined++
+		}
+	}
+	annotated := 0
+	if result.AnnotatedImage != nil && len(result.AnnotatedImage.Data) > 0 {
+		for _, mark := range trustedPhotoMarks(result.Items) {
+			if mark.Status != PhotoAnswerUnclear {
+				annotated++
+			}
+		}
+		if annotated < determined {
+			return fmt.Sprintf("本次 %d 题已判定，其中 %d 题在原作答位置标注；其余 %d 题仅作文字汇总，未在图上猜测位置。", determined, annotated, determined-annotated)
+		}
+	} else if determined > 0 {
+		return fmt.Sprintf("本次 %d 题已判定，0 题已在图上标注；本次未生成批改图，判定结果仅作文字汇总，以避免标记错位。", determined)
+	}
+	return ""
 }
 
 func (d Deps) assessPhotoItem(
@@ -802,27 +835,12 @@ func photoGradeMarkdown(result PhotoGradeResult) string {
 		fmt.Fprintf(&b, "，待核对 **%d** 题", pending)
 	}
 	b.WriteString("\n\n")
-	if result.ImageWarning != "" {
+	coverageWarning := photoAnnotationCoverageWarning(result)
+	if result.ImageWarning != "" && result.ImageWarning != coverageWarning {
 		fmt.Fprintf(&b, "> ℹ️ %s。\n\n", result.ImageWarning)
 	}
-	determined := correct + processIssue + wrong
-	annotated := 0
-	if result.AnnotatedImage != nil && len(result.AnnotatedImage.Data) > 0 {
-		for _, mark := range trustedPhotoMarks(result.Items) {
-			if mark.Status != PhotoAnswerUnclear {
-				annotated++
-			}
-		}
-	}
-	if result.AnnotatedImage != nil && len(result.AnnotatedImage.Data) > 0 && annotated < determined {
-		fmt.Fprintf(&b, "> ℹ️ 本次 %d 题已判定，其中 %d 题在原作答位置标注；其余 %d 题仅作文字汇总，未在图上猜测位置。\n\n",
-			determined, annotated, determined-annotated)
-	} else if annotated < determined {
-		if annotated == 0 {
-			fmt.Fprintf(&b, "> ℹ️ 本次 %d 题已判定，0 题已在图上标注；本次未生成批改图，判定结果仅作文字汇总，以避免标记错位。\n\n", determined)
-		} else {
-			fmt.Fprintf(&b, "> ℹ️ 本次 %d 题已判定，其中 %d 题找到作答位置并已标注；其余仅作文字汇总，以避免标记错位。\n\n", determined, annotated)
-		}
+	if coverageWarning != "" {
+		fmt.Fprintf(&b, "> ℹ️ %s\n\n", coverageWarning)
 	}
 	if correct > 0 {
 		fmt.Fprintf(&b, "### ✅ 答对的题（%d）\n\n", correct)

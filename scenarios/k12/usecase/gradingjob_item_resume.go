@@ -141,7 +141,7 @@ func (o *GradingOrchestrator) runAssessItems(
 				}
 			}
 			if ledgerErr := o.markFrozenAssessInvocationSucceeded(context.WithoutCancel(ctx), stageInvocation,
-				modelInvocationResultDigest(*run.result)); ledgerErr != nil {
+				*run.result); ledgerErr != nil {
 				return o.markFrozenAssessLedgerUnknown(ctx, run, job.Record.RecordID, ledgerErr)
 			}
 			return o.advanceOK(ctx, run, job.Record.RecordID,
@@ -164,10 +164,10 @@ func (o *GradingOrchestrator) runAssessItems(
 	assessDeps := o.deps
 	assessDeps.Recognizer = presetRecognizer{questions: run.questions}
 	switch {
+	case run.anchorFailed:
+		assessDeps.AnswerAnchorer = presetAnchorer{questions: run.anchored, err: errors.New("锚点定位在 locating 阶段已失败（检查点回放）")}
 	case run.anchored != nil:
 		assessDeps.AnswerAnchorer = presetAnchorer{questions: run.anchored}
-	case run.anchorFailed:
-		assessDeps.AnswerAnchorer = presetAnchorer{err: errors.New("锚点定位在 locating 阶段已失败（检查点回放）")}
 	default:
 		assessDeps.AnswerAnchorer = nil
 	}
@@ -277,7 +277,7 @@ func (o *GradingOrchestrator) runAssessItems(
 		return o.failStage(ctx, run, job.Record.RecordID, "result_not_durable", err)
 	}
 	if err := o.markFrozenAssessInvocationSucceeded(context.WithoutCancel(ctx), stageInvocation,
-		modelInvocationResultDigest(result)); err != nil {
+		result); err != nil {
 		return o.markFrozenAssessLedgerUnknown(ctx, run, job.Record.RecordID, err)
 	}
 	return o.advanceOK(ctx, run, job.Record.RecordID,
@@ -326,8 +326,9 @@ func (o *GradingOrchestrator) beginFrozenAssessInvocation(
 func (o *GradingOrchestrator) markFrozenAssessInvocationSucceeded(
 	ctx context.Context,
 	invocation k12.ModelInvocation,
-	resultDigest string,
+	result PhotoGradeResult,
 ) error {
+	resultDigest := modelInvocationResultDigest(result)
 	if invocation.Status == k12.ModelInvocationSucceeded {
 		if invocation.ResultDigest != resultDigest {
 			return fmt.Errorf("%w: invocation=%s aggregate result digest mismatch",
@@ -339,8 +340,12 @@ func (o *GradingOrchestrator) markFrozenAssessInvocationSucceeded(
 		return fmt.Errorf("%w: invocation=%s status=%s cannot succeed",
 			ErrModelInvocationRequiresReconciliation, invocation.InvocationID, invocation.Status)
 	}
-	stored, err := o.deps.Records.MarkModelInvocationSucceeded(ctx, invocation.AgentName,
-		invocation.InvocationID, resultDigest, "")
+	raw, err := json.Marshal(result)
+	if err != nil {
+		return err
+	}
+	stored, err := o.deps.Records.MarkModelInvocationSucceededWithResult(ctx, invocation.AgentName,
+		invocation.InvocationID, resultDigest, string(raw), "")
 	if err != nil {
 		return err
 	}
@@ -1167,6 +1172,10 @@ func replayGradingAssessmentItem(q RecognizedQuestion, receipt k12.GradingAssess
 	if item.Recognized.PageAssetID == q.PageAssetID && q.SourceWidth > 0 && q.SourceHeight > 0 {
 		item.Recognized.SourceWidth = q.SourceWidth
 		item.Recognized.SourceHeight = q.SourceHeight
+		if q.BBox != nil {
+			box := *q.BBox
+			item.Recognized.BBox = &box
+		}
 	}
 	// Projection metadata is storage-owned because only the atomic receipt
 	// transaction knows whether the Mistake insert won or hit an existing row.
@@ -1224,8 +1233,10 @@ func validateGradingAssessmentExactSet(result PhotoGradeResult, receipts []k12.G
 		if !ok {
 			return fmt.Errorf("%w: missing receipt problem=%s", ErrGradingAssessmentExactSet, problemID)
 		}
+		replayed, replayErr := replayGradingAssessmentItem(item.Recognized, receipt)
 		raw, err := json.Marshal(gradingAssessmentCanonicalResult(item))
-		if err != nil || receipt.ResultDigest != modelInvocationDigest(raw) {
+		frozenRaw, frozenErr := json.Marshal(gradingAssessmentCanonicalResult(replayed))
+		if replayErr != nil || err != nil || frozenErr != nil || string(raw) != string(frozenRaw) {
 			return fmt.Errorf("%w: result digest mismatch problem=%s", ErrGradingAssessmentExactSet, problemID)
 		}
 		status, statusErr := gradingAssessmentStatus(item.Status)

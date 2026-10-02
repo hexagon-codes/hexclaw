@@ -10,6 +10,7 @@ import (
 	"image/color"
 	"image/draw"
 	"image/png"
+	"log/slog"
 	"math"
 	"sort"
 	"strconv"
@@ -155,21 +156,54 @@ func (a *RecognizerAdapter) ReuseRecognitionAnswerGeometry(ctx context.Context, 
 		if q.AnswerState == usecase.AnswerStateBlank {
 			continue
 		}
-		if ctx.Err() != nil || q.SourceWidth != cfg.Width || q.SourceHeight != cfg.Height {
+		if ctx.Err() != nil {
 			return nil, false
 		}
-		r := q.ObservedAnswerRegion
-		s := q.SourceRegion
-		if r.X < s.X || r.Y < s.Y || r.Width <= 0 || r.Height <= 0 || r.Width > s.Width || r.Height > s.Height || r.X-s.X > s.Width-r.Width || r.Y-s.Y > s.Height-r.Height || (r.Width == s.Width && r.Height == s.Height) {
+		box, reason := checkedRecognitionAnswerGeometry(src, q)
+		if reason != "" {
 			return nil, false
 		}
-		box := usecase.BBox{X: float64(r.X) / float64(cfg.Width), Y: float64(r.Y) / float64(cfg.Height), W: float64(r.Width) / float64(cfg.Width), H: float64(r.Height) / float64(cfg.Height)}
-		if !validPhotoBBox(box) || !answerBBoxBelongsToSourceRegion(src.Bounds(), box, s) || !semanticBBoxHasVisibleInk(src, semanticBBoxRect(src.Bounds(), box)) {
-			return nil, false
-		}
-		out[i].BBox = &box
+		out[i].BBox = box
 	}
 	return out, true
+}
+
+// checkedRecognitionAnswerGeometry 保持整页及逐题复用的尺寸、来源和墨迹核验一致。
+func checkedRecognitionAnswerGeometry(src image.Image, q usecase.RecognizedQuestion) (*usecase.BBox, string) {
+	if q.AnswerState != usecase.AnswerStatePresent {
+		return nil, "answer_not_present"
+	}
+	if q.ObservedAnswerRegion == nil {
+		return nil, "answer_region_missing"
+	}
+	if q.SourceRegion == nil {
+		return nil, "source_region_missing"
+	}
+	bounds := src.Bounds()
+	if q.SourceWidth != bounds.Dx() || q.SourceHeight != bounds.Dy() {
+		return nil, "source_dimensions_mismatch"
+	}
+	r, s := q.ObservedAnswerRegion, q.SourceRegion
+	if r.Width <= 0 || r.Height <= 0 {
+		return nil, "answer_region_invalid"
+	}
+	if r.X < s.X || r.Y < s.Y || r.Width > s.Width || r.Height > s.Height || r.X-s.X > s.Width-r.Width || r.Y-s.Y > s.Height-r.Height {
+		return nil, "answer_region_outside_source"
+	}
+	if r.Width == s.Width && r.Height == s.Height {
+		return nil, "answer_region_is_source"
+	}
+	box := usecase.BBox{X: float64(r.X) / float64(bounds.Dx()), Y: float64(r.Y) / float64(bounds.Dy()), W: float64(r.Width) / float64(bounds.Dx()), H: float64(r.Height) / float64(bounds.Dy())}
+	if !validPhotoBBox(box) {
+		return nil, "answer_bbox_invalid"
+	}
+	if !answerBBoxBelongsToSourceRegion(bounds, box, s) {
+		return nil, "answer_bbox_outside_source"
+	}
+	if !semanticBBoxHasVisibleInk(src, semanticBBoxRect(bounds, box)) {
+		return nil, "answer_bbox_without_ink"
+	}
+	return &box, ""
 }
 
 // AnchorAnswerGeometry implements the low-latency page-batch geometry pass
@@ -192,7 +226,7 @@ func (a *RecognizerAdapter) AnchorAnswerGeometry(
 	}
 
 	out := append([]usecase.RecognizedQuestion(nil), questions...)
-	targets := make([]answerBBoxTarget, 0, len(out))
+	eligible := make([]int, 0, len(out))
 	for i := range out {
 		out[i] = usecase.NormalizeRecognizedQuestion(out[i])
 		out[i].BBox = nil
@@ -200,6 +234,36 @@ func (a *RecognizerAdapter) AnchorAnswerGeometry(
 			out[i].AnswerState != usecase.AnswerStateUnclear {
 			continue
 		}
+		eligible = append(eligible, i)
+	}
+	if len(eligible) == 0 {
+		return out, nil
+	}
+
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(rawImage))
+	if err != nil {
+		return nil, fmt.Errorf("answer anchorer: 读取图片尺寸: %w", err)
+	}
+	if cfg.Width <= 0 || cfg.Height <= 0 || int64(cfg.Width)*int64(cfg.Height) > answerAnchorMaxPixels {
+		return nil, fmt.Errorf("answer anchorer: 图片像素 %dx%d 超出上限", cfg.Width, cfg.Height)
+	}
+	src, _, err := image.Decode(bytes.NewReader(rawImage))
+	if err != nil {
+		return nil, fmt.Errorf("answer anchorer: 解码图片: %w", err)
+	}
+
+	targets := make([]answerBBoxTarget, 0, len(eligible))
+	for _, i := range eligible {
+		if err := ctx.Err(); err != nil {
+			return out, err
+		}
+		box, reason := checkedRecognitionAnswerGeometry(src, out[i])
+		if reason == "" {
+			out[i].BBox = box
+			continue
+		}
+		slog.InfoContext(ctx, "K12 answer geometry reuse requires locating",
+			"problem_id", out[i].ProblemID, "target_index", i+1, "reason", reason)
 		answerHint := ""
 		if out[i].AnswerState == usecase.AnswerStatePresent {
 			answerHint = compactAnswerAnchorHint(out[i].StudentAnswer, answerLocatorAnswerHintRunes)
@@ -217,29 +281,19 @@ func (a *RecognizerAdapter) AnchorAnswerGeometry(
 			SourceRegion: sourceRegion,
 		})
 	}
+	slog.InfoContext(ctx, "K12 answer geometry candidates checked",
+		"reused_count", len(eligible)-len(targets), "locating_count", len(targets))
 	if len(targets) == 0 {
 		return out, nil
 	}
 
-	cfg, _, err := image.DecodeConfig(bytes.NewReader(rawImage))
-	if err != nil {
-		return nil, fmt.Errorf("answer anchorer: 读取图片尺寸: %w", err)
-	}
-	if cfg.Width <= 0 || cfg.Height <= 0 || int64(cfg.Width)*int64(cfg.Height) > answerAnchorMaxPixels {
-		return nil, fmt.Errorf("answer anchorer: 图片像素 %dx%d 超出上限", cfg.Width, cfg.Height)
-	}
-	src, _, err := image.Decode(bytes.NewReader(rawImage))
-	if err != nil {
-		return nil, fmt.Errorf("answer anchorer: 解码图片: %w", err)
-	}
-
 	locatorImage, err := buildAnswerLocatorPage(src)
 	if err != nil {
-		return nil, err
+		return out, err
 	}
 	targetJSON, err := json.Marshal(targets)
 	if err != nil {
-		return nil, fmt.Errorf("answer anchorer: 编码定位目标: %w", err)
+		return out, fmt.Errorf("answer anchorer: 编码定位目标: %w", err)
 	}
 	locatorPrompt := fmt.Sprintf(`这是“批量答案定位”，不是识题，也不要计算答案。
 原页实际像素为 %d×%d。每个目标如带 source_region_px，它就是该题在原页像素坐标中的唯一允许区域；不得选择区域外或相邻题的笔迹。
@@ -252,11 +306,12 @@ answer_state=present 表示答案文字已可靠誊录；answer_state=unclear �
 严格只输出紧凑 JSON 数组，每个对象仅含整数 index、bbox_1000；四个坐标范围均为 0..1000 且 right>left、bottom>top。index 必须原样回传。`, cfg.Width, cfg.Height, string(targetJSON))
 	rawLocated, err := a.callVision(ctx, locatorImage, locatorPrompt)
 	if err != nil {
-		return nil, fmt.Errorf("answer anchorer: 批量定位调用失败: %w", err)
+		// 仅保留调用前已核验的几何，错误回执不授权采用任何新定位结果。
+		return out, fmt.Errorf("answer anchorer: 批量定位调用失败: %w", err)
 	}
 	var located []answerLocatorResult
 	if err := json.Unmarshal([]byte(extractJSON(rawLocated)), &located); err != nil {
-		return nil, fmt.Errorf("answer anchorer: 解析批量定位结果: %w", err)
+		return out, fmt.Errorf("answer anchorer: 解析批量定位结果: %w", err)
 	}
 
 	questionByIndex := make(map[int]int, len(targets))

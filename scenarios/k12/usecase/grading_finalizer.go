@@ -195,6 +195,14 @@ func (o *GradingOrchestrator) finalizeGradingPage(
 	if err := o.freezeGradingFinalAnnotatedAsset(ctx, run, job, &artifact); err != nil {
 		return k12.GradingFinalArtifact{}, err
 	}
+	if job.Fields.SourceKind == "image_task" && run.result != nil && len(run.result.Items) > 0 {
+		if err := validateGradingAssessmentExactSet(*run.result, assessments); err != nil {
+			return k12.GradingFinalArtifact{}, err
+		}
+		if warning := photoAnnotationCoverageWarning(*run.result); warning != "" {
+			artifact.CanonicalMarkdown += "\n\n> ℹ️ " + warning
+		}
+	}
 	artifact.ArtifactDigest = k12.ComputeGradingFinalArtifactDigest(artifact)
 	stored, _, err := o.deps.Records.CommitGradingFinalArtifact(
 		ctx,

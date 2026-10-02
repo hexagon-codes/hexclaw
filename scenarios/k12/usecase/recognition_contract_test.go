@@ -959,6 +959,51 @@ func TestRecognitionSourceReadingsMatch_IndependentCompleteReview(t *testing.T) 
 	}
 }
 
+func TestRecognitionSourceReadingsMatch_CompleteRatioWording(t *testing.T) {
+	const source = `把 \(\frac{3}{4}:\frac{1}{2}\) 化成最简单的整数比。`
+	const traditional = `把 \(\frac{3}{4}:\frac{1}{2}\) 化成最簡單的整數比。`
+	makeRead := func(question, answer string) RecognizedQuestion {
+		return RecognizedQuestion{Question: question, RawTranscription: question, Subject: "数学",
+			AnswerState: AnswerStatePresent, StudentAnswer: answer, AnswerRawTranscription: answer}
+	}
+	for _, tt := range []struct {
+		name, question, answer   string
+		wantQuestion, wantAnswer bool
+	}{
+		{"complete simplified and traditional", traditional, `\(3:2\)`, true, true},
+		{"plain numeric fractions and ratio glyph", "把 3/4∶1/2 化成最簡單的整數比。", "3:2", true, true},
+		{"division remains a different operator", strings.Replace(traditional, ":", `\div`, 1), "3:2", false, true},
+		{"changed fraction stays different", strings.Replace(traditional, "{3}", "{5}", 1), "3:2", false, true},
+		{"reversed ratio stays different", `把 \(\frac{1}{2}:\frac{3}{4}\) 化成最簡單的整數比。`, "3:2", false, true},
+		{"missing printed glyph is not completed", strings.TrimSuffix(traditional, "比。"), "3:2", false, true},
+		{"additional source condition is not discarded", traditional + "必须先约分。", "3:2", false, true},
+		{"incomplete fraction is not completed", strings.Replace(traditional, `\frac{1}{2}`, "1/?", 1), "3:2", false, true},
+		{"nonratio source is outside fixed wording", strings.Replace(traditional, ":", "×", 1), "3:2", false, true},
+		{"student answer difference remains", traditional, "2:3", true, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			prior, review := makeRead(source, "3:2"), makeRead(tt.question, tt.answer)
+			beforePrior, _ := json.Marshal(prior)
+			beforeReview, _ := json.Marshal(review)
+			question, answer := RecognitionSourceReadingsMatchForInitialReadMode(prior, review, k12.RecognitionLayoutManifestWithContentV1)
+			if question != tt.wantQuestion || answer != tt.wantAnswer {
+				t.Fatalf("source match = (%t,%t), want (%t,%t)", question, answer, tt.wantQuestion, tt.wantAnswer)
+			}
+			afterPrior, _ := json.Marshal(prior)
+			afterReview, _ := json.Marshal(review)
+			if string(beforePrior) != string(afterPrior) || string(beforeReview) != string(afterReview) {
+				t.Fatal("comparison changed original question or answer bytes")
+			}
+		})
+	}
+	// 两份题干均完整也不能用第三条冲突观察替代来源一致性。
+	prior, review := makeRead(source, "3:2"), makeRead(traditional, "3:2")
+	prior.EvidenceTranscriptions = []string{strings.Replace(source, ":", `\div`, 1)}
+	if question, _ := RecognitionSourceReadingsMatchForInitialReadMode(prior, review, k12.RecognitionLayoutManifestWithContentV1); question {
+		t.Fatal("fixed wording discarded a conflicting source observation")
+	}
+}
+
 func TestRecognitionSourceReadingsMatch_CompleteAnswerFormatting(t *testing.T) {
 	const q13Question = `一个数的\(\frac{3}{8}\)是24，求这个数？`
 	const q13ReviewQuestion = `一个数的 \(\frac{3}{8}\) 是24，求这个数？`
