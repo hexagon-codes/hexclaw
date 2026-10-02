@@ -15,6 +15,7 @@ import (
 	"unicode"
 
 	"github.com/hexagon-codes/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/messagecontent"
 	"github.com/hexagon-codes/hexclaw/records"
 	agentrouter "github.com/hexagon-codes/hexclaw/router"
 	k12 "github.com/hexagon-codes/hexclaw/scenarios/k12"
@@ -1023,11 +1024,20 @@ func (r *k12DingtalkPhotoInboundRuntime) completeBoundReply(
 	if queryErr != nil && !errors.Is(queryErr, k12usecase.ErrDeliveryQueryUnavailable) {
 		return false, queryErr
 	}
-	if len(batch.Receipts) != 2 || !strings.HasPrefix(batch.Receipts[1].PartMIME, "image/") {
-		return false, fmt.Errorf("DingTalk photo bound reply batch is invalid")
-	}
-	if err := validateK12DingtalkPhotoReplyBatch(batch, target, batch.Receipts[1].PartMIME); err != nil {
-		return false, err
+	if batch.ObjectKind == "creative_work" && len(batch.Receipts) == 1 {
+		receipt := batch.Receipts[0]
+		if strings.TrimSpace(batch.BatchID) == "" || receipt.PartKind != messagecontent.PartMarkdown ||
+			receipt.PartOrdinal != 1 || strings.TrimSpace(receipt.DeliveryID) == "" ||
+			receipt.BindingID != target.BindingID || receipt.Target != target.Target {
+			return false, fmt.Errorf("DingTalk creative bound reply batch is invalid")
+		}
+	} else {
+		if len(batch.Receipts) != 2 || !strings.HasPrefix(batch.Receipts[1].PartMIME, "image/") {
+			return false, fmt.Errorf("DingTalk photo bound reply batch is invalid")
+		}
+		if err := validateK12DingtalkPhotoReplyBatch(batch, target, batch.Receipts[1].PartMIME); err != nil {
+			return false, err
+		}
 	}
 	if queryErr != nil {
 		if batch.Status != k12.DeliveryBatchOutcomeUnknown {
@@ -1297,23 +1307,28 @@ func (r *k12DingtalkPhotoInboundRuntime) advanceCreativeFinalReply(
 	if err != nil {
 		return false, err
 	}
-	message := k12usecase.DeliveryMessage{
-		Content: content,
-		Attachments: []k12usecase.DeliveryAttachment{{
-			Name: bundle.Asset.Name, MIME: bundle.Asset.MIME,
-			Data: append([]byte(nil), bundle.Asset.Bytes...),
-		}},
-	}
-	identities := []k12usecase.DeliveryAttachmentIdentity{{
-		Name: bundle.Asset.Name, MIME: bundle.Asset.MIME, ContentDigest: bundle.Asset.Digest,
-	}}
+	message := k12usecase.DeliveryMessage{Content: content}
 	// 发送与绑定之间发生重启时只绑定既有作品批次，不再次跨越发送边界。
 	batch, lookupErr := r.replyBatches.GetDeliveryBatchForMessageIdentity(
 		ctx, bundle.Receipt.AgentName, "creative_work", result.CreativeWork.Record.RecordID,
-		content, identities,
+		content, nil,
 	)
 	if lookupErr != nil && !errors.Is(lookupErr, records.ErrNotFound) {
 		return false, lookupErr
+	}
+	legacyBatch := false
+	if errors.Is(lookupErr, records.ErrNotFound) {
+		// 旧图文批次尚未绑定时仍只接续原回执，不因正文身份改变再次发送。
+		batch, lookupErr = r.replyBatches.GetDeliveryBatchForMessageIdentity(
+			ctx, bundle.Receipt.AgentName, "creative_work", result.CreativeWork.Record.RecordID,
+			content, []k12usecase.DeliveryAttachmentIdentity{{
+				Name: bundle.Asset.Name, MIME: bundle.Asset.MIME, ContentDigest: bundle.Asset.Digest,
+			}},
+		)
+		if lookupErr != nil && !errors.Is(lookupErr, records.ErrNotFound) {
+			return false, lookupErr
+		}
+		legacyBatch = lookupErr == nil
 	}
 	var deliverErr error
 	if errors.Is(lookupErr, records.ErrNotFound) {
@@ -1325,8 +1340,14 @@ func (r *k12DingtalkPhotoInboundRuntime) advanceCreativeFinalReply(
 	if strings.TrimSpace(batch.BatchID) == "" {
 		return false, errors.Join(deliverErr, fmt.Errorf("DingTalk creative reply returned no durable batch identity"))
 	}
-	if err := validateK12DingtalkPhotoReplyBatch(batch, target, bundle.Asset.MIME); err != nil {
-		return false, errors.Join(deliverErr, err)
+	if legacyBatch {
+		if err := validateK12DingtalkPhotoReplyBatch(batch, target, bundle.Asset.MIME); err != nil {
+			return false, errors.Join(deliverErr, err)
+		}
+	} else if len(batch.Receipts) != 1 || batch.Receipts[0].PartKind != messagecontent.PartMarkdown ||
+		batch.Receipts[0].PartOrdinal != 1 || strings.TrimSpace(batch.Receipts[0].DeliveryID) == "" ||
+		batch.Receipts[0].BindingID != target.BindingID || batch.Receipts[0].Target != target.Target {
+		return false, errors.Join(deliverErr, fmt.Errorf("DingTalk creative reply batch is incomplete"))
 	}
 	bound, bindErr := r.inbound.BindReplyBatch(
 		context.WithoutCancel(ctx), bundle.Receipt.AgentName, bundle.Receipt.ReceiptID,

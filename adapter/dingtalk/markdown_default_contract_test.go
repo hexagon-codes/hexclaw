@@ -69,6 +69,16 @@ func TestDingTalkAllOutboundPathsPreferMarkdown(t *testing.T) {
 		t.Fatalf("真实媒体上传次数 = %d，期望 1", uploadCount)
 	}
 	for index, message := range messages {
+		if index == 2 {
+			var payload struct {
+				Content string `json:"content"`
+			}
+			if message.MsgKey != "sampleText" || json.Unmarshal([]byte(message.MsgParam), &payload) != nil ||
+				payload.Content != dingtalkThinkingFeedback {
+				t.Fatalf("处理中占位应使用原文 sampleText: %#v", message)
+			}
+			continue
+		}
 		assertDingTalkSampleMarkdown(t, index, message)
 	}
 }

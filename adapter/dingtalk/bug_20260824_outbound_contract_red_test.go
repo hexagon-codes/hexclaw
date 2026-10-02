@@ -288,7 +288,7 @@ func TestDingTalkImageAttachmentPathNameDoesNotLeakToMultipartOrMarkdown(t *test
 	}
 }
 
-func TestEngineSkillReplyFlowsToDingTalkSampleMarkdown(t *testing.T) {
+func TestEngineSkillPlainReplyFlowsToDingTalkSampleText(t *testing.T) {
 	store, err := sqlitestore.New(filepath.Join(t.TempDir(), "engine.db"))
 	if err != nil {
 		t.Fatalf("创建测试存储: %v", err)
@@ -340,8 +340,12 @@ func TestEngineSkillReplyFlowsToDingTalkSampleMarkdown(t *testing.T) {
 		t.Fatalf("Engine Skill Reply 发送到 DingTalk adapter: %v", err)
 	}
 	calls := fake.SendCalls()
-	if len(calls) != 1 || calls[0].MsgKey != "sampleMarkdown" || calls[0].Text != "echo: hello" {
-		t.Fatalf("Engine Skill Reply 未贯通 sampleMarkdown: %#v", calls)
+	if len(calls) != 1 || calls[0].MsgKey != "sampleText" || calls[0].Text != "echo: hello" {
+		t.Fatalf("Engine Skill 纯文本 Reply 未贯通 sampleText: %#v", calls)
+	}
+	if reply.RenderManifest == nil || reply.RenderManifest.RendererVersion != "dingtalk-sample-text-v1" ||
+		reply.RenderManifest.CapabilitySnapshot.Markdown || reply.RenderManifest.Parts[0].Kind != messagecontent.PartText {
+		t.Fatalf("纯文本发送与 render manifest 不一致: %#v", reply.RenderManifest)
 	}
 }
 
@@ -609,8 +613,8 @@ func TestDingTalkThinkingFeedbackCanonicalizesBeforeProviderSend(t *testing.T) {
 		t.Fatalf("处理中占位 SendOTO 调用次数=%d，期望 2", len(calls))
 	}
 	for index, call := range calls {
-		if call.MsgKey != "sampleMarkdown" {
-			t.Errorf("处理中占位 %d MsgKey=%q，期望 sampleMarkdown", index, call.MsgKey)
+		if call.MsgKey != "sampleText" || call.Text != dingtalkThinkingFeedback {
+			t.Errorf("处理中占位 %d MsgKey=%q，Text=%q，期望原文 sampleText", index, call.MsgKey, call.Text)
 		}
 	}
 }
@@ -689,10 +693,11 @@ func TestDingTalkV05OTOStillUsesSampleMarkdown(t *testing.T) {
 	if len(calls) != 2 {
 		t.Fatalf("OTO SendOTO 调用次数=%d，期望 2", len(calls))
 	}
-	for index, call := range calls {
-		if call.MsgKey != "sampleMarkdown" {
-			t.Errorf("OTO 消息 %d MsgKey=%q，期望 sampleMarkdown", index, call.MsgKey)
-		}
+	if calls[0].MsgKey != "sampleMarkdown" || calls[0].Text != "## 正常 OTO 回复" {
+		t.Errorf("OTO Markdown 回复格式漂移: %#v", calls[0])
+	}
+	if calls[1].MsgKey != "sampleText" || calls[1].Text != dingtalkThinkingFeedback {
+		t.Errorf("OTO 处理中占位应使用原文 sampleText: %#v", calls[1])
 	}
 }
 

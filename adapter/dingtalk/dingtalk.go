@@ -25,6 +25,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	openapi "github.com/alibabacloud-go/darabonba-openapi/v2/client"
 	dtoauth "github.com/alibabacloud-go/dingtalk/oauth2_1_0"
@@ -33,7 +34,9 @@ import (
 	"github.com/alibabacloud-go/tea/tea"
 	dtchatbot "github.com/open-dingtalk/dingtalk-stream-sdk-go/chatbot"
 	dtclient "github.com/open-dingtalk/dingtalk-stream-sdk-go/client"
+	dtlogger "github.com/open-dingtalk/dingtalk-stream-sdk-go/logger"
 	dtpayload "github.com/open-dingtalk/dingtalk-stream-sdk-go/payload"
+	dtutils "github.com/open-dingtalk/dingtalk-stream-sdk-go/utils"
 
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/config"
@@ -91,6 +94,61 @@ const photoHandlerTimeout = 10 * time.Minute
 
 // terminalNotifyTimeout 是终态用户通知（错误提示 / 占位撤回 / 最终答案）的兜底 ctx 预算。
 const terminalNotifyTimeout = 45 * time.Second
+
+var streamLoggerOnce sync.Once
+
+// streamEventLogger 仅记录固定 SDK 事件；全局日志不绑定实例、不转发参数。
+type streamEventLogger struct{}
+
+func (streamEventLogger) Debugf(format string, args ...interface{}) {
+	if format != "[wire] [websocket] local => remote:\n%s" || len(args) != 1 {
+		return
+	}
+	encoded, ok := args[0].(string)
+	if !ok {
+		return
+	}
+	var response struct {
+		Code int `json:"code"`
+	}
+	if json.Unmarshal([]byte(encoded), &response) == nil && response.Code == 404 {
+		logger.Warn("[dingtalk] stream sdk event", "event", "handler_not_found")
+	}
+}
+
+func (streamEventLogger) Infof(format string, _ ...interface{}) {
+	var event string
+	switch format {
+	case "connect success, sessionId=[%s]":
+		event = "transport_connected"
+	case "StreamClient reconnect success":
+		event = "transport_reconnected"
+	default:
+		return
+	}
+	logger.Info("[dingtalk] stream sdk event", "event", event)
+}
+
+func (streamEventLogger) Warningf(string, ...interface{}) {}
+
+func (streamEventLogger) Errorf(format string, _ ...interface{}) {
+	var event string
+	switch format {
+	case "connection process read message error: messageType=[%d] message=[%s] error=[%s]":
+		event = "transport_read_failed"
+	case "connection process decode data frame error: length=[%d] error=[%s]":
+		event = "frame_decode_failed"
+	case "connection processDataFrame dataFrame nil.":
+		event = "frame_headers_missing"
+	case "connection processDataFrame send response error: error=[%s]":
+		event = "frame_ack_write_failed"
+	default:
+		return
+	}
+	logger.Warn("[dingtalk] stream sdk event", "event", event)
+}
+
+func (streamEventLogger) Fatalf(string, ...interface{}) {}
 
 // messageHandlerTimeout 返回处理总预算（handlerTimeout 未设时用默认）。
 func (a *DingtalkAdapter) messageHandlerTimeout() time.Duration {
@@ -824,13 +882,40 @@ func (a *DingtalkAdapter) Start(ctx context.Context, handler adapter.MessageHand
 	a.workerCtx, a.workerCancel = context.WithCancel(ctx)
 	a.workerMu.Unlock()
 
+	streamLoggerOnce.Do(func() {
+		dtlogger.SetLogger(streamEventLogger{})
+	})
 	cli := dtclient.NewStreamClient(
 		dtclient.WithAppCredential(dtclient.NewAppCredentialConfig(a.cfg.AppKey, a.cfg.AppSecret)),
 	)
 	cli.RegisterCallbackRouter(dtpayload.BotMessageCallbackTopic, a.onChatBotFrame)
-	a.streamClient = cli
+	// 系统回调保留 SDK 的原处理，仅同步应用健康与固定连接事件。
+	cli.RegisterRouter(dtutils.SubscriptionTypeKSystem, "disconnect", func(ctx context.Context, frame *dtpayload.DataFrame) (*dtpayload.DataFrameResponse, error) {
+		a.mu.Lock()
+		if !a.stopped.Load() && a.streamClient == cli {
+			a.connected.Store(false)
+			a.lastError = "dingtalk Stream disconnected"
+		}
+		a.mu.Unlock()
+		logger.Info("[dingtalk] stream system event", "event", "disconnect", "instance_sha256", dingtalkIdentityHash(a.Name()))
+		return cli.OnDisconnect(ctx, frame)
+	})
+	cli.RegisterRouter(dtutils.SubscriptionTypeKSystem, "ping", func(ctx context.Context, frame *dtpayload.DataFrame) (*dtpayload.DataFrameResponse, error) {
+		response, err := cli.OnPing(ctx, frame)
+		if err == nil {
+			a.mu.Lock()
+			if !a.stopped.Load() && a.streamClient == cli {
+				a.connected.Store(true)
+				a.lastError = ""
+			}
+			a.mu.Unlock()
+		}
+		logger.Info("[dingtalk] stream system event", "event", "ping", "instance_sha256", dingtalkIdentityHash(a.Name()))
+		return response, err
+	})
 	streamCtx, cancel := context.WithCancel(ctx)
 	a.mu.Lock()
+	a.streamClient = cli
 	if a.streamCancel != nil {
 		a.streamCancel()
 	}
@@ -867,9 +952,11 @@ func (a *DingtalkAdapter) Start(ctx context.Context, handler adapter.MessageHand
 		if err != nil || a.stopped.Load() {
 			return
 		}
-		a.connected.Store(true)
 		a.mu.Lock()
-		a.lastError = ""
+		if !a.stopped.Load() && a.streamClient == cli {
+			a.connected.Store(true)
+			a.lastError = ""
+		}
 		a.mu.Unlock()
 		logger.Info("钉钉 Stream 连接已建立", "name", a.Name())
 	}()
@@ -884,7 +971,6 @@ func (a *DingtalkAdapter) Stop(ctx context.Context) error {
 		ctx = context.Background()
 	}
 	a.stopped.Store(true)
-	a.connected.Store(false)
 	a.workerMu.Lock()
 	a.stopping = true
 	if a.workerCancel != nil {
@@ -892,6 +978,7 @@ func (a *DingtalkAdapter) Stop(ctx context.Context) error {
 	}
 	a.workerMu.Unlock()
 	a.mu.Lock()
+	a.connected.Store(false)
 	cancel := a.streamCancel
 	a.streamCancel = nil
 	a.mu.Unlock()
@@ -1632,6 +1719,9 @@ func (a *DingtalkAdapter) replyMessageWithAttachments(
 		}
 		content += "\n\n![" + alt + "](" + imageRef + ")"
 	}
+	if reply.RenderManifest.RendererVersion == "dingtalk-sample-text-v1" {
+		return dingtalkTextMessage(content), nil
+	}
 	return dingtalkMarkdownMessage(content), nil
 }
 
@@ -1719,7 +1809,7 @@ func (a *DingtalkAdapter) sendThinkingFeedback(ctx context.Context, chatID strin
 		logger.Error("[dingtalk] processing feedback projection failed", "error", err)
 		return ""
 	}
-	key, err := api.SendOTO(ctx, token, a.cfg.RobotCode, chatID, dingtalkMarkdownMessage(content))
+	key, err := api.SendOTO(ctx, token, a.cfg.RobotCode, chatID, dingtalkTextMessage(content))
 	if err != nil {
 		logger.Error("[dingtalk] 发送思考占位失败", "error", err)
 		return ""
@@ -1758,7 +1848,7 @@ func (a *DingtalkAdapter) sendThinkingFeedbackForEvent(ctx context.Context, even
 		logger.Error("[dingtalk] processing feedback projection failed", "error", err)
 		return ""
 	}
-	msg := dingtalkMarkdownMessage(content)
+	msg := dingtalkTextMessage(content)
 	key, sendErr := api.SendOTO(ctx, token, a.cfg.RobotCode, event.SenderStaffId, msg)
 	if sendErr != nil {
 		logger.Error("[dingtalk] 发送单聊处理进度失败", "error", sendErr)
@@ -1818,8 +1908,8 @@ const dingtalkEmptyReplyFallback = "⚠️ 本次没有生成有效内容，请�
 // dingtalkMarkdownMessage 构造 sampleMarkdown 出站消息（BUG-20260703 B7）。
 //
 // 钉钉 text 消息不渲染 markdown，LLM 产出的 ### 标题/加粗会裸露给用户；
-// sampleMarkdown 原生渲染标题/加粗/链接/列表子集（纯文本内容按 markdown 发送
-// 显示不变）。载荷为 {"title","text"}，title/text 均必填（钉钉硬约束）——title 从正文
+// sampleMarkdown 原生渲染标题/加粗/链接/列表子集。载荷为 {"title","text"}，
+// title/text 均必填（钉钉硬约束）——title 从正文
 // 首个非空行派生（有兜底），text 同理：正文为空/纯空白时用兜底文案，绝不产出空 text
 // （BUG-20260704，与 title 兜底对称，使非法载荷在构造点即不可表达）。
 func dingtalkMarkdownMessage(content string) dingtalkOutboundMessage {
@@ -1831,6 +1921,39 @@ func dingtalkMarkdownMessage(content string) dingtalkOutboundMessage {
 		MsgKey:   "sampleMarkdown",
 		MsgParam: marshalMarkdownContent(dingtalkMessageTitle(text), text),
 	}
+}
+
+// 单行纯文本使用文本模板；格式、数学和链接保留 Markdown 渲染。
+func dingTalkUsesPlainText(content string) bool {
+	if strings.ContainsAny(content, "\r\n\t") || strings.HasPrefix(content, "    ") {
+		return false
+	}
+	content = strings.TrimSpace(content)
+	if content == dingtalkThinkingFeedback || content == dingtalkPhotoProcessingFeedback {
+		return true
+	}
+	if content == "" || strings.ContainsAny(content, "#*_`[]!<>|~\\$=+-−×÷/^{}&@") {
+		return false
+	}
+	lower := strings.ToLower(content)
+	if strings.Contains(lower, "://") || strings.Contains(lower, "www.") || strings.Contains(lower, "mailto:") {
+		return false
+	}
+	for _, value := range content {
+		if unicode.IsNumber(value) || unicode.Is(unicode.Sm, value) {
+			return false
+		}
+	}
+	return true
+}
+
+func dingtalkTextMessage(content string) dingtalkOutboundMessage {
+	text := strings.TrimSpace(content)
+	if text == "" {
+		text = dingtalkEmptyReplyFallback
+	}
+	payload, _ := json.Marshal(map[string]string{"content": text})
+	return dingtalkOutboundMessage{MsgKey: "sampleText", MsgParam: string(payload)}
 }
 
 // restoreEscapedMarkdownNewlines 兼容被上游 JSON/自动化脚本二次转义的整篇 Markdown。

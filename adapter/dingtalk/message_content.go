@@ -47,7 +47,11 @@ func ensureDingTalkRenderEvidence(reply *adapter.Reply) error {
 			if err != nil {
 				return err
 			}
-			return validateDingTalkVisibleContent(visible)
+			plain := len(reply.Attachments) == 0 &&
+				dingTalkUsesPlainText(reply.MessageContent.Markdown) && dingTalkUsesPlainText(visible)
+			if plain == (reply.RenderManifest.RendererVersion == "dingtalk-sample-text-v1") {
+				return validateDingTalkVisibleContent(visible)
+			}
 		}
 	}
 
@@ -80,7 +84,14 @@ func ensureDingTalkRenderEvidence(reply *adapter.Reply) error {
 	if err := validateDingTalkVisibleContent(projected); err != nil {
 		return err
 	}
-	parts = append(parts, messagecontent.RenderPart{Kind: messagecontent.PartMarkdown, Text: projected})
+	partKind := messagecontent.PartMarkdown
+	rendererVersion := "dingtalk-sample-markdown-v1"
+	plain := len(reply.Attachments) == 0 && dingTalkUsesPlainText(sourceMarkdown) && dingTalkUsesPlainText(projected)
+	if plain {
+		partKind = messagecontent.PartText
+		rendererVersion = "dingtalk-sample-text-v1"
+	}
+	parts = append(parts, messagecontent.RenderPart{Kind: partKind, Text: projected})
 	for _, attachment := range reply.Attachments {
 		if !adapter.IsImageAttachment(attachment) && !isDingTalkPDFAttachment(attachment) {
 			return errors.New("DingTalk attachment type is unsupported")
@@ -106,11 +117,14 @@ func ensureDingTalkRenderEvidence(reply *adapter.Reply) error {
 	if projected != sourceMarkdown {
 		fallback = messagecontent.FallbackMathToReadableText
 	}
+	if plain {
+		parts[0].Text = strings.TrimSpace(projected)
+	}
 	manifest, err := messagecontent.BuildManifest(content, messagecontent.RenderRequest{
 		Surface:         messagecontent.SurfaceChannel,
-		RendererVersion: "dingtalk-sample-markdown-v1",
+		RendererVersion: rendererVersion,
 		Capabilities: messagecontent.CapabilitySnapshot{
-			Markdown:    true,
+			Markdown:    !plain,
 			TeXMath:     false,
 			UnicodeMath: true,
 			Attachments: len(refs) > 0,
@@ -130,14 +144,14 @@ func dingTalkManifestMarkdown(manifest messagecontent.RenderManifest) (string, e
 	var visible string
 	count := 0
 	for _, part := range manifest.Parts {
-		if part.Kind != messagecontent.PartMarkdown {
+		if part.Kind != messagecontent.PartMarkdown && part.Kind != messagecontent.PartText {
 			continue
 		}
 		visible = part.Text
 		count++
 	}
 	if count != 1 || strings.TrimSpace(visible) == "" {
-		return "", errors.New("dingtalk: render manifest must contain exactly one visible markdown part")
+		return "", errors.New("dingtalk: render manifest must contain exactly one visible text part")
 	}
 	return visible, nil
 }
@@ -332,12 +346,15 @@ func isDingTalkPDFAttachment(attachment adapter.Attachment) bool {
 
 func dingTalkCompatibleManifest(manifest messagecontent.RenderManifest) bool {
 	if manifest.Surface != messagecontent.SurfaceChannel ||
-		!manifest.CapabilitySnapshot.Markdown ||
 		manifest.CapabilitySnapshot.TeXMath {
 		return false
 	}
+	if manifest.RendererVersion == "dingtalk-sample-text-v1" {
+		return !manifest.CapabilitySnapshot.Markdown && len(manifest.Parts) == 1 &&
+			manifest.Parts[0].Kind == messagecontent.PartText
+	}
 	for _, part := range manifest.Parts {
-		if part.Kind == messagecontent.PartMarkdown {
+		if part.Kind == messagecontent.PartMarkdown && manifest.CapabilitySnapshot.Markdown {
 			return true
 		}
 	}
