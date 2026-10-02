@@ -2421,6 +2421,13 @@ func (m *Manager) mmrSelect(candidates []*SearchResult, topK int) []*SearchResul
 	}
 
 	lambda := m.cfg().MMRLambda
+	// RRF 融合分与余弦相似度需使用相同尺度；只归一化选择分，不改展示分。
+	maxRelevance := 0.0
+	for _, candidate := range candidates {
+		if candidate.Chunk.Score > maxRelevance {
+			maxRelevance = candidate.Chunk.Score
+		}
+	}
 	selected := make([]*SearchResult, 0, topK)
 	remaining := make([]*SearchResult, len(candidates))
 	copy(remaining, candidates)
@@ -2431,6 +2438,9 @@ func (m *Manager) mmrSelect(candidates []*SearchResult, topK int) []*SearchResul
 
 		for i, cand := range remaining {
 			relevance := cand.Chunk.Score
+			if maxRelevance > 0 {
+				relevance /= maxRelevance
+			}
 			maxSim := 0.0
 			for _, sel := range selected {
 				sim := cosineSimilarity(cand.Chunk.Embedding, sel.Chunk.Embedding)
@@ -2447,7 +2457,7 @@ func (m *Manager) mmrSelect(candidates []*SearchResult, topK int) []*SearchResul
 
 		if bestIdx >= 0 {
 			selected = append(selected, remaining[bestIdx])
-			remaining[bestIdx] = remaining[len(remaining)-1]
+			copy(remaining[bestIdx:], remaining[bestIdx+1:])
 			remaining = remaining[:len(remaining)-1]
 		}
 	}

@@ -50,7 +50,9 @@ func (s *KnowledgeSearchSkill) ToolDefinition() llm.ToolDefinition {
 			"Use this for SCOPED retrieval when the user constrains by where it came from or when it was added "+
 			"(e.g. \"search only my uploaded files\", \"what did I save about X last week\"). "+
 			"Optional filters narrow results: source_types, sources, created_after/created_before. "+
-			"Omit all filters to search the whole knowledge base.",
+			"Omit all filters to search the whole knowledge base. "+
+			"Cite the explicit PDF page location returned with a passage. PDF page numbers are file positions, "+
+			"not printed textbook page numbers; do not infer a printed page or page offset when it is absent from the passage.",
 		&llm.Schema{
 			Type: "object",
 			Properties: map[string]*llm.Schema{
@@ -145,6 +147,13 @@ func formatKnowledgeSearchHits(query string, hits []knowledge.SearchHit) string 
 		}
 		if st, ok := h.Metadata["source_type"].(string); ok && st != "" {
 			fmt.Fprintf(&sb, " · %s", st)
+		}
+		if h.PageStart > 0 && h.PageEnd >= h.PageStart {
+			if h.PageEnd == h.PageStart {
+				fmt.Fprintf(&sb, " · PDF page: %d", h.PageStart)
+			} else {
+				fmt.Fprintf(&sb, " · PDF pages: %d–%d", h.PageStart, h.PageEnd)
+			}
 		}
 		sb.WriteString("\n")
 		sb.WriteString(h.Content)
