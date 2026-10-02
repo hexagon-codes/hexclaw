@@ -1,9 +1,52 @@
 package k12
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
+
+func TestGradingAssessmentItemValidateKnownContradictionRequiresSolveOnly(t *testing.T) {
+	const result = `{"Solve":{"problem_issue":"inconsistent_gcd_lcm","Evidence":{"Verdict":"unverifiable","EvidenceType":"numeric_exec"}}}`
+	for _, scenario := range []string{"solve only", "missing solve", "grade", "guide", "invented guide", "ordinary untrusted", "unsupported issue", "unverified issue", "agreed answer"} {
+		t.Run(scenario, func(t *testing.T) {
+			item := GradingAssessmentItem{AgentName: "agent", JobID: "job", ProblemID: "problem", AttemptID: "attempt", ConfirmedVersion: 1, InputDigest: "sha256:input", Status: GradingAssessmentUntrusted, ResultJSON: result, ResultDigest: "sha256:result", ProjectionStatus: GradingProjectionCommitted, SolveInvocationID: "solve"}
+			switch scenario {
+			case "missing solve":
+				item.SolveInvocationID = ""
+			case "grade":
+				item.GradeInvocationID = "grade"
+			case "guide":
+				item.ParentGuideInvocationID = "guide"
+			case "invented guide":
+				var fields map[string]json.RawMessage
+				_ = json.Unmarshal([]byte(result), &fields)
+				fields["ParentGuide"] = json.RawMessage(`{"Answer":"24"}`)
+				raw, _ := json.Marshal(fields)
+				item.ResultJSON = string(raw)
+			case "ordinary untrusted":
+				item.ResultJSON = `{"Solve":{"Evidence":{"Verdict":"unverifiable","EvidenceType":"none"}}}`
+			case "unsupported issue":
+				item.ResultJSON = strings.ReplaceAll(result, "inconsistent_gcd_lcm", "unknown")
+			case "unverified issue":
+				item.ResultJSON = strings.ReplaceAll(result, "numeric_exec", "none")
+			case "agreed answer":
+				item.ResultJSON = strings.ReplaceAll(result, "unverifiable", "agree")
+			}
+			err := item.Validate()
+			if scenario == "solve only" && err != nil {
+				t.Fatalf("concrete contradiction solve receipt rejected: %v", err)
+			}
+			if scenario != "solve only" && scenario != "grade" && err == nil {
+				t.Fatal("missing proof or invented operation accepted")
+			}
+			// 历史已批改的 untrusted 仍沿用原来的求解与批改操作集。
+			if scenario == "grade" && err != nil {
+				t.Fatalf("existing untrusted solve-plus-grade receipt rejected: %v", err)
+			}
+		})
+	}
+}
 
 func TestGradingAssessmentItemValidateEnforcesStatusOperationExactSet(t *testing.T) {
 	statuses := []struct {

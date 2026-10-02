@@ -10,6 +10,8 @@ import (
 	"strings"
 
 	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/egress"
+	"github.com/hexagon-codes/hexclaw/engine"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/usecase"
 )
@@ -26,6 +28,11 @@ func WithParentTeachingGuideGen(fn ParentTeachingGuideGenerateFunc) SolveAdapter
 
 func (a *SolveAdapter) SetParentTeachingGuideGen(fn ParentTeachingGuideGenerateFunc) {
 	a.parentTeachingGuideGen = fn
+}
+
+// SetParentTeachingGuideAudit 注入独立审核的一次模型调用。
+func (a *SolveAdapter) SetParentTeachingGuideAudit(fn ParentTeachingGuideGenerateFunc) {
+	a.parentTeachingGuideAudit = fn
 }
 
 // WithParentTeachingSkillLoader 注入已安装 Skill 的正文读取边界。
@@ -61,6 +68,7 @@ var parentTeachingSubjectSkills = map[string]parentTeachingSkillSpec{
 }
 
 var _ usecase.ParentTeachingGuideGenerator = (*SolveAdapter)(nil)
+var _ usecase.ParentTeachingGuideAuditor = (*SolveAdapter)(nil)
 var _ usecase.SolveTeachingContractFreezer = (*SolveAdapter)(nil)
 
 // FreezeSolveTeachingContract 固化教学 Skill、表达要求和年级，求解时同次生成候选指南。
@@ -101,9 +109,13 @@ func (a *SolveAdapter) GenerateParentTeachingGuide(
 		return usecase.ParentTeachingGuide{}, fmt.Errorf("parent teaching guide: encode exact problem facts: %w", err)
 	}
 	var promptBuilder strings.Builder
-	promptBuilder.WriteString(config.ParentExpressionInstructions(ctx))
-	if methodology := buildParentTeachingSkillMethodology(req.Subject, a.parentTeachingSkillLoader); methodology != "" {
-		promptBuilder.WriteString(methodology)
+	if req.FrozenTeachingContract != "" {
+		promptBuilder.WriteString(req.FrozenTeachingContract)
+	} else {
+		promptBuilder.WriteString(config.ParentExpressionInstructions(ctx))
+		promptBuilder.WriteString(buildParentTeachingSkillMethodology(req.Subject, a.parentTeachingSkillLoader))
+	}
+	if promptBuilder.Len() != 0 {
 		promptBuilder.WriteString("\n\n——以下是本题冻结事实与输出合同——\n")
 	}
 	promptBuilder.WriteString(`请只针对下面这一道题生成家长可照着使用的辅导指南。一次提供正确答案、完整解法和讲题方法，把学科 Skill 的方法落实到具体的讲解、追问、卡点引导和理解检查；内容简洁明确。
@@ -118,6 +130,11 @@ follow_up_questions（非空字符串数组，可追问孩子的理解问题）�
 checking_method（字符串，家长可独立执行的检查或反向验算）。每一项必须针对本题，禁止复用通用话术。
 题目事实：`)
 	promptBuilder.Write(facts)
+	if req.RejectedCandidate != nil {
+		rejected, _ := json.Marshal(req.RejectedCandidate)
+		promptBuilder.WriteString("\nThe following previous guide failed independent mathematical audit. It is not an authority. Generate a new guide and check every explanation against the verified solution; do not copy its errors:\n")
+		promptBuilder.Write(rejected)
+	}
 	prompt := promptBuilder.String()
 	out, err := a.parentTeachingGuideGen(ctx, req.Subject, prompt, req.Grade)
 	if err != nil {
@@ -127,12 +144,44 @@ checking_method（字符串，家长可独立执行的检查或反向验算）�
 	decoder := json.NewDecoder(strings.NewReader(extractParentTeachingGuideJSON(out)))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&guide); err != nil {
-		return usecase.ParentTeachingGuide{}, fmt.Errorf("parent teaching guide: 解析 JSON 失败: %w", err)
+		return usecase.ParentTeachingGuide{}, fmt.Errorf("parent teaching guide: invalid JSON: %v: %w", err, egress.ErrProviderResponseProcessed)
 	}
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		return usecase.ParentTeachingGuide{}, fmt.Errorf("parent teaching guide: JSON 包含额外内容")
+		return usecase.ParentTeachingGuide{}, fmt.Errorf("parent teaching guide: unexpected trailing JSON: %w", egress.ErrProviderResponseProcessed)
 	}
 	return guide, nil
+}
+
+func (a *SolveAdapter) AuditParentTeachingGuide(ctx context.Context, req usecase.ParentTeachingGuideAuditRequest) (usecase.ParentTeachingGuideAudit, error) {
+	if a.parentTeachingGuideAudit == nil {
+		return usecase.ParentTeachingGuideAudit{}, fmt.Errorf("parent teaching guide auditor unavailable: %w", egress.ErrProviderNotSent)
+	}
+	facts, err := json.Marshal(struct {
+		Problem   string `json:"problem"`
+		Candidate struct {
+			SourceDigest string                      `json:"source_digest"`
+			Solution     string                      `json:"solution"`
+			Guide        usecase.ParentTeachingGuide `json:"parent_guide"`
+		} `json:"candidate"`
+	}{Problem: req.Request.Problem, Candidate: struct {
+		SourceDigest string                      `json:"source_digest"`
+		Solution     string                      `json:"solution"`
+		Guide        usecase.ParentTeachingGuide `json:"parent_guide"`
+	}{req.SourceSolutionDigest, req.Request.VerifiedSolution, req.Guide}})
+	if err != nil {
+		return usecase.ParentTeachingGuideAudit{}, err
+	}
+	prompt := req.Request.FrozenTeachingContract + "\n" + engine.ParentGuideAuditContract +
+		"\nThe original mathematical solution is already verified and immutable. Audit only this supplied guide; do not generate another solution. Output exactly one line: PARENT_GUIDE_AUDITS: <JSON array containing this one candidate's audit>.\n" + string(facts)
+	out, err := a.parentTeachingGuideAudit(ctx, req.Request.Subject, prompt, req.Request.Grade)
+	if err != nil {
+		return usecase.ParentTeachingGuideAudit{}, providerResponseError(err)
+	}
+	return usecase.ParentTeachingGuideAudit{
+		SourceSolutionDigest: req.SourceSolutionDigest,
+		Verdict:              engine.ParentGuideAuditVerdict(out, req.SourceSolutionDigest),
+		Output:               out,
+	}, nil
 }
 
 func buildParentTeachingSkillMethodology(subject string, loader SkillContentLoader) string {

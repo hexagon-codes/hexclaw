@@ -26,12 +26,13 @@ type Deps struct {
 	// CreativeWorkOCR recognizes a writing-photo draft into immutable raw
 	// evidence. Parent corrections are versioned by the usecase/store, never by
 	// the model adapter.
-	CreativeWorkOCR     CreativeWorkOCRRecognizer
-	AnswerAnchorer      AnswerAnchorer
-	Insights            Insights
-	Grounding           Grounding
-	TutoringTipsReview  TutoringTipsReviewGenerator
-	ParentTeachingGuide ParentTeachingGuideGenerator
+	CreativeWorkOCR          CreativeWorkOCRRecognizer
+	AnswerAnchorer           AnswerAnchorer
+	Insights                 Insights
+	Grounding                Grounding
+	TutoringTipsReview       TutoringTipsReviewGenerator
+	ParentTeachingGuide      ParentTeachingGuideGenerator
+	ParentTeachingGuideAudit ParentTeachingGuideAuditor
 	// WorkFeedbackRoute resolves the actual provider/model only when a promoted
 	// ImageTask work starts its feedback operation. The resulting snapshot is
 	// persisted before the provider call and reused verbatim on retry.
@@ -222,6 +223,7 @@ type SolveHomeworkResult struct {
 	Solution         string
 	Evidence         SolveEvidence
 	Generation       *SolveGeneration `json:"generation,omitempty"`
+	ProblemIssue     string           `json:"problem_issue,omitempty"`
 	OutOfScope       bool
 	OutOfScopeKP     string
 	// CurriculumUnmapped 词表外知识点（fail-visible，见 GradeResult 同名字段）。
@@ -270,7 +272,12 @@ func (d Deps) SolveHomeworkProblem(ctx context.Context, req GradeRequest) (Solve
 			Evidence:           sr.Evidence,
 		}, nil
 	}
-	return SolveHomeworkResult{Solution: sr.Solution, Evidence: sr.Evidence, Generation: sr.Generation, CurriculumUnmapped: unmapped}, nil
+	return SolveHomeworkResult{Solution: sr.Solution, Evidence: sr.Evidence, Generation: sr.Generation, ProblemIssue: sr.ProblemIssue, CurriculumUnmapped: unmapped}, nil
+}
+
+// 只有确定性题意校验的具体矛盾可单独结算，普通验算失败仍保留原错误语义。
+func (r SolveHomeworkResult) hasDeterministicProblemIssue() bool {
+	return r.ProblemIssue == "inconsistent_gcd_lcm" && r.Evidence.Verdict == VerdictUnverifiable && r.Evidence.EvidenceType == EvidenceNumericExec
 }
 
 // outOfScope 倒查超纲：任一知识点首学年级晚于生效年级 = 错发（数学硬边界）。

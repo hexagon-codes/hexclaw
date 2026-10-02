@@ -46,10 +46,11 @@ type TutoringTipsReviewGenerateFunc func(ctx context.Context, subject, prompt, g
 
 // SolveAdapter 用 engine 的 solve skill 实现用例层的 Solver + Grader 两个 port。
 type SolveAdapter struct {
-	exec                   SolveExecutor
-	causeSummaryGen        CauseSummaryGenerateFunc       // 轻量错因摘要；nil 时留空由用户填写
-	tutoringTipsReviewGen  TutoringTipsReviewGenerateFunc // nil means an honest static degradation
-	parentTeachingGuideGen ParentTeachingGuideGenerateFunc
+	exec                     SolveExecutor
+	causeSummaryGen          CauseSummaryGenerateFunc       // 轻量错因摘要；nil 时留空由用户填写
+	tutoringTipsReviewGen    TutoringTipsReviewGenerateFunc // nil means an honest static degradation
+	parentTeachingGuideGen   ParentTeachingGuideGenerateFunc
+	parentTeachingGuideAudit ParentTeachingGuideGenerateFunc
 	// parentTeachingSkillLoader 读取建档锁定的教学方法 Skill；盘上版本不可用时由
 	// parent_teaching_guide.go 降级到同版本内嵌快照。
 	parentTeachingSkillLoader SkillContentLoader
@@ -215,11 +216,19 @@ func (a *SolveAdapter) SolveSubject(ctx context.Context, subject, problem, grade
 		Evidence:     evidenceFromMeta(res.Metadata),
 		OutOfScopeKP: res.Metadata["solve_out_of_scope_kp"],
 		Generation:   solveGenerationFromMetadata(version, res.Metadata),
+		ProblemIssue: solveProblemIssueFromMetadata(res.Metadata),
 	}, nil
 }
 
+func solveProblemIssueFromMetadata(metadata map[string]string) string {
+	if metadata["solve_mode"] == "deterministic_problem_validation" && metadata["solve_problem_issue"] == "inconsistent_gcd_lcm" && metadata["solve_verdict"] == "unverifiable" && metadata["solve_evidence"] == "numeric_exec" {
+		return metadata["solve_problem_issue"]
+	}
+	return ""
+}
+
 func solveGenerationFromMetadata(version string, metadata map[string]string) *usecase.SolveGeneration {
-	if version == "" {
+	if version == "" || solveProblemIssueFromMetadata(metadata) != "" {
 		return nil
 	}
 	// 本机精确求值没有模型教学候选，沿用本地讲法；已有候选或审计信息仍按原合同核对。

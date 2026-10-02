@@ -1388,6 +1388,43 @@ func executeUncachedDurableSolveOperation(
 	q RecognizedQuestion,
 	gradeReq GradeRequest,
 ) (SolveHomeworkResult, string, error) {
+	if usesGradingPhysicalCalls(deps.Solver) && deps.Records != nil {
+		requestDigest := modelInvocationResultDigest(struct {
+			ExecutionKind k12.GradingExecutionKind `json:"execution_kind"`
+			InputDigest   string                   `json:"input_digest"`
+			Request       GradeRequest             `json:"request"`
+		}{k12.GradingExecutionLocalDeterministic, q.InputDigest, gradeReq})
+		invocations, err := deps.Records.ListGradingItemInvocations(ctx, job.Record.AgentName, job.Record.RecordID)
+		if err != nil {
+			return SolveHomeworkResult{}, "", err
+		}
+		for _, invocation := range invocations {
+			if invocation.ProblemID != q.ProblemID || invocation.Operation != k12.GradingItemOperationSolve ||
+				invocation.ExecutionKind != k12.GradingExecutionLocalDeterministic ||
+				invocation.Status != k12.ModelInvocationSucceeded || invocation.RequestDigest != requestDigest {
+				continue
+			}
+			if err := validateGradingItemInvocationIdentity(invocation, job, q, requestDigest, k12.GradingExecutionLocalDeterministic); err != nil {
+				return SolveHomeworkResult{}, invocation.InvocationID, err
+			}
+			var stored SolveHomeworkResult
+			if invocation.ResultDigest != modelInvocationDigest([]byte(invocation.ResultJSON)) ||
+				json.Unmarshal([]byte(invocation.ResultJSON), &stored) != nil || stored.ProblemIssue != "" ||
+				stored.OutOfScope || stored.AnswerSource != nil || stored.assetPublication != nil ||
+				stored.Evidence.Verdict != VerdictUnverifiable || stored.Evidence.EvidenceType != EvidenceNumericExec {
+				continue
+			}
+			// 旧本地矛盾回执仅由当前完整规则重证；空的只读执行器禁止任何模型发送。
+			replay := &weeklyPhysicalExecutor{call: &weeklyCandidateCall{}, replayOnly: true}
+			fresh, replayErr := deps.SolveHomeworkProblem(withGradingPhysicalCallExecutor(ctx, replay), gradeReq)
+			if replayErr == nil && fresh.hasDeterministicProblemIssue() && !fresh.OutOfScope &&
+				fresh.AnswerSource == nil && fresh.assetPublication == nil && fresh.Solution == stored.Solution {
+				stored.ProblemIssue, stored.Generation = fresh.ProblemIssue, nil
+				return stored, invocation.InvocationID, nil
+			}
+			break
+		}
+	}
 	groundedCtx, groundingRequired, groundingErr := prepareGradingItemGrounding(
 		ctx, deps, job, q, gradeReq,
 	)
@@ -1430,7 +1467,7 @@ func executeUncachedDurableSolveOperation(
 			err = fmt.Errorf("%w: physical solver returned without a durable invocation",
 				ErrModelInvocationRequiresReconciliation)
 		} else {
-			return executeGradingItemOperationWithKind(ctx, o, job, q,
+			stored, storedInvocationID, storedErr := executeGradingItemOperationWithKind(ctx, o, job, q,
 				k12.GradingItemOperationSolve,
 				k12.GradingExecutionLocalDeterministic,
 				struct {
@@ -1441,6 +1478,15 @@ func executeUncachedDurableSolveOperation(
 				func(context.Context) (SolveHomeworkResult, error) {
 					return result, nil
 				})
+			// 本地校验已重新证明具体矛盾；旧回执不改写，仅为相同解答补齐读取投影。
+			if storedErr == nil && result.hasDeterministicProblemIssue() && stored.ProblemIssue == "" &&
+				stored.Solution == result.Solution && !stored.OutOfScope && stored.AnswerSource == nil &&
+				stored.assetPublication == nil && stored.Evidence.Verdict == VerdictUnverifiable &&
+				stored.Evidence.EvidenceType == EvidenceNumericExec {
+				stored.ProblemIssue = result.ProblemIssue
+				stored.Generation = nil
+			}
+			return stored, storedInvocationID, storedErr
 		}
 	}
 	return result, invocationID, err

@@ -157,6 +157,15 @@ func WithParentTeachingGuideGenerator(fn engineadapter.ParentTeachingGuideGenera
 	}
 }
 
+// WithParentTeachingGuideAuditor 注入失败指南恢复时的独立审核调用。
+func WithParentTeachingGuideAuditor(fn engineadapter.ParentTeachingGuideGenerateFunc) Option {
+	return func(d *usecase.Deps) {
+		if sa, ok := d.Solver.(*engineadapter.SolveAdapter); ok && fn != nil {
+			sa.SetParentTeachingGuideAudit(fn)
+		}
+	}
+}
+
 // WithParentTeachingSkillLoader 让逐题家长讲法消费建档锁定的教学 Skill 正文。
 func WithParentTeachingSkillLoader(fn engineadapter.SkillContentLoader) Option {
 	return func(d *usecase.Deps) {
@@ -247,16 +256,17 @@ func WireInto(ctx context.Context, reg *scenario.Registry, db *sql.DB, solveSkil
 	solveAdapter := engineadapter.NewSolveAdapter(solveSkill)
 
 	deps := usecase.Deps{
-		Solver:              solveAdapter,
-		Grader:              solveAdapter,
-		VerifiedGrader:      solveAdapter,
-		WeeklyAssessment:    usecase.NewVerifiedSolutionWeeklyAssessor(solveAdapter),
-		TutoringTipsReview:  solveAdapter,
-		ParentTeachingGuide: solveAdapter,
-		Records:             store,
-		TextbookOwnerID:     "desktop-user",
-		PageAssets:          assetstore.PageStore{},
-		Constraint:          constraint,
+		Solver:                   solveAdapter,
+		Grader:                   solveAdapter,
+		VerifiedGrader:           solveAdapter,
+		WeeklyAssessment:         usecase.NewVerifiedSolutionWeeklyAssessor(solveAdapter),
+		TutoringTipsReview:       solveAdapter,
+		ParentTeachingGuide:      solveAdapter,
+		ParentTeachingGuideAudit: solveAdapter,
+		Records:                  store,
+		TextbookOwnerID:          "desktop-user",
+		PageAssets:               assetstore.PageStore{},
+		Constraint:               constraint,
 	}
 	for _, o := range opts {
 		o(&deps)

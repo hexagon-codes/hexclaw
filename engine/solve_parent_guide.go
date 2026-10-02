@@ -90,7 +90,15 @@ func guideCandidates(sols []solverSolution) []guideAuditCandidate {
 	return candidates
 }
 
-const parentGuideAuditContract = `Independently audit every supplied parent_guide against its own solution, the original problem and allowed curriculum. Check all seven fields: answer, full_solution_steps, grade_level_method, likely_mistakes, parent_teaching_sequence, follow_up_questions, checking_method. Audit every mathematical example, follow-up answer, proposed checking method and grade-level explanation. A correct original answer does not excuse an incorrect guide example. For every likely_mistakes entry, test each described operation against the solution and its proposed correction: reject an entry that labels a correct operation as wrong, including mixed alternatives, or contradicts its own correction. Each audit has this exact JSON shape: {"source_digest":"digest supplied with the candidate","scope":"IN_SCOPE or OUT_OF_SCOPE","fields":[{"field":"answer","valid":true,"reason":"concrete reason"}]}, with exactly one entry for each of the seven fields. Set valid=false for missing, contradictory or mathematically wrong content. Guide audits are separate from the original problem's numeric execution evidence.`
+// ParentGuideAuditContract 供联合验算和独立指南审核复用同一七字段合同。
+const ParentGuideAuditContract = `Independently audit every supplied parent_guide against its own solution, the original problem and allowed curriculum. Check all seven fields: answer, full_solution_steps, grade_level_method, likely_mistakes, parent_teaching_sequence, follow_up_questions, checking_method. Audit every mathematical example, follow-up answer, proposed checking method and grade-level explanation. A correct original answer does not excuse an incorrect guide example. For every likely_mistakes entry, test each described operation against the solution and its proposed correction: reject an entry that labels a correct operation as wrong, including mixed alternatives, or contradicts its own correction. Each audit has this exact JSON shape: {"source_digest":"digest supplied with the candidate","scope":"IN_SCOPE or OUT_OF_SCOPE","fields":[{"field":"answer","valid":true,"reason":"concrete reason"}]}, with exactly one entry for each of the seven fields. Set valid=false for missing, contradictory or mathematically wrong content. Guide audits are separate from the original problem's numeric execution evidence.`
+
+const parentGuideAuditContract = ParentGuideAuditContract
+
+// ParentGuideAuditVerdict 按实际审核原文判定给定解答来源的七字段合同。
+func ParentGuideAuditVerdict(output, sourceDigest string) string {
+	return parentGuideAuditVerdict(parentGuideAuditsFromOutput(output), sourceDigest)
+}
 
 func withParentGuideVerification(spec SubAgentSpec, candidates []guideAuditCandidate) SubAgentSpec {
 	if len(candidates) == 0 {

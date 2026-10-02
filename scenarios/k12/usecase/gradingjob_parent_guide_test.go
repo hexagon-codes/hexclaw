@@ -5,11 +5,72 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
 )
+
+type deterministicProblemIssueSolver struct {
+	delegate *itemResumeSolver
+}
+
+func (s deterministicProblemIssueSolver) Solve(ctx context.Context, problem, grade, constraint string) (SolveResult, error) {
+	result, err := s.delegate.Solve(ctx, problem, grade, constraint)
+	if problem == "contradictory ticket" {
+		result.Solution = "The greatest common divisor 13 does not divide the least common multiple 72."
+		result.ProblemIssue = "inconsistent_gcd_lcm"
+		result.Evidence = SolveEvidence{Verdict: VerdictUnverifiable, EvidenceType: EvidenceNumericExec}
+	}
+	return result, err
+}
+
+func TestGradingJobBlankWorksheetCommitsContradictionWithoutBlockingOtherItems(t *testing.T) {
+	runDir := t.TempDir()
+	solver := &itemResumeSolver{calls: map[string]int{}, solutions: map[string]string{"1+1=": "2"}}
+	grader := &itemResumeGrader{calls: map[string]int{}}
+	o := newItemResumeOrchestrator(t, runDir, []RecognizedQuestion{
+		{Question: "contradictory ticket", Subject: "数学", AnswerState: AnswerStateBlank},
+		{Question: "1+1=", Subject: "数学", AnswerState: AnswerStateBlank},
+	}, solver, grader)
+	o.deps.Solver = deterministicProblemIssueSolver{delegate: solver}
+	jobID := runItemResumeJobToAssessing(t, o, "blank-known-source-contradiction")
+	completed, err := o.ConfirmAndRun(context.Background(), jobID, nil)
+	if err != nil || completed.Record.Status != k12.GradingStageCompleted {
+		t.Fatalf("single source contradiction blocked the page: stage=%s err=%v", completed.Record.Status, err)
+	}
+	result, ok := o.PhotoResult(jobID)
+	if !ok || len(result.Items) != 2 || result.Items[0].Status != PhotoUntrusted || result.Items[0].ParentGuide != nil || result.Items[0].Solve.ProblemIssue != "inconsistent_gcd_lcm" || result.Items[1].Status != PhotoBlankSolved || result.Items[1].ParentGuide == nil || result.Items[1].ParentGuide.Answer != "2" || !strings.Contains(result.Markdown, "contradictory conditions") {
+		t.Fatalf("contradiction invented an answer or lost independent items: %+v", result)
+	}
+	rows, err := o.deps.Records.ListGradingItemInvocations(context.Background(), "mingming", jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range rows {
+		if row.ProblemID == result.Items[0].Recognized.ProblemID && row.Operation != k12.GradingItemOperationSolve {
+			t.Fatalf("contradiction generated an unnecessary guide or grade: %+v", row)
+		}
+	}
+	if len(rows) != 3 || solver.callCount("contradictory ticket") != 1 || solver.callCount("1+1=") != 1 || len(o.deps.ParentTeachingGuide.(*parentTeachingGuideSpy).snapshot()) != 0 {
+		t.Fatalf("unexpected calls or receipts: %+v", rows)
+	}
+	restarted := trackGradingOrchestrator(t, NewGradingOrchestrator(o.deps, orchestratorSnapshotResolver, WithGradingRunDir(runDir)))
+	run, err := restarted.ensureRun(context.Background(), jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, question := range run.questions {
+		if _, err := restarted.assessDurablePhotoItem(context.Background(), restarted.deps, completed, run.req, PhotoModeSolve, question); err != nil {
+			t.Fatalf("persisted completed item could not replay: %v", err)
+		}
+	}
+	after, err := o.deps.Records.ListGradingItemInvocations(context.Background(), "mingming", jobID)
+	if err != nil || !reflect.DeepEqual(rows, after) || solver.callCount("contradictory ticket") != 1 || solver.callCount("1+1=") != 1 {
+		t.Fatalf("restart replay changed successful receipts or sent again: err=%v", err)
+	}
+}
 
 func TestGradingJobBlankWorksheetCommitsAndReplaysPerItemParentGuide(t *testing.T) {
 	solver := &itemResumeSolver{calls: map[string]int{}}

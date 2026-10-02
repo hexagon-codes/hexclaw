@@ -28,20 +28,41 @@ type ParentTeachingGuide struct {
 // answer, but the usecase accepts it only when it is anchored in that verified
 // solution and never lets the generator rewrite the full method.
 type ParentTeachingGuideRequest struct {
-	Subject          string
-	Grade            string
-	Problem          string
-	StudentAnswer    string
-	KnowledgePoints  []string
-	WrongStep        string
-	ErrorCause       string
-	VerifiedSolution string
+	Subject                string
+	Grade                  string
+	Problem                string
+	StudentAnswer          string
+	KnowledgePoints        []string
+	WrongStep              string
+	ErrorCause             string
+	VerifiedSolution       string
+	FrozenTeachingContract string               `json:"frozen_teaching_contract,omitempty"`
+	RejectedCandidate      *ParentTeachingGuide `json:"rejected_candidate,omitempty"`
 }
 
 // ParentTeachingGuideGenerator is intentionally separate from Solver. Existing
 // grade/solve clients keep their historical contract and call count.
 type ParentTeachingGuideGenerator interface {
 	GenerateParentTeachingGuide(context.Context, ParentTeachingGuideRequest) (ParentTeachingGuide, error)
+}
+
+// ParentTeachingGuideAudit 保留独立审核原文，不代替原题的数值执行证据。
+type ParentTeachingGuideAudit struct {
+	SourceSolutionDigest string `json:"source_solution_digest"`
+	Verdict              string `json:"verdict"`
+	Output               string `json:"output"`
+}
+
+// ParentTeachingGuideAuditRequest 将审核绑定到完整候选与已验证解答。
+type ParentTeachingGuideAuditRequest struct {
+	Request              ParentTeachingGuideRequest `json:"request"`
+	Guide                ParentTeachingGuide        `json:"guide"`
+	SourceSolutionDigest string                     `json:"source_solution_digest"`
+}
+
+// ParentTeachingGuideAuditor 仅审核教学内容，不重新识题或生成数学解答。
+type ParentTeachingGuideAuditor interface {
+	AuditParentTeachingGuide(context.Context, ParentTeachingGuideAuditRequest) (ParentTeachingGuideAudit, error)
 }
 
 type BlankWorksheetProblemResult struct {
@@ -73,7 +94,7 @@ func (d Deps) SolveBlankWorksheetProblem(
 ) (BlankWorksheetProblemResult, error) {
 	solved, err := d.SolveHomeworkProblem(ctx, req)
 	result := BlankWorksheetProblemResult{Solved: solved}
-	if err != nil || solved.OutOfScope {
+	if err != nil || solved.OutOfScope || solved.hasDeterministicProblemIssue() {
 		return result, err
 	}
 	subject, err := normalizeSubject(req.Subject)

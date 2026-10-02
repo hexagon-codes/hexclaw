@@ -546,6 +546,12 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 		if historical, _ := ctx.Value(historicalAssetCorrectionContextKey{}).(bool); historical && !photoEvidenceTrusted(solved.Evidence) {
 			return item, fmt.Errorf("historical answer feedback requires verified solve evidence")
 		}
+		if solved.hasDeterministicProblemIssue() {
+			item.Status = PhotoUntrusted
+			item.Warning = "The question contains contradictory conditions; no answer or correctness judgment was produced."
+			return commitGradingAssessmentItem(durableCtx, deps, job, q, item,
+				solveInvocationID, "", "", k12storage.GradingAssessmentEffects{})
+		}
 		guideRequest := parentTeachingGuideRequest(gradeReq, solved, GradeOutcome{})
 		guideExecutionKind := k12.GradingExecutionProvider
 		var deterministicGuide *ParentTeachingGuide
@@ -557,28 +563,35 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 		} else if gradeReq.SolveOutputVersion == SolveOutputWithParentGuideV1 {
 			guideExecutionKind = k12.GradingExecutionLocalDeterministic
 		}
-		rawGuide, parentGuideInvocationID, err := executeGradingItemOperationWithKind(ctx, o, job, q,
-			k12.GradingItemOperationParentGuide,
-			guideExecutionKind,
-			struct {
-				ExecutionKind k12.GradingExecutionKind   `json:"execution_kind"`
-				InputDigest   string                     `json:"input_digest"`
-				Request       ParentTeachingGuideRequest `json:"request"`
-				Generation    *SolveGeneration           `json:"generation,omitempty"`
-			}{guideExecutionKind, q.InputDigest, guideRequest, parentGuideGenerationForRequest(gradeReq, solved)},
-			func(callCtx context.Context) (ParentTeachingGuide, error) {
-				if deterministicGuide != nil {
-					return *deterministicGuide, nil
-				}
-				if gradeReq.SolveOutputVersion == SolveOutputWithParentGuideV1 {
-					return auditedSolveParentTeachingGuide(solved)
-				}
-				return deps.generateParentTeachingGuide(callCtx, guideRequest)
-			})
+		originalGuideRequest := struct {
+			ExecutionKind k12.GradingExecutionKind   `json:"execution_kind"`
+			InputDigest   string                     `json:"input_digest"`
+			Request       ParentTeachingGuideRequest `json:"request"`
+			Generation    *SolveGeneration           `json:"generation,omitempty"`
+		}{guideExecutionKind, q.InputDigest, guideRequest, parentGuideGenerationForRequest(gradeReq, solved)}
+		rawGuide, parentGuideInvocationID, repaired, err := executeDurableParentTeachingGuideRepair(
+			ctx, o, deps, job, q, gradeReq, solved, originalGuideRequest,
+		)
 		if err != nil {
 			return item, err
 		}
-		guide, err := finalizeParentTeachingGuide(rawGuide, solved.Solution)
+		if !repaired {
+			rawGuide, parentGuideInvocationID, err = executeGradingItemOperationWithKind(ctx, o, job, q,
+				k12.GradingItemOperationParentGuide, guideExecutionKind, originalGuideRequest,
+				func(callCtx context.Context) (ParentTeachingGuide, error) {
+					if deterministicGuide != nil {
+						return *deterministicGuide, nil
+					}
+					if gradeReq.SolveOutputVersion == SolveOutputWithParentGuideV1 {
+						return auditedSolveParentTeachingGuide(solved)
+					}
+					return deps.generateParentTeachingGuide(callCtx, guideRequest)
+				})
+		}
+		if err != nil {
+			return item, err
+		}
+		guide, err := finalizeSolveParentTeachingGuide(rawGuide, solved)
 		if err != nil {
 			return item, err
 		}

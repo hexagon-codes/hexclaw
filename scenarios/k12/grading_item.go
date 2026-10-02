@@ -189,7 +189,23 @@ func (v *GradingAssessmentItem) Validate() error {
 		}
 	}
 	switch v.Status {
-	case GradingAssessmentCorrect, GradingAssessmentProcessIssue, GradingAssessmentWrong, GradingAssessmentUntrusted:
+	case GradingAssessmentUntrusted:
+		// 题干的确定性矛盾只引用求解回执，不伪造学生批改或教学调用。
+		var result struct {
+			Solve struct {
+				ProblemIssue string `json:"problem_issue"`
+				Evidence     struct {
+					Verdict      string
+					EvidenceType string
+				}
+			}
+			ParentGuide json.RawMessage
+		}
+		if json.Unmarshal([]byte(v.ResultJSON), &result) == nil && result.Solve.ProblemIssue == "inconsistent_gcd_lcm" && result.Solve.Evidence.Verdict == "unverifiable" && result.Solve.Evidence.EvidenceType == "numeric_exec" && v.SolveInvocationID != "" && v.GradeInvocationID == "" && v.ParentGuideInvocationID == "" && (len(result.ParentGuide) == 0 || string(result.ParentGuide) == "null") {
+			break
+		}
+		fallthrough
+	case GradingAssessmentCorrect, GradingAssessmentProcessIssue, GradingAssessmentWrong:
 		if !hasSolve || v.GradeInvocationID == "" {
 			return fmt.Errorf("grading assessment %s requires solve and grade invocations", v.Status)
 		}

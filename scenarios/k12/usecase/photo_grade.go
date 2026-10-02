@@ -390,6 +390,11 @@ func (d Deps) assessPhotoItem(
 		item.Status = PhotoOutOfScope
 		return item, nil
 	}
+	if blankResult.Solved.hasDeterministicProblemIssue() {
+		item.Status = PhotoUntrusted
+		item.Warning = "The question contains contradictory conditions; no answer or correctness judgment was produced."
+		return item, nil
+	}
 	item.ParentGuide = &blankResult.Guide
 	item.Status = PhotoBlankSolved
 	if !photoEvidenceTrusted(blankResult.Solved.Evidence) {

@@ -131,6 +131,10 @@ func completeKnowledgePDFPageOCR(
 		request.Metadata = map[string]any{"thinking": "off"}
 		request.ReasoningPolicyScope = llm.ReasoningPolicyScopeStructuredVisionRecognition
 	}
+	// 逐页预算也是本次请求的响应头等待上限，避免共享客户端提前截断转写。
+	if deadline, ok := ctx.Deadline(); ok {
+		ctx = egress.WithProviderRequestResponseHeaderTimeout(ctx, time.Until(deadline))
+	}
 	response, err := provider.Complete(ctx, request)
 	if err != nil {
 		return knowledge.CaptionResult{}, err
@@ -2247,6 +2251,34 @@ Set source only when the material explicitly names a work, title, or another rel
 			}
 			return resp.Content, nil
 		}
+		parentTeachingGuideAuditFn := func(ctx context.Context, subject, prompt, grade string) (string, error) {
+			provider, model, err := resolveK12FrozenTextCompletionRoute(
+				ctx, router, k12ModelCapabilityReceipts, "K12 parent tutoring guide audit",
+			)
+			if err != nil {
+				return "", err
+			}
+			if subject != "" {
+				prompt = "Frozen subject: " + subject + "\n" + prompt
+			}
+			if grade != "" {
+				prompt += "\nUse only the supplied methods allowed for " + grade + "."
+			}
+			cctx := k12ParentTeachingGuideRequestContext(ctx)
+			temp := 0.2
+			resp, err := provider.Complete(k12NonIdempotentLLMContext(cctx), hexagon.CompletionRequest{
+				Model: model,
+				Messages: []hexagon.Message{
+					{Role: hexagon.RoleSystem, Content: "Independently audit the supplied parent tutoring guide against its frozen verified solution and curriculum. Check all seven fields, mathematical examples, explanations and checks. Do not rewrite or generate a solution or guide. Output exactly one PARENT_GUIDE_AUDITS line containing the requested JSON array; incorrect, missing or out-of-scope content must not pass."},
+					{Role: hexagon.RoleUser, Content: prompt},
+				},
+				Temperature: &temp,
+			})
+			if err != nil {
+				return "", err
+			}
+			return resp.Content, nil
+		}
 		causeSummaryGenFn := func(ctx context.Context, subject, prompt, grade string) (string, error) {
 			provider, model, err := resolveK12FrozenTextCompletionRoute(
 				ctx, router, k12ModelCapabilityReceipts, "K12 cause summary",
@@ -2429,6 +2461,7 @@ Set source only when the material explicitly names a work, title, or another rel
 			k12assembly.WithCauseSummaryGenerator(causeSummaryGenFn),
 			k12assembly.WithTutoringTipsReviewGenerator(tutoringTipsReviewGenFn),
 			k12assembly.WithParentTeachingGuideGenerator(parentTeachingGuideGenFn),
+			k12assembly.WithParentTeachingGuideAuditor(parentTeachingGuideAuditFn),
 			k12assembly.WithParentTeachingSkillLoader(k12SkillLoaderFn),
 			k12assembly.WithWorkFeedbackGenerator(workFeedbackGenFn),
 			k12assembly.WithWorkFeedbackVision(workFeedbackVisionFn),
@@ -2488,7 +2521,7 @@ Set source only when the material explicitly names a work, title, or another rel
 			// §6.15 异步执行模型（进程级 ctx + 有界并发 + panic 不逃逸）+ 阶段产物落盘恢复。
 			k12ModelSnapshot := func(requested k12.GradingModelSnapshot) (k12.GradingModelSnapshot, error) {
 				return resolveK12GradingModelSnapshotWithCapabilityReceipt(
-					ctx, router, k12ModelCapabilityReceipts, requested,
+					ctx, router, k12ModelCapabilityReceipts, requested, srv.ProbeSavedModelCapability,
 				)
 			}
 			k12rt.Deps.PracticeGenerationRoute = func(
@@ -2506,7 +2539,7 @@ Set source only when the material explicitly names a work, title, or another rel
 				k12rt.MaterialWorker.PreparePDFSource = api.NewMaterialPDFSourcePreparer(kbSemanticRuntime.Service, k12rt.Records)
 			}
 			k12rt.MaterialWorker.ResolveVisualModel = func(requestCtx context.Context, requested k12.GradingModelSnapshot) (k12.GradingModelSnapshot, error) {
-				return resolveK12GradingModelSnapshotWithCapabilityReceipt(requestCtx, router, k12ModelCapabilityReceipts, requested)
+				return resolveK12GradingModelSnapshotWithCapabilityReceipt(requestCtx, router, k12ModelCapabilityReceipts, requested, srv.ProbeSavedModelCapability)
 			}
 			k12GradingOrch = k12usecase.NewGradingOrchestrator(k12rt.Deps, k12ModelSnapshot,
 				k12usecase.WithGradingRunDir(filepath.Join(dataDir, "k12", "grading-runs")),

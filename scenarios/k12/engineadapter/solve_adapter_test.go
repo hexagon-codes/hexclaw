@@ -227,6 +227,35 @@ func TestSolveAdapter_TrivialArithmeticUsesDeterministicFastPath(t *testing.T) {
 	}
 }
 
+func TestSolveAdapterDeterministicProblemIssueIsNotAnUnauditedGuide(t *testing.T) {
+	const problem = "小明有张10至40排的电影票，这张票的排数和座位号的最大公约数是13，最小公倍数是72，小明这张电影票是（）排（）号。"
+	calls := 0
+	a := NewSolveAdapter(engine.NewSolveSkill(func(context.Context, engine.SubAgentSpec) (engine.SubAgentResult, error) {
+		calls++
+		return engine.SubAgentResult{}, errors.New("unexpected provider call")
+	}, nil))
+	result, err := a.Solve(context.Background(), problem, "六年级上", "最大公约数、最小公倍数")
+	if err != nil || calls != 0 || result.ProblemIssue != "inconsistent_gcd_lcm" || result.Evidence.Verdict != usecase.VerdictUnverifiable || !strings.Contains(result.Solution, "13") || !strings.Contains(result.Solution, "72") {
+		t.Fatalf("concrete source contradiction lost or guessed: result=%+v calls=%d err=%v", result, calls, err)
+	}
+	metadata := map[string]string{"solve_mode": "deterministic_problem_validation", "solve_problem_issue": "inconsistent_gcd_lcm", "solve_verdict": "unverifiable", "solve_evidence": "numeric_exec"}
+	if solveGenerationFromMetadata(usecase.SolveOutputWithParentGuideV1, metadata) != nil {
+		t.Fatal("source contradiction fabricated a missing model guide audit")
+	}
+	for key, value := range map[string]string{"solve_mode": "model", "solve_problem_issue": "unsupported", "solve_verdict": "agree", "solve_evidence": "none"} {
+		t.Run(key, func(t *testing.T) {
+			modified := map[string]string{}
+			for k, v := range metadata {
+				modified[k] = v
+			}
+			modified[key] = value
+			if solveProblemIssueFromMetadata(modified) != "" || solveGenerationFromMetadata(usecase.SolveOutputWithParentGuideV1, modified) == nil {
+				t.Fatal("ordinary incomplete verification was promoted to a deterministic contradiction")
+			}
+		})
+	}
+}
+
 // countingExec 统计 SolveExecutor.Execute 被调次数——代表「走完整 solve/ReAct 工具循环」的路径。
 type countingExec struct{ calls int }
 
