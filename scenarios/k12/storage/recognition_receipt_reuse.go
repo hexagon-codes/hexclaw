@@ -27,8 +27,9 @@ func (s *Store) ReuseSucceededRecognitionPhysicalInvocation(
 	}
 	isRepair := strings.HasPrefix(string(current.PhysicalUnit), "layout_repair_")
 	isAdjudication := strings.HasPrefix(string(current.PhysicalUnit), "layout_adjudicate_")
+	isReview := strings.HasPrefix(string(current.PhysicalUnit), "layout_review_batch_")
 	if current.Status != k12.ModelInvocationPrepared || current.RecognitionPlanVersion != k12.RecognitionPlanVersionV2 ||
-		(current.PhysicalUnit != k12.RecognitionPhysicalUnitWholePage && !strings.HasPrefix(string(current.PhysicalUnit), "layout_batch_") && !isRepair && !isAdjudication) {
+		(current.PhysicalUnit != k12.RecognitionPhysicalUnitWholePage && !strings.HasPrefix(string(current.PhysicalUnit), "layout_batch_") && !isRepair && !isAdjudication && !isReview) {
 		return current, false, nil
 	}
 	parent, err := s.getModelInvocationByID(ctx, current.ParentInvocationID)
@@ -70,6 +71,9 @@ func (s *Store) ReuseSucceededRecognitionPhysicalInvocation(
 	for _, source := range children {
 		if source.ParentInvocationID == parent.InvocationID || source.PhysicalUnit != current.PhysicalUnit ||
 			source.RecognitionPlanVersion != k12.RecognitionPlanVersionV2 || source.Status != k12.ModelInvocationSucceeded {
+			continue
+		}
+		if isReview && (current.CandidateExactSetDigest == "" || source.CandidateExactSetDigest != current.CandidateExactSetDigest) {
 			continue
 		}
 		prior, getErr := s.getModelInvocationByID(ctx, source.ParentInvocationID)

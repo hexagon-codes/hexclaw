@@ -47,6 +47,7 @@ var (
 	latexFraction           = regexp.MustCompile(`\\frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}`)
 	latexText               = regexp.MustCompile(`\\text\s*\{([^{}]*)\}`)
 	evidenceNewline         = regexp.MustCompile(`\\n(?:\b|([0-9]))`)
+	answerDisplayNewline    = regexp.MustCompile(`\\n(?:\b|([0-9]|[xX]\s*[=＝]))`)
 	evidenceNumericFraction = regexp.MustCompile(`\b([0-9]+(?:\.[0-9]+)?)\s*/\s*([0-9]+(?:\.[0-9]+)?)\b`)
 	evidenceNumericRatio    = regexp.MustCompile(`([0-9])[:：∶]([0-9])`)
 	explicitAnswerLine      = regexp.MustCompile(`^(?:答\s*[:：]\s*(?:是|为)?|答案\s*(?:是|为|[:：]))\s*`)
@@ -243,11 +244,25 @@ func answerEvidenceTranscriptionsConflict(transcription string, values []string)
 	if !evidenceTranscriptionsConflict(transcription, values, "") {
 		return false
 	}
+	// 单行结果可带一个前导等号；仅比较完整读数，不据此删除中间演算。
+	trimLeadingEquals := func(value string) string {
+		value = strings.TrimSpace(CanonicalPlainTextFallback(value))
+		if strings.HasPrefix(value, "＝") {
+			return strings.TrimPrefix(value, "＝")
+		}
+		return strings.TrimPrefix(value, "=")
+	}
+	readings := make([]string, len(values))
+	for index, value := range values {
+		readings[index] = trimLeadingEquals(value)
+	}
+	if !evidenceTranscriptionsConflict(trimLeadingEquals(transcription), readings, "") {
+		return false
+	}
 	canonical, ok := canonicalAnswerEvidenceLineOrder(transcription)
 	if !ok {
 		return true
 	}
-	readings := make([]string, len(values))
 	for index, value := range values {
 		readings[index], ok = canonicalAnswerEvidenceLineOrder(value)
 		if !ok {
@@ -572,9 +587,9 @@ func RecognizedQuestionDisplayText(q RecognizedQuestion) string {
 
 func recognizedAnswerDisplayText(q RecognizedQuestion) string {
 	if CanonicalMarkdownValid(q.AnswerCanonicalMarkdown) {
-		return q.AnswerCanonicalMarkdown
+		return answerDisplayNewline.ReplaceAllString(q.AnswerCanonicalMarkdown, "\n$1")
 	}
-	return CanonicalPlainTextFallback(q.AnswerRawTranscription)
+	return answerDisplayNewline.ReplaceAllString(CanonicalPlainTextFallback(q.AnswerRawTranscription), "\n$1")
 }
 
 // NormalizeRecognizedProblems 冻结一次识别结果的结构身份并校验父子不变量。

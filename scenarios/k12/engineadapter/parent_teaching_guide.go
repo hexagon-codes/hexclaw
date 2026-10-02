@@ -111,12 +111,13 @@ func (a *SolveAdapter) GenerateParentTeachingGuide(
 	var promptBuilder strings.Builder
 	if req.FrozenTeachingContract != "" {
 		promptBuilder.WriteString(req.FrozenTeachingContract)
+		promptBuilder.WriteString("\n\n——以下是本题冻结事实与输出合同——\n")
 	} else {
 		promptBuilder.WriteString(config.ParentExpressionInstructions(ctx))
-		promptBuilder.WriteString(buildParentTeachingSkillMethodology(req.Subject, a.parentTeachingSkillLoader))
-	}
-	if promptBuilder.Len() != 0 {
-		promptBuilder.WriteString("\n\n——以下是本题冻结事实与输出合同——\n")
+		if methodology := buildParentTeachingSkillMethodology(req.Subject, a.parentTeachingSkillLoader); methodology != "" {
+			promptBuilder.WriteString(methodology)
+			promptBuilder.WriteString("\n\n——以下是本题冻结事实与输出合同——\n")
+		}
 	}
 	promptBuilder.WriteString(`请只针对下面这一道题生成家长可照着使用的辅导指南。一次提供正确答案、完整解法和讲题方法，把学科 Skill 的方法落实到具体的讲解、追问、卡点引导和理解检查；内容简洁明确。
 verified_solution 是已验算的完整解答，是答案和完整方法的唯一依据，不得改写为其他答案或方法。

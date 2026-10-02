@@ -162,12 +162,12 @@ func executeDurableParentTeachingGuideRepair(
 	ctx = withParentInstructions(ctx, failed.RouteSnapshot.ParentInstructions)
 	executor := newDurableGradingPhysicalCallExecutor(o, job, q)
 	generateRequest := struct {
-			Phase                string                     `json:"phase"`
-			RepairOf             string                     `json:"repair_of"`
-			InputDigest          string                     `json:"input_digest"`
-			SourceSolutionDigest string                     `json:"source_solution_digest"`
-			Request              ParentTeachingGuideRequest `json:"request"`
-		}{"guide_generate", failed.InvocationID, q.InputDigest, generation.SourceSolutionDigest, guideRequest}
+		Phase                string                     `json:"phase"`
+		RepairOf             string                     `json:"repair_of"`
+		InputDigest          string                     `json:"input_digest"`
+		SourceSolutionDigest string                     `json:"source_solution_digest"`
+		Request              ParentTeachingGuideRequest `json:"request"`
+	}{"guide_generate", failed.InvocationID, q.InputDigest, generation.SourceSolutionDigest, guideRequest}
 	generatedCall, err := executor.ExecuteGradingPhysicalCall(ctx, GradingPhysicalCallSpec{
 		Operation: k12.GradingItemOperationParentGuide, RequestDigest: modelInvocationResultDigest(generateRequest),
 	}, func(callCtx context.Context) (string, error) {
@@ -196,13 +196,13 @@ func executeDurableParentTeachingGuideRepair(
 	}
 	generatedDigest := modelInvocationResultDigest(generated)
 	verifyRequest := struct {
-			Phase                 string                          `json:"phase"`
-			RepairOf              string                          `json:"repair_of"`
-			InputDigest           string                          `json:"input_digest"`
-			GeneratedInvocationID string                          `json:"generated_invocation_id"`
-			GeneratedDigest       string                          `json:"generated_digest"`
-			Request               ParentTeachingGuideAuditRequest `json:"request"`
-		}{"guide_audit", failed.InvocationID, q.InputDigest, generatedID, generatedDigest, auditRequest}
+		Phase                 string                          `json:"phase"`
+		RepairOf              string                          `json:"repair_of"`
+		InputDigest           string                          `json:"input_digest"`
+		GeneratedInvocationID string                          `json:"generated_invocation_id"`
+		GeneratedDigest       string                          `json:"generated_digest"`
+		Request               ParentTeachingGuideAuditRequest `json:"request"`
+	}{"guide_audit", failed.InvocationID, q.InputDigest, generatedID, generatedDigest, auditRequest}
 	auditCall, err := executor.ExecuteGradingPhysicalCall(ctx, GradingPhysicalCallSpec{
 		Operation: k12.GradingItemOperationParentGuide, RequestDigest: modelInvocationResultDigest(verifyRequest),
 	}, func(callCtx context.Context) (string, error) {
