@@ -747,9 +747,10 @@ func (s *Scheduler) ReplaceJobForOwner(
 	defer func() { _ = tx.Rollback() }()
 
 	var existingOwner string
+	var existingMeta sql.NullString
 	err = tx.QueryRowContext(ctx,
-		`SELECT user_id FROM cron_jobs WHERE id = ?`, jobID,
-	).Scan(&existingOwner)
+		`SELECT user_id, meta FROM cron_jobs WHERE id = ?`, jobID,
+	).Scan(&existingOwner, &existingMeta)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrCronJobNotFound
@@ -759,6 +760,11 @@ func (s *Scheduler) ReplaceJobForOwner(
 	if existingOwner != ownerID {
 		return nil, ErrCronJobNotFound
 	}
+	// 编辑不改变任务的托管来源；以事务内的原记录为准，避免表单未携带来源键时丢失归属。
+	var existing Job
+	parseJobMeta(&existing, existingMeta.String)
+	job.SourceKey = existing.SourceKey
+	metaJSON = serializeJobMeta(job)
 
 	deleteResult, err := tx.ExecContext(ctx,
 		`DELETE FROM cron_jobs WHERE id = ? AND user_id = ?`, jobID, ownerID,

@@ -143,6 +143,67 @@ func TestBUG20260801003CronUnifiedUsesAuthenticatedOwnerForEveryAction(t *testin
 	}
 }
 
+func TestCronUnifiedUpdatePreservesManagedSourceKeyAfterRestart(t *testing.T) {
+	for _, status := range []cron.JobStatus{cron.StatusActive, cron.StatusPaused} {
+		t.Run(string(status), func(t *testing.T) {
+			h := newBUG20260801003CronOwnerHarness(t)
+			const sourceKey = "agent-a/return-reminder"
+			old := &cron.Job{
+				ID: "managed-reminder", Name: "managed reminder", Type: cron.JobTypeCron,
+				Schedule: "@daily", UserID: "owner-a", Status: status, SourceKey: sourceKey,
+				SourcePrompt: "original reminder", Spec: &cron.JobSpec{
+					Runtime: cron.RuntimeStarlark, Script: `emit("reminder")`,
+				},
+			}
+			if err := h.scheduler.AddJob(t.Context(), old); err != nil {
+				t.Fatalf("add managed job: %v", err)
+			}
+			request := CronJobRequest{
+				Action: "update", JobID: old.ID,
+				IdempotencyKey: "managed-update-" + strings.ReplaceAll(t.Name(), "/", "-"),
+				Draft: &CronJobDraft{
+					Name: old.Name, Schedule: "@hourly", Prompt: old.SourcePrompt,
+					Runtime: cron.RuntimeStarlark, Script: old.Spec.Script,
+					Paused: status == cron.StatusPaused,
+				},
+			}
+			rec := h.invoke(t, request)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("update status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			var response CronJobResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+				t.Fatalf("decode update response: %v", err)
+			}
+			if response.Job == nil || response.Job.SourceKey != sourceKey || response.Job.Status != status {
+				t.Fatalf("update lost managed ownership or status: %+v", response.Job)
+			}
+
+			restarted := cron.NewScheduler(h.db, nil, nil)
+			if err := restarted.Init(t.Context()); err != nil {
+				t.Fatalf("restart scheduler: %v", err)
+			}
+			jobs, err := restarted.ListJobs(t.Context(), "owner-a")
+			if err != nil || len(jobs) != 1 || jobs[0].ID != response.Job.ID ||
+				jobs[0].SourceKey != sourceKey || jobs[0].Status != status || jobs[0].Schedule != "@hourly" {
+				t.Fatalf("restarted managed job mismatch: jobs=%+v err=%v", jobs, err)
+			}
+			if _, active := restarted.GetJob(t.Context(), response.Job.ID); active != (status == cron.StatusActive) {
+				t.Fatalf("restart active=%v for status %q", active, status)
+			}
+			h.server.SetCronScheduler(restarted)
+			replay := h.invoke(t, request)
+			if replay.Code != http.StatusOK || replay.Header().Get("X-Idempotent-Replay") != "1" ||
+				replay.Body.String() != rec.Body.String() {
+				t.Fatalf("update replay changed response: status=%d body=%s", replay.Code, replay.Body.String())
+			}
+			if snapshot := h.snapshot(t, response.Job.ID); snapshot.TotalJobs != 1 || !snapshot.Exists {
+				t.Fatalf("update replay replaced managed job again: %+v", snapshot)
+			}
+		})
+	}
+}
+
 func testBUG20260801003CronCreateUsesAuthenticatedOwner(t *testing.T) {
 	h := newBUG20260801003CronOwnerHarness(t)
 	rec := h.invoke(t, CronJobRequest{
@@ -337,9 +398,9 @@ func TestBUG20260801003CronLifecycleActionsReturnOpaqueNotFoundCode(t *testing.T
 					h.addJob(t, "lifecycle-target", "owner-b", status)
 				}
 				rec := h.invoke(t, CronJobRequest{
-					Action:         action,
-					JobID:          "lifecycle-target",
-					UserID:         "owner-b",
+					Action: action,
+					JobID:  "lifecycle-target",
+					UserID: "owner-b",
 					IdempotencyKey: fmt.Sprintf(
 						"%s-not-found-%s", action, strings.ReplaceAll(t.Name(), "/", "-"),
 					),

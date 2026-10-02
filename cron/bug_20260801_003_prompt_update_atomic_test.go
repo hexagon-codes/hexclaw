@@ -15,6 +15,7 @@ type bug20260801003PromptUpdateRow struct {
 	userID       string
 	status       string
 	specJSON     string
+	metaJSON     string
 }
 
 func newBUG20260801003PromptUpdateScheduler(
@@ -45,6 +46,7 @@ func addBUG20260801003PromptUpdateOldJob(t *testing.T, scheduler *Scheduler, id,
 		UserID:       owner,
 		Status:       StatusActive,
 		SourcePrompt: "old prompt",
+		SourceKey:    "agent-a/weekly-sheet",
 		Spec:         minimalSpec(),
 	}
 	if err := scheduler.AddJob(context.Background(), job); err != nil {
@@ -61,7 +63,7 @@ func snapshotBUG20260801003PromptUpdateRow(
 	t.Helper()
 	var row bug20260801003PromptUpdateRow
 	err := db.QueryRow(
-		`SELECT id, name, schedule, source_prompt, user_id, status, spec_json
+		`SELECT id, name, schedule, source_prompt, user_id, status, spec_json, meta
 		 FROM cron_jobs WHERE id = ?`,
 		jobID,
 	).Scan(
@@ -72,6 +74,7 @@ func snapshotBUG20260801003PromptUpdateRow(
 		&row.userID,
 		&row.status,
 		&row.specJSON,
+		&row.metaJSON,
 	)
 	if err != nil {
 		t.Fatalf("snapshot cron job %q: %v", jobID, err)
@@ -137,6 +140,9 @@ func TestBUG20260801003PromptUpdateSameOwnerReplacesAtomically(t *testing.T) {
 	if replacement.UserID != "owner-a" {
 		t.Fatalf("replacement owner was not bound to trusted owner: %q", replacement.UserID)
 	}
+	if replacement.SourceKey != "agent-a/weekly-sheet" {
+		t.Fatalf("replacement lost managed source key: %q", replacement.SourceKey)
+	}
 	if _, ok := scheduler.GetJob(context.Background(), old.ID); ok {
 		t.Fatal("old job remains in memory after successful replacement")
 	}
@@ -156,6 +162,10 @@ func TestBUG20260801003PromptUpdateSameOwnerReplacesAtomically(t *testing.T) {
 	}
 	if sourcePrompt != "new prompt" || ownerID != "owner-a" || schedule != "@hourly" {
 		t.Fatalf("replacement row mismatch: prompt=%q owner=%q schedule=%q", sourcePrompt, ownerID, schedule)
+	}
+	jobs, err := scheduler.ListJobs(context.Background(), "owner-a")
+	if err != nil || len(jobs) != 1 || jobs[0].SourceKey != "agent-a/weekly-sheet" {
+		t.Fatalf("persisted replacement lost managed source key: jobs=%+v err=%v", jobs, err)
 	}
 	var oldRows int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM cron_jobs WHERE id = ?`, old.ID).Scan(&oldRows); err != nil {
