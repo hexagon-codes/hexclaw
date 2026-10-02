@@ -476,6 +476,16 @@ func (s *Server) executeModelCapabilityProbe(
 // ProbeSavedModelCapability 供新任务接纳复用保存配置下的单项能力探测。
 // 使用与控制面相同的请求、配置围栏与持久回执，不接受临时 endpoint 或 credential。
 func (s *Server) ProbeSavedModelCapability(ctx context.Context, providerInstanceID, modelID, kind string) error {
+	return s.probeSavedModelCapability(ctx, providerInstanceID, modelID, kind, modelCapabilityProbeTimeout)
+}
+
+// ProbeSavedModelVisionCapability 让新任务的自动视觉探测沿用业务单次调用预算。
+// 普通显式探测保持原预算；请求、配置围栏与回执契约共用原实现。
+func (s *Server) ProbeSavedModelVisionCapability(ctx context.Context, providerInstanceID, modelID string, timeout time.Duration) error {
+	return s.probeSavedModelCapability(ctx, providerInstanceID, modelID, modelCapabilityProbeKindVision, timeout)
+}
+
+func (s *Server) probeSavedModelCapability(ctx context.Context, providerInstanceID, modelID, kind string, timeout time.Duration) error {
 	kinds, err := normalizeModelCapabilityProbeKinds([]string{kind})
 	if err != nil {
 		return err
@@ -487,7 +497,7 @@ func (s *Server) ProbeSavedModelCapability(ctx context.Context, providerInstance
 	if _, ok := s.store.(storage.ModelCapabilityProbeReceiptStore); !ok {
 		return errors.New("model capability probe receipt storage is unavailable")
 	}
-	result, err := s.executeAndPersistModelCapabilityProbe(ctx, candidate, kinds[0])
+	result, err := s.executeAndPersistModelCapabilityProbe(ctx, candidate, kinds[0], timeout)
 	if err != nil {
 		return err
 	}
@@ -499,9 +509,14 @@ func (s *Server) ProbeSavedModelCapability(ctx context.Context, providerInstance
 
 func (s *Server) executeAndPersistModelCapabilityProbe(
 	ctx context.Context, candidate modelCapabilityProbeCandidate, kind string,
+	timeouts ...time.Duration,
 ) (LLMModelCapabilityProbeResult, error) {
 	probeStartedAt := nextProviderProbeStartedAt()
-	probeCtx, cancel := context.WithTimeout(ctx, modelCapabilityProbeTimeout)
+	timeout := modelCapabilityProbeTimeout
+	if kind == modelCapabilityProbeKindVision && len(timeouts) > 0 && timeouts[0] > 0 {
+		timeout = timeouts[0]
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, timeout)
 	probeCtx = egress.WithRequest(probeCtx, egress.PurposeProviderProbe, "", egress.ClassGeneral)
 	started := time.Now()
 	probeErr := s.executeModelCapabilityProbe(probeCtx, candidate, kind)

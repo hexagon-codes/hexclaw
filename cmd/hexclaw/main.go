@@ -2519,9 +2519,16 @@ Set source only when the material explicitly names a work, title, or another rel
 			k12Base := fmt.Sprintf("http://127.0.0.1:%d", cfg.Server.Port)
 			// 统一 GradingJob 编排器（§6.7 单一应用服务）：桌面 HTTP 入口与钉钉 IM 入口共用；
 			// §6.15 异步执行模型（进程级 ctx + 有界并发 + panic 不逃逸）+ 阶段产物落盘恢复。
+			k12AutoVisionProbe := func(probeCtx context.Context, providerID, modelID, kind string) error {
+				if kind != config.LLMModelCapabilityVision {
+					return srv.ProbeSavedModelCapability(probeCtx, providerID, modelID, kind)
+				}
+				return srv.ProbeSavedModelVisionCapability(probeCtx, providerID, modelID,
+					time.Duration(config.DefaultK12GradingBudget().PhysicalCallCapMillis)*time.Millisecond)
+			}
 			k12ModelSnapshot := func(requested k12.GradingModelSnapshot) (k12.GradingModelSnapshot, error) {
 				return resolveK12GradingModelSnapshotWithCapabilityReceipt(
-					ctx, router, k12ModelCapabilityReceipts, requested, srv.ProbeSavedModelCapability,
+					ctx, router, k12ModelCapabilityReceipts, requested, k12AutoVisionProbe,
 				)
 			}
 			k12rt.Deps.PracticeGenerationRoute = func(
@@ -2539,7 +2546,7 @@ Set source only when the material explicitly names a work, title, or another rel
 				k12rt.MaterialWorker.PreparePDFSource = api.NewMaterialPDFSourcePreparer(kbSemanticRuntime.Service, k12rt.Records)
 			}
 			k12rt.MaterialWorker.ResolveVisualModel = func(requestCtx context.Context, requested k12.GradingModelSnapshot) (k12.GradingModelSnapshot, error) {
-				return resolveK12GradingModelSnapshotWithCapabilityReceipt(requestCtx, router, k12ModelCapabilityReceipts, requested, srv.ProbeSavedModelCapability)
+				return resolveK12GradingModelSnapshotWithCapabilityReceipt(requestCtx, router, k12ModelCapabilityReceipts, requested, k12AutoVisionProbe)
 			}
 			k12GradingOrch = k12usecase.NewGradingOrchestrator(k12rt.Deps, k12ModelSnapshot,
 				k12usecase.WithGradingRunDir(filepath.Join(dataDir, "k12", "grading-runs")),

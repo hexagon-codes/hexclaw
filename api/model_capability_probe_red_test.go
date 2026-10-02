@@ -19,6 +19,8 @@ import (
 
 type modelCapabilityProbeRecordingProvider struct {
 	requests []hexagon.CompletionRequest
+	budgets  []time.Duration
+	err      error
 }
 
 type modelCapabilityProbeBlockingProvider struct {
@@ -101,11 +103,91 @@ func runModelCapabilityProbe(
 }
 
 func (p *modelCapabilityProbeRecordingProvider) Complete(
-	_ context.Context,
+	ctx context.Context,
 	req hexagon.CompletionRequest,
 ) (*hexagon.CompletionResponse, error) {
 	p.requests = append(p.requests, req)
+	if deadline, ok := ctx.Deadline(); ok {
+		p.budgets = append(p.budgets, time.Until(deadline))
+	}
+	if p.err != nil {
+		return nil, p.err
+	}
 	return &hexagon.CompletionResponse{Content: "OK"}, nil
+}
+
+func TestModelCapabilityProbe_AutomaticVisionBudgetDoesNotChangeOrdinaryProbe(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		automatic bool
+		kind      string
+		want      time.Duration
+	}{
+		{name: "automatic vision", automatic: true, kind: "vision", want: 120 * time.Second},
+		{name: "saved ordinary vision", kind: "vision", want: 15 * time.Second},
+		{name: "manual vision", kind: "vision", want: 15 * time.Second},
+		{name: "manual text", kind: "text", want: 15 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			oldFactory := llmTestProviderFactory
+			recording := &modelCapabilityProbeRecordingProvider{}
+			llmTestProviderFactory = func(llmConnectionTestProvider) completionProvider { return recording }
+			t.Cleanup(func() { llmTestProviderFactory = oldFactory })
+			store := bug20260728OpenStore(t)
+			cfg := bug20260728ProviderConfig()
+			provider := cfg.LLM.Providers["custom"]
+			provider.Model = "gpt-5.6-terra"
+			provider.Models = []string{"gpt-5.6-terra"}
+			provider.ModelSpecs = []config.LLMProviderModelSpec{{ID: "gpt-5.6-terra", Capabilities: []string{"text", "vision"}}}
+			cfg.LLM.Providers["custom"] = provider
+			srv := NewServer(cfg, &mockEngine{}, nil, store)
+			srv.SetSidecarCapabilityToken("model-probe-capability-token")
+			if tc.automatic {
+				if err := srv.ProbeSavedModelVisionCapability(context.Background(), bug20260728ProviderInstanceID, "gpt-5.6-terra", 120*time.Second); err != nil {
+					t.Fatal(err)
+				}
+			} else if tc.name == "saved ordinary vision" {
+				if err := srv.ProbeSavedModelCapability(context.Background(), bug20260728ProviderInstanceID, "gpt-5.6-terra", tc.kind); err != nil {
+					t.Fatal(err)
+				}
+			} else if rec := runModelCapabilityProbe(t, srv, tc.kind); rec.Code != http.StatusOK {
+				t.Fatalf("probe status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			if len(recording.budgets) != 1 || recording.budgets[0] > tc.want || recording.budgets[0] < tc.want-time.Second {
+				t.Fatalf("provider budgets=%v, want %v", recording.budgets, tc.want)
+			}
+			receipt, err := store.GetModelCapabilityProbeReceipt(context.Background(), bug20260728ProviderInstanceID, "gpt-5.6-terra", tc.kind)
+			if err != nil || receipt == nil || receipt.Outcome != "passed" {
+				t.Fatalf("probe receipt=%+v err=%v", receipt, err)
+			}
+		})
+	}
+}
+
+func TestModelCapabilityProbe_AutomaticVisionTimeoutDoesNotClaimUnsupported(t *testing.T) {
+	oldFactory := llmTestProviderFactory
+	recording := &modelCapabilityProbeRecordingProvider{err: context.DeadlineExceeded}
+	llmTestProviderFactory = func(llmConnectionTestProvider) completionProvider { return recording }
+	t.Cleanup(func() { llmTestProviderFactory = oldFactory })
+	store := bug20260728OpenStore(t)
+	cfg := bug20260728ProviderConfig()
+	provider := cfg.LLM.Providers["custom"]
+	provider.Model = "gpt-5.6-terra"
+	provider.Models = []string{"gpt-5.6-terra"}
+	provider.ModelSpecs = []config.LLMProviderModelSpec{{ID: "gpt-5.6-terra", Capabilities: []string{"text", "vision"}}}
+	cfg.LLM.Providers["custom"] = provider
+	srv := NewServer(cfg, &mockEngine{}, nil, store)
+	err := srv.ProbeSavedModelVisionCapability(context.Background(), bug20260728ProviderInstanceID, "gpt-5.6-terra", 120*time.Second)
+	if err == nil || !strings.Contains(err.Error(), "UPSTREAM_UNAVAILABLE") {
+		t.Fatalf("timeout error=%v, want unavailable evidence", err)
+	}
+	receipt, err := store.GetModelCapabilityProbeReceipt(context.Background(), bug20260728ProviderInstanceID, "gpt-5.6-terra", "vision")
+	if err != nil || receipt == nil || receipt.Outcome != "failed" || receipt.FailureCode != "UPSTREAM_UNAVAILABLE" {
+		t.Fatalf("timeout receipt=%+v err=%v", receipt, err)
+	}
+	if receipt.ProbePolicyVersion != ModelCapabilityProbePolicyVersion || receipt.ConfigFingerprint != ModelCapabilityProbeConfigFingerprint("custom", provider, "gpt-5.6-terra") {
+		t.Fatalf("timeout changed receipt identity: %+v", receipt)
+	}
 }
 
 func TestProbeSavedModelCapabilityUsesSamePersistedVisionProtocol(t *testing.T) {
