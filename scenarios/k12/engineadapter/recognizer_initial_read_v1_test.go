@@ -9,6 +9,7 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"os"
 	"reflect"
 	"strings"
 	"sync"
@@ -17,6 +18,116 @@ import (
 
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 )
+
+func TestRecognitionInitialReadV1RedundantObservationsPreserveActualManifest(t *testing.T) {
+	raw, err := os.ReadFile("testdata/initial_read_redundant_observations.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := parseRecognitionInitialReadEnvelopeV1(string(raw))
+	if err != nil || len(entries) != 16 {
+		t.Fatalf("complete successful manifest rejected: entries=%d err=%v", len(entries), err)
+	}
+	for index, entry := range entries {
+		var observation map[string]json.RawMessage
+		if json.Unmarshal(entry.raw, &observation) != nil || len(observation["shared_conditions"]) == 0 || len(observation["answer_ownership"]) == 0 || entry.manifest.ManifestOrder != index+1 {
+			t.Fatalf("raw observation or manifest identity lost: %s", entry.raw)
+		}
+	}
+	for _, failure := range []string{"conflicting shared conditions", "conflicting ownership", "unknown field", "duplicate reference"} {
+		t.Run(failure, func(t *testing.T) {
+			var envelope struct {
+				Targets []map[string]json.RawMessage `json:"targets"`
+			}
+			if err := json.Unmarshal(raw, &envelope); err != nil {
+				t.Fatal(err)
+			}
+			switch failure {
+			case "conflicting shared conditions":
+				envelope.Targets[0]["shared_conditions"] = json.RawMessage(`"each bag contains 2"`)
+			case "conflicting ownership":
+				envelope.Targets[0]["answer_ownership"] = json.RawMessage(`"neighboring answer"`)
+			case "unknown field":
+				envelope.Targets[0]["invented_answer"] = json.RawMessage(`"8"`)
+			case "duplicate reference":
+				envelope.Targets[1]["manifest_ref"] = envelope.Targets[0]["manifest_ref"]
+			}
+			mutated, err := json.Marshal(envelope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := parseRecognitionInitialReadEnvelopeV1(string(mutated)); !errors.Is(err, k12.ErrRecognitionProtocolInvalid) {
+				t.Fatalf("invalid manifest accepted: %v", err)
+			}
+		})
+	}
+}
+
+func TestRecognitionInitialReadV1FrozenSectionPreservesActualSourceFacts(t *testing.T) {
+	raw, err := os.ReadFile("testdata/initial_read_section_observations.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := parseRecognitionInitialReadEnvelopeV1(string(raw))
+	if err != nil || len(entries) != 17 {
+		t.Fatalf("successful source manifest rejected: %v", err)
+	}
+	entry := entries[7]
+	target := k12.RecognitionLayoutTargetV2{TargetID: "target", Region: entry.manifest.Region}
+	projection, err := recognitionInitialReadProjectionV1(entry, target)
+	if err != nil {
+		t.Fatalf("frozen section metadata discarded source observation: %v", err)
+	}
+	var projected struct {
+		Recognition struct {
+			Question      string `json:"question"`
+			StudentAnswer string `json:"student_answer"`
+		} `json:"recognition"`
+	}
+	if err := json.Unmarshal(projection, &projected); err != nil || projected.Recognition.Question != `7-\(\frac{5}{7}\)=` || projected.Recognition.StudentAnswer != `6\frac{2}{7}` {
+		t.Fatalf("printed expression or complete mixed number was lost: %s err=%v", projection, err)
+	}
+	var read map[string]json.RawMessage
+	if err := json.Unmarshal(entry.read, &read); err != nil {
+		t.Fatal(err)
+	}
+	read["shared_conditions"] = json.RawMessage(`"一、直接写得数。每包2个。"`)
+	entry.read, _ = json.Marshal(read)
+	if _, err := recognitionInitialReadProjectionV1(entry, target); err == nil {
+		t.Fatal("numeric shared conditions absent from the question were accepted")
+	}
+}
+
+func TestRecognitionInitialReadV1SectionMetadataStillAdjudicatesClippedSource(t *testing.T) {
+	for _, scenario := range []struct{ name, firstQuestion, firstAnswer, rereadQuestion, rereadAnswer string }{
+		{"missing left operand", `0.5+\(\frac{1}{3}\)=`, `\(\frac{2}{3}\)`, `\(\frac{1}{3}\)=`, `\(\frac{2}{3}\)`},
+		{"missing mixed-number integer", `7-\(\frac{5}{7}\)=`, `6\frac{2}{7}`, `7-\(\frac{5}{7}\)=`, `\(\frac{2}{7}\)`},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			entry := initialReadAdapterEntryV1("manifest_0001", 1, 40, scenario.firstQuestion, scenario.firstAnswer, "一、直接写得数", 0.80)
+			entry["source_section_path"] = []string{"一"}
+			entry["source_section_label"] = "一、直接写得数"
+			whole, _ := json.Marshal(map[string]any{"targets": []any{entry}})
+			review, _ := json.Marshal(map[string]any{"items": []any{map[string]any{"target_id": "t1", "kind": "question", "recognition": map[string]any{"question": scenario.rereadQuestion, "subject": "数学", "answer_state": "present", "student_answer": scenario.rereadAnswer, "recognition_confidence": 0.99, "ocr_signals": []string{}, "answer_bbox": k12.SourcePixelRegion{X: 130, Y: 35, Width: 20, Height: 20}}}}})
+			executor := &jsonOutputInitialReadExecutorV1{initialReadAdapterExecutorV1: &initialReadAdapterExecutorV1{}}
+			ctx := k12.WithRecognitionPhysicalCallExecutor(k12.WithRecognitionLayoutInitialReadMode(k12.WithRecognitionLayoutPlanV2(t.Context(), recognitionLayoutV2TestDigest("initial-read-header")), k12.RecognitionLayoutManifestWithContentV1), executor)
+			stop := errors.New("source adjudication reached")
+			_, err := NewRecognizerAdapter(func(_ context.Context, _ []byte, prompt string) (string, error) {
+				switch {
+				case strings.Contains(prompt, "SAME JSON response"):
+					return string(whole), nil
+				case strings.Contains(prompt, "Independently verify one worksheet target"):
+					return "", stop
+				default:
+					return string(review), nil
+				}
+			}).Recognize(ctx, denseWorksheetTestImage(t, 320, 320))
+			if !errors.Is(err, stop) || len(executor.initial.FirstReads) != 1 || len(executor.initial.FirstReads[0].ResultJSON) == 0 {
+				t.Fatalf("source conflict bypassed independent adjudication: %v", err)
+			}
+		})
+	}
+}
 
 // 替身仅覆盖获授权的 Provider/结算边界；真实 SQLite 事务与 unknown 回放另由存储组验证。
 type initialReadAdapterExecutorV1 struct {

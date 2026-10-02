@@ -48,6 +48,7 @@ var (
 	latexText               = regexp.MustCompile(`\\text\s*\{([^{}]*)\}`)
 	evidenceNewline         = regexp.MustCompile(`\\n(?:\b|([0-9]))`)
 	evidenceNumericFraction = regexp.MustCompile(`\b([0-9]+(?:\.[0-9]+)?)\s*/\s*([0-9]+(?:\.[0-9]+)?)\b`)
+	evidenceNumericRatio    = regexp.MustCompile(`([0-9])[:：∶]([0-9])`)
 	explicitAnswerLine      = regexp.MustCompile(`^(?:答\s*[:：]\s*(?:是|为)?|答案\s*(?:是|为|[:：]))\s*`)
 )
 
@@ -100,7 +101,26 @@ func EvaluateOCRConfirmationRiskForInitialReadMode(q RecognizedQuestion, initial
 		// 视觉模型偶尔违反枚举协议，直接把“遮挡/重叠但看似清晰”等观察写入信号。
 		// 这类原题证据不能被高分数覆盖；保留原始信号并降为低置信，阻止自动冻结。
 		if recognitionSignalIndicatesSourceOcclusion(normalizedSignal) {
-			reasons[OCRRiskLowConfidence] = struct{}{}
+			// 完整的两次题干观察一致时，边缘裁切的可能性不等于已经缺失题干。
+			potentialCut := strings.Contains(normalizedSignal, "轻微裁切风险") &&
+				!recognitionSignalIndicatesSourceOcclusion(strings.ReplaceAll(normalizedSignal, "轻微裁切风险", ""))
+			completeReadings := len(q.EvidenceTranscriptions) == 2 && strings.TrimSpace(q.RawTranscription) != ""
+			for _, value := range q.EvidenceTranscriptions {
+				completeReadings = completeReadings && strings.TrimSpace(value) != "" &&
+					!evidenceTranscriptionsConflict(q.RawTranscription, []string{q.RawTranscription, value}, "")
+			}
+			if !potentialCut || !completeReadings {
+				reasons[OCRRiskLowConfidence] = struct{}{}
+			} else if q.RecognitionConfidence != nil && *q.RecognitionConfidence >= ocrConfidenceConfirmationThreshold {
+				onlyPotentialCut := true
+				for _, observation := range q.OCRSignals {
+					onlyPotentialCut = onlyPotentialCut && !recognitionSignalIndicatesSourceOcclusion(
+						strings.ReplaceAll(strings.ToLower(observation), "轻微裁切风险", ""))
+				}
+				if onlyPotentialCut {
+					delete(reasons, OCRRiskLowConfidence)
+				}
+			}
 		}
 	}
 	if questionEvidenceTranscriptionsConflictForInitialReadMode(q, initialReadMode) ||
@@ -280,6 +300,9 @@ func evidenceTranscriptionsConflict(transcription string, values []string, answe
 		// 平方、立方的 Unicode 与 LaTeX 写法只影响排版；指数值仍参与逐字比较。
 		value = strings.NewReplacer("²", "^2", "³", "^3", "^{2}", "^2", "^{3}", "^3").Replace(value)
 		value = strings.Join(strings.Fields(CanonicalPlainTextFallback(value)), "")
+		value = evidenceNumericRatio.ReplaceAllString(value, "$1∶$2")
+		// 相邻比号共享中间数字，第二轮保留首轮未重叠匹配的比号。
+		value = evidenceNumericRatio.ReplaceAllString(value, "$1∶$2")
 		return strings.NewReplacer(
 			`\,`, "", "（", "(", "）", ")", "＝", "=",
 			"。", "", "；", "", "，", "", "：", "", "、", "", ";", "", ":", "",

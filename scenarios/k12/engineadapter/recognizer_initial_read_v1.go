@@ -53,6 +53,17 @@ func parseRecognitionInitialReadEnvelopeV1(raw string) ([]recognitionInitialRead
 			return fail("target has no matching first read")
 		}
 		delete(fields, "initial_read")
+		// 同一观察的冗余位置仅在值完全一致时消除，原始回执仍完整保留。
+		for _, key := range []string{"shared_conditions", "answer_ownership"} {
+			if duplicate, exists := fields[key]; exists {
+				var observation map[string]json.RawMessage
+				var outer, inner string
+				if json.Unmarshal(read, &observation) != nil || json.Unmarshal(duplicate, &outer) != nil || json.Unmarshal(observation[key], &inner) != nil || outer != inner {
+					return fail("duplicate observation fields conflict")
+				}
+				delete(fields, key)
+			}
+		}
 		manifestJSON, err := json.Marshal(fields)
 		if err != nil {
 			return fail("manifest cannot be encoded")
@@ -103,7 +114,8 @@ func recognitionInitialReadProjectionV1(entry recognitionInitialReadEntryV1, tar
 		if json.Unmarshal(fields["question"], &question) != nil {
 			return nil, fmt.Errorf("initial question does not retain its shared conditions")
 		}
-		if strings.TrimSpace(shared) != "" && !strings.Contains(question, shared) {
+		if strings.TrimSpace(shared) != "" && !strings.Contains(question, shared) && shared != entry.manifest.SourceSectionLabel {
+			// 冻结栏目名称已由来源身份保留；真实共享条件仍必须进入完整题干。
 			// 仅固定栏目完整配对时接受冒号排版差异，严格投影仍保存原题干。
 			view, paired := recognitionInitialReadArithmeticViewV1(usecase.RecognizedQuestion{Question: question}, entry)
 			if !paired || view.Question == question {
