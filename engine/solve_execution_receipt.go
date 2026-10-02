@@ -103,5 +103,8 @@ func (r *CodeExecutionReceipt) computed(task string) (string, bool) {
 	if _, ok := parseAnswerQuantity(computed); ok {
 		return computed, true
 	}
+	if _, ok := parseLabeledAnswerQuantities(computed); ok {
+		return computed, true
+	}
 	return "", false
 }

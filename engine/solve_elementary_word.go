@@ -29,12 +29,15 @@ var (
 	elementaryQuantityUnitRe    = regexp.MustCompile(`\\mathrm\{(kg|g)\}`)
 	elementaryQuantityScopeRe   = regexp.MustCompile(`^(?:([1-9][0-9]*)|\(([1-9][0-9]*)\)|（([1-9][0-9]*)）)$`)
 
-	finalQuantityMarkerRe = regexp.MustCompile(`(?i)(?:答案?|答)\s*(?:是|为)?\s*[:：]?\s*` + answerQuantityNumberPattern + `\s*(平方米|千克|公斤|张纸|张|m²|m2|kg|克|米|g|m)?`)
+	finalQuantityMarkerRe = regexp.MustCompile(`(?i)(?:答案?|答)\s*(?:是|为)?\s*[:：]?\s*` + answerQuantityNumberPattern + `\s*(平方米|千克|公斤|张纸|张|本|段|人|m²|m2|kg|克|米|g|m)?`)
 	removedNumberMarkerRe = regexp.MustCompile(`划去(?:数)?\s*[:：]?\s*([+\-]?[0-9]+)`)
-	bareQuantityRe        = regexp.MustCompile(`(?i)^\s*` + answerQuantityNumberPattern + `\s*(平方厘米|cm²|cm\^?2|平方米|千克|公斤|张纸|张|m²|m2|kg|克|米|g|m)?\s*$`)
+	bareQuantityRe        = regexp.MustCompile(`(?i)^\s*` + answerQuantityNumberPattern + `\s*(平方厘米|cm²|cm\^?2|平方米|千克|公斤|张纸|张|本|段|人|m²|m2|kg|克|米|g|m)?\s*$`)
+	bareAnswerRatioRe     = regexp.MustCompile(`^\s*` + answerQuantityNumberPattern + `\s*[:：∶]\s*` + answerQuantityNumberPattern + `\s*$`)
+	finalNamedCountRe     = regexp.MustCompile(`^([\p{Han}]+)(?:有|是|为)\s*` + answerQuantityNumberPattern + `\s*(本|段|人)$`)
+	finalLabeledCountsRe  = regexp.MustCompile(`^\s*([\p{Han}]+)\s*` + answerQuantityNumberPattern + `\s*(本|段|人)\s*[,，;；、]\s*([\p{Han}]+)\s*` + answerQuantityNumberPattern + `\s*(本|段|人)\s*$`)
 	equivalentQuantityRe  = regexp.MustCompile(`^\s*(.+?)[（(]\s*(?:也就是|即)\s*(.+?)[）)]\s*$`)
-	equationQuantityRe    = regexp.MustCompile(`(?i)[=＝]\s*` + answerQuantityNumberPattern + `(?:\s*(?:[（(]\s*)?(平方米|千克|公斤|张纸|张|m²|m\^?2|kg|克|米|g|m)(?:\s*[）)])?)?`)
-	equationUnitSuffixRe  = regexp.MustCompile(`(?i)\s*(?:[（(]\s*)?(?:平方米|千克|公斤|张纸|张|m²|m\^?2|kg|克|米|g|m)(?:\s*[）)])?\s*$`)
+	equationQuantityRe    = regexp.MustCompile(`(?i)[=＝]\s*` + answerQuantityNumberPattern + `(?:\s*(?:[（(]\s*)?(平方米|千克|公斤|张纸|张|本|段|人|m²|m\^?2|kg|克|米|g|m)(?:\s*[）)])?)?`)
+	equationUnitSuffixRe  = regexp.MustCompile(`(?i)\s*(?:[（(]\s*)?(?:平方米|千克|公斤|张纸|张|本|段|人|m²|m\^?2|kg|克|米|g|m)(?:\s*[）)])?\s*$`)
 )
 
 type elementaryWordSolution struct {
@@ -336,6 +339,13 @@ func parseAnswerQuantity(answer string) (answerQuantity, bool) {
 	if strings.TrimSpace(answer) == "" || len(answer) > 1024 {
 		return answerQuantity{}, false
 	}
+	if ratio, ok := parseAnswerRatio(answer); ok {
+		return answerQuantity{value: ratio.RatString(), unit: "比"}, true
+	}
+	// 完整单量答句只移除数量前的名词与系词；第二个量或其他内容不能被后缀忽略。
+	if quantity, ok := affirmativeNamedAnswerCount(answer); ok {
+		answer = quantity
+	}
 	if parts := equivalentQuantityRe.FindStringSubmatch(answer); len(parts) == 3 {
 		// 括号内外必须都是完整单量且值、单位一致，不能忽略相互冲突的表示。
 		if !bareQuantityRe.MatchString(parts[1]) || !bareQuantityRe.MatchString(parts[2]) {
@@ -398,9 +408,82 @@ func normalizeAnswerUnit(unit string) string {
 		return "米"
 	case "张纸", "张":
 		return unit
+	case "本", "段", "人":
+		return unit
 	default:
 		return ""
 	}
+}
+
+// 比按前项与后项的顺序比较，不能当成无序数集或省略单位的标量。
+func parseAnswerRatio(answer string) (*big.Rat, bool) {
+	match := bareAnswerRatioRe.FindStringSubmatch(normalizeAnswer(answer))
+	if len(match) != 3 {
+		return nil, false
+	}
+	left, leftOK := nonNegativeRat(match[1])
+	right, rightOK := positiveRat(match[2])
+	if !leftOK || !rightOK {
+		return nil, false
+	}
+	return new(big.Rat).Quo(left, right), true
+}
+
+// 名词答句必须是完整肯定结论，否定、条件和推测不能投影成已计算数量。
+func affirmativeNamedAnswerCount(answer string) (string, bool) {
+	match := finalNamedCountRe.FindStringSubmatch(normalizeAnswer(answer))
+	if len(match) != 4 || !affirmativeCountLabel(match[1]) {
+		return "", false
+	}
+	return match[2] + match[3], true
+}
+
+func affirmativeCountLabel(label string) bool {
+	if label == "" || strings.ContainsAny(label, "不未无没否若") {
+		return false
+	}
+	for _, marker := range []string{"如果", "假如", "假设", "可能", "也许", "大概", "是否"} {
+		if strings.Contains(label, marker) {
+			return false
+		}
+	}
+	return true
+}
+
+// 两个命名数量必须完整保留标签和单位；不把不同对象的结果当作可交换的无序数集。
+func parseLabeledAnswerQuantities(answer string) (map[string]answerQuantity, bool) {
+	if len(answer) > 1024 {
+		return nil, false
+	}
+	match := finalLabeledCountsRe.FindStringSubmatch(normalizeAnswer(answer))
+	if len(match) != 7 || match[1] == match[4] {
+		return nil, false
+	}
+	quantities := make(map[string]answerQuantity, 2)
+	for _, offset := range []int{1, 4} {
+		label := match[offset]
+		if !affirmativeCountLabel(label) {
+			return nil, false
+		}
+		for _, copula := range []string{"有", "是", "为"} {
+			if strings.HasSuffix(label, copula) {
+				label = strings.TrimSuffix(label, copula)
+				break
+			}
+		}
+		if label == "" {
+			return nil, false
+		}
+		if _, duplicate := quantities[label]; duplicate {
+			return nil, false
+		}
+		quantity, ok := parseAnswerQuantity(match[offset+1] + match[offset+2])
+		if !ok || quantity.unit == "" {
+			return nil, false
+		}
+		quantities[label] = quantity
+	}
+	return quantities, true
 }
 
 func quantitiesEqual(a, b answerQuantity) bool {

@@ -182,7 +182,11 @@ $$\frac{3}{8}\times8=\frac{3\times8}{8}=3$$
 			if err != nil {
 				t.Fatal(err)
 			}
-			if exec.solverCalls() != 1 || len(exec.specs) != 2 || !exec.has(verifierAgentName) {
+			if tc.name == "selected-numbered-first" || tc.name == "selected-numbered-second" {
+				if len(exec.specs) != 0 || result.Metadata["solve_mode"] != "deterministic_elementary_word" || !strings.Contains(strings.Join(strings.Fields(result.Content), ""), tc.answer) {
+					t.Fatalf("complete elementary calculation needs the correct local result without model calls: %v", result.Metadata)
+				}
+			} else if exec.solverCalls() != 1 || len(exec.specs) != 2 || !exec.has(verifierAgentName) {
 				t.Fatalf("ordinary problem needs one solver and one verifier: %v", exec.agents())
 			}
 			if result.Metadata["solve_evidence"] != "numeric_exec" {

@@ -671,6 +671,7 @@ func (o *SolveSkill) verifySolutionWithGuides(ctx context.Context, problem, solu
 	spec := withParentGuideVerification(verifierSpecWithSolution(problem, solution, candidate, constraint), guides)
 	_, numericCandidate := numberSet(candidate)
 	_, quantityCandidate := parseAnswerQuantity(candidate)
+	_, labeledCandidate := parseLabeledAnswerQuantities(candidate)
 	result, usedSpec, err := o.runValidatedResult(ctx, spec, func(result SubAgentResult, attempt SubAgentSpec) bool {
 		if !verdictParseable(result.Output) {
 			return false
@@ -678,7 +679,7 @@ func (o *SolveSkill) verifySolutionWithGuides(ctx context.Context, problem, solu
 		verdict, reported := parseVerdict(result.Output)
 		// 一般规律的解释没有唯一数值答案，示例计算不成为最终数值回执合同。
 		if verdict == verdictOutOfScope || (verdict == verdictUnverifiable &&
-			(reported == "" || (!numericCandidate && !quantityCandidate))) {
+			(reported == "" || (!numericCandidate && !quantityCandidate && !labeledCandidate))) {
 			return true
 		}
 		_, executed := result.ExecutionReceipt.computed(attempt.Task)
@@ -760,7 +761,8 @@ func (o *SolveSkill) runValidatedResult(ctx context.Context, spec SubAgentSpec, 
 	if requiresNumericReceipt && spec.verification != nil {
 		_, numeric := numberSet(spec.verification.Candidate)
 		_, quantity := parseAnswerQuantity(spec.verification.Candidate)
-		requiresNumericReceipt = numeric || quantity
+		_, labeled := parseLabeledAnswerQuantities(spec.verification.Candidate)
+		requiresNumericReceipt = numeric || quantity || labeled
 	}
 	if requiresNumericReceipt {
 		retry.Task += "\nA valid execution receipt is required for a numeric verdict. Run code_exec and print one COMPUTED: <final answer> line to stdout; do not only describe executing code."
@@ -1174,7 +1176,7 @@ func numberSetsEqual(as, bs []float64) bool {
 }
 
 var singleQuantityEquationLeftRe = regexp.MustCompile(`^[ \t0-9.+*/×÷＋－−()（）-]+$`)
-var singleQuantityEquationRightRe = regexp.MustCompile(`(?i)^[ \t]*` + answerQuantityNumberPattern + `[ \t]*([（(]?)(平方厘米|cm²|cm\^?2|平方米|千克|公斤|张纸|张|m²|m2|kg|克|米|g|m)([）)]?)[ \t]*$`)
+var singleQuantityEquationRightRe = regexp.MustCompile(`(?i)^[ \t]*` + answerQuantityNumberPattern + `[ \t]*([（(]?)(平方厘米|cm²|cm\^?2|平方米|千克|公斤|张纸|张|本|段|人|m²|m2|kg|克|米|g|m)([）)]?)[ \t]*$`)
 
 // singleQuantityEquation 仅接纳自身成立且右侧完整保留明确单位的一个数值等式。
 func singleQuantityEquation(answer string) (answerQuantity, bool) {
@@ -1200,10 +1202,41 @@ func singleQuantityEquation(answer string) (answerQuantity, bool) {
 	return answerQuantity{value: match[1], unit: normalizeAnswerUnit(match[3])}, true
 }
 
-// sameUnitAnswersEqual 仅比较单量及自身成立的单量等式，不转换单位或猜测文字含义。
+// sameUnitAnswersEqual 比较完整同向比、命名数量、单量及自身成立的单量等式，不猜测文字含义。
 func sameUnitAnswersEqual(a, b string) (equal, comparable bool) {
+	leftRatio, leftIsRatio := parseAnswerRatio(a)
+	rightRatio, rightIsRatio := parseAnswerRatio(b)
+	if leftIsRatio || rightIsRatio {
+		if !leftIsRatio || !rightIsRatio {
+			return false, false
+		}
+		return leftRatio.Cmp(rightRatio) == 0, true
+	}
+	leftQuantities, leftLabeled := parseLabeledAnswerQuantities(a)
+	rightQuantities, rightLabeled := parseLabeledAnswerQuantities(b)
+	if leftLabeled || rightLabeled {
+		if !leftLabeled || !rightLabeled {
+			return false, false
+		}
+		equal := true
+		for label, left := range leftQuantities {
+			right, found := rightQuantities[label]
+			if !found || left.unit != right.unit {
+				return false, false
+			}
+			lv, lok := numericValue(left.value)
+			rv, rok := numericValue(right.value)
+			if !lok || !rok {
+				return false, false
+			}
+			equal = equal && floatsClose(lv, rv)
+		}
+		return equal, true
+	}
 	for _, answer := range []*string{&a, &b} {
-		if equivalentQuantityRe.MatchString(*answer) {
+		if quantity, ok := affirmativeNamedAnswerCount(*answer); ok {
+			*answer = quantity
+		} else if equivalentQuantityRe.MatchString(*answer) {
 			quantity, ok := parseAnswerQuantity(*answer)
 			if !ok {
 				return false, false
@@ -1376,7 +1409,9 @@ func formatSolve(groups []answerGroup, verdict verifyVerdict, computed string, t
 		}
 	case verdictDisagree:
 		b.WriteString("\n\n")
-		if numericGrounded {
+		if numericGrounded && answersEqual(primary.answer, computed) {
+			b.WriteString("> ⚠️ 答案数值一致，但解题过程未通过核验，请复核错误步骤。\n")
+		} else if numericGrounded {
 			fmt.Fprintf(&b, "> ⚠️ 注意：独立代码核验得到**不同**答案——解题得「%s」，代码核验得「%s」。两者不一致，请勿直接采信，建议复核关键步骤再下结论。\n", primary.answer, fallbackStr(computed, "（未给出）"))
 		} else {
 			fmt.Fprintf(&b, "> ⚠️ AI 自检结果不一致：%s / %s · 未程序验算，请复核。\n", primary.answer, fallbackStr(computed, "（未给出）"))
@@ -1453,9 +1488,13 @@ var triageMultiPart = regexp.MustCompile(`[①②③④⑤⑥]|[(（][1-9一二�
 // 数字算术表达式后面的括号分母是数学表示，不能当作另一道子题编号。
 var triageExpressionFractionDenominatorRe = regexp.MustCompile(`(\([0-9+\-×xX*/÷^.\s]+\)|[0-9]+)\s*/\s*\(([0-9]+)\)`)
 
+// 完整班级名里的班号不是子题编号；仅在复杂度副本中排除，模型仍读取原题。
+var triagePrimaryClassNameRe = regexp.MustCompile(`(?:[一二三四五六]|[1-6])\s*(?:年级)?\s*(?:\([1-9][0-9]?\)|（[1-9][0-9]?）)\s*班`)
+
 func complexityMathMarkerInput(problem string) string {
 	input := elementaryParenthesizedFractionRe.ReplaceAllString(problem, "$1/$2")
-	return triageExpressionFractionDenominatorRe.ReplaceAllString(input, "$1/$2")
+	input = triageExpressionFractionDenominatorRe.ReplaceAllString(input, "$1/$2")
+	return triagePrimaryClassNameRe.ReplaceAllString(input, "小学班级")
 }
 
 // triagePureArith 粗判「纯算术表达式」（只含数字/运算符/括号/等号问号百分号）。

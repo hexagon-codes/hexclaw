@@ -18,6 +18,7 @@ var answerLatexTextRe = regexp.MustCompile(`\\text\s*\{([^{}]*)\}`)
 var answerParenthesizedFractionRe = regexp.MustCompile(`\(([0-9]+)\)\s*/\s*\(([0-9]+)\)`)
 var answerMixedFractionRe = regexp.MustCompile(`([0-9]+)\s*\(([0-9]+/[0-9]+)\)`)
 var answerSpacedMixedFractionRe = regexp.MustCompile(`([0-9]+)\s+([0-9]+/[0-9]+)`)
+var arithmeticFractionLiteralRe = regexp.MustCompile(`[0-9]+/[0-9]+`)
 
 // itemNumberPrefixRe 题号列表前缀（bug 2026-07-18：照片识别题干自带「1. 」「3、」「4)」等
 // 题号，去空白后「1. 26*3」曾被误拼成小数「1.26*3」）。两类可安全剥离的形态：
@@ -96,6 +97,7 @@ func normalizeTrivialArithmetic(problem string) (expr, display string, ok bool) 
 	if s == "" || len(s) > 256 {
 		return "", "", false
 	}
+	s = groupArithmeticFractionLiterals(s)
 	replacer := strings.NewReplacer(
 		"×", "*", "÷", "/", "＋", "+", "－", "-", "−", "-",
 		"（", "(", "）", ")", "＝", "=", "？", "?",
@@ -146,6 +148,29 @@ func normalizeTrivialArithmetic(problem string) (expr, display string, ok bool) 
 	}, s)
 	display = strings.NewReplacer("*", "×", "/", "÷").Replace(expr)
 	return expr, display, true
+}
+
+// groupArithmeticFractionLiterals 在除号归一化前保留数字分数的整体性，避免把除以分数变成连续除法。
+func groupArithmeticFractionLiterals(s string) string {
+	var b strings.Builder
+	start := 0
+	for _, span := range arithmeticFractionLiteralRe.FindAllStringIndex(s, -1) {
+		// 小数和连续斜线除法不截取局部数字；保留它们原有的运算顺序。
+		if span[0] > 0 && strings.ContainsRune("0123456789./", rune(s[span[0]-1])) ||
+			span[1] < len(s) && strings.ContainsRune("0123456789./", rune(s[span[1]])) {
+			continue
+		}
+		b.WriteString(s[start:span[0]])
+		b.WriteByte('(')
+		b.WriteString(s[span[0]:span[1]])
+		b.WriteByte(')')
+		start = span[1]
+	}
+	if start == 0 {
+		return s
+	}
+	b.WriteString(s[start:])
+	return b.String()
 }
 
 // arithmeticAnswerValue 只从“纯数值/算式答案”中取精确值。允许学生写完整等式或在最后一行写

@@ -78,7 +78,7 @@ func splitLinearEquation(problem string) (left, right string, ok bool) {
 	s = strings.NewReplacer(
 		"×", "*", "÷", "/", "＋", "+", "－", "-", "−", "-",
 		"（", "(", "）", ")", "＝", "=",
-	).Replace(s)
+	).Replace(groupArithmeticFractionLiterals(s))
 	if strings.Count(s, "=") != 1 {
 		return "", "", false
 	}
