@@ -69,7 +69,10 @@ func currentFeedbackGeneration(t *testing.T, body map[string]any) map[string]any
 
 func TestGenerateWorkFeedbackHTTPWritingReturnsCurrentCanonicalDTO(t *testing.T) {
 	h := newFeedbackServer(t, func(context.Context, string, string, string) (string, error) {
-		return "「柳枝像绿色的丝带」比喻贴切；建议结尾补一个听觉细节。", nil
+		return "## 可见证据\n原文写到「柳枝像绿色的丝带」。\n\n" +
+			"## 先这样肯定\n「柳枝像绿色的丝带」比喻贴切。\n\n" +
+			"## 家长可以这样问或讲\n可以问孩子风吹柳枝时听到了什么。\n\n" +
+			"## 下一次只试一个点\n在结尾补一个听觉细节。", nil
 	})
 	id := createWritingWorkHTTP(t, h)
 
@@ -153,7 +156,10 @@ func TestGenerateWorkFeedbackHTTPCommandReplayAndRegeneration(t *testing.T) {
 		if calls == 2 {
 			return "", nil
 		}
-		return "好句在开头；建议结尾具体化。", nil
+		return "## 可见证据\n开头写到「柳枝像绿色的丝带」。\n\n" +
+			"## 先这样肯定\n用丝带描写柳枝的形状很具体。\n\n" +
+			"## 家长可以这样问或讲\n可以问孩子柳枝随风怎样摆动。\n\n" +
+			"## 下一次只试一个点\n在结尾补一个具体细节。", nil
 	})
 	id := createWritingWorkHTTP(t, h)
 	rec, first := generateWritingFeedbackHTTP(t, h, id, "initial-generation-resume", "mingming")

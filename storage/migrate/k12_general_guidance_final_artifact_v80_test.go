@@ -17,7 +17,13 @@ func TestK12GeneralGuidanceFinalArtifactV80PreservesRowsAndWidensOnlyCoverage(t 
 	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = db.Close() })
 	ctx := context.Background()
-	if err := Run(ctx, db, All[:len(All)-1]); err != nil {
+	preV80 := make([]Migration, 0, len(All))
+	for _, migration := range All {
+		if migration.Version <= 79 {
+			preV80 = append(preV80, migration)
+		}
+	}
+	if err := Run(ctx, db, preV80); err != nil {
 		t.Fatalf("run migration chain through V79: %v", err)
 	}
 	if _, err := db.Exec(`INSERT INTO agents(name) VALUES('agent-v80')`); err != nil {

@@ -75,6 +75,17 @@ func dialWebAdapter(t *testing.T, a *WebAdapter) (*websocket.Conn, context.Conte
 		_ = conn.Close(websocket.StatusNormalClosure, "")
 		cancel()
 	})
+	// 握手完成不代表服务端已登记连接；pong 确认连接与归属登记后进入读循环。
+	if err := wsjson.Write(ctx, conn, wsMessage{Type: "ping"}); err != nil {
+		t.Fatalf("write websocket readiness ping: %v", err)
+	}
+	var ready wsMessage
+	if err := wsjson.Read(ctx, conn, &ready); err != nil {
+		t.Fatalf("read websocket readiness pong: %v", err)
+	}
+	if ready.Type != "pong" {
+		t.Fatalf("websocket readiness frame=%q, want pong", ready.Type)
+	}
 	return conn, ctx, cancel
 }
 

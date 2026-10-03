@@ -17,7 +17,7 @@ func newTestStoreV2(t *testing.T) *Store {
 	t.Helper()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
-	store, err := New(dbPath)
+	store, err := newMigratedTestStore(t, dbPath)
 	if err != nil {
 		t.Fatalf("创建测试存储失败: %v", err)
 	}

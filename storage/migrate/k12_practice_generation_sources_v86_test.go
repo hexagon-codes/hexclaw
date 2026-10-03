@@ -207,6 +207,7 @@ func TestK12PracticeGenerationSourcesV86SeparatesVersionedAndLegacyUniqueness(t 
 	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = db.Close() })
 	ctx := context.Background()
+	copyLatestMigrationFixture(t, db)
 	if err := Run(ctx, db, All); err != nil {
 		t.Fatal(err)
 	}

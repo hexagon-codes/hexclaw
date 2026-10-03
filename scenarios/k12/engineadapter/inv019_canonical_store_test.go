@@ -13,10 +13,10 @@ package engineadapter
 
 import (
 	"context"
-	"database/sql"
 	"strings"
 	"testing"
 
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/scenario"
 	k12 "github.com/hexagon-codes/hexclaw/scenarios/k12"
 	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
@@ -29,7 +29,7 @@ import (
 
 func TestINV019_CanonicalAnswerStoredNormalized_NoLatexResidue(t *testing.T) {
 	ctx := context.Background()
-	db, err := sql.Open("sqlite", ":memory:")
+	db, err := sqlitefixture.Memory()
 	if err != nil {
 		t.Fatal(err)
 	}

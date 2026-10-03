@@ -2,7 +2,6 @@ package apihttp_test
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -11,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/apihttp"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/assembly"
@@ -60,7 +60,7 @@ type practiceGenerationReceiptFixture struct {
 
 func newPracticeGenerationReceiptFixture(t *testing.T) practiceGenerationReceiptFixture {
 	t.Helper()
-	db, err := sql.Open("sqlite", ":memory:")
+	db, err := sqlitefixture.Memory()
 	if err != nil {
 		t.Fatal(err)
 	}

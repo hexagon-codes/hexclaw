@@ -2,10 +2,10 @@ package skilladapter_test
 
 import (
 	"context"
-	"database/sql"
 	"strings"
 	"testing"
 
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/scenario"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/skilladapter"
@@ -31,7 +31,7 @@ func (f fakeGrader) Grade(context.Context, string, string, string) (usecase.Grad
 
 func newDeps(t *testing.T, oc usecase.GradeOutcome) usecase.Deps {
 	t.Helper()
-	db, err := sql.Open("sqlite", ":memory:")
+	db, err := sqlitefixture.Memory()
 	if err != nil {
 		t.Fatal(err)
 	}

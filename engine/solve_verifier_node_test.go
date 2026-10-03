@@ -269,7 +269,7 @@ func TestStandaloneVerificationExecutesOnceAndPersistsEvidence(t *testing.T) {
 		t.Context(), "每盒6张卡片，7盒共有多少张？", "6×7=42张。", "42张", "小学乘法",
 	)
 	if verdict != verdictAgree || computed != "42张" || !grounded || reply == nil {
-		t.Fatalf("verdict=%s computed=%q grounded=%v reply=%+v", verdictString(verdict), computed, grounded, reply)
+		t.Fatalf("verdict=%s computed=%q grounded=%v reply=%+v code_exec_result=%+v", verdictString(verdict), computed, grounded, reply, codeExec.lastResult.Load())
 	}
 	if receipt == nil || receipt.RunID == "" || receipt.InputDigest != executionInputDigest(task) || receipt.Stdout != "COMPUTED: 42张\n" {
 		t.Fatalf("actual execution receipt was lost or mismatched: %+v", receipt)
@@ -345,12 +345,15 @@ func standaloneVerifierTestReceipt(task, stdout string) *CodeExecutionReceipt {
 
 type standaloneVerifierCountingCodeExec struct {
 	*builtin.CodeExecSkill
-	calls atomic.Int32
+	calls      atomic.Int32
+	lastResult atomic.Pointer[skill.Result]
 }
 
 func (s *standaloneVerifierCountingCodeExec) Execute(ctx context.Context, args map[string]any) (*skill.Result, error) {
 	s.calls.Add(1)
-	return s.CodeExecSkill.Execute(ctx, args)
+	result, err := s.CodeExecSkill.Execute(ctx, args)
+	s.lastResult.Store(result)
+	return result, err
 }
 
 type standaloneVerifierTestProvider struct {

@@ -320,7 +320,7 @@ func prepareRecognitionLayoutSettlementFixture(
 ) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "recognition-layout-settlement-v2.db")
-	store, db := openPhysicalLedgerFileStore(t, path)
+	store, db := newPhysicalLedgerFileStore(t, path)
 	if err := migrate.Run(ctx, db, migrate.All); err != nil {
 		t.Fatalf("migrate settlement db: %v", err)
 	}

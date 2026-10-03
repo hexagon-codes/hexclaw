@@ -11,31 +11,31 @@ import (
 )
 
 func TestBUG20260808_DenseWholePagePromptFreezesCompactPrintedInventory(t *testing.T) {
-	const marker = "printed_inventory independently reviews"
+	const marker = "- Each pi item is exactly"
 	index := strings.LastIndex(wholePageSelfInventoryPrompt, marker)
 	if index < 0 {
 		t.Fatalf("whole-page prompt is missing %q", marker)
 	}
 	contract := wholePageSelfInventoryPrompt[index:]
-	if !strings.Contains(
-		contract,
-		"Each item must contain exactly source_number_path, display_label, and question",
-	) {
-		t.Fatalf("whole-page printed inventory is not frozen to the compact three-field contract: %s", contract)
+	if !strings.Contains(contract, "a 3-value array in this fixed order: [np,dl,qt]") ||
+		!strings.Contains(contract, "pi=printed_inventory, qs=questions") ||
+		!strings.Contains(contract, "np=source_number_path, dl=display_label") ||
+		!strings.Contains(contract, "qt=question") {
+		t.Fatalf("whole-page printed inventory is not frozen to the compact three-value contract: %s", contract)
 	}
 }
 
 func TestREGBUGK12DenseV1Complete_PromptUsesPrintedInventoryAsSingleQuestionSource(t *testing.T) {
 	required := []string{
-		"First complete printed_inventory as the single source of printed-question identity",
-		"copy source_number_path, display_label, and question character for character",
-		"Do not transcribe the printed question a second time",
-		"Only add answer, subject, and knowledge facts",
-		"Before returning JSON, compare every corresponding identity field byte for byte",
-		`"question":"8的1/4的4/5是多少？"`,
-		"Ignore worksheet metadata fields such as title, date, name, and time",
-		`instructions such as "把下面每题的得数化简"`,
-		"instruction text are not questions and must not appear in either array",
+		"Complete pi first",
+		"Copy np, dl, and qt character for character from the corresponding pi item",
+		"do not transcribe printed identity a second time",
+		"Add answer, section, subject, and knowledge facts using the complete mapped field protocol",
+		"Before returning JSON, compare each corresponding np, dl, and qt byte for byte and correct qs from pi",
+		"pi=printed_inventory, qs=questions",
+		"Ignore title, date, name, time",
+		"worksheet instructions",
+		"They are not questions and must not appear in either array",
 	}
 	for _, invariant := range required {
 		if !strings.Contains(wholePageSelfInventoryPrompt, invariant) {
@@ -45,12 +45,12 @@ func TestREGBUGK12DenseV1Complete_PromptUsesPrintedInventoryAsSingleQuestionSour
 }
 
 func TestREGBUGK12DenseV1Complete_PromptPresentsPrintedInventoryBeforeQuestions(t *testing.T) {
-	const envelope = `{"printed_inventory":[...],"questions":[...]}`
+	const envelope = `{"pi":[...],"qs":[...]}`
 	if !strings.Contains(wholePageSelfInventoryPrompt, envelope) {
 		t.Fatalf("whole-page prompt does not present the single-source array first: missing %s", envelope)
 	}
-	inventoryRule := strings.Index(wholePageSelfInventoryPrompt, "- printed_inventory independently reviews")
-	questionsRule := strings.Index(wholePageSelfInventoryPrompt, "- Then build questions in the same order")
+	inventoryRule := strings.Index(wholePageSelfInventoryPrompt, "- Each pi item is exactly")
+	questionsRule := strings.Index(wholePageSelfInventoryPrompt, "- Build qs in the same order")
 	if inventoryRule < 0 || questionsRule < 0 || inventoryRule > questionsRule {
 		t.Fatalf("whole-page prompt explains questions before its printed single source")
 	}
@@ -76,7 +76,7 @@ func TestREGBUGK12StandaloneParentFields006_PromptsFreezeExactKindFieldCombinati
 		}
 	}
 	if !strings.Contains(wholePageSelfInventoryPrompt,
-		"Before returning JSON, verify every problem_kind against these exact parent, subproblem, and answer-field combinations") {
+		"Verify every pk/pr/sb/as/sa combination against the parent-child rules above") {
 		t.Error("英文整页提示缺少返回前父子字段组合自检")
 	}
 }

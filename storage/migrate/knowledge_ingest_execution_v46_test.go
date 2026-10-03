@@ -14,6 +14,7 @@ func TestKnowledgeIngestExecutionV46IsRegisteredWithDurableContracts(t *testing.
 		t.Fatal(err)
 	}
 	defer db.Close()
+	copyLatestMigrationFixture(t, db)
 	if err := Run(context.Background(), db, All); err != nil {
 		t.Fatal(err)
 	}

@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/storage/migrate"
 
 	_ "modernc.org/sqlite"
@@ -26,7 +27,7 @@ func newK12WebhookTestManager(t *testing.T, db *sql.DB) *Manager {
 	t.Helper()
 	if db == nil {
 		var err error
-		db, err = sql.Open("sqlite", ":memory:")
+		db, err = sqlitefixture.Memory()
 		if err != nil {
 			t.Fatalf("open sqlite: %v", err)
 		}

@@ -2,10 +2,10 @@ package records
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"testing"
 
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/storage/migrate"
 
 	_ "modernc.org/sqlite"
@@ -26,7 +26,7 @@ func mockSchema() *RecordSchema {
 // newTestStore 建内存库、跑迁移、插两个实例、注册 mockSchema。
 func newTestStore(t *testing.T) *Store {
 	t.Helper()
-	db, err := sql.Open("sqlite", ":memory:")
+	db, err := sqlitefixture.Memory()
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}

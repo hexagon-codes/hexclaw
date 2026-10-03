@@ -232,13 +232,15 @@ func (d Deps) GenerateWorkFeedbackCommand(
 		)
 		return CreativeWorkView{}, fmt.Errorf("%w: 未配置作品点评生成能力", ErrSolveFailed)
 	}
+	legacyVersionID := last.VersionID
 	if last.VersionID == "" {
-		// Internal compatibility identity only. It is never emitted by the
-		// current DTO and does not create a legacy version row.
 		last.VersionID = generation.GenerationID
 	}
+	// 调用身份绑定已持久化的 generation，反馈投影保留原版本身份。
+	invocationVersion := last
+	invocationVersion.VersionID = generation.GenerationID
 
-	invocation, replay, err := d.prepareWorkFeedbackInvocation(ctx, v, last, req)
+	invocation, replay, err := d.prepareWorkFeedbackInvocation(ctx, v, invocationVersion, req, generation, legacyVersionID)
 	if err != nil {
 		_, _ = d.Records.FailWorkFeedbackGeneration(
 			context.WithoutCancel(ctx), agentName, generation.GenerationID, err.Error(),
@@ -501,6 +503,8 @@ func (d Deps) prepareWorkFeedbackInvocation(
 	work CreativeWorkView,
 	version k12.CreativeWorkVersion,
 	req WorkFeedbackRequest,
+	generation k12.WorkFeedbackGeneration,
+	legacyVersionID string,
 ) (*k12.ImageTaskInvocation, *WorkFeedbackOutput, error) {
 	if d.Records == nil {
 		return nil, nil, fmt.Errorf("usecase: image task store 未配置")
@@ -532,6 +536,41 @@ func (d Deps) prepareWorkFeedbackInvocation(
 	prior, err := d.Records.GetLatestWorkFeedbackInvocation(
 		ctx, work.Record.AgentName, work.Record.RecordID, operationKey,
 	)
+	if errors.Is(err, k12storage.ErrImageTaskNotFound) && legacyVersionID != "" && legacyVersionID != version.VersionID {
+		legacyKey := "work:" + work.Record.RecordID + ":version:" + legacyVersionID + ":feedback"
+		legacy, legacyErr := d.Records.GetLatestWorkFeedbackInvocation(ctx, work.Record.AgentName, work.Record.RecordID, legacyKey)
+		if legacyErr != nil && !errors.Is(legacyErr, k12storage.ErrImageTaskNotFound) {
+			return nil, nil, legacyErr
+		}
+		if legacyErr == nil {
+			switch legacy.Status {
+			case k12.ImageTaskInvocationSent, k12.ImageTaskInvocationOutcomeUnknown:
+				return nil, nil, k12storage.ErrImageTaskInvalidState
+			case k12.ImageTaskInvocationPrepared, k12.ImageTaskInvocationFailed, k12.ImageTaskInvocationSucceeded:
+				if legacy.Status == k12.ImageTaskInvocationFailed && !legacy.RetrySafe {
+					return nil, nil, k12storage.ErrImageTaskInvalidState
+				}
+				if generation.GenerationNo == 1 && generation.RequestDigest == requestDigest {
+					expectedDigest := requestDigestWithParentInstructions(requestDigest, legacy.RouteSnapshot.ParentInstructions)
+					prior, err = d.Records.RebindLegacyWorkFeedbackInvocation(ctx, generation, legacy, expectedDigest)
+				} else if legacy.Status == k12.ImageTaskInvocationSucceeded {
+					previous := work.GenerationState.Latest
+					previousCompleted := previous != nil && work.GenerationState.Current != nil &&
+						previous.Status == k12.WorkFeedbackSucceeded && previous.GenerationID != generation.GenerationID &&
+						previous.GenerationID == work.GenerationState.Current.GenerationID && previous.GenerationNo < generation.GenerationNo &&
+						legacy.CreatedAt >= previous.CreatedAt && legacy.FinishedAt > 0 && legacy.FinishedAt <= previous.UpdatedAt &&
+						legacy.RequestDigest == requestDigestWithParentInstructions(previous.RequestDigest, legacy.RouteSnapshot.ParentInstructions)
+					if generation.GenerationNo <= 1 || (!previousCompleted && (legacy.FinishedAt <= 0 || legacy.FinishedAt >= generation.CreatedAt)) {
+						return nil, nil, k12storage.ErrImageTaskConflict
+					}
+				} else {
+					return nil, nil, k12storage.ErrImageTaskConflict
+				}
+			default:
+				return nil, nil, k12storage.ErrImageTaskConflict
+			}
+		}
+	}
 	if err == nil {
 		requestDigest = requestDigestWithParentInstructions(requestDigest, prior.RouteSnapshot.ParentInstructions)
 	}

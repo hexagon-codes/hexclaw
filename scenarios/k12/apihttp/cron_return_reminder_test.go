@@ -2,12 +2,12 @@ package apihttp_test
 
 import (
 	"context"
-	"database/sql"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/apihttp"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/assembly"
@@ -20,7 +20,7 @@ func TestCronReturnReminder_Endpoint(t *testing.T) {
 	finalizeAt := time.Date(2026, 7, 16, 15, 0, 0, 0, loc)
 	remindAt := time.Date(2026, 7, 17, 20, 0, 0, 0, loc)
 
-	db, err := sql.Open("sqlite", ":memory:")
+	db, err := sqlitefixture.Memory()
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/scenario"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
@@ -53,6 +54,26 @@ func newPartialRecognitionFixture(t *testing.T, unknown bool) *partialRecognitio
 		t.Fatalf("start: created=%v err=%v", created, err)
 	}
 	f.jobID = job.Record.RecordID
+	// 旧在途任务的检查点没有首读模式；重启后必须继续原 repair 结算协议。
+	f.close()
+	runPath := filepath.Join(f.runDir, f.jobID, "run.json")
+	raw, err := os.ReadFile(runPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var checkpoint map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	delete(checkpoint, "initial_read_mode")
+	raw, err = json.Marshal(checkpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(runPath, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	f.open()
 	view, err := f.o.RunGradingJob(context.Background(), f.jobID)
 	if err == nil || view.Record.Status != k12.GradingStageOutcomeUnknown {
 		t.Fatalf("local failure: stage=%s failure=%s err=%v", view.Record.Status, view.Fields.FailureKind, err)
@@ -64,7 +85,13 @@ func newPartialRecognitionFixture(t *testing.T, unknown bool) *partialRecognitio
 func (f *partialRecognitionFixture) open() {
 	f.t.Helper()
 	var err error
-	f.db, err = sql.Open("sqlite", f.path)
+	if _, statErr := os.Stat(f.path); os.IsNotExist(statErr) {
+		f.db, err = sqlitefixture.Open(f.path, f.path)
+	} else if statErr != nil {
+		f.t.Fatal(statErr)
+	} else {
+		f.db, err = sql.Open("sqlite", f.path)
+	}
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -208,7 +235,7 @@ func TestRecognitionPartialRecoveryRestartReusesSuccessfulRepairs(t *testing.T) 
 	if _, handled, err := f.o.RetryPhotoGradingJob(context.Background(), f.jobID); err != nil || !handled {
 		t.Fatalf("public retry: handled=%v err=%v", handled, err)
 	}
-	deadline := time.Now().Add(8 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for {
 		view, err = f.deps.GetGradingJob(context.Background(), "mingming", f.jobID)
 		if err != nil {

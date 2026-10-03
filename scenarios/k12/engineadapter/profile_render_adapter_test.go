@@ -195,12 +195,12 @@ func TestProfileAdapter_OnlyChangesK12Keys_NoAlias(t *testing.T) {
 		t.Error("不存在实例应报错")
 	}
 
-	// 已升级数据库缺失触发器时，正式向前迁移只恢复行为，不改写既有 revision。
+	// 模拟 v96 升级到 v97 的缺失触发器状态，向前迁移只恢复行为，不改写既有 revision。
 	if _, err := f.db.ExecContext(ctx, `DROP TRIGGER trg_k12_profile_revision_after_metadata_update;
-		DELETE FROM schema_migrations WHERE version=97`); err != nil {
+		DELETE FROM schema_migrations WHERE version>=97`); err != nil {
 		t.Fatal(err)
 	}
-	if err := migrate.Run(ctx, f.db, migrate.All); err != nil {
+	if err := migrate.Run(ctx, f.db, []migrate.Migration{migrate.K12ProfileRevisionTriggerRecoveryV97}); err != nil {
 		t.Fatal(err)
 	}
 	afterRecovery, err := f.records.GetProfileState(ctx, "mingming")

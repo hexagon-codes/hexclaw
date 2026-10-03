@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/apihttp"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/assembly"
 	"github.com/hexagon-codes/hexclaw/storage/migrate"
@@ -18,7 +19,7 @@ import (
 // newServerWithDB 同 newServer，但暴露 db 供测试改 due_at（把错题拨到期）。
 func newServerWithDB(t *testing.T) (http.Handler, *sql.DB) {
 	t.Helper()
-	db, err := sql.Open("sqlite", ":memory:")
+	db, err := sqlitefixture.Memory()
 	if err != nil {
 		t.Fatal(err)
 	}

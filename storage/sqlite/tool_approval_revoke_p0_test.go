@@ -14,7 +14,7 @@ import (
 func TestToolApprovalV70RevokeToolGrants(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "tool-approval-revoke.db")
-	store, err := New(dbPath)
+	store, err := newMigratedTestStore(t, dbPath)
 	if err != nil {
 		t.Fatalf("new store: %v", err)
 	}
@@ -103,7 +103,7 @@ WHERE owner_id = ? AND canonical_tool_name = ?`,
 // RevokeToolGrants 缺 owner 或 tool 必须拒绝，不得做全量撤销。
 func TestToolApprovalV70RevokeToolGrantsRequiresIdentity(t *testing.T) {
 	ctx := context.Background()
-	store, err := New(filepath.Join(t.TempDir(), "tool-approval-revoke-identity.db"))
+	store, err := newMigratedTestStore(t, filepath.Join(t.TempDir(), "tool-approval-revoke-identity.db"))
 	if err != nil {
 		t.Fatalf("new store: %v", err)
 	}

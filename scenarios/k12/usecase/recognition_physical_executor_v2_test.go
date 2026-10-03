@@ -11,11 +11,13 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/scenario"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
@@ -386,7 +388,16 @@ func openRecognitionPhysicalExecutorV2Store(
 	path string,
 ) (*sql.DB, *k12storage.Store) {
 	t.Helper()
-	db, err := sql.Open("sqlite", path)
+	var db *sql.DB
+	var err error
+	// 仅初建空库复制模板，重开时保留已有物理账本与回执。
+	if _, statErr := os.Stat(path); errors.Is(statErr, os.ErrNotExist) {
+		db, err = sqlitefixture.Open(path, path)
+	} else if statErr != nil {
+		t.Fatalf("inspect file SQLite: %v", statErr)
+	} else {
+		db, err = sql.Open("sqlite", path)
+	}
 	if err != nil {
 		t.Fatalf("open file SQLite: %v", err)
 	}

@@ -53,7 +53,8 @@ jobs:
   test:
     name: Test (Linux)
     if: ${{ github.event_name != 'push' || github.ref == 'refs/heads/main' }}
-    runs-on: ubuntu-24.04
+    # 与 toolkit 的真实沙箱执行基线一致，保留所需 namespace 能力。
+    runs-on: ubuntu-22.04
     timeout-minutes: 40
     env:
       HAS_REAL_LLM_EVAL_KEY: ${{ secrets.HEXCLAW_LLM_EVAL_KEY != '' }}
@@ -88,9 +89,14 @@ jobs:
         run: bash toolkit/scripts/install-bubblewrap-ci.sh
 
       - name: Probe Linux sandbox backend
+        shell: bash
         run: |
           bwrap --version
           unshare --version
+          bwrap --die-with-parent --new-session \
+            --unshare-user --unshare-pid --unshare-ipc --unshare-uts --unshare-net \
+            --disable-userns --assert-userns-disabled --cap-drop ALL \
+            --ro-bind / / --proc /proc --dev /dev -- /bin/true
 
       - name: Run tests
         env:

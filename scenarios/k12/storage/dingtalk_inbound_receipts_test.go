@@ -8,11 +8,24 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/records"
 	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
 	"github.com/hexagon-codes/hexclaw/storage/migrate"
 	_ "modernc.org/sqlite"
 )
+
+func newInboundPhotoStore(t *testing.T, path string) (*sql.DB, *k12storage.Store) {
+	t.Helper()
+	db, err := sqlitefixture.Open(path, path+"?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return openInboundPhotoStore(t, path)
+}
 
 func openInboundPhotoStore(t *testing.T, path string) (*sql.DB, *k12storage.Store) {
 	t.Helper()
@@ -76,7 +89,7 @@ func tableCount(t *testing.T, db *sql.DB, table string) int {
 func TestInboundPhotoAdmissionIsAtomicAndProviderIdentityIsTheDedupeOwner(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "inbound.sqlite")
-	db, store := openInboundPhotoStore(t, dbPath)
+	db, store := newInboundPhotoStore(t, dbPath)
 	defer db.Close()
 	seedInboundAgent(t, db, "mingming")
 
@@ -164,7 +177,7 @@ func TestInboundPhotoAdmissionIsAtomicAndProviderIdentityIsTheDedupeOwner(t *tes
 func TestInboundPhotoAdmissionRollsBackReceiptAndAssetWhenDispatchCannotCommit(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "atomic.sqlite")
-	db, store := openInboundPhotoStore(t, dbPath)
+	db, store := newInboundPhotoStore(t, dbPath)
 	defer db.Close()
 	seedInboundAgent(t, db, "mingming")
 	if _, err := db.Exec(`CREATE TRIGGER reject_inbound_dispatch
@@ -187,7 +200,7 @@ func TestInboundPhotoAdmissionRollsBackReceiptAndAssetWhenDispatchCannotCommit(t
 func TestInboundPhotoDispatchRecoverySurvivesAdmissionImageTaskAndFinalArtifactRestarts(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "restart.sqlite")
-	db, store := openInboundPhotoStore(t, dbPath)
+	db, store := newInboundPhotoStore(t, dbPath)
 	seedInboundAgent(t, db, "mingming")
 	bundle, _, err := store.AdmitInboundPhoto(ctx, inboundAdmission("msg-restart", []byte("restart image")))
 	if err != nil {
@@ -327,7 +340,7 @@ func TestInboundPhotoDispatchRecoverySurvivesAdmissionImageTaskAndFinalArtifactR
 func TestInboundPhotoRoutingConfirmationIsDurableAndCASProtected(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "confirmation.sqlite")
-	db, store := openInboundPhotoStore(t, dbPath)
+	db, store := newInboundPhotoStore(t, dbPath)
 	seedInboundAgent(t, db, "mingming")
 	bundle, _, err := store.AdmitInboundPhoto(ctx, inboundAdmission("msg-confirm", []byte("ambiguous image")))
 	if err != nil {

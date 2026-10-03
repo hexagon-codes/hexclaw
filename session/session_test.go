@@ -11,14 +11,14 @@ import (
 	"github.com/hexagon-codes/hexagon"
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/storage"
-	sqlitestore "github.com/hexagon-codes/hexclaw/storage/sqlite"
 )
 
 func newTestManager(t *testing.T) (*Manager, storage.Store) {
 	t.Helper()
 	dir := t.TempDir()
-	store, err := sqlitestore.New(filepath.Join(dir, "test.db"))
+	store, err := sqlitefixture.New(filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatalf("创建存储失败: %v", err)
 	}

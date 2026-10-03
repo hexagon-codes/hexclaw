@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hexagon-codes/hexclaw/config"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/usecase"
 )
@@ -105,7 +106,7 @@ func TestCreativeWorkFeedbackCoordinatorQuiesceAgentTerminalizesSentInvocation(t
 		t.Fatal(err)
 	}
 	d.Solver = &fakeWorkFeedbackSolver{
-		feedback: "细节清楚；家长可以追问声音；下次补一处触觉细节。",
+		feedback: "## 可见证据\n原稿里有具体事物与动作。\n## 先这样肯定\n细节清楚。\n## 家长可以这样问或讲\n家长可以追问声音，孩子卡住时回到原稿观察。\n## 下一次只试一个点\n下次补一处亲身感受到的触觉细节。",
 	}
 	resumeAgain, err := coordinator.QuiesceAgent(drainCtx, "xiaoming")
 	if err != nil {
@@ -165,6 +166,8 @@ func TestCreativeWorkFeedbackCoordinatorAutomaticallyCompletesInitialGeneration(
 	coordinator := &usecase.CreativeWorkFeedbackCoordinator{
 		Deps: &d, Records: d.Records, BaseContext: baseCtx,
 	}
+	expectedRoute := currentFeedbackRoute()
+	expectedRoute.ParentInstructions = config.ReadAgentInstructions()
 	if !coordinator.StartAsync("xiaoming", generationID) {
 		t.Fatal("first schedule must be accepted")
 	}
@@ -200,7 +203,7 @@ func TestCreativeWorkFeedbackCoordinatorAutomaticallyCompletesInitialGeneration(
 		t.Fatal(err)
 	}
 	if invocation.Status != k12.ImageTaskInvocationSucceeded ||
-		invocation.RouteSnapshot != currentFeedbackRoute() {
+		invocation.RouteSnapshot != expectedRoute {
 		t.Fatalf("direct text route/invocation not frozen: %+v", invocation)
 	}
 	providerDeadline, hasDeadline := solver.lastCtx.Deadline()
@@ -213,7 +216,7 @@ func TestCreativeWorkFeedbackCoordinatorAutomaticallyCompletesInitialGeneration(
 func TestCreativeWorkFeedbackCoordinatorRecoversQueuedDirectWorkAfterRestart(t *testing.T) {
 	d := newDataDeps(t)
 	solver := &fakeWorkFeedbackSolver{
-		feedback: "原文的桂花细节可见；家长可以追问声音；下一次只补一处听觉细节。",
+		feedback: "## 可见证据\n原文的桂花细节可见。\n## 先这样肯定\n桂花落在青石板上的动作清楚。\n## 家长可以这样问或讲\n家长可以追问声音，孩子卡住时回忆当时听到的声音。\n## 下一次只试一个点\n下一次只补一处听觉细节。",
 	}
 	d.Solver = solver
 	d.WorkFeedbackRoute = func(

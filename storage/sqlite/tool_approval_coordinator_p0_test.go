@@ -49,7 +49,7 @@ func exactToolApprovalDecision(req *storage.ToolApprovalRequest, decision, key s
 func TestToolApprovalV70DurableDecisionGrantReleaseAndACKAreAtomic(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "tool-approval.db")
-	store, err := New(dbPath)
+	store, err := newMigratedTestStore(t, dbPath)
 	if err != nil {
 		t.Fatalf("new store: %v", err)
 	}

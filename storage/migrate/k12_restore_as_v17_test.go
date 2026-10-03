@@ -15,6 +15,7 @@ func TestK12RestoreAsV17CreatesDurableImmutableEvidenceTables(t *testing.T) {
 	}
 	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = db.Close() })
+	copyLatestMigrationFixture(t, db)
 	if err := Run(context.Background(), db, All); err != nil {
 		t.Fatal(err)
 	}

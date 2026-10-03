@@ -173,8 +173,19 @@ func TestBUG_20260726_031_WithSkipsFinalizesHonestArtifactWithoutFullTutoringTip
 }
 
 func TestBUG_20260726_031_FullFinalizerKeepsTipsAndBindsOneSummaryToAllCurrentDigests(t *testing.T) {
-	solver := &itemResumeSolver{calls: map[string]int{}}
-	grader := &itemResumeGrader{calls: map[string]int{}}
+	solver := &itemResumeSolver{
+		calls: map[string]int{}, solutions: map[string]string{"1+1=": "2", "2+2=": "4"},
+		evidenceType: EvidenceHeterogeneousModel,
+	}
+	grader := &itemResumeGrader{
+		calls: map[string]int{},
+		outcomes: map[string]GradeOutcome{
+			"2+2=": {
+				Verdict: VerdictDisagree, WrongStep: "把 2+2 算成 3",
+				ErrorCause: "基础加法计算失误", KnowledgePoint: "加法",
+			},
+		},
+	}
 	o := newItemResumeOrchestrator(t, t.TempDir(), []RecognizedQuestion{
 		{
 			Question: "1+1=", Subject: "数学", StudentAnswer: "2",
@@ -183,7 +194,7 @@ func TestBUG_20260726_031_FullFinalizerKeepsTipsAndBindsOneSummaryToAllCurrentDi
 			KnowledgePoints: []string{"加法"},
 		},
 		{
-			Question: "2+2=", Subject: "数学", StudentAnswer: "4",
+			Question: "2+2=", Subject: "数学", StudentAnswer: "3",
 			AnswerState:      AnswerStatePresent,
 			SourceNumberPath: []string{"2"}, DisplayLabel: "2.",
 			KnowledgePoints: []string{"加法"},
@@ -194,6 +205,8 @@ func TestBUG_20260726_031_FullFinalizerKeepsTipsAndBindsOneSummaryToAllCurrentDi
 	o.deps.Profiles = &bug20260726031ProfileStore{
 		profile: k12.ChildProfile{ChildName: "小明", GradeTerm: "五年级下"},
 	}
+	guides := &completedHomeworkParentGuideSpy{answer: map[string]string{"2+2=": "4"}}
+	o.deps.ParentTeachingGuide = guides
 
 	jobID := runItemResumeJobToAssessing(t, o, "bug-031-final-full")
 	run, job := confirmItemResumeJobWithoutRun(t, o, jobID)
@@ -207,6 +220,19 @@ func TestBUG_20260726_031_FullFinalizerKeepsTipsAndBindsOneSummaryToAllCurrentDi
 		}
 		items = append(items, item)
 	}
+	if len(items) != 2 || items[0].Status != PhotoCorrect || items[0].ParentGuide != nil ||
+		items[1].Status != PhotoWrong || items[1].ParentGuide == nil {
+		t.Fatalf("verified wrong item must keep its own guide without changing the correct sibling: %#v", items)
+	}
+	guide := items[1].ParentGuide
+	if guide.Answer != "4" || strings.Join(guide.FullSolutionSteps, "\n") != "4" ||
+		guide.GradeLevelMethod == "" || len(guide.LikelyMistakes) == 0 ||
+		len(guide.ParentTeachingSequence) == 0 || len(guide.FollowUpQuestions) == 0 || guide.CheckingMethod == "" {
+		t.Fatalf("wrong-item guide lost one of its seven complete components: %+v", guide)
+	}
+	if calls := guides.snapshot(); len(calls) != 1 || calls[0].Problem != "2+2=" {
+		t.Fatalf("only the verified wrong item may request a parent guide: %#v", calls)
+	}
 	forceBUG20260726031Projecting(t, o, jobID, PhotoGradeResult{Items: items})
 	view, err := o.runProject(context.Background(), run, jobID)
 	if err != nil {
@@ -215,8 +241,8 @@ func TestBUG_20260726_031_FullFinalizerKeepsTipsAndBindsOneSummaryToAllCurrentDi
 	if view.Record.Status != k12.GradingStageCompleted {
 		t.Fatalf("full final stage=%s, want completed", view.Record.Status)
 	}
-	if tips.calls != 1 {
-		t.Errorf("full coverage TutoringTips calls=%d, want one canonical page call", tips.calls)
+	if tips.calls != 0 {
+		t.Errorf("canonical item finalization made %d redundant page-summary calls", tips.calls)
 	}
 
 	invocations, err := o.deps.Records.ListModelInvocations(
@@ -231,8 +257,8 @@ func TestBUG_20260726_031_FullFinalizerKeepsTipsAndBindsOneSummaryToAllCurrentDi
 			summaryInvocations++
 		}
 	}
-	if summaryInvocations != 1 {
-		t.Errorf("page summary invocations=%d, want exactly one", summaryInvocations)
+	if summaryInvocations != 0 {
+		t.Errorf("page summary invocations=%d, want zero", summaryInvocations)
 	}
 
 	receipts, err := o.deps.Records.ListGradingAssessmentItems(
@@ -245,7 +271,33 @@ func TestBUG_20260726_031_FullFinalizerKeepsTipsAndBindsOneSummaryToAllCurrentDi
 	for _, receipt := range receipts {
 		if receipt.CurrentDisposition == k12.GradingAssessmentDispositionCurrent {
 			wantDigests = append(wantDigests, receipt.ResultDigest)
+			if receipt.ProblemID == items[1].Recognized.ProblemID {
+				if receipt.Status != k12.GradingAssessmentWrong || receipt.ParentGuideInvocationID == "" {
+					t.Fatalf("wrong-item receipt lost its bound parent guide: %+v", receipt)
+				}
+				parentInvocation, err := o.deps.Records.GetGradingItemInvocation(
+					context.Background(), "mingming", receipt.ParentGuideInvocationID,
+				)
+				if err != nil || parentInvocation.ProblemID != receipt.ProblemID ||
+					parentInvocation.Operation != k12.GradingItemOperationParentGuide ||
+					parentInvocation.Status != k12.ModelInvocationSucceeded {
+					t.Fatalf("wrong-item guide is not bound to its durable successful invocation: invocation=%+v err=%v", parentInvocation, err)
+				}
+				replayed, err := replayGradingAssessmentItem(items[1].Recognized, receipt)
+				if err != nil || replayed.ParentGuide == nil || replayed.ParentGuide.Answer != "4" ||
+					strings.Join(replayed.ParentGuide.FullSolutionSteps, "\n") != "4" ||
+					replayed.ParentGuide.GradeLevelMethod != guide.GradeLevelMethod ||
+					strings.Join(replayed.ParentGuide.ParentTeachingSequence, "\n") != strings.Join(guide.ParentTeachingSequence, "\n") {
+					t.Fatalf("durable wrong-item receipt lost the canonical guide: item=%#v err=%v", replayed, err)
+				}
+			} else if receipt.ProblemID != items[0].Recognized.ProblemID ||
+				receipt.Status != k12.GradingAssessmentCorrect || receipt.ParentGuideInvocationID != "" {
+				t.Fatalf("correct sibling receipt was changed or given an unnecessary guide: %+v", receipt)
+			}
 		}
+	}
+	if len(wantDigests) != 2 {
+		t.Fatalf("full current receipt exact set=%v, want both item digests", wantDigests)
 	}
 	sort.Strings(wantDigests)
 	artifact := loadBUG20260726031FinalArtifact(t, o, jobID)
@@ -255,10 +307,20 @@ func TestBUG_20260726_031_FullFinalizerKeepsTipsAndBindsOneSummaryToAllCurrentDi
 	}
 	sort.Strings(gotDigests)
 	if strings.Join(gotDigests, "\x00") != strings.Join(wantDigests, "\x00") {
-		t.Fatalf("summary/final artifact digests=%v, want all current %v", gotDigests, wantDigests)
+		t.Fatalf("canonical final artifact digests=%v, want all current %v", gotDigests, wantDigests)
 	}
-	if artifact.SummaryInvocationID == "" || artifact.ArtifactDigest == "" {
-		t.Fatalf("full final artifact is not bound to one summary receipt: %+v", artifact)
+	if artifact.SummaryInvocationID != "" || artifact.ArtifactID == "" || artifact.ArtifactDigest == "" ||
+		artifact.CoverageStatus != string(k12.GradingFinalArtifactCoverageComplete) ||
+		artifact.TotalCount != 2 || artifact.PublishedCount != 2 || artifact.SkippedCount != 0 {
+		t.Fatalf("full canonical artifact is not bound to the complete current receipt set: %+v", artifact)
+	}
+	for _, text := range []string{
+		"2+2=", "把 2+2 算成 3", "基础加法计算失误", "家长怎么讲",
+		"按本年级方法分析 2+2=", "先让孩子复述题意", "为什么这里要这样算？", "把结果代回原题独立验算",
+	} {
+		if !strings.Contains(artifact.CanonicalMarkdown, text) {
+			t.Fatalf("canonical final artifact lost required wrong-item guide content %q: %s", text, artifact.CanonicalMarkdown)
+		}
 	}
 }
 

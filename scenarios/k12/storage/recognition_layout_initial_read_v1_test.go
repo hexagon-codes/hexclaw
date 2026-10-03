@@ -30,13 +30,15 @@ func newInitialReadFixtureV1(t *testing.T, review bool, legacy ...bool) initialR
 	t.Helper()
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "initial.db")
-	store, db := openPhysicalLedgerFileStore(t, path)
 	migrations := migrate.All
 	mode := k12.RecognitionLayoutManifestWithContentV1
+	openStore := newPhysicalLedgerFileStore
 	if len(legacy) > 0 && legacy[0] {
 		mode = ""
 		migrations = append([]migrate.Migration(nil), migrate.All[:len(migrate.All)-1]...)
+		openStore = openPhysicalLedgerFileStore
 	}
+	store, db := openStore(t, path)
 	if err := migrate.Run(ctx, db, migrations); err != nil {
 		t.Fatal(err)
 	}

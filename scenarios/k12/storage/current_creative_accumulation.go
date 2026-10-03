@@ -192,7 +192,7 @@ func ValidateCreativeWorksArchiveV7(agent string, items []CreativeWorkArchiveV7)
 			}
 			if g.Source.OCRVersion > 0 {
 				sum := sha256.Sum256([]byte(g.Source.ContentMarkdown))
-				if g.Source.ContentConfirmedAt <= 0 || "sha256:"+hex.EncodeToString(sum[:]) != g.Source.OCRDigest {
+				if g.Source.ContentConfirmedAt <= 0 || (hex.EncodeToString(sum[:]) != g.Source.OCRDigest && "sha256:"+hex.EncodeToString(sum[:]) != g.Source.OCRDigest) {
 					return fmt.Errorf("invalid archived creative OCR digest")
 				}
 			}
@@ -957,6 +957,60 @@ func (s *Store) GetWorkFeedbackGeneration(
 	agentName, generationID string,
 ) (k12.WorkFeedbackGeneration, error) {
 	return getWorkFeedbackGenerationVia(ctx, s.db, agentName, generationID)
+}
+
+// RebindLegacyWorkFeedbackInvocation 只重绑能唯一归属初代的旧物理回执，不复制调用或结果。
+func (s *Store) RebindLegacyWorkFeedbackInvocation(ctx context.Context, generation k12.WorkFeedbackGeneration, legacy k12.ImageTaskInvocation, expectedDigest string) (k12.ImageTaskInvocation, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return legacy, err
+	}
+	defer tx.Rollback()
+	current, err := getWorkFeedbackGenerationVia(ctx, tx, generation.AgentName, generation.GenerationID)
+	if err != nil {
+		return legacy, err
+	}
+	if current.WorkID != generation.WorkID || current.GenerationNo != 1 || current.RequestDigest != generation.RequestDigest || current.CreatedAt <= 0 {
+		return legacy, ErrImageTaskConflict
+	}
+	stored, err := getImageTaskInvocation(ctx, tx, generation.AgentName, legacy.InvocationID)
+	if err != nil {
+		return legacy, err
+	}
+	recoverable := stored.Status == k12.ImageTaskInvocationPrepared || stored.Status == k12.ImageTaskInvocationSucceeded || (stored.Status == k12.ImageTaskInvocationFailed && stored.RetrySafe)
+	if stored.WorkRecordID != current.WorkID || stored.Operation != k12.ImageTaskOperationWorkFeedback || stored.OperationKey != legacy.OperationKey || !recoverable || stored.RequestDigest != expectedDigest || stored.CreatedAt < current.CreatedAt || (stored.Status == k12.ImageTaskInvocationSucceeded && stored.FinishedAt < stored.CreatedAt) {
+		return legacy, ErrImageTaskConflict
+	}
+	key := "work:" + current.WorkID + ":version:" + current.GenerationID + ":feedback"
+	var initialID string
+	var generations, canonical, attempts, invalid int
+	if err := tx.QueryRowContext(ctx, `SELECT initial_feedback_generation_id,
+		(SELECT count(*) FROM k12_work_feedback_generations WHERE agent_name=? AND work_id=?),
+		(SELECT count(*) FROM k12_image_task_invocations WHERE agent_name=? AND operation_key=?)
+		FROM k12_creative_works WHERE agent_name=? AND record_id=?`, current.AgentName, current.WorkID, current.AgentName, key, current.AgentName, current.WorkID).Scan(&initialID, &generations, &canonical); err != nil {
+		return legacy, err
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT count(*),coalesce(sum(CASE WHEN work_record_id IS NOT ? OR operation<>'work_feedback'
+		OR request_digest<>? OR created_at<? OR status IN ('sent','outcome_unknown') THEN 1 ELSE 0 END),0)
+		FROM k12_image_task_invocations WHERE agent_name=? AND operation_key=?`, current.WorkID, expectedDigest, current.CreatedAt, current.AgentName, stored.OperationKey).Scan(&attempts, &invalid); err != nil {
+		return legacy, err
+	}
+	if initialID != current.GenerationID || generations != 1 || canonical != 0 || attempts == 0 || invalid != 0 {
+		return legacy, ErrImageTaskConflict
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE k12_image_task_invocations SET operation_key=?
+		WHERE agent_name=? AND work_record_id=? AND operation='work_feedback' AND operation_key=? AND request_digest=? AND created_at>=?`, key, current.AgentName, current.WorkID, stored.OperationKey, expectedDigest, current.CreatedAt)
+	if err != nil {
+		return legacy, err
+	}
+	if changed, err := result.RowsAffected(); err != nil || changed != int64(attempts) {
+		return legacy, ErrImageTaskConflict
+	}
+	if err := tx.Commit(); err != nil {
+		return legacy, err
+	}
+	stored.OperationKey = key
+	return stored, nil
 }
 
 // ListDirectWorkFeedbackGenerationsForRecovery returns only current works that

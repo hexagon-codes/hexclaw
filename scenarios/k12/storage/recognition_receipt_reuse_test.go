@@ -210,7 +210,7 @@ func recognitionClosureReceiptPage(t *testing.T, changed bool) []byte {
 func prepareRecognitionClosureReceiptSource(t *testing.T, f recognitionClosureReceiptFixture, scenario string) (*k12storage.Store, *sql.DB, string, k12.ModelInvocation, k12.RecognitionLayoutPlanV2, []k12.ModelPhysicalInvocation) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "recognition-receipt-closure.db")
-	store, db := openPhysicalLedgerFileStore(t, path)
+	store, db := newPhysicalLedgerFileStore(t, path)
 	if err := migrate.Run(t.Context(), db, migrate.All); err != nil {
 		t.Fatal(err)
 	}

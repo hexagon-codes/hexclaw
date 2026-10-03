@@ -173,6 +173,7 @@ func MigrateHexbakOwner(source *Hexbak, targetAgent string) (*Hexbak, error) {
 	}
 	migrated.Assets = assets
 	assetMapping := creativeWorkOCRAssetMapping(source, migrated)
+	jobIDs := creativeWorkOCRJobMapping(sourceOCR, targetAgent)
 	for i := range migrated.CurrentCreativeWorks {
 		work := &migrated.CurrentCreativeWorks[i]
 		work.AgentName = targetAgent
@@ -204,6 +205,15 @@ func MigrateHexbakOwner(source *Hexbak, targetAgent string) (*Hexbak, error) {
 				if err := json.Unmarshal([]byte(text), &g.Feedback); err != nil {
 					return nil, err
 				}
+				for n, ref := range g.Feedback.EvidenceRefs {
+					for from, to := range jobIDs {
+						prefix := "ocr-confirmed:" + from + ":"
+						if strings.HasPrefix(ref, prefix) {
+							g.Feedback.EvidenceRefs[n] = "ocr-confirmed:" + to + ":" + strings.TrimPrefix(ref, prefix)
+							break
+						}
+					}
+				}
 			}
 		}
 		for j := range work.Invocations {
@@ -227,7 +237,6 @@ func MigrateHexbakOwner(source *Hexbak, targetAgent string) (*Hexbak, error) {
 	if err != nil {
 		return nil, err
 	}
-	jobIDs := creativeWorkOCRJobMapping(sourceOCR, targetAgent)
 	if err := rewriteCreativeWorkOCRJobRefs(migrated.Records, jobIDs); err != nil {
 		return nil, err
 	}

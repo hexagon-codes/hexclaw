@@ -161,7 +161,10 @@ func TestCurrentCreativeWorkHTTPExactDTOGenerationAndDelete(t *testing.T) {
 	h := newFeedbackServer(t, func(
 		context.Context, string, string, string,
 	) (string, error) {
-		return "桂花落在青石板上的细节清楚；建议补充一个声音细节。", nil
+		return "## 可见证据\n原文写到「桂花落在青石板上」。\n\n" +
+			"## 先这样肯定\n桂花落在青石板上的细节清楚。\n\n" +
+			"## 家长可以这样问或讲\n可以问孩子当时听到了什么声音。\n\n" +
+			"## 下一次只试一个点\n补充一个声音细节。", nil
 	})
 	rec, _ := doCurrent(t, h, http.MethodPost, "/creative-works",
 		`{"agent":"mingming","work_type":"writing","content_markdown":"原文","title":"猜测标题"}`,
@@ -244,7 +247,10 @@ func TestCurrentCreativeWorkHTTPCreateAutomaticallyRunsInitialFeedback(t *testin
 			string,
 			string,
 		) (string, error) {
-			return "原文中的桂花细节清楚；家长可以追问声音；下一次只补一处听觉细节。", nil
+			return "## 可见证据\n原文写到「桂花落在青石板上」。\n\n" +
+				"## 先这样肯定\n原文中的桂花细节清楚。\n\n" +
+				"## 家长可以这样问或讲\n家长可以追问当时的声音。\n\n" +
+				"## 下一次只试一个点\n只补一处听觉细节。", nil
 		}),
 	)
 	coordinator := &usecase.CreativeWorkFeedbackCoordinator{

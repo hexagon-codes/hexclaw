@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/memory"
 	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/usecase"
@@ -19,8 +20,16 @@ func TestInsightsReplay_SQLiteAndFileMemory(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "events.db")
+	firstOpen := true
 	openDB := func() *sql.DB {
-		db, err := sql.Open("sqlite", dbPath)
+		var db *sql.DB
+		var err error
+		if firstOpen {
+			db, err = sqlitefixture.Open(dbPath, dbPath)
+			firstOpen = false
+		} else {
+			db, err = sql.Open("sqlite", dbPath)
+		}
 		if err != nil {
 			t.Fatal(err)
 		}

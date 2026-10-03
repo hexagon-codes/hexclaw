@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/secret"
 	"github.com/hexagon-codes/hexclaw/skill"
 	"github.com/hexagon-codes/hexclaw/storage"
@@ -97,7 +98,13 @@ func (s *durableApprovalSender) receipt() *storage.ToolApprovalReceipt {
 
 func newDurableApprovalTestStore(t *testing.T, dbPath, ownerID, sessionID string) *sqlitestore.Store {
 	t.Helper()
-	store, err := sqlitestore.New(dbPath)
+	var store *sqlitestore.Store
+	var err error
+	if ownerID != "" {
+		store, err = sqlitefixture.New(dbPath)
+	} else {
+		store, err = sqlitestore.New(dbPath)
+	}
 	if err != nil {
 		t.Fatalf("new approval store: %v", err)
 	}

@@ -19,6 +19,7 @@ func TestE3KbChunksUnique(t *testing.T) {
 	defer db.Close()
 
 	// 跑全部 migration
+	copyLatestMigrationFixture(t, db)
 	if err := Run(context.Background(), db, All); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
@@ -68,6 +69,7 @@ func TestE3KbChunksDifferentIndexes(t *testing.T) {
 		t.Fatalf("open db: %v", err)
 	}
 	defer db.Close()
+	copyLatestMigrationFixture(t, db)
 	if err := Run(context.Background(), db, All); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}

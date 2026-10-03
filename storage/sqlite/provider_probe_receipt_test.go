@@ -10,7 +10,7 @@ import (
 
 func TestProviderProbeReceiptStartedAtFencesLateOlderCompletion(t *testing.T) {
 	ctx := context.Background()
-	store, err := New(filepath.Join(t.TempDir(), "probe-receipt.db"))
+	store, err := newMigratedTestStore(t, filepath.Join(t.TempDir(), "probe-receipt.db"))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
