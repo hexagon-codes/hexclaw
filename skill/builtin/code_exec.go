@@ -1497,7 +1497,7 @@ func syncCodeExecRootTree(root *os.Root) error {
 			}
 			continue
 		}
-		if !before.Mode().IsRegular() || codeExecFileLinkCount(before) != 1 {
+		if !before.Mode().IsRegular() || codeExecFileLinkCount(root, name, before) != 1 {
 			return errors.New("trusted Go build cache seed contains a non-regular entry")
 		}
 		file, err := root.Open(name)
@@ -1505,7 +1505,7 @@ func syncCodeExecRootTree(root *os.Root) error {
 			return err
 		}
 		opened, statErr := file.Stat()
-		if statErr != nil || !os.SameFile(before, opened) || codeExecFileLinkCount(opened) != 1 {
+		if statErr != nil || !os.SameFile(before, opened) || codeExecFileLinkCount(root, name, opened) != 1 {
 			_ = file.Close()
 			return errors.New("trusted Go build cache file changed while syncing")
 		}
@@ -1517,8 +1517,8 @@ func syncCodeExecRootTree(root *os.Root) error {
 			return syncErr
 		}
 		if afterErr != nil || pathErr != nil || !os.SameFile(opened, after) || !os.SameFile(after, postPath) ||
-			postPath.Mode()&os.ModeSymlink != 0 || codeExecFileLinkCount(after) != 1 ||
-			codeExecFileLinkCount(postPath) != 1 {
+			postPath.Mode()&os.ModeSymlink != 0 || codeExecFileLinkCount(root, name, after) != 1 ||
+			codeExecFileLinkCount(root, name, postPath) != 1 {
 			return errors.New("trusted Go build cache file changed while syncing")
 		}
 		if closeErr != nil {
@@ -1650,7 +1650,7 @@ func walkCodeExecGoBuildCacheRoot(
 			}
 			continue
 		}
-		if !info.Mode().IsRegular() || codeExecFileLinkCount(info) != 1 {
+		if !info.Mode().IsRegular() || codeExecFileLinkCount(root, name, info) != 1 {
 			return errors.New("trusted Go build cache seed contains a non-regular entry")
 		}
 		file, err := root.Open(name)
@@ -1659,7 +1659,7 @@ func walkCodeExecGoBuildCacheRoot(
 		}
 		opened, statErr := file.Stat()
 		if statErr != nil || !opened.Mode().IsRegular() || !os.SameFile(info, opened) ||
-			codeExecFileLinkCount(opened) != 1 {
+			codeExecFileLinkCount(root, name, opened) != 1 {
 			_ = file.Close()
 			return errors.New("trusted Go build cache file changed while opening")
 		}
@@ -1673,8 +1673,8 @@ func walkCodeExecGoBuildCacheRoot(
 		postPathInfo, pathErr := root.Lstat(name)
 		if statErr != nil || pathErr != nil || !os.SameFile(opened, after) || !os.SameFile(after, postPathInfo) ||
 			postPathInfo.Mode()&os.ModeSymlink != 0 || opened.Size() != after.Size() || opened.Mode() != after.Mode() ||
-			!opened.ModTime().Equal(after.ModTime()) || codeExecFileLinkCount(after) != 1 ||
-			codeExecFileLinkCount(postPathInfo) != 1 {
+			!opened.ModTime().Equal(after.ModTime()) || codeExecFileLinkCount(root, name, after) != 1 ||
+			codeExecFileLinkCount(root, name, postPathInfo) != 1 {
 			return errors.New("trusted Go build cache file changed while hashing")
 		}
 		if closeErr != nil {
@@ -1729,12 +1729,22 @@ func codeExecFileOwnerIdentity(info os.FileInfo) string {
 	return "platform:" + runtime.GOOS
 }
 
-func codeExecFileLinkCount(info os.FileInfo) uint64 {
+func codeExecFileLinkCount(root *os.Root, name string, info os.FileInfo) uint64 {
 	identity, available := codeExecPlatformPathIdentity(info)
-	if !available {
+	if available {
+		return identity.Links
+	}
+	// Windows 的路径元数据不含硬链接数，改从同一文件的 no-follow 句柄查询。
+	file, err := openCodeExecRegularFileNoFollow(root, name)
+	if err != nil {
 		return 0
 	}
-	return identity.Links
+	opened, snapshotErr := snapshotCodeExecOpenedFile(file)
+	closeErr := file.Close()
+	if snapshotErr != nil || closeErr != nil || !sameCodeExecFileSnapshot(info, opened.Info) {
+		return 0
+	}
+	return opened.Platform.Links
 }
 
 func codeExecReflectUnsigned(value reflect.Value) (uint64, bool) {
@@ -1960,7 +1970,7 @@ func copyCodeExecGoBuildCacheRoot(
 			}
 			continue
 		}
-		if !info.Mode().IsRegular() || codeExecFileLinkCount(info) != 1 {
+		if !info.Mode().IsRegular() || codeExecFileLinkCount(source, name, info) != 1 {
 			return errors.New("trusted Go build cache seed contains a non-regular entry")
 		}
 		manifestPath := filepath.ToSlash(relative)
@@ -1978,7 +1988,7 @@ func copyCodeExecGoBuildCacheRoot(
 		}
 		opened, statErr := input.Stat()
 		if statErr != nil || !opened.Mode().IsRegular() || !os.SameFile(info, opened) ||
-			codeExecFileLinkCount(opened) != 1 {
+			codeExecFileLinkCount(source, name, opened) != 1 {
 			_ = input.Close()
 			return errors.New("trusted Go build cache file changed while opening")
 		}
@@ -2004,8 +2014,8 @@ func copyCodeExecGoBuildCacheRoot(
 		}
 		if afterErr != nil || pathErr != nil || !os.SameFile(opened, after) || !os.SameFile(after, postPathInfo) ||
 			postPathInfo.Mode()&os.ModeSymlink != 0 || opened.Size() != after.Size() || opened.Mode() != after.Mode() ||
-			!opened.ModTime().Equal(after.ModTime()) || codeExecFileLinkCount(after) != 1 ||
-			codeExecFileLinkCount(postPathInfo) != 1 {
+			!opened.ModTime().Equal(after.ModTime()) || codeExecFileLinkCount(source, name, after) != 1 ||
+			codeExecFileLinkCount(source, name, postPathInfo) != 1 {
 			return errors.New("trusted Go build cache file changed while copying")
 		}
 		if closeInputErr != nil {
@@ -4558,7 +4568,7 @@ func removeCodeExecVendorFileNoFollow(path string, before os.FileInfo) (returnEr
 	name := filepath.Base(path)
 	pathInfo, err := root.Lstat(name)
 	if err != nil || pathInfo.Mode()&os.ModeSymlink != 0 || !pathInfo.Mode().IsRegular() ||
-		!os.SameFile(before, pathInfo) || codeExecFileLinkCount(pathInfo) != 1 {
+		!os.SameFile(before, pathInfo) || codeExecFileLinkCount(root, name, pathInfo) != 1 {
 		return errors.New("vendor file changed before removal")
 	}
 	file, err := root.Open(name)
@@ -4568,12 +4578,12 @@ func removeCodeExecVendorFileNoFollow(path string, before os.FileInfo) (returnEr
 	opened, statErr := file.Stat()
 	closeErr := file.Close()
 	if statErr != nil || closeErr != nil || !opened.Mode().IsRegular() ||
-		!os.SameFile(pathInfo, opened) || codeExecFileLinkCount(opened) != 1 {
+		!os.SameFile(pathInfo, opened) || codeExecFileLinkCount(root, name, opened) != 1 {
 		return errors.New("vendor file changed while opening")
 	}
 	postPath, err := root.Lstat(name)
 	if err != nil || postPath.Mode()&os.ModeSymlink != 0 || !os.SameFile(opened, postPath) ||
-		codeExecFileLinkCount(postPath) != 1 {
+		codeExecFileLinkCount(root, name, postPath) != 1 {
 		return errors.New("vendor file changed before removal")
 	}
 	return root.Remove(name)
