@@ -161,13 +161,9 @@ func TestREGBUGK12ProcessEvidenceComplete004UsesSingleFreshContextRetry(t *testi
 			return SubAgentResult{Output: "CORRECT: no\nFINAL_ANSWER_CORRECT: yes\nWRONG_STEP:\nMISCONCEPTION:\nGUIDANCE: 重算两组和"}, nil
 		}, NewSubAgentRegistry(""))
 		result, err := solver.GradeVerified(context.Background(), problem, verified, student)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if calls != 2 || result.Metadata["grade_wrong_step"] != "" ||
-			result.Metadata["grade_misconception"] != "" {
-			t.Fatalf("incomplete retry invented process evidence: calls=%d metadata=%#v",
-				calls, result.Metadata)
+		if err == nil || result != nil || calls != 2 {
+			t.Fatalf("incomplete retry became a grading fact: calls=%d result=%+v err=%v",
+				calls, result, err)
 		}
 	})
 
@@ -178,12 +174,8 @@ func TestREGBUGK12ProcessEvidenceComplete004UsesSingleFreshContextRetry(t *testi
 			return SubAgentResult{Output: "CORRECT: no\nFINAL_ANSWER_CORRECT: yes\nWRONG_STEP:\nMISCONCEPTION:\nGUIDANCE: 重算两组和"}, nil
 		}, NewSubAgentRegistry(""))
 		result, err := solver.GradeVerified(context.Background(), problem, verified, "划去29，分组过程看不清")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if calls != 2 || result.Metadata["grade_wrong_step"] != "" ||
-			result.Metadata["grade_misconception"] != "" {
-			t.Fatalf("无法程序证明的过程不得猜补: calls=%d metadata=%#v", calls, result.Metadata)
+		if err == nil || result != nil || calls != 2 {
+			t.Fatalf("unprovable retry became a grading fact: calls=%d result=%+v err=%v", calls, result, err)
 		}
 	})
 }

@@ -6,6 +6,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/hexagon-codes/hexclaw/skill"
 )
 
 // REG-P0: a durable K12 assessing deadline is already frozen by the Job. The
@@ -90,7 +92,12 @@ func TestBUG20260802K12DeadlineSurvivesSolveAndVerifiedGradeWallGuards(t *testin
 		case solverAgentName:
 			return SubAgentResult{Output: "步骤：按图形关系求解\n答案：42"}, nil
 		case verifierAgentName:
-			return SubAgentResult{Output: "VERDICT: AGREE\nCOMPUTED: 42"}, nil
+			stdout := "COMPUTED: 42\n"
+			captureCodeExecutionReceipt(ctx, codeExecToolName, &skill.Result{
+				Content: stdout,
+				Data:    map[string]any{"run_id": "deadline-verification", "status": "success", "exit_code": 0, "stdout_bytes": len(stdout)},
+			})
+			return SubAgentResult{Output: "VERDICT: AGREE\nPROCESS: VALID\nCOMPUTED: 42"}, nil
 		case graderAgentName:
 			return SubAgentResult{Output: "CORRECT: yes\nFINAL_ANSWER_CORRECT: yes\nGUIDANCE: 继续保持"}, nil
 		default:

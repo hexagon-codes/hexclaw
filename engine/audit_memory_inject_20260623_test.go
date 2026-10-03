@@ -24,7 +24,7 @@ func newEngineForMemoryAudit(t *testing.T) *ReActEngine {
 	dir := t.TempDir()
 	store, _ := sqlitestore.New(filepath.Join(dir, "test.db"))
 	t.Cleanup(func() { store.Close() })
-	store.Init(context.Background())
+	// 此夹具仅装配提示词与文件记忆，不进入 SQL 会话读写。
 	skills := skill.NewRegistry()
 	return NewReActEngine(cfg, router, store, skills)
 }
