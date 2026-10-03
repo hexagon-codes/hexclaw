@@ -199,11 +199,11 @@ func TestCodeExecGoCommandPolicyAcceptsOnlyRunAndTest(t *testing.T) {
 			programArgs: []string{"value"},
 		},
 		{
-			name:        "test packages with translated flags",
-			command:     []string{"go", "test", "./...", "-run", "TestValue", "-count=2", "-v"},
-			kind:        codeExecGoCommandTest,
-			targets:     []string{"./..."},
-			testArgs:    []string{"-test.run=TestValue", "-test.count=2", "-test.v=true"},
+			name:     "test packages with translated flags",
+			command:  []string{"go", "test", "./...", "-run", "TestValue", "-count=2", "-v"},
+			kind:     codeExecGoCommandTest,
+			targets:  []string{"./..."},
+			testArgs: []string{"-test.run=TestValue", "-test.count=2", "-test.v=true"},
 		},
 	}
 
@@ -785,9 +785,9 @@ func TestCodeExecGoArtifactPromotionIsolatedFromSourceMutationAfterBuildClose(t 
 	}
 	for _, forbidden := range []string{run.Workspace, run.CacheDir, run.Plan.Toolchain.GOROOT, run.Plan.Toolchain.Binary} {
 		if !slices.ContainsFunc(finalConfig.DeniedPaths, func(path string) bool {
-			return resolveRealPath(path) == resolveRealPath(forbidden)
+			return pathWithinResolved(path, forbidden)
 		}) {
-			t.Fatalf("final denied paths do not contain build state %q: %v", forbidden, finalConfig.DeniedPaths)
+			t.Fatalf("final denied paths do not cover build state %q: %v", forbidden, finalConfig.DeniedPaths)
 		}
 	}
 	if _, statErr := os.Lstat(finalCommand.Path); !os.IsNotExist(statErr) {

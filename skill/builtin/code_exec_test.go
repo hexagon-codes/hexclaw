@@ -2523,6 +2523,22 @@ func TestCodeExecTrustedCacheIsDeniedBeforeProjectStaging(t *testing.T) {
 		Workspace: t.TempDir(),
 		Timeout:   30,
 	})
+	goEnvironment := fmt.Sprintf(
+		`{"GOOS":%q,"GOARCH":%q,"GOVERSION":"go-test","GOROOT":%q,"CGO_ENABLED":"0"}`,
+		runtime.GOOS, runtime.GOARCH, t.TempDir(),
+	)
+	s.goHelperFactory = func(sandbox.Config) (sandbox.Sandbox, error) {
+		return &mockSandbox{execFn: func(_ context.Context, command sandbox.Command) (*sandbox.ExecResult, error) {
+			switch {
+			case len(command.Args) > 0 && command.Args[0] == "env":
+				return &sandbox.ExecResult{Stdout: goEnvironment, ExitCode: 0}, nil
+			case slices.Equal(command.Args, []string{"tool", "compile", "-V=full"}):
+				return &sandbox.ExecResult{Stdout: "compile version go-test", ExitCode: 0}, nil
+			default:
+				return nil, errors.New("unexpected Go policy fixture command")
+			}
+		}}, nil
+	}
 	s.goBuildCacheBase = cacheBase
 	deniedBeforeStaging := false
 	s.projectStager = func(
@@ -2637,6 +2653,32 @@ replace example.com/cache => ../trusted-cache
 			}
 
 			s := newConfiguredTestCodeExecSkill(t, &mockSandbox{}, sandbox.Config{Workspace: t.TempDir(), Timeout: 30})
+			goEnvironment := fmt.Sprintf(
+				`{"GOOS":%q,"GOARCH":%q,"GOVERSION":"go-test","GOROOT":%q,"CGO_ENABLED":"0"}`,
+				runtime.GOOS, runtime.GOARCH, t.TempDir(),
+			)
+			modEdit := `{"Module":{"Path":"example.com/project"},"Go":"1.24"}`
+			if tt.workFile == "" {
+				modEdit = `{"Module":{"Path":"example.com/project"},"Go":"1.24","Replace":[{"Old":{"Path":"example.com/cache"},"New":{"Path":"../trusted-cache"}}]}`
+			}
+			s.goHelperFactory = func(sandbox.Config) (sandbox.Sandbox, error) {
+				return &mockSandbox{execFn: func(_ context.Context, command sandbox.Command) (*sandbox.ExecResult, error) {
+					switch {
+					case len(command.Args) > 0 && command.Args[0] == "env":
+						return &sandbox.ExecResult{Stdout: goEnvironment, ExitCode: 0}, nil
+					case slices.Equal(command.Args, []string{"tool", "compile", "-V=full"}):
+						return &sandbox.ExecResult{Stdout: "compile version go-test", ExitCode: 0}, nil
+					case len(command.Args) == 4 && slices.Equal(command.Args[:3], []string{"mod", "edit", "-json"}) &&
+						resolveRealPath(command.Args[3]) == resolveRealPath(filepath.Join(projectRoot, "go.mod")):
+						return &sandbox.ExecResult{Stdout: modEdit, ExitCode: 0}, nil
+					case len(command.Args) == 4 && slices.Equal(command.Args[:3], []string{"work", "edit", "-json"}) &&
+						resolveRealPath(command.Args[3]) == resolveRealPath(filepath.Join(root, "go.work")):
+						return &sandbox.ExecResult{Stdout: `{"Go":"1.24","Use":[{"DiskPath":"./project"},{"DiskPath":"./trusted-cache"}]}`, ExitCode: 0}, nil
+					default:
+						return nil, errors.New("unexpected Go policy fixture command")
+					}
+				}}, nil
+			}
 			s.goBuildCacheBase = cacheBase
 			_, err := s.Execute(context.Background(), map[string]any{
 				"mode":         "project",
@@ -2690,6 +2732,22 @@ func TestCodeExecGoCacheCleanupRunsAfterPolicyRejection(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := newConfiguredTestCodeExecSkill(t, &mockSandbox{}, sandbox.Config{Workspace: t.TempDir(), Timeout: 30})
+			goEnvironment := fmt.Sprintf(
+				`{"GOOS":%q,"GOARCH":%q,"GOVERSION":"go-test","GOROOT":%q,"CGO_ENABLED":"0"}`,
+				runtime.GOOS, runtime.GOARCH, t.TempDir(),
+			)
+			s.goHelperFactory = func(sandbox.Config) (sandbox.Sandbox, error) {
+				return &mockSandbox{execFn: func(_ context.Context, command sandbox.Command) (*sandbox.ExecResult, error) {
+					switch {
+					case len(command.Args) > 0 && command.Args[0] == "env":
+						return &sandbox.ExecResult{Stdout: goEnvironment, ExitCode: 0}, nil
+					case slices.Equal(command.Args, []string{"tool", "compile", "-V=full"}):
+						return &sandbox.ExecResult{Stdout: "compile version go-test", ExitCode: 0}, nil
+					default:
+						return nil, errors.New("unexpected Go policy fixture command")
+					}
+				}}, nil
+			}
 			cleanupCalls := 0
 			s.goBuildCacheCleaner = func(codeExecRun) error {
 				cleanupCalls++
@@ -4302,6 +4360,7 @@ func TestCodeExecGoBuildCacheWorkspaceMeasurementHonorsContext(t *testing.T) {
 }
 
 func TestCodeExecGoBuildCacheDoesNotPolluteHostCache(t *testing.T) {
+	requireCodeExecSandbox(t)
 	hostCache := t.TempDir()
 	writeCodeExecTestFile(t, filepath.Join(hostCache, "sentinel"), "unchanged")
 	t.Setenv("GOCACHE", hostCache)
@@ -4319,6 +4378,7 @@ func TestCodeExecGoBuildCacheDoesNotPolluteHostCache(t *testing.T) {
 }
 
 func TestCodeExecGoBuildCacheFitsDefaultWorkspaceBudget(t *testing.T) {
+	requireCodeExecSandbox(t)
 	run := newCodeExecGoBuildCacheTestRun(t)
 	if _, err := prepareCodeExecGoBuildCache(context.Background(), run, codeExecTestGoBuildCacheBase); err != nil {
 		t.Fatalf("prepare private Go build cache: %v", err)
@@ -4340,7 +4400,31 @@ func TestCodeExecGoBuildCacheFitsDefaultWorkspaceBudget(t *testing.T) {
 
 func TestCodeExecGoBuildCacheCleanupPreservesTrustedSeedAndRunOutputs(t *testing.T) {
 	_, seed, seedEntry, _ := newCodeExecManifestSeedWithContent(t, "trusted", 0600)
-	run := newCodeExecGoBuildCacheTestRun(t)
+	base := t.TempDir()
+	workspace := filepath.Join(base, "runs", "cache-test", "work")
+	cacheDir := filepath.Join(workspace, "cache")
+	if err := os.MkdirAll(cacheDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	goBinary := filepath.Join(t.TempDir(), "go")
+	writeCodeExecTestFile(t, goBinary, "fake-go")
+	if err := os.Chmod(goBinary, 0700); err != nil {
+		t.Fatal(err)
+	}
+	run := codeExecRun{
+		ID:        "cache-test",
+		Base:      base,
+		Workspace: workspace,
+		Scratch:   workspace,
+		CacheDir:  cacheDir,
+		Plan: codeExecExecutionPlan{
+			GoRuntime: true,
+			Toolchain: newBoundCodeExecTestToolchain(
+				t, goBinary, t.TempDir(), strings.Repeat("e", 64),
+			),
+		},
+		Config: ensureCodeExecConfigDefaults(sandbox.Config{Workspace: base, Timeout: 30}),
+	}
 	run.ArtifactDir = filepath.Join(run.Workspace, "artifacts")
 	run.ManifestPath = filepath.Join(run.Base, "manifest.json")
 	if err := copyCodeExecGoBuildCacheSeed(
@@ -4378,6 +4462,33 @@ func TestCodeExecGoBuildCacheCleanupFailureEntersReport(t *testing.T) {
 		Workspace: t.TempDir(),
 		Timeout:   180,
 	})
+	goEnvironment := fmt.Sprintf(
+		`{"GOOS":%q,"GOARCH":%q,"GOVERSION":"go-test","GOROOT":%q,"CGO_ENABLED":"0"}`,
+		runtime.GOOS, runtime.GOARCH, t.TempDir(),
+	)
+	s.goHelperFactory = func(sandbox.Config) (sandbox.Sandbox, error) {
+		return &mockSandbox{execFn: func(_ context.Context, command sandbox.Command) (*sandbox.ExecResult, error) {
+			switch {
+			case len(command.Args) > 0 && command.Args[0] == "env":
+				return &sandbox.ExecResult{Stdout: goEnvironment, ExitCode: 0}, nil
+			case slices.Equal(command.Args, []string{"tool", "compile", "-V=full"}):
+				return &sandbox.ExecResult{Stdout: "compile version go-test", ExitCode: 0}, nil
+			case len(command.Args) == 4 && slices.Equal(command.Args[:3], []string{"mod", "edit", "-json"}):
+				modFile, err := os.ReadFile(command.Args[3])
+				if err != nil {
+					return nil, err
+				}
+				if string(modFile) != "module example.com/cleanup\n\ngo 1.24\n" {
+					return nil, errors.New("unexpected Go cleanup module fixture")
+				}
+				return &sandbox.ExecResult{Stdout: `{"Module":{"Path":"example.com/cleanup"},"Go":"1.24"}`, ExitCode: 0}, nil
+			case slices.Equal(command.Args, []string{"list", "-deps", "-export", "testing"}):
+				return &sandbox.ExecResult{ExitCode: 0}, nil
+			default:
+				return nil, errors.New("unexpected Go cleanup fixture command")
+			}
+		}}, nil
+	}
 	s.sandboxFactory = func(sandbox.Config) (sandbox.Sandbox, error) {
 		return &mockSandbox{execFn: func(context.Context, sandbox.Command) (*sandbox.ExecResult, error) {
 			return &sandbox.ExecResult{Stdout: "PASS", ExitCode: 0}, nil
