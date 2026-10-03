@@ -29,7 +29,7 @@ func TestBackupV5PacksProblemAttemptLedgerAndPageAssetExactSet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bak.Version != 6 || len(bak.ProblemAttempts) != 1 || len(bak.Assets) != 1 {
+	if bak.Version != HexbakVersion || len(bak.ProblemAttempts) != 1 || len(bak.Assets) != 1 {
 		t.Fatalf("backup scope incomplete: version=%d problem_attempts=%d assets=%d", bak.Version, len(bak.ProblemAttempts), len(bak.Assets))
 	}
 	if bak.ProblemAttempts[0].Problems[0].PageAssetID != assetID || bak.Assets[0].AssetID != assetID {
@@ -100,7 +100,7 @@ func TestMigrateHexbakOwnerKeepsStableProblemAttemptIDsAndRewritesOnlyOwnerAndPa
 	if err != nil {
 		t.Fatal(err)
 	}
-	if migrated.Version != 6 || len(migrated.ProblemAttempts) != 1 || len(migrated.Assets) != 1 {
+	if migrated.Version != HexbakVersion || len(migrated.ProblemAttempts) != 1 || len(migrated.Assets) != 1 {
 		t.Fatalf("migrated archive incomplete: %+v", migrated)
 	}
 	got := migrated.ProblemAttempts[0]
