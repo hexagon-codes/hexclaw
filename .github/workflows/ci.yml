@@ -55,6 +55,8 @@ jobs:
     if: ${{ github.event_name != 'push' || github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 40
+    env:
+      HAS_REAL_LLM_EVAL_KEY: ${{ secrets.HEXCLAW_LLM_EVAL_KEY != '' }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
@@ -63,8 +65,44 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.sum
 
+      - name: Setup Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.x"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
+      # 严格证明读取与应用依赖一致的 toolkit 源码，不切换模块或重复执行上游测试。
+      - name: Prepare toolkit sandbox source
+        shell: bash
+        run: |
+          go mod download github.com/hexagon-codes/toolkit
+          toolkit_dir="$(go list -m -f '{{.Dir}}' github.com/hexagon-codes/toolkit)"
+          cp -R "$toolkit_dir" toolkit
+
+      - name: Install Linux sandbox dependencies
+        shell: bash
+        run: bash toolkit/scripts/install-bubblewrap-ci.sh
+
+      - name: Probe Linux sandbox backend
+        run: |
+          bwrap --version
+          unshare --version
+
       - name: Run tests
+        env:
+          HEXCLAW_P0_SANDBOX_PROOF: "1"
         run: go test -race -count=1 -timeout 20m ./...
+
+      - name: K12 real-model accuracy gate (opt-in)
+        if: ${{ env.HAS_REAL_LLM_EVAL_KEY == 'true' }}
+        run: go test -count=1 -timeout 900s -run TestK12EvalGate_RealModel -v ./scenarios/k12/usecase/
+        env:
+          HEXCLAW_REAL_LLM_EVAL: "1"
+          HEXCLAW_REAL_LLM_KEY: ${{ secrets.HEXCLAW_LLM_EVAL_KEY }}
 
   test-sandbox:
     name: Test (${{ matrix.platform }} Sandbox)
@@ -78,7 +116,7 @@ jobs:
           - os: macos-14
             platform: macOS
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
@@ -87,9 +125,37 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.sum
 
+      - name: Setup Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.x"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
+      - name: Prepare toolkit sandbox source
+        shell: bash
+        run: |
+          go mod download github.com/hexagon-codes/toolkit
+          toolkit_dir="$(go list -m -f '{{.Dir}}' github.com/hexagon-codes/toolkit)"
+          cp -R "$toolkit_dir" toolkit
+
       - name: Build all
         if: runner.os == 'Windows'
         run: go build ./...
 
       - name: Run sandbox tests
         run: go test -v -count=1 -timeout 120s ./skill/sandbox/...
+
+      - name: Test hexclaw code_exec
+        env:
+          HEXCLAW_P0_SANDBOX_PROOF: "1"
+        run: >-
+          go test -v -count=1 -timeout 900s ./skill/builtin
+          -run '^(TestCodeExec|TestCloseCodeExecSandbox|TestJoinCodeExecSandboxClose|TestToolkitSandboxMigration|TestDetectMissingPackages|TestBuildInstallCommand|TestRegisterAdvancedCodeExec|TestEnsureCodeExecConfigDefaults|TestNewCodeExecSkill|TestPrepareCodeExecCommand|TestSandboxP0)'
+
+      - name: Test macOS connector readable paths
+        if: runner.os == 'macOS'
+        run: go test -v -count=1 -timeout 180s ./skill/builtin -run 'TestBug20260626_CodeExecReadsConnectorAuthorizedDir'

@@ -731,12 +731,12 @@ hexclaw/
 
 - 功能分支 `feat/**` push 只运行编译检查，不执行测试用例；启用自动部署且配置为部署分支时，编译成功会触发云端部署。
 - 分支 push / PR 仅修改 `README*.md`、`CHANGELOG.md`、`CONTRIBUTING.md`、`SECURITY*.md`、`docs/**/*.md` 或 `LICENSE` 时不触发 CI，也不触发该提交的构建或自动云端部署。不能广义忽略所有 `**/*.md`：其他路径的 Markdown 可能是 `go:embed` 运行资源。
-- main push / 指向 main 的 PR 保留 Linux 全量测试及 race、Windows 构建与 sandbox、macOS sandbox。Linux 当前命令为 `go test -race -count=1 -timeout 20m ./...`，单包测试超时 20 分钟、job 总预算 40 分钟；两个平台 sandbox 共用矩阵，不再上传覆盖率或运行 Windows 提示性重复测试。
-- CI 与 K12 使用 `GOWORK=off` 和 `GOFLAGS=-mod=readonly`，核对已发布依赖且不改写依赖锁定文件。K12 仅在 main push / PR 匹配相关路径时运行，不再重复执行 feature push；真实模型评测仍按密钥配置启用。render、Sandbox CodeExec 按各自路径规则运行专项验证，render 不再执行每周定时任务或查询上游最新版本。
-- 普通业务测试复用一次真实迁移生成的空库模板，各用例仍有独立数据库和原有断言；生产迁移及迁移专项不变。Windows 的真实 code_exec 集成受既有 toolkit 能力门控，跳过不代表 Go 执行已验证，平台 sandbox 硬门禁仍执行。
+- main push / 指向 main 的 PR 由一个主 CI 执行 Linux 全量测试及 race、Windows 构建和必要的跨平台 sandbox / CodeExec。Linux 当前命令为 `go test -race -count=1 -timeout 20m ./...`，单包测试超时 20 分钟、job 总预算 40 分钟；不再上传覆盖率或运行 Windows 提示性重复测试。
+- CI 与 K12 使用 `GOWORK=off` 和 `GOFLAGS=-mod=readonly`，核对已发布依赖且不改写依赖锁定文件。K12 确定性测试已包含在全量中，配置 `HEXCLAW_LLM_EVAL_KEY` 时由主 CI 执行真实模型门；K12 / Sandbox 专项改为手动，公网爬虫仅在手动 Sandbox 的 `run_live_network=true` 时运行，上游 toolkit 自身测试不在普通提交重复执行。render 仍按自身路径规则独立运行，不执行每周定时任务或查询上游最新版本。
+- 普通业务测试复用一次真实迁移生成的空库模板，各用例仍有独立数据库、原连接语义和全部断言；生产迁移及迁移专项不变。Windows Go 构建缓存组仅两项真实初始化 / 预算用例按能力跳过，规则与清理断言仍跨平台执行；其他真实 code_exec 集成沿用既有 toolkit 能力门控。跳过不代表 Windows Go 运行已验证。
 - `v*` Tag 或手动指定已有 Tag 通过独立 Release 工作流生成发布产物，不等待主 CI 全量测试。`v0.5.0-beta` 是本次预发布版本，文档版本不代表 Tag 或 Release 已生成。
 
-完整检查范围见[CI/CD 门禁说明](CONTRIBUTING.md#cicd-门禁说明)，部署配置与结果核对见[云端部署指南](docs/cloud-deployment.md)。功能分支编译成功不能替代完整测试或 Desktop / IM 业务验收。
+完整检查范围见[CI/CD 门禁说明](CONTRIBUTING.md#cicd-门禁说明)，部署配置与结果核对见[云端部署指南](docs/cloud-deployment.md)。功能分支编译、Deploy 或 render 独立成功不能替代主 CI 或 Desktop / IM 业务验收；未提供真实 PDF 或未启用真实模型的检查不计为相应边界通过。
 
 ### 手动命令
 
@@ -840,8 +840,8 @@ chore: 构建/工具链
 **依赖与 CI/CD**
 - **框架依赖升级** — `go.mod` 对齐 hexagon v0.5.14 / ai-core v0.2.11 / toolkit v0.3.4，Go 兼容基线为 1.25.13；发布与本地复验使用已发布依赖，不依赖本地 workspace。
 - **技能种子升级** — 首启内嵌技能支持版本感知升级，默认目录对齐 `hexagon-codes/hexclaw-hub` `v0.0.6`。
-- **CI/CD 精简** — 保留 Linux 全量测试及 race、平台 sandbox 与专项门禁，合并 Windows / macOS 配置，移除覆盖率上传、Windows 非阻塞重复测试及 render 每周上游版本查询。仅纯说明文档改动跳过主 CI 与自动部署，内嵌 Markdown 资源仍参与检查；K12 专项保留相关 PR / main 验证，不重复运行 feature push。功能分支编译、自动云端部署和 Tag Release 的验证范围分别记录。
-- **沙箱复验口径** — `sandbox-code-exec.yml` 专项验证强沙箱；普通 Linux CI 按后端能力门控真实沙箱用例，专项 workflow 使用 `HEXCLAW_P0_SANDBOX_PROOF=1`，runner 完整性探针仅在 `HEXCLAW_RUNNER_PROBE=1` 时手工触发。
+- **CI/CD 精简** — 功能分支保留编译预检与自动部署，main / PR 统一由主 CI 执行全量 race 和必要跨平台 CodeExec；K12 确定性包含在全量中，配置密钥时执行真实模型门。K12 / Sandbox 专项及公网爬虫改为手动，不重复上游 toolkit 自身测试；render 独立成功不代替主 CI。仅纯说明文档改动跳过主 CI 与自动部署，内嵌 Markdown 资源仍参与检查，覆盖率上传与 render 每周上游版本查询已移除。
+- **沙箱复验口径** — 主 CI 保留必要的跨平台执行器验证，`sandbox-code-exec.yml` 仅手动补验强沙箱与 `run_live_network=true` 时的公网爬虫；使用 `HEXCLAW_P0_SANDBOX_PROOF=1` 要求 Linux 真实执行，runner 完整性探针仅在 `HEXCLAW_RUNNER_PROBE=1` 时手工触发。
 
 > 完整发布历史见 [CHANGELOG.md](CHANGELOG.md)。
 
