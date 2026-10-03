@@ -117,8 +117,22 @@ func TestMemoryLifecycle_StringChain_E2E(t *testing.T) {
 	if syn.calls < 1 {
 		t.Error("相⑤画像：合成器未被调用")
 	}
-	if pe, ok := profileEntry(t, fm); !ok || !pe.Pinned {
-		t.Fatalf("相⑤画像条应存在且 Pinned，得 ok=%v pinned=%v", ok, pe.Pinned)
+	profile, ok := profileEntry(t, fm)
+	if !ok || !profile.Pinned {
+		t.Fatalf("相⑤画像条应存在且 Pinned，得 ok=%v pinned=%v", ok, profile.Pinned)
+	}
+	// 来源事实变更后，旧画像不再进入读取投影；淘汰保护需核对真实存储条目。
+	assertStoredProfile := func(fm *FileMemory, phase string) {
+		t.Helper()
+		for _, entry := range fm.parseEntriesFromFile(fm.roleDir(role), memoryActiveFile, MemoryStatusActive, "m") {
+			if entry.ID == profile.ID {
+				if !entry.Pinned || entry.Subject != ProfileSubject || entry.Content != profile.Content {
+					t.Errorf("%s: stored profile changed unexpectedly: %+v", phase, entry)
+				}
+				return
+			}
+		}
+		t.Errorf("%s: pinned profile is missing from active storage", phase)
 	}
 
 	// ── 相⑥淘汰保护：重开到小容量 MaxMemory=6，灌一批琐碎 fact 触发淘汰 ──
@@ -128,15 +142,17 @@ func TestMemoryLifecycle_StringChain_E2E(t *testing.T) {
 		_ = fmSmall.SaveEntryForRole(fmt.Sprintf("琐碎闲聊事实-%02d", i), "fact", "chat_extract", role)
 	}
 	assertSurvive(fmSmall, "相⑥淘汰后", "青霉素", "小明", "中文")
-	if pe, ok := profileEntry(t, fmSmall); !ok || pe.Status == "archived" {
-		t.Errorf("相⑥淘汰：Pinned 画像条不应被淘汰，ok=%v status=%q", ok, pe.Status)
+	assertStoredProfile(fmSmall, "相⑥淘汰后")
+	if _, ok := profileEntry(t, fmSmall); ok {
+		t.Error("stale profile must not be visible after source facts change")
 	}
 
 	// ── 相⑦重开 DB（状态累积·持久·有界）：所有受保护条目仍在，活跃集有界 ──
 	fmReopen := open(6)
 	assertSurvive(fmReopen, "相⑦重开后", "青霉素", "小明", "中文")
-	if _, ok := profileEntry(t, fmReopen); !ok {
-		t.Error("相⑦重开：Pinned 画像条应持久存在")
+	assertStoredProfile(fmReopen, "相⑦重开后")
+	if _, ok := profileEntry(t, fmReopen); ok {
+		t.Error("cold read must not revive a stale profile")
 	}
 	activeReopen := len(fmReopen.ParseEntriesForRole(role))
 	// 有界：受保护 4 条(identity/allergy/rule/profile) + 容量内琐碎；宽松上界 MaxMemory + 受保护富余。
