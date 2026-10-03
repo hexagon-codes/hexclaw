@@ -408,9 +408,12 @@ func TestIngestWorkerRenewsLeaseDuringSlowExtraction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var nowMillis atomic.Int64
+	nowMillis.Store(time.Now().UTC().UnixMilli())
+	now := func() time.Time { return time.UnixMilli(nowMillis.Load()).UTC() }
 	worker := NewSemanticIndexWorker(h.repo, nil, SemanticIndexWorkerConfig{
 		OwnerID: "owner-1", CorpusID: "default", WorkerID: "heartbeat-worker",
-		LeaseDuration: 150 * time.Millisecond, Lane: SemanticWorkerLaneIngest,
+		LeaseDuration: 150 * time.Millisecond, Lane: SemanticWorkerLaneIngest, Now: now,
 	})
 	started, release := make(chan struct{}), make(chan struct{})
 	worker.SetDocumentIngestProcessor(delayedIngestProcessor{delay: 350 * time.Millisecond, started: started, release: release})
@@ -429,11 +432,47 @@ func TestIngestWorkerRenewsLeaseDuringSlowExtraction(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("ingest lane did not start")
 	}
+	initialLease, err := h.service.GetJob(ctx, "owner-1", accepted.JobID)
+	if err != nil || initialLease.LeaseExpiresAt == nil {
+		t.Fatalf("ingest lease unavailable: job=%+v err=%v", initialLease, err)
+	}
+	waitForHeartbeat := func(previousExpiry time.Time) KnowledgeJob {
+		t.Helper()
+		deadline := time.NewTimer(time.Second)
+		defer deadline.Stop()
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			job, err := h.service.GetJob(ctx, "owner-1", accepted.JobID)
+			if err != nil || job.State != KnowledgeJobRunning || job.LeaseOwner != "heartbeat-worker" || job.LeaseEpoch != initialLease.LeaseEpoch {
+				t.Fatalf("heartbeat must preserve the live ingest lease: job=%+v err=%v", job, err)
+			}
+			if job.LeaseExpiresAt != nil && job.LeaseExpiresAt.After(previousExpiry) {
+				return job
+			}
+			select {
+			case <-done:
+				t.Fatalf("ingest ended before heartbeat renewal: worked=%v err=%v", worked, runErr)
+			case <-deadline.C:
+				t.Fatalf("heartbeat did not extend the persisted lease: job=%+v previous_expiry=%v", job, previousExpiry)
+			case <-ticker.C:
+			}
+		}
+	}
+	// 租约时间与运行器调度解耦，但续租仍必须由真实心跳写入数据库。
+	nowMillis.Add(100)
+	renewedLease := waitForHeartbeat(*initialLease.LeaseExpiresAt)
+	crossedExpiry := initialLease.LeaseExpiresAt.Add(renewedLease.LeaseExpiresAt.Sub(*initialLease.LeaseExpiresAt) / 2)
+	if !crossedExpiry.After(*initialLease.LeaseExpiresAt) || !crossedExpiry.Before(*renewedLease.LeaseExpiresAt) {
+		t.Fatalf("renewed lease must permit advancing beyond its original expiry: initial=%v renewed=%v", initialLease.LeaseExpiresAt, renewedLease.LeaseExpiresAt)
+	}
+	nowMillis.Store(crossedExpiry.UnixMilli())
+	waitForHeartbeat(*renewedLease.LeaseExpiresAt)
 	executor := &scriptedWorkerExecutor{dimension: 3}
 	indexWorker := NewSemanticIndexWorker(h.repo, &workerExecutorRegistry{
 		executors: map[string]ProfileEmbeddingExecutor{"profile-a": executor},
 	}, SemanticIndexWorkerConfig{
-		OwnerID: "owner-1", CorpusID: "default", WorkerID: "index-worker", Lane: SemanticWorkerLaneIndex,
+		OwnerID: "owner-1", CorpusID: "default", WorkerID: "index-worker", Lane: SemanticWorkerLaneIndex, Now: now,
 	})
 	if indexed, err := indexWorker.RunOnce(ctx); err != nil || !indexed || executor.calls != 1 {
 		t.Fatalf("index did not advance during extraction: worked=%v calls=%d err=%v", indexed, executor.calls, err)
