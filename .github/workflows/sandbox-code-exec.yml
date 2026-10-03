@@ -111,9 +111,9 @@ jobs:
 
       - name: Install Linux sandbox dependencies
         if: runner.os == 'Linux'
+        shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y bubblewrap util-linux python3 python3-pip nodejs npm
+          bash toolkit/scripts/install-bubblewrap-ci.sh
 
       - name: Probe Linux sandbox backend
         if: runner.os == 'Linux'
