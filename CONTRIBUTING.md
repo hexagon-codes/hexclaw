@@ -35,6 +35,8 @@ Linux 全量测试和 race、平台 sandbox、K12 与渲染专项检查保持不
 
 Sandbox CodeExec 的 Linux 环境复用同一固定 toolkit 版本提供的 bubblewrap 安装脚本，安装并检查运行所需参数，避免发行版旧包与当前后端不兼容。
 
+三项大型真实 PDF 回归仅在显式设置 `HEXCLAW_REAL_PDF_FIXTURE` 时使用外部冻结样本，不从其他仓库自动读取。未设置或文件不存在时明确跳过，不能计为真实 PDF 边界已验证；文件存在时仍检查固定大小、SHA 和全部功能断言，其他读取失败或内容不符继续失败。默认构建、CI 与应用运行不依赖该外部素材。
+
 - GitHub Actions 的 Linux 硬门禁等价于 `go test -race -count=1 ./...`。
 - 发布/CI 兼容性必须用 `GOWORK=off` 复验，避免本地 `go.work` 把未发布的 `toolkit` / `ai-core` / `hexagon` API 变化遮住。
 - 故意失败的 runner 完整性探针不得进入默认 `go test ./...` 路径；这类测试必须默认 `t.Skip`，或只在显式环境变量/手工 workflow 下启用。

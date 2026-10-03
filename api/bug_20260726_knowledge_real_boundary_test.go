@@ -15,7 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -30,6 +30,7 @@ import (
 const (
 	bug20260726MathFivePDFSHA  = "657e1547074668dbb50f2bf37f13c20f292127be64c26c5334190aa34d06de83"
 	bug20260726MathFivePDFSize = int64(14_621_452)
+	bug20260726DesktopToken    = "real-pdf-desktop-fixture"
 )
 
 type bug20260726EmbeddingResolver struct{}
@@ -112,6 +113,7 @@ func newBug20260726KnowledgeHarness(
 		migrate.KnowledgeUploadOperationsV71,
 		migrate.KnowledgeOCRRouteReceiptsV87,
 		migrate.K12KnowledgeInvocationLedgersV91,
+		migrate.KnowledgeUploadDismissalV99,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -181,6 +183,7 @@ func newBug20260726KnowledgeHTTPServer(
 ) *httptest.Server {
 	t.Helper()
 	server := NewServer(config.DefaultConfig(), nil, nil, nil)
+	server.SetDesktopAPIToken(bug20260726DesktopToken)
 	server.SetKnowledgeBase(manager)
 	server.SetSemanticIndexService(service)
 	httpServer := httptest.NewServer(server.routes())
@@ -199,18 +202,15 @@ func bug20260726MathFiveFixture(t *testing.T) string {
 	if testing.Short() {
 		t.Skip("real 14.6MB/131-page PDF boundary")
 	}
-	_, sourceFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("resolve test source path")
+	// 冻结的大型 PDF 仅由本次测试显式提供，不读取仓库外的默认素材路径。
+	fixture := strings.TrimSpace(os.Getenv("HEXCLAW_REAL_PDF_FIXTURE"))
+	if fixture == "" {
+		t.Skip("HEXCLAW_REAL_PDF_FIXTURE is not set; frozen real PDF boundary is not verified")
 	}
-	repositoryRoot := filepath.Dir(filepath.Dir(sourceFile))
-	fixture := filepath.Join(
-		filepath.Dir(repositoryRoot),
-		"hexclaw-docs",
-		"test",
-		"\u4e49\u52a1\u6559\u80b2\u6559\u79d1\u4e66\u00b7\u6570\u5b66\u4e94\u5e74\u7ea7\u4e0b\u518c.pdf",
-	)
 	file, err := os.Open(fixture)
+	if errors.Is(err, os.ErrNotExist) {
+		t.Skip("frozen 14.6MB/131-page PDF fixture is unavailable; real textbook boundary is not verified")
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -269,6 +269,7 @@ func bug20260726PostPDF(
 		t.Fatal(err)
 	}
 	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer "+bug20260726DesktopToken)
 	req.Header.Set("Idempotency-Key", idempotencyKey)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -484,6 +485,7 @@ func bug20260726PostCancel(t *testing.T, baseURL string, jobID string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	req.Header.Set("Authorization", "Bearer "+bug20260726DesktopToken)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -511,6 +513,7 @@ func bug20260726DeleteDocument(
 		t.Fatal(err)
 	}
 	req.Header.Set("Idempotency-Key", idempotencyKey)
+	req.Header.Set("Authorization", "Bearer "+bug20260726DesktopToken)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
