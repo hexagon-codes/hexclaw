@@ -106,8 +106,8 @@ func TestLocalProviderBypassesCloudEgressEnvelope(t *testing.T) {
 func TestFallbackProviderKeepsCloudEgressGuard(t *testing.T) {
 	p1, p2 := &egressCaptureProvider{}, &egressCaptureProvider{}
 	cfg := config.LLMConfig{Default: "a", Providers: map[string]config.LLMProviderConfig{
-		"a": {BaseURL: "https://a.example", APIKey: "a"},
-		"b": {BaseURL: "https://b.example", APIKey: "b"},
+		"a": {BaseURL: "https://a.example", APIKey: "a", Model: "chat-a"},
+		"b": {BaseURL: "https://b.example", APIKey: "b", Model: "chat-b"},
 	}}
 	r := NewWithProviders(cfg, map[string]hexagon.Provider{"a": p1, "b": p2})
 	r.SetEgressPolicy(&egress.Policy{})
