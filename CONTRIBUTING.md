@@ -39,6 +39,8 @@ CI 与 K12 固定使用 `GOWORK=off`、`GOFLAGS=-mod=readonly`，验证已发布
 
 主 CI 与手动 Sandbox CodeExec 的 Linux 环境复用固定 toolkit 版本提供的 bubblewrap 安装脚本，安装并检查运行所需参数，避免发行版旧包与当前后端不兼容。
 
+主 CI 的 Linux 全量测试使用与 toolkit 沙箱基线一致的 Ubuntu 22.04，安装后以真实 bubblewrap 空命令探测 namespace 能力；失败保留错误输出并终止，不重试或跳过。该探测只核对环境能力，完整沙箱行为仍由原全量测试与 P0 门验证。
+
 普通业务测试通过 `internal/testutil/sqlitefixture` 复用进程内一次真实全量迁移的空库模板；每个用例仍使用独立数据库，原 Init、断言、清理和 race 保留。文件库与内存库保留原连接语义，后端身份独立；迁移专项、旧 schema 和重开测试仍按原流程执行。这减少重复迁移耗时，不修改生产迁移或减少测试。
 
 Windows 的平台 sandbox 硬门禁继续执行。Go 构建缓存组仅两项真实初始化 / 预算用例沿用平台能力跳过，缓存策略与清理断言仍跨平台执行。当前 toolkit 不支持 Go helper 所需的只读工具链路径映射，其他真实 code_exec 运行集成仍沿用既有能力门控，Linux / macOS 的真实执行保留。Windows 跳过项不计为 Go 执行功能已验证，不能通过取消只读路径或改用宿主执行冒充支持。
