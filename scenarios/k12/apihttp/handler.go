@@ -38,7 +38,8 @@ type CronRegistrar interface {
 	// 展示名匹配——用户自建任务（无稳定键）一个都不许动。返回回收清单供取证。
 	ReclaimStale(ctx context.Context, agentName string, keepJobIDs []string) (removed []ReclaimedCronJob, err error)
 	// EnsureMissing 只补 exact SourceKey 缺项；已有任务（含暂停、改时区、改投递、改脚本）
-	// 必须原样保留。用于存量档案保存后的作用域修复，不做全局启动扫描。
+	// 必须原样保留。同归属、来源键为空且精确默认名称与完整规范脚本一致的旧 cron/Starlark
+	// 任务只读视为已存在，不回填来源键。用于存量档案保存后的作用域修复，不做全局启动扫描。
 	EnsureMissing(ctx context.Context, kind string, spec usecase.CronSpec, platform, chatID, userID string) (jobID string, created bool, err error)
 }
 

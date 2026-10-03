@@ -166,6 +166,8 @@ type AddJobRequest struct {
 	Paused          bool     `json:"paused,omitempty"`
 	AvailableSkills []string `json:"-"` // 服务端注入
 	LocalAPIBase    string   `json:"-"` // 服务端注入
+	// PreserveVerifiedLegacyDefault 只允许默认补齐只读保留同归属、同名且规范脚本一致的旧任务。
+	PreserveVerifiedLegacyDefault bool `json:"-"`
 }
 
 // ScriptJobRequest 是一个已编写脚本任务的原子批处理单元。
@@ -825,16 +827,13 @@ func (s *Scheduler) AddJobFromScript(ctx context.Context, req AddJobRequest, run
 	return job, nil
 }
 
-// EnsureJobFromScriptMissingOnly creates a script job only when no durable job
-// already owns the exact SourceKey. Unlike UpsertJobFromScript it never updates,
-// resumes, migrates, merges, or deletes an existing job: schedule, status,
-// timezone, delivery targets, platform/chat binding, and script remain byte
-// semantically unchanged. The lookup spans every user_id because scenario-owned
-// jobs may survive an owner/principal migration.
+// EnsureJobFromScriptMissingOnly 只创建缺失的脚本任务，精确 SourceKey 跨归属匹配，
+// 兼容场景任务在身份迁移后的保留。已有匹配任务不更新、恢复、迁移、归并或删除，
+// 调度、状态、时区、投递目标、平台/会话绑定与脚本都保持原有字节语义。
 //
-// SourceKey-empty jobs are deliberately invisible to this method. They are
-// user-authored tasks, not scenario defaults, and must never be claimed by a
-// background reconciliation.
+// 默认不匹配 SourceKey 为空的任务，避免认领用户自建任务。
+// 场景默认补齐显式开启 PreserveVerifiedLegacyDefault 时，仅对同归属、同名、
+// cron/Starlark 且完整规范脚本一致的旧任务只读返回；不回填来源键或修改任何任务字段。
 func (s *Scheduler) EnsureJobFromScriptMissingOnly(
 	ctx context.Context,
 	req AddJobRequest,
@@ -876,7 +875,7 @@ func (s *Scheduler) EnsureJobFromScriptMissingOnly(
 	if err != nil {
 		return nil, false, fmt.Errorf("查询 cron stable key: %w", err)
 	}
-	var existing *Job
+	var existing, verifiedLegacy *Job
 	for rows.Next() {
 		candidate, scanErr := scanJobRow(rows)
 		if scanErr != nil {
@@ -885,6 +884,13 @@ func (s *Scheduler) EnsureJobFromScriptMissingOnly(
 		}
 		if candidate.SourceKey == req.SourceKey && existing == nil {
 			existing = candidate
+		}
+		if req.PreserveVerifiedLegacyDefault && verifiedLegacy == nil &&
+			candidate.SourceKey == "" && candidate.UserID == req.UserID &&
+			candidate.Name == req.Name && candidate.Type == JobTypeCron &&
+			candidate.Spec != nil && candidate.Spec.Runtime == RuntimeStarlark &&
+			job.Spec.Runtime == RuntimeStarlark && candidate.Spec.Script == job.Spec.Script {
+			verifiedLegacy = candidate
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -896,6 +902,9 @@ func (s *Scheduler) EnsureJobFromScriptMissingOnly(
 	}
 	if existing != nil {
 		return cloneJobSnapshot(existing), false, nil
+	}
+	if verifiedLegacy != nil {
+		return cloneJobSnapshot(verifiedLegacy), false, nil
 	}
 
 	_, err = tx.ExecContext(ctx, `INSERT INTO cron_jobs

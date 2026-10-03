@@ -4013,6 +4013,7 @@ func (r k12CronRegistrar) EnsureMissing(ctx context.Context, kind string, spec k
 		job, created, err := r.sched.EnsureJobFromScriptMissingOnly(ctx, cron.AddJobRequest{
 			Name: spec.Name, Schedule: spec.Schedule, UserID: userID,
 			Platform: platform, ChatID: chatID, TZ: "Asia/Shanghai", Deliver: spec.Deliver, SourceKey: key,
+			PreserveVerifiedLegacyDefault: true,
 		}, spec.Runtime, spec.Script)
 		if err != nil {
 			return "", false, fmt.Errorf("k12 cron 缺项注册（已有任务保持不变）: %w", err)
