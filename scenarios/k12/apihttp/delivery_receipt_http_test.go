@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/apihttp"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/assembly"
@@ -54,7 +55,7 @@ func newServerWithReceiptTransport(
 	seed ...func(*sql.DB),
 ) http.Handler {
 	t.Helper()
-	db, err := sql.Open("sqlite", ":memory:")
+	db, err := sqlitefixture.Memory()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,6 +73,7 @@ func newServerWithReceiptTransport(
 		db,
 		fakeSolveExec{},
 		assembly.WithAccumulationMetadataDeriver(fixedAccumulationMetadataDeriver{}),
+		assembly.WithRenderer(fixedPDFRenderer{}),
 		assembly.WithDeliveryTransport(delivery),
 	)
 	if err != nil {

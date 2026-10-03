@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -13,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/hexagon-codes/hexclaw/channel"
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/messagecontent"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/apihttp"
@@ -133,7 +133,7 @@ func newCreativeWorkDeliveryHTTPFixture(
 	options ...assembly.Option,
 ) (*assembly.K12, http.Handler) {
 	t.Helper()
-	db, err := sql.Open("sqlite", ":memory:")
+	db, err := sqlitefixture.Memory()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -413,12 +413,35 @@ func TestFinalizeSendHasNoTargetAndZeroBindingKeepsDraft(t *testing.T) {
 	}
 	set, _ := finalized["set"].(map[string]any)
 	batch, _ := finalized["delivery_batch"].(map[string]any)
+	receipts := batch["receipts"].([]any)
 	if set["status"] != k12.PracticeStatusAssigned ||
 		set["delivery_batch_id"] == "" ||
 		set["delivery_target"] != nil ||
 		batch["status"] != string(k12.DeliveryBatchDelivered) ||
-		len(batch["receipts"].([]any)) != 2 {
+		len(receipts) != 4 {
 		t.Fatalf("finalize must bind assigned set to two-recipient batch: %v", finalized)
+	}
+	partsByBinding := map[string]map[messagecontent.PartKind]int{
+		"agent-rule:101": {},
+		"agent-rule:102": {},
+	}
+	for _, raw := range receipts {
+		receipt := raw.(map[string]any)
+		parts, exists := partsByBinding[receipt["binding_id"].(string)]
+		if !exists || receipt["status"] != string(k12.DeliveryDelivered) {
+			t.Fatalf("unexpected or undelivered recipient component: %v", receipt)
+		}
+		kind := messagecontent.PartKind(receipt["part_kind"].(string))
+		if kind != messagecontent.PartMarkdown &&
+			(kind != messagecontent.PartArtifact || receipt["part_mime"] != "application/pdf") {
+			t.Fatalf("recipient component must be markdown or PDF: %v", receipt)
+		}
+		parts[kind]++
+	}
+	for binding, parts := range partsByBinding {
+		if parts[messagecontent.PartMarkdown] != 1 || parts[messagecontent.PartArtifact] != 1 {
+			t.Fatalf("recipient %s must receive exactly one markdown and one PDF: %v", binding, parts)
+		}
 	}
 }
 
@@ -480,7 +503,10 @@ func TestCreativeWorkSendFreezesCurrentWorkAndLatestFeedback(t *testing.T) {
 		fakeSolveExec{},
 		assembly.WithWorkFeedbackGenerator(engineadapter.WorkFeedbackGenerateFunc(
 			func(context.Context, string, string, string) (string, error) {
-				return "柳枝的比喻有可见依据；可以追问风吹时的声音。", nil
+				return "## 可见证据\n原文写到「柳枝像绿色的丝带」。\n\n" +
+					"## 先这样肯定\n柳枝的比喻有可见依据。\n\n" +
+					"## 家长可以这样问或讲\n可以追问风吹时的声音。\n\n" +
+					"## 下一次只试一个点\n补充一个听觉细节。", nil
 			},
 		)),
 		assembly.WithDeliveryTransport(delivery),

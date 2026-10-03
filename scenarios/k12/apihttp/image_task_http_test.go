@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/apihttp"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/assembly"
@@ -283,7 +284,7 @@ type creativeWorkHTTPContract struct {
 func newImageTaskHTTPFixture(t *testing.T) imageTaskHTTPFixture {
 	t.Helper()
 	t.Setenv("HEXCLAW_ASSET_ROOT", t.TempDir())
-	db, err := sql.Open("sqlite", ":memory:")
+	db, err := sqlitefixture.Memory()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -660,18 +661,25 @@ func TestImageTaskHTTPCreativeConfirmationProjectionCarriesExactFrozenInput(t *t
 	}
 	_, out = waitImageTaskHTTPState(t, fixture, dispatchID, func(dispatch map[string]any) bool {
 		target, _ := dispatch["target_projection"].(map[string]any)
-		return target["status"] == string(k12.CreativeWorkIntakeAwaitingConfirmation)
+		progress, _ := dispatch["progress"].(map[string]any)
+		return target["status"] == string(k12.CreativeWorkIntakePromoted) &&
+			progress["state"] == "feedback_ready"
 	})
 	rawDispatch = out["dispatch"].(map[string]any)
 	rawTarget := rawDispatch["target_projection"].(map[string]any)
 	assertJSONExactKeys(t, rawTarget,
 		"canonical_content", "canonical_version", "conflicts",
-		"entry_kind", "intake_id", "kind", "promotion_policy",
-		"routing_provenance", "status", "work_type")
-	if rawTarget["canonical_version"] != float64(1) ||
-		rawTarget["canonical_content"] != fixture.ocr.result.CanonicalContent ||
-		rawTarget["status"] != string(k12.CreativeWorkIntakeAwaitingConfirmation) {
-		t.Fatalf("creative confirmation input drift: %#v", rawTarget)
+		"entry_kind", "intake_id", "kind", "notice", "outcome", "promotion_policy",
+		"promoted_generation_id", "promoted_work_id",
+		"routing_provenance", "status", "work", "work_type")
+	if rawTarget["canonical_version"] != float64(2) ||
+		rawTarget["canonical_content"] != "我的好爸[无法识别]" ||
+		rawTarget["status"] != string(k12.CreativeWorkIntakePromoted) ||
+		rawTarget["outcome"] != "partial" ||
+		rawTarget["entry_kind"] != string(k12.CreativeWorkEntryAuto) ||
+		rawTarget["promotion_policy"] != string(k12.CreativeWorkPromotionAutomatic) ||
+		rawTarget["routing_provenance"] != string(k12.ImageTaskRoutingModelClassified) {
+		t.Fatalf("creative frozen input drift: %#v", rawTarget)
 	}
 	conflicts := rawTarget["conflicts"].([]any)
 	if len(conflicts) != 1 {
@@ -679,6 +687,18 @@ func TestImageTaskHTTPCreativeConfirmationProjectionCarriesExactFrozenInput(t *t
 	}
 	assertJSONExactKeys(t, conflicts[0].(map[string]any),
 		"raw_text", "reason", "segment_id")
+	conflict := conflicts[0].(map[string]any)
+	if conflict["raw_text"] != "〔字迹不清〕" ||
+		conflict["reason"] != "illegible" || conflict["segment_id"] != "line-1-word-5" {
+		t.Fatalf("frozen conflict input drift: %#v", conflict)
+	}
+	workID, _ := rawTarget["promoted_work_id"].(string)
+	generationID, _ := rawTarget["promoted_generation_id"].(string)
+	work := rawTarget["work"].(map[string]any)
+	assertJSONExactKeys(t, work, "display_name", "work_id")
+	if workID == "" || generationID == "" || work["work_id"] != workID {
+		t.Fatalf("promoted work identity drift: %#v", rawTarget)
+	}
 }
 
 func TestImageTaskHTTPManualCreativeEntryAndCommitExactContract(t *testing.T) {
