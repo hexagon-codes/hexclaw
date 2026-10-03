@@ -6993,7 +6993,7 @@ func defaultSandboxDeniedPaths() []string {
 		return nil
 	}
 	appDir := filepath.Join(home, ".hexclaw")
-	return []string{
+	paths := []string{
 		filepath.Join(home, ".ssh"),
 		filepath.Join(home, ".aws"),
 		filepath.Join(home, ".config", "gcloud"),
@@ -7003,6 +7003,19 @@ func defaultSandboxDeniedPaths() []string {
 		filepath.Join(appDir, "hexclaw.yaml"),
 		filepath.Join(appDir, "data.db"),
 	}
+	if runtime.GOOS != "linux" {
+		return paths
+	}
+	// Linux 的掩蔽目标必须存在；不存在的默认凭据路径不能成为启动依赖。
+	// 其他检查错误仍交给沙箱处理，调用方显式配置的拒绝路径不在此过滤。
+	existing := paths[:0]
+	for _, path := range paths {
+		if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		existing = append(existing, path)
+	}
+	return existing
 }
 
 // mergeDeniedPaths 合并两组 deny 路径并去重（保留出现顺序）。
