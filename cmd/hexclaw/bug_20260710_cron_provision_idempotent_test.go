@@ -20,7 +20,6 @@ import (
 
 	"github.com/hexagon-codes/hexclaw/cron"
 	k12usecase "github.com/hexagon-codes/hexclaw/scenarios/k12/usecase"
-	"github.com/hexagon-codes/hexclaw/storage/migrate"
 
 	_ "modernc.org/sqlite"
 )
@@ -35,9 +34,7 @@ func newCronRegistrarFixture(t *testing.T) k12CronRegistrar {
 	// 否则失败原因会变成测试夹具的 "no such table"，而非待修复的原子幂等问题。
 	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = db.Close() })
-	if err := migrate.Run(context.Background(), db, migrate.All); err != nil {
-		t.Fatal(err)
-	}
+	// 调度器的生产初始化已创建并修复所需 Cron 表，无需重跑其他场景的迁移。
 	sched := cron.NewScheduler(db, nil, nil)
 	if err := sched.Init(context.Background()); err != nil {
 		t.Fatal(err)
