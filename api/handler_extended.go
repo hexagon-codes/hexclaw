@@ -873,6 +873,12 @@ func (s *Server) handleRunWorkflow(w http.ResponseWriter, r *http.Request) {
 	run := s.newWorkflowRun(wf, req.Input, nil)
 	s.workflowStore.mu.Lock()
 	s.workflowStore.addRun(run)
+	// 启动后台执行前复制初始快照，响应不读取执行中的可变记录。
+	snapshot := *run
+	if len(run.NodeResults) > 0 {
+		snapshot.NodeResults = make([]WorkflowNodeRun, len(run.NodeResults))
+		copy(snapshot.NodeResults, run.NodeResults)
+	}
 	s.workflowStore.mu.Unlock()
 
 	wfCtx, wfCancel := context.WithTimeout(context.Background(), 10*time.Minute)
@@ -881,12 +887,6 @@ func (s *Server) handleRunWorkflow(w http.ResponseWriter, r *http.Request) {
 		s.executeWorkflow(wfCtx, wf, run, req)
 	}()
 
-	// 深拷贝 run 快照，避免与 goroutine 并发修改竞态（浅拷贝共享 NodeResults 底层数组）
-	snapshot := *run
-	if len(run.NodeResults) > 0 {
-		snapshot.NodeResults = make([]WorkflowNodeRun, len(run.NodeResults))
-		copy(snapshot.NodeResults, run.NodeResults)
-	}
 	writeJSON(w, http.StatusOK, &snapshot)
 }
 
