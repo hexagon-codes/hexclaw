@@ -2,7 +2,6 @@ package engineadapter
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +13,7 @@ import (
 	"time"
 
 	"github.com/hexagon-codes/ai-core/llm"
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/resourcegov"
 	"github.com/hexagon-codes/hexclaw/scenario"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
@@ -289,10 +289,8 @@ func newDD036CrossLayerStore(
 ) (*k12storage.Store, scenario.ConstraintProvider) {
 	t.Helper()
 
-	db, err := sql.Open(
-		"sqlite",
-		filepath.Join(t.TempDir(), "dd036-cross-layer.db"),
-	)
+	path := filepath.Join(t.TempDir(), "dd036-cross-layer.db")
+	db, err := sqlitefixture.Open(path, path)
 	if err != nil {
 		t.Fatalf("open file SQLite: %v", err)
 	}
@@ -393,6 +391,7 @@ func (h *dd036CrossLayerHarness) start(
 		t.Fatalf("start grading job created=%v err=%v", created, err)
 	}
 	h.probe.jobID = job.Record.RecordID
+	h.probe.snapshot.ParentInstructions = job.Fields.ModelSnapshot.ParentInstructions
 	return job
 }
 

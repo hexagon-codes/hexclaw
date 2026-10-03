@@ -48,9 +48,36 @@ func TestArchiveRestoreV3WritingOCRUpgradesAndRestoresResolvableEvidence(t *test
 func TestArchiveRestoreAsWritingOCRKeepsWorkFeedbackEvidenceResolvableAndRollbackExact(t *testing.T) {
 	t.Setenv("HEXCLAW_ASSET_ROOT", t.TempDir())
 	f := newArchiveRestoreFixture(t)
+	sourceFixture := newArchiveRestoreFixture(t)
 	ctx := context.Background()
 	registerRestoreTarget(t, f)
 	bak, _ := archiveForRestoreAsWithWritingOCR(t, "mingming")
+	if err := sourceFixture.restore.RestoreHexbak(ctx, bak); err != nil {
+		t.Fatal(err)
+	}
+	feedbackDeps := usecase.Deps{
+		Records: sourceFixture.records,
+		Solver:  archiveOCRFeedbackSolver{},
+		WorkFeedbackRoute: func(
+			context.Context, string,
+		) (k12.ImageTaskRouteSnapshot, error) {
+			return k12.ImageTaskRouteSnapshot{
+				Provider: "test", Model: "feedback-v1",
+				Route: "test/feedback-v1", Capability: "text",
+				SelectionSource: "explicit", PolicyVersion: "test-v1",
+				PromptVersion: "writing-feedback-v1",
+			}, nil
+		},
+	}
+	// 点评调用先成为源归档事实，目标读取不产生迁移后的新调用。
+	sourceWork := findCreativeWorkRecord(t, sourceFixture, "mingming")
+	if _, err := feedbackDeps.GenerateWorkFeedback(ctx, "mingming", sourceWork.RecordID); err != nil {
+		t.Fatal(err)
+	}
+	bak, err := feedbackDeps.Backup(ctx, "mingming")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	restoreDeps := usecase.Deps{ArchiveMigrator: f.restore, Now: func() int64 { return 500 }}
 	result, err := restoreDeps.RestoreAs(ctx, usecase.RestoreAsRequest{
@@ -77,21 +104,7 @@ func TestArchiveRestoreAsWritingOCRKeepsWorkFeedbackEvidenceResolvableAndRollbac
 		t.Fatalf("target job/version mismatch: job=%+v version=%+v", job, version)
 	}
 
-	feedbackDeps := usecase.Deps{
-		Records: f.records,
-		Solver:  archiveOCRFeedbackSolver{},
-		WorkFeedbackRoute: func(
-			context.Context, string,
-		) (k12.ImageTaskRouteSnapshot, error) {
-			return k12.ImageTaskRouteSnapshot{
-				Provider: "test", Model: "feedback-v1",
-				Route: "test/feedback-v1", Capability: "text",
-				SelectionSource: "explicit", PolicyVersion: "test-v1",
-				PromptVersion: "writing-feedback-v1",
-			}, nil
-		},
-	}
-	view, err := feedbackDeps.GenerateWorkFeedback(ctx, "target-child", work.RecordID)
+	view, err := (usecase.Deps{Records: f.records}).GetCreativeWork(ctx, "target-child", work.RecordID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -288,7 +301,10 @@ func (archiveOCRFeedbackSolver) Solve(context.Context, string, string, string) (
 
 func (archiveOCRFeedbackSolver) GenerateWorkFeedback(context.Context, usecase.WorkFeedbackRequest) (usecase.WorkFeedbackOutput, error) {
 	return usecase.WorkFeedbackOutput{
-		Feedback:   "这句话的比喻很清楚；建议补充柳枝随风移动的细节。",
+		Feedback: "## 可见证据\n柳枝像绿色丝带，原稿的比喻清楚。\n" +
+			"## 先这样肯定\n用绿色丝带比喻柳枝，颜色与形状具体。\n" +
+			"## 家长可以这样问或讲\n请孩子比较柳枝和丝带的相似处，再说说柳枝随风怎样移动。\n" +
+			"## 下一次只试一个点\n只补充一处实际观察到的柳枝随风移动的细节。",
 		SkillStamp: "writing-feedback@1.0.0/embedded",
 	}, nil
 }
