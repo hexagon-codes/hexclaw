@@ -189,7 +189,7 @@ func TestSolveJointGuideNumericNodePreservesAudit(t *testing.T) {
 	}
 	result, err := NewSolveSkill(execute, nil).Execute(t.Context(), jointGuideArgs())
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("solve failed: %v; code_exec_result=%+v", err, codeExec.lastResult.Load())
 	}
 	jointGuideMetadata(t, result, method, jointGuideDigest(solution), "VALID")
 	if calls != 2 || codeExec.calls.Load() != 1 || result.Metadata["solve_evidence"] != "numeric_exec" {
