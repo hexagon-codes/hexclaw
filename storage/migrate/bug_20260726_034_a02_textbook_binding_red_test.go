@@ -197,6 +197,7 @@ func TestBUG20260726034A02_TextbookMigrationIsAdditiveAndRegistered(t *testing.T
 
 func TestBUG20260726034A02_ManifestAndBindingConstraintsAreDurable(t *testing.T) {
 	db, ctx := openBUG20260726034A02MigrationDB(t)
+	copyLatestMigrationFixture(t, db)
 	if err := Run(ctx, db, All); err != nil {
 		t.Fatal(err)
 	}

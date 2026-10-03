@@ -15,6 +15,7 @@ func TestK12ProblemAttemptsV19Migration(t *testing.T) {
 	}
 	defer db.Close()
 
+	copyLatestMigrationFixture(t, db)
 	if err := Run(context.Background(), db, All); err != nil {
 		t.Fatalf("migrate through V19: %v", err)
 	}

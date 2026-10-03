@@ -29,6 +29,7 @@ func TestK12ProblemSourceRecognitionV73IsRegisteredAndCreatesImmutableLedgers(t 
 	}
 	defer db.Close()
 	ctx := context.Background()
+	copyLatestMigrationFixture(t, db)
 	if err := Run(ctx, db, All); err != nil {
 		t.Fatalf("run full migration chain through V73: %v", err)
 	}

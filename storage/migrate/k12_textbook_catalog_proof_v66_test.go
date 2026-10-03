@@ -29,6 +29,7 @@ func TestK12TextbookCatalogProofV66IsRegisteredAndAdditive(t *testing.T) {
 	}
 	defer db.Close()
 	ctx := context.Background()
+	copyLatestMigrationFixture(t, db)
 	if err := Run(ctx, db, All); err != nil {
 		t.Fatal(err)
 	}

@@ -182,6 +182,7 @@ func TestK12ProblemSourceReprocessV72PageAssetAndLeaseConstraints(t *testing.T) 
 	}
 	defer db.Close()
 	ctx := context.Background()
+	copyLatestMigrationFixture(t, db)
 	if err := Run(ctx, db, All); err != nil {
 		t.Fatalf("run full migration chain: %v", err)
 	}

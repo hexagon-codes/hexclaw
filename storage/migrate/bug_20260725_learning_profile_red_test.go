@@ -3,11 +3,109 @@ package migrate
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
+	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
-	_ "modernc.org/sqlite"
+	modernsqlite "modernc.org/sqlite"
 )
+
+var (
+	latestMigrationFixtureOnce sync.Once
+	latestMigrationFixtureData []byte
+	latestMigrationFixtureErr  error
+)
+
+// copyLatestMigrationFixture 向原连接复制独立空库，保留目标 DSN、PRAGMA 和清理语义。
+func copyLatestMigrationFixture(t *testing.T, db *sql.DB) {
+	t.Helper()
+	latestMigrationFixtureOnce.Do(func() {
+		directory, err := os.MkdirTemp("", "hexclaw-migrate-fixture-template-")
+		if err != nil {
+			latestMigrationFixtureErr = err
+			return
+		}
+		defer func() {
+			latestMigrationFixtureErr = errors.Join(latestMigrationFixtureErr, os.RemoveAll(directory))
+		}()
+		path := filepath.Join(directory, "template.db")
+		template, err := sql.Open("sqlite", path)
+		if err != nil {
+			latestMigrationFixtureErr = err
+			return
+		}
+		template.SetMaxOpenConns(1)
+		migrationErr := Run(context.Background(), template, All)
+		closeErr := template.Close()
+		if err := errors.Join(migrationErr, closeErr); err != nil {
+			latestMigrationFixtureErr = err
+			return
+		}
+		latestMigrationFixtureData, latestMigrationFixtureErr = os.ReadFile(path)
+	})
+	if latestMigrationFixtureErr != nil {
+		t.Fatalf("prepare latest migration fixture: %v", latestMigrationFixtureErr)
+	}
+
+	path := filepath.Join(t.TempDir(), "fixture.db")
+	if err := os.WriteFile(path, latestMigrationFixtureData, 0600); err != nil {
+		t.Fatalf("copy latest migration fixture: %v", err)
+	}
+	sourcePath, err := filepath.Abs(path)
+	if err != nil {
+		t.Fatalf("resolve migration fixture source: %v", err)
+	}
+	uriPath := filepath.ToSlash(sourcePath)
+	if uriPath[0] != '/' {
+		uriPath = "/" + uriPath
+	}
+	sourceURI := (&url.URL{Scheme: "file", Path: uriPath}).String()
+	connection, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatalf("acquire migration fixture connection: %v", err)
+	}
+	restoreErr := connection.Raw(func(driverConnection any) error {
+		restorer, ok := driverConnection.(interface {
+			NewRestore(string) (*modernsqlite.Backup, error)
+		})
+		if !ok {
+			return errors.New("SQLite driver does not support fixture restore")
+		}
+		backup, err := restorer.NewRestore(sourceURI)
+		if err != nil {
+			return fmt.Errorf("start migration fixture restore: %w", err)
+		}
+		if backup == nil {
+			return errors.New("migration fixture restore returned no backup")
+		}
+		remaining, stepErr := backup.Step(-1)
+		finishErr := backup.Finish()
+		if remaining {
+			stepErr = errors.Join(stepErr, errors.New("migration fixture restore did not complete"))
+		}
+		return errors.Join(stepErr, finishErr)
+	})
+	if restoreErr == nil {
+		result, err := connection.ExecContext(context.Background(),
+			`UPDATE backend_metadata SET value=lower(hex(randomblob(16))) WHERE key='backend_id'`)
+		if err != nil {
+			restoreErr = fmt.Errorf("reset migration fixture backend identity: %w", err)
+		} else if rows, err := result.RowsAffected(); err != nil {
+			restoreErr = fmt.Errorf("inspect migration fixture backend identity: %w", err)
+		} else if rows != 1 {
+			restoreErr = fmt.Errorf("migration fixture backend identity rows=%d, want 1", rows)
+		}
+	}
+	closeErr := connection.Close()
+	if err := errors.Join(restoreErr, closeErr); err != nil {
+		t.Fatalf("restore latest migration fixture: %v", err)
+	}
+}
 
 func openBUG20260725Latest(t *testing.T) *sql.DB {
 	t.Helper()
@@ -17,6 +115,7 @@ func openBUG20260725Latest(t *testing.T) *sql.DB {
 	}
 	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = db.Close() })
+	copyLatestMigrationFixture(t, db)
 	if err := Run(context.Background(), db, All); err != nil {
 		t.Fatalf("migrate latest: %v", err)
 	}
