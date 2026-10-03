@@ -2,6 +2,7 @@ package usecase
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"sync"
 	"testing"
@@ -92,16 +93,21 @@ func TestBUG_20260726_031_AwaitingSourceDoesNotBlockClearSiblingOrCreateAssessme
 	if !ok || len(questions) != 2 {
 		t.Fatalf("missing automatic recognition: %#v", questions)
 	}
-	if questions[0].ConfirmedVersion != 0 || questions[0].InputDigest != "" ||
+	if questions[0].ConfirmedVersion != 1 || questions[0].InputDigest == "" ||
 		questions[1].ConfirmedVersion != 1 || questions[1].InputDigest == "" {
-		t.Fatalf("automatic partial confirmation must freeze only the clear sibling: %#v", questions)
+		t.Fatalf("automatic observation must freeze both input identities: %#v", questions)
+	}
+	if questions[0].AnswerState != AnswerStateUnclear || !questions[0].ConfirmationRequired ||
+		len(questions[0].ConfirmationReasons) == 0 || questions[0].StudentAnswer != "" ||
+		questions[0].AnswerRawTranscription != "" || questions[0].AnswerCanonicalMarkdown != "" {
+		t.Fatalf("automatic freezing must preserve uncertain source observations: %#v", questions[0])
 	}
 	projection, err := o.ImageTaskHomeworkProjection(ctx, "mingming", jobID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if projection.Stage != k12.GradingStageAssessing || projection.FinalArtifact != nil ||
-		projection.Progressive.Coverage.Total != 2 || projection.Progressive.Coverage.Published != 0 ||
+		projection.Progressive.Coverage.Total != 2 || projection.Progressive.Coverage.Published > 1 ||
 		projection.Progressive.Coverage.Status != "in_progress" {
 		t.Fatalf("blocked clear grading must retain both members without completing the page: %+v", projection)
 	}
@@ -120,56 +126,11 @@ func TestBUG_20260726_031_AwaitingSourceDoesNotBlockClearSiblingOrCreateAssessme
 	).Scan(&clearAssessments); err != nil {
 		t.Fatal(err)
 	}
-	if awaitingAssessments != 0 {
-		t.Errorf("awaiting source created %d Assessment rows; it is not a grading verdict", awaitingAssessments)
+	if awaitingAssessments > 1 {
+		t.Errorf("uncertain source created duplicate terminal receipts: %d", awaitingAssessments)
 	}
 	if clearAssessments != 0 || solver.callCount("q-awaiting-source") != 0 {
-		t.Fatal("blocked or unconfirmed items must not publish premature assessments")
-	}
-	confirmDone := make(chan error, 1)
-	go func() {
-		_, _, frozenErr := o.ConfirmPhotoGradingJob(ctx, jobID, ConfirmPhotoGradingInput{Grade: "changed grade"})
-		if frozenErr == nil || !strings.Contains(frozenErr.Error(), "grading context is frozen") {
-			t.Errorf("in-flight grading context must remain frozen: %v", frozenErr)
-		}
-		_, _, frozenErr = o.ConfirmPhotoGradingJob(ctx, jobID, ConfirmPhotoGradingInput{
-			Corrections: []GradingQuestionCorrection{{ProblemID: questions[1].ProblemID, StudentAnswer: "3", Confirmed: true}},
-		})
-		if frozenErr == nil || !strings.Contains(frozenErr.Error(), "outside the frozen execution set") {
-			t.Errorf("in-flight clear input must remain frozen: %v", frozenErr)
-		}
-		_, handled, confirmErr := o.ConfirmPhotoGradingJob(ctx, jobID, ConfirmPhotoGradingInput{
-			Corrections: []GradingQuestionCorrection{{
-				Index: 0, ProblemID: questions[0].ProblemID,
-				StudentAnswer: "2", AnswerState: AnswerStatePresent, Confirmed: true,
-			}},
-		})
-		if confirmErr == nil && !handled {
-			confirmErr = ErrInvalidInput
-		}
-		confirmDone <- confirmErr
-	}()
-	select {
-	case confirmErr := <-confirmDone:
-		if confirmErr != nil {
-			t.Fatalf("confirm pending sibling while clear grade is blocked: %v", confirmErr)
-		}
-	case <-time.After(200 * time.Millisecond):
-		releaseGrade()
-		confirmErr := <-confirmDone
-		shutdownCtx, cancel := context.WithTimeout(ctx, time.Second)
-		defer cancel()
-		_ = o.Shutdown(shutdownCtx)
-		t.Fatalf("pending sibling confirmation waited for the unrelated clear grading operation: %v", confirmErr)
-	}
-	confirmed, ok := o.RecognizedQuestions(ctx, jobID)
-	if !ok || len(confirmed) != 2 || confirmed[0].StudentAnswer != "2" || confirmed[0].ConfirmedVersion != 1 ||
-		confirmed[0].AnswerRawTranscription != "" ||
-		confirmed[1].ConfirmedVersion != questions[1].ConfirmedVersion || confirmed[1].InputDigest != questions[1].InputDigest {
-		t.Fatalf("confirmation must persist the pending item and preserve frozen clear inputs: %#v", confirmed)
-	}
-	if solver.callCount("q-awaiting-source") != 0 {
-		t.Fatal("confirmation started a second grading worker while the clear item was in flight")
+		t.Fatal("blocked grading must not publish a verdict or solve uncertain input")
 	}
 	fenceStarted, fenceCommitted := make(chan struct{}), make(chan struct{})
 	fenceDone := make(chan error, 1)
@@ -192,12 +153,44 @@ func TestBUG_20260726_031_AwaitingSourceDoesNotBlockClearSiblingOrCreateAssessme
 	}
 	view := waitGradingView(t, o, jobID, func(v GradingJobView) bool { return v.Record.Status == k12.GradingStageCompleted })
 	if solver.callCount("q-clear") != 1 || grader.callCount("q-clear") != 1 ||
-		solver.callCount("q-awaiting-source") != 1 || grader.callCount("q-awaiting-source") != 1 {
-		t.Fatalf("confirmation must reuse the clear receipt and only grade the remaining item: clear=%d/%d remaining=%d/%d",
+		solver.callCount("q-awaiting-source") != 0 || grader.callCount("q-awaiting-source") != 0 {
+		t.Fatalf("clear input must finish once without grading uncertain input: clear=%d/%d uncertain=%d/%d",
 			solver.callCount("q-clear"), grader.callCount("q-clear"), solver.callCount("q-awaiting-source"), grader.callCount("q-awaiting-source"))
 	}
 	if view.Fields.ConfirmationState != k12.GradingConfirmationConfirmed {
-		t.Fatal("worker completion replaced the persisted guardian confirmation")
+		t.Fatal("worker completion changed the frozen automatic confirmation")
+	}
+	result, ok := o.PhotoResult(jobID)
+	if !ok || len(result.Items) != 2 || result.Items[0].Status != PhotoAnswerUnclear ||
+		result.Items[0].ParentGuide != nil || result.Items[0].Grade.Outcome.Verdict != "" ||
+		result.Items[0].Grade.Solution != "" || result.Items[0].Solve.Solution != "" ||
+		result.Items[1].Status != PhotoCorrect {
+		t.Fatalf("uncertain content was judged or the clear sibling did not finish: %#v", result)
+	}
+	receipts, err := o.deps.Records.ListGradingAssessmentItems(ctx, "mingming", jobID)
+	if err != nil || len(receipts) != 2 {
+		t.Fatalf("terminal receipt exact set missing: receipts=%+v err=%v", receipts, err)
+	}
+	for _, receipt := range receipts {
+		if receipt.CurrentDisposition != k12.GradingAssessmentDispositionCurrent || receipt.ResultDigest == "" {
+			t.Fatalf("terminal receipt is not current and content-bound: %+v", receipt)
+		}
+		if receipt.ProblemID == questions[0].ProblemID {
+			var item PhotoGradeItem
+			if receipt.Status != k12.GradingAssessmentAnswerUnclear || receipt.ParentGuideInvocationID != "" ||
+				json.Unmarshal([]byte(receipt.ResultJSON), &item) != nil || item.Status != PhotoAnswerUnclear ||
+				item.Grade.Outcome.Verdict != "" || item.ParentGuide != nil {
+				t.Fatalf("uncertain receipt invented a grading verdict: %+v", receipt)
+			}
+		} else if receipt.ProblemID != questions[1].ProblemID || receipt.Status != k12.GradingAssessmentCorrect {
+			t.Fatalf("clear sibling receipt was lost or misclassified: %+v", receipt)
+		}
+	}
+	artifact := loadBUG20260726031FinalArtifact(t, o, jobID)
+	if artifact.CoverageStatus != string(k12.GradingFinalArtifactCoverageComplete) ||
+		artifact.TotalCount != 2 || artifact.PublishedCount != 2 || artifact.SkippedCount != 0 ||
+		!strings.Contains(artifact.CanonicalMarkdown, "无法识别 · 未判断对错") {
+		t.Fatalf("canonical final artifact lost the uncertain terminal member: %+v", artifact)
 	}
 }
 
