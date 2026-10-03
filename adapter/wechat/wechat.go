@@ -290,10 +290,10 @@ func (a *WechatAdapter) handleMessage(w http.ResponseWriter, r *http.Request) {
 
 	// 尝试 5 秒内被动回复
 	ctx, cancel := context.WithTimeout(r.Context(), 4500*time.Millisecond)
+	defer cancel()
 
 	replyCh := make(chan string, 1)
 	go func() {
-		defer cancel()
 		unified := &adapter.Message{
 			ID:         "wechat-" + idgen.ShortID(),
 			Platform:   adapter.PlatformWechat,
@@ -311,13 +311,17 @@ func (a *WechatAdapter) handleMessage(w http.ResponseWriter, r *http.Request) {
 		reply, err := a.handler(trace.Detach(ctx), unified)
 		if err != nil {
 			logger.Error("error", "error", err)
+			cancel()
 			return
 		}
-		if reply != nil {
-			select {
-			case replyCh <- adapter.NormalizeMathText(reply.Content): // 被动回复同样降级（BUG-20260712-P）
-			default:
-			}
+		if reply == nil {
+			cancel()
+			return
+		}
+		// 有效回复入队后不取消等待，避免与已就绪的回复竞争超时分支。
+		select {
+		case replyCh <- adapter.NormalizeMathText(reply.Content): // 被动回复同样降级（BUG-20260712-P）
+		default:
 		}
 	}()
 

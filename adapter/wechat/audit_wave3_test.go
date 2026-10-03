@@ -275,7 +275,11 @@ func postSigned(token, body string) *http.Request {
 // 走被动回复，HTTP 响应应是 XML，且 ToUserName/FromUserName 正确互换。
 func TestHandleMessage_TextPassiveReply(t *testing.T) {
 	const token = "tk"
-	a := New(config.WechatConfig{Token: token, AppID: "wx", AppSecret: "s"})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "unexpected asynchronous reply", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(srv.Close)
+	a := newWithServer(t, config.WechatConfig{Token: token, AppID: "wx", AppSecret: "s"}, srv)
 
 	var gotMsg *adapter.Message
 	a.handler = func(_ context.Context, m *adapter.Message) (*adapter.Reply, error) {
