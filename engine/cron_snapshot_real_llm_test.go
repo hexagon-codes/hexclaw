@@ -34,11 +34,11 @@ import (
 
 	"github.com/hexagon-codes/hexagon/rag/splitter"
 	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/knowledge"
 	"github.com/hexagon-codes/hexclaw/llmrouter"
 	"github.com/hexagon-codes/hexclaw/skill"
 	"github.com/hexagon-codes/hexclaw/skill/builtin"
-	sqlitestore "github.com/hexagon-codes/hexclaw/storage/sqlite"
 )
 
 // snapshotTitleShapeRe matches "<base> YYYY-MM-DD HH:MM:SS" with an optional
@@ -76,7 +76,7 @@ func TestRealLLM_CronSnapshotChain(t *testing.T) {
 
 	ctx := context.Background()
 	dir := t.TempDir()
-	store, err := sqlitestore.New(filepath.Join(dir, "cronkb.db"))
+	store, err := sqlitefixture.New(filepath.Join(dir, "cronkb.db"))
 	if err != nil {
 		t.Fatalf("store: %v", err)
 	}

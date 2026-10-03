@@ -10,14 +10,14 @@ import (
 	"github.com/hexagon-codes/hexagon"
 	"github.com/hexagon-codes/hexclaw/config"
 	"github.com/hexagon-codes/hexclaw/instances"
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	hexmcp "github.com/hexagon-codes/hexclaw/mcp"
-	sqlitestore "github.com/hexagon-codes/hexclaw/storage/sqlite"
 	"github.com/hexagon-codes/hexclaw/webhook"
 )
 
 func newTestInstanceMgr(t *testing.T) *instances.Manager {
 	t.Helper()
-	store, err := sqlitestore.New(filepath.Join(t.TempDir(), "instances.db"))
+	store, err := sqlitefixture.New(filepath.Join(t.TempDir(), "instances.db"))
 	if err != nil {
 		t.Fatalf("store: %v", err)
 	}
@@ -30,7 +30,7 @@ func newTestInstanceMgr(t *testing.T) *instances.Manager {
 
 func newTestWebhookMgr(t *testing.T) *webhook.Manager {
 	t.Helper()
-	store, err := sqlitestore.New(filepath.Join(t.TempDir(), "webhooks.db"))
+	store, err := sqlitefixture.New(filepath.Join(t.TempDir(), "webhooks.db"))
 	if err != nil {
 		t.Fatalf("store: %v", err)
 	}

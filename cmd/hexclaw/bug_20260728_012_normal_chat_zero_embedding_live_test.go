@@ -22,11 +22,11 @@ import (
 	"github.com/hexagon-codes/hexclaw/config"
 	"github.com/hexagon-codes/hexclaw/egress"
 	"github.com/hexagon-codes/hexclaw/engine"
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/knowledge"
 	"github.com/hexagon-codes/hexclaw/llmrouter"
 	"github.com/hexagon-codes/hexclaw/localinfer"
 	"github.com/hexagon-codes/hexclaw/skill"
-	sqlitestore "github.com/hexagon-codes/hexclaw/storage/sqlite"
 )
 
 const (
@@ -124,7 +124,7 @@ func TestBUG20260728012NormalChatZeroEmbeddingWithLocalOllama(t *testing.T) {
 	router.SetEgressPolicy(&egress.Policy{})
 	router.SetLocalInferenceCoordinator(coordinator)
 
-	messageStore, err := sqlitestore.New(cfg.Storage.SQLite.Path)
+	messageStore, err := sqlitefixture.New(cfg.Storage.SQLite.Path)
 	if err != nil {
 		t.Fatalf("open isolated chat SQLite: error_type=%T", err)
 	}

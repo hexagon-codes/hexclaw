@@ -10,10 +10,10 @@ import (
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/config"
 	"github.com/hexagon-codes/hexclaw/egress"
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/llmrouter"
 	"github.com/hexagon-codes/hexclaw/memory"
 	"github.com/hexagon-codes/hexclaw/skill"
-	sqlitestore "github.com/hexagon-codes/hexclaw/storage/sqlite"
 )
 
 // BUG-20260711 全链路 E2E：复现截图那条「多轮云端对话被 egress 硬拦死」。
@@ -29,7 +29,7 @@ import (
 func newEgressGuardedCloudEngine(t *testing.T, provider hexagon.Provider, mem *memory.FileMemory) *ReActEngine {
 	t.Helper()
 	dir := t.TempDir()
-	store, err := sqlitestore.New(filepath.Join(dir, "e2e.db"))
+	store, err := sqlitefixture.New(filepath.Join(dir, "e2e.db"))
 	if err != nil {
 		t.Fatalf("创建存储失败: %v", err)
 	}

@@ -81,11 +81,17 @@ Compose 留出 60 秒停止窗口，覆盖服务当前 30 秒收尾预算。已�
 
 | 入口 | 执行范围 | 与部署／发布的关系 |
 | --- | --- | --- |
-| `feat/**` 分支 push | [CI](../.github/workflows/ci.yml) 使用 `go test -run '^$' ./...` 编译应用和测试包，不执行测试用例 | 部署已启用且分支等于 `HEXCLAW_DEPLOY_BRANCH` 时，CI 编译成功就会触发自动云端部署；不需要先合并 main |
-| main push／指向 main 的 PR | Linux 全量测试及 race、Windows 编译与 sandbox、macOS sandbox；K12、render、Sandbox CodeExec 按各自路径规则运行 | PR 验证不触发云端部署；main push 也只在 main 是已配置部署分支时部署。feature 编译成功不代表这些检查通过 |
+| `feat/**` 分支 push（纯说明文档改动除外） | [CI](../.github/workflows/ci.yml) 使用 `go test -run '^$' ./...` 编译应用和测试包，不执行测试用例 | 部署已启用且分支等于 `HEXCLAW_DEPLOY_BRANCH` 时，CI 编译成功就会触发自动云端部署；不需要先合并 main |
+| main push／指向 main 的 PR（纯说明文档改动除外） | Linux 全量测试及 race、Windows 编译与 sandbox、macOS sandbox；K12 仅在相关 main push／PR 运行，render、Sandbox CodeExec 按各自路径规则运行 | PR 验证不触发云端部署；main push 也只在 main 是已配置部署分支时部署。feature 编译成功不代表这些检查通过 |
 | `v*` Tag push／手动指定已有 Tag | [Release](../.github/workflows/release.yml) 构建 Linux、macOS、Windows 二进制，生成 checksum、GitHub Release 和 Linux amd64 镜像 | 独立发布入口，只依赖自身构建任务，不等待主 CI 的完整测试；不会代替分支自动部署或业务验收 |
 
-CI 当前不提供手动触发入口。render 的 main push 路径包含工作流自身，PR 路径只包含渲染代码；仅修改 CI／render 工作流后推送 feature 分支，不会运行 render 的三平台检查。移除每周上游版本提示及覆盖率上传后，main／PR 的既有测试门禁仍保留，Windows／macOS sandbox 共用一个平台矩阵。
+分支 push／PR 仅修改 `README*.md`、`CHANGELOG.md`、`CONTRIBUTING.md`、`SECURITY*.md`、`docs/**/*.md` 或 `LICENSE` 时不触发 CI，因此该提交不会触发 CI 构建或接续自动云端部署。此范围只包含说明文档；其他目录的 Markdown 可能是 `go:embed` 运行资源，不能广义忽略 `**/*.md`。独立 Tag Release 入口不受这项分支文档过滤影响。
+
+CI 与 K12 使用 `GOWORK=off`、`GOFLAGS=-mod=readonly`，按已发布依赖检查且不改写依赖锁定文件。Linux 当前命令为 `go test -race -count=1 -timeout 20m ./...`：单包测试超时 20 分钟，job 总预算 40 分钟。K12 不再重复执行 feature push，确定性 harness 和按密钥启用的真实模型评测仍保留。
+
+业务测试的独立空库复用真实迁移模板以减少重复迁移，不改变生产 schema 或跳过 race。Windows 的真实 code_exec 集成仍受 toolkit 工具链访问能力门控，平台 sandbox 硬门禁继续执行；这类跳过不代表 Windows Go 执行已验证，也不影响 Linux 镜像部署的执行边界。完整 CI、专项检查和部署回执必须分别核对，单项成功不能抵消其他失败。
+
+CI 当前不提供手动触发入口。render 的 main push 路径包含工作流自身，PR 路径只包含渲染代码；仅修改 CI／render 工作流后推送 feature 分支，不会运行 render 的三平台检查。移除每周上游版本提示及覆盖率上传后，main／PR 的既有测试检查内容仍保留，Windows／macOS sandbox 共用一个平台矩阵。
 
 `workflow_run` 的监听文件必须存在于仓库默认分支；实际构建仍检出上游 CI 已通过的 `head_sha`。`HEXCLAW_DEPLOY_BRANCH` 应选择既有 CI 监听的分支，不能只配置变量而没有相应 CI 运行。首次接入时若该提交的 CI 在监听文件合入前已经完成，可重新运行该次 CI，让完成事件接续部署，无需创建空提交。
 

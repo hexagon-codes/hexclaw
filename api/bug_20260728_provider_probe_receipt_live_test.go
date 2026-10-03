@@ -12,7 +12,7 @@ import (
 	"testing"
 
 	"github.com/hexagon-codes/hexclaw/config"
-	sqlitestore "github.com/hexagon-codes/hexclaw/storage/sqlite"
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 )
 
 const (
@@ -40,7 +40,7 @@ func TestBUG20260728ProviderProbeReceipt_RealHexClawGPT(t *testing.T) {
 		t.Fatal("the required local HexClaw-GPT provider has no usable runtime credential")
 	}
 
-	store, err := sqlitestore.New(filepath.Join(t.TempDir(), "provider-probe-live.db"))
+	store, err := sqlitefixture.New(filepath.Join(t.TempDir(), "provider-probe-live.db"))
 	if err != nil {
 		t.Fatalf("open isolated receipt store: error_type=%T", err)
 	}

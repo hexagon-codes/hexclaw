@@ -1,12 +1,12 @@
 name: K12 Eval Gate
 
 # K12 v0.5.0-beta 发版门（架构文档 §11 / 发版 checklist）：
-#  - harness 门（每次跑，无 key）：eval 集完整性 + 阈值判定逻辑 + 作文不代写启发式 + 超纲检出。
+#  - harness 门（相关 PR/main，无 key）：eval 集完整性 + 阈值判定逻辑 + 作文不代写启发式 + 超纲检出。
 #  - 真模型门（env-gated）：配置 HEXCLAW_REAL_LLM_EVAL secret 后跑真模型批改准确率 ≥90%；
 #    无 secret 时 TestK12EvalGate_RealModel 自动 skip（不阻断 fork PR）。
 on:
   push:
-    branches: [main, "feat/**"]
+    branches: [main]
     paths:
       - "**.go"
       - "go.mod"
@@ -34,6 +34,8 @@ concurrency:
 
 env:
   GOPRIVATE: github.com/hexagon-codes/*
+  GOWORK: "off"
+  GOFLAGS: "-mod=readonly"
 
 jobs:
   eval-gate:
@@ -50,7 +52,7 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.sum
 
-      # harness 门 + 阈值逻辑 + 学科/超纲/不代写维度完整性（确定性，每次卡）。
+      # harness 门 + 阈值逻辑 + 学科/超纲/不代写维度完整性（确定性，相关 PR/main 校验）。
       - name: K12 eval harness gate
         run: go test -race -count=1 -run 'TestEvalGate|TestEvalCases_NonEmpty|TestRunEval|TestLooksLikeGhostwrite|TestSubjectEvalCases|TestK12EvalGate' ./scenarios/k12/usecase/
 

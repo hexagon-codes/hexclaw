@@ -6,10 +6,67 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
+
+// codeExecCanonicalToolchainPath 由内核解析工具链目录和可执行文件的 junction；
+// 调用方仍对最终路径执行原有的 no-follow 和文件身份校验。
+func codeExecCanonicalToolchainPath(path string) (canonical string, returnErr error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	pathUTF16, err := windows.UTF16PtrFromString(abs)
+	if err != nil {
+		return "", err
+	}
+	handle, err := windows.CreateFile(
+		pathUTF16,
+		0,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_FLAG_BACKUP_SEMANTICS,
+		0,
+	)
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		returnErr = errors.Join(returnErr, windows.CloseHandle(handle))
+	}()
+	bufferSize := uint32(260)
+	buffer := make([]uint16, bufferSize)
+	for {
+		n, err := windows.GetFinalPathNameByHandle(
+			handle,
+			&buffer[0],
+			bufferSize,
+			0, // FILE_NAME_NORMALIZED 与 VOLUME_NAME_DOS 均为零，返回规范化的 DOS 路径。
+		)
+		if err != nil {
+			return "", err
+		}
+		if n >= bufferSize {
+			bufferSize = n
+			buffer = make([]uint16, bufferSize)
+			continue
+		}
+		canonical = windows.UTF16ToString(buffer[:n])
+		if len(canonical) >= 8 && strings.EqualFold(canonical[:8], `\\?\UNC\`) {
+			canonical = `\\` + canonical[8:]
+		} else if strings.HasPrefix(canonical, `\\?\`) {
+			canonical = canonical[4:]
+		}
+		if !filepath.IsAbs(canonical) {
+			return "", errors.New("toolchain final path is not absolute")
+		}
+		return filepath.Clean(canonical), nil
+	}
+}
 
 type codeExecWindowsFileBasicInfo struct {
 	CreationTime   int64

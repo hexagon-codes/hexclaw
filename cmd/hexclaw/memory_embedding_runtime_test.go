@@ -20,11 +20,11 @@ import (
 	"github.com/hexagon-codes/hexclaw/config"
 	"github.com/hexagon-codes/hexclaw/egress"
 	"github.com/hexagon-codes/hexclaw/engine"
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/knowledge"
 	"github.com/hexagon-codes/hexclaw/llmrouter"
 	"github.com/hexagon-codes/hexclaw/memory"
 	"github.com/hexagon-codes/hexclaw/skill"
-	sqlitestore "github.com/hexagon-codes/hexclaw/storage/sqlite"
 )
 
 // HTTP 边界只提供向量；运行时代、缓存、出口规则、文件记忆与引擎使用真实实现。
@@ -194,7 +194,7 @@ func TestMemoryEmbeddingReloadReachesChatWithoutRewritingMemory(t *testing.T) {
 	cfg.LLM.Providers["chat"] = config.LLMProviderConfig{Model: "test-chat", BaseURL: chat.URL + "/v1", Compatible: "openai", Locality: config.ProviderLocalityCloud}
 	router := llmrouter.NewWithProviders(cfg.LLM, map[string]hexagon.Provider{"chat": hexagon.NewOpenAI("test-placeholder", hexagon.OpenAIWithBaseURL(chat.URL+"/v1"))})
 	router.SetEgressPolicy(policy)
-	store, err := sqlitestore.New(filepath.Join(dir, "chat.db"))
+	store, err := sqlitefixture.New(filepath.Join(dir, "chat.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

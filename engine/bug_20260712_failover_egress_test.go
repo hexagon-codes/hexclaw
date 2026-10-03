@@ -29,10 +29,10 @@ import (
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/config"
 	"github.com/hexagon-codes/hexclaw/egress"
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/llmrouter"
 	"github.com/hexagon-codes/hexclaw/memory"
 	"github.com/hexagon-codes/hexclaw/skill"
-	sqlitestore "github.com/hexagon-codes/hexclaw/storage/sqlite"
 )
 
 const failoverEgressMemMarker = "FOEGRESS_用户是杭州的K12家长孩子上五年级"
@@ -42,7 +42,7 @@ const failoverEgressMemMarker = "FOEGRESS_用户是杭州的K12家长孩子上�
 func newFailoverEgressEngine(t *testing.T, local, cloud hexagon.Provider, localName, cloudName string) *ReActEngine {
 	t.Helper()
 	dir := t.TempDir()
-	store, err := sqlitestore.New(filepath.Join(dir, "foegress.db"))
+	store, err := sqlitefixture.New(filepath.Join(dir, "foegress.db"))
 	if err != nil {
 		t.Fatalf("创建存储失败: %v", err)
 	}

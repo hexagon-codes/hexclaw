@@ -32,11 +32,11 @@ import (
 	"github.com/hexagon-codes/hexagon/rag/splitter"
 	"github.com/hexagon-codes/hexclaw/config"
 	"github.com/hexagon-codes/hexclaw/cron"
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/knowledge"
 	"github.com/hexagon-codes/hexclaw/llmrouter"
 	"github.com/hexagon-codes/hexclaw/skill"
 	"github.com/hexagon-codes/hexclaw/skill/builtin"
-	sqlitestore "github.com/hexagon-codes/hexclaw/storage/sqlite"
 	"github.com/hexagon-codes/hexclaw/webhook"
 )
 
@@ -70,7 +70,7 @@ func TestRealLLM_WebhookCronChain(t *testing.T) {
 
 	ctx := context.Background()
 	dir := t.TempDir()
-	store, err := sqlitestore.New(filepath.Join(dir, "chain.db"))
+	store, err := sqlitefixture.New(filepath.Join(dir, "chain.db"))
 	if err != nil {
 		t.Fatalf("store: %v", err)
 	}

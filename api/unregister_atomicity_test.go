@@ -8,12 +8,12 @@ import (
 	"testing"
 
 	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	agentrouter "github.com/hexagon-codes/hexclaw/router"
-	sqlitestore "github.com/hexagon-codes/hexclaw/storage/sqlite"
 )
 
 func TestHandleUnregisterAgentDefaultReassignmentFailureRollsBackEverything(t *testing.T) {
-	store, err := sqlitestore.New(filepath.Join(t.TempDir(), "atomic-unregister.db"))
+	store, err := sqlitefixture.New(filepath.Join(t.TempDir(), "atomic-unregister.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

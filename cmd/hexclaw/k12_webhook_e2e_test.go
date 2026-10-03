@@ -15,6 +15,7 @@ import (
 	"time"
 
 	platformapi "github.com/hexagon-codes/hexclaw/api"
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	k12 "github.com/hexagon-codes/hexclaw/scenarios/k12"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/assembly"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/assetstore"
@@ -34,7 +35,7 @@ func (k12WebhookSolveStub) Execute(context.Context, map[string]any) (*skill.Resu
 
 func newK12WebhookRuntime(t *testing.T) *assembly.K12 {
 	t.Helper()
-	db, err := sql.Open("sqlite", ":memory:")
+	db, err := sqlitefixture.Memory()
 	if err != nil {
 		t.Fatal(err)
 	}

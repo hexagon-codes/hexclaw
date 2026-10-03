@@ -4,8 +4,13 @@ package builtin
 
 import (
 	"os"
+	"path/filepath"
 	"syscall"
 )
+
+func codeExecCanonicalToolchainPath(path string) (string, error) {
+	return filepath.EvalSymlinks(path)
+}
 
 func codeExecPlatformFileIdentity(file *os.File, info os.FileInfo) (codeExecPlatformIdentity, error) {
 	stat, ok := info.Sys().(*syscall.Stat_t)

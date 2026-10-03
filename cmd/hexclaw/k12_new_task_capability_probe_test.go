@@ -8,16 +8,16 @@ import (
 
 	"github.com/hexagon-codes/hexclaw/api"
 	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	"github.com/hexagon-codes/hexclaw/storage"
-	sqlitestore "github.com/hexagon-codes/hexclaw/storage/sqlite"
 )
 
 func TestK12NewTaskVisionProbePersistsOnceAndFreezesSameModel(t *testing.T) {
 	for _, initial := range []string{"missing", "stale"} {
 		t.Run(initial, func(t *testing.T) {
 			ctx := context.Background()
-			store, err := sqlitestore.New(filepath.Join(t.TempDir(), "probe.db"))
+			store, err := sqlitefixture.New(filepath.Join(t.TempDir(), "probe.db"))
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -19,13 +19,13 @@ import (
 	"testing"
 
 	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	agentrouter "github.com/hexagon-codes/hexclaw/router"
-	sqlitestore "github.com/hexagon-codes/hexclaw/storage/sqlite"
 )
 
 func newEditLockoutServer(t *testing.T) (*Server, *agentrouter.Dispatcher, *agentrouter.SQLiteStore) {
 	t.Helper()
-	store, err := sqlitestore.New(filepath.Join(t.TempDir(), "d3-lockout.db"))
+	store, err := sqlitefixture.New(filepath.Join(t.TempDir(), "d3-lockout.db"))
 	if err != nil {
 		t.Fatalf("创建 SQLite 存储失败: %v", err)
 	}

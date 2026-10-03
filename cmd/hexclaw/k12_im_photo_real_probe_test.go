@@ -35,6 +35,7 @@ import (
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/config"
 	"github.com/hexagon-codes/hexclaw/engine"
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/llmrouter"
 	"github.com/hexagon-codes/hexclaw/messagecontent"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
@@ -43,7 +44,6 @@ import (
 	k12usecase "github.com/hexagon-codes/hexclaw/scenarios/k12/usecase"
 	"github.com/hexagon-codes/hexclaw/skill"
 	"github.com/hexagon-codes/hexclaw/skill/builtin"
-	sqlitestore "github.com/hexagon-codes/hexclaw/storage/sqlite"
 )
 
 func TestK12DingtalkPhotoDirectRoute_RealModel_NoSend(t *testing.T) {
@@ -90,7 +90,7 @@ func TestK12DingtalkPhotoDirectRoute_RealModel_NoSend(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	store, err := sqlitestore.New(filepath.Join(t.TempDir(), "k12-photo-probe.db"))
+	store, err := sqlitefixture.New(filepath.Join(t.TempDir(), "k12-photo-probe.db"))
 	if err != nil {
 		t.Fatalf("create isolated store: error_type=%T", err)
 	}

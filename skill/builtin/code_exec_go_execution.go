@@ -1169,7 +1169,20 @@ func codeExecGoFinalConfig(buildRun codeExecRun, executionWorkspace string) (san
 	if err != nil {
 		return sandbox.Config{}, fmt.Errorf("derive Go execution denied paths: %w", err)
 	}
-	cfg.DeniedPaths = denied
+	// 父目录拒绝规则已覆盖子路径，避免在只读父挂载内再次创建子挂载点。
+	cfg.DeniedPaths = make([]string, 0, len(denied))
+	for _, path := range denied {
+		covered := false
+		for _, parent := range denied {
+			if parent != path && pathWithinResolved(parent, path) {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			cfg.DeniedPaths = append(cfg.DeniedPaths, path)
+		}
+	}
 	cfg.Workspace = executionWorkspace
 	cfg.Network = sandbox.NetworkDisabled
 	cfg.RequiredCapabilities = 0

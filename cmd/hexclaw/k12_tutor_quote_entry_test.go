@@ -12,6 +12,7 @@ import (
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/config"
 	"github.com/hexagon-codes/hexclaw/engine"
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/llmrouter"
 	agentrouter "github.com/hexagon-codes/hexclaw/router"
 	"github.com/hexagon-codes/hexclaw/scenario"
@@ -20,7 +21,6 @@ import (
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/usecase"
 	"github.com/hexagon-codes/hexclaw/skill"
 	"github.com/hexagon-codes/hexclaw/storage"
-	sqlitestore "github.com/hexagon-codes/hexclaw/storage/sqlite"
 )
 
 func tutorQuoteEntryFixture(t *testing.T, s *k12storage.Store) {
@@ -86,7 +86,7 @@ func tutorQuoteEntryFixture(t *testing.T, s *k12storage.Store) {
 
 func TestK12TutorQuoteEntryStopsUnmatchedAndIdentityBeforeProvider(t *testing.T) {
 	ctx := context.Background()
-	store, err := sqlitestore.New(filepath.Join(t.TempDir(), "quote.db"))
+	store, err := sqlitefixture.New(filepath.Join(t.TempDir(), "quote.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

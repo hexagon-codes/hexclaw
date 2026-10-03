@@ -31,12 +31,12 @@ import (
 	"github.com/hexagon-codes/hexagon"
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/llmrouter"
 	"github.com/hexagon-codes/hexclaw/memory"
 	"github.com/hexagon-codes/hexclaw/memory/recall"
 	"github.com/hexagon-codes/hexclaw/skill"
 	"github.com/hexagon-codes/hexclaw/skill/builtin"
-	sqlitestore "github.com/hexagon-codes/hexclaw/storage/sqlite"
 )
 
 const fullScanUser = "fullscan-user"
@@ -72,7 +72,7 @@ func TestMemoryRealLLM_FullScan(t *testing.T) {
 
 	ctx := context.Background()
 	dir := t.TempDir()
-	store, err := sqlitestore.New(filepath.Join(dir, "mem.db"))
+	store, err := sqlitefixture.New(filepath.Join(dir, "mem.db"))
 	if err != nil {
 		t.Fatalf("store: %v", err)
 	}

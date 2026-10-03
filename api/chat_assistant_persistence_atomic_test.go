@@ -16,11 +16,11 @@ import (
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/config"
 	enginepkg "github.com/hexagon-codes/hexclaw/engine"
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/llmrouter"
 	"github.com/hexagon-codes/hexclaw/session"
 	"github.com/hexagon-codes/hexclaw/skill"
 	"github.com/hexagon-codes/hexclaw/storage"
-	sqlitestore "github.com/hexagon-codes/hexclaw/storage/sqlite"
 )
 
 type canonicalReceiptStreamEngine struct {
@@ -117,7 +117,7 @@ func newAPIAssistantPersistenceFailureHarness(
 ) (*Server, *mockllm.LLMProvider, *apiPermanentAssistantFailureStore) {
 	t.Helper()
 	dir := t.TempDir()
-	real, err := sqlitestore.New(filepath.Join(dir, "chat-persistence.db"))
+	real, err := sqlitefixture.New(filepath.Join(dir, "chat-persistence.db"))
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
