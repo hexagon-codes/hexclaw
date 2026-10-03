@@ -742,13 +742,17 @@ func inspectCodeExecGoToolchainDescriptor(
 		strings.TrimSpace(environment.GOARCH) == "" || strings.TrimSpace(environment.GOVERSION) == "" {
 		return codeExecGoToolchainDescriptor{}, errors.New("go environment descriptor is incomplete")
 	}
+	goRoot, inspectErr := codeExecCanonicalToolchainPath(environment.GOROOT)
+	if inspectErr != nil {
+		return codeExecGoToolchainDescriptor{}, errors.New("go environment descriptor has invalid GOROOT")
+	}
 
 	compileResult, inspectErr := helper.Run(
 		descriptorCtx,
 		cfg,
 		workspace,
 		workspace,
-		[]string{environment.GOROOT},
+		[]string{goRoot},
 		goBinary,
 		[]string{"tool", "compile", "-V=full"},
 		exports,
@@ -764,10 +768,6 @@ func inspectCodeExecGoToolchainDescriptor(
 		return codeExecGoToolchainDescriptor{}, errors.New("go compiler identity is empty")
 	}
 
-	goRoot, inspectErr := canonicalCodeExecPath(environment.GOROOT)
-	if inspectErr != nil {
-		return codeExecGoToolchainDescriptor{}, errors.New("go environment descriptor has invalid GOROOT")
-	}
 	descriptor := codeExecGoToolchainDescriptor{
 		Binary:         goBinary,
 		BinarySHA256:   binaryIdentity.SHA256,
@@ -898,7 +898,7 @@ func verifyCodeExecGoToolchainDescriptor(descriptor codeExecGoToolchainDescripto
 	if err != nil || canonicalBinary != descriptor.Binary {
 		return errors.New("go toolchain binary binding changed")
 	}
-	canonicalGOROOT, err := canonicalCodeExecPath(descriptor.GOROOT)
+	canonicalGOROOT, err := codeExecCanonicalToolchainPath(descriptor.GOROOT)
 	if err != nil || canonicalGOROOT != descriptor.GOROOT {
 		return errors.New("go toolchain descriptor is incomplete")
 	}
@@ -1347,7 +1347,7 @@ func codeExecCanonicalRuntimeExecutable(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	canonical, err := filepath.EvalSymlinks(abs)
+	canonical, err := codeExecCanonicalToolchainPath(abs)
 	if err != nil {
 		return "", err
 	}
