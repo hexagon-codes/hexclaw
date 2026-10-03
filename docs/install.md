@@ -30,10 +30,18 @@ HexClaw 核心为单二进制（SQLite 使用纯 Go）；文档导出、中文/�
 
 ## 安装方式
 
+本次版本为 `v0.5.0-beta`，属于预发布版。安装该版本时须显式指定 tag；`@latest` 和 Releases 的 `latest/download` 用于稳定版，不保证选中 beta。以下 beta 安装命令需在对应 tag 与发布产物已生成后使用，版本说明本身不代表发布已完成。
+
 ### 方式一：go install（推荐开发者使用）
 
 ```bash
 go install github.com/hexagon-codes/hexclaw/cmd/hexclaw@latest
+```
+
+安装本次 beta：
+
+```bash
+go install github.com/hexagon-codes/hexclaw/cmd/hexclaw@v0.5.0-beta
 ```
 
 验证安装：
@@ -60,15 +68,17 @@ sudo mv hexclaw /usr/local/bin/
 
 ### 方式三：预编译二进制
 
-从 [GitHub Releases](https://github.com/hexagon-codes/hexclaw/releases) 下载对应平台的二进制：
+从 [GitHub Releases](https://github.com/hexagon-codes/hexclaw/releases) 下载对应平台的二进制。安装本次 beta 使用固定版本地址：
 
 ```bash
+RELEASE_VERSION=v0.5.0-beta
+
 # Linux amd64
-curl -sSL https://github.com/hexagon-codes/hexclaw/releases/latest/download/hexclaw-linux-amd64.tar.gz | tar xz
+curl -fSL "https://github.com/hexagon-codes/hexclaw/releases/download/${RELEASE_VERSION}/hexclaw-linux-amd64.tar.gz" | tar xz
 sudo mv hexclaw /usr/local/bin/
 
 # macOS arm64 (Apple Silicon)
-curl -sSL https://github.com/hexagon-codes/hexclaw/releases/latest/download/hexclaw-darwin-arm64.tar.gz | tar xz
+curl -fSL "https://github.com/hexagon-codes/hexclaw/releases/download/${RELEASE_VERSION}/hexclaw-darwin-arm64.tar.gz" | tar xz
 sudo mv hexclaw /usr/local/bin/
 ```
 
@@ -81,7 +91,7 @@ docker compose pull hexclaw
 docker compose up -d --no-build hexclaw
 ```
 
-本地源码开发先执行 `docker compose build hexclaw`，默认镜像为 `hexclaw:dev`。发布镜像使用版本号及完整提交 SHA 标签，`latest` 仅用于正式稳定版；更新保留现有项目、数据卷及完整 Compose override 文件集合。
+本地源码开发先执行 `docker compose build hexclaw`，默认镜像为 `hexclaw:dev`。发布镜像使用版本号及完整提交 SHA 标签，`v0.5.0-beta` 不更新 `latest`；`latest` 仅用于正式稳定版。更新保留现有项目、数据卷及完整 Compose override 文件集合。
 
 源码镜像当前面向 Linux amd64，持久化完整可写 HOME。默认 Compose **不安装 Ollama，也不下载模型**；在 Desktop 为当前远端配置模型和 Embedding API，知识数据与索引保存在服务器。未配置有效 Embedding 时，关键词检索与向量可用性分别判断。初始化令牌、Kubernetes、备份恢复、自动部署及当前验收边界见[云端部署指南](cloud-deployment.md)。
 
@@ -499,7 +509,7 @@ curl -H "Authorization: Bearer ${HEXCLAW_API_TOKEN}" http://127.0.0.1:16060/api/
 - `/api/v1/knowledge/documents` 返回 `status/error_message/updated_at/source_type`
 - `/api/v1/knowledge/documents/{id}` 返回单个文档的完整内容
 - 图片/视频生成优先返回 `file_path`，通过 `/api/v1/files/generated/{path}` 访问产物
-- `/api/k12/*` 是场景包挂载路由；非 loopback 读写请求同样需要 Bearer Token
+- `/api/k12/*` 是场景包挂载路由；读写均需要 Bearer Token，包括 loopback 请求
 - `/api/v1/logs` 支持 `domain` 过滤，便于按功能域诊断问题
 
 ### 日志
@@ -554,12 +564,14 @@ hexclaw security audit
 
 ### 升级
 
+以下命令显式升级到 `v0.5.0-beta`，执行前确认该版本的 tag 与产物已生成。升级到最新稳定版时，Go 安装使用 `@latest`，二进制下载使用 Releases 的 `latest/download`。
+
 ```bash
 # go install 方式
-go install github.com/hexagon-codes/hexclaw/cmd/hexclaw@latest
+go install github.com/hexagon-codes/hexclaw/cmd/hexclaw@v0.5.0-beta
 
 # 二进制替换
-wget https://github.com/hexagon-codes/hexclaw/releases/latest/download/hexclaw-linux-amd64.tar.gz
+wget https://github.com/hexagon-codes/hexclaw/releases/download/v0.5.0-beta/hexclaw-linux-amd64.tar.gz
 tar xzf hexclaw-linux-amd64.tar.gz
 sudo mv hexclaw /usr/local/bin/
 sudo systemctl restart hexclaw

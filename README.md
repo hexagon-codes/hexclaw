@@ -727,6 +727,15 @@ hexclaw/
 | `make clean` | 清理构建产物 |
 | `make init` | 初始化默认配置 |
 
+### CI/CD
+
+- 功能分支 `feat/**` push 只运行编译检查，不执行测试用例；启用自动部署且配置为部署分支时，编译成功会触发云端部署。
+- main push / 指向 main 的 PR 保留 Linux 全量测试及 race、Windows 构建与 sandbox、macOS sandbox。两个平台 sandbox 共用矩阵，不再上传覆盖率或运行 Windows 提示性重复测试。
+- K12、render、Sandbox CodeExec 按各自路径规则运行专项验证；render 不再执行每周定时任务或查询上游最新版本。
+- `v*` Tag 或手动指定已有 Tag 通过独立 Release 工作流生成发布产物，不等待主 CI 全量测试。`v0.5.0-beta` 是本次预发布版本，文档版本不代表 Tag 或 Release 已生成。
+
+完整检查范围见[CI/CD 门禁说明](CONTRIBUTING.md#cicd-门禁说明)，部署配置与结果核对见[云端部署指南](docs/cloud-deployment.md)。功能分支编译成功不能替代完整测试或 Desktop / IM 业务验收。
+
 ### 手动命令
 
 ```bash
@@ -756,8 +765,8 @@ go run ./cmd/verify-release -repo . -version 0.5.0-beta \
 | 组件 | 技术 |
 |------|------|
 | 语言 | Go 1.25.13+ |
-| Agent 框架 | [Hexagon](https://github.com/hexagon-codes/hexagon) v0.5.13 |
-| AI 基础库 | [ai-core](https://github.com/hexagon-codes/ai-core) v0.2.10 |
+| Agent 框架 | [Hexagon](https://github.com/hexagon-codes/hexagon) v0.5.14 |
+| AI 基础库 | [ai-core](https://github.com/hexagon-codes/ai-core) v0.2.11 |
 | 工具库 | [toolkit](https://github.com/hexagon-codes/toolkit) v0.3.4 |
 | CLI | [Cobra](https://github.com/spf13/cobra) |
 | 配置 | YAML + 环境变量 |
@@ -800,8 +809,8 @@ chore: 构建/工具链
 
 | 项目 | 说明 | 仓库 |
 |------|------|------|
-| **Hexagon** | Go AI Agent 框架 (核心引擎) v0.5.13 | [hexagon](https://github.com/hexagon-codes/hexagon) |
-| **ai-core** | AI 基础能力库 (LLM/Tool/Memory) v0.2.10 | [ai-core](https://github.com/hexagon-codes/ai-core) |
+| **Hexagon** | Go AI Agent 框架 (核心引擎) v0.5.14 | [hexagon](https://github.com/hexagon-codes/hexagon) |
+| **ai-core** | AI 基础能力库 (LLM/Tool/Memory) v0.2.11 | [ai-core](https://github.com/hexagon-codes/ai-core) |
 | **toolkit** | Go 通用工具库 v0.3.4 | [toolkit](https://github.com/hexagon-codes/toolkit) |
 | **hexagon-ui** | Hexagon Dev UI 观测面板 (Vue 3) | [hexagon-ui](https://github.com/hexagon-codes/hexagon-ui) |
 | **hexclaw-desktop** | HexClaw 桌面客户端 (Tauri + Vue 3) | [hexclaw-desktop](https://github.com/hexagon-codes/hexclaw-desktop) |
@@ -809,7 +818,7 @@ chore: 构建/工具链
 
 ## 更新日志
 
-### v0.5.0-beta（2026-07-13）
+### v0.5.0-beta（2026-10-03）
 
 **场景包与记录系统**
 - **场景包六缝扩展** — 新增 `scenario` 注册表，统一注入记录集、约束、视图槽、Agent mode、按钮和 eval suite，平台层不硬编码业务包。
@@ -827,9 +836,10 @@ chore: 构建/工具链
 - **适配器/工作流韧性** — 加固有界发送队列、webhook 体限额、MCP/IM 生命周期、条件节点和原子持久化；cron 编译改用文本推理模型。
 
 **依赖与 CI/CD**
-- **框架依赖升级** — `go.mod` 对齐 hexagon v0.5.9 / ai-core v0.2.4 / toolkit v0.2.6，保持 Go 1.25.7 兼容基线并指定 Go 1.25.12 发版工具链。
+- **框架依赖升级** — `go.mod` 对齐 hexagon v0.5.14 / ai-core v0.2.11 / toolkit v0.3.4，Go 兼容基线为 1.25.13；发布与本地复验使用已发布依赖，不依赖本地 workspace。
 - **技能种子升级** — 首启内嵌技能支持版本感知升级，默认目录对齐 `hexagon-codes/hexclaw-hub` `v0.0.6`。
-- **CI/CD 复验口径** — `sandbox-code-exec.yml` 专项验证强沙箱；普通 Linux CI 按后端能力门控真实沙箱用例，专项 workflow 使用 `HEXCLAW_P0_SANDBOX_PROOF=1`，runner 完整性探针仅在 `HEXCLAW_RUNNER_PROBE=1` 时手工触发。
+- **CI/CD 精简** — 保留 Linux 全量测试及 race、平台 sandbox 与专项门禁，合并 Windows / macOS 配置，移除覆盖率上传、Windows 非阻塞重复测试及 render 每周上游版本查询。功能分支编译、自动云端部署和 Tag Release 的验证范围分别记录。
+- **沙箱复验口径** — `sandbox-code-exec.yml` 专项验证强沙箱；普通 Linux CI 按后端能力门控真实沙箱用例，专项 workflow 使用 `HEXCLAW_P0_SANDBOX_PROOF=1`，runner 完整性探针仅在 `HEXCLAW_RUNNER_PROBE=1` 时手工触发。
 
 > 完整发布历史见 [CHANGELOG.md](CHANGELOG.md)。
 

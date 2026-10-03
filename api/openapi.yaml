@@ -8,7 +8,7 @@ info:
     两者业务接口均要求对应持久 Bearer 令牌；公开存活端点不证明业务鉴权成功。
     HTTP、SSE、WebSocket 与资产请求使用同一选定后端，支持代理路径前缀。
 
-    Contract 测试见 `api/contract_test.go`，CI 跑 `spectral lint api/openapi.yaml` 校验规范。
+    Contract 测试见 `api/contract_test.go`，默认 CI 的实际检查范围见 `CONTRIBUTING.md`。
 
     本规范当前覆盖 cron 与核心 health 契约；其余已实现 API 见 README 的端点索引，
     场景包契约由各场景目录单独维护（例如 `scenarios/k12/API.md`）。

@@ -43,7 +43,7 @@ HexClaw includes a 6-layer security gateway:
 - Token comparison uses `crypto/subtle.ConstantTimeCompare` to prevent timing attacks
 - Logs API (`/api/v1/logs*`) always requires authentication regardless of source IP
 - `isLogsAPI` uses exact prefix `/api/v1/logs` to avoid matching `/api/v1/login` etc.
-- Mounted scenario-pack routes such as `/api/k12/*` are derived from the mount registry and require auth for non-loopback reads and writes, preventing future scenario mounts from bypassing `/api/v1` guards.
+- Mounted scenario-pack routes such as `/api/k12/*` are derived from the mount registry and require Bearer authentication for reads and writes, including loopback requests. Only explicitly public endpoints bypass business authentication.
 
 ### Code Execution
 - `code_exec` is the recommended execution primitive. It runs snippet/file/module/project modes through the toolkit sandbox, returns bounded output, run metadata, resource limits, diagnostics, and an artifact manifest.
@@ -54,7 +54,7 @@ HexClaw includes a 6-layer security gateway:
 ### Outbound HTTP Boundaries
 - Browser/search/weather/Skill Hub use raw outbound HTTP clients with timeouts and response-size limits. They should not be described as SSRF-protected private-network blockers in the current code.
 - Cron Starlark `http_get`/`http_post` intentionally has no SSRF or loopback guard in desktop/single-user semantics; scripts can reach loopback. Prefer the in-process `kb_ingest` builtin instead of posting back to local knowledge APIs.
-- For untrusted unattended tasks, rely on `PermissionPolicy`, `security.autonomy`, API auth on non-loopback requests, and `code_exec` loopback denial rather than assuming generic outbound HTTP SSRF filtering.
+- For untrusted unattended tasks, rely on `PermissionPolicy`, `security.autonomy`, authenticated business APIs, and `code_exec` loopback denial rather than assuming generic outbound HTTP SSRF filtering.
 
 ### Tool Permission & Unattended Gate
 - A single declarative `PermissionPolicy` gates every tool call (GA). Capability-mutating tools — `manage_skill`, `create_skill`, `patch_skill`, `manage_skill_pending`, `manage_mcp_server` — and consequential actions (`send_message`, `media_generate`, `publish_*`, `shell`, `code`, `code_exec`, `browser`, `file_edit`) **require approval** when policy says so; unmatched tools default to allow.
@@ -96,7 +96,7 @@ HexClaw includes a 6-layer security gateway:
 - Server definitions and secrets are persisted through the same config/secret handling path used by other platform integrations.
 
 ### Desktop Mode
-- `hexclaw serve --desktop` is a single-user local sidecar mode. It intentionally allows loopback requests without Bearer tokens for desktop, cron, and local UI integration.
+- `hexclaw serve --desktop` is a single-user local sidecar mode. Business requests still require a valid Bearer token; loopback is not an authentication bypass. Desktop native integration supplies the backend's business credentials, while internal desktop capability endpoints additionally require loopback and the sidecar capability token.
 - Service deployments exposed beyond loopback should configure `server.api_token`, keep logs/scenario routes authenticated, and treat desktop mode as a local-only profile.
 
 ### Workflow Execution

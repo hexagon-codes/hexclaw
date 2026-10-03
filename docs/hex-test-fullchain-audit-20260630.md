@@ -1,5 +1,7 @@
 # hex-test 全链路审计报告（2026-06-30）
 
+> 适用范围：本文及 2026-07-04 补充记录是当时提交、依赖和环境下的历史证据，不代表 `v0.5.0-beta` 的当前 CI 或功能验收结果。现行 CI 范围见 [README](../README.md)，部署与发布边界见[云端部署指南](cloud-deployment.md)。CI 配置精简不等于本文所述或后续发现的缺陷已修复。
+
 > 范围：以后端 `hexclaw` + 前端 `hexclaw-desktop` 为主，基于真实 sidecar、真实浏览器、真实模型、真实 API、MCP、cron、benchmark 的测试结果做审计。  
 > 约束：本次运行环境为 macOS / Apple M1；Linux、Windows 只做代码/历史测试证据引用，未做真机 E2E。日志中的 access key / token 已刻意脱敏，不写入本文。
 

@@ -2,12 +2,7 @@
 
 本文件记录 hexclaw 的用户可见变更，遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
-## [Unreleased]
-
-### Changed
-- 根模块依赖基线更新为 hexagon **v0.5.13**、ai-core **v0.2.10**、toolkit **v0.3.4**、`golang.org/x/net` **v0.55.0** 与 Go **1.25.13**；固定使用已发布版本，`GOWORK=off go mod tidy -diff` 与全仓编译型回归不再依赖本地 workspace。hexagon v0.5.13 修复 `testing/record` 对可取消 Token 计数能力的遮蔽；Go 补丁版本与 `x/net` 升级修复安全扫描确认的可达漏洞。HexClaw 当前运行链不直接导入 hexagon 的该测试工具包。
-
-## [0.5.0-beta] - 2026-07-13
+## [0.5.0-beta] - 2026-10-03
 > 家长辅导场景包正式落地，打通作业图片识题、批改、错题、复习和定时投递闭环；同时加固本地/云端模型路由、知识召回、IM 送达与沙箱执行。
 
 ### Added
@@ -18,14 +13,17 @@
 - **出站上下文**：新增 purpose × data-class 出网策略，按 chat、vision、embedding、rerank 等用途隔离本地/云端数据边界。
 
 ### Changed
-- 升级框架依赖至 hexagon **v0.5.9**、ai-core **v0.2.4**、toolkit **v0.2.6**；`go.mod` 保持 Go **1.25.7** 兼容基线，发版工具链为 Go **1.25.12**。`GOWORK=off go test ./... -run '^$'` 已通过，发版/CI 模式下全仓编译不再依赖本地 `go.work` 的隐式下层源码。
+- 根模块依赖基线更新为 hexagon **v0.5.14**、ai-core **v0.2.11**、toolkit **v0.3.4**、`golang.org/x/net` **v0.55.0** 与 Go **1.25.13**；固定使用已发布版本，全仓编译型回归不依赖本地 workspace。保留 hexagon v0.5.13 的 `testing/record` 可取消 Token 计数修复；HexClaw 当前运行链不直接导入该测试工具包。Go 补丁版本与 `x/net` 升级修复此前安全扫描确认的可达漏洞。
 - **执行原语收敛**：`code_exec` 成为推荐执行入口，支持 snippet/file/module/project 与 artifact metadata；`code`/`shell` 保留兼容但标记弃用，顶层 `runtime/` 包删除，沙箱能力收敛到 toolkit + `skill/sandbox`。
 - **技能种子版本化**：首启内嵌技能支持版本感知升级，默认市场目录对齐 `hexagon-codes/hexclaw-hub` `v0.0.6`。
 - **本地/云端路由韧性**：本地默认模型启动预热并对齐 `num_ctx`；推理、视觉、embedding 和 rerank 按用途选路，provider failover 时重建符合目标 locality 的请求。
 - **工作流与平台生命周期**：条件节点、路由规则与配置更新改为原子持久化；MCP 客户端与 IM adapter 收敛启停、重连和投递语义。
-- 更新 CI/CD 文档口径：补充 `sandbox-code-exec.yml` 专项门禁、Linux CI 等价命令，以及 runner 完整性探针不得进入默认 `go test ./...` 的规则。
+- 精简 CI/CD：Windows / macOS sandbox 共用矩阵，移除覆盖率上传、Windows 非阻塞的核心重复测试、render 每周定时任务及上游版本查询；保留 Linux 全量测试和 race、平台 sandbox 及 K12 / render / code_exec 专项检查。
+- 更新中英文安装、开发与云端部署文档，区分功能分支编译、main / PR 全量验证、按提交自动部署和独立 Tag Release；历史审计结果保留原证据范围。
 
 ### Fixed
+- 修复钉钉模板切换覆盖既有消息投影、Windows Go 构建缓存误拒普通文件，以及 Linux 沙箱 CI 安装的 bubblewrap 与 toolkit 所需参数不匹配的问题。
+- 对齐既有测试夹具与当前鉴权、画像来源版本、模型能力、数据库迁移及平台关闭契约，保留原有功能与失败断言。
 - 修复 release 构建不可复现的依赖锁定问题：`skill/builtin/code_exec.go` 依赖的 sandbox 限额字段已由 `toolkit v0.2.6` 提供，不再需要本地 workspace 才能编译。
 - 将 runner 完整性故意失败探针改为 `HEXCLAW_RUNNER_PROBE=1` 手工门控，默认 `go test ./...` 不再被取证用例打红。
 - **视觉多轮请求**：按路由策略限制历史图片预算，遇到上游图片数超限时保留当轮图并丢弃最旧图重试，避免多轮作业批改因图片累积失败或超时。

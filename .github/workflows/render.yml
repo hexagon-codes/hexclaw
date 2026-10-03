@@ -1,7 +1,7 @@
 name: render
 
 # 文档渲染管线 CI smoke：三平台跑 render 包测试 + 黄金回归。
-# 详见 .claude/doc-generation-architecture.md §4 P0g。
+# 检查范围见 CONTRIBUTING.md 的 CI/CD 门禁说明。
 #
 # 触发：
 #   - render/ 或 api/handler_render*.go 改动

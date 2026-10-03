@@ -2,6 +2,8 @@
 
 适用于本仓库包含云端连接支持的源码构建。当前镜像为 Linux amd64，包含 Pandoc、Typst、Poppler、中文和数学字体、Python 及 SymPy。Poppler 提供 PDF 页数读取、文本提取及原页渲染。服务存储使用 SQLite；同一数据目录只运行一个实例。单机日常运行推荐 Docker Compose；已有 Kubernetes 集群使用相同镜像和独立 PVC。
 
+本次文档版本为 `v0.5.0-beta`；版本标识不表示已创建对应 Tag、完成 GitHub Release 或发布版本镜像，实际状态以对应 Actions 记录及产物为准。
+
 ## Docker Compose
 
 日常服务器拉取已发布镜像，沿用现有项目名、数据卷和完整 Compose 文件集合。在部署目录的私有 `.env` 中设置 `HEXCLAW_IMAGE=ghcr.io/hexagon-codes/hexclaw@sha256:<实际摘要>`，摘要从对应构建产物取得；不要原样使用占位符。
@@ -73,7 +75,17 @@ Compose 留出 60 秒停止窗口，覆盖服务当前 30 秒收尾预算。已�
 
 ## 按提交自动部署
 
-源码提供 `.github/workflows/deploy.yml` 和 `scripts/ops/deploy.py`。部署需按下方配置显式启用。备份、按摘要更新、锁内版本复核与失败恢复已通过隔离 Docker 回归；[真实 Actions 部署记录](https://github.com/hexagon-codes/hexclaw/actions/runs/36291184852)已完成镜像发布及 Compose 更新，原数据卷、后端身份、配置及数据库版本保持。部署就绪检查不代替每个环境的模型、IM 与 Desktop 业务验收。
+源码提供 [Deploy 工作流](../.github/workflows/deploy.yml) 和 [部署脚本](../scripts/ops/deploy.py)，按下方配置显式启用。[历史 Actions 部署记录](https://github.com/hexagon-codes/hexclaw/actions/runs/36291184852)只证明该次镜像发布及 Compose 更新结果，不代表本次版本已经部署。部署就绪检查不代替每个环境的模型、IM 与 Desktop 业务验收。
+
+### CI 与发布入口
+
+| 入口 | 执行范围 | 与部署／发布的关系 |
+| --- | --- | --- |
+| `feat/**` 分支 push | [CI](../.github/workflows/ci.yml) 使用 `go test -run '^$' ./...` 编译应用和测试包，不执行测试用例 | 部署已启用且分支等于 `HEXCLAW_DEPLOY_BRANCH` 时，CI 编译成功就会触发自动云端部署；不需要先合并 main |
+| main push／指向 main 的 PR | Linux 全量测试及 race、Windows 编译与 sandbox、macOS sandbox；K12、render、Sandbox CodeExec 按各自路径规则运行 | PR 验证不触发云端部署；main push 也只在 main 是已配置部署分支时部署。feature 编译成功不代表这些检查通过 |
+| `v*` Tag push／手动指定已有 Tag | [Release](../.github/workflows/release.yml) 构建 Linux、macOS、Windows 二进制，生成 checksum、GitHub Release 和 Linux amd64 镜像 | 独立发布入口，只依赖自身构建任务，不等待主 CI 的完整测试；不会代替分支自动部署或业务验收 |
+
+CI 当前不提供手动触发入口。render 的 main push 路径包含工作流自身，PR 路径只包含渲染代码；仅修改 CI／render 工作流后推送 feature 分支，不会运行 render 的三平台检查。移除每周上游版本提示及覆盖率上传后，main／PR 的既有测试门禁仍保留，Windows／macOS sandbox 共用一个平台矩阵。
 
 `workflow_run` 的监听文件必须存在于仓库默认分支；实际构建仍检出上游 CI 已通过的 `head_sha`。`HEXCLAW_DEPLOY_BRANCH` 应选择既有 CI 监听的分支，不能只配置变量而没有相应 CI 运行。首次接入时若该提交的 CI 在监听文件合入前已经完成，可重新运行该次 CI，让完成事件接续部署，无需创建空提交。
 

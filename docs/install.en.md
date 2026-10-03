@@ -30,10 +30,18 @@ The core is a single binary with pure Go SQLite. Document exports, Chinese/math 
 
 ## Installation Methods
 
+This release is `v0.5.0-beta`, a prerelease. Specify the tag explicitly when installing it: `@latest` and Releases' `latest/download` select stable releases and do not guarantee the beta. Use the beta commands below only after its tag and release artifacts exist; the version documented here does not establish that publication is complete.
+
 ### Method 1: go install (recommended for developers)
 
 ```bash
 go install github.com/hexagon-codes/hexclaw/cmd/hexclaw@latest
+```
+
+Install this beta:
+
+```bash
+go install github.com/hexagon-codes/hexclaw/cmd/hexclaw@v0.5.0-beta
 ```
 
 Verify installation:
@@ -60,15 +68,17 @@ sudo mv hexclaw /usr/local/bin/
 
 ### Method 3: Pre-built binary
 
-Download the binary for your platform from [GitHub Releases](https://github.com/hexagon-codes/hexclaw/releases):
+Download the binary for your platform from [GitHub Releases](https://github.com/hexagon-codes/hexclaw/releases). Use the explicit version URL for this beta:
 
 ```bash
+RELEASE_VERSION=v0.5.0-beta
+
 # Linux amd64
-curl -sSL https://github.com/hexagon-codes/hexclaw/releases/latest/download/hexclaw-linux-amd64.tar.gz | tar xz
+curl -fSL "https://github.com/hexagon-codes/hexclaw/releases/download/${RELEASE_VERSION}/hexclaw-linux-amd64.tar.gz" | tar xz
 sudo mv hexclaw /usr/local/bin/
 
 # macOS arm64 (Apple Silicon)
-curl -sSL https://github.com/hexagon-codes/hexclaw/releases/latest/download/hexclaw-darwin-arm64.tar.gz | tar xz
+curl -fSL "https://github.com/hexagon-codes/hexclaw/releases/download/${RELEASE_VERSION}/hexclaw-darwin-arm64.tar.gz" | tar xz
 sudo mv hexclaw /usr/local/bin/
 ```
 
@@ -81,7 +91,7 @@ docker compose pull hexclaw
 docker compose up -d --no-build hexclaw
 ```
 
-For local source development, run `docker compose build hexclaw` first; the default image is `hexclaw:dev`. Published images use version and full commit SHA tags; `latest` is reserved for stable releases. Keep the existing project, data volume and complete Compose override set when updating.
+For local source development, run `docker compose build hexclaw` first; the default image is `hexclaw:dev`. Published images use version and full commit SHA tags. `v0.5.0-beta` does not update `latest`, which is reserved for stable releases. Keep the existing project, data volume and complete Compose override set when updating.
 
 The source image targets Linux amd64 and persists the complete writable HOME. The default Compose setup **does not install Ollama or download models**. Configure model and Embedding APIs for the selected remote backend in Desktop. Knowledge data and indexes belong to that server; keyword retrieval and vector availability are separate when no effective Embedding configuration exists. See the [cloud deployment guide](cloud-deployment.md) for initialization, Kubernetes, backup, automation and current verification limits.
 
@@ -500,7 +510,7 @@ Key response semantics:
 - `/api/v1/knowledge/documents` returns `status/error_message/updated_at/source_type`
 - `/api/v1/knowledge/documents/{id}` returns a single document with full content
 - Image/video generation prefers returning `file_path`; resolve artifacts through `/api/v1/files/generated/{path}`
-- `/api/k12/*` is a scenario-pack mount; non-loopback read/write requests still require a Bearer token
+- `/api/k12/*` is a scenario-pack mount; reads and writes require a Bearer token, including loopback requests
 - `/api/v1/logs` supports `domain` filtering for functional diagnostics
 
 ### Logs
@@ -555,12 +565,14 @@ Audit checks:
 
 ### Upgrade
 
+The commands below explicitly target `v0.5.0-beta`; first confirm that its tag and artifacts exist. To upgrade to the latest stable release instead, use `@latest` for Go installation or Releases' `latest/download` for binaries.
+
 ```bash
 # go install method
-go install github.com/hexagon-codes/hexclaw/cmd/hexclaw@latest
+go install github.com/hexagon-codes/hexclaw/cmd/hexclaw@v0.5.0-beta
 
 # Binary replacement
-wget https://github.com/hexagon-codes/hexclaw/releases/latest/download/hexclaw-linux-amd64.tar.gz
+wget https://github.com/hexagon-codes/hexclaw/releases/download/v0.5.0-beta/hexclaw-linux-amd64.tar.gz
 tar xzf hexclaw-linux-amd64.tar.gz
 sudo mv hexclaw /usr/local/bin/
 sudo systemctl restart hexclaw
