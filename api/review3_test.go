@@ -187,10 +187,11 @@ func TestApiAuth_PathBypass(t *testing.T) {
 	}
 }
 
-func TestApiAuth_DesktopRoutes_RemoteRequiresToken_LocalhostAllowed(t *testing.T) {
+func TestApiAuth_DesktopRoutes_RequireBusinessToken(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Server.APIToken = "secret-token"
 	s := &Server{cfg: cfg, logCollector: NewLogCollector(10)}
+	s.SetDesktopAPIToken("desktop-business-fixture")
 
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -228,17 +229,19 @@ func TestApiAuth_DesktopRoutes_RemoteRequiresToken_LocalhostAllowed(t *testing.T
 			expect: http.StatusOK,
 		},
 		{
-			name:   "localhost桌面读接口免token",
+			name:   "localhost桌面读接口携带业务令牌",
 			method: http.MethodGet,
 			path:   "/api/v1/desktop/notifications",
 			addr:   "127.0.0.1:12345",
+			token:  "Bearer desktop-business-fixture",
 			expect: http.StatusOK,
 		},
 		{
-			name:   "localhost桌面写接口免token",
+			name:   "localhost桌面写接口携带业务令牌",
 			method: http.MethodPost,
 			path:   "/api/v1/desktop/clipboard",
 			addr:   "127.0.0.1:12345",
+			token:  "Bearer desktop-business-fixture",
 			expect: http.StatusOK,
 		},
 	}
@@ -260,10 +263,11 @@ func TestApiAuth_DesktopRoutes_RemoteRequiresToken_LocalhostAllowed(t *testing.T
 	}
 }
 
-func TestApiAuth_LocalhostBypassesManagementAuthEvenWithToken(t *testing.T) {
+func TestApiAuth_LocalhostManagementUsesDesktopBusinessToken(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Server.APIToken = "secret-token"
 	s := &Server{cfg: cfg, logCollector: NewLogCollector(10)}
+	s.SetDesktopAPIToken("desktop-business-fixture")
 
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -280,18 +284,20 @@ func TestApiAuth_LocalhostBypassesManagementAuthEvenWithToken(t *testing.T) {
 	} {
 		req := httptest.NewRequest(tc.method, tc.path, nil)
 		req.RemoteAddr = "127.0.0.1:12345"
+		req.Header.Set("Authorization", "Bearer desktop-business-fixture")
 		w := httptest.NewRecorder()
 		handler.ServeHTTP(w, req)
 		if w.Code != http.StatusOK {
-			t.Fatalf("%s %s localhost with token-configured server should pass, got %d", tc.method, tc.path, w.Code)
+			t.Fatalf("%s %s localhost with a valid desktop business token should pass, got %d", tc.method, tc.path, w.Code)
 		}
 	}
 }
 
-func TestApiAuth_NoToken_LocalhostAllowed(t *testing.T) {
+func TestApiAuth_NoServerToken_DesktopBusinessTokenAllowed(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Server.APIToken = ""
 	s := &Server{cfg: cfg, logCollector: NewLogCollector(10)}
+	s.SetDesktopAPIToken("desktop-business-fixture")
 
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -302,6 +308,7 @@ func TestApiAuth_NoToken_LocalhostAllowed(t *testing.T) {
 	for _, addr := range []string{"127.0.0.1:1234", "[::1]:1234"} {
 		req := httptest.NewRequest("DELETE", "/api/v1/sessions/123", nil)
 		req.RemoteAddr = addr
+		req.Header.Set("Authorization", "Bearer desktop-business-fixture")
 		w := httptest.NewRecorder()
 		handler.ServeHTTP(w, req)
 		if w.Code != http.StatusOK {
@@ -348,18 +355,20 @@ func TestLogsApi_RequiresAuth(t *testing.T) {
 		t.Errorf("with valid token: status=%d, want 200", w2.Code)
 	}
 
-	// localhost 无 token 也应通过（未配置 token 的场景）
+	// 未配置远端业务令牌时，本机请求仍使用桌面业务令牌。
 	cfg2 := config.DefaultConfig()
 	cfg2.Server.APIToken = ""
 	s2 := &Server{cfg: cfg2, logCollector: NewLogCollector(100)}
+	s2.SetDesktopAPIToken("desktop-business-fixture")
 	handler2 := s2.apiAuthMiddleware(http.HandlerFunc(s2.handleGetLogs))
 
 	req3 := httptest.NewRequest("GET", "/api/v1/logs", nil)
 	req3.RemoteAddr = "127.0.0.1:1234"
+	req3.Header.Set("Authorization", "Bearer desktop-business-fixture")
 	w3 := httptest.NewRecorder()
 	handler2.ServeHTTP(w3, req3)
 	if w3.Code != http.StatusOK {
-		t.Errorf("localhost without token: status=%d, want 200", w3.Code)
+		t.Errorf("localhost with desktop token: status=%d, want 200", w3.Code)
 	}
 }
 

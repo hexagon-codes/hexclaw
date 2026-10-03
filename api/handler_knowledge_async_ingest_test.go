@@ -188,6 +188,7 @@ func TestKnowledgeDocumentsMultipartAcceptsFrozen57313616BytesAs202AndRetiresOld
 
 	srv := NewServer(config.DefaultConfig(), nil, nil, nil)
 	srv.SetKnowledgeBase(&knowledge.Manager{})
+	srv.SetDesktopAPIToken("knowledge-desktop-fixture")
 	srv.SetSemanticIndexService(stub)
 	ts := httptest.NewServer(srv.routes())
 	defer ts.Close()
@@ -241,6 +242,7 @@ func TestKnowledgeDocumentsMultipartAcceptsFrozen57313616BytesAs202AndRetiresOld
 	}
 	req.Header.Set("Content-Type", multipartWriter.FormDataContentType())
 	req.Header.Set("Idempotency-Key", "six-upper-fixture")
+	req.Header.Set("Authorization", "Bearer knowledge-desktop-fixture")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -261,8 +263,13 @@ func TestKnowledgeDocumentsMultipartAcceptsFrozen57313616BytesAs202AndRetiresOld
 			stub.consumedBytes, stub.createCallCount)
 	}
 
-	oldResp, err := http.Post(ts.URL+"/api/v1/knowledge/upload?user_id=desktop-user",
-		"multipart/form-data", strings.NewReader("retired"))
+	oldReq, err := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/knowledge/upload?user_id=desktop-user", strings.NewReader("retired"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldReq.Header.Set("Content-Type", "multipart/form-data")
+	oldReq.Header.Set("Authorization", "Bearer knowledge-desktop-fixture")
+	oldResp, err := ts.Client().Do(oldReq)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -373,11 +380,17 @@ func TestKnowledgeDocumentDetailPrefersAsyncProjectionAndKeepsLegacyContentCompa
 	}
 	srv := NewServer(config.DefaultConfig(), nil, nil, nil)
 	srv.SetKnowledgeBase(knowledge.NewManager(store, store, nil))
+	srv.SetDesktopAPIToken("knowledge-desktop-fixture")
 	srv.SetSemanticIndexService(stub)
 	ts := httptest.NewServer(srv.routes())
 	defer ts.Close()
 
-	resp, err := http.Get(ts.URL + "/api/v1/knowledge/documents/doc-async-detail?user_id=forged-remote-user")
+	req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/v1/knowledge/documents/doc-async-detail?user_id=forged-remote-user", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer knowledge-desktop-fixture")
+	resp, err := ts.Client().Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -430,7 +443,12 @@ func TestKnowledgeDocumentDetailPrefersAsyncProjectionAndKeepsLegacyContentCompa
 		}
 	}
 
-	listResp, err := http.Get(ts.URL + "/api/v1/knowledge/documents")
+	listReq, err := http.NewRequest(http.MethodGet, ts.URL+"/api/v1/knowledge/documents", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listReq.Header.Set("Authorization", "Bearer knowledge-desktop-fixture")
+	listResp, err := ts.Client().Do(listReq)
 	if err != nil {
 		t.Fatal(err)
 	}

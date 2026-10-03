@@ -49,6 +49,7 @@ func newAutonomyTestServer(t *testing.T) (*Server, *autonomy.GrantStore, *autono
 	cfgPath := filepath.Join(t.TempDir(), "hexclaw.yaml")
 
 	srv := NewServer(cfg, &mockEngine{reply: &adapter.Reply{Content: "ok"}}, nil, nil)
+	srv.SetDesktopAPIToken("autonomy-desktop-fixture")
 	srv.SetAutonomy(hook, decisions, grants, cfgPath)
 	return srv, grants, decisions, cfgPath
 }
@@ -64,7 +65,8 @@ func doAutonomyJSON(t *testing.T, srv *Server, method, path string, body any) (*
 	}
 	req := httptest.NewRequest(method, path, reader)
 	req.Header.Set("Content-Type", "application/json")
-	// 桌面 sidecar 场景：本机回环放行写操作（apiAuthMiddleware）。
+	// 桌面 sidecar 场景：本机回环请求携带桌面业务令牌。
+	req.Header.Set("Authorization", "Bearer autonomy-desktop-fixture")
 	req.RemoteAddr = "127.0.0.1:54321"
 	rec := httptest.NewRecorder()
 	srv.routes().ServeHTTP(rec, req)
@@ -107,9 +109,7 @@ func TestAutonomyProfileGetAndUpdatePersistsAndHotSwaps(t *testing.T) {
 	}
 }
 
-// full_access 允许运行时经弹窗确认热切（产品决策 2026-07-03：单用户桌面去掉
-// 手动改配置+重启的摩擦；不再返回 403）。安全权衡：loopback 端点无鉴权，运行时
-// 放行 full_access 意味着放弃 GO-1 的自提权防护——后续以 token 门控（方案 B）加固。
+// 通过桌面业务令牌认证后，full_access 支持运行时切换并持久化，无需重启。
 func TestAutonomyProfileFullAccessHotSwapsAtRuntime(t *testing.T) {
 	srv, _, _, cfgPath := newAutonomyTestServer(t)
 

@@ -24,6 +24,7 @@ func doK12WebhookAPI(t *testing.T, client *http.Client, method, target string, b
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	req.Header.Set("Authorization", "Bearer webhook-desktop-fixture")
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatal(err)

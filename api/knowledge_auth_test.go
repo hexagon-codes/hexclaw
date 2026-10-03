@@ -27,6 +27,7 @@ func TestKnowledgeEndpointsUseManagementAuthWithoutBreakingLoopbackDesktop(t *te
 				cfg.Server.APIToken = "knowledge-secret"
 			}
 			srv := NewServer(cfg, nil, nil, nil)
+			srv.SetDesktopAPIToken("knowledge-desktop-fixture")
 			reached := false
 			guarded := srv.apiAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				reached = true
@@ -47,6 +48,7 @@ func TestKnowledgeEndpointsUseManagementAuthWithoutBreakingLoopbackDesktop(t *te
 				reached = false
 				loopback := httptest.NewRequest(endpoint.method, endpoint.path, nil)
 				loopback.RemoteAddr = "127.0.0.1:54321"
+				loopback.Header.Set("Authorization", "Bearer knowledge-desktop-fixture")
 				loopbackRec := httptest.NewRecorder()
 				guarded.ServeHTTP(loopbackRec, loopback)
 				if loopbackRec.Code != http.StatusOK || !reached {

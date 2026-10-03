@@ -129,6 +129,7 @@ func (*apiCanonicalHistoryStreamProvider) CountTokens([]llm.Message) (int, error
 
 func apiCanonicalHistoryConfig() *config.Config {
 	cfg := config.DefaultConfig()
+	cfg.Server.APIToken = e2eAPIToken
 	cfg.Compaction.Enabled = false
 	cfg.Knowledge.Enabled = false
 	cfg.FileMemory.Enabled = false
@@ -173,6 +174,7 @@ func apiCanonicalHistoryDoJSON(
 	if len(body) > 0 {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	req.Header.Set("Authorization", "Bearer "+e2eAPIToken)
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("%s %s: %v", method, url, err)
@@ -391,6 +393,7 @@ func apiMultiTurnRequest(
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("Authorization", "Bearer "+e2eAPIToken)
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("SSE request: %v", err)

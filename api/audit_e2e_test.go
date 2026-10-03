@@ -28,6 +28,8 @@ import (
 	"github.com/hexagon-codes/hexclaw/gateway"
 )
 
+const e2eAPIToken = "http-api-fixture-token"
+
 // newE2EServer 构造一个用 mock 引擎驱动的 httptest 真实 HTTP 服务。
 //
 // 返回 *httptest.Server（调用方负责 Close）和底层 mockEngine（便于断言引擎是否被调用）。
@@ -35,7 +37,9 @@ import (
 func newE2EServer(t *testing.T, reply *adapter.Reply, gw gateway.Gateway) (*httptest.Server, *mockEngine) {
 	t.Helper()
 	eng := &mockEngine{reply: reply}
-	srv := NewServer(config.DefaultConfig(), eng, gw, nil)
+	cfg := config.DefaultConfig()
+	cfg.Server.APIToken = e2eAPIToken
+	srv := NewServer(cfg, eng, gw, nil)
 	ts := httptest.NewServer(srv.routes())
 	t.Cleanup(ts.Close)
 	return ts, eng
@@ -55,6 +59,7 @@ func doJSON(t *testing.T, ts *httptest.Server, method, path, body string) *http.
 	if body != "" {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	req.Header.Set("Authorization", "Bearer "+e2eAPIToken)
 	resp, err := ts.Client().Do(req)
 	if err != nil {
 		t.Fatalf("%s %s 请求失败: %v", method, path, err)
@@ -182,6 +187,7 @@ func TestE2E_Chat_SSE_StreamsDataFramesThenDone(t *testing.T) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("Authorization", "Bearer "+e2eAPIToken)
 
 	resp, err := ts.Client().Do(req)
 	if err != nil {
@@ -226,6 +232,7 @@ func TestE2E_Chat_SSE_LineFramingOverRealHTTP(t *testing.T) {
 		ts.URL+"/api/v1/chat", strings.NewReader(`{"message":"hi","user_id":"u1"}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("Authorization", "Bearer "+e2eAPIToken)
 
 	resp, err := ts.Client().Do(req)
 	if err != nil {
@@ -419,7 +426,7 @@ func TestE2E_CORS_UntrustedOrigin_NoACAO(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 // 闭环 9：鉴权中间件——非 loopback 的写操作（无 Token 配置）→ 401
 // （用 srv.routes() + 伪造非 loopback RemoteAddr，验证 auth 中间件闭环；
-//  httptest.NewServer 的连接固定来自 127.0.0.1 会触发 loopback 放行，无法测此路径）
+//  httptest.NewServer 的连接固定来自 127.0.0.1，无法测非回环来源）
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestE2E_Auth_NonLoopbackWrite_NoToken_401(t *testing.T) {
@@ -509,7 +516,9 @@ func TestE2E_Auth_ChatRequiresAuth_NonLoopback(t *testing.T) {
 
 func TestE2E_Chat_EngineDeadline_503_PropagatesClassification(t *testing.T) {
 	eng := &mockEngine{err: context.DeadlineExceeded}
-	srv := NewServer(config.DefaultConfig(), eng, nil, nil)
+	cfg := config.DefaultConfig()
+	cfg.Server.APIToken = e2eAPIToken
+	srv := NewServer(cfg, eng, nil, nil)
 	ts := httptest.NewServer(srv.routes())
 	t.Cleanup(ts.Close)
 

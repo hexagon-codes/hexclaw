@@ -58,6 +58,7 @@ func (s *semanticIndexServiceStub) CancelJobForCorpus(ctx context.Context, owner
 func newSemanticIndexHTTPServer(t *testing.T, svc semanticIndexAPI) *httptest.Server {
 	t.Helper()
 	srv := NewServer(config.DefaultConfig(), nil, nil, nil)
+	srv.SetDesktopAPIToken("knowledge-desktop-fixture")
 	srv.SetSemanticIndexService(svc)
 	ts := httptest.NewServer(srv.routes())
 	t.Cleanup(ts.Close)
@@ -202,7 +203,12 @@ func TestSemanticIndexPolicyHTTPContract(t *testing.T) {
 	stub.cancelJobFn = stub.getJobFn
 	ts := newSemanticIndexHTTPServer(t, stub)
 
-	resp, err := http.Get(ts.URL + "/api/v1/knowledge/corpora/default/embedding-policy?user_id=desktop-user")
+	getReq, err := http.NewRequest(http.MethodGet, ts.URL+"/api/v1/knowledge/corpora/default/embedding-policy?user_id=desktop-user", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	getReq.Header.Set("Authorization", "Bearer knowledge-desktop-fixture")
+	resp, err := ts.Client().Do(getReq)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,6 +236,7 @@ func TestSemanticIndexPolicyHTTPContract(t *testing.T) {
 		ts.URL+"/api/v1/knowledge/corpora/default/embedding-policy:apply?user_id=desktop-user",
 		strings.NewReader(`{"expected_policy_version":7,"selection":{"kind":"disabled"}}`))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer knowledge-desktop-fixture")
 	applyResp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -305,6 +312,7 @@ func TestSemanticIndexJobHTTPContractAndErrorMapping(t *testing.T) {
 		{http.MethodPost, "/api/v1/knowledge/jobs/job-1/cancel?user_id=desktop-user"},
 	} {
 		req, _ := http.NewRequest(tc.method, ts.URL+tc.path, nil)
+		req.Header.Set("Authorization", "Bearer knowledge-desktop-fixture")
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatal(err)
@@ -320,6 +328,7 @@ func TestSemanticIndexJobHTTPContractAndErrorMapping(t *testing.T) {
 		ts.URL+"/api/v1/knowledge/corpora/default/embedding-policy:apply?user_id=desktop-user",
 		strings.NewReader(`{"expected_policy_version":1,"selection":{"kind":"auto"}}`))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer knowledge-desktop-fixture")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -353,7 +362,12 @@ func TestKnowledgeJobHTTPPublishesSanitizedOCRPageReceipts(t *testing.T) {
 	}
 	stub.cancelJobFn = stub.getJobFn
 	ts := newSemanticIndexHTTPServer(t, stub)
-	resp, err := http.Get(ts.URL + "/api/v1/knowledge/jobs/job-ocr")
+	req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/v1/knowledge/jobs/job-ocr", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer knowledge-desktop-fixture")
+	resp, err := ts.Client().Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}

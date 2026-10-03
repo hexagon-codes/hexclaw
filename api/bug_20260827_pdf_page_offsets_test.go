@@ -32,10 +32,11 @@ func TestPDFPageCheckpointsPersistCanonicalOffsets(t *testing.T) {
 		t.Fatalf("page_count=%d checkpoints=%d, want 2/2", prepared.PageCount, len(progress.pages))
 	}
 	previousEnd := int64(-1)
-	for pageNumber, want := range map[int]string{
-		1: "page one alpha contains enough canonical lesson text for the text layer threshold and offset assertion",
-		2: "page two beta contains enough canonical lesson text for the text layer threshold and offset assertion",
+	for pageIndex, want := range []string{
+		"page one alpha contains enough canonical lesson text for the text layer threshold and offset assertion",
+		"page two beta contains enough canonical lesson text for the text layer threshold and offset assertion",
 	} {
+		pageNumber := pageIndex + 1
 		checkpoint, ok := progress.pages[pageNumber]
 		if !ok {
 			t.Fatalf("missing checkpoint page=%d", pageNumber)

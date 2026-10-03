@@ -54,11 +54,18 @@ func TestKnowledgeDocumentRetryRequiresIdempotencyKeyAndUsesTrustedScope(t *test
 		}, nil
 	}
 	srv := NewServer(config.DefaultConfig(), nil, nil, nil)
+	srv.SetDesktopAPIToken("knowledge-desktop-fixture")
 	srv.SetSemanticIndexService(stub)
 	ts := httptest.NewServer(srv.routes())
 	defer ts.Close()
 
-	missing, err := http.Post(ts.URL+"/api/v1/knowledge/documents/doc-failed/retry?user_id=forged", "application/json", nil)
+	missingReq, err := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/knowledge/documents/doc-failed/retry?user_id=forged", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	missingReq.Header.Set("Content-Type", "application/json")
+	missingReq.Header.Set("Authorization", "Bearer knowledge-desktop-fixture")
+	missing, err := ts.Client().Do(missingReq)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,6 +80,7 @@ func TestKnowledgeDocumentRetryRequiresIdempotencyKeyAndUsesTrustedScope(t *test
 		t.Fatal(err)
 	}
 	req.Header.Set("Idempotency-Key", "retry-key")
+	req.Header.Set("Authorization", "Bearer knowledge-desktop-fixture")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)

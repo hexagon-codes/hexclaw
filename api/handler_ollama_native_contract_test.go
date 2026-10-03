@@ -98,10 +98,20 @@ func TestHandleOllamaPullRejects307BeforeReplayingBodyCrossOrigin(t *testing.T) 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/ollama/pull", strings.NewReader(
 		`{"model":"private-model-name"}`,
 	))
+	req.Header.Set("Idempotency-Key", "redirect-rejection-fixture")
 	s.handleOllamaPull(w, req)
 
-	if w.Code != http.StatusBadGateway {
-		t.Fatalf("status=%d body=%s, want redirect rejection", w.Code, w.Body.String())
+	// 事件流的 HTTP 状态只表示订阅成功；上游拒绝保存在操作终态。
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s, want progress stream", w.Code, w.Body.String())
+	}
+	op := s.pullOperation("redirect-rejection-fixture")
+	if op == nil {
+		t.Fatal("redirect rejection did not preserve pull operation")
+	}
+	snapshot, _ := op.read()
+	if snapshot.State != "failed" || !strings.Contains(snapshot.Error, "HTTP 307") {
+		t.Fatalf("pull terminal receipt=%+v, want redirect rejection", snapshot)
 	}
 	if redirectedRequests.Load() != 0 {
 		t.Fatalf("Ollama pull replay reached foreign origin %d times", redirectedRequests.Load())
@@ -196,7 +206,12 @@ func TestHandleOllamaPullNotifiesInstalledModelOnlyAfterSuccess(t *testing.T) {
 		{name: "later error overrides success", upstream: "{\"status\":\"success\"}\n{\"status\":\"error\",\"error\":\"checksum mismatch\"}\n", wantCalled: false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodGet && r.URL.Path == "/api/tags" {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(`{"models":[{"name":"nomic-embed-text:latest"}]}`))
+					return
+				}
 				w.Header().Set("Content-Type", "application/x-ndjson")
 				_, _ = w.Write([]byte(tt.upstream))
 			}))
@@ -212,7 +227,20 @@ func TestHandleOllamaPullNotifiesInstalledModelOnlyAfterSuccess(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/ollama/pull", strings.NewReader(
 				`{"model":"nomic-embed-text:latest"}`,
 			))
+			req.Header.Set("Idempotency-Key", "installed-callback-fixture")
 			s.handleOllamaPull(w, req)
+			op := s.pullOperation("installed-callback-fixture")
+			if op == nil {
+				t.Fatal("pull did not preserve operation")
+			}
+			snapshot, _ := op.read()
+			wantState := "failed"
+			if tt.wantCalled {
+				wantState = "succeeded"
+			}
+			if snapshot.State != wantState {
+				t.Fatalf("pull terminal state=%q, want %q; receipt=%+v", snapshot.State, wantState, snapshot)
+			}
 
 			select {
 			case model := <-called:
