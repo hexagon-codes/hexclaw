@@ -18,7 +18,7 @@ import (
 	"time"
 
 	"github.com/hexagon-codes/hexclaw/config"
-	sqlitestore "github.com/hexagon-codes/hexclaw/storage/sqlite"
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 )
 
 const bug20260808InstalledAppExecutable = "HEXCLAW_INSTALLED_APP_EXECUTABLE"
@@ -69,7 +69,7 @@ func TestBUG20260808YAMLProviderKeySurvivesRestart_RealHexClawGPT(t *testing.T) 
 		t.Fatal("provider API key changed or disappeared across isolated YAML restart")
 	}
 
-	store, err := sqlitestore.New(filepath.Join(t.TempDir(), "yaml-provider-persistence-live.db"))
+	store, err := sqlitefixture.New(filepath.Join(t.TempDir(), "yaml-provider-persistence-live.db"))
 	if err != nil {
 		t.Fatalf("open isolated receipt store: error_type=%T", err)
 	}
@@ -193,7 +193,7 @@ func TestBUG20260808UnsignedInstalledAppPreservesOwnerYAML_RealHexClawGPT(t *tes
 	if err != nil {
 		t.Fatal("reload installed-app Provider YAML for real probe failed")
 	}
-	store, err := sqlitestore.New(filepath.Join(runRoot, "installed-app-provider-probe.db"))
+	store, err := sqlitefixture.New(filepath.Join(runRoot, "installed-app-provider-probe.db"))
 	if err != nil {
 		t.Fatalf("open installed-app probe receipt store: error_type=%T", err)
 	}

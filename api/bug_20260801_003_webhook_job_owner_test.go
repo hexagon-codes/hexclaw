@@ -15,6 +15,7 @@ import (
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/config"
 	"github.com/hexagon-codes/hexclaw/cron"
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/skill"
 	"github.com/hexagon-codes/hexclaw/storage/migrate"
 	"github.com/hexagon-codes/hexclaw/webhook"
@@ -28,7 +29,8 @@ type bug20260801003WebhookJobOwnerHarness struct {
 
 func newBUG20260801003WebhookJobOwnerHarness(t *testing.T) *bug20260801003WebhookJobOwnerHarness {
 	t.Helper()
-	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "webhook-owner.db"))
+	path := filepath.Join(t.TempDir(), "webhook-owner.db")
+	db, err := sqlitefixture.Open(path, path)
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}

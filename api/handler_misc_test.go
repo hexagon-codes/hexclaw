@@ -14,12 +14,12 @@ import (
 
 	"github.com/hexagon-codes/hexclaw/config"
 	"github.com/hexagon-codes/hexclaw/engine"
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/llmrouter"
 	agentrouter "github.com/hexagon-codes/hexclaw/router"
 	"github.com/hexagon-codes/hexclaw/skill"
 	"github.com/hexagon-codes/hexclaw/skill/hub"
 	"github.com/hexagon-codes/hexclaw/skill/marketplace"
-	sqlitestore "github.com/hexagon-codes/hexclaw/storage/sqlite"
 )
 
 type mockSkillRuntimeEngine struct {
@@ -156,7 +156,7 @@ func agentTempPtr(v float64) *float64 { return &v }
 
 func TestHandleUpdateAgent_PreservesPersistedFields(t *testing.T) {
 	dir := t.TempDir()
-	store, err := sqlitestore.New(filepath.Join(dir, "test.db"))
+	store, err := sqlitefixture.New(filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatalf("创建 SQLite 存储失败: %v", err)
 	}
@@ -240,7 +240,7 @@ func TestHandleUpdateAgent_PreservesPersistedFields(t *testing.T) {
 
 func TestHandleUpdateAgent_AllowsZeroValueOverrides(t *testing.T) {
 	dir := t.TempDir()
-	store, err := sqlitestore.New(filepath.Join(dir, "test.db"))
+	store, err := sqlitefixture.New(filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatalf("创建 SQLite 存储失败: %v", err)
 	}

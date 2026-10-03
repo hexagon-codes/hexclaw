@@ -24,8 +24,8 @@ import (
 	"testing"
 
 	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	agentrouter "github.com/hexagon-codes/hexclaw/router"
-	sqlitestore "github.com/hexagon-codes/hexclaw/storage/sqlite"
 )
 
 // failingAgentStore：可注入失败的 router.Store 替身（含 A1 新增的两个级联方法，
@@ -144,7 +144,7 @@ func TestBug20260703G1_SetDefaultPersistFailureReturns500(t *testing.T) {
 
 // G2 + 孤儿规则：用真 SQLite 走完整链路。
 func TestBug20260703G2_UnregisterDefaultAgentPersistsNewDefaultAndCleansRules(t *testing.T) {
-	store, err := sqlitestore.New(filepath.Join(t.TempDir(), "g2-default.db"))
+	store, err := sqlitefixture.New(filepath.Join(t.TempDir(), "g2-default.db"))
 	if err != nil {
 		t.Fatalf("创建 SQLite 存储失败: %v", err)
 	}
@@ -217,7 +217,7 @@ func TestBug20260703G2_UnregisterDefaultAgentPersistsNewDefaultAndCleansRules(t 
 // G1 连带：SetDefault("") 清除默认是合法操作；修掉吞错后 store 层必须支持
 // 空名清除语义，不得把「清除」误报为 500。
 func TestBug20260703G1_ClearDefaultAgentSucceeds(t *testing.T) {
-	store, err := sqlitestore.New(filepath.Join(t.TempDir(), "g1-clear.db"))
+	store, err := sqlitefixture.New(filepath.Join(t.TempDir(), "g1-clear.db"))
 	if err != nil {
 		t.Fatalf("创建 SQLite 存储失败: %v", err)
 	}

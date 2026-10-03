@@ -15,6 +15,7 @@ import (
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/autonomy"
 	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/skill"
 	"github.com/hexagon-codes/hexclaw/storage/migrate"
 	"github.com/hexagon-codes/hexclaw/webhook"
@@ -58,7 +59,7 @@ type webhookOwnerAPISnapshot struct {
 
 func newWebhookOwnerAPIFixture(t *testing.T) *webhookOwnerAPIFixture {
 	t.Helper()
-	db, err := sql.Open("sqlite", ":memory:")
+	db, err := sqlitefixture.Memory()
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}

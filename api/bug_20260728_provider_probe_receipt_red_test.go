@@ -11,6 +11,7 @@ import (
 
 	"github.com/hexagon-codes/hexagon"
 	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	sqlitestore "github.com/hexagon-codes/hexclaw/storage/sqlite"
 )
 
@@ -55,7 +56,7 @@ func bug20260728ProviderConfig() *config.Config {
 
 func bug20260728OpenStore(t *testing.T) *sqlitestore.Store {
 	t.Helper()
-	store, err := sqlitestore.New(t.TempDir() + "/provider-probe-red.db")
+	store, err := sqlitefixture.New(t.TempDir() + "/provider-probe-red.db")
 	if err != nil {
 		t.Fatalf("open sqlite store: %v", err)
 	}

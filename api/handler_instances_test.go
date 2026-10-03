@@ -10,13 +10,13 @@ import (
 
 	"github.com/hexagon-codes/hexclaw/config"
 	"github.com/hexagon-codes/hexclaw/instances"
-	sqlitestore "github.com/hexagon-codes/hexclaw/storage/sqlite"
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 )
 
 func newTestInstanceManager(t *testing.T) (*instances.Manager, func()) {
 	t.Helper()
 
-	store, err := sqlitestore.New(filepath.Join(t.TempDir(), "api-instances.db"))
+	store, err := sqlitefixture.New(filepath.Join(t.TempDir(), "api-instances.db"))
 	if err != nil {
 		t.Fatalf("创建 SQLite 存储失败: %v", err)
 	}

@@ -20,8 +20,8 @@ import (
 
 	"github.com/hexagon-codes/hexclaw/config"
 	"github.com/hexagon-codes/hexclaw/instances"
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	agentrouter "github.com/hexagon-codes/hexclaw/router"
-	sqlitestore "github.com/hexagon-codes/hexclaw/storage/sqlite"
 )
 
 type instanceCascadeHarness struct {
@@ -34,7 +34,7 @@ type instanceCascadeHarness struct {
 func newInstanceCascadeHarness(t *testing.T) *instanceCascadeHarness {
 	t.Helper()
 
-	store, err := sqlitestore.New(filepath.Join(t.TempDir(), "a1-cascade.db"))
+	store, err := sqlitefixture.New(filepath.Join(t.TempDir(), "a1-cascade.db"))
 	if err != nil {
 		t.Fatalf("创建 SQLite 存储失败: %v", err)
 	}

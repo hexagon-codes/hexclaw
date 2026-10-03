@@ -14,6 +14,7 @@ import (
 
 	"github.com/hexagon-codes/hexagon/rag/splitter"
 	"github.com/hexagon-codes/hexclaw/engine"
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/knowledge"
 	"github.com/hexagon-codes/hexclaw/scenario"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
@@ -35,7 +36,8 @@ func (materialTestResolver) Catalog(context.Context, string, string) (knowledge.
 func materialImportFixture(t *testing.T, body string, configure ...func(*sql.DB, *knowledge.CreateDocumentInput)) (*sql.DB, *k12storage.Store, *usecase.MaterialPreparationWorker, string) {
 	t.Helper()
 	ctx := t.Context()
-	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "material.db")+"?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)")
+	path := filepath.Join(t.TempDir(), "material.db")
+	db, err := sqlitefixture.Open(path, path+"?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)")
 	if err != nil {
 		t.Fatal(err)
 	}

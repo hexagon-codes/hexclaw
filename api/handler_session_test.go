@@ -15,6 +15,7 @@ import (
 
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/storage"
 	sqlitestore "github.com/hexagon-codes/hexclaw/storage/sqlite"
 )
@@ -31,7 +32,7 @@ func (s *getSessionErrorStore) GetSession(context.Context, string) (*storage.Ses
 func newTestStoreForAPI(t *testing.T) storage.Store {
 	t.Helper()
 	dir := t.TempDir()
-	store, err := sqlitestore.New(filepath.Join(dir, "test.db"))
+	store, err := sqlitefixture.New(filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

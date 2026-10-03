@@ -21,6 +21,7 @@ import (
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/config"
 	enginepkg "github.com/hexagon-codes/hexclaw/engine"
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/llmrouter"
 	"github.com/hexagon-codes/hexclaw/session"
 	"github.com/hexagon-codes/hexclaw/skill"
@@ -261,7 +262,7 @@ func TestChatAPIResponseAndPublicHistoryShareCanonicalAssistantBytesAcrossRestar
 	)
 	cfg := apiCanonicalHistoryConfig()
 	dbPath := filepath.Join(t.TempDir(), "api-canonical-history.db")
-	store, err := sqlitestore.New(dbPath)
+	store, err := sqlitefixture.New(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -460,7 +461,7 @@ func TestChatAPIMultiTurnToolVisibleBytesMatchHistoryAcrossJSONSSEAndRestart(t *
 			cfg := apiCanonicalHistoryConfig()
 			cfg.LLM.Tools.Enabled = "on"
 			dbPath := filepath.Join(t.TempDir(), "api-multi-turn.db")
-			store, err := sqlitestore.New(dbPath)
+			store, err := sqlitefixture.New(dbPath)
 			if err != nil {
 				t.Fatalf("new sqlite store: %v", err)
 			}
