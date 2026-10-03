@@ -4468,11 +4468,10 @@ type codeExecGoCacheDiagnosticSandbox struct {
 
 func (s codeExecGoCacheDiagnosticSandbox) Exec(ctx context.Context, command sandbox.Command) (*sandbox.ExecResult, error) {
 	result, err := s.Sandbox.Exec(ctx, command)
-	if slices.Equal(command.Args, []string{"list", "-deps", "-export", "testing"}) &&
-		!codeExecGoHelperResultSucceeded(result, err) {
+	if !codeExecGoHelperResultSucceeded(result, err) {
 		if result != nil {
-			s.t.Logf("trusted Go cache build failed: exit=%d stderr=%q limits=%+v error=%v",
-				result.ExitCode, result.Stderr, result.Limits, err)
+			s.t.Logf("trusted Go helper failed: args=%q exit=%d stderr=%q limits=%+v error=%v",
+				command.Args, result.ExitCode, result.Stderr, result.Limits, err)
 		} else {
 			s.t.Logf("trusted Go cache build failed without process result: %v", err)
 		}
@@ -4508,7 +4507,7 @@ func newCodeExecGoBuildCacheTestRun(t *testing.T) codeExecRun {
 		if lookupErr != nil {
 			t.Fatalf("Go cache test requires a Go toolchain: lookup error: %v", lookupErr)
 		}
-		binary, canonicalErr := filepath.EvalSymlinks(binary)
+		binary, canonicalErr := codeExecCanonicalToolchainPath(binary)
 		if canonicalErr != nil {
 			t.Fatalf("Go cache test requires a Go toolchain: canonical error: %v", canonicalErr)
 		}

@@ -590,9 +590,7 @@ func codeExecGoHelperConfigWithLimit(
 	cfg.MaxProcesses = 0
 
 	paths := append([]string(nil), readablePaths...)
-	if strings.TrimSpace(workingDir) != "" {
-		paths = append(paths, workingDir)
-	}
+	// 工作目录已在可写 Workspace 内，不能再列为只读路径覆盖它的写入挂载。
 	paths = append(paths, filepath.Dir(goBinary))
 	canonicalReadable, err := canonicalCodeExecPaths(paths)
 	if err != nil {
