@@ -39,6 +39,7 @@ type k12DingtalkPhotoReplyCommand struct {
 	FinalArtifactDigest string
 	DeliveryBatchID     string
 	Target              k12usecase.ResolvedDeliveryTarget
+	TaskIntent          k12.ImageTaskIntent
 	Message             k12usecase.DeliveryMessage
 }
 
@@ -89,17 +90,25 @@ func (c *k12DingtalkPhotoReplyCoordinator) Deliver(
 		(command.Target.Target.ChatID[0] < 0x20) {
 		return k12.DeliveryBatch{}, false, fmt.Errorf("K12 DingTalk photo reply target must be one direct binding")
 	}
-	if command.Message.Content == "" || len(command.Message.Attachments) != 1 {
-		return k12.DeliveryBatch{}, false, fmt.Errorf("K12 DingTalk photo reply must contain Markdown and one annotated image")
+	attachmentCount := 1
+	if command.TaskIntent == k12.ImageTaskIntentBlankWorksheet {
+		attachmentCount = 0
 	}
-	attachment := command.Message.Attachments[0]
-	attachment.Name = strings.TrimSpace(attachment.Name)
-	attachment.MIME = strings.ToLower(strings.TrimSpace(attachment.MIME))
-	if attachment.Name == "" || !strings.HasPrefix(attachment.MIME, "image/") ||
-		attachment.MIME == "image/" || len(attachment.Data) == 0 {
-		return k12.DeliveryBatch{}, false, fmt.Errorf("K12 DingTalk photo reply annotated image is incomplete")
+	if command.Message.Content == "" || len(command.Message.Attachments) != attachmentCount {
+		return k12.DeliveryBatch{}, false, fmt.Errorf("K12 DingTalk photo reply has an invalid part set")
 	}
-	command.Message.Attachments[0] = attachment
+	imageMIME := ""
+	if attachmentCount == 1 {
+		attachment := command.Message.Attachments[0]
+		attachment.Name = strings.TrimSpace(attachment.Name)
+		attachment.MIME = strings.ToLower(strings.TrimSpace(attachment.MIME))
+		if attachment.Name == "" || !strings.HasPrefix(attachment.MIME, "image/") ||
+			attachment.MIME == "image/" || len(attachment.Data) == 0 {
+			return k12.DeliveryBatch{}, false, fmt.Errorf("K12 DingTalk photo reply annotated image is incomplete")
+		}
+		command.Message.Attachments[0] = attachment
+		imageMIME = attachment.MIME
+	}
 
 	batch, created, err := c.batches.PrepareAndSendMessageBatchForTargets(
 		ctx,
@@ -112,7 +121,7 @@ func (c *k12DingtalkPhotoReplyCoordinator) Deliver(
 	if err != nil {
 		return batch, created, err
 	}
-	if err := validateK12DingtalkPhotoReplyBatch(batch, command.Target, attachment.MIME); err != nil {
+	if err := validateK12DingtalkPhotoReplyBatch(batch, command.Target, imageMIME); err != nil {
 		return batch, created, err
 	}
 	return batch, created, nil
@@ -140,14 +149,22 @@ func validateK12DingtalkPhotoReplyBatch(
 	target k12usecase.ResolvedDeliveryTarget,
 	imageMIME string,
 ) error {
-	if strings.TrimSpace(batch.BatchID) == "" || len(batch.Receipts) != 2 {
+	partCount := 2
+	if imageMIME == "" {
+		partCount = 1
+	}
+	if strings.TrimSpace(batch.BatchID) == "" || len(batch.Receipts) != partCount {
 		return fmt.Errorf("K12 DingTalk photo reply batch is incomplete")
 	}
-	markdown, image := batch.Receipts[0], batch.Receipts[1]
-	if markdown.PartKind != messagecontent.PartMarkdown || markdown.PartOrdinal != 1 ||
-		image.PartKind != messagecontent.PartArtifact || image.PartOrdinal != 2 ||
-		image.PartMIME != imageMIME {
+	markdown := batch.Receipts[0]
+	if markdown.PartKind != messagecontent.PartMarkdown || markdown.PartOrdinal != 1 {
 		return fmt.Errorf("K12 DingTalk photo reply batch has an invalid part set")
+	}
+	if partCount == 2 {
+		image := batch.Receipts[1]
+		if image.PartKind != messagecontent.PartArtifact || image.PartOrdinal != 2 || image.PartMIME != imageMIME {
+			return fmt.Errorf("K12 DingTalk photo reply batch has an invalid part set")
+		}
 	}
 	for _, receipt := range batch.Receipts {
 		if strings.TrimSpace(receipt.DeliveryID) == "" || receipt.BindingID != target.BindingID ||
