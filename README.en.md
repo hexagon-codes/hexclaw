@@ -732,8 +732,9 @@ Scenario packs are mounted through `srv.Mount` under `/api/<scenario>` and inher
 ### CI/CD
 
 - Pushes to `feat/**` compile application and test packages without running test cases. A successful compile triggers cloud deployment when automatic deployment is enabled and the branch is configured as its target.
-- Main pushes and PRs targeting main retain full Linux tests with race detection, Windows builds and sandbox tests, and macOS sandbox tests. Windows/macOS share one matrix; coverage uploads and advisory Windows core-test duplication are removed.
-- K12, render, and Sandbox CodeExec run their dedicated checks according to their path filters. Render no longer runs weekly jobs or queries upstream release versions.
+- Branch pushes and PRs changing only `README*.md`, `CHANGELOG.md`, `CONTRIBUTING.md`, `SECURITY*.md`, `docs/**/*.md`, or `LICENSE` do not trigger CI, builds, or automatic cloud deployment for that commit. A blanket `**/*.md` ignore is inappropriate: Markdown elsewhere may be a `go:embed` runtime resource.
+- Main pushes and PRs targeting main retain full Linux tests with race detection, Windows builds and sandbox tests, and macOS sandbox tests. The current Linux command is `go test -race -count=1 -timeout 20m ./...`, with a 20-minute per-package test timeout and a 40-minute job budget. Windows/macOS share one matrix; coverage uploads and advisory Windows core-test duplication are removed.
+- CI and K12 use `GOWORK=off` and `GOFLAGS=-mod=readonly` to check published dependencies without rewriting dependency lockfiles. K12 runs for relevant main pushes and PRs, not duplicate feature pushes; real-model evaluation remains enabled by its key configuration. Render and Sandbox CodeExec follow their own path filters. Render no longer runs weekly jobs or queries upstream release versions.
 - `v*` tags or manual runs against an existing tag produce release artifacts independently of the full CI tests. The release version is `v0.5.0-beta`, a prerelease; a version entry does not imply that its tag or GitHub Release exists.
 
 See [CI/CD gate details](CONTRIBUTING.md#cicd-门禁说明) and the [cloud deployment guide](docs/cloud-deployment.md). A successful feature-branch compile does not replace full tests or Desktop/IM acceptance.
@@ -840,7 +841,7 @@ chore: build/toolchain updates
 **Dependencies & CI/CD**
 - **Framework dependency upgrade** — `go.mod` targets hexagon v0.5.14 / ai-core v0.2.11 / toolkit v0.3.4 with Go 1.25.13 as the compatibility baseline. Release-mode verification uses published dependencies rather than a local workspace.
 - **Version-aware skill seeds** — Embedded first-run skills can upgrade by seed version; the default catalog remains aligned with `hexagon-codes/hexclaw-hub` tag `v0.0.6`.
-- **CI/CD simplification** — Full Linux tests with race detection, platform sandbox checks, and dedicated gates remain. Windows/macOS configuration is shared; coverage uploads, advisory Windows core-test duplication, and render's weekly upstream-version checks are removed. Feature compilation, automatic cloud deployment, and tag-based releases have separate verification scopes.
+- **CI/CD simplification** — Full Linux tests with race detection, platform sandbox checks, and dedicated gates remain. Windows/macOS configuration is shared; coverage uploads, advisory Windows core-test duplication, and render's weekly upstream-version checks are removed. Changes limited to explanatory docs skip primary CI and automatic deployment, while embedded Markdown resources remain checked. K12 retains relevant PR/main checks without duplicate feature-push runs. Feature compilation, automatic cloud deployment, and tag-based releases have separate verification scopes.
 - **Sandbox verification** — `sandbox-code-exec.yml` tests strong-sandbox behavior; normal Linux CI gates real execution by backend capability, the dedicated workflow sets `HEXCLAW_P0_SANDBOX_PROOF=1`, and the runner-integrity probe only runs manually with `HEXCLAW_RUNNER_PROBE=1`.
 
 > See [CHANGELOG.md](CHANGELOG.md) for the complete release history.

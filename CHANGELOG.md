@@ -19,6 +19,8 @@
 - **本地/云端路由韧性**：本地默认模型启动预热并对齐 `num_ctx`；推理、视觉、embedding 和 rerank 按用途选路，provider failover 时重建符合目标 locality 的请求。
 - **工作流与平台生命周期**：条件节点、路由规则与配置更新改为原子持久化；MCP 客户端与 IM adapter 收敛启停、重连和投递语义。
 - 精简 CI/CD：Windows / macOS sandbox 共用矩阵，移除覆盖率上传、Windows 非阻塞的核心重复测试、render 每周定时任务及上游版本查询；保留 Linux 全量测试和 race、平台 sandbox 及 K12 / render / code_exec 专项检查。
+- 主 CI 仅对指定纯说明文档改动跳过构建与自动部署，不广义忽略可能参与 `go:embed` 的 Markdown；K12 专项仅保留相关 main push / PR，移除 feature push 重复执行，真实模型评测仍按密钥配置启用。
+- CI 与 K12 使用 `GOWORK=off`、`GOFLAGS=-mod=readonly`；Linux 全量命令调整为 `go test -race -count=1 -timeout 20m ./...`，当前单包测试超时为 20 分钟、job 总预算为 40 分钟。
 - 更新中英文安装、开发与云端部署文档，区分功能分支编译、main / PR 全量验证、按提交自动部署和独立 Tag Release；历史审计结果保留原证据范围。
 
 ### Fixed

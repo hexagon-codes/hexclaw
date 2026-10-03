@@ -21,9 +21,9 @@ golangci-lint run
 
 | 工作流 | 触发条件 | 检查或产物 |
 | --- | --- | --- |
-| CI：功能分支 | push 到 `feat/**` | `go test -run '^$' ./...`，只编译应用和测试包，不执行用例 |
-| CI：主分支 / PR | push 到 main，或 PR 的目标为 main | Linux 全量 `go test -race -count=1 ./...`；Windows 全仓构建与 sandbox；macOS sandbox |
-| K12 Eval Gate | main / `feat/**` push 或 PR 匹配 Go / K12 / 工作流路径 | 确定性 harness；真实模型评测仅在配置相应密钥时执行 |
+| CI：功能分支 | push 到 `feat/**`，纯说明文档改动除外 | `go test -run '^$' ./...`，只编译应用和测试包，不执行用例 |
+| CI：主分支 / PR | push 到 main，或 PR 的目标为 main，纯说明文档改动除外 | Linux 全量 `go test -race -count=1 -timeout 20m ./...`；Windows 全仓构建与 sandbox；macOS sandbox |
+| K12 Eval Gate | main push 或 PR 匹配 Go / K12 / 工作流路径；不运行 feature push | 确定性 harness；真实模型评测仅在配置相应密钥时执行 |
 | render | main push 或 PR 匹配渲染路径 | Linux / macOS / Windows 构建及 render、API Render 测试；不再每周定时执行 |
 | Sandbox CodeExec | main push / PR 匹配执行器与依赖路径，或手动触发 | 三平台 toolkit sandbox 与 HexClaw code_exec 专项验证 |
 | Deploy | 已启用部署，且指定分支的 push CI 成功 | 构建已验证提交的镜像，以 digest 更新云端并核对部署结果 |
@@ -31,13 +31,17 @@ golangci-lint run
 
 功能分支的编译成功可以触发现有自动部署，但不代表 main / PR 全量测试通过。Release 只依赖自身构建，不等待主 CI 或专项工作流；发布产物与云端部署结果应分别核对。
 
-Linux 全量测试和 race、平台 sandbox、K12 与渲染专项检查保持不变。Windows / macOS sandbox 共用平台矩阵；已移除覆盖率文件上传和 Windows 非阻塞的核心重复测试。覆盖率仍可按需用 `make test-cover` 在本地生成。
+CI 的 push / PR 仅修改 `README*.md`、`CHANGELOG.md`、`CONTRIBUTING.md`、`SECURITY*.md`、`docs/**/*.md` 或 `LICENSE` 时跳过，不触发该提交的 CI 构建及后续自动部署。这是明确的纯说明文档范围，不使用 `**/*.md` 广义忽略：其他目录中的 Markdown 可能参与 `go:embed`，影响运行产物。
+
+CI 与 K12 固定使用 `GOWORK=off`、`GOFLAGS=-mod=readonly`，验证已发布依赖而不改写 `go.mod` / `go.sum`。Linux 当前全量命令设置单包测试超时 20 分钟，job 总预算为 40 分钟。
+
+Linux 全量测试和 race、平台 sandbox、K12 与渲染专项的检查内容保持不变。Windows / macOS sandbox 共用平台矩阵；已移除覆盖率文件上传和 Windows 非阻塞的核心重复测试。覆盖率仍可按需用 `make test-cover` 在本地生成。
 
 Sandbox CodeExec 的 Linux 环境复用同一固定 toolkit 版本提供的 bubblewrap 安装脚本，安装并检查运行所需参数，避免发行版旧包与当前后端不兼容。
 
 三项大型真实 PDF 回归仅在显式设置 `HEXCLAW_REAL_PDF_FIXTURE` 时使用外部冻结样本，不从其他仓库自动读取。未设置或文件不存在时明确跳过，不能计为真实 PDF 边界已验证；文件存在时仍检查固定大小、SHA 和全部功能断言，其他读取失败或内容不符继续失败。默认构建、CI 与应用运行不依赖该外部素材。
 
-- GitHub Actions 的 Linux 硬门禁等价于 `go test -race -count=1 ./...`。
+- GitHub Actions 的 Linux 硬门禁等价于 `GOWORK=off GOFLAGS=-mod=readonly go test -race -count=1 -timeout 20m ./...`。
 - 发布/CI 兼容性必须用 `GOWORK=off` 复验，避免本地 `go.work` 把未发布的 `toolkit` / `ai-core` / `hexagon` API 变化遮住。
 - 故意失败的 runner 完整性探针不得进入默认 `go test ./...` 路径；这类测试必须默认 `t.Skip`，或只在显式环境变量/手工 workflow 下启用。
 
