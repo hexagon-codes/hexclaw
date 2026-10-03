@@ -4461,6 +4461,25 @@ func TestCodeExecGoBuildCacheBaseRejectsSymlinkComponent(t *testing.T) {
 	}
 }
 
+type codeExecGoCacheDiagnosticSandbox struct {
+	sandbox.Sandbox
+	t *testing.T
+}
+
+func (s codeExecGoCacheDiagnosticSandbox) Exec(ctx context.Context, command sandbox.Command) (*sandbox.ExecResult, error) {
+	result, err := s.Sandbox.Exec(ctx, command)
+	if slices.Equal(command.Args, []string{"list", "-deps", "-export", "testing"}) &&
+		!codeExecGoHelperResultSucceeded(result, err) {
+		if result != nil {
+			s.t.Logf("trusted Go cache build failed: exit=%d stderr=%q limits=%+v error=%v",
+				result.ExitCode, result.Stderr, result.Limits, err)
+		} else {
+			s.t.Logf("trusted Go cache build failed without process result: %v", err)
+		}
+	}
+	return result, err
+}
+
 func newCodeExecGoBuildCacheTestRun(t *testing.T) codeExecRun {
 	t.Helper()
 	base := t.TempDir()
@@ -4473,7 +4492,14 @@ func newCodeExecGoBuildCacheTestRun(t *testing.T) codeExecRun {
 		Workspace: base,
 		Timeout:   30,
 	})
-	plan, err := newCodeExecExecutionPlan(context.Background(), cfg, true, codeExecGoHelper{})
+	helper := codeExecGoHelper{Factory: func(cfg sandbox.Config) (sandbox.Sandbox, error) {
+		sb, err := sandbox.New(cfg)
+		if err != nil {
+			return nil, err
+		}
+		return codeExecGoCacheDiagnosticSandbox{Sandbox: sb, t: t}, nil
+	}}
+	plan, err := newCodeExecExecutionPlan(context.Background(), cfg, true, helper)
 	if err != nil {
 		t.Fatalf("create Go cache test execution plan: %v", err)
 	}
