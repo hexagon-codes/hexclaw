@@ -12,7 +12,6 @@ import (
 
 	"github.com/hexagon-codes/hexclaw/internal/inputlimits"
 	"github.com/hexagon-codes/hexclaw/records"
-	"github.com/hexagon-codes/hexclaw/router"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 )
 
@@ -297,7 +296,7 @@ func (s *Store) UpdateProfileBundle(ctx context.Context, in ProfileBundleMutatio
 			in.AgentConfig.Description = strings.TrimSpace(in.AgentConfig.Description)
 		}
 		if in.AgentConfig.DisplayName != displayName {
-			if nameErr := router.ValidateAgentDisplayName(in.AgentConfig.DisplayName); nameErr != nil {
+			if nameErr := inputlimits.Text("display_name", in.AgentConfig.DisplayName, "", inputlimits.DisplayName); nameErr != nil {
 				return k12.ProfileBundleResult{}, false, fmt.Errorf("%w: %s", records.ErrInvalidFields, nameErr)
 			}
 			in.AgentConfig.DisplayName = strings.TrimSpace(in.AgentConfig.DisplayName)
