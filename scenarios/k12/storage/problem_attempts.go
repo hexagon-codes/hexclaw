@@ -384,8 +384,112 @@ func (s *Store) PutProblemAttemptSnapshot(ctx context.Context, snapshot k12.Prob
 	if err := syncProblemInputRevisionHeadsTx(ctx, tx, normalized, nowUnix()); err != nil {
 		return fmt.Errorf("k12storage: freeze immutable Problem input heads: %w", err)
 	}
+	if err := correctRecognizedHomeworkIntentTx(ctx, tx, normalized, nowUnix()); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("k12storage: 提交 Problem/Attempt 事务: %w", err)
+	}
+	return nil
+}
+
+// 自动数学分流在识别事实固化时收敛有效意图；原分类回执和显式讲解意图不变。
+// photo Submission 与 HomeworkSubmission 身份不同，只沿当前 Job 绑定和原图快照关联。
+func correctRecognizedHomeworkIntentTx(ctx context.Context, tx *sql.Tx, snapshot k12.ProblemAttemptSnapshot, at int64) error {
+	answeredPages := make(map[string]bool)
+	problems := make(map[string]k12.Problem, len(snapshot.Problems))
+	for _, problem := range snapshot.Problems {
+		problems[problem.ProblemID] = problem
+	}
+	for _, attempt := range snapshot.Attempts {
+		problem := problems[attempt.ProblemID]
+		if problem.Subject == "数学" && attempt.AnswerState == "present" && attempt.AnswerMarkdown != "" {
+			answeredPages[problem.PageAssetID] = true
+		}
+	}
+	if len(answeredPages) == 0 {
+		return nil
+	}
+	owner, submissionID := snapshot.Problems[0].AgentName, snapshot.Problems[0].SubmissionID
+	var dispatchID, homeworkID, jobID, dispatchAssets, homeworkAssets string
+	var dispatchVersion, homeworkVersion, candidates int
+	err := tx.QueryRowContext(ctx, `SELECT d.dispatch_id,h.submission_id,j.record_id,
+            d.version,h.version,d.source_asset_refs_json,h.source_asset_refs_json,COUNT(*) OVER ()
+        FROM k12_grading_jobs j
+        JOIN k12_homework_submissions h ON h.agent_name=j.agent_name AND h.grading_job_id=j.record_id
+        JOIN k12_image_task_dispatches d ON d.agent_name=h.agent_name AND d.dispatch_id=h.dispatch_id
+        WHERE j.agent_name=? AND j.submission_id=? AND j.source_kind='image_task'
+          AND j.confirmed_version=0 AND j.idempotency_key='image_task|' || d.dispatch_id || '|v0'
+          AND (j.status='recognizing' OR (j.status='outcome_unknown' AND j.failed_stage='recognizing'))
+          AND j.confirmation_state='pending' AND j.anchor_state='pending'
+          AND h.status='processing' AND h.task_intent='blank_worksheet'
+          AND d.status='routed' AND d.task_intent='blank_worksheet'
+          AND d.routing_provenance='model_classified' AND d.creative_entry_json=''
+          AND d.target_object_type='homework_submission' AND d.target_object_id=h.submission_id
+          AND NOT EXISTS (SELECT 1 FROM k12_grading_assessment_items a
+              WHERE a.agent_name=j.agent_name AND a.job_id=j.record_id)
+          AND NOT EXISTS (SELECT 1 FROM k12_grading_final_artifacts a
+              WHERE a.agent_name=j.agent_name AND a.job_id=j.record_id)
+          AND NOT EXISTS (SELECT 1 FROM k12_model_invocations i
+              WHERE i.agent_name=j.agent_name AND i.job_id=j.record_id
+                AND i.stage IN ('locating','assessing','rendering','projecting'))`, owner, submissionID).
+		Scan(&dispatchID, &homeworkID, &jobID, &dispatchVersion, &homeworkVersion, &dispatchAssets, &homeworkAssets, &candidates)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("k12storage: resolve recognized homework intent: %w", err)
+	}
+	// 旧版内容摘要身份可能被多个来源共享，不能任取另一任务的绑定。
+	if candidates != 1 {
+		return nil
+	}
+	// 人工从 unknown 选择空白卷也保留 model_classified 来源，须核对原始分类决定。
+	classification, err := getLatestImageTaskInvocation(ctx, tx, owner, k12.ImageTaskOperationClassification, dispatchID, "")
+	if err != nil {
+		return fmt.Errorf("k12storage: read original homework classification: %w", err)
+	}
+	var decision ImageTaskRoutingDecision
+	if classification.Status != k12.ImageTaskInvocationSucceeded {
+		return nil
+	}
+	if err := json.Unmarshal([]byte(classification.ResultJSON), &decision); err != nil {
+		return fmt.Errorf("k12storage: parse original homework classification: %w", err)
+	}
+	if decision.Intent != k12.ImageTaskIntentBlankWorksheet {
+		return nil
+	}
+	var dispatchRefs, homeworkRefs []string
+	if err := json.Unmarshal([]byte(dispatchAssets), &dispatchRefs); err != nil {
+		return fmt.Errorf("k12storage: parse dispatch source snapshot: %w", err)
+	}
+	if err := json.Unmarshal([]byte(homeworkAssets), &homeworkRefs); err != nil {
+		return fmt.Errorf("k12storage: parse homework source snapshot: %w", err)
+	}
+	if !reflect.DeepEqual(dispatchRefs, homeworkRefs) || len(dispatchRefs) != 1 || !answeredPages[dispatchRefs[0]] {
+		return nil
+	}
+	res, err := tx.ExecContext(ctx, `UPDATE k12_image_task_dispatches
+        SET task_intent='completed_homework',version=version+1,updated_at=?
+        WHERE agent_name=? AND dispatch_id=? AND version=? AND status='routed'
+          AND routing_provenance='model_classified' AND task_intent='blank_worksheet'`,
+		at, owner, dispatchID, dispatchVersion)
+	if err != nil {
+		return fmt.Errorf("k12storage: correct recognized dispatch intent: %w", err)
+	}
+	if changed, err := res.RowsAffected(); err != nil || changed != 1 {
+		return ErrImageTaskVersionConflict
+	}
+	res, err = tx.ExecContext(ctx, `UPDATE k12_homework_submissions
+        SET task_intent='completed_homework',version=version+1,updated_at=?
+        WHERE agent_name=? AND submission_id=? AND version=? AND grading_job_id=?
+          AND status='processing' AND task_intent='blank_worksheet'`,
+		at, owner, homeworkID, homeworkVersion, jobID)
+	if err != nil {
+		return fmt.Errorf("k12storage: correct recognized homework intent: %w", err)
+	}
+	if changed, err := res.RowsAffected(); err != nil || changed != 1 {
+		return ErrImageTaskVersionConflict
 	}
 	return nil
 }

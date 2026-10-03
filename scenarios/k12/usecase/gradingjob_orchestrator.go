@@ -1337,7 +1337,7 @@ func (o *GradingOrchestrator) runRecognize(ctx context.Context, run *gradingRun,
 		}
 		return v, receiptErr
 	}
-	if perr := o.persistRecognizedPhotoFacts(ctx, run, job.Fields.SubmissionID); perr != nil {
+	if perr := o.persistRecognizedPhotoFacts(ctx, run, job); perr != nil {
 		// 物理调用和原始回执已成功，失败仅属于本地投影，不能改称传输结果未知。
 		return o.failStage(context.WithoutCancel(ctx), run, jobID, "typed_result_not_durable", perr)
 	}
@@ -1477,8 +1477,9 @@ func (o *GradingOrchestrator) expireParentAutomaticStageBeforeSend(
 func (o *GradingOrchestrator) persistRecognizedPhotoFacts(
 	ctx context.Context,
 	run *gradingRun,
-	submissionID string,
+	job GradingJobView,
 ) (resultErr error) {
+	submissionID := job.Fields.SubmissionID
 	started := time.Now()
 	defer func() {
 		slog.Info("K12 recognized facts persisted", "submission_id", submissionID, "elapsed_ms", time.Since(started).Milliseconds(), "question_count", len(run.questions), "succeeded", resultErr == nil)
@@ -1510,7 +1511,11 @@ func (o *GradingOrchestrator) persistRecognizedPhotoFacts(
 	if o.deps.PageAssets == nil {
 		// Compatibility for embedded/test compositions and historical page-* facts.
 		// Production assembly always injects PageAssets.
-		return o.persistProblemAttemptFacts(ctx, run.agentName, submissionID, run.questions, run.req.InitialReadMode)
+		if err := o.persistProblemAttemptFacts(ctx, run.agentName, submissionID, run.questions, run.req.InitialReadMode); err != nil {
+			return err
+		}
+		run.req.TaskIntent, resultErr = o.persistedImageTaskPhotoIntent(ctx, run.agentName, job.Fields, run.req.TaskIntent)
+		return resultErr
 	}
 	release := o.acquirePageAssetLock(run.agentName, photoImageDigest(run.req.Image))
 	defer release()
@@ -1547,7 +1552,9 @@ func (o *GradingOrchestrator) persistRecognizedPhotoFacts(
 		}
 		return err
 	}
-	return nil
+	// 原图事实事务已校正自动分流，定位和评估只消费同一持久有效意图。
+	run.req.TaskIntent, resultErr = o.persistedImageTaskPhotoIntent(ctx, run.agentName, job.Fields, run.req.TaskIntent)
+	return resultErr
 }
 
 // startAnchorAsync 启动 locating 独立分支。昂贵的模型调用不持 Job 锁，因此家长确认可
@@ -2718,7 +2725,7 @@ func (o *GradingOrchestrator) recoverRecognizeInvocation(ctx context.Context, ru
 	if readErr != nil {
 		return true, GradingJobView{}, readErr
 	}
-	if persistErr := o.persistRecognizedPhotoFacts(ctx, run, job.Fields.SubmissionID); persistErr != nil {
+	if persistErr := o.persistRecognizedPhotoFacts(ctx, run, job); persistErr != nil {
 		v, err := o.failStage(context.WithoutCancel(ctx), run, jobID, "typed_result_not_durable", persistErr)
 		return true, v, err
 	}

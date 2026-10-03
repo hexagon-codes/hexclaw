@@ -15,7 +15,7 @@ import (
 )
 
 const imageTaskClassifierPrompt = `你是图片任务分流器，只依据当前图片中可见事实分类；附带消息只能帮助理解指代，绝不能替代图片证据。四类定义：completed_homework=有学生作答痕迹的作业；blank_worksheet=无学生作答、供家长讲题的试卷或教材题页；writing=语文作文/连续文字作品；artwork=绘画/美术作品。
-教材印刷的例题解答、标准答案、约分数字、彩色文字、装饰和统一排版的演算过程属于题目材料，不是学生作答。教材页同时有已讲解例题和未作答练习，且没有额外学生作答痕迹时，仍为 blank_worksheet；不能仅因印刷内容有答案或红色数字而判 completed_homework 或 unknown。只有可见的学生填答、手写演算、涂改等证据才支持 completed_homework；不能把真实手写作答一概当印刷内容。消息指明某道题时核对其图中位置，不凭消息补题或改变图片事实。实际证据冲突时输出 unknown，并给出至少两个 confirmation_candidates。严格只输出 JSON：
+教材印刷的例题解答、标准答案、约分数字、彩色文字、装饰和统一排版的演算过程属于题目材料，不是学生作答。教材页同时有已讲解例题和未作答练习，且没有额外学生作答痕迹时，仍为 blank_worksheet；不能仅因印刷内容有答案或红色数字而判 completed_homework 或 unknown。只有可见的学生填答、手写演算、涂改等证据才支持 completed_homework；不能把真实手写作答一概当印刷内容。AI 生成示例、非真实学生作业等标记仅说明素材来源，不决定是否有作答；姓名日期未填或个别题目空白不能覆盖其他题目可见的作答痕迹。消息指明某道题时核对其图中位置，不凭消息补题或改变图片事实。实际证据冲突时输出 unknown，并给出至少两个 confirmation_candidates。严格只输出 JSON：
 {"task_intent":"completed_homework|blank_worksheet|writing|artwork|unknown","intent_evidence":["图片中可复核的短证据"],"confidence":0.0,"confirmation_candidates":[],"work_title_candidate":null,"task_requirement_candidate":null}
 confirmation_candidates 必须是枚举字符串数组，元素仅限 completed_homework、blank_worksheet、writing、artwork，不能是对象。已确定 task_intent 时必须为 []；unknown 时给出至少两个不同的具体意图，例如 ["completed_homework","blank_worksheet"]。不要把标题或任务的对象候选格式用于 confirmation_candidates。
 标题/任务不是必填；只有图片中确实可见时才输出候选，候选格式 {"value":"...","source":"image_vision","confidence":0.0,"evidence_ref":"可复核位置"}，不得用占位标题补齐。`

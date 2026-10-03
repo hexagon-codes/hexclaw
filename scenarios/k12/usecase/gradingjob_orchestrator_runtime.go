@@ -1240,7 +1240,7 @@ func (o *GradingOrchestrator) reconcileDurableGradingOutcome(
 		candidate := *run
 		candidate.questions = questions
 		if persistErr := o.persistRecognizedPhotoFacts(
-			ctx, &candidate, job.Fields.SubmissionID,
+			ctx, &candidate, job,
 		); persistErr != nil {
 			return false, GradingJobView{}, persistErr
 		}
@@ -1255,6 +1255,7 @@ func (o *GradingOrchestrator) reconcileDurableGradingOutcome(
 		if reconcileErr != nil {
 			return false, GradingJobView{}, reconcileErr
 		}
+		run.req.TaskIntent = candidate.req.TaskIntent
 		run.questions = candidate.questions
 		if reconciled.Record.Status != k12.GradingStageFailedRetryable {
 			return true, reconciled, nil
@@ -1760,22 +1761,10 @@ func (o *GradingOrchestrator) ensureRun(ctx context.Context, jobID string) (*gra
 	if err != nil {
 		return nil, err
 	}
-	taskIntent := meta.TaskIntent
-	if taskIntent == "" && v.Fields.SourceKind == "image_task" {
-		dispatchID := gradingSourceKeyFromIdempotencyKey(v.Fields)
-		dispatch, dispatchErr := o.deps.Records.GetImageTaskDispatch(
-			ctx,
-			meta.AgentName,
-			dispatchID,
-		)
-		if dispatchErr != nil {
-			return nil, fmt.Errorf(
-				"usecase: restore grading task intent from image task %s: %w",
-				dispatchID,
-				dispatchErr,
-			)
-		}
-		taskIntent = photoTaskIntentFromDispatch(dispatch.TaskIntent)
+	// 自动数学意图在识别事务内可能已校正，陈旧的非空 run 文件也必须读回校准。
+	taskIntent, err := o.persistedImageTaskPhotoIntent(ctx, meta.AgentName, v.Fields, meta.TaskIntent)
+	if err != nil {
+		return nil, err
 	}
 	var image []byte
 	questions := meta.Questions
@@ -1830,6 +1819,24 @@ func (o *GradingOrchestrator) ensureRun(ctx context.Context, jobID string) (*gra
 	}
 	o.mu.Unlock()
 	return run, nil
+}
+
+// 只校准 ImageTask 数学入口；直接照片讲解及作品任务保留各自冻结合同。
+func (o *GradingOrchestrator) persistedImageTaskPhotoIntent(ctx context.Context, agentName string, fields k12.GradingJobFields, fallback PhotoTaskIntent) (PhotoTaskIntent, error) {
+	if fields.SourceKind != "image_task" {
+		return fallback, nil
+	}
+	dispatchID := gradingSourceKeyFromIdempotencyKey(fields)
+	dispatch, err := o.deps.Records.GetImageTaskDispatch(ctx, agentName, dispatchID)
+	if err != nil {
+		return fallback, fmt.Errorf("usecase: read grading task intent from image task %s: %w", dispatchID, err)
+	}
+	switch dispatch.TaskIntent {
+	case k12.ImageTaskIntentCompletedHomework, k12.ImageTaskIntentBlankWorksheet:
+		return photoTaskIntentFromDispatch(dispatch.TaskIntent), nil
+	default:
+		return fallback, nil
+	}
 }
 
 func (o *GradingOrchestrator) recognitionAuditPath(jobID string) string {
