@@ -131,7 +131,7 @@ func TestGenerateWorkFeedback_Writing_AI(t *testing.T) {
 		t.Fatalf("provider context log missing feedback correlation: %+v", logEntry)
 	}
 	invocation, err := d.Records.GetLatestWorkFeedbackInvocation(
-		ctx, "xiaoming", id, "work:"+id+":version:"+v.Fields.Versions[0].VersionID+":feedback",
+		ctx, "xiaoming", id, "work:"+id+":version:"+v.GenerationState.Latest.GenerationID+":feedback",
 	)
 	if err != nil {
 		t.Fatal(err)
