@@ -15,6 +15,22 @@ type ProviderPrivateNetworkAccess struct {
 	Allowed bool   `yaml:"allowed" json:"allowed"`
 }
 
+// ProviderHTTPAuthorization 将明文 HTTP 授权绑定到完整 Provider Base URL。
+type ProviderHTTPAuthorization struct {
+	BaseURL string `yaml:"base_url" json:"base_url"`
+	Allowed bool   `yaml:"allowed" json:"allowed"`
+}
+
+// Matches 只接受已确认的同一 HTTP 端点，地址变化不会继承旧授权。
+func (a ProviderHTTPAuthorization) Matches(baseURL string) bool {
+	if !a.Allowed {
+		return false
+	}
+	parsed, err := url.Parse(strings.TrimSpace(baseURL))
+	return err == nil && parsed.Scheme == "http" &&
+		strings.TrimRight(strings.TrimSpace(a.BaseURL), "/") == strings.TrimRight(strings.TrimSpace(baseURL), "/")
+}
+
 func normalizeProviderEndpointHost(host string) string {
 	host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
 	if zone := strings.LastIndexByte(host, '%'); zone >= 0 {
@@ -28,6 +44,11 @@ func normalizeProviderEndpointHost(host string) string {
 // LAN addresses require an authorization bound to the exact normalized host;
 // metadata and special-purpose destinations are never allowed.
 func ValidateProviderEndpointAccess(baseURL string, access ProviderPrivateNetworkAccess) error {
+	return ValidateProviderEndpointAccessWithHTTPAuthorization(baseURL, access, ProviderHTTPAuthorization{})
+}
+
+// ValidateProviderEndpointAccessWithHTTPAuthorization 保留地址边界并接受端点级 HTTP 授权。
+func ValidateProviderEndpointAccessWithHTTPAuthorization(baseURL string, access ProviderPrivateNetworkAccess, httpAuthorization ProviderHTTPAuthorization) error {
 	raw := strings.TrimSpace(baseURL)
 	if raw == "" {
 		return nil
@@ -42,7 +63,7 @@ func ValidateProviderEndpointAccess(baseURL string, access ProviderPrivateNetwor
 		return fmt.Errorf("provider endpoint is a blocked metadata host")
 	}
 	ip := net.ParseIP(host)
-	if u.Scheme == "http" && !providerPlainHTTPAuthorized(host, ip, access) {
+	if u.Scheme == "http" && !providerPlainHTTPAuthorized(host, ip, access) && !httpAuthorization.Matches(raw) {
 		return fmt.Errorf("provider endpoint requires https outside explicitly local networks")
 	}
 	if ip == nil {

@@ -57,6 +57,7 @@ type LLMProviderConfigResponse struct {
 	LocalitySource        string                               `json:"locality_source,omitempty"`
 	ConfirmedEndpointHost string                               `json:"confirmed_endpoint_host,omitempty"`
 	PrivateNetworkAccess  *config.ProviderPrivateNetworkAccess `json:"private_network_access,omitempty"`
+	HTTPAuthorization     *config.ProviderHTTPAuthorization    `json:"http_authorization,omitempty"`
 	ToolsEnabled          *bool                                `json:"tools_enabled,omitempty"`
 	MaxTools              int                                  `json:"max_tools,omitempty"`
 	Enabled               *bool                                `json:"enabled,omitempty"`
@@ -115,6 +116,7 @@ type LLMProviderConfigUpdateItem struct {
 	LocalitySource        string                              `json:"locality_source,omitempty"`
 	ConfirmedEndpointHost string                              `json:"confirmed_endpoint_host,omitempty"`
 	PrivateNetworkAccess  config.ProviderPrivateNetworkAccess `json:"private_network_access,omitempty"`
+	HTTPAuthorization     config.ProviderHTTPAuthorization    `json:"http_authorization,omitempty"`
 	ToolsEnabled          *bool                               `json:"tools_enabled,omitempty"`
 	MaxTools              int                                 `json:"max_tools,omitempty"`
 	Enabled               *bool                               `json:"enabled,omitempty"`
@@ -130,6 +132,7 @@ type llmConnectionTestProvider struct {
 	Model                string                              `json:"model"`
 	Locality             string                              `json:"locality,omitempty"`
 	PrivateNetworkAccess config.ProviderPrivateNetworkAccess `json:"private_network_access,omitempty"`
+	HTTPAuthorization    config.ProviderHTTPAuthorization    `json:"http_authorization,omitempty"`
 	// 仅由服务端已保存目标派生，客户端不能通过请求体声明传输范围。
 	OllamaTargetBaseURL string `json:"-"`
 }
@@ -259,6 +262,13 @@ func (s *Server) rollbackLegacyLLMTransition(
 	return errors.Join(rollbackErrors...)
 }
 
+func providerHTTPAuthorizationResponse(authorization config.ProviderHTTPAuthorization) *config.ProviderHTTPAuthorization {
+	if authorization.BaseURL == "" && !authorization.Allowed {
+		return nil
+	}
+	return &authorization
+}
+
 func providerPrivateNetworkAccessResponse(access config.ProviderPrivateNetworkAccess) *config.ProviderPrivateNetworkAccess {
 	if strings.TrimSpace(access.Host) == "" && !access.Allowed {
 		return nil
@@ -357,6 +367,7 @@ var llmTestProviderFactory = func(cfg llmConnectionTestProvider) completionProvi
 		APIKey:               cfg.APIKey,
 		Model:                cfg.Model,
 		PrivateNetworkAccess: cfg.PrivateNetworkAccess,
+		HTTPAuthorization:    cfg.HTTPAuthorization,
 		OllamaTargetBaseURL:  cfg.OllamaTargetBaseURL,
 	})
 }
@@ -373,13 +384,14 @@ type providerProbePersistenceCandidate struct {
 }
 
 type providerProbeFingerprintPayload struct {
-	ProviderType         string `json:"provider_type"`
-	BaseURL              string `json:"base_url"`
-	APIKeyRevision       string `json:"api_key_revision"`
-	Model                string `json:"model"`
-	Locality             string `json:"locality"`
-	PrivateNetworkHost   string `json:"private_network_host"`
-	PrivateNetworkAccess bool   `json:"private_network_access"`
+	ProviderType         string                            `json:"provider_type"`
+	BaseURL              string                            `json:"base_url"`
+	APIKeyRevision       string                            `json:"api_key_revision"`
+	Model                string                            `json:"model"`
+	Locality             string                            `json:"locality"`
+	PrivateNetworkHost   string                            `json:"private_network_host"`
+	PrivateNetworkAccess bool                              `json:"private_network_access"`
+	HTTPAuthorization    *config.ProviderHTTPAuthorization `json:"http_authorization,omitempty"`
 }
 
 func nextProviderProbeStartedAt() int64 {
@@ -451,6 +463,7 @@ func providerProbeConfigFingerprint(
 		Locality:             normalizeProviderProbeLocality(provider.Locality),
 		PrivateNetworkHost:   privateHost,
 		PrivateNetworkAccess: provider.PrivateNetworkAccess.Allowed,
+		HTTPAuthorization:    providerHTTPAuthorizationResponse(provider.HTTPAuthorization),
 	}
 	canonical, _ := json.Marshal(payload)
 	digest := sha256.Sum256(canonical)
@@ -534,6 +547,7 @@ func (s *Server) providerProbePersistenceCandidate(
 				Model:                providerProbeModel(saved),
 				Locality:             saved.Locality,
 				PrivateNetworkAccess: saved.PrivateNetworkAccess,
+				HTTPAuthorization:    saved.HTTPAuthorization,
 				OllamaTargetBaseURL:  saved.OllamaTargetBaseURL,
 			},
 		}, true
@@ -657,6 +671,7 @@ func (s *Server) handleGetLLMConfig(w http.ResponseWriter, r *http.Request) {
 			LocalitySource:        p.LocalitySource,
 			ConfirmedEndpointHost: p.ConfirmedEndpointHost,
 			PrivateNetworkAccess:  providerPrivateNetworkAccessResponse(p.PrivateNetworkAccess),
+			HTTPAuthorization:     providerHTTPAuthorizationResponse(p.HTTPAuthorization),
 			ToolsEnabled:          p.ToolsEnabled,
 			MaxTools:              p.MaxTools,
 			Enabled:               p.Enabled,
@@ -771,7 +786,7 @@ func (s *Server) updateLLMConfig(w http.ResponseWriter, r *http.Request, req LLM
 		targetBase, _ := oldOllama.Resolve(s.ollamaBaseURL)
 		matchesOllamaTarget := llmrouter.UsesOllamaNativeAdapter(name, config.LLMProviderConfig{BaseURL: p.BaseURL}) &&
 			(strings.TrimRight(p.BaseURL, "/") == targetBase || strings.TrimRight(p.BaseURL, "/") == targetBase+"/v1")
-		if err := config.ValidateProviderEndpointAccess(p.BaseURL, p.PrivateNetworkAccess); err != nil && !matchesOllamaTarget && !(oldLLM.Providers[name].HasOllamaTarget() && oldLLM.Providers[name].BaseURL == p.BaseURL) {
+		if err := config.ValidateProviderEndpointAccessWithHTTPAuthorization(p.BaseURL, p.PrivateNetworkAccess, p.HTTPAuthorization); err != nil && !matchesOllamaTarget && !(oldLLM.Providers[name].HasOllamaTarget() && oldLLM.Providers[name].BaseURL == p.BaseURL) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{
 				"error": fmt.Sprintf("provider %q 的 base_url 不安全: %v", name, err),
 			})
@@ -871,6 +886,7 @@ func (s *Server) updateLLMConfig(w http.ResponseWriter, r *http.Request, req LLM
 				LocalitySource:        p.LocalitySource,
 				ConfirmedEndpointHost: p.ConfirmedEndpointHost,
 				PrivateNetworkAccess:  p.PrivateNetworkAccess,
+				HTTPAuthorization:     p.HTTPAuthorization,
 				ToolsEnabled:          p.ToolsEnabled,
 				MaxTools:              p.MaxTools,
 				Enabled:               p.Enabled, // 禁用态持久化；Key 经脱敏回传保留（IsMaskedKey 分支）
@@ -1147,7 +1163,7 @@ func (s *Server) handleTestLLMConfig(w http.ResponseWriter, r *http.Request) {
 		probeDescriptor.OllamaTargetBaseURL = s.configuredOllamaTargetFor(baseURL)
 	}
 	configuredOllama := config.LLMProviderConfig{BaseURL: baseURL, OllamaTargetBaseURL: probeDescriptor.OllamaTargetBaseURL}
-	if err := config.ValidateProviderEndpointAccess(baseURL, probeDescriptor.PrivateNetworkAccess); err != nil && !configuredOllama.HasOllamaTarget() {
+	if err := config.ValidateProviderEndpointAccessWithHTTPAuthorization(baseURL, probeDescriptor.PrivateNetworkAccess, probeDescriptor.HTTPAuthorization); err != nil && !configuredOllama.HasOllamaTarget() {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
@@ -1159,6 +1175,7 @@ func (s *Server) handleTestLLMConfig(w http.ResponseWriter, r *http.Request) {
 		Model:                model,
 		Locality:             probeDescriptor.Locality,
 		PrivateNetworkAccess: probeDescriptor.PrivateNetworkAccess,
+		HTTPAuthorization:    probeDescriptor.HTTPAuthorization,
 		OllamaTargetBaseURL:  probeDescriptor.OllamaTargetBaseURL,
 	})
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
@@ -1259,6 +1276,7 @@ func (s *Server) handleFetchProviderModels(w http.ResponseWriter, r *http.Reques
 		APIKey               string                              `json:"api_key"`
 		Locality             string                              `json:"locality,omitempty"`
 		PrivateNetworkAccess config.ProviderPrivateNetworkAccess `json:"private_network_access,omitempty"`
+		HTTPAuthorization    config.ProviderHTTPAuthorization    `json:"http_authorization,omitempty"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
@@ -1278,6 +1296,7 @@ func (s *Server) handleFetchProviderModels(w http.ResponseWriter, r *http.Reques
 			req.APIKey = provider.APIKey
 			req.Locality = provider.Locality
 			req.PrivateNetworkAccess = provider.PrivateNetworkAccess
+			req.HTTPAuthorization = provider.HTTPAuthorization
 			if provider.HasOllamaTarget() {
 				ollamaTargetBase = provider.OllamaTargetBaseURL
 			}
@@ -1307,7 +1326,7 @@ func (s *Server) handleFetchProviderModels(w http.ResponseWriter, r *http.Reques
 	if ollamaTargetBase == "" {
 		ollamaTargetBase = s.configuredOllamaTargetFor(baseURL)
 	}
-	if err := config.ValidateProviderEndpointAccess(baseURL, req.PrivateNetworkAccess); err != nil && ollamaTargetBase == "" {
+	if err := config.ValidateProviderEndpointAccessWithHTTPAuthorization(baseURL, req.PrivateNetworkAccess, req.HTTPAuthorization); err != nil && ollamaTargetBase == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
@@ -1317,7 +1336,7 @@ func (s *Server) handleFetchProviderModels(w http.ResponseWriter, r *http.Reques
 		providerClient = egress.NewConfiguredOllamaClient(10 * time.Second)
 		baseURL = strings.TrimRight(ollamaTargetBase, "/") + "/v1"
 	} else {
-		providerClient, err = egress.NewProviderHTTPClient(baseURL, req.PrivateNetworkAccess)
+		providerClient, err = egress.NewProviderHTTPClient(baseURL, req.PrivateNetworkAccess, egress.WithProviderHTTPAuthorization(req.HTTPAuthorization))
 	}
 	if err != nil {
 		writeJSON(w, http.StatusOK, map[string]any{"models": []any{}, "error": err.Error()})

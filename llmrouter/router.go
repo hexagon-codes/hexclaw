@@ -521,7 +521,7 @@ func buildSelectorState(cfg config.LLMConfig) (map[string]hexagon.Provider, conf
 			logger.Info("[router] 跳过已禁用 provider（配置/Key 保留，不参与路由）", "provider", name)
 			continue
 		}
-		if err := config.ValidateProviderEndpointAccess(pc.BaseURL, pc.PrivateNetworkAccess); err != nil && !pc.HasOllamaTarget() {
+		if err := config.ValidateProviderEndpointAccessWithHTTPAuthorization(pc.BaseURL, pc.PrivateNetworkAccess, pc.HTTPAuthorization); err != nil && !pc.HasOllamaTarget() {
 			logger.Warn("[router] 跳过未授权或不安全的 provider endpoint", "provider", name, "error", err)
 			continue
 		}
@@ -679,7 +679,7 @@ func providerHTTPClient(name string, pc config.LLMProviderConfig) *http.Client {
 	if pc.HasOllamaTarget() {
 		return egress.NewConfiguredOllamaClient(ollamaResponseHeaderTimeout)
 	}
-	options := []egress.ProviderHTTPClientOption(nil)
+	options := []egress.ProviderHTTPClientOption{egress.WithProviderHTTPAuthorization(pc.HTTPAuthorization)}
 	if isOllamaProviderConfig(name, pc) {
 		options = append(options,
 			egress.WithProviderResponseHeaderTimeout(ollamaResponseHeaderTimeout),

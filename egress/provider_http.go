@@ -24,10 +24,19 @@ type providerLookupIPAddr func(context.Context, string) ([]net.IPAddr, error)
 type providerHTTPClientConfig struct {
 	responseHeaderTimeout time.Duration
 	fixedOriginAdapter    bool
+	httpAuthorization     config.ProviderHTTPAuthorization
 }
 
-// ProviderHTTPClientOption adjusts bounded transport behavior without
-// weakening destination, redirect, credential or proxy policy.
+// WithProviderHTTPAuthorization 只对当前完整 Base URL 使用已确认的 HTTP 协议。
+func WithProviderHTTPAuthorization(authorization config.ProviderHTTPAuthorization) ProviderHTTPClientOption {
+	return func(cfg *providerHTTPClientConfig) {
+		if cfg != nil {
+			cfg.httpAuthorization = authorization
+		}
+	}
+}
+
+// ProviderHTTPClientOption 配置等待预算、适配传输及绑定端点的 HTTP 授权。
 type ProviderHTTPClientOption func(*providerHTTPClientConfig)
 
 // WithProviderResponseHeaderTimeout overrides the default time allowed for a
@@ -84,9 +93,10 @@ func newProviderHTTPClient(
 	if baseURL == "" {
 		baseURL = defaultCloudEmbeddingBaseURL
 	}
-	if err := config.ValidateProviderEndpointAccess(baseURL, access); err != nil {
+	if err := config.ValidateProviderEndpointAccessWithHTTPAuthorization(baseURL, access, clientConfig.httpAuthorization); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrProviderEndpointPolicy, err)
 	}
+	httpAuthorized := clientConfig.httpAuthorization.Matches(baseURL)
 	parsed, err := url.Parse(baseURL)
 	if err != nil || parsed.Hostname() == "" || parsed.User != nil {
 		return nil, fmt.Errorf("%w: invalid base URL", ErrProviderEndpointPolicy)
@@ -133,7 +143,7 @@ func newProviderHTTPClient(
 			}
 			if transportErr := validateProviderTransportSecurity(
 				baseScheme, baseHost, candidate.IP, access,
-			); transportErr != nil {
+			); transportErr != nil && !httpAuthorized {
 				return nil, transportErr
 			}
 		}
@@ -160,7 +170,7 @@ func newProviderHTTPClient(
 			}
 			if transportErr := validateProviderTransportSecurity(
 				baseScheme, baseHost, remoteIP, access,
-			); transportErr != nil {
+			); transportErr != nil && !httpAuthorized {
 				_ = conn.Close()
 				return nil, transportErr
 			}

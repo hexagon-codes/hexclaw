@@ -705,6 +705,7 @@ type LLMProviderConfig struct {
 	LocalitySource        string                       `yaml:"locality_source,omitempty" json:"locality_source,omitempty"`
 	ConfirmedEndpointHost string                       `yaml:"confirmed_endpoint_host,omitempty" json:"confirmed_endpoint_host,omitempty"`
 	PrivateNetworkAccess  ProviderPrivateNetworkAccess `yaml:"private_network_access,omitempty" json:"private_network_access,omitempty"`
+	HTTPAuthorization     ProviderHTTPAuthorization    `yaml:"http_authorization,omitempty" json:"http_authorization,omitempty"`
 	ToolsEnabled          *bool                        `yaml:"tools_enabled,omitempty"` // 是否启用工具注入（nil=自动判断, true=强制开启, false=强制关闭）
 	MaxTools              int                          `yaml:"max_tools,omitempty"`     // 最大注入工具数（0=不限制）
 	Enabled               *bool                        `yaml:"enabled,omitempty"`       // 是否启用（nil/true=启用, false=禁用但保留配置/Key，不参与路由）
