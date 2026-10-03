@@ -10,9 +10,9 @@ import (
 	"github.com/hexagon-codes/hexagon"
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/llmrouter"
 	"github.com/hexagon-codes/hexclaw/skill"
-	sqlitestore "github.com/hexagon-codes/hexclaw/storage/sqlite"
 )
 
 // BUG-20260703 B5（跨仓集成锁）：hexagon 根修「终态回答进块流」必须穿过 hexclaw
@@ -28,7 +28,7 @@ func TestBug20260703_B5_StreamDoneChunkBlocksEndWithFinalText(t *testing.T) {
 	provider := &toolThenTextStreamProvider{finalAnswer: finalAnswer}
 
 	dir := t.TempDir()
-	store, err := sqlitestore.New(filepath.Join(dir, "test.db"))
+	store, err := sqlitefixture.New(filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatalf("创建存储失败: %v", err)
 	}
@@ -161,7 +161,7 @@ func TestProcessStreamPersistsAllVisibleMultiTurnContent(t *testing.T) {
 		firstContent: firstContent,
 		finalAnswer:  finalAnswer,
 	}
-	store, err := sqlitestore.New(filepath.Join(t.TempDir(), "test.db"))
+	store, err := sqlitefixture.New(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}

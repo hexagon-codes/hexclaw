@@ -12,10 +12,10 @@ import (
 	"github.com/hexagon-codes/hexagon/rag/splitter"
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/knowledge"
 	"github.com/hexagon-codes/hexclaw/llmrouter"
 	"github.com/hexagon-codes/hexclaw/skill"
-	sqlitestore "github.com/hexagon-codes/hexclaw/storage/sqlite"
 )
 
 // BUG-20260703 B8（引擎注入点集成锁）：knowledge 层的 fail-closed 严格地板必须在
@@ -158,7 +158,7 @@ func (e *b8EngineEmbedder) lookup(t string) []float32 {
 func newEngineWithKB(t *testing.T, provider hexagon.Provider, vecs map[string][]float32) (*ReActEngine, *knowledge.Manager) {
 	t.Helper()
 	dir := t.TempDir()
-	store, err := sqlitestore.New(filepath.Join(dir, "test.db"))
+	store, err := sqlitefixture.New(filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatalf("创建存储失败: %v", err)
 	}

@@ -8,9 +8,9 @@ import (
 	"github.com/hexagon-codes/hexagon"
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/llmrouter"
 	"github.com/hexagon-codes/hexclaw/skill"
-	sqlitestore "github.com/hexagon-codes/hexclaw/storage/sqlite"
 )
 
 // BUG-20260704：会话挂载了 skill（前端 chip「前女友」→ metadata["skills"]）但人设没被引用。
@@ -19,7 +19,7 @@ import (
 // 覆盖「msg.Metadata → ProcessStream → buildStreamMessages → buildMountedSkillsPrompt」全链路。
 func TestBug20260704_MountedSkill_ReachesModelViaProcessStream(t *testing.T) {
 	dir := t.TempDir()
-	store, err := sqlitestore.New(filepath.Join(dir, "test.db"))
+	store, err := sqlitefixture.New(filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatalf("store: %v", err)
 	}

@@ -13,14 +13,14 @@ import (
 	mockllm "github.com/hexagon-codes/hexagon/testing/mock"
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/llmrouter"
 	"github.com/hexagon-codes/hexclaw/skill"
-	sqlitestore "github.com/hexagon-codes/hexclaw/storage/sqlite"
 )
 
 func newScanWiringEngine(t *testing.T) *ReActEngine {
 	t.Helper()
-	store, err := sqlitestore.New(filepath.Join(t.TempDir(), "scan.db"))
+	store, err := sqlitefixture.New(filepath.Join(t.TempDir(), "scan.db"))
 	if err != nil {
 		t.Fatalf("store: %v", err)
 	}

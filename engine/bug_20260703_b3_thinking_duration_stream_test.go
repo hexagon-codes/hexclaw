@@ -13,9 +13,9 @@ import (
 	hexagon "github.com/hexagon-codes/hexagon"
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/llmrouter"
 	"github.com/hexagon-codes/hexclaw/skill"
-	sqlitestore "github.com/hexagon-codes/hexclaw/storage/sqlite"
 )
 
 // BUG-20260703 B3：思考时间在 runtime 流式路径丢失。
@@ -34,7 +34,7 @@ func TestBug20260703_B3_ThinkingDurationPersistedOnRuntimeStream(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	store, err := sqlitestore.New(filepath.Join(dir, "test.db"))
+	store, err := sqlitefixture.New(filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatalf("创建存储失败: %v", err)
 	}

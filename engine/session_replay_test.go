@@ -6,14 +6,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/storage"
-	sqlitestore "github.com/hexagon-codes/hexclaw/storage/sqlite"
 )
 
 // 做梦回放相「会话选择」逻辑（纯 store、零 LLM）：只选 since 之后有新消息、且含可记信息暗示的会话。
 func TestSessionReplay_GatherSelectsRightSessions(t *testing.T) {
 	ctx := context.Background()
-	store, err := sqlitestore.New(filepath.Join(t.TempDir(), "rp.db"))
+	store, err := sqlitefixture.New(filepath.Join(t.TempDir(), "rp.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

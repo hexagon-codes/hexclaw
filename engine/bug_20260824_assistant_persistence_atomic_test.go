@@ -16,6 +16,7 @@ import (
 	mockllm "github.com/hexagon-codes/hexagon/testing/mock"
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/llmrouter"
 	agentrouter "github.com/hexagon-codes/hexclaw/router"
 	"github.com/hexagon-codes/hexclaw/session"
@@ -166,7 +167,7 @@ func newAssistantPersistenceAtomicHarness(
 ) (*ReActEngine, storage.Store, *assistantPersistenceFailureStore, *mockllm.LLMProvider) {
 	t.Helper()
 	dir := t.TempDir()
-	real, err := sqlitestore.New(filepath.Join(dir, "assistant-persistence.db"))
+	real, err := sqlitefixture.New(filepath.Join(dir, "assistant-persistence.db"))
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -325,7 +326,7 @@ func TestCHATAssistantPersistenceAtomicFallbackPreservesCanonicalReplyAfterResta
 		agentName = "TutorAgent"
 	)
 	dbPath := filepath.Join(t.TempDir(), "assistant-persistence-restart.db")
-	real, err := sqlitestore.New(dbPath)
+	real, err := sqlitefixture.New(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -566,7 +567,7 @@ func TestCHATAssistantPersistenceAtomicIncompleteRuntimeSnapshotFailsClosedAfter
 		requestID = "req-assistant-snapshot-failure"
 	)
 	dbPath := filepath.Join(t.TempDir(), "assistant-snapshot-failure.db")
-	real, err := sqlitestore.New(dbPath)
+	real, err := sqlitefixture.New(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}
@@ -692,7 +693,7 @@ func TestCHATAssistantPersistenceAtomicSyncRestartReplaysExactReplyWithoutProvid
 		t.Fatalf("fixed fixture sha256=%q, want %q", got, assistantPersistenceFixtureSHA256)
 	}
 	dbPath := filepath.Join(t.TempDir(), "assistant-sync-restart.db")
-	real, err := sqlitestore.New(dbPath)
+	real, err := sqlitefixture.New(dbPath)
 	if err != nil {
 		t.Fatalf("new sqlite store: %v", err)
 	}

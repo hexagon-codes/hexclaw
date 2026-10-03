@@ -13,10 +13,10 @@ import (
 	"github.com/hexagon-codes/hexagon/rag/splitter"
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/knowledge"
 	"github.com/hexagon-codes/hexclaw/llmrouter"
 	"github.com/hexagon-codes/hexclaw/skill"
-	sqlitestore "github.com/hexagon-codes/hexclaw/storage/sqlite"
 )
 
 func TestREG_RAG_UntrustedEvidenceStructuredFraming(t *testing.T) {
@@ -289,7 +289,7 @@ func (*ragAuthorityProvider) CountTokens([]llm.Message) (int, error) { return 0,
 
 func newRAGAuthorityEngine(t *testing.T) (*ReActEngine, *knowledge.Manager, *ragAuthorityProbeSkill) {
 	t.Helper()
-	store, err := sqlitestore.New(filepath.Join(t.TempDir(), "rag-authority.db"))
+	store, err := sqlitefixture.New(filepath.Join(t.TempDir(), "rag-authority.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

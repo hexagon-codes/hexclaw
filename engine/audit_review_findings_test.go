@@ -10,12 +10,12 @@ import (
 	"github.com/hexagon-codes/hexagon"
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/llmrouter"
 	"github.com/hexagon-codes/hexclaw/memory"
 	"github.com/hexagon-codes/hexclaw/skill"
 	"github.com/hexagon-codes/hexclaw/skill/builtin"
 	"github.com/hexagon-codes/hexclaw/storage"
-	sqlitestore "github.com/hexagon-codes/hexclaw/storage/sqlite"
 )
 
 // 评审findings 实证（RED-first）。范围：单用户桌面（多 Agent）。
@@ -24,7 +24,7 @@ import (
 // 真实 sqlite store，零 LLM。ctx 带当前 sessionID → Prefetch 据此排除当前会话。
 func TestAuditG_ActiveRecallExcludesCurrentSession(t *testing.T) {
 	ctx := context.Background()
-	store, err := sqlitestore.New(filepath.Join(t.TempDir(), "g.db"))
+	store, err := sqlitefixture.New(filepath.Join(t.TempDir(), "g.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +139,7 @@ func TestAuditD_InlineSilentFailOnWeakLocalModel(t *testing.T) {
 	cfg.FileMemory.AutoMemory = "inline"
 
 	dir := t.TempDir()
-	store, err := sqlitestore.New(filepath.Join(dir, "d.db"))
+	store, err := sqlitefixture.New(filepath.Join(dir, "d.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

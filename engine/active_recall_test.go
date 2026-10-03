@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/skill"
 	"github.com/hexagon-codes/hexclaw/storage"
-	sqlitestore "github.com/hexagon-codes/hexclaw/storage/sqlite"
 )
 
 // 增量 G②：ActiveRecall 回复前主动会话深召回。这些测试钉死：浮现相关 / 坑F 去重 / 跳当前 query /
@@ -173,7 +173,7 @@ func TestActiveRecall_EligibilityAndFence(t *testing.T) {
 // 真实 sqlite store 端到端：种入历史会话消息 → buildTurnContext 经真实 FTS 主动召回浮现（零 LLM）。
 func TestActiveRecall_RealStoreEndToEnd(t *testing.T) {
 	ctx := context.Background()
-	store, err := sqlitestore.New(filepath.Join(t.TempDir(), "ar.db"))
+	store, err := sqlitefixture.New(filepath.Join(t.TempDir(), "ar.db"))
 	if err != nil {
 		t.Fatalf("store: %v", err)
 	}

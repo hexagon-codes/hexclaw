@@ -12,9 +12,9 @@ import (
 	mockllm "github.com/hexagon-codes/hexagon/testing/mock"
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/llmrouter"
 	"github.com/hexagon-codes/hexclaw/skill"
-	sqlitestore "github.com/hexagon-codes/hexclaw/storage/sqlite"
 )
 
 // reasoningStreamProvider 模拟原生 Ollama thinking 模型：
@@ -88,7 +88,7 @@ func runOllamaThinkingProbe(t *testing.T, thinkingPref string) *mockllm.LLMProvi
 	provider := newCapturingOllamaProvider()
 
 	dir := t.TempDir()
-	store, err := sqlitestore.New(filepath.Join(dir, "test.db"))
+	store, err := sqlitefixture.New(filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatalf("创建存储失败: %v", err)
 	}
@@ -173,7 +173,7 @@ func TestBug20260704_OllamaThinkingOn_StreamsReasoning(t *testing.T) {
 	provider := &reasoningStreamProvider{name: "Ollama (本地)"}
 
 	dir := t.TempDir()
-	store, err := sqlitestore.New(filepath.Join(dir, "test.db"))
+	store, err := sqlitefixture.New(filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatalf("创建存储失败: %v", err)
 	}

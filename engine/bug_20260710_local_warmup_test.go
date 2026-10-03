@@ -16,9 +16,9 @@ import (
 	"testing"
 
 	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/llmrouter"
 	"github.com/hexagon-codes/hexclaw/skill"
-	sqlitestore "github.com/hexagon-codes/hexclaw/storage/sqlite"
 )
 
 type warmupCapture struct {
@@ -75,7 +75,7 @@ func newWarmupTestEngine(t *testing.T, providers map[string]config.LLMProviderCo
 		t.Fatalf("llmrouter: %v", err)
 	}
 	dir := t.TempDir()
-	store, err := sqlitestore.New(filepath.Join(dir, "warmup.db"))
+	store, err := sqlitefixture.New(filepath.Join(dir, "warmup.db"))
 	if err != nil {
 		t.Fatalf("store: %v", err)
 	}

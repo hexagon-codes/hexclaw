@@ -31,12 +31,12 @@ import (
 	mockllm "github.com/hexagon-codes/hexagon/testing/mock"
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/knowledge"
 	"github.com/hexagon-codes/hexclaw/llmrouter"
 	agentrouter "github.com/hexagon-codes/hexclaw/router"
 	"github.com/hexagon-codes/hexclaw/skill"
 	"github.com/hexagon-codes/hexclaw/skill/builtin"
-	sqlitestore "github.com/hexagon-codes/hexclaw/storage/sqlite"
 )
 
 // newEngineWithProviderAndSkills builds an engine with a mock LLM provider
@@ -45,7 +45,7 @@ func newEngineWithProviderAndSkills(t *testing.T, provider hexagon.Provider, ski
 	t.Helper()
 
 	dir := t.TempDir()
-	store, err := sqlitestore.New(filepath.Join(dir, "test.db"))
+	store, err := sqlitefixture.New(filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatalf("failed to create store: %v", err)
 	}
@@ -201,7 +201,7 @@ func TestBug20260611_CronDispatchSkipsSkillFastPath_Stream(t *testing.T) {
 // broken before the fix.
 func TestBug20260611_CronDispatchKnowledgeIngestClosedLoop(t *testing.T) {
 	dir := t.TempDir()
-	store, err := sqlitestore.New(filepath.Join(dir, "test.db"))
+	store, err := sqlitefixture.New(filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatalf("failed to create store: %v", err)
 	}

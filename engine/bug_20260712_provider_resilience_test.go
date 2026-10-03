@@ -9,9 +9,9 @@ import (
 
 	"github.com/hexagon-codes/hexagon"
 	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/llmrouter"
 	"github.com/hexagon-codes/hexclaw/skill"
-	sqlitestore "github.com/hexagon-codes/hexclaw/storage/sqlite"
 )
 
 // BUG-20260712 provider 韧性回归锁（治本·第 2 部分）：
@@ -23,7 +23,7 @@ func TestResolveProvider_MissingProviderActionableNoSilentFallback(t *testing.T)
 	// router 里没有 "Ollama (本地)"（模拟绑定本地模型的 agent 遇上配置被抹）。
 	router := llmrouter.NewWithProviders(cfg.LLM, map[string]hexagon.Provider{})
 	dir := t.TempDir()
-	store, _ := sqlitestore.New(filepath.Join(dir, "test.db"))
+	store, _ := sqlitefixture.New(filepath.Join(dir, "test.db"))
 	t.Cleanup(func() { _ = store.Close() })
 	_ = store.Init(context.Background())
 	eng := NewReActEngine(cfg, router, store, skill.NewRegistry())

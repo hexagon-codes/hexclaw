@@ -28,12 +28,15 @@ func TestBuildSolverPrompt_InjectsGradeConstraint(t *testing.T) {
 // 回归锁（修复②）：verifier prompt 在有约束时加 OUT_OF_SCOPE 判定；parseVerdict 能识别。
 func TestVerifier_OutOfScope(t *testing.T) {
 	vp := buildVerifierPrompt("解方程", "x=5", "分数加减")
-	if !strings.Contains(vp, "OUT_OF_SCOPE") || !strings.Contains(vp, "超纲") {
-		t.Error("有约束时 verifier prompt 应含超纲判定")
+	if !strings.Contains(vp, "本题只允许使用「分数加减」范围内的方法") ||
+		!strings.Contains(vp, "VERDICT: AGREE 或 DISAGREE 或 UNVERIFIABLE 或 OUT_OF_SCOPE\n") {
+		t.Error("constrained verifier must include the curriculum scope and OUT_OF_SCOPE verdict")
 	}
-	// 无约束时不加超纲维度（不干扰普通解题）。
-	if strings.Contains(buildVerifierPrompt("解方程", "x=5", ""), "OUT_OF_SCOPE") {
-		t.Error("无约束时 verifier 不应提超纲")
+	// 普通数值题不注入学段约束；通用概念审计说明不属于本题的约束段。
+	bare := buildVerifierPrompt("解方程", "x=5", "")
+	if strings.Contains(bare, "本题只允许使用") ||
+		!strings.Contains(bare, "VERDICT: AGREE 或 DISAGREE 或 UNVERIFIABLE\n") {
+		t.Error("unconstrained verifier must not add a curriculum scope or numeric OUT_OF_SCOPE verdict")
 	}
 	// parseVerdict 识别 OUT_OF_SCOPE（优先于同现的 AGREE）。
 	if v, _ := parseVerdict("VERDICT: AGREE / OUT_OF_SCOPE\nCOMPUTED: 5"); v != verdictOutOfScope {

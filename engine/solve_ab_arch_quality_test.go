@@ -14,10 +14,10 @@ import (
 
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/llmrouter"
 	"github.com/hexagon-codes/hexclaw/skill"
 	"github.com/hexagon-codes/hexclaw/skill/builtin"
-	sqlitestore "github.com/hexagon-codes/hexclaw/storage/sqlite"
 	"github.com/hexagon-codes/toolkit/os/sandbox"
 	"github.com/hexagon-codes/toolkit/util/idgen"
 )
@@ -344,7 +344,7 @@ func newRealEngineExec(t *testing.T) (SubAgentExecFunc, string) {
 	}
 
 	ctx := context.Background()
-	store, err := sqlitestore.New(filepath.Join(t.TempDir(), "real.db"))
+	store, err := sqlitefixture.New(filepath.Join(t.TempDir(), "real.db"))
 	if err != nil {
 		t.Fatalf("建 store 失败：%v", err)
 	}

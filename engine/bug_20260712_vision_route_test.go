@@ -16,9 +16,9 @@ import (
 	"github.com/hexagon-codes/hexagon"
 	mockllm "github.com/hexagon-codes/hexagon/testing/mock"
 	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/llmrouter"
 	"github.com/hexagon-codes/hexclaw/skill"
-	sqlitestore "github.com/hexagon-codes/hexclaw/storage/sqlite"
 )
 
 // newCostAwareEngine 装配一个 cost-aware 策略的引擎（真机复现 bug 的配置：cost-aware 会优先
@@ -26,7 +26,7 @@ import (
 func newCostAwareEngine(t *testing.T, providers map[string]hexagon.Provider, cfgs map[string]config.LLMProviderConfig, defaultProvider string) *ReActEngine {
 	t.Helper()
 	dir := t.TempDir()
-	store, err := sqlitestore.New(filepath.Join(dir, "vroute.db"))
+	store, err := sqlitefixture.New(filepath.Join(dir, "vroute.db"))
 	if err != nil {
 		t.Fatalf("创建存储失败: %v", err)
 	}
@@ -56,11 +56,11 @@ func TestRouteForVision_UsesConfiguredDefaultNotCostAware(t *testing.T) {
 	cloud := mockllm.NewLLMProvider("cloud")
 	eng := newCostAwareEngine(t,
 		map[string]hexagon.Provider{
-			"Ollama (本地)": local,
-			"智谱 AI":       cloud,
+			"ollama": local,
+			"智谱 AI":  cloud,
 		},
 		map[string]config.LLMProviderConfig{
-			"Ollama (本地)": {Model: "qwen3.5:9b"},
+			"ollama": {Model: "qwen3.5:9b"},
 			"智谱 AI": {
 				Model: "text-default", Models: []string{"text-default", "glm-4v-flash"},
 				ModelSpecsMode: config.LLMModelSpecsModeExplicit,
@@ -74,7 +74,7 @@ func TestRouteForVision_UsesConfiguredDefaultNotCostAware(t *testing.T) {
 	)
 
 	// 先确认这套配置下 cost-aware Route 确实抓的是本地（否则 RED 无意义）。
-	if _, routeName, err := eng.router.Route(context.Background()); err != nil || routeName != "Ollama (本地)" {
+	if _, routeName, err := eng.router.Route(context.Background()); err != nil || routeName != "ollama" {
 		t.Fatalf("前置：cost-aware Route 应抓本地 Ollama（证明与默认有区分），got name=%q err=%v", routeName, err)
 	}
 

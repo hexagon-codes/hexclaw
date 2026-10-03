@@ -12,14 +12,14 @@ import (
 	mockllm "github.com/hexagon-codes/hexagon/testing/mock"
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/llmrouter"
 	"github.com/hexagon-codes/hexclaw/skill"
-	sqlitestore "github.com/hexagon-codes/hexclaw/storage/sqlite"
 )
 
 func TestReActEngine_Lifecycle(t *testing.T) {
 	dir := t.TempDir()
-	store, err := sqlitestore.New(filepath.Join(dir, "test.db"))
+	store, err := sqlitefixture.New(filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatalf("创建存储失败: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestReActEngine_Lifecycle(t *testing.T) {
 
 func TestReActEngine_SkillFastPath(t *testing.T) {
 	dir := t.TempDir()
-	store, err := sqlitestore.New(filepath.Join(dir, "test.db"))
+	store, err := sqlitefixture.New(filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatalf("创建存储失败: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestReActEngine_SkillFastPath(t *testing.T) {
 
 func TestReActEngine_ProcessStream_SkillFastPath(t *testing.T) {
 	dir := t.TempDir()
-	store, err := sqlitestore.New(filepath.Join(dir, "test.db"))
+	store, err := sqlitefixture.New(filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatalf("创建存储失败: %v", err)
 	}
@@ -195,7 +195,7 @@ func TestBuildStreamMessages(t *testing.T) {
 	}
 	router, _ := llmrouter.New(cfg.LLM)
 	dir := t.TempDir()
-	store, _ := sqlitestore.New(filepath.Join(dir, "test.db"))
+	store, _ := sqlitefixture.New(filepath.Join(dir, "test.db"))
 	defer store.Close()
 	store.Init(context.Background())
 	skills := skill.NewRegistry()
@@ -332,7 +332,7 @@ func TestApplyModelThinkingDefaults_CloudQwenAndNoThink(t *testing.T) {
 
 func TestReActEngine_ReloadLLMConfig(t *testing.T) {
 	dir := t.TempDir()
-	store, err := sqlitestore.New(filepath.Join(dir, "test.db"))
+	store, err := sqlitefixture.New(filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatalf("创建存储失败: %v", err)
 	}
@@ -1111,7 +1111,7 @@ func newEngineWithProvider(t *testing.T, provider hexagon.Provider) *ReActEngine
 	t.Helper()
 
 	dir := t.TempDir()
-	store, err := sqlitestore.New(filepath.Join(dir, "test.db"))
+	store, err := sqlitefixture.New(filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatalf("创建存储失败: %v", err)
 	}
@@ -1157,7 +1157,7 @@ func newEngineWithProviders(
 	t.Helper()
 
 	dir := t.TempDir()
-	store, err := sqlitestore.New(filepath.Join(dir, "test.db"))
+	store, err := sqlitefixture.New(filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatalf("创建存储失败: %v", err)
 	}
