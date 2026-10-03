@@ -733,6 +733,7 @@ hexclaw/
 - 分支 push / PR 仅修改 `README*.md`、`CHANGELOG.md`、`CONTRIBUTING.md`、`SECURITY*.md`、`docs/**/*.md` 或 `LICENSE` 时不触发 CI，也不触发该提交的构建或自动云端部署。不能广义忽略所有 `**/*.md`：其他路径的 Markdown 可能是 `go:embed` 运行资源。
 - main push / 指向 main 的 PR 保留 Linux 全量测试及 race、Windows 构建与 sandbox、macOS sandbox。Linux 当前命令为 `go test -race -count=1 -timeout 20m ./...`，单包测试超时 20 分钟、job 总预算 40 分钟；两个平台 sandbox 共用矩阵，不再上传覆盖率或运行 Windows 提示性重复测试。
 - CI 与 K12 使用 `GOWORK=off` 和 `GOFLAGS=-mod=readonly`，核对已发布依赖且不改写依赖锁定文件。K12 仅在 main push / PR 匹配相关路径时运行，不再重复执行 feature push；真实模型评测仍按密钥配置启用。render、Sandbox CodeExec 按各自路径规则运行专项验证，render 不再执行每周定时任务或查询上游最新版本。
+- 普通业务测试复用一次真实迁移生成的空库模板，各用例仍有独立数据库和原有断言；生产迁移及迁移专项不变。Windows 的真实 code_exec 集成受既有 toolkit 能力门控，跳过不代表 Go 执行已验证，平台 sandbox 硬门禁仍执行。
 - `v*` Tag 或手动指定已有 Tag 通过独立 Release 工作流生成发布产物，不等待主 CI 全量测试。`v0.5.0-beta` 是本次预发布版本，文档版本不代表 Tag 或 Release 已生成。
 
 完整检查范围见[CI/CD 门禁说明](CONTRIBUTING.md#cicd-门禁说明)，部署配置与结果核对见[云端部署指南](docs/cloud-deployment.md)。功能分支编译成功不能替代完整测试或 Desktop / IM 业务验收。

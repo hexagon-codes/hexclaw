@@ -21,6 +21,7 @@
 - 精简 CI/CD：Windows / macOS sandbox 共用矩阵，移除覆盖率上传、Windows 非阻塞的核心重复测试、render 每周定时任务及上游版本查询；保留 Linux 全量测试和 race、平台 sandbox 及 K12 / render / code_exec 专项检查。
 - 主 CI 仅对指定纯说明文档改动跳过构建与自动部署，不广义忽略可能参与 `go:embed` 的 Markdown；K12 专项仅保留相关 main push / PR，移除 feature push 重复执行，真实模型评测仍按密钥配置启用。
 - CI 与 K12 使用 `GOWORK=off`、`GOFLAGS=-mod=readonly`；Linux 全量命令调整为 `go test -race -count=1 -timeout 20m ./...`，当前单包测试超时为 20 分钟、job 总预算为 40 分钟。
+- 普通业务测试复用一次真实迁移的空库模板，各用例保持独立数据库、原连接语义、全部断言和 race；迁移专项及生产迁移流程不变，减少重复迁移导致的 CI 超时。
 - 更新中英文安装、开发与云端部署文档，区分功能分支编译、main / PR 全量验证、按提交自动部署和独立 Tag Release；历史审计结果保留原证据范围。
 
 ### Fixed
@@ -28,6 +29,7 @@
 - 会话标题长度按去除首尾空白后的实际内容检查，保留已有标题兼容行为。
 - 修复钉钉模板切换覆盖既有消息投影、Windows Go 构建缓存误拒普通文件，以及 Linux 沙箱 CI 安装的 bubblewrap 与 toolkit 所需参数不匹配的问题。
 - 修复 Linux `code_exec` 将不存在的默认凭据路径当作启动依赖的问题；现存凭据和调用方显式拒绝路径仍保留原保护。
+- 修复 Windows Go 安装目录 junction 的物理路径解析，并移除 Linux Go helper 对自身可写工作区的重复只读挂载；保留工具链身份和只读访问边界。Windows 真实执行集成仍按 toolkit 当前能力明确门控，不把跳过计为 Go 执行通过。
 - 对齐既有测试夹具与当前鉴权、画像来源版本、模型能力、数据库迁移及平台关闭契约，保留原有功能与失败断言。
 - 修复 release 构建不可复现的依赖锁定问题：`skill/builtin/code_exec.go` 依赖的 sandbox 限额字段已由 `toolkit v0.2.6` 提供，不再需要本地 workspace 才能编译。
 - 将 runner 完整性故意失败探针改为 `HEXCLAW_RUNNER_PROBE=1` 手工门控，默认 `go test ./...` 不再被取证用例打红。

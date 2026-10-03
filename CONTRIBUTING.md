@@ -39,6 +39,10 @@ Linux 全量测试和 race、平台 sandbox、K12 与渲染专项的检查内容
 
 Sandbox CodeExec 的 Linux 环境复用同一固定 toolkit 版本提供的 bubblewrap 安装脚本，安装并检查运行所需参数，避免发行版旧包与当前后端不兼容。
 
+普通业务测试通过 `internal/testutil/sqlitefixture` 复用进程内一次真实全量迁移的空库模板；每个用例仍使用独立数据库，原 Init、断言、清理和 race 保留。文件库与内存库保留原连接语义，后端身份独立；迁移专项、旧 schema 和重开测试仍按原流程执行。这减少重复迁移耗时，不修改生产迁移或减少测试。
+
+Windows 的 toolkit sandbox 硬门禁继续执行。当前 toolkit 不支持 Go helper 所需的只读工具链路径映射，真实 code_exec 运行集成沿用既有平台能力门控；策略与文件系统断言继续验证，Linux / macOS 的真实执行仍保留。Windows 跳过项不计为 Go 执行功能已验证，不能通过取消只读路径或改用宿主执行冒充支持。
+
 三项大型真实 PDF 回归仅在显式设置 `HEXCLAW_REAL_PDF_FIXTURE` 时使用外部冻结样本，不从其他仓库自动读取。未设置或文件不存在时明确跳过，不能计为真实 PDF 边界已验证；文件存在时仍检查固定大小、SHA 和全部功能断言，其他读取失败或内容不符继续失败。默认构建、CI 与应用运行不依赖该外部素材。
 
 - GitHub Actions 的 Linux 硬门禁等价于 `GOWORK=off GOFLAGS=-mod=readonly go test -race -count=1 -timeout 20m ./...`。
