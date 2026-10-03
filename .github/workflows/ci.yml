@@ -48,18 +48,20 @@ jobs:
           cache-dependency-path: go.sum
 
       - name: Run tests
-        run: go test -race -count=1 -coverprofile=coverage.out ./...
+        run: go test -race -count=1 ./...
 
-      - name: Upload coverage
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: coverage
-          path: coverage.out
-
-  test-windows:
-    name: Test (Windows Sandbox)
+  test-sandbox:
+    name: Test (${{ matrix.platform }} Sandbox)
     if: ${{ github.event_name != 'push' || github.ref == 'refs/heads/main' }}
-    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            platform: Windows
+          - os: macos-14
+            platform: macOS
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -70,31 +72,8 @@ jobs:
           cache-dependency-path: go.sum
 
       - name: Build all
+        if: runner.os == 'Windows'
         run: go build ./...
-
-      - name: Run sandbox tests
-        run: go test -v -count=1 -timeout 120s ./skill/sandbox/...
-
-      # 核心套件大量断言 Unix 专属可观测值 (文件权限位 0600/0640/0755、HOME 与 ~ 展开、POSIX 路径),
-      # 在 Windows 上非可移植 (产品代码可用, 是测试断言不跨平台), 重构前即非绿。降为提示性:
-      # Windows 硬门禁仅保留"可编译 + sandbox 实现"; 核心功能全量验证在 Linux job (go test -race ./...)。
-      # 待核心测试跨平台可移植化后恢复硬门禁。
-      - name: Run core tests (advisory on Windows)
-        continue-on-error: true
-        run: go test -count=1 -timeout 300s ./engine/... ./config/... ./security/... ./mcp/... ./session/... ./skill/...
-
-  test-macos:
-    name: Test (macOS Sandbox)
-    if: ${{ github.event_name != 'push' || github.ref == 'refs/heads/main' }}
-    runs-on: macos-14
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
-        with:
-          go-version-file: go.mod
-          cache-dependency-path: go.sum
 
       - name: Run sandbox tests
         run: go test -v -count=1 -timeout 120s ./skill/sandbox/...

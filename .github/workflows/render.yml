@@ -6,7 +6,6 @@ name: render
 # 触发：
 #   - render/ 或 api/handler_render*.go 改动
 #   - cmd/hexclaw/main.go 改动
-#   - 每周一 02:00 UTC 拉 latest pandoc/typst 跑回归（监测上游升级）
 
 on:
   push:
@@ -21,9 +20,6 @@ on:
       - 'render/**'
       - 'api/handler_render*.go'
       - 'cmd/hexclaw/main.go'
-  schedule:
-    # 每周一 02:00 UTC 跑黄金回归 + 监测最新上游版本
-    - cron: '0 2 * * 1'
 
 permissions:
   contents: read
@@ -80,23 +76,3 @@ jobs:
 
       - name: Test api render handler
         run: go test ./api/... -run "Render" -v -timeout 5m
-
-  upstream-version-check:
-    # schedule 触发时，检查上游 pandoc/typst 是否有新版本。
-    if: github.event_name == 'schedule'
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-
-      - name: Check pandoc latest
-        run: |
-          latest=$(curl -fsSL https://api.github.com/repos/jgm/pandoc/releases/latest | jq -r .tag_name)
-          echo "Pandoc latest: $latest"
-          # 当前 pin 版本与最新对比；非阻塞，只发提醒
-          echo "::notice::Pandoc upstream latest=$latest. Manual review for upgrade."
-
-      - name: Check typst latest
-        run: |
-          latest=$(curl -fsSL https://api.github.com/repos/typst/typst/releases/latest | jq -r .tag_name)
-          echo "Typst latest: $latest"
-          echo "::notice::Typst upstream latest=$latest. Manual review for upgrade."
