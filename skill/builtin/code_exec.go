@@ -1498,7 +1498,12 @@ func syncCodeExecRootTree(root *os.Root) error {
 		if !before.Mode().IsRegular() || codeExecFileLinkCount(root, name, before) != 1 {
 			return errors.New("trusted Go build cache seed contains a non-regular entry")
 		}
-		file, err := root.Open(name)
+		flags := os.O_RDONLY
+		if runtime.GOOS == "windows" {
+			// Windows 刷盘需要写访问；这里只打开发布前的私有缓存文件，不修改内容。
+			flags = os.O_RDWR
+		}
+		file, err := root.OpenFile(name, flags, 0)
 		if err != nil {
 			return err
 		}
