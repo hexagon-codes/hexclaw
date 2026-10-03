@@ -3912,7 +3912,17 @@ func TestCodeExecGoBuildCacheManifestRejectsTampering(t *testing.T) {
 			name: "permission replacement",
 			mutate: func(t *testing.T, seedRoot string) {
 				t.Helper()
-				if err := os.Chmod(filepath.Join(seedRoot, "go-build", "ab", "abcdef-a"), 0644); err != nil {
+				path := filepath.Join(seedRoot, "go-build", "ab", "abcdef-a")
+				mode := os.FileMode(0644)
+				if runtime.GOOS == "windows" {
+					mode = 0400
+					t.Cleanup(func() {
+						if err := os.Chmod(path, 0600); err != nil {
+							t.Errorf("restore cache fixture write permission: %v", err)
+						}
+					})
+				}
+				if err := os.Chmod(path, mode); err != nil {
 					t.Fatal(err)
 				}
 			},
@@ -4468,7 +4478,31 @@ func newCodeExecGoBuildCacheTestRun(t *testing.T) codeExecRun {
 		t.Fatalf("create Go cache test execution plan: %v", err)
 	}
 	if plan.Toolchain == nil {
-		t.Fatal("Go cache test requires a Go toolchain")
+		binary, lookupErr := exec.LookPath("go")
+		if lookupErr != nil {
+			t.Fatalf("Go cache test requires a Go toolchain: lookup error: %v", lookupErr)
+		}
+		binary, canonicalErr := filepath.EvalSymlinks(binary)
+		if canonicalErr != nil {
+			t.Fatalf("Go cache test requires a Go toolchain: canonical error: %v", canonicalErr)
+		}
+		root, rootErr := os.OpenRoot(filepath.Dir(binary))
+		if rootErr != nil {
+			t.Fatalf("Go cache test requires a Go toolchain: root error: %v", rootErr)
+		}
+		defer root.Close()
+		info, pathErr := root.Lstat(filepath.Base(binary))
+		if pathErr != nil {
+			t.Fatalf("Go cache test requires a Go toolchain: path error: %v", pathErr)
+		}
+		file, openErr := openCodeExecRegularFileNoFollow(root, filepath.Base(binary))
+		if openErr != nil {
+			t.Fatalf("Go cache test requires a Go toolchain: open error: %v", openErr)
+		}
+		defer file.Close()
+		snapshot, snapshotErr := snapshotCodeExecOpenedFile(file)
+		t.Fatalf("Go cache test requires a Go toolchain: links=%d regular=%t path_matches=%t snapshot_error=%v",
+			snapshot.Platform.Links, info.Mode().IsRegular(), codeExecPathMatchesOpenedSnapshot(info, snapshot), snapshotErr)
 	}
 	return codeExecRun{
 		ID:        "cache-test",

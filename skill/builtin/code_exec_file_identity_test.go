@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 type codeExecSideEffectContext struct {
@@ -22,6 +23,52 @@ func (c *codeExecSideEffectContext) Err() error {
 		c.effect()
 	}
 	return c.Context.Err()
+}
+
+// 文件系统可能在同一时钟刻度内复用 ctime；先读回确认变化，再验证快照拒绝。
+func rewriteCodeExecIdentityFixture(root *os.Root, name string, before os.FileInfo) (returnErr error) {
+	file, err := openCodeExecRegularFileNoFollow(root, name)
+	if err != nil {
+		return err
+	}
+	defer func() { returnErr = errors.Join(returnErr, file.Close()) }()
+	baseline, err := snapshotCodeExecOpenedFile(file)
+	if err != nil {
+		return err
+	}
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	tick := time.NewTicker(5 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		mutator, err := root.OpenFile(name, os.O_WRONLY|os.O_TRUNC, 0)
+		if err != nil {
+			return err
+		}
+		_, writeErr := mutator.WriteString("mutated!")
+		if err := errors.Join(writeErr, mutator.Close()); err != nil {
+			return err
+		}
+		if err := root.Chtimes(name, before.ModTime(), before.ModTime()); err != nil {
+			return err
+		}
+		after, err := snapshotCodeExecOpenedFile(file)
+		if err != nil {
+			return err
+		}
+		if after.Info.Size() != before.Size() || !after.Info.ModTime().Equal(before.ModTime()) {
+			return errors.New("fixture rewrite did not preserve size and modification time")
+		}
+		if after.Platform.ChangeTimeSec != baseline.Platform.ChangeTimeSec ||
+			after.Platform.ChangeTimeNsec != baseline.Platform.ChangeTimeNsec {
+			return nil
+		}
+		select {
+		case <-deadline.C:
+			return errors.New("fixture change time did not advance before deadline")
+		case <-tick.C:
+		}
+	}
 }
 
 func TestCodeExecOpenedFileSnapshotDetectsSameSizeRewriteWithRestoredMtime(t *testing.T) {
@@ -42,19 +89,8 @@ func TestCodeExecOpenedFileSnapshotDetectsSameSizeRewriteWithRestoredMtime(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	mutator, err := root.OpenFile("payload.txt", os.O_WRONLY|os.O_TRUNC, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, writeErr := mutator.WriteString("mutated!"); writeErr != nil {
-		_ = mutator.Close()
-		t.Fatal(writeErr)
-	}
-	if closeErr := mutator.Close(); closeErr != nil {
-		t.Fatal(closeErr)
-	}
-	if chtimesErr := root.Chtimes("payload.txt", before.Info.ModTime(), before.Info.ModTime()); chtimesErr != nil {
-		t.Fatal(chtimesErr)
+	if err := rewriteCodeExecIdentityFixture(root, "payload.txt", before.Info); err != nil {
+		t.Fatalf("mutate opened-file fixture: %v", err)
 	}
 	after, err := snapshotCodeExecOpenedFile(file)
 	if err != nil {
@@ -121,18 +157,7 @@ func TestCodeExecStageRejectsSameSizeSourceRewriteWithRestoredMtime(t *testing.T
 		Context: context.Background(),
 		trigger: 1,
 		effect: func() {
-			file, effectErr := sourceRoot.OpenFile("source.txt", os.O_WRONLY|os.O_TRUNC, 0)
-			if effectErr == nil {
-				_, effectErr = file.WriteString("mutated!")
-				closeErr := file.Close()
-				if effectErr == nil {
-					effectErr = closeErr
-				}
-			}
-			if effectErr == nil {
-				effectErr = sourceRoot.Chtimes("source.txt", before.ModTime(), before.ModTime())
-			}
-			mutationErr = effectErr
+			mutationErr = rewriteCodeExecIdentityFixture(sourceRoot, "source.txt", before)
 		},
 	}
 	err = copyCodeExecStageRegularFile(
@@ -220,18 +245,7 @@ func TestCodeExecArtifactRejectsSameSizeRewriteWithRestoredMtime(t *testing.T) {
 		Context: context.Background(),
 		trigger: 1,
 		effect: func() {
-			file, effectErr := root.OpenFile("artifact.txt", os.O_WRONLY|os.O_TRUNC, 0)
-			if effectErr == nil {
-				_, effectErr = file.WriteString("mutated!")
-				closeErr := file.Close()
-				if effectErr == nil {
-					effectErr = closeErr
-				}
-			}
-			if effectErr == nil {
-				effectErr = root.Chtimes("artifact.txt", before.ModTime(), before.ModTime())
-			}
-			mutationErr = effectErr
+			mutationErr = rewriteCodeExecIdentityFixture(root, "artifact.txt", before)
 		},
 	}
 	_, _, err = hashCodeExecArtifact(ctx, root, "artifact.txt", before, 1024)
