@@ -206,6 +206,10 @@ func (s *Server) parseAddCronJobRequest(w http.ResponseWriter, r *http.Request) 
 		writeAPIError(w, http.StatusBadRequest, CodeBadRequest, "name、schedule 和 prompt 不能为空")
 		return nil, false
 	}
+	if err := validateCronInputLengths(req.Name, req.Schedule, "", ""); err != nil {
+		writeAPIError(w, http.StatusBadRequest, CodeBadRequest, err.Error())
+		return nil, false
+	}
 	if req.UserID == "" {
 		req.UserID = "api-user"
 	}

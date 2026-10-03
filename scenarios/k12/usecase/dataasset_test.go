@@ -2,16 +2,12 @@ package usecase
 
 import (
 	"context"
-	"database/sql"
 	"strings"
 	"testing"
 
-	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/scenario"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
-	"github.com/hexagon-codes/hexclaw/storage/migrate"
-
-	_ "modernc.org/sqlite"
+	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
 )
 
 func TestAccumulation(t *testing.T) {
@@ -108,18 +104,11 @@ func eqDue(a, b *int64) bool {
 }
 
 // freshStore 建一个独立的空库 store（模拟换机恢复目标），注册 K12 schema。
-func freshStore(t *testing.T) *records.Store {
+func freshStore(t *testing.T) *k12storage.Store {
 	t.Helper()
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
-	if err := migrate.Run(context.Background(), db, migrate.All); err != nil {
-		t.Fatal(err)
-	}
+	db := openMigratedTestDB(t)
 	db.Exec(`INSERT INTO agents(name) VALUES('mingming')`)
 	reg := scenario.NewRegistry()
 	reg.Assemble(k12.Pack(k12.NewCurriculumStub()))
-	return records.NewStore(db, reg.Records)
+	return k12storage.NewStore(db, reg.Records)
 }

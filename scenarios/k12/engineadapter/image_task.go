@@ -1,0 +1,285 @@
+package engineadapter
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"math"
+	"strings"
+
+	"github.com/hexagon-codes/hexclaw/scenarios/k12"
+	"github.com/hexagon-codes/hexclaw/scenarios/k12/usecase"
+)
+
+const imageTaskClassifierPrompt = `你是图片任务分流器，只依据当前图片中可见事实分类；附带消息只能帮助理解指代，绝不能替代图片证据。四类定义：completed_homework=有学生作答痕迹的作业；blank_worksheet=无学生作答、供家长讲题的试卷或教材题页；writing=语文作文/连续文字作品；artwork=绘画/美术作品。
+教材印刷的例题解答、标准答案、约分数字、彩色文字、装饰和统一排版的演算过程属于题目材料，不是学生作答。教材页同时有已讲解例题和未作答练习，且没有额外学生作答痕迹时，仍为 blank_worksheet；不能仅因印刷内容有答案或红色数字而判 completed_homework 或 unknown。只有可见的学生填答、手写演算、涂改等证据才支持 completed_homework；不能把真实手写作答一概当印刷内容。AI 生成示例、非真实学生作业等标记仅说明素材来源，不决定是否有作答；姓名日期未填或个别题目空白不能覆盖其他题目可见的作答痕迹。消息指明某道题时核对其图中位置，不凭消息补题或改变图片事实。实际证据冲突时输出 unknown，并给出至少两个 confirmation_candidates。严格只输出 JSON：
+{"task_intent":"completed_homework|blank_worksheet|writing|artwork|unknown","intent_evidence":["图片中可复核的短证据"],"confidence":0.0,"confirmation_candidates":[],"work_title_candidate":null,"task_requirement_candidate":null}
+confirmation_candidates 必须是枚举字符串数组，元素仅限 completed_homework、blank_worksheet、writing、artwork，不能是对象。已确定 task_intent 时必须为 []；unknown 时给出至少两个不同的具体意图，例如 ["completed_homework","blank_worksheet"]。不要把标题或任务的对象候选格式用于 confirmation_candidates。
+标题/任务不是必填；只有图片中确实可见时才输出候选，候选格式 {"value":"...","source":"image_vision","confidence":0.0,"evidence_ref":"可复核位置"}，不得用占位标题补齐。`
+
+const imageTaskWritingOCRPrompt = `逐字转写这张语文作文原稿，并同时报告转写质量。不要润色、纠错、补句、概括或点评；无法辨认、涂改覆盖、多个读法冲突的片段不得猜。严格只输出 JSON：
+{"raw":"逐字原稿","canonical_content":"只有清晰一致片段才可规范换行，文字不得改写","confidence":0.0,"risk_segments":[{"segment_id":"稳定位置标识","raw_text":"原片段","reasons":["illegible|overwrite|conflicting_reading"],"alternatives":["候选读法"]}]}
+清晰一致时 risk_segments 必须为空；存在任何风险必须逐段列出。raw_text 必须是 canonical_content 中可唯一定位的原始片段，无法读出的字原位写 [无法识别]，不得填猜测字；关键内容或整篇/大部分无法辨认时用 segment_id=document，reasons=["document_unreadable"]，raw 和 canonical_content 仍保留可见观察或 [无法识别]。`
+
+type ImageTaskAdapter struct{ vision VisionFunc }
+
+type definitiveImageTaskResponseError struct{ cause error }
+
+func (e *definitiveImageTaskResponseError) Error() string { return e.cause.Error() }
+func (e *definitiveImageTaskResponseError) Unwrap() error { return e.cause }
+func (e *definitiveImageTaskResponseError) ProviderResponseStatusCode() int {
+	return 200
+}
+
+func definitiveImageTaskResponse(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &definitiveImageTaskResponseError{cause: err}
+}
+
+func NewImageTaskAdapter(vision VisionFunc) *ImageTaskAdapter {
+	return &ImageTaskAdapter{vision: vision}
+}
+
+var _ usecase.ImageTaskClassifier = (*ImageTaskAdapter)(nil)
+var _ usecase.ImageTaskWritingOCR = (*ImageTaskAdapter)(nil)
+var _ usecase.ImageTaskWritingOCRReviewer = (*ImageTaskAdapter)(nil)
+
+func (a *ImageTaskAdapter) ReviewImageTaskWriting(ctx context.Context, image []byte, risks []k12.CreativeWorkIntakeOCRRisk) ([]k12.CreativeWorkOCRReviewSegment, error) {
+	if a == nil || a.vision == nil || len(image) == 0 {
+		return nil, fmt.Errorf("writing local review requires image and vision model")
+	}
+	segments, err := json.Marshal(risks)
+	if err != nil {
+		return nil, err
+	}
+	prompt := `仅复核图片中下列已定位的作文转写风险片段，不重写整篇，不润色、纠错或按通顺程度选读法。原文中的错字照抄。
+只输出 JSON：{"segments":[{"segment_id":"原标识","text":"实际可辨认的原文","readable":true,"visual_evidence":"图中行列位置及可见笔画依据"}]}。
+仍看不清就 readable=false、text=""；不得猜测。每个原标识最多一项，不新增片段。风险片段：` + string(segments)
+	raw, err := a.vision(ctx, image, prompt)
+	if err != nil {
+		return nil, fmt.Errorf("writing local review provider failed: %w", providerResponseError(err))
+	}
+	var result struct {
+		Segments []k12.CreativeWorkOCRReviewSegment `json:"segments"`
+	}
+	if err := strictImageTaskJSON(raw, &result); err != nil {
+		return nil, definitiveImageTaskResponse(fmt.Errorf("invalid writing local review response: %w", err))
+	}
+	allowed := make(map[string]bool, len(risks))
+	for _, risk := range risks {
+		allowed[risk.SegmentID] = true
+	}
+	for _, segment := range result.Segments {
+		if !allowed[segment.SegmentID] || (segment.Readable && (strings.TrimSpace(segment.Text) == "" || strings.TrimSpace(segment.VisualEvidence) == "")) {
+			return nil, definitiveImageTaskResponse(fmt.Errorf("writing local review contains invalid segment evidence"))
+		}
+		delete(allowed, segment.SegmentID)
+	}
+	return result.Segments, nil
+}
+
+func strictImageTaskJSON(raw string, target any) error {
+	raw = strings.TrimSpace(raw)
+	if strings.HasPrefix(raw, "```") {
+		if newline := strings.IndexByte(raw, '\n'); newline >= 0 {
+			raw = raw[newline+1:]
+		}
+		if end := strings.LastIndex(raw, "```"); end >= 0 {
+			raw = raw[:end]
+		}
+		raw = strings.TrimSpace(raw)
+	}
+	left, right := strings.IndexByte(raw, '{'), strings.LastIndexByte(raw, '}')
+	if left < 0 || right <= left {
+		return fmt.Errorf("模型未返回 JSON object")
+	}
+	decoder := json.NewDecoder(bytes.NewReader([]byte(raw[left : right+1])))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return fmt.Errorf("模型返回了多余 JSON 内容")
+	}
+	return nil
+}
+
+func (a *ImageTaskAdapter) ClassifyImageTask(
+	ctx context.Context,
+	input usecase.ImageTaskClassificationInput,
+) (usecase.ImageTaskClassification, error) {
+	if a == nil || a.vision == nil {
+		return usecase.ImageTaskClassification{}, fmt.Errorf("image task classifier: 未配置视觉模型")
+	}
+	if len(input.Images) != 1 || len(input.Images[0]) == 0 {
+		return usecase.ImageTaskClassification{}, fmt.Errorf("image task classifier: 当前分流调用必须有且仅有一张真实图片")
+	}
+	prompt := imageTaskClassifierPrompt
+	if input.IncludeWritingOCR {
+		prompt += `
+本次来自新建作品入口。仍须区分作文、美术、试卷和歧义；不能按字数阈值把课文、题目或说明书当作文。
+当且仅当 task_intent=writing 时，在同一个 JSON object 增加 writing_ocr 字段，值为逐字转写对象：
+{"raw":"原稿逐字文字","canonical_content":"原稿正文，仅整理换行","confidence":0.0,"risk_segments":[{"segment_id":"稳定行列标识","raw_text":"正文中可唯一定位的原片段","reasons":["illegible|overwrite|conflicting_reading"],"alternatives":[]}]}
+不得润色、纠错、补句或点评；看不清的字写 [无法识别] 并列入 risk_segments，不能猜读。整篇或关键内容不可靠时使用 segment_id=document、reasons=["document_unreadable"]。清晰一致时 risk_segments 为空。其他类型 writing_ocr=null。`
+	}
+	if message := strings.TrimSpace(input.MessageIntent); message != "" {
+		prompt += "\n附带消息（仅作指代上下文）：" + message
+	}
+	raw, err := a.vision(ctx, input.Images[0], prompt)
+	if err != nil {
+		return usecase.ImageTaskClassification{}, fmt.Errorf(
+			"image task classifier: 视觉模型调用失败: %w", providerResponseError(err),
+		)
+	}
+	if input.RecordResponse != nil {
+		if err := input.RecordResponse(context.WithoutCancel(ctx), raw); err != nil {
+			return usecase.ImageTaskClassification{}, definitiveImageTaskResponse(
+				fmt.Errorf("image task classifier: persist response: %w", err),
+			)
+		}
+	}
+	return a.ParseImageTaskClassificationResponse(raw, input.IncludeWritingOCR)
+}
+
+// ParseImageTaskClassificationResponse 只解析已保存原文，不访问视觉模型。
+func (a *ImageTaskAdapter) ParseImageTaskClassificationResponse(raw string, includeWritingOCR bool) (usecase.ImageTaskClassification, error) {
+	var envelope struct {
+		TaskIntent             k12.ImageTaskIntent                `json:"task_intent"`
+		IntentEvidence         []string                           `json:"intent_evidence"`
+		Confidence             float64                            `json:"confidence"`
+		ConfirmationCandidates []k12.ImageTaskIntent              `json:"confirmation_candidates"`
+		WorkTitleCandidate     *k12.FactCandidate                 `json:"work_title_candidate"`
+		TaskRequirement        *k12.FactCandidate                 `json:"task_requirement_candidate"`
+		WritingOCR             *usecase.ImageTaskWritingOCRResult `json:"writing_ocr"`
+	}
+	parseErr := strictImageTaskJSON(raw, &envelope)
+	if errors.Is(parseErr, io.ErrUnexpectedEOF) {
+		// 只补完整字段后唯一缺失的顶层闭合；有效 JSON 才能继续原字段与事实校验。
+		left, right := strings.IndexByte(raw, '{'), strings.LastIndexByte(raw, '}')
+		if left >= 0 && right > left {
+			completed := raw[left:right+1] + "}"
+			if json.Valid([]byte(completed)) {
+				parseErr = strictImageTaskJSON(completed, &envelope)
+			}
+		}
+	}
+	if parseErr != nil {
+		return usecase.ImageTaskClassification{}, definitiveImageTaskResponse(
+			fmt.Errorf("image task classifier: 解析失败: %w", parseErr),
+		)
+	}
+	result := usecase.ImageTaskClassification{
+		Intent: envelope.TaskIntent, IntentEvidence: envelope.IntentEvidence,
+		Confidence:               envelope.Confidence,
+		ConfirmationCandidates:   envelope.ConfirmationCandidates,
+		WorkTitleCandidate:       envelope.WorkTitleCandidate,
+		TaskRequirementCandidate: envelope.TaskRequirement,
+	}
+	// 非作文或不完整转写不进入草稿；旧响应缺少该字段时沿既有 OCR 链处理。
+	if includeWritingOCR && result.Intent == k12.ImageTaskIntentWriting && validClassificationOCR(envelope.WritingOCR) {
+		result.WritingOCR = envelope.WritingOCR
+	}
+	bindImageTaskCandidate := func(candidate *k12.FactCandidate) {
+		if candidate == nil {
+			return
+		}
+		if candidate.Source == k12.FactCandidateSourceImageVision ||
+			candidate.Source == k12.FactCandidateSourceImageOCR {
+			candidate.EvidenceRef = "asset_index:0#" +
+				strings.TrimSpace(candidate.EvidenceRef)
+		}
+	}
+	bindImageTaskCandidate(result.WorkTitleCandidate)
+	bindImageTaskCandidate(result.TaskRequirementCandidate)
+	if len(result.IntentEvidence) == 0 || result.Confidence < 0 || result.Confidence > 1 {
+		return result, definitiveImageTaskResponse(
+			fmt.Errorf("image task classifier: 缺少可复核证据或 confidence 非法"),
+		)
+	}
+	if result.Intent == k12.ImageTaskIntentUnknown {
+		if len(result.ConfirmationCandidates) < 2 {
+			return result, definitiveImageTaskResponse(
+				fmt.Errorf("image task classifier: unknown 缺少最小候选 exact-set"),
+			)
+		}
+	} else if len(result.ConfirmationCandidates) != 0 {
+		return result, definitiveImageTaskResponse(
+			fmt.Errorf("image task classifier: 已确定 intent 不得携带确认候选"),
+		)
+	}
+	if result.WorkTitleCandidate != nil {
+		if err := result.WorkTitleCandidate.Validate(); err != nil {
+			return result, definitiveImageTaskResponse(err)
+		}
+	}
+	if result.TaskRequirementCandidate != nil {
+		if err := result.TaskRequirementCandidate.Validate(); err != nil {
+			return result, definitiveImageTaskResponse(err)
+		}
+	}
+	return result, nil
+}
+
+func validClassificationOCR(ocr *usecase.ImageTaskWritingOCRResult) bool {
+	if ocr == nil || strings.TrimSpace(ocr.Raw) == "" || strings.TrimSpace(ocr.CanonicalContent) == "" ||
+		math.IsNaN(ocr.Confidence) || math.IsInf(ocr.Confidence, 0) || ocr.Confidence < 0 || ocr.Confidence > 1 {
+		return false
+	}
+	for _, risk := range ocr.RiskSegments {
+		if strings.TrimSpace(risk.SegmentID) == "" || len(risk.Reasons) == 0 {
+			return false
+		}
+	}
+	if strings.Contains(ocr.CanonicalContent, "[无法识别]") && len(ocr.RiskSegments) == 0 {
+		ocr.RiskSegments = []k12.CreativeWorkIntakeOCRRisk{{SegmentID: "document", RawText: ocr.CanonicalContent, Reasons: []string{"document_unreadable"}}}
+	}
+	return true
+}
+
+func (a *ImageTaskAdapter) RecognizeImageTaskWriting(
+	ctx context.Context,
+	image []byte,
+) (usecase.ImageTaskWritingOCRResult, error) {
+	if a == nil || a.vision == nil || len(image) == 0 {
+		return usecase.ImageTaskWritingOCRResult{}, fmt.Errorf("image task writing OCR: 图片或视觉模型缺失")
+	}
+	raw, err := a.vision(ctx, image, imageTaskWritingOCRPrompt)
+	if err != nil {
+		return usecase.ImageTaskWritingOCRResult{}, fmt.Errorf(
+			"image task writing OCR: 视觉模型调用失败: %w", providerResponseError(err),
+		)
+	}
+	var envelope struct {
+		Raw              string                          `json:"raw"`
+		CanonicalContent string                          `json:"canonical_content"`
+		Confidence       float64                         `json:"confidence"`
+		RiskSegments     []k12.CreativeWorkIntakeOCRRisk `json:"risk_segments"`
+	}
+	if err := strictImageTaskJSON(raw, &envelope); err != nil {
+		return usecase.ImageTaskWritingOCRResult{}, definitiveImageTaskResponse(
+			fmt.Errorf("image task writing OCR: 解析失败: %w", err),
+		)
+	}
+	if strings.TrimSpace(envelope.Raw) == "" || strings.TrimSpace(envelope.CanonicalContent) == "" ||
+		envelope.Confidence < 0 || envelope.Confidence > 1 {
+		return usecase.ImageTaskWritingOCRResult{}, definitiveImageTaskResponse(
+			fmt.Errorf("image task writing OCR: 证据不完整"),
+		)
+	}
+	for _, risk := range envelope.RiskSegments {
+		if strings.TrimSpace(risk.SegmentID) == "" || len(risk.Reasons) == 0 {
+			return usecase.ImageTaskWritingOCRResult{}, definitiveImageTaskResponse(
+				fmt.Errorf("image task writing OCR: 风险片段证据不完整"),
+			)
+		}
+	}
+	return usecase.ImageTaskWritingOCRResult{
+		Raw: envelope.Raw, CanonicalContent: envelope.CanonicalContent,
+		Confidence: envelope.Confidence, RiskSegments: envelope.RiskSegments,
+	}, nil
+}

@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hexagon-codes/hexagon"
 	"github.com/hexagon-codes/hexclaw/adapter"
@@ -86,10 +87,14 @@ func newFailoverEgressEngine(t *testing.T, local, cloud hexagon.Provider, localN
 // 本地 "context canceled" → 回退云端，不得被 egress 拦死，云端信封不含 memory。
 func TestFailoverEgress_NonStreaming_LocalCanceledFallsBackCloudSafe(t *testing.T) {
 	local := &failoverProvider{name: "Ollama (本地)", err: errors.New(`Post "http://localhost:11434/api/chat": context canceled`)}
-	cloud := &egressCaptureProvider{}
+	cloud := &ctxHealthCloudProvider{}
 	eng := newFailoverEgressEngine(t, local, cloud, local.name, "openrouter")
+	type callerKey struct{}
+	deadline := time.Now().Add(time.Minute)
+	ctx, cancel := context.WithDeadline(context.WithValue(context.Background(), callerKey{}, "preserved"), deadline)
+	defer cancel()
 
-	reply, err := eng.Process(context.Background(), &adapter.Message{
+	reply, err := eng.Process(ctx, &adapter.Message{
 		ID: "foe-nonstream-1", Platform: adapter.PlatformAPI,
 		UserID: "u-foe-1", ChatID: "c-foe-1",
 		Content: "hello",
@@ -105,6 +110,12 @@ func TestFailoverEgress_NonStreaming_LocalCanceledFallsBackCloudSafe(t *testing.
 	}
 	if local.callCount() == 0 {
 		t.Fatalf("本地 provider 应先被调用一次（是回退的起点）")
+	}
+	if cloud.receivedCtx == nil || cloud.receivedCtx.Value(callerKey{}) != "preserved" {
+		t.Fatal("fallback lost caller context values")
+	}
+	if actual, ok := cloud.receivedCtx.Deadline(); !ok || !actual.Equal(deadline) {
+		t.Fatalf("fallback reset caller deadline: got=%v present=%v want=%v", actual, ok, deadline)
 	}
 	// 发给云端的 egress 信封必须不含 memory（根因修复：回退按云 locality 重建，不注入跨会话记忆）。
 	reqs := cloud.last(t)

@@ -48,6 +48,13 @@ func TestRegistry_StartAppendComplete(t *testing.T) {
 		Content:   "hello",
 		Reasoning: "think",
 		Metadata:  map[string]string{"k": "v"},
+		ReasoningDisclosure: adapter.ReasoningDisclosure{
+			Visibility: adapter.ReasoningVisible,
+			Source:     "ollama",
+			Dialect:    "message.thinking",
+			Provider:   "ollama",
+			Model:      "test-model",
+		},
 	})
 	if s2 == nil || s2.Status != StatusStreaming {
 		t.Fatalf("append 后应 streaming, 实际 %+v", s2)
@@ -107,6 +114,10 @@ func TestRegistry_FailAndCancel(t *testing.T) {
 	s2 := r.Cancel("reqC")
 	if s2 == nil || s2.Status != StatusCancelled {
 		t.Fatalf("Cancel 后应 cancelled, 实际 %+v", s2)
+	}
+	late := r.Append("reqC", &adapter.ReplyChunk{Content: "late success", Done: true})
+	if late == nil || late.Status != StatusCancelled || late.Content != "" || late.Status == StatusCompleted {
+		t.Fatalf("取消后的晚到 chunk 改变了终态: %+v", late)
 	}
 
 	// 未知 requestID 应返回 nil

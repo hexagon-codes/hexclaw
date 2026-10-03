@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/ai-core/template"
@@ -13,6 +15,7 @@ import (
 	"github.com/hexagon-codes/hexagon/observe/trace"
 	hruntime "github.com/hexagon-codes/hexagon/runtime"
 	"github.com/hexagon-codes/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/messagecontent"
 )
 
 type runtimeProviderSelector struct {
@@ -24,16 +27,20 @@ type runtimeProviderSelector struct {
 	// 都先打一次挂掉的默认 provider（429）再回退，"额度耗尽即云端整体变慢/不可用"的观感由此
 	// 而来。仅对 isProviderUnavailableError（429/5xx/超时/连接失败）熔断，不误伤"工具不支持"
 	// （那条走去工具降级、不换 provider）。nil 时不熔断（保持旧行为）。
-	markUnhealthy    func(name, reason string)
-	initialProvider  hexagon.Provider
-	initialName      string
-	initialModel     string
-	explicitProvider bool
-	modelForProvider func(string) string
-	wrapProvider     func(hexagon.Provider, string, string) hexagon.Provider
-	currentProvider  hexagon.Provider
-	currentName      string
-	currentModel     string
+	markUnhealthy   func(name, reason string)
+	initialProvider hexagon.Provider
+	initialName     string
+	initialModel    string
+	// initialSameProviderFallback 是首选模型硬失败时，同一 provider 内可用的默认模型。
+	// 典型场景：K12 优先 glm-4.5 推理，但该模型 429；同一智谱的 glm-4v-flash 仍健康。
+	initialSameProviderFallback string
+	usedSameProviderFallback    bool
+	explicitProvider            bool
+	modelForProvider            func(string) string
+	wrapProvider                func(hexagon.Provider, string, string) hexagon.Provider
+	currentProvider             hexagon.Provider
+	currentName                 string
+	currentModel                string
 	// tried 累积本次运行已尝试过的 provider 名，供多跳回退用 exclude 集合遍历所有健康
 	// provider 一轮、防止回到已失败的 provider 造成死循环（BUG-20260711 Gap-2）。
 	tried map[string]bool
@@ -107,6 +114,17 @@ func (s *runtimeProviderSelector) Fallback(context.Context, hruntime.ProviderSel
 func (s *runtimeProviderSelector) failoverAdvance(cause error) bool {
 	if s.explicitProvider || s.router == nil {
 		return false
+	}
+	// 模型级失败不等于整个 provider 失败。首选推理模型不可用时，先用同 provider 的
+	// 配置默认模型兜底；只有默认模型也失败，才熔断 provider 并跨 provider 切换。
+	if !s.usedSameProviderFallback &&
+		s.currentName == s.initialName &&
+		s.initialProvider != nil &&
+		s.initialSameProviderFallback != "" &&
+		s.initialSameProviderFallback != s.currentModel {
+		s.usedSameProviderFallback = true
+		s.setCurrent(s.initialProvider, s.initialName, s.initialSameProviderFallback)
+		return true
 	}
 	s.tripBreaker(s.currentName, cause)
 	s.markTried(s.currentName)
@@ -218,14 +236,22 @@ type runtimeToolExecutor struct {
 }
 
 func (e *runtimeToolExecutor) Execute(ctx context.Context, call llm.ToolCall) (hruntime.ToolResult, error) {
+	started := time.Now()
+	argumentsForLog := call.Arguments
+	if strings.Contains(strings.ToLower(argumentsForLog), "base64") {
+		argumentsForLog = "[omitted: contains base64 media]"
+	}
+	trace.L(ctx).Info("runtime tool call started", "stage", "tool_execute", "tool", call.Name, "tool_call_id", call.ID, "arguments", argumentsForLog)
 	var args map[string]any
 	if call.Arguments != "" {
 		if err := json.Unmarshal([]byte(call.Arguments), &args); err != nil {
+			trace.L(ctx).Warn("runtime tool call failed", "stage", "tool_execute", "tool", call.Name, "tool_call_id", call.ID, "arguments", argumentsForLog, "reason", "invalid_arguments", "err", err, "elapsed_ms", time.Since(started).Milliseconds())
 			msg := fmt.Sprintf("Error: invalid arguments for tool %q: %s", call.Name, err.Error())
 			return hruntime.ToolResult{Content: msg, Error: err.Error()}, nil
 		}
 	}
 	if e.executor == nil {
+		trace.L(ctx).Warn("runtime tool call failed", "stage", "tool_execute", "tool", call.Name, "tool_call_id", call.ID, "arguments", argumentsForLog, "reason", "executor_unavailable", "err", "tool executor not available", "elapsed_ms", time.Since(started).Milliseconds())
 		return hruntime.ToolResult{Content: "Error: tool executor not available", Error: "tool executor not available"}, nil
 	}
 
@@ -238,16 +264,47 @@ func (e *runtimeToolExecutor) Execute(ctx context.Context, call llm.ToolCall) (h
 	e.mu.Unlock()
 	if count > maxIdenticalToolCallsFor(call.Name) {
 		trace.L(ctx).Warn("tool-loop repeat guard tripped",
-			"tool", call.Name, "identical_calls", count)
+			"stage", "tool_execute", "tool", call.Name, "tool_call_id", call.ID, "arguments", argumentsForLog,
+			"reason", "repeat_guard", "err", repeatToolCallBlockedError, "identical_calls", count, "elapsed_ms", time.Since(started).Milliseconds())
 		msg := fmt.Sprintf("You have already called %q with these exact arguments %d times and received the same result above. Do NOT call it again. Produce your final answer now using the information you already have; if it is insufficient, explain what is missing and stop.", call.Name, count-1)
 		return hruntime.ToolResult{Content: msg, Raw: repeatToolCallBlockedError, Status: hruntime.ToolStatusError}, nil
 	}
 
+	heartbeatCtx, stopHeartbeat := context.WithCancel(ctx)
+	heartbeatStopped := make(chan struct{})
+	var stopHeartbeatOnce sync.Once
+	finishHeartbeat := func() {
+		stopHeartbeatOnce.Do(func() {
+			stopHeartbeat()
+			select {
+			case <-heartbeatStopped:
+			case <-time.After(time.Second):
+				trace.L(ctx).Warn("runtime tool heartbeat stop timed out", "stage", "tool_execute", "tool", call.Name, "tool_call_id", call.ID, "err", "heartbeat goroutine did not stop within timeout", "timeout_ms", int64(time.Second/time.Millisecond))
+			}
+		})
+	}
+	defer finishHeartbeat()
+	go func() {
+		defer close(heartbeatStopped)
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-heartbeatCtx.Done():
+				return
+			case <-ticker.C:
+				trace.L(ctx).Info("runtime tool call heartbeat", "stage", "tool_execute", "tool", call.Name, "tool_call_id", call.ID, "elapsed_ms", time.Since(started).Milliseconds())
+			}
+		}
+	}()
 	result, err := e.executor.Execute(ctx, call.Name, args)
+	finishHeartbeat()
 	if err != nil {
+		trace.L(ctx).Warn("runtime tool call failed", "stage", "tool_execute", "tool", call.Name, "tool_call_id", call.ID, "arguments", argumentsForLog, "reason", "execution_error", "err", err, "elapsed_ms", time.Since(started).Milliseconds())
 		msg := fmt.Sprintf("Error executing tool %q: %s", call.Name, err.Error())
 		return hruntime.ToolResult{Content: msg, Raw: result, Error: err.Error()}, nil
 	}
+	trace.L(ctx).Info("runtime tool call completed", "stage", "tool_execute", "tool", call.Name, "tool_call_id", call.ID, "elapsed_ms", time.Since(started).Milliseconds())
 	return hruntime.ToolResult{Content: result, Raw: result}, nil
 }
 
@@ -360,17 +417,44 @@ func (runtimeCompactionMiddleware) AfterTool(context.Context, *hruntime.State, l
 
 func (runtimeCompactionMiddleware) Finalize(context.Context, *hruntime.State) error { return nil }
 
-func runtimeToolCallsToAdapter(calls []hruntime.ToolCallRecord) []adapter.ToolCall {
+func runtimeToolCallsToAdapter(calls []hruntime.ToolCallRecord, origins ...map[string]*adapter.ToolOrigin) []adapter.ToolCall {
 	result := make([]adapter.ToolCall, 0, len(calls))
 	for _, c := range calls {
+		var origin *adapter.ToolOrigin
+		if len(origins) > 0 {
+			origin = origins[0][c.Name]
+		}
+		execution := sandboxExecutionForDisplay(c.Name, c.Result.Content)
+		if origin != nil && origin.Kind == "mcp" {
+			execution = nil
+		}
+		displayContent := c.Result.Content
+		if execution != nil {
+			displayContent = displayContent[:strings.LastIndex(displayContent, "\n[hexclaw_sandbox_result]\n")]
+		}
+		displayResult := truncateToolResultForDisplay(c.Name, displayContent)
+		status := string(c.Result.Status)
+		// 兼容执行前拦截回执：结束事件不等于工具成功，沿用既有错误信封契约。
+		if strings.HasPrefix(strings.TrimSpace(c.Result.Content), "Error executing tool \"") {
+			status = "error"
+		}
+		if execution != nil && (execution.Status != "success" || execution.ExitCode != 0 || execution.Timeout) {
+			status = "error"
+		}
+		if execution != nil && execution.Status == "success" && status == "" {
+			status = "success"
+		}
 		result = append(result, adapter.ToolCall{
 			ID:        c.ID,
 			Name:      c.Name,
+			Origin:    origin,
 			Arguments: c.Arguments,
 			// 多 Agent 工具(orchestrate/spawn)放宽展示上限以保全尾部 hexclaw-subagents 哨兵块。
-			Result: truncateToolResultForDisplay(c.Name, c.Result.Content),
+			Result:         displayResult,
+			MessageContent: canonicalProducerContent(messagecontent.ProducerTool, displayResult, "und"),
 			// 透传 hexagon 框架在执行点产出的执行真相（状态/耗时），客户端免去正文嗅探。
-			Status:     string(c.Result.Status),
+			Status:     status,
+			Execution:  execution,
 			DurationMs: c.Result.DurationMs,
 		})
 	}
@@ -394,16 +478,22 @@ func runtimeBlocksToAdapter(blocks template.Blocks) []adapter.Block {
 	for _, b := range blocks {
 		switch b.Type {
 		case template.BlockText:
-			out = append(out, adapter.Block{Type: "text", Text: b.Text})
+			out = append(out, adapter.Block{
+				Type:           "text",
+				Text:           b.Text,
+				MessageContent: canonicalProducerContent(messagecontent.ProducerChat, b.Text, "und"),
+			})
 		case template.BlockToolUse:
 			out = append(out, adapter.Block{Type: "tool_use", ID: b.ID, Name: b.Name, Input: b.Input})
 		case template.BlockToolResult:
+			output := truncateToolResultForDisplay(names[b.ToolUseID], b.Output)
 			out = append(out, adapter.Block{
-				Type:      "tool_result",
-				ToolUseID: b.ToolUseID,
-				ToolName:  names[b.ToolUseID],
-				Output:    truncateToolResultForDisplay(names[b.ToolUseID], b.Output),
-				IsError:   b.IsError,
+				Type:           "tool_result",
+				MessageContent: canonicalProducerContent(messagecontent.ProducerTool, output, "und"),
+				ToolUseID:      b.ToolUseID,
+				ToolName:       names[b.ToolUseID],
+				Output:         output,
+				IsError:        b.IsError,
 			})
 		}
 	}

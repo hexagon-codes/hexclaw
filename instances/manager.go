@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -51,21 +52,23 @@ type Instance struct {
 }
 
 type HealthReport struct {
-	Name        string    `json:"name"`
-	Provider    string    `json:"provider"`
-	Mode        string    `json:"mode"`
-	Status      Status    `json:"status"`
-	Healthy     bool      `json:"healthy"`
-	LastEventAt time.Time `json:"last_event_at,omitempty"`
-	LastError   string    `json:"last_error,omitempty"`
-	CheckedAt   time.Time `json:"checked_at"`
+	Name            string    `json:"name"`
+	Provider        string    `json:"provider"`
+	Mode            string    `json:"mode"`
+	Status          Status    `json:"status"`
+	Healthy         bool      `json:"healthy"`
+	ConnectionState string    `json:"connection_state,omitempty"`
+	LastEventAt     time.Time `json:"last_event_at,omitempty"`
+	LastError       string    `json:"last_error,omitempty"`
+	CheckedAt       time.Time `json:"checked_at"`
 }
 
 type Manager struct {
-	db                *sql.DB
-	handler           adapter.MessageHandler
-	buildAdapter      func(*Instance) (adapter.Adapter, error)
-	disabledProviders map[string]bool
+	db                            *sql.DB
+	handler                       adapter.MessageHandler
+	buildAdapter                  func(*Instance) (adapter.Adapter, error)
+	disabledProviders             map[string]bool
+	dingtalkInboundPhotoAdmission dingtalk.InboundPhotoAdmissionPort
 
 	// box 负责 config_json 的静态加密/解密。可为 nil（部分测试不注入）：
 	// 此时凭据按明文直存直读，全链路退化为旧行为，不 crash。
@@ -92,6 +95,16 @@ func (m *Manager) SetHandler(h adapter.MessageHandler) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.handler = h
+}
+
+// SetDingTalkInboundPhotoAdmissionPort 注入钉钉 ACK 前的耐久图片接纳端口。
+// Manager 只负责在适配器启动前完成装配，不参与图片业务状态机。
+func (m *Manager) SetDingTalkInboundPhotoAdmissionPort(
+	port dingtalk.InboundPhotoAdmissionPort,
+) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.dingtalkInboundPhotoAdmission = port
 }
 
 // SetDisabledProviders prevents selected platform adapters from starting.
@@ -163,6 +176,13 @@ func (m *Manager) Init(ctx context.Context) error {
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
+		`CREATE TABLE IF NOT EXISTS platform_test_requests (
+            instance_id TEXT NOT NULL,
+            request_id TEXT NOT NULL,
+            deliveries_json TEXT NOT NULL,
+            deadline_ms INTEGER NOT NULL,
+            PRIMARY KEY (instance_id, request_id)
+        )`,
 		`CREATE TABLE IF NOT EXISTS platform_events (
 			instance_name TEXT NOT NULL,
 			event_id TEXT NOT NULL,
@@ -246,12 +266,14 @@ func (m *Manager) ListLive(ctx context.Context) ([]*Instance, error) {
 
 		var newStatus Status
 		var lastErr string
+		var connectionState string
 		switch {
 		case started:
 			newStatus = StatusRunning
 			if hc, ok := adp.(adapter.HealthChecker); ok {
 				if herr := hc.Health(ctx); herr != nil {
 					newStatus, lastErr = StatusError, herr.Error()
+					connectionState = healthConnectionState(herr)
 				}
 			}
 		case inst.Status == StatusRunning:
@@ -265,7 +287,10 @@ func (m *Manager) ListLive(ctx context.Context) ([]*Instance, error) {
 		if inst.Status != newStatus || inst.LastError != lastErr {
 			inst.Status = newStatus
 			inst.LastError = lastErr
-			_ = m.setStatus(ctx, inst.Name, newStatus, lastErr)
+			// 首次握手只是瞬态健康结果，不将其保存为实例故障。
+			if connectionState != "connecting" {
+				_ = m.setStatus(ctx, inst.Name, newStatus, lastErr)
+			}
 		}
 	}
 	return list, nil
@@ -512,6 +537,7 @@ func (m *Manager) Start(ctx context.Context, name string) error {
 	handler := m.handler
 	buildAdapter := m.buildAdapter
 	disabled := m.disabledProviders[strings.ToLower(inst.Provider)]
+	dingtalkInboundPhotoAdmission := m.dingtalkInboundPhotoAdmission
 	m.mu.RUnlock()
 	if alreadyRunning || alreadyInbound {
 		return nil
@@ -533,6 +559,13 @@ func (m *Manager) Start(ctx context.Context, name string) error {
 		_ = m.setStatus(ctx, name, StatusError, err.Error())
 		return err
 	}
+	if strings.EqualFold(inst.Provider, "dingtalk") {
+		if configurable, ok := adp.(interface {
+			SetInboundPhotoAdmissionPort(dingtalk.InboundPhotoAdmissionPort)
+		}); ok {
+			configurable.SetInboundPhotoAdmissionPort(dingtalkInboundPhotoAdmission)
+		}
+	}
 	wrapped := m.wrapHandler(inst, handler)
 
 	if wa, ok := adp.(adapter.WebhookAdapter); ok {
@@ -548,7 +581,10 @@ func (m *Manager) Start(ctx context.Context, name string) error {
 		return m.setStatus(ctx, name, StatusRunning, "")
 	}
 
-	if err := safeStartAdapter(ctx, adp, wrapped); err != nil {
+	// 长连接独立于启动请求，不能继承请求的取消信号、认证主体和其他请求级值。
+	// 每条入站消息由适配器建立平台身份，连接仍由 Manager.Stop → Adapter.Stop 负责取消。
+	lifecycleCtx := context.Background()
+	if err := safeStartAdapter(lifecycleCtx, adp, wrapped); err != nil {
 		_ = m.setStatus(ctx, name, StatusError, err.Error())
 		return err
 	}
@@ -595,7 +631,16 @@ func (m *Manager) Stop(ctx context.Context, name string) error {
 // Deterministic ordering at each step avoids routing to a random instance when
 // several share a provider. Returns an error if no running adapter matches.
 func (m *Manager) Send(ctx context.Context, target, chatID string, reply *adapter.Reply) error {
+	adp := m.resolveRunningAdapter(target)
+	if adp == nil {
+		return fmt.Errorf("no running adapter for target %q", target)
+	}
+	return adp.Send(ctx, chatID, reply)
+}
+
+func (m *Manager) resolveRunningAdapter(target string) adapter.Adapter {
 	m.mu.RLock()
+	defer m.mu.RUnlock()
 	// 预排序运行中的实例名，使按 ID / provider 命中时都走确定顺序。
 	names := make([]string, 0, len(m.running))
 	for name := range m.running {
@@ -624,11 +669,180 @@ func (m *Manager) Send(ctx context.Context, target, chatID string, reply *adapte
 			}
 		}
 	}
-	m.mu.RUnlock()
-	if adp == nil {
-		return fmt.Errorf("no running adapter for target %q", target)
+	return adp
+}
+
+// resolveRunningAdapterByStableID 只按持久化实例 ID 解析运行中的适配器，
+// 不允许回退到实例名或 provider，避免冻结投递被发送到其他实例。
+func (m *Manager) resolveRunningAdapterByStableID(target string) adapter.Adapter {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	names := make([]string, 0, len(m.running))
+	for name := range m.running {
+		names = append(names, name)
 	}
-	return adp.Send(ctx, chatID, reply)
+	sort.Strings(names)
+	for _, name := range names {
+		if md, ok := m.metadata[name]; ok && md.ID == target {
+			return m.running[name]
+		}
+	}
+	return nil
+}
+
+// ResolveRunningInstanceID 把 K12 绑定中的稳定 ID、精确实例名或单实例旧配置
+// 解析为运行实例的持久 ID。空引用只允许命中同平台唯一运行实例，禁止选择首实例。
+func (m *Manager) ResolveRunningInstanceID(platform, instanceRef string) (string, error) {
+	platform = strings.ToLower(strings.TrimSpace(platform))
+	instanceRef = strings.TrimSpace(instanceRef)
+	if platform == "" {
+		return "", fmt.Errorf("platform is required to resolve a running instance")
+	}
+
+	type candidate struct {
+		id   string
+		name string
+	}
+	m.mu.RLock()
+	names := make([]string, 0, len(m.running))
+	for name := range m.running {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	candidates := make([]candidate, 0, len(names))
+	for _, name := range names {
+		metadata := m.metadata[name]
+		if metadata == nil || strings.ToLower(strings.TrimSpace(metadata.Provider)) != platform {
+			continue
+		}
+		metadataName := strings.TrimSpace(metadata.Name)
+		metadataID := strings.TrimSpace(metadata.ID)
+		if instanceRef != "" && instanceRef != metadataID && instanceRef != metadataName && instanceRef != name {
+			continue
+		}
+		candidates = append(candidates, candidate{id: metadataID, name: name})
+	}
+	m.mu.RUnlock()
+
+	if len(candidates) == 0 {
+		return "", fmt.Errorf("no running %s instance matches %q", platform, instanceRef)
+	}
+	if len(candidates) != 1 {
+		return "", fmt.Errorf("running %s instance reference %q is ambiguous", platform, instanceRef)
+	}
+	if candidates[0].id == "" {
+		return "", fmt.Errorf("running %s instance %q has no stable ID", platform, candidates[0].name)
+	}
+	return candidates[0].id, nil
+}
+
+// SendWithReceipt requires a provider-backed external message identifier. It
+// deliberately refuses adapters that only implement basic Send so callers can
+// never convert a local nil error into a false "delivered" claim.
+func (m *Manager) SendWithReceipt(ctx context.Context, target, chatID string, reply *adapter.Reply) (adapter.DeliveryAck, error) {
+	adp := m.resolveRunningAdapterByStableID(target)
+	if adp == nil {
+		return adapter.DeliveryAck{Status: adapter.DeliveryFailed}, fmt.Errorf("no running adapter for stable instance %q", target)
+	}
+	receiptAdapter, ok := adp.(adapter.DeliveryReceiptAdapter)
+	if !ok {
+		return adapter.DeliveryAck{Status: adapter.DeliveryFailed}, fmt.Errorf("adapter %q does not support delivery receipts", adp.Name())
+	}
+	return receiptAdapter.SendWithReceipt(ctx, chatID, reply)
+}
+
+// PrepareDeliveryPartResource 按稳定实例定位平台适配器并准备一个媒体 part。
+// 该阶段不得发送可见消息；返回值由上层回执账本持久化后才能进入发送阶段。
+func (m *Manager) PrepareDeliveryPartResource(ctx context.Context, target string, part adapter.DeliveryPart) (string, error) {
+	adp := m.resolveRunningAdapterByStableID(target)
+	if adp == nil {
+		return "", fmt.Errorf("no running adapter for stable instance %q", target)
+	}
+	partAdapter, ok := adp.(adapter.DeliveryPartAdapter)
+	if !ok {
+		return "", fmt.Errorf("adapter %q does not support delivery part preparation", adp.Name())
+	}
+	return partAdapter.PrepareDeliveryPartResource(ctx, part)
+}
+
+// SendPreparedPartWithReceipt 只发送一个已经冻结并完成媒体准备的 part。
+func (m *Manager) SendPreparedPartWithReceipt(
+	ctx context.Context,
+	target, chatID string,
+	part adapter.DeliveryPart,
+) (adapter.DeliveryAck, error) {
+	adp := m.resolveRunningAdapterByStableID(target)
+	if adp == nil {
+		return adapter.DeliveryAck{Status: adapter.DeliveryFailed}, fmt.Errorf("no running adapter for stable instance %q", target)
+	}
+	partAdapter, ok := adp.(adapter.DeliveryPartAdapter)
+	if !ok {
+		return adapter.DeliveryAck{Status: adapter.DeliveryFailed}, fmt.Errorf("adapter %q does not support delivery part receipts", adp.Name())
+	}
+	return partAdapter.SendPreparedPartWithReceipt(ctx, chatID, part)
+}
+
+// SendPreparedEnvelopeWithReceipt 按稳定实例发送一个已经冻结并完成媒体准备的组合消息。
+// 该能力必须由适配器显式实现，禁止回退为逐 part 发送。
+func (m *Manager) SendPreparedEnvelopeWithReceipt(
+	ctx context.Context,
+	target, chatID string,
+	envelope adapter.PreparedEnvelope,
+) (adapter.DeliveryAck, error) {
+	if strings.TrimSpace(target) == "" || strings.TrimSpace(chatID) == "" {
+		return adapter.DeliveryAck{Status: adapter.DeliveryFailed}, fmt.Errorf("prepared envelope target and chat ID are required")
+	}
+	adp := m.resolveRunningAdapterByStableID(target)
+	if adp == nil {
+		return adapter.DeliveryAck{Status: adapter.DeliveryFailed}, fmt.Errorf("no running adapter for stable instance %q", target)
+	}
+	envelopeAdapter, ok := adp.(adapter.PreparedEnvelopeAdapter)
+	if !ok {
+		return adapter.DeliveryAck{Status: adapter.DeliveryFailed}, fmt.Errorf("adapter %q does not support prepared envelopes", adp.Name())
+	}
+	return envelopeAdapter.SendPreparedEnvelopeWithReceipt(ctx, chatID, envelope)
+}
+
+// PreflightPreparedEnvelope 按稳定实例执行只读平台组合消息校验。
+func (m *Manager) PreflightPreparedEnvelope(
+	ctx context.Context,
+	target, chatID string,
+	envelope adapter.PreparedEnvelope,
+) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if strings.TrimSpace(target) == "" || strings.TrimSpace(chatID) == "" {
+		return fmt.Errorf("prepared envelope target and chat ID are required")
+	}
+	adp := m.resolveRunningAdapterByStableID(target)
+	if adp == nil {
+		return fmt.Errorf("no running adapter for stable instance %q", target)
+	}
+	validator, ok := adp.(adapter.PreparedEnvelopeValidator)
+	if !ok {
+		return fmt.Errorf("adapter %q does not support prepared envelope preflight", adp.Name())
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return validator.ValidatePreparedEnvelope(envelope)
+}
+
+// QueryReceipt reconciles an accepted or outcome-unknown proactive message
+// without resending it. The same stable instance target used at send time must
+// be retained by the domain receipt.
+func (m *Manager) QueryReceipt(ctx context.Context, target, externalMessageID string) (adapter.DeliveryAck, error) {
+	adp := m.resolveRunningAdapterByStableID(target)
+	if adp == nil {
+		return adapter.DeliveryAck{ExternalMessageID: externalMessageID, Status: adapter.DeliveryOutcomeUnknown}, fmt.Errorf("no running adapter for stable instance %q", target)
+	}
+	receiptAdapter, ok := adp.(adapter.DeliveryReceiptAdapter)
+	if !ok {
+		return adapter.DeliveryAck{ExternalMessageID: externalMessageID, Status: adapter.DeliveryOutcomeUnknown}, fmt.Errorf("adapter %q does not support delivery receipts", adp.Name())
+	}
+	return receiptAdapter.QueryReceipt(ctx, externalMessageID)
 }
 
 func (m *Manager) StopAll(ctx context.Context) error {
@@ -667,13 +881,14 @@ func (m *Manager) Health(ctx context.Context, name string) (*HealthReport, error
 	}
 
 	report := &HealthReport{
-		Name:        inst.Name,
-		Provider:    inst.Provider,
-		Mode:        inst.Mode,
-		Status:      inst.Status,
-		LastEventAt: inst.LastEventAt,
-		LastError:   inst.LastError,
-		CheckedAt:   time.Now(),
+		Name:            inst.Name,
+		Provider:        inst.Provider,
+		Mode:            inst.Mode,
+		Status:          inst.Status,
+		LastEventAt:     inst.LastEventAt,
+		LastError:       inst.LastError,
+		CheckedAt:       time.Now(),
+		ConnectionState: "disconnected",
 	}
 
 	m.mu.RLock()
@@ -695,16 +910,32 @@ func (m *Manager) Health(ctx context.Context, name string) (*HealthReport, error
 		if err := hc.Health(ctx); err != nil {
 			report.Status = StatusError
 			report.LastError = err.Error()
-			_ = m.setStatus(ctx, name, StatusError, report.LastError)
+			report.ConnectionState = healthConnectionState(err)
+			if report.ConnectionState != "connecting" {
+				_ = m.setStatus(ctx, name, StatusError, report.LastError)
+			}
 			return report, nil
 		}
 	}
 
 	report.Status = StatusRunning
 	report.Healthy = true
+	report.ConnectionState = "connected"
 	report.LastError = ""
 	_ = m.setStatus(ctx, name, StatusRunning, "")
 	return report, nil
+}
+
+// healthConnectionState 只接纳适配器的明确原因，不从任意错误文案推断凭据失效。
+func healthConnectionState(err error) string {
+	var diagnostic interface{ ConnectionState() string }
+	if errors.As(err, &diagnostic) {
+		switch state := diagnostic.ConnectionState(); state {
+		case "connecting", "credential_invalid":
+			return state
+		}
+	}
+	return "disconnected"
 }
 
 func (m *Manager) HealthAll(ctx context.Context) ([]*HealthReport, error) {

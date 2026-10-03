@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/hexagon-codes/hexclaw/internal/inputlimits"
+	"github.com/hexagon-codes/hexclaw/skill"
 	"github.com/hexagon-codes/hexclaw/storage"
 	"github.com/hexagon-codes/toolkit/util/idgen"
 )
@@ -21,6 +24,12 @@ const maxSessionTitleRunes = 200
 // --- 会话管理 API ---
 
 func sessionUserIDFromRequest(r *http.Request) string {
+	// Authentication middleware stamps an unforgeable principal in context.
+	// Query/body user_id remain a legacy direct-handler test/embedding fallback
+	// only; authenticated HTTP traffic must never be allowed to switch owners.
+	if userID := strings.TrimSpace(skill.AuthenticatedUserID(r.Context())); userID != "" {
+		return userID
+	}
 	// 优先从 query parameter 读取，其次从请求体 JSON 读取
 	userID := strings.TrimSpace(r.URL.Query().Get("user_id"))
 	if userID != "" {
@@ -31,6 +40,9 @@ func sessionUserIDFromRequest(r *http.Request) string {
 
 // sessionUserIDFromRequestOrBody 从 query 或 body 中提取 user_id
 func sessionUserIDFromRequestOrBody(r *http.Request, bodyUserID string) string {
+	if userID := strings.TrimSpace(skill.AuthenticatedUserID(r.Context())); userID != "" {
+		return userID
+	}
 	userID := strings.TrimSpace(r.URL.Query().Get("user_id"))
 	if userID != "" {
 		return userID
@@ -131,6 +143,9 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	if hook := s.sessionDeletedHook; hook != nil {
+		hook(id)
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"message": "会话已删除"})
 }
 
@@ -161,6 +176,7 @@ func (s *Server) handleListMessages(w http.ResponseWriter, r *http.Request) {
 	if messages == nil {
 		messages = []*storage.MessageRecord{}
 	}
+	hydrateMessageContents(messages)
 
 	// 获取真实总数用于分页
 	total := len(messages) + offset // 近似值，实际由 store 提供
@@ -367,11 +383,14 @@ func (s *Server) handleUpdateSession(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "标题不能为空"})
 		return
 	}
-	if utf8.RuneCountInString(title) > maxSessionTitleRunes {
+	if req.Title != sess.Title && utf8.RuneCountInString(req.Title) > maxSessionTitleRunes {
 		writeJSON(w, http.StatusBadRequest, map[string]string{
 			"error": fmt.Sprintf("标题过长（最多 %d 字符）", maxSessionTitleRunes),
 		})
 		return
+	}
+	if req.Title == sess.Title {
+		title = sess.Title
 	}
 
 	sess.Title = title
@@ -502,15 +521,12 @@ func (s *Server) handleSearchMessages(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	// 限制搜索查询长度，防止超长查询给 SQLite 造成压力
-	if len([]rune(query)) > 200 {
-		query = string([]rune(query)[:200])
+	if err := inputlimits.Text("q", query, "", inputlimits.Keyword); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
 	}
 
-	userID := r.URL.Query().Get("user_id")
-	if userID == "" {
-		userID = "api-user"
-	}
+	userID := sessionUserIDFromRequest(r)
 
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
@@ -528,6 +544,11 @@ func (s *Server) handleSearchMessages(w http.ResponseWriter, r *http.Request) {
 	if results == nil {
 		results = []*storage.SearchResult{}
 	}
+	for _, result := range results {
+		if result != nil {
+			hydrateMessageContents([]*storage.MessageRecord{result.Message})
+		}
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"results": results,
@@ -540,8 +561,9 @@ func (s *Server) handleSearchMessages(w http.ResponseWriter, r *http.Request) {
 
 // ForkSessionRequest 创建分支请求
 type ForkSessionRequest struct {
-	MessageID string `json:"message_id"` // 从哪条消息开始分支
-	UserID    string `json:"user_id"`    // 用户 ID（可选）
+	MessageID      string `json:"message_id"` // 从哪条消息开始分支
+	UserID         string `json:"user_id"`    // 用户 ID（可选）
+	IncludeMessage *bool  `json:"include_message,omitempty"`
 }
 
 // handleForkSession 从指定消息处创建对话分支
@@ -563,16 +585,17 @@ func (s *Server) handleForkSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userID := req.UserID
-	if userID == "" {
-		userID = "api-user"
-	}
+	userID := sessionUserIDFromRequestOrBody(r, req.UserID)
 	if _, err := s.getOwnedSession(r, sessionID, userID); err != nil {
 		writeSessionLookupError(w, err)
 		return
 	}
 
-	newSession, err := s.store.ForkSession(r.Context(), sessionID, req.MessageID, userID)
+	options := []storage.ForkSessionOptions(nil)
+	if req.IncludeMessage != nil {
+		options = append(options, storage.ForkSessionOptions{IncludeMessage: *req.IncludeMessage})
+	}
+	newSession, err := s.store.ForkSession(r.Context(), sessionID, req.MessageID, userID, options...)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{
 			"error": "创建分支失败: " + err.Error(),
@@ -690,6 +713,15 @@ func buildMessageRecord(sessionID string, req *appendMessageRequest) *storage.Me
 	if id == "" {
 		id = "msg-" + idgen.ShortID()
 	}
+	metadata := string(req.Metadata)
+	attachments := ""
+	if metadataContainsAttachments(req.Metadata) {
+		// Keep the complete metadata envelope in the dedicated attachments
+		// column. scanMessage restores this envelope on reads, preserving
+		// attachments together with sibling scenario metadata without the
+		// generic metadata column's 64 KiB clamp.
+		attachments = metadata
+	}
 	return &storage.MessageRecord{
 		ID:               id,
 		SessionID:        sessionID,
@@ -697,13 +729,28 @@ func buildMessageRecord(sessionID string, req *appendMessageRequest) *storage.Me
 		Role:             req.Role,
 		Content:          req.Content,
 		ContentType:      req.ContentType,
-		Metadata:         string(req.Metadata),
+		Metadata:         metadata,
+		Attachments:      attachments,
 		ModelName:        req.ModelName,
 		PromptTokens:     req.PromptTokens,
 		CompletionTokens: req.CompletionTokens,
 		FinishReason:     req.FinishReason,
 		RequestID:        req.RequestID,
 	}
+}
+
+func metadataContainsAttachments(raw json.RawMessage) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	var envelope struct {
+		Attachments json.RawMessage `json:"attachments"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return false
+	}
+	value := bytes.TrimSpace(envelope.Attachments)
+	return len(value) > 0 && !bytes.Equal(value, []byte("null")) && !bytes.Equal(value, []byte("[]"))
 }
 
 // handleBatchAppendMessages POST /api/v1/sessions/{id}/messages/batch

@@ -1,5 +1,5 @@
 // Package k12 是 K12 家长辅导场景包——**平台里唯一允许出现领域词**
-// （错题本 / 年级 / 复习 / 备课卡 / 孩子）的地方（架构 §6.5）。
+// （错题本 / 年级 / 复习 / 辅导要点 / 孩子）的地方（架构 §6.5）。
 //
 // 它通过 scenario 六缝声明式接入平台；engine/records/router/chat shell 不认识 K12。
 // 删掉本目录后，Assemble 不再发生，平台回到干净通用形态（AP-1 反向门）。
@@ -35,18 +35,129 @@ const (
 // MistakeFields 错题的领域字段（PRD §5.2.3 错题本 fields 约定）。
 // 它被 marshal 进 AgentRecord.Fields（JSON），平台不 typed 这些字段。
 type MistakeFields struct {
+	// GradeTerm freezes the learner profile term at creation time. It is an
+	// attribution fact for insight snapshots; changing the current profile must
+	// never rewrite historical mistakes. V41 legacy rows remain empty.
+	GradeTerm      string `json:"grade_term,omitempty"`
 	Subject        string `json:"subject,omitempty"` // 数学/物理/化学；老记录空值按数学兼容
 	Question       string `json:"question"`          // 题干
 	KnowledgePoint string `json:"knowledge_point"`   // 命中课标词表；命不中记「其他」
 	ErrorCause     string `json:"error_cause"`       // 五类错因
 	WrongProcess   string `json:"wrong_process"`     // ≤100 字错步摘要，可空
+	// CanonicalAnswer 规范答案（执行计划 §3.0 练习集治本①）：批改入库时从批改结论
+	// （solve 链已验算解法）带入；手工录入路径无家长答案字段则留空。
+	// 老记录空 = 前向兼容：自动装篮时无答案 → pending 诚实阻断（§4.7）。
+	CanonicalAnswer string `json:"canonical_answer,omitempty"`
 	// ReviewStage 间隔重排轮次（艾宾浩斯式）：0=首次入库；每成功重做一次 +1，决定下次复习间隔
 	// （越记得牢，下次复习推得越远）。老记录缺此字段 = 0，前向兼容。
 	ReviewStage int `json:"review_stage"`
 	// LastRetriedAt 上次「做对」的 unix 秒（T2.2 掌握判定用）：第二次做对距上次 ≥3 天 → mastered。
 	// 老记录缺此字段 = 0，前向兼容（0 视为无上次做对，不触发掌握升级）。
 	LastRetriedAt int64 `json:"last_retried_at"`
+	// ParentConfirmedAt is a parent's subjective “会了” confirmation. It is an
+	// audit/scheduling fact only and must never be used as mastery evidence.
+	ParentConfirmedAt int64 `json:"parent_confirmed_at,omitempty"`
+	// SpotCheckState 抽查复验状态（架构设计-v0.5.0 §5.2 数据字段表 / §3.6 抽查复验，
+	// 2026-07-18 闭环补缺批）：none/scheduled/passed/failed。「最多自动安排一次」与
+	// 「家长确认（复验未过）」标注的持久依据，跨重启幂等。老记录缺字段 = 空串，视同 none
+	// （前向兼容）。行为（家长确认已会 → 下一周期混入周卷 ≤2 道抽查）随抽查复验链路落地。
+	SpotCheckState string `json:"spot_check_state,omitempty"`
+	// EntrySource 录入来源（§5.5 Mistake entry_source：photo/verified/manual/writing_confirmed，
+	// §6.9 类型化存储批补齐）：photo=拍照批改判错自动入库；manual=家长手动记入。
+	// Outbox 学情消费者据此还原两条路径的措辞差异；老记录空串按 photo 口径兼容。
+	EntrySource string `json:"entry_source,omitempty"`
+	// 手动归档是可恢复的学习队列退出，而不是删除或掌握证据。下面字段冻结最近一次
+	// 归档前的学习状态/调度事实，供 8 秒 Undo 与「已归档」长期恢复共用同一命令。
+	ArchivedReason             string                  `json:"archived_reason,omitempty"`
+	ArchivedAt                 int64                   `json:"archived_at,omitempty"`
+	ArchiveCommandID           string                  `json:"archive_command_id,omitempty"`
+	ArchivedFromStatus         string                  `json:"archived_from_status,omitempty"`
+	ArchivedFromDueAt          *int64                  `json:"archived_from_due_at,omitempty"`
+	ArchivedFromSpotCheckState string                  `json:"archived_from_spot_check_state,omitempty"`
+	LastArchive                *MistakeArchiveSnapshot `json:"last_archive,omitempty"`
 }
+
+const (
+	MistakeArchivedReasonManual           = "manual"
+	MistakeArchivedReasonSourceCorrection = "source_correction"
+)
+
+// MistakeSourceCorrectionArchived 判断来源纠正是否已撤回这条错题；读取投影不恢复旧复习状态。
+func MistakeSourceCorrectionArchived(status, archivedReason string) bool {
+	return status == StatusArchived && archivedReason == MistakeArchivedReasonSourceCorrection
+}
+
+// MistakeArchiveSnapshot 保留最近一次归档/恢复的审计事实。当前归档态字段只在
+// status=archived 时非空；恢复后清空当前字段，但保留本快照用于审计与迟到命令去重。
+type MistakeArchiveSnapshot struct {
+	Reason             string `json:"reason"`
+	ArchivedAt         int64  `json:"archived_at"`
+	ArchiveCommandID   string `json:"archive_command_id"`
+	FromStatus         string `json:"from_status"`
+	FromDueAt          *int64 `json:"from_due_at,omitempty"`
+	FromSpotCheckState string `json:"from_spot_check_state,omitempty"`
+	RestoredAt         int64  `json:"restored_at,omitempty"`
+	RestoreCommandID   string `json:"restore_command_id,omitempty"`
+}
+
+// MistakeRestorable 是错题恢复能力的领域投影，不是持久化事实。只有当前确为
+// archived，且当前归档字段与一份完整、未恢复的 LastArchive 快照严格一致时才为真。
+// V35 前已经 archived 的历史行没有快照，因此明确为 false；不得猜造原状态或调度。
+func MistakeRestorable(status string, f MistakeFields) bool {
+	if status != StatusArchived || f.LastArchive == nil {
+		return false
+	}
+	snapshot := f.LastArchive
+	if snapshot.Reason != MistakeArchivedReasonManual ||
+		snapshot.ArchivedAt <= 0 ||
+		strings.TrimSpace(snapshot.ArchiveCommandID) == "" ||
+		snapshot.RestoredAt != 0 ||
+		strings.TrimSpace(snapshot.RestoreCommandID) != "" {
+		return false
+	}
+	switch snapshot.FromStatus {
+	case StatusNew, StatusExplained, StatusRetried, StatusMastered:
+	default:
+		return false
+	}
+	switch snapshot.FromSpotCheckState {
+	case "", SpotCheckNone, SpotCheckScheduled, SpotCheckPassed, SpotCheckFailed:
+	default:
+		return false
+	}
+	if snapshot.FromDueAt != nil && *snapshot.FromDueAt <= 0 {
+		return false
+	}
+	return f.ArchivedReason == snapshot.Reason &&
+		f.ArchivedAt == snapshot.ArchivedAt &&
+		f.ArchiveCommandID == snapshot.ArchiveCommandID &&
+		f.ArchivedFromStatus == snapshot.FromStatus &&
+		unixPointersEqual(f.ArchivedFromDueAt, snapshot.FromDueAt) &&
+		f.ArchivedFromSpotCheckState == snapshot.FromSpotCheckState
+}
+
+func unixPointersEqual(left, right *int64) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
+}
+
+// 错题录入来源枚举（§5.5 entry_source）。
+const (
+	MistakeEntryPhoto            = "photo"
+	MistakeEntryVerified         = "verified"
+	MistakeEntryManual           = "manual"
+	MistakeEntryWritingConfirmed = "writing_confirmed"
+)
+
+// 抽查复验状态枚举（§3.6/§5.2，2026-07-18 补）。
+const (
+	SpotCheckNone      = "none"      // 未安排（默认；老记录空串同义）
+	SpotCheckScheduled = "scheduled" // 已安排下一周期抽查（家长确认已会触发，最多自动一次）
+	SpotCheckPassed    = "passed"    // 抽查通过
+	SpotCheckFailed    = "failed"    // 抽查未过（档案标「家长确认（复验未过）」）
+)
 
 // MistakeSchema 返回错题本记录集的 schema（注册进 RecordSchemaRegistry）。
 //
@@ -58,13 +169,18 @@ func MistakeSchema() *records.RecordSchema {
 		InitialStatus: StatusNew,
 		Statuses:      []string{StatusNew, StatusExplained, StatusRetried, StatusMastered, StatusArchived},
 		// 转移偏序（PRD §5.3.1）：前进阶梯 + 手动「他会了」可跨阶到 mastered + 归档可来自任一活跃态；
-		// 禁止倒退（mastered→retried 等）与离开终态（archived→*）。T1.1（hex-test 审计）。
+		// 禁止倒退与离开终态（archived→*）。T1.1（hex-test 审计）。
+		// 唯一合法回退 mastered→retried（§3.6 抽查复验规则 3，2026-07-18 落地）：家长确认已会
+		// 后抽查复验未过，该题回到本周复习队列——这是证据推翻主观确认的兜底闭环，
+		// 仅由复批联动（applySpotCheckOutcome）触发，不开放为普通操作。
 		Transitions: map[string][]string{
 			StatusNew:       {StatusExplained, StatusRetried, StatusMastered, StatusArchived},
 			StatusExplained: {StatusRetried, StatusMastered, StatusArchived},
 			StatusRetried:   {StatusMastered, StatusArchived},
-			StatusMastered:  {StatusArchived},
-			StatusArchived:  {},
+			StatusMastered:  {StatusRetried, StatusArchived},
+			// 通用状态机里 archived 仍是终态；恢复只允许走受控 RestoreMistake
+			// 命令，按冻结快照复原，不能借通用 UpdateStatus 任意改写目标状态。
+			StatusArchived: {},
 		},
 		DedupeKey:      mistakeDedupeKey,
 		ValidateFields: validateMistakeFields,
@@ -91,6 +207,40 @@ func validateMistakeFields(fieldsJSON string) error {
 	}
 	if strings.TrimSpace(f.Question) == "" {
 		return fmt.Errorf("错题缺少题干 question")
+	}
+	if f.GradeTerm != "" && !ValidProfileGradeTerm(f.GradeTerm) {
+		return fmt.Errorf("grade_term 非法值 %q", f.GradeTerm)
+	}
+	switch f.SpotCheckState {
+	case "", SpotCheckNone, SpotCheckScheduled, SpotCheckPassed, SpotCheckFailed:
+	default:
+		return fmt.Errorf("spot_check_state 非法值 %q（none/scheduled/passed/failed）", f.SpotCheckState)
+	}
+	switch f.EntrySource {
+	case "", MistakeEntryPhoto, MistakeEntryVerified, MistakeEntryManual, MistakeEntryWritingConfirmed:
+	default:
+		return fmt.Errorf("entry_source 非法值 %q（photo/verified/manual/writing_confirmed）", f.EntrySource)
+	}
+	switch f.ArchivedReason {
+	case "", MistakeArchivedReasonManual, MistakeArchivedReasonSourceCorrection:
+	default:
+		return fmt.Errorf("archived_reason 非法值 %q", f.ArchivedReason)
+	}
+	switch f.ArchivedFromStatus {
+	case "", StatusNew, StatusExplained, StatusRetried, StatusMastered:
+	default:
+		return fmt.Errorf("archived_from_status 非法值 %q", f.ArchivedFromStatus)
+	}
+	if f.LastArchive != nil {
+		if f.LastArchive.Reason != MistakeArchivedReasonManual &&
+			f.LastArchive.Reason != MistakeArchivedReasonSourceCorrection {
+			return fmt.Errorf("last_archive.reason 非法值 %q", f.LastArchive.Reason)
+		}
+		switch f.LastArchive.FromStatus {
+		case StatusNew, StatusExplained, StatusRetried, StatusMastered:
+		default:
+			return fmt.Errorf("last_archive.from_status 非法值 %q", f.LastArchive.FromStatus)
+		}
 	}
 	return nil
 }
@@ -124,20 +274,23 @@ func NewMistakeRecord(agentName, sourceSession string, f MistakeFields) (*record
 func Pack(constraint scenario.ConstraintProvider) *scenario.Pack {
 	p := &scenario.Pack{
 		Name:          "k12",
-		RecordSchemas: []*records.RecordSchema{MistakeSchema(), AccumulationSchema()},
+		RecordSchemas: []*records.RecordSchema{MistakeSchema(), AccumulationSchema(), PracticeSetSchema(), CreativeWorkSchema(), GradingJobSchema()},
 		ViewExtensions: map[string]scenario.ViewExtension{
 			"tutor": {
-				HeaderTabs: []string{"辅导", "错题本"},
+				// IA 定稿（PRD §1.5，2026-07-18 迁移）：顶栏三段「辅导｜学习档案｜学情」；
+				// 「学习档案」承载五对象（本周复习/全部错题/练习集/积累/作品），学情为一等 Tab。
+				// §4.11 术语表：导航名用「学习档案」，禁止「错题本」作为整个导航名称。
+				HeaderTabs: []string{"辅导", "学习档案", "学情"},
 				// 值须对齐前端契约枚举 MessageBadgeKind = 'verify' | 'record-chip'
 				// （contracts/view-descriptor.ts）——此前用 "verify-badge" 与契约漂移（BUG-20260708）。
 				MessageBadges:       []string{"verify", "record-chip"},
-				ComposerPlaceholder: "发消息，或 ⌘V 粘贴作业照片",
-				ComposerChips:       []string{"🧮 数学讲解", "💡 渐进提示", "📷 识题校验"},
-				RecordCollections:   []string{CollectionMistakes},
-				SidePanels:          []string{"prep-card"},
-				Actions:             []string{"prep-card"},
-				I18nKeys:            []string{"k12.tab.tutor", "k12.tab.mistakes"},
-				SchemaVersion:       1,
+				ComposerPlaceholder: "发消息、粘贴带分数/公式的题目，或 ⌘V 粘贴作业照片",
+				ComposerChips:       []string{"📚 自动识别学科", "💡 渐进提示", "📷 识题校验"},
+				RecordCollections:   []string{CollectionMistakes, CollectionPracticeSet, CollectionAccumulation, CollectionCreativeWork},
+				// 辅导要点只在识题确认后内联呈现；当前 IA 不声明独立侧栏或头部动作，
+				// 因而 SidePanels 与 Actions 保持空集合。
+				I18nKeys:      []string{"k12.tab.tutor", "k12.tab.archive", "k12.tab.insights"},
+				SchemaVersion: 1,
 			},
 		},
 		// mode 特性词（清债 P5：从 engine/agent_mode.go 硬编码迁到此，engine 在原路由位置消费）。

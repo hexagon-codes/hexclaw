@@ -23,7 +23,12 @@ const (
 
 // 积累型 entryType（固定 已积累，不进复习队列）；其余（默写错/错词/语法改错）为**纠错型**（进复习闭环）。
 // 「作文」是留档型：只留档进报告、不进复习队列（作文无法"重做判对"+共写不代写红线，SR 不适用创作）。
-var accumKeepTypes = map[string]bool{"好词好句": true, "古诗": true, "语法点": true, "作文": true}
+// 2026-07-18（§3.9 类型按学科分化）：语文＝好词好句/古诗积累/写作素材，英语＝表达积累/词汇积累，
+// 全部为主动收藏的积累型——防新类型误入复习队列；存量旧词汇（好词好句/古诗/语法点/作文）兼容保留。
+var accumKeepTypes = map[string]bool{
+	"好词好句": true, "古诗": true, "语法点": true, "作文": true,
+	"古诗积累": true, "写作素材": true, "表达积累": true, "词汇积累": true,
+}
 
 // AccumIsCorrective 判断某 entryType 是否为纠错型（客观错误、进复习闭环）。
 // 纠错型 = 非积累/留档型（默写错 / 错词 / 语法改错…）。用于错题 tab 归类 + 复习队列纳入。
@@ -31,6 +36,9 @@ func AccumIsCorrective(entryType string) bool { return !accumKeepTypes[entryType
 
 // AccumFields 积累本领域字段（PRD §5.2.7）。
 type AccumFields struct {
+	// GradeTerm freezes the learner profile term at creation time. V41 legacy
+	// rows remain empty and are not guessed into a later term's insight report.
+	GradeTerm string `json:"grade_term,omitempty"`
 	Subject   string `json:"subject"`    // 语文 / 英语
 	EntryType string `json:"entry_type"` // 纠错型：默写错/错词/语法改错 · 积累型：好词好句/古诗/语法点 · 留档：作文
 	Content   string `json:"content"`
@@ -73,6 +81,9 @@ func validateAccumFields(fieldsJSON string) error {
 	}
 	if f.Subject != "语文" && f.Subject != "英语" {
 		return fmt.Errorf("积累本学科只允许语文/英语，got %q", f.Subject)
+	}
+	if f.GradeTerm != "" && !ValidProfileGradeTerm(f.GradeTerm) {
+		return fmt.Errorf("积累本 grade_term 非法值 %q", f.GradeTerm)
 	}
 	if strings.TrimSpace(f.Content) == "" {
 		return fmt.Errorf("积累本缺少 content")

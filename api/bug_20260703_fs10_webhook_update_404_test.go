@@ -15,6 +15,7 @@ import (
 
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/storage/migrate"
 	"github.com/hexagon-codes/hexclaw/webhook"
 )
 
@@ -26,6 +27,9 @@ func newWebhookTestServer(t *testing.T) *Server {
 	}
 	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = db.Close() })
+	if err := migrate.Run(context.Background(), db, migrate.All); err != nil {
+		t.Fatalf("init numbered webhook migrations: %v", err)
+	}
 	mgr := webhook.NewManager(db)
 	if err := mgr.Init(context.Background()); err != nil {
 		t.Fatalf("webhook Init: %v", err)
@@ -38,7 +42,7 @@ func newWebhookTestServer(t *testing.T) *Server {
 func TestBug20260703_UpdateWebhookUnknownNameReturns404(t *testing.T) {
 	srv := newWebhookTestServer(t)
 
-	req := httptest.NewRequest("PATCH", "/api/v1/webhooks/ghost", strings.NewReader(`{"enabled":true}`))
+	req := httptest.NewRequest("PATCH", "/api/v1/webhooks/ghost?user_id=u", strings.NewReader(`{"enabled":true}`))
 	req.SetPathValue("name", "ghost")
 	w := httptest.NewRecorder()
 	srv.handleUpdateWebhook(w, req)
@@ -55,7 +59,7 @@ func TestBug20260703_UpdateWebhookExistingNameReturns200(t *testing.T) {
 		t.Fatalf("Register: %v", err)
 	}
 
-	req := httptest.NewRequest("PATCH", "/api/v1/webhooks/real", strings.NewReader(`{"enabled":true}`))
+	req := httptest.NewRequest("PATCH", "/api/v1/webhooks/real?user_id=u", strings.NewReader(`{"enabled":true}`))
 	req.SetPathValue("name", "real")
 	w := httptest.NewRecorder()
 	srv.handleUpdateWebhook(w, req)

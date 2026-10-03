@@ -8,6 +8,7 @@ import (
 
 	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
+	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
 )
 
 // replaceAwareProfiles deliberately keeps SaveProfile's public patch semantics
@@ -18,7 +19,7 @@ type replaceAwareProfiles struct {
 }
 
 type inMemoryArchiveRestorer struct {
-	records  *records.Store
+	records  *k12storage.Store
 	profiles *replaceAwareProfiles
 }
 
@@ -57,7 +58,7 @@ func (p *replaceAwareProfiles) ReplaceProfile(_ context.Context, _ string, next 
 
 func signedV2(t *testing.T, agent string, recs []*records.AgentRecord, profile *k12.ChildProfile) *Hexbak {
 	t.Helper()
-	bak := &Hexbak{Version: HexbakVersion, AgentName: agent, ExportedAt: 42, Records: recs, Profile: profile}
+	bak := &Hexbak{Version: 2, AgentName: agent, ExportedAt: 42, Records: recs, Profile: profile}
 	var err error
 	bak.Checksum, err = checksumHexbak(bak)
 	if err != nil {
@@ -194,25 +195,5 @@ func TestRunEval_FullEssayWithFirstYouCanStillFails(t *testing.T) {
 	}})
 	if res.GhostRefused != 0 || len(res.Failures) == 0 {
 		t.Fatalf("first/you can pair masked finished essay: %+v", res)
-	}
-}
-
-func TestGenerateRetryByRecord_PreservesPhysicsSubjectRouting(t *testing.T) {
-	solver := &subjectCaptureSolver{}
-	d, _ := newPipeline(t, solver, fakeGrader{}, nil)
-	rec, err := k12.NewMistakeRecord("mingming", "physics", k12.MistakeFields{
-		Subject: "物理", Question: "速度是多少", KnowledgePoint: "速度",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := d.Records.Put(context.Background(), rec); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := d.GenerateRetryByRecord(context.Background(), "mingming", rec.RecordID, "初二上"); err != nil {
-		t.Fatal(err)
-	}
-	if solver.subject != "物理" || solver.constraint != "" {
-		t.Fatalf("review retry lost subject routing: subject=%q constraint=%q", solver.subject, solver.constraint)
 	}
 }

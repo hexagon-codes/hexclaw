@@ -1,0 +1,88 @@
+# 每个部署使用独立 PVC；SQLite 与渠道 worker 不允许多副本共享目录。
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: hexclaw-data
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hexclaw
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: hexclaw
+  template:
+    metadata:
+      labels:
+        app: hexclaw
+    spec:
+      terminationGracePeriodSeconds: 60
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      containers:
+        - name: hexclaw
+          image: hexclaw:local
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 16060
+          env:
+            - name: TZ
+              value: Asia/Shanghai
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: init
+              mountPath: /run/hexclaw-init
+              readOnly: true
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+            failureThreshold: 24
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: hexclaw-data
+        # 种子可省略。首次复制到 PVC，此后配置保存与启动仅使用 PVC 中的文件。
+        - name: init
+          secret:
+            secretName: hexclaw-init
+            optional: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hexclaw
+spec:
+  selector:
+    app: hexclaw
+  ports:
+    - name: http
+      port: 16060
+      targetPort: http
+  type: ClusterIP

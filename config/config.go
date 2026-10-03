@@ -11,6 +11,7 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"sort"
 	"strings"
 
@@ -19,28 +20,121 @@ import (
 
 // Config HexClaw 全局配置
 type Config struct {
-	Server     ServerConfig     `yaml:"server"`
-	LLM        LLMConfig        `yaml:"llm"`
-	Platforms  PlatformsConfig  `yaml:"platforms"`
-	Security   SecurityConfig   `yaml:"security"`
-	Skill      SkillConfig      `yaml:"skill"`
-	Storage    StorageConfig    `yaml:"storage"`
-	Memory     MemoryConfig     `yaml:"memory"`
-	Knowledge  KnowledgeConfig  `yaml:"knowledge"`
-	Observe    ObserveConfig    `yaml:"observe"`
-	MCP        MCPConfig        `yaml:"mcp"`
-	Skills     SkillsConfig     `yaml:"skills"`
-	Heartbeat  HeartbeatConfig  `yaml:"heartbeat"`
-	Cron       CronConfig       `yaml:"cron"`
-	Webhook    WebhookConfig    `yaml:"webhook"`
-	Compaction CompactionConfig `yaml:"compaction"`
-	FileMemory FileMemoryConfig `yaml:"file_memory"`
-	Router     RouterConfig     `yaml:"router"`
-	Canvas     CanvasConfig     `yaml:"canvas"`
-	Audit      AuditConfig      `yaml:"audit"`
-	Voice      VoiceConfig      `yaml:"voice"`
-	Budget     BudgetConfig     `yaml:"budget"`
-	Features   map[string]bool  `yaml:"features"` // v0.4.0 feature flag override（key=flag name）
+	Ollama           OllamaTargetConfig     `yaml:"ollama,omitempty"`
+	Server           ServerConfig           `yaml:"server"`
+	LLM              LLMConfig              `yaml:"llm"`
+	Platforms        PlatformsConfig        `yaml:"platforms"`
+	Security         SecurityConfig         `yaml:"security"`
+	Skill            SkillConfig            `yaml:"skill"`
+	Storage          StorageConfig          `yaml:"storage"`
+	Memory           MemoryConfig           `yaml:"memory"`
+	Knowledge        KnowledgeConfig        `yaml:"knowledge"`
+	Observe          ObserveConfig          `yaml:"observe"`
+	MCP              MCPConfig              `yaml:"mcp"`
+	Skills           SkillsConfig           `yaml:"skills"`
+	Heartbeat        HeartbeatConfig        `yaml:"heartbeat"`
+	Cron             CronConfig             `yaml:"cron"`
+	Webhook          WebhookConfig          `yaml:"webhook"`
+	Compaction       CompactionConfig       `yaml:"compaction"`
+	FileMemory       FileMemoryConfig       `yaml:"file_memory"`
+	Router           RouterConfig           `yaml:"router"`
+	Canvas           CanvasConfig           `yaml:"canvas"`
+	Audit            AuditConfig            `yaml:"audit"`
+	Voice            VoiceConfig            `yaml:"voice"`
+	Budget           BudgetConfig           `yaml:"budget"`
+	ResourceGovernor ResourceGovernorConfig `yaml:"resource_governor"`
+	K12              K12Config              `yaml:"k12,omitempty"`
+	Features         map[string]bool        `yaml:"features"` // v0.4.0 feature flag override（key=flag name）
+}
+
+// K12Config contains scenario policy inputs that must be frozen into durable
+// K12 Jobs. A zero GradingBudget means the 1/8/16/32 real-model release gate is
+// not complete; it is deliberately different from an active policy.
+type K12Config struct {
+	GradingBudget K12GradingBudgetConfig `yaml:"grading_budget,omitempty"`
+}
+
+type K12AssessingBudgetBucketConfig struct {
+	MaxProblems int   `yaml:"max_problems"`
+	Seconds     int64 `yaml:"seconds"`
+}
+
+type K12RecognizingBudgetBucketsConfig struct {
+	UpTo1ProblemMillis   int64 `yaml:"up_to_1_problem_millis"`
+	UpTo8ProblemsMillis  int64 `yaml:"up_to_8_problems_millis"`
+	UpTo16ProblemsMillis int64 `yaml:"up_to_16_problems_millis"`
+	UpTo32ProblemsMillis int64 `yaml:"up_to_32_problems_millis"`
+}
+
+func (c K12RecognizingBudgetBucketsConfig) IsZero() bool {
+	return c == (K12RecognizingBudgetBucketsConfig{})
+}
+
+type K12GradingBudgetConfig struct {
+	PolicyVersion          int                               `yaml:"policy_version"`
+	QueuedSeconds          int64                             `yaml:"queued_seconds"`
+	NormalizingSeconds     int64                             `yaml:"normalizing_seconds"`
+	RecognizingSeconds     int64                             `yaml:"recognizing_seconds"`
+	LocatingSeconds        int64                             `yaml:"locating_seconds"`
+	RenderingSeconds       int64                             `yaml:"rendering_seconds"`
+	ProjectingSeconds      int64                             `yaml:"projecting_seconds"`
+	AssessingBuckets       []K12AssessingBudgetBucketConfig  `yaml:"assessing_buckets"`
+	ItemConcurrency        int                               `yaml:"item_concurrency"`
+	RecognitionPlanVersion int                               `yaml:"recognition_plan_version"`
+	RecognizingBuckets     K12RecognizingBudgetBucketsConfig `yaml:"recognizing_buckets,omitempty"`
+	PhysicalCallCapMillis  int64                             `yaml:"physical_call_cap_millis,omitempty"`
+	WorkerHardCap          int                               `yaml:"worker_hard_cap,omitempty"`
+	EffectiveConcurrency   int                               `yaml:"effective_concurrency,omitempty"`
+}
+
+func (c K12GradingBudgetConfig) IsZero() bool {
+	return c.PolicyVersion == 0 && c.QueuedSeconds == 0 && c.NormalizingSeconds == 0 &&
+		c.RecognizingSeconds == 0 && c.LocatingSeconds == 0 && c.RenderingSeconds == 0 &&
+		c.ProjectingSeconds == 0 && len(c.AssessingBuckets) == 0 && c.ItemConcurrency == 0 &&
+		c.RecognitionPlanVersion == 0 && c.RecognizingBuckets.IsZero() &&
+		c.PhysicalCallCapMillis == 0 && c.WorkerHardCap == 0 && c.EffectiveConcurrency == 0
+}
+
+// DefaultK12GradingBudget 返回零配置运行时使用的保守操作基线。
+// 它不会写入默认配置，也不替代独立的真实性能发布校准门。
+func DefaultK12GradingBudget() K12GradingBudgetConfig {
+	return K12GradingBudgetConfig{
+		PolicyVersion:          2,
+		RecognitionPlanVersion: 2,
+		QueuedSeconds:          60,
+		NormalizingSeconds:     60,
+		RecognizingSeconds:     300,
+		LocatingSeconds:        60,
+		RenderingSeconds:       60,
+		ProjectingSeconds:      60,
+		AssessingBuckets: []K12AssessingBudgetBucketConfig{
+			{MaxProblems: 1, Seconds: 90},
+			{MaxProblems: 8, Seconds: 180},
+			{MaxProblems: 16, Seconds: 300},
+			{MaxProblems: 32, Seconds: 540},
+		},
+		ItemConcurrency: 2,
+		RecognizingBuckets: K12RecognizingBudgetBucketsConfig{
+			UpTo1ProblemMillis:   60_000,
+			UpTo8ProblemsMillis:  120_000,
+			UpTo16ProblemsMillis: 300_000,
+			UpTo32ProblemsMillis: 300_000,
+		},
+		PhysicalCallCapMillis: 120_000,
+		WorkerHardCap:         2,
+		EffectiveConcurrency:  2,
+	}
+}
+
+// ResourceGovernorConfig bounds process-wide expensive resources shared by
+// interactive grading/query and durable Knowledge work.
+type ResourceGovernorConfig struct {
+	VLMConcurrency         int    `yaml:"vlm_concurrency"`
+	AcceleratorConcurrency int    `yaml:"accelerator_concurrency"`
+	CPUHeavyConcurrency    int    `yaml:"cpu_heavy_concurrency"`
+	SQLiteWriteConcurrency int    `yaml:"sqlite_write_concurrency"`
+	BackgroundAging        string `yaml:"background_aging"`
+	MaxInteractiveBurst    int    `yaml:"max_interactive_burst"`
 }
 
 // BudgetConfig 单任务三维预算控制 (G1 前置关卡)
@@ -177,14 +271,20 @@ type MCPConfig struct {
 
 // MCPServerConfig 单个 MCP Server 配置
 type MCPServerConfig struct {
-	Name      string            `yaml:"name"`           // 名称标识
-	Transport string            `yaml:"transport"`      // 传输: stdio / sse / streamable
-	Command   string            `yaml:"command"`        // stdio 命令（如 npx, uvx）
-	Args      []string          `yaml:"args"`           // stdio 命令参数
-	Env       map[string]string `yaml:"env,omitempty"`  // stdio 进程环境变量（如 DB 凭证），重启后须保留
-	Endpoint  string            `yaml:"endpoint"`       // sse/streamable 端点 URL
-	Enabled   bool              `yaml:"enabled"`        // 是否启用，默认 true
-	Auth      *MCPAuthConfig    `yaml:"auth,omitempty"` // OAuth 配置（可选）
+	Name      string            `yaml:"name"`          // 名称标识
+	Transport string            `yaml:"transport"`     // 传输: stdio / sse / streamable
+	Command   string            `yaml:"command"`       // stdio 命令（如 npx, uvx）
+	Args      []string          `yaml:"args"`          // stdio 命令参数
+	Env       map[string]string `yaml:"env,omitempty"` // stdio 进程环境变量（如 DB 凭证），重启后须保留
+	// ArgsSecretRefs 标记 args 中需要由 secret.Box 静态加密的下标。
+	// 值是稳定的不透明引用，不是 secret 内容；运行时仍只向 MCP 子进程传递解密后的值。
+	ArgsSecretRefs map[int]string `yaml:"args_secret_refs,omitempty"`
+	// EnvSecretRefs 标记 env 中需要由 secret.Box 静态加密的键。
+	// 值是稳定的不透明引用，不是 secret 内容。
+	EnvSecretRefs map[string]string `yaml:"env_secret_refs,omitempty"`
+	Endpoint      string            `yaml:"endpoint"`       // sse/streamable 端点 URL
+	Enabled       bool              `yaml:"enabled"`        // 是否启用，默认 true
+	Auth          *MCPAuthConfig    `yaml:"auth,omitempty"` // OAuth 配置（可选）
 }
 
 // MCPAuthConfig MCP server OAuth 认证配置
@@ -209,7 +309,7 @@ type SkillsConfig struct {
 // SkillsHubConfig 在线技能市场 Git 源
 type SkillsHubConfig struct {
 	RepoURL string `yaml:"repo_url"` // 默认 github.com/hexagon-codes/hexclaw-hub
-	Branch  string `yaml:"branch"`   // 默认 v0.0.1
+	Branch  string `yaml:"branch"`   // 默认 v0.0.7
 }
 
 // FileMemoryConfig 文件记忆配置
@@ -262,10 +362,10 @@ type KnowledgeConfig struct {
 	MMRLambda     float64 `yaml:"mmr_lambda"`      // MMR 多样性参数（0=最多样, 1=最相关），默认 0.7
 	TimeDecayDays int     `yaml:"time_decay_days"` // 时间衰减半衰期（天），默认 30，0=不衰减
 	Rerank        bool    `yaml:"rerank"`          // 重排总开关，默认 true
-	RerankModel   string  `yaml:"rerank_model"`    // 专用 cross-encoder 重排模型（如 BAAI/bge-reranker-v2-m3）；空=LLM 重排，SiliconFlow 自动启用
+	RerankModel   string  `yaml:"rerank_model"`    // 专用 cross-encoder 模型；空=未显式指定（SiliconFlow 可自动选择），最终无专用 executor 时使用 MMR
 	QueryExpand   bool    `yaml:"query_expand"`    // HyDE + multi-query 查询扩展开关（需已配 LLM），默认 true
 	Contextual    bool    `yaml:"contextual"`      // 入库 Contextual Retrieval（chunk 前置文档级上下文），默认 true
-	MinScore      float64 `yaml:"min_score"`       // 向量相关度地板 [0,1]，默认 0.55，0=关
+	MinScore      float64 `yaml:"min_score"`       // 向量相关度地板 [0,1]，默认 0.85，0=关
 	CandidateK    int     `yaml:"candidate_k"`     // 宽召回候选池大小（rerank 前），默认 50
 	// SnapshotRetention 每个定时任务「快照系列」(source + 基础标题) 保留的最大文档数，
 	// 超出后台裁剪最旧的，防止 @hourly 采集器无限累积。默认 100，0=不限。
@@ -294,22 +394,236 @@ type ServerConfig struct {
 	Port     int    `yaml:"port"`      // 主服务端口，默认 16060
 	MCPPort  int    `yaml:"mcp_port"`  // MCP Server 端口，默认 16070 (预留，暂未启用)
 	Mode     string `yaml:"mode"`      // 运行模式: production / development
-	APIToken string `yaml:"api_token"` // 管理 API Token（为空则允许 localhost 免认证）
+	APIToken string `yaml:"api_token"` // 独立服务业务令牌；本机 Sidecar 另接收原生层注入令牌。
 }
 
 // LLMConfig LLM 配置
 type LLMConfig struct {
-	Default   string                       `yaml:"default"`   // 默认 Provider 名称
-	Providers map[string]LLMProviderConfig `yaml:"providers"` // Provider 列表
-	Routing   LLMRoutingConfig             `yaml:"routing"`   // 智能路由
-	Cache     LLMCacheConfig               `yaml:"cache"`     // 语义缓存
-	Tools     LLMToolsConfig               `yaml:"tools"`     // 工具注入（全局）
+	Default                string                              `yaml:"default"`                                                  // 默认 Provider 名称
+	DefaultReasoningPolicy ReasoningPolicy                     `yaml:"default_reasoning_policy" json:"default_reasoning_policy"` // 全局默认思考策略
+	Providers              map[string]LLMProviderConfig        `yaml:"providers"`                                                // Provider 列表
+	Routing                LLMRoutingConfig                    `yaml:"routing"`                                                  // 智能路由
+	Cache                  LLMCacheConfig                      `yaml:"cache"`                                                    // 语义缓存
+	Tools                  LLMToolsConfig                      `yaml:"tools"`                                                    // 工具注入（全局）
+	ConfigRevision         uint64                              `yaml:"config_revision,omitempty"`                                // 每次成功配置提交单调递增
+	LastMutationReceipt    *LLMConfigMutationReceipt           `yaml:"last_mutation_receipt,omitempty"`                          // 最近一次幂等提交的非秘密证明
+	MutationReceipts       map[string]LLMConfigMutationReceipt `yaml:"mutation_receipts,omitempty" json:"-"`                     // request_id -> durable idempotency proof; older successful mutations remain replayable
 	// ReasoningProvider/Model 解题/批改等「多步文本推理 + 工具验证」任务专用的强文本模型
 	// （BUG-20260712-#1）。视觉默认模型（如 glm-4v-flash）擅长看图却不擅长多步数学推理与写
 	// 验证代码，会把错答案判成 unverifiable 漏判。配上强文本模型（如 智谱/glm-4.5）后，solve
 	// 源的 solver/verifier 子 Agent 走它；空=沿用默认路由（不改变现状，无回归）。
 	ReasoningProvider string `yaml:"reasoning_provider,omitempty" json:"reasoning_provider,omitempty"`
 	ReasoningModel    string `yaml:"reasoning_model,omitempty" json:"reasoning_model,omitempty"`
+}
+
+// MarshalYAML 在持久化边界阻止全局策略写入 Agent 专属 inherit 或非法组合。
+func (c LLMConfig) MarshalYAML() (any, error) {
+	if err := c.DefaultReasoningPolicy.Validate(false); err != nil {
+		return nil, fmt.Errorf("invalid llm.default_reasoning_policy: %w", err)
+	}
+	type wire LLMConfig
+	return wire(c), nil
+}
+
+// ReasoningPolicyMode 定义持久化思考策略的选择模式。
+type ReasoningPolicyMode string
+
+const (
+	// ReasoningPolicyModeAuto 使用模型原生或运行时自动选择。空值在内存中等价于 auto，
+	// 让旧配置缺少 default_reasoning_policy 时自然得到向后兼容默认值。
+	ReasoningPolicyModeAuto    ReasoningPolicyMode = ""
+	ReasoningPolicyModeInherit ReasoningPolicyMode = "inherit"
+	ReasoningPolicyModeOn      ReasoningPolicyMode = "on"
+	ReasoningPolicyModeOff     ReasoningPolicyMode = "off"
+	ReasoningPolicyModeEffort  ReasoningPolicyMode = "effort"
+)
+
+// ReasoningEffort 是 reasoning_effort 方言可选择的标准强度。
+type ReasoningEffort string
+
+const (
+	ReasoningEffortLow    ReasoningEffort = "low"
+	ReasoningEffortMedium ReasoningEffort = "medium"
+	ReasoningEffortHigh   ReasoningEffort = "high"
+	ReasoningEffortXHigh  ReasoningEffort = "xhigh"
+	ReasoningEffortMax    ReasoningEffort = "max"
+)
+
+// ReasoningPolicy 是全局与 Agent 共享的类型化思考策略合同。
+// Effort 仅在 Mode=effort 时存在；Agent 可使用 inherit，全局策略不可使用。
+type ReasoningPolicy struct {
+	Mode   ReasoningPolicyMode `yaml:"mode" json:"mode"`
+	Effort ReasoningEffort     `yaml:"effort,omitempty" json:"effort,omitempty"`
+}
+
+func (m ReasoningPolicyMode) wireValue() string {
+	if m == ReasoningPolicyModeAuto || m == ReasoningPolicyMode("auto") {
+		return "auto"
+	}
+	return string(m)
+}
+
+func (m ReasoningPolicyMode) String() string {
+	return m.wireValue()
+}
+
+// MarshalJSON 保证 auto 的内存零值仍以显式 typed wire 输出。
+func (m ReasoningPolicyMode) MarshalJSON() ([]byte, error) {
+	if !m.valid() {
+		return nil, fmt.Errorf("invalid reasoning policy mode %q", string(m))
+	}
+	return json.Marshal(m.wireValue())
+}
+
+// UnmarshalJSON 只接受合同声明的 mode exact-set。
+func (m *ReasoningPolicyMode) UnmarshalJSON(data []byte) error {
+	var value string
+	if err := json.Unmarshal(data, &value); err != nil {
+		return fmt.Errorf("reasoning policy mode must be a string: %w", err)
+	}
+	parsed, err := parseReasoningPolicyMode(value)
+	if err != nil {
+		return err
+	}
+	*m = parsed
+	return nil
+}
+
+// MarshalYAML 保证持久化配置总是写出显式 auto。
+func (m ReasoningPolicyMode) MarshalYAML() (any, error) {
+	if !m.valid() {
+		return nil, fmt.Errorf("invalid reasoning policy mode %q", string(m))
+	}
+	return m.wireValue(), nil
+}
+
+// UnmarshalYAML 只接受合同声明的 mode exact-set。
+func (m *ReasoningPolicyMode) UnmarshalYAML(node *yaml.Node) error {
+	var value string
+	if err := node.Decode(&value); err != nil {
+		return fmt.Errorf("reasoning policy mode must be a string: %w", err)
+	}
+	parsed, err := parseReasoningPolicyMode(value)
+	if err != nil {
+		return err
+	}
+	*m = parsed
+	return nil
+}
+
+func parseReasoningPolicyMode(value string) (ReasoningPolicyMode, error) {
+	switch value {
+	case "auto":
+		return ReasoningPolicyModeAuto, nil
+	case "inherit":
+		return ReasoningPolicyModeInherit, nil
+	case "on":
+		return ReasoningPolicyModeOn, nil
+	case "off":
+		return ReasoningPolicyModeOff, nil
+	case "effort":
+		return ReasoningPolicyModeEffort, nil
+	default:
+		return "", fmt.Errorf("invalid reasoning policy mode %q", value)
+	}
+}
+
+func (m ReasoningPolicyMode) valid() bool {
+	switch m {
+	case ReasoningPolicyModeAuto, ReasoningPolicyMode("auto"), ReasoningPolicyModeInherit, ReasoningPolicyModeOn,
+		ReasoningPolicyModeOff, ReasoningPolicyModeEffort:
+		return true
+	default:
+		return false
+	}
+}
+
+// UnmarshalJSON 只接受合同声明的 effort exact-set。
+func (e *ReasoningEffort) UnmarshalJSON(data []byte) error {
+	var value string
+	if err := json.Unmarshal(data, &value); err != nil {
+		return fmt.Errorf("reasoning effort must be a string: %w", err)
+	}
+	parsed := ReasoningEffort(value)
+	if !parsed.valid() {
+		return fmt.Errorf("invalid reasoning effort %q", value)
+	}
+	*e = parsed
+	return nil
+}
+
+// UnmarshalYAML 只接受合同声明的 effort exact-set。
+func (e *ReasoningEffort) UnmarshalYAML(node *yaml.Node) error {
+	var value string
+	if err := node.Decode(&value); err != nil {
+		return fmt.Errorf("reasoning effort must be a string: %w", err)
+	}
+	parsed := ReasoningEffort(value)
+	if !parsed.valid() {
+		return fmt.Errorf("invalid reasoning effort %q", value)
+	}
+	*e = parsed
+	return nil
+}
+
+func (e ReasoningEffort) valid() bool {
+	switch e {
+	case ReasoningEffortLow, ReasoningEffortMedium, ReasoningEffortHigh,
+		ReasoningEffortXHigh, ReasoningEffortMax:
+		return true
+	default:
+		return false
+	}
+}
+
+// Validate 校验 mode/effort 组合；allowInherit 仅供 Agent 层开启。
+func (p ReasoningPolicy) Validate(allowInherit bool) error {
+	if !p.Mode.valid() {
+		return fmt.Errorf("invalid reasoning policy mode %q", string(p.Mode))
+	}
+	if p.Mode == ReasoningPolicyModeInherit && !allowInherit {
+		return fmt.Errorf("reasoning policy mode inherit is not allowed for global defaults")
+	}
+	if p.Mode == ReasoningPolicyModeEffort {
+		if !p.Effort.valid() {
+			return fmt.Errorf("reasoning policy mode effort requires one of low, medium, high, xhigh, or max")
+		}
+		return nil
+	}
+	if p.Effort != "" {
+		return fmt.Errorf("reasoning policy effort is only allowed when mode is effort")
+	}
+	return nil
+}
+
+// UnmarshalYAML 在全局配置边界拒绝 Agent 专属 inherit 与非法组合。
+func (p *ReasoningPolicy) UnmarshalYAML(node *yaml.Node) error {
+	type wire ReasoningPolicy
+	var decoded wire
+	if err := node.Decode(&decoded); err != nil {
+		return err
+	}
+	candidate := ReasoningPolicy(decoded)
+	if err := candidate.Validate(false); err != nil {
+		return err
+	}
+	*p = candidate
+	return nil
+}
+
+// LLMConfigMutationReceipt is a durable, non-secret proof for an idempotent LLM
+// config mutation. The keyed ledger lets the native coordinator resolve a lost
+// HTTP response after later commits or restart without replaying a credential
+// transition or guessing whether the original write committed.
+type LLMConfigMutationReceipt struct {
+	OperationKind  string `yaml:"operation_kind,omitempty" json:"operation_kind,omitempty"`
+	TargetRevision uint64 `yaml:"target_revision,omitempty" json:"target_revision,omitempty"`
+	TargetDigest   string `yaml:"target_digest,omitempty" json:"target_digest,omitempty"`
+	RequestID      string `yaml:"request_id" json:"request_id"`
+	RequestDigest  string `yaml:"request_digest" json:"request_digest"`
+	ConfigDigest   string `yaml:"config_digest" json:"config_digest"`
+	Revision       uint64 `yaml:"revision" json:"revision"`
+	CommittedAt    int64  `yaml:"committed_at" json:"committed_at"`
 }
 
 // strongTextProviderTokens 已知擅长多步文本推理的云端 provider 名 token（reasoning 兜底优先序）。
@@ -334,7 +648,7 @@ func (c *Config) ApplyReasoningDefault() (chosen string, applied bool) {
 			if !strings.Contains(strings.ToLower(name), token) {
 				continue
 			}
-			if !providerUsableCloud(c.LLM.Providers[name]) {
+			if !providerUsableCloud(name, c.LLM.Providers[name]) {
 				continue
 			}
 			c.LLM.ReasoningProvider = name
@@ -345,11 +659,11 @@ func (c *Config) ApplyReasoningDefault() (chosen string, applied bool) {
 }
 
 // providerUsableCloud 判定 provider 可作云端强文本兜底：启用 + 非本地部署 + 有 key 或自定义端点。
-func providerUsableCloud(pc LLMProviderConfig) bool {
+func providerUsableCloud(name string, pc LLMProviderConfig) bool {
 	if pc.Enabled != nil && !*pc.Enabled {
 		return false
 	}
-	if isLocalBaseURLHeuristic(pc.BaseURL) {
+	if IsLocalLLMProviderNamed(name, pc) {
 		return false
 	}
 	return strings.TrimSpace(pc.APIKey) != "" || strings.TrimSpace(pc.BaseURL) != ""
@@ -358,16 +672,7 @@ func providerUsableCloud(pc LLMProviderConfig) bool {
 // isLocalBaseURLHeuristic 轻量判定 base_url 是否指向本地部署（loopback/localhost/容器内网）。
 // config 层不 import llmrouter（避免环），与 llmrouter.IsLocalProviderBaseURL 的判定意图一致。
 func isLocalBaseURLHeuristic(baseURL string) bool {
-	s := strings.ToLower(strings.TrimSpace(baseURL))
-	if s == "" {
-		return false
-	}
-	for _, h := range []string{"localhost", "127.0.0.1", "[::1]", "//::1", "0.0.0.0", "host.docker.internal", "host.containers.internal", ".local", "ollama"} {
-		if strings.Contains(s, h) {
-			return true
-		}
-	}
-	return false
+	return IsLocalProviderBaseURL(baseURL)
 }
 
 // LLMToolsConfig 工具注入全局配置
@@ -378,14 +683,32 @@ type LLMToolsConfig struct {
 
 // LLMProviderConfig 单个 LLM Provider 配置
 type LLMProviderConfig struct {
-	APIKey       string   `yaml:"api_key"`                 // API Key
-	BaseURL      string   `yaml:"base_url"`                // 自定义 API 端点（支持中转/私有部署）
-	Model        string   `yaml:"model"`                   // 当前选中的模型
-	Models       []string `yaml:"models,omitempty"`        // 已配置的模型列表（桌面端持久化用）
-	Compatible   string   `yaml:"compatible"`              // 兼容协议: "openai"（用于中转/私有部署）
-	ToolsEnabled *bool    `yaml:"tools_enabled,omitempty"` // 是否启用工具注入（nil=自动判断, true=强制开启, false=强制关闭）
-	MaxTools     int      `yaml:"max_tools,omitempty"`     // 最大注入工具数（0=不限制）
-	Enabled      *bool    `yaml:"enabled,omitempty"`       // 是否启用（nil/true=启用, false=禁用但保留配置/Key，不参与路由）
+	OllamaTargetBaseURL string                 `yaml:"ollama_target_base_url,omitempty" json:"ollama_target_base_url,omitempty"`
+	ProviderInstanceID  string                 `yaml:"provider_instance_id,omitempty" json:"provider_instance_id,omitempty"` // 稳定内部身份，不随名称/Key/端点变化
+	DisplayName         string                 `yaml:"display_name,omitempty" json:"display_name,omitempty"`                 // 用户配置的展示名；不参与 Provider 路由
+	CredentialRef       string                 `yaml:"credential_ref,omitempty" json:"credential_ref,omitempty"`             // 原生协调器使用的稳定引用；不得覆盖 owner YAML 中持久化的 APIKey
+	APIKey              string                 `yaml:"api_key"`                                                              // API Key
+	BaseURL             string                 `yaml:"base_url"`                                                             // 自定义 API 端点（支持中转/私有部署）
+	Model               string                 `yaml:"model"`                                                                // 当前选中的文本模型；可空
+	Models              []string               `yaml:"models,omitempty"`                                                     // 已配置的模型 ID 列表（legacy API 兼容）
+	ModelSpecsMode      string                 `yaml:"model_specs_mode,omitempty"`                                           // legacy / explicit；区分 omitted 与显式 []
+	ModelSpecs          []LLMProviderModelSpec `yaml:"model_specs,omitempty"`                                                // 模型级能力声明
+	Compatible          string                 `yaml:"compatible"`                                                           // 兼容协议: "openai"（用于中转/私有部署）
+	// Locality 描述模型算力/数据最终位置，而非 HTTP 监听地址：
+	//   - auto/空：按 endpoint host 自动判断
+	//   - local：本机/LAN 私有部署
+	//   - cloud：云端服务（包括 localhost 上的云 API 反向代理）
+	//
+	// 显式字段解决“本地网关代理云模型”被误判成本地模型：误判会绕过云端 egress
+	// 守卫、禁用 RAG 辅助 LLM，并错误套用本地单槽/并发策略。
+	Locality              string                       `yaml:"locality,omitempty" json:"locality,omitempty"`
+	LocalitySource        string                       `yaml:"locality_source,omitempty" json:"locality_source,omitempty"`
+	ConfirmedEndpointHost string                       `yaml:"confirmed_endpoint_host,omitempty" json:"confirmed_endpoint_host,omitempty"`
+	PrivateNetworkAccess  ProviderPrivateNetworkAccess `yaml:"private_network_access,omitempty" json:"private_network_access,omitempty"`
+	HTTPAuthorization     ProviderHTTPAuthorization    `yaml:"http_authorization,omitempty" json:"http_authorization,omitempty"`
+	ToolsEnabled          *bool                        `yaml:"tools_enabled,omitempty"` // 是否启用工具注入（nil=自动判断, true=强制开启, false=强制关闭）
+	MaxTools              int                          `yaml:"max_tools,omitempty"`     // 最大注入工具数（0=不限制）
+	Enabled               *bool                        `yaml:"enabled,omitempty"`       // 是否启用（nil/true=启用, false=禁用但保留配置/Key，不参与路由）
 	// KeepAlive 本地模型驻留时长(仅 Ollama 生效,如 "5m"/"30m";空=ai-core 默认 30m)。
 	// BUG-20260710:16GB 机器 9B 模型驻留≈7GB,可调短换内存。
 	KeepAlive string `yaml:"keep_alive,omitempty" json:"keep_alive,omitempty"`
@@ -630,11 +953,11 @@ type SecurityConfig struct {
 	ToolPermissions    ToolPermissionsConfig `yaml:"tool_permissions"`
 }
 
-// AutonomyConfig controls non-interactive automation permissions.
+// AutonomyConfig 控制工具调用的权限档位。
 //
-// Profile sets the baseline matrix. SystemDispatch entries optionally override
-// a specific source with category names, exact tool names, glob patterns, or "*".
-// Supported profiles: function_first (default), balanced, strict, full_access.
+// Profile 决定交互调用与无人值守调用的审批基线；SystemDispatch entries 仅覆盖
+// 特定无人值守来源的矩阵，可使用类别名、精确工具名、glob 或 "*"。
+// 支持 function_first（默认）、balanced、strict、full_access。
 type AutonomyConfig struct {
 	Profile        string                       `yaml:"profile"`
 	SystemDispatch SystemDispatchAutonomyConfig `yaml:"system_dispatch,omitempty"`
@@ -789,26 +1112,27 @@ type BuiltinConfig struct {
 
 // CodeExecPolicyConfig 代码执行审批与沙箱策略
 //
-// RequireApproval 为 true 时，code_exec 工具被分类为 "dangerous"，
-// 每次执行前需要用户确认。设为 false 表示信任沙箱隔离，跳过审批。
-// 默认值为 false（功能优先）。
+// RequireApproval 只控制旧版 classifyRisk 兼容路径。统一声明式权限策略是
+// 最终裁决者；当前 DefaultBaselinePolicy 无论该字段取值如何都要求 code_exec
+// 审批，避免配置回退路径意外降权。默认值为 false 仅保留旧配置语义。
 //
-// Network 控制沙箱是否允许网络访问。默认 true 以支持抓取网页、调用 API 等场景。
+// Network 为旧配置保留序列化兼容。零值和默认配置均为 false；在工具包尚未提供
+// 目的地址过滤前，true 会被配置校验拒绝，不能授予宿主网络视图。
 type CodeExecPolicyConfig struct {
 	RequireApproval *bool `yaml:"require_approval"` // nil 视为 false（功能优先）
-	Network         *bool `yaml:"network"`          // nil 视为 true（允许网络）
+	Network         *bool `yaml:"network"`          // nil 视为 false（deny-by-default）
 }
 
-// CodeExecNetworkAllowed 返回沙箱是否允许网络访问
+// CodeExecNetworkAllowed 返回配置是否请求宿主网络；true 仍须由校验层拒绝。
 func (c CodeExecPolicyConfig) CodeExecNetworkAllowed() bool {
 	if c.Network == nil {
-		return true
+		return false
 	}
 	return *c.Network
 }
 
-// CodeExecRequiresApproval 返回 code_exec 是否需要用户审批
-// nil（未设置）视为 false，功能优先。
+// CodeExecRequiresApproval 返回旧版 classifyRisk 路径的 code_exec 开关。
+// nil（未设置）视为 false；声明式权限策略仍可强制要求审批。
 func (c CodeExecPolicyConfig) CodeExecRequiresApproval() bool {
 	if c.RequireApproval == nil {
 		return false

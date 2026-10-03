@@ -22,11 +22,11 @@ func (s *subjectCaptureSolver) SolveSubject(_ context.Context, subject, _, _, co
 type subjectCaptureGrader struct{ subject string }
 
 func (g *subjectCaptureGrader) Grade(context.Context, string, string, string) (GradeOutcome, error) {
-	return GradeOutcome{Correct: true}, nil
+	return GradeOutcome{Verdict: VerdictAgree}, nil
 }
 func (g *subjectCaptureGrader) GradeSubject(_ context.Context, subject, _, _, _ string) (GradeOutcome, error) {
 	g.subject = subject
-	return GradeOutcome{Correct: true}, nil
+	return GradeOutcome{Verdict: VerdictAgree}, nil
 }
 
 func TestGradeHomeworkProblem_PassesSubjectToAdapters(t *testing.T) {
@@ -91,11 +91,6 @@ func TestAllSolveEntrypointsRejectInvalidGrade(t *testing.T) {
 		name string
 		fn   func() error
 	}{
-		{name: "prep", fn: func() error { _, err := d.BuildPrepCard(ctx, "mingming", "大学", []string{"数学"}); return err }},
-		{name: "retry", fn: func() error {
-			_, err := d.GenerateRetry(ctx, ReviewItem{Fields: k12.MistakeFields{Question: "1+1"}}, "大学")
-			return err
-		}},
 		{name: "tutor", fn: func() error {
 			_, err := d.TutorTurn(ctx, TutorTurnRequest{AgentName: "mingming", PriorStage: StageHint2, ParentMessage: "直接讲"}, "1+1", "大学")
 			return err
@@ -112,7 +107,7 @@ func TestAllSolveEntrypointsRejectInvalidGrade(t *testing.T) {
 
 func TestGradeHomeworkProblem_RecognizedKnowledgePointWinsAndReturns(t *testing.T) {
 	d, store := newPipeline(t, fakeSolver{}, fakeGrader{outcome: GradeOutcome{
-		Correct: false, KnowledgePoint: "模型幻觉知识点", ErrorCause: "计算失误",
+		Verdict: VerdictDisagree, KnowledgePoint: "模型幻觉知识点", ErrorCause: "计算失误",
 	}}, nil)
 	res, err := d.GradeHomeworkProblem(context.Background(), GradeRequest{
 		AgentName: "mingming", Grade: "五年级上", SourceSession: "kp", Problem: "3.8x3", StudentAnswer: "10.4", KnowledgePoints: []string{"小数乘法"},
@@ -134,7 +129,7 @@ func TestGradeHomeworkProblem_RecognizedKnowledgePointWinsAndReturns(t *testing.
 }
 
 func TestGradeHomeworkProblem_PersistsSubjectForCrossSubjectReview(t *testing.T) {
-	d, _ := newPipeline(t, fakeSolver{}, fakeGrader{outcome: GradeOutcome{Correct: false, ErrorCause: "单位错误"}}, nil)
+	d, _ := newPipeline(t, fakeSolver{}, fakeGrader{outcome: GradeOutcome{Verdict: VerdictDisagree, ErrorCause: "单位错误"}}, nil)
 	res, err := d.GradeHomeworkProblem(context.Background(), GradeRequest{
 		AgentName: "mingming", Subject: "物理", Grade: "初二上", SourceSession: "physics",
 		Problem: "速度是多少", StudentAnswer: "20m/s", KnowledgePoints: []string{"速度"},

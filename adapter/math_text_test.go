@@ -16,18 +16,25 @@ func TestBug20260712_NormalizeMathText(t *testing.T) {
 		{`\le \ge \ne`, `≤ ≥ ≠`},
 		{`\sqrt{16} = 4`, `√16 = 4`},
 		{`\frac{3}{4} + \frac{1}{4} = 1`, `3/4 + 1/4 = 1`},
+		{`$2\frac{3}{4}$ 与 $1\frac{1}{2}$`, `2 3/4 与 1 1/2`},
 		{`\pi r^2`, `π r²`},
 		// 数学定界符剥除（内容保留）
 		{`$2.8 \times 3.85$`, `2.8 × 3.85`},
 		{`\(a+b\) 与 \[c-d\]`, `a+b 与 c-d`},
 		// 上下标 → Unicode（x²、H₂O、10⁻³）
 		{`x^2 + y^{2} = r^2`, `x² + y² = r²`},
+		{`H_2O`, `H₂O`},
+		{`CO_2`, `CO₂`},
+		{`Na_2CO_3`, `Na₂CO₃`},
 		{`H_2O 与 CO_{2}`, `H₂O 与 CO₂`},
+		{`水的化学式是 $H_2O$`, `水的化学式是 H₂O`},
 		{`10^{-3} 和 2^{n}`, `10⁻³ 和 2ⁿ`},
 		// \text{}/\mathrm{} 单位剥壳 + 细空格 + 上标（真机桌面「再练一道」原样取证）
 		{`\( V = l \times w \times h \)`, `V = l × w × h`},
 		{`\[ V = 6 \, \text{cm} \times 6 \, \text{cm} \]`, `V = 6 cm × 6 cm`},
 		{`216 \text{cm}^3`, `216 cm³`},
+		{`\[\begin{aligned}2x + 1 &= 5 \\ 2x &= 4\end{aligned}\]`, "2x + 1 = 5\n2x = 4"},
+		{`\begin{cases}x+1 & x>0 \\ 0 & x=0\end{cases}`, "x+1 x>0\n0 x=0"},
 		// 非数学文本零改动（含路径/代码里的反斜杠不误伤）
 		{`C:\tmp\dir 和 $HOME 变量`, `C:\tmp\dir 和 $HOME 变量`},
 		{`普通中文，不含任何公式。`, `普通中文，不含任何公式。`},
@@ -36,6 +43,29 @@ func TestBug20260712_NormalizeMathText(t *testing.T) {
 		if got := NormalizeMathText(c.in); got != c.want {
 			t.Fatalf("NormalizeMathText(%q)\n got  %q\n want %q", c.in, got, c.want)
 		}
+	}
+}
+
+func TestNormalizeMathText_MixedNumberAcrossDelimitedFraction(t *testing.T) {
+	const complete = `8×\(\frac{1}{4}\)×\(\frac{4}{5}\)` + "\n" +
+		`＝2×\(\frac{4}{5}\)` + "\n" + `＝\(\frac{8}{5}\)＝1\(\frac{3}{5}\)` + "\n" +
+		`答：是1\(\frac{3}{5}\)。`
+	for _, tt := range []struct{ name, input, want string }{
+		{"integer outside inline delimiters", `1\(\frac{3}{5}\)`, "1 3/5"},
+		{"integer outside display delimiters", `12\[\dfrac{3}{5}\]`, "12 3/5"},
+		{"complete working preserves lines", complete, "8×1/4×4/5\n＝2×4/5\n＝8/5＝1 3/5\n答：是1 3/5。"},
+		{"ordinary fraction", `\(\frac{13}{5}\)`, "13/5"},
+		{"bare fraction is not a mixed number", "13/5", "13/5"},
+		{"existing mixed number inside one segment", `$2\frac{3}{4}$`, "2 3/4"},
+		{"inline code stays literal", "`1\\(\\frac{3}{5}\\)`", "`1\\(\\frac{3}{5}\\)`"},
+		{"fenced code stays literal", "```text\n1\\(\\frac{3}{5}\\)\n```", "```text\n1\\(\\frac{3}{5}\\)\n```"},
+		{"URL stays literal", `https://example.test/math/1\(\frac{3}{5}\)`, `https://example.test/math/1\(\frac{3}{5}\)`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := NormalizeMathText(tt.input); got != tt.want {
+				t.Fatalf("projection = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 

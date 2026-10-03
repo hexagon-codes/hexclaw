@@ -2,15 +2,11 @@ package usecase
 
 import (
 	"context"
-	"database/sql"
 	"testing"
 
-	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/scenario"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
-	"github.com/hexagon-codes/hexclaw/storage/migrate"
-
-	_ "modernc.org/sqlite"
+	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
 )
 
 // --- fakes（engine 能力的替身，用例层可脱离真 engine 测全闭环）---
@@ -32,23 +28,20 @@ func (f fakeGrader) Grade(context.Context, string, string, string) (GradeOutcome
 
 type fakeInsights struct{ notes []string }
 
-func (f *fakeInsights) WriteWeakness(_ context.Context, _, _, note string) error {
+func (f *fakeInsights) WriteWeakness(_ context.Context, _, _, _, note string) error {
 	f.notes = append(f.notes, note)
 	return nil
 }
 
-func newPipeline(t *testing.T, solver Solver, grader Grader, ins Insights) (Deps, *records.Store) {
+func newPipeline(t *testing.T, solver Solver, grader Grader, ins Insights) (Deps, *k12storage.Store) {
 	t.Helper()
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
-	if err := migrate.Run(context.Background(), db, migrate.All); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
+	db := openMigratedTestDB(t)
 	for _, a := range []string{"mingming", "eval-agent"} {
-		if _, err := db.Exec(`INSERT INTO agents(name) VALUES(?)`, a); err != nil {
+		if _, err := db.Exec(
+			`INSERT INTO agents(name, metadata) VALUES(?, ?)`,
+			a,
+			`{"k12.grade_term":"五年级上"}`,
+		); err != nil {
 			t.Fatalf("agent %s: %v", a, err)
 		}
 	}
@@ -57,7 +50,10 @@ func newPipeline(t *testing.T, solver Solver, grader Grader, ins Insights) (Deps
 	if err := reg.Assemble(k12.Pack(constraint)); err != nil {
 		t.Fatalf("assemble: %v", err)
 	}
-	store := records.NewStore(db, reg.Records)
+	store := k12storage.NewStore(db, reg.Records)
+	// Outbox 学情投影（§6.9）：harness 用同步投递器——域写提交即消费，
+	// 既有「判错入库 → 学情信号」断言的时序语义保持不变。
+	k12storage.NewSyncDispatcher(store, InsightsConsumer{Insights: ins})
 	return Deps{
 		Solver:     solver,
 		Grader:     grader,
@@ -73,7 +69,7 @@ func TestClosedLoop_WrongAnswer(t *testing.T) {
 	ins := &fakeInsights{}
 	d, store := newPipeline(t,
 		fakeSolver{solution: "11.4", ev: SolveEvidence{Verdict: VerdictAgree, EvidenceType: EvidenceNumericExec, SolverModel: "glm", VerifierModel: "gpt"}},
-		fakeGrader{outcome: GradeOutcome{Correct: false, WrongStep: "3.8×3 误算为 10.4", ErrorCause: "计算失误", KnowledgePoint: "小数乘法"}},
+		fakeGrader{outcome: GradeOutcome{Verdict: VerdictDisagree, WrongStep: "3.8×3 误算为 10.4", ErrorCause: "计算失误", KnowledgePoint: "小数乘法"}},
 		ins,
 	)
 	ctx := context.Background()
@@ -124,7 +120,7 @@ func TestClosedLoop_CorrectAnswer(t *testing.T) {
 	ins := &fakeInsights{}
 	d, store := newPipeline(t,
 		fakeSolver{solution: "11.4", ev: SolveEvidence{Verdict: VerdictAgree, EvidenceType: EvidenceNumericExec}},
-		fakeGrader{outcome: GradeOutcome{Correct: true}},
+		fakeGrader{outcome: GradeOutcome{Verdict: VerdictAgree}},
 		ins,
 	)
 	ctx := context.Background()

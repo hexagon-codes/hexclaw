@@ -101,6 +101,11 @@ func (s *txStore) ListSessions(ctx context.Context, userID string, limit, offset
 }
 
 func (s *txStore) DeleteSession(ctx context.Context, id string) error {
+	if err := fenceAndRevokeSessionToolAuthority(
+		ctx, s.tx, id, "session_deleted", time.Now().UTC(),
+	); err != nil {
+		return err
+	}
 	_, err := s.tx.ExecContext(ctx,
 		`UPDATE sessions SET status = -1, updated_at = ? WHERE id = ?`,
 		time.Now(), id,
@@ -147,6 +152,24 @@ func (s *txStore) GetMessage(ctx context.Context, id string) (*storage.MessageRe
 		return nil, storage.ErrNotFound
 	}
 	return msg, nil
+}
+
+func (s *txStore) UpdateMessageMetadata(ctx context.Context, id, metadata string) error {
+	if metadata == "" {
+		metadata = "{}"
+	}
+	result, err := s.tx.ExecContext(ctx, `UPDATE messages SET metadata = ? WHERE id = ?`, metadata, id)
+	if err != nil {
+		return err
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return storage.ErrNotFound
+	}
+	return nil
 }
 
 func (s *txStore) DeleteMessage(ctx context.Context, id string) error {
@@ -255,7 +278,7 @@ func (s *txStore) SearchMessages(_ context.Context, _, _ string, _, _ int) ([]*s
 	return nil, 0, fmt.Errorf("不支持在事务中搜索消息")
 }
 
-func (s *txStore) ForkSession(_ context.Context, _, _, _ string) (*storage.Session, error) {
+func (s *txStore) ForkSession(_ context.Context, _, _, _ string, _ ...storage.ForkSessionOptions) (*storage.Session, error) {
 	return nil, fmt.Errorf("不支持在事务中创建分支")
 }
 

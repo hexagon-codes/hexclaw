@@ -21,9 +21,12 @@ import (
 	"github.com/hexagon-codes/hexclaw/config"
 	"github.com/hexagon-codes/hexclaw/engine"
 	"github.com/hexagon-codes/hexclaw/httpua"
+	"github.com/hexagon-codes/hexclaw/internal/inputlimits"
 	hexmcp "github.com/hexagon-codes/hexclaw/mcp"
 	"github.com/hexagon-codes/hexclaw/memory"
 	"github.com/hexagon-codes/hexclaw/router"
+	"github.com/hexagon-codes/hexclaw/scenarios/k12"
+	"github.com/hexagon-codes/hexclaw/skill/hub"
 	"github.com/hexagon-codes/hexclaw/skill/marketplace"
 	"github.com/hexagon-codes/toolkit/util/logger"
 )
@@ -96,11 +99,12 @@ func (s *Server) handleGetMemory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	result, err := s.fileMem.ListEntries(memory.ListOptions{
-		View:   q.Get("view"),
-		Limit:  limit,
-		Cursor: q.Get("cursor"),
-		Type:   q.Get("type"),
-		Source: q.Get("source"),
+		View:      q.Get("view"),
+		Limit:     limit,
+		Cursor:    q.Get("cursor"),
+		Type:      q.Get("type"),
+		Source:    q.Get("source"),
+		ExcludeID: q.Get("exclude_id"),
 	})
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -168,7 +172,8 @@ func (s *Server) handleSearchMemory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 1. FileMemory 关键词搜索
-	fileResults := s.fileMem.Search(query)
+	excludeID := r.URL.Query().Get("exclude_id")
+	fileResults := s.fileMem.SearchExcluding(query, excludeID)
 
 	// 2. VectorMemory 语义搜索 (D7: 链路④ 记忆闭环)
 	type vectorResult struct {
@@ -198,6 +203,105 @@ func (s *Server) handleSearchMemory(w http.ResponseWriter, r *http.Request) {
 
 // --- MCP API ---
 
+// mcpServerSummary 是给 Desktop 的脱敏服务器投影。
+// command、args、env、endpoint 和凭据只属于 sidecar 内部运行配置，不得进入此响应。
+type mcpServerSummary struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Status      string `json:"status"`
+	Transport   string `json:"transport"`
+	ToolCount   int    `json:"tool_count"`
+	LastError   string `json:"last_error,omitempty"`
+	Retryable   *bool  `json:"retryable,omitempty"`
+	RetryState  string `json:"retry_state,omitempty"`
+	RetryCount  int    `json:"retry_count,omitempty"`
+	NextRetryAt string `json:"next_retry_at,omitempty"`
+}
+
+func mcpServerDescription(kind string) string {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "filesystem":
+		return "读取允许目录内的文件内容"
+	case "mysql", "postgres", "sqlite":
+		return "执行只读 SQL 查询"
+	case "redis":
+		return "读取 Redis 数据"
+	case "github":
+		return "读取 GitHub 仓库数据"
+	default:
+		return "MCP 工具服务器"
+	}
+}
+
+func mcpServerTransport(cfg config.MCPServerConfig) string {
+	transport := strings.ToLower(strings.TrimSpace(cfg.Transport))
+	switch transport {
+	case "stdio", "sse", "streamable":
+		return transport
+	case "":
+		if strings.TrimSpace(cfg.Endpoint) != "" {
+			return "sse"
+		}
+		if strings.TrimSpace(cfg.Command) != "" {
+			return "stdio"
+		}
+	}
+	return "unknown"
+}
+
+func (s *Server) rememberMCPServerConfig(server config.MCPServerConfig) {
+	if s.cfg == nil {
+		return
+	}
+	s.cfgMu.Lock()
+	defer s.cfgMu.Unlock()
+	for i := range s.cfg.MCP.Servers {
+		if s.cfg.MCP.Servers[i].Name == server.Name {
+			s.cfg.MCP.Servers[i] = server
+			return
+		}
+	}
+	s.cfg.MCP.Servers = append(s.cfg.MCP.Servers, server)
+}
+
+func (s *Server) mcpServerSummaries() []mcpServerSummary {
+	if s.mcpMgr == nil {
+		return []mcpServerSummary{}
+	}
+
+	configured := make(map[string]config.MCPServerConfig)
+	if s.cfg != nil {
+		s.cfgMu.RLock()
+		for _, cfg := range s.cfg.MCP.Servers {
+			configured[cfg.Name] = cfg
+		}
+		s.cfgMu.RUnlock()
+	}
+
+	statuses := s.mcpMgr.ServerStatuses()
+	summaries := make([]mcpServerSummary, 0, len(statuses))
+	for _, status := range statuses {
+		cfg := configured[status.Name]
+		serverState := "disconnected"
+		if status.Connected {
+			serverState = "connected"
+		}
+		summaries = append(summaries, mcpServerSummary{
+			Name:        status.Name,
+			Description: mcpServerDescription(status.Kind),
+			Status:      serverState,
+			Transport:   mcpServerTransport(cfg),
+			ToolCount:   status.ToolCount,
+			LastError:   status.LastError,
+			Retryable:   status.Retryable,
+			RetryState:  status.RetryState,
+			RetryCount:  status.RetryCount,
+			NextRetryAt: status.NextRetryAt,
+		})
+	}
+	return summaries
+}
+
 // handleListMCPTools 列出所有已发现的 MCP 工具
 func (s *Server) handleListMCPTools(w http.ResponseWriter, r *http.Request) {
 	if s.mcpMgr == nil {
@@ -214,15 +318,15 @@ func (s *Server) handleListMCPTools(w http.ResponseWriter, r *http.Request) {
 // handleListMCPServers 列出已连接的 MCP Server
 func (s *Server) handleListMCPServers(w http.ResponseWriter, r *http.Request) {
 	if s.mcpMgr == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"servers": []any{}, "total": 0})
+		writeJSON(w, http.StatusOK, map[string]any{"servers": []mcpServerSummary{}, "total": 0})
 		return
 	}
 	// 用「已配置」而非「已连接」作为列表事实源：市场一键安装后冷装尚未连上的 server 也要出现在
 	// UI 列表（状态另由 /mcp/status 显示未连接），不因未即时连上而消失（修复 BUG-20260626）。
-	names := s.mcpMgr.ConfiguredServerNames()
+	servers := s.mcpServerSummaries()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"servers": names,
-		"total":   len(names),
+		"servers": servers,
+		"total":   len(servers),
 	})
 }
 
@@ -235,12 +339,14 @@ const mcpAddImmediateConnectTimeout = 10 * time.Second
 // addMCPServerRequest 新增 MCP Server 请求。Env 为 stdio 子进程环境变量
 // （数据连接器走 MCP 的凭证注入：MySQL/Redis 等通过 env 配 MYSQL_HOST/PASSWORD 等）。
 type addMCPServerRequest struct {
-	Name      string            `json:"name"`
-	Command   string            `json:"command"`
-	Args      []string          `json:"args"`
-	Env       map[string]string `json:"env"`
-	Transport string            `json:"transport"`
-	Endpoint  string            `json:"endpoint"`
+	Name       string                 `json:"name"`
+	Command    string                 `json:"command"`
+	Args       []string               `json:"args"`
+	Env        map[string]string      `json:"env"`
+	Transport  string                 `json:"transport"`
+	Endpoint   string                 `json:"endpoint"`
+	SecretArgs []mcpSecretArgMutation `json:"secret_args"`
+	SecretEnv  []mcpSecretEnvMutation `json:"secret_env"`
 }
 
 func (s *Server) handleAddMCPServer(w http.ResponseWriter, r *http.Request) {
@@ -253,6 +359,35 @@ func (s *Server) handleAddMCPServer(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name 不能为空"})
 		return
 	}
+	var previousMCP config.MCPServerConfig
+	if s.cfg != nil {
+		s.cfgMu.RLock()
+		for _, current := range s.cfg.MCP.Servers {
+			if current.Name == req.Name {
+				previousMCP = current
+				break
+			}
+		}
+		s.cfgMu.RUnlock()
+	}
+	if s.cfgWriter != nil {
+		current, err := s.cfgWriter.GetMCPServer(req.Name)
+		if err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "MCP configuration is unavailable"})
+			return
+		}
+		if current != nil {
+			previousMCP = *current
+		}
+	}
+	if err := inputlimits.Text("name", req.Name, previousMCP.Name, inputlimits.DisplayName); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if err := inputlimits.Bytes("endpoint", req.Endpoint, previousMCP.Endpoint, inputlimits.URLBytes); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
 
 	transport := req.Transport
 	if transport == "" {
@@ -261,6 +396,12 @@ func (s *Server) handleAddMCPServer(w http.ResponseWriter, r *http.Request) {
 		} else {
 			transport = "stdio"
 		}
+	}
+	switch transport {
+	case "stdio", "sse", "streamable", "http":
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Unsupported MCP transport"})
+		return
 	}
 
 	if transport == "stdio" && req.Command == "" {
@@ -271,16 +412,20 @@ func (s *Server) handleAddMCPServer(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "sse 模式需要指定 endpoint"})
 		return
 	}
+	if (transport == "streamable" || transport == "http") && req.Endpoint == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Streamable HTTP transport requires an endpoint"})
+		return
+	}
 
-	// 安全校验：stdio command 必须是已知安全的可执行文件，禁止 shell 元字符
+	// 校验命令结构，保留自定义可执行文件及参数的支持。
 	if transport == "stdio" {
 		if err := validateMCPCommand(req.Command, req.Args); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
 	}
-	// 安全校验：sse/streamable endpoint 必须是合法 URL
-	if (transport == "sse" || transport == "streamable") && req.Endpoint != "" {
+	// 网络传输共用端点格式校验。
+	if transport == "sse" || transport == "streamable" || transport == "http" {
 		if err := validateMCPEndpoint(req.Endpoint); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
@@ -290,6 +435,59 @@ func (s *Server) handleAddMCPServer(w http.ResponseWriter, r *http.Request) {
 	if s.mcpMgr == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "MCP 未启用"})
 		return
+	}
+
+	// 连接器编辑请求只携带脱敏 projection；preserve 必须从 Sidecar 当前解密投影恢复，
+	// 然后在写盘前由 Writer 重新 Seal。没有 Writer/secret.Box 时禁止把 secret 交给运行时。
+	hasSecretMutations := len(req.SecretArgs) > 0 || len(req.SecretEnv) > 0
+	var persistedSecretConfig *config.MCPServerConfig
+	if hasSecretMutations {
+		if s.cfgWriter == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "MCP secret persistence is unavailable"})
+			return
+		}
+		current, err := s.cfgWriter.GetMCPServer(req.Name)
+		if err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "MCP secret persistence is unavailable"})
+			return
+		}
+		merged, err := mergeMCPSecretMutations(current, config.MCPServerConfig{
+			Name:      req.Name,
+			Transport: transport,
+			Command:   req.Command,
+			Args:      req.Args,
+			Env:       req.Env,
+			Endpoint:  req.Endpoint,
+			Enabled:   true,
+		}, req.SecretArgs, req.SecretEnv)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		// 先写入已归一化的密文配置，确保 secret.Box 失败时不会启动带未持久化凭据的 MCP。
+		if err := s.cfgWriter.UpsertMCPServer(merged); err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "MCP secret persistence is unavailable"})
+			return
+		}
+		req.Args = merged.Args
+		req.Env = merged.Env
+		persistedSecretConfig = &merged
+	}
+
+	// 先保存配置；写盘失败时保留现有运行态，避免显示成功却在重启后丢失。
+	if s.cfgWriter != nil && persistedSecretConfig == nil {
+		if err := s.cfgWriter.UpsertMCPServer(config.MCPServerConfig{
+			Name:      req.Name,
+			Transport: transport,
+			Command:   req.Command,
+			Args:      req.Args,
+			Env:       req.Env,
+			Endpoint:  req.Endpoint,
+			Enabled:   true,
+		}); err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "MCP configuration could not be saved"})
+			return
+		}
 	}
 
 	cfg := hexmcp.ServerConfig{
@@ -315,12 +513,16 @@ func (s *Server) handleAddMCPServer(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	// 持久化到配置文件：无论是否已连接都持久化——未连上者重启后仍由 reconnectLoop 自动拉起。
-	if s.cfgWriter != nil {
-		if err := s.cfgWriter.AppendMCPServer(req.Name, transport, req.Command, req.Args, req.Env, req.Endpoint); err != nil {
-			logger.Error("MCP Server", "name", req.Name, "添加成功但持久化失败", err)
-		}
-	}
+
+	s.rememberMCPServerConfig(config.MCPServerConfig{
+		Name:      req.Name,
+		Transport: transport,
+		Command:   req.Command,
+		Args:      req.Args,
+		Env:       req.Env,
+		Endpoint:  req.Endpoint,
+		Enabled:   true,
+	})
 	msg := fmt.Sprintf("MCP Server %q 已添加", req.Name)
 	if !connected {
 		msg = fmt.Sprintf("MCP Server %q 已添加，正在后台连接（首次需下载组件）", req.Name)
@@ -340,13 +542,31 @@ func (s *Server) handleRemoveMCPServer(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "MCP 未启用"})
 		return
 	}
+	// 先移除持久化配置；失败时保留运行态，允许用户修复写盘条件后重试。
+	if s.cfgWriter != nil {
+		persisted, err := s.cfgWriter.GetMCPServer(name)
+		if err == nil && persisted != nil {
+			err = s.cfgWriter.RemoveMCPServer(name)
+		}
+		if err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "MCP configuration could not be removed"})
+			return
+		}
+	}
 	if err := s.mcpMgr.RemoveServer(name); err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 		return
 	}
-	// 从配置文件中移除
-	if s.cfgWriter != nil {
-		_ = s.cfgWriter.RemoveMCPServer(name)
+	if s.cfg != nil {
+		s.cfgMu.Lock()
+		servers := s.cfg.MCP.Servers[:0]
+		for _, server := range s.cfg.MCP.Servers {
+			if server.Name != name {
+				servers = append(servers, server)
+			}
+		}
+		s.cfg.MCP.Servers = servers
+		s.cfgMu.Unlock()
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"message": fmt.Sprintf("MCP Server %q 已移除", name)})
 }
@@ -515,6 +735,10 @@ func (s *Server) handleInstallSkill(w http.ResponseWriter, r *http.Request) {
 	case "file":
 		s.installSkillFromFile(w, req.Source)
 	case "url":
+		if err := inputlimits.Bytes("source", req.Source, "", inputlimits.URLBytes); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
 		s.installSkillFromURL(w, r, req.Source)
 	case "content":
 		s.installSkillFromContent(w, req.Content)
@@ -633,7 +857,14 @@ func (s *Server) installSkillFromClawHub(w http.ResponseWriter, r *http.Request,
 	}
 	metaType := strings.ToLower(strings.TrimSpace(meta.Type))
 	if metaType == "mcp" {
-		s.installMCPFromClawHubEntry(w, r, skillName, meta.Command, meta.Args, meta.ConfigHint)
+		entry, err := hub.ValidatePinnedMCPServer(hub.MCPServerMetaFromSkill(meta))
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "MCP 市场条目未通过供应链校验: " + err.Error(),
+			})
+			return
+		}
+		s.installMCPFromClawHubEntry(w, r, entry)
 		return
 	}
 	if err := s.skillHub.Install(r.Context(), skillName); err != nil {
@@ -652,52 +883,46 @@ func (s *Server) installSkillFromClawHub(w http.ResponseWriter, r *http.Request,
 	})
 }
 
-func (s *Server) findClawHubEntry(skillName string) (meta struct {
-	Type       string
-	Command    string
-	Args       []string
-	ConfigHint string
-}, ok bool) {
+func (s *Server) findClawHubEntry(skillName string) (hub.SkillMeta, bool) {
 	if s.skillHub == nil {
-		return meta, false
+		return hub.SkillMeta{}, false
 	}
 	catalog := s.skillHub.GetCatalog()
 	if catalog == nil {
-		return meta, false
+		return hub.SkillMeta{}, false
 	}
 	for _, entry := range catalog.Skills {
 		if entry.Name != skillName {
 			continue
 		}
-		meta.Type = entry.Type
-		meta.Command = entry.Command
-		meta.Args = entry.Args
-		meta.ConfigHint = entry.ConfigHint
-		return meta, true
+		return entry, true
 	}
-	return meta, false
+	return hub.SkillMeta{}, false
 }
 
-func (s *Server) installMCPFromClawHubEntry(w http.ResponseWriter, r *http.Request, name, command string, args []string, configHint string) {
+func (s *Server) installMCPFromClawHubEntry(w http.ResponseWriter, r *http.Request, entry hub.ValidatedMCPServer) {
 	if s.mcpMgr == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
-			"error": "MCP 模块未启用，无法安装 MCP 市场条目: " + name,
-		})
-		return
-	}
-	if err := validateMCPCommand(command, args); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "MCP 市场条目配置无效: " + err.Error(),
+			"error": "MCP 模块未启用，无法安装 MCP 市场条目: " + entry.Name(),
 		})
 		return
 	}
 
 	cfg := hexmcp.ServerConfig{
-		Name:      name,
+		Name:      entry.Name(),
 		Transport: "stdio",
-		Command:   command,
-		Args:      args,
+		Command:   entry.Command(),
+		Args:      entry.Args(),
+		Env:       entry.Env(),
 		Enabled:   true,
+	}
+
+	// 先保存市场配置，写盘失败时不创建仅本次运行可见的连接。
+	if s.cfgWriter != nil {
+		if err := s.cfgWriter.AppendMCPServer(entry.Name(), cfg.Transport, cfg.Command, cfg.Args, cfg.Env, cfg.Endpoint); err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "MCP configuration could not be saved"})
+			return
+		}
 	}
 
 	// best-effort：即时连接给较短窗口，冷装 npx/uvx 首次下载超时则转后台 reconnectLoop(30s)，不硬失败
@@ -709,27 +934,27 @@ func (s *Server) installMCPFromClawHubEntry(w http.ResponseWriter, r *http.Reque
 	if err != nil {
 		// 仅不可恢复错误（name 空 / Manager 已关闭）走 400；即时连接失败属可恢复，不会到这。
 		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": fmt.Sprintf("MCP Server %q 添加失败: %v", name, err),
+			"error": fmt.Sprintf("MCP Server %q 添加失败: %v", entry.Name(), err),
 		})
 		return
 	}
-	// 无论是否已连上都持久化——未连上者重启后仍由 reconnectLoop 自动拉起。
-	if s.cfgWriter != nil {
-		if err := s.cfgWriter.AppendMCPServer(name, cfg.Transport, cfg.Command, cfg.Args, cfg.Env, cfg.Endpoint); err != nil {
-			logger.Error("MCP Server", "name", name, "添加成功但持久化失败", err)
-		}
-	}
+
+	s.rememberMCPServerConfig(config.MCPServerConfig{
+		Name: cfg.Name, Transport: cfg.Transport, Command: cfg.Command,
+		Args: cfg.Args, Env: cfg.Env, Endpoint: cfg.Endpoint, Enabled: true,
+	})
 	msg := "MCP 条目已从 ClawHub 安装并已连接"
 	if !connected {
 		msg = "MCP 条目已从 ClawHub 安装，正在后台连接（首次需下载组件）"
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"name":               name,
+		"name":               entry.Name(),
 		"type":               "mcp",
 		"message":            msg,
 		"requires_restart":   false,
 		"runtime_registered": connected,
-		"config_hint":        configHint,
+		"config_hint":        entry.ConfigHint(),
+		"artifact":           entry.Artifact(),
 	})
 }
 
@@ -964,14 +1189,15 @@ func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 
 // RegisterAgentRequest 注册/更新 Agent 请求
 type RegisterAgentRequest struct {
-	Name         string   `json:"name"`
-	DisplayName  string   `json:"display_name"`
-	Description  string   `json:"description"`
-	Model        string   `json:"model"`
-	Provider     string   `json:"provider"`
-	SystemPrompt string   `json:"system_prompt"`
-	Skills       []string `json:"skills"`
-	MaxTokens    int      `json:"max_tokens"`
+	Name            string                  `json:"name"`
+	DisplayName     string                  `json:"display_name"`
+	Description     string                  `json:"description"`
+	Model           string                  `json:"model"`
+	Provider        string                  `json:"provider"`
+	SystemPrompt    string                  `json:"system_prompt"`
+	Skills          []string                `json:"skills"`
+	MaxTokens       int                     `json:"max_tokens"`
+	ReasoningPolicy *config.ReasoningPolicy `json:"reasoning_policy"`
 	// Temperature 指针语义（BUG-20260703 P2-4）：缺席=未设跟随模型默认，显式 0=确定性采样。
 	Temperature *float64          `json:"temperature"`
 	Metadata    map[string]string `json:"metadata"`
@@ -999,15 +1225,50 @@ func (o *OptionalFloat) UnmarshalJSON(data []byte) error {
 }
 
 type UpdateAgentRequest struct {
-	DisplayName  *string            `json:"display_name"`
-	Description  *string            `json:"description"`
-	Model        *string            `json:"model"`
-	Provider     *string            `json:"provider"`
-	SystemPrompt *string            `json:"system_prompt"`
-	Skills       *[]string          `json:"skills"`
-	MaxTokens    *int               `json:"max_tokens"`
-	Temperature  OptionalFloat      `json:"temperature"`
-	Metadata     *map[string]string `json:"metadata"`
+	DisplayName     *string                 `json:"display_name"`
+	Description     *string                 `json:"description"`
+	Model           *string                 `json:"model"`
+	Provider        *string                 `json:"provider"`
+	SystemPrompt    *string                 `json:"system_prompt"`
+	Skills          *[]string               `json:"skills"`
+	MaxTokens       *int                    `json:"max_tokens"`
+	ReasoningPolicy *config.ReasoningPolicy `json:"reasoning_policy"`
+	Temperature     OptionalFloat           `json:"temperature"`
+	Metadata        *map[string]string      `json:"metadata"`
+}
+
+var k12ProfileOwnedMetadataKeys = [...]string{
+	"k12.child_name",
+	"k12.grade_term",
+	"k12.textbook_edition",
+	"k12.textbook_edition.math",
+	"k12.textbook_edition.chinese",
+	"k12.textbook_edition.english",
+	"k12.textbook_edition.science",
+	"k12.textbook_edition.information_technology",
+	"k12.textbook_edition.art",
+}
+
+func k12ProfileFieldsTouched(existing *router.AgentConfig, req UpdateAgentRequest) bool {
+	if existing == nil || existing.Metadata["scenario"] != "k12-tutor" {
+		return false
+	}
+	if req.DisplayName != nil || req.Description != nil || req.SystemPrompt != nil ||
+		req.Provider != nil || req.Model != nil || req.Skills != nil {
+		return true
+	}
+	if req.Metadata == nil {
+		return false
+	}
+	next := *req.Metadata
+	for _, key := range k12ProfileOwnedMetadataKeys {
+		before, beforeOK := existing.Metadata[key]
+		after, afterOK := next[key]
+		if beforeOK != afterOK || before != after {
+			return true
+		}
+	}
+	return false
 }
 
 // validateAgentTemperature 温度合法域 [0,2]（nil=未设不校验）。
@@ -1018,10 +1279,135 @@ func validateAgentTemperature(t *float64) error {
 	return nil
 }
 
+func normalizeAPIReasoningPolicy(policy **config.ReasoningPolicy) error {
+	if policy == nil {
+		return fmt.Errorf("reasoning_policy destination is nil")
+	}
+	if *policy == nil {
+		inherit := config.ReasoningPolicy{Mode: config.ReasoningPolicyModeInherit}
+		*policy = &inherit
+		return nil
+	}
+	candidate := **policy
+	if err := candidate.Validate(true); err != nil {
+		return err
+	}
+	*policy = &candidate
+	return nil
+}
+
+// validateAgentMetadataCapabilities applies the scenario-owned capability
+// guard before generic Agent state reaches the router or persistent store.
+func (s *Server) validateAgentMetadataCapabilities(metadata map[string]string) error {
+	if metadata == nil || s.agentMetadataGuard == nil {
+		return nil
+	}
+	return s.agentMetadataGuard(metadata)
+}
+
+func cloneLLMReasoningValueSnapshot(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		cloned := make(map[string]any, len(typed))
+		for key, item := range typed {
+			cloned[key] = cloneLLMReasoningValueSnapshot(item)
+		}
+		return cloned
+	case map[any]any:
+		cloned := make(map[any]any, len(typed))
+		for key, item := range typed {
+			cloned[key] = cloneLLMReasoningValueSnapshot(item)
+		}
+		return cloned
+	case []any:
+		cloned := make([]any, len(typed))
+		for index, item := range typed {
+			cloned[index] = cloneLLMReasoningValueSnapshot(item)
+		}
+		return cloned
+	default:
+		return value
+	}
+}
+
+func cloneLLMReasoningControlSnapshot(control *config.LLMReasoningControlSpec) *config.LLMReasoningControlSpec {
+	if control == nil {
+		return nil
+	}
+	cloned := &config.LLMReasoningControlSpec{
+		Dialect: control.Dialect,
+		On:      cloneLLMReasoningValueSnapshot(control.On),
+		Off:     cloneLLMReasoningValueSnapshot(control.Off),
+	}
+	if control.AllowedEfforts != nil {
+		cloned.AllowedEfforts = append([]string(nil), control.AllowedEfforts...)
+		if len(control.AllowedEfforts) == 0 {
+			cloned.AllowedEfforts = make([]string, 0)
+		}
+	}
+	return cloned
+}
+
+func cloneLLMConfigSnapshot(source config.LLMConfig) config.LLMConfig {
+	clone := source
+	clone.Providers = make(map[string]config.LLMProviderConfig, len(source.Providers))
+	for name, provider := range source.Providers {
+		providerClone := provider
+		if provider.Models != nil {
+			providerClone.Models = append([]string{}, provider.Models...)
+		}
+		if provider.ModelSpecs != nil {
+			providerClone.ModelSpecs = make([]config.LLMProviderModelSpec, len(provider.ModelSpecs))
+			for index, spec := range provider.ModelSpecs {
+				specClone := spec
+				if spec.Capabilities != nil {
+					specClone.Capabilities = append([]string{}, spec.Capabilities...)
+				}
+				if spec.Embedding != nil {
+					embedding := *spec.Embedding
+					specClone.Embedding = &embedding
+				}
+				specClone.ReasoningControl = cloneLLMReasoningControlSnapshot(spec.ReasoningControl)
+				providerClone.ModelSpecs[index] = specClone
+			}
+		}
+		if provider.ToolsEnabled != nil {
+			toolsEnabled := *provider.ToolsEnabled
+			providerClone.ToolsEnabled = &toolsEnabled
+		}
+		if provider.Enabled != nil {
+			enabled := *provider.Enabled
+			providerClone.Enabled = &enabled
+		}
+		clone.Providers[name] = providerClone
+	}
+	return clone
+}
+
+// persistedLLMConfig returns the complete control-plane configuration, including
+// disabled or temporarily unloadable providers. Configuration GETs and stable
+// provider-identity lookups must use this snapshot rather than the routing
+// runtime, whose active set intentionally filters those providers.
+func (s *Server) persistedLLMConfig() config.LLMConfig {
+	s.cfgMu.Lock()
+	defer s.cfgMu.Unlock()
+	return cloneLLMConfigSnapshot(s.cfg.LLM)
+}
+
 func (s *Server) activeLLMConfig() config.LLMConfig {
-	llmCfg := s.cfg.LLM
+	// cfgMu also covers runtime ReloadLLMConfig in the PUT path. Reading both
+	// sources and cloning every mutable map/slice/pointer while holding the same
+	// lock yields one immutable generation and prevents catalog probes from
+	// racing a concurrent config transition.
+	s.cfgMu.Lock()
+	defer s.cfgMu.Unlock()
+
+	llmCfg := cloneLLMConfigSnapshot(s.cfg.LLM)
 	if runtime, ok := s.engine.(llmConfigRuntime); ok {
-		llmCfg = effectiveLLMConfig(llmCfg, runtime)
+		live := runtime.ActiveLLMConfig()
+		if len(live.Providers) > 0 {
+			llmCfg = cloneLLMConfigSnapshot(live)
+		}
 	}
 	return llmCfg
 }
@@ -1066,6 +1452,9 @@ func (s *Server) validateAgentLLMConfig(cfg *router.AgentConfig) error {
 	if p := llmCfg.Providers[providerKey]; p.Enabled != nil && !*p.Enabled {
 		return fmt.Errorf("指定的 provider %q 已禁用，请先在设置中启用", cfg.Provider)
 	}
+	if err := validateConfiguredTextModel(llmCfg, providerKey, cfg.Model); err != nil {
+		return err
+	}
 	cfg.Provider = providerKey
 	return nil
 }
@@ -1081,20 +1470,39 @@ func (s *Server) handleRegisterAgent(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name 不能为空"})
 		return
 	}
+	if err := router.ValidateAgentDisplayName(req.DisplayName); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	req.DisplayName = strings.TrimSpace(req.DisplayName)
 
 	cfg := router.AgentConfig{
-		Name:         req.Name,
-		DisplayName:  req.DisplayName,
-		Description:  req.Description,
-		Model:        req.Model,
-		Provider:     req.Provider,
-		SystemPrompt: req.SystemPrompt,
-		Skills:       req.Skills,
-		MaxTokens:    req.MaxTokens,
-		Temperature:  req.Temperature,
-		Metadata:     req.Metadata,
+		Name:            req.Name,
+		DisplayName:     req.DisplayName,
+		Description:     req.Description,
+		Model:           req.Model,
+		Provider:        req.Provider,
+		SystemPrompt:    req.SystemPrompt,
+		Skills:          req.Skills,
+		MaxTokens:       req.MaxTokens,
+		ReasoningPolicy: req.ReasoningPolicy,
+		Temperature:     req.Temperature,
+		Metadata:        req.Metadata,
+	}
+	if err := validateAgentInputLengths(cfg, router.AgentConfig{}); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	cfg.Metadata = k12.EnsureTutorAvatar(cfg.Metadata)
+	if err := normalizeAPIReasoningPolicy(&cfg.ReasoningPolicy); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
 	}
 
+	if err := s.validateAgentMetadataCapabilities(cfg.Metadata); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
 	if err := s.validateAgentLLMConfig(&cfg); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
@@ -1137,6 +1545,12 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "agent \"" + name + "\" 未注册"})
 		return
 	}
+	if k12ProfileFieldsTouched(existing, req) {
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error": "K12 profile fields require /api/k12/profile-bundle",
+		})
+		return
+	}
 	cfg := *existing
 	cfg.Name = name
 	if req.DisplayName != nil {
@@ -1160,6 +1574,13 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 	if req.MaxTokens != nil {
 		cfg.MaxTokens = *req.MaxTokens
 	}
+	if req.ReasoningPolicy != nil {
+		cfg.ReasoningPolicy = req.ReasoningPolicy
+		if err := normalizeAPIReasoningPolicy(&cfg.ReasoningPolicy); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+	}
 	if req.Temperature.Present {
 		// 三态：null=清除回「未设」（Value=nil），数值=设置（BUG-20260703 P2-4）
 		if err := validateAgentTemperature(req.Temperature.Value); err != nil {
@@ -1170,6 +1591,11 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Metadata != nil {
 		cfg.Metadata = *req.Metadata
+	}
+	cfg.Metadata = k12.EnsureTutorAvatar(cfg.Metadata)
+	if err := s.validateAgentMetadataCapabilities(cfg.Metadata); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
 	}
 	// BUG-20260703 D3：LLM 配置校验只跟着真改动走——请求未碰（或原样回传）model/provider
 	// 时不重审存量值，否则 provider 失效后连 display_name/system_prompt 都被连坐锁死。
@@ -1185,13 +1611,20 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 		cfg.Model = existing.Model
 		cfg.Provider = existing.Provider
 	}
-	var persistErr error
+	var persistErr, displayNameErr error
 	err := s.agentRouter.UpdateAgentPersisted(name, func(current router.AgentConfig) (router.AgentConfig, error) {
+		previous := current
 		// Reapply only request-present fields to the value read under the
 		// dispatcher lock. This prevents a concurrent K12 profile restore from
 		// being overwritten by the stale pre-validation snapshot above.
 		if req.DisplayName != nil {
-			current.DisplayName = cfg.DisplayName
+			// 旧长名称原样保留，其他配置更新不要求改名。
+			if cfg.DisplayName != current.DisplayName {
+				if displayNameErr = router.ValidateAgentDisplayName(cfg.DisplayName); displayNameErr != nil {
+					return current, displayNameErr
+				}
+				current.DisplayName = strings.TrimSpace(cfg.DisplayName)
+			}
 		}
 		if req.Description != nil {
 			current.Description = cfg.Description
@@ -1205,6 +1638,9 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 		if req.MaxTokens != nil {
 			current.MaxTokens = cfg.MaxTokens
 		}
+		if req.ReasoningPolicy != nil {
+			current.ReasoningPolicy = cfg.ReasoningPolicy
+		}
 		if req.Temperature.Present {
 			current.Temperature = cfg.Temperature
 		}
@@ -1215,6 +1651,9 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 			current.Model = cfg.Model
 			current.Provider = cfg.Provider
 		}
+		if displayNameErr = validateAgentInputLengths(current, previous); displayNameErr != nil {
+			return previous, displayNameErr
+		}
 		return current, nil
 	}, func(updated *router.AgentConfig) error {
 		if s.agentStore == nil {
@@ -1224,7 +1663,9 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 		return persistErr
 	})
 	if err != nil {
-		if persistErr != nil {
+		if displayNameErr != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": displayNameErr.Error()})
+		} else if persistErr != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "持久化失败: " + persistErr.Error()})
 		} else {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
@@ -1237,8 +1678,26 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 // handleUnregisterAgent 注销 Agent（内存 + 持久化）
 func (s *Server) handleUnregisterAgent(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
+	agent, exists := s.agentRouter.GetAgent(name)
+	if !exists {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": fmt.Sprintf("agent %q 未注册", name)})
+		return
+	}
+
+	var detachedResources AgentResourceDetach
 	var persistErr error
+	var resourceErr error
 	err := s.agentRouter.UnregisterPersisted(name, func(name, nextDefault string, wasDefault bool) error {
+		// UnregisterPersisted holds the dispatcher write lock across this
+		// callback. Staging owned-resource cleanup here closes the provision vs
+		// delete race: a provisioner that validates through the same dispatcher
+		// cannot recreate schedules between cleanup and Agent removal.
+		if s.agentResources != nil {
+			detachedResources, resourceErr = s.agentResources.DetachAgentResources(r.Context(), *agent)
+			if resourceErr != nil {
+				return fmt.Errorf("清理 Agent 归属资源失败: %w", resourceErr)
+			}
+		}
 		if s.agentStore == nil {
 			return nil
 		}
@@ -1257,12 +1716,26 @@ func (s *Server) handleUnregisterAgent(w http.ResponseWriter, r *http.Request) {
 		return persistErr
 	})
 	if err != nil {
-		if persistErr != nil {
+		if detachedResources.Rollback != nil {
+			// The request can already be canceled by the time persistence
+			// reports an error. Compensation must still get a chance to restore
+			// the resources staged above.
+			if rollbackErr := detachedResources.Rollback(context.WithoutCancel(r.Context())); rollbackErr != nil {
+				logger.Error("Agent 注销资源回滚失败", "agent", name, "error", rollbackErr)
+				err = fmt.Errorf("%w; 归属资源回滚失败: %v", err, rollbackErr)
+			}
+		}
+		if resourceErr != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": resourceErr.Error()})
+		} else if persistErr != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "持久化失败: " + persistErr.Error()})
 		} else {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 		}
 		return
+	}
+	if detachedResources.Commit != nil {
+		detachedResources.Commit()
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"message": "Agent 已注销"})
 }

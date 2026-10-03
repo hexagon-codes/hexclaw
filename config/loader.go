@@ -1,6 +1,7 @@
 package config
 
 import (
+	"crypto/rand"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,6 +19,39 @@ func configDir() (string, error) {
 		return "", fmt.Errorf("获取用户主目录失败: %w", err)
 	}
 	return filepath.Join(home, ".hexclaw"), nil
+}
+
+// ensureOwnerOnlyConfigDir 在需要时创建默认配置目录，并在每次持久化写入时
+// 修复目录权限。MkdirAll 无法收紧已有目录的权限，因此手动创建的 ~/.hexclaw
+// 可能会被其他本地账户读取。
+func ensureOwnerOnlyConfigDir(dir string) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("create config directory: %w", err)
+	}
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return fmt.Errorf("inspect config directory: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("config directory must be a non-symlink directory: %s", dir)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return fmt.Errorf("restrict config directory permissions: %w", err)
+	}
+	return nil
+}
+
+// ensureOwnerOnlyDefaultConfigParent 仅对标准用户配置应用仅所有者可访问的目录规则。
+// 使用显式 --config 路径的调用方保留其自行选择的目录语义。
+func ensureOwnerOnlyDefaultConfigParent(configFile string) error {
+	dir, err := configDir()
+	if err != nil {
+		return nil
+	}
+	if filepath.Clean(configFile) != filepath.Join(dir, "hexclaw.yaml") {
+		return nil
+	}
+	return ensureOwnerOnlyConfigDir(dir)
 }
 
 // Load 加载配置
@@ -66,6 +100,13 @@ func Load(configFile string) (*Config, error) {
 	// 展开路径中的 ~
 	expandTildePaths(cfg)
 
+	// 升级兼容：reasoning_provider/model 是可选的派生选择。旧桌面端可能在删除或禁用
+	// Provider 后留下成对悬空值；只在文件加载边界清空这对陈旧引用，再走现有默认推导。
+	// 不写回文件，避免把已经展开的环境变量（尤其凭据）持久化。
+	if migrateStaleReasoningSelection(cfg) {
+		logger.Warn("[llm] 检测到陈旧的可选 reasoning 配置，已在内存中清空并重新推导")
+	}
+
 	// reasoning 兜底：未显式配强文本模型时指向云端强 provider（BUG-20260712 治本 #5）。
 	applyReasoningDefault(cfg)
 
@@ -87,9 +128,9 @@ func Init() (string, error) {
 		return "", err
 	}
 
-	// 创建目录
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return "", fmt.Errorf("创建配置目录失败: %w", err)
+	// 创建目录，并在目录早于本版本时修复其权限。
+	if err := ensureOwnerOnlyConfigDir(dir); err != nil {
+		return "", err
 	}
 
 	cfgPath := filepath.Join(dir, "hexclaw.yaml")
@@ -100,11 +141,74 @@ func Init() (string, error) {
 	}
 
 	// 写入默认配置模板
-	if err := os.WriteFile(cfgPath, []byte(defaultConfigYAML), 0600); err != nil {
+	content := strings.Replace(defaultConfigYAML, "  mode: \"production\"", "  mode: \"production\"\n  api_token: \""+rand.Text()+"\"", 1)
+	if err := os.WriteFile(cfgPath, []byte(content), 0600); err != nil {
 		return "", fmt.Errorf("写入配置文件失败: %w", err)
 	}
 
 	return cfgPath, nil
+}
+
+// EnsureAPIToken 为独立服务首次启动补齐持久业务令牌，保留原文件中的环境引用与其他配置。
+// Desktop 使用原生层 auth.json，不调用此函数。
+func EnsureAPIToken(cfg *Config, configFile string) error {
+	if cfg.Server.APIToken != "" {
+		return nil
+	}
+	data, err := os.ReadFile(configFile)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read API token configuration: %w", err)
+	}
+	var document yaml.Node
+	if len(data) == 0 {
+		data = []byte("server: {}\n")
+	}
+	if err := yaml.Unmarshal(data, &document); err != nil {
+		return fmt.Errorf("decode API token configuration: %w", err)
+	}
+	if len(document.Content) != 1 || document.Content[0].Kind != yaml.MappingNode {
+		return fmt.Errorf("API token configuration must be a mapping")
+	}
+	root := document.Content[0]
+	var server *yaml.Node
+	for i := 0; i < len(root.Content); i += 2 {
+		if root.Content[i].Value == "server" {
+			server = root.Content[i+1]
+			break
+		}
+	}
+	if server == nil {
+		server = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+		root.Content = append(root.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "server"}, server)
+	}
+	if server.Kind != yaml.MappingNode {
+		return fmt.Errorf("server configuration must be a mapping")
+	}
+	token := rand.Text()
+	value := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: token}
+	found := false
+	for i := 0; i < len(server.Content); i += 2 {
+		if server.Content[i].Value == "api_token" {
+			server.Content[i+1] = value
+			found = true
+			break
+		}
+	}
+	if !found {
+		server.Content = append(server.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "api_token"}, value)
+	}
+	data, err = yaml.Marshal(&document)
+	if err != nil {
+		return fmt.Errorf("encode API token configuration: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(configFile), 0o700); err != nil {
+		return err
+	}
+	if err := ReconcileCommittedWrite(atomicWriteFile(configFile, data, 0o600)); err != nil {
+		return err
+	}
+	cfg.Server.APIToken = token
+	return nil
 }
 
 // Save 将当前配置持久化到 YAML 文件
@@ -116,21 +220,28 @@ func Save(cfg *Config, configFile string) error {
 		if err != nil {
 			return err
 		}
-		if err := os.MkdirAll(dir, 0700); err != nil {
-			return fmt.Errorf("创建配置目录失败: %w", err)
-		}
 		configFile = filepath.Join(dir, "hexclaw.yaml")
 	}
+	if err := ensureOwnerOnlyDefaultConfigParent(configFile); err != nil {
+		return err
+	}
 
-	data, err := yaml.Marshal(cfg)
+	data, err := marshalConfigForPersistence(cfg)
 	if err != nil {
 		return fmt.Errorf("序列化配置失败: %w", err)
 	}
 
-	if err := atomicWriteFile(configFile, data, 0600); err != nil {
+	if err := ReconcileCommittedWrite(atomicWriteFile(configFile, data, 0600)); err != nil {
 		return fmt.Errorf("写入配置文件失败: %w", err)
 	}
 	return nil
+}
+
+// marshalConfigForPersistence 是持久化 YAML 的唯一序列化路径。
+// Provider API Key 及其稳定的 credential_ref 均属于仅所有者可访问的配置契约，
+// 因此此处不得丢弃任一字段。
+func marshalConfigForPersistence(cfg *Config) ([]byte, error) {
+	return yaml.Marshal(cfg)
 }
 
 // MaskAPIKey 对 API Key 脱敏显示
@@ -207,15 +318,41 @@ func applyEnvProviders(cfg *Config) {
 		}
 	}
 
-	// 如果默认 Provider 在配置中不存在，按名称排序选择第一个（确保确定性）
+	// 默认 Provider 缺失时，只从已启用且可对话的候选中确定性选择。
+	// 没有候选时保留原值，避免重启把禁用或仅向量模型提升为聊天默认项。
 	if _, exists := cfg.LLM.Providers[cfg.LLM.Default]; !exists && len(cfg.LLM.Providers) > 0 {
 		names := make([]string, 0, len(cfg.LLM.Providers))
-		for name := range cfg.LLM.Providers {
+		for name, provider := range cfg.LLM.Providers {
+			if provider.Enabled != nil && !*provider.Enabled || provider.Model == "" || !ModelHasCapability(provider, provider.Model, LLMModelCapabilityText) {
+				continue
+			}
 			names = append(names, name)
 		}
-		sort.Strings(names)
-		cfg.LLM.Default = names[0]
+		if len(names) > 0 {
+			sort.Strings(names)
+			cfg.LLM.Default = names[0]
+		}
 	}
+}
+
+// migrateStaleReasoningSelection repairs only the optional cross-field reference loaded from
+// persisted configuration. Direct Config.Validate and API updates remain strict so a caller
+// cannot use this compatibility path to submit an unknown or disabled provider explicitly.
+func migrateStaleReasoningSelection(cfg *Config) bool {
+	if cfg == nil {
+		return false
+	}
+	providerName := strings.TrimSpace(cfg.LLM.ReasoningProvider)
+	if providerName == "" {
+		return false
+	}
+	provider, exists := cfg.LLM.Providers[providerName]
+	if exists && (provider.Enabled == nil || *provider.Enabled) {
+		return false
+	}
+	cfg.LLM.ReasoningProvider = ""
+	cfg.LLM.ReasoningModel = ""
+	return true
 }
 
 // applyReasoningDefault 未显式配 reasoning_provider 时挑云端强文本 provider 兜底，并 warn。
@@ -258,6 +395,15 @@ server:
   host: "127.0.0.1"
   port: 16060
   mode: "production"
+
+# 进程级重资源预算（K12 批改与 Knowledge 摄取/查询共用）
+resource_governor:
+  vlm_concurrency: 2
+  accelerator_concurrency: 1
+  cpu_heavy_concurrency: 2
+  sqlite_write_concurrency: 1
+  background_aging: "5s"
+  max_interactive_burst: 8
 
 # LLM 配置
 llm:

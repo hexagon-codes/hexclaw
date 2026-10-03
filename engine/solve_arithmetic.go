@@ -1,0 +1,438 @@
+package engine
+
+import (
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"math/big"
+	"regexp"
+	"strings"
+	"unicode"
+)
+
+var writtenFinalAnswerRe = regexp.MustCompile(`(?:答案?|答)[^0-9+\-(]*([+\-]?[0-9(][0-9.+\-*/×÷() \t]*)`)
+var answerLatexFractionRe = regexp.MustCompile(`\\frac\s*\{([^{}]+)\}\s*\{([^{}]+)\}`)
+var answerLatexCompactFractionRe = regexp.MustCompile(`\\frac\s*([0-9])\s*([0-9])`)
+var answerLatexTextRe = regexp.MustCompile(`\\text\s*\{([^{}]*)\}`)
+var answerParenthesizedFractionRe = regexp.MustCompile(`\(([0-9]+)\)\s*/\s*\(([0-9]+)\)`)
+var answerMixedFractionRe = regexp.MustCompile(`([0-9]+)\s*\(([0-9]+/[0-9]+)\)`)
+var answerSpacedMixedFractionRe = regexp.MustCompile(`([0-9]+)\s+([0-9]+/[0-9]+)`)
+var arithmeticFractionLiteralRe = regexp.MustCompile(`[0-9]+/[0-9]+`)
+
+// itemNumberPrefixRe 题号列表前缀（bug 2026-07-18：照片识别题干自带「1. 」「3、」「4)」等
+// 题号，去空白后「1. 26*3」曾被误拼成小数「1.26*3」）。两类可安全剥离的形态：
+//   - 数字 + 顿号/右括号（、)）——这些分隔符不可能是小数点；
+//   - 数字 + 半角/全角句点 + 空白——小数写法不会在小数点后带空白。
+var itemNumberPrefixRe = regexp.MustCompile(`^[0-9]{1,3}\s*(?:[、)）]|[.．]\s)\s*`)
+var mixedNumberAnswerRe = regexp.MustCompile(`^([+\-]?)([0-9]+)(?:\s+|又)([0-9]+)\s*/\s*([0-9]+)$`)
+var simplestFractionRequestRe = regexp.MustCompile(`^计算[ \t]*(.+?)[ \t]*[，,][ \t]*并把结果化成最简分数[。.]?$`)
+var simplestRatioRequestRe = regexp.MustCompile(`^把[ \t]*([0-9]+(?:[ \t]*/[ \t]*[0-9]+|\.[0-9]+)?)[ \t]*[:：∶][ \t]*([0-9]+(?:[ \t]*/[ \t]*[0-9]+|\.[0-9]+)?)[ \t]*化成(?:最简单的整数比|最簡單的整數比)[。.]?$`)
+var simplestRatioMethodRe = regexp.MustCompile(`(?:^|[、，,；;：:\s（(])比(?:$|[、，,；;。.\s）)])`)
+var positiveIntegerRatioAnswerRe = regexp.MustCompile(`^([0-9]+)[ \t]*[:：∶][ \t]*([0-9]+)$`)
+
+// 识别模型常见的“计算：表达式=”输出；问号是可选的，不能因缺少问号而把确定性算式
+// 降级到模型 solver/verifier 链。等号右侧仍必须为空，后续字符白名单继续 fail-closed。
+var standaloneArithmeticRequestRe = regexp.MustCompile(`^计算：[ \t]*([0-9.+*/() \t-]+?)[ \t]*(?:。|=[ \t]*\??)$`)
+var separatedArithmeticNumberRe = regexp.MustCompile(`[0-9.][ \t]+[0-9.]`)
+
+// ArithmeticTranscriptionConsistent 仅为原图复核分流提供算术一致性证据，不确认原图内容
+// 或生成批改结论；无法完整复算、最终答案不同或任一步不成立时均需另行复核。
+func ArithmeticTranscriptionConsistent(problem, studentAnswer string) bool {
+	problem = normalizeArithmeticAnswerMarkup(problem)
+	_, computed, ok := solveTrivialArithmetic(problem)
+	if !ok {
+		return false
+	}
+	answer, ok := arithmeticAnswerValue(studentAnswer)
+	if !ok || answer != computed {
+		return false
+	}
+	valid, conclusive, _ := validateStudentArithmeticWork(problem, normalizeArithmeticAnswerMarkup(studentAnswer))
+	return valid && conclusive
+}
+
+// solveTrivialArithmetic 对“只含数字、四则运算、括号，等号右侧为空/问号”的一步算式做
+// 本机精确求值。它刻意不接受变量、函数、单位或自然语言，避免把方程/应用题误判成纯计算。
+func solveTrivialArithmetic(problem string) (worked, answer string, ok bool) {
+	normalizedProblem, forceFraction := unwrapSimplestFractionRequest(problem)
+	expr, display, ok := normalizeTrivialArithmetic(normalizedProblem)
+	if !ok {
+		return "", "", false
+	}
+	node, err := parser.ParseExpr(expr)
+	if err != nil {
+		return "", "", false
+	}
+	remaining := 128
+	value, ok := evalArithmeticNode(node, &remaining)
+	if !ok {
+		return "", "", false
+	}
+	if forceFraction {
+		answer = value.RatString()
+	} else {
+		answer = formatArithmeticRat(value)
+	}
+	if answer == "" {
+		return "", "", false
+	}
+	worked = fmt.Sprintf("按四则运算规则计算：\n%s = %s\n\n答案：%s", display, answer, answer)
+	return worked, answer, true
+}
+
+// solveSimplestRatio 只化简完整数值比题型，保留前后项顺序和最简单整数比的答案要求。
+func solveSimplestRatio(problem string) (worked, answer string, ok bool) {
+	s := strings.TrimSpace(problem)
+	if len(s) > 256 {
+		return "", "", false
+	}
+	s = elementaryParenthesizedFractionRe.ReplaceAllString(s, "$1/$2")
+	match := simplestRatioRequestRe.FindStringSubmatch(s)
+	if len(match) != 3 {
+		return "", "", false
+	}
+	leftText := strings.NewReplacer(" ", "", "\t", "").Replace(match[1])
+	rightText := strings.NewReplacer(" ", "", "\t", "").Replace(match[2])
+	left, leftOK := nonNegativeRat(leftText)
+	right, rightOK := positiveRat(rightText)
+	if !leftOK || !rightOK {
+		return "", "", false
+	}
+	commonDivisor := new(big.Int).GCD(nil, nil, left.Denom(), right.Denom())
+	commonDenominator := new(big.Int).Quo(new(big.Int).Mul(left.Denom(), right.Denom()), commonDivisor)
+	leftInteger := new(big.Int).Mul(left.Num(), new(big.Int).Quo(new(big.Int).Set(commonDenominator), left.Denom()))
+	rightInteger := new(big.Int).Mul(right.Num(), new(big.Int).Quo(new(big.Int).Set(commonDenominator), right.Denom()))
+	divisor := new(big.Int).GCD(nil, nil, leftInteger, rightInteger)
+	first := new(big.Int).Quo(new(big.Int).Set(leftInteger), divisor)
+	second := new(big.Int).Quo(new(big.Int).Set(rightInteger), divisor)
+	answer = first.String() + ":" + second.String()
+	worked = fmt.Sprintf("比的前项和后项同时乘以同一个非零数，比值不变。\n两项同时乘 %s，化成整数比：\n%s:%s = %s:%s\n\n%s 和 %s 的最大公因数是 %s，两项同时除以 %s，得到最简单的整数比 %s。\n\n答案：%s",
+		commonDenominator, leftText, rightText, leftInteger, rightInteger, leftInteger, rightInteger, divisor, divisor, answer, answer)
+	return worked, answer, true
+}
+
+// positiveIntegerRatioAnswer 只规范化单个正整数比，不约去公因数，避免把非最简作答判对。
+func positiveIntegerRatioAnswer(answer string) (string, bool) {
+	match := positiveIntegerRatioAnswerRe.FindStringSubmatch(normalizeAnswer(answer))
+	if len(match) != 3 {
+		return "", false
+	}
+	first, firstOK := new(big.Int).SetString(match[1], 10)
+	second, secondOK := new(big.Int).SetString(match[2], 10)
+	if !firstOK || !secondOK || first.Sign() <= 0 || second.Sign() <= 0 {
+		return "", false
+	}
+	return first.String() + ":" + second.String(), true
+}
+
+func simplestRatioAllowedByConstraint(constraint string) bool {
+	c := strings.TrimSpace(constraint)
+	if c == "" {
+		return true
+	}
+	for _, marker := range []string{"不使用比", "不用比", "不得使用比", "禁止使用比"} {
+		if strings.Contains(c, marker) {
+			return false
+		}
+	}
+	return strings.Contains(c, "化简比") || strings.Contains(c, "整数比") ||
+		strings.Contains(c, "比的") || simplestRatioMethodRe.MatchString(c)
+}
+
+// unwrapSimplestFractionRequest 只接受产品链路使用的这一句固定自然语言包装。包装剥离后仍
+// 必须通过 normalizeTrivialArithmetic 的字符白名单与 Go AST 白名单；任何尾随指令、变量、
+// 函数或多行内容都会 fail closed 回完整模型链，不能把“自然语言支持”扩成表达式注入面。
+func unwrapSimplestFractionRequest(problem string) (string, bool) {
+	s := strings.TrimSpace(problem)
+	matches := simplestFractionRequestRe.FindStringSubmatch(s)
+	if len(matches) != 2 {
+		return problem, false
+	}
+	return strings.TrimSpace(matches[1]), true
+}
+
+func normalizeTrivialArithmetic(problem string) (expr, display string, ok bool) {
+	s := strings.TrimSpace(problem)
+	// 这一固定印刷指令只要求计算结果化简；原题仍保留，后续只解析完整算式。
+	s = strings.TrimSpace(strings.TrimPrefix(s, "把下面每题的得数化简："))
+	if s == "" || len(s) > 256 {
+		return "", "", false
+	}
+	s = groupArithmeticFractionLiterals(s)
+	replacer := strings.NewReplacer(
+		"×", "*", "÷", "/", "＋", "+", "－", "-", "−", "-",
+		"（", "(", "）", ")", "＝", "=", "？", "?",
+	)
+	s = replacer.Replace(s)
+	s = itemNumberPrefixRe.ReplaceAllString(s, "")
+	// 完整单行包装允许算符旁空白，但不能将分隔数字或题号拼入算式。
+	if matches := standaloneArithmeticRequestRe.FindStringSubmatch(s); len(matches) == 2 {
+		if separatedArithmeticNumberRe.MatchString(matches[1]) {
+			return "", "", false
+		}
+		s = matches[1]
+	}
+	if i := strings.IndexByte(s, '='); i >= 0 {
+		// 只接受“表达式=”或“表达式=?”；已有等式/方程不是纯求值题。
+		rhs := strings.TrimSpace(s[i+1:])
+		if rhs != "" && rhs != "?" {
+			return "", "", false
+		}
+		if strings.ContainsRune(s[i+1:], '=') {
+			return "", "", false
+		}
+		s = strings.TrimSpace(s[:i])
+	} else {
+		s = strings.TrimSuffix(strings.TrimSpace(s), "?")
+	}
+	if s == "" {
+		return "", "", false
+	}
+	hasDigit := false
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9':
+			hasDigit = true
+		case unicode.IsSpace(r), strings.ContainsRune(".+-*/()", r):
+		default:
+			return "", "", false
+		}
+	}
+	if !hasDigit {
+		return "", "", false
+	}
+	expr = strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) {
+			return -1
+		}
+		return r
+	}, s)
+	display = strings.NewReplacer("*", "×", "/", "÷").Replace(expr)
+	return expr, display, true
+}
+
+// groupArithmeticFractionLiterals 在除号归一化前保留数字分数的整体性，避免把除以分数变成连续除法。
+func groupArithmeticFractionLiterals(s string) string {
+	var b strings.Builder
+	start := 0
+	for _, span := range arithmeticFractionLiteralRe.FindAllStringIndex(s, -1) {
+		// 小数和连续斜线除法不截取局部数字；保留它们原有的运算顺序。
+		if span[0] > 0 && strings.ContainsRune("0123456789./", rune(s[span[0]-1])) ||
+			span[1] < len(s) && strings.ContainsRune("0123456789./", rune(s[span[1]])) {
+			continue
+		}
+		b.WriteString(s[start:span[0]])
+		b.WriteByte('(')
+		b.WriteString(s[span[0]:span[1]])
+		b.WriteByte(')')
+		start = span[1]
+	}
+	if start == 0 {
+		return s
+	}
+	b.WriteString(s[start:])
+	return b.String()
+}
+
+// arithmeticAnswerValue 只从“纯数值/算式答案”中取精确值。允许学生写完整等式或在最后一行写
+// “答案：…”，但不剥单位、不从自然语言里猜数字；无法保守判定时仍交给 grader。
+func arithmeticAnswerValue(answer string) (string, bool) {
+	s := normalizeArithmeticAnswerMarkup(answer)
+	if s == "" || len(s) > 512 {
+		return "", false
+	}
+	lines := strings.Split(strings.ReplaceAll(s, "\r\n", "\n"), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		candidate := strings.Trim(strings.TrimSpace(lines[i]), "`*。.；;，,、 ")
+		candidate = strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(candidate, "答案："), "答："))
+		candidate = strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(candidate, "答案:"), "答:"))
+		candidate = strings.TrimSpace(strings.TrimPrefix(candidate, "是"))
+		candidate = strings.Trim(candidate, "`*。.；;，,、 ")
+		candidate = strings.ReplaceAll(candidate, "＝", "=")
+		if eq := strings.LastIndexByte(candidate, '='); eq >= 0 {
+			rhs := strings.TrimSpace(candidate[eq+1:])
+			if rhs == "" || rhs == "?" {
+				continue
+			}
+			candidate = rhs
+		}
+		if value, ok := mixedNumberAnswerValue(candidate); ok {
+			return value, true
+		}
+		if _, value, ok := solveTrivialArithmetic(candidate); ok {
+			return value, true
+		}
+	}
+	// 有完整演算时最后一行不一定是纯算式，例如“24÷3×8=64 答这个数是64”。只在出现明确
+	// “答/答案”标记时提取其后的完整算式并精确求值；单位与其他文字不参与数值相等性比较。
+	if matches := writtenFinalAnswerRe.FindAllStringSubmatch(s, -1); len(matches) > 0 {
+		candidate := matches[len(matches)-1][1]
+		if _, value, ok := solveTrivialArithmetic(candidate); ok {
+			return value, true
+		}
+	}
+	return "", false
+}
+
+// normalizeArithmeticAnswerMarkup 只把识题 canonical Markdown 的数学包装投影为
+// 本机计算器可读文本；持久化与用户展示仍保留原始 canonical 内容。
+func normalizeArithmeticAnswerMarkup(answer string) string {
+	s := strings.TrimSpace(answer)
+	// 只解开明确的步骤分隔，避免把 \neq、\nabla 等命令误当换行；原始作答不回写。
+	s = strings.NewReplacer(`\r\n=`, "\n=", `\n=`, "\n=", `\n答：`, "\n答：", `\n答:`, "\n答:").Replace(s)
+	for {
+		next := answerLatexFractionRe.ReplaceAllString(s, `($1/$2)`)
+		if next == s {
+			break
+		}
+		s = next
+	}
+	s = answerLatexCompactFractionRe.ReplaceAllString(s, `($1/$2)`)
+	s = answerLatexTextRe.ReplaceAllString(s, `$1`)
+	s = answerParenthesizedFractionRe.ReplaceAllString(s, `($1/$2)`)
+	s = strings.NewReplacer(
+		`\begin{aligned}`, "", `\end{aligned}`, "",
+		`\left`, "", `\right`, "", `\times`, "×", `\div`, "÷", `\cdot`, "×",
+		`\ `, " ",
+		`\\`, "\n", "$", "", "&", "",
+	).Replace(s)
+	s = answerMixedFractionRe.ReplaceAllString(s, `$1+($2)`)
+	s = answerSpacedMixedFractionRe.ReplaceAllString(s, `$1+($2)`)
+	return strings.TrimSpace(s)
+}
+
+// mixedNumberAnswerValue parses elementary-school mixed numbers such as "6 2/7" or "6又2/7".
+// Passing the space-separated form through the ordinary expression normalizer would remove the
+// space and silently reinterpret it as 62/7 instead of 6+2/7.
+func mixedNumberAnswerValue(answer string) (string, bool) {
+	matches := mixedNumberAnswerRe.FindStringSubmatch(strings.TrimSpace(answer))
+	if len(matches) != 5 {
+		return "", false
+	}
+	whole, wholeOK := new(big.Int).SetString(matches[2], 10)
+	numerator, numeratorOK := new(big.Int).SetString(matches[3], 10)
+	denominator, denominatorOK := new(big.Int).SetString(matches[4], 10)
+	if !wholeOK || !numeratorOK || !denominatorOK || denominator.Sign() <= 0 ||
+		numerator.Sign() < 0 || numerator.Cmp(denominator) >= 0 {
+		return "", false
+	}
+	totalNumerator := new(big.Int).Add(new(big.Int).Mul(whole, denominator), numerator)
+	if matches[1] == "-" {
+		totalNumerator.Neg(totalNumerator)
+	}
+	return formatArithmeticRat(new(big.Rat).SetFrac(totalNumerator, denominator)), true
+}
+
+func evalArithmeticNode(node ast.Expr, remaining *int) (*big.Rat, bool) {
+	if remaining == nil || *remaining <= 0 {
+		return nil, false
+	}
+	(*remaining)--
+	switch n := node.(type) {
+	case *ast.ParenExpr:
+		return evalArithmeticNode(n.X, remaining)
+	case *ast.BasicLit:
+		if n.Kind != token.INT && n.Kind != token.FLOAT {
+			return nil, false
+		}
+		v, ok := new(big.Rat).SetString(n.Value)
+		return v, ok
+	case *ast.UnaryExpr:
+		v, ok := evalArithmeticNode(n.X, remaining)
+		if !ok {
+			return nil, false
+		}
+		switch n.Op {
+		case token.ADD:
+			return new(big.Rat).Set(v), true
+		case token.SUB:
+			return new(big.Rat).Neg(v), true
+		default:
+			return nil, false
+		}
+	case *ast.BinaryExpr:
+		left, ok := evalArithmeticNode(n.X, remaining)
+		if !ok {
+			return nil, false
+		}
+		right, ok := evalArithmeticNode(n.Y, remaining)
+		if !ok {
+			return nil, false
+		}
+		switch n.Op {
+		case token.ADD:
+			return new(big.Rat).Add(left, right), true
+		case token.SUB:
+			return new(big.Rat).Sub(left, right), true
+		case token.MUL:
+			return new(big.Rat).Mul(left, right), true
+		case token.QUO:
+			if right.Sign() == 0 {
+				return nil, false
+			}
+			return new(big.Rat).Quo(left, right), true
+		default:
+			return nil, false
+		}
+	default:
+		return nil, false
+	}
+}
+
+func formatArithmeticRat(v *big.Rat) string {
+	if v == nil {
+		return ""
+	}
+	if v.IsInt() {
+		return v.Num().String()
+	}
+	den := new(big.Int).Set(v.Denom())
+	two, five := big.NewInt(2), big.NewInt(5)
+	twos, fives := 0, 0
+	for new(big.Int).Mod(den, two).Sign() == 0 {
+		den.Quo(den, two)
+		twos++
+	}
+	for new(big.Int).Mod(den, five).Sign() == 0 {
+		den.Quo(den, five)
+		fives++
+	}
+	if den.Cmp(big.NewInt(1)) != 0 {
+		return v.RatString()
+	}
+	scale := twos
+	if fives > scale {
+		scale = fives
+	}
+	if scale > 64 {
+		return v.RatString()
+	}
+	s := v.FloatString(scale)
+	if strings.Contains(s, ".") {
+		s = strings.TrimRight(strings.TrimRight(s, "0"), ".")
+	}
+	if s == "-0" {
+		return "0"
+	}
+	return s
+}
+
+func trivialArithmeticAllowedByConstraint(problem, constraint string) bool {
+	c := strings.TrimSpace(constraint)
+	if c == "" {
+		return true
+	}
+	p := strings.TrimSpace(problem)
+	if strings.Contains(p, ".") && !strings.Contains(c, "小数") && !strings.Contains(c, "四则运算") {
+		return false
+	}
+	if strings.ContainsAny(p, "÷/") &&
+		!strings.Contains(c, "除法") && !strings.Contains(c, "分数") && !strings.Contains(c, "四则运算") {
+		return false
+	}
+	if strings.ContainsAny(p, "×*") && !strings.Contains(c, "乘法") && !strings.Contains(c, "四则运算") {
+		return false
+	}
+	return true
+}

@@ -52,9 +52,8 @@ func TestReviewSkill_ReturnsDuePlan(t *testing.T) {
 	if !strings.Contains(res.Content, "3.8×3") || !strings.Contains(res.Content, "陪练建议") {
 		t.Errorf("陪练方案应含到期题 + 引导话术: %q", res.Content)
 	}
-	// 守答案遮罩：话术里明确"别直接报答案"。
-	if !strings.Contains(res.Content, "别直接报答案") {
-		t.Errorf("应含答案遮罩话术: %q", res.Content)
+	if !strings.Contains(res.Content, "家长") || strings.Contains(res.Content, "别直接报答案") {
+		t.Errorf("陪练方案不得挡住家长答案: %q", res.Content)
 	}
 	if res.Metadata["k12_due_count"] != "2" {
 		t.Errorf("到期数应为 2, meta=%v", res.Metadata)
@@ -77,35 +76,29 @@ func TestReviewSkill_EmptyWhenNothingDue(t *testing.T) {
 	}
 }
 
-func TestReviewSkill_GenerateRetryVariant(t *testing.T) {
-	deps := newDeps(t, usecase.GradeOutcome{}) // Solver=fakeSolver{sol:"解：11.4"}
-	seedDueMistake(t, deps, "3.8×3", "小数乘法", "计算失误", 500)
-	sk := skilladapter.NewReviewSkill(deps)
-
-	ctx := skill.WithRoutedAgent(context.Background(), "mingming")
-	res, err := sk.Execute(ctx, map[string]any{"generate_retry": true, "grade": "五年级上"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(res.Content, "变式题") || !strings.Contains(res.Content, "解：11.4") {
-		t.Errorf("generate_retry 应附变式题（含 fakeSolver 解）: %q", res.Content)
-	}
-}
-
-func TestReviewSkill_AccumulationUsesContentAndVerbatimRetry(t *testing.T) {
+func TestReviewSkill_AccumulationUsesContent(t *testing.T) {
 	deps := newDeps(t, usecase.GradeOutcome{})
 	seedDueAccum(t, deps, "believe", 400)
 	sk := skilladapter.NewReviewSkill(deps)
 	ctx := skill.WithRoutedAgent(context.Background(), "mingming")
-	res, err := sk.Execute(ctx, map[string]any{"generate_retry": true})
+	res, err := sk.Execute(ctx, map[string]any{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(res.Content, "believe") || !strings.Contains(res.Content, "再默一遍") {
-		t.Fatalf("cross-subject review lost content/verbatim retry: %q", res.Content)
+	if !strings.Contains(res.Content, "believe") {
+		t.Fatalf("cross-subject review lost accumulation content: %q", res.Content)
 	}
-	if res.Metadata["badge"] != "verbatim-recall" {
-		t.Fatalf("badge=%q want verbatim-recall", res.Metadata["badge"])
+}
+
+func TestReviewSkillHasNoLegacyInlineGenerationArguments(t *testing.T) {
+	sk := skilladapter.NewReviewSkill(usecase.Deps{})
+	if strings.Contains(sk.Description(), "generate_retry") {
+		t.Fatalf("legacy generation argument leaked into description: %q", sk.Description())
+	}
+	definition := sk.ToolDefinition()
+	if definition.Function.Parameters != nil &&
+		len(definition.Function.Parameters.Properties) != 0 {
+		t.Fatalf("review skill must be read-only: %+v", definition.Function.Parameters.Properties)
 	}
 }
 

@@ -35,7 +35,7 @@ func (fakeSolveExec) Execute(_ context.Context, args map[string]any) (*skill.Res
 
 type capturedInsights struct{ n int }
 
-func (c *capturedInsights) WriteWeakness(context.Context, string, string, string) error {
+func (c *capturedInsights) WriteWeakness(context.Context, string, string, string, string) error {
 	c.n++
 	return nil
 }
@@ -64,6 +64,9 @@ func TestWire_RealAdapterClosedLoop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Wire: %v", err)
 	}
+	if k.Deps.VerifiedGrader == nil {
+		t.Fatal("production wiring must explicitly retain the verified-solution grader fast path")
+	}
 	ctx := context.Background()
 
 	// 六缝装配：错题本 schema 已注册
@@ -84,6 +87,10 @@ func TestWire_RealAdapterClosedLoop(t *testing.T) {
 	}
 	if res.Evidence.Badge() != "verified-strong" {
 		t.Errorf("code_exec 一致应强徽章, got %q", res.Evidence.Badge())
+	}
+	// 学情信号经 Transactional Outbox 投影（§6.9）：显式补投 pending（生产由 Outbox.Start 驱动）。
+	if err := k.Outbox.ProcessPending(ctx); err != nil {
+		t.Fatalf("outbox 投递: %v", err)
 	}
 	if ins.n != 1 {
 		t.Errorf("应写 1 条学情, got %d", ins.n)
@@ -113,5 +120,38 @@ func TestWire_NilGuards(t *testing.T) {
 	db := newDB(t)
 	if _, err := Wire(db, nil); err == nil {
 		t.Error("solveSkill=nil 应报错")
+	}
+}
+
+func TestWire_ParentTeachingGuideUsesDedicatedGenerator(t *testing.T) {
+	db := newDB(t)
+	calls := 0
+	k, err := Wire(db, fakeSolveExec{}, WithParentTeachingGuideGenerator(func(
+		context.Context, string, string, string,
+	) (string, error) {
+		calls++
+		return `{
+			"answer":"11.4",
+			"full_solution_steps":["先按整数乘法计算","再点回一位小数"],
+			"grade_level_method":"使用五年级小数乘法",
+			"likely_mistakes":["小数点错位"],
+			"parent_teaching_sequence":["先让孩子计算整数乘法，再点小数点"],
+			"follow_up_questions":["两个因数共有几位小数？"],
+			"checking_method":"用除法验算"
+		}`, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if k.Deps.ParentTeachingGuide == nil {
+		t.Fatal("production wiring omitted ParentTeachingGuideGenerator")
+	}
+	guide, err := k.Deps.ParentTeachingGuide.GenerateParentTeachingGuide(context.Background(),
+		usecase.ParentTeachingGuideRequest{
+			Subject: "数学", Grade: "五年级上", Problem: "3.8×3=",
+			VerifiedSolution: "11.4", KnowledgePoints: []string{"小数乘法"},
+		})
+	if err != nil || calls != 1 || guide.CheckingMethod != "用除法验算" {
+		t.Fatalf("dedicated generator wiring: calls=%d guide=%#v err=%v", calls, guide, err)
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/hexagon-codes/hexagon"
+	mockllm "github.com/hexagon-codes/hexagon/testing/mock"
 	"github.com/hexagon-codes/hexclaw/config"
 	"github.com/hexagon-codes/hexclaw/llmrouter"
 	"github.com/hexagon-codes/hexclaw/skill"
@@ -51,8 +52,8 @@ func newCostAwareEngine(t *testing.T, providers map[string]hexagon.Provider, cfg
 // TestRouteForVision_UsesConfiguredDefaultNotCostAware cost-aware 策略下，识题视觉路由必须落到
 // **配置的默认**（智谱 glm-4v-flash），而非 cost-aware 抓到的本地 Ollama。
 func TestRouteForVision_UsesConfiguredDefaultNotCostAware(t *testing.T) {
-	local := &numCtxCaptureProvider{}
-	cloud := &numCtxCaptureProvider{}
+	local := mockllm.NewLLMProvider("local")
+	cloud := mockllm.NewLLMProvider("cloud")
 	eng := newCostAwareEngine(t,
 		map[string]hexagon.Provider{
 			"Ollama (本地)": local,
@@ -60,7 +61,14 @@ func TestRouteForVision_UsesConfiguredDefaultNotCostAware(t *testing.T) {
 		},
 		map[string]config.LLMProviderConfig{
 			"Ollama (本地)": {Model: "qwen3.5:9b"},
-			"智谱 AI":       {Model: "glm-4v-flash"},
+			"智谱 AI": {
+				Model: "text-default", Models: []string{"text-default", "glm-4v-flash"},
+				ModelSpecsMode: config.LLMModelSpecsModeExplicit,
+				ModelSpecs: []config.LLMProviderModelSpec{
+					{ID: "text-default", Capabilities: []string{config.LLMModelCapabilityText}},
+					{ID: "glm-4v-flash", Capabilities: []string{config.LLMModelCapabilityText, config.LLMModelCapabilityVision}},
+				},
+			},
 		},
 		"智谱 AI", // 配置的默认 provider
 	)
@@ -77,7 +85,41 @@ func TestRouteForVision_UsesConfiguredDefaultNotCostAware(t *testing.T) {
 	if model != "glm-4v-flash" {
 		t.Fatalf("BUG 复现：识题未用配置的默认视觉模型 glm-4v-flash，got %q（cost-aware 抓了本地）", model)
 	}
-	if provider != hexagon.Provider(cloud) {
+	// Selector may decorate providers with capability/egress middleware, so
+	// assert the selected provider identity instead of its concrete pointer.
+	if provider.Name() != cloud.Name() {
 		t.Fatalf("BUG 复现：识题路由到了非默认 provider（应为配置默认智谱 AI）")
+	}
+}
+
+func TestRouteForVisionFailsClosedWhenOnlyAnotherProviderHasVision(t *testing.T) {
+	defaultProvider := mockllm.NewLLMProvider("default")
+	otherProvider := mockllm.NewLLMProvider("other")
+	eng := newCostAwareEngine(t,
+		map[string]hexagon.Provider{
+			"default": defaultProvider,
+			"other":   otherProvider,
+		},
+		map[string]config.LLMProviderConfig{
+			"default": {
+				Model: "text-only", Models: []string{"text-only"},
+				ModelSpecsMode: config.LLMModelSpecsModeExplicit,
+				ModelSpecs: []config.LLMProviderModelSpec{{
+					ID: "text-only", Capabilities: []string{config.LLMModelCapabilityText},
+				}},
+			},
+			"other": {
+				Model: "vision", Models: []string{"vision"},
+				ModelSpecsMode: config.LLMModelSpecsModeExplicit,
+				ModelSpecs: []config.LLMProviderModelSpec{{
+					ID: "vision", Capabilities: []string{config.LLMModelCapabilityText, config.LLMModelCapabilityVision},
+				}},
+			},
+		},
+		"default",
+	)
+
+	if _, _, err := eng.RouteForVision(context.Background()); err == nil {
+		t.Fatal("RouteForVision crossed provider instead of failing closed")
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -16,6 +17,39 @@ import (
 
 	_ "modernc.org/sqlite"
 )
+
+type k12ReleaseReceiptSearcher struct{}
+
+func (k12ReleaseReceiptSearcher) Search(
+	context.Context, string, int, knowledge.Filter,
+) ([]*knowledge.SearchResult, bool, error) {
+	return nil, false, nil
+}
+
+func (k12ReleaseReceiptSearcher) SearchWithReceipt(
+	_ context.Context, query string, _ int, _ knowledge.Filter,
+) ([]*knowledge.SearchResult, bool, *knowledge.QueryEmbeddingReceipt, error) {
+	return []*knowledge.SearchResult{{
+			Chunk: &knowledge.Chunk{
+				ID: "A-c0", DocID: "A", DocTitle: "A", Source: "upload:a.pdf",
+				Content: "shared widget content", PageStart: 7, PageEnd: 7,
+				CitationDigest: "chunk-content-hash-a",
+			},
+			VectorScore: 0.99,
+		}}, true, &knowledge.QueryEmbeddingReceipt{
+			Operation: "query_embedding", Status: "succeeded",
+			ProviderID: "ollama", Model: "qwen3-embedding:8b",
+			ProfileID:         "ollama:qwen3-embedding:8b",
+			ProfileConfigHash: "qwen-profile-hash", Dimension: 4096,
+			RevisionID: "revision-a", QueryDigest: "sha256:query",
+		}, nil
+}
+
+func (k12ReleaseReceiptSearcher) TextSearch(
+	context.Context, string, int, knowledge.Filter,
+) ([]*knowledge.SearchResult, error) {
+	return nil, nil
+}
 
 // /api/v1/knowledge/search 端点应把 source_types / sources / 日期过滤透传到检索层，
 // 在 topK 截断前生效。这里直接灌库（绕开 splitter），构造 Server 调处理器验证端到端。
@@ -33,6 +67,11 @@ func TestHandleSearchKnowledge_MetadataFilter(t *testing.T) {
 	add := func(id, source, stype string, created time.Time) {
 		doc := &knowledge.Document{ID: id, Title: id, Source: source, SourceType: stype, ChunkCount: 1, CreatedAt: created, UpdatedAt: created, Status: "indexed"}
 		ch := &knowledge.Chunk{ID: id + "-c0", DocID: id, DocTitle: id, Source: source, ChunkCount: 1, Content: "shared widget content", Index: 0, CreatedAt: created}
+		if id == "A" {
+			ch.PageStart, ch.PageEnd = 7, 7
+			ch.SourceDigest = strings.Repeat("a", 64)
+			ch.SourceOffsetStart, ch.SourceOffsetEnd = 300, 360
+		}
 		if err := store.Add(ctx, doc, []*knowledge.Chunk{ch}); err != nil {
 			t.Fatalf("add %s: %v", id, err)
 		}
@@ -82,6 +121,12 @@ func TestHandleSearchKnowledge_MetadataFilter(t *testing.T) {
 	if st, _ := bOnly[0].Metadata["source_type"].(string); st != "agent" {
 		t.Errorf("Metadata.source_type 应回填 agent，得 %v", bOnly[0].Metadata)
 	}
+	aOnly := post(`{"query":"widget","top_k":10,"sources":["upload:a.pdf"]}`)
+	if len(aOnly) != 1 || aOnly[0].PageStart != 7 || aOnly[0].PageEnd != 7 ||
+		aOnly[0].SourceDigest != strings.Repeat("a", 64) ||
+		aOnly[0].SourceOffsetStart != 300 || aOnly[0].SourceOffsetEnd != 360 {
+		t.Fatalf("search API structured source span=%+v", aOnly)
+	}
 	// created_before=06-10：只剩 A（日期在 Go 层按真实时刻过滤）。
 	if g := docIDs(post(`{"query":"widget","top_k":10,"created_before":"2026-06-10"}`)); !g["A"] || g["B"] {
 		t.Fatalf("created_before=06-10 应只剩 A，得 %v", g)
@@ -92,5 +137,93 @@ func TestHandleSearchKnowledge_MetadataFilter(t *testing.T) {
 	srv.handleSearchKnowledge(w, req)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("非法日期应 400，得 %d", w.Code)
+	}
+
+	cfg := knowledge.DefaultHybridConfig()
+	cfg.ExpandEnabled = false
+	cfg.RerankEnabled = false
+	cfg.UseRRF = false
+	receiptManager := knowledge.NewManager(
+		store, store, nil,
+		knowledge.WithHybridConfig(cfg),
+		knowledge.WithRevisionSemanticSearcher(k12ReleaseReceiptSearcher{}),
+	)
+	receiptServer := NewServer(config.DefaultConfig(), nil, nil, nil)
+	receiptServer.SetKnowledgeBase(receiptManager)
+	req = httptest.NewRequest(
+		http.MethodPost, "/api/v1/knowledge/search",
+		strings.NewReader(`{"query":"frozen textbook oracle","top_k":1}`),
+	)
+	w = httptest.NewRecorder()
+	receiptServer.handleSearchKnowledge(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("receipt search status=%d body=%s", w.Code, w.Body.String())
+	}
+	var receiptPayload struct {
+		Results  []knowledge.SearchHit             `json:"results"`
+		Receipts []knowledge.QueryEmbeddingReceipt `json:"query_receipts"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &receiptPayload); err != nil {
+		t.Fatal(err)
+	}
+	if len(receiptPayload.Results) != 1 ||
+		receiptPayload.Results[0].DocID != "A" ||
+		receiptPayload.Results[0].PageStart != 7 ||
+		receiptPayload.Results[0].ChunkID != "A-c0" ||
+		receiptPayload.Results[0].CitationDigest != "chunk-content-hash-a" ||
+		len(receiptPayload.Receipts) != 1 ||
+		receiptPayload.Receipts[0].Model != "qwen3-embedding:8b" ||
+		receiptPayload.Receipts[0].Operation != "query_embedding" {
+		t.Fatalf("C09 receipt response drift: %+v", receiptPayload)
+	}
+}
+
+func TestHandleSearchKnowledge_EmptyCorpusReturnsJSONArrays(t *testing.T) {
+	ctx := context.Background()
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "kb.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	store := knowledge.NewSQLiteStore(db)
+	if err := store.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	manager := knowledge.NewManager(store, store, nil)
+	server := NewServer(config.DefaultConfig(), nil, nil, nil)
+	server.SetKnowledgeBase(manager)
+	httpServer := httptest.NewServer(server.routes())
+	t.Cleanup(httpServer.Close)
+
+	response, err := http.Post(
+		httpServer.URL+"/api/v1/knowledge/search",
+		"application/json",
+		strings.NewReader(`{"query":"empty corpus query","top_k":3}`),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = response.Body.Close() })
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.StatusCode, body)
+	}
+
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("decode response: %v body=%s", err, body)
+	}
+	for _, field := range []string{"results", "query_receipts"} {
+		raw, ok := payload[field]
+		if !ok {
+			t.Fatalf("response is missing %q: %s", field, body)
+		}
+		if got := strings.TrimSpace(string(raw)); got != "[]" {
+			t.Fatalf("%s must be JSON [], got %s: %s", field, got, body)
+		}
 	}
 }

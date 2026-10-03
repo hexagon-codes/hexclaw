@@ -19,12 +19,12 @@
 | Item | Minimum | Recommended |
 |------|---------|-------------|
 | OS | Linux / macOS / Windows | Linux (Ubuntu 22.04+) |
-| Go | >= 1.25.7 | Latest stable |
+| Go | >= 1.25.13 | Latest stable |
 | Memory | 128 MB | 512 MB+ |
 | Disk | 100 MB | 1 GB+ (including knowledge base data) |
 | Network | Access to LLM API | Low-latency connection |
 
-HexClaw compiles to a single binary with no external runtime dependencies (SQLite uses a pure Go implementation).
+The core is a single binary with pure Go SQLite. Document exports, Chinese/math rendering and numeric execution also need Pandoc, Typst, fonts and Python/SymPy; the cloud image includes them.
 
 ---
 
@@ -74,19 +74,16 @@ sudo mv hexclaw /usr/local/bin/
 
 ### Method 4: Docker
 
-```bash
-# Use official image
-docker run -d \
-  --name hexclaw \
-  -p 16060:16060 \
-  -e DEEPSEEK_API_KEY="sk-xxx" \
-  -v hexclaw-data:/data/.hexclaw \
-  ghcr.io/hexagon-codes/hexclaw:latest
+Use Docker Compose for a single server. In the private deployment `.env`, set `HEXCLAW_IMAGE=ghcr.io/hexagon-codes/hexclaw@sha256:<actual-digest>` using a digest from an available build:
 
-# Or build from source
-docker build -t hexclaw .
-docker run -d --name hexclaw -p 16060:16060 -e DEEPSEEK_API_KEY="sk-xxx" hexclaw
+```bash
+docker compose pull hexclaw
+docker compose up -d --no-build hexclaw
 ```
+
+For local source development, run `docker compose build hexclaw` first; the default image is `hexclaw:dev`. Published images use version and full commit SHA tags; `latest` is reserved for stable releases. Keep the existing project, data volume and complete Compose override set when updating.
+
+The source image targets Linux amd64 and persists the complete writable HOME. The default Compose setup **does not install Ollama or download models**. Configure model and Embedding APIs for the selected remote backend in Desktop. Knowledge data and indexes belong to that server; keyword retrieval and vector availability are separate when no effective Embedding configuration exists. See the [cloud deployment guide](cloud-deployment.md) for initialization, Kubernetes, backup, automation and current verification limits.
 
 ---
 
@@ -103,6 +100,8 @@ The default config directory is `~/.hexclaw/`, containing:
 
 ```
 ~/.hexclaw/
+├── AGENTS.md       # Shared working rules, initialized only when absent
+├── auth.json       # Desktop-owned local/remote connection credentials
 ├── hexclaw.yaml     # Main config file
 ├── data.db          # SQLite database (auto-created)
 ├── master.key       # At-rest credential encryption master key (auto-created, 0600)
@@ -116,14 +115,14 @@ The default config directory is `~/.hexclaw/`, containing:
 
 ### Skill marketplace (hexclaw-hub)
 
-The desktop **Skill Marketplace** fetches `index.json` and `skills/*.md` from a GitHub repo. The default is **`hexagon-codes/hexclaw-hub`** on tag **`v0.0.6`**. Override for a mirror:
+The desktop **Skill Marketplace** fetches `index.json` and `skills/*.md` from a GitHub repo. The default is **`hexagon-codes/hexclaw-hub`** on tag **`v0.0.7`**. Override for a mirror:
 
 ```yaml
 skills:
   enabled: true
   hub:
     repo_url: https://github.com/hexagon-codes/hexclaw-hub
-    branch: v0.0.6
+    branch: v0.0.7
 ```
 
 After installing or uninstalling a Markdown skill, the engine **syncs** the runtime skill registry; you usually **do not need** to restart the sidecar.
@@ -190,10 +189,11 @@ See the complete config file in [README.en.md](../README.en.md#configuration).
 ```bash
 hexclaw serve
 hexclaw serve --config /path/to/hexclaw.yaml
-hexclaw serve --desktop  # Single-user desktop mode: local anonymous access plus desktop notification/cron/canvas/webhook integration
+# Desktop launches --desktop with its persistent native token; standalone:
+hexclaw serve
 ```
 
-### 2. systemd Service (recommended for Linux production)
+### 2. systemd Service (direct binary management)
 
 Create service file `/etc/systemd/system/hexclaw.service`:
 
@@ -257,104 +257,10 @@ sudo systemctl status hexclaw
 sudo journalctl -u hexclaw -f
 ```
 
-### 3. Docker Compose (recommended for containerized deployment)
+### 3. Docker Compose and Kubernetes
 
-Create `docker-compose.yml`:
+Use the maintained [Compose file](../docker-compose.yml) or [single-instance Kubernetes manifest](../docker/kubernetes.yaml), following the [cloud deployment guide](cloud-deployment.md). Both keep `/data` as a writable persistent HOME and initialize credentials only once. Do not mount a read-only configuration over the runtime YAML, or inject daily Provider keys through environment variables; either would break remote configuration persistence. Kubernetes uses one replica and Recreate. The full guide covers first-time seeds, Ollama networking, shutdown, updates and complete backups.
 
-```yaml
-version: "3.8"
-
-services:
-  hexclaw:
-    image: ghcr.io/hexagon-codes/hexclaw:latest
-    # Or use local build
-    # build: .
-    container_name: hexclaw
-    restart: unless-stopped
-    ports:
-      - "16060:16060"
-    environment:
-      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
-      # - OPENAI_API_KEY=${OPENAI_API_KEY}
-      # - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
-    volumes:
-      - hexclaw-data:/data/.hexclaw
-      - ./hexclaw.yaml:/data/.hexclaw/hexclaw.yaml:ro
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:16060/health"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-
-volumes:
-  hexclaw-data:
-```
-
-```bash
-# Start
-docker compose up -d
-
-# View logs
-docker compose logs -f hexclaw
-
-# Stop
-docker compose down
-```
-
-### 4. Kubernetes
-
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: hexclaw
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: hexclaw
-  template:
-    metadata:
-      labels:
-        app: hexclaw
-    spec:
-      containers:
-        - name: hexclaw
-          image: ghcr.io/hexagon-codes/hexclaw:latest
-          ports:
-            - containerPort: 16060
-          env:
-            - name: DEEPSEEK_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: hexclaw-secrets
-                  key: deepseek-api-key
-          volumeMounts:
-            - name: data
-              mountPath: /data/.hexclaw
-            - name: config
-              mountPath: /data/.hexclaw/hexclaw.yaml
-              subPath: hexclaw.yaml
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: 16060
-            initialDelaySeconds: 10
-            periodSeconds: 30
-          resources:
-            requests:
-              memory: "128Mi"
-              cpu: "100m"
-            limits:
-              memory: "512Mi"
-              cpu: "500m"
-      volumes:
-        - name: data
-          persistentVolumeClaim:
-            claimName: hexclaw-data
-        - name: config
-          configMap:
-            name: hexclaw-config
 ---
 apiVersion: v1
 kind: Service
@@ -526,7 +432,7 @@ If `server.api_token` is configured, add `Authorization: Bearer <TOKEN>` to all 
 
 ```bash
 # 1. Test a real LLM config without persisting it
-curl -X POST http://127.0.0.1:16060/api/v1/config/llm/test \
+curl -H "Authorization: Bearer ${HEXCLAW_API_TOKEN}" -X POST http://127.0.0.1:16060/api/v1/config/llm/test \
   -H "Content-Type: application/json" \
   -d '{
     "provider": {
@@ -538,7 +444,7 @@ curl -X POST http://127.0.0.1:16060/api/v1/config/llm/test \
   }'
 
 # 1b. Local Ollama connectivity test can leave api_key empty
-curl -X POST http://127.0.0.1:16060/api/v1/config/llm/test \
+curl -H "Authorization: Bearer ${HEXCLAW_API_TOKEN}" -X POST http://127.0.0.1:16060/api/v1/config/llm/test \
   -H "Content-Type: application/json" \
   -d '{
     "provider": {
@@ -550,38 +456,38 @@ curl -X POST http://127.0.0.1:16060/api/v1/config/llm/test \
   }'
 
 # 2. Search and install a ClawHub skill online
-curl "http://127.0.0.1:16060/api/v1/clawhub/search?q=calendar&category=automation"
-curl -X POST http://127.0.0.1:16060/api/v1/skills/install \
+curl -H "Authorization: Bearer ${HEXCLAW_API_TOKEN}" "http://127.0.0.1:16060/api/v1/clawhub/search?q=calendar&category=automation"
+curl -H "Authorization: Bearer ${HEXCLAW_API_TOKEN}" -X POST http://127.0.0.1:16060/api/v1/skills/install \
   -H "Content-Type: application/json" \
   -d '{"source":"clawhub://<SKILL_NAME>"}'
 
 # 3. Check runtime skill status fields
-curl http://127.0.0.1:16060/api/v1/skills
-curl -X PUT http://127.0.0.1:16060/api/v1/skills/example/status \
+curl -H "Authorization: Bearer ${HEXCLAW_API_TOKEN}" http://127.0.0.1:16060/api/v1/skills
+curl -H "Authorization: Bearer ${HEXCLAW_API_TOKEN}" -X PUT http://127.0.0.1:16060/api/v1/skills/example/status \
   -H "Content-Type: application/json" \
   -d '{"enabled":true}'
 
 # 4. Check Cron history result fields
-curl http://127.0.0.1:16060/api/v1/cron/jobs/<JOB_ID>/history
+curl -H "Authorization: Bearer ${HEXCLAW_API_TOKEN}" http://127.0.0.1:16060/api/v1/cron/jobs/<JOB_ID>/history
 
 # 5. Verify structured knowledge search
-curl -X POST http://127.0.0.1:16060/api/v1/knowledge/search \
+curl -H "Authorization: Bearer ${HEXCLAW_API_TOKEN}" -X POST http://127.0.0.1:16060/api/v1/knowledge/search \
   -H "Content-Type: application/json" \
   -d '{"query":"RAG","limit":5}'
 
 # 6. Check platform instances and IM channel test APIs
-curl http://127.0.0.1:16060/api/v1/platforms/instances
-curl -X POST http://127.0.0.1:16060/api/v1/im/channels/telegram/test \
+curl -H "Authorization: Bearer ${HEXCLAW_API_TOKEN}" http://127.0.0.1:16060/api/v1/platforms/instances
+curl -H "Authorization: Bearer ${HEXCLAW_API_TOKEN}" -X POST http://127.0.0.1:16060/api/v1/im/channels/telegram/test \
   -H "Content-Type: application/json" \
   -d '{"token":"123:abc"}'
 
 # 7. Check autonomy governance and media provider status
-curl http://127.0.0.1:16060/api/v1/autonomy/summary
-curl http://127.0.0.1:16060/api/v1/images/status
-curl http://127.0.0.1:16060/api/v1/videos/status
+curl -H "Authorization: Bearer ${HEXCLAW_API_TOKEN}" http://127.0.0.1:16060/api/v1/autonomy/summary
+curl -H "Authorization: Bearer ${HEXCLAW_API_TOKEN}" http://127.0.0.1:16060/api/v1/images/status
+curl -H "Authorization: Bearer ${HEXCLAW_API_TOKEN}" http://127.0.0.1:16060/api/v1/videos/status
 
 # 8. Check the built-in K12 scenario-pack mount
-curl http://127.0.0.1:16060/api/k12/view-descriptor
+curl -H "Authorization: Bearer ${HEXCLAW_API_TOKEN}" http://127.0.0.1:16060/api/k12/view-descriptor
 ```
 
 Key response semantics:
@@ -626,15 +532,9 @@ wscat -H "Authorization: Bearer TOKEN" \
 
 ### Data Backup
 
-SQLite database and memory files are located in `~/.hexclaw/`:
+For Compose, use the [consistent backup and isolated restore procedure](cloud-deployment.md#完整备份与恢复). Stop writes, archive the full HOME and deployment configuration, restart the original service, then transfer the completed archive off-host. A local archive is not an off-host backup. Restore to a new volume and check its contents before switching the active deployment.
 
-```bash
-# Backup
-tar czf hexclaw-backup-$(date +%Y%m%d).tar.gz ~/.hexclaw/
-
-# Restore
-tar xzf hexclaw-backup-20260318.tar.gz -C ~/
-```
+For a standalone binary, first stop the service and all other writers of the same data directory. Archive the complete `~/.hexclaw/`, external object/configuration paths and required rendering assets; SQLite main and WAL files must come from the same stopped state. Extract to a new directory for verification instead of overwriting the running instance. Do not copy only a live `data.db`.
 
 ### Security Audit
 
@@ -666,11 +566,11 @@ sudo mv hexclaw /usr/local/bin/
 sudo systemctl restart hexclaw
 
 # Docker
-docker compose pull
-docker compose up -d
+docker compose pull hexclaw
+docker compose up -d --no-build hexclaw
 ```
 
-Config files are backward-compatible — upgrades typically require no config changes.
+Create a consistent backup before updating. For database migrations, follow the [deployment recovery rules](cloud-deployment.md#按提交自动部署); replacing the image alone does not establish data compatibility.
 
 ---
 
@@ -680,7 +580,7 @@ Config files are backward-compatible — upgrades typically require no config ch
 
 **"No LLM provider available"**
 
-The service can start, but chat, K12 recognition/grading, prep-card warmups, voice/media, and other provider-dependent features require at least one usable local or cloud provider:
+The service can start, but chat, K12 recognition/grading, provider-generated tutoring-tip explanations, voice/media, and other provider-dependent features require at least one usable local or cloud provider:
 
 ```bash
 export DEEPSEEK_API_KEY="sk-xxx"

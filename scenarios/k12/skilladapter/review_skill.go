@@ -35,22 +35,15 @@ func (s *ReviewSkill) Name() string      { return "k12_review" }
 func (s *ReviewSkill) Match(string) bool { return false } // 只经 LLM 工具调用，不走关键词快路
 
 func (s *ReviewSkill) Description() string {
-	return "取出孩子错题本里到期该复习的错题，给家长今天的陪练方案（含最薄弱知识点 + 引导话术，守答案遮罩不直接给答案）。generate_retry=true 时额外出一道过验算的变式题。"
+	return "取出孩子到期复习项，给家长已有正确答案、薄弱知识点与陪练讲法。缺少完整解法时继续调用解题能力，不要求家长自己做题。"
 }
 
 func (s *ReviewSkill) ToolDefinition() llm.ToolDefinition {
 	return llm.NewToolDefinition("k12_review",
 		"Fetch the child's DUE mistakes from the mistake book and produce today's review plan for the parent. "+
-			"Returns the due-review queue (problem / knowledge-point / last error-cause), the weakest knowledge point, and coaching tips (answer-masking: never hand the child the answer). "+
-			"Set generate_retry=true to also produce ONE verified variant problem for the most-due mistake. "+
+			"Returns the due-review queue, available canonical answers, the weakest knowledge point, and parent coaching tips. Provide the parent with the correct answers and complete solutions; use the solving tool for missing solutions rather than asking the parent to solve them. "+
 			"Use when a parent asks to review or practice the child's past mistakes. The child instance is resolved automatically — do NOT pass an agent id.",
-		&llm.Schema{
-			Type: "object",
-			Properties: map[string]*llm.Schema{
-				"generate_retry": {Type: "boolean", Description: "Also generate one verified variant problem for the most-due mistake."},
-				"grade":          {Type: "string", Description: "Optional. Effective grade term (e.g. 五年级上); empty resolves from the child's profile."},
-			},
-		})
+		&llm.Schema{Type: "object"})
 }
 
 // Execute 取到期复习队列 → 陪练方案。实例 scope 取自 ctx（engine stamp 的已路由 Agent）。
@@ -76,29 +69,14 @@ func (s *ReviewSkill) Execute(ctx context.Context, args map[string]any) (*skill.
 		}, nil
 	}
 
-	// 可选出一道变式题：仅对最先到期的一道（items 已按到期升序），避免刷题海 + 控 token。
-	var retry *usecase.SolveResult
-	if argBool(args, "generate_retry") {
-		grade := argStr(args, "grade")
-		if grade == "" && s.deps.Profiles != nil {
-			// grade 不信 LLM：优先从孩子档案取生效年级（同 k12_grade 纪律）。
-			if p, perr := s.deps.GetProfile(ctx, agent); perr == nil {
-				grade = p.GradeTerm
-			}
-		}
-		if r, gerr := s.deps.GenerateRetryByRecord(ctx, agent, items[0].Record.RecordID, grade); gerr == nil {
-			retry = &r
-		}
-	}
-
 	return &skill.Result{
-		Content:  renderReviewContent(items, retry),
-		Metadata: reviewMetadata(items, retry),
+		Content:  renderReviewContent(items),
+		Metadata: reviewMetadata(items),
 	}, nil
 }
 
-// renderReviewContent 面向家长/LLM 的陪练方案文本。守答案遮罩：给引导话术，不直接报答案。
-func renderReviewContent(items []usecase.ReviewItem, retry *usecase.SolveResult) string {
+// renderReviewContent 给家长已有答案和陪练方法，不把孩子的练习方式当作答案可见性门槛。
+func renderReviewContent(items []usecase.ReviewItem) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "今天有 %d 个复习项该陪孩子练了", len(items))
 	if weakest := weakestKP(items); weakest != "" {
@@ -121,29 +99,24 @@ func renderReviewContent(items []usecase.ReviewItem, retry *usecase.SolveResult)
 			b.WriteString("）")
 		}
 		b.WriteString("\n")
+		if answer := strings.TrimSpace(it.Fields.CanonicalAnswer); answer != "" {
+			fmt.Fprintf(&b, "   Parent reference answer: %s\n", answer)
+		}
 	}
 	if len(items) > reviewListMax {
 		fmt.Fprintf(&b, "……还有 %d 道，先过这几道，别一次堆太多。\n", len(items)-reviewListMax)
 	}
 
-	b.WriteString("\n陪练建议：让孩子先自己重做，别急着提醒；做完再对，卡住了先用问题引导（比如「这一步为什么这样算」），别直接报答案。做对了就标记掌握，错题本会自动帮你排下次复习。")
+	b.WriteString("\n陪练建议：家长先看正确答案和完整解法，再按题意、方法、计算、检查的顺序给孩子讲。已有答案直接提供，缺少完整解法时由 AI 继续解题验算，不要求家长先做题。孩子的真实重做结果交由系统处理，不凭讲解或主观确认标记掌握。")
 
-	if retry != nil {
-		b.WriteString("\n\n给家长参考——一道同知识点的变式题（答案供你核对，先别给孩子看）：\n")
-		b.WriteString(retry.Solution)
-	}
 	return b.String()
 }
 
-func reviewMetadata(items []usecase.ReviewItem, retry *usecase.SolveResult) map[string]string {
-	m := map[string]string{
+func reviewMetadata(items []usecase.ReviewItem) map[string]string {
+	return map[string]string{
 		"k12_due_count":  fmt.Sprintf("%d", len(items)),
 		"k12_weakest_kp": weakestKP(items),
 	}
-	if retry != nil {
-		m["badge"] = retry.Evidence.Badge()
-	}
-	return m
 }
 
 // weakestKP 复习队列里出现最多的知识点 = 当前最薄弱点（空知识点忽略；并列取先到期者，

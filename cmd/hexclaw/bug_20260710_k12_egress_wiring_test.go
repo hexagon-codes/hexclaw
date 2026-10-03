@@ -5,18 +5,64 @@ import (
 	"testing"
 
 	"github.com/hexagon-codes/hexclaw/egress"
+	k12engineadapter "github.com/hexagon-codes/hexclaw/scenarios/k12/engineadapter"
 	"github.com/hexagon-codes/hexclaw/skill"
 )
 
 type countingSolveExecutor struct {
-	calls int
-	ctx   context.Context
+	calls         int
+	verifiedCalls int
+	ctx           context.Context
+}
+
+type interceptingCountingSolveExecutor struct {
+	countingSolveExecutor
+}
+
+func (*interceptingCountingSolveExecutor) SupportsSubAgentCallInterceptor() bool {
+	return true
+}
+
+func (e *countingSolveExecutor) GradeVerified(ctx context.Context, _, _, _ string) (*skill.Result, error) {
+	e.verifiedCalls++
+	e.ctx = ctx
+	return &skill.Result{Content: "graded"}, nil
 }
 
 func (e *countingSolveExecutor) Execute(ctx context.Context, _ map[string]any) (*skill.Result, error) {
 	e.calls++
 	e.ctx = ctx
 	return &skill.Result{Content: "ok"}, nil
+}
+
+// BUG-20260714：安全分类 wrapper 必须保留 GradeVerified 方法，否则生产 adapter 的类型断言
+// 失败并把每道题从“solver+verifier+grader”退化为两套 solver+verifier 再 grader。
+func TestBUG20260714_K12ClassifiedSolveForwardsVerifiedGradeFastPath(t *testing.T) {
+	next := &countingSolveExecutor{}
+	exec := classifiedSolveExecutor{next: next}
+	res, err := exec.GradeVerified(context.Background(), "1+1", "答案：2", "2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next.verifiedCalls != 1 || next.calls != 0 || res.Content != "graded" {
+		t.Fatalf("verified=%d execute=%d res=%#v", next.verifiedCalls, next.calls, res)
+	}
+	got, _ := egress.RequestsFromContext(next.ctx)
+	if len(got) != 2 || got[0].DataClass != egress.ClassGeneral || got[1].DataClass != egress.ClassSensitiveProfile {
+		t.Fatalf("verified grade 出网标签错误: %+v", got)
+	}
+}
+
+// REG-P0: the production classification wrapper must preserve the capability
+// method used by SolveAdapter to select the durable per-physical-call ledger.
+// Erasing it silently falls back to the generic whole-operation sender.
+func TestBUG20260803_K12ClassifiedSolveForwardsPhysicalCallCapability(t *testing.T) {
+	next := &interceptingCountingSolveExecutor{}
+	exec := classifiedSolveExecutor{next: next}
+	adapter := k12engineadapter.NewSolveAdapter(exec)
+	if !adapter.UsesGradingPhysicalCalls() {
+		t.Fatal("production SolveAdapter lost the wrapped physical-call interceptor capability")
+	}
 }
 
 func TestBUG20260710_K12SolveCarriesExplicitEgressClassification(t *testing.T) {

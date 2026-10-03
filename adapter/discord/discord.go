@@ -85,7 +85,7 @@ func New(cfg config.DiscordConfig) *DiscordAdapter {
 	workerCtx, workerCancel := context.WithCancel(context.Background())
 	a := &DiscordAdapter{
 		cfg:          cfg,
-		client:       httpx.RawClient(httpx.WithRawTimeout(30 * time.Second)),
+		client:       httpx.MustNewRawClient(httpx.WithRawTimeout(30 * time.Second)),
 		workerCtx:    workerCtx,
 		workerCancel: workerCancel,
 	}
@@ -300,7 +300,7 @@ func (a *DiscordAdapter) reconnectDelay(attempt int) time.Duration {
 	cfg.Delay = reconnectBaseDelay
 	cfg.MaxDelay = reconnectMaxDelay
 	cfg.Multiplier = 2
-	return retry.ExponentialBackoff(attempt, cfg)
+	return retry.ExponentialBackoff(attempt+1, cfg)
 }
 
 // connect 建立 Gateway 连接并处理事件

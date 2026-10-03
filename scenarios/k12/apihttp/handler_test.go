@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/apihttp"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/assembly"
 	"github.com/hexagon-codes/hexclaw/skill"
@@ -30,7 +31,30 @@ func (fakeSolveExec) Execute(_ context.Context, args map[string]any) (*skill.Res
 	return &skill.Result{Content: "解：11.4", Metadata: map[string]string{"solve_verdict": "agree", "solve_evidence": "numeric_exec"}}, nil
 }
 
-func newServer(t *testing.T) http.Handler {
+type fixedAccumulationMetadataDeriver struct{}
+
+type fixedPDFRenderer struct{}
+
+func (fixedPDFRenderer) Render(context.Context, string, string) ([]byte, string, error) {
+	return []byte("%PDF-1.7\nfixed-http-render"), "application/pdf", nil
+}
+
+func (fixedAccumulationMetadataDeriver) DeriveAccumulationMetadata(
+	context.Context,
+	string,
+) (k12.AccumulationDerivedMetadata, error) {
+	return k12.AccumulationDerivedMetadata{
+		Subject: "语文", EntryType: "好词好句",
+		SubjectProvenance: k12.DerivationProvenance{
+			Method: "model", Policy: "test", Version: "1",
+		},
+		EntryTypeProvenance: k12.DerivationProvenance{
+			Method: "model", Policy: "test", Version: "1",
+		},
+	}, nil
+}
+
+func newServer(t *testing.T, seededProfiles ...k12.ChildProfile) http.Handler {
 	t.Helper()
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
@@ -40,8 +64,26 @@ func newServer(t *testing.T) http.Handler {
 	if err := migrate.Run(context.Background(), db, migrate.All); err != nil {
 		t.Fatal(err)
 	}
-	db.Exec(`INSERT INTO agents(name) VALUES('mingming')`)
-	k, err := assembly.Wire(db, fakeSolveExec{})
+	options := []assembly.Option{
+		assembly.WithAccumulationMetadataDeriver(fixedAccumulationMetadataDeriver{}),
+		assembly.WithRenderer(fixedPDFRenderer{}),
+	}
+	if len(seededProfiles) > 0 {
+		profile := seededProfiles[0]
+		metadata, marshalErr := json.Marshal(k12.ApplyProfileToMeta(nil, profile))
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		if _, err = db.Exec(`INSERT INTO agents(name, metadata) VALUES('mingming', ?)`, string(metadata)); err != nil {
+			t.Fatal(err)
+		}
+		options = append(options, assembly.WithProfiles(&memProfiles{
+			m: map[string]k12.ChildProfile{"mingming": profile},
+		}))
+	} else if _, err = db.Exec(`INSERT INTO agents(name) VALUES('mingming')`); err != nil {
+		t.Fatal(err)
+	}
+	k, err := assembly.Wire(db, fakeSolveExec{}, options...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,9 +108,23 @@ func TestViewDescriptor(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("状态 %d", rec.Code)
 	}
+	// IA 定稿（PRD §1.5，2026-07-18 迁移）：顶栏三段「辅导｜学习档案｜学情」；
+	// §4.11 术语表禁止「错题本」作为整个导航名称。
 	tabs, _ := out["header_tabs"].([]any)
-	if len(tabs) != 2 || tabs[0] != "辅导" {
-		t.Errorf("头部 tab 契约不符: %v", out["header_tabs"])
+	if len(tabs) != 3 || tabs[0] != "辅导" || tabs[1] != "学习档案" || tabs[2] != "学情" {
+		t.Errorf("头部 tab 契约不符（应为 辅导|学习档案|学情）: %v", out["header_tabs"])
+	}
+	// 学习档案对象 collections 全量下发（错题本/练习集/积累本/作品）。
+	cols, _ := out["record_collections"].([]any)
+	if len(cols) != 4 {
+		t.Errorf("record_collections 应含四对象 collection: %v", cols)
+	}
+	// 辅导要点在识题流中内联生成，清单不下发独立侧栏或头部动作。
+	if panels, _ := out["side_panels"].([]any); len(panels) != 0 {
+		t.Errorf("side_panels 应为空: %v", panels)
+	}
+	if actions, _ := out["actions"].([]any); len(actions) != 0 {
+		t.Errorf("actions 应为空: %v", actions)
 	}
 }
 
@@ -113,16 +169,19 @@ func TestOutOfScope(t *testing.T) {
 	}
 }
 
-func TestPrepCard(t *testing.T) {
+func TestInsightReportCarriesCanonicalRenderEvidence(t *testing.T) {
 	h := newServer(t)
-	body := `{"agent":"mingming","grade":"五年级上","knowledge_points":["小数乘法"]}`
-	rec, out := do(t, h, "POST", "/prep-card", body)
-	if rec.Code != 200 {
-		t.Fatalf("prep-card 状态 %d", rec.Code)
+	rec, out := do(t, h, http.MethodGet, "/insight-report?agent=mingming", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("insight-report status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	secs, _ := out["sections"].([]any)
-	if len(secs) < 4 {
-		t.Errorf("备课卡应≥4段: %v", out)
+	content, _ := out["message_content"].(map[string]any)
+	manifest, _ := out["render_manifest"].(map[string]any)
+	if content["producer_kind"] != "report" || content["source_digest"] == "" {
+		t.Fatalf("report omitted canonical MessageContent: %#v", out)
+	}
+	if manifest["surface"] != "k12" || manifest["source_digest"] != content["source_digest"] {
+		t.Fatalf("report omitted same-source RenderManifest: content=%#v manifest=%#v", content, manifest)
 	}
 }
 

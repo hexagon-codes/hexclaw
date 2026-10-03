@@ -16,7 +16,7 @@ func TestGrade_ErrorCause_StripsVerifierSelfCheck(t *testing.T) {
 	dump := "移项时把 +15 抄成 -15。\n自查:\n- 关键条件是否都用到? √\n- 推理正确 √\n自查通过"
 	d, store := newPipeline(t,
 		fakeSolver{solution: "x=14", ev: SolveEvidence{Verdict: VerdictAgree, EvidenceType: EvidenceNumericExec}},
-		fakeGrader{outcome: GradeOutcome{Correct: false, WrongStep: "移项", ErrorCause: dump, KnowledgePoint: "简易方程"}},
+		fakeGrader{outcome: GradeOutcome{Verdict: VerdictDisagree, WrongStep: "移项", ErrorCause: dump, KnowledgePoint: "简易方程"}},
 		&fakeInsights{},
 	)
 	ctx := context.Background()
@@ -54,6 +54,9 @@ func TestSanitizeErrorCause_Units(t *testing.T) {
 		{"移项符号错。自查:- 推理正确 √ 自查通过", "移项符号错。"},
 		{"未分析\n自查:\n- 关键条件是否都用到? √", "未分析"},
 		{"- 关键条件是否都用到? √\n- 推理正确 √", ""}, // 全是核对行 → 空
+		{"- 推理正确 ×", ""},
+		{"42=18×2 不成立，误把两边作为相等。", "42=18×2 不成立，误把两边作为相等。"},
+		{"42=18 × 2 不成立，误把两边作为相等。", "42=18 × 2 不成立，误把两边作为相等。"},
 		{"  进位算错  ", "进位算错"},
 	}
 	for _, c := range cases {

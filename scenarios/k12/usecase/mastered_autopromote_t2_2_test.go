@@ -2,30 +2,19 @@ package usecase_test
 
 import (
 	"context"
-	"database/sql"
 	"testing"
 
-	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/scenario"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/curriculum"
+	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/usecase"
-	"github.com/hexagon-codes/hexclaw/storage/migrate"
-
-	_ "modernc.org/sqlite"
 )
 
 // newClockDeps 建带可变时钟的 Deps（T2.2 需推进时间验证「≥3天二次做对」）。
 func newClockDeps(t *testing.T, clock *int64) (usecase.Deps, *toggleGrader) {
 	t.Helper()
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
-	if err := migrate.Run(context.Background(), db, migrate.All); err != nil {
-		t.Fatal(err)
-	}
+	db := openMigratedTestDB(t)
 	db.Exec(`INSERT INTO agents(name) VALUES('xiaoming')`)
 	cur := curriculum.New()
 	reg := scenario.NewRegistry()
@@ -34,7 +23,7 @@ func newClockDeps(t *testing.T, clock *int64) (usecase.Deps, *toggleGrader) {
 	}
 	g := &toggleGrader{}
 	return usecase.Deps{
-		Solver: toggleSolver{}, Grader: g, Records: records.NewStore(db, reg.Records),
+		Solver: toggleSolver{}, Grader: g, Records: k12storage.NewStore(db, reg.Records),
 		Constraint: cur, Now: func() int64 { return *clock },
 	}, g
 }

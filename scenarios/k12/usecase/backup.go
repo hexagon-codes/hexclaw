@@ -10,10 +10,15 @@ import (
 
 	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
+	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
 )
 
 // HexbakVersion 备份格式版本（嵌入归档头，支撑演进）。
-const HexbakVersion = 2
+// v3 为 DD-025 restore-as 增加不可变 archive_id；v4 把作品已确认 OCR
+// canonical evidence 纳入 checksum；v5 纳入 V19 Problem/Attempt canonical
+// ledger 与其 page asset；v6 纳入 V50/V51/V72/V73 source-action durability
+// closure；v7 纳入当前作品来源、点评与调用停点。v2-v6 校验字节契约继续兼容。
+const HexbakVersion = 7
 
 // ErrChecksumMismatch 恢复时校验和不符（归档损坏或载荷不一致）。
 var ErrChecksumMismatch = errors.New("hexbak checksum mismatch")
@@ -24,13 +29,29 @@ var ErrVersionUnsupported = errors.New("hexbak version newer than supported")
 // Hexbak 家庭学习档案备份（M4-1，商业化数据资产的耐久底座）。
 type Hexbak struct {
 	Version    int                    `json:"version"`
+	ArchiveID  string                 `json:"archive_id,omitempty"`
 	AgentName  string                 `json:"agent_name"`
 	ExportedAt int64                  `json:"exported_at"`
 	Records    []*records.AgentRecord `json:"records"`
+	// Assets v3 起内嵌 canonical records 引用的内容寻址图片；[]byte 以 JSON base64
+	// 编码进入 .hexbak，checksum 同时覆盖 manifest 与原始字节。
+	Assets []HexbakAsset `json:"assets,omitempty"`
+	// CreativeWorkOCR v4 起只携带被作品版本引用的 confirmed OCR canonical
+	// evidence。运行中的 pending/processing/failed Job 不属于可恢复事实。
+	CreativeWorkOCR []k12.CreativeWorkOCRArchiveEvidence `json:"creative_work_ocr,omitempty"`
+	// ProblemAttempts v5 起覆盖所有 V19 canonical submission。SubmissionID、
+	// ProblemID、AttemptID 保持稳定；page_asset_id 引用的原图进入 Assets exact-set。
+	ProblemAttempts []k12.ProblemAttemptSnapshot `json:"problem_attempts,omitempty"`
+	// ProblemSource v6 起覆盖 source-action 的不可变输入头、收据、PageAsset
+	// metadata、可恢复队列与 V73 typed/physical lineage。原始 provider payload
+	// 不进入该投影；所有引用的 PageAsset bytes 仍通过 Assets 单一机制打包。
+	ProblemSource *k12storage.ProblemSourceArchiveV6 `json:"problem_source,omitempty"`
+	// CurrentCreativeWorks v7 覆盖当前作品来源、点评与调用停点；旧格式字段不变。
+	CurrentCreativeWorks []k12storage.CreativeWorkArchiveV7 `json:"current_creative_works,omitempty"`
 	// Profile 孩子档案（T2.6 全量导出 PRD §3.12.4-1：不止 records，还含档案）。可空（老归档/无档案）。
 	// 注：学情记忆 + 实例配置的导出需跨子系统新 port（Insights 目前只写不可导），属后续。
 	Profile  *k12.ChildProfile `json:"profile,omitempty"`
-	Checksum string            `json:"checksum"` // v2: sha256(归档头+records+profile 规范 JSON)
+	Checksum string            `json:"checksum"` // v2+: sha256(该版本完整语义载荷的规范 JSON)
 }
 
 // Backup 导出某实例的全部记录为 .hexbak（含 checksum）。
@@ -46,6 +67,10 @@ func (d Deps) Backup(ctx context.Context, agentName string) (*Hexbak, error) {
 		Version: HexbakVersion, AgentName: agentName, ExportedAt: d.now(),
 		Records: recs,
 	}
+	bak.CurrentCreativeWorks, err = d.Records.ExportCreativeWorksArchiveV7(ctx, agentName)
+	if err != nil {
+		return nil, fmt.Errorf("export current creative works: %w", err)
+	}
 	// T2.6 全量导出：附孩子档案（有档案存储且档案存在时）。
 	if d.Profiles != nil {
 		p, perr := d.Profiles.GetProfile(ctx, agentName)
@@ -57,11 +82,46 @@ func (d Deps) Backup(ctx context.Context, agentName string) (*Hexbak, error) {
 			bak.Profile = &pc
 		}
 	}
-	sum, err := checksumHexbak(bak)
+	problemAttempts, err := PackHexbakProblemAttempts(ctx, d.Records, agentName)
+	if err != nil {
+		return nil, fmt.Errorf("usecase: 打包 Problem/Attempt ledger: %w", err)
+	}
+	bak.ProblemAttempts = problemAttempts
+	problemSource, err := d.Records.ExportProblemSourceArchiveV6(ctx, agentName)
+	if err != nil {
+		return nil, fmt.Errorf("usecase: 打包 source-action durability closure: %w", err)
+	}
+	if !problemSourceArchiveEmpty(problemSource) {
+		bak.ProblemSource = &problemSource
+	}
+	recordAssets, err := PackHexbakAssets(agentName, recs)
+	if err != nil {
+		return nil, fmt.Errorf("usecase: 打包档案资产: %w", err)
+	}
+	problemAssets, err := PackHexbakProblemAttemptAssets(agentName, problemAttempts)
+	if err != nil {
+		return nil, fmt.Errorf("usecase: 打包 Problem 页面资产: %w", err)
+	}
+	problemSourceAssets, err := PackHexbakProblemSourceAssets(agentName, bak.ProblemSource)
+	if err != nil {
+		return nil, fmt.Errorf("usecase: 打包 source-action PageAsset: %w", err)
+	}
+	currentAssets, err := PackHexbakCurrentCreativeAssets(agentName, bak.CurrentCreativeWorks)
 	if err != nil {
 		return nil, err
 	}
-	bak.Checksum = sum
+	bak.Assets, err = MergeHexbakAssets(recordAssets, problemAssets, problemSourceAssets, currentAssets)
+	if err != nil {
+		return nil, fmt.Errorf("usecase: 合并档案资产: %w", err)
+	}
+	ocrEvidence, err := PackHexbakCreativeWorkOCR(ctx, d.Records, agentName, recs)
+	if err != nil {
+		return nil, fmt.Errorf("usecase: 打包作文 OCR 确认证据: %w", err)
+	}
+	bak.CreativeWorkOCR = ocrEvidence
+	if err := SealHexbak(bak); err != nil {
+		return nil, err
+	}
 	return bak, nil
 }
 
@@ -91,64 +151,280 @@ func (d Deps) Restore(ctx context.Context, bak *Hexbak) (int, error) {
 	if bak.AgentName == "" {
 		return 0, fmt.Errorf("%w: agentName 不可空", ErrInvalidInput)
 	}
-	var sum string
-	var err error
-	if bak.Version >= 2 {
-		sum, err = checksumHexbak(bak)
-	} else {
-		// v1 只签名 records：为兼容老归档仍允许恢复记录，但绝不恢复未签名的 Profile。
-		sum, err = checksumRecords(bak.Records)
-	}
-	if err != nil {
+	if err := VerifyHexbak(bak); err != nil {
 		return 0, err
 	}
-	if sum != bak.Checksum {
-		return 0, ErrChecksumMismatch
+	restoreBak, err := materializeHexbakForRestore(bak)
+	if err != nil {
+		return 0, fmt.Errorf("usecase: materialize archive evidence: %w", err)
 	}
-	if bak.Version >= 2 && bak.Profile != nil && bak.Profile.GradeTerm != "" && !k12.ValidGradeTerm(bak.Profile.GradeTerm) {
-		return 0, fmt.Errorf("%w: 归档档案含非法年级 %q", ErrInvalidInput, bak.Profile.GradeTerm)
+	// 冻结#2 / §5.4 零容忍：备份恢复是「初中可绕过进入」最隐蔽的通道——恢复一份含初中
+	// 档案的 .hexbak 即绕过建档守门。恢复路径同样收窄小学 12 档白名单（ValidProfileGradeTerm）。
+	if restoreBak.Version >= 2 && restoreBak.Profile != nil && restoreBak.Profile.GradeTerm != "" && !k12.ValidProfileGradeTerm(restoreBak.Profile.GradeTerm) {
+		return 0, fmt.Errorf("%w: 归档档案年级 %q 不在当前开放学段（仅小学一至六年级）", ErrInvalidInput, restoreBak.Profile.GradeTerm)
 	}
-	if bak.Version >= 2 {
+	if restoreBak.Version >= 2 {
 		// In v2 a nil profile is signed semantic data: it means clear the K12
 		// profile namespace. Whenever profiles are enabled (or one is present in
 		// the archive), fail closed unless records + profile share one durability
 		// boundary; compensation cannot close a process-crash window.
-		if d.ArchiveRestorer == nil && (d.Profiles != nil || bak.Profile != nil) {
+		if d.ArchiveRestorer == nil && (d.Profiles != nil || restoreBak.Profile != nil ||
+			len(restoreBak.CreativeWorkOCR) > 0 || len(restoreBak.ProblemAttempts) > 0 ||
+			restoreBak.ProblemSource != nil || len(restoreBak.CurrentCreativeWorks) > 0) {
 			return 0, fmt.Errorf("%w: 未配置 records/profile 原子恢复能力", ErrInvalidInput)
 		}
 		if d.ArchiveRestorer != nil {
-			if err := d.ArchiveRestorer.RestoreArchive(ctx, bak.AgentName, bak.Records, bak.Profile); err != nil {
+			if restoreBak.Version >= 3 {
+				if full, ok := d.ArchiveRestorer.(HexbakArchiveRestorer); ok {
+					if err := full.RestoreHexbak(ctx, cloneHexbak(restoreBak)); err != nil {
+						return 0, fmt.Errorf("usecase: 原子恢复 v%d 档案: %w", restoreBak.Version, err)
+					}
+					return len(restoreBak.Records), nil
+				}
+				if len(restoreBak.Assets) > 0 || len(restoreBak.CreativeWorkOCR) > 0 ||
+					len(restoreBak.ProblemAttempts) > 0 || restoreBak.ProblemSource != nil || len(restoreBak.CurrentCreativeWorks) > 0 {
+					return 0, fmt.Errorf("%w: 未配置 v%d 内容文件/OCR/Problem-Attempt 原子恢复能力", ErrInvalidInput, restoreBak.Version)
+				}
+			}
+			if err := d.ArchiveRestorer.RestoreArchive(ctx, restoreBak.AgentName, restoreBak.Records, restoreBak.Profile); err != nil {
 				return 0, fmt.Errorf("usecase: 原子恢复档案: %w", err)
 			}
-			return len(bak.Records), nil
+			return len(restoreBak.Records), nil
 		}
 	}
 	// v1 has no signed profile. Records still use the same agent-scoped atomic
 	// merge contract; only the unsigned profile is intentionally ignored.
-	if err := d.Records.ImportAgentRecords(ctx, bak.AgentName, bak.Records); err != nil {
+	if err := d.Records.ImportAgentRecords(ctx, restoreBak.AgentName, restoreBak.Records); err != nil {
 		return 0, fmt.Errorf("usecase: 恢复档案: %w", err)
 	}
-	return len(bak.Records), nil
+	return len(restoreBak.Records), nil
 }
 
-// checksumHexbak 对 v2 归档除 Checksum 外的完整语义载荷算 sha256。
+// checksumHexbak 对 v2+ 归档除 Checksum 外的完整语义载荷算 sha256。
+// v2/v3/v4 必须保持历史字段集合，新增字段不得改变旧归档校验结果。
 func checksumHexbak(bak *Hexbak) (string, error) {
 	if bak == nil {
 		return "", fmt.Errorf("usecase: nil hexbak")
 	}
-	payload := struct {
-		Version    int                    `json:"version"`
-		AgentName  string                 `json:"agent_name"`
-		ExportedAt int64                  `json:"exported_at"`
-		Records    []*records.AgentRecord `json:"records"`
-		Profile    *k12.ChildProfile      `json:"profile,omitempty"`
-	}{bak.Version, bak.AgentName, bak.ExportedAt, bak.Records, bak.Profile}
+	if bak.Version >= 7 {
+		copy := *bak
+		copy.Checksum = ""
+		raw, err := json.Marshal(copy)
+		if err != nil {
+			return "", err
+		}
+		sum := sha256.Sum256(raw)
+		return hex.EncodeToString(sum[:]), nil
+	}
+	var payload any
+	if bak.Version == 2 {
+		payload = struct {
+			Version    int                    `json:"version"`
+			AgentName  string                 `json:"agent_name"`
+			ExportedAt int64                  `json:"exported_at"`
+			Records    []*records.AgentRecord `json:"records"`
+			Profile    *k12.ChildProfile      `json:"profile,omitempty"`
+		}{bak.Version, bak.AgentName, bak.ExportedAt, bak.Records, bak.Profile}
+	} else if bak.Version == 3 {
+		payload = struct {
+			Version    int                    `json:"version"`
+			ArchiveID  string                 `json:"archive_id"`
+			AgentName  string                 `json:"agent_name"`
+			ExportedAt int64                  `json:"exported_at"`
+			Records    []*records.AgentRecord `json:"records"`
+			Assets     []HexbakAsset          `json:"assets,omitempty"`
+			Profile    *k12.ChildProfile      `json:"profile,omitempty"`
+		}{bak.Version, bak.ArchiveID, bak.AgentName, bak.ExportedAt, bak.Records, bak.Assets, bak.Profile}
+	} else if bak.Version == 4 {
+		payload = struct {
+			Version         int                                  `json:"version"`
+			ArchiveID       string                               `json:"archive_id"`
+			AgentName       string                               `json:"agent_name"`
+			ExportedAt      int64                                `json:"exported_at"`
+			Records         []*records.AgentRecord               `json:"records"`
+			Assets          []HexbakAsset                        `json:"assets,omitempty"`
+			CreativeWorkOCR []k12.CreativeWorkOCRArchiveEvidence `json:"creative_work_ocr,omitempty"`
+			Profile         *k12.ChildProfile                    `json:"profile,omitempty"`
+		}{bak.Version, bak.ArchiveID, bak.AgentName, bak.ExportedAt, bak.Records,
+			bak.Assets, bak.CreativeWorkOCR, bak.Profile}
+	} else if bak.Version == 5 {
+		payload = struct {
+			Version         int                                  `json:"version"`
+			ArchiveID       string                               `json:"archive_id"`
+			AgentName       string                               `json:"agent_name"`
+			ExportedAt      int64                                `json:"exported_at"`
+			Records         []*records.AgentRecord               `json:"records"`
+			Assets          []HexbakAsset                        `json:"assets,omitempty"`
+			CreativeWorkOCR []k12.CreativeWorkOCRArchiveEvidence `json:"creative_work_ocr,omitempty"`
+			ProblemAttempts []k12.ProblemAttemptSnapshot         `json:"problem_attempts,omitempty"`
+			Profile         *k12.ChildProfile                    `json:"profile,omitempty"`
+		}{bak.Version, bak.ArchiveID, bak.AgentName, bak.ExportedAt, bak.Records,
+			bak.Assets, bak.CreativeWorkOCR, bak.ProblemAttempts, bak.Profile}
+	} else {
+		payload = struct {
+			Version         int                                  `json:"version"`
+			ArchiveID       string                               `json:"archive_id"`
+			AgentName       string                               `json:"agent_name"`
+			ExportedAt      int64                                `json:"exported_at"`
+			Records         []*records.AgentRecord               `json:"records"`
+			Assets          []HexbakAsset                        `json:"assets,omitempty"`
+			CreativeWorkOCR []k12.CreativeWorkOCRArchiveEvidence `json:"creative_work_ocr,omitempty"`
+			ProblemAttempts []k12.ProblemAttemptSnapshot         `json:"problem_attempts,omitempty"`
+			ProblemSource   *k12storage.ProblemSourceArchiveV6   `json:"problem_source,omitempty"`
+			Profile         *k12.ChildProfile                    `json:"profile,omitempty"`
+		}{bak.Version, bak.ArchiveID, bak.AgentName, bak.ExportedAt, bak.Records,
+			bak.Assets, bak.CreativeWorkOCR, bak.ProblemAttempts, bak.ProblemSource, bak.Profile}
+	}
 	b, err := json.Marshal(payload)
 	if err != nil {
 		return "", fmt.Errorf("usecase: 序列化校验和: %w", err)
 	}
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:]), nil
+}
+
+// SealHexbak 为 v2+ 归档生成校验和。v3+ 缺少 archive_id 时按该版本
+// 语义载荷派生稳定内容 ID。
+func SealHexbak(bak *Hexbak) error {
+	if bak == nil {
+		return fmt.Errorf("usecase: nil hexbak")
+	}
+	if bak.Version == 0 {
+		bak.Version = HexbakVersion
+	}
+	if bak.Version >= 7 && bak.ArchiveID == "" {
+		seed, err := checksumHexbak(bak)
+		if err != nil {
+			return err
+		}
+		bak.ArchiveID = "hexbak-" + seed[:32]
+	}
+	if bak.Version >= 3 && bak.ArchiveID == "" {
+		var seed any
+		if bak.Version == 3 {
+			seed = struct {
+				Version    int                    `json:"version"`
+				AgentName  string                 `json:"agent_name"`
+				ExportedAt int64                  `json:"exported_at"`
+				Records    []*records.AgentRecord `json:"records"`
+				Assets     []HexbakAsset          `json:"assets,omitempty"`
+				Profile    *k12.ChildProfile      `json:"profile,omitempty"`
+			}{bak.Version, bak.AgentName, bak.ExportedAt, bak.Records, bak.Assets, bak.Profile}
+		} else if bak.Version == 4 {
+			seed = struct {
+				Version         int                                  `json:"version"`
+				AgentName       string                               `json:"agent_name"`
+				ExportedAt      int64                                `json:"exported_at"`
+				Records         []*records.AgentRecord               `json:"records"`
+				Assets          []HexbakAsset                        `json:"assets,omitempty"`
+				CreativeWorkOCR []k12.CreativeWorkOCRArchiveEvidence `json:"creative_work_ocr,omitempty"`
+				Profile         *k12.ChildProfile                    `json:"profile,omitempty"`
+			}{bak.Version, bak.AgentName, bak.ExportedAt, bak.Records, bak.Assets,
+				bak.CreativeWorkOCR, bak.Profile}
+		} else if bak.Version == 5 {
+			seed = struct {
+				Version         int                                  `json:"version"`
+				AgentName       string                               `json:"agent_name"`
+				ExportedAt      int64                                `json:"exported_at"`
+				Records         []*records.AgentRecord               `json:"records"`
+				Assets          []HexbakAsset                        `json:"assets,omitempty"`
+				CreativeWorkOCR []k12.CreativeWorkOCRArchiveEvidence `json:"creative_work_ocr,omitempty"`
+				ProblemAttempts []k12.ProblemAttemptSnapshot         `json:"problem_attempts,omitempty"`
+				Profile         *k12.ChildProfile                    `json:"profile,omitempty"`
+			}{bak.Version, bak.AgentName, bak.ExportedAt, bak.Records, bak.Assets,
+				bak.CreativeWorkOCR, bak.ProblemAttempts, bak.Profile}
+		} else {
+			seed = struct {
+				Version         int                                  `json:"version"`
+				AgentName       string                               `json:"agent_name"`
+				ExportedAt      int64                                `json:"exported_at"`
+				Records         []*records.AgentRecord               `json:"records"`
+				Assets          []HexbakAsset                        `json:"assets,omitempty"`
+				CreativeWorkOCR []k12.CreativeWorkOCRArchiveEvidence `json:"creative_work_ocr,omitempty"`
+				ProblemAttempts []k12.ProblemAttemptSnapshot         `json:"problem_attempts,omitempty"`
+				ProblemSource   *k12storage.ProblemSourceArchiveV6   `json:"problem_source,omitempty"`
+				Profile         *k12.ChildProfile                    `json:"profile,omitempty"`
+			}{bak.Version, bak.AgentName, bak.ExportedAt, bak.Records, bak.Assets,
+				bak.CreativeWorkOCR, bak.ProblemAttempts, bak.ProblemSource, bak.Profile}
+		}
+		b, err := json.Marshal(seed)
+		if err != nil {
+			return fmt.Errorf("usecase: 序列化 archive id: %w", err)
+		}
+		sum := sha256.Sum256(b)
+		bak.ArchiveID = "hexbak-" + hex.EncodeToString(sum[:16])
+	}
+	sum, err := checksumHexbak(bak)
+	if err != nil {
+		return err
+	}
+	bak.Checksum = sum
+	return nil
+}
+
+// VerifyHexbak 验证受支持归档的版本、必要头与原始 checksum，不做任何写入。
+func VerifyHexbak(bak *Hexbak) error {
+	if bak == nil {
+		return fmt.Errorf("usecase: nil hexbak")
+	}
+	if bak.Version > HexbakVersion {
+		return fmt.Errorf("%w: 归档 v%d > 支持 v%d，请先升级应用", ErrVersionUnsupported, bak.Version, HexbakVersion)
+	}
+	if bak.Version <= 0 {
+		return fmt.Errorf("%w: 非法归档版本 %d", ErrInvalidInput, bak.Version)
+	}
+	if bak.AgentName == "" {
+		return fmt.Errorf("%w: agentName 不可空", ErrInvalidInput)
+	}
+	if bak.Version >= 3 && bak.ArchiveID == "" {
+		return fmt.Errorf("%w: v3 archive_id 不可空", ErrInvalidInput)
+	}
+	var (
+		sum string
+		err error
+	)
+	if bak.Version >= 2 {
+		sum, err = checksumHexbak(bak)
+	} else {
+		sum, err = checksumRecords(bak.Records)
+	}
+	if err != nil {
+		return err
+	}
+	if sum != bak.Checksum {
+		return ErrChecksumMismatch
+	}
+	if bak.Version < 7 && len(bak.CurrentCreativeWorks) != 0 {
+		return fmt.Errorf("current creative archive is not covered by this version")
+	}
+	if err := k12storage.ValidateCreativeWorksArchiveV7(bak.AgentName, bak.CurrentCreativeWorks); err != nil {
+		return err
+	}
+	for _, work := range bak.CurrentCreativeWorks {
+		found := false
+		for _, rec := range bak.Records {
+			if rec != nil && rec.RecordID == work.WorkID && rec.AgentName == work.AgentName && rec.Collection == k12.CollectionCreativeWork {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("current creative archive root is missing")
+		}
+	}
+	if err := ValidateHexbakAssets(bak); err != nil {
+		return err
+	}
+	if err := ValidateHexbakCreativeWorkOCR(bak); err != nil {
+		return err
+	}
+	if err := ValidateHexbakProblemAttempts(bak); err != nil {
+		return err
+	}
+	if err := ValidateHexbakProblemSource(bak); err != nil {
+		return err
+	}
+	return nil
 }
 
 // checksumRecords 对记录集算 sha256（ExportAgent 已确定性排序，序列化字节稳定）。

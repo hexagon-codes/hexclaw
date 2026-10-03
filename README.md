@@ -21,7 +21,7 @@
 - **LLM 智能路由** — 多 Provider 自动切换，故障降级，成本优化，模型 tool_call 能力探测
 - **Skill 系统** — 内置搜索/天气/翻译/摘要/媒体生成/送达/文档导出等，7 阶段流水线，`.pending` 审批闭环，TrustLevel 与 TOCTOU 校验
 - **语义缓存** — Singleflight 防击穿 + TTL 抖动防雪崩 + 空值缓存防穿透
-- **知识库** — FTS5 + 向量混合检索，RAG 5 阶段 Pipeline，上下文增强
+- **知识库** — FTS5 + 向量混合检索，RAG 5 阶段 Pipeline，Ollama 嵌入模型自动发现/安装与有证据召回
 - **场景包扩展** — `scenario` 六缝注入（记录集、约束、视图槽、Agent mode、按钮、eval），平台不硬编码具体业务
 - **通用记录本** — `records.agent_records` 以 Agent 为隔离键，支持状态机、去重键、到期队列、乐观锁和场景包字段校验
 
@@ -73,7 +73,7 @@
 - **MCP 原生支持** — 兼容 3200+ MCP Server（stdio + SSE + streamable 传输）
 - **Markdown 技能市场** — 兼容 OpenClaw 技能格式，按需延迟加载
 - **多 Agent 路由** — 一个实例托管多个 Agent，按平台/用户/群组路由
-- **K12 家长辅导场景包** — 出厂内置错题本、复习队列、备课卡、年级约束、作业识题/批改和默认 cron 投递
+- **K12 家长辅导场景包** — 出厂内置作业图片识题/批改、确认后内联辅导要点、错题本、变式复习、年级约束和默认 cron 投递
 - **Canvas / A2UI** — Agent 生成交互式 UI（图表、表单、看板等 8 种组件）
 - **安全审计 CLI** — `hexclaw security audit` 一键安全检查 + 修复建议
 - **语音交互** — STT/TTS 转写与合成，支持 MiniMax / Edge / OpenAI / Azure TTS 串联 fallback
@@ -125,26 +125,24 @@ export DEEPSEEK_API_KEY="sk-xxx"
 hexclaw serve
 ```
 
-### Docker
+### Docker / Kubernetes
+
+单机日常部署推荐 Docker Compose。在部署目录私有 `.env` 设置 `HEXCLAW_IMAGE=ghcr.io/hexagon-codes/hexclaw@sha256:<实际摘要>`，摘要须来自已可拉取的构建产物：
 
 ```bash
-docker run -d \
-  --name hexclaw \
-  -p 16060:16060 \
-  -e DEEPSEEK_API_KEY="sk-xxx" \
-  -v hexclaw-data:/data/.hexclaw \
-  ghcr.io/hexagon-codes/hexclaw:latest
+docker compose pull hexclaw
+docker compose up -d --no-build hexclaw
 ```
 
-服务启动后：
-- Web UI: `http://127.0.0.1:16060`
-- 健康检查: `GET http://127.0.0.1:16060/health`
-- 聊天 API: `POST http://127.0.0.1:16060/api/v1/chat`
+本地源码开发先执行 `docker compose build hexclaw`，默认镜像为 `hexclaw:dev`。发布镜像使用版本号及完整提交 SHA 标签，`latest` 仅用于正式稳定版；更新保留现有项目、数据卷及完整 Compose override 文件集合。
+
+源码镜像当前面向 Linux amd64，持久化完整可写 HOME。默认 Compose **不安装 Ollama，也不下载模型**；在 Desktop 为当前远端配置模型和 Embedding API，知识数据与索引保存在服务器。未配置有效 Embedding 时，关键词检索与向量可用性分别判断。初始化令牌、Kubernetes、备份恢复、自动部署及当前验收边界见[云端部署指南](docs/cloud-deployment.md)。
 
 ### 使用 API
 
 ```bash
 curl -X POST http://127.0.0.1:16060/api/v1/chat \
+  -H "Authorization: Bearer ${HEXCLAW_API_TOKEN}" \
   -H "Content-Type: application/json" \
   -d '{"message": "你好", "user_id": "test-user"}'
 ```
@@ -236,7 +234,7 @@ skills:
   auto_load: true
   hub:
     repo_url: https://github.com/hexagon-codes/hexclaw-hub
-    branch: v0.0.6
+    branch: v0.0.7
 
 heartbeat:
   enabled: true
@@ -507,6 +505,10 @@ hexclaw/
 | GET | `/api/v1/documents/preview/{token}` | 预览/下载暂存原文件 |
 | POST | `/api/v1/render` | Markdown 渲染为 md/html/docx/pdf/epub/odt/rtf/txt（启用 render 服务时） |
 
+### 自动化能力状态
+
+`GET /api/v1/automation/status` 使用业务接口相同的 Bearer 鉴权；Cron 或 Webhook 未启用时，该接口仍可读取。响应分别包含 `cron`、`webhook` 的 `enabled`（配置值）和 `state`（`ready`、`disabled`、`unavailable`）。对应能力 `ready` 后才读取列表；成功零条、未启用、初始化失败和接口不兼容分开处理，不能把 404 推断为未启用。
+
 ### 定时任务
 统一入口 `POST /api/v1/cronjob` 以请求体中的 `action` 字段分发（`create` / `update` / `remove` / `pause` / `resume` / `run` / `list` / `history`），支持 `idempotency_key` 幂等重放。
 
@@ -575,7 +577,7 @@ hexclaw/
 | GET | `/api/v1/clawhub/search` | ClawHub 技能搜索（支持 `q` / `category`） |
 | GET | `/api/v1/clawhub/skills/{name}/content` | 安装前预览 ClawHub 技能内容 |
 
-默认技能目录仓库：`https://github.com/hexagon-codes/hexclaw-hub` 的 `v0.0.6` 标签（`index.json` + `skills/*.md`）。
+默认技能目录仓库：`https://github.com/hexagon-codes/hexclaw-hub` 的 `v0.0.7` 标签（`index.json` + `skills/*.md`）。
 安装或卸载 Markdown 技能后，会自动同步运行时技能注册表；通常无需重启 sidecar。
 
 ### Agent 路由
@@ -708,7 +710,7 @@ hexclaw/
 
 | 工具 | 版本要求 |
 |------|---------|
-| Go | >= 1.25.7 |
+| Go | >= 1.25.13 |
 | golangci-lint | 最新版（可选） |
 
 ### Make 命令
@@ -745,17 +747,18 @@ go vet ./...
 golangci-lint run
 
 # 发版前门禁 + Eval + canary dry-run
-go run ./cmd/verify-release -repo . -version 0.5.0 -version-files hexclaw.go
+go run ./cmd/verify-release -repo . -version 0.5.0-beta \
+  -version-files hexclaw.go,cmd/hexclaw/main.go,api/openapi.yaml,README.md,README.en.md,SECURITY.md,SECURITY.zh.md
 ```
 
 ## 技术栈
 
 | 组件 | 技术 |
 |------|------|
-| 语言 | Go 1.25.7+ |
-| Agent 框架 | [Hexagon](https://github.com/hexagon-codes/hexagon) v0.5.9 |
-| AI 基础库 | [ai-core](https://github.com/hexagon-codes/ai-core) v0.2.4 |
-| 工具库 | [toolkit](https://github.com/hexagon-codes/toolkit) v0.2.6 |
+| 语言 | Go 1.25.13+ |
+| Agent 框架 | [Hexagon](https://github.com/hexagon-codes/hexagon) v0.5.13 |
+| AI 基础库 | [ai-core](https://github.com/hexagon-codes/ai-core) v0.2.10 |
+| 工具库 | [toolkit](https://github.com/hexagon-codes/toolkit) v0.3.4 |
 | CLI | [Cobra](https://github.com/spf13/cobra) |
 | 配置 | YAML + 环境变量 |
 | 存储 | SQLite (modernc.org/sqlite) |
@@ -797,31 +800,38 @@ chore: 构建/工具链
 
 | 项目 | 说明 | 仓库 |
 |------|------|------|
-| **Hexagon** | Go AI Agent 框架 (核心引擎) v0.5.8 | [hexagon](https://github.com/hexagon-codes/hexagon) |
-| **ai-core** | AI 基础能力库 (LLM/Tool/Memory) v0.2.4 | [ai-core](https://github.com/hexagon-codes/ai-core) |
-| **toolkit** | Go 通用工具库 v0.2.6 | [toolkit](https://github.com/hexagon-codes/toolkit) |
+| **Hexagon** | Go AI Agent 框架 (核心引擎) v0.5.13 | [hexagon](https://github.com/hexagon-codes/hexagon) |
+| **ai-core** | AI 基础能力库 (LLM/Tool/Memory) v0.2.10 | [ai-core](https://github.com/hexagon-codes/ai-core) |
+| **toolkit** | Go 通用工具库 v0.3.4 | [toolkit](https://github.com/hexagon-codes/toolkit) |
 | **hexagon-ui** | Hexagon Dev UI 观测面板 (Vue 3) | [hexagon-ui](https://github.com/hexagon-codes/hexagon-ui) |
 | **hexclaw-desktop** | HexClaw 桌面客户端 (Tauri + Vue 3) | [hexclaw-desktop](https://github.com/hexagon-codes/hexclaw-desktop) |
 | **hexclaw-ui** | HexClaw Web 前端 (Vue 3) | [hexclaw-ui](https://github.com/hexagon-codes/hexclaw-ui) |
 
 ## 更新日志
 
-### Unreleased
+### v0.5.0-beta（2026-07-13）
 
 **场景包与记录系统**
 - **场景包六缝扩展** — 新增 `scenario` 注册表，统一注入记录集、约束、视图槽、Agent mode、按钮和 eval suite，平台层不硬编码业务包。
 - **通用记录本** — 新增 `records.agent_records`，以 Agent 为隔离键，支持 schema 校验、去重键、到期复习队列、状态机和乐观锁。
-- **K12 家长辅导包** — 内置 `/api/k12/*`、`k12_grade`/`k12_review`、错题本、积累本、年级约束、备课卡、默认 cron 投递和 K12 专项评测 workflow。
+- **K12 家长辅导包** — 打通作业图片识题内联回显、学科/题型标注、空白题求解、批改入本、错题纠正、变式复习、确认后内联辅导要点与默认 cron 投递。
 
-**执行与治理**
-- **执行原语收敛** — `code_exec` 成为推荐执行入口，支持 snippet/file/module/project 与 artifact metadata；`code`/`shell` 保留兼容但标记弃用，顶层 `runtime/` 包删除，沙箱能力收敛到 toolkit + `skill/sandbox`。
-- **无人值守治理 API** — 新增 autonomy profile、preflight、summary、decision audit、task grant 端点，并补齐 purpose/data-class 出网策略。
+**模型、知识与执行**
+- **推理与多模态路由** — 解题/批改使用专用 reasoning model；视觉、embedding、rerank 按用途选路，failover 时重建符合目标 locality 的请求。
+- **嵌入与召回闭环** — 自动发现 Ollama 嵌入模型，提供状态/安装接口；短输入和场景会话增加注入门控，无证据召回不再伪造命中。
+- **执行原语收敛** — `code_exec` 成为推荐执行入口，支持 snippet/file/module/project 与 artifact metadata；`code`/`shell` 保留兼容但标记弃用，沙箱能力收敛到 toolkit + `skill/sandbox`。
+
+**稳定性与送达**
+- **视觉图片预算** — 按路由策略限制历史图片，上游报图片数超限时保留当轮图、淘汰最旧图重试，避免多轮作业批改失败或超时。
+- **钉钉图片闭环** — `picture` 消息经 `downloadCode` 进入多模态管道；成功、错误和超时都会撤回思考占位并送达终态消息。
+- **适配器/工作流韧性** — 加固有界发送队列、webhook 体限额、MCP/IM 生命周期、条件节点和原子持久化；cron 编译改用文本推理模型。
 
 **依赖与 CI/CD**
-- **框架依赖升级** — 当前 `go.mod` 对齐 hexagon v0.5.9 / ai-core v0.2.4 / toolkit v0.2.6，并统一 Go 1.25.7；`GOWORK=off go test ./... -run '^$'` 已通过，发版/CI 模式下全仓编译不再依赖本地工作区隐式版本。
-- **默认 Hub 标签** — 技能市场默认目录对齐 `hexagon-codes/hexclaw-hub` `v0.0.6`。
-- **CI/CD 复验口径** — `sandbox-code-exec.yml` 作为专项 workflow 覆盖 toolkit 联调下的 Linux/macOS code_exec 强沙箱路径，并保留 Windows toolkit sandbox 硬门禁；Windows code_exec runtime 集成用例按当前 toolkit 工具链/设备访问能力门控。普通 Linux CI 对真实沙箱执行型用例按后端能力门控，专项 workflow 通过 `HEXCLAW_P0_SANDBOX_PROOF=1` 强制验证。runner 完整性探针默认跳过，仅在 `HEXCLAW_RUNNER_PROBE=1` 时手工触发。
-- **code_exec 沙箱兼容性** — Windows 执行包装改为临时 `.cmd` 文件，避免带 `C:\...` 的多行脚本文本触发 toolkit ADS 防逃逸校验；默认 `max_memory_bytes` 提升到 2GiB，满足 Go/Node runtime 在强沙箱中的冷启动需求。
+- **框架依赖升级** — `go.mod` 对齐 hexagon v0.5.9 / ai-core v0.2.4 / toolkit v0.2.6，保持 Go 1.25.7 兼容基线并指定 Go 1.25.12 发版工具链。
+- **技能种子升级** — 首启内嵌技能支持版本感知升级，默认目录对齐 `hexagon-codes/hexclaw-hub` `v0.0.6`。
+- **CI/CD 复验口径** — `sandbox-code-exec.yml` 专项验证强沙箱；普通 Linux CI 按后端能力门控真实沙箱用例，专项 workflow 使用 `HEXCLAW_P0_SANDBOX_PROOF=1`，runner 完整性探针仅在 `HEXCLAW_RUNNER_PROBE=1` 时手工触发。
+
+> 完整发布历史见 [CHANGELOG.md](CHANGELOG.md)。
 
 ### v0.4.4
 

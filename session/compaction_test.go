@@ -75,6 +75,18 @@ func (s *mockStore) GetMessage(_ context.Context, id string) (*storage.MessageRe
 	return nil, storage.ErrNotFound
 }
 
+func (s *mockStore) UpdateMessageMetadata(_ context.Context, id, metadata string) error {
+	for _, msgs := range s.messages {
+		for _, msg := range msgs {
+			if msg.ID == id {
+				msg.Metadata = metadata
+				return nil
+			}
+		}
+	}
+	return storage.ErrNotFound
+}
+
 func (s *mockStore) CountMessages(_ context.Context, sessionID string) (int, error) {
 	return len(s.messages[sessionID]), nil
 }
@@ -83,7 +95,7 @@ func (s *mockStore) UpdateSession(_ context.Context, _ *storage.Session) error  
 func (s *mockStore) SearchMessages(_ context.Context, _, _ string, _, _ int) ([]*storage.SearchResult, int, error) {
 	return nil, 0, nil
 }
-func (s *mockStore) ForkSession(_ context.Context, _, _, _ string) (*storage.Session, error) {
+func (s *mockStore) ForkSession(_ context.Context, _, _, _ string, _ ...storage.ForkSessionOptions) (*storage.Session, error) {
 	return nil, nil
 }
 func (s *mockStore) ListSessionBranches(_ context.Context, _ string) ([]*storage.Session, error) {

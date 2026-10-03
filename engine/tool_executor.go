@@ -74,14 +74,16 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolName string, args map[st
 			// flag OFF 退化到直接 Execute（与 v0.3 行为一致）。
 			if featureflag.Enabled(ctx, skill.FlagSkillPipelineV1) {
 				return e.executeWithHooks(ctx, call, func(ctx context.Context) (string, error) {
-					return e.runSkillViaPipeline(ctx, skillName, args)
+					return e.runSkillViaPipeline(ctx, skillName, call.Arguments)
 				})
 			}
 			return e.executeWithHooks(ctx, call, func(ctx context.Context) (string, error) {
-				result, err := s.Execute(ctx, args)
+				result, err := s.Execute(ctx, call.Arguments)
 				if err != nil {
+					captureCodeExecutionReceipt(ctx, skillName, nil)
 					return "", err
 				}
+				captureCodeExecutionReceipt(ctx, skillName, result)
 				// BUG-1：skill 结构化 reply-safe 元数据（如 record chip）经 ctx sink 带到 reply。
 				stampToolReplyMeta(ctx, result.Metadata)
 				return result.Content, nil
@@ -89,8 +91,19 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolName string, args map[st
 		}
 	}
 
+	// MCP 内部调用标识只用于路由，既有钩子继续按上游原名识别功能。
+	if e.mcpMgr != nil {
+		for _, info := range e.mcpMgr.ListToolInfos() {
+			if info.Name == toolName {
+				call.Name = info.OriginalName
+				call.ServerName = info.ServerName
+				break
+			}
+		}
+	}
+
 	// 2. Prevent MCP tools from shadowing builtin skill names
-	if e.skills != nil && e.isBuiltinSkillName(toolName) {
+	if e.skills != nil && e.isBuiltinSkillName(call.Name) {
 		return "", fmt.Errorf("tool %q is a reserved builtin skill name", toolName)
 	}
 
@@ -98,7 +111,7 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolName string, args map[st
 	if e.mcpMgr != nil {
 		call.Source = "mcp"
 		return e.executeWithHooks(ctx, call, func(ctx context.Context) (string, error) {
-			result, owner, err := e.mcpMgr.CallToolWithOwner(ctx, toolName, args)
+			result, owner, err := e.mcpMgr.CallToolWithOwner(ctx, toolName, call.Arguments)
 			call.ServerName = owner
 			return result, err
 		})
@@ -170,10 +183,9 @@ func (e *ToolExecutor) isBuiltinSkillName(name string) bool {
 func (e *ToolExecutor) executeWithHooks(ctx context.Context, call *ToolCallInfo, exec func(context.Context) (string, error)) (string, error) {
 	v2 := featureflag.Enabled(ctx, FlagToolLifecycleV2)
 
-	beforeHooks := e.beforeHooks
+	beforeHooks := sortBeforeHooks(e.beforeHooks)
 	afterHooks := e.afterHooks
 	if v2 {
-		beforeHooks = sortBeforeHooks(beforeHooks)
 		afterHooks = sortAfterHooks(afterHooks)
 	}
 
@@ -246,6 +258,7 @@ func runAfterHook(ctx context.Context, h AfterToolHook, call *ToolCallInfo, resu
 //
 // flag OFF 时由调用方退化到 s.Execute；本函数假设 flag 已 ON。
 func (e *ToolExecutor) runSkillViaPipeline(ctx context.Context, toolName string, args map[string]any) (string, error) {
+	captureCodeExecutionReceipt(ctx, toolName, nil)
 	if e.skills == nil {
 		return "", fmt.Errorf("runSkillViaPipeline: nil skill registry")
 	}
@@ -263,6 +276,7 @@ func (e *ToolExecutor) runSkillViaPipeline(ctx context.Context, toolName string,
 	if res.Skill != nil && res.Skill.Name() != toolName {
 		return "", fmt.Errorf("runSkillViaPipeline: pipeline routed %q → %q (refusing to execute mismatched skill)", toolName, res.Skill.Name())
 	}
+	captureCodeExecutionReceipt(ctx, toolName, res.Result)
 	// BUG-1：pipeline 路径同样透传结构化 reply-safe 元数据（record chip 等）。
 	stampToolReplyMeta(ctx, res.Result.Metadata)
 	return res.Result.Content, nil

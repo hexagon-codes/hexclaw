@@ -28,6 +28,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"log/slog"
@@ -37,6 +38,7 @@ import (
 	"time"
 
 	"github.com/hexagon-codes/hexclaw/security"
+	"github.com/hexagon-codes/hexclaw/storage/migrate"
 	"github.com/hexagon-codes/toolkit/util/idgen"
 	"github.com/hexagon-codes/toolkit/util/logger"
 )
@@ -143,6 +145,8 @@ type AddJobRequest struct {
 	UserID   string `json:"user_id"`
 	Platform string `json:"platform,omitempty"`
 	ChatID   string `json:"chat_id,omitempty"`
+	// TZ 显式指定任务时区；留空时保持现有跟随宿主时区的语义。
+	TZ string `json:"tz,omitempty"`
 	// D4.2 多 deliver 桥接：chat / push / feishu / discord / wechat 任意组合
 	// 留空 → 默认 ["chat"]（仅在 chat 流回写）
 	Deliver []string `json:"deliver,omitempty"`
@@ -162,6 +166,16 @@ type AddJobRequest struct {
 	Paused          bool     `json:"paused,omitempty"`
 	AvailableSkills []string `json:"-"` // 服务端注入
 	LocalAPIBase    string   `json:"-"` // 服务端注入
+	// PreserveVerifiedLegacyDefault 只允许默认补齐只读保留同归属、同名且规范脚本一致的旧任务。
+	PreserveVerifiedLegacyDefault bool `json:"-"`
+}
+
+// ScriptJobRequest 是一个已编写脚本任务的原子批处理单元。
+// Runtime/Script 与 AddJobRequest 分开，保持单任务 API 的现有 JSON 契约。
+type ScriptJobRequest struct {
+	Request AddJobRequest
+	Runtime string
+	Script  string
 }
 
 // initialJobStatus 由 Paused 求初始状态。
@@ -312,6 +326,20 @@ func (s *Scheduler) SetKBIngest(fn KBIngestFunc) {
 	}
 }
 
+// SetLoopbackCapabilityToken 为 Starlark 本机回环请求注入当前 Sidecar token。
+func (s *Scheduler) SetLoopbackCapabilityToken(token string) {
+	if eng, ok := s.engines[RuntimeStarlark].(*StarlarkEngine); ok {
+		eng.SetLoopbackCapabilityToken(token)
+	}
+}
+
+// SetServiceAPIAuth 接线当前服务实际地址及业务凭据。
+func (s *Scheduler) SetServiceAPIAuth(baseURL, token string) {
+	if eng, ok := s.engines[RuntimeStarlark].(*StarlarkEngine); ok {
+		eng.SetServiceAPIAuth(baseURL, token)
+	}
+}
+
 // engineFor resolves the script engine for a runtime, or nil for an unknown one.
 // Returning nil (rather than silently falling back to Starlark) lets executeJob
 // surface an explicit "no engine for runtime X" error instead of running, say, a
@@ -394,13 +422,6 @@ func (s *Scheduler) Init(ctx context.Context) error {
 	// D4.2 多 deliver 桥接：meta JSON 列承载 deliver 数组
 	addColumnExpectDuplicate(ctx, s.db, "cron_jobs", `ALTER TABLE cron_jobs ADD COLUMN meta TEXT NOT NULL DEFAULT '{}'`)
 
-	// 旧库的 prompt 列带 NOT NULL 约束，v2 INSERT 不写它就触发约束失败。
-	// SQLite ALTER DROP COLUMN 在带索引/约束的列上可能静默失败，因此用表重建
-	// 兜底：检测到 prompt 列存在 → 重建 cron_jobs（v1 旧任务已被 detect 清理）。
-	if err := s.rebuildCronJobsIfLegacy(ctx); err != nil {
-		return fmt.Errorf("v2 migration 重建 cron_jobs 失败: %w", err)
-	}
-
 	// v2 history migration：为脚本执行新增 stdout/stderr/exit_code/data_json 列
 	addColumnExpectDuplicate(ctx, s.db, "cron_job_runs", `ALTER TABLE cron_job_runs ADD COLUMN stdout TEXT NOT NULL DEFAULT ''`)
 	addColumnExpectDuplicate(ctx, s.db, "cron_job_runs", `ALTER TABLE cron_job_runs ADD COLUMN stderr TEXT NOT NULL DEFAULT ''`)
@@ -414,108 +435,30 @@ func (s *Scheduler) Init(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_cron_job_runs_job_id ON cron_job_runs(job_id, id)`); err != nil {
 		return fmt.Errorf("创建 cron_job_runs 索引失败: %w", err)
 	}
+	// Runtime tests and imported/legacy databases may reach Scheduler without
+	// first passing through storage.Init. Reuse the numbered migration's exact
+	// fixed-connection repair so Init and startup cannot diverge on parent/child
+	// preservation, duplicate handling, indexes or FK constraints.
+	if err := migrate.RepairCronIntegrityV29(ctx, s.db); err != nil {
+		return fmt.Errorf("Cron 完整性修复失败: %w", err)
+	}
 
-	// 清理 v1 遗留任务（只有 prompt 无 spec_json）—— 不自动编译，提示用户重建
+	// 隔离 v1 遗留任务（只有 prompt 无 spec_json）—— 不自动编译，提示用户重建。
+	// 保留父记录后，历史 run/state 证据也继续可查。
 	if err := s.detectAndCleanupLegacyJobs(ctx); err != nil {
-		return fmt.Errorf("清理 v1 遗留任务失败: %w", err)
+		return fmt.Errorf("隔离 v1 遗留任务失败: %w", err)
 	}
 
 	// 加载所有活跃任务
 	return s.loadJobs(ctx)
 }
 
-// rebuildCronJobsIfLegacy 若 cron_jobs 表含 v1 遗留的 prompt 列，做表重建：
-//   - CREATE TABLE cron_jobs_v2 with the canonical v2 schema
-//   - 拷贝 spec_json 非空的 v2 任务（v1 任务在 detectAndCleanupLegacyJobs 阶段已被 DELETE）
-//   - DROP TABLE cron_jobs; ALTER RENAME cron_jobs_v2 → cron_jobs
-//   - 重建索引
-//
-// 全程在 transaction 内，失败 ROLLBACK。
-func (s *Scheduler) rebuildCronJobsIfLegacy(ctx context.Context) error {
-	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(cron_jobs)`)
-	if err != nil {
-		return err
-	}
-	hasPrompt := false
-	for rows.Next() {
-		var cid int
-		var name, ctype string
-		var notnull, pk int
-		var dflt sql.NullString
-		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
-			rows.Close()
-			return err
-		}
-		if name == "prompt" {
-			hasPrompt = true
-		}
-	}
-	rows.Close()
-	if !hasPrompt {
-		return nil
-	}
-
-	logger.Warn("[cron] 检测到 v1 遗留 prompt 列，执行 cron_jobs 表重建迁移")
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	rollback := func() { _ = tx.Rollback() }
-
-	if _, err := tx.ExecContext(ctx, `CREATE TABLE cron_jobs_v2 (
-		id TEXT PRIMARY KEY,
-		name TEXT NOT NULL,
-		type TEXT NOT NULL DEFAULT 'cron',
-		schedule TEXT NOT NULL,
-		spec_json TEXT NOT NULL DEFAULT '',
-		source_prompt TEXT NOT NULL DEFAULT '',
-		user_id TEXT NOT NULL,
-		platform TEXT DEFAULT '',
-		chat_id TEXT DEFAULT '',
-		status TEXT NOT NULL DEFAULT 'active',
-		last_run_at DATETIME,
-		next_run_at DATETIME NOT NULL,
-		run_count INTEGER DEFAULT 0,
-		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-		meta TEXT NOT NULL DEFAULT '{}'
-	)`); err != nil {
-		rollback()
-		return fmt.Errorf("CREATE cron_jobs_v2: %w", err)
-	}
-
-	if _, err := tx.ExecContext(ctx, `INSERT INTO cron_jobs_v2
-		(id, name, type, schedule, spec_json, source_prompt, user_id, platform, chat_id, status, last_run_at, next_run_at, run_count, created_at, meta)
-		SELECT id, name, type, schedule, spec_json, source_prompt,
-		       user_id, COALESCE(platform,''), COALESCE(chat_id,''), status, last_run_at, next_run_at,
-		       COALESCE(run_count,0), created_at, '{}'
-		FROM cron_jobs
-		WHERE spec_json IS NOT NULL AND spec_json != ''`); err != nil {
-		rollback()
-		return fmt.Errorf("拷贝 v2 任务: %w", err)
-	}
-
-	for _, ddl := range []string{
-		`DROP TABLE cron_jobs`,
-		`ALTER TABLE cron_jobs_v2 RENAME TO cron_jobs`,
-	} {
-		if _, err := tx.ExecContext(ctx, ddl); err != nil {
-			rollback()
-			return fmt.Errorf("%s: %w", ddl, err)
-		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit: %w", err)
-	}
-	logger.Warn("[cron] cron_jobs 表重建完成 — v1 schema 已清退")
-	return nil
-}
-
-// detectAndCleanupLegacyJobs 启动时清理 v1 遗留任务。
+// detectAndCleanupLegacyJobs 启动时隔离 v1 遗留任务。
 //
 // 判定：spec_json 为空 → 该任务未经 v2 编译，运行时不知道怎么执行。
 // 不自动编译（避免启动期 LLM 调用 + 旧 prompt 可能已过时）。
-// 直接 DELETE 并通过日志告知用户在 UI 重建。
+// 置 paused 并通过日志告知用户在 UI 重建；不能 DELETE，因为 run/state 是
+// 用户可审计证据，且在 foreign_keys=ON 时会被父表级联删除。
 func (s *Scheduler) detectAndCleanupLegacyJobs(ctx context.Context) error {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, name FROM cron_jobs WHERE spec_json IS NULL OR spec_json = ''`)
@@ -541,14 +484,14 @@ func (s *Scheduler) detectAndCleanupLegacyJobs(ctx context.Context) error {
 	}
 
 	for _, l := range legs {
-		logger.Warn("[cron] 清理 v1 遗留任务 — 请在 UI 重新创建",
+		logger.Warn("[cron] 隔离 v1 遗留任务 — 请在 UI 重新创建",
 			"id", l.id, "name", l.name)
 	}
 	if _, err := s.db.ExecContext(ctx,
-		`DELETE FROM cron_jobs WHERE spec_json IS NULL OR spec_json = ''`); err != nil {
-		return fmt.Errorf("DELETE legacy jobs: %w", err)
+		`UPDATE cron_jobs SET status='paused' WHERE spec_json IS NULL OR spec_json = ''`); err != nil {
+		return fmt.Errorf("pause legacy jobs: %w", err)
 	}
-	logger.Warn("[cron] v1 遗留任务已清理", "count", len(legs))
+	logger.Warn("[cron] v1 遗留任务已隔离", "count", len(legs))
 	return nil
 }
 
@@ -665,6 +608,23 @@ func (s *Scheduler) AddJobFromPromptWithProgress(
 	req AddJobRequest,
 	onProgress ProgressFunc,
 ) (*Job, error) {
+	job, err := s.buildJobFromPromptWithProgress(ctx, req, onProgress)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.AddJob(ctx, job); err != nil {
+		return nil, err
+	}
+	return job, nil
+}
+
+// buildJobFromPromptWithProgress 只完成 Prompt 编译和 Job 构建，不写数据库或内存 map。
+// 替换流程必须在锁外完成这一步，避免编译期间阻塞调度器并确保失败不影响旧任务。
+func (s *Scheduler) buildJobFromPromptWithProgress(
+	ctx context.Context,
+	req AddJobRequest,
+	onProgress ProgressFunc,
+) (*Job, error) {
 	if s.compiler == nil {
 		return nil, fmt.Errorf("compiler 未注入 — 调度器初始化错")
 	}
@@ -700,14 +660,12 @@ func (s *Scheduler) AddJobFromPromptWithProgress(
 			UserID:       req.UserID,
 			Platform:     req.Platform,
 			ChatID:       req.ChatID,
+			TZ:           req.TZ,
 			Status:       initialJobStatus(req.Paused),
 			SourcePrompt: req.Prompt,
 			Spec:         &JobSpec{Runtime: RuntimeAgent, TimeoutSec: agentTimeoutSec(req.TimeoutSec)},
 			Deliver:      req.Deliver,
 			Continuous:   req.Continuous,
-		}
-		if err := s.AddJob(ctx, job); err != nil {
-			return nil, err
 		}
 		return job, nil
 	}
@@ -739,14 +697,116 @@ func (s *Scheduler) AddJobFromPromptWithProgress(
 		UserID:       req.UserID,
 		Platform:     req.Platform,
 		ChatID:       req.ChatID,
+		TZ:           req.TZ,
 		Status:       initialJobStatus(req.Paused),
 		SourcePrompt: req.Prompt,
 		Spec:         spec,
 		Deliver:      req.Deliver, // D4.2 多 deliver 桥接 — 持久化到 meta JSON 列
 	}
-	if err := s.AddJob(ctx, job); err != nil {
+	return job, nil
+}
+
+// ReplaceJobForOwner 在锁外构建新任务，在同一 scheduler 锁和数据库事务内完成
+// owner 校验、删除旧任务和插入新任务，先释放旧名称的唯一约束。
+// 构建或事务任一步失败都会回滚旧任务；仅提交成功后更新内存映射。
+// runtime/script 保留统一 update 对预编译脚本任务的既有支持。
+func (s *Scheduler) ReplaceJobForOwner(
+	ctx context.Context,
+	jobID, ownerID string,
+	req AddJobRequest,
+	runtime, script string,
+	onProgress ProgressFunc,
+) (*Job, error) {
+	if strings.TrimSpace(ownerID) == "" {
+		return nil, ErrCronJobNotFound
+	}
+	req.UserID = ownerID
+
+	var (
+		job *Job
+		err error
+	)
+	if strings.TrimSpace(script) != "" {
+		job, err = s.buildJobFromScript(req, runtime, script)
+	} else {
+		job, err = s.buildJobFromPromptWithProgress(ctx, req, onProgress)
+	}
+	if err != nil {
 		return nil, err
 	}
+	specJSON, metaJSON, err := prepareJobForPersistence(job)
+	if err != nil {
+		return nil, err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin cron replacement transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var existingOwner string
+	var existingMeta sql.NullString
+	err = tx.QueryRowContext(ctx,
+		`SELECT user_id, meta FROM cron_jobs WHERE id = ?`, jobID,
+	).Scan(&existingOwner, &existingMeta)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrCronJobNotFound
+		}
+		return nil, fmt.Errorf("load cron job for replacement: %w", err)
+	}
+	if existingOwner != ownerID {
+		return nil, ErrCronJobNotFound
+	}
+	// 编辑不改变任务的托管来源；以事务内的原记录为准，避免表单未携带来源键时丢失归属。
+	var existing Job
+	parseJobMeta(&existing, existingMeta.String)
+	job.SourceKey = existing.SourceKey
+	metaJSON = serializeJobMeta(job)
+
+	deleteResult, err := tx.ExecContext(ctx,
+		`DELETE FROM cron_jobs WHERE id = ? AND user_id = ?`, jobID, ownerID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("delete replaced cron job: %w", err)
+	}
+	deleted, err := deleteResult.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("read deleted cron job row count: %w", err)
+	}
+	if deleted == 0 {
+		return nil, ErrCronJobNotFound
+	}
+	if deleted != 1 {
+		return nil, fmt.Errorf("delete replaced cron job affected %d rows", deleted)
+	}
+	insertResult, err := tx.ExecContext(ctx,
+		`INSERT INTO cron_jobs (id, name, type, schedule, spec_json, source_prompt, user_id, platform, chat_id, status, next_run_at, created_at, meta)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		job.ID, job.Name, job.Type, job.Schedule, specJSON, job.SourcePrompt,
+		job.UserID, job.Platform, job.ChatID, job.Status, job.NextRunAt, job.CreatedAt, metaJSON,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("insert cron replacement: %w", err)
+	}
+	inserted, err := insertResult.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("read inserted cron replacement row count: %w", err)
+	}
+	if inserted != 1 {
+		return nil, fmt.Errorf("insert cron replacement affected %d rows", inserted)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit cron replacement: %w", err)
+	}
+
+	delete(s.jobs, jobID)
+	s.jobs[job.ID] = job
+	s.pruneAgentState(jobID)
 	return job, nil
 }
 
@@ -765,6 +825,103 @@ func (s *Scheduler) AddJobFromScript(ctx context.Context, req AddJobRequest, run
 		return nil, err
 	}
 	return job, nil
+}
+
+// EnsureJobFromScriptMissingOnly 只创建缺失的脚本任务，精确 SourceKey 跨归属匹配，
+// 兼容场景任务在身份迁移后的保留。已有匹配任务不更新、恢复、迁移、归并或删除，
+// 调度、状态、时区、投递目标、平台/会话绑定与脚本都保持原有字节语义。
+//
+// 默认不匹配 SourceKey 为空的任务，避免认领用户自建任务。
+// 场景默认补齐显式开启 PreserveVerifiedLegacyDefault 时，仅对同归属、同名、
+// cron/Starlark 且完整规范脚本一致的旧任务只读返回；不回填来源键或修改任何任务字段。
+func (s *Scheduler) EnsureJobFromScriptMissingOnly(
+	ctx context.Context,
+	req AddJobRequest,
+	runtime, script string,
+) (*Job, bool, error) {
+	if strings.TrimSpace(req.SourceKey) == "" {
+		return nil, false, fmt.Errorf("source_key is required for missing-only cron ensure")
+	}
+	if strings.TrimSpace(req.UserID) == "" {
+		return nil, false, fmt.Errorf("user_id is required for missing-only cron ensure")
+	}
+	job, err := s.buildJobFromScript(req, runtime, script)
+	if err != nil {
+		return nil, false, err
+	}
+	// Keep the existing stable-key ID shape for newly created jobs. Exact-key
+	// preservation is global across user IDs; the owner is only part of the ID
+	// for compatibility with jobs created by UpsertJobFromScript.
+	sum := sha256.Sum256([]byte(req.UserID + "\x00" + req.SourceKey))
+	job.ID = fmt.Sprintf("cron-%x", sum[:12])
+	specJSON, metaJSON, err := prepareJobForPersistence(job)
+	if err != nil {
+		return nil, false, err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, false, fmt.Errorf("开始 cron missing-only 事务: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Query the durable table rather than s.jobs: loadJobs intentionally loads
+	// active jobs only, while a user-paused default must still block creation.
+	rows, err := tx.QueryContext(ctx, `SELECT id, name, type, schedule, spec_json, source_prompt, user_id, platform, chat_id, status,
+		last_run_at, next_run_at, run_count, created_at, meta
+		FROM cron_jobs ORDER BY created_at, id`)
+	if err != nil {
+		return nil, false, fmt.Errorf("查询 cron stable key: %w", err)
+	}
+	var existing, verifiedLegacy *Job
+	for rows.Next() {
+		candidate, scanErr := scanJobRow(rows)
+		if scanErr != nil {
+			_ = rows.Close()
+			return nil, false, fmt.Errorf("读取 cron stable key: %w", scanErr)
+		}
+		if candidate.SourceKey == req.SourceKey && existing == nil {
+			existing = candidate
+		}
+		if req.PreserveVerifiedLegacyDefault && verifiedLegacy == nil &&
+			candidate.SourceKey == "" && candidate.UserID == req.UserID &&
+			candidate.Name == req.Name && candidate.Type == JobTypeCron &&
+			candidate.Spec != nil && candidate.Spec.Runtime == RuntimeStarlark &&
+			job.Spec.Runtime == RuntimeStarlark && candidate.Spec.Script == job.Spec.Script {
+			verifiedLegacy = candidate
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, false, fmt.Errorf("遍历 cron stable key: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, false, fmt.Errorf("关闭 cron stable key 查询: %w", err)
+	}
+	if existing != nil {
+		return cloneJobSnapshot(existing), false, nil
+	}
+	if verifiedLegacy != nil {
+		return cloneJobSnapshot(verifiedLegacy), false, nil
+	}
+
+	_, err = tx.ExecContext(ctx, `INSERT INTO cron_jobs
+		(id, name, type, schedule, spec_json, source_prompt, user_id, platform, chat_id, status,
+		 next_run_at, created_at, meta)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		job.ID, job.Name, job.Type, job.Schedule, specJSON, job.SourcePrompt,
+		job.UserID, job.Platform, job.ChatID, job.Status, job.NextRunAt, job.CreatedAt, metaJSON)
+	if err != nil {
+		return nil, false, fmt.Errorf("保存 missing-only cron 任务: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, false, fmt.Errorf("提交 cron missing-only 事务: %w", err)
+	}
+	s.jobs[job.ID] = job
+	logger.Info("Cron 缺项已注册", "name", job.Name, "source_key", job.SourceKey, "schedule", job.Schedule)
+	return cloneJobSnapshot(job), true, nil
 }
 
 // buildJobFromScript validates a pre-authored script completely before any DB
@@ -802,6 +959,7 @@ func (s *Scheduler) buildJobFromScript(req AddJobRequest, runtime, script string
 		UserID:       req.UserID,
 		Platform:     req.Platform,
 		ChatID:       req.ChatID,
+		TZ:           req.TZ,
 		Status:       initialJobStatus(req.Paused),
 		SourcePrompt: req.Prompt,
 		Spec:         spec,
@@ -861,10 +1019,42 @@ func (s *Scheduler) UpsertJobFromScript(ctx context.Context, req AddJobRequest, 
 		return nil, fmt.Errorf("开始 cron 覆盖事务: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	staleIDs, err := upsertPreparedJobTx(ctx, tx, req, job, specJSON, metaJSON, false)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("提交 cron 覆盖事务: %w", err)
+	}
+	for _, id := range staleIDs {
+		delete(s.jobs, id)
+		s.pruneAgentState(id)
+	}
+	s.jobs[job.ID] = job
+	logger.Info("Cron 任务已覆盖注册", "name", job.Name, "source_key", job.SourceKey, "schedule", job.Schedule)
+	return job, nil
+}
 
-	rows, err := tx.QueryContext(ctx, `SELECT id, name, type, schedule, spec_json, source_prompt, user_id, platform, chat_id, status,
-		last_run_at, next_run_at, run_count, created_at, meta
-		FROM cron_jobs WHERE user_id = ? ORDER BY created_at, id`, req.UserID)
+// upsertPreparedJobTx 在调用方已持有 Scheduler.mu 的事务内执行单任务覆盖。
+// 它保留 UpsertJobFromScript 的 legacy name 迁移、暂停状态和运行证据合并语义，
+// 同时供场景整组 provision 复用同一事务。
+func upsertPreparedJobTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	req AddJobRequest,
+	job *Job,
+	specJSON, metaJSON string,
+	matchExactAcrossUsers bool,
+) ([]string, error) {
+	query := `SELECT id, name, type, schedule, spec_json, source_prompt, user_id, platform, chat_id, status,
+		last_run_at, next_run_at, run_count, created_at, meta FROM cron_jobs`
+	var queryArgs []any
+	if !matchExactAcrossUsers {
+		query += ` WHERE user_id = ?`
+		queryArgs = append(queryArgs, req.UserID)
+	}
+	query += ` ORDER BY created_at, id`
+	rows, err := tx.QueryContext(ctx, query, queryArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("查询 cron 幂等键: %w", err)
 	}
@@ -877,7 +1067,16 @@ func (s *Scheduler) UpsertJobFromScript(ctx context.Context, req AddJobRequest, 
 		}
 		// Name fallback migrates jobs created before SourceKey existed. A job
 		// already owned by another non-empty key is never stolen by display name.
-		if jobMatchesIdempotencyKey(existing.SourceKey, existing.Name, req.SourceKey, req.Name) {
+		exactStableKey := existing.SourceKey != "" && existing.SourceKey == req.SourceKey &&
+			(matchExactAcrossUsers || existing.UserID == req.UserID)
+		// Whole-family cutover crosses principal boundaries and therefore only
+		// trusts a non-empty exact SourceKey. A SourceKey-empty row is user-owned;
+		// display-name fallback here could absorb or delete it while migrating an
+		// exact key from an older principal. Single-job Upsert retains the scoped
+		// same-owner legacy-name migration below.
+		sameOwnerLegacyMatch := !matchExactAcrossUsers && existing.UserID == req.UserID &&
+			jobMatchesIdempotencyKey(existing.SourceKey, existing.Name, req.SourceKey, req.Name)
+		if exactStableKey || sameOwnerLegacyMatch {
 			matches = append(matches, existing)
 		}
 	}
@@ -901,9 +1100,21 @@ func (s *Scheduler) UpsertJobFromScript(ctx context.Context, req AddJobRequest, 
 		job.Status = keep.Status
 		for _, duplicate := range matches[1:] {
 			staleIDs = append(staleIDs, duplicate.ID)
-			if _, err := tx.ExecContext(ctx, `DELETE FROM cron_jobs WHERE id = ?`, duplicate.ID); err != nil {
-				return nil, fmt.Errorf("清理重复 cron %s: %w", duplicate.ID, err)
+			if duplicate.Status == StatusPaused {
+				job.Status = StatusPaused
 			}
+		}
+		if err := migrate.MergeCronJobsTx(ctx, tx, keep.ID, staleIDs, "runtime_source_key_upsert"); err != nil {
+			return nil, fmt.Errorf("归并重复 cron 证据: %w", err)
+		}
+		var mergedLastRun sql.NullTime
+		if err := tx.QueryRowContext(ctx, `SELECT run_count,last_run_at FROM cron_jobs WHERE id=?`, keep.ID).
+			Scan(&job.RunCount, &mergedLastRun); err != nil {
+			return nil, fmt.Errorf("读取归并后的 cron 运行统计: %w", err)
+		}
+		job.LastRunAt = time.Time{}
+		if mergedLastRun.Valid {
+			job.LastRunAt = mergedLastRun.Time
 		}
 	}
 
@@ -928,46 +1139,319 @@ func (s *Scheduler) UpsertJobFromScript(ctx context.Context, req AddJobRequest, 
 	if err != nil {
 		return nil, fmt.Errorf("原子保存 cron 任务: %w", err)
 	}
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("提交 cron 覆盖事务: %w", err)
+	return staleIDs, nil
+}
+
+// ProvisionJobsFromScriptsAtomic 在一个 SQLite 事务中覆盖声明的脚本任务并回收
+// 同一 SourceKey 前缀下的历史超集。所有脚本/调度在加锁和写 DB 前先完成验证；
+// 任一 upsert/合并/回收/提交失败都不改变 durable rows 或 active map。
+func (s *Scheduler) ProvisionJobsFromScriptsAtomic(
+	ctx context.Context,
+	prefix string,
+	requests []ScriptJobRequest,
+) (provisioned, reclaimed []*Job, err error) {
+	prefix = strings.TrimSpace(prefix)
+	if prefix == "" {
+		return nil, nil, fmt.Errorf("source_key prefix is required")
 	}
-	for _, id := range staleIDs {
+	if len(requests) == 0 {
+		return nil, nil, fmt.Errorf("at least one cron job is required")
+	}
+
+	type preparedJob struct {
+		req                AddJobRequest
+		job                *Job
+		specJSON, metaJSON string
+	}
+	prepared := make([]preparedJob, 0, len(requests))
+	seenKeys := make(map[string]bool, len(requests))
+	for _, input := range requests {
+		req := input.Request
+		if strings.TrimSpace(req.UserID) == "" {
+			return nil, nil, fmt.Errorf("user_id is required for cron provision")
+		}
+		if req.SourceKey == prefix || !strings.HasPrefix(req.SourceKey, prefix) {
+			return nil, nil, fmt.Errorf("source_key %q is outside provision prefix %q", req.SourceKey, prefix)
+		}
+		if seenKeys[req.SourceKey] {
+			return nil, nil, fmt.Errorf("duplicate source_key in cron provision: %q", req.SourceKey)
+		}
+		seenKeys[req.SourceKey] = true
+		job, buildErr := s.buildJobFromScript(req, input.Runtime, input.Script)
+		if buildErr != nil {
+			return nil, nil, buildErr
+		}
+		sum := sha256.Sum256([]byte(req.UserID + "\x00" + req.SourceKey))
+		job.ID = fmt.Sprintf("cron-%x", sum[:12])
+		specJSON, metaJSON, prepareErr := prepareJobForPersistence(job)
+		if prepareErr != nil {
+			return nil, nil, prepareErr
+		}
+		prepared = append(prepared, preparedJob{req: req, job: job, specJSON: specJSON, metaJSON: metaJSON})
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, nil, fmt.Errorf("开始 cron 整组 provision 事务: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	removedIDs := make(map[string]bool)
+	keepIDs := make(map[string]bool, len(prepared))
+	for _, item := range prepared {
+		staleIDs, upsertErr := upsertPreparedJobTx(ctx, tx, item.req, item.job, item.specJSON, item.metaJSON, true)
+		if upsertErr != nil {
+			return nil, nil, upsertErr
+		}
+		for _, id := range staleIDs {
+			removedIDs[id] = true
+		}
+		keepIDs[item.job.ID] = true
+	}
+
+	rows, err := tx.QueryContext(ctx, `SELECT id, name, type, schedule, spec_json, source_prompt, user_id, platform, chat_id, status,
+		last_run_at, next_run_at, run_count, created_at, meta
+		FROM cron_jobs ORDER BY created_at, id`)
+	if err != nil {
+		return nil, nil, fmt.Errorf("查询 cron provision 历史超集: %w", err)
+	}
+	for rows.Next() {
+		candidate, scanErr := scanJobRow(rows)
+		if scanErr != nil {
+			_ = rows.Close()
+			return nil, nil, fmt.Errorf("读取 cron provision 历史超集: %w", scanErr)
+		}
+		if candidate.SourceKey != "" && strings.HasPrefix(candidate.SourceKey, prefix) && !keepIDs[candidate.ID] {
+			reclaimed = append(reclaimed, cloneJobSnapshot(candidate))
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, nil, fmt.Errorf("遍历 cron provision 历史超集: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, nil, fmt.Errorf("关闭 cron provision 历史超集查询: %w", err)
+	}
+	for _, job := range reclaimed {
+		if _, deleteErr := tx.ExecContext(ctx, `DELETE FROM cron_jobs WHERE id = ?`, job.ID); deleteErr != nil {
+			return nil, nil, fmt.Errorf("回收历史 K12 定时任务 %s（%s）: %w", job.Name, job.ID, deleteErr)
+		}
+		removedIDs[job.ID] = true
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, nil, fmt.Errorf("提交 cron 整组 provision 事务: %w", err)
+	}
+
+	for id := range removedIDs {
 		delete(s.jobs, id)
 		s.pruneAgentState(id)
 	}
-	s.jobs[job.ID] = job
-	logger.Info("Cron 任务已覆盖注册", "name", job.Name, "source_key", job.SourceKey, "schedule", job.Schedule)
-	return job, nil
+	provisioned = make([]*Job, 0, len(prepared))
+	for _, item := range prepared {
+		s.jobs[item.job.ID] = item.job
+		provisioned = append(provisioned, cloneJobSnapshot(item.job))
+	}
+	return provisioned, reclaimed, nil
 }
 
-// RemoveJob 删除任务
+// RemoveJob 删除任务。保留内部可信调用方按全局 ID 删除的兼容行为。
 func (s *Scheduler) RemoveJob(ctx context.Context, jobID string) error {
-	// Keep the same lock→DB→map order as stable-key Upsert. The previous
-	// DB→lock order allowed this interleaving: delete old row, upsert replacement,
-	// then delete the replacement from memory.
-	s.mu.Lock()
-	_, err := s.db.ExecContext(ctx, `DELETE FROM cron_jobs WHERE id = ?`, jobID)
-	if err != nil {
-		s.mu.Unlock()
-		return err
+	return s.removeJob(ctx, jobID, "", false)
+}
+
+// RemoveJobForOwner 仅允许任务所属用户删除，并统一隐藏跨用户与不存在任务。
+func (s *Scheduler) RemoveJobForOwner(ctx context.Context, jobID, ownerID string) error {
+	if strings.TrimSpace(ownerID) == "" {
+		return ErrCronJobNotFound
 	}
+	return s.removeJob(ctx, jobID, ownerID, true)
+}
+
+func (s *Scheduler) removeJob(ctx context.Context, jobID, ownerID string, ownerScoped bool) error {
+	// 与稳定键 Upsert 共用 lock→transaction→map 顺序，所有权判断和删除由同一条
+	// SQL 完成，避免 handler 先查后删造成 TOCTOU。
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin cron remove transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	query := `DELETE FROM cron_jobs WHERE id = ?`
+	args := []any{jobID}
+	if ownerScoped {
+		query += ` AND user_id = ?`
+		args = append(args, ownerID)
+	}
+	result, err := tx.ExecContext(ctx, query, args...)
+	if err != nil {
+		return fmt.Errorf("remove cron job: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read removed cron row count: %w", err)
+	}
+	if affected == 0 {
+		if ownerScoped {
+			return ErrCronJobNotFound
+		}
+		// 旧 RemoveJob 对不存在任务返回成功，保持兼容。
+		return nil
+	}
+	if affected != 1 {
+		return fmt.Errorf("remove cron job affected %d rows", affected)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit cron remove transaction: %w", err)
+	}
+
 	delete(s.jobs, jobID)
 	// Drop heal-quota / notification bookkeeping so the maps cannot grow
 	// unboundedly across job churn (review L5). Keep it inside the lifecycle
 	// boundary so it cannot erase state initialized by a following upsert.
 	s.pruneAgentState(jobID)
-	s.mu.Unlock()
 	return nil
+}
+
+// JobsBySourceKeyPrefix returns read-only snapshots of every job whose stable
+// SourceKey starts with prefix, across all user IDs. Scenario provisioning uses
+// it to reconcile the declared job set for one logical owner (for example
+// "agent-name/") against historical registrations: legacy kinds that were
+// retired from the default spec set, or duplicates left under an older user ID,
+// are invisible to per-user idempotent upsert and can only be found here.
+// Jobs without a SourceKey (user-authored tasks) never match.
+func (s *Scheduler) JobsBySourceKeyPrefix(prefix string) []*Job {
+	prefix = strings.TrimSpace(prefix)
+	if prefix == "" {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]*Job, 0)
+	for _, job := range s.jobs {
+		if job.SourceKey != "" && strings.HasPrefix(job.SourceKey, prefix) {
+			out = append(out, cloneJobSnapshot(job))
+		}
+	}
+	return out
+}
+
+// RemoveJobsBySourceKeyPrefix atomically detaches every job owned by one
+// logical resource. SourceKey is the stable ownership key used by scenario
+// provisioning (for example "agent-name/daily-reminder"). The returned
+// snapshots let the caller compensate if a later step in its deletion saga
+// fails.
+//
+// The lock -> transaction -> in-memory-map ordering intentionally matches
+// UpsertJobFromScript and RemoveJob, so a concurrent provision cannot recreate
+// a row between the durable delete and the map cleanup.
+func (s *Scheduler) RemoveJobsBySourceKeyPrefix(ctx context.Context, prefix string) ([]*Job, error) {
+	prefix = strings.TrimSpace(prefix)
+	if prefix == "" {
+		return nil, fmt.Errorf("source_key prefix is required")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("开始 cron 归属清理事务: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// loadJobs 只把 active job 放入 s.jobs；已暂停任务只在持久层。
+	// 因此归属清理必须在同一事务内以全量持久行为权威集合，
+	// 否则重启后删 agent 会遗留 paused orphan。
+	rows, err := tx.QueryContext(ctx, `SELECT id, name, type, schedule, spec_json, source_prompt, user_id, platform, chat_id, status,
+		last_run_at, next_run_at, run_count, created_at, meta
+		FROM cron_jobs ORDER BY created_at, id`)
+	if err != nil {
+		return nil, fmt.Errorf("查询 cron 归属清理集合: %w", err)
+	}
+	detached := make([]*Job, 0)
+	for rows.Next() {
+		job, scanErr := scanJobRow(rows)
+		if scanErr != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("读取 cron 归属清理集合: %w", scanErr)
+		}
+		if job.SourceKey != "" && strings.HasPrefix(job.SourceKey, prefix) {
+			detached = append(detached, cloneJobSnapshot(job))
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, fmt.Errorf("遍历 cron 归属清理集合: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("关闭 cron 归属清理查询: %w", err)
+	}
+	for _, job := range detached {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM cron_jobs WHERE id = ?`, job.ID); err != nil {
+			return nil, fmt.Errorf("删除归属 cron %s: %w", job.ID, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("提交 cron 归属清理事务: %w", err)
+	}
+	for _, job := range detached {
+		delete(s.jobs, job.ID)
+		s.pruneAgentState(job.ID)
+	}
+	return detached, nil
+}
+
+func cloneJobSnapshot(job *Job) *Job {
+	if job == nil {
+		return nil
+	}
+	cloned := *job
+	cloned.Deliver = append([]string(nil), job.Deliver...)
+	cloned.ContextFrom = append([]string(nil), job.ContextFrom...)
+	cloned.FailureDeliver = append([]string(nil), job.FailureDeliver...)
+	if job.Spec != nil {
+		spec := *job.Spec
+		spec.Deps = append([]string(nil), job.Spec.Deps...)
+		if job.Spec.Inputs != nil {
+			spec.Inputs = make(map[string]any, len(job.Spec.Inputs))
+			for key, value := range job.Spec.Inputs {
+				spec.Inputs[key] = value
+			}
+		}
+		cloned.Spec = &spec
+	}
+	return &cloned
 }
 
 // PauseJob 暂停任务
 func (s *Scheduler) PauseJob(ctx context.Context, jobID string) error {
-	return s.updateJobStatus(ctx, jobID, StatusPaused)
+	return s.updateJobStatus(ctx, jobID, "", StatusPaused, false)
 }
 
 // ResumeJob 恢复任务
 func (s *Scheduler) ResumeJob(ctx context.Context, jobID string) error {
-	return s.updateJobStatus(ctx, jobID, StatusActive)
+	return s.updateJobStatus(ctx, jobID, "", StatusActive, false)
+}
+
+// PauseJobForOwner 仅允许任务所属用户暂停，并统一隐藏跨用户与不存在任务。
+func (s *Scheduler) PauseJobForOwner(ctx context.Context, jobID, ownerID string) error {
+	if strings.TrimSpace(ownerID) == "" {
+		return ErrCronJobNotFound
+	}
+	return s.updateJobStatus(ctx, jobID, ownerID, StatusPaused, true)
+}
+
+// ResumeJobForOwner 仅允许任务所属用户恢复；恢复时从持久层完整回载任务。
+func (s *Scheduler) ResumeJobForOwner(ctx context.Context, jobID, ownerID string) error {
+	if strings.TrimSpace(ownerID) == "" {
+		return ErrCronJobNotFound
+	}
+	return s.updateJobStatus(ctx, jobID, ownerID, StatusActive, true)
 }
 
 // ListJobs 列出所有任务
@@ -1182,32 +1666,81 @@ func (s *Scheduler) GetJob(_ context.Context, jobID string) (*Job, bool) {
 	return job, ok
 }
 
+var (
+	// ErrCronJobNotFound 对不存在与跨用户任务提供同一失败语义。
+	ErrCronJobNotFound = fmt.Errorf("cron job not found")
+	// ErrCronJobPaused 表示任务已暂停，必须恢复后才能运行。
+	ErrCronJobPaused = fmt.Errorf("cron job paused")
+	// ErrCronExecutorUnavailable 表示脚本任务执行器未配置。
+	ErrCronExecutorUnavailable = fmt.Errorf("cron executor unavailable")
+)
+
 // TriggerJob 手动触发任务执行（fire-and-forget，不等结果）。
 //
 // v2：不依赖 executor callback，直接 dispatch 到 executeJob，由 ScriptExecutor 跑沙箱。
-func (s *Scheduler) TriggerJob(_ context.Context, jobID string) error {
+func (s *Scheduler) TriggerJob(ctx context.Context, jobID string) error {
+	return s.triggerJob(ctx, jobID, "", false)
+}
+
+// TriggerJobForOwner 仅允许任务所属用户触发，并对不存在与跨用户任务返回相同错误。
+func (s *Scheduler) TriggerJobForOwner(ctx context.Context, jobID, ownerID string) error {
+	if strings.TrimSpace(ownerID) == "" {
+		return ErrCronJobNotFound
+	}
+	return s.triggerJob(ctx, jobID, ownerID, true)
+}
+
+func (s *Scheduler) triggerJob(ctx context.Context, jobID, ownerID string, ownerScoped bool) error {
 	s.mu.RLock()
 	job, ok := s.jobs[jobID]
-	s.mu.RUnlock()
-
-	if !ok {
+	var j Job
+	if ok {
+		if ownerScoped && job.UserID != ownerID {
+			s.mu.RUnlock()
+			return ErrCronJobNotFound
+		}
+		j = *job
+	} else if ownerScoped {
+		// paused job 重启后不在 active map；从持久层 owner-scoped 查询才能正确
+		// 区分 paused 与 not-found，同时不泄露其他 owner 的任务。
+		loaded, err := scanJobRow(s.db.QueryRowContext(ctx,
+			`SELECT id, name, type, schedule, spec_json, source_prompt, user_id, platform, chat_id, status,
+			 last_run_at, next_run_at, run_count, created_at, meta
+			 FROM cron_jobs WHERE id = ? AND user_id = ?`, jobID, ownerID))
+		if err != nil {
+			s.mu.RUnlock()
+			if err == sql.ErrNoRows {
+				return ErrCronJobNotFound
+			}
+			return fmt.Errorf("load cron job for trigger: %w", err)
+		}
+		j = *loaded
+	} else {
+		s.mu.RUnlock()
 		return fmt.Errorf("任务 %q 不存在", jobID)
 	}
+	// 所有权校验与任务快照必须处于同一读锁，避免校验后按同一 ID 读取到其他任务。
+	s.mu.RUnlock()
+
 	// 暂停态任务不接受手动 run / webhook TriggerJob —— 尊重「审批未决先冻结任务
 	// 意图，暂停期间根本不 dispatch」的设计（GO-6）。仅 checkAndExecute 的调度尊重
 	// StatusActive 是不够的：run/webhook 会绕过冻结，平白产生一次失败运行+pending 审计。
-	if job.Status == StatusPaused {
+	if j.Status == StatusPaused {
+		if ownerScoped {
+			return ErrCronJobPaused
+		}
 		return fmt.Errorf("任务 %q 已暂停，恢复（resume）后才能触发", jobID)
 	}
 	// Agent-mode jobs run via the injected AgentRunner, not the script executor,
 	// so only script-mode jobs need scriptExec — don't block a webhook-triggered
 	// agent job on it (an agent-only deployment may legitimately have no exec).
-	if s.scriptExec == nil && (job.Spec == nil || job.Spec.Runtime != RuntimeAgent) {
+	if s.scriptExec == nil && (j.Spec == nil || j.Spec.Runtime != RuntimeAgent) {
+		if ownerScoped {
+			return ErrCronExecutorUnavailable
+		}
 		return fmt.Errorf("脚本执行器未就绪")
 	}
 
-	// 复制一份避免并发修改（Spec 是 read-only pointer，共享安全）
-	j := *job
 	go s.executeJob(&j)
 	return nil
 }
@@ -1233,11 +1766,14 @@ type JobHistory struct {
 
 // GetJobHistory 获取任务执行历史（最近 50 条，从新到旧）
 func (s *Scheduler) GetJobHistory(ctx context.Context, jobID string, limit ...int) ([]JobHistory, error) {
-	s.mu.RLock()
-	_, ok := s.jobs[jobID]
-	s.mu.RUnlock()
-	if !ok {
+	// 暂停任务重启后不进入活跃调度缓存，历史查询以持久记录为准。
+	var exists int
+	err := s.db.QueryRowContext(ctx, `SELECT 1 FROM cron_jobs WHERE id = ?`, jobID).Scan(&exists)
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("任务 %q 不存在", jobID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("query job for history: %w", err)
 	}
 
 	// limit 可选：缺省 50，传入 >0 时生效并夹到 [1,200]（bug 2026-06-22：前端 ?limit 此前被忽略）。
@@ -1501,31 +2037,37 @@ func (s *Scheduler) currentJobGeneration(candidate *Job) bool {
 // row. The DB check matters when a different scheduler replica performs the
 // stable-key replacement and this process still has an old in-memory copy.
 func (s *Scheduler) jobGenerationCurrent(ctx context.Context, candidate *Job) bool {
+	current, err := s.jobGenerationCurrentResult(ctx, candidate)
+	return err == nil && current
+}
+
+func (s *Scheduler) jobGenerationCurrentResult(ctx context.Context, candidate *Job) (bool, error) {
 	if candidate == nil || !s.currentJobGeneration(candidate) {
-		return false
+		return false, nil
 	}
 	if s.db == nil {
-		return true
+		return true, nil
 	}
 	var exists int
 	err := s.db.QueryRowContext(ctx,
 		`SELECT COUNT(1) FROM cron_jobs WHERE id = ? AND meta = ?`,
 		candidate.ID, serializeJobMeta(candidate)).Scan(&exists)
 	if err != nil {
-		return false
+		return false, err
 	}
 	if exists == 1 {
-		return true
+		return true, nil
 	}
 	// Generation-less values are legacy/test-only and may intentionally have no
 	// cron_jobs row. Admitted jobs always carry a generation and fail closed.
 	if candidate.Generation == "" {
 		var anyRow int
-		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM cron_jobs WHERE id = ?`, candidate.ID).Scan(&anyRow); err == nil {
-			return anyRow == 0
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM cron_jobs WHERE id = ?`, candidate.ID).Scan(&anyRow); err != nil {
+			return false, err
 		}
+		return anyRow == 0, nil
 	}
-	return false
+	return false, nil
 }
 
 // jobGenerationCurrentFresh gives each boundary check its own short DB budget.
@@ -1533,9 +2075,14 @@ func (s *Scheduler) jobGenerationCurrent(ctx context.Context, candidate *Job) bo
 // target must not make a still-current second target look stale merely because
 // the earlier check context expired.
 func (s *Scheduler) jobGenerationCurrentFresh(candidate *Job) bool {
+	current, err := s.jobGenerationCurrentFreshResult(candidate)
+	return err == nil && current
+}
+
+func (s *Scheduler) jobGenerationCurrentFreshResult(candidate *Job) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	return s.jobGenerationCurrent(ctx, candidate)
+	return s.jobGenerationCurrentResult(ctx, candidate)
 }
 
 // fastForward 把超宽限的 misfire 任务推进到下个未来执行点（跳过积压、不补一串），
@@ -1613,12 +2160,31 @@ func (s *Scheduler) executeJob(job *Job) {
 		return // 上一次执行尚未完成（进程内去重）
 	}
 	defer s.running.Delete(job.ID)
+	executeStarted := time.Now()
+	runtime := ""
+	if job.Spec != nil {
+		runtime = job.Spec.Runtime
+		if runtime == RuntimePython3 && looksLikeStarlark(job.Spec.Script) {
+			runtime = RuntimeStarlark
+		}
+	}
 
 	// 跨副本去重：进程内 sync.Map 只防单实例重入，多副本部署时同一到期刻度会被多个
 	// 实例同时触发。claimJob 用 DB 原子领取保证一个到期刻度只跑一个副本。
 	if !s.claimJob(job) {
+		slog.Info("[cron] job lifecycle",
+			"source", "cron", "job", job.ID, "job_name", job.Name, "job_type", job.Type,
+			"generation", job.Generation, "source_key", job.SourceKey, "runtime", runtime,
+			"schedule", job.Schedule, "user_id", job.UserID, "platform", job.Platform, "chat_id", job.ChatID,
+			"stage", "execute", "elapsed_ms", time.Since(executeStarted).Milliseconds(), "status", "not_claimed")
 		return // 另一副本已领取本到期刻度
 	}
+	slog.Info("[cron] job lifecycle",
+		"source", "cron", "job", job.ID, "job_name", job.Name, "job_type", job.Type,
+		"generation", job.Generation, "source_key", job.SourceKey, "runtime", runtime,
+		"schedule", job.Schedule, "user_id", job.UserID, "platform", job.Platform, "chat_id", job.ChatID,
+		"source_prompt", job.SourcePrompt, "context_from", job.ContextFrom, "job_spec", job.Spec,
+		"stage", "execute", "elapsed_ms", time.Since(executeStarted).Milliseconds(), "status", "started")
 
 	now := time.Now()
 	// Note: the persistence ctx must be created AFTER the run finishes — a job
@@ -1630,10 +2196,16 @@ func (s *Scheduler) executeJob(job *Job) {
 
 	// 防御：spec 为 nil（理论上 v2 不会发生，AddJob 已强制要求 Spec）
 	if job.Spec == nil {
-		logger.Error("[cron] 跳过执行 — Spec 为 nil", "id", job.ID)
+		specErr := errors.New("Spec 为 nil — 请重新创建任务")
+		logger.Error("[cron] 跳过执行 — Spec 为 nil", "id", job.ID, "name", job.Name, "error", specErr)
 		ec, cancel := earlyCtx()
 		defer cancel()
-		_, _ = s.persistHistoryForGeneration(ec, job, "error", "", "Spec 为 nil — 请重新创建任务", 0, now, "", "", 0, nil)
+		_, _ = s.persistHistoryForGeneration(ec, job, "error", "", specErr.Error(), 0, now, "", "", 0, nil)
+		slog.Info("[cron] job lifecycle",
+			"source", "cron", "job", job.ID, "job_name", job.Name, "job_type", job.Type,
+			"generation", job.Generation, "source_key", job.SourceKey, "runtime", runtime,
+			"stage", "execute", "elapsed_ms", time.Since(executeStarted).Milliseconds(), "status", "error",
+			"error", specErr, "job_context", job)
 		return
 	}
 	// context_from 线性任务链：执行前把上游最近一次产物注入本任务（仅读最近一条，
@@ -1651,6 +2223,26 @@ func (s *Scheduler) executeJob(job *Job) {
 	// §13.3(2)：把 job lifecycle（ID + generation）带进 ctx。Stable-key
 	// replacement 复用 ID；generation 隔离防旧脚本迟到 state_set 污染新定义。
 	runCtx = withStateJob(runCtx, job)
+	heartbeatCtx, stopHeartbeat := context.WithCancel(runCtx)
+	defer stopHeartbeat()
+	heartbeatStopped := make(chan struct{})
+	go func() {
+		defer close(heartbeatStopped)
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-heartbeatCtx.Done():
+				return
+			case <-ticker.C:
+				slog.Info("[cron] job heartbeat",
+					"source", "cron", "job", job.ID, "job_name", job.Name, "job_type", job.Type,
+					"generation", job.Generation, "source_key", job.SourceKey, "runtime", runtime,
+					"schedule", job.Schedule, "user_id", job.UserID, "platform", job.Platform, "chat_id", job.ChatID,
+					"stage", "execute", "elapsed_ms", time.Since(executeStarted).Milliseconds(), "status", "running")
+			}
+		}
+	}()
 
 	var result *RunResult
 	var runErr error
@@ -1664,32 +2256,50 @@ func (s *Scheduler) executeJob(job *Job) {
 			result = s.runAgentJob(runCtx, job)
 		}
 	} else {
-		runtime := job.Spec.Runtime
 		// Backstop: a script tagged python3 but using Starlark host builtins (emit /
 		// kb_ingest / ...) was mis-routed — e.g. a weak compiler model declared python3
 		// while emitting Starlark. Run it on the engine it was actually written for
 		// instead of failing with NameError at python runtime; also self-heals already
 		// persisted jobs without a re-compile.
-		if runtime == RuntimePython3 && looksLikeStarlark(job.Spec.Script) {
+		if job.Spec.Runtime == RuntimePython3 && runtime == RuntimeStarlark {
 			slog.Warn("[cron] script tagged python3 but uses Starlark builtins — routing to Starlark engine", "source", "cron", "id", job.ID)
-			runtime = RuntimeStarlark
 		}
 		engine := s.engineFor(runtime)
 		if engine == nil {
-			slog.Error("[cron] skipping run — no engine for runtime", "source", "cron", "id", job.ID, "runtime", runtime)
+			engineErr := fmt.Errorf("no script engine for runtime %s", runtime)
+			slog.Error("[cron] skipping run — no engine for runtime", "source", "cron", "id", job.ID,
+				"name", job.Name, "generation", job.Generation, "source_key", job.SourceKey,
+				"runtime", runtime, "error", engineErr, "job_context", job)
+			stopHeartbeat()
+			<-heartbeatStopped
+			slog.Info("[cron] job lifecycle",
+				"source", "cron", "job", job.ID, "job_name", job.Name, "job_type", job.Type,
+				"generation", job.Generation, "source_key", job.SourceKey, "runtime", runtime,
+				"stage", "execute", "elapsed_ms", time.Since(executeStarted).Milliseconds(), "status", "error",
+				"error", engineErr, "job_context", job)
 			ec, cancel := earlyCtx()
 			defer cancel()
-			_, _ = s.persistHistoryForGeneration(ec, job, "error", "", "no script engine for runtime "+runtime, 0, now, "", "", 0, nil)
+			_, _ = s.persistHistoryForGeneration(ec, job, "error", "", engineErr.Error(), 0, now, "", "", 0, nil)
 			return
 		}
 		if !engine.Available() {
 			// Explicit error instead of a silent exec failure (e.g. python3 not
 			// installed). The Starlark engine is always available, so steering new
 			// mechanical jobs to it avoids this entirely.
-			slog.Error("[cron] skipping run — runtime unavailable on this host", "source", "cron", "id", job.ID, "runtime", engine.Name())
+			engineErr := fmt.Errorf("%s runtime is not available on this host", engine.Name())
+			slog.Error("[cron] skipping run — runtime unavailable on this host", "source", "cron", "id", job.ID,
+				"name", job.Name, "generation", job.Generation, "source_key", job.SourceKey,
+				"runtime", engine.Name(), "error", engineErr, "job_context", job)
+			stopHeartbeat()
+			<-heartbeatStopped
+			slog.Info("[cron] job lifecycle",
+				"source", "cron", "job", job.ID, "job_name", job.Name, "job_type", job.Type,
+				"generation", job.Generation, "source_key", job.SourceKey, "runtime", runtime,
+				"stage", "execute", "elapsed_ms", time.Since(executeStarted).Milliseconds(), "status", "error",
+				"error", engineErr, "job_context", job)
 			ec, cancel := earlyCtx()
 			defer cancel()
-			_, _ = s.persistHistoryForGeneration(ec, job, "error", "", engine.Name()+" runtime is not available on this host", 0, now, "", "", 0, nil)
+			_, _ = s.persistHistoryForGeneration(ec, job, "error", "", engineErr.Error(), 0, now, "", "", 0, nil)
 			return
 		}
 		logger.Info("[cron] 执行脚本任务", "name", job.Name, "id", job.ID, "engine", engine.Name())
@@ -1728,17 +2338,36 @@ func (s *Scheduler) executeJob(job *Job) {
 		result.Status = "error"
 		result.Error = runErr.Error()
 	}
-	logger.Info("[cron] 脚本任务结束",
-		"name", job.Name, "id", job.ID,
-		"status", result.Status, "exit", result.ExitCode, "duration_ms", result.DurationMs)
+	stopHeartbeat()
+	<-heartbeatStopped
+	slog.Info("[cron] job lifecycle",
+		"source", "cron", "job", job.ID, "job_name", job.Name, "job_type", job.Type,
+		"generation", job.Generation, "source_key", job.SourceKey, "runtime", runtime,
+		"schedule", job.Schedule, "user_id", job.UserID, "platform", job.Platform, "chat_id", job.ChatID,
+		"stage", "execute", "elapsed_ms", time.Since(executeStarted).Milliseconds(),
+		"status", result.Status, "exit", result.ExitCode, "error", runErr,
+		"result_error", result.Error, "stdout", result.Stdout, "stderr", result.Stderr, "result_data", result.Data)
 
 	// Update job state (the persistence ctx is created after the run finishes,
 	// see the note at the top of this function).
+	persistStarted := time.Now()
+	persistStatus := "success"
+	var persistError error
+	var nextErr error
+	persistLogged := false
+	defer func() {
+		if !persistLogged {
+			slog.Info("[cron] job lifecycle",
+				"source", "cron", "job", job.ID, "job_name", job.Name, "job_type", job.Type,
+				"generation", job.Generation, "source_key", job.SourceKey, "runtime", runtime,
+				"stage", "persist", "elapsed_ms", time.Since(persistStarted).Milliseconds(), "status", persistStatus,
+				"error", persistError, "next_run_error", nextErr, "job_context", job, "result", result)
+		}
+	}()
 	dbCtx, dbCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer dbCancel()
 	now = time.Now()
 	var next time.Time
-	var nextErr error
 	if job.Type != JobTypeOnce {
 		next, nextErr = nextRunTime(job.Schedule, job.Type, now.In(jobLocation(job.TZ)))
 		if nextErr != nil {
@@ -1774,14 +2403,24 @@ func (s *Scheduler) executeJob(job *Job) {
 		}
 		if err != nil {
 			logger.Error("Cron: 更新任务状态失败", "error", err)
+			persistStatus = "error"
+			persistError = err
 			if job.Generation != "" {
 				return
 			}
-		} else if affected, rowsErr := res.RowsAffected(); rowsErr != nil || affected != 1 {
+		} else if affected, rowsErr := res.RowsAffected(); rowsErr != nil {
+			logger.Error("Cron: 读取任务状态更新结果失败", "error", rowsErr)
+			persistStatus = "error"
+			persistError = rowsErr
+			if job.Generation != "" {
+				return
+			}
+		} else if affected != 1 {
 			// Generation-bearing jobs are always persisted. A zero-row update
 			// therefore means this run was superseded or removed. Legacy/test jobs
 			// without a generation retain the historical no-row fail-open behavior.
 			if job.Generation != "" {
+				persistStatus = "stale"
 				slog.Info("[cron] 已忽略旧世代执行结果",
 					"source", "cron", "id", job.ID, "generation", job.Generation)
 				return
@@ -1792,6 +2431,7 @@ func (s *Scheduler) executeJob(job *Job) {
 	s.mu.Lock()
 	if !s.currentJobGenerationLocked(job) {
 		s.mu.Unlock()
+		persistStatus = "stale"
 		return
 	}
 	if j, ok := s.jobs[job.ID]; ok {
@@ -1824,26 +2464,54 @@ func (s *Scheduler) executeJob(job *Job) {
 	)
 	if historyErr != nil {
 		logger.Error("Cron: 写入执行历史失败", "error", historyErr)
+		persistStatus = "error"
+		persistError = historyErr
 	}
 	if !persisted {
+		if persistStatus == "success" {
+			persistStatus = "stale"
+		}
 		slog.Info("[cron] 已忽略旧世代历史与投递", "source", "cron", "id", job.ID, "generation", job.Generation)
 		return
 	}
 	// History/pruning may consume most of dbCtx's budget. Delivery is a new
 	// external boundary and must get a fresh generation-check deadline.
-	if !s.jobGenerationCurrentFresh(job) {
+	generationCurrent, generationErr := s.jobGenerationCurrentFreshResult(job)
+	if generationErr != nil {
+		logger.Error("Cron: 校验任务世代失败", "error", generationErr)
+		persistStatus = "error"
+		persistError = generationErr
 		return
 	}
+	if !generationCurrent {
+		persistStatus = "stale"
+		return
+	}
+	persistLogged = true
+	slog.Info("[cron] job lifecycle",
+		"source", "cron", "job", job.ID, "job_name", job.Name, "job_type", job.Type,
+		"generation", job.Generation, "source_key", job.SourceKey, "runtime", runtime,
+		"stage", "persist", "elapsed_ms", time.Since(persistStarted).Milliseconds(), "status", persistStatus,
+		"error", persistError, "next_run_error", nextErr, "job_context", job, "result", result)
 
+	deliveryStarted := time.Now()
+	deliveryStatus := "attempted"
 	if result.Status == "success" {
+		s.resolveSelfHealVerification(dbCtx, job, result)
 		// §13.3(2) only_if_changed：产物与上次相同 → 跳过投递（执行已跑、取过数）。
 		// 否则按 deliver 目标投递（脚本与 agent 结果同走）。
 		if job.OnlyIfChanged && s.outputUnchangedForGeneration(job, result) {
+			deliveryStatus = "skipped_unchanged"
 			slog.Info("[cron] only_if_changed：产物未变，跳过投递", "source", "cron", "id", job.ID, "name", job.Name)
 		} else {
 			s.deliverResult(job, result)
 		}
 	} else {
+		deliveryStatus = "failure_handled"
+		_, pendingHeal := s.selfHealPendingMarker(job)
+		if pendingHeal {
+			s.resolveSelfHealVerification(dbCtx, job, result)
+		}
 		// failure_deliver: route a failure summary to the job's dedicated
 		// failure channels; falls back to the existing throttled alert when unset.
 		// Additive to the existing alert/self-heal paths.
@@ -1852,12 +2520,18 @@ func (s *Scheduler) executeJob(job *Job) {
 			// Agent jobs have no script to recompile — alert on persistent failure
 			// instead of healing.
 			s.maybeAlertAgentFailure(dbCtx, job, result)
-		} else {
+		} else if !pendingHeal {
 			// Self-heal bridge: consecutive script failures past the threshold →
 			// recompile with the failure context (cooldown-window quota applies).
 			s.maybeSelfHeal(dbCtx, job, result)
 		}
 	}
+	slog.Info("[cron] job lifecycle",
+		"source", "cron", "job", job.ID, "job_name", job.Name, "job_type", job.Type,
+		"generation", job.Generation, "source_key", job.SourceKey, "runtime", runtime,
+		"deliver", job.Deliver, "failure_deliver", job.FailureDeliver, "platform", job.Platform, "chat_id", job.ChatID,
+		"stage", "delivery", "elapsed_ms", time.Since(deliveryStarted).Milliseconds(),
+		"status", deliveryStatus, "total_elapsed_ms", time.Since(executeStarted).Milliseconds(), "result", result)
 }
 
 // maybeFailureDeliver routes a failure summary to the job's FailureDeliver
@@ -1932,18 +2606,77 @@ func (s *Scheduler) loadJobs(ctx context.Context) error {
 	return rows.Err()
 }
 
-// updateJobStatus 更新任务状态
-func (s *Scheduler) updateJobStatus(ctx context.Context, jobID string, status JobStatus) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE cron_jobs SET status = ? WHERE id = ?`, status, jobID)
+// updateJobStatus 在同一锁和事务内读取、校验并更新任务状态。
+// Resume 必须使用持久层完整快照回载 s.jobs，因为 paused job 重启时不会被 loadJobs 加载。
+func (s *Scheduler) updateJobStatus(
+	ctx context.Context,
+	jobID, ownerID string,
+	status JobStatus,
+	ownerScoped bool,
+) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("begin cron status transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	query := `SELECT id, name, type, schedule, spec_json, source_prompt, user_id, platform, chat_id, status,
+		last_run_at, next_run_at, run_count, created_at, meta
+		FROM cron_jobs WHERE id = ?`
+	args := []any{jobID}
+	if ownerScoped {
+		query += ` AND user_id = ?`
+		args = append(args, ownerID)
+	}
+	job, err := scanJobRow(tx.QueryRowContext(ctx, query, args...))
+	if err != nil {
+		if err == sql.ErrNoRows {
+			if ownerScoped {
+				return ErrCronJobNotFound
+			}
+			// 旧 PauseJob/ResumeJob 对不存在任务返回成功，保持兼容。
+			return nil
+		}
+		return fmt.Errorf("load cron job for status update: %w", err)
 	}
 
-	s.mu.Lock()
-	if job, ok := s.jobs[jobID]; ok {
-		job.Status = status
+	updateQuery := `UPDATE cron_jobs SET status = ? WHERE id = ?`
+	updateArgs := []any{status, jobID}
+	if ownerScoped {
+		updateQuery += ` AND user_id = ?`
+		updateArgs = append(updateArgs, ownerID)
 	}
-	s.mu.Unlock()
+	result, err := tx.ExecContext(ctx, updateQuery, updateArgs...)
+	if err != nil {
+		return fmt.Errorf("update cron job status: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read updated cron row count: %w", err)
+	}
+	if affected == 0 {
+		if ownerScoped {
+			return ErrCronJobNotFound
+		}
+		return nil
+	}
+	if affected != 1 {
+		return fmt.Errorf("update cron job status affected %d rows", affected)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit cron status transaction: %w", err)
+	}
+
+	job.Status = status
+	if status == StatusActive {
+		// Resume 总是用 durable snapshot 完整回载，修复重启后 paused job 不在 map。
+		s.jobs[jobID] = job
+	} else if _, ok := s.jobs[jobID]; ok {
+		s.jobs[jobID] = job
+	}
 	return nil
 }
 

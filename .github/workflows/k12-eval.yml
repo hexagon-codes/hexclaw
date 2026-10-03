@@ -1,6 +1,6 @@
 name: K12 Eval Gate
 
-# K12 v0.5.0 发版门（架构文档 §11 / 发版 checklist）：
+# K12 v0.5.0-beta 发版门（架构文档 §11 / 发版 checklist）：
 #  - harness 门（每次跑，无 key）：eval 集完整性 + 阈值判定逻辑 + 作文不代写启发式 + 超纲检出。
 #  - 真模型门（env-gated）：配置 HEXCLAW_REAL_LLM_EVAL secret 后跑真模型批改准确率 ≥90%；
 #    无 secret 时 TestK12EvalGate_RealModel 自动 skip（不阻断 fork PR）。
@@ -8,47 +8,56 @@ on:
   push:
     branches: [main, "feat/**"]
     paths:
+      - "**.go"
+      - "go.mod"
+      - "go.sum"
+      - "go.work"
+      - "go.work.sum"
       - "scenarios/k12/**"
-      - "engine/solve.go"
       - ".github/workflows/k12-eval.yml"
   pull_request:
     paths:
+      - "**.go"
+      - "go.mod"
+      - "go.sum"
+      - "go.work"
+      - "go.work.sum"
       - "scenarios/k12/**"
-      - "engine/solve.go"
+      - ".github/workflows/k12-eval.yml"
 
 permissions:
   contents: read
 
+concurrency:
+  group: k12-eval-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GOPRIVATE: github.com/hexagon-codes/*
+
 jobs:
   eval-gate:
     name: K12 Eval Gate
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     env:
       HAS_REAL_LLM_EVAL_KEY: ${{ secrets.HEXCLAW_LLM_EVAL_KEY != '' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - name: Configure private modules
-        run: git config --global url."https://${{ secrets.PRIVATE_REPO_TOKEN }}@github.com/".insteadOf "https://github.com/"
-
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: "1.25"
+          go-version-file: go.mod
           cache-dependency-path: go.sum
-        env:
-          GOPRIVATE: github.com/hexagon-codes/*
 
       # harness 门 + 阈值逻辑 + 学科/超纲/不代写维度完整性（确定性，每次卡）。
       - name: K12 eval harness gate
         run: go test -race -count=1 -run 'TestEvalGate|TestEvalCases_NonEmpty|TestRunEval|TestLooksLikeGhostwrite|TestSubjectEvalCases|TestK12EvalGate' ./scenarios/k12/usecase/
-        env:
-          GOPRIVATE: github.com/hexagon-codes/*
 
       # 真模型批改准确率 ≥90% 门：仅当配置了 LLM eval secret 才激活（否则内部自动 skip）。
       - name: K12 real-model accuracy gate (opt-in)
         if: ${{ env.HAS_REAL_LLM_EVAL_KEY == 'true' }}
         run: go test -count=1 -timeout 900s -run TestK12EvalGate_RealModel -v ./scenarios/k12/usecase/
         env:
-          GOPRIVATE: github.com/hexagon-codes/*
           HEXCLAW_REAL_LLM_EVAL: "1"
           HEXCLAW_REAL_LLM_KEY: ${{ secrets.HEXCLAW_LLM_EVAL_KEY }}

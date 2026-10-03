@@ -23,8 +23,10 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -34,10 +36,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/hexagon-codes/toolkit/util/logger"
 
+	"github.com/hexagon-codes/ai-core/llm"
 	imagegen "github.com/hexagon-codes/ai-core/media/image"
 	videogen "github.com/hexagon-codes/ai-core/media/video"
 	"github.com/hexagon-codes/ai-core/media/voice"
@@ -60,8 +64,10 @@ import (
 	"github.com/hexagon-codes/hexclaw/llmrouter"
 	hexmcp "github.com/hexagon-codes/hexclaw/mcp"
 	"github.com/hexagon-codes/hexclaw/memory"
+	"github.com/hexagon-codes/hexclaw/messagecontent"
 	"github.com/hexagon-codes/hexclaw/render"
 	"github.com/hexagon-codes/hexclaw/router"
+	"github.com/hexagon-codes/hexclaw/skill"
 	"github.com/hexagon-codes/hexclaw/skill/hub"
 	"github.com/hexagon-codes/hexclaw/skill/marketplace"
 	"github.com/hexagon-codes/hexclaw/storage"
@@ -74,69 +80,164 @@ import (
 
 // Server HTTP API 服务器
 type Server struct {
-	cfg *config.Config
+	cfg             *config.Config
+	runtimeCfgPath  string
+	backendID       string
+	desktopAPIToken string
 	// cfgMu 串行化 s.cfg 的 read-copy-save-apply 写路径（GO-7/BUG-20260703）：
 	// 各配置写 handler 都做「整结构浅拷贝→落盘→回写」，无锁时既有同址读写
 	// 竞争（拷贝读 vs 字段写），也有 lost-update（旧副本落盘抹掉他人变更）。
-	cfgMu             sync.Mutex
-	engine            engine.Engine
-	gateway           gateway.Gateway
-	store             storage.Store                // 数据存储层
-	kb                *knowledge.Manager           // 知识库管理器（可选）
-	webhookMgr        *webhook.Manager             // Webhook 管理器（可选）
-	scheduler         *cron.Scheduler              // Cron 调度器（可选）
-	promptStore       *library.PromptStore         // §11.8 Prompt 库（可选）
-	fileMem           *memory.FileMemory           // 文件记忆（可选）
-	vectorMem         *memory.VectorMemory         // 向量语义记忆（可选）
-	mcpMgr            *hexmcp.Manager              // MCP 管理器（可选）
-	mp                *marketplace.Marketplace     // 技能市场（可选）
-	skillHub          *hub.Hub                     // 在线技能市场（可选）
-	agentRouter       *router.Dispatcher           // 多 Agent 路由器（可选）
-	agentStore        router.Store                 // Agent/Rule 持久化（可选）
-	instanceMgr       *instances.Manager           // 平台实例运行时（可选）
-	connectorStore    *connector.Store             // 数据连接器(GitHub/Notion 只读，token 加密)（可选）
-	canvasSvc         *canvas.Service              // Canvas/A2UI 服务（可选）
-	voiceSvc          *voice.Service               // 语音服务（可选）
-	voiceChatSvc      *voicechat.Service           // 语音对话服务（可选）
-	imagegenSvc       *imagegen.Service            // 图像生成服务（可选）
-	videogenSvc       *videogen.Service            // 视频生成服务（可选）
-	renderSvc         *render.Service              // 文档渲染服务（可选）
-	capabilities      *llmrouter.CapabilityService // A7 模型 tool_call 能力探测（可选）
-	genStore          *genstore.Store              // 生成内容持久化（图像/视频）
-	kbEmbedding       *KnowledgeEmbeddingInfo      // 知识库嵌入接线信息（BUG-20260712-B1，可选）
-	reloadGenServices func()                       // LLM 配置变更后重建 gen 服务（main.go 注入）
-	desktopSvc        *desktop.Service             // 桌面集成服务（可选）
-	cfgWriter         *config.Writer               // 配置文件写入器（MCP 持久化用）
-	wsHandler         http.Handler                 // WebSocket Handler（可选）
-	extraMounts       []mountedHandler             // 场景包子路由（前缀 → handler，AP-1：平台不认识场景内容）
-	streamStates      streamstate.Provider         // 流式 in-flight 状态（可选）
-	logCollector      *LogCollector                // 日志收集器
-	workflowStore     *WorkflowStore               // 工作流存储
-	teamStore         *TeamStore                   // 团队数据存储
-	budgetCtrl        *engine.BudgetController     // 预算控制器（可选）
-	toolCache         *engine.ToolCache            // 工具缓存（可选）
-	toolMetrics       *engine.ToolMetricsCollector // 工具指标（可选）
-	toolPerms         *engine.ToolPermissions      // 工具权限（可选）
-	checkpointMgr     *engine.CheckpointManager    // 检查点管理器（可选）
-	subagentRegistry  *engine.SubAgentRegistry     // 子 Agent 派生运行注册表（可选，观测/续接）
-	cfgTxMgr          *config.TransactionManager   // v0.4.0 F9 配置事务热加载（可选）
-	cronParseProvider hexagon.Provider             // D2.1 Layer 2 cron parse LLM provider
-	cronParseModel    string                       // D2.1 cron parse 模型名（建议 haiku/mini 类快模型）
-	version           string                       // 版本号
+	cfgMu   sync.RWMutex
+	engine  engine.Engine
+	gateway gateway.Gateway
+	store   storage.Store // 数据存储层
+	// sessionDeletedHook 在会话删除成功（durable 撤销已提交）后回调，供
+	// PermissionHub 等进程内状态清理使用；hook 缺失或失败不改变删除结果。
+	sessionDeletedHook func(sessionID string)
+	kb                 *knowledge.Manager            // 知识库管理器（可选）
+	semanticIndex      SemanticIndexAPI              // corpus 级语义索引策略/持久 Job（可选）
+	knowledgeOwnerID   string                        // 单用户部署显式绑定的知识库业务归属
+	webhookMgr         *webhook.Manager              // Webhook 管理器（可选）
+	scheduler          *cron.Scheduler               // Cron 调度器（可选）
+	promptStore        *library.PromptStore          // §11.8 Prompt 库（可选）
+	fileMem            *memory.FileMemory            // 文件记忆（可选）
+	vectorMem          *memory.VectorMemory          // 向量语义记忆（可选）
+	mcpMgr             *hexmcp.Manager               // MCP 管理器（可选）
+	mp                 *marketplace.Marketplace      // 技能市场（可选）
+	skillHub           *hub.Hub                      // 在线技能市场（可选）
+	agentRouter        *router.Dispatcher            // 多 Agent 路由器（可选）
+	agentStore         router.Store                  // Agent/Rule 持久化（可选）
+	agentMetadataGuard func(map[string]string) error // 场景 metadata capability guard（可选）
+	agentResources     AgentResourceCleaner          // Agent 归属资源删除 saga（可选）
+	instanceMgr        *instances.Manager            // 平台实例运行时（可选）
+	connectorStore     *connector.Store              // 数据连接器(GitHub/Notion 只读，token 加密)（可选）
+	canvasSvc          *canvas.Service               // Canvas/A2UI 服务（可选）
+	voiceSvc           *voice.Service                // 语音服务（可选）
+	voiceChatSvc       *voicechat.Service            // 语音对话服务（可选）
+	imagegenSvc        *imagegen.Service             // 图像生成服务（可选）
+	videogenSvc        *videogen.Service             // 视频生成服务（可选）
+	renderSvc          *render.Service               // 文档渲染服务（可选）
+	capabilities       *llmrouter.CapabilityService  // A7 模型 tool_call 能力探测（可选）
+	genStore           *genstore.Store               // 生成内容持久化（图像/视频）
+	kbEmbedding        *KnowledgeEmbeddingInfo       // 知识库嵌入接线信息（BUG-20260712-B1，可选）
+	reloadGenServices  func()                        // LLM 配置变更后重建 gen 服务（main.go 注入）
+	// reloadSemanticRuntime builds and atomically installs the next embedding
+	// resolver/registry generation while draining the prior gate. The legacy
+	// invalidator remains for non-desktop callers and compatibility tests.
+	reloadSemanticRuntime     func(context.Context, config.LLMConfig) error
+	invalidateSemanticRuntime func(context.Context) error
+	desktopSvc                *desktop.Service             // 桌面集成服务（可选）
+	cfgWriter                 *config.Writer               // 配置文件写入器（MCP 持久化用）
+	wsHandler                 http.Handler                 // WebSocket Handler（可选）
+	sidecarCapabilityToken    string                       // Desktop 每次启动注入的 loopback-only capability（可选）
+	credentialResolver        *inMemoryCredentialResolver  // 原生协调器引用 -> 进程内更新候选
+	attachmentStaging         *attachmentStagingStore      // owner-bound ephemeral binary receipts
+	extraMounts               []mountedHandler             // 场景包子路由（前缀 → handler，AP-1：平台不认识场景内容）
+	streamStates              streamstate.Provider         // 流式 in-flight 状态（可选）
+	logCollector              *LogCollector                // 日志收集器
+	workflowStore             *WorkflowStore               // 工作流存储
+	teamStore                 *TeamStore                   // 团队数据存储
+	budgetCtrl                *engine.BudgetController     // 预算控制器（可选）
+	toolCache                 *engine.ToolCache            // 工具缓存（可选）
+	toolMetrics               *engine.ToolMetricsCollector // 工具指标（可选）
+	toolPerms                 *engine.ToolPermissions      // 工具权限（可选）
+	checkpointMgr             *engine.CheckpointManager    // 检查点管理器（可选）
+	subagentRegistry          *engine.SubAgentRegistry     // 子 Agent 派生运行注册表（可选，观测/续接）
+	cfgTxMgr                  *config.TransactionManager   // v0.4.0 F9 配置事务热加载（可选）
+	cronParseProvider         hexagon.Provider             // D2.1 Layer 2 cron parse LLM provider
+	cronParseModel            string                       // D2.1 cron parse 模型名（建议 haiku/mini 类快模型）
+	version                   string                       // 版本号
 	// 自动化权限治理（可选，main.go 经 SetAutonomy 注入）
 	autonomyHook      *engine.PermissionHook  // 权限闸引用：Profile 热更新 + 当前策略
 	autonomyDecisions *autonomy.DecisionStore // 权限决策审计日志（持久化）
 	autonomyGrants    *autonomy.GrantStore    // 任务级授权存储
 	autonomyCfgPath   string                  // Profile 持久化目标配置文件（空 = 默认）
-	// 沙箱网络热更新回调（由 main.go 注入）
-	onSandboxNetworkUpdate      func(enabled bool) error
-	onSandboxAllowedPathsUpdate func(paths []string) error
-	sandboxNetworkEnabled       func() bool
-	server                      *http.Server
-	statsMu                     sync.Mutex
-	statsCache                  statsResponse
-	statsJSON                   []byte
-	statsCacheAt                time.Time
+	// sandboxPolicyRuntime 以完整策略候选串行提交网络与只读路径，避免运行态半更新。
+	sandboxPolicyRuntime   SandboxPolicyRuntime
+	server                 *http.Server
+	statsMu                sync.Mutex
+	statsCache             statsResponse
+	statsJSON              []byte
+	statsCacheAt           time.Time
+	ollamaBaseURL          string
+	ollamaProcessManaged   bool
+	ollamaPullMu           sync.Mutex
+	ollamaPulls            map[string]*ollamaPullOperation
+	onOllamaModelInstalled func(context.Context, string)
+	serviceLifecycleCtx    context.Context
+}
+
+// SandboxPolicy 是一次原子发布的完整沙箱运行策略。
+type SandboxPolicy struct {
+	NetworkEnabled bool
+	ReadablePaths  []string
+}
+
+// SandboxPolicyCandidate 表示已经完成构建和验证、但尚未发布的运行时策略。
+// Commit 与 Discard 互斥且幂等；Commit 不执行任何可能失败的工作。
+type SandboxPolicyCandidate struct {
+	state *sandboxPolicyCandidateState
+}
+
+type sandboxPolicyCandidateState struct {
+	once    sync.Once
+	commit  func()
+	discard func()
+}
+
+// NewSandboxPolicyCandidate 创建只允许完成一次的策略候选。
+func NewSandboxPolicyCandidate(commit, discard func()) SandboxPolicyCandidate {
+	if commit == nil || discard == nil {
+		return SandboxPolicyCandidate{}
+	}
+	return SandboxPolicyCandidate{state: &sandboxPolicyCandidateState{
+		commit:  commit,
+		discard: discard,
+	}}
+}
+
+// Commit 原子发布候选；候选已经完成后重复调用不会产生效果。
+func (c SandboxPolicyCandidate) Commit() {
+	if c.state == nil {
+		return
+	}
+	c.state.once.Do(c.state.commit)
+}
+
+// Discard 放弃候选并释放其写事务；候选已经完成后重复调用不会产生效果。
+func (c SandboxPolicyCandidate) Discard() {
+	if c.state == nil {
+		return
+	}
+	c.state.once.Do(c.state.discard)
+}
+
+func (c SandboxPolicyCandidate) valid() bool {
+	return c.state != nil
+}
+
+// SandboxPolicyRuntime 提供完整策略的候选事务与单代际快照。
+type SandboxPolicyRuntime struct {
+	Prepare  func(context.Context, SandboxPolicy) (SandboxPolicyCandidate, error)
+	Snapshot func() SandboxPolicy
+}
+
+// AgentResourceDetach is the staged half of Agent resource deletion. Commit is
+// invoked only after router/store removal succeeds; Rollback compensates the
+// staged resources when durable deletion fails. Both callbacks must be
+// idempotent.
+type AgentResourceDetach struct {
+	Commit   func()
+	Rollback func(context.Context) error
+}
+
+// AgentResourceCleaner stages cleanup of resources owned by an Agent before
+// the Agent itself is durably removed.
+type AgentResourceCleaner interface {
+	DetachAgentResources(
+		ctx context.Context,
+		agent router.AgentConfig,
+	) (AgentResourceDetach, error)
 }
 
 // NewServer 创建 API 服务器
@@ -145,7 +246,6 @@ type Server struct {
 // store 可为 nil，此时会话/搜索/分支 API 不可用。
 func NewServer(cfg *config.Config, eng engine.Engine, gw gateway.Gateway, store storage.Store) *Server {
 	collector := NewLogCollector(5000)
-
 	// 挂载日志文件持久化 (JSONL + 轮转)
 	sink, err := NewLogFileSink(LogFileSinkConfig{})
 	if err != nil {
@@ -156,14 +256,25 @@ func NewServer(cfg *config.Config, eng engine.Engine, gw gateway.Gateway, store 
 	}
 
 	return &Server{
-		cfg:           cfg,
-		engine:        eng,
-		gateway:       gw,
-		store:         store,
-		logCollector:  collector,
-		workflowStore: NewWorkflowStore(),
-		teamStore:     NewTeamStore(defaultDataDir()),
+		cfg:                cfg,
+		engine:             eng,
+		gateway:            gw,
+		store:              store,
+		logCollector:       collector,
+		workflowStore:      NewWorkflowStore(),
+		teamStore:          NewTeamStore(defaultDataDir()),
+		ollamaBaseURL:      defaultOllamaBaseURL,
+		credentialResolver: newInMemoryCredentialResolver(),
+		attachmentStaging:  newAttachmentStagingStore(),
 	}
+}
+
+// SetSessionDeletedHook 注册会话删除后的进程内清理回调（如 PermissionHub
+// 的 ClearSession）。durable 撤销由 Store.DeleteSession 事务内完成，hook 只
+// 负责清理进程内 pending/remembered 状态；hook 缺失或失败只记日志，不改变
+// 会话删除结果。
+func (s *Server) SetSessionDeletedHook(fn func(sessionID string)) {
+	s.sessionDeletedHook = fn
 }
 
 func defaultDataDir() string {
@@ -180,6 +291,15 @@ func defaultDataDir() string {
 func (s *Server) SetWebSocketHandler(h http.Handler) {
 	s.wsHandler = h
 }
+
+// SetSidecarCapabilityToken 设置本次启动的本机内部能力令牌，不持久化。
+// 常规业务使用独立的持久凭据；回环地址不会恢复匿名访问。
+func (s *Server) SetSidecarCapabilityToken(token string) {
+	s.sidecarCapabilityToken = strings.TrimSpace(token)
+}
+
+// SetDesktopAPIToken 仅保存原生层注入的本机业务凭据，不写入 YAML。
+func (s *Server) SetDesktopAPIToken(token string) { s.desktopAPIToken = token }
 
 // SetStreamStateProvider 设置流式 in-flight 状态提供器。
 func (s *Server) SetStreamStateProvider(p streamstate.Provider) {
@@ -252,6 +372,41 @@ func (s *Server) SetMCPManager(mgr *hexmcp.Manager) {
 // SetCfgWriter 设置配置文件写入器（MCP 动态添加持久化用）
 func (s *Server) SetCfgWriter(w *config.Writer) {
 	s.cfgWriter = w
+	if w != nil {
+		w.SetCommitCoordinator(&s.cfgMu, func(next *config.Config) {
+			s.cfg.MCP, s.cfg.Knowledge = next.MCP, next.Knowledge
+		})
+	}
+}
+
+// SetRuntimeConfigPath 固定当前服务所有设置写入和补偿的实际启动路径。
+func (s *Server) SetRuntimeConfigPath(path string) { s.runtimeCfgPath = path }
+
+// SetBackendID 注入随数据库持久化的数据实例身份。
+func (s *Server) SetBackendID(id string) { s.backendID = id }
+
+// saveRuntimeConfig 由已经持有 cfgMu 的设置事务调用。
+func (s *Server) saveRuntimeConfig(cfg *config.Config) error {
+	if s.cfgWriter != nil {
+		return s.cfgWriter.SaveRuntimeLocked(cfg)
+	}
+	return config.Save(cfg, s.runtimeCfgPath)
+}
+
+// SetSemanticRuntimeInvalidator installs the fail-closed boundary used by
+// config hot reloads. It has no UI surface and is intentionally one-way.
+func (s *Server) SetSemanticRuntimeInvalidator(invalidate func(context.Context) error) {
+	s.invalidateSemanticRuntime = invalidate
+}
+
+// SetSemanticRuntimeReloader installs the provider hot-reload boundary. The
+// callback receives the fully merged next LLM config before s.cfg is exposed;
+// it must return only after the old generation is drained and the successor is
+// ready for Catalog/Apply calls.
+func (s *Server) SetSemanticRuntimeReloader(
+	reload func(context.Context, config.LLMConfig) error,
+) {
+	s.reloadSemanticRuntime = reload
 }
 
 // SetCapabilityService 设置模型 tool_call 能力探测服务（A7）。
@@ -307,6 +462,18 @@ func (s *Server) handleListSubAgentRuns(w http.ResponseWriter, r *http.Request) 
 // SetAgentStore 设置 Agent/Rule 持久化层
 func (s *Server) SetAgentStore(store router.Store) {
 	s.agentStore = store
+}
+
+// SetAgentMetadataGuard injects scenario-owned validation without teaching the
+// platform API any scenario metadata keys or value semantics.
+func (s *Server) SetAgentMetadataGuard(guard func(map[string]string) error) {
+	s.agentMetadataGuard = guard
+}
+
+// SetAgentResourceCleaner wires the lifecycle boundary for Agent-owned
+// resources such as scenario-provisioned cron jobs.
+func (s *Server) SetAgentResourceCleaner(cleaner AgentResourceCleaner) {
+	s.agentResources = cleaner
 }
 
 // SetInstanceManager 设置平台实例运行时管理器。
@@ -427,14 +594,9 @@ func (s *Server) handleGeneratedFile(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, stat.Name(), stat.ModTime(), f)
 }
 
-// SetSandboxCallbacks 注入沙箱网络热更新回调
-func (s *Server) SetSandboxCallbacks(updater func(bool) error, getter func() bool) {
-	s.onSandboxNetworkUpdate = updater
-	s.sandboxNetworkEnabled = getter
-}
-
-func (s *Server) SetSandboxAllowedPathsCallback(updater func([]string) error) {
-	s.onSandboxAllowedPathsUpdate = updater
+// SetSandboxPolicyRuntime 注入沙箱完整策略的原子运行时边界。
+func (s *Server) SetSandboxPolicyRuntime(runtime SandboxPolicyRuntime) {
+	s.sandboxPolicyRuntime = runtime
 }
 
 // LogCollector 返回日志收集器，供外部模块写入日志
@@ -522,6 +684,12 @@ func (s *Server) routes() http.Handler {
 
 	// API v1
 	mux.HandleFunc("POST /api/v1/chat", s.handleChat)
+	mux.HandleFunc("POST /api/v1/attachments", s.handleStageAttachment)
+	// Native-only internal API. apiAuthMiddleware requires an exact loopback
+	// sidecar capability and rejects the general API token for this namespace.
+	mux.HandleFunc("POST /api/internal/desktop/credentials/hydrate", s.handleHydrateDesktopCredentials)
+	mux.HandleFunc("POST /api/internal/desktop/credentials/dehydrate", s.handleDehydrateDesktopCredentials)
+	mux.HandleFunc("POST /api/internal/desktop/provider-credentials/reserve", s.handleReserveProviderCredentialIdentity)
 
 	// 文档渲染 API（markdown → docx/pdf/epub/odt/rtf/txt/html/md）
 	if s.renderSvc != nil {
@@ -531,17 +699,31 @@ func (s *Server) routes() http.Handler {
 	// 知识库 API
 	if s.kb != nil {
 		mux.HandleFunc("POST /api/v1/knowledge/documents", s.handleAddDocument)
-		mux.HandleFunc("POST /api/v1/knowledge/upload", s.handleUploadDocument)
 		mux.HandleFunc("GET /api/v1/knowledge/documents", s.handleListDocuments)
 		mux.HandleFunc("GET /api/v1/knowledge/documents/{id}", s.handleGetDocument)
+		mux.HandleFunc("GET /api/v1/knowledge/documents/{id}/source", s.handleKnowledgeDocumentSource)
 		mux.HandleFunc("DELETE /api/v1/knowledge/documents/{id}", s.handleDeleteDocument)
 		mux.HandleFunc("POST /api/v1/knowledge/documents/{id}/reindex", s.handleReindexDocument)
 		mux.HandleFunc("POST /api/v1/knowledge/search", s.handleSearchKnowledge)
+		mux.HandleFunc("GET /api/v1/knowledge/metrics", s.handleKnowledgeRetrievalMetrics)
 		mux.HandleFunc("GET /api/v1/knowledge/config", s.handleGetKnowledgeConfig)
 		mux.HandleFunc("GET /api/v1/knowledge/embedding-status", s.handleKnowledgeEmbeddingStatus)
 		mux.HandleFunc("PUT /api/v1/knowledge/config", s.handlePutKnowledgeConfig)
 	} else {
 		mux.HandleFunc("GET /api/v1/knowledge/documents", emptyList("documents"))
+	}
+	if s.semanticIndex != nil {
+		mux.HandleFunc("GET /api/v1/knowledge/operations", s.handleKnowledgeOperations)
+		mux.HandleFunc("POST /api/v1/knowledge/operations/{operation_id}/ack", s.handleAcknowledgeKnowledgeOperation)
+		mux.HandleFunc("POST /api/v1/knowledge/operations/{operation_id}/dismiss", s.handleDismissKnowledgeOperation)
+		mux.HandleFunc("POST /api/v1/knowledge/documents/{id}/retry", s.handleRetryKnowledgeDocument)
+		mux.HandleFunc("GET /api/v1/knowledge/documents/{id}/recovery", s.handleKnowledgeDocumentRecovery)
+		mux.HandleFunc("POST /api/v1/knowledge/documents/{id}/recovery", s.handleKnowledgeDocumentRecovery)
+		mux.HandleFunc("POST /api/v1/knowledge/documents/{id}/reparse", s.handleReparseKnowledgeDocument)
+		mux.HandleFunc("GET /api/v1/knowledge/corpora/{corpus_id}/embedding-policy", s.handleGetKnowledgeEmbeddingPolicy)
+		mux.HandleFunc("POST /api/v1/knowledge/corpora/{corpus_id}/embedding-policy:apply", s.handleApplyKnowledgeEmbeddingPolicy)
+		mux.HandleFunc("GET /api/v1/knowledge/jobs/{job_id}", s.handleGetKnowledgeJob)
+		mux.HandleFunc("POST /api/v1/knowledge/jobs/{job_id}/cancel", s.handleCancelKnowledgeJob)
 	}
 
 	// 文档解析（无状态，不依赖知识库）：把上传文档抽取为纯文本供对话注入。
@@ -576,8 +758,11 @@ func (s *Server) routes() http.Handler {
 
 	// 配置 API
 	mux.HandleFunc("GET /api/v1/config/llm", s.handleGetLLMConfig)
+	mux.HandleFunc("POST /api/v1/config/llm/providers/{provider_instance_id}/reveal-key", s.handleRevealProviderKey)
+	mux.HandleFunc("GET /api/v1/config/mutations/{request_id}", s.handleGetConfigMutation)
 	mux.HandleFunc("PUT /api/v1/config/llm", s.handleUpdateLLMConfig)
 	mux.HandleFunc("POST /api/v1/config/llm/test", s.handleTestLLMConfig)
+	mux.HandleFunc("POST /api/v1/config/llm/probe", s.handleProbeModelCapability)
 	mux.HandleFunc("POST /api/v1/config/llm/models", s.handleFetchProviderModels)
 	// 记忆行为配置（BUG-20260703 P2-2：auto_memory / 召回地板 / 主动召回 / 画像蒸馏）
 	mux.HandleFunc("GET /api/v1/config/memory", s.handleGetMemoryConfig)
@@ -627,6 +812,7 @@ func (s *Server) routes() http.Handler {
 	}
 
 	// 自动化权限治理 API（Profile / 预检 / 总览 / 决策日志 / 任务级授权）
+	mux.HandleFunc("GET /api/v1/automation/status", s.handleAutomationStatus)
 	mux.HandleFunc("GET /api/v1/autonomy/profile", s.handleGetAutonomyProfile)
 	mux.HandleFunc("PUT /api/v1/autonomy/profile", s.handleUpdateAutonomyProfile)
 	mux.HandleFunc("POST /api/v1/autonomy/preflight", s.handleAutonomyPreflight)
@@ -650,6 +836,8 @@ func (s *Server) routes() http.Handler {
 
 	// 文件记忆 API
 	if s.fileMem != nil {
+		mux.HandleFunc("POST /api/v1/memory/profile/refresh", s.handleRefreshMemoryProfile)
+		mux.HandleFunc("PUT /api/v1/memory/profile", s.handleEditMemoryProfile)
 		mux.HandleFunc("GET /api/v1/memory", s.handleGetMemory)
 		mux.HandleFunc("POST /api/v1/memory", s.handleSaveMemory)
 		mux.HandleFunc("PUT /api/v1/memory", s.handleUpdateMemory)
@@ -802,6 +990,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/models", s.handleListModels)
 	mux.HandleFunc("GET /api/v1/ollama/status", s.handleOllamaStatus)
 	mux.HandleFunc("POST /api/v1/ollama/pull", s.handleOllamaPull)
+	mux.HandleFunc("GET /api/v1/ollama/pulls/{operation_id}", s.handleGetOllamaPull)
+	mux.HandleFunc("GET /api/v1/ollama/pulls/{operation_id}/events", s.handleOllamaPullEvents)
 	mux.HandleFunc("GET /api/v1/ollama/running", s.handleOllamaRunning)
 	mux.HandleFunc("POST /api/v1/ollama/load", s.handleOllamaLoad)
 	mux.HandleFunc("POST /api/v1/ollama/unload", s.handleOllamaUnload)
@@ -846,9 +1036,8 @@ func (s *Server) routes() http.Handler {
 		mux.HandleFunc("GET /api/v1/sessions/{id}/checkpoints", s.handleListCheckpoints)
 	}
 
-	// TODO: Tool Approval API (engine/tool_approval.go)
-	// ToolApprovalGate 需要 WebSocket 双向通信，已通过 WebAdapter ↔ PermissionHub 实现。
-	// 未来可添加 REST API 查询待审批请求列表或审批历史。
+	// 工具审批仅由 WebAdapter ↔ 持久化 PermissionHub 契约处理；
+	// 此处不挂载并行的 REST 审批路由。
 
 	// 桌面集成 API
 	if s.desktopSvc != nil {
@@ -908,6 +1097,13 @@ func (s *Server) Start(ctx context.Context, onReady func()) error {
 }
 
 func (s *Server) buildHTTPServer(ctx context.Context) *http.Server {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// Long-running operations may intentionally detach from one browser
+	// request, but must still be owned by the serving process. This is assigned
+	// during construction, before Serve exposes any handler concurrently.
+	s.serviceLifecycleCtx = ctx
 	handler := s.routes()
 	addr := fmt.Sprintf("%s:%d", s.cfg.Server.Host, s.cfg.Server.Port)
 	return &http.Server{
@@ -932,10 +1128,32 @@ func emptyList(key string) http.HandlerFunc {
 //
 // 使用调用方传入的 context 控制超时，避免双重超时。
 func (s *Server) Stop(ctx context.Context) error {
-	if s.server == nil {
-		return nil
+	return s.StopWithDrain(ctx, nil)
+}
+
+// StopWithDrain closes every HTTP listener before invoking drain, then waits
+// for in-flight requests to become idle. The hook is intended for cancelling
+// process-owned workers and detached streaming operations: no new request can
+// enter once it runs, while existing requests still receive graceful shutdown.
+func (s *Server) StopWithDrain(ctx context.Context, drain func()) error {
+	var drainOnce sync.Once
+	runDrain := func() {
+		if drain != nil {
+			drainOnce.Do(drain)
+		}
 	}
-	return s.server.Shutdown(ctx)
+	if s.server == nil {
+		runDrain()
+		return s.attachmentStaging.Close()
+	}
+	if drain != nil {
+		s.server.RegisterOnShutdown(runDrain)
+	}
+	err := s.server.Shutdown(ctx)
+	// RegisterOnShutdown callbacks run asynchronously. Ensure the caller never
+	// observes StopWithDrain returning before its runtime cancellation ran.
+	runDrain()
+	return errors.Join(err, s.attachmentStaging.Close())
 }
 
 // handleHealth 健康检查端点
@@ -970,15 +1188,23 @@ type ChatRequest struct {
 
 // ChatResponse 聊天回复
 type ChatResponse struct {
-	Reply     string             `json:"reply"`                // 回复内容
-	SessionID string             `json:"session_id"`           // 会话 ID
-	Metadata  map[string]string  `json:"metadata,omitempty"`   // 元数据
-	Usage     *adapter.Usage     `json:"usage,omitempty"`      // Token 使用统计
-	ToolCalls []adapter.ToolCall `json:"tool_calls,omitempty"` // 工具调用记录
-	Blocks    []adapter.Block    `json:"blocks,omitempty"`     // 有序内容块（多步交错按序渲染）
+	Reply          string                         `json:"reply"`                     // 回复内容（legacy fallback）
+	MessageContent *messagecontent.MessageContent `json:"message_content,omitempty"` // canonical Markdown/LaTeX
+	RenderManifest *messagecontent.RenderManifest `json:"render_manifest,omitempty"` // projection receipt when supplied by owner surface
+	SessionID      string                         `json:"session_id"`                // 会话 ID
+	Metadata       map[string]string              `json:"metadata,omitempty"`        // 元数据
+	Usage          *adapter.Usage                 `json:"usage,omitempty"`           // Token 使用统计
+	ToolCalls      []adapter.ToolCall             `json:"tool_calls,omitempty"`      // 工具调用记录
+	Blocks         []adapter.Block                `json:"blocks,omitempty"`          // 有序内容块（多步交错按序渲染）
 	// U9：结构化 RAG/记忆命中（非空时前端渲染「知识库命中」「记忆命中」标签+详情）。
-	KnowledgeHits []adapter.KnowledgeHit `json:"knowledge_hits,omitempty"`
-	MemoryHits    []adapter.MemoryHit    `json:"memory_hits,omitempty"`
+	KnowledgeHits       []adapter.KnowledgeHit          `json:"knowledge_hits,omitempty"`
+	MemoryHits          []adapter.MemoryHit             `json:"memory_hits,omitempty"`
+	AssistantMessageID  string                          `json:"assistant_message_id,omitempty"`
+	BackendMessageID    string                          `json:"backend_message_id,omitempty"`
+	MessageID           string                          `json:"message_id,omitempty"`
+	LastSequence        uint64                          `json:"last_sequence,omitempty"`
+	ReasoningDisclosure adapter.ReasoningDisclosure     `json:"reasoning_disclosure"`
+	RuntimeEvents       []adapter.SequencedRuntimeEvent `json:"runtime_events,omitempty"`
 }
 
 // handleChat 同步聊天端点
@@ -1004,6 +1230,16 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	// Resolve opaque staging IDs under the authenticated principal before any
+	// attachment metadata reaches validation or the engine. The request cannot
+	// provide filename, MIME, digest, or bytes for an ID reference.
+	principal := httpPrincipalFromRequest(r)
+	resolvedAttachments, err := s.ResolveStagedAttachments(r.Context(), principal.userID, req.Attachments)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "attachment is unavailable"})
+		return
+	}
+	req.Attachments = resolvedAttachments
 
 	if !adapter.HasMessageInput(req.Message, req.Attachments) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{
@@ -1026,15 +1262,24 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 构建统一消息
-	userID := req.UserID
-	if userID == "" {
-		if platform == adapter.PlatformDesktop {
-			userID = defaultDesktopUserID
-		} else {
-			userID = "api-user" // API 调用的默认用户
+	// Validate an explicit provider before constructing/persisting a chat
+	// message. Invalid client input is 400 and must not leave a partial session.
+	if validator, ok := s.engine.(interface{ ValidateProvider(string) error }); ok {
+		if err := validator.ValidateProvider(req.Provider); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": upstreamerr.PublicMessage(err, "error"),
+			})
+			return
 		}
 	}
+	if err := validateRequestedCompletionModel(s.activeLLMConfig(), req.Provider, req.Model); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+
+	// HTTP identity is derived exclusively by apiAuthMiddleware. Client body
+	// platform/user_id fields remain decode-compatible but carry no authority.
+	userID := principal.userID
 
 	msg := &adapter.Message{
 		ID:          "msg-" + idgen.ShortID(),
@@ -1054,6 +1299,18 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	// GO-3：外部聊天入口是信任边界——剥除只能由受信内部派发器盖章的保留键，
 	// 否则客户端可伪造 source=cron + cron_job_id 盗用他人任务的授权（提权）。
 	engine.StripReservedDispatchMetadata(msg.Metadata)
+	metadataModel := strings.TrimSpace(msg.Metadata["model"])
+	if metadataModel == "" {
+		metadataModel = strings.TrimSpace(msg.Metadata["agent_model"])
+	}
+	if err := validateRequestedCompletionModel(
+		s.activeLLMConfig(),
+		msg.Metadata["provider"],
+		metadataModel,
+	); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
 	if err := adapter.ApplyRequestSamplingOverrides(msg.Metadata, req.Temperature, req.MaxTokens); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
@@ -1076,6 +1333,27 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	// 请求级结构化日志
 	logger := trace.NewRequest(userID, "").With("source", "chat", "provider", req.Provider, "model", req.Model)
 	ctx := trace.WithLogger(r.Context(), logger)
+	// 普通聊天会产生不可撤销的模型计费与可见回复，transport 不得在结果不明确时自动重放。
+	ctx = llm.WithOperationSafety(ctx, llm.OperationSafetyNonIdempotent)
+	var physicalProviderCalls atomic.Int32
+	if os.Getenv("HEXCLAW_TEST_OBSERVE_CHAT_PHYSICAL_CALLS") == "1" {
+		requestIDSum := sha256.Sum256([]byte(msg.Metadata["request_id"]))
+		ctx = llm.WithBeforeSendHookForAction(ctx, "stream", func(context.Context) error {
+			physicalProviderCalls.Add(1)
+			return nil
+		})
+		defer func() {
+			s.logCollector.Add(
+				"info",
+				"chat",
+				"显式用户请求物理模型调用计数",
+				map[string]any{
+					"request_id_sha256":       fmt.Sprintf("%x", requestIDSum),
+					"physical_provider_calls": physicalProviderCalls.Load(),
+				},
+			)
+		}()
+	}
 	logger.Info("← 收到消息", "content_len", len([]rune(req.Message)), "platform", string(msg.Platform))
 
 	// 安全网关检查
@@ -1126,10 +1404,8 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	if se, ok := s.engine.(streamEngine); ok {
 		chunks, err := se.ProcessStream(ctx, msg)
 		if err != nil {
-			trace.L(ctx).Error("处理失败", "err", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{
-				"error": upstreamerr.PublicMessage(err, "error"),
-			})
+			trace.L(ctx).Error("处理失败", chatLLMErrorTraceFields(err)...)
+			writeChatLLMError(w, chatErrorStatus(req.Provider, err), err)
 			return
 		}
 		// 消费流式 channel，收集完整回复
@@ -1140,15 +1416,30 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		var blocks []adapter.Block
 		var knowledgeHits []adapter.KnowledgeHit
 		var memoryHits []adapter.MemoryHit
+		var assistantMessageID string
+		var backendMessageID string
+		var messageID string
+		var lastSequence uint64
+		var reasoningDisclosure adapter.ReasoningDisclosure
+		var runtimeEvents []adapter.SequencedRuntimeEvent
 		for chunk := range chunks {
 			if chunk.Error != nil {
-				trace.L(ctx).Error("处理失败", "err", chunk.Error)
-				writeJSON(w, http.StatusInternalServerError, map[string]string{
-					"error": upstreamerr.PublicMessage(chunk.Error, "error"),
-				})
+				trace.L(ctx).Error("处理失败", chatLLMErrorTraceFields(chunk.Error)...)
+				writeChatLLMError(w, chatErrorStatus(req.Provider, chunk.Error), chunk.Error)
 				return
 			}
 			content.WriteString(chunk.Content)
+			assistantMessageID = chunk.AssistantMessageID
+			backendMessageID = chunk.BackendMessageID
+			messageID = chunk.MessageID
+			lastSequence = chunk.Sequence
+			reasoningDisclosure = chunk.ReasoningDisclosure
+			if chunk.RuntimeEvent != nil {
+				runtimeEvents = append(runtimeEvents, adapter.SequencedRuntimeEvent{
+					Sequence: chunk.Sequence,
+					Event:    *chunk.RuntimeEvent,
+				})
+			}
 			if chunk.Done {
 				metadata = chunk.Metadata
 				usage = chunk.Usage
@@ -1163,22 +1454,26 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		// 覆盖 <think>/<thinking>/<reasoning> 三种标签、任意位置（含中间嵌入）、多段、未闭合残段
 		finalContent := engine.StripAllThinking(content.String())
 		reply = &adapter.Reply{
-			Content:       finalContent,
-			Metadata:      metadata,
-			Usage:         usage,
-			ToolCalls:     toolCalls,
-			Blocks:        blocks,
-			KnowledgeHits: knowledgeHits,
-			MemoryHits:    memoryHits,
+			Content:             finalContent,
+			Metadata:            metadata,
+			Usage:               usage,
+			ToolCalls:           toolCalls,
+			Blocks:              blocks,
+			KnowledgeHits:       knowledgeHits,
+			MemoryHits:          memoryHits,
+			AssistantMessageID:  assistantMessageID,
+			BackendMessageID:    backendMessageID,
+			MessageID:           messageID,
+			LastSequence:        lastSequence,
+			ReasoningDisclosure: reasoningDisclosure,
+			RuntimeEvents:       runtimeEvents,
 		}
 	} else {
 		var err error
 		reply, err = s.engine.Process(ctx, msg)
 		if err != nil {
-			trace.L(ctx).Error("处理失败", "err", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{
-				"error": upstreamerr.PublicMessage(err, "error"),
-			})
+			trace.L(ctx).Error("处理失败", chatLLMErrorTraceFields(err)...)
+			writeChatLLMError(w, chatErrorStatus(req.Provider, err), err)
 			return
 		}
 	}
@@ -1186,16 +1481,66 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	trace.L(ctx).Info("→ 回复", "content_len", len([]rune(reply.Content)), "elapsed_ms", time.Since(start).Milliseconds())
 
 	// 返回响应
+	canonical := reply.MessageContent
+	if canonical == nil {
+		canonical = canonicalChatContent(reply.Content, reply.Metadata)
+	}
 	writeJSON(w, http.StatusOK, ChatResponse{
-		Reply:         reply.Content,
-		SessionID:     msg.SessionID,
-		Metadata:      reply.Metadata,
-		Usage:         reply.Usage,
-		ToolCalls:     reply.ToolCalls,
-		Blocks:        reply.Blocks,
-		KnowledgeHits: reply.KnowledgeHits,
-		MemoryHits:    reply.MemoryHits,
+		Reply:               reply.Content,
+		MessageContent:      canonical,
+		RenderManifest:      reply.RenderManifest,
+		SessionID:           msg.SessionID,
+		Metadata:            reply.Metadata,
+		Usage:               reply.Usage,
+		ToolCalls:           reply.ToolCalls,
+		Blocks:              reply.Blocks,
+		KnowledgeHits:       reply.KnowledgeHits,
+		MemoryHits:          reply.MemoryHits,
+		AssistantMessageID:  reply.AssistantMessageID,
+		BackendMessageID:    reply.BackendMessageID,
+		MessageID:           reply.MessageID,
+		LastSequence:        reply.LastSequence,
+		ReasoningDisclosure: reply.ReasoningDisclosure,
+		RuntimeEvents:       reply.RuntimeEvents,
 	})
+}
+
+func chatErrorStatus(explicitProvider string, err error) int {
+	if classification, ok := llmrouter.ClassifyLLMError(err); ok {
+		return classification.HTTPStatus
+	}
+	var providerErr *engine.ProviderUnavailableError
+	if strings.TrimSpace(explicitProvider) != "" && errors.As(err, &providerErr) {
+		return http.StatusBadRequest
+	}
+	return http.StatusInternalServerError
+}
+
+// chatLLMErrorTraceFields 仅投影稳定诊断信息，避免 ProviderError 的 Error() 写入上游正文。
+func chatLLMErrorTraceFields(err error) []any {
+	fields := []any{"error_code", "UNCLASSIFIED"}
+	if classification, ok := llmrouter.ClassifyLLMError(err); ok {
+		fields = []any{
+			"error_code", string(classification.Code),
+			"retryable", classification.Retryable,
+		}
+	}
+
+	var providerErr *llm.ProviderError
+	if errors.As(err, &providerErr) && providerErr != nil {
+		fields = append(fields,
+			"provider_status_code", providerErr.StatusCode,
+			"provider_body_len", len(providerErr.Body),
+		)
+		if providerErr.RequestID != "" {
+			fields = append(fields, "provider_request_id", providerErr.RequestID)
+		}
+		return fields
+	}
+	if err != nil {
+		fields = append(fields, "error_len", len(err.Error()))
+	}
+	return fields
 }
 
 // handleChatSSE 处理 SSE 流式聊天请求（BUG-20260523-v2）。
@@ -1229,18 +1574,15 @@ func (s *Server) handleChatSSE(
 
 	// sse.NewWriter sets the text/event-stream headers; the immediate Flush
 	// commits a 200 and opens the stream before the first chunk arrives.
-	writer := sse.NewWriter(w)
+	writer := sse.MustNewWriter(w)
 	writer.Flush()
 
 	trace.L(ctx).Info("[SSE] 开始流式响应", "session", msg.SessionID, "user", msg.UserID)
 
 	chunks, err := se.ProcessStream(ctx, msg)
 	if err != nil {
-		trace.L(ctx).Error("[SSE] ProcessStream 启动失败", "err", err)
-		errPayload, _ := json.Marshal(map[string]any{
-			"error": upstreamerr.PublicMessage(err, "error"),
-			"done":  true,
-		})
+		trace.L(ctx).Error("[SSE] ProcessStream 启动失败", chatLLMErrorTraceFields(err)...)
+		errPayload, _ := json.Marshal(llmErrorPayload(err))
 		_ = writer.WriteData(string(errPayload))
 		return
 	}
@@ -1251,25 +1593,38 @@ func (s *Server) handleChatSSE(
 		reasoningBytes int
 		toolCallCount  int
 		hadError       bool
+		canonical      strings.Builder
 	)
 
 	for chunk := range chunks {
 		if chunk.Error != nil {
 			hadError = true
-			trace.L(ctx).Error("[SSE] chunk 错误", "err", chunk.Error, "chunks_so_far", chunkCount)
-			errPayload, _ := json.Marshal(map[string]any{
-				"error": upstreamerr.PublicMessage(chunk.Error, "error"),
-				"done":  true,
-			})
+			errFields := chatLLMErrorTraceFields(chunk.Error)
+			errFields = append(errFields, "chunks_so_far", chunkCount)
+			trace.L(ctx).Error("[SSE] chunk 错误", errFields...)
+			payloadFields := llmErrorPayload(chunk.Error)
+			payloadFields["assistant_message_id"] = chunk.AssistantMessageID
+			payloadFields["backend_message_id"] = chunk.BackendMessageID
+			payloadFields["message_id"] = chunk.MessageID
+			payloadFields["sequence"] = chunk.Sequence
+			payloadFields["reasoning_disclosure"] = chunk.ReasoningDisclosure
+			payloadFields["runtime_event"] = chunk.RuntimeEvent
+			errPayload, _ := json.Marshal(payloadFields)
 			_ = writer.WriteData(string(errPayload))
 			return
 		}
 
 		chunkCount++
 		contentBytes += len(chunk.Content)
+		canonical.WriteString(chunk.Content)
 		reasoningBytes += len(chunk.Reasoning)
 		if len(chunk.ToolCalls) > 0 {
 			toolCallCount = len(chunk.ToolCalls)
+		}
+
+		if chunk.Done {
+			finalContent := engine.StripAllThinking(canonical.String())
+			chunk.MessageContent = canonicalChatContent(finalContent, chunk.Metadata)
 		}
 
 		payload, err := json.Marshal(chunk)
@@ -1296,21 +1651,33 @@ func (s *Server) handleChatSSE(
 
 const defaultDesktopUserID = "desktop-user"
 
-func resolveChatPlatform(req ChatRequest, r *http.Request) (adapter.Platform, error) {
-	if raw := strings.ToLower(strings.TrimSpace(req.Platform)); raw != "" {
-		switch adapter.Platform(raw) {
-		case adapter.PlatformAPI, adapter.PlatformDesktop:
-			return adapter.Platform(raw), nil
-		default:
-			return "", fmt.Errorf("platform 仅支持 api 或 desktop")
+type authenticatedHTTPPrincipal struct {
+	userID   string
+	platform adapter.Platform
+}
+
+type authenticatedHTTPPrincipalKey struct{}
+
+func withAuthenticatedHTTPPrincipal(r *http.Request, principal authenticatedHTTPPrincipal) *http.Request {
+	ctx := context.WithValue(r.Context(), authenticatedHTTPPrincipalKey{}, principal)
+	ctx = skill.WithAuthenticatedUser(ctx, principal.userID)
+	return r.WithContext(ctx)
+}
+
+func httpPrincipalFromRequest(r *http.Request) authenticatedHTTPPrincipal {
+	if r != nil {
+		if principal, ok := r.Context().Value(authenticatedHTTPPrincipalKey{}).(authenticatedHTTPPrincipal); ok &&
+			principal.userID != "" {
+			return principal
 		}
 	}
+	// Direct handler calls in embedded/tests do not cross the HTTP auth
+	// middleware. They are API calls and never inherit client identity claims.
+	return authenticatedHTTPPrincipal{userID: "api-user", platform: adapter.PlatformAPI}
+}
 
-	if isDesktopOrigin(r.Header.Get("Origin")) || strings.TrimSpace(req.UserID) == defaultDesktopUserID {
-		return adapter.PlatformDesktop, nil
-	}
-
-	return adapter.PlatformAPI, nil
+func resolveChatPlatform(_ ChatRequest, r *http.Request) (adapter.Platform, error) {
+	return httpPrincipalFromRequest(r).platform, nil
 }
 
 // corsMiddleware 处理跨域请求
@@ -1329,7 +1696,7 @@ func corsMiddleware(next http.Handler) http.Handler {
 			isLoopback127 {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, Idempotency-Key")
 			w.Header().Set("Access-Control-Max-Age", "3600")
 		}
 
@@ -1390,65 +1757,94 @@ func (s *Server) isMountedScenarioPath(path string) bool {
 
 func (s *Server) apiAuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// 认证规则：
-		// 1. 所有写操作（POST/PUT/DELETE）需认证，除 /api/v1/chat 和 webhook 接收
-		// 2. 日志 API（GET /api/v1/logs*）需认证（可能含敏感信息）
-		// 3. 所有 localhost 请求始终放行，兼容桌面客户端 sidecar / 本机管理
 		path := r.URL.Path
-		// PATCH 也是写操作（如 PATCH /webhooks/{name} 启停 webhook = 开关自动化派发闸门）。
-		// 漏了 PATCH 会让它绕过 Bearer 校验（非回环 + 配了 APIToken 时可无凭证操作）。
-		isWriteOp := r.Method == http.MethodPost || r.Method == http.MethodPut ||
-			r.Method == http.MethodPatch || r.Method == http.MethodDelete
-		isWebhookReceiver := (r.Method == http.MethodPost && strings.HasPrefix(path, "/api/v1/webhooks/") && path != "/api/v1/webhooks") ||
-			((r.Method == http.MethodGet || r.Method == http.MethodPost) &&
-				strings.HasPrefix(path, "/api/v1/platforms/hooks/"))
-		isLogsAPI := path == "/api/v1/logs" || strings.HasPrefix(path, "/api/v1/logs/")
-		isDesktopAPI := strings.HasPrefix(path, "/api/v1/desktop/")
-		// 场景包挂载路径（/api/k12/ 等）**读写都需鉴权**——否则落在 /api/v1 前缀守卫之外，
-		// 非回环部署下 grade/restore/provision/bind-im（写）与 backup/export/profile/mistakes（读，
-		// 含孩子 PII 与全量 .hexbak 导出）会无凭证可达。读端点尤其敏感（整份错题/档案导出）。
-		// loopback 仍在下方放行（桌面 sidecar + cron 自身 http_get 到本机端点不受影响）。
-		//
-		// BUG-4：守护前缀集从挂载注册表 extraMounts 派生，而非硬编码 `/api/k12/`——否则未来
-		// 新场景包挂到 `/api/<其他>/` 会重现 AP-184 绕过鉴权。任何 Mount 进来的场景子路由
-		// （注册为 prefix+"/"）自动纳入守卫。
-		isScenarioAPI := s.isMountedScenarioPath(path)
-		needsAuth := isDesktopAPI || isLogsAPI || isScenarioAPI ||
-			(isWriteOp && strings.HasPrefix(path, "/api/v1/") && path != "/api/v1/chat" && !isWebhookReceiver)
-
+		if isPublicAPIRequest(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		internalDesktop := strings.HasPrefix(path, "/api/internal/desktop/")
+		needsAuth := strings.HasPrefix(path, "/api/v1/") || internalDesktop || path == "/ws" || s.isMountedScenarioPath(path)
 		if !needsAuth {
 			next.ServeHTTP(w, r)
 			return
 		}
 
-		if isLoopbackRequest(r) {
-			next.ServeHTTP(w, r)
+		if internalDesktop {
+			if isLoopbackRequest(r) && s.sidecarCapabilityToken != "" && tokenMatchesBearer(r, s.sidecarCapabilityToken) {
+				next.ServeHTTP(w, withAuthenticatedHTTPPrincipal(r, authenticatedHTTPPrincipal{
+					userID: defaultDesktopUserID, platform: adapter.PlatformDesktop,
+				}))
+				return
+			}
+			writeJSON(w, http.StatusUnauthorized, map[string]string{
+				"error": "native sidecar capability required",
+			})
 			return
 		}
 
-		token := s.cfg.Server.APIToken
-		if token != "" {
-			// 配置了 Token：验证 Authorization header（constant-time 防时序攻击）
-			auth := r.Header.Get("Authorization")
-			expected := "Bearer " + token
-			if subtle.ConstantTimeCompare([]byte(auth), []byte(expected)) != 1 {
-				writeJSON(w, http.StatusUnauthorized, map[string]string{
-					"error": "未授权：需要有效的 API Token",
-				})
-				return
-			}
-		} else {
-			// 未配置 Token：仅允许 localhost
-			if !isLoopbackRequest(r) {
-				writeJSON(w, http.StatusForbidden, map[string]string{
-					"error": "未配置 API Token，仅允许本地访问管理端点",
-				})
-				return
-			}
+		if isLoopbackRequest(r) && tokenMatchesBearer(r, s.desktopAPIToken) {
+			next.ServeHTTP(w, withAuthenticatedHTTPPrincipal(r, authenticatedHTTPPrincipal{
+				userID: defaultDesktopUserID, platform: adapter.PlatformDesktop,
+			}))
+			return
 		}
-
-		next.ServeHTTP(w, r)
+		if tokenMatchesBearer(r, s.cfg.Server.APIToken) {
+			next.ServeHTTP(w, withAuthenticatedHTTPPrincipal(r, authenticatedHTTPPrincipal{
+				userID: "api-user", platform: adapter.PlatformAPI,
+			}))
+			return
+		}
+		if isLoopbackRequest(r) && tokenMatchesBearer(r, s.sidecarCapabilityToken) {
+			next.ServeHTTP(w, withAuthenticatedHTTPPrincipal(r, authenticatedHTTPPrincipal{
+				userID: defaultDesktopUserID, platform: adapter.PlatformDesktop,
+			}))
+			return
+		}
+		writeJSON(w, http.StatusUnauthorized, map[string]string{
+			"error": "Valid access token required",
+		})
 	})
+}
+
+func tokenMatchesBearer(r *http.Request, token string) bool {
+	if r == nil || token == "" {
+		return false
+	}
+	expected := "Bearer " + token
+	return subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte(expected)) == 1
+}
+
+func isPublicAPIRequest(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	path := r.URL.Path
+	if r.Method == http.MethodOptions || (r.Method == http.MethodGet && path == "/health") ||
+		(r.Method == http.MethodGet && path == "/api/v1/version") {
+		return true
+	}
+	if r.Method == http.MethodPost && hasExactPathSegments(path, "/api/v1/webhooks/", 1) {
+		return true
+	}
+	return (r.Method == http.MethodGet || r.Method == http.MethodPost) &&
+		hasExactPathSegments(path, "/api/v1/platforms/hooks/", 2)
+}
+
+func hasExactPathSegments(path, prefix string, count int) bool {
+	if !strings.HasPrefix(path, prefix) {
+		return false
+	}
+	rest := strings.TrimPrefix(path, prefix)
+	parts := strings.Split(rest, "/")
+	if len(parts) != count {
+		return false
+	}
+	for _, part := range parts {
+		if strings.TrimSpace(part) == "" || part == "." || part == ".." {
+			return false
+		}
+	}
+	return true
 }
 
 // writeJSON 写入 JSON 响应

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/hexagon-codes/hexclaw/internal/inputlimits"
 	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 )
@@ -23,6 +24,13 @@ type ArchiveRestorer interface {
 	RestoreArchive(ctx context.Context, agentName string, recs []*records.AgentRecord, p *k12.ChildProfile) error
 }
 
+// HexbakArchiveRestorer extends ArchiveRestorer with v3 content-file restoration.
+// Legacy in-memory adapters may keep RestoreArchive for asset-free archives; production
+// must implement this port so records/profile/assets share one compensated command.
+type HexbakArchiveRestorer interface {
+	RestoreHexbak(ctx context.Context, bak *Hexbak) error
+}
+
 // GetProfile 读孩子档案。
 func (d Deps) GetProfile(ctx context.Context, agentName string) (k12.ChildProfile, error) {
 	if d.Profiles == nil {
@@ -33,16 +41,32 @@ func (d Deps) GetProfile(ctx context.Context, agentName string) (k12.ChildProfil
 
 // UpdateProfile 建档/改档（升学改年级）。
 //
-// 校验年级 18 档合法（PRD §5.2.2）；只改传入的非空字段（保留其他）。改年级 → 下次辅导边界随之重算。
+// 年级白名单收窄为小学 12 档（架构设计-v0.5.0《明确不做》#2：不做初中和高中辅导，
+// 发布阻断）——初中/高中年级不可写入档案；超纲判定仍用 18 档全序，不受影响。
+// 只改传入的非空字段（保留其他）。改年级 → 下次辅导边界随之重算。
 func (d Deps) UpdateProfile(ctx context.Context, agentName string, p k12.ChildProfile) (k12.ChildProfile, error) {
-	if d.Profiles == nil {
-		return k12.ChildProfile{}, fmt.Errorf("usecase: 未配置档案存储")
-	}
 	if agentName == "" {
 		return k12.ChildProfile{}, fmt.Errorf("%w: agentName 不可空", ErrInvalidInput)
 	}
-	if p.GradeTerm != "" && !k12.ValidGradeTerm(p.GradeTerm) {
-		return k12.ChildProfile{}, fmt.Errorf("%w: 非法年级学期 %q（须为 18 档之一）", ErrInvalidInput, p.GradeTerm)
+	if err := k12.ValidateProfileGradeTerm(p.GradeTerm); err != nil {
+		return k12.ChildProfile{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
+	}
+	if d.Profiles == nil {
+		if d.Records == nil {
+			return k12.ChildProfile{}, fmt.Errorf("usecase: 未配置档案存储")
+		}
+		stored, err := d.Records.PatchLegacyProfile(ctx, agentName, p, d.now())
+		if err != nil {
+			return k12.ChildProfile{}, fmt.Errorf("usecase: 保存档案: %w", err)
+		}
+		return stored, nil
+	}
+	previous, err := d.Profiles.GetProfile(ctx, agentName)
+	if err != nil {
+		return k12.ChildProfile{}, err
+	}
+	if err := inputlimits.Text("profile.child_name", p.ChildName, previous.ChildName, inputlimits.ChildName); err != nil {
+		return k12.ChildProfile{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 	}
 	if err := d.Profiles.SaveProfile(ctx, agentName, p); err != nil {
 		return k12.ChildProfile{}, fmt.Errorf("usecase: 保存档案: %w", err)

@@ -2,17 +2,14 @@ package usecase_test
 
 import (
 	"context"
-	"database/sql"
 	"testing"
 
 	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/scenario"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/curriculum"
+	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/usecase"
-	"github.com/hexagon-codes/hexclaw/storage/migrate"
-
-	_ "modernc.org/sqlite"
 )
 
 type toggleSolver struct{}
@@ -25,21 +22,14 @@ type toggleGrader struct{ correct bool }
 
 func (g *toggleGrader) Grade(context.Context, string, string, string) (usecase.GradeOutcome, error) {
 	if g.correct {
-		return usecase.GradeOutcome{Correct: true}, nil
+		return usecase.GradeOutcome{Verdict: usecase.VerdictAgree}, nil
 	}
-	return usecase.GradeOutcome{Correct: false, WrongStep: "第一步", ErrorCause: "计算失误", KnowledgePoint: "小数乘法"}, nil
+	return usecase.GradeOutcome{Verdict: usecase.VerdictDisagree, WrongStep: "第一步", ErrorCause: "计算失误", KnowledgePoint: "小数乘法"}, nil
 }
 
 func newToggleDeps(t *testing.T) (usecase.Deps, *toggleGrader) {
 	t.Helper()
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
-	if err := migrate.Run(context.Background(), db, migrate.All); err != nil {
-		t.Fatal(err)
-	}
+	db := openMigratedTestDB(t)
 	db.Exec(`INSERT INTO agents(name) VALUES('xiaoming')`)
 	cur := curriculum.New()
 	reg := scenario.NewRegistry()
@@ -48,7 +38,7 @@ func newToggleDeps(t *testing.T) (usecase.Deps, *toggleGrader) {
 	}
 	g := &toggleGrader{}
 	return usecase.Deps{
-		Solver: toggleSolver{}, Grader: g, Records: records.NewStore(db, reg.Records),
+		Solver: toggleSolver{}, Grader: g, Records: k12storage.NewStore(db, reg.Records),
 		Constraint: cur, Now: func() int64 { return 1000 },
 	}, g
 }

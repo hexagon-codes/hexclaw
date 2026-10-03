@@ -1,0 +1,182 @@
+package k12
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"strings"
+)
+
+const (
+	// RecognizingRequestPolicyVersion 控制共享的 DD-036 线上协议策略。
+	// 它有意与 recognition_plan_version V1/V2 保持独立。
+	RecognizingRequestPolicyVersion    = "dd036-recognizing-v1"
+	ConfiguredRecognizingPolicyVersion = "k12-recognizing-v2"
+	LocatingRequestPolicyVersion       = "k12-locating-v1"
+	RecognizingPolicyModel             = "gpt-5.6-sol"
+)
+
+// ModelRequestPolicySnapshot is the allowlisted, non-sensitive request policy
+// frozen before an external model invocation. ReasoningEffort records the
+// expected adapter-resolved wire policy for audit; HexClaw sends only Thinking
+// as semantic CompletionRequest metadata.
+type ModelRequestPolicySnapshot struct {
+	PolicyVersion   string `json:"policy_version"`
+	Stage           string `json:"stage"`
+	Thinking        string `json:"thinking"`
+	ReasoningEffort string `json:"reasoning_effort"`
+}
+
+func ApprovedRecognizingRequestPolicy() ModelRequestPolicySnapshot {
+	return ModelRequestPolicySnapshot{
+		PolicyVersion:   RecognizingRequestPolicyVersion,
+		Stage:           GradingStageRecognizing,
+		Thinking:        "off",
+		ReasoningEffort: "none",
+	}
+}
+
+func ApprovedLocatingRequestPolicy() ModelRequestPolicySnapshot {
+	return ModelRequestPolicySnapshot{
+		PolicyVersion:   LocatingRequestPolicyVersion,
+		Stage:           GradingStageLocating,
+		Thinking:        "off",
+		ReasoningEffort: "none",
+	}
+}
+
+// ConfiguredRecognizingRequestPolicy 用于创建时已核实适配映射的新任务。
+func ConfiguredRecognizingRequestPolicy() ModelRequestPolicySnapshot {
+	policy := ApprovedRecognizingRequestPolicy()
+	policy.PolicyVersion = ConfiguredRecognizingPolicyVersion
+	return policy
+}
+
+func NormalizeModelRequestPolicySnapshot(
+	policy ModelRequestPolicySnapshot,
+) ModelRequestPolicySnapshot {
+	policy.PolicyVersion = strings.TrimSpace(policy.PolicyVersion)
+	policy.Stage = strings.TrimSpace(policy.Stage)
+	policy.Thinking = strings.ToLower(strings.TrimSpace(policy.Thinking))
+	policy.ReasoningEffort = strings.ToLower(strings.TrimSpace(policy.ReasoningEffort))
+	return policy
+}
+
+func (policy ModelRequestPolicySnapshot) IsZero() bool {
+	return NormalizeModelRequestPolicySnapshot(policy) == (ModelRequestPolicySnapshot{})
+}
+
+func (policy ModelRequestPolicySnapshot) IsApprovedRecognizing() bool {
+	policy = NormalizeModelRequestPolicySnapshot(policy)
+	return policy == ApprovedRecognizingRequestPolicy() || policy == ConfiguredRecognizingRequestPolicy()
+}
+
+func (policy ModelRequestPolicySnapshot) IsApprovedLocating() bool {
+	return NormalizeModelRequestPolicySnapshot(policy) == ApprovedLocatingRequestPolicy()
+}
+
+func (policy ModelRequestPolicySnapshot) Digest() string {
+	policy = NormalizeModelRequestPolicySnapshot(policy)
+	if policy.IsZero() {
+		return ""
+	}
+	raw, err := json.Marshal(policy)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(raw)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// ValidateGradingRecognizingRequestPolicy 核对任务创建时冻结的识别策略。
+func ValidateGradingRecognizingRequestPolicy(snapshot GradingModelSnapshot) error {
+	snapshot = NormalizeGradingModelSnapshot(snapshot)
+	policy := NormalizeModelRequestPolicySnapshot(snapshot.RecognizingRequestPolicy)
+	if snapshot.Model == RecognizingPolicyModel {
+		if policy != ApprovedRecognizingRequestPolicy() {
+			return fmt.Errorf(
+				"recognizing request policy missing or invalid for model %q",
+				snapshot.Model,
+			)
+		}
+		return nil
+	}
+	if !policy.IsZero() && policy != ConfiguredRecognizingRequestPolicy() {
+		return fmt.Errorf(
+			"recognizing request policy is not approved for model %q",
+			snapshot.Model,
+		)
+	}
+	return nil
+}
+
+// ValidateModelInvocationRequestPolicy checks the per-invocation copy against
+// the Job route snapshot. Other stages must never inherit DD-036.
+func ValidateModelInvocationRequestPolicy(
+	stage string,
+	route GradingModelSnapshot,
+	policy ModelRequestPolicySnapshot,
+) error {
+	stage = strings.TrimSpace(stage)
+	route = NormalizeGradingModelSnapshot(route)
+	policy = NormalizeModelRequestPolicySnapshot(policy)
+	if stage == GradingStageLocating {
+		// 历史 locating invocation 的零策略仍可读；新 Sol 调用由
+		// 编排器显式冻结独立的低延迟策略。
+		if policy.IsZero() {
+			return nil
+		}
+		if !policy.IsApprovedLocating() || (route.Model != RecognizingPolicyModel &&
+			route.RecognizingRequestPolicy != ConfiguredRecognizingRequestPolicy()) {
+			return fmt.Errorf("locating request policy is not approved for model %q", route.Model)
+		}
+		return nil
+	}
+	if stage != GradingStageRecognizing {
+		if !policy.IsZero() {
+			return fmt.Errorf("request policy is forbidden for stage %q", stage)
+		}
+		return nil
+	}
+	if err := ValidateGradingRecognizingRequestPolicy(route); err != nil {
+		return err
+	}
+	if policy != route.RecognizingRequestPolicy {
+		return fmt.Errorf("recognizing invocation policy does not match frozen route policy")
+	}
+	return nil
+}
+
+type gradingModelRequestPolicyContextKey struct{}
+
+// WithGradingModelRequestPolicy is intentionally separate from the route
+// context. Locating reuses the same Job route but must not inherit DD-036.
+func WithGradingModelRequestPolicy(
+	ctx context.Context,
+	policy ModelRequestPolicySnapshot,
+) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(
+		ctx,
+		gradingModelRequestPolicyContextKey{},
+		NormalizeModelRequestPolicySnapshot(policy),
+	)
+}
+
+func GradingModelRequestPolicyFromContext(
+	ctx context.Context,
+) (ModelRequestPolicySnapshot, bool) {
+	if ctx == nil {
+		return ModelRequestPolicySnapshot{}, false
+	}
+	policy, ok := ctx.Value(gradingModelRequestPolicyContextKey{}).(ModelRequestPolicySnapshot)
+	if !ok {
+		return ModelRequestPolicySnapshot{}, false
+	}
+	policy = NormalizeModelRequestPolicySnapshot(policy)
+	return policy, !policy.IsZero()
+}

@@ -10,6 +10,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/egress"
+	"github.com/hexagon-codes/hexclaw/localinfer"
 	"github.com/hexagon-codes/hexclaw/skill"
 	"github.com/hexagon-codes/toolkit/util/logger"
 )
@@ -69,6 +71,7 @@ func (h *WarmupHandle) finish(err error) {
 // 返回 warmed=false 表示默认路由非本地、按设计跳过（云端无预热需求）。
 func (e *ReActEngine) WarmupLocalDefaultModel(ctx context.Context) (warmed bool, err error) {
 	ctx = egress.WithRequest(ctx, egress.PurposeGeneralChat, "warmup", egress.ClassGeneral)
+	ctx = localinfer.WithOperation(ctx, localinfer.OperationWarmup)
 	// 与日常提问同构的普通中文短句：工具渐进召回（CollectFiltered 按 query）对无关键词
 	// 文本返回基础工具集——与多数真实首问相同，前缀才能命中。
 	msg := &adapter.Message{
@@ -81,7 +84,7 @@ func (e *ReActEngine) WarmupLocalDefaultModel(ctx context.Context) (warmed bool,
 	if serr != nil {
 		return false, serr
 	}
-	if !isLocalProvider(selection.providerName) {
+	if !e.providerIsLocal(selection.providerName) {
 		return false, nil
 	}
 
@@ -112,7 +115,7 @@ func (e *ReActEngine) WarmupLocalDefaultModel(ctx context.Context) (warmed bool,
 	if len(tools) > 0 {
 		req.Tools = tools
 	}
-	applyPerTurnRequestPolicy(&req, selection.modelName, msg, nil)
+	applyPerTurnRequestPolicy(ctx, &req, selection.modelName, e.visionRoutingStrategy(), msg, nil)
 	// BUG-20260712：预热必须与真实请求用同一 num_ctx，否则预热按自动分档把 runner 载到 16384
 	// （巨型 KV 常驻），真实请求即便注入 num_ctx=4096 也只会复用那个 16384 runner（Ollama 不会
 	// 为更小 ctx 降载），内存照样被撑爆。此处显式盖同一档，让 runner 一开始就载在 4096。
@@ -122,27 +125,70 @@ func (e *ReActEngine) WarmupLocalDefaultModel(ctx context.Context) (warmed bool,
 	start := time.Now()
 	logger.Info("[warmup] 本地默认模型预热开始（把 system prompt+工具模板 prefill 进 KV 缓存）",
 		"provider", selection.providerName, "model", selection.modelName,
-		"tools", len(req.Tools), "num_ctx", reqNumCtxField(req), "prompt_bytes", promptBytesField(req))
+		"stage", "provider_prefill", "status", "started", "elapsed_ms", int64(0),
+		"input", msg.Content, "prompt_messages", req.Messages,
+		"tools", len(req.Tools), "tool_definitions", req.Tools,
+		"num_ctx", reqNumCtxField(req), "prompt_bytes", promptBytesField(req))
+	heartbeatStop := make(chan struct{})
+	heartbeatDone := make(chan struct{})
+	var heartbeatStopOnce sync.Once
+	go func() {
+		defer close(heartbeatDone)
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				logger.Info("[warmup] 本地默认模型预热进行中",
+					"provider", selection.providerName, "model", selection.modelName,
+					"stage", "provider_prefill", "elapsed_ms", time.Since(start).Milliseconds())
+			case <-heartbeatStop:
+				return
+			}
+		}
+	}()
+	stopHeartbeat := func() {
+		heartbeatStopOnce.Do(func() { close(heartbeatStop) })
+		<-heartbeatDone
+	}
+	defer stopHeartbeat()
+	logTerminal := func(runErr error) {
+		status := "failed"
+		if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) {
+			status = "cancelled"
+		}
+		logger.Warn("[warmup] 本地模型预热未完成（不影响功能，首条消息将走冷路径）",
+			"provider", selection.providerName, "model", selection.modelName,
+			"stage", "provider_prefill", "status", status,
+			"elapsed_ms", time.Since(start).Milliseconds(), "error", runErr)
+	}
 	// 必须走流式：非流式 Complete 的响应头超时 120s < 纯 CPU 大 prompt prefill（实测 344s），
 	// 预热自己就会超时（首版踩坑取证 sidecar2.log）。流式响应头即刻返回，prefill 期间连接保活。
 	stream, cerr := selection.provider.Stream(ctx, req)
 	if cerr != nil {
+		stopHeartbeat()
+		logTerminal(cerr)
 		return true, cerr
 	}
+	defer stream.Close()
 	for range stream.Chunks() {
 		// 排空至流结束（num_predict=1，产出即止）
 	}
 	select {
 	case serr, ok := <-stream.Errors():
 		if ok && serr != nil {
+			stopHeartbeat()
+			logTerminal(serr)
 			return true, serr
 		}
 	default:
 	}
+	stopHeartbeat()
 	logger.Info("[warmup] 本地默认模型预热完成（system prompt+工具模板已入 KV 缓存）",
 		"provider", selection.providerName, "model", selection.modelName,
+		"stage", "provider_prefill", "status", "completed",
 		"num_ctx", reqNumCtxField(req), "prompt_bytes", promptBytesField(req),
-		"elapsed", time.Since(start).Round(time.Second).String())
+		"elapsed", time.Since(start).Round(time.Second).String(), "elapsed_ms", time.Since(start).Milliseconds())
 	return true, nil
 }
 
@@ -176,7 +222,8 @@ func (e *ReActEngine) StartLocalWarmup(ctx context.Context, timeout ...time.Dura
 		defer func() {
 			if r := recover(); r != nil {
 				runErr = fmt.Errorf("warmup panic: %v", r)
-				logger.Warn("[warmup] 预热 goroutine panic（已吞，不影响功能）", "panic", r)
+				logger.Warn("[warmup] 本地模型预热失败（不影响功能，首条消息将走冷路径）",
+					"status", "failed", "error", runErr)
 			}
 			if runErr == nil && runCtx.Err() != nil {
 				runErr = runCtx.Err()
@@ -191,8 +238,9 @@ func (e *ReActEngine) StartLocalWarmup(ctx context.Context, timeout ...time.Dura
 		warmed, err := e.WarmupLocalDefaultModel(runCtx)
 		runErr = err
 		switch {
-		case err != nil:
-			logger.Warn("[warmup] 本地模型预热失败（不影响功能，首条消息将走冷路径）", "error", err)
+		case err != nil && !warmed:
+			logger.Warn("[warmup] 本地模型预热失败（不影响功能，首条消息将走冷路径）",
+				"status", "failed", "error", err)
 		case !warmed:
 			logger.Info("[warmup] 默认路由非本地模型，跳过预热")
 		}

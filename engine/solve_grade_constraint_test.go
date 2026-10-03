@@ -46,6 +46,7 @@ func TestVerifier_OutOfScope(t *testing.T) {
 
 func TestSolve_VerifierSeesWorkedStepsAndReverifyKeepsConstraint(t *testing.T) {
 	se := &solveExec{
+		verifierStdout: "COMPUTED: 42\n",
 		solverOuts: []string{
 			"超纲解法标记：使用微积分。\n答案：42",
 			"学段内解法标记：只用乘法竖式。\n答案：42",

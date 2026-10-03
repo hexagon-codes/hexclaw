@@ -20,7 +20,7 @@ on:
       toolkit_ref:
         description: "hexagon-codes/toolkit ref to test with"
         required: false
-        default: "main"
+        default: "v0.3.4"
       run_live_network:
         description: "Run live network code_exec crawler checks on Linux/macOS"
         required: false
@@ -30,28 +30,28 @@ permissions:
   contents: read
 
 concurrency:
-  group: sandbox-code-exec-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && inputs.toolkit_ref || 'main' }}
+  group: sandbox-code-exec-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && inputs.toolkit_ref || 'v0.3.4' }}
   cancel-in-progress: true
 
 env:
-  GO_VERSION: "1.25"
   GOPRIVATE: github.com/hexagon-codes/*
-  TOOLKIT_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.toolkit_ref || 'main' }}
+  # 默认使用与 go.mod 一致的 toolkit tag；手动触发时仍可显式传入其他 ref。
+  TOOLKIT_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.toolkit_ref || 'v0.3.4' }}
   RUN_LIVE_NETWORK: ${{ github.event_name != 'workflow_dispatch' || inputs.run_live_network == 'true' }}
 
 jobs:
   workflow-lint:
     name: Workflow lint
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Checkout hexclaw
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: go.mod
 
       - name: Run actionlint
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 .github/workflows/sandbox-code-exec.yml
@@ -69,37 +69,27 @@ jobs:
             os: ubuntu-22.04
             live_network: "1"
           - name: macOS sandbox/code_exec
-            os: macos-latest
+            os: macos-14
             live_network: "1"
           - name: Windows sandbox/code_exec
-            os: windows-latest
+            os: windows-2022
             live_network: "0"
 
     steps:
       - name: Checkout hexclaw
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Checkout toolkit
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           repository: hexagon-codes/toolkit
           ref: ${{ env.TOOLKIT_REF }}
           path: toolkit
-          token: ${{ secrets.PRIVATE_REPO_TOKEN || github.token }}
-
-      - name: Configure private modules
-        shell: pwsh
-        env:
-          PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
-        run: |
-          if ($env:PRIVATE_REPO_TOKEN) {
-            git config --global url."https://$env:PRIVATE_REPO_TOKEN@github.com/".insteadOf "https://github.com/"
-          }
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: go.mod
           cache-dependency-path: |
             go.sum
             toolkit/go.sum
@@ -110,12 +100,12 @@ jobs:
           GOPRIVATE: github.com/hexagon-codes/*
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.x"
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
 
@@ -148,7 +138,9 @@ jobs:
       - name: Test hexclaw code_exec
         env:
           HEXCLAW_P0_SANDBOX_PROOF: "1"
-        run: go test -v -count=1 -timeout 360s ./skill/builtin -run 'TestCodeExecSkill_|TestDetectMissingPackages|TestBuildInstallCommand|TestSandboxP0_StaticGapMatrix'
+        run: >-
+          go test -v -count=1 -timeout 900s ./skill/builtin
+          -run '^(TestCodeExec|TestCloseCodeExecSandbox|TestJoinCodeExecSandboxClose|TestToolkitSandboxMigration|TestDetectMissingPackages|TestBuildInstallCommand|TestRegisterAdvancedCodeExec|TestEnsureCodeExecConfigDefaults|TestNewCodeExecSkill|TestPrepareCodeExecCommand|TestSandboxP0)'
 
       - name: Test macOS connector readable paths
         if: runner.os == 'macOS'

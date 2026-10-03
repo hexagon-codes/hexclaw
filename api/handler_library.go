@@ -56,6 +56,19 @@ func (s *Server) handleUpsertPrompt(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "title 不能为空"})
 		return
 	}
+	var previous library.Prompt
+	if p.ID != "" {
+		var err error
+		previous, _, err = s.promptStore.Get(r.Context(), p.ID)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+	}
+	if err := validatePromptInputLengths(p, previous); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
 	id, err := s.promptStore.Upsert(r.Context(), &p)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "保存 Prompt 失败: " + err.Error()})

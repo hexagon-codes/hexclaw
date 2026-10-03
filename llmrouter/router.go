@@ -14,10 +14,13 @@ package llmrouter
 
 import (
 	"context"
+	"errors"
+	"flag"
 	"fmt"
 	"log/slog"
 	"net"
-	"net/url"
+	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -29,6 +32,7 @@ import (
 	"github.com/hexagon-codes/hexagon"
 	"github.com/hexagon-codes/hexclaw/config"
 	"github.com/hexagon-codes/hexclaw/egress"
+	"github.com/hexagon-codes/hexclaw/localinfer"
 	"github.com/hexagon-codes/toolkit/util/logger"
 )
 
@@ -68,9 +72,30 @@ type Selector struct {
 	unhealthyUntil map[string]time.Time        // 运行时短期熔断，避免刚失败的 provider 立即被再次选中
 	now            func() time.Time
 	egressPolicy   *egress.Policy // nil only for explicitly unguarded/test selectors
+	localInference *localinfer.Coordinator
 }
 
 const defaultProviderCooldown = 2 * time.Minute
+
+var (
+	// ErrNoProvider means routing cannot proceed because no LLM provider is configured.
+	ErrNoProvider = errors.New("没有可用的 LLM Provider")
+	// ErrNoCapableModel means the configured default provider has no exact
+	// model declaration satisfying a required capability set.
+	ErrNoCapableModel = errors.New("no model satisfies required capabilities")
+	// ErrModelCapabilityMismatch means an explicit provider/model selection
+	// does not satisfy the request. Callers must not silently replace it.
+	ErrModelCapabilityMismatch = errors.New("model capability mismatch")
+)
+
+// CapabilityRoute is an exact provider/model route selected from explicit
+// backend capability metadata. Provider is the facade captured under the same
+// selector read lock as ProviderName and Model, preventing a reload split-read.
+type CapabilityRoute struct {
+	Provider     hexagon.Provider
+	ProviderName string
+	Model        string
+}
 
 // New 创建 LLM 路由器
 //
@@ -84,7 +109,13 @@ const defaultProviderCooldown = 2 * time.Minute
 func New(cfg config.LLMConfig) (*Selector, error) {
 	providers, activeCfg, defaultP := buildSelectorState(cfg)
 	if len(providers) == 0 {
-		return nil, fmt.Errorf("没有可用的 LLM Provider，请检查 API Key 配置")
+		return &Selector{
+			providers:      providers,
+			cfg:            activeCfg,
+			defaultP:       defaultP,
+			unhealthyUntil: make(map[string]time.Time),
+			now:            time.Now,
+		}, fmt.Errorf("%w，请检查 API Key 配置", ErrNoProvider)
 	}
 	// 校验 default 名字
 	if _, ok := providers[defaultP]; !ok {
@@ -165,6 +196,19 @@ func (r *Selector) SetEgressPolicy(policy *egress.Policy) {
 	r.mu.Unlock()
 }
 
+// SetLocalInferenceCoordinator installs the single process-scoped admission
+// boundary used by every local provider returned by this selector. The
+// coordinator survives Reload because it is runtime infrastructure, not
+// provider configuration.
+func (r *Selector) SetLocalInferenceCoordinator(coordinator *localinfer.Coordinator) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.localInference = coordinator
+	r.mu.Unlock()
+}
+
 type cloudEgressProvider struct {
 	next   hexagon.Provider
 	policy *egress.Policy
@@ -195,10 +239,192 @@ func (p *cloudEgressProvider) CountTokens(messages []llm.Message) (int, error) {
 // Caller must hold at least r.mu.RLock.
 func (r *Selector) providerLocked(name string) hexagon.Provider {
 	p := r.providers[name]
-	if p == nil || r.egressPolicy == nil || r.isLocalProviderName(name) {
+	if p == nil {
 		return p
 	}
-	return &cloudEgressProvider{next: p, policy: r.egressPolicy}
+	// 在所有出口检查内侧标记；本地或云端已执行后均不能再推断整次操作未发送。
+	p = preserveContextTokenCounter(&providerAttemptProvider{Provider: p}, p)
+	if r.egressPolicy != nil && !r.isLocalProviderName(name) {
+		inner := p
+		p = preserveContextTokenCounter(&cloudEgressProvider{next: inner, policy: r.egressPolicy}, inner)
+	}
+	if providerConfig, configured := r.cfg.Providers[name]; configured {
+		if r.localInference != nil && r.isLocalProviderName(name) {
+			inner := p
+			p = preserveContextTokenCounter(&localInferenceProvider{
+				next: inner, coordinator: r.localInference,
+				defaultModel: providerConfig.Model, budgetForModel: localChatBudget,
+			}, inner)
+		}
+		// This wrapper is the final completion/stream boundary shared by Chat,
+		// Agents, QuickChat, channels and capability probes. UI filtering is not
+		// a security boundary: a stale session or direct API caller must still be
+		// unable to send embedding-only/unclassified IDs to chat transports.
+		inner := p
+		p = preserveContextTokenCounter(&completionCapabilityProvider{
+			next: inner, providerName: name, providerConfig: providerConfig,
+		}, inner)
+	}
+	return p
+}
+
+type providerAttemptProvider struct{ hexagon.Provider }
+
+func (p *providerAttemptProvider) Complete(ctx context.Context, req llm.CompletionRequest) (*llm.CompletionResponse, error) {
+	egress.MarkProviderAttempt(ctx)
+	return p.Provider.Complete(ctx, req)
+}
+
+func (p *providerAttemptProvider) Stream(ctx context.Context, req llm.CompletionRequest) (*llm.Stream, error) {
+	egress.MarkProviderAttempt(ctx)
+	return p.Provider.Stream(ctx, req)
+}
+
+type completionCapabilityProvider struct {
+	next           hexagon.Provider
+	providerName   string
+	providerConfig config.LLMProviderConfig
+}
+
+func (p *completionCapabilityProvider) Name() string { return p.next.Name() }
+
+func (p *completionCapabilityProvider) requestModel(req llm.CompletionRequest) string {
+	model := strings.TrimSpace(req.Model)
+	if model == "" {
+		model = strings.TrimSpace(p.providerConfig.Model)
+	}
+	return model
+}
+
+func (p *completionCapabilityProvider) validate(req llm.CompletionRequest) error {
+	model := p.requestModel(req)
+	required := []string{config.LLMModelCapabilityText}
+	if completionRequestContainsImage(req) {
+		required = append(required, config.LLMModelCapabilityVision)
+	}
+	if model == "" || !config.ModelHasCapabilities(p.providerConfig, model, required...) {
+		return fmt.Errorf(
+			"%w: provider %q model %q lacks required capabilities %v",
+			ErrModelCapabilityMismatch,
+			p.providerName,
+			model,
+			required,
+		)
+	}
+	return nil
+}
+
+func (p *completionCapabilityProvider) applyReasoningCapability(req *llm.CompletionRequest) error {
+	if req == nil || req.Metadata == nil {
+		return nil
+	}
+	if _, requested := req.Metadata["thinking"]; !requested {
+		return nil
+	}
+	metadata := make(map[string]any, len(req.Metadata)+1)
+	for key, value := range req.Metadata {
+		metadata[key] = value
+	}
+	req.Metadata = metadata
+
+	support, control := config.ModelReasoningControl(p.providerConfig, p.requestModel(*req))
+	if expected, frozen := req.Metadata["expected_reasoning_effort"]; frozen {
+		if support != config.LLMReasoningSupportSupported || control == nil ||
+			control.Dialect != config.LLMReasoningDialectEffort || control.Off != expected {
+			return fmt.Errorf("provider %q model %q reasoning mapping differs from frozen request policy", p.providerName, p.requestModel(*req))
+		}
+	}
+	capability := llm.ReasoningCapability{Support: llm.ReasoningSupport(support)}
+	if control != nil {
+		capability.Dialect = llm.ReasoningDialect(control.Dialect)
+		capability.OnValue = control.On
+		capability.OffValue = control.Off
+	}
+	req.Metadata[llm.ReasoningCapabilityMetadataKey] = capability
+	plan, _, err := llm.PlanReasoningFromMetadata(
+		req.Metadata,
+		p.requestModel(*req),
+		p.providerConfig.BaseURL,
+	)
+	if err != nil {
+		llm.PublishReasoningReceipt(req.Metadata, plan.Receipt)
+		return err
+	}
+	if plan.Receipt.Enabled {
+		if err := applyConfiguredThinkingEffort(control, req.Metadata, &capability); err != nil {
+			return fmt.Errorf("provider %q model %q: %w", p.providerName, p.requestModel(*req), err)
+		}
+		req.Metadata[llm.ReasoningCapabilityMetadataKey] = capability
+	}
+	return nil
+}
+
+func applyConfiguredThinkingEffort(
+	control *config.LLMReasoningControlSpec,
+	metadata map[string]any,
+	capability *llm.ReasoningCapability,
+) error {
+	if control == nil || capability == nil || control.Dialect != config.LLMReasoningDialectEffort {
+		return nil
+	}
+	raw, requested := metadata["thinking_effort"]
+	if !requested {
+		return nil
+	}
+	effort, ok := raw.(string)
+	if !ok || effort == "" || effort != strings.TrimSpace(effort) {
+		return fmt.Errorf("thinking_effort must be an exact allowed string")
+	}
+	for _, allowed := range control.AllowedEfforts {
+		if effort == allowed {
+			capability.OnValue = effort
+			return nil
+		}
+	}
+	return fmt.Errorf("thinking_effort %q is not allowed", effort)
+}
+
+func (p *completionCapabilityProvider) Complete(
+	ctx context.Context,
+	req llm.CompletionRequest,
+) (*llm.CompletionResponse, error) {
+	if err := p.validate(req); err != nil {
+		return nil, err
+	}
+	if err := p.applyReasoningCapability(&req); err != nil {
+		return nil, err
+	}
+	return p.next.Complete(ctx, req)
+}
+
+func (p *completionCapabilityProvider) Stream(
+	ctx context.Context,
+	req llm.CompletionRequest,
+) (*llm.Stream, error) {
+	if err := p.validate(req); err != nil {
+		return nil, err
+	}
+	if err := p.applyReasoningCapability(&req); err != nil {
+		return nil, err
+	}
+	return p.next.Stream(ctx, req)
+}
+
+func (p *completionCapabilityProvider) Models() []llm.ModelInfo { return p.next.Models() }
+
+func (p *completionCapabilityProvider) CountTokens(messages []llm.Message) (int, error) {
+	return p.next.CountTokens(messages)
+}
+
+func completionRequestContainsImage(req llm.CompletionRequest) bool {
+	for _, message := range req.Messages {
+		for _, part := range message.MultiContent {
+			if strings.EqualFold(strings.TrimSpace(part.Type), "image_url") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // isLocalProviderName reports whether a provider should rank last in fallback.
@@ -213,10 +439,8 @@ func (r *Selector) isLocalProviderName(name string) bool {
 	if canon, ok := r.canonicalNameLocked(name); ok {
 		key = canon
 	}
-	if pc, configured := r.cfg.Providers[key]; configured && strings.TrimSpace(pc.BaseURL) != "" {
-		// An explicit endpoint is authoritative. In particular, a public hosted
-		// service named "ollama" must still cross the cloud egress boundary.
-		return isLocalProvider(pc)
+	if pc, configured := r.cfg.Providers[key]; configured {
+		return isLocalProviderNamed(key, pc)
 	}
 	return strings.Contains(strings.ToLower(name), "ollama")
 }
@@ -234,33 +458,17 @@ func (r *Selector) IsLocalProviderName(name string) bool {
 
 // isLocalProvider 检查 provider 是否为本地部署（如 Ollama），本地 provider 不需要 API Key
 func isLocalProvider(pc config.LLMProviderConfig) bool {
-	return IsLocalProviderBaseURL(pc.BaseURL)
+	return config.IsLocalLLMProvider(pc)
+}
+
+func isLocalProviderNamed(name string, pc config.LLMProviderConfig) bool {
+	return config.IsLocalLLMProviderNamed(name, pc)
 }
 
 // IsLocalProviderBaseURL classifies only the parsed endpoint host. Local-looking
 // text in a public hostname, path, query, or userinfo must not bypass egress.
 func IsLocalProviderBaseURL(baseURL string) bool {
-	raw := strings.TrimSpace(baseURL)
-	if raw == "" {
-		return false
-	}
-	if !strings.Contains(raw, "://") {
-		raw = "//" + raw
-	}
-	u, err := url.Parse(raw)
-	if err != nil {
-		return false
-	}
-	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
-	if zone := strings.LastIndexByte(host, '%'); zone >= 0 {
-		host = host[:zone]
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		return ip.IsLoopback() || ip.IsUnspecified()
-	}
-	return host == "localhost" || host == "ollama" ||
-		host == "host.docker.internal" || host == "host.containers.internal" ||
-		strings.HasSuffix(host, ".local")
+	return config.IsLocalProviderBaseURL(baseURL)
 }
 
 const (
@@ -281,10 +489,21 @@ var localOllamaReachable = func() bool {
 	return true
 }
 
+// autoLocalOllamaRegistrationAllowed prevents ordinary Go tests from silently
+// turning a configured fake/remote provider into a real localhost model call.
+// Production binaries preserve the resilience behavior; a test can exercise the
+// branch only with an explicit fake-probe opt-in.
+func autoLocalOllamaRegistrationAllowed() bool {
+	if flag.Lookup("test.paniconexit0") == nil {
+		return true
+	}
+	return os.Getenv("HEXCLAW_TEST_ALLOW_AUTO_LOCAL_OLLAMA") == "1"
+}
+
 // hasLocalProvider 判断配置里是否已有任一本地 provider（指向回环端点）。
 func hasLocalProvider(providers map[string]config.LLMProviderConfig) bool {
-	for _, pc := range providers {
-		if isLocalProvider(pc) {
+	for name, pc := range providers {
+		if isLocalProviderNamed(name, pc) {
 			return true
 		}
 	}
@@ -302,12 +521,17 @@ func buildSelectorState(cfg config.LLMConfig) (map[string]hexagon.Provider, conf
 			logger.Info("[router] 跳过已禁用 provider（配置/Key 保留，不参与路由）", "provider", name)
 			continue
 		}
-		if strings.TrimSpace(pc.APIKey) == "" && !isLocalProvider(pc) {
+		if err := config.ValidateProviderEndpointAccessWithHTTPAuthorization(pc.BaseURL, pc.PrivateNetworkAccess, pc.HTTPAuthorization); err != nil && !pc.HasOllamaTarget() {
+			logger.Warn("[router] 跳过未授权或不安全的 provider endpoint", "provider", name, "error", err)
+			continue
+		}
+		if strings.TrimSpace(pc.APIKey) == "" && !isLocalProviderNamed(name, pc) && !pc.HasOllamaTarget() {
 			logger.Warn("[router] 跳过无 API Key 的远程 provider", "provider", name, "base_url", pc.BaseURL)
 			continue
 		}
-		logger.Info("[router] 加载 provider", "provider", name, "base_url", pc.BaseURL, "local", isLocalProvider(pc))
+		logger.Info("[router] 加载 provider", "provider", name, "base_url", pc.BaseURL, "local", isLocalProviderNamed(name, pc))
 		providerNames = append(providerNames, name)
+		pc.ModelSpecs = cloneLLMModelSpecs(pc.ModelSpecs)
 		activeCfg.Providers[name] = pc
 	}
 
@@ -315,7 +539,7 @@ func buildSelectorState(cfg config.LLMConfig) (map[string]hexagon.Provider, conf
 	// 测试或误操作抹掉），自动注册默认「Ollama (本地)」。让本地模型「配置漂移也不丢」，绑定本地
 	// 模型的 agent 不再因缺 provider 硬崩（BUG-20260712）。已有本地 provider 则尊重配置不覆盖。
 	// 仅**补充**已有配置（len>0）：空配置=「未配置 LLM」语义不变（不凭空造 LLM，保 nil-router 契约）。
-	if len(providerNames) > 0 && !hasLocalProvider(activeCfg.Providers) && localOllamaReachable() {
+	if autoLocalOllamaRegistrationAllowed() && len(providerNames) > 0 && !hasLocalProvider(activeCfg.Providers) && localOllamaReachable() {
 		enabled := true
 		activeCfg.Providers[localOllamaProviderName] = config.LLMProviderConfig{
 			BaseURL: localOllamaBaseURL,
@@ -350,9 +574,65 @@ func cloneLLMConfig(cfg config.LLMConfig) config.LLMConfig {
 	cloned := cfg
 	cloned.Providers = make(map[string]config.LLMProviderConfig, len(cfg.Providers))
 	for name, provider := range cfg.Providers {
+		provider.ModelSpecs = cloneLLMModelSpecs(provider.ModelSpecs)
 		cloned.Providers[name] = provider
 	}
 	return cloned
+}
+
+func cloneLLMModelSpecs(specs []config.LLMProviderModelSpec) []config.LLMProviderModelSpec {
+	if specs == nil {
+		return nil
+	}
+	cloned := append([]config.LLMProviderModelSpec(nil), specs...)
+	if len(specs) == 0 {
+		cloned = make([]config.LLMProviderModelSpec, 0)
+	}
+	for i := range cloned {
+		cloned[i].ReasoningControl = cloneLLMReasoningControl(cloned[i].ReasoningControl)
+	}
+	return cloned
+}
+
+func cloneLLMReasoningControl(control *config.LLMReasoningControlSpec) *config.LLMReasoningControlSpec {
+	if control == nil {
+		return nil
+	}
+	cloned := *control
+	cloned.On = cloneLLMReasoningValue(control.On)
+	cloned.Off = cloneLLMReasoningValue(control.Off)
+	if control.AllowedEfforts != nil {
+		cloned.AllowedEfforts = append([]string(nil), control.AllowedEfforts...)
+		if len(control.AllowedEfforts) == 0 {
+			cloned.AllowedEfforts = make([]string, 0)
+		}
+	}
+	return &cloned
+}
+
+func cloneLLMReasoningValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		cloned := make(map[string]any, len(typed))
+		for key, item := range typed {
+			cloned[key] = cloneLLMReasoningValue(item)
+		}
+		return cloned
+	case map[any]any:
+		cloned := make(map[any]any, len(typed))
+		for key, item := range typed {
+			cloned[key] = cloneLLMReasoningValue(item)
+		}
+		return cloned
+	case []any:
+		cloned := make([]any, len(typed))
+		for i, item := range typed {
+			cloned[i] = cloneLLMReasoningValue(item)
+		}
+		return cloned
+	default:
+		return value
+	}
 }
 
 // createProvider 根据配置创建 Provider 实例
@@ -368,14 +648,71 @@ func (r *Selector) createProvider(name string, pc config.LLMProviderConfig) hexa
 	return NewProviderFromConfig(name, pc)
 }
 
+const (
+	defaultOpenAIProviderBaseURL    = "https://api.openai.com/v1"
+	defaultAnthropicProviderBaseURL = "https://api.anthropic.com/v1"
+	defaultOllamaProviderBaseURL    = "http://localhost:11434"
+	ollamaResponseHeaderTimeout     = 10 * time.Minute
+)
+
+func providerEndpointBaseURL(name string, pc config.LLMProviderConfig) string {
+	baseURL := strings.TrimSpace(pc.BaseURL)
+	if pc.HasOllamaTarget() {
+		return baseURL
+	}
+	if isOllamaProviderConfig(name, pc) {
+		if baseURL == "" {
+			return defaultOllamaProviderBaseURL
+		}
+		return normalizeOllamaBaseURL(baseURL)
+	}
+	if baseURL != "" {
+		return baseURL
+	}
+	if name == "anthropic" {
+		return defaultAnthropicProviderBaseURL
+	}
+	return defaultOpenAIProviderBaseURL
+}
+
+func providerHTTPClient(name string, pc config.LLMProviderConfig) *http.Client {
+	if pc.HasOllamaTarget() {
+		return egress.NewConfiguredOllamaClient(ollamaResponseHeaderTimeout)
+	}
+	options := []egress.ProviderHTTPClientOption{egress.WithProviderHTTPAuthorization(pc.HTTPAuthorization)}
+	if isOllamaProviderConfig(name, pc) {
+		options = append(options,
+			egress.WithProviderResponseHeaderTimeout(ollamaResponseHeaderTimeout),
+			egress.WithProviderFixedOriginAdapterTransport(),
+		)
+	}
+	client, err := egress.NewProviderHTTPClient(
+		providerEndpointBaseURL(name, pc), pc.PrivateNetworkAccess, options...,
+	)
+	if err != nil {
+		// Preserve the public factory's no-error signature while ensuring a rejected
+		// endpoint can never fall back to ai-core's proxy-aware default client. A
+		// concrete transport remains compatible with Ollama's secondary policy clone.
+		reject := func(context.Context, string, string) (net.Conn, error) {
+			return nil, err
+		}
+		return &http.Client{Transport: &http.Transport{
+			Proxy: nil, DialContext: reject, DialTLSContext: reject,
+		}}
+	}
+	return client
+}
+
 // NewProviderFromConfig 按 provider 名/配置选择正确协议创建 Provider（ollama 原生 /
 // anthropic 原生 SDK / 其余 OpenAI 兼容）。测试连接与真实路由共用此单一工厂，避免
 // 「测试连接一律当 OpenAI 打」的协议漂移（契约#2）。
 func NewProviderFromConfig(name string, pc config.LLMProviderConfig) hexagon.Provider {
+	baseURL := providerEndpointBaseURL(name, pc)
+	httpClient := providerHTTPClient(name, pc)
 	if isOllamaProviderConfig(name, pc) {
-		var opts []ollama.Option
-		if baseURL := normalizeOllamaBaseURL(pc.BaseURL); baseURL != "" {
-			opts = append(opts, ollama.WithBaseURL(baseURL))
+		opts := []ollama.Option{
+			ollama.WithBaseURL(baseURL),
+			ollama.WithHTTPClient(httpClient),
 		}
 		if pc.Model != "" {
 			opts = append(opts, ollama.WithModel(pc.Model))
@@ -388,9 +725,9 @@ func NewProviderFromConfig(name string, pc config.LLMProviderConfig) hexagon.Pro
 
 	// Anthropic 使用原生 SDK（非 OpenAI 兼容协议）
 	if name == "anthropic" {
-		var aopts []anthropic.Option
-		if pc.BaseURL != "" {
-			aopts = append(aopts, anthropic.WithBaseURL(pc.BaseURL))
+		aopts := []anthropic.Option{
+			anthropic.WithBaseURL(baseURL),
+			anthropic.WithHTTPClient(httpClient),
 		}
 		if pc.Model != "" {
 			aopts = append(aopts, anthropic.WithModel(pc.Model))
@@ -399,9 +736,9 @@ func NewProviderFromConfig(name string, pc config.LLMProviderConfig) hexagon.Pro
 	}
 
 	// 其他 Provider 统一使用 OpenAI 兼容协议
-	opts := []hexagon.OpenAIOption{}
-	if pc.BaseURL != "" {
-		opts = append(opts, hexagon.OpenAIWithBaseURL(pc.BaseURL))
+	opts := []hexagon.OpenAIOption{
+		hexagon.OpenAIWithBaseURL(baseURL),
+		hexagon.OpenAIWithHTTPClient(httpClient),
 	}
 	if pc.Model != "" {
 		opts = append(opts, hexagon.OpenAIWithModel(pc.Model))
@@ -409,7 +746,16 @@ func NewProviderFromConfig(name string, pc config.LLMProviderConfig) hexagon.Pro
 	return hexagon.NewOpenAI(pc.APIKey, opts...)
 }
 
+// UsesOllamaNativeAdapter 返回实际工厂选择的协议，供关联目标复用。
+func UsesOllamaNativeAdapter(name string, pc config.LLMProviderConfig) bool {
+	return isOllamaProviderConfig(name, pc)
+}
+
 func isOllamaProviderConfig(name string, pc config.LLMProviderConfig) bool {
+	// 联合提交以原生服务根或兼容端点保留原适配器，地址变化不重新猜测协议。
+	if pc.HasOllamaTarget() {
+		return strings.TrimRight(pc.BaseURL, "/") == pc.OllamaTargetBaseURL
+	}
 	lowerName := strings.ToLower(strings.TrimSpace(name))
 	lowerBase := strings.ToLower(strings.TrimSpace(pc.BaseURL))
 	return strings.Contains(lowerName, "ollama") ||
@@ -481,9 +827,103 @@ func (r *Selector) Default() hexagon.Provider {
 
 // DefaultName 返回默认 Provider 名称
 func (r *Selector) DefaultName() string {
+	if r == nil {
+		return ""
+	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.defaultP
+}
+
+// DefaultRouteForCapabilities selects a model only inside the configured
+// default provider. It never falls back across providers.
+func (r *Selector) DefaultRouteForCapabilities(required ...string) (CapabilityRoute, error) {
+	return r.ResolveRouteForCapabilities("", "", required...)
+}
+
+// ResolveRouteForCapabilities resolves either an exact explicit provider/model
+// pair or, when both are empty, a stable capable model in the default provider.
+// A partial or incapable explicit selection fails closed and is never replaced.
+func (r *Selector) ResolveRouteForCapabilities(
+	providerName string,
+	model string,
+	required ...string,
+) (CapabilityRoute, error) {
+	if r == nil {
+		return CapabilityRoute{}, ErrNoProvider
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if len(r.providers) == 0 {
+		return CapabilityRoute{}, ErrNoProvider
+	}
+
+	providerName = strings.TrimSpace(providerName)
+	model = strings.TrimSpace(model)
+	providerAutomatic := providerName == "" || strings.EqualFold(providerName, "auto")
+	modelAutomatic := model == "" || strings.EqualFold(model, "auto")
+	explicit := !providerAutomatic || !modelAutomatic
+	if explicit && (providerAutomatic || modelAutomatic) {
+		return CapabilityRoute{}, fmt.Errorf(
+			"%w: explicit provider and model must both be set",
+			ErrModelCapabilityMismatch,
+		)
+	}
+	if !explicit {
+		providerName = r.defaultP
+		model = ""
+	}
+	key, ok := r.canonicalNameLocked(providerName)
+	if !ok {
+		return CapabilityRoute{}, fmt.Errorf(
+			"%w: provider %q is not configured",
+			ErrModelCapabilityMismatch,
+			providerName,
+		)
+	}
+	if _, loaded := r.providers[key]; !loaded {
+		return CapabilityRoute{}, fmt.Errorf(
+			"%w: provider %q is not loaded",
+			ErrModelCapabilityMismatch,
+			key,
+		)
+	}
+	providerConfig, configured := r.cfg.Providers[key]
+	if !configured {
+		return CapabilityRoute{}, fmt.Errorf(
+			"%w: provider %q has no capability catalog",
+			ErrModelCapabilityMismatch,
+			key,
+		)
+	}
+
+	if explicit {
+		if !config.ModelHasCapabilities(providerConfig, model, required...) {
+			return CapabilityRoute{}, fmt.Errorf(
+				"%w: provider %q model %q lacks required capabilities %v",
+				ErrModelCapabilityMismatch,
+				key,
+				model,
+				required,
+			)
+		}
+	} else {
+		var found bool
+		model, found = config.PreferredModelWithCapabilities(providerConfig, required...)
+		if !found {
+			return CapabilityRoute{}, fmt.Errorf(
+				"%w: default provider %q has no model with capabilities %v",
+				ErrNoCapableModel,
+				key,
+				required,
+			)
+		}
+	}
+	return CapabilityRoute{
+		Provider:     r.providerLocked(key),
+		ProviderName: key,
+		Model:        model,
+	}, nil
 }
 
 // Route 根据策略选择最优 Provider
@@ -494,11 +934,14 @@ func (r *Selector) DefaultName() string {
 //   - "quality-first": 优先选择高质量 Provider（Claude > OpenAI > Gemini > DeepSeek > Qwen）
 //   - "latency-first": 优先选择低延迟 Provider（Ollama > DeepSeek > OpenAI > Claude）
 func (r *Selector) Route(_ context.Context) (hexagon.Provider, string, error) {
+	if r == nil {
+		return nil, "", ErrNoProvider
+	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	if len(r.providers) == 0 {
-		return nil, "", fmt.Errorf("没有可用的 LLM Provider")
+		return nil, "", ErrNoProvider
 	}
 
 	// 如果路由未启用或策略为空/default，直接返回默认 Provider
@@ -631,7 +1074,7 @@ func (r *Selector) selectByPriority(priorities map[string]int) string {
 
 	var candidates []ranked
 	for name := range r.providers {
-		if !r.isProviderHealthyLocked(name) {
+		if !r.isProviderHealthyLocked(name) || !r.hasCompletionModelLocked(name) {
 			continue
 		}
 		p, ok := priorities[name]
@@ -649,6 +1092,10 @@ func (r *Selector) selectByPriority(priorities map[string]int) string {
 		if candidates[i].priority != candidates[j].priority {
 			return candidates[i].priority < candidates[j].priority
 		}
+		// 同优先级保留用户默认聊天提供方，不因自定义名称排序切换服务。
+		if candidates[i].name == r.defaultP || candidates[j].name == r.defaultP {
+			return candidates[i].name == r.defaultP
+		}
 		return candidates[i].name < candidates[j].name // stable tie-break
 	})
 
@@ -660,8 +1107,14 @@ func (r *Selector) selectByPriority(priorities map[string]int) string {
 // 当指定的 Provider 不可用时，返回第一个可用的其他 Provider。
 // 支持排除多个 Provider（用于级联降级场景）。
 func (r *Selector) Fallback(exclude ...string) (hexagon.Provider, string, error) {
+	if r == nil {
+		return nil, "", ErrNoProvider
+	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	if len(r.providers) == 0 {
+		return nil, "", ErrNoProvider
+	}
 
 	name := r.fallbackNameLocked(exclude)
 	if name != "" {
@@ -671,6 +1124,15 @@ func (r *Selector) Fallback(exclude ...string) (hexagon.Provider, string, error)
 		return r.providerLocked(name), name, nil
 	}
 	return nil, "", fmt.Errorf("没有可用的备用 Provider")
+}
+
+// hasCompletionModelLocked 将仅向量提供方留在索引路径，不纳入自动聊天候选。
+func (r *Selector) hasCompletionModelLocked(name string) bool {
+	provider, configured := r.cfg.Providers[name]
+	if !configured {
+		return true
+	}
+	return config.ModelHasCapabilities(provider, provider.Model, config.LLMModelCapabilityText)
 }
 
 func (r *Selector) fallbackNameLocked(exclude []string) string {
@@ -685,7 +1147,7 @@ func (r *Selector) fallbackNameLocked(exclude []string) string {
 	// plain alphabetical order made the local provider win every fallback).
 	var remote, local []string
 	for name := range r.providers {
-		if excludeSet[name] || !r.isProviderHealthyLocked(name) {
+		if excludeSet[name] || !r.isProviderHealthyLocked(name) || !r.hasCompletionModelLocked(name) {
 			continue
 		}
 		if r.isLocalProviderName(name) {

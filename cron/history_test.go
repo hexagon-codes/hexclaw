@@ -2,9 +2,74 @@ package cron
 
 import (
 	"context"
+	"database/sql"
+	"path/filepath"
 	"testing"
 	"time"
 )
+
+// 暂停任务的历史在进程重建后仍可读取，读取不会重新激活任务。
+func TestHistoryPersistence_PausedAfterRestart(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "cron.db")
+	openDB := func() *sql.DB {
+		t.Helper()
+		db, err := sql.Open("sqlite", path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		db.SetMaxOpenConns(1)
+		t.Cleanup(func() { _ = db.Close() })
+		return db
+	}
+	db := openDB()
+	s := newTestScheduler(t, db)
+	if err := s.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	job := &Job{Name: "paused history", Schedule: "@hourly", Spec: minimalSpec(), UserID: "u1"}
+	if err := s.AddJob(ctx, job); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.persistHistory(ctx, job.ID, "success", "10/3 kg", "", 73,
+		time.Unix(1790477120, 0), "10/3 kg\n", "", 0, map[string]any{"answer": "10/3 kg"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PauseJob(ctx, job.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened := openDB()
+	restarted := newTestScheduler(t, reopened)
+	if err := restarted.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	history, err := restarted.GetJobHistory(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("read paused history after restart: %v", err)
+	}
+	if len(history) != 1 || history[0].Status != "success" || history[0].Result != "10/3 kg" ||
+		history[0].Stdout != "10/3 kg\n" || history[0].ExitCode != 0 || history[0].DurationMs != 73 {
+		t.Fatalf("saved history changed: %+v", history)
+	}
+	if _, active := restarted.GetJob(ctx, job.ID); active {
+		t.Fatal("history lookup activated a paused job")
+	}
+	var status string
+	var runs int
+	if err := reopened.QueryRowContext(ctx, `SELECT status FROM cron_jobs WHERE id = ?`, job.ID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.QueryRowContext(ctx, `SELECT COUNT(*) FROM cron_job_runs WHERE job_id = ?`, job.ID).Scan(&runs); err != nil {
+		t.Fatal(err)
+	}
+	if status != "paused" || runs != 1 {
+		t.Fatalf("history lookup changed durable state: status=%s runs=%d", status, runs)
+	}
+}
 
 // TestHistoryPersistence_RoundtripStdout 验证 Sprint 1.3 JobHistory 扩展字段：
 // stdout / stderr / exit_code / data 写入后能通过 GetJobHistory 还原。
@@ -90,7 +155,7 @@ func TestHistoryPersistence_ExitCodeAndTimeout(t *testing.T) {
 
 	job := &Job{
 		Name: "失败任务", Schedule: "@hourly", SourcePrompt: "x",
-		Spec: &JobSpec{Runtime: "python3", Script: "import sys; sys.exit(2)"},
+		Spec:   &JobSpec{Runtime: "python3", Script: "import sys; sys.exit(2)"},
 		UserID: "u1",
 	}
 	if err := s.AddJob(ctx, job); err != nil {

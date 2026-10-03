@@ -287,8 +287,9 @@ func TestRAGReal_CoreRetrieval(t *testing.T) {
 	}
 
 	ollamaBase := envOr("HEX_E2E_OLLAMA_BASE", "http://localhost:11434/v1")
-	t.Run("ollama_nomic_embed", func(t *testing.T) {
-		run(t, realEmbedder(ollamaBase, "", envOr("HEX_E2E_OLLAMA_EMBED", "nomic-embed-text"), 768))
+	t.Run("ollama_qwen3_embedding_8b", func(t *testing.T) {
+		model := envOr("HEX_E2E_OLLAMA_EMBED", "qwen3-embedding:8b")
+		run(t, realEmbedder(ollamaBase, "", model, realOllamaEmbeddingDimension(t, model)))
 	})
 	if base, key, _ := envProvider("GLM"); key != "" {
 		if em := os.Getenv("HEX_E2E_GLM_EMBED"); em != "" {
@@ -305,15 +306,20 @@ func TestRAGReal_CoreRetrieval(t *testing.T) {
 	}
 }
 
-// TestRAGReal_FullPipeline：完整管线全开（HyDE+multi-query+rerank+contextual）+ 真 chat LLM 会话落地，
-// 每个 chat provider 只跑 1 query（控时），证明各阶段在真模型上能端到端跑通。
+// TestRAGReal_FullPipeline：查询扩展（HyDE+multi-query）+ contextual + 混合检索/MMR +
+// 真 chat LLM 会话落地。此测试不配置专用 reranker，并明确验证 rerank 开关不会把聊天
+// LLM 当成 executor；真实 cross-encoder 链路由 TestRAGReal_CrossEncoderReranker 覆盖。
 func TestRAGReal_FullPipeline(t *testing.T) {
 	if os.Getenv("HEX_RAG_E2E") != "1" {
 		t.Skip("real-model E2E：设 HEX_RAG_E2E=1 运行")
 	}
 	httpc := &http.Client{Timeout: 240 * time.Second}
 	ollamaBase := envOr("HEX_E2E_OLLAMA_BASE", "http://localhost:11434/v1")
-	nomic := realEmbedder(ollamaBase, "", envOr("HEX_E2E_OLLAMA_EMBED", "nomic-embed-text"), 768)
+	localEmbeddingModel := envOr("HEX_E2E_OLLAMA_EMBED", "qwen3-embedding:8b")
+	localEmbedding := realEmbedder(
+		ollamaBase, "", localEmbeddingModel,
+		realOllamaEmbeddingDimension(t, localEmbeddingModel),
+	)
 	qc := e2eQueries[0] // 只跑第一条，控时
 
 	run := func(t *testing.T, embedder hexagon.VectorEmbedder, llm RerankLLM) {
@@ -327,7 +333,7 @@ func TestRAGReal_FullPipeline(t *testing.T) {
 		if vv, err := embedder.Embed(ctx, []string{"探针"}); err != nil || len(vv) == 0 || len(vv[0]) == 0 {
 			t.Skipf("embedder 不可用，跳过：%v", err)
 		}
-		mgr := newRealManager(t, DefaultHybridConfig(), embedder, llm) // 全开
+		mgr := newRealManager(t, DefaultHybridConfig(), embedder, llm)
 		ingestCorpus(t, ctx, mgr)
 
 		hits, err := mgr.Search(ctx, qc.q, 3)
@@ -336,6 +342,10 @@ func TestRAGReal_FullPipeline(t *testing.T) {
 		}
 		if len(hits) == 0 || hits[0].DocTitle != qc.wantTitle {
 			t.Fatalf("full-pipeline 检索错位：%v", titles(hits))
+		}
+		rerankMetrics := mgr.RetrievalMetricsSnapshot().Rerank
+		if rerankMetrics.Configured == 0 || rerankMetrics.Executed != 0 {
+			t.Fatalf("未配置专用 executor 时必须 MMR 降级且不得调用聊天 LLM 重排，metrics=%+v", rerankMetrics)
 		}
 		t.Logf("  ✓ 完整管线检索 %q → top=%q", clip(qc.q, 28), hits[0].DocTitle)
 
@@ -354,7 +364,7 @@ func TestRAGReal_FullPipeline(t *testing.T) {
 	// 本地 qwen 仅在 HEX_E2E_RUN_OLLAMA_CHAT=1 时跑（本机 9B 常冷启动超时，默认不跑免浪费时间）
 	if os.Getenv("HEX_E2E_RUN_OLLAMA_CHAT") == "1" {
 		t.Run("ollama_qwen", func(t *testing.T) {
-			run(t, nomic, &httpChatLLM{base: ollamaBase, model: envOr("HEX_E2E_OLLAMA_CHAT", "qwen3.5:9b"), client: httpc})
+			run(t, localEmbedding, &httpChatLLM{base: ollamaBase, model: envOr("HEX_E2E_OLLAMA_CHAT", "qwen3.5:9b"), client: httpc})
 		})
 	}
 	if base, key, model := envProvider("SF"); key != "" {
@@ -397,6 +407,21 @@ func envOr(k, def string) string {
 		return v
 	}
 	return def
+}
+
+func realOllamaEmbeddingDimension(t *testing.T, model string) int {
+	t.Helper()
+	switch strings.ToLower(strings.TrimSpace(model)) {
+	case "qwen3-embedding:8b":
+		return 4096
+	case "nomic-embed-text", "nomic-embed-text:latest", "nomic-embed-text:v1.5":
+		return 768
+	case "mxbai-embed-large", "mxbai-embed-large:latest", "bge-m3", "bge-m3:latest":
+		return 1024
+	default:
+		t.Fatalf("Ollama embedding model %q has no trusted exact test dimension", model)
+		return 0
+	}
 }
 
 func envProvider(name string) (base, key, model string) {

@@ -11,7 +11,6 @@ import (
 	"github.com/hexagon-codes/toolkit/util/logger"
 
 	"github.com/hexagon-codes/hexclaw/autonomy"
-	"github.com/hexagon-codes/hexclaw/config"
 	"github.com/hexagon-codes/hexclaw/cron"
 	"github.com/hexagon-codes/hexclaw/engine"
 )
@@ -36,6 +35,9 @@ func (s *Server) SetAutonomy(hook *engine.PermissionHook, decisions *autonomy.De
 	s.autonomyDecisions = decisions
 	s.autonomyGrants = grants
 	s.autonomyCfgPath = cfgPath
+	if s.runtimeCfgPath == "" {
+		s.runtimeCfgPath = cfgPath
+	}
 }
 
 // autonomyPolicy 返回当前生效策略（hook 未注入时从配置重建，测试友好）。
@@ -153,7 +155,7 @@ func (s *Server) handleUpdateAutonomyProfile(w http.ResponseWriter, r *http.Requ
 	s.cfgMu.Lock()
 	nextCfg := *s.cfg
 	nextCfg.Security.Autonomy.Profile = profile
-	if err := config.Save(&nextCfg, s.autonomyCfgPath); err != nil {
+	if err := s.saveRuntimeConfig(&nextCfg); err != nil {
 		s.cfgMu.Unlock()
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "持久化配置失败: " + err.Error()})
 		return
@@ -451,11 +453,16 @@ func (s *Server) handleListAutonomyGrants(w http.ResponseWriter, r *http.Request
 }
 
 // CreateGrantRequest 创建任务级授权请求。
+// security_scope_digest 为可选参数级精确授权（BUG-20260801-003）：由服务端
+// 以调用参数规范化摘要冻结，无人值守 + 不可信 RAG 证据场景下要求与调用方
+// digest 精确一致；留空 = 工具级授权（调用方参数仍须可审计）。
+// owner 不接收客户端字段：GrantStore.Create 只从可信上下文冻结。
 type CreateGrantRequest struct {
-	TaskRef string   `json:"task_ref"`
-	Source  string   `json:"source,omitempty"`
-	Entries []string `json:"entries"`
-	Note    string   `json:"note,omitempty"`
+	TaskRef             string   `json:"task_ref"`
+	Source              string   `json:"source,omitempty"`
+	Entries             []string `json:"entries"`
+	SecurityScopeDigest string   `json:"security_scope_digest,omitempty"`
+	Note                string   `json:"note,omitempty"`
 }
 
 // handleCreateAutonomyGrant POST /api/v1/autonomy/grants
@@ -470,10 +477,11 @@ func (s *Server) handleCreateAutonomyGrant(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	grant, err := s.autonomyGrants.Create(r.Context(), autonomy.Grant{
-		TaskRef: req.TaskRef,
-		Source:  req.Source,
-		Entries: req.Entries,
-		Note:    req.Note,
+		TaskRef:             req.TaskRef,
+		Source:              req.Source,
+		Entries:             req.Entries,
+		SecurityScopeDigest: strings.TrimSpace(req.SecurityScopeDigest),
+		Note:                req.Note,
 	})
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})

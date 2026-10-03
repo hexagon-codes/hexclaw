@@ -17,6 +17,7 @@ import (
 	"github.com/hexagon-codes/hexclaw/autonomy"
 	"github.com/hexagon-codes/hexclaw/config"
 	"github.com/hexagon-codes/hexclaw/engine"
+	"github.com/hexagon-codes/hexclaw/skill"
 )
 
 func newAutonomyTestServer(t *testing.T) (*Server, *autonomy.GrantStore, *autonomy.DecisionStore, string) {
@@ -124,6 +125,26 @@ func TestAutonomyProfileFullAccessHotSwapsAtRuntime(t *testing.T) {
 	raw, err := os.ReadFile(cfgPath)
 	if err != nil || !bytes.Contains(raw, []byte("full_access")) {
 		t.Fatalf("full_access 未持久化到配置文件: %v", err)
+	}
+}
+
+func TestAutonomyProfileFullAccessHotSwapSuppressesInteractiveApproval(t *testing.T) {
+	srv, grants, decisions, cfgPath := newAutonomyTestServer(t)
+	hook := engine.NewPermissionHook(engine.NewPermissionHub(0),
+		engine.WithPolicy(engine.DefaultBaselinePolicy()),
+		engine.WithSystemDispatchPolicy(engine.DefaultSystemDispatchPolicy()),
+		engine.WithTaskGrants(grants),
+	)
+	srv.SetAutonomy(hook, decisions, grants, cfgPath)
+
+	rec, resp := doAutonomyJSON(t, srv, "PUT", "/api/v1/autonomy/profile", map[string]string{"profile": "full_access"})
+	if rec.Code != http.StatusOK || resp["profile"] != "full_access" {
+		t.Fatalf("full_access 应运行时可切并返回 200，得到 %d %v", rec.Code, resp)
+	}
+
+	ctx := skill.WithAuthenticatedUser(context.Background(), "interactive-owner")
+	if err := srv.autonomyHook.BeforeToolCall(ctx, &engine.ToolCallInfo{Name: "browser", Source: "skill"}); err != nil {
+		t.Fatalf("设置 API 热更新后交互 browser 不应再要求审批: %v", err)
 	}
 }
 
@@ -265,6 +286,38 @@ func mustRecordDecision(t *testing.T, s *autonomy.DecisionStore, d autonomy.Deci
 	t.Helper()
 	if err := s.Record(context.Background(), d); err != nil {
 		t.Fatalf("Record: %v", err)
+	}
+}
+
+// BUG-20260801-003：创建授权时 owner 由服务端从可信上下文冻结（客户端不
+// 可伪造），可选的 security_scope_digest 透传并持久化；同一授权在重启
+// （重建 store 重新 reload）后仍能以精确证据授权链命中。
+func TestAutonomyGrantFreezesTrustedOwnerAndPersistsScopeDigest(t *testing.T) {
+	srv, grants, _, _ := newAutonomyTestServer(t)
+
+	rec, resp := doAutonomyJSON(t, srv, "POST", "/api/v1/autonomy/grants", map[string]any{
+		"task_ref":              "cron:job-1",
+		"source":                "cron",
+		"entries":               []string{"shell"},
+		"security_scope_digest": "scope-digest-abc",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("创建授权: %d %v", rec.Code, resp)
+	}
+	grant, _ := resp["grant"].(map[string]any)
+	if grant["owner_id"] != defaultDesktopUserID {
+		t.Fatalf("grant owner = %v, want frozen %q（客户端不可伪造）", grant["owner_id"], defaultDesktopUserID)
+	}
+	if grant["security_scope_digest"] != "scope-digest-abc" {
+		t.Fatalf("security_scope_digest 未透传: %v", grant["security_scope_digest"])
+	}
+
+	// 重启恢复：重新 Init 即从同一库 reload（等价进程重启后重建 store）。
+	if err := grants.Init(context.Background()); err != nil {
+		t.Fatalf("reload Init: %v", err)
+	}
+	if !grants.GrantAllowsUntrustedEvidence(defaultDesktopUserID, "cron", "cron:job-1", "shell", "scope-digest-abc") {
+		t.Fatal("重启后精确证据授权链必须仍可命中")
 	}
 }
 

@@ -31,6 +31,7 @@ func (fm *FileMemory) UpsertEntryForRole(content, memType, source, role string) 
 //
 // 返回动作："insert" | "update" | "discard" | "supersede"。
 func (fm *FileMemory) UpsertStructuredEntryForRole(content, memType, source, role, subject string) (string, error) {
+	defer fm.requestProfileRefresh()
 	if memType == "" {
 		memType = "fact"
 	}
@@ -46,11 +47,20 @@ func (fm *FileMemory) UpsertStructuredEntryForRole(content, memType, source, rol
 	defer fm.mu.Unlock()
 
 	now := time.Now()
-	existing := recallEntriesForDedup(fm.parseEntriesForRoleUnlocked(role))
+	var sources []MemoryEntry
+	for _, entry := range fm.parseEntriesForRoleUnlocked(role) {
+		if !isProfileEntry(entry) {
+			sources = append(sources, entry)
+		}
+	}
+	existing := recallEntriesForDedup(sources)
 	cand := recall.Entry{Content: content, Type: recall.Type(memType), Subject: strings.TrimSpace(subject)}
 	d := recall.DedupUpsert(cand, existing, now,
 		recall.DedupOptions{SimFn: recall.LexicalSim, JaccardThreshold: dedupUpsertThreshold})
 
+	if d.TargetID != "" && (source == "chat_extract" || source == "system") && fm.readEntryMetaUnlocked(d.TargetID).ManualCorrection {
+		return "discard", nil
+	}
 	switch d.Action {
 	case recall.ActionDiscard:
 		return "discard", nil

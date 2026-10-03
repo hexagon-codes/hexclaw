@@ -110,6 +110,18 @@ func TestReActEngine_SkillFastPath(t *testing.T) {
 	if reply.Metadata["backend_message_id"] == "" {
 		t.Fatal("同步回复应携带 backend_message_id")
 	}
+	// IM 通道会在发送前校验 canonical source 与 channel render manifest 成对存在；
+	// skill 快速路径不能只返回 MessageContent，否则钉钉会在调用 provider 前拒绝回复。
+	if reply.MessageContent == nil || reply.RenderManifest == nil {
+		t.Fatalf(
+			"skill 快速路径必须返回完整渲染证据对: content=%#v manifest=%#v",
+			reply.MessageContent,
+			reply.RenderManifest,
+		)
+	}
+	if err := reply.RenderManifest.ValidateFor(*reply.MessageContent); err != nil {
+		t.Fatalf("skill 快速路径渲染证据无效: %v", err)
+	}
 }
 
 func TestReActEngine_ProcessStream_SkillFastPath(t *testing.T) {
@@ -945,7 +957,7 @@ func TestReActEngine_ProcessHonorsExplicitProviderModelAndDisablesFallback(t *te
 		"智谱": primary,
 		"通义": fallback,
 	}, map[string]config.LLMProviderConfig{
-		"智谱": {Model: "glm-4"},
+		"智谱": {Model: "glm-4", Models: []string{"glm-4", "glm-5"}},
 		"通义": {Model: "qwen-max"},
 	}, "智谱")
 
@@ -985,7 +997,7 @@ func TestReActEngine_ProcessStreamHonorsExplicitProviderModelAndDisablesFallback
 		"智谱": primary,
 		"通义": fallback,
 	}, map[string]config.LLMProviderConfig{
-		"智谱": {Model: "glm-4"},
+		"智谱": {Model: "glm-4", Models: []string{"glm-4", "glm-5"}},
 		"通义": {Model: "qwen-max"},
 	}, "智谱")
 
@@ -1112,7 +1124,17 @@ func newEngineWithProvider(t *testing.T, provider hexagon.Provider) *ReActEngine
 	cfg.Compaction.Enabled = false // 禁用压缩，防止后台 goroutine 与测试 DB 竞争
 	cfg.LLM.Default = "test"
 	cfg.LLM.Providers = map[string]config.LLMProviderConfig{
-		"test": {Model: "mock-model"},
+		"test": {
+			Model:          "mock-model",
+			ModelSpecsMode: config.LLMModelSpecsModeExplicit,
+			ModelSpecs: []config.LLMProviderModelSpec{{
+				ID: "mock-model",
+				Capabilities: []string{
+					config.LLMModelCapabilityText,
+					config.LLMModelCapabilityVision,
+				},
+			}},
+		},
 	}
 	router := llmrouter.NewWithProviders(cfg.LLM, map[string]hexagon.Provider{
 		"test": provider,

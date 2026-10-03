@@ -13,7 +13,7 @@ import (
 // `\text{cm}^3`，数学符号没渲染。桌面 API 路径不像 IM egress 会过 NormalizeMathText。
 //
 // 治本：把数学归一化下沉到 engineadapter 的单一出站口（stripReports/GradeSubject 元数据），
-// 让 solve / grade 讲解 / 再练 / prep-card / 错因 全部拿到干净 Unicode。
+// 让 solve / grade 讲解 / 再练 / 辅导要点 / 错因全部拿到干净 Unicode。
 //
 // RED（fix 前）：Solution/ErrorCause 原样含 \( \times \text{ \frac $ → 断言失败。
 // GREEN（fix 后）：不含任何 LaTeX 痕迹、含 Unicode ×÷ 上下标。
@@ -48,11 +48,11 @@ func TestSolveAdapter_Solve_NormalizesLatexToUnicode(t *testing.T) {
 	}
 }
 
-func TestSolveAdapter_GenerateSimilar_NormalizesLatex(t *testing.T) {
-	a := NewSolveAdapter(&countingExec{}, WithRetryGen(func(_ context.Context, _, _, _ string) (string, error) {
+func TestPracticeVariantAdapter_NormalizesLatex(t *testing.T) {
+	a := NewPracticeVariantAdapter(func(_ context.Context, _, _, _ string) (string, error) {
 		return `再练：$3.9 \times 3 = ?$，用 \frac{1}{2} 想一想。`, nil
-	}))
-	sr, err := a.GenerateSimilar(context.Background(), "数学", "出一道", "五年级上")
+	})
+	sr, err := a.GeneratePracticeVariant(context.Background(), "数学", "出一道", "五年级上")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -2,6 +2,7 @@ package builtin
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -103,5 +104,38 @@ func TestKnowledgeSearchSkill_NilKB(t *testing.T) {
 	sk := NewKnowledgeSearchSkill(nil)
 	if _, err := sk.Execute(context.Background(), map[string]any{"query": "q"}); err == nil {
 		t.Error("kb 为 nil 应报错而非 panic")
+	}
+}
+
+func TestKnowledgeSearchSkillProjectsOnlyTrustedPDFPages(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		start, end int
+		want       string
+	}{
+		{"single-page", 7, 7, "PDF page: 7"},
+		{"page-range", 7, 9, "PDF pages: 7–9"},
+		{"missing-page", 0, 0, ""},
+		{"invalid-range", 7, 4, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hit := knowledge.SearchHit{
+				DocTitle: "六年级上册科学", Source: "upload:science.pdf", Content: "用四个小瓶进行对比实验。",
+				PageStart: tc.start, PageEnd: tc.end, Metadata: map[string]any{"page": 4},
+			}
+			result, err := NewKnowledgeSearchSkill(&fakeKBSearcher{hits: []knowledge.SearchHit{hit}}).Execute(t.Context(), map[string]any{"query": "实验设计"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.want != "" && !strings.Contains(result.Content, tc.want) {
+				t.Fatalf("trusted PDF location missing: %q", result.Content)
+			}
+			if tc.want == "" && strings.Contains(result.Content, "PDF page") {
+				t.Fatalf("unverified PDF page projected: %q", result.Content)
+			}
+			if strings.Contains(result.Content, "page: 4") || !strings.Contains(result.Content, hit.Content) {
+				t.Fatalf("printed page guessed or passage changed: %q", result.Content)
+			}
+		})
 	}
 }

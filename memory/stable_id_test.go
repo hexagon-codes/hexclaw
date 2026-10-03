@@ -1,9 +1,47 @@
 package memory
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
+
+// 内容编辑只替换正文，单行、多行和冷读必须指向同一条持久记忆。
+func TestStableID_EditMultilinePreservesEntryOnReload(t *testing.T) {
+	dir := t.TempDir()
+	opts := Options{Enabled: true, Dir: dir, MaxMemory: 200}
+	fm, err := New(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta := EntryMeta{Pinned: true, Subject: "讲解偏好", ValidFrom: "2026-01-01T00:00:00Z", Confidence: 0.9, HitCount: 7}
+	if err := fm.SaveStructuredEntry("请逐步讲解", "preference", "manual", "", meta); err != nil {
+		t.Fatal(err)
+	}
+	before := fm.ParseEntries()[0]
+	for _, content := range []string{"请逐步讲解\n先解释依据\n再核对结果", "请逐步讲解\n保留第二次编辑", "请逐步讲解并核对结果"} {
+		if err := fm.UpdateEntry(before.ID, content); err != nil {
+			t.Fatal(err)
+		}
+		cold, err := New(opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		entries := cold.ParseEntries()
+		if len(entries) != 1 {
+			t.Fatalf("expected one entry after reload, got %d", len(entries))
+		}
+		got := entries[0]
+		if got.Content != content {
+			t.Fatalf("content mismatch: %q", got.Content)
+		}
+		got.Content = before.Content
+		if !reflect.DeepEqual(got, before) {
+			t.Fatalf("metadata changed after edit: before=%+v after=%+v", before, got)
+		}
+		fm = cold
+	}
+}
 
 // 缺陷H 修复回归锁：稳定内容寻址 ID 取代「行号即 ID」。
 // 不变量：一旦拿到某条目的 ID，删/改/移动它**上方**的条目（evict/反思/做梦默认开都会这样移行）后，

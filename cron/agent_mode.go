@@ -75,6 +75,9 @@ type Notifier func(job *Job, level, title, body string)
 // (review L2).
 type Deliverer func(job *Job, target, content string) error
 
+// ResultDeliverer 可接管成功结果的投递；未接管时继续使用任务原有目标路由。
+type ResultDeliverer func(job *Job, content string) (handled bool, err error)
+
 // agentSupport is the Scheduler's agent-mode extension state.
 //
 // Tradeoff: healTimes/quotaNotices are in-memory only — a process restart
@@ -82,12 +85,14 @@ type Deliverer func(job *Job, target, content string) error
 // rare and the worst case is a few extra heal attempts, never an unbounded
 // loop within one process lifetime. Entries are pruned on RemoveJob.
 type agentSupport struct {
-	mu           sync.Mutex
-	runner       AgentRunner
-	notifier     Notifier
-	deliverer    Deliverer
-	healTimes    map[string][]time.Time // jobID → heal-attempt timestamps inside the 24h window
-	quotaNotices map[string]time.Time   // jobID → last failure-class notification (anti-bombing)
+	mu              sync.Mutex
+	runner          AgentRunner
+	notifier        Notifier
+	deliverer       Deliverer
+	resultDeliverer ResultDeliverer
+	healTimes       map[string][]time.Time // jobID → heal-attempt timestamps inside the 24h window
+	quotaNotices    map[string]time.Time   // jobID → last failure-class notification (anti-bombing)
+	pendingHeals    map[string]string      // 无 DB 测试路径的自愈候选标记
 }
 
 // SetDeliverer injects the IM delivery callback. Without it, non-desktop
@@ -96,6 +101,13 @@ func (s *Scheduler) SetDeliverer(fn Deliverer) {
 	s.agent.mu.Lock()
 	defer s.agent.mu.Unlock()
 	s.agent.deliverer = fn
+}
+
+// SetResultDeliverer 注入可选结果投递接缝，不改变任务执行及历史记录。
+func (s *Scheduler) SetResultDeliverer(fn ResultDeliverer) {
+	s.agent.mu.Lock()
+	defer s.agent.mu.Unlock()
+	s.agent.resultDeliverer = fn
 }
 
 // SetNotifier injects the notification callback. Without it notifications are
@@ -113,6 +125,161 @@ func (s *Scheduler) notify(job *Job, level, title, body string) {
 	if fn != nil {
 		fn(job, level, title, body)
 	}
+}
+
+const selfHealPendingStateKey = "__self_heal_pending__"
+
+type selfHealPendingState struct {
+	CandidateHash string `json:"candidate_hash"`
+	PreviousSpec  string `json:"previous_spec"`
+}
+
+func decodeSelfHealPendingState(marker string) selfHealPendingState {
+	state := selfHealPendingState{CandidateHash: strings.TrimSpace(marker)}
+	var decoded selfHealPendingState
+	if err := json.Unmarshal([]byte(marker), &decoded); err == nil && strings.TrimSpace(decoded.CandidateHash) != "" {
+		return decoded
+	}
+	return state
+}
+
+func (s *Scheduler) selfHealPendingMarker(job *Job) (string, bool) {
+	if job == nil {
+		return "", false
+	}
+	key := stateKeyForGeneration(selfHealPendingStateKey, job)
+	if s.state != nil {
+		value, ok := s.state.Get(job.ID, key)
+		return value, ok && strings.TrimSpace(value) != ""
+	}
+	s.agent.mu.Lock()
+	defer s.agent.mu.Unlock()
+	value, ok := s.agent.pendingHeals[job.ID+":"+key]
+	return value, ok && value != ""
+}
+
+func (s *Scheduler) setSelfHealPending(job *Job, marker string) error {
+	if job == nil || strings.TrimSpace(marker) == "" {
+		return fmt.Errorf("self-heal pending marker is empty")
+	}
+	key := stateKeyForGeneration(selfHealPendingStateKey, job)
+	if s.state != nil {
+		return s.state.Set(job.ID, key, marker)
+	}
+	s.agent.mu.Lock()
+	defer s.agent.mu.Unlock()
+	if s.agent.pendingHeals == nil {
+		s.agent.pendingHeals = make(map[string]string)
+	}
+	s.agent.pendingHeals[job.ID+":"+key] = marker
+	return nil
+}
+
+func (s *Scheduler) clearSelfHealPending(job *Job) {
+	if job == nil {
+		return
+	}
+	key := stateKeyForGeneration(selfHealPendingStateKey, job)
+	if s.state != nil {
+		if err := s.state.Set(job.ID, key, ""); err != nil {
+			slog.Warn("[cron-heal] clear pending marker failed", "source", "cron", "id", job.ID, "err", err.Error())
+		}
+		return
+	}
+	s.agent.mu.Lock()
+	delete(s.agent.pendingHeals, job.ID+":"+key)
+	s.agent.mu.Unlock()
+}
+
+func (s *Scheduler) rollbackSelfHealCandidate(ctx context.Context, job *Job, state selfHealPendingState) error {
+	if strings.TrimSpace(state.PreviousSpec) == "" || job == nil || job.Spec == nil {
+		return nil
+	}
+	currentJSON, err := json.Marshal(job.Spec)
+	if err != nil {
+		return fmt.Errorf("marshal current self-heal candidate: %w", err)
+	}
+	if state.CandidateHash == "" || hashString(string(currentJSON)) != state.CandidateHash {
+		return nil
+	}
+	var previous JobSpec
+	if err := json.Unmarshal([]byte(state.PreviousSpec), &previous); err != nil {
+		return fmt.Errorf("decode previous self-heal spec: %w", err)
+	}
+	if s.db != nil {
+		res, err := s.db.ExecContext(ctx,
+			`UPDATE cron_jobs SET spec_json = ? WHERE id = ? AND meta = ?`,
+			state.PreviousSpec, job.ID, serializeJobMeta(job))
+		if err != nil {
+			return fmt.Errorf("persist previous self-heal spec: %w", err)
+		}
+		if n, _ := res.RowsAffected(); n != 1 {
+			return fmt.Errorf("self-heal rollback lost the current job generation")
+		}
+	}
+	s.mu.Lock()
+	if !s.currentJobGenerationLocked(job) {
+		s.mu.Unlock()
+		return fmt.Errorf("self-heal rollback lost the current job generation")
+	}
+	job.Spec = &previous
+	if current, ok := s.jobs[job.ID]; ok {
+		current.Spec = &previous
+	}
+	s.mu.Unlock()
+	return nil
+}
+
+// resolveSelfHealVerification 把候选脚本的下一次真实执行结果写入自愈状态。
+func (s *Scheduler) resolveSelfHealVerification(ctx context.Context, job *Job, result *RunResult) bool {
+	marker, pending := s.selfHealPendingMarker(job)
+	if !pending {
+		return false
+	}
+	if !s.jobGenerationCurrentFresh(job) {
+		return true
+	}
+	pendingState := decodeSelfHealPendingState(marker)
+	success := result != nil && result.Status == "success"
+	if success {
+		specJSON, err := json.Marshal(job.Spec)
+		if err != nil || hashString(string(specJSON)) != pendingState.CandidateHash {
+			success = false
+			result = &RunResult{Status: "error", Error: "self-heal candidate was not persisted consistently"}
+		}
+	}
+	now := time.Now()
+	status := "heal_failed"
+	resultText := ""
+	errText := "self-heal candidate verification failed"
+	level := NotifyLevelWarning
+	title := "定时任务自动修复失败"
+	body := fmt.Sprintf("「%s」自愈候选验证仍失败，请在自动化页面查看原因。", job.Name)
+	if success {
+		status = "healed"
+		resultText = "self-heal candidate passed a real execution verification"
+		errText = ""
+		level = NotifyLevelSuccess
+		title = "定时任务已验证恢复"
+		body = fmt.Sprintf("「%s」自愈候选已通过真实执行验证，任务已恢复。", job.Name)
+	} else if result != nil && strings.TrimSpace(result.Error) != "" {
+		errText += ": " + result.Error
+		body = fmt.Sprintf("「%s」自愈候选验证仍失败，请在自动化页面查看原因：%s", job.Name, clipForHeal(result.Error, 120))
+	}
+	if !success {
+		if err := s.rollbackSelfHealCandidate(ctx, job, pendingState); err != nil {
+			errText += "; rollback failed: " + err.Error()
+		}
+	}
+	persisted, err := s.persistHistoryForGeneration(ctx, job, status, resultText, errText, 0, now, "", "", 0, nil)
+	if err != nil || !persisted {
+		return true
+	}
+	s.clearSelfHealPending(job)
+	if s.jobGenerationCurrentFresh(job) {
+		s.notify(job, level, title, body)
+	}
+	return true
 }
 
 // SetAgentRunner injects the agent executor. Without it agent-mode job runs
@@ -459,9 +626,21 @@ func (s *Scheduler) deliverResult(job *Job, result *RunResult) {
 	}
 	s.agent.mu.Lock()
 	deliverer := s.agent.deliverer
+	resultDeliverer := s.agent.resultDeliverer
 	s.agent.mu.Unlock()
 
 	var deliverErrs []string
+	if resultDeliverer != nil {
+		handled, err := resultDeliverer(job, content)
+		if err != nil {
+			deliverErrs = append(deliverErrs, err.Error())
+			slog.Warn("[cron] result delivery failed", "source", "cron", "id", job.ID, "err", err)
+		}
+		if handled || err != nil {
+			s.recordDeliveryOutcomeForGeneration(job, deliverErrs)
+			return
+		}
+	}
 	notified := false
 	for _, target := range EffectiveDeliver(job) {
 		if !s.jobGenerationCurrentFresh(job) {
@@ -594,10 +773,14 @@ func buildHealPrompt(job *Job, failCtx string) string {
 
 // maybeSelfHeal is the self-heal bridge: after a script job fails
 // selfHealThreshold times in a row (counting only runs newer than the last
-// successful heal), recompile the script once with the failure context.
+// verified heal), compile a candidate once with the failure context. The
+// candidate is only marked healed after a later real execution succeeds.
 // Attempts beyond the cooldown-window quota are skipped and logged.
 func (s *Scheduler) maybeSelfHeal(_ context.Context, job *Job, lastResult *RunResult) {
 	if job.Spec == nil || job.Spec.Runtime == RuntimeAgent || s.compiler == nil {
+		return
+	}
+	if _, pending := s.selfHealPendingMarker(job); pending {
 		return
 	}
 	// Self-healing runs on its own context: callers pass their short DB-write
@@ -657,11 +840,35 @@ func (s *Scheduler) maybeSelfHeal(_ context.Context, job *Job, lastResult *RunRe
 		slog.Warn("[cron-heal] spec marshal failed", "source", "cron", "id", job.ID, "err", err.Error())
 		return
 	}
+	previousSpecJSON, err := json.Marshal(job.Spec)
+	if err != nil {
+		slog.Warn("[cron-heal] previous spec marshal failed", "source", "cron", "id", job.ID, "err", err.Error())
+		return
+	}
+	pendingState := selfHealPendingState{
+		CandidateHash: hashString(string(specJSON)),
+		PreviousSpec:  string(previousSpecJSON),
+	}
+	pendingMarker, err := json.Marshal(pendingState)
+	if err != nil {
+		slog.Warn("[cron-heal] pending marker marshal failed", "source", "cron", "id", job.ID, "err", err.Error())
+		return
+	}
+	if err := s.setSelfHealPending(job, string(pendingMarker)); err != nil {
+		slog.Warn("[cron-heal] pending marker persist failed", "source", "cron", "id", job.ID, "err", err.Error())
+		persisted, _ := s.persistHistoryForGeneration(ctx, job, "heal_failed", "", "self-heal candidate marker persist failed: "+err.Error(), 0, now, "", "", 0, nil)
+		if persisted && s.shouldNotifyHealFailure(job.ID) {
+			s.notify(job, NotifyLevelWarning, "定时任务自动修复失败",
+				fmt.Sprintf("「%s」连续失败且自动修复未成功，请在自动化页面处理。", job.Name))
+		}
+		return
+	}
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE cron_jobs SET spec_json = ? WHERE id = ? AND meta = ?`,
 		string(specJSON), job.ID, serializeJobMeta(job))
 	if err != nil {
 		slog.Warn("[cron-heal] spec persist failed", "source", "cron", "id", job.ID, "err", err.Error())
+		s.clearSelfHealPending(job)
 		return
 	}
 	if n, _ := res.RowsAffected(); n != 1 {
@@ -673,6 +880,7 @@ func (s *Scheduler) maybeSelfHeal(_ context.Context, job *Job, lastResult *RunRe
 		if job.Generation != "" || queryErr != nil || exists != 0 {
 			slog.Info("[cron-heal] stale generation heal ignored",
 				"source", "cron", "id", job.ID, "generation", job.Generation)
+			s.clearSelfHealPending(job)
 			return
 		}
 	}
@@ -692,20 +900,20 @@ func (s *Scheduler) maybeSelfHeal(_ context.Context, job *Job, lastResult *RunRe
 	if !s.currentJobGeneration(job) {
 		return
 	}
-	persisted, _ := s.persistHistoryForGeneration(ctx, job, "healed", "脚本已根据失败上下文自动重编译，下次执行使用新脚本", "", 0, now, "", "", 0, nil)
+	persisted, _ := s.persistHistoryForGeneration(ctx, job, "heal_pending", "self-heal candidate compiled; waiting for real execution verification", "", 0, now, "", "", 0, nil)
 	if !persisted {
 		return
 	}
 	if !s.currentJobGeneration(job) {
 		return
 	}
-	s.notify(job, NotifyLevelSuccess, "定时任务已自动修复",
-		fmt.Sprintf("「%s」连续失败后已自动重编译，下次执行使用修复后的脚本。", job.Name))
-	slog.Info("[cron-heal] self-heal complete, script updated", "source", "cron", "id", job.ID, "name", job.Name)
+	s.notify(job, NotifyLevelInfo, "定时任务已生成修复候选",
+		fmt.Sprintf("「%s」已生成修复候选，下一次真实执行成功后才会确认恢复。", job.Name))
+	slog.Info("[cron-heal] self-heal candidate staged, awaiting verification", "source", "cron", "id", job.ID, "name", job.Name)
 }
 
 // consecutiveFailures reports whether the n most recent runs all failed.
-// Heal/pause rows are excluded, and only runs NEWER than the latest 'healed'
+// Heal/pause rows are excluded, and only runs NEWER than the latest verified 'healed'
 // row count — pre-heal failures must not satisfy the window again after a
 // successful heal (review M3: premature re-heal). The cutoff uses MAX(id) of
 // the healed rows: ids are insertion-ordered, which avoids DATETIME string

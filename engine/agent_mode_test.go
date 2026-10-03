@@ -159,23 +159,23 @@ func TestResolveModeWithSkillHint(t *testing.T) {
 }
 
 func TestModePromptPrefix(t *testing.T) {
-	if p := modePromptPrefix(ModePlanExecute); !contains(p, "计划") {
-		t.Error("plan-execute prefix 应提示计划")
+	if p := modePromptPrefix(ModePlanExecute); !contains(p, "Plan and complete") {
+		t.Error("plan-execute prefix should preserve task planning")
 	}
-	if p := modePromptPrefix(ModeReflection); !contains(p, "自查") {
-		t.Error("reflection prefix 应提示自查")
+	if p := modePromptPrefix(ModeReflection); !contains(p, "check key conditions, calculations and reasoning") {
+		t.Error("reflection prefix should preserve answer checking")
 	}
-	if p := modePromptPrefix(ModeToT); !contains(p, "思路 A") {
-		t.Error("tot prefix 应提示多思路")
+	if p := modePromptPrefix(ModeToT); !contains(p, "Compare suitable approaches") {
+		t.Error("tot prefix should preserve comparison of solutions")
 	}
-	if p := modePromptPrefix(ModeSelfReflect); !contains(p, "反思") {
-		t.Error("self-reflect prefix 应提示反思")
+	if p := modePromptPrefix(ModeSelfReflect); !contains(p, "Examine assumptions and key reasoning") {
+		t.Error("self-reflect prefix should preserve reasoning review")
 	}
-	if p := modePromptPrefix(ModeMemAugmented); !contains(p, "档案") {
-		t.Error("mem-augmented prefix 应提示档案")
+	if p := modePromptPrefix(ModeMemAugmented); !contains(p, "Use relevant profile and historical information") {
+		t.Error("mem-augmented prefix should preserve profile context")
 	}
-	if p := modePromptPrefix(ModeDebate); !contains(p, "正方") {
-		t.Error("debate prefix 应提示正反方")
+	if p := modePromptPrefix(ModeDebate); !contains(p, "a debate or multiple perspectives") {
+		t.Error("debate prefix should preserve requested perspectives")
 	}
 	if p := modePromptPrefix(ModeReAct); p != "" {
 		t.Error("react 不应追加 prefix（保持默认行为）")

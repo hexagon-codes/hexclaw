@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/hexagon-codes/hexagon"
 	"github.com/hexagon-codes/toolkit/util/logger"
@@ -18,6 +19,8 @@ import (
 	"time"
 
 	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/internal/inputlimits"
+	"github.com/hexagon-codes/hexclaw/messagecontent"
 	"github.com/hexagon-codes/hexclaw/skill/hub"
 	"github.com/hexagon-codes/toolkit/util/idgen"
 )
@@ -177,8 +180,9 @@ func (s *Server) setMemoryPinned(w http.ResponseWriter, r *http.Request, pinned 
 // ─── MCP: POST /api/v1/mcp/tools/call ──
 
 type MCPToolCallRequest struct {
-	Name      string         `json:"name"`
-	Arguments map[string]any `json:"arguments"`
+	ServerName string         `json:"server_name,omitempty"`
+	Name       string         `json:"name"`
+	Arguments  map[string]any `json:"arguments"`
 }
 
 func (s *Server) handleCallMCPTool(w http.ResponseWriter, r *http.Request) {
@@ -195,7 +199,7 @@ func (s *Server) handleCallMCPTool(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "MCP 未启用"})
 		return
 	}
-	result, err := s.mcpMgr.CallTool(r.Context(), req.Name, req.Arguments)
+	result, err := s.mcpMgr.CallServerTool(r.Context(), req.ServerName, req.Name, req.Arguments)
 	if err != nil {
 		// CallTool 已返回完整可读的错误（含工具名 + 失败原因），此处原样透出。
 		// 不再叠加 `工具 "<name>" 执行失败:` 前缀——否则与 CallTool 内部前缀重复，
@@ -223,25 +227,35 @@ func (s *Server) handleMCPStatus(w http.ResponseWriter, r *http.Request) {
 // ─── Config: GET /api/v1/config ──
 
 func (s *Server) handleGetFullConfig(w http.ResponseWriter, r *http.Request) {
-	providers := make(map[string]any, len(s.cfg.LLM.Providers))
-	for name, p := range s.cfg.LLM.Providers {
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
+
+	llmCfg := cloneLLMConfigSnapshot(s.cfg.LLM)
+	providers := make(map[string]any, len(llmCfg.Providers))
+	for name, p := range llmCfg.Providers {
 		providers[name] = fullConfigProviderStatus(name, p)
 	}
-	// sandbox 网络状态：优先读运行时真值，回退到配置
-	sandboxNetworkEnabled := s.cfg.Skill.Builtin.CodeExecPolicy.CodeExecNetworkAllowed()
-	if s.sandboxNetworkEnabled != nil {
-		sandboxNetworkEnabled = s.sandboxNetworkEnabled()
+	// 沙箱策略必须来自同一次运行时代际快照，避免网络与路径跨代组合。
+	sandboxPolicy := SandboxPolicy{
+		NetworkEnabled: s.cfg.Skill.Builtin.CodeExecPolicy.CodeExecNetworkAllowed(),
+		ReadablePaths:  append([]string(nil), s.cfg.Skill.Sandbox.Filesystem.AllowedPaths...),
+	}
+	if s.sandboxPolicyRuntime.Snapshot != nil {
+		sandboxPolicy = s.sandboxPolicyRuntime.Snapshot()
+		sandboxPolicy.ReadablePaths = append([]string(nil), sandboxPolicy.ReadablePaths...)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"server":    map[string]any{"host": s.cfg.Server.Host, "port": s.cfg.Server.Port, "mode": s.cfg.Server.Mode},
-		"llm":       map[string]any{"default": s.cfg.LLM.Default, "providers": providers},
-		"knowledge": map[string]any{"enabled": s.cfg.Knowledge.Enabled},
-		"mcp":       map[string]any{"enabled": s.cfg.MCP.Enabled},
-		"cron":      map[string]any{"enabled": s.cfg.Cron.Enabled},
-		"webhook":   map[string]any{"enabled": s.cfg.Webhook.Enabled},
-		"canvas":    map[string]any{"enabled": s.cfg.Canvas.Enabled},
-		"voice":     map[string]any{"enabled": s.cfg.Voice.Enabled},
+		"backend_id": s.backendID,
+		"ollama":     s.ollamaTargetLocked(),
+		"server":     map[string]any{"host": s.cfg.Server.Host, "port": s.cfg.Server.Port, "mode": s.cfg.Server.Mode},
+		"llm":        map[string]any{"default": llmCfg.Default, "providers": providers},
+		"knowledge":  map[string]any{"enabled": s.cfg.Knowledge.Enabled},
+		"mcp":        map[string]any{"enabled": s.cfg.MCP.Enabled},
+		"cron":       map[string]any{"enabled": s.cfg.Cron.Enabled},
+		"webhook":    map[string]any{"enabled": s.cfg.Webhook.Enabled},
+		"canvas":     map[string]any{"enabled": s.cfg.Canvas.Enabled},
+		"voice":      map[string]any{"enabled": s.cfg.Voice.Enabled},
 		"security": map[string]any{
 			"gateway_enabled":     s.cfg.Security.Auth.Enabled,
 			"injection_detection": s.cfg.Security.InjectionDetection.Enabled,
@@ -250,8 +264,8 @@ func (s *Server) handleGetFullConfig(w http.ResponseWriter, r *http.Request) {
 			"rate_limit_rpm":      s.cfg.Security.RateLimit.RequestsPerMinute,
 		},
 		"sandbox": map[string]any{
-			"network_enabled": sandboxNetworkEnabled,
-			"allowed_paths":   s.cfg.Skill.Sandbox.Filesystem.AllowedPaths,
+			"network_enabled": sandboxPolicy.NetworkEnabled,
+			"allowed_paths":   sandboxPolicy.ReadablePaths,
 		},
 	})
 }
@@ -259,7 +273,7 @@ func (s *Server) handleGetFullConfig(w http.ResponseWriter, r *http.Request) {
 func fullConfigProviderStatus(name string, p config.LLMProviderConfig) map[string]any {
 	enabled := p.Enabled == nil || *p.Enabled
 	hasKey := strings.TrimSpace(p.APIKey) != ""
-	local := isLocalLLMProvider(name, p.BaseURL)
+	local := isLocalLLMProvider(name, p.BaseURL) || p.HasOllamaTarget()
 	switchable := enabled && (hasKey || local)
 	reason := ""
 	if !enabled {
@@ -308,6 +322,7 @@ func isOpenRouterFreeModel(baseURL, model string) bool {
 
 func (s *Server) handleUpdateFullConfig(w http.ResponseWriter, r *http.Request) {
 	var body struct {
+		ollamaTargetUpdateRequest
 		Security *struct {
 			GatewayEnabled     *bool `json:"gateway_enabled"`
 			InjectionDetection *bool `json:"injection_detection"`
@@ -324,7 +339,16 @@ func (s *Server) handleUpdateFullConfig(w http.ResponseWriter, r *http.Request) 
 		} `json:"sandbox"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "无效的请求体"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid request body"})
+		return
+	}
+
+	if body.Ollama != nil {
+		if body.Security != nil || body.Sandbox != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Ollama target update must be submitted separately"})
+			return
+		}
+		s.updateLLMConfig(w, r, LLMConfigUpdateRequest{ExpectedConfigRevision: body.ExpectedConfigRevision, ExpectedConfigDigest: body.ExpectedConfigDigest}, &body.ollamaTargetUpdateRequest)
 		return
 	}
 
@@ -353,76 +377,87 @@ func (s *Server) handleUpdateFullConfig(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	sandboxChanged := false
-	var newNetworkEnabled bool
-	allowedPathsChanged := false
-	var newAllowedPaths []string
+	currentSandboxPolicy := SandboxPolicy{
+		NetworkEnabled: s.cfg.Skill.Builtin.CodeExecPolicy.CodeExecNetworkAllowed(),
+		ReadablePaths:  append([]string(nil), s.cfg.Skill.Sandbox.Filesystem.AllowedPaths...),
+	}
+	if s.sandboxPolicyRuntime.Snapshot != nil {
+		currentSandboxPolicy = s.sandboxPolicyRuntime.Snapshot()
+		currentSandboxPolicy.ReadablePaths = append([]string(nil), currentSandboxPolicy.ReadablePaths...)
+	}
+	nextSandboxPolicy := currentSandboxPolicy
+	sandboxPolicyChanged := false
 	if sb := body.Sandbox; sb != nil {
 		if sb.NetworkEnabled != nil {
-			nextCfg.Skill.Builtin.CodeExecPolicy.Network = sb.NetworkEnabled
-			sandboxChanged = true
-			newNetworkEnabled = *sb.NetworkEnabled
+			if *sb.NetworkEnabled {
+				writeJSON(w, http.StatusBadRequest, map[string]string{
+					"error": "Code execution host network is unsupported because destination filtering is unavailable",
+				})
+				return
+			}
+			nextSandboxPolicy.NetworkEnabled = *sb.NetworkEnabled
+			sandboxPolicyChanged = true
 		}
 		if sb.AllowedPaths != nil {
-			// 授权目录白名单：下次沙箱构建（sidecar 启动）即放行只读。指针非 nil 时整体替换，空数组 = 清空。
-			nextCfg.Skill.Sandbox.Filesystem.AllowedPaths = *sb.AllowedPaths
-			allowedPathsChanged = true
-			newAllowedPaths = append([]string(nil), (*sb.AllowedPaths)...)
+			// 指针非 nil 时整体替换；空数组表示清空全部授权目录。
+			nextSandboxPolicy.ReadablePaths = append([]string(nil), (*sb.AllowedPaths)...)
+			sandboxPolicyChanged = true
 		}
 	}
 
-	// 先持久化，失败则什么都不变（runtime + 磁盘一致）
-	if err := config.Save(&nextCfg, ""); err != nil {
-		logger.Error("配置持久化失败", "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "配置保存失败: " + err.Error()})
+	var candidate SandboxPolicyCandidate
+	if sandboxPolicyChanged {
+		networkEnabled := nextSandboxPolicy.NetworkEnabled
+		nextCfg.Skill.Builtin.CodeExecPolicy.Network = &networkEnabled
+		nextCfg.Skill.Sandbox.Filesystem.AllowedPaths = append(
+			[]string(nil), nextSandboxPolicy.ReadablePaths...,
+		)
+		if s.sandboxPolicyRuntime.Prepare != nil {
+			var err error
+			candidate, err = s.sandboxPolicyRuntime.Prepare(r.Context(), SandboxPolicy{
+				NetworkEnabled: nextSandboxPolicy.NetworkEnabled,
+				ReadablePaths:  append([]string(nil), nextSandboxPolicy.ReadablePaths...),
+			})
+			if err != nil || !candidate.valid() {
+				if err == nil {
+					err = errors.New("sandbox policy runtime returned an invalid candidate")
+				}
+				logger.Error("Sandbox policy candidate validation failed", "error", err)
+				writeJSON(w, http.StatusInternalServerError, map[string]string{
+					"error": "Sandbox policy validation failed",
+				})
+				return
+			}
+			defer candidate.Discard()
+		} else if s.sandboxPolicyRuntime.Snapshot != nil {
+			logger.Error("Sandbox policy runtime is missing the Prepare callback")
+			writeJSON(w, http.StatusInternalServerError, map[string]string{
+				"error": "Sandbox policy validation failed",
+			})
+			return
+		}
+	}
+
+	// 候选验证完成后先原子落盘；Commit 只做不可失败的运行时代际交换。
+	if err := s.saveRuntimeConfig(&nextCfg); err != nil {
+		logger.Error("Failed to persist configuration", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to save configuration"})
 		return
 	}
-
-	if allowedPathsChanged && s.onSandboxAllowedPathsUpdate != nil {
-		if err := s.onSandboxAllowedPathsUpdate(newAllowedPaths); err != nil {
-			logger.Error("沙箱文件授权路径热更新失败", "error", err)
-			if rollbackErr := config.Save(s.cfg, ""); rollbackErr != nil {
-				logger.Error("沙箱文件授权路径热更新失败，且配置回滚失败", "error", rollbackErr)
-				writeJSON(w, http.StatusInternalServerError, map[string]string{
-					"error": "沙箱文件授权路径热更新失败，且配置回滚失败: " + rollbackErr.Error(),
-				})
-				return
-			}
-			writeJSON(w, http.StatusInternalServerError, map[string]string{
-				"error": "沙箱文件授权路径热更新失败，配置已回滚: " + err.Error(),
-			})
-			return
-		}
+	if candidate.valid() {
+		candidate.Commit()
 	}
 
-	// 沙箱网络热更新；失败时回滚刚刚持久化的新配置，保持 runtime/内存/磁盘一致
-	if sandboxChanged && s.onSandboxNetworkUpdate != nil {
-		if err := s.onSandboxNetworkUpdate(newNetworkEnabled); err != nil {
-			logger.Error("沙箱网络策略热更新失败", "error", err)
-			if rollbackErr := config.Save(s.cfg, ""); rollbackErr != nil {
-				logger.Error("沙箱网络策略热更新失败，且配置回滚失败", "error", rollbackErr)
-				writeJSON(w, http.StatusInternalServerError, map[string]string{
-					"error": "沙箱网络热更新失败，且配置回滚失败: " + rollbackErr.Error(),
-				})
-				return
-			}
-			writeJSON(w, http.StatusInternalServerError, map[string]string{
-				"error": "沙箱网络热更新失败，配置已回滚: " + err.Error(),
-			})
-			return
-		}
-	}
-
-	// 直到磁盘与 runtime 都成功后，才提交内存配置
+	// 运行时代际发布后再暴露内存配置；cfgMu 使并发读写只观察完整提交。
 	*s.cfg = nextCfg
-	writeJSON(w, http.StatusOK, map[string]string{"message": "配置已更新（LLM 配置请使用 PUT /api/v1/config/llm）"})
+	writeJSON(w, http.StatusOK, map[string]string{"message": "Configuration updated"})
 }
 
 // ─── Models: GET /api/v1/models ──
 
 func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 	var models []map[string]string
-	for name, pc := range s.cfg.LLM.Providers {
+	for name, pc := range s.activeLLMConfig().Providers {
 		if pc.Model != "" {
 			models = append(models, map[string]string{"id": name + "/" + pc.Model, "name": pc.Model, "provider": name})
 		}
@@ -533,15 +568,78 @@ type WorkflowData struct {
 
 // WorkflowRun 工作流执行记录
 type WorkflowRun struct {
-	ID          string            `json:"id"`
-	WorkflowID  string            `json:"workflow_id"`
-	Status      string            `json:"status"`
-	Input       string            `json:"input,omitempty"`
-	Output      string            `json:"output,omitempty"`
-	Error       string            `json:"error,omitempty"`
-	NodeResults []WorkflowNodeRun `json:"node_results,omitempty"`
-	StartedAt   time.Time         `json:"started_at"`
-	FinishedAt  time.Time         `json:"finished_at,omitempty"`
+	ID                  string                         `json:"id"`
+	WorkflowID          string                         `json:"workflow_id"`
+	Status              string                         `json:"status"`
+	ProviderDisplayName *string                        `json:"provider_display_name"`
+	ModelID             *string                        `json:"model_id"`
+	Input               string                         `json:"input,omitempty"`
+	Output              string                         `json:"output,omitempty"`
+	MessageContent      *messagecontent.MessageContent `json:"message_content,omitempty"`
+	RenderManifest      *messagecontent.RenderManifest `json:"render_manifest,omitempty"`
+	Error               string                         `json:"error,omitempty"`
+	NodeResults         []WorkflowNodeRun              `json:"node_results,omitempty"`
+	// TriggerKey is the stable webhook binding/event identity. PriorRunID links
+	// safe checkpoint continuations without changing the webhook Receipt/event.
+	TriggerKey string    `json:"trigger_key,omitempty"`
+	PriorRunID string    `json:"prior_run_id,omitempty"`
+	RetrySafe  bool      `json:"retry_safe,omitempty"`
+	StartedAt  time.Time `json:"started_at"`
+	FinishedAt time.Time `json:"finished_at,omitempty"`
+}
+
+func (s *Server) newWorkflowRun(wf *WorkflowData, input string, prior *WorkflowRun) *WorkflowRun {
+	var providerDisplayName, modelID *string
+	if prior != nil && (prior.ProviderDisplayName != nil || prior.ModelID != nil) {
+		providerDisplayName = cloneWorkflowRouteFact(prior.ProviderDisplayName)
+		modelID = cloneWorkflowRouteFact(prior.ModelID)
+	}
+	return &WorkflowRun{
+		ID:                  "run-" + idgen.ShortID(),
+		WorkflowID:          wf.ID,
+		Status:              "running",
+		ProviderDisplayName: providerDisplayName,
+		ModelID:             modelID,
+		Input:               input,
+		StartedAt:           time.Now(),
+	}
+}
+
+// freezeWorkflowRouteSnapshot 仅在 Agent 即将进入引擎调用边界时解析并冻结路由事实。
+// 不能在 Run 创建时从工作流定义预填，否则解析/DAG 失败等零模型调用终态会伪造路由。
+func (s *Server) freezeWorkflowRouteSnapshot(requestedProvider, requestedModel string) (*string, *string) {
+	llmCfg := s.persistedLLMConfig()
+	providerKey := requestedProvider
+	if providerKey == "" {
+		providerKey = strings.TrimSpace(llmCfg.Default)
+	}
+
+	providerDisplayName := providerKey
+	if resolvedKey, ok := findLLMProviderKey(llmCfg, providerKey); ok {
+		provider := llmCfg.Providers[resolvedKey]
+		providerDisplayName = firstNonEmpty(strings.TrimSpace(provider.DisplayName), resolvedKey)
+		if requestedModel == "" {
+			requestedModel = strings.TrimSpace(provider.Model)
+		}
+	}
+
+	return newWorkflowRouteFact(providerDisplayName), newWorkflowRouteFact(requestedModel)
+}
+
+func newWorkflowRouteFact(value string) *string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	return &value
+}
+
+func cloneWorkflowRouteFact(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
 }
 
 // WorkflowStore 工作流存储（内存 + JSON 文件持久化）
@@ -716,6 +814,11 @@ func (s *Server) handleSaveWorkflow(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now()
 	s.workflowStore.mu.Lock()
+	if err := validateWorkflowInputLengths(wf, s.workflowStore.workflows[wf.ID]); err != nil {
+		s.workflowStore.mu.Unlock()
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
 	if wf.ID == "" {
 		wf.ID = "wf-" + idgen.ShortID()
 		wf.CreatedAt = now
@@ -767,13 +870,7 @@ func (s *Server) handleRunWorkflow(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	run := &WorkflowRun{
-		ID:         "run-" + idgen.ShortID(),
-		WorkflowID: wf.ID,
-		Status:     "running",
-		Input:      req.Input,
-		StartedAt:  time.Now(),
-	}
+	run := s.newWorkflowRun(wf, req.Input, nil)
 	s.workflowStore.mu.Lock()
 	s.workflowStore.addRun(run)
 	s.workflowStore.mu.Unlock()
@@ -794,13 +891,78 @@ func (s *Server) handleRunWorkflow(w http.ResponseWriter, r *http.Request) {
 }
 
 // executeWorkflow 异步执行工作流
-func (s *Server) executeWorkflow(ctx context.Context, wf *WorkflowData, run *WorkflowRun, req RunWorkflowRequest) {
+func (s *Server) executeWorkflow(ctx context.Context, wf *WorkflowData, run *WorkflowRun, req RunWorkflowRequest, resumed ...map[string]string) {
+	startedAt := time.Now()
+	logger.Info("[workflow] run started",
+		"run_id", run.ID,
+		"workflow_id", wf.ID,
+		"workflow_name", wf.Name,
+		"user", req.UserID,
+		"platform", req.Platform,
+		"input", req.Input,
+		"stage", "execute",
+		"elapsed_ms", int64(0),
+	)
+	heartbeatStop := make(chan struct{})
+	heartbeatStopped := make(chan struct{})
+	go func() {
+		defer close(heartbeatStopped)
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-heartbeatStop:
+				return
+			case <-ticker.C:
+				logger.Info("[workflow] run heartbeat",
+					"run_id", run.ID,
+					"workflow_id", wf.ID,
+					"workflow_name", wf.Name,
+					"user", req.UserID,
+					"platform", req.Platform,
+					"input", req.Input,
+					"stage", "execute",
+					"elapsed_ms", time.Since(startedAt).Milliseconds(),
+				)
+			}
+		}
+	}()
+
 	exec := newWorkflowExecutor(s, wf, req)
+	if len(resumed) > 0 {
+		exec = exec.withResumed(resumed[0])
+	}
 	finished := exec.execute(ctx, run)
 	s.workflowStore.mu.Lock()
 	s.workflowStore.runs[run.ID] = finished
 	s.workflowStore.persistRuns() // Ph5：终态（含各节点输出）落盘，支撑失败后续接重放
 	s.workflowStore.mu.Unlock()
+	close(heartbeatStop)
+	<-heartbeatStopped
+
+	terminalStatus := "failed"
+	if finished.Status == "completed" {
+		terminalStatus = "completed"
+	} else if ctx.Err() != nil {
+		terminalStatus = "cancelled"
+	}
+	logFields := []any{
+		"run_id", run.ID,
+		"workflow_id", wf.ID,
+		"workflow_name", wf.Name,
+		"user", req.UserID,
+		"platform", req.Platform,
+		"input", req.Input,
+		"stage", "execute",
+		"status", terminalStatus,
+		"error", finished.Error,
+		"elapsed_ms", time.Since(startedAt).Milliseconds(),
+	}
+	if terminalStatus == "completed" {
+		logger.Info("[workflow] run completed", logFields...)
+	} else {
+		logger.Warn("[workflow] run "+terminalStatus, logFields...)
+	}
 }
 
 // handleResumeWorkflowRun 续接一次失败/中断的运行（Ph5，对齐 OpenClaw 续接语义）：复用上次
@@ -839,13 +1001,7 @@ func (s *Server) handleResumeWorkflowRun(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	run := &WorkflowRun{
-		ID:         "run-" + idgen.ShortID(),
-		WorkflowID: wf.ID,
-		Status:     "running",
-		Input:      priorInput,
-		StartedAt:  time.Now(),
-	}
+	run := s.newWorkflowRun(wf, priorInput, prior)
 	s.workflowStore.mu.Lock()
 	s.workflowStore.addRun(run)
 	s.workflowStore.mu.Unlock()
@@ -854,11 +1010,7 @@ func (s *Server) handleResumeWorkflowRun(w http.ResponseWriter, r *http.Request)
 	wfCtx, wfCancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	go func() {
 		defer wfCancel()
-		finished := newWorkflowExecutor(s, wf, req).withResumed(resumed).execute(wfCtx, run)
-		s.workflowStore.mu.Lock()
-		s.workflowStore.runs[run.ID] = finished
-		s.workflowStore.persistRuns()
-		s.workflowStore.mu.Unlock()
+		s.executeWorkflow(wfCtx, wf, run, req, resumed)
 	}()
 
 	snapshot := *run
@@ -905,13 +1057,12 @@ func (s *Server) RunWorkflowByID(id, userID string) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("工作流不存在: %s", id)
 	}
-	logger.Info("[workflow] agent 触发运行", "workflow_id", id, "name", wf.Name, "user", userID)
-	run := &WorkflowRun{
-		ID:         "run-" + idgen.ShortID(),
-		WorkflowID: wf.ID,
-		Status:     "running",
-		StartedAt:  time.Now(),
-	}
+	logger.Info("[workflow] agent trigger accepted",
+		"workflow_id", id,
+		"workflow_name", wf.Name,
+		"user", userID,
+	)
+	run := s.newWorkflowRun(wf, "", nil)
 	s.workflowStore.mu.Lock()
 	s.workflowStore.addRun(run)
 	s.workflowStore.mu.Unlock()
@@ -921,6 +1072,197 @@ func (s *Server) RunWorkflowByID(id, userID string) (string, error) {
 		s.executeWorkflow(wfCtx, wf, run, RunWorkflowRequest{})
 	}()
 	return run.ID, nil
+}
+
+// RunK12WorkflowFromWebhook triggers a versioned, owner-bound K12 workflow
+// through the same workflow executor used by the UI. Binding allowlisting is
+// performed by the webhook adapter; this second guard verifies that the saved
+// definition itself declares the same immutable owner and version. Unlike the
+// interactive Canvas command, this method waits for the durable workflow
+// terminal: returning a run ID while execution is merely running would let the
+// webhook Receipt falsely claim succeeded.
+func (s *Server) RunK12WorkflowFromWebhook(
+	ctx context.Context,
+	id, version, input, agentID, learnerID string,
+) (string, error) {
+	runID, _, err := s.RunK12WorkflowFromWebhookDispatch(
+		ctx, id, version, input, agentID, learnerID, "legacy:"+idgen.ShortID(),
+	)
+	return runID, err
+}
+
+var ErrK12WorkflowOutcomeUnknown = errors.New("K12 workflow 外部副作用结果未知")
+
+// RunK12WorkflowFromWebhookDispatch executes one stable webhook trigger. A
+// completed trigger is returned idempotently. A locally certain failure may
+// continue from durable completed-node outputs; an in-flight or failed
+// external boundary is outcome_unknown and is never replayed blindly.
+func (s *Server) RunK12WorkflowFromWebhookDispatch(
+	ctx context.Context,
+	id, version, input, agentID, learnerID, triggerKey string,
+) (string, bool, error) {
+	if s == nil || s.workflowStore == nil {
+		return "", true, fmt.Errorf("工作流存储不可用")
+	}
+	triggerKey = strings.TrimSpace(triggerKey)
+	if triggerKey == "" {
+		return "", true, fmt.Errorf("K12 workflow trigger_key 必填")
+	}
+
+	// Claim the stable trigger before creating a run. This is the in-process
+	// uniqueness boundary; persisted TriggerKey makes it survive restarts.
+	s.workflowStore.mu.Lock()
+	prior := s.workflowStore.latestRunByTriggerLocked(triggerKey)
+	var resumed map[string]string
+	if prior != nil {
+		switch prior.Status {
+		case "completed":
+			runID := prior.ID
+			s.workflowStore.mu.Unlock()
+			return runID, false, nil
+		case "running":
+			runID := prior.ID
+			s.workflowStore.mu.Unlock()
+			return runID, false, fmt.Errorf("%w: run %s 仍在执行或进程中断", ErrK12WorkflowOutcomeUnknown, runID)
+		case "failed":
+			safe, unknown, checkpoints := k12WorkflowRetryPlan(prior)
+			if !safe {
+				runID := prior.ID
+				s.workflowStore.mu.Unlock()
+				if unknown {
+					return runID, false, fmt.Errorf("%w: run %s 缺少外部副作用完成证据", ErrK12WorkflowOutcomeUnknown, runID)
+				}
+				return runID, false, fmt.Errorf("K12 workflow run %s 缺少可重放的控制流 checkpoint", runID)
+			}
+			resumed = checkpoints
+		default:
+			runID := prior.ID
+			s.workflowStore.mu.Unlock()
+			return runID, false, fmt.Errorf("%w: run %s 状态 %s 不可判定", ErrK12WorkflowOutcomeUnknown, runID, prior.Status)
+		}
+	}
+
+	wf, ok := s.workflowStore.workflows[id]
+	if !ok {
+		s.workflowStore.mu.Unlock()
+		return "", true, fmt.Errorf("工作流不存在: %s", id)
+	}
+	if strings.TrimSpace(version) == "" {
+		s.workflowStore.mu.Unlock()
+		return "", true, fmt.Errorf("K12 workflow_version 必填")
+	}
+	data := wf.Data
+	if data == nil || stringAny(data["scenario"]) != "k12" ||
+		stringAny(data["agent_id"]) != agentID || stringAny(data["learner_id"]) != learnerID ||
+		stringAny(data["version"]) != version {
+		s.workflowStore.mu.Unlock()
+		return "", true, fmt.Errorf("工作流定义的 K12 owner/version 与 binding 不一致")
+	}
+	priorID := ""
+	if prior != nil {
+		priorID = prior.ID
+	}
+	run := s.newWorkflowRun(wf, input, prior)
+	run.TriggerKey = triggerKey
+	run.PriorRunID = priorID
+	s.workflowStore.addRun(run)
+	s.workflowStore.mu.Unlock()
+
+	req := RunWorkflowRequest{
+		Input: input, UserID: "webhook:" + learnerID, Platform: "api",
+		Metadata: map[string]string{
+			"source": "webhook", "agent_id": agentID, "learner_id": learnerID,
+			"workflow_version": version, "webhook_trigger_key": triggerKey,
+		},
+	}
+	wfCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
+	exec := newWorkflowExecutor(s, wf, req)
+	if resumed != nil {
+		exec = exec.withResumed(resumed)
+	}
+	finished := exec.execute(wfCtx, run)
+	retrySafe, outcomeUnknown, _ := k12WorkflowRetryPlan(finished)
+	finished.RetrySafe = retrySafe
+	s.workflowStore.mu.Lock()
+	s.workflowStore.runs[run.ID] = finished
+	s.workflowStore.persistRuns()
+	s.workflowStore.mu.Unlock()
+	if finished.Status != "completed" {
+		failure := finished.Error
+		if failure == "" {
+			failure = "workflow 未产生可确认终态"
+		}
+		if outcomeUnknown {
+			return run.ID, false, fmt.Errorf("%w: %s", ErrK12WorkflowOutcomeUnknown, failure)
+		}
+		return run.ID, retrySafe, fmt.Errorf("K12 workflow 执行失败（status=%s）: %s", finished.Status, failure)
+	}
+	return run.ID, false, nil
+}
+
+func (ws *WorkflowStore) latestRunByTriggerLocked(triggerKey string) *WorkflowRun {
+	for index := len(ws.runOrder) - 1; index >= 0; index-- {
+		if run := ws.runs[ws.runOrder[index]]; run != nil && run.TriggerKey == triggerKey {
+			return run
+		}
+	}
+	// Defensive fallback for stores assembled directly in tests or imported
+	// from an older file without runOrder.
+	var latest *WorkflowRun
+	for _, run := range ws.runs {
+		if run != nil && run.TriggerKey == triggerKey && (latest == nil || latest.StartedAt.Before(run.StartedAt)) {
+			latest = run
+		}
+	}
+	return latest
+}
+
+// k12WorkflowRetryPlan returns a safe continuation only when every completed
+// external node has a durable output checkpoint and no failed/running external
+// boundary can have an unobserved side effect. Condition/handoff state is not
+// represented by the legacy output-only resume map, so it fails closed.
+func k12WorkflowRetryPlan(run *WorkflowRun) (safe bool, outcomeUnknown bool, resumed map[string]string) {
+	if run == nil || run.Status != "failed" {
+		return false, false, nil
+	}
+	resumed = make(map[string]string)
+	for _, node := range run.NodeResults {
+		typeName := strings.ToLower(strings.TrimSpace(node.Type))
+		switch node.Status {
+		case nodeStatusCompleted:
+			switch typeName {
+			case "condition", "handoff", "agent_handoff":
+				return false, false, nil
+			default:
+				resumed[node.NodeID] = node.Output
+			}
+		case nodeStatusFailed, nodeStatusRunning:
+			if k12WorkflowExternalNode(typeName) {
+				return false, true, nil
+			}
+		case nodeStatusPending, nodeStatusSkipped:
+			// Pending deterministic work is safe to execute. Skipped work can only
+			// be trusted when no stateful condition/handoff checkpoint was seen.
+		default:
+			return false, false, nil
+		}
+	}
+	return true, false, resumed
+}
+
+func k12WorkflowExternalNode(typeName string) bool {
+	switch typeName {
+	case "agent", "tool", "handoff", "agent_handoff", "parallel", "fanout":
+		return true
+	default:
+		return false
+	}
+}
+
+func stringAny(v any) string {
+	s, _ := v.(string)
+	return s
 }
 
 func (s *Server) handleGetWorkflowRun(w http.ResponseWriter, r *http.Request) {
@@ -945,6 +1287,10 @@ func (s *Server) handleGetWorkflowRun(w http.ResponseWriter, r *http.Request) {
 // ─── ClawHub: GET /api/v1/clawhub/search ──
 
 func (s *Server) handleClawHubSearch(w http.ResponseWriter, r *http.Request) {
+	if err := inputlimits.Text("q", r.URL.Query().Get("q"), "", inputlimits.Keyword); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
 	if s.skillHub == nil {
 		writeJSON(w, http.StatusOK, map[string]any{"skills": []any{}, "total": 0, "source": "clawhub"})
 		return

@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 	"time"
@@ -54,12 +55,28 @@ func (c *Config) Validate() error {
 			Suggest: "用 127.0.0.1 / localhost / 0.0.0.0",
 		})
 	}
+	if strings.TrimSpace(c.Server.Host) != "" && !isLoopbackListenerHost(c.Server.Host) && strings.TrimSpace(c.Server.APIToken) == "" {
+		errs = append(errs, &ValidationError{
+			Field:   "server.api_token",
+			Value:   "<empty>",
+			Rule:    "监听非 loopback 地址时必须配置 API token",
+			Suggest: "配置高熵 server.api_token，或把 server.host 改为 127.0.0.1",
+		})
+	}
 	if !isValidAutonomyProfile(c.Security.Autonomy.Profile) {
 		errs = append(errs, &ValidationError{
 			Field:   "security.autonomy.profile",
 			Value:   c.Security.Autonomy.Profile,
 			Rule:    "function_first / balanced / strict / full_access",
 			Suggest: "功能优先默认用 function_first；需要显式全开放用 full_access",
+		})
+	}
+	if c.Skill.Builtin.CodeExecPolicy.CodeExecNetworkAllowed() {
+		errs = append(errs, &ValidationError{
+			Field:   "skill.builtin.code_exec_policy.network",
+			Value:   "true",
+			Rule:    "code execution host network is unsupported because destination filtering is unavailable",
+			Suggest: "Set skill.builtin.code_exec_policy.network to false",
 		})
 	}
 
@@ -79,6 +96,140 @@ func (c *Config) Validate() error {
 			Field: "budget.max_cost", Value: fmt.Sprintf("%f", c.Budget.MaxCost),
 			Rule: "≥ 0", Suggest: "0 表示使用默认 5.00 USD",
 		})
+	}
+
+	// Config is sometimes assembled as a narrow zero-value fixture by callers
+	// that validate an unrelated section. Loader/Writer always overlay on
+	// DefaultConfig, so a wholly absent governor block means "use defaults";
+	// once any governor field is present, validate the complete budget strictly.
+	if c.ResourceGovernor != (ResourceGovernorConfig{}) {
+		resourceLimits := []struct {
+			field string
+			value int
+		}{
+			{"resource_governor.vlm_concurrency", c.ResourceGovernor.VLMConcurrency},
+			{"resource_governor.accelerator_concurrency", c.ResourceGovernor.AcceleratorConcurrency},
+			{"resource_governor.cpu_heavy_concurrency", c.ResourceGovernor.CPUHeavyConcurrency},
+			{"resource_governor.sqlite_write_concurrency", c.ResourceGovernor.SQLiteWriteConcurrency},
+		}
+		for _, limit := range resourceLimits {
+			if limit.value <= 0 {
+				errs = append(errs, &ValidationError{
+					Field: limit.field, Value: fmt.Sprintf("%d", limit.value),
+					Rule: "必须为正整数", Suggest: "使用默认值或按设备基准调低/调高",
+				})
+			}
+		}
+		if aging, err := time.ParseDuration(c.ResourceGovernor.BackgroundAging); err != nil || aging <= 0 {
+			errs = append(errs, &ValidationError{
+				Field: "resource_governor.background_aging", Value: c.ResourceGovernor.BackgroundAging,
+				Rule: "正数 Go duration（如 5s）", Suggest: "使用默认 5s",
+			})
+		}
+		if c.ResourceGovernor.MaxInteractiveBurst <= 0 {
+			errs = append(errs, &ValidationError{
+				Field: "resource_governor.max_interactive_burst",
+				Value: fmt.Sprintf("%d", c.ResourceGovernor.MaxInteractiveBurst),
+				Rule:  "必须为正整数", Suggest: "使用默认 8",
+			})
+		}
+	}
+
+	// K12 grading budgets are publish evidence, not a tuning guess. The all-zero
+	// block is the only unfrozen state. Once policy_version is positive, every
+	// automatic stage and the measured 1/8/16/32 buckets are mandatory.
+	gradingBudget := c.K12.GradingBudget
+	if !gradingBudget.IsZero() {
+		if gradingBudget.PolicyVersion <= 0 {
+			errs = append(errs, &ValidationError{
+				Field: "k12.grading_budget.policy_version", Value: fmt.Sprintf("%d", gradingBudget.PolicyVersion),
+				Rule: "未冻结必须全零；冻结策略版本必须为正整数", Suggest: "真实性能门完成前删除整个 grading_budget 配置",
+			})
+		}
+		for _, stage := range []struct {
+			field string
+			value int64
+		}{
+			{"queued_seconds", gradingBudget.QueuedSeconds},
+			{"normalizing_seconds", gradingBudget.NormalizingSeconds},
+			{"recognizing_seconds", gradingBudget.RecognizingSeconds},
+			{"locating_seconds", gradingBudget.LocatingSeconds},
+			{"rendering_seconds", gradingBudget.RenderingSeconds},
+			{"projecting_seconds", gradingBudget.ProjectingSeconds},
+		} {
+			if stage.value <= 0 {
+				errs = append(errs, &ValidationError{
+					Field: "k12.grading_budget." + stage.field, Value: fmt.Sprintf("%d", stage.value),
+					Rule: "冻结策略的自动阶段秒数必须为正整数", Suggest: "使用同一路由真实性能报告定版",
+				})
+			}
+		}
+		if gradingBudget.ItemConcurrency <= 0 || gradingBudget.ItemConcurrency > 32 {
+			errs = append(errs, &ValidationError{
+				Field: "k12.grading_budget.item_concurrency", Value: fmt.Sprintf("%d", gradingBudget.ItemConcurrency),
+				Rule: "1-32", Suggest: "使用真实性能报告对应的并发策略",
+			})
+		}
+		bucketShapeOK := len(gradingBudget.AssessingBuckets) == 4
+		wantMax := [...]int{1, 8, 16, 32}
+		if bucketShapeOK {
+			for i, bucket := range gradingBudget.AssessingBuckets {
+				if bucket.MaxProblems != wantMax[i] || bucket.Seconds <= 0 {
+					bucketShapeOK = false
+					break
+				}
+			}
+		}
+		if !bucketShapeOK {
+			errs = append(errs, &ValidationError{
+				Field: "k12.grading_budget.assessing_buckets", Value: fmt.Sprintf("%v", gradingBudget.AssessingBuckets),
+				Rule: "按顺序完整提供 max_problems=1/8/16/32 且 seconds>0", Suggest: "缺任一真实样本桶时保持未冻结",
+			})
+		}
+		switch gradingBudget.RecognitionPlanVersion {
+		case 1:
+			if !gradingBudget.RecognizingBuckets.IsZero() ||
+				gradingBudget.PhysicalCallCapMillis != 0 || gradingBudget.WorkerHardCap != 0 ||
+				gradingBudget.EffectiveConcurrency != 0 {
+				errs = append(errs, &ValidationError{
+					Field: "k12.grading_budget.recognition_plan_version", Value: "1",
+					Rule: "v1 must not include v2 recognizing parameters", Suggest: "Remove recognizing_buckets/cap/worker/concurrency",
+				})
+			}
+		case 2:
+			b := gradingBudget.RecognizingBuckets
+			if b.UpTo1ProblemMillis <= 0 || b.UpTo8ProblemsMillis <= 0 ||
+				b.UpTo16ProblemsMillis <= 0 || b.UpTo32ProblemsMillis <= 0 {
+				errs = append(errs, &ValidationError{
+					Field: "k12.grading_budget.recognizing_buckets", Value: fmt.Sprintf("%+v", b),
+					Rule: "v2 must provide positive 1/8/16/32-millisecond buckets", Suggest: "Use measured values from the same route",
+				})
+			}
+			if gradingBudget.PhysicalCallCapMillis != 120000 || gradingBudget.WorkerHardCap != 2 {
+				errs = append(errs, &ValidationError{
+					Field: "k12.grading_budget.recognition_plan_version", Value: "2",
+					Rule: "v2 requires physical_call_cap_millis=120000 and worker_hard_cap=2", Suggest: "Use the approved fixed limits",
+				})
+			}
+			if gradingBudget.EffectiveConcurrency < 1 || gradingBudget.EffectiveConcurrency > 2 {
+				errs = append(errs, &ValidationError{
+					Field: "k12.grading_budget.effective_concurrency", Value: fmt.Sprintf("%d", gradingBudget.EffectiveConcurrency),
+					Rule: "v2 effective_concurrency must be 1 or 2", Suggest: "Use a value within the approved worker hard cap",
+				})
+			}
+			wantRecognizingSeconds := (b.UpTo32ProblemsMillis + 999) / 1000
+			if b.UpTo32ProblemsMillis > 0 && gradingBudget.RecognizingSeconds != wantRecognizingSeconds {
+				errs = append(errs, &ValidationError{
+					Field: "k12.grading_budget.recognizing_seconds", Value: fmt.Sprintf("%d", gradingBudget.RecognizingSeconds),
+					Rule: "v2 must equal ceil(up_to_32_problem_millis/1000)", Suggest: "Use the same 32-problem initial window for manifest and batch",
+				})
+			}
+		default:
+			errs = append(errs, &ValidationError{
+				Field: "k12.grading_budget.recognition_plan_version", Value: fmt.Sprintf("%d", gradingBudget.RecognitionPlanVersion),
+				Rule: "The frozen policy must explicitly be 1 or 2", Suggest: "Use 1 for ordinary mode or 2 for the approved dense v2 mode",
+			})
+		}
 	}
 
 	// 3. Router：配置了静态 Agents 时，DefaultAgent（若指定）必须在列表中
@@ -129,7 +280,51 @@ func (c *Config) Validate() error {
 	}
 
 	// 6. LLM provider keep_alive 格式（仅 Ollama 本地生效；非法值此前直达 Ollama 才 400）
+	providerInstanceIDs := make(map[string]string, len(c.LLM.Providers))
 	for name, p := range c.LLM.Providers {
+		if p.ProviderInstanceID != "" {
+			if err := ValidateProviderInstanceID(p.ProviderInstanceID); err != nil {
+				errs = append(errs, &ValidationError{
+					Field:   fmt.Sprintf("llm.providers.%s.provider_instance_id", name),
+					Value:   p.ProviderInstanceID,
+					Rule:    "稳定、非密钥的 canonical Provider ID",
+					Suggest: "保留服务端生成的 provider_instance_id，不要用展示名、API Key 或 Base URL 替换",
+				})
+			} else if previous, duplicate := providerInstanceIDs[p.ProviderInstanceID]; duplicate {
+				errs = append(errs, &ValidationError{
+					Field:   fmt.Sprintf("llm.providers.%s.provider_instance_id", name),
+					Value:   p.ProviderInstanceID,
+					Rule:    "在 llm.providers 中唯一",
+					Suggest: fmt.Sprintf("不得与 provider %q 复用同一 ID", previous),
+				})
+			} else {
+				providerInstanceIDs[p.ProviderInstanceID] = name
+			}
+		}
+		if err := ValidateProviderModelSpecs(p); err != nil {
+			errs = append(errs, &ValidationError{
+				Field:   fmt.Sprintf("llm.providers.%s.model_specs", name),
+				Value:   err.Error(),
+				Rule:    "模型 ID、能力、Embedding 契约与当前文本模型必须一致",
+				Suggest: "仅声明受支持 capability；Embedding 需提供合法 protocol/dimension，当前 model 只能选择 text 模型",
+			})
+		}
+		if !IsValidProviderLocality(p.Locality) {
+			errs = append(errs, &ValidationError{
+				Field:   fmt.Sprintf("llm.providers.%s.locality", name),
+				Value:   p.Locality,
+				Rule:    "auto / local / cloud",
+				Suggest: "本地反向代理云模型请选择 cloud；真正本机/LAN 模型请选择 local；不确定时留空或用 auto",
+			})
+		}
+		if !IsValidProviderLocalitySource(p.LocalitySource) {
+			errs = append(errs, &ValidationError{
+				Field:   fmt.Sprintf("llm.providers.%s.locality_source", name),
+				Value:   p.LocalitySource,
+				Rule:    "system / user",
+				Suggest: "由系统推断时使用 system；用户确认时使用 user",
+			})
+		}
 		if !IsValidKeepAlive(p.KeepAlive) {
 			errs = append(errs, &ValidationError{
 				Field:   fmt.Sprintf("llm.providers.%s.keep_alive", name),
@@ -139,11 +334,48 @@ func (c *Config) Validate() error {
 			})
 		}
 	}
+	if defaultProvider, exists := c.LLM.Providers[c.LLM.Default]; exists {
+		if defaultProvider.Model == "" || !ModelHasCapability(defaultProvider, defaultProvider.Model, LLMModelCapabilityText) {
+			errs = append(errs, &ValidationError{
+				Field:   "llm.default",
+				Value:   c.LLM.Default,
+				Rule:    "默认 Provider 必须选择一个包含 text capability 的 model",
+				Suggest: "选择可对话模型；embedding-only Provider 可保留，但不能作为全局默认",
+			})
+		}
+	}
+	if reasoningProvider := strings.TrimSpace(c.LLM.ReasoningProvider); reasoningProvider != "" {
+		provider, exists := c.LLM.Providers[reasoningProvider]
+		if !exists || provider.Enabled != nil && !*provider.Enabled {
+			errs = append(errs, &ValidationError{
+				Field:   "llm.reasoning_provider",
+				Value:   reasoningProvider,
+				Rule:    "必须引用一个存在且已启用的 llm.providers 项",
+				Suggest: "重新选择强文本 Provider，或清空 reasoning_provider 让系统重新推导",
+			})
+		}
+	} else if strings.TrimSpace(c.LLM.ReasoningModel) != "" {
+		errs = append(errs, &ValidationError{
+			Field:   "llm.reasoning_model",
+			Value:   c.LLM.ReasoningModel,
+			Rule:    "配置 reasoning_model 时必须同时配置 reasoning_provider",
+			Suggest: "选择对应 Provider，或同时清空 reasoning_model",
+		})
+	}
 
 	if len(errs) > 0 {
 		return errs
 	}
 	return nil
+}
+
+func isLoopbackListenerHost(host string) bool {
+	host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // isValidTTSProvider 检查 TTS provider 取值是否合法。

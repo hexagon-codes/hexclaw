@@ -81,8 +81,8 @@ func DefaultConfig() *Config {
 				CodeExec:  true,  // 沙箱代码执行（Python/JS/Go），支持抓取网页、数据处理等
 				FileOps:   true,  // 受限于 workspace，默认开启
 				CodeExecPolicy: CodeExecPolicyConfig{
-					RequireApproval: boolPtr(false), // 功能优先：默认无需审批
-					Network:         boolPtr(true),  // 允许网络访问：抓取网页、调用 API
+					RequireApproval: boolPtr(false), // 仅旧 classifier；baseline policy 仍强制审批
+					Network:         boolPtr(false), // 默认离线；当前不接受宿主网络视图
 				},
 			},
 		},
@@ -151,7 +151,7 @@ func DefaultConfig() *Config {
 			AutoLoad: true,
 			Hub: SkillsHubConfig{
 				RepoURL: "https://github.com/hexagon-codes/hexclaw-hub",
-				Branch:  "v0.0.6",
+				Branch:  "v0.0.7",
 			},
 		},
 		Heartbeat: HeartbeatConfig{
@@ -175,10 +175,23 @@ func DefaultConfig() *Config {
 		MCP: MCPConfig{
 			Enabled: true,
 		},
+		// 桌面端朗读使用无需凭据的 edge-tts；用户显式 voice 配置仍会覆盖该内存默认。
+		Voice: VoiceConfig{
+			Enabled: true,
+			TTS:     VoiceTTSConfig{Provider: "edge-tts"},
+		},
 		Budget: BudgetConfig{
 			MaxTokens:   500000,
 			MaxDuration: "30m",
 			MaxCost:     5.0,
+		},
+		ResourceGovernor: ResourceGovernorConfig{
+			VLMConcurrency:         2,
+			AcceleratorConcurrency: 1,
+			CPUHeavyConcurrency:    2,
+			SQLiteWriteConcurrency: 1,
+			BackgroundAging:        "5s",
+			MaxInteractiveBurst:    8,
 		},
 	}
 }

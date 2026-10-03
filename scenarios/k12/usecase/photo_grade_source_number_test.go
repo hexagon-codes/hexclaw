@@ -1,0 +1,111 @@
+package usecase
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/hexagon-codes/hexclaw/scenarios/k12"
+)
+
+func numberedQuestion(label, question string) RecognizedQuestion {
+	return RecognizedQuestion{
+		SourceNumberPath: []string{"原大题", label},
+		DisplayLabel:     label,
+		Question:         question,
+	}
+}
+
+func TestPhotoGradeMarkdownPreservesExactSourceLabelsWithoutGlobalRenumbering(t *testing.T) {
+	graded := photoGradeMarkdown(PhotoGradeResult{
+		Mode: PhotoModeGrade,
+		Items: []PhotoGradeItem{
+			{Recognized: numberedQuestion("一. 1", "4÷0.5="), Status: PhotoCorrect},
+			{Recognized: numberedQuestion("一. 2", "10×0.01="), Status: PhotoWrong},
+			{Recognized: numberedQuestion("四. 1", "鱼塘应用题"), Status: PhotoUnanswered},
+			{Recognized: numberedQuestion("五. 1", "思维题"), Status: PhotoUntrusted, Warning: "字迹不清"},
+			{Recognized: numberedQuestion("五. 2", "超纲题"), Status: PhotoOutOfScope},
+			{Recognized: numberedQuestion("五. 3", "处理失败题"), Status: PhotoFailed, Warning: "处理失败"},
+		},
+	})
+	for _, label := range []string{"一. 1", "一. 2", "四. 1", "五. 1", "五. 2", "五. 3"} {
+		if !strings.Contains(graded, label) {
+			t.Errorf("graded projection lost source label %q:\n%s", label, graded)
+		}
+	}
+	for _, synthetic := range []string{
+		"#### 第 2 题",
+		"- 第 3 题",
+		"- 第 4 题",
+		"- 第 5 题",
+		"- 第 6 题",
+	} {
+		if strings.Contains(graded, synthetic) {
+			t.Errorf("graded projection invented global label %q:\n%s", synthetic, graded)
+		}
+	}
+
+	blank := photoGradeMarkdown(PhotoGradeResult{
+		Mode: PhotoModeSolve,
+		Items: []PhotoGradeItem{
+			{
+				Recognized: numberedQuestion("一. 1", "4÷0.5="),
+				Status:     PhotoBlankSolved,
+				Solve:      SolveHomeworkResult{Solution: "8"},
+			},
+			{
+				Recognized: numberedQuestion("三. 2", "8的四分之一的五分之四"),
+				Status:     PhotoBlankSolved,
+				Solve:      SolveHomeworkResult{Solution: "8/5"},
+			},
+		},
+	})
+	for _, heading := range []string{"### 一. 1 ", "### 三. 2 "} {
+		if !strings.Contains(blank, heading) {
+			t.Errorf("blank worksheet projection lost source heading %q:\n%s", heading, blank)
+		}
+	}
+	for _, synthetic := range []string{"### 1. ", "### 2. "} {
+		if strings.Contains(blank, synthetic) {
+			t.Errorf("blank worksheet projection invented global heading %q:\n%s", synthetic, blank)
+		}
+	}
+}
+
+func TestDD041_PhotoGradeAndFinalProjectionKeepSectionAndMarkedSystemOrderSeparate(t *testing.T) {
+	question := RecognizedQuestion{
+		SourceSectionPath:    []string{"一"},
+		SourceSectionLabel:   "一、直接写得数",
+		SystemSectionOrdinal: 1,
+		SystemDisplayLabel:   "第 1 题（系统序号）",
+		Question:             "4÷0.5=",
+	}
+	graded := photoGradeMarkdown(PhotoGradeResult{
+		Mode:  PhotoModeGrade,
+		Items: []PhotoGradeItem{{Recognized: question, Status: PhotoCorrect}},
+	})
+	finalEntries := []gradingFinalEntry{{
+		question:   question,
+		assessment: &k12.GradingAssessmentItem{Status: k12.GradingAssessmentCorrect, ResultJSON: `{}`},
+	}}
+	final := renderCanonicalGradingFinal(finalEntries, nil)
+	if !strings.Contains(graded, "一、直接写得数") ||
+		!strings.Contains(graded, "第 1 题（系统序号）") {
+		t.Fatalf("DD-041 photo projection lost section/system distinction:\n%s", graded)
+	}
+	if !strings.Contains(final, "**共 1 题 · 1 题正确**") ||
+		!strings.Contains(final, "1 题已答对。") {
+		t.Fatalf("DD-041 correct final projection lost its summary:\n%s", final)
+	}
+	for name, projection := range map[string]string{"photo": graded, "final": final} {
+		if strings.Contains(projection, "一、1") {
+			t.Fatalf("DD-041 %s projection forged an original child number:\n%s", name, projection)
+		}
+	}
+	source := finalEntries[0].question
+	if len(source.SourceSectionPath) != 1 || source.SourceSectionPath[0] != "一" ||
+		source.SourceSectionLabel != "一、直接写得数" ||
+		source.SystemSectionOrdinal != 1 || source.SystemDisplayLabel != "第 1 题（系统序号）" ||
+		len(source.SourceNumberPath) != 0 || source.DisplayLabel != "" || source.Question != "4÷0.5=" {
+		t.Fatalf("DD-041 final rendering rewrote source/system facts: %#v", source)
+	}
+}

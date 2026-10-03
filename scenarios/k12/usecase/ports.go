@@ -3,6 +3,10 @@ package usecase
 import (
 	"context"
 	"errors"
+	"strings"
+
+	"github.com/hexagon-codes/hexclaw/messagecontent"
+	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 )
 
 // ErrRenderUnavailable render 服务未启用（调用方降级 markdown）。
@@ -14,6 +18,134 @@ var ErrSolveFailed = errors.New("solve service failed")
 
 // ErrInvalidInput 标识客户端可修正的 K12 用例输入错误。
 var ErrInvalidInput = errors.New("invalid k12 input")
+
+// ErrDeliveryUnavailable means the durable send-to-phone transport has not
+// been wired. Callers must show a binding/setup action, never report success.
+var ErrDeliveryUnavailable = errors.New("delivery transport unavailable")
+
+// ErrDeliveryQueryUnavailable means the provider may have accepted a message
+// but returned no query key. Retrying would risk a duplicate, so the receipt
+// remains outcome_unknown until an operator can verify it externally.
+var ErrDeliveryQueryUnavailable = errors.New("delivery receipt cannot be queried safely")
+
+// ErrNoActiveDirectBindings is returned before any delivery-domain write when
+// the TutorAgent currently has no active one-to-one IM binding.
+var ErrNoActiveDirectBindings = errors.New("no active direct delivery bindings")
+
+// ResolvedDeliveryTarget is the immutable binding identity and normalized
+// direct target captured during a server-side binding-resolution pass.
+type ResolvedDeliveryTarget struct {
+	BindingID string
+	Target    k12.DeliveryTarget
+}
+
+// DeliveryAttachment 在 K12 应用边界内携带一个不可变附件；平台编码只属于渠道投影层。
+type DeliveryAttachment struct {
+	Name string
+	MIME string
+	Data []byte
+}
+
+// DeliveryAttachmentIdentity 描述无需重读附件字节即可复算的内容身份。
+type DeliveryAttachmentIdentity struct {
+	Name          string
+	MIME          string
+	ContentDigest string
+}
+
+// DeliveryMessage 是一个投递批次为全部已解析目标冻结的通道中立源消息。
+type DeliveryMessage struct {
+	Content     string
+	Attachments []DeliveryAttachment
+}
+
+// PreparedTextDelivery is the immutable, channel-neutral payload projection
+// frozen before a provider send begins. PayloadJSON and RenderJSON are stored
+// verbatim and reused by retries/restart recovery.
+type PreparedTextDelivery struct {
+	BindingID   string
+	Target      k12.DeliveryTarget
+	PartKind    messagecontent.PartKind
+	PartMIME    string
+	PartOrdinal int
+	PartDigest  string
+	PayloadJSON string
+	RenderJSON  string
+}
+
+// DeliveryPartResourcePreparer 在可见消息发送前准备冻结的媒体 part。
+// 成功返回的 provider 资源引用由回执账本持久化，重试不得重新读取源资源。
+type DeliveryPartResourcePreparer interface {
+	PrepareDeliveryPartResource(
+		ctx context.Context,
+		receipt k12.DeliveryReceipt,
+	) (preparedResourceID string, err error)
+}
+
+// DeliveryTransportAck uses the durable domain statuses directly: provider
+// acceptance maps to DeliverySending, never DeliveryDelivered.
+type DeliveryTransportAck struct {
+	ExternalMessageID string
+	Status            k12.DeliveryReceiptStatus
+	Detail            string
+	// Err is not serialized; it lets deterministic fakes describe the paired
+	// transport error while production implementations normally leave it nil.
+	Err error
+}
+
+// DeliveryTransport is the DD-024 composition seam. Preparing is side-effect
+// free; SendPrepared may only be called after a durable receipt exists; query
+// is the sole legal operation for an outcome_unknown receipt.
+type DeliveryTransport interface {
+	PrepareText(ctx context.Context, agentName, content string) (PreparedTextDelivery, error)
+	SendPrepared(ctx context.Context, receipt k12.DeliveryReceipt) (DeliveryTransportAck, error)
+	QueryPrepared(ctx context.Context, receipt k12.DeliveryReceipt) (DeliveryTransportAck, error)
+}
+
+// DeliveryEnvelopeTransport 是作品正文与原图同卡投递的可选能力。
+// 组件回执仍分别冻结；物理发送与查询必须以同一有序组件组为单位。
+type DeliveryEnvelopeTransport interface {
+	SendPreparedEnvelope(
+		ctx context.Context,
+		receipts []k12.DeliveryReceipt,
+	) (DeliveryTransportAck, error)
+	QueryPreparedEnvelope(
+		ctx context.Context,
+		receipts []k12.DeliveryReceipt,
+	) (DeliveryTransportAck, error)
+}
+
+// DeliveryEnvelopePreflightTransport 在组 CAS 前校验已准备的平台资源；
+// 能力缺失或校验失败时不得降级为逐 part 发送。
+type DeliveryEnvelopePreflightTransport interface {
+	PreflightPreparedEnvelope(
+		ctx context.Context,
+		receipts []k12.DeliveryReceipt,
+	) error
+}
+
+// BatchDeliveryTransport resolves all current active direct bindings and then
+// prepares one frozen payload per resolved target. ResolveTextTargets is split
+// from payload preparation so aggregate commands can fail with zero bindings
+// before mutating their own domain object.
+type BatchDeliveryTransport interface {
+	ResolveTextTargets(ctx context.Context, agentName string) ([]ResolvedDeliveryTarget, error)
+	PrepareTextForTargets(
+		ctx context.Context,
+		content string,
+		targets []ResolvedDeliveryTarget,
+	) ([]PreparedTextDelivery, error)
+}
+
+// BatchMessageDeliveryTransport 是附加的附件感知准备缝；纯文本 transport 继续原样使用
+// BatchDeliveryTransport。
+type BatchMessageDeliveryTransport interface {
+	PrepareMessageForTargets(
+		ctx context.Context,
+		message DeliveryMessage,
+		targets []ResolvedDeliveryTarget,
+	) ([]PreparedTextDelivery, error)
+}
 
 // Renderer 文档渲染 port（adapter = 平台 render 服务）。format=pdf/docx/...
 type Renderer interface {
@@ -33,20 +165,213 @@ type BBox struct {
 	H float64
 }
 
+// AnswerState 是视觉识别后的作答事实，必须与 StudentAnswer 文本分离。
+//
+//   - blank:   核心识别未发现学生作答；
+//   - present: 可以确认有作答，且 StudentAnswer 已可靠誊录；
+//   - unclear: 核心识别发现疑似笔迹/涂改，但无法可靠誊录，仍需独立图片证据确认。
+//
+// present 本身足以进入批改；只有 unclear 时，必须由 AnswerAnchorer 给出经过本地墨迹门禁的
+// BBox 才能确认是已答卷。这样既不会把空白卷上的印刷噪声当作作答，也不会用答案文本是否为空猜测。
+type AnswerState string
+
+const (
+	AnswerStateBlank   AnswerState = "blank"
+	AnswerStatePresent AnswerState = "present"
+	AnswerStateUnclear AnswerState = "unclear"
+)
+
 // RecognizedQuestion 识题产出的结构化题目值对象（engine 只产值对象，不含领域编排）。
 type RecognizedQuestion struct {
+	// ProblemID 是一次 Submission 内稳定的问题标识。复合题的公共题干与每个可作答小题
+	// 都有独立 ID；锚点、确认版本与 Assessment 只能引用可作答题自己的 ID。
+	ProblemID        string      `json:"problem_id,omitempty"`
+	ProblemKind      ProblemKind `json:"problem_kind,omitempty"`
+	ParentProblemID  string      `json:"parent_problem_id,omitempty"`
+	SubproblemNo     string      `json:"subproblem_no,omitempty"`
+	SourceNumberPath []string    `json:"source_number_path,omitempty"`
+	DisplayLabel     string      `json:"display_label,omitempty"`
+	// SourceSection* is the printed section heading exactly as visible on the
+	// worksheet. A heading is a source fact, never an answerable problem itself.
+	SourceSectionPath  []string `json:"source_section_path,omitempty"`
+	SourceSectionLabel string   `json:"source_section_label,omitempty"`
+	// System* is server-derived only for an unnumbered answerable item within a
+	// printed section. It must never be attributed to the source worksheet.
+	SystemSectionOrdinal int                    `json:"system_section_ordinal,omitempty"`
+	SystemDisplayLabel   string                 `json:"system_display_label,omitempty"`
+	PageAssetID          string                 `json:"page_asset_id,omitempty"`
+	SourceWidth          int                    `json:"source_width,omitempty"`
+	SourceHeight         int                    `json:"source_height,omitempty"`
+	SourceRegion         *k12.SourcePixelRegion `json:"source_region,omitempty"`
+	// ObservedAnswerRegion 是成功识别回执内的原图答案候选框；仅经 anchor 本地核验后使用。
+	ObservedAnswerRegion *k12.SourcePixelRegion `json:"observed_answer_region,omitempty"`
+	AttemptID            string                 `json:"attempt_id,omitempty"`
+
+	// OCR 原始转写与 canonical Markdown/LaTeX 是两份独立事实。Raw* 一经识别不得被
+	// 家长修正或增强模型覆盖；canonical 可在显式确认时形成新版本。
+	RawTranscription             string          `json:"raw_transcription,omitempty"`
+	CanonicalMarkdown            string          `json:"canonical_markdown,omitempty"`
+	AnswerRawTranscription       string          `json:"answer_raw_transcription,omitempty"`
+	AnswerCanonicalMarkdown      string          `json:"answer_canonical_markdown,omitempty"`
+	CanonicalVersion             int             `json:"canonical_version,omitempty"`
+	ConfirmedVersion             int             `json:"confirmed_version,omitempty"`
+	InputDigest                  string          `json:"input_digest,omitempty"`
+	RecognitionConfidence        *float64        `json:"recognition_confidence,omitempty"`
+	OCRSignals                   []string        `json:"ocr_signals,omitempty"`
+	EvidenceTranscriptions       []string        `json:"evidence_transcriptions,omitempty"`
+	AnswerEvidenceTranscriptions []string        `json:"answer_evidence_transcriptions,omitempty"`
+	ConfirmationRequired         bool            `json:"confirmation_required,omitempty"`
+	ConfirmationReasons          []OCRRiskReason `json:"confirmation_reasons,omitempty"`
+	// 仅评估副本使用的父题依赖风险；从冻结父题推导，不写回学生或题干事实。
+	parentSourceUnclear bool
+
 	Question        string
 	KnowledgePoints []string
-	// StudentAnswer 识题时视觉模型逐题回收的孩子**手写作答**内容（未作答留空）。
-	// 这是「空白卷 vs 已答卷」的单一真相源：空=空白题→走解题（SolveHomeworkProblem），
-	// 非空=已答题→走批改（GradeHomeworkProblem）。绝不由 LLM 编造，未辨认出留空字符串。
+	// AnswerState 是“是否作答、能否可靠读出”的单一真相源。
+	AnswerState AnswerState
+	// StudentAnswer 仅承载可靠誊录出的学生作答。blank / unclear 时必须为空；
+	// present 时必须非空。模型解释文字、置信度说明和“无法辨认”等元描述不得进入本字段。
 	StudentAnswer string
 	// Subject 识题时视觉模型逐题自动判定的学科（数学/语文/英语/物理/化学）；判不出留空。
 	// 家长不必手选学科——前端据此预填学科下拉（仍可手动覆盖），solve/批改不再 gate 在手选上。
 	Subject string
-	// BBox 学生作答区域的归一化边界框（0~1），供前端在原图上叠加 ✓/✗（原图批改 Phase 1）。
-	// nil = 视觉模型未给/坐标非法（降级为纯文字批改，不叠加）；绝不是零值 struct（{0,0,0,0} 会误叠加）。
+	// BBox 是独立于核心识题、并通过本地几何与墨迹门禁的学生作答边界框。
+	// present 可用它原位回写批改标记；unclear 可用它确认确有不可辨认的学生笔迹，但不会画对错。
+	// nil = 尚未定位或证据不足；前端/IM 只能降级为文字结果，绝不能猜测位置。
 	BBox *BBox
+}
+
+// NormalizeRecognizedQuestion 把任何 Recognizer 实现的输出收敛到领域不变量。
+// 兼容未显式提供 AnswerState 的旧实现，但绝不使用 BBox 推断作答状态。
+func NormalizeRecognizedQuestion(q RecognizedQuestion) RecognizedQuestion {
+	return NormalizeRecognizedQuestionForInitialReadMode(q, "")
+}
+
+// NormalizeRecognizedQuestionForInitialReadMode 使用当前任务已冻结的识别合同，不从题面推断模式。
+func NormalizeRecognizedQuestionForInitialReadMode(q RecognizedQuestion, initialReadMode string) RecognizedQuestion {
+	q = normalizeRecognizedQuestionFacts(q)
+	q = EvaluateOCRConfirmationRiskForInitialReadMode(q, initialReadMode)
+	return q
+}
+
+// RecognizedQuestionSourceDisplayLabel is the single human-readable source
+// projection. It keeps the printed section, printed child number and any
+// server-derived order visibly distinct: the latter is never returned as a
+// worksheet number.
+func RecognizedQuestionSourceDisplayLabel(q RecognizedQuestion) string {
+	section := strings.TrimSpace(q.SourceSectionLabel)
+	item := strings.TrimSpace(q.DisplayLabel)
+	if item == "" {
+		item = strings.TrimSpace(q.SystemDisplayLabel)
+	}
+	switch {
+	case section != "" && item != "":
+		return section + " · " + item
+	case section != "":
+		return section
+	default:
+		return item
+	}
+}
+
+// normalizeRecognizedQuestionFacts 只收敛事实投影，不执行风险策略；与
+// EvaluateOCRConfirmationRisk 分层，避免风险计算递归调用 Normalize。
+func normalizeRecognizedQuestionFacts(q RecognizedQuestion) RecognizedQuestion {
+	legacyQuestion := q.Question
+	legacyAnswer := q.StudentAnswer
+	q.ProblemKind = normalizeProblemKind(q.ProblemKind, q.ParentProblemID)
+	q.SourceNumberPath = append([]string(nil), q.SourceNumberPath...)
+	for i := range q.SourceNumberPath {
+		q.SourceNumberPath[i] = strings.TrimSpace(q.SourceNumberPath[i])
+	}
+	q.DisplayLabel = strings.TrimSpace(q.DisplayLabel)
+	q.SourceSectionPath = append([]string(nil), q.SourceSectionPath...)
+	for i := range q.SourceSectionPath {
+		q.SourceSectionPath[i] = strings.TrimSpace(q.SourceSectionPath[i])
+	}
+	q.SourceSectionLabel = strings.TrimSpace(q.SourceSectionLabel)
+	q.SystemDisplayLabel = strings.TrimSpace(q.SystemDisplayLabel)
+	if sourceNumberOnlyRepeatsSectionHeading(q) {
+		q.SourceNumberPath = nil
+		q.DisplayLabel = ""
+	}
+	// 仅初始化尚无 canonical 事实的旧输入；明确的空 raw 不能由展示别名回填。
+	if q.RawTranscription == "" && q.CanonicalMarkdown == "" {
+		q.RawTranscription = legacyQuestion
+	}
+	if q.CanonicalMarkdown == "" {
+		q.CanonicalMarkdown = strings.TrimSpace(legacyQuestion)
+	}
+	if q.AnswerRawTranscription == "" && q.AnswerCanonicalMarkdown == "" && legacyAnswer != "" {
+		q.AnswerRawTranscription = legacyAnswer
+	}
+	if q.AnswerCanonicalMarkdown == "" && legacyAnswer != "" {
+		q.AnswerCanonicalMarkdown = strings.TrimSpace(legacyAnswer)
+	}
+	// 尚未冻结的识题结果可能只把末行答案写进答案字段，而把完整竖排过程放进证据。
+	// 只接纳逐行前导等号、前序含运算且末行与原答案完全一致的连续过程，不代算对错。
+	if q.ConfirmedVersion == 0 && q.AnswerState == AnswerStatePresent && len(q.AnswerEvidenceTranscriptions) > 1 {
+		steps := q.AnswerEvidenceTranscriptions
+		answer := strings.TrimSpace(CanonicalPlainTextFallback(q.AnswerRawTranscription))
+		last := strings.TrimSpace(strings.TrimLeft(CanonicalPlainTextFallback(steps[len(steps)-1]), "=＝ "))
+		continuous := answer != "" && answer == last && !strings.ContainsAny(answer, "\n=＝")
+		for _, step := range steps[:len(steps)-1] {
+			text := strings.TrimSpace(CanonicalPlainTextFallback(step))
+			continuous = continuous && strings.HasPrefix(text, "=") &&
+				strings.ContainsAny(strings.TrimPrefix(text, "="), "+−-×÷*/") && !strings.ContainsAny(text, "\r\n")
+		}
+		if continuous {
+			q.AnswerRawTranscription = strings.Join(steps, "\n")
+			q.AnswerCanonicalMarkdown = q.AnswerRawTranscription
+		}
+	}
+	if q.CanonicalVersion <= 0 && (q.CanonicalMarkdown != "" || q.AnswerCanonicalMarkdown != "") {
+		q.CanonicalVersion = 1
+	}
+	q.Question = strings.TrimSpace(RecognizedQuestionDisplayText(q))
+	q.StudentAnswer = strings.TrimSpace(recognizedAnswerDisplayText(q))
+	switch q.AnswerState {
+	case AnswerStatePresent:
+		if q.StudentAnswer == "" {
+			q.AnswerState = AnswerStateUnclear
+		}
+	case AnswerStateBlank:
+		q.StudentAnswer = ""
+	case AnswerStateUnclear:
+		q.StudentAnswer = ""
+	default:
+		if q.StudentAnswer == "" {
+			q.AnswerState = AnswerStateBlank
+		} else {
+			q.AnswerState = AnswerStatePresent
+		}
+	}
+	if q.AnswerState == AnswerStateBlank {
+		q.BBox = nil
+	}
+	return q
+}
+
+// sourceNumberOnlyRepeatsSectionHeading recognizes the one deterministic
+// heading-only shape allowed by DD-041. It never derives a source number: it
+// only removes a model value that is already proven to duplicate the same
+// visible section heading. A real C02 returned 四/五 in this exact shape for
+// unnumbered items under 四、应用题 / 五、思维题.
+func sourceNumberOnlyRepeatsSectionHeading(q RecognizedQuestion) bool {
+	if len(q.SourceNumberPath) == 0 ||
+		len(q.SourceNumberPath) != len(q.SourceSectionPath) ||
+		q.DisplayLabel == "" || q.SourceSectionLabel == "" {
+		return false
+	}
+	for index, token := range q.SourceNumberPath {
+		if token != q.SourceSectionPath[index] {
+			return false
+		}
+	}
+	if q.DisplayLabel != strings.Join(q.SourceNumberPath, "、") {
+		return false
+	}
+	return strings.HasPrefix(q.SourceSectionLabel, q.DisplayLabel+"、")
 }
 
 // Recognizer 拍题识别 port（adapter = OCR + 云端 vision，出网走 egress 白名单）。
@@ -54,10 +379,72 @@ type Recognizer interface {
 	Recognize(ctx context.Context, image []byte) ([]RecognizedQuestion, error)
 }
 
+// CreativeWorkOCRRecognizer is deliberately narrower than homework
+// Recognizer: it returns one verbatim writing draft, not questions/answers.
+// The same production VisionFunc primitive powers both adapters.
+type CreativeWorkOCRRecognizer interface {
+	RecognizeWriting(ctx context.Context, image []byte) (string, error)
+}
+
+// AnswerAnchorer 是可选的第二阶段图片证据 port：在核心识题已经返回后，按页批量定位并独立
+// 核验学生答案的墨迹坐标。实现应先用固定次数的整页/批量证据解决无争议答案；只有仍冲突的
+// 单题才能进入隔离复核，避免为追求固定调用数而把多个争议答案塞进同一上下文相互污染。
+type AnswerAnchorer interface {
+	AnchorAnswers(ctx context.Context, image []byte, questions []RecognizedQuestion) ([]RecognizedQuestion, error)
+}
+
+// AnswerGeometryAnchorer 端口已随一次切换删除（§6.14 · 2026-07-18）：它是被删的
+// POST /recognize/anchors 直连端点专用的低延迟几何子集；批改统一走 AnswerAnchorer
+//（含转写共识）。adapter 内部仍可自行分层实现几何 pass，但不再是 usecase 端口。
+
+// PhotoAnnotation 是允许进入批改图的可信批改结论。只有经过程序/强证据验算且 bbox
+// 合法的结论才可传给 adapter，并在原作答位置绘制。没有可靠 bbox 的结论只保留在文字
+// 汇总中，绝不猜测坐标或发送未改动原图。超纲、不可验证、失败项不得伪装成红叉。
+type PhotoAnnotation struct {
+	BBox           BBox
+	QuestionNumber int
+	// Status 是当前的类型化事实。Correct 仅为早于非二元批注标记的旧调用方保留。
+	Status  PhotoItemStatus
+	Correct bool
+}
+
+func (a PhotoAnnotation) EffectiveStatus() PhotoItemStatus {
+	if a.Status != "" {
+		return a.Status
+	}
+	if a.Correct {
+		return PhotoCorrect
+	}
+	return PhotoWrong
+}
+
+// RenderedPhoto 是平台无关的批改图产物。
+type RenderedPhoto struct {
+	Data []byte
+	MIME string
+}
+
+// PhotoAnnotator 在原图上确定性绘制勾/叉/过程警示。实现只负责像素合成，不参与识题和判分。
+type PhotoAnnotator interface {
+	Annotate(ctx context.Context, image []byte, marks []PhotoAnnotation) (RenderedPhoto, error)
+}
+
+// PageAssetStore persists the immutable source page before photo recognition is
+// promoted into the V19 Problem/Attempt ledger. Ensure is content-addressed and
+// owner-scoped; Remove is used only to compensate a newly-created blob when the
+// paired typed write fails.
+type PageAssetStore interface {
+	Ensure(agentName string, image []byte) (assetID string, created bool, err error)
+	Remove(agentName, assetID string) (removed bool, err error)
+}
+
 // SolveResult 解题结果 = 解 + 证据对象。
 type SolveResult struct {
-	Solution string
-	Evidence SolveEvidence
+	Solution     string
+	Evidence     SolveEvidence
+	OutOfScopeKP string
+	Generation   *SolveGeneration `json:"generation,omitempty"`
+	ProblemIssue string           `json:"problem_issue,omitempty"`
 }
 
 // Solver 解题验算 port（adapter = engine/solve）。
@@ -76,19 +463,6 @@ type SubjectSolver interface {
 	SolveSubject(ctx context.Context, subject, problem, grade, constraint string) (SolveResult, error)
 }
 
-// RetryGenerator 是「再练一道」的轻量出题 port（Solver 的可选扩展，BUG-20260712 治本）。
-//
-// 与 Solve 的全对抗多智能体验算链（变式生成 → solver → verifier → code_exec →
-// self-consistency 多数表决 → 不合格重出，为**批改正确性**设计，真机 68s）相反：练习变式题
-// 非高风险批改、容错高，只需**单次 reasoning 出题 + 解答**，延迟优先（目标 <10s）。
-// prompt 已含知识点约束，subject 透传保学科路由，grade 约束「只用学过的方法」。
-//
-// SolveAdapter 实现之（走单个 solver 子 Agent，不派 verifier / 不 self-consistency / 不重出）；
-// 只实现 Solver 的老实现不满足本接口，GenerateRetry 自动回退全链，向后兼容。
-type RetryGenerator interface {
-	GenerateSimilar(ctx context.Context, subject, prompt, grade string) (SolveResult, error)
-}
-
 // CauseSummarizer 是「记一条错题」的**轻量错因归纳** port（Solver 的可选扩展，BUG-20260712-记一条错题）。
 //
 // 家长手动记的是**已知错题**（课堂/学校/线下订正），不需要判对错的重验算链（solver → verifier →
@@ -101,12 +475,44 @@ type CauseSummarizer interface {
 	SummarizeCause(ctx context.Context, subject, question, studentAnswer, grade string) (string, error)
 }
 
-// GradeOutcome 批改结果（第一个错步 + 错因 + 命中知识点）。
+// GradeOutcome 批改结果（判定 + 第一个错步 + 错因 + 命中知识点）。
+//
+// 判定统一走 Verdict 五值（§3.4/§4.5：布尔 correct 只在迁移读取层短期兼容，切换后删除）：
+// agree=答对、disagree=答错（仅 disagree 自动入错题本，§4.5「可自动进错题」列）；
+// 其余值（unverifiable/out_of_scope/verbatim）表示无二元结论，不判对错、不自动入错题。
 type GradeOutcome struct {
-	Correct        bool
-	WrongStep      string
-	ErrorCause     string
-	KnowledgePoint string
+	Verdict Verdict
+	// FinalAnswerCorrect 是显式三态事实。nil 会逐字节保留旧回执；
+	// 当前批改器会写入 true/false。
+	FinalAnswerCorrect *bool `json:",omitempty"`
+	WrongStep          string
+	ErrorCause         string
+	KnowledgePoint     string
+}
+
+// AssessmentStatus 是从批改证据到持久化评估词汇的唯一映射。
+// 只有首个错误步骤及其原因均明确时，最终答案正确才会成为过程问题；
+// 否则标记为不可信，而不是猜测结论。
+func (o GradeOutcome) AssessmentStatus() k12.GradingAssessmentStatus {
+	switch o.Verdict {
+	case VerdictAgree:
+		if o.FinalAnswerCorrect != nil && !*o.FinalAnswerCorrect {
+			return k12.GradingAssessmentUntrusted
+		}
+		return k12.GradingAssessmentCorrect
+	case VerdictDisagree:
+		if o.FinalAnswerCorrect != nil && *o.FinalAnswerCorrect {
+			if strings.TrimSpace(o.WrongStep) != "" && strings.TrimSpace(o.ErrorCause) != "" {
+				return k12.GradingAssessmentProcessIssue
+			}
+			return k12.GradingAssessmentUntrusted
+		}
+		return k12.GradingAssessmentWrong
+	case VerdictOutOfScope:
+		return k12.GradingAssessmentOutOfScope
+	default:
+		return k12.GradingAssessmentUntrusted
+	}
 }
 
 // Grader 批改 port（adapter = engine/solve 的 grader 模式）。
@@ -119,16 +525,39 @@ type SubjectGrader interface {
 	GradeSubject(ctx context.Context, subject, problem, studentAnswer, solution string) (GradeOutcome, error)
 }
 
+// VerifiedSolutionGrader 复用本请求前一阶段已经过 verifier 的解法，只追加“学生答案 vs 正解”批改。
+// 它是可选扩展；老 Grader 仍走 Grade/GradeSubject，保持第三方 adapter 向后兼容。
+type VerifiedSolutionGrader interface {
+	GradeVerified(ctx context.Context, subject, problem, studentAnswer, verifiedSolution string) (GradeOutcome, error)
+}
+
 // Insights 学情信号写入 port（adapter = memory 反思管线）。
 // 错题**不入记忆**（AP-3）；这里只写"薄弱点画像"信号。
 type Insights interface {
-	WriteWeakness(ctx context.Context, agentName, knowledgePoint, note string) error
+	WriteWeakness(ctx context.Context, eventID, agentName, knowledgePoint, note string) error
 }
 
-// Grounding 备课卡①段知识点讲法检索 port（adapter = knowledge/RAG，按 agent_id scope）。
-// found=true 来自家长上传教材（可信）；false 时调用方降级为 LLM 生成并标未校验。
+// RevisableInsights 以原始来源和有效修订更新派生摘要；空 note 撤回旧信号。
+type RevisableInsights interface {
+	ReviseWeakness(ctx context.Context, eventID string, revision int, agentName, knowledgePoint, note string) error
+}
+
+// Grounding retrieves textbook evidence for the first tutoring-tips section
+// (adapter = knowledge/RAG, scoped by agent_id).
 type Grounding interface {
 	Ground(ctx context.Context, agentName, knowledgePoint, grade string) (text string, found bool, err error)
+}
+
+// TutoringTipsReviewGenerator produces one bounded explanation when textbook
+// evidence is unavailable. It does not enter the grading solve pipeline.
+type TutoringTipsReviewGenerator interface {
+	GenerateTutoringTipsReview(ctx context.Context, subject, knowledgePoint, grade string) (string, error)
+}
+
+// GroundedTutoringTipsReviewGenerator turns retrieved textbook evidence into
+// parent-facing Markdown while preserving the evidence boundary.
+type GroundedTutoringTipsReviewGenerator interface {
+	GenerateGroundedTutoringTipsReview(ctx context.Context, subject, knowledgePoint, grade, evidence string) (string, error)
 }
 
 // GroundingWriter 是教材 grounding 的写缝；与 Grounding 使用同一 agent scope。

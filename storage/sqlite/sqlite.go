@@ -40,6 +40,11 @@ type Store struct {
 
 	forkCacheMu sync.RWMutex
 	forkCache   map[forkCacheKey]forkCacheEntry
+
+	// messageMutationMu linearizes canonical message writes with their
+	// denormalized session-stat updates inside one Store. SQLite busy retry
+	// remains responsible only for competing external connections.
+	messageMutationMu sync.Mutex
 }
 
 type searchCacheKey struct {
@@ -92,7 +97,8 @@ func New(dbPath string) (*Store, error) {
 	// modernc.org/sqlite 只认 _pragma=NAME(VALUE) 形式，原 DSN 的 _journal_mode=WAL / _busy_timeout=5000 是无效参数（历史 bug：
 	// WAL 从未生效，所以启动恢复时出现 data.db-journal 且主线程被 rollback 阻塞 4 分钟）。
 	dsn := dbPath +
-		"?_pragma=journal_mode(WAL)" +
+		"?_txlock=immediate" +
+		"&_pragma=journal_mode(WAL)" +
 		"&_pragma=busy_timeout(5000)" +
 		"&_pragma=foreign_keys(1)" +
 		"&_pragma=synchronous(NORMAL)" +
@@ -482,15 +488,28 @@ func (s *Store) ListSessions(ctx context.Context, userID string, limit, offset i
 
 // DeleteSession 软删除会话（标记 status=-1）
 func (s *Store) DeleteSession(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := fenceAndRevokeSessionToolAuthority(
+		ctx, tx, id, "session_deleted", time.Now().UTC(),
+	); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx,
 		`UPDATE sessions SET status = -1, updated_at = ? WHERE id = ?`,
 		time.Now(), id,
-	)
-	if err == nil {
-		s.invalidateSearchCache()
-		s.invalidateForkCache()
+	); err != nil {
+		return err
 	}
-	return err
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.invalidateSearchCache()
+	s.invalidateForkCache()
+	return nil
 }
 
 // CleanupOldSessions 删除超过指定天数未活跃的会话及其消息
@@ -540,13 +559,24 @@ func (s *Store) SaveMessage(ctx context.Context, msg *storage.MessageRecord) err
 		msg.Meta = "{}"
 	}
 
-	if err := sqliteutil.RetryOnBusy(ctx, func() error {
+	if err := s.withMessageMutation(ctx, func() error {
 		return s.saveMessageTx(ctx, msg)
 	}); err != nil {
 		return err
 	}
 	s.invalidateSearchCache()
 	return nil
+}
+
+// withMessageMutation serializes message facts and their session aggregates
+// within this Store, then retains the existing BUSY retry for external writers.
+func (s *Store) withMessageMutation(ctx context.Context, fn func() error) error {
+	s.messageMutationMu.Lock()
+	defer s.messageMutationMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return sqliteutil.RetryOnBusy(ctx, fn)
 }
 
 // saveMessageTx 在单个事务内插入消息并更新会话冗余字段。
@@ -595,14 +625,100 @@ func (s *Store) GetMessage(ctx context.Context, id string) (*storage.MessageReco
 	return msg, nil
 }
 
+// UpdateMessageMetadata 原位更新已有消息的 metadata。
+// runtime terminal snapshot 是后续写入，不得经 SaveMessage 重插同一 ID。
+func (s *Store) UpdateMessageMetadata(ctx context.Context, id, metadata string) error {
+	if metadata == "" {
+		metadata = "{}"
+	}
+	if err := s.withMessageMutation(ctx, func() error {
+		result, err := s.db.ExecContext(ctx, `UPDATE messages SET metadata = ? WHERE id = ?`, metadata, id)
+		if err != nil {
+			return err
+		}
+		rowsAffected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if rowsAffected == 0 {
+			return storage.ErrNotFound
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	s.invalidateSearchCache()
+	s.invalidateForkCache()
+	return nil
+}
+
 // DeleteMessage 删除单条消息
 func (s *Store) DeleteMessage(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM messages WHERE id = ?`, id)
-	if err == nil {
-		s.invalidateSearchCache()
-		s.invalidateForkCache()
+	err := s.withMessageMutation(ctx, func() error {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("开启删除消息事务失败: %w", err)
+		}
+		defer func() { _ = tx.Rollback() }()
+
+		var sessionID string
+		if err := tx.QueryRowContext(ctx, `SELECT session_id FROM messages WHERE id = ?`, id).
+			Scan(&sessionID); err != nil {
+			if err == sql.ErrNoRows {
+				// DeleteMessage remains idempotent for client compensation and retry.
+				return nil
+			}
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM messages WHERE id = ?`, id); err != nil {
+			return err
+		}
+
+		var count, promptTokens, completionTokens int
+		var lastContent string
+		if err := tx.QueryRowContext(ctx, `
+			SELECT
+				COUNT(*),
+				COALESCE(SUM(prompt_tokens), 0),
+				COALESCE(SUM(completion_tokens), 0),
+				COALESCE((
+					SELECT content
+					FROM messages
+					WHERE session_id = ?
+					ORDER BY created_at DESC, rowid DESC
+					LIMIT 1
+				), '')
+			FROM messages
+			WHERE session_id = ?`,
+			sessionID, sessionID,
+		).Scan(&count, &promptTokens, &completionTokens, &lastContent); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE sessions SET
+				updated_at = ?,
+				message_count = ?,
+				total_prompt_tokens = ?,
+				total_completion_tokens = ?,
+				last_message_preview = ?
+			WHERE id = ?`,
+			time.Now(),
+			count,
+			promptTokens,
+			completionTokens,
+			previewByteLimit(lastContent, 200),
+			sessionID,
+		); err != nil {
+			return err
+		}
+		return tx.Commit()
+	})
+	if err != nil {
+		return err
 	}
-	return err
+	s.invalidateSearchCache()
+	s.invalidateForkCache()
+	return nil
 }
 
 // ListMessages 获取会话的消息历史
@@ -864,7 +980,7 @@ func (s *Store) searchMessagesLike(ctx context.Context, userID, query string, li
 //
 // 使用 rowid 比较而非 created_at，避免 datetime 精度丢失导致
 // 边界消息被遗漏（time.Time 经 SQLite 存储后纳秒精度丢失）。
-func (s *Store) ForkSession(ctx context.Context, sourceSessionID, messageID, userID string) (*storage.Session, error) {
+func (s *Store) ForkSession(ctx context.Context, sourceSessionID, messageID, userID string, options ...storage.ForkSessionOptions) (*storage.Session, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("开启事务失败: %w", err)
@@ -922,8 +1038,17 @@ func (s *Store) ForkSession(ctx context.Context, sourceSessionID, messageID, use
 		return nil, fmt.Errorf("创建分支会话失败: %w", err)
 	}
 
-	// 3. 复制源会话中 messageID 之前（含）的所有消息到新会话
-	// 使用 rowid <= ? 而非 created_at <= ?，避免精度丢失
+	// 3. 复制源会话的稳定前缀。默认（手工分支）包含 messageID；历史消息编辑
+	// 显式要求排除它，随后由发送管道把编辑后的新消息写入该分支。
+	// 使用 rowid 比较而非 created_at，避免精度丢失。
+	includeMessage := true
+	if len(options) > 0 {
+		includeMessage = options[0].IncludeMessage
+	}
+	comparison := "<="
+	if !includeMessage {
+		comparison = "<"
+	}
 	// 不依赖插入顺序；读取时仍按 created_at 排序
 	forkPrefix := "msg-fork-" + strings.TrimPrefix(newSessionID, "sess-") + "-"
 	_, err = tx.ExecContext(ctx,
@@ -931,7 +1056,7 @@ func (s *Store) ForkSession(ctx context.Context, sourceSessionID, messageID, use
 			 SELECT ? || rowid, ?, parent_id, role, content, content_type, metadata, feedback,
 			        model_name, prompt_tokens, completion_tokens, finish_reason, latency_ms, request_id, meta, attachments, created_at
 			 FROM messages
-			 WHERE session_id = ? AND rowid <= ?`,
+		 WHERE session_id = ? AND rowid `+comparison+` ?`,
 		forkPrefix, newSessionID, sourceSessionID, msgRowID,
 	)
 	if err != nil {

@@ -2,18 +2,22 @@ package engine
 
 import (
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/hexagon-codes/hexclaw/skill"
 )
 
 // solve 派生携带**不可伪造 grant** 的沙箱 code_exec 自动放行，确保验证链路不依赖交互审批。
 // 功能优先策略下，普通系统派发 spawn 也可自动跑 code_exec。
 func TestSolve_VerifierCodeExecAutoApproved(t *testing.T) {
 	hub := NewPermissionHub(5 * time.Second)
-	hook := NewPermissionHook(hub)
-	ctxSolve := withSolveGrant(context.Background())
+	hook := NewPermissionHook(hub, WithPolicy(DefaultBaselinePolicy()), WithSystemDispatchPolicy(FullAccessSystemDispatchPolicy()))
+	ctxSolve := withUntrustedKnowledgeEvidence(withSystemDispatch(withSolveGrant(context.Background()), solveDispatchSource))
 	if err := hook.BeforeToolCall(ctxSolve, &ToolCallInfo{Name: codeExecToolName, Source: "skill"}); err != nil {
 		t.Fatalf("solve grant 下沙箱 code_exec 应自动放行，得 err=%v", err)
 	}
@@ -24,23 +28,24 @@ func TestSolve_VerifierCodeExecAutoApproved(t *testing.T) {
 }
 
 // P0（K12 正确性）：Solver–Verifier，verifier 走 code_exec 执行验证 + fresh-context 独立重解。
-// 不变量：①验证一致→高置信徽标 ②不一致→诚实并列双答+请复核（不直接采信）③不可验证→标注人工复核
+// 不变量：①验证一致保留正文与证据 ②不一致→诚实并列双答+请复核（不直接采信）③不可验证→标注人工复核
 // ④verifier spec 被限定为「只有 code_exec 工具」⑤self-consistency 多数表决。
 
 type solveExec struct {
-	mu           sync.Mutex
-	specs        []SubAgentSpec
-	solverOuts   []string // 按序返回的 solver 输出（self-consistency 用）
-	solverIdx    int
-	verifierOut  string
-	verifierOuts []string // 按序返回的 verifier 输出（校验重试用）
-	verifierIdx  int
-	graderOut    string
-	graderOuts   []string
-	graderIdx    int
+	mu             sync.Mutex
+	specs          []SubAgentSpec
+	solverOuts     []string // 按序返回的 solver 输出（self-consistency 用）
+	solverIdx      int
+	verifierOut    string
+	verifierOuts   []string // 按序返回的 verifier 输出（校验重试用）
+	verifierStdout string   // 与模型正文独立提供的工具执行结果
+	verifierIdx    int
+	graderOut      string
+	graderOuts     []string
+	graderIdx      int
 }
 
-func (s *solveExec) fn(_ context.Context, spec SubAgentSpec) (SubAgentResult, error) {
+func (s *solveExec) fn(ctx context.Context, spec SubAgentSpec) (SubAgentResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.specs = append(s.specs, spec)
@@ -53,6 +58,12 @@ func (s *solveExec) fn(_ context.Context, spec SubAgentSpec) (SubAgentResult, er
 		}
 		return SubAgentResult{Output: s.graderOut}, nil
 	case verifierAgentName:
+		if s.verifierStdout != "" {
+			captureCodeExecutionReceipt(ctx, codeExecToolName, &skill.Result{
+				Content: s.verifierStdout,
+				Data:    map[string]any{"run_id": "fixture-execution", "status": "success", "exit_code": 0, "stdout_bytes": len(s.verifierStdout)},
+			})
+		}
 		if s.verifierIdx < len(s.verifierOuts) {
 			o := s.verifierOuts[s.verifierIdx]
 			s.verifierIdx++
@@ -83,7 +94,7 @@ func (s *solveExec) specFor(agent string) (SubAgentSpec, bool) {
 
 func solveArgs(problem string) map[string]any { return map[string]any{"problem": problem} }
 
-// ① 验证一致 → 高置信徽标；solver + verifier 各被调用。
+// 模型自报数值一致但没有实际执行回执时，只能保留弱证据。
 func TestSolve_VerifiedAgreement(t *testing.T) {
 	se := &solveExec{verifierOut: "我用 Python 重算。\nVERDICT: AGREE\nCOMPUTED: 42"}
 	o := NewSolveSkill(se.fn, nil)
@@ -97,8 +108,11 @@ func TestSolve_VerifiedAgreement(t *testing.T) {
 	if !strings.Contains(res.Content, "答案：42") {
 		t.Errorf("应含解题正文，得：%s", res.Content)
 	}
-	if !strings.Contains(res.Content, "核验") || !strings.Contains(res.Content, "✅") {
-		t.Errorf("一致应有已核验高置信徽标，得：%s", res.Content)
+	if res.Metadata["solve_evidence"] == "numeric_exec" || strings.Contains(res.Content, "高置信") {
+		t.Errorf("model-only agreement must not produce execution evidence: metadata=%v content=%s", res.Metadata, res.Content)
+	}
+	if res.Metadata["solve_primary_digest"] != "" || res.Metadata["solve_verification_run_id"] != "" {
+		t.Fatal("model-only agreement must not create a reusable execution proof")
 	}
 }
 
@@ -160,9 +174,9 @@ func TestSolve_SelfConsistencyMajority(t *testing.T) {
 	}
 }
 
-// 方法多样：跑 2 个「不同方法」的 solver；两法一致 + 核验 → 高置信。
+// 方法多样：跑 2 个不同方法的 solver；正文保留解法，实际执行证据保留在回执。
 func TestSolve_MethodDiversity_TwoDistinctMethods(t *testing.T) {
-	se := &solveExec{verifierOut: "VERDICT: AGREE\nCOMPUTED: 42"}
+	se := &solveExec{verifierOut: "VERDICT: AGREE\nCOMPUTED: 42", verifierStdout: "COMPUTED: 42\n"}
 	o := NewSolveSkill(se.fn, nil)
 	res, err := o.Execute(context.Background(), map[string]any{"problem": "6×7", "method_diversity": true})
 	if err != nil {
@@ -180,24 +194,36 @@ func TestSolve_MethodDiversity_TwoDistinctMethods(t *testing.T) {
 	if len(tasks) == 2 && tasks[0] == tasks[1] {
 		t.Errorf("两个 solver 应使用不同方法（prompt 应不同）")
 	}
-	if !strings.Contains(res.Content, "解法") || !strings.Contains(res.Content, "✅") {
-		t.Errorf("两法一致 + 核验应高置信，得：%s", res.Content)
+	if !strings.Contains(res.Content, "答案：42") || res.Metadata["solve_evidence"] != "numeric_exec" || strings.Contains(res.Content, "✅") {
+		t.Errorf("应保留答案与执行证据，不追加验证徽标：metadata=%v content=%s", res.Metadata, res.Content)
 	}
 }
 
-// 两法分歧 → code_exec 独立核验充当裁决者（判出正确解法 + 提示另一解法有误）。
+// 两法分歧由实际执行证据裁决，正文只保留选中的解法。
 func TestSolve_MethodDiversity_VerifierAdjudicates(t *testing.T) {
 	se := &solveExec{
-		solverOuts:  []string{"用代数解……\n答案：42", "用代入解……\n答案：43"},
-		verifierOut: "我用代码重算。\nVERDICT: AGREE\nCOMPUTED: 42",
+		solverOuts:     []string{"用代数解……\n答案：42", "用代入解……\n答案：43"},
+		verifierOut:    "我用代码重算。\nVERDICT: AGREE\nCOMPUTED: 42",
+		verifierStdout: "COMPUTED: 42\n",
 	}
 	o := NewSolveSkill(se.fn, nil)
 	res, _ := o.Execute(context.Background(), map[string]any{"problem": "6×7", "method_diversity": true})
-	if !strings.Contains(res.Content, "42") || !strings.Contains(res.Content, "43") {
-		t.Errorf("两法分歧应并列两个答案，得：%s", res.Content)
+	if !strings.Contains(res.Content, "42") || strings.Contains(res.Content, "43") {
+		t.Errorf("应保留代码裁决选中的答案，得：%s", res.Content)
 	}
-	if !strings.Contains(res.Content, "核验") {
-		t.Errorf("应说明由代码核验裁决，得：%s", res.Content)
+	if res.Metadata["solve_evidence"] != "numeric_exec" || strings.Contains(res.Content, "核验") {
+		t.Errorf("应保留执行证据，不追加核验声明：metadata=%v content=%s", res.Metadata, res.Content)
+	}
+	selectedDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(se.solverOuts[0])))
+	verifier, ok := se.specFor(verifierAgentName)
+	if !ok {
+		t.Fatal("missing actual verifier request")
+	}
+	verificationDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(verifier.Task)))
+	if res.Metadata["solve_primary_digest"] != selectedDigest ||
+		res.Metadata["solve_verification_input_digest"] != verificationDigest ||
+		res.Metadata["solve_verification_run_id"] != "fixture-execution" {
+		t.Fatalf("proof must bind the selected solution and actual execution: %v", res.Metadata)
 	}
 }
 
@@ -248,7 +274,7 @@ func TestSolve_Triage_ExplicitParamDisablesTriage(t *testing.T) {
 func TestSolve_Grading_Correct(t *testing.T) {
 	se := &solveExec{
 		verifierOut: "VERDICT: AGREE\nCOMPUTED: 42",
-		graderOut:   "CORRECT: yes\nGUIDANCE: 思路清晰，继续保持。",
+		graderOut:   "CORRECT: yes\nFINAL_ANSWER_CORRECT: yes\nGUIDANCE: 思路清晰，继续保持。",
 	}
 	o := NewSolveSkill(se.fn, nil)
 	res, err := o.Execute(context.Background(), map[string]any{
@@ -269,7 +295,7 @@ func TestSolve_Grading_Correct(t *testing.T) {
 func TestSolve_Grading_WrongFindsStep(t *testing.T) {
 	se := &solveExec{
 		verifierOut: "VERDICT: AGREE\nCOMPUTED: 42",
-		graderOut:   "CORRECT: no\nWRONG_STEP: 第2步把 6×7 当成 6+7 了\nMISCONCEPTION: 把乘法当成加法\nGUIDANCE: 再看看“每盒7支”应该用哪种运算？",
+		graderOut:   "CORRECT: no\nFINAL_ANSWER_CORRECT: no\nWRONG_STEP: 第2步把 6×7 当成 6+7 了\nMISCONCEPTION: 把乘法当成加法\nGUIDANCE: 再看看“每盒7支”应该用哪种运算？",
 	}
 	o := NewSolveSkill(se.fn, nil)
 	res, _ := o.Execute(context.Background(), map[string]any{
@@ -285,7 +311,7 @@ func TestSolve_Grading_WrongFindsStep(t *testing.T) {
 
 // 对标 Hermes JSON-mode：verifier 首次输出无法解析出 verdict → 校验重试一次 → 第二次干净。
 func TestSolve_Verifier_ValidateRetryOnBadFormat(t *testing.T) {
-	se := &solveExec{verifierOuts: []string{"嗯我觉得这题答案大概是对的吧～", "VERDICT: AGREE\nCOMPUTED: 42"}}
+	se := &solveExec{verifierOuts: []string{"嗯我觉得这题答案大概是对的吧～", "VERDICT: AGREE\nCOMPUTED: 42"}, verifierStdout: "COMPUTED: 42\n"}
 	o := NewSolveSkill(se.fn, nil)
 	res, err := o.Execute(context.Background(), solveArgs("小明有 6 盒铅笔，每盒 7 支，一共多少支？"))
 	if err != nil {
@@ -294,8 +320,8 @@ func TestSolve_Verifier_ValidateRetryOnBadFormat(t *testing.T) {
 	if se.verifierCalls() != 2 {
 		t.Fatalf("verifier 解析失败应校验重试一次（共 2 次），实得 %d", se.verifierCalls())
 	}
-	if !strings.Contains(res.Content, "✅") {
-		t.Errorf("重试后得到干净 AGREE，应高置信，得：%s", res.Content)
+	if !strings.Contains(res.Content, "答案：42") || res.Metadata["solve_evidence"] != "numeric_exec" || strings.Contains(res.Content, "✅") {
+		t.Errorf("格式重试后应保留答案与实际执行证据：metadata=%v content=%s", res.Metadata, res.Content)
 	}
 }
 
@@ -303,7 +329,7 @@ func TestSolve_Verifier_ValidateRetryOnBadFormat(t *testing.T) {
 func TestSolve_Grader_ValidateRetryOnBadFormat(t *testing.T) {
 	se := &solveExec{
 		verifierOut: "VERDICT: AGREE\nCOMPUTED: 42",
-		graderOuts:  []string{"你写得不错呀，再想想哦", "CORRECT: no\nWRONG_STEP: 第2步\nMISCONCEPTION: 乘法当加法\nGUIDANCE: 再看看"},
+		graderOuts:  []string{"你写得不错呀，再想想哦", "CORRECT: no\nFINAL_ANSWER_CORRECT: no\nWRONG_STEP: 第2步\nMISCONCEPTION: 乘法当加法\nGUIDANCE: 再看看"},
 	}
 	o := NewSolveSkill(se.fn, nil)
 	res, _ := o.Execute(context.Background(), map[string]any{

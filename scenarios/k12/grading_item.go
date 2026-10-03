@@ -1,0 +1,262 @@
+package k12
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+)
+
+type GradingItemOperation string
+
+type GradingExecutionKind string
+
+const (
+	GradingExecutionProvider           GradingExecutionKind = "provider"
+	GradingExecutionLocalDeterministic GradingExecutionKind = "local_deterministic"
+)
+
+func (k GradingExecutionKind) Valid() bool {
+	return k == GradingExecutionProvider || k == GradingExecutionLocalDeterministic
+}
+
+const (
+	// GradingItemOperationSolve is retained only for historical/third-party
+	// logical ledgers. Current production grading records each physical solver
+	// request independently as solve_generate and solve_verify.
+	GradingItemOperationSolve         GradingItemOperation = "solve"
+	GradingItemOperationSolveGenerate GradingItemOperation = "solve_generate"
+	GradingItemOperationSolveVerify   GradingItemOperation = "solve_verify"
+	GradingItemOperationGrade         GradingItemOperation = "grade"
+	GradingItemOperationParentGuide   GradingItemOperation = "parent_guide"
+)
+
+func (o GradingItemOperation) Valid() bool {
+	return o == GradingItemOperationSolve ||
+		o == GradingItemOperationSolveGenerate ||
+		o == GradingItemOperationSolveVerify ||
+		o == GradingItemOperationGrade ||
+		o == GradingItemOperationParentGuide
+}
+
+// GradingItemInvocation 记录一次可恢复的题目逻辑执行。本机确定性执行仍保留任务冻结路由
+// 作为恢复上下文，但只有物理调用账本可以证明真实 Provider 请求。
+type GradingItemInvocation struct {
+	InvocationID     string               `json:"item_invocation_id"`
+	AgentName        string               `json:"agent_name"`
+	JobID            string               `json:"job_id"`
+	ProblemID        string               `json:"problem_id"`
+	AttemptID        string               `json:"attempt_id"`
+	Operation        GradingItemOperation `json:"operation"`
+	ExecutionKind    GradingExecutionKind `json:"execution_kind"`
+	OperationAttempt int                  `json:"operation_attempt"`
+	RequestDigest    string               `json:"request_digest"`
+	// InputRevision/InputDigest 是本次题目来源快照的成对围栏；V98 之前的历史行允许为零值。
+	InputRevision int                   `json:"input_revision"`
+	InputDigest   string                `json:"input_digest,omitempty"`
+	RouteSnapshot GradingModelSnapshot  `json:"route_snapshot"`
+	Status        ModelInvocationStatus `json:"status"`
+	CostReceiptID string                `json:"cost_receipt_id,omitempty"`
+	ResultDigest  string                `json:"result_digest,omitempty"`
+	ResultJSON    string                `json:"result_json,omitempty"`
+	FailureClass  string                `json:"failure_class,omitempty"`
+	FailureCode   string                `json:"failure_code,omitempty"`
+	CreatedAt     int64                 `json:"created_at"`
+	UpdatedAt     int64                 `json:"updated_at"`
+}
+
+func (v *GradingItemInvocation) ValidateIdentity() error {
+	if v == nil {
+		return fmt.Errorf("grading item invocation is nil")
+	}
+	v.InvocationID = strings.TrimSpace(v.InvocationID)
+	v.AgentName = strings.TrimSpace(v.AgentName)
+	v.JobID = strings.TrimSpace(v.JobID)
+	v.ProblemID = strings.TrimSpace(v.ProblemID)
+	v.AttemptID = strings.TrimSpace(v.AttemptID)
+	v.RequestDigest = strings.TrimSpace(v.RequestDigest)
+	v.InputDigest = strings.TrimSpace(v.InputDigest)
+	if v.InputRevision < 0 || (v.InputRevision == 0) != (v.InputDigest == "") {
+		return fmt.Errorf("grading item invocation input revision and digest must be provided together")
+	}
+	v.CostReceiptID = strings.TrimSpace(v.CostReceiptID)
+	if v.ExecutionKind == "" {
+		v.ExecutionKind = GradingExecutionProvider
+	}
+	v.RouteSnapshot = NormalizeGradingModelSnapshot(v.RouteSnapshot)
+	if v.InvocationID == "" || v.AgentName == "" || v.JobID == "" || v.ProblemID == "" ||
+		v.AttemptID == "" || v.RequestDigest == "" || v.OperationAttempt < 1 || !v.Operation.Valid() || !v.ExecutionKind.Valid() ||
+		v.RouteSnapshot.Provider == "" || v.RouteSnapshot.Model == "" || v.RouteSnapshot.Route == "" {
+		return fmt.Errorf("grading item invocation missing id/owner/job/problem/attempt/operation/digest/route")
+	}
+	return nil
+}
+
+type GradingAssessmentStatus string
+
+const (
+	GradingAssessmentCorrect       GradingAssessmentStatus = "correct"
+	GradingAssessmentProcessIssue  GradingAssessmentStatus = "correct_with_process_issue"
+	GradingAssessmentWrong         GradingAssessmentStatus = "wrong"
+	GradingAssessmentUnanswered    GradingAssessmentStatus = "unanswered"
+	GradingAssessmentAnswerUnclear GradingAssessmentStatus = "answer_unclear"
+	GradingAssessmentBlankSolved   GradingAssessmentStatus = "blank_solved"
+	GradingAssessmentOutOfScope    GradingAssessmentStatus = "out_of_scope"
+	GradingAssessmentUntrusted     GradingAssessmentStatus = "untrusted"
+)
+
+func (s GradingAssessmentStatus) Valid() bool {
+	switch s {
+	case GradingAssessmentCorrect, GradingAssessmentProcessIssue, GradingAssessmentWrong, GradingAssessmentUnanswered,
+		GradingAssessmentAnswerUnclear, GradingAssessmentBlankSolved,
+		GradingAssessmentOutOfScope, GradingAssessmentUntrusted:
+		return true
+	}
+	return false
+}
+
+const GradingProjectionCommitted = "committed"
+
+const (
+	GradingAssessmentDispositionCurrent    = "current"
+	GradingAssessmentDispositionSuperseded = "superseded"
+	GradingAssessmentStructureVersion      = 1
+)
+
+var ErrGradingAssessmentTerminalInvariant = errors.New("grading assessment terminal invariant violated")
+
+// GradingAssessmentItem is the exactly-once local receipt for one stable
+// problem. Invocation references are status-dependent: unanswered/unclear make
+// no model call, blank_solved has solve only, and a graded verdict has both.
+type GradingAssessmentItem struct {
+	AnswerSource            *ProblemAnswerSource    `json:"answer_source,omitempty"`
+	AgentName               string                  `json:"agent_name"`
+	JobID                   string                  `json:"job_id"`
+	ProblemID               string                  `json:"problem_id"`
+	AttemptID               string                  `json:"attempt_id"`
+	ConfirmedVersion        int                     `json:"confirmed_version"`
+	InputRevision           int                     `json:"input_revision"`
+	PublishedRevision       int                     `json:"published_revision"`
+	CurrentDisposition      string                  `json:"current_disposition"`
+	StructureVersion        int                     `json:"structure_version"`
+	InputDigest             string                  `json:"input_digest"`
+	Status                  GradingAssessmentStatus `json:"status"`
+	ResultJSON              string                  `json:"result_json"`
+	ResultDigest            string                  `json:"result_digest"`
+	SolveInvocationID       string                  `json:"solve_invocation_id,omitempty"`
+	GradeInvocationID       string                  `json:"grade_invocation_id,omitempty"`
+	ParentGuideInvocationID string                  `json:"parent_guide_invocation_id,omitempty"`
+	ProjectionRecordID      string                  `json:"projection_record_id,omitempty"`
+	ProjectionCreated       bool                    `json:"projection_created,omitempty"`
+	ProjectionStatus        string                  `json:"projection_status"`
+	CreatedAt               int64                   `json:"created_at"`
+	UpdatedAt               int64                   `json:"updated_at"`
+}
+
+func (v *GradingAssessmentItem) Validate() error {
+	if v == nil {
+		return fmt.Errorf("grading assessment item is nil")
+	}
+	v.AgentName = strings.TrimSpace(v.AgentName)
+	v.JobID = strings.TrimSpace(v.JobID)
+	v.ProblemID = strings.TrimSpace(v.ProblemID)
+	v.AttemptID = strings.TrimSpace(v.AttemptID)
+	v.InputDigest = strings.TrimSpace(v.InputDigest)
+	v.ResultDigest = strings.TrimSpace(v.ResultDigest)
+	v.ResultJSON = strings.TrimSpace(v.ResultJSON)
+	v.SolveInvocationID = strings.TrimSpace(v.SolveInvocationID)
+	v.GradeInvocationID = strings.TrimSpace(v.GradeInvocationID)
+	v.ParentGuideInvocationID = strings.TrimSpace(v.ParentGuideInvocationID)
+	if v.AgentName == "" || v.JobID == "" || v.ProblemID == "" || v.AttemptID == "" ||
+		v.ConfirmedVersion < 1 || v.InputDigest == "" || !v.Status.Valid() ||
+		v.ResultDigest == "" || v.ResultJSON == "" || !json.Valid([]byte(v.ResultJSON)) ||
+		v.ProjectionStatus != GradingProjectionCommitted {
+		return fmt.Errorf("grading assessment item missing owner/job/problem/attempt/version/digest/result/status")
+	}
+
+	hasSolve := v.SolveInvocationID != ""
+	if v.AnswerSource != nil {
+		if err := v.AnswerSource.Validate(); err != nil {
+			return err
+		}
+		if v.AnswerSource.Kind == ProblemAnswerAsset {
+			if hasSolve {
+				return fmt.Errorf("asset adoption must not claim a solve invocation")
+			}
+			hasSolve = true
+		} else if v.AnswerSource.InvocationID != v.SolveInvocationID {
+			return fmt.Errorf("answer source invocation mismatch")
+		}
+	}
+	switch v.Status {
+	case GradingAssessmentUntrusted:
+		// 题干的确定性矛盾只引用求解回执，不伪造学生批改或教学调用。
+		var result struct {
+			Solve struct {
+				ProblemIssue string `json:"problem_issue"`
+				Evidence     struct {
+					Verdict      string
+					EvidenceType string
+				}
+			}
+			ParentGuide json.RawMessage
+		}
+		if json.Unmarshal([]byte(v.ResultJSON), &result) == nil && result.Solve.ProblemIssue == "inconsistent_gcd_lcm" && result.Solve.Evidence.Verdict == "unverifiable" && result.Solve.Evidence.EvidenceType == "numeric_exec" && v.SolveInvocationID != "" && v.GradeInvocationID == "" && v.ParentGuideInvocationID == "" && (len(result.ParentGuide) == 0 || string(result.ParentGuide) == "null") {
+			break
+		}
+		fallthrough
+	case GradingAssessmentCorrect, GradingAssessmentProcessIssue, GradingAssessmentWrong:
+		if !hasSolve || v.GradeInvocationID == "" {
+			return fmt.Errorf("grading assessment %s requires solve and grade invocations", v.Status)
+		}
+	case GradingAssessmentBlankSolved:
+		if !hasSolve || v.GradeInvocationID != "" {
+			return fmt.Errorf("blank_solved requires solve only")
+		}
+	case GradingAssessmentUnanswered, GradingAssessmentAnswerUnclear:
+		if hasSolve || v.GradeInvocationID != "" {
+			return fmt.Errorf("grading assessment %s must not claim model invocations", v.Status)
+		}
+	case GradingAssessmentOutOfScope:
+		if v.GradeInvocationID != "" {
+			return fmt.Errorf("out_of_scope must not claim a grade invocation")
+		}
+	}
+	if v.ParentGuideInvocationID != "" &&
+		v.Status != GradingAssessmentWrong &&
+		v.Status != GradingAssessmentProcessIssue &&
+		v.Status != GradingAssessmentBlankSolved {
+		return fmt.Errorf("grading assessment %s must not claim a parent guide invocation", v.Status)
+	}
+	return nil
+}
+
+// ValidateTerminalParentGuideReference is stricter than Validate on purpose.
+// Validate keeps historical receipts readable, while this boundary prevents a
+// legacy/incomplete wrong or blank-solved item from being published as a
+// current terminal result. CommitGradingAssessmentItem separately proves that
+// every non-empty reference names a matching succeeded invocation.
+func (v GradingAssessmentItem) ValidateTerminalParentGuideReference() error {
+	if err := v.Validate(); err != nil {
+		return fmt.Errorf("%w: %v", ErrGradingAssessmentTerminalInvariant, err)
+	}
+	switch v.Status {
+	case GradingAssessmentWrong, GradingAssessmentProcessIssue, GradingAssessmentBlankSolved:
+		if v.ParentGuideInvocationID == "" {
+			return fmt.Errorf(
+				"%w: grading assessment %s requires a succeeded parent guide reference",
+				ErrGradingAssessmentTerminalInvariant,
+				v.Status,
+			)
+		}
+	default:
+		if v.ParentGuideInvocationID != "" {
+			return fmt.Errorf(
+				"%w: grading assessment %s must remain parent-guide-free",
+				ErrGradingAssessmentTerminalInvariant,
+				v.Status,
+			)
+		}
+	}
+	return nil
+}

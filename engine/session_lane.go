@@ -3,7 +3,9 @@ package engine
 import (
 	"context"
 	"fmt"
+	"time"
 
+	"github.com/hexagon-codes/hexagon/observe/trace"
 	"github.com/hexagon-codes/hexclaw/session"
 )
 
@@ -80,15 +82,22 @@ func (e *ReActEngine) acquireSessionLane(ctx context.Context, sessionID, request
 	lock := e.sessionLock
 	e.mu.RUnlock()
 
+	if lane == nil && lock == nil {
+		return nil, nil
+	}
+	waitStarted := time.Now()
+	trace.L(ctx).Info("session lane wait started", "stage", "session_wait", "session_id", sessionID, "request_id", requestID)
+
 	if lane != nil {
 		lease, err := lane.Acquire(ctx, LaneKey{SessionID: sessionID, RequestID: requestID})
 		if err != nil {
+			trace.L(ctx).Warn("session lane wait failed", "stage", "session_wait", "session_id", sessionID, "request_id", requestID, "reason", "acquire_error", "err", err, "elapsed_ms", time.Since(waitStarted).Milliseconds())
 			return nil, err
 		}
+		trace.L(ctx).Info("session lane wait completed", "stage", "session_wait", "session_id", sessionID, "request_id", requestID, "elapsed_ms", time.Since(waitStarted).Milliseconds())
 		return func() { _ = lease.Release(context.Background()) }, nil
 	}
-	if lock != nil {
-		return lock.Acquire(sessionID), nil
-	}
-	return nil, nil
+	unlock := lock.Acquire(sessionID)
+	trace.L(ctx).Info("session lane wait completed", "stage", "session_wait", "session_id", sessionID, "request_id", requestID, "elapsed_ms", time.Since(waitStarted).Milliseconds())
+	return unlock, nil
 }

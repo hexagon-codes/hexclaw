@@ -1,19 +1,6 @@
 package engine
 
-// BUG-20260712-b failover 继承被取消的 ctx（真机 "hello" 整条对话仍失败的最后一环）。
-//
-// 复现的真机链路（在 BUG-20260712-a egress 修复之后仍失败）：
-//   1) 路由先选本地 Ollama(tools=33) → CPU 巨型 prompt header 超时 → 本地 HTTP 客户端**取消了
-//      共享请求 ctx**，错误呈 "context canceled"。
-//   2) 引擎回退到云端健康 provider（智谱 glm-4v-flash），egress 已 cloud-safe（-a 修复），
-//      但回退请求的 ctx 是从**那个已被取消的 ctx**派生的 → 云端 provider 拿到手就是 canceled
-//      → 真实 HTTP 客户端立刻 "context canceled" 失败，provider 被熔断。
-//   3) 没有更多健康 provider → 落到友好错误 "模型服务暂时不可用"。用户看到的是「本地能用、云端
-//      也配了，却什么都回不出来」。真机日志取证：`to=智谱 AI model=glm-4v-flash ... err=context
-//      canceled`——回退**打到了**智谱，却被毒化的 ctx 就地枪毙。
-//
-// 修复（本套件钉死）：rebuildRequestForFailover 用 context.WithoutCancel 脱离上游取消，让回退请求
-// 拿到一个干净、可用的 ctx；各 provider 客户端自带超时兜底，不会无限挂。
+// 调用者取消与上游局部失败必须区分：前者终止派发，后者才允许在原期限内回退。
 
 import (
 	"context"
@@ -28,8 +15,7 @@ import (
 	"github.com/hexagon-codes/hexclaw/adapter"
 )
 
-// ctxPoisonLocalProvider 模拟本地 Ollama header 超时：被调用时**取消共享请求 ctx**（cancel），
-// 再返回 "context canceled" 错误——真机里本地 HTTP 客户端就是这样毒化整条链的。
+// ctxPoisonLocalProvider 在首次模型调用期间触发调用者取消。
 type ctxPoisonLocalProvider struct {
 	name   string
 	cancel context.CancelFunc
@@ -41,7 +27,7 @@ func (p *ctxPoisonLocalProvider) Name() string { return p.name }
 func (p *ctxPoisonLocalProvider) poison() error {
 	atomic.AddInt32(&p.calls, 1)
 	if p.cancel != nil {
-		p.cancel() // 本地超时取消共享 ctx（毒化后续回退）
+		p.cancel()
 	}
 	return errors.New(`Post "http://localhost:11434/api/chat": context canceled`)
 }
@@ -69,9 +55,13 @@ func (p *ctxPoisonLocalProvider) callCount() int32 { return atomic.LoadInt32(&p.
 type ctxHealthCloudProvider struct {
 	egressCaptureProvider
 	sawCanceled int32
+	calls       int32
+	receivedCtx context.Context
 }
 
 func (p *ctxHealthCloudProvider) Complete(ctx context.Context, _ hexagon.CompletionRequest) (*hexagon.CompletionResponse, error) {
+	atomic.AddInt32(&p.calls, 1)
+	p.receivedCtx = ctx
 	if err := ctx.Err(); err != nil {
 		atomic.StoreInt32(&p.sawCanceled, 1)
 		return nil, fmt.Errorf(`Post "https://open.bigmodel.cn": %w`, err)
@@ -81,6 +71,8 @@ func (p *ctxHealthCloudProvider) Complete(ctx context.Context, _ hexagon.Complet
 }
 
 func (p *ctxHealthCloudProvider) Stream(ctx context.Context, _ hexagon.CompletionRequest) (*hexagon.LLMStream, error) {
+	atomic.AddInt32(&p.calls, 1)
+	p.receivedCtx = ctx
 	if err := ctx.Err(); err != nil {
 		atomic.StoreInt32(&p.sawCanceled, 1)
 		return nil, fmt.Errorf(`Post "https://open.bigmodel.cn": %w`, err)
@@ -96,9 +88,8 @@ func (p *ctxHealthCloudProvider) Stream(ctx context.Context, _ hexagon.Completio
 
 func (p *ctxHealthCloudProvider) canceledSeen() bool { return atomic.LoadInt32(&p.sawCanceled) == 1 }
 
-// TestFailover_NonStreaming_DetachesCanceledCtx 非流式：本地取消共享 ctx 后回退云端，
-// 回退请求必须拿到干净 ctx（rebuildRequestForFailover WithoutCancel），云端不得看见 canceled。
-func TestFailover_NonStreaming_DetachesCanceledCtx(t *testing.T) {
+// 非流式调用者取消后不得启动备用模型或污染当前模型健康。
+func TestFailover_NonStreaming_PreservesCanceledCtx(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	local := &ctxPoisonLocalProvider{name: "Ollama (本地)", cancel: cancel}
@@ -110,22 +101,22 @@ func TestFailover_NonStreaming_DetachesCanceledCtx(t *testing.T) {
 		UserID: "u-ctx-1", ChatID: "c-ctx-1",
 		Content: "hello",
 	})
-	if err != nil {
-		t.Fatalf("BUG 复现：本地取消共享 ctx 后回退云端继承了被取消的 ctx → 云端就地 context canceled：%v", err)
-	}
-	if !strings.Contains(reply.Content, "ok") {
-		t.Fatalf("应拿到云端 provider 的正常回答，got %q", reply.Content)
+	if !errors.Is(err, context.Canceled) || reply != nil {
+		t.Fatalf("caller cancellation must stop the request: reply=%+v err=%v", reply, err)
 	}
 	if local.callCount() == 0 {
 		t.Fatalf("本地 provider 应先被调用一次（是回退+取消的起点）")
 	}
-	if cloud.canceledSeen() {
-		t.Fatalf("BUG 复现：回退请求把被取消的 ctx 透传给了云端（应 WithoutCancel 脱钩）")
+	if calls := atomic.LoadInt32(&cloud.calls); calls != 0 {
+		t.Fatalf("caller cancellation dispatched %d fallback calls", calls)
+	}
+	if _, name, routeErr := eng.router.Route(context.Background()); routeErr != nil || name != local.name {
+		t.Fatalf("caller cancellation must not trip provider health: name=%q err=%v", name, routeErr)
 	}
 }
 
-// TestFailover_Streaming_DetachesCanceledCtx 流式（真机同构，日志里就是流式回退）：同上。
-func TestFailover_Streaming_DetachesCanceledCtx(t *testing.T) {
+// 流式取消保持同一停止语义，不把取消包装成新的模型请求。
+func TestFailover_Streaming_PreservesCanceledCtx(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	local := &ctxPoisonLocalProvider{name: "Ollama (本地)", cancel: cancel}
@@ -141,16 +132,16 @@ func TestFailover_Streaming_DetachesCanceledCtx(t *testing.T) {
 		t.Fatalf("ProcessStream 建流失败: %v", err)
 	}
 	out, derr := drainStream(t, ch)
-	if derr != nil {
-		t.Fatalf("BUG 复现：流式本地取消 ctx 后回退云端继承取消 → 云端就地 context canceled：%v", derr)
-	}
-	if !strings.Contains(out, "ok") {
-		t.Fatalf("流式应拿到云端 provider 的正常回答，got %q", out)
+	if out != "" {
+		t.Fatalf("caller cancellation must not produce a fallback answer: out=%q err=%v", out, derr)
 	}
 	if local.callCount() == 0 {
 		t.Fatalf("本地 provider 应先被调用一次（是回退+取消的起点）")
 	}
-	if cloud.canceledSeen() {
-		t.Fatalf("BUG 复现：流式回退请求把被取消的 ctx 透传给了云端（应 WithoutCancel 脱钩）")
+	if calls := atomic.LoadInt32(&cloud.calls); calls != 0 {
+		t.Fatalf("caller cancellation dispatched %d fallback calls", calls)
+	}
+	if _, name, routeErr := eng.router.Route(context.Background()); routeErr != nil || name != local.name {
+		t.Fatalf("caller cancellation must not trip provider health: name=%q err=%v", name, routeErr)
 	}
 }

@@ -89,6 +89,46 @@ func TestForkSession_EmptyBody(t *testing.T) {
 	}
 }
 
+func TestForkSession_ExclusivePrefixRequest(t *testing.T) {
+	store := newTestStoreForAPI(t)
+	ctx := context.Background()
+	if err := store.CreateSession(ctx, &storage.Session{
+		ID: "sess-edit-source", UserID: "editor", Platform: "web", Title: "编辑源会话",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"before", "edited", "tail"} {
+		if err := store.SaveMessage(ctx, &storage.MessageRecord{
+			ID: id, SessionID: "sess-edit-source", Role: "user", Content: id, Metadata: "{}",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := config.DefaultConfig()
+	srv := NewServer(cfg, &mockEngine{reply: &adapter.Reply{Content: "ok"}}, nil, store)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/sess-edit-source/fork",
+		strings.NewReader(`{"message_id":"edited","user_id":"editor","include_message":false}`))
+	req.SetPathValue("id", "sess-edit-source")
+	w := httptest.NewRecorder()
+	srv.handleForkSession(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("fork status = %d: %s", w.Code, w.Body.String())
+	}
+	var response struct {
+		Session storage.Session `json:"session"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	messages, err := store.ListMessages(ctx, response.Session.ID, 100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 1 || messages[0].Content != "before" {
+		t.Fatalf("exclusive API fork copied %#v, want only before", messages)
+	}
+}
+
 // 测试 handleSearchMessages 缺少 q 参数
 func TestSearchMessages_MissingQuery(t *testing.T) {
 	store := newTestStoreForAPI(t)
@@ -747,6 +787,64 @@ func TestDeleteSession_CrossUser(t *testing.T) {
 
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("跨用户删除应返回 404，实际 %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// REG-TOOL-APPROVAL-SESSION-DELETE-001 工程子门：
+// DELETE /api/v1/sessions/{id} 成功删除后必须触发进程内清理 hook（PermissionHub.ClearSession）。
+func TestDeleteSession_InvokesSessionDeletedHook(t *testing.T) {
+	store := newTestStoreForAPI(t)
+	cfg := config.DefaultConfig()
+	eng := &mockEngine{reply: &adapter.Reply{Content: "ok"}}
+	srv := NewServer(cfg, eng, nil, store)
+
+	deleted := make(chan string, 1)
+	srv.SetSessionDeletedHook(func(sessionID string) { deleted <- sessionID })
+
+	if err := store.CreateSession(context.Background(), &storage.Session{
+		ID: "sess-hook", UserID: "test", Platform: "web", Title: "hook 会话",
+	}); err != nil {
+		t.Fatalf("创建会话失败: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/sessions/sess-hook?user_id=test", nil)
+	req.SetPathValue("id", "sess-hook")
+	w := httptest.NewRecorder()
+	srv.handleDeleteSession(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("期望 200，实际 %d: %s", w.Code, w.Body.String())
+	}
+	select {
+	case id := <-deleted:
+		if id != "sess-hook" {
+			t.Fatalf("hook 收到 sessionID=%q, want sess-hook", id)
+		}
+	default:
+		t.Fatal("会话删除后未调用 session-deleted hook（进程内审批状态未清理）")
+	}
+}
+
+// 删除失败（404/403）不得触发 hook，避免把失败会话误当已清理。
+func TestDeleteSession_HookNotInvokedOnFailure(t *testing.T) {
+	store := newTestStoreForAPI(t)
+	cfg := config.DefaultConfig()
+	eng := &mockEngine{reply: &adapter.Reply{Content: "ok"}}
+	srv := NewServer(cfg, eng, nil, store)
+
+	called := 0
+	srv.SetSessionDeletedHook(func(string) { called++ })
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/sessions/nonexistent?user_id=test", nil)
+	req.SetPathValue("id", "nonexistent")
+	w := httptest.NewRecorder()
+	srv.handleDeleteSession(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("删除不存在的会话应返回 404，实际 %d: %s", w.Code, w.Body.String())
+	}
+	if called != 0 {
+		t.Fatalf("删除失败仍触发 hook，调用次数=%d, want 0", called)
 	}
 }
 

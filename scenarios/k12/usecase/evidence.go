@@ -31,11 +31,15 @@ const (
 // SolveEvidence solve 输出的证据对象（评审 P0-4）——徽章强弱由**实际验证方式**决定，
 // 同源模型复核不得包装成"已程序验算"。
 type SolveEvidence struct {
-	Verdict             Verdict
-	EvidenceType        EvidenceType
-	SolverModel         string
-	VerifierModel       string
-	RecognizedInputHash string // 绑定 OCR 回显后的输入；输入被改则徽章失效
+	// 复用资格所需的物理执行关联；为空的旧证据仍保留原批改语义，不自动升级为资产。
+	SolverOutputDigest      string `json:",omitempty"`
+	VerificationInputDigest string `json:",omitempty"`
+	VerificationRunID       string `json:",omitempty"`
+	Verdict                 Verdict
+	EvidenceType            EvidenceType
+	SolverModel             string
+	VerifierModel           string
+	RecognizedInputHash     string // 绑定 OCR 回显后的输入；输入被改则徽章失效
 }
 
 // StrongTrust 是否可显"强信任"徽章（PRD §5.3.2）：

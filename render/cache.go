@@ -82,6 +82,8 @@ func NewCache(cfg CacheConfig) (*Cache, error) {
 // Key 计算缓存键。所有影响输出的维度都进 hash。
 func (c *Cache) Key(content string, format Format, opts RenderOptions) string {
 	h := sha256.New()
+	// reader 与可见元数据语义变化必须隔离旧产物。
+	h.Write([]byte("reader:math-delimiters-v2|metadata:source-date-v1|"))
 	h.Write([]byte(content))
 	h.Write([]byte("|F:"))
 	h.Write([]byte(format))

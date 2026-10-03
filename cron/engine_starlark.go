@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"log/slog"
 	"math"
 	"net/http"
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hexagon-codes/hexclaw/httpua"
@@ -29,11 +31,14 @@ import (
 // structural sandbox — the opposite of an AST denylist that must chase every new
 // escape.
 type StarlarkEngine struct {
-	client     *http.Client
-	maxBody    int64
-	stdoutTail int
-	kbIngest   KBIngestFunc
-	stateStore StateStore // §13.3(2) per-job 跨运行 KV，nil → state_get 返默认 / state_set 报错
+	client                  *http.Client
+	maxBody                 int64
+	stdoutTail              int
+	kbIngest                KBIngestFunc
+	stateStore              StateStore // §13.3(2) per-job 跨运行 KV，nil → state_get 返默认 / state_set 报错
+	capabilityMu            sync.RWMutex
+	loopbackCapabilityToken string
+	serviceAPIOrigins       map[string]bool
 }
 
 // KBIngestFunc persists a document into the local knowledge base in-process and
@@ -61,6 +66,67 @@ func NewStarlarkEngine() *StarlarkEngine {
 		maxBody:    starlarkMaxBody,
 		stdoutTail: 64 * 1024,
 	}
+}
+
+// SetLoopbackCapabilityToken 只在进程内保存本次 Sidecar 的回环鉴权 token。
+func (e *StarlarkEngine) SetLoopbackCapabilityToken(token string) {
+	e.SetServiceAPIAuth("http://localhost:16060", token)
+}
+
+// SetServiceAPIAuth 将自动凭据限定到当前服务实际端口的 API。
+func (e *StarlarkEngine) SetServiceAPIAuth(baseURL, token string) {
+	e.capabilityMu.Lock()
+	defer e.capabilityMu.Unlock()
+	e.loopbackCapabilityToken = strings.TrimSpace(token)
+	e.serviceAPIOrigins = make(map[string]bool)
+	base, err := url.Parse(baseURL)
+	if err != nil {
+		return
+	}
+	e.serviceAPIOrigins[base.Scheme+"://"+base.Host] = true
+	if base.Hostname() == "localhost" {
+		for _, host := range []string{"127.0.0.1", "[::1]"} {
+			if base.Port() != "" {
+				host += ":" + base.Port()
+			}
+			e.serviceAPIOrigins[base.Scheme+"://"+host] = true
+		}
+	}
+}
+
+type serviceAPITransport struct {
+	base    http.RoundTripper
+	origins map[string]bool
+	token   string
+}
+
+// RoundTrip 的副本承载凭据，原请求、脚本和日志不接触自动注入值。
+func (t serviceAPITransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	path := r.URL.Path
+	if t.token != "" && r.URL.User == nil && t.origins[r.URL.Scheme+"://"+r.URL.Host] &&
+		(strings.HasPrefix(path, "/api/v1/") || strings.HasPrefix(path, "/api/k12/") || path == "/ws") {
+		r = r.Clone(r.Context())
+		r.Header.Set("Authorization", "Bearer "+t.token)
+	}
+	return t.base.RoundTrip(r)
+}
+
+func (e *StarlarkEngine) serviceClient() *http.Client {
+	e.capabilityMu.RLock()
+	defer e.capabilityMu.RUnlock()
+	client := *e.client
+	base := client.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	client.Transport = serviceAPITransport{base: base, origins: e.serviceAPIOrigins, token: e.loopbackCapabilityToken}
+	return &client
+}
+
+func (e *StarlarkEngine) loopbackCapability() string {
+	e.capabilityMu.RLock()
+	defer e.capabilityMu.RUnlock()
+	return e.loopbackCapabilityToken
 }
 
 func (e *StarlarkEngine) Name() string    { return RuntimeStarlark }
@@ -351,6 +417,10 @@ func (e *StarlarkEngine) builtinHTTP(ctx context.Context, method string) func(*s
 		}
 		req, err := http.NewRequestWithContext(ctx, method, url, rdr)
 		if err != nil {
+			slog.Info("[cron] starlark external call",
+				"source", "cron", "job", stateJobIDFrom(ctx), "runtime", RuntimeStarlark,
+				"stage", "http", "status", "error", "method", method,
+				"url", url, "request_body", body, "error", err)
 			return nil, fmt.Errorf("%s: %w", b.Name(), err)
 		}
 		// 默认浏览器 User-Agent，避免站点对 Go 默认 UA 返回反爬 HTML（脚本可经 headers 覆盖）。
@@ -362,16 +432,42 @@ func (e *StarlarkEngine) builtinHTTP(ctx context.Context, method string) func(*s
 				req.Header.Set(k, v)
 			}
 		}
-		resp, err := e.client.Do(req)
+		started := time.Now()
+		resp, err := e.serviceClient().Do(req)
 		if err != nil {
+			slog.Info("[cron] starlark external call",
+				"source", "cron", "job", stateJobIDFrom(ctx), "runtime", RuntimeStarlark,
+				"stage", "http", "elapsed_ms", time.Since(started).Milliseconds(),
+				"status", "error", "method", method, "url", req.URL.String(),
+				"request_headers", req.Header, "request_body", body, "error", err)
 			return nil, fmt.Errorf("%s: %w", b.Name(), err)
 		}
 		defer resp.Body.Close()
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, e.maxBody))
+		slog.Info("[cron] starlark external call",
+			"source", "cron", "job", stateJobIDFrom(ctx), "runtime", RuntimeStarlark,
+			"stage", "http", "elapsed_ms", time.Since(started).Milliseconds(),
+			"status", "success", "method", method, "url", req.URL.String(),
+			"request_headers", req.Header, "request_body", body,
+			"http_status", resp.StatusCode, "response_headers", resp.Header,
+			"response_content_length", resp.ContentLength, "response_body_bytes", len(data))
 		out := starlark.NewDict(2)
 		_ = out.SetKey(starlark.String("status"), starlark.MakeInt(resp.StatusCode))
 		_ = out.SetKey(starlark.String("body"), starlark.String(string(data)))
 		return out, nil
+	}
+}
+
+func isLoopbackURL(rawURL string) bool {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return false
+	}
+	switch strings.ToLower(parsed.Hostname()) {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -391,10 +487,19 @@ func (e *StarlarkEngine) builtinKBIngest(ctx context.Context) func(*starlark.Thr
 		if strings.TrimSpace(content) == "" {
 			return nil, fmt.Errorf("kb_ingest: content must not be empty")
 		}
+		started := time.Now()
 		id, err := e.kbIngest(ctx, title, content, source)
 		if err != nil {
+			slog.Info("[cron] starlark external call",
+				"source", "cron", "job", stateJobIDFrom(ctx), "runtime", RuntimeStarlark,
+				"stage", "kb_ingest", "elapsed_ms", time.Since(started).Milliseconds(), "status", "error",
+				"title", title, "content", content, "knowledge_source", source, "error", err)
 			return nil, fmt.Errorf("kb_ingest: %w", err)
 		}
+		slog.Info("[cron] starlark external call",
+			"source", "cron", "job", stateJobIDFrom(ctx), "runtime", RuntimeStarlark,
+			"stage", "kb_ingest", "elapsed_ms", time.Since(started).Milliseconds(), "status", "success",
+			"document_id", id, "title", title, "content", content, "knowledge_source", source)
 		out := starlark.NewDict(1)
 		_ = out.SetKey(starlark.String("id"), starlark.String(id))
 		return out, nil

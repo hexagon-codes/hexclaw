@@ -3,18 +3,57 @@ package usecase
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 )
 
-// TestMarkRetried_EbbinghausLadder 验证间隔阶梯：每次重做做对，ReviewStage +1，
-// 下次到期按 3/7/15/30/30 天推进（末档封顶），且轮次持久化回卡片 fields。
+// TestReviewPolicyV1_DueIndependentOfTimezoneAndDST 钉死 due_at 的业务口径是
+// 策略规定的绝对时长，不受呈现时区或 DST 跳时影响。2026-03-08 纽约进入夏令时，
+// 从切换前一天完成一次重做仍必须精确排到 3*24h 后；上海同一瞬间结果完全一致。
+func TestReviewPolicyV1_DueIndependentOfTimezoneAndDST(t *testing.T) {
+	newYork, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatal(err)
+	}
+	shanghai, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	completedAt := time.Date(2026, 3, 7, 12, 0, 0, 0, newYork)
+	wantDue := completedAt.Unix() + 3*86400
+
+	for _, displayLocation := range []*time.Location{newYork, shanghai} {
+		t.Run(displayLocation.String(), func(t *testing.T) {
+			d, _ := newPipeline(t, fakeSolver{}, fakeGrader{}, &fakeInsights{})
+			d.Now = func() int64 { return completedAt.In(displayLocation).Unix() }
+			id := seedMistake(t, d, "dst-"+displayLocation.String(), "小数乘法", "计算失误", completedAt.Unix()-1)
+			cur, err := d.Records.Get(context.Background(), id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := d.MarkRetried(context.Background(), id, cur.Version); err != nil {
+				t.Fatal(err)
+			}
+			got, err := d.Records.Get(context.Background(), id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.DueAt == nil || *got.DueAt != wantDue {
+				t.Fatalf("due_at 受时区/DST 漂移: got=%v want=%d", got.DueAt, wantDue)
+			}
+		})
+	}
+}
+
+// TestMarkRetried_EbbinghausLadder 验证间隔阶梯（§4.6 默认策略 v1：1/3/7/14 天）：
+// 每次重做做对，ReviewStage +1，下次到期按 3/7/14 天推进（末档封顶），轮次持久化回卡片 fields。
 func TestMarkRetried_EbbinghausLadder(t *testing.T) {
 	d, _ := newPipeline(t, fakeSolver{}, fakeGrader{}, &fakeInsights{}) // now()=1000
 	ctx := context.Background()
 	id := seedMistake(t, d, "a", "小数乘法", "计算失误", 500) // stage 0, version 0
 
-	wantDays := []int64{3, 7, 15, 30, 30} // rung 1..5（第 5 次仍封顶 30 天）
+	wantDays := []int64{3, 7, 14, 14, 14} // rung 1..5（第 4 次起封顶 14 天）
 	for i, days := range wantDays {
 		cur, err := d.Records.Get(ctx, id)
 		if err != nil {
@@ -45,37 +84,42 @@ func TestMarkRetried_EbbinghausLadder(t *testing.T) {
 	}
 }
 
-// TestReviewIntervalLadder_MonotonicAndCapped 属性检查：间隔单调不减、封顶 30 天、
-// 负轮次退化到 rung 0。防未来调阶梯时不小心弄出"越复习越频繁"的反效果。
+// TestReviewIntervalLadder_MonotonicAndCapped 属性检查（§4.6 策略 v1）：间隔单调不减、
+// 封顶 14 天、负轮次退化到 rung 0。防未来调阶梯时不小心弄出"越复习越频繁"的反效果。
 func TestReviewIntervalLadder_MonotonicAndCapped(t *testing.T) {
-	const cap30 = int64(30 * 86400)
+	const capV1 = int64(14 * 86400)
 	prev := int64(0)
 	for stage := 0; stage < 12; stage++ {
 		got := reviewIntervalForStage(stage)
 		if got < prev {
 			t.Errorf("间隔应单调不减: stage %d = %d < prev %d", stage, got, prev)
 		}
-		if got > cap30 {
-			t.Errorf("间隔应封顶 30 天: stage %d = %d", stage, got)
+		if got > capV1 {
+			t.Errorf("间隔应封顶 14 天（策略 v1）: stage %d = %d", stage, got)
 		}
 		prev = got
 	}
 	if reviewIntervalForStage(-5) != reviewIntervalForStage(0) {
 		t.Error("负轮次应退化到 rung 0")
 	}
-	if reviewIntervalForStage(100) != cap30 {
-		t.Error("超末档应封顶 30 天")
+	if reviewIntervalForStage(100) != capV1 {
+		t.Error("超末档应封顶 14 天（策略 v1）")
 	}
 }
 
-// TestMarkMastered_ClearsDue 掌握后清到期，移出复习队列（回归保护：阶梯改造不破坏掌握态）。
-func TestMarkMastered_ClearsDue(t *testing.T) {
+// TestEvidenceMasteryClearsDue 两次相隔足够的正确证据才升级掌握并清到期。
+func TestEvidenceMasteryClearsDue(t *testing.T) {
 	d, _ := newPipeline(t, fakeSolver{}, fakeGrader{}, &fakeInsights{})
 	ctx := context.Background()
 	id := seedMistake(t, d, "a", "小数乘法", "计算失误", 500)
 
 	cur, _ := d.Records.Get(ctx, id)
-	if err := d.MarkMastered(ctx, "mingming", id, cur.Version); err != nil {
+	if err := d.MarkRetried(ctx, id, cur.Version); err != nil {
+		t.Fatal(err)
+	}
+	first, _ := d.Records.Get(ctx, id)
+	d.Now = func() int64 { return 1000 + MasteryGapInterval }
+	if err := d.MarkRetried(ctx, id, first.Version); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := d.Records.Get(ctx, id)

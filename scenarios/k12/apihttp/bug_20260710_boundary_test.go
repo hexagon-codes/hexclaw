@@ -9,10 +9,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/scenario"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/apihttp"
+	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/usecase"
 	"github.com/hexagon-codes/hexclaw/skill"
 )
@@ -35,12 +35,22 @@ func TestAddAccumulation_InternalStorageFailureIs500(t *testing.T) {
 	if err := reg.Assemble(k12.Pack(k12.NewCurriculumStub())); err != nil {
 		t.Fatal(err)
 	}
-	store := records.NewStore(db, reg.Records)
+	store := k12storage.NewStore(db, reg.Records)
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	h := apihttp.NewHandler(apihttp.Runtime{Deps: usecase.Deps{Records: store}})
-	rec, _ := do(t, h, http.MethodPost, "/accumulation", `{"agent":"mingming","subject":"英语","entry_type":"错词","content":"believe"}`)
+	h := apihttp.NewHandler(apihttp.Runtime{Deps: usecase.Deps{
+		Records:              store,
+		AccumulationMetadata: fixedAccumulationMetadataDeriver{},
+	}})
+	rec, _ := doCurrent(
+		t,
+		h,
+		http.MethodPost,
+		"/accumulation?agent=mingming",
+		`{"content":"believe"}`,
+		map[string]string{"Idempotency-Key": "storage-failure"},
+	)
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("accumulation storage failure status=%d want 500", rec.Code)
 	}
@@ -77,11 +87,17 @@ func (failingProfileStore) SaveProfile(context.Context, string, k12.ChildProfile
 	return errors.New("disk unavailable")
 }
 
-func TestUpdateProfile_InternalStorageFailureIs500(t *testing.T) {
+func TestUpdateProfile_LegacyRouteRejectedBeforeStorage(t *testing.T) {
 	h := apihttp.NewHandler(apihttp.Runtime{Deps: usecase.Deps{Profiles: failingProfileStore{}}})
 	rec, _ := do(t, h, http.MethodPut, "/profile", `{"agent":"mingming","grade_term":"五年级上"}`)
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("profile storage failure status=%d want 500", rec.Code)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("legacy profile update status=%d want 405", rec.Code)
+	}
+	if got := rec.Header().Get("Allow"); got != http.MethodGet {
+		t.Fatalf("legacy profile update Allow=%q want GET", got)
+	}
+	if got := strings.TrimSpace(rec.Body.String()); got != `{"error":"profile updates require /api/k12/profile-bundle"}` {
+		t.Fatalf("legacy profile update body=%s", got)
 	}
 }
 

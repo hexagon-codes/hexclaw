@@ -9,6 +9,7 @@ package engine
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/hexagon-codes/hexagon"
@@ -44,6 +45,9 @@ func TestReasoningModel_SolveSourceUsesStrongTextModel(t *testing.T) {
 	if sel.modelName != "glm-4.5" {
 		t.Fatalf("BUG 复现:解题/批改未用配置的强文本模型 glm-4.5(仍用视觉默认→漏判),got model=%q provider=%q", sel.modelName, sel.providerName)
 	}
+	if sel.explicitProvider {
+		t.Fatal("配置的 reasoning_model 只是系统首选，不是用户本轮显式 pin；硬失败时必须允许降级")
+	}
 }
 
 // TestReasoningModel_NonSolveKeepsDefaultVisionModel 普通聊天/识题(非 solve 源)仍用默认视觉模型,不被误改。
@@ -74,5 +78,21 @@ func TestReasoningModel_ExplicitProviderNotOverridden(t *testing.T) {
 	}
 	if sel.modelName != "glm-4v-flash" {
 		t.Fatalf("显式下发的 model 应被尊重,不被推理模型覆盖,got %q", sel.modelName)
+	}
+}
+
+// 热更新后若 reasoning_provider 悬空，绝不能返回 false 让 resolveLLMSelection 静默走
+// 默认 provider（默认很可能是 Ollama）。这是配置错误，应在调用边界显式失败。
+func TestReasoningModel_DanglingProviderFailsExplicitly(t *testing.T) {
+	eng := newReasoningEngine(t)
+	eng.cfg.LLM.ReasoningProvider = "provider-that-no-longer-exists"
+	msg := &adapter.Message{
+		ID: "solve-dangling", Platform: adapter.PlatformAPI, UserID: "system", Content: "1+1",
+		Metadata: map[string]string{"source": solveDispatchSource, "role": solverAgentName},
+	}
+
+	_, err := eng.resolveLLMSelection(context.Background(), msg)
+	if err == nil || !strings.Contains(err.Error(), "reasoning_provider") {
+		t.Fatalf("dangling reasoning provider error=%v, want explicit reasoning_provider error", err)
 	}
 }

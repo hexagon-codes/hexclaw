@@ -1,10 +1,11 @@
 package config
 
 import (
+	"crypto/sha256"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sync"
 
 	"github.com/hexagon-codes/hexclaw/secret"
@@ -16,14 +17,40 @@ import (
 // 支持追加/移除 MCP server 配置到 hexclaw.yaml，
 // 保留用户手动编辑的注释和格式。
 type Writer struct {
-	mu   sync.Mutex
-	path string
-	box  *secret.Box // 注入后：MCP server 的 env 凭证静态加密落盘（保险箱接管 MCP 凭证）。
+	mu       sync.Locker
+	path     string
+	box      *secret.Box // 注入后：MCP server 的 env 凭证静态加密落盘（保险箱接管 MCP 凭证）。
+	onCommit func(*Config)
 }
 
 // NewWriter 创建配置写入器
 func NewWriter(path string) *Writer {
-	return &Writer{path: path}
+	return &Writer{path: path, mu: &sync.Mutex{}}
+}
+
+// SetCommitCoordinator 在启动装配时接入所有设置共用的提交锁和内存投影。
+func (w *Writer) SetCommitCoordinator(lock sync.Locker, onCommit func(*Config)) {
+	w.mu, w.onCommit = lock, onCommit
+}
+
+// SaveRuntimeLocked 保存已经持有共享提交锁的运行时候选，避免递归加锁。
+// Writer 管理的字段从锁内最新文件读取，不能被其他设置的旧快照覆盖。
+func (w *Writer) SaveRuntimeLocked(cfg *Config) error {
+	next := *cfg
+	if _, err := os.Stat(w.path); err == nil {
+		latest, err := w.readConfig()
+		if err != nil {
+			return err
+		}
+		next.MCP, next.Knowledge = latest.MCP, latest.Knowledge
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if err := w.writeConfig(&next); err != nil {
+		return err
+	}
+	cfg.MCP, cfg.Knowledge = next.MCP, next.Knowledge
+	return nil
 }
 
 // SetSecretBox 注入静态加密保险箱。注入后 readConfig 解密、writeConfig 加密 MCP env 凭证；
@@ -61,6 +88,80 @@ func (w *Writer) AppendMCPServer(name, transport, command string, args []string,
 	})
 
 	return w.writeConfig(cfg)
+}
+
+// UpsertMCPServer 写入一个已完成 secret metadata 归一化的 MCP server。
+// 同名项按一次读-改-写替换，供 Desktop 编辑现有连接时保留/清除 secret。
+func (w *Writer) UpsertMCPServer(server MCPServerConfig) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if server.Name == "" {
+		return fmt.Errorf("MCP server name cannot be empty")
+	}
+	// EncryptMCPSecrets 在写盘前会就地替换切片/映射值；复制输入避免把密文
+	// 泄漏回 handler 的运行时参数，运行时始终使用解密后的值。
+	server.Args = append([]string(nil), server.Args...)
+	if server.Env != nil {
+		server.Env = cloneMCPStringMapForWriter(server.Env)
+	}
+	if server.ArgsSecretRefs != nil {
+		server.ArgsSecretRefs = cloneMCPArgRefsForWriter(server.ArgsSecretRefs)
+	}
+	if server.EnvSecretRefs != nil {
+		server.EnvSecretRefs = cloneMCPStringMapForWriter(server.EnvSecretRefs)
+	}
+	cfg, err := w.readConfig()
+	if err != nil {
+		return err
+	}
+	found := false
+	for i := range cfg.MCP.Servers {
+		if cfg.MCP.Servers[i].Name != server.Name {
+			continue
+		}
+		cfg.MCP.Servers[i] = server
+		found = true
+		break
+	}
+	if !found {
+		cfg.MCP.Servers = append(cfg.MCP.Servers, server)
+	}
+	return w.writeConfig(cfg)
+}
+
+func cloneMCPStringMapForWriter(values map[string]string) map[string]string {
+	clone := make(map[string]string, len(values))
+	for key, value := range values {
+		clone[key] = value
+	}
+	return clone
+}
+
+func cloneMCPArgRefsForWriter(values map[int]string) map[int]string {
+	clone := make(map[int]string, len(values))
+	for index, ref := range values {
+		clone[index] = ref
+	}
+	return clone
+}
+
+// GetMCPServer 返回指定 server 的解密内存投影；调用方不得把结果写入日志或响应。
+func (w *Writer) GetMCPServer(name string) (*MCPServerConfig, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	cfg, err := w.readConfig()
+	if err != nil {
+		return nil, err
+	}
+	for i := range cfg.MCP.Servers {
+		if cfg.MCP.Servers[i].Name == name {
+			server := cfg.MCP.Servers[i]
+			return &server, nil
+		}
+	}
+	return nil, nil
 }
 
 // RemoveMCPServer 从配置文件移除 MCP server
@@ -109,7 +210,11 @@ type KnowledgeRetrievalSettings struct {
 func (w *Writer) UpdateKnowledgeRetrieval(s KnowledgeRetrievalSettings) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	return w.UpdateKnowledgeRetrievalLocked(s)
+}
 
+// UpdateKnowledgeRetrievalLocked 供已持有配置提交锁的运行时事务调用。
+func (w *Writer) UpdateKnowledgeRetrievalLocked(s KnowledgeRetrievalSettings) error {
 	cfg, err := w.readConfig()
 	if err != nil {
 		return err
@@ -128,7 +233,11 @@ func (w *Writer) UpdateKnowledgeRetrieval(s KnowledgeRetrievalSettings) error {
 func (w *Writer) ReadKnowledge() (KnowledgeConfig, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	return w.ReadKnowledgeLocked()
+}
 
+// ReadKnowledgeLocked 与同一提交锁内的候选更新共享读取快照。
+func (w *Writer) ReadKnowledgeLocked() (KnowledgeConfig, error) {
 	cfg, err := w.readConfig()
 	if err != nil {
 		return KnowledgeConfig{}, err
@@ -153,56 +262,181 @@ func (w *Writer) readConfig() (*Config, error) {
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
-	// 读改写一致性：把盘上密文 env 解回明文（无 box 时 no-op）。配合 writeConfig 的加密，
-	// 既不双重加密已有 server，也让本次新增的明文 env 在写回时统一加密。
-	DecryptMCPEnv(cfg.MCP.Servers, w.box)
+	// 读改写一致性：把盘上密文 env/secret args 解回明文。Box 缺失或密文损坏时
+	// 立即失败，禁止把密文交给 MCP 子进程或通过一次写回静默覆盖。
+	if err := DecryptMCPSecrets(cfg.MCP.Servers, w.box); err != nil {
+		return nil, err
+	}
 	return cfg, nil
 }
 
 func (w *Writer) writeConfig(cfg *Config) error {
-	// 写盘前把 MCP env 凭证静态加密（无 box 时 no-op，保持明文）。
-	EncryptMCPEnv(cfg.MCP.Servers, w.box)
-	data, err := yaml.Marshal(cfg)
+	if err := ensureOwnerOnlyDefaultConfigParent(w.path); err != nil {
+		return err
+	}
+	// 写盘前把 MCP env/secret args 静态加密。新 secret metadata 没有 Box 时
+	// fail-closed；无 metadata 的历史普通 MCP 配置保留兼容。
+	// 加密只修改持久化副本，运行态和调用者仍保留解密值。
+	persisted := *cfg
+	persisted.MCP.Servers = append([]MCPServerConfig(nil), cfg.MCP.Servers...)
+	for i := range persisted.MCP.Servers {
+		server := &persisted.MCP.Servers[i]
+		server.Args = append([]string(nil), server.Args...)
+		server.Env = cloneMCPStringMapForWriter(server.Env)
+		server.ArgsSecretRefs = cloneMCPArgRefsForWriter(server.ArgsSecretRefs)
+		server.EnvSecretRefs = cloneMCPStringMapForWriter(server.EnvSecretRefs)
+	}
+	if err := EncryptMCPSecrets(persisted.MCP.Servers, w.box); err != nil {
+		return err
+	}
+	data, err := marshalConfigForPersistence(&persisted)
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
 	}
-	return atomicWriteFile(w.path, data, 0644)
+	// 仅所有者可访问的 YAML 中可能包含 Provider Key 和 MCP 凭据。
+	// 所有写入路径都必须确保整个文件仅所有者可访问。
+	if err := ReconcileCommittedWrite(atomicWriteFile(w.path, data, 0o600)); err != nil {
+		return err
+	}
+	if w.onCommit != nil {
+		w.onCommit(cfg)
+	}
+	return nil
 }
 
-// atomicWriteFile 原子写入文件：先写 temp 再 rename，防止 crash 导致配置损坏
+type atomicWriteOps struct {
+	syncTemp   func(*os.File) error
+	replace    func(oldPath, newPath string) error
+	syncParent func(dir string) error
+}
+
+// PostCommitDurabilityError means the target path was replaced successfully,
+// but syncing the parent directory failed. The new bytes are visible to this
+// process; their survival across an immediate machine crash is not guaranteed.
+//
+// Callers must not treat this like a pre-commit failure and blindly write an
+// older snapshot back. ReconcileCommittedWrite accepts the outcome only when
+// the target was read back and its digest matches the intended bytes.
+type PostCommitDurabilityError struct {
+	Path           string
+	Cause          error
+	expectedSHA256 string
+	observedSHA256 string
+	readbackErr    error
+}
+
+func (e *PostCommitDurabilityError) Error() string {
+	if e == nil {
+		return "post-commit durability error"
+	}
+	if e.readbackErr != nil {
+		return fmt.Sprintf("target replaced but parent directory sync failed: %v (readback failed: %v)", e.Cause, e.readbackErr)
+	}
+	if !e.ReadbackVerified() {
+		return fmt.Sprintf("target replaced but parent directory sync failed: %v (readback digest mismatch)", e.Cause)
+	}
+	return fmt.Sprintf("target replaced and read back, but parent directory sync failed: %v", e.Cause)
+}
+
+func (e *PostCommitDurabilityError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Cause
+}
+
+func (e *PostCommitDurabilityError) ReadbackVerified() bool {
+	return e != nil && e.readbackErr == nil && e.expectedSHA256 != "" && e.expectedSHA256 == e.observedSHA256
+}
+
+func (e *PostCommitDurabilityError) ExpectedSHA256() string {
+	if e == nil {
+		return ""
+	}
+	return e.expectedSHA256
+}
+
+func (e *PostCommitDurabilityError) ObservedSHA256() string {
+	if e == nil {
+		return ""
+	}
+	return e.observedSHA256
+}
+
+// ReconcileCommittedWrite converts only a verified post-commit durability
+// outcome into success. Ordinary failures and unverified outcomes are retained.
+func ReconcileCommittedWrite(err error) error {
+	if err == nil {
+		return nil
+	}
+	var committed *PostCommitDurabilityError
+	if errors.As(err, &committed) && committed.ReadbackVerified() {
+		return nil
+	}
+	return err
+}
+
+// atomicWriteFile 原子且持久地写入文件。临时文件和目标文件位于同一目录，
+// 因此 replace 始终发生在同一文件系统内。
 func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
+	return atomicWriteFileWithOps(path, data, perm, atomicWriteOps{
+		syncTemp:   (*os.File).Sync,
+		replace:    replaceFile,
+		syncParent: syncParentDirectory,
+	})
+}
+
+func atomicWriteFileWithOps(path string, data []byte, perm os.FileMode, ops atomicWriteOps) error {
 	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("create config directory: %w", err)
+	}
 	tmp, err := os.CreateTemp(dir, ".hexclaw-cfg-*.tmp")
 	if err != nil {
 		return fmt.Errorf("create temp file: %w", err)
 	}
 	tmpPath := tmp.Name()
+	committed := false
+	defer func() {
+		if !committed {
+			_ = os.Remove(tmpPath)
+		}
+	}()
 
+	// Apply metadata before Sync so the same durability boundary covers both
+	// the bytes and the requested mode.
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("chmod temp file: %w", err)
+	}
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		os.Remove(tmpPath)
+		_ = tmp.Close()
 		return fmt.Errorf("write temp file: %w", err)
 	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		os.Remove(tmpPath)
+	if err := ops.syncTemp(tmp); err != nil {
+		_ = tmp.Close()
 		return fmt.Errorf("sync temp file: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
-		os.Remove(tmpPath)
 		return fmt.Errorf("close temp file: %w", err)
 	}
-	if err := os.Chmod(tmpPath, perm); err != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("chmod temp file: %w", err)
-	}
-	// Windows: os.Rename fails if target exists; remove first
-	if runtime.GOOS == "windows" {
-		os.Remove(path)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		os.Remove(tmpPath)
+	if err := ops.replace(tmpPath, path); err != nil {
 		return fmt.Errorf("rename temp to target: %w", err)
+	}
+	committed = true
+	if err := ops.syncParent(dir); err != nil {
+		outcome := &PostCommitDurabilityError{
+			Path:           path,
+			Cause:          err,
+			expectedSHA256: fmt.Sprintf("sha256:%x", sha256.Sum256(data)),
+		}
+		readback, readErr := os.ReadFile(path)
+		if readErr != nil {
+			outcome.readbackErr = readErr
+		} else {
+			outcome.observedSHA256 = fmt.Sprintf("sha256:%x", sha256.Sum256(readback))
+		}
+		return outcome
 	}
 	return nil
 }

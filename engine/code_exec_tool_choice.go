@@ -20,7 +20,10 @@ func wrapCodeExecToolChoiceProvider(provider hexagon.Provider, userContent strin
 	if provider == nil || !shouldForceCodeExecTool(userContent) {
 		return provider
 	}
-	return &codeExecToolChoiceProvider{provider: provider, userContent: userContent}
+	return preserveContextTokenCounter(
+		&codeExecToolChoiceProvider{provider: provider, userContent: userContent},
+		provider,
+	)
 }
 
 func (p *codeExecToolChoiceProvider) Name() string {
@@ -91,6 +94,12 @@ func shouldBypassSemanticCache(msg *adapter.Message) bool {
 	}
 	if msg == nil {
 		return false
+	}
+	// The semantic cache stores final text only. Serving a thinking:on request
+	// from it would silently drop the provider's live reasoning/summary stream
+	// and would not execute the explicitly requested reasoning mode at all.
+	if strings.EqualFold(strings.TrimSpace(msg.Metadata["thinking"]), "on") {
+		return true
 	}
 	if msg.Metadata != nil && (msg.Metadata[adapter.MetadataRequestTemperature] != "" || msg.Metadata[adapter.MetadataRequestMaxTokens] != "") {
 		return true

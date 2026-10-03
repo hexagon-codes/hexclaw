@@ -1,0 +1,3395 @@
+package usecase
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"slices"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/hexagon-codes/toolkit/util/idgen"
+
+	"github.com/hexagon-codes/hexclaw/internal/inputlimits"
+	"github.com/hexagon-codes/hexclaw/records"
+	"github.com/hexagon-codes/hexclaw/scenarios/k12"
+	"github.com/hexagon-codes/hexclaw/scenarios/k12/assetstore"
+	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
+)
+
+// ImageTaskClassificationInput keeps image evidence mandatory. MessageIntent
+// is contextual evidence only; adapters must never classify from it alone.
+type ImageTaskClassificationInput struct {
+	Images            [][]byte
+	MessageIntent     string
+	IncludeWritingOCR bool
+	// RecordResponse 在解析前保存完整回复，失败时不得丢弃错误继续提交分类。
+	RecordResponse func(context.Context, string) error
+}
+
+type ImageTaskClassification struct {
+	Intent                   k12.ImageTaskIntent
+	IntentEvidence           []string
+	Confidence               float64
+	ConfirmationCandidates   []k12.ImageTaskIntent
+	WorkTitleCandidate       *k12.FactCandidate
+	TaskRequirementCandidate *k12.FactCandidate
+	WritingOCR               *ImageTaskWritingOCRResult
+}
+
+type ImageTaskClassifier interface {
+	ClassifyImageTask(context.Context, ImageTaskClassificationInput) (ImageTaskClassification, error)
+}
+
+type ImageTaskWritingOCRResult struct {
+	Raw              string                          `json:"raw"`
+	CanonicalContent string                          `json:"canonical_content"`
+	Confidence       float64                         `json:"confidence"`
+	RiskSegments     []k12.CreativeWorkIntakeOCRRisk `json:"risk_segments"`
+}
+
+// ImageTaskWritingOCR returns explicit quality evidence. A string-only OCR
+// result is insufficient to authorize automatic promotion.
+type ImageTaskWritingOCR interface {
+	RecognizeImageTaskWriting(context.Context, []byte) (ImageTaskWritingOCRResult, error)
+}
+
+// ImageTaskWritingOCRReviewer 只复核既有风险片段，不重写整篇原稿。
+type ImageTaskWritingOCRReviewer interface {
+	ReviewImageTaskWriting(context.Context, []byte, []k12.CreativeWorkIntakeOCRRisk) ([]k12.CreativeWorkOCRReviewSegment, error)
+}
+
+type imageTaskGradingStarter interface {
+	StartPhotoGradingJob(context.Context, StartPhotoGradingInput) (GradingJobView, bool, error)
+	ConfirmPhotoGradingJob(context.Context, string, ConfirmPhotoGradingInput) (GradingJobView, bool, error)
+	StartAsync(jobID string) bool
+}
+
+type imageTaskGradingParentWindowRetrier interface {
+	CanRetryPhotoGradingWithParentAutomaticWindow(
+		context.Context,
+		string,
+	) (bool, error)
+	RetryPhotoGradingJobWithParentAutomaticWindow(
+		context.Context,
+		string,
+		string,
+		int64,
+	) (GradingJobView, bool, error)
+}
+
+type ImageTaskRouteResolver func(k12.ImageTaskRouteSnapshot) (k12.ImageTaskRouteSnapshot, error)
+type ImageTaskWorkFeedbackRouteResolver func(
+	context.Context,
+	string,
+	k12.ImageTaskRouteSnapshot,
+) (k12.ImageTaskRouteSnapshot, error)
+type ImageTaskRouteDisplayResolver func(k12.ImageTaskRouteSnapshot) (string, string)
+type ImageTaskAssetReader func(agentName, assetRef string) ([]byte, error)
+type ImageTaskGradeResolver func(context.Context, string) (string, error)
+
+const imageTaskDefaultProviderTimeout = 120 * time.Second
+
+const (
+	imageTaskFailureInteractiveDeadlineExceeded = "interactive_deadline_exceeded"
+)
+
+type imageTaskWorkFeedbackGenerator interface {
+	GenerateWorkFeedback(context.Context, string, string) (CreativeWorkView, error)
+}
+
+type ImageTaskCoordinator struct {
+	Records                        *k12storage.Store
+	PageAssets                     PageAssetGateway
+	Classifier                     ImageTaskClassifier
+	WritingOCR                     ImageTaskWritingOCR
+	Grading                        imageTaskGradingStarter
+	IMCompletedHomeworkRoutingGate ImageTaskIMCompletedHomeworkRoutingGate
+	WorkFeedback                   imageTaskWorkFeedbackGenerator
+	ResolveRoute                   ImageTaskRouteResolver
+	ResolveWorkFeedbackRoute       ImageTaskWorkFeedbackRouteResolver
+	ResolveRouteDisplay            ImageTaskRouteDisplayResolver
+	ResolveGrade                   ImageTaskGradeResolver
+	ReadAsset                      ImageTaskAssetReader
+	SourceReprocess                *ProblemSourceReprocessWorker
+	GradingBudgetSnapshot          k12.GradingBudgetSnapshot
+	Now                            func() int64
+	NewID                          func(kind string) string
+	BaseContext                    context.Context
+
+	workerMu     sync.Mutex
+	agentWorkers agentWorkerFenceRegistry
+	sealed       bool
+	workerCount  int
+	workerIdle   chan struct{}
+	runCtx       context.Context
+	runCancel    context.CancelFunc
+}
+
+var ErrImageTaskCoordinatorShutdown = errors.New("image task coordinator is shut down")
+
+type CreateImageTaskInput struct {
+	OwnerScope        string
+	AgentName         string
+	LearnerID         string
+	SourceKind        k12.ImageTaskSourceKind
+	SourceRef         string
+	SourceSessionID   string
+	SourceAssetRefs   []string
+	MessageIntent     string
+	AttemptGeneration int
+	RouteRequest      k12.ImageTaskRouteSnapshot
+	CreativeEntry     *k12.ImageTaskCreativeEntry
+}
+
+// CreatedImageTask 保留批量接入中每张图片的独立接纳事实。
+type CreatedImageTask struct {
+	View    ImageTaskView
+	Created bool
+}
+
+type ImageTaskView struct {
+	Dispatch k12.ImageTaskDispatch
+	// ClassificationInvocationStatus 只供内部编排区分明确失败与结果未知，不进入公开 DTO。
+	ClassificationInvocationStatus k12.ImageTaskInvocationStatus `json:"-"`
+	Homework                       *k12.HomeworkSubmission
+	HomeworkProjection             *ImageTaskHomeworkProjection
+	Creative                       *k12.CreativeWorkIntake
+	CreativeDisplayName            string
+	CreativeWork                   *CreativeWorkView
+	CreativeFeedback               string
+	// CreativeFeedbackRetryable 只投影当前作品点评调用账本的安全重试事实。
+	CreativeFeedbackRetryable  bool
+	ActiveInvocationDeadlineAt int64
+	homeworkCompleted          bool
+	solveInvocation            *k12.ImageTaskInvocation
+	feedbackInvocation         *k12.ImageTaskInvocation
+	ocrInvocation              *k12.ImageTaskInvocation
+}
+
+type ImageTaskHomeworkProjection struct {
+	Stage                     string
+	CompletedAt               int64
+	Retryable                 bool
+	ConfirmationState         string
+	AnchorState               string
+	Subject                   string
+	Questions                 []RecognizedQuestion
+	Progressive               ImageTaskProgressiveSnapshot
+	FinalArtifact             *k12.GradingFinalArtifact  `json:"final_artifact,omitempty"`
+	GroundingEvidenceReceipts []GroundingEvidenceReceipt `json:"grounding_evidence_receipts"`
+	ProblemGroundingReceipts  []ProblemGroundingReceipt  `json:"problem_grounding_receipts"`
+	// retryFailureKind is an internal retry-router fact. It must never be
+	// serialized by the public ImageTask projection, but lets the facade keep
+	// interactive deadline retries on their specialized parent-window path.
+	retryFailureKind string
+}
+
+type ImageTaskProgressiveSnapshot struct {
+	StructureVersion int
+	SnapshotRevision int
+	ProblemProgress  []ImageTaskProblemProgress
+	Coverage         ImageTaskProgressiveCoverage
+}
+
+type ImageTaskProblemProgress struct {
+	ProblemID          string
+	Status             string
+	InputRevision      int
+	PublishedRevision  int
+	CurrentDisposition string
+}
+
+type ImageTaskProgressiveCoverage struct {
+	Total              int
+	Published          int
+	Skipped            int
+	Awaiting           int
+	Failed             int
+	Status             string
+	ProjectionRevision int
+}
+
+type imageTaskGradingProjector interface {
+	ImageTaskHomeworkProjection(
+		context.Context, string, string,
+	) (ImageTaskHomeworkProjection, error)
+}
+
+type imageTaskGradingCanceller interface {
+	CancelImageTaskHomework(context.Context, string, string) error
+}
+
+// ImageTaskIMCompletedHomeworkRoutingGate 在 IM 作业分类完成后、创建批改任务前，
+// 只读取入站收据中已经持久化的分流决定。其他图片来源不经过该门。
+type ImageTaskIMCompletedHomeworkRoutingGate interface {
+	AllowIMCompletedHomeworkGrading(
+		context.Context,
+		k12.ImageTaskDispatch,
+	) (bool, error)
+}
+
+type ImageTaskResult struct {
+	Kind                      string
+	Dispatch                  k12.ImageTaskDispatch
+	SourceAttachments         []ImageTaskSourceAttachmentReceipt
+	OperationReceipts         []ImageTaskOperationReceipt
+	Photo                     *PhotoGradeResult
+	GradingJobID              string
+	Creative                  *k12.CreativeWorkIntake
+	CreativeDisplayName       string
+	CreativeWork              *CreativeWorkView
+	FinalArtifact             *k12.GradingFinalArtifact  `json:"final_artifact,omitempty"`
+	GroundingEvidenceReceipts []GroundingEvidenceReceipt `json:"grounding_evidence_receipts"`
+	ProblemGroundingReceipts  []ProblemGroundingReceipt  `json:"problem_grounding_receipts"`
+}
+
+type ImageTaskSourceAttachmentReceipt struct {
+	Digest    string `json:"digest"`
+	SizeBytes int    `json:"size_bytes"`
+}
+
+type ImageTaskOperationReceipt struct {
+	InvocationID         string                          `json:"invocation_id"`
+	ParentInvocationID   string                          `json:"parent_invocation_id,omitempty"`
+	PhysicalUnit         string                          `json:"physical_unit,omitempty"`
+	Operation            string                          `json:"operation"`
+	ExecutionKind        string                          `json:"execution_kind,omitempty"`
+	CanonicalInputDigest string                          `json:"canonical_input_digest"`
+	Provider             string                          `json:"provider,omitempty"`
+	Model                string                          `json:"model,omitempty"`
+	Status               string                          `json:"status"`
+	Attempt              int                             `json:"attempt"`
+	ResultDigest         string                          `json:"result_digest"`
+	RequestPolicyDigest  string                          `json:"request_policy_digest,omitempty"`
+	RequestPolicy        *k12.ModelRequestPolicySnapshot `json:"request_policy,omitempty"`
+}
+
+type ConfirmImageTaskInput struct {
+	AgentName           string
+	DispatchID          string
+	ExpectedVersion     int
+	Intent              k12.ImageTaskIntent
+	Subject             string
+	Grade               string
+	QuestionCorrections []GradingQuestionCorrection
+	CanonicalVersion    int
+	CanonicalContent    string
+	Creative            *ConfirmCreativeImageTaskInput
+}
+
+type CreativeImageTaskAction string
+
+const (
+	CreativeImageTaskActionFreezeOCR CreativeImageTaskAction = "freeze_ocr"
+	CreativeImageTaskActionCommit    CreativeImageTaskAction = "commit"
+)
+
+type ConfirmCreativeImageTaskInput struct {
+	Action             CreativeImageTaskAction
+	CanonicalVersion   int
+	CanonicalContent   string
+	SegmentCorrections []k12.CreativeWorkIntakeOCRCorrection
+	WorkTitle          string
+	TaskRequirement    string
+	Intent             string
+	ContentMarkdown    string
+}
+
+func (c *ImageTaskCoordinator) now() int64 {
+	if c.Now != nil {
+		return c.Now()
+	}
+	return time.Now().Unix()
+}
+
+func (c *ImageTaskCoordinator) id(kind string) string {
+	if c.NewID != nil {
+		if value := strings.TrimSpace(c.NewID(kind)); value != "" {
+			return value
+		}
+	}
+	return idgen.NanoID()
+}
+
+func defaultImageTaskAssetReader(agentName, assetRef string) ([]byte, error) {
+	owner, file, err := assetstore.Parse(assetRef)
+	if err != nil || owner != agentName {
+		return nil, fmt.Errorf("%w: image task 只接受当前实例真实上传的 asset:// 图片", ErrInvalidInput)
+	}
+	raw, _, err := assetstore.Read(agentName, file)
+	if err != nil {
+		return nil, fmt.Errorf("%w: 读取 image task 图片: %v", ErrInvalidInput, err)
+	}
+	return raw, nil
+}
+
+func (c *ImageTaskCoordinator) validate() error {
+	if c == nil || c.Records == nil {
+		return fmt.Errorf("usecase: image task store 未配置")
+	}
+	return nil
+}
+
+func normalizeCreateImageTaskInput(in CreateImageTaskInput) (CreateImageTaskInput, error) {
+	in.OwnerScope = strings.TrimSpace(in.OwnerScope)
+	in.AgentName = strings.TrimSpace(in.AgentName)
+	in.LearnerID = strings.TrimSpace(in.LearnerID)
+	in.SourceRef = strings.TrimSpace(in.SourceRef)
+	in.SourceSessionID = strings.TrimSpace(in.SourceSessionID)
+	in.MessageIntent = strings.TrimSpace(in.MessageIntent)
+	if in.AgentName == "" || in.LearnerID == "" || in.SourceRef == "" ||
+		len(in.SourceAssetRefs) == 0 || in.AttemptGeneration < 1 {
+		return in, fmt.Errorf("%w: agent/learner/source/assets/attempt_generation 不完整", ErrInvalidInput)
+	}
+	switch in.SourceKind {
+	case k12.ImageTaskSourceDesktop, k12.ImageTaskSourceAPI, k12.ImageTaskSourceIM:
+	default:
+		return in, fmt.Errorf("%w: source_kind 非法", ErrInvalidInput)
+	}
+	for i := range in.SourceAssetRefs {
+		in.SourceAssetRefs[i] = strings.TrimSpace(in.SourceAssetRefs[i])
+		if in.SourceAssetRefs[i] == "" {
+			return in, fmt.Errorf("%w: source_asset_refs 包含空值", ErrInvalidInput)
+		}
+	}
+	if in.RouteRequest.SelectionSource == "" {
+		in.RouteRequest.SelectionSource = "auto"
+	}
+	if in.CreativeEntry != nil {
+		entry := *in.CreativeEntry
+		entry.WorkID = strings.TrimSpace(entry.WorkID)
+		entry.BaseVersionID = strings.TrimSpace(entry.BaseVersionID)
+		if err := entry.Validate(); err != nil {
+			return in, fmt.Errorf("%w: %v", ErrInvalidInput, err)
+		}
+		in.CreativeEntry = &entry
+	}
+	return in, nil
+}
+
+func digestJSON(v any) string {
+	raw, _ := json.Marshal(v)
+	sum := sha256.Sum256(raw)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func imageBytesDigest(images [][]byte) string {
+	hash := sha256.New()
+	for _, image := range images {
+		var length [8]byte
+		n := uint64(len(image))
+		for i := 7; i >= 0; i-- {
+			length[i] = byte(n)
+			n >>= 8
+		}
+		hash.Write(length[:])
+		hash.Write(image)
+	}
+	return "sha256:" + hex.EncodeToString(hash.Sum(nil))
+}
+
+// CreateMany 只按输入顺序包装既有单图创建，不建立另一套任务状态。
+// 返回的失败序号从零开始；已接纳项保留原身份，可沿同一入口继续。
+func (c *ImageTaskCoordinator) CreateMany(
+	ctx context.Context,
+	input CreateImageTaskInput,
+) ([]CreatedImageTask, int, error) {
+	if err := c.validate(); err != nil {
+		return nil, 0, err
+	}
+	in, err := normalizeCreateImageTaskInput(input)
+	if err != nil {
+		return nil, 0, err
+	}
+	if len(in.SourceAssetRefs) == 1 {
+		view, created, err := c.Create(ctx, in)
+		if err != nil {
+			return nil, 0, err
+		}
+		return []CreatedImageTask{{View: view, Created: created}}, -1, nil
+	}
+	// 旧版整组接纳的请求只能查询原记录，不能拆成新命令重发未知调用。
+	legacyKey := fmt.Sprintf("%s:%s:g%d", in.SourceKind, in.SourceRef, in.AttemptGeneration)
+	if _, err := c.Records.GetImageTaskDispatchByIdempotency(ctx, in.AgentName, legacyKey); err == nil {
+		return nil, 0, k12storage.ErrImageTaskConflict
+	} else if !errors.Is(err, k12storage.ErrImageTaskNotFound) {
+		return nil, 0, err
+	}
+	// 在创建或启动任何一页之前核对整组资产，避免后一页无效时先处理前页。
+	for index, ref := range in.SourceAssetRefs {
+		owner, _, err := assetstore.Parse(ref)
+		if err != nil || owner != in.AgentName {
+			return nil, index, fmt.Errorf("%w: image %d is outside the current agent", ErrInvalidInput, index)
+		}
+		if _, err := c.readSourceImages(ctx, in.OwnerScope, in.AgentName, []string{ref}); err != nil {
+			return nil, index, err
+		}
+	}
+	accepted := make([]CreatedImageTask, 0, len(in.SourceAssetRefs))
+	for index, ref := range in.SourceAssetRefs {
+		page := in
+		page.SourceRef = fmt.Sprintf("%s:image:%d", in.SourceRef, index+1)
+		page.SourceAssetRefs = []string{ref}
+		view, created, err := c.Create(ctx, page)
+		if err != nil {
+			return accepted, index, err
+		}
+		accepted = append(accepted, CreatedImageTask{View: view, Created: created})
+		slog.Info("K12 image page accepted", "agent_id", in.AgentName,
+			"source_ref", in.SourceRef, "page_index", index, "page_count", len(in.SourceAssetRefs),
+			"dispatch_id", view.Dispatch.DispatchID, "created", created)
+	}
+	return accepted, -1, nil
+}
+
+func (c *ImageTaskCoordinator) Create(
+	ctx context.Context,
+	input CreateImageTaskInput,
+) (ImageTaskView, bool, error) {
+	if c == nil || c.Records == nil {
+		return ImageTaskView{}, false, fmt.Errorf("usecase: image task store 未配置")
+	}
+	in, err := normalizeCreateImageTaskInput(input)
+	if err != nil {
+		return ImageTaskView{}, false, err
+	}
+	if len(in.SourceAssetRefs) != 1 {
+		return ImageTaskView{}, false, fmt.Errorf("%w: one image is required for each task", ErrInvalidInput)
+	}
+	if (in.CreativeEntry == nil || in.CreativeEntry.TaskIntent == k12.ImageTaskIntentUnknown) && (c.Classifier == nil || c.ResolveRoute == nil) {
+		return ImageTaskView{}, false, fmt.Errorf("usecase: image task classifier/route resolver 未配置")
+	}
+	if c.PageAssets != nil && in.OwnerScope == "" {
+		return ImageTaskView{}, false, fmt.Errorf(
+			"%w: authenticated PageAsset owner scope is required",
+			ErrInvalidInput,
+		)
+	}
+	for index, ref := range in.SourceAssetRefs {
+		owner, _, parseErr := assetstore.Parse(ref)
+		if parseErr != nil || owner != in.AgentName {
+			return ImageTaskView{}, false, fmt.Errorf(
+				"%w: source_asset_refs[%d] 不是当前实例的 immutable asset:// 图片",
+				ErrInvalidInput, index,
+			)
+		}
+	}
+	idempotencyKey := fmt.Sprintf("%s:%s:g%d", in.SourceKind, in.SourceRef, in.AttemptGeneration)
+	existing, lookupErr := c.Records.GetImageTaskDispatchByIdempotency(
+		ctx, in.AgentName, idempotencyKey,
+	)
+	if lookupErr == nil {
+		if existing.LearnerID != in.LearnerID ||
+			existing.SourceKind != in.SourceKind ||
+			existing.SourceRef != in.SourceRef ||
+			existing.SourceSessionID != in.SourceSessionID ||
+			!slices.Equal(existing.SourceAssetRefs, in.SourceAssetRefs) ||
+			existing.MessageIntent != in.MessageIntent ||
+			existing.AttemptGeneration != in.AttemptGeneration ||
+			!sameCreativeEntry(existing.CreativeEntry, in.CreativeEntry) ||
+			!sameCreateImageTaskRouteRequest(existing, in) {
+			return ImageTaskView{}, false, k12storage.ErrImageTaskConflict
+		}
+		if c.PageAssets != nil {
+			ownerScope, ownerErr := c.Records.GetImageTaskOwnerScope(
+				ctx,
+				existing.AgentName,
+				existing.DispatchID,
+			)
+			if ownerErr != nil || ownerScope != in.OwnerScope {
+				return ImageTaskView{}, false, k12storage.ErrImageTaskConflict
+			}
+		}
+		view, err := c.projectTarget(ctx, existing)
+		return view, false, err
+	}
+	if !errors.Is(lookupErr, k12storage.ErrImageTaskNotFound) {
+		return ImageTaskView{}, false, lookupErr
+	}
+	images, err := c.readSourceImages(
+		ctx,
+		in.OwnerScope,
+		in.AgentName,
+		in.SourceAssetRefs,
+	)
+	if err != nil {
+		return ImageTaskView{}, false, err
+	}
+	sourceDigest := imageBytesDigest(images)
+	if in.CreativeEntry != nil && in.CreativeEntry.TaskIntent != k12.ImageTaskIntentUnknown {
+		operationRouteRequest := in.RouteRequest
+		if c.ResolveRouteDisplay != nil {
+			// Parent-selected creative creation must not resolve an unexecuted
+			// vision route. Freeze only the configured display facts.
+			operationRouteRequest.ProviderDisplayName,
+				operationRouteRequest.ModelID = c.ResolveRouteDisplay(in.RouteRequest)
+		}
+		requestDigest := digestJSON(struct {
+			Agent, Learner, Source, Session, Message, SourceDigest string
+			Assets                                                 []string
+			RouteRequest                                           k12.ImageTaskRouteSnapshot
+			CreativeEntry                                          *k12.ImageTaskCreativeEntry
+		}{
+			in.AgentName, in.LearnerID, in.SourceRef, in.SourceSessionID,
+			in.MessageIntent, sourceDigest, in.SourceAssetRefs, operationRouteRequest,
+			in.CreativeEntry,
+		})
+		now := c.now()
+		dispatch := k12.ImageTaskDispatch{
+			DispatchID: c.id("dispatch"), OwnerScope: in.OwnerScope,
+			AgentName: in.AgentName, LearnerID: in.LearnerID,
+			SourceKind: in.SourceKind, SourceRef: in.SourceRef, SourceSessionID: in.SourceSessionID,
+			SourceAssetRefs: append([]string(nil), in.SourceAssetRefs...), SourceDigest: sourceDigest,
+			MessageIntent: in.MessageIntent, TaskIntent: in.CreativeEntry.TaskIntent,
+			IntentEvidence:   []string{"parent_selected:" + string(in.CreativeEntry.TaskIntent)},
+			IntentConfidence: 1, Status: k12.ImageTaskStatusRouted,
+			TargetObjectType:      k12.ImageTaskTargetCreativeWorkIntake,
+			TargetObjectID:        c.id("creative_intake"),
+			RoutingProvenance:     k12.ImageTaskRoutingParentSelected,
+			CreativeEntry:         in.CreativeEntry,
+			OperationRouteRequest: operationRouteRequest,
+			IdempotencyKey:        idempotencyKey, RequestDigest: requestDigest,
+			AttemptGeneration:         in.AttemptGeneration,
+			AutomaticBudgetSeconds:    k12.ImageTaskAutomaticBudgetSeconds,
+			AutomaticStartedAt:        now,
+			AutomaticDeadlineAt:       now + k12.ImageTaskAutomaticBudgetSeconds,
+			AutomaticRemainingSeconds: k12.ImageTaskAutomaticBudgetSeconds,
+			Version:                   0, CreatedAt: now, UpdatedAt: now,
+		}
+		stored, intake, created, err := c.Records.PrepareParentSelectedCreativeDispatch(
+			ctx, dispatch,
+		)
+		if err != nil {
+			return ImageTaskView{}, false, err
+		}
+		return ImageTaskView{Dispatch: stored, Creative: intake}, created, nil
+	}
+	route, err := c.ResolveRoute(in.RouteRequest)
+	if err != nil {
+		return ImageTaskView{}, false, fmt.Errorf(
+			"%w: resolve image task route: %v", ErrInvalidInput, err,
+		)
+	}
+	route = k12.NormalizeImageTaskRouteSnapshot(route)
+	if (in.SourceKind == k12.ImageTaskSourceIM && in.CreativeEntry == nil) ||
+		(in.CreativeEntry != nil && in.CreativeEntry.Kind == k12.CreativeWorkEntryNewWork && in.CreativeEntry.TaskIntent == k12.ImageTaskIntentUnknown) {
+		route.PromptVersion = "creative-work-classification-ocr-v1"
+	}
+	if route.TimeoutMS <= 0 {
+		route.TimeoutMS = int(imageTaskDefaultProviderTimeout / time.Millisecond)
+	}
+	if err := route.Validate(); err != nil {
+		return ImageTaskView{}, false, fmt.Errorf("%w: %v", ErrInvalidInput, err)
+	}
+	requestDigest := digestJSON(struct {
+		Agent, Learner, Source, Session, Message, SourceDigest string
+		Assets                                                 []string
+		Route                                                  k12.ImageTaskRouteSnapshot
+		CreativeEntry                                          *k12.ImageTaskCreativeEntry
+	}{
+		in.AgentName, in.LearnerID, in.SourceRef, in.SourceSessionID,
+		in.MessageIntent, sourceDigest, in.SourceAssetRefs, route, in.CreativeEntry,
+	})
+	now := c.now()
+	dispatchID := c.id("dispatch")
+	invocationID := c.id("classification")
+	dispatch := k12.ImageTaskDispatch{
+		DispatchID: dispatchID, OwnerScope: in.OwnerScope,
+		AgentName: in.AgentName, LearnerID: in.LearnerID,
+		SourceKind: in.SourceKind, SourceRef: in.SourceRef, SourceSessionID: in.SourceSessionID,
+		SourceAssetRefs: append([]string(nil), in.SourceAssetRefs...), SourceDigest: sourceDigest,
+		MessageIntent: in.MessageIntent, TaskIntent: k12.ImageTaskIntentUnknown,
+		IntentEvidence: []string{}, Status: k12.ImageTaskStatusRouting,
+		RoutingProvenance:           k12.ImageTaskRoutingModelClassified,
+		CreativeEntry:               in.CreativeEntry,
+		OperationRouteRequest:       in.RouteRequest,
+		ClassificationRouteSnapshot: route, ClassificationInvocationID: invocationID,
+		RoutePolicySnapshot: route, IdempotencyKey: idempotencyKey,
+		RequestDigest: requestDigest, AttemptGeneration: in.AttemptGeneration,
+		AutomaticBudgetSeconds:    k12.ImageTaskAutomaticBudgetSeconds,
+		AutomaticStartedAt:        now,
+		AutomaticDeadlineAt:       now + k12.ImageTaskAutomaticBudgetSeconds,
+		AutomaticRemainingSeconds: k12.ImageTaskAutomaticBudgetSeconds,
+		Version:                   0, CreatedAt: now, UpdatedAt: now,
+	}
+	invocation := k12.ImageTaskInvocation{
+		InvocationID: invocationID, AgentName: in.AgentName, DispatchID: dispatchID,
+		Operation:     k12.ImageTaskOperationClassification,
+		OperationKey:  "dispatch:" + dispatchID + ":classification",
+		RequestDigest: requestDigest, RouteSnapshot: route,
+		Status: k12.ImageTaskInvocationPrepared, Attempt: 1,
+		DeadlineAt: dispatch.AutomaticDeadlineAt,
+		CreatedAt:  now, UpdatedAt: now,
+	}
+	stored, created, err := c.Records.PrepareImageTaskDispatch(ctx, dispatch, invocation)
+	if err != nil {
+		return ImageTaskView{}, false, err
+	}
+	view, projectErr := c.projectTarget(ctx, stored)
+	return view, created, projectErr
+}
+
+func sameCreativeEntry(a, b *k12.ImageTaskCreativeEntry) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
+func sameCreateImageTaskRouteRequest(
+	existing k12.ImageTaskDispatch,
+	input CreateImageTaskInput,
+) bool {
+	if input.CreativeEntry != nil && input.CreativeEntry.TaskIntent != k12.ImageTaskIntentUnknown {
+		return sameImageTaskRouteRequest(
+			existing.OperationRouteRequest,
+			input.RouteRequest,
+		)
+	}
+	return sameImageTaskRouteRequest(
+		existing.RoutePolicySnapshot,
+		input.RouteRequest,
+	)
+}
+
+func sameImageTaskRouteRequest(
+	frozen k12.ImageTaskRouteSnapshot,
+	requested k12.ImageTaskRouteSnapshot,
+) bool {
+	frozen = k12.NormalizeImageTaskRouteSnapshot(frozen)
+	requested = k12.NormalizeImageTaskRouteSnapshot(requested)
+	if requested.SelectionSource == "" {
+		requested.SelectionSource = "auto"
+	}
+	if frozen.SelectionSource != requested.SelectionSource {
+		return false
+	}
+	if requested.SelectionSource == "explicit" {
+		return frozen.Provider == requested.Provider &&
+			frozen.Model == requested.Model
+	}
+	// An auto replay is identified by its request semantics, not by today's
+	// mutable default. Create intentionally does not call ResolveRoute here.
+	return requested.SelectionSource == "auto"
+}
+
+func gradingSnapshotFromImageRoute(route k12.ImageTaskRouteSnapshot) k12.GradingModelSnapshot {
+	snapshot := k12.GradingModelSnapshot{
+		Provider:                 route.Provider,
+		Model:                    route.Model,
+		Route:                    route.Route,
+		ProviderInstanceID:       route.ProviderInstanceID,
+		ConfigFingerprint:        route.ConfigFingerprint,
+		CapabilityReceiptDigest:  route.CapabilityReceiptDigest,
+		ProbePolicyVersion:       route.ProbePolicyVersion,
+		Capability:               route.Capability,
+		TimeoutMS:                route.TimeoutMS,
+		Fallback:                 route.FallbackPolicy,
+		RecognizingRequestPolicy: route.RecognizingRequestPolicy,
+	}
+	if snapshot.Model == k12.RecognizingPolicyModel && snapshot.RecognizingRequestPolicy.IsZero() {
+		snapshot.RecognizingRequestPolicy = k12.ApprovedRecognizingRequestPolicy()
+	}
+	return k12.NormalizeGradingModelSnapshot(snapshot)
+}
+
+func imageTaskProviderContext(
+	ctx context.Context,
+	route k12.ImageTaskRouteSnapshot,
+) (context.Context, context.CancelFunc) {
+	providerCtx := k12.WithGradingModelSnapshot(
+		ctx,
+		gradingSnapshotFromImageRoute(route),
+	)
+	if route.TimeoutMS > 0 {
+		return context.WithTimeout(
+			providerCtx,
+			time.Duration(route.TimeoutMS)*time.Millisecond,
+		)
+	}
+	return providerCtx, func() {}
+}
+
+type imageTaskAutomaticWindowContext struct {
+	DispatchID string
+	DeadlineAt int64
+	NowAt      int64
+}
+
+type imageTaskAutomaticWindowContextKey struct{}
+
+func withImageTaskAutomaticWindow(
+	ctx context.Context,
+	dispatchID string,
+	deadlineAt, nowAt int64,
+) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if deadlineAt <= 0 {
+		return ctx, func() {}
+	}
+	ctx = context.WithValue(
+		ctx,
+		imageTaskAutomaticWindowContextKey{},
+		imageTaskAutomaticWindowContext{
+			DispatchID: strings.TrimSpace(dispatchID),
+			DeadlineAt: deadlineAt,
+			NowAt:      nowAt,
+		},
+	)
+	remaining := deadlineAt - nowAt
+	if remaining <= 0 {
+		expired, cancel := context.WithCancel(ctx)
+		cancel()
+		return expired, func() {}
+	}
+	return context.WithTimeout(ctx, time.Duration(remaining)*time.Second)
+}
+
+func imageTaskAutomaticWindowFromContext(
+	ctx context.Context,
+) (imageTaskAutomaticWindowContext, bool) {
+	if ctx == nil {
+		return imageTaskAutomaticWindowContext{}, false
+	}
+	window, ok := ctx.Value(imageTaskAutomaticWindowContextKey{}).(imageTaskAutomaticWindowContext)
+	return window, ok && window.DeadlineAt > 0
+}
+
+func (c *ImageTaskCoordinator) expireImageTaskInvocationIfDue(
+	ctx context.Context,
+	dispatch k12.ImageTaskDispatch,
+	invocation k12.ImageTaskInvocation,
+) (ImageTaskView, bool, error) {
+	deadlineAt := invocation.DeadlineAt
+	if deadlineAt == 0 {
+		deadlineAt = dispatch.AutomaticDeadlineAt
+	}
+	now := c.now()
+	if deadlineAt == 0 || deadlineAt > now {
+		return ImageTaskView{}, false, nil
+	}
+	expiredDispatch, _, _, err := c.Records.ExpireImageTaskInvocation(
+		context.WithoutCancel(ctx),
+		dispatch.AgentName,
+		dispatch.DispatchID,
+		invocation.InvocationID,
+		now,
+	)
+	if err != nil {
+		return ImageTaskView{}, false, err
+	}
+	view, err := c.projectTarget(context.WithoutCancel(ctx), expiredDispatch)
+	return view, true, err
+}
+
+func (c *ImageTaskCoordinator) expireImageTaskGapIfDue(
+	ctx context.Context,
+	dispatch k12.ImageTaskDispatch,
+) (ImageTaskView, bool, error) {
+	now := c.now()
+	if dispatch.AutomaticDeadlineAt == 0 ||
+		dispatch.AutomaticDeadlineAt > now {
+		return ImageTaskView{}, false, nil
+	}
+	expiredDispatch, _, changed, err := c.Records.ExpireImageTaskInvocation(
+		context.WithoutCancel(ctx),
+		dispatch.AgentName,
+		dispatch.DispatchID,
+		"",
+		now,
+	)
+	if err != nil {
+		return ImageTaskView{}, false, err
+	}
+	if !changed {
+		return ImageTaskView{}, false, nil
+	}
+	view, err := c.projectTarget(context.WithoutCancel(ctx), expiredDispatch)
+	return view, true, err
+}
+
+// StartAsync advances one already-persisted dispatch from its durable
+// checkpoint. It is deliberately separate from Create: POST acceptance returns
+// the dispatch identity before any classifier/OCR/feedback provider call.
+func (c *ImageTaskCoordinator) StartAsync(agentName, dispatchID string) bool {
+	agentName = strings.TrimSpace(agentName)
+	dispatchID = strings.TrimSpace(dispatchID)
+	submissionID := ""
+	jobID := ""
+	stage := ""
+	logScheduling := func(accepted bool, reason string) {
+		slog.Info("K12 ImageTask scheduling decision",
+			"agent_id", agentName,
+			"dispatch_id", dispatchID,
+			"submission_id", submissionID,
+			"job_id", jobID,
+			"stage", stage,
+			"accepted", accepted,
+			"reason", reason,
+		)
+	}
+	if c == nil || c.Records == nil {
+		logScheduling(false, "coordinator_unavailable")
+		return false
+	}
+	if agentName == "" || dispatchID == "" {
+		logScheduling(false, "invalid_identity")
+		return false
+	}
+	dispatch, err := c.Records.GetImageTaskDispatch(
+		context.Background(), agentName, dispatchID,
+	)
+	if err != nil {
+		logScheduling(false, "dispatch_lookup_failed")
+		return false
+	}
+	stage = string(dispatch.Status)
+	if dispatch.TargetObjectType == k12.ImageTaskTargetHomeworkSubmission &&
+		dispatch.TargetObjectID != "" {
+		submissionID = dispatch.TargetObjectID
+		if homework, lookupErr := c.Records.GetHomeworkSubmission(
+			context.Background(), agentName, submissionID,
+		); lookupErr == nil {
+			jobID = homework.GradingJobID
+		}
+	}
+	key := agentName + "\x00" + dispatchID
+	c.workerMu.Lock()
+	c.initWorkerRuntimeLocked()
+	if c.sealed {
+		c.workerMu.Unlock()
+		logScheduling(false, "coordinator_sealed")
+		return false
+	}
+	runCtx, finishWorker, workerAccepted := c.agentWorkers.start(
+		c.runCtx, agentName, key,
+	)
+	if !workerAccepted {
+		c.workerMu.Unlock()
+		logScheduling(false, "worker_fenced_or_active")
+		return false
+	}
+	if c.workerCount == 0 {
+		c.workerIdle = make(chan struct{})
+	}
+	c.workerCount++
+	c.workerMu.Unlock()
+	logScheduling(true, "new_worker")
+	go func() {
+		defer func() {
+			c.workerMu.Lock()
+			c.workerCount--
+			if c.workerCount == 0 {
+				close(c.workerIdle)
+			}
+			c.workerMu.Unlock()
+			finishWorker()
+		}()
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				slog.Error("K12 ImageTask worker panic; durable checkpoint retained",
+					"agent_id", agentName,
+					"dispatch_id", dispatchID,
+					"submission_id", submissionID,
+					"job_id", jobID,
+					"stage", stage,
+					"panicked", true,
+					"panic_type", fmt.Sprintf("%T", recovered),
+					"panic", recovered,
+				)
+			}
+		}()
+		runStarted := time.Now()
+		slog.Info("K12 ImageTask Run started",
+			"agent_id", agentName,
+			"dispatch_id", dispatchID,
+			"submission_id", submissionID,
+			"job_id", jobID,
+			"stage", dispatch.Status,
+			"attempt_generation", dispatch.AttemptGeneration,
+			"classification_invocation_id", dispatch.ClassificationInvocationID,
+			"dispatch_context", dispatch,
+			"elapsed_ms", int64(0),
+		)
+
+		heartbeatCtx, stopHeartbeat := context.WithCancel(runCtx)
+		heartbeatStopped := make(chan struct{})
+		var stopHeartbeatOnce sync.Once
+		finishHeartbeat := func() {
+			stopHeartbeatOnce.Do(func() {
+				stopHeartbeat()
+				timer := time.NewTimer(time.Second)
+				defer timer.Stop()
+				select {
+				case <-heartbeatStopped:
+				case <-timer.C:
+					slog.Warn("K12 ImageTask heartbeat stop timed out",
+						"agent_id", agentName,
+						"dispatch_id", dispatchID,
+						"submission_id", submissionID,
+						"job_id", jobID,
+						"stage", "heartbeat_stop_timeout",
+						"run_stage", stage,
+						"attempt_generation", dispatch.AttemptGeneration,
+						"timeout_ms", int64(time.Second/time.Millisecond),
+					)
+				}
+			})
+		}
+		go func() {
+			defer close(heartbeatStopped)
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					slog.Warn("K12 ImageTask heartbeat panic",
+						"agent_id", agentName,
+						"dispatch_id", dispatchID,
+						"submission_id", submissionID,
+						"job_id", jobID,
+						"stage", stage,
+						"panic_type", fmt.Sprintf("%T", recovered),
+						"panic", recovered,
+					)
+				}
+			}()
+			ticker := time.NewTicker(30 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-heartbeatCtx.Done():
+					return
+				case <-ticker.C:
+					heartbeatStage := string(dispatch.Status)
+					heartbeatSubmissionID := submissionID
+					heartbeatJobID := jobID
+					heartbeatDispatch := dispatch
+					var heartbeatHomework *k12.HomeworkSubmission
+					var heartbeatQuestions []RecognizedQuestion
+					var heartbeatAttemptIDs []string
+					if current, err := c.Records.GetImageTaskDispatch(
+						heartbeatCtx, agentName, dispatchID,
+					); err == nil {
+						heartbeatStage = string(current.Status)
+						heartbeatDispatch = current
+						if current.TargetObjectType == k12.ImageTaskTargetHomeworkSubmission &&
+							current.TargetObjectID != "" {
+							heartbeatSubmissionID = current.TargetObjectID
+							if homework, homeworkErr := c.Records.GetHomeworkSubmission(
+								heartbeatCtx, agentName, current.TargetObjectID,
+							); homeworkErr == nil {
+								heartbeatHomework = &homework
+								heartbeatJobID = homework.GradingJobID
+							}
+							if snapshot, snapshotErr := c.Records.GetProblemAttemptSnapshot(
+								heartbeatCtx, agentName, current.TargetObjectID,
+							); snapshotErr == nil {
+								if questions, questionsErr := RecognizedQuestionsFromProblemAttemptSnapshot(snapshot); questionsErr == nil {
+									heartbeatQuestions = questions
+									for _, question := range questions {
+										if question.AttemptID != "" {
+											heartbeatAttemptIDs = append(heartbeatAttemptIDs, question.AttemptID)
+										}
+									}
+								}
+							}
+						}
+					}
+					slog.Info("K12 ImageTask Run heartbeat",
+						"agent_id", agentName,
+						"dispatch_id", dispatchID,
+						"submission_id", heartbeatSubmissionID,
+						"job_id", heartbeatJobID,
+						"stage", heartbeatStage,
+						"attempt_generation", heartbeatDispatch.AttemptGeneration,
+						"classification_invocation_id", heartbeatDispatch.ClassificationInvocationID,
+						"dispatch_context", heartbeatDispatch,
+						"homework_context", heartbeatHomework,
+						"questions_total", len(heartbeatQuestions),
+						"attempt_ids", heartbeatAttemptIDs,
+						"questions", heartbeatQuestions,
+						"elapsed_ms", time.Since(runStarted).Milliseconds(),
+					)
+				}
+			}
+		}()
+		defer finishHeartbeat()
+
+		view, err := c.Run(runCtx, agentName, dispatchID)
+		finishHeartbeat()
+		finishedStage := string(dispatch.Status)
+		if view.Dispatch.Status != "" {
+			finishedStage = string(view.Dispatch.Status)
+		}
+		finishedSubmissionID := submissionID
+		finishedJobID := jobID
+		terminal := view.Dispatch.Status == k12.ImageTaskStatusFailed ||
+			view.Dispatch.Status == k12.ImageTaskStatusCancelled
+		if view.Homework != nil {
+			finishedStage = "homework/queued"
+			finishedSubmissionID = view.Homework.SubmissionID
+			if view.Homework.GradingJobID != "" {
+				finishedJobID = view.Homework.GradingJobID
+			}
+		}
+		if view.HomeworkProjection != nil {
+			finishedStage = "homework/" + view.HomeworkProjection.Stage
+			terminal = k12.GradingStageTerminal(view.HomeworkProjection.Stage)
+		} else if view.Creative != nil {
+			finishedStage = "creative/" + string(view.Creative.Status)
+		}
+		finishedQuestions := []RecognizedQuestion(nil)
+		if view.HomeworkProjection != nil {
+			finishedQuestions = view.HomeworkProjection.Questions
+		} else if finishedSubmissionID != "" {
+			if snapshot, snapshotErr := c.Records.GetProblemAttemptSnapshot(
+				runCtx, agentName, finishedSubmissionID,
+			); snapshotErr == nil {
+				if questions, questionsErr := RecognizedQuestionsFromProblemAttemptSnapshot(snapshot); questionsErr == nil {
+					finishedQuestions = questions
+				}
+			}
+		}
+		finishedAttemptIDs := make([]string, 0, len(finishedQuestions))
+		for _, question := range finishedQuestions {
+			if question.AttemptID != "" {
+				finishedAttemptIDs = append(finishedAttemptIDs, question.AttemptID)
+			}
+		}
+		finishedAttrs := []any{
+			"agent_id", agentName,
+			"dispatch_id", dispatchID,
+			"submission_id", finishedSubmissionID,
+			"job_id", finishedJobID,
+			"stage", finishedStage,
+			"attempt_generation", view.Dispatch.AttemptGeneration,
+			"classification_invocation_id", view.Dispatch.ClassificationInvocationID,
+			"dispatch_context", view.Dispatch,
+			"homework_context", view.Homework,
+			"homework_projection", view.HomeworkProjection,
+			"questions_total", len(finishedQuestions),
+			"attempt_ids", finishedAttemptIDs,
+			"questions", finishedQuestions,
+			"elapsed_ms", time.Since(runStarted).Milliseconds(),
+			"terminal", terminal,
+			"failed", err != nil,
+		}
+		if err != nil {
+			finishedAttrs = append(finishedAttrs, "error", err)
+		}
+		slog.Info("K12 ImageTask Run finished", finishedAttrs...)
+		if err != nil {
+			slog.Warn("K12 ImageTask worker stopped at durable checkpoint",
+				"agent_id", agentName,
+				"dispatch_id", dispatchID,
+				"submission_id", finishedSubmissionID,
+				"job_id", finishedJobID,
+				"stage", finishedStage,
+				"dispatch_context", view.Dispatch,
+				"homework_context", view.Homework,
+				"homework_projection", view.HomeworkProjection,
+				"attempt_ids", finishedAttemptIDs,
+				"questions", finishedQuestions,
+				"failed", true,
+				"error", err,
+			)
+		}
+	}()
+	return true
+}
+
+// QuiesceAgent fences, cancels and drains one Agent's ImageTask workers without
+// sealing the process-wide coordinator or disturbing unrelated Agents.
+func (c *ImageTaskCoordinator) QuiesceAgent(
+	ctx context.Context,
+	agentName string,
+) (func(), error) {
+	if c == nil {
+		return func() {}, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	sourceResume := func() {}
+	if c.SourceReprocess != nil {
+		var err error
+		sourceResume, err = c.SourceReprocess.Quiesce(ctx)
+		if err != nil {
+			sourceResume()
+			return func() {}, err
+		}
+	}
+	agentResume, err := c.agentWorkers.quiesceAgent(ctx, agentName)
+	if err != nil {
+		agentResume()
+		sourceResume()
+		return func() {}, err
+	}
+	var resumeOnce sync.Once
+	return func() {
+		resumeOnce.Do(func() {
+			agentResume()
+			sourceResume()
+		})
+	}, nil
+}
+
+func (c *ImageTaskCoordinator) initWorkerRuntimeLocked() {
+	if c.workerIdle == nil {
+		c.workerIdle = make(chan struct{})
+		close(c.workerIdle)
+	}
+	if c.runCtx == nil {
+		base := c.BaseContext
+		if base == nil {
+			base = context.Background()
+		}
+		c.runCtx, c.runCancel = context.WithCancel(base)
+	}
+}
+
+// Wait blocks until currently scheduled ImageTask workers drain or ctx ends.
+func (c *ImageTaskCoordinator) Wait(ctx context.Context) error {
+	if c == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	c.workerMu.Lock()
+	c.initWorkerRuntimeLocked()
+	done := c.workerIdle
+	c.workerMu.Unlock()
+	select {
+	case <-done:
+		if c.SourceReprocess != nil {
+			return c.SourceReprocess.Wait(ctx)
+		}
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// Shutdown seals the coordinator before dependencies are closed, cancels
+// process-owned calls, and drains all workers. Repeated calls are safe.
+func (c *ImageTaskCoordinator) Shutdown(ctx context.Context) error {
+	if c == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	c.workerMu.Lock()
+	c.initWorkerRuntimeLocked()
+	c.sealed = true
+	done := c.workerIdle
+	cancel := c.runCancel
+	c.workerMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	var sourceReprocessErr error
+	if c.SourceReprocess != nil {
+		sourceReprocessErr = c.SourceReprocess.Shutdown(ctx)
+	}
+	select {
+	case <-done:
+		return sourceReprocessErr
+	case <-ctx.Done():
+		return errors.Join(sourceReprocessErr, ctx.Err())
+	}
+}
+
+func (c *ImageTaskCoordinator) beginTrackedWorkerContext(
+	parent context.Context,
+) (context.Context, func(), bool) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	c.workerMu.Lock()
+	c.initWorkerRuntimeLocked()
+	if c.sealed {
+		c.workerMu.Unlock()
+		return nil, nil, false
+	}
+	if c.workerCount == 0 {
+		c.workerIdle = make(chan struct{})
+	}
+	c.workerCount++
+	runCtx := c.runCtx
+	c.workerMu.Unlock()
+
+	ctx, cancel := context.WithCancelCause(parent)
+	stop := context.AfterFunc(runCtx, func() {
+		cancel(context.Cause(runCtx))
+	})
+	return ctx, func() {
+		stop()
+		cancel(context.Canceled)
+		c.workerMu.Lock()
+		c.workerCount--
+		if c.workerCount == 0 {
+			close(c.workerIdle)
+		}
+		c.workerMu.Unlock()
+	}, true
+}
+
+// Recover scans only checkpoints that are safe to continue locally. Sent,
+// outcome-unknown, retryable-failed, and parent-confirmation states remain
+// parked and therefore cause zero provider calls after restart.
+func (c *ImageTaskCoordinator) Recover(
+	ctx context.Context,
+	agents []string,
+) (int, error) {
+	if err := c.validate(); err != nil {
+		return 0, err
+	}
+	trackedCtx, finish, ok := c.beginTrackedWorkerContext(ctx)
+	if !ok {
+		return 0, ErrImageTaskCoordinatorShutdown
+	}
+	defer finish()
+	recovered := 0
+	for _, agentName := range agents {
+		dispatches, err := c.Records.ListImageTaskDispatchesForRecovery(
+			trackedCtx,
+			strings.TrimSpace(agentName),
+		)
+		if err != nil {
+			return recovered, err
+		}
+		for _, dispatch := range dispatches {
+			safe, safeErr := c.recoverySafe(trackedCtx, dispatch)
+			if safeErr != nil {
+				return recovered, safeErr
+			}
+			if safe && c.StartAsync(dispatch.AgentName, dispatch.DispatchID) {
+				recovered++
+			}
+		}
+	}
+	return recovered, nil
+}
+
+func (c *ImageTaskCoordinator) recoverySafe(
+	ctx context.Context,
+	dispatch k12.ImageTaskDispatch,
+) (bool, error) {
+	if dispatch.Status == k12.ImageTaskStatusRouting {
+		invocation, err := c.Records.GetImageTaskInvocation(
+			ctx,
+			dispatch.AgentName,
+			dispatch.ClassificationInvocationID,
+		)
+		if err == nil && invocation.DeadlineAt > 0 &&
+			invocation.DeadlineAt <= c.now() &&
+			(invocation.Status == k12.ImageTaskInvocationPrepared ||
+				invocation.Status == k12.ImageTaskInvocationSent) {
+			_, _, _, err = c.Records.ExpireImageTaskInvocation(
+				context.WithoutCancel(ctx),
+				dispatch.AgentName,
+				dispatch.DispatchID,
+				invocation.InvocationID,
+				c.now(),
+			)
+			return false, err
+		}
+		return err == nil && invocation.Status == k12.ImageTaskInvocationPrepared, err
+	}
+	view, err := c.projectTarget(ctx, dispatch)
+	if err != nil {
+		return false, err
+	}
+	if view.Homework != nil {
+		return strings.TrimSpace(view.Homework.GradingJobID) == "", nil
+	}
+	if view.Creative == nil {
+		return false, nil
+	}
+	switch view.Creative.Status {
+	case k12.CreativeWorkIntakePreparing:
+		invocation, invocationErr := c.Records.GetLatestWritingOCRInvocation(
+			ctx,
+			dispatch.AgentName,
+			view.Creative.IntakeID,
+		)
+		if errors.Is(invocationErr, k12storage.ErrImageTaskNotFound) {
+			return true, nil
+		}
+		if invocationErr == nil && invocation.DeadlineAt > 0 &&
+			invocation.DeadlineAt <= c.now() &&
+			(invocation.Status == k12.ImageTaskInvocationPrepared ||
+				invocation.Status == k12.ImageTaskInvocationSent) {
+			_, _, _, invocationErr = c.Records.ExpireImageTaskInvocation(
+				context.WithoutCancel(ctx),
+				dispatch.AgentName,
+				dispatch.DispatchID,
+				invocation.InvocationID,
+				c.now(),
+			)
+			return false, invocationErr
+		}
+		return invocationErr == nil &&
+			(invocation.Status == k12.ImageTaskInvocationPrepared ||
+				(invocation.Status == k12.ImageTaskInvocationSucceeded && view.Creative.OCREvidence != nil)), invocationErr
+	case k12.CreativeWorkIntakeReady:
+		return true, nil
+	case k12.CreativeWorkIntakePromoted:
+		if view.CreativeFeedback == "feedback_ready" {
+			return false, nil
+		}
+		if view.feedbackInvocation == nil {
+			return true, nil
+		}
+		if view.feedbackInvocation.DeadlineAt > 0 &&
+			view.feedbackInvocation.DeadlineAt <= c.now() &&
+			(view.feedbackInvocation.Status == k12.ImageTaskInvocationPrepared ||
+				view.feedbackInvocation.Status == k12.ImageTaskInvocationSent) {
+			_, _, _, invocationErr := c.Records.ExpireImageTaskInvocation(
+				context.WithoutCancel(ctx),
+				dispatch.AgentName,
+				dispatch.DispatchID,
+				view.feedbackInvocation.InvocationID,
+				c.now(),
+			)
+			return false, invocationErr
+		}
+		return view.feedbackInvocation.Status == k12.ImageTaskInvocationPrepared ||
+			view.feedbackInvocation.Status == k12.ImageTaskInvocationSucceeded, nil
+	default:
+		return false, nil
+	}
+}
+
+// Run advances exactly one dispatch from durable checkpoints. A prepared
+// invocation may be sent once; sent/outcome_unknown receipts are projected
+// without a blind resend.
+func (c *ImageTaskCoordinator) Run(
+	ctx context.Context,
+	agentName, dispatchID string,
+) (ImageTaskView, error) {
+	if err := c.validate(); err != nil {
+		return ImageTaskView{}, err
+	}
+	dispatch, err := c.Records.GetImageTaskDispatch(
+		ctx, strings.TrimSpace(agentName), strings.TrimSpace(dispatchID),
+	)
+	if err != nil {
+		return ImageTaskView{}, err
+	}
+	view, err := c.projectTarget(ctx, dispatch)
+	if err != nil {
+		return ImageTaskView{}, err
+	}
+	if view.homeworkCompleted {
+		return view, nil
+	}
+	switch dispatch.Status {
+	case k12.ImageTaskStatusRouting:
+		if c.Classifier == nil {
+			return view, fmt.Errorf("usecase: image task classifier 未配置")
+		}
+		invocation, invocationErr := c.Records.GetImageTaskInvocation(
+			ctx, dispatch.AgentName, dispatch.ClassificationInvocationID,
+		)
+		if invocationErr != nil {
+			return view, invocationErr
+		}
+		if invocation.Status != k12.ImageTaskInvocationPrepared {
+			return view, nil
+		}
+		if expired, yes, expireErr := c.expireImageTaskInvocationIfDue(
+			ctx,
+			dispatch,
+			invocation,
+		); yes || expireErr != nil {
+			return expired, expireErr
+		}
+		images, readErr := c.readDispatchImages(ctx, dispatch)
+		if readErr != nil {
+			return view, readErr
+		}
+		claimedInvocation, claimed, sendErr := c.Records.ClaimImageTaskInvocationSend(
+			ctx, dispatch.AgentName, invocation.InvocationID,
+			"image-task:"+dispatch.DispatchID+":classification",
+			c.now(),
+		)
+		if sendErr != nil {
+			return view, sendErr
+		}
+		if !claimed {
+			return c.Get(ctx, dispatch.AgentName, dispatch.DispatchID)
+		}
+		invocation = claimedInvocation
+		automaticCtx, cancelAutomatic := withImageTaskAutomaticWindow(
+			ctx,
+			dispatch.DispatchID,
+			invocation.DeadlineAt,
+			c.now(),
+		)
+		providerCtx, cancelProvider := imageTaskProviderContext(
+			automaticCtx,
+			invocation.RouteSnapshot,
+		)
+		if policy := gradingSnapshotFromImageRoute(invocation.RouteSnapshot).RecognizingRequestPolicy; !policy.IsZero() {
+			providerCtx = k12.WithGradingModelRequestPolicy(
+				providerCtx,
+				policy,
+			)
+		}
+		classificationStartedAt := time.Now()
+		slog.Info("K12 ImageTask classification started", "agent_id", dispatch.AgentName,
+			"dispatch_id", dispatch.DispatchID, "invocation_id", invocation.InvocationID,
+			"provider", invocation.RouteSnapshot.Provider, "model", invocation.RouteSnapshot.Model,
+			"capability", invocation.RouteSnapshot.Capability,
+			"capability_receipt_digest", invocation.RouteSnapshot.CapabilityReceiptDigest,
+			"timeout_ms", invocation.RouteSnapshot.TimeoutMS, "images", len(images))
+		classified, classifyErr := c.Classifier.ClassifyImageTask(
+			providerCtx,
+			ImageTaskClassificationInput{
+				Images: images, MessageIntent: dispatch.MessageIntent,
+				IncludeWritingOCR: invocation.RouteSnapshot.PromptVersion == "creative-work-classification-ocr-v1",
+				RecordResponse:    c.classificationResponseRecorder(dispatch.AgentName, invocation.InvocationID),
+			},
+		)
+		providerCtxErr := providerCtx.Err()
+		slog.Info("K12 ImageTask classification finished", "agent_id", dispatch.AgentName,
+			"dispatch_id", dispatch.DispatchID, "invocation_id", invocation.InvocationID,
+			"provider", invocation.RouteSnapshot.Provider, "model", invocation.RouteSnapshot.Model,
+			"elapsed_ms", time.Since(classificationStartedAt).Milliseconds(), "intent", classified.Intent,
+			"confidence", classified.Confidence, "confirmation_candidates", classified.ConfirmationCandidates,
+			"capability_unverified", errors.Is(classifyErr, k12.ErrModelCapabilityUnverified),
+			"context_error", providerCtxErr, "error", classifyErr)
+		cancelProvider()
+		cancelAutomatic()
+		if classifyErr != nil {
+			unknown := sentProviderOutcomeUnknown(classifyErr, providerCtxErr)
+			failureKind := "classification_provider_failed"
+			retrySafe := !unknown
+			if unknown {
+				failureKind = "classification_outcome_unknown"
+			}
+			if errors.Is(classifyErr, k12.ErrModelCapabilityUnverified) {
+				failureKind = "model_capability_unverified"
+				retrySafe = false
+			}
+			_ = c.Records.FailImageTaskInvocation(
+				context.WithoutCancel(ctx), dispatch.AgentName, invocation.InvocationID,
+				failureKind, unknown, retrySafe,
+			)
+			failed, _ := c.Get(context.WithoutCancel(ctx), dispatch.AgentName, dispatch.DispatchID)
+			return failed, fmt.Errorf("classify image task: %w", classifyErr)
+		}
+		routingStartedAt := time.Now()
+		routed, target, commitErr := c.Records.CommitImageTaskRouting(
+			ctx, dispatch.AgentName, dispatch.DispatchID, dispatch.Version,
+			k12storage.ImageTaskRoutingDecision{
+				Intent:     classified.Intent,
+				Evidence:   append([]string(nil), classified.IntentEvidence...),
+				Confidence: classified.Confidence,
+				ConfirmationCandidates: append(
+					[]k12.ImageTaskIntent(nil), classified.ConfirmationCandidates...,
+				),
+				WorkTitleCandidate:       classified.WorkTitleCandidate,
+				TaskRequirementCandidate: classified.TaskRequirementCandidate,
+				InvocationResultDigest:   digestJSON(classified),
+				WritingOCR:               classificationOCREvidence(classified),
+			},
+		)
+		slog.Info("K12 ImageTask routing commit finished", "agent_id", dispatch.AgentName,
+			"dispatch_id", dispatch.DispatchID, "invocation_id", invocation.InvocationID,
+			"intent", classified.Intent, "status", routed.Status,
+			"elapsed_ms", time.Since(routingStartedAt).Milliseconds(), "error", commitErr)
+		if commitErr != nil {
+			_ = c.Records.FailImageTaskInvocation(
+				context.WithoutCancel(ctx), dispatch.AgentName, invocation.InvocationID,
+				"classification_contract_invalid", false, true,
+			)
+			return view, commitErr
+		}
+		view = ImageTaskView{
+			Dispatch: routed, Homework: target.HomeworkSubmission,
+			Creative: target.CreativeIntake,
+		}
+		if routed.Status != k12.ImageTaskStatusRouted {
+			return view, nil
+		}
+		return c.continueTarget(ctx, view, images)
+	case k12.ImageTaskStatusRouted:
+		needsImages := (view.Homework != nil && view.Homework.GradingJobID == "") ||
+			(view.Creative != nil &&
+				view.Creative.WorkType == k12.WorkTypeWriting &&
+				view.Creative.Status == k12.CreativeWorkIntakePreparing)
+		var images [][]byte
+		if needsImages {
+			images, err = c.readDispatchImages(ctx, dispatch)
+			if err != nil {
+				return view, err
+			}
+		}
+		return c.continueTarget(ctx, view, images)
+	default:
+		return view, nil
+	}
+}
+
+// projectTarget is deliberately read-only. GET/result projections must never
+// send provider requests, perform OCR or promote records.
+func (c *ImageTaskCoordinator) projectTarget(
+	ctx context.Context,
+	dispatch k12.ImageTaskDispatch,
+) (ImageTaskView, error) {
+	view := ImageTaskView{Dispatch: dispatch}
+	if (dispatch.Status == k12.ImageTaskStatusRouting ||
+		dispatch.Status == k12.ImageTaskStatusFailed) &&
+		strings.TrimSpace(dispatch.ClassificationInvocationID) != "" {
+		invocation, invocationErr := c.Records.GetImageTaskInvocation(
+			ctx,
+			dispatch.AgentName,
+			dispatch.ClassificationInvocationID,
+		)
+		if invocationErr != nil {
+			return ImageTaskView{}, invocationErr
+		}
+		if invocation.Status == k12.ImageTaskInvocationPrepared ||
+			invocation.Status == k12.ImageTaskInvocationSent {
+			view.ActiveInvocationDeadlineAt = invocation.DeadlineAt
+		}
+		view.ClassificationInvocationStatus = invocation.Status
+	}
+	if dispatch.TargetObjectType == "" || dispatch.TargetObjectID == "" {
+		return view, nil
+	}
+	var err error
+	switch dispatch.TargetObjectType {
+	case k12.ImageTaskTargetHomeworkSubmission:
+		value, getErr := c.Records.GetHomeworkSubmission(ctx, dispatch.AgentName, dispatch.TargetObjectID)
+		err, view.Homework = getErr, &value
+	case k12.ImageTaskTargetCreativeWorkIntake:
+		value, getErr := c.Records.GetCreativeWorkIntake(ctx, dispatch.AgentName, dispatch.TargetObjectID)
+		err, view.Creative = getErr, &value
+	default:
+		err = k12storage.ErrImageTaskNotFound
+	}
+	if err != nil {
+		return ImageTaskView{}, err
+	}
+	if view.Creative != nil &&
+		(view.Creative.Status == k12.CreativeWorkIntakePreparing ||
+			view.Creative.Status == k12.CreativeWorkIntakeFailed) {
+		invocation, invocationErr := c.Records.GetLatestWritingOCRInvocation(
+			ctx,
+			dispatch.AgentName,
+			view.Creative.IntakeID,
+		)
+		switch {
+		case invocationErr == nil && invocation.Status == k12.ImageTaskInvocationOutcomeUnknown:
+			view.ocrInvocation = &invocation
+			// 旧父任务可能已被期限处理误标可重试；投影只采用实际 OCR 回执，不改写历史。
+			view.Dispatch.RetrySafe = false
+			view.Dispatch.FailureKind = invocation.ErrorKind
+		case invocationErr == nil &&
+			(invocation.Status == k12.ImageTaskInvocationPrepared ||
+				invocation.Status == k12.ImageTaskInvocationSent):
+			view.ocrInvocation = &invocation
+			view.ActiveInvocationDeadlineAt = invocation.DeadlineAt
+		case invocationErr == nil:
+			view.ocrInvocation = &invocation
+		case errors.Is(invocationErr, k12storage.ErrImageTaskNotFound):
+		case invocationErr != nil:
+			return ImageTaskView{}, invocationErr
+		}
+	}
+	if view.Homework != nil && view.Homework.GradingJobID != "" {
+		if projector, ok := c.Grading.(imageTaskGradingProjector); ok {
+			projection, projectErr := projector.ImageTaskHomeworkProjection(
+				ctx, dispatch.AgentName, view.Homework.GradingJobID,
+			)
+			if projectErr != nil {
+				return ImageTaskView{}, projectErr
+			}
+			view.HomeworkProjection = &projection
+			if projection.Stage == k12.GradingStageCompleted && projection.FinalArtifact != nil &&
+				projection.FinalArtifact.Validate() == nil &&
+				(dispatch.Status == k12.ImageTaskStatusRouted ||
+					(dispatch.Status == k12.ImageTaskStatusFailed && dispatch.RetrySafe &&
+						dispatch.FailureKind == imageTaskFailureInteractiveDeadlineExceeded)) {
+				completed, completionErr := c.Records.HasCompletedImageTaskHomework(ctx, dispatch.AgentName, dispatch.DispatchID)
+				if completionErr != nil {
+					return ImageTaskView{}, completionErr
+				}
+				if completed {
+					// 当前完成事实优先于旧间隙超时投影；持久失败回执保持原样。
+					view.homeworkCompleted = true
+					view.Dispatch.Status = k12.ImageTaskStatusRouted
+					view.Dispatch.FailureKind = ""
+					view.Dispatch.RetrySafe = false
+					view.Dispatch.AutomaticDeadlineAt = 0
+					view.Dispatch.AutomaticRemainingSeconds = 0
+					view.ActiveInvocationDeadlineAt = 0
+					view.HomeworkProjection.Retryable = false
+				}
+			}
+		}
+	}
+	if view.Homework != nil && view.Homework.GradingJobID == "" {
+		invocation, invocationErr := c.Records.GetLatestHomeworkSolveInvocation(
+			ctx,
+			dispatch.AgentName,
+			dispatch.DispatchID,
+		)
+		switch {
+		case invocationErr == nil:
+			view.solveInvocation = &invocation
+			if invocation.Status == k12.ImageTaskInvocationPrepared ||
+				invocation.Status == k12.ImageTaskInvocationSent {
+				view.ActiveInvocationDeadlineAt = invocation.DeadlineAt
+			}
+		case errors.Is(invocationErr, k12storage.ErrImageTaskNotFound):
+		case invocationErr != nil:
+			return ImageTaskView{}, invocationErr
+		}
+	}
+	if view.Creative != nil && view.Creative.PromotedWorkID != "" {
+		record, getErr := c.Records.Get(ctx, view.Creative.PromotedWorkID)
+		if getErr != nil {
+			return ImageTaskView{}, getErr
+		}
+		if record.AgentName != dispatch.AgentName {
+			return ImageTaskView{}, k12storage.ErrImageTaskNotFound
+		}
+		fields, parseErr := k12.ParseCreativeWorkFields(record.Fields)
+		if parseErr != nil {
+			return ImageTaskView{}, parseErr
+		}
+		generationState, stateErr := c.Records.GetCreativeWorkGenerationState(
+			ctx, dispatch.AgentName, record.RecordID,
+		)
+		if stateErr != nil {
+			return ImageTaskView{}, stateErr
+		}
+		fields = overlayCurrentCreativeWorkFeedback(fields, generationState)
+		view.CreativeDisplayName = fields.DisplayName
+		work := CreativeWorkView{
+			Record:          record,
+			Fields:          fields,
+			GenerationState: generationState,
+		}
+		view.CreativeWork = &work
+		view.CreativeFeedback = creativeFeedbackProjectionState(work)
+		generation := generationState.Initial
+		if generationState.Latest != nil {
+			generation = generationState.Latest
+		}
+		if generation != nil {
+			operationKey := "work:" + record.RecordID + ":version:" +
+				generation.GenerationID + ":feedback"
+			invocation, invocationErr := c.Records.GetLatestWorkFeedbackInvocation(
+				ctx, dispatch.AgentName, record.RecordID, operationKey,
+			)
+			switch {
+			case invocationErr == nil:
+				if invocation.Status == k12.ImageTaskInvocationOutcomeUnknown &&
+					invocation.ErrorKind == "work_feedback_outcome_unknown" &&
+					view.CreativeFeedback != "feedback_ready" {
+					// Provider 发送后发生 deadline/取消是独立的终态：不能把 generation
+					// 的普通失败投影暴露为可重试/一般失败，也不能再次发送请求。
+					view.CreativeFeedback = "feedback_outcome_unknown"
+				} else if view.CreativeFeedback != "feedback_ready" && view.CreativeFeedback != "feedback_failed" {
+					view.CreativeFeedback = publicCreativeFeedbackInvocationState(invocation)
+				}
+				// 作品恢复投影统一判断成功回执重放与已知失败重试，不在图片入口另设状态规则。
+				view.CreativeFeedbackRetryable = generation.RetrySafe
+				view.feedbackInvocation = &invocation
+				if invocation.Status == k12.ImageTaskInvocationPrepared ||
+					invocation.Status == k12.ImageTaskInvocationSent {
+					view.ActiveInvocationDeadlineAt = invocation.DeadlineAt
+				}
+			case errors.Is(invocationErr, k12storage.ErrImageTaskNotFound):
+				view.CreativeFeedbackRetryable = generation.Status == k12.WorkFeedbackFailed
+			case !errors.Is(invocationErr, k12storage.ErrImageTaskNotFound):
+				return ImageTaskView{}, invocationErr
+			}
+		}
+	}
+	return view, nil
+}
+
+func creativeFeedbackProjectionState(work CreativeWorkView) string {
+	if work.GenerationState.Latest != nil &&
+		work.GenerationState.Latest.Status == k12.WorkFeedbackSucceeded &&
+		work.GenerationState.Latest.Feedback != nil {
+		return "feedback_ready"
+	}
+	if work.Record != nil && work.Record.Status == k12.WorkStatusFeedbackReady &&
+		len(work.Fields.Versions) > 0 {
+		version := work.Fields.Versions[len(work.Fields.Versions)-1]
+		if version.StructuredFeedback != nil &&
+			strings.TrimSpace(version.StructuredFeedback.ProjectionMarkdown) != "" {
+			return "feedback_ready"
+		}
+	}
+	if work.GenerationState.Initial != nil && work.GenerationState.Initial.Status == k12.WorkFeedbackFailed {
+		return "feedback_failed"
+	}
+	return "feedback_pending"
+}
+
+func publicCreativeFeedbackInvocationState(invocation k12.ImageTaskInvocation) string {
+	switch invocation.Status {
+	case k12.ImageTaskInvocationPrepared,
+		k12.ImageTaskInvocationSent,
+		k12.ImageTaskInvocationSucceeded:
+		return "feedback_pending"
+	case k12.ImageTaskInvocationFailed:
+		return "feedback_failed"
+	case k12.ImageTaskInvocationOutcomeUnknown:
+		return "feedback_outcome_unknown"
+	default:
+		return "feedback_pending"
+	}
+}
+
+func imageTaskWorkFeedbackContext(
+	ctx context.Context,
+	snapshot k12.ImageTaskRouteSnapshot,
+) context.Context {
+	snapshot = k12.NormalizeImageTaskRouteSnapshot(snapshot)
+	if err := snapshot.Validate(); err != nil {
+		return ctx
+	}
+	// 作品点评的文本/视觉回调同样走 Provider 边界；同时携带 Grading 快照，
+	// 让发送前能力回执校验与普通 ImageTask 调用使用同一冻结证据。
+	ctx = k12.WithGradingModelSnapshot(ctx, gradingSnapshotFromImageRoute(snapshot))
+	return withWorkFeedbackRouteSnapshot(ctx, snapshot)
+}
+
+func (c *ImageTaskCoordinator) resolveWorkFeedbackRoute(
+	ctx context.Context,
+	view ImageTaskView,
+) (k12.ImageTaskRouteSnapshot, error) {
+	var (
+		route k12.ImageTaskRouteSnapshot
+		err   error
+	)
+	switch {
+	case view.feedbackInvocation != nil:
+		route = view.feedbackInvocation.RouteSnapshot
+	case view.Dispatch.RoutingProvenance == k12.ImageTaskRoutingModelClassified:
+		if c.ResolveWorkFeedbackRoute == nil {
+			return k12.ImageTaskRouteSnapshot{}, errors.New(
+				"usecase: image task work-feedback route resolver is not configured",
+			)
+		}
+		if view.Creative == nil {
+			return k12.ImageTaskRouteSnapshot{}, errors.New(
+				"usecase: image task work-feedback creative intake is missing",
+			)
+		}
+		route, err = c.ResolveWorkFeedbackRoute(
+			ctx,
+			view.Creative.WorkType,
+			view.Dispatch.RoutePolicySnapshot,
+		)
+		if err != nil {
+			return k12.ImageTaskRouteSnapshot{}, err
+		}
+	case view.Dispatch.RoutingProvenance == k12.ImageTaskRoutingParentSelected:
+		if c.ResolveWorkFeedbackRoute == nil {
+			return k12.ImageTaskRouteSnapshot{}, errors.New(
+				"usecase: image task work-feedback route resolver is not configured",
+			)
+		}
+		if view.Creative == nil {
+			return k12.ImageTaskRouteSnapshot{}, errors.New(
+				"usecase: image task work-feedback creative intake is missing",
+			)
+		}
+		route, err = c.ResolveWorkFeedbackRoute(
+			ctx,
+			view.Creative.WorkType,
+			view.Dispatch.OperationRouteRequest,
+		)
+		if err != nil {
+			return k12.ImageTaskRouteSnapshot{}, err
+		}
+	default:
+		return k12.ImageTaskRouteSnapshot{}, errors.New(
+			"usecase: image task work-feedback routing provenance is invalid",
+		)
+	}
+	route = k12.NormalizeImageTaskRouteSnapshot(route)
+	if err := route.Validate(); err != nil {
+		return k12.ImageTaskRouteSnapshot{}, err
+	}
+	return route, nil
+}
+
+func (c *ImageTaskCoordinator) continueCreativeFeedback(
+	ctx context.Context,
+	view ImageTaskView,
+) (ImageTaskView, error) {
+	if view.Creative == nil ||
+		view.Creative.Status != k12.CreativeWorkIntakePromoted ||
+		strings.TrimSpace(view.Creative.PromotedWorkID) == "" {
+		return view, nil
+	}
+	projected, err := c.projectTarget(ctx, view.Dispatch)
+	if err != nil {
+		return view, err
+	}
+	if projected.CreativeFeedback == "feedback_ready" ||
+		projected.CreativeFeedback == "feedback_failed" ||
+		projected.CreativeFeedback == "feedback_outcome_unknown" {
+		return projected, nil
+	}
+	if projected.feedbackInvocation != nil {
+		switch projected.feedbackInvocation.Status {
+		case k12.ImageTaskInvocationSent,
+			k12.ImageTaskInvocationOutcomeUnknown,
+			k12.ImageTaskInvocationFailed:
+			return projected, nil
+		}
+	}
+	if c.WorkFeedback == nil {
+		return projected, fmt.Errorf("usecase: creative image task work feedback 未配置")
+	}
+	automaticCtx, cancelAutomatic := withImageTaskAutomaticWindow(
+		ctx,
+		view.Dispatch.DispatchID,
+		view.Dispatch.AutomaticDeadlineAt,
+		c.now(),
+	)
+	defer cancelAutomatic()
+	routeStartedAt := time.Now()
+	slog.Info("K12 ImageTask feedback route resolution started", "agent_id", view.Dispatch.AgentName,
+		"dispatch_id", view.Dispatch.DispatchID, "work_id", view.Creative.PromotedWorkID,
+		"work_type", view.Creative.WorkType, "routing_provenance", view.Dispatch.RoutingProvenance)
+	feedbackRoute, err := c.resolveWorkFeedbackRoute(automaticCtx, projected)
+	slog.Info("K12 ImageTask feedback route resolution finished", "agent_id", view.Dispatch.AgentName,
+		"dispatch_id", view.Dispatch.DispatchID, "work_id", view.Creative.PromotedWorkID,
+		"provider", feedbackRoute.Provider, "model", feedbackRoute.Model, "capability", feedbackRoute.Capability,
+		"capability_receipt_digest", feedbackRoute.CapabilityReceiptDigest,
+		"elapsed_ms", time.Since(routeStartedAt).Milliseconds(), "error", err)
+	if err != nil {
+		if _, failErr := c.Records.FailWorkFeedbackGeneration(
+			context.WithoutCancel(ctx), view.Dispatch.AgentName,
+			view.Creative.PromotedGenerationID, err.Error(),
+		); failErr != nil {
+			return projected, failErr
+		}
+		failed, projectionErr := c.projectTarget(ctx, view.Dispatch)
+		if projectionErr != nil {
+			return projected, projectionErr
+		}
+		return failed, err
+	}
+	feedbackCtx := imageTaskWorkFeedbackContext(automaticCtx, feedbackRoute)
+	feedbackStartedAt := time.Now()
+	slog.Info("K12 ImageTask feedback generation started", "agent_id", view.Dispatch.AgentName,
+		"dispatch_id", view.Dispatch.DispatchID, "work_id", view.Creative.PromotedWorkID,
+		"provider", feedbackRoute.Provider, "model", feedbackRoute.Model, "timeout_ms", feedbackRoute.TimeoutMS)
+	if _, err := c.WorkFeedback.GenerateWorkFeedback(
+		feedbackCtx, view.Dispatch.AgentName, view.Creative.PromotedWorkID,
+	); err != nil {
+		slog.Warn("K12 ImageTask feedback generation failed", "agent_id", view.Dispatch.AgentName,
+			"dispatch_id", view.Dispatch.DispatchID, "work_id", view.Creative.PromotedWorkID,
+			"elapsed_ms", time.Since(feedbackStartedAt).Milliseconds(),
+			"capability_unverified", errors.Is(err, k12.ErrModelCapabilityUnverified), "error", err)
+		return projected, err
+	}
+	slog.Info("K12 ImageTask feedback generation completed", "agent_id", view.Dispatch.AgentName,
+		"dispatch_id", view.Dispatch.DispatchID, "work_id", view.Creative.PromotedWorkID,
+		"elapsed_ms", time.Since(feedbackStartedAt).Milliseconds())
+	return c.projectTarget(ctx, view.Dispatch)
+}
+
+func (c *ImageTaskCoordinator) continueTarget(
+	ctx context.Context,
+	view ImageTaskView,
+	images [][]byte,
+) (ImageTaskView, error) {
+	if view.homeworkCompleted {
+		return view, nil
+	}
+	if expired, yes, err := c.expireImageTaskGapIfDue(
+		ctx,
+		view.Dispatch,
+	); yes || err != nil {
+		return expired, err
+	}
+	if view.Homework != nil {
+		if view.Homework.GradingJobID != "" {
+			return view, nil
+		}
+		if view.Dispatch.SourceKind == k12.ImageTaskSourceIM &&
+			view.Dispatch.TaskIntent == k12.ImageTaskIntentCompletedHomework {
+			if c.IMCompletedHomeworkRoutingGate == nil {
+				return view, fmt.Errorf("usecase: IM completed-homework routing gate is unavailable")
+			}
+			allow, err := c.IMCompletedHomeworkRoutingGate.AllowIMCompletedHomeworkGrading(
+				ctx, view.Dispatch,
+			)
+			slog.Info("K12 ImageTask IM homework routing gate evaluated", "agent_id", view.Dispatch.AgentName,
+				"dispatch_id", view.Dispatch.DispatchID, "submission_id", view.Homework.SubmissionID,
+				"allowed", allow, "error", err)
+			if err != nil {
+				return view, err
+			}
+			if !allow {
+				return view, nil
+			}
+		}
+		if c.Grading == nil {
+			return view, fmt.Errorf("usecase: homework image task grading orchestrator 未配置")
+		}
+		grade := ""
+		if c.ResolveGrade != nil {
+			var gradeErr error
+			grade, gradeErr = c.ResolveGrade(ctx, view.Dispatch.AgentName)
+			if gradeErr != nil {
+				return view, gradeErr
+			}
+		}
+		job, _, err := c.Grading.StartPhotoGradingJob(ctx, StartPhotoGradingInput{
+			Photo: PhotoGradeRequest{
+				AgentName: view.Dispatch.AgentName, SourceSession: view.Dispatch.SourceSessionID,
+				SourcePageAssetID: view.Dispatch.SourceAssetRefs[0],
+				Image:             append([]byte(nil), images[0]...),
+				TaskIntent:        photoTaskIntentFromDispatch(view.Dispatch.TaskIntent),
+				Grade:             strings.TrimSpace(grade),
+			},
+			SourceKind: "image_task", SourceKey: view.Dispatch.DispatchID,
+			ModelSnapshot:  gradingSnapshotFromImageRoute(view.Dispatch.RoutePolicySnapshot),
+			BudgetSnapshot: c.GradingBudgetSnapshot,
+			ParentAutomaticAttemptID: fmt.Sprintf(
+				"%s:%d",
+				view.Dispatch.DispatchID,
+				view.Dispatch.AutomaticStartedAt,
+			),
+			ParentAutomaticDeadlineAt: view.Dispatch.AutomaticDeadlineAt,
+		})
+		if err != nil {
+			if errors.Is(err, ErrInvalidInput) {
+				if persistErr := c.failHomeworkSolvePreflight(
+					context.WithoutCancel(ctx),
+					view.Dispatch,
+					err,
+				); persistErr != nil {
+					return view, errors.Join(
+						err,
+						fmt.Errorf("persist homework solve preflight failure: %w", persistErr),
+					)
+				}
+			}
+			return view, err
+		}
+		if job.Record == nil || strings.TrimSpace(job.Record.RecordID) == "" {
+			return view, fmt.Errorf("usecase: grading orchestrator 未返回 durable job identity")
+		}
+		submission, err := c.Records.BindHomeworkSubmissionGradingJob(
+			ctx, view.Dispatch.AgentName, view.Homework.SubmissionID,
+			job.Record.RecordID, view.Homework.Version,
+		)
+		if err != nil {
+			return view, err
+		}
+		view.Homework = &submission
+		accepted := c.Grading.StartAsync(job.Record.RecordID)
+		elapsedMS := int64(0)
+		if view.Dispatch.AutomaticStartedAt > 0 {
+			elapsedSeconds := c.now() - view.Dispatch.AutomaticStartedAt
+			if elapsedSeconds > 0 {
+				elapsedMS = elapsedSeconds * int64(time.Second/time.Millisecond)
+			}
+		}
+		slog.Info("K12 ImageTask handed off to GradingJob",
+			"agent_id", view.Dispatch.AgentName,
+			"dispatch_id", view.Dispatch.DispatchID,
+			"submission_id", submission.SubmissionID,
+			"job_id", job.Record.RecordID,
+			"parent_automatic_attempt_id", job.Fields.ParentAutomaticAttemptID,
+			"stage", job.Record.Status,
+			"job_fields", job.Fields,
+			"accepted", accepted,
+			"elapsed_ms", elapsedMS,
+		)
+		return view, nil
+	}
+	if view.Creative == nil {
+		return view, nil
+	}
+	intake := *view.Creative
+	if intake.Status == k12.CreativeWorkIntakePromoted {
+		return c.continueCreativeFeedback(ctx, view)
+	}
+	if intake.WorkType == k12.WorkTypeWriting && intake.Status == k12.CreativeWorkIntakePreparing {
+		if c.WritingOCR == nil {
+			return view, fmt.Errorf("usecase: writing OCR 未配置")
+		}
+		prepared, err := c.Records.GetLatestWritingOCRInvocation(
+			ctx,
+			intake.AgentName,
+			intake.IntakeID,
+		)
+		if errors.Is(err, k12storage.ErrImageTaskNotFound) && intake.OCREvidence != nil && intake.OCREvidence.SourceInvocationID != "" {
+			// 分类已提供原始转写，直接复核其风险片段，不再发送整篇 OCR。
+			prior, priorErr := c.Records.GetImageTaskInvocation(ctx, intake.AgentName, intake.OCREvidence.SourceInvocationID)
+			if priorErr != nil {
+				return view, priorErr
+			}
+			if prior.DispatchID != intake.DispatchID || prior.Operation != k12.ImageTaskOperationClassification || prior.Status != k12.ImageTaskInvocationSucceeded {
+				return view, k12storage.ErrImageTaskConflict
+			}
+			updated, reviewErr := c.reviewWritingOCR(ctx, view.Dispatch, intake, prior, images)
+			view.Creative = &updated
+			return view, reviewErr
+		}
+		if errors.Is(err, k12storage.ErrImageTaskNotFound) {
+			ocrRoute := intake.RoutePolicySnapshot
+			if intake.PromotionPolicy == k12.CreativeWorkPromotionExplicitCommit && view.Dispatch.RoutingProvenance == k12.ImageTaskRoutingModelClassified {
+				ocrRoute = view.Dispatch.RoutePolicySnapshot
+			} else if intake.PromotionPolicy == k12.CreativeWorkPromotionExplicitCommit {
+				if c.ResolveRoute == nil {
+					return view, fmt.Errorf("usecase: writing OCR route resolver 未配置")
+				}
+				ocrRoute, err = c.ResolveRoute(view.Dispatch.OperationRouteRequest)
+				if err != nil {
+					return view, fmt.Errorf(
+						"%w: resolve writing OCR route: %v",
+						ErrInvalidInput,
+						err,
+					)
+				}
+				ocrRoute = k12.NormalizeImageTaskRouteSnapshot(ocrRoute)
+				if ocrRoute.TimeoutMS <= 0 {
+					ocrRoute.TimeoutMS = int(imageTaskDefaultProviderTimeout / time.Millisecond)
+				}
+			}
+			ocrRoute.PromptVersion = "creative-work-writing-ocr-v1"
+			ocrRoute.Capability = "vision"
+			if err := ocrRoute.Validate(); err != nil {
+				return view, fmt.Errorf("%w: writing OCR route: %v", ErrInvalidInput, err)
+			}
+			invocation := k12.ImageTaskInvocation{
+				InvocationID: c.id("writing_ocr"), AgentName: intake.AgentName,
+				IntakeID:     intake.IntakeID,
+				Operation:    k12.ImageTaskOperationWritingOCR,
+				OperationKey: "intake:" + intake.IntakeID + ":writing-ocr",
+				RequestDigest: digestJSON(struct{ Intake, Source string }{
+					intake.IntakeID,
+					intake.SourceDigest,
+				}),
+				RouteSnapshot: ocrRoute, Status: k12.ImageTaskInvocationPrepared, Attempt: 1,
+				DeadlineAt: view.Dispatch.AutomaticDeadlineAt,
+				CreatedAt:  c.now(), UpdatedAt: c.now(),
+			}
+			prepared, _, err = c.Records.PrepareImageTaskInvocation(ctx, invocation)
+			if err != nil {
+				return view, err
+			}
+		} else if err != nil {
+			return view, err
+		}
+		switch prepared.Status {
+		case k12.ImageTaskInvocationPrepared:
+			if expired, yes, expireErr := c.expireImageTaskInvocationIfDue(
+				ctx,
+				view.Dispatch,
+				prepared,
+			); yes || expireErr != nil {
+				return expired, expireErr
+			}
+			if intake.OCREvidence != nil && view.Dispatch.RoutingProvenance != k12.ImageTaskRoutingParentSelected {
+				intake, err = c.reviewWritingOCR(ctx, view.Dispatch, intake, prepared, images)
+			} else {
+				intake, err = c.executeWritingOCR(
+					ctx,
+					view.Dispatch,
+					intake,
+					prepared,
+					images,
+				)
+			}
+			if err != nil {
+				return view, err
+			}
+			view.Creative = &intake
+		case k12.ImageTaskInvocationSucceeded:
+			updated, getErr := c.Records.GetCreativeWorkIntake(
+				ctx, intake.AgentName, intake.IntakeID,
+			)
+			if getErr != nil {
+				return view, getErr
+			}
+			view.Creative = &updated
+		case k12.ImageTaskInvocationSent,
+			k12.ImageTaskInvocationOutcomeUnknown,
+			k12.ImageTaskInvocationFailed:
+			// A prepared request may be sent exactly once. A sent or uncertain
+			// receipt must be reconciled by provider request key; a retryable
+			// failure may advance only through the explicit retry command.
+			return view, nil
+		default:
+			return view, k12storage.ErrImageTaskInvalidState
+		}
+		if view.Creative.Status == k12.CreativeWorkIntakePreparing && view.Creative.OCREvidence != nil &&
+			view.Dispatch.RoutingProvenance != k12.ImageTaskRoutingParentSelected {
+			latest, getErr := c.Records.GetLatestWritingOCRInvocation(ctx, intake.AgentName, intake.IntakeID)
+			if getErr != nil {
+				return view, getErr
+			}
+			updated, reviewErr := c.reviewWritingOCR(ctx, view.Dispatch, *view.Creative, latest, images)
+			if reviewErr != nil {
+				return view, reviewErr
+			}
+			view.Creative = &updated
+		}
+	}
+	if view.Creative.Status == k12.CreativeWorkIntakeReady {
+		if view.Creative.PromotionPolicy == k12.CreativeWorkPromotionExplicitCommit {
+			return view, nil
+		}
+		// File IO stays outside the promotion transaction. Re-read immediately
+		// before the CAS so deleted/replaced content-addressed evidence cannot be
+		// promoted from an earlier in-memory copy.
+		if _, err := c.readDispatchImages(ctx, view.Dispatch); err != nil {
+			return view, err
+		}
+		promotionStartedAt := time.Now()
+		workID, _, err := c.Records.PromoteCreativeWorkIntake(
+			ctx, view.Creative.AgentName, view.Creative.IntakeID, view.Creative.Version,
+		)
+		slog.Info("K12 ImageTask creative intake promotion finished", "agent_id", view.Creative.AgentName,
+			"dispatch_id", view.Dispatch.DispatchID, "intake_id", view.Creative.IntakeID,
+			"work_id", workID, "work_type", view.Creative.WorkType,
+			"elapsed_ms", time.Since(promotionStartedAt).Milliseconds(), "error", err)
+		if err != nil {
+			return view, err
+		}
+		updated, err := c.Records.GetCreativeWorkIntake(ctx, view.Creative.AgentName, view.Creative.IntakeID)
+		if err != nil {
+			return view, err
+		}
+		if updated.PromotedWorkID != workID {
+			return view, fmt.Errorf("usecase: promoted work projection drift")
+		}
+		view.Creative = &updated
+		return c.continueCreativeFeedback(ctx, view)
+	}
+	return view, nil
+}
+
+func (c *ImageTaskCoordinator) failHomeworkSolvePreflight(
+	ctx context.Context,
+	dispatch k12.ImageTaskDispatch,
+	cause error,
+) error {
+	now := c.now()
+	_, err := c.Records.FailHomeworkSolvePreflight(
+		ctx,
+		k12.ImageTaskInvocation{
+			InvocationID: c.id("solve_preflight"),
+			AgentName:    dispatch.AgentName,
+			DispatchID:   dispatch.DispatchID,
+			Operation:    k12.ImageTaskOperationSolve,
+			OperationKey: "dispatch:" + dispatch.DispatchID + ":solve-preflight",
+			RequestDigest: digestJSON(struct {
+				DispatchID    string
+				RequestDigest string
+				SourceDigest  string
+				Route         string
+			}{
+				DispatchID:    dispatch.DispatchID,
+				RequestDigest: dispatch.RequestDigest,
+				SourceDigest:  dispatch.SourceDigest,
+				Route:         dispatch.RoutePolicySnapshot.Route,
+			}),
+			RouteSnapshot: dispatch.RoutePolicySnapshot,
+			Status:        k12.ImageTaskInvocationPrepared,
+			Attempt:       1,
+			CreatedAt:     now,
+			UpdatedAt:     now,
+		},
+		imageTaskGradingPreflightFailureKind(cause),
+	)
+	return err
+}
+
+func imageTaskGradingPreflightFailureKind(cause error) string {
+	switch {
+	case errors.Is(cause, errGradingBudgetMissing):
+		return "grading_budget_missing"
+	case errors.Is(cause, errGradingBudgetPolicyInvalid):
+		return "grading_budget_policy_invalid"
+	case errors.Is(cause, ErrModelRequestPolicyInvalid):
+		return "grading_model_request_policy_invalid"
+	default:
+		return "grading_request_invalid"
+	}
+}
+
+func photoTaskIntentFromDispatch(intent k12.ImageTaskIntent) PhotoTaskIntent {
+	if intent == k12.ImageTaskIntentBlankWorksheet {
+		return PhotoTaskBlankWorksheet
+	}
+	return PhotoTaskCompletedHomework
+}
+
+func (c *ImageTaskCoordinator) executeWritingOCR(
+	ctx context.Context,
+	dispatch k12.ImageTaskDispatch,
+	intake k12.CreativeWorkIntake,
+	invocation k12.ImageTaskInvocation,
+	images [][]byte,
+) (k12.CreativeWorkIntake, error) {
+	if len(images) == 0 {
+		return intake, fmt.Errorf("%w: writing OCR resume 缺少 immutable source image", ErrInvalidInput)
+	}
+	if invocation.Status == k12.ImageTaskInvocationPrepared {
+		claimedInvocation, claimed, err := c.Records.ClaimImageTaskInvocationSend(
+			ctx, intake.AgentName, invocation.InvocationID,
+			"image-task:"+intake.DispatchID+":writing-ocr",
+			c.now(),
+		)
+		if err != nil {
+			return intake, err
+		}
+		if !claimed {
+			return c.Records.GetCreativeWorkIntake(
+				ctx,
+				intake.AgentName,
+				intake.IntakeID,
+			)
+		}
+		invocation = claimedInvocation
+	}
+	automaticCtx, cancelAutomatic := withImageTaskAutomaticWindow(
+		ctx,
+		dispatch.DispatchID,
+		invocation.DeadlineAt,
+		c.now(),
+	)
+	providerCtx, cancelProvider := imageTaskProviderContext(
+		automaticCtx,
+		invocation.RouteSnapshot,
+	)
+	ocrStartedAt := time.Now()
+	slog.Info("K12 ImageTask writing OCR started", "agent_id", intake.AgentName,
+		"dispatch_id", dispatch.DispatchID, "intake_id", intake.IntakeID, "invocation_id", invocation.InvocationID,
+		"provider", invocation.RouteSnapshot.Provider, "model", invocation.RouteSnapshot.Model,
+		"capability_receipt_digest", invocation.RouteSnapshot.CapabilityReceiptDigest,
+		"timeout_ms", invocation.RouteSnapshot.TimeoutMS, "image_bytes", len(images[0]))
+	ocr, err := c.WritingOCR.RecognizeImageTaskWriting(providerCtx, images[0])
+	providerCtxErr := providerCtx.Err()
+	slog.Info("K12 ImageTask writing OCR finished", "agent_id", intake.AgentName,
+		"dispatch_id", dispatch.DispatchID, "intake_id", intake.IntakeID, "invocation_id", invocation.InvocationID,
+		"provider", invocation.RouteSnapshot.Provider, "model", invocation.RouteSnapshot.Model,
+		"elapsed_ms", time.Since(ocrStartedAt).Milliseconds(), "raw_bytes", len(ocr.Raw),
+		"canonical_bytes", len(ocr.CanonicalContent), "confidence", ocr.Confidence,
+		"risk_segments", len(ocr.RiskSegments), "promotion_policy", intake.PromotionPolicy,
+		"capability_unverified", errors.Is(err, k12.ErrModelCapabilityUnverified),
+		"context_error", providerCtxErr, "error", err)
+	cancelProvider()
+	cancelAutomatic()
+	if err != nil {
+		unknown := sentProviderOutcomeUnknown(err, providerCtxErr)
+		failureKind := "writing_ocr_provider_failed"
+		retrySafe := !unknown
+		if unknown {
+			failureKind = "writing_ocr_outcome_unknown"
+		}
+		if errors.Is(err, k12.ErrModelCapabilityUnverified) {
+			failureKind = "model_capability_unverified"
+			retrySafe = false
+		}
+		_ = c.Records.FailImageTaskInvocation(
+			context.WithoutCancel(ctx), intake.AgentName, invocation.InvocationID,
+			failureKind, unknown, retrySafe,
+		)
+		return intake, err
+	}
+	ocr.Raw = strings.TrimSpace(ocr.Raw)
+	ocr.CanonicalContent = strings.TrimSpace(ocr.CanonicalContent)
+	if ocr.CanonicalContent == "" {
+		ocr.CanonicalContent = ocr.Raw
+	}
+	sum := sha256.Sum256([]byte(ocr.CanonicalContent))
+	evidence := k12.CreativeWorkIntakeOCREvidence{
+		Raw: ocr.Raw, CanonicalContent: ocr.CanonicalContent, CanonicalVersion: 1,
+		CanonicalDigest: "sha256:" + hex.EncodeToString(sum[:]),
+		Confidence:      ocr.Confidence,
+		RiskSegments:    append([]k12.CreativeWorkIntakeOCRRisk(nil), ocr.RiskSegments...),
+	}
+	if intake.PromotionPolicy == k12.CreativeWorkPromotionExplicitCommit && dispatch.RoutingProvenance == k12.ImageTaskRoutingParentSelected {
+		return c.Records.HoldCreativeWorkIntakeOCRConfirmation(
+			ctx, intake.AgentName, intake.IntakeID, intake.Version,
+			invocation.InvocationID, evidence,
+		)
+	}
+	if ocr.CanonicalContent == "" {
+		evidence.Outcome = "unreadable"
+		return c.Records.FreezeCreativeWorkIntakeOCR(ctx, intake.AgentName, intake.IntakeID, intake.Version, invocation.InvocationID, evidence, k12.CreativeWorkEvidenceBoundedReview)
+	}
+	if ocr.Confidence >= 0.95 && len(ocr.RiskSegments) == 0 {
+		evidence.Outcome = "complete"
+		evidence.ConfirmationProvenance = k12.CreativeWorkEvidenceAutoFreeze
+		evidence.FrozenAt = c.now()
+		return c.Records.FreezeCreativeWorkIntakeOCR(
+			ctx, intake.AgentName, intake.IntakeID, intake.Version,
+			invocation.InvocationID, evidence, k12.CreativeWorkEvidenceAutoFreeze,
+		)
+	}
+	if len(evidence.RiskSegments) == 0 {
+		evidence.RiskSegments = []k12.CreativeWorkIntakeOCRRisk{{
+			SegmentID: "document", RawText: evidence.Raw,
+			Reasons: []string{"confidence_below_auto_freeze_threshold"},
+		}}
+	}
+	return c.Records.HoldCreativeWorkIntakeOCRConfirmation(
+		ctx, intake.AgentName, intake.IntakeID, intake.Version,
+		invocation.InvocationID, evidence,
+	)
+}
+
+func (c *ImageTaskCoordinator) Get(
+	ctx context.Context,
+	agentName, dispatchID string,
+) (ImageTaskView, error) {
+	if c == nil || c.Records == nil {
+		return ImageTaskView{}, fmt.Errorf("usecase: image task store 未配置")
+	}
+	dispatch, err := c.Records.GetImageTaskDispatch(ctx, strings.TrimSpace(agentName), strings.TrimSpace(dispatchID))
+	if err != nil {
+		return ImageTaskView{}, err
+	}
+	return c.projectTarget(ctx, dispatch)
+}
+
+func (c *ImageTaskCoordinator) Result(
+	ctx context.Context,
+	agentName, dispatchID string,
+) (ImageTaskResult, error) {
+	view, err := c.Get(ctx, agentName, dispatchID)
+	if err != nil {
+		return ImageTaskResult{}, err
+	}
+	sourceAttachments, err := c.sourceAttachmentReceipts(ctx, view.Dispatch)
+	if err != nil {
+		return ImageTaskResult{}, err
+	}
+	result := ImageTaskResult{
+		Kind: "pending", Dispatch: view.Dispatch, Creative: view.Creative,
+		CreativeDisplayName: view.CreativeDisplayName, CreativeWork: view.CreativeWork,
+		SourceAttachments:         sourceAttachments,
+		OperationReceipts:         make([]ImageTaskOperationReceipt, 0),
+		GroundingEvidenceReceipts: []GroundingEvidenceReceipt{},
+		ProblemGroundingReceipts:  []ProblemGroundingReceipt{},
+	}
+	if strings.TrimSpace(view.Dispatch.ClassificationInvocationID) != "" {
+		invocation, invocationErr := c.Records.GetImageTaskInvocation(
+			ctx,
+			view.Dispatch.AgentName,
+			view.Dispatch.ClassificationInvocationID,
+		)
+		if invocationErr != nil {
+			return ImageTaskResult{}, invocationErr
+		}
+		result.OperationReceipts = append(
+			result.OperationReceipts,
+			imageTaskInvocationReceipt(invocation, view.Dispatch.SourceDigest),
+		)
+	}
+	if view.solveInvocation != nil {
+		result.OperationReceipts = append(
+			result.OperationReceipts,
+			imageTaskInvocationReceipt(*view.solveInvocation, view.Dispatch.SourceDigest),
+		)
+	}
+	if view.feedbackInvocation != nil {
+		result.OperationReceipts = append(
+			result.OperationReceipts,
+			imageTaskInvocationReceipt(*view.feedbackInvocation, view.Dispatch.SourceDigest),
+		)
+	}
+	if view.ocrInvocation != nil {
+		result.OperationReceipts = append(result.OperationReceipts,
+			imageTaskInvocationReceipt(*view.ocrInvocation, view.Dispatch.SourceDigest))
+	}
+	if view.Dispatch.Status == k12.ImageTaskStatusAwaitingConfirmation ||
+		(view.Creative != nil && view.Creative.Status == k12.CreativeWorkIntakeAwaitingConfirmation) {
+		result.Kind = "awaiting_confirmation"
+		return result, nil
+	}
+	if view.Creative != nil && view.Creative.Status == k12.CreativeWorkIntakeUnreadable {
+		result.Kind = "creative"
+		return result, nil
+	}
+	if view.Creative != nil && view.Creative.Status == k12.CreativeWorkIntakePromoted &&
+		(view.CreativeFeedback == "feedback_ready" ||
+			view.Creative.PromotionPolicy == k12.CreativeWorkPromotionExplicitCommit) {
+		result.Kind = "creative"
+		return result, nil
+	}
+	if view.Homework != nil && view.Homework.GradingJobID != "" {
+		result.GradingJobID = view.Homework.GradingJobID
+		if view.HomeworkProjection != nil {
+			result.GroundingEvidenceReceipts = cloneGroundingEvidenceReceipts(
+				view.HomeworkProjection.GroundingEvidenceReceipts,
+			)
+			result.ProblemGroundingReceipts = cloneProblemGroundingReceipts(
+				view.HomeworkProjection.ProblemGroundingReceipts,
+			)
+		}
+		invocations, listErr := c.Records.ListModelInvocations(
+			ctx, agentName, view.Homework.GradingJobID,
+		)
+		if listErr != nil {
+			return ImageTaskResult{}, listErr
+		}
+		for _, invocation := range invocations {
+			result.OperationReceipts = append(
+				result.OperationReceipts,
+				modelInvocationReceipt(invocation, view.Dispatch.SourceDigest),
+			)
+		}
+		physicalInvocations, listPhysicalErr := c.Records.ListModelPhysicalInvocations(
+			ctx,
+			agentName,
+			view.Homework.GradingJobID,
+		)
+		if listPhysicalErr != nil {
+			return ImageTaskResult{}, listPhysicalErr
+		}
+		for _, invocation := range physicalInvocations {
+			result.OperationReceipts = append(
+				result.OperationReceipts,
+				modelPhysicalInvocationReceipt(invocation, view.Dispatch.SourceDigest),
+			)
+		}
+		itemInvocations, listItemsErr := c.Records.ListGradingItemInvocations(
+			ctx,
+			agentName,
+			view.Homework.GradingJobID,
+		)
+		if listItemsErr != nil {
+			return ImageTaskResult{}, listItemsErr
+		}
+		for _, invocation := range itemInvocations {
+			result.OperationReceipts = append(
+				result.OperationReceipts,
+				gradingItemInvocationReceipt(invocation, view.Dispatch.SourceDigest),
+			)
+		}
+		finalArtifact, finalArtifactErr := c.Records.GetGradingFinalArtifactByJob(
+			ctx, agentName, view.Homework.GradingJobID,
+		)
+		if finalArtifactErr == nil {
+			result.Kind = string(view.Dispatch.TaskIntent)
+			result.FinalArtifact = &finalArtifact
+		} else if !errors.Is(finalArtifactErr, records.ErrNotFound) {
+			return ImageTaskResult{}, finalArtifactErr
+		}
+		if result.FinalArtifact == nil {
+			return result, nil
+		}
+		photo := PhotoGradeResult{
+			Mode:          PhotoModeGrade,
+			TaskIntent:    photoTaskIntentFromDispatch(view.Dispatch.TaskIntent),
+			ResultSurface: PhotoSurfaceAnnotatedHomework,
+			Markdown:      result.FinalArtifact.CanonicalMarkdown,
+		}
+		if view.HomeworkProjection == nil {
+			return ImageTaskResult{}, fmt.Errorf("usecase: final image task result missing homework projection")
+		}
+		questions := RecognizedQuestionsForAssessment(
+			cloneRecognizedQuestions(view.HomeworkProjection.Questions),
+		)
+		assessments, assessmentErr := c.Records.ListGradingAssessmentItems(
+			ctx, agentName, view.Homework.GradingJobID,
+		)
+		if assessmentErr != nil {
+			return ImageTaskResult{}, assessmentErr
+		}
+		assessmentByProblem := make(map[string]k12.GradingAssessmentItem, len(assessments))
+		for _, assessment := range assessments {
+			assessmentByProblem[assessment.ProblemID] = assessment
+		}
+		photo.Items = make([]PhotoGradeItem, 0, len(assessments))
+		assessmentDigests := make([]string, 0, len(assessments))
+		for _, question := range questions {
+			assessment, ok := assessmentByProblem[question.ProblemID]
+			if !ok {
+				continue
+			}
+			// 终稿原图不能用后来补出的 Attempt 框推断批注；默认只读原逐题回执。
+			question.BBox = nil
+			item, replayErr := replayGradingAssessmentItem(question, assessment)
+			if replayErr != nil {
+				return ImageTaskResult{}, replayErr
+			}
+			photo.Items = append(photo.Items, item)
+			assessmentDigests = append(assessmentDigests, assessment.ResultDigest)
+			delete(assessmentByProblem, question.ProblemID)
+		}
+		if len(photo.Items) != result.FinalArtifact.PublishedCount || len(assessmentByProblem) != 0 {
+			return ImageTaskResult{}, fmt.Errorf(
+				"usecase: final image task result assessment exact-set mismatch",
+			)
+		}
+		if view.Dispatch.TaskIntent == k12.ImageTaskIntentBlankWorksheet {
+			photo.Mode = PhotoModeSolve
+			photo.ResultSurface = PhotoSurfaceParentTeachingGuide
+		}
+		if result.FinalArtifact.HasAnnotatedAsset() {
+			result.OperationReceipts = append(
+				result.OperationReceipts,
+				gradingAnnotationReceipt(*result.FinalArtifact, view.Dispatch.SourceDigest),
+			)
+			asset, openErr := c.Records.OpenGradingFinalAnnotatedAsset(
+				ctx, agentName, result.FinalArtifact.ArtifactID,
+			)
+			if openErr != nil {
+				return ImageTaskResult{}, openErr
+			}
+			photo.AnnotatedImage = &RenderedPhoto{
+				Data: append([]byte(nil), asset.Data...), MIME: asset.MIME,
+			}
+		}
+		// 已冻结的 aggregate 结果同时证明当时的几何和实际图；旧无正文回执不回填。
+		restoreFinalPhotoGeometry(&photo, *result.FinalArtifact, invocations, assessments, assessmentDigests)
+		if photo.ImageWarning == "" || photo.ImageWarning == "未能可靠定位作答位置，本次仅提供文字批改" {
+			photo.ImageWarning = photoAnnotationCoverageWarning(photo)
+		}
+		result.Kind = string(view.Dispatch.TaskIntent)
+		result.Photo = &photo
+		if err := c.registerTutorResult(ctx, result, assessments); err != nil {
+			// 关联可在下一次结果读取时补齐，不能因派生记录失败丢失完整批改产物。
+			slog.Warn("K12 tutor context registration failed", "dispatch_id", dispatchID, "error", err)
+		}
+	}
+	return result, nil
+}
+
+func restoreFinalPhotoGeometry(
+	photo *PhotoGradeResult,
+	artifact k12.GradingFinalArtifact,
+	invocations []k12.ModelInvocation,
+	assessments []k12.GradingAssessmentItem,
+	assessmentDigests []string,
+) {
+	if artifact.SkippedCount != 0 {
+		return
+	}
+	ordered, err := json.Marshal(assessmentDigests)
+	if err != nil || string(ordered) != artifact.OrderedCurrentDigestsJSON {
+		return
+	}
+	for _, invocation := range invocations {
+		complete := invocation.Status == k12.ModelInvocationSucceeded ||
+			(invocation.Status == k12.ModelInvocationReconciled && invocation.FailureKind == "reconciled_succeeded")
+		if invocation.AgentName != artifact.AgentName || invocation.JobID != artifact.JobID ||
+			invocation.Stage != k12.GradingStageAssessing || !complete ||
+			strings.TrimSpace(invocation.ResultJSON) == "" {
+			continue
+		}
+		var frozen PhotoGradeResult
+		if json.Unmarshal([]byte(invocation.ResultJSON), &frozen) != nil ||
+			modelInvocationResultDigest(frozen) != invocation.ResultDigest ||
+			frozen.EffectiveTaskIntent() != photo.EffectiveTaskIntent() || len(frozen.Items) != len(photo.Items) ||
+			validateGradingAssessmentExactSet(frozen, assessments) != nil {
+			continue
+		}
+		if (frozen.AnnotatedImage == nil) != (photo.AnnotatedImage == nil) ||
+			(frozen.AnnotatedImage != nil && (frozen.AnnotatedImage.MIME != photo.AnnotatedImage.MIME ||
+				!bytes.Equal(frozen.AnnotatedImage.Data, photo.AnnotatedImage.Data))) {
+			continue
+		}
+		matches := true
+		for i, item := range frozen.Items {
+			q := photo.Items[i].Recognized
+			if item.Recognized.ProblemID != q.ProblemID || item.Recognized.AttemptID != q.AttemptID ||
+				item.Recognized.ConfirmedVersion != q.ConfirmedVersion || item.Recognized.InputDigest != q.InputDigest ||
+				item.Recognized.PageAssetID != q.PageAssetID ||
+				item.Recognized.SourceWidth != q.SourceWidth || item.Recognized.SourceHeight != q.SourceHeight {
+				matches = false
+				break
+			}
+		}
+		if !matches {
+			continue
+		}
+		for i, item := range frozen.Items {
+			photo.Items[i].Recognized.BBox = nil
+			if item.Recognized.BBox != nil {
+				box := *item.Recognized.BBox
+				photo.Items[i].Recognized.BBox = &box
+			}
+		}
+		photo.ImageWarning = frozen.ImageWarning
+		return
+	}
+}
+
+func gradingItemInvocationReceipt(
+	invocation k12.GradingItemInvocation,
+	canonicalInputDigest string,
+) ImageTaskOperationReceipt {
+	receipt := ImageTaskOperationReceipt{
+		InvocationID:         invocation.InvocationID,
+		Operation:            string(invocation.Operation),
+		ExecutionKind:        string(invocation.ExecutionKind),
+		CanonicalInputDigest: canonicalInputDigest,
+		Status:               string(invocation.Status),
+		Attempt:              invocation.OperationAttempt,
+		ResultDigest:         invocation.ResultDigest,
+	}
+	if invocation.ExecutionKind == k12.GradingExecutionProvider {
+		receipt.Provider = invocation.RouteSnapshot.Provider
+		receipt.Model = invocation.RouteSnapshot.Model
+	}
+	return receipt
+}
+
+func gradingAnnotationReceipt(
+	artifact k12.GradingFinalArtifact,
+	canonicalInputDigest string,
+) ImageTaskOperationReceipt {
+	return ImageTaskOperationReceipt{
+		InvocationID:         "annotation:" + artifact.ArtifactID,
+		Operation:            "annotation",
+		ExecutionKind:        string(k12.GradingExecutionLocalDeterministic),
+		CanonicalInputDigest: canonicalInputDigest,
+		Status:               string(k12.ModelInvocationSucceeded),
+		Attempt:              1,
+		ResultDigest:         "sha256:" + artifact.AnnotatedDigest,
+	}
+}
+
+func (c *ImageTaskCoordinator) sourceAttachmentReceipts(
+	ctx context.Context,
+	dispatch k12.ImageTaskDispatch,
+) ([]ImageTaskSourceAttachmentReceipt, error) {
+	images, err := c.readDispatchImages(ctx, dispatch)
+	if err != nil {
+		return nil, err
+	}
+	receipts := make([]ImageTaskSourceAttachmentReceipt, 0, len(images))
+	for _, image := range images {
+		sum := sha256.Sum256(image)
+		receipts = append(receipts, ImageTaskSourceAttachmentReceipt{
+			Digest: "sha256:" + hex.EncodeToString(sum[:]), SizeBytes: len(image),
+		})
+	}
+	return receipts, nil
+}
+
+func imageTaskInvocationReceipt(
+	invocation k12.ImageTaskInvocation,
+	canonicalInputDigest string,
+) ImageTaskOperationReceipt {
+	return ImageTaskOperationReceipt{
+		InvocationID:         invocation.InvocationID,
+		Operation:            string(invocation.Operation),
+		ExecutionKind:        string(k12.GradingExecutionProvider),
+		CanonicalInputDigest: canonicalInputDigest,
+		Provider:             invocation.RouteSnapshot.Provider,
+		Model:                invocation.RouteSnapshot.Model,
+		Status:               string(invocation.Status),
+		Attempt:              invocation.Attempt,
+		ResultDigest:         invocation.ResultDigest,
+	}
+}
+
+func modelInvocationReceipt(
+	invocation k12.ModelInvocation,
+	canonicalInputDigest string,
+) ImageTaskOperationReceipt {
+	receipt := ImageTaskOperationReceipt{
+		InvocationID:         invocation.InvocationID,
+		Operation:            invocation.Stage,
+		ExecutionKind:        string(k12.GradingExecutionProvider),
+		CanonicalInputDigest: canonicalInputDigest,
+		Provider:             invocation.RouteSnapshot.Provider,
+		Model:                invocation.RouteSnapshot.Model,
+		Status:               string(invocation.Status),
+		Attempt:              invocation.Attempt,
+		ResultDigest:         invocation.ResultDigest,
+	}
+	policy := k12.NormalizeModelRequestPolicySnapshot(invocation.RequestPolicySnapshot)
+	if !policy.IsZero() {
+		receipt.RequestPolicyDigest = policy.Digest()
+		receipt.RequestPolicy = &policy
+	}
+	return receipt
+}
+
+func modelPhysicalInvocationReceipt(
+	invocation k12.ModelPhysicalInvocation,
+	canonicalInputDigest string,
+) ImageTaskOperationReceipt {
+	receipt := ImageTaskOperationReceipt{
+		InvocationID:         invocation.PhysicalInvocationID,
+		ParentInvocationID:   invocation.ParentInvocationID,
+		PhysicalUnit:         string(invocation.PhysicalUnit),
+		Operation:            invocation.Stage,
+		ExecutionKind:        string(k12.GradingExecutionProvider),
+		CanonicalInputDigest: canonicalInputDigest,
+		Provider:             invocation.RouteSnapshot.Provider,
+		Model:                invocation.RouteSnapshot.Model,
+		Status:               string(invocation.Status),
+		Attempt:              invocation.Attempt,
+		ResultDigest:         invocation.ResultDigest,
+	}
+	policy := k12.NormalizeModelRequestPolicySnapshot(
+		invocation.RequestPolicySnapshot,
+	)
+	if !policy.IsZero() {
+		receipt.RequestPolicyDigest = policy.Digest()
+		receipt.RequestPolicy = &policy
+	}
+	return receipt
+}
+
+// ResolveTutoringTipsGradingJob is an internal server-side bridge. Public
+// callers address only the ImageTaskDispatch; the GradingJob identity never
+// crosses the HTTP boundary.
+func (c *ImageTaskCoordinator) ResolveTutoringTipsGradingJob(
+	ctx context.Context,
+	agentName, dispatchID string,
+) (string, error) {
+	view, err := c.Get(ctx, strings.TrimSpace(agentName), strings.TrimSpace(dispatchID))
+	if err != nil {
+		return "", err
+	}
+	if view.Dispatch.Status != k12.ImageTaskStatusRouted ||
+		(view.Dispatch.TaskIntent != k12.ImageTaskIntentCompletedHomework &&
+			view.Dispatch.TaskIntent != k12.ImageTaskIntentBlankWorksheet) ||
+		view.Dispatch.TargetObjectType != k12.ImageTaskTargetHomeworkSubmission ||
+		view.Homework == nil ||
+		strings.TrimSpace(view.Homework.GradingJobID) == "" {
+		return "", k12storage.ErrImageTaskInvalidState
+	}
+	return view.Homework.GradingJobID, nil
+}
+
+func (c *ImageTaskCoordinator) readSourceImages(
+	ctx context.Context,
+	ownerScope, agentName string,
+	assetRefs []string,
+) ([][]byte, error) {
+	images := make([][]byte, len(assetRefs))
+	if c.PageAssets != nil {
+		for index, ref := range assetRefs {
+			ready, err := c.PageAssets.OpenReady(
+				ctx,
+				ownerScope,
+				agentName,
+				ref,
+			)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"%w: PageAsset %d is not ready in authenticated scope: %v",
+					ErrInvalidInput,
+					index,
+					err,
+				)
+			}
+			canonical, err := canonicalProblemSourceImage(ready)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"%w: canonicalize PageAsset %d: %v",
+					ErrInvalidInput, index, err,
+				)
+			}
+			images[index] = canonical.Data
+		}
+		return images, nil
+	}
+	reader := c.ReadAsset
+	if reader == nil {
+		reader = defaultImageTaskAssetReader
+	}
+	for index, ref := range assetRefs {
+		var err error
+		images[index], err = reader(agentName, ref)
+		if err != nil {
+			return nil, err
+		}
+		if len(images[index]) == 0 {
+			return nil, fmt.Errorf("%w: source image %d empty", ErrInvalidInput, index)
+		}
+	}
+	return images, nil
+}
+
+func (c *ImageTaskCoordinator) readDispatchImages(
+	ctx context.Context,
+	dispatch k12.ImageTaskDispatch,
+) ([][]byte, error) {
+	ownerScope := ""
+	if c.PageAssets != nil {
+		var err error
+		ownerScope, err = c.Records.GetImageTaskOwnerScope(
+			ctx,
+			dispatch.AgentName,
+			dispatch.DispatchID,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("%w: durable image task owner scope missing", ErrInvalidInput)
+		}
+	}
+	for _, ref := range dispatch.SourceAssetRefs {
+		owner, _, parseErr := assetstore.Parse(ref)
+		if parseErr != nil || owner != dispatch.AgentName {
+			return nil, fmt.Errorf("%w: retry source asset owner mismatch", ErrInvalidInput)
+		}
+	}
+	images, err := c.readSourceImages(
+		ctx,
+		ownerScope,
+		dispatch.AgentName,
+		dispatch.SourceAssetRefs,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if digest := imageBytesDigest(images); digest != dispatch.SourceDigest {
+		return nil, fmt.Errorf(
+			"%w: immutable source digest mismatch: frozen=%s actual=%s",
+			ErrInvalidInput, dispatch.SourceDigest, digest,
+		)
+	}
+	return images, nil
+}
+
+// PersistPageAsset is the sole image-ingress persistence seam for non-HTTP
+// adapters such as IM. It cannot fall back to assetstore.Save because that
+// would create bytes without an owner-scoped ready ledger.
+func (c *ImageTaskCoordinator) PersistPageAsset(
+	ctx context.Context,
+	ownerScope, agentName string,
+	data []byte,
+) (ReadyPageAsset, error) {
+	if c == nil || c.PageAssets == nil {
+		return ReadyPageAsset{}, errors.New("usecase: PageAsset repository not configured")
+	}
+	return c.PageAssets.Persist(
+		ctx,
+		strings.TrimSpace(ownerScope),
+		strings.TrimSpace(agentName),
+		data,
+	)
+}
+
+func (c *ImageTaskCoordinator) Confirm(
+	ctx context.Context,
+	input ConfirmImageTaskInput,
+) (ImageTaskView, error) {
+	if c == nil || c.Records == nil {
+		return ImageTaskView{}, fmt.Errorf("usecase: image task store 未配置")
+	}
+	dispatch, err := c.Records.GetImageTaskDispatch(ctx, input.AgentName, input.DispatchID)
+	if err != nil {
+		return ImageTaskView{}, err
+	}
+	if dispatch.Version != input.ExpectedVersion {
+		return ImageTaskView{}, k12storage.ErrImageTaskVersionConflict
+	}
+	if dispatch.Status == k12.ImageTaskStatusAwaitingConfirmation {
+		if input.Creative != nil || input.Subject != "" || input.Grade != "" ||
+			len(input.QuestionCorrections) != 0 {
+			return ImageTaskView{}, fmt.Errorf("%w: intent confirmation cannot mix target command", ErrInvalidInput)
+		}
+		images, err := c.readDispatchImages(ctx, dispatch)
+		if err != nil {
+			return ImageTaskView{}, err
+		}
+		routed, target, err := c.Records.ConfirmImageTaskIntent(
+			ctx, input.AgentName, input.DispatchID, input.ExpectedVersion, input.Intent,
+		)
+		if err != nil {
+			return ImageTaskView{}, err
+		}
+		view := ImageTaskView{
+			Dispatch: routed, Homework: target.HomeworkSubmission, Creative: target.CreativeIntake,
+		}
+		return c.continueTarget(ctx, view, images)
+	}
+	view, err := c.projectTarget(ctx, dispatch)
+	if err != nil {
+		return ImageTaskView{}, err
+	}
+	if view.Homework != nil {
+		if input.Creative != nil || input.Intent != "" {
+			return view, fmt.Errorf("%w: homework/creative confirmation branches are exclusive", ErrInvalidInput)
+		}
+		if c.Grading == nil || view.Homework.GradingJobID == "" {
+			return view, k12storage.ErrImageTaskInvalidState
+		}
+		if _, ok, err := c.Grading.ConfirmPhotoGradingJob(
+			ctx, view.Homework.GradingJobID,
+			ConfirmPhotoGradingInput{
+				Subject: input.Subject, Grade: input.Grade,
+				Corrections: input.QuestionCorrections,
+			},
+		); err != nil || !ok {
+			if err == nil {
+				err = k12storage.ErrImageTaskInvalidState
+			}
+			return view, err
+		}
+		// 确认成功后重新投影同一任务，不能将确认前的 pending 快照返回给界面。
+		return c.projectTarget(ctx, dispatch)
+	}
+	if view.Creative == nil || input.Creative == nil ||
+		input.Intent != "" || input.Subject != "" || input.Grade != "" ||
+		len(input.QuestionCorrections) != 0 {
+		return view, k12storage.ErrImageTaskInvalidState
+	}
+	creative := input.Creative
+	switch creative.Action {
+	case CreativeImageTaskActionFreezeOCR:
+		if strings.TrimSpace(creative.WorkTitle) != "" ||
+			strings.TrimSpace(creative.TaskRequirement) != "" ||
+			strings.TrimSpace(creative.Intent) != "" ||
+			strings.TrimSpace(creative.ContentMarkdown) != "" {
+			return view, fmt.Errorf("%w: freeze_ocr cannot carry commit fields", ErrInvalidInput)
+		}
+		if view.Creative.Status != k12.CreativeWorkIntakeAwaitingConfirmation {
+			return view, k12storage.ErrImageTaskInvalidState
+		}
+		images, err := c.readDispatchImages(ctx, dispatch)
+		if err != nil {
+			return view, err
+		}
+		intake, err := c.Records.ConfirmCreativeWorkIntakeOCR(
+			ctx, input.AgentName, view.Creative.IntakeID, view.Creative.Version,
+			creative.CanonicalVersion, creative.CanonicalContent,
+			creative.SegmentCorrections,
+		)
+		if err != nil {
+			return view, err
+		}
+		view.Creative = &intake
+		return c.continueTarget(ctx, view, images)
+	case CreativeImageTaskActionCommit:
+		if creative.CanonicalVersion != 0 ||
+			strings.TrimSpace(creative.CanonicalContent) != "" ||
+			len(creative.SegmentCorrections) != 0 {
+			return view, fmt.Errorf("%w: commit cannot carry freeze_ocr fields", ErrInvalidInput)
+		}
+		command := k12.CreativeWorkCommitCommand{
+			WorkTitle:       strings.TrimSpace(creative.WorkTitle),
+			TaskRequirement: strings.TrimSpace(creative.TaskRequirement),
+			Intent:          strings.TrimSpace(creative.Intent),
+			ContentMarkdown: strings.TrimSpace(creative.ContentMarkdown),
+		}
+		if view.Creative.WorkType == k12.WorkTypeWriting &&
+			command.ContentMarkdown != "" &&
+			(view.Creative.OCREvidence == nil ||
+				command.ContentMarkdown != view.Creative.OCREvidence.CanonicalContent) {
+			return view, fmt.Errorf("%w: writing content changed after freeze_ocr", ErrInvalidInput)
+		}
+		command.CommandDigest = digestJSON(struct {
+			DispatchID, IntakeID, WorkTitle, TaskRequirement, Intent, ContentMarkdown string
+		}{
+			dispatch.DispatchID, view.Creative.IntakeID, command.WorkTitle,
+			command.TaskRequirement, command.Intent, command.ContentMarkdown,
+		})
+		// 原图标题和已成功提交的重放保留原文；只限制本次手工填写的标题。
+		if view.Creative.WorkType == k12.WorkTypeArt && view.Creative.CommitReceipt == nil {
+			previousTitle := ""
+			if candidate := view.Creative.WorkTitleCandidate; candidate != nil {
+				previousTitle = candidate.Value
+			}
+			if err := inputlimits.Text("work_title", creative.WorkTitle, previousTitle, inputlimits.Title); err != nil {
+				return view, fmt.Errorf("%w: %v", ErrInvalidInput, err)
+			}
+		}
+		intake, err := c.Records.CommitManualCreativeWorkIntake(
+			ctx, input.AgentName, view.Creative.IntakeID,
+			view.Creative.Version, command,
+		)
+		if err != nil {
+			return view, err
+		}
+		view.Creative = &intake
+		return c.projectTarget(ctx, dispatch)
+	default:
+		return view, fmt.Errorf("%w: creative action must be freeze_ocr or commit", ErrInvalidInput)
+	}
+}
+
+// Retry executes only a durably retry-safe failed invocation and reuses its
+// frozen route snapshot. GET/result never call this path.
+func (c *ImageTaskCoordinator) Retry(
+	ctx context.Context,
+	agentName, dispatchID string,
+	expectedVersion int,
+) (ImageTaskView, error) {
+	if err := c.validate(); err != nil {
+		return ImageTaskView{}, err
+	}
+	original, err := c.Records.GetImageTaskDispatch(ctx, agentName, dispatchID)
+	if err != nil {
+		return ImageTaskView{}, err
+	}
+	if original.Version != expectedVersion {
+		return ImageTaskView{}, k12storage.ErrImageTaskVersionConflict
+	}
+	current, err := c.projectTarget(ctx, original)
+	if err != nil {
+		return ImageTaskView{}, err
+	}
+	if current.ocrInvocation != nil &&
+		current.ocrInvocation.Status == k12.ImageTaskInvocationOutcomeUnknown {
+		return current, k12storage.ErrImageTaskInvalidState
+	}
+	if current.Homework != nil &&
+		strings.TrimSpace(current.Homework.GradingJobID) != "" {
+		projection := current.HomeworkProjection
+		genericRetryable := projection != nil &&
+			projection.Stage == k12.GradingStageFailedRetryable &&
+			projection.Retryable
+		requiresParentWindow := projection != nil &&
+			(projection.retryFailureKind == gradingFailureInteractiveDeadlineExceeded ||
+				(genericRetryable && original.AutomaticDeadlineAt > 0 &&
+					original.AutomaticDeadlineAt <= c.now()))
+		parentWindowOnly := projection == nil ||
+			projection.retryFailureKind == "" ||
+			requiresParentWindow
+		if parentWindowOnly {
+			retrier, ok := c.Grading.(imageTaskGradingParentWindowRetrier)
+			if !ok {
+				if !genericRetryable {
+					return current, k12storage.ErrImageTaskInvalidState
+				}
+			} else {
+				allowed, preflightErr := retrier.CanRetryPhotoGradingWithParentAutomaticWindow(
+					ctx,
+					current.Homework.GradingJobID,
+				)
+				if preflightErr != nil {
+					return current, preflightErr
+				}
+				if allowed {
+					restarted, restartErr := c.Records.RestartImageTaskAutomaticWindow(
+						ctx,
+						agentName,
+						dispatchID,
+						expectedVersion,
+						c.now(),
+					)
+					if restartErr != nil {
+						return current, restartErr
+					}
+					parentAttemptID := fmt.Sprintf(
+						"%s:%d",
+						restarted.DispatchID,
+						restarted.AutomaticStartedAt,
+					)
+					if _, started, retryErr := retrier.RetryPhotoGradingJobWithParentAutomaticWindow(
+						ctx,
+						current.Homework.GradingJobID,
+						parentAttemptID,
+						restarted.AutomaticDeadlineAt,
+					); retryErr != nil || !started {
+						if retryErr == nil {
+							retryErr = k12storage.ErrImageTaskInvalidState
+						}
+						return current, retryErr
+					}
+					return c.projectTarget(ctx, restarted)
+				}
+				if requiresParentWindow {
+					return current, k12storage.ErrImageTaskInvalidState
+				}
+			}
+		}
+		if !genericRetryable {
+			return current, k12storage.ErrImageTaskInvalidState
+		}
+		var runtime PhotoGradingJobRuntimeRetrier
+		if candidate, ok := c.Grading.(PhotoGradingJobRuntimeRetrier); ok {
+			runtime = candidate
+		}
+		if _, retryErr := RetryPhotoGradingJobWithDurableFallback(
+			ctx,
+			Deps{Records: c.Records, Now: c.Now},
+			runtime,
+			agentName,
+			current.Homework.GradingJobID,
+		); retryErr != nil {
+			return current, retryErr
+		}
+		return c.projectTarget(ctx, original)
+	}
+	if current.Creative != nil &&
+		current.Creative.Status == k12.CreativeWorkIntakePromoted {
+		if original.Status == k12.ImageTaskStatusFailed &&
+			original.RetrySafe &&
+			original.FailureKind == imageTaskFailureInteractiveDeadlineExceeded &&
+			current.CreativeFeedback == "feedback_ready" &&
+			current.CreativeWork != nil &&
+			current.CreativeWork.GenerationState.Latest != nil &&
+			current.CreativeWork.GenerationState.Latest.Status == k12.WorkFeedbackSucceeded &&
+			current.CreativeWork.GenerationState.Latest.Feedback != nil {
+			// 点评已经成功时只恢复父任务接续窗口，复用当前 generation 与调用回执。
+			dispatch, restartErr := c.Records.RestartImageTaskAutomaticWindow(
+				ctx, agentName, dispatchID, expectedVersion, c.now(),
+			)
+			if restartErr != nil {
+				return current, restartErr
+			}
+			return c.projectTarget(ctx, dispatch)
+		}
+		if current.CreativeFeedback != "feedback_failed" ||
+			!current.CreativeFeedbackRetryable ||
+			c.WorkFeedback == nil {
+			return current, k12storage.ErrImageTaskInvalidState
+		}
+		dispatch, err := c.Records.RestartImageTaskAutomaticWindow(
+			ctx,
+			agentName,
+			dispatchID,
+			expectedVersion,
+			c.now(),
+		)
+		if err != nil {
+			return current, err
+		}
+		current.Dispatch = dispatch
+		automaticCtx, cancelAutomatic := withImageTaskAutomaticWindow(
+			ctx,
+			dispatch.DispatchID,
+			dispatch.AutomaticDeadlineAt,
+			c.now(),
+		)
+		defer cancelAutomatic()
+		retryStartedAt := time.Now()
+		slog.Info("K12 ImageTask feedback retry started", "agent_id", agentName,
+			"dispatch_id", dispatchID, "work_id", current.Creative.PromotedWorkID)
+		feedbackRoute, routeErr := c.resolveWorkFeedbackRoute(automaticCtx, current)
+		slog.Info("K12 ImageTask feedback retry route resolved", "agent_id", agentName,
+			"dispatch_id", dispatchID, "work_id", current.Creative.PromotedWorkID,
+			"provider", feedbackRoute.Provider, "model", feedbackRoute.Model, "capability", feedbackRoute.Capability,
+			"capability_receipt_digest", feedbackRoute.CapabilityReceiptDigest,
+			"elapsed_ms", time.Since(retryStartedAt).Milliseconds(), "error", routeErr)
+		if routeErr != nil {
+			return current, routeErr
+		}
+		feedbackCtx := imageTaskWorkFeedbackContext(automaticCtx, feedbackRoute)
+		if _, err := c.WorkFeedback.GenerateWorkFeedback(
+			feedbackCtx, agentName, current.Creative.PromotedWorkID,
+		); err != nil {
+			slog.Warn("K12 ImageTask feedback retry failed", "agent_id", agentName,
+				"dispatch_id", dispatchID, "work_id", current.Creative.PromotedWorkID,
+				"elapsed_ms", time.Since(retryStartedAt).Milliseconds(), "error", err)
+			return current, err
+		}
+		slog.Info("K12 ImageTask feedback retry completed", "agent_id", agentName,
+			"dispatch_id", dispatchID, "work_id", current.Creative.PromotedWorkID,
+			"elapsed_ms", time.Since(retryStartedAt).Milliseconds())
+		return c.projectTarget(ctx, dispatch)
+	}
+	if original.Status == k12.ImageTaskStatusFailed &&
+		original.RetrySafe &&
+		original.TargetObjectType != "" &&
+		original.TargetObjectID != "" {
+		restarted, restartErr := c.Records.RestartImageTaskAutomaticWindow(
+			ctx,
+			agentName,
+			dispatchID,
+			expectedVersion,
+			c.now(),
+		)
+		if restartErr != nil {
+			return current, restartErr
+		}
+		current.Dispatch = restarted
+		var images [][]byte
+		if current.Homework != nil ||
+			(current.Creative != nil &&
+				current.Creative.WorkType == k12.WorkTypeWriting &&
+				current.Creative.Status == k12.CreativeWorkIntakePreparing) {
+			images, err = c.readDispatchImages(ctx, restarted)
+			if err != nil {
+				return current, err
+			}
+		}
+		return c.continueTarget(ctx, current, images)
+	}
+	images, err := c.readDispatchImages(ctx, original)
+	if err != nil {
+		return ImageTaskView{}, err
+	}
+	dispatch, invocation, err := c.Records.PrepareImageTaskRetry(
+		ctx, agentName, dispatchID, expectedVersion, c.id(string(invocationKindForDispatch(original))+"_retry"),
+	)
+	if err != nil {
+		return ImageTaskView{}, err
+	}
+	switch invocation.Operation {
+	case k12.ImageTaskOperationClassification:
+		if c.Classifier == nil {
+			return ImageTaskView{}, fmt.Errorf("usecase: image task classifier 未配置")
+		}
+		claimedInvocation, claimed, err := c.Records.ClaimImageTaskInvocationSend(
+			ctx, agentName, invocation.InvocationID,
+			"image-task:"+dispatchID+":classification:retry",
+			c.now(),
+		)
+		if err != nil {
+			return ImageTaskView{}, err
+		}
+		if !claimed {
+			return c.Get(ctx, agentName, dispatchID)
+		}
+		invocation = claimedInvocation
+		automaticCtx, cancelAutomatic := withImageTaskAutomaticWindow(
+			ctx,
+			dispatch.DispatchID,
+			invocation.DeadlineAt,
+			c.now(),
+		)
+		providerCtx, cancelProvider := imageTaskProviderContext(
+			automaticCtx,
+			invocation.RouteSnapshot,
+		)
+		retryStartedAt := time.Now()
+		slog.Info("K12 ImageTask classification retry started", "agent_id", agentName,
+			"dispatch_id", dispatchID, "invocation_id", invocation.InvocationID,
+			"provider", invocation.RouteSnapshot.Provider, "model", invocation.RouteSnapshot.Model,
+			"capability_receipt_digest", invocation.RouteSnapshot.CapabilityReceiptDigest,
+			"timeout_ms", invocation.RouteSnapshot.TimeoutMS, "images", len(images))
+		classified, err := c.Classifier.ClassifyImageTask(
+			providerCtx,
+			ImageTaskClassificationInput{Images: images, MessageIntent: dispatch.MessageIntent,
+				IncludeWritingOCR: invocation.RouteSnapshot.PromptVersion == "creative-work-classification-ocr-v1",
+				RecordResponse:    c.classificationResponseRecorder(agentName, invocation.InvocationID)},
+		)
+		providerCtxErr := providerCtx.Err()
+		slog.Info("K12 ImageTask classification retry finished", "agent_id", agentName,
+			"dispatch_id", dispatchID, "invocation_id", invocation.InvocationID,
+			"elapsed_ms", time.Since(retryStartedAt).Milliseconds(), "intent", classified.Intent,
+			"confidence", classified.Confidence,
+			"capability_unverified", errors.Is(err, k12.ErrModelCapabilityUnverified),
+			"context_error", providerCtxErr, "error", err)
+		cancelProvider()
+		cancelAutomatic()
+		if err != nil {
+			unknown := sentProviderOutcomeUnknown(err, providerCtxErr)
+			retrySafe := !unknown
+			failureKind := "classification_retry_failed"
+			if errors.Is(err, k12.ErrModelCapabilityUnverified) {
+				failureKind = "model_capability_unverified"
+				retrySafe = false
+			}
+			_ = c.Records.FailImageTaskInvocation(
+				context.WithoutCancel(ctx), agentName, invocation.InvocationID,
+				failureKind, unknown, retrySafe,
+			)
+			return ImageTaskView{}, err
+		}
+		routed, target, err := c.Records.CommitImageTaskRouting(
+			ctx, agentName, dispatchID, dispatch.Version,
+			k12storage.ImageTaskRoutingDecision{
+				Intent: classified.Intent, Evidence: classified.IntentEvidence,
+				Confidence:               classified.Confidence,
+				ConfirmationCandidates:   classified.ConfirmationCandidates,
+				WorkTitleCandidate:       classified.WorkTitleCandidate,
+				TaskRequirementCandidate: classified.TaskRequirementCandidate,
+				InvocationResultDigest:   digestJSON(classified),
+				WritingOCR:               classificationOCREvidence(classified),
+			},
+		)
+		if err != nil {
+			_ = c.Records.FailImageTaskInvocation(
+				context.WithoutCancel(ctx), agentName, invocation.InvocationID,
+				"classification_retry_contract_invalid", false, true,
+			)
+			return ImageTaskView{}, err
+		}
+		view := ImageTaskView{
+			Dispatch: routed, Homework: target.HomeworkSubmission, Creative: target.CreativeIntake,
+		}
+		if routed.Status == k12.ImageTaskStatusRouted {
+			return c.continueTarget(ctx, view, images)
+		}
+		return view, nil
+	case k12.ImageTaskOperationWritingOCR:
+		view, err := c.projectTarget(ctx, dispatch)
+		if err != nil || view.Creative == nil {
+			return view, err
+		}
+		intake, err := c.executeWritingOCR(
+			ctx,
+			dispatch,
+			*view.Creative,
+			invocation,
+			images,
+		)
+		if err != nil {
+			return view, err
+		}
+		view.Creative = &intake
+		return c.continueTarget(ctx, view, images)
+	default:
+		return ImageTaskView{}, k12storage.ErrImageTaskInvalidState
+	}
+}
+
+func invocationKindForDispatch(dispatch k12.ImageTaskDispatch) k12.ImageTaskOperation {
+	if dispatch.Status == k12.ImageTaskStatusFailed {
+		return k12.ImageTaskOperationClassification
+	}
+	return k12.ImageTaskOperationWritingOCR
+}
+
+func (c *ImageTaskCoordinator) Cancel(
+	ctx context.Context,
+	agentName, dispatchID string,
+	expectedVersion int,
+) (ImageTaskView, error) {
+	if c == nil || c.Records == nil {
+		return ImageTaskView{}, fmt.Errorf("usecase: image task store 未配置")
+	}
+	current, err := c.Get(ctx, agentName, dispatchID)
+	if err != nil {
+		return ImageTaskView{}, err
+	}
+	if current.Dispatch.Status == k12.ImageTaskStatusCancelled {
+		return current, nil
+	}
+	if current.Dispatch.Version != expectedVersion {
+		return ImageTaskView{}, k12storage.ErrImageTaskVersionConflict
+	}
+	if current.Homework != nil && current.Homework.GradingJobID != "" {
+		canceller, ok := c.Grading.(imageTaskGradingCanceller)
+		if !ok {
+			return ImageTaskView{}, fmt.Errorf(
+				"usecase: homework image task cancellation 未配置",
+			)
+		}
+		if err := canceller.CancelImageTaskHomework(
+			ctx, agentName, current.Homework.GradingJobID,
+		); err != nil {
+			return ImageTaskView{}, err
+		}
+	}
+	dispatch, err := c.Records.CancelImageTaskDispatch(ctx, agentName, dispatchID, expectedVersion)
+	if err != nil {
+		return ImageTaskView{}, err
+	}
+	return c.projectTarget(ctx, dispatch)
+}

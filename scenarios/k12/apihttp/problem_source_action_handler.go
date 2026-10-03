@@ -1,0 +1,237 @@
+package apihttp
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"strings"
+
+	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
+	"github.com/hexagon-codes/hexclaw/scenarios/k12/usecase"
+	"github.com/hexagon-codes/hexclaw/scenarios/k12/viewcontract"
+)
+
+type problemSourceActionRequest struct {
+	Action                string          `json:"action"`
+	StructureVersion      int             `json:"structure_version"`
+	ExpectedInputRevision int             `json:"expected_input_revision"`
+	Payload               json.RawMessage `json:"payload"`
+}
+
+type correctTextSourceActionPayload struct {
+	QuestionCanonicalMarkdown string `json:"question_canonical_markdown"`
+	AnswerCanonicalMarkdown   string `json:"answer_canonical_markdown"`
+}
+
+type selectRegionSourceActionPayload struct {
+	PageAssetID string `json:"page_asset_id"`
+	Region      struct {
+		X      int `json:"x"`
+		Y      int `json:"y"`
+		Width  int `json:"width"`
+		Height int `json:"height"`
+	} `json:"region"`
+}
+
+type retakeSourceActionPayload struct {
+	PageAssetID string `json:"page_asset_id"`
+}
+
+func (h *handler) problemSourceAction(w http.ResponseWriter, r *http.Request) {
+	dispatchID := strings.TrimSpace(r.PathValue("dispatch_id"))
+	problemID := strings.TrimSpace(r.PathValue("problem_id"))
+	if dispatchID == "" || problemID == "" {
+		writeErr(w, http.StatusBadRequest, "dispatch_id and problem_id required")
+		return
+	}
+	if strings.TrimSpace(r.Header.Get("Idempotency-Key")) == "" {
+		writeErr(w, http.StatusBadRequest, "Idempotency-Key required")
+		return
+	}
+
+	var req problemSourceActionRequest
+	if !decodeStrict(w, r, &req) {
+		return
+	}
+	req.Action = strings.TrimSpace(req.Action)
+	if req.StructureVersion <= 0 || req.ExpectedInputRevision <= 0 {
+		writeErr(w, http.StatusBadRequest, "positive structure_version and expected_input_revision required")
+		return
+	}
+	if !validateProblemSourceActionPayload(w, req) {
+		return
+	}
+
+	ownerScope, err := h.problemSourceActionOwnerScope(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusUnauthorized, "authenticated image task principal required")
+		return
+	}
+	if h.rt.ImageTasks == nil {
+		writeErr(w, http.StatusServiceUnavailable, "image task coordinator unavailable")
+		return
+	}
+	if h.rt.Records == nil {
+		writeErr(w, http.StatusServiceUnavailable, "image task records unavailable")
+		return
+	}
+	durableScope, err := h.rt.Records.GetProblemSourceActionAssetScope(
+		r.Context(),
+		dispatchID,
+		problemID,
+	)
+	if err != nil {
+		if errors.Is(err, k12storage.ErrProblemSourceActionNotFound) {
+			writeErr(w, http.StatusNotFound, "problem source action scope not found")
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if strings.TrimSpace(h.rt.PrincipalMode) == "remote" {
+		durableOwnerScope, scopeErr := h.rt.Records.GetImageTaskOwnerScope(
+			r.Context(),
+			durableScope.AgentName,
+			dispatchID,
+		)
+		if scopeErr != nil {
+			if errors.Is(scopeErr, k12storage.ErrImageTaskNotFound) {
+				writeErr(w, http.StatusNotFound, "problem source action scope not found")
+				return
+			}
+			writeErr(w, http.StatusInternalServerError, scopeErr.Error())
+			return
+		}
+		if durableOwnerScope != ownerScope {
+			// Cross-owner objects are existence-hidden and never reach the
+			// owner-to-Agent command authorizer.
+			writeErr(w, http.StatusNotFound, "problem source action scope not found")
+			return
+		}
+		if h.rt.AuthorizeAgentScope == nil ||
+			h.rt.AuthorizeAgentScope(r.Context(), ownerScope, durableScope.AgentName) != nil {
+			// The durable owner is already proven. A command-capability denial is
+			// therefore 403 without exposing any target content.
+			writeErr(w, http.StatusForbidden, "problem source action forbidden")
+			return
+		}
+	}
+	result, err := h.rt.ImageTasks.CommitProblemSourceAction(
+		r.Context(),
+		usecase.ProblemSourceActionCommand{
+			OwnerScope:            ownerScope,
+			TrustedAgentName:      durableScope.AgentName,
+			DispatchID:            dispatchID,
+			ProblemID:             problemID,
+			IdempotencyKey:        strings.TrimSpace(r.Header.Get("Idempotency-Key")),
+			Action:                req.Action,
+			StructureVersion:      req.StructureVersion,
+			ExpectedInputRevision: req.ExpectedInputRevision,
+			Payload:               req.Payload,
+		},
+	)
+	if err != nil {
+		switch {
+		case errors.Is(err, usecase.ErrProblemSourceActionAssetNotFound):
+			writeErr(w, http.StatusNotFound, "problem source action PageAsset not found")
+		case errors.Is(err, usecase.ErrProblemSourceActionInvalid):
+			writeErr(w, http.StatusUnprocessableEntity, err.Error())
+		case errors.Is(err, k12storage.ErrProblemSourceActionNotFound):
+			writeErr(w, http.StatusNotFound, err.Error())
+		case errors.Is(err, k12storage.ErrProblemSourceActionConflict):
+			writeErr(w, http.StatusConflict, err.Error())
+		default:
+			writeErr(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+	response := viewcontract.ProblemSourceActionResponse(result.ProblemSourceActionResponse)
+	if response.DispatchID != dispatchID || response.ProblemID != problemID ||
+		response.Action != req.Action || response.StructureVersion != req.StructureVersion {
+		writeErr(w, http.StatusInternalServerError, "problem source action response identity mismatch")
+		return
+	}
+	writeFrozenProblemSourceActionJSON(w, result.JSON)
+}
+
+func writeFrozenProblemSourceActionJSON(w http.ResponseWriter, raw json.RawMessage) {
+	if _, err := viewcontract.ParseFrozenProblemSourceActionResponse(raw); err != nil {
+		writeErr(w, http.StatusInternalServerError, "invalid frozen problem source action response")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(raw)
+	_, _ = w.Write([]byte{'\n'})
+}
+
+func (h *handler) problemSourceActionOwnerScope(
+	ctx context.Context,
+) (string, error) {
+	return h.ownerScope(ctx)
+}
+
+func validateProblemSourceActionPayload(w http.ResponseWriter, req problemSourceActionRequest) bool {
+	switch req.Action {
+	case "correct_text":
+		var payload correctTextSourceActionPayload
+		if !decodeProblemSourceActionPayload(w, req.Payload, &payload) {
+			return false
+		}
+		if strings.TrimSpace(payload.QuestionCanonicalMarkdown) == "" &&
+			strings.TrimSpace(payload.AnswerCanonicalMarkdown) == "" {
+			writeErr(w, http.StatusUnprocessableEntity, "correct_text requires question or answer canonical markdown")
+			return false
+		}
+	case "select_region":
+		var payload selectRegionSourceActionPayload
+		if !decodeProblemSourceActionPayload(w, req.Payload, &payload) {
+			return false
+		}
+		if strings.TrimSpace(payload.PageAssetID) == "" ||
+			payload.Region.X < 0 || payload.Region.Y < 0 ||
+			payload.Region.Width <= 0 || payload.Region.Height <= 0 {
+			writeErr(w, http.StatusUnprocessableEntity, "select_region requires page_asset_id and a positive source-pixel region")
+			return false
+		}
+	case "retake":
+		var payload retakeSourceActionPayload
+		if !decodeProblemSourceActionPayload(w, req.Payload, &payload) {
+			return false
+		}
+		if strings.TrimSpace(payload.PageAssetID) == "" {
+			writeErr(w, http.StatusUnprocessableEntity, "retake requires page_asset_id")
+			return false
+		}
+	case "skip", "resume":
+		var payload struct{}
+		if !decodeProblemSourceActionPayload(w, req.Payload, &payload) {
+			return false
+		}
+	default:
+		writeErr(w, http.StatusBadRequest, "unsupported source action")
+		return false
+	}
+	return true
+}
+
+func decodeProblemSourceActionPayload(w http.ResponseWriter, raw json.RawMessage, dst any) bool {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		writeErr(w, http.StatusBadRequest, "action payload required")
+		return false
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid action payload: "+err.Error())
+		return false
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		writeErr(w, http.StatusBadRequest, "action payload must contain exactly one JSON value")
+		return false
+	}
+	return true
+}

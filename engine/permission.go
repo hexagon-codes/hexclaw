@@ -2,6 +2,10 @@ package engine
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -9,6 +13,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/hexagon-codes/hexclaw/skill"
+	"github.com/hexagon-codes/hexclaw/storage"
 	"github.com/hexagon-codes/toolkit/lang/mapx"
 	"github.com/hexagon-codes/toolkit/lang/stringx"
 	"github.com/hexagon-codes/toolkit/util/idgen"
@@ -17,18 +23,53 @@ import (
 
 // PermissionRequest is sent to the frontend for user approval.
 type PermissionRequest struct {
-	ID        string         `json:"id"`
-	ToolName  string         `json:"tool_name"`
-	Arguments map[string]any `json:"arguments"`
-	Risk      string         `json:"risk"` // "safe" | "sensitive" | "dangerous"
-	Reason    string         `json:"reason"`
+	ID                  string         `json:"id"`
+	OwnerID             string         `json:"owner_id"`
+	InvocationID        string         `json:"invocation_id"`
+	ToolName            string         `json:"tool_name"`
+	Arguments           map[string]any `json:"arguments"`
+	ArgumentsDigest     string         `json:"arguments_digest"`
+	SecurityScopeDigest string         `json:"security_scope_digest"`
+	ScopeSchemaVersion  int            `json:"scope_schema_version"`
+	DeadlineAt          time.Time      `json:"deadline_at"`
+	Risk                string         `json:"risk"` // "safe" | "sensitive" | "dangerous"
+	Reason              string         `json:"reason"`
 }
 
 // PermissionResponse is the user's decision.
 type PermissionResponse struct {
-	RequestID string `json:"request_id"`
-	Approved  bool   `json:"approved"`
-	Remember  bool   `json:"remember"` // "always allow this tool" for session
+	RequestID           string `json:"request_id"`
+	OwnerID             string `json:"owner_id"`
+	SessionID           string `json:"session_id"`
+	InvocationID        string `json:"invocation_id"`
+	ArgumentsDigest     string `json:"arguments_digest"`
+	SecurityScopeDigest string `json:"security_scope_digest"`
+	ScopeSchemaVersion  int    `json:"scope_schema_version"`
+	DecisionID          string `json:"decision_id"`
+	Decision            string `json:"decision"`
+	IdempotencyKey      string `json:"idempotency_key"`
+	Approved            bool   `json:"approved"`
+	Remember            bool   `json:"remember"` // "always allow this tool" for session
+}
+
+// PermissionReceiptReconciliation 是 Desktop 重连时逐张审批卡提交的完整身份。
+// 它只用于读取 durable coordinator 已提交的事实，不能携带或推导用户决策。
+type PermissionReceiptReconciliation struct {
+	RequestID           string    `json:"request_id"`
+	OwnerID             string    `json:"owner_id"`
+	SessionID           string    `json:"session_id"`
+	InvocationID        string    `json:"invocation_id"`
+	ArgumentsDigest     string    `json:"arguments_digest"`
+	SecurityScopeDigest string    `json:"security_scope_digest"`
+	ScopeSchemaVersion  int       `json:"scope_schema_version"`
+	DeadlineAt          time.Time `json:"deadline_at"`
+}
+
+// PermissionReceiptReconciliationResult 只会携带一个分支：仍 pending 的原始请求，
+// 或 durable 终态/ACK 回执。它不建立进程内终态缓存。
+type PermissionReceiptReconciliationResult struct {
+	Request *PermissionRequest
+	Receipt *storage.ToolApprovalReceipt
 }
 
 // PermissionSender pushes approval requests to the frontend.
@@ -37,25 +78,167 @@ type PermissionSender interface {
 	SendPermissionRequest(ctx context.Context, sessionID string, req *PermissionRequest) error
 }
 
+// PermissionTerminal 是 durable 审批终态的只读传输投影，不携带用户决策字段。
+type PermissionTerminal struct {
+	RequestID           string    `json:"request_id"`
+	SessionID           string    `json:"session_id"`
+	OwnerID             string    `json:"owner_id"`
+	InvocationID        string    `json:"invocation_id"`
+	ArgumentsDigest     string    `json:"arguments_digest"`
+	SecurityScopeDigest string    `json:"security_scope_digest"`
+	ScopeSchemaVersion  int       `json:"scope_schema_version"`
+	DeadlineAt          time.Time `json:"deadline_at"`
+	TerminalResult      string    `json:"terminal_result"`
+}
+
+// PermissionTerminalSender 是 Web 等支持服务端终态推送的可选能力。
+// PermissionSender 保持不变，未实现该能力的发送端继续只接收审批请求。
+type PermissionTerminalSender interface {
+	SendPermissionTerminal(ctx context.Context, terminal *PermissionTerminal) error
+}
+
+// RememberedGrantStore is the narrow persistence boundary for remembered
+// approvals. It intentionally does not widen storage.Store.
+type RememberedGrantStore interface {
+	HasRememberedGrant(ctx context.Context, ownerID, resolvedSessionID, canonicalToolName, securityScopeDigest string) (bool, error)
+	RememberGrant(ctx context.Context, ownerID, resolvedSessionID, canonicalToolName, securityScopeDigest string) error
+	DeleteRememberedGrants(ctx context.Context, resolvedSessionID string) error
+	// RevokeToolGrants 按 owner + canonical tool 维度主动撤销 remembered grants
+	// （工具禁用/策略收紧路径）。撤销必须持久化（active=0 + revoked 证据），
+	// 重复撤销幂等；owner 或 tool 为空必须拒绝。
+	RevokeToolGrants(ctx context.Context, ownerID, canonicalToolName, reason string) error
+}
+
+// DurableToolApprovalStore is the backend authority boundary. The decision,
+// optional grant, release intent, and ACK receipt are committed atomically by
+// DecideToolApproval; process maps are transport/waiter indexes only.
+type DurableToolApprovalStore interface {
+	RememberedGrantStore
+	CreateToolApprovalRequest(context.Context, *storage.ToolApprovalRequest) (bool, error)
+	DecideToolApproval(context.Context, *storage.ToolApprovalDecision) (*storage.ToolApprovalReceipt, error)
+	ExpireToolApproval(context.Context, string, time.Time) (*storage.ToolApprovalReceipt, error)
+	FenceToolApprovalRequest(context.Context, string, string, time.Time) (*storage.ToolApprovalReceipt, error)
+	ConsumeToolApprovalRelease(context.Context, *storage.ToolApprovalExecutionIdentity) (bool, error)
+	GetToolApprovalReceipt(context.Context, string) (*storage.ToolApprovalReceipt, error)
+	ListPendingToolApprovals(context.Context, string, string, time.Time) ([]*storage.ToolApprovalRequest, error)
+	FenceOrphanedToolApprovals(context.Context, time.Time) (int64, error)
+	RevokeSessionToolApprovals(context.Context, string, string) error
+}
+
+type approvalEnvelopeBox interface {
+	Seal([]byte) (string, error)
+	Open(string) ([]byte, error)
+}
+
+// PermissionHubOption configures durable coordinator internals without
+// widening the transport contract.
+type PermissionHubOption func(*PermissionHub)
+
+// WithApprovalEnvelopeBox encrypts frozen canonical arguments before they are
+// persisted. Without a box the durable identity remains usable but no raw
+// argument envelope is written.
+func WithApprovalEnvelopeBox(box approvalEnvelopeBox) PermissionHubOption {
+	return func(h *PermissionHub) { h.envelopeBox = box }
+}
+
+type rememberedGrantKey struct {
+	ownerID             string
+	resolvedSessionID   string
+	canonicalToolName   string
+	securityScopeDigest string
+}
+
+type pendingApproval struct {
+	response chan PermissionResponse
+	request  *PermissionRequest
+	key      rememberedGrantKey
+}
+
 // PermissionHub manages pending approval requests and their responses.
 type PermissionHub struct {
-	mu      sync.Mutex
-	pending map[string]chan PermissionResponse // requestID → response channel
-	allowed map[string]map[string]bool         // sessionID → set of always-allowed tool names
-	sender  PermissionSender
-	timeout time.Duration
+	mu           sync.Mutex
+	pending      map[string]*pendingApproval
+	remembered   map[rememberedGrantKey]bool
+	sender       PermissionSender
+	timeout      time.Duration
+	grants       RememberedGrantStore
+	approvals    DurableToolApprovalStore
+	envelopeBox  approvalEnvelopeBox
+	authorityErr error
 }
 
 // NewPermissionHub creates a permission hub.
 func NewPermissionHub(timeout time.Duration) *PermissionHub {
+	return newPermissionHub(timeout, nil)
+}
+
+// NewPermissionHubWithRememberedGrantStore creates a permission hub backed by
+// the supplied remembered-grant store. Existing callers retain the original
+// single-return API; durable initialization failures leave the returned hub
+// fail-closed.
+func NewPermissionHubWithRememberedGrantStore(
+	timeout time.Duration, grants RememberedGrantStore, options ...PermissionHubOption,
+) *PermissionHub {
+	hub := newPermissionHub(timeout, grants, options...)
+	if err := hub.initializeDurableAuthority(context.Background()); err != nil {
+		logger.Error("[permission] initialize durable authority", "error", err)
+		hub.authorityErr = err
+	}
+	return hub
+}
+
+// NewDurablePermissionHub creates a hub whose durable authority is ready before
+// it is exposed to the caller. Startup must stop when orphan fencing fails.
+func NewDurablePermissionHub(
+	ctx context.Context, timeout time.Duration, approvals DurableToolApprovalStore, options ...PermissionHubOption,
+) (*PermissionHub, error) {
+	if approvals == nil {
+		return nil, errors.New("durable tool approval authority is required")
+	}
+	hub := newPermissionHub(timeout, approvals, options...)
+	if err := hub.initializeDurableAuthority(ctx); err != nil {
+		return nil, err
+	}
+	return hub, nil
+}
+
+func newPermissionHub(timeout time.Duration, grants RememberedGrantStore, options ...PermissionHubOption) *PermissionHub {
 	if timeout <= 0 {
 		timeout = 60 * time.Second
 	}
-	return &PermissionHub{
-		pending: make(map[string]chan PermissionResponse),
-		allowed: make(map[string]map[string]bool),
-		timeout: timeout,
+	hub := &PermissionHub{
+		pending:    make(map[string]*pendingApproval),
+		remembered: make(map[rememberedGrantKey]bool),
+		timeout:    timeout,
+		grants:     grants,
 	}
+	if durable, ok := grants.(DurableToolApprovalStore); ok {
+		hub.approvals = durable
+	}
+	for _, option := range options {
+		if option != nil {
+			option(hub)
+		}
+	}
+	return hub
+}
+
+func (h *PermissionHub) initializeDurableAuthority(ctx context.Context) error {
+	if h.approvals == nil {
+		return nil
+	}
+	// Every row predating this coordinator instance has lost its live tool
+	// execution closure. Fence it before publishing the hub as usable.
+	count, err := h.approvals.FenceOrphanedToolApprovals(
+		ctx, time.Now().UTC().Add(time.Millisecond),
+	)
+	if err != nil {
+		return fmt.Errorf("fence orphaned tool approvals: %w", err)
+	}
+	if count > 0 {
+		logger.Info("[permission] fenced orphaned approvals", "count", count)
+	}
+	return nil
 }
 
 // SetSender sets the adapter that can push messages to the frontend.
@@ -65,80 +248,648 @@ func (h *PermissionHub) SetSender(s PermissionSender) {
 	h.sender = s
 }
 
-// ClearSession removes all remembered permissions for a session.
+// ClearSession removes all remembered permissions for a session. Durable
+// revocation errors are returned; failed revocation is not reported as cleanup.
 // Should be called when a session is deleted or user disconnects.
-func (h *PermissionHub) ClearSession(sessionID string) {
+func (h *PermissionHub) ClearSession(sessionID string) error {
+	if h.authorityErr != nil {
+		return fmt.Errorf("permission authority unavailable: %w", h.authorityErr)
+	}
 	h.mu.Lock()
-	defer h.mu.Unlock()
-	delete(h.allowed, sessionID)
+	grants := h.grants
+	approvals := h.approvals
+	h.mu.Unlock()
+	if approvals != nil {
+		if err := approvals.RevokeSessionToolApprovals(
+			context.Background(), sessionID, "session_authority_cleared",
+		); err != nil {
+			return fmt.Errorf("revoke session tool authority: %w", err)
+		}
+	} else if grants != nil {
+		if err := grants.DeleteRememberedGrants(context.Background(), sessionID); err != nil {
+			return fmt.Errorf("clear remembered grants: %w", err)
+		}
+	}
+	h.mu.Lock()
+	pendingResponses := make([]chan PermissionResponse, 0)
+	for requestID, pending := range h.pending {
+		if pending.key.resolvedSessionID == sessionID {
+			delete(h.pending, requestID)
+			pendingResponses = append(pendingResponses, pending.response)
+		}
+	}
+	for key := range h.remembered {
+		if key.resolvedSessionID == sessionID {
+			delete(h.remembered, key)
+		}
+	}
+	h.mu.Unlock()
+	for _, response := range pendingResponses {
+		select {
+		case response <- PermissionResponse{}:
+		default:
+		}
+	}
+	return nil
+}
+
+// RevokeToolGrant 按 owner + canonical tool 维度主动撤销 remembered grants
+// （工具禁用/策略收紧路径）。durable 撤销失败必须返回错误，不得伪装成功；
+// 进程内 remembered cache 同步清理，保证 cache 投影不复活；重复撤销幂等。
+func (h *PermissionHub) RevokeToolGrant(ctx context.Context, ownerID, canonicalToolName string) error {
+	if h.authorityErr != nil {
+		return fmt.Errorf("permission authority unavailable: %w", h.authorityErr)
+	}
+	if strings.TrimSpace(ownerID) == "" || strings.TrimSpace(canonicalToolName) == "" {
+		return errors.New("owner and canonical tool name are required")
+	}
+	h.mu.Lock()
+	grants := h.grants
+	approvals := h.approvals
+	h.mu.Unlock()
+	revoke := func() error {
+		if approvals != nil {
+			return approvals.RevokeToolGrants(ctx, ownerID, canonicalToolName, "tool_revoked")
+		}
+		if grants != nil {
+			return grants.RevokeToolGrants(ctx, ownerID, canonicalToolName, "tool_revoked")
+		}
+		return nil
+	}
+	if err := revoke(); err != nil {
+		return fmt.Errorf("revoke tool grants: %w", err)
+	}
+	h.mu.Lock()
+	for key := range h.remembered {
+		if key.ownerID == ownerID && key.canonicalToolName == canonicalToolName {
+			delete(h.remembered, key)
+		}
+	}
+	h.mu.Unlock()
+	return nil
 }
 
 // RequestApproval sends an approval request and blocks until the user responds or timeout.
 func (h *PermissionHub) RequestApproval(ctx context.Context, sessionID string, req *PermissionRequest) (bool, error) {
-	// Check if this tool is already allowed for this session
-	h.mu.Lock()
-	if tools, ok := h.allowed[sessionID]; ok && tools[req.ToolName] {
-		h.mu.Unlock()
+	if h.authorityErr != nil {
+		return false, fmt.Errorf("permission authority unavailable: %w", h.authorityErr)
+	}
+	if req == nil {
+		return false, errors.New("permission request is nil")
+	}
+	key, err := preparePermissionRequest(ctx, sessionID, req, h.timeout)
+	if err != nil {
+		return false, err
+	}
+	allowed, err := h.hasRememberedGrant(ctx, key)
+	if err != nil {
+		return false, fmt.Errorf("lookup remembered permission grant: %w", err)
+	}
+	if allowed {
 		return true, nil
 	}
 
+	requestCtx, cancel := context.WithDeadline(ctx, req.DeadlineAt)
+	defer cancel()
+
+	h.mu.Lock()
 	if h.sender == nil {
 		h.mu.Unlock()
 		// No frontend connected — use default policy (deny)
 		logger.Info("[permission] no sender available, denying", "tool_name", req.ToolName)
 		return false, nil
 	}
-
-	ch := make(chan PermissionResponse, 1)
-	h.pending[req.ID] = ch
 	sender := h.sender
 	h.mu.Unlock()
 
+	if h.approvals != nil {
+		envelope, err := h.sealApprovalArguments(req.Arguments)
+		if err != nil {
+			return false, fmt.Errorf("seal permission execution envelope: %w", err)
+		}
+		created, err := h.approvals.CreateToolApprovalRequest(requestCtx, &storage.ToolApprovalRequest{
+			RequestID: req.ID, InvocationID: req.InvocationID,
+			OwnerID: req.OwnerID, ResolvedSessionID: sessionID,
+			CanonicalToolName: req.ToolName, ArgumentsDigest: req.ArgumentsDigest,
+			SecurityScopeDigest: req.SecurityScopeDigest, ScopeSchemaVersion: req.ScopeSchemaVersion,
+			ArgumentsEnvelope: envelope, DeadlineAt: req.DeadlineAt,
+		})
+		if err != nil {
+			return false, fmt.Errorf("persist permission request: %w", err)
+		}
+		if !created {
+			return false, errors.New("permission request identity already exists")
+		}
+	}
+
+	h.mu.Lock()
+	ch := make(chan PermissionResponse, 1)
+	h.pending[req.ID] = &pendingApproval{response: ch, request: req, key: key}
+	h.mu.Unlock()
+
 	// Send request to frontend
-	if err := sender.SendPermissionRequest(ctx, sessionID, req); err != nil {
+	if err := sender.SendPermissionRequest(requestCtx, sessionID, req); err != nil {
 		h.mu.Lock()
 		delete(h.pending, req.ID)
 		h.mu.Unlock()
+		if h.approvals != nil {
+			receipt, fenceErr := h.approvals.FenceToolApprovalRequest(
+				context.Background(), req.ID, "transport_send_failed", time.Now().UTC(),
+			)
+			if fenceErr != nil {
+				logger.Error("[permission] fence failed transport", "request_id", req.ID, "error", fenceErr)
+			} else {
+				h.sendPermissionTerminal(sender, receipt)
+			}
+		}
 		return false, fmt.Errorf("failed to send permission request: %w", err)
 	}
 
 	// Wait for response
 	select {
 	case resp := <-ch:
-		if resp.Remember && resp.Approved {
-			h.mu.Lock()
-			if h.allowed[sessionID] == nil {
-				h.allowed[sessionID] = make(map[string]bool)
-			}
-			h.allowed[sessionID][req.ToolName] = true
-			h.mu.Unlock()
+		if !resp.Approved {
+			return false, nil
 		}
-		return resp.Approved, nil
-	case <-time.After(h.timeout):
+		if h.approvals != nil {
+			consumed, err := h.approvals.ConsumeToolApprovalRelease(
+				context.Background(), executionIdentity(req, sessionID),
+			)
+			if err != nil {
+				return false, fmt.Errorf("consume permission release: %w", err)
+			}
+			if !consumed {
+				return false, errors.New("permission release is unavailable or already consumed")
+			}
+		}
+		return true, nil
+	case <-requestCtx.Done():
+		requestErr := requestCtx.Err()
 		h.mu.Lock()
 		delete(h.pending, req.ID)
 		h.mu.Unlock()
-		return false, fmt.Errorf("permission request timed out after %v", h.timeout)
-	case <-ctx.Done():
-		h.mu.Lock()
-		delete(h.pending, req.ID)
-		h.mu.Unlock()
-		return false, ctx.Err()
+		if h.approvals != nil {
+			var receipt *storage.ToolApprovalReceipt
+			var durableErr error
+			if errors.Is(requestErr, context.DeadlineExceeded) {
+				receipt, durableErr = h.approvals.ExpireToolApproval(
+					context.Background(), req.ID, req.DeadlineAt,
+				)
+			} else {
+				receipt, durableErr = h.approvals.FenceToolApprovalRequest(
+					context.Background(), req.ID, "request_context_cancelled", time.Now().UTC(),
+				)
+			}
+			if durableErr != nil {
+				return false, fmt.Errorf("close permission request: %w", durableErr)
+			}
+			h.sendPermissionTerminal(sender, receipt)
+			if toolApprovalReceiptAllowsExecution(receipt) {
+				consumed, consumeErr := h.approvals.ConsumeToolApprovalRelease(
+					context.Background(), executionIdentity(req, sessionID),
+				)
+				if consumeErr != nil {
+					return false, fmt.Errorf("consume concurrent permission release: %w", consumeErr)
+				}
+				if consumed {
+					return true, nil
+				}
+			}
+		}
+		if errors.Is(requestErr, context.DeadlineExceeded) {
+			return false, fmt.Errorf("permission request timed out after %v", h.timeout)
+		}
+		return false, requestErr
 	}
+}
+
+func (h *PermissionHub) sealApprovalArguments(arguments map[string]any) (string, error) {
+	if h.envelopeBox == nil {
+		// Fail-closed restart behavior is preferable to plaintext sensitive
+		// arguments at rest. Live reconnect still replays the in-memory envelope.
+		return "", nil
+	}
+	raw, err := json.Marshal(arguments)
+	if err != nil {
+		return "", err
+	}
+	return h.envelopeBox.Seal(raw)
+}
+
+func executionIdentity(req *PermissionRequest, sessionID string) *storage.ToolApprovalExecutionIdentity {
+	return &storage.ToolApprovalExecutionIdentity{
+		RequestID: req.ID, InvocationID: req.InvocationID, OwnerID: req.OwnerID,
+		ResolvedSessionID: sessionID, ArgumentsDigest: req.ArgumentsDigest,
+		SecurityScopeDigest: req.SecurityScopeDigest, ScopeSchemaVersion: req.ScopeSchemaVersion,
+	}
+}
+
+func toolApprovalReceiptAllowsExecution(receipt *storage.ToolApprovalReceipt) bool {
+	return receipt != nil && receipt.ReleaseState == storage.ToolApprovalReleaseAuthorized &&
+		(receipt.TerminalResult == storage.ToolApprovalDecisionApprovedOnce ||
+			receipt.TerminalResult == storage.ToolApprovalDecisionApprovedRemember)
+}
+
+func (h *PermissionHub) sendPermissionTerminal(sender PermissionSender, receipt *storage.ToolApprovalReceipt) {
+	terminalSender, ok := sender.(PermissionTerminalSender)
+	if !ok {
+		return
+	}
+	terminal, ok := permissionTerminalFromReceipt(receipt)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := terminalSender.SendPermissionTerminal(ctx, terminal); err != nil {
+		logger.Error("[permission] send durable terminal", "request_id", terminal.RequestID, "error", err)
+	}
+}
+
+func permissionTerminalFromReceipt(receipt *storage.ToolApprovalReceipt) (*PermissionTerminal, bool) {
+	if receipt == nil ||
+		(receipt.TerminalResult != storage.ToolApprovalTerminalExpired &&
+			receipt.TerminalResult != storage.ToolApprovalTerminalFenced) ||
+		strings.TrimSpace(receipt.RequestID) == "" || strings.TrimSpace(receipt.ResolvedSessionID) == "" ||
+		strings.TrimSpace(receipt.OwnerID) == "" || strings.TrimSpace(receipt.InvocationID) == "" ||
+		strings.TrimSpace(receipt.ArgumentsDigest) == "" || strings.TrimSpace(receipt.SecurityScopeDigest) == "" ||
+		receipt.ScopeSchemaVersion <= 0 || receipt.DeadlineAt.IsZero() {
+		return nil, false
+	}
+	return &PermissionTerminal{
+		RequestID: receipt.RequestID, SessionID: receipt.ResolvedSessionID,
+		OwnerID: receipt.OwnerID, InvocationID: receipt.InvocationID,
+		ArgumentsDigest: receipt.ArgumentsDigest, SecurityScopeDigest: receipt.SecurityScopeDigest,
+		ScopeSchemaVersion: receipt.ScopeSchemaVersion, DeadlineAt: receipt.DeadlineAt,
+		TerminalResult: receipt.TerminalResult,
+	}, true
 }
 
 // HandleResponse is called when the frontend sends back an approval decision.
 func (h *PermissionHub) HandleResponse(resp PermissionResponse) {
+	h.HandleResponseResult(resp)
+}
+
+// HandleResponseResult persists a remembered decision before releasing the
+// waiting invocation and returns the terminal result used by transport ACKs.
+func (h *PermissionHub) HandleResponseResult(resp PermissionResponse) string {
+	receipt := h.HandleResponseReceipt(resp)
+	if receipt == nil || receipt.TerminalResult == "" {
+		return "store_error"
+	}
+	return receipt.TerminalResult
+}
+
+// HandleResponseReceipt is the durable coordinator entry point used by
+// transports. A successful receipt was committed before this method releases
+// the in-process waiter; replay returns the original durable ACK identity.
+func (h *PermissionHub) HandleResponseReceipt(resp PermissionResponse) *storage.ToolApprovalReceipt {
+	if h.authorityErr != nil {
+		return syntheticToolApprovalReceipt(resp, "store_error", storage.ToolApprovalACKRejected)
+	}
 	h.mu.Lock()
-	ch, ok := h.pending[resp.RequestID]
+	pending, ok := h.pending[resp.RequestID]
+	h.mu.Unlock()
+	if !ok && h.approvals == nil {
+		return syntheticToolApprovalReceipt(resp, "not_pending", storage.ToolApprovalACKExpired)
+	}
+	if !ok && h.approvals != nil &&
+		(resp.ScopeSchemaVersion == 0 || strings.TrimSpace(resp.SessionID) == "") {
+		persisted, err := h.approvals.GetToolApprovalReceipt(context.Background(), resp.RequestID)
+		if err != nil {
+			return syntheticToolApprovalReceipt(resp, "not_pending", storage.ToolApprovalACKExpired)
+		}
+		// These fields are recovered from authenticated backend state, never
+		// trusted from a reconnecting client.
+		if resp.ScopeSchemaVersion == 0 {
+			resp.ScopeSchemaVersion = persisted.ScopeSchemaVersion
+		}
+		if strings.TrimSpace(resp.SessionID) == "" {
+			resp.SessionID = persisted.ResolvedSessionID
+		}
+	}
 	if ok {
+		if resp.ScopeSchemaVersion == 0 {
+			resp.ScopeSchemaVersion = pending.request.ScopeSchemaVersion
+		}
+		if strings.TrimSpace(resp.OwnerID) == "" || resp.OwnerID != pending.request.OwnerID ||
+			strings.TrimSpace(resp.SessionID) == "" || resp.SessionID != pending.key.resolvedSessionID ||
+			strings.TrimSpace(resp.InvocationID) == "" || resp.InvocationID != pending.request.InvocationID ||
+			strings.TrimSpace(resp.ArgumentsDigest) == "" || resp.ArgumentsDigest != pending.request.ArgumentsDigest ||
+			strings.TrimSpace(resp.SecurityScopeDigest) == "" || resp.SecurityScopeDigest != pending.request.SecurityScopeDigest ||
+			resp.ScopeSchemaVersion != pending.request.ScopeSchemaVersion {
+			return syntheticToolApprovalReceipt(resp, "identity_mismatch", storage.ToolApprovalACKRejected)
+		}
+	}
+	decision, valid := normalizePermissionResponseDecision(resp)
+	if !valid {
+		return syntheticToolApprovalReceipt(resp, "invalid_decision", storage.ToolApprovalACKRejected)
+	}
+	resp.Decision = decision
+	resp.Approved = decision != storage.ToolApprovalDecisionDenied
+	resp.Remember = decision == storage.ToolApprovalDecisionApprovedRemember
+
+	if h.approvals != nil {
+		if strings.TrimSpace(resp.DecisionID) == "" || strings.TrimSpace(resp.IdempotencyKey) == "" ||
+			strings.TrimSpace(resp.SessionID) == "" || resp.ScopeSchemaVersion == 0 {
+			return syntheticToolApprovalReceipt(resp, "identity_mismatch", storage.ToolApprovalACKRejected)
+		}
+		receipt, err := h.approvals.DecideToolApproval(context.Background(), &storage.ToolApprovalDecision{
+			RequestID: resp.RequestID, InvocationID: resp.InvocationID,
+			OwnerID: resp.OwnerID, ResolvedSessionID: resp.SessionID,
+			ArgumentsDigest: resp.ArgumentsDigest, SecurityScopeDigest: resp.SecurityScopeDigest,
+			ScopeSchemaVersion: resp.ScopeSchemaVersion,
+			DecisionID:         resp.DecisionID, IdempotencyKey: resp.IdempotencyKey,
+			Decision: decision, DecidedAt: time.Now().UTC(),
+		})
+		if err != nil {
+			terminal := "store_error"
+			if errors.Is(err, storage.ErrToolApprovalIdentityMismatch) {
+				terminal = "identity_mismatch"
+			} else if errors.Is(err, storage.ErrToolApprovalConflict) {
+				terminal = "idempotency_conflict"
+			}
+			logger.Error("[permission] durable approval decision", "request_id", resp.RequestID, "error", err)
+			return syntheticToolApprovalReceipt(resp, terminal, storage.ToolApprovalACKRejected)
+		}
+		if ok {
+			h.mu.Lock()
+			current, stillPending := h.pending[resp.RequestID]
+			if stillPending && current == pending {
+				delete(h.pending, resp.RequestID)
+			}
+			h.mu.Unlock()
+			if stillPending {
+				resp.Approved = toolApprovalReceiptAllowsExecution(receipt)
+				resp.Remember = receipt.TerminalResult == storage.ToolApprovalDecisionApprovedRemember
+				pending.response <- resp
+			}
+		}
+		return receipt
+	}
+
+	terminalResult := storage.ToolApprovalDecisionDenied
+	if resp.Approved {
+		terminalResult = storage.ToolApprovalDecisionApprovedOnce
+	}
+	if resp.Approved && resp.Remember {
+		if err := h.rememberGrant(context.Background(), pending.key); err != nil {
+			logger.Error("[permission] persist remembered grant", "request_id", resp.RequestID, "error", err)
+			resp.Approved = false
+			resp.Remember = false
+			terminalResult = "store_error"
+		} else {
+			terminalResult = storage.ToolApprovalDecisionApprovedRemember
+		}
+	}
+	h.mu.Lock()
+	current, ok := h.pending[resp.RequestID]
+	if ok && current == pending {
 		delete(h.pending, resp.RequestID)
 	}
 	h.mu.Unlock()
-
 	if ok {
-		ch <- resp
+		pending.response <- resp
 	}
+	return syntheticToolApprovalReceipt(resp, terminalResult, storage.ToolApprovalACKAccepted)
+}
+
+func normalizePermissionResponseDecision(resp PermissionResponse) (string, bool) {
+	decision := strings.TrimSpace(resp.Decision)
+	explicit := decision != ""
+	if !explicit {
+		switch {
+		case resp.Approved && resp.Remember:
+			decision = storage.ToolApprovalDecisionApprovedRemember
+		case resp.Approved:
+			decision = storage.ToolApprovalDecisionApprovedOnce
+		default:
+			decision = storage.ToolApprovalDecisionDenied
+		}
+	}
+	switch decision {
+	case storage.ToolApprovalDecisionApprovedOnce:
+		return decision, !explicit || (resp.Approved && !resp.Remember)
+	case storage.ToolApprovalDecisionApprovedRemember:
+		return decision, !explicit || (resp.Approved && resp.Remember)
+	case storage.ToolApprovalDecisionDenied:
+		return decision, !explicit || (!resp.Approved && !resp.Remember)
+	default:
+		return "", false
+	}
+}
+
+func syntheticToolApprovalReceipt(
+	resp PermissionResponse, terminalResult, ackStatus string,
+) *storage.ToolApprovalReceipt {
+	return &storage.ToolApprovalReceipt{
+		RequestID: resp.RequestID, InvocationID: resp.InvocationID,
+		OwnerID: resp.OwnerID, ResolvedSessionID: resp.SessionID,
+		ArgumentsDigest: resp.ArgumentsDigest, SecurityScopeDigest: resp.SecurityScopeDigest,
+		ScopeSchemaVersion: resp.ScopeSchemaVersion, DecisionID: resp.DecisionID,
+		IdempotencyKey: resp.IdempotencyKey, Decision: resp.Decision,
+		TerminalResult: terminalResult, ACKStatus: ackStatus,
+	}
+}
+
+// ReconcileApprovalReceipt 只读取 Desktop 对一张可见审批卡提交的 durable 回执。
+// 客户端身份必须逐项匹配 durable 身份后才可投影响应；该路径绝不决策、放行、消费、过期或 fence 审批。
+func (h *PermissionHub) ReconcileApprovalReceipt(
+	ctx context.Context, identity PermissionReceiptReconciliation,
+) (*PermissionReceiptReconciliationResult, error) {
+	if h.authorityErr != nil {
+		return nil, fmt.Errorf("permission authority unavailable: %w", h.authorityErr)
+	}
+	if !validPermissionReceiptReconciliationIdentity(identity) {
+		return nil, storage.ErrToolApprovalIdentityMismatch
+	}
+	h.mu.Lock()
+	approvals := h.approvals
+	h.mu.Unlock()
+	if approvals == nil {
+		return nil, errors.New("durable tool approval authority is required")
+	}
+	receipt, err := approvals.GetToolApprovalReceipt(ctx, identity.RequestID)
+	if err != nil {
+		return nil, fmt.Errorf("read durable tool approval receipt: %w", err)
+	}
+	if !toolApprovalReceiptMatchesReconciliation(receipt, identity) {
+		return nil, storage.ErrToolApprovalIdentityMismatch
+	}
+	if receipt.State == storage.ToolApprovalStatePending {
+		h.mu.Lock()
+		pending, ok := h.pending[identity.RequestID]
+		if !ok || pending == nil || pending.request == nil ||
+			!permissionRequestMatchesReconciliation(pending.request, pending.key, identity) {
+			h.mu.Unlock()
+			// 进程内 waiter 缺失时不能把它重解释为终态。
+			return nil, errors.New("live pending approval is unavailable")
+		}
+		request := clonePermissionRequest(pending.request)
+		h.mu.Unlock()
+		return &PermissionReceiptReconciliationResult{Request: request}, nil
+	}
+	if !reconcilableToolApprovalTerminal(receipt.TerminalResult) {
+		return nil, errors.New("durable tool approval receipt has unsupported state")
+	}
+	copyOfReceipt := *receipt
+	copyOfReceipt.Replayed = true
+	return &PermissionReceiptReconciliationResult{Receipt: &copyOfReceipt}, nil
+}
+
+func validPermissionReceiptReconciliationIdentity(identity PermissionReceiptReconciliation) bool {
+	return strings.TrimSpace(identity.RequestID) != "" && strings.TrimSpace(identity.OwnerID) != "" &&
+		strings.TrimSpace(identity.SessionID) != "" && strings.TrimSpace(identity.InvocationID) != "" &&
+		strings.TrimSpace(identity.ArgumentsDigest) != "" && strings.TrimSpace(identity.SecurityScopeDigest) != "" &&
+		identity.ScopeSchemaVersion > 0 && !identity.DeadlineAt.IsZero()
+}
+
+func toolApprovalReceiptMatchesReconciliation(
+	receipt *storage.ToolApprovalReceipt, identity PermissionReceiptReconciliation,
+) bool {
+	return receipt != nil && strings.TrimSpace(receipt.RequestID) != "" &&
+		strings.TrimSpace(receipt.OwnerID) != "" && strings.TrimSpace(receipt.ResolvedSessionID) != "" &&
+		strings.TrimSpace(receipt.InvocationID) != "" && strings.TrimSpace(receipt.ArgumentsDigest) != "" &&
+		strings.TrimSpace(receipt.SecurityScopeDigest) != "" && receipt.ScopeSchemaVersion > 0 &&
+		!receipt.DeadlineAt.IsZero() && receipt.RequestID == identity.RequestID &&
+		receipt.OwnerID == identity.OwnerID && receipt.ResolvedSessionID == identity.SessionID &&
+		receipt.InvocationID == identity.InvocationID && receipt.ArgumentsDigest == identity.ArgumentsDigest &&
+		receipt.SecurityScopeDigest == identity.SecurityScopeDigest &&
+		receipt.ScopeSchemaVersion == identity.ScopeSchemaVersion && receipt.DeadlineAt.Equal(identity.DeadlineAt)
+}
+
+func permissionRequestMatchesReconciliation(
+	request *PermissionRequest, key rememberedGrantKey, identity PermissionReceiptReconciliation,
+) bool {
+	return request != nil && request.ID == identity.RequestID && request.OwnerID == identity.OwnerID &&
+		key.resolvedSessionID == identity.SessionID && request.InvocationID == identity.InvocationID &&
+		request.ArgumentsDigest == identity.ArgumentsDigest &&
+		request.SecurityScopeDigest == identity.SecurityScopeDigest &&
+		request.ScopeSchemaVersion == identity.ScopeSchemaVersion && request.DeadlineAt.Equal(identity.DeadlineAt)
+}
+
+func reconcilableToolApprovalTerminal(terminalResult string) bool {
+	switch terminalResult {
+	case storage.ToolApprovalDecisionApprovedOnce,
+		storage.ToolApprovalDecisionApprovedRemember,
+		storage.ToolApprovalDecisionDenied,
+		storage.ToolApprovalTerminalExpired,
+		storage.ToolApprovalTerminalFenced:
+		return true
+	default:
+		return false
+	}
+}
+
+// PendingApprovals returns immutable live requests for authenticated transport
+// reconnect. It is a projection only: durable state remains authoritative.
+func (h *PermissionHub) PendingApprovals(ownerID, sessionID string) []*PermissionRequest {
+	if h.authorityErr != nil {
+		return nil
+	}
+	now := time.Now().UTC()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	requests := make([]*PermissionRequest, 0)
+	for _, pending := range h.pending {
+		if pending == nil || pending.request == nil || pending.request.OwnerID != ownerID ||
+			pending.key.resolvedSessionID != sessionID || !now.Before(pending.request.DeadlineAt) {
+			continue
+		}
+		requests = append(requests, clonePermissionRequest(pending.request))
+	}
+	sort.Slice(requests, func(i, j int) bool { return requests[i].ID < requests[j].ID })
+	return requests
+}
+
+func clonePermissionRequest(req *PermissionRequest) *PermissionRequest {
+	if req == nil {
+		return nil
+	}
+	clone := *req
+	raw, err := json.Marshal(req.Arguments)
+	if err == nil {
+		_ = json.Unmarshal(raw, &clone.Arguments)
+	}
+	return &clone
+}
+
+func preparePermissionRequest(ctx context.Context, sessionID string, req *PermissionRequest, timeout time.Duration) (rememberedGrantKey, error) {
+	if strings.TrimSpace(req.ID) == "" {
+		return rememberedGrantKey{}, errors.New("permission request id is required")
+	}
+	if strings.TrimSpace(sessionID) == "" {
+		return rememberedGrantKey{}, errors.New("permission session id is required")
+	}
+	raw, err := json.Marshal(req.Arguments)
+	if err != nil {
+		return rememberedGrantKey{}, fmt.Errorf("canonicalize permission arguments: %w", err)
+	}
+	var frozen map[string]any
+	if len(raw) > 0 && string(raw) != "null" {
+		if err := json.Unmarshal(raw, &frozen); err != nil {
+			return rememberedGrantKey{}, fmt.Errorf("freeze permission arguments: %w", err)
+		}
+	}
+	digestBytes := sha256.Sum256(raw)
+	digest := hex.EncodeToString(digestBytes[:])
+	req.ToolName = strings.ToLower(strings.TrimSpace(req.ToolName))
+	req.Arguments = frozen
+	req.ArgumentsDigest = digest
+	req.OwnerID = skill.AuthenticatedUserID(ctx)
+	if strings.TrimSpace(req.OwnerID) == "" {
+		return rememberedGrantKey{}, errors.New("permission request requires an authenticated owner")
+	}
+	req.ScopeSchemaVersion = storage.CurrentToolApprovalScopeSchemaVersion
+	scopeRaw, err := json.Marshal(struct {
+		SchemaVersion      int            `json:"schema_version"`
+		OwnerID            string         `json:"owner_id"`
+		ResolvedSessionID  string         `json:"resolved_session_id"`
+		CanonicalToolName  string         `json:"canonical_tool_name"`
+		CanonicalArguments map[string]any `json:"canonical_arguments"`
+	}{
+		SchemaVersion: req.ScopeSchemaVersion, OwnerID: req.OwnerID,
+		ResolvedSessionID: sessionID, CanonicalToolName: req.ToolName,
+		CanonicalArguments: frozen,
+	})
+	if err != nil {
+		return rememberedGrantKey{}, fmt.Errorf("canonicalize permission security scope: %w", err)
+	}
+	scopeDigest := sha256.Sum256(scopeRaw)
+	req.SecurityScopeDigest = hex.EncodeToString(scopeDigest[:])
+	if req.InvocationID == "" {
+		req.InvocationID = req.ID
+	}
+	deadline := time.Now().Add(timeout)
+	if existing, ok := ctx.Deadline(); ok && existing.Before(deadline) {
+		deadline = existing
+	}
+	req.DeadlineAt = deadline.UTC()
+	return rememberedGrantKey{
+		ownerID:             req.OwnerID,
+		resolvedSessionID:   sessionID,
+		canonicalToolName:   req.ToolName,
+		securityScopeDigest: req.SecurityScopeDigest,
+	}, nil
+}
+
+func (h *PermissionHub) hasRememberedGrant(ctx context.Context, key rememberedGrantKey) (bool, error) {
+	if h.grants != nil {
+		return h.grants.HasRememberedGrant(ctx, key.ownerID, key.resolvedSessionID, key.canonicalToolName, key.securityScopeDigest)
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.remembered[key], nil
+}
+
+func (h *PermissionHub) rememberGrant(ctx context.Context, key rememberedGrantKey) error {
+	if h.grants != nil {
+		return h.grants.RememberGrant(ctx, key.ownerID, key.resolvedSessionID, key.canonicalToolName, key.securityScopeDigest)
+	}
+	h.mu.Lock()
+	h.remembered[key] = true
+	h.mu.Unlock()
+	return nil
 }
 
 // PermissionHook is a BeforeToolHook that asks for user approval on sensitive/dangerous tools.
@@ -217,8 +968,9 @@ func WithUnattendedReviewer(r UnattendedReviewer) PermissionHookOption {
 // PermissionHookOption configures a PermissionHook.
 type PermissionHookOption func(*PermissionHook)
 
-// WithCodeExecApproval controls whether code_exec requires user approval.
-// When disabled, code_exec is removed from the dangerous tools list.
+// WithCodeExecApproval controls only the legacy classifyRisk list. A supplied
+// declarative policy remains authoritative; DefaultBaselinePolicy always
+// requires code_exec approval even when this compatibility switch is false.
 func WithCodeExecApproval(require bool) PermissionHookOption {
 	return func(h *PermissionHook) {
 		if !require {
@@ -387,6 +1139,16 @@ func (h *PermissionHook) BeforeToolCall(ctx context.Context, call *ToolCallInfo)
 	// （未注入策略的调用方）才退化到 classifyRisk 黑名单兜底。
 	if h.policy != nil {
 		dec := h.policy.Evaluate(call)
+		// Retrieved document content is a data-plane input, never an authority
+		// source. Explicit static deny remains first; every other policy outcome
+		// is narrowed by the evidence-aware gate before allow/matrix/solve paths.
+		if dec.Action != ActionDeny && hasUntrustedKnowledgeEvidence(ctx) && !userRequestedEvidenceTool(ctx, call) {
+			risk := dec.Risk
+			if risk == "" || risk == "safe" {
+				risk = "sensitive"
+			}
+			return h.authorizeUntrustedEvidenceTool(ctx, call, risk)
+		}
 		switch dec.Action {
 		case ActionAllow:
 			return h.gateUnattendedConnectorTool(ctx, call)
@@ -398,6 +1160,9 @@ func (h *PermissionHook) BeforeToolCall(ctx context.Context, call *ToolCallInfo)
 				reason = "policy denies execution"
 			}
 			h.recordDecision(ctx, call.Name, "deny", "policy", "显式 deny 规则 "+dec.MatchedRule)
+			// 策略收紧即撤销：deny 是显式的授权状态冲突信号，先撤销该 owner+tool
+			// 的 remembered grant 再拒绝，避免策略放宽后旧授权立即复活。
+			h.revokeRememberedToolGrant(ctx, call.Name)
 			return fmt.Errorf("tool %q blocked by policy %q: %s", call.Name, dec.MatchedRule, reason)
 		case ActionRequireApproval:
 			risk := dec.Risk
@@ -417,10 +1182,72 @@ func (h *PermissionHook) BeforeToolCall(ctx context.Context, call *ToolCallInfo)
 
 	// Legacy path: hardcoded dangerous/sensitive lists
 	risk := h.classifyRisk(call.Name)
+	if hasUntrustedKnowledgeEvidence(ctx) && !userRequestedEvidenceTool(ctx, call) {
+		if risk == "safe" {
+			risk = "sensitive"
+		}
+		return h.authorizeUntrustedEvidenceTool(ctx, call, risk)
+	}
 	if risk == "safe" {
 		return h.gateUnattendedConnectorTool(ctx, call)
 	}
 	return h.requestApproval(ctx, call, risk,
+		fmt.Sprintf("Agent wants to execute %s(%s)", call.Name, summarizeArgs(call.Arguments)))
+}
+
+// revokeRememberedToolGrant 在策略 deny 时同步撤销该 owner+tool 的 remembered
+// grant。撤销失败只记日志不阻断 deny（deny 本身就是安全结局），但 durable
+// 撤销必须在正常路径成功，否则策略放宽后 grant 会复活。
+func (h *PermissionHook) revokeRememberedToolGrant(ctx context.Context, toolName string) {
+	if h.hub == nil {
+		return
+	}
+	ownerID := skill.AuthenticatedUserID(ctx)
+	if ownerID == "" {
+		return
+	}
+	if err := h.hub.RevokeToolGrant(ctx, ownerID, strings.ToLower(strings.TrimSpace(toolName))); err != nil {
+		logger.Warn("[permission] revoke remembered grant after policy deny", "tool", toolName, "error", err)
+	}
+}
+
+// authorizeUntrustedEvidenceTool 隔离资料内容与执行授权。全权限下的内部验算只消费
+// 运行时已有的 solve grant；其余无人值守调用仍要求证据作用域授权，不能由资料提权。
+func (h *PermissionHook) authorizeUntrustedEvidenceTool(ctx context.Context, call *ToolCallInfo, risk string) error {
+	if src := systemDispatchSource(ctx); src != "" {
+		if src == solveDispatchSource && solveGrantFromContext(ctx) &&
+			h.DispatchPolicy().Profile() == SystemDispatchProfileFullAccess &&
+			call.Source == "skill" && canonicalEvidenceToolName(call.Name) == codeExecToolName {
+			logger.Info("[permission] solve-internal code_exec auto-approved with evidence",
+				"tool_name", call.Name, "source", src, "profile", SystemDispatchProfileFullAccess)
+			h.recordDecision(ctx, call.Name, "allow", "solve_grant", "全权限下消费运行时内部验算授权")
+			return nil
+		}
+		taskRef := systemDispatchTaskRef(ctx)
+		scopeDigest, err := untrustedEvidenceSecurityScopeDigest(call.Arguments)
+		if err != nil {
+			h.recordDecision(ctx, call.Name, "deny", "policy", "RAG 证据作用域无法规范化")
+			return fmt.Errorf("tool %q blocked for untrusted evidence: canonicalize security scope: %w", call.Name, err)
+		}
+		checker, ok := h.taskGrants.(UntrustedEvidenceTaskGrantChecker)
+		ownerID := skill.AuthenticatedUserID(ctx)
+		toolName := canonicalEvidenceToolName(call.Name)
+		if ok && ownerID != "" && taskRef != "" && checker.GrantAllowsUntrustedEvidence(ownerID, src, taskRef, toolName, scopeDigest) {
+			logger.Info("[permission] tainted tool approved by exact evidence-aware task grant",
+				"tool_name", toolName, "source", src, "task_ref", taskRef)
+			h.recordDecision(ctx, toolName, "allow", "task_grant", "命中 RAG 证据专用 owner/task/scope 授权")
+			return nil
+		}
+		h.recordDecision(ctx, toolName, "deny", "policy", "不可信 RAG 证据禁止全局矩阵或宽泛 grant 提权")
+		return fmt.Errorf("tool %q blocked for untrusted evidence in unattended %s dispatch: an exact owner/task/tool/security-scope grant is required", toolName, src)
+	}
+	if h.DispatchPolicy().Profile() == SystemDispatchProfileFullAccess {
+		logger.Warn("[permission] full_access does not elevate untrusted evidence",
+			"tool_name", call.Name)
+		return fmt.Errorf("tool %q blocked for untrusted evidence: full_access does not bypass the evidence authorization boundary", call.Name)
+	}
+
+	return h.requestInteractiveApproval(ctx, call, risk,
 		fmt.Sprintf("Agent wants to execute %s(%s)", call.Name, summarizeArgs(call.Arguments)))
 }
 
@@ -503,6 +1330,17 @@ func (h *PermissionHook) requestApproval(ctx context.Context, call *ToolCallInfo
 			call.Name, src, policy.Profile(), src)
 	}
 
+	policy := h.DispatchPolicy()
+	if policy.AllowsInteractiveTool(call.Name) {
+		logger.Info("[permission] interactive tool auto-approved by autonomy profile",
+			"tool_name", call.Name, "risk", risk, "profile", policy.Profile())
+		return nil
+	}
+
+	return h.requestInteractiveApproval(ctx, call, risk, reason)
+}
+
+func (h *PermissionHook) requestInteractiveApproval(ctx context.Context, call *ToolCallInfo, risk, reason string) error {
 	sessionID, _ := ctx.Value(ctxKeySessionID).(string)
 	if sessionID == "" {
 		if risk == "dangerous" {
@@ -521,6 +1359,9 @@ func (h *PermissionHook) requestApproval(ctx context.Context, call *ToolCallInfo
 		Reason:    reason,
 	}
 
+	if h.hub == nil {
+		return fmt.Errorf("tool %q requires approval but no approval coordinator is configured", call.Name)
+	}
 	approved, err := h.hub.RequestApproval(ctx, sessionID, req)
 	if err != nil {
 		logger.Error("[permission] approval error for", "name", call.Name, "error", err)
@@ -529,6 +1370,10 @@ func (h *PermissionHook) requestApproval(ctx context.Context, call *ToolCallInfo
 	if !approved {
 		return fmt.Errorf("tool %q: user denied execution", call.Name)
 	}
+	// Execute exactly the canonical envelope that was hashed and approved. The
+	// caller-owned map may be mutated while the approval is pending and is no
+	// longer an authority input after this point.
+	call.Arguments = req.Arguments
 	return nil
 }
 
