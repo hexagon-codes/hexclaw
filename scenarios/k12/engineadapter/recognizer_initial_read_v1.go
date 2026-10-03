@@ -115,7 +115,14 @@ func recognitionInitialReadProjectionV1(entry recognitionInitialReadEntryV1, tar
 		if json.Unmarshal(fields["question"], &question) != nil {
 			return nil, fmt.Errorf("initial question does not retain its shared conditions")
 		}
-		if strings.TrimSpace(shared) != "" && !strings.Contains(question, shared) && shared != entry.manifest.SourceSectionLabel {
+		sectionMetadata := shared == entry.manifest.SourceSectionLabel
+		if !sectionMetadata && len(entry.manifest.SourceSectionPath) == 1 && entry.manifest.SourceSectionPath[0] != "" {
+			// 同一冻结栏目的编号前缀不属于共享条件，余文仍须完整相等。
+			prefix := entry.manifest.SourceSectionPath[0] + "、"
+			sectionMetadata = strings.HasPrefix(entry.manifest.SourceSectionLabel, prefix) &&
+				shared == strings.TrimPrefix(entry.manifest.SourceSectionLabel, prefix)
+		}
+		if strings.TrimSpace(shared) != "" && !strings.Contains(question, shared) && !sectionMetadata {
 			// 冻结栏目名称已由来源身份保留；真实共享条件仍必须进入完整题干。
 			// 仅固定栏目完整配对时接受冒号排版差异，严格投影仍保存原题干。
 			view, paired := recognitionInitialReadArithmeticViewV1(usecase.RecognizedQuestion{Question: question}, entry)
