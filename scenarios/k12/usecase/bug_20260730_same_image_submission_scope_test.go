@@ -201,6 +201,13 @@ func TestBUG20260730002RunDirRecoversLegacyAndV2ButRejectsTamperedImage(t *testi
 			}
 
 			writer := newRecoverableOrchestrator(t, d, dir)
+			// 已持久化的旧任务同时包含原图与运行时检查点，重放不能凭新请求重建。
+			if err := writer.persistRun(job.Record.RecordID, &gradingRun{
+				agentName: request.AgentName,
+				req:       request,
+			}); err != nil {
+				t.Fatalf("seed %s persisted run: %v", tc.name, err)
+			}
 			replayed, replayCreated, err := writer.StartPhotoGradingJob(
 				ctx,
 				StartPhotoGradingInput{
@@ -209,12 +216,12 @@ func TestBUG20260730002RunDirRecoversLegacyAndV2ButRejectsTamperedImage(t *testi
 					SourceKey:  "recovery-source",
 				},
 			)
-			if err != nil || replayCreated || replayed.Record.RecordID != job.Record.RecordID {
+			if err != nil || replayCreated || replayed.Record == nil || replayed.Record.RecordID != job.Record.RecordID {
 				t.Fatalf(
-					"replay %s persisted job: created=%v got=%s want=%s err=%v",
+					"replay %s persisted job: created=%v got=%+v want=%s err=%v",
 					tc.name,
 					replayCreated,
-					replayed.Record.RecordID,
+					replayed.Record,
 					job.Record.RecordID,
 					err,
 				)
