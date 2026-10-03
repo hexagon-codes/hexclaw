@@ -1,20 +1,6 @@
 name: Sandbox CodeExec
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - ".github/workflows/sandbox-code-exec.yml"
-      - "go.mod"
-      - "go.sum"
-      - "skill/builtin/**"
-  pull_request:
-    branches: [main]
-    paths:
-      - ".github/workflows/sandbox-code-exec.yml"
-      - "go.mod"
-      - "go.sum"
-      - "skill/builtin/**"
   workflow_dispatch:
     inputs:
       toolkit_ref:
@@ -37,7 +23,7 @@ env:
   GOPRIVATE: github.com/hexagon-codes/*
   # 默认使用与 go.mod 一致的 toolkit tag；手动触发时仍可显式传入其他 ref。
   TOOLKIT_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.toolkit_ref || 'v0.3.4' }}
-  RUN_LIVE_NETWORK: ${{ github.event_name != 'workflow_dispatch' || inputs.run_live_network == 'true' }}
+  RUN_LIVE_NETWORK: ${{ github.event_name == 'workflow_dispatch' && inputs.run_live_network == 'true' }}
 
 jobs:
   workflow-lint:
