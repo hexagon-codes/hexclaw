@@ -11,6 +11,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/scenario"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
@@ -22,7 +23,7 @@ import (
 
 func setup(t *testing.T) (*k12storage.Store, *sql.DB) {
 	t.Helper()
-	db, err := sql.Open("sqlite", ":memory:")
+	db, err := sqlitefixture.Memory()
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}

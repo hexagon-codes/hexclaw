@@ -2,21 +2,99 @@ package sqlite
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/hexagon-codes/hexclaw/storage"
 )
 
+var (
+	sqliteTestTemplateOnce sync.Once
+	sqliteTestTemplateData []byte
+	sqliteTestTemplateErr  error
+)
+
+// newMigratedTestStore 复制进程内一次真实迁移的空库，每个业务用例仍独立初始化。
+func newMigratedTestStore(t *testing.T, path string) (*Store, error) {
+	t.Helper()
+	sqliteTestTemplateOnce.Do(func() {
+		sqliteTestTemplateData, sqliteTestTemplateErr = buildSQLiteTestTemplate(t)
+	})
+	if sqliteTestTemplateErr != nil {
+		return nil, sqliteTestTemplateErr
+	}
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return nil, fmt.Errorf("create SQLite test fixture: %w", err)
+	}
+	_, writeErr := file.Write(sqliteTestTemplateData)
+	if err := errors.Join(writeErr, file.Close()); err != nil {
+		return nil, fmt.Errorf("copy SQLite test fixture: %w", err)
+	}
+	store, err := New(path)
+	if err != nil {
+		return nil, err
+	}
+	result, err := store.DB().ExecContext(context.Background(),
+		`UPDATE backend_metadata SET value=lower(hex(randomblob(16))) WHERE key='backend_id'`)
+	if err == nil {
+		var rows int64
+		rows, err = result.RowsAffected()
+		if err == nil && rows != 1 {
+			err = fmt.Errorf("affected %d backend identity rows, want 1", rows)
+		}
+	}
+	if err != nil {
+		return nil, errors.Join(fmt.Errorf("reset SQLite test fixture identity: %w", err), store.Close())
+	}
+	return store, nil
+}
+
+func buildSQLiteTestTemplate(t *testing.T) (_ []byte, returnErr error) {
+	path := filepath.Join(t.TempDir(), "template.db")
+	store, err := New(path)
+	if err != nil {
+		return nil, err
+	}
+	closed := false
+	defer func() {
+		if !closed {
+			returnErr = errors.Join(returnErr, store.Close())
+		}
+	}()
+	ctx := context.Background()
+	if err := store.Init(ctx); err != nil {
+		return nil, fmt.Errorf("migrate SQLite test template: %w", err)
+	}
+	// 关闭所有连接前确认 WAL 已写回，复制后的用例不共享日志或数据。
+	var busy, pages, checkpointed int
+	if err := store.DB().QueryRowContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)").
+		Scan(&busy, &pages, &checkpointed); err != nil {
+		return nil, fmt.Errorf("checkpoint SQLite test template: %w", err)
+	}
+	if busy != 0 || pages != 0 || checkpointed != 0 {
+		return nil, fmt.Errorf("incomplete SQLite test template checkpoint: %d/%d/%d", busy, pages, checkpointed)
+	}
+	err = store.Close()
+	closed = true
+	if err != nil {
+		return nil, err
+	}
+	return os.ReadFile(path)
+}
+
 // newTestStore 创建测试用的 SQLite 存储（使用临时目录）
 func newTestStore(t *testing.T) *Store {
 	t.Helper()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
-	store, err := New(dbPath)
+	store, err := newMigratedTestStore(t, dbPath)
 	if err != nil {
 		t.Fatalf("创建存储失败: %v", err)
 	}
@@ -89,7 +167,7 @@ func TestSessionCRUD(t *testing.T) {
 func TestRememberedGrantV63ExactKeySurvivesReopenAndSessionDeleteRevokesIt(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "remembered-grants.db")
-	store, err := New(dbPath)
+	store, err := newMigratedTestStore(t, dbPath)
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}

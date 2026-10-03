@@ -32,7 +32,7 @@ func TestModelPhysicalInvocationSuccessStoreOwnsContentDigestAndPersistence(
 ) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "physical-result-content.db")
-	store, db := openPhysicalLedgerFileStore(t, path)
+	store, db := newPhysicalLedgerFileStore(t, path)
 	if err := migrate.Run(ctx, db, migrate.All); err != nil {
 		t.Fatalf("migrate file db: %v", err)
 	}

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/scenario"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
@@ -19,13 +20,22 @@ import (
 )
 
 func problemAssetStore(t *testing.T) (*k12storage.Store, string) {
-	return problemAssetStoreWithMigrations(t, migrate.All)
+	return problemAssetStoreWithMigrations(t, nil)
 }
 
 func problemAssetStoreWithMigrations(t *testing.T, migrations []migrate.Migration) (*k12storage.Store, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "assets.db")
-	db, err := sql.Open("sqlite", path+"?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
+	dsn := path + "?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"
+	var db *sql.DB
+	var err error
+	// 默认夹具复制完整迁移空库；指定迁移的回归仍从真正空库执行。
+	if migrations == nil {
+		db, err = sqlitefixture.Open(path, dsn)
+		migrations = migrate.All
+	} else {
+		db, err = sql.Open("sqlite", dsn)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}

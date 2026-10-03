@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/scenario"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
@@ -76,6 +77,18 @@ func newPhysicalInvocation(
 		Attempt:               1,
 		CreatedAt:             200,
 	}
+}
+
+func newPhysicalLedgerFileStore(t *testing.T, path string) (*k12storage.Store, *sql.DB) {
+	t.Helper()
+	db, err := sqlitefixture.Open(path, path)
+	if err != nil {
+		t.Fatalf("prepare physical ledger db: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return openPhysicalLedgerFileStore(t, path)
 }
 
 func openPhysicalLedgerFileStore(
@@ -673,7 +686,7 @@ func TestModelPhysicalInvocationGetAndListAreOwnerAndJobScoped(t *testing.T) {
 
 func TestModelPhysicalInvocationSurvivesSQLiteCloseAndReopen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "physical-ledger.db")
-	store, db := openPhysicalLedgerFileStore(t, path)
+	store, db := newPhysicalLedgerFileStore(t, path)
 	if err := migrate.Run(context.Background(), db, migrate.All); err != nil {
 		t.Fatalf("migrate file db: %v", err)
 	}

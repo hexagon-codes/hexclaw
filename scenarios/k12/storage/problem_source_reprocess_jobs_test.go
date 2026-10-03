@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
 	"github.com/hexagon-codes/hexclaw/storage/migrate"
 
@@ -569,7 +570,7 @@ func TestProblemSourceReprocessOutcomeUnknownReconciliationHundredConcurrentSing
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "source-reconcile.db")
 	dsn := path + "?_pragma=foreign_keys(1)&_pragma=busy_timeout(10000)"
-	seedDB, err := sql.Open("sqlite", dsn)
+	seedDB, err := sqlitefixture.Open(path, dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -750,7 +751,7 @@ func TestProblemSourceReprocessConcurrentSQLiteClaimHasSingleWinner(t *testing.T
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "source-reprocess-claim.db")
 	dsn := path + "?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)"
-	seedDB, err := sql.Open("sqlite", dsn)
+	seedDB, err := sqlitefixture.Open(path, dsn)
 	if err != nil {
 		t.Fatal(err)
 	}

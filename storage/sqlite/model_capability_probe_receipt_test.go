@@ -111,7 +111,7 @@ INSERT INTO llm_model_capability_probe_receipts (
 
 func TestModelCapabilityProbeReceiptStartedAtFencesLateOlderCompletion(t *testing.T) {
 	ctx := context.Background()
-	store, err := New(filepath.Join(t.TempDir(), "model-capability-probe-fence.db"))
+	store, err := newMigratedTestStore(t, filepath.Join(t.TempDir(), "model-capability-probe-fence.db"))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}

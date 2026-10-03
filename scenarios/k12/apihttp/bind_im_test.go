@@ -2,10 +2,10 @@ package apihttp_test
 
 import (
 	"context"
-	"database/sql"
 	"net/http"
 	"testing"
 
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/apihttp"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/assembly"
 	"github.com/hexagon-codes/hexclaw/storage/migrate"
@@ -24,7 +24,7 @@ func (f *fakeBinder) Bind(_ context.Context, platform, instanceID, chatID, agent
 
 func newServerWithBinder(t *testing.T, b apihttp.IMBinder) http.Handler {
 	t.Helper()
-	db, err := sql.Open("sqlite", ":memory:")
+	db, err := sqlitefixture.Memory()
 	if err != nil {
 		t.Fatal(err)
 	}

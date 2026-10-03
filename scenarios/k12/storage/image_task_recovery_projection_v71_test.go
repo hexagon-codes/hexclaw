@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/scenario"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
@@ -16,8 +17,17 @@ import (
 
 func TestImageTaskRecoveryProjectionIsAgentSessionScopedAndStableAfterReopen(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "image-task-recovery.db")
+	firstOpen := true
 	open := func() (*sql.DB, *k12storage.Store) {
-		db, err := sql.Open("sqlite", dbPath+"?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)")
+		dsn := dbPath + "?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)"
+		var db *sql.DB
+		var err error
+		if firstOpen {
+			db, err = sqlitefixture.Open(dbPath, dsn)
+			firstOpen = false
+		} else {
+			db, err = sql.Open("sqlite", dsn)
+		}
 		if err != nil {
 			t.Fatal(err)
 		}

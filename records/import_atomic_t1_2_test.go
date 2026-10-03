@@ -2,10 +2,10 @@ package records
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"testing"
 
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/storage/migrate"
 
 	_ "modernc.org/sqlite"
@@ -18,11 +18,14 @@ import (
 func newFKStore(t *testing.T) *Store {
 	t.Helper()
 	// 显式开 foreign_keys，使 ghost agent_name 触发 FK 失败（模拟中途写库故障）。
-	db, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(1)")
+	db, err := sqlitefixture.Memory()
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
+	if _, err := db.ExecContext(context.Background(), "PRAGMA foreign_keys=ON"); err != nil {
+		t.Fatalf("enable foreign keys: %v", err)
+	}
 	if err := migrate.Run(context.Background(), db, migrate.All); err != nil {
 		t.Fatal(err)
 	}

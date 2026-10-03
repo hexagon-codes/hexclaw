@@ -7,12 +7,13 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/storage/migrate"
 	_ "modernc.org/sqlite"
 )
 
 func TestGroundingRetrievalInvocationClaimAndSuccessSurviveRestartWithoutDuplicate(t *testing.T) {
-	db, err := sql.Open("sqlite", ":memory:")
+	db, err := sqlitefixture.Memory()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +76,7 @@ func TestGroundingRetrievalTerminalReceiptsCannotOverwriteEachOther(t *testing.T
 	for _, terminal := range []string{"succeeded", "failed", "outcome_unknown"} {
 		t.Run(terminal, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "receipts.db")
-			db, err := sql.Open("sqlite", path)
+			db, err := sqlitefixture.Open(path, path)
 			if err != nil {
 				t.Fatal(err)
 			}

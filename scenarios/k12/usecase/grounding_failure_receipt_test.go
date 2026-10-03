@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
 	"github.com/hexagon-codes/hexclaw/storage/migrate"
@@ -58,7 +59,7 @@ func TestGroundingFailureReceiptsSurviveReopenWithoutResend(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "grounding.db")
-			db, err := sql.Open("sqlite", path)
+			db, err := sqlitefixture.Open(path, path)
 			if err != nil {
 				t.Fatal(err)
 			}

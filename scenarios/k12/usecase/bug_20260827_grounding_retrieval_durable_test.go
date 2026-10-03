@@ -7,8 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"database/sql"
-
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
 	"github.com/hexagon-codes/hexclaw/storage/migrate"
@@ -38,7 +37,7 @@ func (p *durableGroundingRetrievalProbe) GroundSnapshotWithEvidence(
 }
 
 func TestGroundingRetrievalInvocationIsReusedAfterSessionRestart(t *testing.T) {
-	db, err := sql.Open("sqlite", ":memory:")
+	db, err := sqlitefixture.Memory()
 	if err != nil {
 		t.Fatal(err)
 	}

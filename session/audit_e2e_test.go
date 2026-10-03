@@ -35,11 +35,11 @@ import (
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/config"
 	"github.com/hexagon-codes/hexclaw/engine"
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/llmrouter"
 	"github.com/hexagon-codes/hexclaw/session"
 	"github.com/hexagon-codes/hexclaw/skill"
 	"github.com/hexagon-codes/hexclaw/storage"
-	sqlitestore "github.com/hexagon-codes/hexclaw/storage/sqlite"
 )
 
 // ============================================================================
@@ -62,7 +62,7 @@ func newE2EHarness(t *testing.T, provider *mockllm.LLMProvider, opts e2eOptions)
 	t.Helper()
 
 	dir := t.TempDir()
-	real, err := sqlitestore.New(filepath.Join(dir, "e2e.db"))
+	real, err := sqlitefixture.New(filepath.Join(dir, "e2e.db"))
 	if err != nil {
 		t.Fatalf("创建 sqlite 存储失败: %v", err)
 	}
@@ -882,7 +882,7 @@ func (s *failingAssistantStore) WithTx(ctx context.Context, fn func(storage.Stor
 // 但存储中查无此 assistant 消息，且 reply 不携带任何失败信号。
 func TestE2E_PersistFailure_SwallowedBreaksClosedLoop(t *testing.T) {
 	dir := t.TempDir()
-	real, err := sqlitestore.New(filepath.Join(dir, "persistfail.db"))
+	real, err := sqlitefixture.New(filepath.Join(dir, "persistfail.db"))
 	if err != nil {
 		t.Fatalf("创建底层 store 失败: %v", err)
 	}
@@ -982,7 +982,7 @@ func (s *busyOnceStore) WithTx(ctx context.Context, fn func(storage.Store) error
 // 重试后必定落库的正向断言见 TestE2E_BusyWrite_RetriedAndPersisted。
 func TestE2E_ConcurrentWrite_BusySwallowedLosesMessage(t *testing.T) {
 	dir := t.TempDir()
-	real, err := sqlitestore.New(filepath.Join(dir, "busy.db"))
+	real, err := sqlitefixture.New(filepath.Join(dir, "busy.db"))
 	if err != nil {
 		t.Fatalf("创建底层 store 失败: %v", err)
 	}
@@ -1056,7 +1056,7 @@ func TestE2E_ConcurrentWrite_BusySwallowedLosesMessage(t *testing.T) {
 // 分支更强的正向证据：直接证明"重试 → 落库"链路成立。
 func TestE2E_BusyWrite_RetriedAndPersisted(t *testing.T) {
 	dir := t.TempDir()
-	real, err := sqlitestore.New(filepath.Join(dir, "busy_retry.db"))
+	real, err := sqlitefixture.New(filepath.Join(dir, "busy_retry.db"))
 	if err != nil {
 		t.Fatalf("创建底层 store 失败: %v", err)
 	}
@@ -1179,7 +1179,7 @@ func (s *laneProbeStore) WithTx(ctx context.Context, fn func(storage.Store) erro
 // 掩盖不了并发重入），因此即便存在 sqlite 重试，缺默认锁时本用例仍会失败。
 func TestE2E_NewReActEngine_DefaultSessionLockSerializes(t *testing.T) {
 	dir := t.TempDir()
-	real, err := sqlitestore.New(filepath.Join(dir, "defaultlock.db"))
+	real, err := sqlitefixture.New(filepath.Join(dir, "defaultlock.db"))
 	if err != nil {
 		t.Fatalf("创建底层 store 失败: %v", err)
 	}

@@ -13,7 +13,7 @@ import (
 func TestInboundPhotoPermanentFailureIsDurableImmutableAndNotRecoverable(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "terminal.sqlite")
-	db, store := openInboundPhotoStore(t, dbPath)
+	db, store := newInboundPhotoStore(t, dbPath)
 	seedInboundAgent(t, db, "mingming")
 	bundle, _, err := store.AdmitInboundPhoto(
 		ctx, inboundAdmission("msg-terminal", []byte("permanent failure image")),
@@ -84,7 +84,7 @@ func TestInboundPhotoPermanentFailureIsDurableImmutableAndNotRecoverable(t *test
 
 func TestInboundPhotoTerminalFenceRejectsUnstructuredFailureKind(t *testing.T) {
 	ctx := context.Background()
-	db, store := openInboundPhotoStore(t, filepath.Join(t.TempDir(), "invalid-terminal.sqlite"))
+	db, store := newInboundPhotoStore(t, filepath.Join(t.TempDir(), "invalid-terminal.sqlite"))
 	defer db.Close()
 	seedInboundAgent(t, db, "mingming")
 	bundle, _, err := store.AdmitInboundPhoto(
@@ -116,7 +116,7 @@ func TestInboundPhotoTerminalFenceRejectsUnstructuredFailureKind(t *testing.T) {
 
 func TestInboundPhotoDeliveryFailureRequiresAndPreservesBoundBatch(t *testing.T) {
 	ctx := context.Background()
-	db, store := openInboundPhotoStore(t, filepath.Join(t.TempDir(), "delivery-terminal.sqlite"))
+	db, store := newInboundPhotoStore(t, filepath.Join(t.TempDir(), "delivery-terminal.sqlite"))
 	defer db.Close()
 	seedInboundAgent(t, db, "mingming")
 	bundle, _, err := store.AdmitInboundPhoto(

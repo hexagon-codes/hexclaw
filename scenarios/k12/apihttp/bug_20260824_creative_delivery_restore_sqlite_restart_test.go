@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/apihttp"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/assembly"
@@ -102,7 +103,14 @@ func openCreativeDeliveryFileRuntime(
 	seedAgent bool,
 ) (*sql.DB, *assembly.K12, http.Handler) {
 	t.Helper()
-	db, err := sql.Open("sqlite", databasePath+"?_pragma=foreign_keys(1)")
+	dsn := databasePath + "?_pragma=foreign_keys(1)"
+	var db *sql.DB
+	var err error
+	if seedAgent {
+		db, err = sqlitefixture.Open(databasePath, dsn)
+	} else {
+		db, err = sql.Open("sqlite", dsn)
+	}
 	if err != nil {
 		t.Fatalf("open file SQLite: %v", err)
 	}

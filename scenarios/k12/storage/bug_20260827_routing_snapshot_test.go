@@ -2,16 +2,16 @@ package k12storage
 
 import (
 	"context"
-	"database/sql"
 	"strings"
 	"testing"
 
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/storage/migrate"
 	_ "modernc.org/sqlite"
 )
 
 func TestInboundPhotoRoutingSnapshotSelectionIsDurableAndIdempotent(t *testing.T) {
-	db, err := sql.Open("sqlite", ":memory:")
+	db, err := sqlitefixture.Memory()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +80,7 @@ func TestInboundPhotoRoutingSnapshotSelectionIsDurableAndIdempotent(t *testing.T
 }
 
 func TestInboundPhotoRoutingSnapshotIntentAllowsEmptyCandidates(t *testing.T) {
-	db, err := sql.Open("sqlite", ":memory:")
+	db, err := sqlitefixture.Memory()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +110,7 @@ func TestInboundPhotoRoutingSnapshotIntentAllowsEmptyCandidates(t *testing.T) {
 }
 
 func TestInboundPhotoRoutingSnapshotRejectsPersistedCandidateDigestDrift(t *testing.T) {
-	db, err := sql.Open("sqlite", ":memory:")
+	db, err := sqlitefixture.Memory()
 	if err != nil {
 		t.Fatal(err)
 	}

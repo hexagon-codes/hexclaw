@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
 	"github.com/hexagon-codes/hexclaw/storage/migrate"
@@ -437,7 +438,7 @@ func TestCommitProblemSourceRecognitionResultConcurrentReplayAndRestart(t *testi
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "recognition-result.db")
 	dsn := path + "?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)"
-	seedDB, err := sql.Open("sqlite", dsn)
+	seedDB, err := sqlitefixture.Open(path, dsn)
 	if err != nil {
 		t.Fatal(err)
 	}

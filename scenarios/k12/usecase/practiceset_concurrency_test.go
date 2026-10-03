@@ -2,13 +2,13 @@ package usecase_test
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/scenario"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/curriculum"
@@ -23,7 +23,7 @@ func newFileBackedDeps(t *testing.T) usecase.Deps {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "concurrency.db")
 	dsn := dbPath + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)"
-	db, err := sql.Open("sqlite", dsn)
+	db, err := sqlitefixture.Open(dbPath, dsn)
 	if err != nil {
 		t.Fatal(err)
 	}

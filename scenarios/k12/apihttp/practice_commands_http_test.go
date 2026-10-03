@@ -2,12 +2,12 @@ package apihttp_test
 
 import (
 	"context"
-	"database/sql"
 	"encoding/base64"
 	"fmt"
 	"net/http"
 	"testing"
 
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/scenario"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/apihttp"
@@ -34,7 +34,7 @@ func (*practiceCommandSolver) Solve(_ context.Context, problem, _, _ string) (us
 
 func newPracticeCommandServer(t *testing.T) (http.Handler, usecase.Deps) {
 	t.Helper()
-	db, err := sql.Open("sqlite", ":memory:")
+	db, err := sqlitefixture.Memory()
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/scenario"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
@@ -45,12 +46,30 @@ func annotatedArtifactSHA256(raw []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
+func newAnnotatedArtifactStore(t *testing.T, databasePath string) (*k12storage.Store, *sql.DB) {
+	t.Helper()
+	db, err := sqlitefixture.Open(databasePath, databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return openAnnotatedArtifactStore(t, databasePath)
+}
+
 func openAnnotatedArtifactStore(
 	t *testing.T,
 	databasePath string,
 ) (*k12storage.Store, *sql.DB) {
 	t.Helper()
-	db, err := sql.Open("sqlite", databasePath)
+	var db *sql.DB
+	var err error
+	if databasePath == ":memory:" {
+		db, err = sqlitefixture.Memory()
+	} else {
+		db, err = sql.Open("sqlite", databasePath)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +153,7 @@ func TestGradingFinalAnnotatedAssetSurvivesProcessResultLossAndSQLiteRestart(t *
 	original := annotatedArtifactPNG(t, 40)
 	annotated := annotatedArtifactPNG(t, 180)
 
-	store, db := openAnnotatedArtifactStore(t, databasePath)
+	store, db := newAnnotatedArtifactStore(t, databasePath)
 	artifact, _ := commitAnnotatedArtifactFixture(
 		t, store, "guardian-1", original, annotated, "annotated-restart",
 	)

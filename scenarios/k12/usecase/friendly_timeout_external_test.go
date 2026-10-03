@@ -12,10 +12,10 @@ import (
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/config"
 	"github.com/hexagon-codes/hexclaw/engine"
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/llmrouter"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/usecase"
 	"github.com/hexagon-codes/hexclaw/skill"
-	sqlitestore "github.com/hexagon-codes/hexclaw/storage/sqlite"
 )
 
 type friendlyTimeoutRecognizer struct{}
@@ -63,7 +63,7 @@ func TestGradeHomeworkPhotoRecognizesFriendlyEngineDeadlineAsUnknown(t *testing.
 	router := llmrouter.NewWithProviders(cfg.LLM, map[string]hexagon.Provider{
 		"deadline-provider": provider,
 	})
-	store, err := sqlitestore.New(filepath.Join(t.TempDir(), "engine.db"))
+	store, err := sqlitefixture.New(filepath.Join(t.TempDir(), "engine.db"))
 	if err != nil {
 		t.Fatalf("open engine store: %v", err)
 	}

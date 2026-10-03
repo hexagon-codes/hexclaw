@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/router"
 	"github.com/hexagon-codes/hexclaw/scenario"
@@ -143,7 +144,8 @@ type archiveRestoreFixture struct {
 
 func newArchiveRestoreFixture(t *testing.T) *archiveRestoreFixture {
 	t.Helper()
-	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "archive-restore.db"))
+	path := filepath.Join(t.TempDir(), "archive-restore.db")
+	db, err := sqlitefixture.Open(path, path)
 	if err != nil {
 		t.Fatal(err)
 	}

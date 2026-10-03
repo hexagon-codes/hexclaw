@@ -192,7 +192,7 @@ func TestPrepareRecognizingInvocationWithInitialWholePageConcurrentReplay(
 ) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "physical-initial-concurrent.db")
-	store, db := openPhysicalLedgerFileStore(t, path)
+	store, db := newPhysicalLedgerFileStore(t, path)
 	defer db.Close()
 	if err := migrate.Run(ctx, db, migrate.All); err != nil {
 		t.Fatalf("migrate file db: %v", err)
@@ -286,7 +286,7 @@ func TestPrepareRecognizingInvocationWithInitialWholePageTwoStoreConcurrentExact
 ) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "physical-initial-two-store.db")
-	firstStore, firstDB := openPhysicalLedgerFileStore(t, path)
+	firstStore, firstDB := newPhysicalLedgerFileStore(t, path)
 	t.Cleanup(func() { _ = firstDB.Close() })
 	if err := migrate.Run(ctx, firstDB, migrate.All); err != nil {
 		t.Fatalf("migrate concurrent publication database: %v", err)

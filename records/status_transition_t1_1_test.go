@@ -2,10 +2,10 @@ package records
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"testing"
 
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/storage/migrate"
 
 	_ "modernc.org/sqlite"
@@ -36,7 +36,7 @@ func ladderSchema() *RecordSchema {
 
 func newLadderStore(t *testing.T) *Store {
 	t.Helper()
-	db, err := sql.Open("sqlite", ":memory:")
+	db, err := sqlitefixture.Memory()
 	if err != nil {
 		t.Fatal(err)
 	}
