@@ -28,12 +28,12 @@ import (
 	"github.com/hexagon-codes/hexagon"
 	"github.com/hexagon-codes/hexclaw/config"
 	"github.com/hexagon-codes/hexclaw/egress"
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/llmrouter"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/assembly"
 	"github.com/hexagon-codes/hexclaw/skill"
 	"github.com/hexagon-codes/hexclaw/skill/marketplace"
-	sqlitestore "github.com/hexagon-codes/hexclaw/storage/sqlite"
 )
 
 // §13.2 发布级要求：作品点评探针必须支持显式真实文件输入，并断言 FX-WRITING-001 /
@@ -99,7 +99,7 @@ func TestK12WorkFeedback_RealModel(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	store, err := sqlitestore.New(filepath.Join(t.TempDir(), "k12-workfb-probe.db"))
+	store, err := sqlitefixture.New(filepath.Join(t.TempDir(), "k12-workfb-probe.db"))
 	if err != nil {
 		t.Fatalf("create isolated store: error_type=%T", err)
 	}

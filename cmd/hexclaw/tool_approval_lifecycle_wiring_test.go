@@ -13,9 +13,9 @@ import (
 	"github.com/hexagon-codes/hexclaw/api"
 	"github.com/hexagon-codes/hexclaw/config"
 	"github.com/hexagon-codes/hexclaw/engine"
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/skill"
 	"github.com/hexagon-codes/hexclaw/storage"
-	sqlitestore "github.com/hexagon-codes/hexclaw/storage/sqlite"
 )
 
 type runtimeLifecycleApprovalSender struct {
@@ -47,7 +47,7 @@ func TestRuntimeSessionDeleteWiresSamePermissionHubAndSQLiteAuthority(t *testing
 	const ownerID = "desktop-user"
 	const sessionID = "runtime-session"
 
-	store, err := sqlitestore.New(filepath.Join(t.TempDir(), "runtime-lifecycle.db"))
+	store, err := sqlitefixture.New(filepath.Join(t.TempDir(), "runtime-lifecycle.db"))
 	if err != nil {
 		t.Fatalf("new SQLite authority: %v", err)
 	}
