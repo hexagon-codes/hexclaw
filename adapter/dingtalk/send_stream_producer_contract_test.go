@@ -72,8 +72,8 @@ func TestSendStreamPreservesTerminalMetadataForCanonicalFallback(t *testing.T) {
 	if got := reply.MessageContent.Locale; got != "zh-CN" {
 		t.Errorf("canonical locale = %q, want zh-CN", got)
 	}
-	if len(reply.RenderManifest.Parts) != 1 || reply.RenderManifest.Parts[0].Kind != messagecontent.PartMarkdown || reply.RenderManifest.Parts[0].Text != "流式回答" {
-		t.Fatalf("canonical stream projection = %#v, want one markdown part", reply.RenderManifest.Parts)
+	if len(reply.RenderManifest.Parts) != 1 || reply.RenderManifest.Parts[0].Kind != messagecontent.PartText || reply.RenderManifest.Parts[0].Text != "流式回答" {
+		t.Fatalf("canonical stream projection = %#v, want one text part", reply.RenderManifest.Parts)
 	}
 }
 
