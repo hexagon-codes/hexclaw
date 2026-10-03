@@ -729,6 +729,15 @@ Scenario packs are mounted through `srv.Mount` under `/api/<scenario>` and inher
 | `make clean` | Clean build artifacts |
 | `make init` | Initialize default config |
 
+### CI/CD
+
+- Pushes to `feat/**` compile application and test packages without running test cases. A successful compile triggers cloud deployment when automatic deployment is enabled and the branch is configured as its target.
+- Main pushes and PRs targeting main retain full Linux tests with race detection, Windows builds and sandbox tests, and macOS sandbox tests. Windows/macOS share one matrix; coverage uploads and advisory Windows core-test duplication are removed.
+- K12, render, and Sandbox CodeExec run their dedicated checks according to their path filters. Render no longer runs weekly jobs or queries upstream release versions.
+- `v*` tags or manual runs against an existing tag produce release artifacts independently of the full CI tests. The release version is `v0.5.0-beta`, a prerelease; a version entry does not imply that its tag or GitHub Release exists.
+
+See [CI/CD gate details](CONTRIBUTING.md#cicd-门禁说明) and the [cloud deployment guide](docs/cloud-deployment.md). A successful feature-branch compile does not replace full tests or Desktop/IM acceptance.
+
 ### Manual Commands
 
 ```bash
@@ -758,8 +767,8 @@ go run ./cmd/verify-release -repo . -version 0.5.0-beta \
 | Component | Technology |
 |-----------|-----------|
 | Language | Go 1.25.13+ |
-| Agent Framework | [Hexagon](https://github.com/hexagon-codes/hexagon) v0.5.13 |
-| AI Core Library | [ai-core](https://github.com/hexagon-codes/ai-core) v0.2.10 |
+| Agent Framework | [Hexagon](https://github.com/hexagon-codes/hexagon) v0.5.14 |
+| AI Core Library | [ai-core](https://github.com/hexagon-codes/ai-core) v0.2.11 |
 | Utility Library | [toolkit](https://github.com/hexagon-codes/toolkit) v0.3.4 |
 | CLI | [Cobra](https://github.com/spf13/cobra) |
 | Configuration | YAML + environment variables |
@@ -802,8 +811,8 @@ chore: build/toolchain updates
 
 | Project | Description | Repository |
 |---------|-------------|------------|
-| **Hexagon** | Go AI Agent framework (core engine) v0.5.13 | [hexagon](https://github.com/hexagon-codes/hexagon) |
-| **ai-core** | AI core library (LLM/Tool/Memory) v0.2.10 | [ai-core](https://github.com/hexagon-codes/ai-core) |
+| **Hexagon** | Go AI Agent framework (core engine) v0.5.14 | [hexagon](https://github.com/hexagon-codes/hexagon) |
+| **ai-core** | AI core library (LLM/Tool/Memory) v0.2.11 | [ai-core](https://github.com/hexagon-codes/ai-core) |
 | **toolkit** | Go utility library v0.3.4 | [toolkit](https://github.com/hexagon-codes/toolkit) |
 | **hexagon-ui** | Hexagon Dev UI dashboard (Vue 3) | [hexagon-ui](https://github.com/hexagon-codes/hexagon-ui) |
 | **hexclaw-desktop** | HexClaw desktop client (Tauri + Vue 3) | [hexclaw-desktop](https://github.com/hexagon-codes/hexclaw-desktop) |
@@ -811,7 +820,7 @@ chore: build/toolchain updates
 
 ## Changelog
 
-### v0.5.0-beta (2026-07-13)
+### v0.5.0-beta (2026-10-03)
 
 **Scenario Packs & Records**
 - **Scenario extension seams** — Added the `scenario` registry for record collections, constraints, view slots, Agent modes, buttons, and eval suites without hard-coding business packages in the platform layer.
@@ -829,9 +838,10 @@ chore: build/toolchain updates
 - **Adapter/workflow resilience** — Bounded send queues, webhook body limits, MCP/IM lifecycle handling, condition nodes, and atomic persistence were hardened. Cron compilation now uses a text reasoning model.
 
 **Dependencies & CI/CD**
-- **Framework dependency upgrade** — `go.mod` targets hexagon v0.5.9 / ai-core v0.2.4 / toolkit v0.2.6, keeps Go 1.25.7 as the compatibility baseline, and selects Go 1.25.12 as the release toolchain.
+- **Framework dependency upgrade** — `go.mod` targets hexagon v0.5.14 / ai-core v0.2.11 / toolkit v0.3.4 with Go 1.25.13 as the compatibility baseline. Release-mode verification uses published dependencies rather than a local workspace.
 - **Version-aware skill seeds** — Embedded first-run skills can upgrade by seed version; the default catalog remains aligned with `hexagon-codes/hexclaw-hub` tag `v0.0.6`.
-- **CI/CD verification** — `sandbox-code-exec.yml` proves strong-sandbox behavior; normal Linux CI gates real execution by backend capability, the dedicated workflow sets `HEXCLAW_P0_SANDBOX_PROOF=1`, and the runner-integrity probe only runs manually with `HEXCLAW_RUNNER_PROBE=1`.
+- **CI/CD simplification** — Full Linux tests with race detection, platform sandbox checks, and dedicated gates remain. Windows/macOS configuration is shared; coverage uploads, advisory Windows core-test duplication, and render's weekly upstream-version checks are removed. Feature compilation, automatic cloud deployment, and tag-based releases have separate verification scopes.
+- **Sandbox verification** — `sandbox-code-exec.yml` tests strong-sandbox behavior; normal Linux CI gates real execution by backend capability, the dedicated workflow sets `HEXCLAW_P0_SANDBOX_PROOF=1`, and the runner-integrity probe only runs manually with `HEXCLAW_RUNNER_PROBE=1`.
 
 > See [CHANGELOG.md](CHANGELOG.md) for the complete release history.
 

@@ -45,6 +45,7 @@ func newAsyncIngestHarness(t *testing.T) (*sql.DB, *SemanticIndexService, contex
 		migrate.KnowledgeUploadOperationsV71,
 		migrate.KnowledgeOCRRouteReceiptsV87,
 		migrate.K12KnowledgeInvocationLedgersV91,
+		migrate.KnowledgeUploadDismissalV99,
 		migrate.KnowledgeRecoveryV106,
 	}); err != nil {
 		t.Fatal(err)

@@ -40,7 +40,7 @@ func newEngineForSkillAudit(t *testing.T) (*ReActEngine, skill.Registry) {
 	dir := t.TempDir()
 	store, _ := sqlitestore.New(filepath.Join(dir, "test.db"))
 	t.Cleanup(func() { store.Close() })
-	store.Init(context.Background())
+	// 挂载技能和提示词断言不进入 SQL 会话读写。
 	skills := skill.NewRegistry()
 	eng := NewReActEngine(cfg, router, store, skills)
 	return eng, skills

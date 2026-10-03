@@ -18,9 +18,7 @@ func newEncryptedManager(t *testing.T) (*Manager, func()) {
 	if err != nil {
 		t.Fatalf("创建 SQLite 存储失败: %v", err)
 	}
-	if err := store.Init(context.Background()); err != nil {
-		t.Fatalf("初始化 SQLite 存储失败: %v", err)
-	}
+	// 真实 SQLite 保留持久化行为，表结构由实例管理器的生产初始化创建。
 	mgr := NewManager(store.DB())
 	if err := mgr.Init(context.Background()); err != nil {
 		t.Fatalf("初始化实例管理器失败: %v", err)

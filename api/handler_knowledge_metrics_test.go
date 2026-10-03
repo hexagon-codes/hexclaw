@@ -17,9 +17,11 @@ import (
 
 func TestKnowledgeRetrievalMetricsEndpoint(t *testing.T) {
 	srv, _ := newKBConfigServer(t)
+	srv.SetDesktopAPIToken("knowledge-desktop-fixture")
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/knowledge/metrics", nil)
 	req.RemoteAddr = "127.0.0.1:45678"
+	req.Header.Set("Authorization", "Bearer knowledge-desktop-fixture")
 	srv.routes().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("metrics endpoint 应返回 200，得 %d body=%s", w.Code, w.Body.String())
@@ -42,6 +44,7 @@ func TestKnowledgeRetrievalMetricsEndpointDoesNotLeakLocalInferenceInputsOrError
 	t.Cleanup(governor.Close)
 	coordinator := localinfer.New(governor)
 	srv, _ := newKBConfigServer(t, knowledge.WithLocalInferenceCoordinator(coordinator))
+	srv.SetDesktopAPIToken("knowledge-desktop-fixture")
 
 	const (
 		queryCanary  = "query-canary-52f9c7a4"
@@ -57,6 +60,7 @@ func TestKnowledgeRetrievalMetricsEndpointDoesNotLeakLocalInferenceInputsOrError
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/knowledge/metrics", nil)
 	req.RemoteAddr = "127.0.0.1:45678"
+	req.Header.Set("Authorization", "Bearer knowledge-desktop-fixture")
 	srv.routes().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("metrics endpoint status=%d body=%s", w.Code, w.Body.String())

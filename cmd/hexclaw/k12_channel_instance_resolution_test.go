@@ -126,7 +126,7 @@ func TestK12IMDelivererCanonicalizesLegacyEmptyAndNamedBindingsBeforeFreeze(t *t
 		}
 	}
 	d.SetInstanceResolver(func(platform, instanceRef string) (string, error) {
-		if platform != "dingtalk" || (instanceRef != "" && instanceRef != "family-dingtalk") {
+		if platform != "dingtalk" || (instanceRef != "" && instanceRef != "family-dingtalk" && instanceRef != "pi-dingtalk-main") {
 			return "", fmt.Errorf("unexpected instance reference %q/%q", platform, instanceRef)
 		}
 		return "pi-dingtalk-main", nil
@@ -326,7 +326,7 @@ func emptyInstanceCreativeReceipts(
 	provider := &exactInstanceGuardChannel{}
 	registry.Register(provider)
 	rule := agentrouter.Rule{
-		ID: 41, Platform: "dingtalk", ChatID: "parent-1", AgentName: "child-a",
+		ID: 41, Platform: "dingtalk", InstanceID: "pi-dingtalk-main", ChatID: "parent-1", AgentName: "child-a",
 	}
 	if err := dispatcher.AddRule(rule); err != nil {
 		t.Fatal(err)
@@ -342,7 +342,7 @@ func emptyInstanceCreativeReceipts(
 		[]k12usecase.ResolvedDeliveryTarget{{
 			BindingID: stableBindingID(rule),
 			Target: k12.DeliveryTarget{
-				Platform: "dingtalk", ChatID: "parent-1",
+				Platform: "dingtalk", InstanceID: "pi-dingtalk-main", ChatID: "parent-1",
 			},
 		}},
 	)
@@ -354,6 +354,8 @@ func emptyInstanceCreativeReceipts(
 	}
 	receipts := make([]k12.DeliveryReceipt, 0, len(prepared))
 	for i, item := range prepared {
+		// 先冻结合法载荷，再模拟持久回执缺失实例；冻结入口本身已拒绝不完整目标。
+		item.Target.InstanceID = ""
 		receipts = append(receipts, k12.DeliveryReceipt{
 			DeliveryID: fmt.Sprintf("empty-instance-part-%d", i+1),
 			BatchID:    "empty-instance-batch", BatchOrdinal: i + 1,

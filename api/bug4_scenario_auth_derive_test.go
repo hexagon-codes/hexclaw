@@ -14,6 +14,7 @@ import (
 func TestBUG4_MountedScenarioPrefixDerivesAuthGuard(t *testing.T) {
 	s := &Server{cfg: &config.Config{}}
 	s.cfg.Server.APIToken = "secret-token"
+	s.SetDesktopAPIToken("scenario-desktop-fixture")
 	// 注册一个「非 k12」的场景挂载，模拟未来新场景包。
 	s.Mount("/api/xx", http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 
@@ -46,9 +47,9 @@ func TestBUG4_MountedScenarioPrefixDerivesAuthGuard(t *testing.T) {
 	if code, hit := call(http.MethodPost, "/api/xx/write", "203.0.113.7:5555", "Bearer secret-token"); code != http.StatusOK || !hit {
 		t.Errorf("带正确 token 应放行，got code=%d hit=%v", code, hit)
 	}
-	// loopback 放行（cron/桌面 sidecar）。
-	if code, hit := call(http.MethodPost, "/api/xx/write", "127.0.0.1:1234", ""); code != http.StatusOK || !hit {
-		t.Errorf("loopback 应放行，got code=%d hit=%v", code, hit)
+	// loopback 携带桌面业务令牌后放行。
+	if code, hit := call(http.MethodPost, "/api/xx/write", "127.0.0.1:1234", "Bearer scenario-desktop-fixture"); code != http.StatusOK || !hit {
+		t.Errorf("loopback with a valid desktop token should pass, got code=%d hit=%v", code, hit)
 	}
 	// 未注册的前缀不应被场景守卫误纳（仍走默认规则；GET 非写 → 放行）。
 	if code, _ := call(http.MethodGet, "/api/unmounted/x", "203.0.113.7:5555", ""); code != http.StatusOK {

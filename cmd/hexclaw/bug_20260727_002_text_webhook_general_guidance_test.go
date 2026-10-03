@@ -97,7 +97,7 @@ func TestBUG20260727002_TextWebhookWithoutConceptFactsProducesGeneralGuidance(t 
 	if artifact.SummaryInvocationID != "" {
 		t.Fatalf("general guidance started a full TutoringTips summary: %q", artifact.SummaryInvocationID)
 	}
-	if !strings.Contains(artifact.CanonicalMarkdown, "No verified textbook grounding is available.") {
+	if !strings.Contains(artifact.CanonicalMarkdown, "本次没有可核验的课本依据，以上批改与家长讲法为通用参考。") {
 		t.Fatalf("general guidance omitted the grounding boundary: %q", artifact.CanonicalMarkdown)
 	}
 	if strings.Contains(artifact.CanonicalMarkdown, usecase.TutoringTipsSourceTextbook) {
@@ -131,7 +131,7 @@ func TestBUG20260727002_TextWebhookWithoutConceptFactsProducesGeneralGuidance(t 
 	)
 	if err != nil || replayedArtifact.ArtifactDigest != artifact.ArtifactDigest ||
 		replayedArtifact.SummaryInvocationID != "" ||
-		!strings.Contains(replayedArtifact.CanonicalMarkdown, "No verified textbook grounding is available.") {
+		!strings.Contains(replayedArtifact.CanonicalMarkdown, "本次没有可核验的课本依据，以上批改与家长讲法为通用参考。") {
 		t.Fatalf("replay changed durable general guidance: artifact=%+v err=%v", replayedArtifact, err)
 	}
 }

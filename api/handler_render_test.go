@@ -24,6 +24,7 @@ func (s *stubRenderer) Render(ctx context.Context, content string, format render
 func newTestRenderServer(t *testing.T, withRenderSvc bool) *Server {
 	t.Helper()
 	s := &Server{cfg: &config.Config{}}
+	s.cfg.Server.APIToken = "render-fixture-token"
 	if withRenderSvc {
 		svc, err := render.NewService(render.ServiceConfig{Renderer: &stubRenderer{}})
 		if err != nil {
@@ -36,8 +37,7 @@ func newTestRenderServer(t *testing.T, withRenderSvc bool) *Server {
 
 // TestRenderRoute_OldPath404 — 旧路径 /api/render（无 v1 前缀）必须 404。
 //
-// 关键安全门槛：apiAuthMiddleware 只对 /api/v1/* 写操作鉴权
-// （server.go: apiAuthMiddleware）；旧路径会绕过鉴权链。
+// /api/v1/ 业务端点统一鉴权；旧路径必须保持未挂载。
 func TestRenderRoute_OldPath404(t *testing.T) {
 	srv := newTestRenderServer(t, true)
 	handler := srv.routes()
@@ -58,6 +58,7 @@ func TestRenderRoute_NotMountedWithoutService(t *testing.T) {
 	handler := srv.routes()
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/render", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer "+srv.cfg.Server.APIToken)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -76,6 +77,7 @@ func TestRenderRoute_MountedWithService(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/render",
 		strings.NewReader(`{"content":"hi","format":"md"}`))
+	req.Header.Set("Authorization", "Bearer "+srv.cfg.Server.APIToken)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -85,8 +87,8 @@ func TestRenderRoute_MountedWithService(t *testing.T) {
 	}
 }
 
-// TestRenderAuth_LocalhostBypass — localhost 自动放行（兼容桌面 sidecar）。
-func TestRenderAuth_LocalhostBypass(t *testing.T) {
+// TestRenderAuth_LocalhostWithToken — localhost 请求携带业务令牌后进入渲染端点。
+func TestRenderAuth_LocalhostWithToken(t *testing.T) {
 	srv := newTestRenderServer(t, true)
 	srv.cfg.Server.APIToken = "secret-token-12345"
 
@@ -95,11 +97,12 @@ func TestRenderAuth_LocalhostBypass(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/render",
 		strings.NewReader(`{"content":"x","format":"md"}`))
 	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Set("Authorization", "Bearer "+srv.cfg.Server.APIToken)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
 	if rec.Code == http.StatusUnauthorized {
-		t.Errorf("localhost should be authorized without token, got 401")
+		t.Errorf("localhost with a valid business token should be authorized, got 401")
 	}
 }
 

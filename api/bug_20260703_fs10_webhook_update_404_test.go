@@ -35,6 +35,7 @@ func newWebhookTestServer(t *testing.T) *Server {
 		t.Fatalf("webhook Init: %v", err)
 	}
 	srv := NewServer(config.DefaultConfig(), &mockEngine{reply: &adapter.Reply{Content: "ok"}}, nil, nil)
+	srv.SetDesktopAPIToken("webhook-desktop-fixture")
 	srv.SetWebhookManager(mgr)
 	return srv
 }

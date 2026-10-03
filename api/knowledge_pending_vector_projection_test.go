@@ -63,6 +63,8 @@ func TestKnowledgeAcceptedUploadImmediateListKeepsVectorPending(t *testing.T) {
 		migrate.KnowledgeDocumentScopeV27,
 		migrate.KnowledgeIngestCheckpointV28,
 		migrate.KnowledgeUploadOperationsV71,
+		migrate.K12KnowledgeInvocationLedgersV91,
+		migrate.KnowledgeRecoveryV106,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -79,6 +81,7 @@ func TestKnowledgeAcceptedUploadImmediateListKeepsVectorPending(t *testing.T) {
 	}
 
 	srv := NewServer(config.DefaultConfig(), nil, nil, nil)
+	srv.SetDesktopAPIToken("knowledge-desktop-fixture")
 	srv.SetKnowledgeBase(knowledge.NewManager(store, store, nil))
 	srv.SetSemanticIndexService(semantic)
 	ts := httptest.NewServer(srv.routes())
@@ -102,6 +105,7 @@ func TestKnowledgeAcceptedUploadImmediateListKeepsVectorPending(t *testing.T) {
 	}
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	req.Header.Set("Idempotency-Key", "accepted-immediate-list")
+	req.Header.Set("Authorization", "Bearer knowledge-desktop-fixture")
 	response, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -117,7 +121,12 @@ func TestKnowledgeAcceptedUploadImmediateListKeepsVectorPending(t *testing.T) {
 		t.Fatalf("accepted status=%d payload=%+v", response.StatusCode, accepted)
 	}
 
-	listResponse, err := http.Get(ts.URL + "/api/v1/knowledge/documents")
+	listReq, err := http.NewRequest(http.MethodGet, ts.URL+"/api/v1/knowledge/documents", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listReq.Header.Set("Authorization", "Bearer knowledge-desktop-fixture")
+	listResponse, err := ts.Client().Do(listReq)
 	if err != nil {
 		t.Fatal(err)
 	}

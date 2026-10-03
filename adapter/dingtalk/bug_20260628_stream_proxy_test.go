@@ -30,12 +30,15 @@ func TestStreamDelegatesToOfficialSDK_BUG20260628(t *testing.T) {
 	// 必须依赖官方 SDK 的 client 包并通过其注册机器人回调。
 	for _, must := range []string{
 		"dingtalk-stream-sdk-go/client",
-		"RegisterChatBotCallbackRouter",
 	} {
 		if !strings.Contains(s, must) {
 			t.Errorf("BUG-20260628: dingtalk.go 未使用官方 SDK（缺 %q）——连接层应整体委托官方"+
 				"dingtalk-stream-sdk-go，与飞书 larkws 同路子", must)
 		}
+	}
+	if !strings.Contains(s, "RegisterChatBotCallbackRouter") &&
+		!(strings.Contains(s, "RegisterCallbackRouter") && strings.Contains(s, "BotMessageCallbackTopic")) {
+		t.Error("DingTalk Stream must register the robot callback through the SDK")
 	}
 
 	// 不得再手搓 Stream 连接：这些是被替换掉的手搓符号，复活即视为回归。

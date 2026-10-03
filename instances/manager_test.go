@@ -46,10 +46,7 @@ func newTestManager(t *testing.T) (*Manager, func()) {
 	if err != nil {
 		t.Fatalf("创建 SQLite 存储失败: %v", err)
 	}
-	if err := store.Init(context.Background()); err != nil {
-		t.Fatalf("初始化 SQLite 存储失败: %v", err)
-	}
-
+	// 实例管理器维护自身表结构，无需在每个用例中重跑无关业务迁移。
 	mgr := NewManager(store.DB())
 	if err := mgr.Init(context.Background()); err != nil {
 		t.Fatalf("初始化实例管理器失败: %v", err)

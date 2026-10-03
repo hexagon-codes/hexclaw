@@ -1738,12 +1738,6 @@ func isLoopbackRequest(r *http.Request) bool {
 	return host == "127.0.0.1" || host == "::1" || host == "localhost"
 }
 
-// apiAuthMiddleware 管理 API 认证中间件
-//
-// 对 /api/v1/ 下的管理写操作进行认证，日志和桌面端点也受保护。
-// 如果配置了 APIToken，需要 Authorization: Bearer <token>。
-// 为兼容本地桌面客户端和本机管理操作，localhost 请求始终允许访问。
-// 非 localhost 请求在未配置 Token 时会被拒绝。
 // isMountedScenarioPath 判断 path 是否落在某个已挂载的场景子路由前缀下（BUG-4）。
 // 与 routes() 的挂载注册（mux.Handle(prefix+"/", ...)）同源：命中即须走场景鉴权守卫。
 func (s *Server) isMountedScenarioPath(path string) bool {
@@ -1755,6 +1749,8 @@ func (s *Server) isMountedScenarioPath(path string) bool {
 	return false
 }
 
+// apiAuthMiddleware 对业务 API 校验对应 Bearer 令牌，回环地址本身不代表身份。
+// 内部桌面端点仅接受回环来源的原生 capability；业务端点保留各自的业务身份。
 func (s *Server) apiAuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path

@@ -125,8 +125,8 @@ func TestAuditDesignFlaw_D_ProfilePersistsRefusal(t *testing.T) {
 	// 合成器返回「拒答」（弱模型/长 prompt 常见）。
 	refusal := &recordingSyn{out: "抱歉，我无法根据所提供的信息生成用户画像。"}
 	act, err := fm.DistillProfileForRole(context.Background(), "", refusal, DistillProfileConfig{MinFacts: 3}, time.Now())
-	if err != nil {
-		t.Fatalf("distill: %v", err)
+	if err == nil || act != "skip" {
+		t.Fatalf("unusable profile must be skipped with an error, got action=%q error=%v", act, err)
 	}
 	if strings.Contains(fm.GetMemory(), "无法根据所提供的信息生成") {
 		t.Fatalf("🔴缺陷D：画像蒸馏把 LLM 拒答原样落库为「每轮必注入」的 Pinned 画像(act=%q)——只查 err/空/==prev，无拒答/长度/接地校验", act)

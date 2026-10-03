@@ -43,7 +43,7 @@ HexClaw 包含六层安全网关：
 - Token 比较使用 `crypto/subtle.ConstantTimeCompare`，防止时序攻击
 - 日志 API（`/api/v1/logs*`）无论来源 IP 均要求认证
 - `isLogsAPI` 使用精确前缀 `/api/v1/logs`，避免匹配 `/api/v1/login` 等路径
-- `/api/k12/*` 等场景包挂载路由从挂载注册表派生鉴权前缀，非 loopback 读写均需认证，避免未来新场景绕过 `/api/v1` 守卫。
+- `/api/k12/*` 等场景包挂载路由从挂载注册表派生鉴权前缀，读写均要求 Bearer 认证，包括 loopback 请求；只有明确的公开端点免于业务鉴权。
 
 ### 代码执行
 - `code_exec` 是推荐执行原语，支持 snippet/file/module/project，通过 toolkit sandbox 执行，并返回有界输出、运行元数据、资源限制、诊断和产物清单。
@@ -54,7 +54,7 @@ HexClaw 包含六层安全网关：
 ### 出站 HTTP 边界
 - Browser/search/weather/Skill Hub 使用带超时和响应体限制的原始 HTTP 客户端；当前代码不应被描述为具备通用私网/元数据 SSRF 封锁。
 - Cron Starlark `http_get`/`http_post` 在桌面/单用户语义下故意不设置 SSRF 或 loopback 守卫，脚本可以访问 loopback；需要写知识库时优先用 in-process 的 `kb_ingest`，不要回打本地知识库 HTTP API。
-- 对不可信无人值守任务，应依赖 `PermissionPolicy`、`security.autonomy`、非 loopback API 鉴权以及 `code_exec` 的 loopback 禁止，而不是假设所有出站 HTTP 都有 SSRF 过滤。
+- 对不可信无人值守任务，应依赖 `PermissionPolicy`、`security.autonomy`、业务 API 鉴权以及 `code_exec` 的 loopback 禁止，而不是假设所有出站 HTTP 都有 SSRF 过滤。
 
 ### 工具权限与无人值守闸
 - 统一声明式 `PermissionPolicy` 前置闸所有工具调用（GA）。能力变更类工具——`manage_skill`、`create_skill`、`patch_skill`、`manage_skill_pending`、`manage_mcp_server`——与 consequential 动作（`send_message`、`media_generate`、`publish_*`、`shell`、`code`、`code_exec`、`browser`、`file_edit`）在策略要求时**需用户审批**；未命中规则的工具默认放行。
@@ -96,7 +96,7 @@ HexClaw 包含六层安全网关：
 - Server 定义和密钥复用平台集成的配置/凭据加密路径持久化。
 
 ### 桌面模式
-- `hexclaw serve --desktop` 是单用户本地 sidecar 模式，会为了桌面、cron、本地 UI 集成放行 loopback 无 Bearer Token 请求。
+- `hexclaw serve --desktop` 是单用户本地 sidecar 模式，业务请求仍要求有效 Bearer Token，loopback 不构成鉴权豁免。Desktop 原生集成提供对应后端的业务凭据；桌面内部 capability 端点还要求 loopback 和 Sidecar capability token。
 - 暴露到非 loopback 的服务部署应配置 `server.api_token`，保持日志和场景包路由鉴权，并把 desktop mode 视为本地专用模式。
 
 ### 工作流执行

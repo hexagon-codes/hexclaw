@@ -12,8 +12,10 @@ import (
 
 func TestServerRoutes_AgentsRulesFallback(t *testing.T) {
 	srv := NewServer(config.DefaultConfig(), nil, nil, nil)
+	srv.SetDesktopAPIToken("routes-desktop-fixture")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/agents/rules", nil)
+	req.Header.Set("Authorization", "Bearer routes-desktop-fixture")
 	req.RemoteAddr = "127.0.0.1:12345"
 	w := httptest.NewRecorder()
 
@@ -37,9 +39,11 @@ func TestServerRoutes_AgentsRulesFallback(t *testing.T) {
 
 func TestServerRoutes_LLMTestWiring(t *testing.T) {
 	srv := NewServer(config.DefaultConfig(), nil, nil, nil)
+	srv.SetDesktopAPIToken("routes-desktop-fixture")
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/config/llm/test", strings.NewReader(`{}`))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer routes-desktop-fixture")
 	req.RemoteAddr = "127.0.0.1:12345"
 	w := httptest.NewRecorder()
 
@@ -52,10 +56,12 @@ func TestServerRoutes_LLMTestWiring(t *testing.T) {
 
 func TestServerRoutes_ConnectionsTestWiring(t *testing.T) {
 	srv := NewServer(config.DefaultConfig(), nil, nil, nil)
+	srv.SetDesktopAPIToken("routes-desktop-fixture")
 
 	// 空 body 缺 type/config，应被 handler 以 400 拒绝——证明路由已注册并命中 handler。
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/connections/test", strings.NewReader(`{}`))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer routes-desktop-fixture")
 	req.RemoteAddr = "127.0.0.1:12345"
 	w := httptest.NewRecorder()
 
@@ -68,9 +74,11 @@ func TestServerRoutes_ConnectionsTestWiring(t *testing.T) {
 
 func TestServerRoutes_LogsWiring(t *testing.T) {
 	srv := NewServer(config.DefaultConfig(), nil, nil, nil)
+	srv.SetDesktopAPIToken("routes-desktop-fixture")
 	srv.logCollector.Add("info", "test", "message", nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/logs?limit=1", nil)
+	req.Header.Set("Authorization", "Bearer routes-desktop-fixture")
 	req.RemoteAddr = "127.0.0.1:12345"
 	w := httptest.NewRecorder()
 
@@ -83,8 +91,10 @@ func TestServerRoutes_LogsWiring(t *testing.T) {
 
 func TestServerRoutes_StatsWiring(t *testing.T) {
 	srv := NewServer(config.DefaultConfig(), nil, nil, nil)
+	srv.SetDesktopAPIToken("routes-desktop-fixture")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/stats", nil)
+	req.Header.Set("Authorization", "Bearer routes-desktop-fixture")
 	req.RemoteAddr = "127.0.0.1:12345"
 	w := httptest.NewRecorder()
 

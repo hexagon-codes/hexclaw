@@ -2719,6 +2719,17 @@ func TestCodeExecGoCacheCleanupRunsAfterPolicyRejection(t *testing.T) {
 
 func TestCodeExecGoToolchainDescriptorPinsBinaryAndEnvironment(t *testing.T) {
 	workspace := t.TempDir()
+	goRoot := filepath.Join(t.TempDir(), "go-root")
+	if err := os.MkdirAll(goRoot, 0700); err != nil {
+		t.Fatal(err)
+	}
+	goEnvironment, err := json.Marshal(codeExecGoEnvironment{
+		GOOS: "darwin", GOARCH: "arm64", GOVERSION: "go1.26.5", GOROOT: goRoot,
+		CGOEnabled: "1", GOEXPERIMENT: "arenas", GOAMD64: "v3", GOARM64: "v8.0",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	goBinary := filepath.Join(t.TempDir(), "go")
 	binaryContent := []byte("fake-go-one")
 	writeCodeExecTestFile(t, goBinary, string(binaryContent))
@@ -2738,7 +2749,7 @@ func TestCodeExecGoToolchainDescriptorPinsBinaryAndEnvironment(t *testing.T) {
 			return &mockSandbox{execFn: func(context.Context, sandbox.Command) (*sandbox.ExecResult, error) {
 				calls++
 				if calls%2 == 1 {
-					return &sandbox.ExecResult{Stdout: `{"GOOS":"darwin","GOARCH":"arm64","GOVERSION":"go1.26.5","GOROOT":"/opt/go","CGO_ENABLED":"1","GOEXPERIMENT":"arenas","GOAMD64":"v3","GOARM64":"v8.0"}`, ExitCode: 0}, nil
+					return &sandbox.ExecResult{Stdout: string(goEnvironment), ExitCode: 0}, nil
 				}
 				return &sandbox.ExecResult{Stdout: "compile version go1.26.5", ExitCode: 0}, nil
 			}}, nil
@@ -2759,7 +2770,7 @@ func TestCodeExecGoToolchainDescriptorPinsBinaryAndEnvironment(t *testing.T) {
 		t.Fatalf("Go binary descriptor = %#v", descriptor)
 	}
 	if descriptor.CompileVersion != "compile version go1.26.5" ||
-		descriptor.GOROOT != "/opt/go" || descriptor.GOOS != "darwin" || descriptor.GOARCH != "arm64" ||
+		descriptor.GOROOT != resolveRealPath(goRoot) || descriptor.GOOS != "darwin" || descriptor.GOARCH != "arm64" ||
 		descriptor.GOAMD64 != "v3" || descriptor.GOARM64 != "v8.0" || descriptor.GOEXPERIMENT != "arenas" {
 		t.Fatalf("Go environment descriptor = %#v", descriptor)
 	}
@@ -2782,7 +2793,7 @@ func TestCodeExecGoToolchainDescriptorPinsBinaryAndEnvironment(t *testing.T) {
 		t.Fatalf("initial helper exposed unrelated runtime GOROOT %q: %v", testGOROOT, capturedConfigs[0].ReadablePaths)
 	}
 	if !slices.ContainsFunc(capturedConfigs[1].ReadablePaths, func(path string) bool {
-		return resolveRealPath(path) == resolveRealPath("/opt/go")
+		return resolveRealPath(path) == resolveRealPath(goRoot)
 	}) {
 		t.Fatalf("compiler helper readable paths do not contain selected GOROOT: %v", capturedConfigs[1].ReadablePaths)
 	}

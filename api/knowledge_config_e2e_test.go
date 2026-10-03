@@ -79,6 +79,7 @@ func TestKnowledgeConfig_CrossProcessE2E(t *testing.T) {
 	mgr := knowledge.NewManager(store, store, kwEmbedder{})
 	yamlPath := filepath.Join(t.TempDir(), "hexclaw.yaml")
 	srv := NewServer(config.DefaultConfig(), nil, nil, nil)
+	srv.SetDesktopAPIToken("knowledge-desktop-fixture")
 	srv.SetKnowledgeBase(mgr)
 	srv.SetCfgWriter(config.NewWriter(yamlPath))
 
@@ -90,6 +91,7 @@ func TestKnowledgeConfig_CrossProcessE2E(t *testing.T) {
 		t.Helper()
 		req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/v1/knowledge/config", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer knowledge-desktop-fixture")
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatalf("PUT: %v", err)
@@ -102,7 +104,12 @@ func TestKnowledgeConfig_CrossProcessE2E(t *testing.T) {
 	}
 	getConfig := func() map[string]any {
 		t.Helper()
-		resp, err := http.Get(ts.URL + "/api/v1/knowledge/config")
+		req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/v1/knowledge/config", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer knowledge-desktop-fixture")
+		resp, err := ts.Client().Do(req)
 		if err != nil {
 			t.Fatalf("GET: %v", err)
 		}
@@ -115,8 +122,14 @@ func TestKnowledgeConfig_CrossProcessE2E(t *testing.T) {
 	}
 	searchDocIDs := func(query string) map[string]bool {
 		t.Helper()
-		resp, err := http.Post(ts.URL+"/api/v1/knowledge/search", "application/json",
+		req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/knowledge/search",
 			bytes.NewReader([]byte(`{"query":"`+query+`","top_k":10}`)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer knowledge-desktop-fixture")
+		resp, err := ts.Client().Do(req)
 		if err != nil {
 			t.Fatalf("search: %v", err)
 		}

@@ -52,6 +52,37 @@ func ensureDingTalkRenderEvidence(reply *adapter.Reply) error {
 			if plain == (reply.RenderManifest.RendererVersion == "dingtalk-sample-text-v1") {
 				return validateDingTalkVisibleContent(visible)
 			}
+			if err := validateDingTalkVisibleContent(visible); err != nil {
+				return err
+			}
+			// 模板转换只调整表示，保留已验证的渠道投影及渲染元数据。
+			request := messagecontent.RenderRequest{
+				Surface:         reply.RenderManifest.Surface,
+				RendererVersion: "dingtalk-sample-markdown-v1",
+				Capabilities:    reply.RenderManifest.CapabilitySnapshot,
+				Parts:           append([]messagecontent.RenderPart(nil), reply.RenderManifest.Parts...),
+				FallbackReason:  reply.RenderManifest.FallbackReason,
+				ReceiptRef:      reply.RenderManifest.ReceiptRef,
+			}
+			request.Capabilities.Markdown = !plain
+			for i := range request.Parts {
+				if request.Parts[i].Kind == messagecontent.PartMarkdown || request.Parts[i].Kind == messagecontent.PartText {
+					request.Parts[i].Kind = messagecontent.PartMarkdown
+					if plain {
+						request.Parts[i].Kind = messagecontent.PartText
+						request.Parts[i].Text = strings.TrimSpace(visible)
+					}
+				}
+			}
+			if plain {
+				request.RendererVersion = "dingtalk-sample-text-v1"
+			}
+			manifest, err := messagecontent.BuildManifest(*reply.MessageContent, request)
+			if err != nil {
+				return err
+			}
+			reply.RenderManifest = &manifest
+			return nil
 		}
 	}
 

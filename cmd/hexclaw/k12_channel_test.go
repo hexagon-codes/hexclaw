@@ -661,7 +661,7 @@ func TestK12FinalArtifactIMProjectionKeepsActionableSolutionAndUserJSON(t *testi
 			},
 		},
 		ParentGuide: &k12usecase.ParentTeachingGuide{
-			Answer: "6", FullSolutionSteps: []string{"3/4 × 8 = 6"},
+			Answer: "6", FullSolutionSteps: []string{"先算 3 ÷ 4，再乘 8，得到 6。", "3/4 × 8 = 6"},
 			GradeLevelMethod: "先约分或先算 8 ÷ 4", LikelyMistakes: []string{"把分母也乘 8"},
 			ParentTeachingSequence: []string{"先让孩子说出四分之三的含义", "再让孩子独立计算"},
 			FollowUpQuestions:      []string{"怎样验算结果？"}, CheckingMethod: "用 6 ÷ 8 = 3/4 反向检查",
@@ -681,9 +681,9 @@ func TestK12FinalArtifactIMProjectionKeepsActionableSolutionAndUserJSON(t *testi
 	}
 	for _, want := range []string{
 		"```json\n{\"student_visible\":true}\n```",
-		"### 订正参考", "先算 3 ÷ 4，再乘 8，得到 6。",
+		"**必要步骤：**", "先算 3 ÷ 4，再乘 8，得到 6。", "3/4 × 8 = 6",
 		"**第一个错步：** 把 3/4 当成了 3/8", "**错因：** 分数含义理解错误",
-		"### 家长怎么讲", "**答案：** 6", "**本年级方法：** 先约分或先算 8 ÷ 4",
+		"### 家长怎么讲", "**正确答案：** 6", "**本年级方法：** 先约分或先算 8 ÷ 4",
 		"**易错点：**", "把分母也乘 8", "**家长怎么讲：**", "先让孩子说出四分之三的含义",
 		"**可以追问：**", "怎样验算结果？", "**怎么检查：** 用 6 ÷ 8 = 3/4 反向检查",
 	} {

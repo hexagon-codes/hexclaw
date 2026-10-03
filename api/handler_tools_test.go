@@ -115,9 +115,11 @@ func TestHandleToolPermissions_EmptyRules(t *testing.T) {
 func TestToolPermissionLifecycleMutationsAreNotPublicOperations(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	srv := NewServer(config.DefaultConfig(), nil, nil, nil)
+	srv.SetDesktopAPIToken("tools-desktop-fixture")
 	srv.SetToolPermissions(engine.NewToolPermissions([]string{"search"}, []string{"code_exec"}))
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/tools/permissions", nil)
+	req.Header.Set("Authorization", "Bearer tools-desktop-fixture")
 	req.RemoteAddr = "127.0.0.1:18080"
 	rec := httptest.NewRecorder()
 	srv.routes().ServeHTTP(rec, req)

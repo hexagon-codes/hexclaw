@@ -79,6 +79,8 @@ func TestRuntimeSessionDeleteWiresSamePermissionHubAndSQLiteAuthority(t *testing
 		t.Fatalf("release loopback port: %v", err)
 	}
 	srv := api.NewServer(cfg, nil, nil, store)
+	const apiToken = "runtime-lifecycle-token"
+	srv.SetDesktopAPIToken(apiToken)
 	wireToolApprovalSessionLifecycle(srv, hub)
 
 	ready := make(chan struct{})
@@ -151,6 +153,7 @@ func TestRuntimeSessionDeleteWiresSamePermissionHubAndSQLiteAuthority(t *testing
 	if err != nil {
 		t.Fatalf("build session delete request: %v", err)
 	}
+	req.Header.Set("Authorization", "Bearer "+apiToken)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("delete session through runtime API: %v", err)

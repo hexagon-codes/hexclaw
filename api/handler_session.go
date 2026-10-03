@@ -383,7 +383,7 @@ func (s *Server) handleUpdateSession(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "标题不能为空"})
 		return
 	}
-	if req.Title != sess.Title && utf8.RuneCountInString(req.Title) > maxSessionTitleRunes {
+	if req.Title != sess.Title && utf8.RuneCountInString(title) > maxSessionTitleRunes {
 		writeJSON(w, http.StatusBadRequest, map[string]string{
 			"error": fmt.Sprintf("标题过长（最多 %d 字符）", maxSessionTitleRunes),
 		})

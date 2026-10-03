@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"runtime"
 	"sync/atomic"
 	"testing"
 
@@ -125,8 +126,12 @@ func TestToolkitSandboxMigration_GoHelperClosesSandboxAndPreservesErrors(t *test
 	if !errors.Is(err, execErr) || !errors.Is(err, closeErr) {
 		t.Fatalf("Go helper error = %v, want joined execution and Close errors", err)
 	}
-	if got := helperSandbox.closeCalls.Load(); got != 1 {
-		t.Fatalf("Go helper sandbox Close calls = %d, want 1", got)
+	wantCloseCalls := int32(1)
+	if runtime.GOOS == "windows" {
+		wantCloseCalls = codeExecWindowsSandboxCloseAttempts
+	}
+	if got := helperSandbox.closeCalls.Load(); got != wantCloseCalls {
+		t.Fatalf("Go helper sandbox Close calls = %d, want %d", got, wantCloseCalls)
 	}
 	if captured.MaxMemoryBytes != 0 || captured.MaxProcesses != 0 ||
 		captured.MaxWorkspaceBytes != 0 || captured.MaxArtifactBytes != 0 {
@@ -206,8 +211,12 @@ func TestToolkitSandboxMigration_RunSandboxPreservesExecutionAndCloseErrors(t *t
 	if !errors.Is(err, execErr) || !errors.Is(err, closeErr) {
 		t.Fatalf("run error = %v, want joined execution and Close errors", err)
 	}
-	if got := runSandbox.closeCalls.Load(); got != 1 {
-		t.Fatalf("run sandbox Close calls = %d, want 1", got)
+	wantCloseCalls := int32(1)
+	if runtime.GOOS == "windows" {
+		wantCloseCalls = codeExecWindowsSandboxCloseAttempts
+	}
+	if got := runSandbox.closeCalls.Load(); got != wantCloseCalls {
+		t.Fatalf("run sandbox Close calls = %d, want %d", got, wantCloseCalls)
 	}
 }
 

@@ -192,15 +192,21 @@ func TestHandleSearchKnowledge_EmptyCorpusReturnsJSONArrays(t *testing.T) {
 	}
 	manager := knowledge.NewManager(store, store, nil)
 	server := NewServer(config.DefaultConfig(), nil, nil, nil)
+	server.SetDesktopAPIToken("knowledge-desktop-fixture")
 	server.SetKnowledgeBase(manager)
 	httpServer := httptest.NewServer(server.routes())
 	t.Cleanup(httpServer.Close)
 
-	response, err := http.Post(
+	req, err := http.NewRequest(http.MethodPost,
 		httpServer.URL+"/api/v1/knowledge/search",
-		"application/json",
 		strings.NewReader(`{"query":"empty corpus query","top_k":3}`),
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer knowledge-desktop-fixture")
+	response, err := httpServer.Client().Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
