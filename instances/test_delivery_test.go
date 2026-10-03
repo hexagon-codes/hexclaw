@@ -54,9 +54,6 @@ func TestBoundTestDeliveryDeduplicatesAndPersistsReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = store.Init(ctx); err != nil {
-		t.Fatal(err)
-	}
 	mgr := NewManager(store.DB())
 	if err = mgr.Init(ctx); err != nil {
 		t.Fatal(err)
