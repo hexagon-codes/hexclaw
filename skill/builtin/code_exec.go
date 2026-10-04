@@ -5684,7 +5684,8 @@ func codeExecRuntimePath() string {
 		"/sbin",
 	}
 	if goroot := strings.TrimSpace(runtime.GOROOT()); goroot != "" {
-		dirs = append(dirs, filepath.Join(goroot, "bin"))
+		// 优先使用当前 Go 安装，避免系统目录中的旧版本覆盖已选工具链。
+		dirs = append([]string{filepath.Join(goroot, "bin")}, dirs...)
 	}
 	// Preserve explicitly supported runtimes installed in version-manager
 	// directories without inheriting the host's broad PATH verbatim.

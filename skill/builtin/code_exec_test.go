@@ -1203,6 +1203,13 @@ func TestBUG20260727001_CodeExecProjectGoCommandUsesSelfContainedStagedWorkspace
 		Network:       false,
 		ReadablePaths: []string{filepath.Dir(root)},
 	})
+	s.goHelperFactory = func(cfg sandbox.Config) (sandbox.Sandbox, error) {
+		sb, err := sandbox.New(cfg)
+		if err != nil {
+			return nil, err
+		}
+		return codeExecGoCacheDiagnosticSandbox{Sandbox: sb, t: t}, nil
+	}
 	result, err := s.Execute(context.Background(), map[string]any{
 		"mode":         "project",
 		"project_root": root,
