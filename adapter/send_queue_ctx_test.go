@@ -22,10 +22,9 @@ func TestCtxBug_HandlerTimeout_ErrorSendRejected(t *testing.T) {
 	})
 	defer q.Stop(context.Background())
 
-	// 模拟 2 分钟 timeout，handler 耗尽
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	// 直接构造已过期的截止时间，不依赖计时器回调的调度顺序。
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Millisecond))
 	defer cancel()
-	time.Sleep(15 * time.Millisecond)
 
 	// BUG: 修复前代码 a.Send(ctx, chatID, &Reply{...})
 	err := q.Send(ctx, "chat-1", &Reply{Content: "处理消息时出现错误"})
