@@ -24,7 +24,9 @@ func TestArtFeedbackRejectsDeferredCritiqueButAllowsFollowUpAfterCompleteCritiqu
 func TestArtFeedbackWithoutTaskOrIntentStillCompletesFromVisibleEvidence(t *testing.T) {
 	d := newDataDeps(t)
 	gen := &fakeWorkFeedbackSolver{
-		feedback: "画面中央的人物面积最大，右下角的小猫与左上角彩虹形成呼应；下一次可以试着加深地面颜色。",
+		feedback: "## 可见证据\n画面中央的人物面积最大，右下角的小猫与左上角彩虹形成呼应。\n" +
+			"## 先这样肯定\n小猫与彩虹形成呼应。\n## 家长可以这样问或讲\n一起比较地面颜色的深浅。\n" +
+			"## 下一次只试一个点\n下一次可以试着加深地面颜色。",
 	}
 	d.Solver = gen
 	id, _, err := d.CreateCreativeWork(

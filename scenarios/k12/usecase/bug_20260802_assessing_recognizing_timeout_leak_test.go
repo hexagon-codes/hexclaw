@@ -79,7 +79,10 @@ func (s *assessingDeadlineSolver) Solve(
 ) (SolveResult, error) {
 	want := SolveResult{
 		Solution: "2",
-		Evidence: SolveEvidence{Verdict: VerdictAgree, EvidenceType: EvidenceNumericExec},
+		Evidence: SolveEvidence{
+			Verdict: VerdictAgree, EvidenceType: EvidenceHeterogeneousModel,
+			SolverModel: "solver-a", VerifierModel: "verifier-b",
+		},
 	}
 	raw, err := json.Marshal(want)
 	if err != nil {

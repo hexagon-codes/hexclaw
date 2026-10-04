@@ -33,7 +33,9 @@ func TestCreativeWorkWritingLifecycle(t *testing.T) {
 	}
 
 	fb := generateCreativeWorkFeedbackForTest(
-		t, &d, id, "切题；结构三段清晰；「像绿色的丝带」比喻好；建议再加一个感官细节。",
+		t, &d, id, "## 可见证据\n原稿写了「像绿色的丝带」。\n"+
+			"## 先这样肯定\n切题；结构三段清晰；「像绿色的丝带」比喻好。\n"+
+			"## 家长可以这样问或讲\n一起说说当时听到了什么。\n## 下一次只试一个点\n建议再加一个感官细节。",
 	)
 	if fb.Record.Status != k12.WorkStatusFeedbackReady {
 		t.Fatalf("点评后应为 feedback_ready，got %s", fb.Record.Status)
@@ -124,7 +126,9 @@ func TestCreativeWorkWritingLifecycle(t *testing.T) {
 	}
 
 	// 独立新作品可从同一首轮 generation 完成点评。
-	fb2 := generateCreativeWorkFeedbackForTest(t, &d, newID, "加了听觉细节，更生动了；建议保留这个细节。")
+	fb2 := generateCreativeWorkFeedbackForTest(t, &d, newID,
+		"## 可见证据\n原稿写了风一吹就沙沙响。\n## 先这样肯定\n加了听觉细节，更生动了。\n"+
+			"## 家长可以这样问或讲\n一起读沙沙响这句话。\n## 下一次只试一个点\n建议保留这个细节。")
 	if fb2.Record.Status != k12.WorkStatusFeedbackReady {
 		t.Fatalf("独立新作品点评后应为 feedback_ready")
 	}
@@ -150,7 +154,8 @@ func TestCreativeWorkArtLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	fb := generateCreativeWorkFeedbackForTest(
-		t, &d, id, "构图主体偏右，天空留白呼应了安静；建议让地面倒影再明显一点。",
+		t, &d, id, "## 可见证据\n构图主体偏右，天空留白。\n## 先这样肯定\n天空留白呼应了安静。\n"+
+			"## 家长可以这样问或讲\n一起比较地面倒影的深浅。\n## 下一次只试一个点\n建议让地面倒影再明显一点。",
 	)
 	if fb.Fields.Intent != "想画出雨后安静的感觉" {
 		t.Fatal("创作意图应保留")

@@ -166,7 +166,9 @@ func TestWritingPhotoRequiresCurrentConfirmedOCRBeforeSaveAndFeedbackEvidenceUse
 		t.Fatalf("confirmed OCR snapshot should save: %v", err)
 	}
 
-	gen := &fakeWorkFeedbackSolver{feedback: "这句话的比喻很清楚；建议补充柳枝随风移动的细节。"}
+	gen := &fakeWorkFeedbackSolver{feedback: "## 可见证据\n确认后的原稿写了柳枝像绿色丝带。\n" +
+		"## 先这样肯定\n这句话的比喻很清楚。\n## 家长可以这样问或讲\n一起回想柳枝随风怎样移动。\n" +
+		"## 下一次只试一个点\n建议补充柳枝随风移动的细节。"}
 	d.Solver = gen
 	view, err := d.GenerateWorkFeedback(ctx, "xiaoming", id)
 	if err != nil {
