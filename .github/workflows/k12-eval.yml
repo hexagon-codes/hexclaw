@@ -1,6 +1,6 @@
 name: K12 Eval Gate
 
-# K12 手动专项门；自动 harness 与条件性真模型门由主 CI 执行。
+# K12 手动专项门；确定性测试已包含在主 CI，真实模型仅在本专项执行。
 # 配置 HEXCLAW_LLM_EVAL_KEY secret 后验证真模型批改准确率 ≥90%；无 secret 时跳过真模型门。
 on:
   workflow_dispatch:
