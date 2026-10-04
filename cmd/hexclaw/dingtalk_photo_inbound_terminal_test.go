@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -15,12 +16,13 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-type terminalProjectionClassifier struct{}
+type terminalProjectionClassifier struct{ calls int }
 
-func (terminalProjectionClassifier) ClassifyImageTask(
+func (c *terminalProjectionClassifier) ClassifyImageTask(
 	context.Context,
 	k12usecase.ImageTaskClassificationInput,
 ) (k12usecase.ImageTaskClassification, error) {
+	c.calls++
 	return k12usecase.ImageTaskClassification{}, nil
 }
 
@@ -170,9 +172,10 @@ func TestDingTalkPhotoWorkerReadsPersistedClassificationOutcomeUnknownBeforeTerm
 
 	records := k12storage.NewStore(db, nil)
 	assetRef := "asset://child-tutor/" + strings.Repeat("a", 64) + ".png"
+	classifier := &terminalProjectionClassifier{}
 	coordinator := &k12usecase.ImageTaskCoordinator{
 		Records:    records,
-		Classifier: terminalProjectionClassifier{},
+		Classifier: classifier,
 		ResolveRoute: func(
 			request k12.ImageTaskRouteSnapshot,
 		) (k12.ImageTaskRouteSnapshot, error) {
@@ -237,18 +240,36 @@ func TestDingTalkPhotoWorkerReadsPersistedClassificationOutcomeUnknownBeforeTerm
 		projected.ClassificationInvocationStatus != k12.ImageTaskInvocationOutcomeUnknown {
 		t.Fatalf("persisted outcome_unknown projection=%+v", projected)
 	}
+	beforeInvocation, err := records.GetImageTaskInvocation(ctx, "child-tutor", invocation.InvocationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeDispatch, err := records.GetImageTaskDispatch(ctx, "child-tutor", created.Dispatch.DispatchID)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	bundle := terminalImageTaskBundle()
 	terminal := &inboundPhotoCoordinatorFake{bundle: bundle}
 	runtime := newK12DingtalkPhotoInboundRuntime(k12DingtalkPhotoInboundRuntimeConfig{
 		BaseContext: ctx, Inbound: terminal, ImageTasks: coordinator,
 	})
-	done, advanceErr := runtime.advanceImageTask(ctx, bundle)
-	if done || advanceErr == nil {
-		t.Fatalf("outcome_unknown worker state: done=%v err=%v", done, advanceErr)
+	for range 2 {
+		done, advanceErr := runtime.advanceImageTask(ctx, bundle)
+		if !done || advanceErr != nil {
+			t.Fatalf("outcome_unknown worker state: done=%v err=%v", done, advanceErr)
+		}
 	}
 	if terminal.terminalCalls != 0 {
 		t.Fatalf("persisted outcome_unknown was made terminal: %+v", terminal.bundle.Dispatch)
+	}
+	afterInvocation, err := records.GetImageTaskInvocation(ctx, "child-tutor", invocation.InvocationID)
+	if err != nil || !reflect.DeepEqual(beforeInvocation, afterInvocation) {
+		t.Fatalf("parked unknown invocation changed: before=%+v after=%+v err=%v", beforeInvocation, afterInvocation, err)
+	}
+	afterDispatch, err := records.GetImageTaskDispatch(ctx, "child-tutor", created.Dispatch.DispatchID)
+	if err != nil || !reflect.DeepEqual(beforeDispatch, afterDispatch) || classifier.calls != 0 {
+		t.Fatalf("parked unknown dispatch changed or provider resent: before=%+v after=%+v calls=%d err=%v", beforeDispatch, afterDispatch, classifier.calls, err)
 	}
 }
 

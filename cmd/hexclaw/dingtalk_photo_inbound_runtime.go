@@ -532,8 +532,14 @@ func (r *k12DingtalkPhotoInboundRuntime) advanceImageTask(
 		view.HomeworkProjection.Stage == k12.GradingStageCompleted
 	if view.Dispatch.Status == k12.ImageTaskStatusFailed &&
 		!homeworkCompleted &&
-		!view.Dispatch.RetrySafe &&
-		view.ClassificationInvocationStatus != k12.ImageTaskInvocationOutcomeUnknown {
+		view.ClassificationInvocationStatus == k12.ImageTaskInvocationOutcomeUnknown {
+		// 未知调用没有可推进的自动步骤；保留原回执，结束本次轮询。
+		return true, nil
+	}
+	if view.Dispatch.Status == k12.ImageTaskStatusFailed &&
+		!homeworkCompleted &&
+		(!view.Dispatch.RetrySafe ||
+			bundle.Dispatch.RoutingDecision != k12usecase.InboundPhotoRouteNewSubmission) {
 		failureKind := strings.TrimSpace(view.Dispatch.FailureKind)
 		if failureKind == "" {
 			failureKind = "image_task_failed"
@@ -691,6 +697,10 @@ func (r *k12DingtalkPhotoInboundRuntime) advanceImageTask(
 			return false, err
 		}
 		r.imageTasks.StartAsync(bundle.Receipt.AgentName, bundle.Dispatch.ImageTaskID)
+		return false, nil
+	}
+	if view.HomeworkProjection != nil && !homeworkCompleted {
+		// 批改未完成时只读取状态，完整结果的源图回执留到可交付后组装。
 		return false, nil
 	}
 	result, err := r.imageTasks.Result(
