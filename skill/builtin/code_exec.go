@@ -590,13 +590,18 @@ func codeExecGoHelperConfigWithLimit(
 	cfg.MaxProcesses = 0
 
 	paths := append([]string(nil), readablePaths...)
-	// 工作目录已在可写 Workspace 内，不能再列为只读路径覆盖它的写入挂载。
 	paths = append(paths, filepath.Dir(goBinary))
 	canonicalReadable, err := canonicalCodeExecPaths(paths)
 	if err != nil {
 		return sandbox.Config{}, err
 	}
-	cfg.ReadablePaths = canonicalReadable
+	// 工作目录已在可写 Workspace 内，不能再列为只读路径覆盖它的写入挂载。
+	cfg.ReadablePaths = canonicalReadable[:0]
+	for _, path := range canonicalReadable {
+		if !pathWithinResolved(workspace, path) {
+			cfg.ReadablePaths = append(cfg.ReadablePaths, path)
+		}
+	}
 	denied := make([]string, 0, len(cfg.DeniedPaths))
 	for _, path := range cfg.DeniedPaths {
 		// 受信任辅助命令的专属工作区可能位于可信缓存下；不得让父级拒绝规则
