@@ -2,7 +2,7 @@
 
 适用于本仓库包含云端连接支持的源码构建。当前镜像为 Linux amd64，包含 Pandoc、Typst、Poppler、中文和数学字体、Python 及 SymPy。Poppler 提供 PDF 页数读取、文本提取及原页渲染。服务存储使用 SQLite；同一数据目录只运行一个实例。单机日常运行推荐 Docker Compose；已有 Kubernetes 集群使用相同镜像和独立 PVC。
 
-本次文档版本为 `v0.5.0-beta`；版本标识不表示已创建对应 Tag、完成 GitHub Release 或发布版本镜像，实际状态以对应 Actions 记录及产物为准。
+本次文档版本为 `v0.5.0-beta.1`；版本标识不表示已创建对应 Tag、完成 GitHub Release 或发布版本镜像，实际状态以对应 Actions 记录及产物为准。
 
 ## Docker Compose
 

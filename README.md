@@ -735,7 +735,7 @@ hexclaw/
 - Linux 全量测试使用与 toolkit 沙箱基线一致的 Ubuntu 22.04，安装后以真实 bubblewrap 空命令探测 namespace 能力；失败保留错误输出并终止，不重试或跳过。完整沙箱行为仍由原测试验证。
 - CI 与 K12 使用 `GOWORK=off` 和 `GOFLAGS=-mod=readonly`，核对已发布依赖且不改写依赖锁定文件。K12 确定性测试已包含在全量中；自动 CI 不使用真实模型密钥，真实模型门仅在手动 K12 Eval Gate 配置 `HEXCLAW_LLM_EVAL_KEY` 时执行。K12 / Sandbox 专项保持手动，公网爬虫仅在手动 Sandbox 的 `run_live_network=true` 时运行，上游 toolkit 自身测试不在普通提交重复执行。render 仍按自身路径规则独立运行，不执行每周定时任务或查询上游最新版本。
 - 普通业务测试及仅检查最新 schema 约束的迁移用例复用真实迁移生成的空库模板，各用例仍有独立数据库、原连接语义和全部断言；生产迁移、历史 schema 升级、全链重跑及重开测试不变。Windows Go 构建缓存组仅两项真实初始化 / 预算用例按能力跳过，规则与清理断言仍跨平台执行；其他真实 code_exec 集成沿用既有 toolkit 能力门控。跳过不代表 Windows Go 运行已验证。
-- `v*` Tag 或手动指定已有 Tag 通过独立 Release 工作流生成发布产物，不等待主 CI 全量测试。`v0.5.0-beta` 是本次预发布版本，文档版本不代表 Tag 或 Release 已生成。
+- `v*` Tag 或手动指定已有 Tag 通过独立 Release 工作流生成发布产物，不等待主 CI 全量测试。`v0.5.0-beta.1` 是本次预发布版本，文档版本不代表 Tag 或 Release 已生成。
 
 完整检查范围见[CI/CD 门禁说明](CONTRIBUTING.md#cicd-门禁说明)，变更规则以[CI/CD 固定基线](CONTRIBUTING.md#cicd-固定基线)为准，部署配置与结果核对见[云端部署指南](docs/cloud-deployment.md)。功能分支编译、Deploy 或 render 独立成功不能替代主 CI 或 Desktop / IM 业务验收；未执行手动全量 race、未提供真实 PDF 或未启用真实模型的检查不计为相应边界通过。
 
@@ -820,6 +820,10 @@ chore: 构建/工具链
 | **hexclaw-ui** | HexClaw Web 前端 (Vue 3) | [hexclaw-ui](https://github.com/hexagon-codes/hexclaw-ui) |
 
 ## 更新日志
+
+### v0.5.0-beta.1（2026-10-04）
+
+- 升级 toolkit 至 v0.3.5，修复 Linux ARM64 发布编译的链接计数字段类型不兼容；沙箱校验和五个平台发布目标保持不变。
 
 ### v0.5.0-beta（2026-10-03）
 

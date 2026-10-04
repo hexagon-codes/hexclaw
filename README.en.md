@@ -737,7 +737,7 @@ Scenario packs are mounted through `srv.Mount` under `/api/<scenario>` and inher
 - Full Linux tests use Ubuntu 22.04, matching toolkit's sandbox baseline. A real bubblewrap no-op checks namespace availability after installation and fails with stderr preserved, without retries or skips. Existing tests still verify the complete sandbox behavior.
 - CI and K12 use `GOWORK=off` and `GOFLAGS=-mod=readonly` to check published dependencies without rewriting dependency lockfiles. Deterministic K12 tests are included in the full suite; automatic CI does not use live-model keys, and the real-model gate runs only in the manual K12 Eval Gate when `HEXCLAW_LLM_EVAL_KEY` is configured. Dedicated K12/Sandbox workflows remain manual, public-network crawler checks only run through manual Sandbox with `run_live_network=true`, and ordinary commits do not rerun toolkit's own tests. Render remains independently path-filtered, without weekly jobs or upstream release queries.
 - Business tests and migration tests that only check constraints on the latest schema reuse empty database templates produced by real migrations; each case retains an independent database, its original connection semantics, and all assertions. Production migrations, historical schema upgrades, full-chain replay, and database reopen tests are unchanged. Within the Windows Go build-cache group, only the two real initialization/budget cases retain capability-based skips; policy and cleanup assertions still run cross-platform. Other real code_exec integration tests retain their existing toolkit capability gates. Skips do not verify Windows Go execution.
-- `v*` tags or manual runs against an existing tag produce release artifacts independently of the full CI tests. The release version is `v0.5.0-beta`, a prerelease; a version entry does not imply that its tag or GitHub Release exists.
+- `v*` tags or manual runs against an existing tag produce release artifacts independently of the full CI tests. The release version is `v0.5.0-beta.1`, a prerelease; a version entry does not imply that its tag or GitHub Release exists.
 
 See [CI/CD gate details](CONTRIBUTING.md#cicd-门禁说明), the authoritative [fixed CI/CD baseline](CONTRIBUTING.md#cicd-固定基线), and the [cloud deployment guide](docs/cloud-deployment.md). A successful feature-branch compile, Deploy, or render run does not replace primary CI or Desktop/IM acceptance. An unexecuted manual full race suite, missing real PDF fixtures, or disabled real-model evaluation does not verify the corresponding boundary.
 
@@ -822,6 +822,10 @@ chore: build/toolchain updates
 | **hexclaw-ui** | HexClaw web frontend (Vue 3) | [hexclaw-ui](https://github.com/hexagon-codes/hexclaw-ui) |
 
 ## Changelog
+
+### v0.5.0-beta.1 (2026-10-04)
+
+- Upgrade toolkit to v0.3.5 to fix the Linux ARM64 release build's incompatible link-count field type. Sandbox checks and all five release targets remain unchanged.
 
 ### v0.5.0-beta (2026-10-03)
 

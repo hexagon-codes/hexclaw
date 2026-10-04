@@ -10,7 +10,7 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/hexagon-codes/ai-core v0.2.11
 	github.com/hexagon-codes/hexagon v0.5.14
-	github.com/hexagon-codes/toolkit v0.3.4
+	github.com/hexagon-codes/toolkit v0.3.5
 	github.com/larksuite/oapi-sdk-go/v3 v3.5.3
 	github.com/line/line-bot-sdk-go/v8 v8.20.1
 	github.com/open-dingtalk/dingtalk-stream-sdk-go v0.9.1

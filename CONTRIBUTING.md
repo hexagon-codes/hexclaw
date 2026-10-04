@@ -17,7 +17,7 @@ golangci-lint run
 
 ### CI/CD 门禁说明
 
-本次版本为 `v0.5.0-beta`。分支验证、云端部署和 Tag 发布是三个不同入口：
+本次版本为 `v0.5.0-beta.1`。分支验证、云端部署和 Tag 发布是三个不同入口：
 
 | 工作流 | 触发条件 | 检查或产物 |
 | --- | --- | --- |
@@ -54,7 +54,14 @@ Windows 的平台 sandbox 硬门禁继续执行。Go 构建缓存组仅两项真
 
 主 CI 提供手动全量 race 入口；K12 Eval Gate 与 Sandbox CodeExec 也提供各自的手动入口，公网爬虫不进入普通自动 CI。手动 Sandbox 的 `run_live_network` 输入默认 true，可设为 false 不运行公网爬虫。render 的 main push 路径包含 `.github/workflows/render.yml` 自身，PR 路径不包含该文件；仅推送 CI / render 工作流文件到功能分支，不能验证完整平台矩阵或 render 三平台测试。工作流配置和绿色编译结果不等于功能缺陷已修复，也不表示手动全量 race 已通过。
 
-云端配置、部署结果及恢复边界见[云端部署与日常运维](docs/cloud-deployment.md)。`v0.5.0-beta` 属于预发布；版本记录不表示已创建 Tag 或完成 Release。
+云端配置、部署结果及恢复边界见[云端部署与日常运维](docs/cloud-deployment.md)。`v0.5.0-beta.1` 属于预发布；版本记录不表示已创建 Tag 或完成 Release。
+
+### 发版流程
+
+1. 在最终发布提交上完成主 CI；使用 `GOWORK=off`、`GOFLAGS=-mod=readonly` 和已发布依赖，不以本地 workspace 结果替代。
+2. 打 Tag 前按现有 Release 目标核对编译：Linux amd64 / arm64、macOS amd64 / arm64、Windows amd64，统一使用 `CGO_ENABLED=0`。这是发版前的编译预检，不增加普通提交门禁，也不要求先打测试 Tag。
+3. 编译通过后再推送版本 Tag，由 Release 生成二进制、checksum 和镜像；含预发布标识的版本应标记为 GitHub Pre-release，不作为稳定版 latest。
+4. 已推送 Tag 不删除或移动。未改变源码的临时环境或发布步骤失败可针对同一 Tag 重跑；源码需要修复时，修复、验证后使用新版本 Tag。
 
 ### CI/CD 固定基线
 
