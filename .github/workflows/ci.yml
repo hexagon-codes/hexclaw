@@ -77,10 +77,11 @@ jobs:
           node-version: 22
 
       # 严格证明读取与应用依赖一致的 toolkit 源码，不切换模块或重复执行上游测试。
+      # 离线 vendor 还会读取其他平台依赖，不能只预热当前 Linux 测试的模块。
       - name: Prepare toolkit sandbox source
         shell: bash
         run: |
-          go mod download github.com/hexagon-codes/toolkit
+          go mod download
           toolkit_dir="$(go list -m -f '{{.Dir}}' github.com/hexagon-codes/toolkit)"
           cp -R "$toolkit_dir" toolkit
 
