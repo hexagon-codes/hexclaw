@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/hexagon-codes/hexclaw/config"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 )
 
@@ -16,6 +17,7 @@ func TestGradingRetryKeepsFrozenCapabilityEvidence(t *testing.T) {
 		fakeGrader{outcome: GradeOutcome{Verdict: VerdictAgree}}, nil)
 	d.Recognizer = recognizer
 	frozen := k12.GradingModelSnapshot{
+		ParentInstructions:      config.ReadAgentInstructions(),
 		Provider:                "provider-a",
 		Model:                   "vision-a",
 		Route:                   "provider-a/vision-a",

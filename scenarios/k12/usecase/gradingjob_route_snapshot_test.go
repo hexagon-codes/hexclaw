@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hexagon-codes/hexclaw/config"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
 	"github.com/hexagon-codes/hexclaw/storage/migrate"
@@ -156,7 +157,10 @@ func TestGradingSucceededInvocationBeforeCheckpointIsNotBlindlyReplayed(t *testi
 		fakeSolver{solution: "2", ev: SolveEvidence{Verdict: VerdictAgree, EvidenceType: EvidenceNumericExec}},
 		fakeGrader{outcome: GradeOutcome{Verdict: VerdictAgree}}, nil)
 	d.Recognizer = recognizer
-	snapshot := k12.GradingModelSnapshot{Provider: "provider-a", Model: "vision-a", Route: "provider-a/vision-a"}
+	snapshot := k12.GradingModelSnapshot{
+		ParentInstructions: config.ReadAgentInstructions(),
+		Provider:           "provider-a", Model: "vision-a", Route: "provider-a/vision-a",
+	}
 	o := trackGradingOrchestrator(t, NewGradingOrchestrator(d, func(k12.GradingModelSnapshot) (k12.GradingModelSnapshot, error) {
 		return snapshot, nil
 	}))
@@ -274,7 +278,10 @@ func TestGradingSucceededInvocationWithDurableArtifactRecoversCheckpointWithoutP
 		fakeSolver{solution: "2", ev: SolveEvidence{Verdict: VerdictAgree, EvidenceType: EvidenceNumericExec}},
 		fakeGrader{outcome: GradeOutcome{Verdict: VerdictAgree}}, nil)
 	d.Recognizer = recognizer
-	snapshot := k12.GradingModelSnapshot{Provider: "provider-a", Model: "vision-a", Route: "provider-a/vision-a"}
+	snapshot := k12.GradingModelSnapshot{
+		ParentInstructions: config.ReadAgentInstructions(),
+		Provider:           "provider-a", Model: "vision-a", Route: "provider-a/vision-a",
+	}
 	o := trackGradingOrchestrator(t, NewGradingOrchestrator(d, func(k12.GradingModelSnapshot) (k12.GradingModelSnapshot, error) {
 		return snapshot, nil
 	}, WithGradingRunDir(t.TempDir())))
@@ -291,7 +298,12 @@ func TestGradingSucceededInvocationWithDurableArtifactRecoversCheckpointWithoutP
 		t.Fatal(err)
 	}
 	run := o.lookup(v.Record.RecordID)
-	run.questions = []RecognizedQuestion{{Question: "1+1=", ProblemID: "p1", CanonicalMarkdown: "1+1=", AnswerState: AnswerStateBlank}}
+	run.questions, err = NormalizeRecognizedProblemsForInitialReadMode(v.Fields.SubmissionID,
+		[]RecognizedQuestion{{Question: "1+1=", RawTranscription: "1+1=", CanonicalMarkdown: "1+1=", AnswerState: AnswerStateBlank}},
+		run.req.InitialReadMode)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := o.persistRun(v.Record.RecordID, run); err != nil {
 		t.Fatal(err)
 	}

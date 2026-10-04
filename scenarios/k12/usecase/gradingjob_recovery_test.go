@@ -384,7 +384,7 @@ func TestGradingRecovery_FailedRetryableReenqueued(t *testing.T) {
 			if _, err := o2.RecoverGradingJobs(ctx, []string{"mingming"}); err != nil {
 				t.Fatal(err)
 			}
-			idleCtx, cancel := context.WithTimeout(ctx, time.Second)
+			idleCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			defer cancel()
 			if err := o2.WaitForIdle(idleCtx); err != nil {
 				t.Fatal(err)

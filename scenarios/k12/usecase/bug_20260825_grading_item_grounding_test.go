@@ -611,7 +611,7 @@ func TestK12GradingImageTaskGroundingUsesFrozenOwnerForItemsAndFinalTips(t *test
 	freezes, legacyUse, queries := grounding.snapshot()
 	bFreezes, bQueries := grounding.ownerConsumption(ownerBBinding)
 	aFreezes, aQueries := grounding.ownerConsumption(ownerABinding)
-	if freezes != 1 || bFreezes != freezes || len(queries) < 2 || bQueries != len(queries) {
+	if freezes != 1 || bFreezes != freezes || len(queries) != 1 || bQueries != len(queries) {
 		t.Fatalf(
 			"owner-b grounding consumption freezes=%d/%d queries=%d/%d",
 			bFreezes, freezes, bQueries, len(queries),
@@ -628,23 +628,36 @@ func TestK12GradingImageTaskGroundingUsesFrozenOwnerForItemsAndFinalTips(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	invocation, err := o.deps.Records.GetModelInvocation(
-		ctx, "mingming", artifact.SummaryInvocationID,
-	)
+	if artifact.SummaryInvocationID != "" {
+		t.Fatalf("final artifact created an additional summary invocation: %q", artifact.SummaryInvocationID)
+	}
+	projection, err := o.ImageTaskHomeworkProjection(ctx, "mingming", jobID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var tips TutoringTips
-	if err := json.Unmarshal([]byte(invocation.ResultJSON), &tips); err != nil {
-		t.Fatal(err)
+	if projection.Stage != k12.GradingStageCompleted || projection.FinalArtifact == nil ||
+		projection.FinalArtifact.ArtifactDigest != artifact.ArtifactDigest {
+		t.Fatal("final homework projection did not reuse the frozen artifact")
 	}
-	if len(tips.GroundingEvidenceReceipts) == 0 {
-		t.Fatal("final TutoringTips omitted owner-b grounding receipts")
+	if len(projection.GroundingEvidenceReceipts) == 0 || len(projection.ProblemGroundingReceipts) == 0 {
+		t.Fatal("final homework projection omitted owner-b grounding receipts")
 	}
-	for _, receipt := range tips.GroundingEvidenceReceipts {
+	for _, receipt := range projection.GroundingEvidenceReceipts {
 		if receipt.TextbookBindingID != ownerBBinding {
-			t.Fatalf("final TutoringTips consumed a non-owner-b binding: %+v", receipt)
+			t.Fatalf("final homework projection consumed a non-owner-b binding: %+v", receipt)
 		}
+		if err := validateGroundingEvidenceReceiptIdentity(receipt); err != nil {
+			t.Fatalf("final homework projection has invalid receipt identity: %v", err)
+		}
+	}
+	for _, receipt := range projection.ProblemGroundingReceipts {
+		if receipt.TextbookBindingID != ownerBBinding || receipt.ProblemID == "" || receipt.IdentityDigest == "" {
+			t.Fatalf("final per-problem grounding receipt lost owner-b identity: %+v", receipt)
+		}
+	}
+	finalFreezes, finalLegacyUse, finalQueries := grounding.snapshot()
+	if finalFreezes != freezes || finalLegacyUse != legacyUse || len(finalQueries) != len(queries) {
+		t.Fatal("final homework projection repeated grounding consumption")
 	}
 }
 

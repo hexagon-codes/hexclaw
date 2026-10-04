@@ -46,9 +46,9 @@ func TestGradeHomeworkPhoto_CompleteFractionSourcesUseExactLocalArithmetic(t *te
 		{"Q16 real process error remains", "在下列六个数：5、6、12、14、23、29中划去数（ ）后，能使其中3个数的和为另外2个数和的2倍。",
 			"划去：29\n因为：5+23+14=42\n6+12=18\n42=18×2", "划去：29\n因为：5+23+14=42\n6+12=18\n42=18×2",
 			"42", usecase.PhotoCorrectWithProcessIssue},
-		{"Q13 bare slash source cannot invent fraction grouping", "一个数的3/8是24，求这个数？",
+		{"Q13 fraction literal remains a divisor", "一个数的3/8是24，求这个数？",
 			"24÷3/8=24×8/3\n=64\n答：这个数是64。", "24÷3/8=24×8/3\n=64\n答：这个数是64。",
-			"24÷3/8", usecase.PhotoCorrectWithProcessIssue},
+			"", usecase.PhotoCorrect},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			// 保存响应替代视觉传输，解题和批改使用真实本地精确计算器。

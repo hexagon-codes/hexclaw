@@ -3,6 +3,7 @@ package usecase
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"sync"
@@ -172,6 +173,56 @@ func TestBUG20260802ImageTaskResultReadsOnlyDurableFinalArtifact(t *testing.T) {
 	); err != nil {
 		t.Fatalf("persist problem/attempt fixture: %v", err)
 	}
+	snapshot, err := coordinator.Records.GetProblemAttemptSnapshot(
+		context.Background(), "mingming", persistedJob.Fields.SubmissionID,
+	)
+	if err != nil {
+		t.Fatalf("load durable problem/attempt fixture: %v", err)
+	}
+	questions, err := RecognizedQuestionsFromProblemAttemptSnapshot(snapshot)
+	if err != nil || len(questions) != 1 {
+		t.Fatalf("project durable problem/attempt fixture: questions=%d err=%v", len(questions), err)
+	}
+	assessmentResult := gradingAssessmentCanonicalResult(PhotoGradeItem{
+		Recognized: questions[0], Status: PhotoCorrect,
+	})
+	assessmentJSON, err := json.Marshal(assessmentResult)
+	if err != nil {
+		t.Fatal(err)
+	}
+	solveJSON, err := json.Marshal(SolveResult{
+		Solution: "2", Evidence: SolveEvidence{Verdict: VerdictAgree, EvidenceType: EvidenceNumericExec},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	solveInvocation, solveCreated, err := coordinator.Records.PrepareGradingItemInvocation(
+		context.Background(),
+		k12.GradingItemInvocation{
+			InvocationID: "solve-final-result-liveness", AgentName: "mingming",
+			JobID: grading.resolvedJobID(), ProblemID: questions[0].ProblemID,
+			AttemptID: questions[0].AttemptID, Operation: k12.GradingItemOperationSolve,
+			OperationAttempt: 1, RequestDigest: "sha256:solve-request",
+			InputRevision: 1, InputDigest: questions[0].InputDigest,
+			RouteSnapshot: persistedJob.Fields.ModelSnapshot, CreatedAt: 1000,
+		},
+	)
+	if err != nil || !solveCreated {
+		t.Fatalf("prepare solve invocation: created=%v err=%v", solveCreated, err)
+	}
+	solveInvocation, err = coordinator.Records.MarkGradingItemInvocationSent(
+		context.Background(), solveInvocation.AgentName, solveInvocation.InvocationID,
+	)
+	if err != nil {
+		t.Fatalf("mark solve invocation sent: %v", err)
+	}
+	solveInvocation, err = coordinator.Records.MarkGradingItemInvocationSucceeded(
+		context.Background(), solveInvocation.AgentName, solveInvocation.InvocationID,
+		modelInvocationDigest(solveJSON), string(solveJSON),
+	)
+	if err != nil {
+		t.Fatalf("complete solve invocation: %v", err)
+	}
 	itemInvocation, itemCreated, err := coordinator.Records.PrepareGradingItemInvocation(
 		context.Background(),
 		k12.GradingItemInvocation{
@@ -199,6 +250,28 @@ func TestBUG20260802ImageTaskResultReadsOnlyDurableFinalArtifact(t *testing.T) {
 	if err != nil {
 		t.Fatalf("complete grading item invocation: %v", err)
 	}
+	assessment, _, err := coordinator.Records.CommitGradingAssessmentItem(
+		context.Background(),
+		k12.GradingAssessmentItem{
+			AgentName: "mingming", JobID: grading.resolvedJobID(),
+			ProblemID: questions[0].ProblemID, AttemptID: questions[0].AttemptID,
+			ConfirmedVersion: questions[0].ConfirmedVersion, InputRevision: 1,
+			StructureVersion: 1, InputDigest: questions[0].InputDigest,
+			Status: k12.GradingAssessmentCorrect, ResultJSON: string(assessmentJSON),
+			ResultDigest:      modelInvocationDigest(assessmentJSON),
+			SolveInvocationID: solveInvocation.InvocationID, GradeInvocationID: itemInvocation.InvocationID,
+			ProjectionStatus: k12.GradingProjectionCommitted,
+			CreatedAt:        1000, UpdatedAt: 1000,
+		},
+		k12storage.GradingAssessmentEffects{},
+	)
+	if err != nil {
+		t.Fatalf("persist durable grading assessment fixture: %v", err)
+	}
+	orderedDigests, err := json.Marshal([]string{assessment.ResultDigest})
+	if err != nil {
+		t.Fatal(err)
+	}
 	repository := &PageAssetRepository{Records: coordinator.Records}
 	annotatedBytes := validPNGFixture(t, "image-task-final-result-liveness")
 	annotated, err := repository.Persist(
@@ -213,7 +286,7 @@ func TestBUG20260802ImageTaskResultReadsOnlyDurableFinalArtifact(t *testing.T) {
 		StructureVersion: k12.GradingFinalArtifactStructureVersion,
 		CoverageStatus:   k12.GradingFinalArtifactCoverageComplete,
 		TotalCount:       1, PublishedCount: 1,
-		OrderedCurrentDigestsJSON: `["receipt-result-liveness"]`,
+		OrderedCurrentDigestsJSON: string(orderedDigests),
 		CanonicalMarkdown:         "# durable final grading result",
 		SummaryInvocationID:       "summary-result-liveness",
 		AnnotatedAssetOwnerScope:  "guardian-result-liveness",
@@ -236,6 +309,7 @@ func TestBUG20260802ImageTaskResultReadsOnlyDurableFinalArtifact(t *testing.T) {
 	wantGroundingReceipts := []GroundingEvidenceReceipt{groundingRecoveryReceipt()}
 	grading.projection = ImageTaskHomeworkProjection{
 		Stage:                     k12.GradingStageCompleted,
+		Questions:                 questions,
 		GroundingEvidenceReceipts: wantGroundingReceipts,
 	}
 

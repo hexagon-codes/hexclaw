@@ -125,11 +125,11 @@ func TestTutoringTipsOverviewUsesTextbookEvidenceWithoutLeakingRetrievalProtocol
 	generator := &tutoringTipsGeneratorStub{}
 	d := Deps{Grounding: tutoringTipsGroundingStub{found: true}, TutoringTipsReview: generator}
 	section := d.tutoringTipsOverview(context.Background(), "mingming", "五年级上", "数学", []string{"小数乘法"})
-	if generator.calls != 1 || generator.evidence != "教材证据正文" {
-		t.Fatalf("grounded generator evidence=%q calls=%d", generator.evidence, generator.calls)
+	if generator.calls != 0 || generator.evidence != "" {
+		t.Fatalf("textbook evidence triggered an additional model call: evidence=%q calls=%d", generator.evidence, generator.calls)
 	}
 	if section.SourceLabel != TutoringTipsSourceTextbook ||
-		!strings.Contains(section.Content, `$2.8 \times 0.65 = 1.82$`) {
+		!strings.Contains(section.Content, "教材证据正文") {
 		t.Fatalf("grounded section=%+v", section)
 	}
 	if strings.Contains(section.Content, "相关度:") || strings.Contains(section.Content, "参考编号") {
@@ -141,10 +141,10 @@ func TestTutoringTipsOverviewHonestFallbackUsesApprovedSourceLegend(t *testing.T
 	generator := &tutoringTipsGeneratorStub{err: errors.New("provider unavailable")}
 	d := Deps{Grounding: tutoringTipsGroundingStub{}, TutoringTipsReview: generator}
 	section := d.tutoringTipsOverview(context.Background(), "mingming", "五年级上", "数学", []string{"简易方程"})
-	if generator.calls != 1 || section.SourceLabel != TutoringTipsSourceAI {
+	if generator.calls != 0 || section.SourceLabel != TutoringTipsSourceAI {
 		t.Fatalf("fallback label=%q calls=%d", section.SourceLabel, generator.calls)
 	}
-	if !strings.Contains(section.Content, "No reliable explanation was generated") {
+	if !strings.Contains(section.Content, "结合课本例题回顾概念、计算步骤和验算方法。") {
 		t.Fatalf("fallback was not honest: %q", section.Content)
 	}
 }
@@ -154,10 +154,8 @@ func TestTutoringTipsOverviewTextbookHitSkipsUngroundedGeneration(t *testing.T) 
 	grounding := tutoringTipsGroundingStub{found: true}
 	d := Deps{Grounding: grounding, TutoringTipsReview: generator}
 	section := d.tutoringTipsOverview(context.Background(), "mingming", "五年级上", "数学", []string{"小数乘法"})
-	if generator.calls != 1 {
-		// The single call is the evidence-grounded transformation, never the
-		// ungrounded generation method.
-		t.Fatalf("grounded transformation calls=%d", generator.calls)
+	if generator.calls != 0 {
+		t.Fatalf("textbook evidence triggered an additional model call: calls=%d", generator.calls)
 	}
 	if section.SourceLabel != TutoringTipsSourceTextbook {
 		t.Fatalf("source label=%q", section.SourceLabel)
@@ -187,8 +185,8 @@ func TestTutoringTipsOverviewStopsAfterDeadlineWhenReviewIgnoresContext(t *testi
 	if elapsed := time.Since(started); elapsed >= 100*time.Millisecond {
 		t.Fatalf("deadline-insensitive review blocked page summary for %s", elapsed)
 	}
-	if calls := generator.callCount(); calls != 1 {
-		t.Fatalf("deadline-insensitive review calls=%d want exactly one in-flight call", calls)
+	if calls := generator.callCount(); calls != 0 {
+		t.Fatalf("deterministic overview started deadline-insensitive review: calls=%d", calls)
 	}
 	if strings.Contains(section.Content, "late provider text") {
 		t.Fatalf("late provider result escaped the existing fallback: %q", section.Content)
@@ -219,8 +217,8 @@ func TestTutoringTipsOverviewStopsAfterDeadlineWhenGroundedReviewIgnoresContext(
 	if elapsed := time.Since(started); elapsed >= 100*time.Millisecond {
 		t.Fatalf("deadline-insensitive grounded review blocked page summary for %s", elapsed)
 	}
-	if calls := generator.callCount(); calls != 1 {
-		t.Fatalf("deadline-insensitive grounded review calls=%d want exactly one in-flight call", calls)
+	if calls := generator.callCount(); calls != 0 {
+		t.Fatalf("textbook overview started deadline-insensitive review: calls=%d", calls)
 	}
 	if strings.Contains(section.Content, "late provider text") {
 		t.Fatalf("late grounded review result escaped the existing fallback: %q", section.Content)
