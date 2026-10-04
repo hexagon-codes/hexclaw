@@ -265,8 +265,9 @@ func TestGradingOrchestratorAssessCompleteResultAtDeadlineDoesNotBecomeUnknown(t
 			v.Fields.AnchorState == k12.GradingAnchorDegraded
 	})
 
+	// 为发送前持久化预留窗口；grader 仍等待真实上下文到期后返回完整结果。
 	o.deps.Now = func() int64 {
-		return time.Now().Unix() - 90 + 1
+		return time.Now().Unix() - 90 + 5
 	}
 	view, err := o.ConfirmAndRun(context.Background(), jobID, nil)
 	if err != nil {
@@ -319,8 +320,9 @@ func TestGradingOrchestratorFrozenAssessCompleteResultAtDeadlinePersistsSuccess(
 			v.Fields.AnchorState == k12.GradingAnchorDegraded
 	})
 
+	// 为发送前持久化预留窗口；grader 仍等待真实上下文到期后返回完整结果。
 	o.deps.Now = func() int64 {
-		return time.Now().Unix() - 90 + 1
+		return time.Now().Unix() - 90 + 5
 	}
 	view, err := o.ConfirmAndRun(context.Background(), jobID, nil)
 	if err != nil {
