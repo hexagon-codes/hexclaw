@@ -1,7 +1,7 @@
 # 与仓库根 docker-compose.yml 合并；HexClaw 中选择 http://ollama:11434 自定义目标。
 services:
   ollama:
-    image: ollama/ollama:0.34.0
+    image: ollama/ollama:0.35.1
     volumes:
       - ollama-data:/root/.ollama
     environment:

@@ -13,6 +13,7 @@
 - **出站上下文**：新增 purpose × data-class 出网策略，按 chat、vision、embedding、rerank 等用途隔离本地/云端数据边界。
 
 ### Changed
+- 可选 Ollama Compose 镜像更新至 **0.35.1**，保留独立模型数据卷和原连接配置；默认部署仍不安装 Ollama 或自动下载模型。
 - 根模块依赖基线更新为 hexagon **v0.5.14**、ai-core **v0.2.11**、toolkit **v0.3.4**、`golang.org/x/net` **v0.55.0** 与 Go **1.25.13**；固定使用已发布版本，全仓编译型回归不依赖本地 workspace。保留 hexagon v0.5.13 的 `testing/record` 可取消 Token 计数修复；HexClaw 当前运行链不直接导入该测试工具包。Go 补丁版本与 `x/net` 升级修复此前安全扫描确认的可达漏洞。
 - **执行原语收敛**：`code_exec` 成为推荐执行入口，支持 snippet/file/module/project 与 artifact metadata；`code`/`shell` 保留兼容但标记弃用，顶层 `runtime/` 包删除，沙箱能力收敛到 toolkit + `skill/sandbox`。
 - **技能种子版本化**：首启内嵌技能支持版本感知升级，默认市场目录对齐 `hexagon-codes/hexclaw-hub` `v0.0.6`。
