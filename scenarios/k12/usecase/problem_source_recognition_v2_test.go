@@ -538,6 +538,7 @@ func TestREGK12RecognitionDurabilityBudget20260808002ProblemSourceReclaimedLease
 		SourceNumberPath:      []string{"1"},
 		DisplayLabel:          "1",
 		Question:              "recovered finalized source",
+		RawTranscription:      "recovered finalized source",
 		CanonicalMarkdown:     "recovered finalized source",
 		Subject:               "数学",
 		AnswerState:           AnswerStatePresent,

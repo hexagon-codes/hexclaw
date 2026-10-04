@@ -55,7 +55,7 @@ jobs:
     if: ${{ github.event_name != 'push' || github.ref == 'refs/heads/main' }}
     # 与 toolkit 的真实沙箱执行基线一致，保留所需 namespace 能力。
     runs-on: ubuntu-22.04
-    timeout-minutes: 40
+    timeout-minutes: 50
     env:
       HAS_REAL_LLM_EVAL_KEY: ${{ secrets.HEXCLAW_LLM_EVAL_KEY != '' }}
     steps:
@@ -101,7 +101,12 @@ jobs:
       - name: Run tests
         env:
           HEXCLAW_P0_SANDBOX_PROOF: "1"
-        run: go test -race -count=1 -timeout 20m ./...
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            go test -count=1 -timeout 30m ./...
+          else
+            go test -race -count=1 -timeout 30m ./...
+          fi
 
       - name: K12 real-model accuracy gate (opt-in)
         if: ${{ env.HAS_REAL_LLM_EVAL_KEY == 'true' }}

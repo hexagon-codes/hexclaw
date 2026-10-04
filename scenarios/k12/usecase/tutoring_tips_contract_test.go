@@ -143,8 +143,8 @@ func TestBuildTutoringTipsUsesConfirmedServerFactsAndExactlyThreeSections(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if spy.calls != 2 {
-		t.Fatalf("review calls=%d want one per durable knowledge point", spy.calls)
+	if spy.calls != 0 {
+		t.Fatalf("deterministic overview must not start additional review calls: calls=%d", spy.calls)
 	}
 	if tips.Grade != "五年级下" || tips.Subject != "数学" {
 		t.Fatalf("server-derived grade/subject=%q/%q", tips.Grade, tips.Subject)
@@ -171,9 +171,12 @@ func TestBuildTutoringTipsUsesConfirmedServerFactsAndExactlyThreeSections(t *tes
 			t.Fatalf("section[%d] uses unapproved source label %q", i, section.SourceLabel)
 		}
 	}
-	for _, problemID := range []string{"problem-1", "problem-2"} {
-		if strings.Count(tips.Sections[2].Content, problemID) != 1 {
-			t.Fatalf("guidance must cover %s exactly once: %q", problemID, tips.Sections[2].Content)
+	for _, problem := range confirmedTipsFacts(1, "canonical").Problems {
+		if strings.Count(tips.Sections[2].Content, problem.StemMarkdown) != 1 {
+			t.Fatalf("guidance must cover %s exactly once: %q", problem.ProblemID, tips.Sections[2].Content)
+		}
+		if strings.Contains(tips.Sections[2].Content, problem.ProblemID) {
+			t.Fatalf("internal problem ID leaked into guidance: %q", tips.Sections[2].Content)
 		}
 	}
 }
@@ -227,12 +230,17 @@ func TestBuildTutoringTipsPreservesSourceNumbersWithoutSyntheticArrayLabels(t *t
 	}
 	content := tips.Sections[2].Content
 	for _, expectedHeading := range []string{
-		"### 三、应用题 · 三、1 · problem-1",
-		"### 三、应用题 · 三、3 · problem-2",
-		"### 三、应用题 · 第 1 题（系统序号） · problem-3",
+		"### 三、应用题 · 三、1",
+		"### 三、应用题 · 三、3",
+		"### 三、应用题 · 第 1 题（系统序号）",
 	} {
 		if !strings.Contains(content, expectedHeading) {
 			t.Fatalf("per-problem guidance missing source heading %q: %q", expectedHeading, content)
+		}
+	}
+	for _, expected := range want {
+		if strings.Contains(content, expected.problemID) {
+			t.Fatalf("internal problem ID leaked into source heading: %q", content)
 		}
 	}
 	for _, syntheticHeading := range []string{"### 第 1 题 ·", "### 第 2 题 ·", "### 第 3 题 ·"} {

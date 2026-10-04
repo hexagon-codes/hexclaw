@@ -22,7 +22,7 @@ golangci-lint run
 | 工作流 | 触发条件 | 检查或产物 |
 | --- | --- | --- |
 | CI：功能分支 | push 到 `feat/**`，纯说明文档改动除外 | `go test -run '^$' ./...`，只编译应用和测试包，不执行用例 |
-| CI：主分支 / PR | push 到 main，或 PR 的目标为 main，纯说明文档改动除外 | Linux 全量 `go test -race -count=1 -timeout 20m ./...`（包含 K12 确定性测试）；Windows 全仓构建；必要的跨平台 sandbox / CodeExec；配置真实模型密钥时执行 K12 真实模型门 |
+| CI：主分支 / PR | push 到 main，或 PR 的目标为 main，纯说明文档改动除外 | Linux PR 执行 `go test -count=1 -timeout 30m ./...`，main push 执行 `go test -race -count=1 -timeout 30m ./...`（均包含 K12 确定性测试）；Windows 全仓构建；必要的跨平台 sandbox / CodeExec；配置真实模型密钥时执行 K12 真实模型门 |
 | K12 Eval Gate | 手动触发 | 定向重跑 K12 harness；真实模型评测仅在配置相应密钥时执行 |
 | render | main push 或 PR 匹配渲染路径 | Linux / macOS / Windows 构建及 render、API Render 测试；不再每周定时执行 |
 | Sandbox CodeExec | 手动触发 | 三平台 toolkit sandbox 与 HexClaw code_exec 专项验证；公网爬虫仅在手动输入 `run_live_network=true` 时运行（该输入默认 true） |
@@ -33,21 +33,21 @@ golangci-lint run
 
 CI 的 push / PR 仅修改 `README*.md`、`CHANGELOG.md`、`CONTRIBUTING.md`、`SECURITY*.md`、`docs/**/*.md` 或 `LICENSE` 时跳过，不触发该提交的 CI 构建及后续自动部署。这是明确的纯说明文档范围，不使用 `**/*.md` 广义忽略：其他目录中的 Markdown 可能参与 `go:embed`，影响运行产物。
 
-CI 与 K12 固定使用 `GOWORK=off`、`GOFLAGS=-mod=readonly`，验证已发布依赖而不改写 `go.mod` / `go.sum`。Linux 当前全量命令设置单包测试超时 20 分钟，job 总预算为 40 分钟。
+CI 与 K12 固定使用 `GOWORK=off`、`GOFLAGS=-mod=readonly`，验证已发布依赖而不改写 `go.mod` / `go.sum`。Linux 当前全量命令设置单包测试超时 30 分钟，job 总预算为 50 分钟。
 
-普通 main / PR 提交以一个主 CI 执行全量测试和 race，以及必要的跨平台 sandbox / CodeExec；K12 确定性测试已包含在全量中，不再重复运行独立 subset。配置 `HEXCLAW_LLM_EVAL_KEY` 时，主 CI 执行 K12 真实模型门；未配置时不计为真实模型已验证。K12 / Sandbox 专项改为手动，上游 toolkit 自身测试不在普通提交重复执行；render 仍按自身路径规则独立运行。已移除覆盖率文件上传和 Windows 非阻塞的核心重复测试，覆盖率仍可按需用 `make test-cover` 在本地生成。
+普通 main / PR 提交以一个主 CI 执行全量测试：PR 执行普通测试，main push 执行 race；必要的跨平台 sandbox / CodeExec 保留。K12 确定性测试已包含在全量中，不再重复运行独立 subset。配置 `HEXCLAW_LLM_EVAL_KEY` 时，主 CI 执行 K12 真实模型门；未配置时不计为真实模型已验证。K12 / Sandbox 专项改为手动，上游 toolkit 自身测试不在普通提交重复执行；render 仍按自身路径规则独立运行。已移除覆盖率文件上传和 Windows 非阻塞的核心重复测试，覆盖率仍可按需用 `make test-cover` 在本地生成。
 
 主 CI 与手动 Sandbox CodeExec 的 Linux 环境复用固定 toolkit 版本提供的 bubblewrap 安装脚本，安装并检查运行所需参数，避免发行版旧包与当前后端不兼容。
 
 主 CI 的 Linux 全量测试使用与 toolkit 沙箱基线一致的 Ubuntu 22.04，安装后以真实 bubblewrap 空命令探测 namespace 能力；失败保留错误输出并终止，不重试或跳过。该探测只核对环境能力，完整沙箱行为仍由原全量测试与 P0 门验证。
 
-普通业务测试通过 `internal/testutil/sqlitefixture` 复用进程内一次真实全量迁移的空库模板；迁移包内仅检查最新 schema 约束的用例使用包内独立模板。每个用例仍使用独立数据库，原 Init、断言、清理和 race 保留。文件库与内存库保留原连接语义，后端身份独立；历史 schema 升级、全链重跑和重开测试仍按原流程执行。这减少重复迁移耗时，不修改生产迁移或减少测试。
+普通业务测试通过 `internal/testutil/sqlitefixture` 复用进程内一次真实全量迁移的空库模板；迁移包内仅检查最新 schema 约束的用例使用包内独立模板。每个用例仍使用独立数据库，原 Init、断言、清理保留，main push 仍执行全量 race。文件库与内存库保留原连接语义，后端身份独立；历史 schema 升级、全链重跑和重开测试仍按原流程执行。这减少重复迁移耗时，不修改生产迁移或减少测试。
 
 Windows 的平台 sandbox 硬门禁继续执行。Go 构建缓存组仅两项真实初始化 / 预算用例沿用平台能力跳过，缓存策略与清理断言仍跨平台执行。当前 toolkit 不支持 Go helper 所需的只读工具链路径映射，其他真实 code_exec 运行集成仍沿用既有能力门控，Linux / macOS 的真实执行保留。Windows 跳过项不计为 Go 执行功能已验证，不能通过取消只读路径或改用宿主执行冒充支持。
 
 三项大型真实 PDF 回归仅在显式设置 `HEXCLAW_REAL_PDF_FIXTURE` 时使用外部冻结样本，不从其他仓库自动读取。未设置或文件不存在时明确跳过，不能计为真实 PDF 边界已验证；文件存在时仍检查固定大小、SHA 和全部功能断言，其他读取失败或内容不符继续失败。默认构建、CI 与应用运行不依赖该外部素材。
 
-- GitHub Actions 的 Linux 硬门禁等价于 `GOWORK=off GOFLAGS=-mod=readonly go test -race -count=1 -timeout 20m ./...`。
+- GitHub Actions 的 Linux 门禁：PR 使用 `GOWORK=off GOFLAGS=-mod=readonly go test -count=1 -timeout 30m ./...`；main push 使用 `GOWORK=off GOFLAGS=-mod=readonly go test -race -count=1 -timeout 30m ./...`。
 - 发布/CI 兼容性必须用 `GOWORK=off` 复验，避免本地 `go.work` 把未发布的 `toolkit` / `ai-core` / `hexagon` API 变化遮住。
 - 故意失败的 runner 完整性探针不得进入默认 `go test ./...` 路径；这类测试必须默认 `t.Skip`，或只在显式环境变量/手工 workflow 下启用。
 
@@ -60,6 +60,6 @@ Windows 的平台 sandbox 硬门禁继续执行。Go 构建缓存组仅两项真
 - 涉及 DB/缓存/幂等/配额/状态流转的改动，按 bug 修复闭环走 RED→GREEN + 真实环境 E2E。
 
 ## PR Checklist
-- [ ] build+vet+test -race 全绿、golangci-lint 0 issue
+- [ ] build+vet+test 全绿、golangci-lint 0 issue（main push 另执行全量 race）
 - [ ] 复用下层而非重造；新发现的通用能力评估下沉
 - [ ] CHANGELOG.md 记录用户可见变更

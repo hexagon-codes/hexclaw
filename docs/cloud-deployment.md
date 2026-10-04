@@ -82,14 +82,14 @@ Compose 留出 60 秒停止窗口，覆盖服务当前 30 秒收尾预算。已�
 | 入口 | 执行范围 | 与部署／发布的关系 |
 | --- | --- | --- |
 | `feat/**` 分支 push（纯说明文档改动除外） | [CI](../.github/workflows/ci.yml) 使用 `go test -run '^$' ./...` 编译应用和测试包，不执行测试用例 | 部署已启用且分支等于 `HEXCLAW_DEPLOY_BRANCH` 时，CI 编译成功就会触发自动云端部署；不需要先合并 main |
-| main push／指向 main 的 PR（纯说明文档改动除外） | 一个主 CI 执行 Linux 全量测试及 race（含 K12 确定性）、Windows 编译和必要的跨平台 sandbox／CodeExec；配置密钥时执行 K12 真实模型门 | PR 验证不触发云端部署；main push 也只在 main 是已配置部署分支时部署。feature 编译成功不代表这些检查通过 |
+| main push／指向 main 的 PR（纯说明文档改动除外） | 一个主 CI 执行 Linux 全量测试（PR 普通测试、main push race，均含 K12 确定性）、Windows 编译和必要的跨平台 sandbox／CodeExec；配置密钥时执行 K12 真实模型门 | PR 验证不触发云端部署；main push 也只在 main 是已配置部署分支时部署。feature 编译成功不代表这些检查通过 |
 | `v*` Tag push／手动指定已有 Tag | [Release](../.github/workflows/release.yml) 构建 Linux、macOS、Windows 二进制，生成 checksum、GitHub Release 和 Linux amd64 镜像 | 独立发布入口，只依赖自身构建任务，不等待主 CI 的完整测试；不会代替分支自动部署或业务验收 |
 
 分支 push／PR 仅修改 `README*.md`、`CHANGELOG.md`、`CONTRIBUTING.md`、`SECURITY*.md`、`docs/**/*.md` 或 `LICENSE` 时不触发 CI，因此该提交不会触发 CI 构建或接续自动云端部署。此范围只包含说明文档；其他目录的 Markdown 可能是 `go:embed` 运行资源，不能广义忽略 `**/*.md`。独立 Tag Release 入口不受这项分支文档过滤影响。
 
-CI 与 K12 使用 `GOWORK=off`、`GOFLAGS=-mod=readonly`，按已发布依赖检查且不改写依赖锁定文件。Linux 当前命令为 `go test -race -count=1 -timeout 20m ./...`：单包测试超时 20 分钟，job 总预算 40 分钟。K12 确定性测试已包含在全量中，配置 `HEXCLAW_LLM_EVAL_KEY` 时由主 CI 执行真实模型门；K12／Sandbox 专项与公网爬虫改为手动，上游 toolkit 自身测试不在普通提交重复执行。
+CI 与 K12 使用 `GOWORK=off`、`GOFLAGS=-mod=readonly`，按已发布依赖检查且不改写依赖锁定文件。Linux PR 使用 `go test -count=1 -timeout 30m ./...`，main push 使用 `go test -race -count=1 -timeout 30m ./...`；两者单包测试超时均为 30 分钟、job 总预算均为 50 分钟。K12 确定性测试已包含在全量中，配置 `HEXCLAW_LLM_EVAL_KEY` 时由主 CI 执行真实模型门；K12／Sandbox 专项与公网爬虫改为手动，上游 toolkit 自身测试不在普通提交重复执行。
 
-业务测试复用进程内一次真实全量迁移的空库模板，各用例仍有独立数据库、原连接语义及全部断言，不改变生产 schema 或跳过 race。Windows Go 构建缓存组仅两项真实初始化／预算用例按 toolkit 能力跳过，规则与清理断言仍跨平台执行；其他真实 code_exec 集成保留既有能力门控。这类跳过不代表 Windows Go 运行已验证，也不影响 Linux 镜像部署的执行边界。Deploy／render 独立成功不能代替主 CI；未提供真实 PDF 或未启用真实模型的检查不计为相应边界通过。
+业务测试复用进程内一次真实全量迁移的空库模板，各用例仍有独立数据库、原连接语义及全部断言，不改变生产 schema，main push 全量 race 保留。Windows Go 构建缓存组仅两项真实初始化／预算用例按 toolkit 能力跳过，规则与清理断言仍跨平台执行；其他真实 code_exec 集成保留既有能力门控。这类跳过不代表 Windows Go 运行已验证，也不影响 Linux 镜像部署的执行边界。Deploy／render 独立成功不能代替主 CI；未提供真实 PDF 或未启用真实模型的检查不计为相应边界通过。
 
 主 CI 当前不提供手动触发入口，K12 Eval Gate 与 Sandbox CodeExec 仅手动补验，公网爬虫仅在手动 Sandbox 的 `run_live_network=true` 时运行。render 仍按自身路径规则独立运行：main push 路径包含工作流自身，PR 路径只包含渲染代码；仅修改 CI／render 工作流后推送 feature 分支，不会运行 render 的三平台检查。render 每周上游版本查询与覆盖率上传已移除。
 

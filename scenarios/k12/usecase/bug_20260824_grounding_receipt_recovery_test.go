@@ -9,6 +9,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 )
 
 type groundingRecoveryNoSecondSearch struct {
@@ -65,8 +67,8 @@ func groundingRecoveryReceipt() GroundingEvidenceReceipt {
 	}
 }
 
-// K12-GRADING-GROUNDING-CITATION-REAL-001：崩溃重启后只从同一个
-// page-summary invocation ResultJSON 恢复 receipt，不再次调用检索或 Provider。
+// 历史终稿重启后只从已关联的 page-summary 成功回执恢复教材证据，
+// 不再次调用检索或 Provider，也不创建新的 summary。
 func TestBUG20260824GroundingReceiptRecoversFromPageSummaryWithoutSecondCall(t *testing.T) {
 	fixture := prepareFinalSummaryCrashFixture(t)
 	fixture.tips.Sections[0].SourceLabel = TutoringTipsSourceTextbook
@@ -87,6 +89,31 @@ func TestBUG20260824GroundingReceiptRecoversFromPageSummaryWithoutSecondCall(t *
 		"",
 	); err != nil {
 		t.Fatalf("persist page-summary receipt: %v", err)
+	}
+	assessments, err := fixture.orchestrator.deps.Records.ListGradingAssessmentItems(
+		context.Background(), fixture.job.Record.AgentName, fixture.job.Record.RecordID,
+	)
+	if err != nil || len(assessments) != 1 {
+		t.Fatalf("load historical final assessment: count=%d err=%v", len(assessments), err)
+	}
+	ordered, err := json.Marshal([]string{assessments[0].ResultDigest})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyArtifact := k12.GradingFinalArtifact{
+		AgentName: fixture.job.Record.AgentName, JobID: fixture.job.Record.RecordID,
+		StructureVersion: k12.GradingFinalArtifactStructureVersion,
+		CoverageStatus:   k12.GradingFinalArtifactCoverageComplete, TotalCount: 1, PublishedCount: 1,
+		OrderedCurrentDigestsJSON: string(ordered),
+		CanonicalMarkdown:         renderCanonicalGradingFinal(nil, &fixture.tips),
+		SummaryInvocationID:       fixture.invocation.InvocationID,
+		CreatedAt:                 fixture.orchestrator.deps.now(), UpdatedAt: fixture.orchestrator.deps.now(),
+	}
+	legacyArtifact.ArtifactDigest = k12.ComputeGradingFinalArtifactDigest(legacyArtifact)
+	if _, _, err := fixture.orchestrator.deps.Records.CommitGradingFinalArtifact(
+		context.Background(), legacyArtifact, 0,
+	); err != nil {
+		t.Fatalf("persist historical final artifact: %v", err)
 	}
 
 	restarted := fixture.restartedFinalizer()
@@ -119,6 +146,9 @@ func TestBUG20260824GroundingReceiptRecoversFromPageSummaryWithoutSecondCall(t *
 	if !reflect.DeepEqual(projection.GroundingEvidenceReceipts, want) {
 		t.Fatalf("restarted receipt=%+v want %+v",
 			projection.GroundingEvidenceReceipts, want)
+	}
+	if fixture.provider.calls != 0 || grounding.calls != 0 {
+		t.Fatalf("public recovery repeated calls: Provider=%d grounding=%d", fixture.provider.calls, grounding.calls)
 	}
 
 	stored, err := restarted.deps.Records.GetModelInvocation(
@@ -157,13 +187,46 @@ func TestBUG20260824CorruptDurableGroundingReceiptFailsClosed(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.restartedFinalizer().finalizeGradingPage(
-		context.Background(), fixture.run, fixture.job,
-	); err == nil {
-		t.Fatal("corrupt durable grounding receipt was accepted")
+	assessments, err := fixture.orchestrator.deps.Records.ListGradingAssessmentItems(
+		context.Background(), fixture.job.Record.AgentName, fixture.job.Record.RecordID,
+	)
+	if err != nil || len(assessments) != 1 {
+		t.Fatalf("load historical final assessment: count=%d err=%v", len(assessments), err)
 	}
-	if fixture.provider.calls != 0 {
-		t.Fatalf("corrupt durable receipt triggered Provider %d times", fixture.provider.calls)
+	ordered, err := json.Marshal([]string{assessments[0].ResultDigest})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyArtifact := k12.GradingFinalArtifact{
+		AgentName: fixture.job.Record.AgentName, JobID: fixture.job.Record.RecordID,
+		StructureVersion: k12.GradingFinalArtifactStructureVersion,
+		CoverageStatus:   k12.GradingFinalArtifactCoverageComplete, TotalCount: 1, PublishedCount: 1,
+		OrderedCurrentDigestsJSON: string(ordered),
+		CanonicalMarkdown:         renderCanonicalGradingFinal(nil, &fixture.tips),
+		SummaryInvocationID:       fixture.invocation.InvocationID,
+		CreatedAt:                 fixture.orchestrator.deps.now(), UpdatedAt: fixture.orchestrator.deps.now(),
+	}
+	legacyArtifact.ArtifactDigest = k12.ComputeGradingFinalArtifactDigest(legacyArtifact)
+	if _, _, err := fixture.orchestrator.deps.Records.CommitGradingFinalArtifact(
+		context.Background(), legacyArtifact, 0,
+	); err != nil {
+		t.Fatalf("persist historical final artifact: %v", err)
+	}
+	restarted := fixture.restartedFinalizer()
+	grounding := &groundingRecoveryNoSecondSearch{}
+	restarted.deps.Grounding = grounding
+	if _, err := restarted.finalizeGradingPage(
+		context.Background(), fixture.run, fixture.job,
+	); err != nil {
+		t.Fatalf("read historical final artifact: %v", err)
+	}
+	if _, err := restarted.ImageTaskHomeworkProjection(
+		context.Background(), fixture.job.Record.AgentName, fixture.job.Record.RecordID,
+	); !errors.Is(err, ErrModelInvocationRequiresReconciliation) {
+		t.Fatalf("corrupt durable grounding receipt was not rejected: %v", err)
+	}
+	if fixture.provider.calls != 0 || grounding.calls != 0 {
+		t.Fatalf("corrupt durable receipt repeated calls: Provider=%d grounding=%d", fixture.provider.calls, grounding.calls)
 	}
 }
 

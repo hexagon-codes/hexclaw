@@ -21,7 +21,9 @@ func TestSubmitRevision_CurrentContractRejectsAllRevisionWrites(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	generateCreativeWorkFeedbackForTest(t, &d, id, "结构清晰；建议加一个感官细节。")
+	generateCreativeWorkFeedbackForTest(t, &d, id,
+		"## 可见证据\n原稿写了柳枝像绿色的丝带。\n## 先这样肯定\n结构清晰。\n"+
+			"## 家长可以这样问或讲\n一起说说柳枝随风怎样移动。\n## 下一次只试一个点\n建议加一个感官细节。")
 
 	before, err := d.GetCreativeWork(ctx, "xiaoming", id)
 	if err != nil {

@@ -184,7 +184,7 @@ func TestCompletedSourceCorrection_MissingRegionNeverSent(t *testing.T) {
 }
 
 func TestCompletedSourceCorrection_ReconcileOnlyKnownPreflightFailure(t *testing.T) {
-	for _, failure := range []string{"original source region unavailable", `recognizing invocation policy is not approved for model "model-a"`, "context deadline exceeded"} {
+	for _, failure := range []string{"original source region unavailable", "recognizing invocation policy does not match frozen route policy", "context deadline exceeded"} {
 		t.Run(failure, func(t *testing.T) {
 			f := prepareCompletedSourceFixture(t)
 			// 历史终稿在后续时点纠正，新产物不能继承早于创建时间的旧更新时间。

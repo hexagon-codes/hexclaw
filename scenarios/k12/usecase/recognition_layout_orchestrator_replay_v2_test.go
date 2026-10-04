@@ -118,6 +118,12 @@ func TestREGK12RecognitionDurabilityBudget20260808001OrchestratorMarksFinalizedV
 	if err != nil || !created {
 		t.Fatalf("start finalized replay fixture: created=%v err=%v", created, err)
 	}
+	// 历史 V2 的 run.json 没有首读模式字段，重启后继续复用原分批计划。
+	legacyRun := orchestrator.lookup(job.Record.RecordID)
+	legacyRun.req.InitialReadMode = ""
+	if err := orchestrator.persistRun(job.Record.RecordID, legacyRun); err != nil {
+		t.Fatalf("persist historical V2 replay checkpoint: %v", err)
+	}
 	job, err = deps.AdvanceGradingStage(
 		ctx,
 		job.Record.AgentName,

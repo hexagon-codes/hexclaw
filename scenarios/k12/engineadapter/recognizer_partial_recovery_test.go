@@ -235,19 +235,15 @@ func TestRecognitionPartialRecoveryRestartReusesSuccessfulRepairs(t *testing.T) 
 	if _, handled, err := f.o.RetryPhotoGradingJob(context.Background(), f.jobID); err != nil || !handled {
 		t.Fatalf("public retry: handled=%v err=%v", handled, err)
 	}
-	deadline := time.Now().Add(30 * time.Second)
-	for {
-		view, err = f.deps.GetGradingJob(context.Background(), "mingming", f.jobID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if view.Record.Status == k12.GradingStageAwaitingConfirmation {
-			break
-		}
-		if time.Now().After(deadline) || view.Record.Status == k12.GradingStageOutcomeUnknown || view.Record.Status == k12.GradingStageFailedTerminal {
-			t.Fatalf("resume stage=%s failure=%s calls=%v", view.Record.Status, view.Fields.FailureKind, f.counts())
-		}
-		time.Sleep(10 * time.Millisecond)
+	if err := f.o.WaitForIdle(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	view, err = f.deps.GetGradingJob(context.Background(), "mingming", f.jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Record.Status != k12.GradingStageAwaitingConfirmation {
+		t.Fatalf("resume stage=%s failure=%s calls=%v", view.Record.Status, view.Fields.FailureKind, f.counts())
 	}
 	questions, ok := f.o.RecognizedQuestionsForOwner(context.Background(), "mingming", f.jobID)
 	if !ok || len(questions) != 4 {

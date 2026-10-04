@@ -379,6 +379,7 @@ func TestGradingRecoveryExpiredParentBeforeSendPersistsInteractiveDeadlineWithou
 	}}}
 	d := recoveryDeps(t, rec, nil, &photoAnnotatorFake{})
 	d.Now = func() int64 { return now }
+	seedGradingImageTaskOwnerScopeForTest(t, d, "dispatch-expired-before-send:1")
 	dir := t.TempDir()
 	o1 := newRecoverableOrchestrator(t, d, dir)
 	photo := orchestratorPhotoRequest()

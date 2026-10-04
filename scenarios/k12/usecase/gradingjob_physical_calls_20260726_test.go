@@ -36,7 +36,10 @@ func (s *grading20260726PhysicalSolver) Solve(
 			}
 			return SolveResult{
 				Solution: "2",
-				Evidence: SolveEvidence{Verdict: VerdictAgree, EvidenceType: EvidenceNumericExec},
+				Evidence: SolveEvidence{
+					Verdict: VerdictAgree, EvidenceType: EvidenceHeterogeneousModel,
+					SolverModel: "solver-a", VerifierModel: "verifier-b",
+				},
 			}, nil
 		}, s,
 	)

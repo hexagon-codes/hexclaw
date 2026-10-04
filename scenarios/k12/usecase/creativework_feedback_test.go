@@ -272,7 +272,9 @@ func TestGenerateWorkFeedback_INV011_Rejected(t *testing.T) {
 // （如“10分钟”“百分数”这类含“分”字但非打分的表述）。
 func TestGenerateWorkFeedback_FeedbackNotFalselyRejected(t *testing.T) {
 	d := newDataDeps(t)
-	d.Solver = &fakeWorkFeedbackSolver{feedback: "「柳枝像绿色的丝带」比喻好；建议每天花 10 分钟朗读，结尾再补一个细节。"}
+	d.Solver = &fakeWorkFeedbackSolver{feedback: "## 可见证据\n原稿写了「柳枝像绿色的丝带」。\n" +
+		"## 先这样肯定\n「柳枝像绿色的丝带」比喻好。\n## 家长可以这样问或讲\n建议每天花 10 分钟朗读。\n" +
+		"## 下一次只试一个点\n结尾再补一个细节。"}
 	ctx := context.Background()
 	id := newWritingWork(t, d, "xiaoming")
 	if _, err := d.GenerateWorkFeedback(ctx, "xiaoming", id); err != nil {
