@@ -163,6 +163,9 @@ func TestBUG20260802FrozenAssessingNestedOperationsUseDurableStageDeadline(t *te
 	o := newParallelAnchorOrchestrator(t, &countingRecognizer{questions: []RecognizedQuestion{{
 		Question: "1+1=", Subject: "数学", StudentAnswer: "3", AnswerState: AnswerStatePresent,
 	}}}, nil, WithGradingRunDir(t.TempDir()))
+	// 截止时间持久化为整秒，固定起点以精确校验预算，不依赖断言前的调度耗时。
+	frozenNow := time.Now().Unix()
+	o.deps.Now = func() int64 { return frozenNow }
 	o.deps.Solver = &assessingDeadlineSolver{recorder: recorder}
 	o.deps.Grader = &assessingDeadlineGrader{recorder: recorder}
 	o.deps.VerifiedGrader = nil
@@ -184,9 +187,9 @@ func TestBUG20260802FrozenAssessingNestedOperationsUseDurableStageDeadline(t *te
 	}
 
 	run, job := confirmItemResumeJobWithoutRun(t, o, jobID)
-	wantDeadline := time.Unix(job.Fields.Deadline, 0)
-	if remaining := time.Until(wantDeadline); remaining < 599*time.Second || remaining > 601*time.Second {
-		t.Fatalf("frozen assessing deadline remaining=%s, want approximately 600s", remaining)
+	wantDeadline := time.Unix(frozenNow+600, 0)
+	if job.Fields.Deadline != wantDeadline.Unix() {
+		t.Fatalf("frozen assessing deadline=%d, want %d (600s budget)", job.Fields.Deadline, wantDeadline.Unix())
 	}
 	view, err := o.runAssessItems(context.Background(), run, job)
 	if err != nil || view.Record.Status != k12.GradingStageRendering {

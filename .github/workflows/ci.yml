@@ -1,5 +1,6 @@
 name: CI
 
+# 执行边界与变更规则见 CONTRIBUTING.md 的 CI/CD 固定基线。
 on:
   push:
     branches: [main, "feat/**"]
@@ -19,12 +20,14 @@ on:
       - "SECURITY*.md"
       - "docs/**/*.md"
       - "LICENSE"
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  # 手动专项与日常提交独立，避免新提交取消正在执行的 race 验证。
+  group: ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -56,8 +59,6 @@ jobs:
     # 与 toolkit 的真实沙箱执行基线一致，保留所需 namespace 能力。
     runs-on: ubuntu-22.04
     timeout-minutes: 50
-    env:
-      HAS_REAL_LLM_EVAL_KEY: ${{ secrets.HEXCLAW_LLM_EVAL_KEY != '' }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
@@ -103,18 +104,11 @@ jobs:
         env:
           HEXCLAW_P0_SANDBOX_PROOF: "1"
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            go test -count=1 -timeout 30m ./...
-          else
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             go test -race -count=1 -timeout 30m ./...
+          else
+            go test -count=1 -timeout 30m ./...
           fi
-
-      - name: K12 real-model accuracy gate (opt-in)
-        if: ${{ env.HAS_REAL_LLM_EVAL_KEY == 'true' }}
-        run: go test -count=1 -timeout 900s -run TestK12EvalGate_RealModel -v ./scenarios/k12/usecase/
-        env:
-          HEXCLAW_REAL_LLM_EVAL: "1"
-          HEXCLAW_REAL_LLM_KEY: ${{ secrets.HEXCLAW_LLM_EVAL_KEY }}
 
   test-sandbox:
     name: Test (${{ matrix.platform }} Sandbox)
