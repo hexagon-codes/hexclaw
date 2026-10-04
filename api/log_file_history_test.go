@@ -140,6 +140,7 @@ func TestLogFileSinkHistoryPreservesNewAndLegacyIdentityAcrossRestart(t *testing
 	path := filepath.Join(dir, "hexclaw.log")
 	now := time.Now().Add(-time.Hour)
 	legacy := historyFixture(t, now, "same legacy row")
+	legacy = bytes.Replace(legacy, []byte("}\n"), []byte(",\"fields\":{\"nested\":{\"count\":9007199254740993}}}\n"), 1)
 	if err := os.WriteFile(path, bytes.Join([][]byte{legacy, legacy}, nil), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +173,8 @@ func TestLogFileSinkHistoryPreservesNewAndLegacyIdentityAcrossRestart(t *testing
 		t.Fatal("legacy row timestamp/domain reconstructed incorrectly")
 	}
 	for range 2 {
-		sink.Write(LogEntry{Timestamp: now.UTC().Format(time.RFC3339Nano), Level: "warn", Source: "trace", Message: "same legacy row"})
+		sink.Write(LogEntry{Timestamp: now.UTC().Format(time.RFC3339Nano), Level: "warn", Source: "trace", Message: "same legacy row",
+			Fields: map[string]any{"nested": map[string]any{"count": json.Number("9007199254740993")}}})
 	}
 	appended, total, err := sink.QueryHistory(context.Background(), LogHistoryQuery{Limit: 10})
 	if err != nil || total != 6 || len(appended) != 6 || !reflect.DeepEqual(appended[2:], before) {
@@ -197,6 +199,14 @@ func TestLogFileSinkHistoryPreservesNewAndLegacyIdentityAcrossRestart(t *testing
 	page, total, err := reopened.QueryHistory(context.Background(), LogHistoryQuery{Limit: 1, Offset: 2})
 	if err != nil || total != 6 || len(page) != 1 || !reflect.DeepEqual(page[0], before[2]) {
 		t.Fatalf("pagination renumbered legacy identities: total=%d page=%#v err=%v", total, page, err)
+	}
+	for _, item := range []struct{ offset, index int }{{2, 3}, {4, 5}} {
+		filtered, total, err := reopened.QueryHistory(context.Background(), LogHistoryQuery{
+			Keyword: "same legacy row", Limit: 1, Offset: item.offset,
+		})
+		if err != nil || total != 5 || len(filtered) != 1 || !reflect.DeepEqual(filtered[0], before[item.index]) {
+			t.Fatalf("filtered page changed retained identity: offset=%d total=%d rows=%#v err=%v", item.offset, total, filtered, err)
+		}
 	}
 }
 

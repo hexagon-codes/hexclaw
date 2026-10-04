@@ -230,8 +230,10 @@ func (s *LogFileSink) cleanupExpiredLocked(now time.Time) error {
 		kept := make([]byte, 0, len(data))
 		changed := false
 		for _, line := range bytes.SplitAfter(data, []byte{'\n'}) {
-			var entry logFileEntry
-			if json.Unmarshal(line, &entry) == nil {
+			var entry struct {
+				Timestamp string `json:"ts"`
+			}
+			if _, err := decodeLogFileMetadata(line, &entry); err == nil {
 				if timestamp, err := time.Parse(time.RFC3339Nano, entry.Timestamp); err == nil && timestamp.Before(cutoff) {
 					changed = true
 					continue
@@ -303,6 +305,42 @@ type logFileSnapshot struct {
 	size int64
 }
 
+type logFilePosition struct {
+	snapshot int
+	line     int
+}
+
+// logFileQueryEntry 延后解码结构化字段，扫描计数不为未返回的日志分配字段对象。
+type logFileQueryEntry struct {
+	ID        string          `json:"id,omitempty"`
+	Timestamp string          `json:"ts"`
+	Level     string          `json:"level"`
+	Source    string          `json:"source,omitempty"`
+	Domain    string          `json:"domain,omitempty"`
+	Message   string          `json:"msg"`
+	Fields    json.RawMessage `json:"fields,omitempty"`
+	TraceID   string          `json:"trace_id,omitempty"`
+}
+
+// decodeLogFileMetadata 对既有 JSONL 尾部 fields 保留原始字节，只解析查询元数据。
+// 完整校验 fields JSON；其他字段顺序及 trace_id 后置的格式仍由标准解码器读取。
+func decodeLogFileMetadata(line []byte, value any) (json.RawMessage, error) {
+	line = bytes.TrimSpace(line)
+	marker := []byte(`,"fields":`)
+	if position := bytes.Index(line, marker); position > 0 && len(line) > 0 && line[len(line)-1] == '}' {
+		fields := line[position+len(marker) : len(line)-1]
+		if json.Valid(fields) {
+			metadata := make([]byte, position+1)
+			copy(metadata, line[:position])
+			metadata[position] = '}'
+			if err := json.Unmarshal(metadata, value); err == nil {
+				return fields, nil
+			}
+		}
+	}
+	return nil, json.Unmarshal(line, value)
+}
+
 // LogHistoryQuery 沿用实时查询的过滤与分页，并以含端点的时间范围查询保留期内日志。
 type LogHistoryQuery struct {
 	Level, Source, Domain, Keyword string
@@ -350,8 +388,10 @@ func (s *LogFileSink) QueryHistory(ctx context.Context, query LogHistoryQuery) (
 	entries := make([]LogEntry, 0, limit)
 	total := 0
 	legacyOccurrences := make(map[[32]byte]int)
+	legacyPositions := make(map[logFilePosition]int)
+	legacyPrefixes := make(map[[64]byte]struct{})
 	matcher := newKeywordMatcher(query.Keyword)
-	for _, snapshot := range snapshots {
+	for snapshotIndex, snapshot := range snapshots {
 		data, err := readLogSnapshot(ctx, snapshot)
 		if err != nil {
 			return nil, 0, err
@@ -361,16 +401,17 @@ func (s *LogFileSink) QueryHistory(ctx context.Context, query LogHistoryQuery) (
 			if err := ctx.Err(); err != nil {
 				return nil, 0, err
 			}
-			var stored logFileEntry
-			decoder := json.NewDecoder(bytes.NewReader(lines[i]))
-			decoder.UseNumber()
-			if decoder.Decode(&stored) != nil || decoder.Decode(&struct{}{}) != io.EOF {
+			var stored logFileQueryEntry
+			rawFields, err := decodeLogFileMetadata(lines[i], &stored)
+			if err != nil {
 				continue
 			}
-			if stored.ID == "" {
-				hash := sha256.Sum256(lines[i])
-				legacyOccurrences[hash]++
-				stored.ID = fmt.Sprintf("legacy-%x-%d", hash, legacyOccurrences[hash])
+			if rawFields != nil {
+				stored.Fields = rawFields
+			}
+			fieldsJSON := bytes.TrimSpace(stored.Fields)
+			if len(fieldsJSON) > 0 && fieldsJSON[0] != '{' && !bytes.Equal(fieldsJSON, []byte("null")) {
+				continue
 			}
 			timestamp, err := time.Parse(time.RFC3339Nano, stored.Timestamp)
 			if err != nil || timestamp.Before(cutoff) || (!query.End.IsZero() && timestamp.After(query.End)) {
@@ -388,18 +429,73 @@ func (s *LogFileSink) QueryHistory(ctx context.Context, query LogHistoryQuery) (
 			if total <= offset || len(entries) >= limit {
 				continue
 			}
+			// 只保存本页旧记录的身份候选，深分页不保留此前全部记录的摘要。
+			if stored.ID == "" {
+				hash := sha256.Sum256(lines[i])
+				legacyOccurrences[hash] = 0
+				legacyPositions[logFilePosition{snapshot: snapshotIndex, line: i}] = len(entries)
+				var prefix [64]byte
+				copy(prefix[:], lines[i])
+				legacyPrefixes[prefix] = struct{}{}
+			}
+			var fields map[string]any
+			if len(fieldsJSON) > 0 {
+				decoder := json.NewDecoder(bytes.NewReader(fieldsJSON))
+				decoder.UseNumber()
+				if err := decoder.Decode(&fields); err != nil {
+					return nil, 0, err
+				}
+			}
 			entries = append(entries, LogEntry{
 				ID: stored.ID, Timestamp: stored.Timestamp, Level: stored.Level,
 				Source: stored.Source, Domain: stored.Domain, Message: stored.Message,
-				Fields: stored.Fields, TraceID: stored.TraceID,
+				Fields: fields, TraceID: stored.TraceID,
 			})
 		}
+	}
+	if len(legacyPositions) > 0 {
+		// 沿同一文件快照补算候选的原始出现序号，原内容相同的记录不会被筛选拆分。
+		// 仅扫描到本页最后一个候选；字段不重复解码，身份集合最多为本页记录数。
+		for snapshotIndex, snapshot := range snapshots {
+			data, err := readLogSnapshot(ctx, snapshot)
+			if err != nil {
+				return nil, 0, err
+			}
+			lines := bytes.Split(data, []byte{'\n'})
+			for i := len(lines) - 1; i >= 0; i-- {
+				if err := ctx.Err(); err != nil {
+					return nil, 0, err
+				}
+				// 相同原始行必有相同前缀；预筛只省略不可能命中的全文摘要计算。
+				var prefix [64]byte
+				copy(prefix[:], lines[i])
+				if _, candidate := legacyPrefixes[prefix]; !candidate {
+					continue
+				}
+				hash := sha256.Sum256(lines[i])
+				occurrence, candidate := legacyOccurrences[hash]
+				if !candidate {
+					continue
+				}
+				legacyOccurrences[hash] = occurrence + 1
+				position := logFilePosition{snapshot: snapshotIndex, line: i}
+				if index, selected := legacyPositions[position]; selected {
+					entries[index].ID = fmt.Sprintf("legacy-%x-%d", hash, occurrence+1)
+					delete(legacyPositions, position)
+					if len(legacyPositions) == 0 {
+						return entries, total, nil
+					}
+				}
+			}
+		}
+		return nil, 0, io.ErrUnexpectedEOF
 	}
 	return entries, total, nil
 }
 
 func readLogSnapshot(ctx context.Context, snapshot logFileSnapshot) ([]byte, error) {
-	var data bytes.Buffer
+	// 冻结长度已知，避免扫描大文件时缓冲反复扩容和复制已读取的内容。
+	data := bytes.NewBuffer(make([]byte, 0, snapshot.size))
 	reader := io.NewSectionReader(snapshot.file, 0, snapshot.size)
 	buf := make([]byte, 64*1024)
 	for {
