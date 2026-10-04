@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestLogFileSink_RotateAtExactMaxSize(t *testing.T) {
@@ -25,7 +26,7 @@ func TestLogFileSink_RotateAtExactMaxSize(t *testing.T) {
 	// Write entries until we exceed maxSize exactly or just past it
 	for i := 0; i < 50; i++ {
 		sink.Write(LogEntry{
-			Timestamp: "2025-01-01T00:00:00Z",
+			Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
 			Level:     "info",
 			Message:   fmt.Sprintf("msg-%d", i),
 		})
@@ -62,7 +63,7 @@ func TestLogFileSink_RotateMaxFiles1(t *testing.T) {
 	// Write enough to trigger multiple rotations
 	for i := 0; i < 100; i++ {
 		sink.Write(LogEntry{
-			Timestamp: "2025-01-01T00:00:00Z",
+			Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
 			Level:     "info",
 			Message:   fmt.Sprintf("message-number-%d-padding", i),
 		})
@@ -99,7 +100,7 @@ func TestLogFileSink_ConcurrentWrites(t *testing.T) {
 			defer wg.Done()
 			for i := 0; i < 50; i++ {
 				sink.Write(LogEntry{
-					Timestamp: "2025-01-01T00:00:00Z",
+					Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
 					Level:     "info",
 					Message:   fmt.Sprintf("goroutine-%d-msg-%d", id, i),
 				})
@@ -130,7 +131,7 @@ func TestLogFileSink_WriteAfterClose(t *testing.T) {
 
 	// Write after close should not panic
 	sink.Write(LogEntry{
-		Timestamp: "2025-01-01T00:00:00Z",
+		Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
 		Level:     "info",
 		Message:   "after close",
 	})
@@ -152,7 +153,7 @@ func TestLogFileSink_NestedDirectories(t *testing.T) {
 	defer sink.Close()
 
 	sink.Write(LogEntry{
-		Timestamp: "2025-01-01T00:00:00Z",
+		Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
 		Level:     "info",
 		Message:   "nested dir test",
 	})
@@ -178,7 +179,7 @@ func TestLogFileSink_VeryLargeMessage(t *testing.T) {
 	// 1MB message
 	bigMsg := strings.Repeat("X", 1024*1024)
 	sink.Write(LogEntry{
-		Timestamp: "2025-01-01T00:00:00Z",
+		Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
 		Level:     "info",
 		Message:   bigMsg,
 	})
@@ -250,7 +251,7 @@ func TestLogFileSink_RotatedFilesAfterMultipleRotations(t *testing.T) {
 	// Write enough to cause several rotations
 	for i := 0; i < 200; i++ {
 		sink.Write(LogEntry{
-			Timestamp: "2025-01-01T00:00:00Z",
+			Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
 			Level:     "info",
 			Message:   fmt.Sprintf("rotation-test-msg-%d-pad", i),
 		})

@@ -684,7 +684,7 @@ hexclaw/
 ### 日志与监控
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/v1/logs` | 查询日志（支持 level/source/domain/keyword 过滤 + 分页） |
+| GET | `/api/v1/logs` | 查询实时日志；`history=true` 或 `start/end` 查询磁盘历史，支持过滤与分页 |
 | GET | `/api/v1/logs/stats` | 日志统计（按 level/source 分类计数） |
 | GET | `/api/v1/logs/stream` | 实时日志流 (WebSocket，需 Token 认证) |
 
@@ -701,6 +701,8 @@ hexclaw/
 - 平台实例推荐在前端用 `by-id` 路由做更新/删除/测试，避免显示名重命名后误操作；`GET/POST /api/v1/platforms/hooks/{provider}/{name}` 由平台适配器复用为回调入口。
 - 图片/视频生成优先返回 `file_path`，前端拼接 `/api/v1/files/generated/{path}` 访问，避免把大 base64 写入 SQLite。
 - `GET /api/v1/logs` 的日志项包含稳定 `domain` 字段，可按 `chat / knowledge / integration / automation / engine` 等功能域过滤。
+- 日志查询默认从最多 5000 条进程内实时日志读取；`history=true` 或提供 `start/end` 时改为读取磁盘历史，不合并两种来源。`start/end` 为 RFC3339Nano 时间，含两个端点；无效或反向范围返回 400。两种来源均支持 `level/source/domain/keyword`（关键字匹配消息正文）、`offset` 和 `limit`，默认 100、最大 8000；按最新追加记录优先返回，`total` 为过滤后匹配总数。历史查询失败不会回退到实时缓存，文件持久化不可用时返回 503。
+- 磁盘 JSONL 日志默认保留最近 7 天，并沿用单文件 10 MiB、最多 100 份历史加当前文件的轮转上限（约 1010 MiB，先触达容量上限时更早淘汰）。启动及写入/历史查询的每小时维护清理过期条目；历史读取即时排除保留期外记录。无法解析的原始行保留在文件内，但不作为有效日志返回。重启后可查询仍保留的历史日志；`/logs/stats` 和实时 WebSocket 流保持进程内实时含义。
 - `POST /api/v1/config/llm/models` 向 Provider 的 `/models` 端点发起代理请求，返回标准化的模型列表（`{ models: [{ id, name }] }`）；支持 OpenAI 标准格式和替代格式的自动适配。
 - `GET /api/v1/llm/capabilities` 返回 `{ provider_name, model_name, tool_call, tool_call_text, last_probe, probe_error }`；`POST /api/v1/llm/capabilities/probe?provider=X&model=Y` 会实时重测并写入 SQLite 缓存。
 

@@ -884,13 +884,39 @@ func (s *Server) handleGetLogs(w http.ResponseWriter, r *http.Request) {
 	offset := 0
 	if v := q.Get("limit"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			limit = min(n, 500)
+			limit = min(n, 8000)
 		}
 	}
 	if v := q.Get("offset"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 			offset = n
 		}
+	}
+
+	start, startErr := parseLogHistoryTime(q.Get("start"))
+	end, endErr := parseLogHistoryTime(q.Get("end"))
+	if startErr != nil || endErr != nil || (!start.IsZero() && !end.IsZero() && start.After(end)) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid log history time range"})
+		return
+	}
+	if q.Get("history") == "true" || q.Has("start") || q.Has("end") {
+		s.logCollector.mu.RLock()
+		sink := s.logCollector.fileSink
+		s.logCollector.mu.RUnlock()
+		if sink == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "log history is unavailable"})
+			return
+		}
+		entries, total, err := sink.QueryHistory(r.Context(), LogHistoryQuery{
+			Level: level, Source: source, Domain: domain, Keyword: keyword,
+			Start: start, End: end, Limit: limit, Offset: offset,
+		})
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "log history query failed"})
+			return
+		}
+		writeJSON(w, http.StatusOK, logsResponse{Logs: entries, Total: total})
+		return
 	}
 
 	key := logQueryKey{
@@ -919,6 +945,14 @@ func (s *Server) handleGetLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	s.logCollector.cacheQueryBody(key, version, body)
 	writeJSONBytes(w, http.StatusOK, body)
+}
+
+func parseLogHistoryTime(value string) (time.Time, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}, nil
+	}
+	return time.Parse(time.RFC3339Nano, value)
 }
 
 func (s *Server) handleGetLogStats(w http.ResponseWriter, r *http.Request) {
