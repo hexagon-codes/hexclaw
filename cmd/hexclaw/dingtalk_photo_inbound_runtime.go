@@ -23,8 +23,9 @@ import (
 )
 
 const (
-	k12DingtalkPhotoRoutingObjectKind = "dingtalk_photo_routing_confirmation"
-	k12DingtalkInboundRecoveryLimit   = 100
+	k12DingtalkPhotoRoutingObjectKind  = "dingtalk_photo_routing_confirmation"
+	k12DingtalkInboundRecoveryLimit    = 100
+	k12DingtalkInboundMaxRetryInterval = 30 * time.Second
 )
 
 var errK12InboundPhotoRoutingSnapshotUnavailable = errors.New(
@@ -363,12 +364,17 @@ func (r *k12DingtalkPhotoInboundRuntime) schedule(agentName, receiptID string) {
 }
 
 func (r *k12DingtalkPhotoInboundRuntime) run(agentName, receiptID string) {
+	retryDelay := min(r.retryInterval, k12DingtalkInboundMaxRetryInterval)
 	for {
 		if err := r.baseCtx.Err(); err != nil {
 			return
 		}
 		attemptStartedAt := time.Now()
 		bundle, err := r.inbound.Resume(r.baseCtx, agentName, receiptID)
+		if errors.Is(err, records.ErrNotFound) {
+			// 入站聚合已不存在，结束对应worker，不重建或重发任务。
+			return
+		}
 		done := false
 		if err == nil {
 			done, err = r.advance(r.baseCtx, bundle)
@@ -378,7 +384,10 @@ func (r *k12DingtalkPhotoInboundRuntime) run(agentName, receiptID string) {
 		}
 		delay := r.pollInterval
 		if err != nil {
+			delay = r.retryInterval
 			if !errors.Is(err, records.ErrVersionConflict) {
+				delay = retryDelay
+				retryDelay = nextK12DingtalkPhotoRetryInterval(retryDelay)
 				slog.Warn("K12 DingTalk inbound photo worker will retry",
 					"agent", agentName,
 					"receipt_id", receiptID,
@@ -395,11 +404,13 @@ func (r *k12DingtalkPhotoInboundRuntime) run(agentName, receiptID string) {
 					"reply_status", bundle.Dispatch.ReplyStatus,
 					"terminal_status", bundle.Dispatch.TerminalStatus,
 					"elapsed_ms", time.Since(attemptStartedAt).Milliseconds(),
+					"retry_delay_ms", delay.Milliseconds(),
 					"error_type", fmt.Sprintf("%T", err),
 					"error", err,
 				)
 			}
-			delay = r.retryInterval
+		} else {
+			retryDelay = min(r.retryInterval, k12DingtalkInboundMaxRetryInterval)
 		}
 		timer := time.NewTimer(delay)
 		select {
@@ -409,6 +420,14 @@ func (r *k12DingtalkPhotoInboundRuntime) run(agentName, receiptID string) {
 		case <-timer.C:
 		}
 	}
+}
+
+// 连续可恢复错误逐次退避；先检查上限，避免时长倍增溢出。
+func nextK12DingtalkPhotoRetryInterval(current time.Duration) time.Duration {
+	if current >= k12DingtalkInboundMaxRetryInterval/2 {
+		return k12DingtalkInboundMaxRetryInterval
+	}
+	return current * 2
 }
 
 // Recover 只在平台实例已启动后调用；扫描结果按收据去重进入同一个进程 worker。
