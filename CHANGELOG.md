@@ -19,10 +19,10 @@
 - **技能种子版本化**：首启内嵌技能支持版本感知升级，默认市场目录对齐 `hexagon-codes/hexclaw-hub` `v0.0.6`。
 - **本地/云端路由韧性**：本地默认模型启动预热并对齐 `num_ctx`；推理、视觉、embedding 和 rerank 按用途选路，provider failover 时重建符合目标 locality 的请求。
 - **工作流与平台生命周期**：条件节点、路由规则与配置更新改为原子持久化；MCP 客户端与 IM adapter 收敛启停、重连和投递语义。
-- 收敛自动 CI/CD：功能分支编译预检维持现有自动部署，main / PR 由一个主 CI 执行 Linux 全量测试和 race，以及必要的跨平台 sandbox / CodeExec；K12 确定性测试包含在全量中，配置真实模型密钥时由主 CI 执行真实模型门。K12 / Sandbox 专项与公网爬虫改为手动，上游 toolkit 自身测试不在普通提交重复执行。
+- 收敛自动 CI/CD：功能分支编译预检维持现有自动部署，main / PR 由一个主 CI 执行 Linux 全量测试（PR 普通测试、main push race），以及必要的跨平台 sandbox / CodeExec；K12 确定性测试包含在全量中，配置真实模型密钥时由主 CI 执行真实模型门。K12 / Sandbox 专项与公网爬虫改为手动，上游 toolkit 自身测试不在普通提交重复执行。
 - 主 CI 仅对指定纯说明文档改动跳过构建与自动部署，不广义忽略可能参与 `go:embed` 的 Markdown；render 按自身路径规则独立运行。移除覆盖率上传、Windows 非阻塞重复测试及 render 每周上游版本查询；Deploy / render 独立成功不能代替主 CI。
-- CI 与 K12 使用 `GOWORK=off`、`GOFLAGS=-mod=readonly`；Linux 全量命令调整为 `go test -race -count=1 -timeout 20m ./...`，当前单包测试超时为 20 分钟、job 总预算为 40 分钟。
-- 普通业务测试及迁移包内仅检查最新 schema 约束的用例复用进程内真实迁移的空库模板，各用例保持独立数据库、原连接语义、全部断言和 race；历史 schema 升级、全链重跑、重开及生产迁移流程不变，减少重复迁移导致的 CI 超时。
+- CI 与 K12 使用 `GOWORK=off`、`GOFLAGS=-mod=readonly`；Linux PR 执行 `go test -count=1 -timeout 30m ./...`，main push 执行 `go test -race -count=1 -timeout 30m ./...`，两者单包测试超时均为 30 分钟、job 总预算均为 50 分钟。
+- 普通业务测试及迁移包内仅检查最新 schema 约束的用例复用进程内真实迁移的空库模板，各用例保持独立数据库、原连接语义和全部断言，main push 全量 race 保留；历史 schema 升级、全链重跑、重开及生产迁移流程不变，减少重复迁移导致的 CI 超时。
 - Windows Go 构建缓存组仅两项真实初始化 / 预算用例按平台能力跳过；规则与清理断言仍跨平台执行，跳过不计为 Windows Go 运行已验证。
 - 更新中英文安装、开发与云端部署文档，区分功能分支编译、main / PR 全量验证、按提交自动部署和独立 Tag Release；历史审计结果保留原证据范围。
 

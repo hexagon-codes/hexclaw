@@ -731,7 +731,7 @@ hexclaw/
 
 - 功能分支 `feat/**` push 只运行编译检查，不执行测试用例；启用自动部署且配置为部署分支时，编译成功会触发云端部署。
 - 分支 push / PR 仅修改 `README*.md`、`CHANGELOG.md`、`CONTRIBUTING.md`、`SECURITY*.md`、`docs/**/*.md` 或 `LICENSE` 时不触发 CI，也不触发该提交的构建或自动云端部署。不能广义忽略所有 `**/*.md`：其他路径的 Markdown 可能是 `go:embed` 运行资源。
-- main push / 指向 main 的 PR 由一个主 CI 执行 Linux 全量测试及 race、Windows 构建和必要的跨平台 sandbox / CodeExec。Linux 当前命令为 `go test -race -count=1 -timeout 20m ./...`，单包测试超时 20 分钟、job 总预算 40 分钟；不再上传覆盖率或运行 Windows 提示性重复测试。
+- main push / 指向 main 的 PR 由一个主 CI 执行 Linux 全量测试、Windows 构建和必要的跨平台 sandbox / CodeExec。PR 使用 `go test -count=1 -timeout 30m ./...`，main push 使用 `go test -race -count=1 -timeout 30m ./...`；两者单包测试超时均为 30 分钟、Linux job 总预算均为 50 分钟。不再上传覆盖率或运行 Windows 提示性重复测试。
 - Linux 全量测试使用与 toolkit 沙箱基线一致的 Ubuntu 22.04，安装后以真实 bubblewrap 空命令探测 namespace 能力；失败保留错误输出并终止，不重试或跳过。完整沙箱行为仍由原测试验证。
 - CI 与 K12 使用 `GOWORK=off` 和 `GOFLAGS=-mod=readonly`，核对已发布依赖且不改写依赖锁定文件。K12 确定性测试已包含在全量中，配置 `HEXCLAW_LLM_EVAL_KEY` 时由主 CI 执行真实模型门；K12 / Sandbox 专项改为手动，公网爬虫仅在手动 Sandbox 的 `run_live_network=true` 时运行，上游 toolkit 自身测试不在普通提交重复执行。render 仍按自身路径规则独立运行，不执行每周定时任务或查询上游最新版本。
 - 普通业务测试及仅检查最新 schema 约束的迁移用例复用真实迁移生成的空库模板，各用例仍有独立数据库、原连接语义和全部断言；生产迁移、历史 schema 升级、全链重跑及重开测试不变。Windows Go 构建缓存组仅两项真实初始化 / 预算用例按能力跳过，规则与清理断言仍跨平台执行；其他真实 code_exec 集成沿用既有 toolkit 能力门控。跳过不代表 Windows Go 运行已验证。
@@ -841,7 +841,7 @@ chore: 构建/工具链
 **依赖与 CI/CD**
 - **框架依赖升级** — `go.mod` 对齐 hexagon v0.5.14 / ai-core v0.2.11 / toolkit v0.3.4，Go 兼容基线为 1.25.13；发布与本地复验使用已发布依赖，不依赖本地 workspace。
 - **技能种子升级** — 首启内嵌技能支持版本感知升级，默认目录对齐 `hexagon-codes/hexclaw-hub` `v0.0.6`。
-- **CI/CD 精简** — 功能分支保留编译预检与自动部署，main / PR 统一由主 CI 执行全量 race 和必要跨平台 CodeExec；K12 确定性包含在全量中，配置密钥时执行真实模型门。K12 / Sandbox 专项及公网爬虫改为手动，不重复上游 toolkit 自身测试；render 独立成功不代替主 CI。仅纯说明文档改动跳过主 CI 与自动部署，内嵌 Markdown 资源仍参与检查，覆盖率上传与 render 每周上游版本查询已移除。
+- **CI/CD 精简** — 功能分支保留编译预检与自动部署，main / PR 统一由主 CI 执行全量测试和必要跨平台 CodeExec：PR 执行普通全量测试，main push 执行全量 race；K12 确定性包含在全量中，配置密钥时执行真实模型门。K12 / Sandbox 专项及公网爬虫改为手动，不重复上游 toolkit 自身测试；render 独立成功不代替主 CI。仅纯说明文档改动跳过主 CI 与自动部署，内嵌 Markdown 资源仍参与检查，覆盖率上传与 render 每周上游版本查询已移除。
 - **沙箱复验口径** — 主 CI 保留必要的跨平台执行器验证，`sandbox-code-exec.yml` 仅手动补验强沙箱与 `run_live_network=true` 时的公网爬虫；使用 `HEXCLAW_P0_SANDBOX_PROOF=1` 要求 Linux 真实执行，runner 完整性探针仅在 `HEXCLAW_RUNNER_PROBE=1` 时手工触发。
 
 > 完整发布历史见 [CHANGELOG.md](CHANGELOG.md)。
