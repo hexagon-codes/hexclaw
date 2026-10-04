@@ -900,6 +900,12 @@ func (s *Store) prepareRecognizingInvocationWithInitialWholePageOnce(
 	// 提交成功或主路径失败后，回滚仅用于释放事务；主路径错误保持原样。
 	defer func() { _ = tx.Rollback() }()
 
+	// 先取得写锁再读取父记录，避免 deferred 读快照在并发发布时升级失败。
+	if _, opErr := tx.ExecContext(ctx, `UPDATE k12_model_invocations SET updated_at=updated_at WHERE 0`); opErr != nil {
+		return k12.ModelInvocation{}, k12.ModelPhysicalInvocation{}, false,
+			fmt.Errorf("k12storage: reserve atomic recognizing publication write transaction: %w", opErr)
+	}
+
 	parentCreated := false
 	storedParent, opErr := getModelInvocationByAttemptVia(
 		ctx,
