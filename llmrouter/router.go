@@ -296,6 +296,54 @@ func (p *completionCapabilityProvider) requestModel(req llm.CompletionRequest) s
 	return model
 }
 
+// projectTextOnlyHistory 仅为当前纯文字回合投影历史图片，不修改原请求或存储历史。
+func (p *completionCapabilityProvider) projectTextOnlyHistory(req llm.CompletionRequest) llm.CompletionRequest {
+	model := p.requestModel(req)
+	if !config.ModelHasCapability(p.providerConfig, model, config.LLMModelCapabilityText) ||
+		config.ModelHasCapability(p.providerConfig, model, config.LLMModelCapabilityVision) {
+		return req
+	}
+	lastUser := -1
+	for i := len(req.Messages) - 1; i >= 0; i-- {
+		if req.Messages[i].Role == llm.RoleUser {
+			lastUser = i
+			break
+		}
+	}
+	if lastUser <= 0 {
+		return req
+	}
+	for _, part := range req.Messages[lastUser].MultiContent {
+		if strings.EqualFold(strings.TrimSpace(part.Type), "image_url") {
+			return req
+		}
+	}
+	var projected []llm.Message
+	for i := 0; i < lastUser; i++ {
+		var parts []llm.ContentPart
+		for j, part := range req.Messages[i].MultiContent {
+			if !strings.EqualFold(strings.TrimSpace(part.Type), "image_url") {
+				continue
+			}
+			if projected == nil {
+				projected = make([]llm.Message, len(req.Messages))
+				copy(projected, req.Messages)
+			}
+			if parts == nil {
+				parts = make([]llm.ContentPart, len(req.Messages[i].MultiContent))
+				copy(parts, req.Messages[i].MultiContent)
+				projected[i].MultiContent = parts
+			}
+			// 沿用视觉历史裁剪的占位表达，保留此处曾有图片的上下文。
+			parts[j] = llm.NewTextPart("[早前发送的图片]")
+		}
+	}
+	if projected != nil {
+		req.Messages = projected
+	}
+	return req
+}
+
 func (p *completionCapabilityProvider) validate(req llm.CompletionRequest) error {
 	model := p.requestModel(req)
 	required := []string{config.LLMModelCapabilityText}
@@ -388,6 +436,7 @@ func (p *completionCapabilityProvider) Complete(
 	ctx context.Context,
 	req llm.CompletionRequest,
 ) (*llm.CompletionResponse, error) {
+	req = p.projectTextOnlyHistory(req)
 	if err := p.validate(req); err != nil {
 		return nil, err
 	}
@@ -401,6 +450,7 @@ func (p *completionCapabilityProvider) Stream(
 	ctx context.Context,
 	req llm.CompletionRequest,
 ) (*llm.Stream, error) {
+	req = p.projectTextOnlyHistory(req)
 	if err := p.validate(req); err != nil {
 		return nil, err
 	}
@@ -667,7 +717,8 @@ func providerEndpointBaseURL(name string, pc config.LLMProviderConfig) string {
 		return normalizeOllamaBaseURL(baseURL)
 	}
 	if baseURL != "" {
-		return baseURL
+		// SDK 追加的协议路径以斜杠开头；挂载地址仅去除末尾分隔符，保留自定义前缀。
+		return strings.TrimRight(baseURL, "/")
 	}
 	if name == "anthropic" {
 		return defaultAnthropicProviderBaseURL

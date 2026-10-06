@@ -2,6 +2,7 @@
 //
 // 包含以下端点：
 //   - GET    /health                            健康检查
+//   - POST   /api/v1/service/restart             托管服务优雅重启
 //   - POST   /api/v1/chat                       同步聊天
 //   - GET    /api/v1/sessions                   会话列表
 //   - GET    /api/v1/sessions/{id}              会话详情
@@ -165,6 +166,11 @@ type Server struct {
 	ollamaPulls            map[string]*ollamaPullOperation
 	onOllamaModelInstalled func(context.Context, string)
 	serviceLifecycleCtx    context.Context
+
+	// 同一运行代际只接受一次优雅退出，不将管理请求写入业务数据。
+	serviceRestartMu        sync.Mutex
+	serviceRestartRequestID string
+	serviceRestart          func()
 }
 
 // SandboxPolicy 是一次原子发布的完整沙箱运行策略。
@@ -683,6 +689,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /health", s.handleHealth)
 
 	// API v1
+	mux.HandleFunc("POST /api/v1/service/restart", s.handleRestartService)
 	mux.HandleFunc("POST /api/v1/chat", s.handleChat)
 	mux.HandleFunc("POST /api/v1/attachments", s.handleStageAttachment)
 	// Native-only internal API. apiAuthMiddleware requires an exact loopback
@@ -1158,16 +1165,18 @@ func (s *Server) StopWithDrain(ctx context.Context, drain func()) error {
 
 // handleHealth 健康检查端点
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	response := serviceHealthResponse{
+		Status: "healthy", ProcessInstanceID: processInstanceID, RestartSupported: s.managedRestartSupported(),
+	}
 	if s.engine != nil {
 		if err := s.engine.Health(r.Context()); err != nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{
-				"status": "unhealthy",
-				"error":  err.Error(),
-			})
+			response.Status = "unhealthy"
+			response.Error = err.Error()
+			writeJSON(w, http.StatusServiceUnavailable, response)
 			return
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "healthy"})
+	writeJSON(w, http.StatusOK, response)
 }
 
 // ChatRequest 聊天请求

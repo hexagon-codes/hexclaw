@@ -426,11 +426,34 @@ hexclaw/
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/health` | 健康检查 |
+| POST | `/api/v1/service/restart` | 托管服务优雅重启（需要访问令牌） |
 | POST | `/api/v1/chat` | 聊天（支持流式/同步、角色选择） |
 | GET | `/api/v1/roles` | 角色列表 |
 | GET | `/api/v1/version` | 版本信息 |
 | GET | `/api/v1/stats` | 系统统计 |
 | GET | `/api/v1/models` | 已配置 LLM 模型列表 |
+
+#### 服务健康与托管重启
+
+`GET /health` 保持免鉴权：健康时 HTTP 200、`status="healthy"`；不健康时 HTTP 503、`status="unhealthy"`，并保留 `error`。两种响应均包含 `process_instance_id`（本次进程运行代际，每次进程启动重新生成）及布尔值 `restart_supported`（部署是否已接通托管重启回调）。运行代际不代表持久化数据实例身份。
+
+`POST /api/v1/service/restart` 使用既有 `Authorization: Bearer <access-token>` 鉴权。先读取当前健康响应，再提交一次 JSON：
+
+```json
+{"expected_process_instance_id":"<current-process-id>","request_id":"<unique-request-id>"}
+```
+
+首次受理返回 HTTP 202；响应中的运行代际是重启前的进程，仅表示已受理：
+
+```json
+{"status":"restarting","process_instance_id":"<current-process-id>","request_id":"<unique-request-id>"}
+```
+
+同代际同 `request_id` 的重复请求只返回同一 202 回执，不再次退出。预期代际已变化、未配置管理恢复能力或同代际另一重启请求已受理时返回 HTTP 409，包含 `error` 及当前 `process_instance_id`。无有效访问令牌返回 401，格式错误或必填字段为空返回 400。
+
+仅非 Desktop 服务在部署已确认 supervisor 会恢复退出进程后，设置 `HEXCLAW_MANAGED_RESTART=1` 才启用此接口，例如 Docker 的恢复策略或 systemd 的 `Restart=always`；默认拒绝重启。接口写出受理响应后复用现有优雅退出链，配置、数据库和任务保持原持久化与恢复规则，不直接终止进程或新增任务重放。
+
+客户端只提交一次；超时或断连导致结果未知时，仅查询 `/health`，不得重发重启请求。只有观察到不同的 `process_instance_id` 且 HTTP 200、`status="healthy"`，才确认重启完成；原进程健康或 HTTP 202 均不等于完成。
 
 ### 会话管理
 | 方法 | 路径 | 说明 |

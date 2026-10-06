@@ -428,11 +428,34 @@ hexclaw/
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/health` | Health check |
+| POST | `/api/v1/service/restart` | Graceful managed restart (access token required) |
 | POST | `/api/v1/chat` | Chat (streaming/sync, role selection) |
 | GET | `/api/v1/roles` | Role list |
 | GET | `/api/v1/version` | Version info |
 | GET | `/api/v1/stats` | System statistics |
 | GET | `/api/v1/models` | Configured LLM models |
+
+#### Health and managed restart
+
+`GET /health` remains public: HTTP 200 with `status="healthy"`, or HTTP 503 with `status="unhealthy"` and `error`. Both responses include `process_instance_id` (a new runtime generation for every process start) and the boolean `restart_supported` (whether the deployment has wired a managed restart callback). The runtime generation is separate from persistent data identity.
+
+`POST /api/v1/service/restart` uses the existing `Authorization: Bearer <access-token>` authentication. Read the current health response, then submit one JSON request:
+
+```json
+{"expected_process_instance_id":"<current-process-id>","request_id":"<unique-request-id>"}
+```
+
+The first accepted request returns HTTP 202. Its process ID identifies the old process; acceptance does not mean restart completion:
+
+```json
+{"status":"restarting","process_instance_id":"<current-process-id>","request_id":"<unique-request-id>"}
+```
+
+A duplicate with the same generation and `request_id` returns the same 202 receipt without another exit. HTTP 409, with `error` and the current `process_instance_id`, means the expected generation changed, managed recovery is not configured, or another restart request was already accepted in this generation. Invalid credentials return 401; malformed requests or empty required fields return 400.
+
+Enable `HEXCLAW_MANAGED_RESTART=1` only for a non-Desktop service whose deployment supervisor is confirmed to restart an exited process, such as a Docker restart policy or systemd `Restart=always`. Restart is disabled by default. After writing the acknowledgement, the endpoint uses the existing graceful shutdown chain and preserves existing configuration, database and task recovery rules; it does not terminate the process directly or introduce task replay.
+
+Submit once. If a timeout or disconnection makes the outcome unknown, only query `/health`; do not resend the restart request. Completion requires a different `process_instance_id` and HTTP 200 with `status="healthy"`. A healthy old process or HTTP 202 alone is insufficient.
 
 ### Session Management
 | Method | Path | Description |

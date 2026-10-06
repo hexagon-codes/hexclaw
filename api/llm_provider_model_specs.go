@@ -88,12 +88,24 @@ func resolveProviderModelSpecs(
 	return config.LLMModelSpecsModeExplicit, filtered
 }
 
-func isEmbeddingOnlyCompletionModel(llmCfg config.LLMConfig, providerType, baseURL, modelID string) bool {
+func isEmbeddingOnlyCompletionModel(llmCfg config.LLMConfig, providerInstanceID, providerType, baseURL, modelID string) bool {
+	if providerInstanceID != "" {
+		for providerKey, provider := range llmCfg.Providers {
+			if config.EffectiveProviderInstanceID(providerKey, provider) == providerInstanceID {
+				return config.ModelHasCapability(provider, modelID, config.LLMModelCapabilityEmbedding) &&
+					!config.ModelHasCapability(provider, modelID, config.LLMModelCapabilityText)
+			}
+		}
+	}
 	if _, ok := config.MigrateOpenRouterEmbeddingModelSpec(modelID); ok {
 		return true
 	}
+	if providerInstanceID != "" {
+		return false
+	}
 
 	normalizedBaseURL := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	embeddingOnly := false
 	for providerKey, provider := range llmCfg.Providers {
 		if normalizedBaseURL != "" {
 			if strings.TrimRight(strings.TrimSpace(provider.BaseURL), "/") != normalizedBaseURL {
@@ -102,12 +114,15 @@ func isEmbeddingOnlyCompletionModel(llmCfg config.LLMConfig, providerType, baseU
 		} else if !strings.EqualFold(strings.TrimSpace(providerKey), strings.TrimSpace(providerType)) {
 			continue
 		}
-		if config.ModelHasCapability(provider, modelID, config.LLMModelCapabilityEmbedding) &&
-			!config.ModelHasCapability(provider, modelID, config.LLMModelCapabilityText) {
-			return true
+		// 临时旧请求缺少稳定身份时，不能借同地址其它实例的向量声明误拦文字协议。
+		if config.ModelHasCapability(provider, modelID, config.LLMModelCapabilityText) {
+			return false
+		}
+		if config.ModelHasCapability(provider, modelID, config.LLMModelCapabilityEmbedding) {
+			embeddingOnly = true
 		}
 	}
-	return false
+	return embeddingOnly
 }
 
 // validateConfiguredTextModel is the shared API-boundary guard for operations

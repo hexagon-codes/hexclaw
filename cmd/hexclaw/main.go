@@ -3412,6 +3412,10 @@ Set source only when the material explicitly names a work, title, or another rel
 
 	// 监听退出信号，优雅关闭
 	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	// 仅部署已接通 supervisor 恢复能力时启用，管理请求复用同一优雅退出链。
+	if !desktopMode && os.Getenv("HEXCLAW_MANAGED_RESTART") == "1" {
+		srv.SetManagedRestart(stop)
+	}
 	var semanticWorkerDone chan struct{}
 	var catalogWorkerDone chan struct{}
 	var materialWorkerDone chan struct{}

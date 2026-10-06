@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/hexagon"
 	"github.com/hexagon-codes/hexclaw/config"
 	"github.com/hexagon-codes/hexclaw/egress"
@@ -379,6 +380,8 @@ var providerProbeStartedAtClock atomic.Int64
 type providerProbePersistenceCandidate struct {
 	providerInstanceID string
 	configFingerprint  string
+	modelFingerprint   string
+	embeddingOnly      bool
 	locality           string
 	descriptor         llmConnectionTestProvider
 }
@@ -392,6 +395,7 @@ type providerProbeFingerprintPayload struct {
 	PrivateNetworkHost   string                            `json:"private_network_host"`
 	PrivateNetworkAccess bool                              `json:"private_network_access"`
 	HTTPAuthorization    *config.ProviderHTTPAuthorization `json:"http_authorization,omitempty"`
+	OllamaTargetBaseURL  string                            `json:"ollama_target_base_url,omitempty"`
 }
 
 func nextProviderProbeStartedAt() int64 {
@@ -464,6 +468,9 @@ func providerProbeConfigFingerprint(
 		PrivateNetworkHost:   privateHost,
 		PrivateNetworkAccess: provider.PrivateNetworkAccess.Allowed,
 		HTTPAuthorization:    providerHTTPAuthorizationResponse(provider.HTTPAuthorization),
+	}
+	if provider.HasOllamaTarget() {
+		payload.OllamaTargetBaseURL = normalizeProviderProbeBaseURL(provider.OllamaTargetBaseURL)
 	}
 	canonical, _ := json.Marshal(payload)
 	digest := sha256.Sum256(canonical)
@@ -538,7 +545,10 @@ func (s *Server) providerProbePersistenceCandidate(
 		return providerProbePersistenceCandidate{
 			providerInstanceID: providerInstanceID,
 			configFingerprint:  savedFingerprint,
-			locality:           resolvedProviderProbeLocality(providerType, saved),
+			modelFingerprint:   modelCapabilityProbeConfigFingerprint(providerType, saved, providerProbeModel(saved)),
+			embeddingOnly: config.ModelHasCapability(saved, providerProbeModel(saved), config.LLMModelCapabilityEmbedding) &&
+				!config.ModelHasCapability(saved, providerProbeModel(saved), config.LLMModelCapabilityText),
+			locality: resolvedProviderProbeLocality(providerType, saved),
 			descriptor: llmConnectionTestProvider{
 				ProviderInstanceID:   providerInstanceID,
 				Type:                 providerType,
@@ -555,10 +565,10 @@ func (s *Server) providerProbePersistenceCandidate(
 	return providerProbePersistenceCandidate{}, false
 }
 
-func (s *Server) providerProbeCandidateStillCurrent(
+func providerProbeCandidateMatches(
+	llmCfg config.LLMConfig,
 	candidate providerProbePersistenceCandidate,
 ) bool {
-	llmCfg := s.persistedLLMConfig()
 	for providerKey, saved := range llmCfg.Providers {
 		if config.EffectiveProviderInstanceID(providerKey, saved) != candidate.providerInstanceID {
 			continue
@@ -621,8 +631,19 @@ func (s *Server) persistProviderProbeReceipt(
 	ctx context.Context,
 	candidate providerProbePersistenceCandidate,
 	receipt *storage.ProviderProbeReceipt,
+	modelReceipt *storage.ModelCapabilityProbeReceipt,
 ) bool {
-	if !s.providerProbeCandidateStillCurrent(candidate) {
+	// 配置检查与两类回执写入共用围栏；各表保留最新开始时间的独立 CAS。
+	s.cfgMu.Lock()
+	defer s.cfgMu.Unlock()
+	if !providerProbeCandidateMatches(s.cfg.LLM, candidate) {
+		return false
+	}
+	if modelReceipt != nil && !modelCapabilityProbeCandidateMatches(s.cfg.LLM, modelCapabilityProbeCandidate{
+		providerInstanceID: candidate.providerInstanceID,
+		modelID:            candidate.descriptor.Model,
+		configFingerprint:  candidate.modelFingerprint,
+	}) {
 		return false
 	}
 	receiptStore, ok := s.store.(storage.ProviderProbeReceiptStore)
@@ -635,6 +656,15 @@ func (s *Server) persistProviderProbeReceipt(
 			"provider_instance_id", candidate.providerInstanceID,
 			"error", err)
 		return false
+	}
+	if modelReceiptStore, ok := s.store.(storage.ModelCapabilityProbeReceiptStore); ok && modelReceipt != nil {
+		if _, err := modelReceiptStore.SaveModelCapabilityProbeReceipt(ctx, modelReceipt); err != nil {
+			logger.Warn("Failed to persist connection-test model receipt",
+				"provider_instance_id", candidate.providerInstanceID,
+				"model", candidate.descriptor.Model,
+				"probe_kind", modelReceipt.ProbeKind,
+				"error", err)
+		}
 	}
 	return persisted
 }
@@ -870,7 +900,7 @@ func (s *Server) updateLLMConfig(w http.ResponseWriter, r *http.Request, req LLM
 			if credentialOld.CredentialRef != "" && credentialOld.CredentialRef != credentialRef {
 				credentialRefsToForget[credentialOld.CredentialRef] = struct{}{}
 			}
-			modelSpecsMode, modelSpecs := resolveProviderModelSpecs(old, oldExists, p)
+			modelSpecsMode, modelSpecs := resolveProviderModelSpecs(credentialOld, credentialOldExists, p)
 			candidate := config.LLMProviderConfig{
 				ProviderInstanceID:    providerInstanceID,
 				DisplayName:           p.DisplayName,
@@ -1150,8 +1180,10 @@ func (s *Server) handleTestLLMConfig(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	llmCfg := s.persistedLLMConfig()
-	embeddingOnly := isEmbeddingOnlyCompletionModel(llmCfg, providerType, baseURL, model)
+	embeddingOnly := persistenceCandidate.embeddingOnly
+	if !canPersist {
+		embeddingOnly = isEmbeddingOnlyCompletionModel(s.persistedLLMConfig(), probeDescriptor.ProviderInstanceID, providerType, baseURL, model)
+	}
 	// Ollama 本地通常无需 API Key
 	if strings.TrimSpace(apiKey) == "" && !strings.EqualFold(providerType, "ollama") {
 		writeJSON(w, http.StatusBadRequest, map[string]string{
@@ -1168,37 +1200,38 @@ func (s *Server) handleTestLLMConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	provider := llmTestProviderFactory(llmConnectionTestProvider{
-		Type:                 providerType,
-		BaseURL:              baseURL,
-		APIKey:               apiKey,
-		Model:                model,
-		Locality:             probeDescriptor.Locality,
-		PrivateNetworkAccess: probeDescriptor.PrivateNetworkAccess,
-		HTTPAuthorization:    probeDescriptor.HTTPAuthorization,
-		OllamaTargetBaseURL:  probeDescriptor.OllamaTargetBaseURL,
-	})
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 	ctx = egress.WithRequest(ctx, egress.PurposeProviderProbe, "", egress.ClassGeneral)
+	ctx = llm.WithOperationSafety(ctx, llm.OperationSafetyNonIdempotent)
 
 	start := time.Now()
-	var err error
+	probeKind := modelCapabilityProbeKindText
 	if embeddingOnly {
-		// 复用现有 Embedding 探测，保留连接回执的身份和时序约束。
-		err = s.executeModelCapabilityProbe(ctx, modelCapabilityProbeCandidate{
-			modelID: model, descriptor: probeDescriptor,
-		}, modelCapabilityProbeKindEmbedding)
-	} else {
-		_, err = provider.Complete(ctx, hexagon.CompletionRequest{
-			Messages:  []hexagon.Message{{Role: "user", Content: "Reply with OK."}},
-			MaxTokens: 8,
-		})
+		probeKind = modelCapabilityProbeKindEmbedding
 	}
+	// 连接与能力探测共用请求及响应验收，一次执行生成两种事实投影。
+	err := s.executeModelCapabilityProbe(ctx, modelCapabilityProbeCandidate{
+		modelID: model, descriptor: probeDescriptor,
+	}, probeKind)
 	latency := time.Since(start).Milliseconds()
 	testedAt := time.Now().UnixMilli()
+	modelReceipt := &storage.ModelCapabilityProbeReceipt{
+		ProviderInstanceID: persistenceCandidate.providerInstanceID,
+		ModelID:            model,
+		ProbeKind:          probeKind,
+		ProbePolicyVersion: ModelCapabilityProbePolicyVersion,
+		ConfigFingerprint:  persistenceCandidate.modelFingerprint,
+		Outcome:            "passed",
+		TestedAt:           testedAt,
+		ProbeStartedAt:     probeStartedAt,
+		LatencyMS:          latency,
+	}
 
 	if err != nil {
+		modelReceipt.Outcome = "failed"
+		modelReceipt.FailureCode = modelCapabilityProbeFailureCode(err)
+		logModelCapabilityProbeFailure(persistenceCandidate.providerInstanceID, model, probeKind, probeStartedAt, latency, err)
 		message := sanitizeProviderProbeMessage(
 			"连接测试失败: "+upstreamerr.PublicMessage(err, "Provider connection test failed"),
 			req.Provider.APIKey,
@@ -1219,6 +1252,7 @@ func (s *Server) handleTestLLMConfig(w http.ResponseWriter, r *http.Request) {
 					Locality:           persistenceCandidate.locality,
 					Message:            message,
 				},
+				modelReceipt,
 			)
 		}
 		writeJSON(w, http.StatusOK, LLMConnectionTestResponse{
@@ -1250,6 +1284,7 @@ func (s *Server) handleTestLLMConfig(w http.ResponseWriter, r *http.Request) {
 				Locality:           persistenceCandidate.locality,
 				Message:            message,
 			},
+			modelReceipt,
 		)
 	}
 	writeJSON(w, http.StatusOK, LLMConnectionTestResponse{

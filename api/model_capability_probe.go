@@ -279,6 +279,28 @@ func modelCapabilityProbeFailureCode(err error) string {
 	return "PROBE_EXECUTION_FAILED"
 }
 
+// 失败诊断只记录固定分类和结构化状态，不保存上游正文或凭据。
+func logModelCapabilityProbeFailure(providerInstanceID, modelID, kind string, startedAt, latencyMS int64, err error) {
+	if err == nil {
+		return
+	}
+	status := 0
+	var providerErr *llm.ProviderError
+	if errors.As(err, &providerErr) && providerErr != nil {
+		status = providerErr.StatusCode
+	}
+	logger.Warn("Model capability probe failed",
+		"provider_instance_id", providerInstanceID,
+		"model", modelID,
+		"probe_kind", kind,
+		"probe_started_at", startedAt,
+		"latency_ms", latencyMS,
+		"failure_code", modelCapabilityProbeFailureCode(err),
+		"upstream_status", status,
+		"outcome_unknown", errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) ||
+			errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF))
+}
+
 func modelCapabilityProbeHasResponse(response *hexagon.CompletionResponse) bool {
 	return response != nil && (strings.TrimSpace(response.Content) != "" || len(response.ToolCalls) > 0)
 }
@@ -519,6 +541,7 @@ func (s *Server) executeAndPersistModelCapabilityProbe(
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, timeout)
 	probeCtx = egress.WithRequest(probeCtx, egress.PurposeProviderProbe, "", egress.ClassGeneral)
+	probeCtx = llm.WithOperationSafety(probeCtx, llm.OperationSafetyNonIdempotent)
 	started := time.Now()
 	probeErr := s.executeModelCapabilityProbe(probeCtx, candidate, kind)
 	latencyMS := time.Since(started).Milliseconds()
@@ -529,6 +552,7 @@ func (s *Server) executeAndPersistModelCapabilityProbe(
 	if probeErr != nil {
 		outcome = "failed"
 		failureCode = modelCapabilityProbeFailureCode(probeErr)
+		logModelCapabilityProbeFailure(candidate.providerInstanceID, candidate.modelID, kind, probeStartedAt, latencyMS, probeErr)
 	}
 	persisted, err := s.persistModelCapabilityProbeReceipt(ctx, candidate, &storage.ModelCapabilityProbeReceipt{
 		ProviderInstanceID: candidate.providerInstanceID,
