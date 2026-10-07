@@ -2,6 +2,7 @@ package llmrouter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync/atomic"
 	"testing"
@@ -9,6 +10,7 @@ import (
 	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/hexagon"
 	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/egress"
 )
 
 type capabilityGuardCountingProvider struct {
@@ -39,6 +41,80 @@ func (*capabilityGuardCountingProvider) Models() []llm.ModelInfo { return nil }
 func (*capabilityGuardCountingProvider) CountTokens([]llm.Message) (int, error) { return 0, nil }
 
 var _ hexagon.Provider = (*capabilityGuardCountingProvider)(nil)
+
+func TestSelectorKnowledgeOCRRouteKeepsExactInstanceAndModelScope(t *testing.T) {
+	const instanceID = "pvd_v1_11111111111111111111111111111111"
+	cfg := config.LLMConfig{Default: "mixed", Providers: map[string]config.LLMProviderConfig{
+		"mixed": {
+			ProviderInstanceID: instanceID,
+			Model:              "book-model", Models: []string{"book-model", "other-model", "vision-model", "vector-model"},
+			ModelSpecsMode: config.LLMModelSpecsModeExplicit,
+			ModelSpecs: []config.LLMProviderModelSpec{
+				{ID: "book-model", Capabilities: []string{config.LLMModelCapabilityText}},
+				{ID: "other-model", Capabilities: []string{config.LLMModelCapabilityText}},
+				{ID: "vision-model", Capabilities: []string{config.LLMModelCapabilityText, config.LLMModelCapabilityVision}},
+				{ID: "vector-model", Capabilities: []string{config.LLMModelCapabilityEmbedding}},
+			},
+		},
+	}}
+	inner := &capabilityGuardCountingProvider{}
+	selector := NewWithProviders(cfg, map[string]hexagon.Provider{"mixed": inner})
+	imageRequest := func(model string) llm.CompletionRequest {
+		return llm.CompletionRequest{Model: model, Messages: []llm.Message{{
+			Role: llm.RoleUser, MultiContent: []llm.ContentPart{llm.NewImageURLPart("data:image/png;base64,aW1hZ2U=", "auto")},
+		}}}
+	}
+	for _, route := range []struct{ instance, provider, model string }{
+		{instanceID, "mixed", "vector-model"},
+		{instanceID, "mixed", "unknown-model"},
+		{"pvd_v1_22222222222222222222222222222222", "mixed", "book-model"},
+		{instanceID, "other-provider", "book-model"},
+		{instanceID, "mixed", ""},
+	} {
+		if _, err := selector.ResolveKnowledgeOCRRoute(route.instance, route.provider, route.model); !errors.Is(err, ErrModelCapabilityMismatch) {
+			t.Fatalf("invalid OCR route %+v returned %v", route, err)
+		}
+	}
+	if _, err := selector.ResolveRouteForCapabilities("mixed", "book-model", "text", "vision"); !errors.Is(err, ErrModelCapabilityMismatch) {
+		t.Fatalf("ordinary vision route changed: %v", err)
+	}
+	ordinary, ok := selector.Get("mixed")
+	if !ok {
+		t.Fatal("ordinary provider missing")
+	}
+	request := imageRequest("book-model")
+	request.Metadata = map[string]any{"capabilities": []string{"vision"}, "purpose": "vision_ocr"}
+	ctx := egress.WithRequest(context.Background(), egress.PurposeVisionOCR, "", egress.ClassSensitiveMedia)
+	if _, err := ordinary.Complete(ctx, request); !errors.Is(err, ErrModelCapabilityMismatch) {
+		t.Fatalf("shared OCR purpose or request metadata granted vision: %v", err)
+	}
+	if inner.completeCalls.Load() != 0 {
+		t.Fatal("invalid or ordinary image request reached transport")
+	}
+	ocr, err := selector.ResolveKnowledgeOCRRoute(instanceID, "mixed", "book-model")
+	if err != nil || ocr.ProviderName != "mixed" || ocr.Model != "book-model" {
+		t.Fatalf("exact OCR route=%+v err=%v", ocr, err)
+	}
+	ocrContext, attempt := egress.WithProviderAttempt(context.Background())
+	if _, err := ocr.Provider.Complete(ocrContext, imageRequest("book-model")); err != nil {
+		t.Fatalf("unknown vision rejected before actual OCR completion: %v", err)
+	}
+	if errors.Is(attempt.Reconcile(egress.ErrDenied), egress.ErrProviderNotSent) {
+		t.Fatal("OCR route bypassed the provider attempt wrapper")
+	}
+	for _, model := range []string{"other-model", "vision-model", "vector-model", "unknown-model"} {
+		if _, err := ocr.Provider.Complete(context.Background(), imageRequest(model)); !errors.Is(err, ErrModelCapabilityMismatch) {
+			t.Fatalf("OCR scope leaked to model %q: %v", model, err)
+		}
+	}
+	if inner.completeCalls.Load() != 1 {
+		t.Fatalf("OCR transport calls=%d, want only the exact real request", inner.completeCalls.Load())
+	}
+	current, _ := selector.ProviderConfig("mixed")
+	if current.Model != "book-model" || config.ModelHasCapability(current, "book-model", config.LLMModelCapabilityVision) {
+		t.Fatal("OCR execution changed the default model or persistent vision declaration")
+	}
+}
 
 func TestSelectorProviderRejectsNonTextModelsBeforeCompletionTransport(t *testing.T) {
 	const (

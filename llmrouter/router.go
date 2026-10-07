@@ -237,7 +237,7 @@ func (p *cloudEgressProvider) CountTokens(messages []llm.Message) (int, error) {
 
 // providerLocked returns the raw local provider or a cloud-guarded facade.
 // Caller must hold at least r.mu.RLock.
-func (r *Selector) providerLocked(name string) hexagon.Provider {
+func (r *Selector) providerLocked(name string, scopes ...completionRouteScope) hexagon.Provider {
 	p := r.providers[name]
 	if p == nil {
 		return p
@@ -261,9 +261,14 @@ func (r *Selector) providerLocked(name string) hexagon.Provider {
 		// a security boundary: a stale session or direct API caller must still be
 		// unable to send embedding-only/unclassified IDs to chat transports.
 		inner := p
-		p = preserveContextTokenCounter(&completionCapabilityProvider{
+		capabilityProvider := &completionCapabilityProvider{
 			next: inner, providerName: name, providerConfig: providerConfig,
-		}, inner)
+		}
+		if len(scopes) == 1 {
+			capabilityProvider.knowledgeOCR = scopes[0].knowledgeOCR
+			capabilityProvider.k12Vision = scopes[0].k12Vision
+		}
+		p = preserveContextTokenCounter(capabilityProvider, inner)
 	}
 	return p
 }
@@ -284,6 +289,31 @@ type completionCapabilityProvider struct {
 	next           hexagon.Provider
 	providerName   string
 	providerConfig config.LLMProviderConfig
+	knowledgeOCR   *knowledgeOCRScope
+	k12Vision      *k12VisionScope
+}
+
+type completionRouteScope struct {
+	knowledgeOCR *knowledgeOCRScope
+	k12Vision    *k12VisionScope
+}
+
+// K12VisionRouteValidator 使用路由捕获的执行配置验证冻结的视觉回执，不重新读取路由。
+type K12VisionRouteValidator func(context.Context, string, config.LLMProviderConfig, string) error
+
+type k12VisionScope struct {
+	providerInstanceID string
+	providerName       string
+	model              string
+	validate           K12VisionRouteValidator
+	currentConfig      func() (config.LLMProviderConfig, bool)
+}
+
+// knowledgeOCRScope 只由精确 OCR 路由创建，不接受请求元数据或共享出口用途授权。
+type knowledgeOCRScope struct {
+	providerInstanceID string
+	providerName       string
+	model              string
 }
 
 func (p *completionCapabilityProvider) Name() string { return p.next.Name() }
@@ -346,8 +376,11 @@ func (p *completionCapabilityProvider) projectTextOnlyHistory(req llm.Completion
 
 func (p *completionCapabilityProvider) validate(req llm.CompletionRequest) error {
 	model := p.requestModel(req)
+	if p.knowledgeOCR != nil && model != p.knowledgeOCR.model {
+		return fmt.Errorf("%w: knowledge OCR model differs from the frozen route", ErrModelCapabilityMismatch)
+	}
 	required := []string{config.LLMModelCapabilityText}
-	if completionRequestContainsImage(req) {
+	if completionRequestContainsImage(req) && !p.permitsKnowledgeOCR(model) && !p.permitsK12Vision(model) {
 		required = append(required, config.LLMModelCapabilityVision)
 	}
 	if model == "" || !config.ModelHasCapabilities(p.providerConfig, model, required...) {
@@ -360,6 +393,40 @@ func (p *completionCapabilityProvider) validate(req llm.CompletionRequest) error
 		)
 	}
 	return nil
+}
+
+func (p *completionCapabilityProvider) permitsKnowledgeOCR(model string) bool {
+	scope := p.knowledgeOCR
+	return scope != nil && scope.model == model && scope.providerName == p.providerName &&
+		scope.providerInstanceID == config.EffectiveProviderInstanceID(p.providerName, p.providerConfig) &&
+		config.ModelHasCapability(p.providerConfig, model, config.LLMModelCapabilityText)
+}
+
+func (p *completionCapabilityProvider) permitsK12Vision(model string) bool {
+	scope := p.k12Vision
+	return scope != nil && scope.validate != nil && scope.model == model && scope.providerName == p.providerName &&
+		scope.providerInstanceID == config.EffectiveProviderInstanceID(p.providerName, p.providerConfig) &&
+		config.ModelHasCapability(p.providerConfig, model, config.LLMModelCapabilityText)
+}
+
+func (p *completionCapabilityProvider) validateK12Vision(ctx context.Context, req llm.CompletionRequest) error {
+	scope := p.k12Vision
+	if scope == nil {
+		return nil
+	}
+	model := p.requestModel(req)
+	if !p.permitsK12Vision(model) || scope.currentConfig == nil {
+		return fmt.Errorf("%w: K12 vision request differs from the frozen route", ErrModelCapabilityMismatch)
+	}
+	if err := scope.validate(ctx, p.providerName, p.providerConfig, model); err != nil {
+		return err
+	}
+	current, configured := scope.currentConfig()
+	if !configured || config.EffectiveProviderInstanceID(p.providerName, current) != scope.providerInstanceID ||
+		!config.ModelHasCapability(current, model, config.LLMModelCapabilityText) {
+		return fmt.Errorf("%w: K12 vision provider instance or text model is unavailable", ErrModelCapabilityMismatch)
+	}
+	return scope.validate(ctx, p.providerName, current, model)
 }
 
 func (p *completionCapabilityProvider) applyReasoningCapability(req *llm.CompletionRequest) error {
@@ -437,6 +504,9 @@ func (p *completionCapabilityProvider) Complete(
 	req llm.CompletionRequest,
 ) (*llm.CompletionResponse, error) {
 	req = p.projectTextOnlyHistory(req)
+	if err := p.validateK12Vision(ctx, req); err != nil {
+		return nil, err
+	}
 	if err := p.validate(req); err != nil {
 		return nil, err
 	}
@@ -451,6 +521,9 @@ func (p *completionCapabilityProvider) Stream(
 	req llm.CompletionRequest,
 ) (*llm.Stream, error) {
 	req = p.projectTextOnlyHistory(req)
+	if err := p.validateK12Vision(ctx, req); err != nil {
+		return nil, err
+	}
 	if err := p.validate(req); err != nil {
 		return nil, err
 	}
@@ -890,6 +963,96 @@ func (r *Selector) DefaultName() string {
 // default provider. It never falls back across providers.
 func (r *Selector) DefaultRouteForCapabilities(required ...string) (CapabilityRoute, error) {
 	return r.ResolveRouteForCapabilities("", "", required...)
+}
+
+// ResolveKnowledgeOCRRoute 只接纳冻结的精确实例与文本模型。缺失视觉声明是未知，
+// 由真实 OCR 请求验证；许可只属于返回的 facade，不改普通路由或持久能力声明。
+func (r *Selector) ResolveKnowledgeOCRRoute(providerInstanceID, providerName, model string) (CapabilityRoute, error) {
+	if r == nil {
+		return CapabilityRoute{}, ErrNoProvider
+	}
+	providerInstanceID = strings.TrimSpace(providerInstanceID)
+	providerName = strings.TrimSpace(providerName)
+	model = strings.TrimSpace(model)
+	if providerInstanceID == "" || providerName == "" || model == "" ||
+		strings.EqualFold(providerName, "auto") || strings.EqualFold(model, "auto") {
+		return CapabilityRoute{}, fmt.Errorf("%w: knowledge OCR requires an exact provider instance and model", ErrModelCapabilityMismatch)
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	key, exists := r.canonicalNameLocked(providerName)
+	providerConfig, configured := r.cfg.Providers[key]
+	if !exists || !configured || r.providers[key] == nil ||
+		config.EffectiveProviderInstanceID(key, providerConfig) != providerInstanceID ||
+		!config.ModelHasCapability(providerConfig, model, config.LLMModelCapabilityText) {
+		return CapabilityRoute{}, fmt.Errorf("%w: knowledge OCR provider instance or text model is unavailable", ErrModelCapabilityMismatch)
+	}
+	scope := knowledgeOCRScope{providerInstanceID: providerInstanceID, providerName: key, model: model}
+	return CapabilityRoute{Provider: r.providerLocked(key, completionRouteScope{knowledgeOCR: &scope}), ProviderName: key, Model: model}, nil
+}
+
+// ResolveK12VisionCandidate 只选择原配置的精确文本模型；缺失视觉声明不授予执行许可。
+func (r *Selector) ResolveK12VisionCandidate(providerName, model string) (CapabilityRoute, config.LLMProviderConfig, error) {
+	if r == nil {
+		return CapabilityRoute{}, config.LLMProviderConfig{}, ErrNoProvider
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	providerName, model = strings.TrimSpace(providerName), strings.TrimSpace(model)
+	providerAuto := providerName == "" || strings.EqualFold(providerName, "auto")
+	modelAuto := model == "" || strings.EqualFold(model, "auto")
+	if providerAuto != modelAuto {
+		return CapabilityRoute{}, config.LLMProviderConfig{}, fmt.Errorf("%w: explicit provider and model must both be set", ErrModelCapabilityMismatch)
+	}
+	if providerAuto {
+		providerName = r.defaultP
+	}
+	key, exists := r.canonicalNameLocked(providerName)
+	providerConfig, configured := r.cfg.Providers[key]
+	if !exists || !configured || r.providers[key] == nil {
+		return CapabilityRoute{}, config.LLMProviderConfig{}, ErrNoProvider
+	}
+	if modelAuto {
+		model = strings.TrimSpace(providerConfig.Model)
+	}
+	if model == "" || !config.ModelHasCapability(providerConfig, model, config.LLMModelCapabilityText) {
+		return CapabilityRoute{}, config.LLMProviderConfig{}, fmt.Errorf("%w: K12 configured model lacks text capability", ErrModelCapabilityMismatch)
+	}
+	return CapabilityRoute{Provider: r.providerLocked(key), ProviderName: key, Model: model}, providerConfig, nil
+}
+
+// ResolveK12VisionRoute 的许可只绑定精确实例与模型，回执校验始终在路由锁外执行。
+func (r *Selector) ResolveK12VisionRoute(ctx context.Context, providerInstanceID, providerName, model string, validate K12VisionRouteValidator) (CapabilityRoute, error) {
+	if r == nil {
+		return CapabilityRoute{}, ErrNoProvider
+	}
+	providerInstanceID, providerName, model = strings.TrimSpace(providerInstanceID), strings.TrimSpace(providerName), strings.TrimSpace(model)
+	if providerInstanceID == "" || providerName == "" || model == "" || validate == nil ||
+		strings.EqualFold(providerName, "auto") || strings.EqualFold(model, "auto") {
+		return CapabilityRoute{}, fmt.Errorf("%w: K12 vision requires an exact verified route", ErrModelCapabilityMismatch)
+	}
+	r.mu.RLock()
+	key, exists := r.canonicalNameLocked(providerName)
+	providerConfig, configured := r.cfg.Providers[key]
+	if !exists || !configured || r.providers[key] == nil ||
+		config.EffectiveProviderInstanceID(key, providerConfig) != providerInstanceID ||
+		!config.ModelHasCapability(providerConfig, model, config.LLMModelCapabilityText) {
+		r.mu.RUnlock()
+		return CapabilityRoute{}, fmt.Errorf("%w: K12 vision provider instance or text model is unavailable", ErrModelCapabilityMismatch)
+	}
+	scope := &k12VisionScope{providerInstanceID: providerInstanceID, providerName: key, model: model, validate: validate}
+	scope.currentConfig = func() (config.LLMProviderConfig, bool) {
+		r.mu.RLock()
+		defer r.mu.RUnlock()
+		current, ok := r.cfg.Providers[key]
+		return current, ok && r.providers[key] != nil
+	}
+	route := CapabilityRoute{Provider: r.providerLocked(key, completionRouteScope{k12Vision: scope}), ProviderName: key, Model: model}
+	r.mu.RUnlock()
+	if err := validate(ctx, key, providerConfig, model); err != nil {
+		return CapabilityRoute{}, err
+	}
+	return route, nil
 }
 
 // ResolveRouteForCapabilities resolves either an exact explicit provider/model
