@@ -1,216 +1,145 @@
-# K12 后端联调契约（前端对接指南）
+# K12 公共 API
 
-> 后端 = `scenarios/k12` 场景包，全部端点挂在 **`/api/k12/*`**（平台 `srv.Mount` + `http.StripPrefix`）。
-> 启动时 storage V8 迁移自动建 `agent_records` 表。响应均为 JSON；错误统一 `{"error":"..."}` + HTTP 状态码。
-> DTO 定义见 `scenarios/k12/apihttp/handler.go`。
+[English](API.en.md) · [核心 API](../../docs/api.md) · [返回 README](../../README.md)
 
----
+场景端点使用 `/api/k12/*`；Agent 创建仍使用平台 `POST /api/v1/agents`。业务请求携带当前服务的 Bearer 令牌，身份来自鉴权上下文；`agent` 使用实例 `name`，作用域与记录归属的具体校验按各操作说明，不能把该字段当成身份令牌。
 
-## 1. 端点清单（当前契约摘录）
+本文描述当前源码契约，已发布版本使用对应版本的文档。普通 JSON 错误为 `{"error":"..."}` 和 HTTP 状态码；导出、资产和结果接口还可能返回二进制，不能把所有响应当成 JSON。本文示例中的 ID、版本号和业务内容需替换为实际响应值。
 
-### 视图 / 识题 / 批改
+## 完整接口参考
 
-**`GET /api/k12/view-descriptor?slot=tutor`** — 驱动前端 chat shell 渲染
-```json
-{
-  "header_tabs": ["辅导", "学习档案", "学情"],
-  "message_badges": ["verify", "record-chip"],
-  "composer_placeholder": "发消息、粘贴带分数/公式的题目，或 ⌘V 粘贴作业照片",
-  "composer_chips": ["📚 自动识别学科", "💡 渐进提示", "📷 识题校验"],
-  "record_collections": ["错题本", "练习集", "积累本", "作品"],
-  "side_panels": [],
-  "actions": [],
-  "i18n_keys": ["k12.tab.tutor", "k12.tab.archive", "k12.tab.insights"],
-  "schema_version": 1
-}
-```
+| 模块 | 内容 |
+| --- | --- |
+| [图片任务、创作与材料](docs/api/tasks.md) | 图片 facade、结果与恢复、逐题来源与反馈、作品和资产、材料准备 |
+| [练习、周练与打印](docs/api/practice.md) | 错题练习生成、候选选择、练习集、作答与批改、周练、原生打印回执 |
+| [档案、教材与学习记录](docs/api/records.md) | 展示描述、单题处理、档案与课程进度、积累与学情、导出备份、辅导与 IM 自动化 |
 
-**图片任务唯一公开 facade（六个端点）**
+三份模块参考覆盖当前 K12 显式挂载路由；[OpenAPI](../../api/openapi.yaml)提供对应请求和响应结构。下方说明兼容范围及档案、教材进度和图片终态的共享规则，原生或外部客户端按对应操作的字段、版本与副作用说明调用。
 
-- `POST /api/k12/image-tasks`
-- `GET /api/k12/image-tasks/{dispatch_id}?agent=...`
-- `POST /api/k12/image-tasks/{dispatch_id}/confirm`
-- `POST /api/k12/image-tasks/{dispatch_id}/retry`
-- `POST /api/k12/image-tasks/{dispatch_id}/cancel`
-- `GET /api/k12/image-tasks/{dispatch_id}/result?agent=...`
-
-同一入口把图片分流为 `completed_homework`、`blank_worksheet`、`writing` 或 `artwork`。
-前两类内部使用 HomeworkSubmission/GradingJob，后两类使用 CreativeWorkIntake；这些内部对象不再
-拥有客户端可寻址的图片任务路由。`/recognize*`、`/grading-jobs*` 和
-`/creative-work-ocr-jobs*` 均不属于公开契约并返回 404/405。
-
-学习档案中的手工作品图片也走同一 facade，但必须携带严格 `creative_entry`：
-新作品为 `{"kind":"new_work","task_intent":"writing|artwork"}`，修改稿另带
-`work_id/base_version_id`。该路径采用家长已选类型、跳过模型分类；上传、写作 OCR 冻结和恢复
-都不会创建正式作品，只有现有保存动作提交 `creative.action=commit` 才原子创建 v1 或追加版本。
-
-**`POST /api/k12/grade`** — 批改一道题完整闭环（**需 LLM 密钥**）
-- 请求：`{"agent","grade","source_session","problem","student_answer","knowledge_points":[]}`
-- 响应：
-```json
-{
-  "solution": "…教学解题…",
-  "verdict": "agree|disagree|unverifiable|out_of_scope",
-  "evidence_type": "numeric_exec|symbolic_exec|heterogeneous_model|heuristic|none",
-  "badge": "verified-strong|verified-weak|disagree|out-of-scope|unverifiable",
-  "correct": false,
-  "wrong_step": "3.8×3 误算为 10.4",
-  "error_cause": "小数点错位",
-  "out_of_scope": false,
-  "out_of_scope_kp": "",
-  "record_created": true,
-  "record_id": "…"
-}
-```
-
-### 错题本 / 复习
-
-**`GET /api/k12/mistakes?agent=X&status=`** — 错题本列表（status 可空=全部）
-`{"items":[{"record_id","question","knowledge_point","error_cause","status","version","due_at"}]}`
-
-**`GET /api/k12/review-queue?agent=X`** — 到期该练队列
-`{"items":[{"record_id","question","knowledge_point","error_cause","status","version","due_at","subject","review_kind"}]}`
-- `review_kind=verify`：数理化走验算链变式；`review_kind=verbatim`：语英积累本原词重现/字符比对。
-
-**`POST /api/k12/mark-mastered`** — 「他会了」（乐观锁）
-- 请求：`{"record_id","version"}` → 响应：`{"ok":true}`；**version 陈旧 → 409**
-
-**`POST /api/k12/mistakes/{record_id}/practice-generation`** — 一键加入练习集并异步出题
-- 请求：`{"agent","idempotency_key","grade?","textbook?","difficulty?","provider?","model?","source_session?"}`
-- 接受后返回持久状态：`pending`；同一来源同时只允许一个活动任务。
-- 成功状态：`joined`，并返回 `practice_set_id`、`practice_item_id` 与只读 `item`。
-- 失败状态：`failed`，前端只显示“出题失败，重试”。
-
-**`GET /api/k12/mistakes/{record_id}/practice-generation?agent=X`** — 查询持久出题状态
-
-**`POST /api/k12/mistakes/{record_id}/practice-generation/retry`** — 仅重试已明确失败的同一任务
-- 请求：`{"agent"}`；复用原题、占位项和冻结模型路由，不创建第二份练习题。
-
-### 学情 / 辅导要点
-
-**`GET /api/k12/insight-report?agent=X`** — 学情报告
-```json
-{
-  "trend": {"mastered":1,"reviewing":3,"retried":1,"archived":0,"total":5},
-  "weak_top3": [{"knowledge_point":"小数乘法","count":3}],
-  "month_new_mistakes": 5,
-  "review_completion_rate": 0.4,
-  "consecutive_fail_kps": ["小数乘法"],
-  "suggestion": "「小数乘法」连续受挫，建议本周集中复习这个知识点。"
-}
-```
-
-**`POST /api/k12/tutoring-tips`** — 识题确认后的内联辅导要点（只读；可用 LLM provider 负责无教材依据时的年级适配讲解）
-- 请求只允许：`{"agent","grading_job_id"}`。
-- 服务端按 owner scope 读取同一 `GradingJob → Submission → Problem/Attempt` 持久事实；必须已确认，且每个可作答 Problem 恰有一个摘要匹配的当前 Attempt。客户端不得提交年级、学科、知识点或题目。
-- 响应严格为 `{"knowledge_points":[], "sections":[{"title","content","source_label"}]}`，固定三段、固定顺序：
-  `这页在练什么` / `{孩子称呼}要留意` / `每道题怎么带（不直接给答案）`。
-- `source_label` 只允许：`📖 依据课本` / `🧠 学情信号` / `🤖 AI 归纳·供参考`。
-- `outcome_unknown`、未确认或归属/摘要不一致时拒绝生成，不调用模型。
-
-### 积累本 / 档案 / 导出 / 备份
-
-**`POST /api/k12/accumulation`** `{"agent","source_session","subject","entry_type","content","source"}` → `{"record_id","created"}`
-- `subject` 只允许 `语文`/`英语`；`entry_type`：默写错/错词/好词好句/古诗/语法点
-
-**`GET /api/k12/accumulation?agent=X&subject=`** → `{"items":[{"record_id","subject","entry_type","content","status"}]}`
-
-**`GET /api/k12/profile?agent=X`** → `{"child_name","grade_term","textbook_edition"}`
-
-**`PUT /api/k12/profile`** — 建档 / 改档（升学改年级）
-- 请求：`{"agent","child_name","grade_term","textbook_edition"}`（只改传的非空字段）→ 响应同 GET
-
-**`POST /api/k12/cold-start`** — 首拍作业冷启动建档（按知识点倒推年级，已有档案不覆盖）
-- 请求：`{"agent","child_name","knowledge_points":[],"fallback_grade","textbook"}`
-- 响应：`{"child_name","grade_term","textbook_edition","inferred":true,"created":true}`
-
-**`GET /api/k12/export?agent=X&format=md|pdf|docx`** — 当前 Tutor / 当前学期的完整学习档案导出
-- 服务端在同一 SQLite read transaction 中读取并固定输出 `本周该练 → 全部错题 → 练习集 → 积累 → 作品` 五段；不从当前 Tab、旧 ReviewQueue 或 legacy 作品版本拼装。
-- `md`（或 render 服务未启用）→ `{"format":"markdown","content":"# 学习档案…","schema_version":"v1","scope":{"agent":"X","grade_term":"五年级下"},"as_of":0,"source_digest":"<sha256>","object_counts":{"weekly_review":0,"mistakes":0,"practice_sets":0,"accumulations":0,"creative_works":0},"artifact_id":"…"}`
-- `pdf`/`docx` → **二进制流**（`Content-Type` + `Content-Disposition: attachment`）
-- 二进制响应通过 `X-HexClaw-Artifact-ID`、`X-HexClaw-Source-Digest` 与 `X-HexClaw-Object-Counts` 绑定同一 canonical Artifact；渲染失败降级为带相同 metadata 的 Markdown JSON，并追加 `render_error`。
-- 新作品创建时冻结 `grade_term`；导出只纳入与当前档案学期严格相等的五对象。legacy 空学期不按当前档案猜测回填。业务 Markdown/LaTeX 保持原字节，坏 JSON 或缺作品 current generation/source 时整次失败，不产出部分 Artifact。
-
-**`GET /api/k12/mistake-sheet?agent=X`** — 本周错题卷（Markdown，只出题）→ `{"format":"markdown","content"}`
-
-**`GET /api/k12/backup?agent=X`** → `{"version","agent_name","exported_at","records":[…],"checksum"}`（.hexbak）
-**`POST /api/k12/restore`** — body=上面的 hexbak → `{"restored":N,"snapshot":{...}}`；**checksum 不符 → 400**
-
-### 深度对话（渐进提示 + 情绪守门）
-
-**`POST /api/k12/tutor-turn`** `{"agent","prior_stage":0|1|2|3,"parent_message","student_answer","problem","grade"}` → `{"stage":1|2|3,"comfort":bool,"emotion_cue","escalated":bool,"prompt_hint","solution","badge"}`
-- 渐进提示三阶段编排（PRD §3.3.4）：`prior_stage` 传上一轮的 `stage`（首轮传 0）。后端按 `parent_message`（"不会"/"直接讲"）+ `student_answer` 推进阶段。
-- `prompt_hint` 是**给上游 LLM 的行为指令**（本轮该给方向提示/具体提示/完整讲解），前端把它连同题目发给会话模型生成家长话术。
-- `comfort=true` = 情绪守门命中（家长消息含"哭了/生气/急哭"等）→ 本轮切安抚、**不推进阶段、不给解**。
-- `stage=3` 且有 `problem` 时 `solution` 带**经 solve 验算链**的完整解 + `badge`（**需 LLM 密钥**）；阶段一二 `solution` 为空（不给未验证答案）。
-
-### 自动化沉淀投递（cron · §3.6）
-
-投递内容端点返回**纯文本**，**空 body = 本期无内容（静默跳过，不投递空内容）**。供平台 cron 的 Starlark 脚本 http_get 抓取后投递到 IM 群/桌面：
-
-**`GET /api/k12/cron/mistake-sheet?agent=X`** — 周五错题卷（到期该练；无到期→空）
-**`GET /api/k12/cron/daily-reminder?agent=X`** — 每日复习提醒一句话（无待复习→空）
-**`GET /api/k12/cron/return-reminder?agent=X`** — 回传提醒（§3.13）：昨日固化仍未回传的卷 → 温和提醒（含卷面号与题数，**每卷最多一次**，reminder_sent_at 持久幂等；已回传/家长关闭/非昨日→空）
-**`GET /api/k12/cron/monthly-report?agent=X`** — 月度学情报告 Markdown（无记录→空）
-**`GET /api/k12/cron/semester-check?agent=X`** — 学期确认提醒（无档案/已最末档→空）
-**`GET /api/k12/cron/year-archive?agent=X`** — 学年 6 月底归档建议（无记录→空）
-
-**`POST /api/k12/cron/provision`** `{"agent","platform","chat_id","deliver":["dingtalk"],"user_id","base_url"}` → `{"provisioned":[{"kind","name","schedule","job_id"}],"reclaimed":[{"job_id","name","source_key"}]}`
-- 显式切换兼容入口：在同一 durable 事务内注册/覆盖 §3.13 四个默认任务，并回收历史默认任务超集；任一注册、归并或回收失败时 durable/active 状态均保持调用前快照。
-- 需服务器注入 cron.Scheduler（桌面默认有）；未注入 → **501**。`base_url` 服务器已配时可省。
-
-**`POST /api/k12/cron/reconcile-defaults`** `{"agent","platform","chat_id","deliver":["dingtalk"],"user_id","base_url"}` → `{"provisioned":[{"kind","name","schedule","job_id","created"}]}`
-- 档案新建/编辑成功后的作用域修复入口，只补该 `agent` 缺失的 §3.13 默认任务。
-- exact `source_key` 已存在时零写入：保留用户的暂停状态、时间表、时区、投递目标、平台/会话和脚本；`source_key` 为空的用户任务永不参与。
-- 逐项失败可安全重试，二次成功调用零写；不做全局启动扫描。
-- 需服务器注入 cron.Scheduler（桌面默认有）；未注入 → **501**。`base_url` 服务器已配时可省。
-
-### IM 入站路由绑定（§3.1.7）
-
-**`POST /api/k12/bind-im`** `{"agent","platform","instance_id","chat_id"}` → `{"bound":true,...}`
-- 把某 IM 群（platform+chat_id）绑到辅导实例，之后该群消息经平台 `agent_rules` 路由到这个 Agent（各绑各的群）。
-- 需注入 router（桌面默认有）；未注入 → **501**。
+- [档案整体更新](#profile-bundle)
+- [教材与课程进度](#textbook-and-curriculum-progress)
+- [图片任务终态](#image-task-completion)
+- [接口范围与兼容](#1-端点清单当前契约摘录)
 
 ---
 
-## 2. 前端必须遵守的 9 个契约点
+<a id="1-端点清单当前契约摘录"></a>
+## 接口范围与兼容
 
-1. **`agent` = 实例 `name`（agents.name，不可变隔离键），不是显示名。** 所有端点靠它做多孩隔离。
-2. **`grade` = 18 档枚举**（`一年级上`…`初三下`），从 `GET /profile.grade_term` 取，原样传。
-3. **徽章按 `badge` 字段渲染，别自己判断**：
-   - `verified-strong` = ✅ 已程序验算
-   - `verified-weak` = 「AI 自检一致·未程序验算」— **绝不能显示"已程序验算"**
-   - `disagree` = ⚠️ 并列双答 + 请复核 / `out-of-scope` = ⛔ / `unverifiable` = 无徽章
-4. **`out_of_scope=true` 先判**：超纲错发，无 solution，走"错发反问"UI（按档案年级讲/别的孩子/按题目年级）。
-5. **`record_created=false` 是去重命中**，`record_id` 仍有效（指向已存在错题），可直接 mark-mastered。
-6. **`mark-mastered` 必带 `version`**（从 mistakes/review-queue 拿）；409 冲突时重取再试。
-7. **view-descriptor 驱动 chat shell**：tabs/badges/composer_chips/side_panels 全从 descriptor 渲染；**K12 字面量只允许在 `features/k12`**，通用 chat shell 不硬编码（AP-1 红线）。
-8. **`review_completion_rate == -1`** = 当月无错题（分母 0），显示「—」。
-9. **`review_kind` 驱动再练 UI**：`verify` 走变式题/验算链，`verbatim` 走原文重现/字符比对，不要只按 collection 名猜。
+完整字段、响应、错误与示例按上方三份模块参考维护。`POST /api/v1/agents` 属于平台接口，K12 创建的 metadata 与课程进度选择也使用下方共享规则。
 
-## 3. 关键流程
+- 图片入口为公开 `image-tasks` facade；内部识题、GradingJob 与 OCR 对象不是客户端任务接口。
+- `POST /grade`、`POST /solve` 和显式学习记录操作仍按[档案与学习记录](docs/api/records.md)中的合同保留，不把单题校准等操作误标为已删除。
+- `PUT /profile` 保留已注册的兼容拒绝入口，返回 `405` 与 `Allow: GET`；更新使用 `PUT /profile-bundle`。
+- 备份、导出、学习积累和辅导请求使用当前模块字段，不从旧示意字段推断调用方式。备份版本、JSON 降级和二进制产物在模块中明确区分。
+- 已绑定 IM 的结果交付与平台通用 Cron 接收配置分别说明；目标通道的连通性检查不代表任务已完成或结果已送达。
 
-- **识题回显护栏**（分渠道两种形态，同一信任链目标）：
-  - **桌面**：`POST /image-tasks` → 轮询同一 dispatch；清晰证据自动推进，只有模糊或冲突的最小原题事实进入 `confirm`。终态统一从同 dispatch 的 `/result` 读取；已作答作业返回批注原图和错题家长讲法，空白卷返回每题完整家长讲题指南。单题补批仍走 `grade`。
-  - **IM（钉钉/微信）**：内联回显——`homework-checker` skill 在解答**同一条消息**开头先列「我读到的题目」抬头再给整页解答，不阻塞等确认（IM 多轮往返代价高）；`[?]` 不确定字符点名请确认、确认前该题不下批改结论。出站经 `NormalizeMathText` 把 LaTeX 降级为 Unicode 数学符号（钉钉 markdown 不渲染 LaTeX）。
-- **建档**：实例（agent）先经平台 Agent 创建，再 `PUT /profile` 写 K12 档案（落 `k12.child_name`/`k12.grade_term`/`k12.textbook_edition` metadata 键，不覆盖其他 metadata）。
-- **导出 PDF**：`format=pdf` 需服务器装 pandoc；未装则降级 markdown JSON — 前端要判断响应是二进制还是 `{content}`。
+<a id="image-task-completion"></a>
+## 图片任务终态
 
-## 4. 状态与仍受限项
+`POST /api/k12/image-tasks/{id}/retry` 的可选固定 `intent: "known_local_technical"` 仅恢复原 job 当前代次有确定本地技术失败、无未知调用且无终稿的 `failed_terminal/assessing` 任务；账户由服务认证派生，父子窗口双版本 CAS 提交后才启动。保持完整冻结模型、输入和历史，阶段计数 3 保留，新调用进入代次 4；不传 intent 时普通重试与 max3 保持。重复版本返回 `409`，未知结果只查询。精确资格、拒绝条件与请求字段见[图片任务重试契约](docs/api/tasks.md#op-post-api-k12-image-tasks-id-retry)。
 
-| 功能 | 状态 |
-|---|---|
-| 真 LLM | `grade`、`image-tasks` 的分类/OCR/批改/讲题/作品反馈阶段，以及 `tutor-turn` 阶段三 solution 会调用本地或云端模型，**服务器必须有可用 `cfg.LLM` provider**。每个实际调用冻结自己的模型路由；家长明确选择的手工作品类型不调用分类模型。`tutoring-tips` 在无教材依据时会使用可用生成器；生成器不可用或失败则返回明确降级内容。其余纯数据端点不依赖 LLM |
-| cron 自动投递（周五错题卷/回传提醒/学期确认×2，§3.13 四任务） | ✅ 已接：档案保存走 `cron/reconcile-defaults` missing-only 补齐，保留用户已改任务；显式切换兼容入口 `cron/provision` 仍负责注册并回收历史 kind 残留。投递内容走 `cron/*` 纯文本端点（空 body 静默跳过），复用平台 cron 调度 + Deliverer（IM/桌面）|
-| IM 群绑定（各绑各的群） | ✅ 已接：`bind-im` 写 `agent_rules`，入站群消息路由到对应实例 |
-| 渐进三阶段提示 + 情绪守门 | ✅ 已接：`tutor-turn` 输出分阶段指令 + 守门标志；**桌面/HTTP 联调可用** |
-| IM 入站作业 → 自动错题入库副作用 | ✅ 结构已通：engine 把已路由 Agent 名 stamp 进 ctx（`skill.RoutedAgentName`），K12 提供通用 `k12_grade` skill 包全闭环（批改+错题入库+学情），实例 scope 从 ctx 取。**辅导 Agent 模板须在 Skills 声明 `k12_grade`**（建档时挂载）。真 IM+LLM 端到端仍需活环境验 |
-| 学情注入 / 超纲学段内重解 | 学情信号写入已有（`grade` 触发 WriteWeakness）；超纲已判（`out_of_scope`），学段内自动重解仍走 LLM |
-| 多教材版本 / 物化硬边界 | 仅人教数学有超纲硬判定，其他学科软约束（不 block） |
+- Desktop 和已绑定钉钉使用同一领域任务、判定、持久结果与自动推进语义。渠道差异只用于消息传输和展示，不产生不同批改标准或确认流程。当前 K12 专门渠道投影声明为钉钉，不能把其他通用适配器视为同等 K12 验收。
+- 默认链路为发图 → 自动识别/判定 → 实际结果。作业批改以带批注的原图为主要交付；可识别部分照常完成。
+- 经自动识别仍无法可靠辨认的原图内容在结果中标注“无法识别”，作为任务终态的一部分。该部分不猜题、不编答案、不判错，不写入掌握或错题结论；不强制确认、纠正识别、补拍或跳过。补拍是后续自愿输入。
+- Provider 超时、请求结果未知、协议错误和应用故障属于技术失败，不能伪装成“无法识别”；结果未知时不盲重发。失败查看 `failure_kind`、`retryable` 和恢复状态。
+- 客户端轮询同一 `dispatch_id`，读取该任务的 `target_projection`、进度及 `/result`。派发状态 `routed` 表示已分流，不代表最终批注图或其他产物已经交付；处理中间态不能代替最终结果。
+- 手工录入作品的 `creative_entry` 与显式 `creative.action=commit` 保留其创建/版本提交语义，不作为自动作业批改的默认前置步骤。
 
-## 5. 最容易踩的第一个坑
+<a id="profile-bundle"></a>
+## 档案整体更新
 
-联调报"LLM 未配置/解题失败"类错误时，先确认服务器端 `cfg.LLM` 有可用 provider
-（`grade`、自动图片分流/识别/批改/讲题及 `tutoring-tips` 的无教材讲解会使用它）。
-手工美术作品的 `parent_selected + explicit_commit` 路径不应因缺少分类/OCR模型而失败。
-纯数据端点（mistakes/review/report/profile/backup/export-md/accumulation）不依赖 LLM，可先联调这些。
+`PUT /api/k12/profile-bundle` 将孩子档案、课程进度、周练设置及可选 Agent 配置作为一个事务命令提交，不是字段 PATCH。纯数据更新本身不需要模型。
+
+### 请求与版本
+
+更新前分别读取 `GET /api/k12/profile?agent=...`、`GET /api/k12/curriculum-progress?agent=...&subject=math`、`GET /api/k12/weekly-practice/settings?agent=...` 的 `revision`，放入三个 `expected_*_revision`。未持久化状态可返回 `0`；不要猜测已有数据的版本。
+
+三个版本字段未传时会解码为 `0`，不表示跳过版本校验；正确调用应发送刚读取的实际值。档案的 `grade_term` 可为空，非空时使用当前小学学期枚举，不借用单题解题接口的其他学段枚举。
+
+| 字段 | 契约 |
+| --- | --- |
+| `agent`、`idempotency_key` | 当前归属的实例 name、该事务命令的非空幂等键 |
+| `expected_profile_revision` | 刚读取的档案 revision |
+| `expected_progress_revision` | 刚读取的数学进度生命周期 revision，进度为 null 时也读取外层 revision |
+| `expected_settings_revision` | 刚读取的周练设置 revision |
+| `profile` | 非空 `child_name`、完整 `subject_textbooks`，以及空值或有效小学学期的 `grade_term`；按本次完整档案值提交 |
+| `subject_textbooks` | 严格六键 `math/chinese/english/science/information_technology/art`，每项为非空教材版本字符串 |
+| `weekly_practice_settings` | 有效 IANA `timezone`、`arithmetic_minutes: 1..5`；两个 enabled 布尔及 `textbook_consolidation_tier: less/standard/more`，tier 省略默认 standard |
+| `curriculum_progress` | 省略=自动处理；null=本次清除；非空对象遵守[教材与课程进度](#textbook-and-curriculum-progress) |
+| `agent_config` | 可选；提供时必须完整非空 display_name/description/system_prompt，provider/model 同时空或同时非空，skills 由服务补齐必要场景技能 |
+
+请求采用严格字段解码，未知字段会被拒绝。下面示例显式清除进度；三个零版本仅为示意，调用时替换为读取值：
+
+```json
+{
+  "agent": "mingming",
+  "idempotency_key": "profile-update-1",
+  "expected_profile_revision": 0,
+  "expected_progress_revision": 0,
+  "expected_settings_revision": 0,
+  "profile": {
+    "child_name": "明明",
+    "grade_term": "五年级下",
+    "subject_textbooks": {
+      "math": "人教版",
+      "chinese": "统编版",
+      "english": "外研版",
+      "science": "教科版",
+      "information_technology": "浙教版",
+      "art": "人美版"
+    }
+  },
+  "curriculum_progress": null,
+  "weekly_practice_settings": {
+    "timezone": "Asia/Shanghai",
+    "textbook_consolidation_enabled": false,
+    "textbook_consolidation_tier": "standard",
+    "arithmetic_warmup_enabled": false,
+    "arithmetic_minutes": 2
+  }
+}
+```
+
+将请求保存为本地 `profile-bundle.json` 后，使用当前服务地址和令牌：
+
+```bash
+curl --fail-with-body "$HEXCLAW_API_BASE/api/k12/profile-bundle" \
+  -X PUT \
+  -H "Authorization: Bearer $HEXCLAW_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  --data-binary @profile-bundle.json
+```
+
+### 响应与失败
+
+成功为 `200`，响应为 `{"profile":{...},"curriculum_progress":null或对象,"weekly_practice_settings":{...},"replayed":false}`，提交可选 Agent 配置时另含 `agent_config`。重放命令通过 `replayed` 表达；修改命令内容时使用新键。profile 的 `textbook_edition` 是数学教材兼容投影。
+
+| HTTP | 原因 |
+| --- | --- |
+| `400` | 非法 JSON、未知字段、缺少完整六学科档案、无效年级/周练设置或不匹配的显式教材进度 |
+| `401` | 当前服务令牌无效 |
+| `404` | 引用的领域记录不存在，或不可在当前范围读取 |
+| `409` | revision 已变更，或同幂等键的命令内容冲突；重读状态并重新形成命令 |
+| `502` | 需要的教材目录不可用 |
+| `500` | 未分类的存储或应用错误 |
+
+错误体为 `{"error":"..."}`。校验或事务失败不留下部分档案、进度、绑定或设置。
+
+<a id="textbook-and-curriculum-progress"></a>
+## 教材与课程进度
+
+本节为创建、编辑和预览课程进度的共同契约。
+
+1. K12 创建使用 `POST /api/v1/agents`。省略 `curriculum_progress` 时可采用唯一匹配的真实教材目录建议；显式 `null` 保持未设进度，无可用目录仍正常创建。
+2. Agent、非空进度和绑定在同一 SQLite 事务中提交，失败不留下部分建档。平台响应沿用 `{"message":"Agent 已注册","name":"..."}`。
+3. 创建与 `PUT /api/k12/profile-bundle` 共用非空选择：`subject: math`、当前归属的 `textbook_manifest_id`，可选 `lesson_id/page_from/page_to`。`evidence_source` 区分 `parent_confirmed` 和 `ai_estimated`。
+4. 人工进度须提供目录内的 `volume/unit_id`。AI 输入允许 unit_id 为空，后端重算并保留显式课时、页码。显式非空 AI 选择无法匹配当前档案的真实教材目录时，创建与编辑均返回 `400`，不保存任何变更。
+5. 同 scope 人工进度不被推算覆盖。PUT 省略表示自动处理，显式 null 表示本次清除；旧空进度生命周期不关闭后续建议。
+6. `GET /api/k12/curriculum-progress?mode=estimate` 只读预览，返回 `{"progress":null或对象,"revision":...}`。创建前无需 agent；参数为 `grade_term/textbook_edition` 和可选 `textbook_manifest_id/lesson_id/page_from/page_to`。已有实例可带 agent，由持久档案补齐缺省年级与教材。
+7. `GET /api/k12/textbook-binding-options?mode=create` 在创建前只读当前可信 owner 的数学教材候选，无需 agent、不创建绑定，返回 `{"items":[...]}`。未指定创建模式时保留已有实例的候选查询与归属校验。
+8. 年级来自持久封面证据，不从文件名猜测；多个匹配目录不任取首项。confirmed_at 保持 Unix 数字，AI 建议为 `0`；estimate_basis 保存推算日期、参考窗口、权重方法和可选引用回执哈希。
+9. 推算参考窗口为上学期 9 月 1 日至次年 1 月 31 日、下学期 3 月 1 日至 6 月 30 日；按服务端上海日期选择最近对应周期，结合工作日比例、目录课时数与缺省页跨度估计单元。这是建议参考，不是真实学校校历或已学、掌握证据。
+10. 只读预览不写入；仅新业务请求通过 CAS 采用建议。已冻结成果不会因新建议重新生成，无教材或进度不阻断真实题目处理。
+
+实现参考：[场景路由](apihttp/handler.go)、[档案与周练处理器](apihttp/weekly_practice_handler.go)、[只读建议](apihttp/curriculum_progress_handler.go)。客户端以本节契约为入口，无需通过源码推断调用方式。
