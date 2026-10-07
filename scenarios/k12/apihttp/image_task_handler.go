@@ -744,12 +744,18 @@ type imageTaskVersionReq struct {
 	Version int    `json:"version"`
 }
 
+type imageTaskRetryReq struct {
+	Agent   string                       `json:"agent"`
+	Version int                          `json:"version"`
+	Intent  usecase.ImageTaskRetryIntent `json:"intent,omitempty"`
+}
+
 func (h *handler) retryImageTask(w http.ResponseWriter, r *http.Request) {
 	if h.rt.ImageTasks == nil {
 		writeErr(w, http.StatusServiceUnavailable, "image task facade unavailable")
 		return
 	}
-	var req imageTaskVersionReq
+	var req imageTaskRetryReq
 	if !decodeStrict(w, r, &req) {
 		return
 	}
@@ -758,12 +764,13 @@ func (h *handler) retryImageTask(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "agent required")
 		return
 	}
-	if _, ok := h.authorizeImageTaskDispatch(
+	ownerScope, ok := h.authorizeImageTaskDispatch(
 		w, r, req.Agent, r.PathValue("id"),
-	); !ok {
+	)
+	if !ok {
 		return
 	}
-	view, err := h.rt.ImageTasks.Retry(r.Context(), req.Agent, r.PathValue("id"), req.Version)
+	view, err := h.rt.ImageTasks.RetryWithIntent(r.Context(), req.Agent, r.PathValue("id"), req.Version, ownerScope, req.Intent)
 	if err != nil {
 		writeErr(w, httpStatusForK12Error(err, http.StatusConflict), err.Error())
 		return

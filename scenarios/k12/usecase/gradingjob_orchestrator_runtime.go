@@ -221,6 +221,12 @@ func (o *GradingOrchestrator) beginTrackedContext(parent context.Context) (conte
 // 同一 Job 已在推进中时记录一次 rerun 信号，当前轮退出前至少再读一次状态机；这样确认
 // 与锚点同时回位时不会因 active 守卫吞掉最后一次续跑。panic 不逃逸（§6.15）。
 func (o *GradingOrchestrator) StartAsync(jobID string) bool {
+	accepted, _ := o.startAsyncAfter(jobID, nil)
+	return accepted
+}
+
+// startAsyncAfter 在既有生命周期锁内提交必要状态，提交失败不会注册或启动 worker。
+func (o *GradingOrchestrator) startAsyncAfter(jobID string, beforeStart func() error) (bool, error) {
 	run := o.lookup(jobID)
 	agentName := ""
 	if run != nil {
@@ -238,7 +244,13 @@ func (o *GradingOrchestrator) StartAsync(jobID string) bool {
 	if o.sealed {
 		o.mu.Unlock()
 		logScheduling(false, "orchestrator_sealed")
-		return false
+		return false, nil
+	}
+	if beforeStart != nil {
+		if err := beforeStart(); err != nil {
+			o.mu.Unlock()
+			return false, err
+		}
 	}
 	if o.active == nil {
 		o.active = map[string]bool{}
@@ -250,14 +262,14 @@ func (o *GradingOrchestrator) StartAsync(jobID string) bool {
 		o.rerun[jobID] = true
 		o.mu.Unlock()
 		logScheduling(true, "active_rerun")
-		return true
+		return true, nil
 	}
 	o.active[jobID] = true
 	if !o.beginWorkerLocked() {
 		delete(o.active, jobID)
 		o.mu.Unlock()
 		logScheduling(false, "worker_lifecycle_closed")
-		return false
+		return false, nil
 	}
 	o.mu.Unlock()
 	logScheduling(true, "new_worker")
@@ -618,7 +630,7 @@ func (o *GradingOrchestrator) StartAsync(jobID string) bool {
 			return
 		}
 	}()
-	return true
+	return true, nil
 }
 
 // GradingQuestionCorrection 家长对识别结果的逐题确认/修正（§6.7 公共命令③的结构化载荷）。

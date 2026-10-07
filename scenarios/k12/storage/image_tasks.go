@@ -2695,14 +2695,14 @@ func (s *Store) RestartImageTaskAutomaticWindow(
 	expectedVersion int,
 	now int64,
 ) (k12.ImageTaskDispatch, error) {
-	res, err := s.db.ExecContext(ctx, `UPDATE k12_image_task_dispatches
-        SET status='routed',failure_kind='',retry_safe=0,
-            automatic_budget_seconds=?,automatic_started_at=?,
-            automatic_deadline_at=?,automatic_remaining_seconds=?,
-            version=version+1,updated_at=?
-        WHERE agent_name=? AND dispatch_id=? AND version=?
-          AND target_object_id!=''
-          AND (
+	return restartImageTaskAutomaticWindowVia(ctx, s.db, agentName, dispatchID, expectedVersion, now, false)
+}
+
+func restartImageTaskAutomaticWindowVia(
+	ctx context.Context, q dbHandle, agentName, dispatchID string,
+	expectedVersion int, now int64, knownLocalTechnical bool,
+) (k12.ImageTaskDispatch, error) {
+	predicate := `AND (
             (status='failed' AND retry_safe=1)
             OR (
               status='routed'
@@ -2714,17 +2714,31 @@ func (s *Store) RestartImageTaskAutomaticWindow(
               status='routed'
               AND target_object_type='creative_work_intake'
             )
-          )`,
-		imageTaskAutomaticBudgetSeconds, now,
-		now+imageTaskAutomaticBudgetSeconds, imageTaskAutomaticBudgetSeconds,
-		now, agentName, dispatchID, expectedVersion, now)
+          )`
+	args := []any{imageTaskAutomaticBudgetSeconds, now,
+		now + imageTaskAutomaticBudgetSeconds, imageTaskAutomaticBudgetSeconds,
+		now, agentName, dispatchID, expectedVersion}
+	if knownLocalTechnical {
+		// 唯一调用方已经在同一事务核对原批改终态及当前确定失败回执。
+		predicate = `AND status IN ('routed','failed') AND target_object_type='homework_submission'`
+	} else {
+		args = append(args, now)
+	}
+	res, err := q.ExecContext(ctx, `UPDATE k12_image_task_dispatches
+        SET status='routed',failure_kind='',retry_safe=0,
+            automatic_budget_seconds=?,automatic_started_at=?,
+            automatic_deadline_at=?,automatic_remaining_seconds=?,
+            version=version+1,updated_at=?
+        WHERE agent_name=? AND dispatch_id=? AND version=?
+          AND target_object_id!=''
+          `+predicate, args...)
 	if err != nil {
 		return k12.ImageTaskDispatch{}, err
 	}
 	if n, _ := res.RowsAffected(); n != 1 {
 		return k12.ImageTaskDispatch{}, ErrImageTaskVersionConflict
 	}
-	return s.GetImageTaskDispatch(ctx, agentName, dispatchID)
+	return getImageTaskDispatch(ctx, q, agentName, dispatchID, "")
 }
 
 func normalizeImageTaskAutomaticWindow(dispatch *k12.ImageTaskDispatch) {
