@@ -41,6 +41,7 @@ type inboundPhotoCoordinatorFake struct {
 	beforeRecordImageTask   func()
 	resumeCalls             int
 	terminalCalls           int
+	resumeByIdentity        func(k12usecase.InboundPhotoIdentity) (k12usecase.InboundPhotoBundle, error)
 }
 
 func (f *inboundPhotoCoordinatorFake) Admit(
@@ -62,8 +63,11 @@ func (f *inboundPhotoCoordinatorFake) Resume(
 }
 
 func (f *inboundPhotoCoordinatorFake) ResumeByIdentity(
-	_ context.Context, _ k12usecase.InboundPhotoIdentity,
+	_ context.Context, identity k12usecase.InboundPhotoIdentity,
 ) (k12usecase.InboundPhotoBundle, error) {
+	if f.resumeByIdentity != nil {
+		return f.resumeByIdentity(identity)
+	}
 	return f.bundle, f.resumeErr
 }
 
@@ -178,6 +182,14 @@ func TestDingTalkPhotoAdmissionResumesFrozenIdentityBeforeMutableRouting(t *test
 	runtime := newK12DingtalkPhotoInboundRuntime(k12DingtalkPhotoInboundRuntimeConfig{
 		BaseContext: context.Background(),
 		Inbound:     coordinator,
+		ResolveInstanceID: func(string, string) (string, error) {
+			t.Fatal("frozen legacy receipt must resume before instance resolution")
+			return "", nil
+		},
+		BindDirect: func(context.Context, *adapter.Message) error {
+			t.Fatal("frozen receipt must not consult mutable bindings")
+			return nil
+		},
 	})
 
 	handled, err := runtime.AdmitInboundPhoto(context.Background(), &adapter.Message{
@@ -199,6 +211,167 @@ func TestDingTalkPhotoAdmissionResumesFrozenIdentityBeforeMutableRouting(t *test
 		replayed.AssetName != "homework.png" || replayed.AssetMIME != "image/png" ||
 		replayed.CommandJSON != coordinator.bundle.Receipt.CommandJSON {
 		t.Fatalf("replay did not preserve first frozen admission: %#v", replayed)
+	}
+}
+
+func TestDingTalkPhotoAdmissionCanonicalIdentityUsesExplicitLegacyAliasRoute(t *testing.T) {
+	agents := []agentrouter.AgentConfig{
+		{Name: "child-a", Provider: "provider-a", Model: "model-a", Metadata: map[string]string{"scenario": k12TutorScenario}},
+		{Name: "child-b", Provider: "provider-b", Model: "model-b", Metadata: map[string]string{"scenario": k12TutorScenario}},
+		{Name: "general", Provider: "provider-general", Model: "model-general", Metadata: map[string]string{"scenario": "general"}},
+	}
+	tests := []struct {
+		name        string
+		alias       string
+		stableID    string
+		rules       []agentrouter.Rule
+		wantHandled bool
+		wantAgent   string
+		wantBinding string
+		wantBindRef string
+		reboundRule *agentrouter.Rule
+	}{
+		{
+			name: "legacy exact name", alias: "钉钉-A", stableID: "pi-a",
+			rules:       []agentrouter.Rule{{ID: 41, Platform: "dingtalk", InstanceID: "钉钉-A", ChatID: "family-group", AgentName: "child-a"}},
+			wantHandled: true, wantAgent: "child-a", wantBinding: "agent-rule:41", wantBindRef: "钉钉-A",
+		},
+		{
+			name: "canonical rule takes priority", alias: "钉钉-A", stableID: "pi-a",
+			rules: []agentrouter.Rule{
+				{ID: 41, Platform: "dingtalk", InstanceID: "钉钉-A", ChatID: "family-group", AgentName: "child-b"},
+				{ID: 42, Platform: "dingtalk", InstanceID: "pi-a", ChatID: "family-group", AgentName: "child-a"},
+			},
+			wantHandled: true, wantAgent: "child-a", wantBinding: "agent-rule:42", wantBindRef: "pi-a",
+		},
+		{
+			name: "canonical non K12 rule blocks legacy K12 takeover", alias: "钉钉-A", stableID: "pi-a",
+			rules: []agentrouter.Rule{
+				{ID: 41, Platform: "dingtalk", InstanceID: "钉钉-A", ChatID: "family-group", AgentName: "child-a"},
+				{ID: 42, Platform: "dingtalk", InstanceID: "pi-a", ChatID: "family-group", AgentName: "general"},
+			},
+		},
+		{
+			name: "legacy catchall rebinds exact name", alias: "钉钉-A", stableID: "pi-a",
+			rules:       []agentrouter.Rule{{ID: 41, Platform: "dingtalk", InstanceID: "钉钉-A", AgentName: "child-a"}},
+			wantHandled: true, wantAgent: "child-a", wantBinding: "agent-rule:43", wantBindRef: "钉钉-A",
+			reboundRule: &agentrouter.Rule{ID: 43, Platform: "dingtalk", InstanceID: "钉钉-A", ChatID: "family-group", AgentName: "child-a", Priority: 50},
+		},
+		{
+			name: "second physical instance keeps own legacy rule", alias: "钉钉-B", stableID: "pi-b",
+			rules: []agentrouter.Rule{
+				{ID: 41, Platform: "dingtalk", InstanceID: "钉钉-A", ChatID: "family-group", AgentName: "child-a"},
+				{ID: 44, Platform: "dingtalk", InstanceID: "钉钉-B", ChatID: "family-group", AgentName: "child-b"},
+			},
+			wantHandled: true, wantAgent: "child-b", wantBinding: "agent-rule:44", wantBindRef: "钉钉-B",
+		},
+		{
+			name: "other physical instance and default cannot take over", alias: "钉钉-B", stableID: "pi-b",
+			rules: []agentrouter.Rule{{ID: 41, Platform: "dingtalk", InstanceID: "钉钉-A", ChatID: "family-group", AgentName: "child-a"}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			router := agentrouter.New()
+			router.LoadAll(agents, "child-a", tt.rules)
+			coordinator := &inboundPhotoCoordinatorFake{resumeErr: records.ErrNotFound}
+			bindCalls := 0
+			runtime := newK12DingtalkPhotoInboundRuntime(k12DingtalkPhotoInboundRuntimeConfig{
+				BaseContext: context.Background(), Router: router, Inbound: coordinator,
+				ResolveInstanceID: func(platform, instanceRef string) (string, error) {
+					if platform != "dingtalk" || instanceRef != tt.alias {
+						t.Fatalf("instance resolution crossed source identity: %s/%s", platform, instanceRef)
+					}
+					return tt.stableID, nil
+				},
+				BindDirect: func(_ context.Context, routingMessage *adapter.Message) error {
+					bindCalls++
+					if !tt.wantHandled {
+						return nil
+					}
+					if routingMessage.InstanceID != tt.wantBindRef {
+						t.Fatalf("direct binding used instance %q, want matched rule identity %q", routingMessage.InstanceID, tt.wantBindRef)
+					}
+					if tt.reboundRule != nil {
+						router.LoadAll(agents, "child-a", append(append([]agentrouter.Rule(nil), tt.rules...), *tt.reboundRule))
+					}
+					return nil
+				},
+			})
+			msg := k12PhotoTestMessage()
+			msg.InstanceID = tt.alias
+			handled, err := runtime.AdmitInboundPhoto(context.Background(), msg)
+			if err != nil || handled != tt.wantHandled {
+				t.Fatalf("admission = handled %v, err %v; want handled %v", handled, err, tt.wantHandled)
+			}
+			if !tt.wantHandled {
+				if bindCalls != 0 || len(coordinator.admissions) != 0 {
+					t.Fatalf("unmatched/default route created a binding or receipt: %d/%d", bindCalls, len(coordinator.admissions))
+				}
+				return
+			}
+			if bindCalls != 1 || len(coordinator.admissions) != 1 {
+				t.Fatalf("binding/admission calls = %d/%d, want 1/1", bindCalls, len(coordinator.admissions))
+			}
+			admission := coordinator.admissions[0]
+			if admission.AgentName != tt.wantAgent || admission.BindingID != tt.wantBinding ||
+				admission.Identity.InstanceID != tt.stableID || admission.Identity.ChatID != msg.ChatID ||
+				admission.Identity.ProviderMessageID != msg.ID || msg.InstanceID != tt.alias {
+				t.Fatalf("admission changed frozen physical identity or legacy binding: %#v", admission)
+			}
+			var command k12DingtalkInboundPhotoCommand
+			if err := json.Unmarshal([]byte(admission.CommandJSON), &command); err != nil {
+				t.Fatal(err)
+			}
+			wantProvider, wantModel := "provider-a", "model-a"
+			if tt.wantAgent == "child-b" {
+				wantProvider, wantModel = "provider-b", "model-b"
+			}
+			if command.Provider != wantProvider || command.Model != wantModel {
+				t.Fatalf("route snapshot crossed TutorAgent: %#v", command)
+			}
+		})
+	}
+}
+
+func TestDingTalkPhotoAdmissionCanonicalResumeKeepsFrozenBinding(t *testing.T) {
+	msg := k12PhotoTestMessage()
+	msg.InstanceID = "钉钉-A"
+	raw, err := decodeK12PhotoAttachment(msg.Attachments[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle := inboundPhotoBundleFixture(raw)
+	bundle.Receipt.Identity.InstanceID = "pi-a"
+	bundle.Receipt.Identity.ChatID = msg.ChatID
+	bundle.Receipt.Identity.ProviderMessageID = msg.ID
+	var lookedUp []string
+	coordinator := &inboundPhotoCoordinatorFake{
+		bundle: bundle,
+		resumeByIdentity: func(identity k12usecase.InboundPhotoIdentity) (k12usecase.InboundPhotoBundle, error) {
+			lookedUp = append(lookedUp, identity.InstanceID)
+			if identity.InstanceID == "pi-a" {
+				return bundle, nil
+			}
+			return k12usecase.InboundPhotoBundle{}, records.ErrNotFound
+		},
+	}
+	runtime := newK12DingtalkPhotoInboundRuntime(k12DingtalkPhotoInboundRuntimeConfig{
+		BaseContext: context.Background(), Inbound: coordinator,
+		ResolveInstanceID: func(string, string) (string, error) { return "pi-a", nil },
+		BindDirect: func(context.Context, *adapter.Message) error {
+			t.Fatal("canonical frozen receipt must not consult mutable bindings")
+			return nil
+		},
+	})
+	handled, err := runtime.AdmitInboundPhoto(context.Background(), msg)
+	if err != nil || !handled || strings.Join(lookedUp, ",") != "钉钉-A,pi-a" || len(coordinator.admissions) != 1 {
+		t.Fatalf("canonical resume = handled %v, err %v, lookups %v, admissions %d", handled, err, lookedUp, len(coordinator.admissions))
+	}
+	admission := coordinator.admissions[0]
+	if admission.AgentName != bundle.Receipt.AgentName || admission.BindingID != bundle.Receipt.BindingID ||
+		admission.Identity != bundle.Receipt.Identity || admission.CommandJSON != bundle.Receipt.CommandJSON {
+		t.Fatalf("canonical resume replaced frozen receipt: %#v", admission)
 	}
 }
 

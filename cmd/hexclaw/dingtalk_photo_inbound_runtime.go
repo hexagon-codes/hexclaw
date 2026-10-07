@@ -207,6 +207,7 @@ func (r *k12DingtalkPhotoInboundRuntime) AdmitInboundPhoto(
 		len(msg.Attachments) != 1 || strings.TrimSpace(msg.Attachments[0].Type) != "image" {
 		return false, nil
 	}
+	originalMessage := msg
 	identity, err := k12DingtalkInboundIdentity(msg)
 	if err != nil {
 		return false, err
@@ -264,7 +265,7 @@ func (r *k12DingtalkPhotoInboundRuntime) AdmitInboundPhoto(
 		return false, resumeErr
 	}
 
-	routed := routeK12DingtalkPhotoTutor(msg, r.router)
+	routed, routingMessage := lookupK12DingtalkTutorRoute(msg, originalMessage, r.router)
 	if routed == nil {
 		return false, nil
 	}
@@ -274,12 +275,12 @@ func (r *k12DingtalkPhotoInboundRuntime) AdmitInboundPhoto(
 		}
 	}
 	if r.bindDirect != nil {
-		if err := r.bindDirect(ctx, msg); err != nil {
+		if err := r.bindDirect(ctx, routingMessage); err != nil {
 			return false, fmt.Errorf("bind DingTalk direct K12 target: %w", err)
 		}
 		// 绑定会把实例级 catchall 提升为发送者精确规则。
 		// 重新路由，使耐久入站回执冻结具体 binding ID。
-		rebound := routeK12DingtalkPhotoTutor(msg, r.router)
+		rebound, _ := lookupK12DingtalkTutorRoute(msg, originalMessage, r.router)
 		if rebound == nil || rebound.Rule == nil || strings.TrimSpace(rebound.Rule.ChatID) == "" {
 			return false, fmt.Errorf("DingTalk direct K12 target binding did not produce an exact route")
 		}

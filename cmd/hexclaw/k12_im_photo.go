@@ -725,23 +725,40 @@ func routeK12DingtalkPhotoTutor(msg *adapter.Message, router *agentrouter.Dispat
 	return routeK12DingtalkTutor(msg, router)
 }
 
+// lookupK12DingtalkTutorRoute 优先匹配稳定实例身份，同一来源的旧精确实例名仅作后备。
+// 返回命中规则使用的消息身份，供私聊绑定沿用；耐久回执仍由调用方冻结原物理身份。
+func lookupK12DingtalkTutorRoute(
+	canonicalMessage, originalMessage *adapter.Message,
+	router *agentrouter.Dispatcher,
+) (*agentrouter.RoutingResult, *adapter.Message) {
+	for _, msg := range []*adapter.Message{canonicalMessage, originalMessage} {
+		if msg == nil || router == nil || msg.Platform != adapter.PlatformDingtalk ||
+			msg.Metadata["conversation_type"] == "2" {
+			return nil, msg
+		}
+		routed := router.Route(agentrouter.RouteRequest{
+			Platform:   string(msg.Platform),
+			InstanceID: msg.InstanceID,
+			UserID:     msg.UserID,
+			ChatID:     msg.ChatID,
+		})
+		if routed == nil || routed.Rule == nil {
+			if msg == canonicalMessage && canonicalMessage != originalMessage {
+				continue
+			}
+			return nil, msg
+		}
+		// 稳定身份的显式规则拥有消息；指向其他 Agent 时不得改用旧名称接管。
+		if routed.AgentConfig == nil || strings.TrimSpace(routed.AgentConfig.Metadata["scenario"]) != k12TutorScenario {
+			return nil, msg
+		}
+		return routed, msg
+	}
+	return nil, canonicalMessage
+}
+
 func routeK12DingtalkTutor(msg *adapter.Message, router *agentrouter.Dispatcher) *agentrouter.RoutingResult {
-	if msg == nil || router == nil || msg.Platform != adapter.PlatformDingtalk {
-		return nil
-	}
-	if msg.Metadata["conversation_type"] == "2" { // 钉钉群聊约定值（adapter/dingtalk 同一口径）
-		return nil
-	}
-	routed := router.Route(agentrouter.RouteRequest{
-		Platform:   string(msg.Platform),
-		InstanceID: msg.InstanceID,
-		UserID:     msg.UserID,
-		ChatID:     msg.ChatID,
-	})
-	if routed == nil || routed.Rule == nil || routed.AgentConfig == nil ||
-		strings.TrimSpace(routed.AgentConfig.Metadata["scenario"]) != k12TutorScenario {
-		return nil
-	}
+	routed, _ := lookupK12DingtalkTutorRoute(msg, msg, router)
 	return routed
 }
 

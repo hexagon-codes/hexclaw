@@ -51,12 +51,7 @@ func (p *k12TutorIdentityPolicy) ProcessDingtalkFollowup(ctx context.Context, ms
 			routeMessage = &normalized
 		}
 	}
-	routed := routeK12DingtalkTutor(routeMessage, p.router)
-	if routed == nil && routeMessage != msg {
-		// 仍以精确实例名保存的旧绑定沿用已有路由，不扩大到默认 Agent。
-		routed = routeK12DingtalkTutor(msg, p.router)
-		routeMessage = msg
-	}
+	routed, routeMessage := lookupK12DingtalkTutorRoute(routeMessage, msg, p.router)
 	if routed == nil {
 		return process(ctx, msg)
 	}
