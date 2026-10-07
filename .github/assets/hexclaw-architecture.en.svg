@@ -1,0 +1,92 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="850" viewBox="0 0 1200 850" role="img" aria-labelledby="title desc" data-generator="fireworks-tech-graph" data-quality-profile="showcase">
+<title id="title">HexClaw · Runtime architecture</title><desc id="desc">Desktop and API, IM channels, and automation enter a shared execution service through API intake, platform adapters, and the scheduler. Task runtimes include ReAct Agents, scenario tasks, scripts, and workflows. They read knowledge and memory and call models and tools as needed. Interactive tasks reply to their origin; automated tasks deliver to configured targets.</desc>
+<defs><filter id="shadow" x="-10%" y="-20%" width="120%" height="140%"><feDropShadow dx="0" dy="1.5" stdDeviation="2.5" flood-color="#9fb4c9" flood-opacity="0.22"/></filter>
+<marker id="arrow-0" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="userSpaceOnUse"><path d="M 1 1 L 8 5 L 1 9 Z" fill="#3f8fd4"/></marker>
+<marker id="arrow-1" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="userSpaceOnUse"><path d="M 1 1 L 8 5 L 1 9 Z" fill="#4caf7d"/></marker>
+<marker id="arrow-2" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="userSpaceOnUse"><path d="M 1 1 L 8 5 L 1 9 Z" fill="#8b6fcf"/></marker>
+<marker id="arrow-3" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="userSpaceOnUse"><path d="M 1 1 L 8 5 L 1 9 Z" fill="#e8943a"/></marker>
+</defs>
+<rect width="1200" height="850" fill="#ffffff" data-graph-role="background"/>
+<!-- 横向泳道按职责分区，主流程使用实线，真实反馈使用虚线。 -->
+<text x="600" y="51" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="30" font-weight="700" fill="#12324c" text-anchor="middle">HexClaw · Runtime architecture</text>
+<text x="600" y="83" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="16" font-weight="400" fill="#5f7b9c" text-anchor="middle">One execution service, with task-specific runtimes and capabilities</text>
+<rect id="lane-0" x="40" y="120" width="1120" height="145" rx="18" fill="#f4fbff" stroke="#bcdcf3" stroke-width="1.5" data-graph-role="container"/>
+<text x="64" y="164" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="20" font-weight="700" fill="#3f8fd4" text-anchor="start">Task sources</text>
+<text x="64" y="193" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="14" font-weight="400" fill="#5f7b9c" text-anchor="start">User input or events</text>
+<rect id="lane-1" x="40" y="290" width="1120" height="145" rx="18" fill="#f1faf4" stroke="#bfe6cf" stroke-width="1.5" data-graph-role="container"/>
+<text x="64" y="334" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="20" font-weight="700" fill="#4caf7d" text-anchor="start">Intake &amp; routing</text>
+<text x="64" y="363" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="14" font-weight="400" fill="#5f7b9c" text-anchor="start">One shared runtime</text>
+<rect id="lane-2" x="40" y="460" width="1120" height="145" rx="18" fill="#f5f1fb" stroke="#d4c5ef" stroke-width="1.5" data-graph-role="container"/>
+<text x="64" y="504" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="20" font-weight="700" fill="#8b6fcf" text-anchor="start">Execution</text>
+<text x="64" y="533" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="14" font-weight="400" fill="#5f7b9c" text-anchor="start">Read context</text>
+<text x="64" y="556" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="14" font-weight="400" fill="#5f7b9c" text-anchor="start">Use tools as needed</text>
+<rect id="lane-3" x="40" y="630" width="1120" height="145" rx="18" fill="#fff7ee" stroke="#f3d7b0" stroke-width="1.5" data-graph-role="container"/>
+<text x="64" y="674" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="20" font-weight="700" fill="#e8943a" text-anchor="start">Data &amp; delivery</text>
+<text x="64" y="703" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="14" font-weight="400" fill="#5f7b9c" text-anchor="start">Persist run records</text>
+<text x="64" y="726" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="14" font-weight="400" fill="#5f7b9c" text-anchor="start">Return artifacts</text>
+<g id="clients" data-graph-role="node" data-node-id="clients" data-graph-bounds="250 145 220 95"><rect x="250" y="145" width="220" height="95" rx="12" fill="#ffffff" stroke="#bcdcf3" stroke-width="1.6" filter="url(#shadow)"/>
+<text x="360.0" y="177" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="18" font-weight="650" fill="#12324c" text-anchor="middle">Desktop / API</text>
+<text x="360.0" y="202" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="14.5" font-weight="400" fill="#5f7b9c" text-anchor="middle">Desktop · REST · WebSocket</text>
+</g>
+<g id="im" data-graph-role="node" data-node-id="im" data-graph-bounds="555 145 220 95"><rect x="555" y="145" width="220" height="95" rx="12" fill="#ffffff" stroke="#bcdcf3" stroke-width="1.6" filter="url(#shadow)"/>
+<text x="665.0" y="177" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="18" font-weight="650" fill="#12324c" text-anchor="middle">IM channels</text>
+<text x="665.0" y="202" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="14.5" font-weight="400" fill="#5f7b9c" text-anchor="middle">DingTalk · Feishu · adapters</text>
+</g>
+<g id="events" data-graph-role="node" data-node-id="events" data-graph-bounds="860 145 220 95"><rect x="860" y="145" width="220" height="95" rx="12" fill="#ffffff" stroke="#bcdcf3" stroke-width="1.6" filter="url(#shadow)"/>
+<text x="970.0" y="177" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="18" font-weight="650" fill="#12324c" text-anchor="middle">Automation triggers</text>
+<text x="970.0" y="202" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="14.5" font-weight="400" fill="#5f7b9c" text-anchor="middle">Cron · Workflow · Webhook</text>
+</g>
+<g id="api" data-graph-role="node" data-node-id="api" data-graph-bounds="250 315 220 95"><rect x="250" y="315" width="220" height="95" rx="12" fill="#ffffff" stroke="#bfe6cf" stroke-width="1.6" filter="url(#shadow)"/>
+<text x="360.0" y="347" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="18" font-weight="650" fill="#12324c" text-anchor="middle">API intake</text>
+<text x="360.0" y="372" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="14.5" font-weight="400" fill="#5f7b9c" text-anchor="middle">Requests · session context</text>
+</g>
+<g id="adapter" data-graph-role="node" data-node-id="adapter" data-graph-bounds="555 315 220 95"><rect x="555" y="315" width="220" height="95" rx="12" fill="#ffffff" stroke="#bfe6cf" stroke-width="1.6" filter="url(#shadow)"/>
+<text x="665.0" y="347" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="18" font-weight="650" fill="#12324c" text-anchor="middle">Platform adapters</text>
+<text x="665.0" y="372" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="14.5" font-weight="400" fill="#5f7b9c" text-anchor="middle">Normalize · instance routing</text>
+</g>
+<g id="scheduler" data-graph-role="node" data-node-id="scheduler" data-graph-bounds="860 315 220 95"><rect x="860" y="315" width="220" height="95" rx="12" fill="#ffffff" stroke="#bfe6cf" stroke-width="1.6" filter="url(#shadow)"/>
+<text x="970.0" y="347" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="18" font-weight="650" fill="#12324c" text-anchor="middle">Scheduler</text>
+<text x="970.0" y="372" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="14.5" font-weight="400" fill="#5f7b9c" text-anchor="middle">Scheduled &amp; event tasks</text>
+</g>
+<g id="context" data-graph-role="node" data-node-id="context" data-graph-bounds="250 485 220 95"><rect x="250" y="485" width="220" height="95" rx="12" fill="#ffffff" stroke="#d4c5ef" stroke-width="1.6" filter="url(#shadow)"/>
+<text x="360.0" y="517" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="18" font-weight="650" fill="#12324c" text-anchor="middle">Knowledge &amp; memory</text>
+<text x="360.0" y="542" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="14.5" font-weight="400" fill="#5f7b9c" text-anchor="middle">Retrieval · file memory</text>
+</g>
+<g id="agent" data-graph-role="node" data-node-id="agent" data-graph-bounds="555 485 220 95"><rect x="555" y="485" width="220" height="95" rx="12" fill="#ffffff" stroke="#d4c5ef" stroke-width="1.6" filter="url(#shadow)"/>
+<text x="665.0" y="517" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="18" font-weight="650" fill="#12324c" text-anchor="middle">Task runtime</text>
+<text x="665.0" y="542" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="14.5" font-weight="400" fill="#5f7b9c" text-anchor="middle">ReAct Agent · scenarios</text>
+<text x="665.0" y="564" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="14.5" font-weight="400" fill="#5f7b9c" text-anchor="middle">Scripts · workflows</text>
+</g>
+<g id="capability" data-graph-role="node" data-node-id="capability" data-graph-bounds="860 485 220 95"><rect x="860" y="485" width="220" height="95" rx="12" fill="#ffffff" stroke="#d4c5ef" stroke-width="1.6" filter="url(#shadow)"/>
+<text x="970.0" y="517" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="18" font-weight="650" fill="#12324c" text-anchor="middle">Models &amp; tools</text>
+<text x="970.0" y="542" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="14.5" font-weight="400" fill="#5f7b9c" text-anchor="middle">LLM Router · Skill · MCP</text>
+<text x="970.0" y="564" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="14.5" font-weight="400" fill="#5f7b9c" text-anchor="middle">Scenario packs · code_exec</text>
+</g>
+<g id="storage" data-graph-role="node" data-node-id="storage" data-graph-bounds="250 655 220 95"><rect x="250" y="655" width="220" height="95" rx="12" fill="#ffffff" stroke="#f3d7b0" stroke-width="1.6" filter="url(#shadow)"/>
+<text x="360.0" y="687" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="18" font-weight="650" fill="#12324c" text-anchor="middle">SQLite / file storage</text>
+<text x="360.0" y="712" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="14.5" font-weight="400" fill="#5f7b9c" text-anchor="middle">Sessions · tasks · learning</text>
+</g>
+<g id="artifact" data-graph-role="node" data-node-id="artifact" data-graph-bounds="555 655 220 95"><rect x="555" y="655" width="220" height="95" rx="12" fill="#ffffff" stroke="#f3d7b0" stroke-width="1.6" filter="url(#shadow)"/>
+<text x="665.0" y="687" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="18" font-weight="650" fill="#12324c" text-anchor="middle">Answers &amp; artifacts</text>
+<text x="665.0" y="712" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="14.5" font-weight="400" fill="#5f7b9c" text-anchor="middle">Text · documents · images</text>
+</g>
+<g id="delivery" data-graph-role="node" data-node-id="delivery" data-graph-bounds="860 655 220 95"><rect x="860" y="655" width="220" height="95" rx="12" fill="#ffffff" stroke="#f3d7b0" stroke-width="1.6" filter="url(#shadow)"/>
+<text x="970.0" y="687" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="18" font-weight="650" fill="#12324c" text-anchor="middle">Result delivery</text>
+<text x="970.0" y="712" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="14.5" font-weight="400" fill="#5f7b9c" text-anchor="middle">Origin / configured target</text>
+<text x="970.0" y="734" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="14.5" font-weight="400" fill="#5f7b9c" text-anchor="middle">Desktop · API · IM</text>
+</g>
+<path id="edge-clients-api-77" data-graph-role="edge" data-source="clients" data-target="api" d="M 360 240 L 360 315" fill="none" stroke="#3f8fd4" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-0)"/>
+<path id="edge-im-adapter-78" data-graph-role="edge" data-source="im" data-target="adapter" d="M 665 240 L 665 315" fill="none" stroke="#3f8fd4" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-0)"/>
+<path id="edge-events-scheduler-79" data-graph-role="edge" data-source="events" data-target="scheduler" d="M 970 240 L 970 315" fill="none" stroke="#3f8fd4" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-0)"/>
+<path id="edge-api-agent-80" data-graph-role="edge" data-source="api" data-target="agent" d="M 360 410 L 360 450 L 615 450 L 615 485" fill="none" stroke="#4caf7d" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-1)"/>
+<path id="edge-adapter-agent-81" data-graph-role="edge" data-source="adapter" data-target="agent" d="M 665 410 L 665 485" fill="none" stroke="#4caf7d" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-1)"/>
+<path id="edge-scheduler-agent-82" data-graph-role="edge" data-source="scheduler" data-target="agent" d="M 970 410 L 970 450 L 715 450 L 715 485" fill="none" stroke="#4caf7d" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-1)"/>
+<path id="edge-context-agent-83" data-graph-role="edge" data-source="context" data-target="agent" d="M 470 520 L 555 520" fill="none" stroke="#8b6fcf" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-2)"/>
+<path id="edge-agent-capability-84" data-graph-role="edge" data-source="agent" data-target="capability" d="M 775 520 L 860 520" fill="none" stroke="#8b6fcf" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-2)"/>
+<path id="edge-capability-agent-85" data-graph-role="edge" data-source="capability" data-target="agent" d="M 860 556 L 775 556" fill="none" stroke="#8b6fcf" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-2)" stroke-dasharray="7 6"/>
+<path id="edge-agent-storage-86" data-graph-role="edge" data-source="agent" data-target="storage" d="M 615 580 L 615 620 L 360 620 L 360 655" fill="none" stroke="#e8943a" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-3)"/>
+<path id="edge-agent-artifact-87" data-graph-role="edge" data-source="agent" data-target="artifact" d="M 665 580 L 665 655" fill="none" stroke="#e8943a" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-3)"/>
+<path id="edge-artifact-delivery-88" data-graph-role="edge" data-source="artifact" data-target="delivery" d="M 775 702 L 860 702" fill="none" stroke="#e8943a" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-3)"/>
+<path id="edge-storage-context-89" data-graph-role="edge" data-source="storage" data-target="context" d="M 250 702 L 225 702 L 225 532 L 250 532" fill="none" stroke="#8b6fcf" stroke-width="2.2" stroke-linejoin="round" marker-end="url(#arrow-2)" stroke-dasharray="7 6"/>
+<text x="600" y="828" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="14" font-weight="400" fill="#5f7b9c" text-anchor="middle">Solid: tasks and calls    Dashed: tool results and context reads</text>
+</svg>
