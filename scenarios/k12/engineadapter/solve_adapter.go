@@ -106,6 +106,15 @@ func (a *SolveAdapter) UsesGradingPhysicalCalls() bool {
 	return ok && capable.SupportsSubAgentCallInterceptor()
 }
 
+// FailedVerificationPayload 仅用于已有可信调用账本的来源核验，不从模型正文推断执行状态。
+func (a *SolveAdapter) FailedVerificationPayload(payload string) error {
+	var result engine.SubAgentResult
+	if json.Unmarshal([]byte(payload), &result) != nil || result.ExecutionReceipt == nil {
+		return nil
+	}
+	return result.ExecutionReceipt.KnownExecutionFailure(result.ExecutionReceipt.InputDigest)
+}
+
 func (a *SolveAdapter) withGradingPhysicalCallInterceptor(ctx context.Context) context.Context {
 	if !usecase.HasGradingPhysicalCallExecutor(ctx) {
 		return ctx
@@ -146,10 +155,22 @@ func (a *SolveAdapter) withGradingPhysicalCallInterceptor(ctx context.Context) c
 				return engine.SubAgentResult{}, err
 			}
 			digestRaw := sha256.Sum256(requestRaw)
+			var knownExecutionFailure func(string) error
+			if operation == k12.GradingItemOperationSolveVerify {
+				inputDigest := sha256.Sum256([]byte(spec.Task))
+				knownExecutionFailure = func(payload string) error {
+					var result engine.SubAgentResult
+					if json.Unmarshal([]byte(payload), &result) != nil {
+						return nil
+					}
+					return result.ExecutionReceipt.KnownExecutionFailure(hex.EncodeToString(inputDigest[:]))
+				}
+			}
 			physical, err := usecase.ExecuteGradingPhysicalCall(
 				callCtx,
 				usecase.GradingPhysicalCallSpec{
 					Operation: operation, RequestDigest: hex.EncodeToString(digestRaw[:]),
+					KnownExecutionFailure: knownExecutionFailure,
 				},
 				func(providerCtx context.Context) (string, error) {
 					result, callErr := next(providerCtx, spec)

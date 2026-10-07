@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"math"
 	"regexp"
 	"strings"
@@ -28,6 +30,22 @@ type CodeExecutionReceipt struct {
 	StderrTruncated bool   `json:"stderr_truncated"`
 	Truncated       bool   `json:"truncated"`
 	Stdout          string `json:"stdout"`
+}
+
+// ErrVerificationExecutionFailed 表示同输入的程序执行已明确失败。
+var ErrVerificationExecutionFailed = errors.New("verification execution failed")
+
+// KnownExecutionFailure 只认同一次输入的明确执行失败；缺失或未知回执不据此重试。
+// 没有执行失败回执的概念题仍可返回 unverifiable，超时沿原未知结果边界处理。
+func (r *CodeExecutionReceipt) KnownExecutionFailure(inputDigest string) error {
+	if r == nil || inputDigest == "" || r.InputDigest != inputDigest || r.RunID == "" ||
+		r.Status != "failed" || r.Timeout {
+		return nil
+	}
+	if r.Error != "" {
+		return fmt.Errorf("%w: %s", ErrVerificationExecutionFailed, r.Error)
+	}
+	return ErrVerificationExecutionFailed
 }
 
 type codeExecutionReceiptKey struct{}

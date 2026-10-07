@@ -1126,6 +1126,7 @@ func RecognizedQuestionsFromLayoutFinalizationV2(
 		physicalByID[physical.PhysicalInvocationID] = physical
 	}
 	questions := make([]usecase.RecognizedQuestion, 0, len(plan.Targets))
+	questionTargets := make([]int, 0, len(plan.Targets))
 	for index, candidate := range finalization.CandidateResults {
 		target := plan.Targets[index]
 		if candidate.CandidateID != target.TargetID {
@@ -1174,6 +1175,7 @@ func RecognizedQuestionsFromLayoutFinalizationV2(
 			region := target.Region
 			question.SourceRegion = &region
 			questions = append(questions, usecase.NormalizeRecognizedQuestionForInitialReadMode(question, plan.InitialReadMode))
+			questionTargets = append(questionTargets, index)
 		case k12.RecognitionLayoutCandidateNonQuestionV2:
 			if !bytes.Equal(candidate.ResultJSON, []byte(`{}`)) {
 				return fail("candidate %q non_question result is not {}", target.TargetID)
@@ -1182,6 +1184,7 @@ func RecognizedQuestionsFromLayoutFinalizationV2(
 			return fail("candidate %q has invalid result kind", target.TargetID)
 		}
 	}
+	questions = projectCompletePrintedQuestionsV2(questions, questionTargets, plan, finalization)
 	if err := validateRecognitionProtocolResult(questions); err != nil {
 		return nil, err
 	}

@@ -27,8 +27,8 @@ type k12SavedModelCapabilityProbe func(context.Context, string, string, string) 
 
 var k12NewTaskCapabilityProbeMu sync.Mutex
 
-// resolveK12GradingModelSnapshotWithCapabilityReceipt 在静态路由授权后，冻结同一
-// Provider 实例、模型与执行配置下的视觉成功回执。缺失或过期回执不会退化到默认模型。
+// resolveK12GradingModelSnapshotWithCapabilityReceipt 为精确文本候选冻结视觉成功回执。
+// 已冻结任务只验证原证据，不重新探测或替换模型、回执。
 func resolveK12GradingModelSnapshotWithCapabilityReceipt(
 	ctx context.Context,
 	router *llmrouter.Selector,
@@ -39,6 +39,16 @@ func resolveK12GradingModelSnapshotWithCapabilityReceipt(
 	snapshot, err := resolveK12GradingModelSnapshot(router, requested)
 	if err != nil {
 		return k12.GradingModelSnapshot{}, err
+	}
+	requested = k12.NormalizeGradingModelSnapshot(requested)
+	if requested.HasFrozenCapabilityProbeEvidence() {
+		if requested.Provider != snapshot.Provider || requested.Model != snapshot.Model || requested.ProviderInstanceID != snapshot.ProviderInstanceID {
+			return k12.GradingModelSnapshot{}, k12.ErrModelCapabilityUnverified
+		}
+		if err := validateK12FrozenModelCapabilityReceipt(ctx, router, receipts, requested, config.LLMModelCapabilityVision); err != nil {
+			return k12.GradingModelSnapshot{}, err
+		}
+		return requested, nil
 	}
 	evidence, err := ensureK12NewTaskVisionCapabilityReceipt(
 		ctx, router, receipts, snapshot.Provider, snapshot.Model, probes,
@@ -124,13 +134,14 @@ func resolveK12WorkFeedbackRouteWithCapabilityReceipt(
 	router *llmrouter.Selector,
 	receipts storage.ModelCapabilityProbeReceiptStore,
 	workType string,
+	probes ...k12SavedModelCapabilityProbe,
 ) (k12.ImageTaskRouteSnapshot, error) {
 	route, err := resolveK12WorkFeedbackRoute(router, workType)
 	if err != nil {
 		return k12.ImageTaskRouteSnapshot{}, err
 	}
 	return freezeK12WorkFeedbackRouteCapabilityReceipt(
-		ctx, router, receipts, workType, route,
+		ctx, router, receipts, workType, route, probes,
 	)
 }
 
@@ -140,14 +151,41 @@ func resolveK12RequestedWorkFeedbackRouteWithCapabilityReceipt(
 	receipts storage.ModelCapabilityProbeReceiptStore,
 	workType string,
 	requested k12.ImageTaskRouteSnapshot,
+	probes ...k12SavedModelCapabilityProbe,
 ) (k12.ImageTaskRouteSnapshot, error) {
-	route, err := resolveK12RequestedWorkFeedbackRoute(router, workType, requested)
+	requested = k12.NormalizeImageTaskRouteSnapshot(requested)
+	selection := requested
+	if k12WorkFeedbackHasMatchingFrozenCapability(requested, workType) {
+		selection.SelectionSource = "explicit"
+	}
+	route, err := resolveK12RequestedWorkFeedbackRoute(router, workType, selection)
 	if err != nil {
 		return k12.ImageTaskRouteSnapshot{}, err
 	}
+	if k12WorkFeedbackHasMatchingFrozenCapability(requested, workType) {
+		route.ProviderInstanceID = requested.ProviderInstanceID
+		route.ConfigFingerprint = requested.ConfigFingerprint
+		route.CapabilityReceiptDigest = requested.CapabilityReceiptDigest
+		route.ProbePolicyVersion = requested.ProbePolicyVersion
+		route.Capability = requested.Capability
+		route.SelectionSource = requested.SelectionSource
+	}
 	return freezeK12WorkFeedbackRouteCapabilityReceipt(
-		ctx, router, receipts, workType, route,
+		ctx, router, receipts, workType, route, probes,
 	)
+}
+
+// 不同阶段能力回执各自归属；视觉分类证据不能替换写作点评的文本回执。
+func k12WorkFeedbackHasMatchingFrozenCapability(route k12.ImageTaskRouteSnapshot, workType string) bool {
+	return route.HasFrozenCapabilityProbeEvidence() &&
+		k12ProbeKindForSnapshot(k12.GradingModelSnapshot{Capability: route.Capability}) == k12WorkFeedbackProbeKind(workType)
+}
+
+func k12WorkFeedbackProbeKind(workType string) string {
+	if strings.TrimSpace(workType) == k12.WorkTypeArt {
+		return config.LLMModelCapabilityVision
+	}
+	return config.LLMModelCapabilityText
 }
 
 func freezeK12WorkFeedbackRouteCapabilityReceipt(
@@ -156,14 +194,27 @@ func freezeK12WorkFeedbackRouteCapabilityReceipt(
 	receipts storage.ModelCapabilityProbeReceiptStore,
 	workType string,
 	route k12.ImageTaskRouteSnapshot,
+	probes []k12SavedModelCapabilityProbe,
 ) (k12.ImageTaskRouteSnapshot, error) {
-	probeKind := config.LLMModelCapabilityText
-	if strings.TrimSpace(workType) == k12.WorkTypeArt {
-		probeKind = config.LLMModelCapabilityVision
+	probeKind := k12WorkFeedbackProbeKind(workType)
+	if k12WorkFeedbackHasMatchingFrozenCapability(route, workType) {
+		snapshot := k12.GradingModelSnapshot{
+			Provider: route.Provider, Model: route.Model, Route: route.Route, Capability: route.Capability,
+			ProviderInstanceID: route.ProviderInstanceID, ConfigFingerprint: route.ConfigFingerprint,
+			CapabilityReceiptDigest: route.CapabilityReceiptDigest, ProbePolicyVersion: route.ProbePolicyVersion,
+		}
+		if err := validateK12FrozenModelCapabilityReceipt(ctx, router, receipts, snapshot, probeKind); err != nil {
+			return k12.ImageTaskRouteSnapshot{}, err
+		}
+		return k12.NormalizeImageTaskRouteSnapshot(route), nil
 	}
-	evidence, err := k12CapabilityReceiptEvidenceForRoute(
-		ctx, router, receipts, route.Provider, route.Model, probeKind,
-	)
+	var evidence k12CapabilityReceiptEvidence
+	var err error
+	if probeKind == config.LLMModelCapabilityVision {
+		evidence, err = ensureK12NewTaskVisionCapabilityReceipt(ctx, router, receipts, route.Provider, route.Model, probes)
+	} else {
+		evidence, err = k12CapabilityReceiptEvidenceForRoute(ctx, router, receipts, route.Provider, route.Model, probeKind)
+	}
 	if err != nil {
 		return k12.ImageTaskRouteSnapshot{}, err
 	}
@@ -191,6 +242,14 @@ func k12CapabilityReceiptEvidenceForRoute(
 	probeKind = strings.TrimSpace(probeKind)
 	provider, configured := router.ProviderConfig(providerName)
 	if !configured || providerName == "" || modelID == "" || probeKind == "" {
+		return k12CapabilityReceiptEvidence{}, k12.ErrModelCapabilityUnverified
+	}
+	return k12CapabilityReceiptEvidenceForProviderConfig(ctx, receipts, providerName, modelID, probeKind, provider)
+}
+
+// k12CapabilityReceiptEvidenceForProviderConfig 复用路由捕获的配置，避免跨重载读取两份事实。
+func k12CapabilityReceiptEvidenceForProviderConfig(ctx context.Context, receipts storage.ModelCapabilityProbeReceiptStore, providerName, modelID, probeKind string, provider config.LLMProviderConfig) (k12CapabilityReceiptEvidence, error) {
+	if receipts == nil {
 		return k12CapabilityReceiptEvidence{}, k12.ErrModelCapabilityUnverified
 	}
 	providerInstanceID := config.EffectiveProviderInstanceID(providerName, provider)
@@ -221,13 +280,22 @@ func validateK12FrozenModelCapabilityReceipt(
 	snapshot k12.GradingModelSnapshot,
 	probeKind string,
 ) error {
+	if router == nil {
+		return k12.ErrModelCapabilityUnverified
+	}
+	provider, configured := router.ProviderConfig(snapshot.Provider)
+	if !configured {
+		return k12.ErrModelCapabilityUnverified
+	}
+	return validateK12FrozenModelCapabilityReceiptForProviderConfig(ctx, receipts, snapshot, probeKind, provider)
+}
+
+func validateK12FrozenModelCapabilityReceiptForProviderConfig(ctx context.Context, receipts storage.ModelCapabilityProbeReceiptStore, snapshot k12.GradingModelSnapshot, probeKind string, provider config.LLMProviderConfig) error {
 	snapshot = k12.NormalizeGradingModelSnapshot(snapshot)
 	if !snapshot.HasFrozenCapabilityProbeEvidence() {
 		return k12.ErrModelCapabilityUnverified
 	}
-	evidence, err := k12CapabilityReceiptEvidenceForRoute(
-		ctx, router, receipts, snapshot.Provider, snapshot.Model, probeKind,
-	)
+	evidence, err := k12CapabilityReceiptEvidenceForProviderConfig(ctx, receipts, snapshot.Provider, snapshot.Model, probeKind, provider)
 	if err != nil {
 		return k12.ErrModelCapabilityUnverified
 	}

@@ -29,7 +29,7 @@ func TestK12NewTaskVisionProbePersistsOnceAndFreezesSameModel(t *testing.T) {
 				ProviderInstanceID: "pvd_v1_00112233445566778899aabbccddeeff",
 				BaseURL:            "https://example.invalid/v1", APIKey: "fixture", Model: "vision-v1",
 				Models: []string{"vision-v1"}, ModelSpecsMode: config.LLMModelSpecsModeExplicit,
-				ModelSpecs: []config.LLMProviderModelSpec{{ID: "vision-v1", Capabilities: []string{"text", "vision"}}},
+				ModelSpecs: []config.LLMProviderModelSpec{{ID: "vision-v1", Capabilities: []string{"text"}}},
 			}
 			fingerprint := api.ModelCapabilityProbeConfigFingerprint("hexclaw-gpt", provider, "vision-v1")
 			if initial == "stale" {
@@ -59,7 +59,7 @@ func TestK12NewTaskVisionProbePersistsOnceAndFreezesSameModel(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			second, err := resolveK12GradingModelSnapshotWithCapabilityReceipt(ctx, router, store, k12.GradingModelSnapshot{}, probe)
+			second, err := resolveK12GradingModelSnapshotWithCapabilityReceipt(ctx, router, store, first, probe)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -77,7 +77,7 @@ func TestK12NewTaskVisionProbeDoesNotResendCurrentFailedProbe(t *testing.T) {
 	provider := config.LLMProviderConfig{
 		ProviderInstanceID: "pvd_v1_00112233445566778899aabbccddeeff", Model: "vision-v1",
 		Models: []string{"vision-v1"}, ModelSpecsMode: config.LLMModelSpecsModeExplicit,
-		ModelSpecs: []config.LLMProviderModelSpec{{ID: "vision-v1", Capabilities: []string{"text", "vision"}}},
+		ModelSpecs: []config.LLMProviderModelSpec{{ID: "vision-v1", Capabilities: []string{"text"}}},
 	}
 	receipts := &k12CapabilityReceiptStoreStub{receipt: &storage.ModelCapabilityProbeReceipt{
 		ProviderInstanceID: provider.ProviderInstanceID, ModelID: "vision-v1", ProbeKind: "vision",

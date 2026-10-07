@@ -125,7 +125,7 @@ func (o *GradingOrchestrator) runAssessItems(
 	}
 	if run.result != nil && (stageInvocation.Status == k12.ModelInvocationSent ||
 		stageInvocation.Status == k12.ModelInvocationSucceeded) {
-		receipts, listErr := o.deps.Records.ListGradingAssessmentItems(ctx, run.agentName, job.Record.RecordID)
+		receipts, listErr := o.deps.Records.ListEffectiveGradingAssessments(ctx, run.agentName, job.Record.RecordID)
 		if listErr == nil {
 			listErr = validateGradingAssessmentExactSet(*run.result, receipts)
 		}
@@ -151,7 +151,7 @@ func (o *GradingOrchestrator) runAssessItems(
 			stageInvocation, listErr)
 	}
 	if stageInvocation.Status == k12.ModelInvocationSucceeded {
-		receipts, listErr := o.deps.Records.ListGradingAssessmentItems(ctx, run.agentName, job.Record.RecordID)
+		receipts, listErr := o.deps.Records.ListEffectiveGradingAssessments(ctx, run.agentName, job.Record.RecordID)
 		if listErr == nil {
 			listErr = validateFrozenAssessReceiptSet(run, receipts)
 		}
@@ -250,7 +250,7 @@ func (o *GradingOrchestrator) runAssessItems(
 		return v, assessErr
 	}
 
-	receipts, err := o.deps.Records.ListGradingAssessmentItems(ctx, run.agentName, job.Record.RecordID)
+	receipts, err := o.deps.Records.ListEffectiveGradingAssessments(ctx, run.agentName, job.Record.RecordID)
 	if err == nil {
 		err = validateGradingAssessmentExactSet(result, receipts)
 	}
@@ -448,31 +448,61 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 		return item, nil
 	}
 	if view, err := deps.Records.GetEffectiveGradingAssessment(ctx, req.AgentName, job.Record.RecordID, q.ProblemID); err == nil {
-		if recovery, _ := ctx.Value(assessmentRecoveryContextKey{}).(bool); !recovery {
+		failedSource, executionErr := failedAssessmentVerification(ctx, deps, view.Current)
+		if executionErr != nil && failedSource == nil {
+			return item, executionErr
+		}
+		if failedSource != nil {
+			if _, replayErr := replayGradingAssessmentItem(q, view.Current); replayErr != nil {
+				return item, replayErr
+			}
+			// 已交付的冻结终稿保持；尚无终稿的明确失败只在新恢复代次追加修正。
+			if _, finalErr := deps.Records.GetGradingFinalArtifactByJob(ctx, req.AgentName, job.Record.RecordID); finalErr == nil {
+				return replayGradingAssessmentItem(q, view.Current)
+			} else if !errors.Is(finalErr, records.ErrNotFound) {
+				return item, finalErr
+			}
+			if failedSource.OperationAttempt/1000 >= job.Fields.AttemptCount+1 {
+				return item, errors.Join(ErrGradingItemInvocationFailed, executionErr)
+			}
+			item.correction = &view
+			ctx = context.WithValue(ctx, assessmentCorrectionContextKey{}, assessmentCorrectionIdentity(view))
+		} else if recovery, _ := ctx.Value(assessmentRecoveryContextKey{}).(bool); !recovery {
+			if view.Correction != nil {
+				originalFailure, originalErr := failedAssessmentVerification(ctx, deps, view.Original)
+				if originalErr != nil && originalFailure == nil {
+					return item, originalErr
+				}
+				if originalFailure != nil {
+					return replayGradingAssessmentItem(q, view.Current)
+				}
+			}
 			return replayGradingAssessmentItem(q, view.Original)
 		}
-		if err = deps.Records.ValidateGradingAssessmentAnswer(ctx, view.Current); err == nil {
-			return replayGradingAssessmentItem(q, view.Current)
-		} else if !errors.Is(err, k12storage.ErrProblemAssetUnavailable) {
-			return item, err
+		if failedSource == nil {
+			if err = deps.Records.ValidateGradingAssessmentAnswer(ctx, view.Current); err == nil {
+				return replayGradingAssessmentItem(q, view.Current)
+			} else if !errors.Is(err, k12storage.ErrProblemAssetUnavailable) {
+				return item, err
+			}
+			_, historicalCorrection := ctx.Value(historicalAssetCorrectionContextKey{}).(bool)
+			if _, finalErr := deps.Records.GetGradingFinalArtifactByJob(ctx, req.AgentName, job.Record.RecordID); finalErr == nil && !historicalCorrection {
+				return replayGradingAssessmentItem(q, view.Current)
+			} else if finalErr != nil && !errors.Is(finalErr, records.ErrNotFound) {
+				return item, finalErr
+			}
+			item.correction = &view
+			owner, ownerErr := resolveGradingGroundingTextbookOwner(ctx, deps, job)
+			if ownerErr != nil {
+				return item, ownerErr
+			}
+			asset, assetErr := deps.Records.GetProblemAssetVersion(ctx, owner, view.Current.AnswerSource.AssetID, view.Current.AnswerSource.AssetVersion)
+			if assetErr != nil {
+				return item, assetErr
+			}
+			req.Grade = asset.Facts.AnswerContext["grade_term"]
+			ctx = context.WithValue(ctx, assessmentCorrectionContextKey{}, assessmentCorrectionIdentity(view))
 		}
-		_, historicalCorrection := ctx.Value(historicalAssetCorrectionContextKey{}).(bool)
-		if _, finalErr := deps.Records.GetGradingFinalArtifactByJob(ctx, req.AgentName, job.Record.RecordID); finalErr == nil && !historicalCorrection {
-			return replayGradingAssessmentItem(q, view.Current)
-		} else if finalErr != nil && !errors.Is(finalErr, records.ErrNotFound) {
-			return item, finalErr
-		}
-		item.correction = &view
-		owner, ownerErr := resolveGradingGroundingTextbookOwner(ctx, deps, job)
-		if ownerErr != nil {
-			return item, ownerErr
-		}
-		asset, assetErr := deps.Records.GetProblemAssetVersion(ctx, owner, view.Current.AnswerSource.AssetID, view.Current.AnswerSource.AssetVersion)
-		if assetErr != nil {
-			return item, assetErr
-		}
-		req.Grade = asset.Facts.AnswerContext["grade_term"]
-		ctx = context.WithValue(ctx, assessmentCorrectionContextKey{}, assessmentCorrectionIdentity(view))
 	} else if !errors.Is(err, records.ErrNotFound) {
 		return item, err
 	}

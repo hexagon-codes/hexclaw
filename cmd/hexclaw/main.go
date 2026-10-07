@@ -1976,20 +1976,11 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 			// cost-aware（那会抓本地免费 provider、无视用户配的 glm-4v-flash，既慢又曾 404）。
 			var provider hexagon.Provider
 			var visionModel string
-			if snapshot, pinned := k12.GradingModelSnapshotFromContext(ctx); pinned {
-				var found bool
-				provider, found = router.Get(snapshot.Provider)
-				if !found || provider == nil {
-					return "", fmt.Errorf("K12 GradingJob 冻结 provider %q 不可用，拒绝跨路由 fallback", snapshot.Provider)
-				}
-				visionModel = snapshot.Model
-				if err := k12.ValidateGradingModelRoute(ctx, snapshot.Provider, visionModel); err != nil {
-					return "", err
-				}
-				if err := validateK12FrozenModelCapabilityReceipt(
-					ctx, router, k12ModelCapabilityReceipts, snapshot, config.LLMModelCapabilityVision,
-				); err != nil {
-					return "", err
+			if _, pinned := k12.GradingModelSnapshotFromContext(ctx); pinned {
+				var rErr error
+				provider, visionModel, rErr = resolveK12FrozenVisionCompletionRoute(ctx, router, k12ModelCapabilityReceipts, "K12 recognition")
+				if rErr != nil {
+					return "", rErr
 				}
 			} else {
 				var rErr error
@@ -2382,22 +2373,11 @@ Set source only when the material explicitly names a work, title, or another rel
 			}
 			var provider hexagon.Provider
 			var visionModel string
-			if snapshot, pinned := k12.GradingModelSnapshotFromContext(ctx); pinned {
-				var found bool
-				provider, found = router.Get(snapshot.Provider)
-				if !found || provider == nil {
-					return "", fmt.Errorf("K12 作品点评冻结 provider %q 不可用，拒绝跨路由 fallback", snapshot.Provider)
-				}
-				visionModel = snapshot.Model
-				if err := k12.ValidateGradingModelRoute(
-					ctx, snapshot.Provider, visionModel,
-				); err != nil {
-					return "", err
-				}
-				if err := validateK12FrozenModelCapabilityReceipt(
-					ctx, router, k12ModelCapabilityReceipts, snapshot, config.LLMModelCapabilityVision,
-				); err != nil {
-					return "", err
+			if _, pinned := k12.GradingModelSnapshotFromContext(ctx); pinned {
+				var rErr error
+				provider, visionModel, rErr = resolveK12FrozenVisionCompletionRoute(ctx, router, k12ModelCapabilityReceipts, "K12 art feedback")
+				if rErr != nil {
+					return "", rErr
 				}
 			} else {
 				var rErr error
@@ -2563,7 +2543,7 @@ Set source only when the material explicitly names a work, title, or another rel
 				requestCtx context.Context, workType string,
 			) (k12.ImageTaskRouteSnapshot, error) {
 				return resolveK12WorkFeedbackRouteWithCapabilityReceipt(
-					requestCtx, router, k12ModelCapabilityReceipts, workType,
+					requestCtx, router, k12ModelCapabilityReceipts, workType, k12AutoVisionProbe,
 				)
 			}
 			k12WorkFeedback = &k12usecase.CreativeWorkFeedbackCoordinator{
@@ -2582,12 +2562,16 @@ Set source only when the material explicitly names a work, title, or another rel
 					requested k12.ImageTaskRouteSnapshot,
 				) (k12.ImageTaskRouteSnapshot, error) {
 					requested = k12.NormalizeImageTaskRouteSnapshot(requested)
+					if k12WorkFeedbackHasMatchingFrozenCapability(requested, workType) {
+						return resolveK12RequestedWorkFeedbackRouteWithCapabilityReceipt(requestCtx, router, k12ModelCapabilityReceipts, workType, requested)
+					}
 					if requested.SelectionSource == "auto" {
 						return resolveK12WorkFeedbackRouteWithCapabilityReceipt(
 							requestCtx,
 							router,
 							k12ModelCapabilityReceipts,
 							workType,
+							k12AutoVisionProbe,
 						)
 					}
 					return resolveK12RequestedWorkFeedbackRouteWithCapabilityReceipt(
@@ -2596,6 +2580,7 @@ Set source only when the material explicitly names a work, title, or another rel
 						k12ModelCapabilityReceipts,
 						workType,
 						requested,
+						k12AutoVisionProbe,
 					)
 				},
 				BaseContext:           ctx,

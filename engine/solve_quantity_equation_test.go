@@ -2,9 +2,11 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
+	"github.com/hexagon-codes/hexclaw/egress"
 	"github.com/hexagon-codes/hexclaw/skill"
 )
 
@@ -97,6 +99,12 @@ func TestSolveSingleQuantityEquationReceiptGuards(t *testing.T) {
 				return SubAgentResult{Output: "VERDICT: AGREE\nPROCESS: VALID\nCOMPUTED: 9/10 kg"}, nil
 			}
 			result, err := NewSolveSkill(execute, nil).Execute(t.Context(), map[string]any{"problem": "一袋面包重3/10千克，3袋面包共重多少千克？", "self_consistency": 1})
+			if variant == "failed-status" {
+				if !errors.Is(err, ErrVerificationExecutionFailed) || !errors.Is(err, egress.ErrProviderResponseProcessed) || calls != 2 {
+					t.Fatalf("known execution failure must stop without another verifier: calls=%d err=%v", calls, err)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatal(err)
 			}

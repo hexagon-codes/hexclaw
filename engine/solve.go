@@ -661,6 +661,9 @@ func (o *SolveSkill) runSolveAgentResult(ctx context.Context, spec SubAgentSpec)
 			result.ExecutionReceipt = nil
 			if callErr == nil {
 				result.ExecutionReceipt = sink.receipt
+				if executionErr := result.ExecutionReceipt.KnownExecutionFailure(executionInputDigest(callSpec.Task)); executionErr != nil {
+					return result, errors.Join(egress.ErrProviderResponseProcessed, executionErr)
+				}
 			}
 			return result, callErr
 		}

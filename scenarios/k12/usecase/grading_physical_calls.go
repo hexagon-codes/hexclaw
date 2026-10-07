@@ -27,6 +27,8 @@ var (
 type GradingPhysicalCallSpec struct {
 	Operation     k12.GradingItemOperation
 	RequestDigest string
+	// KnownExecutionFailure 由适配器识别同输入的明确失败执行回执；不用于一般格式或能力校验。
+	KnownExecutionFailure func(string) error `json:"-"`
 }
 
 type GradingPhysicalCallResult struct {
@@ -1157,6 +1159,16 @@ func (e *durableGradingPhysicalCallExecutor) ExecuteGradingPhysicalCall(
 			if decodeErr != nil {
 				return zero, decodeErr
 			}
+			if spec.KnownExecutionFailure != nil {
+				if executionErr := spec.KnownExecutionFailure(payload); executionErr != nil {
+					if matching.OperationAttempt/1000 >= currentGeneration {
+						return zero, errors.Join(ErrGradingItemInvocationFailed, executionErr)
+					}
+					// 只有已进入新重试代次的确定失败可派生调用，原成功账本保持只读。
+					matching = nil
+					break
+				}
+			}
 			e.remember(spec.Operation, matching.InvocationID)
 			return GradingPhysicalCallResult{
 				Payload: payload, InvocationID: matching.InvocationID,
@@ -1284,6 +1296,17 @@ func (e *durableGradingPhysicalCallExecutor) ExecuteGradingPhysicalCall(
 			gradingPhysicalNoRetryError{cause: errors.New("physical result is not valid JSON")},
 			ledgerErr,
 		)
+	}
+	if spec.KnownExecutionFailure != nil {
+		if executionErr := spec.KnownExecutionFailure(payload); executionErr != nil {
+			commitCtx, cancelCommit = gradingDurableCommitContext(ctx)
+			defer cancelCommit()
+			_, ledgerErr := e.o.deps.Records.MarkGradingItemInvocationFailed(
+				commitCtx, e.job.Record.AgentName, invocation.InvocationID,
+				"local", "verification_execution_failed",
+			)
+			return zero, errors.Join(egress.ErrProviderResponseProcessed, executionErr, ledgerErr)
+		}
 	}
 	storedPayload := payload
 	if expectedGrounding != nil {

@@ -131,7 +131,7 @@ func TestResolveK12GradingModelSnapshotHonorsExplicitSessionModel(t *testing.T) 
 	}
 }
 
-func TestResolveK12GradingModelSnapshotRejectsExplicitTextOnlyWithoutSwitching(t *testing.T) {
+func TestResolveK12GradingModelSnapshotKeepsExplicitTextCandidateWithoutSwitching(t *testing.T) {
 	cfg := config.LLMConfig{
 		Default: "hexclaw-gpt",
 		Providers: map[string]config.LLMProviderConfig{
@@ -150,15 +150,16 @@ func TestResolveK12GradingModelSnapshotRejectsExplicitTextOnlyWithoutSwitching(t
 		"hexclaw-gpt": mockllm.NewLLMProvider("hexclaw-gpt"),
 	})
 
-	if _, err := resolveK12GradingModelSnapshot(router, k12.GradingModelSnapshot{
+	got, err := resolveK12GradingModelSnapshot(router, k12.GradingModelSnapshot{
 		Provider: "hexclaw-gpt",
 		Model:    "gpt-5.3-codex-spark",
-	}); err == nil {
-		t.Fatal("explicit text-only model must fail closed instead of switching to gpt-5.6-sol")
+	})
+	if err != nil || got.Provider != "hexclaw-gpt" || got.Model != "gpt-5.3-codex-spark" || got.HasFrozenCapabilityProbeEvidence() {
+		t.Fatalf("explicit text candidate switched or gained unverified execution permission: snapshot=%+v err=%v", got, err)
 	}
 }
 
-func TestResolveK12GradingModelSnapshotAutoUsesStableDefaultProviderVisionModel(t *testing.T) {
+func TestResolveK12GradingModelSnapshotAutoKeepsExactDefaultTextCandidate(t *testing.T) {
 	cfg := config.LLMConfig{
 		Default: "hexclaw-gpt",
 		Providers: map[string]config.LLMProviderConfig{
@@ -189,8 +190,8 @@ func TestResolveK12GradingModelSnapshotAutoUsesStableDefaultProviderVisionModel(
 	if err != nil {
 		t.Fatalf("resolve automatic snapshot: %v", err)
 	}
-	if got.Provider != "hexclaw-gpt" || got.Model != "vision-first" {
-		t.Fatalf("automatic route=%+v, want stable default-provider vision-first", got)
+	if got.Provider != "hexclaw-gpt" || got.Model != "text-default" || got.HasFrozenCapabilityProbeEvidence() {
+		t.Fatalf("automatic route=%+v, want exact default text candidate without execution permission", got)
 	}
 }
 

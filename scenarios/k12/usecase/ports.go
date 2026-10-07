@@ -206,6 +206,8 @@ type RecognizedQuestion struct {
 	// ObservedAnswerRegion 是成功识别回执内的原图答案候选框；仅经 anchor 本地核验后使用。
 	ObservedAnswerRegion *k12.SourcePixelRegion `json:"observed_answer_region,omitempty"`
 	AttemptID            string                 `json:"attempt_id,omitempty"`
+	// LayoutSourceProjection 引用合并前的两个不可变目标；不承载题干或作答副本。
+	LayoutSourceProjection RecognitionLayoutSourceProjection `json:"layout_source_projection,omitzero"`
 
 	// OCR 原始转写与 canonical Markdown/LaTeX 是两份独立事实。Raw* 一经识别不得被
 	// 家长修正或增强模型覆盖；canonical 可在显式确认时形成新版本。
@@ -455,6 +457,12 @@ type SolveResult struct {
 // 两者均为不透明串透传给 solve，solve 不认识"课标"（AP-1）。
 type Solver interface {
 	Solve(ctx context.Context, problem, grade, constraint string) (SolveResult, error)
+}
+
+// FailedVerificationPayloadValidator 只识别持久化物理结果内同源的明确执行失败。
+// 缺失回执或合法非计算判断不被归为运行故障，调用者仍须核实调用归属。
+type FailedVerificationPayloadValidator interface {
+	FailedVerificationPayload(payload string) error
 }
 
 // SubjectSolver 是支持显式学科路由的 Solver 扩展。用例在请求带 Subject 时优先调用，

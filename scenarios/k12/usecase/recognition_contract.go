@@ -332,23 +332,7 @@ func canonicalAnswerEvidenceLineOrder(value string) (string, bool) {
 // 各片段按原顺序覆盖完整抄录时，它们共同构成一次证据；只允许首行前导等号
 // 和原文中单个连接运算符的间隙，不改写数值、片段顺序或片段内运算符。
 func evidenceTranscriptionsConflict(transcription string, values []string, answerTranscription string) bool {
-	normalize := func(value string) string {
-		// 仅在比较视图统一转义换行和数值分数；先保留分数边界，避免
-		// 空白归一后将带分数的整数部分并入分子，也不移除运算分组括号。
-		value = evidenceNewline.ReplaceAllString(value, "\n$1")
-		value = evidenceNumericFraction.ReplaceAllString(value, `\frac{$1}{$2}`)
-		value = strings.ReplaceAll(value, `\ `, " ")
-		// 平方、立方的 Unicode 与 LaTeX 写法只影响排版；指数值仍参与逐字比较。
-		value = strings.NewReplacer("²", "^2", "³", "^3", "^{2}", "^2", "^{3}", "^3").Replace(value)
-		value = strings.Join(strings.Fields(CanonicalPlainTextFallback(value)), "")
-		value = evidenceNumericRatio.ReplaceAllString(value, "$1∶$2")
-		// 相邻比号共享中间数字，第二轮保留首轮未重叠匹配的比号。
-		value = evidenceNumericRatio.ReplaceAllString(value, "$1∶$2")
-		return strings.NewReplacer(
-			`\,`, "", "（", "(", "）", ")", "＝", "=", "＋", "+",
-			"。", "", "；", "", "，", "", "：", "", "、", "", ";", "", ":", "",
-		).Replace(value)
-	}
+	normalize := normalizedRecognitionSourceReading
 	if answerTranscription != "" {
 		// 两个固定角色分别全量匹配原题和原作答，不能互作题干备选。
 		// 任何额外正文、重复角色或第三条证据都不属于该封套。

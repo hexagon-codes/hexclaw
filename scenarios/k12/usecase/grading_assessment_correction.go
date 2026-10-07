@@ -12,6 +12,38 @@ import (
 type assessmentCorrectionContextKey struct{}
 type assessmentRecoveryContextKey struct{}
 
+// failedAssessmentVerification 只核验同一作答所引用的可信物理校验来源。
+// 正常来源保持原重放；明确失败的执行不会变成新的学生输入或内容结论。
+func failedAssessmentVerification(ctx context.Context, deps Deps, item k12.GradingAssessmentItem) (*k12.GradingItemInvocation, error) {
+	validator, ok := deps.Solver.(FailedVerificationPayloadValidator)
+	if !ok || deps.Records == nil || item.SolveInvocationID == "" {
+		return nil, nil
+	}
+	invocation, err := deps.Records.GetGradingItemInvocation(ctx, item.AgentName, item.SolveInvocationID)
+	if err != nil {
+		return nil, err
+	}
+	if invocation.Operation != k12.GradingItemOperationSolveVerify {
+		return nil, nil
+	}
+	payload, _, _, err := decodeGroundedPhysicalPayload(invocation.ResultJSON, nil)
+	if err != nil {
+		return nil, err
+	}
+	executionErr := validator.FailedVerificationPayload(payload)
+	if executionErr == nil {
+		return nil, nil
+	}
+	if invocation.AgentName != item.AgentName || invocation.JobID != item.JobID ||
+		invocation.ProblemID != item.ProblemID || invocation.AttemptID != item.AttemptID ||
+		invocation.InputRevision != item.ConfirmedVersion || invocation.InputDigest != item.InputDigest ||
+		invocation.Status != k12.ModelInvocationSucceeded ||
+		invocation.ResultDigest != modelInvocationDigest([]byte(invocation.ResultJSON)) {
+		return nil, fmt.Errorf("%w: failed verification source identity drift", ErrModelInvocationRequiresReconciliation)
+	}
+	return &invocation, executionErr
+}
+
 func assessmentCorrectionIdentity(view k12.EffectiveGradingAssessment) string {
 	predecessor := ""
 	if view.Correction != nil {
@@ -77,10 +109,22 @@ func (o *GradingOrchestrator) recoverInvalidAssetAssessments(ctx context.Context
 		return err
 	}
 	for _, item := range items {
-		if err = o.deps.Records.ValidateGradingAssessmentAnswer(ctx, item); err == nil {
+		failedSource, executionErr := failedAssessmentVerification(ctx, o.deps, item)
+		if executionErr != nil && failedSource == nil {
+			return executionErr
+		}
+		if failedSource == nil {
+			err = o.deps.Records.ValidateGradingAssessmentAnswer(ctx, item)
+		} else {
+			if failedSource.OperationAttempt/1000 >= job.Fields.AttemptCount+1 {
+				return errors.Join(ErrGradingItemInvocationFailed, executionErr)
+			}
+			err = executionErr
+		}
+		if err == nil {
 			continue
 		}
-		if !errors.Is(err, k12storage.ErrProblemAssetUnavailable) {
+		if failedSource == nil && !errors.Is(err, k12storage.ErrProblemAssetUnavailable) {
 			return err
 		}
 		found := false

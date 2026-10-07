@@ -85,13 +85,23 @@ func resolveK12WorkFeedbackRouteSelection(
 			"work-feedback route selection source is invalid: %q", selectionSource,
 		)
 	}
-	route, err := router.ResolveRouteForCapabilities(providerName, modelID, capabilities...)
+	var route llmrouter.CapabilityRoute
+	var providerConfig config.LLMProviderConfig
+	var err error
+	if workType == k12.WorkTypeArt {
+		route, providerConfig, err = router.ResolveK12VisionCandidate(providerName, modelID)
+	} else {
+		route, err = router.ResolveRouteForCapabilities(providerName, modelID, capabilities...)
+	}
 	if err != nil {
 		return k12.ImageTaskRouteSnapshot{}, err
 	}
-	providerInstanceID, err := k12ProviderInstanceID(router, route.ProviderName)
-	if err != nil {
-		return k12.ImageTaskRouteSnapshot{}, err
+	providerInstanceID := config.EffectiveProviderInstanceID(route.ProviderName, providerConfig)
+	if workType != k12.WorkTypeArt {
+		providerInstanceID, err = k12ProviderInstanceID(router, route.ProviderName)
+		if err != nil {
+			return k12.ImageTaskRouteSnapshot{}, err
+		}
 	}
 	displayModelID := strings.TrimSpace(requested.ModelID)
 	if displayModelID == "" {

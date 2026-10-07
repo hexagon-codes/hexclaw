@@ -12,10 +12,7 @@ import (
 	"github.com/hexagon-codes/hexclaw/storage"
 )
 
-// resolveK12GradingModelSnapshot is the single control-plane selector shared
-// by all K12 GradingJob entry points. An explicit session provider/model is
-// validated and preserved exactly. Only an empty request may select a stable
-// text+vision model within the configured default provider.
+// resolveK12GradingModelSnapshot 只选择精确文本候选；视觉执行许可由当前成功回执冻结。
 func resolveK12GradingModelSnapshot(
 	router *llmrouter.Selector,
 	requested k12.GradingModelSnapshot,
@@ -24,19 +21,11 @@ func resolveK12GradingModelSnapshot(
 		return k12.GradingModelSnapshot{}, fmt.Errorf("LLM router 未初始化")
 	}
 	requested = k12.NormalizeGradingModelSnapshot(requested)
-	route, err := router.ResolveRouteForCapabilities(
-		requested.Provider,
-		requested.Model,
-		config.LLMModelCapabilityText,
-		config.LLMModelCapabilityVision,
-	)
+	route, providerConfig, err := router.ResolveK12VisionCandidate(requested.Provider, requested.Model)
 	if err != nil {
 		return k12.GradingModelSnapshot{}, err
 	}
-	providerInstanceID, err := k12ProviderInstanceID(router, route.ProviderName)
-	if err != nil {
-		return k12.GradingModelSnapshot{}, err
-	}
+	providerInstanceID := config.EffectiveProviderInstanceID(route.ProviderName, providerConfig)
 	snapshot := k12.GradingModelSnapshot{
 		Provider:           route.ProviderName,
 		Model:              route.Model,
@@ -48,7 +37,6 @@ func resolveK12GradingModelSnapshot(
 	if snapshot.Model == k12.RecognizingPolicyModel {
 		snapshot.RecognizingRequestPolicy = k12.ApprovedRecognizingRequestPolicy()
 	} else if snapshot.Provider == "cloud-gpt" && snapshot.Model == "gpt-6-sol" {
-		providerConfig, _ := router.ProviderConfig(snapshot.Provider)
 		support, control := config.ModelReasoningControl(providerConfig, snapshot.Model)
 		if support == config.LLMReasoningSupportSupported && control != nil &&
 			control.Dialect == config.LLMReasoningDialectEffort && control.Off == "none" {
@@ -112,6 +100,31 @@ func k12ProviderLogIdentity(ctx context.Context, provider llm.Provider) (routePr
 		routeProvider = snapshot.Provider
 	}
 	return routeProvider, adapterProvider
+}
+
+// resolveK12FrozenVisionCompletionRoute 只为当前冻结回执创建 K12 图片请求许可。
+func resolveK12FrozenVisionCompletionRoute(ctx context.Context, router *llmrouter.Selector, receipts storage.ModelCapabilityProbeReceiptStore, operation string) (llm.Provider, string, error) {
+	if router == nil {
+		return nil, "", fmt.Errorf("%s: LLM router is not initialized", operation)
+	}
+	snapshot, frozen := k12.GradingModelSnapshotFromContext(ctx)
+	if !frozen || !snapshot.HasFrozenCapabilityProbeEvidence() {
+		return nil, "", k12.ErrModelCapabilityUnverified
+	}
+	if err := k12.ValidateGradingModelRoute(ctx, snapshot.Provider, snapshot.Model); err != nil {
+		return nil, "", err
+	}
+	route, err := router.ResolveK12VisionRoute(ctx, snapshot.ProviderInstanceID, snapshot.Provider, snapshot.Model,
+		func(checkCtx context.Context, providerName string, providerConfig config.LLMProviderConfig, model string) error {
+			if providerName != snapshot.Provider || model != snapshot.Model {
+				return k12.ErrModelCapabilityUnverified
+			}
+			return validateK12FrozenModelCapabilityReceiptForProviderConfig(checkCtx, receipts, snapshot, config.LLMModelCapabilityVision, providerConfig)
+		})
+	if err != nil {
+		return nil, "", err
+	}
+	return route.Provider, route.Model, nil
 }
 
 // resolveK12FrozenTextCompletionRoute 是 K12 文本回调的数据平面唯一解析器，
