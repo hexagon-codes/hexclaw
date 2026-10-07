@@ -19,10 +19,10 @@
 | Item | Minimum | Recommended |
 |------|---------|-------------|
 | OS | Linux / macOS / Windows | Linux (Ubuntu 22.04+) |
-| Go | >= 1.25.13 | Latest stable |
-| Memory | 128 MB | 512 MB+ |
-| Disk | 100 MB | 1 GB+ (including knowledge base data) |
-| Network | Access to LLM API | Low-latency connection |
+| Go (Go installation or source builds only) | >= 1.25.13 | A toolchain compatible with the selected version's `go.mod` |
+| Memory | Size for the tasks, file sizes, and model deployment | Reserve resources separately for rendering, image tasks, and local models |
+| Disk | Writable program and complete user-data directories | Allow space for source documents, artifacts, indexes, and backups |
+| Network | Reachable online Providers and channels in use; local models follow their deployment requirements | Low-latency connection |
 
 The core is a single binary with pure Go SQLite. Document exports, Chinese/math rendering and numeric execution also need Pandoc, Typst, fonts and Python/SymPy; the cloud image includes them.
 
@@ -30,7 +30,9 @@ The core is a single binary with pure Go SQLite. Document exports, Chinese/math 
 
 ## Installation Methods
 
-This release is `v0.5.0-beta`, a prerelease. Specify the tag explicitly when installing it: `@latest` and Releases' `latest/download` select stable releases and do not guarantee the beta. Use the beta commands below only after its tag and release artifacts exist; the version documented here does not establish that publication is complete.
+This page covers installation and deployment of the standalone HexClaw service. For the desktop app's one-line installer, see [HexClaw Desktop installation](https://github.com/hexagon-codes/hexclaw-desktop#安装).
+
+`@latest` and Releases' `latest/download` select stable releases. For a prerelease, use its complete published Tag from [Releases](https://github.com/hexagon-codes/hexclaw/releases) and the assets actually available for that version.
 
 ### Method 1: go install (recommended for developers)
 
@@ -38,11 +40,7 @@ This release is `v0.5.0-beta`, a prerelease. Specify the tag explicitly when ins
 go install github.com/hexagon-codes/hexclaw/cmd/hexclaw@latest
 ```
 
-Install this beta:
-
-```bash
-go install github.com/hexagon-codes/hexclaw/cmd/hexclaw@v0.5.0-beta
-```
+For a specific version, replace `@latest` with its complete Tag. Ensure `GOBIN`, or `$(go env GOPATH)/bin` by default, is on your `PATH`.
 
 Verify installation:
 
@@ -68,19 +66,9 @@ sudo mv hexclaw /usr/local/bin/
 
 ### Method 3: Pre-built binary
 
-Download the binary for your platform from [GitHub Releases](https://github.com/hexagon-codes/hexclaw/releases). Use the explicit version URL for this beta:
+Choose a version from [GitHub Releases](https://github.com/hexagon-codes/hexclaw/releases), then download the archive for your operating system and CPU architecture. For example, Linux amd64 uses `hexclaw-linux-amd64.tar.gz`, while Apple Silicon uses `hexclaw-darwin-arm64.tar.gz`.
 
-```bash
-RELEASE_VERSION=v0.5.0-beta
-
-# Linux amd64
-curl -fSL "https://github.com/hexagon-codes/hexclaw/releases/download/${RELEASE_VERSION}/hexclaw-linux-amd64.tar.gz" | tar xz
-sudo mv hexclaw /usr/local/bin/
-
-# macOS arm64 (Apple Silicon)
-curl -fSL "https://github.com/hexagon-codes/hexclaw/releases/download/${RELEASE_VERSION}/hexclaw-darwin-arm64.tar.gz" | tar xz
-sudo mv hexclaw /usr/local/bin/
-```
+Extract `hexclaw` (`hexclaw.exe` on Windows), place it in a directory on your `PATH`, and run `hexclaw version`. Use the asset list and filenames from the selected release.
 
 ### Method 4: Docker
 
@@ -91,7 +79,7 @@ docker compose pull hexclaw
 docker compose up -d --no-build hexclaw
 ```
 
-For local source development, run `docker compose build hexclaw` first; the default image is `hexclaw:dev`. Published images use version and full commit SHA tags. `v0.5.0-beta` does not update `latest`, which is reserved for stable releases. Keep the existing project, data volume and complete Compose override set when updating.
+For local source development, run `docker compose build hexclaw` first; the default image is `hexclaw:dev`. Published images use version and full commit SHA tags. Prereleases do not update `latest`, which is reserved for stable releases. Keep the existing project, data volume and complete Compose override set when updating.
 
 The source image targets Linux amd64 and persists the complete writable HOME. The default Compose setup **does not install Ollama or download models**. Configure model and Embedding APIs for the selected remote backend in Desktop. Knowledge data and indexes belong to that server; keyword retrieval and vector availability are separate when no effective Embedding configuration exists. See the [cloud deployment guide](cloud-deployment.md) for initialization, Kubernetes, backup, automation and current verification limits.
 
@@ -140,10 +128,10 @@ For online installs through the API, `source` may be `clawhub://skill-name`; `GE
 
 ### Environment Variables
 
-All sensitive config values should be set via environment variables:
+Environment variables can provide credentials for the selected Provider during initial standalone setup. When managing models through Desktop, daily configuration is saved in the active service's YAML. Persistently injecting Provider keys into a cloud service's startup environment can restore them after deletion or changes on restart. See the [cloud deployment guide](cloud-deployment.md) for initialization and persistence rules.
 
 ```bash
-# LLM API Keys (set at least one)
+# API key examples for your selected cloud Providers
 export DEEPSEEK_API_KEY="sk-xxx"
 export OPENAI_API_KEY="sk-xxx"
 export ANTHROPIC_API_KEY="sk-xxx"
@@ -168,27 +156,27 @@ llm:
 
 ### Configuration Priority
 
-From highest to lowest:
+Configuration is loaded and completed in this order:
 
-1. Command-line arguments (`--feishu-app-id`)
-2. Environment variables (`DEEPSEEK_API_KEY`)
-3. Config file (`hexclaw.yaml`)
-4. Secure defaults
+1. Start with the default configuration.
+2. Load `hexclaw.yaml`, expanding `${VAR_NAME}` from the current process environment; unset variables become empty values.
+3. Add missing Providers from supported LLM key environment variables, or fill empty keys in existing Providers. Non-empty keys already loaded from configuration are preserved.
+4. Apply supported command-line arguments, such as `--feishu-app-id`, to their corresponding fields.
 
 ### Minimal Configuration
 
-The service can start without a cloud LLM key, but chat, homework recognition/grading, RAG-augmented answers, and other LLM-dependent features will return provider configuration errors. Configure at least one provider for normal use:
+The service can start without an available model Provider. Chat, homework recognition/grading, RAG-augmented answers, and other model-dependent tasks require an available local or cloud Provider for their purpose. Missing Providers produce configuration errors; local Ollama does not necessarily need an API key. This example configures a cloud Provider:
 
 ```bash
 export DEEPSEEK_API_KEY="sk-xxx"
 hexclaw serve
 ```
 
-All security options are enabled by default. SQLite storage is created automatically.
+The default configuration enables authentication, input checks, and sandbox capabilities; RBAC is configured as needed. See the [defaults](../config/defaults.go) for exact values. SQLite storage is created automatically.
 
-### Full Configuration Example
+### Configuration Example and Options
 
-See the complete config file in [README.en.md](../README.en.md#configuration).
+See [README.en.md](../README.en.md#configuration) for a minimal YAML example, [configuration types](../config/config.go) for all options, and the [configuration loader](../config/loader.go) for the generated default template.
 
 ---
 
@@ -199,11 +187,15 @@ See the complete config file in [README.en.md](../README.en.md#configuration).
 ```bash
 hexclaw serve
 hexclaw serve --config /path/to/hexclaw.yaml
-# Desktop launches --desktop with its persistent native token; standalone:
-hexclaw serve
+# Desktop is launched by the native host with its persistent token.
+# Use hexclaw serve for a standalone service.
 ```
 
 ### 2. systemd Service (direct binary management)
+
+This is a Linux systemd example. Install the selected executable at `/usr/local/bin/hexclaw` and confirm its version with `/usr/local/bin/hexclaw version`. Go installations place it in `GOBIN`; source builds and Release archives provide their corresponding executable.
+
+The service uses `/opt/hexclaw` as HOME, stores configuration and data in `/opt/hexclaw/.hexclaw/`, and creates temporary files in `/opt/hexclaw/tmp/`. `WorkingDirectory` does not change HOME. The service user must own both directories.
 
 Create service file `/etc/systemd/system/hexclaw.service`:
 
@@ -217,12 +209,13 @@ Type=simple
 User=hexclaw
 Group=hexclaw
 WorkingDirectory=/opt/hexclaw
-ExecStart=/usr/local/bin/hexclaw serve --config /opt/hexclaw/hexclaw.yaml
+ExecStart=/usr/local/bin/hexclaw serve --config /opt/hexclaw/.hexclaw/hexclaw.yaml
 Restart=always
 RestartSec=5
 
-# Environment variables
-EnvironmentFile=/opt/hexclaw/.env
+# Configuration, data, and temporary files use the writable directory
+Environment=HOME=/opt/hexclaw
+Environment=TMPDIR=/opt/hexclaw/tmp
 
 # Security hardening
 NoNewPrivileges=yes
@@ -238,24 +231,19 @@ MemoryMax=1G
 WantedBy=multi-user.target
 ```
 
-Create environment variables file `/opt/hexclaw/.env`:
-
-```bash
-DEEPSEEK_API_KEY=sk-xxx
-# OPENAI_API_KEY=sk-xxx
-```
-
-Start the service:
+Initialize and start the service for the first time:
 
 ```bash
 # Create user
-sudo useradd -r -s /bin/false hexclaw
-sudo mkdir -p /opt/hexclaw
-sudo chown hexclaw:hexclaw /opt/hexclaw
+sudo useradd -r -U -d /opt/hexclaw -s /bin/false hexclaw
+sudo mkdir -p /opt/hexclaw/tmp
+sudo chown hexclaw:hexclaw /opt/hexclaw /opt/hexclaw/tmp
 
-# Copy config and binary
-sudo cp hexclaw /usr/local/bin/
-sudo cp hexclaw.yaml /opt/hexclaw/
+# Generate the configuration in the service HOME, without copying personal settings
+sudo -u hexclaw env HOME=/opt/hexclaw /usr/local/bin/hexclaw init
+
+# Follow the Configuration section; preserve the service user's file ownership
+sudoedit /opt/hexclaw/.hexclaw/hexclaw.yaml
 
 # Start
 sudo systemctl daemon-reload
@@ -267,38 +255,13 @@ sudo systemctl status hexclaw
 sudo journalctl -u hexclaw -f
 ```
 
+User creation and `init` are first-install steps. For an existing service, edit its configuration rather than initializing it again. Persist Provider credentials through this service's YAML or Desktop model settings after startup. Replace template environment-variable references with the service's persistent values; do not keep injecting Provider keys in the daily unit.
+
+The existing directory restrictions remain. `TMPDIR` lets attachment staging, document extraction, and script validation create temporary files inside the writable area. `MemoryMax=1G` is an example budget; size resources for the tasks and files. For access from another machine, configure `server.host` for the actual listener/proxy arrangement; the default loopback address is local-only. See the [official systemd execution environment documentation](https://raw.githubusercontent.com/systemd/systemd/main/man/systemd.exec.xml) for directory semantics.
+
 ### 3. Docker Compose and Kubernetes
 
 Use the maintained [Compose file](../docker-compose.yml) or [single-instance Kubernetes manifest](../docker/kubernetes.yaml), following the [cloud deployment guide](cloud-deployment.md). Both keep `/data` as a writable persistent HOME and initialize credentials only once. Do not mount a read-only configuration over the runtime YAML, or inject daily Provider keys through environment variables; either would break remote configuration persistence. Kubernetes uses one replica and Recreate. The full guide covers first-time seeds, Ollama networking, shutdown, updates and complete backups.
-
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: hexclaw
-spec:
-  selector:
-    app: hexclaw
-  ports:
-    - port: 16060
-      targetPort: 16060
-  type: ClusterIP
-```
-
-Create Secret and ConfigMap:
-
-```bash
-# Create secret
-kubectl create secret generic hexclaw-secrets \
-  --from-literal=deepseek-api-key=sk-xxx
-
-# Create config
-kubectl create configmap hexclaw-config \
-  --from-file=hexclaw.yaml
-
-# Deploy
-kubectl apply -f hexclaw-k8s.yaml
-```
 
 ---
 
@@ -379,9 +342,9 @@ platforms:
 
 ### DingTalk Bot
 
-1. Create an internal app on [DingTalk Open Platform](https://open-dev.dingtalk.com/)
-2. Configure message receive URL: `http://YOUR_HOST:6062/dingtalk/webhook`
-3. Enable in config:
+1. Create an internal app on [DingTalk Open Platform](https://open-dev.dingtalk.com/) and configure its robot.
+2. Obtain the app's `app_key`, `app_secret`, and robot `robot_code`.
+3. Enable the configuration below and start the service. The adapter receives messages through the official Stream SDK without a public callback address:
 
 ```yaml
 platforms:
@@ -391,6 +354,8 @@ platforms:
     app_secret: ${DINGTALK_APP_SECRET}
     robot_code: ${DINGTALK_ROBOT_CODE}
 ```
+
+For HTTP compatibility, combine the actual service address with `/api/v1/platforms/hooks/dingtalk/{name}`. Use the configured platform instance's actual name, available from the platform instance list. External callbacks require an address reachable in your deployment.
 
 ### WeCom (Enterprise WeChat)
 
@@ -438,7 +403,13 @@ curl http://127.0.0.1:16060/health
 
 ### Post-Startup Integration Checks
 
-If `server.api_token` is configured, add `Authorization: Bearer <TOKEN>` to all write requests below.
+All business reads and writes below require the current service's Bearer token. `hexclaw init` generates `server.api_token`; starting the standalone service directly also fills a missing token while preserving an existing value. Set the variable used by these examples first; see [connection and identity](api.en.md#connection-and-identity) for Desktop's local token distinction.
+
+```bash
+export HEXCLAW_API_TOKEN="the server.api_token from your configuration file"
+```
+
+Choose the checks you need and replace model credentials, skill names, and record IDs. Model connectivity checks call the selected Provider; installing a skill or changing its state modifies the current service configuration.
 
 ```bash
 # 1. Test a real LLM config without persisting it
@@ -478,7 +449,7 @@ curl -H "Authorization: Bearer ${HEXCLAW_API_TOKEN}" -X PUT http://127.0.0.1:160
   -d '{"enabled":true}'
 
 # 4. Check Cron history result fields
-curl -H "Authorization: Bearer ${HEXCLAW_API_TOKEN}" http://127.0.0.1:16060/api/v1/cron/jobs/<JOB_ID>/history
+curl -H "Authorization: Bearer ${HEXCLAW_API_TOKEN}" "http://127.0.0.1:16060/api/v1/cron/jobs/REPLACE_WITH_JOB_ID/history"
 
 # 5. Verify structured knowledge search
 curl -H "Authorization: Bearer ${HEXCLAW_API_TOKEN}" -X POST http://127.0.0.1:16060/api/v1/knowledge/search \
@@ -565,22 +536,18 @@ Audit checks:
 
 ### Upgrade
 
-The commands below explicitly target `v0.5.0-beta`; first confirm that its tag and artifacts exist. To upgrade to the latest stable release instead, use `@latest` for Go installation or Releases' `latest/download` for binaries.
+The Go command below upgrades to the latest stable release. For a prerelease, replace `@latest` with a Tag that actually exists in [Releases](https://github.com/hexagon-codes/hexclaw/releases). For binary installations, download the asset for your system and architecture from the selected Release, verify its checksum, then replace the executable and restart the service.
 
 ```bash
 # go install method
-go install github.com/hexagon-codes/hexclaw/cmd/hexclaw@v0.5.0-beta
-
-# Binary replacement
-wget https://github.com/hexagon-codes/hexclaw/releases/download/v0.5.0-beta/hexclaw-linux-amd64.tar.gz
-tar xzf hexclaw-linux-amd64.tar.gz
-sudo mv hexclaw /usr/local/bin/
-sudo systemctl restart hexclaw
+go install github.com/hexagon-codes/hexclaw/cmd/hexclaw@latest
 
 # Docker
 docker compose pull hexclaw
 docker compose up -d --no-build hexclaw
 ```
+
+The Docker commands apply to deployments using a published image. The default source Compose setup uses `hexclaw:dev`; after updating source, run `docker compose build hexclaw` first. See the [cloud deployment guide](cloud-deployment.md) for image versions and complete Compose override rules.
 
 Create a consistent backup before updating. For database migrations, follow the [deployment recovery rules](cloud-deployment.md#按提交自动部署); replacing the image alone does not establish data compatibility.
 

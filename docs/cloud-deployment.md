@@ -26,7 +26,7 @@ docker compose ps
 docker compose exec -T hexclaw python3 -c 'import yaml; print(yaml.safe_load(open("/data/.hexclaw/hexclaw.yaml"))["server"]["api_token"])'
 ```
 
-远端 URL 为 `http://服务器地址:16060`，也可配置已有 HTTPS 反向代理的路径前缀，例如 `https://example.com/hexclaw`。代理需要保留 Authorization、转发 WebSocket Upgrade 并关闭 SSE 缓冲；移除对外前缀后转发至 HexClaw。`/health` 和 `/version` 是公开就绪信息，业务请求使用 `Authorization: Bearer <token>`。Desktop 原生层负责附加令牌，不放到资产 URL 查询参数。
+远端 URL 为 `http://服务器地址:16060`，也可配置已有 HTTPS 反向代理的路径前缀，例如 `https://example.com/hexclaw`。代理需要保留 Authorization、转发 WebSocket Upgrade 并关闭 SSE 缓冲；移除对外前缀后转发至 HexClaw。`GET /health` 和 `GET /api/v1/version` 是公开的健康与版本信息，业务请求使用 `Authorization: Bearer <token>`。Desktop 原生层负责附加令牌，不放到资产 URL 查询参数。
 
 模型、渠道、孩子、任务和产物属于选中的服务器；连接或切换不会自动上传本机配置、数据或规则。通过该服务器的设置配置模型与钉钉实例，再创建或配置 TutorAgent。迁移同一钉钉实例时先停止旧实例消费，避免两台服务同时争用消息；不要把两套独立任务库同时绑定到同一实际渠道进行验收。
 

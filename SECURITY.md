@@ -22,7 +22,7 @@ We will acknowledge receipt within 48 hours and provide a detailed response with
 
 | Version | Supported |
 |---------|-----------|
-| v0.5.0-beta (prerelease) | ✅ Yes |
+| v0.5.0-beta / v0.5.0-beta.1 (prerelease) | ✅ Yes |
 | v0.4.9 (latest stable) | ✅ Yes |
 | <= v0.4.8 | No |
 
@@ -30,19 +30,19 @@ We will acknowledge receipt within 48 hours and provide a detailed response with
 
 HexClaw includes a 6-layer security gateway:
 
-1. **Authentication** - HMAC-SHA256 token validation with constant-time comparison (`crypto/subtle`)
+1. **Authentication** - HTTP business APIs compare Bearer tokens with `crypto/subtle.ConstantTimeCompare`. The message gateway uses the authenticated principal; for messages without one, it also supports configured token lists or HMAC-SHA256 signatures.
 2. **Rate Limiting** - Per-user sliding window with memory upper bound (100K windows)
 3. **Cost Control** - Budget enforcement per user/global, **fail-closed** on DB errors
 4. **Input Safety** - Prompt injection detection + PII redaction, **fail-closed** on errors
-5. **RBAC** - Role-based access control
+5. **RBAC** - Role-based access control when enabled and configured
 6. **Audit** - Request logging
 
-## Security Hardening (v0.5.0-beta)
+## Runtime Boundaries
 
 ### API Authentication
 - Token comparison uses `crypto/subtle.ConstantTimeCompare` to prevent timing attacks
 - Logs API (`/api/v1/logs*`) always requires authentication regardless of source IP
-- `isLogsAPI` uses exact prefix `/api/v1/logs` to avoid matching `/api/v1/login` etc.
+- Authentication applies to the `/api/v1/` namespace, `/ws`, and mounted scenario routes, with method-specific exceptions listed in the [public API reference](docs/api.en.md#connection-and-identity).
 - Mounted scenario-pack routes such as `/api/k12/*` are derived from the mount registry and require Bearer authentication for reads and writes, including loopback requests. Only explicitly public endpoints bypass business authentication.
 
 ### Code Execution
@@ -65,7 +65,7 @@ HexClaw includes a 6-layer security gateway:
 - Cron-dispatched agents keep tool visibility; actual execution is decided by `PermissionPolicy` + the autonomy matrix instead of hard-coded tool stripping.
 
 ### Path Traversal Prevention
-- All file operations validate with `filepath.Base()` + absolute path prefix check
+- File APIs and tools enforce their own path or workspace boundaries; a basename check is not a universal authorization rule.
 - Memory system: `DeleteFile()` double-validates with `filepath.Clean()` + prefix match
 - Memory item ID validated at handler layer (rejects `..`, `/`, `\`)
 - Skill Hub/Marketplace: install paths verified against skill directory boundary
@@ -82,9 +82,9 @@ HexClaw includes a 6-layer security gateway:
 - Cost Check layer rejects requests when budget DB query fails (not silently passes)
 
 ### CORS
-- Origin validated against allowlist: `http://localhost:{port}`, `tauri://localhost`, `http://tauri.localhost`
-- Port must be 1–5 digits numeric; paths, non-numeric ports, and non-http schemes rejected
-- OPTIONS preflight returns 204 without invoking auth middleware
+- CORS headers are emitted for `http://localhost:{port}`, `http://127.0.0.1:{port}`, `tauri://localhost`, and `http://tauri.localhost`.
+- Local HTTP origins require a 1–5 digit numeric port. Other origins do not receive CORS permission headers; this is distinct from business authentication.
+- OPTIONS preflight bypasses the Bearer check and returns 204. The current allowed-method/header list and HEAD behavior are documented in [calling conventions](docs/api.en.md#common-calling-conventions).
 
 ### WebSocket
 - Origin validation via `OriginPatterns` (replaced `InsecureSkipVerify`)

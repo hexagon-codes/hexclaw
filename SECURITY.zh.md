@@ -22,7 +22,7 @@
 
 | 版本 | 支持状态 |
 |------|---------|
-| v0.5.0-beta（预发布） | ✅ 支持 |
+| v0.5.0-beta / v0.5.0-beta.1（预发布） | ✅ 支持 |
 | v0.4.9（最新稳定版） | ✅ 支持 |
 | <= v0.4.8 | 不支持 |
 
@@ -30,19 +30,19 @@
 
 HexClaw 包含六层安全网关：
 
-1. **认证** — HMAC-SHA256 Token 验证，使用 `crypto/subtle` 常量时间比较
+1. **认证** — HTTP 业务 API 使用 `crypto/subtle.ConstantTimeCompare` 比较 Bearer 令牌。消息网关复用已鉴权主体；无已鉴权主体的消息另支持配置令牌列表或 HMAC-SHA256 签名。
 2. **限流** — 基于用户的滑动窗口限流，内存上限 100K 窗口
 3. **成本控制** — 用户/全局预算强制执行，数据库异常时 **fail-closed**
 4. **输入安全** — Prompt 注入检测 + PII 脱敏，异常时 **fail-closed**
-5. **RBAC** — 基于角色的访问控制
+5. **RBAC** — 启用并配置后执行基于角色的访问控制
 6. **审计** — 请求日志记录
 
-## 安全加固（v0.5.0-beta）
+## 运行边界
 
 ### API 认证
 - Token 比较使用 `crypto/subtle.ConstantTimeCompare`，防止时序攻击
 - 日志 API（`/api/v1/logs*`）无论来源 IP 均要求认证
-- `isLogsAPI` 使用精确前缀 `/api/v1/logs`，避免匹配 `/api/v1/login` 等路径
+- 鉴权覆盖 `/api/v1/`、`/ws` 和已挂载场景路由；按请求方法定义的公开例外见[公共 API](docs/api.md#连接与身份)。
 - `/api/k12/*` 等场景包挂载路由从挂载注册表派生鉴权前缀，读写均要求 Bearer 认证，包括 loopback 请求；只有明确的公开端点免于业务鉴权。
 
 ### 代码执行
@@ -65,7 +65,7 @@ HexClaw 包含六层安全网关：
 - cron 派发的 Agent 默认保留工具可见性；最终是否执行由 `PermissionPolicy` + autonomy 矩阵裁决，而不是硬编码剥离。
 
 ### 路径遍历防护
-- 所有文件操作通过 `filepath.Base()` + 绝对路径前缀检查进行验证
+- 文件接口与工具分别执行自身的路径或工作目录边界校验；文件名检查不代表所有操作的统一授权规则。
 - 记忆系统：`DeleteFile()` 使用 `filepath.Clean()` + 前缀匹配双重验证
 - 记忆条目 ID 在处理层验证（拒绝 `..`、`/`、`\`）
 - Skill Hub/Marketplace：安装路径经过技能目录边界验证
@@ -82,9 +82,9 @@ HexClaw 包含六层安全网关：
 - 成本检查层在预算数据库查询失败时拒绝请求（不静默放行）
 
 ### CORS
-- Origin 经允许列表验证：`http://localhost:{port}`、`tauri://localhost`、`http://tauri.localhost`
-- 端口必须为 1–5 位数字；路径、非数字端口、非 http 协议均被拒绝
-- OPTIONS 预检返回 204，不触发认证中间件
+- CORS 为 `http://localhost:{port}`、`http://127.0.0.1:{port}`、`tauri://localhost` 和 `http://tauri.localhost` 返回许可头。
+- 本地 HTTP Origin 的端口必须为 1–5 位数字；其他 Origin 不获得 CORS 许可头，这与业务鉴权是不同机制。
+- OPTIONS 预检跳过 Bearer 校验并返回 204。当前允许的方法、请求头和 HEAD 行为见[通用调用约定](docs/api.md#通用调用约定)。
 
 ### WebSocket
 - 通过 `OriginPatterns` 进行 Origin 验证（替代 `InsecureSkipVerify`）

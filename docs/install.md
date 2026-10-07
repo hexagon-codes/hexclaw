@@ -19,10 +19,10 @@
 | 项目 | 最低要求 | 推荐 |
 |------|---------|------|
 | 操作系统 | Linux / macOS / Windows | Linux (Ubuntu 22.04+) |
-| Go | >= 1.25.13 | 最新稳定版 |
-| 内存 | 128 MB | 512 MB+ |
-| 磁盘 | 100 MB | 1 GB+（含知识库数据） |
-| 网络 | 可访问 LLM API | 低延迟连接 |
+| Go（仅 Go 安装或源码构建） | >= 1.25.13 | 与所选版本 `go.mod` 兼容的工具链 |
+| 内存 | 按任务、文件大小与模型部署方式规划 | 为文档渲染、图片任务及本地模型分别预留资源 |
+| 磁盘 | 程序及完整用户数据目录可写 | 为原始文档、产物、索引和备份预留空间 |
+| 网络 | 所选在线 Provider 与渠道可达；本地模型按自身部署要求配置 | 低延迟连接 |
 
 HexClaw 核心为单二进制（SQLite 使用纯 Go）；文档导出、中文/数学渲染及题目计算还需要 Pandoc、Typst、字体和 Python/SymPy，云端镜像已包含。
 
@@ -30,7 +30,9 @@ HexClaw 核心为单二进制（SQLite 使用纯 Go）；文档导出、中文/�
 
 ## 安装方式
 
-本次版本为 `v0.5.0-beta`，属于预发布版。安装该版本时须显式指定 tag；`@latest` 和 Releases 的 `latest/download` 用于稳定版，不保证选中 beta。以下 beta 安装命令需在对应 tag 与发布产物已生成后使用，版本说明本身不代表发布已完成。
+本页介绍独立 HexClaw 服务的安装与部署。桌面应用的一键安装见 [HexClaw Desktop 安装说明](https://github.com/hexagon-codes/hexclaw-desktop#安装)。
+
+`@latest` 和 Releases 的 `latest/download` 选择稳定版。安装预发布版时，使用 [Releases](https://github.com/hexagon-codes/hexclaw/releases) 中已发布的完整 Tag，并选择该版本实际提供的资产。
 
 ### 方式一：go install（推荐开发者使用）
 
@@ -38,11 +40,7 @@ HexClaw 核心为单二进制（SQLite 使用纯 Go）；文档导出、中文/�
 go install github.com/hexagon-codes/hexclaw/cmd/hexclaw@latest
 ```
 
-安装本次 beta：
-
-```bash
-go install github.com/hexagon-codes/hexclaw/cmd/hexclaw@v0.5.0-beta
-```
+需要指定版本时，将 `@latest` 替换为该版本的完整 Tag。确保 `GOBIN`（默认 `$(go env GOPATH)/bin`）位于 `PATH`。
 
 验证安装：
 
@@ -68,19 +66,9 @@ sudo mv hexclaw /usr/local/bin/
 
 ### 方式三：预编译二进制
 
-从 [GitHub Releases](https://github.com/hexagon-codes/hexclaw/releases) 下载对应平台的二进制。安装本次 beta 使用固定版本地址：
+从 [GitHub Releases](https://github.com/hexagon-codes/hexclaw/releases) 选择版本，再下载对应系统和 CPU 架构的压缩包。例如 Linux amd64 使用 `hexclaw-linux-amd64.tar.gz`，Apple Silicon 使用 `hexclaw-darwin-arm64.tar.gz`。
 
-```bash
-RELEASE_VERSION=v0.5.0-beta
-
-# Linux amd64
-curl -fSL "https://github.com/hexagon-codes/hexclaw/releases/download/${RELEASE_VERSION}/hexclaw-linux-amd64.tar.gz" | tar xz
-sudo mv hexclaw /usr/local/bin/
-
-# macOS arm64 (Apple Silicon)
-curl -fSL "https://github.com/hexagon-codes/hexclaw/releases/download/${RELEASE_VERSION}/hexclaw-darwin-arm64.tar.gz" | tar xz
-sudo mv hexclaw /usr/local/bin/
-```
+解压后，将 `hexclaw`（Windows 为 `hexclaw.exe`）放入 `PATH` 中的目录，再运行 `hexclaw version` 核对版本。资产列表与文件名以所选 Release 为准。
 
 ### 方式四：Docker
 
@@ -91,7 +79,7 @@ docker compose pull hexclaw
 docker compose up -d --no-build hexclaw
 ```
 
-本地源码开发先执行 `docker compose build hexclaw`，默认镜像为 `hexclaw:dev`。发布镜像使用版本号及完整提交 SHA 标签，`v0.5.0-beta` 不更新 `latest`；`latest` 仅用于正式稳定版。更新保留现有项目、数据卷及完整 Compose override 文件集合。
+本地源码开发先执行 `docker compose build hexclaw`，默认镜像为 `hexclaw:dev`。发布镜像使用版本号及完整提交 SHA 标签；预发布版不更新 `latest`，该标签仅用于正式稳定版。更新保留现有项目、数据卷及完整 Compose override 文件集合。
 
 源码镜像当前面向 Linux amd64，持久化完整可写 HOME。默认 Compose **不安装 Ollama，也不下载模型**；在 Desktop 为当前远端配置模型和 Embedding API，知识数据与索引保存在服务器。未配置有效 Embedding 时，关键词检索与向量可用性分别判断。初始化令牌、Kubernetes、备份恢复、自动部署及当前验收边界见[云端部署指南](cloud-deployment.md)。
 
@@ -140,10 +128,10 @@ skills:
 
 ### 环境变量
 
-所有敏感配置建议通过环境变量设置：
+独立服务首次配置可通过环境变量提供所选 Provider 的凭据。通过 Desktop 管理模型时，日常配置保存到当前服务的 YAML；不要在云端服务的启动环境中持续注入 Provider Key，否则删除或更改配置后可能在重启时重新补入。初始化与持久化约定见[云端部署指南](cloud-deployment.md)。
 
 ```bash
-# LLM API Key（至少设置一个）
+# 云端 Provider 的 API Key 示例，按所选 Provider 设置
 export DEEPSEEK_API_KEY="sk-xxx"
 export OPENAI_API_KEY="sk-xxx"
 export ANTHROPIC_API_KEY="sk-xxx"
@@ -168,27 +156,27 @@ llm:
 
 ### 配置优先级
 
-从高到低：
+配置按以下顺序加载与补齐：
 
-1. 命令行参数（`--feishu-app-id`）
-2. 环境变量（`DEEPSEEK_API_KEY`）
-3. 配置文件（`hexclaw.yaml`）
-4. 安全默认值
+1. 使用默认配置作为基线。
+2. 加载 `hexclaw.yaml`，其中 `${VAR_NAME}` 按当前进程环境展开，未设置的变量为空值。
+3. 从已支持的 LLM Key 环境变量添加缺省 Provider，或补齐已有 Provider 的空 Key；不覆盖配置中已加载的非空 Key。
+4. 应用受支持的命令行参数，例如 `--feishu-app-id`，覆盖对应字段。
 
 ### 最小配置
 
-服务本身可在没有云端 LLM Key 时启动，但聊天、识题、批改、RAG 增强等 LLM 依赖功能会返回 Provider 配置错误。建议至少配置一个 Provider：
+服务本身可以在没有可用模型 Provider 时启动；聊天、识题、批改、RAG 增强等功能需要对应用途可用的本地或云端 Provider。未配置可用 Provider 时会返回配置错误。本地 Ollama 不一定需要 API Key。以下为云端 Provider 示例：
 
 ```bash
 export DEEPSEEK_API_KEY="sk-xxx"
 hexclaw serve
 ```
 
-所有安全选项默认开启，存储使用 SQLite 自动创建。
+默认配置启用认证、输入检测和沙箱等能力，RBAC 按需配置；具体值见[默认配置](../config/defaults.go)。存储使用 SQLite 自动创建。
 
-### 完整配置示例
+### 配置示例与选项
 
-参考 [README.md](../README.md#配置) 中的完整配置文件。
+最小 YAML 示例见 [README.md](../README.md#配置)。完整选项见[配置结构](../config/config.go)，生成配置时使用的默认模板见[配置加载器](../config/loader.go)。
 
 ---
 
@@ -204,6 +192,10 @@ hexclaw serve --config /path/to/hexclaw.yaml
 
 ### 2. systemd 服务（直接管理二进制）
 
+以下为 Linux systemd 示例。先将选定版本的可执行文件安装到 `/usr/local/bin/hexclaw`，并运行 `/usr/local/bin/hexclaw version` 核对版本；Go 安装方式的文件来自 `GOBIN`，源码或 Release 方式使用对应构建或解压产物。
+
+服务使用 `/opt/hexclaw` 作为 HOME，配置与数据位于 `/opt/hexclaw/.hexclaw/`，临时文件位于 `/opt/hexclaw/tmp/`。`WorkingDirectory` 不会改变 HOME；两个目录都必须由服务用户拥有。
+
 创建服务文件 `/etc/systemd/system/hexclaw.service`：
 
 ```ini
@@ -216,12 +208,13 @@ Type=simple
 User=hexclaw
 Group=hexclaw
 WorkingDirectory=/opt/hexclaw
-ExecStart=/usr/local/bin/hexclaw serve --config /opt/hexclaw/hexclaw.yaml
+ExecStart=/usr/local/bin/hexclaw serve --config /opt/hexclaw/.hexclaw/hexclaw.yaml
 Restart=always
 RestartSec=5
 
-# 环境变量
-EnvironmentFile=/opt/hexclaw/.env
+# 配置、数据与临时文件均使用现有可写目录
+Environment=HOME=/opt/hexclaw
+Environment=TMPDIR=/opt/hexclaw/tmp
 
 # 安全加固
 NoNewPrivileges=yes
@@ -237,24 +230,19 @@ MemoryMax=1G
 WantedBy=multi-user.target
 ```
 
-创建环境变量文件 `/opt/hexclaw/.env`：
-
-```bash
-DEEPSEEK_API_KEY=sk-xxx
-# OPENAI_API_KEY=sk-xxx
-```
-
-启动服务：
+首次初始化并启动服务：
 
 ```bash
 # 创建用户
-sudo useradd -r -s /bin/false hexclaw
-sudo mkdir -p /opt/hexclaw
-sudo chown hexclaw:hexclaw /opt/hexclaw
+sudo useradd -r -U -d /opt/hexclaw -s /bin/false hexclaw
+sudo mkdir -p /opt/hexclaw/tmp
+sudo chown hexclaw:hexclaw /opt/hexclaw /opt/hexclaw/tmp
 
-# 复制配置和二进制
-sudo cp hexclaw /usr/local/bin/
-sudo cp hexclaw.yaml /opt/hexclaw/
+# 在服务自身 HOME 中生成配置，不复制个人配置
+sudo -u hexclaw env HOME=/opt/hexclaw /usr/local/bin/hexclaw init
+
+# 按“配置”章节设置模型；保留服务用户的配置文件所有权
+sudoedit /opt/hexclaw/.hexclaw/hexclaw.yaml
 
 # 启动
 sudo systemctl daemon-reload
@@ -266,38 +254,13 @@ sudo systemctl status hexclaw
 sudo journalctl -u hexclaw -f
 ```
 
+上述用户创建与 `init` 是首次安装步骤，已有服务直接编辑原配置，不重复初始化。Provider 凭据通过该服务的 YAML 或启动后的 Desktop 模型设置持久化；使用模板中的环境变量引用时，先替换为该服务的实际持久配置，日常 unit 不持续注入 Provider Key。
+
+现有目录限制保持不变；`TMPDIR` 让附件暂存、文档提取和脚本校验在可写范围内创建临时文件。`MemoryMax=1G` 是示例预算，按任务与文件大小规划资源。需要从其他机器连接时，按实际监听地址与反向代理方式设置 `server.host`；缺省回环地址只供本机访问。systemd 的目录语义见[官方执行环境说明](https://raw.githubusercontent.com/systemd/systemd/main/man/systemd.exec.xml)。
+
 ### 3. Docker Compose 与 Kubernetes
 
 使用维护中的 [Compose 文件](../docker-compose.yml)或 [Kubernetes 单实例清单](../docker/kubernetes.yaml)，按[云端部署指南](cloud-deployment.md)操作。两者均持久化整个可写 HOME `/data`，仅首次初始化凭据。不要把只读配置挂到运行 YAML，或在日常启动环境变量中重复注入 Provider Key，否则远端配置不能正常保存或删除。Kubernetes 使用单副本和 Recreate；初始化种子、Ollama 地址、停机、更新与完整备份均见指南。
-
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: hexclaw
-spec:
-  selector:
-    app: hexclaw
-  ports:
-    - port: 16060
-      targetPort: 16060
-  type: ClusterIP
-```
-
-创建 Secret 和 ConfigMap：
-
-```bash
-# 创建密钥
-kubectl create secret generic hexclaw-secrets \
-  --from-literal=deepseek-api-key=sk-xxx
-
-# 创建配置
-kubectl create configmap hexclaw-config \
-  --from-file=hexclaw.yaml
-
-# 部署
-kubectl apply -f hexclaw-k8s.yaml
-```
 
 ---
 
@@ -378,9 +341,9 @@ platforms:
 
 ### 钉钉 Bot
 
-1. 在[钉钉开放平台](https://open-dev.dingtalk.com/)创建企业内部应用
-2. 配置消息接收地址: `http://YOUR_HOST:6062/dingtalk/webhook`
-3. 启用配置：
+1. 在[钉钉开放平台](https://open-dev.dingtalk.com/)创建企业内部应用并配置机器人。
+2. 准备应用的 `app_key`、`app_secret` 和机器人 `robot_code`。
+3. 启用以下配置并启动服务。适配器通过官方 Stream SDK 接收消息，无需公网回调地址：
 
 ```yaml
 platforms:
@@ -390,6 +353,8 @@ platforms:
     app_secret: ${DINGTALK_APP_SECRET}
     robot_code: ${DINGTALK_ROBOT_CODE}
 ```
+
+若使用 HTTP 兼容接入，回调地址由实际服务地址与 `/api/v1/platforms/hooks/dingtalk/{name}` 组成；`{name}` 使用已配置平台实例的实际名称。实例名称可从平台实例列表查询；外部回调使用部署中可访问的服务地址。
 
 ### 企业微信
 
@@ -437,7 +402,13 @@ curl http://127.0.0.1:16060/health
 
 ### 启动后联调检查
 
-如果配置了 `server.api_token`，下面所有写请求都需要追加 `Authorization: Bearer <TOKEN>`。
+下面的业务接口读写均需要当前服务的 Bearer 令牌。`hexclaw init` 会生成 `server.api_token`，直接启动独立服务也会补齐缺少的令牌；已有值保持不变。先设置示例使用的环境变量，Desktop 本机令牌的区别见[连接与身份](api.md#连接与身份)。
+
+```bash
+export HEXCLAW_API_TOKEN="配置文件中的 server.api_token"
+```
+
+按需选择检查项，并替换模型凭据、技能名和记录 ID。模型连通性检查会请求对应 Provider；技能安装与状态更新会修改当前服务配置。
 
 ```bash
 # 1. 真实测试 LLM 配置，不写入磁盘
@@ -477,7 +448,7 @@ curl -H "Authorization: Bearer ${HEXCLAW_API_TOKEN}" -X PUT http://127.0.0.1:160
   -d '{"enabled":true}'
 
 # 4. 查看 Cron 历史结果字段
-curl -H "Authorization: Bearer ${HEXCLAW_API_TOKEN}" http://127.0.0.1:16060/api/v1/cron/jobs/<JOB_ID>/history
+curl -H "Authorization: Bearer ${HEXCLAW_API_TOKEN}" "http://127.0.0.1:16060/api/v1/cron/jobs/实际任务ID/history"
 
 # 5. 验证知识库结构化搜索
 curl -H "Authorization: Bearer ${HEXCLAW_API_TOKEN}" -X POST http://127.0.0.1:16060/api/v1/knowledge/search \
@@ -564,22 +535,18 @@ hexclaw security audit
 
 ### 升级
 
-以下命令显式升级到 `v0.5.0-beta`，执行前确认该版本的 tag 与产物已生成。升级到最新稳定版时，Go 安装使用 `@latest`，二进制下载使用 Releases 的 `latest/download`。
+以下 Go 命令升级到最新稳定版；使用预发布版时，将 `@latest` 替换为 [Releases](https://github.com/hexagon-codes/hexclaw/releases) 中实际存在的 Tag。二进制安装从所选 Release 下载与系统、架构对应的资产，核对 checksum 后替换原程序并重启服务。
 
 ```bash
 # go install 方式
-go install github.com/hexagon-codes/hexclaw/cmd/hexclaw@v0.5.0-beta
-
-# 二进制替换
-wget https://github.com/hexagon-codes/hexclaw/releases/download/v0.5.0-beta/hexclaw-linux-amd64.tar.gz
-tar xzf hexclaw-linux-amd64.tar.gz
-sudo mv hexclaw /usr/local/bin/
-sudo systemctl restart hexclaw
+go install github.com/hexagon-codes/hexclaw/cmd/hexclaw@latest
 
 # Docker
 docker compose pull hexclaw
 docker compose up -d --no-build hexclaw
 ```
+
+Docker 命令适用于已选择发布镜像的部署；默认源码 Compose 使用 `hexclaw:dev`，更新源码后先执行 `docker compose build hexclaw`。完整镜像版本与 Compose override 约定见[云端部署指南](cloud-deployment.md)。
 
 更新前完成一致备份；涉及数据库迁移时按[部署恢复约定](cloud-deployment.md#按提交自动部署)处理，不能仅替换旧镜像而假设数据格式可回退。
 
