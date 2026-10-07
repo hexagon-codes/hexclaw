@@ -327,6 +327,8 @@ func TestKnowledgeDocumentsRejectsUnsupportedCorpusBeforeQueueing(t *testing.T) 
 
 func TestKnowledgeDocumentDetailPrefersAsyncProjectionAndKeepsLegacyContentCompatibility(t *testing.T) {
 	ctx := context.Background()
+	const rawCause = `knowledge: OCR transcription failed: HTTP 429, body: {"error":{"message":"Provider returned error","code":429},"metadata":{"raw":"private-upstream-body"}}`
+	const publicCause = "Provider returned error (code: 429)"
 	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "knowledge-detail.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -339,6 +341,7 @@ func TestKnowledgeDocumentDetailPrefersAsyncProjectionAndKeepsLegacyContentCompa
 	doc := &knowledge.Document{
 		ID: "doc-async-detail", Title: "六上数学.pdf", Content: "legacy-compatible extracted text",
 		Source: "upload:六上数学.pdf", SourceType: "upload", Status: "indexed", ChunkCount: 1,
+		ErrorMessage: rawCause,
 	}
 	if err := store.Add(ctx, doc, []*knowledge.Chunk{{
 		ID: "doc-async-detail-chunk", DocID: doc.ID, DocTitle: doc.Title, Source: doc.Source,
@@ -353,7 +356,7 @@ func TestKnowledgeDocumentDetailPrefersAsyncProjectionAndKeepsLegacyContentCompa
 			"doc-async-detail": {
 				DocumentID: "doc-async-detail", VectorIndexState: knowledge.VectorIndexFailed,
 				JobID: "job-vector-failed", JobState: knowledge.KnowledgeJobFailed,
-				Stage: knowledge.JobStageEmbedding, LastError: "provider unavailable",
+				Stage: knowledge.JobStageEmbedding, LastError: "provider unavailable token=private-vector-token",
 			},
 		},
 		projection: &knowledge.KnowledgeDocumentProjection{
@@ -406,6 +409,7 @@ func TestKnowledgeDocumentDetailPrefersAsyncProjectionAndKeepsLegacyContentCompa
 		"id": "doc-async-detail", "document_id": "doc-async-detail",
 		"document_generation": float64(3),
 		"content":             "legacy-compatible extracted text", "status": "indexed",
+		"error_message": publicCause,
 		"source_digest": strings.Repeat("a", 64), "sha256": strings.Repeat("a", 64),
 		"owner_id": "desktop-user", "corpus_id": "default", "agent_id": "tutor-a",
 		"learner_id": "learner-a", "subject": "数学", "grade": "六年级上",
@@ -419,7 +423,7 @@ func TestKnowledgeDocumentDetailPrefersAsyncProjectionAndKeepsLegacyContentCompa
 		t.Fatalf("async counters/state missing: %v", payload)
 	}
 	if payload["vector_index_state"] != "failed" || payload["vector_job_id"] != "job-vector-failed" ||
-		payload["vector_job_state"] != "failed" || payload["vector_error"] != "provider unavailable" {
+		payload["vector_job_state"] != "failed" || payload["vector_error"] != "provider unavailable token=[redacted]" {
 		t.Fatalf("vector failure projection missing from detail: %v", payload)
 	}
 	spans, ok := payload["source_spans"].([]any)
@@ -465,10 +469,36 @@ func TestKnowledgeDocumentDetailPrefersAsyncProjectionAndKeepsLegacyContentCompa
 		t.Fatalf("vector failure projection missing from list: status=%d payload=%+v",
 			listResp.StatusCode, listPayload)
 	}
+	if listPayload.Documents[0].ErrorMessage != publicCause ||
+		listPayload.Documents[0].VectorError != "provider unavailable token=[redacted]" {
+		t.Fatalf("list failure projection=%+v", listPayload.Documents[0])
+	}
 	span, ok := spans[0].(map[string]any)
 	if !ok || span["page_start"] != float64(12) ||
 		span["source_digest"] != strings.Repeat("a", 64) ||
 		span["source_offset_start"] != float64(240) {
 		t.Fatalf("source span payload=%v", spans[0])
+	}
+	srv.SetSemanticIndexService(nil)
+	legacyResp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var legacyDocument knowledge.Document
+	decodeErr := json.NewDecoder(legacyResp.Body).Decode(&legacyDocument)
+	legacyResp.Body.Close()
+	if decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+	if legacyResp.StatusCode != http.StatusOK || legacyDocument.ErrorMessage != publicCause ||
+		legacyDocument.Status != doc.Status || legacyDocument.Content != doc.Content {
+		t.Fatalf("legacy detail failure projection=%+v status=%d", legacyDocument, legacyResp.StatusCode)
+	}
+	var storedCause string
+	if err := db.QueryRow(`SELECT error_message FROM kb_documents WHERE id=?`, doc.ID).Scan(&storedCause); err != nil {
+		t.Fatal(err)
+	}
+	if storedCause != rawCause {
+		t.Fatal("public document projection changed the historical failure")
 	}
 }

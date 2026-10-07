@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/hexagon-codes/hexclaw/internal/upstreamerr"
 	"github.com/hexagon-codes/hexclaw/knowledge"
 	"github.com/hexagon-codes/hexclaw/skill"
 	"github.com/hexagon-codes/toolkit/util/logger"
@@ -179,7 +180,7 @@ func (s *Server) handleGetKnowledgeJob(w http.ResponseWriter, r *http.Request) {
 		writeSemanticIndexError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, job)
+	writeJSON(w, http.StatusOK, projectKnowledgeJobFailure(job))
 }
 
 func (s *Server) handleCancelKnowledgeJob(w http.ResponseWriter, r *http.Request) {
@@ -195,7 +196,17 @@ func (s *Server) handleCancelKnowledgeJob(w http.ResponseWriter, r *http.Request
 		writeSemanticIndexError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, job)
+	writeJSON(w, http.StatusOK, projectKnowledgeJobFailure(job))
+}
+
+func projectKnowledgeJobFailure(job knowledge.KnowledgeJob) knowledge.KnowledgeJob {
+	job.LastError = upstreamerr.KnowledgeFailureMessage(job.LastError)
+	if job.Failure != nil {
+		failure := *job.Failure
+		failure.Message = upstreamerr.KnowledgeFailureMessage(failure.Message)
+		job.Failure = &failure
+	}
+	return job
 }
 
 func (s *Server) handleRetryKnowledgeDocument(w http.ResponseWriter, r *http.Request) {

@@ -49,3 +49,41 @@ func TestPublicMessage_PreservesNonProviderErrors(t *testing.T) {
 		t.Fatalf("期望保留普通错误，实际 %q", got)
 	}
 }
+
+func TestKnowledgeFailureMessagePreservesDiagnosticsWithoutRequestSecrets(t *testing.T) {
+	cases := []struct{ name, input, want string }{
+		{
+			name:  "provider body",
+			input: `knowledge: OCR transcription failed: HTTP 429, body: {"error":{"message":"Provider returned error","code":429},"metadata":{"raw":"private-provider-body"}}`,
+			want:  "Provider returned error (code: 429)",
+		},
+		{
+			name:  "malformed provider body",
+			input: `knowledge: OCR transcription failed: HTTP 503, body: {"raw":"private-provider-body"`,
+			want:  "knowledge: OCR transcription failed: HTTP 503",
+		},
+		{
+			name:  "request preview",
+			input: `knowledge: OCR transcription failed: HTTP 503, request_preview: {"messages":"private-request-preview"}`,
+			want:  "knowledge: OCR transcription failed: HTTP 503",
+		},
+		{
+			name:  "endpoint and labeled credentials",
+			input: `HTTP 401 endpoint=https://user:uri-secret@models.example/v1/chat/completions?arbitrary=query-secret Authorization: Bearer auth-secret; api_key="key-secret"; token=token-secret; access_token=fixture-token; refresh_token='refresh-secret'; client_secret="client-secret"; secret='tag-secret'; password=pass-secret; credential=sk-key-secret`,
+			want:  `HTTP 401 endpoint=https://models.example/v1/chat/completions Authorization: [redacted]; api_key=[redacted]; token=[redacted]; access_token=[redacted]; refresh_token=[redacted]; client_secret=[redacted]; secret=[redacted]; password=[redacted]; credential=[redacted]`,
+		},
+		{
+			name:  "bare bearer and response break",
+			input: "knowledge: OCR transcription failed: unexpected EOF (outcome_unknown); Bearer bearer-secret",
+			want:  "knowledge: OCR transcription failed: unexpected EOF (outcome_unknown); Bearer [redacted]",
+		},
+		{name: "empty", input: " \n\t ", want: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := KnowledgeFailureMessage(tc.input); got != tc.want {
+				t.Fatalf("public failure=%q want %q", got, tc.want)
+			}
+		})
+	}
+}

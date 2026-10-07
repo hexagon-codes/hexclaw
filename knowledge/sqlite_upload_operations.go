@@ -393,9 +393,11 @@ func (r *SQLiteSemanticIndexRepository) listUploadOperationsForCorpus(
 	if err != nil {
 		return nil, err
 	}
+	// 上传原绑定保持不变，查询投影跟踪同归属、同源代次的最新执行。
+	// 同毫秒执行以现有 SQLite 插入顺序区分，不使用随机任务 ID 判定新旧。
 	rows, err := r.db.QueryContext(ctx, `SELECT
 		o.operation_id,o.idempotency_key,o.owner_id,c.corpus_alias,
-		COALESCE(o.document_id,''),COALESCE(o.job_id,''),o.display_name,o.media_type,
+		COALESCE(o.document_id,''),COALESCE(j.job_id,o.job_id,''),o.display_name,o.media_type,
 		o.size_bytes,COALESCE(o.content_digest,''),o.state,o.last_error,
 		o.created_at,o.updated_at,COALESCE(j.state,''),COALESCE(j.stage,''),
 		COALESCE(j.last_error,''),COALESCE(j.updated_at,0),
@@ -403,8 +405,16 @@ func (r *SQLiteSemanticIndexRepository) listUploadOperationsForCorpus(
 		FROM kb_upload_operations o
 		JOIN kb_semantic_corpora c
 		  ON c.owner_id=o.owner_id AND c.corpus_uid=o.corpus_uid
-		LEFT JOIN kb_knowledge_jobs j
-		  ON j.job_id=o.job_id AND j.owner_id=o.owner_id AND j.corpus_uid=o.corpus_uid
+		LEFT JOIN kb_knowledge_jobs original_job
+		  ON original_job.job_id=o.job_id AND original_job.owner_id=o.owner_id
+		 AND original_job.corpus_uid=o.corpus_uid AND original_job.document_id=o.document_id
+		LEFT JOIN kb_knowledge_jobs j ON j.job_id=(
+		  SELECT current_job.job_id FROM kb_knowledge_jobs current_job
+		  WHERE current_job.owner_id=o.owner_id AND current_job.corpus_uid=o.corpus_uid
+		    AND current_job.document_id=o.document_id
+		    AND current_job.document_generation=original_job.document_generation
+		    AND current_job.kind='ingest'
+		  ORDER BY current_job.created_at DESC,current_job.rowid DESC LIMIT 1)
 		LEFT JOIN kb_documents d ON d.id=o.document_id AND d.corpus_uid=o.corpus_uid
 		WHERE o.owner_id=? AND o.corpus_uid=?
 		  AND (? OR (o.dismissed_at IS NULL AND (o.document_id IS NULL OR d.deleted=0)))

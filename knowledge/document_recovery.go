@@ -115,7 +115,7 @@ func loadDocumentRecoveryPlan(ctx context.Context, q *sql.Tx, ownerID, corpusUID
 	}
 	err = q.QueryRowContext(ctx, `SELECT job_id,COALESCE(pages_total,0) FROM kb_knowledge_jobs WHERE owner_id=? AND corpus_uid=?
  AND document_id=? AND document_generation=? AND kind='ingest' AND state='failed' AND cancel_requested=0
- ORDER BY COALESCE(finished_at,updated_at) DESC,job_id DESC LIMIT 1`, ownerID, corpusUID, documentID, p.Generation).Scan(&p.FailedJobID, &p.PagesTotal)
+ ORDER BY COALESCE(finished_at,updated_at) DESC,rowid DESC LIMIT 1`, ownerID, corpusUID, documentID, p.Generation).Scan(&p.FailedJobID, &p.PagesTotal)
 	if errors.Is(err, sql.ErrNoRows) {
 		return p, ErrDocumentRetryNotAllowed
 	}

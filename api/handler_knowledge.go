@@ -15,6 +15,7 @@ import (
 
 	"github.com/hexagon-codes/hexclaw/config"
 	"github.com/hexagon-codes/hexclaw/internal/inputlimits"
+	"github.com/hexagon-codes/hexclaw/internal/upstreamerr"
 	"github.com/hexagon-codes/hexclaw/knowledge"
 	"github.com/hexagon-codes/hexclaw/skill"
 	"github.com/hexagon-codes/toolkit/util/logger"
@@ -97,7 +98,7 @@ func (s *Server) handleKnowledgeOperations(w http.ResponseWriter, r *http.Reques
 			State:           operation.State,
 			Stage:           operation.Stage,
 			Terminal:        operation.Terminal,
-			Error:           operation.Error,
+			Error:           upstreamerr.KnowledgeFailureMessage(operation.Error),
 			CreatedAt:       operation.CreatedAt,
 			UpdatedAt:       operation.UpdatedAt,
 		})
@@ -551,6 +552,9 @@ func (s *Server) handleListDocuments(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	for index, document := range res.Documents {
+		res.Documents[index] = projectKnowledgeDocumentFailure(document)
+	}
 	if projectionService, ok := s.semanticIndex.(KnowledgeDocumentVectorProjectionAPI); ok {
 		projections, projectionErr := projectionService.ListDocumentVectorProjections(
 			r.Context(), s.knowledgeOwnerScope(r), knowledgeDefaultCorpusID,
@@ -651,6 +655,7 @@ func (s *Server) handleGetDocument(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	doc = projectKnowledgeDocumentFailure(doc)
 	if vectorService, vectorOK := s.semanticIndex.(KnowledgeDocumentVectorProjectionAPI); vectorOK {
 		vectors, vectorErr := vectorService.ListDocumentVectorProjections(
 			r.Context(), s.knowledgeOwnerScope(r), knowledgeDefaultCorpusID,
@@ -677,7 +682,7 @@ func applyKnowledgeDocumentVectorProjection(
 	document.VectorJobStage = projection.Stage
 	document.VectorChunksDone = projection.ChunksDone
 	document.VectorChunksTotal = projection.ChunksTotal
-	document.VectorError = projection.LastError
+	document.VectorError = upstreamerr.KnowledgeFailureMessage(projection.LastError)
 	document.VectorOutcomeUnknown = projection.OutcomeUnknown
 	document.TextOutcomeUnknown = projection.TextOutcomeUnknown
 }
@@ -692,7 +697,7 @@ func applyKnowledgeDocumentVectorPayload(
 	payload["vector_job_stage"] = projection.Stage
 	payload["vector_chunks_done"] = projection.ChunksDone
 	payload["vector_chunks_total"] = projection.ChunksTotal
-	payload["vector_error"] = projection.LastError
+	payload["vector_error"] = upstreamerr.KnowledgeFailureMessage(projection.LastError)
 	payload["vector_outcome_unknown"] = projection.OutcomeUnknown
 	payload["text_outcome_unknown"] = projection.TextOutcomeUnknown
 }
@@ -703,7 +708,7 @@ func (s *Server) knowledgeDocumentDetail(
 ) map[string]any {
 	payload := map[string]any{}
 	if legacy, err := s.kb.GetDocument(r.Context(), projection.DocumentID); err == nil {
-		if raw, marshalErr := json.Marshal(legacy); marshalErr == nil {
+		if raw, marshalErr := json.Marshal(projectKnowledgeDocumentFailure(legacy)); marshalErr == nil {
 			_ = json.Unmarshal(raw, &payload)
 		}
 	}
@@ -1040,10 +1045,20 @@ func knowledgeDocResponse(doc *knowledge.Document) knowledgeDocumentResponse {
 		CreatedAt:    doc.CreatedAt,
 		UpdatedAt:    doc.UpdatedAt,
 		Status:       doc.Status,
-		ErrorMessage: doc.ErrorMessage,
+		ErrorMessage: upstreamerr.KnowledgeFailureMessage(doc.ErrorMessage),
 		SourceType:   doc.SourceType,
 		Warnings:     []string{},
 	}
+}
+
+func projectKnowledgeDocumentFailure(document *knowledge.Document) *knowledge.Document {
+	if document == nil {
+		return nil
+	}
+	projected := *document
+	projected.ErrorMessage = upstreamerr.KnowledgeFailureMessage(document.ErrorMessage)
+	projected.VectorError = upstreamerr.KnowledgeFailureMessage(document.VectorError)
+	return &projected
 }
 
 // Route contract: GET /api/v1/knowledge/operations is the durable renderer recovery projection.

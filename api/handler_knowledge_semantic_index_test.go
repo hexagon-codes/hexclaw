@@ -339,6 +339,53 @@ func TestSemanticIndexJobHTTPContractAndErrorMapping(t *testing.T) {
 	}
 }
 
+func TestKnowledgeJobHTTPProjectsFailureWithoutChangingStoredCause(t *testing.T) {
+	const raw = `knowledge: OCR transcription failed: HTTP 429, body: {"error":{"message":"Provider returned error","code":429},"metadata":{"raw":"private-upstream-body"}}`
+	const want = "Provider returned error (code: 429)"
+	failure := &knowledge.KnowledgeJobFailure{Code: "job_failed", Message: raw}
+	stored := knowledge.KnowledgeJob{
+		JobID: "job-1", State: knowledge.KnowledgeJobFailed,
+		LastError: raw, Failure: failure,
+	}
+	stub := &semanticIndexServiceStub{
+		getJobFn: func(context.Context, string, string) (knowledge.KnowledgeJob, error) {
+			return stored, nil
+		},
+		cancelJobFn: func(context.Context, string, string) (knowledge.KnowledgeJob, error) {
+			return stored, nil
+		},
+	}
+	ts := newSemanticIndexHTTPServer(t, stub)
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodGet, "/api/v1/knowledge/jobs/job-1"},
+		{http.MethodPost, "/api/v1/knowledge/jobs/job-1/cancel"},
+	} {
+		req, err := http.NewRequest(tc.method, ts.URL+tc.path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer knowledge-desktop-fixture")
+		resp, err := ts.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got knowledge.KnowledgeJob
+		decodeErr := json.NewDecoder(resp.Body).Decode(&got)
+		resp.Body.Close()
+		if decodeErr != nil {
+			t.Fatal(decodeErr)
+		}
+		if resp.StatusCode != http.StatusOK || got.JobID != stored.JobID ||
+			got.State != stored.State || got.LastError != want || got.Failure == nil ||
+			got.Failure.Code != failure.Code || got.Failure.Message != want {
+			t.Fatalf("public job failure=%+v status=%d", got, resp.StatusCode)
+		}
+	}
+	if stored.LastError != raw || failure.Message != raw {
+		t.Fatal("public projection changed the stored failure")
+	}
+}
+
 func TestKnowledgeJobHTTPPublishesSanitizedOCRPageReceipts(t *testing.T) {
 	receipt := knowledge.OCRPageRouteReceipt{
 		PageNumber: 1, PagesTotal: 1,

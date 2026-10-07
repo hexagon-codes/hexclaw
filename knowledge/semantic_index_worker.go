@@ -1289,6 +1289,7 @@ func isPermanentSemanticWorkerError(err error) bool {
 		errors.Is(err, ErrVisionModelRequired) ||
 		errors.Is(err, ErrEmbeddingBatchOutcomeUnknown) ||
 		errors.Is(err, ErrOCRPageInvocationOutcomeUnknown) ||
+		errors.Is(err, ErrOCRPageInvocationFailed) ||
 		errors.Is(err, ErrInvalidDocumentUpload) ||
 		errors.Is(err, ErrProfileUnavailable) ||
 		errors.Is(err, ErrInvalidEmbeddingResult) ||

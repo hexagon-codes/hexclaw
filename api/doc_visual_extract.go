@@ -512,10 +512,7 @@ func extractPDFForAsyncIngestWithProgress(
 		"segments", len(segments), "has_route_snapshot", hasRouteSnapshot,
 		"provider", routeSnapshot.ProviderName, "model", routeSnapshot.Model,
 		"capabilities", routeSnapshot.Capabilities, "has_captioner", kb != nil && kb.HasCaptioner())
-	if snapshot, ok := knowledge.VisionRouteSnapshotFromContext(ctx); ok &&
-		len(visualPages) > 0 && !snapshot.HasCapability("vision") {
-		return result, knowledge.NewVisionModelRequiredError(snapshot, visualPages)
-	}
+	// 未声明视觉能力不等于不支持；真实 OCR 沿冻结路由记录执行结果。
 	if len(visualPages) > 0 && (kb == nil || !kb.HasCaptioner()) {
 		failed := make(map[int]string, len(visualPages))
 		for _, page := range visualPages {
@@ -638,6 +635,9 @@ func extractPDFForAsyncIngestWithProgress(
 				} else if captionErr != nil {
 					return result, captionErr
 				} else if !invocation.Fresh {
+					if invocation.Status == knowledge.OCRPageInvocationStatusFailed {
+						return result, knowledge.ErrOCRPageInvocationFailed
+					}
 					if invocation.Status != knowledge.OCRPageInvocationStatusSucceeded ||
 						strings.TrimSpace(invocation.Content) == "" {
 						return result, knowledge.ErrOCRPageInvocationOutcomeUnknown
@@ -670,40 +670,9 @@ func extractPDFForAsyncIngestWithProgress(
 				caption, captionErr = kb.CaptionImageWithRouteReceipt(
 					pageCtx, renderedPage.Data, "image/png",
 				)
-				outcomeUnknown := providerBegan
-				httpStatus, requestID, safeCause := 0, "", ""
+				captionErr, httpStatus, requestID, safeCause, outcomeUnknown := classifyKnowledgeOCRFailure(captionErr, providerBegan)
 				acceptedEvidence := "completed"
-				var providerErr *llm.ProviderError
 				if captionErr != nil {
-					safeCause, _ = redactProviderErrorBody(captionErr.Error())
-					if errors.As(captionErr, &providerErr) && providerErr != nil {
-						httpStatus, requestID = providerErr.StatusCode, providerErr.RequestID
-						if providerErr.Cause != nil {
-							cause, _ := redactProviderErrorBody(providerErr.Cause.Error())
-							if !strings.Contains(safeCause, cause) {
-								safeCause += ": " + cause
-							}
-						}
-						// 错误链保留结构化状态和底层原因，不携带 Provider 正文或请求预览。
-						sanitized := *providerErr
-						sanitized.Body, sanitized.RequestPreview = "", ""
-						captionErr = fmt.Errorf("knowledge: OCR transcription failed: %w", &sanitized)
-					}
-					if httpStatus > 0 {
-						outcomeUnknown = true
-						switch httpStatus {
-						case 400, 401, 403, 404, 405, 413, 415, 422, 429:
-							outcomeUnknown = false
-						}
-					} else {
-						var dnsErr *net.DNSError
-						var opErr *net.OpError
-						if errors.As(captionErr, &dnsErr) || (errors.As(captionErr, &opErr) && opErr.Op == "dial") {
-							outcomeUnknown = false
-						} else if errors.Is(captionErr, io.EOF) || errors.Is(captionErr, io.ErrUnexpectedEOF) {
-							outcomeUnknown = true
-						}
-					}
 					acceptedEvidence = "request_not_sent"
 					if outcomeUnknown {
 						acceptedEvidence = "request_outcome_unknown"
@@ -747,8 +716,12 @@ func extractPDFForAsyncIngestWithProgress(
 					if ctx.Err() != nil {
 						return result, ctx.Err()
 					}
-					failed[page] = "OCR/VLM failed: " + safeCause
-					continue
+					// 技术失败后停止后续页，保留成功检查点和原始错误链。
+					return result, &pdfPageExtractionError{
+						PagesTotal: info.PageCount, FailedPages: []int{page},
+						Reasons: []string{"OCR/VLM failed: " + safeCause},
+						Cause:   fmt.Errorf("%w: %w", knowledge.ErrOCRPageInvocationFailed, captionErr),
+					}
 				}
 			}
 			result.Pages[page-1].Text = strings.TrimSpace(caption.Content)
@@ -836,6 +809,67 @@ func extractPDFForAsyncIngestWithProgress(
 	}
 	result.Text = joinPDFPageExtractions(result.Pages)
 	return result, nil
+}
+
+type knowledgeOCRSafeError struct {
+	cause   error
+	message string
+}
+
+func (e *knowledgeOCRSafeError) Error() string { return e.message }
+func (e *knowledgeOCRSafeError) Unwrap() error { return e.cause }
+
+// classifyKnowledgeOCRFailure 统一图片和 PDF 的脱敏错误及请求结果未知判定。
+func classifyKnowledgeOCRFailure(captionErr error, providerBegan bool) (error, int, string, string, bool) {
+	if captionErr == nil {
+		return nil, 0, "", "", false
+	}
+	safeCause := "knowledge: OCR transcription failed"
+	switch {
+	case errors.Is(captionErr, io.ErrUnexpectedEOF):
+		safeCause += ": unexpected EOF"
+	case errors.Is(captionErr, io.EOF):
+		safeCause += ": EOF"
+	case errors.Is(captionErr, context.DeadlineExceeded):
+		safeCause += ": context deadline exceeded"
+	case errors.Is(captionErr, context.Canceled):
+		safeCause += ": context canceled"
+	case errors.Is(captionErr, knowledge.ErrInvalidDocumentUpload):
+		safeCause += ": invalid OCR response"
+	case errors.Is(captionErr, knowledge.ErrVisionModelRequired):
+		safeCause += ": vision model required"
+	}
+	httpStatus, requestID := 0, ""
+	outcomeUnknown := providerBegan
+	var providerErr *llm.ProviderError
+	if errors.As(captionErr, &providerErr) && providerErr != nil {
+		httpStatus, requestID = providerErr.StatusCode, providerErr.RequestID
+		safeCause += fmt.Sprintf(" (HTTP %d)", httpStatus)
+		// 错误链保留结构化状态和底层原因，不携带 Provider 正文或请求预览。
+		sanitized := *providerErr
+		sanitized.Body, sanitized.RequestPreview = "", ""
+		sanitized.Status = fmt.Sprintf("%d %s", httpStatus, http.StatusText(httpStatus))
+		if providerErr.Cause != nil {
+			sanitized.Cause = &knowledgeOCRSafeError{cause: providerErr.Cause, message: safeCause}
+		}
+		captionErr = &sanitized
+	}
+	if httpStatus > 0 {
+		outcomeUnknown = true
+		switch httpStatus {
+		case 400, 401, 403, 404, 405, 413, 415, 422, 429:
+			outcomeUnknown = false
+		}
+	} else {
+		var dnsErr *net.DNSError
+		var opErr *net.OpError
+		if errors.As(captionErr, &dnsErr) || (errors.As(captionErr, &opErr) && opErr.Op == "dial") {
+			outcomeUnknown = false
+		} else if errors.Is(captionErr, io.EOF) || errors.Is(captionErr, io.ErrUnexpectedEOF) {
+			outcomeUnknown = true
+		}
+	}
+	return &knowledgeOCRSafeError{cause: captionErr, message: safeCause}, httpStatus, requestID, safeCause, outcomeUnknown
 }
 
 func pdfOCRPageRequestDigest(

@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -13,12 +14,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hexagon-codes/ai-core/transport"
 	"github.com/hexagon-codes/hexclaw/knowledge"
 	"github.com/hexagon-codes/hexclaw/resourcegov"
 	"github.com/hexagon-codes/toolkit/util/logger"
 )
 
 const (
+	knowledgeImageContentPrefix           = "【图像内容】\n"
 	maxAsyncTextSourceBytes         int64 = 32 << 20
 	maxAsyncDOCXSourceBytes         int64 = 32 << 20
 	maxAsyncImageSourceBytes        int64 = 20 << 20
@@ -123,20 +126,15 @@ func (p *knowledgeDocumentIngestProcessor) prepare(
 			pageCount = int64(extracted.PageCount)
 		}
 	} else if strings.HasPrefix(strings.ToLower(source.MediaType), "image/") {
-		if snapshot, ok := knowledge.VisionRouteSnapshotFromContext(ctx); ok &&
-			!snapshot.HasCapability("vision") {
-			return knowledge.PreparedIngestDocument{},
-				knowledge.NewVisionModelRequiredError(snapshot, []int{1})
-		}
 		data, err := readAndVerifyBufferedIngestSource(ctx, source, maxAsyncImageSourceBytes)
 		if err != nil {
 			return knowledge.PreparedIngestDocument{}, err
 		}
-		caption, captionErr := p.manager.CaptionImage(ctx, data, source.MediaType)
+		caption, captionErr := p.prepareImageOCR(ctx, source, data, progress)
 		if captionErr != nil {
 			return knowledge.PreparedIngestDocument{}, captionErr
 		}
-		content = "【图像内容】\n" + strings.TrimSpace(caption)
+		content = caption
 	} else {
 		extracted, extractErr := p.runCPU(ctx, func() (documentExtractionResult, error) {
 			if isAsyncTextExtension(source.Extension) {
@@ -219,6 +217,115 @@ func (p *knowledgeDocumentIngestProcessor) prepare(
 		ReleaseAttachments: releaseAttachments,
 		Document:           document, Chunks: chunks, PageCount: pageCount, Warnings: warnings, SourceManifest: sourceManifest,
 	}, nil
+}
+
+// prepareImageOCR 将单张图片作为一页复用调用账本和检查点，未知请求不再次发送。
+func (p *knowledgeDocumentIngestProcessor) prepareImageOCR(
+	ctx context.Context,
+	source knowledge.PersistedIngestDocument,
+	data []byte,
+	progress knowledge.IngestPageProgress,
+) (string, error) {
+	if progress != nil {
+		if err := progress.SetPageTotal(ctx, source.SHA256, 1); err != nil {
+			return "", err
+		}
+		completed, err := progress.LoadCompletedPages(ctx, source.SHA256, 1)
+		if err != nil {
+			return "", err
+		}
+		if len(completed) > 0 {
+			if len(completed) != 1 || completed[0].PageNumber != 1 ||
+				completed[0].PagesTotal != 1 || completed[0].SourceDigest != source.SHA256 ||
+				strings.TrimSpace(completed[0].Content) == "" {
+				return "", fmt.Errorf("%w: invalid image OCR checkpoint", knowledge.ErrInvalidDocumentUpload)
+			}
+			return completed[0].Content, nil
+		}
+	}
+	invocationProgress, invocationSupported := progress.(knowledge.OCRPageInvocationContextProgress)
+	var invocation knowledge.OCRPageInvocation
+	var caption knowledge.CaptionResult
+	if invocationSupported {
+		route, ok := knowledge.VisionRouteSnapshotFromContext(ctx)
+		if !ok {
+			return "", knowledge.ErrInvalidVisionRouteSnapshot
+		}
+		var err error
+		invocation, err = invocationProgress.ClaimOCRPageInvocationContext(ctx, knowledge.OCRPageInvocationClaim{
+			PageNumber: 1, PagesTotal: 1, SourceDigest: source.SHA256,
+			RequestDigest: pdfOCRPageRequestDigest(source.SHA256, 1, 1, data, route),
+			Provider:      route.ProviderName, Model: route.Model,
+		})
+		if errors.Is(err, knowledge.ErrOCRPageInvocationLedgerUnavailable) {
+			invocationSupported = false
+		} else if err != nil {
+			return "", err
+		} else if !invocation.Fresh {
+			if invocation.Status == knowledge.OCRPageInvocationStatusFailed {
+				return "", knowledge.ErrOCRPageInvocationFailed
+			}
+			if invocation.Status != knowledge.OCRPageInvocationStatusSucceeded || strings.TrimSpace(invocation.Content) == "" {
+				return "", knowledge.ErrOCRPageInvocationOutcomeUnknown
+			}
+			caption.Content, caption.RouteReceipt = invocation.Content, invocation.RouteReceipt
+		}
+	}
+	if !invocationSupported || invocation.Fresh {
+		pageCtx, cancelPage := context.WithTimeout(ctx, asyncPDFLimitsFromEnv().PageTimeout)
+		providerBegan := false
+		pageCtx = transport.WithOperationSafety(pageCtx, transport.OperationSafetyNonIdempotent)
+		pageCtx = transport.WithBeforeSendHookForAction(pageCtx, "complete", func(context.Context) error {
+			providerBegan = true
+			return nil
+		})
+		var err error
+		caption, err = p.manager.CaptionImageWithRouteReceipt(pageCtx, data, source.MediaType)
+		err, _, _, safeCause, outcomeUnknown := classifyKnowledgeOCRFailure(err, providerBegan)
+		cancelPage()
+		if err != nil {
+			if invocationSupported && invocation.Fresh {
+				marker, ok := progress.(knowledge.OCRPageInvocationContextOutcomeMarker)
+				if !ok {
+					return "", knowledge.ErrOCRPageInvocationLedgerUnavailable
+				}
+				markCtx, cancelMark := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+				var markErr error
+				if outcomeUnknown {
+					markErr = marker.MarkOCRPageInvocationOutcomeUnknownContext(markCtx, invocation, safeCause)
+				} else {
+					markErr = marker.MarkOCRPageInvocationFailedContext(markCtx, invocation, safeCause)
+				}
+				cancelMark()
+				if markErr != nil {
+					return "", errors.Join(err, markErr)
+				}
+			}
+			if outcomeUnknown {
+				return "", fmt.Errorf("%w: image invocation %s: %s (%w)", knowledge.ErrOCRPageInvocationOutcomeUnknown, invocation.InvocationID, safeCause, err)
+			}
+			return "", fmt.Errorf("%w: %w", knowledge.ErrOCRPageInvocationFailed, err)
+		}
+		if invocationSupported {
+			if err := invocationProgress.SaveOCRPageInvocationContext(ctx, invocation, knowledge.OCRPageInvocationResult{
+				Content: caption.Content, RouteReceipt: caption.RouteReceipt,
+			}); err != nil {
+				return "", err
+			}
+		}
+	}
+	canonicalContent := knowledgeImageContentPrefix + strings.TrimSpace(caption.Content)
+	if progress != nil {
+		receipt := caption.RouteReceipt
+		if err := progress.CommitPage(ctx, knowledge.IngestPageCheckpoint{
+			PageNumber: 1, PagesTotal: 1, SourceDigest: source.SHA256, ExtractionMode: "ocr_vlm",
+			Content: canonicalContent, SourceOffsetStart: 0, SourceOffsetEnd: int64(len(canonicalContent)),
+			OCRRouteReceipt: &receipt,
+		}); err != nil {
+			return "", err
+		}
+	}
+	return canonicalContent, nil
 }
 
 func validateAsyncIngestMemoryBudget(source knowledge.PersistedIngestDocument) error {

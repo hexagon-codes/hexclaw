@@ -484,7 +484,7 @@ func readyIngestSegmentVisibilitySQL(bindingAlias, chunkAlias string) string {
 		  AND j.document_generation=%[1]s.content_generation
 		  AND j.kind='ingest'
 		  AND EXISTS (SELECT 1 FROM kb_ingest_segments planned WHERE planned.job_id=j.job_id)
-		ORDER BY j.created_at DESC,j.job_id DESC LIMIT 1
+		ORDER BY j.created_at DESC,j.rowid DESC LIMIT 1
 	)`, bindingAlias)
 	return fmt.Sprintf(`(
 		NOT EXISTS (

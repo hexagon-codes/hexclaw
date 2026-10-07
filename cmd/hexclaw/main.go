@@ -142,6 +142,13 @@ func completeKnowledgePDFPageOCR(
 	if response == nil {
 		return knowledge.CaptionResult{}, fmt.Errorf("knowledge: PDF page OCR returned no response")
 	}
+	if strings.EqualFold(strings.TrimSpace(response.FinishReason), "length") ||
+		strings.EqualFold(strings.TrimSpace(response.FinishReason), "max_tokens") {
+		return knowledge.CaptionResult{}, fmt.Errorf("knowledge: PDF page OCR response was truncated")
+	}
+	if strings.TrimSpace(response.Content) == "" {
+		return knowledge.CaptionResult{}, fmt.Errorf("knowledge: PDF page OCR returned empty content")
+	}
 	return knowledge.CaptionResult{
 		Content: response.Content,
 		RouteReceipt: knowledge.OCRRouteReceipt{
@@ -1008,18 +1015,11 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 						var provider hexagon.Provider
 						var providerName, model string
 						if snapshot, frozen := knowledge.VisionRouteSnapshotFromContext(ctx); frozen {
-							route, rErr := router.ResolveRouteForCapabilities(
-								snapshot.ProviderName, snapshot.Model, "text", "vision",
+							route, rErr := router.ResolveKnowledgeOCRRoute(
+								snapshot.ProviderInstanceID, snapshot.ProviderName, snapshot.Model,
 							)
 							if rErr != nil {
 								return knowledge.CaptionResult{}, rErr
-							}
-							currentConfig, configured := router.ProviderConfig(route.ProviderName)
-							if !configured || currentConfig.ProviderInstanceID != snapshot.ProviderInstanceID {
-								return knowledge.CaptionResult{}, fmt.Errorf(
-									"knowledge: frozen vision provider %q is no longer configured",
-									snapshot.ProviderDisplayName,
-								)
 							}
 							provider, providerName, model = route.Provider, route.ProviderName, route.Model
 						} else {

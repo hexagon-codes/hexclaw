@@ -443,7 +443,7 @@ func queueFailedTextRetryTx(
 	err := tx.QueryRowContext(ctx, `SELECT job_id FROM kb_knowledge_jobs
 		WHERE owner_id=? AND corpus_uid=? AND document_id=? AND document_generation=?
 		  AND kind='ingest' AND state='failed' AND cancel_requested=0
-		ORDER BY COALESCE(finished_at,updated_at) DESC,job_id DESC
+		ORDER BY COALESCE(finished_at,updated_at) DESC,rowid DESC
 		LIMIT 1`, ownerID, corpusUID, documentID, generation).Scan(&predecessorJobID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrDocumentRetryNotAllowed
@@ -921,7 +921,7 @@ func (r *SQLiteSemanticIndexRepository) loadDocumentOCRPageRouteReceipts(
 	err := r.db.QueryRowContext(ctx, `SELECT job_id FROM kb_knowledge_jobs
 		WHERE owner_id=? AND corpus_uid=? AND document_id=? AND document_generation=?
 		  AND kind='ingest'
-		ORDER BY created_at DESC,job_id DESC LIMIT 1`, ownerID, corpusUID,
+		ORDER BY created_at DESC,rowid DESC LIMIT 1`, ownerID, corpusUID,
 		documentID, documentGeneration).Scan(&jobID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return []OCRPageRouteReceipt{}, nil

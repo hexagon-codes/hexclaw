@@ -6,21 +6,28 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	"image/png"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/ai-core/transport"
+	"github.com/hexagon-codes/hexagon"
 	"github.com/hexagon-codes/hexagon/rag/splitter"
 	"github.com/hexagon-codes/hexclaw/knowledge"
 	"github.com/hexagon-codes/toolkit/util/logger"
@@ -203,6 +210,187 @@ func TestKnowledgeAsyncProcessorTextLayerPDFDoesNotCallVLM(t *testing.T) {
 	}
 }
 
+func TestKnowledgeAsyncProcessorUnknownVisionStopsAfterFirstHTTPFailure(t *testing.T) {
+	requirePopplerForAsyncPDFTest(t)
+	t.Setenv("HEXCLAW_DOC_VLM_RENDER_DPI", "72")
+	for _, test := range []struct {
+		name       string
+		status     int
+		disconnect bool
+		unknown    bool
+	}{
+		{name: "rate limited", status: http.StatusTooManyRequests},
+		{name: "upstream unavailable", status: http.StatusServiceUnavailable, unknown: true},
+		{name: "connection interrupted", disconnect: true, unknown: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			manager, calls := newKnowledgeOCRHTTPManager(t, func(w http.ResponseWriter, r *http.Request, _ int) {
+				if test.disconnect {
+					conn, _, err := w.(http.Hijacker).Hijack()
+					if err != nil {
+						t.Error(err)
+						return
+					}
+					_ = conn.Close()
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(test.status)
+				_, _ = io.WriteString(w, `{"error":{"message":"sentinel-secret-request-body","type":"fixture_failure"}}`)
+			})
+			source := writeAsyncProcessorPDF(t, buildImageOnlyTestPDF(t, 3))
+			ctx := unknownKnowledgeOCRContext()
+			progress := &durableOCRProgressProbe{memoryIngestPageProgress: &memoryIngestPageProgress{}}
+			processor := NewKnowledgeDocumentIngestProcessor(manager).(knowledge.ResumableDocumentIngestProcessor)
+			prepared, err := processor.PrepareResumable(ctx, source, progress)
+			if err == nil || prepared.Document != nil || calls() != 1 || len(progress.pages) != 0 {
+				t.Fatalf("technical failure continued or published: calls=%d pages=%v prepared=%+v err=%v", calls(), progress.pages, prepared, err)
+			}
+			want := knowledge.OCRPageInvocationStatusFailed
+			if test.unknown {
+				want = knowledge.OCRPageInvocationStatusOutcomeUnknown
+			}
+			if progress.invocations[1].Status != want || errors.Is(err, knowledge.ErrVisionModelRequired) {
+				t.Fatalf("technical failure misclassified: invocation=%+v err=%v", progress.invocations[1], err)
+			}
+			if strings.Contains(err.Error(), "sentinel-secret") || strings.Contains(knowledge.KnowledgeJobFailureFromError(err).Message, "sentinel-secret") {
+				t.Fatalf("upstream body entered durable failure: %v", err)
+			}
+			if test.status > 0 {
+				var providerErr *llm.ProviderError
+				if !errors.As(err, &providerErr) || providerErr.StatusCode != test.status || providerErr.Body != "" || providerErr.RequestPreview != "" {
+					t.Fatalf("failure lost its status or retained upstream details: %+v err=%v", providerErr, err)
+				}
+			}
+			if test.unknown {
+				_, replayErr := processor.PrepareResumable(ctx, source, progress)
+				if !errors.Is(replayErr, knowledge.ErrOCRPageInvocationOutcomeUnknown) || calls() != 1 {
+					t.Fatalf("unknown request replayed: calls=%d err=%v", calls(), replayErr)
+				}
+			}
+		})
+	}
+}
+
+func TestKnowledgeAsyncProcessorUnknownVisionImageKeepsLedgerAndSuccess(t *testing.T) {
+	for _, interrupted := range []bool{false, true} {
+		name := "success checkpoint replay"
+		if interrupted {
+			name = "interrupted request no replay"
+		}
+		t.Run(name, func(t *testing.T) {
+			manager, calls := newKnowledgeOCRHTTPManager(t, func(w http.ResponseWriter, r *http.Request, _ int) {
+				if interrupted {
+					conn, _, err := w.(http.Hijacker).Hijack()
+					if err != nil {
+						t.Error(err)
+						return
+					}
+					_ = conn.Close()
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"controlled image transcription"},"finish_reason":"stop"}]}`)
+			})
+			source := writeAsyncProcessorImage(t)
+			processor := NewKnowledgeDocumentIngestProcessor(manager).(knowledge.ResumableDocumentIngestProcessor)
+			progress := &durableOCRProgressProbe{memoryIngestPageProgress: &memoryIngestPageProgress{}}
+			progress.failCommit = !interrupted
+			ctx := unknownKnowledgeOCRContext()
+			prepared, err := processor.PrepareResumable(ctx, source, progress)
+			if !interrupted {
+				if err == nil || progress.invocations[1].Status != knowledge.OCRPageInvocationStatusSucceeded || len(progress.pages) != 0 {
+					t.Fatalf("checkpoint crash lost the successful invocation: progress=%+v err=%v", progress, err)
+				}
+				prepared, err = processor.PrepareResumable(ctx, source, progress)
+			}
+			if calls() != 1 {
+				t.Fatalf("image did not attempt the frozen model once: calls=%d err=%v", calls(), err)
+			}
+			if interrupted {
+				if !errors.Is(err, knowledge.ErrOCRPageInvocationOutcomeUnknown) || prepared.Document != nil ||
+					progress.invocations[1].Status != knowledge.OCRPageInvocationStatusOutcomeUnknown {
+					t.Fatalf("image interruption not persisted as unknown: invocation=%+v err=%v", progress.invocations[1], err)
+				}
+			} else if err != nil || prepared.Document == nil || !strings.Contains(prepared.Document.Content, "controlled image transcription") ||
+				progress.invocations[1].Status != knowledge.OCRPageInvocationStatusSucceeded ||
+				progress.pages[1].OCRRouteReceipt == nil || progress.pages[1].OCRRouteReceipt.Fake {
+				t.Fatalf("image success did not preserve its receipt/checkpoint: prepared=%+v progress=%+v err=%v", prepared, progress, err)
+			}
+			if !interrupted {
+				checkpoint := progress.pages[1]
+				if checkpoint.Content != prepared.Document.Content || checkpoint.SourceOffsetStart != 0 ||
+					checkpoint.SourceOffsetEnd != int64(len(prepared.Document.Content)) ||
+					progress.invocations[1].Content != "controlled image transcription" {
+					t.Fatalf("image checkpoint lost canonical coordinates or changed transcription: checkpoint=%+v invocation=%+v content=%q", checkpoint, progress.invocations[1], prepared.Document.Content)
+				}
+			}
+			replayed, replayErr := processor.PrepareResumable(ctx, source, progress)
+			if calls() != 1 || (interrupted && !errors.Is(replayErr, knowledge.ErrOCRPageInvocationOutcomeUnknown)) || (!interrupted && replayErr != nil) {
+				t.Fatalf("image request replayed or lost success: calls=%d err=%v", calls(), replayErr)
+			}
+			if !interrupted && (replayed.Document.Content != prepared.Document.Content || strings.Count(replayed.Document.Content, knowledgeImageContentPrefix) != 1) {
+				t.Fatalf("image reload duplicated its content prefix: content=%q", replayed.Document.Content)
+			}
+		})
+	}
+}
+
+func unknownKnowledgeOCRContext() context.Context {
+	return knowledge.WithVisionRouteSnapshot(context.Background(), knowledge.VisionRouteSnapshot{
+		ProviderInstanceID: "hexclaw-gpt", ProviderName: "hexclaw-gpt", ProviderDisplayName: "HexClaw-GPT",
+		Model: "gpt-5.6-sol", Capabilities: []string{"text"},
+	})
+}
+
+func writeAsyncProcessorImage(t *testing.T) knowledge.PersistedIngestDocument {
+	t.Helper()
+	var imageBytes bytes.Buffer
+	if err := png.Encode(&imageBytes, image.NewRGBA(image.Rect(0, 0, 2, 2))); err != nil {
+		t.Fatal(err)
+	}
+	data := imageBytes.Bytes()
+	path := filepath.Join(t.TempDir(), "image.png")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(data)
+	return knowledge.PersistedIngestDocument{
+		DocumentID: "doc-image", OwnerID: "desktop-user", CorpusUID: "corpus-1", CorpusAlias: "default",
+		ContentGeneration: 1, Filename: "image.png", Extension: ".png", MediaType: "image/png",
+		SizeBytes: int64(len(data)), SHA256: hex.EncodeToString(digest[:]), StoragePath: path,
+	}
+}
+
+func newKnowledgeOCRHTTPManager(t *testing.T, serve func(http.ResponseWriter, *http.Request, int)) (*knowledge.Manager, func() int) {
+	t.Helper()
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		serve(w, r, int(calls.Add(1)))
+	}))
+	t.Cleanup(server.Close)
+	provider := hexagon.NewOpenAI("local-fixture-credential", hexagon.OpenAIWithBaseURL(server.URL), hexagon.OpenAIWithHTTPClient(server.Client()))
+	manager := newAsyncProcessorTestManager(t, knowledge.CaptionerWithReceiptFunc(func(ctx context.Context, data []byte, mime string) (knowledge.CaptionResult, error) {
+		route, ok := knowledge.VisionRouteSnapshotFromContext(ctx)
+		if !ok {
+			return knowledge.CaptionResult{}, knowledge.ErrInvalidVisionRouteSnapshot
+		}
+		response, err := provider.Complete(ctx, hexagon.CompletionRequest{
+			Model: route.Model, Messages: []hexagon.Message{{Role: hexagon.RoleUser, MultiContent: []llm.ContentPart{
+				llm.NewTextPart("Transcribe this local fixture."), llm.NewImageURLPart("data:"+mime+";base64,"+base64.StdEncoding.EncodeToString(data), "auto"),
+			}}},
+		})
+		if err != nil {
+			return knowledge.CaptionResult{}, err
+		}
+		return knowledge.CaptionResult{Content: response.Content, RouteReceipt: knowledge.OCRRouteReceipt{
+			Provider: route.ProviderName, Model: route.Model, Operation: knowledge.OCRRouteOperationPDFPage,
+			Status: knowledge.OCRRouteStatusSucceeded,
+		}}, nil
+	}))
+	return manager, func() int { return int(calls.Load()) }
+}
+
 func TestKnowledgeAsyncProcessorRendersPDFInSmallBatches(t *testing.T) {
 	requirePopplerForAsyncPDFTest(t)
 	t.Setenv("HEXCLAW_DOC_VLM_MAX_PAGES", "250")
@@ -378,7 +566,7 @@ func TestKnowledgeAsyncProcessorResumeSkipsCompletedVLMPageCheckpoints(t *testin
 		!strings.Contains(err.Error(), "failed_pages=[3]") {
 		t.Fatalf("first interrupted OCR err=%v", err)
 	}
-	if len(progress.pages) != 4 {
+	if len(progress.pages) != 2 || calls != 3 {
 		t.Fatalf("durable completed pages=%v", progress.pages)
 	}
 	if progress.invocations[3].Status != knowledge.OCRPageInvocationStatusFailed {
@@ -390,7 +578,7 @@ func TestKnowledgeAsyncProcessorResumeSkipsCompletedVLMPageCheckpoints(t *testin
 		t.Fatal(err)
 	}
 	if calls != 6 {
-		t.Fatalf("VLM calls=%d, want 5 initial attempts + only failed page retry", calls)
+		t.Fatalf("VLM calls=%d, want 3 initial attempts + 3 remaining pages", calls)
 	}
 	if progress.invocations[3].InvocationID != failedID || progress.invocations[3].Status != knowledge.OCRPageInvocationStatusSucceeded {
 		t.Fatalf("retry replaced the failed invocation: %+v", progress.invocations[3])

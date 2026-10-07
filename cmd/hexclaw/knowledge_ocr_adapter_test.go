@@ -15,6 +15,7 @@ import (
 
 type knowledgeOCRCaptureProvider struct {
 	request         llm.CompletionRequest
+	response        *llm.CompletionResponse
 	err             error
 	headerBudget    time.Duration
 	hasHeaderBudget bool
@@ -33,6 +34,9 @@ func (p *knowledgeOCRCaptureProvider) Complete(
 	p.deadline, p.hasDeadline = ctx.Deadline()
 	if p.err != nil {
 		return nil, p.err
+	}
+	if p.response != nil {
+		return p.response, nil
 	}
 	return &llm.CompletionResponse{Content: "第 1 题：\\(a \\div b = a/b\\)"}, nil
 }
@@ -99,6 +103,26 @@ func TestKnowledgeOCRAdapterDoesNotCreateSuccessReceiptOnProviderFailure(t *test
 	if err == nil || result.Content != "" || result.RouteReceipt.Provider != "" ||
 		result.RouteReceipt.Status != "" {
 		t.Fatalf("failed OCR result=%+v err=%v", result, err)
+	}
+}
+
+func TestKnowledgeOCRAdapterRejectsEmptyAndTruncatedTranscription(t *testing.T) {
+	for _, tc := range []struct {
+		name, content, finishReason string
+	}{
+		{name: "empty", finishReason: "stop"},
+		{name: "whitespace", content: " \t\n", finishReason: "stop"},
+		{name: "empty_truncated", finishReason: "length"},
+		{name: "partial_truncated", content: "unfinished textbook transcription", finishReason: "length"},
+		{name: "native_truncated", content: "unfinished textbook transcription", finishReason: "max_tokens"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := &knowledgeOCRCaptureProvider{response: &llm.CompletionResponse{Content: tc.content, FinishReason: tc.finishReason}}
+			result, err := completeKnowledgePDFPageOCR(context.Background(), provider, "saved-provider", "saved-model", []byte("rendered-page"), "image/png")
+			if err == nil || result.Content != "" || result.RouteReceipt != (knowledge.OCRRouteReceipt{}) {
+				t.Fatalf("invalid transcription created success result=%+v err=%v", result, err)
+			}
+		})
 	}
 }
 

@@ -205,6 +205,7 @@ const (
 )
 
 var ErrOCRPageInvocationOutcomeUnknown = errors.New("knowledge: OCR page invocation outcome unknown")
+var ErrOCRPageInvocationFailed = errors.New("knowledge: OCR page invocation failed; explicit document retry required")
 var ErrOCRPageInvocationLedgerUnavailable = errors.New("knowledge: OCR page invocation ledger unavailable")
 
 // OCRPageInvocationClaim 是调用前冻结的逐页身份；JobID 由持有的 JobLease 提供，
