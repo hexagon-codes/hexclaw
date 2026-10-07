@@ -1,11 +1,9 @@
 package apihttp
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -36,6 +34,10 @@ func (h *handler) getCurriculumCatalog(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) getCurriculumProgress(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Get("mode") == "estimate" {
+		h.estimateCurriculumProgress(w, r)
+		return
+	}
 	scope, err := h.textbookScope(
 		r.Context(), r.URL.Query().Get("agent"), r.URL.Query().Get("subject"),
 	)
@@ -97,40 +99,12 @@ type profileBundleRequest struct {
 	} `json:"weekly_practice_settings"`
 }
 
-type profileBundleCurriculumProgressRequest struct {
-	Subject            string `json:"subject"`
-	TextbookManifestID string `json:"textbook_manifest_id"`
-	Volume             string `json:"volume"`
-	UnitID             string `json:"unit_id"`
-	LessonID           string `json:"lesson_id,omitempty"`
-	PageFrom           *int   `json:"page_from,omitempty"`
-	PageTo             *int   `json:"page_to,omitempty"`
-	EvidenceSource     string `json:"evidence_source"`
-}
+type profileBundleCurriculumProgressRequest = k12.CurriculumProgressSelection
 
 func decodeProfileBundleCurriculumProgress(
 	raw json.RawMessage,
 ) (*profileBundleCurriculumProgressRequest, error) {
-	if len(raw) == 0 {
-		return nil, fmt.Errorf("curriculum_progress is required")
-	}
-	raw = bytes.TrimSpace(raw)
-	if bytes.Equal(raw, []byte("null")) {
-		return nil, nil
-	}
-	var progress profileBundleCurriculumProgressRequest
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&progress); err != nil {
-		return nil, fmt.Errorf("invalid curriculum_progress: %w", err)
-	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		return nil, fmt.Errorf("curriculum_progress must contain exactly one JSON value")
-	}
-	if strings.TrimSpace(progress.TextbookManifestID) == "" {
-		return nil, fmt.Errorf("textbook_manifest_id is required")
-	}
-	return &progress, nil
+	return k12.DecodeCurriculumProgressSelection(raw)
 }
 
 func (h *handler) updateProfileBundle(w http.ResponseWriter, r *http.Request) {
@@ -138,7 +112,11 @@ func (h *handler) updateProfileBundle(w http.ResponseWriter, r *http.Request) {
 	if !decodeStrict(w, r, &req) {
 		return
 	}
-	progressRequest, err := decodeProfileBundleCurriculumProgress(req.CurriculumProgress)
+	var progressRequest *profileBundleCurriculumProgressRequest
+	var err error
+	if len(req.CurriculumProgress) > 0 {
+		progressRequest, err = decodeProfileBundleCurriculumProgress(req.CurriculumProgress)
+	}
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -184,7 +162,8 @@ func (h *handler) updateProfileBundle(w http.ResponseWriter, r *http.Request) {
 			SubjectTextbooks: req.Profile.SubjectTextbooks,
 		},
 		CurriculumProgress:      progressInput,
-		ClearCurriculumProgress: progressRequest == nil,
+		ClearCurriculumProgress: len(req.CurriculumProgress) > 0 && progressRequest == nil,
+		AutoCurriculumProgress:  len(req.CurriculumProgress) == 0,
 		WeeklyPracticeSettings: usecase.WeeklyPracticeSettingsInput{
 			Timezone:                     req.WeeklyPracticeSettings.Timezone,
 			TextbookConsolidationEnabled: req.WeeklyPracticeSettings.TextbookConsolidationEnabled,
@@ -203,6 +182,20 @@ func (h *handler) updateProfileBundle(w http.ResponseWriter, r *http.Request) {
 func (h *handler) listTextbookBindingOptions(w http.ResponseWriter, r *http.Request) {
 	if h.rt.Records == nil {
 		writeErr(w, http.StatusInternalServerError, "records unavailable")
+		return
+	}
+	if r.URL.Query().Get("mode") == "create" {
+		ownerID, err := h.ownerScope(r.Context())
+		if err != nil {
+			writeErr(w, httpStatusForK12Error(err, http.StatusInternalServerError), err.Error())
+			return
+		}
+		items, err := h.rt.Records.ListTextbookCreationOptions(r.Context(), ownerID)
+		if err != nil {
+			writeErr(w, httpStatusForK12Error(err, http.StatusInternalServerError), err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"items": items})
 		return
 	}
 	scope, err := h.textbookScope(

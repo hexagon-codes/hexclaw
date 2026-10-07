@@ -15,6 +15,10 @@ func (d Deps) projectWeeklyManualRecommendations(
 	plan k12.WeeklyPracticePlan,
 ) (k12.WeeklyPracticePlan, error) {
 	progress, err := d.GetCurriculumProgress(ctx, plan.AgentName, "math")
+	_, production := d.WeeklyCandidates.(weeklyCandidateRequestFreezer)
+	if production && plan.Status == k12.WeeklyPlanDraft {
+		progress, err = d.PreviewCurriculumProgress(ctx, d.TextbookOwnerID, plan.AgentName)
+	}
 	if err != nil {
 		return k12.WeeklyPracticePlan{}, err
 	}
@@ -46,15 +50,19 @@ func (d Deps) projectWeeklyManualRecommendations(
 	if plan.Status != k12.WeeklyPlanDraft {
 		syncAvailability = k12.WeeklyManualTrackFailedTerminal
 		arithmeticAvailability = k12.WeeklyManualTrackFailedTerminal
-	} else if progress == nil || progress.Revision <= 0 ||
-		progress.EvidenceSource != "parent_confirmed" {
+	} else if !k12.CurriculumProgressSuggested(progress) {
 		syncAvailability = k12.WeeklyManualTrackSetupRequired
 		arithmeticAvailability = k12.WeeklyManualTrackSetupRequired
 	}
-	if freezer, production := d.WeeklyCandidates.(weeklyCandidateRequestFreezer); production && plan.Status == k12.WeeklyPlanDraft {
-		_, targetErr := freezer.FreezeWeeklyPracticeCandidateRequest(ctx, WeeklyPracticeCandidateRequest{
+	if freezer, production := d.WeeklyCandidates.(weeklyCandidateRequestFreezer); production && plan.Status == k12.WeeklyPlanDraft &&
+		!(k12.CurriculumProgressSuggested(progress) && !k12.CurriculumProgressUsable(progress)) {
+		request := WeeklyPracticeCandidateRequest{
 			AgentName: plan.AgentName, PlanSection: k12.WeeklySectionArithmeticWarmup, MaxItems: 1,
-		})
+		}
+		if progress != nil {
+			request.Progress = *progress
+		}
+		_, targetErr := freezer.FreezeWeeklyPracticeCandidateRequest(ctx, request)
 		switch {
 		case targetErr == nil:
 			arithmeticAvailability = k12.WeeklyManualTrackAvailable
@@ -138,9 +146,26 @@ func (d Deps) PrepareWeeklyTextbookTrack(
 		projected, projectErr := d.projectWeeklyArithmetic(ctx, stored)
 		return projected, replay, projectErr
 	}
-	progress, err := d.GetCurriculumProgress(ctx, agentName, "math")
-	if err != nil || progress == nil || progress.Revision <= 0 ||
-		progress.EvidenceSource != "parent_confirmed" {
+	progress, progressRevision, err := d.GetCurriculumProgressState(ctx, agentName, "math")
+	if _, production := d.WeeklyCandidates.(weeklyCandidateRequestFreezer); production {
+		ref := WeeklyCandidateCheckpointRef{AgentName: agentName, Kind: "refresh", PlanID: planID, Revision: plan.Revision, IdempotencyKey: key}
+		if _, checkpointErr := d.Records.GetWeeklyCandidateCheckpoint(ctx, ref); errors.Is(checkpointErr, records.ErrNotFound) {
+			pending, pendingErr := d.Records.WeeklyPlanHasPendingGeneration(ctx, agentName, planID)
+			if pendingErr != nil {
+				return k12.WeeklyPracticePlan{}, false, pendingErr
+			}
+			// 原未决来源与已清除草稿保持不变；只有新命令才可采用建议。
+			if !pending && !(progress == nil && progressRevision > 0) {
+				progress, err = d.EnsureCurriculumProgress(ctx, d.TextbookOwnerID, agentName)
+			}
+		} else if checkpointErr != nil {
+			return k12.WeeklyPracticePlan{}, false, checkpointErr
+		}
+	}
+	if err != nil {
+		return k12.WeeklyPracticePlan{}, false, err
+	}
+	if !k12.CurriculumProgressUsable(progress) {
 		return k12.WeeklyPracticePlan{}, false, records.ErrIllegalTransition
 	}
 	found := false

@@ -1053,6 +1053,12 @@ func (e *ReActEngine) Process(ctx context.Context, msg *adapter.Message) (reply 
 		// 并把权限决策归因到触发任务（持久化审计）。
 		ctx = skill.WithSystemDispatchTask(ctx, systemDispatchTaskRefFromMessage(msg))
 	}
+	// 本轮用户声明只来自互动原文，系统任务清空继承来源。
+	originalUserText := ""
+	if !isSystemDispatch(msg) {
+		originalUserText = msg.Content
+	}
+	ctx = skill.WithOriginalUserText(ctx, originalUserText)
 	// 子 Agent 派生深度透传到 ctx，供 spawn/orchestrate 的深度闸读取（P0-1 递归防护）。
 	if d := spawnDepthFromMessage(msg); d > 0 {
 		ctx = withSpawnDepth(ctx, d)
@@ -2061,6 +2067,12 @@ func (e *ReActEngine) processStream(
 		// 并把权限决策归因到触发任务（持久化审计）。
 		ctx = skill.WithSystemDispatchTask(ctx, systemDispatchTaskRefFromMessage(msg))
 	}
+	// 本轮用户声明只来自互动原文，系统任务清空继承来源。
+	originalUserText := ""
+	if !isSystemDispatch(msg) {
+		originalUserText = msg.Content
+	}
+	ctx = skill.WithOriginalUserText(ctx, originalUserText)
 	// 子 Agent 派生深度透传到 ctx，供 spawn/orchestrate 的深度闸读取（P0-1 递归防护）。
 	if d := spawnDepthFromMessage(msg); d > 0 {
 		ctx = withSpawnDepth(ctx, d)

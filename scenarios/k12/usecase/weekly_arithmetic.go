@@ -184,6 +184,22 @@ func (d Deps) createWeeklyArithmeticBatch(
 		}
 		return batch, true, nil
 	}
+	// 只为新的用户命令采用建议；已有冻结批次与未知回执不重新估计。
+	if production {
+		progress, ensureErr := d.EnsureCurriculumProgress(ctx, d.TextbookOwnerID, agentName)
+		if ensureErr != nil {
+			return batch, false, ensureErr
+		}
+		if progress != nil {
+			checkpoint.Progress = *progress
+		}
+		raw, _ := json.Marshal(checkpoint)
+		ref := WeeklyCandidateCheckpointRef{Kind: "arithmetic", AgentName: agentName, PlanID: planID, BatchID: batch.BatchID}
+		if err := d.Records.SaveWeeklyCandidateCheckpoint(ctx, ref, batch.GenerationCheckpoint, string(raw)); err != nil {
+			return batch, false, err
+		}
+		batch.GenerationCheckpoint = string(raw)
+	}
 	if err := d.finishWeeklyArithmeticGeneration(ctx, batch); err != nil {
 		return batch, false, fmt.Errorf("finish weekly arithmetic generation: %w", err)
 	}

@@ -24,6 +24,7 @@ type ProfileBundleMutation struct {
 	ExpectedProgressRevision int
 	ExpectedSettingsRevision int
 	AgentConfig              *k12.ProfileBundleAgentConfig
+	PreserveProgress         bool
 	Profile                  k12.ChildProfile
 	ProgressSubject          string
 	Progress                 *k12.CurriculumProgress
@@ -169,12 +170,13 @@ const curriculumProgressSelect = `SELECT progress_id,agent_name,subject,revision
     textbook_binding_id,textbook_manifest_id,textbook_edition,textbook_version,title,volume,
     unit_id,unit_title,lesson_id,lesson_title,requested_page_from,requested_page_to,
     verified_page_from,verified_page_to,page_verification_status,segment_refs_json,
-    evidence_source,confirmed_at,created_at,updated_at FROM k12_curriculum_progress`
+    evidence_source,confirmed_at,created_at,updated_at,grade_term,estimate_basis_json FROM k12_curriculum_progress`
 
 func scanCurriculumProgress(row rowScanner) (k12.CurriculumProgress, error) {
 	var p k12.CurriculumProgress
 	var requestedFrom, requestedTo, verifiedFrom, verifiedTo sql.NullInt64
 	var refsJSON string
+	var basisJSON sql.NullString
 	err := row.Scan(
 		&p.ProgressID, &p.AgentName, &p.Subject, &p.Revision,
 		&p.TextbookBindingID, &p.TextbookManifestID, &p.TextbookEdition,
@@ -182,10 +184,15 @@ func scanCurriculumProgress(row rowScanner) (k12.CurriculumProgress, error) {
 		&p.UnitID, &p.UnitTitle, &p.LessonID, &p.LessonTitle,
 		&requestedFrom, &requestedTo, &verifiedFrom, &verifiedTo,
 		&p.PageVerificationStatus, &refsJSON, &p.EvidenceSource,
-		&p.ConfirmedAt, &p.CreatedAt, &p.UpdatedAt,
+		&p.ConfirmedAt, &p.CreatedAt, &p.UpdatedAt, &p.GradeTerm, &basisJSON,
 	)
 	if err == sql.ErrNoRows {
 		return k12.CurriculumProgress{}, records.ErrNotFound
+	}
+	if basisJSON.Valid {
+		if err := json.Unmarshal([]byte(basisJSON.String), &p.EstimateBasis); err != nil {
+			return k12.CurriculumProgress{}, err
+		}
 	}
 	if err != nil {
 		return k12.CurriculumProgress{}, fmt.Errorf("k12storage: scan curriculum progress: %w", err)
@@ -324,56 +331,6 @@ func (s *Store) UpdateProfileBundle(ctx context.Context, in ProfileBundleMutatio
 		settingsRevision != in.ExpectedSettingsRevision {
 		return k12.ProfileBundleResult{}, false, records.ErrVersionConflict
 	}
-	currentCanonicalBindingID := ""
-	if in.Progress == nil {
-		var currentBindingID, currentManifestID string
-		queryErr := tx.QueryRowContext(ctx, `SELECT textbook_binding_id,textbook_manifest_id
-			FROM k12_curriculum_progress WHERE agent_name=? AND subject=?`,
-			in.AgentName, in.ProgressSubject).Scan(&currentBindingID, &currentManifestID)
-		if queryErr != nil && queryErr != sql.ErrNoRows {
-			return k12.ProfileBundleResult{}, false, queryErr
-		}
-		if queryErr == nil && strings.TrimSpace(currentBindingID) != "" {
-			var bindingOwner, bindingAgent, bindingSubject, bindingStatus string
-			legacyBinding := false
-			bindingErr := tx.QueryRowContext(ctx, `SELECT owner_id,agent_name,subject,status
-				FROM k12_textbook_bindings WHERE textbook_binding_id=?`,
-				currentBindingID).Scan(
-				&bindingOwner, &bindingAgent, &bindingSubject, &bindingStatus,
-			)
-			if bindingErr == sql.ErrNoRows && strings.TrimSpace(currentManifestID) == "" {
-				bindingErr = nil
-				legacyBinding = true // 兼容 V54 前由目录适配器持有的外部 binding 引用。
-			}
-			if bindingErr != nil {
-				if bindingErr == sql.ErrNoRows {
-					return k12.ProfileBundleResult{}, false, records.ErrNotFound
-				}
-				return k12.ProfileBundleResult{}, false, bindingErr
-			}
-			if !legacyBinding {
-				if bindingOwner != in.OwnerID || bindingAgent != in.AgentName ||
-					bindingSubject != in.ProgressSubject ||
-					(bindingStatus != "active" && bindingStatus != "invalidated") {
-					return k12.ProfileBundleResult{}, false, records.ErrNotFound
-				}
-				currentCanonicalBindingID = currentBindingID
-			}
-		}
-	}
-	if in.Progress != nil && strings.TrimSpace(in.Progress.TextbookManifestID) != "" {
-		progress := *in.Progress
-		bindingID, bindErr := activateTextbookBindingTx(
-			ctx, tx, TextbookScope{
-				OwnerID: in.OwnerID, AgentName: in.AgentName, Subject: progress.Subject,
-			}, in.Profile, progress, in.At,
-		)
-		if bindErr != nil {
-			return k12.ProfileBundleResult{}, false, bindErr
-		}
-		progress.TextbookBindingID = bindingID
-		in.Progress = &progress
-	}
 
 	var meta map[string]string
 	if unmarshalErr := json.Unmarshal([]byte(metadata), &meta); unmarshalErr != nil {
@@ -416,54 +373,22 @@ func (s *Store) UpdateProfileBundle(ctx context.Context, in ProfileBundleMutatio
 		return k12.ProfileBundleResult{}, false, queryErr
 	}
 
-	nextProgressRevision := progressRevision + 1
-	if in.Progress == nil {
-		// 已失效来源只解除当前进度明确引用的绑定，保留其他历史失效记录。
-		result, execErr := tx.ExecContext(ctx, `UPDATE k12_textbook_bindings
-			SET status='superseded',updated_at=?
-			WHERE owner_id=? AND agent_name=? AND subject=?
-			  AND (status='active' OR (status='invalidated' AND textbook_binding_id=?))
-			  AND (?='' OR textbook_binding_id=?)`,
-			in.At, in.OwnerID, in.AgentName, in.ProgressSubject,
-			currentCanonicalBindingID, currentCanonicalBindingID, currentCanonicalBindingID)
-		if execErr != nil {
-			return k12.ProfileBundleResult{}, false, execErr
+	if in.PreserveProgress {
+		current, readErr := scanCurriculumProgress(tx.QueryRowContext(ctx, curriculumProgressSelect+` WHERE agent_name=? AND subject=?`, in.AgentName, in.ProgressSubject))
+		if readErr != nil && !errors.Is(readErr, records.ErrNotFound) {
+			return k12.ProfileBundleResult{}, false, readErr
 		}
-		if currentCanonicalBindingID != "" {
-			changed, changedErr := result.RowsAffected()
-			if changedErr != nil {
-				return k12.ProfileBundleResult{}, false, changedErr
-			}
-			if changed != 1 {
-				return k12.ProfileBundleResult{}, false, records.ErrNotFound
-			}
-		}
-		if _, deleteErr := tx.ExecContext(ctx, `DELETE FROM k12_curriculum_progress
-			WHERE agent_name=? AND subject=?`, in.AgentName, in.ProgressSubject); deleteErr != nil {
-			return k12.ProfileBundleResult{}, false, deleteErr
-		}
-		if revisionErr := upsertCurriculumProgressRevision(
-			ctx, tx, in.AgentName, in.ProgressSubject, nextProgressRevision, in.At,
-		); revisionErr != nil {
-			return k12.ProfileBundleResult{}, false, revisionErr
+		in.Progress = nil
+		if readErr == nil {
+			in.Progress = &current
 		}
 	} else {
-		progress := *in.Progress
-		progress.Revision = nextProgressRevision
-		progress.AgentName = in.AgentName
-		progress.UpdatedAt = in.At
-		if progressRevision == 0 {
-			progress.CreatedAt = in.At
+		in.Progress, err = writeCurriculumProgressTx(ctx, tx, TextbookScope{
+			OwnerID: in.OwnerID, AgentName: in.AgentName, Subject: in.ProgressSubject,
+		}, in.Profile, in.Progress, progressRevision, in.At)
+		if err != nil {
+			return k12.ProfileBundleResult{}, false, err
 		}
-		if upsertErr := upsertCurriculumProgress(ctx, tx, progress); upsertErr != nil {
-			return k12.ProfileBundleResult{}, false, upsertErr
-		}
-		if revisionErr := upsertCurriculumProgressRevision(
-			ctx, tx, in.AgentName, in.ProgressSubject, nextProgressRevision, in.At,
-		); revisionErr != nil {
-			return k12.ProfileBundleResult{}, false, revisionErr
-		}
-		in.Progress = &progress
 	}
 	in.Settings.Revision = settingsRevision + 1
 	in.Settings.AgentName = in.AgentName
@@ -503,6 +428,152 @@ func (s *Store) UpdateProfileBundle(ctx context.Context, in ProfileBundleMutatio
 	return result, false, nil
 }
 
+// writeCurriculumProgressTx 创建与编辑共用绑定、进度与生命周期版本写入；由调用方提交事务。
+func writeCurriculumProgressTx(ctx context.Context, tx *sql.Tx, scope TextbookScope,
+	profile k12.ChildProfile, currentProgress *k12.CurriculumProgress, progressRevision int, at int64,
+) (*k12.CurriculumProgress, error) {
+	currentCanonicalBindingID := ""
+	if currentProgress == nil {
+		var currentBindingID, currentManifestID string
+		queryErr := tx.QueryRowContext(ctx, `SELECT textbook_binding_id,textbook_manifest_id
+			FROM k12_curriculum_progress WHERE agent_name=? AND subject=?`,
+			scope.AgentName, scope.Subject).Scan(&currentBindingID, &currentManifestID)
+		if queryErr != nil && queryErr != sql.ErrNoRows {
+			return nil, queryErr
+		}
+		if queryErr == nil && strings.TrimSpace(currentBindingID) != "" {
+			var bindingOwner, bindingAgent, bindingSubject, bindingStatus string
+			legacyBinding := false
+			bindingErr := tx.QueryRowContext(ctx, `SELECT owner_id,agent_name,subject,status
+				FROM k12_textbook_bindings WHERE textbook_binding_id=?`,
+				currentBindingID).Scan(
+				&bindingOwner, &bindingAgent, &bindingSubject, &bindingStatus,
+			)
+			if bindingErr == sql.ErrNoRows && strings.TrimSpace(currentManifestID) == "" {
+				bindingErr = nil
+				legacyBinding = true // 兼容 V54 前由目录适配器持有的外部 binding 引用。
+			}
+			if bindingErr != nil {
+				if bindingErr == sql.ErrNoRows {
+					return nil, records.ErrNotFound
+				}
+				return nil, bindingErr
+			}
+			if !legacyBinding {
+				if bindingOwner != scope.OwnerID || bindingAgent != scope.AgentName ||
+					bindingSubject != scope.Subject ||
+					(bindingStatus != "active" && bindingStatus != "invalidated") {
+					return nil, records.ErrNotFound
+				}
+				currentCanonicalBindingID = currentBindingID
+			}
+		}
+	}
+	if currentProgress != nil && strings.TrimSpace(currentProgress.TextbookManifestID) != "" {
+		progress := *currentProgress
+		bindingID, bindErr := activateTextbookBindingTx(
+			ctx, tx, TextbookScope{
+				OwnerID: scope.OwnerID, AgentName: scope.AgentName, Subject: progress.Subject,
+			}, profile, progress, at,
+		)
+		if bindErr != nil {
+			return nil, bindErr
+		}
+		progress.TextbookBindingID = bindingID
+		currentProgress = &progress
+	}
+
+	nextProgressRevision := progressRevision + 1
+	if currentProgress == nil {
+		// 已失效来源只解除当前进度明确引用的绑定，保留其他历史失效记录。
+		result, execErr := tx.ExecContext(ctx, `UPDATE k12_textbook_bindings
+			SET status='superseded',updated_at=?
+			WHERE owner_id=? AND agent_name=? AND subject=?
+			  AND (status='active' OR (status='invalidated' AND textbook_binding_id=?))
+			  AND (?='' OR textbook_binding_id=?)`,
+			at, scope.OwnerID, scope.AgentName, scope.Subject,
+			currentCanonicalBindingID, currentCanonicalBindingID, currentCanonicalBindingID)
+		if execErr != nil {
+			return nil, execErr
+		}
+		if currentCanonicalBindingID != "" {
+			changed, changedErr := result.RowsAffected()
+			if changedErr != nil {
+				return nil, changedErr
+			}
+			if changed != 1 {
+				return nil, records.ErrNotFound
+			}
+		}
+		if _, deleteErr := tx.ExecContext(ctx, `DELETE FROM k12_curriculum_progress
+			WHERE agent_name=? AND subject=?`, scope.AgentName, scope.Subject); deleteErr != nil {
+			return nil, deleteErr
+		}
+		if revisionErr := upsertCurriculumProgressRevision(
+			ctx, tx, scope.AgentName, scope.Subject, nextProgressRevision, at,
+		); revisionErr != nil {
+			return nil, revisionErr
+		}
+	} else {
+		progress := *currentProgress
+		progress.Revision = nextProgressRevision
+		progress.AgentName = scope.AgentName
+		progress.UpdatedAt = at
+		if progressRevision == 0 {
+			progress.CreatedAt = at
+		}
+		if upsertErr := upsertCurriculumProgress(ctx, tx, progress); upsertErr != nil {
+			return nil, upsertErr
+		}
+		if revisionErr := upsertCurriculumProgressRevision(
+			ctx, tx, scope.AgentName, scope.Subject, nextProgressRevision, at,
+		); revisionErr != nil {
+			return nil, revisionErr
+		}
+		currentProgress = &progress
+	}
+	return currentProgress, nil
+}
+
+// CreateInitialCurriculumProgress 在同一事务中登记实例并保存初始进度，失败不留下部分建档。
+func (s *Store) CreateInitialCurriculumProgress(ctx context.Context, scope TextbookScope,
+	profile k12.ChildProfile, progress *k12.CurriculumProgress, at int64,
+	register func(*sql.Tx) error,
+) error {
+	var err error
+	scope, err = scope.normalized()
+	if err != nil {
+		return err
+	}
+	if register == nil || at <= 0 || scope.Subject != "math" || (progress != nil && progress.Subject != scope.Subject) {
+		return fmt.Errorf("%w: incomplete initial curriculum progress", records.ErrInvalidFields)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var exists bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM agents WHERE name=?)`, scope.AgentName).Scan(&exists); err != nil {
+		return err
+	}
+	if exists {
+		return records.ErrVersionConflict
+	}
+	if err := register(tx); err != nil {
+		return err
+	}
+	if err := ensureAgentRegistered(ctx, tx, scope.AgentName); err != nil {
+		return err
+	}
+	if progress != nil {
+		if _, err := writeCurriculumProgressTx(ctx, tx, scope, profile, progress, 0, at); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func revisionVia(ctx context.Context, tx *sql.Tx, query string, args ...any) (int, error) {
 	var revision int
 	err := tx.QueryRowContext(ctx, query, args...).Scan(&revision)
@@ -540,12 +611,20 @@ func upsertCurriculumProgressRevision(
 
 func upsertCurriculumProgress(ctx context.Context, tx *sql.Tx, p k12.CurriculumProgress) error {
 	refs, _ := json.Marshal(p.SegmentRefs)
+	var basis any
+	if p.EstimateBasis != nil {
+		raw, err := json.Marshal(p.EstimateBasis)
+		if err != nil {
+			return err
+		}
+		basis = string(raw)
+	}
 	_, err := tx.ExecContext(ctx, `INSERT INTO k12_curriculum_progress
         (progress_id,agent_name,subject,revision,textbook_binding_id,textbook_manifest_id,textbook_edition,
          textbook_version,title,volume,unit_id,unit_title,lesson_id,lesson_title,
          requested_page_from,requested_page_to,verified_page_from,verified_page_to,
-         page_verification_status,segment_refs_json,evidence_source,confirmed_at,created_at,updated_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+         page_verification_status,segment_refs_json,evidence_source,confirmed_at,created_at,updated_at,grade_term,estimate_basis_json)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(agent_name,subject) DO UPDATE SET
          progress_id=excluded.progress_id,revision=excluded.revision,
          textbook_binding_id=excluded.textbook_binding_id,
@@ -558,13 +637,14 @@ func upsertCurriculumProgress(ctx context.Context, tx *sql.Tx, p k12.CurriculumP
          verified_page_to=excluded.verified_page_to,
          page_verification_status=excluded.page_verification_status,
          segment_refs_json=excluded.segment_refs_json,evidence_source=excluded.evidence_source,
-         confirmed_at=excluded.confirmed_at,updated_at=excluded.updated_at`,
+         confirmed_at=excluded.confirmed_at,updated_at=excluded.updated_at,
+         grade_term=excluded.grade_term,estimate_basis_json=excluded.estimate_basis_json`,
 		p.ProgressID, p.AgentName, p.Subject, p.Revision, p.TextbookBindingID,
 		p.TextbookManifestID,
 		p.TextbookEdition, p.TextbookVersion, p.Title, p.Volume, p.UnitID, p.UnitTitle,
 		p.LessonID, p.LessonTitle, p.RequestedPageFrom, p.RequestedPageTo,
 		p.VerifiedPageFrom, p.VerifiedPageTo, p.PageVerificationStatus, string(refs),
-		p.EvidenceSource, p.ConfirmedAt, p.CreatedAt, p.UpdatedAt)
+		p.EvidenceSource, p.ConfirmedAt, p.CreatedAt, p.UpdatedAt, p.GradeTerm, basis)
 	return err
 }
 
@@ -604,6 +684,27 @@ func (s *Store) ReconcileWeeklyPracticeBoundary(ctx context.Context, agentName s
           AND NOT (iso_week_year=? AND iso_week_number=? AND timezone=?)`,
 		at, agentName, year, week, timezone)
 	return err
+}
+
+// HasWeeklyPracticePlanCommand 任何已存在回执都保留原来源，不因日期更新先采用新建议。
+func (s *Store) HasWeeklyPracticePlanCommand(ctx context.Context, agentName, key string) (bool, error) {
+	var exists bool
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM k12_weekly_practice_plan_commands WHERE agent_name=? AND idempotency_key=?)`, agentName, key).Scan(&exists)
+	return exists, err
+}
+
+// WeeklyPlanHasPendingGeneration 只读既有未决状态，避免新建议改变原冻结调用的来源。
+func (s *Store) WeeklyPlanHasPendingGeneration(ctx context.Context, agentName, planID string) (bool, error) {
+	var exists bool
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(
+	 SELECT 1 FROM k12_weekly_practice_plan_commands c WHERE c.agent_name=? AND c.plan_id=? AND
+	 (json_extract(c.response_json,'$._weekly_pending')=1 OR EXISTS(SELECT 1 FROM json_tree(c.response_json,'$._weekly_generation.generation.items') t WHERE t.key='status' AND t.value IN ('sent','outcome_unknown')))
+	 UNION ALL SELECT 1 FROM k12_weekly_track_refresh_commands c WHERE c.agent_name=? AND c.plan_id=? AND
+	 (json_extract(c.response_json,'$._weekly_pending')=1 OR EXISTS(SELECT 1 FROM json_tree(c.response_json,'$._weekly_generation.generation.items') t WHERE t.key='status' AND t.value IN ('sent','outcome_unknown')))
+	 UNION ALL SELECT 1 FROM k12_weekly_arithmetic_batches b WHERE b.agent_name=? AND b.plan_id=? AND
+	 (b.state='preparing' OR EXISTS(SELECT 1 FROM json_tree(CASE WHEN json_valid(b.generation_checkpoint_json) THEN b.generation_checkpoint_json ELSE '{}' END,'$.generation.items') t WHERE t.key='status' AND t.value IN ('sent','outcome_unknown')))
+	)`, agentName, planID, agentName, planID, agentName, planID).Scan(&exists)
+	return exists, err
 }
 
 func (s *Store) ReplayWeeklyPracticePlan(ctx context.Context, agentName,

@@ -1,5 +1,13 @@
 package k12
 
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"strings"
+)
+
 const (
 	WeeklySectionDueReview             = "due_review"
 	WeeklySectionTextbookConsolidation = "textbook_consolidation"
@@ -66,43 +74,75 @@ type CurriculumCatalogUnit struct {
 }
 
 type CurriculumCatalog struct {
-	AgentName         string                  `json:"agent"`
-	Subject           string                  `json:"subject"`
-	TextbookBindingID string                  `json:"textbook_binding_id"`
-	TextbookEdition   string                  `json:"textbook_edition"`
-	TextbookVersion   string                  `json:"textbook_version"`
-	Title             string                  `json:"title"`
-	Volume            string                  `json:"volume"`
-	PageMin           int                     `json:"page_min"`
-	PageMax           int                     `json:"page_max"`
-	Units             []CurriculumCatalogUnit `json:"units"`
+	GradeTerm          string                  `json:"grade_term,omitempty"`
+	TextbookManifestID string                  `json:"textbook_manifest_id,omitempty"`
+	AgentName          string                  `json:"agent"`
+	Subject            string                  `json:"subject"`
+	TextbookBindingID  string                  `json:"textbook_binding_id"`
+	TextbookEdition    string                  `json:"textbook_edition"`
+	TextbookVersion    string                  `json:"textbook_version"`
+	Title              string                  `json:"title"`
+	Volume             string                  `json:"volume"`
+	PageMin            int                     `json:"page_min"`
+	PageMax            int                     `json:"page_max"`
+	Units              []CurriculumCatalogUnit `json:"units"`
 }
 
 type CurriculumProgress struct {
-	ProgressID             string   `json:"progress_id"`
-	AgentName              string   `json:"agent"`
-	Subject                string   `json:"subject"`
-	Revision               int      `json:"revision"`
-	TextbookBindingID      string   `json:"textbook_binding_id"`
-	TextbookManifestID     string   `json:"textbook_manifest_id,omitempty"`
-	TextbookEdition        string   `json:"textbook_edition"`
-	TextbookVersion        string   `json:"textbook_version"`
-	Title                  string   `json:"title"`
-	Volume                 string   `json:"volume"`
-	UnitID                 string   `json:"unit_id"`
-	UnitTitle              string   `json:"unit_title"`
-	LessonID               string   `json:"lesson_id,omitempty"`
-	LessonTitle            string   `json:"lesson_title,omitempty"`
-	RequestedPageFrom      *int     `json:"requested_page_from,omitempty"`
-	RequestedPageTo        *int     `json:"requested_page_to,omitempty"`
-	VerifiedPageFrom       *int     `json:"verified_page_from,omitempty"`
-	VerifiedPageTo         *int     `json:"verified_page_to,omitempty"`
-	PageVerificationStatus string   `json:"page_verification_status"`
-	SegmentRefs            []string `json:"segment_refs"`
-	EvidenceSource         string   `json:"evidence_source"`
-	ConfirmedAt            int64    `json:"confirmed_at"`
-	CreatedAt              int64    `json:"created_at"`
-	UpdatedAt              int64    `json:"updated_at"`
+	GradeTerm              string                   `json:"grade_term,omitempty"`
+	EstimateBasis          *CurriculumEstimateBasis `json:"estimate_basis,omitempty"`
+	ProgressID             string                   `json:"progress_id"`
+	AgentName              string                   `json:"agent"`
+	Subject                string                   `json:"subject"`
+	Revision               int                      `json:"revision"`
+	TextbookBindingID      string                   `json:"textbook_binding_id"`
+	TextbookManifestID     string                   `json:"textbook_manifest_id,omitempty"`
+	TextbookEdition        string                   `json:"textbook_edition"`
+	TextbookVersion        string                   `json:"textbook_version"`
+	Title                  string                   `json:"title"`
+	Volume                 string                   `json:"volume"`
+	UnitID                 string                   `json:"unit_id"`
+	UnitTitle              string                   `json:"unit_title"`
+	LessonID               string                   `json:"lesson_id,omitempty"`
+	LessonTitle            string                   `json:"lesson_title,omitempty"`
+	RequestedPageFrom      *int                     `json:"requested_page_from,omitempty"`
+	RequestedPageTo        *int                     `json:"requested_page_to,omitempty"`
+	VerifiedPageFrom       *int                     `json:"verified_page_from,omitempty"`
+	VerifiedPageTo         *int                     `json:"verified_page_to,omitempty"`
+	PageVerificationStatus string                   `json:"page_verification_status"`
+	SegmentRefs            []string                 `json:"segment_refs"`
+	EvidenceSource         string                   `json:"evidence_source"`
+	ConfirmedAt            int64                    `json:"confirmed_at"`
+	CreatedAt              int64                    `json:"created_at"`
+	UpdatedAt              int64                    `json:"updated_at"`
+}
+
+const (
+	CurriculumSourceParentConfirmed = "parent_confirmed"
+	CurriculumSourceAIEstimated     = "ai_estimated"
+)
+
+// CurriculumEstimateBasis 记录建议来源，不将推算依据写成教材正文证据。
+type CurriculumEstimateBasis struct {
+	AsOfDate            string `json:"as_of_date"`
+	ReferenceTermStart  string `json:"reference_term_start"`
+	ReferenceTermEnd    string `json:"reference_term_end"`
+	WeightMethod        string `json:"weight_method"`
+	EvidenceReceiptHash string `json:"evidence_receipt_hash,omitempty"`
+}
+
+// CurriculumProgressSuggested 判断目录建议可用；预览尚未登记绑定或生命周期版本。
+func CurriculumProgressSuggested(p *CurriculumProgress) bool {
+	if p == nil || p.Subject != "math" || p.UnitID == "" || p.TextbookEdition == "" || p.Volume == "" {
+		return false
+	}
+	return (p.EvidenceSource == CurriculumSourceParentConfirmed && p.ConfirmedAt > 0) ||
+		(p.EvidenceSource == CurriculumSourceAIEstimated && p.ConfirmedAt == 0 && p.EstimateBasis != nil && p.EstimateBasis.AsOfDate != "" && p.TextbookManifestID != "")
+}
+
+// CurriculumProgressUsable 已采用进度必须有持久版本与真实绑定。
+func CurriculumProgressUsable(p *CurriculumProgress) bool {
+	return CurriculumProgressSuggested(p) && p.Revision > 0 && p.TextbookBindingID != ""
 }
 
 type WeeklyPracticeSettings struct {
@@ -148,6 +188,42 @@ type ProfileBundleAgentConfig struct {
 	Provider     string   `json:"provider"`
 	Model        string   `json:"model"`
 	Skills       []string `json:"skills"`
+}
+
+// CurriculumProgressSelection 创建和编辑共用的家长确认教材进度输入。
+type CurriculumProgressSelection struct {
+	Subject            string `json:"subject"`
+	TextbookManifestID string `json:"textbook_manifest_id"`
+	Volume             string `json:"volume"`
+	UnitID             string `json:"unit_id"`
+	LessonID           string `json:"lesson_id,omitempty"`
+	PageFrom           *int   `json:"page_from,omitempty"`
+	PageTo             *int   `json:"page_to,omitempty"`
+	EvidenceSource     string `json:"evidence_source"`
+}
+
+// DecodeCurriculumProgressSelection 保留编辑接口的严格输入语义；缺省由调用方决定。
+func DecodeCurriculumProgressSelection(raw json.RawMessage) (*CurriculumProgressSelection, error) {
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("curriculum_progress is required")
+	}
+	raw = bytes.TrimSpace(raw)
+	if bytes.Equal(raw, []byte("null")) {
+		return nil, nil
+	}
+	var progress CurriculumProgressSelection
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&progress); err != nil {
+		return nil, fmt.Errorf("invalid curriculum_progress: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return nil, fmt.Errorf("curriculum_progress must contain exactly one JSON value")
+	}
+	if strings.TrimSpace(progress.TextbookManifestID) == "" {
+		return nil, fmt.Errorf("textbook_manifest_id is required")
+	}
+	return &progress, nil
 }
 
 type ProfileBundleResult struct {

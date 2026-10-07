@@ -24,6 +24,7 @@ import (
 	"github.com/hexagon-codes/hexclaw/internal/inputlimits"
 	hexmcp "github.com/hexagon-codes/hexclaw/mcp"
 	"github.com/hexagon-codes/hexclaw/memory"
+	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/router"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	"github.com/hexagon-codes/hexclaw/skill/hub"
@@ -1201,6 +1202,8 @@ type RegisterAgentRequest struct {
 	// Temperature 指针语义（BUG-20260703 P2-4）：缺席=未设跟随模型默认，显式 0=确定性采样。
 	Temperature *float64          `json:"temperature"`
 	Metadata    map[string]string `json:"metadata"`
+	// CurriculumProgress 缺省或 null 保留普通注册；非空由场景事务与实例一起提交。
+	CurriculumProgress json.RawMessage `json:"curriculum_progress,omitempty"`
 }
 
 // OptionalFloat 三态 patch 字段（BUG-20260703 P2-4）：字段缺席=不改（Present=false）；
@@ -1511,9 +1514,20 @@ func (s *Server) handleRegisterAgent(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	hasInitialProgress := len(req.CurriculumProgress) != 0 &&
+		!bytes.Equal(bytes.TrimSpace(req.CurriculumProgress), []byte("null"))
+	if hasInitialProgress && s.agentInitialProgressPersister == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "Initial curriculum progress is unavailable"})
+		return
+	}
+	persistInitialProgress := hasInitialProgress || (cfg.Metadata[k12.MetaKeyScenario] == "k12-tutor" && s.agentInitialProgressPersister != nil)
 
 	var persistErr error
 	err := s.agentRouter.RegisterPersisted(cfg, func(candidate *router.AgentConfig) error {
+		if persistInitialProgress {
+			persistErr = s.agentInitialProgressPersister(r.Context(), candidate, req.CurriculumProgress)
+			return persistErr
+		}
 		if s.agentStore == nil {
 			return nil
 		}
@@ -1522,6 +1536,19 @@ func (s *Server) handleRegisterAgent(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		if persistErr != nil {
+			if persistInitialProgress {
+				status := http.StatusInternalServerError
+				switch {
+				case errors.Is(persistErr, records.ErrInvalidFields), errors.Is(persistErr, records.ErrIllegalTransition):
+					status = http.StatusBadRequest
+				case errors.Is(persistErr, records.ErrNotFound):
+					status = http.StatusNotFound
+				case errors.Is(persistErr, records.ErrVersionConflict):
+					status = http.StatusConflict
+				}
+				writeJSON(w, status, map[string]string{"error": persistErr.Error()})
+				return
+			}
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "持久化失败: " + persistErr.Error()})
 		} else {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})

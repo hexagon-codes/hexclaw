@@ -31,6 +31,154 @@ func TestREGTextbookCatalog_StoreExposesClaimAndProofPublishBoundary(t *testing.
 	}
 }
 
+func TestREGTextbookCatalog_ManifestFailurePreservesCurrentJobReason(t *testing.T) {
+	cases := []struct {
+		name       string
+		code       string
+		actionCode string
+		lastError  string
+		message    string
+		state      string
+		retryable  bool
+	}{
+		{
+			name: "legacy vision failure",
+			code: "vision_model_required", actionCode: "configure_default_vision_model",
+			lastError: "  knowledge: OCR transcription failed: model does not accept images  ",
+			message:   "knowledge: OCR transcription failed: model does not accept images",
+			state:     "failed_retryable", retryable: true,
+		},
+		{
+			name: "legacy vision action",
+			code: "job_failed", actionCode: "configure_default_vision_model",
+			lastError: "knowledge: OCR route is unavailable",
+			message:   "knowledge: OCR route is unavailable",
+			state:     "failed_retryable", retryable: true,
+		},
+		{
+			name:      "unknown response outcome",
+			code:      "job_failed",
+			lastError: "knowledge: OCR transcription failed: unexpected EOF (outcome_unknown)",
+			message:   "knowledge: OCR transcription failed: unexpected EOF (outcome_unknown)",
+			state:     "failed_terminal",
+		},
+		{
+			name:    "empty failure detail",
+			message: "Textbook recognition failed", state: "failed_terminal",
+		},
+		{
+			name:      "legacy upstream body",
+			code:      "job_failed",
+			lastError: `knowledge: OCR transcription failed: HTTP 429, body: {"error":{"message":"Provider returned error","code":429},"metadata":{"raw":"private-upstream-body"}}`,
+			message:   "Provider returned error (code: 429)",
+			state:     "failed_terminal",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store, _, _ := seedTextbookCatalogMaterialization(t)
+			db := store.DB()
+			ctx := context.Background()
+			if _, err := db.Exec(`UPDATE kb_semantic_document_bindings
+				SET text_state='failed' WHERE document_id='catalog-doc'`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`UPDATE kb_knowledge_jobs
+				SET state='failed',last_error='previous ingest failure'
+				WHERE job_id='catalog-ingest'`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`INSERT INTO kb_knowledge_jobs
+				(job_id,parent_job_id,kind,owner_id,corpus_uid,document_id,
+				 document_generation,target_revision_id,idempotency_key,state,stage,
+				 attempt,cancel_requested,lease_owner,lease_epoch,last_error,created_at,
+				 updated_at,finished_at,pages_total,pages_done)
+				SELECT 'current-ingest',NULL,kind,owner_id,corpus_uid,document_id,
+				 document_generation,target_revision_id,'current-ingest','failed','ocr',
+				 1,0,'',1,?,20,20,20,pages_total,0
+				FROM kb_knowledge_jobs WHERE job_id='catalog-ingest'`, tc.lastError); err != nil {
+				t.Fatal(err)
+			}
+			if tc.code != "" {
+				if _, err := db.Exec(`INSERT INTO kb_job_failures
+					(job_id,code,message,action_code,created_at)
+					VALUES('current-ingest',?,?,?,20)`, tc.code,
+					strings.TrimSpace(tc.lastError), tc.actionCode); err != nil {
+					t.Fatal(err)
+				}
+			}
+			tx, err := db.BeginTx(ctx, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback()
+			if err := store.ReconcileTextbookManifestLifecycle(ctx, tx,
+				k12storage.TextbookManifestLifecycleEvent{
+					OwnerID: "desktop-user", CorpusUID: "catalog-corpus",
+					DocumentID: "catalog-doc", DocumentGeneration: 1,
+					At: time.UnixMilli(30),
+				}); err != nil {
+				t.Fatal(err)
+			}
+			if err := tx.Commit(); err != nil {
+				t.Fatal(err)
+			}
+			var message string
+			if err := db.QueryRow(`SELECT failure_message FROM k12_textbook_manifests
+				WHERE manifest_id='catalog-manifest'`).Scan(&message); err != nil {
+				t.Fatal(err)
+			}
+			if message != tc.message {
+				t.Fatalf("persisted failure message=%q want %q", message, tc.message)
+			}
+			var storedCause string
+			if err := db.QueryRow(`SELECT last_error FROM kb_knowledge_jobs
+				WHERE job_id='current-ingest'`).Scan(&storedCause); err != nil {
+				t.Fatal(err)
+			}
+			if storedCause != tc.lastError {
+				t.Fatal("manifest projection changed the historical job failure")
+			}
+			reader := k12storage.NewStore(db, nil)
+			creationOptions, err := reader.ListTextbookCreationOptions(ctx, "desktop-user")
+			if err != nil {
+				t.Fatal(err)
+			}
+			bindingOptions, err := reader.ListTextbookBindingOptions(ctx, k12storage.TextbookScope{
+				OwnerID: "desktop-user", AgentName: "mingming", Subject: "math",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, options := range [][]k12storage.TextbookBindingOption{creationOptions, bindingOptions} {
+				if len(options) != 1 || options[0].DocumentID != "catalog-doc" ||
+					options[0].FailureMessage != tc.message || options[0].State != tc.state ||
+					options[0].Retryable != tc.retryable {
+					t.Fatalf("failure projection=%+v want message=%q state=%q retryable=%v",
+						options, tc.message, tc.state, tc.retryable)
+				}
+			}
+			if tc.name == "legacy upstream body" {
+				if _, err := db.Exec(`UPDATE k12_textbook_manifests SET failure_message=?
+					WHERE manifest_id='catalog-manifest'`, tc.lastError); err != nil {
+					t.Fatal(err)
+				}
+				legacyOptions, err := reader.ListTextbookCreationOptions(ctx, "desktop-user")
+				if err != nil || len(legacyOptions) != 1 || legacyOptions[0].FailureMessage != tc.message {
+					t.Fatalf("legacy public manifest failure=%+v err=%v", legacyOptions, err)
+				}
+				if err := db.QueryRow(`SELECT failure_message FROM k12_textbook_manifests
+					WHERE manifest_id='catalog-manifest'`).Scan(&storedCause); err != nil {
+					t.Fatal(err)
+				}
+				if storedCause != tc.lastError {
+					t.Fatal("public creation options rewrote the legacy manifest failure")
+				}
+			}
+		})
+	}
+}
+
 func seedTextbookCatalogMaterialization(t *testing.T, sourcePage ...string) (*k12storage.Store, string, string) {
 	t.Helper()
 	store, db := setup(t)

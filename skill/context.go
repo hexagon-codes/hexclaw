@@ -2,6 +2,19 @@ package skill
 
 import "context"
 
+type originalUserTextKey struct{}
+
+// WithOriginalUserText 只透传本轮互动消息的原始文本；空值覆盖上一轮来源。
+func WithOriginalUserText(ctx context.Context, text string) context.Context {
+	return context.WithValue(ctx, originalUserTextKey{}, text)
+}
+
+// OriginalUserText 返回处理入口提供的用户原文，不包含附件识别或模型推演。
+func OriginalUserText(ctx context.Context) string {
+	text, _ := ctx.Value(originalUserTextKey{}).(string)
+	return text
+}
+
 // authUserCtxKey is the context key carrying the authenticated user ID of the
 // message that triggered the current tool execution. The engine stamps it at
 // Process/ProcessStream entry so skills can trust it over LLM-supplied

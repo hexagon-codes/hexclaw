@@ -112,6 +112,7 @@ type UpdateProfileBundleRequest struct {
 	Profile                  k12.ChildProfile
 	CurriculumProgress       CurriculumProgressInput
 	ClearCurriculumProgress  bool
+	AutoCurriculumProgress   bool
 	WeeklyPracticeSettings   WeeklyPracticeSettingsInput
 }
 
@@ -218,7 +219,7 @@ func (d Deps) GetWeeklyPracticeSettings(ctx context.Context, agentName string) (
 
 var mandatoryK12ProfileSkills = [...]string{
 	"k12-pedagogy", "homework-checker", "math-tutor",
-	"grade-constraint", "k12_grade", "k12_review",
+	"grade-constraint", "k12_grade", "k12_review", "k12_progress",
 }
 
 func normalizeK12ProfileSkills(input []string) []string {
@@ -289,7 +290,18 @@ func (d Deps) UpdateProfileBundle(ctx context.Context, req UpdateProfileBundleRe
 		return k12.ProfileBundleResult{}, err
 	}
 	var progress *k12.CurriculumProgress
-	if !req.ClearCurriculumProgress {
+	preserveProgress := false
+	if !req.ClearCurriculumProgress && (req.AutoCurriculumProgress || req.CurriculumProgress.EvidenceSource == k12.CurriculumSourceAIEstimated) {
+		var selection *k12.CurriculumProgressSelection
+		if !req.AutoCurriculumProgress {
+			selection = &k12.CurriculumProgressSelection{Subject: req.CurriculumProgress.Subject, TextbookManifestID: req.CurriculumProgress.TextbookManifestID, Volume: req.CurriculumProgress.Volume, UnitID: req.CurriculumProgress.UnitID, LessonID: req.CurriculumProgress.LessonID, PageFrom: req.CurriculumProgress.PageFrom, PageTo: req.CurriculumProgress.PageTo, EvidenceSource: req.CurriculumProgress.EvidenceSource}
+		}
+		resolution, resolveErr := d.ResolveCurriculumProgress(ctx, CurriculumProgressResolveRequest{OwnerID: req.OwnerID, AgentName: req.AgentName, Profile: req.Profile, Selection: selection, RequireSelectedProgress: true})
+		if resolveErr != nil {
+			return k12.ProfileBundleResult{}, resolveErr
+		}
+		progress, preserveProgress = resolution.Progress, resolution.Preserve
+	} else if !req.ClearCurriculumProgress {
 		var catalog k12.CurriculumCatalog
 		req.CurriculumProgress.TextbookManifestID =
 			strings.TrimSpace(req.CurriculumProgress.TextbookManifestID)
@@ -321,6 +333,7 @@ func (d Deps) UpdateProfileBundle(ctx context.Context, req UpdateProfileBundleRe
 			return k12.ProfileBundleResult{}, resolveErr
 		}
 		progress = &resolved
+		progress.GradeTerm = req.Profile.GradeTerm
 	}
 	requestIdentity := struct {
 		OwnerID                  string
@@ -370,6 +383,7 @@ func (d Deps) UpdateProfileBundle(ctx context.Context, req UpdateProfileBundleRe
 		ExpectedSettingsRevision: req.ExpectedSettingsRevision,
 		AgentConfig:              req.AgentConfig,
 		Profile:                  req.Profile,
+		PreserveProgress:         preserveProgress,
 		ProgressSubject:          "math",
 		Progress:                 progress,
 		Settings:                 settings,
@@ -384,6 +398,26 @@ func (d Deps) UpdateProfileBundle(ctx context.Context, req UpdateProfileBundleRe
 		}
 	}
 	return result, nil
+}
+
+// ResolveInitialCurriculumProgress 创建前复用编辑的目录进度解析，不发布或预登记实例。
+func (d Deps) ResolveInitialCurriculumProgress(ctx context.Context, ownerID, agentName string,
+	in k12.CurriculumProgressSelection,
+) (k12.CurriculumProgress, error) {
+	ownerID, agentName = strings.TrimSpace(ownerID), strings.TrimSpace(agentName)
+	in.Subject = strings.TrimSpace(in.Subject)
+	if ownerID == "" || agentName == "" || in.Subject != "math" || d.Records == nil {
+		return k12.CurriculumProgress{}, fmt.Errorf("%w: owner/agent/subject=math required", ErrInvalidInput)
+	}
+	catalog, err := d.Records.GetTextbookCreationCatalog(ctx, ownerID, in.TextbookManifestID)
+	if err != nil {
+		return k12.CurriculumProgress{}, err
+	}
+	return resolveCurriculumProgress(agentName, CurriculumProgressInput{
+		Subject: in.Subject, TextbookManifestID: strings.TrimSpace(in.TextbookManifestID),
+		Volume: in.Volume, UnitID: in.UnitID, LessonID: in.LessonID,
+		PageFrom: in.PageFrom, PageTo: in.PageTo, EvidenceSource: in.EvidenceSource,
+	}, catalog, d.now())
 }
 
 func weeklyTextbookTierItemCount(tier string) (int, bool) {
@@ -530,6 +564,34 @@ func (d Deps) EnsureWeeklyPracticePlan(ctx context.Context,
 	if err != nil {
 		return k12.WeeklyPracticePlan{}, false, err
 	}
+	freezer, production := d.WeeklyCandidates.(weeklyCandidateRequestFreezer)
+	planID := "wplan-" + shortDigest(fmt.Sprintf("%s\x00%d\x00%d\x00%s", req.AgentName, window.Year, window.Week, settings.Timezone))
+	if production && settings.TextbookConsolidationEnabled && strings.TrimSpace(d.TextbookOwnerID) != "" {
+		exists, lookupErr := d.Records.HasWeeklyPracticePlanCommand(ctx, req.AgentName, req.IdempotencyKey)
+		if lookupErr != nil {
+			return k12.WeeklyPracticePlan{}, false, lookupErr
+		}
+		prior, priorErr := d.Records.GetWeeklyPracticePlan(ctx, req.AgentName, planID)
+		if priorErr != nil && !errors.Is(priorErr, records.ErrNotFound) {
+			return k12.WeeklyPracticePlan{}, false, priorErr
+		}
+		mayAdopt := errors.Is(priorErr, records.ErrNotFound) || (prior.Status == k12.WeeklyPlanDraft && !(progress == nil && progressLifecycleRevision > 0))
+		if !exists && mayAdopt {
+			pending, pendingErr := d.Records.WeeklyPlanHasPendingGeneration(ctx, req.AgentName, planID)
+			if pendingErr != nil {
+				return k12.WeeklyPracticePlan{}, false, pendingErr
+			}
+			if !pending {
+				if _, ensureErr := d.EnsureCurriculumProgress(ctx, d.TextbookOwnerID, req.AgentName); ensureErr != nil {
+					return k12.WeeklyPracticePlan{}, false, ensureErr
+				}
+				progress, progressLifecycleRevision, err = d.GetCurriculumProgressState(ctx, req.AgentName, "math")
+				if err != nil {
+					return k12.WeeklyPracticePlan{}, false, err
+				}
+			}
+		}
+	}
 	dueTrack, dueKeys, err := d.weeklyDueTrack(ctx, req.AgentName)
 	if err != nil {
 		return k12.WeeklyPracticePlan{}, false, err
@@ -539,7 +601,6 @@ func (d Deps) EnsureWeeklyPracticePlan(ctx context.Context,
 	if progress != nil {
 		syncRequest.Progress = *progress
 	}
-	freezer, production := d.WeeklyCandidates.(weeklyCandidateRequestFreezer)
 	var targetErr error
 	targetDigest := ""
 	if production && settings.TextbookConsolidationEnabled && progress != nil {
@@ -574,7 +635,7 @@ func (d Deps) EnsureWeeklyPracticePlan(ctx context.Context,
 	at := d.now()
 	progressRev := optionalProgressLifecycleRevision(progressLifecycleRevision)
 	plan := k12.WeeklyPracticePlan{
-		PlanID:    "wplan-" + shortDigest(fmt.Sprintf("%s\x00%d\x00%d\x00%s", req.AgentName, window.Year, window.Week, settings.Timezone)),
+		PlanID:    planID,
 		AgentName: req.AgentName, Revision: 1, ISOWeekYear: window.Year, ISOWeekNumber: window.Week, Timezone: settings.Timezone,
 		WeekStart: window.Start, WeekEnd: window.End, LocalStartDate: window.LocalStart, LocalEndDate: window.LocalEnd,
 		Status: k12.WeeklyPlanDraft, SettingsRevision: settings.Revision, CurriculumProgressRevision: progressRev,
@@ -741,10 +802,10 @@ func (d Deps) weeklySupplementRequest(ctx context.Context, request WeeklyPractic
 		track.Status = k12.WeeklyTrackDisabled
 		return track, keys, 0
 	}
-	if progress == nil || progress.Revision <= 0 || progress.EvidenceSource != "parent_confirmed" ||
+	if !k12.CurriculumProgressUsable(progress) ||
 		d.WeeklyCandidates == nil {
 		track.Status = k12.WeeklyTrackFailed
-		if progress == nil || progress.Revision <= 0 || progress.EvidenceSource != "parent_confirmed" {
+		if !k12.CurriculumProgressUsable(progress) {
 			track.FailureMessage = "curriculum progress setup required"
 		} else {
 			track.FailureMessage = "weekly candidate generator unavailable"

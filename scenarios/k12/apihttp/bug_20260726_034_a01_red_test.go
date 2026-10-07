@@ -45,7 +45,7 @@ func TestBUG20260726034A01ProfileBundlePersistsAgentConfigAndReplaysAtomically(t
 		t.Fatalf("agent_config response drifted: %v", config)
 	}
 	wantSkills := []any{"chinese-tutor", "k12-pedagogy", "homework-checker", "math-tutor",
-		"grade-constraint", "k12_grade", "k12_review"}
+		"grade-constraint", "k12_grade", "k12_review", "k12_progress"}
 	if !reflect.DeepEqual(config["skills"], wantSkills) {
 		t.Fatalf("agent_config skills not normalized: got=%v want=%v", config["skills"], wantSkills)
 	}
@@ -68,7 +68,7 @@ func TestBUG20260726034A01ProfileBundlePersistsAgentConfigAndReplaysAtomically(t
 		t.Fatal(err)
 	}
 	wantPersistedSkills := []string{"chinese-tutor", "k12-pedagogy", "homework-checker",
-		"math-tutor", "grade-constraint", "k12_grade", "k12_review"}
+		"math-tutor", "grade-constraint", "k12_grade", "k12_review", "k12_progress"}
 	if !reflect.DeepEqual(persistedSkills, wantPersistedSkills) {
 		t.Fatalf("agents skills not committed with bundle: got=%v want=%v",
 			persistedSkills, wantPersistedSkills)

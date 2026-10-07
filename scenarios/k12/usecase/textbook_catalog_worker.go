@@ -8,7 +8,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
+	"github.com/hexagon-codes/hexclaw/internal/upstreamerr"
 	"github.com/hexagon-codes/hexclaw/records"
 	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
 )
@@ -230,15 +232,26 @@ func (w *TextbookCatalogWorker) recordFailure(
 	terminal bool,
 ) error {
 	now := w.now()
+	message := upstreamerr.KnowledgeFailureMessage(cause.Error())
+	if message == "" {
+		message = "Textbook catalog extraction failed"
+	}
+	// 目录失败持久化限定 1024 字节，截断时保留完整 UTF-8 字符。
+	if len(message) > 1024 {
+		boundary := 1024
+		for boundary > 0 && !utf8.RuneStart(message[boundary]) {
+			boundary--
+		}
+		message = message[:boundary]
+	}
 	failure := k12storage.TextbookCatalogFailure{
-		Code: "catalog_transient_failure", Message: "识别失败",
+		Code: "catalog_transient_failure", Message: message,
 		Terminal: terminal,
 	}
 	if errors.Is(cause, ErrTextbookCatalogEvidenceInsufficient) ||
 		errors.Is(cause, k12storage.ErrTextbookCatalogSourceIncomplete) ||
 		errors.Is(cause, records.ErrIllegalTransition) {
 		failure.Code = "catalog_evidence_incomplete"
-		failure.Message = "识别失败"
 		failure.Terminal = true
 	}
 	if !failure.Terminal {

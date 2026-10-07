@@ -19,14 +19,25 @@ func (s *Store) GetActiveTextbookGroundingScope(
 	ctx context.Context,
 	requested TextbookScope,
 ) (k12.TextbookGroundingScope, bool, error) {
+	return s.getActiveTextbookGroundingScope(ctx, requested, true)
+}
+
+// GetActiveTextbookGroundingScopeReadOnly 预览只读取同一有效来源，不修复绑定状态。
+func (s *Store) GetActiveTextbookGroundingScopeReadOnly(ctx context.Context, requested TextbookScope) (k12.TextbookGroundingScope, bool, error) {
+	return s.getActiveTextbookGroundingScope(ctx, requested, false)
+}
+
+func (s *Store) getActiveTextbookGroundingScope(ctx context.Context, requested TextbookScope, reconcile bool) (k12.TextbookGroundingScope, bool, error) {
 	textbookScope, err := requested.normalized()
 	if err != nil {
 		return k12.TextbookGroundingScope{}, false, nil
 	}
-	if err := reconcileTextbookBindings(
-		ctx, s.db, textbookScope.OwnerID, textbookScope.Subject, nowUnix(),
-	); err != nil {
-		return k12.TextbookGroundingScope{}, false, err
+	if reconcile {
+		if err := reconcileTextbookBindings(
+			ctx, s.db, textbookScope.OwnerID, textbookScope.Subject, nowUnix(),
+		); err != nil {
+			return k12.TextbookGroundingScope{}, false, err
+		}
 	}
 
 	var scope k12.TextbookGroundingScope

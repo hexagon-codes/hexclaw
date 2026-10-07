@@ -171,6 +171,8 @@ type Server struct {
 	serviceRestartMu        sync.Mutex
 	serviceRestartRequestID string
 	serviceRestart          func()
+
+	agentInitialProgressPersister func(context.Context, *router.AgentConfig, json.RawMessage) error
 }
 
 // SandboxPolicy 是一次原子发布的完整沙箱运行策略。
@@ -474,6 +476,11 @@ func (s *Server) SetAgentStore(store router.Store) {
 // platform API any scenario metadata keys or value semantics.
 func (s *Server) SetAgentMetadataGuard(guard func(map[string]string) error) {
 	s.agentMetadataGuard = guard
+}
+
+// SetAgentInitialProgressPersister 注入场景初始进度与实例的原子持久化，不调用内存路由。
+func (s *Server) SetAgentInitialProgressPersister(persist func(context.Context, *router.AgentConfig, json.RawMessage) error) {
+	s.agentInitialProgressPersister = persist
 }
 
 // SetAgentResourceCleaner wires the lifecycle boundary for Agent-owned

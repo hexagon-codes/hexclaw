@@ -196,10 +196,10 @@ func TestTextbookCatalogCheckpointExtractorFailsClosedOnMissingVersionOrPage(t *
 			},
 		},
 		{
-			name: "non contiguous printed footer",
+			name: "conflicting boundary footer",
 			mutate: func(source *k12storage.TextbookCatalogSource) {
-				source.Pages[3].Content = strings.ReplaceAll(source.Pages[3].Content, "\n2\n", "\n20\n")
-				source.Pages[3].ContentDigest = testTextbookContentDigest(source.Pages[3].Content)
+				source.Pages[4].Content = strings.ReplaceAll(source.Pages[4].Content, "\n3\n", "\n30\n")
+				source.Pages[4].ContentDigest = testTextbookContentDigest(source.Pages[4].Content)
 			},
 		},
 	}
@@ -218,6 +218,82 @@ func TestTextbookCatalogCheckpointExtractorFailsClosedOnMissingVersionOrPage(t *
 			}
 		})
 	}
+}
+
+func TestTextbookCatalogCheckpointExtractorRepairsIsolatedConflictingFooterWithoutChangingSource(t *testing.T) {
+	source := controlledTextbookFooterSource("114", "155", "116")
+	before, err := json.Marshal(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publication, err := (TextbookCatalogCheckpointExtractor{}).Extract(context.Background(), source)
+	if err != nil {
+		t.Fatalf("extract isolated conflicting footer: %v", err)
+	}
+	var catalog textbookCatalogJSON
+	if err := json.Unmarshal(publication.CatalogJSON, &catalog); err != nil {
+		t.Fatal(err)
+	}
+	if catalog.PageMin != 114 || catalog.PageMax != 116 || len(catalog.PageRefs) != 3 ||
+		catalog.PageRefs[1].LogicalPage != 115 || catalog.PageRefs[1].PDFPage != 4 {
+		t.Fatalf("isolated footer page map=%+v", catalog)
+	}
+	proof := publication.PageProofs[1]
+	page := source.Pages[3]
+	if proof.Method != "adjacent_printed_anchors" || proof.EvidencePage != 4 ||
+		proof.EvidenceDigest != page.ContentDigest || proof.EvidenceOffsetFrom != 0 ||
+		proof.EvidenceOffsetTo != len(page.Content) || len(proof.SegmentRefs) != 1 ||
+		proof.SegmentRefs[0] != page.SegmentRefs[0] || !strings.HasSuffix(page.Content, "\n155\n") {
+		t.Fatalf("isolated footer lost original evidence: %+v", proof)
+	}
+	after, err := json.Marshal(source)
+	if err != nil || string(after) != string(before) {
+		t.Fatalf("catalog extraction changed persisted source: %v", err)
+	}
+}
+
+func TestTextbookCatalogCheckpointExtractorRejectsUnprovedFooterConflicts(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		footers []string
+	}{
+		{name: "first boundary", footers: []string{"154", "115", "116"}},
+		{name: "last boundary", footers: []string{"114", "115", "156"}},
+		{name: "consecutive conflicts", footers: []string{"114", "155", "156", "117"}},
+		{name: "multiple offsets", footers: []string{"114", "155", "116", "157", "118"}},
+		{name: "missing direct neighbor", footers: []string{"114", "155", "unreadable footer", "117"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			source := controlledTextbookFooterSource(tc.footers...)
+			publication, err := (TextbookCatalogCheckpointExtractor{}).Extract(context.Background(), source)
+			if !errors.Is(err, ErrTextbookCatalogEvidenceInsufficient) ||
+				len(publication.CatalogJSON) != 0 || len(publication.PageProofs) != 0 {
+				t.Fatalf("unproved footer conflict produced publication=%+v err=%v", publication, err)
+			}
+		})
+	}
+}
+
+func controlledTextbookFooterSource(footers ...string) k12storage.TextbookCatalogSource {
+	source := syntheticTextbookCatalogSource()
+	contents := []string{source.Pages[0].Content, "目 录\n1 第一单元 114\n"}
+	for _, footer := range footers {
+		contents = append(contents, "第一单元\n正文\n"+footer+"\n")
+	}
+	source.Pages = nil
+	offset := int64(0)
+	for index, content := range contents {
+		page := k12storage.TextbookCatalogSourcePage{
+			PDFPage: index + 1, Content: content, ContentDigest: testTextbookContentDigest(content),
+			SourceOffsetFrom: offset, SourceOffsetTo: offset + int64(len(content)),
+		}
+		if index >= 2 {
+			page.SegmentRefs = []string{fmt.Sprintf("chunk-page-%d", index+1)}
+		}
+		source.Pages = append(source.Pages, page)
+		offset += int64(len(content))
+	}
+	return source
 }
 
 func syntheticTextbookCatalogSource() k12storage.TextbookCatalogSource {

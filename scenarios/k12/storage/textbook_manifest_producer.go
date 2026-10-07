@@ -10,11 +10,12 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/hexagon-codes/hexclaw/internal/upstreamerr"
 )
 
 const (
 	textbookManifestSubjectMath            = "math"
-	textbookDefaultModelMissingReason      = "默认模型未配置"
 	textbookVisionModelRequiredFailureCode = "vision_model_required"
 )
 
@@ -369,7 +370,7 @@ func loadTextbookManifestFactsTx(
 		FROM kb_knowledge_jobs
 		WHERE owner_id=? AND corpus_uid=? AND document_id=?
 		  AND document_generation=? AND kind='ingest'
-		ORDER BY created_at DESC,job_id DESC LIMIT 1`,
+		ORDER BY created_at DESC,rowid DESC LIMIT 1`,
 		facts.knowledgeOwnerID,
 		facts.corpusUID,
 		documentID,
@@ -478,13 +479,14 @@ func projectTextbookManifestState(
 	}
 	switch facts.textState {
 	case "failed":
+		// 失败原因与当前摄取任务一致，能力标记不能替代实际错误。
+		message := upstreamerr.KnowledgeFailureMessage(facts.lastError)
+		if message == "" {
+			message = "Textbook recognition failed"
+		}
 		if facts.failureCode == textbookVisionModelRequiredFailureCode ||
 			facts.actionCode == "configure_default_vision_model" {
-			return "failed_retryable", true, textbookDefaultModelMissingReason
-		}
-		message := strings.TrimSpace(facts.lastError)
-		if message == "" {
-			message = "教材识别失败"
+			return "failed_retryable", true, message
 		}
 		return "failed_terminal", false, message
 	case "ready":
@@ -493,13 +495,13 @@ func projectTextbookManifestState(
 		}
 		switch facts.catalogJobState {
 		case "failed_terminal":
-			message := strings.TrimSpace(facts.catalogJobError)
+			message := upstreamerr.KnowledgeFailureMessage(facts.catalogJobError)
 			if message == "" {
 				message = "识别失败"
 			}
 			return "failed_terminal", false, message
 		case "failed_retryable":
-			message := strings.TrimSpace(facts.catalogJobError)
+			message := upstreamerr.KnowledgeFailureMessage(facts.catalogJobError)
 			if message == "" {
 				message = "识别失败"
 			}

@@ -111,7 +111,7 @@ func (s *weeklyPracticeCandidateSource) FreezeWeeklyPracticeCandidateRequest(ctx
 		return request, err
 	}
 	targetProgress := request.Progress
-	if request.PlanSection == k12.WeeklySectionTextbookConsolidation &&
+	if (request.PlanSection == k12.WeeklySectionTextbookConsolidation || request.PlanSection == k12.WeeklySectionArithmeticWarmup) &&
 		(targetProgress.VerifiedPageFrom == nil || targetProgress.VerifiedPageTo == nil) && targetProgress.TextbookManifestID != "" {
 		catalog, catalogErr := s.deps.Records.GetTextbookManifestCatalog(ctx, k12storage.TextbookScope{
 			OwnerID: s.deps.TextbookOwnerID, AgentName: request.AgentName, Subject: "math",
@@ -166,7 +166,8 @@ func (s *weeklyPracticeCandidateSource) FreezeWeeklyPracticeCandidateRequest(ctx
 			SourceRevision: source.SourceRevision, EvidenceRefs: evidence})
 	}
 	if len(request.Targets) == 0 {
-		if request.PlanSection == k12.WeeklySectionTextbookConsolidation {
+		if (request.PlanSection == k12.WeeklySectionTextbookConsolidation || request.PlanSection == k12.WeeklySectionArithmeticWarmup) &&
+			k12.CurriculumProgressUsable(&targetProgress) {
 			pages, pageErr := s.deps.Records.ListWeeklyTextbookPages(ctx, k12storage.TextbookScope{
 				OwnerID: s.deps.TextbookOwnerID, AgentName: request.AgentName, Subject: "math",
 			}, targetProgress)
@@ -407,6 +408,9 @@ func (s *weeklyPracticeCandidateSource) GenerateWeeklyPracticeCandidates(ctx con
 				prompt := fmt.Sprintf("Generate one same-level practice problem for the explicit knowledge point %s, grade %s, textbook %s. Source problem: %s. Do not repeat the source or earlier variants. Variant %d. Output ## 问题 / ## 解答 / ## 答案. Section: %s.", target.KnowledgePoint, request.GradeTerm, request.Textbook, target.Question, index+1, request.PlanSection)
 				if strings.HasPrefix(target.SourceRef, "textbook:") {
 					prompt += " The source is a verified textbook lesson page. Use only its taught methods and prerequisites; generate a new self-contained text problem that needs no diagram. Do not copy the examples or infer student mastery."
+				}
+				if request.PlanSection == k12.WeeklySectionArithmeticWarmup {
+					prompt += " Generate only a numeric arithmetic expression using this lesson's methods; no word problem, diagram, equation variable or explanatory text in the question."
 				}
 				return d.PracticeVariant.GeneratePracticeVariant(callCtx, target.Subject, prompt, request.GradeTerm)
 			})

@@ -9,6 +9,7 @@ import (
 
 	"github.com/hexagon-codes/toolkit/util/idgen"
 
+	"github.com/hexagon-codes/hexclaw/internal/upstreamerr"
 	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 )
@@ -51,12 +52,25 @@ func (s *Store) ListTextbookBindingOptions(
 	); err != nil {
 		return nil, err
 	}
+	return s.listTextbookBindingOptions(ctx, scope.OwnerID, scope.Subject)
+}
+
+// ListTextbookCreationOptions 在建档前只读同归属的数学教材候选，不登记实例或绑定。
+func (s *Store) ListTextbookCreationOptions(ctx context.Context, ownerID string) ([]TextbookBindingOption, error) {
+	ownerID = strings.TrimSpace(ownerID)
+	if ownerID == "" {
+		return nil, fmt.Errorf("k12storage: textbook owner is required")
+	}
+	return s.listTextbookBindingOptions(ctx, ownerID, "math")
+}
+
+func (s *Store) listTextbookBindingOptions(ctx context.Context, ownerID, subject string) ([]TextbookBindingOption, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT manifest_id,document_id,document_generation,
 	    document_title,state,retryable,failure_message,text_index_state,vector_index_state,
 	    catalog_json,updated_at
 	    FROM k12_textbook_manifests
 	    WHERE owner_id=? AND subject=?
-	    ORDER BY updated_at DESC,manifest_id`, scope.OwnerID, scope.Subject)
+	    ORDER BY updated_at DESC,manifest_id`, ownerID, subject)
 	if err != nil {
 		return nil, fmt.Errorf("k12storage: list textbook manifests: %w", err)
 	}
@@ -74,6 +88,7 @@ func (s *Store) ListTextbookBindingOptions(
 			return nil, err
 		}
 		item.Retryable = retryable == 1
+		item.FailureMessage = upstreamerr.KnowledgeFailureMessage(item.FailureMessage)
 		item.Catalog = json.RawMessage("null")
 		if catalog.Valid && strings.TrimSpace(catalog.String) != "" {
 			if !json.Valid([]byte(catalog.String)) {
@@ -106,12 +121,31 @@ func (s *Store) GetTextbookManifestCatalog(
 	); err != nil {
 		return k12.CurriculumCatalog{}, err
 	}
+	out, err := s.getTextbookManifestCatalog(ctx, scope.OwnerID, scope.Subject, manifestID)
+	if err != nil {
+		return k12.CurriculumCatalog{}, err
+	}
+	out.AgentName = scope.AgentName
+	return out, nil
+}
+
+// GetTextbookCreationCatalog 复用教材证据校验，允许创建前按可信归属读取目录。
+func (s *Store) GetTextbookCreationCatalog(ctx context.Context, ownerID, manifestID string) (k12.CurriculumCatalog, error) {
+	ownerID, manifestID = strings.TrimSpace(ownerID), strings.TrimSpace(manifestID)
+	if ownerID == "" || manifestID == "" {
+		return k12.CurriculumCatalog{}, fmt.Errorf("k12storage: textbook owner and manifest are required")
+	}
+	return s.getTextbookManifestCatalog(ctx, ownerID, "math", manifestID)
+}
+
+func (s *Store) getTextbookManifestCatalog(ctx context.Context, ownerID, subject, manifestID string) (k12.CurriculumCatalog, error) {
 	var state string
 	var catalog sql.NullString
-	err = s.db.QueryRowContext(ctx, `SELECT state,catalog_json
+	err := s.db.QueryRowContext(ctx, `SELECT state,catalog_json
 	    FROM k12_textbook_manifests
-	    WHERE manifest_id=? AND owner_id=? AND subject=?`,
-		manifestID, scope.OwnerID, scope.Subject).Scan(&state, &catalog)
+	    WHERE manifest_id=? AND owner_id=? AND subject=?
+	      AND EXISTS(SELECT 1 FROM kb_semantic_document_bindings b JOIN kb_documents d ON d.id=b.document_id WHERE b.owner_id=k12_textbook_manifests.owner_id AND b.document_id=k12_textbook_manifests.document_id AND b.content_generation=k12_textbook_manifests.document_generation AND b.lifecycle_state='active' AND d.deleted=0)`,
+		manifestID, ownerID, subject).Scan(&state, &catalog)
 	if err == sql.ErrNoRows {
 		return k12.CurriculumCatalog{}, records.ErrNotFound
 	}
@@ -137,7 +171,13 @@ func (s *Store) GetTextbookManifestCatalog(
 	if err != nil {
 		return k12.CurriculumCatalog{}, err
 	}
-	out.AgentName = scope.AgentName
+	out.TextbookManifestID = manifestID
+	if out.GradeTerm == "" {
+		out.GradeTerm, err = s.textbookCoverGradeTerm(ctx, ownerID, manifestID)
+		if err != nil {
+			return k12.CurriculumCatalog{}, err
+		}
+	}
 	return out, nil
 }
 
@@ -148,6 +188,15 @@ func (s *Store) GetTextbookManifestCatalog(
 func (s *Store) GetActiveTextbookCatalog(
 	ctx context.Context, scope TextbookScope,
 ) (catalog k12.CurriculumCatalog, handled bool, err error) {
+	return s.getActiveTextbookCatalog(ctx, scope, true)
+}
+
+// GetActiveTextbookCatalogReadOnly 用于建议预览，不执行绑定状态修复。
+func (s *Store) GetActiveTextbookCatalogReadOnly(ctx context.Context, scope TextbookScope) (k12.CurriculumCatalog, bool, error) {
+	return s.getActiveTextbookCatalog(ctx, scope, false)
+}
+
+func (s *Store) getActiveTextbookCatalog(ctx context.Context, scope TextbookScope, reconcile bool) (catalog k12.CurriculumCatalog, handled bool, err error) {
 	scope, err = scope.normalized()
 	if err != nil {
 		return k12.CurriculumCatalog{}, true, err
@@ -155,17 +204,20 @@ func (s *Store) GetActiveTextbookCatalog(
 	if err := requireTextbookAgent(ctx, s.db, scope.AgentName); err != nil {
 		return k12.CurriculumCatalog{}, true, err
 	}
-	if err := reconcileTextbookBindings(
-		ctx, s.db, scope.OwnerID, scope.Subject, nowUnix(),
-	); err != nil {
-		return k12.CurriculumCatalog{}, true, err
+	if reconcile {
+		if err := reconcileTextbookBindings(
+			ctx, s.db, scope.OwnerID, scope.Subject, nowUnix(),
+		); err != nil {
+			return k12.CurriculumCatalog{}, true, err
+		}
 	}
-	var bindingID, raw string
-	err = s.db.QueryRowContext(ctx, `SELECT b.textbook_binding_id,m.catalog_json
+	var bindingID, raw, manifestID string
+	err = s.db.QueryRowContext(ctx, `SELECT b.textbook_binding_id,m.catalog_json,m.manifest_id
 	    FROM k12_textbook_bindings b
 	    JOIN k12_textbook_manifests m ON m.manifest_id=b.textbook_manifest_id
 	    WHERE b.owner_id=? AND b.agent_name=? AND b.subject=? AND b.status='active'
 	      AND m.state='ready_for_confirmation'
+	      AND EXISTS(SELECT 1 FROM kb_semantic_document_bindings d JOIN kb_documents k ON k.id=d.document_id WHERE d.owner_id=m.owner_id AND d.document_id=m.document_id AND d.content_generation=m.document_generation AND d.lifecycle_state='active' AND k.deleted=0)
 	      AND EXISTS(
 	        SELECT 1 FROM k12_textbook_page_mappings p
 	        JOIN k12_textbook_manifest_segments s
@@ -181,7 +233,7 @@ func (s *Store) GetActiveTextbookCatalog(
 		  AND s.document_generation=m.document_generation
 		  AND s.source_digest=m.source_digest
 	      )`,
-		scope.OwnerID, scope.AgentName, scope.Subject).Scan(&bindingID, &raw)
+		scope.OwnerID, scope.AgentName, scope.Subject).Scan(&bindingID, &raw, &manifestID)
 	if err == nil {
 		catalog, err = decodeTextbookCatalog(raw)
 		if err != nil {
@@ -189,6 +241,13 @@ func (s *Store) GetActiveTextbookCatalog(
 		}
 		catalog.AgentName = scope.AgentName
 		catalog.TextbookBindingID = bindingID
+		catalog.TextbookManifestID = manifestID
+		if catalog.GradeTerm == "" {
+			catalog.GradeTerm, err = s.textbookCoverGradeTerm(ctx, scope.OwnerID, manifestID)
+			if err != nil {
+				return k12.CurriculumCatalog{}, true, err
+			}
+		}
 		return catalog, true, nil
 	}
 	if err != sql.ErrNoRows {

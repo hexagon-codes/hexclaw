@@ -295,11 +295,22 @@ func TestREGK12C02NullProgressRestore20260810001(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if missingRec, _ := do(t, h, http.MethodPut, "/profile-bundle", string(missingBytes)); missingRec.Code != http.StatusBadRequest {
-		t.Fatalf("missing curriculum_progress status=%d want 400", missingRec.Code)
+	if missingRec, _ := do(t, h, http.MethodPut, "/profile-bundle", string(missingBytes)); missingRec.Code != http.StatusOK {
+		t.Fatalf("omitted curriculum_progress status=%d want 200", missingRec.Code)
+	}
+	if _, head, err := deps.Records.GetCurriculumProgressState(context.Background(), "mingming", "math"); err != nil || head != 2 {
+		t.Fatalf("omission changed cleared progress lifecycle: head=%d err=%v", head, err)
+	}
+	currentProfile, err := deps.Records.GetProfileState(context.Background(), "mingming")
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentSettings, err := deps.Records.GetWeeklyPracticeSettings(context.Background(), "mingming")
+	if err != nil {
+		t.Fatal(err)
 	}
 	staleBody := regK12C02ProfileBundleBody(
-		"reg-c02-stale-null", "五年级下", "", 3, 1, 2,
+		"reg-c02-stale-null", "五年级下", "", currentProfile.Revision, 1, currentSettings.Revision,
 		"null", false, false,
 	)
 	if staleRec, _ := do(t, h, http.MethodPut, "/profile-bundle", staleBody); staleRec.Code != http.StatusConflict {
@@ -325,7 +336,7 @@ func TestREGK12C02NullProgressRestore20260810001(t *testing.T) {
 	}
 
 	recreateBody := regK12C02ProfileBundleBody(
-		"reg-c02-recreate-after-null", "六年级上", "上册", 3, 2, 2,
+		"reg-c02-recreate-after-null", "六年级上", "上册", currentProfile.Revision, 2, currentSettings.Revision,
 		regK12C02SixUpperProgressJSON("manifest-six-upper-new", "上册"), true, true,
 	)
 	rec, recreated := do(t, h, http.MethodPut, "/profile-bundle", recreateBody)

@@ -62,6 +62,7 @@ type extractedTextbookLesson struct {
 }
 
 type textbookCatalogJSON struct {
+	GradeTerm       string                    `json:"grade_term,omitempty"`
 	Subject         string                    `json:"subject"`
 	TextbookEdition string                    `json:"textbook_edition"`
 	TextbookVersion string                    `json:"textbook_version"`
@@ -189,6 +190,7 @@ func (TextbookCatalogCheckpointExtractor) Extract(
 		})
 	}
 	sort.Slice(anchors, func(i, j int) bool { return anchors[i].PDFPage < anchors[j].PDFPage })
+	anchors = withoutIsolatedConflictingPrintedAnchor(anchors)
 	pageOffset := anchors[0].LogicalPage - anchors[0].PDFPage
 	for index, anchor := range anchors {
 		if anchor.LogicalPage-anchor.PDFPage != pageOffset {
@@ -286,7 +288,8 @@ func (TextbookCatalogCheckpointExtractor) Extract(
 	}
 
 	catalog := textbookCatalogJSON{
-		Subject: "math", TextbookEdition: "人教版", TextbookVersion: version,
+		GradeTerm: volumeMatch[1] + strings.TrimSuffix(volumeMatch[2], "册"),
+		Subject:   "math", TextbookEdition: "人教版", TextbookVersion: version,
 		Title: title, Volume: volumeMatch[2], PageMin: pageMin, PageMax: pageMax,
 		Units:    make([]textbookCatalogJSONUnit, 0, len(units)),
 		PageRefs: make([]textbookCatalogJSONPage, 0, len(anchors)),
@@ -349,6 +352,37 @@ func (TextbookCatalogCheckpointExtractor) Extract(
 		return k12storage.TextbookCatalogPublication{}, err
 	}
 	return k12storage.TextbookCatalogPublication{CatalogJSON: encoded, PageProofs: proofs}, nil
+}
+
+// withoutIsolatedConflictingPrintedAnchor 仅将全册唯一矛盾页脚交给既有相邻补全。
+// 双侧必须是物理和逻辑均连续的直接印刷证据；首尾、多处冲突或缺邻页保留原校验。
+func withoutIsolatedConflictingPrintedAnchor(anchors []printedPageAnchor) []printedPageAnchor {
+	if len(anchors) < 3 {
+		return anchors
+	}
+	pageOffset := anchors[0].LogicalPage - anchors[0].PDFPage
+	conflict := -1
+	for index, anchor := range anchors {
+		if anchor.LogicalPage-anchor.PDFPage == pageOffset {
+			continue
+		}
+		if conflict >= 0 {
+			return anchors
+		}
+		conflict = index
+	}
+	if conflict <= 0 || conflict+1 >= len(anchors) {
+		return anchors
+	}
+	previous, current, next := anchors[conflict-1], anchors[conflict], anchors[conflict+1]
+	if previous.Method != "printed_anchor" || next.Method != "printed_anchor" ||
+		previous.PDFPage+1 != current.PDFPage || current.PDFPage+1 != next.PDFPage ||
+		previous.LogicalPage+2 != next.LogicalPage {
+		return anchors
+	}
+	filtered := make([]printedPageAnchor, 0, len(anchors)-1)
+	filtered = append(filtered, anchors[:conflict]...)
+	return append(filtered, anchors[conflict+1:]...)
 }
 
 func parseTextbookTOC(pages []k12storage.TextbookCatalogSourcePage) ([]extractedTextbookUnit, error) {

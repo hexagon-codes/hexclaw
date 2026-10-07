@@ -438,6 +438,7 @@ func (state textbookCatalogJobState) matchesClaim(claim TextbookCatalogJobClaim)
 }
 
 type textbookCatalogDocument struct {
+	GradeTerm       string                   `json:"grade_term,omitempty"`
 	Subject         string                   `json:"subject"`
 	TextbookEdition string                   `json:"textbook_edition"`
 	TextbookVersion string                   `json:"textbook_version"`
@@ -485,6 +486,7 @@ func validateTextbookCatalogPublication(
 			fmt.Errorf("%w: decode textbook catalog: %v", records.ErrIllegalTransition, err)
 	}
 	catalog.Subject = strings.TrimSpace(catalog.Subject)
+	catalog.GradeTerm = strings.TrimSpace(catalog.GradeTerm)
 	catalog.TextbookEdition = strings.TrimSpace(catalog.TextbookEdition)
 	catalog.TextbookVersion = strings.TrimSpace(catalog.TextbookVersion)
 	catalog.Title = strings.TrimSpace(catalog.Title)

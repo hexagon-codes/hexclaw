@@ -12,8 +12,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"database/sql"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -71,6 +74,7 @@ import (
 	hexmcp "github.com/hexagon-codes/hexclaw/mcp"
 	"github.com/hexagon-codes/hexclaw/memory"
 	"github.com/hexagon-codes/hexclaw/messagecontent"
+	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/render"
 	"github.com/hexagon-codes/hexclaw/resourcegov"
 	agentrouter "github.com/hexagon-codes/hexclaw/router"
@@ -2488,6 +2492,9 @@ Set source only when the material explicitly names a work, title, or another rel
 			if err := skills.Register(k12skilladapter.NewReviewSkill(k12rt.Deps)); err != nil {
 				logger.Warn("注册 k12_review skill 失败", "error", err)
 			}
+			if err := skills.Register(k12skilladapter.NewProgressSkill(k12rt.Deps)); err != nil {
+				logger.Warn("register k12_progress skill failed", "error", err)
+			}
 			// 自动化沉淀「调度」缝：注入平台 cron.Scheduler 包成 CronRegistrar，
 			// POST /api/k12/cron/provision 原子切换四任务（周卷/回传提醒/春秋学期确认）。
 			var k12Cron k12apihttp.CronRegistrar
@@ -2672,6 +2679,59 @@ Set source only when the material explicitly names a work, title, or another rel
 					logger.Info("K12 Webhook 持久派发恢复完成", "recovered", recovered)
 				}
 			}
+			// 注册与教材候选读取共用可信 owner，创建前不需要已有实例归属。
+			resolveAuthenticatedK12Owner := func(requestCtx context.Context) (string, error) {
+				if skill.AuthenticatedUserID(requestCtx) != "api-user" {
+					return "", fmt.Errorf("authenticated service principal required")
+				}
+				return k12usecase.DefaultLocalOwnerScope, nil
+			}
+			srv.SetAgentInitialProgressPersister(func(requestCtx context.Context, candidate *agentrouter.AgentConfig, raw json.RawMessage) error {
+				if candidate.Metadata["scenario"] != "k12-tutor" {
+					return fmt.Errorf("%w: initial curriculum progress requires a K12 tutor", records.ErrInvalidFields)
+				}
+				var selection *k12.CurriculumProgressSelection
+				var err error
+				if len(raw) > 0 && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+					selection, err = k12.DecodeCurriculumProgressSelection(raw)
+				}
+				if err != nil {
+					return fmt.Errorf("%w: %v", records.ErrInvalidFields, err)
+				}
+				ownerID := k12usecase.DefaultLocalOwnerScope
+				if !desktopMode {
+					ownerID, err = resolveAuthenticatedK12Owner(requestCtx)
+					if err != nil {
+						return err
+					}
+				}
+				profile := k12.ProfileFromMeta(candidate.Metadata)
+				resolution := k12usecase.CurriculumProgressResolution{}
+				// 缺省自动推荐，显式 null 继续保持未设进度的注册契约。
+				if !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+					resolution, err = k12rt.Deps.ResolveCurriculumProgress(requestCtx, k12usecase.CurriculumProgressResolveRequest{OwnerID: ownerID, AgentName: candidate.Name, Profile: profile, Selection: selection, RequireSelectedProgress: true})
+				}
+				if err != nil {
+					if errors.Is(err, k12usecase.ErrInvalidInput) {
+						return fmt.Errorf("%w: %v", records.ErrInvalidFields, err)
+					}
+					return err
+				}
+				found := false
+				for _, name := range candidate.Skills {
+					if name == "k12_progress" {
+						found = true
+					}
+				}
+				if !found {
+					candidate.Skills = append(candidate.Skills, "k12_progress")
+				}
+				return k12rt.Records.CreateInitialCurriculumProgress(requestCtx,
+					k12storage.TextbookScope{OwnerID: ownerID, AgentName: candidate.Name, Subject: "math"},
+					profile, resolution.Progress, time.Now().Unix(),
+					func(tx *sql.Tx) error { return agentStore.SaveAgentTx(requestCtx, tx, candidate) },
+				)
+			})
 			// 挂载前缀取自 Manifest（路由命名空间由声明驱动，不再硬编码字面量）。
 			k12Handler := k12apihttp.NewHandler(k12apihttp.Runtime{
 				Views:                 k12rt.Registry.Views,
@@ -2694,12 +2754,7 @@ Set source only when the material explicitly names a work, title, or another rel
 					}
 					return "remote"
 				}(),
-				AuthenticatedOwnerScope: func(requestCtx context.Context) (string, error) {
-					if skill.AuthenticatedUserID(requestCtx) != "api-user" {
-						return "", fmt.Errorf("authenticated service principal required")
-					}
-					return k12usecase.DefaultLocalOwnerScope, nil
-				},
+				AuthenticatedOwnerScope: resolveAuthenticatedK12Owner,
 				AuthorizeAgentScope: func(requestCtx context.Context, owner, agent string) error {
 					if owner != k12usecase.DefaultLocalOwnerScope {
 						return fmt.Errorf("agent owner mismatch")

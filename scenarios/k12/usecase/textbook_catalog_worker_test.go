@@ -3,9 +3,12 @@ package usecase
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
 )
@@ -55,10 +58,29 @@ func TestTextbookCatalogWorkerBoundsRetryAndFailsEvidenceErrorsTerminal(t *testi
 		attempt    int
 		extractErr error
 		terminal   bool
+		code       string
+		message    string
 	}{
-		{name: "deterministic proof absent", attempt: 1, extractErr: ErrTextbookCatalogEvidenceInsufficient, terminal: true},
-		{name: "transient below max", attempt: 2, extractErr: errors.New("sqlite busy"), terminal: false},
-		{name: "transient exhausted", attempt: 3, extractErr: errors.New("sqlite busy"), terminal: true},
+		{name: "deterministic proof absent", attempt: 1, extractErr: ErrTextbookCatalogEvidenceInsufficient, terminal: true,
+			code: "catalog_evidence_incomplete", message: "textbook catalog evidence insufficient"},
+		{name: "conflicting printed page anchors", attempt: 1,
+			extractErr: fmt.Errorf("%w: printed page anchors have conflicting offsets", ErrTextbookCatalogEvidenceInsufficient), terminal: true,
+			code: "catalog_evidence_incomplete", message: "textbook catalog evidence insufficient: printed page anchors have conflicting offsets"},
+		{name: "transient below max", attempt: 2, extractErr: errors.New("sqlite busy"), terminal: false,
+			code: "catalog_transient_failure", message: "sqlite busy"},
+		{name: "transient exhausted", attempt: 3, extractErr: errors.New("sqlite busy"), terminal: true,
+			code: "catalog_transient_failure", message: "sqlite busy"},
+		{name: "provider cause without body", attempt: 2,
+			extractErr: errors.New(`catalog extraction failed: HTTP 429, body: {"error":{"message":"Provider returned error","code":429},"metadata":{"raw":"private-provider-body"}}`),
+			code:       "catalog_transient_failure", message: "Provider returned error (code: 429)"},
+		{name: "empty failure detail", attempt: 2, extractErr: errors.New(""),
+			code: "catalog_transient_failure", message: "Textbook catalog extraction failed"},
+		{name: "long ASCII failure", attempt: 2, extractErr: errors.New(strings.Repeat("a", 2048)),
+			code: "catalog_transient_failure", message: strings.Repeat("a", 1024)},
+		{name: "long Chinese failure", attempt: 2, extractErr: errors.New(strings.Repeat("中", 342)),
+			code: "catalog_transient_failure", message: strings.Repeat("中", 341)},
+		{name: "Chinese exact byte boundary", attempt: 2, extractErr: errors.New(strings.Repeat("中", 341) + "!"),
+			code: "catalog_transient_failure", message: strings.Repeat("中", 341) + "!"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -80,14 +102,23 @@ func TestTextbookCatalogWorkerBoundsRetryAndFailsEvidenceErrorsTerminal(t *testi
 				Now: func() time.Time { return time.UnixMilli(10_000) },
 			})
 			processed, err := worker.RunOnce(context.Background())
-			if !processed || err == nil {
-				t.Fatalf("processed=%v err=%v want processed error", processed, err)
+			if !processed || err != tt.extractErr {
+				t.Fatalf("processed=%v err=%v want unchanged extraction error", processed, err)
 			}
 			if len(repo.failures) != 1 || repo.failures[0].Terminal != tt.terminal {
 				t.Fatalf("failure=%+v want terminal=%v", repo.failures, tt.terminal)
 			}
+			if message := repo.failures[0].Message; len(message) > 1024 || !utf8.ValidString(message) {
+				t.Fatalf("failure message bytes=%d validUTF8=%v", len(message), utf8.ValidString(message))
+			}
+			if repo.failures[0].Code != tt.code || repo.failures[0].Message != tt.message {
+				t.Fatalf("failure=%+v want code=%q message=%q", repo.failures[0], tt.code, tt.message)
+			}
 			if !tt.terminal && !repo.failures[0].RetryAt.After(time.UnixMilli(10_000)) {
 				t.Fatalf("retry deadline=%v must be in the future", repo.failures[0].RetryAt)
+			}
+			if tt.terminal && !repo.failures[0].RetryAt.IsZero() {
+				t.Fatalf("terminal failure scheduled a retry: %v", repo.failures[0].RetryAt)
 			}
 		})
 	}
