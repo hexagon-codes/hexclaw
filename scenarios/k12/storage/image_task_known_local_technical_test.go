@@ -27,7 +27,7 @@ type knownLocalRecoveryFixture struct {
 	command    k12storage.ImageTaskKnownLocalTechnicalRecovery
 }
 
-func seedKnownLocalRecovery(t *testing.T) knownLocalRecoveryFixture {
+func seedKnownLocalRecovery(t *testing.T, reconciledLogical bool) knownLocalRecoveryFixture {
 	t.Helper()
 	store, db := setup(t)
 	ctx := context.Background()
@@ -121,8 +121,16 @@ func seedKnownLocalRecovery(t *testing.T) knownLocalRecoveryFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	parent, err = store.MarkModelInvocationSucceeded(ctx, "mingming", parent.InvocationID,
-		"sha256:original-model-success", "original-provider-request")
+	if reconciledLogical {
+		if _, err := store.MarkModelInvocationOutcomeUnknown(ctx, "mingming", parent.InvocationID, "response_lost"); err != nil {
+			t.Fatal(err)
+		}
+		parent, err = store.ReconcileModelInvocationSucceeded(ctx, "mingming", parent.InvocationID,
+			"sha256:original-model-success", "original-provider-request")
+	} else {
+		parent, err = store.MarkModelInvocationSucceeded(ctx, "mingming", parent.InvocationID,
+			"sha256:original-model-success", "original-provider-request")
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,7 +241,27 @@ func assertKnownLocalSnapshotEqual(t *testing.T, before, after map[string][]map[
 }
 
 func TestKnownLocalTechnicalRecoveryPreservesOriginalHistory(t *testing.T) {
-	f := seedKnownLocalRecovery(t)
+	for _, test := range []struct {
+		name              string
+		reconciledLogical bool
+	}{
+		{"succeeded logical history", false},
+		{"conclusive reconciled logical history", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := seedKnownLocalRecovery(t, test.reconciledLogical)
+			if test.reconciledLogical && (f.parent.Status != k12.ModelInvocationReconciled ||
+				f.parent.FailureKind != "reconciled_succeeded" || f.parent.ResultDigest != "sha256:original-model-success" ||
+				f.parent.ResultJSON != "") {
+				t.Fatalf("legacy conclusive logical fixture lost its durable success evidence: %+v", f.parent)
+			}
+			assertKnownLocalRecoveryOriginalHistory(t, f)
+		})
+	}
+}
+
+func assertKnownLocalRecoveryOriginalHistory(t *testing.T, f knownLocalRecoveryFixture) {
+	t.Helper()
 	if err := f.store.UpdateStatus(context.Background(), f.job.RecordID, k12.GradingStageQueued, nil, 7); !errors.Is(err, records.ErrIllegalTransition) {
 		t.Fatalf("ordinary terminal state gained a queued transition: %v", err)
 	}
@@ -329,6 +357,12 @@ func TestKnownLocalTechnicalRecoveryRejectsWithoutMutation(t *testing.T) {
 		{"logical sent", func(t *testing.T, f *knownLocalRecoveryFixture) {
 			knownLocalExec(t, f.db, `UPDATE k12_model_invocations SET status='sent' WHERE invocation_id=?`, f.parent.InvocationID)
 		}},
+		{"logical reconciliation is not conclusive success", func(t *testing.T, f *knownLocalRecoveryFixture) {
+			knownLocalExec(t, f.db, `UPDATE k12_model_invocations SET failure_kind='reconciled_partial_succeeded' WHERE invocation_id=?`, f.parent.InvocationID)
+		}},
+		{"logical reconciled success has empty digest", func(t *testing.T, f *knownLocalRecoveryFixture) {
+			knownLocalExec(t, f.db, `UPDATE k12_model_invocations SET result_digest='   ' WHERE invocation_id=?`, f.parent.InvocationID)
+		}},
 		{"physical outcome unknown", func(t *testing.T, f *knownLocalRecoveryFixture) {
 			knownLocalExec(t, f.db, `UPDATE k12_model_physical_invocations SET status='outcome_unknown',result_content=NULL,
 				result_digest='',failure_kind='provider_result_unknown' WHERE physical_invocation_id=?`, f.physical.PhysicalInvocationID)
@@ -346,7 +380,7 @@ func TestKnownLocalTechnicalRecoveryRejectsWithoutMutation(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			f := seedKnownLocalRecovery(t)
+			f := seedKnownLocalRecovery(t, true)
 			test.change(t, &f)
 			before := knownLocalDatabaseSnapshot(t, f.db)
 			if _, _, err := f.store.RestoreImageTaskKnownLocalTechnical(context.Background(), f.command); err == nil {
@@ -367,7 +401,7 @@ func TestKnownLocalTechnicalRecoveryDualCASAndRollback(t *testing.T) {
 		{"stale job", func(f *knownLocalRecoveryFixture) { f.command.ExpectedJobVersion = 6 }, records.ErrVersionConflict},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			f := seedKnownLocalRecovery(t)
+			f := seedKnownLocalRecovery(t, false)
 			test.prepare(&f)
 			before := knownLocalDatabaseSnapshot(t, f.db)
 			if _, _, err := f.store.RestoreImageTaskKnownLocalTechnical(context.Background(), f.command); !errors.Is(err, test.wantErr) {
@@ -377,7 +411,7 @@ func TestKnownLocalTechnicalRecoveryDualCASAndRollback(t *testing.T) {
 		})
 	}
 	t.Run("same versions apply only once", func(t *testing.T) {
-		f := seedKnownLocalRecovery(t)
+		f := seedKnownLocalRecovery(t, false)
 		if _, _, err := f.store.RestoreImageTaskKnownLocalTechnical(context.Background(), f.command); err != nil {
 			t.Fatal(err)
 		}
@@ -388,7 +422,7 @@ func TestKnownLocalTechnicalRecoveryDualCASAndRollback(t *testing.T) {
 		assertKnownLocalSnapshotEqual(t, committed, knownLocalDatabaseSnapshot(t, f.db))
 	})
 	t.Run("job update failure rolls back parent window", func(t *testing.T) {
-		f := seedKnownLocalRecovery(t)
+		f := seedKnownLocalRecovery(t, false)
 		knownLocalExec(t, f.db, `CREATE TRIGGER fail_known_local_job_update
 			BEFORE UPDATE OF status ON k12_grading_jobs WHEN NEW.status='queued'
 			BEGIN SELECT RAISE(ABORT, 'controlled job update failure'); END`)

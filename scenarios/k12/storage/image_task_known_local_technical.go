@@ -97,7 +97,9 @@ func (s *Store) RestoreImageTaskKnownLocalTechnical(
 	var blocked int
 	err = tx.QueryRowContext(ctx, `SELECT
 		EXISTS(SELECT 1 FROM k12_grading_final_artifacts WHERE agent_name=? AND job_id=?)
-		OR EXISTS(SELECT 1 FROM k12_model_invocations WHERE agent_name=? AND job_id=? AND status IN ('sent','outcome_unknown','reconciled'))
+		OR EXISTS(SELECT 1 FROM k12_model_invocations WHERE agent_name=? AND job_id=?
+		  AND (status IN ('sent','outcome_unknown') OR (status='reconciled'
+		    AND (failure_kind!='reconciled_succeeded' OR TRIM(result_digest)=''))))
 		OR EXISTS(SELECT 1 FROM k12_model_physical_invocations WHERE agent_name=? AND job_id=? AND status IN ('sent','outcome_unknown','reconciled'))
 		OR EXISTS(SELECT 1 FROM k12_grading_item_invocations WHERE agent_name=? AND job_id=? AND status IN ('sent','outcome_unknown','reconciled'))`,
 		command.AgentName, command.JobID, command.AgentName, command.JobID,
