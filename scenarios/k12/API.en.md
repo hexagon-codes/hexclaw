@@ -132,7 +132,7 @@ This is the shared contract for creating, editing, and previewing progress.
 <a id="image-task-completion"></a>
 ## Image task completion
 
-`POST /api/k12/image-tasks/{id}/retry` accepts the optional fixed `intent: "known_local_technical"` only for the original `failed_terminal/assessing` job with a current-generation definite local technical failure, no unknown calls and no final artifact. Account scope is server-derived; both parent and job versions commit atomically before scheduling. Full frozen model/input/history and count 3 remain; new calls begin at generation 4. Omitting the intent preserves ordinary retry and max3. Repeated versions return `409`; query uncertain outcomes without resubmitting. See the [exact retry contract](docs/api/tasks.en.md#op-post-api-k12-image-tasks-id-retry).
+`POST /api/k12/image-tasks/{id}/retry` accepts the optional fixed `intent: "known_local_technical"` only for the original `failed_terminal/assessing` job with a current-generation definite local technical failure, no unknown calls and no final artifact. Account scope is server-derived; both parent and job versions commit atomically before scheduling. The stage count must have reached the ordinary limit of 3. Full frozen model/input/history and the current count remain; new calls use the next generation, for example 3→4 or 4→5. Omitting the intent preserves ordinary retry and max3. Repeated versions return `409`; query uncertain outcomes without resubmitting. See the [exact retry contract](docs/api/tasks.en.md#op-post-api-k12-image-tasks-id-retry).
 
 ### Common entry points
 

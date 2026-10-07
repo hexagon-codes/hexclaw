@@ -84,7 +84,7 @@ func (s *Store) RestoreImageTaskKnownLocalTechnical(
 		return k12.ImageTaskDispatch{}, nil, err
 	}
 	if job.Status != k12.GradingStageFailedTerminal || fields.FailedStage != k12.GradingStageAssessing ||
-		fields.AttemptCount != k12.GradingMaxStageAttempts || fields.SourceKind != "image_task" ||
+		fields.AttemptCount < k12.GradingMaxStageAttempts || fields.SourceKind != "image_task" ||
 		fields.IdempotencyKey != k12.BuildGradingIdempotencyKey("image_task", dispatch.DispatchID, fields.ConfirmedVersion) ||
 		fields.ConfirmationState != k12.GradingConfirmationConfirmed || k12.GradingResumeStage(fields.StageCheckpoints) != k12.GradingStageAssessing {
 		return k12.ImageTaskDispatch{}, nil, ErrImageTaskInvalidState

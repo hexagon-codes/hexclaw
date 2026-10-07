@@ -80,8 +80,12 @@ type knownTechnicalFixture struct {
 }
 
 // 真实 SQLite 保存历史与当前代次；只有 Provider HTTP 边界为本次隔离服务。
-func newKnownTechnicalFixture(t *testing.T) knownTechnicalFixture {
+func newKnownTechnicalFixture(t *testing.T, failedCounts ...int) knownTechnicalFixture {
 	t.Helper()
+	failedCount := 3
+	if len(failedCounts) > 0 {
+		failedCount = failedCounts[0]
+	}
 	ctx := context.Background()
 	generateCalls, verifyCalls := &atomic.Int32{}, &atomic.Int32{}
 	payload, _ := json.Marshal(SolveResult{Solution: "2", Evidence: SolveEvidence{
@@ -192,7 +196,7 @@ func newKnownTechnicalFixture(t *testing.T) knownTechnicalFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	job.Fields.AttemptCount = 2
+	job.Fields.AttemptCount = failedCount - 1
 	job, err = o.deps.saveGradingJob(ctx, job, k12.GradingStageAssessing)
 	if err != nil {
 		t.Fatal(err)
@@ -208,7 +212,7 @@ func newKnownTechnicalFixture(t *testing.T) knownTechnicalFixture {
 		t.Fatalf("seed current known failure: %v", err)
 	}
 	job, err = o.deps.AdvanceGradingStage(ctx, "mingming", jobID, AdvanceGradingInput{Outcome: GradingOutcomeFailed, FailureKind: "item_assessment_failed", Retryable: true})
-	if err != nil || job.Record.Status != k12.GradingStageFailedTerminal || job.Fields.AttemptCount != 3 {
+	if err != nil || job.Record.Status != k12.GradingStageFailedTerminal || job.Fields.AttemptCount != failedCount {
 		t.Fatalf("terminal fixture: %+v %v", job, err)
 	}
 	before, err := o.deps.Records.ListGradingItemInvocations(ctx, "mingming", jobID)
@@ -219,7 +223,16 @@ func newKnownTechnicalFixture(t *testing.T) knownTechnicalFixture {
 }
 
 func TestKnownLocalTechnicalRuntimeReplaysSuccessAndAppendsCorrection(t *testing.T) {
-	f := newKnownTechnicalFixture(t)
+	assertKnownTechnicalRuntimeRecovery(t, 3, 4001)
+}
+
+func TestKnownLocalTechnicalRuntimeCount4EntersGeneration5(t *testing.T) {
+	assertKnownTechnicalRuntimeRecovery(t, 4, 5001)
+}
+
+func assertKnownTechnicalRuntimeRecovery(t *testing.T, failedCount, expectedOperationAttempt int) {
+	t.Helper()
+	f := newKnownTechnicalFixture(t, failedCount)
 	ctx := context.Background()
 	if _, err := f.c.Retry(ctx, "mingming", f.dispatch.DispatchID, f.dispatch.Version); !errors.Is(err, k12storage.ErrImageTaskInvalidState) {
 		t.Fatalf("ordinary terminal retry: %v", err)
@@ -237,7 +250,7 @@ func TestKnownLocalTechnicalRuntimeReplaysSuccessAndAppendsCorrection(t *testing
 		t.Fatal(err)
 	}
 	queued, err := f.o.deps.GetGradingJob(ctx, "mingming", f.job.Record.RecordID)
-	if err != nil || queued.Record.Status != k12.GradingStageQueued || queued.Fields.AttemptCount != 3 || queued.Fields.FailedStage != k12.GradingStageAssessing {
+	if err != nil || queued.Record.Status != k12.GradingStageQueued || queued.Fields.AttemptCount != failedCount || queued.Fields.FailedStage != k12.GradingStageAssessing {
 		t.Fatalf("queued recovery: %+v %v", queued, err)
 	}
 	if _, err := f.c.RetryWithIntent(ctx, "mingming", f.dispatch.DispatchID, f.dispatch.Version, DefaultLocalOwnerScope, ImageTaskRetryIntentKnownLocalTechnical); !errors.Is(err, k12storage.ErrImageTaskVersionConflict) {
@@ -290,8 +303,8 @@ func TestKnownLocalTechnicalRuntimeReplaysSuccessAndAppendsCorrection(t *testing
 		}
 	}
 	newVerify := byID[effective.Current.SolveInvocationID]
-	if newVerify.OperationAttempt != 4001 || newVerify.JobID != f.job.Record.RecordID {
-		t.Fatalf("same-job generation4: %+v", newVerify)
+	if newVerify.OperationAttempt != expectedOperationAttempt || newVerify.JobID != f.job.Record.RecordID {
+		t.Fatalf("same-job next generation count=%d invocation=%+v", failedCount, newVerify)
 	}
 }
 

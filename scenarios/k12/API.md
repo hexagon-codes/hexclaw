@@ -37,7 +37,7 @@
 <a id="image-task-completion"></a>
 ## 图片任务终态
 
-`POST /api/k12/image-tasks/{id}/retry` 的可选固定 `intent: "known_local_technical"` 仅恢复原 job 当前代次有确定本地技术失败、无未知调用且无终稿的 `failed_terminal/assessing` 任务；账户由服务认证派生，父子窗口双版本 CAS 提交后才启动。保持完整冻结模型、输入和历史，阶段计数 3 保留，新调用进入代次 4；不传 intent 时普通重试与 max3 保持。重复版本返回 `409`，未知结果只查询。精确资格、拒绝条件与请求字段见[图片任务重试契约](docs/api/tasks.md#op-post-api-k12-image-tasks-id-retry)。
+`POST /api/k12/image-tasks/{id}/retry` 的可选固定 `intent: "known_local_technical"` 仅恢复原 job 当前代次有确定本地技术失败、无未知调用且无终稿的 `failed_terminal/assessing` 任务；账户由服务认证派生，父子窗口双版本 CAS 提交后才启动。阶段计数须已达到正常上限 3，完整冻结模型、输入、历史及当前计数保持，新调用进入当前计数加一的代次，例如 3→4、4→5；不传 intent 时普通重试与 max3 保持。重复版本返回 `409`，未知结果只查询。精确资格、拒绝条件与请求字段见[图片任务重试契约](docs/api/tasks.md#op-post-api-k12-image-tasks-id-retry)。
 
 - Desktop 和已绑定钉钉使用同一领域任务、判定、持久结果与自动推进语义。渠道差异只用于消息传输和展示，不产生不同批改标准或确认流程。当前 K12 专门渠道投影声明为钉钉，不能把其他通用适配器视为同等 K12 验收。
 - 默认链路为发图 → 自动识别/判定 → 实际结果。作业批改以带批注的原图为主要交付；可识别部分照常完成。

@@ -82,7 +82,7 @@ func (o *GradingOrchestrator) RetryPhotoGradingJobForKnownLocalTechnical(
 		return GradingJobView{}, false, err
 	}
 	if job.Record.Status != k12.GradingStageFailedTerminal || job.Fields.FailedStage != k12.GradingStageAssessing ||
-		job.Fields.AttemptCount != k12.GradingMaxStageAttempts {
+		job.Fields.AttemptCount < k12.GradingMaxStageAttempts {
 		return job, false, k12storage.ErrImageTaskInvalidState
 	}
 	now := o.deps.now()

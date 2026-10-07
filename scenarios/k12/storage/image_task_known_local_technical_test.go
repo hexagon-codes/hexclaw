@@ -27,8 +27,12 @@ type knownLocalRecoveryFixture struct {
 	command    k12storage.ImageTaskKnownLocalTechnicalRecovery
 }
 
-func seedKnownLocalRecovery(t *testing.T, reconciledLogical bool) knownLocalRecoveryFixture {
+func seedKnownLocalRecovery(t *testing.T, reconciledLogical bool, failedCounts ...int) knownLocalRecoveryFixture {
 	t.Helper()
+	failedCount := 3
+	if len(failedCounts) > 0 {
+		failedCount = failedCounts[0]
+	}
 	store, db := setup(t)
 	ctx := context.Background()
 	dispatch := testImageTaskDispatch()
@@ -93,7 +97,7 @@ func seedKnownLocalRecovery(t *testing.T, reconciledLogical bool) knownLocalReco
 			{Stage: k12.GradingStageRecognizing, ArtifactDigest: "sha256:recognizing", RecordedAt: 120},
 			{Stage: k12.GradingStageAwaitingConfirmation, ArtifactDigest: "sha256:confirmed", RecordedAt: 130},
 		},
-		AttemptCount: 3, FailureKind: "provider_response_processed", FailedStage: k12.GradingStageAssessing,
+		AttemptCount: failedCount, FailureKind: "provider_response_processed", FailedStage: k12.GradingStageAssessing,
 	}
 	job, err := k12.NewGradingJobRecord("mingming", "session-original", fields)
 	if err != nil {
@@ -139,7 +143,7 @@ func seedKnownLocalRecovery(t *testing.T, reconciledLogical bool) knownLocalReco
 		assessmentReceipt(job.RecordID, snapshot.Attempts[1], solveID, gradeID), k12storage.GradingAssessmentEffects{}); err != nil || !created {
 		t.Fatalf("persist historical assessment: created=%v err=%v", created, err)
 	}
-	failed := itemInvocation(job.RecordID, snapshot.Attempts[0], k12.GradingItemOperationGrade, 3001)
+	failed := itemInvocation(job.RecordID, snapshot.Attempts[0], k12.GradingItemOperationGrade, failedCount*1000+1)
 	failed.RouteSnapshot = fields.ModelSnapshot
 	failed, created, err = store.PrepareGradingItemInvocation(ctx, failed)
 	if err != nil || !created {
@@ -244,12 +248,14 @@ func TestKnownLocalTechnicalRecoveryPreservesOriginalHistory(t *testing.T) {
 	for _, test := range []struct {
 		name              string
 		reconciledLogical bool
+		failedCount       int
 	}{
-		{"succeeded logical history", false},
-		{"conclusive reconciled logical history", true},
+		{"succeeded logical history", false, 3},
+		{"conclusive reconciled logical history", true, 3},
+		{"count4 current generation4001", true, 4},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			f := seedKnownLocalRecovery(t, test.reconciledLogical)
+			f := seedKnownLocalRecovery(t, test.reconciledLogical, test.failedCount)
 			if test.reconciledLogical && (f.parent.Status != k12.ModelInvocationReconciled ||
 				f.parent.FailureKind != "reconciled_succeeded" || f.parent.ResultDigest != "sha256:original-model-success" ||
 				f.parent.ResultJSON != "") {
@@ -262,6 +268,10 @@ func TestKnownLocalTechnicalRecoveryPreservesOriginalHistory(t *testing.T) {
 
 func assertKnownLocalRecoveryOriginalHistory(t *testing.T, f knownLocalRecoveryFixture) {
 	t.Helper()
+	originalFields, err := k12.ParseGradingJobFields(f.job.Fields)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := f.store.UpdateStatus(context.Background(), f.job.RecordID, k12.GradingStageQueued, nil, 7); !errors.Is(err, records.ErrIllegalTransition) {
 		t.Fatalf("ordinary terminal state gained a queued transition: %v", err)
 	}
@@ -283,7 +293,7 @@ func assertKnownLocalRecoveryOriginalHistory(t *testing.T, f knownLocalRecoveryF
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fields.AttemptCount != 3 || fields.Deadline != 1017 ||
+	if fields.AttemptCount != originalFields.AttemptCount || fields.Deadline != 1017 ||
 		fields.ParentAutomaticAttemptID != "dispatch-1:1000" ||
 		fields.ParentAutomaticDeadlineAt != 1300 || fields.ParentAutomaticRemainingSeconds != 300 {
 		t.Fatalf("recovery reset attempts or returned wrong job window: %+v", fields)
@@ -340,6 +350,9 @@ func TestKnownLocalTechnicalRecoveryRejectsWithoutMutation(t *testing.T) {
 		}},
 		{"prior generation", func(t *testing.T, f *knownLocalRecoveryFixture) {
 			knownLocalExec(t, f.db, `UPDATE k12_grading_item_invocations SET operation_attempt=2001 WHERE item_invocation_id=?`, f.failedItem.InvocationID)
+		}},
+		{"count4 only has old generation3001", func(t *testing.T, f *knownLocalRecoveryFixture) {
+			knownLocalExec(t, f.db, `UPDATE k12_grading_jobs SET attempt_count=4 WHERE record_id=?`, f.job.RecordID)
 		}},
 		{"newer operation receipt exists", func(t *testing.T, f *knownLocalRecoveryFixture) {
 			newer := f.failedItem
