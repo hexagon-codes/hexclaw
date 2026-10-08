@@ -1028,6 +1028,7 @@ func (e *ReActEngine) Process(ctx context.Context, msg *adapter.Message) (reply 
 	if err := validateIncomingMessage(msg); err != nil {
 		return nil, err
 	}
+	ctx = e.beginRequestReasoningPolicy(ctx)
 	if replay, err := e.loadDurableAssistantReply(ctx, msg, false); err != nil {
 		return nil, err
 	} else if replay != nil {
@@ -1037,6 +1038,7 @@ func (e *ReActEngine) Process(ctx context.Context, msg *adapter.Message) (reply 
 		return nil, err
 	}
 	ensureMessageMetadata(msg)
+	delete(msg.Metadata, agentRequestReasoningPolicyKey)
 	assistantMessageID := canonicalAssistantMessageID(msg)
 	msg.Metadata["assistant_message_id"] = assistantMessageID
 	ctx = session.WithAssistantMessageID(ctx, assistantMessageID)
@@ -1168,6 +1170,7 @@ func (e *ReActEngine) Process(ctx context.Context, msg *adapter.Message) (reply 
 	if err != nil {
 		return nil, fmt.Errorf("llm 路由失败: %w", err)
 	}
+	e.freezeSelectedRequestReasoningPolicy(ctx, msg, selection)
 	if err := e.prepareAgentSystemPromptPolicy(ctx, msg); err != nil {
 		return nil, err
 	}
@@ -1942,6 +1945,8 @@ func (e *ReActEngine) ProcessStream(ctx context.Context, msg *adapter.Message) (
 	if msg.Metadata == nil {
 		msg.Metadata = make(map[string]string)
 	}
+	ctx = e.beginRequestReasoningPolicy(ctx)
+	delete(msg.Metadata, agentRequestReasoningPolicyKey)
 	assistantMessageID := canonicalAssistantMessageID(msg)
 	msg.Metadata["assistant_message_id"] = assistantMessageID
 	ctx = session.WithAssistantMessageID(ctx, assistantMessageID)
@@ -2174,6 +2179,7 @@ func (e *ReActEngine) processStream(
 			Model:    selection.modelName,
 		}
 	}
+	e.freezeSelectedRequestReasoningPolicy(ctx, msg, selection)
 	if err := e.prepareAgentSystemPromptPolicy(ctx, msg); err != nil {
 		return nil, err
 	}
@@ -4308,6 +4314,7 @@ func validSamplingTemperature(temperature float64) bool {
 // 调用点须在 req.Tools 已就位后调用：cron intent guidance 会按 req.Tools 收窄工具面。
 func applyPerTurnRequestPolicy(ctx context.Context, req *hexagon.CompletionRequest, modelName, strategy string, msg *adapter.Message, history []hexagon.Message) {
 	applyModelThinkingDefaults(req, modelName, msg.Content)
+	applyFrozenRequestReasoningPolicy(ctx, req, msg)
 	// 视觉出口图片预算裁剪（BUG-20260713）：glm-4v-flash 等视觉模型单请求图片数有硬上限（实测
 	// glm-4v-flash：1~5 张 200，6+ 张报智谱 400 code 1210「输入图片数量超过限制」；且 5 张>2min 撞
 	// 钉钉超时，真机 session sess-xb9mJ1bu 取证）。多轮会话历史累积多图 + 当轮图会超限/超时。
@@ -5280,6 +5287,7 @@ func (e *ReActEngine) applyPinnedAgent(msg *adapter.Message, pinned, hint string
 // applyAgentConfigToMetadata 把 Agent 配置落到消息 metadata（model/prompt/超参）并
 // 返回 provider hint——路由命中与显式锁定共用这一份语义，避免两条路径漂移。
 func applyAgentConfigToMetadata(metadata map[string]string, cfg *agentrouter.AgentConfig, hint string) string {
+	recordAgentRequestReasoningPolicy(metadata, cfg.ReasoningPolicy)
 	if cfg.Provider != "" {
 		hint = cfg.Provider
 	}
@@ -5990,10 +5998,10 @@ func needsNoThinkInjection(model string) bool {
 // 前置，而桌面会话恒挂 20+ 工具 → 本地 qwen3/deepseek-r1 永远拿不到 /no_think → 思考模式在
 // CPU 上生成海量推理，9B 真机单条 120s+（"用一句话说你好"都超时）。/no_think 只抑制 <think>
 // 冗长推理块、**不阻止工具调用**，故有无工具都应注入；仅当用户显式开「深度思考」(thinking==on)
-// 才尊重保留思考。云端 thinking 模型不受此困扰（不慢），且非本地不注入。
+// 或自动推理时保留模型行为。云端 thinking 模型不受此困扰（不慢），且非本地不注入。
 func shouldInjectNoThink(isLocal, hasTools bool, thinkingMeta, model string) bool {
 	_ = hasTools // 保留在签名以标注「工具存在不再阻断注入」，不参与判定
-	return isLocal && thinkingMeta != "on" && needsNoThinkInjection(model)
+	return isLocal && thinkingMeta != "on" && thinkingMeta != "auto" && needsNoThinkInjection(model)
 }
 
 // injectNoThink 在 system prompt 末尾追加 /no_think 指令

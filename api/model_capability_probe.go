@@ -27,6 +27,7 @@ import (
 const (
 	// ModelCapabilityProbePolicyVersion 变更时，旧回执不再作为当前能力事实投影。
 	ModelCapabilityProbePolicyVersion = "v4"
+	nativeReasoningProbePolicyVersion = "native-reasoning-v1"
 	modelCapabilityProbeTimeout       = 15 * time.Second
 	modelCapabilityProbeOutputTokens  = 128
 	maxModelCapabilityProbeKinds      = 4
@@ -38,6 +39,7 @@ const (
 	modelCapabilityProbeKindVision    = "vision"
 	modelCapabilityProbeKindTools     = "tools"
 	modelCapabilityProbeKindEmbedding = "embedding"
+	modelCapabilityProbeKindReasoning = "reasoning"
 )
 
 var modelCapabilityProbeKinds = []string{
@@ -46,14 +48,23 @@ var modelCapabilityProbeKinds = []string{
 	modelCapabilityProbeKindVision,
 	modelCapabilityProbeKindTools,
 	modelCapabilityProbeKindEmbedding,
+	modelCapabilityProbeKindReasoning,
+}
+
+func modelCapabilityProbePolicyVersion(kind string) string {
+	if kind == modelCapabilityProbeKindReasoning {
+		return nativeReasoningProbePolicyVersion
+	}
+	return ModelCapabilityProbePolicyVersion
 }
 
 var (
-	errModelCapabilityProbeEmptyResponse   = errors.New("model capability probe received an empty response")
-	errModelCapabilityProbeOutputTruncated = errors.New("model capability probe output was truncated")
-	errModelCapabilityProbeUnsupported     = errors.New("model capability probe is unsupported by the provider")
-	errModelCapabilityProbeCatalogMiss     = errors.New("model capability probe catalog did not contain the target model")
-	errModelCapabilityProbeConfigStale     = errors.New("model capability probe configuration became stale")
+	errModelCapabilityProbeEmptyResponse    = errors.New("model capability probe received an empty response")
+	errModelCapabilityProbeOutputTruncated  = errors.New("model capability probe output was truncated")
+	errModelCapabilityProbeUnsupported      = errors.New("model capability probe is unsupported by the provider")
+	errModelCapabilityProbeCatalogMiss      = errors.New("model capability probe catalog did not contain the target model")
+	errModelCapabilityProbeConfigStale      = errors.New("model capability probe configuration became stale")
+	errModelCapabilityProbeReasoningUnknown = errors.New("model capability probe received no positive native reasoning evidence")
 )
 
 // LLMModelCapabilityProbeRequest 只接受已保存 Provider 的稳定身份和目标模型。
@@ -74,6 +85,8 @@ type LLMModelCapabilityProbeResult struct {
 	ProbeStartedAt     int64  `json:"probe_started_at"`
 	LatencyMS          int64  `json:"latency_ms"`
 	Persisted          bool   `json:"persisted"`
+	ReasoningTokens    int    `json:"reasoning_tokens,omitempty"`
+	ReportedModel      string `json:"reported_model,omitempty"`
 }
 
 // LLMModelCapabilityProbeResponse 按请求顺序返回最多四项串行探测结果。
@@ -97,21 +110,26 @@ type LLMModelCapabilityProbeReceiptResponse struct {
 // LLMEffectiveModelResponse 将静态授权、探测事实与实时可用性拆开输出。
 // Capabilities 永远是静态路由授权；ProbeReceipts 不会反写配置。
 type LLMEffectiveModelResponse struct {
-	ID               string                                   `json:"id"`
-	DisplayName      string                                   `json:"display_name,omitempty"`
-	Capabilities     []string                                 `json:"capabilities"`
-	CapabilityStates map[string]string                        `json:"capability_states"`
-	RouteEligible    bool                                     `json:"route_eligible"`
-	Availability     string                                   `json:"availability"`
-	ProbeReceipts    []LLMModelCapabilityProbeReceiptResponse `json:"probe_receipts"`
+	ID                               string                                   `json:"id"`
+	DisplayName                      string                                   `json:"display_name,omitempty"`
+	Capabilities                     []string                                 `json:"capabilities"`
+	CapabilityStates                 map[string]string                        `json:"capability_states"`
+	RouteEligible                    bool                                     `json:"route_eligible"`
+	Availability                     string                                   `json:"availability"`
+	ProbeReceipts                    []LLMModelCapabilityProbeReceiptResponse `json:"probe_receipts"`
+	EffectiveNativeReasoningSupport  string                                   `json:"effective_native_reasoning_support"`
+	NativeReasoningSourceFingerprint string                                   `json:"native_reasoning_source_fingerprint"`
 }
 
 type modelCapabilityProbeCandidate struct {
-	providerInstanceID string
-	providerType       string
-	modelID            string
-	configFingerprint  string
-	descriptor         llmConnectionTestProvider
+	providerInstanceID      string
+	providerType            string
+	modelID                 string
+	configFingerprint       string
+	nativeConfigFingerprint string
+	descriptor              llmConnectionTestProvider
+	textDeclared            bool
+	probeKind               string
 }
 
 func normalizeModelCapabilityProbeKinds(input []string) ([]string, error) {
@@ -124,7 +142,8 @@ func normalizeModelCapabilityProbeKinds(input []string) ([]string, error) {
 			modelCapabilityProbeKindText,
 			modelCapabilityProbeKindVision,
 			modelCapabilityProbeKindTools,
-			modelCapabilityProbeKindEmbedding:
+			modelCapabilityProbeKindEmbedding,
+			modelCapabilityProbeKindReasoning:
 		default:
 			return nil, fmt.Errorf("unsupported model capability probe kind %q", raw)
 		}
@@ -184,8 +203,12 @@ func modelCapabilityProbeCandidateMatches(
 			continue
 		}
 		providerType := canonicalProviderProbeType(providerKey, provider)
+		fingerprint := modelCapabilityProbeConfigFingerprint(providerType, provider, candidate.modelID)
+		if candidate.probeKind == modelCapabilityProbeKindReasoning {
+			fingerprint = nativeReasoningSourceFingerprint(providerKey, provider, candidate.modelID)
+		}
 		return modelCapabilityProbeModelIsSaved(provider, candidate.modelID) &&
-			modelCapabilityProbeConfigFingerprint(providerType, provider, candidate.modelID) == candidate.configFingerprint
+			fingerprint == candidate.configFingerprint
 	}
 	return false
 }
@@ -218,10 +241,12 @@ func (s *Server) modelCapabilityProbeCandidate(
 			return modelCapabilityProbeCandidate{}, errors.New("saved provider credential is unavailable")
 		}
 		return modelCapabilityProbeCandidate{
-			providerInstanceID: providerInstanceID,
-			providerType:       providerType,
-			modelID:            modelID,
-			configFingerprint:  modelCapabilityProbeConfigFingerprint(providerType, provider, modelID),
+			providerInstanceID:      providerInstanceID,
+			providerType:            providerType,
+			modelID:                 modelID,
+			configFingerprint:       modelCapabilityProbeConfigFingerprint(providerType, provider, modelID),
+			nativeConfigFingerprint: nativeReasoningSourceFingerprint(providerKey, provider, modelID),
+			textDeclared:            config.ModelHasCapability(provider, modelID, config.LLMModelCapabilityText),
 			descriptor: llmConnectionTestProvider{
 				ProviderInstanceID:   providerInstanceID,
 				Type:                 providerType,
@@ -272,6 +297,8 @@ func modelCapabilityProbeFailureCode(err error) string {
 		return "PROBE_KIND_UNSUPPORTED"
 	case errors.Is(err, errModelCapabilityProbeCatalogMiss):
 		return "PROBE_CATALOG_MODEL_MISSING"
+	case errors.Is(err, errModelCapabilityProbeReasoningUnknown):
+		return "PROBE_REASONING_EVIDENCE_UNAVAILABLE"
 	}
 	if classification, ok := llmrouter.ClassifyLLMError(err); ok {
 		return string(classification.Code)
@@ -325,6 +352,38 @@ func modelCapabilityProbeTextRequest(modelID string) hexagon.CompletionRequest {
 		}},
 		MaxTokens: modelCapabilityProbeOutputTokens,
 	}
+}
+
+func modelCapabilityProbeReasoningRequest(modelID string) hexagon.CompletionRequest {
+	// 仅启用 SDK 的结构化回执；unknown 合同不会发送任何推理控制字段。
+	return hexagon.CompletionRequest{
+		Model: modelID,
+		Metadata: map[string]any{
+			llm.ReasoningCapabilityMetadataKey: llm.ReasoningCapability{Support: llm.ReasoningUnknown},
+			"thinking":                         false,
+		},
+		Messages:  []hexagon.Message{{Role: "user", Content: "请求出满足 x+y=17、2x−3y=4 的 x 和 y，只输出最终答案。"}},
+		MaxTokens: 1024,
+	}
+}
+
+func (s *Server) executeNativeReasoningProbe(ctx context.Context, candidate modelCapabilityProbeCandidate) (*hexagon.CompletionResponse, error) {
+	if !candidate.textDeclared {
+		return nil, errModelCapabilityProbeUnsupported
+	}
+	provider := llmTestProviderFactory(candidate.descriptor)
+	if provider == nil {
+		return nil, errModelCapabilityProbeUnsupported
+	}
+	response, err := provider.Complete(ctx, modelCapabilityProbeReasoningRequest(candidate.modelID))
+	if err != nil {
+		return nil, err
+	}
+	// 完整成功响应的正用量即可证明原生执行；正文为空不证明文本连通。
+	if response == nil || response.ReasoningReceipt == nil || response.ReasoningReceipt.ReasoningTokens <= 0 {
+		return response, errModelCapabilityProbeReasoningUnknown
+	}
+	return response, nil
 }
 
 func modelCapabilityProbeVisionRequest(modelID string) hexagon.CompletionRequest {
@@ -446,6 +505,10 @@ func (s *Server) executeModelCapabilityProbe(
 	if kind == modelCapabilityProbeKindCatalog {
 		return s.executeModelCapabilityCatalogProbe(ctx, candidate)
 	}
+	if kind == modelCapabilityProbeKindReasoning {
+		_, err := s.executeNativeReasoningProbe(ctx, candidate)
+		return err
+	}
 	provider := llmTestProviderFactory(candidate.descriptor)
 	if provider == nil {
 		return errModelCapabilityProbeUnsupported
@@ -534,6 +597,11 @@ func (s *Server) executeAndPersistModelCapabilityProbe(
 	ctx context.Context, candidate modelCapabilityProbeCandidate, kind string,
 	timeouts ...time.Duration,
 ) (LLMModelCapabilityProbeResult, error) {
+	if kind == modelCapabilityProbeKindReasoning {
+		// 原生回执与声明共用来源身份；旧协议探测继续使用原指纹。
+		candidate.probeKind = kind
+		candidate.configFingerprint = candidate.nativeConfigFingerprint
+	}
 	probeStartedAt := nextProviderProbeStartedAt()
 	timeout := modelCapabilityProbeTimeout
 	if kind == modelCapabilityProbeKindVision && len(timeouts) > 0 && timeouts[0] > 0 {
@@ -543,7 +611,13 @@ func (s *Server) executeAndPersistModelCapabilityProbe(
 	probeCtx = egress.WithRequest(probeCtx, egress.PurposeProviderProbe, "", egress.ClassGeneral)
 	probeCtx = llm.WithOperationSafety(probeCtx, llm.OperationSafetyNonIdempotent)
 	started := time.Now()
-	probeErr := s.executeModelCapabilityProbe(probeCtx, candidate, kind)
+	var probeErr error
+	var reasoningResponse *hexagon.CompletionResponse
+	if kind == modelCapabilityProbeKindReasoning {
+		reasoningResponse, probeErr = s.executeNativeReasoningProbe(probeCtx, candidate)
+	} else {
+		probeErr = s.executeModelCapabilityProbe(probeCtx, candidate, kind)
+	}
 	latencyMS := time.Since(started).Milliseconds()
 	cancel()
 	testedAt := time.Now().UnixMilli()
@@ -557,17 +631,22 @@ func (s *Server) executeAndPersistModelCapabilityProbe(
 	persisted, err := s.persistModelCapabilityProbeReceipt(ctx, candidate, &storage.ModelCapabilityProbeReceipt{
 		ProviderInstanceID: candidate.providerInstanceID,
 		ModelID:            candidate.modelID, ProbeKind: kind,
-		ProbePolicyVersion: ModelCapabilityProbePolicyVersion,
+		ProbePolicyVersion: modelCapabilityProbePolicyVersion(kind),
 		ConfigFingerprint:  candidate.configFingerprint,
 		Outcome:            outcome, FailureCode: failureCode,
 		TestedAt: testedAt, ProbeStartedAt: probeStartedAt, LatencyMS: latencyMS,
 	})
-	return LLMModelCapabilityProbeResult{
+	result := LLMModelCapabilityProbeResult{
 		ProbeKind: kind, Outcome: outcome, FailureCode: failureCode,
-		ProbePolicyVersion: ModelCapabilityProbePolicyVersion,
+		ProbePolicyVersion: modelCapabilityProbePolicyVersion(kind),
 		TestedAt:           testedAt, ProbeStartedAt: probeStartedAt, LatencyMS: latencyMS,
 		Persisted: persisted,
-	}, err
+	}
+	if kind == modelCapabilityProbeKindReasoning && probeErr == nil && reasoningResponse != nil {
+		result.ReasoningTokens = reasoningResponse.ReasoningReceipt.ReasoningTokens
+		result.ReportedModel = sanitizeProviderProbeMessage(reasoningResponse.Model, candidate.descriptor.APIKey)
+	}
+	return result, err
 }
 
 // handleProbeModelCapability POST /api/v1/config/llm/probe
@@ -636,7 +715,7 @@ func modelCapabilityProbeAvailability(
 	var latest *LLMModelCapabilityProbeReceiptResponse
 	for index := range receipts {
 		receipt := &receipts[index]
-		if receipt.ProbeKind == modelCapabilityProbeKindCatalog ||
+		if receipt.ProbeKind == modelCapabilityProbeKindCatalog || receipt.ProbeKind == modelCapabilityProbeKindReasoning ||
 			(latest != nil && receipt.TestedAt < latest.TestedAt) {
 			continue
 		}
@@ -677,9 +756,11 @@ func (s *Server) matchingModelCapabilityProbeReceipt(
 		logger.Warn("读取模型能力探测回执失败", "provider_instance_id", providerInstanceID, "model", modelID, "probe_kind", probeKind, "error", err)
 		return nil
 	}
-	if receipt == nil || receipt.ConfigFingerprint != modelCapabilityProbeConfigFingerprint(
-		canonicalProviderProbeType(providerKey, provider), provider, modelID,
-	) || receipt.ProbePolicyVersion != ModelCapabilityProbePolicyVersion {
+	fingerprint := modelCapabilityProbeConfigFingerprint(canonicalProviderProbeType(providerKey, provider), provider, modelID)
+	if probeKind == modelCapabilityProbeKindReasoning {
+		fingerprint = nativeReasoningSourceFingerprint(providerKey, provider, modelID)
+	}
+	if receipt == nil || receipt.ConfigFingerprint != fingerprint || receipt.ProbePolicyVersion != modelCapabilityProbePolicyVersion(probeKind) {
 		return nil
 	}
 	response := modelCapabilityProbeReceiptResponse(receipt)
@@ -691,9 +772,10 @@ func (s *Server) effectiveModelsForProvider(
 	providerKey string,
 	provider config.LLMProviderConfig,
 ) []LLMEffectiveModelResponse {
-	_, specs := config.NormalizeProviderModelSpecs(provider)
+	_, specs := nativeReasoningModelSpecs(providerKey, provider)
 	models := make([]LLMEffectiveModelResponse, 0, len(specs))
 	for _, spec := range specs {
+		nativeSupport := spec.NativeReasoningSupport
 		states := make(map[string]string, len(modelCapabilityProbeKinds)+len(spec.Capabilities))
 		for _, kind := range modelCapabilityProbeKinds {
 			states[kind] = "unknown"
@@ -710,6 +792,9 @@ func (s *Server) effectiveModelsForProvider(
 			receipts = append(receipts, *receipt)
 			if receipt.Outcome == "passed" {
 				states[kind] = "verified"
+				if kind == modelCapabilityProbeKindReasoning {
+					nativeSupport = config.LLMReasoningSupportSupported
+				}
 			} else {
 				states[kind] = "failed"
 			}
@@ -719,13 +804,15 @@ func (s *Server) effectiveModelsForProvider(
 			capabilities = []string{}
 		}
 		models = append(models, LLMEffectiveModelResponse{
-			ID:               spec.ID,
-			DisplayName:      spec.DisplayName,
-			Capabilities:     capabilities,
-			CapabilityStates: states,
-			RouteEligible:    config.ModelHasCapability(provider, spec.ID, config.LLMModelCapabilityText),
-			Availability:     modelCapabilityProbeAvailability(receipts),
-			ProbeReceipts:    receipts,
+			ID:                               spec.ID,
+			DisplayName:                      spec.DisplayName,
+			Capabilities:                     capabilities,
+			CapabilityStates:                 states,
+			RouteEligible:                    config.ModelHasCapability(provider, spec.ID, config.LLMModelCapabilityText),
+			Availability:                     modelCapabilityProbeAvailability(receipts),
+			ProbeReceipts:                    receipts,
+			EffectiveNativeReasoningSupport:  nativeSupport,
+			NativeReasoningSourceFingerprint: spec.NativeReasoningSourceFingerprint,
 		})
 	}
 	return models

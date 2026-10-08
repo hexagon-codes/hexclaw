@@ -3846,7 +3846,7 @@ paths:
     post:
       summary: 执行精确模型能力探测
       description: 64 KiB JSON；只接受已保存稳定Provider
-        ID及精确model，不接收凭据/端点。kind大小写归一、去重后1..4项，五种候选catalog/text/vision/tools/embedding。逐项串行调用并持久回执；200结果可为failed，不等于全通过。
+        ID及精确model，不接收凭据/端点。kind大小写归一、去重后1..4项，候选catalog/text/vision/tools/embedding/reasoning。逐项串行调用并持久回执；reasoning仅显式请求时执行，使用独立策略且不发送推理控制参数。完整成功响应的正推理token可证明原生用量，未获正证保持unknown，不影响文本可用性或控制合同。200结果可为failed，不等于全通过。
       tags:
         - models-system-media
       operationId: models_handleProbeModelCapability_post
@@ -3898,8 +3898,10 @@ paths:
       x-availability:
         - always registered
       x-description-en: 64 KiB JSON; saved stable identity and exact model only, no credentials/endpoints.
-        Case-normalized/deduplicated 1..4 distinct kinds from catalog/text/vision/tools/embedding. Executes
-        sequentially and persists receipts; HTTP 200 can include failed outcomes.
+        Case-normalized/deduplicated 1..4 distinct kinds from catalog/text/vision/tools/embedding/reasoning. Executes
+        sequentially and persists receipts; reasoning runs only when explicitly requested, preserves structured
+        positive usage without sending control parameters, and does not alter text readiness or control contracts.
+        HTTP 200 can include failed outcomes; absent native evidence remains unknown.
       x-summary-en: Probe exact model capabilities
       requestBody:
         required: true
@@ -20145,6 +20147,7 @@ components:
           type: integer
         metadata:
           type: object
+          description: 请求级 thinking 可取 on、off、auto；thinking_effort 在 on 时指定强度。显式 auto 覆盖智能体和全局策略且不发送推理控制字段；省略时依次继承智能体与全局策略。实际开关和强度仅按当前模型可信控制合同执行，原生推理能力不证明可手动控制。
           additionalProperties:
             type: string
         attachments:
@@ -24197,6 +24200,13 @@ components:
           type: string
         is_custom:
           type: boolean
+        native_reasoning_support:
+          type: string
+          enum: [supported, unsupported, unknown]
+          description: Static native declaration; independent of reasoning controls
+        native_reasoning_source_fingerprint:
+          type: string
+          description: Server-generated source binding for this exact instance, model and execution target; preserve on round-trip
         capabilities:
           type: array
           items:
@@ -24264,6 +24274,7 @@ components:
             - vision
             - tools
             - embedding
+            - reasoning
         outcome:
           type: string
           enum:
@@ -24295,6 +24306,15 @@ components:
           type: string
         display_name:
           type: string
+        effective_native_reasoning_support:
+          type: string
+          readOnly: true
+          enum: [supported, unsupported, unknown]
+          description: Current-source declaration or matched positive native receipt; never write back as a static declaration
+        native_reasoning_source_fingerprint:
+          type: string
+          readOnly: true
+          description: Current exact-model source binding; independent of the default model
         capabilities:
           type: array
           items:
@@ -24408,6 +24428,10 @@ components:
           description: Stable server identity; preserve when renaming
         display_name:
           type: string
+        native_reasoning_source_fingerprint:
+          type: string
+          readOnly: true
+          description: Current provider target scope for catalog cache; stable across display-name and default-model changes
         base_url:
           type: string
         model:
@@ -24759,6 +24783,13 @@ components:
           type: string
         name:
           type: string
+        native_reasoning_support:
+          type: string
+          enum: [supported, unsupported, unknown]
+          description: Explicit provider native declaration; omitted when not declared
+        native_reasoning_source_fingerprint:
+          type: string
+          description: Server-generated exact-model source binding
         context_length:
           type: integer
         prompt_price:
@@ -24810,6 +24841,7 @@ components:
               - vision
               - tools
               - embedding
+              - reasoning
           minItems: 1
           maxItems: 4
           uniqueItems: false
@@ -24829,6 +24861,7 @@ components:
             - vision
             - tools
             - embedding
+            - reasoning
         outcome:
           type: string
           enum:
@@ -24848,6 +24881,12 @@ components:
           type: integer
         persisted:
           type: boolean
+        reasoning_tokens:
+          type: integer
+          description: Optional structured native usage from the same successful reasoning request
+        reported_model:
+          type: string
+          description: Optional sanitized provider model ID; legal aliases do not have to equal the requested model
       required:
         - probe_kind
         - outcome

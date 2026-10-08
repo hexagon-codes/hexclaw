@@ -42,29 +42,30 @@ type LLMConfigResponse struct {
 
 // LLMProviderConfigResponse 脱敏后的 Provider 配置
 type LLMProviderConfigResponse struct {
-	ProviderInstanceID    string                               `json:"provider_instance_id"`
-	DisplayName           string                               `json:"display_name,omitempty"`
-	CredentialRef         string                               `json:"credential_ref,omitempty"`
-	CredentialPresent     bool                                 `json:"credential_present"`
-	APIKey                string                               `json:"api_key"`
-	APIKeyLength          int                                  `json:"api_key_length,omitempty"`
-	BaseURL               string                               `json:"base_url"`
-	Model                 string                               `json:"model"`
-	Models                []string                             `json:"models"`
-	ModelSpecs            []config.LLMProviderModelSpec        `json:"model_specs"`
-	ModelSpecsMode        string                               `json:"model_specs_mode"`
-	Compatible            string                               `json:"compatible"`
-	Locality              string                               `json:"locality,omitempty"`
-	LocalitySource        string                               `json:"locality_source,omitempty"`
-	ConfirmedEndpointHost string                               `json:"confirmed_endpoint_host,omitempty"`
-	PrivateNetworkAccess  *config.ProviderPrivateNetworkAccess `json:"private_network_access,omitempty"`
-	HTTPAuthorization     *config.ProviderHTTPAuthorization    `json:"http_authorization,omitempty"`
-	ToolsEnabled          *bool                                `json:"tools_enabled,omitempty"`
-	MaxTools              int                                  `json:"max_tools,omitempty"`
-	Enabled               *bool                                `json:"enabled,omitempty"`
-	KeepAlive             string                               `json:"keep_alive,omitempty"`
-	NumCtx                int                                  `json:"num_ctx,omitempty"`
-	ProbeReceipt          *LLMProviderProbeReceiptResponse     `json:"probe_receipt,omitempty"`
+	ProviderInstanceID               string                               `json:"provider_instance_id"`
+	NativeReasoningSourceFingerprint string                               `json:"native_reasoning_source_fingerprint"`
+	DisplayName                      string                               `json:"display_name,omitempty"`
+	CredentialRef                    string                               `json:"credential_ref,omitempty"`
+	CredentialPresent                bool                                 `json:"credential_present"`
+	APIKey                           string                               `json:"api_key"`
+	APIKeyLength                     int                                  `json:"api_key_length,omitempty"`
+	BaseURL                          string                               `json:"base_url"`
+	Model                            string                               `json:"model"`
+	Models                           []string                             `json:"models"`
+	ModelSpecs                       []config.LLMProviderModelSpec        `json:"model_specs"`
+	ModelSpecsMode                   string                               `json:"model_specs_mode"`
+	Compatible                       string                               `json:"compatible"`
+	Locality                         string                               `json:"locality,omitempty"`
+	LocalitySource                   string                               `json:"locality_source,omitempty"`
+	ConfirmedEndpointHost            string                               `json:"confirmed_endpoint_host,omitempty"`
+	PrivateNetworkAccess             *config.ProviderPrivateNetworkAccess `json:"private_network_access,omitempty"`
+	HTTPAuthorization                *config.ProviderHTTPAuthorization    `json:"http_authorization,omitempty"`
+	ToolsEnabled                     *bool                                `json:"tools_enabled,omitempty"`
+	MaxTools                         int                                  `json:"max_tools,omitempty"`
+	Enabled                          *bool                                `json:"enabled,omitempty"`
+	KeepAlive                        string                               `json:"keep_alive,omitempty"`
+	NumCtx                           int                                  `json:"num_ctx,omitempty"`
+	ProbeReceipt                     *LLMProviderProbeReceiptResponse     `json:"probe_receipt,omitempty"`
 	// EffectiveModels 是服务端只读投影；探测事实不会被 PUT 写回 YAML。
 	EffectiveModels []LLMEffectiveModelResponse `json:"effective_models,omitempty"`
 }
@@ -683,30 +684,31 @@ func (s *Server) handleGetLLMConfig(w http.ResponseWriter, r *http.Request) {
 
 	providers := make(map[string]LLMProviderConfigResponse, len(llmCfg.Providers))
 	for name, p := range llmCfg.Providers {
-		modelSpecsMode, modelSpecs := config.NormalizeProviderModelSpecs(p)
+		modelSpecsMode, modelSpecs := nativeReasoningModelSpecs(name, p)
 		response := LLMProviderConfigResponse{
-			ProviderInstanceID:    config.EffectiveProviderInstanceID(name, p),
-			DisplayName:           p.DisplayName,
-			CredentialRef:         p.CredentialRef,
-			CredentialPresent:     strings.TrimSpace(p.APIKey) != "",
-			APIKey:                config.MaskAPIKey(p.APIKey),
-			APIKeyLength:          len(p.APIKey),
-			BaseURL:               p.BaseURL,
-			Model:                 p.Model,
-			Models:                p.Models,
-			ModelSpecs:            modelSpecs,
-			ModelSpecsMode:        modelSpecsMode,
-			Compatible:            p.Compatible,
-			Locality:              p.Locality,
-			LocalitySource:        p.LocalitySource,
-			ConfirmedEndpointHost: p.ConfirmedEndpointHost,
-			PrivateNetworkAccess:  providerPrivateNetworkAccessResponse(p.PrivateNetworkAccess),
-			HTTPAuthorization:     providerHTTPAuthorizationResponse(p.HTTPAuthorization),
-			ToolsEnabled:          p.ToolsEnabled,
-			MaxTools:              p.MaxTools,
-			Enabled:               p.Enabled,
-			KeepAlive:             p.KeepAlive,
-			NumCtx:                p.NumCtx,
+			ProviderInstanceID:               config.EffectiveProviderInstanceID(name, p),
+			NativeReasoningSourceFingerprint: nativeReasoningSourceFingerprint(name, p, ""),
+			DisplayName:                      p.DisplayName,
+			CredentialRef:                    p.CredentialRef,
+			CredentialPresent:                strings.TrimSpace(p.APIKey) != "",
+			APIKey:                           config.MaskAPIKey(p.APIKey),
+			APIKeyLength:                     len(p.APIKey),
+			BaseURL:                          p.BaseURL,
+			Model:                            p.Model,
+			Models:                           p.Models,
+			ModelSpecs:                       modelSpecs,
+			ModelSpecsMode:                   modelSpecsMode,
+			Compatible:                       p.Compatible,
+			Locality:                         p.Locality,
+			LocalitySource:                   p.LocalitySource,
+			ConfirmedEndpointHost:            p.ConfirmedEndpointHost,
+			PrivateNetworkAccess:             providerPrivateNetworkAccessResponse(p.PrivateNetworkAccess),
+			HTTPAuthorization:                providerHTTPAuthorizationResponse(p.HTTPAuthorization),
+			ToolsEnabled:                     p.ToolsEnabled,
+			MaxTools:                         p.MaxTools,
+			Enabled:                          p.Enabled,
+			KeepAlive:                        p.KeepAlive,
+			NumCtx:                           p.NumCtx,
 		}
 		response.ProbeReceipt = s.matchingProviderProbeReceipt(r.Context(), name, p)
 		response.EffectiveModels = s.effectiveModelsForProvider(r.Context(), name, p)
@@ -937,6 +939,7 @@ func (s *Server) updateLLMConfig(w http.ResponseWriter, r *http.Request, req LLM
 					candidate.OllamaTargetBaseURL = targetBase
 				}
 			}
+			resolveProviderNativeReasoning(name, &candidate, credentialOld, credentialOldExists, p)
 			if err := config.ValidateProviderModelSpecs(candidate); err != nil {
 				writeJSON(w, http.StatusBadRequest, map[string]string{
 					"error": fmt.Sprintf("provider %q 的模型能力配置非法: %v", name, err),
@@ -1305,6 +1308,8 @@ func (s *Server) handleTestLLMConfig(w http.ResponseWriter, r *http.Request) {
 // 向 {base_url}/models 发请求（OpenAI 兼容格式），返回标准化的模型列表。
 func (s *Server) handleFetchProviderModels(w http.ResponseWriter, r *http.Request) {
 	ollamaTargetBase := ""
+	var nativeSourceProvider config.LLMProviderConfig
+	nativeSourceProviderKey := ""
 	var req struct {
 		ProviderInstanceID   string                              `json:"provider_instance_id,omitempty"`
 		BaseURL              string                              `json:"base_url"`
@@ -1335,6 +1340,8 @@ func (s *Server) handleFetchProviderModels(w http.ResponseWriter, r *http.Reques
 			if provider.HasOllamaTarget() {
 				ollamaTargetBase = provider.OllamaTargetBaseURL
 			}
+			nativeSourceProvider = provider
+			nativeSourceProviderKey = providerKey
 			providerFound = true
 			break
 		}
@@ -1437,6 +1444,9 @@ func (s *Server) handleFetchProviderModels(w http.ResponseWriter, r *http.Reques
 	models := make([]providerModelInfo, 0, len(rawModels))
 	for _, raw := range rawModels {
 		if m, ok := parseProviderModel(raw); ok {
+			if nativeSourceProviderKey != "" {
+				m.NativeReasoningSourceFingerprint = nativeReasoningSourceFingerprint(nativeSourceProviderKey, nativeSourceProvider, m.ID)
+			}
 			models = append(models, m)
 		}
 	}
@@ -1454,16 +1464,18 @@ func (s *Server) handleFetchProviderModels(w http.ResponseWriter, r *http.Reques
 // （pricing / architecture.input_modalities / supported_parameters / context_length）。
 // 标准 OpenAI /models 只有裸 id，这些字段会缺省——前端按"有则展示、无则启发式兜底"处理。
 type providerModelInfo struct {
-	Capabilities     *[]string                       `json:"capabilities,omitempty"`
-	ID               string                          `json:"id"`
-	Name             string                          `json:"name,omitempty"`
-	ContextLength    int64                           `json:"context_length,omitempty"`
-	PromptPrice      string                          `json:"prompt_price,omitempty"`
-	CompletionPrice  string                          `json:"completion_price,omitempty"`
-	InputModalities  []string                        `json:"input_modalities,omitempty"`
-	SupportsTools    bool                            `json:"supports_tools,omitempty"`
-	ReasoningSupport string                          `json:"reasoning_support,omitempty"`
-	ReasoningControl *config.LLMReasoningControlSpec `json:"reasoning_control,omitempty"`
+	Capabilities                     *[]string                       `json:"capabilities,omitempty"`
+	ID                               string                          `json:"id"`
+	Name                             string                          `json:"name,omitempty"`
+	ContextLength                    int64                           `json:"context_length,omitempty"`
+	PromptPrice                      string                          `json:"prompt_price,omitempty"`
+	CompletionPrice                  string                          `json:"completion_price,omitempty"`
+	InputModalities                  []string                        `json:"input_modalities,omitempty"`
+	SupportsTools                    bool                            `json:"supports_tools,omitempty"`
+	ReasoningSupport                 string                          `json:"reasoning_support,omitempty"`
+	ReasoningControl                 *config.LLMReasoningControlSpec `json:"reasoning_control,omitempty"`
+	NativeReasoningSupport           string                          `json:"native_reasoning_support,omitempty"`
+	NativeReasoningSourceFingerprint string                          `json:"native_reasoning_source_fingerprint,omitempty"`
 }
 
 // parseProviderModel 容错解析单个模型条目。
@@ -1532,7 +1544,30 @@ func parseProviderModel(raw json.RawMessage) (providerModelInfo, bool) {
 		}
 	}
 	info.ReasoningSupport, info.ReasoningControl = parseProviderModelReasoning(m, id)
+	info.NativeReasoningSupport = parseProviderModelNativeReasoning(m)
 	return info, true
+}
+
+func parseProviderModelNativeReasoning(m map[string]any) string {
+	if raw, exists := m["native_reasoning_support"]; exists {
+		if support, ok := raw.(string); ok {
+			switch support {
+			case config.LLMReasoningSupportSupported, config.LLMReasoningSupportUnsupported, config.LLMReasoningSupportUnknown:
+				return support
+			}
+		}
+		return config.LLMReasoningSupportUnknown
+	}
+	if raw, exists := m["supports_reasoning"]; exists {
+		if supported, ok := raw.(bool); ok {
+			if supported {
+				return config.LLMReasoningSupportSupported
+			}
+			return config.LLMReasoningSupportUnsupported
+		}
+		return config.LLMReasoningSupportUnknown
+	}
+	return ""
 }
 
 func parseProviderModelReasoning(m map[string]any, modelID string) (string, *config.LLMReasoningControlSpec) {

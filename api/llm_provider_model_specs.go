@@ -1,11 +1,82 @@
 package api
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"strings"
 
 	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/llmrouter"
 )
+
+// 原生能力来源绑定物理实例和执行目标；展示名与默认模型不参与来源身份。
+func nativeReasoningSourceFingerprint(providerKey string, provider config.LLMProviderConfig, modelID string) string {
+	domain := "native_reasoning/model/v1"
+	probeModel := modelID
+	if modelID == "" {
+		domain = "native_reasoning/provider/v1"
+		probeModel = "native_reasoning_source"
+	}
+	// 自定义别名最终使用同一 OpenAI 适配器，不让展示名称制造新的来源。
+	providerType := canonicalProviderProbeType(providerKey, provider)
+	if llmrouter.UsesOllamaNativeAdapter(providerType, provider) {
+		providerType = "ollama"
+	} else if providerType != "anthropic" {
+		providerType = "openai"
+	}
+	payload := domain + "\x00" + config.EffectiveProviderInstanceID(providerKey, provider) + "\x00" + modelID + "\x00" +
+		modelCapabilityProbeConfigFingerprint(providerType, provider, probeModel)
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(payload)))
+}
+
+func nativeReasoningModelSpecs(providerKey string, provider config.LLMProviderConfig) (string, []config.LLMProviderModelSpec) {
+	mode, specs := config.NormalizeProviderModelSpecs(provider)
+	for i := range specs {
+		fingerprint := nativeReasoningSourceFingerprint(providerKey, provider, specs[i].ID)
+		if specs[i].NativeReasoningSourceFingerprint != fingerprint {
+			specs[i].NativeReasoningSupport = config.LLMReasoningSupportUnknown
+		}
+		if specs[i].NativeReasoningSupport == "" {
+			specs[i].NativeReasoningSupport = config.LLMReasoningSupportUnknown
+		}
+		specs[i].NativeReasoningSourceFingerprint = fingerprint
+	}
+	return mode, specs
+}
+
+// 写入只接纳当前来源；同来源旧客户端省略字段仍保留已保存声明。
+func resolveProviderNativeReasoning(providerKey string, candidate *config.LLMProviderConfig, old config.LLMProviderConfig, oldExists bool, requested LLMProviderConfigUpdateItem) {
+	oldSpecs := make(map[string]config.LLMProviderModelSpec)
+	if oldExists && config.EffectiveProviderInstanceID(providerKey, *candidate) == config.EffectiveProviderInstanceID(providerKey, old) {
+		_, normalized := config.NormalizeProviderModelSpecs(old)
+		for _, spec := range normalized {
+			oldSpecs[spec.ID] = spec
+		}
+	}
+	requestedSpecs := make(map[string]config.LLMProviderModelSpec)
+	if requested.ModelSpecs != nil {
+		for _, spec := range *requested.ModelSpecs {
+			requestedSpecs[spec.ID] = spec
+		}
+	}
+	for i := range candidate.ModelSpecs {
+		spec := &candidate.ModelSpecs[i]
+		fingerprint := nativeReasoningSourceFingerprint(providerKey, *candidate, spec.ID)
+		incoming, supplied := requestedSpecs[spec.ID]
+		if !supplied || incoming.NativeReasoningSupport == "" {
+			previous := oldSpecs[spec.ID]
+			if previous.NativeReasoningSourceFingerprint == fingerprint {
+				spec.NativeReasoningSupport = previous.NativeReasoningSupport
+				spec.NativeReasoningSourceFingerprint = fingerprint
+				continue
+			}
+		}
+		if spec.NativeReasoningSourceFingerprint != fingerprint {
+			spec.NativeReasoningSupport = config.LLMReasoningSupportUnknown
+		}
+		spec.NativeReasoningSourceFingerprint = fingerprint
+	}
+}
 
 func resolveProviderInstanceID(
 	providerKey string,

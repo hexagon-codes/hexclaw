@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 
+	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/hexclaw/egress"
 )
 
@@ -12,7 +13,7 @@ import (
 //   1) 分类器 isToolUnsupportedError / isLocalRuntimeUnavailable —— 供 react.go 的
 //      工具循环判定是否可“去工具重试”降级 / 是否本地运行时根本起不来。
 //   2) friendlyLLMError —— 兜底把原始错误翻译成对用户友好、可操作的中文；Error()
-//      不含原始错误。仅保留 deadline/cancel 的类型化终态供内部账本对账，provider 细节仍只进日志。
+//      不含原始错误。仅保留标准终态及脱敏 HTTP 失败状态供内部账本判定，provider 细节仍只进日志。
 // 全部按 needle 小写子串匹配，模型/provider 无关。
 
 // toolUnsupportedNeedles 覆盖各家“不支持工具调用”的措辞（openrouter/openai 等）。
@@ -59,7 +60,7 @@ func isLocalRuntimeUnavailable(err error) bool {
 }
 
 // friendlyLLMError 把原始 LLM/provider 错误翻译成对用户友好、可操作的中文。
-// Error() 只返回友好中文；deadline/cancel 仅通过 Unwrap 暴露标准 context sentinel，
+// Error() 只返回友好中文；Unwrap 仅暴露标准 sentinel 或只有状态码的 HTTP 失败，
 // 不保留 provider 原始错误。nil 透传 nil。按“越具体越靠前”的优先级匹配。
 func friendlyLLMError(err error) error {
 	if err == nil {
@@ -91,9 +92,15 @@ func (e *friendlyLLMContextError) Error() string { return e.message }
 func (e *friendlyLLMContextError) Unwrap() error { return e.cause }
 
 func newFriendlyLLMError(message string, err error) error {
-	switch {
-	case errors.Is(err, egress.ErrDenied):
+	if errors.Is(err, egress.ErrDenied) {
 		return &friendlyLLMContextError{message: message, cause: egress.ErrDenied}
+	}
+	var providerErr *llm.ProviderError
+	if errors.As(err, &providerErr) && providerErr != nil && providerErr.StatusCode >= 400 && providerErr.StatusCode <= 599 {
+		// 已收到明确 HTTP 失败时保留状态；原始正文、请求信息与后续 context 错误均不进入错误链。
+		return &friendlyLLMContextError{message: message, cause: &llm.ProviderError{StatusCode: providerErr.StatusCode}}
+	}
+	switch {
 	case errors.Is(err, context.DeadlineExceeded):
 		return &friendlyLLMContextError{message: message, cause: context.DeadlineExceeded}
 	case errors.Is(err, context.Canceled):

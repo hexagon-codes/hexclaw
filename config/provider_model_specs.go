@@ -81,13 +81,15 @@ type LLMReasoningControlSpec struct {
 // Capabilities intentionally has no omitempty tag: explicit [] means
 // unclassified and must survive YAML/JSON round-trips.
 type LLMProviderModelSpec struct {
-	ID               string                   `yaml:"id" json:"id"`
-	DisplayName      string                   `yaml:"display_name,omitempty" json:"display_name,omitempty"`
-	IsCustom         bool                     `yaml:"is_custom,omitempty" json:"is_custom,omitempty"`
-	Capabilities     []string                 `yaml:"capabilities" json:"capabilities"`
-	ReasoningSupport string                   `yaml:"reasoning_support,omitempty" json:"reasoning_support,omitempty"`
-	ReasoningControl *LLMReasoningControlSpec `yaml:"reasoning_control,omitempty" json:"reasoning_control,omitempty"`
-	Embedding        *LLMEmbeddingModelSpec   `yaml:"embedding,omitempty" json:"embedding,omitempty"`
+	ID                               string                   `yaml:"id" json:"id"`
+	DisplayName                      string                   `yaml:"display_name,omitempty" json:"display_name,omitempty"`
+	IsCustom                         bool                     `yaml:"is_custom,omitempty" json:"is_custom,omitempty"`
+	Capabilities                     []string                 `yaml:"capabilities" json:"capabilities"`
+	ReasoningSupport                 string                   `yaml:"reasoning_support,omitempty" json:"reasoning_support,omitempty"`
+	ReasoningControl                 *LLMReasoningControlSpec `yaml:"reasoning_control,omitempty" json:"reasoning_control,omitempty"`
+	NativeReasoningSupport           string                   `yaml:"native_reasoning_support,omitempty" json:"native_reasoning_support,omitempty"`
+	NativeReasoningSourceFingerprint string                   `yaml:"native_reasoning_source_fingerprint,omitempty" json:"native_reasoning_source_fingerprint,omitempty"`
+	Embedding                        *LLMEmbeddingModelSpec   `yaml:"embedding,omitempty" json:"embedding,omitempty"`
 }
 
 // NewProviderInstanceID creates a stable opaque provider identity. It contains
@@ -207,6 +209,9 @@ func NormalizeProviderModelSpecs(provider LLMProviderConfig) (string, []LLMProvi
 				catalogSpec.IsCustom = spec.IsCustom
 				catalogSpec.ReasoningSupport = LLMReasoningSupportUnknown
 				catalogSpec.ReasoningControl = nil
+				nativeSpec := normalizeProviderModelReasoning(cloneProviderModelSpec(spec))
+				catalogSpec.NativeReasoningSupport = nativeSpec.NativeReasoningSupport
+				catalogSpec.NativeReasoningSourceFingerprint = nativeSpec.NativeReasoningSourceFingerprint
 				specs[i] = catalogSpec
 				continue
 			}
@@ -435,6 +440,14 @@ func normalizeReasoningSupport(support string) string {
 }
 
 func normalizeProviderModelReasoning(spec LLMProviderModelSpec) LLMProviderModelSpec {
+	// 原生执行能力独立于可控开关；缺省保留，非法声明不制造正证。
+	if spec.NativeReasoningSupport != "" {
+		switch spec.NativeReasoningSupport {
+		case LLMReasoningSupportSupported, LLMReasoningSupportUnsupported, LLMReasoningSupportUnknown:
+		default:
+			spec.NativeReasoningSupport = LLMReasoningSupportUnknown
+		}
+	}
 	spec.ReasoningSupport = normalizeReasoningSupport(spec.ReasoningSupport)
 	switch spec.ReasoningSupport {
 	case LLMReasoningSupportSupported:

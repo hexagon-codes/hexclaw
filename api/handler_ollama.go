@@ -108,13 +108,12 @@ type OllamaModel struct {
 	Family   string `json:"family,omitempty"`
 	Params   string `json:"parameter_size,omitempty"`
 	Quant    string `json:"quantization_level,omitempty"`
-	// Capabilities 模型真实能力（BUG-20260704）：直接透出 Ollama /api/tags 上报的
-	// capabilities（如 completion / vision / tools / thinking），由前端映射为模态徽章。
-	// 此前前端只按模型名查静态表猜能力 → qwen3.5:9b 等视觉模型被误判为纯文本。
+	// Capabilities 透出 Ollama 实际声明的能力；tags 缺省时从同一目标的 show 补全。
+	// 前端将 completion / vision / tools / thinking 等能力映射为既有标签。
 	Capabilities []string `json:"capabilities,omitempty"`
 }
 
-// ollamaTagsResponse 是 Ollama GET /api/tags 的响应结构（含 capabilities，新版 Ollama 已上报）。
+// ollamaTagsResponse 保留 GET /api/tags 的模型信息与可选能力声明。
 type ollamaTagsResponse struct {
 	Models []struct {
 		Name         string   `json:"name"`
@@ -193,6 +192,34 @@ func (s *Server) handleOllamaStatus(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			response.Body.Close()
+		}
+		// 旧版 tags 未声明能力时，只读取同一目标中精确模型的元数据，不按名称猜测。
+		for i := range status.Models {
+			model := &status.Models[i]
+			if model.Capabilities != nil || strings.TrimSpace(model.Name) == "" {
+				continue
+			}
+			body, _ := json.Marshal(struct {
+				Model string `json:"model"`
+			}{Model: model.Name})
+			showReq, requestErr := http.NewRequestWithContext(r.Context(), http.MethodPost, target.endpoint("/api/show"), bytes.NewReader(body))
+			if requestErr != nil {
+				continue
+			}
+			showReq.Header.Set("Content-Type", "application/json")
+			showResp, requestErr := client.Do(showReq)
+			if requestErr != nil {
+				continue
+			}
+			showBody, readErr := io.ReadAll(showResp.Body)
+			showResp.Body.Close()
+			var details struct {
+				Capabilities []string `json:"capabilities"`
+			}
+			if showResp.StatusCode != http.StatusOK || readErr != nil || json.Unmarshal(showBody, &details) != nil {
+				continue
+			}
+			model.Capabilities = details.Capabilities
 		}
 	}
 	status.Associated = len(target.AssociatedProviderInstanceIDs) > 0
