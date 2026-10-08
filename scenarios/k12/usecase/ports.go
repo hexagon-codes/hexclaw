@@ -459,6 +459,12 @@ type Solver interface {
 	Solve(ctx context.Context, problem, grade, constraint string) (SolveResult, error)
 }
 
+// ElementaryEquationClassifier 用纯内容证书校正课程查询输入，不执行模型或改写识读。
+// 未实现此可选能力的 Solver 仍保留原课程边界语义。
+type ElementaryEquationClassifier interface {
+	ElementaryEquationWithinCurriculum(problem string, allowedKnowledgePoints []string) bool
+}
+
 // FailedVerificationPayloadValidator 只识别持久化物理结果内同源的明确执行失败。
 // 缺失回执或合法非计算判断不被归为运行故障，调用者仍须核实调用归属。
 type FailedVerificationPayloadValidator interface {

@@ -106,6 +106,11 @@ func (a *SolveAdapter) UsesGradingPhysicalCalls() bool {
 	return ok && capable.SupportsSubAgentCallInterceptor()
 }
 
+// ElementaryEquationWithinCurriculum 复用精确解析与当前小学方法证书，不进入调用账本或模型。
+func (a *SolveAdapter) ElementaryEquationWithinCurriculum(problem string, allowedKnowledgePoints []string) bool {
+	return engine.ElementaryEquationWithinCurriculum(problem, allowedKnowledgePoints)
+}
+
 // FailedVerificationPayload 仅用于已有可信调用账本的来源核验，不从模型正文推断执行状态。
 func (a *SolveAdapter) FailedVerificationPayload(payload string) error {
 	var result engine.SubAgentResult

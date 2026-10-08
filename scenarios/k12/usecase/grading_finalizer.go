@@ -175,11 +175,11 @@ func (o *GradingOrchestrator) finalizeGradingPage(
 		!gradingFinalEntriesHaveTrustedConceptFacts(entries) {
 		coverage = k12.GradingFinalArtifactCoverageGeneralGuidance
 	}
-	canonicalMarkdown := renderCanonicalGradingFinal(entries, nil)
-	if coverage == k12.GradingFinalArtifactCoverageGeneralGuidance {
-		canonicalMarkdown += "\n\n## 说明\n\n" +
-			"本次没有可核验的课本依据，以上批改与家长讲法为通用参考。"
+	taskIntent, err := o.persistedImageTaskPhotoIntent(ctx, job.Record.AgentName, job.Fields, run.req.TaskIntent)
+	if err != nil {
+		return k12.GradingFinalArtifact{}, err
 	}
+	canonicalMarkdown := renderCanonicalFinalForTask(entries, taskIntent, coverage)
 	artifact := k12.GradingFinalArtifact{
 		AgentName:                 job.Record.AgentName,
 		JobID:                     job.Record.RecordID,
@@ -677,6 +677,64 @@ func validateRecoveredFinalTutoringTips(
 		return fmt.Errorf("durable result per-problem section contract changed")
 	}
 	return nil
+}
+
+// 三个终稿入口共用任务语义投影，原批改正文与既有来源摘要保持独立。
+func renderCanonicalFinalForTask(entries []gradingFinalEntry, intent PhotoTaskIntent, coverage k12.GradingFinalArtifactCoverageStatus) string {
+	markdown := renderCanonicalGradingFinal(entries, nil)
+	modeWord := "批改"
+	if intent == PhotoTaskBlankWorksheet {
+		markdown = renderCanonicalBlankWorksheetFinal(entries)
+		modeWord = "解题"
+	}
+	if coverage == k12.GradingFinalArtifactCoverageGeneralGuidance {
+		markdown += "\n\n## 说明\n\n本次没有可核验的课本依据，以上" + modeWord + "与家长讲法为通用参考。"
+	}
+	return markdown
+}
+
+func renderCanonicalBlankWorksheetFinal(entries []gradingFinalEntry) string {
+	var out strings.Builder
+	out.WriteString("# 空白卷 · 家长讲题指南\n\n## 解题摘要\n\n")
+	solvedCount := 0
+	for _, entry := range entries {
+		if entry.assessment != nil && entry.assessment.Status == k12.GradingAssessmentBlankSolved {
+			solvedCount++
+		}
+	}
+	fmt.Fprintf(&out, "**共 %d 题 · %d 题已解答", len(entries), solvedCount)
+	if unresolved := len(entries) - solvedCount; unresolved > 0 {
+		fmt.Fprintf(&out, " · %d 题未解答", unresolved)
+	}
+	out.WriteString("**\n\n")
+	for _, entry := range entries {
+		label := RecognizedQuestionSourceDisplayLabel(entry.question)
+		if label == "" {
+			label = "题目位置待确认"
+		}
+		fmt.Fprintf(&out, "### %s\n\n", label)
+		if question := strings.TrimSpace(entry.question.CanonicalMarkdown); question != "" {
+			out.WriteString(question + "\n\n")
+		}
+		status := "未解答"
+		if entry.assessment != nil {
+			switch entry.assessment.Status {
+			case k12.GradingAssessmentBlankSolved:
+				status = "已解答"
+			case k12.GradingAssessmentAnswerUnclear:
+				status = "无法识别"
+			case k12.GradingAssessmentOutOfScope:
+				status = "超出当前年级范围"
+			}
+		}
+		fmt.Fprintf(&out, "**解题状态：** %s\n\n", status)
+		if entry.assessment != nil && entry.assessment.Status == k12.GradingAssessmentBlankSolved {
+			if details, itemStatus, ok := RenderCanonicalGradingAssessmentDetails(entry.assessment.ResultJSON); ok && itemStatus == PhotoBlankSolved && details != "" {
+				out.WriteString(details + "\n\n")
+			}
+		}
+	}
+	return strings.TrimSpace(out.String())
 }
 
 func renderCanonicalGradingFinal(

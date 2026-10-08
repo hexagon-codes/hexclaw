@@ -7,6 +7,97 @@ import (
 	"unicode"
 )
 
+// ElementaryEquationWithinCurriculum 只证明两份同一未知量合成的正数量等式属于当前小学方法范围。
+// 一般线性可解不等于小学适用；复杂展开、负数量和未知方法均不产生此证书。
+func ElementaryEquationWithinCurriculum(problem string, allowedKnowledgePoints []string) bool {
+	allowed := make(map[string]bool, len(allowedKnowledgePoints))
+	for _, point := range allowedKnowledgePoints {
+		allowed[strings.TrimSpace(point)] = true
+	}
+	if !allowed["简易方程"] && !allowed["解方程"] {
+		return false
+	}
+	left, right, ok := splitLinearEquation(problem)
+	if !ok {
+		return false
+	}
+	if separatedArithmeticNumberRe.MatchString(left) || separatedArithmeticNumberRe.MatchString(right) {
+		return false
+	}
+	quantity, constant := left, right
+	if strings.ContainsAny(right, "xX") && !strings.ContainsAny(left, "xX") {
+		quantity, constant = right, left
+	}
+	if !elementaryEquationQuantitySide(quantity) || strings.ContainsAny(constant, "xX+*-") {
+		return false
+	}
+	constant = strings.Trim(strings.TrimSpace(constant), "() ")
+	if constant == "" || strings.Count(constant, "/") > 1 {
+		return false
+	}
+	for _, r := range constant {
+		if !unicode.IsDigit(r) && !unicode.IsSpace(r) && r != '.' && r != '/' {
+			return false
+		}
+	}
+	quantityForm, ok := parseLinearExpression(quantity)
+	if !ok || quantityForm.a.Sign() <= 0 || quantityForm.b.Sign() != 0 {
+		return false
+	}
+	constantForm, ok := parseLinearExpression(right)
+	if quantity == right {
+		constantForm, ok = parseLinearExpression(left)
+	}
+	if !ok || constantForm.hasVar || constantForm.b.Sign() <= 0 {
+		return false
+	}
+	whole := left + right
+	if strings.Contains(whole, "/") && (!allowed["分数乘法"] || !allowed["分数除法"]) {
+		return false
+	}
+	if strings.Contains(whole, ".") && (!allowed["小数乘法"] || !allowed["小数除法"]) {
+		return false
+	}
+	_, _, ok = solveLinearEquation(problem)
+	return ok
+}
+
+func elementaryEquationQuantitySide(side string) bool {
+	side = strings.TrimSpace(side)
+	depth, split := 0, -1
+	for i, r := range side {
+		switch r {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth < 0 {
+				return false
+			}
+		case '+', '-':
+			if depth == 0 {
+				if split >= 0 || i == 0 {
+					return false
+				}
+				split = i
+			}
+		}
+	}
+	if depth != 0 || split < 0 {
+		return false
+	}
+	for _, term := range []string{side[:split], side[split+1:]} {
+		if strings.Count(strings.ToLower(term), "x") != 1 || strings.ContainsAny(term, "+-") || strings.Count(term, "*") > 1 || strings.Count(term, "/") > 1 {
+			return false
+		}
+		form, ok := parseLinearExpression(term)
+		if !ok || !form.hasVar || form.a.Sign() <= 0 || form.b.Sign() != 0 {
+			return false
+		}
+	}
+	return true
+}
+
 // solveLinearEquation 对严格白名单内的单变量一次方程做本机精确求解。
 //
 // 安全边界：只接受数字、x/X、四则运算、括号和恰好一个等号；左右两边都必须能归约为

@@ -70,7 +70,8 @@ type BlankWorksheetProblemResult struct {
 	Guide  ParentTeachingGuide
 }
 
-func parentTeachingGuideRequest(
+func (d Deps) parentTeachingGuideRequest(
+	ctx context.Context,
 	req GradeRequest,
 	solved SolveHomeworkResult,
 	outcome GradeOutcome,
@@ -78,7 +79,7 @@ func parentTeachingGuideRequest(
 	return ParentTeachingGuideRequest{
 		Subject: req.Subject, Grade: req.Grade, Problem: req.Problem,
 		StudentAnswer:    req.StudentAnswer,
-		KnowledgePoints:  normalizeParentGuideList(req.KnowledgePoints),
+		KnowledgePoints:  normalizeParentGuideList(d.projectElementaryEquationKnowledgePoints(ctx, req)),
 		WrongStep:        outcome.WrongStep,
 		ErrorCause:       outcome.ErrorCause,
 		VerifiedSolution: solved.Solution,
@@ -102,7 +103,7 @@ func (d Deps) SolveBlankWorksheetProblem(
 		return result, err
 	}
 	req.Subject = subject
-	guideRequest := parentTeachingGuideRequest(req, solved, GradeOutcome{})
+	guideRequest := d.parentTeachingGuideRequest(ctx, req, solved, GradeOutcome{})
 	guide, deterministic := deterministicParentTeachingGuideForEvidence(guideRequest, solved.Evidence)
 	// 联合输出已有本题候选时必须保留其审计结果，不能用通用数值讲法覆盖。
 	if req.SolveOutputVersion == SolveOutputWithParentGuideV1 && solved.Generation != nil {

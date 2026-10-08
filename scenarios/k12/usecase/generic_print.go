@@ -482,7 +482,15 @@ func (d Deps) gradingFinalArtifactPrintableMarkdown(
 		string(orderedJSON) != strings.TrimSpace(artifact.OrderedCurrentDigestsJSON) {
 		return artifact.CanonicalMarkdown
 	}
-	return renderCanonicalGradingFinal(entries, nil)
+	job, err := d.GetGradingJob(ctx, artifact.AgentName, artifact.JobID)
+	if err != nil {
+		return artifact.CanonicalMarkdown
+	}
+	intent, err := orchestrator.persistedImageTaskPhotoIntent(ctx, artifact.AgentName, job.Fields, "")
+	if err != nil {
+		return artifact.CanonicalMarkdown
+	}
+	return renderCanonicalFinalForTask(entries, intent, artifact.CoverageStatus)
 }
 
 func (d Deps) getExactGradingFinalArtifact(

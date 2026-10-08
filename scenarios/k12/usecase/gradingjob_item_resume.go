@@ -587,7 +587,7 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 			return commitGradingAssessmentItem(durableCtx, deps, job, q, item,
 				solveInvocationID, "", "", k12storage.GradingAssessmentEffects{})
 		}
-		guideRequest := parentTeachingGuideRequest(gradeReq, solved, GradeOutcome{})
+		guideRequest := deps.parentTeachingGuideRequest(ctx, gradeReq, solved, GradeOutcome{})
 		guideExecutionKind := k12.GradingExecutionProvider
 		var deterministicGuide *ParentTeachingGuide
 		if gradeReq.SolveOutputVersion == SolveOutputWithParentGuideV1 && solved.Generation != nil {
@@ -703,7 +703,7 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 	}
 	parentGuideInvocationID := ""
 	if item.Status == PhotoWrong || item.Status == PhotoCorrectWithProcessIssue {
-		guideRequest := parentTeachingGuideRequest(gradeReq, solved, graded.Outcome)
+		guideRequest := deps.parentTeachingGuideRequest(ctx, gradeReq, solved, graded.Outcome)
 		guideExecutionKind := k12.GradingExecutionProvider
 		var deterministicGuide *ParentTeachingGuide
 		if guide, ok := deterministicParentTeachingGuideForEvidence(guideRequest, solved.Evidence); ok {

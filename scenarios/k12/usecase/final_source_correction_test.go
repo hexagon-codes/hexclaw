@@ -67,6 +67,10 @@ type completedSourceFixture struct {
 }
 
 func prepareCompletedSourceFixture(t *testing.T) completedSourceFixture {
+	return prepareCompletedSourceFixtureForIntent(t, k12.ImageTaskIntentCompletedHomework)
+}
+
+func prepareCompletedSourceFixtureForIntent(t *testing.T, intent k12.ImageTaskIntent) completedSourceFixture {
 	t.Helper()
 	t.Setenv("HEXCLAW_ASSET_ROOT", t.TempDir())
 	ctx := context.Background()
@@ -81,7 +85,7 @@ func prepareCompletedSourceFixture(t *testing.T) completedSourceFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	coordinator := &ImageTaskCoordinator{Records: store, PageAssets: repo, Classifier: &imageTaskClassifierStub{result: ImageTaskClassification{Intent: k12.ImageTaskIntentCompletedHomework, IntentEvidence: []string{"writing"}, Confidence: 1}}, ResolveRoute: imageTaskRouteForTest}
+	coordinator := &ImageTaskCoordinator{Records: store, PageAssets: repo, Classifier: &imageTaskClassifierStub{result: ImageTaskClassification{Intent: intent, IntentEvidence: []string{"source content"}, Confidence: 1}}, ResolveRoute: imageTaskRouteForTest}
 	in := testCreateImageTaskInput()
 	in.OwnerScope = "guardian-final"
 	in.SourceRef = "source-correction"
@@ -101,11 +105,11 @@ func prepareCompletedSourceFixture(t *testing.T) completedSourceFixture {
 		t.Fatal(err)
 	}
 	assetRefs, _ := json.Marshal(in.SourceAssetRefs)
-	_, err = store.DB().Exec(`INSERT INTO k12_homework_submissions(submission_id,dispatch_id,agent_name,learner_id,source_kind,source_ref,source_asset_refs_json,task_intent,status,grading_job_id,idempotency_key,created_at,updated_at) VALUES('submission-final',?,'mingming','mingming','desktop','source-correction',?,'completed_homework','completed',?,'homework-final',100,100)`, dispatchID, string(assetRefs), jobRecord.RecordID)
+	_, err = store.DB().Exec(`INSERT INTO k12_homework_submissions(submission_id,dispatch_id,agent_name,learner_id,source_kind,source_ref,source_asset_refs_json,task_intent,status,grading_job_id,idempotency_key,created_at,updated_at) VALUES('submission-final',?,'mingming','mingming','desktop','source-correction',?,?,'completed',?,'homework-final',100,100)`, dispatchID, string(assetRefs), intent, jobRecord.RecordID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = store.DB().Exec(`UPDATE k12_image_task_dispatches SET task_intent='completed_homework',target_object_type='homework_submission',target_object_id='submission-final' WHERE dispatch_id=?`, dispatchID)
+	_, err = store.DB().Exec(`UPDATE k12_image_task_dispatches SET task_intent=?,target_object_type='homework_submission',target_object_id='submission-final' WHERE dispatch_id=?`, intent, dispatchID)
 	if err != nil {
 		t.Fatal(err)
 	}

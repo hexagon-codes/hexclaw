@@ -71,3 +71,14 @@ func TestGradingFinalArtifactLegacyTextOnlyArtifactRemainsValid(t *testing.T) {
 		t.Fatalf("legacy artifact without an annotated image must remain readable: %v", err)
 	}
 }
+
+func TestGradingFinalArtifactGeneralGuidanceAcceptsSolveVocabulary(t *testing.T) {
+	artifact := annotatedFinalArtifactFixture()
+	artifact.CoverageStatus = GradingFinalArtifactCoverageGeneralGuidance
+	artifact.SummaryInvocationID = ""
+	artifact.CanonicalMarkdown = "# 空白卷 · 家长讲题指南\n\n本次没有可核验的课本依据，以上解题与家长讲法为通用参考。"
+	artifact.ArtifactDigest = ComputeGradingFinalArtifactDigest(artifact)
+	if err := artifact.Validate(); err != nil {
+		t.Fatalf("valid solve general guidance rejected: %v", err)
+	}
+}

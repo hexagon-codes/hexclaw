@@ -205,7 +205,8 @@ func (a GradingFinalArtifact) Validate() error {
 		if a.PublishedCount != a.TotalCount || a.SkippedCount != 0 ||
 			strings.TrimSpace(a.SummaryInvocationID) != "" ||
 			(!strings.Contains(a.CanonicalMarkdown, "No verified textbook grounding is available.") &&
-				!strings.Contains(a.CanonicalMarkdown, "本次没有可核验的课本依据，以上批改与家长讲法为通用参考。")) {
+				!strings.Contains(a.CanonicalMarkdown, "本次没有可核验的课本依据，以上批改与家长讲法为通用参考。") &&
+				!strings.Contains(a.CanonicalMarkdown, "本次没有可核验的课本依据，以上解题与家长讲法为通用参考。")) {
 			return ErrGradingFinalArtifactInvariant
 		}
 	default:

@@ -291,7 +291,7 @@ func (d Deps) outOfScope(ctx context.Context, req GradeRequest) (bool, string, [
 		return false, "", nil
 	}
 	var unmapped []string
-	for _, kp := range req.KnowledgePoints {
+	for _, kp := range d.projectElementaryEquationKnowledgePoints(ctx, req) {
 		fg, ok := d.Constraint.FirstGrade(ctx, kp)
 		if !ok {
 			unmapped = append(unmapped, kp)
@@ -302,6 +302,41 @@ func (d Deps) outOfScope(ctx context.Context, req GradeRequest) (bool, string, [
 		}
 	}
 	return false, "", unmapped
+}
+
+// 课程查询和家长讲法共用执行输入投影，原知识点和识读摘要不变。
+func (d Deps) projectElementaryEquationKnowledgePoints(ctx context.Context, req GradeRequest) []string {
+	points := req.KnowledgePoints
+	if d.Constraint == nil || !isMathSubject(req.Subject) {
+		return points
+	}
+	primary, combined := false, false
+	for _, point := range points {
+		switch strings.TrimSpace(point) {
+		case "解方程", "简易方程":
+			primary = true
+		case "合并同类项":
+			combined = true
+		}
+	}
+	if !primary || !combined {
+		return points
+	}
+	classifier, ok := d.Solver.(ElementaryEquationClassifier)
+	if !ok {
+		return points
+	}
+	allowed, err := d.Constraint.Allowed(ctx, req.Grade)
+	if err != nil || !classifier.ElementaryEquationWithinCurriculum(req.Problem, allowed) {
+		return points
+	}
+	projected := append([]string(nil), points...)
+	for i, point := range projected {
+		if strings.TrimSpace(point) == "合并同类项" {
+			projected[i] = "简易方程"
+		}
+	}
+	return projected
 }
 
 // GradeHomeworkProblem 批改一道作业题的完整闭环：

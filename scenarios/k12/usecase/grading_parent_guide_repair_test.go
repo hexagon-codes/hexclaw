@@ -218,7 +218,7 @@ func TestFailedParentGuideRepairOnlyMissingTeaching(t *testing.T) {
 				InputDigest   string                     `json:"input_digest"`
 				Request       ParentTeachingGuideRequest `json:"request"`
 				Generation    *SolveGeneration           `json:"generation,omitempty"`
-			}{k12.GradingExecutionLocalDeterministic, question.InputDigest, parentTeachingGuideRequest(req, solved, GradeOutcome{}), solved.Generation}
+			}{k12.GradingExecutionLocalDeterministic, question.InputDigest, base.deps.parentTeachingGuideRequest(ctx, req, solved, GradeOutcome{}), solved.Generation}
 			gen, audit := &parentGuideRepairGenerator{}, &parentGuideRepairAuditor{}
 			base.deps.ParentTeachingGuide, base.deps.ParentTeachingGuideAudit = gen, audit
 			_, _, selected, repairErr := executeDurableParentTeachingGuideRepair(ctx, base, base.deps, baseJob, question, req, solved, original)

@@ -315,9 +315,13 @@ func (o *GradingOrchestrator) CorrectCompletedSource(ctx context.Context, owner,
 		return out, err
 	}
 	ordered, _ := json.Marshal(digests)
+	taskIntent, err := o.persistedImageTaskPhotoIntent(ctx, in.Agent, job.Fields, "")
+	if err != nil {
+		return out, err
+	}
 	artifact := original
 	artifact.ArtifactID = "final-" + id
-	artifact.CanonicalMarkdown = renderCanonicalGradingFinal(entries, nil)
+	artifact.CanonicalMarkdown = renderCanonicalFinalForTask(entries, taskIntent, original.CoverageStatus)
 	artifact.SummaryInvocationID = ""
 	artifact.OrderedCurrentDigestsJSON = string(ordered)
 	artifact.CreatedAt = now

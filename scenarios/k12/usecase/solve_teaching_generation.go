@@ -152,7 +152,7 @@ func executeDurableParentTeachingGuideRepair(
 	if deps.ParentTeachingGuide == nil || deps.ParentTeachingGuideAudit == nil {
 		return zero, "", true, fmt.Errorf("%w: parent teaching guide repair generator or auditor unavailable", ErrSolveFailed)
 	}
-	guideRequest := parentTeachingGuideRequest(gradeReq, solved, GradeOutcome{})
+	guideRequest := deps.parentTeachingGuideRequest(ctx, gradeReq, solved, GradeOutcome{})
 	guideRequest.FrozenTeachingContract = gradeReq.ParentTeachingContract
 	guideRequest.RejectedCandidate = generation.ParentGuideCandidate
 	ctx, _, err = prepareGradingItemGrounding(ctx, deps, job, q, gradeReq)
