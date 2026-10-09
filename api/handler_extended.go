@@ -402,12 +402,6 @@ func (s *Server) handleUpdateFullConfig(w http.ResponseWriter, r *http.Request) 
 	sandboxPolicyChanged := false
 	if sb := body.Sandbox; sb != nil {
 		if sb.NetworkEnabled != nil {
-			if *sb.NetworkEnabled {
-				writeJSON(w, http.StatusBadRequest, map[string]string{
-					"error": "Code execution host network is unsupported because destination filtering is unavailable",
-				})
-				return
-			}
 			nextSandboxPolicy.NetworkEnabled = *sb.NetworkEnabled
 			sandboxPolicyChanged = true
 		}

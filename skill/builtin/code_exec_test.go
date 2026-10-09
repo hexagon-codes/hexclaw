@@ -1119,9 +1119,9 @@ func TestCodeExecSkill_Execute_RealSnippetNoMkdirNoise(t *testing.T) {
 	}
 }
 
-func TestCodeExecSkill_Execute_PythonCrawlerHostNetworkRejected(t *testing.T) {
+func TestCodeExecSkill_Execute_PythonCrawlerNetworkPolicy(t *testing.T) {
 	if os.Getenv("HEXCLAW_CODE_EXEC_LIVE_NETWORK") != "1" {
-		t.Skip("set HEXCLAW_CODE_EXEC_LIVE_NETWORK=1 to run the crawler network rejection contract")
+		t.Skip("set HEXCLAW_CODE_EXEC_LIVE_NETWORK=1 to run the crawler network policy contract")
 	}
 	code := strings.Join([]string{
 		"import re",
@@ -1182,8 +1182,11 @@ func TestCodeExecSkill_Execute_PythonCrawlerHostNetworkRejected(t *testing.T) {
 	}
 
 	online, err := run(t, true)
-	if online != "" || !errors.Is(err, errCodeExecHostNetworkUnsupported) {
-		t.Fatalf("host-network crawler = (%q, %v), want fail-closed rejection", online, err)
+	if err != nil {
+		t.Fatalf("execute host-network crawler: %v", err)
+	}
+	if !strings.Contains(online, "CRAWL_OK status=") || strings.Contains(online, "CRAWL_ERROR") {
+		t.Fatalf("network=true should allow the crawler, got:\n%s", online)
 	}
 }
 
@@ -4791,9 +4794,18 @@ func TestCodeExecSkill_PrepareSandboxPolicy_Toggle(t *testing.T) {
 		t.Error("should be disabled after update")
 	}
 
-	candidate, err := s.PrepareSandboxPolicy(context.Background(), SandboxPolicy{NetworkEnabled: true})
-	if candidate != nil || !errors.Is(err, errCodeExecHostNetworkUnsupported) {
-		t.Fatalf("host network update = (%v, %v), want fail-closed rejection", candidate, err)
+	commitCodeExecPolicyForTest(t, s, SandboxPolicy{NetworkEnabled: true})
+	enabledCfg := codeExecConfigForTest(s)
+	if !s.SandboxPolicy().NetworkEnabled || enabledCfg.Network != sandbox.NetworkHost {
+		t.Fatalf("enabled network=%s policy=%+v, want host network", enabledCfg.Network, s.SandboxPolicy())
+	}
+	if enabledCfg.ExecutionProfile != sandbox.ExecutionProfileUntrusted || enabledCfg.RequiredCapabilities&sandbox.UntrustedCodeIsolationCapabilities != sandbox.UntrustedCodeIsolationCapabilities {
+		t.Fatalf("network toggle changed the untrusted execution contract: %+v", enabledCfg)
+	}
+	commitCodeExecPolicyForTest(t, s, SandboxPolicy{NetworkEnabled: false})
+	disabledCfg := codeExecConfigForTest(s)
+	if s.SandboxPolicy().NetworkEnabled || disabledCfg.Network != sandbox.NetworkDisabled {
+		t.Fatalf("disabled network=%s policy=%+v, want disabled network", disabledCfg.Network, s.SandboxPolicy())
 	}
 }
 

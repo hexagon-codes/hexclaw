@@ -1,10 +1,8 @@
 package api
 
 import (
-	"errors"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -12,7 +10,7 @@ import (
 	"github.com/hexagon-codes/hexclaw/config"
 )
 
-func TestHandleUpdateFullConfigRejectsCodeExecHostNetworkWithoutRuntime(t *testing.T) {
+func TestHandleUpdateFullConfigPersistsCodeExecHostNetworkWithoutRuntime(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	s := &Server{
@@ -29,18 +27,17 @@ func TestHandleUpdateFullConfigRejectsCodeExecHostNetworkWithoutRuntime(t *testi
 	w := httptest.NewRecorder()
 	s.handleUpdateFullConfig(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d, body=%s", w.Code, http.StatusBadRequest, w.Body.String())
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", w.Code, http.StatusOK, w.Body.String())
 	}
-	for _, want := range []string{"host network", "destination filtering"} {
-		if !strings.Contains(w.Body.String(), want) {
-			t.Fatalf("body = %s, want %q", w.Body.String(), want)
-		}
+	if !s.cfg.Skill.Builtin.CodeExecPolicy.CodeExecNetworkAllowed() {
+		t.Fatal("host-network request did not update in-memory configuration")
 	}
-	if s.cfg.Skill.Builtin.CodeExecPolicy.CodeExecNetworkAllowed() {
-		t.Fatal("rejected host-network request changed in-memory configuration")
+	persisted, err := config.Load(filepath.Join(home, ".hexclaw", "hexclaw.yaml"))
+	if err != nil {
+		t.Fatalf("load persisted configuration: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(home, ".hexclaw", "hexclaw.yaml")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("rejected host-network request changed persisted configuration: %v", err)
+	if !persisted.Skill.Builtin.CodeExecPolicy.CodeExecNetworkAllowed() {
+		t.Fatal("host-network request did not persist the enabled policy")
 	}
 }

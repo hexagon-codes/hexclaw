@@ -63,8 +63,6 @@ type SandboxPolicy struct {
 	ReadablePaths  []string
 }
 
-var errCodeExecHostNetworkUnsupported = errors.New("code execution host network is unsupported because destination filtering is unavailable")
-
 // SandboxPolicyCandidate 表示已经完成构建、能力验证和关闭的待发布策略。
 type SandboxPolicyCandidate struct {
 	once   sync.Once
@@ -2402,9 +2400,6 @@ func (s *CodeExecSkill) PrepareSandboxPolicy(
 	if ctx == nil {
 		return nil, errors.New("sandbox policy context must not be nil")
 	}
-	if policy.NetworkEnabled {
-		return nil, errCodeExecHostNetworkUnsupported
-	}
 	s.policyUpdateMu.Lock()
 	releaseWriter := true
 	defer func() {
@@ -2428,6 +2423,9 @@ func (s *CodeExecSkill) PrepareSandboxPolicy(
 
 	nextCfg := cloneCodeExecSandboxConfig(current.cfg)
 	nextCfg.Network = sandbox.NetworkDisabled
+	if policy.NetworkEnabled {
+		nextCfg.Network = sandbox.NetworkHost
+	}
 	nextCfg.ReadablePaths = append([]string(nil), policy.ReadablePaths...)
 	nextCfg = withCodeExecRequiredCapabilities(nextCfg)
 	if err := validateCodeExecSandboxPolicyCandidate(ctx, nextCfg, factory); err != nil {
@@ -2540,9 +2538,6 @@ func (s *CodeExecSkill) Execute(ctx context.Context, args map[string]any) (*skil
 	}
 
 	cfg, broker, factory, goHelperFactory, scratchBase, projectStager, goBuildCacheBase, goBuildCacheCleaner := s.snapshot()
-	if cfg.Network == sandbox.NetworkHost {
-		return nil, errCodeExecHostNetworkUnsupported
-	}
 	if strings.TrimSpace(cfg.Workspace) == "" {
 		return nil, errors.New("sandbox workspace is required")
 	}

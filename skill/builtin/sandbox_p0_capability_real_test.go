@@ -463,9 +463,9 @@ PY_ARTIFACT_OK backlog=1 lin=89 guo=13`,
 	}
 }
 
-func TestSandboxP0_RealModelPythonCrawlerHostNetworkRejected(t *testing.T) {
+func TestSandboxP0_RealModelPythonCrawlerConfiguredHostNetwork(t *testing.T) {
 	if os.Getenv("HEXCLAW_P0_SANDBOX_REALMODEL") != "1" {
-		t.Skip("set HEXCLAW_P0_SANDBOX_REALMODEL=1 to run real-model Python crawler rejection validation")
+		t.Skip("set HEXCLAW_P0_SANDBOX_REALMODEL=1 to run real-model Python crawler host-network validation")
 	}
 
 	cfg, err := config.Load(os.Getenv("HEXCLAW_REAL_LLM_CONFIG"))
@@ -525,12 +525,12 @@ PY_CRAWL_OK title=<title> hrefs=<数量> bytes=<字节数>`
 			if err := sandboxP0RequirePythonShellArgs(call.Args, call.ArgsJSON); err != nil {
 				t.Fatalf("model did not write/run Python crawler code: %v\nargs:\n%s\nresult:\n%s", err, call.ArgsJSON, sandboxP0Trunc(call.Result, 1200))
 			}
-			t.Logf("real-model Python crawler rejection:\n%s", sandboxP0Trunc(call.Result, 1200))
-			if !strings.Contains(call.Result, "tool_error: "+errCodeExecHostNetworkUnsupported.Error()) {
-				t.Fatalf("crawler host network was not rejected\nargs:\n%s\nresult:\n%s", call.ArgsJSON, sandboxP0Trunc(call.Result, 1200))
+			t.Logf("real-model Python crawler result:\n%s", sandboxP0Trunc(call.Result, 1200))
+			if strings.Contains(call.Result, "tool_error:") {
+				t.Fatalf("configured crawler execution failed\nargs:\n%s\nresult:\n%s", call.ArgsJSON, sandboxP0Trunc(call.Result, 1200))
 			}
-			if strings.Contains(call.Result, "PY_CRAWL_OK") {
-				t.Fatalf("rejected crawler reported success\nargs:\n%s\nresult:\n%s", call.ArgsJSON, sandboxP0Trunc(call.Result, 1200))
+			if !strings.Contains(call.Result, "PY_CRAWL_OK title=") {
+				t.Fatalf("configured crawler did not return its result\nargs:\n%s\nresult:\n%s", call.ArgsJSON, sandboxP0Trunc(call.Result, 1200))
 			}
 		})
 	}

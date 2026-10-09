@@ -128,10 +128,7 @@ func RegisterAdvanced(registry *skill.DefaultRegistry, cfg config.BuiltinConfig,
 		deps.FileAccess = broker
 	}
 
-	if cfg.CodeExec && cfg.CodeExecPolicy.CodeExecNetworkAllowed() {
-		logger.Error("CodeExecSkill is unavailable because host-network destination filtering is unsupported",
-			"error", errCodeExecHostNetworkUnsupported)
-	} else if cfg.CodeExec {
+	if cfg.CodeExec {
 		ws := deps.Workspace
 		if ws == "" {
 			ws = defaultWorkspace()
@@ -142,6 +139,9 @@ func RegisterAdvanced(registry *skill.DefaultRegistry, cfg config.BuiltinConfig,
 			Network:   sandbox.NetworkDisabled,
 			// 用户经数据连接器授权的本地目录 → 沙箱只读放行，否则 code_exec 读不到（BUG-20260626）。
 			ReadablePaths: deps.SandboxReadablePaths,
+		}
+		if cfg.CodeExecPolicy.CodeExecNetworkAllowed() {
+			sbCfg.Network = sandbox.NetworkHost
 		}
 		sbCfg = withCodeExecRequiredCapabilities(sbCfg)
 		sb, err := sandbox.New(sbCfg)

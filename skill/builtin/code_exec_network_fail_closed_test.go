@@ -2,7 +2,6 @@ package builtin
 
 import (
 	"context"
-	"strings"
 	"testing"
 
 	"github.com/hexagon-codes/toolkit/os/sandbox"
@@ -11,7 +10,8 @@ import (
 	"github.com/hexagon-codes/hexclaw/skill"
 )
 
-func TestRegisterAdvancedRejectsCodeExecHostNetwork(t *testing.T) {
+func TestRegisterAdvancedUsesConfiguredCodeExecHostNetwork(t *testing.T) {
+	requireCodeExecSandbox(t)
 	allowed := true
 	registry := skill.NewRegistry()
 	deps := &SkillDeps{Workspace: t.TempDir()}
@@ -23,63 +23,79 @@ func TestRegisterAdvancedRejectsCodeExecHostNetwork(t *testing.T) {
 		},
 	}, deps)
 
-	if deps.CodeExecSkill != nil {
-		t.Fatal("code_exec must not start when the requested network policy exposes the host network")
+	if deps.CodeExecSkill == nil {
+		t.Fatal("code_exec was not initialized with the enabled network policy")
 	}
-	if _, exists := registry.Get("code_exec"); exists {
-		t.Fatal("code_exec must not be registered when the requested network policy exposes the host network")
+	if _, exists := registry.Get("code_exec"); !exists {
+		t.Fatal("code_exec was not registered with the enabled network policy")
+	}
+	cfg := codeExecConfigForTest(deps.CodeExecSkill)
+	if cfg.Network != sandbox.NetworkHost || !deps.CodeExecSkill.SandboxPolicy().NetworkEnabled {
+		t.Fatalf("registered network=%s policy=%+v, want host network", cfg.Network, deps.CodeExecSkill.SandboxPolicy())
+	}
+	if cfg.ExecutionProfile != sandbox.ExecutionProfileUntrusted || cfg.RequiredCapabilities&sandbox.UntrustedCodeIsolationCapabilities != sandbox.UntrustedCodeIsolationCapabilities {
+		t.Fatalf("registered host network changed the untrusted execution contract: %+v", cfg)
 	}
 }
 
-func TestPrepareSandboxPolicyRejectsHostNetworkBeforeConstruction(t *testing.T) {
+func TestPrepareSandboxPolicyConstructsConfiguredHostNetwork(t *testing.T) {
 	s := NewCodeExecSkill(nil, sandbox.Config{
 		Workspace: t.TempDir(),
 		Network:   sandbox.NetworkDisabled,
 	})
 	factoryCalled := false
-	s.sandboxFactory = func(sandbox.Config) (sandbox.Sandbox, error) {
+	var constructed sandbox.Config
+	s.sandboxFactory = func(cfg sandbox.Config) (sandbox.Sandbox, error) {
 		factoryCalled = true
+		constructed = cfg
 		return &mockSandbox{}, nil
 	}
 
 	candidate, err := s.PrepareSandboxPolicy(context.Background(), SandboxPolicy{NetworkEnabled: true})
-	if candidate != nil {
-		t.Fatal("host-network policy must not produce a candidate")
+	if err != nil || candidate == nil {
+		t.Fatalf("PrepareSandboxPolicy candidate=%v error=%v, want valid host-network candidate", candidate, err)
 	}
-	if err == nil || !strings.Contains(err.Error(), "host network") {
-		t.Fatalf("PrepareSandboxPolicy error = %v, want host-network rejection", err)
+	defer candidate.Discard()
+	if !factoryCalled || constructed.Network != sandbox.NetworkHost {
+		t.Fatalf("host-network construction called=%v network=%s", factoryCalled, constructed.Network)
 	}
-	if factoryCalled {
-		t.Fatal("host-network policy reached sandbox construction")
+	if constructed.ExecutionProfile != sandbox.ExecutionProfileUntrusted || constructed.RequiredCapabilities&sandbox.UntrustedCodeIsolationCapabilities != sandbox.UntrustedCodeIsolationCapabilities {
+		t.Fatalf("host-network candidate changed the untrusted execution contract: %+v", constructed)
 	}
 	if s.SandboxPolicy().NetworkEnabled {
-		t.Fatal("rejected host-network policy changed the active policy")
+		t.Fatal("uncommitted host-network candidate changed the active policy")
+	}
+	candidate.Commit()
+	if !s.SandboxPolicy().NetworkEnabled {
+		t.Fatal("committed host-network candidate did not update the active policy")
 	}
 }
 
-func TestCodeExecExecuteRejectsInjectedHostNetworkBeforeConstruction(t *testing.T) {
+func TestCodeExecExecuteUsesConfiguredHostNetwork(t *testing.T) {
 	s := NewCodeExecSkill(nil, sandbox.Config{
 		Workspace: t.TempDir(),
 		Network:   sandbox.NetworkHost,
 	})
 	factoryCalled := false
-	s.sandboxFactory = func(sandbox.Config) (sandbox.Sandbox, error) {
+	var constructed sandbox.Config
+	s.sandboxFactory = func(cfg sandbox.Config) (sandbox.Sandbox, error) {
 		factoryCalled = true
+		constructed = cfg
 		return &mockSandbox{}, nil
 	}
 
 	result, err := s.Execute(context.Background(), map[string]any{
 		"language": "python",
-		"code":     "print('unreachable')",
+		"code":     "print('network policy')",
 	})
-	if result != nil {
-		t.Fatalf("Execute result = %#v, want nil", result)
+	if err != nil || result == nil {
+		t.Fatalf("Execute result=%#v error=%v, want successful configured execution", result, err)
 	}
-	if err == nil || !strings.Contains(err.Error(), "host network") {
-		t.Fatalf("Execute error = %v, want host-network rejection", err)
+	if !factoryCalled || constructed.Network != sandbox.NetworkHost {
+		t.Fatalf("host-network execution construction called=%v network=%s", factoryCalled, constructed.Network)
 	}
-	if factoryCalled {
-		t.Fatal("injected host-network policy reached sandbox construction")
+	if constructed.ExecutionProfile != sandbox.ExecutionProfileUntrusted || constructed.RequiredCapabilities&sandbox.UntrustedCodeIsolationCapabilities != sandbox.UntrustedCodeIsolationCapabilities {
+		t.Fatalf("host-network execution changed the untrusted execution contract: %+v", constructed)
 	}
 }
 
