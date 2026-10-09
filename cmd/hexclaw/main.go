@@ -1119,7 +1119,8 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 
 	// 7. 初始化文件记忆系统
 	var fileMem *memory.FileMemory
-	if cfg.FileMemory.Enabled {
+	// 单一对象随应用存在，自动召回/抽取服从可热更新的 enabled；关闭后可原位重新开启。
+	{
 		var err error
 		fileMem, err = memory.New(memory.Options{
 			Enabled:   true,
@@ -1136,7 +1137,11 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 	// 否则首次启动（记忆为空）时不挂载，用户当次会话新增的记忆要等到下次重启才会注入 → 问答答不上。
 	if fileMem != nil {
 		eng.SetFileMemory(fileMem)
-		fmt.Printf("  ✓ Memory      文件记忆 (%d 字符) + 自动记忆\n", len(fileMem.LoadContext()))
+		if cfg.FileMemory.Enabled {
+			fmt.Printf("  ✓ Memory      文件记忆 (%d 字符) + 自动记忆\n", len(fileMem.LoadContext()))
+		} else {
+			fmt.Println("  ✓ Memory      文件记忆已装配，自动记忆关闭")
+		}
 		// 长期记忆使用当前配置代的客户端；未配置时降级 BM25，后续配置无需重启。
 		if kbSemanticResolver != nil {
 			eng.SetMemoryEmbedder(&runtimeMemoryEmbedder{holder: kbSemanticResolver})
@@ -1155,7 +1160,7 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 			fmt.Printf("  ✗ manage_memory 注册失败: %v\n", err)
 		}
 		// 增量 B：周期反思整合（默认关、opt-in）。零 LLM 确定性维护：去重 / 时序取代留史 / 晋升降级 / 归档陈旧。
-		if cfg.FileMemory.Reflect {
+		if cfg.FileMemory.Enabled && cfg.FileMemory.Reflect {
 			interval := time.Duration(cfg.FileMemory.ReflectIntervalMins) * time.Minute
 			if cfg.FileMemory.Dreaming && router != nil {
 				// 多阶段 dreaming（对标 OpenClaw）：light=机械反思（每 interval），deep=LLM 聚类合成留史（每 deep）。
@@ -1192,7 +1197,7 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 		}
 		// 增量 G③：周期画像蒸馏（默认关、opt-in，deep 相）。低频把零碎事实 LLM 合成稳定用户画像 → Pinned 条。
 		// 与机械反思并存不替换；prompt 强制只综合不杜撰。
-		if cfg.FileMemory.Profile {
+		if cfg.FileMemory.Enabled && cfg.FileMemory.Profile {
 			syn := engine.NewProfileSynthesizer(eng)
 			interval := time.Duration(cfg.FileMemory.ProfileIntervalMins) * time.Minute
 			stopProfile := fileMem.StartProfileDistillation(ctx, interval, syn, memory.DistillProfileConfig{})
@@ -1201,7 +1206,7 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 		}
 		// 增量 G②：回复前主动会话深召回（默认开，仅 DM/交互式）。FTS-fast 零 LLM + 超时 + 熔断；
 		// 把「该想起来」的旧上下文主动浮现，而非只等模型主动调 session_search。nil 配置=默认开。
-		if cfg.FileMemory.ActiveRecall == nil || *cfg.FileMemory.ActiveRecall {
+		if cfg.FileMemory.Enabled && (cfg.FileMemory.ActiveRecall == nil || *cfg.FileMemory.ActiveRecall) {
 			eng.SetActiveRecall(engine.NewActiveRecall(store))
 			fmt.Println("  ✓ Memory      主动会话召回已启用 (回复前 FTS 深召回)")
 		}

@@ -23,7 +23,7 @@ const (
 // extractAndIngestConversation 对一段对话跑抽取 LLM → 落库（复用 buildMemoryExtractionPrompt/
 // parseExtractedFacts/ingestExtractedFacts；PII 守卫与 dedup/supersede 在 ingest 内）。返回落库条数。
 func (e *ReActEngine) extractAndIngestConversation(ctx context.Context, userText, assistantText, role string) int {
-	if e.fileMem == nil {
+	if !e.memoryRuntimeEnabled() {
 		return 0
 	}
 	existing := e.fileMem.GetMemoryForPrompt() // 剥存储层内联 meta 标签，不把 eid/pin 噪声注入抽取提示
@@ -33,7 +33,7 @@ func (e *ReActEngine) extractAndIngestConversation(ctx context.Context, userText
 	if err != nil || strings.TrimSpace(out) == "" {
 		return 0
 	}
-	return e.ingestExtractedFacts(ctx, parseExtractedFacts(out), role)
+	return e.ingestEnabledMemoryFacts(ctx, parseExtractedFacts(out), role)
 }
 
 // replayConv 是一段待回放的会话对话（已过 mayContainMemorableInfo 快闸）。

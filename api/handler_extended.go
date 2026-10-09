@@ -244,6 +244,10 @@ func (s *Server) handleGetFullConfig(w http.ResponseWriter, r *http.Request) {
 		sandboxPolicy = s.sandboxPolicyRuntime.Snapshot()
 		sandboxPolicy.ReadablePaths = append([]string(nil), sandboxPolicy.ReadablePaths...)
 	}
+	fm := s.cfg.FileMemory
+	if runtime, ok := s.engine.(fileMemoryConfigRuntime); ok {
+		fm = runtime.ActiveFileMemoryConfig()
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"backend_id": s.backendID,
@@ -256,6 +260,8 @@ func (s *Server) handleGetFullConfig(w http.ResponseWriter, r *http.Request) {
 		"webhook":    map[string]any{"enabled": s.cfg.Webhook.Enabled},
 		"canvas":     map[string]any{"enabled": s.cfg.Canvas.Enabled},
 		"voice":      map[string]any{"enabled": s.cfg.Voice.Enabled},
+		// 设置页总开关沿文件记忆的运行配置投影，不另建 memory.enabled 持久化字段。
+		"memory": map[string]any{"enabled": fm.Enabled},
 		"security": map[string]any{
 			"gateway_enabled":     s.cfg.Security.Auth.Enabled,
 			"injection_detection": s.cfg.Security.InjectionDetection.Enabled,
@@ -337,6 +343,9 @@ func (s *Server) handleUpdateFullConfig(w http.ResponseWriter, r *http.Request) 
 			// 指针区分「未提供（保持原值）」与「提供空数组（清空）」。
 			AllowedPaths *[]string `json:"allowed_paths"`
 		} `json:"sandbox"`
+		Memory *struct {
+			Enabled *bool `json:"enabled"`
+		} `json:"memory"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid request body"})
@@ -344,7 +353,7 @@ func (s *Server) handleUpdateFullConfig(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if body.Ollama != nil {
-		if body.Security != nil || body.Sandbox != nil {
+		if body.Security != nil || body.Sandbox != nil || body.Memory != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Ollama target update must be submitted separately"})
 			return
 		}
@@ -358,6 +367,10 @@ func (s *Server) handleUpdateFullConfig(w http.ResponseWriter, r *http.Request) 
 	s.cfgMu.Lock()
 	defer s.cfgMu.Unlock()
 	nextCfg := *s.cfg
+	memoryChanged := body.Memory != nil && body.Memory.Enabled != nil
+	if memoryChanged {
+		nextCfg.FileMemory.Enabled = *body.Memory.Enabled
+	}
 
 	if sec := body.Security; sec != nil {
 		if sec.GatewayEnabled != nil {
@@ -446,6 +459,10 @@ func (s *Server) handleUpdateFullConfig(w http.ResponseWriter, r *http.Request) 
 	}
 	if candidate.valid() {
 		candidate.Commit()
+	}
+	if memoryChanged {
+		// 只热更已保存的记忆字段，模型草稿与其他文件记忆旋钮均保持原值。
+		s.applyFileMemoryConfig(nextCfg.FileMemory, true)
 	}
 
 	// 运行时代际发布后再暴露内存配置；cfgMu 使并发读写只观察完整提交。

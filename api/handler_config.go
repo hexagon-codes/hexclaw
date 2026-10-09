@@ -1655,7 +1655,7 @@ type activeRecallRuntime interface {
 
 // MemoryConfigResponse GET /api/v1/config/memory 响应
 type MemoryConfigResponse struct {
-	Enabled             bool    `json:"enabled"`               // 文件记忆总开关（只读展示；关闭需改配置文件并重启）
+	Enabled             bool    `json:"enabled"`               // 自动记忆提取与召回总开关，保留已存记忆
 	AutoMemory          string  `json:"auto_memory"`           // inline / extract / off（规范化后，热生效）
 	RecallMinScore      float64 `json:"recall_min_score"`      // 召回相关性地板 [0,1]，仅配 embedding 时生效（热生效）
 	ActiveRecall        bool    `json:"active_recall"`         // 回复前主动会话召回（生效值：未配 = 默认开；热生效）
@@ -1665,6 +1665,7 @@ type MemoryConfigResponse struct {
 
 // MemoryConfigUpdateRequest PUT /api/v1/config/memory 请求（字段级 patch 语义）
 type MemoryConfigUpdateRequest struct {
+	Enabled        *bool    `json:"enabled"`
 	AutoMemory     *string  `json:"auto_memory"`
 	RecallMinScore *float64 `json:"recall_min_score"`
 	ActiveRecall   *bool    `json:"active_recall"`
@@ -1696,6 +1697,8 @@ func memoryConfigResponse(fm config.FileMemoryConfig) MemoryConfigResponse {
 
 // handleGetMemoryConfig GET /api/v1/config/memory
 func (s *Server) handleGetMemoryConfig(w http.ResponseWriter, r *http.Request) {
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
 	fm := s.cfg.FileMemory
 	if runtime, ok := s.engine.(fileMemoryConfigRuntime); ok {
 		fm = runtime.ActiveFileMemoryConfig()
@@ -1706,7 +1709,7 @@ func (s *Server) handleGetMemoryConfig(w http.ResponseWriter, r *http.Request) {
 // handleUpdateMemoryConfig PUT /api/v1/config/memory
 //
 // 更新记忆行为配置并持久化到 ~/.hexclaw/hexclaw.yaml。auto_memory/recall_min_score/
-// active_recall 热生效（引擎调用时读取 + SetActiveRecall 接线）；profile 的后台蒸馏
+// enabled/active_recall 热生效（引擎调用时读取 + SetActiveRecall 接线）；profile 的后台蒸馏
 // goroutine 在 boot 期接线 → 落盘后重启生效，响应以 restart_required 如实告知。
 func (s *Server) handleUpdateMemoryConfig(w http.ResponseWriter, r *http.Request) {
 	var req MemoryConfigUpdateRequest
@@ -1739,6 +1742,9 @@ func (s *Server) handleUpdateMemoryConfig(w http.ResponseWriter, r *http.Request
 		nextFM = runtime.ActiveFileMemoryConfig()
 	}
 	restartRequired := []string{}
+	if req.Enabled != nil {
+		nextFM.Enabled = *req.Enabled
+	}
 	if req.AutoMemory != nil {
 		nextFM.AutoMemory = strings.ToLower(strings.TrimSpace(*req.AutoMemory))
 	}
@@ -1761,22 +1767,7 @@ func (s *Server) handleUpdateMemoryConfig(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// 热应用：引擎与 Server 共享同一 *config.Config，经引擎锁写入即全局生效；
-	// 无引擎热更接口（测试替身等）时兜底直写 Server 侧。
-	if runtime, ok := s.engine.(fileMemoryConfigRuntime); ok {
-		runtime.ReloadFileMemoryConfig(nextFM)
-	} else {
-		s.cfg.FileMemory = nextFM
-	}
-	if req.ActiveRecall != nil {
-		if runtime, ok := s.engine.(activeRecallRuntime); ok {
-			if *req.ActiveRecall && s.store != nil {
-				runtime.SetActiveRecall(engine.NewActiveRecall(s.store))
-			} else if !*req.ActiveRecall {
-				runtime.SetActiveRecall(nil)
-			}
-		}
-	}
+	s.applyFileMemoryConfig(nextFM, req.Enabled != nil || req.ActiveRecall != nil)
 
 	logger.Info("记忆配置已更新并持久化", "restart_required", restartRequired)
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -1784,4 +1775,24 @@ func (s *Server) handleUpdateMemoryConfig(w http.ResponseWriter, r *http.Request
 		"config":           memoryConfigResponse(nextFM),
 		"restart_required": restartRequired,
 	})
+}
+
+// applyFileMemoryConfig 由持有 cfgMu 的配置提交调用，两条设置 API 共用同一运行态。
+// 总开关仅控制自动提取与召回；关闭不删除记忆，重新开启复用原对象与原目录。
+func (s *Server) applyFileMemoryConfig(fm config.FileMemoryConfig, refreshActiveRecall bool) {
+	if runtime, ok := s.engine.(fileMemoryConfigRuntime); ok {
+		runtime.ReloadFileMemoryConfig(fm)
+	} else {
+		s.cfg.FileMemory = fm
+	}
+	if !refreshActiveRecall {
+		return
+	}
+	if runtime, ok := s.engine.(activeRecallRuntime); ok {
+		if fm.Enabled && (fm.ActiveRecall == nil || *fm.ActiveRecall) && s.store != nil {
+			runtime.SetActiveRecall(engine.NewActiveRecall(s.store))
+		} else {
+			runtime.SetActiveRecall(nil)
+		}
+	}
 }

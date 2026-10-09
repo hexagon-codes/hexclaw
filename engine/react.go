@@ -5644,7 +5644,7 @@ func (e *ReActEngine) buildTurnContext(ctx context.Context, metadata map[string]
 
 	// 长期记忆召回（查询相关，三维打分），尊重 memory=off 门控；按角色隔离。
 	// 记忆跟随本轮开关和所选模型；云端聊天使用独立请求信封记录已启用状态。
-	memoryOff := (metadata != nil && metadata["memory"] == "off") || personaMounted
+	memoryOff := (metadata != nil && metadata["memory"] == "off") || personaMounted || !e.memoryRuntimeEnabled()
 	var injectedMem string // 本轮已注入的策展记忆，供 G② 主动召回去重（坑F）
 	if e.fileMem != nil && !memoryOff {
 		role := ""

@@ -87,7 +87,7 @@ func memoryExtractionTimeout(isLocal bool) time.Duration {
 //   - 不记忆敏感信息（密码、密钥等）
 //   - 异步执行，不阻塞回复
 func (e *ReActEngine) autoExtractMemoryForRole(parentCtx context.Context, userText, assistantText, role string) {
-	if e.fileMem == nil {
+	if !e.memoryRuntimeEnabled() {
 		return
 	}
 	// 增量 G（采纳 Claude Code 式「主模型随手判断」）：mode=off 永不抽取；inline/extract 的取舍下移到
@@ -111,6 +111,9 @@ func (e *ReActEngine) autoExtractMemoryForRole(parentCtx context.Context, userTe
 	e.bgWg.Add(1)
 	go func() {
 		defer e.bgWg.Done()
+		if !e.memoryRuntimeEnabled() {
+			return
+		}
 		base := trace.Detach(parentCtx)
 		base = egress.WithRequest(base, egress.PurposeGeneralChat, "auto-memory", egress.ClassGeneral, egress.ClassMemory)
 
@@ -167,8 +170,12 @@ func (e *ReActEngine) autoExtractMemoryForRole(parentCtx context.Context, userTe
 		// 原子化抽取（重点一）：LLM 已按「每条一行」产出，拆成离散自包含事实逐条入库；
 		// 每条过 dedupUpsert（查重叠 → insert / update 就地 / discard，CJK 用字符二元组相似度），
 		// 替代旧「整段 append」—— 修 P5「只增不整合」+ 重复/矛盾累积。
+		// 在途抽取完成时再次读取总开关，关闭后不把迟到的抽取结果写入记忆。
+		if !e.memoryRuntimeEnabled() {
+			return
+		}
 		facts := parseExtractedFacts(result)
-		saved := e.ingestExtractedFacts(ctx, facts, role)
+		saved := e.ingestEnabledMemoryFacts(ctx, facts, role)
 		if saved == 0 {
 			return
 		}
