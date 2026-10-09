@@ -10,6 +10,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -245,7 +246,20 @@ func scanMessage(sc scannable) (*storage.MessageRecord, error) {
 	// 让前端继续读 metadata.attachments 渲染图片，无需改前端契约。仅当独立列有内容时覆盖
 	// （老消息 attachments='' → 保留其原 metadata；assistant 等无附件消息不受影响）。
 	if m.Attachments != "" && m.Attachments != "{}" {
+		persistedMetadata := m.Metadata
 		m.Metadata = m.Attachments
+		// 附件保留原独立列；服务器后写的持久产物引用只从 metadata.artifacts 补回展示。
+		var persisted struct {
+			Artifacts json.RawMessage `json:"artifacts"`
+		}
+		var presentation map[string]json.RawMessage
+		if json.Unmarshal([]byte(persistedMetadata), &persisted) == nil && len(persisted.Artifacts) > 0 &&
+			json.Unmarshal([]byte(m.Attachments), &presentation) == nil && presentation != nil {
+			presentation["artifacts"] = persisted.Artifacts
+			if merged, err := json.Marshal(presentation); err == nil {
+				m.Metadata = string(merged)
+			}
+		}
 	}
 	return &m, nil
 }

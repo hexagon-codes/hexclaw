@@ -48,8 +48,13 @@ func (s *Server) handleUpsertPrompt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var p library.Prompt
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&p); err != nil {
+	var raw json.RawMessage
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&raw); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误: " + err.Error()})
+		return
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid prompt request: " + err.Error()})
 		return
 	}
 	if p.Title == "" {
@@ -63,6 +68,30 @@ func (s *Server) handleUpsertPrompt(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
+		}
+	}
+	// 旧客户端没有新增元数据字段时保留原值；显式空值仍可编辑，内置身份由Store保护。
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid prompt request"})
+		return
+	}
+	for key, target := range map[string]*string{"command": &p.Command, "description": &p.Description,
+		"scenario": &p.Scenario, "subject": &p.Subject, "task_kind": &p.TaskKind} {
+		if _, supplied := fields[key]; supplied {
+			continue
+		}
+		switch key {
+		case "command":
+			*target = previous.Command
+		case "description":
+			*target = previous.Description
+		case "scenario":
+			*target = previous.Scenario
+		case "subject":
+			*target = previous.Subject
+		case "task_kind":
+			*target = previous.TaskKind
 		}
 	}
 	if err := validatePromptInputLengths(p, previous); err != nil {

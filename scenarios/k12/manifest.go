@@ -50,7 +50,7 @@ func Manifest(constraint scenario.ConstraintProvider) *scenario.Manifest {
 		// Skill catalog 从出厂内嵌 skills 派生（完整目录与验收以 K12-Skill清单-v0.5.0.md 为准）。
 		Skills: bundledSkillDecls(),
 		// Tool capability：平台工具面注册的 K12 工具（composition root skills.Register）。
-		Tools: []string{"k12_grade", "k12_review", "k12_progress"},
+		Tools: []string{"k12_grade", "k12_review", "k12_progress", "k12_unit_summary"},
 		// 已达质量门的确定性验证器学科（§4.7：数学/语文/英语达门；科学/信息科技过门前
 		// 不声明为可用验证器——宁可窄而真）。
 		Validators: []string{"数学", "语文", "英语"},

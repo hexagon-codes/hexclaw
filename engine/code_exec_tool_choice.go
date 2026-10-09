@@ -95,6 +95,10 @@ func shouldBypassSemanticCache(msg *adapter.Message) bool {
 	if msg == nil {
 		return false
 	}
+	// 缓存只有最终文字，不能代替有持久资料引用或创建副作用的场景任务。
+	if msg.Metadata["k12_task_intent"] != "" || msg.Metadata["k12_active_material"] != "" {
+		return true
+	}
 	// The semantic cache stores final text only. Serving a thinking:on request
 	// from it would silently drop the provider's live reasoning/summary stream
 	// and would not execute the explicitly requested reasoning mode at all.

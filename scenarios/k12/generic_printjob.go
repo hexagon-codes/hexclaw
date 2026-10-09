@@ -17,6 +17,8 @@ func GenericPrintSourceKindAllowed(kind string) bool {
 		PrintSourceGradingFinalArtifact, PrintSourceWeeklyPracticeSnapshot,
 		PrintSourceLearningArchive:
 		return true
+	case PrintSourceUnitSummary:
+		return true
 	default:
 		return false
 	}

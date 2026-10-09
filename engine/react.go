@@ -113,6 +113,9 @@ func labelMessagePayloadEgress(ctx context.Context, msg *adapter.Message) contex
 func labelToolResultEgress(ctx context.Context, toolName string) {
 	name := strings.ToLower(strings.TrimSpace(toolName))
 	switch {
+	case toolName == unitSummaryToolName:
+		// 单元工具只返回资料状态与文件引用，不含学生作答、评分或证据正文。
+		egress.AddDataClasses(ctx, egress.ClassDocument)
 	case name == "knowledge_search" || name == "knowledge_ingest" || name == "knowledge_ingest_path":
 		egress.AddDataClasses(ctx, egress.ClassDocument)
 	case name == "session_search" || name == "manage_memory":
@@ -1327,7 +1330,8 @@ func (e *ReActEngine) completeWithTools(
 		tools = stripSpawnRecursiveTools(msg, tools)
 		tools = applyInheritedToolPolicy(msg, tools)
 		tools = e.ensureSystemDispatchToolFloor(tools, msg)
-		tools = e.ensureMountedSkillTools(tools, msg.Metadata)                // bug#2：显式挂载技能的工具强制前置，保证不被 maxTools 截断
+		tools = e.ensureMountedSkillTools(tools, msg.Metadata) // bug#2：显式挂载技能的工具强制前置，保证不被 maxTools 截断
+		tools = e.ensureUnitSummaryTool(tools, msg)
 		tools = e.filterInternalRetrievalToolsForPersona(tools, msg.Metadata) // BUG-20260704：挂载 persona 时剥离内部检索工具，防模型主动拉回旧内容压过人设
 		tools = restrictToolsToCodeExecWhenRequired(tools, msg.Content)
 		if cap := effectiveMaxTools(toolsCfg.MaxTools, msg); cap > 0 && len(tools) > cap {
@@ -1448,6 +1452,7 @@ func (e *ReActEngine) completeWithTools(
 		wrapProvider: func(p hexagon.Provider, name, model string) hexagon.Provider {
 			p = wrapVisionImageLimitProvider(p, model) // 反应式视觉兜底（含 failover 目标 provider）
 			p = wrapCodeExecToolChoiceProvider(p, msg.Content)
+			p = wrapUnitSummaryToolChoiceProvider(p, msg)
 			if !e.shouldBoundThinkingCompletion(name, model, req) {
 				return p
 			}
@@ -1491,6 +1496,7 @@ func (e *ReActEngine) completeWithTools(
 	// 以它为实例 scope（同 authUserCtxKey 纪律：不信 LLM 传的 agent 参数）。此前唯一
 	// stamp 点在零调用的死函数 processStreamToolLoop 里，活跃路径恒空。
 	ctx = skill.WithRoutedAgent(ctx, strings.TrimSpace(msg.Metadata["routed_agent"]))
+	ctx = withSkillInvocationContext(ctx, msg, sessionID, providerName, modelName)
 	trace.L(ctx).Info("Runtime Run 调用准备（工具循环）",
 		"provider", providerName, "model", modelName, "local", isLocal,
 		"tools", len(req.Tools), "attachments", len(msg.Attachments),
@@ -1709,7 +1715,7 @@ func (e *ReActEngine) finalizeReply(
 		assistantMessageID = record.ID
 	}
 
-	if cacheable {
+	if cacheable && msg.Metadata["artifacts"] == "" {
 		e.cache.Put(cacheInput, content, providerName, modelName)
 	}
 
@@ -2551,7 +2557,8 @@ func (e *ReActEngine) processStreamRuntime(
 			tools = stripSpawnRecursiveTools(msg, tools) // 子 Agent leaf 防护：到顶剔除 spawn/orchestrate/transfer（P0-2）
 			tools = applyInheritedToolPolicy(msg, tools) // 工具继承：按父收窄的 allow/deny 过滤子 Agent 工具（feature 2）
 			tools = e.ensureSystemDispatchToolFloor(tools, msg)
-			tools = e.ensureMountedSkillTools(tools, msg.Metadata)                // bug#2：显式挂载技能的工具强制前置，保证不被 maxTools 截断
+			tools = e.ensureMountedSkillTools(tools, msg.Metadata) // bug#2：显式挂载技能的工具强制前置，保证不被 maxTools 截断
+			tools = e.ensureUnitSummaryTool(tools, msg)
 			tools = e.filterInternalRetrievalToolsForPersona(tools, msg.Metadata) // BUG-20260704：挂载 persona 时剥离内部检索工具，防模型主动拉回旧内容压过人设
 			tools = restrictToolsToCodeExecWhenRequired(tools, msg.Content)
 			if cap := effectiveMaxTools(streamToolsCfg.MaxTools, msg); cap > 0 && len(tools) > cap {
@@ -2609,7 +2616,8 @@ func (e *ReActEngine) processStreamRuntime(
 			},
 			wrapProvider: func(p hexagon.Provider, name, model string) hexagon.Provider {
 				p = wrapVisionImageLimitProvider(p, model) // 反应式视觉兜底（流式，含 failover 目标）
-				return wrapCodeExecToolChoiceProvider(p, msg.Content)
+				p = wrapCodeExecToolChoiceProvider(p, msg.Content)
+				return wrapUnitSummaryToolChoiceProvider(p, msg)
 			},
 		}
 		maxTurns := defaultAgentMaxTurns
@@ -2646,6 +2654,7 @@ func (e *ReActEngine) processStreamRuntime(
 		streamCtx := withToolReplyMetaSink(ctx)
 		// BUG-20260710-H1：流式路径同样盖已路由 Agent（与非流式 completeWithTools 对称）。
 		streamCtx = skill.WithRoutedAgent(streamCtx, strings.TrimSpace(msg.Metadata["routed_agent"]))
+		streamCtx = withSkillInvocationContext(streamCtx, msg, sessionID, selection.providerName, selection.modelName)
 		ollama.InjectTrustedReasoningDisclosureEvidence(&req, selection.providerName, selection.modelName)
 		sink.bindReasoningEvidenceObserver(&req)
 		if process := retrievalProcessSnapshot(ctx); len(process) > 0 {
@@ -3106,7 +3115,7 @@ func (e *ReActEngine) finalizeRuntimeStreamResult(
 		assistantMessageID = record.ID
 	}
 
-	if cacheable {
+	if cacheable && msgMeta["artifacts"] == "" {
 		e.cache.Put(cacheInput, content, providerName, modelName)
 	}
 
@@ -4146,6 +4155,10 @@ func shouldApplyCronIntentGuidance(msg *adapter.Message, history []hexagon.Messa
 	if msg == nil {
 		return false
 	}
+	// 单元模板先交领域解析最终正文，材料中的叙事时间不能触发定时任务工具收窄。
+	if hasTypedUnitSummaryInvocation(msg) {
+		return false
+	}
 	if isCronDispatch(msg) {
 		return false
 	}
@@ -5051,7 +5064,7 @@ func buildReplyMetadata(metadata map[string]string, providerName, modelName, ass
 	if v := metadata["routed_agent"]; v != "" {
 		replyMeta["routed_agent"] = v
 	}
-	for _, key := range []string{"request_id", "session_id", "finish_reason", "recovered_from_reasoning_only", "thinking", "reasoning_visibility", "thinking_duration", "record", persistErrorMetaKey} {
+	for _, key := range []string{"request_id", "session_id", "finish_reason", "recovered_from_reasoning_only", "thinking", "reasoning_visibility", "thinking_duration", "record", "artifacts", persistErrorMetaKey} {
 		if v := metadata[key]; v != "" {
 			replyMeta[key] = v
 		}

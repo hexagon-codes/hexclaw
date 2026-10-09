@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"testing"
 
+	"github.com/hexagon-codes/hexclaw/storage/migrate"
+
 	_ "modernc.org/sqlite"
 )
 
@@ -27,6 +29,9 @@ func setupDB(t *testing.T) *sql.DB {
 		if _, err := db.Exec(ddl); err != nil {
 			t.Fatalf("ddl: %v", err)
 		}
+	}
+	if _, err := db.Exec(migrate.PromptBuiltinMetadataV126DDL); err != nil {
+		t.Fatalf("prompt metadata migration: %v", err)
 	}
 	return db
 }

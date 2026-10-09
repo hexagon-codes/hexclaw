@@ -99,6 +99,8 @@ type Runtime struct {
 	// workers. The HTTP handler persists the return first and only then nudges
 	// this coordinator.
 	PracticeReturnRegrade *usecase.PracticeReturnRegradeCoordinator
+	// UnitSummary 共享聊天与HTTP的单元资料领域任务，生成和恢复由服务生命周期拥有。
+	UnitSummary *usecase.UnitSummaryCoordinator
 	// PrincipalMode is "local_loopback" for the single-user Desktop runtime or
 	// "remote" when an authentication middleware owns identity.
 	PrincipalMode string
@@ -114,6 +116,8 @@ type Runtime struct {
 	// It validates that the authenticated owner may address the requested K12
 	// agent; local Desktop still validates the registered agent in storage.
 	AuthorizeAgentScope func(context.Context, string, string) error
+	// AuthorizeSessionScope复用聊天会话的真实身份映射，不把知识owner当作sessions.user_id。
+	AuthorizeSessionScope func(context.Context, string, string) error
 }
 
 // NewHandler 返回 K12 的 HTTP 子路由（Go 1.22+ method+path 路由）。
@@ -127,6 +131,7 @@ func NewHandler(rt Runtime) http.Handler {
 	}
 	mux := http.NewServeMux()
 	h := &handler{rt: rt}
+	h.registerUnitSummary(mux)
 	mux.HandleFunc("GET /view-descriptor", h.viewDescriptor)
 	mux.HandleFunc("GET /materials/{document_id}/preparation", h.materialPreparation)
 	mux.HandleFunc("GET /materials/preparations", h.materialPreparationList)

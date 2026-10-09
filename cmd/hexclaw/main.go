@@ -2526,6 +2526,16 @@ Set source only when the material explicitly names a work, title, or another rel
 					requestCtx, router, k12ModelCapabilityReceipts, requested,
 				)
 			}
+			k12UnitSummary := newK12UnitSummaryCoordinator(k12rt.Deps, router)
+			k12UnitSummary.SetBaseContext(ctx)
+			go k12UnitSummary.Run(ctx)
+			k12TutorPolicy.unitSummary = k12UnitSummary
+			if err := skills.Register(k12skilladapter.NewUnitSummarySkill(k12UnitSummary)); err != nil {
+				logger.Error("K12 unit summary registration failed", "error", err)
+			}
+			if err := promptStore.EnsureK12UnitPrompts(ctx); err != nil {
+				logger.Error("K12 default prompt initialization failed", "error", err)
+			}
 			k12rt.Deps.WeeklyCandidates = k12usecase.NewWeeklyPracticeCandidateSource(&k12rt.Deps)
 			k12rt.MaterialWorker.ResolveModel = k12rt.Deps.PracticeGenerationRoute
 			k12rt.MaterialWorker.ReadVisual = visionFn
@@ -2746,6 +2756,7 @@ Set source only when the material explicitly names a work, title, or another rel
 				PageAssets:            k12PageAssets,
 				WorkFeedback:          k12WorkFeedback,
 				PracticeGeneration:    k12PracticeGeneration,
+				UnitSummary:           k12UnitSummary,
 				PracticeReturnRegrade: k12PracticeReturnRegrade,
 				OwnerScope:            k12usecase.DefaultLocalOwnerScope,
 				PrincipalMode: func() string {
@@ -2755,6 +2766,20 @@ Set source only when the material explicitly names a work, title, or another rel
 					return "remote"
 				}(),
 				AuthenticatedOwnerScope: resolveAuthenticatedK12Owner,
+				AuthorizeSessionScope: func(requestCtx context.Context, agent, sessionID string) error {
+					principal := strings.TrimSpace(skill.AuthenticatedUserID(requestCtx))
+					if principal == "" {
+						return fmt.Errorf("authenticated session principal is required")
+					}
+					sess, err := store.GetSession(requestCtx, sessionID)
+					if err != nil {
+						return err
+					}
+					if sess.UserID != principal {
+						return fmt.Errorf("session owner mismatch")
+					}
+					return nil
+				},
 				AuthorizeAgentScope: func(requestCtx context.Context, owner, agent string) error {
 					if owner != k12usecase.DefaultLocalOwnerScope {
 						return fmt.Errorf("agent owner mismatch")

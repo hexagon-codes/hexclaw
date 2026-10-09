@@ -2,6 +2,46 @@ package skill
 
 import "context"
 
+// InvocationContext 由引擎盖章本轮请求身份；模型参数不拥有会话、孩子或消息归属。
+type InvocationContext struct {
+	AuthenticatedUserID string
+	RoutedAgentName     string
+	RequestID           string
+	SourceMessageID     string
+	SessionID           string
+	OriginalUserText    string
+	ScenarioInput       map[string]string
+}
+
+type invocationContextKey struct{}
+
+func WithInvocationContext(ctx context.Context, input InvocationContext) context.Context {
+	metadata := make(map[string]string, len(input.ScenarioInput))
+	for key, value := range input.ScenarioInput {
+		metadata[key] = value
+	}
+	input.ScenarioInput = metadata
+	return context.WithValue(ctx, invocationContextKey{}, input)
+}
+
+// CurrentInvocation 返回请求快照，并以现有可信路由上下文补齐执行时的身份。
+func CurrentInvocation(ctx context.Context) InvocationContext {
+	input, _ := ctx.Value(invocationContextKey{}).(InvocationContext)
+	if user := AuthenticatedUserID(ctx); user != "" {
+		input.AuthenticatedUserID = user
+	}
+	if agent := RoutedAgentName(ctx); agent != "" {
+		input.RoutedAgentName = agent
+	}
+	input.OriginalUserText = OriginalUserText(ctx)
+	copy := make(map[string]string, len(input.ScenarioInput))
+	for key, value := range input.ScenarioInput {
+		copy[key] = value
+	}
+	input.ScenarioInput = copy
+	return input
+}
+
 type originalUserTextKey struct{}
 
 // WithOriginalUserText 只透传本轮互动消息的原始文本；空值覆盖上一轮来源。

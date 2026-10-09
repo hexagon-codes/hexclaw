@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 
 	"github.com/hexagon-codes/hexclaw/adapter"
@@ -25,7 +26,8 @@ var replyMetaSinkKey = replyMetaSinkKeyType{}
 // replySafeToolMetaKeys 是允许从工具结果透传到回复元数据的键白名单。
 // 只收结构化、面向前端渲染的领域中立键；杜绝内部 skill 元数据泄漏到回复。
 var replySafeToolMetaKeys = map[string]bool{
-	"record": true, // 记录本入库徽章（{collection,fields,status} JSON），前端 messageRecordChip 消费
+	"record":    true, // 记录本入库徽章（{collection,fields,status} JSON），前端 messageRecordChip 消费
+	"artifacts": true, // 只透传持久产物引用，不携带文件字节或内部调用参数。
 }
 
 type replyMetaSink struct {
@@ -61,10 +63,49 @@ func stampToolReplyMeta(ctx context.Context, meta map[string]string) {
 	defer s.mu.Unlock()
 	for k, v := range meta {
 		if v != "" && replySafeToolMetaKeys[k] {
+			if k == "artifacts" {
+				s.m[k] = mergeArtifactReplyReferences(s.m[k], v)
+				continue
+			}
 			// 后写覆盖：同一轮工具循环内多次入库取最后一条（对齐「一次批改一道题」语义）。
 			s.m[k] = v
 		}
 	}
+}
+
+// 同轮多个工具回执按稳定对象身份合并，避免后一次动作遮蔽前一次已发布引用。
+func mergeArtifactReplyReferences(previous, next string) string {
+	var merged []json.RawMessage
+	seen := make(map[string]bool)
+	for _, encoded := range []string{previous, next} {
+		var items []json.RawMessage
+		if json.Unmarshal([]byte(encoded), &items) != nil {
+			continue
+		}
+		for _, item := range items {
+			var fields map[string]any
+			if json.Unmarshal(item, &fields) != nil {
+				continue
+			}
+			identity := string(item)
+			for _, key := range []string{"revision_id", "artifact_id", "attempt_id"} {
+				if value, ok := fields[key].(string); ok && value != "" {
+					kind, _ := fields["kind"].(string)
+					identity = kind + ":" + key + ":" + value
+					break
+				}
+			}
+			if !seen[identity] {
+				seen[identity] = true
+				merged = append(merged, item)
+			}
+		}
+	}
+	if len(merged) == 0 {
+		return ""
+	}
+	data, _ := json.Marshal(merged)
+	return string(data)
 }
 
 // applyToolReplyMeta 把 sink 收集的 reply-safe 元数据落到 msg.Metadata，

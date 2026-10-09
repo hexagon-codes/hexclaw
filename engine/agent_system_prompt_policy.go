@@ -90,6 +90,10 @@ func (e *ReActEngine) prepareAgentSystemPromptPolicy(ctx context.Context, msg *a
 	}
 	msg.Metadata[metadataAgentSystemPromptPolicyKey] = directive.Key
 	msg.Metadata[metadataAgentSystemPromptPolicyDirective] = directive.Content
+	// 显式角色的实际注册配置与工具身份保持一致，不能只注入人设而遗漏路由归属。
+	if strings.TrimSpace(msg.Metadata["routed_agent"]) == "" {
+		msg.Metadata["routed_agent"] = cfg.Name
+	}
 	if len(directive.KnowledgeHits) > 0 {
 		recordKnowledgeHits(ctx, directive.KnowledgeHits)
 	}

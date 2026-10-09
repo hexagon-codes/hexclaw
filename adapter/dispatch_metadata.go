@@ -37,6 +37,9 @@ var ReservedDispatchMetadataKeys = []string{
 	"reasoning_observed",
 	"reasoning_provider",
 	"reasoning_model",
+	// 产物完成回执由工具/存储提交后生成；请求只能携带独立的active material提示。
+	"artifacts",
+	"source_message_id",
 }
 
 // StripReservedDispatchMetadata 从不可信客户端 metadata 中剥除保留派发键。

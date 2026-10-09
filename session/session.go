@@ -107,12 +107,16 @@ type messageMetadata struct {
 	// Skills 发送时挂载/召唤的技能名（前端气泡 chip）。前端随请求 metadata["skills"] 逗号分隔上送；
 	// 此前持久化漏编码 → 重载后 metadata.skills 缺失、chip 消失。现解析成**数组**一并落库
 	// （与前端内存态 userMeta.skills、getMessageSkills 的 Array.isArray 契约一致）（BUG-20260627 #4）。
-	Skills []string `json:"skills,omitempty"`
+	Skills               []string        `json:"skills,omitempty"`
+	PromptInvocation     json.RawMessage `json:"prompt_invocation,omitempty"`
+	K12TaskIntent        json.RawMessage `json:"k12_task_intent,omitempty"`
+	K12ActiveMaterial    json.RawMessage `json:"k12_active_material,omitempty"`
+	K12ProvidedMaterials json.RawMessage `json:"k12_provided_materials,omitempty"`
 }
 
 // SaveUserMessage 保存用户消息到会话。
 func (m *Manager) SaveUserMessage(ctx context.Context, sessionID string, msg *adapter.Message) error {
-	metadata, err := encodeMessageMetadata(msg.Attachments, msg.Metadata["documents"], msg.Metadata["skills"])
+	metadata, err := encodeMessageMetadata(msg.Attachments, msg.Metadata["documents"], msg.Metadata["skills"], msg.Metadata)
 	if err != nil {
 		return fmt.Errorf("编码消息元数据失败: %w", err)
 	}
@@ -131,6 +135,11 @@ func (m *Manager) SaveUserMessage(ctx context.Context, sessionID string, msg *ad
 	if err := m.saveMessage(ctx, record); err != nil {
 		return err
 	}
+	// 保留渠道原消息ID；工具副作用另引用实际持久用户消息主键。
+	if msg.Metadata == nil {
+		msg.Metadata = make(map[string]string)
+	}
+	msg.Metadata["source_message_id"] = record.ID
 
 	// 首条用户消息时自动更新默认标题（同步、无 LLM 依赖）
 	m.autoUpdateDefaultTitle(ctx, sessionID, msg.Content)
@@ -556,13 +565,21 @@ func generateTitleForMessage(msg *adapter.Message) string {
 
 // encodeMessageMetadata 组装用户消息富内容 blob（图片附件 + 文档卡片）。
 // documentsJSON 来自前端随请求 metadata["documents"] 上送的 ChatDocumentRef[] JSON（可空）。
-func encodeMessageMetadata(attachments []adapter.Attachment, documentsJSON, skillsCSV string) (string, error) {
+func encodeMessageMetadata(attachments []adapter.Attachment, documentsJSON, skillsCSV string, invocation ...map[string]string) (string, error) {
 	mm := messageMetadata{Attachments: attachments}
 	if documentsJSON != "" && documentsJSON != "null" && json.Valid([]byte(documentsJSON)) {
 		mm.Documents = json.RawMessage(documentsJSON)
 	}
 	mm.Skills = parseSkillsCSV(skillsCSV)
-	if len(mm.Attachments) == 0 && mm.Documents == nil && len(mm.Skills) == 0 {
+	if len(invocation) > 0 {
+		for key, target := range map[string]*json.RawMessage{"prompt_invocation": &mm.PromptInvocation, "k12_task_intent": &mm.K12TaskIntent, "k12_active_material": &mm.K12ActiveMaterial, "k12_provided_materials": &mm.K12ProvidedMaterials} {
+			value := invocation[0][key]
+			if value != "" && json.Valid([]byte(value)) {
+				*target = json.RawMessage(value)
+			}
+		}
+	}
+	if len(mm.Attachments) == 0 && mm.Documents == nil && len(mm.Skills) == 0 && mm.PromptInvocation == nil && mm.K12TaskIntent == nil && mm.K12ActiveMaterial == nil && mm.K12ProvidedMaterials == nil {
 		return "{}", nil
 	}
 	data, err := json.Marshal(mm)
