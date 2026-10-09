@@ -13,6 +13,8 @@ import (
 	goruntime "runtime"
 	"strings"
 	"time"
+
+	"github.com/hexagon-codes/hexclaw/config"
 )
 
 const defaultOllamaBaseURL = "http://localhost:11434"
@@ -98,6 +100,65 @@ type OllamaStatus struct {
 	Models          []OllamaModel `json:"models,omitempty"`  // 已下载的模型列表
 	Associated      bool          `json:"associated"`        // 是否已关联为 LLM Provider
 	ModelCount      int           `json:"model_count"`       // 模型数量
+}
+
+// OllamaProbeResponse 是未保存连接草稿的一次只读可达性回执。
+// 不含目标修订、关联实例或模型计数，不能被当作已保存目标的运行状态。
+type OllamaProbeResponse struct {
+	Reachable       bool   `json:"reachable"`
+	ResolvedBaseURL string `json:"resolved_base_url"`
+	Version         string `json:"version,omitempty"`
+	Error           string `json:"error,omitempty"`
+}
+
+// handleOllamaProbe 仅探测候选地址，不保存目标、不改 Provider 映射，也不拉起服务或模型。
+// 候选解析与既有配置保存共用 Resolve，默认地址始终指向当前后端服务的默认目标。
+func (s *Server) handleOllamaProbe(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Mode          string `json:"mode"`
+		CustomBaseURL string `json:"custom_base_url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid request body"})
+		return
+	}
+	candidate := config.OllamaTargetConfig{Mode: body.Mode, CustomBaseURL: body.CustomBaseURL}
+	base, err := candidate.Resolve(s.ollamaBaseURL)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	target := ollamaTargetSnapshot{ResolvedBaseURL: base}
+	result := OllamaProbeResponse{ResolvedBaseURL: base}
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, target.endpoint("/api/version"), nil)
+	if err != nil {
+		result.Error = "Ollama probe request failed"
+		writeJSON(w, http.StatusOK, result)
+		return
+	}
+	response, err := target.client(3*time.Second, 3*time.Second).Do(req)
+	if err != nil {
+		result.Error = "Ollama service is unreachable"
+		writeJSON(w, http.StatusOK, result)
+		return
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		result.Error = fmt.Sprintf("Ollama version request returned HTTP %d", response.StatusCode)
+		writeJSON(w, http.StatusOK, result)
+		return
+	}
+	var version struct {
+		Version string `json:"version"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&version); err != nil || strings.TrimSpace(version.Version) == "" {
+		result.Error = "Ollama version response is invalid"
+		writeJSON(w, http.StatusOK, result)
+		return
+	}
+	result.Reachable = true
+	result.Version = version.Version
+	writeJSON(w, http.StatusOK, result)
 }
 
 // OllamaModel Ollama 已下载的模型

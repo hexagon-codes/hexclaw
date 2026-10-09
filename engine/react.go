@@ -2639,9 +2639,11 @@ func (e *ReActEngine) processStreamRuntime(
 				modelName:    selection.modelName,
 			})
 		}
+		runtimeExecutor := newRuntimeToolExecutor(e.toolExecutor)
+		runtimeExecutor.onActivity = sink.emitToolActivity
 		runner := hruntime.NewRunner(hruntime.Config{
 			ProviderSelector: selector,
-			ToolExecutor:     newRuntimeToolExecutor(e.toolExecutor),
+			ToolExecutor:     runtimeExecutor,
 			Middleware:       middleware,
 			DefaultMaxTurns:  maxTurns,
 		})
@@ -2859,6 +2861,20 @@ type replyChunkRuntimeSink struct {
 	reasoningEvidenceMu  sync.Mutex
 	lastReasoningReceipt llm.ReasoningReceipt
 	hasReasoningReceipt  bool
+}
+
+// emitToolActivity 仅续传实际执行中的工具活动，不新增文字、推理或完成事件。
+// 活动帧沿同一 RuntimeWire 分配消息身份和连续序号，断连恢复也复用原请求。
+func (s *replyChunkRuntimeSink) emitToolActivity(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case s.ch <- &adapter.ReplyChunk{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (s *replyChunkRuntimeSink) Emit(ctx context.Context, event hruntime.Event) error {

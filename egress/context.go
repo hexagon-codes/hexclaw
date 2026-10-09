@@ -11,6 +11,7 @@ import (
 
 type contextKey struct{}
 type providerClientRequestKeyContextKey struct{}
+type providerCompletionRequestKeyContextKey struct{}
 type providerRequestResponseHeaderTimeoutContextKey struct{}
 
 // WithProviderClientRequestKey binds a durable upstream request identity to
@@ -25,6 +26,13 @@ func WithProviderClientRequestKey(ctx context.Context, key string) context.Conte
 		return ctx
 	}
 	return context.WithValue(ctx, providerClientRequestKeyContextKey{}, key)
+}
+
+// WithProviderCompletionRequestKey 仅绑定当前持久模型操作的请求标识，
+// 不改变其他业务的请求、出口权限或上游是否支持去重的判断。
+func WithProviderCompletionRequestKey(ctx context.Context, key string) context.Context {
+	ctx = WithProviderClientRequestKey(ctx, key)
+	return context.WithValue(ctx, providerCompletionRequestKeyContextKey{}, true)
 }
 
 // ProviderClientRequestKeyFromContext returns the request-local durable

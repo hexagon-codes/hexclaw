@@ -230,6 +230,8 @@ func newRuntimeToolExecutor(executor *ToolExecutor) *runtimeToolExecutor {
 
 type runtimeToolExecutor struct {
 	executor *ToolExecutor
+	// 流式请求用现有工具心跳续传活动帧；非流式调用不绑定回调。
+	onActivity func(context.Context) error
 
 	mu         sync.Mutex
 	callCounts map[string]int // (tool+args) signature → times seen this run
@@ -270,6 +272,12 @@ func (e *runtimeToolExecutor) Execute(ctx context.Context, call llm.ToolCall) (h
 		return hruntime.ToolResult{Content: msg, Raw: repeatToolCallBlockedError, Status: hruntime.ToolStatusError}, nil
 	}
 
+	// 已进入真实执行阶段即续传一次活动，不能等第一个周期心跳才续期。
+	if e.onActivity != nil {
+		if err := e.onActivity(ctx); err != nil {
+			return hruntime.ToolResult{}, err
+		}
+	}
 	heartbeatCtx, stopHeartbeat := context.WithCancel(ctx)
 	heartbeatStopped := make(chan struct{})
 	var stopHeartbeatOnce sync.Once
@@ -294,6 +302,11 @@ func (e *runtimeToolExecutor) Execute(ctx context.Context, call llm.ToolCall) (h
 				return
 			case <-ticker.C:
 				trace.L(ctx).Info("runtime tool call heartbeat", "stage", "tool_execute", "tool", call.Name, "tool_call_id", call.ID, "elapsed_ms", time.Since(started).Milliseconds())
+				if e.onActivity != nil {
+					if err := e.onActivity(heartbeatCtx); err != nil {
+						return
+					}
+				}
 			}
 		}
 	}()

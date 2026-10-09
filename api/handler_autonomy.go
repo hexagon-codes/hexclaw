@@ -261,6 +261,8 @@ func extractWorkflowTools(wf *WorkflowData) (tools []string, hasAgentNode bool) 
 type autonomyTaskStatus struct {
 	TaskRef       string                    `json:"task_ref"`
 	Kind          string                    `json:"kind"` // cron | webhook | workflow
+	Source        string                    `json:"source"`
+	DecisionID    string                    `json:"decision_id,omitempty"`
 	Name          string                    `json:"name"`
 	Enabled       bool                      `json:"enabled"`
 	Status        string                    `json:"status,omitempty"`
@@ -382,8 +384,15 @@ func (s *Server) handleAutonomySummary(w http.ResponseWriter, r *http.Request) {
 		grantsActive = len(s.autonomyGrants.ListActive(""))
 	}
 
+	// counts.ready 沿用旧客户端的预检预估口径。当前没有同时绑定策略与任务
+	// 修订的评估快照，不能把本次只读预检或历史工具放行当成真实可运行评估。
+	// 新客户端通过独立 ready=null 与 evaluation 显示待评估；读取摘要不执行任务。
 	writeJSON(w, http.StatusOK, map[string]any{
 		"profile": policy.Profile(),
+		"evaluation": map[string]string{
+			"state": "not_evaluated",
+		},
+		"ready": nil,
 		"counts": map[string]int{
 			"tasks":   len(tasks),
 			"ready":   ready,
@@ -400,6 +409,7 @@ func buildTaskStatus(ref, kind, name string, enabled bool, status string, pf aut
 	t := autonomyTaskStatus{
 		TaskRef:       ref,
 		Kind:          kind,
+		Source:        pf.Source,
 		Name:          name,
 		Enabled:       enabled,
 		Status:        status,
@@ -410,6 +420,8 @@ func buildTaskStatus(ref, kind, name string, enabled bool, status string, pf aut
 	if block, ok := pendingBlocks[ref]; ok {
 		b := block
 		t.LastBlock = &b
+		t.Source = b.Source
+		t.DecisionID = b.ID
 		t.AllClear = false
 	}
 	return t

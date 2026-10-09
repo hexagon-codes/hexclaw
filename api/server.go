@@ -1003,6 +1003,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("PUT /api/v1/config", s.handleUpdateFullConfig)
 	mux.HandleFunc("GET /api/v1/models", s.handleListModels)
 	mux.HandleFunc("GET /api/v1/ollama/status", s.handleOllamaStatus)
+	mux.HandleFunc("POST /api/v1/ollama/probe", s.handleOllamaProbe)
 	mux.HandleFunc("POST /api/v1/ollama/pull", s.handleOllamaPull)
 	mux.HandleFunc("GET /api/v1/ollama/pulls/{operation_id}", s.handleGetOllamaPull)
 	mux.HandleFunc("GET /api/v1/ollama/pulls/{operation_id}/events", s.handleOllamaPullEvents)

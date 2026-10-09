@@ -199,7 +199,7 @@ func newProviderHTTPClient(
 		if originErr != nil || redirectOrigin != origin {
 			return fmt.Errorf("%w: redirect must stay on configured origin", ErrProviderEndpointPolicy)
 		}
-		if len(via) > 0 && providerEmbeddingRequest(via[0]) &&
+		if len(via) > 0 && providerRequestIdentityApplicable(via[0]) &&
 			!providerRequestHeaderPresent(req.Header, "Idempotency-Key") {
 			if key, ok := ProviderClientRequestKeyFromContext(req.Context()); ok {
 				req.Header.Set("Idempotency-Key", key)
@@ -287,7 +287,7 @@ func (t *providerOriginTransport) RoundTrip(req *http.Request) (*http.Response, 
 		return nil, fmt.Errorf("%w: request must stay on configured origin", ErrProviderEndpointPolicy)
 	}
 	if key, ok := ProviderClientRequestKeyFromContext(req.Context()); ok &&
-		providerEmbeddingRequest(req) &&
+		providerRequestIdentityApplicable(req) &&
 		!providerRequestHeaderPresent(req.Header, "Idempotency-Key") {
 		clone := req.Clone(req.Context())
 		clone.Header = req.Header.Clone()
@@ -321,6 +321,19 @@ func providerEmbeddingRequest(req *http.Request) bool {
 		return false
 	}
 	return strings.HasSuffix(strings.TrimSuffix(req.URL.Path, "/"), "/embeddings")
+}
+
+// 仅扩当前显式持久模型请求；模型目录/探测和未绑定操作的其他completion保持原样。
+func providerRequestIdentityApplicable(req *http.Request) bool {
+	if providerEmbeddingRequest(req) {
+		return true
+	}
+	if req == nil || req.URL == nil || req.Method != http.MethodPost {
+		return false
+	}
+	enabled, _ := req.Context().Value(providerCompletionRequestKeyContextKey{}).(bool)
+	path := strings.TrimSuffix(req.URL.Path, "/")
+	return enabled && (strings.HasSuffix(path, "/chat/completions") || strings.HasSuffix(path, "/responses"))
 }
 
 func providerRequestHeaderPresent(header http.Header, name string) bool {
