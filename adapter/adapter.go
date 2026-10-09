@@ -272,6 +272,31 @@ type DeliveryAck struct {
 	Status            DeliveryStatus `json:"status"`
 }
 
+// ResourcePreparationError 区分媒体请求未开始或明确被拒绝，与请求结果未知。
+// Cause 只保留脱敏技术原因，不能带请求正文、地址或凭据。
+type ResourcePreparationError struct {
+	Known bool
+	Cause error
+}
+
+func (e *ResourcePreparationError) Error() string {
+	if e == nil || e.Cause == nil {
+		return "delivery resource preparation failed"
+	}
+	return e.Cause.Error()
+}
+
+func (e *ResourcePreparationError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Cause
+}
+
+func (e *ResourcePreparationError) ResourcePreparationKnown() bool {
+	return e != nil && e.Known
+}
+
 // DeliveryPart 是一次平台外发只处理一个冻结 part 的适配器载荷。
 // PreparedResourceID 是平台媒体引用；内部账本可持久化，但不进入 canonical payload、公开 API 或日志。
 type DeliveryPart struct {

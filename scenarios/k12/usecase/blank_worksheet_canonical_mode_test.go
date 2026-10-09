@@ -106,7 +106,7 @@ func TestBlankWorksheetCanonicalPrintReplayKeepsFrozenSourceSQLite(t *testing.T)
 	if err != nil || !reflect.DeepEqual(stored, before) {
 		t.Fatalf("print projection mutated the frozen source: %v", err)
 	}
-	if req.SourceRef != "final_artifact:"+before.ArtifactID+":"+before.ArtifactDigest {
+	if !strings.HasPrefix(req.SourceRef, "final_artifact:"+before.ArtifactID+":"+before.ArtifactDigest+":") || !strings.HasSuffix(req.SourceRef, ":"+imageFinalPDFRenderContractVersion) {
 		t.Fatal("print projection lost the exact source identity")
 	}
 }

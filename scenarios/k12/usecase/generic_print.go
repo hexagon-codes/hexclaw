@@ -15,9 +15,22 @@ import (
 	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/render"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
+	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
 )
 
 const printPDFRenderContractVersion = "k12-pdf-v2"
+
+const imageFinalPDFRenderContractVersion = k12storage.ImageFinalPDFRenderContractVersion
+
+func printArtifactRenderContract(sourceRef string) string {
+	if strings.HasPrefix(sourceRef, "automation_weekly-sheet:") && strings.HasSuffix(sourceRef, ":"+weeklyMistakeSheetRenderContract) {
+		return weeklyMistakeSheetRenderContract
+	}
+	if strings.HasSuffix(sourceRef, ":"+imageFinalPDFRenderContractVersion) {
+		return imageFinalPDFRenderContractVersion
+	}
+	return printPDFRenderContractVersion
+}
 
 type PrepareGenericPrintRequest struct {
 	AgentName         string
@@ -102,7 +115,7 @@ func normalizePrintableArtifactRequest(req PreparePrintableArtifactRequest) (Pre
 func buildPrintArtifact(req PreparePrintableArtifactRequest, at int64) k12.PrintArtifact {
 	renderContract := ""
 	if req.SourceKind == k12.PrintSourceGradingFinalArtifact {
-		renderContract = printPDFRenderContractVersion
+		renderContract = printArtifactRenderContract(req.SourceRef)
 	}
 	artifactBytes, _ := json.Marshal(struct {
 		SourceKind        string `json:"source_kind"`
@@ -153,7 +166,7 @@ func (d Deps) renderPrintableArtifact(ctx context.Context,
 	sum := sha256.Sum256(pdf)
 	return k12.PrintArtifactRender{
 		ArtifactID: artifact.ArtifactID, Format: "pdf",
-		RenderContractVersion: printPDFRenderContractVersion,
+		RenderContractVersion: printArtifactRenderContract(artifact.SourceRef),
 		ContentType:           "application/pdf",
 		ByteDigest:            hex.EncodeToString(sum[:]),
 		ByteSize:              int64(len(pdf)),
@@ -376,6 +389,31 @@ func (d Deps) gradingFinalArtifactPrintRequest(
 	artifact k12.GradingFinalArtifact,
 	title string,
 ) (PreparePrintableArtifactRequest, error) {
+	source, intent, err := d.gradingFinalArtifactImageSource(ctx, artifact)
+	if err != nil {
+		return PreparePrintableArtifactRequest{}, err
+	}
+	if intent != "" {
+		media := source
+		if artifact.HasAnnotatedAsset() {
+			annotated, openErr := d.Records.OpenGradingFinalAnnotatedAsset(ctx, artifact.AgentName, artifact.ArtifactID)
+			if openErr != nil {
+				return PreparePrintableArtifactRequest{}, openErr
+			}
+			if artifact.OriginalSourceDigest != strings.TrimPrefix(deliveryDigest(string(source.Data)), "sha256:") {
+				return PreparePrintableArtifactRequest{}, errors.New("final artifact original image identity mismatch")
+			}
+			media = DeliveryAttachment{MIME: annotated.MIME, Data: annotated.Data}
+		}
+		canonical := artifact.CanonicalMarkdown
+		return PreparePrintableArtifactRequest{
+			AgentName: artifact.AgentName, SourceKind: k12.PrintSourceGradingFinalArtifact,
+			SourceRef: "final_artifact:" + artifact.ArtifactID + ":" + artifact.ArtifactDigest + ":" +
+				strings.TrimPrefix(deliveryDigest(string(source.Data)), "sha256:") + ":" + imageFinalPDFRenderContractVersion,
+			Title: title, CanonicalMarkdown: canonical,
+			RenderMarkdown: frozenFinalPDFMarkdown(canonical, media),
+		}, nil
+	}
 	canonical := d.gradingFinalArtifactPrintableMarkdown(ctx, artifact)
 	req := PreparePrintableArtifactRequest{
 		AgentName:         artifact.AgentName,
@@ -407,6 +445,60 @@ func (d Deps) gradingFinalArtifactPrintRequest(
 		req.RenderMarkdown = imageMarkdown + "\n\n" + canonical
 	}
 	return req, nil
+}
+
+// gradingFinalArtifactImageSource 只读取该终稿所属任务已冻结的 owner 和原图。
+// 无 ImageTask 来源的历史打印保留既有投影，不强迫其携带图片。
+func (d Deps) gradingFinalArtifactImageSource(ctx context.Context, artifact k12.GradingFinalArtifact) (DeliveryAttachment, k12.ImageTaskIntent, error) {
+	job, err := d.GetGradingJob(ctx, artifact.AgentName, artifact.JobID)
+	if errors.Is(err, records.ErrNotFound) {
+		return DeliveryAttachment{}, "", nil
+	}
+	if err != nil {
+		return DeliveryAttachment{}, "", err
+	}
+	if job.Fields.SourceKind != "image_task" {
+		return DeliveryAttachment{}, "", nil
+	}
+	id, err := gradingFinalImageTaskDispatchID(job)
+	if err != nil {
+		return DeliveryAttachment{}, "", err
+	}
+	dispatch, err := d.Records.GetImageTaskDispatch(ctx, artifact.AgentName, id)
+	if err != nil {
+		return DeliveryAttachment{}, "", err
+	}
+	if len(dispatch.SourceAssetRefs) != 1 || (dispatch.TaskIntent != k12.ImageTaskIntentBlankWorksheet && dispatch.TaskIntent != k12.ImageTaskIntentCompletedHomework) {
+		return DeliveryAttachment{}, "", errors.New("final artifact image task source is invalid")
+	}
+	owner, err := d.Records.GetImageTaskOwnerScope(ctx, artifact.AgentName, id)
+	if err != nil {
+		return DeliveryAttachment{}, "", err
+	}
+	repository := &PageAssetRepository{Records: d.Records}
+	image, err := repository.OpenReady(ctx, owner, artifact.AgentName, dispatch.SourceAssetRefs[0])
+	if err != nil {
+		return DeliveryAttachment{}, "", err
+	}
+	if imageBytesDigest([][]byte{image.Data}) != dispatch.SourceDigest {
+		// 历史任务冻结原始字节，当前 PageAsset 任务冻结规范 PNG；两者只核同一原图。
+		canonical, err := canonicalProblemSourceImage(image)
+		if err != nil {
+			return DeliveryAttachment{}, "", err
+		}
+		if imageBytesDigest([][]byte{canonical.Data}) != dispatch.SourceDigest {
+			return DeliveryAttachment{}, "", errors.New("final artifact image task digest mismatch")
+		}
+	}
+	return DeliveryAttachment{MIME: image.Metadata.MediaType, Data: image.Data}, dispatch.TaskIntent, nil
+}
+
+func frozenFinalPDFMarkdown(canonical string, media DeliveryAttachment) string {
+	image := "![](data:" + media.MIME + ";base64," + base64.StdEncoding.EncodeToString(media.Data) + "){width=92%}"
+	if heading, body, ok := strings.Cut(canonical, "\n"); ok && strings.HasPrefix(heading, "# ") {
+		return heading + "\n\n" + image + "\n" + body
+	}
+	return image + "\n\n" + canonical
 }
 
 // gradingFinalArtifactPrintableMarkdown 只在当前结构化回执仍与冻结摘要完全一致时，

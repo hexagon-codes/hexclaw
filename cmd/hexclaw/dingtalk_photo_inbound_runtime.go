@@ -1063,7 +1063,7 @@ func (r *k12DingtalkPhotoInboundRuntime) completeBoundReply(
 		}
 	} else {
 		imageMIME := ""
-		if len(batch.Receipts) == 1 && r.imageTasks != nil {
+		if (len(batch.Receipts) == 1 || (len(batch.Receipts) == 2 && batch.Receipts[1].PartMIME == "application/pdf")) && r.imageTasks != nil {
 			view, err := r.imageTasks.Get(ctx, bundle.Receipt.AgentName, bundle.Dispatch.ImageTaskID)
 			if err != nil {
 				return false, err
@@ -1072,7 +1072,7 @@ func (r *k12DingtalkPhotoInboundRuntime) completeBoundReply(
 				bundle.Dispatch.RoutingDecision != k12usecase.InboundPhotoRouteNewSubmission {
 				return false, fmt.Errorf("DingTalk photo bound reply batch is invalid")
 			}
-		} else if len(batch.Receipts) == 2 && strings.HasPrefix(batch.Receipts[1].PartMIME, "image/") {
+		} else if (len(batch.Receipts) == 2 || len(batch.Receipts) == 3) && strings.HasPrefix(batch.Receipts[1].PartMIME, "image/") {
 			imageMIME = batch.Receipts[1].PartMIME
 		} else {
 			return false, fmt.Errorf("DingTalk photo bound reply batch is invalid")
@@ -1205,6 +1205,28 @@ func (r *k12DingtalkPhotoInboundRuntime) advanceFinalReply(
 	}
 	if bundle.Dispatch.RoutingDecision == k12usecase.InboundPhotoRouteRegrade {
 		taskIntent = k12.ImageTaskIntentCompletedHomework
+	}
+	// 已冻结的实际计划先接续，不能因升级后重新读取媒体失败而阻断旧回执。
+	if reader, ok := r.replyBatches.(interface {
+		GetK12FinalReplyBatch(context.Context, string, string, string) (k12.DeliveryBatch, error)
+	}); ok {
+		meta, readErr := r.artifacts.GetGradingFinalArtifact(ctx, bundle.Receipt.AgentName, bundle.Dispatch.FinalArtifactID)
+		if readErr != nil {
+			return false, readErr
+		}
+		identity := k12DingtalkPhotoReplyCommand{InboundReceiptID: bundle.Receipt.ReceiptID, FinalArtifactID: meta.ArtifactID, FinalArtifactDigest: meta.ArtifactDigest}
+		batch, lookupErr := reader.GetK12FinalReplyBatch(ctx, bundle.Receipt.AgentName, k12DingtalkPhotoReplyObjectKind, k12DingtalkPhotoReplyObjectID(identity))
+		if lookupErr == nil && !k12usecase.K12FinalReplyNeedsFallback(batch) {
+			bound, bindErr := r.inbound.BindReplyBatch(ctx, bundle.Receipt.AgentName, bundle.Receipt.ReceiptID, bundle.Dispatch.Version, batch.BatchID)
+			if bindErr != nil {
+				return false, bindErr
+			}
+			bundle.Dispatch = bound
+			return r.completeBoundReply(ctx, bundle)
+		}
+		if lookupErr != nil && !errors.Is(lookupErr, records.ErrNotFound) {
+			return false, lookupErr
+		}
 	}
 	artifact, asset, err := r.openValidatedFinalArtifact(ctx, bundle, taskIntent)
 	if err != nil {

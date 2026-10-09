@@ -134,7 +134,9 @@ func (d Deps) deliverAutomationText(ctx context.Context, agentName, kind, comman
 		if kind == string(KindWeeklySheet) {
 			artifact, _, prepareErr := d.PreparePrintableArtifact(ctx, PreparePrintableArtifactRequest{
 				AgentName: agentName, SourceKind: k12.PrintSourcePracticeQuestion,
-				SourceRef: objectKind + ":" + commandID, Title: "本周错题卷", CanonicalMarkdown: content,
+				SourceRef: objectKind + ":" + commandID + ":" + weeklyMistakeSheetRenderContract,
+				Title:     "本周错题卷", CanonicalMarkdown: content,
+				RenderMarkdown: weeklyMistakeSheetRenderMarkdown(content),
 			})
 			if prepareErr != nil {
 				return k12.DeliveryBatch{}, prepareErr
@@ -686,6 +688,52 @@ func (d Deps) prepareDeliveryBatchResources(
 	ctx context.Context,
 	batch k12.DeliveryBatch,
 ) (k12.DeliveryBatch, error) {
+	if isK12PDFReplyBatch(batch) {
+		media := make([]k12.DeliveryReceipt, 0, len(batch.Receipts))
+		for _, r := range batch.Receipts {
+			if r.PartMIME == "application/pdf" {
+				media = append(media, r)
+			}
+		}
+		for _, r := range batch.Receipts {
+			if r.PartKind == messagecontent.PartArtifact && r.PartMIME != "application/pdf" {
+				media = append(media, r)
+			}
+		}
+		for _, receipt := range media {
+			if receipt.PreparedResourceID != "" {
+				continue
+			}
+			preparer, ok := d.Delivery.(DeliveryPartResourcePreparer)
+			if !ok {
+				return d.Records.MarkDeliveryK12PreparationFailure(context.WithoutCancel(ctx), batch.AgentName, batch.BatchID, receipt.DeliveryID, true)
+			}
+			began, err := d.Records.BeginDeliveryK12MediaPreparation(ctx, batch.AgentName, receipt.DeliveryID)
+			if err != nil {
+				return batch, err
+			}
+			if !began {
+				current, getErr := d.GetDeliveryBatch(ctx, batch.AgentName, batch.BatchID)
+				return current, errors.Join(getErr, errors.New("PDF preparation is already in progress or unknown"))
+			}
+			resourceID, prepareErr := preparer.PrepareDeliveryPartResource(ctx, receipt)
+			resourceID = strings.TrimSpace(resourceID)
+			if prepareErr != nil || resourceID == "" {
+				var outcome interface{ ResourcePreparationKnown() bool }
+				known := errors.As(prepareErr, &outcome) && outcome.ResourcePreparationKnown()
+				current, saveErr := d.Records.MarkDeliveryK12PreparationFailure(context.WithoutCancel(ctx), batch.AgentName, batch.BatchID, receipt.DeliveryID, known)
+				return current, errors.Join(saveErr, errors.New("PDF resource preparation failed"))
+			}
+			if err = d.Records.SaveDeliveryK12PreparedResource(context.WithoutCancel(ctx), batch.AgentName, receipt.DeliveryID, resourceID); err != nil {
+				return batch, err
+			}
+		}
+		current, err := d.GetDeliveryBatch(ctx, batch.AgentName, batch.BatchID)
+		if err != nil {
+			return batch, err
+		}
+		batch = current
+	}
 	hasArtifact := false
 	for _, receipt := range batch.Receipts {
 		if receipt.PartKind == messagecontent.PartArtifact {
@@ -749,6 +797,17 @@ func (d Deps) prepareDeliveryBatchResources(
 		return current, errors.New(detail)
 	}
 	return current, nil
+}
+
+func isK12PDFReplyBatch(batch k12.DeliveryBatch) bool {
+	if !strings.HasSuffix(batch.ObjectID, ":"+imageFinalPDFRenderContractVersion) {
+		return false
+	}
+	if batch.ObjectKind != k12.PrintSourceGradingFinalArtifact && batch.ObjectKind != "dingtalk_photo_grading_reply" {
+		return false
+	}
+	// 同版本的全文退路仍属于这个新计划，媒体未知也不得自动重传。
+	return true
 }
 
 // sendDeliveryBatch starts only children that are durably pending. It is

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -94,7 +95,8 @@ func (c *k12DingtalkPhotoReplyCoordinator) Deliver(
 	if command.TaskIntent == k12.ImageTaskIntentBlankWorksheet {
 		attachmentCount = 0
 	}
-	if command.Message.Content == "" || len(command.Message.Attachments) != attachmentCount {
+	hasPDF := len(command.Message.Attachments) == attachmentCount+1
+	if command.Message.Content == "" || (len(command.Message.Attachments) != attachmentCount && !hasPDF) {
 		return k12.DeliveryBatch{}, false, fmt.Errorf("K12 DingTalk photo reply has an invalid part set")
 	}
 	imageMIME := ""
@@ -108,6 +110,24 @@ func (c *k12DingtalkPhotoReplyCoordinator) Deliver(
 		}
 		command.Message.Attachments[0] = attachment
 		imageMIME = attachment.MIME
+	}
+	if hasPDF {
+		pdf := command.Message.Attachments[attachmentCount]
+		if pdf.MIME != "application/pdf" || strings.TrimSpace(pdf.Name) == "" || !bytes.HasPrefix(pdf.Data, []byte("%PDF-")) {
+			return k12.DeliveryBatch{}, false, fmt.Errorf("K12 DingTalk photo reply PDF is invalid")
+		}
+	}
+	if shared, ok := c.batches.(interface {
+		PrepareAndSendK12FinalReplyBatch(context.Context, string, string, string, string, string, k12usecase.DeliveryMessage, []k12usecase.ResolvedDeliveryTarget) (k12.DeliveryBatch, bool, error)
+	}); ok {
+		batch, created, err := shared.PrepareAndSendK12FinalReplyBatch(ctx, command.AgentName, k12DingtalkPhotoReplyObjectKind, k12DingtalkPhotoReplyObjectID(command), command.FinalArtifactID, command.FinalArtifactDigest, command.Message, []k12usecase.ResolvedDeliveryTarget{command.Target})
+		if err != nil {
+			return batch, created, err
+		}
+		if err = validateK12DingtalkPhotoReplyBatch(batch, command.Target, imageMIME); err != nil {
+			return batch, created, err
+		}
+		return batch, created, nil
 	}
 
 	batch, created, err := c.batches.PrepareAndSendMessageBatchForTargets(
@@ -153,7 +173,8 @@ func validateK12DingtalkPhotoReplyBatch(
 	if imageMIME == "" {
 		partCount = 1
 	}
-	if strings.TrimSpace(batch.BatchID) == "" || len(batch.Receipts) != partCount {
+	hasPDF := len(batch.Receipts) == partCount+1
+	if strings.TrimSpace(batch.BatchID) == "" || (len(batch.Receipts) != partCount && !hasPDF) {
 		return fmt.Errorf("K12 DingTalk photo reply batch is incomplete")
 	}
 	markdown := batch.Receipts[0]
@@ -164,6 +185,12 @@ func validateK12DingtalkPhotoReplyBatch(
 		image := batch.Receipts[1]
 		if image.PartKind != messagecontent.PartArtifact || image.PartOrdinal != 2 || image.PartMIME != imageMIME {
 			return fmt.Errorf("K12 DingTalk photo reply batch has an invalid part set")
+		}
+	}
+	if hasPDF {
+		pdf := batch.Receipts[partCount]
+		if pdf.PartKind != messagecontent.PartArtifact || pdf.PartOrdinal != partCount+1 || pdf.PartMIME != "application/pdf" || pdf.PartDigest == "" {
+			return fmt.Errorf("K12 DingTalk photo reply PDF part is invalid")
 		}
 	}
 	for _, receipt := range batch.Receipts {

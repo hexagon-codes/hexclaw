@@ -476,6 +476,189 @@ func (s *Store) GetDeliveryBatch(ctx context.Context, agentName, batchID string)
 	)
 }
 
+// GetLatestDeliveryBatchForObject 优先接续该冻结业务对象已经选择的实际投递计划。
+func (s *Store) GetLatestDeliveryBatchForObject(ctx context.Context, agentName, objectKind, objectID string) (k12.DeliveryBatch, error) {
+	root, err := scanDeliveryBatchRoot(s.db.QueryRowContext(ctx, `SELECT `+deliveryBatchColumns+`
+		FROM k12_delivery_batches WHERE agent_name=? AND object_kind=? AND object_id=?
+		ORDER BY rowid DESC LIMIT 1`, strings.TrimSpace(agentName), objectKind, objectID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return k12.DeliveryBatch{}, records.ErrNotFound
+	}
+	if err != nil {
+		return k12.DeliveryBatch{}, err
+	}
+	return attachDeliveryBatchReceiptsVia(ctx, s.db, root)
+}
+
+const PDFPreparationKnownFailure = "pdf_resource_preparation_known_failure"
+const PDFPreparationUnknown = "pdf_resource_preparation_outcome_unknown"
+const pdfPreparationStarted = "pdf_resource_preparation_started"
+const ImageFinalPDFRenderContractVersion = "k12-image-pdf-v1"
+
+// BeginDeliveryK12MediaPreparation 在物理上传前取得一次所有权；重放只读未知态。
+func (s *Store) BeginDeliveryK12MediaPreparation(ctx context.Context, agentName, deliveryID string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `UPDATE k12_delivery_receipts SET status='outcome_unknown',last_error=?,updated_at=?
+		WHERE agent_name=? AND delivery_id=? AND part_kind='artifact' AND status='pending'
+		AND attempt=0 AND external_message_id='' AND prepared_resource_id=''
+		AND object_kind IN (?,?) AND object_id LIKE ?`, pdfPreparationStarted, nowUnix(), agentName, deliveryID, k12.PrintSourceGradingFinalArtifact, "dingtalk_photo_grading_reply", "%:"+ImageFinalPDFRenderContractVersion)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n == 1, nil
+}
+
+// SaveDeliveryK12PreparedResource 只有取得上传所有权的成功回执可恢复可发送态。
+func (s *Store) SaveDeliveryK12PreparedResource(ctx context.Context, agentName, deliveryID, resourceID string) error {
+	resourceID = strings.TrimSpace(resourceID)
+	if resourceID == "" {
+		return errors.New("prepared media resource ID is empty")
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE k12_delivery_receipts SET prepared_resource_id=?,status='pending',last_error='',updated_at=?
+		WHERE agent_name=? AND delivery_id=? AND part_kind='artifact' AND status='outcome_unknown'
+		AND last_error=? AND attempt=0 AND external_message_id='' AND prepared_resource_id=''
+		AND object_kind IN (?,?) AND object_id LIKE ?`, resourceID, nowUnix(), agentName, deliveryID, pdfPreparationStarted, k12.PrintSourceGradingFinalArtifact, "dingtalk_photo_grading_reply", "%:"+ImageFinalPDFRenderContractVersion)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return fmt.Errorf("%w: PDF preparation ownership changed", ErrDeliveryBatchConflict)
+	}
+	return nil
+}
+
+// MarkDeliveryK12PreparationFailure 不增加发送次数；资源未知不能伪造成发送已开始。
+func (s *Store) MarkDeliveryK12PreparationFailure(ctx context.Context, agentName, batchID, deliveryID string, known bool) (k12.DeliveryBatch, error) {
+	detail := PDFPreparationKnownFailure
+	status := k12.DeliveryFailed
+	if !known {
+		detail = PDFPreparationUnknown
+		status = k12.DeliveryOutcomeUnknown
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE k12_delivery_receipts SET
+		status=CASE WHEN delivery_id=? THEN ? ELSE 'failed' END,last_error=?,updated_at=?
+		WHERE agent_name=? AND batch_id=? AND attempt=0 AND external_message_id=''
+		AND object_kind IN (?,?) AND object_id LIKE ?
+	AND (status IN ('pending','failed') OR (delivery_id=? AND status='outcome_unknown' AND last_error=?))
+		AND NOT EXISTS (SELECT 1 FROM k12_delivery_receipts crossed
+		 WHERE crossed.agent_name=? AND crossed.batch_id=? AND (crossed.attempt<>0 OR crossed.external_message_id<>''
+	 OR (crossed.status NOT IN ('pending','failed') AND NOT (crossed.delivery_id=? AND crossed.status='outcome_unknown' AND crossed.last_error=?))))
+		AND EXISTS (SELECT 1 FROM k12_delivery_receipts pdf WHERE pdf.agent_name=? AND pdf.batch_id=?
+		 AND pdf.delivery_id=? AND pdf.part_kind='artifact' AND pdf.prepared_resource_id='')`,
+		deliveryID, status, detail, nowUnix(), agentName, batchID, k12.PrintSourceGradingFinalArtifact, "dingtalk_photo_grading_reply", "%:"+ImageFinalPDFRenderContractVersion, deliveryID, pdfPreparationStarted, agentName, batchID, deliveryID, pdfPreparationStarted, agentName, batchID, deliveryID)
+	if err != nil {
+		return k12.DeliveryBatch{}, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return k12.DeliveryBatch{}, fmt.Errorf("%w: PDF preparation crossed the send boundary", ErrDeliveryBatchConflict)
+	}
+	return s.GetDeliveryBatch(ctx, agentName, batchID)
+}
+
+// PDFPreparationFallbackAllowed 只认本库写入的明确准备失败及整批零发送证据。
+func PDFPreparationFallbackAllowed(batch k12.DeliveryBatch) bool {
+	if (batch.ObjectKind != k12.PrintSourceGradingFinalArtifact && batch.ObjectKind != "dingtalk_photo_grading_reply") || !strings.HasSuffix(batch.ObjectID, ":"+ImageFinalPDFRenderContractVersion) {
+		return false
+	}
+	pdf := false
+	for _, item := range batch.Receipts {
+		if item.Attempt != 0 || item.ExternalMessageID != "" || item.Status != k12.DeliveryFailed || item.LastError != PDFPreparationKnownFailure {
+			return false
+		}
+		if item.PartMIME == "application/pdf" {
+			pdf = true
+		}
+	}
+	return pdf
+}
+
+// PrepareDeliveryPDFFallback 在同一事务中核对原失败计划并冻结全文退路，旧计划保持不变。
+func (s *Store) PrepareDeliveryPDFFallback(ctx context.Context, sourceID string, input k12.DeliveryBatch) (k12.DeliveryBatch, bool, error) {
+	batch, err := normalizeDeliveryBatch(input)
+	if err != nil {
+		return k12.DeliveryBatch{}, false, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return k12.DeliveryBatch{}, false, err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, `UPDATE k12_delivery_batches SET updated_at=updated_at WHERE agent_name=? AND batch_id=?`, batch.AgentName, sourceID); err != nil {
+		return k12.DeliveryBatch{}, false, err
+	}
+	source, err := getDeliveryBatchVia(ctx, tx, batch.AgentName, sourceID)
+	if err != nil {
+		return k12.DeliveryBatch{}, false, err
+	}
+	if source.ObjectKind != batch.ObjectKind || source.ObjectID != batch.ObjectID || !PDFPreparationFallbackAllowed(source) {
+		return k12.DeliveryBatch{}, false, fmt.Errorf("%w: PDF fallback source is not a known zero-send failure", ErrDeliveryBatchConflict)
+	}
+	oldTargets := make(map[string]bool)
+	oldImages := make(map[string]bool)
+	for _, r := range source.Receipts {
+		oldTargets[deliveryReceiptTargetKey(r)] = true
+		if strings.HasPrefix(r.PartMIME, "image/") {
+			oldImages[deliveryReceiptTargetKey(r)+"\x00"+r.PartMIME+"\x00"+r.PartDigest] = true
+		}
+	}
+	newTargets := make(map[string]bool)
+	newImages := make(map[string]bool)
+	for i, r := range batch.Receipts {
+		if r.PartMIME == "application/pdf" {
+			return k12.DeliveryBatch{}, false, fmt.Errorf("%w: PDF fallback must preserve full text", ErrDeliveryBatchConflict)
+		}
+		key := deliveryReceiptTargetKey(r)
+		if !oldTargets[key] {
+			return k12.DeliveryBatch{}, false, fmt.Errorf("%w: PDF fallback changed target", ErrDeliveryBatchConflict)
+		}
+		newTargets[key] = true
+		if strings.HasPrefix(r.PartMIME, "image/") {
+			newImages[key+"\x00"+r.PartMIME+"\x00"+r.PartDigest] = true
+			matched := false
+			for _, old := range source.Receipts {
+				if deliveryReceiptTargetKey(old) == key && old.PartMIME == r.PartMIME && old.PartDigest == r.PartDigest {
+					matched = true
+					batch.Receipts[i].PreparedResourceID = old.PreparedResourceID
+					break
+				}
+			}
+			if !matched {
+				return k12.DeliveryBatch{}, false, fmt.Errorf("%w: PDF fallback changed image", ErrDeliveryBatchConflict)
+			}
+		}
+	}
+	if len(newTargets) != len(oldTargets) {
+		return k12.DeliveryBatch{}, false, fmt.Errorf("%w: PDF fallback changed target set", ErrDeliveryBatchConflict)
+	}
+	if len(newImages) != len(oldImages) {
+		return k12.DeliveryBatch{}, false, fmt.Errorf("%w: PDF fallback dropped an image", ErrDeliveryBatchConflict)
+	}
+	created, err := insertDeliveryBatchRoot(ctx, tx, batch, true)
+	if err != nil {
+		return k12.DeliveryBatch{}, false, err
+	}
+	if created {
+		if err = insertDeliveryBatchChildren(ctx, tx, batch); err != nil {
+			return k12.DeliveryBatch{}, false, err
+		}
+	}
+	stored, err := getDeliveryBatchByDedupeVia(ctx, tx, batch.AgentName, batch.DedupeKey)
+	if err != nil {
+		return k12.DeliveryBatch{}, false, err
+	}
+	if !deliveryBatchIdentityEqual(stored, batch) {
+		return k12.DeliveryBatch{}, false, ErrDeliveryBatchConflict
+	}
+	if err = tx.Commit(); err != nil {
+		return k12.DeliveryBatch{}, false, err
+	}
+	return stored, created, nil
+}
+
+func deliveryReceiptTargetKey(r k12.DeliveryReceipt) string {
+	return strings.Join([]string{r.BindingID, r.Target.Platform, r.Target.InstanceID, r.Target.ChatID}, "\x00")
+}
+
 // FailDeliveryBatchPreparationIfIncomplete 在任一媒体 part 仍未准备时，原子地把
 // 尚未跨越可见发送边界的 children 标记为明确失败。全部资源已就绪时不写入。
 func (s *Store) FailDeliveryBatchPreparationIfIncomplete(

@@ -395,6 +395,9 @@ const dingtalkMaxOutboundImageBytes = 20 << 20
 
 const dingtalkMaxOutboundPDFBytes = 20 << 20
 
+// MaxOutboundPDFBytes 返回本平台文件上传已经使用的真实预算。
+func MaxOutboundPDFBytes() int { return dingtalkMaxOutboundPDFBytes }
+
 type dingtalkMediaUploadResponse struct {
 	ErrCode int    `json:"errcode"`
 	ErrMsg  string `json:"errmsg"`
@@ -503,7 +506,25 @@ func uploadDingtalkPDFFile(
 	endpoint string,
 	accessToken string,
 	attachment adapter.Attachment,
-) (string, error) {
+) (mediaID string, resultErr error) {
+	requestStarted := false
+	knownResponse := false
+	var safeCause error
+	defer func() {
+		if resultErr != nil {
+			// 请求后只有可信完整拒绝响应才是已知失败；断连、5xx和非法响应均未知。
+			if safeCause == nil {
+				safeCause = errors.New("DingTalk PDF resource preparation failed")
+			}
+			if !requestStarted {
+				safeCause = resultErr
+			}
+			resultErr = &adapter.ResourcePreparationError{
+				Known: !requestStarted || knownResponse,
+				Cause: safeCause,
+			}
+		}
+	}()
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -556,6 +577,7 @@ func uploadDingtalkPDFFile(
 	uploadClient.CheckRedirect = func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
 	}
+	requestStarted = true
 	response, err := uploadClient.Do(request)
 	if err != nil {
 		return "", fmt.Errorf("DingTalk file media upload failed: %w", err)
@@ -566,6 +588,8 @@ func uploadDingtalkPDFFile(
 		return "", fmt.Errorf("DingTalk file media upload response read failed: %w", err)
 	}
 	if response.StatusCode != http.StatusOK {
+		knownResponse = isDingTalkDefiniteProviderRejectionStatus(response.StatusCode)
+		safeCause = fmt.Errorf("DingTalk PDF resource preparation failed with HTTP %d", response.StatusCode)
 		return "", fmt.Errorf("DingTalk file media upload failed with HTTP %d", response.StatusCode)
 	}
 	var result dingtalkMediaUploadResponse
@@ -573,9 +597,11 @@ func uploadDingtalkPDFFile(
 		return "", fmt.Errorf("DingTalk file media upload response is invalid: %w", err)
 	}
 	if result.ErrCode != 0 {
+		knownResponse = true
+		safeCause = fmt.Errorf("DingTalk PDF resource preparation failed with errcode %d", result.ErrCode)
 		return "", fmt.Errorf("DingTalk file media upload failed with errcode %d: %s", result.ErrCode, result.ErrMsg)
 	}
-	mediaID := strings.TrimSpace(result.MediaID)
+	mediaID = strings.TrimSpace(result.MediaID)
 	if !validDingTalkFileMediaID(mediaID) {
 		return "", errors.New("DingTalk file media upload returned an invalid media ID")
 	}
@@ -1242,7 +1268,19 @@ func (a *DingtalkAdapter) SendWithReceipt(ctx context.Context, chatID string, re
 }
 
 // PrepareDeliveryPartResource 只准备单个媒体 part 的平台资源，不发送用户可见消息。
-func (a *DingtalkAdapter) PrepareDeliveryPartResource(ctx context.Context, part adapter.DeliveryPart) (string, error) {
+func (a *DingtalkAdapter) PrepareDeliveryPartResource(ctx context.Context, part adapter.DeliveryPart) (resourceID string, resultErr error) {
+	media := part.Attachment != nil
+	mediaStarted := false
+	defer func() {
+		if !media || resultErr == nil {
+			return
+		}
+		var classified interface{ ResourcePreparationKnown() bool }
+		if errors.As(resultErr, &classified) {
+			return
+		}
+		resultErr = &adapter.ResourcePreparationError{Known: !mediaStarted, Cause: errors.New("DingTalk media resource preparation failed")}
+	}()
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -1282,12 +1320,14 @@ func (a *DingtalkAdapter) PrepareDeliveryPartResource(ctx context.Context, part 
 		if !ok {
 			return "", errors.New("DingTalk file media upload capability is unavailable")
 		}
+		mediaStarted = true
 		mediaID, err = fileAPI.UploadFile(ctx, token, attachment)
 	} else {
 		imageAPI, ok := api.(dingtalkMediaOpenAPI)
 		if !ok {
 			return "", errors.New("DingTalk image media upload capability is unavailable")
 		}
+		mediaStarted = true
 		mediaID, err = imageAPI.UploadImage(ctx, token, attachment)
 	}
 	if err != nil {

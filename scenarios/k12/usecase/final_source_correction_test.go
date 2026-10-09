@@ -66,11 +66,19 @@ type completedSourceFixture struct {
 	oldPNG    []byte
 }
 
+type completedSourceImageFixture struct {
+	data         []byte
+	rawReader    bool
+	unannotated  bool
+	frozenDigest string
+	frozenOwner  string
+}
+
 func prepareCompletedSourceFixture(t *testing.T) completedSourceFixture {
 	return prepareCompletedSourceFixtureForIntent(t, k12.ImageTaskIntentCompletedHomework)
 }
 
-func prepareCompletedSourceFixtureForIntent(t *testing.T, intent k12.ImageTaskIntent) completedSourceFixture {
+func prepareCompletedSourceFixtureForIntent(t *testing.T, intent k12.ImageTaskIntent, sourceImages ...completedSourceImageFixture) completedSourceFixture {
 	t.Helper()
 	t.Setenv("HEXCLAW_ASSET_ROOT", t.TempDir())
 	ctx := context.Background()
@@ -81,11 +89,21 @@ func prepareCompletedSourceFixtureForIntent(t *testing.T, intent k12.ImageTaskIn
 	deps.PhotoAnnotator = annotator
 	o := &GradingOrchestrator{deps: deps, runDir: t.TempDir()}
 	repo := &PageAssetRepository{Records: store}
-	original, err := repo.Persist(ctx, "guardian-final", "mingming", validPNGFixture(t, "original-final"))
+	sourceImage := completedSourceImageFixture{data: validPNGFixture(t, "original-final")}
+	if len(sourceImages) != 0 {
+		sourceImage = sourceImages[0]
+	}
+	original, err := repo.Persist(ctx, "guardian-final", "mingming", sourceImage.data)
 	if err != nil {
 		t.Fatal(err)
 	}
 	coordinator := &ImageTaskCoordinator{Records: store, PageAssets: repo, Classifier: &imageTaskClassifierStub{result: ImageTaskClassification{Intent: intent, IntentEvidence: []string{"source content"}, Confidence: 1}}, ResolveRoute: imageTaskRouteForTest}
+	if sourceImage.rawReader {
+		coordinator.PageAssets = nil
+		coordinator.ReadAsset = func(string, string) ([]byte, error) {
+			return append([]byte(nil), sourceImage.data...), nil
+		}
+	}
 	in := testCreateImageTaskInput()
 	in.OwnerScope = "guardian-final"
 	in.SourceRef = "source-correction"
@@ -93,6 +111,29 @@ func prepareCompletedSourceFixtureForIntent(t *testing.T, intent k12.ImageTaskIn
 	view, _, err := coordinator.Create(ctx, in)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if sourceImage.frozenDigest != "" || sourceImage.frozenOwner != "" {
+		invocation, err := store.GetImageTaskInvocation(ctx, in.AgentName, view.Dispatch.ClassificationInvocationID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dispatch := view.Dispatch
+		dispatch.DispatchID += "-source-fixture"
+		dispatch.IdempotencyKey += "-source-fixture"
+		dispatch.ClassificationInvocationID += "-source-fixture"
+		if sourceImage.frozenDigest != "" {
+			dispatch.SourceDigest = sourceImage.frozenDigest
+		}
+		if sourceImage.frozenOwner != "" {
+			dispatch.OwnerScope = sourceImage.frozenOwner
+		}
+		invocation.InvocationID = dispatch.ClassificationInvocationID
+		invocation.DispatchID = dispatch.DispatchID
+		invocation.OperationKey = "dispatch:" + dispatch.DispatchID + ":classification"
+		view.Dispatch, _, err = store.PrepareImageTaskDispatch(ctx, dispatch, invocation)
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 	dispatchID := view.Dispatch.DispatchID
 	// 临时真实库冻结一份已交付的双题任务；模型仅在独立复核边界使用替身。
@@ -165,6 +206,9 @@ func prepareCompletedSourceFixtureForIntent(t *testing.T, intent k12.ImageTaskIn
 	}
 	oldPNG := validPNGFixture(t, "old-final")
 	run := &gradingRun{questions: questions, result: &PhotoGradeResult{AnnotatedImage: &RenderedPhoto{Data: oldPNG, MIME: "image/png"}}}
+	if sourceImage.unannotated {
+		run.result.AnnotatedImage = nil
+	}
 	artifact, err := o.finalizeGradingPage(ctx, run, job)
 	if err != nil {
 		t.Fatal(err)
