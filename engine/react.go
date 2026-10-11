@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -950,7 +951,7 @@ func (e *ReActEngine) matchSkillFastPath(msg *adapter.Message) (skill.Skill, boo
 	// 的 skill 塑造回复」——关键词 fast-path 必须让路 LLM 主路径，否则正文命中的 builtin
 	// 会短路旁路，挂载的 persona 正文永不注入（buildMountedSkillsPrompt 到不了）、当轮失效。
 	// 与 bug#2「挂载即生效」、bug#7/B4「fast-path 不劫持对话」同一纪律。
-	if len(mountedSkillNames(msg.Metadata)) > 0 {
+	if len(mountedSkillNames(msg.Metadata)) > 0 || len(agentDefaultSkillContextNames(msg.Metadata)) > 0 {
 		return nil, false
 	}
 	matched, ok := e.skills.Match(msg)
@@ -1042,6 +1043,7 @@ func (e *ReActEngine) Process(ctx context.Context, msg *adapter.Message) (reply 
 		return nil, err
 	}
 	ensureMessageMetadata(msg)
+	ctx = clearPreparedSkillContext(ctx, msg)
 	delete(msg.Metadata, skillContextReceiptsMetadataKey)
 	delete(msg.Metadata, agentRequestReasoningPolicyKey)
 	assistantMessageID := canonicalAssistantMessageID(msg)
@@ -1126,6 +1128,7 @@ func (e *ReActEngine) Process(ctx context.Context, msg *adapter.Message) (reply 
 		return replay.reply, nil
 	}
 
+	e.prepareAgentDefaultSkillContext(msg)
 	// 2. 尝试快速路径: Skill 关键词匹配
 	if matched, ok := e.matchSkillFastPath(msg); ok {
 		if err := e.sessions.SaveUserMessage(ctx, sess.ID, msg); err != nil {
@@ -1180,6 +1183,8 @@ func (e *ReActEngine) Process(ctx context.Context, msg *adapter.Message) (reply 
 	if err != nil {
 		return nil, err
 	}
+	e.prepareAgentDefaultSkillContext(msg)
+	ctx = e.prepareSkillPromptContext(ctx, msg)
 	cacheInput := buildLLMCacheInput(msg)
 
 	// 3. Semantic cache lookup. System dispatches and explicit code execution
@@ -1956,6 +1961,7 @@ func (e *ReActEngine) ProcessStream(ctx context.Context, msg *adapter.Message) (
 	}
 	ctx = withSolveUserProblem(ctx, msg)
 	ctx = e.beginRequestReasoningPolicy(ctx)
+	ctx = clearPreparedSkillContext(ctx, msg)
 	delete(msg.Metadata, skillContextReceiptsMetadataKey)
 	delete(msg.Metadata, agentRequestReasoningPolicyKey)
 	assistantMessageID := canonicalAssistantMessageID(msg)
@@ -2141,6 +2147,7 @@ func (e *ReActEngine) processStream(
 		return replay, nil
 	}
 
+	e.prepareAgentDefaultSkillContext(msg)
 	// 2. 尝试快速路径: Skill 匹配 → 单 chunk 返回
 	if matched, ok := e.matchSkillFastPath(msg); ok {
 		if err := e.sessions.SaveUserMessage(ctx, sess.ID, msg); err != nil {
@@ -2195,6 +2202,8 @@ func (e *ReActEngine) processStream(
 	if err != nil {
 		return nil, err
 	}
+	e.prepareAgentDefaultSkillContext(msg)
+	ctx = e.prepareSkillPromptContext(ctx, msg)
 	cacheInput := buildLLMCacheInput(msg)
 	if shouldRejectImageAttachmentsForProvider(selection.provider, selection.providerName, selection.modelName, msg.Attachments) {
 		return nil, fmt.Errorf("当前模型 %s 不支持图片附件，请切换到视觉模型后重试", selection.modelName)
@@ -4122,8 +4131,18 @@ func (e *ReActEngine) buildStreamMessages(ctx context.Context, roleName string, 
 	// bug#2 2026-06-23：用户在对话框显式挂载/召唤的技能（前端 skillNames → metadata["skills"]）。
 	// persona 类（Markdown）技能把正文注入 system prompt，使其当轮即生效，不依赖模型主动调用工具。
 	delete(metadata, skillContextReceiptsMetadataKey)
-	if names := mountedSkillNames(metadata); len(names) > 0 {
-		prompt, receipts := e.buildMountedSkillsContext(names)
+	if names := effectiveSkillContextNames(metadata); len(names) > 0 {
+		prepared, ok := ctx.Value(preparedSkillContextKey{}).(*preparedSkillContext)
+		if !ok || prepared == nil {
+			_, explicit := metadata["skills"]
+			prompt, receipts := e.buildMountedSkillsContext(names, !explicit)
+			prepared = &preparedSkillContext{prompt: prompt, receipts: receipts}
+		}
+		prompt := prepared.prompt
+		receipts := append([]skill.ContextReceipt(nil), prepared.receipts...)
+		for i := range receipts {
+			receipts[i].Status = "loaded"
+		}
 		sysContent += prompt
 		if len(receipts) > 0 && metadata != nil {
 			encoded, _ := json.Marshal(receipts)
@@ -4694,6 +4713,9 @@ func buildLLMCacheInput(msg *adapter.Message) string {
 		{key: "routed_agent", value: msg.Metadata["routed_agent"]},
 		{key: "agent_model", value: msg.Metadata["agent_model"]},
 		{key: "agent_system_prompt_policy", value: msg.Metadata[metadataAgentSystemPromptPolicyKey]},
+		{key: "skills", value: msg.Metadata["skills"]},
+		{key: "agent_default_skill_owner", value: msg.Metadata[agentDefaultSkillOwnerKey]},
+		{key: "skill_context_digest", value: msg.Metadata[skillPromptDigestKey]},
 	} {
 		if item.value == "" {
 			continue
@@ -5529,7 +5551,116 @@ func (e *ReActEngine) buildMountedSkillsPrompt(names []string) string {
 
 const skillContextReceiptsMetadataKey = "skill_context_receipts"
 
-func (e *ReActEngine) buildMountedSkillsContext(names []string) (string, []skill.ContextReceipt) {
+const (
+	agentDefaultSkillNamesKey = "_agent_default_skill_names"
+	agentDefaultSkillOwnerKey = "_agent_default_skill_owner"
+	skillPromptDigestKey      = "_skill_prompt_digest"
+)
+
+type preparedSkillContextKey struct{}
+type preparedSkillContext struct {
+	prompt   string
+	receipts []skill.ContextReceipt
+}
+
+func clearPreparedSkillContext(ctx context.Context, msg *adapter.Message) context.Context {
+	delete(msg.Metadata, agentDefaultSkillNamesKey)
+	delete(msg.Metadata, agentDefaultSkillOwnerKey)
+	delete(msg.Metadata, skillPromptDigestKey)
+	return context.WithValue(ctx, preparedSkillContextKey{}, (*preparedSkillContext)(nil))
+}
+
+func agentDefaultSkillContextNames(metadata map[string]string) []string {
+	var names []string
+	_ = json.Unmarshal([]byte(metadata[agentDefaultSkillNamesKey]), &names)
+	return names
+}
+
+func effectiveSkillContextNames(metadata map[string]string) []string {
+	if _, explicit := metadata["skills"]; explicit {
+		return mountedSkillNames(metadata)
+	}
+	return agentDefaultSkillContextNames(metadata)
+}
+
+// 默认教学正文与用户主动挂载独立，避免改变工具前置、记忆或用户消息 chips。
+func (e *ReActEngine) prepareAgentDefaultSkillContext(msg *adapter.Message) {
+	if msg == nil {
+		return
+	}
+	ensureMessageMetadata(msg)
+	delete(msg.Metadata, agentDefaultSkillNamesKey)
+	delete(msg.Metadata, agentDefaultSkillOwnerKey)
+	if isSystemDispatch(msg) {
+		return
+	}
+	if _, explicit := msg.Metadata["skills"]; explicit {
+		return
+	}
+	if pinned, explicit := msg.Metadata["pinned_agent"]; explicit && (strings.TrimSpace(pinned) == "" || strings.EqualFold(strings.TrimSpace(pinned), "default")) {
+		return
+	}
+	cfg, found := e.agentConfigForSystemPromptPolicy(msg.Metadata)
+	if !found && strings.TrimSpace(msg.Metadata["role"]) == "" && strings.TrimSpace(msg.Metadata["pinned_agent"]) == "" {
+		if router := e.getAgentRouter(); router != nil {
+			if routed := router.Route(agentrouter.RouteRequest{Platform: string(msg.Platform), InstanceID: msg.InstanceID, UserID: msg.UserID, ChatID: msg.ChatID}); routed != nil {
+				cfg = routed.AgentConfig
+			}
+		}
+	}
+	if cfg == nil {
+		return
+	}
+	e.mu.RLock()
+	registry := e.skills
+	e.mu.RUnlock()
+	if registry == nil {
+		return
+	}
+	var names []string
+	seen := make(map[string]bool)
+	for _, name := range cfg.Skills {
+		name = strings.TrimSpace(name)
+		if name == "" || seen[name] {
+			continue
+		}
+		if enabled, exists := registry.IsEnabled(name); !enabled || !exists {
+			continue
+		}
+		target, exists := registry.Get(name)
+		if !exists {
+			continue
+		}
+		if _, body := target.(skillContentLoader); !body {
+			continue
+		}
+		seen[name] = true
+		names = append(names, name)
+	}
+	if len(names) == 0 {
+		return
+	}
+	encoded, _ := json.Marshal(names)
+	msg.Metadata[agentDefaultSkillNamesKey] = string(encoded)
+	msg.Metadata[agentDefaultSkillOwnerKey] = cfg.Name
+}
+
+// 缓存按同次实际正文摘要隔离；准备快照只有真正拼入请求时才成为加载回执。
+func (e *ReActEngine) prepareSkillPromptContext(ctx context.Context, msg *adapter.Message) context.Context {
+	delete(msg.Metadata, skillPromptDigestKey)
+	_, explicit := msg.Metadata["skills"]
+	prompt, receipts := e.buildMountedSkillsContext(effectiveSkillContextNames(msg.Metadata), !explicit)
+	for i := range receipts {
+		receipts[i].Status = "prepared"
+	}
+	if prompt != "" {
+		digest := sha256.Sum256([]byte(prompt))
+		msg.Metadata[skillPromptDigestKey] = fmt.Sprintf("sha256:%x", digest)
+	}
+	return context.WithValue(ctx, preparedSkillContextKey{}, &preparedSkillContext{prompt: prompt, receipts: receipts})
+}
+
+func (e *ReActEngine) buildMountedSkillsContext(names []string, defaultContext ...bool) (string, []skill.ContextReceipt) {
 	e.mu.RLock()
 	skills := e.skills
 	e.mu.RUnlock()
@@ -5560,7 +5691,11 @@ func (e *ReActEngine) buildMountedSkillsContext(names []string) (string, []skill
 			body = string(r[:perSkillCap]) + "\n..."
 		}
 		if sb.Len() == 0 {
-			sb.WriteString("\n\n[已激活技能]\n用户已主动挂载以下技能，请按其设定与能力作答：\n")
+			if len(defaultContext) > 0 && defaultContext[0] {
+				sb.WriteString("\n\n[已激活技能]\n当前智能体默认挂载以下教学技能，请按其设定与适用范围作答：\n")
+			} else {
+				sb.WriteString("\n\n[已激活技能]\n用户已主动挂载以下技能，请按其设定与能力作答：\n")
+			}
 		}
 		sb.WriteString("\n## 技能：" + s.Name() + "\n")
 		sb.WriteString(body)
