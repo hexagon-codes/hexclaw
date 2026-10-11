@@ -1,5 +1,7 @@
 ---
 name: writing-feedback
+display_names: {"zh-CN":"语文写作反馈（作品）","en":"Writing feedback","ug-CN":"يېزىقچىلىق ئەسىرىگە پىكىر"}
+teaching_methods: [{"name":"叶圣陶自主修改","display_names":{"zh-CN":"叶圣陶自主修改","en":"Ye Shengtao’s self-revision","ug-CN":"يې شېڭتاۋنىڭ مۇستەقىل تۈزىتىشى"},"structure":{"zh-CN":"原句与改句对照，说明理由，再引导孩子迁移","en":"Compare original and revision, explain why, then guide transfer","ug-CN":"ئەسلى ۋە تۈزىتىلگەن جۈملىنى سېلىشتۇرۇپ سەۋەبىنى چۈشەندۈرۈش ۋە قوللىنىشقا يېتەكلەش"}}]
 display_name: 语文写作反馈（作品）
 description: 小学生作文/习作的形成性反馈与家长辅导——切题、结构、表达、基础规范四维评价，引用原稿证据、聚焦 1～3 个修改重点，提供改句、完整参考稿与具体讲法，不打分。用于家长上传孩子作文照片或文字稿求点评、求修改指导时。
 author: hexclaw

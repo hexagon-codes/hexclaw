@@ -184,7 +184,8 @@ type AssistantMeta struct {
 }
 
 var replySafeAssistantMetadataKeys = map[string]struct{}{
-	"record": {},
+	"skill_context_receipts": {},
+	"record":                 {},
 }
 
 // SaveAssistantMessageWithMeta 保存助手回复（含 reasoning 等元数据）并返回消息记录。

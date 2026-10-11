@@ -1,5 +1,6 @@
 ---
 name: homework-checker
+display_names: {"zh-CN":"作业批改","en":"Homework checking","ug-CN":"تاپشۇرۇق باھالاش"}
 display_name: 作业识题批改助手
 description: 拍题批改第一入口——识题、OCR 回显护栏核对、分题、路由到对应学科 tutor、逐题批改并把错题入库。用于家长拍照或粘贴整页作业让检查时。
 author: hexclaw

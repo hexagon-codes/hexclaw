@@ -104,18 +104,46 @@ type MetaProvider interface {
 // 单独抽出此 struct 是因为 skill/marketplace 依赖 skill 包，反向引用会循环。
 // MarkdownSkill 在 marketplace 包中实现 SkillMeta() 返回此结构即可。
 type SkillMetaInfo struct {
-	Name          string
-	Description   string
-	Triggers      []string
-	Tags          []string
-	When          []string // 形如 "subject=math"、"mode=tot"、"grade=小学"，AND 关系
-	NotWhen       []string // AND 关系，匹配任一即排除
-	PreferredMode string   // 例如 "tot"、"plan-execute"，由 chat 引擎读取后路由
+	Name            string
+	Description     string
+	Version         string
+	DisplayName     string
+	DisplayNames    map[string]string
+	TeachingMethods []TeachingMethod
+	Triggers        []string
+	Tags            []string
+	When            []string // 形如 "subject=math"、"mode=tot"、"grade=小学"，AND 关系
+	NotWhen         []string // AND 关系，匹配任一即排除
+	PreferredMode   string   // 例如 "tot"、"plan-execute"，由 chat 引擎读取后路由
 
 	// v0.4.0 F5: 工具集依赖。Tools 是硬依赖（缺失则 Skill 跳过）；Requires 是
 	// 抽象能力标签（用于上层环境画像匹配，不强制为可执行工具名）。
 	Tools    []string
 	Requires []string
+}
+
+// TeachingMethod 是技能作者声明的教学依据及其面向家长的结构说明。
+// 它只描述技能正文，不代表某次回答已经使用了该方法。
+type TeachingMethod struct {
+	Name         string            `json:"name"`
+	DisplayNames map[string]string `json:"display_names,omitempty"`
+	Structure    map[string]string `json:"structure,omitempty"`
+}
+
+// ContextReceipt 固化实际注入请求的技能版本和展示元数据，历史不随目录更新。
+type ContextReceipt struct {
+	Name          string            `json:"name"`
+	Version       string            `json:"version"`
+	Status        string            `json:"status"`
+	ContentDigest string            `json:"content_digest"`
+	DisplayName   string            `json:"display_name,omitempty"`
+	DisplayNames  map[string]string `json:"display_names,omitempty"`
+	Methods       []TeachingMethod  `json:"methods,omitempty"`
+}
+
+// ContextReceiptProvider 在已加载正文上生成快照，不重新读取文件。
+type ContextReceiptProvider interface {
+	LoadedContextReceipt(content string) (ContextReceipt, bool)
 }
 
 // SelectByQuery 按 query 关键词召回 Top-K Skill。

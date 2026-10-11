@@ -195,6 +195,15 @@ func publishSeedVersionAware(dest string, data []byte, prevHash string) (bool, s
 		return false, "", rerr
 	}
 	if compareSkillVersions(skillSeedVersion(data), skillSeedVersion(existing)) <= 0 {
+		// 同版出厂展示元数据可补齐；逐字相同的其余内容及 seed 哈希证明用户正文未变。
+		if skillSeedVersion(data) == skillSeedVersion(existing) &&
+			(prevHash == "" || hashSeedContent(existing) == prevHash) &&
+			canEnrichSeedDisplayMetadata(existing, data) {
+			if err := overwriteSeedAtomic(dest, data); err != nil {
+				return false, "", err
+			}
+			return true, hashSeedContent(data), nil
+		}
 		// bundled 未比磁盘新：不动磁盘（含用户改动/更高本地版本）。内容恰与 bundled 一致时
 		// 回填 hash，让未来的编辑判定有基线。
 		if bytes.Equal(existing, data) {
@@ -215,6 +224,39 @@ func publishSeedVersionAware(dest string, data []byte, prevHash string) (bool, s
 		return false, "", err
 	}
 	return true, hashSeedContent(data), nil
+}
+
+func canEnrichSeedDisplayMetadata(existing, bundled []byte) bool {
+	oldMeta, _ := parseFrontmatter(string(existing))
+	newMeta, _ := parseFrontmatter(string(bundled))
+	if len(oldMeta.DisplayNames) > 0 || len(oldMeta.TeachingMethods) > 0 || len(newMeta.DisplayNames) == 0 {
+		return false
+	}
+	if oldMeta.DisplayName != "" && oldMeta.DisplayName != newMeta.DisplayName {
+		return false
+	}
+	strip := func(data []byte) string {
+		lines := strings.Split(string(data), "\n")
+		if len(lines) < 3 || strings.TrimSpace(lines[0]) != "---" {
+			return string(data)
+		}
+		out := make([]string, 0, len(lines))
+		frontmatter := true
+		for i, line := range lines {
+			if i > 0 && strings.TrimSpace(line) == "---" {
+				frontmatter = false
+			}
+			if frontmatter && i > 0 {
+				key, _, _ := strings.Cut(strings.TrimSpace(line), ":")
+				if key == "display_name" || key == "display_names" || key == "teaching_methods" {
+					continue
+				}
+			}
+			out = append(out, line)
+		}
+		return strings.Join(out, "\n")
+	}
+	return strip(existing) == strip(bundled)
 }
 
 // overwriteSeedAtomic 原子覆盖写（temp + rename），用于版本升级覆盖已存在文件。

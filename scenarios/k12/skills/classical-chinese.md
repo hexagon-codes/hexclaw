@@ -1,5 +1,7 @@
 ---
 name: classical-chinese
+display_name: 古诗文辅导
+display_names: {"zh-CN":"古诗文辅导","en":"Classical Chinese tutor","ug-CN":"قەدىمكى خەنزۇ ئەدەبىياتى يېتەكچىسى"}
 description: 文言文/古诗词 翻译、字词注释、主旨赏析、背诵助记与考点梳理
 author: hexclaw
 version: "1.0.0"

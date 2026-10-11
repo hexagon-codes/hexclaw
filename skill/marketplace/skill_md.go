@@ -39,6 +39,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -66,17 +67,20 @@ import (
 //	preferred_mode: tot
 //	---
 type SkillMeta struct {
-	Name          string   `yaml:"name"`           // 唯一标识（必需）
-	Description   string   `yaml:"description"`    // 描述（供 LLM 理解）
-	Author        string   `yaml:"author"`         // 作者
-	Version       string   `yaml:"version"`        // 版本
-	Triggers      []string `yaml:"triggers"`       // 快速路径触发关键词
-	Tags          []string `yaml:"tags"`           // 分类标签
-	Signature     string   `yaml:"signature"`      // 签名（安全验证用）
-	Icon          string   `yaml:"icon"`           // 可选：emoji（如 "📊"）或内置 lucide 名（如 "Code"），供桌面端渲染图标；缺省时前端按 category/tags/name 派生
-	When          []string `yaml:"when"`           // Phase 2: 激活条件 AND
-	NotWhen       []string `yaml:"not_when"`       // Phase 2: 排除条件
-	PreferredMode string   `yaml:"preferred_mode"` // Phase 2: 推荐 Agent 模式
+	Name            string                 `yaml:"name"` // 唯一标识（必需）
+	DisplayName     string                 `yaml:"display_name"`
+	DisplayNames    map[string]string      `yaml:"display_names"`
+	TeachingMethods []skill.TeachingMethod `yaml:"teaching_methods"`
+	Description     string                 `yaml:"description"`    // 描述（供 LLM 理解）
+	Author          string                 `yaml:"author"`         // 作者
+	Version         string                 `yaml:"version"`        // 版本
+	Triggers        []string               `yaml:"triggers"`       // 快速路径触发关键词
+	Tags            []string               `yaml:"tags"`           // 分类标签
+	Signature       string                 `yaml:"signature"`      // 签名（安全验证用）
+	Icon            string                 `yaml:"icon"`           // 可选：emoji（如 "📊"）或内置 lucide 名（如 "Code"），供桌面端渲染图标；缺省时前端按 category/tags/name 派生
+	When            []string               `yaml:"when"`           // Phase 2: 激活条件 AND
+	NotWhen         []string               `yaml:"not_when"`       // Phase 2: 排除条件
+	PreferredMode   string                 `yaml:"preferred_mode"` // Phase 2: 推荐 Agent 模式
 
 	// v0.4.0 F5: 工具集依赖（硬依赖：列出 Skill 执行时会调用的工具/Skill 名）。
 	// 加载或选择时若环境中缺少其中之一，应跳过此 Skill，避免运行时崩溃。
@@ -96,12 +100,13 @@ type SkillMeta struct {
 // 会重新读盘并比对 hash —— 若磁盘文件被替换（time-of-check 与 time-of-use 之间），
 // 立即返回错误而非把可能被篡改的内容喂给 LLM。
 type MarkdownSkill struct {
-	Meta     SkillMeta // 元数据
-	FilePath string    // 技能文件路径
-	Content  string    // 完整 Prompt 内容（懒加载）
-	loaded   bool      // 内容是否已加载
-	hash     [32]byte  // 首次加载时计算的 SHA256，用于后续 TOCTOU 校验
-	mu       sync.RWMutex
+	Meta       SkillMeta // 元数据
+	FilePath   string    // 技能文件路径
+	Content    string    // 完整 Prompt 内容（懒加载）
+	loaded     bool      // 内容是否已加载
+	hash       [32]byte  // 首次加载时计算的 SHA256，用于后续 TOCTOU 校验
+	loadedMeta SkillMeta // 与首次实际加载的正文来自同一次文件读取
+	mu         sync.RWMutex
 }
 
 // Name 返回技能名称
@@ -118,15 +123,19 @@ func (s *MarkdownSkill) Description() string {
 // 能利用 frontmatter 的 triggers/tags/when/not_when/preferred_mode。
 func (s *MarkdownSkill) SkillMeta() skill.SkillMetaInfo {
 	return skill.SkillMetaInfo{
-		Name:          s.Meta.Name,
-		Description:   s.Meta.Description,
-		Triggers:      s.Meta.Triggers,
-		Tags:          s.Meta.Tags,
-		When:          s.Meta.When,
-		NotWhen:       s.Meta.NotWhen,
-		PreferredMode: s.Meta.PreferredMode,
-		Tools:         s.Meta.Tools,
-		Requires:      s.Meta.Requires,
+		Name:            s.Meta.Name,
+		Description:     s.Meta.Description,
+		Version:         s.Meta.Version,
+		DisplayName:     s.Meta.DisplayName,
+		DisplayNames:    s.Meta.DisplayNames,
+		TeachingMethods: s.Meta.TeachingMethods,
+		Triggers:        s.Meta.Triggers,
+		Tags:            s.Meta.Tags,
+		When:            s.Meta.When,
+		NotWhen:         s.Meta.NotWhen,
+		PreferredMode:   s.Meta.PreferredMode,
+		Tools:           s.Meta.Tools,
+		Requires:        s.Meta.Requires,
 	}
 }
 
@@ -208,12 +217,49 @@ func (s *MarkdownSkill) LoadContent() (string, error) {
 		return "", fmt.Errorf("读取技能文件失败: %w", err)
 	}
 
-	_, content := parseFrontmatter(string(data))
+	meta, content := parseFrontmatter(string(data))
+	if meta.Name == "" {
+		meta.Name = s.Meta.Name
+	}
+	s.loadedMeta = meta
 	s.Content = content
 	s.hash = sha256.Sum256(data)
 	s.loaded = true
 
 	return content, nil
+}
+
+// LoadedContextReceipt 只投影本对象实际读到的元数据与实际注入的正文摘要。
+func (s *MarkdownSkill) LoadedContextReceipt(content string) (skill.ContextReceipt, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if !s.loaded || strings.TrimSpace(content) == "" {
+		return skill.ContextReceipt{}, false
+	}
+	truncated := content != s.Content
+	if truncated && (!strings.HasSuffix(content, "\n...") || !strings.HasPrefix(s.Content, strings.TrimSuffix(content, "\n..."))) {
+		return skill.ContextReceipt{}, false
+	}
+	receipt := loadedContextReceipt(s.Meta.Name, s.loadedMeta, content)
+	if truncated {
+		receipt.Methods = nil
+	}
+	return receipt, true
+}
+
+// LoadedContextReceiptFromMarkdown 将同次读取、成功注入的正文及 frontmatter 固化为快照。
+// 调用者负责在实际注入成功之后交付，不能把单纯准备或加载失败当作执行依据。
+func LoadedContextReceiptFromMarkdown(name, raw, content string) skill.ContextReceipt {
+	meta, _ := parseFrontmatter(raw)
+	return loadedContextReceipt(name, meta, content)
+}
+
+func loadedContextReceipt(name string, meta SkillMeta, content string) skill.ContextReceipt {
+	digest := sha256.Sum256([]byte(content))
+	return skill.ContextReceipt{
+		Name: name, Version: meta.Version, Status: "loaded", ContentDigest: fmt.Sprintf("sha256:%x", digest),
+		DisplayName: meta.DisplayName, DisplayNames: meta.DisplayNames, Methods: meta.TeachingMethods,
+	}
 }
 
 // VerifyContent 重读技能文件并校验 SHA256，确认与首次加载时的内容一致。
@@ -436,12 +482,20 @@ func parseFrontmatter(text string) (SkillMeta, string) {
 		key := strings.TrimSpace(parts[0])
 		value := strings.TrimSpace(parts[1])
 		// 去掉引号
+		rawValue := value
 		value = strings.Trim(value, `"'`)
 		currentKey = key
 
 		switch key {
 		case "name":
 			meta.Name = value
+		case "display_name":
+			meta.DisplayName = value
+		case "display_names":
+			// 展示语言映射采用单行 JSON flow 值，不改变既有列表解析。
+			_ = json.Unmarshal([]byte(rawValue), &meta.DisplayNames)
+		case "teaching_methods":
+			_ = json.Unmarshal([]byte(rawValue), &meta.TeachingMethods)
 		case "description":
 			meta.Description = value
 		case "author":

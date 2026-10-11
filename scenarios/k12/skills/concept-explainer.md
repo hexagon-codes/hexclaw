@@ -1,5 +1,7 @@
 ---
 name: concept-explainer
+display_names: {"zh-CN":"概念讲解","en":"Concept explanation","ug-CN":"بىلىم نۇقتىسى چۈشەندۈرۈش"}
+teaching_methods: [{"name":"费曼学习法","display_names":{"zh-CN":"费曼学习法","en":"Feynman technique","ug-CN":"فېيمان ئۆگىنىش ئۇسۇلى"},"structure":{"zh-CN":"用朴素语言解释，发现缺口后补充理解","en":"Explain simply, identify gaps and strengthen understanding","ug-CN":"ئاددىي چۈشەندۈرۈش، بوشلۇقنى تېپىش ۋە چۈشىنىشنى تولۇقلاش"}}]
 display_name: 知识点讲解
 description: 费曼式把一个知识点讲透——类比、拆解、典型例题、常见误区，按学段不超纲。用于孩子/家长要"讲清楚某概念是什么、怎么理解"（区别于辅导具体作业题）时。
 author: hexclaw

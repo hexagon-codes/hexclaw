@@ -1,5 +1,7 @@
 ---
 name: exercise-generator
+display_names: {"zh-CN":"练习生成","en":"Exercise generation","ug-CN":"مەشىق ھاسىل قىلىش"}
+teaching_methods: [{"name":"顾泠沅变式教学","display_names":{"zh-CN":"顾泠沅变式教学","en":"Gu Lingyuan’s variation teaching","ug-CN":"گۇ لىڭيۈەننىڭ ئۆزگەرتىش ئوقۇتۇشى"},"structure":{"zh-CN":"变数值或情境，不变考点","en":"Vary values or contexts while keeping the concept","ug-CN":"بىلىم نۇقتىسىنى ساقلاپ، سان ياكى ئەھۋالنى ئۆزگەرتىش"}}]
 display_name: K12 出题器
 description: 按年级边界出练习题、变式题、错题卷——每题过验算、变式换数换情境不变考点、错题卷精准复现薄弱点。用于家长要给孩子出题、组卷、单元测、默写卷时。
 author: hexclaw

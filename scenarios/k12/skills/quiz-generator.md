@@ -1,5 +1,7 @@
 ---
 name: quiz-generator
+display_name: 练习与试卷生成
+display_names: {"zh-CN":"练习与试卷生成","en":"Quiz generator","ug-CN":"مەشىق ۋە سىناق ھاسىللىغۇچ"}
 description: 按知识点/难度/题型生成练习题与试卷，附标准答案、解析与评分标准
 author: hexclaw
 version: "1.0.0"

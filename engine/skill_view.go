@@ -66,7 +66,7 @@ func (s *SkillViewSkill) ToolDefinition() llm.ToolDefinition {
 
 // Execute 渲染 Tier 2/3 视图。registry 为 nil 时返回错误；name 不存在时返回提示
 // 字符串（不抛错），让 LLM 自行重试或换工具。
-func (s *SkillViewSkill) Execute(_ context.Context, args map[string]any) (*skill.Result, error) {
+func (s *SkillViewSkill) Execute(ctx context.Context, args map[string]any) (*skill.Result, error) {
 	if s.registry == nil {
 		return nil, fmt.Errorf("skill_view: registry not configured")
 	}
@@ -119,6 +119,7 @@ func (s *SkillViewSkill) Execute(_ context.Context, args map[string]any) (*skill
 
 	// Tier 3: ContentLoader 提供的无副作用完整内容
 	tier3Loaded := false
+	var loadedReceipt *skill.ContextReceipt
 	if cl, ok := target.(skill.ContentLoader); ok {
 		content, err := cl.LoadContent()
 		if err == nil && strings.TrimSpace(content) != "" {
@@ -126,6 +127,11 @@ func (s *SkillViewSkill) Execute(_ context.Context, args map[string]any) (*skill
 			sb.WriteString(content)
 			sb.WriteString("\n")
 			tier3Loaded = true
+			if provider, ok := target.(skill.ContextReceiptProvider); ok {
+				if receipt, valid := provider.LoadedContextReceipt(content); valid {
+					loadedReceipt = &receipt
+				}
+			}
 		}
 	}
 
@@ -139,8 +145,12 @@ func (s *SkillViewSkill) Execute(_ context.Context, args map[string]any) (*skill
 		meta["tier"] = "2"
 	}
 
+	toolContent := sb.String()
+	if loadedReceipt != nil {
+		prepareToolSkillContextReceipt(ctx, toolContent, *loadedReceipt)
+	}
 	return &skill.Result{
-		Content:  sb.String(),
+		Content:  toolContent,
 		Metadata: meta,
 	}, nil
 }

@@ -2,10 +2,13 @@ package engine
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"sync"
 
+	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/skill"
 )
 
 // BUG-1 plumb：把 skill 执行产出的结构化「reply-safe」元数据从工具边界带到最终回复。
@@ -31,8 +34,87 @@ var replySafeToolMetaKeys = map[string]bool{
 }
 
 type replyMetaSink struct {
-	mu sync.Mutex
-	m  map[string]string
+	mu                   sync.Mutex
+	m                    map[string]string
+	pendingSkillContexts []pendingToolSkillContext
+}
+
+type pendingToolSkillContext struct {
+	toolContentDigest [32]byte
+	receipt           skill.ContextReceipt
+	consumed          bool
+}
+
+// 成功读到的工具正文仅准备快照，不直接进入回复或历史。
+func prepareToolSkillContextReceipt(ctx context.Context, content string, receipt skill.ContextReceipt) {
+	s := replyMetaSinkFrom(ctx)
+	if s == nil || content == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	digest := sha256.Sum256([]byte(content))
+	for _, pending := range s.pendingSkillContexts {
+		if pending.toolContentDigest == digest && pending.receipt.Name == receipt.Name {
+			return
+		}
+	}
+	receipt.Status = "prepared"
+	s.pendingSkillContexts = append(s.pendingSkillContexts, pendingToolSkillContext{toolContentDigest: digest, receipt: receipt})
+}
+
+// Provider 成功接纳的本次请求必须包含同一工具结果，才确认其教学正文实际进入上下文。
+func confirmConsumedToolSkillContexts(ctx context.Context, messages []llm.Message) {
+	s := replyMetaSinkFrom(ctx)
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.pendingSkillContexts) == 0 {
+		return
+	}
+	for _, message := range messages {
+		if message.Role != llm.RoleTool {
+			continue
+		}
+		digest := sha256.Sum256([]byte(message.Content))
+		for i := range s.pendingSkillContexts {
+			pending := &s.pendingSkillContexts[i]
+			if pending.consumed || pending.toolContentDigest != digest {
+				continue
+			}
+			receipt := pending.receipt
+			receipt.Status = "loaded"
+			encoded, _ := json.Marshal([]skill.ContextReceipt{receipt})
+			s.m[skillContextReceiptsMetadataKey] = mergeSkillContextReceiptReferences(s.m[skillContextReceiptsMetadataKey], string(encoded))
+			pending.consumed = true
+		}
+	}
+}
+
+func mergeSkillContextReceiptReferences(previous, next string) string {
+	var merged []skill.ContextReceipt
+	seen := make(map[string]bool)
+	for _, encoded := range []string{previous, next} {
+		var receipts []skill.ContextReceipt
+		if json.Unmarshal([]byte(encoded), &receipts) != nil {
+			continue
+		}
+		for _, receipt := range receipts {
+			identity := receipt.Name + "\x00" + receipt.Version + "\x00" + receipt.ContentDigest
+			if receipt.Status != "loaded" || receipt.Name == "" || seen[identity] {
+				continue
+			}
+			seen[identity] = true
+			merged = append(merged, receipt)
+		}
+	}
+	if len(merged) == 0 {
+		return ""
+	}
+	data, _ := json.Marshal(merged)
+	return string(data)
 }
 
 // withToolReplyMetaSink 在 ctx 上安装「工具→回复」元数据收集器（幂等）。
@@ -122,6 +204,9 @@ func applyToolReplyMeta(ctx context.Context, msg *adapter.Message) {
 	}
 	ensureMessageMetadata(msg)
 	for k, v := range s.m {
+		if k == skillContextReceiptsMetadataKey {
+			v = mergeSkillContextReceiptReferences(msg.Metadata[k], v)
+		}
 		msg.Metadata[k] = v
 	}
 }

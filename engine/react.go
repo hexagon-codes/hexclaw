@@ -1031,6 +1031,7 @@ func (e *ReActEngine) Process(ctx context.Context, msg *adapter.Message) (reply 
 	if err := validateIncomingMessage(msg); err != nil {
 		return nil, err
 	}
+	ctx = withSolveUserProblem(ctx, msg)
 	ctx = e.beginRequestReasoningPolicy(ctx)
 	if replay, err := e.loadDurableAssistantReply(ctx, msg, false); err != nil {
 		return nil, err
@@ -1041,6 +1042,7 @@ func (e *ReActEngine) Process(ctx context.Context, msg *adapter.Message) (reply 
 		return nil, err
 	}
 	ensureMessageMetadata(msg)
+	delete(msg.Metadata, skillContextReceiptsMetadataKey)
 	delete(msg.Metadata, agentRequestReasoningPolicyKey)
 	assistantMessageID := canonicalAssistantMessageID(msg)
 	msg.Metadata["assistant_message_id"] = assistantMessageID
@@ -1174,7 +1176,8 @@ func (e *ReActEngine) Process(ctx context.Context, msg *adapter.Message) (reply 
 		return nil, fmt.Errorf("llm 路由失败: %w", err)
 	}
 	e.freezeSelectedRequestReasoningPolicy(ctx, msg, selection)
-	if err := e.prepareAgentSystemPromptPolicy(ctx, msg); err != nil {
+	ctx, err = e.prepareAgentSystemPromptPolicy(ctx, msg)
+	if err != nil {
 		return nil, err
 	}
 	cacheInput := buildLLMCacheInput(msg)
@@ -1951,7 +1954,9 @@ func (e *ReActEngine) ProcessStream(ctx context.Context, msg *adapter.Message) (
 	if msg.Metadata == nil {
 		msg.Metadata = make(map[string]string)
 	}
+	ctx = withSolveUserProblem(ctx, msg)
 	ctx = e.beginRequestReasoningPolicy(ctx)
+	delete(msg.Metadata, skillContextReceiptsMetadataKey)
 	delete(msg.Metadata, agentRequestReasoningPolicyKey)
 	assistantMessageID := canonicalAssistantMessageID(msg)
 	msg.Metadata["assistant_message_id"] = assistantMessageID
@@ -2186,7 +2191,8 @@ func (e *ReActEngine) processStream(
 		}
 	}
 	e.freezeSelectedRequestReasoningPolicy(ctx, msg, selection)
-	if err := e.prepareAgentSystemPromptPolicy(ctx, msg); err != nil {
+	ctx, err = e.prepareAgentSystemPromptPolicy(ctx, msg)
+	if err != nil {
 		return nil, err
 	}
 	cacheInput := buildLLMCacheInput(msg)
@@ -4115,8 +4121,14 @@ func (e *ReActEngine) buildStreamMessages(ctx context.Context, roleName string, 
 	sysContent += e.buildCapabilityContext(ctx, metadata)
 	// bug#2 2026-06-23：用户在对话框显式挂载/召唤的技能（前端 skillNames → metadata["skills"]）。
 	// persona 类（Markdown）技能把正文注入 system prompt，使其当轮即生效，不依赖模型主动调用工具。
+	delete(metadata, skillContextReceiptsMetadataKey)
 	if names := mountedSkillNames(metadata); len(names) > 0 {
-		sysContent += e.buildMountedSkillsPrompt(names)
+		prompt, receipts := e.buildMountedSkillsContext(names)
+		sysContent += prompt
+		if len(receipts) > 0 && metadata != nil {
+			encoded, _ := json.Marshal(receipts)
+			metadata[skillContextReceiptsMetadataKey] = string(encoded)
+		}
 	}
 	// B1+B2: Agent 模式差异化 prompt prefix
 	// auto 时优先尊重 Top-1 召回 Skill 的 frontmatter preferred_mode（B2 DoD），
@@ -5080,7 +5092,7 @@ func buildReplyMetadata(metadata map[string]string, providerName, modelName, ass
 	if v := metadata["routed_agent"]; v != "" {
 		replyMeta["routed_agent"] = v
 	}
-	for _, key := range []string{"request_id", "session_id", "finish_reason", "recovered_from_reasoning_only", "thinking", "reasoning_visibility", "thinking_duration", "record", "artifacts", persistErrorMetaKey} {
+	for _, key := range []string{"request_id", "session_id", "finish_reason", "recovered_from_reasoning_only", "thinking", "reasoning_visibility", "thinking_duration", "record", "artifacts", skillContextReceiptsMetadataKey, persistErrorMetaKey} {
 		if v := metadata[key]; v != "" {
 			replyMeta[key] = v
 		}
@@ -5511,15 +5523,27 @@ func (e *ReActEngine) hasMountedPersonaSkill(metadata map[string]string) bool {
 // buildMountedSkillsPrompt 把用户显式挂载的 persona 类技能正文注入 system prompt，
 // 使其当轮即生效（不依赖模型主动调用工具）。bug#2 2026-06-23。
 func (e *ReActEngine) buildMountedSkillsPrompt(names []string) string {
+	prompt, _ := e.buildMountedSkillsContext(names)
+	return prompt
+}
+
+const skillContextReceiptsMetadataKey = "skill_context_receipts"
+
+func (e *ReActEngine) buildMountedSkillsContext(names []string) (string, []skill.ContextReceipt) {
 	e.mu.RLock()
 	skills := e.skills
 	e.mu.RUnlock()
 	if len(names) == 0 || skills == nil {
-		return ""
+		return "", nil
 	}
 	const perSkillCap = 4000 // 单技能正文字符上限（rune），防 system prompt 膨胀
 	var sb strings.Builder
+	var receipts []skill.ContextReceipt
+	loadedNames := make(map[string]bool)
 	for _, name := range names {
+		if loadedNames[name] {
+			continue
+		}
 		s, ok := skills.Get(name)
 		if !ok {
 			continue
@@ -5541,8 +5565,14 @@ func (e *ReActEngine) buildMountedSkillsPrompt(names []string) string {
 		sb.WriteString("\n## 技能：" + s.Name() + "\n")
 		sb.WriteString(body)
 		sb.WriteString("\n")
+		loadedNames[name] = true
+		if provider, ok := s.(skill.ContextReceiptProvider); ok {
+			if receipt, valid := provider.LoadedContextReceipt(body); valid {
+				receipts = append(receipts, receipt)
+			}
+		}
 	}
-	return sb.String()
+	return sb.String(), receipts
 }
 
 // ensureMountedSkillTools 保证用户显式挂载技能的工具一定出现在工具集里并前置（bug#2 2026-06-23）。

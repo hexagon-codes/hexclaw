@@ -70,7 +70,7 @@ func (s *runtimeProviderSelector) setCurrent(p hexagon.Provider, name, model str
 	s.currentModel = model
 }
 
-func (s *runtimeProviderSelector) Select(context.Context, hruntime.Request) (hruntime.ProviderSelection, error) {
+func (s *runtimeProviderSelector) Select(ctx context.Context, _ hruntime.Request) (hruntime.ProviderSelection, error) {
 	// 首次进入用 initial；再次进入（engine 多跳回退重跑 runner）返回已 advance 的 current。
 	if s.currentProvider == nil {
 		if s.initialProvider == nil {
@@ -79,8 +79,12 @@ func (s *runtimeProviderSelector) Select(context.Context, hruntime.Request) (hru
 		s.setCurrent(s.initialProvider, s.initialName, s.initialModel)
 	}
 	s.markTried(s.currentName)
+	selectedProvider := s.currentProvider
+	if replyMetaSinkFrom(ctx) != nil {
+		selectedProvider = preserveContextTokenCounter(&skillContextConsumedProvider{Provider: selectedProvider}, selectedProvider)
+	}
 	return hruntime.ProviderSelection{
-		Provider: s.currentProvider,
+		Provider: selectedProvider,
 		Name:     s.currentName,
 		Model:    s.currentModel,
 	}, nil
@@ -145,6 +149,25 @@ func (s *runtimeProviderSelector) wrap(provider hexagon.Provider, name, model st
 		return provider
 	}
 	return s.wrapProvider(provider, name, model)
+}
+
+// 只观察现有 Provider 请求，不改变正文、路由、次数或错误分类。
+type skillContextConsumedProvider struct{ hexagon.Provider }
+
+func (p *skillContextConsumedProvider) Complete(ctx context.Context, req llm.CompletionRequest) (*llm.CompletionResponse, error) {
+	response, err := p.Provider.Complete(ctx, req)
+	if err == nil && response != nil {
+		confirmConsumedToolSkillContexts(ctx, req.Messages)
+	}
+	return response, err
+}
+
+func (p *skillContextConsumedProvider) Stream(ctx context.Context, req llm.CompletionRequest) (*llm.Stream, error) {
+	stream, err := p.Provider.Stream(ctx, req)
+	if err == nil && stream != nil {
+		confirmConsumedToolSkillContexts(ctx, req.Messages)
+	}
+	return stream, err
 }
 
 func (s *runtimeProviderSelector) Current() (hexagon.Provider, string, string) {

@@ -1,5 +1,7 @@
 ---
 name: english-tutor
+display_names: {"zh-CN":"英语辅导","en":"English tutoring","ug-CN":"ئىنگلىزچە يېتەكلەش"}
+teaching_methods: [{"name":"克拉申可理解输入","display_names":{"zh-CN":"克拉申可理解输入","en":"Krashen’s comprehensible input","ug-CN":"كراشېننىڭ چۈشىنىشلىك كىرگۈزۈشى"},"structure":{"zh-CN":"可理解且略高于当前水平的输入，降低焦虑","en":"Understandable input slightly above current ability, with low anxiety","ug-CN":"ھازىرقى سەۋىيەدىن ئازراق يۇقىرى چۈشىنىشلىك مەزمۇن بىلەن ئەندىشىنى ئازايتىش"}}]
 display_name: 英语辅导老师
 description: 辅导、批改小学到初中英语——用法先于术语讲语法时态、错词订正、作文参考与讲法、口语只鼓励。用于家长辅导孩子英语作业（单词听写、语法、阅读、作文、音标口语）时。
 author: hexclaw

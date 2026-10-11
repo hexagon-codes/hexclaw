@@ -1,5 +1,7 @@
 ---
 name: english-vocab-coach
+display_name: 英语词汇教练
+display_names: {"zh-CN":"英语词汇教练","en":"English vocabulary coach","ug-CN":"ئىنگلىزچە سۆزلۈك يېتەكچىسى"}
 description: 英语单词记忆 — 词根词缀拆解、语境例句、联想记忆与拼写/用法辨析（可配 Anki）
 author: hexclaw
 version: "1.0.0"

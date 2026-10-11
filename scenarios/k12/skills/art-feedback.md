@@ -1,5 +1,7 @@
 ---
 name: art-feedback
+display_names: {"zh-CN":"美术作品反馈","en":"Art feedback","ug-CN":"سەنئەت ئەسىرىگە پىكىر"}
+teaching_methods: [{"name":"费德门美术鉴赏四步骤","display_names":{"zh-CN":"费德门美术鉴赏四步骤","en":"Feldman’s art criticism","ug-CN":"فېلدماننىڭ سەنئەت تەھلىلى"},"structure":{"zh-CN":"描述 → 形式分析 → 解释 → 建议","en":"Describe → Analyze form → Interpret → Suggest","ug-CN":"تەسۋىرلەش → شەكىلنى تەھلىل قىلىش → چۈشەندۈرۈش → تەكلىپ"}}]
 display_name: 美术作品反馈
 description: 小学生美术作品的形成性反馈与指导——构图/色彩/线条/空间/材料效果五要素观察 + 儿童绘画发展阶段适龄评价，只依据画面可见证据，不打分不排名不重画。用于家长上传孩子画作、手工照片求点评时。
 author: hexclaw

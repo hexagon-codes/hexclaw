@@ -1,5 +1,7 @@
 ---
 name: reading-comprehension
+display_name: 阅读理解辅导
+display_names: {"zh-CN":"阅读理解辅导","en":"Reading comprehension tutor","ug-CN":"ئوقۇش چۈشىنىش يېتەكچىسى"}
 description: 现代文/英语阅读理解 — 文章解构、题型套路、答题模板与逐题讲解
 author: hexclaw
 version: "1.0.0"

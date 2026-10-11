@@ -27,6 +27,7 @@ import (
 	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/router"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
+	"github.com/hexagon-codes/hexclaw/skill"
 	"github.com/hexagon-codes/hexclaw/skill/hub"
 	"github.com/hexagon-codes/hexclaw/skill/marketplace"
 	"github.com/hexagon-codes/toolkit/util/logger"
@@ -38,17 +39,20 @@ type skillRuntimeController interface {
 }
 
 type skillStatusResponse struct {
-	Name             string   `json:"name,omitempty"`
-	Description      string   `json:"description,omitempty"`
-	Author           string   `json:"author,omitempty"`
-	Version          string   `json:"version,omitempty"`
-	Triggers         []string `json:"triggers,omitempty"`
-	Tags             []string `json:"tags,omitempty"`
-	Icon             string   `json:"icon,omitempty"`
-	Enabled          bool     `json:"enabled"`
-	EffectiveEnabled bool     `json:"effective_enabled"`
-	RequiresRestart  bool     `json:"requires_restart"`
-	Message          string   `json:"message,omitempty"`
+	Name             string                 `json:"name,omitempty"`
+	DisplayName      string                 `json:"display_name,omitempty"`
+	DisplayNames     map[string]string      `json:"display_names,omitempty"`
+	TeachingMethods  []skill.TeachingMethod `json:"teaching_methods,omitempty"`
+	Description      string                 `json:"description,omitempty"`
+	Author           string                 `json:"author,omitempty"`
+	Version          string                 `json:"version,omitempty"`
+	Triggers         []string               `json:"triggers,omitempty"`
+	Tags             []string               `json:"tags,omitempty"`
+	Icon             string                 `json:"icon,omitempty"`
+	Enabled          bool                   `json:"enabled"`
+	EffectiveEnabled bool                   `json:"effective_enabled"`
+	RequiresRestart  bool                   `json:"requires_restart"`
+	Message          string                 `json:"message,omitempty"`
 }
 
 // --- 角色 API ---
@@ -609,6 +613,9 @@ func (s *Server) handleListSkills(w http.ResponseWriter, r *http.Request) {
 		effective, requiresRestart, message := s.skillEffectiveState(sk.Meta.Name, enabled)
 		list = append(list, skillStatusResponse{
 			Name:             sk.Meta.Name,
+			DisplayName:      sk.Meta.DisplayName,
+			DisplayNames:     sk.Meta.DisplayNames,
+			TeachingMethods:  sk.Meta.TeachingMethods,
 			Description:      sk.Meta.Description,
 			Author:           sk.Meta.Author,
 			Version:          sk.Meta.Version,

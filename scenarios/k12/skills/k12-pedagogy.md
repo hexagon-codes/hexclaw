@@ -1,5 +1,7 @@
 ---
 name: k12-pedagogy
+display_names: {"zh-CN":"渐进式辅导","en":"Step-by-step tutoring","ug-CN":"باسقۇچلۇق يېتەكلەش"}
+teaching_methods: [{"name":"责任逐渐释放","display_names":{"zh-CN":"责任逐渐释放","en":"Gradual release of responsibility","ug-CN":"مەسئۇلىيەتنى تەدرىجىي ئۆتكۈزۈش"},"structure":{"zh-CN":"示范 → 共做 → 独立","en":"I do → We do → You do","ug-CN":"كۆرسىتىش → بىرگە قىلىش → مۇستەقىل قىلىش"}}]
 display_name: K12 教学法（基座）
 description: K12 各学科辅导的共享教学法基座——完整家长参考、渐进讲解方法、苏格拉底追问、五类错因、成长型情绪引导。所有学科 tutor 在此之上叠加。用于家长辅导或陪孩子做任何学科作业、讲题、批改时。
 author: hexclaw

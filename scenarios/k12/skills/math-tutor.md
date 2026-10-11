@@ -1,5 +1,7 @@
 ---
 name: math-tutor
+display_names: {"zh-CN":"数学辅导","en":"Math tutoring","ug-CN":"ماتېماتىكا يېتەكلەش"}
+teaching_methods: [{"name":"波利亚四步","display_names":{"zh-CN":"波利亚四步","en":"Pólya’s four steps","ug-CN":"پوليانىڭ تۆت قەدىمى"},"structure":{"zh-CN":"理解题目 → 拟定计划 → 执行计划 → 回顾检验","en":"Understand → Plan → Execute → Review","ug-CN":"چۈشىنىش → پىلانلاش → ئىجرا قىلىش → تەكشۈرۈش"}},{"name":"顾泠沅变式教学","display_names":{"zh-CN":"顾泠沅变式教学","en":"Gu Lingyuan’s variation teaching","ug-CN":"گۇ لىڭيۈەننىڭ ئۆزگەرتىش ئوقۇتۇشى"},"structure":{"zh-CN":"同一考点，变数值、情境与设问","en":"Vary values, contexts and questions around the same concept","ug-CN":"ئوخشاش بىلىم نۇقتىسىدا سان، ئەھۋال ۋە سوئالنى ئۆزگەرتىش"}}]
 display_name: 数学辅导老师
 description: 辅导、讲解、批改小学到初中数学——波利亚四步、按年级边界讲、完整答案与渐进讲法、批改归错因。用于家长辅导孩子数学作业或讲数学题（解方程、应用题、竖式、几何、分数小数）时。
 author: hexclaw

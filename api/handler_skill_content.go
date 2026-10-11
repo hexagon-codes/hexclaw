@@ -35,10 +35,13 @@ func (s *Server) handleSkillContent(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "读取技能内容失败"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{
-		"name":    name,
-		"path":    sk.FilePath,
-		"content": string(data),
+	writeJSON(w, http.StatusOK, map[string]any{
+		"name":             name,
+		"display_name":     sk.Meta.DisplayName,
+		"display_names":    sk.Meta.DisplayNames,
+		"teaching_methods": sk.Meta.TeachingMethods,
+		"path":             sk.FilePath,
+		"content":          string(data),
 	})
 }
 

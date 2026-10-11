@@ -1,5 +1,7 @@
 ---
 name: grade-constraint
+display_names: {"zh-CN":"年级边界约束（基座）","en":"Grade boundaries","ug-CN":"سىنىپ دائىرىسى"}
+teaching_methods: [{"name":"最近发展区","display_names":{"zh-CN":"最近发展区","en":"Zone of proximal development","ug-CN":"يېقىن تەرەققىيات دائىرىسى"},"structure":{"zh-CN":"在已学知识基础上增加可理解的一小步","en":"Build on learned knowledge with one understandable step","ug-CN":"ئۆگەنگەن بىلىم ئۈستىگە چۈشەنگىلى بولىدىغان بىر قەدەم قوشۇش"}}]
 display_name: 年级边界约束（基座）
 description: 把讲解锁在孩子当前学段学过的知识内，提供超纲说法的学段内替代话术。所有学科 tutor 讲题前套用。用于判断解法/知识点是否超纲、需要按年级找替代讲法时。
 author: hexclaw

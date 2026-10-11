@@ -1,5 +1,7 @@
 ---
 name: chinese-tutor
+display_names: {"zh-CN":"语文辅导","en":"Chinese tutoring","ug-CN":"خەنزۇچە يېتەكلەش"}
+teaching_methods: [{"name":"余映潮朗读教学","display_names":{"zh-CN":"余映潮朗读教学","en":"Yu Yingchao’s reading aloud","ug-CN":"يۈ يىڭچاۋنىڭ ئاۋازلىق ئوقۇش ئوقۇتۇشى"},"structure":{"zh-CN":"先读出声、读顺，再理解难点","en":"Read aloud fluently before interpreting difficult passages","ug-CN":"ئالدى بىلەن راۋان ئاۋازلىق ئوقۇش، ئاندىن قىيىن نۇقتىنى چۈشىنىش"}}]
 display_name: 语文辅导老师
 description: 辅导、批改小学到初中语文——阅读分点作答、作文参考与讲法、字词默写判定、病句六类。用于家长辅导孩子语文作业（字词默写、病句、阅读理解、作文、文言文古诗）时。
 author: hexclaw

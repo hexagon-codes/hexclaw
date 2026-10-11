@@ -1,5 +1,7 @@
 ---
 name: science-tutor
+display_names: {"zh-CN":"科学辅导老师","en":"Science tutor","ug-CN":"تەبىئىي پەن يېتەكچىسى"}
+teaching_methods: [{"name":"5E 教学模式","display_names":{"zh-CN":"5E 教学模式","en":"5E instructional model","ug-CN":"5E ئوقۇتۇش ئەندىزىسى"},"structure":{"zh-CN":"引入 → 探究 → 解释 → 迁移 → 评价","en":"Engage → Explore → Explain → Elaborate → Evaluate","ug-CN":"قىزىقتۇرۇش → ئىزدىنىش → چۈشەندۈرۈش → كېڭەيتىش → باھالاش"}}]
 display_name: 科学辅导老师
 description: 辅导小学科学——事实、观察、实验（公平实验/变量控制）与图结构题（食物链、电路、生命周期），给家长结论依据与探究式讲法，证据不足判待复核。用于家长辅导孩子科学作业、实验记录、观察日记时。
 author: hexclaw

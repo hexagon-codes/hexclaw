@@ -29,6 +29,10 @@ func (a *markdownSkillAdapter) Match(content string) bool { return a.s.Match(con
 // 以通用助手身份回答（bug 2026-06-23：挂"前女友"问"你在哪"答"我是虚拟AI助手"）。
 func (a *markdownSkillAdapter) LoadContent() (string, error) { return a.s.LoadContent() }
 
+func (a *markdownSkillAdapter) LoadedContextReceipt(content string) (skill.ContextReceipt, bool) {
+	return a.s.LoadedContextReceipt(content)
+}
+
 // ToolDefinition 返回 Markdown 技能的 LLM 工具定义
 //
 // 基于元数据中的名称和描述生成，不包含参数 Schema（Markdown 技能由 Prompt 驱动）
