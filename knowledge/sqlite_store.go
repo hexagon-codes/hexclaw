@@ -569,6 +569,7 @@ func (s *SQLiteStore) replaceOnce(ctx context.Context, doc *Document, chunks []*
 	}
 
 	var scopeUID string
+	var previousSourceGeneration int64
 	if s.semanticMutations != nil {
 		state, scopeErr := loadSemanticPolicyState(ctx, tx,
 			s.semanticMutations.ownerID, s.semanticMutations.corpusID)
@@ -576,6 +577,33 @@ func (s *SQLiteStore) replaceOnce(ctx context.Context, doc *Document, chunks []*
 			return scopeErr
 		}
 		scopeUID = state.corpusUID
+		var oldContent, oldSource string
+		var previousGeneration int64
+		var deleted bool
+		if err := tx.QueryRowContext(ctx, `SELECT d.content,d.source,d.deleted,b.content_generation FROM kb_documents d JOIN kb_semantic_document_bindings b ON b.document_id=d.id AND b.corpus_uid=d.corpus_uid WHERE b.owner_id=? AND b.corpus_uid=? AND d.id=?`, s.semanticMutations.ownerID, scopeUID, doc.ID).Scan(&oldContent, &oldSource, &deleted, &previousGeneration); err != nil {
+			return err
+		}
+		// 同正文的重建只改变索引投影；真正替换或已删来源不继承历史原文件。
+		if !deleted && oldContent == doc.Content && oldSource == doc.Source {
+			var digest string
+			err := tx.QueryRowContext(ctx, `SELECT blob_sha256 FROM kb_ingest_document_sources WHERE owner_id=? AND corpus_uid=? AND document_id=? AND content_generation=?`, s.semanticMutations.ownerID, scopeUID, doc.ID, previousGeneration).Scan(&digest)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+			if err == nil {
+				previousSourceGeneration = previousGeneration
+				jobID, _, proofErr := ResolveReindexedPDFIngest(ctx, tx, s.semanticMutations.ownerID, scopeUID, doc.ID, previousGeneration, digest, "")
+				if proofErr == nil {
+					pages, _, err := loadExactPDFParsePages(ctx, tx, s.semanticMutations.ownerID, scopeUID, doc.ID, jobID, digest, doc.Content)
+					if err != nil {
+						return err
+					}
+					restoreChunkSourceSpans(doc, chunks, digest, pages)
+				} else if !errors.Is(proofErr, ErrDocumentParseSourceConflict) {
+					return proofErr
+				}
+			}
+		}
 	}
 
 	if _, err := tx.ExecContext(ctx,
@@ -644,6 +672,15 @@ func (s *SQLiteStore) replaceOnce(ctx context.Context, doc *Document, chunks []*
 	if s.semanticMutations != nil {
 		if err := s.semanticMutations.documentReplacedTx(ctx, tx, doc, chunks); err != nil {
 			return fmt.Errorf("更新语义索引任务失败: %w", err)
+		}
+		if previousSourceGeneration > 0 {
+			var generation int64
+			if err := tx.QueryRowContext(ctx, `SELECT content_generation FROM kb_semantic_document_bindings WHERE owner_id=? AND corpus_uid=? AND document_id=?`, s.semanticMutations.ownerID, scopeUID, doc.ID).Scan(&generation); err != nil {
+				return err
+			}
+			if err := inheritDocumentSourceTx(ctx, tx, s.semanticMutations.ownerID, scopeUID, doc.ID, previousSourceGeneration, generation, semanticNowMillis()); err != nil {
+				return err
+			}
 		}
 	}
 	if err := restoreCJKFTSCurrentTx(ctx, tx, projectionWasCurrent); err != nil {

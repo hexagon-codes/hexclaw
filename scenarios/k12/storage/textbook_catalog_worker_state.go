@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/hexagon-codes/hexclaw/knowledge"
 )
 
 const TextbookCatalogExtractorContract = "checkpoint-toc-footer-v5"
@@ -75,23 +77,36 @@ func loadTextbookCatalogSourceSnapshot(
 	var jobState string
 	var pagesTotal, pagesDone int
 	var jobLeaseEpoch int64
+	var parseGeneration int64
 	err := q.QueryRowContext(ctx, `SELECT j.state,COALESCE(j.pages_total,0),
-		COALESCE(j.pages_done,0),j.lease_epoch
+		COALESCE(j.pages_done,0),j.lease_epoch,j.document_generation
 		FROM kb_knowledge_jobs j
 		JOIN kb_ingest_document_sources s
 		  ON s.owner_id=j.owner_id AND s.corpus_uid=j.corpus_uid
 		 AND s.document_id=j.document_id
 		 AND s.content_generation=j.document_generation
 		WHERE j.job_id=? AND j.kind='ingest' AND j.owner_id=? AND j.document_id=?
-		  AND j.document_generation=? AND s.blob_sha256=?`,
-		jobID, ownerID, documentID, generation, sourceDigest,
-	).Scan(&jobState, &pagesTotal, &pagesDone, &jobLeaseEpoch)
+		  AND s.blob_sha256=?`,
+		jobID, ownerID, documentID, sourceDigest,
+	).Scan(&jobState, &pagesTotal, &pagesDone, &jobLeaseEpoch, &parseGeneration)
 	if errors.Is(err, sql.ErrNoRows) || jobState != "succeeded" ||
 		pagesTotal < 1 || pagesDone != pagesTotal {
 		return textbookCatalogSourceSnapshot{}, "", ErrTextbookCatalogSourceIncomplete
 	}
 	if err != nil {
 		return textbookCatalogSourceSnapshot{}, "", err
+	}
+	if parseGeneration != generation {
+		var corpusUID string
+		if err := q.QueryRowContext(ctx, `SELECT corpus_uid FROM kb_semantic_document_bindings WHERE owner_id=? AND document_id=? AND content_generation=?`, ownerID, documentID, generation).Scan(&corpusUID); err != nil {
+			return textbookCatalogSourceSnapshot{}, "", ErrTextbookCatalogSourceIncomplete
+		}
+		if _, _, err := knowledge.ResolveReindexedPDFIngest(ctx, q, ownerID, corpusUID, documentID, generation, sourceDigest, jobID); err != nil {
+			if errors.Is(err, knowledge.ErrDocumentParseSourceConflict) {
+				return textbookCatalogSourceSnapshot{}, "", ErrTextbookCatalogSourceIncomplete
+			}
+			return textbookCatalogSourceSnapshot{}, "", err
+		}
 	}
 
 	snapshot := textbookCatalogSourceSnapshot{

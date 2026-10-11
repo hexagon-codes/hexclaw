@@ -1039,8 +1039,7 @@ func joinPDFPageExtractions(pages []documentPageExtraction) string {
 		if b.Len() > 0 {
 			b.WriteString("\n\n")
 		}
-		fmt.Fprintf(&b, "## PDF 第 %d 页\n\n<!-- source_page_span=%d-%d -->\n\n",
-			page.PageNumber, page.SourcePageFrom, page.SourcePageTo)
+		b.WriteString(knowledge.CanonicalPDFPagePrefix(page.PageNumber, page.SourcePageFrom, page.SourcePageTo))
 		b.WriteString(strings.TrimSpace(page.Text))
 	}
 	return strings.TrimSpace(b.String())
@@ -1061,8 +1060,7 @@ func assignPDFPageSourceOffsets(pages []documentPageExtraction) {
 		if hasPreviousPage {
 			cursor += int64(len("\n\n"))
 		}
-		prefix := fmt.Sprintf("## PDF 第 %d 页\n\n<!-- source_page_span=%d-%d -->\n\n",
-			pages[index].PageNumber, pages[index].SourcePageFrom, pages[index].SourcePageTo)
+		prefix := knowledge.CanonicalPDFPagePrefix(pages[index].PageNumber, pages[index].SourcePageFrom, pages[index].SourcePageTo)
 		cursor += int64(len(prefix))
 		pages[index].SourceOffsetFrom = cursor
 		cursor += int64(len(text))

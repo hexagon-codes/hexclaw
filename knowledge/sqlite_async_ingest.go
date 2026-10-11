@@ -924,7 +924,20 @@ func (r *SQLiteSemanticIndexRepository) loadDocumentOCRPageRouteReceipts(
 		ORDER BY created_at DESC,rowid DESC LIMIT 1`, ownerID, corpusUID,
 		documentID, documentGeneration).Scan(&jobID)
 	if errors.Is(err, sql.ErrNoRows) {
-		return []OCRPageRouteReceipt{}, nil
+		var digest string
+		if sourceErr := r.db.QueryRowContext(ctx, `SELECT blob_sha256 FROM kb_ingest_document_sources WHERE owner_id=? AND corpus_uid=? AND document_id=? AND content_generation=?`, ownerID, corpusUID, documentID, documentGeneration).Scan(&digest); errors.Is(sourceErr, sql.ErrNoRows) {
+			return []OCRPageRouteReceipt{}, nil
+		} else if sourceErr != nil {
+			return nil, sourceErr
+		}
+		originalJob, _, proofErr := ResolveReindexedPDFIngest(ctx, r.db, ownerID, corpusUID, documentID, documentGeneration, digest, "")
+		if errors.Is(proofErr, ErrDocumentParseSourceConflict) {
+			return []OCRPageRouteReceipt{}, nil
+		}
+		if proofErr != nil {
+			return nil, proofErr
+		}
+		return r.loadOCRPageRouteReceipts(ctx, originalJob)
 	}
 	if err != nil {
 		return nil, err

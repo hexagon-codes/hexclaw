@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/hexagon-codes/hexclaw/internal/upstreamerr"
+	"github.com/hexagon-codes/hexclaw/knowledge"
 )
 
 const (
@@ -378,6 +379,15 @@ func loadTextbookManifestFactsTx(
 	).Scan(&facts.jobID, &facts.jobState, &facts.lastError)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return textbookManifestFacts{}, false, err
+	}
+	if facts.jobID == "" && facts.sourceDigest != "" && facts.textState == "ready" && facts.lifecycleState == "active" && !facts.deleted {
+		// 同源索引代次沿真实解析任务取证，不复制或伪造新 ingest 回执。
+		id, _, proofErr := knowledge.ResolveReindexedPDFIngest(ctx, tx, facts.knowledgeOwnerID, facts.corpusUID, documentID, generation, facts.sourceDigest, "")
+		if proofErr == nil {
+			facts.jobID, facts.jobState = id, "succeeded"
+		} else if !errors.Is(proofErr, knowledge.ErrDocumentParseSourceConflict) {
+			return textbookManifestFacts{}, false, proofErr
+		}
 	}
 	if facts.jobID != "" {
 		err = tx.QueryRowContext(ctx, `SELECT code,action_code
