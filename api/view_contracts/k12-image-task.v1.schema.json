@@ -9,6 +9,32 @@
     { "$ref": "#/$defs/problemSourceActionResponse" }
   ],
   "$defs": {
+    "skillContextReceipt": {
+      "type": "object",
+      "required": ["name", "version", "status", "content_digest"],
+      "properties": {
+        "name": { "type": "string" },
+        "version": { "type": "string" },
+        "status": { "const": "loaded" },
+        "content_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "display_name": { "type": "string" },
+        "display_names": { "type": "object", "additionalProperties": { "type": "string" } },
+        "methods": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+              "name": { "type": "string" },
+              "display_names": { "type": "object", "additionalProperties": { "type": "string" } },
+              "structure": { "type": "object", "additionalProperties": { "type": "string" } }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "progress": {
       "type": "object",
       "required": ["operation", "state"],
@@ -260,6 +286,10 @@
         "operation_receipts": {
           "type": "array",
           "items": { "$ref": "#/$defs/operationReceipt" }
+        },
+        "skill_context_receipts": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/skillContextReceipt" }
         },
         "grounding_evidence_receipts": {
           "type": "array",

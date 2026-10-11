@@ -49,6 +49,7 @@ type elementaryWordSolution struct {
 	unit           string
 	knowledgePoint string
 	problemIssue   string
+	program        string
 }
 
 type answerQuantity struct {
@@ -84,7 +85,7 @@ func solveElementaryWordProblemDetailed(problem string) (elementaryWordSolution,
 		// 五年级下只用已经学过的整数乘除表达“先求一份，再求若干份”，不展示六上分数除法。
 		worked := fmt.Sprintf("把这个数平均分成 %s 份，%s 份是 %s。\n先求 1 份，再求 %s 份：\n%s÷%s×%s = %s\n\n答案：%s",
 			m[2], m[1], m[3], m[2], m[3], m[1], m[2], answer, answer)
-		return elementaryWordSolution{worked: worked, value: answer, knowledgePoint: "分数的意义和性质"}, true
+		return elementaryWordSolution{worked: worked, value: answer, knowledgePoint: "分数的意义和性质", program: wordProgram([]string{m[3] + "/" + m[1] + "*" + m[2]}, []string{""})}, true
 	}
 
 	if m := successiveFractionRe.FindStringSubmatch(problem); len(m) == 6 {
@@ -103,7 +104,7 @@ func solveElementaryWordProblemDetailed(problem string) (elementaryWordSolution,
 		answer := formatArithmeticRat(value)
 		worked := fmt.Sprintf("按“先除以分母，再乘分子”依次计算：\n%s÷%s×%s÷%s×%s = %s\n\n答案：%s",
 			m[1], m[3], m[2], m[5], m[4], answer, answer)
-		return elementaryWordSolution{worked: worked, value: answer, knowledgePoint: "分数的意义和性质"}, true
+		return elementaryWordSolution{worked: worked, value: answer, knowledgePoint: "分数的意义和性质", program: wordProgram([]string{m[1] + "/" + m[3] + "*" + m[2] + "/" + m[5] + "*" + m[4]}, []string{""})}, true
 	}
 
 	if m := rectangleYieldRe.FindStringSubmatch(problem); len(m) == 4 {
@@ -123,7 +124,8 @@ func solveElementaryWordProblemDetailed(problem string) (elementaryWordSolution,
 		worked := fmt.Sprintf("长方形周长 = 2×(长+宽)，长是宽的 %s 倍。\n宽：%s÷[2×(%s+1)] = %s 米\n长：%s×%s = %s 米\n面积：%s×%s = %s 平方米\n产量：%s×%s = %s 千克\n\n答案：%s 千克",
 			m[2], m[1], m[2], formatArithmeticRat(width), formatArithmeticRat(width), m[2], formatArithmeticRat(length),
 			formatArithmeticRat(width), formatArithmeticRat(length), formatArithmeticRat(area), formatArithmeticRat(area), m[3], answer, answer)
-		return elementaryWordSolution{worked: worked, value: answer, unit: "千克", knowledgePoint: "长方形的周长和面积"}, true
+		w := "(" + m[1] + "/(2*(" + m[2] + "+1)))"
+		return elementaryWordSolution{worked: worked, value: answer, unit: "千克", knowledgePoint: "长方形的周长和面积", program: wordProgram([]string{w + "*" + w + "*" + m[2] + "*" + m[3]}, []string{"千克"})}, true
 	}
 
 	if m := openCubeFishTankRe.FindStringSubmatch(problem); len(m) == 3 {
@@ -142,7 +144,7 @@ func solveElementaryWordProblemDetailed(problem string) (elementaryWordSolution,
 		worked := fmt.Sprintf("鱼缸无盖，只需计算底面和 4 个侧面，共 5 个面。\n玻璃面积：%s×%s×5 = %s 平方分米\n换算成平方米：%s÷100 = %s 平方米\n1 L = 1 立方分米，水的体积是 %s 立方分米。\n底面积：%s×%s = %s 平方分米\n水面高度：%s÷(%s×%s) = %s 分米\n\n答案：%s平方米；%s分米（依次为至少需要的玻璃面积、水面高度）。",
 			m[1], m[1], formatArithmeticRat(glassDM2), formatArithmeticRat(glassDM2), glassAnswer,
 			m[2], m[1], m[1], formatArithmeticRat(baseArea), m[2], m[1], m[1], heightAnswer, glassAnswer, heightAnswer)
-		return elementaryWordSolution{worked: worked, value: answer, knowledgePoint: "长方体和正方体的表面积、体积和容积"}, true
+		return elementaryWordSolution{worked: worked, value: answer, knowledgePoint: "长方体和正方体的表面积、体积和容积", program: wordProgram([]string{m[1] + "*" + m[1] + "*5/100", m[2] + "/(" + m[1] + "*" + m[1] + ")"}, []string{"平方米", "分米"})}, true
 	}
 
 	if m := ticketGCDLCMRe.FindStringSubmatch(problem); len(m) == 5 {
@@ -215,7 +217,14 @@ func solveElementaryWordProblemDetailed(problem string) (elementaryWordSolution,
 			matched.triple[0], matched.triple[1], matched.triple[2], matched.triple[0]+matched.triple[1]+matched.triple[2],
 			matched.pair[0], matched.pair[1], matched.pair[0]+matched.pair[1],
 			matched.triple[0]+matched.triple[1]+matched.triple[2], matched.pair[0]+matched.pair[1], matched.removed)
-		return elementaryWordSolution{worked: worked, value: answer, knowledgePoint: "数的组合与倍数关系"}, true
+		program := fmt.Sprintf("from itertools import combinations\nnumbers = %v\nanswers = set()\nfor i, removed in enumerate(numbers):\n    rest = numbers[:i] + numbers[i+1:]\n    for pair in combinations(range(5), 2):\n        pair_sum = sum(rest[j] for j in pair)\n        triple_sum = sum(rest[j] for j in range(5) if j not in pair)\n        if triple_sum == 2 * pair_sum:\n            answers.add(removed)\nassert len(answers) == 1\nprint('COMPUTED: ' + str(next(iter(answers))))\n", numbers)
+		// Go 切片的数字显示改为 Python 列表，只替换这一受信字面量。
+		literals := make([]string, len(rawNumbers))
+		for i, number := range numbers {
+			literals[i] = fmt.Sprint(number)
+		}
+		program = strings.Replace(program, fmt.Sprint(numbers), "["+strings.Join(literals, ",")+"]", 1)
+		return elementaryWordSolution{worked: worked, value: answer, knowledgePoint: "数的组合与倍数关系", program: program}, true
 	}
 
 	return elementaryWordSolution{}, false
@@ -248,7 +257,7 @@ func solveTotalFractionCountProblem(problem string) (elementaryWordSolution, boo
 	worked := fmt.Sprintf("%s占总数的 %s/%s，就是把 %s %s平均分成 %s 份，取其中 %s 份。\n%s÷%s×%s = %s %s\n\n答案：%s %s",
 		field("part"), field("numerator"), field("denominator"), field("total"), unit,
 		field("denominator"), field("numerator"), field("total"), field("denominator"), field("numerator"), answer, unit, answer, unit)
-	return elementaryWordSolution{worked: worked, value: answer, unit: unit, knowledgePoint: "分数乘法"}, true
+	return elementaryWordSolution{worked: worked, value: answer, unit: unit, knowledgePoint: "分数乘法", program: wordProgram([]string{field("total") + "/" + field("denominator") + "*" + field("numerator")}, []string{unit})}, true
 }
 
 // 只让完整直接式或两步份数式进入本地批改；数值成立但与题干无关的式子仍由 grader 判断。
@@ -424,7 +433,7 @@ func solveQuantityPerItemProblem(problem string) (elementaryWordSolution, bool) 
 		field("count"), field("measure"), field("item"), field("count"),
 		field("numerator"), field("denominator"), field("count"), field("numerator"), field("count"), field("denominator"),
 		product.String(), denominator.Num().String(), answer, targetUnit, answer, targetUnit)
-	return elementaryWordSolution{worked: worked, value: answer, unit: targetUnit, knowledgePoint: "分数乘整数"}, true
+	return elementaryWordSolution{worked: worked, value: answer, unit: targetUnit, knowledgePoint: "分数乘整数", program: wordProgram([]string{"(" + field("numerator") + "/" + field("denominator") + ")*" + field("count")}, []string{targetUnit})}, true
 }
 
 func compactElementaryProblem(problem string) string {

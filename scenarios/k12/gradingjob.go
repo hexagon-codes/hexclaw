@@ -57,7 +57,11 @@ const GradingAnchorTimeoutSeconds = 60
 const GradingMaxStageAttempts = 3
 
 // GradingModelSnapshot 实际模型路由快照（§5.4 model_snapshot：provider/model/capability/timeout/fallback）。
+const MathExecutionContractProgramFirst = "program-first-v1"
+const MathExecutionContractLegacy = "legacy"
+
 type GradingModelSnapshot struct {
+	MathExecutionContract string `json:"math_execution_contract,omitempty"`
 	// ParentInstructions 只用于家长表达，不注入识别、求解和评分请求。
 	ParentInstructions config.AgentInstructionsSnapshot `json:"parent_instructions,omitzero"`
 	Provider           string                           `json:"provider"`
@@ -378,6 +382,9 @@ func validateGradingJobFields(fieldsJSON string) error {
 
 // NewGradingJobRecord 从领域字段构造一条批改任务记录（初始 queued）。
 func NewGradingJobRecord(agentName, sourceSession string, f GradingJobFields) (*records.AgentRecord, error) {
+	if f.ModelSnapshot.MathExecutionContract == "" {
+		f.ModelSnapshot.MathExecutionContract = MathExecutionContractProgramFirst
+	}
 	if f.ConfirmationState == "" {
 		f.ConfirmationState = GradingConfirmationPending
 	}

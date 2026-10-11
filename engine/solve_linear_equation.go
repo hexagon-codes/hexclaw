@@ -182,16 +182,17 @@ func splitLinearEquation(problem string) (left, right string, ok bool) {
 }
 
 type linearForm struct {
-	a, b   *big.Rat // ax+b
-	hasVar bool     // 语法上曾含 x；不能只看化简后的 a 是否为 0。
+	a, b    *big.Rat // ax+b
+	hasVar  bool     // 语法上曾含 x；不能只看化简后的 a 是否为 0。
+	program string   // 保留解析树的原数量关系，供真实脚本代回。
 }
 
 func linearConstant(v *big.Rat) linearForm {
-	return linearForm{a: new(big.Rat), b: new(big.Rat).Set(v)}
+	return linearForm{a: new(big.Rat), b: new(big.Rat).Set(v), program: fmt.Sprintf("F(%q)", v.RatString())}
 }
 
 func linearVariable() linearForm {
-	return linearForm{a: big.NewRat(1, 1), b: new(big.Rat), hasVar: true}
+	return linearForm{a: big.NewRat(1, 1), b: new(big.Rat), hasVar: true, program: "x"}
 }
 
 func addLinear(left, right linearForm, subtract bool) linearForm {
@@ -203,14 +204,18 @@ func addLinear(left, right linearForm, subtract bool) linearForm {
 		a.Add(left.a, right.a)
 		b.Add(left.b, right.b)
 	}
-	return linearForm{a: a, b: b, hasVar: left.hasVar || right.hasVar}
+	op := "+"
+	if subtract {
+		op = "-"
+	}
+	return linearForm{a: a, b: b, hasVar: left.hasVar || right.hasVar, program: "(" + left.program + op + right.program + ")"}
 }
 
 func multiplyLinear(left, right linearForm) (linearForm, bool) {
 	if left.hasVar && right.hasVar {
 		return linearForm{}, false
 	}
-	result := linearForm{a: new(big.Rat), b: new(big.Rat), hasVar: left.hasVar || right.hasVar}
+	result := linearForm{a: new(big.Rat), b: new(big.Rat), hasVar: left.hasVar || right.hasVar, program: "(" + left.program + "*" + right.program + ")"}
 	switch {
 	case left.hasVar:
 		result.a.Mul(left.a, right.b)
@@ -229,17 +234,19 @@ func divideLinear(numerator, denominator linearForm) (linearForm, bool) {
 		return linearForm{}, false
 	}
 	return linearForm{
-		a:      new(big.Rat).Quo(numerator.a, denominator.b),
-		b:      new(big.Rat).Quo(numerator.b, denominator.b),
-		hasVar: numerator.hasVar,
+		a:       new(big.Rat).Quo(numerator.a, denominator.b),
+		b:       new(big.Rat).Quo(numerator.b, denominator.b),
+		hasVar:  numerator.hasVar,
+		program: "(" + numerator.program + "/" + denominator.program + ")",
 	}, true
 }
 
 func negateLinear(value linearForm) linearForm {
 	return linearForm{
-		a:      new(big.Rat).Neg(value.a),
-		b:      new(big.Rat).Neg(value.b),
-		hasVar: value.hasVar,
+		a:       new(big.Rat).Neg(value.a),
+		b:       new(big.Rat).Neg(value.b),
+		hasVar:  value.hasVar,
+		program: "(-" + value.program + ")",
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
+	"github.com/hexagon-codes/hexclaw/skill"
 )
 
 // 本文件是 GradingOrchestrator 的单机运行时扩展（架构设计 §6.15）：
@@ -1654,24 +1655,25 @@ func joinOCRRiskReasons(reasons []OCRRiskReason) string {
 
 // gradingRunFile run.json 结构（原图独立存 image.bin，避免每次改写都重写大字节）。
 type gradingRunFile struct {
-	AgentName                  string                     `json:"agent_name"`
-	TextOnly                   bool                       `json:"text_only,omitempty"`
-	Subject                    string                     `json:"subject,omitempty"`
-	Grade                      string                     `json:"grade,omitempty"`
-	SourceSession              string                     `json:"source_session,omitempty"`
-	SourcePageAssetID          string                     `json:"source_page_asset_id,omitempty"`
-	TaskIntent                 PhotoTaskIntent            `json:"task_intent,omitempty"`
-	InitialReadMode            string                     `json:"initial_read_mode,omitempty"`
-	SolveOutputVersion         string                     `json:"solve_output_version,omitempty"`
-	ParentTeachingContract     string                     `json:"parent_teaching_contract,omitempty"`
-	SourceUncertaintyFinalized bool                       `json:"source_uncertainty_finalized,omitempty"`
-	PracticeReferences         []PracticeGradingReference `json:"practice_references,omitempty"`
-	PracticePaperSize          int                        `json:"practice_paper_size,omitempty"`
-	Questions                  []RecognizedQuestion       `json:"questions,omitempty"`
-	Anchored                   []RecognizedQuestion       `json:"anchored,omitempty"`
-	AnchorFailed               bool                       `json:"anchor_failed,omitempty"`
-	RenderFailure              string                     `json:"render_failure,omitempty"`
-	Result                     *PhotoGradeResult          `json:"result,omitempty"`
+	AgentName                   string                     `json:"agent_name"`
+	TextOnly                    bool                       `json:"text_only,omitempty"`
+	Subject                     string                     `json:"subject,omitempty"`
+	Grade                       string                     `json:"grade,omitempty"`
+	SourceSession               string                     `json:"source_session,omitempty"`
+	SourcePageAssetID           string                     `json:"source_page_asset_id,omitempty"`
+	TaskIntent                  PhotoTaskIntent            `json:"task_intent,omitempty"`
+	InitialReadMode             string                     `json:"initial_read_mode,omitempty"`
+	SolveOutputVersion          string                     `json:"solve_output_version,omitempty"`
+	ParentTeachingContract      string                     `json:"parent_teaching_contract,omitempty"`
+	ParentTeachingSkillSnapshot []skill.ContextReceipt     `json:"parent_teaching_skill_snapshot,omitempty"`
+	SourceUncertaintyFinalized  bool                       `json:"source_uncertainty_finalized,omitempty"`
+	PracticeReferences          []PracticeGradingReference `json:"practice_references,omitempty"`
+	PracticePaperSize           int                        `json:"practice_paper_size,omitempty"`
+	Questions                   []RecognizedQuestion       `json:"questions,omitempty"`
+	Anchored                    []RecognizedQuestion       `json:"anchored,omitempty"`
+	AnchorFailed                bool                       `json:"anchor_failed,omitempty"`
+	RenderFailure               string                     `json:"render_failure,omitempty"`
+	Result                      *PhotoGradeResult          `json:"result,omitempty"`
 }
 
 type gradingRecognitionAuditFile struct {
@@ -1738,8 +1740,9 @@ func (o *GradingOrchestrator) persistRun(jobID string, run *gradingRun) error {
 		TaskIntent:         run.req.TaskIntent,
 		InitialReadMode:    run.req.InitialReadMode,
 		SolveOutputVersion: run.req.SolveOutputVersion, ParentTeachingContract: run.req.ParentTeachingContract,
-		SourceUncertaintyFinalized: run.req.SourceUncertaintyFinalized,
-		PracticeReferences:         run.req.PracticeReferences, PracticePaperSize: run.req.PracticePaperSize,
+		ParentTeachingSkillSnapshot: run.req.ParentTeachingSkillSnapshot,
+		SourceUncertaintyFinalized:  run.req.SourceUncertaintyFinalized,
+		PracticeReferences:          run.req.PracticeReferences, PracticePaperSize: run.req.PracticePaperSize,
 		Questions: run.questions, Anchored: run.anchored, AnchorFailed: run.anchorFailed,
 		RenderFailure: run.renderFailure, Result: run.result,
 	}
@@ -1817,8 +1820,9 @@ func (o *GradingOrchestrator) ensureRun(ctx context.Context, jobID string) (*gra
 			TaskIntent: taskIntent, Image: image,
 			InitialReadMode:    meta.InitialReadMode,
 			SolveOutputVersion: meta.SolveOutputVersion, ParentTeachingContract: meta.ParentTeachingContract,
-			SourceUncertaintyFinalized: meta.SourceUncertaintyFinalized,
-			PracticeReferences:         meta.PracticeReferences, PracticePaperSize: meta.PracticePaperSize,
+			ParentTeachingSkillSnapshot: meta.ParentTeachingSkillSnapshot,
+			SourceUncertaintyFinalized:  meta.SourceUncertaintyFinalized,
+			PracticeReferences:          meta.PracticeReferences, PracticePaperSize: meta.PracticePaperSize,
 		},
 		questions: questions, anchored: meta.Anchored, anchorFailed: meta.AnchorFailed,
 		renderFailure: meta.RenderFailure, result: meta.Result,

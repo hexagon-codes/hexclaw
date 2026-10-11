@@ -276,6 +276,12 @@ func photoResultDTO(res usecase.PhotoGradeResult) map[string]any {
 			Warning: it.Warning, ParentGuide: it.ParentGuide,
 			AnswerSource: it.AnswerSource,
 		}
+		// 教学依据独立投影，公开指南仍只交付既有七项正文。
+		if d.ParentGuide != nil {
+			guide := *d.ParentGuide
+			guide.SkillContextReceipts = nil
+			d.ParentGuide = &guide
+		}
 		switch {
 		case it.Status == usecase.PhotoBlankSolved,
 			it.Status == usecase.PhotoOutOfScope && it.Grade.Solution == "" && it.Solve.OutOfScope:

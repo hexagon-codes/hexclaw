@@ -320,8 +320,17 @@ func (o *GradingOrchestrator) StartPhotoGradingJob(ctx context.Context, in Start
 		in.Photo.InitialReadMode = ""
 		in.Photo.SolveOutputVersion = ""
 		in.Photo.ParentTeachingContract = ""
+		in.Photo.ParentTeachingSkillSnapshot = nil
 		if in.Photo.TaskIntent == PhotoTaskBlankWorksheet {
-			if freezer, ok := o.deps.Solver.(SolveTeachingContractFreezer); ok {
+			if freezer, ok := o.deps.Solver.(SolveTeachingContextFreezer); ok {
+				contract, prepared, freezeErr := freezer.FreezeSolveTeachingContext(ctx, in.Photo.Subject, in.Photo.Grade)
+				if freezeErr != nil {
+					return GradingJobView{}, false, fmt.Errorf("freeze solve teaching context: %w", freezeErr)
+				}
+				in.Photo.SolveOutputVersion = SolveOutputWithParentGuideV1
+				in.Photo.ParentTeachingContract = contract
+				in.Photo.ParentTeachingSkillSnapshot = prepared
+			} else if freezer, ok := o.deps.Solver.(SolveTeachingContractFreezer); ok {
 				contract, freezeErr := freezer.FreezeSolveTeachingContract(ctx, in.Photo.Subject, in.Photo.Grade)
 				if freezeErr != nil {
 					return GradingJobView{}, false, fmt.Errorf("freeze solve teaching contract: %w", freezeErr)

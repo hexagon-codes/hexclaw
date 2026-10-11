@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
+	"github.com/hexagon-codes/hexclaw/skill"
 )
 
 // PhotoMode 是整页图片的单一分流结果：有任一真实作答就是批改卷；整页无作答才是空白解题卷。
@@ -69,15 +70,16 @@ const (
 )
 
 type PhotoGradeRequest struct {
-	AgentName              string
-	Subject                string
-	Grade                  string
-	SourceSession          string
-	SourcePageAssetID      string
-	Image                  []byte
-	InitialReadMode        string `json:"initial_read_mode,omitempty"`
-	SolveOutputVersion     string `json:"solve_output_version,omitempty"`
-	ParentTeachingContract string `json:"parent_teaching_contract,omitempty"`
+	AgentName                   string
+	Subject                     string
+	Grade                       string
+	SourceSession               string
+	SourcePageAssetID           string
+	Image                       []byte
+	InitialReadMode             string                 `json:"initial_read_mode,omitempty"`
+	SolveOutputVersion          string                 `json:"solve_output_version,omitempty"`
+	ParentTeachingContract      string                 `json:"parent_teaching_contract,omitempty"`
+	ParentTeachingSkillSnapshot []skill.ContextReceipt `json:"parent_teaching_skill_snapshot,omitempty"`
 	// TaskIntent is frozen by ImageTaskDispatch. Empty preserves the legacy
 	// direct-photo path which infers intent from recognition evidence.
 	TaskIntent PhotoTaskIntent
@@ -462,6 +464,7 @@ func photoItemGradeRequest(req PhotoGradeRequest, q RecognizedQuestion) GradeReq
 		SourceSession: req.SourceSession, Problem: q.Question, StudentAnswer: q.StudentAnswer,
 		KnowledgePoints: photoGradeKnowledgePoints(q), PracticeReference: req.practiceReference,
 		SolveOutputVersion: req.SolveOutputVersion, ParentTeachingContract: req.ParentTeachingContract,
+		ParentTeachingSkillSnapshot: req.ParentTeachingSkillSnapshot,
 	}
 	// 可读投影可能把上下分式写成斜杠；只在完整作答一致时保留原分式作为计算输入，
 	// 避免将除以分数误解为连续除法。识读、展示和持久身份仍使用原字段。

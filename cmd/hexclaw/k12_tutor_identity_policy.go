@@ -90,8 +90,24 @@ func (p *k12TutorIdentityPolicy) ProcessDingtalkFollowup(ctx context.Context, ms
 func (p *k12TutorIdentityPolicy) CompileTerminalDirective(
 	ctx context.Context,
 	input engine.AgentSystemPromptPolicyInput,
-) (engine.AgentSystemPromptDirective, error) {
-	directive, err := p.compileIdentity(ctx, input)
+) (directive engine.AgentSystemPromptDirective, err error) {
+	defer func() {
+		if err != nil || directive.Content == "" || p.followup == nil {
+			return
+		}
+		constraint, scopeErr := p.frozenMathConstraint(ctx, input.Agent)
+		if scopeErr != nil {
+			directive, err = engine.AgentSystemPromptDirective{}, scopeErr
+			return
+		}
+		// 最终指令追加完毕后统一固定课程依据，缓存与本轮程序执行使用同一版本。
+		directive.FrozenMathConstraint = constraint
+		if constraint != "" {
+			sum := sha256.Sum256([]byte(directive.Content + "\x00" + constraint))
+			directive.Key = k12.TutorIdentityPromptContractVersion + ":" + hex.EncodeToString(sum[:])
+		}
+	}()
+	directive, err = p.compileIdentity(ctx, input)
 	if err != nil || directive.Content == "" || p.followup == nil {
 		return directive, err
 	}
@@ -185,6 +201,22 @@ func (p *k12TutorIdentityPolicy) CompileTerminalDirective(
 		})
 	}
 	return directive, nil
+}
+
+// 当前课标只提供人教数学；其他教材与缺失档案保留原有解题路径。
+func (p *k12TutorIdentityPolicy) frozenMathConstraint(ctx context.Context, agent agentrouter.AgentConfig) (string, error) {
+	if agent.Metadata[k12.MetaKeyScenario] != k12TutorScenario || p.followup == nil || p.followup.Constraint == nil {
+		return "", nil
+	}
+	profile := k12.ProfileFromMeta(agent.Metadata)
+	if !k12.ValidProfileGradeTerm(profile.GradeTerm) || profile.SubjectTextbooks.Math != "人教版" {
+		return "", nil
+	}
+	allowed, err := p.followup.Constraint.Allowed(ctx, profile.GradeTerm)
+	if err != nil {
+		return "", fmt.Errorf("K12 math curriculum is unavailable: %w", err)
+	}
+	return strings.Join(allowed, "、"), nil
 }
 
 func (p *k12TutorIdentityPolicy) compileIdentity(

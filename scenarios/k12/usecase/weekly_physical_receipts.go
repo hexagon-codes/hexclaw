@@ -15,6 +15,7 @@ import (
 // weeklyPhysicalReceipt 保存一次物理调用的完整返回；汇总解析不覆盖原始证据。
 type weeklyPhysicalReceipt struct {
 	Operation         k12.GradingItemOperation `json:"operation"`
+	ExecutionKind     k12.GradingExecutionKind `json:"execution_kind,omitempty"`
 	RequestDigest     string                   `json:"request_digest"`
 	Status            string                   `json:"status"`
 	Payload           string                   `json:"payload,omitempty"`
@@ -87,7 +88,7 @@ func (e *weeklyPhysicalExecutor) ExecuteGradingPhysicalCall(ctx context.Context,
 	if e.replayOnly {
 		return fail(fmt.Errorf("weekly physical replay request does not match saved receipt"))
 	}
-	receipt := weeklyPhysicalReceipt{Operation: spec.Operation, RequestDigest: spec.RequestDigest, Status: "sent"}
+	receipt := weeklyPhysicalReceipt{Operation: spec.Operation, ExecutionKind: spec.ExecutionKind, RequestDigest: spec.RequestDigest, Status: "sent"}
 	e.call.PhysicalCalls = append(e.call.PhysicalCalls, receipt)
 	index := len(e.call.PhysicalCalls) - 1
 	if err := e.save(); err != nil {
@@ -97,7 +98,8 @@ func (e *weeklyPhysicalExecutor) ExecuteGradingPhysicalCall(ctx context.Context,
 	receipt.Payload = payload
 	if err != nil {
 		receipt.Status, receipt.Error = "failed", err.Error()
-		if !errors.Is(err, egress.ErrProviderNotSent) && sentProviderOutcomeUnknown(err, ctx.Err()) {
+		localKnownFailure := spec.ExecutionKind == k12.GradingExecutionLocalDeterministic && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
+		if !localKnownFailure && !errors.Is(err, egress.ErrProviderNotSent) && sentProviderOutcomeUnknown(err, ctx.Err()) {
 			receipt.Status = "outcome_unknown"
 		}
 	} else if !json.Valid([]byte(payload)) {

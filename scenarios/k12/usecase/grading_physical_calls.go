@@ -27,6 +27,7 @@ var (
 type GradingPhysicalCallSpec struct {
 	Operation     k12.GradingItemOperation
 	RequestDigest string
+	ExecutionKind k12.GradingExecutionKind `json:"execution_kind,omitempty"`
 	// KnownExecutionFailure 由适配器识别同输入的明确失败执行回执；不用于一般格式或能力校验。
 	KnownExecutionFailure func(string) error `json:"-"`
 }
@@ -34,6 +35,31 @@ type GradingPhysicalCallSpec struct {
 type GradingPhysicalCallResult struct {
 	Payload      string
 	InvocationID string
+}
+
+// ExecuteGradingProgramCall 复用当前题目的本地执行账本，不建立 Provider 调用或计费回执。
+func ExecuteGradingProgramCall(ctx context.Context, spec GradingPhysicalCallSpec, run func(context.Context) (string, error)) (GradingPhysicalCallResult, error) {
+	if executor, ok := ctx.Value(gradingPhysicalCallContextKey{}).(*durableGradingPhysicalCallExecutor); ok {
+		payload, invocationID, err := executeGradingItemOperationWithKind(ctx, executor.o, executor.job, executor.q,
+			spec.Operation, k12.GradingExecutionLocalDeterministic,
+			struct {
+				ProgramDigest string `json:"program_digest"`
+			}{spec.RequestDigest}, run)
+		// 成功后仍由原求解主链保存完整本地 solve 回执，供资产／讲法引用；程序行只保存执行证据。
+		if err != nil {
+			executor.remember(spec.Operation, invocationID)
+		}
+		return GradingPhysicalCallResult{Payload: payload, InvocationID: invocationID}, err
+	}
+	if executor, ok := ctx.Value(gradingPhysicalCallContextKey{}).(*weeklyPhysicalExecutor); ok {
+		spec.ExecutionKind = k12.GradingExecutionLocalDeterministic
+		return executor.ExecuteGradingPhysicalCall(ctx, spec, run)
+	}
+	if HasGradingPhysicalCallExecutor(ctx) {
+		return GradingPhysicalCallResult{}, fmt.Errorf("grading program ledger is unavailable")
+	}
+	payload, err := run(ctx)
+	return GradingPhysicalCallResult{Payload: payload}, err
 }
 
 // GradingPhysicalCallExecutor is the shared durable boundary that authorizes
@@ -71,6 +97,17 @@ func HasGradingPhysicalCallExecutor(ctx context.Context) bool {
 	}
 	executor, ok := ctx.Value(gradingPhysicalCallContextKey{}).(GradingPhysicalCallExecutor)
 	return ok && executor != nil
+}
+
+// GradingProgramExecutionEnabled 不给旧任务补写当前算法合同。
+func GradingProgramExecutionEnabled(ctx context.Context) bool {
+	if executor, ok := ctx.Value(gradingPhysicalCallContextKey{}).(*durableGradingPhysicalCallExecutor); ok {
+		return executor.job.Fields.ModelSnapshot.MathExecutionContract == k12.MathExecutionContractProgramFirst
+	}
+	if snapshot, ok := k12.GradingModelSnapshotFromContext(ctx); ok {
+		return snapshot.MathExecutionContract == k12.MathExecutionContractProgramFirst
+	}
+	return !GradingPhysicalCallsReplayOnly(ctx)
 }
 
 const gradingGroundedPhysicalSchema = "k12_grading_grounded_physical_v1"

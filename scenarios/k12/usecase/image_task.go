@@ -21,6 +21,7 @@ import (
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/assetstore"
 	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
+	"github.com/hexagon-codes/hexclaw/skill"
 )
 
 // ImageTaskClassificationInput keeps image evidence mandatory. MessageIntent
@@ -236,6 +237,7 @@ type ImageTaskIMCompletedHomeworkRoutingGate interface {
 }
 
 type ImageTaskResult struct {
+	SkillContextReceipts      []skill.ContextReceipt `json:"skill_context_receipts,omitempty"`
 	Kind                      string
 	Dispatch                  k12.ImageTaskDispatch
 	SourceAttachments         []ImageTaskSourceAttachmentReceipt
@@ -681,7 +683,12 @@ func sameImageTaskRouteRequest(
 }
 
 func gradingSnapshotFromImageRoute(route k12.ImageTaskRouteSnapshot) k12.GradingModelSnapshot {
+	contract := route.MathExecutionContract
+	if contract == "" {
+		contract = k12.MathExecutionContractLegacy
+	}
 	snapshot := k12.GradingModelSnapshot{
+		MathExecutionContract:    contract,
 		Provider:                 route.Provider,
 		Model:                    route.Model,
 		Route:                    route.Route,
@@ -2572,12 +2579,36 @@ func (c *ImageTaskCoordinator) Result(
 		}
 		result.Kind = string(view.Dispatch.TaskIntent)
 		result.Photo = &photo
+		result.SkillContextReceipts = photoSkillContextReceipts(photo)
 		if err := c.registerTutorResult(ctx, result, assessments); err != nil {
 			// 关联可在下一次结果读取时补齐，不能因派生记录失败丢失完整批改产物。
 			slog.Warn("K12 tutor context registration failed", "dispatch_id", dispatchID, "error", err)
 		}
 	}
 	return result, nil
+}
+
+func photoSkillContextReceipts(photo PhotoGradeResult) []skill.ContextReceipt {
+	var receipts []skill.ContextReceipt
+	seen := make(map[string]bool)
+	for _, item := range photo.Items {
+		if item.ParentGuide == nil || (item.Status != PhotoBlankSolved && item.Status != PhotoWrong && item.Status != PhotoCorrectWithProcessIssue) {
+			continue
+		}
+		itemReceipts := item.ParentGuide.SkillContextReceipts
+		if item.Solve.Generation != nil {
+			itemReceipts = append(append([]skill.ContextReceipt(nil), itemReceipts...), item.Solve.Generation.SkillContextReceipts...)
+		}
+		for _, receipt := range itemReceipts {
+			identity := receipt.Name + "\x00" + receipt.Version + "\x00" + receipt.ContentDigest
+			if receipt.Status != "loaded" || receipt.Name == "" || receipt.Version == "" || receipt.ContentDigest == "" || seen[identity] {
+				continue
+			}
+			seen[identity] = true
+			receipts = append(receipts, receipt)
+		}
+	}
+	return receipts
 }
 
 func restoreFinalPhotoGeometry(

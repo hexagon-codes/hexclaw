@@ -31,6 +31,8 @@ type AgentSystemPromptPolicyInput struct {
 type AgentSystemPromptDirective struct {
 	Key     string
 	Content string
+	// FrozenMathConstraint 仅由场景按本轮注册档案编译，不读取客户端声明或模型工具参数。
+	FrozenMathConstraint string
 	// KnowledgeHits 只包含本次指令实际注入的来源，与普通和流式回复共用采用记录。
 	KnowledgeHits []knowledge.SearchHit
 }
@@ -57,9 +59,10 @@ func (e *ReActEngine) getAgentSystemPromptPolicy() AgentSystemPromptPolicy {
 // prepareAgentSystemPromptPolicy resolves the registered Agent after routing,
 // compiles its terminal directive and overwrites the private request metadata.
 // Client-supplied values under the private keys are always discarded.
-func (e *ReActEngine) prepareAgentSystemPromptPolicy(ctx context.Context, msg *adapter.Message) error {
+func (e *ReActEngine) prepareAgentSystemPromptPolicy(ctx context.Context, msg *adapter.Message) (context.Context, error) {
+	ctx = withSolveFrozenMathConstraint(ctx, "")
 	if msg == nil {
-		return nil
+		return ctx, nil
 	}
 	ensureMessageMetadata(msg)
 	delete(msg.Metadata, metadataAgentSystemPromptPolicyKey)
@@ -67,27 +70,28 @@ func (e *ReActEngine) prepareAgentSystemPromptPolicy(ctx context.Context, msg *a
 
 	policy := e.getAgentSystemPromptPolicy()
 	if policy == nil {
-		return nil
+		return ctx, nil
 	}
 	cfg, ok := e.agentConfigForSystemPromptPolicy(msg.Metadata)
 	if !ok {
-		return nil
+		return ctx, nil
 	}
 	directive, err := policy.CompileTerminalDirective(ctx, AgentSystemPromptPolicyInput{
 		Agent: *cfg, UserQuery: msg.Content, Message: *msg,
 		KnowledgeRetrievalDisabled: msg.Metadata["knowledge"] == "off" || explicitlyDeclinesKnowledgeRetrieval(msg.Content),
 	})
 	if err != nil {
-		return fmt.Errorf("agent %q system prompt policy: %w", cfg.Name, err)
+		return ctx, fmt.Errorf("agent %q system prompt policy: %w", cfg.Name, err)
 	}
 	directive.Key = strings.TrimSpace(directive.Key)
 	directive.Content = strings.TrimSpace(directive.Content)
 	if directive.Content == "" {
-		return nil
+		return ctx, nil
 	}
 	if directive.Key == "" || strings.ContainsAny(directive.Key, "\r\n") {
-		return fmt.Errorf("agent %q system prompt policy 返回了非法 key", cfg.Name)
+		return ctx, fmt.Errorf("agent %q system prompt policy 返回了非法 key", cfg.Name)
 	}
+	ctx = withSolveFrozenMathConstraint(ctx, directive.FrozenMathConstraint)
 	msg.Metadata[metadataAgentSystemPromptPolicyKey] = directive.Key
 	msg.Metadata[metadataAgentSystemPromptPolicyDirective] = directive.Content
 	// 显式角色的实际注册配置与工具身份保持一致，不能只注入人设而遗漏路由归属。
@@ -97,7 +101,7 @@ func (e *ReActEngine) prepareAgentSystemPromptPolicy(ctx context.Context, msg *a
 	if len(directive.KnowledgeHits) > 0 {
 		recordKnowledgeHits(ctx, directive.KnowledgeHits)
 	}
-	return nil
+	return ctx, nil
 }
 
 func (e *ReActEngine) agentConfigForSystemPromptPolicy(metadata map[string]string) (*agentrouter.AgentConfig, bool) {

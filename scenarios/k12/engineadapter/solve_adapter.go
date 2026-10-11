@@ -171,7 +171,11 @@ func (a *SolveAdapter) withGradingPhysicalCallInterceptor(ctx context.Context) c
 					return result.ExecutionReceipt.KnownExecutionFailure(hex.EncodeToString(inputDigest[:]))
 				}
 			}
-			physical, err := usecase.ExecuteGradingPhysicalCall(
+			execute := usecase.ExecuteGradingPhysicalCall
+			if spec.ProgramOnly {
+				execute = usecase.ExecuteGradingProgramCall
+			}
+			physical, err := execute(
 				callCtx,
 				usecase.GradingPhysicalCallSpec{
 					Operation: operation, RequestDigest: hex.EncodeToString(digestRaw[:]),
@@ -210,6 +214,7 @@ func (a *SolveAdapter) SolveSubject(ctx context.Context, subject, problem, grade
 	// numeric_exec 强证据；复杂题仍走 solver + verifier。只有真正由调用方显式指定校验力度时，
 	// engine 才禁用快速路径。
 	problem = gradingProblemWithGrounding(ctx, problem)
+	ctx = engine.WithSolveProgramExecution(ctx, usecase.GradingProgramExecutionEnabled(ctx))
 	args := map[string]any{"problem": problem}
 	if subject != "" {
 		args["subject"] = subject
@@ -237,11 +242,18 @@ func (a *SolveAdapter) SolveSubject(ctx context.Context, subject, problem, grade
 	if res == nil {
 		return usecase.SolveResult{}, fmt.Errorf("solve adapter: empty solve result")
 	}
+	generation := solveGenerationFromMetadata(version, res.Metadata)
+	if generation != nil && generation.ParentGuideCandidate != nil {
+		generation.SkillContextReceipts = usecase.SolveTeachingSkillSnapshot(ctx)
+		for i := range generation.SkillContextReceipts {
+			generation.SkillContextReceipts[i].Status = "loaded"
+		}
+	}
 	return usecase.SolveResult{
 		Solution:     normalizeSolveMarkdown(stripReports(res.Content)),
 		Evidence:     evidenceFromMeta(res.Metadata),
 		OutOfScopeKP: res.Metadata["solve_out_of_scope_kp"],
-		Generation:   solveGenerationFromMetadata(version, res.Metadata),
+		Generation:   generation,
 		ProblemIssue: solveProblemIssueFromMetadata(res.Metadata),
 	}, nil
 }
@@ -277,7 +289,7 @@ func solveGenerationFromMetadata(version string, metadata map[string]string) *us
 		var guide usecase.ParentTeachingGuide
 		decoder := json.NewDecoder(strings.NewReader(raw))
 		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&guide); err == nil && decoder.Decode(&struct{}{}) == io.EOF {
+		if err := decoder.Decode(&guide); err == nil && decoder.Decode(&struct{}{}) == io.EOF && !hasModelTeachingReceiptField(raw) {
 			generation.ParentGuideCandidate = &guide
 		} else {
 			generation.GuideAudit = "INVALID"

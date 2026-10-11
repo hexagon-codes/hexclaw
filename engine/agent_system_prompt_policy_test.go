@@ -53,7 +53,7 @@ func TestAgentSystemPromptPolicy_TerminalLastExactlyOnceAfterPersona(t *testing.
 			"role": agentName, "skills": "温和辅导", "agent_mode": "deep",
 		},
 	}
-	if err := eng.prepareAgentSystemPromptPolicy(context.Background(), msg); err != nil {
+	if _, err := eng.prepareAgentSystemPromptPolicy(context.Background(), msg); err != nil {
 		t.Fatalf("prepare policy: %v", err)
 	}
 	messages := eng.buildStreamMessages(
@@ -74,6 +74,44 @@ func TestAgentSystemPromptPolicy_TerminalLastExactlyOnceAfterPersona(t *testing.
 	}
 	if !strings.HasSuffix(strings.TrimSpace(system), terminal) {
 		t.Fatalf("terminal directive 必须是最终 system prompt 的最后内容：%q", system)
+	}
+}
+
+func TestAgentSystemPromptPolicyFreezesOnlyCurrentRegisteredMathScope(t *testing.T) {
+	eng, _ := newEngineForSkillAudit(t)
+	dispatcher := agentrouter.New()
+	const agentName = "registered-math-child"
+	if err := dispatcher.Register(agentrouter.AgentConfig{Name: agentName}); err != nil {
+		t.Fatal(err)
+	}
+	eng.SetAgentRouter(dispatcher)
+	const frozen = "小数乘法、解方程"
+	eng.SetAgentSystemPromptPolicy(stubAgentSystemPromptPolicy{directive: AgentSystemPromptDirective{
+		Key: "current-math-scope", Content: "current registered policy", FrozenMathConstraint: frozen,
+	}})
+	parent := withSolveFrozenMathConstraint(t.Context(), "old inherited scope")
+	msg := &adapter.Message{Content: "解方程：0.25x+0.5x=18", Metadata: map[string]string{
+		"role": agentName, "frozen_math_constraint": "untrusted scope", metadataAgentSystemPromptPolicyKey: "untrusted policy",
+	}}
+	ctx, err := eng.prepareAgentSystemPromptPolicy(parent, msg)
+	if err != nil || solveFrozenMathConstraint(ctx) != frozen {
+		t.Fatalf("current registered scope not frozen: scope=%q err=%v", solveFrozenMathConstraint(ctx), err)
+	}
+	if solveFrozenMathConstraint(parent) != "old inherited scope" {
+		t.Fatal("request preparation mutated its parent scope")
+	}
+	for _, next := range []*adapter.Message{nil, {Metadata: map[string]string{"role": "missing-agent"}}} {
+		cleared, err := eng.prepareAgentSystemPromptPolicy(ctx, next)
+		if err != nil || solveFrozenMathConstraint(cleared) != "" {
+			t.Fatalf("unregistered request inherited another child's scope: scope=%q err=%v", solveFrozenMathConstraint(cleared), err)
+		}
+	}
+	eng.SetAgentSystemPromptPolicy(stubAgentSystemPromptPolicy{directive: AgentSystemPromptDirective{
+		Key: "invalid\nkey", Content: "invalid policy", FrozenMathConstraint: "invalid scope",
+	}})
+	cleared, err := eng.prepareAgentSystemPromptPolicy(ctx, msg)
+	if err == nil || solveFrozenMathConstraint(cleared) != "" {
+		t.Fatalf("invalid policy retained trusted scope: scope=%q err=%v", solveFrozenMathConstraint(cleared), err)
 	}
 }
 
@@ -108,4 +146,3 @@ func TestAgentSystemPromptPolicy_ErrorStopsBeforeProviderCall(t *testing.T) {
 		t.Fatalf("策略失败后 Provider 调用数必须为 0，实际 %d", got)
 	}
 }
-

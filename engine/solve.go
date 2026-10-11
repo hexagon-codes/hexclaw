@@ -33,11 +33,16 @@ import (
 type SolveSkill struct {
 	executeFunc SubAgentExecFunc
 	registry    *SubAgentRegistry
+	programFunc SubAgentExecFunc
 }
 
 // NewSolveSkill 创建 solve 工具。
-func NewSolveSkill(execFn SubAgentExecFunc, reg *SubAgentRegistry) *SolveSkill {
-	return &SolveSkill{executeFunc: execFn, registry: reg}
+func NewSolveSkill(execFn SubAgentExecFunc, reg *SubAgentRegistry, options ...SolveSkillOption) *SolveSkill {
+	s := &SolveSkill{executeFunc: execFn, registry: reg}
+	for _, option := range options {
+		option(s)
+	}
+	return s
 }
 
 func (*SolveSkill) SupportsSubAgentCallInterceptor() bool { return true }
@@ -183,6 +188,41 @@ func (o *SolveSkill) Execute(ctx context.Context, args map[string]any) (*skill.R
 	// 即使题目只是一步算术，也不能被确定性快速路径绕过。
 	auto := !hasArg(args, "method_diversity") && !hasArg(args, "self_consistency")
 	deterministicProblem := deterministicProblemStem(problem)
+	if o.programFunc != nil && solveProgramEnabled(ctx) && !methodDiversity && samples == 1 {
+		plan, ok, frozen := compileFrozenSolveProgram(ctx, deterministicProblem)
+		if !frozen {
+			plan, ok = compileSolveProgram(deterministicProblem, constraint)
+		}
+		if !ok && !frozen {
+			original, _ := ctx.Value(solveUserProblemKey{}).(string)
+			if original != "" && strings.HasPrefix(deterministicProblem, original) {
+				// 句号或换行隔开的讲解要求不进入原数学 AST；数值延长不匹配此边界。
+				suffix := strings.TrimLeft(strings.TrimPrefix(deterministicProblem, original), " \t")
+				if strings.HasPrefix(suffix, "。") || strings.HasPrefix(suffix, "\n") {
+					plan, ok = compileSolveProgram(original, constraint)
+				}
+			}
+		}
+		if ok {
+			computed, err := o.executeSolveProgram(ctx, plan)
+			if err != nil || !gradingMode {
+				return computed, err
+			}
+			graded, err := o.GradeVerified(ctx, problem, computed.Content, studentAnswer)
+			if err != nil {
+				return nil, err
+			}
+			if graded.Metadata == nil {
+				graded.Metadata = map[string]string{}
+			}
+			if graded.Metadata["solve_evidence"] == "numeric_exec" {
+				for _, key := range []string{"solve_primary_digest", "solve_verification_input_digest", "solve_verification_run_id"} {
+					graded.Metadata[key] = computed.Metadata[key]
+				}
+			}
+			return graded, nil
+		}
+	}
 
 	// 纯一步算式走本机精确求值器：这类题不该因云端余额/限流，或本地模型 tools 请求挂起而
 	// 变成“未能解出”。求值器只接受数字、四则运算与括号，拒绝变量/文字/方程；复杂题仍进入
@@ -316,6 +356,9 @@ func (o *SolveSkill) Execute(ctx context.Context, args map[string]any) (*skill.R
 	var sols []solverSolution
 	var solverErrs []error
 	for _, sp := range o.solverSpecs(problem, subject, grade, constraint, methodDiversity, samples) {
+		if o.programFunc != nil && solveProgramEnabled(ctx) {
+			sp.Task = strings.Replace(sp.Task, "涉及计算时可调用 code_exec 写代码精确计算（别口算硬凑）", "涉及数值计算时先建立可检查的数量关系并调用 code_exec 实际计算、代回，再基于执行结果解释，不能口算或把程序文字当已执行结果", 1)
+		}
 		if childCtx.Err() != nil {
 			break
 		}

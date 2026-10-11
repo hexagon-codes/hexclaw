@@ -8,16 +8,18 @@ import (
 	"strings"
 
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
+	"github.com/hexagon-codes/hexclaw/skill"
 )
 
 const SolveOutputWithParentGuideV1 = "solve_with_parent_guide_v1"
 
 // SolveGeneration 保存实际选中解法的教学候选和独立审计，不作为数值验算证据。
 type SolveGeneration struct {
-	OutputVersion        string               `json:"output_version"`
-	ParentGuideCandidate *ParentTeachingGuide `json:"parent_guide_candidate,omitempty"`
-	GuideAudit           string               `json:"guide_audit"`
-	SourceSolutionDigest string               `json:"source_solution_digest"`
+	SkillContextReceipts []skill.ContextReceipt `json:"skill_context_receipts,omitempty"`
+	OutputVersion        string                 `json:"output_version"`
+	ParentGuideCandidate *ParentTeachingGuide   `json:"parent_guide_candidate,omitempty"`
+	GuideAudit           string                 `json:"guide_audit"`
+	SourceSolutionDigest string                 `json:"source_solution_digest"`
 }
 
 // SolveTeachingContractFreezer 只组装教学合同，不调用模型；新建求解任务将其固化到运行时。
@@ -25,15 +27,24 @@ type SolveTeachingContractFreezer interface {
 	FreezeSolveTeachingContract(context.Context, string, string) (string, error)
 }
 
+// SolveTeachingContextFreezer 同次冻结正文与展示快照，准备本身不作为执行依据。
+type SolveTeachingContextFreezer interface {
+	FreezeSolveTeachingContext(context.Context, string, string) (string, []skill.ContextReceipt, error)
+}
+
 type solveTeachingRequestContextKey struct{}
 type solveTeachingRequest struct {
-	version  string
-	contract string
+	version        string
+	contract       string
+	preparedSkills []skill.ContextReceipt
 }
 
 func withSolveTeachingRequest(ctx context.Context, req GradeRequest) context.Context {
 	if req.SolveOutputVersion == "" {
-		return ctx
+		// 旧调用维持原有教学合同继承，但不能继承别的任务新增的展示快照。
+		inherited, _ := ctx.Value(solveTeachingRequestContextKey{}).(solveTeachingRequest)
+		inherited.preparedSkills = nil
+		return context.WithValue(ctx, solveTeachingRequestContextKey{}, inherited)
 	}
 	contract := req.ParentTeachingContract
 	if len(req.KnowledgePoints) != 0 {
@@ -43,8 +54,14 @@ func withSolveTeachingRequest(ctx context.Context, req GradeRequest) context.Con
 		contract += "\nFrozen problem teaching facts: " + string(facts)
 	}
 	return context.WithValue(ctx, solveTeachingRequestContextKey{}, solveTeachingRequest{
-		version: req.SolveOutputVersion, contract: contract,
+		version: req.SolveOutputVersion, contract: contract, preparedSkills: req.ParentTeachingSkillSnapshot,
 	})
+}
+
+// SolveTeachingSkillSnapshot 只返回本任务创建时保存的快照，不查询当前 Skill 目录。
+func SolveTeachingSkillSnapshot(ctx context.Context) []skill.ContextReceipt {
+	request, _ := ctx.Value(solveTeachingRequestContextKey{}).(solveTeachingRequest)
+	return append([]skill.ContextReceipt(nil), request.preparedSkills...)
 }
 
 // SolveTeachingRequest 返回冻结版本和教学合同，供求解适配器透传；旧任务返回空值。

@@ -903,6 +903,9 @@ func (h *handler) getImageTaskResult(w http.ResponseWriter, r *http.Request) {
 		"operation_receipts": result.OperationReceipts,
 		"result":             projection,
 	}
+	if len(result.SkillContextReceipts) > 0 {
+		response["skill_context_receipts"] = result.SkillContextReceipts
+	}
 	if failureKind := publicImageTaskFailureKind(result.Dispatch); failureKind != nil {
 		response["failure_kind"] = *failureKind
 	}

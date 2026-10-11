@@ -10,6 +10,8 @@ import (
 // SubAgentSpec 是一次子 Agent 派生的完整参数，替代原来裸的 (agentName, task)。承载工具继承(2)、
 // 模式/会话(4)、注册表 run id(3)、深度——让 spawn/orchestrate 的派生在一套统一参数上扩展。
 type SubAgentSpec struct {
+	// ProgramOnly 仅由内部编译器构造，不从外部任务取得执行授权。
+	ProgramOnly       bool               `json:"-"`
 	RunID             string             // 本次子 Agent 运行的注册表 id（skill 生成）
 	Agent             string             // 角色名
 	Task              string             // 子任务

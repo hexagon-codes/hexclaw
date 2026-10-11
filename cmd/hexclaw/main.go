@@ -1895,7 +1895,7 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 	}
 	// P0（K12 正确性）：solve = 带 code_exec 独立验证的解题工具。verifier 子 Agent 只许 code_exec、
 	// fresh-context 重算，把"算术幻觉"这一 K12 头号错因用执行 grounding 兜住。
-	solveSkill := engine.NewSolveSkill(agentExecFn, subagentRegistry)
+	solveSkill := engine.NewSolveSkill(agentExecFn, subagentRegistry, engine.WithSolveProgramExecutor(eng.SolveProgramExecutor()))
 	if err := skills.Register(solveSkill); err != nil {
 		logger.Error("注册 SolveSkill 失败", "error", err)
 	}
@@ -2519,17 +2519,25 @@ Set source only when the material explicitly names a work, title, or another rel
 					time.Duration(config.DefaultK12GradingBudget().PhysicalCallCapMillis)*time.Millisecond)
 			}
 			k12ModelSnapshot := func(requested k12.GradingModelSnapshot) (k12.GradingModelSnapshot, error) {
-				return resolveK12GradingModelSnapshotWithCapabilityReceipt(
+				resolved, err := resolveK12GradingModelSnapshotWithCapabilityReceipt(
 					ctx, router, k12ModelCapabilityReceipts, requested, k12AutoVisionProbe,
 				)
+				if err == nil && !requested.HasFrozenCapabilityProbeEvidence() && resolved.MathExecutionContract == "" {
+					resolved.MathExecutionContract = k12.MathExecutionContractProgramFirst
+				}
+				return resolved, err
 			}
 			k12rt.Deps.PracticeGenerationRoute = func(
 				requestCtx context.Context,
 				requested k12.GradingModelSnapshot,
 			) (k12.GradingModelSnapshot, error) {
-				return resolveK12PracticeModelSnapshotWithCapabilityReceipt(
+				resolved, err := resolveK12PracticeModelSnapshotWithCapabilityReceipt(
 					requestCtx, router, k12ModelCapabilityReceipts, requested,
 				)
+				if err == nil && !requested.HasFrozenCapabilityProbeEvidence() && resolved.MathExecutionContract == "" {
+					resolved.MathExecutionContract = k12.MathExecutionContractProgramFirst
+				}
+				return resolved, err
 			}
 			k12UnitSummary := newK12UnitSummaryCoordinator(k12rt.Deps, router)
 			k12UnitSummary.SetBaseContext(ctx)
@@ -2635,7 +2643,8 @@ Set source only when the material explicitly names a work, title, or another rel
 						providerDisplayName = providerConfig.DisplayName
 					}
 					return k12.ImageTaskRouteSnapshot{
-						Provider: resolved.Provider, ProviderDisplayName: providerDisplayName,
+						MathExecutionContract: resolved.MathExecutionContract,
+						Provider:              resolved.Provider, ProviderDisplayName: providerDisplayName,
 						Model: resolved.Model, ModelID: resolved.Model,
 						Route: resolved.Route, Capability: resolved.Capability,
 						ProviderInstanceID:       resolved.ProviderInstanceID,

@@ -14,6 +14,8 @@ import (
 	"github.com/hexagon-codes/hexclaw/engine"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/usecase"
+	"github.com/hexagon-codes/hexclaw/skill"
+	"github.com/hexagon-codes/hexclaw/skill/marketplace"
 )
 
 // ParentTeachingGuideGenerateFunc 根据已验证解生成给家长的完整逐题讲法。
@@ -73,17 +75,23 @@ var _ usecase.SolveTeachingContractFreezer = (*SolveAdapter)(nil)
 
 // FreezeSolveTeachingContract 固化教学 Skill、表达要求和年级，求解时同次生成候选指南。
 func (a *SolveAdapter) FreezeSolveTeachingContract(ctx context.Context, subject, grade string) (string, error) {
+	contract, _, err := a.FreezeSolveTeachingContext(ctx, subject, grade)
+	return contract, err
+}
+
+func (a *SolveAdapter) FreezeSolveTeachingContext(ctx context.Context, subject, grade string) (string, []skill.ContextReceipt, error) {
 	ctx, _ = config.FreezeAgentInstructions(ctx)
 	if strings.TrimSpace(subject) == "" {
 		subject = "数学"
 	}
 	var contract strings.Builder
 	contract.WriteString(config.ParentExpressionInstructions(ctx))
-	contract.WriteString(buildParentTeachingSkillMethodology(subject, a.parentTeachingSkillLoader))
+	methodology, prepared := buildParentTeachingSkillContext(subject, a.parentTeachingSkillLoader)
+	contract.WriteString(methodology)
 	contract.WriteString("\nFrozen subject: " + subject + "\nFrozen grade: " + grade + "\n")
 	contract.WriteString(`Generate the complete parent guide together with this candidate solution. The candidate has not yet been independently verified. Use only the frozen grade/curriculum methods and the supplied teaching Skill. The independent verifier must audit the solution and every mathematical method, example and checking step in the guide.
 parent_guide must contain exactly seven fields: answer (concise final answer explicitly in solution), full_solution_steps (nonempty string array in solution order), grade_level_method (grade-appropriate method), likely_mistakes (nonempty string array specific to this problem), parent_teaching_sequence (nonempty string array of concrete explanation and progressive questions), follow_up_questions (nonempty string array), checking_method (a concrete independent check). Do not invent student answers or grading facts. Do not replace or contradict the candidate solution. The usecase will derive the final full_solution_steps from the independently verified solution.`)
-	return contract.String(), nil
+	return contract.String(), prepared, nil
 }
 
 func (a *SolveAdapter) GenerateParentTeachingGuide(
@@ -109,12 +117,16 @@ func (a *SolveAdapter) GenerateParentTeachingGuide(
 		return usecase.ParentTeachingGuide{}, fmt.Errorf("parent teaching guide: encode exact problem facts: %w", err)
 	}
 	var promptBuilder strings.Builder
+	var prepared []skill.ContextReceipt
 	if req.FrozenTeachingContract != "" {
+		prepared = req.ParentTeachingSkillSnapshot
 		promptBuilder.WriteString(req.FrozenTeachingContract)
 		promptBuilder.WriteString("\n\n——以下是本题冻结事实与输出合同——\n")
 	} else {
 		promptBuilder.WriteString(config.ParentExpressionInstructions(ctx))
-		if methodology := buildParentTeachingSkillMethodology(req.Subject, a.parentTeachingSkillLoader); methodology != "" {
+		methodology, snapshot := buildParentTeachingSkillContext(req.Subject, a.parentTeachingSkillLoader)
+		if methodology != "" {
+			prepared = snapshot
 			promptBuilder.WriteString(methodology)
 			promptBuilder.WriteString("\n\n——以下是本题冻结事实与输出合同——\n")
 		}
@@ -132,7 +144,9 @@ checking_method（字符串，家长可独立执行的检查或反向验算）�
 题目事实：`)
 	promptBuilder.Write(facts)
 	if req.RejectedCandidate != nil {
-		rejected, _ := json.Marshal(req.RejectedCandidate)
+		candidate := *req.RejectedCandidate
+		candidate.SkillContextReceipts = nil
+		rejected, _ := json.Marshal(candidate)
 		promptBuilder.WriteString("\nThe following previous guide failed independent mathematical audit. It is not an authority. Generate a new guide and check every explanation against the verified solution; do not copy its errors:\n")
 		promptBuilder.Write(rejected)
 	}
@@ -142,7 +156,11 @@ checking_method（字符串，家长可独立执行的检查或反向验算）�
 		return usecase.ParentTeachingGuide{}, providerResponseError(err)
 	}
 	var guide usecase.ParentTeachingGuide
-	decoder := json.NewDecoder(strings.NewReader(extractParentTeachingGuideJSON(out)))
+	payload := extractParentTeachingGuideJSON(out)
+	if hasModelTeachingReceiptField(payload) {
+		return usecase.ParentTeachingGuide{}, fmt.Errorf("parent teaching guide: unexpected context receipts: %w", egress.ErrProviderResponseProcessed)
+	}
+	decoder := json.NewDecoder(strings.NewReader(payload))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&guide); err != nil {
 		return usecase.ParentTeachingGuide{}, fmt.Errorf("parent teaching guide: invalid JSON: %v: %w", err, egress.ErrProviderResponseProcessed)
@@ -150,13 +168,29 @@ checking_method（字符串，家长可独立执行的检查或反向验算）�
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		return usecase.ParentTeachingGuide{}, fmt.Errorf("parent teaching guide: unexpected trailing JSON: %w", egress.ErrProviderResponseProcessed)
 	}
+	guide.SkillContextReceipts = append([]skill.ContextReceipt(nil), prepared...)
+	for i := range guide.SkillContextReceipts {
+		guide.SkillContextReceipts[i].Status = "loaded"
+	}
 	return guide, nil
+}
+
+// 面向模型的七字段合同不接受服务端只读快照，即使值为空也不能由模型提供。
+func hasModelTeachingReceiptField(payload string) bool {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal([]byte(payload), &fields) != nil {
+		return false
+	}
+	_, exists := fields["skill_context_receipts"]
+	return exists
 }
 
 func (a *SolveAdapter) AuditParentTeachingGuide(ctx context.Context, req usecase.ParentTeachingGuideAuditRequest) (usecase.ParentTeachingGuideAudit, error) {
 	if a.parentTeachingGuideAudit == nil {
 		return usecase.ParentTeachingGuideAudit{}, fmt.Errorf("parent teaching guide auditor unavailable: %w", egress.ErrProviderNotSent)
 	}
+	guideForAudit := req.Guide
+	guideForAudit.SkillContextReceipts = nil
 	facts, err := json.Marshal(struct {
 		Problem   string `json:"problem"`
 		Candidate struct {
@@ -168,7 +202,7 @@ func (a *SolveAdapter) AuditParentTeachingGuide(ctx context.Context, req usecase
 		SourceDigest string                      `json:"source_digest"`
 		Solution     string                      `json:"solution"`
 		Guide        usecase.ParentTeachingGuide `json:"parent_guide"`
-	}{req.SourceSolutionDigest, req.Request.VerifiedSolution, req.Guide}})
+	}{req.SourceSolutionDigest, req.Request.VerifiedSolution, guideForAudit}})
 	if err != nil {
 		return usecase.ParentTeachingGuideAudit{}, err
 	}
@@ -186,13 +220,19 @@ func (a *SolveAdapter) AuditParentTeachingGuide(ctx context.Context, req usecase
 }
 
 func buildParentTeachingSkillMethodology(subject string, loader SkillContentLoader) string {
+	methodology, _ := buildParentTeachingSkillContext(subject, loader)
+	return methodology
+}
+
+func buildParentTeachingSkillContext(subject string, loader SkillContentLoader) (string, []skill.ContextReceipt) {
 	specs := []parentTeachingSkillSpec{parentTeachingPedagogySkill}
 	if subjectSkill, ok := parentTeachingSubjectSkills[strings.TrimSpace(subject)]; ok {
 		specs = append(specs, subjectSkill)
 	}
 	var b strings.Builder
+	var prepared []skill.ContextReceipt
 	for _, spec := range specs {
-		body, source, ok := resolveParentTeachingSkill(loader, spec)
+		body, source, snapshot, ok := resolveParentTeachingSkillContext(loader, spec)
 		if !ok {
 			continue
 		}
@@ -206,19 +246,26 @@ func buildParentTeachingSkillMethodology(subject string, loader SkillContentLoad
 		b.WriteString(")\n")
 		b.WriteString(body)
 		b.WriteByte('\n')
+		snapshot.Status = "prepared"
+		prepared = append(prepared, snapshot)
 	}
-	return strings.TrimSpace(b.String())
+	return strings.TrimSpace(b.String()), prepared
 }
 
 func resolveParentTeachingSkill(
 	loader SkillContentLoader,
 	spec parentTeachingSkillSpec,
 ) (body, source string, ok bool) {
+	body, source, _, ok = resolveParentTeachingSkillContext(loader, spec)
+	return
+}
+
+func resolveParentTeachingSkillContext(loader SkillContentLoader, spec parentTeachingSkillSpec) (body, source string, snapshot skill.ContextReceipt, ok bool) {
 	if loader != nil {
 		raw, err := loader(spec.name)
 		if err == nil {
 			if diskBody, validateErr := validateDiskWorkFeedbackSkill(raw, spec.anchors); validateErr == nil {
-				return diskBody, "installed", true
+				return diskBody, "installed", marketplace.LoadedContextReceiptFromMarkdown(spec.name, string(raw), diskBody), true
 			} else {
 				slog.Warn("k12 家长讲题：已安装教学 Skill 校验失败，降级内嵌快照", "skill", spec.name, "reason", validateErr.Error())
 			}
@@ -229,19 +276,19 @@ func resolveParentTeachingSkill(
 	raw, err := fs.ReadFile(parentTeachingSkillsFS, spec.file)
 	if err != nil {
 		slog.Warn("k12 家长讲题：内嵌教学 Skill 读取失败，使用既有七字段红线", "skill", spec.name, "err", err)
-		return "", "", false
+		return "", "", skill.ContextReceipt{}, false
 	}
 	body = stripSkillFrontmatter(string(raw))
 	for _, anchor := range spec.anchors {
 		if !strings.Contains(body, anchor) {
 			slog.Warn("k12 家长讲题：内嵌教学 Skill 缺少红线锚点，使用既有七字段红线", "skill", spec.name, "anchor", anchor)
-			return "", "", false
+			return "", "", skill.ContextReceipt{}, false
 		}
 	}
 	if strings.TrimSpace(body) == "" {
-		return "", "", false
+		return "", "", skill.ContextReceipt{}, false
 	}
-	return body, "embedded", true
+	return body, "embedded", marketplace.LoadedContextReceiptFromMarkdown(spec.name, string(raw), body), true
 }
 
 func extractParentTeachingGuideJSON(raw string) string {

@@ -85,6 +85,7 @@ func (e ImageTaskCreativeEntry) Validate() error {
 // writing OCR and work feedback each persist their own value; a retry never
 // re-resolves a mutable default route.
 type ImageTaskRouteSnapshot struct {
+	MathExecutionContract string `json:"math_execution_contract,omitempty"`
 	// ParentInstructions 随反馈调用冻结，识别与分类不消费此字段。
 	ParentInstructions  config.AgentInstructionsSnapshot `json:"parent_instructions,omitzero"`
 	Provider            string                           `json:"provider"`

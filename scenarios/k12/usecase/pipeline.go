@@ -11,6 +11,7 @@ import (
 	"github.com/hexagon-codes/hexclaw/scenario"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
+	"github.com/hexagon-codes/hexclaw/skill"
 )
 
 // FirstReviewInterval 错题首次复习到期间隔（秒）。间隔重排的起点（§5.3.1）。
@@ -186,16 +187,17 @@ func (d Deps) anchorHomeworkGeometry(ctx context.Context, image []byte, question
 
 // GradeRequest 一道题的批改请求（识题后的结构化输入）。
 type GradeRequest struct {
-	AgentName              string
-	Subject                string // 数学/语文/英语/物理/化学；空时由 solver 默认路由
-	Grade                  string // 生效年级
-	SourceSession          string
-	Problem                string
-	StudentAnswer          string
-	KnowledgePoints        []string                  // 识题产出
-	PracticeReference      *PracticeGradingReference `json:"practice_reference,omitempty"`
-	SolveOutputVersion     string                    `json:"solve_output_version,omitempty"`
-	ParentTeachingContract string                    `json:"parent_teaching_contract,omitempty"`
+	AgentName                   string
+	Subject                     string // 数学/语文/英语/物理/化学；空时由 solver 默认路由
+	Grade                       string // 生效年级
+	SourceSession               string
+	Problem                     string
+	StudentAnswer               string
+	KnowledgePoints             []string                  // 识题产出
+	PracticeReference           *PracticeGradingReference `json:"practice_reference,omitempty"`
+	SolveOutputVersion          string                    `json:"solve_output_version,omitempty"`
+	ParentTeachingContract      string                    `json:"parent_teaching_contract,omitempty"`
+	ParentTeachingSkillSnapshot []skill.ContextReceipt    `json:"parent_teaching_skill_snapshot,omitempty"`
 }
 
 // GradeResult 批改闭环结果。

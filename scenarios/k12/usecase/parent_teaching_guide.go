@@ -7,6 +7,7 @@ import (
 	"unicode"
 
 	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/skill"
 )
 
 // ParentTeachingGuide is the fixed seven-item per-question contract for blank
@@ -14,13 +15,14 @@ import (
 // FullSolutionSteps is always derived deterministically from the already-
 // verified solver output before this guide leaves the usecase.
 type ParentTeachingGuide struct {
-	Answer                 string   `json:"answer"`
-	FullSolutionSteps      []string `json:"full_solution_steps"`
-	GradeLevelMethod       string   `json:"grade_level_method"`
-	LikelyMistakes         []string `json:"likely_mistakes"`
-	ParentTeachingSequence []string `json:"parent_teaching_sequence"`
-	FollowUpQuestions      []string `json:"follow_up_questions"`
-	CheckingMethod         string   `json:"checking_method"`
+	SkillContextReceipts   []skill.ContextReceipt `json:"skill_context_receipts,omitempty"`
+	Answer                 string                 `json:"answer"`
+	FullSolutionSteps      []string               `json:"full_solution_steps"`
+	GradeLevelMethod       string                 `json:"grade_level_method"`
+	LikelyMistakes         []string               `json:"likely_mistakes"`
+	ParentTeachingSequence []string               `json:"parent_teaching_sequence"`
+	FollowUpQuestions      []string               `json:"follow_up_questions"`
+	CheckingMethod         string                 `json:"checking_method"`
 }
 
 // ParentTeachingGuideRequest carries one exact recognized problem and its
@@ -28,16 +30,17 @@ type ParentTeachingGuide struct {
 // answer, but the usecase accepts it only when it is anchored in that verified
 // solution and never lets the generator rewrite the full method.
 type ParentTeachingGuideRequest struct {
-	Subject                string
-	Grade                  string
-	Problem                string
-	StudentAnswer          string
-	KnowledgePoints        []string
-	WrongStep              string
-	ErrorCause             string
-	VerifiedSolution       string
-	FrozenTeachingContract string               `json:"frozen_teaching_contract,omitempty"`
-	RejectedCandidate      *ParentTeachingGuide `json:"rejected_candidate,omitempty"`
+	ParentTeachingSkillSnapshot []skill.ContextReceipt `json:"parent_teaching_skill_snapshot,omitempty"`
+	Subject                     string
+	Grade                       string
+	Problem                     string
+	StudentAnswer               string
+	KnowledgePoints             []string
+	WrongStep                   string
+	ErrorCause                  string
+	VerifiedSolution            string
+	FrozenTeachingContract      string               `json:"frozen_teaching_contract,omitempty"`
+	RejectedCandidate           *ParentTeachingGuide `json:"rejected_candidate,omitempty"`
 }
 
 // ParentTeachingGuideGenerator is intentionally separate from Solver. Existing
@@ -78,11 +81,12 @@ func (d Deps) parentTeachingGuideRequest(
 ) ParentTeachingGuideRequest {
 	return ParentTeachingGuideRequest{
 		Subject: req.Subject, Grade: req.Grade, Problem: req.Problem,
-		StudentAnswer:    req.StudentAnswer,
-		KnowledgePoints:  normalizeParentGuideList(d.projectElementaryEquationKnowledgePoints(ctx, req)),
-		WrongStep:        outcome.WrongStep,
-		ErrorCause:       outcome.ErrorCause,
-		VerifiedSolution: solved.Solution,
+		StudentAnswer:               req.StudentAnswer,
+		KnowledgePoints:             normalizeParentGuideList(d.projectElementaryEquationKnowledgePoints(ctx, req)),
+		WrongStep:                   outcome.WrongStep,
+		ErrorCause:                  outcome.ErrorCause,
+		VerifiedSolution:            solved.Solution,
+		ParentTeachingSkillSnapshot: req.ParentTeachingSkillSnapshot,
 	}
 }
 

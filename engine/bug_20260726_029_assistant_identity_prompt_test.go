@@ -25,7 +25,7 @@ func TestBUG20260726029_FinalProviderPromptKeepsRealityAndEndsWithExactAssistant
 	if err := dispatcher.Register(agentrouter.AgentConfig{
 		Name: agentName, SystemPrompt: customPrompt,
 		Metadata: map[string]string{
-			"scenario": "k12-tutor",
+			"scenario":           "k12-tutor",
 			k12.MetaKeyChildName: "小明",
 		},
 	}); err != nil {
@@ -51,7 +51,7 @@ func TestBUG20260726029_FinalProviderPromptKeepsRealityAndEndsWithExactAssistant
 			"role": agentName, "skills": "温和辅导", "agent_mode": "deep",
 		},
 	}
-	if err := eng.prepareAgentSystemPromptPolicy(context.Background(), msg); err != nil {
+	if _, err := eng.prepareAgentSystemPromptPolicy(context.Background(), msg); err != nil {
 		t.Fatalf("准备终端身份合同: %v", err)
 	}
 	messages := eng.buildStreamMessages(
