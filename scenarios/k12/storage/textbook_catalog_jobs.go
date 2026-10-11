@@ -292,10 +292,24 @@ func (s *Store) PublishTextbookCatalog(
 				records.ErrIllegalTransition)
 		}
 	}
+	parseGeneration := claim.DocumentGeneration
+	if claim.IngestJobID != "" {
+		// 当前索引代次与真实解析代次分别校验；发布前重新钉住同一完整来源证明。
+		_, sourcePlanDigest, err := loadTextbookCatalogSourceSnapshot(ctx, tx, claim.IngestJobID, claim.OwnerID, claim.DocumentID, claim.DocumentGeneration, claim.SourceDigest)
+		if err != nil {
+			return err
+		}
+		if sourcePlanDigest != claim.SourcePlanDigest {
+			return ErrTextbookCatalogJobFenced
+		}
+		if err := tx.QueryRowContext(ctx, `SELECT document_generation FROM kb_knowledge_jobs WHERE job_id=? AND owner_id=? AND document_id=? AND kind='ingest'`, claim.IngestJobID, claim.OwnerID, claim.DocumentID).Scan(&parseGeneration); err != nil {
+			return err
+		}
+	}
 
 	for index, proof := range publication.PageProofs {
 		if err := validateTextbookCatalogPageProofTx(
-			ctx, tx, claim, catalog.PageRefs[index], proof,
+			ctx, tx, claim, parseGeneration, catalog.PageRefs[index], proof,
 		); err != nil {
 			return err
 		}
@@ -642,6 +656,7 @@ func validateTextbookCatalogPageProofTx(
 	ctx context.Context,
 	tx *sql.Tx,
 	claim TextbookCatalogJobClaim,
+	parseGeneration int64,
 	pageRef textbookCatalogPageRef,
 	proof TextbookCatalogPageProof,
 ) error {
@@ -660,7 +675,7 @@ func validateTextbookCatalogPageProofTx(
 		LIMIT 1`,
 		claim.OwnerID,
 		claim.DocumentID,
-		claim.DocumentGeneration,
+		parseGeneration,
 		proof.EvidencePage,
 		claim.SourceDigest,
 		claim.IngestJobID,

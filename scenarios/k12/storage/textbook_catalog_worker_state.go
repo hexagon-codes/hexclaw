@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/hexagon-codes/hexclaw/knowledge"
+	"github.com/hexagon-codes/hexclaw/records"
 )
 
 const TextbookCatalogExtractorContract = "checkpoint-toc-footer-v5"
@@ -407,6 +408,77 @@ func (s *Store) FailTextbookCatalogJob(
 		return err
 	}
 	if affected, _ := result.RowsAffected(); affected != 1 {
+		return ErrTextbookCatalogJobFenced
+	}
+	return tx.Commit()
+}
+
+// RecoverSourceReindexCatalogPublication 显式恢复已知的索引/解析代次误判，不改变来源快照或普通自动恢复范围。
+func (s *Store) RecoverSourceReindexCatalogPublication(ctx context.Context, expected TextbookCatalogJobClaim, now time.Time, dryRun bool) error {
+	if s == nil || s.db == nil || expected.IngestJobID == "" || !validSHA256Digest(expected.SourcePlanDigest) || expected.ExtractorContract != TextbookCatalogExtractorContract || expected.LeaseOwner != "" || expected.LeaseExpiresAtMilli != 0 {
+		return ErrTextbookCatalogJobFenced
+	}
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: dryRun})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if !dryRun {
+		if _, err := tx.ExecContext(ctx, `UPDATE k12_textbook_catalog_jobs SET updated_at=updated_at WHERE 0`); err != nil {
+			return err
+		}
+	}
+	var current textbookCatalogJobState
+	var attempt int
+	var failureCode, lastError, contract string
+	err = tx.QueryRowContext(ctx, `SELECT manifest_id,owner_id,document_id,document_generation,source_digest,request_digest,state,lease_owner,lease_epoch,lease_expires_at,result_digest,ingest_job_id,source_plan_digest,attempt,failure_code,last_error,extractor_contract FROM k12_textbook_catalog_jobs WHERE job_id=?`, expected.JobID).Scan(&current.manifestID, &current.ownerID, &current.documentID, &current.documentGeneration, &current.sourceDigest, &current.requestDigest, &current.state, &current.leaseOwner, &current.leaseEpoch, &current.leaseExpiresAt, &current.resultDigest, &current.ingestJobID, &current.sourcePlanDigest, &attempt, &failureCode, &lastError, &contract)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrTextbookCatalogJobFenced
+	}
+	if err != nil {
+		return err
+	}
+	knownError := fmt.Errorf("%w: textbook page checkpoint is missing", records.ErrIllegalTransition).Error()
+	if !current.matchesClaim(expected) || current.state != "failed_terminal" || current.leaseEpoch != expected.LeaseEpoch || attempt != expected.Attempt || current.leaseOwner != "" || current.leaseExpiresAt != 0 || current.resultDigest != "" || failureCode != "catalog_evidence_incomplete" || lastError != knownError || contract != TextbookCatalogExtractorContract {
+		return ErrTextbookCatalogJobFenced
+	}
+	var eligible bool
+	err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM k12_textbook_manifests m JOIN kb_semantic_document_bindings b ON b.owner_id=m.owner_id AND b.document_id=m.document_id AND b.content_generation=m.document_generation JOIN kb_documents d ON d.id=b.document_id AND d.corpus_uid=b.corpus_uid WHERE m.manifest_id=? AND m.owner_id=? AND m.document_id=? AND m.document_generation=? AND m.source_digest=? AND m.subject='math' AND m.state='failed_terminal' AND m.catalog_json IS NULL AND COALESCE(m.catalog_digest,'')='' AND b.lifecycle_state='active' AND b.text_state='ready' AND d.deleted=0 AND NOT EXISTS(SELECT 1 FROM k12_textbook_page_mappings p WHERE p.manifest_id=m.manifest_id) AND NOT EXISTS(SELECT 1 FROM k12_textbook_manifest_segments s WHERE s.manifest_id=m.manifest_id))`, expected.ManifestID, expected.OwnerID, expected.DocumentID, expected.DocumentGeneration, expected.SourceDigest).Scan(&eligible)
+	if err != nil {
+		return err
+	}
+	if !eligible {
+		return ErrTextbookCatalogJobFenced
+	}
+	_, digest, err := loadTextbookCatalogSourceSnapshot(ctx, tx, expected.IngestJobID, expected.OwnerID, expected.DocumentID, expected.DocumentGeneration, expected.SourceDigest)
+	if err != nil {
+		return err
+	}
+	if digest != expected.SourcePlanDigest {
+		return ErrTextbookCatalogJobFenced
+	}
+	var parseGeneration int64
+	if err := tx.QueryRowContext(ctx, `SELECT document_generation FROM kb_knowledge_jobs WHERE job_id=? AND owner_id=? AND document_id=? AND kind='ingest'`, expected.IngestJobID, expected.OwnerID, expected.DocumentID).Scan(&parseGeneration); err != nil {
+		return err
+	}
+	if parseGeneration >= expected.DocumentGeneration {
+		return ErrTextbookCatalogJobFenced
+	}
+	if dryRun {
+		return nil
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE k12_textbook_catalog_jobs SET state='queued',next_attempt_at=0,updated_at=? WHERE job_id=? AND manifest_id=? AND owner_id=? AND document_id=? AND document_generation=? AND source_digest=? AND request_digest=? AND ingest_job_id=? AND source_plan_digest=? AND lease_epoch=? AND attempt=? AND state='failed_terminal' AND lease_owner='' AND lease_expires_at=0 AND result_digest='' AND failure_code=? AND last_error=? AND extractor_contract=?`, now.UTC().UnixMilli(), expected.JobID, expected.ManifestID, expected.OwnerID, expected.DocumentID, expected.DocumentGeneration, expected.SourceDigest, expected.RequestDigest, expected.IngestJobID, expected.SourcePlanDigest, expected.LeaseEpoch, expected.Attempt, failureCode, lastError, contract)
+	if err != nil {
+		return err
+	}
+	if count, _ := result.RowsAffected(); count != 1 {
+		return ErrTextbookCatalogJobFenced
+	}
+	result, err = tx.ExecContext(ctx, `UPDATE k12_textbook_manifests SET state='extracting',retryable=0,updated_at=? WHERE manifest_id=? AND owner_id=? AND document_id=? AND document_generation=? AND source_digest=? AND state='failed_terminal' AND catalog_json IS NULL AND COALESCE(catalog_digest,'')=''`, now.UTC().UnixMilli(), expected.ManifestID, expected.OwnerID, expected.DocumentID, expected.DocumentGeneration, expected.SourceDigest)
+	if err != nil {
+		return err
+	}
+	if count, _ := result.RowsAffected(); count != 1 {
 		return ErrTextbookCatalogJobFenced
 	}
 	return tx.Commit()
