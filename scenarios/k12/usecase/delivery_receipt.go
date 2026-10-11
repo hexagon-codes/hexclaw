@@ -136,7 +136,6 @@ func (d Deps) deliverAutomationText(ctx context.Context, agentName, kind, comman
 				AgentName: agentName, SourceKind: k12.PrintSourcePracticeQuestion,
 				SourceRef: objectKind + ":" + commandID + ":" + weeklyMistakeSheetRenderContract,
 				Title:     "本周错题卷", CanonicalMarkdown: content,
-				RenderMarkdown: weeklyMistakeSheetRenderMarkdown(content),
 			})
 			if prepareErr != nil {
 				return k12.DeliveryBatch{}, prepareErr

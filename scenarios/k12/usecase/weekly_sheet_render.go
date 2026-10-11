@@ -44,7 +44,9 @@ var weeklySheetFraction = regexp.MustCompile(`([0-9]+(?:\.[0-9]+)?)/([0-9]+(?:\.
 func weeklySheetQuestionMarkdown(question string) string {
 	readable, _ := mathtext.ProjectReadable(question)
 	facts := k12.ProblemAssetFacts{Subject: "数学", Stem: readable}
-	if _, ok := k12.ProblemAssetExpressionTerms(facts); ok {
+	// 日期或版本号也可能符合数字语法，缺少数学问法时仍保留原文字。
+	mathIntent := strings.ContainsAny(readable, "×÷=") || strings.ContainsAny(question, "$\\")
+	if _, ok := k12.ProblemAssetExpressionTerms(facts); ok && mathIntent {
 		latex := weeklySheetFraction.ReplaceAllString(readable, `\frac{$1}{$2}`)
 		latex = strings.NewReplacer("×", `\times `, "*", `\times `, "÷", `\div `, "−", "-").Replace(latex)
 		projected, _ := mathtext.ProjectReadable("$" + latex + "$")

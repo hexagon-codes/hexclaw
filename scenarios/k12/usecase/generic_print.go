@@ -150,6 +150,9 @@ func (d Deps) renderPrintableArtifact(ctx context.Context,
 	}
 	if strings.TrimSpace(renderMarkdown) == "" {
 		renderMarkdown = artifact.CanonicalMarkdown
+		if artifact.SourceKind == k12.PrintSourcePracticeQuestion && printArtifactRenderContract(artifact.SourceRef) == weeklyMistakeSheetRenderContract {
+			renderMarkdown = weeklyMistakeSheetRenderMarkdown(artifact.CanonicalMarkdown)
+		}
 	}
 	pdf, contentType, err := d.Renderer.Render(ctx, renderMarkdown, "pdf")
 	if err != nil {
