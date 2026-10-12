@@ -11,6 +11,7 @@ import (
 )
 
 type imageTaskRouteRequest struct {
+	MessageLocale   string `json:"message_locale,omitempty"`
 	Provider        string `json:"provider,omitempty"`
 	Model           string `json:"model,omitempty"`
 	SelectionSource string `json:"selection_source,omitempty"`
@@ -432,6 +433,7 @@ func (h *handler) createImageTask(w http.ResponseWriter, r *http.Request) {
 		MessageIntent: req.MessageIntent, AttemptGeneration: req.AttemptGeneration,
 		RouteRequest: k12.ImageTaskRouteSnapshot{
 			Provider: req.RouteRequest.Provider, Model: req.RouteRequest.Model,
+			MessageLocale:   req.RouteRequest.MessageLocale,
 			SelectionSource: req.RouteRequest.SelectionSource,
 		},
 	}

@@ -226,6 +226,13 @@ func (s *Server) handleMCPStatus(w http.ResponseWriter, r *http.Request) {
 
 // ─── Config: GET /api/v1/config ──
 
+// DisplayLocale 返回已持久化的展示语言，供新接纳的消息冻结语言快照。
+func (s *Server) DisplayLocale() string {
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
+	return config.NormalizeDisplayLocale(s.cfg.DisplayLocale)
+}
+
 func (s *Server) handleGetFullConfig(w http.ResponseWriter, r *http.Request) {
 	s.cfgMu.RLock()
 	defer s.cfgMu.RUnlock()
@@ -250,16 +257,17 @@ func (s *Server) handleGetFullConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"backend_id": s.backendID,
-		"ollama":     s.ollamaTargetLocked(),
-		"server":     map[string]any{"host": s.cfg.Server.Host, "port": s.cfg.Server.Port, "mode": s.cfg.Server.Mode},
-		"llm":        map[string]any{"default": llmCfg.Default, "providers": providers},
-		"knowledge":  map[string]any{"enabled": s.cfg.Knowledge.Enabled},
-		"mcp":        map[string]any{"enabled": s.cfg.MCP.Enabled},
-		"cron":       map[string]any{"enabled": s.cfg.Cron.Enabled},
-		"webhook":    map[string]any{"enabled": s.cfg.Webhook.Enabled},
-		"canvas":     map[string]any{"enabled": s.cfg.Canvas.Enabled},
-		"voice":      map[string]any{"enabled": s.cfg.Voice.Enabled},
+		"backend_id":     s.backendID,
+		"display_locale": config.NormalizeDisplayLocale(s.cfg.DisplayLocale),
+		"ollama":         s.ollamaTargetLocked(),
+		"server":         map[string]any{"host": s.cfg.Server.Host, "port": s.cfg.Server.Port, "mode": s.cfg.Server.Mode},
+		"llm":            map[string]any{"default": llmCfg.Default, "providers": providers},
+		"knowledge":      map[string]any{"enabled": s.cfg.Knowledge.Enabled},
+		"mcp":            map[string]any{"enabled": s.cfg.MCP.Enabled},
+		"cron":           map[string]any{"enabled": s.cfg.Cron.Enabled},
+		"webhook":        map[string]any{"enabled": s.cfg.Webhook.Enabled},
+		"canvas":         map[string]any{"enabled": s.cfg.Canvas.Enabled},
+		"voice":          map[string]any{"enabled": s.cfg.Voice.Enabled},
 		// 设置页总开关沿文件记忆的运行配置投影，不另建 memory.enabled 持久化字段。
 		"memory": map[string]any{"enabled": fm.Enabled},
 		"security": map[string]any{
@@ -329,7 +337,8 @@ func isOpenRouterFreeModel(baseURL, model string) bool {
 func (s *Server) handleUpdateFullConfig(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		ollamaTargetUpdateRequest
-		Security *struct {
+		DisplayLocale *string `json:"display_locale"`
+		Security      *struct {
 			GatewayEnabled     *bool `json:"gateway_enabled"`
 			InjectionDetection *bool `json:"injection_detection"`
 			PIIFilter          *bool `json:"pii_filter"`
@@ -351,9 +360,17 @@ func (s *Server) handleUpdateFullConfig(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid request body"})
 		return
 	}
+	if body.DisplayLocale != nil {
+		switch *body.DisplayLocale {
+		case "zh-CN", "en", "ug-CN":
+		default:
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid display locale"})
+			return
+		}
+	}
 
 	if body.Ollama != nil {
-		if body.Security != nil || body.Sandbox != nil || body.Memory != nil {
+		if body.DisplayLocale != nil || body.Security != nil || body.Sandbox != nil || body.Memory != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Ollama target update must be submitted separately"})
 			return
 		}
@@ -367,6 +384,9 @@ func (s *Server) handleUpdateFullConfig(w http.ResponseWriter, r *http.Request) 
 	s.cfgMu.Lock()
 	defer s.cfgMu.Unlock()
 	nextCfg := *s.cfg
+	if body.DisplayLocale != nil {
+		nextCfg.DisplayLocale = *body.DisplayLocale
+	}
 	memoryChanged := body.Memory != nil && body.Memory.Enabled != nil
 	if memoryChanged {
 		nextCfg.FileMemory.Enabled = *body.Memory.Enabled

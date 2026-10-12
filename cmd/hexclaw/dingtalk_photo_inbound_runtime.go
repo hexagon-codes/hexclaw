@@ -77,9 +77,10 @@ type k12DingtalkPhotoReplyIdentityPort interface {
 }
 
 type k12DingtalkPhotoInboundRuntimeConfig struct {
-	BaseContext context.Context
-	Router      *agentrouter.Dispatcher
-	Check       func(context.Context, *adapter.Message) error
+	MessageLocale func() string
+	BaseContext   context.Context
+	Router        *agentrouter.Dispatcher
+	Check         func(context.Context, *adapter.Message) error
 	// BindDirect 在适配器事件进入 ACK 前，把 direct sender 提升为耐久 K12 物理目标绑定。
 	BindDirect        func(context.Context, *adapter.Message) error
 	ResolveInstanceID func(string, string) (string, error)
@@ -99,6 +100,7 @@ type k12DingtalkPhotoInboundRuntimeConfig struct {
 // k12DingtalkPhotoInboundRuntime 只编排 V88、ImageTask、V89 与既有 DeliveryBatch；
 // 各自的幂等、CAS、媒体准备与回执状态机仍由原有领域实现唯一拥有。
 type k12DingtalkPhotoInboundRuntime struct {
+	messageLocale     func() string
 	baseCtx           context.Context
 	router            *agentrouter.Dispatcher
 	check             func(context.Context, *adapter.Message) error
@@ -145,6 +147,7 @@ func newK12DingtalkPhotoInboundRuntime(
 		bindDirect:        config.BindDirect,
 		resolveInstanceID: config.ResolveInstanceID,
 		resolveRoute:      config.ResolveRoute,
+		messageLocale:     config.MessageLocale,
 		inbound:           config.Inbound, imageTasks: config.ImageTasks,
 		practiceSets: config.PracticeSets, practiceReturns: config.PracticeReturns,
 		artifacts: config.Artifacts, replyBatches: config.ReplyBatches,
@@ -163,6 +166,7 @@ func newK12DingtalkPhotoInboundRuntime(
 }
 
 type k12DingtalkInboundPhotoCommand struct {
+	MessageLocale   string `json:"message_locale,omitempty"`
 	SchemaVersion   int    `json:"schema_version"`
 	SourceSessionID string `json:"source_session_id"`
 	MessageIntent   string `json:"message_intent"`
@@ -302,7 +306,12 @@ func (r *k12DingtalkPhotoInboundRuntime) AdmitInboundPhoto(
 	if !exactRoute {
 		return false, fmt.Errorf("DingTalk inbound TutorAgent route is incomplete")
 	}
+	locale := ""
+	if r.messageLocale != nil {
+		locale = r.messageLocale()
+	}
 	commandJSON, err := json.Marshal(k12DingtalkInboundPhotoCommand{
+		MessageLocale: locale,
 		SchemaVersion: 2, SourceSessionID: k12PhotoSourceSession(msg),
 		MessageIntent: strings.TrimSpace(msg.Content), Provider: provider, Model: model,
 	})
@@ -513,6 +522,7 @@ func (r *k12DingtalkPhotoInboundRuntime) createAndBindImageTask(
 		MessageIntent:   command.MessageIntent, AttemptGeneration: 1,
 		RouteRequest: k12.ImageTaskRouteSnapshot{
 			Provider: command.Provider, Model: command.Model, SelectionSource: "explicit",
+			MessageLocale: command.MessageLocale,
 		},
 	})
 	if err != nil {

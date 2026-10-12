@@ -85,6 +85,8 @@ func (e ImageTaskCreativeEntry) Validate() error {
 // writing OCR and work feedback each persist their own value; a retry never
 // re-resolves a mutable default route.
 type ImageTaskRouteSnapshot struct {
+	// MessageLocale 在接纳时冻结，语言设置变化不能改写恢复中的任务或投递。
+	MessageLocale         string `json:"message_locale,omitempty"`
 	MathExecutionContract string `json:"math_execution_contract,omitempty"`
 	// ParentInstructions 随反馈调用冻结，识别与分类不消费此字段。
 	ParentInstructions  config.AgentInstructionsSnapshot `json:"parent_instructions,omitzero"`

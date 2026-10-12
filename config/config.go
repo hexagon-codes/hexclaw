@@ -20,6 +20,7 @@ import (
 
 // Config HexClaw 全局配置
 type Config struct {
+	DisplayLocale    string                 `yaml:"display_locale,omitempty"`
 	Ollama           OllamaTargetConfig     `yaml:"ollama,omitempty"`
 	Server           ServerConfig           `yaml:"server"`
 	LLM              LLMConfig              `yaml:"llm"`
@@ -45,6 +46,16 @@ type Config struct {
 	ResourceGovernor ResourceGovernorConfig `yaml:"resource_governor"`
 	K12              K12Config              `yaml:"k12,omitempty"`
 	Features         map[string]bool        `yaml:"features"` // v0.4.0 feature flag override（key=flag name）
+}
+
+// NormalizeDisplayLocale 保持旧配置的中文默认值，不按地区或模型推断展示语言。
+func NormalizeDisplayLocale(locale string) string {
+	switch locale {
+	case "en", "ug-CN":
+		return locale
+	default:
+		return "zh-CN"
+	}
 }
 
 // K12Config contains scenario policy inputs that must be frozen into durable
