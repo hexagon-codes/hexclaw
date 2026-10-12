@@ -65,6 +65,7 @@ type MCPRegistryIdentity struct {
 type SkillMeta struct {
 	Name             string            `json:"name"`
 	DisplayName      string            `json:"display_name"`
+	DisplayNames     map[string]string `json:"display_names,omitempty"`
 	Description      string            `json:"description"`
 	Version          string            `json:"version"`
 	Author           string            `json:"author"`
@@ -809,7 +810,35 @@ func (h *Hub) GetCatalog() *Catalog {
 	return &snapshot
 }
 
+// UnmarshalJSON 保留可选作者译名，非法显示值不改变旧目录的接纳语义。
+func (meta *SkillMeta) UnmarshalJSON(data []byte) error {
+	type wireMeta SkillMeta
+	value := wireMeta{}
+	var raw struct {
+		*wireMeta
+		DisplayNames json.RawMessage `json:"display_names"`
+	}
+	raw.wireMeta = &value
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	var names map[string]any
+	if json.Unmarshal(raw.DisplayNames, &names) == nil {
+		for locale, declared := range names {
+			if name, ok := declared.(string); ok {
+				if value.DisplayNames == nil {
+					value.DisplayNames = make(map[string]string)
+				}
+				value.DisplayNames[locale] = name
+			}
+		}
+	}
+	*meta = SkillMeta(value)
+	return nil
+}
+
 func cloneSkillMeta(meta SkillMeta) SkillMeta {
+	meta.DisplayNames = maps.Clone(meta.DisplayNames)
 	meta.Tags = slices.Clone(meta.Tags)
 	meta.Dependencies = slices.Clone(meta.Dependencies)
 	meta.Args = slices.Clone(meta.Args)
@@ -1186,6 +1215,13 @@ func matchSkill(s SkillMeta, query string) bool {
 	}
 	if strings.Contains(strings.ToLower(s.DisplayName), query) {
 		return true
+	}
+	if s.Type == "" || s.Type == "skill" {
+		for _, name := range s.DisplayNames {
+			if strings.Contains(strings.ToLower(name), query) {
+				return true
+			}
+		}
 	}
 	for _, tag := range s.Tags {
 		if strings.Contains(strings.ToLower(tag), query) {
