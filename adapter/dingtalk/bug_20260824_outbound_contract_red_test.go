@@ -288,7 +288,7 @@ func TestDingTalkImageAttachmentPathNameDoesNotLeakToMultipartOrMarkdown(t *test
 	}
 }
 
-func TestEngineSkillPlainReplyFlowsToDingTalkSampleText(t *testing.T) {
+func TestEngineSkillReplyFlowsToDingTalkMarkdownWithExecutionReceipt(t *testing.T) {
 	store, err := sqlitestore.New(filepath.Join(t.TempDir(), "engine.db"))
 	if err != nil {
 		t.Fatalf("创建测试存储: %v", err)
@@ -340,12 +340,13 @@ func TestEngineSkillPlainReplyFlowsToDingTalkSampleText(t *testing.T) {
 		t.Fatalf("Engine Skill Reply 发送到 DingTalk adapter: %v", err)
 	}
 	calls := fake.SendCalls()
-	if len(calls) != 1 || calls[0].MsgKey != "sampleText" || calls[0].Text != "echo: hello" {
-		t.Fatalf("Engine Skill 纯文本 Reply 未贯通 sampleText: %#v", calls)
+	if len(calls) != 1 || calls[0].MsgKey != "sampleMarkdown" || calls[0].Text != "echo: hello\n\n**调用工具**：Skill · outbound-echo" {
+		t.Fatalf("Engine Skill 回执未贯通同一 Markdown: %#v", calls)
 	}
-	if reply.RenderManifest == nil || reply.RenderManifest.RendererVersion != "dingtalk-sample-text-v1" ||
-		reply.RenderManifest.CapabilitySnapshot.Markdown || reply.RenderManifest.Parts[0].Kind != messagecontent.PartText {
-		t.Fatalf("纯文本发送与 render manifest 不一致: %#v", reply.RenderManifest)
+	if reply.RenderManifest == nil || reply.RenderManifest.RendererVersion != "dingtalk-execution-summary-v1" ||
+		!reply.RenderManifest.CapabilitySnapshot.Markdown || reply.RenderManifest.Parts[0].Kind != messagecontent.PartMarkdown ||
+		reply.MessageContent == nil || reply.MessageContent.Markdown != "echo: hello" {
+		t.Fatalf("执行回执投影与 canonical 来源不一致: %#v", reply.RenderManifest)
 	}
 }
 

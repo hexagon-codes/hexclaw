@@ -47,42 +47,8 @@ func ensureDingTalkRenderEvidence(reply *adapter.Reply) error {
 			if err != nil {
 				return err
 			}
-			plain := len(reply.Attachments) == 0 &&
-				dingTalkUsesPlainText(reply.MessageContent.Markdown) && dingTalkUsesPlainText(visible)
-			if plain == (reply.RenderManifest.RendererVersion == "dingtalk-sample-text-v1") {
-				return validateDingTalkVisibleContent(visible)
-			}
-			if err := validateDingTalkVisibleContent(visible); err != nil {
-				return err
-			}
-			// 模板转换只调整表示，保留已验证的渠道投影及渲染元数据。
-			request := messagecontent.RenderRequest{
-				Surface:         reply.RenderManifest.Surface,
-				RendererVersion: "dingtalk-sample-markdown-v1",
-				Capabilities:    reply.RenderManifest.CapabilitySnapshot,
-				Parts:           append([]messagecontent.RenderPart(nil), reply.RenderManifest.Parts...),
-				FallbackReason:  reply.RenderManifest.FallbackReason,
-				ReceiptRef:      reply.RenderManifest.ReceiptRef,
-			}
-			request.Capabilities.Markdown = !plain
-			for i := range request.Parts {
-				if request.Parts[i].Kind == messagecontent.PartMarkdown || request.Parts[i].Kind == messagecontent.PartText {
-					request.Parts[i].Kind = messagecontent.PartMarkdown
-					if plain {
-						request.Parts[i].Kind = messagecontent.PartText
-						request.Parts[i].Text = strings.TrimSpace(visible)
-					}
-				}
-			}
-			if plain {
-				request.RendererVersion = "dingtalk-sample-text-v1"
-			}
-			manifest, err := messagecontent.BuildManifest(*reply.MessageContent, request)
-			if err != nil {
-				return err
-			}
-			reply.RenderManifest = &manifest
-			return nil
+			// 已冻结渠道投影只校验，不受发送时配置或新增说明影响。
+			return validateDingTalkVisibleContent(visible)
 		}
 	}
 
@@ -112,11 +78,26 @@ func ensureDingTalkRenderEvidence(reply *adapter.Reply) error {
 	refs := make([]messagecontent.AttachmentRef, 0, len(reply.Attachments))
 	parts := make([]messagecontent.RenderPart, 0, len(reply.Attachments)+1)
 	projected := adapter.NormalizeMathText(restoreEscapedMarkdownNewlines(sourceMarkdown))
+	fallback := ""
+	if projected != sourceMarkdown {
+		fallback = messagecontent.FallbackMathToReadableText
+	}
+	summary := adapter.RenderExecutionSummary(locale, dingTalkReplyExecutionSummary(reply))
+	if summary != "" {
+		projected += "\n\n" + summary
+		if fallback != "" {
+			fallback += "+"
+		}
+		fallback += "execution_summary"
+	}
 	if err := validateDingTalkVisibleContent(projected); err != nil {
 		return err
 	}
 	partKind := messagecontent.PartMarkdown
 	rendererVersion := "dingtalk-sample-markdown-v1"
+	if summary != "" {
+		rendererVersion = "dingtalk-execution-summary-v1"
+	}
 	plain := len(reply.Attachments) == 0 && dingTalkUsesPlainText(sourceMarkdown) && dingTalkUsesPlainText(projected)
 	if plain {
 		partKind = messagecontent.PartText
@@ -136,20 +117,30 @@ func ensureDingTalkRenderEvidence(reply *adapter.Reply) error {
 			mime = "application/octet-stream"
 		}
 		alt := safeDingTalkAttachmentName(attachment.Name)
-		refs = append(refs, messagecontent.AttachmentRef{AssetID: assetID, Name: alt, MIME: mime, Digest: digest, AltText: alt})
-		parts = append(parts, messagecontent.RenderPart{Kind: messagecontent.PartArtifact, ArtifactRef: assetID, ArtifactDigest: digest, AltText: alt})
+		ref := messagecontent.AttachmentRef{AssetID: assetID, Name: alt, MIME: mime, Digest: digest, AltText: alt}
+		if reply.MessageContent != nil {
+			ref = reply.MessageContent.Attachments[len(refs)]
+		}
+		refs = append(refs, ref)
+		parts = append(parts, messagecontent.RenderPart{Kind: messagecontent.PartArtifact, ArtifactRef: ref.AssetID, ArtifactDigest: ref.Digest, AltText: ref.AltText})
 	}
 
-	content, err := messagecontent.New(producer, locale, sourceMarkdown, refs)
-	if err != nil {
-		return err
-	}
-	fallback := ""
-	if projected != sourceMarkdown {
-		fallback = messagecontent.FallbackMathToReadableText
+	var content messagecontent.MessageContent
+	if reply.MessageContent != nil {
+		content = *reply.MessageContent
+	} else {
+		var err error
+		content, err = messagecontent.New(producer, locale, sourceMarkdown, refs)
+		if err != nil {
+			return err
+		}
 	}
 	if plain {
 		parts[0].Text = strings.TrimSpace(projected)
+	}
+	receiptRef := ""
+	if reply.RenderManifest != nil {
+		receiptRef = reply.RenderManifest.ReceiptRef
 	}
 	manifest, err := messagecontent.BuildManifest(content, messagecontent.RenderRequest{
 		Surface:         messagecontent.SurfaceChannel,
@@ -162,6 +153,7 @@ func ensureDingTalkRenderEvidence(reply *adapter.Reply) error {
 		},
 		Parts:          parts,
 		FallbackReason: fallback,
+		ReceiptRef:     receiptRef,
 	})
 	if err != nil {
 		return err
@@ -169,6 +161,34 @@ func ensureDingTalkRenderEvidence(reply *adapter.Reply) error {
 	reply.MessageContent = &content
 	reply.RenderManifest = &manifest
 	return nil
+}
+
+func dingTalkReplyExecutionSummary(reply *adapter.Reply) adapter.ExecutionSummary {
+	var facts adapter.ExecutionSummary
+	for _, call := range reply.ToolCalls {
+		tool := adapter.ExecutionSummaryTool{Kind: "tool", Name: call.Name, Status: call.Status}
+		if call.Origin != nil {
+			tool.Kind = call.Origin.Kind
+			tool.ServerName = call.Origin.ServerName
+			if strings.TrimSpace(call.Origin.Name) != "" {
+				tool.Name = call.Origin.Name
+			}
+		}
+		facts.Tools = append(facts.Tools, tool)
+	}
+	model := adapter.ExecutionSummaryModel{Stage: "answer_generation", Provider: reply.Metadata["provider"], Model: reply.Metadata["model"]}
+	if reply.Usage != nil {
+		if strings.TrimSpace(model.Model) == "" {
+			model.Model = reply.Usage.Model
+			model.Provider = reply.Usage.Provider
+		} else if strings.TrimSpace(model.Provider) == "" && model.Model == reply.Usage.Model {
+			model.Provider = reply.Usage.Provider
+		}
+	}
+	if strings.TrimSpace(model.Model) != "" {
+		facts.Models = append(facts.Models, model)
+	}
+	return facts
 }
 
 func dingTalkManifestMarkdown(manifest messagecontent.RenderManifest) (string, error) {

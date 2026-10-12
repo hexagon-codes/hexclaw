@@ -12,6 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/adapter/dingtalk"
 	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/render"
@@ -196,6 +197,15 @@ func (d Deps) PrepareAndSendK12FinalReplyBatch(ctx context.Context, agentName, o
 			allDing = false
 		}
 	}
+	if allDing {
+		disclosure, disclosureErr := d.finalReplyExecutionSummary(ctx, artifact)
+		if disclosureErr != nil {
+			return k12.DeliveryBatch{}, false, disclosureErr
+		}
+		if disclosure != "" {
+			full.Content += "\n\n" + disclosure
+		}
+	}
 	message := full
 	if allDing && k12FinalReplyUsesPDF(artifact, intent) {
 		objectID += ":" + imageFinalPDFRenderContractVersion
@@ -216,6 +226,92 @@ func (d Deps) PrepareAndSendK12FinalReplyBatch(ctx context.Context, agentName, o
 		return d.sendK12FinalReplyFallback(ctx, batch, full, targets)
 	}
 	return batch, created, sendErr
+}
+
+// finalReplyExecutionSummary 只消费同一终稿的领域回执；历史缺少语言快照时保持原投影。
+func (d Deps) finalReplyExecutionSummary(ctx context.Context, artifact k12.GradingFinalArtifact) (string, error) {
+	if d.ImageTaskResult == nil {
+		return "", nil
+	}
+	job, err := d.GetGradingJob(ctx, artifact.AgentName, artifact.JobID)
+	if err != nil {
+		return "", err
+	}
+	if job.Fields.SourceKind != "image_task" {
+		return "", nil
+	}
+	id, err := gradingFinalImageTaskDispatchID(job)
+	if err != nil {
+		return "", err
+	}
+	dispatch, err := d.Records.GetImageTaskDispatch(ctx, artifact.AgentName, id)
+	if err != nil {
+		return "", err
+	}
+	if dispatch.OperationRouteRequest.MessageLocale == "" {
+		return "", nil
+	}
+	result, err := d.ImageTaskResult(ctx, artifact.AgentName, id)
+	if err != nil {
+		return "", err
+	}
+	if result.FinalArtifact == nil || result.FinalArtifact.ArtifactID != artifact.ArtifactID || result.FinalArtifact.ArtifactDigest != artifact.ArtifactDigest {
+		return "", errors.New("image task execution summary source mismatch")
+	}
+	facts := adapter.ExecutionSummary{}
+	steps := make(map[string]bool)
+	solved := false
+	for _, receipt := range result.OperationReceipts {
+		if receipt.Status != "succeeded" || receipt.InvocationID == "" || receipt.ResultDigest == "" {
+			continue
+		}
+		stage := ""
+		switch receipt.Operation {
+		case "classification", "writing_ocr", "recognizing", "recognize", "recognize_repair":
+			stage = "image_recognition"
+		case "solve", "solve_generate", "solve_verify":
+			stage = "question_solving"
+			solved = true
+		case "grade":
+			stage = "grading"
+		case "parent_guide":
+			stage = "parent_guide"
+		case "annotation":
+			stage = "image_annotation"
+		case "work_feedback":
+			stage = "answer_generation"
+		}
+		if stage != "" {
+			steps[stage] = true
+		}
+		// 聚合阶段的声明路由不是物理模型调用；只列独立操作或已关联的真实调用单元。
+		if receipt.ExecutionKind == string(k12.GradingExecutionProvider) && receipt.Model != "" && (stage != "" || receipt.PhysicalUnit != "") {
+			facts.Models = append(facts.Models, adapter.ExecutionSummaryModel{Stage: stage, Provider: receipt.Provider, Model: receipt.Model})
+		}
+	}
+	if solved {
+		facts.Tools = append(facts.Tools, adapter.ExecutionSummaryTool{Kind: "skill", Name: "solve", Status: "success", DisplayNames: map[string]string{"zh-CN": "解题", "en": "Solve homework", "ug-CN": "مەسىلە يېشىش"}})
+	}
+	if result.Photo != nil {
+		for _, item := range result.Photo.Items {
+			if item.ParentGuide != nil {
+				steps["parent_guide"] = true
+			}
+			evidence := item.Solve.Evidence
+			if evidence.EvidenceType == EvidenceNumericExec && evidence.Verdict == VerdictAgree && evidence.VerificationRunID != "" && evidence.VerificationInputDigest != "" {
+				steps["numeric_verification"] = true
+			}
+		}
+	}
+	if steps["numeric_verification"] {
+		facts.Tools = append(facts.Tools, adapter.ExecutionSummaryTool{Kind: "tool", Name: "code_exec", Status: "success", DisplayNames: map[string]string{"zh-CN": "沙箱计算", "en": "Sandbox calculation", "ug-CN": "قۇم ساندۇقىدا ھېسابلاش"}})
+	}
+	for _, key := range []string{"image_recognition", "question_solving", "numeric_verification", "grading", "parent_guide", "image_annotation"} {
+		if steps[key] {
+			facts.Steps = append(facts.Steps, adapter.ExecutionSummaryStep{Key: key, Status: "success"})
+		}
+	}
+	return adapter.RenderExecutionSummary(dispatch.OperationRouteRequest.MessageLocale, facts), nil
 }
 
 // GetK12FinalReplyBatch 不读取或重新生成媒体；旧对象身份始终优先于新投影。
