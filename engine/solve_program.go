@@ -68,6 +68,11 @@ func WithSolveProgramExecutor(execute SubAgentExecFunc) SolveSkillOption {
 	return func(s *SolveSkill) { s.programFunc = execute }
 }
 
+// WithSolveTeachingContextSelector 仅投影已消费的冻结教学上下文，不加载技能或决定解题路由。
+func WithSolveTeachingContextSelector(selectReceipts func(string, []skill.ContextReceipt) []skill.ContextReceipt) SolveSkillOption {
+	return func(s *SolveSkill) { s.teachingContextSelector = selectReceipts }
+}
+
 type solveProgramPlan struct {
 	Problem, Code, Worked, Answer, Mode string
 }
@@ -233,11 +238,18 @@ func (s *SolveSkill) executeSolveProgram(ctx context.Context, plan solveProgramP
 	if !valid || !(answersEqual(computed, plan.Answer) || computed == plan.Answer) {
 		return nil, fmt.Errorf("solve program execution result is invalid")
 	}
-	return &skill.Result{Content: plan.Worked, Metadata: map[string]string{
+	resolved := &skill.Result{Content: plan.Worked, Metadata: map[string]string{
 		"solve_mode": plan.Mode, "solve_verdict": "agree", "solve_evidence": "numeric_exec", "solve_computed": plan.Answer,
 		"solve_primary_digest": executionInputDigest(plan.Worked), "solve_verification_input_digest": executionInputDigest(spec.Task),
 		"solve_verification_run_id": result.ExecutionReceipt.RunID,
-	}}, nil
+	}}
+	if s.teachingContextSelector != nil {
+		receipts := s.teachingContextSelector("math", ConsumedSkillContextReceipts(ctx))
+		if encoded, err := json.Marshal(receipts); err == nil && len(receipts) > 0 {
+			resolved.Metadata[teachingContextReceiptsMetadataKey] = string(encoded)
+		}
+	}
+	return resolved, nil
 }
 
 func wordProgram(expressions []string, units []string) string {

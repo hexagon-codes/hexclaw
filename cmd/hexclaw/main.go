@@ -1895,7 +1895,10 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 	}
 	// P0（K12 正确性）：solve = 带 code_exec 独立验证的解题工具。verifier 子 Agent 只许 code_exec、
 	// fresh-context 重算，把"算术幻觉"这一 K12 头号错因用执行 grounding 兜住。
-	solveSkill := engine.NewSolveSkill(agentExecFn, subagentRegistry, engine.WithSolveProgramExecutor(eng.SolveProgramExecutor()))
+	solveSkill := engine.NewSolveSkill(agentExecFn, subagentRegistry,
+		engine.WithSolveProgramExecutor(eng.SolveProgramExecutor()),
+		engine.WithSolveTeachingContextSelector(k12engineadapter.SelectParentTeachingContextReceipts),
+	)
 	if err := skills.Register(solveSkill); err != nil {
 		logger.Error("注册 SolveSkill 失败", "error", err)
 	}
@@ -2677,6 +2680,7 @@ Set source only when the material explicitly names a work, title, or another rel
 					return providerConfig.DisplayName, modelID
 				},
 			}
+			k12rt.Deps.ImageTaskResult = k12ImageTasks.Result
 			k12ImageTasks.SourceReprocess = &k12usecase.ProblemSourceReprocessWorker{
 				Records:     k12rt.Records,
 				Processor:   k12ImageTasks,
@@ -3153,6 +3157,13 @@ Set source only when the material explicitly names a work, title, or another rel
 	_ = voiceChatSvc
 
 	messageHandler := func(ctx context.Context, msg *adapter.Message) (*adapter.Reply, error) {
+		if msg != nil && msg.Platform == "dingtalk" {
+			if msg.Metadata == nil {
+				msg.Metadata = make(map[string]string)
+			}
+			msg.Metadata["locale"] = srv.DisplayLocale()
+			msg.Metadata["user_locale"] = msg.Metadata["locale"]
+		}
 		if err := gw.Check(ctx, msg); err != nil {
 			return &adapter.Reply{Content: "安全检查未通过: " + err.Error()}, nil
 		}
@@ -3225,7 +3236,8 @@ Set source only when the material explicitly names a work, title, or another rel
 		)
 		k12DingtalkPhotos = newK12DingtalkPhotoInboundRuntime(
 			k12DingtalkPhotoInboundRuntimeConfig{
-				BaseContext: ctx, Router: agentRouter, Check: gw.Check,
+				MessageLocale: srv.DisplayLocale,
+				BaseContext:   ctx, Router: agentRouter, Check: gw.Check,
 				BindDirect: func(bindCtx context.Context, msg *adapter.Message) error {
 					return ensureK12DingTalkDirectBinding(bindCtx, msg, agentRouter, k12InboundBinder)
 				},

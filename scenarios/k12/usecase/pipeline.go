@@ -19,8 +19,10 @@ const FirstReviewInterval int64 = 86400 // 1 天
 
 // Deps 用例依赖（端口注入 + 通用能力）。
 type Deps struct {
-	Solver Solver
-	Grader Grader
+	// ImageTaskResult 读取同一领域终态及冻结调用证据，供新投递生成只读摘要。
+	ImageTaskResult func(context.Context, string, string) (ImageTaskResult, error)
+	Solver          Solver
+	Grader          Grader
 	// VerifiedGrader 由生产装配显式接入。不能只依赖 Grader 的运行时类型断言：场景包装、
 	// mock 或后续 decorator 都可能擦掉可选方法，进而静默退回重复 solver+verifier 的慢路径。
 	VerifiedGrader VerifiedSolutionGrader

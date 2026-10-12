@@ -31,9 +31,10 @@ import (
 // Agent **执行代码**算出 ground truth 才能根治。method_diversity 跨「方法」而非跨「温度」，能抓到
 // 自洽采样抓不到的系统性方法错误。
 type SolveSkill struct {
-	executeFunc SubAgentExecFunc
-	registry    *SubAgentRegistry
-	programFunc SubAgentExecFunc
+	executeFunc             SubAgentExecFunc
+	registry                *SubAgentRegistry
+	programFunc             SubAgentExecFunc
+	teachingContextSelector func(string, []skill.ContextReceipt) []skill.ContextReceipt
 }
 
 // NewSolveSkill 创建 solve 工具。

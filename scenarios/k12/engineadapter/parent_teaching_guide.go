@@ -69,6 +69,41 @@ var parentTeachingSubjectSkills = map[string]parentTeachingSkillSpec{
 	"信息科技": {name: "information-technology-tutor", file: "skills/information-technology-tutor.md", anchors: []string{"PRIMM 教学法", "运行结果以系统沙箱回传为准", "完整参考程序"}},
 }
 
+// SelectParentTeachingContextReceipts 从本次已消费快照选择通用与同学科指导，不追补当前目录。
+func SelectParentTeachingContextReceipts(subject string, frozen []skill.ContextReceipt) []skill.ContextReceipt {
+	canonical := strings.TrimSpace(subject)
+	if canonical == "math" {
+		canonical = "数学"
+	}
+	subjectSkill, known := parentTeachingSubjectSkills[canonical]
+	if !known {
+		return nil
+	}
+	var selected []skill.ContextReceipt
+	seen := make(map[string]bool)
+	for _, receipt := range frozen {
+		if receipt.Status != "loaded" || (receipt.Name != parentTeachingPedagogySkill.name && receipt.Name != subjectSkill.name) {
+			continue
+		}
+		identity := receipt.Name + "\x00" + receipt.Version + "\x00" + receipt.ContentDigest
+		if seen[identity] {
+			continue
+		}
+		seen[identity] = true
+		selected = append(selected, receipt)
+	}
+	// 复制所有映射，调用者不能修改冻结任务的原快照。
+	encoded, err := json.Marshal(selected)
+	if err != nil {
+		return nil
+	}
+	var copied []skill.ContextReceipt
+	if json.Unmarshal(encoded, &copied) != nil {
+		return nil
+	}
+	return copied
+}
+
 var _ usecase.ParentTeachingGuideGenerator = (*SolveAdapter)(nil)
 var _ usecase.ParentTeachingGuideAuditor = (*SolveAdapter)(nil)
 var _ usecase.SolveTeachingContractFreezer = (*SolveAdapter)(nil)

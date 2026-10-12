@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"strings"
 	"sync"
 
 	"github.com/hexagon-codes/ai-core/llm"
@@ -29,8 +30,9 @@ var replyMetaSinkKey = replyMetaSinkKeyType{}
 // replySafeToolMetaKeys 是允许从工具结果透传到回复元数据的键白名单。
 // 只收结构化、面向前端渲染的领域中立键；杜绝内部 skill 元数据泄漏到回复。
 var replySafeToolMetaKeys = map[string]bool{
-	"record":    true, // 记录本入库徽章（{collection,fields,status} JSON），前端 messageRecordChip 消费
-	"artifacts": true, // 只透传持久产物引用，不携带文件字节或内部调用参数。
+	"record":                           true, // 记录本入库徽章（{collection,fields,status} JSON），前端 messageRecordChip 消费
+	"artifacts":                        true, // 只透传持久产物引用，不携带文件字节或内部调用参数。
+	teachingContextReceiptsMetadataKey: true,
 }
 
 type replyMetaSink struct {
@@ -63,7 +65,7 @@ func prepareToolSkillContextReceipt(ctx context.Context, content string, receipt
 	s.pendingSkillContexts = append(s.pendingSkillContexts, pendingToolSkillContext{toolContentDigest: digest, receipt: receipt})
 }
 
-// Provider 成功接纳的本次请求必须包含同一工具结果，才确认其教学正文实际进入上下文。
+// Provider 成功接纳的本次请求必须包含同一冻结正文，才确认其实际进入上下文。
 func confirmConsumedToolSkillContexts(ctx context.Context, messages []llm.Message) {
 	s := replyMetaSinkFrom(ctx)
 	if s == nil {
@@ -71,8 +73,19 @@ func confirmConsumedToolSkillContexts(ctx context.Context, messages []llm.Messag
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(s.pendingSkillContexts) == 0 {
-		return
+	if prepared, _ := ctx.Value(preparedSkillContextKey{}).(*preparedSkillContext); prepared != nil && prepared.prompt != "" {
+		for _, message := range messages {
+			if message.Role != llm.RoleSystem || !strings.Contains(message.Content, prepared.prompt) {
+				continue
+			}
+			receipts := cloneSkillContextReceipts(prepared.receipts)
+			for i := range receipts {
+				receipts[i].Status = "loaded"
+			}
+			encoded, _ := json.Marshal(receipts)
+			s.m[skillContextReceiptsMetadataKey] = mergeSkillContextReceiptReferences(s.m[skillContextReceiptsMetadataKey], string(encoded))
+			break
+		}
 	}
 	for _, message := range messages {
 		if message.Role != llm.RoleTool {
@@ -91,6 +104,35 @@ func confirmConsumedToolSkillContexts(ctx context.Context, messages []llm.Messag
 			pending.consumed = true
 		}
 	}
+}
+
+// ConsumedSkillContextReceipts 只复制本次成功 Provider 请求实际消费的冻结快照。
+// 默认挂载、准备正文和历史消息不能独立产生本题教学依据。
+func ConsumedSkillContextReceipts(ctx context.Context) []skill.ContextReceipt {
+	s := replyMetaSinkFrom(ctx)
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	encoded := s.m[skillContextReceiptsMetadataKey]
+	s.mu.Unlock()
+	var receipts []skill.ContextReceipt
+	if json.Unmarshal([]byte(encoded), &receipts) != nil {
+		return nil
+	}
+	return receipts
+}
+
+func cloneSkillContextReceipts(receipts []skill.ContextReceipt) []skill.ContextReceipt {
+	encoded, err := json.Marshal(receipts)
+	if err != nil {
+		return nil
+	}
+	var copied []skill.ContextReceipt
+	if json.Unmarshal(encoded, &copied) != nil {
+		return nil
+	}
+	return copied
 }
 
 func mergeSkillContextReceiptReferences(previous, next string) string {
@@ -149,6 +191,10 @@ func stampToolReplyMeta(ctx context.Context, meta map[string]string) {
 				s.m[k] = mergeArtifactReplyReferences(s.m[k], v)
 				continue
 			}
+			if k == teachingContextReceiptsMetadataKey {
+				s.m[k] = mergeSkillContextReceiptReferences(s.m[k], v)
+				continue
+			}
 			// 后写覆盖：同一轮工具循环内多次入库取最后一条（对齐「一次批改一道题」语义）。
 			s.m[k] = v
 		}
@@ -204,7 +250,7 @@ func applyToolReplyMeta(ctx context.Context, msg *adapter.Message) {
 	}
 	ensureMessageMetadata(msg)
 	for k, v := range s.m {
-		if k == skillContextReceiptsMetadataKey {
+		if k == skillContextReceiptsMetadataKey || k == teachingContextReceiptsMetadataKey {
 			v = mergeSkillContextReceiptReferences(msg.Metadata[k], v)
 		}
 		msg.Metadata[k] = v

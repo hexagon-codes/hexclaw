@@ -1045,6 +1045,7 @@ func (e *ReActEngine) Process(ctx context.Context, msg *adapter.Message) (reply 
 	ensureMessageMetadata(msg)
 	ctx = clearPreparedSkillContext(ctx, msg)
 	delete(msg.Metadata, skillContextReceiptsMetadataKey)
+	delete(msg.Metadata, teachingContextReceiptsMetadataKey)
 	delete(msg.Metadata, agentRequestReasoningPolicyKey)
 	assistantMessageID := canonicalAssistantMessageID(msg)
 	msg.Metadata["assistant_message_id"] = assistantMessageID
@@ -1963,6 +1964,7 @@ func (e *ReActEngine) ProcessStream(ctx context.Context, msg *adapter.Message) (
 	ctx = e.beginRequestReasoningPolicy(ctx)
 	ctx = clearPreparedSkillContext(ctx, msg)
 	delete(msg.Metadata, skillContextReceiptsMetadataKey)
+	delete(msg.Metadata, teachingContextReceiptsMetadataKey)
 	delete(msg.Metadata, agentRequestReasoningPolicyKey)
 	assistantMessageID := canonicalAssistantMessageID(msg)
 	msg.Metadata["assistant_message_id"] = assistantMessageID
@@ -5114,7 +5116,7 @@ func buildReplyMetadata(metadata map[string]string, providerName, modelName, ass
 	if v := metadata["routed_agent"]; v != "" {
 		replyMeta["routed_agent"] = v
 	}
-	for _, key := range []string{"request_id", "session_id", "finish_reason", "recovered_from_reasoning_only", "thinking", "reasoning_visibility", "thinking_duration", "record", "artifacts", skillContextReceiptsMetadataKey, persistErrorMetaKey} {
+	for _, key := range []string{"request_id", "session_id", "finish_reason", "recovered_from_reasoning_only", "thinking", "reasoning_visibility", "thinking_duration", "record", "artifacts", skillContextReceiptsMetadataKey, teachingContextReceiptsMetadataKey, persistErrorMetaKey} {
 		if v := metadata[key]; v != "" {
 			replyMeta[key] = v
 		}
@@ -5550,6 +5552,7 @@ func (e *ReActEngine) buildMountedSkillsPrompt(names []string) string {
 }
 
 const skillContextReceiptsMetadataKey = "skill_context_receipts"
+const teachingContextReceiptsMetadataKey = "teaching_context_receipts"
 
 const (
 	agentDefaultSkillNamesKey = "_agent_default_skill_names"
@@ -5650,6 +5653,7 @@ func (e *ReActEngine) prepareSkillPromptContext(ctx context.Context, msg *adapte
 	delete(msg.Metadata, skillPromptDigestKey)
 	_, explicit := msg.Metadata["skills"]
 	prompt, receipts := e.buildMountedSkillsContext(effectiveSkillContextNames(msg.Metadata), !explicit)
+	receipts = cloneSkillContextReceipts(receipts)
 	for i := range receipts {
 		receipts[i].Status = "prepared"
 	}
