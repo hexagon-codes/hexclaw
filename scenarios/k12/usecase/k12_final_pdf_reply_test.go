@@ -301,6 +301,44 @@ func TestK12FinalPDFSharedSourceAndReplaySQLite(t *testing.T) {
 	}
 }
 
+func TestK12FinalPDFAutomaticRoutePreservesExecutionSummarySQLite(t *testing.T) {
+	f := prepareCompletedSourceFixtureForIntent(t, k12.ImageTaskIntentBlankWorksheet,
+		completedSourceImageFixture{data: validPNGFixture(t, "automatic-final-language"), messageLocale: "en"})
+	d := f.o.deps
+	renderer := &finalReplyPDFRenderer{}
+	transport := newFinalReplyHTTPTransport(t, f.store)
+	d.Renderer, d.Delivery = renderer, transport
+	reads := 0
+	d.ImageTaskResult = func(_ context.Context, agent, dispatch string) (ImageTaskResult, error) {
+		if agent != "mingming" || dispatch != f.dispatch {
+			t.Fatalf("execution summary read another task: %s/%s", agent, dispatch)
+		}
+		reads++
+		return ImageTaskResult{FinalArtifact: &f.old, OperationReceipts: []ImageTaskOperationReceipt{
+			{InvocationID: "classification-success", Operation: "classification", ExecutionKind: "provider", Provider: "frozen-provider", Model: "frozen-model", Status: "succeeded", ResultDigest: "sha256:classification-success"},
+			{InvocationID: "solve-success", Operation: "solve", ExecutionKind: "local_deterministic", Status: "succeeded", ResultDigest: "sha256:solve-success"},
+		}}, nil
+	}
+	ctx := context.Background()
+	batch, created, err := d.PrepareAndSendGradingFinalArtifactExact(ctx, "mingming", f.old.ArtifactID, f.old.ArtifactDigest)
+	if err != nil || !created || batch.Status != k12.DeliveryBatchDelivered || len(transport.preparedMessages) != 1 {
+		t.Fatalf("automatic final delivery incomplete: created=%v batch=%+v err=%v", created, batch, err)
+	}
+	content := transport.preparedMessages[0].Content
+	for _, required := range []string{"完整答案与讲法见附件", "**Processing summary**", "Image recognition", "Problem solving", "**Tools used**", "Skill · Solve homework", "**Models used**: frozen-provider / frozen-model"} {
+		if !strings.Contains(content, required) {
+			t.Errorf("frozen automatic summary omitted %q: %s", required, content)
+		}
+	}
+	if renderer.markdown == "" || strings.Contains(renderer.markdown, "**Models used**") || reads != 1 || len(transport.sends) != 2 {
+		t.Fatalf("projection changed PDF or execution count: reads=%d sends=%d", reads, len(transport.sends))
+	}
+	again, created, err := d.PrepareAndSendGradingFinalArtifactExact(ctx, "mingming", f.old.ArtifactID, f.old.ArtifactDigest)
+	if err != nil || created || again.BatchID != batch.BatchID || reads != 1 || len(transport.sends) != 2 {
+		t.Fatalf("frozen replay regenerated or resent summary: reads=%d sends=%d err=%v", reads, len(transport.sends), err)
+	}
+}
+
 func TestK12FinalPDFSourceDigestFamiliesSQLite(t *testing.T) {
 	for _, scenario := range []string{"canonical_jpeg", "legacy_raw", "wrong_task_digest", "raw_sha_is_not_task_digest", "wrong_owner"} {
 		t.Run(scenario, func(t *testing.T) {

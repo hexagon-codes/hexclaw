@@ -579,6 +579,8 @@ func (c *ImageTaskCoordinator) Create(
 			"%w: resolve image task route: %v", ErrInvalidInput, err,
 		)
 	}
+	// 展示语言属于接纳的请求事实，模型路由解析器只决定 Provider 与能力。
+	route.MessageLocale = in.RouteRequest.MessageLocale
 	route = k12.NormalizeImageTaskRouteSnapshot(route)
 	if (in.SourceKind == k12.ImageTaskSourceIM && in.CreativeEntry == nil) ||
 		(in.CreativeEntry != nil && in.CreativeEntry.Kind == k12.CreativeWorkEntryNewWork && in.CreativeEntry.TaskIntent == k12.ImageTaskIntentUnknown) {

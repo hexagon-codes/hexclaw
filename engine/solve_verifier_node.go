@@ -20,11 +20,12 @@ import (
 
 // verificationInput 与内部子任务一起构造，不从用户消息元数据取得执行授权。
 type verificationInput struct {
-	Problem      string                `json:"problem"`
-	Solution     string                `json:"solution"`
-	Candidate    string                `json:"candidate"`
-	Constraint   string                `json:"curriculum"`
-	ParentGuides []guideAuditCandidate `json:"parent_guides,omitempty"`
+	Problem         string                `json:"problem"`
+	Solution        string                `json:"solution"`
+	Candidate       string                `json:"candidate"`
+	Constraint      string                `json:"curriculum"`
+	ParentGuides    []guideAuditCandidate `json:"parent_guides,omitempty"`
+	SolverExecution *solverExecutionProof `json:"solver_execution,omitempty"`
 }
 
 type verificationInputKey struct{}
@@ -81,6 +82,7 @@ Return one JSON object only, with exactly these fields:
 Independently build the correct calculation from the problem, without copying the candidate as a constant. Use exact fractions when appropriate. Compute each intermediate value in the program. End by printing exactly one line COMPUTED: <final value with the necessary unit>. Do not claim to have executed it: the application executes the program and compares its actual stdout.
 Python Fraction automatically normalizes its numerator and denominator. Preserve the original integer numerator and denominator separately when showing an unreduced intermediate step; never divide the already normalized Fraction numerator and denominator by the original common factor again.
 Audit EVERY reasoning step in the complete proposed solution. A correct final answer does not excuse an invalid equation or inference. Include a concrete reason for each check; if no solution was supplied, checks must be empty. Scope is OUT_OF_SCOPE if any proposed method exceeds the supplied curriculum. Retain the problem's actual unit. Never print a verdict or the candidate merely to make the comparison pass.
+Optional solver_execution is application-provided evidence of a successful execution and its stdout matching the selected candidate. It supports only those execution facts; it does not prove additional executions, substitutions, intermediate steps or mathematical validity. Do not invent execution evidence when the field is absent. Continue to audit every equation and curriculum constraint independently.
 ` + guideContract + string(raw)
 }
 

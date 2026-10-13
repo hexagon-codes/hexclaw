@@ -83,14 +83,18 @@ func (s *Store) RestoreImageTaskKnownLocalTechnical(
 	if err != nil {
 		return k12.ImageTaskDispatch{}, nil, err
 	}
-	if job.Status != k12.GradingStageFailedTerminal || fields.FailedStage != k12.GradingStageAssessing ||
+	recognizing := fields.FailedStage == k12.GradingStageRecognizing
+	if job.Status != k12.GradingStageFailedTerminal || (!recognizing && fields.FailedStage != k12.GradingStageAssessing) ||
 		fields.AttemptCount < k12.GradingMaxStageAttempts || fields.SourceKind != "image_task" ||
 		fields.IdempotencyKey != k12.BuildGradingIdempotencyKey("image_task", dispatch.DispatchID, fields.ConfirmedVersion) ||
-		fields.ConfirmationState != k12.GradingConfirmationConfirmed || k12.GradingResumeStage(fields.StageCheckpoints) != k12.GradingStageAssessing {
+		(!recognizing && fields.ConfirmationState != k12.GradingConfirmationConfirmed) ||
+		(recognizing && fields.ConfirmationState != k12.GradingConfirmationPending) ||
+		k12.GradingResumeStage(fields.StageCheckpoints) != fields.FailedStage {
 		return k12.ImageTaskDispatch{}, nil, ErrImageTaskInvalidState
 	}
 	for _, checkpoint := range fields.StageCheckpoints {
-		if checkpoint.Stage == k12.GradingStageAssessing || checkpoint.Stage == k12.GradingStageRendering || checkpoint.Stage == k12.GradingStageProjecting {
+		if (recognizing && checkpoint.Stage != k12.GradingStageNormalizing) ||
+			checkpoint.Stage == k12.GradingStageAssessing || checkpoint.Stage == k12.GradingStageRendering || checkpoint.Stage == k12.GradingStageProjecting {
 			return k12.ImageTaskDispatch{}, nil, ErrImageTaskInvalidState
 		}
 	}
@@ -110,34 +114,46 @@ func (s *Store) RestoreImageTaskKnownLocalTechnical(
 	if blocked != 0 {
 		return k12.ImageTaskDispatch{}, nil, ErrImageTaskInvalidState
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT `+gradingItemInvocationColumns+` FROM k12_grading_item_invocations AS invocation
-		WHERE agent_name=? AND job_id=? AND operation_attempt/1000=?
-		  AND status='failed' AND execution_kind='provider' AND failure_class='local' AND failure_code='provider_response_processed'
+	eligible := false
+	if recognizing {
+		eligible, err = recognitionProjectionRecoveryEligibleVia(ctx, tx, command.AgentName, command.JobID, fields)
+		if err != nil {
+			return k12.ImageTaskDispatch{}, nil, err
+		}
+	} else {
+		rows, err := tx.QueryContext(ctx, `SELECT `+gradingItemInvocationColumns+` FROM k12_grading_item_invocations AS invocation
+		WHERE agent_name=? AND job_id=? AND status='failed'
+		  AND ((operation_attempt/1000=? AND execution_kind='provider' AND failure_class='local' AND failure_code='provider_response_processed')
+		    OR (operation_attempt=? AND operation='parent_guide' AND execution_kind='local_deterministic'
+		      AND failure_class='local_execution' AND failure_code='deterministic_failed'))
 		  AND result_json='' AND result_digest=''
 		  AND EXISTS(SELECT 1 FROM k12_attempts AS attempt WHERE attempt.agent_name=invocation.agent_name
 		    AND attempt.submission_id=? AND attempt.problem_id=invocation.problem_id AND attempt.attempt_id=invocation.attempt_id
 		    AND attempt.confirmed_version=invocation.input_revision AND attempt.input_digest=invocation.input_digest)
 		  AND NOT EXISTS(SELECT 1 FROM k12_grading_item_invocations AS later WHERE later.agent_name=invocation.agent_name
 		    AND later.job_id=invocation.job_id AND later.problem_id=invocation.problem_id AND later.operation=invocation.operation
-		    AND later.operation_attempt>invocation.operation_attempt)`, command.AgentName, command.JobID, fields.AttemptCount, fields.SubmissionID)
-	if err != nil {
-		return k12.ImageTaskDispatch{}, nil, err
-	}
-	eligible := false
-	for rows.Next() {
-		invocation, scanErr := scanGradingItemInvocation(rows)
-		if scanErr != nil {
-			rows.Close()
-			return k12.ImageTaskDispatch{}, nil, scanErr
+		    AND later.operation_attempt>invocation.operation_attempt)`, command.AgentName, command.JobID, fields.AttemptCount, fields.AttemptCount, fields.SubmissionID)
+		if err != nil {
+			return k12.ImageTaskDispatch{}, nil, err
 		}
-		if invocation.RouteSnapshot == fields.ModelSnapshot {
-			eligible = true
+		for rows.Next() {
+			invocation, scanErr := scanGradingItemInvocation(rows)
+			if scanErr != nil {
+				rows.Close()
+				return k12.ImageTaskDispatch{}, nil, scanErr
+			}
+			if invocation.RouteSnapshot == fields.ModelSnapshot {
+				eligible = true
+			}
 		}
-	}
-	err = rows.Err()
-	rows.Close()
-	if err != nil {
-		return k12.ImageTaskDispatch{}, nil, err
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return k12.ImageTaskDispatch{}, nil, err
+		}
+		if !eligible {
+			return k12.ImageTaskDispatch{}, nil, ErrImageTaskInvalidState
+		}
 	}
 	if !eligible {
 		return k12.ImageTaskDispatch{}, nil, ErrImageTaskInvalidState
@@ -161,7 +177,7 @@ func (s *Store) RestoreImageTaskKnownLocalTechnical(
 	updated, err := tx.ExecContext(ctx, `UPDATE k12_grading_jobs SET status=?,deadline=?,budget_snapshot_json=?,version=version+1,updated_at=?
 		WHERE agent_name=? AND record_id=? AND version=? AND status=? AND failed_stage=? AND attempt_count=?`,
 		k12.GradingStageQueued, fields.Deadline, values[8], command.Now, command.AgentName, command.JobID,
-		command.ExpectedJobVersion, k12.GradingStageFailedTerminal, k12.GradingStageAssessing, fields.AttemptCount)
+		command.ExpectedJobVersion, k12.GradingStageFailedTerminal, fields.FailedStage, fields.AttemptCount)
 	if err != nil {
 		return k12.ImageTaskDispatch{}, nil, err
 	}
@@ -175,4 +191,79 @@ func (s *Store) RestoreImageTaskKnownLocalTechnical(
 		return k12.ImageTaskDispatch{}, nil, fmt.Errorf("commit known local technical recovery: %w", err)
 	}
 	return dispatch, job, nil
+}
+
+// 当前识题只有已收到的唯一观察错层响应可恢复，不能用历史失败或未结算的其他内容授权发送。
+func recognitionProjectionRecoveryEligibleVia(ctx context.Context, q dbQueryer, agent, jobID string, fields k12.GradingJobFields) (bool, error) {
+	if fields.BudgetSnapshot.RecognitionPlanVersion != k12.RecognitionPlanVersionV2 {
+		return false, nil
+	}
+	parent, err := scanModelInvocation(q.QueryRowContext(ctx, `SELECT `+modelInvocationColumns+`
+		FROM k12_model_invocations WHERE agent_name=? AND job_id=? AND stage='recognizing' AND attempt=?`,
+		agent, jobID, fields.AttemptCount))
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if parent.Status != k12.ModelInvocationFailed || parent.FailureKind != "recognize_failed" ||
+		parent.ResultDigest != "" || parent.ResultJSON != "" || parent.RouteSnapshot != fields.ModelSnapshot {
+		return false, nil
+	}
+	var headerJSON, headerDigest, sourceID, resultDigest, planDigest, status string
+	var planJSON, settlement sql.NullString
+	err = q.QueryRowContext(ctx, `SELECT layout_header_json,header_digest,manifest_physical_invocation_id,
+		manifest_result_digest,authorized_plan_digest,authorized_plan_json,initial_read_settlement_json,status
+		FROM k12_recognition_layout_plans WHERE agent_name=? AND parent_invocation_id=?`,
+		agent, parent.InvocationID).Scan(&headerJSON, &headerDigest, &sourceID, &resultDigest, &planDigest, &planJSON, &settlement, &status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if planDigest != "" || (planJSON.Valid && strings.TrimSpace(planJSON.String) != "") ||
+		(settlement.Valid && strings.TrimSpace(settlement.String) != "") || status != "manifest_succeeded" {
+		return false, nil
+	}
+	var header k12.RecognitionLayoutPlanHeaderV2
+	if json.Unmarshal([]byte(headerJSON), &header) != nil {
+		return false, nil
+	}
+	digest, err := k12.RecognitionLayoutPlanHeaderDigestV2(header)
+	if err != nil || digest != headerDigest || header.InitialReadMode != k12.RecognitionLayoutManifestWithContentV1 ||
+		header.AgentName != agent || header.JobID != jobID || header.ParentInvocationID != parent.InvocationID ||
+		header.ParentRequestDigest != parent.RequestDigest || header.RouteSnapshot != parent.RouteSnapshot ||
+		header.RequestPolicySnapshot != parent.RequestPolicySnapshot ||
+		header.PhysicalCallCapMillis != fields.BudgetSnapshot.PhysicalCallCapMillis ||
+		header.BudgetBuckets != fields.BudgetSnapshot.RecognizingBuckets ||
+		header.AdapterWorkerHardCap != fields.BudgetSnapshot.WorkerHardCap ||
+		header.EffectiveConcurrency != fields.BudgetSnapshot.EffectiveConcurrency {
+		return false, nil
+	}
+	source, err := getModelPhysicalInvocationByIDVia(ctx, q, agent, sourceID)
+	if err != nil {
+		return false, err
+	}
+	if source.JobID != jobID || source.ParentInvocationID != parent.InvocationID ||
+		source.PhysicalUnit != k12.RecognitionPhysicalUnitWholePage || source.RecognitionPlanVersion != k12.RecognitionPlanVersionV2 ||
+		source.Status != k12.ModelInvocationSucceeded || source.FailureKind != "" || source.ResultDigest != resultDigest ||
+		source.PlanDigest != headerDigest || source.RouteSnapshot != parent.RouteSnapshot || source.RequestPolicySnapshot != parent.RequestPolicySnapshot {
+		return false, nil
+	}
+	var blocked int
+	if err := q.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM k12_model_invocations
+		WHERE agent_name=? AND job_id=? AND stage='recognizing' AND attempt>?)
+		OR EXISTS(SELECT 1 FROM k12_grading_assessment_items WHERE agent_name=? AND job_id=?)`,
+		agent, jobID, fields.AttemptCount, agent, jobID).Scan(&blocked); err != nil {
+		return false, err
+	}
+	var content sql.NullString
+	if err := q.QueryRowContext(ctx, `SELECT result_content FROM k12_model_physical_invocations
+		WHERE agent_name=? AND physical_invocation_id=?`, agent, sourceID).Scan(&content); err != nil {
+		return false, err
+	}
+	return blocked == 0 && content.Valid && physicalInvocationResultDigest(content.String) == resultDigest &&
+		recognitionInitialObservationProjectionReplayable(content.String), nil
 }

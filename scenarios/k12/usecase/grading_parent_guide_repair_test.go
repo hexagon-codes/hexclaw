@@ -229,6 +229,63 @@ func TestFailedParentGuideRepairOnlyMissingTeaching(t *testing.T) {
 	}
 }
 
+func TestFailedParentGuideRepairVerifiedAnswerDespiteRejectedProcess(t *testing.T) {
+	for _, state := range []string{"same_answer", "different_answer", "missing_execution", "non_numeric", "out_of_scope"} {
+		t.Run(state, func(t *testing.T) {
+			ctx := t.Context()
+			o, run, job, solver := newParentGuideRepairFixture(t, 1)
+			solver.disagree = true
+			if state == "different_answer" {
+				solver.guideAnswer = "3张纸"
+			}
+			failed := failParentGuideRepairFixture(t, o, run, job)
+			before := gradingVerifierResponseRows(t, o, job)
+			resumed := retryParentGuideRepairFixture(t, o, failed)
+			q := run.questions[0]
+			req := photoItemGradeRequest(run.req, q)
+			req.StudentAnswer = ""
+			solved, _, err := executeDurableSolveOperation(ctx, o, o.deps, resumed, q, req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if state == "missing_execution" {
+				solved.Evidence.VerificationRunID = ""
+			} else if state == "non_numeric" {
+				solved.Evidence.EvidenceType = EvidenceNone
+			} else if state == "out_of_scope" {
+				solved.Evidence.Verdict = VerdictOutOfScope
+			}
+			original := struct {
+				ExecutionKind k12.GradingExecutionKind   `json:"execution_kind"`
+				InputDigest   string                     `json:"input_digest"`
+				Request       ParentTeachingGuideRequest `json:"request"`
+				Generation    *SolveGeneration           `json:"generation,omitempty"`
+			}{k12.GradingExecutionLocalDeterministic, q.InputDigest, o.deps.parentTeachingGuideRequest(ctx, req, solved, GradeOutcome{}), solved.Generation}
+			gen, audit := &parentGuideRepairGenerator{}, &parentGuideRepairAuditor{}
+			o.deps.ParentTeachingGuide, o.deps.ParentTeachingGuideAudit = gen, audit
+			guide, _, selected, err := executeDurableParentTeachingGuideRepair(ctx, o, o.deps, resumed, q, req, solved, original)
+			if state != "same_answer" {
+				if err != nil || selected || len(gen.requests) != 0 || len(audit.requests) != 0 {
+					t.Fatalf("unverified answer entered guide repair: selected=%t err=%v", selected, err)
+				}
+				return
+			}
+			if err != nil || !selected || !reflect.DeepEqual(guide, solveTeachingNumericGuide()) || len(gen.requests) != 1 || len(audit.requests) != 1 {
+				t.Fatalf("verified same answer could not repair rejected teaching: selected=%t err=%v guide=%+v", selected, err, guide)
+			}
+			after := gradingVerifierResponseRows(t, o, resumed)
+			assertParentGuideRepairHistory(t, before, after)
+			if !reflect.DeepEqual(solveTeachingMathRows(before), solveTeachingMathRows(after)) || solver.numericChecks != 1 {
+				t.Fatal("guide repair reran successful mathematics")
+			}
+			item, err := o.assessDurablePhotoItem(ctx, o.deps, resumed, run.req, PhotoModeSolve, q)
+			if err != nil || item.ParentGuide == nil || !reflect.DeepEqual(*item.ParentGuide, guide) || len(gen.requests) != 1 || len(audit.requests) != 1 {
+				t.Fatalf("audited repaired method was overwritten during assessment: item=%+v err=%v", item, err)
+			}
+		})
+	}
+}
+
 func TestFailedParentGuideRepairDurableRestartReusesGeneration(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	o, run, job, solver := newParentGuideRepairFixture(t, 1)

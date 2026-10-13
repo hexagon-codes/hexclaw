@@ -20,11 +20,13 @@ func TestSaveAssistantReply_ReplySafeMetadataSurvivesReload(t *testing.T) {
 		t.Fatal(err)
 	}
 	record := `{"collection":"mistake","status":"reviewing"}`
+	teaching := `[{"name":"math-tutor","version":"1","status":"loaded"}]`
 	if _, err := mgr.SaveAssistantReply(ctx, sess.ID, "已加入错题本", AssistantMeta{
 		ReplyMetadata: map[string]string{
-			"record":       record,
-			"routed_agent": "internal-agent-must-not-leak",
-			"secret":       "must-not-persist",
+			"teaching_context_receipts": teaching,
+			"record":                    record,
+			"routed_agent":              "internal-agent-must-not-leak",
+			"secret":                    "must-not-persist",
 		},
 	}); err != nil {
 		t.Fatalf("SaveAssistantReply: %v", err)
@@ -45,6 +47,9 @@ func TestSaveAssistantReply_ReplySafeMetadataSurvivesReload(t *testing.T) {
 	}
 	if got, _ := persisted["record"].(string); got != record {
 		t.Fatalf("reply-safe record metadata did not survive save/reload: got %q want %q", got, record)
+	}
+	if got, _ := persisted["teaching_context_receipts"].(string); got != teaching {
+		t.Fatalf("teaching context did not survive save/reload: got %q want %q", got, teaching)
 	}
 	if _, ok := persisted["routed_agent"]; ok {
 		t.Fatal("non-whitelisted routed_agent must not persist in assistant reply metadata")

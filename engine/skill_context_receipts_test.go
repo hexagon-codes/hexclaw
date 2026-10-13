@@ -2,6 +2,8 @@ package engine
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -103,6 +105,93 @@ func TestSkillContextReceiptsTier3RequiresActualProviderConsumption(t *testing.T
 				t.Fatal("repeat projection duplicated the same consumption receipt")
 			}
 		})
+	}
+}
+
+func TestSolveTeachingContextRequiresConsumedAndVerifiedFallback(t *testing.T) {
+	for _, state := range []string{"verified", "unconsumed", "no_execution", "out_of_scope"} {
+		t.Run(state, func(t *testing.T) {
+			ctx := withToolReplyMetaSink(t.Context())
+			registry := newTier3ReceiptRegistry(t)
+			view, err := NewSkillViewSkill(registry).Execute(ctx, map[string]any{"skill_name": "tier3-method"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if state != "unconsumed" {
+				provider := &tier3ReceiptProvider{}
+				selector := &runtimeProviderSelector{initialProvider: provider, initialName: "test", initialModel: "mock-model"}
+				selection, err := selector.Select(ctx, hruntime.Request{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := selection.Provider.Complete(ctx, llm.CompletionRequest{Messages: []llm.Message{{Role: llm.RoleTool, Content: view.Content}}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			executor := &solveExec{verifierOut: "VERDICT: AGREE\nCOMPUTED: 42", verifierStdout: "COMPUTED: 42\n"}
+			if state == "no_execution" {
+				executor.verifierStdout = ""
+			}
+			if state == "out_of_scope" {
+				executor.verifierOut = "VERDICT: OUT_OF_SCOPE\nCOMPUTED: 42"
+			}
+			solver := NewSolveSkill(executor.fn, nil, WithSolveTeachingContextSelector(func(subject string, receipts []skill.ContextReceipt) []skill.ContextReceipt {
+				if subject != "math" {
+					t.Fatalf("wrong actual tool subject: %q", subject)
+				}
+				return receipts
+			}))
+			result, err := solver.Execute(ctx, map[string]any{"problem": "6×7", "subject": "math", "method_diversity": true})
+			if err != nil || result == nil {
+				t.Fatalf("fallback execution: result=%+v err=%v", result, err)
+			}
+			encoded := result.Metadata[teachingContextReceiptsMetadataKey]
+			if state != "verified" {
+				if encoded != "" {
+					t.Fatalf("untrusted result created teaching context: %s", encoded)
+				}
+				return
+			}
+			var receipts []skill.ContextReceipt
+			if json.Unmarshal([]byte(encoded), &receipts) != nil || len(receipts) != 1 || receipts[0].Name != "tier3-method" || result.Metadata["solve_verification_run_id"] == "" {
+				t.Fatalf("verified fallback lost consumed context: metadata=%+v", result.Metadata)
+			}
+		})
+	}
+}
+
+func TestSolveDisagreementKeepsExecutionBindingWithoutTeachingClaim(t *testing.T) {
+	executor := &solveExec{
+		solverOuts:     []string{"原过程声称调用了没有记录的工具。\n答案：5段"},
+		verifierOut:    "VERDICT: DISAGREE\nPROCESS: INVALID\nCOMPUTED: 5段",
+		verifierStdout: "COMPUTED: 5段\n",
+	}
+	result, err := NewSolveSkill(executor.fn, nil).Execute(t.Context(), map[string]any{
+		"problem": "总长3/2米，每段3/10米，求段数。", "subject": "math", "self_consistency": 1,
+	})
+	if err != nil || result == nil {
+		t.Fatalf("solve execution: result=%+v err=%v", result, err)
+	}
+	metadata := result.Metadata
+	if metadata["solve_verdict"] != "disagree" || metadata["solve_evidence"] != "numeric_exec" {
+		t.Fatalf("execution changed the rejected process judgment: %+v", metadata)
+	}
+	if metadata["solve_primary_digest"] == "" || metadata["solve_verification_input_digest"] == "" || metadata["solve_verification_run_id"] == "" {
+		t.Fatalf("successful physical evidence lost its binding on disagreement: %+v", metadata)
+	}
+	primary := sha256.Sum256([]byte(executor.solverOuts[0]))
+	var verifierTask string
+	for _, spec := range executor.specs {
+		if spec.Agent == verifierAgentName {
+			verifierTask = spec.Task
+		}
+	}
+	verification := sha256.Sum256([]byte(verifierTask))
+	if metadata["solve_primary_digest"] != hex.EncodeToString(primary[:]) || metadata["solve_verification_input_digest"] != hex.EncodeToString(verification[:]) || metadata["solve_verification_run_id"] != "fixture-execution" {
+		t.Fatalf("execution binding differs from actual inputs: %+v", metadata)
+	}
+	if metadata[teachingContextReceiptsMetadataKey] != "" {
+		t.Fatal("a rejected process must not claim teaching context")
 	}
 }
 

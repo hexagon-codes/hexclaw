@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math/big"
 	"reflect"
@@ -26,6 +27,8 @@ type solveTeachingPhysicalSolver struct {
 	numeric       bool
 	noGeneration  bool
 	numericChecks int
+	disagree      bool
+	guideAnswer   string
 }
 
 func (s *solveTeachingPhysicalSolver) FreezeSolveTeachingContract(context.Context, string, string) (string, error) {
@@ -62,6 +65,9 @@ func (s *solveTeachingPhysicalSolver) Solve(ctx context.Context, problem, _, _ s
 			solution := "## 完整方法\n先数出两个单位。\n## 答案\n**2**"
 			if s.numeric {
 				solution = "## 完整方法\n每朵用1/2张纸，4朵共用1/2×4=2张纸。\n## 答案\n**2张纸**"
+			}
+			if s.disagree {
+				solution = "## 完整方法\n声称执行了未记录的工具。\n## 答案\n**2张纸**"
 			}
 			digest := sha256.Sum256([]byte(solution))
 			result := SolveResult{Solution: solution, Evidence: SolveEvidence{
@@ -102,8 +108,17 @@ func (s *solveTeachingPhysicalSolver) Solve(ctx context.Context, problem, _, _ s
 				}
 				s.numericChecks++
 				generated.Evidence.Verdict, generated.Evidence.EvidenceType = VerdictAgree, EvidenceNumericExec
+				if s.disagree {
+					generated.Evidence.Verdict = VerdictDisagree
+					digest := sha256.Sum256([]byte(problem + "\x00" + generated.Solution))
+					generated.Evidence.VerificationInputDigest = hex.EncodeToString(digest[:])
+					generated.Evidence.VerificationRunID = fmt.Sprintf("numeric-fixture-%d", s.numericChecks)
+				}
 			}
 			if generated.Generation != nil {
+				if s.guideAnswer != "" {
+					generated.Generation.ParentGuideCandidate.Answer = s.guideAnswer
+				}
 				generated.Generation.GuideAudit = s.audit
 			}
 			return generated, nil

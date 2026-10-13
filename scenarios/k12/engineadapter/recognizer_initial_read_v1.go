@@ -22,7 +22,7 @@ import (
 // 同一次整页读取同时提供目录与观察事实，作答归属不能从求解结果反推。
 const recognitionLayoutInitialReadPromptV1 = `Read this original worksheet page once and return its complete layout manifest AND the first transcription for every manifest target in the SAME JSON response. Do not solve, grade, correct, or infer any answer.
 Return exactly {"targets":[{"manifest_ref":"manifest_0001","manifest_order":1,"source_number_path":["1"],"display_label":"1.","source_section_path":[],"source_section_label":"","region":{"x":0,"y":0,"width":1,"height":1},"initial_read":{"kind":"question","recognition":{"question":"complete printed question including its shared conditions","subject":"数学","answer_state":"present","student_answer":"all active handwritten working and final answer","recognition_confidence":0.99,"ocr_signals":[],"answer_bbox":{"x":0,"y":0,"width":1,"height":1}},"shared_conditions":"verbatim printed conditions shared with this target, or empty","answer_ownership":"visible source evidence distinguishing this target's active handwriting from printed examples, cancelled work and neighboring handwriting"}}]}.
-Number manifest_ref consecutively from manifest_0001, and manifest_order consecutively from 1; every reference has exactly one initial_read. List all independently answerable targets from top to bottom and left to right within each row, splitting each compound subquestion and preserving its shared conditions. Section headings, headers and decoration are not targets. Never omit, duplicate, merge or invent targets. Copy only visibly printed numbering and owning section into their paired path/label fields; without such evidence use [] and "" together. Source numbering and section describe printed identity, not the student's answer. region and answer_bbox use ABSOLUTE integer pixels in this original page. region must contain the complete target and its answer area; shared conditions must also be copied into question so the target remains independently understandable. answer_bbox is the tight rectangle around this target's active final handwriting (or working when no final value), never printed text or the whole question rectangle; use null for blank, unclear or uncertain location.
+Number manifest_ref consecutively from manifest_0001, and manifest_order consecutively from 1; every reference has exactly one initial_read. List all independently answerable targets from top to bottom and left to right within each row, splitting subquestions only when each has its own visibly printed stable subquestion label, and preserving its shared conditions. When one printed question number owns multiple unlabelled question sentences or requested quantities, keep the complete printed question and ALL of its active handwritten answers together as ONE target. Never create separate targets for those unlabelled sentences or quantities, duplicate their shared printed number/region, or invent child numbering. For visibly labelled subquestions preserve the complete printed number hierarchy. Section headings, headers and decoration are not targets. Never omit, duplicate, merge or invent targets. Copy only visibly printed numbering and owning section into their paired path/label fields; without such evidence use [] and "" together. Source numbering and section describe printed identity, not the student's answer. region and answer_bbox use ABSOLUTE integer pixels in this original page. region must contain the complete target and its answer area; shared conditions must also be copied into question so the target remains independently understandable. answer_bbox is the tight rectangle around this target's active final handwriting (or working when no final value), never printed text or the whole question rectangle; use null for blank, unclear or uncertain location.
 For a question, recognition has exactly question, subject, answer_state, student_answer, recognition_confidence, ocr_signals, answer_bbox. For a genuine title/instruction/decoration target use kind=non_question and recognition=null. Subject is 数学/语文/英语/物理/化学 or empty. Preserve every printed fraction numerator/bar/denominator, decimal, operator and unit. Keep TeX enclosed in \\( ... \\) or \\[ ... \\] and escape JSON only once. Do not infer clipped glyphs from arithmetic or handwriting.
 student_answer transcribes ALL active handwritten working lines in order, including incorrect steps and final answer, separated by newlines. Printed worked examples, printed answers, printed cancellation/simplification marks and nearby handwriting are not this target's student answer. Clearly crossed-out abandoned work is not the active answer. If ownership or cancellation is uncertain, preserve it in ocr_signals instead of guessing. answer_state is present only for legible active handwriting; blank/unclear require student_answer="". Empty answer space does not lower confidence in clear printed text. Confidence and ocr_signals describe unresolved source/active-answer risks, not routine descriptions.
 Distinguish abandoned work from fraction-reduction notation by the visible extent of the strokes. Omit a written fraction or equality step only when it is clearly crossed out as a whole; also omit an equals sign belonging solely to that abandoned step. Slashes through individual numerators or denominators with replacement numerals are reduction notation in a still-active expression, not abandonment of the whole step. Do not invent an extra equality step from those annotations. Retain all readable active handwritten work, including incorrect steps or reductions. Never decide that a step is cancelled because its mathematics is wrong. If cancellation remains genuinely ambiguous, preserve that uncertainty in ocr_signals rather than choosing a reading or declaring the active answer complete.
@@ -45,29 +45,9 @@ func parseRecognitionInitialReadEnvelopeV1(raw string) ([]recognitionInitialRead
 	seen := make(map[string]bool, len(entries))
 	result := make([]recognitionInitialReadEntryV1, 0, len(entries))
 	for _, entry := range entries {
-		var fields map[string]json.RawMessage
-		if json.Unmarshal(entry, &fields) != nil {
-			return fail("target is not an object")
-		}
-		read, exists := fields["initial_read"]
-		if !exists {
-			return fail("target has no matching first read")
-		}
-		delete(fields, "initial_read")
-		// 同一观察的冗余位置仅在值完全一致时消除，原始回执仍完整保留。
-		for _, key := range []string{"shared_conditions", "answer_ownership"} {
-			if duplicate, exists := fields[key]; exists {
-				var observation map[string]json.RawMessage
-				var outer, inner string
-				if json.Unmarshal(read, &observation) != nil || json.Unmarshal(duplicate, &outer) != nil || json.Unmarshal(observation[key], &inner) != nil || outer != inner {
-					return fail("duplicate observation fields conflict")
-				}
-				delete(fields, key)
-			}
-		}
-		manifestJSON, err := json.Marshal(fields)
+		manifestJSON, read, _, err := k12.ProjectRecognitionLayoutInitialObservationV1(entry)
 		if err != nil {
-			return fail("manifest cannot be encoded")
+			return nil, err
 		}
 		manifest, err := parseRecognitionLayoutManifestTargetV2(manifestJSON)
 		if err != nil || manifest.ManifestRef == "" || seen[manifest.ManifestRef] {

@@ -67,11 +67,12 @@ type completedSourceFixture struct {
 }
 
 type completedSourceImageFixture struct {
-	data         []byte
-	rawReader    bool
-	unannotated  bool
-	frozenDigest string
-	frozenOwner  string
+	data          []byte
+	rawReader     bool
+	unannotated   bool
+	frozenDigest  string
+	frozenOwner   string
+	messageLocale string
 }
 
 func prepareCompletedSourceFixture(t *testing.T) completedSourceFixture {
@@ -108,6 +109,7 @@ func prepareCompletedSourceFixtureForIntent(t *testing.T, intent k12.ImageTaskIn
 	in.OwnerScope = "guardian-final"
 	in.SourceRef = "source-correction"
 	in.SourceAssetRefs = []string{original.Metadata.PageAssetID}
+	in.RouteRequest.MessageLocale = sourceImage.messageLocale
 	view, _, err := coordinator.Create(ctx, in)
 	if err != nil {
 		t.Fatal(err)

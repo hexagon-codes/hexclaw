@@ -243,13 +243,19 @@ func (s *SolveSkill) executeSolveProgram(ctx context.Context, plan solveProgramP
 		"solve_primary_digest": executionInputDigest(plan.Worked), "solve_verification_input_digest": executionInputDigest(spec.Task),
 		"solve_verification_run_id": result.ExecutionReceipt.RunID,
 	}}
-	if s.teachingContextSelector != nil {
-		receipts := s.teachingContextSelector("math", ConsumedSkillContextReceipts(ctx))
-		if encoded, err := json.Marshal(receipts); err == nil && len(receipts) > 0 {
-			resolved.Metadata[teachingContextReceiptsMetadataKey] = string(encoded)
-		}
-	}
+	s.appendTeachingContextReceipt(ctx, "math", resolved.Metadata)
 	return resolved, nil
+}
+
+// 本题指导只关联已消费上下文和成功的独立数值执行，不以模型自报或加载名单补足。
+func (s *SolveSkill) appendTeachingContextReceipt(ctx context.Context, subject string, metadata map[string]string) {
+	if s.teachingContextSelector == nil || metadata["solve_verdict"] != "agree" || metadata["solve_evidence"] != "numeric_exec" || metadata["solve_verification_run_id"] == "" {
+		return
+	}
+	receipts := s.teachingContextSelector(subject, ConsumedSkillContextReceipts(ctx))
+	if encoded, err := json.Marshal(receipts); err == nil && len(receipts) > 0 {
+		metadata[teachingContextReceiptsMetadataKey] = string(encoded)
+	}
 }
 
 func wordProgram(expressions []string, units []string) string {

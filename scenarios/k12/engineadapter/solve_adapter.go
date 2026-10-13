@@ -161,7 +161,7 @@ func (a *SolveAdapter) withGradingPhysicalCallInterceptor(ctx context.Context) c
 			}
 			digestRaw := sha256.Sum256(requestRaw)
 			var knownExecutionFailure func(string) error
-			if operation == k12.GradingItemOperationSolveVerify {
+			if operation == k12.GradingItemOperationSolveVerify || operation == k12.GradingItemOperationSolveGenerate {
 				inputDigest := sha256.Sum256([]byte(spec.Task))
 				knownExecutionFailure = func(payload string) error {
 					var result engine.SubAgentResult

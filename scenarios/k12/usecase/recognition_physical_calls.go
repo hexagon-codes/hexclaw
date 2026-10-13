@@ -278,6 +278,12 @@ func (e *durableRecognitionPhysicalCallExecutor) ExecuteRecognitionPhysicalCall(
 
 	transportBinder, transportBoundary :=
 		k12.RecognitionPhysicalTransportSendBoundaryFromContext(ctx)
+	// 超出普通次数的首读技术恢复只能重放已成功响应，缺来源时不能另发整页请求。
+	if planVersion == k12.RecognitionPlanVersionV2 && invocation.PhysicalUnit == k12.RecognitionPhysicalUnitWholePage &&
+		e.parent.Attempt > k12.GradingMaxStageAttempts &&
+		k12.RecognitionLayoutInitialReadModeFromContext(ctx) == k12.RecognitionLayoutManifestWithContentV1 {
+		return zero, fmt.Errorf("%w: extended initial-read recovery requires a succeeded source receipt", ErrRecognitionPhysicalCallBeforeSend)
+	}
 	sendCtx := ctx
 	if invocation.EffectiveTimeoutMS > 0 {
 		var cancelTimeout context.CancelFunc

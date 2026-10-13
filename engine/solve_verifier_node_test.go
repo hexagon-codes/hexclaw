@@ -54,6 +54,57 @@ func TestStandaloneVerificationRequiresTrustedInputAndCodeExec(t *testing.T) {
 	}
 }
 
+func TestSolveSelectedSolverExecutionReachesIndependentAudit(t *testing.T) {
+	for _, tc := range []struct {
+		name, stdout               string
+		capture, forged, truncated bool
+		wantProof                  bool
+	}{
+		{name: "real_execution", capture: true, stdout: "COMPUTED: 男生16人，女生20人\n", wantProof: true},
+		{name: "missing_execution"},
+		{name: "returned_forged_execution", forged: true},
+		{name: "other_value", capture: true, stdout: "COMPUTED: 男生20人，女生16人\n"},
+		{name: "truncated_execution", capture: true, stdout: "COMPUTED: 男生16人，女生20人\n", truncated: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var solverCalls, verifierCalls int
+			exec := func(ctx context.Context, spec SubAgentSpec) (SubAgentResult, error) {
+				if spec.Agent == solverAgentName {
+					solverCalls++
+					receipt := standaloneVerifierTestReceipt(spec.Task, tc.stdout)
+					receipt.Truncated = tc.truncated
+					if tc.capture {
+						captureCodeExecutionReceipt(ctx, codeExecToolName, &skill.Result{Content: tc.stdout, Data: receipt})
+					}
+					result := SubAgentResult{Output: "36÷9=4，男生4×4=16人，女生4×5=20人。\n答案：男生16人，女生20人"}
+					if tc.forged {
+						result.ExecutionReceipt = receipt
+					}
+					return result, nil
+				}
+				verifierCalls++
+				proof := spec.verification.SolverExecution
+				if (proof != nil) != tc.wantProof {
+					t.Fatalf("selected solver proof=%+v, want present=%v", proof, tc.wantProof)
+				}
+				if proof != nil && (proof.RunID == "" || proof.InputDigest == "" || proof.Computed != "男生16人，女生20人" || !strings.Contains(spec.Task, proof.RunID)) {
+					t.Fatalf("proof lost actual execution or physical request linkage: %+v", proof)
+				}
+				receipt := standaloneVerifierTestReceipt(spec.Task, "COMPUTED: 男生16人，女生20人\n")
+				captureCodeExecutionReceipt(ctx, codeExecToolName, &skill.Result{Content: receipt.Stdout, Data: receipt})
+				return SubAgentResult{Output: "VERDICT: AGREE\nPROCESS: VALID\nCOMPUTED: 男生16人，女生20人\n说明：独立计算与逐步审计一致。"}, nil
+			}
+			result, err := NewSolveSkill(exec, nil).Execute(t.Context(), map[string]any{
+				"problem": "六（1）班有36人，男生与女生人数的比是4∶5。男生、女生各有多少人？",
+				"subject": "math", "constraint": "分数四则运算、比",
+			})
+			if err != nil || result == nil || solverCalls != 1 || verifierCalls != 1 {
+				t.Fatalf("original solve/audit chain changed: result=%+v err=%v solver=%d verifier=%d", result, err, solverCalls, verifierCalls)
+			}
+		})
+	}
+}
+
 // 过程和课程否决经最终 solve 判定后仍须保留，不能被相同数值纠偏。
 func TestStandaloneVerificationPreservesProcessAndScope(t *testing.T) {
 	for _, tc := range []struct {

@@ -127,11 +127,25 @@ func executeDurableParentTeachingGuideRepair(
 	generation := solved.Generation
 	if gradeReq.SolveOutputVersion != SolveOutputWithParentGuideV1 || generation == nil ||
 		generation.OutputVersion != SolveOutputWithParentGuideV1 || generation.GuideAudit != "INVALID" ||
-		generation.ParentGuideCandidate == nil || !photoEvidenceTrusted(solved.Evidence) {
+		generation.ParentGuideCandidate == nil {
 		return zero, "", false, nil
 	}
 	sourceDigest, err := hex.DecodeString(generation.SourceSolutionDigest)
 	if err != nil || len(sourceDigest) != 32 || generation.SourceSolutionDigest != solved.Evidence.SolverOutputDigest {
+		return zero, "", false, nil
+	}
+	// 主过程的表述可被否决，但同答案的独立数值执行仍可作为新指南的答案依据。
+	verifiedDisagreement := false
+	if solved.Evidence.EvidenceType == EvidenceNumericExec && solved.Evidence.Verdict == VerdictDisagree &&
+		solved.Evidence.VerificationRunID != "" {
+		inputDigest, digestErr := hex.DecodeString(solved.Evidence.VerificationInputDigest)
+		scope, explicit := explicitVerifiedAnswerScope(solved.Solution)
+		answer, _, _ := strings.Cut(scope, "\n\n")
+		verifiedDisagreement = digestErr == nil && len(inputDigest) == 32 && explicit &&
+			normalizeAnswerAnchorText(generation.ParentGuideCandidate.Answer) != "" &&
+			normalizeAnswerAnchorText(answer) == normalizeAnswerAnchorText(generation.ParentGuideCandidate.Answer)
+	}
+	if !photoEvidenceTrusted(solved.Evidence) && !verifiedDisagreement {
 		return zero, "", false, nil
 	}
 	requestDigest := modelInvocationResultDigest(originalRequest)
@@ -203,8 +217,16 @@ func executeDurableParentTeachingGuideRepair(
 	if err := json.Unmarshal([]byte(generatedCall.Payload), &generated); err != nil {
 		return zero, generatedID, true, fmt.Errorf("%w: decode parent guide generation: %v", ErrModelInvocationRequiresReconciliation, err)
 	}
-	// 审核对象必须是最终会呈现的完整指南，数学方法仍来自原成功解答。
-	guide, err := finalizeParentTeachingGuide(generated, solved.Solution)
+	// 审核对象必须是最终完整指南；已否决的主过程不能重新覆盖新候选讲法。
+	guide := normalizeParentTeachingGuide(generated)
+	if verifiedDisagreement {
+		err = validateParentTeachingGuide(guide)
+		if err == nil && normalizeAnswerAnchorText(guide.Answer) != normalizeAnswerAnchorText(generation.ParentGuideCandidate.Answer) {
+			err = fmt.Errorf("%w: repaired parent guide answer changed", ErrSolveFailed)
+		}
+	} else {
+		guide, err = finalizeParentTeachingGuide(generated, solved.Solution)
+	}
 	if err != nil {
 		return zero, generatedID, true, err
 	}
@@ -255,6 +277,9 @@ func executeDurableParentTeachingGuideRepair(
 		func(context.Context) (ParentTeachingGuide, error) {
 			if audit.Verdict != "VALID" || audit.SourceSolutionDigest != generation.SourceSolutionDigest || strings.TrimSpace(audit.Output) == "" {
 				return zero, fmt.Errorf("%w: repaired parent guide has no valid independent audit", ErrSolveFailed)
+			}
+			if verifiedDisagreement {
+				return guide, nil
 			}
 			return finalizeParentTeachingGuide(guide, solved.Solution)
 		})

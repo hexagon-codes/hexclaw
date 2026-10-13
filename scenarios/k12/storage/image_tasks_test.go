@@ -102,6 +102,8 @@ func TestImageTaskPrepareIsIdempotentAndRouteImmutable(t *testing.T) {
 	store, _ := setup(t)
 	ctx := context.Background()
 	dispatch := testImageTaskDispatch()
+	dispatch.OperationRouteRequest = testImageRoute()
+	dispatch.OperationRouteRequest.MessageLocale = "en"
 	invocation := k12.ImageTaskInvocation{
 		InvocationID: "invocation-classify-1", AgentName: "mingming",
 		DispatchID: "dispatch-1", Operation: k12.ImageTaskOperationClassification,
@@ -117,6 +119,10 @@ func TestImageTaskPrepareIsIdempotentAndRouteImmutable(t *testing.T) {
 	replay, created, err := store.PrepareImageTaskDispatch(ctx, dispatch, invocation)
 	if err != nil || created || replay.DispatchID != dispatch.DispatchID {
 		t.Fatalf("replay got=%+v created=%v err=%v", replay, created, err)
+	}
+	stored, err := store.GetImageTaskDispatch(ctx, dispatch.AgentName, dispatch.DispatchID)
+	if err != nil || stored.OperationRouteRequest != dispatch.OperationRouteRequest || replay.OperationRouteRequest != dispatch.OperationRouteRequest {
+		t.Fatalf("automatic route request lost after SQLite read: stored=%+v replay=%+v err=%v", stored.OperationRouteRequest, replay.OperationRouteRequest, err)
 	}
 
 	changed := dispatch

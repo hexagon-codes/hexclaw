@@ -1187,13 +1187,18 @@ func TestImageTaskCoordinatorRoutesHomeworkToInternalGradingWithoutLeakingModelC
 	}
 	grading.jobID = persistedJob.Record.RecordID
 
-	view, created, err := createAndRunImageTask(t, coordinator, testCreateImageTaskInput())
+	input := testCreateImageTaskInput()
+	input.RouteRequest.MessageLocale = "en"
+	view, created, err := createAndRunImageTask(t, coordinator, input)
 	if err != nil || !created {
 		t.Fatalf("Create: view=%+v created=%v err=%v", view, created, err)
 	}
 	if view.Dispatch.TaskIntent != k12.ImageTaskIntentCompletedHomework ||
 		view.Dispatch.TargetObjectType != k12.ImageTaskTargetHomeworkSubmission {
 		t.Fatalf("wrong public dispatch: %+v", view.Dispatch)
+	}
+	if view.Dispatch.OperationRouteRequest.MessageLocale != "en" || view.Dispatch.ClassificationRouteSnapshot.MessageLocale != "en" {
+		t.Fatalf("homework route lost frozen locale: %+v", view.Dispatch)
 	}
 	if grading.starts != 1 || grading.async != 1 {
 		t.Fatalf("grading start=%d async=%d", grading.starts, grading.async)

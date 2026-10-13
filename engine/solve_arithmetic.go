@@ -156,6 +156,7 @@ func normalizeTrivialArithmetic(problem string) (expr, display string, ok bool) 
 	s := strings.TrimSpace(problem)
 	// 这一固定印刷指令只要求计算结果化简；原题仍保留，后续只解析完整算式。
 	s = strings.TrimSpace(strings.TrimPrefix(s, "把下面每题的得数化简："))
+	s = strings.TrimSpace(strings.TrimPrefix(s, "计算下面各题，能简算的要简算："))
 	if s == "" || len(s) > 256 {
 		return "", "", false
 	}
@@ -168,10 +169,10 @@ func normalizeTrivialArithmetic(problem string) (expr, display string, ok bool) 
 	s = itemNumberPrefixRe.ReplaceAllString(s, "")
 	// 完整单行包装允许算符旁空白，但不能将分隔数字或题号拼入算式。
 	if matches := standaloneArithmeticRequestRe.FindStringSubmatch(s); len(matches) == 2 {
-		if separatedArithmeticNumberRe.MatchString(matches[1]) {
-			return "", "", false
-		}
 		s = matches[1]
+	}
+	if separatedArithmeticNumberRe.MatchString(s) {
+		return "", "", false
 	}
 	if i := strings.IndexByte(s, '='); i >= 0 {
 		// 只接受“表达式=”或“表达式=?”；已有等式/方程不是纯求值题。

@@ -626,7 +626,10 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 		if err != nil {
 			return item, err
 		}
-		guide, err := finalizeSolveParentTeachingGuide(rawGuide, solved)
+		guide := rawGuide
+		if !repaired {
+			guide, err = finalizeSolveParentTeachingGuide(rawGuide, solved)
+		}
 		if err != nil {
 			return item, err
 		}

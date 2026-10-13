@@ -192,7 +192,9 @@ POST 使用刚读取的 fingerprint，显式接受可能重复计费。Idempoten
 
 仅重试有持久安全重试依据的失败调用，复用冻结模型/输入。未知调用不可用此命令重发；先查询原任务/回执。返回投影仍须继续核对最终产物。
 
-`intent` 省略或为空时保留普通重试语义。固定 `known_local_technical` 只恢复同账户、同实例、同 dispatch 当前版本绑定的原 job：必须为 `failed_terminal`、失败阶段 `assessing`、阶段计数已达到正常上限 3，当前输入最新代次的物理调用为 `failed/local/provider_response_processed` 且无结果。旧历史失败或成功回执不能代替当前资格；例如计数 4 只有旧代次 3001 的失败回执仍拒绝。任何未知、在途或无依据对账回执、已有终稿、成功 assessing 检查点均拒绝。服务从认证上下文派生账户，不接受客户端账户、模型或新任务身份。
+`intent` 省略或为空时保留普通重试语义。固定 `known_local_technical` 只恢复同账户、同实例、同 dispatch 当前版本绑定的原 job：必须为 `failed_terminal`、失败阶段 `assessing`、阶段计数已达到正常上限 3，当前输入最新失败操作为空结果，属于 Provider 的 `failed/local/provider_response_processed`（operation_attempt/1000 等于当前计数），或指南的 `parent_guide/local_deterministic/failed/local_execution/deterministic_failed`（operation_attempt 等于当前计数）。其他本地操作不接纳。旧历史失败或成功回执不能代替当前资格；例如计数 4 只有旧 Provider 代次 3001 或本地指南代次 3 的失败回执仍拒绝。任何未知、在途或无依据对账回执、已有终稿、成功 assessing 检查点均拒绝。服务从认证上下文派生账户，不接受客户端账户、模型或新任务身份。
+
+同一意图也接纳 `failed_terminal/recognizing` 的当前同源观察投影技术失败：普通次数已耗尽、确认仍pending、仅normalizing检查点，最新逻辑识题为failed且无结果；其首读整页物理响应必须succeeded、原字节摘要一致、header/页面/冻结模型与策略相同且尚无计划授权或首读结算，并可证明只有观察字符串错层。双CAS恢复不改旧回执，新整页项必须复用该来源，缺复用证据不得重新整页调用。任何未知／在途、已结算或终稿仍拒绝；复核与后续领域处理继续原预算。
 
 父任务新窗口与原 job `queued` 在一个双版本 CAS 事务提交后才启动；运行对象不可恢复或调度生命周期已关闭时零写入。保持完整冻结模型、预算、输入、历史调用和 assessment；当前计数不清零，新调用代次为当前计数加一：计数 3→代次 4，计数 4 且当前 4001 明确失败→代次 5。普通 max3 和终态状态机保持不变。同版本重复请求返回 `409`；结果未知时只查询，不能再次提交恢复。`200` 只表示恢复已接纳，仍需原任务最终产物与交付回执。
 

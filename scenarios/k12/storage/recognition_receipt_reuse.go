@@ -1,8 +1,10 @@
 package k12storage
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -12,6 +14,75 @@ import (
 	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 )
+
+// 只证明观察字段的唯一值错层可派生投影，完整识题和复核仍由原适配器负责。
+func recognitionInitialObservationProjectionReplayable(content string) bool {
+	entries, err := k12.CanonicalRecognitionLayoutInitialReadEntriesV1(content)
+	if err != nil {
+		return false
+	}
+	moved := false
+	refs, orders, owners := map[string]bool{}, map[int]bool{}, map[string]bool{}
+	for _, entry := range entries {
+		manifestJSON, readJSON, changed, err := k12.ProjectRecognitionLayoutInitialObservationV1(entry)
+		if err != nil {
+			return false
+		}
+		var manifestFields, read map[string]json.RawMessage
+		var target k12.RecognitionLayoutManifestTargetV2
+		if json.Unmarshal(manifestJSON, &manifestFields) != nil || len(manifestFields) != 7 ||
+			json.Unmarshal(manifestJSON, &target) != nil || target.ManifestRef == "" || refs[target.ManifestRef] ||
+			target.ManifestOrder < 1 || target.ManifestOrder > len(entries) || orders[target.ManifestOrder] ||
+			target.SourceNumberPath == nil || target.SourceSectionPath == nil ||
+			target.Region.X < 0 || target.Region.Y < 0 || target.Region.Width <= 0 || target.Region.Height <= 0 ||
+			json.Unmarshal(readJSON, &read) != nil || len(read) != 4 {
+			return false
+		}
+		for _, key := range []string{"manifest_ref", "manifest_order", "source_number_path", "display_label", "source_section_path", "source_section_label", "region"} {
+			if _, exists := manifestFields[key]; !exists {
+				return false
+			}
+		}
+		for _, key := range []string{"shared_conditions", "answer_ownership"} {
+			var value string
+			if bytes.Equal(bytes.TrimSpace(read[key]), []byte("null")) || json.Unmarshal(read[key], &value) != nil {
+				return false
+			}
+		}
+		var kind string
+		if json.Unmarshal(read["kind"], &kind) != nil {
+			return false
+		}
+		switch kind {
+		case "question":
+			var recognition map[string]json.RawMessage
+			if json.Unmarshal(read["recognition"], &recognition) != nil || len(recognition) != 7 {
+				return false
+			}
+			for _, key := range []string{"question", "subject", "answer_state", "student_answer", "recognition_confidence", "ocr_signals", "answer_bbox"} {
+				if _, exists := recognition[key]; !exists {
+					return false
+				}
+			}
+		case "non_question":
+			if !bytes.Equal(bytes.TrimSpace(read["recognition"]), []byte("null")) {
+				return false
+			}
+		default:
+			return false
+		}
+		refs[target.ManifestRef], orders[target.ManifestOrder] = true, true
+		if len(target.SourceNumberPath) != 0 {
+			key := strings.Join(target.SourceSectionPath, "\x00") + "|" + strings.Join(target.SourceNumberPath, "\x00")
+			if owners[key] {
+				return false
+			}
+			owners[key] = true
+		}
+		moved = moved || changed
+	}
+	return moved
+}
 
 // ReuseSucceededRecognitionPhysicalInvocation 在同任务可恢复失败后复用成功清单、主批次、已授权复核或独立裁决。
 // 读取不可变输入证明后，事务内再次确认当前所有权及成功载荷；不进入模型发送边界。
@@ -105,7 +176,17 @@ func (s *Store) ReuseSucceededRecognitionPhysicalInvocation(
 		if loadErr != nil {
 			return current, false, loadErr
 		}
-		if currentPlan.Header.PageDigest != priorPlan.Header.PageDigest || priorPlan.AuthorizedPlan == nil {
+		projectionReplay := false
+		if priorPlan.AuthorizedPlan == nil && current.PhysicalUnit == k12.RecognitionPhysicalUnitWholePage &&
+			prior.Attempt == parent.Attempt-1 && prior.FailureKind == "recognize_failed" &&
+			priorPlan.Header.InitialReadMode == k12.RecognitionLayoutManifestWithContentV1 {
+			content, loadErr := s.LoadSucceededModelPhysicalInvocationResultContent(ctx, agentName, source.PhysicalInvocationID, source.ResultDigest)
+			if loadErr != nil {
+				return current, false, loadErr
+			}
+			projectionReplay = recognitionInitialObservationProjectionReplayable(content)
+		}
+		if currentPlan.Header.PageDigest != priorPlan.Header.PageDigest || (priorPlan.AuthorizedPlan == nil && !projectionReplay) {
 			if partial || isRepair || isAdjudication {
 				return current, false, fmt.Errorf("%w: recognition replay page or authority changed", ErrModelPhysicalInvocationConflict)
 			}

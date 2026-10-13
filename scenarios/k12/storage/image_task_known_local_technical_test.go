@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -100,6 +102,10 @@ func seedKnownLocalRecovery(t *testing.T, reconciledLogical bool, failedCounts .
 		AttemptCount: failedCount, FailureKind: "provider_response_processed", FailedStage: k12.GradingStageAssessing,
 	}
 	job, err := k12.NewGradingJobRecord("mingming", "session-original", fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields, err = k12.ParseGradingJobFields(job.Fields)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -324,6 +330,257 @@ func assertKnownLocalRecoveryOriginalHistory(t *testing.T, f knownLocalRecoveryF
 	assertKnownLocalSnapshotEqual(t, before, after)
 	if k12.GradingMaxStageAttempts != 3 {
 		t.Fatalf("ordinary retry limit changed to %d", k12.GradingMaxStageAttempts)
+	}
+}
+
+func seedKnownLocalGuideRecovery(t *testing.T, count int) knownLocalRecoveryFixture {
+	t.Helper()
+	f := seedKnownLocalRecovery(t, true, count)
+	knownLocalExec(t, f.db, `DELETE FROM k12_grading_item_invocations WHERE item_invocation_id=?`, f.failedItem.InvocationID)
+	item := f.failedItem
+	item.InvocationID = "current-local-guide-failure"
+	item.Operation = k12.GradingItemOperationParentGuide
+	item.ExecutionKind = k12.GradingExecutionLocalDeterministic
+	item.OperationAttempt = count
+	item, created, err := f.store.PrepareGradingItemInvocation(context.Background(), item)
+	if err != nil || !created {
+		t.Fatalf("prepare current local guide: created=%v err=%v", created, err)
+	}
+	if _, err := f.store.MarkGradingItemInvocationSent(context.Background(), "mingming", item.InvocationID); err != nil {
+		t.Fatal(err)
+	}
+	f.failedItem, err = f.store.MarkGradingItemInvocationFailed(context.Background(), "mingming", item.InvocationID,
+		"local_execution", "deterministic_failed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+func TestKnownLocalTechnicalRecoveryCurrentLocalGuide(t *testing.T) {
+	for _, count := range []int{3, 4} {
+		t.Run(fmt.Sprintf("generation_%d", count), func(t *testing.T) {
+			assertKnownLocalRecoveryOriginalHistory(t, seedKnownLocalGuideRecovery(t, count))
+		})
+	}
+	for _, test := range []struct {
+		name   string
+		change func(*testing.T, *knownLocalRecoveryFixture)
+	}{
+		{"old generation", func(t *testing.T, f *knownLocalRecoveryFixture) {
+			knownLocalExec(t, f.db, `UPDATE k12_grading_jobs SET attempt_count=4 WHERE record_id=?`, f.job.RecordID)
+		}},
+		{"other local operation", func(t *testing.T, f *knownLocalRecoveryFixture) {
+			knownLocalExec(t, f.db, `UPDATE k12_grading_item_invocations SET operation='grade' WHERE item_invocation_id=?`, f.failedItem.InvocationID)
+		}},
+		{"different local failure", func(t *testing.T, f *knownLocalRecoveryFixture) {
+			knownLocalExec(t, f.db, `UPDATE k12_grading_item_invocations SET failure_code='provider_timeout' WHERE item_invocation_id=?`, f.failedItem.InvocationID)
+		}},
+		{"result already exists", func(t *testing.T, f *knownLocalRecoveryFixture) {
+			knownLocalExec(t, f.db, `UPDATE k12_grading_item_invocations SET result_json='{}',result_digest='sha256:known-result' WHERE item_invocation_id=?`, f.failedItem.InvocationID)
+		}},
+		{"input changed", func(t *testing.T, f *knownLocalRecoveryFixture) {
+			knownLocalExec(t, f.db, `UPDATE k12_attempts SET input_digest='sha256:changed' WHERE attempt_id=?`, f.failedItem.AttemptID)
+		}},
+		{"physical result unknown", func(t *testing.T, f *knownLocalRecoveryFixture) {
+			knownLocalExec(t, f.db, `UPDATE k12_model_physical_invocations SET status='outcome_unknown',result_content=NULL,result_digest='',failure_kind='provider_result_unknown' WHERE physical_invocation_id=?`, f.physical.PhysicalInvocationID)
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := seedKnownLocalGuideRecovery(t, 3)
+			test.change(t, &f)
+			before := knownLocalDatabaseSnapshot(t, f.db)
+			if _, _, err := f.store.RestoreImageTaskKnownLocalTechnical(context.Background(), f.command); err == nil {
+				t.Fatal("ineligible local guide recovery succeeded")
+			}
+			assertKnownLocalSnapshotEqual(t, before, knownLocalDatabaseSnapshot(t, f.db))
+		})
+	}
+}
+
+func seedKnownRecognitionProjectionRecovery(t *testing.T, conflict bool) knownLocalRecoveryFixture {
+	t.Helper()
+	f := seedKnownLocalRecovery(t, true)
+	knownLocalExec(t, f.db, `DELETE FROM k12_grading_assessment_items WHERE job_id=?`, f.job.RecordID)
+	knownLocalExec(t, f.db, `DELETE FROM k12_grading_item_invocations WHERE job_id=?`, f.job.RecordID)
+	fields, err := k12.ParseGradingJobFields(f.job.Fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields.BudgetSnapshot.RecognitionPlanVersion = k12.RecognitionPlanVersionV2
+	fields.BudgetSnapshot.RecognizingBuckets = k12.RecognitionLayoutBudgetBucketsV2{
+		UpTo1ProblemMillis: 120000, UpTo8ProblemsMillis: 120000,
+		UpTo16ProblemsMillis: 120000, UpTo32ProblemsMillis: 120000,
+	}
+	fields.BudgetSnapshot.PhysicalCallCapMillis = 120000
+	fields.BudgetSnapshot.StageSeconds.Recognizing = 120
+	fields.BudgetSnapshot.WorkerHardCap, fields.BudgetSnapshot.EffectiveConcurrency = 2, 1
+	budget, _ := json.Marshal(map[string]any{
+		"grading_job_budget_envelope_version": 2, "budget_snapshot": fields.BudgetSnapshot,
+		"parent_automatic_attempt_id":        fields.ParentAutomaticAttemptID,
+		"parent_automatic_deadline_at":       fields.ParentAutomaticDeadlineAt,
+		"parent_automatic_remaining_seconds": fields.ParentAutomaticRemainingSeconds,
+	})
+	checkpoints, _ := json.Marshal(fields.StageCheckpoints[:1])
+	knownLocalExec(t, f.db, `UPDATE k12_grading_jobs SET confirmed_version=0,confirmation_state='pending',
+		anchor_state='pending',idempotency_key=?,failed_stage='recognizing',failure_kind='recognize_failed',
+		budget_snapshot_json=?,stage_checkpoints_json=? WHERE record_id=?`,
+		k12.BuildGradingIdempotencyKey("image_task", f.dispatch.DispatchID, 0), string(budget), string(checkpoints), f.job.RecordID)
+	parent := f.parent
+	parent.InvocationID, parent.Attempt = "current-projection-parent", 3
+	parent.RouteSnapshot = fields.ModelSnapshot
+	parent.RequestPolicySnapshot = fields.ModelSnapshot.RecognizingRequestPolicy
+	parent.ResultJSON, parent.ResultDigest, parent.FailureKind, parent.ExternalRequestID = "", "", "", ""
+	header := k12.RecognitionLayoutPlanHeaderV2{
+		InitialReadMode: k12.RecognitionLayoutManifestWithContentV1,
+		PlanID:          "current-projection-plan", ParentInvocationID: parent.InvocationID,
+		AgentName: parent.AgentName, JobID: parent.JobID, PageDigest: recognitionLayoutRuntimeTestDigest("same-projection-page"),
+		ParentRequestDigest: parent.RequestDigest, RouteSnapshot: parent.RouteSnapshot,
+		RequestPolicySnapshot: parent.RequestPolicySnapshot, StageStartedAtUnixMillis: 100000,
+		PhysicalCallCapMillis: fields.BudgetSnapshot.PhysicalCallCapMillis,
+		BudgetBuckets:         fields.BudgetSnapshot.RecognizingBuckets, AdapterWorkerHardCap: 2, EffectiveConcurrency: 1,
+	}
+	digest, err := k12.RecognitionLayoutPlanHeaderDigestV2(header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	child := newPhysicalInvocation(parent, "current-projection-physical", k12.RecognitionPhysicalUnitWholePage)
+	child.RecognitionPlanVersion, child.PlanDigest = k12.RecognitionPlanVersionV2, digest
+	parent, child, created, err := f.store.PrepareRecognizingInvocationWithInitialLayoutPlanV2(t.Context(), parent, child, header)
+	if err != nil || !created {
+		t.Fatalf("prepare received source: created=%v err=%v", created, err)
+	}
+	if _, claimed, err := f.store.ClaimModelPhysicalInvocationSent(t.Context(), parent.AgentName, child.PhysicalInvocationID); err != nil || !claimed {
+		t.Fatalf("claim controlled source: claimed=%v err=%v", claimed, err)
+	}
+	body, err := os.ReadFile("../testdata/initial_read_misplaced_observations.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if conflict {
+		var envelope struct {
+			Targets []map[string]json.RawMessage `json:"targets"`
+		}
+		if json.Unmarshal(body, &envelope) != nil {
+			t.Fatal("source fixture decode failed")
+		}
+		var read map[string]json.RawMessage
+		_ = json.Unmarshal(envelope.Targets[9]["initial_read"], &read)
+		read["shared_conditions"] = json.RawMessage(`"每包2个"`)
+		envelope.Targets[9]["initial_read"], _ = json.Marshal(read)
+		body, _ = json.Marshal(envelope)
+	}
+	f.physical, err = f.store.MarkModelPhysicalInvocationSucceededWithContent(t.Context(), parent.AgentName, child.PhysicalInvocationID, string(body), "controlled-response")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.parent, err = f.store.MarkModelInvocationFailed(t.Context(), parent.AgentName, parent.InvocationID, "recognize_failed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.job, err = f.store.Get(t.Context(), f.job.RecordID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+func TestKnownLocalTechnicalRecognitionProjectionReplaysReceivedBytes(t *testing.T) {
+	f := seedKnownRecognitionProjectionRecovery(t, false)
+	sourceBefore := recognitionClosureSourceRows(t, f.db, f.parent.InvocationID)
+	dispatch, job, err := f.store.RestoreImageTaskKnownLocalTechnical(t.Context(), f.command)
+	if err != nil || dispatch.Version != 6 || job.Status != k12.GradingStageQueued || job.Version != 8 {
+		t.Fatalf("original recognition recovery failed: dispatch=%+v job=%+v err=%v", dispatch, job, err)
+	}
+	fields, err := k12.ParseGradingJobFields(job.Fields)
+	if err != nil || fields.AttemptCount != 3 || fields.ConfirmedVersion != 0 || fields.ConfirmationState != k12.GradingConfirmationPending {
+		t.Fatalf("recognition recovery changed count or source confirmation: %+v %v", fields, err)
+	}
+	runtime, err := f.store.LoadRecognitionLayoutPlanRuntimeV2(t.Context(), f.parent.AgentName, f.parent.InvocationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := f.parent
+	parent.InvocationID, parent.Attempt = "replay-projection-parent", 4
+	parent.ResultJSON, parent.ResultDigest, parent.FailureKind = "", "", ""
+	header := runtime.Header
+	header.PlanID, header.ParentInvocationID, header.StageStartedAtUnixMillis = "replay-projection-plan", parent.InvocationID, 1000000
+	digest, err := k12.RecognitionLayoutPlanHeaderDigestV2(header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	child := newPhysicalInvocation(parent, "replay-projection-physical", k12.RecognitionPhysicalUnitWholePage)
+	child.RecognitionPlanVersion, child.PlanDigest = k12.RecognitionPlanVersionV2, digest
+	parent, child, _, err = f.store.PrepareRecognizingInvocationWithInitialLayoutPlanV2(t.Context(), parent, child, header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reused, found, err := f.store.ReuseSucceededRecognitionPhysicalInvocation(t.Context(), parent.AgentName, child.PhysicalInvocationID)
+	if err != nil || !found || reused.ReusedFromPhysicalInvocationID != f.physical.PhysicalInvocationID ||
+		reused.ResultDigest != f.physical.ResultDigest || reused.Status != k12.ModelInvocationSucceeded {
+		t.Fatalf("received original bytes not reused: found=%v reused=%+v err=%v", found, reused, err)
+	}
+	original, err := f.store.LoadSucceededModelPhysicalInvocationResultContent(t.Context(), f.parent.AgentName, f.physical.PhysicalInvocationID, f.physical.ResultDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replay, err := f.store.LoadSucceededModelPhysicalInvocationResultContent(t.Context(), parent.AgentName, reused.PhysicalInvocationID, reused.ResultDigest)
+	if err != nil || original != replay {
+		t.Fatalf("reuse changed source bytes: %v", err)
+	}
+	if _, claimed, _ := f.store.ClaimModelPhysicalInvocationSent(t.Context(), parent.AgentName, reused.PhysicalInvocationID); claimed {
+		t.Fatal("reused whole page entered provider send boundary")
+	}
+	if sourceBefore != recognitionClosureSourceRows(t, f.db, f.parent.InvocationID) {
+		t.Fatal("original failed parent or received physical changed")
+	}
+	if _, _, err := f.store.RestoreImageTaskKnownLocalTechnical(t.Context(), f.command); !errors.Is(err, k12storage.ErrImageTaskVersionConflict) {
+		t.Fatalf("duplicate versions authorized a second recovery: %v", err)
+	}
+}
+
+func TestKnownLocalTechnicalRecognitionProjectionRejectsWithoutMutation(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		conflict bool
+		change   func(*testing.T, knownLocalRecoveryFixture)
+	}{
+		{name: "conflicting observation", conflict: true},
+		{name: "prior attempt only", change: func(t *testing.T, f knownLocalRecoveryFixture) {
+			knownLocalExec(t, f.db, `UPDATE k12_grading_jobs SET attempt_count=4 WHERE record_id=?`, f.job.RecordID)
+		}},
+		{name: "unknown parent", change: func(t *testing.T, f knownLocalRecoveryFixture) {
+			knownLocalExec(t, f.db, `UPDATE k12_model_invocations SET status='outcome_unknown' WHERE invocation_id=?`, f.parent.InvocationID)
+		}},
+		{name: "changed frozen model", change: func(t *testing.T, f knownLocalRecoveryFixture) {
+			knownLocalExec(t, f.db, `UPDATE k12_grading_jobs SET model_snapshot_json=json_set(model_snapshot_json,'$.config_fingerprint','changed') WHERE record_id=?`, f.job.RecordID)
+		}},
+		{name: "wrong owner", change: func(_ *testing.T, f knownLocalRecoveryFixture) {
+			// 归属检查在事务中执行。
+		}},
+		{name: "already assessed", change: func(t *testing.T, f knownLocalRecoveryFixture) {
+			knownLocalExec(t, f.db, `UPDATE k12_grading_jobs SET stage_checkpoints_json=json_insert(stage_checkpoints_json,'$[#]',json(?)) WHERE record_id=?`,
+				`{"stage":"assessing","artifact_digest":"sha256:assessed","recorded_at":200}`, f.job.RecordID)
+		}},
+		{name: "job update rollback", change: func(t *testing.T, f knownLocalRecoveryFixture) {
+			knownLocalExec(t, f.db, `CREATE TRIGGER reject_projection_recovery BEFORE UPDATE OF status ON k12_grading_jobs
+				WHEN NEW.status='queued' BEGIN SELECT RAISE(ABORT,'controlled update rejected'); END`)
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := seedKnownRecognitionProjectionRecovery(t, test.conflict)
+			if test.change != nil {
+				test.change(t, f)
+			}
+			if test.name == "wrong owner" {
+				f.command.OwnerScope = "another-owner"
+			}
+			before := knownLocalDatabaseSnapshot(t, f.db)
+			if _, _, err := f.store.RestoreImageTaskKnownLocalTechnical(t.Context(), f.command); err == nil {
+				t.Fatal("ineligible or failed recognition recovery succeeded")
+			}
+			assertKnownLocalSnapshotEqual(t, before, knownLocalDatabaseSnapshot(t, f.db))
+		})
 	}
 }
 

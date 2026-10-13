@@ -228,16 +228,17 @@ func (s *Store) PrepareImageTaskDispatch(
 	if err != nil {
 		return k12.ImageTaskDispatch{}, false, err
 	}
-	creativeEntryJSON, operationRouteJSON := "", ""
+	creativeEntryJSON := ""
 	if dispatch.CreativeEntry != nil {
 		creativeEntryJSON, err = jsonString(dispatch.CreativeEntry)
 		if err != nil {
 			return k12.ImageTaskDispatch{}, false, err
 		}
-		operationRouteJSON, err = jsonString(dispatch.OperationRouteRequest)
-		if err != nil {
-			return k12.ImageTaskDispatch{}, false, err
-		}
+	}
+	// 自动分类与主动选择均需在首次接纳时冻结原请求，后续查询不读取当前语言设置。
+	operationRouteJSON, err := jsonString(dispatch.OperationRouteRequest)
+	if err != nil {
+		return k12.ImageTaskDispatch{}, false, err
 	}
 	invocationRouteJSON, err := jsonString(invocation.RouteSnapshot)
 	if err != nil {

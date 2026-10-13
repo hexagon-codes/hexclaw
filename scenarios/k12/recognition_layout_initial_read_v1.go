@@ -228,6 +228,48 @@ func sanitizeInitialReadModelJSONV1(s string) string {
 	return out.String()
 }
 
+// ProjectRecognitionLayoutInitialObservationV1 仅投影两个观察字符串的位置，原来源条目由调用者保留。
+// 外层唯一值可补到缺值的观察层；双值必须逐字一致，不从其他字段推断观察事实。
+func ProjectRecognitionLayoutInitialObservationV1(entry json.RawMessage) (manifest, read json.RawMessage, moved bool, err error) {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(entry, &fields) != nil || fields == nil {
+		return nil, nil, false, fmt.Errorf("%w: initial observation target is invalid", ErrRecognitionProtocolInvalid)
+	}
+	read, exists := fields["initial_read"]
+	if !exists {
+		return nil, nil, false, fmt.Errorf("%w: initial observation is missing", ErrRecognitionProtocolInvalid)
+	}
+	delete(fields, "initial_read")
+	for _, key := range []string{"shared_conditions", "answer_ownership"} {
+		outer, exists := fields[key]
+		if !exists {
+			continue
+		}
+		var observation map[string]json.RawMessage
+		var outerValue string
+		if json.Unmarshal(read, &observation) != nil || observation == nil || bytes.Equal(bytes.TrimSpace(outer), []byte("null")) ||
+			json.Unmarshal(outer, &outerValue) != nil {
+			return nil, nil, false, fmt.Errorf("%w: initial observation field is invalid", ErrRecognitionProtocolInvalid)
+		}
+		if inner, exists := observation[key]; exists {
+			var innerValue string
+			if bytes.Equal(bytes.TrimSpace(inner), []byte("null")) || json.Unmarshal(inner, &innerValue) != nil || innerValue != outerValue {
+				return nil, nil, false, fmt.Errorf("%w: initial observation fields conflict", ErrRecognitionProtocolInvalid)
+			}
+		} else {
+			observation[key] = append(json.RawMessage(nil), outer...)
+			read, err = json.Marshal(observation)
+			if err != nil {
+				return nil, nil, false, err
+			}
+			moved = true
+		}
+		delete(fields, key)
+	}
+	manifest, err = json.Marshal(fields)
+	return manifest, read, moved, err
+}
+
 // CanonicalRecognitionLayoutInitialReadEntriesV1 统一首读解析与持久来源对照的封套和转义语义。
 func CanonicalRecognitionLayoutInitialReadEntriesV1(raw string) ([]json.RawMessage, error) {
 	start, end := strings.Index(raw, "{"), strings.LastIndex(raw, "}")

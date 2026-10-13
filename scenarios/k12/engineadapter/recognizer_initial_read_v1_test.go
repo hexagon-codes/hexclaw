@@ -63,6 +63,70 @@ func TestRecognitionInitialReadV1RedundantObservationsPreserveActualManifest(t *
 	}
 }
 
+func TestRecognitionInitialReadV1UniqueObservationLocation(t *testing.T) {
+	raw, err := os.ReadFile("../testdata/initial_read_misplaced_observations.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, err := k12.CanonicalRecognitionLayoutInitialReadEntriesV1(string(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := parseRecognitionInitialReadEnvelopeV1(string(raw))
+	if err != nil || len(entries) != 16 {
+		t.Fatalf("complete unique observations rejected: entries=%d err=%v", len(entries), err)
+	}
+	for i, entry := range entries {
+		if !bytes.Equal(entry.raw, original[i]) {
+			t.Fatalf("original first reading changed at %d", i)
+		}
+	}
+	entry := entries[9]
+	projected, err := recognitionInitialReadProjectionV1(entry, k12.RecognitionLayoutTargetV2{
+		TargetID: "current-target", Region: entry.manifest.Region,
+	})
+	if err != nil {
+		t.Fatalf("unique observation could not project: %s %v", projected, err)
+	}
+	var observation map[string]json.RawMessage
+	if json.Unmarshal(entry.read, &observation) != nil {
+		t.Fatal("projected reading unavailable")
+	}
+	var shared, ownership string
+	if json.Unmarshal(observation["shared_conditions"], &shared) != nil ||
+		json.Unmarshal(observation["answer_ownership"], &ownership) != nil ||
+		shared != "解方程" || ownership != "手写解答行位于第10题方程下方。" {
+		t.Fatalf("unique source strings lost: %s", entry.read)
+	}
+	for _, mode := range []string{"conflict", "invalid outer", "invalid inner"} {
+		t.Run(mode, func(t *testing.T) {
+			var envelope struct {
+				Targets []map[string]json.RawMessage `json:"targets"`
+			}
+			if json.Unmarshal(raw, &envelope) != nil {
+				t.Fatal("fixture decode failed")
+			}
+			var read map[string]json.RawMessage
+			if json.Unmarshal(envelope.Targets[9]["initial_read"], &read) != nil {
+				t.Fatal("reading decode failed")
+			}
+			switch mode {
+			case "conflict":
+				read["shared_conditions"] = json.RawMessage(`"每包2个"`)
+			case "invalid outer":
+				envelope.Targets[9]["shared_conditions"] = json.RawMessage("42")
+			case "invalid inner":
+				read["shared_conditions"] = json.RawMessage("null")
+			}
+			envelope.Targets[9]["initial_read"], _ = json.Marshal(read)
+			mutated, _ := json.Marshal(envelope)
+			if _, err := parseRecognitionInitialReadEnvelopeV1(string(mutated)); !errors.Is(err, k12.ErrRecognitionProtocolInvalid) {
+				t.Fatalf("inconsistent or invalid observation accepted: %v", err)
+			}
+		})
+	}
+}
+
 func TestRecognitionInitialReadV1FrozenSectionPreservesActualSourceFacts(t *testing.T) {
 	raw, err := os.ReadFile("testdata/initial_read_section_observations.json")
 	if err != nil {

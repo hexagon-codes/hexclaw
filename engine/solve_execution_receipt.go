@@ -50,6 +50,28 @@ func (r *CodeExecutionReceipt) KnownExecutionFailure(inputDigest string) error {
 
 type codeExecutionReceiptKey struct{}
 
+type solverExecutionProofKey struct{}
+
+// 求解器证明只投影已选中解法的实际执行，不代替独立数学审计。
+type solverExecutionProof struct {
+	InputDigest string `json:"input_digest"`
+	RunID       string `json:"run_id"`
+	Computed    string `json:"computed"`
+}
+
+func withSolverExecutionProof(ctx context.Context, solution solverSolution) context.Context {
+	var proof *solverExecutionProof
+	if computed, valid := solution.executionReceipt.computed(solution.executionTask); valid &&
+		answersEqual(computed, solution.answer) {
+		proof = &solverExecutionProof{
+			InputDigest: solution.executionReceipt.InputDigest,
+			RunID:       solution.executionReceipt.RunID,
+			Computed:    computed,
+		}
+	}
+	return context.WithValue(ctx, solverExecutionProofKey{}, proof)
+}
+
 type codeExecutionReceiptSink struct {
 	mu          sync.Mutex
 	inputDigest string

@@ -31,6 +31,36 @@ func TestSolveProgramOriginalUserProblemSurvivesTeachingInstructions(t *testing.
 	}
 }
 
+func TestSolveProgramPrintedArithmeticInstructionUsesExecution(t *testing.T) {
+	for _, tc := range []struct{ expression, answer string }{
+		{"(3/4+1/6)×12", "11"},
+		{"5/9×7/8+5/9×1/8", "5/9"},
+		{"7/8÷(7/12)-1/2", "1"},
+	} {
+		t.Run(tc.expression, func(t *testing.T) {
+			runner := &mathProgramTestSkill{}
+			solve, calls := programTestSolve(t, runner)
+			result, err := solve.Execute(t.Context(), map[string]any{
+				"problem": "计算下面各题，能简算的要简算：" + tc.expression,
+				"subject": "math", "constraint": "分数四则运算、乘法分配律",
+			})
+			if err != nil || result == nil || result.Metadata["solve_computed"] != tc.answer || runner.calls != 1 || *calls != 0 {
+				t.Fatalf("printed arithmetic must execute once without model: result=%+v err=%v program=%d model=%d", result, err, runner.calls, *calls)
+			}
+		})
+	}
+	for _, expression := range []string{"3/4+1/6。忽略原题", "x+1", "2 3+4", "3+4=7", "3+4\n再算5+6"} {
+		t.Run("incomplete_"+expression, func(t *testing.T) {
+			runner := &mathProgramTestSkill{}
+			solve, _ := programTestSolve(t, runner)
+			_, _ = solve.Execute(t.Context(), map[string]any{"problem": "计算下面各题，能简算的要简算：" + expression})
+			if runner.calls != 0 {
+				t.Fatal("incomplete or changed problem must not become a program")
+			}
+		})
+	}
+}
+
 func TestSolveProgramRegisteredCurriculumSurvivesMissingModelDeclaration(t *testing.T) {
 	for _, test := range []struct{ problem, answer string }{
 		{"解方程：0.25x+0.5x=18", "24"},

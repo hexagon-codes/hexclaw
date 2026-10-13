@@ -105,8 +105,9 @@ type contentFilterGuard struct {
 }
 
 var defaultBlockKeywords = map[string][]string{
-	"violence":  {"杀人", "炸弹", "枪支", "暗杀", "爆炸物", "how to kill", "make a bomb", "weapon"},
-	"illegal":   {"贩毒", "洗钱", "走私", "伪造", "黑客攻击", "drug trafficking", "money laundering"},
+	"violence": {"杀人", "炸弹", "枪支", "暗杀", "爆炸物", "how to kill", "make a bomb", "weapon"},
+	// 违法对象使用明确词组，不能把禁止编造来源的教学约束当作违法请求。
+	"illegal":   {"贩毒", "洗钱", "走私", "伪造身份证", "伪造证件", "伪造公章", "伪造货币", "伪造票据", "伪造发票", "伪造护照", "伪造驾照", "黑客攻击", "drug trafficking", "money laundering"},
 	"adult":     {"色情", "裸体", "性交", "pornography", "explicit sexual"},
 	"self_harm": {"自杀方法", "自残", "suicide method", "self-harm instructions"},
 }

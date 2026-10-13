@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -144,9 +145,11 @@ const (
 
 // solverSolution 是一份解题产出。
 type solverSolution struct {
-	output     string
-	answer     string // 抽出的最终答案（已归一化）
-	generation *SolveGenerationAttachment
+	output           string
+	answer           string // 抽出的最终答案（已归一化）
+	generation       *SolveGenerationAttachment
+	executionReceipt *CodeExecutionReceipt
+	executionTask    string
 }
 
 // answerGroup 是同一答案的一组解题（多数表决 / 分歧分组用）。
@@ -372,7 +375,8 @@ func (o *SolveSkill) Execute(ctx context.Context, args map[string]any) (*skill.R
 			continue
 		}
 		if strings.TrimSpace(result.Output) != "" {
-			sols = append(sols, solverSolution{output: result.Output, answer: extractFinalAnswer(result.Output), generation: result.Generation})
+			sols = append(sols, solverSolution{output: result.Output, answer: extractFinalAnswer(result.Output), generation: result.Generation,
+				executionReceipt: result.ExecutionReceipt, executionTask: sp.Task})
 		}
 	}
 	if len(sols) == 0 {
@@ -398,7 +402,7 @@ func (o *SolveSkill) Execute(ctx context.Context, args map[string]any) (*skill.R
 	}
 
 	// 2) Verifier 阶段：code_exec 独立重算（fresh-context、只许 code_exec）。
-	verdict, computed, numericGrounded, verificationReceipt, guideAudits, verifyErr := o.verifySolutionWithGuides(childCtx, problem, primary.sols[0].output, primary.answer, constraint, guideCandidates(sols))
+	verdict, computed, numericGrounded, verificationReceipt, guideAudits, verifyErr := o.verifySolutionWithGuides(withSolverExecutionProof(childCtx, primary.sols[0]), problem, primary.sols[0].output, primary.answer, constraint, guideCandidates(sols))
 	if verifyErr != nil {
 		o.registry.Finish(solveRunID, subAgentStatusError, "", verifyErr.Error(), "")
 		return nil, fmt.Errorf("solve: verifier execution failed: %w", verifyErr)
@@ -415,11 +419,12 @@ func (o *SolveSkill) Execute(ctx context.Context, args map[string]any) (*skill.R
 			// **纠正性替换**（非又一次投票样本）：重解的学段内解法直接取代原超纲解作为 primary。
 			// 若走 append+groupByAnswer，超纲解与重解答案值通常相同 → 归同一组、原解先入仍居首，
 			// 学生仍会看到超纲方法（feature 落空，BUG-20260708）。故这里直接换掉 groups。
-			resolved := solverSolution{output: result.Output, answer: extractFinalAnswer(result.Output), generation: result.Generation}
+			resolved := solverSolution{output: result.Output, answer: extractFinalAnswer(result.Output), generation: result.Generation,
+				executionReceipt: result.ExecutionReceipt, executionTask: reSpec.Task}
 			primary = answerGroup{answer: resolved.answer, sols: []solverSolution{resolved}}
 			groups = []answerGroup{primary}
 			// 重解后仍按原约束复验完整过程；答案正确但方法再次超纲不能放行。
-			verdict, computed, numericGrounded, verificationReceipt, guideAudits, verifyErr = o.verifySolutionWithGuides(childCtx, problem, resolved.output, primary.answer, constraint, guideCandidates([]solverSolution{resolved}))
+			verdict, computed, numericGrounded, verificationReceipt, guideAudits, verifyErr = o.verifySolutionWithGuides(withSolverExecutionProof(childCtx, resolved), problem, resolved.output, primary.answer, constraint, guideCandidates([]solverSolution{resolved}))
 			if verifyErr != nil {
 				o.registry.Finish(solveRunID, subAgentStatusError, "", verifyErr.Error(), "")
 				return nil, fmt.Errorf("solve: verifier execution failed: %w", verifyErr)
@@ -474,15 +479,17 @@ func (o *SolveSkill) Execute(ctx context.Context, args map[string]any) (*skill.R
 		"solve_run_id": solveRunID, "solve_verdict": verdictString(verdict),
 		"solve_evidence": evidenceKind(numericGrounded),
 	}
+	selected := selectedSolverSolution(groups, verdict, computed, numericGrounded)
 	if outputVersion == solveWithParentGuideV1 {
-		addParentGuideMetadata(metadata, selectedSolverSolution(groups, verdict, computed, numericGrounded), guideAudits)
+		addParentGuideMetadata(metadata, selected, guideAudits)
 	}
-	// 资产发布绑定实际选中的解法和本次执行证据；不能取最后一份生成结果代替多数选择。
-	if verdict == verdictAgree && numericGrounded && verificationReceipt != nil && hasCleanFinalAnswer(primary.sols[0].output, primary.answer) {
-		metadata["solve_primary_digest"] = executionInputDigest(primary.sols[0].output)
+	// 执行关联独立于过程裁决，复用资格仍由调用方核对；来源与最终选中解法一致。
+	if numericGrounded && verificationReceipt != nil && hasCleanFinalAnswer(selected.output, selected.answer) {
+		metadata["solve_primary_digest"] = executionInputDigest(selected.output)
 		metadata["solve_verification_input_digest"] = verificationReceipt.InputDigest
 		metadata["solve_verification_run_id"] = verificationReceipt.RunID
 	}
+	o.appendTeachingContextReceipt(ctx, subject, metadata)
 	return &skill.Result{Content: content + encodeSubAgentReports(reports), Metadata: metadata}, nil
 }
 
@@ -691,15 +698,16 @@ func (o *SolveSkill) runSolveAgentResult(ctx context.Context, spec SubAgentSpec)
 			return decodeSolveGeneration(result)
 		}
 	}
-	if spec.Source == solveDispatchSource && spec.Agent == verifierAgentName {
+	if spec.Source == solveDispatchSource && (spec.Agent == verifierAgentName || spec.Agent == solverAgentName) {
 		// 在物理调用拦截器内部收集回执，使持久化结果与正文一同保存；重放直接读取原回执。
+		next := execute
 		execute = func(callCtx context.Context, callSpec SubAgentSpec) (SubAgentResult, error) {
 			sink := &codeExecutionReceiptSink{inputDigest: executionInputDigest(callSpec.Task)}
 			callCtx = context.WithValue(callCtx, codeExecutionReceiptKey{}, sink)
 			if callSpec.verification != nil {
 				callCtx = context.WithValue(callCtx, verificationInputKey{}, callSpec.verification)
 			}
-			result, callErr := o.executeFunc(callCtx, callSpec)
+			result, callErr := next(callCtx, callSpec)
 			sink.mu.Lock()
 			defer sink.mu.Unlock()
 			result.ExecutionReceipt = nil
@@ -746,6 +754,11 @@ func (o *SolveSkill) verifySolutionWithGuides(ctx context.Context, problem, solu
 		return verdictUnverifiable, "", false, nil, nil, nil
 	}
 	spec := withParentGuideVerification(verifierSpecWithSolution(problem, solution, candidate, constraint), guides)
+	if proof, _ := ctx.Value(solverExecutionProofKey{}).(*solverExecutionProof); proof != nil {
+		spec.verification.SolverExecution = proof
+		raw, _ := json.Marshal(proof)
+		spec.Task += "\n\nTrusted solver execution proof (only actual execution and stdout; audit all mathematical steps independently):\n" + string(raw)
+	}
 	_, numericCandidate := numberSet(candidate)
 	_, quantityCandidate := parseAnswerQuantity(candidate)
 	_, labeledCandidate := parseLabeledAnswerQuantities(candidate)
@@ -1090,7 +1103,8 @@ func buildSolverPrompt(problem, subject, method, grade, constraint string) strin
 1. 分步推导，关键步骤说明依据；涉及计算时可调用 code_exec 写代码精确计算（别口算硬凑）。
 2. 解法务必控制在上面「学习阶段/允许范围」之内——宁可用更朴素但学过的方法，也不要为了简便用超纲方法。
 3. 数学一律用 Unicode 符号书写（×÷√≤≥≠、分数写 a/b、平方写 x²、下标写 H₂O、单位直接写 cm³），**禁止输出 LaTeX**（不要 \times \div \frac \text{} ^{} 也不要 $…$、\(…\)、\[…\] 定界符）。
-4. 最后单独用一行给出最终答案，格式严格为：答案：<最终答案>`, subjectLine, gradeLine, constraintLine, problem, methodLine)
+4. 最后单独用一行给出最终答案，格式严格为：答案：<最终答案>。
+5. 正文只写数学推导和依据，不写已调用、已运行或已用工具核验等运行陈述；实际工具事实由应用执行回执提供。`, subjectLine, gradeLine, constraintLine, problem, methodLine)
 }
 
 func buildVerifierPrompt(problem, candidate, constraint string) string {
