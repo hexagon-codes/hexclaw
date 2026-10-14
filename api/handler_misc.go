@@ -1263,7 +1263,7 @@ func k12ProfileFieldsTouched(existing *router.AgentConfig, req UpdateAgentReques
 	if existing == nil || existing.Metadata["scenario"] != "k12-tutor" {
 		return false
 	}
-	if req.DisplayName != nil || req.Description != nil || req.SystemPrompt != nil ||
+	if req.DisplayName != nil || req.SystemPrompt != nil ||
 		req.Provider != nil || req.Model != nil || req.Skills != nil {
 		return true
 	}
