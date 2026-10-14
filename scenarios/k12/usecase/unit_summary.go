@@ -158,7 +158,7 @@ func (c *UnitSummaryCoordinator) ResumeAndWait(ctx context.Context, owner, agent
 	}
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
-	for !k12.UnitSummaryAttemptTerminal(v.Job.State) {
+	for unitSummaryObservationPending(v.Job.State) {
 		select {
 		case <-ctx.Done():
 			return v, replayed, nil
@@ -228,7 +228,7 @@ func (c *UnitSummaryCoordinator) StartAndWait(ctx context.Context, req UnitSumma
 	}
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
-	for !k12.UnitSummaryAttemptTerminal(v.Job.State) {
+	for unitSummaryObservationPending(v.Job.State) {
 		select {
 		case <-ctx.Done():
 			return v, replayed, nil
@@ -242,6 +242,12 @@ func (c *UnitSummaryCoordinator) StartAndWait(ctx context.Context, req UnitSumma
 	v.Replayed = replayed
 	return v, replayed, nil
 }
+
+// 未知任务仍可继续对账，聊天观察等待则立即返回已持久化的原任务状态。
+func unitSummaryObservationPending(state string) bool {
+	return !k12.UnitSummaryAttemptTerminal(state) && state != "reconciling"
+}
+
 func unitMaterialView(r k12.UnitSummaryRevision) *UnitSummaryMaterialView {
 	return &UnitSummaryMaterialView{UnitSummaryRevision: r, Subject: r.Content.Subject, Title: r.Content.Title, Artifact: UnitSummaryArtifact{r.ArtifactID, k12.PrintSourceUnitSummary, "application/pdf", r.ByteDigest, r.ByteSize}, GradeTerm: r.Context.GradeTerm, TextbookEdition: r.Context.TextbookEdition, UnitNumber: r.Context.UnitNumber, UnitTitle: r.Context.UnitTitle}
 }

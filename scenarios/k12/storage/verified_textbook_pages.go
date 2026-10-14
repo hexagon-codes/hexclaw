@@ -46,23 +46,50 @@ func (s *Store) ReadVerifiedTextbookPages(ctx context.Context, requested k12.Ver
 	if err != nil {
 		return nil, fmt.Errorf("k12storage: verified textbook source unavailable: %w", err)
 	}
+	catalog, pages, err := readVerifiedTextbookPageProof(ctx, tx, verifiedTextbookDocumentIdentity{ManifestID: scope.TextbookManifestID, DocumentID: scope.DocumentID, Generation: scope.DocumentGeneration, SourceDigest: scope.SourceDigest}, catalogJSON, catalogDigest, ingestJobID, true)
+	if err != nil {
+		return nil, err
+	}
+	actualPages := make([]k12.TextbookGroundingPageRef, 0, len(pages))
+	for _, page := range pages {
+		if strings.TrimSpace(page.Content) == "" {
+			return nil, fmt.Errorf("%w: verified textbook page evidence changed", records.ErrIllegalTransition)
+		}
+		actualPages = append(actualPages, k12.TextbookGroundingPageRef{LogicalPage: page.LogicalPage, PDFPage: page.PDFPage, SegmentRefs: page.SegmentRefs})
+	}
+	actualScope := scope
+	actualScope.PageRefs = actualPages
+	if catalog.TextbookEdition != scope.Edition || catalog.Volume != scope.Volume || k12.ValidateTextbookGroundingScope(actualScope) != nil || !sameGroundingExactSet(scope.PageRefs, scope.SegmentRefs, actualPages, scope.SegmentRefs) {
+		return nil, fmt.Errorf("%w: verified textbook scope differs from frozen catalog", records.ErrIllegalTransition)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return pages, nil
+}
+
+type verifiedTextbookDocumentIdentity struct {
+	ManifestID   string
+	DocumentID   string
+	Generation   int64
+	SourceDigest string
+}
+
+// 目录、页码与正文摘要使用同一证明内核；没有正文的已映射页保留为空，由调用方决定能否部分交付。
+func readVerifiedTextbookPageProof(ctx context.Context, tx *sql.Tx, source verifiedTextbookDocumentIdentity, catalogJSON, catalogDigest, ingestJobID string, withContent bool) (k12.CurriculumCatalog, []k12.VerifiedTextbookPage, error) {
 	if ingestJobID == "" {
-		return nil, fmt.Errorf("%w: verified textbook ingest source missing", records.ErrIllegalTransition)
+		return k12.CurriculumCatalog{}, nil, fmt.Errorf("%w: verified textbook ingest source missing", records.ErrIllegalTransition)
 	}
 	if sha256Hex([]byte(catalogJSON)) != catalogDigest {
-		return nil, fmt.Errorf("%w: verified textbook catalog changed", records.ErrIllegalTransition)
+		return k12.CurriculumCatalog{}, nil, fmt.Errorf("%w: verified textbook catalog changed", records.ErrIllegalTransition)
 	}
 	catalog, err := decodeTextbookCatalog(catalogJSON)
 	if err != nil {
-		return nil, err
+		return catalog, nil, err
 	}
 	expectedPages, expectedSegments, err := decodeGroundingCatalogExactSet(catalogJSON, catalog)
 	if err != nil {
-		return nil, err
-	}
-	if catalog.TextbookEdition != scope.Edition || catalog.Volume != scope.Volume ||
-		!sameGroundingExactSet(expectedPages, expectedSegments, scope.PageRefs, scope.SegmentRefs) {
-		return nil, fmt.Errorf("%w: verified textbook scope differs from frozen catalog", records.ErrIllegalTransition)
+		return catalog, nil, err
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT m.logical_page,m.pdf_page,m.evidence_page,
 		m.evidence_offset_start,m.evidence_offset_end,m.evidence_digest,m.method,
@@ -71,12 +98,13 @@ func (s *Store) ReadVerifiedTextbookPages(ctx context.Context, requested k12.Ver
 		FROM k12_textbook_page_mappings m
 		LEFT JOIN kb_ingest_page_checkpoints p ON p.job_id=?
 		 AND p.source_digest=m.source_digest AND p.page_number=m.pdf_page
-		WHERE m.manifest_id=? ORDER BY m.logical_page,m.pdf_page`, ingestJobID, scope.TextbookManifestID)
+		WHERE m.manifest_id=? ORDER BY m.logical_page,m.pdf_page`, ingestJobID, source.ManifestID)
 	if err != nil {
-		return nil, err
+		return catalog, nil, err
 	}
-	pages := make([]k12.VerifiedTextbookPage, 0, len(scope.PageRefs))
-	pageIndex := make(map[[2]int]int, len(scope.PageRefs))
+	pages := make([]k12.VerifiedTextbookPage, 0, len(expectedPages))
+	pageIndex := make(map[[2]int]int, len(expectedPages))
+	logicalPages, physicalPages := map[int]bool{}, map[int]bool{}
 	for rows.Next() {
 		var page k12.VerifiedTextbookPage
 		var evidencePage, offsetFrom, offsetTo int
@@ -87,18 +115,23 @@ func (s *Store) ReadVerifiedTextbookPages(ctx context.Context, requested k12.Ver
 			&offsetFrom, &offsetTo, &evidenceDigest, &method, &state,
 			&documentID, &generation, &sourceDigest, &content, &contentDigest); err != nil {
 			rows.Close()
-			return nil, err
+			return catalog, nil, err
 		}
 		if page.LogicalPage < 1 || page.PDFPage < 1 || evidencePage != page.PDFPage ||
-			offsetFrom < 0 || offsetTo <= offsetFrom || !content.Valid || !contentDigest.Valid ||
-			strings.TrimSpace(content.String) == "" || offsetTo > len(content.String) ||
-			evidenceDigest != contentDigest.String || sha256Hex([]byte(content.String)) != contentDigest.String ||
+			offsetFrom < 0 || offsetTo <= offsetFrom || len(evidenceDigest) != 64 ||
 			(method != "printed_anchor" && method != "adjacent_printed_anchors") || state != "verified" ||
-			documentID != scope.DocumentID || generation != scope.DocumentGeneration || sourceDigest != scope.SourceDigest {
+			documentID != source.DocumentID || generation != source.Generation || sourceDigest != source.SourceDigest || logicalPages[page.LogicalPage] || physicalPages[page.PDFPage] {
 			rows.Close()
-			return nil, fmt.Errorf("%w: verified textbook page evidence changed", records.ErrIllegalTransition)
+			return catalog, nil, fmt.Errorf("%w: verified textbook page evidence changed", records.ErrIllegalTransition)
 		}
-		page.Content, page.ContentDigest = content.String, contentDigest.String
+		if withContent && (content.Valid != contentDigest.Valid || (content.Valid && (strings.TrimSpace(content.String) == "" || offsetTo > len(content.String) || evidenceDigest != contentDigest.String || sha256Hex([]byte(content.String)) != contentDigest.String))) {
+			rows.Close()
+			return catalog, nil, fmt.Errorf("%w: verified textbook page evidence changed", records.ErrIllegalTransition)
+		}
+		if withContent {
+			page.Content, page.ContentDigest = content.String, contentDigest.String
+		}
+		logicalPages[page.LogicalPage], physicalPages[page.PDFPage] = true, true
 		for _, unit := range catalog.Units {
 			for _, lesson := range unit.Lessons {
 				if lesson.PageFrom <= page.LogicalPage && page.LogicalPage <= lesson.PageTo && strings.TrimSpace(lesson.Title) != "" {
@@ -112,44 +145,45 @@ func (s *Store) ReadVerifiedTextbookPages(ctx context.Context, requested k12.Ver
 	err = rows.Err()
 	rows.Close()
 	if err != nil {
-		return nil, err
+		return catalog, nil, err
 	}
 	rows, err = tx.QueryContext(ctx, `SELECT logical_page,pdf_page,segment_ref,document_id,document_generation,source_digest
-		FROM k12_textbook_manifest_segments WHERE manifest_id=? ORDER BY logical_page,pdf_page,segment_ref`, scope.TextbookManifestID)
+		FROM k12_textbook_manifest_segments WHERE manifest_id=? ORDER BY logical_page,pdf_page,segment_ref`, source.ManifestID)
 	if err != nil {
-		return nil, err
+		return catalog, nil, err
 	}
+	segments := map[string]bool{}
 	for rows.Next() {
 		var logicalPage, pdfPage int
 		var generation int64
 		var segmentRef, documentID, sourceDigest string
 		if err := rows.Scan(&logicalPage, &pdfPage, &segmentRef, &documentID, &generation, &sourceDigest); err != nil {
 			rows.Close()
-			return nil, err
+			return catalog, nil, err
 		}
 		index, found := pageIndex[[2]int{logicalPage, pdfPage}]
-		if !found || documentID != scope.DocumentID || generation != scope.DocumentGeneration || sourceDigest != scope.SourceDigest {
+		if !found || documentID != source.DocumentID || generation != source.Generation || sourceDigest != source.SourceDigest || strings.TrimSpace(segmentRef) == "" {
 			rows.Close()
-			return nil, fmt.Errorf("%w: verified textbook segment evidence changed", records.ErrIllegalTransition)
+			return catalog, nil, fmt.Errorf("%w: verified textbook segment evidence changed", records.ErrIllegalTransition)
 		}
 		pages[index].SegmentRefs = append(pages[index].SegmentRefs, segmentRef)
+		segments[segmentRef] = true
 	}
 	err = rows.Err()
 	rows.Close()
 	if err != nil {
-		return nil, err
+		return catalog, nil, err
 	}
 	actualPages := make([]k12.TextbookGroundingPageRef, 0, len(pages))
 	for _, page := range pages {
 		actualPages = append(actualPages, k12.TextbookGroundingPageRef{LogicalPage: page.LogicalPage, PDFPage: page.PDFPage, SegmentRefs: page.SegmentRefs})
 	}
-	actualScope := scope
-	actualScope.PageRefs = actualPages
-	if k12.ValidateTextbookGroundingScope(actualScope) != nil || !sameGroundingExactSet(scope.PageRefs, scope.SegmentRefs, actualPages, expectedSegments) {
-		return nil, fmt.Errorf("%w: verified textbook page set changed", records.ErrIllegalTransition)
+	actualSegments := make([]string, 0, len(segments))
+	for ref := range segments {
+		actualSegments = append(actualSegments, ref)
 	}
-	if err := tx.Commit(); err != nil {
-		return nil, err
+	if !sameGroundingExactSet(expectedPages, expectedSegments, actualPages, actualSegments) {
+		return catalog, nil, fmt.Errorf("%w: verified textbook page set changed", records.ErrIllegalTransition)
 	}
-	return pages, nil
+	return catalog, pages, nil
 }

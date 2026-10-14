@@ -3,10 +3,12 @@ package skilladapter
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/hexagon-codes/ai-core/llm"
+	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/usecase"
 	"github.com/hexagon-codes/hexclaw/skill"
@@ -81,12 +83,23 @@ func (s *UnitSummarySkill) Execute(ctx context.Context, args map[string]any) (*s
 		}
 		view, _, err = s.coordinator.ResumeAndWait(ctx, owner, inv.RoutedAgentName, waiting[0].AttemptID, usecase.UnitSummaryResumeRequest{ExpectedRevision: waiting[0].Revision, IdempotencyKey: inv.RequestID + ":unit-summary-resume", FollowupMessageID: inv.SourceMessageID})
 	} else {
-		view, _, err = s.coordinator.StartAndWait(ctx, usecase.UnitSummaryRequest{
+		request := usecase.UnitSummaryRequest{
 			OwnerID: owner, AgentName: inv.RoutedAgentName, SessionID: inv.SessionID, SourceMessageID: inv.SourceMessageID,
 			IdempotencyKey: inv.RequestID + ":unit-summary", FinalUserText: finalText,
 			PromptInvocation: json.RawMessage(inv.ScenarioInput["k12_task_intent"]), ActiveRevisionID: active.RevisionID,
 			Subject: subject, Intent: intent, ModelSnapshot: k12.GradingModelSnapshot{Provider: inv.ScenarioInput["provider"], Model: inv.ScenarioInput["model"]},
-		})
+		}
+		if previous, e := s.coordinator.Deps.Records.GetUnitSummaryAttemptByKey(ctx, owner, inv.RoutedAgentName, request.IdempotencyKey); e == nil {
+			var accepted usecase.UnitSummaryRequest
+			if err := json.Unmarshal([]byte(previous.RequestJSON), &accepted); err != nil {
+				return nil, err
+			}
+			// 同轮模型提示不改变已接受的任务，其余可信输入仍由原请求摘要核对。
+			request.Subject, request.Intent = accepted.Subject, accepted.Intent
+		} else if !errors.Is(e, records.ErrNotFound) {
+			return nil, e
+		}
+		view, _, err = s.coordinator.StartAndWait(ctx, request)
 	}
 	if err != nil {
 		return nil, err
@@ -113,6 +126,7 @@ func (s *UnitSummarySkill) Execute(ctx context.Context, args map[string]any) (*s
 	if view.Material != nil {
 		result["title"] = view.Material.Title
 		result["filename"] = view.Material.Filename
+		result["canonical_markdown"] = view.Material.CanonicalMarkdown
 	}
 	if view.Job.Clarification != "" {
 		result["clarification"] = view.Job.Clarification

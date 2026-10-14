@@ -491,13 +491,14 @@ func (s *Store) ReplayUnitSummaryResume(ctx context.Context, owner, agent, id, k
 }
 
 type UnitSummaryMaterial struct {
-	DocumentID   string `json:"document_id"`
-	Title        string `json:"title"`
-	Subject      string `json:"subject"`
-	Generation   int64  `json:"generation"`
-	SourceDigest string `json:"source_digest"`
-	Content      string `json:"-"`
-	Preview      string `json:"preview,omitempty"`
+	DocumentID      string                 `json:"document_id"`
+	Title           string                 `json:"title"`
+	Subject         string                 `json:"subject"`
+	Generation      int64                  `json:"generation"`
+	SourceDigest    string                 `json:"source_digest"`
+	Content         string                 `json:"-"`
+	Preview         string                 `json:"preview,omitempty"`
+	TextbookCatalog *k12.CurriculumCatalog `json:"textbook_catalog,omitempty"`
 }
 
 type UnitSummarySessionDocument struct {

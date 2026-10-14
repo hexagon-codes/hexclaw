@@ -52,6 +52,20 @@ func (c *UnitSummaryCoordinator) resolveInput(ctx context.Context, a k12.UnitSum
 		return input, err
 	}
 	input.Materials = materials
+	for i := range input.Materials {
+		material := &input.Materials[i]
+		if subject := unitSummarySubjectNormalized(material.Subject); subject != "" && subject != "math" {
+			continue
+		}
+		catalog, e := c.Deps.Records.GetVerifiedTextbookDocumentCatalog(ctx, k12storage.VerifiedTextbookDocumentRequest{OwnerID: a.OwnerID, AgentName: a.AgentName, DocumentID: material.DocumentID, DocumentGeneration: material.Generation, SourceDigest: material.SourceDigest})
+		if errors.Is(e, records.ErrNotFound) || errors.Is(e, records.ErrIllegalTransition) {
+			continue
+		}
+		if e != nil {
+			return input, e
+		}
+		material.TextbookCatalog = &catalog
+	}
 	input.SessionDocuments, input.ImageAttachmentCount, err = c.Deps.Records.ReadUnitSummarySessionSources(ctx, a.SessionID, a.SourceMessageID)
 	if err != nil {
 		return input, err
@@ -155,6 +169,35 @@ func (c *UnitSummaryCoordinator) freezeContext(ctx context.Context, a k12.UnitSu
 		old.ChildName = a.Context.ChildName
 		return old, nil
 	}
+	if r.Subject == "math" && r.ProvidedMaterialText == "" && len(input.ProvidedMaterials) == 0 && len(r.SessionMaterialIndexes) == 0 {
+		selected := map[string]bool{}
+		for _, documentID := range r.MaterialDocumentIDs {
+			selected[documentID] = true
+		}
+		if len(selected) == 1 {
+			for _, material := range input.Materials {
+				// 只有本次解析输入已有真实文档目录时才取单元页，旧冻结输入不会被升级解释。
+				if !selected[material.DocumentID] || material.TextbookCatalog == nil {
+					continue
+				}
+				unit := unitSummaryCatalogUnit(*material.TextbookCatalog, r.UnitID, r.UnitTitle)
+				if unit == nil {
+					if r.UnitID != "" {
+						return frozen, fmt.Errorf("resolved textbook unit is not in the selected catalog")
+					}
+					break
+				}
+				source, err := c.Deps.Records.ReadVerifiedTextbookDocument(ctx, k12storage.VerifiedTextbookDocumentRequest{OwnerID: a.OwnerID, AgentName: a.AgentName, DocumentID: material.DocumentID, DocumentGeneration: material.Generation, SourceDigest: material.SourceDigest})
+				if err != nil {
+					return frozen, err
+				}
+				if k12.UnitSummaryDigest(source.Catalog) != k12.UnitSummaryDigest(*material.TextbookCatalog) {
+					return frozen, fmt.Errorf("verified textbook catalog changed after resolution")
+				}
+				return freezeUnitSummaryTextbookPages(frozen, source.Catalog, *unit, k12.UnitSummarySource{DocumentID: material.DocumentID, ManifestID: source.Catalog.TextbookManifestID, Generation: material.Generation, SourceDigest: material.SourceDigest}, source.Pages)
+			}
+		}
+	}
 	if r.Subject == "math" && len(r.MaterialDocumentIDs) == 0 && r.ProvidedMaterialText == "" && len(input.ProvidedMaterials) == 0 && input.MathCatalog != nil {
 		catalog := input.MathCatalog
 		unitID := r.UnitID
@@ -162,16 +205,7 @@ func (c *UnitSummaryCoordinator) freezeContext(ctx context.Context, a k12.UnitSu
 			unitID = input.MathProgress.UnitID
 			frozen.ProgressSource = input.MathProgress.EvidenceSource
 		}
-		var unit *k12.CurriculumCatalogUnit
-		for i := range catalog.Units {
-			candidate := &catalog.Units[i]
-			if (unitID != "" && candidate.UnitID == unitID) || (unitID == "" && r.UnitTitle != "" && candidate.Title == r.UnitTitle) {
-				unit = candidate
-				// 目录当前没有独立可信序号字段，数组下标不能冒充教材印刷单元号。
-				frozen.UnitNumber = ""
-				break
-			}
-		}
+		unit := unitSummaryCatalogUnit(*catalog, unitID, r.UnitTitle)
 		if unit == nil {
 			return frozen, fmt.Errorf("%w: please specify a unit available in the current mathematics textbook", ErrInvalidInput)
 		}
@@ -186,34 +220,7 @@ func (c *UnitSummaryCoordinator) freezeContext(ctx context.Context, a k12.UnitSu
 		if err != nil {
 			return frozen, err
 		}
-		frozen.UnitID = unit.UnitID
-		frozen.UnitTitle = unit.Title
-		frozen.TextbookEdition = catalog.TextbookEdition
-		frozen.Volume = catalog.Volume
-		present := map[int]bool{}
-		for _, page := range pages {
-			if page.LogicalPage < unit.PageFrom || page.LogicalPage > unit.PageTo {
-				continue
-			}
-			present[page.LogicalPage] = true
-			ref := fmt.Sprintf("textbook:%s:p%d", scope.TextbookManifestID, page.LogicalPage)
-			frozen.Sources = append(frozen.Sources, k12.UnitSummaryFrozenSource{UnitSummarySource: k12.UnitSummarySource{Ref: ref, Origin: "textbook", Label: catalog.Title, Locator: scope.DocumentID, Page: strconv.Itoa(page.LogicalPage), DocumentID: scope.DocumentID, ManifestID: scope.TextbookManifestID, Generation: scope.DocumentGeneration, SourceDigest: scope.SourceDigest, SegmentRefs: page.SegmentRefs}, Text: page.Content})
-		}
-		if len(frozen.Sources) == 0 {
-			return frozen, fmt.Errorf("verified textbook unit has no readable source pages")
-		}
-		full := unit.PageFrom > 0 && unit.PageTo >= unit.PageFrom
-		for p := unit.PageFrom; p <= unit.PageTo; p++ {
-			if !present[p] {
-				full = false
-				frozen.Coverage.Missing = append(frozen.Coverage.Missing, "教材第"+strconv.Itoa(p)+"页")
-			}
-		}
-		if full {
-			frozen.Coverage.Level = "full"
-		}
-		frozen.Coverage.Covered = []string{unit.Title}
-		return frozen, nil
+		return freezeUnitSummaryTextbookPages(frozen, *catalog, *unit, k12.UnitSummarySource{DocumentID: scope.DocumentID, ManifestID: scope.TextbookManifestID, Generation: scope.DocumentGeneration, SourceDigest: scope.SourceDigest}, pages)
 	}
 	indexes := r.SessionMaterialIndexes
 	if len(input.ProvidedMaterials) == 0 {
@@ -322,6 +329,50 @@ func (c *UnitSummaryCoordinator) freezeContext(ctx context.Context, a k12.UnitSu
 		return frozen, fmt.Errorf("%w: please specify the title or scope of the learning materials", ErrInvalidInput)
 	}
 	frozen.Coverage.Missing = []string{"未核对教材完整单元范围"}
+	return frozen, nil
+}
+
+func unitSummaryCatalogUnit(catalog k12.CurriculumCatalog, unitID, title string) *k12.CurriculumCatalogUnit {
+	for i := range catalog.Units {
+		unit := &catalog.Units[i]
+		if (unitID != "" && unit.UnitID == unitID) || (unitID == "" && title != "" && unit.Title == title) {
+			return unit
+		}
+	}
+	return nil
+}
+
+func freezeUnitSummaryTextbookPages(frozen k12.UnitSummaryContext, catalog k12.CurriculumCatalog, unit k12.CurriculumCatalogUnit, identity k12.UnitSummarySource, pages []k12.VerifiedTextbookPage) (k12.UnitSummaryContext, error) {
+	frozen.UnitID, frozen.UnitTitle = unit.UnitID, unit.Title
+	// 目录当前没有独立可信序号字段，数组下标不能冒充教材印刷单元号。
+	frozen.UnitNumber = ""
+	frozen.TextbookEdition, frozen.Volume = catalog.TextbookEdition, catalog.Volume
+	present := map[int]bool{}
+	for _, page := range pages {
+		if page.LogicalPage < unit.PageFrom || page.LogicalPage > unit.PageTo || strings.TrimSpace(page.Content) == "" {
+			continue
+		}
+		present[page.LogicalPage] = true
+		source := identity
+		source.Ref = fmt.Sprintf("textbook:%s:p%d", identity.ManifestID, page.LogicalPage)
+		source.Origin, source.Label, source.Locator = "textbook", catalog.Title, identity.DocumentID
+		source.Page, source.SegmentRefs = strconv.Itoa(page.LogicalPage), page.SegmentRefs
+		frozen.Sources = append(frozen.Sources, k12.UnitSummaryFrozenSource{UnitSummarySource: source, Text: page.Content})
+	}
+	if len(frozen.Sources) == 0 {
+		return frozen, fmt.Errorf("verified textbook unit has no readable source pages")
+	}
+	full := unit.PageFrom > 0 && unit.PageTo >= unit.PageFrom
+	for p := unit.PageFrom; p <= unit.PageTo; p++ {
+		if !present[p] {
+			full = false
+			frozen.Coverage.Missing = append(frozen.Coverage.Missing, "教材第"+strconv.Itoa(p)+"页")
+		}
+	}
+	if full {
+		frozen.Coverage.Level = "full"
+	}
+	frozen.Coverage.Covered = []string{unit.Title}
 	return frozen, nil
 }
 

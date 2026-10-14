@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"unicode"
 
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 )
@@ -91,6 +92,14 @@ func (c *UnitSummaryCoordinator) normalizeContentReferences(ctx context.Context,
 			// 不能证明为实际原文的改写/新任务归为AI创作，不改变题意或知识来源引用。
 			if !original {
 				content.Examples[i].Origin = "ai_created"
+			}
+		}
+		// 来源证明使用原题干；开头的精确来源标签只在规范投影中移除，由Origin统一展示。
+		prompt := strings.TrimLeftFunc(content.Examples[i].PromptMD, unicode.IsSpace)
+		for _, label := range []string{"【教材题】", "【教材例题】", "【教材练习】", "【AI创作例题】"} {
+			if rest, ok := strings.CutPrefix(prompt, label); ok {
+				content.Examples[i].PromptMD = strings.TrimLeftFunc(rest, unicode.IsSpace)
+				break
 			}
 		}
 	}
