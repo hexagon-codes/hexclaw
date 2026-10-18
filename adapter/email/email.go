@@ -8,14 +8,20 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/tls"
+	"encoding/base64"
+	"encoding/hex"
+	"errors"
 	"fmt"
-	"github.com/hexagon-codes/toolkit/util/logger"
 	"io"
 	"mime"
+	"mime/multipart"
+	"mime/quotedprintable"
 	"net"
 	"net/mail"
 	"net/smtp"
+	"net/textproto"
 	"regexp"
 	"strconv"
 	"strings"
@@ -23,6 +29,7 @@ import (
 	"time"
 
 	"github.com/hexagon-codes/hexclaw/adapter"
+	"github.com/hexagon-codes/toolkit/util/logger"
 )
 
 // EmailConfig 邮件适配器配置
@@ -50,6 +57,24 @@ type SMTPConfig struct {
 	Username string `yaml:"username"`
 	Password string `yaml:"password"`
 	From     string `yaml:"from"`
+}
+
+// OutboundAttachment 是已经生成的邮件附件，不在 SMTP 发送阶段下载或重新生成文件。
+type OutboundAttachment struct {
+	Name string
+	MIME string
+	Data []byte
+}
+
+// OutboundMessage 区分显式主题和回复主题，同时保留纯文本与 HTML 备选正文。
+// MessageID 由上层冻结后传入；它标识同一封邮件，不代表 SMTP 提供幂等去重。
+type OutboundMessage struct {
+	To          []string
+	Subject     string
+	Text        string
+	HTML        string
+	MessageID   string
+	Attachments []OutboundAttachment
 }
 
 // EmailAdapter 邮件适配器
@@ -103,14 +128,34 @@ func (a *EmailAdapter) Stop(_ context.Context) error {
 }
 
 // Send 发送邮件回复
-func (a *EmailAdapter) Send(_ context.Context, chatID string, reply *adapter.Reply) error {
+func (a *EmailAdapter) Send(ctx context.Context, chatID string, reply *adapter.Reply) error {
+	if reply == nil {
+		return fmt.Errorf("email reply is required")
+	}
 	subject := "Re: HexClaw"
+	msg := OutboundMessage{To: []string{chatID}, Text: reply.Content}
 	if reply.Metadata != nil {
 		if s, ok := reply.Metadata["subject"]; ok {
 			subject = "Re: " + s
 		}
+		msg.HTML = reply.Metadata["html"]
+		msg.MessageID = reply.Metadata["message_id"]
 	}
-	return a.sendEmail(chatID, subject, reply.Content)
+	msg.Subject = subject
+	for _, attachment := range reply.Attachments {
+		if attachment.Data == "" {
+			return fmt.Errorf("email attachment data is required")
+		}
+		data, err := base64.StdEncoding.DecodeString(attachment.Data)
+		if err != nil {
+			return fmt.Errorf("invalid email attachment data: %w", err)
+		}
+		msg.Attachments = append(msg.Attachments, OutboundAttachment{
+			Name: attachment.Name, MIME: attachment.Mime, Data: data,
+		})
+	}
+	_, err := a.SendMessage(ctx, msg)
+	return err
 }
 
 // SendStream 缓冲流式内容后发送
@@ -577,72 +622,230 @@ func encodeSubject(subject string) string {
 	return mime.QEncoding.Encode("utf-8", subject)
 }
 
-func (a *EmailAdapter) sendEmail(to, subject, body string) error {
+type outboundEnvelope struct {
+	sender     string
+	recipients []string
+	messageID  string
+	data       []byte
+}
+
+// SendMessage 直接使用已配置的 SMTP 连接发送一封完整邮件，不要求启动 IMAP。
+// accepted 仅表示 SMTP 已受理；DATA 结束后未获得确认时返回 outcome_unknown，调用方不得盲目重发。
+func (a *EmailAdapter) SendMessage(ctx context.Context, msg OutboundMessage) (adapter.DeliveryAck, error) {
+	ack := adapter.DeliveryAck{Status: adapter.DeliveryFailed}
+	envelope, err := composeOutboundMessage(a.cfg.SMTP.From, msg)
+	if err != nil {
+		return ack, err
+	}
+	ack.ExternalMessageID = envelope.messageID
 	cfg := a.cfg.SMTP
-
-	// W3-7: 出站 subject 先做 RFC2047 编码, 非 ASCII 转为 encoded-word, 避免收件端乱码。
-	// 编码输出为纯 ASCII, 再经 sanitizeHeader 兜底过滤裸 CR/LF, 防止头部注入。
-	subject = encodeSubject(subject)
-
-	// 防止邮件头部注入
-	to = sanitizeHeader(to)
-	subject = sanitizeHeader(subject)
-
-	msg := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n%s",
-		cfg.From, to, subject, body)
-
-	auth := smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)
-
-	// 经环境代理（或直连）建立连接：465 隐式 TLS，其余端口明文后按服务器能力 STARTTLS。
-	// 与 ProbeSMTP 同源（dialTCPContext/dialTLSContext），让发件也共用应用的代理出口。
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if cfg.Host == "" || cfg.Username == "" || cfg.Password == "" {
+		return ack, fmt.Errorf("SMTP host, username and password are required")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	var (
-		conn net.Conn
-		err  error
-	)
+	// 与连接探测共用代理、隐式 TLS 和 STARTTLS 策略。
+	var conn net.Conn
 	if cfg.Port == 465 {
 		conn, err = dialTLSContext(ctx, cfg.Host, cfg.Port)
 	} else {
 		conn, err = dialTCPContext(ctx, cfg.Host, cfg.Port)
 	}
 	if err != nil {
-		return fmt.Errorf("连接 SMTP 服务器失败: %w", err)
+		return ack, fmt.Errorf("SMTP connection failed: %w", err)
 	}
 	defer func() { _ = conn.Close() }()
-
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+	}
+	stopCancel := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stopCancel()
 	client, err := smtp.NewClient(conn, cfg.Host)
 	if err != nil {
-		return fmt.Errorf("创建 SMTP 客户端失败: %w", err)
+		return ack, fmt.Errorf("SMTP greeting failed: %w", err)
 	}
 	defer func() { _ = client.Close() }()
-
 	if cfg.Port != 465 {
 		if ok, _ := client.Extension("STARTTLS"); ok {
 			if err := client.StartTLS(&tls.Config{ServerName: cfg.Host}); err != nil {
-				return fmt.Errorf("SMTP STARTTLS 失败: %w", err)
+				return ack, fmt.Errorf("SMTP STARTTLS failed: %w", err)
 			}
 		}
 	}
-
-	if err := client.Auth(auth); err != nil {
-		return fmt.Errorf("smtp 认证失败: %w", err)
+	if err := client.Auth(smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)); err != nil {
+		return ack, fmt.Errorf("SMTP authentication failed: %w", err)
 	}
-	if err := client.Mail(cfg.From); err != nil {
-		return err
+	if err := client.Mail(envelope.sender); err != nil {
+		return ack, fmt.Errorf("SMTP sender rejected: %w", err)
 	}
-	if err := client.Rcpt(to); err != nil {
-		return err
+	for _, recipient := range envelope.recipients {
+		if err := client.Rcpt(recipient); err != nil {
+			return ack, fmt.Errorf("SMTP recipient rejected: %w", err)
+		}
 	}
 	w, err := client.Data()
 	if err != nil {
-		return err
+		return ack, fmt.Errorf("SMTP DATA rejected: %w", err)
 	}
-	if _, err := w.Write([]byte(msg)); err != nil {
-		return err
+	if _, err := w.Write(envelope.data); err != nil {
+		// 尚未提交 DATA 终止符，服务器不能把不完整邮件视为已受理。
+		return ack, fmt.Errorf("SMTP message write failed: %w", err)
 	}
-	return w.Close()
+	if err := w.Close(); err != nil {
+		var response *textproto.Error
+		if !errors.As(err, &response) || response.Code < 400 || response.Code >= 600 {
+			ack.Status = adapter.DeliveryOutcomeUnknown
+		}
+		return ack, fmt.Errorf("SMTP submission failed: %w", err)
+	}
+	ack.Status = adapter.DeliveryAccepted
+	// 已取得 DATA 250 后，QUIT 失败不改变受理事实。
+	_ = client.Quit()
+	return ack, nil
+}
+
+func composeOutboundMessage(from string, msg OutboundMessage) (outboundEnvelope, error) {
+	var envelope outboundEnvelope
+	sender, err := mail.ParseAddress(from)
+	if err != nil {
+		return envelope, fmt.Errorf("invalid email sender: %w", err)
+	}
+	envelope.sender = sender.Address
+	var recipients []string
+	for _, raw := range msg.To {
+		addresses, err := mail.ParseAddressList(raw)
+		if err != nil {
+			return envelope, fmt.Errorf("invalid email recipient: %w", err)
+		}
+		for _, address := range addresses {
+			envelope.recipients = append(envelope.recipients, address.Address)
+			recipients = append(recipients, address.String())
+		}
+	}
+	if len(recipients) == 0 {
+		return envelope, fmt.Errorf("at least one email recipient is required")
+	}
+	messageID := strings.TrimSpace(msg.MessageID)
+	if messageID == "" {
+		var token [16]byte
+		if _, err := rand.Read(token[:]); err != nil {
+			return envelope, fmt.Errorf("email message ID creation failed: %w", err)
+		}
+		_, domain, _ := strings.Cut(sender.Address, "@")
+		messageID = hex.EncodeToString(token[:]) + "@" + domain
+	} else {
+		messageID = strings.TrimPrefix(strings.TrimSuffix(messageID, ">"), "<")
+	}
+	if strings.Count(messageID, "@") != 1 || strings.ContainsAny(messageID, "<> \t\r\n") {
+		return envelope, fmt.Errorf("invalid email message ID")
+	}
+	envelope.messageID = "<" + messageID + ">"
+	contentType, encoding, body, err := composeOutboundBody(msg)
+	if err != nil {
+		return envelope, err
+	}
+	var data bytes.Buffer
+	fmt.Fprintf(&data, "From: %s\r\nTo: %s\r\nSubject: %s\r\nDate: %s\r\nMessage-ID: %s\r\nMIME-Version: 1.0\r\nContent-Type: %s\r\n",
+		sender.String(), strings.Join(recipients, ", "), sanitizeHeader(encodeSubject(msg.Subject)),
+		time.Now().Format(time.RFC1123Z), envelope.messageID, contentType)
+	if encoding != "" {
+		fmt.Fprintf(&data, "Content-Transfer-Encoding: %s\r\n", encoding)
+	}
+	data.WriteString("\r\n")
+	data.Write(body)
+	envelope.data = data.Bytes()
+	return envelope, nil
+}
+
+func composeOutboundBody(msg OutboundMessage) (string, string, []byte, error) {
+	var body bytes.Buffer
+	encoding := "quoted-printable"
+	contentType := "text/plain; charset=UTF-8"
+	if msg.HTML == "" {
+		writer := quotedprintable.NewWriter(&body)
+		if _, err := io.WriteString(writer, msg.Text); err != nil {
+			return "", "", nil, err
+		}
+		if err := writer.Close(); err != nil {
+			return "", "", nil, err
+		}
+	} else {
+		alternative := multipart.NewWriter(&body)
+		for _, part := range []struct{ mediaType, content string }{
+			{"text/plain; charset=UTF-8", msg.Text}, {"text/html; charset=UTF-8", msg.HTML},
+		} {
+			writer, err := alternative.CreatePart(textproto.MIMEHeader{
+				"Content-Type": {part.mediaType}, "Content-Transfer-Encoding": {"quoted-printable"},
+			})
+			if err != nil {
+				return "", "", nil, err
+			}
+			encoded := quotedprintable.NewWriter(writer)
+			if _, err := io.WriteString(encoded, part.content); err != nil {
+				return "", "", nil, err
+			}
+			if err := encoded.Close(); err != nil {
+				return "", "", nil, err
+			}
+		}
+		if err := alternative.Close(); err != nil {
+			return "", "", nil, err
+		}
+		contentType = mime.FormatMediaType("multipart/alternative", map[string]string{"boundary": alternative.Boundary()})
+		encoding = ""
+	}
+	if len(msg.Attachments) == 0 {
+		return contentType, encoding, body.Bytes(), nil
+	}
+	var mixedBody bytes.Buffer
+	mixed := multipart.NewWriter(&mixedBody)
+	header := textproto.MIMEHeader{"Content-Type": {contentType}}
+	if encoding != "" {
+		header.Set("Content-Transfer-Encoding", encoding)
+	}
+	part, err := mixed.CreatePart(header)
+	if err != nil {
+		return "", "", nil, err
+	}
+	if _, err := part.Write(body.Bytes()); err != nil {
+		return "", "", nil, err
+	}
+	for _, attachment := range msg.Attachments {
+		mediaType := attachment.MIME
+		if mediaType == "" {
+			mediaType = "application/octet-stream"
+		}
+		mediaType, params, err := mime.ParseMediaType(mediaType)
+		if err != nil {
+			return "", "", nil, fmt.Errorf("invalid email attachment MIME type: %w", err)
+		}
+		name := attachment.Name
+		if name == "" {
+			name = "attachment"
+		}
+		params["name"] = name
+		part, err := mixed.CreatePart(textproto.MIMEHeader{
+			"Content-Type":              {mime.FormatMediaType(mediaType, params)},
+			"Content-Disposition":       {mime.FormatMediaType("attachment", map[string]string{"filename": name})},
+			"Content-Transfer-Encoding": {"base64"},
+		})
+		if err != nil {
+			return "", "", nil, err
+		}
+		encoded := base64.StdEncoding.EncodeToString(attachment.Data)
+		for len(encoded) > 0 {
+			n := min(76, len(encoded))
+			if _, err := io.WriteString(part, encoded[:n]+"\r\n"); err != nil {
+				return "", "", nil, err
+			}
+			encoded = encoded[n:]
+		}
+	}
+	if err := mixed.Close(); err != nil {
+		return "", "", nil, err
+	}
+	return mime.FormatMediaType("multipart/mixed", map[string]string{"boundary": mixed.Boundary()}), "", mixedBody.Bytes(), nil
 }
 
 // ParseEmailAddress 从 "Name <email>" 格式提取邮箱地址
