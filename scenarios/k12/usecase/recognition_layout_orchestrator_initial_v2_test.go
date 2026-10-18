@@ -27,6 +27,7 @@ type recognitionLayoutInitialV2Probe struct {
 	headerDigest    string
 	headerEnabled   bool
 	initialReadMode string
+	executionPolicy string
 	parent          k12.ModelInvocation
 	manifest        k12.ModelPhysicalInvocation
 	runtime         k12.RecognitionLayoutPlanRuntimeV2
@@ -42,6 +43,7 @@ func (p *recognitionLayoutInitialV2Probe) Recognize(
 	p.headerDigest, p.headerEnabled =
 		k12.RecognitionLayoutPlanV2HeaderDigestFromContext(ctx)
 	p.initialReadMode = k12.RecognitionLayoutInitialReadModeFromContext(ctx)
+	p.executionPolicy = k12.RecognitionExecutionPolicyFromContext(ctx)
 	parents, err := p.records.ListModelInvocations(
 		context.Background(),
 		p.agentName,
@@ -180,7 +182,9 @@ func TestREGK12RecognitionDurabilityBudget20260808001OrchestratesInitialV2Header
 	}
 	header := probe.runtime.Header
 	if probe.initialReadMode != k12.RecognitionLayoutManifestWithContentV1 ||
+		probe.executionPolicy != k12.RecognitionExecutionPolicyCompactDAGV1 ||
 		header.InitialReadMode != k12.RecognitionLayoutManifestWithContentV1 ||
+		header.ExecutionPolicy != k12.RecognitionExecutionPolicyCompactDAGV1 ||
 		header.PlanID != recognitionLayoutInitialV2PlanID(probe.parent.InvocationID) ||
 		header.ParentInvocationID != probe.parent.InvocationID ||
 		header.AgentName != probe.parent.AgentName ||
@@ -299,6 +303,7 @@ func TestREGK12RecognitionDurabilityBudget20260808001ReusesPreparedAndSucceededV
 	}
 	// 历史任务的运行时未保存首读模式，恢复时仍须使用原清单协议。
 	orchestrator.lookup(job.Record.RecordID).req.InitialReadMode = ""
+	orchestrator.lookup(job.Record.RecordID).req.RecognitionExecutionPolicy = ""
 	job, err = deps.AdvanceGradingStage(
 		ctx,
 		job.Record.AgentName,

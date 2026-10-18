@@ -142,21 +142,29 @@ func buildRecognitionReviewPromptV1(targets []k12.RecognitionLayoutTargetV2) (st
 }
 
 func (a *RecognizerAdapter) recognizeLayoutInitialReadV1(ctx context.Context, sourceImage []byte, headerDigest string) ([]usecase.RecognizedQuestion, error) {
+	executionPolicy := k12.RecognitionExecutionPolicyFromContext(ctx)
+	prompt, err := buildRecognitionInitialReadPromptForPolicy(executionPolicy)
+	if err != nil {
+		return nil, err
+	}
 	physicalCtx, cancel, err := recognitionLayoutPhysicalCallContextV2(ctx, time.Time{}, 120000)
 	if err != nil {
 		return nil, err
 	}
+	phaseStarted := time.Now()
 	page, err := a.canonicalizeRecognitionPageV2(physicalCtx, sourceImage)
+	logRecognitionPhaseV1(ctx, headerDigest, "canonicalize", phaseStarted)
 	if err != nil {
 		cancel()
 		return nil, err
 	}
 	initialReadCtx := k12.WithRecognitionLayoutInitialReadJSONOutput(physicalCtx)
-	whole, err := a.callRecognitionVisionPhysical(initialReadCtx, k12.RecognitionPhysicalCall{PlanVersion: k12.RecognitionPlanVersionV2, PlanDigest: headerDigest, Unit: k12.RecognitionPhysicalUnitWholePage, Image: page.PNG}, recognitionLayoutInitialReadPromptV1)
+	whole, err := a.callRecognitionVisionPhysical(initialReadCtx, k12.RecognitionPhysicalCall{PlanVersion: k12.RecognitionPlanVersionV2, PlanDigest: headerDigest, Unit: k12.RecognitionPhysicalUnitWholePage, Image: page.PNG}, prompt)
 	cancel()
 	if err != nil {
 		return nil, fmt.Errorf("recognizer: initial read model call failed: %w", err)
 	}
+	phaseStarted = time.Now()
 	plan, exists, err := k12.LookupRecognitionLayoutPlanV2(ctx)
 	if err != nil {
 		return nil, err
@@ -207,7 +215,10 @@ func (a *RecognizerAdapter) recognizeLayoutInitialReadV1(ctx context.Context, so
 		}
 	}
 	settlement.PlanDigest = plan.AuthorizedPlanDigest
+	logRecognitionPhaseV1(ctx, headerDigest, "initial_projection_and_plan", phaseStarted)
+	phaseStarted = time.Now()
 	initial, _, err := k12.AuthorizeAndSettleRecognitionLayoutInitialReadV1(ctx, whole, plan, settlement)
+	logRecognitionPhaseV1(ctx, headerDigest, "initial_settlement", phaseStarted)
 	if err != nil {
 		return nil, fmt.Errorf("recognizer: initial-read atomic settlement failed: %w", err)
 	}
@@ -218,7 +229,7 @@ func (a *RecognizerAdapter) recognizeLayoutInitialReadV1(ctx context.Context, so
 	if err != nil {
 		return nil, err
 	}
-	if runtime.HeaderDigest != headerDigest || runtime.Header.InitialReadMode != k12.RecognitionLayoutManifestWithContentV1 || runtime.Header.ParentInvocationID == "" || runtime.AuthorizedPlan == nil || !reflect.DeepEqual(*runtime.AuthorizedPlan, plan) {
+	if runtime.HeaderDigest != headerDigest || runtime.Header.InitialReadMode != k12.RecognitionLayoutManifestWithContentV1 || runtime.Header.ExecutionPolicy != executionPolicy || runtime.Header.ParentInvocationID == "" || runtime.AuthorizedPlan == nil || !reflect.DeepEqual(*runtime.AuthorizedPlan, plan) {
 		return nil, fmt.Errorf("%w: initial-read runtime drifted", k12.ErrRecognitionLayoutPlanV2Unauthorized)
 	}
 	primary := make(map[string]recognitionLayoutBatchOutcomeV2, len(initial.FirstReads))
@@ -235,15 +246,28 @@ func (a *RecognizerAdapter) recognizeLayoutInitialReadV1(ctx context.Context, so
 			primary[target.TargetID] = recognitionLayoutBatchOutcomeV2{targetID: target.TargetID, question: &question, source: whole}
 		}
 	}
+	ctx, err = withRecognitionReviewPreparedInputsV1(ctx, page.PNG, plan, runtime)
+	if err != nil {
+		return nil, err
+	}
+	phaseStarted = time.Now()
 	batches, err := authorizeRecognitionReviewGroupsV1(ctx, page.PNG, plan, runtime, initial.ReviewAuthorizations)
+	logRecognitionPhaseV1(ctx, headerDigest, "review_authorization", phaseStarted)
 	if err != nil {
 		return nil, err
 	}
-	reviewed, err := a.recognizeReviewWaveV1(ctx, page.PNG, plan, runtime, batches, primary)
+	sealRecognitionReviewPreparedInputsV1(ctx)
+	phaseStarted = time.Now()
+	var reviewed map[string]recognitionLayoutBatchOutcomeV2
+	if k12.RecognitionCompactDAGExecutionPolicy(executionPolicy) {
+		reviewed, err = a.recognizeReviewAndAdjudicateV1(ctx, page.PNG, plan, runtime, batches, primary)
+	} else {
+		reviewed, err = a.recognizeReviewWaveV1(ctx, page.PNG, plan, runtime, batches, primary)
+	}
 	if err != nil {
 		return nil, err
 	}
-	if plan.SourceAdjudication {
+	if plan.SourceAdjudication && executionPolicy == "" {
 		// 裁决复用既有规则；批内读数只为旧单题比较器构造瞬时投影，真实回执保持完整。
 		projectedReviewed := make(map[string]recognitionLayoutBatchOutcomeV2, len(reviewed))
 		for targetID, outcome := range reviewed {
@@ -259,7 +283,10 @@ func (a *RecognizerAdapter) recognizeLayoutInitialReadV1(ctx context.Context, so
 			return nil, err
 		}
 	}
+	logRecognitionPhaseV1(ctx, headerDigest, "review_and_adjudication", phaseStarted)
+	phaseStarted = time.Now()
 	finalization, _, err := k12.FinalizeRecognitionLayoutPlanV2(ctx)
+	logRecognitionPhaseV1(ctx, headerDigest, "finalization", phaseStarted)
 	if err != nil {
 		return nil, err
 	}
@@ -413,16 +440,23 @@ func authorizeRecognitionReviewGroupsV1(ctx context.Context, pagePNG []byte, pla
 			return nil, err
 		}
 		request := k12.RecognitionLayoutReviewBatchAuthorizationRequestV1{PlanDigest: plan.AuthorizedPlanDigest, PhysicalUnit: unit, Members: append([]k12.RecognitionLayoutReviewMemberAuthorizationV1(nil), remaining[start:end]...), RecognitionFormat: k12.RecognitionLayoutCompactV4}
-		_, _, request, err = recognitionReviewRequestV1(pagePNG, plan, request)
+		prepareStarted := time.Now()
+		image, prompt, request, err := recognitionReviewRequestV1(pagePNG, plan, request)
+		logRecognitionPhaseV1(ctx, runtime.HeaderDigest, "review_input_"+string(unit), prepareStarted)
 		if err != nil {
 			return nil, err
 		}
+		authorizeStarted := time.Now()
 		authorized, _, err := k12.AuthorizeRecognitionLayoutReviewBatchV1(ctx, request)
+		logRecognitionPhaseV1(ctx, runtime.HeaderDigest, "review_authorize_"+string(unit), authorizeStarted)
 		if err != nil {
 			return nil, err
 		}
 		if !reflect.DeepEqual(authorized.RecognitionLayoutReviewBatchAuthorizationRequestV1, request) || authorized.AuthorizationID == "" || !recognitionLayoutSHA256DigestV2.MatchString(authorized.AuthorizationDigest) {
 			return nil, fmt.Errorf("%w: review authorization projection drifted", k12.ErrRecognitionLayoutPlanV2Unauthorized)
+		}
+		if err := rememberRecognitionReviewPreparedInputV1(ctx, request, image, prompt); err != nil {
+			return nil, err
 		}
 		batches = append(batches, authorized)
 		start = end
@@ -515,7 +549,13 @@ func (a *RecognizerAdapter) recognizeReviewWaveV1(ctx context.Context, pagePNG [
 
 func (a *RecognizerAdapter) recognizeReviewBatchV1(ctx context.Context, pagePNG []byte, plan k12.RecognitionLayoutPlanV2, runtime k12.RecognitionLayoutPlanRuntimeV2, authorization k12.RecognitionLayoutReviewBatchAuthorizationV1, initial map[string]recognitionLayoutBatchOutcomeV2, index int) recognitionReviewExecutionV1 {
 	result := recognitionReviewExecutionV1{index: index}
-	image, prompt, actual, err := recognitionReviewRequestV1(pagePNG, plan, authorization.RecognitionLayoutReviewBatchAuthorizationRequestV1)
+	prepareStarted := time.Now()
+	image, prompt, actual, reused, err := recognitionReviewExecutionInputV1(ctx, pagePNG, plan, runtime, authorization.RecognitionLayoutReviewBatchAuthorizationRequestV1)
+	phase := "review_rebuild_"
+	if reused {
+		phase = "review_reuse_"
+	}
+	logRecognitionPhaseV1(ctx, runtime.HeaderDigest, phase+string(authorization.PhysicalUnit), prepareStarted)
 	if err != nil || !reflect.DeepEqual(actual, authorization.RecognitionLayoutReviewBatchAuthorizationRequestV1) {
 		result.err = fmt.Errorf("%w: frozen review input does not match original pixels and prompt", k12.ErrRecognitionLayoutPlanV2Unauthorized)
 		return result
@@ -576,7 +616,9 @@ func (a *RecognizerAdapter) recognizeReviewBatchV1(ctx context.Context, pagePNG 
 		}
 	}
 	settlement := k12.RecognitionLayoutReviewBatchSettlementV1{PlanDigest: plan.AuthorizedPlanDigest, AuthorizationID: authorization.AuthorizationID, AuthorizationDigest: authorization.AuthorizationDigest, SourcePhysicalInvocationID: physical.InvocationID, SourcePhysicalUnit: authorization.PhysicalUnit, SourcePhysicalResultDigest: physical.ResultDigest, Classification: decision.classification, AmbiguityKind: decision.ambiguityKind, Candidates: decision.candidates}
+	settleStarted := time.Now()
 	projection, _, err := k12.SettleRecognitionLayoutReviewBatchV1(ctx, physical, settlement)
+	logRecognitionPhaseV1(ctx, runtime.HeaderDigest, "review_settle_"+string(authorization.PhysicalUnit), settleStarted)
 	if err != nil {
 		result.err = err
 		return result

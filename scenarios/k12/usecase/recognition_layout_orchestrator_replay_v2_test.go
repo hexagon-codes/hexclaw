@@ -121,6 +121,7 @@ func TestREGK12RecognitionDurabilityBudget20260808001OrchestratorMarksFinalizedV
 	// 历史 V2 的 run.json 没有首读模式字段，重启后继续复用原分批计划。
 	legacyRun := orchestrator.lookup(job.Record.RecordID)
 	legacyRun.req.InitialReadMode = ""
+	legacyRun.req.RecognitionExecutionPolicy = ""
 	if err := orchestrator.persistRun(job.Record.RecordID, legacyRun); err != nil {
 		t.Fatalf("persist historical V2 replay checkpoint: %v", err)
 	}

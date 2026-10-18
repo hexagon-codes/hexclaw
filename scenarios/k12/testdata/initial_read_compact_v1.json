@@ -1,0 +1,9 @@
+{
+  "format": "initial_read_compact_v1",
+  "sections": [{"path": ["一"], "label": "一、解决问题"}],
+  "conditions": ["每朵花用\\(\\frac{3}{8}\\)张纸。"],
+  "targets": [
+    {"number": ["1"], "label": "1.", "section": 0, "shared": [0], "region": [0, 0, 20, 10], "kind": "question", "question": "做2朵花，共用多少张纸？", "subject": "数学", "answer_state": "present", "student_answer": "3/8×2=3/4\n答：3/4张纸。", "confidence": 0.99, "risks": [], "answer_bbox": [10, 2, 8, 5], "ownership": "第一题下方的两行手写。"},
+    {"number": ["2"], "label": "2.", "section": 0, "shared": [0], "region": [0, 20, 20, 10], "kind": "question", "question": "做4朵花，共用多少张纸？", "subject": "数学", "answer_state": "present", "student_answer": "3/8×4=3\n答：3张纸。", "confidence": 0.95, "risks": ["分母有涂改痕迹"], "answer_bbox": [10, 22, 8, 5], "ownership": "第二题下方的两行手写。"}
+  ]
+}

@@ -301,12 +301,19 @@ func CanonicalRecognitionLayoutInitialReadEntriesV1(raw string) ([]json.RawMessa
 			return nil, err
 		}
 	}
-	if len(envelope) != 1 {
-		return nil, fmt.Errorf("%w: initial read envelope fields invalid", ErrRecognitionProtocolInvalid)
-	}
 	var entries []json.RawMessage
-	if json.Unmarshal(envelope["targets"], &entries) != nil || len(entries) < 1 || len(entries) > 32 {
-		return nil, fmt.Errorf("%w: initial read targets invalid", ErrRecognitionProtocolInvalid)
+	if _, compact := envelope["format"]; compact {
+		entries, err = canonicalRecognitionLayoutInitialReadCompactV1(envelope)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		if len(envelope) != 1 {
+			return nil, fmt.Errorf("%w: initial read envelope fields invalid", ErrRecognitionProtocolInvalid)
+		}
+		if json.Unmarshal(envelope["targets"], &entries) != nil || len(entries) < 1 || len(entries) > 32 {
+			return nil, fmt.Errorf("%w: initial read targets invalid", ErrRecognitionProtocolInvalid)
+		}
 	}
 	for i, entry := range entries {
 		var object map[string]any

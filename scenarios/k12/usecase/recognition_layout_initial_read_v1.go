@@ -57,7 +57,7 @@ func (e *durableRecognitionPhysicalCallExecutor) validateInitialReadSourceV1(ctx
 		return err
 	}
 	page, err := k12.CanonicalizeRecognitionPageV2(run.req.Image)
-	if err != nil || page.Digest != runtime.Header.PageDigest || run.req.InitialReadMode != runtime.Header.InitialReadMode {
+	if err != nil || page.Digest != runtime.Header.PageDigest || run.req.InitialReadMode != runtime.Header.InitialReadMode || run.req.RecognitionExecutionPolicy != runtime.Header.ExecutionPolicy {
 		return fmt.Errorf("%w: initial-read frozen page drifted", k12.ErrRecognitionLayoutPlanV2Unauthorized)
 	}
 	call := k12.RecognitionPhysicalCall{PlanVersion: k12.RecognitionPlanVersionV2, PlanDigest: runtime.HeaderDigest, Unit: unit, TargetIDs: targetIDs, Image: page.PNG}

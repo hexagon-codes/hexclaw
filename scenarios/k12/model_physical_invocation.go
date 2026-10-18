@@ -42,6 +42,7 @@ type ModelPhysicalInvocation struct {
 // 它有意不包含图像、裁剪、提示词或 Provider 响应内容。
 type RecognitionLayoutPlanHeaderV2 struct {
 	InitialReadMode          string                           `json:"initial_read_mode,omitempty"`
+	ExecutionPolicy          string                           `json:"execution_policy,omitempty"`
 	PlanID                   string                           `json:"plan_id"`
 	ParentInvocationID       string                           `json:"parent_invocation_id"`
 	AgentName                string                           `json:"agent_name"`
@@ -189,6 +190,7 @@ type RecognitionLayoutRepairSettlementResultV2 struct {
 // 仅在 Store 所有的精确集合完成最终化后返回。Provider 响应仍为私有内容；
 // 此对象是已为候选项及其不可变来源回执冻结的规范类型化结果。
 type RecognitionLayoutCandidateFinalResultV2 struct {
+	FinalAnswerReceipt         *RecognitionFinalAnswerReceiptV1        `json:"final_answer_receipt,omitempty"`
 	CandidateID                string                                  `json:"candidate_id"`
 	ResultKind                 RecognitionLayoutCandidateResultKindV2  `json:"result_kind"`
 	ResultDigest               string                                  `json:"result_digest"`
@@ -505,7 +507,9 @@ func (b RecognitionLayoutBudgetBucketsV2) Select(
 func CanonicalRecognitionLayoutPlanHeaderV2(
 	header RecognitionLayoutPlanHeaderV2,
 ) ([]byte, string, error) {
-	if (header.InitialReadMode != "" && header.InitialReadMode != RecognitionLayoutManifestWithContentV1) || header.PlanID == "" || strings.TrimSpace(header.PlanID) != header.PlanID ||
+	if (header.InitialReadMode != "" && header.InitialReadMode != RecognitionLayoutManifestWithContentV1) ||
+		(header.ExecutionPolicy != "" && (!RecognitionCompactDAGExecutionPolicy(header.ExecutionPolicy) || header.InitialReadMode != RecognitionLayoutManifestWithContentV1)) ||
+		header.PlanID == "" || strings.TrimSpace(header.PlanID) != header.PlanID ||
 		header.ParentInvocationID == "" ||
 		strings.TrimSpace(header.ParentInvocationID) != header.ParentInvocationID ||
 		header.AgentName == "" || strings.TrimSpace(header.AgentName) != header.AgentName ||
