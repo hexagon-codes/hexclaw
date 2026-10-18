@@ -124,6 +124,9 @@ func (o *GradingOrchestrator) recoverInvalidAssetAssessments(ctx context.Context
 		if err == nil {
 			continue
 		}
+		if problemSourceReconciliationOnly(ctx) {
+			return err
+		}
 		if failedSource == nil && !errors.Is(err, k12storage.ErrProblemAssetUnavailable) {
 			return err
 		}

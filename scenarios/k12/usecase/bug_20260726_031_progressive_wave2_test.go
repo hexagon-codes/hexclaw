@@ -60,11 +60,14 @@ func TestBUG_20260726_031_AwaitingSourceDoesNotBlockClearSiblingOrCreateAssessme
 		},
 	}, solver, grader)
 	o.deps.GradingBudgetSnapshot = orchestratorTestBudget()
+	o.deps.AnswerAnchorer = &photoAnchorerFake{boxes: map[int]BBox{0: {X: 0.1, Y: 0.1, W: 0.3, H: 0.3}, 1: {X: 0.5, Y: 0.5, W: 0.3, H: 0.3}}}
+	o.deps.PhotoAnnotator = coveragePNGAnnotator{data: validPNGFixture(t, "awaiting-source-annotated")}
 	ctx := context.Background()
 	const sourceKey = "bug-031-awaiting-source-isolation"
-	seedGradingImageTaskOwnerScopeForTest(t, o.deps, sourceKey)
 	request := orchestratorPhotoRequest()
 	request.TaskIntent = PhotoTaskCompletedHomework
+	request.Image = validPNGFixture(t, "awaiting-source-original")
+	request.SourcePageAssetID = seedGradingImageTaskOwnerScopeForTest(t, o.deps, sourceKey, request.Image)
 	started, created, err := o.StartPhotoGradingJob(ctx, StartPhotoGradingInput{
 		Photo: request, SourceKind: "image_task", SourceKey: sourceKey,
 		BudgetSnapshot:            frozenWiringBudget(),

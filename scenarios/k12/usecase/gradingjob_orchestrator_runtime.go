@@ -1438,6 +1438,7 @@ func (o *GradingOrchestrator) durableAssessmentResult(
 	ctx context.Context,
 	run *gradingRun,
 	job GradingJobView,
+	annotators ...PhotoAnnotator,
 ) (*PhotoGradeResult, bool, error) {
 	if run.result != nil {
 		receipts, err := o.deps.Records.ListGradingAssessmentItems(
@@ -1466,6 +1467,9 @@ func (o *GradingOrchestrator) durableAssessmentResult(
 		byProblem[receipt.ProblemID] = receipt
 	}
 	replayDeps := o.deps
+	if len(annotators) > 0 {
+		replayDeps.PhotoAnnotator = annotators[0]
+	}
 	replayDeps.Recognizer = presetRecognizer{questions: run.questions}
 	switch {
 	case run.anchorFailed:

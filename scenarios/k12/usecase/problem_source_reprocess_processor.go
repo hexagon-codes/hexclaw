@@ -830,18 +830,75 @@ func (o *GradingOrchestrator) processProblemSourceReprocess(
 	return o.requireCurrentSourceReprocessFinalArtifact(ctx, completed)
 }
 
-// finalizeSourceReprocessIfCurrentExactSet finishes a source-action replay
-// only after the canonical finalizer has proved the complete current exact-set.
-// It intentionally contains no item assessment or OCR path. Source work has no
-// process-local full-page render result, so the post-finalizer checkpoint
-// transitions consume the already durable immutable artifact rather than
-// invoking the normal runner's rendering/assessing branches.
+// 来源修正只从完整当前逐题回执重建页面和必需批改图，再由共享终稿器冻结。
+// 回执不齐时保持未完成，不进入普通runner评估其他题，也不重发OCR或模型请求。
 func (o *GradingOrchestrator) finalizeSourceReprocessIfCurrentExactSet(
 	ctx context.Context,
 	run *gradingRun,
 	job GradingJobView,
 ) (GradingJobView, bool, error) {
-	artifact, err := o.finalizeGradingPage(ctx, run, job)
+	required, err := o.deps.gradingRequiresAnnotatedImage(ctx, job)
+	if err != nil {
+		return job, false, err
+	}
+	if required && run.result == nil {
+		// 跳过题保留在完整终稿事实中，只从批注渲染副本排除；父题材料仍随原结构保留。
+		renderRun := *run
+		renderRun.questions = nil
+		skipped := make(map[string]bool)
+		ordinals := make(map[int]int)
+		pageOrdinal := 0
+		for _, question := range cloneRecognizedQuestions(run.questions) {
+			if question.ProblemKind != ProblemKindCompoundParent {
+				pageOrdinal++
+				matches, err := currentProblemSkipMatchesInput(ctx, o.deps, job, question)
+				if err != nil {
+					return job, false, err
+				}
+				if matches {
+					skipped[question.ProblemID] = true
+					continue
+				}
+				ordinals[len(ordinals)+1] = pageOrdinal
+			}
+			renderRun.questions = append(renderRun.questions, question)
+		}
+		if run.anchored != nil {
+			renderRun.anchored = nil
+			for _, question := range cloneRecognizedQuestions(run.anchored) {
+				if !skipped[question.ProblemID] {
+					renderRun.anchored = append(renderRun.anchored, question)
+				}
+			}
+		}
+		annotator := o.deps.PhotoAnnotator
+		if annotator != nil {
+			annotator = sourceReprocessPhotoAnnotator{inner: annotator, ordinals: ordinals}
+		}
+		rebuilt, durable, rebuildErr := o.durableAssessmentResult(ctx, &renderRun, job, annotator)
+		if rebuildErr != nil {
+			return job, false, rebuildErr
+		}
+		if !durable {
+			return job, false, nil
+		}
+		if rebuilt == nil || rebuilt.AnnotatedImage == nil || len(rebuilt.AnnotatedImage.Data) == 0 {
+			return job, false, fmt.Errorf("usecase: source reprocess required annotated image is unavailable")
+		}
+		run.result = rebuilt
+		if err := o.persistRun(job.Record.RecordID, run); err != nil {
+			return job, false, err
+		}
+		// 完整当前回执已证明所有题的输入，先汇合既有确认状态再冻结批改图资产。
+		if job.Record.Status == k12.GradingStageAwaitingConfirmation && job.Fields.ConfirmationState != k12.GradingConfirmationConfirmed {
+			job, err = o.deps.ConfirmGradingJob(ctx, job.Record.AgentName, job.Record.RecordID,
+				[]string{"source-reprocess-render:" + modelInvocationResultDigest(rebuilt)})
+			if err != nil {
+				return job, false, err
+			}
+		}
+	}
+	artifact, err := o.finalizeGradingPage(withProblemSourceReconciliationOnly(ctx), run, job)
 	if errors.Is(err, ErrGradingFinalizationIncomplete) {
 		return job, false, nil
 	}
@@ -917,6 +974,24 @@ func (o *GradingOrchestrator) finalizeSourceReprocessIfCurrentExactSet(
 		)
 	}
 	return completed, true, nil
+}
+
+// 局部渲染的题号映射回原页顺序，坐标与判定原样转发给共享批注器。
+type sourceReprocessPhotoAnnotator struct {
+	inner    PhotoAnnotator
+	ordinals map[int]int
+}
+
+func (a sourceReprocessPhotoAnnotator) Annotate(ctx context.Context, image []byte, marks []PhotoAnnotation) (RenderedPhoto, error) {
+	mapped := append([]PhotoAnnotation(nil), marks...)
+	for i := range mapped {
+		ordinal, ok := a.ordinals[mapped[i].QuestionNumber]
+		if !ok || ordinal < 1 {
+			return RenderedPhoto{}, fmt.Errorf("source reprocess annotation ordinal is invalid")
+		}
+		mapped[i].QuestionNumber = ordinal
+	}
+	return a.inner.Annotate(ctx, image, mapped)
 }
 
 func (o *GradingOrchestrator) requireCurrentSourceReprocessFinalArtifact(

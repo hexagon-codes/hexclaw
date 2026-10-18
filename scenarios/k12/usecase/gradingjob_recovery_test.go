@@ -345,11 +345,12 @@ func TestGradingRecovery_FailedRetryableReenqueued(t *testing.T) {
 			rec := &countingRecognizer{failures: 1, questions: []RecognizedQuestion{{
 				Question: "1+1=", Subject: "数学", StudentAnswer: "3",
 			}}}
-			d := recoveryDeps(t, rec, nil, &photoAnnotatorFake{})
+			d := recoveryDeps(t, rec, &photoAnchorerFake{boxes: map[int]BBox{0: {X: 0.1, Y: 0.1, W: 0.5, H: 0.5}}}, coveragePNGAnnotator{data: validPNGFixture(t, "recover-known-annotated")})
 			d.Now = func() int64 { return now }
-			seedGradingImageTaskOwnerScopeForTest(t, d, "recover-known-failure")
 			photo := orchestratorPhotoRequest()
 			photo.TaskIntent = PhotoTaskCompletedHomework
+			photo.Image = validPNGFixture(t, "recover-known-source")
+			photo.SourcePageAssetID = seedGradingImageTaskOwnerScopeForTest(t, d, "recover-known-failure", photo.Image)
 			o1 := newRecoverableOrchestrator(t, d, dir)
 			job, _, err := o1.StartPhotoGradingJob(ctx, StartPhotoGradingInput{
 				Photo: photo, SourceKind: "image_task", SourceKey: "recover-known-failure",

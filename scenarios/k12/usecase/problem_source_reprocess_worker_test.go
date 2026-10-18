@@ -1700,7 +1700,12 @@ func newSourceReprocessIntegrationFixture(
 	grader := &itemResumeGrader{calls: map[string]int{}}
 	deps, _ := newPipeline(t, solver, grader, nil)
 	deps.Recognizer = recognizer
-	deps.PhotoAnnotator = &photoAnnotatorFake{}
+	// 来源恢复测试仍走完整图片合同，初始定位提供可用几何而不依赖模型。
+	deps.AnswerAnchorer = &photoAnchorerFake{boxes: map[int]BBox{
+		0: {X: 0.1, Y: 0.2, W: 0.3, H: 0.1},
+		1: {X: 0.1, Y: 0.5, W: 0.3, H: 0.1},
+	}}
+	deps.PhotoAnnotator = coveragePNGAnnotator{data: validPNGFixture(t, "source-reprocess-annotated")}
 	deps.ParentTeachingGuide = &parentTeachingGuideSpy{}
 	deps.PageAssets = assetstore.PageStore{}
 	deps.Profiles = newMemProfiles()
@@ -1922,9 +1927,22 @@ func (f sourceReprocessIntegrationFixture) claimCorrectText(
 	t *testing.T,
 	canonical string,
 	idempotencyKey string,
+	targetProblemID ...string,
 ) k12storage.ProblemSourceReprocessJob {
 	t.Helper()
 	affected := f.run.questions[0]
+	if len(targetProblemID) > 0 {
+		found := false
+		for _, question := range f.run.questions {
+			if question.ProblemID == targetProblemID[0] {
+				affected, found = question, true
+				break
+			}
+		}
+		if !found {
+			t.Fatal("source fixture target is missing")
+		}
+	}
 	if _, err := f.coordinator.Records.DB().Exec(`
 		UPDATE k12_problems
 		SET transcription_confidence=0.99,

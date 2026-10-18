@@ -9,7 +9,7 @@ import (
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 )
 
-func seedGradingImageTaskOwnerScopeForTest(t *testing.T, d Deps, dispatchID string) {
+func seedGradingImageTaskOwnerScopeForTest(t *testing.T, d Deps, dispatchID string, sourceImage ...[]byte) string {
 	t.Helper()
 	coordinator := &ImageTaskCoordinator{
 		Records:      d.Records,
@@ -37,10 +37,21 @@ func seedGradingImageTaskOwnerScopeForTest(t *testing.T, d Deps, dispatchID stri
 	input.OwnerScope = "grading-owner"
 	input.SourceRef = dispatchID + "-source"
 	input.SourceSessionID = dispatchID + "-session"
+	if len(sourceImage) > 0 {
+		t.Setenv("HEXCLAW_ASSET_ROOT", t.TempDir())
+		repository := &PageAssetRepository{Records: d.Records}
+		ready, err := repository.Persist(context.Background(), input.OwnerScope, "mingming", sourceImage[0])
+		if err != nil {
+			t.Fatalf("persist grading source asset: %v", err)
+		}
+		coordinator.PageAssets, coordinator.ReadAsset = repository, nil
+		input.SourceAssetRefs = []string{ready.Metadata.PageAssetID}
+	}
 	view, created, err := coordinator.Create(context.Background(), input)
 	if err != nil || !created || view.Dispatch.DispatchID != dispatchID {
 		t.Fatalf("seed ImageTask owner scope: dispatch=%q created=%v err=%v", view.Dispatch.DispatchID, created, err)
 	}
+	return input.SourceAssetRefs[0]
 }
 
 func TestImageTaskPhotoGrading_ClearFormattedOCRAutoFreezesAndCompletes(t *testing.T) {
@@ -151,11 +162,12 @@ func TestImageTaskPhotoGrading_MissingConfidenceFinalizesWithoutJudgment(t *test
 		Question: "7+8=", Subject: "数学",
 		AnswerState: AnswerStatePresent, StudentAnswer: "15",
 	}}}
-	d := recoveryDeps(t, rec, nil, nil)
-	seedGradingImageTaskOwnerScopeForTest(t, d, "missing-confidence")
+	d := recoveryDeps(t, rec, &photoAnchorerFake{boxes: map[int]BBox{0: {X: 0.1, Y: 0.1, W: 0.5, H: 0.5}}}, coveragePNGAnnotator{data: validPNGFixture(t, "missing-confidence-annotated")})
 	o := newRecoverableOrchestrator(t, d, t.TempDir())
 	photo := orchestratorPhotoRequest()
 	photo.TaskIntent = PhotoTaskCompletedHomework
+	photo.Image = validPNGFixture(t, "missing-confidence-source")
+	photo.SourcePageAssetID = seedGradingImageTaskOwnerScopeForTest(t, d, "missing-confidence", photo.Image)
 	v, _, err := o.StartPhotoGradingJob(ctx, StartPhotoGradingInput{
 		Photo: photo, SourceKind: "image_task", SourceKey: "missing-confidence",
 		BudgetSnapshot:            frozenWiringBudget(),

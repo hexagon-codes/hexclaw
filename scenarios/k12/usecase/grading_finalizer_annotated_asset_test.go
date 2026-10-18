@@ -129,7 +129,7 @@ func TestImageTaskFrozenAnnotationCoverageSurvivesRuntimeRelease(t *testing.T) {
 				{Question: "1+1=", RawTranscription: "1+1=", CanonicalMarkdown: "1+1=", Subject: "数学", StudentAnswer: "3", AnswerRawTranscription: "3", AnswerCanonicalMarkdown: "3", AnswerState: AnswerStatePresent, RecognitionConfidence: &confidence, SourceNumberPath: []string{"1"}, DisplayLabel: "1."},
 				{Question: "1+2=", RawTranscription: "1+2=", CanonicalMarkdown: "1+2=", Subject: "数学", StudentAnswer: "4", AnswerRawTranscription: "4", AnswerCanonicalMarkdown: "4", AnswerState: AnswerStatePresent, RecognitionConfidence: &confidence, SourceNumberPath: []string{"2"}, DisplayLabel: "2."},
 			}
-			var anchorer AnswerAnchorer = &partialDegradedAnchorer{err: context.DeadlineExceeded}
+			var anchorer AnswerAnchorer = &partialDegradedAnchorer{}
 			intent := k12.ImageTaskIntentCompletedHomework
 			if scenario == "unlocated" {
 				anchorer = &photoAnchorerFake{err: context.DeadlineExceeded}
@@ -248,6 +248,27 @@ func TestImageTaskFrozenAnnotationCoverageSurvivesRuntimeRelease(t *testing.T) {
 			if _, err := o.RunGradingJob(ctx, jobID); err != nil {
 				t.Fatal(err)
 			}
+			if scenario == "unlocated" {
+				failed := waitGradingView(t, o, jobID, func(v GradingJobView) bool { return v.Record.Status == k12.GradingStageOutcomeUnknown })
+				if failed.Fields.Retryable || failed.Fields.FailedStage != k12.GradingStageLocating {
+					t.Fatalf("unknown locating must remain parked without a completed image: %+v", failed.Fields)
+				}
+				receipts, err := o.deps.Records.ListModelInvocations(ctx, "mingming", jobID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				o.ReleaseGradingRun(jobID)
+				c.Grading = trackGradingOrchestrator(t, NewGradingOrchestrator(o.deps, orchestratorSnapshotResolver, WithGradingRunDir(o.runDir)))
+				after, err := c.Result(ctx, "mingming", dispatch.DispatchID)
+				if err != nil || after.FinalArtifact != nil || (after.Photo != nil && after.Photo.AnnotatedImage != nil) {
+					t.Fatalf("unknown locating exposed a completed artifact: %+v err=%v", after, err)
+				}
+				afterReceipts, err := o.deps.Records.ListModelInvocations(ctx, "mingming", jobID)
+				if err != nil || !reflect.DeepEqual(receipts, afterReceipts) || classifier.calls != 0 {
+					t.Fatal("unknown read/release changed invocation receipts or called classifier")
+				}
+				return
+			}
 			waitGradingView(t, o, jobID, func(v GradingJobView) bool { return v.Fields.AnchorState != k12.GradingAnchorPending })
 			waitGradingView(t, o, jobID, func(v GradingJobView) bool { return v.Record.Status == k12.GradingStageCompleted })
 			before, err := c.Result(ctx, "mingming", dispatch.DispatchID)
@@ -258,8 +279,6 @@ func TestImageTaskFrozenAnnotationCoverageSurvivesRuntimeRelease(t *testing.T) {
 			switch scenario {
 			case "partial", "partial_reconciled_unknown", "partial_reconciled_sent":
 				want = "本次 2 题已判定，其中 1 题在原作答位置标注；其余 1 题仅作文字汇总，未在图上猜测位置。"
-			case "unlocated":
-				want = "本次 2 题已判定，0 题已在图上标注；本次未生成批改图，判定结果仅作文字汇总，以避免标记错位。"
 			}
 			if before.Photo.ImageWarning != want || (want != "" && !strings.Contains(before.FinalArtifact.CanonicalMarkdown, want)) {
 				t.Fatalf("coverage lost before release: got=%q canonical=%q", before.Photo.ImageWarning, before.FinalArtifact.CanonicalMarkdown)
