@@ -66,4 +66,4 @@ require (
 	modernc.org/memory v1.11.0 // indirect
 )
 
-replace github.com/open-dingtalk/dingtalk-stream-sdk-go => github.com/hexagon-codes/dingtalk-stream-sdk-go v0.9.1-hexclaw.1
+replace github.com/open-dingtalk/dingtalk-stream-sdk-go => github.com/hexagon-codes/dingtalk-stream-sdk-go v0.9.1-hexclaw.2

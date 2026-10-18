@@ -67,18 +67,20 @@ type DingtalkAdapter struct {
 	lastError   string // 最后一次 Stream 连接失败原因（mu 守护）；Health 在未连接时透出，便于定位 creds/网络/代理
 	openAPI     dingtalkOpenAPI
 
-	streamClient *dtclient.StreamClient
-	streamCancel context.CancelFunc
-	streamWG     sync.WaitGroup
-	streamWaiter adapter.LifecycleWaiter
-	workerMu     sync.Mutex
-	workers      sync.WaitGroup
-	workerWaiter adapter.LifecycleWaiter
-	workerCtx    context.Context
-	workerCancel context.CancelFunc
-	stopping     bool
-	connected    atomic.Bool
-	stopped      atomic.Bool
+	streamClient     *dtclient.StreamClient
+	streamGeneration uint64 // mu 守护，连接回执仅属于当前客户端及代次
+	streamSequence   uint64 // mu 守护，拒绝锁外通知的迟到覆盖
+	streamCancel     context.CancelFunc
+	streamWG         sync.WaitGroup
+	streamWaiter     adapter.LifecycleWaiter
+	workerMu         sync.Mutex
+	workers          sync.WaitGroup
+	workerWaiter     adapter.LifecycleWaiter
+	workerCtx        context.Context
+	workerCancel     context.CancelFunc
+	stopping         bool
+	connected        atomic.Bool
+	stopped          atomic.Bool
 
 	// handlerTimeout 单条消息的处理总预算；0 → 默认 defaultHandlerTimeout。可注入以在测试中
 	// 复现「占位已发 → handler 超时 → 返回 error」的终态路径，无需真等 2 分钟。
@@ -911,37 +913,31 @@ func (a *DingtalkAdapter) Start(ctx context.Context, handler adapter.MessageHand
 	streamLoggerOnce.Do(func() {
 		dtlogger.SetLogger(streamEventLogger{})
 	})
-	cli := dtclient.NewStreamClient(
+	var cli *dtclient.StreamClient
+	cli = dtclient.NewStreamClient(
 		dtclient.WithAppCredential(dtclient.NewAppCredentialConfig(a.cfg.AppKey, a.cfg.AppSecret)),
+		dtclient.WithConnectionStateHandler(func(state dtclient.ConnectionState) {
+			a.applyStreamConnectionState(cli, state)
+		}),
 	)
 	cli.RegisterCallbackRouter(dtpayload.BotMessageCallbackTopic, a.onChatBotFrame)
-	// 系统回调保留 SDK 的原处理，仅同步应用健康与固定连接事件。
+	// 系统帧保留 SDK 原处理；传输健康只由所属连接回执更新。
 	cli.RegisterRouter(dtutils.SubscriptionTypeKSystem, "disconnect", func(ctx context.Context, frame *dtpayload.DataFrame) (*dtpayload.DataFrameResponse, error) {
-		a.mu.Lock()
-		if !a.stopped.Load() && a.streamClient == cli {
-			a.connected.Store(false)
-			a.lastError = "dingtalk Stream disconnected"
-		}
-		a.mu.Unlock()
 		logger.Info("[dingtalk] stream system event", "event", "disconnect", "instance_sha256", dingtalkIdentityHash(a.Name()))
 		return cli.OnDisconnect(ctx, frame)
 	})
 	cli.RegisterRouter(dtutils.SubscriptionTypeKSystem, "ping", func(ctx context.Context, frame *dtpayload.DataFrame) (*dtpayload.DataFrameResponse, error) {
 		response, err := cli.OnPing(ctx, frame)
-		if err == nil {
-			a.mu.Lock()
-			if !a.stopped.Load() && a.streamClient == cli {
-				a.connected.Store(true)
-				a.lastError = ""
-			}
-			a.mu.Unlock()
-		}
 		logger.Info("[dingtalk] stream system event", "event", "ping", "instance_sha256", dingtalkIdentityHash(a.Name()))
 		return response, err
 	})
 	streamCtx, cancel := context.WithCancel(ctx)
 	a.mu.Lock()
 	a.streamClient = cli
+	a.streamGeneration = 0
+	a.streamSequence = 0
+	a.connected.Store(false)
+	a.lastError = ""
 	if a.streamCancel != nil {
 		a.streamCancel()
 	}
@@ -955,40 +951,59 @@ func (a *DingtalkAdapter) Start(ctx context.Context, handler adapter.MessageHand
 		defer a.streamWG.Done()
 		defer func() {
 			if r := recover(); r != nil {
-				a.connected.Store(false)
 				errMsg := fmt.Sprintf("dingtalk Stream panic: %v", r)
 				a.mu.Lock()
-				a.lastError = errMsg
+				current := !a.stopped.Load() && a.streamClient == cli
+				if current {
+					a.connected.Store(false)
+					a.lastError = errMsg
+				}
 				a.mu.Unlock()
-				if !a.stopped.Load() {
+				if current {
 					logger.Error("钉钉 Stream 连接 panic", "error", errMsg)
 				}
 			}
 		}()
 		logger.Info("钉钉适配器 Stream 连接启动中", "name", a.Name())
 		err := retryInitialStreamConnect(streamCtx, cli.Start, func(err error) {
-			a.connected.Store(false)
-			if !a.stopped.Load() {
-				logger.Error("钉钉 Stream 首次连接失败，将自动重试", "error", err)
-				a.mu.Lock()
+			a.mu.Lock()
+			current := !a.stopped.Load() && a.streamClient == cli && a.streamGeneration == 0
+			if current {
+				a.connected.Store(false)
 				a.lastError = err.Error()
-				a.mu.Unlock()
+			}
+			a.mu.Unlock()
+			if current {
+				logger.Error("钉钉 Stream 首次连接失败，将自动重试", "error", err)
 			}
 		}, initialStreamRetryDelay)
 		if err != nil || a.stopped.Load() {
 			return
 		}
-		a.mu.Lock()
-		if !a.stopped.Load() && a.streamClient == cli {
-			a.connected.Store(true)
-			a.lastError = ""
-		}
-		a.mu.Unlock()
 		logger.Info("钉钉 Stream 连接已建立", "name", a.Name())
 	}()
 
 	logger.Info("钉钉适配器已启动", "name", a.Name())
 	return nil
+}
+
+func (a *DingtalkAdapter) applyStreamConnectionState(cli *dtclient.StreamClient, state dtclient.ConnectionState) {
+	a.mu.Lock()
+	if a.stopped.Load() || a.streamClient != cli || state.Generation < a.streamGeneration || state.Sequence <= a.streamSequence {
+		a.mu.Unlock()
+		return
+	}
+	a.streamGeneration = state.Generation
+	a.streamSequence = state.Sequence
+	a.connected.Store(state.Connected)
+	if state.Connected {
+		a.lastError = ""
+	} else {
+		a.lastError = "dingtalk Stream disconnected"
+	}
+	a.mu.Unlock()
+	logger.Info("[dingtalk] stream connection state", "connected", state.Connected,
+		"generation", state.Generation, "sequence", state.Sequence, "instance_sha256", dingtalkIdentityHash(a.Name()))
 }
 
 // Stop 停止钉钉适配器
@@ -1007,6 +1022,7 @@ func (a *DingtalkAdapter) Stop(ctx context.Context) error {
 	a.connected.Store(false)
 	cancel := a.streamCancel
 	a.streamCancel = nil
+	cli := a.streamClient
 	a.mu.Unlock()
 	if cancel != nil {
 		cancel()
@@ -1015,9 +1031,9 @@ func (a *DingtalkAdapter) Stop(ctx context.Context) error {
 	// 官方 SDK 默认 AutoReconnect=true：其 processLoop 在连接断开（含 Close 触发的读失败）后会
 	// `go reconnect()` 无限重连。关停前必须先把 AutoReconnect 置 false，否则 Close 后 SDK 仍会
 	// 疯狂重连 → goroutine 泄漏。
-	if a.streamClient != nil {
-		a.streamClient.AutoReconnect = false
-		a.streamClient.Close()
+	if cli != nil {
+		dtclient.WithAutoReconnect(false)(cli)
+		cli.Close()
 	}
 
 	var stopErr error
