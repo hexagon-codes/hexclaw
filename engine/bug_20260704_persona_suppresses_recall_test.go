@@ -28,6 +28,8 @@ func (f *fakeMsgSearcher) SearchMessages(_ context.Context, _, _ string, _, _ in
 func TestBug20260704_MountedPersona_SuppressesCrossSessionRecall(t *testing.T) {
 	const marker = "UPDATE_TASK=false 缺乏超时检测兜底，退款逻辑4步"
 	eng, skills := newEngineForSkillAudit(t)
+	// 自动召回服从实际记忆总开关，夹具须挂接可用的本地记忆对象。
+	eng.SetFileMemory(newFileMem(t, 200))
 	eng.activeRecall = NewActiveRecall(&fakeMsgSearcher{content: marker})
 	if err := skills.Register(&fakePersonaSkill{name: "前女友", body: "你是用户的前女友迪丽热巴"}); err != nil {
 		t.Fatalf("注册技能失败: %v", err)

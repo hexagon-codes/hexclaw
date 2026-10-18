@@ -77,6 +77,19 @@ func workflowKnowledgeRequested(ctx context.Context) bool {
 	return options != nil && options.KnowledgeMode == "override"
 }
 
+// 工作流显式知识范围独立于正文技能；普通会话继续沿用人设独占的上下文规则。
+func (e *ReActEngine) shouldUseKnowledgeContext(ctx context.Context, metadata map[string]string) bool {
+	if options := workflowStepOptions(ctx); options != nil {
+		switch options.KnowledgeMode {
+		case "none":
+			return false
+		case "override":
+			return true
+		}
+	}
+	return !e.hasMountedPersonaSkill(metadata)
+}
+
 func (e *ReActEngine) workflowTools(ctx context.Context, tools []llm.ToolDefinition) []llm.ToolDefinition {
 	options := workflowStepOptions(ctx)
 	if options == nil {
