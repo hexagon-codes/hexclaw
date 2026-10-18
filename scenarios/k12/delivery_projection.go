@@ -32,6 +32,21 @@ type DeliveryProjectionSource struct {
 	DingTalkSuffix         string                        `json:"dingtalk_suffix,omitempty"`
 	DingTalkFullProjection string                        `json:"dingtalk_full_projection,omitempty"`
 	WritingFeedback        bool                          `json:"writing_feedback,omitempty"`
+	EmbeddedGradingImage   *PDFEmbeddedGradingImage      `json:"embedded_grading_image,omitempty"`
+}
+
+// PDFEmbeddedGradingImage 保留已嵌入PDF的原图，供零发送的已知准备失败恢复。
+type PDFEmbeddedGradingImage struct {
+	Name      string `json:"name"`
+	MIME      string `json:"mime"`
+	Data      []byte `json:"data"`
+	PDFDigest string `json:"pdf_digest"`
+}
+
+// HasEmbeddedGradingImagePDF 仅识别冻结图所对应的完整PDF可见集合。
+func (s *DeliveryProjectionSource) HasEmbeddedGradingImagePDF(attachments []messagecontent.AttachmentRef) bool {
+	return s != nil && s.EmbeddedGradingImage != nil && len(attachments) == 1 &&
+		attachments[0].MIME == "application/pdf" && attachments[0].Digest == s.EmbeddedGradingImage.PDFDigest
 }
 
 func privateReplySourceDigest(source AcceptedPrivateReplySource) (string, error) {
@@ -131,11 +146,24 @@ func ValidateDeliveryProjection(batchAgent, objectKind, objectID, contentDigest 
 	} else if objectKind == "im_final_reply" || strings.TrimSpace(bindingID) == "" || strings.HasPrefix(bindingID, "accepted-event:") {
 		return fail()
 	}
-	// 渠道可以追加完整 PDF，但既有附件身份和顺序必须保留。
-	if len(payload.Content.Attachments) < len(source.Canonical.Attachments) {
+	originals := source.Canonical.Attachments
+	if image := source.EmbeddedGradingImage; image != nil {
+		if (objectKind != PrintSourceGradingFinalArtifact && objectKind != "dingtalk_photo_grading_reply") ||
+			source.Canonical.ProducerKind != messagecontent.ProducerK12 || len(originals) != 1 ||
+			!strings.HasPrefix(image.MIME, "image/") || image.Name != originals[0].Name || image.MIME != originals[0].MIME ||
+			len(image.Data) == 0 || deliveryProjectionDigest(string(image.Data)) != originals[0].Digest ||
+			len(image.PDFDigest) != len("sha256:")+sha256.Size*2 || !strings.HasPrefix(image.PDFDigest, "sha256:") {
+			return fail()
+		}
+		if target.Platform == "dingtalk" && source.HasEmbeddedGradingImagePDF(payload.Content.Attachments) {
+			originals = nil
+		}
+	}
+	// 仅同摘要批改PDF可替代独立图，其余渠道与旧计划仍保留原附件顺序。
+	if len(payload.Content.Attachments) < len(originals) {
 		return fail()
 	}
-	for index, original := range source.Canonical.Attachments {
+	for index, original := range originals {
 		if payload.Content.Attachments[index] != original {
 			return fail()
 		}
@@ -146,7 +174,7 @@ func ValidateDeliveryProjection(batchAgent, objectKind, objectID, contentDigest 
 	}
 	if !fullText {
 		hasAddedPDF := false
-		for _, attachment := range payload.Content.Attachments[len(source.Canonical.Attachments):] {
+		for _, attachment := range payload.Content.Attachments[len(originals):] {
 			if attachment.MIME == "application/pdf" {
 				hasAddedPDF = true
 			}

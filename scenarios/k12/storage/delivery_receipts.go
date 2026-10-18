@@ -721,10 +721,14 @@ func PDFPreparationFallbackAllowed(batch k12.DeliveryBatch) bool {
 	originalAttachmentCount := 0
 	if projection {
 		var payload struct {
-			Source *k12.DeliveryProjectionSource `json:"delivery_source"`
+			Source  *k12.DeliveryProjectionSource  `json:"delivery_source"`
+			Content *messagecontent.MessageContent `json:"message_content"`
 		}
 		_ = json.Unmarshal([]byte(batch.Receipts[0].PayloadJSON), &payload)
 		originalAttachmentCount = len(payload.Source.Canonical.Attachments)
+		if payload.Content != nil && payload.Source.HasEmbeddedGradingImagePDF(payload.Content.Attachments) {
+			originalAttachmentCount = 0
+		}
 	}
 	for _, item := range batch.Receipts {
 		if item.Attempt != 0 || item.ExternalMessageID != "" || item.Status != k12.DeliveryFailed || item.LastError != PDFPreparationKnownFailure {
@@ -794,7 +798,10 @@ func (s *Store) PrepareDeliveryPDFFallback(ctx context.Context, sourceID string,
 	oldImages := make(map[string]bool)
 	for _, r := range source.Receipts {
 		oldTargets[deliveryReceiptTargetKey(r)] = true
-		if strings.HasPrefix(r.PartMIME, "image/") || (projection && r.PartKind == messagecontent.PartArtifact && r.PartOrdinal <= len(originalSource.Canonical.Attachments)+1) {
+		if projection && originalSource.EmbeddedGradingImage != nil {
+			ref := originalSource.Canonical.Attachments[0]
+			oldImages[deliveryReceiptTargetKey(r)+"\x00"+ref.MIME+"\x00"+ref.Digest] = true
+		} else if strings.HasPrefix(r.PartMIME, "image/") || (projection && r.PartKind == messagecontent.PartArtifact && r.PartOrdinal <= len(originalSource.Canonical.Attachments)+1) {
 			oldImages[deliveryReceiptTargetKey(r)+"\x00"+r.PartMIME+"\x00"+r.PartDigest] = true
 		}
 	}
@@ -820,7 +827,11 @@ func (s *Store) PrepareDeliveryPDFFallback(ctx context.Context, sourceID string,
 				}
 			}
 			if !matched {
-				return k12.DeliveryBatch{}, false, fmt.Errorf("%w: PDF fallback changed image", ErrDeliveryBatchConflict)
+				// 新PDF计划未上传独立图，回退按同一冻结来源的原图摘要重新准备媒体。
+				if !projection || originalSource.EmbeddedGradingImage == nil ||
+					r.PartMIME != originalSource.Canonical.Attachments[0].MIME || r.PartDigest != originalSource.Canonical.Attachments[0].Digest {
+					return k12.DeliveryBatch{}, false, fmt.Errorf("%w: PDF fallback changed image", ErrDeliveryBatchConflict)
+				}
 			}
 		}
 	}

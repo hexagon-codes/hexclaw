@@ -169,6 +169,10 @@ func validateK12DingtalkPhotoReplyBatch(
 	target k12usecase.ResolvedDeliveryTarget,
 	imageMIME string,
 ) error {
+	// 完整批改图已进入PDF的新计划没有独立图部件；旧图文计划仍按原集合验证。
+	if len(batch.Receipts) == 2 && batch.Receipts[1].PartMIME == "application/pdf" {
+		imageMIME = ""
+	}
 	partCount := 2
 	if imageMIME == "" {
 		partCount = 1

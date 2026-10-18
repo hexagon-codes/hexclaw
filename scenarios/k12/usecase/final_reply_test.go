@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/channel"
 	"github.com/hexagon-codes/hexclaw/messagecontent"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
@@ -85,6 +86,95 @@ type finalReplyContractPayload struct {
 		Name, MIME string
 		Data       []byte
 	} `json:"attachment"`
+}
+
+type embeddedGradingTransport struct {
+	*finalReplyContractTransport
+	failPDF bool
+}
+
+func (f *embeddedGradingTransport) PrepareDeliveryPartResource(ctx context.Context, receipt k12.DeliveryReceipt) (string, error) {
+	if f.failPDF && receipt.PartMIME == "application/pdf" {
+		return "", &adapter.ResourcePreparationError{Known: true, Cause: errors.New("PDF upload rejected before send")}
+	}
+	return f.finalReplyContractTransport.PrepareDeliveryPartResource(ctx, receipt)
+}
+
+func TestGradingPDFEmbeddedImageDeliveryAndRecoverySQLite(t *testing.T) {
+	for _, scenario := range []string{"mixed_targets", "render_failure", "upload_failure", "unknown", "frozen_old_plan"} {
+		t.Run(scenario, func(t *testing.T) {
+			d, store, transport, renderer, req, targets := newFinalReplyContractFixture(t)
+			boundary := &embeddedGradingTransport{finalReplyContractTransport: transport}
+			d.Delivery = boundary
+			image := []byte("complete original annotated image")
+			req.SourceKind, req.ObjectKind, req.Producer = k12.PrintSourceGradingFinalArtifact, "dingtalk_photo_grading_reply", messagecontent.ProducerK12
+			req.GradingImageInPDF = true
+			req.Message.Attachments = []DeliveryAttachment{{Name: "annotated.png", MIME: "image/png", Data: image}}
+			if scenario == "mixed_targets" {
+				targets = append(targets, ResolvedDeliveryTarget{BindingID: "other-direct-binding", Target: k12.DeliveryTarget{Platform: "feishu", InstanceID: "other-stable", ChatID: "other-parent"}})
+			}
+			pdf, _, err := d.PreparePrintableArtifact(t.Context(), PreparePrintableArtifactRequest{
+				AgentName: req.AgentName, SourceKind: req.SourceKind, SourceRef: req.SourceRef,
+				Title: req.Title, CanonicalMarkdown: req.Message.Content,
+				RenderMarkdown: frozenFinalPDFMarkdown(req.Message.Content, req.Message.Attachments[0]),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.PDF = &pdf
+			switch scenario {
+			case "render_failure":
+				req.PDF, renderer.err = nil, errors.New("renderer unavailable")
+				req.SourceRef += "-not-prepared"
+			case "upload_failure":
+				boundary.failPDF = true
+			case "unknown":
+				transport.visibleUnknown = true
+			case "frozen_old_plan":
+				req.GradingImageInPDF = false
+			}
+			batch, _, err := d.PrepareAndSendFinalReply(t.Context(), req, targets)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if scenario == "frozen_old_plan" {
+				old := batch
+				req.GradingImageInPDF = true
+				batch, _, err = d.PrepareAndSendFinalReply(t.Context(), req, targets)
+				if err != nil || !reflect.DeepEqual(batch, old) || len(batch.Receipts) != 3 {
+					t.Fatalf("new policy changed old frozen plan: %v", err)
+				}
+			}
+			for _, receipt := range batch.Receipts {
+				payload := readFinalReplyContractPayload(t, batch, receipt)
+				if payload.Source.Canonical.Markdown != req.Message.Content || len(payload.Source.Canonical.Attachments) != 1 || payload.Source.Canonical.Attachments[0].Digest != deliveryDigest(string(image)) {
+					t.Fatal("image deduplication changed the original canonical source")
+				}
+				full := scenario == "render_failure" || scenario == "upload_failure" || receipt.Target.Platform != "dingtalk"
+				if full {
+					if payload.Content.Markdown != req.Message.Content || len(payload.Content.Attachments) < 1 || payload.Content.Attachments[0].MIME != "image/png" {
+						t.Fatal("full-result path lost original text or image")
+					}
+				} else if scenario != "frozen_old_plan" && (len(payload.Content.Attachments) != 1 || payload.Content.Attachments[0].MIME != "application/pdf" || payload.Source.EmbeddedGradingImage == nil || !bytes.Equal(payload.Source.EmbeddedGradingImage.Data, image)) {
+					t.Fatal("DingTalk PDF plan still sends image separately or cannot restore it")
+				}
+			}
+			if scenario == "upload_failure" && len(transport.sends) != 2 {
+				t.Fatalf("known zero-send PDF failure did not restore exactly text/image: %d", len(transport.sends))
+			}
+			beforeSends, beforeRenders := len(transport.sends), renderer.calls
+			again, _, err := d.PrepareAndSendFinalReply(t.Context(), req, targets)
+			if (err != nil && !(scenario == "unknown" && errors.Is(err, ErrDeliveryQueryUnavailable))) || again.BatchID != batch.BatchID || len(transport.sends) != beforeSends || renderer.calls != beforeRenders {
+				t.Fatalf("replay resent or rerendered the original plan: %v", err)
+			}
+			if scenario == "unknown" && batch.Status != k12.DeliveryBatchOutcomeUnknown {
+				t.Fatalf("unknown PDF was not retained as unknown: %s", batch.Status)
+			}
+			if _, err := store.GetDeliveryBatch(t.Context(), req.AgentName, batch.BatchID); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
 }
 
 func readFinalReplyContractPayload(t *testing.T, batch k12.DeliveryBatch, receipt k12.DeliveryReceipt) finalReplyContractPayload {

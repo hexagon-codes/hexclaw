@@ -395,7 +395,7 @@ const dingtalkMediaUploadURL = "https://oapi.dingtalk.com/media/upload"
 // copied into a multipart body.
 const dingtalkMaxOutboundImageBytes = 20 << 20
 
-const dingtalkMaxOutboundPDFBytes = 20 << 20
+const dingtalkMaxOutboundPDFBytes = messagecontent.DingTalkMaxOutboundPDFBytes
 
 // MaxOutboundPDFBytes 返回本平台文件上传已经使用的真实预算。
 func MaxOutboundPDFBytes() int { return dingtalkMaxOutboundPDFBytes }

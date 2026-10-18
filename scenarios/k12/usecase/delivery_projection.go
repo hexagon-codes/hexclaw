@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 
+	"github.com/hexagon-codes/hexclaw/messagecontent"
+
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 )
 
@@ -12,10 +14,13 @@ func projectedDeliveryBatchDedupeKey(batch k12.DeliveryBatch) string {
 	variant := "full"
 	for _, r := range batch.Receipts {
 		var payload struct {
-			Source *k12.DeliveryProjectionSource `json:"delivery_source"`
+			Source  *k12.DeliveryProjectionSource  `json:"delivery_source"`
+			Content *messagecontent.MessageContent `json:"message_content"`
 		}
 		_ = json.Unmarshal([]byte(r.PayloadJSON), &payload)
-		if r.PartMIME == "application/pdf" && payload.Source != nil && r.PartOrdinal > len(payload.Source.Canonical.Attachments)+1 {
+		if r.PartMIME == "application/pdf" && payload.Source != nil &&
+			(r.PartOrdinal > len(payload.Source.Canonical.Attachments)+1 ||
+				(payload.Content != nil && payload.Source.HasEmbeddedGradingImagePDF(payload.Content.Attachments))) {
 			variant = "pdf"
 			break
 		}

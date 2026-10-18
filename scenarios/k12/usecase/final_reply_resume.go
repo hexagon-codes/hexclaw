@@ -57,6 +57,10 @@ func frozenFinalReplyFullMessage(batch k12.DeliveryBatch) (DeliveryMessage, erro
 	full := DeliveryMessage{Content: source.Canonical.Markdown, Source: source, WritingFeedback: source.WritingFeedback}
 	for _, ref := range source.Canonical.Attachments {
 		found := false
+		if image := source.EmbeddedGradingImage; image != nil && image.Name == ref.Name && image.MIME == ref.MIME && deliveryDigest(string(image.Data)) == ref.Digest {
+			full.Attachments = append(full.Attachments, DeliveryAttachment{Name: image.Name, MIME: image.MIME, Data: append([]byte(nil), image.Data...)})
+			continue
+		}
 		for _, r := range batch.Receipts {
 			if r.PartDigest != ref.Digest || r.PartMIME != ref.MIME {
 				continue

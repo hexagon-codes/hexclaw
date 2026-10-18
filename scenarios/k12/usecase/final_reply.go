@@ -8,7 +8,6 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/hexagon-codes/hexclaw/adapter/dingtalk"
 	"github.com/hexagon-codes/hexclaw/messagecontent"
 	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/render"
@@ -29,6 +28,8 @@ type FinalReplyDeliveryRequest struct {
 	Summary                         string
 	DingTalkSuffix                  string
 	WritingFeedback                 bool
+	// 仅精确批改PDF路径可声明图已嵌入；规范源与其他渠道仍保留原图。
+	GradingImageInPDF bool
 }
 
 func FinalReplyUsesPDF(markdown string, document bool) bool {
@@ -168,8 +169,17 @@ func (d Deps) PrepareAndSendFinalReply(ctx context.Context, req FinalReplyDelive
 			if err := validateFinalReplyPDF(req, *pdf, full.Content); err != nil {
 				return k12.DeliveryBatch{}, false, err
 			}
-			if len(pdf.Render.Payload) <= dingtalk.MaxOutboundPDFBytes() {
+			if len(pdf.Render.Payload) <= messagecontent.DingTalkMaxOutboundPDFBytes {
 				projected := DeliveryMessage{Content: finalReplyPDFSummary(req), Source: full.Source, Attachments: append([]DeliveryAttachment(nil), full.Attachments...), WritingFeedback: req.WritingFeedback}
+				if req.GradingImageInPDF && req.SourceKind == k12.PrintSourceGradingFinalArtifact && req.PDF != nil {
+					if len(full.Attachments) != 1 || !strings.HasPrefix(full.Attachments[0].MIME, "image/") {
+						return k12.DeliveryBatch{}, false, errors.New("grading PDF requires its original annotated image")
+					}
+					image := full.Attachments[0]
+					full.Source.EmbeddedGradingImage = &k12.PDFEmbeddedGradingImage{Name: image.Name, MIME: image.MIME,
+						Data: append([]byte(nil), image.Data...), PDFDigest: "sha256:" + pdf.Render.ByteDigest}
+					projected.Attachments = nil
+				}
 				if req.DingTalkSuffix != "" {
 					projected.Content += "\n\n" + req.DingTalkSuffix
 				}

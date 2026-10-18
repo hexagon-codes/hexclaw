@@ -1092,7 +1092,8 @@ func (r *k12DingtalkPhotoInboundRuntime) completeBoundReply(
 			if err != nil {
 				return false, err
 			}
-			if view.Dispatch.TaskIntent != k12.ImageTaskIntentBlankWorksheet ||
+			pdfWithGradingImage := len(batch.Receipts) == 2 && view.Dispatch.TaskIntent == k12.ImageTaskIntentCompletedHomework
+			if (view.Dispatch.TaskIntent != k12.ImageTaskIntentBlankWorksheet && !pdfWithGradingImage) ||
 				bundle.Dispatch.RoutingDecision != k12usecase.InboundPhotoRouteNewSubmission {
 				return false, fmt.Errorf("DingTalk photo bound reply batch is invalid")
 			}

@@ -13,7 +13,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/hexagon-codes/hexclaw/adapter/dingtalk"
 	"github.com/hexagon-codes/hexclaw/messagecontent"
 	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/render"
@@ -213,6 +212,7 @@ func (d Deps) PrepareAndSendK12FinalReplyBatch(ctx context.Context, agentName, o
 			pdf, _, prepareErr := d.PrepareGradingFinalArtifactPDFExact(ctx, agentName, finalID, expectedDigest, req.Title)
 			if prepareErr == nil {
 				req.PDF = &pdf
+				req.GradingImageInPDF = intent == k12.ImageTaskIntentCompletedHomework
 			}
 			// 原图PDF准备已知失败时直接冻结全文，不能另用无原图的通用PDF冒充。
 			if prepareErr != nil {
@@ -242,13 +242,17 @@ func (d Deps) PrepareAndSendK12FinalReplyBatch(ctx context.Context, agentName, o
 	if allDing && k12FinalReplyUsesPDF(artifact, intent) {
 		objectID += ":" + imageFinalPDFRenderContractVersion
 		pdf, _, prepareErr := d.PrepareGradingFinalArtifactPDFExact(ctx, agentName, finalID, expectedDigest, K12FinalArtifactPDFTitle(artifact))
-		if prepareErr == nil && len(pdf.Render.Payload) <= dingtalk.MaxOutboundPDFBytes() {
+		if prepareErr == nil && len(pdf.Render.Payload) <= messagecontent.DingTalkMaxOutboundPDFBytes {
 			message.Content = k12FinalReplySummary(artifact)
 			if suffix := strings.TrimSpace(strings.TrimPrefix(full.Content, artifact.CanonicalMarkdown)); suffix != "" {
 				message.Content += "\n\n" + suffix
 			}
 			_, filename := render.SanitizeFilename(strings.ReplaceAll(pdf.Artifact.Title, "/", "-"), "pdf")
-			message.Attachments = append(append([]DeliveryAttachment(nil), full.Attachments...), DeliveryAttachment{Name: filename, MIME: "application/pdf", Data: pdf.Render.Payload})
+			message.Attachments = append([]DeliveryAttachment(nil), full.Attachments...)
+			if intent == k12.ImageTaskIntentCompletedHomework {
+				message.Attachments = nil
+			}
+			message.Attachments = append(message.Attachments, DeliveryAttachment{Name: filename, MIME: "application/pdf", Data: pdf.Render.Payload})
 		} else {
 			slog.Warn("K12 final reply PDF preparation failed before visible send; preserving full canonical reply", "agent_id", agentName, "final_artifact_id", finalID, "pdf_preparation_failed", prepareErr != nil, "pdf_size_exceeded", prepareErr == nil)
 		}
