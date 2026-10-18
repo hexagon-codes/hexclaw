@@ -283,11 +283,18 @@ func validateDingTalkDeliveryPartCanonicalEvidence(part adapter.DeliveryPart, re
 			return errors.New("DingTalk markdown delivery part digest does not match canonical source")
 		}
 	case messagecontent.PartArtifact:
-		if part.Ordinal < 2 || part.Text != "" || part.Attachment == nil {
+		if part.Text != "" || part.Attachment == nil {
 			return errors.New("DingTalk artifact delivery part fields are incomplete")
 		}
-		attachmentIndex := part.Ordinal - 2
-		if attachmentIndex >= len(part.MessageContent.Attachments) {
+		// 纯附件输出没有前置正文，按冻结产物身份定位，不能按序号减去正文数。
+		attachmentIndex := -1
+		for index, candidate := range part.MessageContent.Attachments {
+			if candidate.AssetID == selected.ArtifactRef {
+				attachmentIndex = index
+				break
+			}
+		}
+		if attachmentIndex < 0 {
 			return errors.New("DingTalk artifact delivery part has no canonical attachment")
 		}
 		attachment := *part.Attachment

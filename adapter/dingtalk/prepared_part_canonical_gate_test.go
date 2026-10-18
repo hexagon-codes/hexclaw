@@ -13,6 +13,35 @@ import (
 	"github.com/hexagon-codes/hexclaw/messagecontent"
 )
 
+func TestDingTalkPreparedPartAcceptsArtifactOnlyWorkflow(t *testing.T) {
+	for _, mime := range []string{"image/png", "application/pdf"} {
+		t.Run(mime, func(t *testing.T) {
+			raw := testPNGBytes(t)
+			name := "result.png"
+			if mime == "application/pdf" {
+				raw, name = []byte("%PDF-1.4\nworkflow result\n%%EOF"), "result.pdf"
+			}
+			attachment := adapter.Attachment{Name: name, Mime: mime, Data: base64.StdEncoding.EncodeToString(raw)}
+			digest, assetID, err := dingTalkAttachmentIdentity(attachment)
+			if err != nil {
+				t.Fatal(err)
+			}
+			content, err := messagecontent.New(messagecontent.ProducerWorkflow, "zh-CN", "", []messagecontent.AttachmentRef{{AssetID: assetID, Name: name, MIME: mime, Digest: digest, AltText: name}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			manifest, err := messagecontent.BuildManifest(content, messagecontent.RenderRequest{Surface: messagecontent.SurfaceChannel, RendererVersion: "workflow-delivery-v1", Capabilities: messagecontent.CapabilitySnapshot{Attachments: true}, Parts: []messagecontent.RenderPart{{Kind: messagecontent.PartArtifact, ArtifactRef: assetID, ArtifactDigest: digest, AltText: name}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			part := adapter.DeliveryPart{Kind: messagecontent.PartArtifact, Ordinal: 1, MIME: mime, Digest: digest, Attachment: &attachment, MessageContent: &content, RenderManifest: &manifest}
+			if err := validateDingTalkDeliveryPartCanonicalEvidence(part, true); err != nil {
+				t.Fatalf("pure result artifact rejected: %v", err)
+			}
+		})
+	}
+}
+
 type canonicalGateOpenAPI struct {
 	*fakeDingtalkOpenAPI
 	uploads int
