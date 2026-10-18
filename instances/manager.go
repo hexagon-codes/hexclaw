@@ -743,6 +743,32 @@ func (m *Manager) ResolveRunningInstanceID(platform, instanceRef string) (string
 	return candidates[0].id, nil
 }
 
+// SendEmail 按稳定实例 ID 使用已有 SMTP 配置，不要求启动 IMAP 收件循环。
+func (m *Manager) SendEmail(ctx context.Context, target string, message email.OutboundMessage) (adapter.DeliveryAck, error) {
+	inst, err := m.GetByID(ctx, target)
+	if err != nil {
+		return adapter.DeliveryAck{Status: adapter.DeliveryFailed}, err
+	}
+	if inst.Provider != "email" {
+		return adapter.DeliveryAck{Status: adapter.DeliveryFailed}, fmt.Errorf("instance is not an email connection")
+	}
+	build := m.buildAdapter
+	if build == nil {
+		build = BuildAdapter
+	}
+	adp, err := build(inst)
+	if err != nil {
+		return adapter.DeliveryAck{Status: adapter.DeliveryFailed}, err
+	}
+	sender, ok := adp.(interface {
+		SendMessage(context.Context, email.OutboundMessage) (adapter.DeliveryAck, error)
+	})
+	if !ok {
+		return adapter.DeliveryAck{Status: adapter.DeliveryFailed}, fmt.Errorf("instance does not support email delivery")
+	}
+	return sender.SendMessage(ctx, message)
+}
+
 // SendWithReceipt requires a provider-backed external message identifier. It
 // deliberately refuses adapters that only implement basic Send so callers can
 // never convert a local nil error into a false "delivered" claim.
