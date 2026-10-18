@@ -132,6 +132,9 @@ type SearchResult struct {
 // 语义：各维度之间是 AND；同一维度内的多值是 OR。任一零值字段表示该维度不过滤；
 // 全部零值（IsZero）等价于全量检索，走原有快路径（不 JOIN），零性能回归。
 type Filter struct {
+	// DocumentIDs 为调用方明确选择的文档范围，与其他过滤条件共同在检索前生效。
+	DocumentIDs []string
+
 	// Sources 按 Document.Source 精确匹配（任一命中即可）。
 	Sources []string
 	// SourceTypes 按 Document.SourceType 匹配：manual / upload / url / file / agent（任一命中即可）。
@@ -159,7 +162,7 @@ type DocumentGenerationRef struct {
 
 // IsZero 报告该 filter 是否无任何约束（等价于全量检索）。
 func (f Filter) IsZero() bool {
-	return len(nonEmptyStrings(f.Sources)) == 0 &&
+	return len(nonEmptyStrings(f.DocumentIDs)) == 0 && len(nonEmptyStrings(f.Sources)) == 0 &&
 		len(nonEmptyStrings(f.SourceTypes)) == 0 &&
 		len(normalizeDocumentGenerations(f.DocumentGenerations)) == 0 &&
 		len(nonEmptyStrings(f.ChunkIDs)) == 0 &&
@@ -169,6 +172,7 @@ func (f Filter) IsZero() bool {
 // normalize 返回去掉空白/空字符串多值后的副本，避免空串污染 SQL IN 子句
 // （IN (”) 会把无 source 的文档错误匹配进来）。
 func (f Filter) normalize() Filter {
+	f.DocumentIDs = nonEmptyStrings(f.DocumentIDs)
 	f.Sources = nonEmptyStrings(f.Sources)
 	f.SourceTypes = nonEmptyStrings(f.SourceTypes)
 	f.DocumentGenerations = normalizeDocumentGenerations(f.DocumentGenerations)
@@ -1195,6 +1199,11 @@ func (m *Manager) searchResultsModeAtRevision(
 	strictFloor bool,
 	expectedRevisionID string,
 ) ([]*SearchResult, []QueryEmbeddingReceipt, error) {
+	var permitted bool
+	filter, permitted = scopedDocumentFilter(ctx, filter)
+	if !permitted {
+		return nil, nil, nil
+	}
 	if !SearchQueryWithinBudget(query) {
 		return nil, nil, ErrSearchQueryBudgetExceeded
 	}

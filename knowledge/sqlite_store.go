@@ -94,6 +94,11 @@ func buildFilterClause(f Filter, docAlias string) (string, []any) {
 	f = f.normalize()
 	var clauses []string
 	var args []any
+	if len(f.DocumentIDs) > 0 {
+		ph, a := inPlaceholders(f.DocumentIDs)
+		clauses = append(clauses, docAlias+".id IN ("+ph+")")
+		args = append(args, a...)
+	}
 	if len(f.Sources) > 0 {
 		ph, a := inPlaceholders(f.Sources)
 		clauses = append(clauses, docAlias+".source IN ("+ph+")")
