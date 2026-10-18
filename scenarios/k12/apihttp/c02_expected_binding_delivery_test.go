@@ -174,8 +174,9 @@ func TestK12LiveC02AllBoundOutcomeUnknownReplayQueriesFrozenReceipts(t *testing.
 
 	rec, replay := do(t, h, http.MethodPost, "/tutoring-tips/send", request)
 	if rec.Code != http.StatusOK || replay["batch_id"] != first["batch_id"] ||
-		len(delivery.sends) != wantReceipts || len(delivery.queries) != 0 {
-		t.Fatalf("all-bound command replay resent or queried implicitly: status=%d body=%v sends=%d queries=%d",
+		replay["status"] != string(k12.DeliveryBatchDelivered) ||
+		len(delivery.sends) != wantReceipts || len(delivery.queries) != wantReceipts {
+		t.Fatalf("all-bound command replay must only query frozen unknown receipts: status=%d body=%v sends=%d queries=%d",
 			rec.Code, replay, len(delivery.sends), len(delivery.queries))
 	}
 	rec, replay = do(

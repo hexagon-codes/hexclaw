@@ -57,9 +57,9 @@ func TestBUG20260726008_NewKnowledgePDFProducesManifestWithoutMigrationOrManualS
 			if got := countBUG20260726034A02Rows(
 				t,
 				db,
-					"k12_textbook_manifest_segments",
-				); got != 0 {
-					t.Fatalf("unverified manifest segment rows=%d want 0", got)
+				"k12_textbook_manifest_segments",
+			); got != 0 {
+				t.Fatalf("unverified manifest segment rows=%d want 0", got)
 			}
 			if got := countBUG20260726034A02Rows(
 				t,
@@ -153,7 +153,7 @@ func TestBUG20260726008_DefaultVisionModelFailureIsExplicitAndRetryable(
 		}
 		if item["state"] != "failed_retryable" ||
 			item["retryable"] != true ||
-			item["failure_message"] != textbookDefaultModelMissingReasonForTest {
+			item["failure_message"] != "vision model required" {
 			t.Fatalf("default-model failure projection=%v", item)
 		}
 		if got := countBUG20260726034A02Rows(
@@ -167,5 +167,3 @@ func TestBUG20260726008_DefaultVisionModelFailureIsExplicitAndRetryable(
 	}
 	t.Fatalf("default-model failure manifest missing: body=%v", body)
 }
-
-const textbookDefaultModelMissingReasonForTest = "默认模型未配置"

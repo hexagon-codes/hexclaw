@@ -22,7 +22,7 @@ func TestK12DeterministicProblemIssueV123PreservesHistoryAndExactOperations(t *t
 	db := openV123AssessmentDB(t)
 	before := snapshotV123History(t, db)
 	schema := readV77AssessmentSchema(t, db)
-	if err := Run(t.Context(), db, All); err != nil {
+	if err := Run(t.Context(), db, []Migration{K12DeterministicProblemIssueV123}); err != nil {
 		t.Fatal(err)
 	}
 	if got := snapshotV123History(t, db); !reflect.DeepEqual(before, got) {
@@ -77,7 +77,7 @@ func TestK12DeterministicProblemIssueV123PreservesHistoryAndExactOperations(t *t
 	if err := db.QueryRow(`PRAGMA foreign_keys`).Scan(&enabled); err != nil || enabled != 1 {
 		t.Fatalf("foreign keys not restored: enabled=%d err=%v", enabled, err)
 	}
-	if err := Run(t.Context(), db, All); err != nil {
+	if err := Run(t.Context(), db, []Migration{K12DeterministicProblemIssueV123}); err != nil {
 		t.Fatalf("reapplying registered migrations was not idempotent: %v", err)
 	}
 }

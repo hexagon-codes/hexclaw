@@ -365,20 +365,13 @@ func TestUnitSummaryDocumentSourcePreservesFrozenUnknownSQLite(t *testing.T) {
 			if view, replayed, err := coordinator.StartAndWait(wait, req); err != nil || !replayed || view.Job.State != "reconciling" {
 				t.Fatalf("unknown replay changed its task: %+v, %v, %v", view.Job, replayed, err)
 			}
-			// 等待已过期租约的原任务实际只读对账，不把立即返回当作后台零重发的证据。
-			var observed k12.UnitSummaryAttempt
-			for {
-				observed, err = store.GetUnitSummaryAttempt(wait, source.OwnerID, source.AgentName, a.AttemptID)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if observed.Revision > a.Revision && observed.LeaseOwner == "" && observed.State == "reconciling" {
-					break
-				}
-				if wait.Err() != nil {
-					t.Fatal("old unknown reconciliation was not observed")
-				}
-				time.Sleep(10 * time.Millisecond)
+			// 未知调用的观察不再改任务代次；持久输入与调用回执必须继续保持原样。
+			observed, err := store.GetUnitSummaryAttempt(wait, source.OwnerID, source.AgentName, a.AttemptID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if observed.Revision != a.Revision || observed.State != "reconciling" || observed.InvocationRef != inv.InvocationID {
+				t.Fatalf("unknown observation changed frozen task identity: %+v", observed)
 			}
 			if observed.ResolveInputJSON != string(inputJSON) || !reflect.DeepEqual(observed.Context, frozen) || generator.calls.Load() != 0 || !reflect.DeepEqual(before, documentSourceSnapshot(t, store.DB(), "k12_unit_summary_model_invocations", "k12_unit_summary_documents", "k12_unit_summary_revisions")) {
 				t.Fatalf("new directory reinterpreted or resent old %s: calls=%d", stage, generator.calls.Load())

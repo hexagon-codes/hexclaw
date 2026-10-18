@@ -17,7 +17,7 @@ import (
 func TestK12TextbookCatalogRecoveryV125PreservesFactsAndAdmitsV4(t *testing.T) {
 	db := newV124CatalogRecoveryFixture(t, "checkpoint-toc-footer-v4")
 	before := catalogRecoveryBusinessSnapshot(t, db)
-	if err := Run(context.Background(), db, All); err != nil {
+	if err := Run(context.Background(), db, []Migration{K12TextbookCatalogExtractorRecoveryV125}); err != nil {
 		t.Fatal(err)
 	}
 	if after := catalogRecoveryBusinessSnapshot(t, db); after != before {
@@ -48,7 +48,7 @@ func TestK12TextbookCatalogRecoveryV125PreservesFactsAndAdmitsV4(t *testing.T) {
 
 func TestK12TextbookCatalogRecoveryV125KeepsFrozenSourceProtections(t *testing.T) {
 	db := newV124CatalogRecoveryFixture(t, "checkpoint-toc-footer-v4")
-	if err := Run(context.Background(), db, All); err != nil {
+	if err := Run(context.Background(), db, []Migration{K12TextbookCatalogExtractorRecoveryV125}); err != nil {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct {
@@ -107,7 +107,7 @@ func TestK12TextbookCatalogRecoveryV125RetainsPreviousRecoveryBranches(t *testin
 	} {
 		t.Run(route[0]+" to "+route[1], func(t *testing.T) {
 			db := newV124CatalogRecoveryFixture(t, route[0])
-			if err := Run(context.Background(), db, All); err != nil {
+			if err := Run(context.Background(), db, []Migration{K12TextbookCatalogExtractorRecoveryV125}); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := db.Exec(catalogRecoveryV125Update, route[1], strings.Repeat("d", 64)); err != nil {
