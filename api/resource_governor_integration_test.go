@@ -73,10 +73,13 @@ func TestResourceGovernorSharedByK12RecognitionAndKnowledgeIngest(t *testing.T) 
 	manager := knowledge.NewManager(store, store, nil,
 		knowledge.WithSplitter(splitter.NewRecursiveSplitter()),
 		knowledge.WithResourceGovernor(governor),
-		knowledge.WithCaptioner(knowledge.CaptionerFunc(func(context.Context, []byte, string) (string, error) {
+		knowledge.WithCaptioner(knowledge.CaptionerWithReceiptFunc(func(context.Context, []byte, string) (knowledge.CaptionResult, error) {
 			enter()
 			active.Add(-1)
-			return "knowledge page", nil
+			return knowledge.CaptionResult{Content: "knowledge page", RouteReceipt: knowledge.OCRRouteReceipt{
+				Provider: "fixture", Model: "vision", Operation: knowledge.OCRRouteOperationPDFPage,
+				Status: knowledge.OCRRouteStatusSucceeded,
+			}}, nil
 		})),
 	)
 	processor := NewKnowledgeDocumentIngestProcessor(

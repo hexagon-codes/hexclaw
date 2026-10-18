@@ -2,7 +2,6 @@ package api
 
 import (
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -10,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/config"
 )
@@ -358,7 +358,8 @@ func TestBUG20260726035FailedEngineCallKeepsBoundaryRouteFacts(t *testing.T) {
 			Model:       "gpt-5.6-sol",
 		},
 	}
-	engine := &mockEngine{err: errors.New("upstream unavailable")}
+	// 已收到的明确HTTP拒绝属于已知失败；无响应的传输错误沿结果未知处理。
+	engine := &mockEngine{err: &llm.ProviderError{StatusCode: http.StatusServiceUnavailable}}
 	s.engine = engine
 	s.workflowStore.workflows["wf-route-engine-failure"] = &WorkflowData{
 		ID:   "wf-route-engine-failure",

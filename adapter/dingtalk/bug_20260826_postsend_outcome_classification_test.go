@@ -382,6 +382,8 @@ func TestOfficialDingTalkSendOTOClassifiesProviderResponseEvidence(t *testing.T)
 				robot: robot,
 				runtime: &util.RuntimeOptions{
 					Autoretry: tea.Bool(false),
+					// Tea 的免代理匹配使用完整 host，包含本地测试服务器的动态端口。
+					NoProxy: tea.String(endpoint),
 				},
 			}
 
