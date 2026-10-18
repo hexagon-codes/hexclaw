@@ -447,7 +447,9 @@ curl -X POST "${HEXCLAW_API}/api/v1/config/llm/test" \
 
 挂载条件: `始终挂载`.
 
-64 KiB JSON；只接受已保存稳定Provider ID及精确model，不接收凭据/端点。kind大小写归一、去重后1..4项，五种候选catalog/text/vision/tools/embedding。逐项串行调用并持久回执；200结果可为failed，不等于全通过。
+64 KiB JSON；只接受已保存稳定 Provider ID 及精确 model，不接收凭据/端点。kind 大小写归一、去重后 1..4 项，六种候选为 catalog/text/vision/tools/embedding/reasoning。逐项串行调用并持久回执；200 结果可为 failed，不等于全通过。
+
+`reasoning` 检测原生推理，与推理控制合同独立：沿当前模型发送一次检测请求，不附加推理开关；仅同次成功响应中的正 `reasoning_tokens` 形成支持证据。缺少或非正值、失败和未知结果不证明“不支持”。有效状态绑定精确实例、模型及来源 fingerprint，不将当前探测结果反写为静态能力声明。
 
 路径/query/额外请求头：无。认证和 Content-Type 按上文。
 
@@ -459,7 +461,7 @@ curl -X POST "${HEXCLAW_API}/api/v1/config/llm/test" \
 | --- | --- | --- | --- | --- |
 | `provider_instance_id` | string | 是 | — | 稳定 Provider 身份 |
 | `model` | string | 是 | — | 精确模型 ID |
-| `kinds` | string[] | 是 | 最少条目: 1；最多条目: 4；条目枚举：`"catalog"`, `"text"`, `"vision"`, `"tools"`, `"embedding"` | 大小写归一并去重后，要求 1..4 个不同 kind |
+| `kinds` | string[] | 是 | 最少条目: 1；最多条目: 4；条目枚举：`"catalog"`, `"text"`, `"vision"`, `"tools"`, `"embedding"`, `"reasoning"` | 大小写归一并去重后，要求 1..4 个不同 kind |
 
 响应：
 
@@ -2434,6 +2436,8 @@ curl -X POST "${HEXCLAW_API}/api/internal/desktop/provider-credentials/reserve" 
 | `id` | string | 是 | 最短: 1 | 标识 |
 | `display_name` | string | 否 | — | 展示名称 |
 | `is_custom` | boolean | 否 | — | 是否自定义 |
+| `native_reasoning_support` | string | 否 | 枚举：`"supported"`, `"unsupported"`, `"unknown"` | 原生推理的静态声明，与推理控制独立 |
+| `native_reasoning_source_fingerprint` | string | 否 | 服务端生成 | 当前精确实例、模型及执行目标的来源绑定 |
 | `capabilities` | string[] | 是 | 条目枚举：`"text"`, `"vision"`, `"video"`, `"audio"`, `"code"`, `"image_generation"`, `"video_generation"`, `"embedding"` | 模态能力声明 |
 | `reasoning_support` | string | 否 | 枚举：`"supported"`, `"unsupported"`, `"unknown"` | 推理支持状态 |
 | `reasoning_control` | [ModelsReasoningControl](#schema-modelsreasoningcontrol) | 否 | — | 推理协议声明 |
@@ -2459,7 +2463,7 @@ curl -X POST "${HEXCLAW_API}/api/internal/desktop/provider-credentials/reserve" 
 
 | 字段 | 类型 / 契约 | 必填 / 必有 | 默认 / 限制 | 含义 |
 | --- | --- | --- | --- | --- |
-| `probe_kind` | string | 是 | 枚举：`"catalog"`, `"text"`, `"vision"`, `"tools"`, `"embedding"` | 探测类型 |
+| `probe_kind` | string | 是 | 枚举：`"catalog"`, `"text"`, `"vision"`, `"tools"`, `"embedding"`, `"reasoning"` | 探测类型 |
 | `outcome` | string | 是 | 枚举：`"passed"`, `"failed"` | 探测结论 |
 | `failure_code` | string | 否 | — | 失败分类 |
 | `probe_policy_version` | string | 是 | — | 探测策略版本 |
@@ -2475,6 +2479,8 @@ curl -X POST "${HEXCLAW_API}/api/internal/desktop/provider-credentials/reserve" 
 | --- | --- | --- | --- | --- |
 | `id` | string | 是 | — | 标识 |
 | `display_name` | string | 否 | — | 展示名称 |
+| `effective_native_reasoning_support` | string | 否 | 只读；枚举：`"supported"`, `"unsupported"`, `"unknown"` | 当前来源声明或匹配的原生推理正回执；不得反写成静态声明 |
+| `native_reasoning_source_fingerprint` | string | 否 | 只读 | 当前精确模型的来源绑定，不随默认模型选择变化 |
 | `capabilities` | string[] | 是 | — | 模态能力声明 |
 | `capability_states` | map&lt;string, string&gt; | 是 | — | 各能力的证据状态 |
 | `route_eligible` | boolean | 是 | — | 是否符合当前路由条件 |
@@ -2514,6 +2520,7 @@ curl -X POST "${HEXCLAW_API}/api/internal/desktop/provider-credentials/reserve" 
 | 字段 | 类型 / 契约 | 必填 / 必有 | 默认 / 限制 | 含义 |
 | --- | --- | --- | --- | --- |
 | `provider_instance_id` | string | 是 | — | 稳定服务端身份；重命名 Provider 时保留 |
+| `native_reasoning_source_fingerprint` | string | 否 | 只读 | 目录缓存的当前执行目标范围；展示名和默认模型变化不改变此范围 |
 | `display_name` | string | 否 | — | 展示名称 |
 | `base_url` | string | 是 | — | 服务端点 |
 | `model` | string | 是 | — | 精确的当前模型 ID |
@@ -2689,6 +2696,8 @@ providers 省略/null 保留；提供 map 则整体替换。两项配置条件�
 | --- | --- | --- | --- | --- |
 | `id` | string | 是 | — | 标识 |
 | `name` | string | 否 | — | 名称 |
+| `native_reasoning_support` | string | 否 | 枚举：`"supported"`, `"unsupported"`, `"unknown"` | 供应商显式原生声明；未声明可省略 |
+| `native_reasoning_source_fingerprint` | string | 否 | 服务端生成 | 精确模型的来源绑定 |
 | `context_length` | integer | 否 | — | 上下文长度 |
 | `prompt_price` | string | 否 | — | 输入价格声明 |
 | `completion_price` | string | 否 | — | 输出价格声明 |
@@ -2715,7 +2724,7 @@ providers 省略/null 保留；提供 map 则整体替换。两项配置条件�
 | --- | --- | --- | --- | --- |
 | `provider_instance_id` | string | 是 | — | 稳定 Provider 身份 |
 | `model` | string | 是 | — | 精确模型 ID |
-| `kinds` | string[] | 是 | 最少条目: 1；最多条目: 4；条目枚举：`"catalog"`, `"text"`, `"vision"`, `"tools"`, `"embedding"` | 大小写归一并去重后，要求 1..4 个不同 kind |
+| `kinds` | string[] | 是 | 最少条目: 1；最多条目: 4；条目枚举：`"catalog"`, `"text"`, `"vision"`, `"tools"`, `"embedding"`, `"reasoning"` | 大小写归一并去重后，要求 1..4 个不同 kind |
 
 <a id="schema-modelsmodelproberesult"></a>
 
@@ -2723,7 +2732,7 @@ providers 省略/null 保留；提供 map 则整体替换。两项配置条件�
 
 | 字段 | 类型 / 契约 | 必填 / 必有 | 默认 / 限制 | 含义 |
 | --- | --- | --- | --- | --- |
-| `probe_kind` | string | 是 | 枚举：`"catalog"`, `"text"`, `"vision"`, `"tools"`, `"embedding"` | 探测类型 |
+| `probe_kind` | string | 是 | 枚举：`"catalog"`, `"text"`, `"vision"`, `"tools"`, `"embedding"`, `"reasoning"` | 探测类型 |
 | `outcome` | string | 是 | 枚举：`"passed"`, `"failed"` | 探测结论 |
 | `failure_code` | string | 否 | — | 失败分类 |
 | `probe_policy_version` | string | 是 | — | 探测策略版本 |
@@ -2731,6 +2740,8 @@ providers 省略/null 保留；提供 map 则整体替换。两项配置条件�
 | `probe_started_at` | integer | 是 | — | Unix 毫秒 |
 | `latency_ms` | integer | 是 | — | 耗时毫秒 |
 | `persisted` | boolean | 是 | — | 是否持久化证据 |
+| `reasoning_tokens` | integer | 否 | — | 同次成功 reasoning 请求的结构化原生推理用量 |
+| `reported_model` | string | 否 | — | 已脱敏的供应商返回模型 ID；合法别名不要求等于请求 ID |
 
 <a id="schema-modelsmodelproberesponse"></a>
 

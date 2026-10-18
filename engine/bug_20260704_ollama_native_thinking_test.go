@@ -65,21 +65,9 @@ func (p *reasoningStreamProvider) CountTokens(messages []llm.Message) (int, erro
 	return total, nil
 }
 
-// BUG-20260704：本地 Ollama thinking 模型（qwen3.5:9b）在桌面聊天里「几分钟才回复 +
-// 不显示推理」。根因=本地 thinking 控制没有把用户的「深度思考」意图确定性地翻成
-// 原生 `think` 参数（ai-core ollama adapter 读 req.Metadata["thinking"] → payload.think）。
-// think 若留空，Ollama 对 qwen3.5 默认进入「思考但不分离」模式——既慢（隐藏思考几千 token）
-// 又不显示推理（thinking 字段不产出 → reasoning_chunks=0）。
-//
-// 契约（本测试钉死）：本地 thinking 模型请求到达 provider 时，req.Metadata["thinking"]
-// 必须是**显式** "on"/"off"（绝不留空），由用户「深度思考」开关决定：
-//   - 默认（未开深度思考）→ "off"：原生 think:false，快，且不夹带隐藏思考；
-//   - 开深度思考（msg.Metadata["thinking"]="on"）→ "on"：原生 think:true，推理可显示。
-//
-// 这条契约覆盖**带工具**路径（桌面聊天恒挂 28 工具）——旧 /no_think 注入被 len(Tools)==0
-// 挡住，对带工具场景失效，是本 bug 的核心缺口。
+// 原生推理和请求控制分别取证；默认auto不按供应商或模型名称推导off。
+// 显式用户偏好沿既有metadata传递，流式推理仍须保留公开回执。
 func newCapturingOllamaProvider() *mockllm.LLMProvider {
-	// 名字含「本地」→ engine isLocalProvider 判定为本地；模型名 qwen3.5:9b → thinking 模型。
 	return mockllm.NewLLMProvider("Ollama (本地)").AddResponse("你好，我是小蟹。").AddResponse("你好，我是小蟹。")
 }
 
@@ -146,15 +134,12 @@ func thinkingMetaReachingProvider(t *testing.T, p *mockllm.LLMProvider) (string,
 	return s, true
 }
 
-// 默认（未开深度思考）：本地 thinking 模型必须显式 think:off（快、不夹带隐藏思考）。
-func TestBug20260704_OllamaNativeThinking_DefaultOff(t *testing.T) {
+// 未指定偏好和控制合同时，由模型决定原生推理，不附加关闭参数。
+func TestBug20260704_OllamaNativeThinking_DefaultAuto(t *testing.T) {
 	p := runOllamaThinkingProbe(t, "")
 	got, present := thinkingMetaReachingProvider(t, p)
-	if !present {
-		t.Fatalf("本地 thinking 模型默认请求的 req.Metadata[\"thinking\"] 留空 —— Ollama 会进入慢的隐藏思考默认；必须显式 \"off\"")
-	}
-	if got != "off" {
-		t.Fatalf("默认深度思考关闭时应显式 think:off，实际 = %q", got)
+	if present {
+		t.Fatalf("默认auto不应推导thinking控制参数，实际 = %q", got)
 	}
 }
 

@@ -115,6 +115,16 @@ func TestHandleUpdateLLMConfig_RenamePreservesModelSpecsByStableInstance(t *test
 			if err != nil {
 				t.Fatal(err)
 			}
+			// 改名和静态规格编辑不改变同一地址、凭据及模型的原生推理证据身份。
+			want = append([]config.LLMProviderModelSpec(nil), want...)
+			for i := range want {
+				for _, original := range before.Providers["source"].ModelSpecs {
+					if original.ID == want[i].ID {
+						want[i].NativeReasoningSupport = original.NativeReasoningSupport
+						want[i].NativeReasoningSourceFingerprint = original.NativeReasoningSourceFingerprint
+					}
+				}
+			}
 			req := httptest.NewRequest(http.MethodPut, "/api/v1/config/llm", bytes.NewReader(body))
 			req.Header.Set("Authorization", "Bearer "+cfg.Server.APIToken)
 			w := httptest.NewRecorder()

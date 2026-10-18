@@ -447,7 +447,9 @@ Authentication: `Authorization: Bearer ${HEXCLAW_API_TOKEN}`.
 
 Availability: `always registered`.
 
-64 KiB JSON; saved stable identity and exact model only, no credentials/endpoints. Case-normalized/deduplicated 1..4 distinct kinds from catalog/text/vision/tools/embedding. Executes sequentially and persists receipts; HTTP 200 can include failed outcomes.
+64 KiB JSON; saved stable identity and exact model only, no credentials/endpoints. Case-normalized/deduplicated 1..4 distinct kinds from catalog/text/vision/tools/embedding/reasoning. Executes sequentially and persists receipts; HTTP 200 can include failed outcomes.
+
+The `reasoning` probe checks native reasoning independently of the control contract. It sends one request to the selected model without reasoning switches; only positive `reasoning_tokens` in that same successful response establish support. Missing/non-positive usage, failures, and unknown outcomes do not establish lack of support. Effective evidence is bound to the exact instance, model, and source fingerprint; probe results are not written back as static capability declarations.
 
 Path/query/additional headers: none. Authentication and content type are specified above.
 
@@ -459,7 +461,7 @@ Request body:
 | --- | --- | --- | --- | --- |
 | `provider_instance_id` | string | yes | — | provider instance id |
 | `model` | string | yes | — | model |
-| `kinds` | string[] | yes | min items: 1; max items: 4; item enum: `"catalog"`, `"text"`, `"vision"`, `"tools"`, `"embedding"` | Case-insensitive; duplicates are removed before enforcing 1..4 distinct kinds |
+| `kinds` | string[] | yes | min items: 1; max items: 4; item enum: `"catalog"`, `"text"`, `"vision"`, `"tools"`, `"embedding"`, `"reasoning"` | Case-insensitive; duplicates are removed before enforcing 1..4 distinct kinds |
 
 Responses:
 
@@ -2434,6 +2436,8 @@ Unknown fields are rejected.
 | `id` | string | yes | min length: 1 | id |
 | `display_name` | string | no | — | display name |
 | `is_custom` | boolean | no | — | is custom |
+| `native_reasoning_support` | string | no | enum: `"supported"`, `"unsupported"`, `"unknown"` | Static native reasoning declaration, independent of controls |
+| `native_reasoning_source_fingerprint` | string | no | Server-generated | Source binding for the exact instance, model, and execution target |
 | `capabilities` | string[] | yes | item enum: `"text"`, `"vision"`, `"video"`, `"audio"`, `"code"`, `"image_generation"`, `"video_generation"`, `"embedding"` | capabilities |
 | `reasoning_support` | string | no | enum: `"supported"`, `"unsupported"`, `"unknown"` | reasoning support |
 | `reasoning_control` | [ModelsReasoningControl](#schema-modelsreasoningcontrol) | no | — | reasoning control |
@@ -2459,7 +2463,7 @@ Unknown fields are rejected.
 
 | Field | Type / contract | Required | Defaults / constraints | Meaning |
 | --- | --- | --- | --- | --- |
-| `probe_kind` | string | yes | enum: `"catalog"`, `"text"`, `"vision"`, `"tools"`, `"embedding"` | probe kind |
+| `probe_kind` | string | yes | enum: `"catalog"`, `"text"`, `"vision"`, `"tools"`, `"embedding"`, `"reasoning"` | probe kind |
 | `outcome` | string | yes | enum: `"passed"`, `"failed"` | outcome |
 | `failure_code` | string | no | — | failure code |
 | `probe_policy_version` | string | yes | — | probe policy version |
@@ -2475,6 +2479,8 @@ Unknown fields are rejected.
 | --- | --- | --- | --- | --- |
 | `id` | string | yes | — | id |
 | `display_name` | string | no | — | display name |
+| `effective_native_reasoning_support` | string | no | Read only; enum: `"supported"`, `"unsupported"`, `"unknown"` | Current-source declaration or matched positive native receipt; never write back as a static declaration |
+| `native_reasoning_source_fingerprint` | string | no | Read only | Exact-model source binding, independent of the default model |
 | `capabilities` | string[] | yes | — | capabilities |
 | `capability_states` | map&lt;string, string&gt; | yes | — | capability states |
 | `route_eligible` | boolean | yes | — | route eligible |
@@ -2514,6 +2520,7 @@ Unknown fields are rejected.
 | Field | Type / contract | Required | Defaults / constraints | Meaning |
 | --- | --- | --- | --- | --- |
 | `provider_instance_id` | string | yes | — | Stable server identity; preserve when renaming |
+| `native_reasoning_source_fingerprint` | string | no | Read only | Current catalog-cache target scope; stable across display-name and default-model changes |
 | `display_name` | string | no | — | display name |
 | `base_url` | string | yes | — | base url |
 | `model` | string | yes | — | Exact selected model ID |
@@ -2689,6 +2696,8 @@ providers omitted/null preserves; a supplied map replaces the complete provider 
 | --- | --- | --- | --- | --- |
 | `id` | string | yes | — | id |
 | `name` | string | no | — | name |
+| `native_reasoning_support` | string | no | enum: `"supported"`, `"unsupported"`, `"unknown"` | Explicit Provider native declaration; omitted when not declared |
+| `native_reasoning_source_fingerprint` | string | no | Server-generated | Exact-model source binding |
 | `context_length` | integer | no | — | context length |
 | `prompt_price` | string | no | — | prompt price |
 | `completion_price` | string | no | — | completion price |
@@ -2715,7 +2724,7 @@ providers omitted/null preserves; a supplied map replaces the complete provider 
 | --- | --- | --- | --- | --- |
 | `provider_instance_id` | string | yes | — | provider instance id |
 | `model` | string | yes | — | model |
-| `kinds` | string[] | yes | min items: 1; max items: 4; item enum: `"catalog"`, `"text"`, `"vision"`, `"tools"`, `"embedding"` | Case-insensitive; duplicates are removed before enforcing 1..4 distinct kinds |
+| `kinds` | string[] | yes | min items: 1; max items: 4; item enum: `"catalog"`, `"text"`, `"vision"`, `"tools"`, `"embedding"`, `"reasoning"` | Case-insensitive; duplicates are removed before enforcing 1..4 distinct kinds |
 
 <a id="schema-modelsmodelproberesult"></a>
 
@@ -2723,7 +2732,7 @@ providers omitted/null preserves; a supplied map replaces the complete provider 
 
 | Field | Type / contract | Required | Defaults / constraints | Meaning |
 | --- | --- | --- | --- | --- |
-| `probe_kind` | string | yes | enum: `"catalog"`, `"text"`, `"vision"`, `"tools"`, `"embedding"` | probe kind |
+| `probe_kind` | string | yes | enum: `"catalog"`, `"text"`, `"vision"`, `"tools"`, `"embedding"`, `"reasoning"` | probe kind |
 | `outcome` | string | yes | enum: `"passed"`, `"failed"` | outcome |
 | `failure_code` | string | no | — | failure code |
 | `probe_policy_version` | string | yes | — | probe policy version |
@@ -2731,6 +2740,8 @@ providers omitted/null preserves; a supplied map replaces the complete provider 
 | `probe_started_at` | integer | yes | — | Unix milliseconds |
 | `latency_ms` | integer | yes | — | latency ms |
 | `persisted` | boolean | yes | — | persisted |
+| `reasoning_tokens` | integer | no | — | Structured native usage from the same successful reasoning request |
+| `reported_model` | string | no | — | Sanitized Provider model ID; valid aliases need not equal the requested ID |
 
 <a id="schema-modelsmodelproberesponse"></a>
 
