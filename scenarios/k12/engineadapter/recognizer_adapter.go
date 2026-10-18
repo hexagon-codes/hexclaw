@@ -151,6 +151,7 @@ func (a *RecognizerAdapter) callRecognitionVisionPhysical(
 		call,
 		func(sendCtx context.Context) (string, error) {
 			started := time.Now()
+			sendCtx = logger.ContextWithLogger(sendCtx, logger.FromContext(sendCtx).With("unit", call.Unit, "plan_digest", call.PlanDigest))
 			// 仅记录请求阶段耗时，区分连接、发送、等待首字与正文读取；不记录请求内容。
 			var connected, written, firstByte atomic.Int64
 			connected.Store(-1)
@@ -1174,10 +1175,27 @@ func RecognizedQuestionsFromLayoutFinalizationV2(
 			}
 			region := target.Region
 			question.SourceRegion = &region
+			if candidate.FinalAnswerReceipt != nil {
+				receipt := *candidate.FinalAnswerReceipt
+				source, found := physicalByID[receipt.SourcePhysicalInvocationID]
+				unit, unitErr := k12.RecognitionLayoutAdjudicationUnitV2(index + 1)
+				exact, exactErr := k12.RecognitionLayoutTargetExactSetDigestV2([]string{target.TargetID})
+				if !found || unitErr != nil || exactErr != nil || !plan.SourceAdjudication || target.AdjudicationRegion == nil ||
+					receipt.PlanDigest != plan.AuthorizedPlanDigest || receipt.CandidateID != target.TargetID ||
+					source.PhysicalUnit != unit || source.PlanDigest != receipt.PlanDigest || source.CandidateExactSetDigest != exact ||
+					source.ResultDigest != receipt.SourcePhysicalResultDigest || strings.TrimSpace(receipt.AuthorizationID) == "" ||
+					!recognitionLayoutSHA256DigestV2.MatchString(receipt.SettlementDigest) ||
+					k12.ValidateRecognitionFinalAnswerEvidenceV1(receipt.Evidence, *target.AdjudicationRegion) != nil {
+					return fail("candidate %q independent final answer is detached from its adjudication", target.TargetID)
+				}
+				question.FinalAnswerReceipt = &receipt
+				box := receipt.Evidence.BBox
+				question.ObservedAnswerRegion = &box
+			}
 			questions = append(questions, usecase.NormalizeRecognizedQuestionForInitialReadMode(question, plan.InitialReadMode))
 			questionTargets = append(questionTargets, index)
 		case k12.RecognitionLayoutCandidateNonQuestionV2:
-			if !bytes.Equal(candidate.ResultJSON, []byte(`{}`)) {
+			if candidate.FinalAnswerReceipt != nil || !bytes.Equal(candidate.ResultJSON, []byte(`{}`)) {
 				return fail("candidate %q non_question result is not {}", target.TargetID)
 			}
 		default:

@@ -1,0 +1,40 @@
+{
+  "initial": {
+    "answer_bbox": {
+      "height": 64,
+      "width": 62,
+      "x": 249,
+      "y": 71
+    },
+    "answer_state": "present",
+    "ocr_signals": [],
+    "question": "\\(\\frac{7}{9}×\\frac{3}{14}=\\)",
+    "recognition_confidence": 0.95,
+    "student_answer": "\\(=\\frac{1}{3}\\)",
+    "subject": "数学"
+  },
+  "review": {
+    "answer_bbox": {
+      "height": 62,
+      "width": 59,
+      "x": 251,
+      "y": 72
+    },
+    "answer_evidence_transcriptions": [
+      "\\(=\\frac{1}{3}\\)",
+      "\\(=\\frac{1}{4}\\)\n\\(=\\frac{1}{3}\\)"
+    ],
+    "answer_state": "present",
+    "evidence_transcriptions": [
+      "\\(\\frac{7}{9}×\\frac{3}{14}=\\)",
+      "\\(\\frac{7}{9}\\times\\frac{3}{14}=\\)"
+    ],
+    "ocr_signals": [
+      "前一手写分数1/4上有斜划线，是否将该步整体划除不明确；暂保留其可读内容。"
+    ],
+    "question": "\\(\\frac{7}{9}\\times\\frac{3}{14}=\\)",
+    "recognition_confidence": 0.99,
+    "student_answer": "\\(=\\frac{1}{4}\\)\n\\(=\\frac{1}{3}\\)",
+    "subject": "数学"
+  }
+}

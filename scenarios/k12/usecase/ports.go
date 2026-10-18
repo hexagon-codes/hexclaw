@@ -57,6 +57,13 @@ type DeliveryAttachmentIdentity struct {
 type DeliveryMessage struct {
 	Content     string
 	Attachments []DeliveryAttachment
+	// ProjectedContent 仅改变渠道正文，规范来源及其摘要仍使用Content。
+	ProjectedContent string
+	WritingFeedback  bool
+	// Source 冻结完整来源；渠道投影不能改写来源、语言及原私聊目标。
+	Source *k12.DeliveryProjectionSource
+	// Projections 仅表达同一批次的渠道差异，各目标仍须冻结完整组件。
+	Projections map[string]DeliveryMessage
 }
 
 // PreparedTextDelivery is the immutable, channel-neutral payload projection
@@ -208,6 +215,8 @@ type RecognizedQuestion struct {
 	AttemptID            string                 `json:"attempt_id,omitempty"`
 	// LayoutSourceProjection 引用合并前的两个不可变目标；不承载题干或作答副本。
 	LayoutSourceProjection RecognitionLayoutSourceProjection `json:"layout_source_projection,omitzero"`
+	// FinalAnswerReceipt 只引用独立裁决的最终答案证据，不替代整份作答及其风险。
+	FinalAnswerReceipt *k12.RecognitionFinalAnswerReceiptV1 `json:"final_answer_receipt,omitempty"`
 
 	// OCR 原始转写与 canonical Markdown/LaTeX 是两份独立事实。Raw* 一经识别不得被
 	// 家长修正或增强模型覆盖；canonical 可在显式确认时形成新版本。
@@ -226,6 +235,8 @@ type RecognizedQuestion struct {
 	ConfirmationReasons          []OCRRiskReason `json:"confirmation_reasons,omitempty"`
 	// 仅评估副本使用的父题依赖风险；从冻结父题推导，不写回学生或题干事实。
 	parentSourceUnclear bool
+	// 父材料合并前的同代次当前题面，仅评估副本携带，不序列化为另一份来源。
+	assessmentSource *assessmentQuestionSource
 
 	Question        string
 	KnowledgePoints []string
@@ -241,6 +252,15 @@ type RecognizedQuestion struct {
 	// present 可用它原位回写批改标记；unclear 可用它确认确有不可辨认的学生笔迹，但不会画对错。
 	// nil = 尚未定位或证据不足；前端/IM 只能降级为文字结果，绝不能猜测位置。
 	BBox *BBox
+}
+
+type assessmentQuestionSource struct {
+	problemID        string
+	inputDigest      string
+	raw              string
+	canonical        string
+	canonicalVersion int
+	confirmedVersion int
 }
 
 // NormalizeRecognizedQuestion 把任何 Recognizer 实现的输出收敛到领域不变量。
@@ -543,6 +563,11 @@ type SubjectGrader interface {
 // 它是可选扩展；老 Grader 仍走 Grade/GradeSubject，保持第三方 adapter 向后兼容。
 type VerifiedSolutionGrader interface {
 	GradeVerified(ctx context.Context, subject, problem, studentAnswer, verifiedSolution string) (GradeOutcome, error)
+}
+
+// ArithmeticFinalAnswerVerifier 只证明独立最终数值答案错误；不支持或相等不代表整题正确。
+type ArithmeticFinalAnswerVerifier interface {
+	VerifyIncorrectArithmeticFinalAnswer(problem, finalAnswer string) (solution string, provenWrong bool)
 }
 
 // Insights 学情信号写入 port（adapter = memory 反思管线）。

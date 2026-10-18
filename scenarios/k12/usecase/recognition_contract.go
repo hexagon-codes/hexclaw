@@ -44,12 +44,9 @@ const (
 const ocrConfidenceConfirmationThreshold = 0.90
 
 var (
-	latexFraction           = regexp.MustCompile(`\\frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}`)
-	latexText               = regexp.MustCompile(`\\text\s*\{([^{}]*)\}`)
 	evidenceNewline         = regexp.MustCompile(`\\n(?:\b|([0-9]))`)
 	answerDisplayNewline    = regexp.MustCompile(`\\n(?:\b|([0-9]|[xX]\s*[=＝]))`)
 	evidenceNumericFraction = regexp.MustCompile(`\b([0-9]+(?:\.[0-9]+)?)\s*/\s*([0-9]+(?:\.[0-9]+)?)\b`)
-	evidenceNumericRatio    = regexp.MustCompile(`([0-9])[:：∶]([0-9])`)
 	completeRatioQuestion   = regexp.MustCompile(`^把\(([0-9]+)\)/\(([0-9]+)\)[:：∶]\(([0-9]+)\)/\(([0-9]+)\)化成(?:最简单的整数比|最簡單的整數比)。?$`)
 	explicitAnswerLine      = regexp.MustCompile(`^(?:答\s*[:：]\s*(?:是|为)?|答案\s*(?:是|为|[:：]))\s*`)
 )
@@ -568,22 +565,7 @@ func consumeLatexGroup(s string, pos int) (int, bool) {
 // CanonicalPlainTextFallback 生成可选择、可复制的降级文本；分数显式加括号，避免
 // 纯文本中的运算优先级歧义。
 func CanonicalPlainTextFallback(markdown string) string {
-	out := markdown
-	for {
-		next := latexFraction.ReplaceAllString(out, `($1)/($2)`)
-		if next == out {
-			break
-		}
-		out = next
-	}
-	out = latexText.ReplaceAllString(out, `$1`)
-	out = strings.NewReplacer(
-		`\times`, "×", `\div`, "÷", `\cdot`, "·",
-		`\leq`, "≤", `\geq`, "≥", `\neq`, "≠",
-		`\(`, "", `\)`, "", `\（`, "（", `\）`, "）",
-		`\[`, "", `\]`, "", "$", "",
-	).Replace(out)
-	return strings.TrimSpace(out)
+	return k12.RecognitionSourcePlainTextV1(markdown)
 }
 
 func RecognizedQuestionDisplayText(q RecognizedQuestion) string {
@@ -1003,6 +985,13 @@ func RecognizedQuestionsForAssessmentForInitialReadMode(questions []RecognizedQu
 		}
 		question = NormalizeRecognizedQuestionForInitialReadMode(question, initialReadMode)
 		if question.ProblemKind == ProblemKindSubproblem {
+			if currentAssessmentCanonical(question) == "" {
+				question.assessmentSource = &assessmentQuestionSource{
+					problemID: question.ProblemID, inputDigest: question.InputDigest,
+					raw: question.RawTranscription, canonical: question.CanonicalMarkdown,
+					canonicalVersion: question.CanonicalVersion, confirmedVersion: question.ConfirmedVersion,
+				}
+			}
 			if parent, ok := parents[question.ParentProblemID]; ok {
 				composed := strings.TrimSpace(RecognizedQuestionDisplayText(parent)) + "\n\n" + strings.TrimSpace(RecognizedQuestionDisplayText(question))
 				// 这是仅供 Assessment port 消费的副本；覆盖副本 canonical 才能穿过
@@ -1017,6 +1006,14 @@ func RecognizedQuestionsForAssessmentForInitialReadMode(questions []RecognizedQu
 		out = append(out, question)
 	}
 	return out
+}
+
+func currentAssessmentCanonical(question RecognizedQuestion) string {
+	source := question.assessmentSource
+	if source == nil || source.problemID != question.ProblemID || source.inputDigest != question.InputDigest || source.raw != question.RawTranscription || source.canonicalVersion != question.CanonicalVersion || source.confirmedVersion != question.ConfirmedVersion || !CanonicalMarkdownValid(source.canonical) {
+		return ""
+	}
+	return source.canonical
 }
 
 // CanonicalRecognizedQuestionsDigest 是确认检查点唯一使用的输入摘要；raw OCR、展示投影和

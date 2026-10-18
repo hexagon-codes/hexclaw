@@ -112,6 +112,11 @@ func (a *SolveAdapter) ElementaryEquationWithinCurriculum(problem string, allowe
 	return engine.ElementaryEquationWithinCurriculum(problem, allowedKnowledgePoints)
 }
 
+// VerifyIncorrectArithmeticFinalAnswer 只桥接独立最终答案的精确核验，不执行模型或脚本。
+func (a *SolveAdapter) VerifyIncorrectArithmeticFinalAnswer(problem, finalAnswer string) (solution string, provenWrong bool) {
+	return engine.VerifyIncorrectArithmeticFinalAnswer(problem, finalAnswer)
+}
+
 // FailedVerificationPayload 仅用于已有可信调用账本的来源核验，不从模型正文推断执行状态。
 func (a *SolveAdapter) FailedVerificationPayload(payload string) error {
 	var result engine.SubAgentResult

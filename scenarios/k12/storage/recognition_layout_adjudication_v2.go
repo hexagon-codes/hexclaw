@@ -84,7 +84,11 @@ func loadRecognitionAdjudicationAuthority(ctx context.Context, q dbQueryer, owne
 			return out, ErrModelPhysicalInvocationConflict
 		}
 	}
-	if err := validateRecognitionAdjudicationConflict(out.originalJSON, in.ConflictKind); err != nil {
+	if in.ConflictKind == "observation_uncertainty" {
+		if err := validateRecognitionObservationUncertaintyV1(ctx, q, parent, out.planID, plan, in.CandidateID, out.originalJSON); err != nil {
+			return out, err
+		}
+	} else if err := validateRecognitionAdjudicationConflict(out.originalJSON, in.ConflictKind); err != nil {
 		return out, err
 	}
 	return out, nil
@@ -255,6 +259,9 @@ func (s *Store) SettleRecognitionLayoutAdjudicationV2(ctx context.Context, owner
 		if child.ParentInvocationID != parentID || child.PhysicalUnit != in.SourcePhysicalUnit || child.PlanDigest != in.PlanDigest || child.Status != k12.ModelInvocationSucceeded || child.ResultDigest != in.SourcePhysicalResultDigest {
 			return ErrModelPhysicalInvocationConflict
 		}
+		if e = validateRecognitionFinalAnswerSettlementV1(ctx, tx, parent, planID, in, false); e != nil {
+			return e
+		}
 		var storedRaw, storedDigest string
 		e = tx.QueryRowContext(ctx, `SELECT settlement_json,settlement_digest FROM k12_recognition_layout_adjudication_settlements WHERE authorization_id=?`, in.AuthorizationID).Scan(&storedRaw, &storedDigest)
 		if e == nil {
@@ -269,6 +276,9 @@ func (s *Store) SettleRecognitionLayoutAdjudicationV2(ctx context.Context, owner
 		}
 		if parent.Status != k12.ModelInvocationSent {
 			return records.ErrIllegalTransition
+		}
+		if e = validateRecognitionFinalAnswerSettlementV1(ctx, tx, parent, planID, in, true); e != nil {
+			return e
 		}
 		if _, e = loadRecognitionLayoutFinalPhysicalEvidenceV2(ctx, tx, parent, child.PhysicalInvocationID, child.PhysicalUnit, child.PlanDigest, child.CandidateExactSetDigest, child.ResultDigest); e != nil {
 			return e
@@ -346,6 +356,9 @@ func loadRecognitionAdjudicationOverlays(ctx context.Context, q dbQueryer, autho
 		if child.ParentInvocationID != authority.Parent.InvocationID || child.Status != k12.ModelInvocationSucceeded || child.ResultDigest != in.SourcePhysicalResultDigest {
 			return nil, nil, ErrModelPhysicalInvocationConflict
 		}
+		if err := validateRecognitionFinalAnswerSettlementV1(ctx, q, authority.Parent, authority.PlanID, in, requireContent); err != nil {
+			return nil, nil, err
+		}
 		evidence := k12.RecognitionLayoutPhysicalResultEvidenceV2{PhysicalInvocationID: sourceID, PhysicalUnit: child.PhysicalUnit, ResultDigest: child.ResultDigest, PlanDigest: child.PlanDigest, CandidateExactSetDigest: child.CandidateExactSetDigest, Attempt: child.Attempt}
 		if requireContent {
 			evidence, err = loadRecognitionLayoutFinalPhysicalEvidenceV2(ctx, q, authority.Parent, sourceID, child.PhysicalUnit, child.PlanDigest, child.CandidateExactSetDigest, child.ResultDigest)
@@ -360,10 +373,17 @@ func loadRecognitionAdjudicationOverlays(ctx context.Context, q dbQueryer, autho
 }
 
 func applyRecognitionAdjudicationOverlay(result k12.RecognitionLayoutCandidateFinalResultV2, overlay recognitionAdjudicationOverlay) k12.RecognitionLayoutCandidateFinalResultV2 {
+	in := overlay.settlement
+	if in.FinalAnswerEvidence != nil {
+		result.FinalAnswerReceipt = &k12.RecognitionFinalAnswerReceiptV1{
+			Evidence: *in.FinalAnswerEvidence, PlanDigest: in.PlanDigest, CandidateID: in.CandidateID,
+			SourcePhysicalInvocationID: in.SourcePhysicalInvocationID, SourcePhysicalResultDigest: in.SourcePhysicalResultDigest,
+			AuthorizationID: in.AuthorizationID, SettlementDigest: overlay.projection.SettlementDigest,
+		}
+	}
 	if !overlay.projection.Adopted {
 		return result
 	}
-	in := overlay.settlement
 	result.OriginalCandidateJSON = json.RawMessage(overlay.originalJSON)
 	result.Adjudication = &k12.RecognitionLayoutAdjudicationReceiptV2{AuthorizationID: in.AuthorizationID, SettlementDigest: overlay.projection.SettlementDigest, MatchedQuestionPrior: in.MatchedQuestionPrior, MatchedAnswerPrior: in.MatchedAnswerPrior}
 	result.ResultKind, result.ResultDigest, result.ResultJSON = in.ResultKind, overlay.projection.FrozenResult.ResultDigest, append(json.RawMessage(nil), in.ResultJSON...)

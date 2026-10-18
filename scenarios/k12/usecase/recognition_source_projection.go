@@ -1,6 +1,9 @@
 package usecase
 
-import "strings"
+import (
+	"github.com/hexagon-codes/hexclaw/scenarios/k12"
+	"strings"
+)
 
 // RecognitionLayoutSourceProjection 是最终识题 JSON 内的派生来源映射。
 // 两个目标的物理回执与裁决仍由原计划终结回执保存，不改变 canonical 内容身份。
@@ -13,18 +16,7 @@ type RecognitionLayoutSourceProjection struct {
 }
 
 func normalizedRecognitionSourceReading(value string) string {
-	// 仅改变比较视图，不改原始转写；分数边界、数值和运算分组仍参与比较。
-	value = evidenceNewline.ReplaceAllString(value, "\n$1")
-	value = evidenceNumericFraction.ReplaceAllString(value, `\frac{$1}{$2}`)
-	value = strings.ReplaceAll(value, `\ `, " ")
-	value = strings.NewReplacer("²", "^2", "³", "^3", "^{2}", "^2", "^{3}", "^3").Replace(value)
-	value = strings.Join(strings.Fields(CanonicalPlainTextFallback(value)), "")
-	value = evidenceNumericRatio.ReplaceAllString(value, "$1∶$2")
-	value = evidenceNumericRatio.ReplaceAllString(value, "$1∶$2")
-	return strings.NewReplacer(
-		`\,`, "", "（", "(", "）", ")", "＝", "=", "＋", "+",
-		"。", "", "；", "", "，", "", "：", "", "、", "", ";", "", ":", "",
-	).Replace(value)
+	return k12.RecognitionSourceComparisonV1(value)
 }
 
 // CompleteRecognitionSourceReadingsEqual 只比较两份完整读数，不能用互补片段补全。

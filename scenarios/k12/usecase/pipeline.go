@@ -19,6 +19,8 @@ const FirstReviewInterval int64 = 86400 // 1 天
 
 // Deps 用例依赖（端口注入 + 通用能力）。
 type Deps struct {
+	// DeliveryLocale 只在新显式投递时读取显示语言，冻结后重放不再读取。
+	DeliveryLocale func() string
 	// ImageTaskResult 读取同一领域终态及冻结调用证据，供新投递生成只读摘要。
 	ImageTaskResult func(context.Context, string, string) (ImageTaskResult, error)
 	Solver          Solver
@@ -200,6 +202,8 @@ type GradeRequest struct {
 	SolveOutputVersion          string                    `json:"solve_output_version,omitempty"`
 	ParentTeachingContract      string                    `json:"parent_teaching_contract,omitempty"`
 	ParentTeachingSkillSnapshot []skill.ContextReceipt    `json:"parent_teaching_skill_snapshot,omitempty"`
+	// FinalAnswerReceipt 仅执行副本携带，原始作答及过程风险仍保存在识题回执。
+	FinalAnswerReceipt *k12.RecognitionFinalAnswerReceiptV1 `json:"final_answer_receipt,omitempty"`
 }
 
 // GradeResult 批改闭环结果。

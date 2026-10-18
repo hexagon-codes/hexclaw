@@ -42,91 +42,204 @@ func buildRecognitionLayoutAdjudicationPrompt(target k12.RecognitionLayoutTarget
 	return recognitionLayoutAdjudicationPrompt + "Target identity: " + string(descriptor) + "\n\n" + compact, nil
 }
 
-// 全部来源复读已经结束后，仅冲突目标进入一次核验；串行保留有界预算，未知立即停发。
+const recognitionFinalAnswerPromptV1 = `
+Independently inspect the printed question and final written answer separately from the completeness of the student's working. verification.question_complete_and_legible is true only when this target's ENTIRE original question, every condition, operand, sign and unit is visible and legible without inference; false on any missing or uncertain source. Keep verification.active_answer_complete and all existing ocr_signals truthful for the ENTIRE active working; do not clear a working ambiguity because a final value is readable.
+final_answer is null unless the image independently proves one complete, legible, uncancelled final conclusion belonging to this target. When proved, return exactly {"raw_transcription":"verbatim complete final answer including units","bbox":{"x":0,"y":0,"width":1,"height":1},"is_final_answer":true,"target_ownership_confirmed":true,"not_cancelled":true,"complete_and_legible":true}. bbox uses pixels relative to this ENTIRE context image and tightly encloses that final conclusion. It is not the generic answer_bbox, which may describe working instead.
+Do not extract a last number from a transcription, infer a final answer from arithmetic, use an abandoned/intermediate expression, or treat placement alone as proof. A readable intermediate value is not a final answer. Multiple competing final answers, unclear ownership, cancellation of the final conclusion, clipped symbols or unreadable final content require final_answer=null. Uncertainty solely in an earlier working step does not by itself negate independently established final-answer evidence; retain that uncertainty in ocr_signals and active_answer_complete. Do not solve or judge correctness.
+`
+
+func buildRecognitionLayoutAdjudicationPromptForPolicy(target k12.RecognitionLayoutTargetV2, format, policy string) (string, error) {
+	prompt, err := buildRecognitionLayoutAdjudicationPrompt(target, format)
+	if err != nil {
+		return "", err
+	}
+	switch policy {
+	case "", k12.RecognitionExecutionPolicyCompactDAGV1:
+		return prompt, nil
+	case k12.RecognitionExecutionPolicyCompactDAGFinalAnswerV1, k12.RecognitionExecutionPolicyCompactDAGFinalAnswerV2:
+		prompt = strings.Replace(prompt, "Return JSON with exactly verification and items.", "Return JSON with exactly verification, items and final_answer.", 1)
+		prompt = strings.Replace(prompt, "verification has exactly two booleans:", "verification has exactly three booleans: question_complete_and_legible (the entire original question is visible and legible without inference),", 1)
+		prompt = strings.Replace(prompt, `"verification":{"target_ownership_confirmed":`, `"verification":{"question_complete_and_legible":true,"target_ownership_confirmed":`, 1)
+		prompt = strings.Replace(prompt, `"items":[`, `"final_answer":null,"items":[`, 1)
+		return prompt + recognitionFinalAnswerPromptV1, nil
+	default:
+		return "", fmt.Errorf("%w: unsupported adjudication execution policy", k12.ErrRecognitionProtocolInvalid)
+	}
+}
+
+// 历史计划仍按原顺序核验；新计划由共享调度器按目标依赖调用同一单题边界。
 func (a *RecognizerAdapter) recognizeLayoutAdjudicationsV2(ctx context.Context, pagePNG []byte, plan k12.RecognitionLayoutPlanV2, runtime k12.RecognitionLayoutPlanRuntimeV2, primary, repaired map[string]recognitionLayoutBatchOutcomeV2) error {
 	for _, target := range plan.Targets {
-		current, exists := repaired[target.TargetID]
-		initial, hasInitial := primary[target.TargetID]
-		if !exists || !hasInitial || current.question == nil || initial.question == nil {
-			continue
-		}
-		risk := usecase.EvaluateOCRConfirmationRiskForInitialReadMode(*current.question, plan.InitialReadMode)
-		hasConflict := false
-		for _, reason := range risk.ConfirmationReasons {
-			hasConflict = hasConflict || reason == usecase.OCRRiskEvidenceConflict
-		}
-		if !hasConflict {
-			continue
-		}
-		if initial.source.InvocationID == "" || current.source.InvocationID == "" || initial.source.InvocationID == current.source.InvocationID {
-			return fmt.Errorf("%w: adjudication requires two distinct successful readings", k12.ErrRecognitionLayoutPlanV2Unauthorized)
-		}
-		_, reread := classifyRecognitionLayoutRepairV2(current.source.Payload, target, plan.RecognitionFormat)
-		if reread == nil || reread.question == nil {
-			return fmt.Errorf("%w: adjudication repair source cannot be parsed", k12.ErrRecognitionProtocolInvalid)
-		}
-		questionMatch, answerMatch := usecase.RecognitionSourceReadingsMatchForInitialReadMode(*initial.question, *reread.question, plan.InitialReadMode)
-		conflictKind := "both"
-		switch {
-		case questionMatch && !answerMatch:
-			conflictKind = "answer"
-		case !questionMatch && answerMatch:
-			conflictKind = "question"
-		}
-		if initial.question.AnswerState != reread.question.AnswerState {
-			// 空白与不清晰可能都没有作答文本，按已保留的题干冲突授权，不能伪造作答观察。
-			if !questionMatch {
-				conflictKind = "question"
-			} else {
-				conflictKind = "answer_ownership"
-			}
-		}
-		authorization, _, err := k12.AuthorizeRecognitionLayoutAdjudicationV2(ctx, k12.RecognitionLayoutAdjudicationRequestV2{
-			PlanDigest: plan.AuthorizedPlanDigest, CandidateID: target.TargetID,
-			PrimaryPhysicalInvocationID: initial.source.InvocationID, PrimaryPhysicalResultDigest: initial.source.ResultDigest,
-			RepairPhysicalInvocationID: current.source.InvocationID, RepairPhysicalResultDigest: current.source.ResultDigest,
-			ConflictKind: conflictKind,
-		})
-		if err != nil {
-			return err
-		}
-		contextImage, err := k12.BuildRecognitionLayoutAdjudicationImageV2(pagePNG, plan, target.TargetID)
-		if err != nil {
-			return err
-		}
-		prompt, err := buildRecognitionLayoutAdjudicationPrompt(target, plan.RecognitionFormat)
-		if err != nil {
-			return err
-		}
-		physicalCtx, cancel, err := recognitionLayoutPhysicalCallContextV2(ctx, time.UnixMilli(runtime.StageDeadlineAtUnixMillis), runtime.Header.PhysicalCallCapMillis)
-		if err != nil {
-			return err
-		}
-		physical, err := a.callRecognitionVisionPhysical(physicalCtx, k12.RecognitionPhysicalCall{PlanVersion: k12.RecognitionPlanVersionV2, PlanDigest: plan.AuthorizedPlanDigest, Unit: authorization.PhysicalUnit, TargetIDs: []string{target.TargetID}, Image: contextImage}, prompt)
-		cancel()
-		if err != nil {
-			return fmt.Errorf("independent source adjudication failed: %w", err)
-		}
-		candidate, reviewed, verified := parseRecognitionLayoutAdjudication(physical.Payload, target, plan.RecognitionFormat)
-		settlement := k12.RecognitionLayoutAdjudicationSettlementV2{PlanDigest: plan.AuthorizedPlanDigest, AuthorizationID: authorization.AuthorizationID, AuthorizationDigest: authorization.AuthorizationDigest, CandidateID: target.TargetID, SourcePhysicalInvocationID: physical.InvocationID, SourcePhysicalUnit: authorization.PhysicalUnit, SourcePhysicalResultDigest: physical.ResultDigest}
-		if verified && reviewed != nil && reviewed.question != nil {
-			qp, ap := usecase.RecognitionSourceReadingsMatchForInitialReadMode(*initial.question, *reviewed.question, plan.InitialReadMode)
-			qr, ar := usecase.RecognitionSourceReadingsMatchForInitialReadMode(*reread.question, *reviewed.question, plan.InitialReadMode)
-			settlement.MatchedQuestionPrior = matchedRecognitionPrior(qp, qr)
-			settlement.MatchedAnswerPrior = matchedRecognitionPrior(ap, ar)
-			settlement.Adopted = settlement.MatchedQuestionPrior != "" && settlement.MatchedAnswerPrior != ""
-			if settlement.Adopted {
-				settlement.ResultKind, settlement.ResultJSON = candidate.ResultKind, candidate.ResultJSON
-			}
-		}
-		if !settlement.Adopted {
-			settlement.MatchedQuestionPrior, settlement.MatchedAnswerPrior = "", ""
-		}
-		if _, _, err := k12.SettleRecognitionLayoutAdjudicationV2(ctx, physical, settlement); err != nil {
+		if err := a.recognizeLayoutAdjudicationV2(ctx, pagePNG, plan, runtime, target, primary[target.TargetID], repaired[target.TargetID]); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func recognitionNeedsAdjudicationV2(initial, current recognitionLayoutBatchOutcomeV2, mode string, policies ...string) bool {
+	if initial.question == nil || current.question == nil {
+		return false
+	}
+	risk := usecase.EvaluateOCRConfirmationRiskForInitialReadMode(*current.question, mode)
+	for _, reason := range risk.ConfirmationReasons {
+		if reason == usecase.OCRRiskEvidenceConflict {
+			return true
+		}
+	}
+	if len(policies) != 0 && k12.RecognitionFinalAnswerExecutionPolicy(policies[0]) {
+		return recognitionUnresolvedSourceObservationsV1(initial.question, current.question, policies[0])
+	}
+	return false
+}
+
+func recognitionFinalAnswerSourceV1(q *usecase.RecognizedQuestion) k12.RecognitionFinalAnswerSourceV1 {
+	if q == nil {
+		return k12.RecognitionFinalAnswerSourceV1{}
+	}
+	return k12.RecognitionFinalAnswerSourceV1{Question: q.RawTranscription, Subject: q.Subject, AnswerState: string(q.AnswerState), Confidence: q.RecognitionConfidence, OCRSignals: q.OCRSignals}
+}
+
+func recognitionUnresolvedSourceObservationsV1(initial, current *usecase.RecognizedQuestion, policies ...string) bool {
+	policy := k12.RecognitionExecutionPolicyCompactDAGFinalAnswerV1
+	if len(policies) != 0 {
+		policy = policies[0]
+	}
+	return initial != nil && current != nil &&
+		k12.RecognitionFinalAnswerSourcesTrustedForPolicyV1(policy, recognitionFinalAnswerSourceV1(initial), recognitionFinalAnswerSourceV1(current)) &&
+		k12.RecognitionSourceObservationUnresolvedV1(current.OCRSignals)
+}
+
+func (a *RecognizerAdapter) recognizeLayoutAdjudicationV2(ctx context.Context, pagePNG []byte, plan k12.RecognitionLayoutPlanV2, runtime k12.RecognitionLayoutPlanRuntimeV2, target k12.RecognitionLayoutTargetV2, initial, current recognitionLayoutBatchOutcomeV2) error {
+	if !recognitionNeedsAdjudicationV2(initial, current, plan.InitialReadMode, runtime.Header.ExecutionPolicy) {
+		return nil
+	}
+	if initial.source.InvocationID == "" || current.source.InvocationID == "" || initial.source.InvocationID == current.source.InvocationID {
+		return fmt.Errorf("%w: adjudication requires two distinct successful readings", k12.ErrRecognitionLayoutPlanV2Unauthorized)
+	}
+	_, reread := classifyRecognitionLayoutRepairV2(current.source.Payload, target, plan.RecognitionFormat)
+	if reread == nil || reread.question == nil {
+		return fmt.Errorf("%w: adjudication repair source cannot be parsed", k12.ErrRecognitionProtocolInvalid)
+	}
+	questionMatch, answerMatch := usecase.RecognitionSourceReadingsMatchForInitialReadMode(*initial.question, *reread.question, plan.InitialReadMode)
+	conflictKind := "both"
+	switch {
+	case questionMatch && answerMatch && k12.RecognitionFinalAnswerExecutionPolicy(runtime.Header.ExecutionPolicy) && recognitionUnresolvedSourceObservationsV1(initial.question, reread.question, runtime.Header.ExecutionPolicy):
+		conflictKind = "observation_uncertainty"
+		// 读数补全相容不等于完整作答相同；增加的歧义过程仍走作答冲突裁决。
+		if !k12.RecognitionSourceQuestionsEqualV1(initial.question.AnswerRawTranscription, reread.question.AnswerRawTranscription) {
+			conflictKind = "answer"
+		}
+	case questionMatch && !answerMatch:
+		conflictKind = "answer"
+	case !questionMatch && answerMatch:
+		conflictKind = "question"
+	}
+	if initial.question.AnswerState != reread.question.AnswerState {
+		// 空白与不清晰可能都没有作答文本，按已保留的题干冲突授权，不能伪造作答观察。
+		if !questionMatch {
+			conflictKind = "question"
+		} else {
+			conflictKind = "answer_ownership"
+		}
+	}
+	authorization, _, err := k12.AuthorizeRecognitionLayoutAdjudicationV2(ctx, k12.RecognitionLayoutAdjudicationRequestV2{
+		PlanDigest: plan.AuthorizedPlanDigest, CandidateID: target.TargetID,
+		PrimaryPhysicalInvocationID: initial.source.InvocationID, PrimaryPhysicalResultDigest: initial.source.ResultDigest,
+		RepairPhysicalInvocationID: current.source.InvocationID, RepairPhysicalResultDigest: current.source.ResultDigest,
+		ConflictKind: conflictKind,
+	})
+	if err != nil {
+		return err
+	}
+	contextImage, err := k12.BuildRecognitionLayoutAdjudicationImageV2(pagePNG, plan, target.TargetID)
+	if err != nil {
+		return err
+	}
+	prompt, err := buildRecognitionLayoutAdjudicationPromptForPolicy(target, plan.RecognitionFormat, runtime.Header.ExecutionPolicy)
+	if err != nil {
+		return err
+	}
+	physicalCtx, cancel, err := recognitionLayoutPhysicalCallContextV2(ctx, time.UnixMilli(runtime.StageDeadlineAtUnixMillis), runtime.Header.PhysicalCallCapMillis)
+	if err != nil {
+		return err
+	}
+	physical, err := a.callRecognitionVisionPhysical(physicalCtx, k12.RecognitionPhysicalCall{PlanVersion: k12.RecognitionPlanVersionV2, PlanDigest: plan.AuthorizedPlanDigest, Unit: authorization.PhysicalUnit, TargetIDs: []string{target.TargetID}, Image: contextImage}, prompt)
+	cancel()
+	if err != nil {
+		return fmt.Errorf("independent source adjudication failed: %w", err)
+	}
+	candidate, reviewed, verified, finalAnswer, err := parseRecognitionLayoutAdjudicationForPolicy(physical.Payload, target, plan.RecognitionFormat, runtime.Header.ExecutionPolicy)
+	if err != nil {
+		return err
+	}
+	settlement := k12.RecognitionLayoutAdjudicationSettlementV2{PlanDigest: plan.AuthorizedPlanDigest, AuthorizationID: authorization.AuthorizationID, AuthorizationDigest: authorization.AuthorizationDigest, CandidateID: target.TargetID, SourcePhysicalInvocationID: physical.InvocationID, SourcePhysicalUnit: authorization.PhysicalUnit, SourcePhysicalResultDigest: physical.ResultDigest}
+	if finalAnswer != nil && (conflictKind == "answer" || conflictKind == "observation_uncertainty") && recognitionFinalAnswerSourcesEligibleV1(initial.question, reread.question, reviewed, plan.InitialReadMode, runtime.Header.ExecutionPolicy) {
+		settlement.FinalAnswerEvidence = finalAnswer
+	}
+	if verified && reviewed != nil && reviewed.question != nil {
+		qp, ap := usecase.RecognitionSourceReadingsMatchForInitialReadMode(*initial.question, *reviewed.question, plan.InitialReadMode)
+		qr, ar := usecase.RecognitionSourceReadingsMatchForInitialReadMode(*reread.question, *reviewed.question, plan.InitialReadMode)
+		settlement.MatchedQuestionPrior = matchedRecognitionPrior(qp, qr)
+		settlement.MatchedAnswerPrior = matchedRecognitionPrior(ap, ar)
+		settlement.Adopted = settlement.MatchedQuestionPrior != "" && settlement.MatchedAnswerPrior != ""
+		if settlement.Adopted {
+			settlement.ResultKind, settlement.ResultJSON = candidate.ResultKind, candidate.ResultJSON
+		}
+	}
+	if !settlement.Adopted {
+		settlement.MatchedQuestionPrior, settlement.MatchedAnswerPrior = "", ""
+	}
+	if _, _, err := k12.SettleRecognitionLayoutAdjudicationV2(ctx, physical, settlement); err != nil {
+		return err
+	}
+	return nil
+}
+
+func parseRecognitionLayoutAdjudicationForPolicy(raw string, target k12.RecognitionLayoutTargetV2, format, policy string) (k12.RecognitionLayoutCandidateSettlementV2, *recognitionLayoutBatchOutcomeV2, bool, *k12.RecognitionFinalAnswerEvidenceV1, error) {
+	if policy == "" || policy == k12.RecognitionExecutionPolicyCompactDAGV1 {
+		candidate, reviewed, verified := parseRecognitionLayoutAdjudication(raw, target, format)
+		return candidate, reviewed, verified, nil, nil
+	}
+	if !k12.RecognitionFinalAnswerExecutionPolicy(policy) || target.AdjudicationRegion == nil {
+		return k12.RecognitionLayoutCandidateSettlementV2{}, nil, false, nil, fmt.Errorf("%w: unsupported adjudication execution policy", k12.ErrRecognitionProtocolInvalid)
+	}
+	response, err := k12.ParseRecognitionFinalAnswerResponseV1(raw, *target.AdjudicationRegion)
+	if err != nil {
+		return k12.RecognitionLayoutCandidateSettlementV2{}, nil, false, nil, err
+	}
+	candidate, reviewed, verified := parseRecognitionLayoutAdjudication(string(response.LegacyEnvelope), target, format)
+	if !response.QuestionCompleteAndLegible || !response.TargetOwnershipConfirmed || reviewed == nil || reviewed.question == nil {
+		return candidate, reviewed, false, nil, nil
+	}
+	return candidate, reviewed, verified, response.Evidence, nil
+}
+
+// 新增证据只处理两份题干已一致的作答冲突，不能替代原题来源、学科或清晰度证明。
+func recognitionFinalAnswerSourcesEligibleV1(initial, reread *usecase.RecognizedQuestion, reviewed *recognitionLayoutBatchOutcomeV2, initialReadMode string, policies ...string) bool {
+	policy := k12.RecognitionExecutionPolicyCompactDAGFinalAnswerV1
+	if len(policies) != 0 {
+		policy = policies[0]
+	}
+	if initial == nil || reread == nil || reviewed == nil || reviewed.question == nil ||
+		!k12.RecognitionFinalAnswerSourcesTrustedForPolicyV1(policy, recognitionFinalAnswerSourceV1(initial), recognitionFinalAnswerSourceV1(reread), recognitionFinalAnswerSourceV1(reviewed.question)) {
+		return false
+	}
+	for index, source := range []*usecase.RecognizedQuestion{initial, reread, reviewed.question} {
+		if source.RecognitionConfidence == nil || source.Subject != "数学" || source.AnswerState != usecase.AnswerStatePresent {
+			return false
+		}
+		question := usecase.EvaluateOCRConfirmationRiskForInitialReadMode(*source, initialReadMode)
+		for _, reason := range question.ConfirmationReasons {
+			if index == 0 && policy == k12.RecognitionExecutionPolicyCompactDAGFinalAnswerV2 && reason == usecase.OCRRiskLowConfidence {
+				continue
+			}
+			if reason != usecase.OCRRiskEvidenceConflict {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func matchedRecognitionPrior(primary, repair bool) string {

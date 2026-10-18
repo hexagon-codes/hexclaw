@@ -506,12 +506,30 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 	} else if !errors.Is(err, records.ErrNotFound) {
 		return item, err
 	}
-	if item.Status == PhotoAnswerUnclear {
+	finalAnswerSolution := ""
+	finalAnswerOnly := false
+	if mode == PhotoModeGrade && finalAnswerObservationUnresolved(req, q) {
+		item.Status = PhotoAnswerUnclear
+		item.Warning = "Unable to reliably recognize the handwriting. No correctness judgment was produced."
+	}
+	if item.Status == PhotoAnswerUnclear && mode == PhotoModeGrade {
+		finalAnswerSolution, finalAnswerOnly, err = o.verifiedFinalAnswerSolution(ctx, deps, job, req, q)
+		if err != nil {
+			return item, err
+		}
+	}
+	if item.Status == PhotoAnswerUnclear && !finalAnswerOnly {
 		return commitGradingAssessmentItem(ctx, deps, job, q, item, "", "", "",
 			k12storage.GradingAssessmentEffects{})
 	}
 
 	gradeReq := photoItemGradeRequest(req, q)
+	if finalAnswerOnly {
+		receipt := *q.FinalAnswerReceipt
+		gradeReq.FinalAnswerReceipt = &receipt
+		gradeReq.StudentAnswer = receipt.Evidence.RawTranscription
+		item.Status, item.Warning = "", ""
+	}
 	if mode == PhotoModeGrade && q.AnswerState == AnswerStateBlank {
 		// 页级仍是批改卷，清晰空白条目仅复用求解链，不产生学生批改事实。
 		mode = PhotoModeSolve
@@ -642,9 +660,21 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 			solveInvocationID, "", parentGuideInvocationID, k12storage.GradingAssessmentEffects{})
 	}
 
-	solved, solveInvocationID, err := executeDurableSolveOperation(
-		ctx, o, deps, job, q, gradeReq,
-	)
+	var solved SolveHomeworkResult
+	var solveInvocationID string
+	if finalAnswerOnly {
+		solved, solveInvocationID, err = executeGradingItemOperationWithKind(ctx, o, job, q, k12.GradingItemOperationSolve, k12.GradingExecutionLocalDeterministic,
+			struct {
+				ExecutionKind k12.GradingExecutionKind `json:"execution_kind"`
+				InputDigest   string                   `json:"input_digest"`
+				Request       GradeRequest             `json:"request"`
+			}{k12.GradingExecutionLocalDeterministic, q.InputDigest, gradeReq},
+			func(context.Context) (SolveHomeworkResult, error) {
+				return SolveHomeworkResult{Solution: finalAnswerSolution, Evidence: SolveEvidence{Verdict: VerdictAgree, EvidenceType: EvidenceNumericExec}}, nil
+			})
+	} else {
+		solved, solveInvocationID, err = executeDurableSolveOperation(ctx, o, deps, job, q, gradeReq)
+	}
 	item.assetPublication = solved.assetPublication
 	item.AnswerSource = solved.AnswerSource
 	item.Solve = solved
@@ -686,6 +716,10 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 	if err != nil {
 		return item, err
 	}
+	if finalAnswerOnly && (graded.Evidence.EvidenceType != EvidenceNumericExec || graded.Evidence.Verdict != VerdictAgree ||
+		graded.Outcome.Verdict != VerdictDisagree || graded.Outcome.FinalAnswerCorrect == nil || *graded.Outcome.FinalAnswerCorrect) {
+		return item, fmt.Errorf("%w: independent final answer did not produce a verified wrong verdict", ErrGradingAssessmentExactSet)
+	}
 	skipped, err = currentProblemSkipMatchesInput(durableCtx, deps, job, q)
 	if err != nil {
 		return item, err
@@ -694,6 +728,12 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 		return item, nil
 	}
 	item.Status, item.Warning = photoAssessmentStatus(graded)
+	if finalAnswerOnly {
+		if item.Status != PhotoWrong {
+			return item, fmt.Errorf("%w: independent final answer has an inconsistent assessment status", ErrGradingAssessmentExactSet)
+		}
+		item.Warning = finalAnswerOnlyAssessmentWarning
+	}
 	effects := k12storage.GradingAssessmentEffects{}
 	// 副作用与已收敛的图片判定一致，证据不足时不消费模型初步对错。
 	if job.Fields.SourceKind != PracticeReturnGradingSourceKind &&
