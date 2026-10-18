@@ -1429,8 +1429,9 @@ func (r *k12DingtalkPhotoInboundRuntime) advanceCreativeFinalReply(
 	}
 	var deliverErr error
 	if errors.Is(lookupErr, records.ErrNotFound) {
+		deliveryCtx := k12usecase.WithCreativeWorkResultDeliveryDisclosure(ctx, *result.CreativeWork, result, content)
 		batch, _, deliverErr = r.replyBatches.PrepareAndSendMessageBatchForTargets(
-			ctx, bundle.Receipt.AgentName, "creative_work", result.CreativeWork.Record.RecordID,
+			deliveryCtx, bundle.Receipt.AgentName, "creative_work", result.CreativeWork.Record.RecordID,
 			message, []k12usecase.ResolvedDeliveryTarget{target},
 		)
 	}

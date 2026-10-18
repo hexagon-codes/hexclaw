@@ -222,7 +222,7 @@ func (d *k12IMDeliverer) PrepareTextForTargets(
 }
 
 func (d *k12IMDeliverer) PrepareMessageForTargets(
-	_ context.Context,
+	ctx context.Context,
 	source k12usecase.DeliveryMessage,
 	targets []k12usecase.ResolvedDeliveryTarget,
 ) ([]k12usecase.PreparedTextDelivery, error) {
@@ -280,6 +280,29 @@ func (d *k12IMDeliverer) PrepareMessageForTargets(
 			return nil, fmt.Errorf("冻结发送目标失败：存在重复私聊目标")
 		}
 		seen[target] = struct{}{}
+		parts, renderJSON := parts, renderJSON
+		if locale, disclosure := k12usecase.CreativeWorkDeliveryDisclosure(ctx, canonical); target.Platform == "dingtalk" && disclosure != "" {
+			// 说明只属于新钉钉渲染投影，canonical 与原图身份保持不变。
+			disclosureFallback := fallbackReason
+			if disclosureFallback != "" {
+				disclosureFallback += "+"
+			}
+			disclosureFallback += "execution_summary"
+			message, disclosureErr := channel.NewCanonicalMarkdownMessageWithAttachments(
+				messagecontent.ProducerK12, locale, canonical, projected+"\n\n"+disclosure, disclosureFallback, attachments,
+			)
+			if disclosureErr != nil {
+				return nil, disclosureErr
+			}
+			parts, err = message.DeliveryParts()
+			if err != nil {
+				return nil, err
+			}
+			renderJSON, err = json.Marshal(message.RenderManifest)
+			if err != nil {
+				return nil, err
+			}
+		}
 		for _, part := range parts {
 			payloadJSON, marshalErr := json.Marshal(part)
 			if marshalErr != nil {

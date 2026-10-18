@@ -374,8 +374,9 @@ func (h *handler) sendCreativeWork(w http.ResponseWriter, r *http.Request) {
 			Data: append([]byte(nil), ready.Data...),
 		}}
 	}
+	deliveryCtx := h.rt.Deps.WithCreativeWorkDeliveryDisclosure(r.Context(), view, content)
 	batch, _, err := h.rt.Deps.PrepareAndSendMessageBatch(
-		r.Context(), req.Agent, "creative_work", workID, message,
+		deliveryCtx, req.Agent, "creative_work", workID, message,
 	)
 	if err != nil {
 		writeDeliveryError(w, err)
