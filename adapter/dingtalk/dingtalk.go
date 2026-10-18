@@ -1693,6 +1693,12 @@ func (a *DingtalkAdapter) sendReplyNowWithReceipt(
 	if err != nil {
 		return "", fmt.Errorf("发送消息失败: %w", err)
 	}
+	logger.Info("[dingtalk] message accepted",
+		"instance_sha256", dingtalkIdentityHash(a.Name()),
+		"chat_sha256", dingtalkIdentityHash(chatID),
+		"content_sha256", dingtalkIdentityHash(reply.Content),
+		"external_message_id", externalID,
+	)
 	return externalID, nil
 }
 
