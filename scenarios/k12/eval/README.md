@@ -48,7 +48,7 @@ kind 与负载定义见 `suites.go`（format 测试钉死每套件允许的 kind
 # 常规门（默认在内，不走 LLM）：格式校验 + holdout 封存校验 + 确定性 eval（套件4/5/6 dev）
 GOWORK=off GOTOOLCHAIN=auto go test -count=1 ./scenarios/k12/...
 
-# 真机小规模冒烟（gpt-5.6-sol，每 LLM 套件 5 题，dev 分割，报告落盘 reports/）
+# 真机小规模冒烟（当前配置的模型，每 LLM 套件 5 题，dev 分割，报告落盘 reports/）
 HEXCLAW_K12_EVAL=1 GOWORK=off GOTOOLCHAIN=auto \
   go test ./scenarios/k12/eval -run TestK12EvalSuites_RealModel -v -count=1 -timeout 30m
 
@@ -57,8 +57,9 @@ HEXCLAW_K12_EVAL=1 HEXCLAW_K12_EVAL_SPLIT=holdout HEXCLAW_K12_EVAL_LIMIT=0 GOWOR
   go test ./scenarios/k12/eval -run TestK12EvalSuites_RealModel -v -count=1 -timeout 60m
 ```
 
-模型解析：默认取 `~/.hexclaw/hexclaw.yaml` 的 `reasoning_provider/reasoning_model`（gpt-5.6-sol），
-凭据不经环境变量明文传递；`HEXCLAW_K12_EVAL_PROVIDER/_MODEL` 可覆盖（显式启用后缺配置即 FAIL，不静默换模型）。
+模型解析：Provider 优先使用 `HEXCLAW_K12_EVAL_PROVIDER`，其次取当前配置的 `reasoning_provider`，未设置时取默认 Provider；模型优先使用 `HEXCLAW_K12_EVAL_MODEL`，其次取 `reasoning_model`，未设置时取所选 Provider 的模型。凭据从配置加载，不经环境变量明文传递；显式启用后，缺少所选 Provider、地址或模型即失败，不静默切换模型。仓库不预设开发者使用的供应商实例或模型名称。
+
+这些命令是评估入口，不代表普通修改都要重跑真实模型。执行前评估本次证据缺口、样例和预算；已通过且相关条件未变的结果继续复用。显式启用会产生真实调用，结果未知时保留原报告和任务，不盲目重发。
 
 指标（§5.7 文档公式）：`coverage = 确定判定数 / 总数`；
 `weighted_risk = (3·N(对判错) + 2·N(错判对)) / N(确定判定)`；holdout 全量运行以 95% 置信上界口径评审。
