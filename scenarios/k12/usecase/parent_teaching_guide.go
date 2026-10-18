@@ -389,8 +389,8 @@ func validateParentTeachingGuide(guide ParentTeachingGuide) error {
 
 // verifiedFullSolutionSteps deterministically projects the solver's verified
 // Markdown into an ordered string list. Headings and a distinct final-answer
-// section are presentation structure, not method steps. If no method paragraph
-// can be isolated, the exact verified solution remains available as one item.
+// section are presentation structure, not method steps.
+// 没有方法正文时保留缺失事实，不能把整份标题和答案重新作为步骤，或采用另一生成器的推导。
 func verifiedFullSolutionSteps(solution string) []string {
 	solution = strings.TrimSpace(strings.ReplaceAll(solution, "\r\n", "\n"))
 	if solution == "" {
@@ -440,9 +440,6 @@ func verifiedFullSolutionSteps(solution string) []string {
 	}
 	flushParagraph()
 	steps = normalizeParentGuideList(steps)
-	if len(steps) == 0 {
-		return []string{solution}
-	}
 	return steps
 }
 

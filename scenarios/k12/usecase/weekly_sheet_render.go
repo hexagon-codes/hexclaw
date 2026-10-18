@@ -19,20 +19,20 @@ const weeklyMistakeSheetStyle = "```{=typst}\n" + `
 #show heading.where(level: 1): set text(size: 18pt)
 #let hc-weekly-question(n, body) = {
   let answer = block(breakable: false, stack(dir: ttb, spacing: 0pt, ..range(4).map(_ => block(width: 100%, height: 7mm, stroke: (bottom: 0.35pt + rgb("#dddddd"))))))
-  let content = grid(columns: (8mm, 1fr), column-gutter: 0pt, align: (left, top), text(weight: "bold")[#n.], [#body #v(3mm) #answer])
+  let content = grid(columns: (8mm, 1fr), column-gutter: 0pt, align: (left, top), text(font: hc-heading-font, weight: "bold")[#n.], [#body #v(3mm) #answer])
   layout(size => {
     let height = measure(content, width: size.width).height
-    if height > 257mm {
-      block(breakable: true, above: 5mm, below: 2mm)[
+    if height > 252mm {
+      block(breakable: true, above: 0mm, below: 2mm, inset: (top: 5mm))[
         #block(breakable: true, sticky: true)[
           #set par(hanging-indent: 8mm)
-          #box(width: 8mm)[#text(weight: "bold")[#n.]]#body
+          #box(width: 8mm)[#text(font: hc-heading-font, weight: "bold")[#n.]]#body
           #v(3mm)
         ]
         #pad(left: 8mm, answer)
       ]
     } else {
-      block(breakable: false, height: calc.max(height, 42mm), above: 5mm, below: 2mm, content)
+      block(breakable: false, height: calc.max(height, 42mm) + 5mm, above: 0mm, below: 2mm, inset: (top: 5mm), content)
     }
   })
 }

@@ -324,6 +324,49 @@ func TestVerifiedFullSolutionStepsFallsBackToOneVerifiedElement(t *testing.T) {
 	}
 }
 
+func TestVerifiedFullSolutionStepsDoNotPromoteHeadingsOrAnswerBlocks(t *testing.T) {
+	for _, tc := range []struct {
+		name, solution string
+	}{
+		{"received_empty_method", "## 解答\n\n## 答案\n\n**2**"},
+		{"inline_answer", "## 解答\n\n答案：2"},
+		{"headings_only", "## 解答\n\n### 计算方法\n\n## 答案"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if steps := verifiedFullSolutionSteps(tc.solution); len(steps) != 0 {
+				t.Fatalf("presentation structure or final answer became a method: %#v", steps)
+			}
+			guide := ParentTeachingGuide{
+				Answer: "2", FullSolutionSteps: []string{"generator supplied an unverified derivation"},
+				GradeLevelMethod: "理解份数", LikelyMistakes: []string{"把时间看作份数"},
+				ParentTeachingSequence: []string{"先说出每份表示的量"}, FollowUpQuestions: []string{"一份是多少？"},
+				CheckingMethod: "回看原图中的份数",
+			}
+			if result, err := finalizeParentTeachingGuide(guide, tc.solution); err == nil || !strings.Contains(err.Error(), "full_solution_steps") {
+				t.Fatalf("unverified generator method replaced missing solver steps: result=%+v err=%v", result, err)
+			}
+		})
+	}
+}
+
+func TestVerifiedFullSolutionStepsKeepExecutedEquationAndSevenGuideFields(t *testing.T) {
+	const solution = "## 解答\n\n2 * 1/3 = 2/3\n\n## 答案\n\n**2**"
+	guide := ParentTeachingGuide{
+		Answer: "2", FullSolutionSteps: []string{"unverified replacement"},
+		GradeLevelMethod: "分数的意义", LikelyMistakes: []string{"把时间当成份数"},
+		ParentTeachingSequence: []string{"先指出每份表示的时间"}, FollowUpQuestions: []string{"两个1/3是多少？"},
+		CheckingMethod: "将份数与每份时间相乘检查",
+	}
+	finalized, err := finalizeParentTeachingGuide(guide, solution)
+	if err != nil || !reflect.DeepEqual(finalized.FullSolutionSteps, []string{"2 * 1/3 = 2/3"}) || finalized.Answer != "2" {
+		t.Fatalf("verified execution equation was lost: %+v err=%v", finalized, err)
+	}
+	guide.FullSolutionSteps = finalized.FullSolutionSteps
+	if !reflect.DeepEqual(finalized, guide) || validateParentTeachingGuide(finalized) != nil {
+		t.Fatal("seven guide fields or answer anchor changed during method projection")
+	}
+}
+
 func TestVerifiedFullSolutionStepsDoesNotCorruptLeadingDecimal(t *testing.T) {
 	const solution = "4.5×2=9"
 	if got := verifiedFullSolutionSteps(solution); !reflect.DeepEqual(got, []string{solution}) {
