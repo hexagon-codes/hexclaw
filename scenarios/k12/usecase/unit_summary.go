@@ -345,13 +345,39 @@ func (c *UnitSummaryCoordinator) Resume(ctx context.Context, owner, agent, id st
 			}
 			next = recovered
 		} else {
-			text, e := c.Deps.Records.ReadUnitSummaryFollowup(ctx, a.SessionID, req.FollowupMessageID)
+			text, metadata, e := c.Deps.Records.ReadUnitSummaryFollowupContext(ctx, a.SessionID, req.FollowupMessageID)
 			if e != nil {
 				return UnitSummaryView{}, false, e
 			}
 			var original UnitSummaryRequest
 			if e = json.Unmarshal([]byte(a.RequestJSON), &original); e != nil {
 				return UnitSummaryView{}, false, e
+			}
+			rawActive := strings.TrimSpace(string(metadata["k12_active_material"]))
+			var serializedActive string
+			// 持久层保存规范对象，历史字符串引用仍沿同一schema解释。
+			if rawActive != "" && json.Unmarshal([]byte(rawActive), &serializedActive) == nil {
+				rawActive = strings.TrimSpace(serializedActive)
+			}
+			if rawActive != "" && rawActive != "null" {
+				var active struct {
+					Version    int    `json:"version"`
+					DocumentID string `json:"document_id"`
+					RevisionID string `json:"revision_id"`
+				}
+				if json.Unmarshal([]byte(rawActive), &active) != nil || active.Version != 1 || active.DocumentID == "" || active.RevisionID == "" {
+					return UnitSummaryView{}, false, fmt.Errorf("%w: invalid active material reference", ErrInvalidInput)
+				}
+				if original.ActiveRevisionID != "" && original.ActiveRevisionID != active.RevisionID {
+					return UnitSummaryView{}, false, k12storage.ErrUnitSummaryConflict
+				}
+				if _, e := c.Deps.Records.GetUnitSummaryRevision(ctx, a.OwnerID, a.AgentName, active.DocumentID, active.RevisionID); e != nil {
+					return UnitSummaryView{}, false, e
+				}
+				// 精确归属核对后补齐原空引用，后续仍只恢复同一不可变版本。
+				if original.ActiveRevisionID == "" {
+					original.ActiveRevisionID = active.RevisionID
+				}
 			}
 			original.FinalUserText = a.FinalUserText + "\n\n" + text
 			raw, _ := json.Marshal(original)
@@ -614,6 +640,22 @@ func (c *UnitSummaryCoordinator) invoke(ctx context.Context, a k12.UnitSummaryAt
 }
 
 func (c *UnitSummaryCoordinator) process(ctx context.Context, requested k12.UnitSummaryAttempt) error {
+	current, err := c.Deps.Records.GetUnitSummaryAttempt(ctx, requested.OwnerID, requested.AgentName, requested.AttemptID)
+	if err != nil {
+		return err
+	}
+	if current.State == "reconciling" && current.InvocationRef != "" {
+		invocation, err := c.Deps.Records.GetUnitSummaryModelInvocation(ctx, current.AgentName, current.InvocationRef)
+		if err != nil {
+			return err
+		}
+		// 未知调用没有新结果时保持原检查点；领取租约本身也会增加版本。
+		if invocation.JobID == current.AttemptID &&
+			(invocation.Status == k12.ModelInvocationSent || invocation.Status == k12.ModelInvocationOutcomeUnknown) &&
+			strings.TrimSpace(invocation.ResultJSON) == "" {
+			return nil
+		}
+	}
 	a, claimed, err := c.Deps.Records.ClaimUnitSummaryAttempt(ctx, requested.OwnerID, requested.AgentName, requested.AttemptID, c.workerID, c.Deps.now()+900)
 	if err != nil || !claimed {
 		return err

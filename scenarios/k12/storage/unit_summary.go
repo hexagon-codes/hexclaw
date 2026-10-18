@@ -475,6 +475,29 @@ func (s *Store) ReadUnitSummaryFollowup(ctx context.Context, session, messageID 
 	return text, err
 }
 
+// ReadUnitSummaryFollowupContext 只读同会话用户补答的正文和元数据，原正文读取契约保持。
+func (s *Store) ReadUnitSummaryFollowupContext(ctx context.Context, session, messageID string) (string, map[string]json.RawMessage, error) {
+	var text, raw, attachments string
+	err := s.db.QueryRowContext(ctx, `SELECT content,COALESCE(metadata,'{}'),COALESCE(attachments,'') FROM messages WHERE id=? AND session_id=? AND role='user'`, messageID, session).Scan(&text, &raw, &attachments)
+	if errors.Is(err, sql.ErrNoRows) {
+		err = records.ErrNotFound
+	}
+	if err != nil {
+		return "", nil, err
+	}
+	// 与公开消息读取一致，独立富内容信封优先，旧消息沿用metadata列。
+	if attachments != "" && attachments != "{}" {
+		raw = attachments
+	}
+	var metadata map[string]json.RawMessage
+	if strings.TrimSpace(raw) != "" {
+		if err := json.Unmarshal([]byte(raw), &metadata); err != nil {
+			return "", nil, err
+		}
+	}
+	return text, metadata, nil
+}
+
 func (s *Store) ReplayUnitSummaryResume(ctx context.Context, owner, agent, id, key, digest string) (bool, error) {
 	var stored string
 	err := s.db.QueryRowContext(ctx, `SELECT c.request_digest FROM k12_unit_summary_resume_commands c JOIN k12_unit_summary_attempts a ON a.attempt_id=c.attempt_id WHERE a.owner_id=? AND a.agent_name=? AND a.attempt_id=? AND c.command_key=?`, owner, agent, id, key).Scan(&stored)
