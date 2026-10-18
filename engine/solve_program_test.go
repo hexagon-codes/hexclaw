@@ -214,6 +214,30 @@ func TestSolveProgramComputesSupportedMathWithoutModel(t *testing.T) {
 	}
 }
 
+func TestSolveProgramFractionQuantitiesExecuteWithoutModelAndRespectGrade(t *testing.T) {
+	for _, tc := range []struct{ problem, answer string }{
+		{"一根彩带长 3/2 米，每段剪成 3/10 米，可以剪成多少段？", "5段"},
+		{"食堂有60千克大米，用去了总量的 2/5，还剩多少千克？", "36千克"},
+		{`一根绳子长 \(\frac{7}{3}\) 米，每段剪成 \(\frac{1}{3}\) 米，可以剪成多少段？`, "7段"},
+		{`仓库有84公斤面粉，用掉了总量的 \(\frac{3}{7}\)，还剩多少千克？`, "48千克"},
+	} {
+		t.Run(tc.problem, func(t *testing.T) {
+			runner := &mathProgramTestSkill{}
+			solve, calls := programTestSolve(t, runner)
+			result, err := solve.Execute(t.Context(), map[string]any{"problem": tc.problem, "grade": "六年级上", "constraint": "分数乘法、分数除法", "self_consistency": 1})
+			if err != nil || result == nil || *calls != 0 || runner.calls != 1 || result.Metadata["solve_computed"] != tc.answer || result.Metadata["solve_verification_run_id"] == "" || result.Metadata["solve_evidence"] != "numeric_exec" {
+				t.Fatalf("fraction quantity did not execute once: result=%+v err=%v model=%d program=%d", result, err, *calls, runner.calls)
+			}
+			runner = &mathProgramTestSkill{}
+			solve, calls = programTestSolve(t, runner)
+			result, err = solve.Execute(t.Context(), map[string]any{"problem": tc.problem, "grade": "三年级上", "constraint": "整数加法、整数乘法"})
+			if err != nil || result == nil || result.Metadata["solve_verdict"] != "out_of_scope" || *calls != 0 || runner.calls != 0 {
+				t.Fatalf("lower-grade constraint changed: result=%+v err=%v model=%d program=%d", result, err, *calls, runner.calls)
+			}
+		})
+	}
+}
+
 func TestSolveProgramPreservesSourceAndCurriculum(t *testing.T) {
 	runner := &mathProgramTestSkill{}
 	solve, calls := programTestSolve(t, runner)

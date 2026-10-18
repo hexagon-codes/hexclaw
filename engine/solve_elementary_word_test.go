@@ -45,6 +45,92 @@ func TestSolveElementaryWordProblem(t *testing.T) {
 	}
 }
 
+func TestSolveFractionQuantityProblemsPreserveCompleteSource(t *testing.T) {
+	for _, tc := range []struct{ problem, answer, unit string }{
+		{"一根彩带长 3/2 米，每段剪成 3/10 米，可以剪成多少段？", "5", "段"},
+		{"食堂有60千克大米，用去了总量的 2/5，还剩多少千克？", "36", "千克"},
+		{`一根彩带长 \(\frac{3}{2}\) 米，每段剪成 \(\frac{3}{10}\) 米，可以剪成多少段？`, "5", "段"},
+		{`食堂有60千克大米，用去了总量的 \(\frac{2}{5}\)，还剩多少千克？`, "36", "千克"},
+		{"一条丝带长2.4米，每段长0.4米，可以分成多少段？", "6", "段"},
+		{"一根木条长70厘米，每段剪成10厘米，能剪成多少段？", "7", "段"},
+		{"仓库有84公斤面粉，用掉了总量的3/7，还剩多少千克？", "48", "千克"},
+		{"工厂有15/2千克原料，用去了总量的1/3，剩下多少千克？", "5", "千克"},
+	} {
+		t.Run(tc.problem, func(t *testing.T) {
+			solution, ok := solveElementaryWordProblemDetailed(tc.problem)
+			if !ok || solution.value != tc.answer || solution.unit != tc.unit || solution.program == "" {
+				t.Fatalf("quantity solution=%+v ok=%v want=%s%s", solution, ok, tc.answer, tc.unit)
+			}
+			plan, ok := compileSolveProgram(tc.problem, "分数乘法、分数除法")
+			if !ok || plan.Problem != tc.problem || plan.Answer != tc.answer+tc.unit {
+				t.Fatalf("source or compiled result changed: plan=%+v ok=%v", plan, ok)
+			}
+		})
+	}
+	for _, problem := range []string{
+		"一根彩带长3/2米，每段剪成3/10厘米，可以剪成多少段？",
+		"一根彩带长3/2米，每段剪成2/5米，可以剪成多少段？",
+		"一根彩带长3/2米，每段剪成0米，可以剪成多少段？",
+		"一根彩带长3/0米，每段剪成3/10米，可以剪成多少段？",
+		"一根彩带长2 3/4米，每段剪成1/4米，可以剪成多少段？",
+		"一根彩带长3/2米，每段剪成3/10米，每剪一刀损耗1厘米，可以剪成多少段？",
+		"一根彩带长3/2米，每段剪成3/10米，可以剪成多少段？剩余多少米？",
+		"一根彩带长3/2米，每段剪成3/10米，最多可以剪成多少段？",
+		"两根彩带长3/2米，每段剪成3/10米，可以剪成多少段？",
+		"食堂有60千克大米，用去了总量的2/5，还剩多少克？",
+		"食堂有6\n0千克大米，用去了总量的2/5，还剩多少千克？",
+		"食堂有60千克大米，用去了总量的6/5，还剩多少千克？",
+		"食堂有60千克大米，用去了总量的2/0，还剩多少千克？",
+		"食堂有60千克大米，用去了总量的-2/5，还剩多少千克？",
+		"食堂有60千克大米，用去了总量的2/5，又运来3千克，还剩多少千克？",
+		"食堂有60千克大米，用去了总量的2/5，还剩多少千克？请再加3千克。",
+		"如果食堂有60千克大米，用去了总量的2/5，还剩多少千克？",
+	} {
+		if solution, ok := solveElementaryWordProblemDetailed(problem); ok {
+			t.Fatalf("incomplete or ambiguous quantity source accepted: %q -> %+v", problem, solution)
+		}
+		if _, ok := compileSolveProgram(problem, "分数乘法、分数除法"); ok {
+			t.Fatalf("ambiguous source compiled a program: %q", problem)
+		}
+	}
+}
+
+func TestGradeFractionQuantityProblemsKeepsWorkAndUnits(t *testing.T) {
+	const segment = "一根彩带长 3/2 米，每段剪成 3/10 米，可以剪成多少段？"
+	const remaining = "食堂有60千克大米，用去了总量的 2/5，还剩多少千克？"
+	for _, tc := range []struct {
+		problem, verified, student string
+		correct, final             string
+		fallback                   bool
+	}{
+		{segment, "答案：5段", "(3/2)÷(3/10)=5段\n答：5段", "true", "true", false},
+		{segment, "答案：5段", "3/2÷(3/10)=5（段）\n答：5段。", "true", "true", false},
+		{segment, "答案：5段", "(3/2)×(10/3)=5段\n答：5段", "true", "true", false},
+		{segment, "答案：5段", "(3/2)÷(3/10)=4段\n答：5段", "false", "true", false},
+		{segment, "答案：5段", "答：5米", "false", "false", false},
+		{segment, "答案：5段", "10-5=5段\n答：5段", "false", "true", true},
+		{remaining, "答案：36千克", "60×(1-2/5)=36千克\n答：36千克", "true", "true", false},
+		{remaining, "答案：36千克", "60-60×(2/5)=36千克\n答：36千克", "true", "true", false},
+		{remaining, "答案：36千克", "60×(2/5)=24千克\n60-24=36千克\n答：36千克", "true", "true", false},
+		{remaining, "答案：36千克", "60×(3/5)=36千克\n答：36千克", "true", "true", false},
+		{remaining, "答案：36千克", "60×(1-2/5)=30千克\n答：36千克", "false", "true", false},
+		{remaining, "答案：36千克", "60×(2/5)=24米\n60-24=36千克\n答：36千克", "false", "true", true},
+		{remaining, "答案：36千克", "40-4=36千克\n答：36千克", "false", "true", true},
+	} {
+		t.Run(tc.student, func(t *testing.T) {
+			executor := &solveExec{graderOut: "CORRECT: no\nFINAL_ANSWER_CORRECT: yes\nWRONG_STEP: 需独立判断完整过程\nMISCONCEPTION: 不能仅按尾值判断"}
+			result, err := NewSolveSkill(executor.fn, nil).GradeVerified(t.Context(), tc.problem, tc.verified, tc.student)
+			calls := 0
+			if tc.fallback {
+				calls = 1
+			}
+			if err != nil || result == nil || executor.graderCalls() != calls || result.Metadata["grade_correct"] != tc.correct || result.Metadata["grade_final_answer_correct"] != tc.final {
+				t.Fatalf("quantity grading result=%+v err=%v agents=%v", result, err, executor.agents())
+			}
+		})
+	}
+}
+
 func TestSolveElementaryWordProblemSixNumberBalanceLegacy(t *testing.T) {
 	for _, problem := range []string{
 		"在下列六个数：5、6、12、14、23、29中划去一个数（ ）后，能使其中3个数的和为另外2个数和的2倍。",

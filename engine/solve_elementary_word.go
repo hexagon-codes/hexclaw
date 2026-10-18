@@ -13,6 +13,7 @@ import (
 )
 
 const elementaryNumberPattern = `([0-9]+(?:\.[0-9]+)?)`
+const elementaryQuantityNumberPattern = `[0-9]+(?:\.[0-9]+|/[0-9]+)?`
 
 // 带分数必须在普通分数之前匹配，保留整数与分数之间的分隔。
 const answerQuantityNumberPattern = `([+\-]?(?:[0-9]+(?:[ \t]+|又)[0-9]+[ \t]*/[ \t]*[0-9]+|[0-9]+(?:\.[0-9]+)?(?:/[0-9]+)?))`
@@ -25,16 +26,19 @@ var (
 	rectangleYieldRe                  = regexp.MustCompile(`^(?:[0-9]+[.．、])?(?:一个)?周长(?:是|为)?` + elementaryNumberPattern + `米的长方形(?:鱼塘)?[，,。.]?长是宽的` + elementaryNumberPattern + `倍[，,。.]?(?:如果)?每平方米(?:鱼塘)?(?:可)?产鱼` + elementaryNumberPattern + `千克[，,。.]?(?:一共|总共)(?:可|能)?产鱼多少千克[?？。.]?$`)
 	openCubeFishTankRe                = regexp.MustCompile(`^(?:小明的爸爸)?用玻璃做了一个棱长(?:是|为)?` + elementaryNumberPattern + `(?:dm|分米)的正方体鱼缸[。.]制作(?:这个|该)鱼缸时[，,]?至少需要玻璃多少平方米[?？](?:小明)?在鱼缸里注入` + elementaryNumberPattern + `(?:L|l|升)的水[，,]?水面高度(?:是|为)?多少分米[?？。.]?$`)
 	ticketGCDLCMRe                    = regexp.MustCompile(`^(?:小明)?有(?:一)?张([0-9]+)至([0-9]+)排的电影票[，,]这张票的排数和座位号的最大公约数是([0-9]+)[，,]最小公倍数是([0-9]+)[，,。.](?:小明)?这张电影票是[（(][）)]排[（(][）)]号[。.]?$`)
+	lengthSegmentCountRe              = regexp.MustCompile(`^(?:[0-9]+[.．、])?(?:一|1)(?:根|条|段)(?P<item>[\p{Han}]+?)长(?:是|为)?(?P<total>` + elementaryQuantityNumberPattern + `)(?P<unit>毫米|厘米|分米|米)[，,](?:每段剪成|每段长(?:是|为)?)(?P<each>` + elementaryQuantityNumberPattern + `)(?P<each_unit>毫米|厘米|分米|米)[，,](?:可以|能)?(?:剪成|分成)多少段[?？。.]?$`)
+	remainingFractionQuantityRe       = regexp.MustCompile(`^(?:[0-9]+[.．、])?(?P<context>[\p{Han}]+?)有(?P<total>` + elementaryQuantityNumberPattern + `)(?P<unit>千克|公斤|kg|克|g|米|m)(?:的)?(?P<item>[\p{Han}]+?)[，,](?:用去|用掉)(?:了)?总量的(?P<numerator>[0-9]+)/(?P<denominator>[0-9]+)[，,](?:还)?剩(?:下)?多少(?P<target_unit>千克|公斤|kg|克|g|米|m)[?？。.]?$`)
 
 	// 完整单位用量与唯一总量问法；印刷示范、额外条件和另一问均不能被后缀忽略。
 	elementaryQuantityPerItemRe = regexp.MustCompile(`^(?:\*\*做一做\*\*|做一做)?(?:(?P<actor>[\p{Han}]+?)用(?P<material>[\p{Han}]+?)做(?:(?P<product>[\p{Han}]+?)[，,])?)?(?:做)?(?:一|1|每)(?P<measure>个|件|袋|朵|份|瓶|盒|包|块)(?P<item>[\p{Han}]+?)(?P<verb>需要用|需用|需要|用|重)(?P<numerator>[0-9]+)/(?P<denominator>[0-9]+)(?P<unit>张纸|张|千克|公斤|kg|克|g)[，,。.]?(?:\((?P<label>[0-9]+)\))?(?:做)?(?P<count>[0-9]+)(?P<target_measure>个|件|袋|朵|份|瓶|盒|包|块)(?P<target_item>[\p{Han}]+?)?(?P<target_verb>需要用|需用|需要|用|重)多少(?P<target_unit>张纸|张|千克|公斤|kg|克|g)[?？。.]?(?:□[×*]□=□(?:\((?P<template_unit>张纸|张|千克|公斤|kg|克|g)\))?)?$`)
 	elementaryQuantityAtomRe    = regexp.MustCompile(`\(([0-9]+/[0-9]+)\)`)
 	elementaryQuantityUnitRe    = regexp.MustCompile(`\\mathrm\{(kg|g)\}`)
 	elementaryQuantityScopeRe   = regexp.MustCompile(`^(?:([1-9][0-9]*)|\(([1-9][0-9]*)\)|（([1-9][0-9]*)）)$`)
+	elementarySeparatedNumberRe = regexp.MustCompile(`[0-9.][\s\p{Zs}]+[0-9.]`)
 
 	finalQuantityMarkerRe = regexp.MustCompile(`(?i)(?:答案?|答)\s*(?:是|为)?\s*[:：]?\s*` + answerQuantityNumberPattern + `\s*(平方米|千克|公斤|张纸|张|本|段|人|m²|m2|kg|克|米|g|m)?`)
 	removedNumberMarkerRe = regexp.MustCompile(`划去(?:数)?\s*[:：]?\s*([+\-]?[0-9]+)`)
-	bareQuantityRe        = regexp.MustCompile(`(?i)^\s*` + answerQuantityNumberPattern + `\s*(平方厘米|cm²|cm\^?2|平方米|千克|公斤|张纸|张|本|段|人|m²|m2|kg|克|米|g|m)?\s*$`)
+	bareQuantityRe        = regexp.MustCompile(`(?i)^\s*` + answerQuantityNumberPattern + `\s*(平方厘米|cm²|cm\^?2|平方米|千克|公斤|千米|公里|张纸|张|本|段|人|份|m²|m2|kg|km|克|米|g|m)?\s*$`)
 	bareAnswerRatioRe     = regexp.MustCompile(`^\s*` + answerQuantityNumberPattern + `\s*[:：∶]\s*` + answerQuantityNumberPattern + `\s*$`)
 	finalNamedCountRe     = regexp.MustCompile(`^([\p{Han}]+)(?:有|是|为)\s*` + answerQuantityNumberPattern + `\s*(本|段|人)$`)
 	finalLabeledCountsRe  = regexp.MustCompile(`^\s*([\p{Han}]+)\s*` + answerQuantityNumberPattern + `\s*(本|段|人)\s*[,，;；、]\s*([\p{Han}]+)\s*` + answerQuantityNumberPattern + `\s*(本|段|人)\s*$`)
@@ -44,12 +48,13 @@ var (
 )
 
 type elementaryWordSolution struct {
-	worked         string
-	value          string
-	unit           string
-	knowledgePoint string
-	problemIssue   string
-	program        string
+	worked          string
+	value           string
+	unit            string
+	knowledgePoint  string
+	problemIssue    string
+	program         string
+	workExpressions [][]string
 }
 
 type answerQuantity struct {
@@ -68,6 +73,9 @@ func solveElementaryWordProblem(problem string) (worked, answer string, ok bool)
 }
 
 func solveElementaryWordProblemDetailed(problem string) (elementaryWordSolution, bool) {
+	if solution, ok := solveFractionQuantityProblem(problem); ok {
+		return solution, true
+	}
 	problem = compactElementaryProblem(problem)
 	if solution, ok := solveTotalFractionCountProblem(problem); ok {
 		return solution, true
@@ -228,6 +236,143 @@ func solveElementaryWordProblemDetailed(problem string) (elementaryWordSolution,
 	}
 
 	return elementaryWordSolution{}, false
+}
+
+// 两种完整数量关系只规范化计算副本，整段数与分率边界不由舍入或补充条件决定。
+func solveFractionQuantityProblem(problem string) (elementaryWordSolution, bool) {
+	p := normalizeFractionQuantityProblem(problem)
+	if m := lengthSegmentCountRe.FindStringSubmatch(p); m != nil {
+		field := func(name string) string { return m[lengthSegmentCountRe.SubexpIndex(name)] }
+		if !affirmativeCountLabel(field("item")) || field("unit") != field("each_unit") {
+			return elementaryWordSolution{}, false
+		}
+		total, totalOK := positiveRat(field("total"))
+		each, eachOK := positiveRat(field("each"))
+		if !totalOK || !eachOK {
+			return elementaryWordSolution{}, false
+		}
+		count := new(big.Rat).Quo(total, each)
+		if !count.IsInt() {
+			return elementaryWordSolution{}, false
+		}
+		answer := formatArithmeticRat(count)
+		expression := "(" + field("total") + ")/(" + field("each") + ")"
+		reciprocal := new(big.Rat).Inv(each).RatString()
+		worked := fmt.Sprintf("求总长度中有多少个每段长度，用总长度除以每段长度。\n(%s)÷(%s) = %s 段\n\n答案：%s 段", field("total"), field("each"), answer, answer)
+		return elementaryWordSolution{worked: worked, value: answer, unit: "段", knowledgePoint: "分数除法", program: wordProgram([]string{expression}, []string{"段"}), workExpressions: [][]string{{expression}, {"(" + field("total") + ")*(" + reciprocal + ")"}}}, true
+	}
+	if m := remainingFractionQuantityRe.FindStringSubmatch(p); m != nil {
+		field := func(name string) string { return m[remainingFractionQuantityRe.SubexpIndex(name)] }
+		unit := normalizeAnswerUnit(field("unit"))
+		if !affirmativeCountLabel(field("context")) || !affirmativeCountLabel(field("item")) || unit == "" || unit != normalizeAnswerUnit(field("target_unit")) {
+			return elementaryWordSolution{}, false
+		}
+		total, totalOK := nonNegativeRat(field("total"))
+		numerator, numeratorOK := nonNegativeRat(field("numerator"))
+		denominator, denominatorOK := positiveRat(field("denominator"))
+		if !totalOK || !numeratorOK || !denominatorOK || numerator.Cmp(denominator) > 0 {
+			return elementaryWordSolution{}, false
+		}
+		fraction := new(big.Rat).Quo(numerator, denominator)
+		remaining := new(big.Rat).Sub(big.NewRat(1, 1), fraction)
+		value := new(big.Rat).Mul(total, remaining)
+		answer := formatArithmeticRat(value)
+		t, f := "("+field("total")+")", "("+field("numerator")+"/"+field("denominator")+")"
+		expression := t + "*(1-" + f + ")"
+		used := formatArithmeticRat(new(big.Rat).Mul(total, fraction))
+		worked := fmt.Sprintf("把总量看作 1，用去了 %s/%s，剩下的分率是 1−%s/%s。\n%s×(1−%s/%s) = %s %s\n\n答案：%s %s", field("numerator"), field("denominator"), field("numerator"), field("denominator"), field("total"), field("numerator"), field("denominator"), answer, unit, answer, unit)
+		return elementaryWordSolution{worked: worked, value: answer, unit: unit, knowledgePoint: "分数乘法", program: wordProgram([]string{expression}, []string{unit}), workExpressions: [][]string{{expression}, {t + "-" + t + "*" + f}, {t + "*(" + remaining.RatString() + ")"}, {t + "*" + f, t + "-(" + used + ")"}}}, true
+	}
+	return elementaryWordSolution{}, false
+}
+
+func normalizeFractionQuantityProblem(problem string) string {
+	p := normalizeArithmeticAnswerMarkup(elementaryQuantityUnitRe.ReplaceAllString(problem, "$1"))
+	p = strings.NewReplacer(`\(`, "", `\)`, "", `\[`, "", `\]`, "", `\,`, " ", `\;`, " ", "（", "(", "）", ")").Replace(p)
+	// 分隔的数字不是同一个数；带分数已由既有投影保留为加法，不能拼接成普通分数。
+	if elementarySeparatedNumberRe.MatchString(p) {
+		return ""
+	}
+	return elementaryQuantityAtomRe.ReplaceAllString(compactElementaryProblem(p), "$1")
+}
+
+// 有步骤的作答须保留题目的数量关系，不能用任意数值成立的等式替代。
+func elementaryWordWorkComparable(solution elementaryWordSolution, answer string) bool {
+	if len(solution.workExpressions) == 0 {
+		return true
+	}
+	key := func(expression string) string {
+		normalized, _, ok := normalizeTrivialArithmetic(expression)
+		if !ok {
+			return ""
+		}
+		node, err := parser.ParseExpr(normalized)
+		if err != nil {
+			return ""
+		}
+		var expressionKey func(ast.Expr) string
+		expressionKey = func(expr ast.Expr) string {
+			switch n := expr.(type) {
+			case *ast.ParenExpr:
+				return expressionKey(n.X)
+			case *ast.BasicLit:
+				if value, ok := nonNegativeRat(n.Value); ok {
+					return value.RatString()
+				}
+			case *ast.BinaryExpr:
+				left, right := expressionKey(n.X), expressionKey(n.Y)
+				if left != "" && right != "" {
+					return "(" + left + n.Op.String() + right + ")"
+				}
+			}
+			return ""
+		}
+		return expressionKey(node)
+	}
+	var expressions []string
+	finalLines := 0
+	for _, line := range strings.FieldsFunc(strings.ReplaceAll(answer, "＝", "="), func(r rune) bool { return r == '\n' || r == ';' || r == '；' || r == '，' }) {
+		line = strings.Trim(strings.TrimSpace(line), "。.；;，,、 ")
+		if !strings.Contains(line, "=") {
+			marker := finalQuantityMarkerRe.FindStringIndex(line)
+			if !bareQuantityRe.MatchString(line) && (marker == nil || marker[0] != 0 || marker[1] != len(line)) {
+				return false
+			}
+			finalLines++
+			if finalLines > 1 {
+				return false
+			}
+			continue
+		}
+		if strings.Count(line, "=") != 1 {
+			return false
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if suffix := equationUnitSuffixRe.FindString(strings.TrimSpace(parts[1])); suffix != "" && normalizeAnswerUnit(strings.Trim(suffix, "（）() \t")) != solution.unit {
+			return false
+		}
+		lhs := key(parts[0])
+		if lhs == "" {
+			return false
+		}
+		expressions = append(expressions, lhs)
+	}
+	if len(expressions) == 0 {
+		return true
+	}
+	for _, expected := range solution.workExpressions {
+		if len(expected) != len(expressions) {
+			continue
+		}
+		match := true
+		for i := range expected {
+			match = match && key(expected[i]) == expressions[i]
+		}
+		if match {
+			return true
+		}
+	}
+	return false
 }
 
 // 求部分数量必须由完整总数和分率确定，且问句的对象、计数单位与条件一致。
@@ -452,6 +597,12 @@ func elementaryWordAllowedByConstraint(problem, constraint string) bool {
 	if c == "" {
 		return true
 	}
+	if lengthSegmentCountRe.MatchString(normalizeFractionQuantityProblem(problem)) {
+		return strings.Contains(c, "分数除法")
+	}
+	if remainingFractionQuantityRe.MatchString(normalizeFractionQuantityProblem(problem)) {
+		return strings.Contains(c, "分数乘法") || strings.Contains(c, "分数乘整数")
+	}
 	if inverseFractionProblemRe.MatchString(p) || successiveFractionRe.MatchString(p) {
 		return strings.Contains(c, "分数")
 	}
@@ -547,9 +698,11 @@ func normalizeAnswerUnit(unit string) string {
 		return "平方米"
 	case "米", "m":
 		return "米"
+	case "千米", "公里", "km":
+		return "千米"
 	case "张纸", "张":
 		return unit
-	case "本", "段", "人":
+	case "本", "段", "人", "份":
 		return unit
 	default:
 		return ""
