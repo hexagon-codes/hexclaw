@@ -308,6 +308,20 @@ func (h *handler) sendCreativeWork(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	message := usecase.DeliveryMessage{Content: content}
+	if objectID, identityErr := usecase.CreativeFinalReplyObjectID(view, "send_to_phone"); identityErr == nil {
+		if frozen, lookupErr := h.rt.Deps.GetDeliveryBatchForObject(r.Context(), req.Agent, "creative_work", objectID); lookupErr == nil {
+			batch, queryErr := h.rt.Deps.QueryDeliveryBatch(r.Context(), req.Agent, frozen.BatchID)
+			if queryErr != nil {
+				writeDeliveryError(w, queryErr)
+				return
+			}
+			writeJSON(w, http.StatusOK, batch)
+			return
+		} else if !errors.Is(lookupErr, records.ErrNotFound) {
+			writeDeliveryError(w, lookupErr)
+			return
+		}
+	}
 	if sourceAssetID != "" {
 		identity, hasIdentity := creativeWorkAttachmentIdentity(req.Agent, dto)
 		replayExisting := func() (k12.DeliveryBatch, bool, error) {
@@ -375,9 +389,7 @@ func (h *handler) sendCreativeWork(w http.ResponseWriter, r *http.Request) {
 		}}
 	}
 	deliveryCtx := h.rt.Deps.WithCreativeWorkDeliveryDisclosure(r.Context(), view, content)
-	batch, _, err := h.rt.Deps.PrepareAndSendMessageBatch(
-		deliveryCtx, req.Agent, "creative_work", workID, message,
-	)
+	batch, _, err := h.rt.Deps.PrepareAndSendCreativeFinalReply(deliveryCtx, view, message, nil, "")
 	if err != nil {
 		writeDeliveryError(w, err)
 		return

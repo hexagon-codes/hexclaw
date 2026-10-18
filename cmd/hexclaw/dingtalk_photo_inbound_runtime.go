@@ -1430,10 +1430,13 @@ func (r *k12DingtalkPhotoInboundRuntime) advanceCreativeFinalReply(
 	var deliverErr error
 	if errors.Is(lookupErr, records.ErrNotFound) {
 		deliveryCtx := k12usecase.WithCreativeWorkResultDeliveryDisclosure(ctx, *result.CreativeWork, result, content)
-		batch, _, deliverErr = r.replyBatches.PrepareAndSendMessageBatchForTargets(
-			deliveryCtx, bundle.Receipt.AgentName, "creative_work", result.CreativeWork.Record.RecordID,
-			message, []k12usecase.ResolvedDeliveryTarget{target},
-		)
+		if finalReplies, ok := r.replyBatches.(interface {
+			PrepareAndSendCreativeFinalReply(context.Context, k12usecase.CreativeWorkView, k12usecase.DeliveryMessage, []k12usecase.ResolvedDeliveryTarget, string) (k12.DeliveryBatch, bool, error)
+		}); ok {
+			batch, _, deliverErr = finalReplies.PrepareAndSendCreativeFinalReply(deliveryCtx, *result.CreativeWork, message, []k12usecase.ResolvedDeliveryTarget{target}, result.Dispatch.OperationRouteRequest.MessageLocale)
+		} else {
+			batch, _, deliverErr = r.replyBatches.PrepareAndSendMessageBatchForTargets(deliveryCtx, bundle.Receipt.AgentName, "creative_work", result.CreativeWork.Record.RecordID, message, []k12usecase.ResolvedDeliveryTarget{target})
+		}
 	}
 	if strings.TrimSpace(batch.BatchID) == "" {
 		return false, errors.Join(deliverErr, fmt.Errorf("DingTalk creative reply returned no durable batch identity"))
@@ -1441,6 +1444,15 @@ func (r *k12DingtalkPhotoInboundRuntime) advanceCreativeFinalReply(
 	if legacyBatch {
 		if err := validateK12DingtalkPhotoReplyBatch(batch, target, bundle.Asset.MIME); err != nil {
 			return false, errors.Join(deliverErr, err)
+		}
+	} else if strings.HasSuffix(batch.ObjectID, ":"+k12.DeliveryProjectionVersionIMFinalPDFV1) {
+		if err := k12.ValidateDeliveryProjectionTarget(batch, batch.Receipts); err != nil {
+			return false, errors.Join(deliverErr, err)
+		}
+		for _, receipt := range batch.Receipts {
+			if receipt.BindingID != target.BindingID || receipt.Target != target.Target {
+				return false, errors.New("creative final reply target mismatch")
+			}
 		}
 	} else if len(batch.Receipts) != 1 || batch.Receipts[0].PartKind != messagecontent.PartMarkdown ||
 		batch.Receipts[0].PartOrdinal != 1 || strings.TrimSpace(batch.Receipts[0].DeliveryID) == "" ||

@@ -15,6 +15,7 @@ import (
 
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/adapter/dingtalk"
+	"github.com/hexagon-codes/hexclaw/messagecontent"
 	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/render"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
@@ -180,6 +181,20 @@ func (d Deps) PrepareAndSendK12FinalReplyBatch(ctx context.Context, agentName, o
 	}
 	if lookupErr == nil {
 		frozenTargets := deliveryBatchResolvedTargets(existing)
+		if strings.HasSuffix(existing.ObjectID, ":"+k12.DeliveryProjectionVersionIMFinalPDFV1) {
+			var payload struct {
+				Source *k12.DeliveryProjectionSource `json:"delivery_source"`
+			}
+			if json.Unmarshal([]byte(existing.Receipts[0].PayloadJSON), &payload) != nil || payload.Source == nil {
+				return existing, false, errors.New("final reply frozen source is missing")
+			}
+			full.Source = payload.Source
+			if payload.Source.DingTalkSuffix != "" {
+				projected := full
+				projected.Content += "\n\n" + payload.Source.DingTalkSuffix
+				full.Projections = map[string]DeliveryMessage{"dingtalk": projected}
+			}
+		}
 		return d.sendK12FinalReplyFallback(ctx, existing, full, frozenTargets)
 	}
 	if targets == nil {
@@ -191,6 +206,34 @@ func (d Deps) PrepareAndSendK12FinalReplyBatch(ctx context.Context, agentName, o
 		if err != nil {
 			return k12.DeliveryBatch{}, false, err
 		}
+	}
+	locale, localeErr := d.finalReplyFrozenLocale(ctx, artifact)
+	if localeErr != nil {
+		return k12.DeliveryBatch{}, false, localeErr
+	}
+	if locale != "" {
+		disclosure, err := d.finalReplyExecutionSummary(ctx, artifact)
+		if err != nil {
+			return k12.DeliveryBatch{}, false, err
+		}
+		req := FinalReplyDeliveryRequest{AgentName: agentName, ObjectKind: objectKind, ObjectID: objectID, SourceKind: k12.PrintSourceGradingFinalArtifact, SourceRef: artifact.ArtifactID + ":" + artifact.ArtifactDigest, Title: K12FinalArtifactPDFTitle(artifact), Message: full, Producer: messagecontent.ProducerK12, Locale: locale, Document: intent == k12.ImageTaskIntentBlankWorksheet && artifact.TotalCount > 1, Summary: k12FinalReplySummary(artifact), DingTalkSuffix: disclosure}
+		hasDing := false
+		for _, target := range targets {
+			hasDing = hasDing || target.Target.Platform == "dingtalk"
+		}
+		if hasDing && FinalReplyUsesPDF(full.Content, req.Document) {
+			pdf, _, prepareErr := d.PrepareGradingFinalArtifactPDFExact(ctx, agentName, finalID, expectedDigest, req.Title)
+			if prepareErr == nil {
+				req.PDF = &pdf
+			}
+			// 原图PDF准备已知失败时直接冻结全文，不能另用无原图的通用PDF冒充。
+			if prepareErr != nil {
+				req.Document = false
+				req.Message.Source = nil
+				return d.prepareImageFinalFullReply(ctx, req, targets)
+			}
+		}
+		return d.PrepareAndSendFinalReply(ctx, req, targets)
 	}
 	allDing := len(targets) > 0
 	for _, target := range targets {
@@ -227,6 +270,44 @@ func (d Deps) PrepareAndSendK12FinalReplyBatch(ctx context.Context, agentName, o
 		return d.sendK12FinalReplyFallback(ctx, batch, full, targets)
 	}
 	return batch, created, sendErr
+}
+
+func (d Deps) finalReplyFrozenLocale(ctx context.Context, artifact k12.GradingFinalArtifact) (string, error) {
+	job, err := d.GetGradingJob(ctx, artifact.AgentName, artifact.JobID)
+	if errors.Is(err, records.ErrNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if job.Fields.SourceKind != "image_task" {
+		return "", nil
+	}
+	id, err := gradingFinalImageTaskDispatchID(job)
+	if err != nil {
+		return "", err
+	}
+	dispatch, err := d.Records.GetImageTaskDispatch(ctx, artifact.AgentName, id)
+	if err != nil {
+		return "", err
+	}
+	return dispatch.OperationRouteRequest.MessageLocale, nil
+}
+
+// 同源图片PDF准备失败只回退完整正文和必需原图，不转成缺图文档。
+func (d Deps) prepareImageFinalFullReply(ctx context.Context, req FinalReplyDeliveryRequest, targets []ResolvedDeliveryTarget) (k12.DeliveryBatch, bool, error) {
+	full := req.Message
+	var err error
+	full.Source, err = finalReplySource(req, full)
+	if err != nil {
+		return k12.DeliveryBatch{}, false, err
+	}
+	if req.DingTalkSuffix != "" {
+		projected := full
+		projected.Content += "\n\n" + req.DingTalkSuffix
+		full.Projections = map[string]DeliveryMessage{"dingtalk": projected}
+	}
+	return d.PrepareAndSendMessageBatchForTargets(ctx, req.AgentName, req.ObjectKind, req.ObjectID+":"+k12.DeliveryProjectionVersionIMFinalPDFV1, full, targets)
 }
 
 // finalReplyExecutionSummary 只消费同一终稿的领域回执；历史缺少语言快照时保持原投影。
@@ -422,7 +503,10 @@ func finalReplyNumericReceiptMatches(invocation k12.GradingItemInvocation, evide
 func (d Deps) GetK12FinalReplyBatch(ctx context.Context, agentName, objectKind, objectID string) (k12.DeliveryBatch, error) {
 	batch, err := d.Records.GetLatestDeliveryBatchForObject(ctx, agentName, objectKind, objectID)
 	if errors.Is(err, records.ErrNotFound) {
-		return d.Records.GetLatestDeliveryBatchForObject(ctx, agentName, objectKind, objectID+":"+imageFinalPDFRenderContractVersion)
+		batch, err = d.Records.GetLatestDeliveryBatchForObject(ctx, agentName, objectKind, objectID+":"+imageFinalPDFRenderContractVersion)
+		if errors.Is(err, records.ErrNotFound) {
+			return d.Records.GetLatestDeliveryBatchForObject(ctx, agentName, objectKind, objectID+":"+k12.DeliveryProjectionVersionIMFinalPDFV1)
+		}
 	}
 	return batch, err
 }

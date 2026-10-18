@@ -102,6 +102,27 @@ func normalizeDeliveryReceipt(receipt k12.DeliveryReceipt) (k12.DeliveryReceipt,
 	if receipt.RenderJSON != "" && !json.Valid([]byte(receipt.RenderJSON)) {
 		return k12.DeliveryReceipt{}, fmt.Errorf("k12storage: DeliveryReceipt render_manifest_json 非法")
 	}
+	var projection struct {
+		Source *k12.DeliveryProjectionSource `json:"delivery_source"`
+	}
+	_ = json.Unmarshal([]byte(receipt.PayloadJSON), &projection)
+	contentDigest := ""
+	if projection.Source != nil {
+		contentDigest = projection.Source.Canonical.SourceDigest
+	}
+	proved, err := k12.ValidateDeliveryProjection(receipt.AgentName, receipt.ObjectKind, receipt.ObjectID, contentDigest, receipt.Target, receipt.BindingID, receipt.PayloadJSON)
+	if err != nil {
+		return k12.DeliveryReceipt{}, err
+	}
+	if !proved && strings.HasPrefix(receipt.BindingID, "accepted-event:") {
+		return k12.DeliveryReceipt{}, fmt.Errorf("k12storage: delivery receipt requires a binding or complete private source proof")
+	}
+	if proved && receipt.BatchID == "" {
+		batch := k12.DeliveryBatch{AgentName: receipt.AgentName, ObjectKind: receipt.ObjectKind, ObjectID: receipt.ObjectID, ContentDigest: contentDigest}
+		if err := k12.ValidateDeliveryProjectionTarget(batch, []k12.DeliveryReceipt{receipt}); err != nil {
+			return k12.DeliveryReceipt{}, err
+		}
+	}
 	if receipt.CreatedAt <= 0 {
 		receipt.CreatedAt = nowUnix()
 	}
@@ -127,6 +148,16 @@ func (s *Store) PrepareDeliveryReceipt(ctx context.Context, input k12.DeliveryRe
 	receipt, err := normalizeDeliveryReceipt(input)
 	if err != nil {
 		return k12.DeliveryReceipt{}, false, err
+	}
+	var projection struct {
+		Source *k12.DeliveryProjectionSource `json:"delivery_source"`
+	}
+	_ = json.Unmarshal([]byte(receipt.PayloadJSON), &projection)
+	if projection.Source != nil {
+		batch := k12.DeliveryBatch{BatchID: receipt.BatchID, AgentName: receipt.AgentName, ObjectKind: receipt.ObjectKind, ObjectID: receipt.ObjectID, ContentDigest: projection.Source.Canonical.SourceDigest}
+		if err := k12.ValidateDeliveryProjectionTarget(batch, []k12.DeliveryReceipt{receipt}); err != nil {
+			return k12.DeliveryReceipt{}, false, err
+		}
 	}
 	if err := ensureAgentRegistered(ctx, s.db, receipt.AgentName); err != nil {
 		return k12.DeliveryReceipt{}, false, err
@@ -266,11 +297,18 @@ func normalizeDeliveryBatch(input k12.DeliveryBatch) (k12.DeliveryBatch, error) 
 		kind messagecontent.PartKind
 		mime string
 	}
+	var projectionMode *bool
+	projectionSource := ""
+	var targetReceipts []k12.DeliveryReceipt
 	finishTarget := func() error {
 		if currentTarget == "" {
 			return nil
 		}
-		if partTemplate == nil {
+		if projectionMode != nil && *projectionMode {
+			if err := k12.ValidateDeliveryProjectionTarget(input, targetReceipts); err != nil {
+				return err
+			}
+		} else if partTemplate == nil {
 			partTemplate = append(partTemplate, currentParts...)
 		} else {
 			if len(currentParts) != len(partTemplate) {
@@ -296,6 +334,27 @@ func normalizeDeliveryBatch(input k12.DeliveryBatch) (k12.DeliveryBatch, error) 
 		if err != nil {
 			return k12.DeliveryBatch{}, fmt.Errorf("k12storage: normalize DeliveryBatch child %d: %w", i+1, err)
 		}
+		proved, err := k12.ValidateDeliveryProjection(input.AgentName, input.ObjectKind, input.ObjectID, input.ContentDigest, child.Target, child.BindingID, child.PayloadJSON)
+		if err != nil {
+			return k12.DeliveryBatch{}, err
+		}
+		if projectionMode == nil {
+			projectionMode = &proved
+		} else if *projectionMode != proved {
+			return k12.DeliveryBatch{}, fmt.Errorf("k12storage: delivery batch mixes source proof contracts")
+		}
+		if proved {
+			var payload struct {
+				Source *k12.DeliveryProjectionSource `json:"delivery_source"`
+			}
+			_ = json.Unmarshal([]byte(child.PayloadJSON), &payload)
+			raw, _ := json.Marshal(payload.Source)
+			if projectionSource == "" {
+				projectionSource = string(raw)
+			} else if projectionSource != string(raw) {
+				return k12.DeliveryBatch{}, fmt.Errorf("k12storage: delivery batch source proof differs between targets")
+			}
+		}
 		targetKey := strings.Join([]string{
 			child.Target.Platform, child.Target.InstanceID, child.Target.ChatID,
 		}, "\x00")
@@ -309,6 +368,7 @@ func normalizeDeliveryBatch(input k12.DeliveryBatch) (k12.DeliveryBatch, error) 
 			currentTarget = targetKey
 			currentBinding = child.BindingID
 			currentParts = currentParts[:0]
+			targetReceipts = nil
 		}
 		if child.BindingID != currentBinding {
 			return k12.DeliveryBatch{}, fmt.Errorf("k12storage: delivery batch target changed binding between parts")
@@ -324,6 +384,7 @@ func normalizeDeliveryBatch(input k12.DeliveryBatch) (k12.DeliveryBatch, error) 
 			kind messagecontent.PartKind
 			mime string
 		}{kind: child.PartKind, mime: child.PartMIME})
+		targetReceipts = append(targetReceipts, child)
 		normalized = append(normalized, child)
 	}
 	if err := finishTarget(); err != nil {
@@ -405,6 +466,46 @@ func (s *Store) PrepareDeliveryBatch(ctx context.Context, input k12.DeliveryBatc
 		return k12.DeliveryBatch{}, false, fmt.Errorf("k12storage: begin DeliveryBatch: %w", err)
 	}
 	defer tx.Rollback()
+	var projection struct {
+		Source *k12.DeliveryProjectionSource `json:"delivery_source"`
+	}
+	_ = json.Unmarshal([]byte(batch.Receipts[0].PayloadJSON), &projection)
+	if projection.Source != nil {
+		// 同一来源对象只冻结首份计划；先取得写锁，防止不同 PDF 字节或目标快照生成第二份计划。
+		locked, lockErr := tx.ExecContext(ctx, `UPDATE agents SET name=name WHERE name=?`, batch.AgentName)
+		if lockErr != nil {
+			return k12.DeliveryBatch{}, false, lockErr
+		}
+		if count, countErr := locked.RowsAffected(); countErr != nil || count != 1 {
+			return k12.DeliveryBatch{}, false, records.ErrNotFound
+		}
+		root, readErr := scanDeliveryBatchRoot(tx.QueryRowContext(ctx,
+			`SELECT `+deliveryBatchColumns+` FROM k12_delivery_batches
+			 WHERE agent_name=? AND object_kind=? AND object_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1`,
+			batch.AgentName, batch.ObjectKind, batch.ObjectID))
+		if readErr == nil {
+			stored, err := attachDeliveryBatchReceiptsVia(ctx, tx, root)
+			if err != nil {
+				return k12.DeliveryBatch{}, false, err
+			}
+			var previous struct {
+				Source *k12.DeliveryProjectionSource `json:"delivery_source"`
+			}
+			_ = json.Unmarshal([]byte(stored.Receipts[0].PayloadJSON), &previous)
+			currentSource, _ := json.Marshal(projection.Source)
+			previousSource, _ := json.Marshal(previous.Source)
+			if previous.Source == nil || string(currentSource) != string(previousSource) || stored.ContentDigest != batch.ContentDigest {
+				return k12.DeliveryBatch{}, false, fmt.Errorf("%w: delivery object source proof changed", ErrDeliveryBatchConflict)
+			}
+			if err := tx.Commit(); err != nil {
+				return k12.DeliveryBatch{}, false, err
+			}
+			return stored, false, nil
+		}
+		if !errors.Is(readErr, sql.ErrNoRows) {
+			return k12.DeliveryBatch{}, false, readErr
+		}
+	}
 	created, err := insertDeliveryBatchRoot(ctx, tx, batch, true)
 	if err != nil {
 		return k12.DeliveryBatch{}, false, err
@@ -495,12 +596,38 @@ const PDFPreparationUnknown = "pdf_resource_preparation_outcome_unknown"
 const pdfPreparationStarted = "pdf_resource_preparation_started"
 const ImageFinalPDFRenderContractVersion = "k12-image-pdf-v1"
 
+func deliveryPDFPreparationContract(receipt k12.DeliveryReceipt) (bool, bool) {
+	if (receipt.ObjectKind == k12.PrintSourceGradingFinalArtifact || receipt.ObjectKind == "dingtalk_photo_grading_reply") &&
+		strings.HasSuffix(receipt.ObjectID, ":"+ImageFinalPDFRenderContractVersion) {
+		return true, false
+	}
+	var payload struct {
+		Source *k12.DeliveryProjectionSource `json:"delivery_source"`
+	}
+	if json.Unmarshal([]byte(receipt.PayloadJSON), &payload) != nil || payload.Source == nil {
+		return false, false
+	}
+	proved, err := k12.ValidateDeliveryProjection(receipt.AgentName, receipt.ObjectKind, receipt.ObjectID, payload.Source.Canonical.SourceDigest, receipt.Target, receipt.BindingID, receipt.PayloadJSON)
+	return proved && err == nil, true
+}
+
 // BeginDeliveryK12MediaPreparation 在物理上传前取得一次所有权；重放只读未知态。
 func (s *Store) BeginDeliveryK12MediaPreparation(ctx context.Context, agentName, deliveryID string) (bool, error) {
+	receipt, err := s.GetDeliveryReceipt(ctx, agentName, deliveryID)
+	if err != nil {
+		return false, err
+	}
+	allowed, projection := deliveryPDFPreparationContract(receipt)
+	if !allowed {
+		return false, nil
+	}
 	res, err := s.db.ExecContext(ctx, `UPDATE k12_delivery_receipts SET status='outcome_unknown',last_error=?,updated_at=?
 		WHERE agent_name=? AND delivery_id=? AND part_kind='artifact' AND status='pending'
 		AND attempt=0 AND external_message_id='' AND prepared_resource_id=''
-		AND object_kind IN (?,?) AND object_id LIKE ?`, pdfPreparationStarted, nowUnix(), agentName, deliveryID, k12.PrintSourceGradingFinalArtifact, "dingtalk_photo_grading_reply", "%:"+ImageFinalPDFRenderContractVersion)
+		AND object_kind=? AND object_id=?
+		AND (?=0 OR NOT EXISTS (SELECT 1 FROM k12_delivery_receipts crossed
+		 WHERE crossed.agent_name=? AND crossed.batch_id=? AND (crossed.attempt<>0 OR crossed.external_message_id<>'' OR crossed.status NOT IN ('pending','failed'))))`,
+		pdfPreparationStarted, nowUnix(), agentName, deliveryID, receipt.ObjectKind, receipt.ObjectID, projection, agentName, receipt.BatchID)
 	if err != nil {
 		return false, err
 	}
@@ -514,10 +641,21 @@ func (s *Store) SaveDeliveryK12PreparedResource(ctx context.Context, agentName, 
 	if resourceID == "" {
 		return errors.New("prepared media resource ID is empty")
 	}
+	receipt, err := s.GetDeliveryReceipt(ctx, agentName, deliveryID)
+	if err != nil {
+		return err
+	}
+	allowed, projection := deliveryPDFPreparationContract(receipt)
+	if !allowed {
+		return fmt.Errorf("%w: PDF preparation source is invalid", ErrDeliveryBatchConflict)
+	}
 	res, err := s.db.ExecContext(ctx, `UPDATE k12_delivery_receipts SET prepared_resource_id=?,status='pending',last_error='',updated_at=?
 		WHERE agent_name=? AND delivery_id=? AND part_kind='artifact' AND status='outcome_unknown'
 		AND last_error=? AND attempt=0 AND external_message_id='' AND prepared_resource_id=''
-		AND object_kind IN (?,?) AND object_id LIKE ?`, resourceID, nowUnix(), agentName, deliveryID, pdfPreparationStarted, k12.PrintSourceGradingFinalArtifact, "dingtalk_photo_grading_reply", "%:"+ImageFinalPDFRenderContractVersion)
+		AND object_kind=? AND object_id=?
+		AND (?=0 OR NOT EXISTS (SELECT 1 FROM k12_delivery_receipts crossed
+		 WHERE crossed.agent_name=? AND crossed.batch_id=? AND (crossed.attempt<>0 OR crossed.external_message_id<>'')))`,
+		resourceID, nowUnix(), agentName, deliveryID, pdfPreparationStarted, receipt.ObjectKind, receipt.ObjectID, projection, agentName, receipt.BatchID)
 	if err != nil {
 		return err
 	}
@@ -529,6 +667,14 @@ func (s *Store) SaveDeliveryK12PreparedResource(ctx context.Context, agentName, 
 
 // MarkDeliveryK12PreparationFailure 不增加发送次数；资源未知不能伪造成发送已开始。
 func (s *Store) MarkDeliveryK12PreparationFailure(ctx context.Context, agentName, batchID, deliveryID string, known bool) (k12.DeliveryBatch, error) {
+	receipt, err := s.GetDeliveryReceipt(ctx, agentName, deliveryID)
+	if err != nil {
+		return k12.DeliveryBatch{}, err
+	}
+	allowed, _ := deliveryPDFPreparationContract(receipt)
+	if !allowed || receipt.BatchID != batchID {
+		return k12.DeliveryBatch{}, ErrDeliveryBatchConflict
+	}
 	detail := PDFPreparationKnownFailure
 	status := k12.DeliveryFailed
 	if !known {
@@ -538,14 +684,14 @@ func (s *Store) MarkDeliveryK12PreparationFailure(ctx context.Context, agentName
 	res, err := s.db.ExecContext(ctx, `UPDATE k12_delivery_receipts SET
 		status=CASE WHEN delivery_id=? THEN ? ELSE 'failed' END,last_error=?,updated_at=?
 		WHERE agent_name=? AND batch_id=? AND attempt=0 AND external_message_id=''
-		AND object_kind IN (?,?) AND object_id LIKE ?
+		AND object_kind=? AND object_id=?
 	AND (status IN ('pending','failed') OR (delivery_id=? AND status='outcome_unknown' AND last_error=?))
 		AND NOT EXISTS (SELECT 1 FROM k12_delivery_receipts crossed
 		 WHERE crossed.agent_name=? AND crossed.batch_id=? AND (crossed.attempt<>0 OR crossed.external_message_id<>''
 	 OR (crossed.status NOT IN ('pending','failed') AND NOT (crossed.delivery_id=? AND crossed.status='outcome_unknown' AND crossed.last_error=?))))
 		AND EXISTS (SELECT 1 FROM k12_delivery_receipts pdf WHERE pdf.agent_name=? AND pdf.batch_id=?
 		 AND pdf.delivery_id=? AND pdf.part_kind='artifact' AND pdf.prepared_resource_id='')`,
-		deliveryID, status, detail, nowUnix(), agentName, batchID, k12.PrintSourceGradingFinalArtifact, "dingtalk_photo_grading_reply", "%:"+ImageFinalPDFRenderContractVersion, deliveryID, pdfPreparationStarted, agentName, batchID, deliveryID, pdfPreparationStarted, agentName, batchID, deliveryID)
+		deliveryID, status, detail, nowUnix(), agentName, batchID, receipt.ObjectKind, receipt.ObjectID, deliveryID, pdfPreparationStarted, agentName, batchID, deliveryID, pdfPreparationStarted, agentName, batchID, deliveryID)
 	if err != nil {
 		return k12.DeliveryBatch{}, err
 	}
@@ -557,15 +703,34 @@ func (s *Store) MarkDeliveryK12PreparationFailure(ctx context.Context, agentName
 
 // PDFPreparationFallbackAllowed 只认本库写入的明确准备失败及整批零发送证据。
 func PDFPreparationFallbackAllowed(batch k12.DeliveryBatch) bool {
-	if (batch.ObjectKind != k12.PrintSourceGradingFinalArtifact && batch.ObjectKind != "dingtalk_photo_grading_reply") || !strings.HasSuffix(batch.ObjectID, ":"+ImageFinalPDFRenderContractVersion) {
+	if len(batch.Receipts) == 0 {
+		return false
+	}
+	allowed, projection := deliveryPDFPreparationContract(batch.Receipts[0])
+	if !allowed {
+		return false
+	}
+	if projection {
+		if _, err := normalizeDeliveryBatch(batch); err != nil {
+			return false
+		}
+	} else if (batch.ObjectKind != k12.PrintSourceGradingFinalArtifact && batch.ObjectKind != "dingtalk_photo_grading_reply") || !strings.HasSuffix(batch.ObjectID, ":"+ImageFinalPDFRenderContractVersion) {
 		return false
 	}
 	pdf := false
+	originalAttachmentCount := 0
+	if projection {
+		var payload struct {
+			Source *k12.DeliveryProjectionSource `json:"delivery_source"`
+		}
+		_ = json.Unmarshal([]byte(batch.Receipts[0].PayloadJSON), &payload)
+		originalAttachmentCount = len(payload.Source.Canonical.Attachments)
+	}
 	for _, item := range batch.Receipts {
 		if item.Attempt != 0 || item.ExternalMessageID != "" || item.Status != k12.DeliveryFailed || item.LastError != PDFPreparationKnownFailure {
 			return false
 		}
-		if item.PartMIME == "application/pdf" {
+		if item.PartMIME == "application/pdf" && (!projection || item.PartOrdinal > originalAttachmentCount+1) {
 			pdf = true
 		}
 	}
@@ -593,18 +758,50 @@ func (s *Store) PrepareDeliveryPDFFallback(ctx context.Context, sourceID string,
 	if source.ObjectKind != batch.ObjectKind || source.ObjectID != batch.ObjectID || !PDFPreparationFallbackAllowed(source) {
 		return k12.DeliveryBatch{}, false, fmt.Errorf("%w: PDF fallback source is not a known zero-send failure", ErrDeliveryBatchConflict)
 	}
+	_, projection := deliveryPDFPreparationContract(source.Receipts[0])
+	var originalSource *k12.DeliveryProjectionSource
+	if projection {
+		var sourcePayload struct {
+			Source *k12.DeliveryProjectionSource `json:"delivery_source"`
+		}
+		_ = json.Unmarshal([]byte(source.Receipts[0].PayloadJSON), &sourcePayload)
+		originalSource = sourcePayload.Source
+		originalJSON, _ := json.Marshal(originalSource)
+		if batch.ContentDigest != source.ContentDigest {
+			return k12.DeliveryBatch{}, false, ErrDeliveryBatchConflict
+		}
+		for _, r := range batch.Receipts {
+			var payload struct {
+				Source  *k12.DeliveryProjectionSource  `json:"delivery_source"`
+				Content *messagecontent.MessageContent `json:"message_content"`
+			}
+			_ = json.Unmarshal([]byte(r.PayloadJSON), &payload)
+			raw, _ := json.Marshal(payload.Source)
+			completeDigest := originalSource.Canonical.SourceDigest
+			if r.Target.Platform == "dingtalk" && originalSource.DingTalkSuffix != "" {
+				withSuffix, suffixErr := messagecontent.New(originalSource.Canonical.ProducerKind, originalSource.Canonical.Locale, originalSource.Canonical.Markdown+"\n\n"+originalSource.DingTalkSuffix, originalSource.Canonical.Attachments)
+				if suffixErr != nil {
+					return k12.DeliveryBatch{}, false, suffixErr
+				}
+				completeDigest = withSuffix.SourceDigest
+			}
+			if payload.Source == nil || payload.Content == nil || string(raw) != string(originalJSON) || payload.Content.SourceDigest != completeDigest {
+				return k12.DeliveryBatch{}, false, fmt.Errorf("%w: PDF fallback must retain the complete original content", ErrDeliveryBatchConflict)
+			}
+		}
+	}
 	oldTargets := make(map[string]bool)
 	oldImages := make(map[string]bool)
 	for _, r := range source.Receipts {
 		oldTargets[deliveryReceiptTargetKey(r)] = true
-		if strings.HasPrefix(r.PartMIME, "image/") {
+		if strings.HasPrefix(r.PartMIME, "image/") || (projection && r.PartKind == messagecontent.PartArtifact && r.PartOrdinal <= len(originalSource.Canonical.Attachments)+1) {
 			oldImages[deliveryReceiptTargetKey(r)+"\x00"+r.PartMIME+"\x00"+r.PartDigest] = true
 		}
 	}
 	newTargets := make(map[string]bool)
 	newImages := make(map[string]bool)
 	for i, r := range batch.Receipts {
-		if r.PartMIME == "application/pdf" {
+		if r.PartMIME == "application/pdf" && !projection {
 			return k12.DeliveryBatch{}, false, fmt.Errorf("%w: PDF fallback must preserve full text", ErrDeliveryBatchConflict)
 		}
 		key := deliveryReceiptTargetKey(r)
@@ -612,7 +809,7 @@ func (s *Store) PrepareDeliveryPDFFallback(ctx context.Context, sourceID string,
 			return k12.DeliveryBatch{}, false, fmt.Errorf("%w: PDF fallback changed target", ErrDeliveryBatchConflict)
 		}
 		newTargets[key] = true
-		if strings.HasPrefix(r.PartMIME, "image/") {
+		if strings.HasPrefix(r.PartMIME, "image/") || (projection && r.PartKind == messagecontent.PartArtifact) {
 			newImages[key+"\x00"+r.PartMIME+"\x00"+r.PartDigest] = true
 			matched := false
 			for _, old := range source.Receipts {

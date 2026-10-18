@@ -9,6 +9,7 @@ import (
 
 	"github.com/hexagon-codes/toolkit/util/idgen"
 
+	"github.com/hexagon-codes/hexclaw/messagecontent"
 	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 )
@@ -137,6 +138,19 @@ func (d Deps) SendAccumulation(
 	content := strings.TrimSpace(fields.Content)
 	if content == "" {
 		return k12.DeliveryBatch{}, false, fmt.Errorf("%w: 积累内容不可空", ErrInvalidInput)
+	}
+	if d.DeliveryLocale != nil {
+		locale := d.DeliveryLocale()
+		if locale != "" {
+			// 旧命令优先读回，新增PDF不能使同一次发送变成另一条消息。
+			if batch, e := d.GetDeliveryBatchForObject(ctx, agentName, "accumulation", rec.RecordID); e == nil {
+				queried, queryErr := d.QueryDeliveryBatch(ctx, agentName, batch.BatchID)
+				return queried, false, queryErr
+			} else if !errors.Is(e, records.ErrNotFound) {
+				return k12.DeliveryBatch{}, false, e
+			}
+			return d.PrepareAndSendFinalReply(ctx, FinalReplyDeliveryRequest{AgentName: agentName, ObjectKind: "accumulation", ObjectID: rec.RecordID, SourceKind: "accumulation", SourceRef: rec.RecordID + ":" + deliveryDigest(content), Message: DeliveryMessage{Content: content}, Producer: messagecontent.ProducerK12, Locale: locale}, nil)
+		}
 	}
 	return d.PrepareAndSendTextBatch(ctx, agentName, "accumulation", rec.RecordID, content)
 }

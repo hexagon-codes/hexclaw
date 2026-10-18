@@ -47,6 +47,9 @@ func normalizeDeliveryMessage(message DeliveryMessage) (DeliveryMessage, error) 
 }
 
 func deliveryMessageDigest(message DeliveryMessage) string {
+	if message.Source != nil {
+		return message.Source.Canonical.SourceDigest
+	}
 	identities := make([]DeliveryAttachmentIdentity, 0, len(message.Attachments))
 	for _, attachment := range message.Attachments {
 		identities = append(identities, DeliveryAttachmentIdentity{
@@ -403,6 +406,9 @@ func (d Deps) prepareMessageForResolvedTargets(
 	message DeliveryMessage,
 	targets []ResolvedDeliveryTarget,
 ) ([]PreparedTextDelivery, error) {
+	if message.Source != nil {
+		return d.prepareProjectedMessageTargets(ctx, message, targets)
+	}
 	batchTransport, ok := d.Delivery.(BatchMessageDeliveryTransport)
 	if !ok {
 		return nil, ErrDeliveryUnavailable
@@ -565,8 +571,11 @@ func (d Deps) prepareAndSendBatch(
 	dedupeKey := deliveryBatchDedupeKey(agentName, objectKind, objectID, contentDigest)
 	existing, err := d.Records.GetDeliveryBatchByDedupe(ctx, agentName, dedupeKey)
 	if err == nil {
-		existing, err = d.sendDeliveryBatch(ctx, existing)
-		return existing, false, err
+		result, sendErr := d.sendDeliveryBatch(ctx, existing)
+		if result.BatchID == "" {
+			result = existing
+		}
+		return result, false, sendErr
 	}
 	if !errors.Is(err, records.ErrNotFound) {
 		return k12.DeliveryBatch{}, false, err
@@ -577,16 +586,26 @@ func (d Deps) prepareAndSendBatch(
 	if err != nil {
 		return k12.DeliveryBatch{}, false, err
 	}
+	planned := batch
 	batch, created, err := d.Records.PrepareDeliveryBatch(ctx, batch)
 	if err != nil {
+		if created && batch.BatchID == "" {
+			batch = planned
+		}
 		return batch, created, err
 	}
 	if !created {
-		batch, err = d.sendDeliveryBatch(ctx, batch)
-		return batch, false, err
+		result, sendErr := d.sendDeliveryBatch(ctx, batch)
+		if result.BatchID == "" {
+			result = batch
+		}
+		return result, false, sendErr
 	}
-	batch, err = d.sendDeliveryBatch(ctx, batch)
-	return batch, true, err
+	result, sendErr := d.sendDeliveryBatch(ctx, batch)
+	if result.BatchID == "" {
+		result = batch
+	}
+	return result, true, sendErr
 }
 
 // buildPreparedTextBatch freezes the target-specific payloads and constructs
@@ -626,12 +645,18 @@ func (d Deps) buildPreparedMessageBatch(
 	}
 	var prepared []PreparedTextDelivery
 	if targets == nil {
-		if len(message.Attachments) == 0 {
+		if message.Source != nil {
+			resolved, resolveErr := d.ResolveDeliveryTargets(ctx, agentName)
+			if resolveErr != nil {
+				return k12.DeliveryBatch{}, resolveErr
+			}
+			prepared, err = d.prepareMessageForResolvedTargets(ctx, message, resolved)
+		} else if len(message.Attachments) == 0 {
 			prepared, err = d.resolveAndPrepareTextBatch(ctx, agentName, message.Content)
 		} else {
 			prepared, err = d.resolveAndPrepareMessageBatch(ctx, agentName, message)
 		}
-	} else if len(message.Attachments) == 0 {
+	} else if len(message.Attachments) == 0 && message.Source == nil {
 		prepared, err = d.prepareTextForResolvedTargets(ctx, message.Content, targets)
 	} else {
 		prepared, err = d.prepareMessageForResolvedTargets(ctx, message, targets)
@@ -670,7 +695,7 @@ func (d Deps) buildPreparedMessageBatch(
 			RenderJSON:    item.RenderJSON,
 		})
 	}
-	return k12.DeliveryBatch{
+	batch := k12.DeliveryBatch{
 		BatchID:       batchID,
 		AgentName:     agentName,
 		ObjectKind:    objectKind,
@@ -678,7 +703,11 @@ func (d Deps) buildPreparedMessageBatch(
 		DedupeKey:     dedupeKey,
 		ContentDigest: contentDigest,
 		Receipts:      receipts,
-	}, nil
+	}
+	if message.Source != nil {
+		batch.DedupeKey = projectedDeliveryBatchDedupeKey(batch)
+	}
+	return batch, nil
 }
 
 // prepareDeliveryBatchResources 先准备并持久化全部媒体 part；只要仍有一个媒体
@@ -799,6 +828,14 @@ func (d Deps) prepareDeliveryBatchResources(
 }
 
 func isK12PDFReplyBatch(batch k12.DeliveryBatch) bool {
+	if strings.HasSuffix(batch.ObjectID, ":"+k12.DeliveryProjectionVersionIMFinalPDFV1) {
+		if len(batch.Receipts) == 0 {
+			return false
+		}
+		first := batch.Receipts[0]
+		present, err := k12.ValidateDeliveryProjection(batch.AgentName, batch.ObjectKind, batch.ObjectID, batch.ContentDigest, first.Target, first.BindingID, first.PayloadJSON)
+		return present && err == nil
+	}
 	if !strings.HasSuffix(batch.ObjectID, ":"+imageFinalPDFRenderContractVersion) {
 		return false
 	}
@@ -824,6 +861,9 @@ func (d Deps) sendDeliveryBatch(
 			"elapsed_ms", time.Since(startedAt).Milliseconds(), "receipts_count", len(result.Receipts), "error", batchErr)
 	}()
 	var err error
+	if err = validateProjectedDeliveryBatch(batch); err != nil {
+		return batch, err
+	}
 	if _, _, err = creativeDeliveryEnvelopeGroups(batch); err != nil {
 		return batch, err
 	}
@@ -866,8 +906,11 @@ func (d Deps) sendDeliveryBatch(
 			return current, err
 		}
 	}
-	batch, err = d.Records.GetDeliveryBatch(ctx, batch.AgentName, batch.BatchID)
-	return batch, err
+	current, getErr := d.Records.GetDeliveryBatch(ctx, batch.AgentName, batch.BatchID)
+	if getErr != nil {
+		return batch, getErr
+	}
+	return current, nil
 }
 
 func (d Deps) GetDeliveryBatch(ctx context.Context, agentName, batchID string) (k12.DeliveryBatch, error) {
@@ -875,6 +918,27 @@ func (d Deps) GetDeliveryBatch(ctx context.Context, agentName, batchID string) (
 		return k12.DeliveryBatch{}, ErrDeliveryUnavailable
 	}
 	return d.Records.GetDeliveryBatch(ctx, strings.TrimSpace(agentName), strings.TrimSpace(batchID))
+}
+
+// GetDeliveryBatchForObject 优先读取业务对象首次冻结的投递内容，不按当前文案重新建批。
+func (d Deps) GetDeliveryBatchForObject(ctx context.Context, agentName, objectKind, objectID string) (k12.DeliveryBatch, error) {
+	if d.Records == nil {
+		return k12.DeliveryBatch{}, ErrDeliveryUnavailable
+	}
+	return d.Records.GetLatestDeliveryBatchForObject(ctx, agentName, objectKind, objectID)
+}
+
+// ResumePendingDeliveryBatch 只接续原批次从未发送的 pending 子项；发送所有权仍由既有 CAS 取得。
+// 已发送、未知及失败子项保持原样，不能借恢复入口扩大为重试。
+func (d Deps) ResumePendingDeliveryBatch(ctx context.Context, agentName, batchID string) (k12.DeliveryBatch, error) {
+	if d.Delivery == nil {
+		return k12.DeliveryBatch{}, ErrDeliveryUnavailable
+	}
+	batch, err := d.GetDeliveryBatch(ctx, agentName, batchID)
+	if err != nil {
+		return batch, err
+	}
+	return d.sendDeliveryBatch(ctx, batch)
 }
 
 // RetryDeliveryBatch retries only children with explicit failed evidence.
@@ -1177,6 +1241,13 @@ func validateCreativeDeliveryTargetIntegrity(
 ) error {
 	if len(parts) == 0 {
 		return nil
+	}
+	if projected, err := k12.ValidateDeliveryProjection(batch.AgentName, batch.ObjectKind, batch.ObjectID,
+		batch.ContentDigest, parts[0].Target, parts[0].BindingID, parts[0].PayloadJSON); projected || err != nil {
+		if err != nil {
+			return err
+		}
+		return k12.ValidateDeliveryProjectionTarget(batch, parts)
 	}
 	first := parts[0]
 	if strings.TrimSpace(first.BindingID) == "" ||

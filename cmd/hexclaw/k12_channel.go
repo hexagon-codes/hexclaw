@@ -230,13 +230,29 @@ func (d *k12IMDeliverer) PrepareMessageForTargets(
 		return nil, k12usecase.ErrNoActiveDirectBindings
 	}
 	canonical := source.Content
+	producer, locale := messagecontent.ProducerK12, "zh-CN"
+	if source.Source != nil {
+		if err := source.Source.Canonical.Validate(); err != nil {
+			return nil, err
+		}
+		producer, locale = source.Source.Canonical.ProducerKind, source.Source.Canonical.Locale
+	}
 	// 批改最终产物的 canonical Markdown 保留逐题内部评估 JSON 以供审计；家长侧
 	// 钉钉消息只投影可读的题目、状态与辅导正文，避免把内部 JSON 送入平台载荷。
 	visible := k12FinalArtifactIMMarkdown(canonical)
+	if source.ProjectedContent != "" {
+		visible = source.ProjectedContent
+	}
 	projected := imLaTeXFallback(visible, "k12_send_to_phone")
 	fallbackReason := ""
+	if source.ProjectedContent != "" && source.ProjectedContent != canonical {
+		fallbackReason = "writing_original_in_image"
+	}
 	if projected != visible {
-		fallbackReason = messagecontent.FallbackMathToReadableText
+		if fallbackReason != "" {
+			fallbackReason += "+"
+		}
+		fallbackReason += messagecontent.FallbackMathToReadableText
 	}
 	attachments := make([]channel.Attachment, 0, len(source.Attachments))
 	for _, attachment := range source.Attachments {
@@ -246,7 +262,7 @@ func (d *k12IMDeliverer) PrepareMessageForTargets(
 		})
 	}
 	message, err := channel.NewCanonicalMarkdownMessageWithAttachments(
-		messagecontent.ProducerK12, "zh-CN", canonical, projected, fallbackReason, attachments,
+		producer, locale, canonical, projected, fallbackReason, attachments,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("发送内容校验失败，请重试: %w", err)
@@ -270,7 +286,14 @@ func (d *k12IMDeliverer) PrepareMessageForTargets(
 		if resolveErr != nil {
 			return nil, fmt.Errorf("freeze delivery target: %w", resolveErr)
 		}
-		if strings.TrimSpace(resolved.BindingID) == "" || target.Platform == "" || target.ChatID == "" {
+		privateReply := source.Source != nil && source.Source.PrivateEvent != nil
+		if privateReply {
+			proof := source.Source.PrivateEvent
+			if proof.Platform != target.Platform || proof.InstanceID != target.InstanceID || proof.SenderID != target.ChatID {
+				return nil, errors.New("accepted private reply target mismatch")
+			}
+		}
+		if (!privateReply && strings.TrimSpace(resolved.BindingID) == "") || target.Platform == "" || target.ChatID == "" {
 			return nil, fmt.Errorf("冻结发送目标失败：绑定或私聊目标不完整")
 		}
 		if err := target.EnsureDirect(); err != nil {
@@ -281,15 +304,42 @@ func (d *k12IMDeliverer) PrepareMessageForTargets(
 		}
 		seen[target] = struct{}{}
 		parts, renderJSON := parts, renderJSON
-		if locale, disclosure := k12usecase.CreativeWorkDeliveryDisclosure(ctx, canonical); target.Platform == "dingtalk" && disclosure != "" {
-			// 说明只属于新钉钉渲染投影，canonical 与原图身份保持不变。
-			disclosureFallback := fallbackReason
-			if disclosureFallback != "" {
-				disclosureFallback += "+"
+		targetProjection, targetFallback := projected, fallbackReason
+		if source.WritingFeedback && target.Platform == "dingtalk" {
+			formatted := k12WritingFeedbackChannelMarkdown(targetProjection)
+			if formatted != targetProjection {
+				targetProjection = formatted
+				if targetFallback != "" {
+					targetFallback += "+"
+				}
+				targetFallback += "writing_feedback_labels"
 			}
-			disclosureFallback += "execution_summary"
+		}
+		if source.Source == nil && target.Platform == "dingtalk" && len(source.Attachments) == 1 && strings.HasPrefix(source.Attachments[0].MIME, "image/") && len(source.Attachments[0].Data) > 0 {
+			if writingProjection, ok := k12usecase.CreativeWorkImageDeliveryProjection(ctx, canonical); ok {
+				writingProjection = k12WritingFeedbackChannelMarkdown(writingProjection)
+				targetProjection = imLaTeXFallback(writingProjection, "k12_writing_image_feedback")
+				targetFallback = "writing_original_in_image"
+				if targetProjection != writingProjection {
+					targetFallback += "+" + messagecontent.FallbackMathToReadableText
+				}
+			}
+		}
+		if disclosureLocale, disclosure := k12usecase.CreativeWorkDeliveryDisclosure(ctx, canonical); target.Platform == "dingtalk" && (disclosure != "" || targetProjection != projected) {
+			// 说明只属于新钉钉渲染投影，canonical 与原图身份保持不变。
+			disclosureFallback := targetFallback
+			if disclosure != "" {
+				if disclosureFallback != "" {
+					disclosureFallback += "+"
+				}
+				disclosureFallback += "execution_summary"
+				targetProjection += "\n\n" + disclosure
+			}
+			if disclosureLocale == "" {
+				disclosureLocale = locale
+			}
 			message, disclosureErr := channel.NewCanonicalMarkdownMessageWithAttachments(
-				messagecontent.ProducerK12, locale, canonical, projected+"\n\n"+disclosure, disclosureFallback, attachments,
+				producer, disclosureLocale, canonical, targetProjection, disclosureFallback, attachments,
 			)
 			if disclosureErr != nil {
 				return nil, disclosureErr
@@ -324,6 +374,21 @@ func (d *k12IMDeliverer) PrepareMessageForTargets(
 		}
 	}
 	return out, nil
+}
+
+// 钉钉对中文冒号后的强调闭合存在兼容差异，仅将点评标签的冒号放到标记外。
+// 原句、建议和原因的文字不变，原始正文与已冻结投递不经此处重写。
+func k12WritingFeedbackChannelMarkdown(markdown string) string {
+	lines := strings.Split(markdown, "\n")
+	for i, line := range lines {
+		for _, label := range []string{"原句", "建议", "原因"} {
+			if rest, ok := strings.CutPrefix(line, "**"+label+"：**"); ok {
+				lines[i] = "**" + label + "**：" + rest
+				break
+			}
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // PrepareText is retained for compatibility with singleton callers. Production
@@ -377,6 +442,18 @@ func (d *k12IMDeliverer) resolveStableDeliveryTarget(target channel.Target) (cha
 }
 
 func (d *k12IMDeliverer) receiptBindingIsActive(receipt k12.DeliveryReceipt) bool {
+	var evidence struct {
+		Source *k12.DeliveryProjectionSource `json:"delivery_source"`
+	}
+	if json.Unmarshal([]byte(receipt.PayloadJSON), &evidence) == nil && evidence.Source != nil && evidence.Source.PrivateEvent != nil {
+		proof := evidence.Source
+		present, err := k12.ValidateDeliveryProjection(receipt.AgentName, receipt.ObjectKind, receipt.ObjectID, proof.Canonical.SourceDigest, receipt.Target, receipt.BindingID, receipt.PayloadJSON)
+		if err != nil || !present {
+			return false
+		}
+		current, err := d.resolveStableDeliveryTarget(channel.Target{Platform: receipt.Target.Platform, InstanceID: receipt.Target.InstanceID, ChatID: receipt.Target.ChatID})
+		return err == nil && current.Platform == proof.PrivateEvent.Platform && current.InstanceID == proof.PrivateEvent.InstanceID && current.ChatID == proof.PrivateEvent.SenderID
+	}
 	target, err := d.resolveStableDeliveryTarget(channelTargetFromReceipt(receipt))
 	if err != nil {
 		return false

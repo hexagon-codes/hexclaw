@@ -9,6 +9,66 @@ import (
 )
 
 type creativeWorkDeliveryDisclosureKey struct{}
+type creativeWorkDeliveryProjectionKey struct{}
+
+type creativeWorkDeliveryProjection struct {
+	canonicalDigest string
+	markdown        string
+}
+
+// 带图写作只省略渠道中的整篇原稿，点评里的原句、局部示范和历史参考稿均完整保留。
+// 原稿仍在 canonical 中用于导出、复制及去重；实际投递必须带原图才可使用本投影。
+func withCreativeWorkDeliveryProjection(ctx context.Context, view CreativeWorkView, canonical string) context.Context {
+	if view.Record == nil || view.Fields.WorkType != k12.WorkTypeWriting || view.GenerationState.Latest == nil ||
+		view.GenerationState.Latest.Status != k12.WorkFeedbackSucceeded || view.GenerationState.Latest.Feedback == nil {
+		return ctx
+	}
+	source := k12.CreativeWorkSourceSnapshot{WorkType: view.Fields.WorkType, DisplayName: view.Fields.DisplayName, WorkTitle: view.Fields.WorkTitle}
+	if view.GenerationState.Initial != nil {
+		source = view.GenerationState.Initial.Source
+	} else if len(view.Fields.Versions) > 0 {
+		version := view.Fields.Versions[len(view.Fields.Versions)-1]
+		source.ContentMarkdown, source.SourceAssetID = version.ContentMarkdown, version.SourceAssetID
+	}
+	if source.WorkType != k12.WorkTypeWriting || strings.TrimSpace(source.SourceAssetID) == "" || source.ContentMarkdown == "" {
+		return ctx
+	}
+	displayName, title := strings.TrimSpace(source.DisplayName), strings.TrimSpace(source.WorkTitle)
+	if displayName == "" {
+		displayName = view.Fields.DisplayName
+	}
+	if title == "" {
+		title = view.Fields.WorkTitle
+	}
+	header := []string{displayName}
+	if title != "" && title != displayName {
+		header = append(header, title)
+	}
+	feedback := view.GenerationState.Latest.Feedback.ProjectionMarkdown
+	whole := append(append([]string(nil), header...), source.ContentMarkdown, feedback)
+	if strings.TrimSpace(strings.Join(whole, "\n\n")) != strings.TrimSpace(canonical) {
+		return ctx
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, creativeWorkDeliveryProjectionKey{}, creativeWorkDeliveryProjection{
+		canonicalDigest: deliveryDigest(strings.TrimSpace(canonical)),
+		markdown:        strings.Join(append(header, feedback), "\n\n"),
+	})
+}
+
+// CreativeWorkImageDeliveryProjection 只返回同一 canonical 的带图作文投影，不解析或裁剪任意正文。
+func CreativeWorkImageDeliveryProjection(ctx context.Context, canonical string) (string, bool) {
+	if ctx == nil {
+		return "", false
+	}
+	projection, ok := ctx.Value(creativeWorkDeliveryProjectionKey{}).(creativeWorkDeliveryProjection)
+	if !ok || projection.canonicalDigest != deliveryDigest(strings.TrimSpace(canonical)) {
+		return "", false
+	}
+	return projection.markdown, true
+}
 
 type creativeWorkDeliveryDisclosure struct {
 	canonicalDigest string
@@ -19,6 +79,7 @@ type creativeWorkDeliveryDisclosure struct {
 // WithCreativeWorkDeliveryDisclosure 仅从当前作品来源读取同代次的真实执行事实。
 // 历史或缺少来源证明时省略说明，不阻断作品正文与原图投递。
 func (d Deps) WithCreativeWorkDeliveryDisclosure(ctx context.Context, view CreativeWorkView, canonical string) context.Context {
+	ctx = withCreativeWorkDeliveryProjection(ctx, view, canonical)
 	if d.Records == nil || d.ImageTaskResult == nil || view.Record == nil || view.Fields.SourceIntakeID == "" {
 		return ctx
 	}
@@ -36,10 +97,15 @@ func (d Deps) WithCreativeWorkDeliveryDisclosure(ctx context.Context, view Creat
 // WithCreativeWorkResultDeliveryDisclosure 为 API 和自动图片入口投影同一创作事实。
 // 上下文只传递当前 canonical 对应的渠道说明，不改 canonical、来源附件或去重身份。
 func WithCreativeWorkResultDeliveryDisclosure(ctx context.Context, view CreativeWorkView, result ImageTaskResult, canonical string) context.Context {
-	if view.Record == nil || view.GenerationState.Latest == nil || result.Creative == nil ||
-		result.CreativeWork == nil || result.CreativeWork.Record == nil || result.CreativeWork.GenerationState.Latest == nil {
+	ctx = withCreativeWorkDeliveryProjection(ctx, view, canonical)
+	if view.Record == nil || view.GenerationState.Initial == nil || view.GenerationState.Latest == nil || result.Creative == nil ||
+		result.CreativeWork == nil || result.CreativeWork.Record == nil ||
+		result.CreativeWork.GenerationState.Initial == nil || result.CreativeWork.GenerationState.Latest == nil {
 		return ctx
 	}
+	// 推广绑定初始点评；后续点评必须保留同一冻结来源，并使用当前代次的执行回执。
+	initial := view.GenerationState.Initial
+	actualInitial := result.CreativeWork.GenerationState.Initial
 	latest := view.GenerationState.Latest
 	actual := result.CreativeWork.GenerationState.Latest
 	dispatch := result.Dispatch
@@ -48,9 +114,14 @@ func WithCreativeWorkResultDeliveryDisclosure(ctx context.Context, view Creative
 		result.Creative.PromotedWorkID != view.Record.RecordID || result.CreativeWork.Record.RecordID != view.Record.RecordID ||
 		result.Creative.IntakeID != view.Fields.SourceIntakeID || result.Creative.DispatchID != dispatch.DispatchID ||
 		dispatch.TargetObjectID != result.Creative.IntakeID || dispatch.SourceDigest == "" || dispatch.SourceDigest != result.Creative.SourceDigest ||
+		initial.AgentName != view.Record.AgentName || actualInitial.AgentName != view.Record.AgentName ||
+		initial.WorkID != view.Record.RecordID || actualInitial.WorkID != view.Record.RecordID ||
+		latest.AgentName != view.Record.AgentName || actual.AgentName != view.Record.AgentName ||
+		latest.WorkID != view.Record.RecordID || actual.WorkID != view.Record.RecordID ||
 		latest.Status != k12.WorkFeedbackSucceeded || actual.Status != k12.WorkFeedbackSucceeded ||
 		latest.Feedback == nil || actual.Feedback == nil || latest.GenerationID == "" || latest.GenerationID != actual.GenerationID ||
-		result.Creative.PromotedGenerationID != latest.GenerationID ||
+		initial.GenerationID == "" || result.Creative.PromotedGenerationID != initial.GenerationID || initial.GenerationID != actualInitial.GenerationID ||
+		initial.Source != actualInitial.Source || latest.Source != initial.Source || actual.Source != latest.Source ||
 		latest.Feedback.ProjectionMarkdown != actual.Feedback.ProjectionMarkdown || strings.TrimSpace(canonical) == "" {
 		return ctx
 	}

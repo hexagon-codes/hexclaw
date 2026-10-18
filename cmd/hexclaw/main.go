@@ -2462,6 +2462,7 @@ Set source only when the material explicitly names a work, title, or another rel
 			}
 			k12rt.Deps.GradingBudgetSnapshot = k12GradingBudgetSnapshotFromConfig(gradingBudget)
 			k12Runtime = k12rt
+			k12rt.Deps.DeliveryLocale = srv.DisplayLocale
 			k12TutorPolicy.followup = &k12rt.Deps
 			k12InboundPhotos = k12usecase.NewInboundPhotoCoordinator(k12rt.Records)
 			logger.Info("K12 场景已按 Manifest v2 安装",
@@ -3304,6 +3305,9 @@ Set source only when the material explicitly names a work, title, or another rel
 			if rebuildErr := appendIMToolDigestAndRebuildCanonical(reply); rebuildErr != nil {
 				err = errors.Join(err, fmt.Errorf("rebuild IM reply canonical evidence: %w", rebuildErr))
 			}
+		}
+		if k12Runtime != nil {
+			reply, err = maybeDeliverIMFinalReply(ctx, msg, reply, err, newIMFinalReplyDependencies(&k12Runtime.Deps, instanceMgr.ResolveRunningInstanceID, k12TutorPolicy.unitSummary))
 		}
 		title := string(msg.Platform) + " 新消息"
 		if msg.UserName != "" {
