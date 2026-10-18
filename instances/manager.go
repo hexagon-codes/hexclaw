@@ -794,6 +794,21 @@ func (m *Manager) SendWithReceipt(ctx context.Context, target, chatID string, re
 	return receiptAdapter.SendWithReceipt(ctx, chatID, reply)
 }
 
+// RecallMessage 只撤回指定稳定实例已经发出的外部消息，不解析新绑定或另行发送。
+func (m *Manager) RecallMessage(ctx context.Context, target, externalMessageID string) error {
+	adp := m.resolveRunningAdapterByStableID(target)
+	if adp == nil {
+		return fmt.Errorf("no running adapter for stable instance %q", target)
+	}
+	recaller, ok := adp.(interface {
+		RecallMessage(context.Context, string) error
+	})
+	if !ok {
+		return fmt.Errorf("adapter %q does not support message recall", adp.Name())
+	}
+	return recaller.RecallMessage(ctx, externalMessageID)
+}
+
 // PrepareDeliveryPartResource 按稳定实例定位平台适配器并准备一个媒体 part。
 // 该阶段不得发送可见消息；返回值由上层回执账本持久化后才能进入发送阶段。
 func (m *Manager) PrepareDeliveryPartResource(ctx context.Context, target string, part adapter.DeliveryPart) (string, error) {

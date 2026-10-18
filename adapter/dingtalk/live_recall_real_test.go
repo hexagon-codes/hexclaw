@@ -19,6 +19,7 @@ package dingtalk
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"os"
@@ -36,6 +37,50 @@ import (
 )
 
 const liveDingtalkConfirmPhrase = "SEND_TO_EXPLICIT_DINGTALK_USER"
+
+// 只清理明确指定的已完成照片任务接纳提示，不产生新的可见发送。
+func TestLiveCompletedPhotoStatusRecall(t *testing.T) {
+	receiptID := strings.TrimSpace(os.Getenv("HEXCLAW_REAL_PHOTO_RECEIPT_ID"))
+	if receiptID == "" {
+		t.Skip("a completed photo receipt was not selected")
+	}
+	cfg, userID := loadLiveDingtalkConfig(t)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(home, ".hexclaw", "data.db")+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var agent, binding, instance, chat, finalBatch, replyStatus, instanceName string
+	err = db.QueryRow(`SELECT r.agent_name,r.binding_id,r.instance_id,r.chat_id,d.delivery_batch_id,d.reply_status,p.name
+		FROM k12_im_inbound_receipts r JOIN k12_im_inbound_dispatches d USING(receipt_id)
+		JOIN platform_instances p ON p.id=r.instance_id WHERE r.receipt_id=? AND r.platform='dingtalk'`, receiptID).
+		Scan(&agent, &binding, &instance, &chat, &finalBatch, &replyStatus, &instanceName)
+	if err != nil || instanceName != cfg.Name || chat != userID || replyStatus != "delivered" || finalBatch == "" {
+		t.Fatalf("selected photo final reply or instance does not match: %v", err)
+	}
+	var total, unfinished int
+	if err = db.QueryRow(`SELECT count(*),sum(CASE WHEN status='delivered' THEN 0 ELSE 1 END) FROM k12_delivery_receipts WHERE batch_id=? AND agent_name=?`, finalBatch, agent).Scan(&total, &unfinished); err != nil || total < 1 || unfinished != 0 {
+		t.Fatalf("final reply is not completely delivered: %v", err)
+	}
+	var external string
+	err = db.QueryRow(`SELECT external_message_id FROM k12_delivery_receipts
+		WHERE agent_name=? AND object_kind='dingtalk_photo_status_notice' AND object_id=?
+		AND binding_id=? AND instance_id=? AND chat_id=? AND part_kind='markdown' AND status='delivered'`,
+		agent, receiptID+":accepted", binding, instance, chat).Scan(&external)
+	if err != nil || external == "" {
+		t.Fatalf("original accepted notice is not available: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := New(cfg).RecallMessage(ctx, external); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("original completed photo notice recall confirmed; message_sha256=%x; new_sends=0", sha256.Sum256([]byte(external)))
+}
 
 // loadLiveDingtalkConfig 从本机 ~/.hexclaw/data.db 解密明确指定的真实钉钉配置 + 目标 userId
 // （in-memory，不落盘）。真机发送是破坏性测试门：send、confirm、instance、user 四项必须

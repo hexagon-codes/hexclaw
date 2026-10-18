@@ -16,9 +16,32 @@ import (
 	"testing"
 	"time"
 
+	dtrobot "github.com/alibabacloud-go/dingtalk/robot_1_0"
+	"github.com/alibabacloud-go/tea/tea"
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/config"
 )
+
+func TestDingTalkRecallRequiresPerMessageSuccess(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body *dtrobot.BatchRecallOTOResponseBody
+		ok   bool
+	}{
+		{"confirmed", &dtrobot.BatchRecallOTOResponseBody{SuccessResult: []*string{tea.String("original-notice")}}, true},
+		{"http_only", nil, false},
+		{"missing_receipt", &dtrobot.BatchRecallOTOResponseBody{}, false},
+		{"other_message", &dtrobot.BatchRecallOTOResponseBody{SuccessResult: []*string{tea.String("another-notice")}}, false},
+		{"rejected", &dtrobot.BatchRecallOTOResponseBody{FailedResult: map[string]*string{"original-notice": tea.String("rejected")}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateDingtalkRecallResponse(&dtrobot.BatchRecallOTOResponse{StatusCode: tea.Int32(http.StatusOK), Body: tc.body}, []*string{tea.String("original-notice")})
+			if (err == nil) != tc.ok {
+				t.Fatalf("recall confirmation mismatch: %v", err)
+			}
+		})
+	}
+}
 
 // newTestAdapter 创建测试用钉钉适配器
 func newTestAdapter() *DingtalkAdapter {

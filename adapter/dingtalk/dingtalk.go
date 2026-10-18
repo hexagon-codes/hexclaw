@@ -825,6 +825,22 @@ func (c *officialDingtalkOpenAPI) QueryOTO(_ context.Context, accessToken, robot
 	return *resp.Body.SendStatus, nil
 }
 
+// RecallMessage 复用官方SDK撤回已发送消息，供耐久进度通知按原回执清理。
+func (a *DingtalkAdapter) RecallMessage(ctx context.Context, externalMessageID string) error {
+	if strings.TrimSpace(externalMessageID) == "" {
+		return fmt.Errorf("DingTalk recall requires an external message ID")
+	}
+	token, err := a.getAccessToken(ctx)
+	if err != nil {
+		return err
+	}
+	api, err := a.apiClient()
+	if err != nil {
+		return err
+	}
+	return api.RecallOTO(ctx, token, a.cfg.RobotCode, []string{externalMessageID})
+}
+
 // RecallOTO 按 processQueryKey 撤回此前发送的单聊消息（用于答案就位后撤回「正在思考」占位）。
 func (c *officialDingtalkOpenAPI) RecallOTO(_ context.Context, accessToken, robotCode string, processQueryKeys []string) error {
 	keys := make([]*string, 0, len(processQueryKeys))
@@ -846,8 +862,31 @@ func (c *officialDingtalkOpenAPI) RecallOTO(_ context.Context, accessToken, robo
 	if err != nil {
 		return err
 	}
-	if resp != nil && resp.StatusCode != nil && *resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("钉钉机器人撤回返回 %d", *resp.StatusCode)
+	return validateDingtalkRecallResponse(resp, keys)
+}
+
+// HTTP受理不能代替逐消息撤回成功，缺失或失败的回执不得结束清理。
+func validateDingtalkRecallResponse(resp *dtrobot.BatchRecallOTOResponse, keys []*string) error {
+	if resp == nil || resp.StatusCode == nil || *resp.StatusCode != http.StatusOK || resp.Body == nil {
+		return fmt.Errorf("DingTalk recall response is incomplete or unsuccessful")
+	}
+	for _, key := range keys {
+		if key == nil {
+			return fmt.Errorf("DingTalk recall message ID is missing")
+		}
+		if _, failed := resp.Body.FailedResult[*key]; failed {
+			return fmt.Errorf("DingTalk message recall was rejected")
+		}
+		found := false
+		for _, success := range resp.Body.SuccessResult {
+			if success != nil && *success == *key {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("DingTalk message recall is not confirmed")
+		}
 	}
 	return nil
 }

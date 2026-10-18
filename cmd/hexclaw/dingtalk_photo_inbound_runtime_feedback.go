@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/hexagon-codes/hexclaw/messagecontent"
 	"github.com/hexagon-codes/hexclaw/records"
@@ -125,4 +126,47 @@ func (r *k12DingtalkPhotoInboundRuntime) waitWithStatusNotice(ctx context.Contex
 		return false, err
 	}
 	return false, errK12DingtalkPhotoWaiting
+}
+
+// 终稿完整送达后撤回原接纳提示；发送回执仍保留其原始事实，不改成清理状态。
+func (r *k12DingtalkPhotoInboundRuntime) recallAcceptedStatusNotice(ctx context.Context, bundle k12usecase.InboundPhotoBundle) error {
+	var command k12DingtalkInboundPhotoCommand
+	if err := json.Unmarshal([]byte(bundle.Receipt.CommandJSON), &command); err != nil {
+		return fmt.Errorf("decode DingTalk photo status command: %w", err)
+	}
+	if command.StatusNoticeVersion == "" {
+		return nil
+	}
+	port, ok := r.replyBatches.(k12DingtalkPhotoStatusBatchPort)
+	if !ok {
+		return fmt.Errorf("DingTalk photo status delivery is unavailable")
+	}
+	objectID := bundle.Receipt.ReceiptID + ":accepted"
+	batch, err := port.GetDeliveryBatchForObject(ctx, bundle.Receipt.AgentName, k12DingtalkPhotoStatusNoticeKind, objectID)
+	if errors.Is(err, records.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if batch.AgentName != bundle.Receipt.AgentName || batch.ObjectKind != k12DingtalkPhotoStatusNoticeKind || batch.ObjectID != objectID || len(batch.Receipts) != 1 {
+		return fmt.Errorf("DingTalk photo status batch identity is invalid")
+	}
+	receipt := batch.Receipts[0]
+	target := inboundPhotoFrozenTarget(bundle)
+	if receipt.PartKind != messagecontent.PartMarkdown || receipt.BindingID != target.BindingID || receipt.Target != target.Target {
+		return fmt.Errorf("DingTalk photo status receipt target is invalid")
+	}
+	if strings.TrimSpace(receipt.ExternalMessageID) == "" {
+		if receipt.Status == k12.DeliveryPending || receipt.Status == k12.DeliveryFailed {
+			return nil
+		}
+		return fmt.Errorf("DingTalk photo status recall requires the original message ID")
+	}
+	if r.recallStatusNotice == nil {
+		return fmt.Errorf("DingTalk photo status recall is unavailable")
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	return r.recallStatusNotice(cleanupCtx, receipt.Target.InstanceID, receipt.ExternalMessageID)
 }

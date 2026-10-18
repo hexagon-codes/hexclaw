@@ -28,6 +28,82 @@ type statusNoticeTransport struct {
 	prepareErr     error
 }
 
+func TestDingTalkPhotoFinalReplyRecallsOnlyItsAcceptedNotice(t *testing.T) {
+	for _, scenario := range []string{"delivered", "still_sending", "recall_failure_restart", "wrong_notice_target"} {
+		t.Run(scenario, func(t *testing.T) {
+			ctx := context.Background()
+			bundle := inboundPhotoBundleFixture([]byte("source-photo"))
+			bundle.Dispatch.ProcessingStatus = k12usecase.InboundPhotoFinalArtifactReady
+			bundle.Dispatch.ReplyStatus = k12usecase.InboundPhotoReplyBound
+			bundle.Dispatch.DeliveryBatchID = "final-batch"
+			target := inboundPhotoFrozenTarget(bundle)
+			part := func(id, kind, mime string, ordinal int) k12.DeliveryReceipt {
+				return k12.DeliveryReceipt{DeliveryID: id, BindingID: target.BindingID, Target: target.Target,
+					PartKind: messagecontent.PartKind(kind), PartMIME: mime, PartOrdinal: ordinal,
+					Status: k12.DeliveryDelivered, ExternalMessageID: id + "-provider"}
+			}
+			final := k12.DeliveryBatch{BatchID: "final-batch", Status: k12.DeliveryBatchDelivered,
+				Receipts: []k12.DeliveryReceipt{part("final-text", "markdown", "", 1), part("final-image", "artifact", "image/png", 2)}}
+			objectID := bundle.Receipt.ReceiptID + ":accepted"
+			notice := k12.DeliveryBatch{BatchID: "notice-batch", AgentName: bundle.Receipt.AgentName,
+				ObjectKind: k12DingtalkPhotoStatusNoticeKind, ObjectID: objectID,
+				Receipts: []k12.DeliveryReceipt{part("accepted", "markdown", "", 1)}}
+			if scenario == "still_sending" {
+				final.Status = k12.DeliveryBatchOutcomeUnknown
+				final.Receipts[1].Status = k12.DeliveryOutcomeUnknown
+			}
+			if scenario == "wrong_notice_target" {
+				notice.Receipts[0].Target.InstanceID = "another-bot"
+			}
+			batches := &finalReplyBatchFake{existing: final, statusNotices: map[string]k12.DeliveryBatch{
+				bundle.Receipt.AgentName + "/" + k12DingtalkPhotoStatusNoticeKind + "/" + objectID: notice,
+			}}
+			inbound := &inboundPhotoCoordinatorFake{bundle: bundle}
+			recalls := 0
+			failure := errors.New("provider recall failed")
+			config := k12DingtalkPhotoInboundRuntimeConfig{Inbound: inbound, ReplyBatches: batches,
+				RecallStatusNotice: func(ctx context.Context, instance, external string) error {
+					recalls++
+					if ctx.Err() != nil || instance != "family-bot" || external != "accepted-provider" {
+						t.Fatalf("recall lost original notice identity: %s/%s, %v", instance, external, ctx.Err())
+					}
+					if scenario == "recall_failure_restart" && recalls == 1 {
+						return failure
+					}
+					return nil
+				}}
+			r := newK12DingtalkPhotoInboundRuntime(config)
+			done, err := r.completeBoundReply(ctx, bundle)
+			switch scenario {
+			case "delivered":
+				if err != nil || !done || !inbound.completed || recalls != 1 {
+					t.Fatalf("completed reply did not clean its notice: done=%v recall=%d err=%v", done, recalls, err)
+				}
+			case "still_sending":
+				if err != nil || done || inbound.completed || recalls != 0 {
+					t.Fatal("unfinished reply removed progress or completed the task")
+				}
+			case "wrong_notice_target":
+				if err == nil || done || recalls != 0 || inbound.completed {
+					t.Fatal("notice target drift allowed recall")
+				}
+			case "recall_failure_restart":
+				if !errors.Is(err, failure) || done || inbound.completed {
+					t.Fatalf("failed cleanup lost pending state: %v", err)
+				}
+				restarted := newK12DingtalkPhotoInboundRuntime(config)
+				done, err = restarted.completeBoundReply(ctx, bundle)
+				if err != nil || !done || !inbound.completed || recalls != 2 {
+					t.Fatalf("restart did not resume original cleanup: %v", err)
+				}
+			}
+			if batches.prepareCalls != 0 || batches.existing.BatchID != "final-batch" {
+				t.Fatal("cleanup prepared or replaced the already delivered final reply")
+			}
+		})
+	}
+}
+
 func (p *statusNoticeTransport) PrepareText(context.Context, string, string) (k12usecase.PreparedTextDelivery, error) {
 	return k12usecase.PreparedTextDelivery{}, errors.New("unexpected mutable target resolution")
 }

@@ -3257,9 +3257,10 @@ Set source only when the material explicitly names a work, title, or another rel
 				BindDirect: func(bindCtx context.Context, msg *adapter.Message) error {
 					return ensureK12DingTalkDirectBinding(bindCtx, msg, agentRouter, k12InboundBinder)
 				},
-				ResolveInstanceID: instanceMgr.ResolveRunningInstanceID,
-				ResolveRoute:      k12ImageTasks.ResolveRoute,
-				Inbound:           k12InboundPhotos, ImageTasks: k12ImageTasks,
+				ResolveInstanceID:  instanceMgr.ResolveRunningInstanceID,
+				RecallStatusNotice: instanceMgr.RecallMessage,
+				ResolveRoute:       k12ImageTasks.ResolveRoute,
+				Inbound:            k12InboundPhotos, ImageTasks: k12ImageTasks,
 				PracticeSets: practiceReturns, PracticeReturns: practiceReturns,
 				Artifacts: k12Runtime.Records, ReplyBatches: &k12Runtime.Deps,
 			},

@@ -82,42 +82,44 @@ type k12DingtalkPhotoInboundRuntimeConfig struct {
 	Router        *agentrouter.Dispatcher
 	Check         func(context.Context, *adapter.Message) error
 	// BindDirect 在适配器事件进入 ACK 前，把 direct sender 提升为耐久 K12 物理目标绑定。
-	BindDirect        func(context.Context, *adapter.Message) error
-	ResolveInstanceID func(string, string) (string, error)
-	ResolveRoute      func(k12.ImageTaskRouteSnapshot) (k12.ImageTaskRouteSnapshot, error)
-	Inbound           k12InboundPhotoCoordinatorPort
-	ImageTasks        k12InboundPhotoImageTaskPort
-	PracticeSets      k12InboundPhotoPracticeSetReader
-	PracticeReturns   k12InboundPhotoPracticeReturnPort
-	Artifacts         k12InboundPhotoFinalArtifactReader
-	ReplyBatches      k12DingtalkPhotoReplyIdentityPort
-	Now               func() int64
-	PollInterval      time.Duration
-	RetryInterval     time.Duration
-	RestartCheckpoint k12DingtalkPhotoRestartCheckpointPort
+	BindDirect         func(context.Context, *adapter.Message) error
+	ResolveInstanceID  func(string, string) (string, error)
+	RecallStatusNotice func(context.Context, string, string) error
+	ResolveRoute       func(k12.ImageTaskRouteSnapshot) (k12.ImageTaskRouteSnapshot, error)
+	Inbound            k12InboundPhotoCoordinatorPort
+	ImageTasks         k12InboundPhotoImageTaskPort
+	PracticeSets       k12InboundPhotoPracticeSetReader
+	PracticeReturns    k12InboundPhotoPracticeReturnPort
+	Artifacts          k12InboundPhotoFinalArtifactReader
+	ReplyBatches       k12DingtalkPhotoReplyIdentityPort
+	Now                func() int64
+	PollInterval       time.Duration
+	RetryInterval      time.Duration
+	RestartCheckpoint  k12DingtalkPhotoRestartCheckpointPort
 }
 
 // k12DingtalkPhotoInboundRuntime 只编排 V88、ImageTask、V89 与既有 DeliveryBatch；
 // 各自的幂等、CAS、媒体准备与回执状态机仍由原有领域实现唯一拥有。
 type k12DingtalkPhotoInboundRuntime struct {
-	messageLocale     func() string
-	baseCtx           context.Context
-	router            *agentrouter.Dispatcher
-	check             func(context.Context, *adapter.Message) error
-	bindDirect        func(context.Context, *adapter.Message) error
-	resolveInstanceID func(string, string) (string, error)
-	resolveRoute      func(k12.ImageTaskRouteSnapshot) (k12.ImageTaskRouteSnapshot, error)
-	inbound           k12InboundPhotoCoordinatorPort
-	imageTasks        k12InboundPhotoImageTaskPort
-	practiceSets      k12InboundPhotoPracticeSetReader
-	practiceReturns   k12InboundPhotoPracticeReturnPort
-	artifacts         k12InboundPhotoFinalArtifactReader
-	replyBatches      k12DingtalkPhotoReplyIdentityPort
-	replies           *k12DingtalkPhotoReplyCoordinator
-	pollInterval      time.Duration
-	retryInterval     time.Duration
-	now               func() int64
-	restartCheckpoint k12DingtalkPhotoRestartCheckpointPort
+	messageLocale      func() string
+	baseCtx            context.Context
+	router             *agentrouter.Dispatcher
+	check              func(context.Context, *adapter.Message) error
+	bindDirect         func(context.Context, *adapter.Message) error
+	resolveInstanceID  func(string, string) (string, error)
+	recallStatusNotice func(context.Context, string, string) error
+	resolveRoute       func(k12.ImageTaskRouteSnapshot) (k12.ImageTaskRouteSnapshot, error)
+	inbound            k12InboundPhotoCoordinatorPort
+	imageTasks         k12InboundPhotoImageTaskPort
+	practiceSets       k12InboundPhotoPracticeSetReader
+	practiceReturns    k12InboundPhotoPracticeReturnPort
+	artifacts          k12InboundPhotoFinalArtifactReader
+	replyBatches       k12DingtalkPhotoReplyIdentityPort
+	replies            *k12DingtalkPhotoReplyCoordinator
+	pollInterval       time.Duration
+	retryInterval      time.Duration
+	now                func() int64
+	restartCheckpoint  k12DingtalkPhotoRestartCheckpointPort
 
 	workerMu sync.Mutex
 	running  map[string]struct{}
@@ -144,11 +146,12 @@ func newK12DingtalkPhotoInboundRuntime(
 	}
 	runtime := &k12DingtalkPhotoInboundRuntime{
 		baseCtx: baseCtx, router: config.Router, check: config.Check,
-		bindDirect:        config.BindDirect,
-		resolveInstanceID: config.ResolveInstanceID,
-		resolveRoute:      config.ResolveRoute,
-		messageLocale:     config.MessageLocale,
-		inbound:           config.Inbound, imageTasks: config.ImageTasks,
+		bindDirect:         config.BindDirect,
+		resolveInstanceID:  config.ResolveInstanceID,
+		recallStatusNotice: config.RecallStatusNotice,
+		resolveRoute:       config.ResolveRoute,
+		messageLocale:      config.MessageLocale,
+		inbound:            config.Inbound, imageTasks: config.ImageTasks,
 		practiceSets: config.PracticeSets, practiceReturns: config.PracticeReturns,
 		artifacts: config.Artifacts, replyBatches: config.ReplyBatches,
 		pollInterval: pollInterval, retryInterval: retryInterval,
@@ -1134,6 +1137,10 @@ func (r *k12DingtalkPhotoInboundRuntime) completeBoundReply(
 	}
 	if batch.Status != k12.DeliveryBatchDelivered {
 		return false, nil
+	}
+	// 清理失败只重读已经送达的批次；不会再走模型或终稿发送路径。
+	if err := r.recallAcceptedStatusNotice(ctx, bundle); err != nil {
+		return false, err
 	}
 	completed, err := r.inbound.CompleteReply(
 		ctx, bundle.Receipt.AgentName, bundle.Receipt.ReceiptID, bundle.Dispatch.Version,
