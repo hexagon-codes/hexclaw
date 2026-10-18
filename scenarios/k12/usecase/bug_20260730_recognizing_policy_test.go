@@ -608,7 +608,7 @@ func TestBug20260730ApprovedRecognitionWithoutPhysicalChildFailsClosed(t *testin
 	}
 }
 
-func TestBug20260730MissingRecognizingPolicyFailsBeforeProvider(t *testing.T) {
+func TestBug20260730ModelNameDoesNotRequireRecognizingPolicy(t *testing.T) {
 	recognizer := &dd036UnexpectedCallRecognizer{}
 	deps, _ := newPipeline(t,
 		fakeSolver{
@@ -633,7 +633,7 @@ func TestBug20260730MissingRecognizingPolicyFailsBeforeProvider(t *testing.T) {
 			return snapshot, nil
 		},
 	))
-	_, created, err := orchestrator.StartPhotoGradingJob(
+	job, created, err := orchestrator.StartPhotoGradingJob(
 		context.Background(),
 		StartPhotoGradingInput{
 			Photo:      orchestratorPhotoRequest(),
@@ -641,8 +641,11 @@ func TestBug20260730MissingRecognizingPolicyFailsBeforeProvider(t *testing.T) {
 			SourceKey:  "dd036-missing-policy",
 		},
 	)
-	if err == nil || created {
-		t.Fatalf("missing frozen policy start created=%v err=%v, want pre-persistence rejection", created, err)
+	if err != nil || !created {
+		t.Fatalf("zero frozen policy start created=%v err=%v, want accepted", created, err)
+	}
+	if !job.Fields.ModelSnapshot.RecognizingRequestPolicy.IsZero() {
+		t.Fatal("model name filled an unfrozen request policy")
 	}
 	if recognizer.calls != 0 {
 		t.Fatalf("missing policy reached provider boundary %d times", recognizer.calls)

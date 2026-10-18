@@ -94,22 +94,14 @@ func (policy ModelRequestPolicySnapshot) Digest() string {
 func ValidateGradingRecognizingRequestPolicy(snapshot GradingModelSnapshot) error {
 	snapshot = NormalizeGradingModelSnapshot(snapshot)
 	policy := NormalizeModelRequestPolicySnapshot(snapshot.RecognizingRequestPolicy)
-	if snapshot.Model == RecognizingPolicyModel {
-		if policy != ApprovedRecognizingRequestPolicy() {
-			return fmt.Errorf(
-				"recognizing request policy missing or invalid for model %q",
-				snapshot.Model,
-			)
-		}
+	if policy.IsZero() || policy == ConfiguredRecognizingRequestPolicy() {
 		return nil
 	}
-	if !policy.IsZero() && policy != ConfiguredRecognizingRequestPolicy() {
-		return fmt.Errorf(
-			"recognizing request policy is not approved for model %q",
-			snapshot.Model,
-		)
+	// 历史任务的显式策略只按原合同读取，不再按型号给新任务补策略。
+	if policy == ApprovedRecognizingRequestPolicy() && snapshot.Model == RecognizingPolicyModel {
+		return nil
 	}
-	return nil
+	return fmt.Errorf("recognizing request policy is not approved for model %q", snapshot.Model)
 }
 
 // ValidateModelInvocationRequestPolicy checks the per-invocation copy against
@@ -123,13 +115,11 @@ func ValidateModelInvocationRequestPolicy(
 	route = NormalizeGradingModelSnapshot(route)
 	policy = NormalizeModelRequestPolicySnapshot(policy)
 	if stage == GradingStageLocating {
-		// 历史 locating invocation 的零策略仍可读；新 Sol 调用由
-		// 编排器显式冻结独立的低延迟策略。
+		// 定位仅沿用任务显式冻结的识别能力合同，零策略不按型号补齐。
 		if policy.IsZero() {
 			return nil
 		}
-		if !policy.IsApprovedLocating() || (route.Model != RecognizingPolicyModel &&
-			route.RecognizingRequestPolicy != ConfiguredRecognizingRequestPolicy()) {
+		if !policy.IsApprovedLocating() || !route.RecognizingRequestPolicy.IsApprovedRecognizing() {
 			return fmt.Errorf("locating request policy is not approved for model %q", route.Model)
 		}
 		return nil

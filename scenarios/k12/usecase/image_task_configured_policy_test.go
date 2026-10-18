@@ -33,7 +33,7 @@ func TestImageTaskConfiguredPolicyPersistsAndReplaysWithoutCallingProvider(t *te
 				return route, err
 			}
 			input := testCreateImageTaskInput()
-			input.RouteRequest.Provider, input.RouteRequest.Model = "cloud-gpt", "gpt-6-sol"
+			input.RouteRequest.Provider, input.RouteRequest.Model = "school-provider", "school-reader"
 			prepared, created, err := original.Create(context.Background(), input)
 			if err != nil || !created {
 				t.Fatalf("prepare: created=%v err=%v", created, err)
@@ -72,7 +72,7 @@ func TestImageTaskConfiguredPolicyPersistsAndReplaysWithoutCallingProvider(t *te
 func TestImageTaskLegacyPolicyUnknownRemainsParkedAfterUpgrade(t *testing.T) {
 	original, _ := newImageTaskCoordinatorForTest(t, &imageTaskClassifierStub{})
 	input := testCreateImageTaskInput()
-	input.RouteRequest.Provider, input.RouteRequest.Model = "cloud-gpt", "gpt-6-sol"
+	input.RouteRequest.Provider, input.RouteRequest.Model = "school-provider", k12.RecognizingPolicyModel
 	prepared, _, err := original.Create(context.Background(), input)
 	if err != nil {
 		t.Fatal(err)

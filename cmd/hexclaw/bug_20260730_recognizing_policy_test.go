@@ -28,7 +28,11 @@ func TestBug20260730ResolvedGradingSnapshotFreezesRecognizingPolicy(t *testing.T
 				Models:         []string{"gpt-5.6-sol"},
 				ModelSpecsMode: config.LLMModelSpecsModeExplicit,
 				ModelSpecs: []config.LLMProviderModelSpec{{
-					ID: "gpt-5.6-sol",
+					ID:               "gpt-5.6-sol",
+					ReasoningSupport: config.LLMReasoningSupportSupported,
+					ReasoningControl: &config.LLMReasoningControlSpec{
+						Dialect: config.LLMReasoningDialectEffort, On: "medium", Off: "none",
+					},
 					Capabilities: []string{
 						config.LLMModelCapabilityText,
 						config.LLMModelCapabilityVision,

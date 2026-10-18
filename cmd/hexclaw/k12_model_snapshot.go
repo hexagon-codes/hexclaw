@@ -34,14 +34,11 @@ func resolveK12GradingModelSnapshot(
 		Capability:         config.LLMModelCapabilityVision,
 		TimeoutMS:          int(k12.GradingStageBudgetSeconds(k12.GradingStageRecognizing) * 1000),
 	}
-	if snapshot.Model == k12.RecognizingPolicyModel {
-		snapshot.RecognizingRequestPolicy = k12.ApprovedRecognizingRequestPolicy()
-	} else if snapshot.Provider == "cloud-gpt" && snapshot.Model == "gpt-6-sol" {
-		support, control := config.ModelReasoningControl(providerConfig, snapshot.Model)
-		if support == config.LLMReasoningSupportSupported && control != nil &&
-			control.Dialect == config.LLMReasoningDialectEffort && control.Off == "none" {
-			snapshot.RecognizingRequestPolicy = k12.ConfiguredRecognizingRequestPolicy()
-		}
+	// 新任务只依据当前供应商与模型的显式控制合同冻结策略，不从名称推断能力。
+	support, control := config.ModelReasoningControl(providerConfig, snapshot.Model)
+	if support == config.LLMReasoningSupportSupported && control != nil &&
+		control.Dialect == config.LLMReasoningDialectEffort && control.Off == "none" {
+		snapshot.RecognizingRequestPolicy = k12.ConfiguredRecognizingRequestPolicy()
 	}
 	return k12.NormalizeGradingModelSnapshot(snapshot), nil
 }
@@ -89,7 +86,7 @@ func k12ProviderInstanceID(router *llmrouter.Selector, providerName string) (str
 }
 
 // k12ProviderLogIdentity 分开记录路由注册名与底层兼容适配器名，避免把
-// hexclaw-gpt 使用 OpenAI-compatible adapter 误读成跨 Provider 路由。
+// 自定义供应商使用兼容适配器误读成跨 Provider 路由。
 func k12ProviderLogIdentity(ctx context.Context, provider llm.Provider) (routeProvider, adapterProvider string) {
 	if provider == nil {
 		return "", ""
@@ -165,10 +162,7 @@ func resolveK12FrozenTextCompletionRoute(
 	return provider, "", nil
 }
 
-// k12VisionRequestMetadata translates the typed, stage-scoped semantic policy
-// into ai-core metadata plus the typed adapter inference scope. The Provider
-// adapter, not HexClaw, owns the final wire dialect
-// (`reasoning_effort=none` for gpt-5.6-sol).
+// k12VisionRequestMetadata 将冻结的阶段策略交给适配器；显式控制映射仍由路由层逐次核对。
 func k12VisionRequestMetadata(
 	ctx context.Context,
 ) (map[string]any, llm.ReasoningPolicyScope, error) {

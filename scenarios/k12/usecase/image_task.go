@@ -703,9 +703,6 @@ func gradingSnapshotFromImageRoute(route k12.ImageTaskRouteSnapshot) k12.Grading
 		Fallback:                 route.FallbackPolicy,
 		RecognizingRequestPolicy: route.RecognizingRequestPolicy,
 	}
-	if snapshot.Model == k12.RecognizingPolicyModel && snapshot.RecognizingRequestPolicy.IsZero() {
-		snapshot.RecognizingRequestPolicy = k12.ApprovedRecognizingRequestPolicy()
-	}
 	return k12.NormalizeGradingModelSnapshot(snapshot)
 }
 

@@ -130,11 +130,6 @@ func completeKnowledgePDFPageOCR(
 			},
 		}},
 	}
-	if model == k12.RecognizingPolicyModel {
-		// 教材逐页 OCR 只做忠实转写，关闭与结果无关的模型推理。
-		request.Metadata = map[string]any{"thinking": "off"}
-		request.ReasoningPolicyScope = llm.ReasoningPolicyScopeStructuredVisionRecognition
-	}
 	// 逐页预算也是本次请求的响应头等待上限，避免共享客户端提前截断转写。
 	if deadline, ok := ctx.Deadline(); ok {
 		ctx = egress.WithProviderRequestResponseHeaderTimeout(ctx, time.Until(deadline))
@@ -2006,8 +2001,7 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 					return "", rErr
 				}
 			}
-			// 路由注册名与兼容适配器名必须分开记录，避免把 hexclaw-gpt 的
-			// OpenAI-compatible adapter 误读成跨 Provider 路由。
+			// 路由注册名与兼容适配器名分开记录，避免将自定义供应商的适配器误读成跨供应商路由。
 			routeProvider, adapterProvider := k12ProviderLogIdentity(ctx, provider)
 			logger.Info("[k12识题] 视觉模型已路由", "route_provider", routeProvider,
 				"adapter_provider", adapterProvider, "model", visionModel,

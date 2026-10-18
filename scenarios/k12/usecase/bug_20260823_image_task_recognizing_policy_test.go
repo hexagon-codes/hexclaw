@@ -6,13 +6,13 @@ import (
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 )
 
-func TestREGBUGK12ImageTaskRecognizingPolicy001SolRouteRestoresApprovedPolicy(t *testing.T) {
+func TestREGBUGK12ImageTaskRecognizingPolicy001ModelNameKeepsZeroPolicy(t *testing.T) {
 	got := gradingSnapshotFromImageRoute(k12.ImageTaskRouteSnapshot{
 		Provider: "hexclaw-gpt",
 		Model:    k12.RecognizingPolicyModel,
 	})
-	if got.RecognizingRequestPolicy != k12.ApprovedRecognizingRequestPolicy() {
-		t.Fatalf("Sol ImageTask route lost its approved recognizing policy: %+v", got)
+	if !got.RecognizingRequestPolicy.IsZero() {
+		t.Fatalf("model name added an unfrozen recognizing policy: %+v", got)
 	}
 	if err := k12.ValidateGradingRecognizingRequestPolicy(got); err != nil {
 		t.Fatalf("Sol ImageTask route cannot enter GradingJob: %v", err)
@@ -43,6 +43,11 @@ func TestREGBUGK12ImageTaskRecognizingPolicy001CoordinatorPassesPolicyToGradingJ
 		Confidence:     0.99,
 	}}
 	coordinator, grading := newImageTaskCoordinatorForTest(t, classifier)
+	coordinator.ResolveRoute = func(requested k12.ImageTaskRouteSnapshot) (k12.ImageTaskRouteSnapshot, error) {
+		route, err := imageTaskRouteForTest(requested)
+		route.RecognizingRequestPolicy = k12.ApprovedRecognizingRequestPolicy()
+		return route, err
+	}
 	view, created, err := createAndRunImageTask(t, coordinator, testCreateImageTaskInput())
 	if err != nil || !created || view.Homework == nil || grading.starts != 1 {
 		t.Fatalf("run completed-homework ImageTask: created=%v starts=%d homework=%t err=%v",

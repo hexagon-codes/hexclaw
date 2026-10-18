@@ -75,3 +75,35 @@ func TestConfiguredRecognitionPolicyRemainsStageScoped(t *testing.T) {
 		t.Fatalf("legacy zero policy rejected: %v", err)
 	}
 }
+
+func TestRecognizingAndLocatingPolicyFollowFrozenContractNotModelName(t *testing.T) {
+	for _, tc := range []struct {
+		name, model string
+		policy      ModelRequestPolicySnapshot
+		valid       bool
+	}{
+		{"named_model_without_policy", RecognizingPolicyModel, ModelRequestPolicySnapshot{}, true},
+		{"custom_model_without_policy", "school-reader", ModelRequestPolicySnapshot{}, true},
+		{"named_model_configured_policy", RecognizingPolicyModel, ConfiguredRecognizingRequestPolicy(), true},
+		{"custom_model_configured_policy", "school-reader", ConfiguredRecognizingRequestPolicy(), true},
+		{"legacy_explicit_contract", RecognizingPolicyModel, ApprovedRecognizingRequestPolicy(), true},
+		{"legacy_contract_does_not_expand", "school-reader", ApprovedRecognizingRequestPolicy(), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			route := GradingModelSnapshot{Provider: "school-provider", Model: tc.model, Route: "school-provider/" + tc.model, RecognizingRequestPolicy: tc.policy}
+			if err := ValidateGradingRecognizingRequestPolicy(route); (err == nil) != tc.valid {
+				t.Fatalf("frozen route validation: %v", err)
+			}
+			if !tc.valid {
+				return
+			}
+			if err := ValidateModelInvocationRequestPolicy(GradingStageRecognizing, route, tc.policy); err != nil {
+				t.Fatalf("same frozen invocation rejected: %v", err)
+			}
+			err := ValidateModelInvocationRequestPolicy(GradingStageLocating, route, ApprovedLocatingRequestPolicy())
+			if (err == nil) != !tc.policy.IsZero() {
+				t.Fatalf("locating authorization must follow explicit recognition policy: %v", err)
+			}
+		})
+	}
+}

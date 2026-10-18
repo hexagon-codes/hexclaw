@@ -72,6 +72,9 @@ func TestKnowledgeOCRAdapterUsesFaithfulTextbookTranscriptionAndRealRouteReceipt
 		len(provider.request.Messages[0].MultiContent) != 2 {
 		t.Fatalf("OCR request=%+v", provider.request)
 	}
+	if len(provider.request.Metadata) != 0 || provider.request.ReasoningPolicyScope != "" {
+		t.Fatal("OCR inferred a reasoning policy from the model name")
+	}
 	prompt := provider.request.Messages[0].MultiContent[0].Text
 	for _, required := range []string{
 		"Faithfully transcribe", "all visible text", "mathematical formulas",

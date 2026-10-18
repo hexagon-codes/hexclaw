@@ -14,6 +14,25 @@ import (
 )
 
 func TestConfiguredRecognizingPolicyWireAndStageIsolation(t *testing.T) {
+	for _, route := range []struct{ provider, model string }{
+		{provider: "provider-a", model: "model-vision-a"},
+		{provider: "provider-b", model: "model-vision-b"},
+	} {
+		t.Run(route.provider, func(t *testing.T) {
+			testConfiguredRecognizingPolicyWireAndStageIsolation(t, route.provider, route.model)
+		})
+	}
+	t.Run("empty configuration cannot invent a route", func(t *testing.T) {
+		router := llmrouter.NewWithProviders(config.LLMConfig{}, map[string]hexagon.Provider{})
+		got, err := resolveK12GradingModelSnapshot(router, k12.GradingModelSnapshot{})
+		if err == nil || got.Provider != "" || got.Model != "" || !got.RecognizingRequestPolicy.IsZero() {
+			t.Fatalf("empty configuration acquired a route or policy: %+v err=%v", got, err)
+		}
+	})
+}
+
+func testConfiguredRecognizingPolicyWireAndStageIsolation(t *testing.T, providerName, model string) {
+	t.Helper()
 	var payloads []map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
@@ -28,10 +47,11 @@ func TestConfiguredRecognizingPolicyWireAndStageIsolation(t *testing.T) {
 	}))
 	defer server.Close()
 	providerConfig := config.LLMProviderConfig{
-		APIKey: "test-only", BaseURL: server.URL, Model: "gpt-6-sol",
+		ProviderInstanceID: "instance-" + providerName,
+		APIKey:             "test-only", BaseURL: server.URL, Model: model,
 		ModelSpecsMode: config.LLMModelSpecsModeExplicit,
 		ModelSpecs: []config.LLMProviderModelSpec{{
-			ID: "gpt-6-sol", Capabilities: []string{"text", "vision"},
+			ID: model, Capabilities: []string{"text", "vision"},
 			ReasoningSupport: config.LLMReasoningSupportSupported,
 			ReasoningControl: &config.LLMReasoningControlSpec{
 				Dialect: config.LLMReasoningDialectEffort, On: "medium", Off: "none",
@@ -43,7 +63,7 @@ func TestConfiguredRecognizingPolicyWireAndStageIsolation(t *testing.T) {
 			Default: name, Providers: map[string]config.LLMProviderConfig{name: cfg},
 		}, map[string]hexagon.Provider{name: llmrouter.NewProviderFromConfig(name, cfg)})
 	}
-	router := makeRouter("cloud-gpt", providerConfig)
+	router := makeRouter(providerName, providerConfig)
 	snapshot, err := resolveK12GradingModelSnapshot(router, k12.GradingModelSnapshot{})
 	if err != nil {
 		t.Fatal(err)
@@ -51,7 +71,10 @@ func TestConfiguredRecognizingPolicyWireAndStageIsolation(t *testing.T) {
 	if snapshot.RecognizingRequestPolicy != k12.ConfiguredRecognizingRequestPolicy() {
 		t.Fatalf("new route did not freeze verified policy: %+v", snapshot)
 	}
-	provider, _ := router.Get("cloud-gpt")
+	if snapshot.Provider != providerName || snapshot.Model != model || snapshot.ProviderInstanceID != "instance-"+providerName {
+		t.Fatalf("configured route identity changed: %+v", snapshot)
+	}
+	provider, _ := router.Get(providerName)
 	for _, stage := range []string{k12.GradingStageRecognizing, k12.GradingStageLocating, "solve_verify", "ordinary"} {
 		t.Run(stage, func(t *testing.T) {
 			ctx := k12.WithGradingModelSnapshot(context.Background(), snapshot)
@@ -82,7 +105,7 @@ func TestConfiguredRecognizingPolicyWireAndStageIsolation(t *testing.T) {
 		changed.ModelSpecs[0].ReasoningControl = &config.LLMReasoningControlSpec{
 			Dialect: config.LLMReasoningDialectEffort, On: "medium", Off: "low",
 		}
-		changedProvider, _ := makeRouter("cloud-gpt", changed).Get("cloud-gpt")
+		changedProvider, _ := makeRouter(providerName, changed).Get(providerName)
 		ctx := k12.WithGradingModelRequestPolicy(k12.WithGradingModelSnapshot(context.Background(), snapshot), snapshot.RecognizingRequestPolicy)
 		before := len(payloads)
 		if _, err := completeK12VisionRequest(ctx, changedProvider, snapshot.Model, []byte("image"), "recognize"); err == nil {
@@ -92,16 +115,25 @@ func TestConfiguredRecognizingPolicyWireAndStageIsolation(t *testing.T) {
 			t.Fatal("drifted request was sent")
 		}
 	})
-	for _, name := range []string{"unknown capability", "other provider"} {
+	for _, name := range []string{"unknown capability", "native reasoning without control", "off value differs", "historical model name without control"} {
 		t.Run(name, func(t *testing.T) {
 			cfg := providerConfig
 			cfg.ModelSpecs = append([]config.LLMProviderModelSpec(nil), providerConfig.ModelSpecs...)
-			providerName := "cloud-gpt"
-			if name == "unknown capability" {
+			switch name {
+			case "unknown capability":
 				cfg.ModelSpecs[0].ReasoningSupport = config.LLMReasoningSupportUnknown
 				cfg.ModelSpecs[0].ReasoningControl = nil
-			} else {
-				providerName = "another-route"
+			case "native reasoning without control":
+				cfg.ModelSpecs[0].ReasoningControl = nil
+			case "off value differs":
+				cfg.ModelSpecs[0].ReasoningControl = &config.LLMReasoningControlSpec{
+					Dialect: config.LLMReasoningDialectEffort, On: "medium", Off: "low",
+				}
+			case "historical model name without control":
+				cfg.Model = k12.RecognizingPolicyModel
+				cfg.ModelSpecs[0].ID = cfg.Model
+				cfg.ModelSpecs[0].ReasoningSupport = config.LLMReasoningSupportUnknown
+				cfg.ModelSpecs[0].ReasoningControl = nil
 			}
 			got, err := resolveK12GradingModelSnapshot(makeRouter(providerName, cfg), k12.GradingModelSnapshot{})
 			if err != nil {
