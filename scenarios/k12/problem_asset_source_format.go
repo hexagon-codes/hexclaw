@@ -3,6 +3,7 @@ package k12
 import (
 	"regexp"
 	"strings"
+	"unicode"
 )
 
 var (
@@ -11,7 +12,7 @@ var (
 )
 
 // ProblemAssetSourceFormatCandidates 为严格数学来源排版生成有限精确查找副本。
-// 仅支持完整分数与单位 span，纯空模板须有调用方的冻结空白作答证据。
+// 支持完整分数单位 span 及中文数量边界的展示空格；纯空模板须有冻结空白作答证据。
 // 不改写 v1 身份，不规范化中文或其他事实，不扫描候选资产。
 func ProblemAssetSourceFormatCandidates(facts ProblemAssetFacts, allowBlankTemplate bool) []ProblemAssetFacts {
 	if normalizeAssetText(facts.Subject) != "数学" {
@@ -19,7 +20,13 @@ func ProblemAssetSourceFormatCandidates(facts ProblemAssetFacts, allowBlankTempl
 	}
 	normal, historical, ok := problemAssetSourceFormatStem(facts.Stem, allowBlankTemplate)
 	if !ok {
-		return nil
+		compact, supported := problemAssetPlainQuantitySpacingStem(facts.Stem)
+		if !supported || compact == normalizeAssetText(facts.Stem) {
+			return nil
+		}
+		candidate := facts
+		candidate.Stem = compact
+		return []ProblemAssetFacts{candidate}
 	}
 	first, second := facts, facts
 	first.Stem, second.Stem = normal, historical
@@ -34,6 +41,10 @@ func EquivalentProblemAssetSourceFormat(left, right ProblemAssetFacts, allowBlan
 	}
 	leftStem, _, leftOK := problemAssetSourceFormatStem(left.Stem, allowBlankTemplate)
 	rightStem, _, rightOK := problemAssetSourceFormatStem(right.Stem, allowBlankTemplate)
+	if !leftOK || !rightOK {
+		leftStem, leftOK = problemAssetPlainQuantitySpacingStem(left.Stem)
+		rightStem, rightOK = problemAssetPlainQuantitySpacingStem(right.Stem)
+	}
 	if !leftOK || !rightOK || leftStem != rightStem {
 		return false
 	}
@@ -41,6 +52,64 @@ func EquivalentProblemAssetSourceFormat(left, right ProblemAssetFacts, allowBlan
 	leftID, leftErr := left.ExactIdentity("math-source-format-v1")
 	rightID, rightErr := right.ExactIdentity("math-source-format-v1")
 	return leftErr == nil && rightErr == nil && leftID.FactsDigest == rightID.FactsDigest
+}
+
+// problemAssetPlainQuantitySpacingStem 只移除完整数量 token 与相邻汉字间的 ASCII 空格。
+// 数字间空格、带分数、数字内部空格及其它排版均不进入此候选通道；原事实保持不变。
+func problemAssetPlainQuantitySpacingStem(stem string) (string, bool) {
+	runes := []rune(normalizeAssetText(stem))
+	starts, ends := make([]bool, len(runes)), make([]bool, len(runes))
+	hasHan, hasQuantity := false, false
+	isDigit := func(r rune) bool { return r >= '0' && r <= '9' }
+	for i := 0; i < len(runes); {
+		r := runes[i]
+		if isDigit(r) {
+			start := i
+			for i < len(runes) && isDigit(runes[i]) {
+				i++
+			}
+			// 一个数量是整数、小数或紧连的整数分数，不合并或求值。
+			if i < len(runes) && (runes[i] == '.' || runes[i] == '/') {
+				i++
+				if i == len(runes) || !isDigit(runes[i]) {
+					return "", false
+				}
+				for i < len(runes) && isDigit(runes[i]) {
+					i++
+				}
+			}
+			starts[start], ends[i-1], hasQuantity = true, true, true
+			continue
+		}
+		if unicode.Is(unicode.Han, r) {
+			hasHan = true
+		} else if r != ' ' && !strings.ContainsRune("，。！？；：、（）()[]", r) {
+			// 英文、变量、引号、公式标记和换行等保留各自原有语义，不猜测等价。
+			return "", false
+		}
+		i++
+	}
+	if !hasHan || !hasQuantity {
+		return "", false
+	}
+	var compact strings.Builder
+	for i := 0; i < len(runes); {
+		if runes[i] != ' ' {
+			compact.WriteRune(runes[i])
+			i++
+			continue
+		}
+		end := i
+		for end < len(runes) && runes[end] == ' ' {
+			end++
+		}
+		if i == 0 || end == len(runes) ||
+			!(unicode.Is(unicode.Han, runes[i-1]) && starts[end] || ends[i-1] && unicode.Is(unicode.Han, runes[end])) {
+			return "", false
+		}
+		i = end
+	}
+	return compact.String(), true
 }
 
 // problemAssetSourceFormatStem 只投影一个来源明确的分数单位 span。

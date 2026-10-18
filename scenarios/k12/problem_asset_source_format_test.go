@@ -10,6 +10,79 @@ const sourceFormatOldBread = `一袋面包重 \(\frac{3}{10}\,\text{kg}\)，3 �
 const sourceFormatHistoricalBread = `一袋面包重 \\(\\frac{3}{10}\\,\\text{kg}\\)，3 袋重多少千克？`
 const sourceFormatNewBread = "一袋面包重 $\\frac{3}{10}\\,\\mathrm{kg}$，3 袋重多少千克？\n\n$\\square\\times\\square=\\square\\（\\mathrm{kg}）$"
 
+func TestProblemAssetSourceFormat_PlainQuantitySpacing(t *testing.T) {
+	for _, tc := range []struct{ name, original, spaced string }{
+		{"ribbon", "一根彩带长3/2米，每段剪成3/10米，可以剪成多少段？", "一根彩带长 3/2 米，每段剪成 3/10 米，可以剪成多少段？"},
+		{"rice", "食堂有60千克大米，用去了总量的2/5，还剩多少千克？", "食堂有60千克大米，用去了总量的 2/5，还剩多少千克？"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			facts := ProblemAssetFacts{Subject: "数学", Stem: tc.spaced, AnswerContext: map[string]string{"grade_term": "六年级上"}}
+			before, err := facts.ExactIdentity("owner")
+			if err != nil {
+				t.Fatal(err)
+			}
+			original := facts
+			original.Stem = tc.original
+			originalID, err := original.ExactIdentity("owner")
+			if err != nil || originalID.FactsDigest == before.FactsDigest {
+				t.Fatal("lookup must preserve distinct original v1 identities")
+			}
+			for _, blank := range []bool{false, true} {
+				candidates := ProblemAssetSourceFormatCandidates(facts, blank)
+				if len(candidates) != 1 || !reflect.DeepEqual(candidates[0], original) {
+					t.Fatalf("expected one unchanged-facts compact lookup: %+v", candidates)
+				}
+				if !EquivalentProblemAssetSourceFormat(facts, original, blank) || !EquivalentProblemAssetSourceFormat(original, facts, blank) {
+					t.Fatal("quantity boundary spacing must compare symmetrically")
+				}
+				if len(ProblemAssetSourceFormatCandidates(original, blank)) != 0 {
+					t.Fatal("compact input must not fabricate arbitrary historical whitespace variants")
+				}
+			}
+			after, _ := facts.ExactIdentity("owner")
+			if before != after || facts.Stem != tc.spaced || !reflect.DeepEqual(facts.AnswerContext, map[string]string{"grade_term": "六年级上"}) {
+				t.Fatal("lookup mutated current facts or identity")
+			}
+			for _, change := range []struct {
+				name string
+				edit func(*ProblemAssetFacts)
+			}{
+				{"number", func(f *ProblemAssetFacts) { f.Stem = strings.Replace(f.Stem, "/", "0/", 1) }},
+				{"unit", func(f *ProblemAssetFacts) { f.Stem = strings.Replace(f.Stem, "米", "厘米", 1) }},
+				{"grade", func(f *ProblemAssetFacts) { f.AnswerContext = map[string]string{"grade_term": "五年级上"} }},
+			} {
+				t.Run(change.name, func(t *testing.T) {
+					other := original
+					change.edit(&other)
+					if EquivalentProblemAssetSourceFormat(facts, other, false) {
+						t.Fatal("answer-relevant facts changed but candidate remained equivalent")
+					}
+				})
+			}
+		})
+	}
+	for _, tc := range []struct{ name, original, compact string }{
+		{"separate_digits", "一根彩带长 1 2 米。", "一根彩带长12米。"},
+		{"mixed_fraction", "一根彩带长 1 1/2 米。", "一根彩带长11/2米。"},
+		{"fraction_numerator", "一根彩带长 3 /2 米。", "一根彩带长3/2米。"},
+		{"fraction_denominator", "一根彩带长 3/ 2 米。", "一根彩带长3/2米。"},
+		{"decimal_separator", "一根彩带长 1 .5 米。", "一根彩带长1.5米。"},
+		{"line_break", "一根彩带长\n3/2米。", "一根彩带长3/2米。"},
+		{"tab", "一根彩带长\t3/2米。", "一根彩带长3/2米。"},
+		{"english_unit", "一根彩带长 3/2 m。", "一根彩带长3/2m。"},
+		{"quoted_literal", "照抄“长 3/2 米”。", "照抄“长3/2米”。"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			facts := ProblemAssetFacts{Subject: "数学", Stem: tc.original}
+			other := facts
+			other.Stem = tc.compact
+			if len(ProblemAssetSourceFormatCandidates(facts, false)) != 0 || EquivalentProblemAssetSourceFormat(facts, other, false) {
+				t.Fatal("meaningful or unsupported whitespace was removed")
+			}
+		})
+	}
+}
+
 func TestProblemAssetSourceFormat_BreadSourcesAndHistoricalEscaping(t *testing.T) {
 	facts := ProblemAssetFacts{Subject: "数学", Stem: sourceFormatNewBread, AnswerContext: map[string]string{"grade_term": "六年级上"}}
 	before, err := facts.ExactIdentity("owner")
