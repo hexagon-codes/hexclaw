@@ -13,6 +13,8 @@
 //     防 LLM 产物中的 <script> / \write18 进入输出
 //
 // 不暴露为 LLM tool——确定性服务，不消耗推理预算。
+// PDF默认使用内嵌A4排版、数学尺寸、品牌和页码；样式/Logo摘要仅隔离PDF缓存。
+// 已冻结的领域产物继续复用原文件，DOCX/HTML等格式不继承PDF样式。
 package render
 
 import "context"

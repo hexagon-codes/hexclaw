@@ -84,6 +84,9 @@ func (c *Cache) Key(content string, format Format, opts RenderOptions) string {
 	h := sha256.New()
 	// reader 与可见元数据语义变化必须隔离旧产物。
 	h.Write([]byte("reader:math-delimiters-v2|metadata:source-date-v1|"))
+	if format == FormatPDF {
+		h.Write([]byte("pdf-style:" + pdfStyleDigest + "|"))
+	}
 	h.Write([]byte(content))
 	h.Write([]byte("|F:"))
 	h.Write([]byte(format))
