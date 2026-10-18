@@ -117,6 +117,11 @@ type Job struct {
 	LastDeliveryError string `json:"last_delivery_error,omitempty"`
 }
 
+// ScheduleLocation 返回任务实际使用的调度时区；空或无效 TZ 沿用服务本地时区。
+func (j *Job) ScheduleLocation() *time.Location {
+	return jobLocation(j.TZ)
+}
+
 // JobSpec 编译后的可执行规约。一次编译，多次执行，全程零 LLM 调用。
 type JobSpec struct {
 	Runtime    string         `json:"runtime"`   // v1 固定 "python3"
@@ -208,16 +213,17 @@ func agentTimeoutSec(override int) int {
 // v2：每次 tick 直接由 ScriptExecutor 跑 JobSpec.Script，全程零 LLM 调用。
 // 创建任务时由 Compiler 一次性编译；后续运行只跑 Python 沙箱。
 type Scheduler struct {
-	mu         sync.RWMutex
-	db         *sql.DB
-	compiler   JobSpecCompiler
-	scriptExec *ScriptExecutor
-	engines    map[string]ScriptEngine // runtime -> engine (starlark default, python3 optional)
-	agent      agentSupport
-	jobs       map[string]*Job // id -> job
-	stopCh     chan struct{}
-	stopped    bool
-	running    sync.Map // map[string]bool — 正在执行的任务 ID
+	workflowHandler func(context.Context, *Job) (*RunResult, error)
+	mu              sync.RWMutex
+	db              *sql.DB
+	compiler        JobSpecCompiler
+	scriptExec      *ScriptExecutor
+	engines         map[string]ScriptEngine // runtime -> engine (starlark default, python3 optional)
+	agent           agentSupport
+	jobs            map[string]*Job // id -> job
+	stopCh          chan struct{}
+	stopped         bool
+	running         sync.Map // map[string]bool — 正在执行的任务 ID
 
 	// H1 升级成本护栏：jobID → 上次 wake_agent 升级时刻。坏门每 tick 唤醒时，
 	// 把 Agent 升级限制在最小间隔内（同 agent-mode 任务的 1h 下限），防刷 token。
@@ -266,6 +272,13 @@ func NewScheduler(db *sql.DB, compiler JobSpecCompiler, scriptExec *ScriptExecut
 		}
 	}
 	return s
+}
+
+// SetWorkflowHandler 复用调度生命周期执行已保存工作流，不经过脚本编译。
+func (s *Scheduler) SetWorkflowHandler(handler func(context.Context, *Job) (*RunResult, error)) {
+	s.mu.Lock()
+	s.workflowHandler = handler
+	s.mu.Unlock()
 }
 
 // SetMaxConcurrentRuns overrides the global concurrency cap. Must be
@@ -1035,6 +1048,39 @@ func (s *Scheduler) UpsertJobFromScript(ctx context.Context, req AddJobRequest, 
 	return job, nil
 }
 
+// UpsertWorkflowJob 以精确归属键保存绑定，保留暂停状态与历史，不吸收同名普通任务。
+// 调用者提供 workflow runtime、所有者与 SourceKey；校验失败不改变原任务。
+func (s *Scheduler) UpsertWorkflowJob(ctx context.Context, job *Job) (*Job, error) {
+	if job == nil || job.Spec == nil || job.Spec.Runtime != "workflow" || strings.TrimSpace(job.SourceKey) == "" || strings.TrimSpace(job.UserID) == "" {
+		return nil, fmt.Errorf("Workflow job requires runtime, source key and owner")
+	}
+	specJSON, metaJSON, err := prepareJobForPersistence(job)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	req := AddJobRequest{UserID: job.UserID, Name: job.Name, SourceKey: job.SourceKey}
+	staleIDs, err := upsertPreparedJobTx(ctx, tx, req, job, specJSON, metaJSON, false, true)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	for _, id := range staleIDs {
+		delete(s.jobs, id)
+		s.pruneAgentState(id)
+	}
+	s.jobs[job.ID] = job
+	return cloneJobSnapshot(job), nil
+}
+
 // upsertPreparedJobTx 在调用方已持有 Scheduler.mu 的事务内执行单任务覆盖。
 // 它保留 UpsertJobFromScript 的 legacy name 迁移、暂停状态和运行证据合并语义，
 // 同时供场景整组 provision 复用同一事务。
@@ -1045,6 +1091,7 @@ func upsertPreparedJobTx(
 	job *Job,
 	specJSON, metaJSON string,
 	matchExactAcrossUsers bool,
+	strictSourceKey ...bool,
 ) ([]string, error) {
 	query := `SELECT id, name, type, schedule, spec_json, source_prompt, user_id, platform, chat_id, status,
 		last_run_at, next_run_at, run_count, created_at, meta FROM cron_jobs`
@@ -1074,7 +1121,7 @@ func upsertPreparedJobTx(
 		// display-name fallback here could absorb or delete it while migrating an
 		// exact key from an older principal. Single-job Upsert retains the scoped
 		// same-owner legacy-name migration below.
-		sameOwnerLegacyMatch := !matchExactAcrossUsers && existing.UserID == req.UserID &&
+		sameOwnerLegacyMatch := !matchExactAcrossUsers && !(len(strictSourceKey) > 0 && strictSourceKey[0]) && existing.UserID == req.UserID &&
 			jobMatchesIdempotencyKey(existing.SourceKey, existing.Name, req.SourceKey, req.Name)
 		if exactStableKey || sameOwnerLegacyMatch {
 			matches = append(matches, existing)
@@ -1734,7 +1781,7 @@ func (s *Scheduler) triggerJob(ctx context.Context, jobID, ownerID string, owner
 	// Agent-mode jobs run via the injected AgentRunner, not the script executor,
 	// so only script-mode jobs need scriptExec — don't block a webhook-triggered
 	// agent job on it (an agent-only deployment may legitimately have no exec).
-	if s.scriptExec == nil && (j.Spec == nil || j.Spec.Runtime != RuntimeAgent) {
+	if s.scriptExec == nil && (j.Spec == nil || (j.Spec.Runtime != RuntimeAgent && j.Spec.Runtime != "workflow")) {
 		if ownerScoped {
 			return ErrCronExecutorUnavailable
 		}
@@ -2218,7 +2265,14 @@ func (s *Scheduler) executeJob(job *Job) {
 
 	// Outer execution budget — shared timeout resolution with the executor's
 	// inner deadline so the two layers stay self-consistent (review M4).
-	runCtx, cancel := context.WithTimeout(context.Background(), runBudget(job.Spec.TimeoutSec))
+	var runCtx context.Context
+	var cancel context.CancelFunc
+	if job.Spec.Runtime == "workflow" {
+		// 工作流运行快照持有唯一时限；调度层只传递取消，不再用脚本时限截断。
+		runCtx, cancel = context.WithCancel(context.Background())
+	} else {
+		runCtx, cancel = context.WithTimeout(context.Background(), runBudget(job.Spec.TimeoutSec))
+	}
 	defer cancel()
 	// §13.3(2)：把 job lifecycle（ID + generation）带进 ctx。Stable-key
 	// replacement 复用 ID；generation 隔离防旧脚本迟到 state_set 污染新定义。
@@ -2246,7 +2300,16 @@ func (s *Scheduler) executeJob(job *Job) {
 
 	var result *RunResult
 	var runErr error
-	if job.Spec.Runtime == RuntimeAgent {
+	if job.Spec.Runtime == "workflow" {
+		s.mu.RLock()
+		handler := s.workflowHandler
+		s.mu.RUnlock()
+		if handler == nil {
+			runErr = fmt.Errorf("Workflow executor is unavailable")
+		} else {
+			result, runErr = handler(runCtx, job)
+		}
+	} else if job.Spec.Runtime == RuntimeAgent {
 		if job.Continuous {
 			// 持续型任务：每 tick 读检查点 → 只推进一个增量 → 写回档案，目标完成/停滞/达上限自动收工。
 			slog.Info("[cron] running continuous agent job", "source", "cron", "name", job.Name, "id", job.ID)
