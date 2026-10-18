@@ -372,6 +372,10 @@ func (o *SolveSkill) Execute(ctx context.Context, args map[string]any) (*skill.R
 		if o.programFunc != nil && solveProgramEnabled(ctx) {
 			sp.Task = strings.Replace(sp.Task, "涉及计算时可调用 code_exec 写代码精确计算（别口算硬凑）", "涉及数值计算时先建立可检查的数量关系并调用 code_exec 实际计算、代回，再基于执行结果解释，不能口算或把程序文字当已执行结果", 1)
 		}
+		if partCountSlot {
+			// 单一空位只限制最终答案，求解与校验仍须保留可审计的方法。
+			sp.Task += "\n\n当前份数空位的目标约束只限定最终答案，不得因此省略数量关系与理由。请实际调用 code_exec 计算并代回；程序 stdout 除最终份数外，还须输出唯一一条以 check: 开头的真实数值代回等式，校验式只含本题数值、四则运算与括号，单位和含义在正文说明。不得只打印最终数值；解答正文保留本题数量关系、依据与校验，最后再单列答案。"
+		}
 		if childCtx.Err() != nil {
 			break
 		}
