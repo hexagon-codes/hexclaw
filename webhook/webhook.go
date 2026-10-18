@@ -55,6 +55,7 @@ const (
 
 // Webhook 配置
 type Webhook struct {
+	WorkflowID  string      `json:"workflow_id,omitempty"`
 	ID          string      `json:"id"`
 	Name        string      `json:"name"`             // 名称（也是 URL 路径）
 	Type        WebhookType `json:"type"`             // 类型
@@ -71,6 +72,8 @@ type Webhook struct {
 
 // Event Webhook 接收到的事件
 type Event struct {
+	WorkflowID  string         `json:"workflow_id,omitempty"`
+	EventID     string         `json:"event_id,omitempty"`
 	WebhookID   string         `json:"webhook_id"`
 	WebhookName string         `json:"webhook_name"`
 	UserID      string         `json:"user_id"` // Webhook 定义中持久化的可信所有者
@@ -97,6 +100,7 @@ type Manager struct {
 	k12Mu                sync.Mutex // K12 lifecycle/nonce/event acceptance linearization boundary
 	db                   *sql.DB
 	webhooks             map[string]*Webhook // name -> webhook
+	workflowHandler      EventHandler
 	handler              EventHandler
 	k12Handler           K12EventHandler
 	k12Clock             func() time.Time
@@ -130,7 +134,8 @@ func (m *Manager) Init(ctx context.Context) error {
 		last_event_at DATETIME,
 		event_count INTEGER DEFAULT 0,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-		job_id TEXT NOT NULL DEFAULT ''
+		job_id TEXT NOT NULL DEFAULT '',
+		workflow_id TEXT NOT NULL DEFAULT ''
 	)`)
 	if err != nil {
 		return fmt.Errorf("初始化 webhook 表失败: %w", err)
@@ -140,7 +145,17 @@ func (m *Manager) Init(ctx context.Context) error {
 	if _, aerr := m.db.ExecContext(ctx, `ALTER TABLE webhooks ADD COLUMN job_id TEXT NOT NULL DEFAULT ''`); aerr != nil && !strings.Contains(aerr.Error(), "duplicate column") {
 		logger.Warn("Webhook: 添加 job_id 列失败（非 duplicate）", "err", aerr.Error())
 	}
+	if _, err := m.db.ExecContext(ctx, `ALTER TABLE webhooks ADD COLUMN workflow_id TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+		return fmt.Errorf("initialize workflow binding: %w", err)
+	}
 	return m.loadWebhooks(ctx)
+}
+
+// SetWorkflowHandler 为显式工作流绑定接入同一事件分发链。
+func (m *Manager) SetWorkflowHandler(handler EventHandler) {
+	m.mu.Lock()
+	m.workflowHandler = handler
+	m.mu.Unlock()
 }
 
 // SetHandler 设置事件处理回调
@@ -188,9 +203,9 @@ func (m *Manager) Register(ctx context.Context, wh *Webhook) error {
 		enabled = 1
 	}
 	_, err := m.db.ExecContext(ctx,
-		`INSERT INTO webhooks (id, name, type, secret, prompt, user_id, enabled, created_at, job_id)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		wh.ID, wh.Name, wh.Type, wh.Secret, wh.Prompt, wh.UserID, enabled, wh.CreatedAt, wh.JobID,
+		`INSERT INTO webhooks (id, name, type, secret, prompt, user_id, enabled, created_at, job_id, workflow_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		wh.ID, wh.Name, wh.Type, wh.Secret, wh.Prompt, wh.UserID, enabled, wh.CreatedAt, wh.JobID, wh.WorkflowID,
 	)
 	if err != nil {
 		// 名称唯一约束冲突转为可分类的 sentinel，供 handler 返回 409 且不外泄底层约束串。
@@ -271,12 +286,63 @@ func (m *Manager) SetEnabledForOwner(ctx context.Context, name, ownerID string, 
 	return nil
 }
 
+// BindWorkflow 复用未绑定的现有端点，保留密钥、启用状态和事件历史。
+func (m *Manager) BindWorkflow(ctx context.Context, name, ownerID, workflowID string) (*Webhook, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	current, ok := m.webhooks[name]
+	if !ok || current.UserID != ownerID {
+		return nil, fmt.Errorf("Webhook endpoint is unavailable")
+	}
+	if current.Type != TypeGeneric || current.JobID != "" || strings.TrimSpace(current.Prompt) != "" || current.WorkflowID != "" && current.WorkflowID != workflowID {
+		return nil, fmt.Errorf("Webhook endpoint is already bound to another target")
+	}
+	if _, err := m.db.ExecContext(ctx, `UPDATE webhooks SET workflow_id = ? WHERE name = ? AND user_id = ?`, workflowID, name, ownerID); err != nil {
+		return nil, fmt.Errorf("bind webhook workflow: %w", err)
+	}
+	copy := *current
+	copy.WorkflowID = workflowID
+	m.webhooks[name] = &copy
+	return &copy, nil
+}
+
+// UnbindWorkflow 解除工作流引用，不删除原端点或改变连接配置。
+func (m *Manager) UnbindWorkflow(ctx context.Context, name, ownerID, workflowID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	current, ok := m.webhooks[name]
+	if !ok || current.UserID != ownerID || current.WorkflowID != workflowID {
+		return fmt.Errorf("Workflow Webhook binding is unavailable")
+	}
+	if _, err := m.db.ExecContext(ctx, `UPDATE webhooks SET workflow_id = '' WHERE name = ? AND user_id = ? AND workflow_id = ?`, name, ownerID, workflowID); err != nil {
+		return err
+	}
+	copy := *current
+	copy.WorkflowID = ""
+	m.webhooks[name] = &copy
+	return nil
+}
+
 // Get 按名称取 Webhook（含未启用的）。
 func (m *Manager) Get(name string) (*Webhook, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	wh, ok := m.webhooks[name]
 	return wh, ok
+}
+
+// WorkflowBindings 返回同一工作流的绑定快照，供工作流删除时精确回收。
+func (m *Manager) WorkflowBindings(id string) []*Webhook {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var bindings []*Webhook
+	for _, wh := range m.webhooks {
+		if wh.WorkflowID == id {
+			copy := *wh
+			bindings = append(bindings, &copy)
+		}
+	}
+	return bindings
 }
 
 // Unregister 注销 Webhook
@@ -326,7 +392,7 @@ func (m *Manager) UnregisterForOwner(ctx context.Context, name, ownerID string) 
 // List 列出所有 Webhook
 func (m *Manager) List(ctx context.Context, userID string) ([]*Webhook, error) {
 	rows, err := m.db.QueryContext(ctx,
-		`SELECT id, name, type, secret, prompt, user_id, enabled, last_event_at, event_count, created_at, job_id
+		`SELECT id, name, type, secret, prompt, user_id, enabled, last_event_at, event_count, created_at, job_id, workflow_id
 		 FROM webhooks WHERE user_id = ? ORDER BY created_at DESC`, userID)
 	if err != nil {
 		return nil, err
@@ -339,7 +405,7 @@ func (m *Manager) List(ctx context.Context, userID string) ([]*Webhook, error) {
 		var lastEvent sql.NullTime
 		var enabled int
 		if err := rows.Scan(&wh.ID, &wh.Name, &wh.Type, &wh.Secret, &wh.Prompt,
-			&wh.UserID, &enabled, &lastEvent, &wh.EventCount, &wh.CreatedAt, &wh.JobID); err != nil {
+			&wh.UserID, &enabled, &lastEvent, &wh.EventCount, &wh.CreatedAt, &wh.JobID, &wh.WorkflowID); err != nil {
 			return nil, err
 		}
 		wh.Enabled = enabled == 1
@@ -462,12 +528,23 @@ func (m *Manager) Handler() http.HandlerFunc {
 		// 异步处理事件
 		m.mu.RLock()
 		handler := m.handler
+		if wh.WorkflowID != "" {
+			handler = m.workflowHandler
+		}
 		m.mu.RUnlock()
 
 		if handler != nil {
 			// §13.3(1)：把 webhook 绑定的目标 job 随 event 带给 handler（非空 →
 			// handler 触发该 job 而非跑 prompt）。EventHandler 签名不变。
 			event.JobID = wh.JobID
+			event.WorkflowID = wh.WorkflowID
+			event.EventID = r.Header.Get("X-HexClaw-Event-ID")
+			if event.EventID == "" {
+				event.EventID = r.Header.Get("X-GitHub-Delivery")
+			}
+			if event.EventID == "" {
+				event.EventID = r.Header.Get("X-Gitlab-Event-UUID")
+			}
 			// v0.3.12 H7：用 trace.Go 保留父 ctx 的 logger 链路（session_id / trace_id）
 			// + panic recover（防止 handler 崩了静默吞）。
 			// 父 ctx 来自 HTTP r.Context()；Detach 断开父取消但保留 Values。
@@ -633,7 +710,7 @@ func getNestedString(m map[string]any, keys ...string) string {
 // 可寻址：验签测试与 423 记录都发生在启用前）。
 func (m *Manager) loadWebhooks(ctx context.Context) error {
 	rows, err := m.db.QueryContext(ctx,
-		`SELECT id, name, type, secret, prompt, user_id, enabled, last_event_at, event_count, created_at, job_id
+		`SELECT id, name, type, secret, prompt, user_id, enabled, last_event_at, event_count, created_at, job_id, workflow_id
 		 FROM webhooks`)
 	if err != nil {
 		return err
@@ -645,7 +722,7 @@ func (m *Manager) loadWebhooks(ctx context.Context) error {
 		var lastEvent sql.NullTime
 		var enabled int
 		if err := rows.Scan(&wh.ID, &wh.Name, &wh.Type, &wh.Secret, &wh.Prompt,
-			&wh.UserID, &enabled, &lastEvent, &wh.EventCount, &wh.CreatedAt, &wh.JobID); err != nil {
+			&wh.UserID, &enabled, &lastEvent, &wh.EventCount, &wh.CreatedAt, &wh.JobID, &wh.WorkflowID); err != nil {
 			return err
 		}
 		// 历史空 owner 记录不进入运行时路由；保留数据库原记录供后续显式处置。
