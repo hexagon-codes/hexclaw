@@ -25,6 +25,7 @@ import (
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/channel"
 	"github.com/hexagon-codes/hexclaw/cron"
+	"github.com/hexagon-codes/hexclaw/internal/mathtext"
 	"github.com/hexagon-codes/hexclaw/messagecontent"
 	agentrouter "github.com/hexagon-codes/hexclaw/router"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
@@ -325,7 +326,17 @@ func (d *k12IMDeliverer) PrepareMessageForTargets(
 				}
 			}
 		}
-		if disclosureLocale, disclosure := k12usecase.CreativeWorkDeliveryDisclosure(ctx, canonical); target.Platform == "dingtalk" && (disclosure != "" || targetProjection != projected) {
+		disclosureLocale, disclosure := k12usecase.CreativeWorkDeliveryDisclosure(ctx, canonical)
+		if target.Platform == "dingtalk" {
+			if normalized := mathtext.NormalizeDingTalkMarkdown(targetProjection); normalized != targetProjection {
+				targetProjection = normalized
+				if targetFallback != "" {
+					targetFallback += "+"
+				}
+				targetFallback += "dingtalk_emphasis"
+			}
+		}
+		if target.Platform == "dingtalk" && (disclosure != "" || targetProjection != projected) {
 			// 说明只属于新钉钉渲染投影，canonical 与原图身份保持不变。
 			disclosureFallback := targetFallback
 			if disclosure != "" {
@@ -335,6 +346,7 @@ func (d *k12IMDeliverer) PrepareMessageForTargets(
 				disclosureFallback += "execution_summary"
 				targetProjection += "\n\n" + disclosure
 			}
+			targetProjection = mathtext.NormalizeDingTalkMarkdown(targetProjection)
 			if disclosureLocale == "" {
 				disclosureLocale = locale
 			}
@@ -376,19 +388,9 @@ func (d *k12IMDeliverer) PrepareMessageForTargets(
 	return out, nil
 }
 
-// 钉钉对中文冒号后的强调闭合存在兼容差异，仅将点评标签的冒号放到标记外。
-// 原句、建议和原因的文字不变，原始正文与已冻结投递不经此处重写。
+// 点评与其他新钉钉消息共用强调投影，原始正文及已冻结投递不经此处重写。
 func k12WritingFeedbackChannelMarkdown(markdown string) string {
-	lines := strings.Split(markdown, "\n")
-	for i, line := range lines {
-		for _, label := range []string{"原句", "建议", "原因"} {
-			if rest, ok := strings.CutPrefix(line, "**"+label+"：**"); ok {
-				lines[i] = "**" + label + "**：" + rest
-				break
-			}
-		}
-	}
-	return strings.Join(lines, "\n")
+	return mathtext.NormalizeDingTalkMarkdown(markdown)
 }
 
 // PrepareText is retained for compatibility with singleton callers. Production
@@ -961,6 +963,7 @@ func newCronIMDeliver(
 	ctx context.Context,
 	channels *channel.Registry,
 	direct func(ctx context.Context, target, chatID string, msg channel.Message) error,
+	targetPlatform ...func(string) string,
 ) func(job *cron.Job, target, content string) error {
 	return func(job *cron.Job, target, content string) error {
 		if job.ChatID == "" {
@@ -973,6 +976,19 @@ func newCronIMDeliver(
 		fallbackReason := ""
 		if content != canonical {
 			fallbackReason = messagecontent.FallbackMathToReadableText
+		}
+		platform := target
+		if len(targetPlatform) > 0 && targetPlatform[0] != nil {
+			platform = targetPlatform[0](target)
+		}
+		if platform == "dingtalk" {
+			if normalized := mathtext.NormalizeDingTalkMarkdown(content); normalized != content {
+				content = normalized
+				if fallbackReason != "" {
+					fallbackReason += "+"
+				}
+				fallbackReason += "dingtalk_emphasis"
+			}
 		}
 		message, err := channel.NewCanonicalMarkdownMessageWithAttachments(messagecontent.ProducerCron, "zh-CN", canonical, content, fallbackReason, nil)
 		if err != nil {

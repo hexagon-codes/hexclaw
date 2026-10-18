@@ -644,6 +644,16 @@ func (m *Manager) Send(ctx context.Context, target, chatID string, reply *adapte
 	return adp.Send(ctx, chatID, reply)
 }
 
+// RunningPlatform 只读返回 Send 按相同优先级解析出的实际平台，不更改运行实例或路由。
+// 未命中时返回 false，调用方不得根据实例 ID 或名称猜测平台能力。
+func (m *Manager) RunningPlatform(target string) (adapter.Platform, bool) {
+	adp := m.resolveRunningAdapter(target)
+	if adp == nil {
+		return "", false
+	}
+	return adp.Platform(), true
+}
+
 func (m *Manager) resolveRunningAdapter(target string) adapter.Adapter {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

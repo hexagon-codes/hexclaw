@@ -67,6 +67,7 @@ import (
 	"github.com/hexagon-codes/hexclaw/gateway"
 	"github.com/hexagon-codes/hexclaw/heartbeat"
 	"github.com/hexagon-codes/hexclaw/instances"
+	"github.com/hexagon-codes/hexclaw/internal/mathtext"
 	"github.com/hexagon-codes/hexclaw/knowledge"
 	"github.com/hexagon-codes/hexclaw/library"
 	"github.com/hexagon-codes/hexclaw/llmrouter"
@@ -3296,7 +3297,7 @@ Set source only when the material explicitly names a work, title, or another rel
 		// 用户也能看到「调用了什么工具、成没成、结果摘要」。桌面经 wa 直连 messageHandler、
 		// 不走此 handler，故工具卡体验不受影响（避免桌面气泡重复展示）。
 		if reply != nil && len(reply.ToolCalls) > 0 {
-			if rebuildErr := appendIMToolDigestAndRebuildCanonical(reply); rebuildErr != nil {
+			if rebuildErr := appendIMToolDigestAndRebuildCanonical(reply, string(msg.Platform)); rebuildErr != nil {
 				err = errors.Join(err, fmt.Errorf("rebuild IM reply canonical evidence: %w", rebuildErr))
 			}
 		}
@@ -3376,6 +3377,9 @@ Set source only when the material explicitly names a work, title, or another rel
 		// 回退平台通用直发（见 newCronIMDeliver），行为逐字节不变。
 		scheduler.SetDeliverer(newCronIMDeliver(ctx, imChannels, func(ctx context.Context, target, chatID string, msg channel.Message) error {
 			return instanceMgr.Send(ctx, target, chatID, adapterReplyFromChannelMessage(msg))
+		}, func(target string) string {
+			platform, _ := instanceMgr.RunningPlatform(target)
+			return string(platform)
 		}))
 	}
 
@@ -4324,6 +4328,7 @@ func canonicalIMChannelMessage(
 	producer messagecontent.ProducerKind,
 	locale, content string,
 	atts []adapter.Attachment,
+	platform ...string,
 ) (channel.Message, error) {
 	attachments := make([]channel.Attachment, 0, len(atts))
 	for _, attachment := range atts {
@@ -4349,6 +4354,15 @@ func canonicalIMChannelMessage(
 	if projected != content {
 		fallbackReason = messagecontent.FallbackMathToReadableText
 	}
+	if len(platform) > 0 && platform[0] == "dingtalk" {
+		if normalized := mathtext.NormalizeDingTalkMarkdown(projected); normalized != projected {
+			projected = normalized
+			if fallbackReason != "" {
+				fallbackReason += "+"
+			}
+			fallbackReason += "dingtalk_emphasis"
+		}
+	}
 	message, err := channel.NewCanonicalMarkdownMessageWithAttachments(
 		producer, locale, content, projected, fallbackReason, attachments,
 	)
@@ -4360,7 +4374,7 @@ func canonicalIMChannelMessage(
 
 // appendIMToolDigestAndRebuildCanonical 追加 IM 工具摘要后重建同一内容对，
 // 避免渠道适配器继续消费追加前的 MessageContent/RenderManifest。
-func appendIMToolDigestAndRebuildCanonical(reply *adapter.Reply) error {
+func appendIMToolDigestAndRebuildCanonical(reply *adapter.Reply, platform ...string) error {
 	if reply == nil || len(reply.ToolCalls) == 0 {
 		return nil
 	}
@@ -4378,7 +4392,7 @@ func appendIMToolDigestAndRebuildCanonical(reply *adapter.Reply) error {
 		}
 	}
 	reply.Content += adapter.ToolCallDigest(reply.ToolCalls)
-	message, err := canonicalIMChannelMessage(producer, locale, reply.Content, reply.Attachments)
+	message, err := canonicalIMChannelMessage(producer, locale, reply.Content, reply.Attachments, platform...)
 	if err != nil {
 		return err
 	}
@@ -4391,7 +4405,14 @@ func (s *instanceMessageSender) Send(ctx context.Context, channel, target, conte
 	if ctx == nil {
 		ctx = s.ctx
 	}
-	message, err := canonicalIMChannelMessage(messagecontent.ProducerTool, "und", content, atts)
+	platform := channel
+	if resolver, ok := s.mgr.(interface {
+		RunningPlatform(string) (adapter.Platform, bool)
+	}); ok {
+		resolved, _ := resolver.RunningPlatform(channel)
+		platform = string(resolved)
+	}
+	message, err := canonicalIMChannelMessage(messagecontent.ProducerTool, "und", content, atts, platform)
 	if err != nil {
 		return fmt.Errorf("build send_message canonical payload: %w", err)
 	}

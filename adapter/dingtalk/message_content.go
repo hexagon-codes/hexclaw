@@ -18,8 +18,33 @@ import (
 	_ "golang.org/x/image/webp"
 
 	"github.com/hexagon-codes/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/internal/mathtext"
 	"github.com/hexagon-codes/hexclaw/messagecontent"
 )
+
+// ProjectMarkdownText 复用钉钉已有的可读公式和强调投影，不读取账号或发送消息。
+// summary 接收已渲染的执行说明，空串不追加；调用者保留规范原文并记录返回的降级原因。
+func ProjectMarkdownText(source, summary string) (projected, fallback string) {
+	projected = adapter.NormalizeMathText(restoreEscapedMarkdownNewlines(source))
+	if projected != source {
+		fallback = messagecontent.FallbackMathToReadableText
+	}
+	if summary != "" {
+		projected += "\n\n" + summary
+		if fallback != "" {
+			fallback += "+"
+		}
+		fallback += "execution_summary"
+	}
+	if normalized := mathtext.NormalizeDingTalkMarkdown(projected); normalized != projected {
+		projected = normalized
+		if fallback != "" {
+			fallback += "+"
+		}
+		fallback += "dingtalk_emphasis"
+	}
+	return projected, fallback
+}
 
 func ensureDingTalkRenderEvidence(reply *adapter.Reply) error {
 	if reply == nil {
@@ -77,19 +102,8 @@ func ensureDingTalkRenderEvidence(reply *adapter.Reply) error {
 	}
 	refs := make([]messagecontent.AttachmentRef, 0, len(reply.Attachments))
 	parts := make([]messagecontent.RenderPart, 0, len(reply.Attachments)+1)
-	projected := adapter.NormalizeMathText(restoreEscapedMarkdownNewlines(sourceMarkdown))
-	fallback := ""
-	if projected != sourceMarkdown {
-		fallback = messagecontent.FallbackMathToReadableText
-	}
 	summary := adapter.RenderExecutionSummary(locale, dingTalkReplyExecutionSummary(reply))
-	if summary != "" {
-		projected += "\n\n" + summary
-		if fallback != "" {
-			fallback += "+"
-		}
-		fallback += "execution_summary"
-	}
+	projected, fallback := ProjectMarkdownText(sourceMarkdown, summary)
 	if err := validateDingTalkVisibleContent(projected); err != nil {
 		return err
 	}

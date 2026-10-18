@@ -681,11 +681,11 @@ func TestK12FinalArtifactIMProjectionKeepsActionableSolutionAndUserJSON(t *testi
 	}
 	for _, want := range []string{
 		"```json\n{\"student_visible\":true}\n```",
-		"**必要步骤：**", "先算 3 ÷ 4，再乘 8，得到 6。", "3/4 × 8 = 6",
-		"**第一个错步：** 把 3/4 当成了 3/8", "**错因：** 分数含义理解错误",
-		"### 家长怎么讲", "**正确答案：** 6", "**本年级方法：** 先约分或先算 8 ÷ 4",
-		"**易错点：**", "把分母也乘 8", "**家长怎么讲：**", "先让孩子说出四分之三的含义",
-		"**可以追问：**", "怎样验算结果？", "**怎么检查：** 用 6 ÷ 8 = 3/4 反向检查",
+		"**必要步骤**：", "先算 3 ÷ 4，再乘 8，得到 6。", "3/4 × 8 = 6",
+		"**第一个错步**： 把 3/4 当成了 3/8", "**错因**： 分数含义理解错误",
+		"### 家长怎么讲", "**正确答案**： 6", "**本年级方法**： 先约分或先算 8 ÷ 4",
+		"**易错点**：", "把分母也乘 8", "**家长怎么讲**：", "先让孩子说出四分之三的含义",
+		"**可以追问**：", "怎样验算结果？", "**怎么检查**： 用 6 ÷ 8 = 3/4 反向检查",
 	} {
 		if !strings.Contains(payload.Text, want) {
 			t.Fatalf("钉钉 Markdown 投影缺少用户可见内容 %q:\n%s", want, payload.Text)
@@ -696,8 +696,8 @@ func TestK12FinalArtifactIMProjectionKeepsActionableSolutionAndUserJSON(t *testi
 			t.Fatalf("内部评估字段不得进入钉钉消息 %q:\n%s", internal, payload.Text)
 		}
 	}
-	if payload.RenderManifest == nil || payload.RenderManifest.FallbackReason != "" {
-		t.Fatalf("无 LaTeX 的可见投影不得虚标数学降级: %#v", payload.RenderManifest)
+	if payload.RenderManifest == nil || payload.RenderManifest.FallbackReason != "dingtalk_emphasis" {
+		t.Fatalf("emphasis-only projection must not claim a math fallback: %#v", payload.RenderManifest)
 	}
 }
 

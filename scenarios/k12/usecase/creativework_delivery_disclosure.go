@@ -4,7 +4,7 @@ import (
 	"context"
 	"strings"
 
-	"github.com/hexagon-codes/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/messagecontent"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 )
 
@@ -131,7 +131,7 @@ func WithCreativeWorkResultDeliveryDisclosure(ctx context.Context, view Creative
 	default:
 		return ctx
 	}
-	facts := adapter.ExecutionSummary{}
+	facts := messagecontent.ExecutionSummary{}
 	// 独立 OCR 必须确有本次回执；分类已包含转写时不虚构第二次调用。
 	for _, operation := range []string{"classification", "writing_ocr", "work_feedback"} {
 		for _, receipt := range result.OperationReceipts {
@@ -143,14 +143,14 @@ func WithCreativeWorkResultDeliveryDisclosure(ctx context.Context, view Creative
 			if operation == "work_feedback" {
 				stage = "answer_generation"
 			}
-			facts.Steps = append(facts.Steps, adapter.ExecutionSummaryStep{Key: stage, Status: "success"})
+			facts.Steps = append(facts.Steps, messagecontent.ExecutionSummaryStep{Key: stage, Status: "success"})
 			if receipt.ExecutionKind == string(k12.GradingExecutionProvider) && strings.TrimSpace(receipt.Model) != "" {
-				facts.Models = append(facts.Models, adapter.ExecutionSummaryModel{Stage: stage, Provider: receipt.Provider, Model: receipt.Model})
+				facts.Models = append(facts.Models, messagecontent.ExecutionSummaryModel{Stage: stage, Provider: receipt.Provider, Model: receipt.Model})
 			}
 		}
 	}
 	// 点评方法来源属于加载依据，不能作为已执行 Skill 或 MCP 的回执。
-	markdown := adapter.RenderExecutionSummary(locale, facts)
+	markdown := messagecontent.RenderExecutionSummary(locale, facts)
 	if markdown == "" {
 		return ctx
 	}

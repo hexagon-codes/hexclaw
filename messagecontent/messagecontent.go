@@ -238,7 +238,16 @@ type RenderRequest struct {
 	ReceiptRef      string
 }
 
-var rawTeXPattern = regexp.MustCompile(`(?s)(\\(?:frac|sqrt|sum|int|begin|left|right|times|cdot|leq|geq|alpha|beta)\b|\\[,;:!]|\$[^$\n]+\$|\\\(|\\\[)`)
+var rawTeXCommandPattern = regexp.MustCompile(`(?s)(\\(?:frac|sqrt|sum|int|begin|left|right|times|cdot|leq|geq|alpha|beta)\b|\\[,;:!]|\\\(|\\\[)`)
+
+// 明确TeX命令仍直接识别；美元包围的普通货币沿共享投影规则判断，避免误拦。
+func hasUnrenderedMath(value string) bool {
+	if rawTeXCommandPattern.MatchString(value) {
+		return true
+	}
+	_, changed := mathtext.ProjectReadable(value)
+	return changed
+}
 
 func BuildManifest(content MessageContent, request RenderRequest) (RenderManifest, error) {
 	if err := content.Validate(); err != nil {
@@ -325,11 +334,11 @@ func (m RenderManifest) validateProjection(content MessageContent) error {
 	}
 	canonicalVisible := mathtext.WithoutProtectedMarkdown(content.Markdown)
 	projectedVisible := mathtext.WithoutProtectedMarkdown(visible.String())
-	if rawTeXPattern.MatchString(canonicalVisible) && !m.CapabilitySnapshot.TeXMath {
+	if !m.CapabilitySnapshot.TeXMath && hasUnrenderedMath(canonicalVisible) {
 		if strings.TrimSpace(m.FallbackReason) == "" {
 			return errors.New("messagecontent: math fallback reason is required")
 		}
-		if rawTeXPattern.MatchString(projectedVisible) {
+		if hasUnrenderedMath(projectedVisible) {
 			return errors.New("messagecontent: raw LaTeX cannot be reported as a successful fallback")
 		}
 	}

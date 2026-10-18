@@ -13,7 +13,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/adapter/dingtalk"
 	"github.com/hexagon-codes/hexclaw/messagecontent"
 	"github.com/hexagon-codes/hexclaw/records"
@@ -329,7 +328,7 @@ func (d Deps) finalReplyExecutionSummary(ctx context.Context, artifact k12.Gradi
 	if result.FinalArtifact == nil || result.FinalArtifact.ArtifactID != artifact.ArtifactID || result.FinalArtifact.ArtifactDigest != artifact.ArtifactDigest {
 		return "", errors.New("image task execution summary source mismatch")
 	}
-	facts := adapter.ExecutionSummary{}
+	facts := messagecontent.ExecutionSummary{}
 	steps := make(map[string]bool)
 	solved := false
 	for _, receipt := range result.OperationReceipts {
@@ -357,11 +356,11 @@ func (d Deps) finalReplyExecutionSummary(ctx context.Context, artifact k12.Gradi
 		}
 		// 聚合阶段的声明路由不是物理模型调用；只列独立操作或已关联的真实调用单元。
 		if receipt.ExecutionKind == string(k12.GradingExecutionProvider) && receipt.Model != "" && (stage != "" || receipt.PhysicalUnit != "") {
-			facts.Models = append(facts.Models, adapter.ExecutionSummaryModel{Stage: stage, Provider: receipt.Provider, Model: receipt.Model})
+			facts.Models = append(facts.Models, messagecontent.ExecutionSummaryModel{Stage: stage, Provider: receipt.Provider, Model: receipt.Model})
 		}
 	}
 	if solved {
-		facts.Tools = append(facts.Tools, adapter.ExecutionSummaryTool{Kind: "skill", Name: "solve", Status: "success", DisplayNames: map[string]string{"zh-CN": "解题", "en": "Solve homework", "ug-CN": "مەسىلە يېشىش"}})
+		facts.Tools = append(facts.Tools, messagecontent.ExecutionSummaryTool{Kind: "skill", Name: "solve", Status: "success", DisplayNames: map[string]string{"zh-CN": "解题", "en": "Solve homework", "ug-CN": "مەسىلە يېشىش"}})
 	}
 	if result.Photo != nil {
 		for _, item := range result.Photo.Items {
@@ -374,14 +373,14 @@ func (d Deps) finalReplyExecutionSummary(ctx context.Context, artifact k12.Gradi
 		steps["numeric_verification"] = true
 	}
 	if steps["numeric_verification"] {
-		facts.Tools = append(facts.Tools, adapter.ExecutionSummaryTool{Kind: "tool", Name: "code_exec", Status: "success", DisplayNames: map[string]string{"zh-CN": "沙箱计算", "en": "Sandbox calculation", "ug-CN": "قۇم ساندۇقىدا ھېسابلاش"}})
+		facts.Tools = append(facts.Tools, messagecontent.ExecutionSummaryTool{Kind: "tool", Name: "code_exec", Status: "success", DisplayNames: map[string]string{"zh-CN": "沙箱计算", "en": "Sandbox calculation", "ug-CN": "قۇم ساندۇقىدا ھېسابلاش"}})
 	}
 	for _, key := range []string{"image_recognition", "question_solving", "numeric_verification", "grading", "parent_guide", "image_annotation"} {
 		if steps[key] {
-			facts.Steps = append(facts.Steps, adapter.ExecutionSummaryStep{Key: key, Status: "success"})
+			facts.Steps = append(facts.Steps, messagecontent.ExecutionSummaryStep{Key: key, Status: "success"})
 		}
 	}
-	return adapter.RenderExecutionSummary(dispatch.OperationRouteRequest.MessageLocale, facts), nil
+	return messagecontent.RenderExecutionSummary(dispatch.OperationRouteRequest.MessageLocale, facts), nil
 }
 
 // 旧资产的验算证明继续用于答案资格；当前工具披露只采用本题本任务的实际执行回执。

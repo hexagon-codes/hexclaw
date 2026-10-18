@@ -78,7 +78,7 @@ func (p *k12TutorIdentityPolicy) ProcessDingtalkFollowup(ctx context.Context, ms
 		"has_quoted_homework_id", strings.TrimSpace(msg.Metadata["quoted_homework_id"]) != "",
 		"resolution_kind", string(result.Kind))
 	if result.Kind == usecase.TutorFollowupHomework || result.Kind == usecase.TutorFollowupUnmatched {
-		message, err := canonicalIMChannelMessage(messagecontent.ProducerK12, locale, result.Reply, nil)
+		message, err := canonicalIMChannelMessage(messagecontent.ProducerK12, locale, result.Reply, nil, string(msg.Platform))
 		if err != nil {
 			return nil, err
 		}

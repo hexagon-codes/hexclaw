@@ -120,6 +120,25 @@ func ProjectReadable(s string) (string, bool) {
 func findProtectedSpans(s string) []byteSpan {
 	var spans []byteSpan
 	for i := 0; i < len(s); {
+		if s[i] == '[' && !markdownEscapedAt(s, i) {
+			labelEnd := markdownExcerptBalancedEnd(s, i, '[', ']')
+			if labelEnd > 0 && labelEnd < len(s) && s[labelEnd] == '(' {
+				if targetEnd := markdownExcerptBalancedEnd(s, labelEnd, '(', ')'); targetEnd > 0 {
+					// 可见标签仍参与投影，只保护其中的代码及真实链接目标。
+					for _, span := range findProtectedSpans(s[i+1 : labelEnd-1]) {
+						spans = append(spans, byteSpan{start: i + 1 + span.start, end: i + 1 + span.end})
+					}
+					spans = append(spans, byteSpan{start: labelEnd, end: targetEnd})
+					i = targetEnd
+					continue
+				}
+			}
+		}
+		if end := markdownHTTPAutolinkEnd(s, i); end > 0 {
+			spans = append(spans, byteSpan{start: i, end: end})
+			i = end
+			continue
+		}
 		if end, ok := httpURLAt(s, i); ok {
 			spans = append(spans, byteSpan{start: i, end: end})
 			i = end
@@ -155,6 +174,25 @@ func findProtectedSpans(s string) []byteSpan {
 		i = runEnd
 	}
 	return spans
+}
+
+// 完整自动链接连同角括号保护；不完整、转义或含空白的内容沿原裸URL规则处理。
+func markdownHTTPAutolinkEnd(s string, start int) int {
+	if s[start] != '<' || markdownEscapedAt(s, start) {
+		return 0
+	}
+	if _, ok := httpURLAt(s, start+1); !ok {
+		return 0
+	}
+	for i := start + 1; i < len(s); i++ {
+		if s[i] == '>' {
+			return i + 1
+		}
+		if s[i] <= ' ' || s[i] == '<' {
+			return 0
+		}
+	}
+	return 0
 }
 
 func httpURLAt(s string, start int) (int, bool) {
