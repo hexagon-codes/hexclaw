@@ -2,6 +2,7 @@ package usecase
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html"
@@ -297,11 +298,10 @@ func (d Deps) finalReplyExecutionSummary(ctx context.Context, artifact k12.Gradi
 			if item.ParentGuide != nil {
 				steps["parent_guide"] = true
 			}
-			evidence := item.Solve.Evidence
-			if evidence.EvidenceType == EvidenceNumericExec && evidence.Verdict == VerdictAgree && evidence.VerificationRunID != "" && evidence.VerificationInputDigest != "" {
-				steps["numeric_verification"] = true
-			}
 		}
+	}
+	if d.finalReplyHasCurrentNumericExecution(ctx, artifact, result) {
+		steps["numeric_verification"] = true
 	}
 	if steps["numeric_verification"] {
 		facts.Tools = append(facts.Tools, adapter.ExecutionSummaryTool{Kind: "tool", Name: "code_exec", Status: "success", DisplayNames: map[string]string{"zh-CN": "沙箱计算", "en": "Sandbox calculation", "ug-CN": "قۇم ساندۇقىدا ھېسابلاش"}})
@@ -312,6 +312,110 @@ func (d Deps) finalReplyExecutionSummary(ctx context.Context, artifact k12.Gradi
 		}
 	}
 	return adapter.RenderExecutionSummary(dispatch.OperationRouteRequest.MessageLocale, facts), nil
+}
+
+// 旧资产的验算证明继续用于答案资格；当前工具披露只采用本题本任务的实际执行回执。
+func (d Deps) finalReplyHasCurrentNumericExecution(ctx context.Context, artifact k12.GradingFinalArtifact, result ImageTaskResult) bool {
+	if d.Records == nil || result.Photo == nil {
+		return false
+	}
+	assessments, err := d.Records.ListGradingAssessmentItems(ctx, artifact.AgentName, artifact.JobID)
+	if err != nil {
+		slog.Warn("K12 current execution disclosure is unavailable", "agent_id", artifact.AgentName, "job_id", artifact.JobID, "error", err)
+		return false
+	}
+	invocations, err := d.Records.ListGradingItemInvocations(ctx, artifact.AgentName, artifact.JobID)
+	if err != nil {
+		slog.Warn("K12 current execution disclosure is unavailable", "agent_id", artifact.AgentName, "job_id", artifact.JobID, "error", err)
+		return false
+	}
+	assessmentByProblem := make(map[string]k12.GradingAssessmentItem, len(assessments))
+	for _, assessment := range assessments {
+		assessmentByProblem[assessment.ProblemID] = assessment
+	}
+	invocationByID := make(map[string]k12.GradingItemInvocation, len(invocations))
+	for _, invocation := range invocations {
+		invocationByID[invocation.InvocationID] = invocation
+	}
+	for _, item := range result.Photo.Items {
+		q, evidence := item.Recognized, item.Solve.Evidence
+		if item.ResultKind == PhotoItemAssessment {
+			evidence = item.Grade.Evidence
+		}
+		if evidence.EvidenceType != EvidenceNumericExec || evidence.Verdict != VerdictAgree || evidence.VerificationRunID == "" || evidence.VerificationInputDigest == "" {
+			continue
+		}
+		assessment, ok := assessmentByProblem[q.ProblemID]
+		if !ok || assessment.AgentName != artifact.AgentName || assessment.JobID != artifact.JobID ||
+			assessment.AttemptID != q.AttemptID || assessment.ConfirmedVersion != q.ConfirmedVersion ||
+			assessment.InputDigest != q.InputDigest || assessment.SolveInvocationID == "" {
+			continue
+		}
+		current := func(invocation k12.GradingItemInvocation) bool {
+			return invocation.AgentName == artifact.AgentName && invocation.JobID == artifact.JobID &&
+				invocation.ProblemID == q.ProblemID && invocation.AttemptID == q.AttemptID &&
+				invocation.InputRevision == q.ConfirmedVersion && invocation.InputDigest == q.InputDigest &&
+				invocation.Status == k12.ModelInvocationSucceeded && invocation.ResultJSON != "" &&
+				invocation.ResultDigest == modelInvocationDigest([]byte(invocation.ResultJSON))
+		}
+		solved, ok := invocationByID[assessment.SolveInvocationID]
+		if !ok || !current(solved) {
+			continue
+		}
+		if solved.Operation == k12.GradingItemOperationSolveVerify && finalReplyNumericReceiptMatches(solved, evidence) {
+			return true
+		}
+		if solved.Operation != k12.GradingItemOperationSolve || solved.ExecutionKind != k12.GradingExecutionLocalDeterministic {
+			continue
+		}
+		payload, _, _, decodeErr := decodeGroundedPhysicalPayload(solved.ResultJSON, nil)
+		var stored SolveHomeworkResult
+		if decodeErr != nil || json.Unmarshal([]byte(payload), &stored) != nil || stored.Evidence != evidence {
+			continue
+		}
+		for _, invocation := range invocations {
+			if current(invocation) && invocation.Operation == k12.GradingItemOperationSolveVerify && finalReplyNumericReceiptMatches(invocation, evidence) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func finalReplyNumericReceiptMatches(invocation k12.GradingItemInvocation, evidence SolveEvidence) bool {
+	payload, _, _, err := decodeGroundedPhysicalPayload(invocation.ResultJSON, nil)
+	if err != nil {
+		return false
+	}
+	// 本地程序账本保存返回的JSON字符串；Provider账本直接保存结构化子任务结果。
+	var encoded string
+	if json.Unmarshal([]byte(payload), &encoded) == nil {
+		payload = encoded
+	}
+	var result struct {
+		Receipt *struct {
+			InputDigest     string `json:"input_digest"`
+			RunID           string `json:"run_id"`
+			Status          string `json:"status"`
+			ExitCode        int    `json:"exit_code"`
+			Timeout         bool   `json:"timeout"`
+			RuntimeMissing  bool   `json:"runtime_missing"`
+			Error           string `json:"error"`
+			StdoutBytes     int64  `json:"stdout_bytes"`
+			Stdout          string `json:"stdout"`
+			StdoutTruncated bool   `json:"stdout_truncated"`
+			StderrTruncated bool   `json:"stderr_truncated"`
+			Truncated       bool   `json:"truncated"`
+		} `json:"execution_receipt"`
+	}
+	if json.Unmarshal([]byte(payload), &result) != nil || result.Receipt == nil {
+		return false
+	}
+	receipt := result.Receipt
+	return receipt.RunID == evidence.VerificationRunID && receipt.InputDigest == evidence.VerificationInputDigest &&
+		receipt.Status == "success" && receipt.ExitCode == 0 && !receipt.Timeout && !receipt.RuntimeMissing &&
+		receipt.Error == "" && !receipt.Truncated && !receipt.StdoutTruncated && !receipt.StderrTruncated &&
+		receipt.StdoutBytes > 0 && int64(len(receipt.Stdout)) == receipt.StdoutBytes
 }
 
 // GetK12FinalReplyBatch 不读取或重新生成媒体；旧对象身份始终优先于新投影。
