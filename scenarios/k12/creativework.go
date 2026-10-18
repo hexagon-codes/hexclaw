@@ -163,6 +163,9 @@ type WorkFeedback struct {
 	ProjectionMarkdown string                     `json:"projection_markdown"`
 }
 
+// WorkFeedbackProjectionWritingConciseV1 只用于新作文点评，旧冻结回执不按新合同重排。
+const WorkFeedbackProjectionWritingConciseV1 = "writing-concise-v1"
+
 // NormalizeWorkFeedbackAtom removes display-only Markdown scaffolding from one
 // observation/suggestion candidate. Canonical atoms remain plain text; Markdown
 // is produced only by ProjectWorkFeedbackMarkdown.
@@ -250,6 +253,12 @@ func validateWorkFeedbackAtoms(feedback WorkFeedback) error {
 // structured feedback. It is deterministic and contains no provider-authored
 // Markdown envelope.
 func ProjectWorkFeedbackMarkdown(feedback WorkFeedback) string {
+	return ProjectWorkFeedbackMarkdownForContract(feedback, "")
+}
+
+// ProjectWorkFeedbackMarkdownForContract 按冻结合同选择投影；空合同保留原投影，历史读取与美术不受影响。
+func ProjectWorkFeedbackMarkdownForContract(feedback WorkFeedback, contract string) string {
+	conciseWriting := feedback.FeedbackType == WorkTypeWriting && contract == WorkFeedbackProjectionWritingConciseV1
 	dimensionLabels := map[string]string{
 		"task_alignment":  "切题",
 		"structure":       "结构",
@@ -261,7 +270,11 @@ func ProjectWorkFeedbackMarkdown(feedback WorkFeedback) string {
 		"visible_detail":  "可见细节",
 	}
 	var b strings.Builder
-	b.WriteString("## 可见证据\n\n")
+	if conciseWriting {
+		fmt.Fprintf(&b, "## 具体肯定\n\n%s\n\n## 关键问题\n\n", strings.TrimSpace(feedback.Affirmation))
+	} else {
+		b.WriteString("## 可见证据\n\n")
+	}
 	for _, observation := range feedback.Observations {
 		label := dimensionLabels[observation.Dimension]
 		if label == "" {
@@ -271,9 +284,14 @@ func ProjectWorkFeedbackMarkdown(feedback WorkFeedback) string {
 	}
 
 	if feedback.Affirmation != "" || feedback.ParentGuidance != "" || feedback.NextStep != "" {
-		fmt.Fprintf(&b, "\n## 先这样肯定\n\n%s\n", strings.TrimSpace(feedback.Affirmation))
-		fmt.Fprintf(&b, "\n## 家长可以这样问或讲\n\n%s\n", strings.TrimSpace(feedback.ParentGuidance))
-		fmt.Fprintf(&b, "\n## 下一次只试一个点\n\n%s\n", strings.TrimSpace(feedback.NextStep))
+		if conciseWriting {
+			fmt.Fprintf(&b, "\n## 局部示范\n\n%s\n", strings.TrimSpace(feedback.ParentGuidance))
+			fmt.Fprintf(&b, "\n## 孩子下一步\n\n%s\n", strings.TrimSpace(feedback.NextStep))
+		} else {
+			fmt.Fprintf(&b, "\n## 先这样肯定\n\n%s\n", strings.TrimSpace(feedback.Affirmation))
+			fmt.Fprintf(&b, "\n## 家长可以这样问或讲\n\n%s\n", strings.TrimSpace(feedback.ParentGuidance))
+			fmt.Fprintf(&b, "\n## 下一次只试一个点\n\n%s\n", strings.TrimSpace(feedback.NextStep))
+		}
 	} else {
 		// 旧记录缺少明确角色时保持原投影，不回写或猜造新的点评事实。
 		if len(feedback.Observations) > 0 {

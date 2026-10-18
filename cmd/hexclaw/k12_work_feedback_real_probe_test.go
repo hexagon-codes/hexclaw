@@ -111,8 +111,7 @@ func TestK12WorkFeedback_RealModel(t *testing.T) {
 		t.Fatalf("seed probe agent: error_type=%T", err)
 	}
 
-	// 写作纯文本闭包：与 cmd/hexclaw/main.go 的 workFeedbackGenFn 同构（系统提示、红线、
-	// egress 归类逐字一致），美术误入即诚实报错。
+	// 写作纯文本闭包复用正式请求装配，系统提示和局部示范合同不另维护副本。
 	writingGen := func(genCtx context.Context, subject, prompt, grade string) (string, error) {
 		provider := router.Default()
 		if provider == nil {
@@ -121,23 +120,11 @@ func TestK12WorkFeedback_RealModel(t *testing.T) {
 		if subject == "美术" {
 			return "", fmt.Errorf("美术观察式点评必须走视觉通道（原图多模态），不允许纯文本生成")
 		}
-		task := prompt
-		if grade != "" {
-			task += "\n（点评口径贴合" + grade + "孩子的水平，用家长和孩子都能懂的话。）"
-		}
+		request := k12WritingFeedbackCompletionRequest("", prompt, grade)
 		cctx := egress.WithRequest(genCtx, egress.PurposeGeneralChat, "k12-work-feedback", egress.ClassGeneral)
 		cctx, ccancel := context.WithTimeout(cctx, 120*time.Second)
 		defer ccancel()
-		temp := 0.3
-		resp, err := provider.Complete(cctx, hexagon.CompletionRequest{
-			Messages: []hexagon.Message{
-				{Role: hexagon.RoleSystem, Content: "你是小学写作辅导老师，给孩子作文做形成性点评。红线：只点评不打分——禁止输出任何分数、等第、评级、排名；" +
-					"提供家长参考改句与完整参考稿，说明先讲什么、怎样追问、卡住时如何引导和检查理解；不覆盖孩子原稿，不编造孩子经历。点评框架与输出格式按用户消息里的技能指引执行；语气鼓励、具体、可执行。"},
-				{Role: hexagon.RoleUser, Content: task},
-			},
-			MaxTokens:   1536,
-			Temperature: &temp,
-		})
+		resp, err := provider.Complete(cctx, request)
 		if err != nil {
 			t.Logf("writing provider error_type=%T", err)
 			return "", fmt.Errorf("work feedback provider completion failed: %T", err)

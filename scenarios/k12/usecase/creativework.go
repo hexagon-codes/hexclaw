@@ -210,7 +210,8 @@ func (d Deps) attachAIFeedback(ctx context.Context, agentName, recordID, feedbac
 	return d.GetCreativeWork(ctx, agentName, recordID)
 }
 
-func buildStructuredWorkFeedback(workType string, version k12.CreativeWorkVersion, feedback, source, methodRef string, currentContract ...bool) (k12.WorkFeedback, error) {
+func buildStructuredWorkFeedback(workType string, version k12.CreativeWorkVersion, feedback, source, methodRef string, currentContract ...string) (k12.WorkFeedback, error) {
+	conciseWriting := workType == k12.WorkTypeWriting && len(currentContract) > 0 && currentContract[0] == k12.WorkFeedbackProjectionWritingConciseV1
 	refs := make([]string, 0, 2)
 	if version.OCRJobID != "" && version.OCRVersion > 0 && version.OCRConfirmedDigest != "" {
 		refs = append(refs, fmt.Sprintf("ocr-confirmed:%s:v%d:sha256:%s",
@@ -235,11 +236,16 @@ func buildStructuredWorkFeedback(workType string, version k12.CreativeWorkVersio
 	strictFeedback := (workType == k12.WorkTypeArt || workType == k12.WorkTypeWriting) && source == k12.FeedbackSourceAI
 	// 写作历史记录可能仍是旧的六段标题；新生成结果带四个固定标题时继续严格校验，
 	// 旧格式只走原兼容解析，避免读取既有作品时把可用点评误判为非法。
-	if strictFeedback && workType == k12.WorkTypeWriting && !(len(currentContract) > 0 && currentContract[0]) &&
+	if strictFeedback && workType == k12.WorkTypeWriting && len(currentContract) == 0 &&
 		!strings.Contains(feedback, "## 可见证据") {
 		strictFeedback = false
 	}
 	artSections := make(map[string]bool, 4)
+	sectionByHeading := map[string]string{"## 可见证据": "observation", "## 先这样肯定": "affirmation", "## 家长可以这样问或讲": "guidance", "## 下一次只试一个点": "practice"}
+	conciseOrder := []string{"## 具体肯定", "## 关键问题", "## 局部示范", "## 孩子下一步"}
+	if conciseWriting {
+		sectionByHeading = map[string]string{conciseOrder[0]: "affirmation", conciseOrder[1]: "observation", conciseOrder[2]: "guidance", conciseOrder[3]: "practice"}
+	}
 	var affirmationLines, guidanceLines, practiceLines, experimentLines []string
 	hasGuidanceContent := false
 	experimentTitle := ""
@@ -263,17 +269,13 @@ func buildStructuredWorkFeedback(workType string, version k12.CreativeWorkVersio
 					guidanceLines = append(guidanceLines, line)
 					continue
 				}
-				switch rawLine {
-				case "## 可见证据":
-					artSection = "observation"
-				case "## 先这样肯定":
-					artSection = "affirmation"
-				case "## 家长可以这样问或讲":
-					artSection = "guidance"
-				case "## 下一次只试一个点":
-					artSection = "practice"
-				default:
+				var known bool
+				artSection, known = sectionByHeading[rawLine]
+				if !known {
 					return k12.WorkFeedback{}, fmt.Errorf("work feedback contains an unexpected section heading")
+				}
+				if conciseWriting && (len(artSections) >= len(conciseOrder) || rawLine != conciseOrder[len(artSections)]) {
+					return k12.WorkFeedback{}, fmt.Errorf("writing feedback sections are out of order")
 				}
 				if artSections[artSection] {
 					return k12.WorkFeedback{}, fmt.Errorf("work feedback contains a duplicate section")
@@ -411,6 +413,9 @@ func buildStructuredWorkFeedback(workType string, version k12.CreativeWorkVersio
 		return false
 	}
 	limitations := "观察依据为孩子原稿；修改示范与参考稿供家长辅导使用。"
+	if conciseWriting {
+		limitations = "观察依据为孩子原稿；局部示范供家长辅导使用。"
+	}
 	if workType == k12.WorkTypeArt {
 		limitations = "仅依据本版本提交的可见画面进行观察，不评分、不排名，也不替孩子重画。"
 	}
@@ -587,7 +592,11 @@ func buildStructuredWorkFeedback(workType string, version k12.CreativeWorkVersio
 		NextStep:           nextStep,
 		ProjectionMarkdown: "",
 	}
-	structured.ProjectionMarkdown = k12.ProjectWorkFeedbackMarkdown(structured)
+	projectionContract := ""
+	if len(currentContract) > 0 {
+		projectionContract = currentContract[0]
+	}
+	structured.ProjectionMarkdown = k12.ProjectWorkFeedbackMarkdownForContract(structured, projectionContract)
 	return structured, nil
 }
 

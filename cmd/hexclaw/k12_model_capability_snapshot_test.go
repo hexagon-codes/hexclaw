@@ -173,7 +173,7 @@ func TestResolveK12RequestedWorkFeedbackRouteKeepsParentSelectionAndCapabilityRe
 		{
 			name: "writing", workType: k12.WorkTypeWriting,
 			probeKind:  config.LLMModelCapabilityText,
-			capability: "text", promptVersion: "writing-feedback-v1",
+			capability: "text", promptVersion: "writing-feedback-v2",
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

@@ -47,7 +47,7 @@ func resolveK12WorkFeedbackRouteSelection(
 	requested k12.ImageTaskRouteSnapshot,
 ) (k12.ImageTaskRouteSnapshot, error) {
 	capabilities := []string{config.LLMModelCapabilityText}
-	promptVersion := "writing-feedback-v1"
+	promptVersion := "writing-feedback-v2"
 	if workType == k12.WorkTypeArt {
 		capabilities = append(capabilities, config.LLMModelCapabilityVision)
 		promptVersion = "art-feedback-v1"

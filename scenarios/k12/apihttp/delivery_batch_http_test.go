@@ -503,10 +503,10 @@ func TestCreativeWorkSendFreezesCurrentWorkAndLatestFeedback(t *testing.T) {
 		fakeSolveExec{},
 		assembly.WithWorkFeedbackGenerator(engineadapter.WorkFeedbackGenerateFunc(
 			func(context.Context, string, string, string) (string, error) {
-				return "## 可见证据\n原文写到「柳枝像绿色的丝带」。\n\n" +
-					"## 先这样肯定\n柳枝的比喻有可见依据。\n\n" +
-					"## 家长可以这样问或讲\n可以追问风吹时的声音。\n\n" +
-					"## 下一次只试一个点\n补充一个听觉细节。", nil
+				return "## 具体肯定\n柳枝的比喻有可见依据。\n\n" +
+					"## 关键问题\n原文尚未写清观察柳枝的位置。\n\n" +
+					"## 局部示范\n原句：柳枝像绿色的丝带。建议：补实际位置。原因：让读者看清。\n\n" +
+					"## 孩子下一步\n补充一个真实的观察位置。", nil
 			},
 		)),
 		assembly.WithDeliveryTransport(delivery),

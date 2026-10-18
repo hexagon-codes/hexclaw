@@ -37,6 +37,8 @@ type WorkFeedbackRequest struct {
 // WorkFeedbackOutput 是作品点评生成结果：点评正文 + 方法论基座来源戳。
 type WorkFeedbackOutput struct {
 	Feedback string
+	// 投影合同随成功响应冻结，旧回执缺省时仍按原四段恢复，不用新格式重解释旧正文。
+	ProjectionContract string `json:"projection_contract,omitempty"`
 	// SkillStamp 生成本条点评实际使用的方法论基座来源戳，随点评落库（feedback_skill 字段）
 	// 供追溯：形如 "writing-feedback@1.0.0/disk"（盘上 marketplace 版本）、
 	// "art-feedback@1.0.0/embedded"（发版内嵌快照）、"builtin"（硬编码红线兜底）。
@@ -46,7 +48,7 @@ type WorkFeedbackOutput struct {
 
 // WorkFeedbackGenerator 是作品点评生成的可选 Skill Executor 扩展 port（与
 // CauseSummarizer 同纪律：由 Solver 实现发现，未实现即诚实报错，不留假点评）。
-// 写作反馈提供原稿观察、家长参考稿与修改讲法，美术反馈依据可见画面。
+// 写作反馈提供原稿观察、局部修改示范与孩子下一步，美术反馈依据可见画面。
 // 评分与替换原画的输出由用例层拒绝入库，参考文本不覆盖孩子原稿。
 type WorkFeedbackGenerator interface {
 	GenerateWorkFeedback(ctx context.Context, req WorkFeedbackRequest) (WorkFeedbackOutput, error)
@@ -94,7 +96,7 @@ func workFeedbackRouteSnapshotFromContext(
 		snapshot.PromptVersion = "art-feedback-v1"
 	} else {
 		snapshot.Capability = "text"
-		snapshot.PromptVersion = "writing-feedback-v1"
+		snapshot.PromptVersion = "writing-feedback-v2"
 	}
 	return snapshot, true
 }
@@ -428,12 +430,12 @@ func (d Deps) GenerateWorkFeedbackCommand(
 	}
 	structured, err := buildStructuredWorkFeedback(
 		v.Fields.WorkType, last, feedback, k12.FeedbackSourceAI,
-		strings.TrimSpace(out.SkillStamp), true,
+		strings.TrimSpace(out.SkillStamp), out.ProjectionContract,
 	)
 	if err == nil {
 		if req.PartialContent {
 			structured.Limitations = req.ContentLimitations
-			structured.ProjectionMarkdown = k12.ProjectWorkFeedbackMarkdown(structured)
+			structured.ProjectionMarkdown = k12.ProjectWorkFeedbackMarkdownForContract(structured, out.ProjectionContract)
 		}
 		err = structured.Validate()
 	}

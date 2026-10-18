@@ -38,7 +38,7 @@ func artReq() usecase.WorkFeedbackRequest {
 
 // 硬编码红线段（三道保险的第二道，所有路径必须原样在场）。
 const (
-	writingHardRedline = "给家长修改示范与完整参考稿，并说明先讲什么、怎样追问、卡住时如何引导、如何检查理解。原稿与参考稿分开，不编造孩子事实；不打分、不评级、不排名。直接给内容与讲法，不输出原则声明。"
+	writingHardRedline = "默认只给1～2处局部修改示范，按原句→建议→一句原因说明；必要时只示范一个关键段，不生成完整家长参考稿或整篇重写。保留孩子的表达和适龄语言，不编造经历，不成人化；不打分、不评级、不排名。直接给内容，不输出原则声明。"
 	artHardRedline     = "红线：不打分、不评级、不排名、不做审美排名；不替孩子重画。"
 )
 
@@ -92,7 +92,7 @@ func TestBuildWorkFeedbackPrompt_DiskPreferredOverEmbedded(t *testing.T) {
 		if !strings.Contains(prompt, "专业方法、原文证据约束与红线") || !strings.Contains(prompt, "输出格式以文末四个固定二级标题为准") {
 			t.Error("writing skill introduction must preserve professional methods and evidence while deferring format to the final four headings")
 		}
-		for _, heading := range []string{"## 可见证据", "## 先这样肯定", "## 家长可以这样问或讲", "## 下一次只试一个点"} {
+		for _, heading := range []string{"## 具体肯定", "## 关键问题", "## 局部示范", "## 孩子下一步"} {
 			if !strings.Contains(prompt, heading) {
 				t.Errorf("writing output envelope is missing %q", heading)
 			}
@@ -140,8 +140,8 @@ func TestBuildWorkFeedbackPrompt_DiskUnavailable_FallsBackEmbedded(t *testing.T)
 	if !strings.Contains(prompt, "叶圣陶") {
 		t.Error("盘上缺失时应注入内嵌快照正文")
 	}
-	if stamp != "writing-feedback@1.0.1/embedded" {
-		t.Errorf("来源戳应为 writing-feedback@1.0.1/embedded，got %q", stamp)
+	if stamp != "writing-feedback@1.0.2/embedded" {
+		t.Errorf("来源戳应为 writing-feedback@1.0.2/embedded，got %q", stamp)
 	}
 	if !strings.Contains(prompt, writingHardRedline) {
 		t.Error("内嵌路径丢失硬编码红线段")
@@ -176,7 +176,7 @@ func TestBuildWorkFeedbackPrompt_DiskCorrupt_FallsBackEmbedded(t *testing.T) {
 			if !strings.Contains(prompt, "叶圣陶") {
 				t.Error("盘上损坏时应降级注入内嵌快照正文")
 			}
-			if stamp != "writing-feedback@1.0.1/embedded" {
+			if stamp != "writing-feedback@1.0.2/embedded" {
 				t.Errorf("来源戳应落 embedded，got %q", stamp)
 			}
 			if !strings.Contains(prompt, writingHardRedline) {
@@ -253,16 +253,16 @@ func TestBuildWorkFeedbackPrompt_Writing_InjectsSkillBody(t *testing.T) {
 	if subject != "语文" {
 		t.Errorf("写作学科应为语文, got %q", subject)
 	}
-	if stamp != "writing-feedback@1.0.1/embedded" {
+	if stamp != "writing-feedback@1.0.2/embedded" {
 		t.Errorf("无 loader 时来源戳应为 embedded，got %q", stamp)
 	}
 	// skill 正文关键方法论句（来自 hub v0.0.7 writing-feedback.md 正文）。
 	for _, kw := range []string{
-		"语文写作反馈",      // 基座抬头
-		"最值得改的 1～3 处", // 输出信封第 3 段：一次最多 3 处
-		"输出信封",        // 固定六段信封
-		"叶圣陶",         // 方法论根基
-		"家长参考",        // 参考稿与孩子原稿分开
+		"语文写作反馈", // 基座抬头
+		"关键问题",   // 一次集中解决一个主要问题
+		"局部示范",   // 默认只示范局部修改
+		"叶圣陶",    // 方法论根基
+		"家长参考",   // 明确请求的参考稿与孩子原稿分开
 	} {
 		if !strings.Contains(prompt, kw) {
 			t.Errorf("写作提示词缺 skill 正文关键句 %q", kw)

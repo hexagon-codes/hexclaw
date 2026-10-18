@@ -161,10 +161,10 @@ func TestCurrentCreativeWorkHTTPExactDTOGenerationAndDelete(t *testing.T) {
 	h := newFeedbackServer(t, func(
 		context.Context, string, string, string,
 	) (string, error) {
-		return "## 可见证据\n原文写到「桂花落在青石板上」。\n\n" +
-			"## 先这样肯定\n桂花落在青石板上的细节清楚。\n\n" +
-			"## 家长可以这样问或讲\n可以问孩子当时听到了什么声音。\n\n" +
-			"## 下一次只试一个点\n补充一个声音细节。", nil
+		return "## 具体肯定\n桂花落在青石板上的细节清楚。\n\n" +
+			"## 关键问题\n原文尚未写清桂花的样子。\n\n" +
+			"## 局部示范\n原句：桂花落在青石板上。建议：只补实际看到的样子。原因：让画面更清楚。\n\n" +
+			"## 孩子下一步\n补充一处真实细节。", nil
 	})
 	rec, _ := doCurrent(t, h, http.MethodPost, "/creative-works",
 		`{"agent":"mingming","work_type":"writing","content_markdown":"原文","title":"猜测标题"}`,
@@ -247,10 +247,10 @@ func TestCurrentCreativeWorkHTTPCreateAutomaticallyRunsInitialFeedback(t *testin
 			string,
 			string,
 		) (string, error) {
-			return "## 可见证据\n原文写到「桂花落在青石板上」。\n\n" +
-				"## 先这样肯定\n原文中的桂花细节清楚。\n\n" +
-				"## 家长可以这样问或讲\n家长可以追问当时的声音。\n\n" +
-				"## 下一次只试一个点\n只补一处听觉细节。", nil
+			return "## 具体肯定\n原文中的桂花细节清楚。\n\n" +
+				"## 关键问题\n原文还没有写清桂花的样子。\n\n" +
+				"## 局部示范\n原句：桂花落在青石板上。建议：补真实样子。原因：让读者看清。\n\n" +
+				"## 孩子下一步\n只补一处真实细节。", nil
 		}),
 	)
 	coordinator := &usecase.CreativeWorkFeedbackCoordinator{

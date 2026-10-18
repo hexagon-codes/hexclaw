@@ -2327,10 +2327,7 @@ Set source only when the material explicitly names a work, title, or another rel
 			if subject == "美术" {
 				return "", fmt.Errorf("美术观察式点评必须走视觉通道（原图多模态），不允许纯文本生成")
 			}
-			task := prompt
-			if grade != "" {
-				task += "\n（点评口径贴合" + grade + "孩子的水平，用家长和孩子都能懂的话。）"
-			}
+			request := k12WritingFeedbackCompletionRequest(model, prompt, grade)
 			// 只含作品文本与教学任务（题目要求/原文），不含孩子敏感档案——归 general_chat/general。
 			cctx := egress.WithRequest(ctx, egress.PurposeGeneralChat, "k12-work-feedback", egress.ClassGeneral)
 			if _, hasDeadline := cctx.Deadline(); !hasDeadline {
@@ -2338,13 +2335,8 @@ Set source only when the material explicitly names a work, title, or another rel
 				cctx, ccancel = context.WithTimeout(cctx, 60*time.Second)
 				defer ccancel()
 			}
-			temp := 0.3
-			// 点评框架与输出信封由任务提示词携带（writing-feedback skill 正文基座，
-			// engineadapter/work_feedback.go 注入；skill 缺失时回退硬编码两段式）。
-			// 系统提示只钉红线（与提示词红线、usecase INV-011 构成三道保险），
-			// 不再下发与 skill 输出信封冲突的固定两段式/字数上限。
-			systemPrompt := "你是小学写作辅导老师，给孩子作文做形成性点评。红线：只点评不打分——禁止输出任何分数、等第、评级、排名；" +
-				"提供家长参考改句与完整参考稿，说明先讲什么、怎样追问、卡住时如何引导和检查理解；不覆盖孩子原稿，不编造孩子经历。点评框架与输出格式按用户消息里的技能指引执行；语气鼓励、具体、可执行。"
+			// 系统与任务提示由同一请求装配器对齐，避免高优先级指令覆盖局部示范合同。
+			systemPrompt, task := request.Messages[0].Content, request.Messages[1].Content
 			completionStartedAt := time.Now()
 			completionDeadline, hasCompletionDeadline := cctx.Deadline()
 			callLogger := logger.FromContext(cctx)
@@ -2352,16 +2344,8 @@ Set source only when the material explicitly names a work, title, or another rel
 				"context_has_deadline", hasCompletionDeadline, "context_deadline", completionDeadline,
 				"remaining_ms", time.Until(completionDeadline).Milliseconds(),
 				"user_bytes", len(task), "system_bytes", len(systemPrompt), "prompt_bytes", len(task)+len(systemPrompt),
-				"max_tokens", 1536, "temperature", temp)
-			resp, err := provider.Complete(k12NonIdempotentLLMContext(cctx), hexagon.CompletionRequest{
-				Model: model,
-				Messages: []hexagon.Message{
-					{Role: hexagon.RoleSystem, Content: systemPrompt},
-					{Role: hexagon.RoleUser, Content: task},
-				},
-				MaxTokens:   1536,
-				Temperature: &temp,
-			})
+				"max_tokens", request.MaxTokens, "temperature", *request.Temperature)
+			resp, err := provider.Complete(k12NonIdempotentLLMContext(cctx), request)
 			outputBytes := 0
 			if resp != nil {
 				outputBytes = len(resp.Content)
