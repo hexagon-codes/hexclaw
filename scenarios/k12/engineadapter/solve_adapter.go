@@ -16,6 +16,7 @@ import (
 
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/engine"
+	"github.com/hexagon-codes/hexclaw/internal/elementarymath"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/usecase"
 	"github.com/hexagon-codes/hexclaw/skill"
@@ -391,6 +392,40 @@ func (a *SolveAdapter) GradeVerified(ctx context.Context, subject, problem, stud
 // gradingProblemWithGrounding 只把编排层已经核验的教材正文加入模型输入；
 // 持久回执、文档标识和 revision 摘要均不进入提示词。
 func gradingProblemWithGrounding(ctx context.Context, problem string) string {
+	if shared, current, canonical, scoped := elementarymath.ParseMathSubproblem(problem); scoped {
+		shared = usecase.CanonicalPlainTextFallback(shared)
+		if evidence, ok := usecase.GradingGroundingForProvider(ctx); ok {
+			shared += "\n\nVerified textbook evidence (use it only to constrain the solution and grading; it is not the student's answer; do not expose internal source identifiers). Respond in Chinese:\n" + strings.TrimSpace(evidence)
+		}
+		if projected, ok := elementarymath.BuildMathSubproblem(shared, current, canonical); ok {
+			return projected
+		}
+		return problem
+	}
+	if shared, current, canonical, scoped := elementarymath.ParsePartCountSlotProblemSources(problem); scoped {
+		shared = usecase.CanonicalPlainTextFallback(shared)
+		if evidence, ok := usecase.GradingGroundingForProvider(ctx); ok {
+			shared += "\n\nVerified textbook evidence (use it only to constrain the solution and grading; it is not the student's answer; do not expose internal source identifiers). Respond in Chinese:\n" + strings.TrimSpace(evidence)
+		}
+		if projected, ok := elementarymath.BuildPartCountSlotProblemFromSources(shared, current, canonical); ok {
+			return projected
+		}
+		return problem
+	}
+	if shared, current, canonical, scoped := elementarymath.ParseFractionSlotProblemSources(problem); scoped {
+		shared = usecase.CanonicalPlainTextFallback(shared)
+		if canonical == "" {
+			current = usecase.CanonicalPlainTextFallback(current)
+		}
+		if evidence, ok := usecase.GradingGroundingForProvider(ctx); ok {
+			shared += "\n\nVerified textbook evidence (use it only to constrain the solution and grading; it is not the student's answer; do not expose internal source identifiers). Respond in Chinese:\n" + strings.TrimSpace(evidence)
+		}
+		if projected, ok := elementarymath.BuildFractionSlotProblemFromSources(shared, current, canonical); ok {
+			return projected
+		}
+		// 规范化不应丢失已冻结的空位；保持原输入而不回退为父题任务。
+		return problem
+	}
 	problem = usecase.CanonicalPlainTextFallback(problem)
 	evidence, ok := usecase.GradingGroundingForProvider(ctx)
 	if !ok {

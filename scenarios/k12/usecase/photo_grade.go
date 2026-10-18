@@ -9,6 +9,7 @@ import (
 	"sync"
 	"unicode/utf8"
 
+	"github.com/hexagon-codes/hexclaw/internal/elementarymath"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	"github.com/hexagon-codes/hexclaw/skill"
 )
@@ -77,6 +78,7 @@ type PhotoGradeRequest struct {
 	SourcePageAssetID           string
 	Image                       []byte
 	InitialReadMode             string                 `json:"initial_read_mode,omitempty"`
+	RecognitionExecutionPolicy  string                 `json:"recognition_execution_policy,omitempty"`
 	SolveOutputVersion          string                 `json:"solve_output_version,omitempty"`
 	ParentTeachingContract      string                 `json:"parent_teaching_contract,omitempty"`
 	ParentTeachingSkillSnapshot []skill.ContextReceipt `json:"parent_teaching_skill_snapshot,omitempty"`
@@ -476,10 +478,26 @@ func photoItemGradeRequest(req PhotoGradeRequest, q RecognizedQuestion) GradeReq
 	if req.practiceReference != nil {
 		input.Subject = req.practiceReference.Subject
 		input.Problem = req.practiceReference.QuestionMarkdown
-	} else if q.ProblemKind == ProblemKindSubproblem && strings.TrimSpace(q.SubproblemNo) != "" {
+	} else if q.ProblemKind == ProblemKindSubproblem {
+		if input.Subject == "数学" || strings.EqualFold(input.Subject, "math") {
+			if scoped, ok := elementarymath.BuildFractionSlotProblemFromSources(q.Question, q.RawTranscription, currentAssessmentCanonical(q)); ok {
+				input.Problem = scoped
+				return input
+			}
+			if scoped, ok := elementarymath.BuildPartCountSlotProblemFromSources(q.Question, q.RawTranscription, currentAssessmentCanonical(q)); ok {
+				input.Problem = scoped
+				return input
+			}
+			if scoped, ok := elementarymath.BuildMathSubproblem(q.Question, q.RawTranscription, currentAssessmentCanonical(q)); ok {
+				input.Problem = scoped
+				return input
+			}
+		}
 		// 父题可能保留其他小题，只向模型限定本次作答范围，不改原始题干与摘要。
-		input.Problem += "\n\nFor this request, solve or assess only subproblem " + q.SubproblemNo +
-			". Use the shared material as context; do not answer the other subproblems."
+		if strings.TrimSpace(q.SubproblemNo) != "" {
+			input.Problem += "\n\nFor this request, solve or assess only subproblem " + q.SubproblemNo +
+				". Use the shared material as context; do not answer the other subproblems."
+		}
 	}
 	return input
 }

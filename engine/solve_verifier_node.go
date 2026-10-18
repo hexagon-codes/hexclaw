@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
+	"regexp"
 	"strings"
 	"time"
 
@@ -14,6 +16,7 @@ import (
 	"github.com/hexagon-codes/hexagon/observe/trace"
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/egress"
+	"github.com/hexagon-codes/hexclaw/internal/elementarymath"
 	"github.com/hexagon-codes/hexclaw/skill"
 	"github.com/hexagon-codes/toolkit/util/idgen"
 )
@@ -53,10 +56,7 @@ func standaloneVerificationInput(ctx context.Context, msg *adapter.Message, tool
 		msg.Metadata["memory"] != "off" || msg.Metadata["knowledge"] != "off" {
 		return nil, false
 	}
-	_, numeric := numberSet(input.Candidate)
-	_, quantity := parseAnswerQuantity(input.Candidate)
-	_, labeled := parseLabeledAnswerQuantities(input.Candidate)
-	if !numeric && !quantity && !labeled {
+	if !completeVerificationAnswer(input.Candidate) {
 		return nil, false
 	}
 	for _, tool := range tools {
@@ -65,6 +65,85 @@ func standaloneVerificationInput(ctx context.Context, msg *adapter.Message, tool
 		}
 	}
 	return nil, false
+}
+
+// completeVerificationQuantity 只接受完整单量、明确命名数量或自身成立的单量等式。
+// 多空说明、演算段落和局部等号不能投影成整个候选答案。
+func completeVerificationQuantity(answer string) (answerQuantity, bool) {
+	s := normalizeAnswer(answer)
+	if quantity, ok := affirmativeNamedAnswerCount(s); ok {
+		s = quantity
+	}
+	if bareQuantityRe.MatchString(s) {
+		return parseAnswerQuantity(s)
+	}
+	if ratio, ok := parseAnswerRatio(s); ok {
+		return answerQuantity{value: ratio.RatString(), unit: "比"}, true
+	}
+	if equivalentQuantityRe.MatchString(s) {
+		// 此分支的既有解析器要求括号内外都是完整单量且相等。
+		return parseAnswerQuantity(s)
+	}
+	return singleQuantityEquation(s)
+}
+
+func completeVerificationAnswer(answer string) bool {
+	if values, ok := numberSet(answer); ok {
+		for _, value := range values {
+			if math.IsNaN(value) || math.IsInf(value, 0) {
+				return false
+			}
+		}
+		return true
+	}
+	if _, ok := completeVerificationQuantity(answer); ok {
+		return true
+	}
+	_, ok := parseLabeledAnswerQuantities(answer)
+	return ok
+}
+
+var verificationBlankSlotRe = regexp.MustCompile(`（[ \t\x{3000}]*）|\([ \t\x{3000}]*\)|□|\\square`)
+var verificationPartSlotRe = regexp.MustCompile(`^(?:（[ \t\x{3000}]*）|\([ \t\x{3000}]*\))[ \t\x{3000}]*份`)
+
+// verificationAnswersEqual 仅在当前题干的唯一明确份数空格上补齐候选省略的单位。
+// 只变换比较投影，原候选、stdout、单位及多空答案始终保留。
+func verificationAnswersEqual(problem, computed, candidate string) (equal, comparable bool) {
+	if _, _, _, scoped := elementarymath.ParsePartCountSlotProblemSources(problem); scoped {
+		left, leftOK := completePartCountSlotAnswer(computed)
+		right, rightOK := completePartCountSlotAnswer(candidate)
+		if !leftOK || !rightOK {
+			return false, false
+		}
+		// 当前唯一空位后已印刷份单位，只在比较副本中补齐两侧省略的同一单位。
+		left.unit, right.unit = "份", "份"
+		return quantitiesEqual(left, right), true
+	}
+	if _, _, scoped := elementarymath.ParseFractionSlotProblem(problem); scoped {
+		var leftOK, rightOK bool
+		computed, leftOK = elementarymath.ParseFractionSlotAnswer(computed)
+		candidate, rightOK = elementarymath.ParseFractionSlotAnswer(candidate)
+		if !leftOK || !rightOK {
+			return false, false
+		}
+	}
+	if !completeVerificationAnswer(computed) || !completeVerificationAnswer(candidate) {
+		return false, false
+	}
+	left, leftOK := completeVerificationQuantity(computed)
+	right, rightOK := completeVerificationQuantity(candidate)
+	if leftOK && rightOK && left.unit == "份" && right.unit == "" {
+		slots := verificationBlankSlotRe.FindAllStringIndex(problem, -1)
+		if len(slots) == 1 && verificationPartSlotRe.MatchString(problem[slots[0][0]:]) {
+			candidate = right.value + "份"
+		}
+	}
+	if leftValues, leftNumeric := numberSet(computed); leftNumeric {
+		if rightValues, rightNumeric := numberSet(candidate); rightNumeric {
+			return numberSetsEqual(leftValues, rightValues), true
+		}
+	}
+	return sameUnitAnswersEqual(computed, candidate)
 }
 
 func verificationProgramPrompt(input *verificationInput) string {
@@ -127,15 +206,16 @@ func verificationProgramJudgment(input *verificationInput, program verificationP
 		}
 	}
 	verdict := verdictUnverifiable
-	computed, executed := receipt.computed(task)
+	computed, executed := receipt.computedOutput(task)
+	equal, comparable := verificationAnswersEqual(input.Problem, computed, input.Candidate)
 	switch {
 	case program.Scope == "OUT_OF_SCOPE":
 		verdict = verdictOutOfScope
 	case process == "INVALID":
 		verdict = verdictDisagree
-	case executed && answersEqual(computed, input.Candidate):
+	case executed && comparable && equal:
 		verdict = verdictAgree
-	case executed && answersDefinitelyDiffer(computed, input.Candidate):
+	case executed && comparable && !equal:
 		verdict = verdictDisagree
 	}
 	if !executed {
@@ -196,7 +276,7 @@ func (e *ReActEngine) completeStandaloneVerification(ctx context.Context, sessio
 		receipt = sink.receipt
 		sink.mu.Unlock()
 	}
-	if _, ok := receipt.computed(msg.Content); !ok {
+	if _, ok := receipt.computedOutput(msg.Content); !ok {
 		return nil, fmt.Errorf("verification execution receipt is invalid")
 	}
 	resp.Content = verificationProgramJudgment(input, program, receipt, msg.Content, raw)

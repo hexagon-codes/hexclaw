@@ -484,3 +484,79 @@ func TestGradingProblemAssetSourceFormat(t *testing.T) {
 		})
 	}
 }
+
+func TestGradingProblemAssetPlainQuantitySpacing(t *testing.T) {
+	for _, tc := range []struct{ name, original, spaced, correct, current string }{
+		{"ribbon", "一根彩带长3/2米，每段剪成3/10米，可以剪成多少段？", "一根彩带长 3/2 米，每段剪成 3/10 米，可以剪成多少段？", "5", "6"},
+		{"rice", "食堂有60千克大米，用去了总量的2/5，还剩多少千克？", "食堂有60千克大米，用去了总量的 2/5，还剩多少千克？", "36", "35"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			solver, grader := &feedbackReassessmentSolver{answer: tc.correct}, &assetReuseGrader{}
+			o := newParallelAnchorOrchestrator(t, &countingRecognizer{}, nil, WithGradingRunDir(t.TempDir()))
+			o.deps.Solver, o.deps.Grader, o.deps.VerifiedGrader = solver, grader, nil
+			o.deps.TextbookOwnerID = DefaultLocalOwnerScope
+			dispatcher := k12storage.NewDispatcher(o.deps.Records, ProblemAssetConsumer{Records: o.deps.Records})
+			o.deps.Recognizer = &countingRecognizer{questions: []RecognizedQuestion{{Question: tc.original, Subject: "数学", StudentAnswer: tc.correct, AnswerState: AnswerStatePresent}}}
+			seedID := runItemResumeJobToAssessing(t, o, "quantity-spacing-seed")
+			if _, err := o.ConfirmAndRun(ctx, seedID, nil); err != nil {
+				t.Fatal(err)
+			}
+			if err := dispatcher.ProcessPending(ctx); err != nil {
+				t.Fatal(err)
+			}
+			grade := o.lookup(seedID).req.Grade
+			original, err := o.deps.Records.FindExactProblemAsset(ctx, DefaultLocalOwnerScope,
+				k12.ProblemAssetFacts{Subject: "数学", Stem: tc.original, AnswerContext: map[string]string{"grade_term": grade}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			seedReceipts, err := o.deps.Records.ListGradingAssessmentItems(ctx, "mingming", seedID)
+			if err != nil || len(seedReceipts) != 1 || seedReceipts[0].Status != k12.GradingAssessmentCorrect {
+				t.Fatalf("original correct assessment is missing: %+v %v", seedReceipts, err)
+			}
+			o.deps.Recognizer = &countingRecognizer{questions: []RecognizedQuestion{{Question: tc.spaced, Subject: "数学", StudentAnswer: tc.current, AnswerState: AnswerStatePresent}}}
+			jobID := runItemResumeJobToAssessing(t, o, "quantity-spacing-current")
+			run, _ := confirmItemResumeJobWithoutRun(t, o, jobID)
+			q := cloneRecognizedQuestions(run.questions)[0]
+			if _, err := o.RunGradingJob(ctx, jobID); err != nil {
+				t.Fatal(err)
+			}
+			assessments, err := o.deps.Records.ListGradingAssessmentItems(ctx, "mingming", jobID)
+			if err != nil || len(assessments) != 1 {
+				t.Fatalf("current assessment is missing: %+v %v", assessments, err)
+			}
+			current := assessments[0]
+			if current.AnswerSource == nil || current.AnswerSource.AssetID != original.AssetID || current.AnswerSource.FactsDigest != original.FactsDigest || current.SolveInvocationID != "" {
+				t.Fatalf("original asset was not adopted without a new solve: %+v", current.AnswerSource)
+			}
+			if current.Status != k12.GradingAssessmentWrong || current.GradeInvocationID == "" || current.GradeInvocationID == seedReceipts[0].GradeInvocationID || !reflect.DeepEqual(grader.answers, []string{tc.correct, tc.current}) {
+				t.Fatalf("current student answer was not independently graded: status=%s answers=%v", current.Status, grader.answers)
+			}
+			if solver.calls != 1 || !reflect.DeepEqual(q, run.questions[0]) || current.InputDigest != q.InputDigest {
+				t.Fatal("spacing lookup repeated solve or mutated the frozen question")
+			}
+			invocations, err := o.deps.Records.ListGradingItemInvocations(ctx, "mingming", jobID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, invocation := range invocations {
+				if invocation.Operation == k12.GradingItemOperationSolve || invocation.Operation == k12.GradingItemOperationSolveGenerate || invocation.Operation == k12.GradingItemOperationSolveVerify {
+					t.Fatal("asset reuse created a solve invocation")
+				}
+			}
+			adoption, err := o.deps.Records.FindProblemAssetAdoption(ctx, DefaultLocalOwnerScope, jobID, q.ProblemID, q.ConfirmedVersion)
+			if err != nil || adoption.AdoptionID != current.AnswerSource.AdoptionID || adoption.InputDigest != q.InputDigest || adoption.FactsDigest != original.FactsDigest {
+				t.Fatalf("adoption lost original facts or current input: %+v %v", adoption, err)
+			}
+			after, err := o.deps.Records.GetProblemAssetVersion(ctx, original.OwnerID, original.AssetID, original.Version)
+			if err != nil || !reflect.DeepEqual(original, after) {
+				t.Fatal("spacing lookup mutated the original asset version")
+			}
+			seedAfter, err := o.deps.Records.ListGradingAssessmentItems(ctx, "mingming", seedID)
+			if err != nil || !reflect.DeepEqual(seedReceipts, seedAfter) {
+				t.Fatal("new assessment changed the historical correct result")
+			}
+		})
+	}
+}

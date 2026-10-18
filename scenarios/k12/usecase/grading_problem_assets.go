@@ -182,7 +182,7 @@ func executeDurableSolveOperation(ctx context.Context, o *GradingOrchestrator, d
 	return solved, invocationID, nil
 }
 
-// findSourceFormatProblemAsset 只查询两个确定的历史排版精确键；完整原事实决定采用。
+// findSourceFormatProblemAsset 只查询有限排版候选的精确键；完整原事实决定采用。
 // 多个有效版本指向不同资产时保留正常求解，不从答案或排序选择来源。
 func findSourceFormatProblemAsset(ctx context.Context, store *k12storage.Store, owner string,
 	facts k12.ProblemAssetFacts, allowBlankTemplate bool,

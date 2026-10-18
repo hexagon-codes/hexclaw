@@ -14,6 +14,7 @@ import (
 	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/hexagon/observe/trace"
 	"github.com/hexagon-codes/hexclaw/egress"
+	"github.com/hexagon-codes/hexclaw/internal/elementarymath"
 	"github.com/hexagon-codes/hexclaw/skill"
 	"github.com/hexagon-codes/toolkit/util/idgen"
 )
@@ -176,6 +177,10 @@ func (o *SolveSkill) Execute(ctx context.Context, args map[string]any) (*skill.R
 	if strings.TrimSpace(problem) == "" {
 		return nil, fmt.Errorf("problem is required")
 	}
+	_, _, fractionSlots := elementarymath.ParseFractionSlotProblem(problem)
+	ctx = context.WithValue(ctx, fractionSlotSolveScopeKey{}, fractionSlots)
+	_, _, _, partCountSlot := elementarymath.ParsePartCountSlotProblemSources(problem)
+	ctx = context.WithValue(ctx, partCountSlotSolveScopeKey{}, partCountSlot)
 	subject, _ := args["subject"].(string)
 	grade, _ := args["grade"].(string)
 	constraint, _ := args["constraint"].(string)
@@ -335,6 +340,10 @@ func (o *SolveSkill) Execute(ctx context.Context, args map[string]any) (*skill.R
 		}
 	}
 	complexity := assessComplexity(complexityProblem)
+	// 明确的分数或份数空位不能误归为可跳过独立验证的完整算式；已有高复杂度保持。
+	if auto && (fractionSlots || partCountSlot) && complexity == complexityTrivial {
+		complexity = complexityStandard
+	}
 	// 完整匹配的计算规律问答只减少默认候选采样，讲解内容与独立审计仍走原合同。
 	if auto && outputVersion == solveWithParentGuideV1 && !gradingMode && fractionIntegerCalculationRuleRe.MatchString(strings.TrimSpace(deterministicProblem)) {
 		complexity = complexityStandard
@@ -504,6 +513,16 @@ func (o *SolveSkill) GradeVerified(ctx context.Context, problem, verifiedSolutio
 	if groundTruth == "" {
 		return nil, fmt.Errorf("verified solution has no final answer")
 	}
+	if _, _, scoped := elementarymath.ParseFractionSlotProblem(problem); scoped {
+		if _, complete := elementarymath.ParseFractionSlotAnswer(groundTruth); !complete {
+			return nil, errFractionSlotAnswerTarget
+		}
+	}
+	if _, _, _, scoped := elementarymath.ParsePartCountSlotProblemSources(problem); scoped {
+		if _, complete := completePartCountSlotAnswer(groundTruth); !complete {
+			return nil, errPartCountSlotAnswerTarget
+		}
+	}
 	deterministicProblem := deterministicProblemStem(problem)
 	if _, computed, ok := solveSimplestRatio(deterministicProblem); ok {
 		verifiedRatio, verifiedOK := positiveIntegerRatioAnswer(groundTruth)
@@ -559,6 +578,7 @@ func (o *SolveSkill) GradeVerified(ctx context.Context, problem, verifiedSolutio
 				}
 				workComparable := !totalFractionCountRe.MatchString(compactElementaryProblem(deterministicProblem)) ||
 					totalFractionCountWorkComparable(deterministicProblem, comparisonAnswer)
+				workComparable = workComparable && elementaryWordWorkComparable(solution, comparisonAnswer)
 				workValid, conclusive, wrongStep := false, false, ""
 				if workComparable {
 					workValid, conclusive, wrongStep = validateStudentArithmeticWork(deterministicProblem, comparisonAnswer)
@@ -698,6 +718,26 @@ func (o *SolveSkill) runSolveAgentResult(ctx context.Context, spec SubAgentSpec)
 			return decodeSolveGeneration(result)
 		}
 	}
+	if scoped, _ := ctx.Value(fractionSlotSolveScopeKey{}).(bool); scoped && spec.Source == solveDispatchSource && spec.Agent == solverAgentName {
+		next := execute
+		execute = func(callCtx context.Context, callSpec SubAgentSpec) (SubAgentResult, error) {
+			result, err := next(callCtx, callSpec)
+			if err == nil {
+				err = validateFractionSlotSolverResult(result)
+			}
+			return result, err
+		}
+	}
+	if scoped, _ := ctx.Value(partCountSlotSolveScopeKey{}).(bool); scoped && spec.Source == solveDispatchSource && spec.Agent == solverAgentName {
+		next := execute
+		execute = func(callCtx context.Context, callSpec SubAgentSpec) (SubAgentResult, error) {
+			result, err := next(callCtx, callSpec)
+			if err == nil {
+				err = validatePartCountSlotSolverResult(result)
+			}
+			return result, err
+		}
+	}
 	if spec.Source == solveDispatchSource && (spec.Agent == verifierAgentName || spec.Agent == solverAgentName) {
 		// 在物理调用拦截器内部收集回执，使持久化结果与正文一同保存；重放直接读取原回执。
 		next := execute
@@ -716,11 +756,21 @@ func (o *SolveSkill) runSolveAgentResult(ctx context.Context, spec SubAgentSpec)
 				if executionErr := result.ExecutionReceipt.KnownExecutionFailure(executionInputDigest(callSpec.Task)); executionErr != nil {
 					return result, errors.Join(egress.ErrProviderResponseProcessed, executionErr)
 				}
+				if scoped, _ := callCtx.Value(partCountSlotSolveScopeKey{}).(bool); scoped && callSpec.Agent == solverAgentName {
+					result = projectPartCountExecutedStep(callSpec.Task, result)
+				}
 			}
 			return result, callErr
 		}
 	}
 	res, err := runSubAgentWithRetry(execCtx, execute, spec, defaultSubAgentTimeout)
+	if scoped, _ := ctx.Value(fractionSlotSolveScopeKey{}).(bool); err == nil && scoped && spec.Source == solveDispatchSource && spec.Agent == solverAgentName {
+		// 账本重放仍须符合本次已冻结的作答目标，不能把历史路程答案当空位答案。
+		err = validateFractionSlotSolverResult(res)
+	}
+	if scoped, _ := ctx.Value(partCountSlotSolveScopeKey{}).(bool); err == nil && scoped && spec.Source == solveDispatchSource && spec.Agent == solverAgentName {
+		err = validatePartCountSlotSolverResult(res)
+	}
 	status, errStr := subAgentStatusOK, ""
 	if err != nil {
 		status, errStr = subAgentStatusError, err.Error()
@@ -750,6 +800,16 @@ func (o *SolveSkill) verifySolutionWithGuides(ctx context.Context, problem, solu
 	if err := ctx.Err(); err != nil {
 		return verdictUnverifiable, "", false, nil, nil, err
 	}
+	if _, _, scoped := elementarymath.ParseFractionSlotProblem(problem); scoped {
+		if _, complete := elementarymath.ParseFractionSlotAnswer(candidate); !complete {
+			return verdictUnverifiable, "", false, nil, nil, errFractionSlotAnswerTarget
+		}
+	}
+	if _, _, _, scoped := elementarymath.ParsePartCountSlotProblemSources(problem); scoped {
+		if _, complete := completePartCountSlotAnswer(candidate); !complete {
+			return verdictUnverifiable, "", false, nil, nil, errPartCountSlotAnswerTarget
+		}
+	}
 	if o.executeFunc == nil {
 		return verdictUnverifiable, "", false, nil, nil, nil
 	}
@@ -759,9 +819,7 @@ func (o *SolveSkill) verifySolutionWithGuides(ctx context.Context, problem, solu
 		raw, _ := json.Marshal(proof)
 		spec.Task += "\n\nTrusted solver execution proof (only actual execution and stdout; audit all mathematical steps independently):\n" + string(raw)
 	}
-	_, numericCandidate := numberSet(candidate)
-	_, quantityCandidate := parseAnswerQuantity(candidate)
-	_, labeledCandidate := parseLabeledAnswerQuantities(candidate)
+	completeCandidate := completeVerificationAnswer(candidate)
 	result, usedSpec, err := o.runValidatedResult(ctx, spec, func(result SubAgentResult, attempt SubAgentSpec) bool {
 		if !verdictParseable(result.Output) {
 			return false
@@ -769,10 +827,10 @@ func (o *SolveSkill) verifySolutionWithGuides(ctx context.Context, problem, solu
 		verdict, reported := parseVerdict(result.Output)
 		// 一般规律的解释没有唯一数值答案，示例计算不成为最终数值回执合同。
 		if verdict == verdictOutOfScope || (verdict == verdictUnverifiable &&
-			(reported == "" || (!numericCandidate && !quantityCandidate && !labeledCandidate))) {
+			(reported == "" || !completeCandidate)) {
 			return true
 		}
-		_, executed := result.ExecutionReceipt.computed(attempt.Task)
+		_, executed := result.ExecutionReceipt.computedOutput(attempt.Task)
 		return executed
 	})
 	// 已处理响应后的执行失败与未知停止都保留原错误，不能退化为缺少指南审计。
@@ -783,7 +841,7 @@ func (o *SolveSkill) verifySolutionWithGuides(ctx context.Context, problem, solu
 		return verdictUnverifiable, "", false, nil, nil, nil
 	}
 	verdict, computed := parseVerdict(result.Output)
-	actualComputed, executed := result.ExecutionReceipt.computed(usedSpec.Task)
+	actualComputed, executed := result.ExecutionReceipt.computedOutput(usedSpec.Task)
 	if executed {
 		computed = actualComputed
 	}
@@ -796,21 +854,21 @@ func (o *SolveSkill) verifySolutionWithGuides(ctx context.Context, problem, solu
 	}
 	// 完整解法只有明确通过过程审计时才允许数值等值纠偏；缺字段不猜测过程正确。
 	allowNumericAgreement := process != "INVALID" && (strings.TrimSpace(solution) == "" || process == "VALID")
+	equal, comparable := verificationAnswersEqual(problem, computed, candidate)
 	// 有执行回执时只比较实际 stdout；过程否决与超纲否决不因最终数值相同而失效。
 	if computed != "" {
 		switch {
-		case verdict == verdictUnverifiable && allowNumericAgreement && answersEqual(computed, candidate):
+		case verdict == verdictUnverifiable && allowNumericAgreement && comparable && equal:
 			verdict = verdictAgree
-		case verdict == verdictUnverifiable && answersDefinitelyDiffer(computed, candidate):
+		case verdict == verdictUnverifiable && comparable && !equal:
 			verdict = verdictDisagree
-		case verdict == verdictDisagree && allowNumericAgreement && answersEqual(computed, candidate):
+		case verdict == verdictDisagree && allowNumericAgreement && comparable && equal:
 			verdict = verdictAgree
-		case verdict == verdictAgree && answersDefinitelyDiffer(computed, candidate):
+		case verdict == verdictAgree && comparable && !equal:
 			verdict = verdictDisagree
 		}
 	}
-	numericGrounded = executed && (verdict == verdictAgree || verdict == verdictDisagree) &&
-		(answersEqual(computed, candidate) || answersDefinitelyDiffer(computed, candidate))
+	numericGrounded = executed && comparable && (verdict == verdictAgree || verdict == verdictDisagree)
 	trace.L(ctx).Info("solve execution evidence evaluated", "input_digest", executionInputDigest(usedSpec.Task),
 		"executed", executed, "computed", computed, "candidate", candidate, "process", process,
 		"verdict", verdictString(verdict), "evidence", evidenceKind(numericGrounded))
@@ -849,10 +907,7 @@ func (o *SolveSkill) runValidatedResult(ctx context.Context, spec SubAgentSpec, 
 	retry.Task = spec.Task + strictFormatReminder
 	requiresNumericReceipt := spec.Agent == verifierAgentName
 	if requiresNumericReceipt && spec.verification != nil {
-		_, numeric := numberSet(spec.verification.Candidate)
-		_, quantity := parseAnswerQuantity(spec.verification.Candidate)
-		_, labeled := parseLabeledAnswerQuantities(spec.verification.Candidate)
-		requiresNumericReceipt = numeric || quantity || labeled
+		requiresNumericReceipt = completeVerificationAnswer(spec.verification.Candidate)
 	}
 	if requiresNumericReceipt {
 		retry.Task += "\nA valid execution receipt is required for a numeric verdict. Run code_exec and print one COMPUTED: <final answer> line to stdout; do not only describe executing code."
@@ -1267,7 +1322,7 @@ func numberSetsEqual(as, bs []float64) bool {
 }
 
 var singleQuantityEquationLeftRe = regexp.MustCompile(`^[ \t0-9.+*/×÷＋－−()（）-]+$`)
-var singleQuantityEquationRightRe = regexp.MustCompile(`(?i)^[ \t]*` + answerQuantityNumberPattern + `[ \t]*([（(]?)(平方厘米|cm²|cm\^?2|平方米|千克|公斤|张纸|张|本|段|人|m²|m2|kg|克|米|g|m)([）)]?)[ \t]*$`)
+var singleQuantityEquationRightRe = regexp.MustCompile(`(?i)^[ \t]*` + answerQuantityNumberPattern + `[ \t]*([（(]?)(平方厘米|cm²|cm\^?2|平方米|千克|公斤|千米|公里|张纸|张|本|段|人|份|m²|m2|kg|km|克|米|g|m)([）)]?)[ \t]*$`)
 
 // singleQuantityEquation 仅接纳自身成立且右侧完整保留明确单位的一个数值等式。
 func singleQuantityEquation(answer string) (answerQuantity, bool) {
@@ -1599,6 +1654,15 @@ var fractionIntegerCalculationRuleRe = regexp.MustCompile(`^(?:(?:讨论一下|�
 
 // complexityProblemStem 剔除附加来源、完整范围包装及已选单题的唯一编号，不改变模型实际输入。
 func complexityProblemStem(problem string) string {
+	if _, current, _, scoped := elementarymath.ParseMathSubproblem(problem); scoped {
+		return current
+	}
+	if _, current, scoped := elementarymath.ParseFractionSlotProblem(problem); scoped {
+		return current
+	}
+	if _, current, _, scoped := elementarymath.ParsePartCountSlotProblemSources(problem); scoped {
+		return current
+	}
 	p := strings.TrimSpace(deterministicProblemStem(problem))
 	const scopePrefix = "\n\nFor this request, solve or assess only subproblem "
 	const scopeSuffix = ". Use the shared material as context; do not answer the other subproblems."

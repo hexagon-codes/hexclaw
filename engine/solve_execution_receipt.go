@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"regexp"
 	"strings"
 	"sync"
@@ -117,34 +116,43 @@ func captureCodeExecutionReceipt(ctx context.Context, toolName string, result *s
 		"stdout_bytes", receipt.StdoutBytes, "stdout_digest", executionInputDigest(receipt.Stdout))
 }
 
-var executionComputedMarker = regexp.MustCompile(`(?im)^COMPUTED:\s*([^\r\n]+)\s*$`)
+var executionComputedMarker = regexp.MustCompile(`(?im)^COMPUTED:[ \t]*([^\r\n]+)[ \t]*\r?$`)
+var executionComputedLabel = regexp.MustCompile(`(?im)^COMPUTED:`)
 
-func (r *CodeExecutionReceipt) computed(task string) (string, bool) {
+// completeFor 共用同输入执行成功且输出完整的判断，不解释 stdout 的数学含义。
+func (r *CodeExecutionReceipt) completeFor(task string) bool {
 	if r == nil || r.InputDigest != executionInputDigest(task) || r.RunID == "" ||
 		r.Status != "success" || r.ExitCode != 0 || r.Timeout || r.RuntimeMissing || r.Error != "" ||
 		r.Truncated || r.StdoutTruncated || r.StderrTruncated ||
 		r.StdoutBytes <= 0 || int64(len(r.Stdout)) != r.StdoutBytes {
+		return false
+	}
+	return true
+}
+
+// computedOutput 只确认本次执行完整、成功并读取唯一结果行，不把数量解析能力当成执行状态。
+func (r *CodeExecutionReceipt) computedOutput(task string) (string, bool) {
+	if !r.completeFor(task) {
 		return "", false
 	}
 	computed := strings.TrimSpace(r.Stdout)
-	if matches := executionComputedMarker.FindAllStringSubmatch(r.Stdout, -1); len(matches) == 1 {
+	labels := executionComputedLabel.FindAllStringIndex(r.Stdout, -1)
+	if matches := executionComputedMarker.FindAllStringSubmatch(r.Stdout, -1); len(labels) == 1 && len(matches) == 1 {
 		computed = strings.TrimSpace(matches[0][1])
-	} else if len(matches) > 1 || strings.ContainsAny(computed, "\r\n") {
+	} else if len(labels) != 0 || strings.ContainsAny(computed, "\r\n") {
 		return "", false
 	}
-	if values, ok := numberSet(computed); ok {
-		for _, value := range values {
-			if math.IsNaN(value) || math.IsInf(value, 0) {
-				return "", false
-			}
-		}
-		return computed, true
+	if computed == "" {
+		return "", false
 	}
-	if _, ok := parseAnswerQuantity(computed); ok {
-		return computed, true
+	return computed, true
+}
+
+// computed 保留数值证明边界：成功 stdout 不自动成为整份答案的数学证明。
+func (r *CodeExecutionReceipt) computed(task string) (string, bool) {
+	computed, complete := r.computedOutput(task)
+	if !complete || !completeVerificationAnswer(computed) {
+		return "", false
 	}
-	if _, ok := parseLabeledAnswerQuantities(computed); ok {
-		return computed, true
-	}
-	return "", false
+	return computed, true
 }
