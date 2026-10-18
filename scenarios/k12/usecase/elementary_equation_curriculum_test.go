@@ -64,10 +64,19 @@ func assertElementaryEquationGuide(t *testing.T, result usecase.BlankWorksheetPr
 }
 
 func TestElementaryEquationCurriculumRealAssemblyPreservesSourceAndProducesGuide(t *testing.T) {
-	for _, question := range []string{"x－1/4x＝18", "x-1/4x=18"} {
-		t.Run(question, func(t *testing.T) {
+	for _, tc := range []struct {
+		question string
+		points   []string
+	}{
+		{"x－1/4x＝18", []string{"解方程", "合并同类项"}},
+		{"x-1/4x=18", []string{"解方程", "合并同类项"}},
+		{`解方程：$x-\frac{1}{4}x=18$`, []string{"解方程", "合并同类项"}},
+		{"x-1/4x=18", []string{"解一元一次方程", "合并同类项", "分数系数方程"}},
+		{`解方程：$x-\frac{1}{4}x=18$`, []string{"解一元一次方程", "合并同类项", "分数系数方程"}},
+	} {
+		t.Run(tc.question+strings.Join(tc.points, "/"), func(t *testing.T) {
 			wired, calls, _ := elementaryEquationAssembly(t)
-			points := []string{"解方程", "合并同类项"}
+			question, points := tc.question, tc.points
 			before := append([]string(nil), points...)
 			req := usecase.GradeRequest{AgentName: "scope-child", Subject: "数学", Grade: "六年级上", Problem: question, KnowledgePoints: points}
 			result, err := wired.Deps.SolveBlankWorksheetProblem(context.Background(), req)
@@ -110,6 +119,9 @@ func TestElementaryEquationCurriculumCertificateDoesNotWidenCourseOrGrammar(t *t
 		want            bool
 	}{
 		{"x－1/4x＝18", "六年级上", true}, {"18=x-1/4x", "六年级上", true},
+		{`解方程：$x-\frac{1}{4}x=18$`, "六年级上", true},
+		{`解方程：$x-\frac{1}{4}x=18$`, "五年级下", false},
+		{`解方程：$x-\frac{1}{4}x=18`, "六年级上", false},
 		{"3x+2x=20", "五年级上", true}, {"0.5x+0.25x=9", "五年级上", true},
 		{"x-1/4x=18", "五年级下", false}, {"3x+2x=20", "四年级下", false},
 		{"x*x+2*x=18", "六年级上", false}, {"x+2*y=18", "六年级上", false},

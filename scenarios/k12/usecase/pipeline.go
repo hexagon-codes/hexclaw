@@ -317,7 +317,7 @@ func (d Deps) projectElementaryEquationKnowledgePoints(ctx context.Context, req 
 	primary, combined := false, false
 	for _, point := range points {
 		switch strings.TrimSpace(point) {
-		case "解方程", "简易方程":
+		case "解方程", "简易方程", "解一元一次方程", "一元一次方程":
 			primary = true
 		case "合并同类项":
 			combined = true
@@ -336,7 +336,8 @@ func (d Deps) projectElementaryEquationKnowledgePoints(ctx context.Context, req 
 	}
 	projected := append([]string(nil), points...)
 	for i, point := range projected {
-		if strings.TrimSpace(point) == "合并同类项" {
+		switch strings.TrimSpace(point) {
+		case "合并同类项", "解一元一次方程", "一元一次方程":
 			projected[i] = "简易方程"
 		}
 	}

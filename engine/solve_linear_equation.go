@@ -163,9 +163,15 @@ func splitLinearEquation(problem string) (left, right string, ok bool) {
 	}
 	// 只剥离完整单题的固定题头和成对数学包装，方程内容仍经过原语法与代回验证。
 	s = strings.TrimSpace(strings.TrimPrefix(s, "解方程："))
+	if strings.HasPrefix(s, "$$") && strings.HasSuffix(s, "$$") && strings.Count(s, "$") == 4 {
+		s = strings.TrimSpace(s[2 : len(s)-2])
+	} else if strings.HasPrefix(s, "$") && strings.HasSuffix(s, "$") && strings.Count(s, "$") == 2 {
+		s = strings.TrimSpace(s[1 : len(s)-1])
+	}
 	if strings.HasPrefix(s, `\[`) && strings.HasSuffix(s, `\]`) {
 		s = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(s, `\[`), `\]`))
 	}
+	s = answerLatexFractionRe.ReplaceAllString(s, "(($1)/($2))")
 	s = strings.NewReplacer(
 		"×", "*", "÷", "/", "＋", "+", "－", "-", "−", "-",
 		"（", "(", "）", ")", "＝", "=",
