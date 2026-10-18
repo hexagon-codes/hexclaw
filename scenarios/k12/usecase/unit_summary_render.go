@@ -19,7 +19,9 @@ var unitSummaryTimezone = time.FixedZone("Asia/Shanghai", 8*3600)
 const unitSummaryStandardRenderContract = "unit-summary-v1"
 const unitSummaryPreviousBriefRenderContract = "unit-summary-brief-v2"
 const unitSummaryPreviousCompactRenderContract = "unit-summary-brief-v3"
-const unitSummaryBriefRenderContract = "unit-summary-brief-v4"
+const unitSummaryPreviousInlineRenderContract = "unit-summary-brief-v4"
+const unitSummaryPreviousReadableRenderContract = "unit-summary-brief-v5"
+const unitSummaryBriefRenderContract = "unit-summary-brief-v6"
 
 func unitSummaryRenderContract(requirements k12.UnitSummaryRequirements) string {
 	if requirements.Format == "brief" {
@@ -36,8 +38,11 @@ func unitSummaryRenderMarkdown(markdown, contract string) string {
 	if contract == unitSummaryPreviousCompactRenderContract {
 		return "```{=typst}\n#set par(spacing: 0.1em)\n#show heading: set block(above: 0.2em, below: 0.1em)\n```\n\n" + markdown
 	}
-	if contract == unitSummaryBriefRenderContract {
+	if contract == unitSummaryPreviousInlineRenderContract {
 		return "```{=typst}\n#set par(spacing: 0.1em)\n#show heading: set block(above: 0.2em, below: 0.1em)\n#set block(spacing: 0.1em)\n#set list(spacing: 0.1em, tight: true)\n```\n\n" + markdown
+	}
+	if contract == unitSummaryPreviousReadableRenderContract || contract == unitSummaryBriefRenderContract {
+		return "```{=typst}\n#set par(spacing: 0.65em)\n#show heading: set block(above: 0.65em, below: 0.65em)\n#set block(spacing: 0.1em)\n#set list(spacing: 0.65em, tight: true)\n```\n\n" + markdown
 	}
 	return markdown
 }
@@ -92,6 +97,9 @@ func unitSummaryMarkdown(content k12.UnitSummaryContentV1, date string, version 
 	}
 	b.WriteString("## 这次可以这样带孩子复习\n\n")
 	for _, p := range content.ParentPlan {
+		if brief {
+			p = unitSummaryBriefPersonalReferences(p, content)
+		}
 		fmt.Fprintf(&b, "- %s\n", p)
 	}
 	b.WriteString("\n## 知识联系与学习目标\n\n")
@@ -110,7 +118,7 @@ func unitSummaryMarkdown(content k12.UnitSummaryContentV1, date string, version 
 		}
 		// 语义heading沿既有Pandoc/Typst的标题连带正文规则，不能用孤立粗体段冒充标题。
 		if brief {
-			fmt.Fprintf(&b, "### 例 %d · %s\n\n%s\n\n#### 思路与关键步骤\n\n%s\n\n**先问什么：** %s\n\n**怎样解释：** %s\n\n**卡住时提示：** %s\n\n", i+1, origin, e.PromptMD, e.DemonstrationMD, e.ParentGuide.Ask, e.ParentGuide.Explain, e.ParentGuide.Hint)
+			fmt.Fprintf(&b, "### 例 %d · %s\n\n%s\n\n#### 思路与关键步骤\n\n%s\n\n**先问什么：** %s\n\n**怎样解释：** %s\n\n**卡住时提示：** %s\n\n", i+1, origin, unitSummaryExamplePrompt(e.PromptMD), e.DemonstrationMD, e.ParentGuide.Ask, e.ParentGuide.Explain, e.ParentGuide.Hint)
 		} else {
 			fmt.Fprintf(&b, "### 例 %d · %s\n\n%s\n\n#### 思路与关键步骤\n\n%s\n\n#### 先问什么\n\n%s\n\n#### 怎样解释\n\n%s\n\n#### 卡住时提示\n\n%s\n\n", i+1, origin, e.PromptMD, e.DemonstrationMD, e.ParentGuide.Ask, e.ParentGuide.Explain, e.ParentGuide.Hint)
 		}
@@ -120,7 +128,13 @@ func unitSummaryMarkdown(content k12.UnitSummaryContentV1, date string, version 
 	}
 	b.WriteString("## 迁移检查\n\n")
 	for i, q := range content.TransferChecks {
-		fmt.Fprintf(&b, "### 检查 %d\n\n%s\n\n", i+1, q.QuestionMD)
+		question := q.QuestionMD
+		if brief {
+			if rest, ok := strings.CutPrefix(strings.TrimLeftFunc(question, unicode.IsSpace), "【原AI对比检查缩减】"); ok {
+				question = "【AI对比检查】" + strings.TrimLeftFunc(rest, unicode.IsSpace)
+			}
+		}
+		fmt.Fprintf(&b, "### 检查 %d\n\n%s\n\n", i+1, question)
 	}
 	b.WriteString("## 参考解读\n\n")
 	explanations := map[string]string{}
@@ -140,7 +154,11 @@ func unitSummaryMarkdown(content k12.UnitSummaryContentV1, date string, version 
 	if len(content.PersonalGuidance) > 0 {
 		b.WriteString("## 当前孩子的复习提示\n\n")
 		for _, p := range content.PersonalGuidance {
-			fmt.Fprintf(&b, "- %s\n", p.Text)
+			text := p.Text
+			if brief {
+				text = unitSummaryBriefPersonalReferences(text, content)
+			}
+			fmt.Fprintf(&b, "- %s\n", text)
 		}
 		b.WriteString("\n")
 	} else if !brief {
@@ -156,14 +174,7 @@ func unitSummaryMarkdown(content k12.UnitSummaryContentV1, date string, version 
 		if len(content.PersonalGuidance) == 0 {
 			parts = append(parts, "无对应作答证据，仅提供通用复习指导；阅读资料不代表已掌握。")
 		}
-		labels := []string{}
-		for _, source := range content.Sources {
-			label := source.Label
-			if source.Page != "" {
-				label += " · 第" + source.Page + "页"
-			}
-			labels = append(labels, label)
-		}
+		labels := unitSummaryBriefSourceLabels(content.Sources)
 		// 仅逐项同值、同数量和同顺序时共用展示；含页码的来源不与更宽的覆盖主题混为一谈。
 		sameCoverage := len(labels) > 0 && len(labels) == len(content.Coverage.Covered)
 		if sameCoverage {
@@ -210,6 +221,114 @@ func unitSummaryMarkdown(content k12.UnitSummaryContentV1, date string, version 
 	}
 	b.WriteString("本资料为 AI 归纳，来源原文与 AI 创作例题已区分。\n")
 	return unitSummaryMarkdownBlocks(b.String())
+}
+
+// 来源已由当前孩子的冻结上下文取得；这里只归并展示，不合并来源身份或个人证据。
+func unitSummaryBriefSourceLabels(sources []k12.UnitSummarySource) []string {
+	type workKey struct{ kind, label string }
+	workRefs := map[workKey]map[string]string{}
+	workConflict := map[workKey]bool{}
+	for _, source := range sources {
+		if source.Origin != "student_work" || source.Ref == "" || source.SourceDigest == "" {
+			continue
+		}
+		key := workKey{source.Kind, source.Label}
+		if workRefs[key] == nil {
+			workRefs[key] = map[string]string{}
+		}
+		if digest, exists := workRefs[key][source.Ref]; exists && digest != source.SourceDigest {
+			workConflict[key] = true
+		}
+		workRefs[key][source.Ref] = source.SourceDigest
+	}
+	pageNumber := func(page string) (int, bool) {
+		number, err := strconv.Atoi(page)
+		return number, err == nil && number > 0 && strconv.Itoa(number) == page
+	}
+	labels := []string{}
+	shownWork := map[workKey]bool{}
+	for i := 0; i < len(sources); i++ {
+		source := sources[i]
+		key := workKey{source.Kind, source.Label}
+		if source.Origin == "student_work" && source.Ref != "" && source.SourceDigest != "" && !workConflict[key] {
+			if !shownWork[key] {
+				labels = append(labels, fmt.Sprintf("%s（%d条）", source.Label, len(workRefs[key])))
+				shownWork[key] = true
+			}
+			continue
+		}
+		label := source.Label
+		if source.Page != "" {
+			last := i
+			page, knownPage := pageNumber(source.Page)
+			if knownPage && source.Origin == "textbook" && source.Ref != "" && source.DocumentID != "" && source.ManifestID != "" && source.Generation > 0 && source.SourceDigest != "" {
+				for last+1 < len(sources) {
+					next := sources[last+1]
+					nextPage, knownNext := pageNumber(next.Page)
+					if !knownNext || nextPage != page+1 || next.Ref == "" || next.Origin != source.Origin || next.Kind != source.Kind || next.Label != source.Label || next.DocumentID != source.DocumentID || next.ManifestID != source.ManifestID || next.Generation != source.Generation || next.SourceDigest != source.SourceDigest {
+						break
+					}
+					last++
+					page = nextPage
+				}
+			}
+			label += " · 第" + source.Page
+			if last > i {
+				label += "–" + sources[last].Page
+			}
+			label += "页"
+			i = last
+		}
+		labels = append(labels, label)
+	}
+	return labels
+}
+
+// 只有本版唯一且完整的例题/检查ID才映射显示序号；未知ID或更长ID的前缀不能被误换。
+func unitSummaryBriefPersonalReferences(text string, content k12.UnitSummaryContentV1) string {
+	counts := map[string]int{}
+	labels := map[string]string{}
+	add := func(kind, id string, index int) {
+		if id != "" {
+			key := kind + id
+			counts[key]++
+			labels[key] = fmt.Sprintf("%s %d", kind, index+1)
+		}
+	}
+	for i, example := range content.Examples {
+		add("例", example.ID, i)
+	}
+	for i, check := range content.TransferChecks {
+		add("检查", check.ID, i)
+	}
+	var b strings.Builder
+	consumed := 0
+	for start, r := range text {
+		if start < consumed {
+			continue
+		}
+		matched := ""
+		for token, count := range counts {
+			if count != 1 || len(token) <= len(matched) || !strings.HasPrefix(text[start:], token) {
+				continue
+			}
+			end := start + len(token)
+			if end < len(text) {
+				next := text[end]
+				if next >= 'a' && next <= 'z' || next >= 'A' && next <= 'Z' || next >= '0' && next <= '9' || next == '_' || next == '-' {
+					continue
+				}
+			}
+			matched = token
+		}
+		if matched == "" {
+			b.WriteRune(r)
+		} else {
+			b.WriteString(labels[matched])
+			consumed = start + len(matched)
+		}
+	}
+	return b.String()
 }
 
 // 只规范单元公开投影的块边界；不修改原生成JSON、冻结来源、词句或代码内容。
