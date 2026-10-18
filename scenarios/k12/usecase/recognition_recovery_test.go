@@ -66,7 +66,8 @@ func newRecognitionRecoveryFixture(t *testing.T) *recognitionRecoveryFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.parent, err = f.o.beginRecognizingLayoutModelInvocationV2(ctx, job, f.image, recognizingInvocationDigest(f.image, route, k12.ModelRequestPolicySnapshot{}), k12.ModelRequestPolicySnapshot{})
+	// 请求摘要采用已持久化的完整模型快照，与恢复时验证的冻结身份保持一致。
+	f.parent, err = f.o.beginRecognizingLayoutModelInvocationV2(ctx, job, f.image, recognizingInvocationDigest(f.image, job.Fields.ModelSnapshot, k12.ModelRequestPolicySnapshot{}), k12.ModelRequestPolicySnapshot{})
 	if err != nil {
 		t.Fatal(err)
 	}

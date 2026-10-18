@@ -85,7 +85,7 @@ func TestImageTaskGradingPreflightFailureKindUsesTypedCause(t *testing.T) {
 			name:   "invalid recognizing request policy",
 			budget: validBudget,
 			mutateInput: func(in *StartPhotoGradingInput) {
-				in.ModelSnapshot.RecognizingRequestPolicy = k12.ModelRequestPolicySnapshot{}
+				in.ModelSnapshot.RecognizingRequestPolicy = k12.ModelRequestPolicySnapshot{PolicyVersion: "invalid-policy", Stage: k12.GradingStageRecognizing}
 			},
 			wantKind:     "grading_model_request_policy_invalid",
 			wantIdentity: ErrModelRequestPolicyInvalid,

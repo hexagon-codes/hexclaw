@@ -56,7 +56,7 @@ func newRecognitionRepairRecoveryFixture(t *testing.T) *recognitionRepairRecover
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.parent, err = f.o.beginRecognizingLayoutModelInvocationV2(ctx, job, f.image, recognizingInvocationDigest(f.image, route, k12.ModelRequestPolicySnapshot{}), k12.ModelRequestPolicySnapshot{})
+	f.parent, err = f.o.beginRecognizingLayoutModelInvocationV2(ctx, job, f.image, recognizingInvocationDigest(f.image, job.Fields.ModelSnapshot, k12.ModelRequestPolicySnapshot{}), k12.ModelRequestPolicySnapshot{})
 	if err != nil {
 		t.Fatal(err)
 	}

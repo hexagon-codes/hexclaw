@@ -66,6 +66,7 @@ func newPartialRecognitionFixture(t *testing.T, unknown bool) *partialRecognitio
 		t.Fatal(err)
 	}
 	delete(checkpoint, "initial_read_mode")
+	delete(checkpoint, "recognition_execution_policy")
 	raw, err = json.Marshal(checkpoint)
 	if err != nil {
 		t.Fatal(err)

@@ -402,7 +402,7 @@ func TestK12ProblemGroundingProjectionBlankSolvedUsesSolveOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"共 1 题 · 1 题已解答", "## 已解答", "**正确答案：** 2"} {
+	for _, want := range []string{"共 1 题 · 1 题已解答", "## 解题摘要", "**解题状态：** 已解答", "**正确答案：** 2"} {
 		if !strings.Contains(artifact.CanonicalMarkdown, want) {
 			t.Fatalf("blank final artifact lacks %q: %s", want, artifact.CanonicalMarkdown)
 		}

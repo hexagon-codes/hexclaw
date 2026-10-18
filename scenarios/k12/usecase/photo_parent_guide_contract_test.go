@@ -35,8 +35,11 @@ func TestParentTeachingGuideContractIsExactlySevenApprovedItems(t *testing.T) {
 		"FollowUpQuestions",
 		"CheckingMethod",
 	}
-	if guideType.NumField() != len(wantFields) {
-		t.Fatalf("ParentTeachingGuide fields=%d, want exact seven: %#v", guideType.NumField(), wantFields)
+	if guideType.NumField() != len(wantFields)+1 {
+		t.Fatalf("ParentTeachingGuide fields=%d, want seven teaching items plus skill receipts: %#v", guideType.NumField(), wantFields)
+	}
+	if field, ok := guideType.FieldByName("SkillContextReceipts"); !ok || field.Tag.Get("json") != "skill_context_receipts,omitempty" {
+		t.Fatal("ParentTeachingGuide must preserve optional skill evidence separately from its seven teaching items")
 	}
 	for _, name := range wantFields {
 		if _, ok := guideType.FieldByName(name); !ok {

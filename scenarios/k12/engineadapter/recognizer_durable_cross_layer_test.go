@@ -391,7 +391,16 @@ func (h *dd036CrossLayerHarness) start(
 		t.Fatalf("start grading job created=%v err=%v", created, err)
 	}
 	h.probe.jobID = job.Record.RecordID
-	h.probe.snapshot.ParentInstructions = job.Fields.ModelSnapshot.ParentInstructions
+	configured := h.probe.snapshot
+	if job.Fields.ModelSnapshot.Provider != configured.Provider || job.Fields.ModelSnapshot.Model != configured.Model ||
+		job.Fields.ModelSnapshot.Route != configured.Route || job.Fields.ModelSnapshot.Capability != configured.Capability ||
+		job.Fields.ModelSnapshot.TimeoutMS != configured.TimeoutMS ||
+		job.Fields.ModelSnapshot.RecognizingRequestPolicy != configured.RecognizingRequestPolicy ||
+		job.Fields.ModelSnapshot.ParentInstructions.Digest == "" ||
+		job.Fields.ModelSnapshot.MathExecutionContract != k12.MathExecutionContractProgramFirst {
+		t.Fatalf("created job did not freeze the configured route and current contracts: %+v", job.Fields.ModelSnapshot)
+	}
+	h.probe.snapshot = job.Fields.ModelSnapshot
 	return job
 }
 

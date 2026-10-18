@@ -182,10 +182,10 @@ func TestGradingSucceededInvocationBeforeCheckpointIsNotBlindlyReplayed(t *testi
 		Stage: k12.GradingStageRecognizing,
 		RequestDigest: recognizingInvocationDigest(
 			orchestratorPhotoRequest().Image,
-			snapshot,
+			v.Fields.ModelSnapshot,
 			k12.ModelRequestPolicySnapshot{},
 		),
-		RouteSnapshot: snapshot, Attempt: 1, CreatedAt: 100, UpdatedAt: 100,
+		RouteSnapshot: v.Fields.ModelSnapshot, Attempt: 1, CreatedAt: 100, UpdatedAt: 100,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -312,10 +312,10 @@ func TestGradingSucceededInvocationWithDurableArtifactRecoversCheckpointWithoutP
 		Stage: k12.GradingStageRecognizing,
 		RequestDigest: recognizingInvocationDigest(
 			orchestratorPhotoRequest().Image,
-			snapshot,
+			v.Fields.ModelSnapshot,
 			k12.ModelRequestPolicySnapshot{},
 		),
-		RouteSnapshot: snapshot, Attempt: 1, CreatedAt: 100, UpdatedAt: 100,
+		RouteSnapshot: v.Fields.ModelSnapshot, Attempt: 1, CreatedAt: 100, UpdatedAt: 100,
 	})
 	if err != nil {
 		t.Fatal(err)

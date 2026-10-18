@@ -182,9 +182,9 @@ func TestREGK12RecognitionDurabilityBudget20260808001OrchestratesInitialV2Header
 	}
 	header := probe.runtime.Header
 	if probe.initialReadMode != k12.RecognitionLayoutManifestWithContentV1 ||
-		probe.executionPolicy != k12.RecognitionExecutionPolicyCompactDAGV1 ||
+		probe.executionPolicy != k12.RecognitionExecutionPolicyCompactDAGFinalAnswerV2 ||
 		header.InitialReadMode != k12.RecognitionLayoutManifestWithContentV1 ||
-		header.ExecutionPolicy != k12.RecognitionExecutionPolicyCompactDAGV1 ||
+		header.ExecutionPolicy != k12.RecognitionExecutionPolicyCompactDAGFinalAnswerV2 ||
 		header.PlanID != recognitionLayoutInitialV2PlanID(probe.parent.InvocationID) ||
 		header.ParentInvocationID != probe.parent.InvocationID ||
 		header.AgentName != probe.parent.AgentName ||

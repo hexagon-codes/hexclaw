@@ -37,6 +37,18 @@ func TestGradingRetryKeepsFrozenCapabilityEvidence(t *testing.T) {
 	if err != nil || !created {
 		t.Fatalf("start created=%v err=%v", created, err)
 	}
+	if v.Fields.ModelSnapshot.Provider != frozen.Provider || v.Fields.ModelSnapshot.Model != frozen.Model ||
+		v.Fields.ModelSnapshot.Route != frozen.Route || v.Fields.ModelSnapshot.Capability != frozen.Capability ||
+		v.Fields.ModelSnapshot.ProviderInstanceID != frozen.ProviderInstanceID ||
+		v.Fields.ModelSnapshot.ConfigFingerprint != frozen.ConfigFingerprint ||
+		v.Fields.ModelSnapshot.CapabilityReceiptDigest != frozen.CapabilityReceiptDigest ||
+		v.Fields.ModelSnapshot.ProbePolicyVersion != frozen.ProbePolicyVersion ||
+		v.Fields.ModelSnapshot.ParentInstructions != frozen.ParentInstructions ||
+		v.Fields.ModelSnapshot.MathExecutionContract != k12.MathExecutionContractProgramFirst {
+		t.Fatalf("created job did not freeze the configured route and current contracts: %+v", v.Fields.ModelSnapshot)
+	}
+	// 后续每次调用必须与正式创建阶段的完整持久快照相同，不能只比较旧字段。
+	frozen = v.Fields.ModelSnapshot
 	if _, err := o.RunGradingJob(context.Background(), v.Record.RecordID); err == nil {
 		t.Fatal("first provider failure expected")
 	}

@@ -154,19 +154,15 @@ func TestK12ProjectionTextClosuresShareFrozenRouteResolver(t *testing.T) {
 		}
 		resolverCalls := 0
 		modelFields := 0
-		parentWritingReference := name.Name != "workFeedbackGenFn"
 		ast.Inspect(fn.Body, func(inner ast.Node) bool {
-			if literal, ok := inner.(*ast.BasicLit); ok && name.Name == "workFeedbackGenFn" {
-				if strings.Contains(literal.Value, "家长参考") {
-					parentWritingReference = true
-				}
-				if strings.Contains(literal.Value, "禁止给范文") || strings.Contains(literal.Value, "禁止改写或重写全文") {
-					t.Error("work feedback system instruction blocks the parent reference")
-				}
-			}
 			if call, ok := inner.(*ast.CallExpr); ok {
 				if ident, ok := call.Fun.(*ast.Ident); ok && ident.Name == "resolveK12FrozenTextCompletionRoute" {
 					resolverCalls++
+				}
+				if ident, ok := call.Fun.(*ast.Ident); ok && name.Name == "workFeedbackGenFn" && ident.Name == "k12WritingFeedbackCompletionRequest" && len(call.Args) > 0 {
+					if model, ok := call.Args[0].(*ast.Ident); ok && model.Name == "model" {
+						modelFields++
+					}
 				}
 			}
 			literal, ok := inner.(*ast.CompositeLit)
@@ -196,8 +192,13 @@ func TestK12ProjectionTextClosuresShareFrozenRouteResolver(t *testing.T) {
 		if modelFields != 1 {
 			t.Errorf("%s CompletionRequest.Model=model fields=%d, want 1", name.Name, modelFields)
 		}
-		if !parentWritingReference {
-			t.Error("work feedback system instruction is missing the parent reference")
+		if name.Name == "workFeedbackGenFn" {
+			request := k12WritingFeedbackCompletionRequest("frozen-writing-model", "作文原稿", "六年级上")
+			if request.Model != "frozen-writing-model" || len(request.Messages) != 2 ||
+				!strings.Contains(request.Messages[0].Content, "1～2处局部示范") ||
+				!strings.Contains(request.Messages[0].Content, "不输出完整参考稿") {
+				t.Error("work feedback request must preserve the frozen model and local-example contract")
+			}
 		}
 		required[name.Name] = true
 		return false

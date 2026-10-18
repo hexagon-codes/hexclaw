@@ -93,7 +93,7 @@ func TestDD041_PhotoGradeAndFinalProjectionKeepSectionAndMarkedSystemOrderSepara
 		t.Fatalf("DD-041 photo projection lost section/system distinction:\n%s", graded)
 	}
 	if !strings.Contains(final, "**共 1 题 · 1 题正确**") ||
-		!strings.Contains(final, "1 题已答对。") {
+		strings.Contains(final, "1 题已答对。") || strings.Contains(final, "## 已答对的题") {
 		t.Fatalf("DD-041 correct final projection lost its summary:\n%s", final)
 	}
 	for name, projection := range map[string]string{"photo": graded, "final": final} {

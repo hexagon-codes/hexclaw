@@ -129,6 +129,7 @@ func TestRecognitionInitialReadModeLegacyRunCannotBeUpgradedByCaller(t *testing.
 	}
 	// 历史版本的 run.json 没有首读模式字段，V2 预算不应使恢复升级协议。
 	orchestrator.lookup(job.Record.RecordID).req.InitialReadMode = ""
+	orchestrator.lookup(job.Record.RecordID).req.RecognitionExecutionPolicy = ""
 	if err := orchestrator.persistRun(job.Record.RecordID, orchestrator.lookup(job.Record.RecordID)); err != nil {
 		t.Fatal(err)
 	}
