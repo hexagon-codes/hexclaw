@@ -83,6 +83,58 @@ func TestSolveTrivialArithmetic_AllowsStrictSimplestFractionWrapper(t *testing.T
 	}
 }
 
+func TestVerifyIncorrectArithmeticFinalAnswer(t *testing.T) {
+	for _, tc := range []struct {
+		name, problem, finalAnswer, correct string
+		wrong                               bool
+	}{
+		{"independent incorrect final", "7/9×3/14=", "1/3", "1/6", true},
+		{"leading equals", "7/9×3/14=", "=1/3", "1/6", true},
+		{"canonical math", `\(\frac{7}{9}\times\frac{3}{14}=\)`, `\(=\frac{1}{3}\)`, "1/6", true},
+		{"display math", "7/9×3/14=", `$$\frac{1}{3}$$`, "1/6", true},
+		{"parenthesized numerator", "1/3=", `\frac{1+1}{3}`, "1/3", true},
+		{"correct final is not a grading verdict", "7/9×3/14=", "1/6", "", false},
+		{"equivalent non-reduced final", "7/9×3/14=", "2/12", "", false},
+		{"equivalent fraction and decimal", "计算 1/4+1/4，并把结果化成最简分数", "0.5", "", false},
+		{"wrong work with correct final is not read", "7/9×3/14=", "7/9×3/14=1/3\n=1/6", "", false},
+		{"multiple equalities are not read", "7/9×3/14=", "1/6=1/3", "", false},
+		{"embedded math wrappers are not joined", "7/9×3/14=", "$1$$2$", "", false},
+		{"unclosed math wrapper", "7/9×3/14=", `\(\frac{1}{3}`, "", false},
+		{"digit internal space", "7/9×3/14=", "1 2/3", "", false},
+		{"digit internal unicode space", "7/9×3/14=", "1\u00a02/3", "", false},
+		{"digit internal latex space", "7/9×3/14=", `\frac{1 2}{3}`, "", false},
+		{"incomplete fraction", "7/9×3/14=", "1/", "", false},
+		{"incomplete question mark", "7/9×3/14=", "1/3?", "", false},
+		{"trailing equation", "7/9×3/14=", "1/3=", "", false},
+		{"multiple leading equalities", "7/9×3/14=", "==1/3", "", false},
+		{"mixed leading equalities", "7/9×3/14=", "=＝1/3", "", false},
+		{"answer is not a numbered problem", "7/9×3/14=", "1)2", "", false},
+		{"comment is not an arithmetic expression", "7/9×3/14=", "1/3/*2*/", "", false},
+		{"unit is not discarded", "7/9×3/14=", "1/3米", "", false},
+		{"variable answer", "7/9×3/14=", "x/3", "", false},
+		{"zero denominator", "7/9×3/14=", "1/0", "", false},
+		{"equation problem remains unsupported", "0.25x+0.5x=18", "25", "", false},
+		{"word problem remains unsupported", "每袋3米，2袋一共多少米？", "7", "", false},
+		{"multiline problem is not joined", "1\n2+3=", "4", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			solution, wrong := VerifyIncorrectArithmeticFinalAnswer(tc.problem, tc.finalAnswer)
+			if wrong != tc.wrong {
+				t.Fatalf("provenWrong=%t want=%t solution=%q", wrong, tc.wrong, solution)
+			}
+			if !tc.wrong {
+				if solution != "" {
+					t.Fatalf("unsupported or equal final answer produced a grading solution: %q", solution)
+				}
+				return
+			}
+			if !strings.Contains(solution, "按四则运算规则计算：") || !strings.Contains(solution, " = "+tc.correct) || !strings.Contains(solution, "答案："+tc.correct) {
+				t.Fatalf("incorrect final answer lacks the complete correct calculation: %q", solution)
+			}
+		})
+	}
+}
+
 func TestSolveSkill_PropagatesExecutorFailureInsteadOfFakeSuccess(t *testing.T) {
 	providerErr := errors.New("provider authentication failed")
 	s := NewSolveSkill(func(context.Context, SubAgentSpec) (SubAgentResult, error) {

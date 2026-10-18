@@ -52,6 +52,69 @@ func ArithmeticTranscriptionConsistent(problem, studentAnswer string) bool {
 	return valid && conclusive
 }
 
+// VerifyIncorrectArithmeticFinalAnswer 只比较已独立识别的完整最终答案与原算式的精确值。
+// 相等或不能完整解析时不作错误结论；本函数不读取演算末行，也不证明整份作答正确。
+func VerifyIncorrectArithmeticFinalAnswer(problem, finalAnswer string) (solution string, provenWrong bool) {
+	inputs := [2]string{problem, finalAnswer}
+	for i, input := range inputs {
+		if len(input) > 512 || strings.ContainsAny(input, "\r\n") {
+			return "", false
+		}
+		s := strings.TrimSpace(input)
+		for _, delimiters := range [][2]string{{`\(`, `\)`}, {`\[`, `\]`}, {"$$", "$$"}, {"$", "$"}} {
+			if strings.HasPrefix(s, delimiters[0]) {
+				if len(s) < len(delimiters[0])+len(delimiters[1]) || !strings.HasSuffix(s, delimiters[1]) {
+					return "", false
+				}
+				s = strings.TrimSpace(s[len(delimiters[0]) : len(s)-len(delimiters[1])])
+				break
+			}
+		}
+		// 分子、分母分别保留括号，不能把分数中的和改成分数外的和。
+		for {
+			next := answerLatexFractionRe.ReplaceAllString(s, `(($1)/($2))`)
+			if next == s {
+				break
+			}
+			s = next
+		}
+		s = answerLatexCompactFractionRe.ReplaceAllString(s, `(($1)/($2))`)
+		s = strings.NewReplacer(`\times`, "×", `\div`, "÷", `\cdot`, "×", `\left(`, "(", `\right)`, ")").Replace(s)
+		for _, r := range s {
+			if unicode.IsSpace(r) && r != ' ' && r != '\t' {
+				return "", false
+			}
+		}
+		if separatedArithmeticNumberRe.MatchString(s) {
+			return "", false
+		}
+		compact := strings.NewReplacer(" ", "", "\t", "").Replace(s)
+		if strings.Contains(compact, "//") || strings.Contains(compact, "/*") || strings.Contains(compact, "*/") {
+			return "", false
+		}
+		inputs[i] = s
+	}
+	answer := strings.TrimSpace(strings.TrimPrefix(strings.ReplaceAll(inputs[1], "＝", "="), "="))
+	if answer == "" || strings.ContainsAny(answer, "=＝?？") {
+		return "", false
+	}
+	worked, correct, ok := solveTrivialArithmetic(inputs[0])
+	if !ok {
+		return "", false
+	}
+	// 整体括号要求最终答案本身完整解析，禁止套用题干的题号和印刷指令剥离。
+	_, observed, ok := solveTrivialArithmetic("(" + answer + ")")
+	if !ok {
+		return "", false
+	}
+	expected, expectedOK := new(big.Rat).SetString(correct)
+	actual, actualOK := new(big.Rat).SetString(observed)
+	if !expectedOK || !actualOK || expected.Cmp(actual) == 0 {
+		return "", false
+	}
+	return worked, true
+}
+
 // solveTrivialArithmetic 对“只含数字、四则运算、括号，等号右侧为空/问号”的一步算式做
 // 本机精确求值。它刻意不接受变量、函数、单位或自然语言，避免把方程/应用题误判成纯计算。
 func solveTrivialArithmetic(problem string) (worked, answer string, ok bool) {
