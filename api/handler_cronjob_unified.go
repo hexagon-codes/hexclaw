@@ -276,7 +276,7 @@ func (s *Server) cronActionUpdate(ctx context.Context, req *CronJobRequest) (*Cr
 	if strings.TrimSpace(d.Name) == "" || strings.TrimSpace(d.Schedule) == "" || strings.TrimSpace(d.Prompt) == "" {
 		return nil, http.StatusBadRequest, &cronErr{code: CodeBadRequest, msg: "name、schedule、prompt 必填"}
 	}
-	used, err := s.activeCronJobCount(ctx, req.UserID)
+	used, err := s.activeCronJobCount(ctx, orig.UserID)
 	if err != nil {
 		return nil, http.StatusInternalServerError, &cronErr{code: CodeInternalError, msg: "配额检查失败"}
 	}
@@ -291,11 +291,11 @@ func (s *Server) cronActionUpdate(ctx context.Context, req *CronJobRequest) (*Cr
 		}
 	}
 
-	job, err := s.scheduler.ReplaceJobForOwner(ctx, req.JobID, req.UserID, cron.AddJobRequest{
+	job, err := s.scheduler.ReplaceJobForOwner(ctx, req.JobID, orig.UserID, cron.AddJobRequest{
 		Name:         d.Name,
 		Schedule:     d.Schedule,
 		Prompt:       d.Prompt,
-		UserID:       req.UserID,
+		UserID:       orig.UserID,
 		Deliver:      d.Deliver,
 		ChatID:       d.ChatID,
 		TimeoutSec:   d.TimeoutSec,
@@ -322,7 +322,7 @@ func (s *Server) cronActionUpdate(ctx context.Context, req *CronJobRequest) (*Cr
 }
 
 func (s *Server) cronActionList(ctx context.Context, req *CronJobRequest) (*CronJobResponse, int, error) {
-	jobs, err := s.scheduler.ListJobs(ctx, req.UserID)
+	jobs, err := s.accessibleCronJobs(ctx, req.UserID)
 	if err != nil {
 		return nil, http.StatusInternalServerError, &cronErr{code: CodeInternalError, msg: humanizeError(err)}
 	}
@@ -332,7 +332,7 @@ func (s *Server) cronActionList(ctx context.Context, req *CronJobRequest) (*Cron
 		if !req.IncludePaused && j.Status == cron.StatusPaused {
 			continue
 		}
-		if j.Status == cron.StatusActive {
+		if j.Status == cron.StatusActive && j.UserID == req.UserID {
 			used++
 		}
 		filtered = append(filtered, j)
@@ -349,7 +349,11 @@ func (s *Server) cronActionPause(ctx context.Context, req *CronJobRequest) (*Cro
 	if req.JobID == "" {
 		return nil, http.StatusBadRequest, &cronErr{code: CodeBadRequest, msg: "job_id 必填"}
 	}
-	if err := s.scheduler.PauseJobForOwner(ctx, req.JobID, req.UserID); err != nil {
+	job, status, err := s.cronLifecycleJobForOwner(ctx, req.UserID, req.JobID)
+	if err != nil {
+		return nil, status, err
+	}
+	if err := s.scheduler.PauseJobForOwner(ctx, req.JobID, job.UserID); err != nil {
 		status, mapped := classifyCronLifecycleError(err)
 		return nil, status, mapped
 	}
@@ -360,7 +364,11 @@ func (s *Server) cronActionResume(ctx context.Context, req *CronJobRequest) (*Cr
 	if req.JobID == "" {
 		return nil, http.StatusBadRequest, &cronErr{code: CodeBadRequest, msg: "job_id 必填"}
 	}
-	if err := s.scheduler.ResumeJobForOwner(ctx, req.JobID, req.UserID); err != nil {
+	job, status, err := s.cronLifecycleJobForOwner(ctx, req.UserID, req.JobID)
+	if err != nil {
+		return nil, status, err
+	}
+	if err := s.scheduler.ResumeJobForOwner(ctx, req.JobID, job.UserID); err != nil {
 		status, mapped := classifyCronLifecycleError(err)
 		return nil, status, mapped
 	}
@@ -371,7 +379,11 @@ func (s *Server) cronActionRemove(ctx context.Context, req *CronJobRequest) (*Cr
 	if req.JobID == "" {
 		return nil, http.StatusBadRequest, &cronErr{code: CodeBadRequest, msg: "job_id 必填"}
 	}
-	if err := s.scheduler.RemoveJobForOwner(ctx, req.JobID, req.UserID); err != nil {
+	job, status, err := s.cronLifecycleJobForOwner(ctx, req.UserID, req.JobID)
+	if err != nil {
+		return nil, status, err
+	}
+	if err := s.scheduler.RemoveJobForOwner(ctx, req.JobID, job.UserID); err != nil {
 		status, mapped := classifyCronLifecycleError(err)
 		return nil, status, mapped
 	}
@@ -384,7 +396,11 @@ func (s *Server) cronActionRun(ctx context.Context, req *CronJobRequest) (*CronJ
 	if req.JobID == "" {
 		return nil, http.StatusBadRequest, &cronErr{code: CodeBadRequest, msg: "job_id 必填"}
 	}
-	if err := s.scheduler.TriggerJobForOwner(ctx, req.JobID, req.UserID); err != nil {
+	job, status, err := s.cronLifecycleJobForOwner(ctx, req.UserID, req.JobID)
+	if err != nil {
+		return nil, status, err
+	}
+	if err := s.scheduler.TriggerJobForOwner(ctx, req.JobID, job.UserID); err != nil {
 		status, mapped := classifyCronLifecycleError(err)
 		return nil, status, mapped
 	}
@@ -407,9 +423,41 @@ func classifyCronLifecycleError(err error) (int, error) {
 	}
 }
 
-// cronJobForOwner 仅从可信 owner 的任务集合解析目标，统一隐藏跨 owner 与不存在的差异。
-func (s *Server) cronJobForOwner(ctx context.Context, ownerID, jobID string) (*cron.Job, int, error) {
+// cronLifecycleJobForOwner 保留暂停、恢复、删除和执行原有的不透明错误合同。
+func (s *Server) cronLifecycleJobForOwner(ctx context.Context, ownerID, jobID string) (*cron.Job, int, error) {
+	job, status, err := s.cronJobForOwner(ctx, ownerID, jobID)
+	if status == http.StatusNotFound {
+		status, err = classifyCronLifecycleError(cron.ErrCronJobNotFound)
+	}
+	return job, status, err
+}
+
+// accessibleCronJobs 保留原 principal 的普通任务，只合并场景装配已验证归属的任务。
+func (s *Server) accessibleCronJobs(ctx context.Context, ownerID string) ([]*cron.Job, error) {
 	jobs, err := s.scheduler.ListJobs(ctx, ownerID)
+	if err != nil || s.cronScenarioJobs == nil {
+		return jobs, err
+	}
+	additional, err := s.cronScenarioJobs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool, len(jobs)+len(additional))
+	for _, job := range jobs {
+		seen[job.ID] = true
+	}
+	for _, job := range additional {
+		if job != nil && !seen[job.ID] {
+			jobs = append(jobs, job)
+			seen[job.ID] = true
+		}
+	}
+	return jobs, nil
+}
+
+// cronJobForOwner 从同一可管理集合解析目标，统一隐藏未授权与不存在的差异。
+func (s *Server) cronJobForOwner(ctx context.Context, ownerID, jobID string) (*cron.Job, int, error) {
+	jobs, err := s.accessibleCronJobs(ctx, ownerID)
 	if err != nil {
 		return nil, http.StatusInternalServerError, &cronErr{
 			code: CodeInternalError,

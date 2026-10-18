@@ -2714,6 +2714,60 @@ Set source only when the material explicitly names a work, title, or another rel
 				}
 				return k12usecase.DefaultLocalOwnerScope, nil
 			}
+			errK12AgentScopeNotFound := errors.New("registered agent owner not found")
+			authorizeK12AgentScope := func(requestCtx context.Context, owner, agent string) error {
+				if owner != k12usecase.DefaultLocalOwnerScope {
+					return fmt.Errorf("agent owner mismatch")
+				}
+				// 单用户服务的已登记辅导实例共享既有 owner；显式历史归属不可覆盖。
+				var allowed bool
+				err := store.DB().QueryRowContext(requestCtx, `SELECT EXISTS (
+					SELECT 1 FROM agents WHERE name=? AND json_extract(metadata, '$.scenario')='k12-tutor'
+					AND NOT EXISTS (SELECT 1 FROM k12_image_task_owner_scopes WHERE agent_name=? AND owner_scope<>?)
+					AND NOT EXISTS (SELECT 1 FROM k12_page_assets WHERE agent_name=? AND owner_scope<>?)
+				)`, agent, agent, owner, agent, owner).Scan(&allowed)
+				if err != nil {
+					return err
+				}
+				if !allowed {
+					return errK12AgentScopeNotFound
+				}
+				return nil
+			}
+			srv.SetCronScenarioJobsResolver(func(requestCtx context.Context) ([]*cron.Job, error) {
+				if desktopMode || skill.AuthenticatedUserID(requestCtx) != "api-user" {
+					return nil, nil
+				}
+				owner, err := resolveAuthenticatedK12Owner(requestCtx)
+				if err != nil {
+					return nil, err
+				}
+				jobs, err := scheduler.ListJobs(requestCtx, owner)
+				if err != nil {
+					return nil, err
+				}
+				var allowed []*cron.Job
+				for _, job := range jobs {
+					separator := strings.LastIndex(job.SourceKey, "/")
+					if separator <= 0 {
+						continue
+					}
+					switch k12usecase.K12CronKind(job.SourceKey[separator+1:]) {
+					case k12usecase.KindWeeklySheet, k12usecase.KindReturnReminder,
+						k12usecase.KindSemesterSpring, k12usecase.KindSemesterFall:
+					default:
+						continue
+					}
+					if err := authorizeK12AgentScope(requestCtx, owner, job.SourceKey[:separator]); err != nil {
+						if errors.Is(err, errK12AgentScopeNotFound) {
+							continue
+						}
+						return nil, err
+					}
+					allowed = append(allowed, job)
+				}
+				return allowed, nil
+			})
 			srv.SetAgentInitialProgressPersister(func(requestCtx context.Context, candidate *agentrouter.AgentConfig, raw json.RawMessage) error {
 				if candidate.Metadata["scenario"] != "k12-tutor" {
 					return fmt.Errorf("%w: initial curriculum progress requires a K12 tutor", records.ErrInvalidFields)
@@ -2798,25 +2852,7 @@ Set source only when the material explicitly names a work, title, or another rel
 					}
 					return nil
 				},
-				AuthorizeAgentScope: func(requestCtx context.Context, owner, agent string) error {
-					if owner != k12usecase.DefaultLocalOwnerScope {
-						return fmt.Errorf("agent owner mismatch")
-					}
-					// 单用户服务的已登记辅导实例共享既有 owner；显式历史归属不可覆盖。
-					var allowed bool
-					err := store.DB().QueryRowContext(requestCtx, `SELECT EXISTS (
-						SELECT 1 FROM agents WHERE name=? AND json_extract(metadata, '$.scenario')='k12-tutor'
-						AND NOT EXISTS (SELECT 1 FROM k12_image_task_owner_scopes WHERE agent_name=? AND owner_scope<>?)
-						AND NOT EXISTS (SELECT 1 FROM k12_page_assets WHERE agent_name=? AND owner_scope<>?)
-					)`, agent, agent, owner, agent, owner).Scan(&allowed)
-					if err != nil {
-						return err
-					}
-					if !allowed {
-						return fmt.Errorf("registered agent owner not found")
-					}
-					return nil
-				},
+				AuthorizeAgentScope: authorizeK12AgentScope,
 			})
 			srv.Mount(
 				k12rt.Manifest.MountPath,

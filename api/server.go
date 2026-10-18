@@ -173,6 +173,7 @@ type Server struct {
 	serviceRestart          func()
 
 	agentInitialProgressPersister func(context.Context, *router.AgentConfig, json.RawMessage) error
+	cronScenarioJobs              func(context.Context) ([]*cron.Job, error) // 场景装配提供的已授权任务集合（可选）
 }
 
 // SandboxPolicy 是一次原子发布的完整沙箱运行策略。
@@ -333,6 +334,11 @@ func (s *Server) SetWebhookManager(mgr *webhook.Manager) {
 // 设置后启用定时任务管理 API。
 func (s *Server) SetCronScheduler(scheduler *cron.Scheduler) {
 	s.scheduler = scheduler
+}
+
+// SetCronScenarioJobsResolver 注入场景已核对归属的任务，不改变认证身份或普通任务归属。
+func (s *Server) SetCronScenarioJobsResolver(resolve func(context.Context) ([]*cron.Job, error)) {
+	s.cronScenarioJobs = resolve
 }
 
 // SetConnectorStore 设置数据连接器存储（GitHub/Notion 只读，token 加密）。
