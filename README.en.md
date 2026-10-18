@@ -15,7 +15,7 @@ HexClaw is an Agent service written in Go. Run it independently, as the local Si
 
 Beyond conversation, HexClaw can process files, generate documents and images, execute code, run workflows, and deliver results to configured channels. Models, tools, and scenario capabilities are connected through configuration, and data belongs to the backend in use.
 
-> This README describes the current source. Published binaries, images, and desktop installers use the code and documentation of their selected Release and may differ from the current source.
+> This README describes the `v0.5.0` source. Updating version metadata and documentation does not publish a release; released binaries, images, and desktop installers use their selected Release's code and documentation and may differ from the current source. Desktop release builds pin backend `refs/tags/v0.5.0`, so publish that backend tag with the final fixes before building desktop installers.
 
 ![A HexClaw-powered K12 scenario in Desktop returning the original homework image with annotations](.github/assets/hexclaw-k12-workspace.png)
 
@@ -319,6 +319,21 @@ The HexClaw ecosystem spans general libraries, model integration, and Agent orch
 | [HexClaw](https://github.com/hexagon-codes/hexclaw) (this repository) | Self-hostable AI Agent service: multiple models, tools, knowledge bases, long-term memory, and task automation, with API and multi-platform IM access | Go |
 | [HexClaw Desktop](https://github.com/hexagon-codes/hexclaw-desktop) | AI Agent desktop workspace: connects to local or cloud HexClaw services and brings together chat, knowledge bases, tools, task automation, and K12 homework tutoring | Tauri 2, Vue 3, TypeScript, Rust |
 | [HexClaw Hub](https://github.com/hexagon-codes/hexclaw-hub) | Skill and tool marketplace: Markdown skill definitions, MCP server directory, marketplace index, and generation and validation tools | Markdown, Python |
+
+## Contact
+
+- Website: [hexclaw.net](https://hexclaw.net)
+- Issues and suggestions: [GitHub Issues](https://github.com/hexagon-codes/hexclaw/issues)
+- HexClaw AI: [ai@hexclaw.net](mailto:ai@hexclaw.net)
+- HexClaw support: [support@hexclaw.net](mailto:support@hexclaw.net)
+
+### WeChat Official Account
+
+Follow the HexClaw WeChat Official Account for news, tutorials, and release updates:
+
+<p align="center">
+  <img src=".github/assets/wechat-qrcode.jpg" alt="HexClaw WeChat Official Account QR code" width="200" />
+</p>
 
 ## License
 

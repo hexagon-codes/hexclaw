@@ -2,6 +2,8 @@
 
 [中文](api.md) · [Back to README](../README.en.md)
 
+This source and the OpenAPI document use version `0.5.0`; existing `/api/v1` paths and API contracts remain unchanged. The documentation version does not identify a running deployment. Check its actual `GET /api/v1/version` response and build source.
+
 This is the public API entry point for the current source. Module references cover explicit main-service and desktop-integration routes; K12 has its own reference. See [OpenAPI](../api/openapi.yaml) for the machine-readable description. Releases use their matching code and documentation. Feature switches, injected dependencies, and the runtime environment determine the endpoints available in a deployment.
 
 ## Browse by module

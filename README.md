@@ -15,7 +15,7 @@ HexClaw 是用 Go 编写的 Agent 服务，可独立运行，也可作为 HexCla
 
 对话之外，HexClaw 可以处理文件、生成文档和图片、执行代码、运行工作流，并把结果送到已配置的渠道。模型、工具和场景能力按配置接入，数据保存在当前使用的后端。
 
-> 本 README 描述当前源码能力。已发布二进制、镜像与桌面安装包以所选 Release 的代码和文档为准，可能与当前源码存在差异。
+> 本 README 描述 `v0.5.0` 源码能力。版本与文档更新不代表已发布；已发布二进制、镜像与桌面安装包以所选 Release 的代码和文档为准，可能与当前源码存在差异。Desktop 正式构建固定引用后端 `refs/tags/v0.5.0`，须先发布包含最终修复的后端 Tag，再构建桌面安装包。
 
 ![HexClaw 驱动的 Desktop K12 场景：返回带批注的作业原图](.github/assets/hexclaw-k12-workspace.png)
 
@@ -319,6 +319,21 @@ HexClaw 生态从通用基础库、模型接入和 Agent 框架，延伸到服�
 | [HexClaw](https://github.com/hexagon-codes/hexclaw)（本仓库） | 可自托管的 AI Agent 服务：多模型、工具、知识库、长期记忆与任务自动化，支持 API 和多平台 IM 接入 | Go |
 | [HexClaw Desktop](https://github.com/hexagon-codes/hexclaw-desktop) | AI Agent 桌面工作台：连接本机或云端 HexClaw 服务，集成对话、知识库、工具、任务自动化与 K12 作业辅导 | Tauri 2、Vue 3、TypeScript、Rust |
 | [HexClaw Hub](https://github.com/hexagon-codes/hexclaw-hub) | 技能与工具市场：Markdown 技能定义、MCP 服务目录、市场索引及生成与校验工具 | Markdown、Python |
+
+## 联系我们
+
+- 官网：[hexclaw.net](https://hexclaw.net)
+- 问题与建议：[GitHub Issues](https://github.com/hexagon-codes/hexclaw/issues)
+- 河蟹 AI：[ai@hexclaw.net](mailto:ai@hexclaw.net)
+- 河蟹支持：[support@hexclaw.net](mailto:support@hexclaw.net)
+
+### 微信公众号
+
+关注 HexClaw 微信公众号，获取最新动态、使用教程和版本更新：
+
+<p align="center">
+  <img src=".github/assets/wechat-qrcode.jpg" alt="HexClaw 微信公众号二维码" width="200" />
+</p>
 
 ## 许可证
 
