@@ -592,6 +592,12 @@ func (m *Manager) Start(ctx context.Context, name string) error {
 	m.mu.Lock()
 	m.running[name] = adp
 	m.metadata[name] = inst
+	// 钉钉兼容 HTTP 入站复用已启动的 Stream 实例及消息处理器。
+	if strings.EqualFold(inst.Provider, "dingtalk") {
+		if inbound, ok := adp.(interface{ Handler() http.Handler }); ok {
+			m.inbound[name] = inbound.Handler()
+		}
+	}
 	m.mu.Unlock()
 	return m.setStatus(ctx, name, StatusRunning, "")
 }
