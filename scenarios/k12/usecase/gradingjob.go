@@ -357,6 +357,9 @@ func (d Deps) advanceGradingOutcomeUnknown(ctx context.Context, v GradingJobView
 func gradingNextStage(v GradingJobView) (string, error) {
 	switch v.Record.Status {
 	case k12.GradingStageQueued:
+		if v.Fields.BudgetSnapshot.RequiresAnnotatedImage() && v.Fields.FailedStage == k12.GradingStageLocating && v.Fields.AnchorState == k12.GradingAnchorPending {
+			return k12.GradingStageAwaitingConfirmation, nil
+		}
 		return k12.GradingResumeStage(v.Fields.StageCheckpoints), nil
 	case k12.GradingStageNormalizing:
 		return k12.GradingStageRecognizing, nil
@@ -420,7 +423,11 @@ func (d Deps) advanceGradingFailed(ctx context.Context, v GradingJobView, in Adv
 	}
 	// 规则 2：rendering 失败降级为「原图 + 文字列表」，任务继续 projecting；
 	// failed_terminal 只由重试耗尽或明确不可重试错误进入，不与渲染阶段绑定。
-	if stage == k12.GradingStageRendering {
+	required, err := d.gradingRequiresAnnotatedImage(ctx, v)
+	if err != nil {
+		return GradingJobView{}, err
+	}
+	if stage == k12.GradingStageRendering && !required {
 		v.Fields.StageCheckpoints = append(v.Fields.StageCheckpoints, k12.GradingStageCheckpoint{
 			Stage: stage, ArtifactDigest: "degraded:" + in.FailureKind, RecordedAt: d.now(), Degraded: true,
 		})
@@ -431,7 +438,7 @@ func (d Deps) advanceGradingFailed(ctx context.Context, v GradingJobView, in Adv
 	}
 	switch stage {
 	case k12.GradingStageQueued, k12.GradingStageNormalizing, k12.GradingStageRecognizing,
-		k12.GradingStageLocating, k12.GradingStageAssessing, k12.GradingStageProjecting:
+		k12.GradingStageLocating, k12.GradingStageAssessing, k12.GradingStageRendering, k12.GradingStageProjecting:
 	default:
 		return GradingJobView{}, errGradingStageConflict("阶段 %s 无失败转移", stage)
 	}
@@ -440,7 +447,7 @@ func (d Deps) advanceGradingFailed(ctx context.Context, v GradingJobView, in Adv
 	v.Fields.Retryable = in.Retryable
 	v.Fields.FailedStage = stage
 	v.Fields.Deadline = 0
-	v, err := d.saveGradingJob(ctx, v, k12.GradingStageFailedRetryable)
+	v, err = d.saveGradingJob(ctx, v, k12.GradingStageFailedRetryable)
 	if err != nil {
 		return GradingJobView{}, err
 	}
@@ -461,6 +468,34 @@ func (d Deps) advanceGradingAnchor(ctx context.Context, v GradingJobView, in Adv
 	stage := v.Record.Status
 	if stage != k12.GradingStageAwaitingConfirmation && stage != k12.GradingStageLocating {
 		return GradingJobView{}, errGradingStageConflict("阶段 %s 无锚点回位语义", stage)
+	}
+	required, err := d.gradingRequiresAnnotatedImage(ctx, v)
+	if err != nil {
+		return GradingJobView{}, err
+	}
+	if required && in.AnchorState == k12.GradingAnchorDegraded {
+		invocations, err := d.Records.ListModelInvocations(ctx, v.Record.AgentName, v.Record.RecordID)
+		if err != nil {
+			return GradingJobView{}, err
+		}
+		unknown := false
+		for _, invocation := range invocations {
+			unknown = unknown || (invocation.Stage == k12.GradingStageLocating && (invocation.Status == k12.ModelInvocationSent || invocation.Status == k12.ModelInvocationOutcomeUnknown))
+		}
+		v.Fields.AnchorState = k12.GradingAnchorPending
+		v.Fields.FailedStage, v.Fields.Deadline = k12.GradingStageLocating, 0
+		if unknown {
+			v.Fields.FailureKind, v.Fields.Retryable = "provider_outcome_unknown", false
+			return d.saveGradingJob(ctx, v, k12.GradingStageOutcomeUnknown)
+		}
+		v.Fields.AttemptCount++
+		v.Fields.FailureKind, v.Fields.Retryable = "required_image_locating_failed", true
+		failed, err := d.saveGradingJob(ctx, v, k12.GradingStageFailedRetryable)
+		if err != nil || failed.Fields.AttemptCount < k12.GradingMaxStageAttempts {
+			return failed, err
+		}
+		failed.Fields.Retryable = false
+		return d.saveGradingJob(ctx, failed, k12.GradingStageFailedTerminal)
 	}
 	v.Fields.AnchorState = in.AnchorState
 	v.Fields.StageCheckpoints = append(v.Fields.StageCheckpoints, k12.GradingStageCheckpoint{

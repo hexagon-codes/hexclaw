@@ -27,6 +27,7 @@ type GradingAssessingBudgetBucket struct {
 // real 1/8/16/32 benchmark is not complete) and must never manufacture a new
 // frozen budget from the historical 180-second constant.
 type GradingBudgetSnapshot struct {
+	ImageOutputContract    string                           `json:"image_output_contract,omitempty"`
 	PolicyVersion          int                              `json:"policy_version"`
 	StageSeconds           GradingStageBudgets              `json:"stage_seconds"`
 	AssessingBuckets       []GradingAssessingBudgetBucket   `json:"assessing_buckets"`
@@ -36,6 +37,13 @@ type GradingBudgetSnapshot struct {
 	PhysicalCallCapMillis  int64                            `json:"physical_call_cap_millis,omitempty"`
 	WorkerHardCap          int                              `json:"worker_hard_cap,omitempty"`
 	EffectiveConcurrency   int                              `json:"effective_concurrency,omitempty"`
+}
+
+const GradingImageOutputContractAnnotatedHomeworkV1 = "annotated_homework_v1"
+
+// RequiresAnnotatedImage 仅识别任务创建时冻结的必需批改图合同。
+func (s GradingBudgetSnapshot) RequiresAnnotatedImage() bool {
+	return s.IsFrozen() && s.ImageOutputContract == GradingImageOutputContractAnnotatedHomeworkV1
 }
 
 func (b RecognitionLayoutBudgetBucketsV2) IsZero() bool {
@@ -49,13 +57,19 @@ func (s GradingBudgetSnapshot) Validate() error {
 		if s.StageSeconds != (GradingStageBudgets{}) || len(s.AssessingBuckets) != 0 ||
 			s.ItemConcurrency != 0 || s.RecognitionPlanVersion != 0 ||
 			!s.RecognizingBuckets.IsZero() || s.PhysicalCallCapMillis != 0 ||
-			s.WorkerHardCap != 0 || s.EffectiveConcurrency != 0 {
+			s.WorkerHardCap != 0 || s.EffectiveConcurrency != 0 || s.ImageOutputContract != "" {
 			return fmt.Errorf("grading budget: policy_version=0 must not carry frozen values")
 		}
 		return nil
 	}
 	if s.PolicyVersion < 0 {
 		return fmt.Errorf("grading budget: policy_version must be >= 0")
+	}
+	if s.ImageOutputContract != "" && s.ImageOutputContract != GradingImageOutputContractAnnotatedHomeworkV1 {
+		return fmt.Errorf("grading budget: unsupported image output contract")
+	}
+	if s.RequiresAnnotatedImage() && s.StageSeconds.Locating > 120 {
+		return fmt.Errorf("grading budget: required image locating budget must not exceed 120 seconds")
 	}
 	for name, seconds := range map[string]int64{
 		GradingStageQueued:      s.StageSeconds.Queued,
@@ -116,9 +130,13 @@ func (s GradingBudgetSnapshot) Validate() error {
 	return nil
 }
 
-// WithRecognitionPolicyFrom 仅复制可信的识别计划选择及其 V2 专用控制项。
+// WithRecognitionPolicyFrom 复制可信的识别计划及新任务图片交付合同；必需图片定位预算随合同冻结。
 // 单次请求调用方仍可提供现有的父级预算窗口，但不能选择或降级识别计划。
 func (s GradingBudgetSnapshot) WithRecognitionPolicyFrom(trusted GradingBudgetSnapshot) GradingBudgetSnapshot {
+	s.ImageOutputContract = trusted.ImageOutputContract
+	if trusted.RequiresAnnotatedImage() {
+		s.StageSeconds.Locating = trusted.StageSeconds.Locating
+	}
 	s.RecognitionPlanVersion = trusted.RecognitionPlanVersion
 	s.StageSeconds.Recognizing = trusted.StageSeconds.Recognizing
 	s.RecognizingBuckets = trusted.RecognizingBuckets

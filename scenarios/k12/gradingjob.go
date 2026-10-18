@@ -266,7 +266,7 @@ func GradingStageBudgetSeconds(stage string) int64 {
 //
 // Transitions 逐边对照 §6.7 状态机图；额外的 queued→后继自动阶段/终态恢复边
 // 由规则 3 授权（failed_retryable→queued 后从最近成功阶段的后继起跑）。
-// 规则 2：rendering 无 failed_* 出边——失败降级续跑 projecting，不进失败态。
+// 旧合同渲染失败仍降级；必需图片合同经用例门控进入既有可重试失败。
 // 规则 5：rendering/projecting 无 cancelled 出边。
 // 规则 6：completed 无出边——修正 = confirmed_version+1 的新 Job。
 // 人工等待不自动过期；局部题调用结果未知时沿 outcome_unknown 停点收敛。
@@ -298,9 +298,10 @@ func GradingJobSchema() *records.RecordSchema {
 				GradingStageAssessing, // 与 locating 汇合后进入（规则 1）
 				GradingStageCancelled,
 				GradingStageOutcomeUnknown,
+				GradingStageFailedRetryable, // 新冻结的必需图片合同保留定位失败，旧降级不变。
 			},
 			GradingStageAssessing:  {GradingStageRendering, GradingStageCancelled, GradingStageOutcomeUnknown, GradingStageFailedRetryable},
-			GradingStageRendering:  {GradingStageProjecting},
+			GradingStageRendering:  {GradingStageProjecting, GradingStageFailedRetryable},
 			GradingStageProjecting: {GradingStageCompleted, GradingStageFailedRetryable},
 			// 未决物理回执可纠正旧的可重试投影，不授予未知请求重发权限。
 			GradingStageFailedRetryable: {GradingStageQueued, GradingStageFailedTerminal, GradingStageOutcomeUnknown},

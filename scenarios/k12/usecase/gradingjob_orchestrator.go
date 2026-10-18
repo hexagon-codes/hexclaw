@@ -318,6 +318,7 @@ func (o *GradingOrchestrator) StartPhotoGradingJob(ctx context.Context, in Start
 		}
 	} else {
 		in.Photo.InitialReadMode = ""
+		in.Photo.RecognitionExecutionPolicy = ""
 		in.Photo.SolveOutputVersion = ""
 		in.Photo.ParentTeachingContract = ""
 		in.Photo.ParentTeachingSkillSnapshot = nil
@@ -380,6 +381,13 @@ func (o *GradingOrchestrator) StartPhotoGradingJob(ctx context.Context, in Start
 				policyErr,
 			)
 		}
+		if trustedRecognitionPolicy != nil && in.SourceKind == "image_task" && in.Photo.TaskIntent == PhotoTaskCompletedHomework && len(in.Photo.Image) > 0 {
+			trustedRecognitionPolicy.ImageOutputContract = k12.GradingImageOutputContractAnnotatedHomeworkV1
+			trustedRecognitionPolicy.StageSeconds.Locating = 120
+			if snap.TimeoutMS > 0 {
+				trustedRecognitionPolicy.StageSeconds.Locating = min(int64(120), (int64(snap.TimeoutMS)+999)/1000)
+			}
+		}
 		v, created, err = o.deps.CreateGradingJob(ctx, in.Photo.AgentName, in.Photo.SourceSession, CreateGradingJobInput{
 			// Submission 聚合未落库（§6.9 类型化存储待接线）：新任务以图片摘要和
 			// canonical source command 的组合摘要为提交标识。同一来源命令重放稳定
@@ -399,6 +407,7 @@ func (o *GradingOrchestrator) StartPhotoGradingJob(ctx context.Context, in Start
 		}
 		if created && v.Fields.BudgetSnapshot.RecognitionPlanVersion == k12.RecognitionPlanVersionV2 {
 			in.Photo.InitialReadMode = k12.RecognitionLayoutManifestWithContentV1
+			in.Photo.RecognitionExecutionPolicy = k12.RecognitionExecutionPolicyCompactDAGFinalAnswerV2
 		}
 	}
 	if !created {
@@ -1003,7 +1012,10 @@ func (o *GradingOrchestrator) runRecognize(ctx context.Context, run *gradingRun,
 				run.req.InitialReadMode,
 			),
 			policy,
-			run.req.InitialReadMode,
+			initialRecognitionLayoutContractV2{
+				InitialReadMode: run.req.InitialReadMode,
+				ExecutionPolicy: run.req.RecognitionExecutionPolicy,
+			},
 		)
 	}
 	if err != nil {
@@ -1103,7 +1115,10 @@ func (o *GradingOrchestrator) runRecognize(ctx context.Context, run *gradingRun,
 			job,
 			invocation,
 			run.req.Image,
-			run.req.InitialReadMode,
+			initialRecognitionLayoutContractV2{
+				InitialReadMode: run.req.InitialReadMode,
+				ExecutionPolicy: run.req.RecognitionExecutionPolicy,
+			},
 		)
 		if runtimeErr != nil {
 			cancelProvider()
@@ -1114,6 +1129,7 @@ func (o *GradingOrchestrator) runRecognize(ctx context.Context, run *gradingRun,
 			runtime.HeaderDigest,
 		)
 		providerCtx = k12.WithRecognitionLayoutInitialReadMode(providerCtx, runtime.Header.InitialReadMode)
+		providerCtx = k12.WithRecognitionExecutionPolicy(providerCtx, runtime.Header.ExecutionPolicy)
 		if runtime.Status == "succeeded" {
 			// 最终化是持久化精确集合的提交。如果进程在将其投影到父 Job 前退出，
 			// 则通过显式的只读重放标记进入适配器。适配器必须在任何图像拆分或
@@ -1741,8 +1757,8 @@ func (o *GradingOrchestrator) anchorDoneChannel(jobID string) <-chan struct{} {
 	return o.anchorDone[jobID]
 }
 
-// executeAnchor 只包围锚点外部调用的 deadline。超时是可审计的 degraded，而不是任务失败；
-// 后续仍使用冻结的文字事实完成 assessing/rendering/projecting。
+// executeAnchor 只包围锚点外部调用的 deadline。旧快照超时仍降级；
+// 必需图片合同由原分支汇合点保留技术失败或未知，不发布缺图完成。
 func (o *GradingOrchestrator) executeAnchor(
 	jobID, agentName string,
 	image []byte,
@@ -1780,8 +1796,7 @@ func (o *GradingOrchestrator) executeAnchorForTask(
 		return nil, k12.GradingAnchorDegraded, "anchor:ledger_job_missing", true
 	}
 	policy := k12.ModelRequestPolicySnapshot{}
-	if frozen := k12.NormalizeGradingModelSnapshot(snapshot); frozen.Model == k12.RecognizingPolicyModel ||
-		frozen.RecognizingRequestPolicy == k12.ConfiguredRecognizingRequestPolicy() {
+	if frozen := k12.NormalizeGradingModelSnapshot(snapshot); frozen.RecognizingRequestPolicy.IsApprovedRecognizing() {
 		policy = k12.ApprovedLocatingRequestPolicy()
 	}
 	requestRaw, _ := json.Marshal(struct {
@@ -1810,6 +1825,12 @@ func (o *GradingOrchestrator) executeAnchorForTask(
 			return nil, k12.GradingAnchorDegraded, "anchor:invalid_budget", true
 		}
 		anchorTimeout = time.Duration(seconds) * time.Second
+	}
+	if job.Fields.BudgetSnapshot.RequiresAnnotatedImage() {
+		anchorTimeout = min(anchorTimeout, 120*time.Second)
+		if snapshot.TimeoutMS > 0 {
+			anchorTimeout = min(anchorTimeout, time.Duration(snapshot.TimeoutMS)*time.Millisecond)
+		}
 	}
 	anchorDeadline := time.Now().Add(anchorTimeout)
 	if strings.TrimSpace(job.Fields.ParentAutomaticAttemptID) != "" {
@@ -1857,6 +1878,11 @@ func (o *GradingOrchestrator) executeAnchorForTask(
 		return anchored, k12.GradingAnchorDegraded, artifact, true
 	}
 	if err != nil {
+		if job.Fields.BudgetSnapshot.RequiresAnnotatedImage() && sentProviderOutcomeUnknown(err, ctxErr) {
+			_, _ = o.deps.Records.MarkModelInvocationOutcomeUnknown(context.WithoutCancel(ctx), agentName,
+				invocation.InvocationID, "provider_outcome_unknown")
+			return anchored, k12.GradingAnchorDegraded, "anchor:outcome_unknown", true
+		}
 		_, _ = o.deps.Records.MarkModelInvocationFailed(context.WithoutCancel(ctx), agentName,
 			invocation.InvocationID, "anchor_failed")
 		return anchored, k12.GradingAnchorDegraded, "anchor:failed", true
@@ -2048,10 +2074,39 @@ func photoHasCompletedItem(items []PhotoGradeItem) bool {
 }
 
 // runRender rendering 阶段：像素合成已在 assessing 内联执行（现网实现），本阶段回写其结果——
-// 失败走规则 2 降级（不终态，续跑 projecting），成功/无可信坐标可渲染则正常推进。
+// 旧合同失败仍降级；必需图片合同只在产物齐备后推进，恢复复用成功的逐题回执。
 func (o *GradingOrchestrator) runRender(ctx context.Context, run *gradingRun, jobID string) (GradingJobView, error) {
 	if run.result == nil {
 		return GradingJobView{}, fmt.Errorf("usecase: 批改任务 %s rendering 缺批改产物（运行时状态丢失）", jobID)
+	}
+	job, err := o.deps.GetGradingJob(ctx, run.agentName, jobID)
+	if err != nil {
+		return GradingJobView{}, err
+	}
+	required, err := o.deps.gradingRequiresAnnotatedImage(ctx, job)
+	if err != nil {
+		return job, err
+	}
+	if required && (run.renderFailure != "" || run.result.AnnotatedImage == nil || len(run.result.AnnotatedImage.Data) == 0) {
+		if job.Fields.FailedStage == k12.GradingStageRendering && job.Fields.AttemptCount > 0 {
+			previous := run.result
+			run.result = nil
+			rebuilt, durable, rebuildErr := o.durableAssessmentResult(ctx, run, job)
+			if rebuildErr != nil || !durable {
+				run.result = previous
+				if rebuildErr == nil {
+					rebuildErr = fmt.Errorf("durable assessment receipts are unavailable for rendering")
+				}
+				return o.failStage(ctx, run, jobID, "annotated_image_render_failed", rebuildErr)
+			}
+			run.result, run.renderFailure = rebuilt, ""
+			if err := o.persistRun(jobID, run); err != nil {
+				return o.failStage(ctx, run, jobID, "annotated_image_not_durable", err)
+			}
+		}
+		if run.renderFailure != "" || run.result.AnnotatedImage == nil || len(run.result.AnnotatedImage.Data) == 0 {
+			return o.failStage(ctx, run, jobID, "annotated_image_render_failed", fmt.Errorf("required annotated image is unavailable"))
+		}
 	}
 	if run.renderFailure != "" {
 		return o.deps.AdvanceGradingStage(ctx, run.agentName, jobID, AdvanceGradingInput{
@@ -2195,6 +2250,10 @@ func cloneRecognizedQuestions(questions []RecognizedQuestion) []RecognizedQuesti
 		out[i].EvidenceTranscriptions = append([]string(nil), question.EvidenceTranscriptions...)
 		out[i].AnswerEvidenceTranscriptions = append([]string(nil), question.AnswerEvidenceTranscriptions...)
 		out[i].ConfirmationReasons = append([]OCRRiskReason(nil), question.ConfirmationReasons...)
+		if question.FinalAnswerReceipt != nil {
+			receipt := *question.FinalAnswerReceipt
+			out[i].FinalAnswerReceipt = &receipt
+		}
 		if question.RecognitionConfidence != nil {
 			confidence := *question.RecognitionConfidence
 			out[i].RecognitionConfidence = &confidence
@@ -2404,7 +2463,7 @@ func (o *GradingOrchestrator) beginRecognizingModelInvocationWithPolicy(
 	image []byte,
 	requestDigest string,
 	policy k12.ModelRequestPolicySnapshot,
-	initialReadModes ...string,
+	contracts ...initialRecognitionLayoutContractV2,
 ) (k12.ModelInvocation, error) {
 	recognitionPlanVersion, err :=
 		frozenRecognitionPlanVersion(job.Fields.BudgetSnapshot)
@@ -2418,7 +2477,7 @@ func (o *GradingOrchestrator) beginRecognizingModelInvocationWithPolicy(
 			image,
 			requestDigest,
 			policy,
-			initialReadModes...,
+			contracts...,
 		)
 	}
 	parent, _, err := o.deps.Records.PrepareModelInvocation(
@@ -2546,7 +2605,7 @@ func (o *GradingOrchestrator) beginRecognizingLayoutModelInvocationV2(
 	image []byte,
 	requestDigest string,
 	policy k12.ModelRequestPolicySnapshot,
-	initialReadModes ...string,
+	contracts ...initialRecognitionLayoutContractV2,
 ) (k12.ModelInvocation, error) {
 	canonicalPage, err := k12.CanonicalizeRecognitionPageV2(image)
 	if err != nil {
@@ -2580,19 +2639,17 @@ func (o *GradingOrchestrator) beginRecognizingLayoutModelInvocationV2(
 	if err != nil {
 		return parent, err
 	}
-	var initialReadMode string
-	if len(initialReadModes) != 0 {
-		initialReadMode = initialReadModes[0]
+	var contract initialRecognitionLayoutContractV2
+	if len(contracts) != 0 {
+		contract = contracts[0]
 	}
+	contract.Budget = job.Fields.BudgetSnapshot
+	contract.StageStartedAtUnixMillis = stageStartedAt
 	published, err := o.publishInitialRecognitionLayoutV2(
 		ctx,
 		parent,
 		canonicalPage,
-		initialRecognitionLayoutContractV2{
-			InitialReadMode:          initialReadMode,
-			Budget:                   job.Fields.BudgetSnapshot,
-			StageStartedAtUnixMillis: stageStartedAt,
-		},
+		contract,
 	)
 	if err == nil {
 		err = o.prepareRecognitionRecoveryPlan(ctx, published)
@@ -2632,7 +2689,7 @@ func (o *GradingOrchestrator) loadInitialRecognitionLayoutRuntimeV2(
 	job GradingJobView,
 	parent k12.ModelInvocation,
 	image []byte,
-	initialReadModes ...string,
+	contracts ...initialRecognitionLayoutContractV2,
 ) (k12.RecognitionLayoutPlanRuntimeV2, error) {
 	canonicalPage, err := k12.CanonicalizeRecognitionPageV2(image)
 	if err != nil {
@@ -2646,19 +2703,17 @@ func (o *GradingOrchestrator) loadInitialRecognitionLayoutRuntimeV2(
 	if err != nil {
 		return k12.RecognitionLayoutPlanRuntimeV2{}, err
 	}
-	var initialReadMode string
-	if len(initialReadModes) != 0 {
-		initialReadMode = initialReadModes[0]
+	var contract initialRecognitionLayoutContractV2
+	if len(contracts) != 0 {
+		contract = contracts[0]
 	}
+	contract.Budget = job.Fields.BudgetSnapshot
+	contract.StageStartedAtUnixMillis = stageStartedAt
 	return o.loadInitialRecognitionLayoutRuntimeForParentV2(
 		ctx,
 		parent,
 		canonicalPage,
-		initialRecognitionLayoutContractV2{
-			InitialReadMode:          initialReadMode,
-			Budget:                   job.Fields.BudgetSnapshot,
-			StageStartedAtUnixMillis: stageStartedAt,
-		},
+		contract,
 	)
 }
 

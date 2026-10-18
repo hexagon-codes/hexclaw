@@ -1051,6 +1051,9 @@ func (o *GradingOrchestrator) typedRecognizedQuestions(ctx context.Context, jobI
 		return nil, false
 	}
 	questions, err := RecognizedQuestionsFromProblemAttemptSnapshot(snapshot)
+	if err == nil {
+		o.restoreFinalAnswerReceipts(ctx, job, questions)
+	}
 	return questions, err == nil
 }
 
@@ -1528,6 +1531,7 @@ func applyGradingCorrections(run *gradingRun, in ConfirmPhotoGradingInput) (map[
 				continue
 			}
 			q := &list[index]
+			q.FinalAnswerReceipt = nil
 			rawQuestion, rawAnswer := q.RawTranscription, q.AnswerRawTranscription
 			canonicalChanged := false
 			canonicalQuestion := firstNonEmpty(c.CanonicalMarkdown, c.Question)
@@ -1663,6 +1667,7 @@ type gradingRunFile struct {
 	SourcePageAssetID           string                     `json:"source_page_asset_id,omitempty"`
 	TaskIntent                  PhotoTaskIntent            `json:"task_intent,omitempty"`
 	InitialReadMode             string                     `json:"initial_read_mode,omitempty"`
+	RecognitionExecutionPolicy  string                     `json:"recognition_execution_policy,omitempty"`
 	SolveOutputVersion          string                     `json:"solve_output_version,omitempty"`
 	ParentTeachingContract      string                     `json:"parent_teaching_contract,omitempty"`
 	ParentTeachingSkillSnapshot []skill.ContextReceipt     `json:"parent_teaching_skill_snapshot,omitempty"`
@@ -1737,9 +1742,10 @@ func (o *GradingOrchestrator) persistRun(jobID string, run *gradingRun) error {
 	meta := gradingRunFile{
 		AgentName: run.agentName, TextOnly: run.textOnly, Subject: run.req.Subject, Grade: run.req.Grade,
 		SourceSession: run.req.SourceSession, SourcePageAssetID: run.req.SourcePageAssetID,
-		TaskIntent:         run.req.TaskIntent,
-		InitialReadMode:    run.req.InitialReadMode,
-		SolveOutputVersion: run.req.SolveOutputVersion, ParentTeachingContract: run.req.ParentTeachingContract,
+		TaskIntent:                 run.req.TaskIntent,
+		InitialReadMode:            run.req.InitialReadMode,
+		RecognitionExecutionPolicy: run.req.RecognitionExecutionPolicy,
+		SolveOutputVersion:         run.req.SolveOutputVersion, ParentTeachingContract: run.req.ParentTeachingContract,
 		ParentTeachingSkillSnapshot: run.req.ParentTeachingSkillSnapshot,
 		SourceUncertaintyFinalized:  run.req.SourceUncertaintyFinalized,
 		PracticeReferences:          run.req.PracticeReferences, PracticePaperSize: run.req.PracticePaperSize,
@@ -1818,8 +1824,9 @@ func (o *GradingOrchestrator) ensureRun(ctx context.Context, jobID string) (*gra
 			AgentName: meta.AgentName, Subject: meta.Subject, Grade: meta.Grade,
 			SourceSession: meta.SourceSession, SourcePageAssetID: meta.SourcePageAssetID,
 			TaskIntent: taskIntent, Image: image,
-			InitialReadMode:    meta.InitialReadMode,
-			SolveOutputVersion: meta.SolveOutputVersion, ParentTeachingContract: meta.ParentTeachingContract,
+			InitialReadMode:            meta.InitialReadMode,
+			RecognitionExecutionPolicy: meta.RecognitionExecutionPolicy,
+			SolveOutputVersion:         meta.SolveOutputVersion, ParentTeachingContract: meta.ParentTeachingContract,
 			ParentTeachingSkillSnapshot: meta.ParentTeachingSkillSnapshot,
 			SourceUncertaintyFinalized:  meta.SourceUncertaintyFinalized,
 			PracticeReferences:          meta.PracticeReferences, PracticePaperSize: meta.PracticePaperSize,
@@ -1839,11 +1846,15 @@ func (o *GradingOrchestrator) ensureRun(ctx context.Context, jobID string) (*gra
 
 // 只校准 ImageTask 数学入口；直接照片讲解及作品任务保留各自冻结合同。
 func (o *GradingOrchestrator) persistedImageTaskPhotoIntent(ctx context.Context, agentName string, fields k12.GradingJobFields, fallback PhotoTaskIntent) (PhotoTaskIntent, error) {
+	return o.deps.persistedImageTaskPhotoIntent(ctx, agentName, fields, fallback)
+}
+
+func (d Deps) persistedImageTaskPhotoIntent(ctx context.Context, agentName string, fields k12.GradingJobFields, fallback PhotoTaskIntent) (PhotoTaskIntent, error) {
 	if fields.SourceKind != "image_task" {
 		return fallback, nil
 	}
 	dispatchID := gradingSourceKeyFromIdempotencyKey(fields)
-	dispatch, err := o.deps.Records.GetImageTaskDispatch(ctx, agentName, dispatchID)
+	dispatch, err := d.Records.GetImageTaskDispatch(ctx, agentName, dispatchID)
 	if err != nil {
 		return fallback, fmt.Errorf("usecase: read grading task intent from image task %s: %w", dispatchID, err)
 	}
@@ -1853,6 +1864,15 @@ func (o *GradingOrchestrator) persistedImageTaskPhotoIntent(ctx context.Context,
 	default:
 		return fallback, nil
 	}
+}
+
+// 状态汇合、渲染与最终化共用持久任务意图，空白卷不要求学生作答批注图。
+func (d Deps) gradingRequiresAnnotatedImage(ctx context.Context, job GradingJobView) (bool, error) {
+	if !job.Fields.BudgetSnapshot.RequiresAnnotatedImage() {
+		return false, nil
+	}
+	intent, err := d.persistedImageTaskPhotoIntent(ctx, job.Record.AgentName, job.Fields, PhotoTaskCompletedHomework)
+	return intent == PhotoTaskCompletedHomework, err
 }
 
 func (o *GradingOrchestrator) recognitionAuditPath(jobID string) string {

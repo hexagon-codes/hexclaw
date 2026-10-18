@@ -34,6 +34,8 @@ func TestGradingJobSchemaLegalEdges(t *testing.T) {
 		{GradingStageAwaitingConfirmation, GradingStageAssessing},
 		{GradingStageAssessing, GradingStageRendering},
 		{GradingStageRendering, GradingStageProjecting},
+		{GradingStageRendering, GradingStageFailedRetryable},            // 必需图片合同经用例门控，旧合同仍降级。
+		{GradingStageAwaitingConfirmation, GradingStageFailedRetryable}, // 必需图片定位失败，不把人工等待判失败。
 		{GradingStageProjecting, GradingStageCompleted},
 		// 可取消态 → cancelled（规则 5/7）
 		{GradingStageQueued, GradingStageCancelled},
@@ -62,17 +64,15 @@ func TestGradingJobSchemaLegalEdges(t *testing.T) {
 func TestGradingJobSchemaIllegalEdges(t *testing.T) {
 	tr := GradingJobSchema().Transitions
 	illegal := [][2]string{
-		{GradingStageNormalizing, GradingStageAssessing},                // 跳阶段
-		{GradingStageRendering, GradingStageCancelled},                  // 规则 5：rendering 不可取消
-		{GradingStageProjecting, GradingStageCancelled},                 // 规则 5：projecting 不可取消
-		{GradingStageRendering, GradingStageFailedRetryable},            // 规则 2：rendering 失败降级续跑，不进失败态
-		{GradingStageRendering, GradingStageFailedTerminal},             // 规则 2
-		{GradingStageCompleted, GradingStageQueued},                     // 终态不可离开（规则 6：修正=新 Job）
-		{GradingStageCompleted, GradingStageAssessing},                  //
-		{GradingStageCancelled, GradingStageQueued},                     // 终态
-		{GradingStageFailedTerminal, GradingStageQueued},                // 终态
-		{GradingStageAssessing, GradingStageAwaitingConfirmation},       // 不可回退
-		{GradingStageAwaitingConfirmation, GradingStageFailedRetryable}, // 人工等待态无自动失败（规则 7）
+		{GradingStageNormalizing, GradingStageAssessing},          // 跳阶段
+		{GradingStageRendering, GradingStageCancelled},            // 规则 5：rendering 不可取消
+		{GradingStageProjecting, GradingStageCancelled},           // 规则 5：projecting 不可取消
+		{GradingStageRendering, GradingStageFailedTerminal},       // 规则 2
+		{GradingStageCompleted, GradingStageQueued},               // 终态不可离开（规则 6：修正=新 Job）
+		{GradingStageCompleted, GradingStageAssessing},            //
+		{GradingStageCancelled, GradingStageQueued},               // 终态
+		{GradingStageFailedTerminal, GradingStageQueued},          // 终态
+		{GradingStageAssessing, GradingStageAwaitingConfirmation}, // 不可回退
 	}
 	for _, e := range illegal {
 		if hasEdge(tr, e[0], e[1]) {

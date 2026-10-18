@@ -1,6 +1,61 @@
 package k12
 
-import "testing"
+import (
+	"encoding/json"
+	"reflect"
+	"testing"
+)
+
+func TestGradingBudgetRequiredImageContractIsOptionalAndFrozen(t *testing.T) {
+	legacy := frozenBudgetFixture()
+	raw, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil {
+		t.Fatal("invalid legacy budget")
+	}
+	if _, exists := fields["image_output_contract"]; exists {
+		t.Fatal("old snapshot acquired an output contract")
+	}
+	before := append([]byte(nil), raw...)
+	decoded, err := ParseStoredGradingBudgetSnapshot(raw)
+	if err != nil || decoded.RequiresAnnotatedImage() {
+		t.Fatalf("old budget semantics changed: %v", err)
+	}
+	after, err := json.Marshal(decoded)
+	if err != nil || string(after) != string(before) {
+		t.Fatal("old frozen bytes changed")
+	}
+	current := legacy
+	current.ImageOutputContract = GradingImageOutputContractAnnotatedHomeworkV1
+	current.StageSeconds.Locating = 120
+	raw, err = json.Marshal(current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := ParseStoredGradingBudgetSnapshot(raw)
+	if err != nil || !stored.RequiresAnnotatedImage() || !reflect.DeepEqual(stored, current) {
+		t.Fatalf("new image contract did not round trip: %v", err)
+	}
+	for _, name := range []string{"unknown", "unfrozen", "over locating cap"} {
+		t.Run(name, func(t *testing.T) {
+			bad := current
+			switch name {
+			case "unknown":
+				bad.ImageOutputContract = "unrecognized_contract"
+			case "unfrozen":
+				bad.PolicyVersion = 0
+			case "over locating cap":
+				bad.StageSeconds.Locating = 121
+			}
+			if bad.Validate() == nil {
+				t.Fatal("invalid new contract was accepted")
+			}
+		})
+	}
+}
 
 func frozenBudgetFixture() GradingBudgetSnapshot {
 	return GradingBudgetSnapshot{
