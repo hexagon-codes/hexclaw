@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -156,7 +157,7 @@ func inboundPhotoBundleFixture(raw []byte) k12usecase.InboundPhotoBundle {
 				ProviderMessageID: "provider-message-1",
 			},
 			CommandDigest: "sha256:" + strings.Repeat("1", 64),
-			CommandJSON:   `{"schema_version":2,"source_session_id":"parent-1","message_intent":"请批改作业","provider":"hexclaw-gpt","model":"gpt-5.6-sol"}`,
+			CommandJSON:   `{"schema_version":2,"status_notice_version":"v1","source_session_id":"parent-1","message_intent":"请批改作业","provider":"hexclaw-gpt","model":"gpt-5.6-sol"}`,
 		},
 		Asset: k12usecase.InboundPhotoAsset{
 			AssetID: "asset-1", ReceiptID: "receipt-1", Name: "homework.png",
@@ -180,8 +181,9 @@ func TestDingTalkPhotoAdmissionResumesFrozenIdentityBeforeMutableRouting(t *test
 	raw := []byte("same-photo")
 	coordinator := &inboundPhotoCoordinatorFake{bundle: inboundPhotoBundleFixture(raw)}
 	runtime := newK12DingtalkPhotoInboundRuntime(k12DingtalkPhotoInboundRuntimeConfig{
-		BaseContext: context.Background(),
-		Inbound:     coordinator,
+		ReplyBatches: &finalReplyBatchFake{},
+		BaseContext:  context.Background(),
+		Inbound:      coordinator,
 		ResolveInstanceID: func(string, string) (string, error) {
 			t.Fatal("frozen legacy receipt must resume before instance resolution")
 			return "", nil
@@ -277,7 +279,8 @@ func TestDingTalkPhotoAdmissionCanonicalIdentityUsesExplicitLegacyAliasRoute(t *
 			coordinator := &inboundPhotoCoordinatorFake{resumeErr: records.ErrNotFound}
 			bindCalls := 0
 			runtime := newK12DingtalkPhotoInboundRuntime(k12DingtalkPhotoInboundRuntimeConfig{
-				BaseContext: context.Background(), Router: router, Inbound: coordinator,
+				ReplyBatches: &finalReplyBatchFake{},
+				BaseContext:  context.Background(), Router: router, Inbound: coordinator,
 				ResolveInstanceID: func(platform, instanceRef string) (string, error) {
 					if platform != "dingtalk" || instanceRef != tt.alias {
 						t.Fatalf("instance resolution crossed source identity: %s/%s", platform, instanceRef)
@@ -357,7 +360,8 @@ func TestDingTalkPhotoAdmissionCanonicalResumeKeepsFrozenBinding(t *testing.T) {
 		},
 	}
 	runtime := newK12DingtalkPhotoInboundRuntime(k12DingtalkPhotoInboundRuntimeConfig{
-		BaseContext: context.Background(), Inbound: coordinator,
+		ReplyBatches: &finalReplyBatchFake{},
+		BaseContext:  context.Background(), Inbound: coordinator,
 		ResolveInstanceID: func(string, string) (string, error) { return "pi-a", nil },
 		BindDirect: func(context.Context, *adapter.Message) error {
 			t.Fatal("canonical frozen receipt must not consult mutable bindings")
@@ -395,7 +399,8 @@ func TestDingTalkPhotoAdmissionRejectsTutorAgentWithoutExactProviderModel(t *tes
 				}
 			}
 			runtime := newK12DingtalkPhotoInboundRuntime(k12DingtalkPhotoInboundRuntimeConfig{
-				BaseContext: context.Background(), Router: router, Inbound: coordinator,
+				ReplyBatches: &finalReplyBatchFake{},
+				BaseContext:  context.Background(), Router: router, Inbound: coordinator,
 			})
 
 			handled, err := runtime.AdmitInboundPhoto(context.Background(), k12PhotoTestMessage())
@@ -415,7 +420,8 @@ func TestDingTalkPhotoAdmissionConflictNACKsInsteadOfFallingThrough(t *testing.T
 		admitErr: k12storage.ErrInboundPhotoConflict,
 	}
 	runtime := newK12DingtalkPhotoInboundRuntime(k12DingtalkPhotoInboundRuntimeConfig{
-		BaseContext: context.Background(), Inbound: coordinator,
+		ReplyBatches: &finalReplyBatchFake{},
+		BaseContext:  context.Background(), Inbound: coordinator,
 	})
 	handled, err := runtime.AdmitInboundPhoto(context.Background(), &adapter.Message{
 		ID: "provider-message-1", Platform: adapter.PlatformDingtalk,
@@ -445,7 +451,8 @@ func TestDingTalkPhotoFirstAdmissionFreezesExplicitK12Binding(t *testing.T) {
 		t.Fatal(err)
 	}
 	runtime := newK12DingtalkPhotoInboundRuntime(k12DingtalkPhotoInboundRuntimeConfig{
-		BaseContext: context.Background(), Router: router,
+		ReplyBatches: &finalReplyBatchFake{},
+		BaseContext:  context.Background(), Router: router,
 		Check:   func(context.Context, *adapter.Message) error { checks++; return nil },
 		Inbound: coordinator,
 	})
@@ -468,7 +475,7 @@ func TestDingTalkPhotoFirstAdmissionFreezesExplicitK12Binding(t *testing.T) {
 	}
 	var command k12DingtalkInboundPhotoCommand
 	if err := json.Unmarshal([]byte(admission.CommandJSON), &command); err != nil ||
-		command.SchemaVersion != 2 || command.SourceSessionID != "family-group" ||
+		command.SchemaVersion != 2 || command.StatusNoticeVersion != "v1" || command.SourceSessionID != "family-group" ||
 		command.MessageIntent != msg.Content || command.Provider != "hexclaw-gpt" ||
 		command.Model != "gpt-5.6-sol" {
 		t.Fatalf("frozen command = %#v, err %v", command, err)
@@ -609,6 +616,19 @@ type finalReplyBatchFake struct {
 	lastObjectKind string
 	lastMessage    k12usecase.DeliveryMessage
 	lastTargets    []k12usecase.ResolvedDeliveryTarget
+	statusNotices  map[string]k12.DeliveryBatch
+}
+
+func (f *finalReplyBatchFake) GetDeliveryBatchForObject(_ context.Context, agent, kind, id string) (k12.DeliveryBatch, error) {
+	batch, ok := f.statusNotices[agent+"/"+kind+"/"+id]
+	if !ok {
+		return k12.DeliveryBatch{}, records.ErrNotFound
+	}
+	return batch, nil
+}
+
+func (f *finalReplyBatchFake) ResumePendingDeliveryBatch(context.Context, string, string) (k12.DeliveryBatch, error) {
+	return k12.DeliveryBatch{}, errors.New("unexpected pending notice replay")
 }
 
 // routingSnapshotReadErrorCoordinator 模拟候选确认快照在重启后被检测出摘要漂移；
@@ -670,9 +690,18 @@ func (f *finalReplyBatchFake) GetDeliveryBatchForMessageIdentity(
 }
 
 func (f *finalReplyBatchFake) PrepareAndSendMessageBatchForTargets(
-	_ context.Context, _ string, objectKind, _ string, message k12usecase.DeliveryMessage,
+	_ context.Context, agent string, objectKind, objectID string, message k12usecase.DeliveryMessage,
 	targets []k12usecase.ResolvedDeliveryTarget,
 ) (k12.DeliveryBatch, bool, error) {
+	if objectKind == k12DingtalkPhotoStatusNoticeKind {
+		if f.statusNotices == nil {
+			f.statusNotices = make(map[string]k12.DeliveryBatch)
+		}
+		batch := k12.DeliveryBatch{BatchID: objectID, AgentName: agent, ObjectKind: objectKind, ObjectID: objectID, Status: k12.DeliveryBatchDelivered,
+			Receipts: []k12.DeliveryReceipt{{PartKind: messagecontent.PartMarkdown, Status: k12.DeliveryDelivered, Target: targets[0].Target}}}
+		f.statusNotices[agent+"/"+objectKind+"/"+objectID] = batch
+		return batch, true, nil
+	}
 	f.prepareCalls++
 	f.lastObjectKind = objectKind
 	f.lastMessage = message
@@ -849,7 +878,8 @@ func TestDingTalkPhotoFinalArtifactIsNotRecordedBeforeExactSourceValidation(t *t
 		result:         k12usecase.ImageTaskResult{FinalArtifact: &artifact},
 	}
 	runtime := newK12DingtalkPhotoInboundRuntime(k12DingtalkPhotoInboundRuntimeConfig{
-		BaseContext: context.Background(), Inbound: coordinator, ImageTasks: images,
+		ReplyBatches: &finalReplyBatchFake{},
+		BaseContext:  context.Background(), Inbound: coordinator, ImageTasks: images,
 		Artifacts: finalArtifactReaderFake{artifact: artifact, asset: annotated},
 	})
 	done, err := runtime.advanceImageTask(context.Background(), bundle)
@@ -874,7 +904,7 @@ func (f *gradingConfirmationImageTasks) Confirm(
 	return k12usecase.ImageTaskView{}, nil
 }
 
-func TestDingTalkPhotoWorkerConfirmsRecognizedHomeworkWithoutMixingIntent(t *testing.T) {
+func TestDingTalkPhotoWorkerLeavesRecognizedHomeworkConfirmationToSharedOwner(t *testing.T) {
 	bundle := inboundPhotoBundleFixture([]byte("source-photo"))
 	bundle.Receipt.AgentName = "child-tutor"
 	bundle.Dispatch.ProcessingStatus = k12usecase.InboundPhotoImageTaskSubmitted
@@ -884,19 +914,18 @@ func TestDingTalkPhotoWorkerConfirmsRecognizedHomeworkWithoutMixingIntent(t *tes
 	base := &fakeK12ImageTaskFacade{}
 	images := &gradingConfirmationImageTasks{fakeK12ImageTaskFacade: base}
 	runtime := newK12DingtalkPhotoInboundRuntime(k12DingtalkPhotoInboundRuntimeConfig{
-		BaseContext: context.Background(), Inbound: coordinator, ImageTasks: images,
+		ReplyBatches: &finalReplyBatchFake{},
+		BaseContext:  context.Background(), Inbound: coordinator, ImageTasks: images,
 	})
 	done, err := runtime.advanceImageTask(context.Background(), bundle)
 	if err != nil || done {
 		t.Fatalf("grading confirmation = done %v, err %v", done, err)
 	}
-	if images.input.Intent != "" || images.input.Subject != "" ||
-		images.input.AgentName != "child-tutor" || images.input.DispatchID != "dispatch-1" ||
-		images.input.ExpectedVersion != 2 {
-		t.Fatalf("grading confirmation mixed the intent branch: %#v", images.input)
+	if !reflect.DeepEqual(images.input, k12usecase.ConfirmImageTaskInput{}) {
+		t.Fatalf("channel worker competed for shared grading confirmation: %#v", images.input)
 	}
-	if base.startCalls != 1 {
-		t.Fatalf("confirmed grading task was not resumed: %d", base.startCalls)
+	if base.startCalls != 0 {
+		t.Fatalf("channel worker restarted shared grading task: %d", base.startCalls)
 	}
 }
 
@@ -918,7 +947,8 @@ func TestDingTalkPhotoWorkerBindsOneImageTaskBeforeStartingIt(t *testing.T) {
 		}
 	}
 	runtime := newK12DingtalkPhotoInboundRuntime(k12DingtalkPhotoInboundRuntimeConfig{
-		BaseContext: context.Background(), Inbound: coordinator, ImageTasks: images,
+		ReplyBatches: &finalReplyBatchFake{},
+		BaseContext:  context.Background(), Inbound: coordinator, ImageTasks: images,
 	})
 	done, err := runtime.advance(context.Background(), bundle)
 	if err != nil || done {
@@ -951,7 +981,8 @@ func TestDingTalkPhotoWorkerRejectsReceiptWithoutFrozenProviderModel(t *testing.
 			coordinator := &inboundPhotoCoordinatorFake{bundle: bundle}
 			images := &fakeK12ImageTaskFacade{}
 			runtime := newK12DingtalkPhotoInboundRuntime(k12DingtalkPhotoInboundRuntimeConfig{
-				BaseContext: context.Background(), Inbound: coordinator, ImageTasks: images,
+				ReplyBatches: &finalReplyBatchFake{},
+				BaseContext:  context.Background(), Inbound: coordinator, ImageTasks: images,
 			})
 
 			done, err := runtime.advance(context.Background(), bundle)
@@ -1187,7 +1218,8 @@ func TestDingTalkPhotoImageTaskGateReadsFrozenV88DecisionWithoutSideEffects(t *t
 			bundle.Dispatch.RoutingDecision = tt.decision
 			coordinator := &inboundPhotoCoordinatorFake{bundle: bundle}
 			runtime := newK12DingtalkPhotoInboundRuntime(k12DingtalkPhotoInboundRuntimeConfig{
-				Inbound: coordinator,
+				ReplyBatches: &finalReplyBatchFake{},
+				Inbound:      coordinator,
 			})
 			dispatch := k12.ImageTaskDispatch{
 				DispatchID: "dispatch-1", AgentName: "child-tutor",

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -105,7 +106,8 @@ func TestDingTalkPhotoWorkerRetryBackoffResetsAfterSuccess(t *testing.T) {
 				},
 			}
 			runtime := newK12DingtalkPhotoInboundRuntime(k12DingtalkPhotoInboundRuntimeConfig{
-				BaseContext: ctx, Inbound: inbound, ImageTasks: images,
+				ReplyBatches: &finalReplyBatchFake{},
+				BaseContext:  ctx, Inbound: inbound, ImageTasks: images,
 				RetryInterval: time.Millisecond, PollInterval: time.Nanosecond,
 			})
 			runtime.run("child-tutor", "receipt-1")
@@ -154,7 +156,8 @@ func TestDingTalkPhotoWorkerStopsWhenInboundAggregateIsMissing(t *testing.T) {
 	}
 	images := &pollingImageTaskFacade{fakeK12ImageTaskFacade: &fakeK12ImageTaskFacade{}}
 	runtime := newK12DingtalkPhotoInboundRuntime(k12DingtalkPhotoInboundRuntimeConfig{
-		BaseContext: ctx, Inbound: inbound, ImageTasks: images, RetryInterval: time.Nanosecond,
+		ReplyBatches: &finalReplyBatchFake{},
+		BaseContext:  ctx, Inbound: inbound, ImageTasks: images, RetryInterval: time.Nanosecond,
 	})
 	runtime.run("child-tutor", "receipt-1")
 	if inbound.resumeCalls != 1 || inbound.terminalCalls != 0 || inbound.recordedImageTaskID != "" ||
@@ -185,7 +188,8 @@ func TestDingTalkPhotoWorkerKeepsRetryingRecoverableStorageAndAdvanceErrors(t *t
 				view: k12usecase.ImageTaskView{Dispatch: k12.ImageTaskDispatch{Status: k12.ImageTaskStatusCancelled}},
 			}
 			runtime := newK12DingtalkPhotoInboundRuntime(k12DingtalkPhotoInboundRuntimeConfig{
-				BaseContext: ctx, Inbound: inbound, ImageTasks: images, RetryInterval: time.Nanosecond,
+				ReplyBatches: &finalReplyBatchFake{},
+				BaseContext:  ctx, Inbound: inbound, ImageTasks: images, RetryInterval: time.Nanosecond,
 			})
 			runtime.run("child-tutor", "receipt-1")
 			if inbound.resumeCalls != 2 || images.getCalls != scenario.wantGetCalls || inbound.terminalCalls != 0 ||
@@ -218,7 +222,8 @@ func TestDingTalkPhotoWorkerTerminatesPendingRetrySafeFailureOnce(t *testing.T) 
 		}, ClassificationInvocationStatus: k12.ImageTaskInvocationSucceeded},
 	}
 	runtime := newK12DingtalkPhotoInboundRuntime(k12DingtalkPhotoInboundRuntimeConfig{
-		BaseContext: context.Background(), Inbound: inbound, ImageTasks: images,
+		ReplyBatches: &finalReplyBatchFake{},
+		BaseContext:  context.Background(), Inbound: inbound, ImageTasks: images,
 	})
 	for range 2 {
 		done, err := runtime.advance(context.Background(), inbound.bundle)
@@ -247,7 +252,8 @@ func TestDingTalkPhotoWorkerPreservesNewSubmissionSafeRetry(t *testing.T) {
 		}, ClassificationInvocationStatus: k12.ImageTaskInvocationSucceeded},
 	}
 	runtime := newK12DingtalkPhotoInboundRuntime(k12DingtalkPhotoInboundRuntimeConfig{
-		BaseContext: context.Background(), Inbound: inbound, ImageTasks: images,
+		ReplyBatches: &finalReplyBatchFake{},
+		BaseContext:  context.Background(), Inbound: inbound, ImageTasks: images,
 	})
 	done, err := runtime.advanceImageTask(context.Background(), bundle)
 	if err != nil || done || images.retryCalls != 1 || images.resultCalls != 0 || images.startCalls != 0 || inbound.terminalCalls != 0 {
@@ -266,19 +272,23 @@ func TestDingTalkPhotoWorkerParksUnknownBeforeRetrySafeFlag(t *testing.T) {
 		}, ClassificationInvocationStatus: k12.ImageTaskInvocationOutcomeUnknown},
 	}
 	runtime := newK12DingtalkPhotoInboundRuntime(k12DingtalkPhotoInboundRuntimeConfig{
-		BaseContext: context.Background(), Inbound: inbound, ImageTasks: images,
+		ReplyBatches: &finalReplyBatchFake{},
+		BaseContext:  context.Background(), Inbound: inbound, ImageTasks: images,
 	})
 	done, err := runtime.advanceImageTask(context.Background(), bundle)
-	if err != nil || !done || images.retryCalls != 0 || images.resultCalls != 0 || images.startCalls != 0 || inbound.terminalCalls != 0 {
+	if !errors.Is(err, errK12DingtalkPhotoWaiting) || done || images.retryCalls != 0 || images.resultCalls != 0 || images.startCalls != 0 || inbound.terminalCalls != 0 {
 		t.Fatalf("unknown invocation did not park before retry: done=%v err=%v retry=%d result=%d start=%d terminal=%d", done, err, images.retryCalls, images.resultCalls, images.startCalls, inbound.terminalCalls)
 	}
 }
 
 func TestDingTalkPhotoWorkerPollsHomeworkStatusUntilFinalArtifactReady(t *testing.T) {
-	for _, scenario := range []string{"routed", "completed_child_before_parent_failure"} {
+	for _, scenario := range []string{"routed", "completed_child_before_parent_failure", "failed_retryable_recovery", "failed_terminal_recovery", "outcome_unknown_recovery", "legacy_failed_retryable_recovery"} {
 		t.Run(scenario, func(t *testing.T) {
 			source := []byte("source-photo")
 			bundle := terminalImageTaskBundle()
+			if scenario == "legacy_failed_retryable_recovery" {
+				bundle.Receipt.CommandJSON = strings.Replace(bundle.Receipt.CommandJSON, `"status_notice_version":"v1",`, "", 1)
+			}
 			inbound := &inboundPhotoCoordinatorFake{bundle: bundle}
 			artifact, annotated := finalArtifactFixture(source)
 			artifact.AgentName = bundle.Receipt.AgentName
@@ -310,14 +320,33 @@ func TestDingTalkPhotoWorkerPollsHomeworkStatusUntilFinalArtifactReady(t *testin
 				BaseContext: context.Background(), Inbound: inbound, ImageTasks: images,
 				Artifacts: finalArtifactReaderFake{artifact: artifact, asset: annotated}, ReplyBatches: batches,
 			})
+			waitingForRecovery := false
+			switch scenario {
+			case "failed_retryable_recovery", "legacy_failed_retryable_recovery":
+				images.view.HomeworkProjection.Stage = k12.GradingStageFailedRetryable
+				waitingForRecovery = true
+			case "failed_terminal_recovery":
+				images.view.HomeworkProjection.Stage = k12.GradingStageFailedTerminal
+				waitingForRecovery = true
+			case "outcome_unknown_recovery":
+				images.view.HomeworkProjection.Stage = k12.GradingStageOutcomeUnknown
+				waitingForRecovery = true
+			}
 			for range 2 {
 				done, err := runtime.advanceImageTask(context.Background(), bundle)
-				if err != nil || done {
+				validWait := err == nil
+				if waitingForRecovery {
+					validWait = errors.Is(err, errK12DingtalkPhotoWaiting)
+				}
+				if !validWait || done {
 					t.Fatalf("waiting homework state: done=%v err=%v", done, err)
 				}
 			}
 			if images.getCalls != 2 || images.resultCalls != 0 || images.retryCalls != 0 || images.startCalls != 0 || inbound.recordedFinalArtifactID != "" {
 				t.Fatalf("waiting homework assembled a complete result: get=%d result=%d retry=%d start=%d artifact=%q", images.getCalls, images.resultCalls, images.retryCalls, images.startCalls, inbound.recordedFinalArtifactID)
+			}
+			if scenario == "legacy_failed_retryable_recovery" && len(batches.statusNotices) != 0 {
+				t.Fatal("legacy task received a retroactive status notice")
 			}
 			images.view.HomeworkProjection.Stage = k12.GradingStageCompleted
 			if scenario == "completed_child_before_parent_failure" {

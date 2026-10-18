@@ -166,12 +166,13 @@ func newK12DingtalkPhotoInboundRuntime(
 }
 
 type k12DingtalkInboundPhotoCommand struct {
-	MessageLocale   string `json:"message_locale,omitempty"`
-	SchemaVersion   int    `json:"schema_version"`
-	SourceSessionID string `json:"source_session_id"`
-	MessageIntent   string `json:"message_intent"`
-	Provider        string `json:"provider"`
-	Model           string `json:"model"`
+	StatusNoticeVersion string `json:"status_notice_version,omitempty"`
+	MessageLocale       string `json:"message_locale,omitempty"`
+	SchemaVersion       int    `json:"schema_version"`
+	SourceSessionID     string `json:"source_session_id"`
+	MessageIntent       string `json:"message_intent"`
+	Provider            string `json:"provider"`
+	Model               string `json:"model"`
 }
 
 func normalizeK12DingtalkInboundPhotoRoute(provider, model string) (string, string, bool) {
@@ -311,8 +312,9 @@ func (r *k12DingtalkPhotoInboundRuntime) AdmitInboundPhoto(
 		locale = r.messageLocale()
 	}
 	commandJSON, err := json.Marshal(k12DingtalkInboundPhotoCommand{
-		MessageLocale: locale,
-		SchemaVersion: 2, SourceSessionID: k12PhotoSourceSession(msg),
+		StatusNoticeVersion: k12DingtalkPhotoStatusNoticeVersion,
+		MessageLocale:       locale,
+		SchemaVersion:       2, SourceSessionID: k12PhotoSourceSession(msg),
 		MessageIntent: strings.TrimSpace(msg.Content), Provider: provider, Model: model,
 	})
 	if err != nil {
@@ -393,7 +395,10 @@ func (r *k12DingtalkPhotoInboundRuntime) run(agentName, receiptID string) {
 			return
 		}
 		delay := r.pollInterval
-		if err != nil {
+		if errors.Is(err, errK12DingtalkPhotoWaiting) {
+			// 已知停止态仅观察原任务；用户显式恢复后仍由同一 worker 接续投递。
+			delay = k12DingtalkInboundMaxRetryInterval
+		} else if err != nil {
 			delay = r.retryInterval
 			if !errors.Is(err, records.ErrVersionConflict) {
 				delay = retryDelay
@@ -460,7 +465,8 @@ func (r *k12DingtalkPhotoInboundRuntime) advance(
 	bundle k12usecase.InboundPhotoBundle,
 ) (bool, error) {
 	if bundle.Dispatch.TerminalStatus == k12usecase.InboundPhotoTerminalFailed {
-		return true, nil
+		err := r.sendStatusNotice(ctx, bundle, "failed")
+		return err == nil, err
 	}
 	if bundle.Dispatch.ReplyStatus == k12usecase.InboundPhotoReplyDelivered {
 		return true, nil
@@ -545,6 +551,10 @@ func (r *k12DingtalkPhotoInboundRuntime) createAndBindImageTask(
 	)
 	// V88 已冻结 task identity 后才允许模型 worker 越过执行边界。
 	r.imageTasks.StartAsync(bundle.Receipt.AgentName, view.Dispatch.DispatchID)
+	// 通知独立于模型推进，发送失败不能撤销已持久接纳或阻止任务继续。
+	if err := r.sendStatusNotice(ctx, bundle, "accepted"); err != nil {
+		slog.Warn("K12 DingTalk photo acceptance notice failed", "receipt_id", bundle.Receipt.ReceiptID, "error", err)
+	}
 	return nil
 }
 
@@ -560,11 +570,18 @@ func (r *k12DingtalkPhotoInboundRuntime) advanceImageTask(
 	}
 	homeworkCompleted := view.HomeworkProjection != nil &&
 		view.HomeworkProjection.Stage == k12.GradingStageCompleted
-	if view.Dispatch.Status == k12.ImageTaskStatusFailed &&
-		!homeworkCompleted &&
+	if !homeworkCompleted && view.HomeworkProjection != nil {
+		switch view.HomeworkProjection.Stage {
+		case k12.GradingStageFailedRetryable, k12.GradingStageFailedTerminal:
+			// 技术恢复可重新推进原子任务，通知不能把入站永久终止。
+			return r.waitWithStatusNotice(ctx, bundle, "failed")
+		case k12.GradingStageOutcomeUnknown:
+			return r.waitWithStatusNotice(ctx, bundle, "outcome_unknown")
+		}
+	}
+	if !homeworkCompleted &&
 		view.ClassificationInvocationStatus == k12.ImageTaskInvocationOutcomeUnknown {
-		// 未知调用没有可推进的自动步骤；保留原回执，结束本次轮询。
-		return true, nil
+		return r.waitWithStatusNotice(ctx, bundle, "outcome_unknown")
 	}
 	if view.Dispatch.Status == k12.ImageTaskStatusFailed &&
 		!homeworkCompleted &&
@@ -573,6 +590,9 @@ func (r *k12DingtalkPhotoInboundRuntime) advanceImageTask(
 		failureKind := strings.TrimSpace(view.Dispatch.FailureKind)
 		if failureKind == "" {
 			failureKind = "image_task_failed"
+		}
+		if err := r.sendStatusNotice(ctx, bundle, "failed"); err != nil {
+			return false, err
 		}
 		_, err := r.inbound.FailTerminal(
 			ctx, bundle.Receipt.AgentName, bundle.Receipt.ReceiptID, bundle.Dispatch.Version,
@@ -626,14 +646,6 @@ func (r *k12DingtalkPhotoInboundRuntime) advanceImageTask(
 			"elapsed_ms", time.Since(retryStartedAt).Milliseconds(),
 		)
 		return false, nil
-	}
-	if view.HomeworkProjection != nil &&
-		view.HomeworkProjection.Stage == k12.GradingStageFailedTerminal {
-		_, err := r.inbound.FailTerminal(
-			ctx, bundle.Receipt.AgentName, bundle.Receipt.ReceiptID, bundle.Dispatch.Version,
-			k12usecase.InboundPhotoTerminalStageGrading, "grading_failed_terminal",
-		)
-		return err == nil, err
 	}
 	practiceRoutingConfigured := r.practiceSets != nil || r.practiceReturns != nil
 	if practiceRoutingConfigured && (r.practiceSets == nil || r.practiceReturns == nil) {
@@ -716,21 +728,11 @@ func (r *k12DingtalkPhotoInboundRuntime) advanceImageTask(
 			return false, fmt.Errorf("DingTalk practice-return routing is unavailable")
 		}
 	}
-	if view.HomeworkProjection != nil &&
-		view.HomeworkProjection.Stage == k12.GradingStageAwaitingConfirmation {
-		if _, err := r.imageTasks.Confirm(ctx, k12usecase.ConfirmImageTaskInput{
-			AgentName:       bundle.Receipt.AgentName,
-			DispatchID:      bundle.Dispatch.ImageTaskID,
-			ExpectedVersion: view.Dispatch.Version,
-			Subject:         view.HomeworkProjection.Subject,
-		}); err != nil {
-			return false, err
-		}
-		r.imageTasks.StartAsync(bundle.Receipt.AgentName, bundle.Dispatch.ImageTaskID)
-		return false, nil
-	}
 	if view.HomeworkProjection != nil && !homeworkCompleted {
-		// 批改未完成时只读取状态，完整结果的源图回执留到可交付后组装。
+		// 自动确认由共享 ImageTask worker 唯一推进；渠道只观察并接续自己的状态通知。
+		if err := r.sendStatusNotice(ctx, bundle, "accepted"); err != nil {
+			slog.Warn("K12 DingTalk photo acceptance notice failed", "receipt_id", bundle.Receipt.ReceiptID, "error", err)
+		}
 		return false, nil
 	}
 	result, err := r.imageTasks.Result(

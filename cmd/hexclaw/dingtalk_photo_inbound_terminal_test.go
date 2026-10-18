@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -71,7 +72,8 @@ func TestDingTalkPhotoWorkerTerminatesOnlyNonRetryableImageTaskFailure(t *testin
 		}},
 	}
 	runtime := newK12DingtalkPhotoInboundRuntime(k12DingtalkPhotoInboundRuntimeConfig{
-		BaseContext: context.Background(), Inbound: coordinator, ImageTasks: images,
+		ReplyBatches: &finalReplyBatchFake{},
+		BaseContext:  context.Background(), Inbound: coordinator, ImageTasks: images,
 	})
 	done, err := runtime.advanceImageTask(context.Background(), bundle)
 	if err != nil || !done {
@@ -135,7 +137,8 @@ func TestDingTalkPhotoWorkerDoesNotMisclassifyRetryOrReconciliationStates(t *tes
 				fakeK12ImageTaskFacade: &fakeK12ImageTaskFacade{}, view: tt.view,
 			}
 			runtime := newK12DingtalkPhotoInboundRuntime(k12DingtalkPhotoInboundRuntimeConfig{
-				BaseContext: context.Background(), Inbound: coordinator, ImageTasks: images,
+				ReplyBatches: &finalReplyBatchFake{},
+				BaseContext:  context.Background(), Inbound: coordinator, ImageTasks: images,
 			})
 			_, _ = runtime.advanceImageTask(context.Background(), bundle)
 			if coordinator.terminalCalls != 0 {
@@ -252,11 +255,12 @@ func TestDingTalkPhotoWorkerReadsPersistedClassificationOutcomeUnknownBeforeTerm
 	bundle := terminalImageTaskBundle()
 	terminal := &inboundPhotoCoordinatorFake{bundle: bundle}
 	runtime := newK12DingtalkPhotoInboundRuntime(k12DingtalkPhotoInboundRuntimeConfig{
-		BaseContext: ctx, Inbound: terminal, ImageTasks: coordinator,
+		ReplyBatches: &finalReplyBatchFake{},
+		BaseContext:  ctx, Inbound: terminal, ImageTasks: coordinator,
 	})
 	for range 2 {
 		done, advanceErr := runtime.advanceImageTask(ctx, bundle)
-		if !done || advanceErr != nil {
+		if done || !errors.Is(advanceErr, errK12DingtalkPhotoWaiting) {
 			t.Fatalf("outcome_unknown worker state: done=%v err=%v", done, advanceErr)
 		}
 	}
@@ -273,7 +277,7 @@ func TestDingTalkPhotoWorkerReadsPersistedClassificationOutcomeUnknownBeforeTerm
 	}
 }
 
-func TestDingTalkPhotoWorkerTerminatesFailedTerminalGrading(t *testing.T) {
+func TestDingTalkPhotoWorkerPreservesExplicitRecoveryOfFailedTerminalGrading(t *testing.T) {
 	bundle := terminalImageTaskBundle()
 	coordinator := &inboundPhotoCoordinatorFake{bundle: bundle}
 	images := &terminalImageTaskFacade{
@@ -286,16 +290,15 @@ func TestDingTalkPhotoWorkerTerminatesFailedTerminalGrading(t *testing.T) {
 		},
 	}
 	runtime := newK12DingtalkPhotoInboundRuntime(k12DingtalkPhotoInboundRuntimeConfig{
-		BaseContext: context.Background(), Inbound: coordinator, ImageTasks: images,
+		ReplyBatches: &finalReplyBatchFake{},
+		BaseContext:  context.Background(), Inbound: coordinator, ImageTasks: images,
 	})
 	done, err := runtime.advanceImageTask(context.Background(), bundle)
-	if err != nil || !done {
+	if !errors.Is(err, errK12DingtalkPhotoWaiting) || done {
 		t.Fatalf("terminal grading failure = done %v, err %v", done, err)
 	}
-	if coordinator.terminalCalls != 1 ||
-		coordinator.bundle.Dispatch.TerminalStage != k12usecase.InboundPhotoTerminalStageGrading ||
-		coordinator.bundle.Dispatch.FailureKind != "grading_failed_terminal" {
-		t.Fatalf("terminal grading facts=%+v calls=%d", coordinator.bundle.Dispatch, coordinator.terminalCalls)
+	if coordinator.terminalCalls != 0 || coordinator.bundle.Dispatch.TerminalStatus != "" {
+		t.Fatalf("recoverable grading was made permanently terminal: %+v calls=%d", coordinator.bundle.Dispatch, coordinator.terminalCalls)
 	}
 }
 
@@ -384,7 +387,8 @@ func TestDingTalkPhotoWorkerShortCircuitsPersistedTerminalReceipt(t *testing.T) 
 	coordinator := &inboundPhotoCoordinatorFake{bundle: bundle}
 	images := &fakeK12ImageTaskFacade{}
 	runtime := newK12DingtalkPhotoInboundRuntime(k12DingtalkPhotoInboundRuntimeConfig{
-		BaseContext: context.Background(), Inbound: coordinator, ImageTasks: images,
+		ReplyBatches: &finalReplyBatchFake{},
+		BaseContext:  context.Background(), Inbound: coordinator, ImageTasks: images,
 	})
 	done, err := runtime.advance(context.Background(), bundle)
 	if err != nil || !done {
