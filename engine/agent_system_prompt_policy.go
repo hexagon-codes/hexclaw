@@ -68,11 +68,18 @@ func (e *ReActEngine) prepareAgentSystemPromptPolicy(ctx context.Context, msg *a
 	delete(msg.Metadata, metadataAgentSystemPromptPolicyKey)
 	delete(msg.Metadata, metadataAgentSystemPromptPolicyDirective)
 
+	if options := workflowStepOptions(ctx); options != nil && options.Agent != nil {
+		applyAgentConfigToMetadata(msg.Metadata, options.Agent, "")
+	}
+
 	policy := e.getAgentSystemPromptPolicy()
 	if policy == nil {
 		return ctx, nil
 	}
 	cfg, ok := e.agentConfigForSystemPromptPolicy(msg.Metadata)
+	if options := workflowStepOptions(ctx); options != nil && options.Agent != nil {
+		cfg, ok = options.Agent, true
+	}
 	if !ok {
 		return ctx, nil
 	}

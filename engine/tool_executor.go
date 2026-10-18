@@ -8,6 +8,7 @@ import (
 	"github.com/hexagon-codes/hexagon/observe/events"
 	"github.com/hexagon-codes/hexagon/observe/trace"
 	"github.com/hexagon-codes/hexclaw/featureflag"
+	"github.com/hexagon-codes/hexclaw/knowledge"
 	"github.com/hexagon-codes/hexclaw/mcp"
 	"github.com/hexagon-codes/hexclaw/skill"
 )
@@ -45,6 +46,9 @@ func (e *ToolExecutor) AddHook(h any) {
 //  3. Execute the tool
 //  4. Run afterHooks (can modify result, e.g. truncation)
 func (e *ToolExecutor) Execute(ctx context.Context, toolName string, args map[string]any) (result string, err error) {
+	if err := workflowToolAllowed(workflowStepOptions(ctx), toolName, args); err != nil {
+		return "", err
+	}
 	// 排查用：逐个工具调用打点（开始 + 完成/失败 + 耗时 + 结果规模）。只记 arg 的 key，不记 value，
 	// 避免把敏感/超长参数写进日志。工具循环里模型到底调了哪些工具、成没成、多慢，一目了然。
 	toolStart := time.Now()
@@ -84,6 +88,11 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolName string, args map[st
 					return "", err
 				}
 				captureCodeExecutionReceipt(ctx, skillName, result)
+				if options := workflowStepOptions(ctx); options != nil && skillName == "knowledge_search" {
+					if hits, ok := result.Data.([]knowledge.SearchHit); ok {
+						recordKnowledgeHits(ctx, hits)
+					}
+				}
 				// BUG-1：skill 结构化 reply-safe 元数据（如 record chip）经 ctx sink 带到 reply。
 				stampToolReplyMeta(ctx, result.Metadata)
 				return result.Content, nil
@@ -277,6 +286,11 @@ func (e *ToolExecutor) runSkillViaPipeline(ctx context.Context, toolName string,
 		return "", fmt.Errorf("runSkillViaPipeline: pipeline routed %q → %q (refusing to execute mismatched skill)", toolName, res.Skill.Name())
 	}
 	captureCodeExecutionReceipt(ctx, toolName, res.Result)
+	if options := workflowStepOptions(ctx); options != nil && toolName == "knowledge_search" {
+		if hits, ok := res.Result.Data.([]knowledge.SearchHit); ok {
+			recordKnowledgeHits(ctx, hits)
+		}
+	}
 	// BUG-1：pipeline 路径同样透传结构化 reply-safe 元数据（record chip 等）。
 	stampToolReplyMeta(ctx, res.Result.Metadata)
 	return res.Result.Content, nil

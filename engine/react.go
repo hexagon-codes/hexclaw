@@ -1131,7 +1131,7 @@ func (e *ReActEngine) Process(ctx context.Context, msg *adapter.Message) (reply 
 
 	e.prepareAgentDefaultSkillContext(msg)
 	// 2. 尝试快速路径: Skill 关键词匹配
-	if matched, ok := e.matchSkillFastPath(msg); ok {
+	if matched, ok := e.matchSkillFastPath(msg); ok && workflowStepOptions(ctx) == nil {
 		if err := e.sessions.SaveUserMessage(ctx, sess.ID, msg); err != nil {
 			trace.L(ctx).Error("保存用户消息失败", "err", err, "session", sess.ID)
 			recordPersistError(msg, "user_message", err)
@@ -1238,12 +1238,12 @@ func (e *ReActEngine) Process(ctx context.Context, msg *adapter.Message) (reply 
 
 	// 5.5 知识库检索（RAG 上下文增强）——策略门（BUG-20260712-N）：场景实例/超短寒暄跳过
 	var kbContext string
-	if e.kb != nil && e.cfg.Knowledge.Enabled && e.shouldAutoInjectKB(msg) {
+	if e.kb != nil && (e.cfg.Knowledge.Enabled && e.shouldAutoInjectKB(msg) || workflowKnowledgeRequested(ctx)) {
 		topK := e.cfg.Knowledge.TopK
 		if topK <= 0 {
 			topK = 3
 		}
-		kbResult, kbHits, kbErr := e.kb.QueryHits(ctx, msg.Content, topK)
+		kbResult, kbHits, kbErr := e.queryWorkflowKnowledge(ctx, msg.Content, topK)
 		if kbErr != nil {
 			recordRetrievalActivity(ctx, adapter.RetrievalActivity{Kind: "knowledge", Status: "failed"})
 			trace.L(ctx).Error("知识库检索失败", "err", kbErr, "session", sess.ID)
@@ -1343,7 +1343,8 @@ func (e *ReActEngine) completeWithTools(
 		tools = e.ensureUnitSummaryTool(tools, msg)
 		tools = e.filterInternalRetrievalToolsForPersona(tools, msg.Metadata) // BUG-20260704：挂载 persona 时剥离内部检索工具，防模型主动拉回旧内容压过人设
 		tools = restrictToolsToCodeExecWhenRequired(tools, msg.Content)
-		if cap := effectiveMaxTools(toolsCfg.MaxTools, msg); cap > 0 && len(tools) > cap {
+		tools = e.workflowTools(ctx, tools)
+		if cap := effectiveMaxTools(toolsCfg.MaxTools, msg); cap > 0 && len(tools) > cap && !workflowExplicitTools(ctx) {
 			tools = tools[:cap]
 		}
 	}
@@ -2151,7 +2152,7 @@ func (e *ReActEngine) processStream(
 
 	e.prepareAgentDefaultSkillContext(msg)
 	// 2. 尝试快速路径: Skill 匹配 → 单 chunk 返回
-	if matched, ok := e.matchSkillFastPath(msg); ok {
+	if matched, ok := e.matchSkillFastPath(msg); ok && workflowStepOptions(ctx) == nil {
 		if err := e.sessions.SaveUserMessage(ctx, sess.ID, msg); err != nil {
 			trace.L(ctx).Error("保存用户消息失败", "err", err, "session", sess.ID)
 			recordPersistError(msg, "user_message", err)
@@ -2455,12 +2456,12 @@ func (e *ReActEngine) processStream(
 
 	// 5.5 知识库检索（RAG）——策略门（BUG-20260712-N）：场景实例/超短寒暄跳过
 	var kbContext string
-	if e.kb != nil && e.cfg.Knowledge.Enabled && e.shouldAutoInjectKB(msg) {
+	if e.kb != nil && (e.cfg.Knowledge.Enabled && e.shouldAutoInjectKB(msg) || workflowKnowledgeRequested(ctx)) {
 		topK := e.cfg.Knowledge.TopK
 		if topK <= 0 {
 			topK = 3
 		}
-		kbResult, kbHits, kbErr := e.kb.QueryHits(ctx, msg.Content, topK)
+		kbResult, kbHits, kbErr := e.queryWorkflowKnowledge(ctx, msg.Content, topK)
 		if kbErr != nil {
 			recordRetrievalActivity(ctx, adapter.RetrievalActivity{Kind: "knowledge", Status: "failed"})
 			trace.L(ctx).Error("知识库检索失败", "err", kbErr, "session", sess.ID)
@@ -2578,7 +2579,8 @@ func (e *ReActEngine) processStreamRuntime(
 			tools = e.ensureUnitSummaryTool(tools, msg)
 			tools = e.filterInternalRetrievalToolsForPersona(tools, msg.Metadata) // BUG-20260704：挂载 persona 时剥离内部检索工具，防模型主动拉回旧内容压过人设
 			tools = restrictToolsToCodeExecWhenRequired(tools, msg.Content)
-			if cap := effectiveMaxTools(streamToolsCfg.MaxTools, msg); cap > 0 && len(tools) > cap {
+			tools = e.workflowTools(ctx, tools)
+			if cap := effectiveMaxTools(streamToolsCfg.MaxTools, msg); cap > 0 && len(tools) > cap && !workflowExplicitTools(ctx) {
 				tools = tools[:cap]
 			}
 		}
@@ -4133,9 +4135,9 @@ func (e *ReActEngine) buildStreamMessages(ctx context.Context, roleName string, 
 	// bug#2 2026-06-23：用户在对话框显式挂载/召唤的技能（前端 skillNames → metadata["skills"]）。
 	// persona 类（Markdown）技能把正文注入 system prompt，使其当轮即生效，不依赖模型主动调用工具。
 	delete(metadata, skillContextReceiptsMetadataKey)
-	if names := effectiveSkillContextNames(metadata); len(names) > 0 {
-		prepared, ok := ctx.Value(preparedSkillContextKey{}).(*preparedSkillContext)
-		if !ok || prepared == nil {
+	prepared, preparedOK := ctx.Value(preparedSkillContextKey{}).(*preparedSkillContext)
+	if names := effectiveSkillContextNames(metadata); len(names) > 0 || preparedOK && prepared != nil && prepared.prompt != "" {
+		if !preparedOK || prepared == nil {
 			_, explicit := metadata["skills"]
 			prompt, receipts := e.buildMountedSkillsContext(names, !explicit)
 			prepared = &preparedSkillContext{prompt: prompt, receipts: receipts}
@@ -5650,6 +5652,18 @@ func (e *ReActEngine) prepareAgentDefaultSkillContext(msg *adapter.Message) {
 
 // 缓存按同次实际正文摘要隔离；准备快照只有真正拼入请求时才成为加载回执。
 func (e *ReActEngine) prepareSkillPromptContext(ctx context.Context, msg *adapter.Message) context.Context {
+	if options := workflowStepOptions(ctx); options != nil && options.SkillPrompt != nil {
+		delete(msg.Metadata, skillPromptDigestKey)
+		if *options.SkillPrompt != "" {
+			digest := sha256.Sum256([]byte(*options.SkillPrompt))
+			msg.Metadata[skillPromptDigestKey] = fmt.Sprintf("sha256:%x", digest)
+		}
+		receipts := cloneSkillContextReceipts(options.SkillReceipts)
+		for i := range receipts {
+			receipts[i].Status = "prepared"
+		}
+		return context.WithValue(ctx, preparedSkillContextKey{}, &preparedSkillContext{prompt: *options.SkillPrompt, receipts: receipts})
+	}
 	delete(msg.Metadata, skillPromptDigestKey)
 	_, explicit := msg.Metadata["skills"]
 	prompt, receipts := e.buildMountedSkillsContext(effectiveSkillContextNames(msg.Metadata), !explicit)
@@ -5829,7 +5843,11 @@ func (e *ReActEngine) buildTurnContext(ctx context.Context, metadata map[string]
 
 	// 长期记忆召回（查询相关，三维打分），尊重 memory=off 门控；按角色隔离。
 	// 记忆跟随本轮开关和所选模型；云端聊天使用独立请求信封记录已启用状态。
-	memoryOff := (metadata != nil && metadata["memory"] == "off") || personaMounted || !e.memoryRuntimeEnabled()
+	options := workflowStepOptions(ctx)
+	memoryOff := (metadata != nil && metadata["memory"] == "off") || personaMounted || !e.memoryRuntimeEnabled() || options != nil && options.MemoryRetrieval == "none"
+	if options != nil && options.MemoryQuery != "" {
+		query = options.MemoryQuery
+	}
 	var injectedMem string // 本轮已注入的策展记忆，供 G② 主动召回去重（坑F）
 	if e.fileMem != nil && !memoryOff {
 		role := ""

@@ -87,6 +87,9 @@ func memoryExtractionTimeout(isLocal bool) time.Duration {
 //   - 不记忆敏感信息（密码、密钥等）
 //   - 异步执行，不阻塞回复
 func (e *ReActEngine) autoExtractMemoryForRole(parentCtx context.Context, userText, assistantText, role string) {
+	if options := workflowStepOptions(parentCtx); options != nil && (options.MemoryWriteback == "none" || options.MemoryWriteback == "suggest") {
+		return
+	}
 	if !e.memoryRuntimeEnabled() {
 		return
 	}
