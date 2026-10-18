@@ -86,7 +86,7 @@ func TestExecuteNode_NonResumedNotSkipped(t *testing.T) {
 		resumed:  map[string]string{"n1": "cached"},
 	}
 	// output 节点直接透传 input，不触引擎；它不在 resumed 里，应正常执行而非跳过。
-	node := &workflowNode{ID: "n2", Type: "output", Label: "out"}
+	node := &workflowNode{ID: "n2", Type: "output", Label: "out", Data: map[string]any{"input": "{{input}}"}}
 	state := hexagon.MapState{
 		stateKeyInput:        "final",
 		stateKeyNodeOutputs:  map[string]string{},

@@ -204,7 +204,8 @@ func (s *Server) generateWorkflowOutputFiles(ctx context.Context, runID, nodeID 
 			if currentRun.ArtifactSnapshots == nil {
 				currentRun.ArtifactSnapshots = map[string]WorkflowArtifactSnapshot{}
 			}
-			currentRun.ArtifactSnapshots[current.ID] = WorkflowArtifactSnapshot{Ref: workflowGeneratedFileRef(*current), FilePath: path}
+			ref := workflowGeneratedFileRef(*current)
+			currentRun.ArtifactSnapshots[ref.AssetID] = WorkflowArtifactSnapshot{Ref: ref, FilePath: path}
 			return nil
 		})
 		if persistErr != nil {
@@ -269,7 +270,8 @@ func (s *Server) renderWorkflowOutputFile(ctx context.Context, run *WorkflowRun,
 }
 
 func workflowGeneratedFileRef(file WorkflowGeneratedFile) messagecontent.AttachmentRef {
-	return messagecontent.AttachmentRef{AssetID: file.ID, Name: file.Name, MIME: file.MIME, Digest: file.Digest, AltText: file.Name}
+	// 任务ID标识一次转换；规范附件身份由内容摘要确定，供所有投递渠道复用。
+	return messagecontent.AttachmentRef{AssetID: "attachment:" + strings.TrimPrefix(file.Digest, "sha256:"), Name: file.Name, MIME: file.MIME, Digest: file.Digest, AltText: file.Name}
 }
 
 // 完整生成本输出节点要求的格式后才投递，原始模型产物始终保留。
@@ -278,21 +280,36 @@ func (s *Server) attachWorkflowGeneratedFiles(runID, deliveryID string) error {
 	if delivery == nil {
 		return errors.New("Workflow delivery was not found")
 	}
+	validateMissingProjection := func(current *WorkflowDelivery) error {
+		if current.Kind == "dingtalk" && current.ContentMode != "" && len(current.Parts) == 0 {
+			return prepareWorkflowDingTalkProjection(current, true)
+		}
+		return nil
+	}
+	if delivery.Kind == "dingtalk" && delivery.ContentMode != "" && delivery.ContentMode != "files" && delivery.ContentMode != "both" {
+		if len(delivery.Parts) > 0 {
+			return nil
+		}
+		return s.updateWorkflowDelivery(runID, deliveryID, validateMissingProjection)
+	}
 	var generated []messagecontent.AttachmentRef
 	for _, file := range run.GeneratedFiles {
 		if file.NodeID != delivery.NodeID {
 			continue
 		}
-		if file.Status != "ready" {
-			return errors.New("Required workflow output files are not ready")
-		}
 		// 钉钉的新增格式合同仅附PDF；原始附件不在此过滤。
 		if delivery.Kind == "dingtalk" && file.Format != "pdf" {
 			continue
 		}
+		if file.Status != "ready" {
+			return errors.New("Required workflow output files are not ready")
+		}
 		generated = append(generated, workflowGeneratedFileRef(file))
 	}
 	if len(generated) == 0 {
+		if delivery.Kind == "dingtalk" && delivery.ContentMode != "" && len(delivery.Parts) == 0 {
+			return s.updateWorkflowDelivery(runID, deliveryID, validateMissingProjection)
+		}
 		return nil
 	}
 	return s.updateWorkflowDelivery(runID, deliveryID, func(current *WorkflowDelivery) error {
@@ -314,7 +331,7 @@ func (s *Server) attachWorkflowGeneratedFiles(runID, deliveryID string) error {
 			}
 		}
 		if !changed {
-			return nil
+			return validateMissingProjection(current)
 		}
 		canonical, err := messagecontent.New(messagecontent.ProducerWorkflow, locale, markdown, refs)
 		if err != nil {
@@ -322,7 +339,7 @@ func (s *Server) attachWorkflowGeneratedFiles(runID, deliveryID string) error {
 		}
 		current.MessageContent = &canonical
 		if current.Kind == "dingtalk" {
-			return prepareWorkflowDeliveryParts(current)
+			return prepareWorkflowDingTalkProjection(current, true)
 		}
 		return nil
 	})
@@ -427,7 +444,7 @@ func (s *Server) workflowDirectoryFiles(run *WorkflowRun, delivery *WorkflowDeli
 		name := workflowOutputSafeName(ref.Name)
 		generated := false
 		for _, output := range run.GeneratedFiles {
-			if output.ID == ref.AssetID {
+			if workflowGeneratedFileRef(output).AssetID == ref.AssetID {
 				generated = true
 				break
 			}

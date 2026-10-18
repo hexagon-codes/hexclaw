@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/mail"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -110,6 +111,16 @@ func TestWorkflowOutputFilesActualFormatsAndServiceDirectory(t *testing.T) {
 		if file.Status != "ready" || file.Size == 0 || file.DownloadURL == "" || file.Digest == "" {
 			t.Fatalf("generated file is not persisted: %+v", file)
 		}
+		canonicalRef := workflowGeneratedFileRef(file)
+		snapshot, found := final.ArtifactSnapshots[canonicalRef.AssetID]
+		if !found || snapshot.Ref.AssetID != canonicalRef.AssetID || snapshot.FilePath != file.FilePath {
+			t.Fatal("generated artifact snapshot is not indexed by the canonical content identity")
+		}
+		for _, saved := range delivery.Files {
+			if saved.ArtifactID == canonicalRef.AssetID && saved.Name != file.Name {
+				t.Fatal("canonical identity changed the authored generated filename")
+			}
+		}
 		stored, openErr := s.genStore.Open(file.FilePath)
 		if openErr != nil {
 			t.Fatal(openErr)
@@ -161,6 +172,23 @@ func TestWorkflowOutputFilesActualFormatsAndServiceDirectory(t *testing.T) {
 	_, recovered := restarted.workflowDeliverySnapshot(run.ID, delivery.ID)
 	if recovered.Status != "delivered" || len(recovered.Files) != 4 {
 		t.Fatal("restart lost directory receipt")
+	}
+}
+
+func TestWorkflowOutputFilesCanonicalAttachmentReference(t *testing.T) {
+	// 此摘要来自固定PDF字节，平台规范身份不能随生成任务或运行ID变化。
+	const digest = "sha256:c9ac9bf396e6456363f391055bd6f284143e82ab5af43b3779e0f77d917ba5f3"
+	const requiredAssetID = "attachment:c9ac9bf396e6456363f391055bd6f284143e82ab5af43b3779e0f77d917ba5f3"
+	checksum := sha256.Sum256([]byte("%PDF-1.7\ncanonical-workflow-file"))
+	if digest != "sha256:"+hex.EncodeToString(checksum[:]) {
+		t.Fatal("canonical fixture digest does not match its independently recorded bytes")
+	}
+	for _, taskID := range []string{"wfo-first-conversion", "wfo-another-run"} {
+		file := WorkflowGeneratedFile{ID: taskID, NodeID: "output", Format: "pdf", Name: "report.pdf", MIME: "application/pdf", Digest: digest}
+		ref := workflowGeneratedFileRef(file)
+		if ref.AssetID != requiredAssetID || ref.AssetID == file.ID || ref.Digest != digest || ref.Name != "report.pdf" || ref.AltText != "report.pdf" {
+			t.Fatalf("generated file identity is not compatible with the existing canonical attachment contract: %+v", ref)
+		}
 	}
 }
 
@@ -315,7 +343,8 @@ func TestWorkflowOutputFilesEmailFrozenAttachmentsAndAcceptance(t *testing.T) {
 				t.Fatalf("SMTP outcome changed result or was lost: %+v", delivery)
 			}
 			message := transport.emails[0]
-			if len(message.To) != 2 || message.To[0] != "reader@example.test" || message.Subject != "Workflow report" || message.MessageID != delivery.ID || len(message.Attachments) != 2 || !strings.Contains(message.HTML, "<strong>files</strong>") {
+			messageAddress, parseErr := mail.ParseAddress(message.MessageID)
+			if len(message.To) != 2 || message.To[0] != "reader@example.test" || message.Subject != "Workflow report" || parseErr != nil || messageAddress.Address != message.MessageID || len(message.Attachments) != 2 || !strings.Contains(message.HTML, "<strong>files</strong>") {
 				t.Fatalf("email envelope lost configured recipients or files: %+v", message)
 			}
 			if test.want == "failed" {
@@ -331,6 +360,42 @@ func TestWorkflowOutputFilesEmailFrozenAttachmentsAndAcceptance(t *testing.T) {
 				t.Fatal("SMTP accepted or unknown email was resent")
 			}
 		})
+	}
+}
+
+func TestWorkflowOutputFilesEmailMessageIDUsesStableRFCAddress(t *testing.T) {
+	const frozenDeliveryID = "dlv-frozen-smtp-envelope"
+	const expectedMessageID = "dlv-frozen-smtp-envelope@hexclaw.local"
+	if _, err := mail.ParseAddress(frozenDeliveryID); err == nil {
+		t.Fatal("bare delivery identity is not a valid RFC message address")
+	}
+	s := workflowDeliveryServer(t)
+	run := workflowDeliveryRun("run-email-message-identity", map[string]any{"email": map[string]any{
+		"enabled": true, "instance_id": "smtp-connection", "to": "reader@example.test", "subject": "Report",
+	}})
+	run.Deliveries = prepareWorkflowDeliveries(run)
+	run.Deliveries[0].ID = frozenDeliveryID
+	if err := s.workflowStore.addRun(run); err != nil {
+		t.Fatal(err)
+	}
+	transport := &workflowEmailTestTransport{workflowDeliveryTestTransport: newWorkflowDeliveryTestTransport(), status: adapter.DeliveryFailed, err: errors.New("definite SMTP rejection")}
+	s.dispatchWorkflowDeliveryWithTransport(t.Context(), run.ID, frozenDeliveryID, false, transport)
+	if len(transport.emails) != 1 {
+		t.Fatal("email was not submitted to its transport")
+	}
+	first := transport.emails[0].MessageID
+	parsed, err := mail.ParseAddress(first)
+	if err != nil || parsed.Address != expectedMessageID || first != expectedMessageID {
+		t.Fatalf("workflow email Message-ID does not satisfy the existing RFC address contract: got %q, parse error %v", first, err)
+	}
+	transport.status, transport.err = adapter.DeliveryAccepted, nil
+	s.dispatchWorkflowDeliveryWithTransport(t.Context(), run.ID, frozenDeliveryID, true, transport)
+	if len(transport.emails) != 2 || transport.emails[1].MessageID != expectedMessageID {
+		t.Fatal("retry of a definitely rejected email changed the frozen envelope identity")
+	}
+	_, delivery := s.workflowDeliverySnapshot(run.ID, frozenDeliveryID)
+	if delivery.Status != "accepted" || delivery.Attempts != 2 {
+		t.Fatal("stable Message-ID changed SMTP acceptance or retry semantics")
 	}
 }
 

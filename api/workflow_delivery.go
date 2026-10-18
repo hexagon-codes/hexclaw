@@ -19,7 +19,9 @@ import (
 	"time"
 
 	"github.com/hexagon-codes/hexclaw/adapter"
+	dingtalkadapter "github.com/hexagon-codes/hexclaw/adapter/dingtalk"
 	emailadapter "github.com/hexagon-codes/hexclaw/adapter/email"
+	"github.com/hexagon-codes/hexclaw/internal/mathtext"
 	"github.com/hexagon-codes/hexclaw/messagecontent"
 	"github.com/hexagon-codes/hexclaw/storage"
 )
@@ -42,6 +44,7 @@ type WorkflowDelivery struct {
 	SessionID         string                         `json:"session_id,omitempty"`
 	InstanceID        string                         `json:"instance_id,omitempty"`
 	ChatID            string                         `json:"chat_id,omitempty"`
+	ContentMode       string                         `json:"content_mode,omitempty"`
 	To                []string                       `json:"to,omitempty"`
 	Subject           string                         `json:"subject,omitempty"`
 	ExternalMessageID string                         `json:"external_message_id,omitempty"`
@@ -170,14 +173,19 @@ func prepareWorkflowDeliveries(run *WorkflowRun) []WorkflowDelivery {
 		ding := resourceMap(settings["dingtalk"])
 		if enabled, _ := ding["enabled"].(bool); enabled {
 			delivery := makeDelivery("dingtalk")
+			delivery.ContentMode = stringValue(ding["mode"])
 			delivery.InstanceID, delivery.ChatID = stringValue(ding["instance_id"]), stringValue(ding["chat_id"])
 			if delivery.InstanceID == "" || delivery.ChatID == "" {
 				delivery.Status, delivery.Error = "failed", "A DingTalk instance and bound conversation are required"
 			} else if delivery.ChatID[0] < 0x20 {
 				delivery.Status, delivery.Error = "failed", "DingTalk workflow delivery supports direct conversations only"
 			}
-			if err := prepareWorkflowDeliveryParts(&delivery); err != nil {
-				delivery.Status, delivery.Error = "failed", err.Error()
+			plannedPDF := false
+			for _, format := range workflowOutputFormats(resourceMap(config["outputs"])["formats"]) {
+				plannedPDF = plannedPDF || format == "pdf"
+			}
+			if err := prepareWorkflowDingTalkProjection(&delivery, !plannedPDF); err != nil {
+				delivery.Status, delivery.ErrorCode, delivery.Error = "failed", workflowDingTalkProjectionErrorCode(err), err.Error()
 			}
 			deliveries = append(deliveries, delivery)
 		}
@@ -212,35 +220,143 @@ func prepareWorkflowDeliveries(run *WorkflowRun) []WorkflowDelivery {
 	return deliveries
 }
 
+var (
+	errWorkflowDingTalkFilesRequired   = errors.New("DingTalk file delivery requires an existing image or PDF, or a selected PDF output")
+	errWorkflowDingTalkMessageRequired = errors.New("DingTalk message delivery requires workflow text content")
+	errWorkflowDingTalkModeInvalid     = errors.New("DingTalk workflow delivery mode is unsupported")
+)
+
+func workflowDingTalkProjectionErrorCode(err error) string {
+	switch {
+	case errors.Is(err, errWorkflowDingTalkFilesRequired):
+		return "DINGTALK_FILES_REQUIRED"
+	case errors.Is(err, errWorkflowDingTalkMessageRequired):
+		return "DINGTALK_MESSAGE_REQUIRED"
+	case errors.Is(err, errWorkflowDingTalkModeInvalid):
+		return "DINGTALK_MODE_INVALID"
+	default:
+		return ""
+	}
+}
+
+// 投递模式只生成渠道投影，完整正文与原始产物仍保留在运行快照中。
+func prepareWorkflowDingTalkProjection(delivery *WorkflowDelivery, requireFiles bool) error {
+	if delivery.ContentMode == "" {
+		return prepareWorkflowDeliveryParts(delivery)
+	}
+	if delivery.ContentMode != "message" && delivery.ContentMode != "files" && delivery.ContentMode != "both" {
+		return errWorkflowDingTalkModeInvalid
+	}
+	markdown, locale := delivery.Content, "und"
+	var refs []messagecontent.AttachmentRef
+	if delivery.MessageContent != nil {
+		markdown, locale = delivery.MessageContent.Markdown, delivery.MessageContent.Locale
+		refs = append(refs, delivery.MessageContent.Attachments...)
+	}
+	switch delivery.ContentMode {
+	case "message":
+		if strings.TrimSpace(markdown) == "" {
+			return errWorkflowDingTalkMessageRequired
+		}
+		refs = nil
+	case "files":
+		markdown = ""
+	case "both":
+		if strings.TrimSpace(markdown) == "" {
+			return errWorkflowDingTalkMessageRequired
+		}
+	}
+	if delivery.ContentMode != "message" && requireFiles && len(refs) == 0 {
+		return errWorkflowDingTalkFilesRequired
+	}
+	if markdown == "" && len(refs) == 0 {
+		// 已选PDF尚待确定性生成，不能先冻结一个虚假的正文消息。
+		delivery.Content, delivery.MessageContent, delivery.RenderManifest, delivery.Parts = "", nil, nil, nil
+		return nil
+	}
+	canonical, err := messagecontent.New(messagecontent.ProducerWorkflow, locale, markdown, refs)
+	if err != nil {
+		return err
+	}
+	delivery.Content, delivery.MessageContent = markdown, &canonical
+	return prepareWorkflowDeliveryParts(delivery)
+}
+
+func workflowDingTalkBrief(markdown string) string {
+	return mathtext.ExcerptMarkdownParagraph(markdown, 240)
+}
+
 func prepareWorkflowDeliveryParts(delivery *WorkflowDelivery) error {
 	if delivery.MessageContent == nil {
 		return errors.New("Workflow output contains no deliverable content")
 	}
 	content := delivery.MessageContent
 	renderParts := []messagecontent.RenderPart{}
-	delivery.Parts = nil
+	parts := []WorkflowDeliveryPart{}
+	renderer, fallback := "workflow-delivery-v1", ""
+	capabilities := messagecontent.CapabilitySnapshot{Markdown: true, TeXMath: true, Attachments: true}
+	if delivery.Kind == "dingtalk" {
+		renderer = "workflow-dingtalk-readable-v2"
+		capabilities = messagecontent.CapabilitySnapshot{Markdown: true, UnicodeMath: true, Attachments: len(content.Attachments) > 0}
+	}
 	if strings.TrimSpace(content.Markdown) != "" {
-		renderParts = append(renderParts, messagecontent.RenderPart{Kind: messagecontent.PartMarkdown, Text: content.Markdown})
+		projected := content.Markdown
+		if delivery.Kind == "dingtalk" {
+			projected, fallback = dingtalkadapter.ProjectMarkdownText(projected, "")
+			if delivery.ContentMode == "both" {
+				// 完整公式先投影，再对可见正文节选，规范原文与摘要保持完整。
+				excerpt := workflowDingTalkBrief(projected)
+				if excerpt == "" {
+					return errWorkflowDingTalkMessageRequired
+				}
+				if excerpt != projected {
+					if fallback != "" {
+						fallback += "+"
+					}
+					fallback += "markdown_excerpt"
+				}
+				projected = excerpt
+			}
+		}
 		sum := sha256.Sum256([]byte(content.Markdown))
-		delivery.Parts = append(delivery.Parts, WorkflowDeliveryPart{Ordinal: 1, Kind: messagecontent.PartMarkdown, Digest: "sha256:" + hex.EncodeToString(sum[:]), Status: "pending"})
+		part := WorkflowDeliveryPart{Ordinal: 1, Kind: messagecontent.PartMarkdown, Digest: "sha256:" + hex.EncodeToString(sum[:]), Status: "pending"}
+		// 追加文件或重试不能用新渲染规则重写已有正文与平台回执。
+		if previous := delivery.RenderManifest; previous != nil && len(previous.Parts) > 0 && previous.Parts[0].Kind == messagecontent.PartMarkdown {
+			for _, old := range delivery.Parts {
+				if old.Ordinal == 1 && old.Kind == part.Kind && old.Digest == part.Digest {
+					projected, part = previous.Parts[0].Text, old
+					renderer, fallback, capabilities = previous.RendererVersion, previous.FallbackReason, previous.CapabilitySnapshot
+					capabilities.Attachments = len(content.Attachments) > 0
+					break
+				}
+			}
+		}
+		renderParts = append(renderParts, messagecontent.RenderPart{Kind: messagecontent.PartMarkdown, Text: projected})
+		parts = append(parts, part)
 	}
 	for _, ref := range content.Attachments {
 		renderParts = append(renderParts, messagecontent.RenderPart{Kind: messagecontent.PartArtifact, ArtifactRef: ref.AssetID,
 			ArtifactDigest: ref.Digest, AltText: ref.AltText})
 	}
 	manifest, err := messagecontent.BuildManifest(*content, messagecontent.RenderRequest{Surface: messagecontent.SurfaceChannel,
-		RendererVersion: "workflow-delivery-v1", Capabilities: messagecontent.CapabilitySnapshot{Markdown: true, TeXMath: true, Attachments: true}, Parts: renderParts})
+		RendererVersion: renderer, Capabilities: capabilities, Parts: renderParts, FallbackReason: fallback})
 	if err != nil {
 		return err
 	}
-	delivery.RenderManifest = &manifest
 	for _, ref := range content.Attachments {
-		part := WorkflowDeliveryPart{Ordinal: len(delivery.Parts) + 1, Kind: messagecontent.PartArtifact, ArtifactID: ref.AssetID, MIME: ref.MIME, Digest: ref.Digest, Status: "pending"}
+		part := WorkflowDeliveryPart{Ordinal: len(parts) + 1, Kind: messagecontent.PartArtifact, ArtifactID: ref.AssetID, MIME: ref.MIME, Digest: ref.Digest, Status: "pending"}
 		if !strings.HasPrefix(strings.ToLower(ref.MIME), "image/") && ref.MIME != "application/pdf" {
 			part.Status, part.Error = "failed", "DingTalk workflow delivery supports text, images and PDF files"
 		}
-		delivery.Parts = append(delivery.Parts, part)
+		for _, old := range delivery.Parts {
+			if old.Ordinal == part.Ordinal && old.Kind == part.Kind && old.ArtifactID == part.ArtifactID && old.MIME == part.MIME && old.Digest == part.Digest {
+				part = old
+				break
+			}
+		}
+		parts = append(parts, part)
 	}
+	delivery.RenderManifest, delivery.Parts = &manifest, parts
 	return nil
 }
 
@@ -378,19 +494,27 @@ func (s *Server) dispatchWorkflowDeliveryWithTransport(ctx context.Context, runI
 		}
 		nodeID = target.NodeID
 	}
-	s.generateWorkflowOutputFiles(ctx, runID, nodeID, retry)
-	s.workflowStore.mu.RLock()
-	run := cloneWorkflowRun(s.workflowStore.runs[runID])
-	s.workflowStore.mu.RUnlock()
+	run := s.workflowGeneratedFilesSnapshot(runID)
 	if run == nil || run.Status != "completed" {
 		return
 	}
+	// 纯消息先进入投递，任何格式转换失败或耗时均不阻塞正文。
+	sort.SliceStable(run.Deliveries, func(i, j int) bool {
+		left := run.Deliveries[i].Kind == "dingtalk" && run.Deliveries[i].ContentMode == "message"
+		right := run.Deliveries[j].Kind == "dingtalk" && run.Deliveries[j].ContentMode == "message"
+		return left && !right
+	})
+	generated := false
 	for _, delivery := range run.Deliveries {
 		if deliveryID != "" && delivery.ID != deliveryID {
 			continue
 		}
 		if delivery.Status == "delivered" || delivery.Status == "sending" || (delivery.Kind == "email" && (delivery.Status == "accepted" || delivery.Status == "outcome_unknown")) || (delivery.Status == "failed" && !retry) {
 			continue
+		}
+		if !(delivery.Kind == "dingtalk" && delivery.ContentMode == "message") && !generated {
+			s.generateWorkflowOutputFiles(ctx, runID, nodeID, retry)
+			generated = true
 		}
 		release := s.claimWorkflowDelivery(runID, delivery.ID)
 		if release == nil {
@@ -399,6 +523,9 @@ func (s *Server) dispatchWorkflowDeliveryWithTransport(ctx context.Context, runI
 		if err := s.attachWorkflowGeneratedFiles(runID, delivery.ID); err != nil {
 			_ = s.updateWorkflowDelivery(runID, delivery.ID, func(current *WorkflowDelivery) error {
 				current.Status, current.ErrorCode, current.Error = "failed", "OUTPUT_RENDER_FAILED", "Required workflow output files could not be generated"
+				if code := workflowDingTalkProjectionErrorCode(err); code != "" {
+					current.ErrorCode, current.Error = code, err.Error()
+				}
 				return nil
 			})
 			release()
@@ -420,6 +547,9 @@ func (s *Server) dispatchWorkflowDeliveryWithTransport(ctx context.Context, runI
 			s.deliverWorkflowDirectory(ctx, runID, delivery.ID)
 		}
 		release()
+	}
+	if !generated && deliveryID == "" {
+		s.generateWorkflowOutputFiles(ctx, runID, nodeID, retry)
 	}
 }
 
@@ -559,7 +689,7 @@ func (s *Server) deliverWorkflowEmail(ctx context.Context, runID, deliveryID str
 		})
 		return
 	}
-	message := emailadapter.OutboundMessage{To: append([]string(nil), delivery.To...), Subject: delivery.Subject, Text: delivery.Content, MessageID: delivery.ID}
+	message := emailadapter.OutboundMessage{To: append([]string(nil), delivery.To...), Subject: delivery.Subject, Text: delivery.Content, MessageID: delivery.ID + "@hexclaw.local"}
 	for _, attachment := range attachments {
 		raw, decodeErr := base64.StdEncoding.DecodeString(attachment.Data)
 		if decodeErr != nil {
