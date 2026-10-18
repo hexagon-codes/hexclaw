@@ -2,6 +2,7 @@ package k12
 
 const (
 	PrintSourceTutoringTips           = "tutoring_tips"
+	PrintSourceIMFinalReply           = "im_final_reply"
 	PrintSourceCreativeObservation    = "creative_observation_card"
 	PrintSourcePracticeQuestion       = "practice_question"
 	PrintSourcePracticeAnswer         = "practice_answer"

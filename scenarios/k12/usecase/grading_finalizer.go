@@ -34,6 +34,13 @@ func (o *GradingOrchestrator) finalizeGradingPage(
 	} else if !errors.Is(err, records.ErrNotFound) {
 		return k12.GradingFinalArtifact{}, err
 	}
+	required, err := o.deps.gradingRequiresAnnotatedImage(ctx, job)
+	if err != nil {
+		return k12.GradingFinalArtifact{}, err
+	}
+	if required && (run == nil || run.result == nil || run.result.AnnotatedImage == nil || len(run.result.AnnotatedImage.Data) == 0) {
+		return k12.GradingFinalArtifact{}, fmt.Errorf("%w: required annotated image is unavailable", ErrGradingFinalizationIncomplete)
+	}
 	if err := o.recoverInvalidAssetAssessments(ctx, run, job); err != nil {
 		return k12.GradingFinalArtifact{}, err
 	}
@@ -194,6 +201,9 @@ func (o *GradingOrchestrator) finalizeGradingPage(
 	}
 	if err := o.freezeGradingFinalAnnotatedAsset(ctx, run, job, &artifact); err != nil {
 		return k12.GradingFinalArtifact{}, err
+	}
+	if required && !artifact.HasAnnotatedAsset() {
+		return k12.GradingFinalArtifact{}, fmt.Errorf("%w: required annotated image asset is unavailable", ErrGradingFinalizationIncomplete)
 	}
 	if job.Fields.SourceKind == "image_task" && run.result != nil && len(run.result.Items) > 0 {
 		if err := validateGradingAssessmentExactSet(*run.result, assessments); err != nil {
@@ -795,7 +805,6 @@ func renderCanonicalGradingFinal(
 		out.WriteString("> 过程问题表示最终答案正确，但书写过程需要核对，不记为错题。\n\n")
 	}
 
-	detailCount := len(detailGroups[0]) + len(detailGroups[1]) + len(detailGroups[2])
 	detailTitles := [...]string{"需关注的题", "已解答", "未作答"}
 	for groupIndex, group := range detailGroups {
 		if len(group) == 0 {
@@ -830,14 +839,6 @@ func renderCanonicalGradingFinal(
 				out.WriteString(details)
 				out.WriteString("\n\n")
 			}
-		}
-	}
-	if correctCount > 0 {
-		out.WriteString("## 已答对的题\n\n")
-		if detailCount > 0 {
-			fmt.Fprintf(&out, "其余 %d 题已答对。\n\n", correctCount)
-		} else {
-			fmt.Fprintf(&out, "%d 题已答对。\n\n", correctCount)
 		}
 	}
 	return strings.TrimSpace(out.String())

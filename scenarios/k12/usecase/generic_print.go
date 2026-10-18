@@ -409,15 +409,19 @@ func (d Deps) gradingFinalArtifactPrintRequest(
 			media = DeliveryAttachment{MIME: annotated.MIME, Data: annotated.Data}
 		}
 		canonical := artifact.CanonicalMarkdown
+		renderMarkdown := canonical
+		if intent == k12.ImageTaskIntentCompletedHomework {
+			renderMarkdown = d.gradingFinalArtifactPrintableMarkdown(ctx, artifact, true)
+		}
 		return PreparePrintableArtifactRequest{
 			AgentName: artifact.AgentName, SourceKind: k12.PrintSourceGradingFinalArtifact,
 			SourceRef: "final_artifact:" + artifact.ArtifactID + ":" + artifact.ArtifactDigest + ":" +
 				strings.TrimPrefix(deliveryDigest(string(source.Data)), "sha256:") + ":" + imageFinalPDFRenderContractVersion,
 			Title: title, CanonicalMarkdown: canonical,
-			RenderMarkdown: frozenFinalPDFMarkdown(canonical, media),
+			RenderMarkdown: frozenFinalPDFMarkdown(renderMarkdown, media),
 		}, nil
 	}
-	canonical := d.gradingFinalArtifactPrintableMarkdown(ctx, artifact)
+	canonical := d.gradingFinalArtifactPrintableMarkdown(ctx, artifact, false)
 	req := PreparePrintableArtifactRequest{
 		AgentName:         artifact.AgentName,
 		SourceKind:        k12.PrintSourceGradingFinalArtifact,
@@ -509,6 +513,7 @@ func frozenFinalPDFMarkdown(canonical string, media DeliveryAttachment) string {
 func (d Deps) gradingFinalArtifactPrintableMarkdown(
 	ctx context.Context,
 	artifact k12.GradingFinalArtifact,
+	compact bool,
 ) string {
 	orchestrator := &GradingOrchestrator{deps: d}
 	questions, ok := orchestrator.typedRecognizedQuestions(
@@ -584,6 +589,11 @@ func (d Deps) gradingFinalArtifactPrintableMarkdown(
 	intent, err := orchestrator.persistedImageTaskPhotoIntent(ctx, artifact.AgentName, job.Fields, "")
 	if err != nil {
 		return artifact.CanonicalMarkdown
+	}
+	if compact && intent == PhotoTaskCompletedHomework {
+		if markdown, ok := renderGradingPDF(entries, artifact.CoverageStatus); ok {
+			return markdown
+		}
 	}
 	return renderCanonicalFinalForTask(entries, intent, artifact.CoverageStatus)
 }

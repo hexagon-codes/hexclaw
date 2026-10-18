@@ -68,14 +68,14 @@ func TestBUGK12DingTalkPhotoMarkdownLocalization20260825(t *testing.T) {
 		"**错误步骤：** 42 = 18 × 2",
 		"**原因：** 等号两边不相等，且原过程中的算式相互矛盾，无法作为最终答案 29 的可复核证据。",
 		"逐行做等号检查，先算出 18 × 2 = 36 并标出冲突，再请孩子从上一条可信算式重新写到最终答案。",
-		"## 已答对的题",
-		"其余 14 题已答对。",
 	} {
 		if !strings.Contains(markdown, want) {
 			t.Fatalf("canonical parent markdown lacks %q:\n%s", want, markdown)
 		}
 	}
 	for _, forbidden := range []string{
+		"## 已答对的题",
+		"其余 14 题已答对。",
 		"Grading summary",
 		"Grading status",
 		"Process note",
