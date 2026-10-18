@@ -144,8 +144,7 @@ func (d Deps) SendAccumulation(
 		if locale != "" {
 			// 旧命令优先读回，新增PDF不能使同一次发送变成另一条消息。
 			if batch, e := d.GetDeliveryBatchForObject(ctx, agentName, "accumulation", rec.RecordID); e == nil {
-				queried, queryErr := d.QueryDeliveryBatch(ctx, agentName, batch.BatchID)
-				return queried, false, queryErr
+				return d.resumeFinalReplyBatch(ctx, batch)
 			} else if !errors.Is(e, records.ErrNotFound) {
 				return k12.DeliveryBatch{}, false, e
 			}

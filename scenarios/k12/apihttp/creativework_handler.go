@@ -148,6 +148,14 @@ func (h *handler) creativeWorkDTOWithDeliveryBatch(
 	if view.GenerationState.Latest == nil || view.GenerationState.Latest.Feedback == nil {
 		return dto, nil
 	}
+	if objectID, identityErr := usecase.CreativeFinalReplyObjectID(view, "send_to_phone"); identityErr == nil {
+		if batch, lookupErr := h.rt.Deps.GetDeliveryBatchForObject(ctx, agent, "creative_work", objectID); lookupErr == nil {
+			dto.DeliveryBatchID = batch.BatchID
+			return dto, nil
+		} else if !errors.Is(lookupErr, records.ErrNotFound) {
+			return creativeWorkDTO{}, lookupErr
+		}
+	}
 	content, err := canonicalCreativeWorkText(view)
 	if err != nil {
 		return creativeWorkDTO{}, err
@@ -310,7 +318,7 @@ func (h *handler) sendCreativeWork(w http.ResponseWriter, r *http.Request) {
 	message := usecase.DeliveryMessage{Content: content}
 	if objectID, identityErr := usecase.CreativeFinalReplyObjectID(view, "send_to_phone"); identityErr == nil {
 		if frozen, lookupErr := h.rt.Deps.GetDeliveryBatchForObject(r.Context(), req.Agent, "creative_work", objectID); lookupErr == nil {
-			batch, queryErr := h.rt.Deps.QueryDeliveryBatch(r.Context(), req.Agent, frozen.BatchID)
+			batch, _, queryErr := h.rt.Deps.ResumeFinalReplyBatch(r.Context(), req.Agent, frozen.BatchID)
 			if queryErr != nil {
 				writeDeliveryError(w, queryErr)
 				return

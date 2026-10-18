@@ -1066,7 +1066,16 @@ func (r *k12DingtalkPhotoInboundRuntime) completeBoundReply(
 	if queryErr != nil && !errors.Is(queryErr, k12usecase.ErrDeliveryQueryUnavailable) {
 		return false, queryErr
 	}
-	if batch.ObjectKind == "creative_work" && len(batch.Receipts) == 1 {
+	if batch.ObjectKind == "creative_work" && strings.HasSuffix(batch.ObjectID, ":"+k12.DeliveryProjectionVersionIMFinalPDFV1) {
+		if err := k12.ValidateDeliveryProjectionTarget(batch, batch.Receipts); err != nil {
+			return false, err
+		}
+		for _, receipt := range batch.Receipts {
+			if receipt.BindingID != target.BindingID || receipt.Target != target.Target {
+				return false, errors.New("creative bound reply target mismatch")
+			}
+		}
+	} else if batch.ObjectKind == "creative_work" && len(batch.Receipts) == 1 {
 		receipt := batch.Receipts[0]
 		if strings.TrimSpace(batch.BatchID) == "" || receipt.PartKind != messagecontent.PartMarkdown ||
 			receipt.PartOrdinal != 1 || strings.TrimSpace(receipt.DeliveryID) == "" ||

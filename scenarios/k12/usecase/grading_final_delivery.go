@@ -182,18 +182,7 @@ func (d Deps) PrepareAndSendK12FinalReplyBatch(ctx context.Context, agentName, o
 	if lookupErr == nil {
 		frozenTargets := deliveryBatchResolvedTargets(existing)
 		if strings.HasSuffix(existing.ObjectID, ":"+k12.DeliveryProjectionVersionIMFinalPDFV1) {
-			var payload struct {
-				Source *k12.DeliveryProjectionSource `json:"delivery_source"`
-			}
-			if json.Unmarshal([]byte(existing.Receipts[0].PayloadJSON), &payload) != nil || payload.Source == nil {
-				return existing, false, errors.New("final reply frozen source is missing")
-			}
-			full.Source = payload.Source
-			if payload.Source.DingTalkSuffix != "" {
-				projected := full
-				projected.Content += "\n\n" + payload.Source.DingTalkSuffix
-				full.Projections = map[string]DeliveryMessage{"dingtalk": projected}
-			}
+			return d.resumeFinalReplyBatch(ctx, existing)
 		}
 		return d.sendK12FinalReplyFallback(ctx, existing, full, frozenTargets)
 	}
@@ -539,8 +528,14 @@ func (d Deps) sendK12FinalReplyFallback(ctx context.Context, source k12.Delivery
 	}
 	if !created {
 		queried, e := d.QueryDeliveryBatch(ctx, batch.AgentName, batch.BatchID)
+		if queried.BatchID == "" {
+			queried = batch
+		}
 		return queried, false, e
 	}
-	batch, err = d.sendDeliveryBatch(ctx, batch)
-	return batch, true, err
+	result, sendErr := d.sendDeliveryBatch(ctx, batch)
+	if result.BatchID == "" {
+		result = batch
+	}
+	return result, true, sendErr
 }

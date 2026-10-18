@@ -60,9 +60,13 @@ func (f *gradingFinalDeliveryTransport) PrepareMessageForTargets(
 			Data: append([]byte(nil), attachment.Data...),
 		})
 	}
+	producer, locale := messagecontent.ProducerK12, "zh-CN"
+	if message.Source != nil {
+		producer, locale = message.Source.Canonical.ProducerKind, message.Source.Canonical.Locale
+	}
 	canonical, err := channel.NewCanonicalMarkdownMessageWithAttachments(
-		messagecontent.ProducerK12,
-		"zh-CN",
+		producer,
+		locale,
 		message.Content,
 		message.Content,
 		"",
