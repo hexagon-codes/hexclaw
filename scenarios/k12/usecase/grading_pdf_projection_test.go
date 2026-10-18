@@ -132,8 +132,133 @@ func TestGradingPDFConservativeGuideProjectionSQLite(t *testing.T) {
 	}
 }
 
+func TestGradingPDFCompoundSourceProjection(t *testing.T) {
+	shared := "小明 $\\frac{2}{3}$ 小时走了 $2$ 千米，照这样的速度，他每小时行走多少千米？\n\n线段图标注：\n- $1$ 小时走了 $?$ km；\n- $\\frac{1}{3}$ 小时走了 $?$ km；\n- $\\frac{2}{3}$ 小时走了 $2$ km。\n\n教材给出的推算过程：\n$$2\\div\\frac{2}{3}=2\\div2\\times3=2\\times\\frac12\\times3=2\\times\\left(\\frac12\\times3\\right)=2\\times\\frac32=3\\text{（km）}。$$"
+	current := []string{
+		"照这样的速度，他每小时行走多少千米？",
+		"从上图看出：已知（　）份是 $2$ 千米，可以先求出这样的 $1$ 份是多少。",
+		"推算过程中“$2\\times\\frac12\\times3=2\\times\\left(\\frac12\\times3\\right)$”的依据是（　）。",
+	}
+	tests := []struct {
+		name  string
+		edit  func([]gradingFinalEntry)
+		count int
+	}{
+		{name: "same confirmed D13 parent is printed once", count: 1},
+		{name: "unclear child answer preserves one confirmed parent source", count: 1, edit: func(e []gradingFinalEntry) {
+			e[2].question.AnswerState = AnswerStateUnclear
+			e[2].question.ConfirmationRequired = true
+			e[2].question.ConfirmationReasons = []OCRRiskReason{OCRRiskUnclearHandwriting}
+		}},
+		{name: "different parent remains separate", count: 2, edit: func(e []gradingFinalEntry) { e[1].question.ParentProblemID = "another-parent" }},
+		{name: "different source page remains separate", count: 2, edit: func(e []gradingFinalEntry) { e[1].question.PageAssetID = "another-page" }},
+		{name: "similar paragraph is not a common source", count: 3, edit: func(e []gradingFinalEntry) {
+			e[1].question.CanonicalMarkdown = strings.Replace(e[1].question.CanonicalMarkdown, "小明", "小红", 1)
+		}},
+		{name: "unconfirmed member keeps the complete source", count: 3, edit: func(e []gradingFinalEntry) { e[1].question.ConfirmedVersion = 0 }},
+		{name: "missing input identity keeps the complete source", count: 3, edit: func(e []gradingFinalEntry) { e[1].question.InputDigest = "" }},
+		{name: "unclear parent keeps the complete source", count: 3, edit: func(e []gradingFinalEntry) { e[1].question.parentSourceUnclear = true }},
+		{name: "current original must survive the whole paragraph cut", count: 3, edit: func(e []gradingFinalEntry) {
+			e[1].question.assessmentSource.canonical = e[1].question.CanonicalMarkdown
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			entries := make([]gradingFinalEntry, len(current))
+			for i, canonical := range current {
+				q := RecognizedQuestion{
+					ProblemID: fmt.Sprintf("d13-child-%d", i), ParentProblemID: "problem-1dab3784789d3d21fe14",
+					AttemptID:   fmt.Sprintf("d13-attempt-%d", i),
+					ProblemKind: ProblemKindSubproblem, PageAssetID: "d13-original-page", SubproblemNo: fmt.Sprint(i + 1),
+					SourceSectionLabel: "3 分数除法", CanonicalVersion: 1, ConfirmedVersion: 1, InputDigest: fmt.Sprintf("d13-input-%d", i),
+					CanonicalMarkdown: shared + "\n\n" + canonical, RawTranscription: canonical,
+				}
+				q.assessmentSource = &assessmentQuestionSource{problemID: q.ProblemID, inputDigest: q.InputDigest, raw: q.RawTranscription, canonical: canonical, canonicalVersion: 1, confirmedVersion: 1}
+				guide := ParentTeachingGuide{Answer: "2", FullSolutionSteps: []string{"只解当前问项。"}, GradeLevelMethod: "按六年级数量关系计算。", LikelyMistakes: []string{"不要替换当前空位。"}, ParentTeachingSequence: []string{"先说明当前空位要填什么。"}, FollowUpQuestions: []string{"如何代回检查？"}, CheckingMethod: "将当前答案代回当前问项。"}
+				item := gradingAssessmentCanonicalResult(PhotoGradeItem{Recognized: q, Status: PhotoWrong, Grade: GradeResult{Solution: "2", Outcome: GradeOutcome{Verdict: VerdictDisagree, WrongStep: "本题计算错误", ErrorCause: "未按原题计算"}}, ParentGuide: &guide})
+				raw, err := json.Marshal(item)
+				if err != nil {
+					t.Fatal(err)
+				}
+				entries[i] = gradingFinalEntry{question: q, assessment: &k12.GradingAssessmentItem{AgentName: "d13-child", ProblemID: q.ProblemID, Status: k12.GradingAssessmentWrong, ResultJSON: string(raw)}}
+			}
+			if tt.edit != nil {
+				tt.edit(entries)
+			}
+			beforeResults := make([]string, len(entries))
+			beforeQuestions := make([]RecognizedQuestion, len(entries))
+			for i := range entries {
+				beforeResults[i] = entries[i].assessment.ResultJSON
+				beforeQuestions[i] = entries[i].question
+				copySource := *entries[i].question.assessmentSource
+				beforeQuestions[i].assessmentSource = &copySource
+			}
+			markdown, ok := renderGradingPDF(entries, "")
+			if !ok {
+				t.Fatal("valid source projection was rejected")
+			}
+			if got := strings.Count(markdown, "教材给出的推算过程："); got != tt.count {
+				t.Errorf("shared material occurs %d times; want %d", got, tt.count)
+			}
+			for _, text := range current {
+				if !strings.Contains(markdown, strings.TrimSpace(weeklySheetQuestionMarkdown(text))) && !strings.Contains(markdown, strings.TrimSpace(text)) {
+					// 完整题面未裁切时，当前问项仍位于同一个受控文字参数中。
+					encoded, _ := json.Marshal(text)
+					if !strings.Contains(markdown, string(encoded[1:len(encoded)-1])) {
+						t.Errorf("current question or unique formula was lost: %s", text)
+					}
+				}
+			}
+			if strings.Contains(markdown, "### 1\n") || strings.Contains(markdown, "### 2\n") {
+				t.Fatal("system ordering was printed as a source question number")
+			}
+			for i := range entries {
+				if !reflect.DeepEqual(beforeQuestions[i], entries[i].question) || entries[i].assessment.ResultJSON != beforeResults[i] {
+					t.Fatal("projection rewrote the frozen current source")
+				}
+			}
+		})
+	}
+	t.Run("public PDF preserves compound sources and frozen replay", func(t *testing.T) {
+		sources := []RecognizedQuestion{{ProblemID: "d13-parent", ProblemKind: ProblemKindCompoundParent, RawTranscription: shared, CanonicalMarkdown: shared}}
+		guides := make([]ParentTeachingGuide, len(current))
+		for i, text := range current {
+			sources = append(sources, RecognizedQuestion{ProblemID: fmt.Sprintf("d13-current-%d", i), ProblemKind: ProblemKindSubproblem, ParentProblemID: "d13-parent", RawTranscription: text, CanonicalMarkdown: text})
+			guides[i] = ParentTeachingGuide{Answer: "2", FullSolutionSteps: []string{"只解当前问项。"}, GradeLevelMethod: "按六年级数量关系计算。", LikelyMistakes: []string{"不要替换当前空位。"}, ParentTeachingSequence: []string{"先说明当前空位要填什么。"}, FollowUpQuestions: []string{"如何代回检查？"}, CheckingMethod: "将当前答案代回当前问项。"}
+		}
+		d, artifact := gradingPDFProjectionFixture(t, guides, sources)
+		ctx := context.Background()
+		before, err := d.Records.ListGradingAssessmentItems(ctx, artifact.AgentName, artifact.JobID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		renderer := &finalReplyPDFRenderer{}
+		d.Renderer = renderer
+		printed, replay, err := d.PrepareGradingFinalArtifactPDFExact(ctx, artifact.AgentName, artifact.ArtifactID, artifact.ArtifactDigest, "作业批改结果")
+		if err != nil || replay || strings.Count(renderer.markdown, "教材给出的推算过程：") != 1 {
+			t.Fatalf("public compound source projection: replay=%v err=%v common_count=%d", replay, err, strings.Count(renderer.markdown, "教材给出的推算过程："))
+		}
+		for _, text := range current {
+			if !strings.Contains(renderer.markdown, strings.TrimSpace(text)) && !strings.Contains(renderer.markdown, strings.TrimSpace(weeklySheetQuestionMarkdown(text))) {
+				encoded, _ := json.Marshal(text)
+				if !strings.Contains(renderer.markdown, string(encoded[1:len(encoded)-1])) {
+					t.Errorf("public PDF lost the complete current question: %s", text)
+				}
+			}
+		}
+		again, replay, err := d.PrepareGradingFinalArtifactPDFExact(ctx, artifact.AgentName, artifact.ArtifactID, artifact.ArtifactDigest, "作业批改结果")
+		if err != nil || !replay || renderer.calls != 1 || !bytes.Equal(printed.Render.Payload, again.Render.Payload) || printed.Artifact.CanonicalMarkdown != artifact.CanonicalMarkdown {
+			t.Fatalf("compound PDF changed frozen source or replay: calls=%d replay=%v err=%v", renderer.calls, replay, err)
+		}
+		after, err := d.Records.ListGradingAssessmentItems(ctx, artifact.AgentName, artifact.JobID)
+		if err != nil || !reflect.DeepEqual(before, after) {
+			t.Fatalf("compound projection changed persisted assessments: %v", err)
+		}
+	})
+}
+
 // 通过正式来源和最终化构造临时真实库；模型与投递边界不参与本组领域验证。
-func gradingPDFProjectionFixture(t *testing.T, guides []ParentTeachingGuide) (Deps, k12.GradingFinalArtifact) {
+func gradingPDFProjectionFixture(t *testing.T, guides []ParentTeachingGuide, sources ...[]RecognizedQuestion) (Deps, k12.GradingFinalArtifact) {
 	t.Helper()
 	t.Setenv("HEXCLAW_ASSET_ROOT", t.TempDir())
 	ctx := context.Background()
@@ -172,10 +297,26 @@ func gradingPDFProjectionFixture(t *testing.T, guides []ParentTeachingGuide) (De
 		t.Fatal(err)
 	}
 	var snapshot k12.ProblemAttemptSnapshot
+	if len(sources) > 0 {
+		parent := sources[0][0]
+		snapshot.Problems = append(snapshot.Problems, k12.Problem{ProblemID: parent.ProblemID, AgentName: "mingming", SubmissionID: "submission-pdf-guide", PageAssetID: asset.Metadata.PageAssetID, Ordinal: 0, ProblemKind: k12.ProblemKindCompoundParent, Subject: "数学", StemRaw: parent.RawTranscription, StemMarkdown: parent.CanonicalMarkdown, CanonicalVersion: 1, CreatedAt: 100, UpdatedAt: 100})
+	}
 	for index := range guides {
 		id := fmt.Sprintf("pdf-guide-%d", index+1)
 		stem := fmt.Sprintf("1+%d=", index+1)
-		snapshot.Problems = append(snapshot.Problems, k12.Problem{ProblemID: id, AgentName: "mingming", SubmissionID: "submission-pdf-guide", PageAssetID: asset.Metadata.PageAssetID, Ordinal: index, ProblemKind: k12.ProblemKindStandalone, SourceNumberPath: []string{fmt.Sprint(index + 1)}, DisplayLabel: fmt.Sprint(index + 1), Subject: "数学", StemRaw: stem, StemMarkdown: stem, CanonicalVersion: 1, CreatedAt: 100, UpdatedAt: 100})
+		problem := k12.Problem{ProblemID: id, AgentName: "mingming", SubmissionID: "submission-pdf-guide", PageAssetID: asset.Metadata.PageAssetID, Ordinal: index, ProblemKind: k12.ProblemKindStandalone, SourceNumberPath: []string{fmt.Sprint(index + 1)}, DisplayLabel: fmt.Sprint(index + 1), Subject: "数学", StemRaw: stem, StemMarkdown: stem, CanonicalVersion: 1, CreatedAt: 100, UpdatedAt: 100}
+		if len(sources) > 0 {
+			current := sources[0][index+1]
+			id = current.ProblemID
+			problem.ProblemID, problem.ParentProblemID, problem.ProblemKind = id, current.ParentProblemID, k12.ProblemKindSubproblem
+			problem.Ordinal, problem.StemRaw, problem.StemMarkdown = index+1, current.RawTranscription, current.CanonicalMarkdown
+			problem.SourceNumberPath, problem.DisplayLabel, problem.SourceSectionLabel = nil, "", "3 分数除法"
+			problem.SourceSectionPath = []string{"3"}
+			problem.SubproblemNo = fmt.Sprint(index + 1)
+			problem.SystemSectionOrdinal = index + 1
+			problem.SystemDisplayLabel = fmt.Sprintf("第 %d 题（系统序号）", index+1)
+		}
+		snapshot.Problems = append(snapshot.Problems, problem)
 		snapshot.Attempts = append(snapshot.Attempts, k12.Attempt{AttemptID: "attempt-" + id, AgentName: "mingming", SubmissionID: "submission-pdf-guide", ProblemID: id, AnswerState: "present", AnswerRaw: "0", AnswerMarkdown: "0", ConfirmedVersion: 1, InputDigest: "input-" + id, CreatedAt: 100, UpdatedAt: 100})
 	}
 	if err = store.PutProblemAttemptSnapshot(ctx, snapshot); err != nil {
@@ -185,6 +326,7 @@ func gradingPDFProjectionFixture(t *testing.T, guides []ParentTeachingGuide) (De
 	if err != nil {
 		t.Fatal(err)
 	}
+	questions = RecognizedQuestionsForAssessment(questions)
 	for index, question := range questions {
 		guide := guides[index]
 		item := gradingAssessmentCanonicalResult(PhotoGradeItem{Recognized: question, Status: PhotoWrong, Grade: GradeResult{Solution: guide.Answer, Outcome: GradeOutcome{Verdict: VerdictDisagree, WrongStep: "原式计算错误", ErrorCause: "未按原式计算"}}, ParentGuide: &guide})

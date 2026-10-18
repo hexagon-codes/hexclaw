@@ -7,9 +7,10 @@
 #let hc-body-font = ("Songti SC", "Noto Serif CJK SC", "Noto Serif CJK SC Regular")
 #let hc-heading-font = ("PingFang SC", "Noto Sans CJK SC")
 #set text(font: hc-body-font, size: 12pt, fill: hc-ink)
-#set par(justify: false, leading: 0.72em, spacing: 0.65em)
-#set list(indent: 4mm, body-indent: 2mm, spacing: 0.45em)
-#set enum(indent: 4mm, body-indent: 2mm, spacing: 0.45em)
+#set par(justify: false, leading: 0.80em, spacing: 0.65em)
+// 列表项使用独立留白，避免紧凑列表的项间距小于正文换行。
+#set list(tight: false, indent: 4mm, body-indent: 2mm, spacing: 0.80em)
+#set enum(tight: false, indent: 4mm, body-indent: 2mm, spacing: 0.80em)
 #show math.equation: it => text(size: 12pt, math.display(it))
 #show math.equation.where(block: true): set align(left)
 #show heading: set text(font: hc-heading-font)

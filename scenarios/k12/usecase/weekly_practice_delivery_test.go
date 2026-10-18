@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/hexagon-codes/hexclaw/messagecontent"
@@ -132,7 +133,9 @@ func TestWeeklyPracticeSendUsesFrozenArtifactMarkdownAndPDFForEveryDirectTarget(
 	if err := d.DeliverCronResult(context.Background(), "xiaoming", usecase.KindWeeklySheet, sheet, nil); err != nil {
 		t.Fatal(err)
 	}
-	if renderer.calls != renderCalls+1 || renderer.markdown != sheet || len(transport.sends) != sends+wantReceiptCount {
+	if renderer.calls != renderCalls+1 || !strings.HasSuffix(renderer.markdown, sheet) ||
+		!strings.Contains(renderer.markdown, `#set page(paper: "a4", margin: 20mm`) ||
+		len(transport.sends) != sends+wantReceiptCount {
 		t.Fatalf("weekly cron must render the complete sheet once and send title/PDF: renders=%d sends=%d", renderer.calls, len(transport.sends))
 	}
 	var title weeklyDeliveryPayload

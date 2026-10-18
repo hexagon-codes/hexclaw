@@ -8,6 +8,8 @@ import (
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 )
 
+const gradingPDFProjectionVersion = "grading-pdf-v4"
+
 // PDF只重排可核对的结构化终稿，独有讲法与来源不做语义删减。
 func renderGradingPDF(entries []gradingFinalEntry, coverage k12.GradingFinalArtifactCoverageStatus) (string, bool) {
 	type detail struct {
@@ -15,6 +17,7 @@ func renderGradingPDF(entries []gradingFinalEntry, coverage k12.GradingFinalArti
 		item  *PhotoGradeItem
 	}
 	var details []detail
+	var detailEntries []gradingFinalEntry
 	var guides []ParentTeachingGuide
 	for _, entry := range entries {
 		if entry.assessment != nil && entry.assessment.Status == k12.GradingAssessmentCorrect {
@@ -36,6 +39,7 @@ func renderGradingPDF(entries []gradingFinalEntry, coverage k12.GradingFinalArti
 			}
 		}
 		details = append(details, d)
+		detailEntries = append(detailEntries, entry)
 	}
 	canonical := renderCanonicalGradingFinal(entries, nil)
 	end := len(canonical)
@@ -55,11 +59,14 @@ func renderGradingPDF(entries []gradingFinalEntry, coverage k12.GradingFinalArti
 		}
 		return "题目位置待确认"
 	}
-	for _, d := range details {
+	questionMarkdown := gradingPDFQuestionProjections(detailEntries)
+	for index, d := range details {
 		out.WriteString("```{=typst}\n#hc-item[\n```\n\n")
 		fmt.Fprintf(&out, "### %s\n\n", label(d.entry))
-		if q := strings.TrimSpace(d.entry.question.CanonicalMarkdown); q != "" {
-			out.WriteString(weeklySheetQuestionMarkdown(q))
+		if q := questionMarkdown[index]; q != "" {
+			// 数学定界符交由共享reader解析，题面中的代码定界符仍只作为文字。
+			out.WriteString(strings.ReplaceAll(q, "`", "\\`"))
+			out.WriteString("\n\n")
 		}
 		if d.entry.skip != nil {
 			out.WriteString("**已跳过 · 未判断对错**\n\n")
@@ -166,4 +173,62 @@ func renderGradingPDF(entries []gradingFinalEntry, coverage k12.GradingFinalArti
 		out.WriteString("## 说明\n\n本次没有可核验的课本依据，以上批改与家长讲法为通用参考。")
 	}
 	return strings.TrimSpace(out.String()), true
+}
+
+// 同源子问只合并逐字相同的完整前导段落，当前题面和冻结来源保持完整。
+func gradingPDFQuestionProjections(entries []gradingFinalEntry) []string {
+	type sourceKey struct{ owner, parent, page string }
+	groups := make(map[sourceKey][]int)
+	projected := make([]string, len(entries))
+	for i, entry := range entries {
+		q := entry.question
+		projected[i] = strings.TrimSpace(q.CanonicalMarkdown)
+		if entry.assessment != nil && entry.assessment.AgentName != "" && q.ProblemKind == ProblemKindSubproblem && q.ParentProblemID != "" && q.PageAssetID != "" {
+			key := sourceKey{entry.assessment.AgentName, q.ParentProblemID, q.PageAssetID}
+			groups[key] = append(groups[key], i)
+		}
+	}
+	for _, indices := range groups {
+		if len(indices) < 2 {
+			continue
+		}
+		parts := strings.Split(projected[indices[0]], "\n\n")
+		sharedCount := len(parts) - 1
+		valid := sharedCount > 0
+		for _, index := range indices {
+			q := entries[index].question
+			// 当前作答不明不改变已证明的父材料；父来源本身不明时仍保留完整原文。
+			if q.InputDigest == "" || q.CanonicalVersion < 1 || q.ConfirmedVersion < 1 || q.parentSourceUnclear || !CanonicalMarkdownValid(q.CanonicalMarkdown) || currentAssessmentCanonical(q) == "" {
+				valid = false
+				break
+			}
+			other := strings.Split(projected[index], "\n\n")
+			if sharedCount >= len(other) {
+				sharedCount = len(other) - 1
+			}
+			for n := 0; n < sharedCount; n++ {
+				if strings.TrimSpace(parts[n]) == "" || parts[n] != other[n] {
+					sharedCount = n
+					break
+				}
+			}
+		}
+		if !valid || sharedCount == 0 {
+			continue
+		}
+		prefix := strings.Join(parts[:sharedCount], "\n\n") + "\n\n"
+		for _, index := range indices {
+			remainder := strings.TrimPrefix(projected[index], prefix)
+			if remainder == projected[index] || !CanonicalMarkdownValid(remainder) || !strings.Contains(remainder, currentAssessmentCanonical(entries[index].question)) {
+				valid = false
+				break
+			}
+		}
+		if valid {
+			for _, index := range indices[1:] {
+				projected[index] = strings.TrimPrefix(projected[index], prefix)
+			}
+		}
+	}
+	return projected
 }

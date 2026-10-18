@@ -410,13 +410,15 @@ func (d Deps) gradingFinalArtifactPrintRequest(
 		}
 		canonical := artifact.CanonicalMarkdown
 		renderMarkdown := canonical
+		projectionVersion := ""
 		if intent == k12.ImageTaskIntentCompletedHomework {
 			renderMarkdown = d.gradingFinalArtifactPrintableMarkdown(ctx, artifact, true)
+			projectionVersion = ":" + gradingPDFProjectionVersion
 		}
 		return PreparePrintableArtifactRequest{
 			AgentName: artifact.AgentName, SourceKind: k12.PrintSourceGradingFinalArtifact,
 			SourceRef: "final_artifact:" + artifact.ArtifactID + ":" + artifact.ArtifactDigest + ":" +
-				strings.TrimPrefix(deliveryDigest(string(source.Data)), "sha256:") + ":" + imageFinalPDFRenderContractVersion,
+				strings.TrimPrefix(deliveryDigest(string(source.Data)), "sha256:") + projectionVersion + ":" + imageFinalPDFRenderContractVersion,
 			Title: title, CanonicalMarkdown: canonical,
 			RenderMarkdown: frozenFinalPDFMarkdown(renderMarkdown, media),
 		}, nil
