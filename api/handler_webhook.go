@@ -88,12 +88,13 @@ func (s *Server) handleListWebhooks(w http.ResponseWriter, r *http.Request) {
 
 // RegisterWebhookRequest 注册 Webhook 请求
 type RegisterWebhookRequest struct {
-	Name   string `json:"name"`   // Webhook 名称（也是 URL 路径）
-	Type   string `json:"type"`   // 类型: generic/github/gitlab
-	Secret string `json:"secret"` // 签名验证 Secret；空 = 服务端自动生成
-	Prompt string `json:"prompt"` // Agent 处理指令（JobID 为空时跑此 prompt）
-	JobID  string `json:"job_id"` // §13.3(1) 非空 → 事件触发指定 cron job 而非跑 prompt
-	UserID string `json:"user_id"`
+	WorkflowID string `json:"workflow_id,omitempty"`
+	Name       string `json:"name"`   // Webhook 名称（也是 URL 路径）
+	Type       string `json:"type"`   // 类型: generic/github/gitlab
+	Secret     string `json:"secret"` // 签名验证 Secret；空 = 服务端自动生成
+	Prompt     string `json:"prompt"` // Agent 处理指令（JobID 为空时跑此 prompt）
+	JobID      string `json:"job_id"` // §13.3(1) 非空 → 事件触发指定 cron job 而非跑 prompt
+	UserID     string `json:"user_id"`
 	// Enabled 缺省 false：创建即得端点、默认未启用——先配对端/验签/授权，
 	// 再显式启用（PATCH /webhooks/{name}）。
 	Enabled bool `json:"enabled"`
@@ -163,10 +164,14 @@ func (s *Server) handleRegisterWebhook(w http.ResponseWriter, r *http.Request) {
 
 	// §13.3(1)：JobID 非空 → 事件触发指定 cron job，不跑 prompt，故此时 prompt 可空。
 	// 仅当无 JobID（走 prompt 模式）时才强制 prompt 非空。
-	if req.Name == "" || (req.JobID == "" && req.Prompt == "") {
+	if req.Name == "" || (req.JobID == "" && req.WorkflowID == "" && req.Prompt == "") {
 		writeJSON(w, http.StatusBadRequest, map[string]string{
 			"error": "name 不能为空；未绑定 cron job 时 prompt 也不能为空",
 		})
+		return
+	}
+	if req.WorkflowID != "" && s.workflowDefinition(req.WorkflowID) == nil {
+		writeAPIError(w, http.StatusNotFound, "NOT_FOUND", "Workflow not found")
 		return
 	}
 
@@ -202,13 +207,14 @@ func (s *Server) handleRegisterWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	wh := &webhook.Webhook{
-		Name:    req.Name,
-		Type:    webhook.WebhookType(req.Type),
-		Secret:  req.Secret,
-		Prompt:  req.Prompt,
-		JobID:   req.JobID,
-		UserID:  req.UserID,
-		Enabled: req.Enabled, // 缺省 false：创建即得端点、默认未启用
+		WorkflowID: req.WorkflowID,
+		Name:       req.Name,
+		Type:       webhook.WebhookType(req.Type),
+		Secret:     req.Secret,
+		Prompt:     req.Prompt,
+		JobID:      req.JobID,
+		UserID:     req.UserID,
+		Enabled:    req.Enabled, // 缺省 false：创建即得端点、默认未启用
 	}
 
 	if s.webhookMgr == nil {

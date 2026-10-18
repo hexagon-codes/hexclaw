@@ -3476,6 +3476,12 @@ Set source only when the material explicitly names a work, title, or another rel
 	if err := instanceMgr.StartEnabled(ctx); err != nil {
 		return fmt.Errorf("启动平台实例失败: %w", err)
 	}
+	// 平台实例就绪后恢复工作流投递；未知发送结果只对账，不重新发送。
+	go func() {
+		if err := srv.RecoverWorkflowDeliveries(ctx); err != nil {
+			logger.Warn("工作流投递恢复失败", "error", err)
+		}
+	}()
 	// DD-024 restart recovery runs only after live provider instances exist.
 	// Pending rows were never attempted and may start once; sending/unknown rows
 	// are query-only, so a process crash can never turn into a blind duplicate.

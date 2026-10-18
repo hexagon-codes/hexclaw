@@ -578,12 +578,8 @@ func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 
 // ─── Canvas Workflow CRUD + 执行 ──
 //
-// WorkflowStore 是纯内存存储，服务重启后数据丢失。
-// 设计选择说明：
-//   - 桌面端（Tauri）前端通过 Pinia persist 插件将 Workflow 持久化到本地 IndexedDB/SQLite
-//   - 后端内存存储仅作为"运行时缓存"，承载 API 调用期间的读写
-//   - Web UI（非桌面端）场景下无前端持久化兜底，Workflow 会随进程重启丢失
-//   - 后续迭代可迁移到 storage.Store 的 SQLite 表实现持久化
+// 工作流定义与运行通过既有 JSON 文件持久化；内存承载查询与执行投影。
+// 节点检查点随运行保存，重启后核对中断与外部结果未知状态。
 
 // WorkflowData 工作流定义
 type WorkflowData struct {
@@ -595,10 +591,17 @@ type WorkflowData struct {
 	Data        map[string]any `json:"data,omitempty"`
 	CreatedAt   time.Time      `json:"created_at"`
 	UpdatedAt   time.Time      `json:"updated_at"`
+	Revision    string         `json:"revision,omitempty"`
 }
 
 // WorkflowRun 工作流执行记录
 type WorkflowRun struct {
+	GeneratedFiles    []WorkflowGeneratedFile             `json:"generated_files,omitempty"`
+	Deliveries        []WorkflowDelivery                  `json:"deliveries,omitempty"`
+	ArtifactSnapshots map[string]WorkflowArtifactSnapshot `json:"artifact_snapshots,omitempty"`
+	// 历史隐藏不移除执行事实，重复触发仍复用同一结果。
+	HistoryDeleted      bool                           `json:"history_deleted,omitempty"`
+	ResourceSnapshots   map[string]map[string]any      `json:"resource_snapshots,omitempty"`
 	ID                  string                         `json:"id"`
 	WorkflowID          string                         `json:"workflow_id"`
 	Status              string                         `json:"status"`
@@ -610,6 +613,9 @@ type WorkflowRun struct {
 	RenderManifest      *messagecontent.RenderManifest `json:"render_manifest,omitempty"`
 	Error               string                         `json:"error,omitempty"`
 	NodeResults         []WorkflowNodeRun              `json:"node_results,omitempty"`
+	Definition          *WorkflowData                  `json:"definition,omitempty"`
+	Request             *RunWorkflowRequest            `json:"request,omitempty"`
+	Checkpoint          *WorkflowCheckpoint            `json:"checkpoint,omitempty"`
 	// TriggerKey is the stable webhook binding/event identity. PriorRunID links
 	// safe checkpoint continuations without changing the webhook Receipt/event.
 	TriggerKey string    `json:"trigger_key,omitempty"`
@@ -632,6 +638,7 @@ func (s *Server) newWorkflowRun(wf *WorkflowData, input string, prior *WorkflowR
 		ProviderDisplayName: providerDisplayName,
 		ModelID:             modelID,
 		Input:               input,
+		Definition:          cloneWorkflowDefinition(wf),
 		StartedAt:           time.Now(),
 	}
 }
@@ -676,7 +683,7 @@ func cloneWorkflowRouteFact(value *string) *string {
 // WorkflowStore 工作流存储（内存 + JSON 文件持久化）
 //
 // workflows 持久化到 ~/.hexclaw/workflows.json，重启后自动恢复。
-// runs 仅内存存储，有 LRU 淘汰（maxRuns=1000）。
+// 运行与检查点独立持久化；可恢复的在途/未知运行不随普通历史淘汰。
 type WorkflowStore struct {
 	mu           sync.RWMutex
 	workflows    map[string]*WorkflowData
@@ -685,6 +692,7 @@ type WorkflowStore struct {
 	maxRuns      int
 	filePath     string // workflows JSON 持久化文件路径
 	runsFilePath string // runs JSON 持久化文件路径（Ph5：续接/重放/恢复——重启后 run 历史不丢）
+	cancels      map[string]context.CancelFunc
 }
 
 // workflowPersistFile 返回工作流持久化文件路径 (~/.hexclaw/workflows.json)
@@ -717,6 +725,7 @@ func NewWorkflowStore() *WorkflowStore {
 	}
 	ws.loadFromFile()
 	ws.loadRunsFromFile()
+	ws.reconcileInterruptedRuns()
 	return ws
 }
 
@@ -750,22 +759,24 @@ func (ws *WorkflowStore) loadRunsFromFile() {
 }
 
 // persistRuns 将运行历史持久化到 JSON 文件。调用方必须持有 mu.Lock 或 mu.RLock。
-func (ws *WorkflowStore) persistRuns() {
+func (ws *WorkflowStore) persistRuns() error {
 	if ws.runsFilePath == "" {
-		return
+		return nil
 	}
 	if err := os.MkdirAll(filepath.Dir(ws.runsFilePath), 0o750); err != nil {
 		logger.Error("创建运行历史目录失败", "error", err)
-		return
+		return err
 	}
 	data, err := json.MarshalIndent(ws.runs, "", "  ")
 	if err != nil {
 		logger.Error("序列化运行历史失败", "error", err)
-		return
+		return err
 	}
-	if err := os.WriteFile(ws.runsFilePath, data, 0o640); err != nil {
+	if err := writeWorkflowFile(ws.runsFilePath, data); err != nil {
 		logger.Error("写运行历史失败", "error", err)
+		return err
 	}
+	return nil
 }
 
 // loadFromFile 从 JSON 文件加载工作流数据
@@ -791,36 +802,60 @@ func (ws *WorkflowStore) loadFromFile() {
 
 // persistToFile 将工作流数据持久化到 JSON 文件
 // 调用方必须持有 mu.Lock 或 mu.RLock
-func (ws *WorkflowStore) persistToFile() {
+func (ws *WorkflowStore) persistToFile() error {
 	if ws.filePath == "" {
-		return
+		return nil
 	}
 	dir := filepath.Dir(ws.filePath)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		logger.Error("error", "error", err)
-		return
+		return err
 	}
 	data, err := json.MarshalIndent(ws.workflows, "", "  ")
 	if err != nil {
 		logger.Error("error", "error", err)
-		return
+		return err
 	}
-	if err := os.WriteFile(ws.filePath, data, 0o640); err != nil {
+	if err := writeWorkflowFile(ws.filePath, data); err != nil {
 		logger.Error("error", "error", err)
+		return err
 	}
+	return nil
 }
 
 // addRun 添加执行记录并淘汰最旧的
 // 调用方必须持有 mu.Lock
-func (ws *WorkflowStore) addRun(run *WorkflowRun) {
-	ws.runs[run.ID] = run
-	ws.runOrder = append(ws.runOrder, run.ID)
-	for len(ws.runOrder) > ws.maxRuns {
-		oldest := ws.runOrder[0]
-		ws.runOrder = ws.runOrder[1:]
-		delete(ws.runs, oldest)
+func (ws *WorkflowStore) addRun(run *WorkflowRun) error {
+	previousRuns, previousOrder := ws.runs, ws.runOrder
+	next := make(map[string]*WorkflowRun, len(previousRuns)+1)
+	for id, existing := range previousRuns {
+		next[id] = existing
 	}
-	ws.persistRuns() // Ph5：run 入库即落盘，重启后历史/可续接状态不丢
+	ws.runs = next
+	ws.runs[run.ID] = run
+	ws.runOrder = append(append([]string(nil), previousOrder...), run.ID)
+	if ws.maxRuns > 0 {
+		for _, id := range previousOrder {
+			if len(ws.runs) <= ws.maxRuns {
+				break
+			}
+			if prior := ws.runs[id]; prior != nil && prior.Status != "running" && prior.Status != "pending" && prior.Status != "outcome_unknown" && !workflowRunHasUnknownOutcome(prior) {
+				delete(ws.runs, id)
+			}
+		}
+		order := ws.runOrder[:0]
+		for _, id := range ws.runOrder {
+			if ws.runs[id] != nil {
+				order = append(order, id)
+			}
+		}
+		ws.runOrder = order
+	}
+	if err := ws.persistRuns(); err != nil {
+		ws.runs, ws.runOrder = previousRuns, previousOrder
+		return err
+	}
+	return nil
 }
 
 func (s *Server) handleListWorkflows(w http.ResponseWriter, r *http.Request) {
@@ -843,6 +878,10 @@ func (s *Server) handleSaveWorkflow(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name 不能为空"})
 		return
 	}
+	if _, err := workflowRunTimeout(&wf); err != nil {
+		writeAPIError(w, 400, "INVALID_WORKFLOW_CONFIG", err.Error())
+		return
+	}
 	now := time.Now()
 	s.workflowStore.mu.Lock()
 	if err := validateWorkflowInputLengths(wf, s.workflowStore.workflows[wf.ID]); err != nil {
@@ -859,8 +898,19 @@ func (s *Server) handleSaveWorkflow(w http.ResponseWriter, r *http.Request) {
 		wf.CreatedAt = now
 	}
 	wf.UpdatedAt = now
+	wf.Revision = workflowRevision(&wf)
+	previous := s.workflowStore.workflows[wf.ID]
 	s.workflowStore.workflows[wf.ID] = &wf
-	s.workflowStore.persistToFile()
+	if err := s.workflowStore.persistToFile(); err != nil {
+		if previous == nil {
+			delete(s.workflowStore.workflows, wf.ID)
+		} else {
+			s.workflowStore.workflows[wf.ID] = previous
+		}
+		s.workflowStore.mu.Unlock()
+		writeAPIError(w, http.StatusInternalServerError, "WORKFLOW_PERSIST_FAILED", "Workflow could not be saved")
+		return
+	}
 	s.workflowStore.mu.Unlock()
 	// 返回完整资源（REST 约定）：前端 saveWorkflow 声明 Promise<Workflow>，调用方可直接信任返回值
 	// （修复 AP-032 契约错位：此前只回 {id,message}，前端类型撒谎、被迫二次 loadWorkflows）。
@@ -875,8 +925,26 @@ func (s *Server) handleDeleteWorkflow(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "工作流不存在"})
 		return
 	}
+	previous := s.workflowStore.workflows[id]
 	delete(s.workflowStore.workflows, id)
-	s.workflowStore.persistToFile()
+	if err := s.workflowStore.persistToFile(); err != nil {
+		s.workflowStore.workflows[id] = previous
+		s.workflowStore.mu.Unlock()
+		writeAPIError(w, http.StatusInternalServerError, "WORKFLOW_PERSIST_FAILED", "Workflow could not be deleted")
+		return
+	}
+	// 先确认定义落盘；写盘失败时不触碰仍属于旧定义的触发绑定。
+	if err := s.removeWorkflowBindings(r.Context(), id); err != nil {
+		s.workflowStore.workflows[id] = previous
+		persistErr := s.workflowStore.persistToFile()
+		s.workflowStore.mu.Unlock()
+		if persistErr != nil {
+			writeAPIError(w, 500, "WORKFLOW_PERSIST_FAILED", "Workflow deletion rollback could not be saved")
+		} else {
+			writeAPIError(w, 500, "WORKFLOW_BIND_FAILED", "Workflow trigger bindings could not be removed")
+		}
+		return
+	}
 	s.workflowStore.mu.Unlock()
 	// 授权生命周期跟随任务：删除即回收其全部任务级授权。
 	s.revokeTaskGrants(r.Context(), "workflow:"+id)
@@ -901,24 +969,13 @@ func (s *Server) handleRunWorkflow(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	run := s.newWorkflowRun(wf, req.Input, nil)
-	s.workflowStore.mu.Lock()
-	s.workflowStore.addRun(run)
-	// 启动后台执行前复制初始快照，响应不读取执行中的可变记录。
-	snapshot := *run
-	if len(run.NodeResults) > 0 {
-		snapshot.NodeResults = make([]WorkflowNodeRun, len(run.NodeResults))
-		copy(snapshot.NodeResults, run.NodeResults)
+	req.UserID = sessionUserIDFromRequestOrBody(r, req.UserID)
+	run, err := s.launchWorkflow(wf, req, nil)
+	if err != nil {
+		writeWorkflowLaunchError(w, err, "Workflow run could not be saved")
+		return
 	}
-	s.workflowStore.mu.Unlock()
-
-	wfCtx, wfCancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	go func() {
-		defer wfCancel()
-		s.executeWorkflow(wfCtx, wf, run, req)
-	}()
-
-	writeJSON(w, http.StatusOK, &snapshot)
+	writeJSON(w, http.StatusOK, workflowRunPublic(run))
 }
 
 // executeWorkflow 异步执行工作流
@@ -959,24 +1016,40 @@ func (s *Server) executeWorkflow(ctx context.Context, wf *WorkflowData, run *Wor
 		}
 	}()
 
-	exec := newWorkflowExecutor(s, wf, req)
+	if run.Request == nil {
+		run.Request = &req
+	}
+	if run.Definition == nil {
+		run.Definition = cloneWorkflowDefinition(wf)
+	}
+	exec := newWorkflowExecutor(s, run.Definition, req)
 	if len(resumed) > 0 {
 		exec = exec.withResumed(resumed[0])
 	}
 	finished := exec.execute(ctx, run)
+	finished.RetrySafe = workflowRetrySafe(finished)
+	if finished.Status != "completed" && !finished.RetrySafe {
+		finished.Status = "outcome_unknown"
+	}
+	// 完成事实与待投递快照同次提交，查询方不会错过尚未开始的投递。
+	if finished.Status == "completed" {
+		finished.GeneratedFiles = prepareWorkflowGeneratedFiles(finished)
+		finished.Deliveries = prepareWorkflowDeliveries(finished)
+	}
 	s.workflowStore.mu.Lock()
 	s.workflowStore.runs[run.ID] = finished
-	s.workflowStore.persistRuns() // Ph5：终态（含各节点输出）落盘，支撑失败后续接重放
+	if err := s.workflowStore.persistRuns(); err != nil {
+		finished.Status = "failed"
+		finished.Error = "Workflow result could not be persisted"
+	}
 	s.workflowStore.mu.Unlock()
+	if finished.Status == "completed" && (len(finished.Deliveries) > 0 || len(finished.GeneratedFiles) > 0) {
+		go s.dispatchWorkflowDelivery(context.Background(), finished.ID)
+	}
 	close(heartbeatStop)
 	<-heartbeatStopped
 
-	terminalStatus := "failed"
-	if finished.Status == "completed" {
-		terminalStatus = "completed"
-	} else if ctx.Err() != nil {
-		terminalStatus = "cancelled"
-	}
+	terminalStatus := finished.Status
 	logFields := []any{
 		"run_id", run.ID,
 		"workflow_id", wf.ID,
@@ -999,53 +1072,37 @@ func (s *Server) executeWorkflow(ctx context.Context, wf *WorkflowData, run *Wor
 // handleResumeWorkflowRun 续接一次失败/中断的运行（Ph5，对齐 OpenClaw 续接语义）：复用上次
 // 已完成节点的输出，只重算失败/未达的节点。POST /api/v1/canvas/runs/{id}/resume
 func (s *Server) handleResumeWorkflowRun(w http.ResponseWriter, r *http.Request) {
-	priorID := r.PathValue("id")
-
-	s.workflowStore.mu.RLock()
-	prior, ok := s.workflowStore.runs[priorID]
-	var (
-		wf         *WorkflowData
-		resumed    = map[string]string{}
-		priorInput string
-	)
-	if ok {
-		wf = s.workflowStore.workflows[prior.WorkflowID]
-		priorInput = prior.Input
-		for _, nr := range prior.NodeResults {
-			if nr.Status == nodeStatusCompleted {
-				resumed[nr.NodeID] = nr.Output
-			}
-		}
+	ws := s.workflowStore
+	ws.mu.RLock()
+	prior := ws.runs[r.PathValue("id")]
+	if prior != nil {
+		prior = cloneWorkflowRun(prior)
 	}
-	s.workflowStore.mu.RUnlock()
-
-	if !ok {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "执行记录不存在"})
+	ws.mu.RUnlock()
+	if prior == nil || prior.HistoryDeleted {
+		writeAPIError(w, 404, "NOT_FOUND", "Workflow run not found")
 		return
 	}
-	if wf == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "源工作流不存在，无法续接"})
+	if prior.Status == "running" || prior.Status == "pending" || prior.Status == "completed" {
+		writeAPIError(w, 409, "WORKFLOW_NOT_RESUMABLE", "This workflow run cannot be resumed")
 		return
 	}
-	if len(resumed) == 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "上次运行没有已完成的节点，无可续接的进度，请直接重跑"})
+	if prior.Definition == nil || prior.Request == nil || prior.Checkpoint == nil {
+		writeAPIError(w, 409, "WORKFLOW_CHECKPOINT_MISSING", "This legacy run has no complete definition and context checkpoint")
 		return
 	}
-
-	run := s.newWorkflowRun(wf, priorInput, prior)
-	s.workflowStore.mu.Lock()
-	s.workflowStore.addRun(run)
-	s.workflowStore.mu.Unlock()
-
-	req := RunWorkflowRequest{Input: priorInput}
-	wfCtx, wfCancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	go func() {
-		defer wfCancel()
-		s.executeWorkflow(wfCtx, wf, run, req, resumed)
-	}()
-
-	snapshot := *run
-	writeJSON(w, http.StatusOK, &snapshot)
+	if prior.Status == "outcome_unknown" || !workflowRetrySafe(prior) {
+		writeAPIError(w, 409, "WORKFLOW_OUTCOME_UNKNOWN", "Inspect the unconfirmed external operation before retrying")
+		return
+	}
+	req := *prior.Request
+	req.IdempotencyKey = "resume:" + prior.ID
+	run, err := s.launchWorkflow(prior.Definition, req, prior)
+	if err != nil {
+		writeWorkflowLaunchError(w, err, "Workflow continuation could not be saved")
+		return
+	}
+	writeJSON(w, http.StatusOK, workflowRunPublic(run))
 }
 
 // WorkflowBrief 是给 Agent 自省的工作流摘要（不含节点内部细节）。
@@ -1080,28 +1137,18 @@ func (s *Server) ListWorkflowsForAgent() []WorkflowBrief {
 // 输入：当前以空 RunWorkflowRequest{} 运行（"运行已保存的工作流"语义，不带即席输入），符合自愈场景。
 func (s *Server) RunWorkflowByID(id, userID string) (string, error) {
 	if s == nil || s.workflowStore == nil {
-		return "", fmt.Errorf("工作流存储不可用")
+		return "", fmt.Errorf("Workflow storage unavailable")
 	}
 	s.workflowStore.mu.RLock()
-	wf, ok := s.workflowStore.workflows[id]
+	wf := cloneWorkflowDefinition(s.workflowStore.workflows[id])
 	s.workflowStore.mu.RUnlock()
-	if !ok {
-		return "", fmt.Errorf("工作流不存在: %s", id)
+	if wf == nil {
+		return "", fmt.Errorf("Workflow not found: %s", id)
 	}
-	logger.Info("[workflow] agent trigger accepted",
-		"workflow_id", id,
-		"workflow_name", wf.Name,
-		"user", userID,
-	)
-	run := s.newWorkflowRun(wf, "", nil)
-	s.workflowStore.mu.Lock()
-	s.workflowStore.addRun(run)
-	s.workflowStore.mu.Unlock()
-	wfCtx, wfCancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	go func() {
-		defer wfCancel()
-		s.executeWorkflow(wfCtx, wf, run, RunWorkflowRequest{})
-	}()
+	run, err := s.launchWorkflow(wf, RunWorkflowRequest{UserID: userID}, nil)
+	if err != nil {
+		return "", err
+	}
 	return run.ID, nil
 }
 
@@ -1196,7 +1243,10 @@ func (s *Server) RunK12WorkflowFromWebhookDispatch(
 	run := s.newWorkflowRun(wf, input, prior)
 	run.TriggerKey = triggerKey
 	run.PriorRunID = priorID
-	s.workflowStore.addRun(run)
+	if err := s.workflowStore.addRun(run); err != nil {
+		s.workflowStore.mu.Unlock()
+		return "", false, fmt.Errorf("persist workflow run: %w", err)
+	}
 	s.workflowStore.mu.Unlock()
 
 	req := RunWorkflowRequest{
@@ -1217,7 +1267,10 @@ func (s *Server) RunK12WorkflowFromWebhookDispatch(
 	finished.RetrySafe = retrySafe
 	s.workflowStore.mu.Lock()
 	s.workflowStore.runs[run.ID] = finished
-	s.workflowStore.persistRuns()
+	if err := s.workflowStore.persistRuns(); err != nil {
+		s.workflowStore.mu.Unlock()
+		return run.ID, false, fmt.Errorf("persist workflow result: %w", err)
+	}
 	s.workflowStore.mu.Unlock()
 	if finished.Status != "completed" {
 		failure := finished.Error
@@ -1300,19 +1353,17 @@ func (s *Server) handleGetWorkflowRun(w http.ResponseWriter, r *http.Request) {
 	s.workflowStore.mu.RLock()
 	run, ok := s.workflowStore.runs[r.PathValue("id")]
 	var snapshot WorkflowRun
-	if ok {
-		snapshot = *run
-		if len(run.NodeResults) > 0 {
-			snapshot.NodeResults = make([]WorkflowNodeRun, len(run.NodeResults))
-			copy(snapshot.NodeResults, run.NodeResults)
-		}
+	if ok && !run.HistoryDeleted {
+		snapshot = *cloneWorkflowRun(run)
+	} else {
+		ok = false
 	}
 	s.workflowStore.mu.RUnlock()
 	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "执行记录不存在"})
 		return
 	}
-	writeJSON(w, http.StatusOK, &snapshot)
+	writeJSON(w, http.StatusOK, workflowRunPublic(&snapshot))
 }
 
 // ─── ClawHub: GET /api/v1/clawhub/search ──

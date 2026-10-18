@@ -327,6 +327,9 @@ func (s *Server) SetKnowledgeBase(kb *knowledge.Manager) {
 // 设置后启用 Webhook 接收端点和管理 API。
 func (s *Server) SetWebhookManager(mgr *webhook.Manager) {
 	s.webhookMgr = mgr
+	if mgr != nil {
+		mgr.SetWorkflowHandler(s.runWorkflowWebhook)
+	}
 }
 
 // SetCronScheduler 设置 Cron 调度器
@@ -334,6 +337,9 @@ func (s *Server) SetWebhookManager(mgr *webhook.Manager) {
 // 设置后启用定时任务管理 API。
 func (s *Server) SetCronScheduler(scheduler *cron.Scheduler) {
 	s.scheduler = scheduler
+	if scheduler != nil {
+		scheduler.SetWorkflowHandler(s.runWorkflowCron)
+	}
 }
 
 // SetCronScenarioJobsResolver 注入场景已核对归属的任务，不改变认证身份或普通任务归属。
@@ -965,13 +971,29 @@ func (s *Server) routes() http.Handler {
 		mux.HandleFunc("POST /api/v1/canvas/events", s.handleCanvasEvent)
 	}
 
-	// Canvas Workflow API（始终启用，内存存储）
+	// Canvas Workflow API（始终启用，持久化运行与检查点）
 	mux.HandleFunc("GET /api/v1/canvas/workflows", s.handleListWorkflows)
 	mux.HandleFunc("POST /api/v1/canvas/workflows", s.handleSaveWorkflow)
+	mux.HandleFunc("POST /api/v1/canvas/workflows/import/preview", s.handlePreviewWorkflowImport)
+	mux.HandleFunc("POST /api/v1/canvas/workflows/import", s.handleImportWorkflow)
+	mux.HandleFunc("POST /api/v1/canvas/workflows/export", s.handleExportWorkflowDefinition)
+	mux.HandleFunc("GET /api/v1/canvas/workflows/{id}/export", s.handleExportWorkflow)
+	mux.HandleFunc("GET /api/v1/canvas/workflows/delivery-targets", s.handleWorkflowDeliveryTargets)
+	mux.HandleFunc("GET /api/v1/canvas/deliveries/pending", s.handlePendingWorkflowDirectoryDeliveries)
 	mux.HandleFunc("DELETE /api/v1/canvas/workflows/{id}", s.handleDeleteWorkflow)
 	mux.HandleFunc("POST /api/v1/canvas/workflows/{id}/run", s.handleRunWorkflow)
+	mux.HandleFunc("POST /api/v1/canvas/workflows/{id}/triggers", s.handleBindWorkflowTrigger)
+	mux.HandleFunc("GET /api/v1/canvas/workflows/{id}/triggers", s.handleListWorkflowTriggers)
+	mux.HandleFunc("DELETE /api/v1/canvas/workflows/{id}/triggers/{kind}/{target}", s.handleRemoveWorkflowTrigger)
+	mux.HandleFunc("GET /api/v1/canvas/runs", s.handleListWorkflowRuns)
 	mux.HandleFunc("GET /api/v1/canvas/runs/{id}", s.handleGetWorkflowRun)
+	mux.HandleFunc("DELETE /api/v1/canvas/runs/{id}", s.handleDeleteWorkflowRun)
+	mux.HandleFunc("POST /api/v1/canvas/runs/{id}/deliveries/{delivery}/retry", s.handleRetryWorkflowDelivery)
+	mux.HandleFunc("POST /api/v1/canvas/runs/{id}/deliveries/{delivery}/ack", s.handleAcknowledgeWorkflowDirectoryDelivery)
+	mux.HandleFunc("POST /api/v1/canvas/runs/{id}/files/{file}/retry", s.handleRetryWorkflowOutputFile)
 	mux.HandleFunc("POST /api/v1/canvas/runs/{id}/resume", s.handleResumeWorkflowRun)
+	mux.HandleFunc("POST /api/v1/canvas/runs/{id}/cancel", s.handleCancelWorkflowRun)
+	mux.HandleFunc("GET /api/v1/canvas/workflows/{id}/runs", s.handleListWorkflowRuns)
 	mux.HandleFunc("GET /api/v1/subagents/runs", s.handleListSubAgentRuns)
 
 	// 语音 API

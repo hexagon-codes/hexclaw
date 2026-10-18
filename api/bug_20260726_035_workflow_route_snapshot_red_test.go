@@ -233,6 +233,11 @@ func TestBUG20260726035ResumeKeepsPriorActualRouteFacts(t *testing.T) {
 		},
 	}
 
+	prior := s.workflowStore.runs["run-route-prior"]
+	prior.Definition = cloneWorkflowDefinition(s.workflowStore.workflows["wf-route-resume"])
+	prior.Request = &RunWorkflowRequest{Input: "hello"}
+	prior.Checkpoint = &WorkflowCheckpoint{Outputs: map[string]string{"input": "hello"}}
+
 	request := httptest.NewRequestWithContext(
 		t.Context(),
 		http.MethodPost,

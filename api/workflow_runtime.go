@@ -2,13 +2,17 @@ package api
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/hexagon"
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/engine"
@@ -27,6 +31,7 @@ const (
 	stateKeyNodeOutputs    = "__workflow_node_outputs"
 	stateKeyNodeHandoffs   = "__workflow_node_handoffs"
 	stateKeyWorkflowOutput = "__workflow_output"
+	stateKeyPrevious       = "__workflow_previous"
 	// C6 condition 分支：deadNodes 记录被 condition 分支停用/跳过的节点；deactivatedEdges
 	// 记录被 condition 判定为未选中的出边（"source|target"）。节点在拓扑序被求值时，若其
 	// 所有入边都不 live（源节点已 dead 或该入边被停用）则整枝跳过——实现按条件的分支路由。
@@ -35,25 +40,46 @@ const (
 )
 
 type RunWorkflowRequest struct {
-	Input      string            `json:"input"`
-	UserID     string            `json:"user_id,omitempty"`
-	Platform   string            `json:"platform,omitempty"`
-	InstanceID string            `json:"instance_id,omitempty"`
-	ChatID     string            `json:"chat_id,omitempty"`
-	Metadata   map[string]string `json:"metadata,omitempty"`
+	Input          string            `json:"input"`
+	SessionID      string            `json:"session_id,omitempty"`
+	UserID         string            `json:"user_id,omitempty"`
+	Platform       string            `json:"platform,omitempty"`
+	InstanceID     string            `json:"instance_id,omitempty"`
+	ChatID         string            `json:"chat_id,omitempty"`
+	Metadata       map[string]string `json:"metadata,omitempty"`
+	IdempotencyKey string            `json:"idempotency_key,omitempty"`
 }
 
 type WorkflowNodeRun struct {
-	NodeID       string    `json:"node_id"`
-	Type         string    `json:"type"`
-	Label        string    `json:"label,omitempty"`
-	Status       string    `json:"status"`
-	Output       string    `json:"output,omitempty"`
-	Error        string    `json:"error,omitempty"`
-	AgentRole    string    `json:"agent_role,omitempty"`
-	HandoffAgent string    `json:"handoff_agent,omitempty"`
-	StartedAt    time.Time `json:"started_at,omitempty"`
-	FinishedAt   time.Time `json:"finished_at,omitempty"`
+	ResourceReceipts    map[string]*WorkflowStepReceipt `json:"resource_receipts,omitempty"`
+	NodeID              string                          `json:"node_id"`
+	Type                string                          `json:"type"`
+	Label               string                          `json:"label,omitempty"`
+	Status              string                          `json:"status"`
+	Output              string                          `json:"output,omitempty"`
+	Error               string                          `json:"error,omitempty"`
+	AgentRole           string                          `json:"agent_role,omitempty"`
+	HandoffAgent        string                          `json:"handoff_agent,omitempty"`
+	StartedAt           time.Time                       `json:"started_at,omitempty"`
+	FinishedAt          time.Time                       `json:"finished_at,omitempty"`
+	Branches            []WorkflowBranchRun             `json:"branches,omitempty"`
+	MessageContent      *messagecontent.MessageContent  `json:"message_content,omitempty"`
+	RenderManifest      *messagecontent.RenderManifest  `json:"render_manifest,omitempty"`
+	ProviderDisplayName *string                         `json:"provider_display_name,omitempty"`
+	ModelID             *string                         `json:"model_id,omitempty"`
+	OutcomeUnknown      bool                            `json:"outcome_unknown,omitempty"`
+}
+
+// WorkflowBranchRun 保留并行组中每个 Agent 的独立执行事实。
+type WorkflowBranchRun struct {
+	Agent               string  `json:"agent"`
+	Task                string  `json:"task,omitempty"`
+	Status              string  `json:"status"`
+	Output              string  `json:"output,omitempty"`
+	Error               string  `json:"error,omitempty"`
+	ProviderDisplayName *string `json:"provider_display_name,omitempty"`
+	ModelID             *string `json:"model_id,omitempty"`
+	OutcomeUnknown      bool    `json:"outcome_unknown,omitempty"`
 }
 
 type workflowNode struct {
@@ -148,13 +174,13 @@ func (e *workflowExecutor) execute(ctx context.Context, run *WorkflowRun) *Workf
 		return e.failedRun(run, err)
 	}
 
-	state := hexagon.MapState{
-		stateKeyInput:            e.req.Input,
-		stateKeyNodeOutputs:      map[string]string{},
-		stateKeyNodeHandoffs:     map[string]string{},
-		stateKeyWorkflowOutput:   "",
-		stateKeyDeadNodes:        map[string]string{},
-		stateKeyDeactivatedEdges: map[string]string{},
+	state := checkpointState(run.Checkpoint, e.req.Input)
+	if run.Checkpoint != nil {
+		e.resumed = cloneStringMap(run.Checkpoint.Outputs)
+		for _, result := range run.NodeResults {
+			result := result
+			e.nodeRuns[result.NodeID] = &result
+		}
 	}
 
 	result, err := g.Run(ctx, state)
@@ -174,6 +200,11 @@ func (e *workflowExecutor) execute(ctx context.Context, run *WorkflowRun) *Workf
 		"workflow-history-v1",
 	)
 	finished.NodeResults = e.listNodeRuns()
+	for _, result := range finished.NodeResults {
+		if result.Output == output && result.MessageContent != nil {
+			finished.MessageContent, finished.RenderManifest = result.MessageContent, result.RenderManifest
+		}
+	}
 	finished.FinishedAt = time.Now()
 	return &finished
 }
@@ -181,6 +212,9 @@ func (e *workflowExecutor) execute(ctx context.Context, run *WorkflowRun) *Workf
 func (e *workflowExecutor) failedRun(run *WorkflowRun, err error) *WorkflowRun {
 	finished := *run
 	finished.Status = "failed"
+	if errors.Is(err, context.Canceled) {
+		finished.Status = "cancelled"
+	}
 	if err != nil {
 		finished.Error = err.Error()
 	}
@@ -347,13 +381,19 @@ func (e *workflowExecutor) executeNode(ctx context.Context, state hexagon.MapSta
 	if node == nil {
 		return state, nil
 	}
+	if err := ctx.Err(); err != nil {
+		return state, err
+	}
+	state = setStringStateValue(state, stateKeyPrevious, e.upstreamOutputs(state, node.ID))
 
 	// 续接（Ph5）：本节点上次已完成 → 跳过重跑，复用缓存输出并回灌 state，只重算失败/未达节点。
 	if cached, ok := e.resumed[node.ID]; ok {
 		e.markNodeResumed(node, cached)
 		state = putStringMapStateValue(state, stateKeyNodeOutputs, node.ID, cached)
 		if node.Type == "output" {
-			state = setStringStateValue(state, stateKeyWorkflowOutput, cached)
+			if len(e.outgoing[node.ID]) == 0 {
+				state = setStringStateValue(state, stateKeyWorkflowOutput, cached)
+			}
 		}
 		return state, nil
 	}
@@ -362,11 +402,19 @@ func (e *workflowExecutor) executeNode(ctx context.Context, state hexagon.MapSta
 	// 根节点（无入边）与至少有一条 live 入边的节点正常执行。
 	if e.nodeDeactivatedByBranch(state, node) {
 		e.markNodeSkipped(node, "")
-		return e.markNodeDead(state, node.ID), nil
+		state = e.markNodeDead(state, node.ID)
+		return state, e.publishCheckpoint(state)
 	}
 
 	e.markNodeStart(node)
-	inputText := e.resolveNodeInput(state, node)
+	if err := e.publishCheckpoint(state); err != nil {
+		return state, fmt.Errorf("persist workflow checkpoint: %w", err)
+	}
+	inputText, inputErr := e.resolveNodeInputChecked(state, node)
+	if inputErr != nil {
+		e.markNodeFailed(node, "", "", inputErr)
+		return state, errors.Join(inputErr, e.publishCheckpoint(state))
+	}
 
 	var (
 		output       string
@@ -377,11 +425,14 @@ func (e *workflowExecutor) executeNode(ctx context.Context, state hexagon.MapSta
 
 	switch node.Type {
 	case "input":
-		output = firstNonEmpty(renderTemplate(firstNonEmpty(stringValue(node.Data["prompt"]), stringValue(node.Data["value"])), state), stringStateValue(state, stateKeyInput), node.Label)
+		output = firstNonEmpty(renderTemplate(firstNonEmpty(stringValue(node.Data["prompt"]), stringValue(node.Data["value"])), state), stringStateValue(state, stateKeyInput))
+		if kind := stringValue(resourceMap(node.Data["input_selection"])["kind"]); kind != "" && kind != "text" {
+			output = inputText
+		}
 
 	case "agent":
 		selected := e.selectedHandoffForNode(state, node)
-		agentRole = firstNonEmpty(stringValue(node.Data["role"]), stringValue(node.Data["agent"]), selected)
+		agentRole = firstNonEmpty(stringValue(node.Data["agent"]), stringValue(node.Data["role"]), selected)
 		if selected != "" && agentRole != "" && agentRole != selected {
 			e.markNodeSkipped(node, agentRole)
 			return e.markNodeDead(state, node.ID), nil
@@ -402,7 +453,20 @@ func (e *workflowExecutor) executeNode(ctx context.Context, state hexagon.MapSta
 
 	case "output":
 		output = inputText
-		state = setStringStateValue(state, stateKeyWorkflowOutput, output)
+		refs := e.workflowSourceArtifacts(node)
+		if len(refs) > 0 {
+			content, contentErr := messagecontent.New(messagecontent.ProducerWorkflow, firstNonEmpty(e.req.Metadata["locale"], "und"), output, refs)
+			if contentErr != nil {
+				err = contentErr
+			} else {
+				e.mu.Lock()
+				e.ensureNodeRun(node).MessageContent = &content
+				e.mu.Unlock()
+			}
+		}
+		if len(e.outgoing[node.ID]) == 0 {
+			state = setStringStateValue(state, stateKeyWorkflowOutput, output)
+		}
 
 	case "condition":
 		// C6：求值条件表达式，选择激活分支，停用未选中的出边（其下游整枝跳过）。
@@ -415,6 +479,7 @@ func (e *workflowExecutor) executeNode(ctx context.Context, state hexagon.MapSta
 
 	if err != nil {
 		e.markNodeFailed(node, agentRole, handoffAgent, err)
+		_ = e.publishCheckpoint(state)
 		return state, err
 	}
 
@@ -423,10 +488,13 @@ func (e *workflowExecutor) executeNode(ctx context.Context, state hexagon.MapSta
 		state = putStringMapStateValue(state, stateKeyNodeHandoffs, node.ID, handoffAgent)
 	}
 	e.markNodeCompleted(node, output, agentRole, handoffAgent)
+	if err := e.publishCheckpoint(state); err != nil {
+		return state, fmt.Errorf("persist workflow checkpoint: %w", err)
+	}
 	return state, nil
 }
 
-func (e *workflowExecutor) executeAgent(ctx context.Context, node *workflowNode, inputText, role string) (string, error) {
+func (e *workflowExecutor) executeAgent(ctx context.Context, node *workflowNode, inputText, role string, branchIndex ...int) (string, error) {
 	if e.server.engine == nil {
 		return "", fmt.Errorf("engine 未初始化")
 	}
@@ -438,8 +506,38 @@ func (e *workflowExecutor) executeAgent(ctx context.Context, node *workflowNode,
 	// GO-3：工作流触发请求的 metadata 同为客户端可控——先剥保留派发键，再由本执行器
 	// 盖章受信的 source=workflow / workflow_id，避免客户端伪造 cron_job_id 盗 grant。
 	engine.StripReservedDispatchMetadata(metadata)
-	if role != "" {
-		metadata["role"] = role
+	if provider := stringValue(node.Data["provider"]); provider != "" {
+		metadata["provider"] = provider
+	}
+	if model := stringValue(node.Data["model"]); model != "" {
+		metadata["model"] = model
+	}
+	ctx, inputText, resources, resourceErr := e.prepareStepInvocation(ctx, node, metadata, inputText, branchIndex...)
+	if resourceErr != nil {
+		return "", resourceErr
+	}
+	if resources != nil && resources.Options.Agent != nil {
+		metadata["pinned_agent"] = resources.Options.Agent.Name
+	} else if role != "" && (stringValue(node.Data["agent"]) != "" || len(branchIndex) > 0) {
+		if e.server.agentRouter == nil {
+			return "", fmt.Errorf("Selected Agent is unavailable: %s", role)
+		}
+		if _, ok := e.server.agentRouter.GetAgent(role); !ok {
+			return "", fmt.Errorf("Selected Agent is unavailable: %s", role)
+		}
+		metadata["pinned_agent"] = role
+	} else if role != "" {
+		if e.server.agentRouter != nil {
+			if _, ok := e.server.agentRouter.GetAgent(role); ok {
+				metadata["pinned_agent"] = role
+			} else {
+				metadata["role"] = role
+			}
+		} else {
+			metadata["role"] = role
+		}
+	} else {
+		metadata["pinned_agent"] = "default"
 	}
 	if provider := stringValue(node.Data["provider"]); provider != "" {
 		metadata["provider"] = provider
@@ -454,6 +552,8 @@ func (e *workflowExecutor) executeAgent(ctx context.Context, node *workflowNode,
 	if strings.TrimSpace(metadata["locale"]) == "" {
 		metadata["locale"] = "und"
 	}
+	e.recordStepReceipt(node, resources, nil, nil, branchIndex...)
+
 	e.freezeRunRouteAtModelBoundary(node)
 
 	reply, err := e.server.engine.Process(ctx, (&agentrouterMessageAdapter{
@@ -465,12 +565,42 @@ func (e *workflowExecutor) executeAgent(ctx context.Context, node *workflowNode,
 		Metadata:   metadata,
 	}).Message())
 	if err != nil {
+		e.recordWorkflowInvocationOutcome(node, err, branchIndex...)
 		return "", err
 	}
 	if reply == nil {
-		return "", nil
+		err := fmt.Errorf("Agent returned no response")
+		e.recordWorkflowInvocationOutcome(node, err, branchIndex...)
+		return "", err
 	}
 	e.freezeRunRouteFromEngineReply(node, reply)
+	artifacts := e.server.freezeWorkflowArtifacts(ctx, reply)
+	e.mu.Lock()
+	if len(artifacts) > 0 {
+		if e.run.ArtifactSnapshots == nil {
+			e.run.ArtifactSnapshots = map[string]WorkflowArtifactSnapshot{}
+		}
+		for id, snapshot := range artifacts {
+			e.run.ArtifactSnapshots[id] = snapshot
+		}
+	}
+	result := e.ensureNodeRun(node)
+	result.MessageContent, result.RenderManifest = reply.MessageContent, reply.RenderManifest
+	if reply.Metadata != nil {
+		provider, model := e.server.freezeWorkflowRouteSnapshot(reply.Metadata["provider"], reply.Metadata["model"])
+		if reply.Metadata["provider"] != "" || reply.Metadata["model"] != "" {
+			result.ProviderDisplayName, result.ModelID = provider, model
+			if len(branchIndex) > 0 && branchIndex[0] < len(result.Branches) {
+				result.Branches[branchIndex[0]].ProviderDisplayName, result.Branches[branchIndex[0]].ModelID = provider, model
+			}
+		}
+	}
+	e.mu.Unlock()
+	outputErr := validateWorkflowOutput(resources, reply)
+	e.recordStepReceipt(node, resources, reply, outputErr, branchIndex...)
+	if outputErr != nil {
+		return reply.Content, outputErr
+	}
 	return reply.Content, nil
 }
 
@@ -579,50 +709,86 @@ func parseParallelRoles(raw any) []string {
 // executeParallelRoles 让 parallel 节点并行跑多个角色 Agent，按角色名合并输出。复用有界并发
 // 上限（maxWorkflowParallel），避免角色数 = goroutine 数。无角色时退化为单 agent。
 func (e *workflowExecutor) executeParallelRoles(ctx context.Context, node *workflowNode, inputText string) (string, error) {
-	roles := parseParallelRoles(node.Data["roles"])
-	if len(roles) == 0 {
-		return e.executeAgent(ctx, node, inputText, firstNonEmpty(stringValue(node.Data["role"]), stringValue(node.Data["agent"])))
+	var branches []WorkflowBranchRun
+	if configured, ok := node.Data["branches"].([]any); ok {
+		for _, raw := range configured {
+			branch, ok := raw.(map[string]any)
+			if !ok || strings.TrimSpace(stringValue(branch["agent"])) == "" {
+				return "", fmt.Errorf("Each parallel branch must select an Agent")
+			}
+			branches = append(branches, WorkflowBranchRun{Agent: strings.TrimSpace(stringValue(branch["agent"])), Task: stringValue(branch["task"]), Status: nodeStatusPending})
+		}
+	} else {
+		for _, role := range parseParallelRoles(node.Data["roles"]) {
+			branches = append(branches, WorkflowBranchRun{Agent: role, Status: nodeStatusPending})
+		}
 	}
-
-	type roleResult struct {
-		role   string
-		output string
-		err    error
+	if len(branches) == 0 {
+		return "", fmt.Errorf("Parallel group has no Agent branches")
 	}
-	results := make([]roleResult, len(roles))
-	limit := maxWorkflowParallel
-	if len(roles) < limit {
-		limit = len(roles)
+	e.mu.Lock()
+	prior := e.ensureNodeRun(node).Branches
+	for i := range branches {
+		if i < len(prior) && prior[i].Agent == branches[i].Agent && prior[i].Task == branches[i].Task && prior[i].Status == nodeStatusCompleted {
+			branches[i] = prior[i]
+		}
 	}
-	sem := make(chan struct{}, limit)
+	e.ensureNodeRun(node).Branches = branches
+	e.mu.Unlock()
+	sem := make(chan struct{}, maxWorkflowParallel)
+	failures := make([]error, len(branches))
 	var wg sync.WaitGroup
-	for i, role := range roles {
+	for i := range branches {
+		if branches[i].Status == nodeStatusCompleted {
+			continue
+		}
 		wg.Add(1)
-		go func(i int, role string) {
+		go func(i int) {
 			defer wg.Done()
 			select {
 			case sem <- struct{}{}:
 				defer func() { <-sem }()
 			case <-ctx.Done():
-				results[i] = roleResult{role: role, err: ctx.Err()}
+				failures[i] = ctx.Err()
 				return
 			}
-			out, err := e.executeAgent(ctx, node, inputText, role)
-			results[i] = roleResult{role: role, output: out, err: err}
-		}(i, role)
+			e.mu.Lock()
+			branch := branches[i]
+			branch.Status = nodeStatusRunning
+			branches[i] = branch
+			e.mu.Unlock()
+			if err := e.publishCheckpoint(hexagon.MapState{}); err != nil {
+				failures[i] = err
+				return
+			}
+			taskInput := inputText
+			if branch.Task != "" {
+				taskInput = branch.Task + "\n\n" + inputText
+			}
+			out, err := e.executeAgent(ctx, node, taskInput, branch.Agent, i)
+			e.mu.Lock()
+			branch.Status, branch.Output = nodeStatusCompleted, out
+			branch.ProviderDisplayName, branch.ModelID = branches[i].ProviderDisplayName, branches[i].ModelID
+			branch.OutcomeUnknown = branches[i].OutcomeUnknown
+			if err != nil {
+				branch.Status, branch.Error = nodeStatusFailed, err.Error()
+				failures[i] = err
+			}
+			branches[i] = branch
+			e.mu.Unlock()
+			if persistErr := e.publishCheckpoint(hexagon.MapState{}); persistErr != nil {
+				failures[i] = persistErr
+			}
+		}(i)
 	}
 	wg.Wait()
-
-	var sb strings.Builder
-	for _, r := range results {
-		sb.WriteString(fmt.Sprintf("=== %s ===\n", r.role))
-		if r.err != nil {
-			sb.WriteString("Error: " + r.err.Error() + "\n\n")
-		} else {
-			sb.WriteString(r.output + "\n\n")
+	var output strings.Builder
+	for _, branch := range branches {
+		if branch.Status == nodeStatusCompleted {
+			fmt.Fprintf(&output, "=== %s ===\n%s\n\n", branch.Agent, branch.Output)
 		}
 	}
-	return sb.String(), nil
+	return output.String(), errors.Join(failures...)
 }
 
 func (e *workflowExecutor) executeTool(ctx context.Context, node *workflowNode, inputText string, state hexagon.MapState) (string, error) {
@@ -641,14 +807,44 @@ func (e *workflowExecutor) executeTool(ctx context.Context, node *workflowNode, 
 		return "", fmt.Errorf("mcp manager 未初始化")
 	}
 
-	args, _ := node.Data["args"].(map[string]any)
+	args, valid := node.Data["args"].(map[string]any)
+	if node.Data["args"] != nil && !valid {
+		return "", fmt.Errorf("Tool arguments must be a JSON object")
+	}
+	state = setStringStateValue(state, "value", inputText)
 	rendered := renderValue(cloneMap(args), state)
 	argMap, _ := rendered.(map[string]any)
 	if len(argMap) == 0 && inputText != "" {
 		argMap = map[string]any{"input": inputText}
 	}
 
-	return e.server.mcpMgr.CallTool(ctx, toolName, argMap)
+	toolStarted := time.Now()
+	output, err := e.server.mcpMgr.CallTool(ctx, toolName, argMap)
+	if err != nil {
+		e.recordWorkflowInvocationOutcome(node, err)
+	}
+	encodedArgs, _ := json.Marshal(argMap)
+	call := adapter.ToolCall{Name: toolName, Arguments: string(encodedArgs), Result: output, Status: "success", DurationMs: time.Since(toolStarted).Milliseconds()}
+	if err != nil {
+		call.Status = "error"
+	}
+	e.recordStepReceipt(node, nil, &adapter.Reply{Content: output, ToolCalls: []adapter.ToolCall{call}}, nil)
+	return output, err
+}
+
+func (e *workflowExecutor) recordWorkflowInvocationOutcome(node *workflowNode, err error, branchIndex ...int) {
+	var rejected *llm.ProviderError
+	unknown := true
+	if errors.As(err, &rejected) && rejected.StatusCode >= 400 && rejected.StatusCode <= 599 {
+		unknown = false
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	result := e.ensureNodeRun(node)
+	result.OutcomeUnknown = result.OutcomeUnknown || unknown
+	if len(branchIndex) > 0 && branchIndex[0] < len(result.Branches) {
+		result.Branches[branchIndex[0]].OutcomeUnknown = unknown
+	}
 }
 
 func (e *workflowExecutor) selectHandoffAgent(ctx context.Context, node *workflowNode, inputText string) (string, error) {
@@ -694,19 +890,35 @@ func (e *workflowExecutor) successorAgentRoles(nodeID string) []string {
 }
 
 func (e *workflowExecutor) resolveNodeInput(state hexagon.MapState, node *workflowNode) string {
-	upstream := e.upstreamOutputs(state, node.ID)
-	rendered := renderTemplate(firstNonEmpty(stringValue(node.Data["prompt"]), stringValue(node.Data["input"])), state)
+	value, _ := e.resolveNodeInputChecked(state, node)
+	return value
+}
+
+func (e *workflowExecutor) resolveNodeInputChecked(state hexagon.MapState, node *workflowNode) (string, error) {
+	upstream, err := e.workflowSelectedValue(state, node)
+	if err != nil {
+		return "", err
+	}
+	if node.Type == "output" || node.Type == "input" && stringValue(resourceMap(node.Data["input_selection"])["kind"]) != "" {
+		return upstream, nil
+	}
+	prompt := stringValue(node.Data["prompt"])
+
+	rendered := renderTemplate(prompt, state)
+	if strings.Contains(prompt, "{{") {
+		return rendered, nil
+	}
 	switch {
 	case rendered != "" && upstream != "":
-		return rendered + "\n\n[上游结果]\n" + upstream
+		return rendered + "\n\n[上游结果]\n" + upstream, nil
 	case rendered != "":
-		return rendered
+		return rendered, nil
 	case upstream != "":
-		return upstream
+		return upstream, nil
 	case stringStateValue(state, stateKeyInput) != "":
-		return stringStateValue(state, stateKeyInput)
+		return stringStateValue(state, stateKeyInput), nil
 	default:
-		return node.Label
+		return "", nil
 	}
 }
 
@@ -771,6 +983,9 @@ func (e *workflowExecutor) markNodeStart(node *workflowNode) {
 	run := e.ensureNodeRun(node)
 	run.Status = nodeStatusRunning
 	run.StartedAt = time.Now()
+	run.FinishedAt = time.Time{}
+	run.Error = ""
+	run.OutcomeUnknown = false
 }
 
 func (e *workflowExecutor) markNodeCompleted(node *workflowNode, output, role, handoffAgent string) {
@@ -779,6 +994,7 @@ func (e *workflowExecutor) markNodeCompleted(node *workflowNode, output, role, h
 	run := e.ensureNodeRun(node)
 	run.Status = nodeStatusCompleted
 	run.Output = output
+	run.Error = ""
 	run.AgentRole = role
 	run.HandoffAgent = handoffAgent
 	run.FinishedAt = time.Now()
@@ -792,8 +1008,12 @@ func (e *workflowExecutor) markNodeResumed(node *workflowNode, output string) {
 	run.Status = nodeStatusCompleted
 	run.Output = output
 	now := time.Now()
-	run.StartedAt = now
-	run.FinishedAt = now
+	if run.StartedAt.IsZero() {
+		run.StartedAt = now
+	}
+	if run.FinishedAt.IsZero() {
+		run.FinishedAt = now
+	}
 }
 
 func (e *workflowExecutor) markNodeSkipped(node *workflowNode, role string) {
@@ -951,7 +1171,7 @@ func renderTemplate(input string, state hexagon.MapState) string {
 	outputs := stringMapStateValue(state, stateKeyNodeOutputs)
 	replacements := []string{
 		"{{input}}", stringStateValue(state, stateKeyInput),
-		"{{previous}}", "",
+		"{{previous}}", stringStateValue(state, stateKeyPrevious),
 		"{{handoff_agent}}", "",
 	}
 	handoffs := stringMapStateValue(state, stateKeyNodeHandoffs)
@@ -963,25 +1183,55 @@ func renderTemplate(input string, state hexagon.MapState) string {
 		sort.Strings(names)
 		replacements[5] = strings.Join(names, ",")
 	}
-	if len(outputs) > 0 {
-		var parts []string
-		for _, v := range outputs {
-			if v != "" {
-				parts = append(parts, v)
-			}
+	input = workflowFieldTemplate.ReplaceAllStringFunc(input, func(token string) string {
+		value, ok := workflowFieldValue(token, state)
+		if !ok {
+			return ""
 		}
-		sort.Strings(parts)
-		replacements[3] = strings.Join(parts, "\n\n")
-	}
+		if text, ok := value.(string); ok {
+			return text
+		}
+		encoded, _ := json.Marshal(value)
+		return string(encoded)
+	})
 	for id, value := range outputs {
 		replacements = append(replacements, "{{node."+id+"}}", value)
 	}
 	return strings.NewReplacer(replacements...).Replace(input)
 }
 
+var workflowFieldTemplate = regexp.MustCompile(`\{\{node\.[^{}]+\.[^{}]+\}\}`)
+
+func workflowFieldValue(token string, state hexagon.MapState) (any, bool) {
+	parts := strings.Split(strings.TrimSuffix(strings.TrimPrefix(token, "{{node."), "}}"), ".")
+	if len(parts) < 2 {
+		return nil, false
+	}
+	var value any
+	if json.Unmarshal([]byte(stringMapStateValue(state, stateKeyNodeOutputs)[parts[0]]), &value) != nil {
+		return nil, false
+	}
+	for _, field := range parts[1:] {
+		object, ok := value.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		value, ok = object[field]
+		if !ok {
+			return nil, false
+		}
+	}
+	return value, true
+}
+
 func renderValue(v any, state hexagon.MapState) any {
 	switch x := v.(type) {
 	case string:
+		if workflowFieldTemplate.FindString(x) == x {
+			if value, ok := workflowFieldValue(x, state); ok {
+				return value
+			}
+		}
 		return renderTemplate(x, state)
 	case map[string]any:
 		out := make(map[string]any, len(x))
