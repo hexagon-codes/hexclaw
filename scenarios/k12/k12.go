@@ -255,6 +255,7 @@ func ParseMistakeFields(fieldsJSON string) (MistakeFields, error) {
 // NewMistakeRecord 从领域字段构造一条待写错题记录（用例层调用）。
 // engine 只产结构化值对象，由此转成通用记录交给 records.Store。
 func NewMistakeRecord(agentName, sourceSession string, f MistakeFields) (*records.AgentRecord, error) {
+	f.Question = MistakeQuestionStatement(f)
 	raw, err := json.Marshal(f)
 	if err != nil {
 		return nil, fmt.Errorf("marshal 错题字段: %w", err)

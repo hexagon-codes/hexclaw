@@ -762,6 +762,12 @@ func (d Deps) weeklyDueTrack(ctx context.Context, agent string) (k12.WeeklyPract
 		if evidence == "" {
 			evidence = "原错题事实"
 		}
+		prompt := due.Title()
+		if due.Fields.EntrySource == k12.MistakeEntryPhoto {
+			fields := due.Fields
+			fields.Question = prompt
+			prompt = k12.MistakeQuestionStatement(fields)
+		}
 		item := k12.WeeklyPracticeItem{
 			ItemID: itemID, Position: len(track.Items) + 1,
 			PlanSection: k12.WeeklySectionDueReview, SourceKind: "mistake",
@@ -774,7 +780,7 @@ func (d Deps) weeklyDueTrack(ctx context.Context, agent string) (k12.WeeklyPract
 				Status:       k12.WeeklyVerificationVerified,
 				EvidenceRefs: []string{evidence},
 			},
-			PromptMarkdown: due.Title(),
+			PromptMarkdown: prompt,
 		}
 		track.Items = append(track.Items, item)
 		if strings.TrimSpace(due.Fields.CanonicalAnswer) != "" {
@@ -896,7 +902,32 @@ func (d Deps) GetCurrentWeeklyPracticePlan(ctx context.Context, agent string) (*
 		return nil, err
 	}
 	plan, err = d.projectWeeklyArithmetic(ctx, plan)
-	return &plan, err
+	if err != nil {
+		return nil, err
+	}
+	sources, err := d.Records.ListByScope(ctx, agent, k12.CollectionMistakes, "")
+	if err != nil {
+		return nil, fmt.Errorf("read weekly practice question sources: %w", err)
+	}
+	photoSources := make(map[string]bool, len(sources))
+	for _, source := range sources {
+		fields, parseErr := k12.ParseMistakeFields(source.Fields)
+		if parseErr == nil && fields.EntrySource == k12.MistakeEntryPhoto {
+			photoSources[source.RecordID] = true
+		}
+	}
+	// 只投影当前计划的原题文字，存储计划与已冻结快照保持原字节。
+	for trackIndex := range plan.Tracks {
+		for itemIndex := range plan.Tracks[trackIndex].Items {
+			item := &plan.Tracks[trackIndex].Items[itemIndex]
+			if item.PlanSection == k12.WeeklySectionDueReview && item.SourceKind == "mistake" && photoSources[item.SourceRef] {
+				item.PromptMarkdown = k12.MistakeQuestionStatement(k12.MistakeFields{
+					Question: item.PromptMarkdown, EntrySource: k12.MistakeEntryPhoto,
+				})
+			}
+		}
+	}
+	return &plan, nil
 }
 
 func (d Deps) ListWeeklyPracticeHistory(ctx context.Context, agent, cursor string,

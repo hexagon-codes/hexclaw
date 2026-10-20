@@ -575,7 +575,7 @@ func (d Deps) findGradingReviewSource(ctx context.Context, req GradeRequest) (*r
 		}
 		return question
 	}
-	question := normalize(req.Problem)
+	question := normalize(k12.MistakeQuestionStatement(k12.MistakeFields{Question: req.Problem, EntrySource: k12.MistakeEntryPhoto}))
 	if question == "" {
 		return nil, nil
 	}
@@ -597,7 +597,7 @@ func (d Deps) findGradingReviewSource(ctx context.Context, req GradeRequest) (*r
 			continue
 		}
 		byID[record.RecordID] = record
-		if normalize(fields.Question) == question {
+		if normalize(k12.MistakeQuestionStatement(fields)) == question {
 			candidates[record.RecordID] = record
 		}
 	}

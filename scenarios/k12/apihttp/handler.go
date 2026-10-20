@@ -1873,7 +1873,7 @@ func mistakeDTOWithReview(
 		}
 	}
 	dto := mistakeDTO{
-		RecordID: r.RecordID, Question: f.Question, KnowledgePoint: f.KnowledgePoint,
+		RecordID: r.RecordID, Question: k12.MistakeQuestionStatement(f), KnowledgePoint: f.KnowledgePoint,
 		ErrorCause: f.ErrorCause, Status: r.Status, Version: r.Version, DueAt: r.DueAt,
 		Subject: f.Subject, SpotCheckState: f.SpotCheckState,
 		CreatedAt: r.CreatedAt, EntrySource: f.EntrySource,
