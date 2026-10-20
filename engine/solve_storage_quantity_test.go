@@ -17,6 +17,7 @@ func TestVerificationStorageQuantityAnswers(t *testing.T) {
 		{"missing unit", "12 TB", "4.8÷2×5＝12", false, false},
 		{"unknown unit", "12 TB", "12 GB", false, false},
 		{"complete relationship", "已用空间=总容量×0.4；12 TB", relation, true, true},
+		{"relationship prefix", "已用空间=总容量×2/5；12 TB", "数量关系：" + relation, true, true},
 		{"reversed relationship", "已用空间=总容量×2/5；12 TB", "总容量=已用空间×2/5；12 TB", false, true},
 		{"wrong fraction", "已用空间=总容量×2/5；12 TB", "已用空间=总容量×3/5；12 TB", false, true},
 		{"wrong relationship equation", "已用空间=总容量×2/5；12 TB", "已用空间=总容量×2/5；4.8÷2×6=12（TB）", false, false},
@@ -29,6 +30,32 @@ func TestVerificationStorageQuantityAnswers(t *testing.T) {
 			equal, comparable := verificationAnswersEqual("硬盘已用空间占总容量的2/5，已用4.8 TB。", tc.computed, tc.candidate)
 			if equal != tc.equal || comparable != tc.comparable {
 				t.Fatalf("comparison=%t/%t, want %t/%t", equal, comparable, tc.equal, tc.comparable)
+			}
+		})
+	}
+}
+
+func TestVerificationQuantityEquationKeepsRepeatedConclusion(t *testing.T) {
+	const problem = "已用空间占总容量的2/5，已用4.8 TB。这个硬盘的总容量是多少太字节？"
+	for _, tc := range []struct {
+		answer string
+		valid  bool
+	}{
+		{"4.8÷2×5＝12（TB），这个硬盘的总容量是 12 TB", true},
+		{"4.8÷2×5＝12（TB），这个硬盘的总容量为 12 太字节", true},
+		{"4.8÷2×5＝12（TB），已用空间是 12 TB", false},
+		{"4.8÷2×5＝12（TB），这个硬盘的总容量是 10 TB", false},
+		{"4.8÷2×6＝12（TB），这个硬盘的总容量是 12 TB", false},
+		{"4.8÷2×5＝12（TB），这个硬盘的总容量是 12", false},
+		{"4.8÷2×5＝12（TB），这个硬盘的总容量是 12 TB；剩余空间是12 TB", false},
+	} {
+		t.Run(tc.answer, func(t *testing.T) {
+			equal, comparable := verificationAnswersEqual(problem, "12.0 TB", tc.answer)
+			if equal != tc.valid || comparable != tc.valid {
+				t.Fatalf("repeated conclusion comparison=%t/%t, want %t/%t", equal, comparable, tc.valid, tc.valid)
+			}
+			if tc.valid && !completeVerificationAnswer(verificationAnswerProjection(problem, tc.answer)) {
+				t.Fatal("complete audited answer did not reach standalone verification")
 			}
 		})
 	}

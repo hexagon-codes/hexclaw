@@ -56,7 +56,7 @@ func standaloneVerificationInput(ctx context.Context, msg *adapter.Message, tool
 		msg.Metadata["memory"] != "off" || msg.Metadata["knowledge"] != "off" {
 		return nil, false
 	}
-	if !completeVerificationAnswer(input.Candidate) {
+	if !completeVerificationAnswer(verificationAnswerProjection(input.Problem, input.Candidate)) {
 		return nil, false
 	}
 	for _, tool := range tools {
@@ -109,7 +109,24 @@ func completeVerificationAnswer(answer string) bool {
 var verificationBlankSlotRe = regexp.MustCompile(`（[ \t\x{3000}]*）|\([ \t\x{3000}]*\)|□|\\square`)
 var verificationPartSlotRe = regexp.MustCompile(`^(?:（[ \t\x{3000}]*）|\([ \t\x{3000}]*\))[ \t\x{3000}]*份`)
 
-var quantityRelationAnswerRe = regexp.MustCompile(`^\s*((?:[\p{Han}]+|（[\p{Han}]+）|\([\p{Han}]+\)))\s*[=＝]\s*((?:[\p{Han}]+|（[\p{Han}]+）|\([\p{Han}]+\)))\s*[×*]\s*` + answerQuantityNumberPattern + `\s*[；;]\s*(?:列式\s*[:：]\s*)?(.+?)\s*$`)
+var quantityRelationAnswerRe = regexp.MustCompile(`^\s*(?:数量关系\s*[:：]\s*)?((?:[\p{Han}]+|（[\p{Han}]+）|\([\p{Han}]+\)))\s*[=＝]\s*((?:[\p{Han}]+|（[\p{Han}]+）|\([\p{Han}]+\)))\s*[×*]\s*` + answerQuantityNumberPattern + `\s*[；;]\s*(?:列式\s*[:：]\s*)?(.+?)\s*$`)
+
+var repeatedQuantityConclusionRe = regexp.MustCompile(`^(.+)[，,]\s*([\p{Han}]+)(?:是|为)\s*(.+)$`)
+
+// 列式后的重复答句只有明确回答原题同一目标且数值、单位均一致时才能合并。
+// 原始答案和执行正文保持不变，其他目标、冲突结论和漏答仍需完整核对。
+func verificationAnswerProjection(problem, answer string) string {
+	match := repeatedQuantityConclusionRe.FindStringSubmatch(normalizeAnswer(answer))
+	if len(match) != 4 || !(strings.Contains(problem, match[2]+"是多少") || strings.Contains(problem, match[2]+"为多少")) {
+		return answer
+	}
+	equation, equationOK := singleQuantityEquation(match[1])
+	conclusion, conclusionOK := completeVerificationQuantity(match[3])
+	if !equationOK || !conclusionOK || !quantitiesEqual(equation, conclusion) {
+		return answer
+	}
+	return equation.value + " " + equation.unit
+}
 
 type quantityRelationAnswer struct {
 	part, whole string
@@ -133,9 +150,11 @@ func parseQuantityRelationAnswer(answer string) (quantityRelationAnswer, bool) {
 	return quantityRelationAnswer{part: part, whole: whole, fraction: fraction, quantity: quantity}, true
 }
 
-// verificationAnswersEqual 仅在当前题干的唯一明确份数空格上补齐候选省略的单位。
-// 只变换比较投影，原候选、stdout、单位及多空答案始终保留。
+// verificationAnswersEqual 比较完整数量、关系填空及原题同一目标的重复结论。
+// 仅对唯一明确份数空格补单位；原候选、stdout及多空答案始终保留。
 func verificationAnswersEqual(problem, computed, candidate string) (equal, comparable bool) {
+	computed = verificationAnswerProjection(problem, computed)
+	candidate = verificationAnswerProjection(problem, candidate)
 	leftRelation, leftIsRelation := parseQuantityRelationAnswer(computed)
 	rightRelation, rightIsRelation := parseQuantityRelationAnswer(candidate)
 	if leftIsRelation || rightIsRelation {

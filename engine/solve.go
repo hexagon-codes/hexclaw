@@ -834,7 +834,7 @@ func (o *SolveSkill) verifySolutionWithGuides(ctx context.Context, problem, solu
 		raw, _ := json.Marshal(proof)
 		spec.Task += "\n\nTrusted solver execution proof (only actual execution and stdout; audit all mathematical steps independently):\n" + string(raw)
 	}
-	completeCandidate := completeVerificationAnswer(candidate)
+	completeCandidate := completeVerificationAnswer(verificationAnswerProjection(problem, candidate))
 	result, usedSpec, err := o.runValidatedResult(ctx, spec, func(result SubAgentResult, attempt SubAgentSpec) bool {
 		if !verdictParseable(result.Output) {
 			return false
