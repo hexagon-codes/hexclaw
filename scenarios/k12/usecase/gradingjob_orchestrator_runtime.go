@@ -1052,6 +1052,7 @@ func (o *GradingOrchestrator) typedRecognizedQuestions(ctx context.Context, jobI
 	}
 	questions, err := RecognizedQuestionsFromProblemAttemptSnapshot(snapshot)
 	if err == nil {
+		o.restoreRecognitionSourceContexts(job, questions)
 		o.restoreFinalAnswerReceipts(ctx, job, questions)
 	}
 	return questions, err == nil
@@ -1868,7 +1869,7 @@ func (d Deps) persistedImageTaskPhotoIntent(ctx context.Context, agentName strin
 	}
 	switch dispatch.TaskIntent {
 	case k12.ImageTaskIntentCompletedHomework, k12.ImageTaskIntentBlankWorksheet:
-		return photoTaskIntentFromDispatch(dispatch.TaskIntent), nil
+		return photoTaskIntentForImageDispatch(dispatch), nil
 	default:
 		return fallback, nil
 	}

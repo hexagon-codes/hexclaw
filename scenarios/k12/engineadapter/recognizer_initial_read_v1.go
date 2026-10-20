@@ -147,6 +147,7 @@ func (a *RecognizerAdapter) recognizeLayoutInitialReadV1(ctx context.Context, so
 	if err != nil {
 		return nil, err
 	}
+	prompt += recognitionPageOrientationPromptV1
 	var scopeInput *k12.RecognitionImageScopeInputV1
 	if input, enabled := k12.RecognitionImageScopeInputFromContextV1(ctx); enabled {
 		scopeInput = &input
@@ -197,7 +198,7 @@ func (a *RecognizerAdapter) recognizeLayoutInitialReadV1(ctx context.Context, so
 				return nil, fmt.Errorf("%w: image scope response is missing or invalid", k12.ErrRecognitionProtocolInvalid)
 			}
 		}
-		plan, err = k12.BuildRecognitionLayoutPlanV2(k12.RecognitionLayoutPlanInputV2{ScopeInput: scopeInput, Scope: scope, PagePNG: page.PNG, Manifest: k12.RecognitionLayoutManifestSuccessV2{InvocationID: whole.InvocationID, ResultDigest: whole.ResultDigest}, Targets: manifest, RecognitionFormat: k12.RecognitionLayoutCompactV4, EnableSourceAdjudication: true, InitialReadMode: k12.RecognitionLayoutManifestWithContentV1})
+		plan, err = k12.BuildRecognitionLayoutPlanV2(k12.RecognitionLayoutPlanInputV2{PageOrientation: k12.RecognitionPageOrientationFromInitialReadV1(whole.Payload, recognitionInitialReadDigestV1(page.PNG)), ScopeInput: scopeInput, Scope: scope, PagePNG: page.PNG, Manifest: k12.RecognitionLayoutManifestSuccessV2{InvocationID: whole.InvocationID, ResultDigest: whole.ResultDigest}, Targets: manifest, RecognitionFormat: k12.RecognitionLayoutCompactV4, EnableSourceAdjudication: true, InitialReadMode: k12.RecognitionLayoutManifestWithContentV1})
 		if err != nil {
 			return nil, fmt.Errorf("%w: initial-read manifest cannot form a complete plan: %v", k12.ErrRecognitionProtocolInvalid, err)
 		}
@@ -303,7 +304,15 @@ func (a *RecognizerAdapter) recognizeLayoutInitialReadV1(ctx context.Context, so
 	if err != nil {
 		return nil, err
 	}
-	return RecognizedQuestionsFromLayoutFinalizationV2(finalization, plan)
+	questions, err := RecognizedQuestionsFromLayoutFinalizationV2(finalization, plan)
+	if err != nil {
+		return nil, err
+	}
+	geometry, err := png.DecodeConfig(bytes.NewReader(page.PNG))
+	if err != nil {
+		return nil, err
+	}
+	return retainInitialReadSharedMaterials(questions, plan, whole.Payload, geometry.Width, geometry.Height)
 }
 
 // 仅比较副本去掉首读中精确配对的非数值印刷指令，不改题干、学生步骤或来源事实。

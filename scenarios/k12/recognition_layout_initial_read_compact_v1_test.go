@@ -63,6 +63,39 @@ func TestRecognitionInitialReadCompactV1PreservesSourceObservations(t *testing.T
 	}
 }
 
+func TestRecognitionInitialReadCompactV1UnwrapsOnlyExactTextCondition(t *testing.T) {
+	raw, err := os.ReadFile("testdata/initial_read_compact_v1.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := CanonicalRecognitionLayoutInitialReadEntriesV1(string(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var envelope map[string]json.RawMessage
+	if json.Unmarshal(raw, &envelope) != nil {
+		t.Fatal("invalid fixture")
+	}
+	var conditions []string
+	_ = json.Unmarshal(envelope["conditions"], &conditions)
+	wrapped := make([]map[string]any, len(conditions))
+	for i, text := range conditions {
+		wrapped[i] = map[string]any{"text": text}
+	}
+	envelope["conditions"], _ = json.Marshal(wrapped)
+	changed, _ := json.Marshal(envelope)
+	got, err := CanonicalRecognitionLayoutInitialReadEntriesV1(string(changed))
+	if err != nil || !reflect.DeepEqual(want, got) {
+		t.Fatal("lossless source wrapper changed observations")
+	}
+	wrapped[0]["other"] = "ambiguous extra content"
+	envelope["conditions"], _ = json.Marshal(wrapped)
+	changed, _ = json.Marshal(envelope)
+	if _, err = CanonicalRecognitionLayoutInitialReadEntriesV1(string(changed)); err == nil {
+		t.Fatal("ambiguous condition object accepted")
+	}
+}
+
 func TestRecognitionInitialReadCompactV1RejectsInvalidReferencesAndOverrides(t *testing.T) {
 	raw, err := os.ReadFile("testdata/initial_read_compact_v1.json")
 	if err != nil {

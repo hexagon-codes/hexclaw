@@ -5,6 +5,23 @@ import (
 	"fmt"
 )
 
+// 成功计划恢复时只读同一首读来源，关闭最终化与题目落盘之间的崩溃窗口。
+type RecognitionLayoutInitialSourceLoaderV1 interface {
+	LoadRecognitionLayoutInitialSourceV1(context.Context) (RecognitionPhysicalCallResult, error)
+}
+
+func LoadRecognitionLayoutInitialSourceV1(ctx context.Context) (RecognitionPhysicalCallResult, bool, error) {
+	if ctx == nil {
+		return RecognitionPhysicalCallResult{}, false, nil
+	}
+	loader, ok := ctx.Value(recognitionPhysicalCallContextKey{}).(RecognitionLayoutInitialSourceLoaderV1)
+	if !ok {
+		return RecognitionPhysicalCallResult{}, false, nil
+	}
+	source, err := loader.LoadRecognitionLayoutInitialSourceV1(ctx)
+	return source, err == nil && source.InvocationID != "", err
+}
+
 // 新首读能力将真实全页回执与计划、正文在同一事务内提交。
 type RecognitionLayoutInitialReadSettlerV1 interface {
 	AuthorizeAndSettleRecognitionLayoutInitialReadV1(context.Context, RecognitionPhysicalCallResult, RecognitionLayoutPlanV2, RecognitionLayoutInitialReadSettlementV1) (RecognitionLayoutInitialReadSettlementResultV1, bool, error)

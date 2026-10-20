@@ -29,3 +29,32 @@ func TestImageScopeRuntimeSurvivesColdRestore(t *testing.T) {
 		t.Fatal("scope is absent from recognition identity")
 	}
 }
+
+func TestImageScopeExplicitActionAndLegacyPolicy(t *testing.T) {
+	for _, tc := range []struct{ message, want string }{
+		{"请解答这张图片中的题目", "solve"}, {"只做第1、2题，帮我解题", "solve"},
+		{"不要解答，只批改", "grade"}, {"不要批改，只求解", "solve"},
+		{"这是作业", ""}, {"先批改再解题", ""},
+	} {
+		if got := explicitImageHomeworkAction(tc.message); got != tc.want {
+			t.Fatalf("%q action=%q want=%q", tc.message, got, tc.want)
+		}
+	}
+	dispatch := k12.ImageTaskDispatch{TaskIntent: k12.ImageTaskIntentCompletedHomework, MessageIntent: "请解答这张图片中的题目"}
+	if photoTaskIntentForImageDispatch(dispatch) != PhotoTaskCompletedHomework {
+		t.Fatal("legacy dispatch was reinterpreted")
+	}
+	dispatch.ClassificationRouteSnapshot.ImageScope = &k12.RecognitionImageScopeInputV1{Version: k12.RecognitionImageScopeVersionV1, Action: "solve", MessageIntent: dispatch.MessageIntent}
+	if photoTaskIntentForImageDispatch(dispatch) != PhotoTaskBlankWorksheet || dispatch.TaskIntent != k12.ImageTaskIntentCompletedHomework {
+		t.Fatal("explicit solve was lost or original image evidence was overwritten")
+	}
+	budget := recognitionLayoutInitialV2Budget()
+	selected, err := trustedPhotoRecognitionCreationPolicy(budget, []byte("small source"), PhotoTaskBlankWorksheet, dispatch.ClassificationRouteSnapshot.ImageScope)
+	if err != nil || selected.RecognitionPlanVersion != k12.RecognitionPlanVersionV2 {
+		t.Fatalf("scope has no durable layout plan: %+v %v", selected, err)
+	}
+	legacy, err := trustedPhotoRecognitionCreationPolicy(budget, []byte("small source"), PhotoTaskBlankWorksheet)
+	if err != nil || legacy.RecognitionPlanVersion != k12.RecognitionPlanVersionV1 {
+		t.Fatal("legacy recognition policy changed")
+	}
+}

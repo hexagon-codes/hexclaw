@@ -63,6 +63,7 @@ type RecognitionLayoutManifestTargetV2 struct {
 }
 
 type RecognitionLayoutPlanInputV2 struct {
+	PageOrientation          *RecognitionPageOrientationV1
 	ScopeInput               *RecognitionImageScopeInputV1
 	Scope                    *RecognitionImageScopeV1
 	InitialReadMode          string
@@ -99,6 +100,7 @@ type RecognitionLayoutBatchV2 struct {
 // RecognitionLayoutPlanV2 可安全持久化：它包含标识、源像素区域和摘要，
 // 但绝不包含源图像或裁剪字节。
 type RecognitionLayoutPlanV2 struct {
+	PageOrientation      *RecognitionPageOrientationV1 `json:"page_orientation,omitempty"`
 	ScopeInput           *RecognitionImageScopeInputV1 `json:"scope_input,omitempty"`
 	Scope                *RecognitionImageScopeV1      `json:"scope,omitempty"`
 	ObservedTargets      []RecognitionLayoutTargetV2   `json:"observed_targets,omitempty"`
@@ -192,20 +194,34 @@ func BuildRecognitionLayoutPlanV2(input RecognitionLayoutPlanInputV2) (Recogniti
 		targets[index].Region = region
 	}
 	// 同一视觉行的题框会有少量纵坐标噪声；先按中心纵坐标归入行带，再在行内从左到右排序。
+	orderRegion := func(target RecognitionLayoutManifestTargetV2) SourcePixelRegion {
+		region := target.Region
+		// 排序使用直立阅读视角，持久区域、裁图和批注仍保持原始像素坐标。
+		switch input.PageOrientation.Rotation() {
+		case 90:
+			return SourcePixelRegion{X: pageBounds.Dy() - region.Y - region.Height, Y: region.X, Width: region.Height, Height: region.Width}
+		case 180:
+			return SourcePixelRegion{X: pageBounds.Dx() - region.X - region.Width, Y: pageBounds.Dy() - region.Y - region.Height, Width: region.Width, Height: region.Height}
+		case 270:
+			return SourcePixelRegion{X: region.Y, Y: pageBounds.Dx() - region.X - region.Width, Width: region.Height, Height: region.Width}
+		}
+		return region
+	}
 	sort.SliceStable(targets, func(left, right int) bool {
-		leftCenter := targets[left].Region.Y*2 + targets[left].Region.Height
-		rightCenter := targets[right].Region.Y*2 + targets[right].Region.Height
+		leftRegion, rightRegion := orderRegion(targets[left]), orderRegion(targets[right])
+		leftCenter := leftRegion.Y*2 + leftRegion.Height
+		rightCenter := rightRegion.Y*2 + rightRegion.Height
 		if leftCenter != rightCenter {
 			return leftCenter < rightCenter
 		}
-		return targets[left].Region.X < targets[right].Region.X
+		return leftRegion.X < rightRegion.X
 	})
 	for rowStart := 0; rowStart < len(targets); {
-		anchor := targets[rowStart].Region
+		anchor := orderRegion(targets[rowStart])
 		anchorCenter := anchor.Y*2 + anchor.Height
 		rowEnd := rowStart + 1
 		for rowEnd < len(targets) {
-			region := targets[rowEnd].Region
+			region := orderRegion(targets[rowEnd])
 			delta := region.Y*2 + region.Height - anchorCenter
 			if delta < 0 {
 				delta = -delta
@@ -218,8 +234,9 @@ func BuildRecognitionLayoutPlanV2(input RecognitionLayoutPlanInputV2) (Recogniti
 		sort.SliceStable(targets[rowStart:rowEnd], func(left, right int) bool {
 			leftTarget := targets[rowStart+left]
 			rightTarget := targets[rowStart+right]
-			if leftTarget.Region.X != rightTarget.Region.X {
-				return leftTarget.Region.X < rightTarget.Region.X
+			leftRegion, rightRegion := orderRegion(leftTarget), orderRegion(rightTarget)
+			if leftRegion.X != rightRegion.X {
+				return leftRegion.X < rightRegion.X
 			}
 			return leftTarget.ManifestOrder < rightTarget.ManifestOrder
 		})
@@ -227,7 +244,11 @@ func BuildRecognitionLayoutPlanV2(input RecognitionLayoutPlanInputV2) (Recogniti
 	}
 
 	pageDigest := recognitionLayoutSHA256(input.PagePNG)
+	if input.PageOrientation != nil && (!input.PageOrientation.Valid() || input.PageOrientation.PageDigest != pageDigest) {
+		return RecognitionLayoutPlanV2{}, fmt.Errorf("%w: page orientation source differs", ErrRecognitionLayoutPlanInvalid)
+	}
 	plan := RecognitionLayoutPlanV2{
+		PageOrientation:      input.PageOrientation,
 		Version:              RecognitionPlanVersionV2,
 		InitialReadMode:      input.InitialReadMode,
 		RecognitionFormat:    input.RecognitionFormat,
@@ -924,6 +945,7 @@ func RebindRecognitionLayoutManifestV2(plan RecognitionLayoutPlanV2, manifestID 
 
 func recognitionLayoutAuthorizedPlanDigestV2(plan RecognitionLayoutPlanV2) (string, error) {
 	canonical := struct {
+		PageOrientation      *RecognitionPageOrientationV1 `json:"page_orientation,omitempty"`
 		ScopeInput           *RecognitionImageScopeInputV1 `json:"scope_input,omitempty"`
 		Scope                *RecognitionImageScopeV1      `json:"scope,omitempty"`
 		ObservedTargets      []RecognitionLayoutTargetV2   `json:"observed_targets,omitempty"`
@@ -938,6 +960,7 @@ func recognitionLayoutAuthorizedPlanDigestV2(plan RecognitionLayoutPlanV2) (stri
 		Batches              []RecognitionLayoutBatchV2    `json:"batches"`
 	}{
 		ScopeInput: plan.ScopeInput, Scope: plan.Scope, ObservedTargets: plan.ObservedTargets,
+		PageOrientation:      plan.PageOrientation,
 		InitialReadMode:      plan.InitialReadMode,
 		Contract:             "recognition_layout_authorized_plan_v2",
 		Version:              plan.Version,

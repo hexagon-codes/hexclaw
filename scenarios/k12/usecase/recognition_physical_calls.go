@@ -34,6 +34,22 @@ type durableRecognitionPhysicalCallExecutor struct {
 	localCallEntries atomic.Uint32
 }
 
+func (e *durableRecognitionPhysicalCallExecutor) LoadRecognitionLayoutInitialSourceV1(ctx context.Context) (k12.RecognitionPhysicalCallResult, error) {
+	runtime, err := e.LoadRecognitionLayoutPlanV2Runtime(ctx)
+	if err != nil {
+		return k12.RecognitionPhysicalCallResult{}, err
+	}
+	plan := runtime.AuthorizedPlan
+	if plan == nil || plan.InitialReadMode != k12.RecognitionLayoutManifestWithContentV1 {
+		return k12.RecognitionPhysicalCallResult{}, nil
+	}
+	payload, err := e.o.deps.Records.LoadSucceededModelPhysicalInvocationResultContent(ctx, e.parent.AgentName, plan.ManifestInvocationID, plan.ManifestResultDigest)
+	if err != nil {
+		return k12.RecognitionPhysicalCallResult{}, err
+	}
+	return k12.RecognitionPhysicalCallResult{InvocationID: plan.ManifestInvocationID, ResultDigest: plan.ManifestResultDigest, Payload: payload}, nil
+}
+
 var _ k12.RecognitionPhysicalFallbackAuthorizer = (*durableRecognitionPhysicalCallExecutor)(nil)
 var _ k12.RecognitionLayoutPlanV2Authorizer = (*durableRecognitionPhysicalCallExecutor)(nil)
 var _ k12.RecognitionLayoutPlanV2RuntimeLoader = (*durableRecognitionPhysicalCallExecutor)(nil)

@@ -140,6 +140,11 @@ func validateInitialReadSourceV1(ctx context.Context, q dbQueryer, owner, parent
 	if physicalInvocationResultDigest(content) != child.ResultDigest {
 		return ErrModelPhysicalInvocationConflict
 	}
+	orientation := k12.RecognitionPageOrientationFromInitialReadV1(content, plan.PageDigest)
+	if (orientation == nil) != (plan.PageOrientation == nil) ||
+		(orientation != nil && *orientation != *plan.PageOrientation) {
+		return ErrModelPhysicalInvocationConflict
+	}
 	if in.Classification == k12.RecognitionLayoutBatchTerminalAmbiguousV2 {
 		return nil
 	}

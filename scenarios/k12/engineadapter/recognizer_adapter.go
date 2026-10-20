@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image/png"
 	"io"
 	"log/slog"
 	"net/http/httptrace"
@@ -554,7 +555,7 @@ func normalizeRecognizedSubject(s string) string {
 // Recognize 识题：调视觉模型 → 解析 JSON → 结构化题目值对象。
 func (a *RecognizerAdapter) Recognize(ctx context.Context, image []byte) ([]usecase.RecognizedQuestion, error) {
 	if k12.RecognitionLayoutFinalizationReplayV2Enabled(ctx) {
-		return recognizeFinalizedLayoutPlanReplayV2(ctx)
+		return recognizeFinalizedLayoutPlanReplayV2(ctx, image)
 	}
 	if a.vision == nil {
 		return nil, fmt.Errorf("recognizer: 未配置视觉模型")
@@ -630,6 +631,7 @@ func (a *RecognizerAdapter) Recognize(ctx context.Context, image []byte) ([]usec
 
 func recognizeFinalizedLayoutPlanReplayV2(
 	ctx context.Context,
+	images ...[]byte,
 ) ([]usecase.RecognizedQuestion, error) {
 	finalization, replayed, err := k12.ReplayFinalizedRecognitionLayoutPlanV2(ctx)
 	if err != nil {
@@ -657,10 +659,29 @@ func recognizeFinalizedLayoutPlanReplayV2(
 			k12.ErrRecognitionLayoutPlanV2Unauthorized,
 		)
 	}
-	return RecognizedQuestionsFromLayoutFinalizationV2(
+	questions, err := RecognizedQuestionsFromLayoutFinalizationV2(
 		finalization,
 		*runtime.AuthorizedPlan,
 	)
+	if err != nil || runtime.AuthorizedPlan.InitialReadMode != k12.RecognitionLayoutManifestWithContentV1 {
+		return questions, err
+	}
+	source, available, err := k12.LoadRecognitionLayoutInitialSourceV1(ctx)
+	if err != nil || !available {
+		return questions, err
+	}
+	if len(images) == 0 || len(images[0]) == 0 {
+		return nil, fmt.Errorf("recognizer: initial source replay requires its original page")
+	}
+	page, err := k12.CanonicalizeRecognitionPageV2(images[0])
+	if err != nil || page.Digest != runtime.AuthorizedPlan.PageDigest || source.InvocationID != runtime.AuthorizedPlan.ManifestInvocationID || source.ResultDigest != runtime.AuthorizedPlan.ManifestResultDigest {
+		return nil, fmt.Errorf("recognizer: initial source replay page or receipt differs")
+	}
+	geometry, err := png.DecodeConfig(bytes.NewReader(page.PNG))
+	if err != nil {
+		return nil, err
+	}
+	return retainInitialReadSharedMaterials(questions, *runtime.AuthorizedPlan, source.Payload, geometry.Width, geometry.Height)
 }
 
 func (a *RecognizerAdapter) recognizeLayoutPlanV2(

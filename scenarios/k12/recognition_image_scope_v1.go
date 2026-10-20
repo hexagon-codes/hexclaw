@@ -15,6 +15,7 @@ const RecognitionImageScopeVersionV1 = "image_scope_v1"
 type RecognitionImageScopeInputV1 struct {
 	Version       string `json:"version"`
 	MessageIntent string `json:"message_intent,omitempty"`
+	Action        string `json:"action,omitempty"`
 }
 
 type RecognitionImageScopeDependencyV1 struct {

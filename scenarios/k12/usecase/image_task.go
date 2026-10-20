@@ -581,6 +581,7 @@ func (c *ImageTaskCoordinator) Create(
 	}
 	// 展示语言属于接纳的请求事实，模型路由解析器只决定 Provider 与能力。
 	route.MessageLocale = in.RouteRequest.MessageLocale
+	route.ImageScope = &k12.RecognitionImageScopeInputV1{Version: k12.RecognitionImageScopeVersionV1, MessageIntent: in.MessageIntent, Action: explicitImageHomeworkAction(in.MessageIntent)}
 	route = k12.NormalizeImageTaskRouteSnapshot(route)
 	if (in.SourceKind == k12.ImageTaskSourceIM && in.CreativeEntry == nil) ||
 		(in.CreativeEntry != nil && in.CreativeEntry.Kind == k12.CreativeWorkEntryNewWork && in.CreativeEntry.TaskIntent == k12.ImageTaskIntentUnknown) {
@@ -1971,8 +1972,8 @@ func (c *ImageTaskCoordinator) continueTarget(
 				AgentName: view.Dispatch.AgentName, SourceSession: view.Dispatch.SourceSessionID,
 				SourcePageAssetID: view.Dispatch.SourceAssetRefs[0],
 				Image:             append([]byte(nil), images[0]...),
-				TaskIntent:        photoTaskIntentFromDispatch(view.Dispatch.TaskIntent),
-				ImageScope:        &k12.RecognitionImageScopeInputV1{Version: k12.RecognitionImageScopeVersionV1, MessageIntent: view.Dispatch.MessageIntent},
+				TaskIntent:        photoTaskIntentForImageDispatch(view.Dispatch),
+				ImageScope:        view.Dispatch.ClassificationRouteSnapshot.ImageScope,
 				Grade:             strings.TrimSpace(grade),
 			},
 			SourceKind: "image_task", SourceKey: view.Dispatch.DispatchID,
@@ -2252,6 +2253,18 @@ func photoTaskIntentFromDispatch(intent k12.ImageTaskIntent) PhotoTaskIntent {
 	return PhotoTaskCompletedHomework
 }
 
+func photoTaskIntentForImageDispatch(dispatch k12.ImageTaskDispatch) PhotoTaskIntent {
+	if scope := dispatch.ClassificationRouteSnapshot.ImageScope; scope != nil && scope.Version == k12.RecognitionImageScopeVersionV1 {
+		switch scope.Action {
+		case "solve":
+			return PhotoTaskBlankWorksheet
+		case "grade":
+			return PhotoTaskCompletedHomework
+		}
+	}
+	return photoTaskIntentFromDispatch(dispatch.TaskIntent)
+}
+
 func (c *ImageTaskCoordinator) executeWritingOCR(
 	ctx context.Context,
 	dispatch k12.ImageTaskDispatch,
@@ -2511,7 +2524,7 @@ func (c *ImageTaskCoordinator) Result(
 		}
 		photo := PhotoGradeResult{
 			Mode:          PhotoModeGrade,
-			TaskIntent:    photoTaskIntentFromDispatch(view.Dispatch.TaskIntent),
+			TaskIntent:    photoTaskIntentForImageDispatch(view.Dispatch),
 			ResultSurface: PhotoSurfaceAnnotatedHomework,
 			Markdown:      result.FinalArtifact.CanonicalMarkdown,
 		}

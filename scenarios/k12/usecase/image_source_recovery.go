@@ -2,11 +2,33 @@ package usecase
 
 import (
 	"context"
+	"regexp"
 	"strings"
 
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
 )
+
+var imageSolveActionPattern = regexp.MustCompile(`(?i)解题|解答|求解|\bsolve\b`)
+var imageGradeActionPattern = regexp.MustCompile(`(?i)批改|批阅|检查作业|\bgrade\b|\bmark\b`)
+var imageNegatedSolvePattern = regexp.MustCompile(`(?i)(不要|不用|无需|不必|别|do not|don't).{0,6}(解题|解答|求解|solve)`)
+var imageNegatedGradePattern = regexp.MustCompile(`(?i)(不要|不用|无需|不必|别|do not|don't).{0,6}(批改|批阅|检查作业|grade|mark)`)
+
+// 只冻结明确动作；冲突或未提供动作时保留原图片分类，不从笔迹反推用户目的。
+func explicitImageHomeworkAction(message string) string {
+	solve, grade := false, false
+	for _, clause := range strings.FieldsFunc(message, func(r rune) bool { return strings.ContainsRune("，,。；;！!？?\n", r) }) {
+		solve = solve || imageSolveActionPattern.MatchString(clause) && !imageNegatedSolvePattern.MatchString(clause)
+		grade = grade || imageGradeActionPattern.MatchString(clause) && !imageNegatedGradePattern.MatchString(clause)
+	}
+	if solve && !grade {
+		return "solve"
+	}
+	if grade && !solve {
+		return "grade"
+	}
+	return ""
+}
 
 // 可选来源端口只返回已核验的派生材料，不覆盖 OCR 或学生作答。
 type ImageSourceRecovery interface {

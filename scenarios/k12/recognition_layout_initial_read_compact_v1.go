@@ -27,11 +27,22 @@ func canonicalRecognitionLayoutInitialReadCompactV1(envelope map[string]json.Raw
 		return fail("format is unsupported")
 	}
 	var sectionEntries, targets []map[string]json.RawMessage
-	var conditions []string
+	var rawConditions []json.RawMessage
 	if json.Unmarshal(envelope["sections"], &sectionEntries) != nil || sectionEntries == nil ||
-		json.Unmarshal(envelope["conditions"], &conditions) != nil || conditions == nil ||
+		json.Unmarshal(envelope["conditions"], &rawConditions) != nil || rawConditions == nil ||
 		json.Unmarshal(envelope["targets"], &targets) != nil || len(targets) < 1 || len(targets) > 32 {
 		return fail("envelope values are invalid")
+	}
+	conditions := make([]string, len(rawConditions))
+	for index, raw := range rawConditions {
+		if json.Unmarshal(raw, &conditions[index]) == nil {
+			continue
+		}
+		// 同一正文的单字段包装可无损展开；其他形态仍拒绝，原响应不改写。
+		var wrapped map[string]json.RawMessage
+		if json.Unmarshal(raw, &wrapped) != nil || len(wrapped) != 1 || json.Unmarshal(wrapped["text"], &conditions[index]) != nil {
+			return fail("shared condition is invalid")
+		}
 	}
 	sections := make([]recognitionInitialReadCompactSectionV1, len(sectionEntries))
 	for i, entry := range sectionEntries {

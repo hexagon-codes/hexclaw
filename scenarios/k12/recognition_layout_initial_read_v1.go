@@ -302,6 +302,8 @@ func CanonicalRecognitionLayoutInitialReadEntriesV1(raw string) ([]json.RawMessa
 		}
 	}
 	var entries []json.RawMessage
+	// 可选页面方向与题目转写分别投影；原物理响应仍完整冻结。
+	delete(envelope, "page_orientation")
 	if _, scoped := envelope["scope"]; scoped {
 		if scope, scopeErr := ParseRecognitionImageScopeV1(raw); scopeErr != nil || scope == nil {
 			return nil, fmt.Errorf("%w: initial read scope is invalid", ErrRecognitionProtocolInvalid)

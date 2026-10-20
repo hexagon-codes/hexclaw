@@ -618,6 +618,9 @@ func RecognitionLayoutTargetExactSetDigestV2(
 // ValidateRecognitionLayoutPlanV2 是持久化边界校验器。
 // 它重新计算计划器所有的摘要，并证明主批次对全部目标构成有序、两两不相交的精确覆盖。
 func ValidateRecognitionLayoutPlanV2(plan RecognitionLayoutPlanV2) error {
+	if plan.PageOrientation != nil && (!plan.PageOrientation.Valid() || plan.PageOrientation.PageDigest != plan.PageDigest) {
+		return fmt.Errorf("%w: invalid page orientation source", ErrRecognitionLayoutPlanInvalid)
+	}
 	if err := validateRecognitionImageScopeV1(plan); err != nil {
 		return fmt.Errorf("%w: %v", ErrRecognitionLayoutPlanInvalid, err)
 	}
