@@ -144,7 +144,7 @@ func EvaluateOCRConfirmationRiskForInitialReadMode(q RecognizedQuestion, initial
 	if q.RecognitionConfidence != nil && *q.RecognitionConfidence < ocrConfidenceConfirmationThreshold {
 		reasons[OCRRiskLowConfidence] = struct{}{}
 	}
-	if verifiedQuotationIsOnlySourceRiskV1(q) {
+	if verifiedImageSourceIsOnlyRiskV1(q) {
 		delete(reasons, OCRRiskLowConfidence)
 	}
 	if q.AnswerState == AnswerStateUnclear {
@@ -250,18 +250,36 @@ func questionEvidenceTranscriptionsConflictForInitialReadMode(q RecognizedQuesti
 
 var chinesePrintedBlankRunV1 = regexp.MustCompile(`[_＿]{2,}`)
 
-func verifiedQuotationIsOnlySourceRiskV1(q RecognizedQuestion) bool {
+func verifiedImageSourceIsOnlyRiskV1(q RecognizedQuestion) bool {
 	source := q.ImageSourceContext
 	if source == nil || source.Version != k12.RecognitionImageScopeVersionV1 || len(source.Recoveries) == 0 || len(q.OCRSignals) == 0 {
 		return false
 	}
-	for _, signal := range q.OCRSignals {
-		if strings.TrimSpace(signal) != "source_gap_quotation" {
+	covered := map[string]bool{}
+	for _, recovery := range source.Recoveries {
+		if recovery.State != "verified" || recovery.AdoptedText == "" || recovery.SourceDigest == "" || recovery.CitationDigest == "" || !strings.Contains(q.RawTranscription, recovery.Gap.Before) || !strings.Contains(q.RawTranscription, recovery.Gap.After) {
 			return false
 		}
+		switch recovery.Gap.Kind {
+		case "quotation":
+			if recovery.DocumentID == "" || recovery.DocumentGeneration < 1 || recovery.TextbookBindingID == "" || recovery.TextbookManifestID == "" {
+				return false
+			}
+		case "instruction", "condition":
+			if recovery.SourceKind == "knowledge_same_exercise" {
+				if recovery.DocumentID == "" || recovery.DocumentGeneration < 1 {
+					return false
+				}
+			} else if recovery.SourceKind != "web_same_exercise" || recovery.URL == "" {
+				return false
+			}
+		default:
+			return false
+		}
+		covered["source_gap_"+recovery.Gap.Kind] = true
 	}
-	for _, recovery := range source.Recoveries {
-		if recovery.Gap.Kind != "quotation" || recovery.State != "verified" || recovery.AdoptedText == "" || recovery.DocumentID == "" || recovery.DocumentGeneration < 1 || recovery.SourceDigest == "" || recovery.CitationDigest == "" || recovery.TextbookBindingID == "" || recovery.TextbookManifestID == "" || !strings.Contains(q.RawTranscription, recovery.Gap.Before) || !strings.Contains(q.RawTranscription, recovery.Gap.After) {
+	for _, signal := range q.OCRSignals {
+		if !covered[strings.TrimSpace(signal)] {
 			return false
 		}
 	}

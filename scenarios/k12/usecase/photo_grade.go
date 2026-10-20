@@ -484,7 +484,7 @@ func photoItemGradeRequest(req PhotoGradeRequest, q RecognizedQuestion) GradeReq
 		}
 		for _, recovery := range q.ImageSourceContext.Recoveries {
 			if recovery.State == "verified" && recovery.AdoptedText != "" {
-				input.Problem += "\n\nVerified quotation source (reference only; do not infer missing exercise instructions or student handwriting):\n" + recovery.Gap.Before + recovery.AdoptedText + recovery.Gap.After
+				input.Problem += "\n\nVerified source fragment for the declared " + recovery.Gap.Kind + " gap (use only this fragment; do not infer other missing content or student handwriting):\n" + recovery.Gap.Before + recovery.AdoptedText + recovery.Gap.After
 			}
 		}
 	}

@@ -109,3 +109,17 @@ func TestImageScopeLanguageInitialReadKeepsSourceRiskAndLegacyPolicy(t *testing.
 		}
 	}
 }
+
+func TestImageScopeVerifiedExerciseGapKeepsOriginalEvidence(t *testing.T) {
+	confidence := 0.5
+	raw := "这样宏伟的建筑物，这样和谐统一的布局，不能不令人惊叹。我也要[missing]校园，仿写一句话：____"
+	q := RecognizedQuestion{Question: raw, RawTranscription: raw, CanonicalMarkdown: raw, Subject: "语文", AnswerState: AnswerStateBlank, RecognitionConfidence: &confidence, OCRSignals: []string{"source_gap_instruction"}, ImageSourceContext: &k12.RecognitionImageSourceContextV1{Version: k12.RecognitionImageScopeVersionV1, Action: "solve", ScopeDigest: "scope", TargetIDs: []string{"target"}, Recoveries: []k12.RecognitionImageSourceRecoveryV1{{Gap: k12.RecognitionImageSourceGapV1{Kind: "instruction", Before: "我也要", After: "校园，仿写一句话："}, State: "verified", SourceKind: "knowledge_same_exercise", AdoptedText: "赞美", DocumentID: "original-exercise", DocumentGeneration: 2, SourceDigest: "source-digest", CitationDigest: "fragment-digest"}}}}
+	got := NormalizeRecognizedQuestionForInitialReadMode(q, k12.RecognitionLayoutManifestWithContentV1)
+	if got.ConfirmationRequired || got.RawTranscription != raw || *got.RecognitionConfidence != 0.5 || !strings.Contains(photoItemGradeRequest(PhotoGradeRequest{}, got).Problem, "我也要赞美校园") {
+		t.Fatal("verified exercise material was not separated from original OCR")
+	}
+	q.OCRSignals = append(q.OCRSignals, "cropped critical number")
+	if !NormalizeRecognizedQuestionForInitialReadMode(q, k12.RecognitionLayoutManifestWithContentV1).ConfirmationRequired {
+		t.Fatal("verified instruction cleared an unrelated source risk")
+	}
+}
