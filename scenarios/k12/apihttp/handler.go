@@ -249,6 +249,7 @@ func NewHandler(rt Runtime) http.Handler {
 	mux.HandleFunc("GET /weekly-practice/plans/history", h.listWeeklyPracticeHistory)
 	mux.HandleFunc("GET /weekly-practice/snapshots/{id}", h.getWeeklyPracticeSnapshot)
 	mux.HandleFunc("POST /weekly-practice/plans/{id}/prepare-output", h.prepareWeeklyPracticeOutput)
+	mux.HandleFunc("POST /weekly-practice/plans/{id}/tracks/{section}/prepare-output", h.prepareWeeklyPracticeTrackOutput)
 	mux.HandleFunc("POST /weekly-practice/snapshots/{id}/send", h.sendWeeklyPracticeSnapshot)
 	mux.HandleFunc("POST /weekly-practice/snapshots/{id}/attempts", h.submitWeeklyPracticeAttempt)
 	mux.HandleFunc("POST /weekly-practice/plans/{id}/arithmetic-batches", h.createWeeklyArithmeticBatch)

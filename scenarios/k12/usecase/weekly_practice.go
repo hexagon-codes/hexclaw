@@ -1069,6 +1069,63 @@ func (d Deps) PrepareWeeklyPracticeOutput(ctx context.Context, agent, planID str
 	}, nil
 }
 
+// PrepareWeeklyPracticeTrackOutput 只冻结当前分区的题面，不冻结周计划或另一分区。
+func (d Deps) PrepareWeeklyPracticeTrackOutput(ctx context.Context, agent, planID, section string,
+	expectedRevision int) (PrintableArtifactView, bool, error) {
+	if strings.TrimSpace(agent) == "" || strings.TrimSpace(planID) == "" || expectedRevision < 1 {
+		return PrintableArtifactView{}, false, fmt.Errorf("%w: invalid track output request", ErrInvalidInput)
+	}
+	title := ""
+	switch section {
+	case "textbook_consolidation":
+		title = "同步巩固练习单"
+	case "arithmetic_warmup":
+		title = "口算热身练习单"
+	default:
+		return PrintableArtifactView{}, false, fmt.Errorf("%w: unsupported practice section", ErrInvalidInput)
+	}
+	plan, err := d.Records.GetWeeklyPracticePlan(ctx, agent, planID)
+	if err != nil {
+		return PrintableArtifactView{}, false, err
+	}
+	if plan.Revision != expectedRevision {
+		return PrintableArtifactView{}, false, records.ErrVersionConflict
+	}
+	for _, track := range plan.Tracks {
+		if string(track.PlanSection) != section {
+			continue
+		}
+		if len(track.Items) == 0 {
+			return PrintableArtifactView{}, false, fmt.Errorf("%w: practice section has no verified questions", ErrInvalidInput)
+		}
+		items := make([]k12.PracticeItem, 0, len(track.Items))
+		for _, item := range track.Items {
+			if item.Verification.Status != k12.WeeklyVerificationVerified {
+				return PrintableArtifactView{}, false, fmt.Errorf("%w: practice section is not verified", ErrInvalidInput)
+			}
+			items = append(items, k12.PracticeItem{ItemID: item.ItemID, Subject: "数学",
+				AddedVia: k12.PracticeAddedViaWeekly, QuestionMarkdown: item.PromptMarkdown,
+				VerificationStatus: "verified"})
+		}
+		// 内容身份不含整周修订号；另一分区变化不会重建同一份 PDF。
+		identity := digestValue(items)
+		var paper strings.Builder
+		fmt.Fprintf(&paper, "# %s\n\n姓名：________　日期：________\n\n", title)
+		for i, item := range items {
+			fmt.Fprintf(&paper, "%d. %s\n\n", i+1, item.QuestionMarkdown)
+			if section == "textbook_consolidation" {
+				paper.WriteString("答：\n\n---\n\n---\n\n")
+			}
+		}
+		return d.PreparePrintableArtifact(ctx, PreparePrintableArtifactRequest{
+			AgentName: agent, SourceKind: k12.PrintSourcePracticeQuestion,
+			SourceRef: "weekly-track:" + planID + ":" + section + ":" + identity,
+			Title:     title, CanonicalMarkdown: paper.String(),
+		})
+	}
+	return PrintableArtifactView{}, false, records.ErrNotFound
+}
+
 func weeklySnapshotMarkdown(snapshot k12.WeeklyPracticeSnapshot) string {
 	items := make([]k12.PracticeItem, 0)
 	for _, track := range snapshot.Tracks {

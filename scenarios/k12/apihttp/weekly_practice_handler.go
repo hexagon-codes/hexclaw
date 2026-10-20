@@ -319,6 +319,24 @@ type weeklySendRequest struct {
 	IdempotencyKey string `json:"idempotency_key"`
 }
 
+func (h *handler) prepareWeeklyPracticeTrackOutput(w http.ResponseWriter, r *http.Request) {
+	var req weeklyExpectedRevisionRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	artifact, replayed, err := h.rt.Deps.PrepareWeeklyPracticeTrackOutput(
+		r.Context(), req.AgentName, r.PathValue("id"), r.PathValue("section"), req.ExpectedRevision)
+	if err != nil {
+		writeErr(w, httpStatusForK12Error(err, http.StatusConflict), err.Error())
+		return
+	}
+	status := http.StatusCreated
+	if replayed {
+		status = http.StatusOK
+	}
+	writeJSON(w, status, map[string]any{"artifact": printableArtifactDTO(artifact), "replayed": replayed})
+}
+
 func (h *handler) sendWeeklyPracticeSnapshot(w http.ResponseWriter, r *http.Request) {
 	var req weeklySendRequest
 	if !decode(w, r, &req) {

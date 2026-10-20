@@ -23,6 +23,7 @@ type WeeklyTextbookRecoveryRequest struct {
 	AcceptDuplicateExecution bool   `json:"accept_duplicate_execution"`
 	SourcePlanRevision       int    `json:"source_plan_revision,omitempty"`
 	ExpectedPlanRevision     int    `json:"expected_plan_revision,omitempty"`
+	ContinueRemaining        bool   `json:"continue_remaining,omitempty"`
 }
 
 type weeklySolveRecoveryAttempt struct {
@@ -129,13 +130,15 @@ func (d Deps) RecoverWeeklyTextbookTrack(ctx context.Context, agentName, planID 
 	if step.Candidate != nil || step.Generate.Status != "succeeded" || step.Generate.Result == nil || !eligible {
 		return k12.WeeklyPracticePlan{}, false, records.ErrIllegalTransition
 	}
-	// 本授权只恢复指定题；不借恢复入口生成其他尚未准备的题目。
-	if len(request.Generation.Items) != request.MaxItems {
+	// 默认只恢复指定题；显式继续仍限于原冻结题数，不能重发其他未知调用。
+	if len(request.Generation.Items) > request.MaxItems || (!input.ContinueRemaining && len(request.Generation.Items) != request.MaxItems) {
 		return k12.WeeklyPracticePlan{}, false, records.ErrIllegalTransition
 	}
 	for i, item := range request.Generation.Items {
 		if i != input.ItemIndex && item.Candidate == nil {
-			return k12.WeeklyPracticePlan{}, false, records.ErrIllegalTransition
+			if !input.ContinueRemaining || item.Generate.Status != "" || item.Solve.Status != "" {
+				return k12.WeeklyPracticePlan{}, false, records.ErrIllegalTransition
+			}
 		}
 	}
 	nextCall := weeklyCandidateCall{Status: "prepared", InputDigest: prior.InputDigest}
