@@ -101,6 +101,7 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolName string, args map[st
 					return "", err
 				}
 				captureCodeExecutionReceipt(ctx, skillName, result)
+				captureSkillRawResult(ctx, result)
 				if skillName == "knowledge_search" {
 					if hits, ok := result.Data.([]knowledge.SearchHit); ok {
 						recordKnowledgeHits(ctx, hits)
@@ -305,6 +306,7 @@ func (e *ToolExecutor) runSkillViaPipeline(ctx context.Context, toolName string,
 		return "", fmt.Errorf("runSkillViaPipeline: pipeline routed %q → %q (refusing to execute mismatched skill)", toolName, res.Skill.Name())
 	}
 	captureCodeExecutionReceipt(ctx, toolName, res.Result)
+	captureSkillRawResult(ctx, res.Result)
 	if toolName == "knowledge_search" {
 		if hits, ok := res.Result.Data.([]knowledge.SearchHit); ok {
 			recordKnowledgeHits(ctx, hits)
@@ -313,6 +315,13 @@ func (e *ToolExecutor) runSkillViaPipeline(ctx context.Context, toolName string,
 	// BUG-1：pipeline 路径同样透传结构化 reply-safe 元数据（record chip 等）。
 	stampToolReplyMeta(ctx, res.Result.Metadata)
 	return res.Result.Content, nil
+}
+
+// 类型化读取与原执行共用钩子和流水线，不为读取元数据再次执行工具。
+func captureSkillRawResult(ctx context.Context, result *skill.Result) {
+	if capture, ok := ctx.Value(toolRawResultContextKey{}).(*toolRawResultCapture); ok {
+		capture.value = result
+	}
 }
 
 // InitLifecycle 调用所有实现 LifecycleTool 的 Skill 的 Init —— 仅在 lifecycle.v2
