@@ -2038,7 +2038,7 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 		}
 		if kb := eng.KnowledgeBase(); kb != nil {
 			k12Opts = append(k12Opts, k12assembly.WithGroundingFactory(func(recordStore *k12storage.Store) k12usecase.Grounding {
-				return k12engineadapter.NewGroundingAdapter(kb, recordStore)
+				return k12engineadapter.NewGroundingAdapter(kb, recordStore).WithImageSourcePageLookup(eng.ReadReferenceSourcePages)
 			}))
 		}
 		// 建档/改档：接 agent 路由 + 持久化（读改写 agents.metadata）。

@@ -36,7 +36,7 @@ type ImageSourceRecovery interface {
 }
 
 type ImageSourceLibraryLookup interface {
-	FindImageSourceCandidate(context.Context, string, string, k12.RecognitionImageSourceGapV1) (k12.RecognitionImageSourceRecoveryV1, error)
+	FindImageSourceCandidate(context.Context, string, string, string, string, k12.RecognitionImageSourceGapV1) (k12.RecognitionImageSourceRecoveryV1, error)
 }
 
 func (o *GradingOrchestrator) recoverImageSourceMaterials(ctx context.Context, run *gradingRun, job GradingJobView) {
@@ -67,7 +67,7 @@ func (o *GradingOrchestrator) recoverImageSourceMaterials(ctx context.Context, r
 				if source.Recoveries[n].State == "unresolved" {
 					source.Recoveries[n].State = "no_verified_bound_textbook"
 					if library, ok := o.deps.Grounding.(ImageSourceLibraryLookup); ok && source.Recoveries[n].Gap.Kind != "handwriting" {
-						candidate, queryErr := library.FindImageSourceCandidate(ctx, run.questions[i].Subject, run.req.Grade, source.Recoveries[n].Gap)
+						candidate, queryErr := library.FindImageSourceCandidate(ctx, run.agentName, run.questions[i].Subject, run.req.Grade, run.questions[i].RawTranscription, source.Recoveries[n].Gap)
 						if queryErr == nil {
 							source.Recoveries[n] = candidate
 						}
@@ -92,6 +92,14 @@ func (o *GradingOrchestrator) recoverImageSourceMaterials(ctx context.Context, r
 				continue
 			}
 			source.Recoveries[n] = result
+			if result.State != "verified" && recovery.Gap.Kind != "handwriting" {
+				if library, ok := o.deps.Grounding.(ImageSourceLibraryLookup); ok {
+					candidate, queryErr := library.FindImageSourceCandidate(ctx, run.agentName, run.questions[i].Subject, run.req.Grade, run.questions[i].RawTranscription, recovery.Gap)
+					if queryErr == nil {
+						source.Recoveries[n] = candidate
+					}
+				}
+			}
 		}
 	}
 }

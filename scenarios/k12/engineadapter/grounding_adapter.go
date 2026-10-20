@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/hexagon-codes/hexclaw/engine"
 	"github.com/hexagon-codes/hexclaw/knowledge"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/usecase"
@@ -55,6 +56,7 @@ type GroundingAdapter struct {
 	kb             kbQuerier
 	topK           int
 	verifiedReader VerifiedTextbookReader
+	sourcePages    func(context.Context, string, string) ([]engine.ReferenceSourcePage, error)
 }
 
 // NewGroundingAdapter 创建 adapter。kb 通常是 main.go 的 kbMgr。
