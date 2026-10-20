@@ -594,6 +594,8 @@ Authentication: Bearer. Successful HTTP status: 200.
 
 Returns explicit-match candidates and source, and can call an LLM for semantic routing or fall back to the default. It does not execute the selected Agent task or add rules. Body user_id is only a simulated match value, not HTTP identity.
 
+When no explicit rule matches DingTalk, the built-in default assistant handles the request without semantic classification or selection of a registered default Agent. The response has `source=default`, `matched=false`, and an empty `agent_name`. Explicit matches and existing fallback behavior on other platforms are preserved.
+
 Availability: {"mounted_when": "s.agentRouter != nil", "disabled_projection": {"status": [404, 405], "description": "Route is not mounted; ServeMux returns 405 when another method remains registered for the same path, otherwise 404."}}.
 
 Request body: `AgentsRouteTestRequest`; maximum read 1048576 bytes. Fields are listed below; required status follows actual handler rejection conditions.

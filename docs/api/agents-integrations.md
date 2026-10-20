@@ -594,6 +594,8 @@ file 读取执行服务所在机器的路径，可为 .md 文件或技能目录�
 
 返回显式匹配候选与来源，也可能经语义路由调用 LLM 或回退默认；不执行选中 Agent 的任务，不新增规则。body user_id 仅为模拟匹配值，不改变 HTTP 身份。
 
+钉钉未命中显式规则时使用内置小蟹，不进行语义分类或选择已注册默认智能体；返回`source=default`、`matched=false`、空`agent_name`。显式规则命中及其他平台的既有回落保持。
+
 可用性：{"mounted_when": "s.agentRouter != nil", "disabled_projection": {"status": [404, 405], "description": "Route is not mounted; ServeMux returns 405 when another method remains registered for the same path, otherwise 404."}}.
 
 请求体：`AgentsRouteTestRequest`; 最大读取 1048576 bytes. 字段详见下方结构表；“必填”以 handler 实际拒绝条件为准。

@@ -224,6 +224,12 @@ Returns complete JSON by default, or SSE when Accept contains text/event-stream.
 
 Request body maximum: 20971520 bytes.
 
+New model replies may include `provider_display_name` and `provider_instance_id` in metadata, frozen from the configuration when the request selects its route. `provider` retains the actual route key and `model` retains the real model ID. Display names support Unicode and survive history persistence and replay without being replaced by later renames. Older messages do not receive invented historical names. Successful built-in knowledge-tool hits share `knowledge_hits` and retrieval blocks with automatic retrieval, preserving document identity, source digest, and page spans for source preview.
+
+`teaching_context_receipts` identify the subject-specific guidance actually consumed by the current successful solve, without falling back to the entire loaded list. Teaching guidance is independent of numerical verification and does not prove program execution or promote `solve_evidence`. Failed, out-of-scope, or unconsumed guidance does not produce a teaching receipt, and older messages are not backfilled.
+
+Tool footnotes in new DingTalk replies extract readable text from Markdown syntax while preserving literal code characters. The actual model display snapshot is appended before freezing the channel projection. Model footnotes do not enter canonical body text or the 1000-readable-character PDF decision. PDF captions use the same frozen model facts without changing document content or attachment identity. Existing frozen projections and deliveries are not regenerated.
+
 | Location | Field | Required | Type / rules |
 | --- | --- | --- | --- |
 | header | `Accept` | No | Use text/event-stream for SSE; otherwise complete JSON — |

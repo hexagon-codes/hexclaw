@@ -597,6 +597,8 @@ POST使用body.name，PUT使用path.name覆盖body.name。provider/name必填；
 
 path.id定位现有实例；空provider/name沿用旧值，省略config沿用旧配置，enabled省略仍是false。先停止旧实例，再写入并按enabled启动；允许更名。响应updated_at是HTTP-date，列表时间是RFC3339。
 
+同一平台更名时，实例更新与旧精确名称的接待规则迁移在同一事务提交，保留当前规则ID、Agent及优先级；提交后同步运行路由。旧冻结消息和投递目标不改写。事务失败时实例与规则均不提交。
+
 实现: [`handleUpdateInstanceByID`](../../api/handler_instances.go#L267). 注册条件: `s.instanceMgr != nil`.
 
 | 位置 | 参数 | 必填 | 类型 / 说明 |

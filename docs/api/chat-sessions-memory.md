@@ -224,6 +224,12 @@ asyncio.run(main())
 
 请求体上限：20971520 bytes.
 
+新模型回复的metadata可包含`provider_display_name`及`provider_instance_id`，取自请求选择时冻结的配置；`provider`仍保留实际路由标识，`model`保留真实模型ID。显示名支持Unicode，历史保存及重放保留该快照，不使用后来改名覆盖已有值。没有快照的旧消息不补造历史名称。知识工具检索成功的真实命中与自动召回共用`knowledge_hits`及retrieval块，保留文档身份、来源摘要和页码供原文件预览。
+
+`teaching_context_receipts`仅关联本题成功求解实际消费的对应学科指南，不从全部已加载清单补足。教学指导依据与数值验证等级独立，不能据此声称程序验算通过或提升`solve_evidence`；失败、超纲或未消费指南的求解不生成该回执，旧消息不补写。
+
+新钉钉回复的工具尾注按Markdown语法提取可读摘要，保留代码字面符号；实际模型显示快照在渠道投影冻结前追加。模型尾注不进入规范正文或1000可读字符的PDF判断；PDF说明沿同一冻结模型事实，正文及附件身份不变。已冻结的历史投影和投递不重新生成。
+
 | 位置 | 字段 | 必填 | 类型 / 规则 |
 | --- | --- | --- | --- |
 | header | `Accept` | 否 | Use text/event-stream for SSE; otherwise complete JSON — |

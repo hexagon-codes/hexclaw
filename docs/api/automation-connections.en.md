@@ -597,6 +597,8 @@ Request example:
 
 Locates the existing instance by path.id. Blank provider/name retain old values; omitted config retains the old config, but omitted enabled is still false. Stops the old instance before writing and optionally starting it; rename is allowed. Response updated_at uses HTTP-date, whereas list timestamps use RFC3339.
 
+For a rename within the same platform, the instance update and migration of exact old-name routing rules commit in one transaction, retaining the current rule IDs, Agents, and priorities. Runtime routing is updated after commit. Existing frozen messages and delivery targets are unchanged; a transaction failure commits neither the instance nor its rules.
+
 Implementation: [`handleUpdateInstanceByID`](../../api/handler_instances.go#L267). Registration: `s.instanceMgr != nil`.
 
 | Location | Parameter | Required | Type / notes |

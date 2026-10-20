@@ -184,6 +184,10 @@ Markdown text after removing Base64 data URLs is limited to 5 MiB (5242880 UTF-8
 | `Locale` | string | Optional; default="zh-CN" |
 | `AllowRawHTML` | boolean | Optional; default=false |
 | `AllowRawTeX` | boolean | Optional; default=false |
+| `pdf_header_footer` | boolean | Optional; default=true. Set false only for an explicit user request. |
+| `pdf_layout` | string: standard, custom | Optional; default=standard. custom preserves explicitly requested Markdown/frontmatter formatting. |
+
+All new PDFs share the default layout across Desktop, agents, IM and workflows. PDF exceptions have separate cache identities and do not enable raw HTML/TeX. Existing frozen PDFs are not rewritten.
 
 ### `KnowledgeRenderErrorResponse`
 

@@ -1,5 +1,7 @@
 # K12 records, textbooks and delivery API
 
+For photo mistakes, `question` is the problem statement. Recognized versioned solver-scope wrappers and complete internal scope suffixes remain model-request details; list and review responses project the original statement. Unknown formats remain unchanged. This read projection preserves historical rows, IDs, versions, states and frozen artifacts; new mistakes store the same statement representation.
+
 This reference covers the 46 method/path registrations in the current source, including worktree changes, for a HexClaw service with the K12 scenario enabled. Use the documentation and installer at the relevant Tag for a released version; a mainline route is not a promise that an older installer contains it.
 
 - [Scenario API and shared rules](../../API.en.md) · [中文](records.md) · [Complete OpenAPI](../../../../api/openapi.yaml)

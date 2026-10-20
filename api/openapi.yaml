@@ -7550,7 +7550,7 @@ paths:
       tags:
         - agents-integrations
       summary: 解释路由选择
-      description: 返回显式匹配候选与来源，也可能经语义路由调用 LLM 或回退默认；不执行选中 Agent 的任务，不新增规则。body user_id 仅为模拟匹配值，不改变 HTTP 身份。
+      description: 返回显式匹配候选与来源，也可能经语义路由调用 LLM 或回退默认；钉钉无显式匹配时使用内置小蟹，返回source=default、matched=false及空agent_name，不进行语义分类或选择已注册默认Agent。不执行选中Agent任务，不新增规则。body user_id仅为模拟匹配值，不改变HTTP身份。
       x-source:
         file: api/handler_misc.go
         handler: handleTestRoute
@@ -9430,7 +9430,7 @@ paths:
       summary: Update a platform instance by ID
       description: Locates the existing instance by path.id. Blank provider/name retain old values; omitted config
         retains the old config, but omitted enabled is still false. Stops the old instance before writing and
-        optionally starting it; rename is allowed. Response updated_at uses HTTP-date, whereas list timestamps
+        optionally starting it; rename within the same platform atomically migrates exact old-name routing rules and publishes runtime routing after commit. Existing frozen delivery targets are unchanged. Response updated_at uses HTTP-date, whereas list timestamps
         use RFC3339.
       tags:
         - automation-connections
@@ -23832,9 +23832,18 @@ components:
         AllowRawTeX:
           type: boolean
           default: false
+        pdf_header_footer:
+          type: boolean
+          default: true
+          description: PDF-only; false omits headers and footers for an explicit user request.
+        pdf_layout:
+          type: string
+          enum: [standard, custom]
+          default: standard
+          description: PDF-only; custom skips the shared layout for explicitly requested Markdown/frontmatter formatting.
       required: []
       additionalProperties: false
-      description: Go公开字段没有json tag；采用Locale/AllowRawHTML/AllowRawTeX，解码大小写不敏感；不接受allow_raw_html等下划线拼法。Markdown
+      description: 既有字段采用Locale/AllowRawHTML/AllowRawTeX，新PDF选项使用pdf_header_footer/pdf_layout，解码大小写不敏感；不接受allow_raw_html等下划线拼法。Markdown
         frontmatter.lang优先于Locale。
     KnowledgeRenderRequest:
       type: object

@@ -184,6 +184,10 @@ curl --fail-with-body "$BASE_URL/api/v1/documents/preview/$PREVIEW_TOKEN?dl=1" \
 | `Locale` | string | 可省略; default="zh-CN" |
 | `AllowRawHTML` | boolean | 可省略; default=false |
 | `AllowRawTeX` | boolean | 可省略; default=false |
+| `pdf_header_footer` | boolean | 可省略，默认true；仅用户明确要求时设false，本次PDF不显示页眉页脚。 |
+| `pdf_layout` | string: standard, custom | 可省略，默认standard；custom仅用于用户指定特殊格式，跳过共享PDF模板。 |
+
+桌面、智能体、IM和工作流新生成PDF默认共用已确认版式；本次例外有独立缓存，不扩大原生HTML/TeX权限。原已冻结PDF不重写。
 
 ### `KnowledgeRenderErrorResponse`
 
