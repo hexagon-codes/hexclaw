@@ -18,6 +18,8 @@ const elementaryQuantityNumberPattern = `[0-9]+(?:\.[0-9]+|/[0-9]+)?`
 // 带分数必须在普通分数之前匹配，保留整数与分数之间的分隔。
 const answerQuantityNumberPattern = `([+\-]?(?:[0-9]+(?:[ \t]+|又)[0-9]+[ \t]*/[ \t]*[0-9]+|[0-9]+(?:\.[0-9]+)?(?:/[0-9]+)?))`
 
+var answerQuantityUnitPattern = elementarymath.UnitPattern()
+
 var (
 	elementaryParenthesizedFractionRe = regexp.MustCompile(`\(([0-9]+)\)/\(([0-9]+)\)`)
 	inverseFractionProblemRe          = regexp.MustCompile(`^(?:[0-9]+[.．、])?一个数的([0-9]+)/([0-9]+)是` + elementaryNumberPattern + `[，,。.]?(?:求(?:这个数|原数)(?:是多少)?|(?:这个数|原数)(?:是)?多少)[?？。.]?$`)
@@ -36,15 +38,15 @@ var (
 	elementaryQuantityScopeRe   = regexp.MustCompile(`^(?:([1-9][0-9]*)|\(([1-9][0-9]*)\)|（([1-9][0-9]*)）)$`)
 	elementarySeparatedNumberRe = regexp.MustCompile(`[0-9.][\s\p{Zs}]+[0-9.]`)
 
-	finalQuantityMarkerRe = regexp.MustCompile(`(?i)(?:答案?|答)\s*(?:是|为)?\s*[:：]?\s*` + answerQuantityNumberPattern + `\s*(平方米|千克|公斤|张纸|张|本|段|人|m²|m2|kg|克|米|g|m)?`)
+	finalQuantityMarkerRe = regexp.MustCompile(`(?i)(?:答案?|答)\s*(?:是|为)?\s*[:：]?\s*` + answerQuantityNumberPattern + `\s*(` + answerQuantityUnitPattern + `)?`)
 	removedNumberMarkerRe = regexp.MustCompile(`划去(?:数)?\s*[:：]?\s*([+\-]?[0-9]+)`)
-	bareQuantityRe        = regexp.MustCompile(`(?i)^\s*` + answerQuantityNumberPattern + `\s*(平方厘米|cm²|cm\^?2|平方米|千克|公斤|千米|公里|张纸|张|本|段|人|份|m²|m2|kg|km|克|米|g|m)?\s*$`)
+	bareQuantityRe        = regexp.MustCompile(`(?i)^\s*` + answerQuantityNumberPattern + `\s*(` + answerQuantityUnitPattern + `)?\s*$`)
 	bareAnswerRatioRe     = regexp.MustCompile(`^\s*` + answerQuantityNumberPattern + `\s*[:：∶]\s*` + answerQuantityNumberPattern + `\s*$`)
 	finalNamedCountRe     = regexp.MustCompile(`^([\p{Han}]+)(?:有|是|为)\s*` + answerQuantityNumberPattern + `\s*(本|段|人)$`)
 	finalLabeledCountsRe  = regexp.MustCompile(`^\s*([\p{Han}]+)\s*` + answerQuantityNumberPattern + `\s*(本|段|人)\s*[,，;；、]\s*([\p{Han}]+)\s*` + answerQuantityNumberPattern + `\s*(本|段|人)\s*$`)
 	equivalentQuantityRe  = regexp.MustCompile(`^\s*(.+?)[（(]\s*(?:也就是|即)\s*(.+?)[）)]\s*$`)
-	equationQuantityRe    = regexp.MustCompile(`(?i)[=＝]\s*` + answerQuantityNumberPattern + `(?:\s*(?:[（(]\s*)?(平方米|千克|公斤|张纸|张|本|段|人|m²|m\^?2|kg|克|米|g|m)(?:\s*[）)])?)?`)
-	equationUnitSuffixRe  = regexp.MustCompile(`(?i)\s*(?:[（(]\s*)?(?:平方米|千克|公斤|张纸|张|本|段|人|m²|m\^?2|kg|克|米|g|m)(?:\s*[）)])?\s*$`)
+	equationQuantityRe    = regexp.MustCompile(`(?i)[=＝]\s*` + answerQuantityNumberPattern + `(?:\s*(?:[（(]\s*)?(` + answerQuantityUnitPattern + `)(?:\s*[）)])?)?`)
+	equationUnitSuffixRe  = regexp.MustCompile(`(?i)\s*(?:[（(]\s*)?(?:` + answerQuantityUnitPattern + `)(?:\s*[）)])?\s*$`)
 )
 
 type elementaryWordSolution struct {
@@ -687,26 +689,7 @@ func parseAnswerQuantity(answer string) (answerQuantity, bool) {
 }
 
 func normalizeAnswerUnit(unit string) string {
-	switch strings.ToLower(strings.TrimSpace(unit)) {
-	case "千克", "公斤", "kg":
-		return "千克"
-	case "克", "g":
-		return "克"
-	case "平方厘米", "cm²", "cm2", "cm^2":
-		return "平方厘米"
-	case "平方米", "m²", "m2", "m^2":
-		return "平方米"
-	case "米", "m":
-		return "米"
-	case "千米", "公里", "km":
-		return "千米"
-	case "张纸", "张":
-		return unit
-	case "本", "段", "人", "份":
-		return unit
-	default:
-		return ""
-	}
+	return elementarymath.NormalizeUnit(unit)
 }
 
 // 比按前项与后项的顺序比较，不能当成无序数集或省略单位的标量。
