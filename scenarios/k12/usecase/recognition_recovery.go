@@ -112,7 +112,7 @@ func (o *GradingOrchestrator) AuthorizeRecognitionRecovery(ctx context.Context, 
 	if err != nil {
 		return zero, err
 	}
-	if page.Digest != runtime.Header.PageDigest || recognizingInvocationDigest(run.req.Image, job.Fields.ModelSnapshot, prior.RequestPolicySnapshot, run.req.InitialReadMode) != prior.RequestDigest {
+	if page.Digest != runtime.Header.PageDigest || recognizingInvocationDigest(run.req.Image, job.Fields.ModelSnapshot, prior.RequestPolicySnapshot, run.req.InitialReadMode, k12.RecognitionImageScopeInputIdentityV1(run.req.ImageScope)) != prior.RequestDigest {
 		return zero, fmt.Errorf("%w: frozen recognition input changed", ErrInvalidInput)
 	}
 	sourceTimeout := source.EffectiveTimeoutMS

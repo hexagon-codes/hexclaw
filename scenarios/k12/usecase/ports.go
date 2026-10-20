@@ -220,19 +220,20 @@ type RecognizedQuestion struct {
 
 	// OCR 原始转写与 canonical Markdown/LaTeX 是两份独立事实。Raw* 一经识别不得被
 	// 家长修正或增强模型覆盖；canonical 可在显式确认时形成新版本。
-	RawTranscription             string          `json:"raw_transcription,omitempty"`
-	CanonicalMarkdown            string          `json:"canonical_markdown,omitempty"`
-	AnswerRawTranscription       string          `json:"answer_raw_transcription,omitempty"`
-	AnswerCanonicalMarkdown      string          `json:"answer_canonical_markdown,omitempty"`
-	CanonicalVersion             int             `json:"canonical_version,omitempty"`
-	ConfirmedVersion             int             `json:"confirmed_version,omitempty"`
-	InputDigest                  string          `json:"input_digest,omitempty"`
-	RecognitionConfidence        *float64        `json:"recognition_confidence,omitempty"`
-	OCRSignals                   []string        `json:"ocr_signals,omitempty"`
-	EvidenceTranscriptions       []string        `json:"evidence_transcriptions,omitempty"`
-	AnswerEvidenceTranscriptions []string        `json:"answer_evidence_transcriptions,omitempty"`
-	ConfirmationRequired         bool            `json:"confirmation_required,omitempty"`
-	ConfirmationReasons          []OCRRiskReason `json:"confirmation_reasons,omitempty"`
+	RawTranscription             string                               `json:"raw_transcription,omitempty"`
+	ImageSourceContext           *k12.RecognitionImageSourceContextV1 `json:"image_source_context,omitempty"`
+	CanonicalMarkdown            string                               `json:"canonical_markdown,omitempty"`
+	AnswerRawTranscription       string                               `json:"answer_raw_transcription,omitempty"`
+	AnswerCanonicalMarkdown      string                               `json:"answer_canonical_markdown,omitempty"`
+	CanonicalVersion             int                                  `json:"canonical_version,omitempty"`
+	ConfirmedVersion             int                                  `json:"confirmed_version,omitempty"`
+	InputDigest                  string                               `json:"input_digest,omitempty"`
+	RecognitionConfidence        *float64                             `json:"recognition_confidence,omitempty"`
+	OCRSignals                   []string                             `json:"ocr_signals,omitempty"`
+	EvidenceTranscriptions       []string                             `json:"evidence_transcriptions,omitempty"`
+	AnswerEvidenceTranscriptions []string                             `json:"answer_evidence_transcriptions,omitempty"`
+	ConfirmationRequired         bool                                 `json:"confirmation_required,omitempty"`
+	ConfirmationReasons          []OCRRiskReason                      `json:"confirmation_reasons,omitempty"`
 	// 仅评估副本使用的父题依赖风险；从冻结父题推导，不写回学生或题干事实。
 	parentSourceUnclear bool
 	// 父材料合并前的同代次当前题面，仅评估副本携带，不序列化为另一份来源。

@@ -63,6 +63,8 @@ type RecognitionLayoutManifestTargetV2 struct {
 }
 
 type RecognitionLayoutPlanInputV2 struct {
+	ScopeInput               *RecognitionImageScopeInputV1
+	Scope                    *RecognitionImageScopeV1
 	InitialReadMode          string
 	PagePNG                  []byte
 	Manifest                 RecognitionLayoutManifestSuccessV2
@@ -74,6 +76,7 @@ type RecognitionLayoutPlanInputV2 struct {
 // RecognitionLayoutTargetV2 仅包含本地派生的持久事实。
 // 源裁剪字节或模型选择的持久标识均不会进入计划。
 type RecognitionLayoutTargetV2 struct {
+	ManifestOrder      int               `json:"manifest_order,omitempty"`
 	TargetID           string            `json:"target_id"`
 	SourceNumberPath   []string          `json:"source_number_path"`
 	DisplayLabel       string            `json:"display_label"`
@@ -96,16 +99,19 @@ type RecognitionLayoutBatchV2 struct {
 // RecognitionLayoutPlanV2 可安全持久化：它包含标识、源像素区域和摘要，
 // 但绝不包含源图像或裁剪字节。
 type RecognitionLayoutPlanV2 struct {
-	InitialReadMode      string                      `json:"initial_read_mode,omitempty"`
-	Version              int                         `json:"version"`
-	RecognitionFormat    string                      `json:"recognition_format,omitempty"`
-	SourceAdjudication   bool                        `json:"source_adjudication,omitempty"`
-	PageDigest           string                      `json:"page_digest"`
-	ManifestInvocationID string                      `json:"manifest_invocation_id"`
-	ManifestResultDigest string                      `json:"manifest_result_digest"`
-	Targets              []RecognitionLayoutTargetV2 `json:"targets"`
-	Batches              []RecognitionLayoutBatchV2  `json:"batches"`
-	AuthorizedPlanDigest string                      `json:"authorized_plan_digest"`
+	ScopeInput           *RecognitionImageScopeInputV1 `json:"scope_input,omitempty"`
+	Scope                *RecognitionImageScopeV1      `json:"scope,omitempty"`
+	ObservedTargets      []RecognitionLayoutTargetV2   `json:"observed_targets,omitempty"`
+	InitialReadMode      string                        `json:"initial_read_mode,omitempty"`
+	Version              int                           `json:"version"`
+	RecognitionFormat    string                        `json:"recognition_format,omitempty"`
+	SourceAdjudication   bool                          `json:"source_adjudication,omitempty"`
+	PageDigest           string                        `json:"page_digest"`
+	ManifestInvocationID string                        `json:"manifest_invocation_id"`
+	ManifestResultDigest string                        `json:"manifest_result_digest"`
+	Targets              []RecognitionLayoutTargetV2   `json:"targets"`
+	Batches              []RecognitionLayoutBatchV2    `json:"batches"`
+	AuthorizedPlanDigest string                        `json:"authorized_plan_digest"`
 }
 
 // BuildRecognitionLayoutPlanV2 校验成功的紧凑清单并派生一个不可变精确集合计划。
@@ -249,6 +255,9 @@ func BuildRecognitionLayoutPlanV2(input RecognitionLayoutPlanInputV2) (Recogniti
 			Region:             target.Region,
 			CropDigest:         recognitionLayoutSHA256(crop),
 		})
+		if input.Scope != nil {
+			plan.Targets[len(plan.Targets)-1].ManifestOrder = target.ManifestOrder
+		}
 		if input.InitialReadMode == RecognitionLayoutManifestWithContentV1 {
 			original := originalByRef[target.ManifestRef]
 			plan.Targets[len(plan.Targets)-1].OriginalRegion = &original
@@ -266,6 +275,31 @@ func BuildRecognitionLayoutPlanV2(input RecognitionLayoutPlanInputV2) (Recogniti
 		}
 	}
 
+	if input.Scope != nil {
+		// 完整候选先参与扩边与标识派生，之后才生成应答集合。
+		plan.ScopeInput, plan.Scope = input.ScopeInput, input.Scope
+		plan.ObservedTargets = append([]RecognitionLayoutTargetV2(nil), plan.Targets...)
+		selected := map[int]bool{}
+		for _, order := range input.Scope.SelectedOrders {
+			selected[order] = true
+		}
+		plan.Targets = nil
+		for _, target := range plan.ObservedTargets {
+			if selected[target.ManifestOrder] {
+				plan.Targets = append(plan.Targets, target)
+			}
+		}
+		if err := validateRecognitionImageScopeV1(plan); err != nil {
+			return RecognitionLayoutPlanV2{}, err
+		}
+		for _, dependency := range input.Scope.Dependencies {
+			if err := validateRecognitionLayoutRegionV2(dependency.Region, pageBounds); err != nil {
+				return RecognitionLayoutPlanV2{}, err
+			}
+		}
+	} else if input.ScopeInput != nil {
+		return RecognitionLayoutPlanV2{}, fmt.Errorf("image scope response is missing")
+	}
 	contactHeight := recognitionLayoutContactHeightV2
 	if plan.RecognitionFormat == RecognitionLayoutCompactV1 || plan.RecognitionFormat == RecognitionLayoutCompactV2 || plan.RecognitionFormat == RecognitionLayoutCompactV3 || plan.RecognitionFormat == RecognitionLayoutCompactV4 {
 		contactHeight = recognitionLayoutCompactHeightV1
@@ -890,16 +924,20 @@ func RebindRecognitionLayoutManifestV2(plan RecognitionLayoutPlanV2, manifestID 
 
 func recognitionLayoutAuthorizedPlanDigestV2(plan RecognitionLayoutPlanV2) (string, error) {
 	canonical := struct {
-		InitialReadMode      string                      `json:"initial_read_mode,omitempty"`
-		Contract             string                      `json:"contract"`
-		Version              int                         `json:"version"`
-		RecognitionFormat    string                      `json:"recognition_format,omitempty"`
-		PageDigest           string                      `json:"page_digest"`
-		ManifestInvocationID string                      `json:"manifest_invocation_id"`
-		ManifestResultDigest string                      `json:"manifest_result_digest"`
-		Targets              []RecognitionLayoutTargetV2 `json:"targets"`
-		Batches              []RecognitionLayoutBatchV2  `json:"batches"`
+		ScopeInput           *RecognitionImageScopeInputV1 `json:"scope_input,omitempty"`
+		Scope                *RecognitionImageScopeV1      `json:"scope,omitempty"`
+		ObservedTargets      []RecognitionLayoutTargetV2   `json:"observed_targets,omitempty"`
+		InitialReadMode      string                        `json:"initial_read_mode,omitempty"`
+		Contract             string                        `json:"contract"`
+		Version              int                           `json:"version"`
+		RecognitionFormat    string                        `json:"recognition_format,omitempty"`
+		PageDigest           string                        `json:"page_digest"`
+		ManifestInvocationID string                        `json:"manifest_invocation_id"`
+		ManifestResultDigest string                        `json:"manifest_result_digest"`
+		Targets              []RecognitionLayoutTargetV2   `json:"targets"`
+		Batches              []RecognitionLayoutBatchV2    `json:"batches"`
 	}{
+		ScopeInput: plan.ScopeInput, Scope: plan.Scope, ObservedTargets: plan.ObservedTargets,
 		InitialReadMode:      plan.InitialReadMode,
 		Contract:             "recognition_layout_authorized_plan_v2",
 		Version:              plan.Version,

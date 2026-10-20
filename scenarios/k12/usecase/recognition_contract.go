@@ -1080,25 +1080,27 @@ func FreezeRecognizedQuestionInputDigests(questions []RecognizedQuestion, gradin
 			stem = strings.TrimSpace(parents[q.ParentProblemID]) + "\n\n" + strings.TrimSpace(stem)
 		}
 		payload := struct {
-			ProblemKind          ProblemKind `json:"problem_kind"`
-			Stem                 string      `json:"stem_markdown"`
-			Answer               string      `json:"answer_markdown"`
-			AnswerState          AnswerState `json:"answer_state"`
-			Subject              string      `json:"subject"`
-			Subproblem           string      `json:"subproblem_no,omitempty"`
-			SourceNumberPath     []string    `json:"source_number_path,omitempty"`
-			DisplayLabel         string      `json:"display_label,omitempty"`
-			SourceSectionPath    []string    `json:"source_section_path,omitempty"`
-			SourceSectionLabel   string      `json:"source_section_label,omitempty"`
-			SystemSectionOrdinal int         `json:"system_section_ordinal,omitempty"`
-			SystemDisplayLabel   string      `json:"system_display_label,omitempty"`
-			Context              string      `json:"context,omitempty"`
+			ProblemKind          ProblemKind                          `json:"problem_kind"`
+			Stem                 string                               `json:"stem_markdown"`
+			Answer               string                               `json:"answer_markdown"`
+			AnswerState          AnswerState                          `json:"answer_state"`
+			Subject              string                               `json:"subject"`
+			Subproblem           string                               `json:"subproblem_no,omitempty"`
+			SourceNumberPath     []string                             `json:"source_number_path,omitempty"`
+			DisplayLabel         string                               `json:"display_label,omitempty"`
+			SourceSectionPath    []string                             `json:"source_section_path,omitempty"`
+			SourceSectionLabel   string                               `json:"source_section_label,omitempty"`
+			SystemSectionOrdinal int                                  `json:"system_section_ordinal,omitempty"`
+			SystemDisplayLabel   string                               `json:"system_display_label,omitempty"`
+			Context              string                               `json:"context,omitempty"`
+			ImageSourceContext   *k12.RecognitionImageSourceContextV1 `json:"image_source_context,omitempty"`
 		}{
 			q.ProblemKind, stem, q.AnswerCanonicalMarkdown, q.AnswerState, q.Subject,
 			q.SubproblemNo, append([]string(nil), q.SourceNumberPath...), q.DisplayLabel,
 			append([]string(nil), q.SourceSectionPath...), q.SourceSectionLabel,
 			q.SystemSectionOrdinal, q.SystemDisplayLabel,
 			contextValue,
+			q.ImageSourceContext,
 		}
 		raw, _ := json.Marshal(payload)
 		sum := sha256.Sum256(raw)

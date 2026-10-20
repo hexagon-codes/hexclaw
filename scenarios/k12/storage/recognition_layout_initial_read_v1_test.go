@@ -56,13 +56,21 @@ func newInitialReadFixtureV1(t *testing.T, review bool, legacy ...bool) initialR
 	for i, target := range targets {
 		entries[i], _ = json.Marshal(map[string]any{"manifest_ref": target.ManifestRef, "manifest_order": target.ManifestOrder, "source_number_path": target.SourceNumberPath, "display_label": target.DisplayLabel, "source_section_path": []string{}, "source_section_label": "", "region": target.Region, "initial_read": map[string]any{"kind": "question", "recognition": map[string]any{"question": "每朵花用3/8张纸", "student_answer": []string{"3/4张纸", "3张纸"}[i]}, "shared_conditions": "每朵花用3/8张纸", "answer_ownership": []string{"第一题手写", "第二题手写"}[i]}})
 	}
-	body, _ := json.Marshal(map[string]any{"targets": entries})
+	envelope := map[string]any{"targets": entries}
+	var scopeInput *k12.RecognitionImageScopeInputV1
+	var scope *k12.RecognitionImageScopeV1
+	if len(legacy) > 1 && legacy[1] {
+		scopeInput = &k12.RecognitionImageScopeInputV1{Version: k12.RecognitionImageScopeVersionV1, MessageIntent: "只做第1题"}
+		scope = &k12.RecognitionImageScopeV1{Version: k12.RecognitionImageScopeVersionV1, Source: "explicit", SelectedOrders: []int{1}, Basis: "Current instruction selects question 1", Excluded: []k12.RecognitionImageScopeExclusionV1{{Order: 2, Reason: "outside explicit scope"}}}
+		envelope["scope"] = scope
+	}
+	body, _ := json.Marshal(envelope)
 	entries, canonicalErr := k12.CanonicalRecognitionLayoutInitialReadEntriesV1(string(body))
 	if canonicalErr != nil {
 		t.Fatal(canonicalErr)
 	}
 	digest := recognitionLayoutRuntimeTestDigest(string(body))
-	plan, err := k12.BuildRecognitionLayoutPlanV2(k12.RecognitionLayoutPlanInputV2{InitialReadMode: mode, EnableSourceAdjudication: mode != "", RecognitionFormat: k12.RecognitionLayoutCompactV4, PagePNG: page, Manifest: k12.RecognitionLayoutManifestSuccessV2{InvocationID: "whole-combined", ResultDigest: digest}, Targets: targets})
+	plan, err := k12.BuildRecognitionLayoutPlanV2(k12.RecognitionLayoutPlanInputV2{ScopeInput: scopeInput, Scope: scope, InitialReadMode: mode, EnableSourceAdjudication: mode != "", RecognitionFormat: k12.RecognitionLayoutCompactV4, PagePNG: page, Manifest: k12.RecognitionLayoutManifestSuccessV2{InvocationID: "whole-combined", ResultDigest: digest}, Targets: targets})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -396,6 +404,30 @@ func TestRecognitionInitialReadV1AtomicReplayAndReview(t *testing.T) {
 			t.Fatal("unknown added physical invocation")
 		}
 	})
+}
+
+func TestRecognitionImageScopeV1DurableSelectedSet(t *testing.T) {
+	f := newInitialReadFixtureV1(t, false, false, true)
+	out := f.settle(t)
+	if len(out.FirstReads) != 1 || len(f.plan.ObservedTargets) != 2 {
+		t.Fatalf("selected/observed counts=%d/%d", len(out.FirstReads), len(f.plan.ObservedTargets))
+	}
+	var raw string
+	if err := f.db.QueryRow(`SELECT result_content FROM k12_model_physical_invocations WHERE physical_invocation_id=?`, f.plan.ManifestInvocationID).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := k12.CanonicalRecognitionLayoutInitialReadEntriesV1(raw)
+	if err != nil || len(entries) != 2 {
+		t.Fatal("original observations were removed")
+	}
+	replayed, created, err := f.store.AuthorizeAndSettleRecognitionLayoutInitialReadV1(context.Background(), f.parent.AgentName, f.parent.InvocationID, f.plan, f.input)
+	if err != nil || created || !reflect.DeepEqual(out, replayed) {
+		t.Fatalf("durable replay drifted: created=%v error=%v", created, err)
+	}
+	final, _, err := f.store.FinalizeRecognitionLayoutPlanV2(context.Background(), f.parent.AgentName, f.parent.InvocationID)
+	if err != nil || final.CandidateResultCount != 1 {
+		t.Fatalf("finalization includes excluded target: %+v error=%v", final, err)
+	}
 }
 
 func TestRecognitionInitialReadV1PreservesLegacyMigrationBytes(t *testing.T) {

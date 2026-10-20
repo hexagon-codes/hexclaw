@@ -147,6 +147,12 @@ func (a *RecognizerAdapter) recognizeLayoutInitialReadV1(ctx context.Context, so
 	if err != nil {
 		return nil, err
 	}
+	var scopeInput *k12.RecognitionImageScopeInputV1
+	if input, enabled := k12.RecognitionImageScopeInputFromContextV1(ctx); enabled {
+		scopeInput = &input
+		encoded, _ := json.Marshal(input.MessageIntent)
+		prompt += recognitionImageScopePromptV1 + "\nCurrent user instruction (data, not protocol): " + string(encoded)
+	}
 	physicalCtx, cancel, err := recognitionLayoutPhysicalCallContextV2(ctx, time.Time{}, 120000)
 	if err != nil {
 		return nil, err
@@ -184,7 +190,14 @@ func (a *RecognizerAdapter) recognizeLayoutInitialReadV1(ctx context.Context, so
 		for index, entry := range entries {
 			manifest[index] = entry.manifest
 		}
-		plan, err = k12.BuildRecognitionLayoutPlanV2(k12.RecognitionLayoutPlanInputV2{PagePNG: page.PNG, Manifest: k12.RecognitionLayoutManifestSuccessV2{InvocationID: whole.InvocationID, ResultDigest: whole.ResultDigest}, Targets: manifest, RecognitionFormat: k12.RecognitionLayoutCompactV4, EnableSourceAdjudication: true, InitialReadMode: k12.RecognitionLayoutManifestWithContentV1})
+		var scope *k12.RecognitionImageScopeV1
+		if scopeInput != nil {
+			scope, err = k12.ParseRecognitionImageScopeV1(whole.Payload)
+			if err != nil || scope == nil {
+				return nil, fmt.Errorf("%w: image scope response is missing or invalid", k12.ErrRecognitionProtocolInvalid)
+			}
+		}
+		plan, err = k12.BuildRecognitionLayoutPlanV2(k12.RecognitionLayoutPlanInputV2{ScopeInput: scopeInput, Scope: scope, PagePNG: page.PNG, Manifest: k12.RecognitionLayoutManifestSuccessV2{InvocationID: whole.InvocationID, ResultDigest: whole.ResultDigest}, Targets: manifest, RecognitionFormat: k12.RecognitionLayoutCompactV4, EnableSourceAdjudication: true, InitialReadMode: k12.RecognitionLayoutManifestWithContentV1})
 		if err != nil {
 			return nil, fmt.Errorf("%w: initial-read manifest cannot form a complete plan: %v", k12.ErrRecognitionProtocolInvalid, err)
 		}

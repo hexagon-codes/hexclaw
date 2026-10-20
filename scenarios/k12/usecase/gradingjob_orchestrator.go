@@ -350,6 +350,7 @@ func (o *GradingOrchestrator) StartPhotoGradingJob(ctx context.Context, in Start
 				o.deps.GradingBudgetSnapshot,
 				in.Photo.Image,
 				taskIntent,
+				in.Photo.ImageScope,
 			)
 			if selectErr != nil {
 				return GradingJobView{}, false, fmt.Errorf(
@@ -434,6 +435,7 @@ func trustedPhotoRecognitionCreationPolicy(
 	trusted k12.GradingBudgetSnapshot,
 	image []byte,
 	taskIntent PhotoTaskIntent,
+	imageScopes ...*k12.RecognitionImageScopeInputV1,
 ) (k12.GradingBudgetSnapshot, error) {
 	if err := trusted.Validate(); err != nil {
 		return k12.GradingBudgetSnapshot{}, err
@@ -442,6 +444,10 @@ func trustedPhotoRecognitionCreationPolicy(
 	case k12.RecognitionPlanVersionV1:
 		return trusted, nil
 	case k12.RecognitionPlanVersionV2:
+		// 新范围任务复用已有精确集合计划；旧任务和显式 V1 配置保持原合同。
+		if len(imageScopes) > 0 && imageScopes[0] != nil && imageScopes[0].Version == k12.RecognitionImageScopeVersionV1 {
+			return trusted, nil
+		}
 		if taskIntent != PhotoTaskBlankWorksheet &&
 			k12.ClassifyRecognitionPage(image) == k12.RecognitionPageDense {
 			return trusted, nil
@@ -997,6 +1003,7 @@ func (o *GradingOrchestrator) runRecognize(ctx context.Context, run *gradingRun,
 				job.Fields.ModelSnapshot,
 				policy,
 				run.req.InitialReadMode,
+				k12.RecognitionImageScopeInputIdentityV1(run.req.ImageScope),
 			),
 			policy,
 		)
@@ -1010,6 +1017,7 @@ func (o *GradingOrchestrator) runRecognize(ctx context.Context, run *gradingRun,
 				job.Fields.ModelSnapshot,
 				policy,
 				run.req.InitialReadMode,
+				k12.RecognitionImageScopeInputIdentityV1(run.req.ImageScope),
 			),
 			policy,
 			initialRecognitionLayoutContractV2{
@@ -1147,6 +1155,7 @@ func (o *GradingOrchestrator) runRecognize(ctx context.Context, run *gradingRun,
 		providerCtx,
 		physicalExecutor,
 	)
+	providerCtx = k12.WithRecognitionImageScopeV1(providerCtx, run.req.ImageScope)
 	unregisterProvider := o.registerGradingModelCall(jobID, cancelProvider)
 	if current, readErr := o.deps.GetGradingJob(context.WithoutCancel(ctx), run.agentName, jobID); readErr != nil {
 		cancelProvider()
@@ -1346,6 +1355,7 @@ func (o *GradingOrchestrator) runRecognize(ctx context.Context, run *gradingRun,
 		// 核心识别冻结事实不接纳 geometry；BBox 只能由独立 anchor 分支补入。
 		run.questions[i].BBox = nil
 	}
+	o.recoverImageSourceMaterials(ctx, run, job)
 	// Provider 已返回后先写 Job+Invocation-scoped 不可变结果回执，再把同一事实投影到按
 	// SubmissionID 共享的 Problem/Attempt ledger。后者可能来自另一条同图 Job，
 	// 不能单独证明当前 invocation 成功；回执是 outcome_unknown 自动对账的 provenance。
@@ -2245,6 +2255,12 @@ func cloneRecognizedQuestions(questions []RecognizedQuestion) []RecognizedQuesti
 	out := make([]RecognizedQuestion, len(questions))
 	for i, question := range questions {
 		out[i] = question
+		if question.ImageSourceContext != nil {
+			data, _ := json.Marshal(question.ImageSourceContext)
+			var source k12.RecognitionImageSourceContextV1
+			_ = json.Unmarshal(data, &source)
+			out[i].ImageSourceContext = &source
+		}
 		out[i].KnowledgePoints = append([]string(nil), question.KnowledgePoints...)
 		out[i].OCRSignals = append([]string(nil), question.OCRSignals...)
 		out[i].EvidenceTranscriptions = append([]string(nil), question.EvidenceTranscriptions...)
@@ -2381,6 +2397,9 @@ func recognizingInvocationDigest(
 	policy = k12.NormalizeModelRequestPolicySnapshot(policy)
 	routeJSON, _ := json.Marshal(route)
 	policyJSON, _ := json.Marshal(policy)
+	if len(initialReadModes) > 1 && initialReadModes[1] != "" {
+		return modelInvocationDigest([]byte("k12-recognizing-request-image-scope-v1"), []byte(k12.GradingStageRecognizing), image, routeJSON, policyJSON, []byte(initialReadModes[0]), []byte(initialReadModes[1]))
+	}
 	if len(initialReadModes) != 0 && initialReadModes[0] != "" {
 		return modelInvocationDigest(
 			[]byte("k12-recognizing-request-initial-content-v1"),

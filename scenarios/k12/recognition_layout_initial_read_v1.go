@@ -302,6 +302,12 @@ func CanonicalRecognitionLayoutInitialReadEntriesV1(raw string) ([]json.RawMessa
 		}
 	}
 	var entries []json.RawMessage
+	if _, scoped := envelope["scope"]; scoped {
+		if scope, scopeErr := ParseRecognitionImageScopeV1(raw); scopeErr != nil || scope == nil {
+			return nil, fmt.Errorf("%w: initial read scope is invalid", ErrRecognitionProtocolInvalid)
+		}
+		delete(envelope, "scope")
+	}
 	if _, compact := envelope["format"]; compact {
 		entries, err = canonicalRecognitionLayoutInitialReadCompactV1(envelope)
 		if err != nil {

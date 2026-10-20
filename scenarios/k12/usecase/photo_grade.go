@@ -77,11 +77,12 @@ type PhotoGradeRequest struct {
 	SourceSession               string
 	SourcePageAssetID           string
 	Image                       []byte
-	InitialReadMode             string                 `json:"initial_read_mode,omitempty"`
-	RecognitionExecutionPolicy  string                 `json:"recognition_execution_policy,omitempty"`
-	SolveOutputVersion          string                 `json:"solve_output_version,omitempty"`
-	ParentTeachingContract      string                 `json:"parent_teaching_contract,omitempty"`
-	ParentTeachingSkillSnapshot []skill.ContextReceipt `json:"parent_teaching_skill_snapshot,omitempty"`
+	InitialReadMode             string                            `json:"initial_read_mode,omitempty"`
+	ImageScope                  *k12.RecognitionImageScopeInputV1 `json:"image_scope,omitempty"`
+	RecognitionExecutionPolicy  string                            `json:"recognition_execution_policy,omitempty"`
+	SolveOutputVersion          string                            `json:"solve_output_version,omitempty"`
+	ParentTeachingContract      string                            `json:"parent_teaching_contract,omitempty"`
+	ParentTeachingSkillSnapshot []skill.ContextReceipt            `json:"parent_teaching_skill_snapshot,omitempty"`
 	// TaskIntent is frozen by ImageTaskDispatch. Empty preserves the legacy
 	// direct-photo path which infers intent from recognition evidence.
 	TaskIntent PhotoTaskIntent
@@ -467,6 +468,16 @@ func photoItemGradeRequest(req PhotoGradeRequest, q RecognizedQuestion) GradeReq
 		KnowledgePoints: photoGradeKnowledgePoints(q), PracticeReference: req.practiceReference,
 		SolveOutputVersion: req.SolveOutputVersion, ParentTeachingContract: req.ParentTeachingContract,
 		ParentTeachingSkillSnapshot: req.ParentTeachingSkillSnapshot,
+	}
+	if q.ImageSourceContext != nil {
+		for _, material := range q.ImageSourceContext.Materials {
+			input.Problem += "\n\nRead-only source material (do not answer as another question):\n" + material.Text
+		}
+		for _, recovery := range q.ImageSourceContext.Recoveries {
+			if recovery.State == "verified" && recovery.AdoptedText != "" {
+				input.Problem += "\n\nVerified quotation source (reference only; do not infer missing exercise instructions or student handwriting):\n" + recovery.Gap.Before + recovery.AdoptedText + recovery.Gap.After
+			}
+		}
 	}
 	// 可读投影可能把上下分式写成斜杠；只在完整作答一致时保留原分式作为计算输入，
 	// 避免将除以分数误解为连续除法。识读、展示和持久身份仍使用原字段。

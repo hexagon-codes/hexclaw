@@ -1175,6 +1175,21 @@ func RecognizedQuestionsFromLayoutFinalizationV2(
 			}
 			region := target.Region
 			question.SourceRegion = &region
+			if plan.Scope != nil {
+				question.ImageSourceContext = &k12.RecognitionImageSourceContextV1{ScopeDigest: plan.AuthorizedPlanDigest, TargetIDs: []string{target.TargetID}}
+				for _, dependency := range plan.Scope.Dependencies {
+					for _, order := range dependency.ForOrders {
+						if order == target.ManifestOrder {
+							question.ImageSourceContext.Materials = append(question.ImageSourceContext.Materials, dependency)
+						}
+					}
+				}
+				for _, gap := range plan.Scope.Gaps {
+					if gap.Order == target.ManifestOrder {
+						question.ImageSourceContext.Recoveries = append(question.ImageSourceContext.Recoveries, k12.RecognitionImageSourceRecoveryV1{Gap: gap, State: "unresolved"})
+					}
+				}
+			}
 			if candidate.FinalAnswerReceipt != nil {
 				receipt := *candidate.FinalAnswerReceipt
 				source, found := physicalByID[receipt.SourcePhysicalInvocationID]

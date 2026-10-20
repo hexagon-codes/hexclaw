@@ -1972,6 +1972,7 @@ func (c *ImageTaskCoordinator) continueTarget(
 				SourcePageAssetID: view.Dispatch.SourceAssetRefs[0],
 				Image:             append([]byte(nil), images[0]...),
 				TaskIntent:        photoTaskIntentFromDispatch(view.Dispatch.TaskIntent),
+				ImageScope:        &k12.RecognitionImageScopeInputV1{Version: k12.RecognitionImageScopeVersionV1, MessageIntent: view.Dispatch.MessageIntent},
 				Grade:             strings.TrimSpace(grade),
 			},
 			SourceKind: "image_task", SourceKey: view.Dispatch.DispatchID,

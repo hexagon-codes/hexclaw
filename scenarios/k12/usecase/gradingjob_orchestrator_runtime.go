@@ -1224,6 +1224,7 @@ func (o *GradingOrchestrator) reconcileDurableGradingOutcome(
 			job.Fields.ModelSnapshot,
 			wantPolicy,
 			run.req.InitialReadMode,
+			k12.RecognitionImageScopeInputIdentityV1(run.req.ImageScope),
 		)
 		if invocation.RequestDigest != wantRequestDigest {
 			return false, GradingJobView{}, fmt.Errorf("recognition invocation request digest drift")
@@ -1663,26 +1664,27 @@ func joinOCRRiskReasons(reasons []OCRRiskReason) string {
 
 // gradingRunFile run.json 结构（原图独立存 image.bin，避免每次改写都重写大字节）。
 type gradingRunFile struct {
-	AgentName                   string                     `json:"agent_name"`
-	TextOnly                    bool                       `json:"text_only,omitempty"`
-	Subject                     string                     `json:"subject,omitempty"`
-	Grade                       string                     `json:"grade,omitempty"`
-	SourceSession               string                     `json:"source_session,omitempty"`
-	SourcePageAssetID           string                     `json:"source_page_asset_id,omitempty"`
-	TaskIntent                  PhotoTaskIntent            `json:"task_intent,omitempty"`
-	InitialReadMode             string                     `json:"initial_read_mode,omitempty"`
-	RecognitionExecutionPolicy  string                     `json:"recognition_execution_policy,omitempty"`
-	SolveOutputVersion          string                     `json:"solve_output_version,omitempty"`
-	ParentTeachingContract      string                     `json:"parent_teaching_contract,omitempty"`
-	ParentTeachingSkillSnapshot []skill.ContextReceipt     `json:"parent_teaching_skill_snapshot,omitempty"`
-	SourceUncertaintyFinalized  bool                       `json:"source_uncertainty_finalized,omitempty"`
-	PracticeReferences          []PracticeGradingReference `json:"practice_references,omitempty"`
-	PracticePaperSize           int                        `json:"practice_paper_size,omitempty"`
-	Questions                   []RecognizedQuestion       `json:"questions,omitempty"`
-	Anchored                    []RecognizedQuestion       `json:"anchored,omitempty"`
-	AnchorFailed                bool                       `json:"anchor_failed,omitempty"`
-	RenderFailure               string                     `json:"render_failure,omitempty"`
-	Result                      *PhotoGradeResult          `json:"result,omitempty"`
+	AgentName                   string                            `json:"agent_name"`
+	TextOnly                    bool                              `json:"text_only,omitempty"`
+	Subject                     string                            `json:"subject,omitempty"`
+	Grade                       string                            `json:"grade,omitempty"`
+	SourceSession               string                            `json:"source_session,omitempty"`
+	SourcePageAssetID           string                            `json:"source_page_asset_id,omitempty"`
+	TaskIntent                  PhotoTaskIntent                   `json:"task_intent,omitempty"`
+	InitialReadMode             string                            `json:"initial_read_mode,omitempty"`
+	ImageScope                  *k12.RecognitionImageScopeInputV1 `json:"image_scope,omitempty"`
+	RecognitionExecutionPolicy  string                            `json:"recognition_execution_policy,omitempty"`
+	SolveOutputVersion          string                            `json:"solve_output_version,omitempty"`
+	ParentTeachingContract      string                            `json:"parent_teaching_contract,omitempty"`
+	ParentTeachingSkillSnapshot []skill.ContextReceipt            `json:"parent_teaching_skill_snapshot,omitempty"`
+	SourceUncertaintyFinalized  bool                              `json:"source_uncertainty_finalized,omitempty"`
+	PracticeReferences          []PracticeGradingReference        `json:"practice_references,omitempty"`
+	PracticePaperSize           int                               `json:"practice_paper_size,omitempty"`
+	Questions                   []RecognizedQuestion              `json:"questions,omitempty"`
+	Anchored                    []RecognizedQuestion              `json:"anchored,omitempty"`
+	AnchorFailed                bool                              `json:"anchor_failed,omitempty"`
+	RenderFailure               string                            `json:"render_failure,omitempty"`
+	Result                      *PhotoGradeResult                 `json:"result,omitempty"`
 }
 
 type gradingRecognitionAuditFile struct {
@@ -1748,6 +1750,7 @@ func (o *GradingOrchestrator) persistRun(jobID string, run *gradingRun) error {
 		SourceSession: run.req.SourceSession, SourcePageAssetID: run.req.SourcePageAssetID,
 		TaskIntent:                 run.req.TaskIntent,
 		InitialReadMode:            run.req.InitialReadMode,
+		ImageScope:                 run.req.ImageScope,
 		RecognitionExecutionPolicy: run.req.RecognitionExecutionPolicy,
 		SolveOutputVersion:         run.req.SolveOutputVersion, ParentTeachingContract: run.req.ParentTeachingContract,
 		ParentTeachingSkillSnapshot: run.req.ParentTeachingSkillSnapshot,
@@ -1829,6 +1832,7 @@ func (o *GradingOrchestrator) ensureRun(ctx context.Context, jobID string) (*gra
 			SourceSession: meta.SourceSession, SourcePageAssetID: meta.SourcePageAssetID,
 			TaskIntent: taskIntent, Image: image,
 			InitialReadMode:            meta.InitialReadMode,
+			ImageScope:                 meta.ImageScope,
 			RecognitionExecutionPolicy: meta.RecognitionExecutionPolicy,
 			SolveOutputVersion:         meta.SolveOutputVersion, ParentTeachingContract: meta.ParentTeachingContract,
 			ParentTeachingSkillSnapshot: meta.ParentTeachingSkillSnapshot,

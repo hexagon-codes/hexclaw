@@ -147,7 +147,20 @@ func validateInitialReadSourceV1(ctx context.Context, q dbQueryer, owner, parent
 		return ErrModelPhysicalInvocationConflict
 	}
 	entries, err := k12.CanonicalRecognitionLayoutInitialReadEntriesV1(content)
-	if err != nil || len(entries) != len(in.Candidates) {
+	expectedObservations := len(plan.Targets)
+	if plan.Scope != nil {
+		if k12.ValidateRecognitionImageScopeSourceV1(plan, content) != nil {
+			return ErrModelPhysicalInvocationConflict
+		}
+		expectedObservations = len(plan.ObservedTargets)
+		scope, scopeErr := k12.ParseRecognitionImageScopeV1(content)
+		a, _ := json.Marshal(scope)
+		b, _ := json.Marshal(plan.Scope)
+		if scopeErr != nil || !bytes.Equal(a, b) {
+			return ErrModelPhysicalInvocationConflict
+		}
+	}
+	if err != nil || len(entries) != expectedObservations {
 		return ErrModelPhysicalInvocationConflict
 	}
 	rawEntries := map[string]bool{}
