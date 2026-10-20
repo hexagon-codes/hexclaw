@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -61,7 +62,7 @@ func imFinalReplyTestInput(t *testing.T, text string) (*adapter.Message, *adapte
 }
 
 func TestIMFinalReplyUsesActualPrivateIdentityProducerAndFrozenLocale(t *testing.T) {
-	msg, reply, deps, delivery := imFinalReplyTestInput(t, strings.Repeat("正文", 300))
+	msg, reply, deps, delivery := imFinalReplyTestInput(t, strings.Repeat("正文", 500))
 	beforeMsg, beforeReply := *msg, *reply
 	got, err := maybeDeliverIMFinalReply(t.Context(), msg, reply, nil, deps)
 	if err != nil || got != nil || len(delivery.requests) != 1 || len(delivery.targets) != 1 {
@@ -89,7 +90,7 @@ func TestIMFinalReplyUsesActualPrivateIdentityProducerAndFrozenLocale(t *testing
 func TestIMFinalReplyExistingBatchSuppressesInlineReplyAndHandlerError(t *testing.T) {
 	for _, status := range []k12.DeliveryBatchStatus{k12.DeliveryBatchPending, k12.DeliveryBatchSending, k12.DeliveryBatchDelivered, k12.DeliveryBatchFailed, k12.DeliveryBatchPartialFailed, k12.DeliveryBatchOutcomeUnknown} {
 		t.Run(string(status), func(t *testing.T) {
-			msg, reply, deps, delivery := imFinalReplyTestInput(t, strings.Repeat("正文", 300))
+			msg, reply, deps, delivery := imFinalReplyTestInput(t, strings.Repeat("正文", 500))
 			delivery.batch.Status = status
 			delivery.err = context.DeadlineExceeded
 			got, err := maybeDeliverIMFinalReply(t.Context(), msg, reply, nil, deps)
@@ -101,7 +102,7 @@ func TestIMFinalReplyExistingBatchSuppressesInlineReplyAndHandlerError(t *testin
 }
 
 func TestIMFinalReplyAcceptedWithoutReadbackSuppressesInlineReply(t *testing.T) {
-	msg, reply, deps, delivery := imFinalReplyTestInput(t, strings.Repeat("正文", 300))
+	msg, reply, deps, delivery := imFinalReplyTestInput(t, strings.Repeat("正文", 500))
 	delivery.batch = k12.DeliveryBatch{}
 	delivery.accepted = true
 	delivery.err = errors.New("accepted batch readback failed")
@@ -112,11 +113,11 @@ func TestIMFinalReplyAcceptedWithoutReadbackSuppressesInlineReply(t *testing.T) 
 }
 
 func TestIMFinalReplyReadableThresholdExcludesActualToolDigest(t *testing.T) {
-	body := strings.Repeat("甲", 599)
+	body := strings.Repeat("甲", 999)
 	msg, reply, deps, delivery := imFinalReplyTestInput(t, body)
 	reply.ToolCalls = []adapter.ToolCall{{Name: "code_exec", Status: "success", Result: strings.Repeat("实际工具结果", 20)}}
 	tail := adapter.ToolCallDigest(reply.ToolCalls)
-	if tail == "" || k12usecase.K12FinalReplyReadableCharacters(body+tail) < 600 {
+	if tail == "" || k12usecase.K12FinalReplyReadableCharacters(body+tail) < 1000 {
 		t.Fatal("tool digest fixture did not cross the full-string threshold")
 	}
 	if err := appendIMToolDigestAndRebuildCanonical(reply); err != nil {
@@ -131,8 +132,39 @@ func TestIMFinalReplyReadableThresholdExcludesActualToolDigest(t *testing.T) {
 	}
 }
 
+func TestIMFinalReplyModelSuffixStaysOutsidePDFThresholdAndBody(t *testing.T) {
+	for _, size := range []int{999, 1000} {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			body := "### 标题\n\n" + strings.Repeat("甲", size-3)
+			msg, reply, deps, delivery := imFinalReplyTestInput(t, body)
+			reply.Metadata["provider"], reply.Metadata["provider_display_name"], reply.Metadata["model"] = "stable-id", "مودېل مۇلازىمىتى", "gpt-6.1-sol"
+			reply.ToolCalls = []adapter.ToolCall{{Name: "solve", Result: "### 第一步\n\n原长40米"}}
+			if err := appendIMToolDigestAndRebuildCanonical(reply, "dingtalk"); err != nil {
+				t.Fatal(err)
+			}
+			got, err := maybeDeliverIMFinalReply(t.Context(), msg, reply, nil, deps)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if size == 999 {
+				if got != reply || len(delivery.requests) != 0 {
+					t.Fatal("model or tool suffix pushed a 999-character body into PDF")
+				}
+				return
+			}
+			if got != nil || len(delivery.requests) != 1 {
+				t.Fatal("1000-character body did not create one final PDF request")
+			}
+			req := delivery.requests[0]
+			if req.Message.Content != body || strings.Contains(req.Message.Content, "gpt-6.1-sol") || !strings.Contains(req.DingTalkSuffix, "مودېل مۇلازىمىتى") || !strings.Contains(req.DingTalkSuffix, "gpt-6.1-sol") {
+				t.Fatalf("PDF source changed or caption lost actual model: %+v", req)
+			}
+		})
+	}
+}
+
 func TestIMFinalReplyKnownPreparationFailurePreservesCompleteReply(t *testing.T) {
-	msg, reply, deps, delivery := imFinalReplyTestInput(t, strings.Repeat("正文", 300))
+	msg, reply, deps, delivery := imFinalReplyTestInput(t, strings.Repeat("正文", 500))
 	delivery.batch = k12.DeliveryBatch{}
 	delivery.err = errors.New("PDF preparation failed before delivery")
 	before, _ := json.Marshal(reply)
@@ -186,7 +218,7 @@ func TestIMFinalReplyLeavesNonFinalAndIneligibleInputsOnOriginalPath(t *testing.
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			msg, reply, deps, delivery := imFinalReplyTestInput(t, strings.Repeat("正文", 300))
+			msg, reply, deps, delivery := imFinalReplyTestInput(t, strings.Repeat("正文", 500))
 			tc.change(msg, reply, &deps)
 			got, err := maybeDeliverIMFinalReply(t.Context(), msg, reply, nil, deps)
 			if err != nil || got != reply || len(delivery.requests) != 0 {
@@ -194,7 +226,7 @@ func TestIMFinalReplyLeavesNonFinalAndIneligibleInputsOnOriginalPath(t *testing.
 			}
 		})
 	}
-	msg, reply, deps, delivery := imFinalReplyTestInput(t, strings.Repeat("正文", 300))
+	msg, reply, deps, delivery := imFinalReplyTestInput(t, strings.Repeat("正文", 500))
 	handlerErr := errors.New("original processing failed")
 	if got, err := maybeDeliverIMFinalReply(t.Context(), msg, reply, handlerErr, deps); got != reply || err != handlerErr || len(delivery.requests) != 0 {
 		t.Fatal("original handler error was changed")

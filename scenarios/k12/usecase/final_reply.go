@@ -32,8 +32,11 @@ type FinalReplyDeliveryRequest struct {
 	GradingImageInPDF bool
 }
 
+// FinalReplyPDFMinCharacters 是钉钉长回复生成PDF的统一可读字符阈值。
+const FinalReplyPDFMinCharacters = 1000
+
 func FinalReplyUsesPDF(markdown string, document bool) bool {
-	return document || K12FinalReplyReadableCharacters(markdown) >= 600
+	return document || K12FinalReplyReadableCharacters(markdown) >= FinalReplyPDFMinCharacters
 }
 
 func finalReplySource(req FinalReplyDeliveryRequest, message DeliveryMessage) (*k12.DeliveryProjectionSource, error) {

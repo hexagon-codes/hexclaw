@@ -190,7 +190,7 @@ func dingTalkReplyExecutionSummary(reply *adapter.Reply) adapter.ExecutionSummar
 		}
 		facts.Tools = append(facts.Tools, tool)
 	}
-	model := adapter.ExecutionSummaryModel{Stage: "answer_generation", Provider: reply.Metadata["provider"], Model: reply.Metadata["model"]}
+	model := adapter.ExecutionSummaryModel{Stage: "answer_generation", Provider: reply.Metadata["provider"], ProviderDisplayName: reply.Metadata["provider_display_name"], ProviderInstanceID: reply.Metadata["provider_instance_id"], Model: reply.Metadata["model"]}
 	if reply.Usage != nil {
 		if strings.TrimSpace(model.Model) == "" {
 			model.Model = reply.Usage.Model
@@ -375,7 +375,7 @@ func dingTalkAttachmentBytes(attachment adapter.Attachment) ([]byte, error) {
 	if strings.TrimSpace(attachment.URL) != "" {
 		return nil, errors.New("DingTalk attachment URL sources are forbidden")
 	}
-	if err := validateDingTalkAttachmentName(attachment.Name); err != nil {
+	if err := validateDingTalkAttachmentName(attachment.Name, isPDF); err != nil {
 		return nil, err
 	}
 	encoded := strings.TrimSpace(attachment.Data)

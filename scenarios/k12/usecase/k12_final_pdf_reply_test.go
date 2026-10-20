@@ -153,10 +153,10 @@ func TestK12FinalPDFPolicyUsesVisibleCanonicalOnly(t *testing.T) {
 		want              bool
 	}{
 		{"multiple_blank", k12.ImageTaskIntentBlankWorksheet, 2, 1, true},
-		{"single_short_blank", k12.ImageTaskIntentBlankWorksheet, 1, 599, false},
-		{"single_long_blank", k12.ImageTaskIntentBlankWorksheet, 1, 600, true},
-		{"short_grade", k12.ImageTaskIntentCompletedHomework, 2, 599, false},
-		{"long_grade", k12.ImageTaskIntentCompletedHomework, 2, 600, true},
+		{"single_short_blank", k12.ImageTaskIntentBlankWorksheet, 1, 999, false},
+		{"single_long_blank", k12.ImageTaskIntentBlankWorksheet, 1, 1000, true},
+		{"short_grade", k12.ImageTaskIntentCompletedHomework, 2, 999, false},
+		{"long_grade", k12.ImageTaskIntentCompletedHomework, 2, 1000, true},
 		{"non_image_legacy", "", 2, 900, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

@@ -5,14 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html"
 	"log/slog"
 	"path"
-	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	"github.com/hexagon-codes/hexclaw/internal/mathtext"
 	"github.com/hexagon-codes/hexclaw/messagecontent"
 	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/render"
@@ -48,29 +47,16 @@ func (d Deps) PrepareAndSendGradingFinalArtifactExact(
 		finalArtifact.ArtifactID+":"+finalArtifact.ArtifactDigest, finalArtifact.ArtifactID, finalArtifact.ArtifactDigest, DeliveryMessage{}, nil)
 }
 
-var finalReplyComments = regexp.MustCompile(`(?s)<!--.*?-->`)
-var finalReplyLinks = regexp.MustCompile(`!?\[([^\]]*)\]\([^)]*\)(?:\{[^}]*\})?`)
-var finalReplyControls = regexp.MustCompile(`(?m)^[ \t]*(?:#{1,6}[ \t]+|>[ \t]*|[-+*][ \t]+)|^[ \t]*(?:\x60{3,}|~{3,}).*$|^[ \t|:-]+$`)
-
 // K12FinalReplyReadableCharacters 只数用户可见字符，不把链接目标、图片字节或排版语法算作正文。
 func K12FinalReplyReadableCharacters(markdown string) int {
-	text := finalReplyComments.ReplaceAllString(markdown, "")
-	text = finalReplyLinks.ReplaceAllString(text, "$1")
-	text = finalReplyControls.ReplaceAllString(text, "")
-	text = strings.Map(func(r rune) rune {
-		if strings.ContainsRune("*`_$", r) {
-			return -1
-		}
-		return r
-	}, text)
-	return utf8.RuneCountInString(strings.Join(strings.Fields(html.UnescapeString(text)), " "))
+	return utf8.RuneCountInString(mathtext.PlainMarkdownText(markdown))
 }
 
 func k12FinalReplyUsesPDF(artifact k12.GradingFinalArtifact, intent k12.ImageTaskIntent) bool {
 	if intent != k12.ImageTaskIntentBlankWorksheet && intent != k12.ImageTaskIntentCompletedHomework {
 		return false
 	}
-	return (intent == k12.ImageTaskIntentBlankWorksheet && artifact.TotalCount > 1) || K12FinalReplyReadableCharacters(artifact.CanonicalMarkdown) >= 600
+	return FinalReplyUsesPDF(artifact.CanonicalMarkdown, intent == k12.ImageTaskIntentBlankWorksheet && artifact.TotalCount > 1)
 }
 
 // K12FinalArtifactPDFTitle 由冻结标题与冻结日期派生文件名，不使用内部任务身份。
@@ -360,7 +346,12 @@ func (d Deps) finalReplyExecutionSummary(ctx context.Context, artifact k12.Gradi
 		}
 		// 聚合阶段的声明路由不是物理模型调用；只列独立操作或已关联的真实调用单元。
 		if receipt.ExecutionKind == string(k12.GradingExecutionProvider) && receipt.Model != "" && (stage != "" || receipt.PhysicalUnit != "") {
-			facts.Models = append(facts.Models, messagecontent.ExecutionSummaryModel{Stage: stage, Provider: receipt.Provider, Model: receipt.Model})
+			model := messagecontent.ExecutionSummaryModel{Stage: stage, Provider: receipt.Provider, Model: receipt.Model}
+			if receipt.Provider == dispatch.OperationRouteRequest.Provider {
+				model.ProviderDisplayName = dispatch.OperationRouteRequest.ProviderDisplayName
+				model.ProviderInstanceID = dispatch.OperationRouteRequest.ProviderInstanceID
+			}
+			facts.Models = append(facts.Models, model)
 		}
 	}
 	if solved {

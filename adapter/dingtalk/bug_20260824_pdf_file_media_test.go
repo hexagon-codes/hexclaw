@@ -94,6 +94,69 @@ func TestDingTalkRenderEvidenceAcceptsStrictPDFBytes(t *testing.T) {
 	}
 }
 
+func TestDingTalkPDFParenthesesNameSurvivesCanonicalPreparation(t *testing.T) {
+	for _, name := range []string{"API Markdown acceptance M2 (temporary).pdf", "分数练习 (第1课).pdf"} {
+		t.Run(name, func(t *testing.T) {
+			attachment := validPDFReplyAttachment()
+			attachment.Name = name
+			reply := &adapter.Reply{Content: "请查看练习。", Attachments: []adapter.Attachment{attachment}}
+			if err := ensureDingTalkRenderEvidence(reply); err != nil {
+				t.Fatalf("合法圆括号 PDF 文件名不应被拒绝: %v", err)
+			}
+			part := canonicalDingTalkDeliveryPartsForTest(t, reply.Content, attachment)[1]
+			api := &fakeDingTalkFileMediaAPI{fakeDingtalkOpenAPI: newFakeDingtalkOpenAPI("token"), mediaID: "@parentheses-pdf"}
+			a := newTestAdapter()
+			a.openAPI = api
+			prepared, err := a.PrepareDeliveryPartResource(context.Background(), part)
+			if err != nil || prepared != "@parentheses-pdf" {
+				t.Fatalf("PDF 准备失败: resource=%q error=%v", prepared, err)
+			}
+			if len(api.uploads) != 1 || api.uploads[0].Name != name || api.uploads[0].Data != attachment.Data {
+				t.Fatalf("准备阶段未保留原文件名和字节: %+v", api.uploads)
+			}
+			if len(api.SendCalls()) != 0 {
+				t.Fatal("准备阶段不应发送可见消息")
+			}
+		})
+	}
+}
+
+func TestDingTalkAttachmentNameRestrictionsRemainForPDFAndImage(t *testing.T) {
+	tests := []struct {
+		name  string
+		image bool
+	}{
+		{name: "../report (1).pdf"},
+		{name: `C:\reports\report (1).pdf`},
+		{name: "https://example.invalid/report (1).pdf"},
+		{name: "asset:report (1).pdf"},
+		{name: "report\n(1).pdf"},
+		{name: "report [1].pdf"},
+		{name: "report !1.pdf"},
+		{name: "report `1`.pdf"},
+		{name: "report <1>.pdf"},
+		{name: "homework (1).png", image: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			attachment := validPDFReplyAttachment()
+			if test.image {
+				attachment.Mime = "image/png"
+				attachment.Data = base64.StdEncoding.EncodeToString(testPNGBytes(t))
+			}
+			attachment.Name = test.name
+			reply := &adapter.Reply{Content: "请查看附件。", Attachments: []adapter.Attachment{attachment}}
+			if err := ensureDingTalkRenderEvidence(reply); err == nil {
+				t.Fatal("附件规范化不应放行原有禁止的文件名")
+			}
+			part := adapter.DeliveryPart{MIME: attachment.Mime}
+			if err := validateDingTalkDeliveryPartAttachment(part, attachment, false); err == nil {
+				t.Fatal("已准备附件入口不应放行原有禁止的文件名")
+			}
+		})
+	}
+}
+
 func TestDingTalkPDFUsesAppBoundMediaUploadAndSampleFile(t *testing.T) {
 	attachment := validPDFReplyAttachment()
 	raw, err := base64.StdEncoding.DecodeString(attachment.Data)

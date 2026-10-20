@@ -72,7 +72,7 @@ func newFinalReplyContractFixture(t *testing.T) (Deps, *k12storage.Store, *final
 	transport := &finalReplyContractTransport{finalReplyHTTPTransport: newFinalReplyHTTPTransport(t, store)}
 	renderer := &finalReplyPDFRenderer{}
 	d.Delivery, d.Renderer = transport, renderer
-	req := FinalReplyDeliveryRequest{AgentName: "mingming", ObjectKind: "accumulation", ObjectID: "current-final", SourceKind: k12.PrintSourceTutoringTips, SourceRef: "saved-final-source", Title: "Frozen final reply", Producer: messagecontent.ProducerSkill, Locale: "en", Message: DeliveryMessage{Content: strings.Repeat("甲", 600)}}
+	req := FinalReplyDeliveryRequest{AgentName: "mingming", ObjectKind: "accumulation", ObjectID: "current-final", SourceKind: k12.PrintSourceTutoringTips, SourceRef: "saved-final-source", Title: "Frozen final reply", Producer: messagecontent.ProducerSkill, Locale: "en", Message: DeliveryMessage{Content: strings.Repeat("甲", 1000)}}
 	targets := []ResolvedDeliveryTarget{{BindingID: "existing-direct-binding", Target: k12.DeliveryTarget{Platform: "dingtalk", InstanceID: "stable-dingtalk", ChatID: "authorized-parent", Label: "dingtalk"}}}
 	return d, store, transport, renderer, req, targets
 }
@@ -196,7 +196,7 @@ func TestFinalReplySharedPolicyVisibleBoundary(t *testing.T) {
 	for _, tc := range []struct {
 		chars         int
 		document, pdf bool
-	}{{599, false, false}, {600, false, true}, {1, true, true}} {
+	}{{999, false, false}, {1000, false, true}, {1, true, true}} {
 		if got := FinalReplyUsesPDF(strings.Repeat("甲", tc.chars), tc.document); got != tc.pdf {
 			t.Fatalf("visible chars=%d document=%t: PDF=%t", tc.chars, tc.document, got)
 		}
@@ -205,7 +205,7 @@ func TestFinalReplySharedPolicyVisibleBoundary(t *testing.T) {
 
 func TestFinalReplySharedShortReplyRemainsCompleteSQLite(t *testing.T) {
 	d, store, transport, renderer, req, targets := newFinalReplyContractFixture(t)
-	req.Message.Content = strings.Repeat("甲", 599)
+	req.Message.Content = strings.Repeat("甲", 999)
 	batch, created, err := d.PrepareAndSendFinalReply(t.Context(), req, targets)
 	if err != nil || !created || batch.Status != k12.DeliveryBatchDelivered || len(batch.Receipts) != 1 || renderer.calls != 0 || len(transport.uploads) != 0 || len(transport.sends) != 1 {
 		t.Fatalf("short final reply changed delivery shape: %+v %v", batch, err)

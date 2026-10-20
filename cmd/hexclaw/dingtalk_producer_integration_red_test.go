@@ -89,6 +89,38 @@ func TestIMHandlerToolDigestRebuildsCanonicalPairFromFinalContent(t *testing.T) 
 	}
 }
 
+func TestIMHandlerFreezesModelAfterToolDigestWithoutChangingCanonicalOrAttachment(t *testing.T) {
+	raw := []byte("frozen-attachment-bytes")
+	body := "### 第一步\n\n计算 `2 ** 3`，结果是 **8**。"
+	attachment := adapter.Attachment{Type: "file", Name: "answer.pdf", Mime: "application/pdf", Data: base64.StdEncoding.EncodeToString(raw)}
+	reply := &adapter.Reply{
+		Content: body, Attachments: []adapter.Attachment{attachment},
+		Metadata:  map[string]string{"locale": "zh-CN", "provider": "stable-cloud-id", "provider_display_name": "云端测试", "provider_instance_id": "provider-1", "model": "gpt-6.1-sol"},
+		ToolCalls: []adapter.ToolCall{{Name: "solve", Result: "### 第一步\n\n原长40米"}},
+	}
+	if err := appendIMToolDigestAndRebuildCanonical(reply, "dingtalk"); err != nil {
+		t.Fatal(err)
+	}
+	if reply.Content != body+adapter.ToolCallDigest(reply.ToolCalls) || reply.MessageContent.Markdown != reply.Content || len(reply.Attachments) != 1 || reply.Attachments[0] != attachment {
+		t.Fatalf("canonical body or attachment changed: %+v", reply)
+	}
+	if err := reply.RenderManifest.ValidateFor(*reply.MessageContent); err != nil {
+		t.Fatal(err)
+	}
+	visible := reply.RenderManifest.Parts[0].Text
+	if !strings.Contains(visible, "### 第一步") || !strings.Contains(visible, "`2 ** 3`") || !strings.HasSuffix(visible, "**本次模型**：云端测试 / gpt-6.1-sol") || strings.Count(visible, "本次模型") != 1 {
+		t.Fatalf("frozen projection lost body formatting or actual model suffix: %q", visible)
+	}
+	if strings.Contains(reply.Content, "本次模型") || strings.Contains(visible, "solve · ·") || strings.Contains(visible, "solve · ###") {
+		t.Fatalf("projection leaked syntax or polluted canonical source: %q", visible)
+	}
+	sum := sha256.Sum256(raw)
+	wantDigest := "sha256:" + hex.EncodeToString(sum[:])
+	if reply.MessageContent.Attachments[0].Digest != wantDigest || reply.RenderManifest.Parts[1].ArtifactDigest != wantDigest {
+		t.Fatal("frozen attachment digest changed")
+	}
+}
+
 func TestInstanceMessageSenderBuildsProducerToolCanonicalPairWithAttachmentBytes(t *testing.T) {
 	capture := &producerCaptureSender{}
 	sender := &instanceMessageSender{mgr: capture}

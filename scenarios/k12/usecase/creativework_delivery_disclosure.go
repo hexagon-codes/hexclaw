@@ -145,7 +145,12 @@ func WithCreativeWorkResultDeliveryDisclosure(ctx context.Context, view Creative
 			}
 			facts.Steps = append(facts.Steps, messagecontent.ExecutionSummaryStep{Key: stage, Status: "success"})
 			if receipt.ExecutionKind == string(k12.GradingExecutionProvider) && strings.TrimSpace(receipt.Model) != "" {
-				facts.Models = append(facts.Models, messagecontent.ExecutionSummaryModel{Stage: stage, Provider: receipt.Provider, Model: receipt.Model})
+				model := messagecontent.ExecutionSummaryModel{Stage: stage, Provider: receipt.Provider, Model: receipt.Model}
+				if receipt.Provider == dispatch.OperationRouteRequest.Provider {
+					model.ProviderDisplayName = dispatch.OperationRouteRequest.ProviderDisplayName
+					model.ProviderInstanceID = dispatch.OperationRouteRequest.ProviderInstanceID
+				}
+				facts.Models = append(facts.Models, model)
 			}
 		}
 	}

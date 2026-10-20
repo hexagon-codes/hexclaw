@@ -1521,7 +1521,7 @@ func validateDingTalkDeliveryPartAttachment(part adapter.DeliveryPart, attachmen
 	if !isDingTalkPDFAttachment(attachment) && !strings.HasPrefix(strings.ToLower(attachmentMIME), "image/") {
 		return errors.New("DingTalk artifact delivery part type is unsupported")
 	}
-	if err := validateDingTalkAttachmentName(attachment.Name); err != nil {
+	if err := validateDingTalkAttachmentName(attachment.Name, isDingTalkPDFAttachment(attachment)); err != nil {
 		return err
 	}
 	if !requireBytes {
@@ -1835,7 +1835,7 @@ func safeDingTalkAttachmentName(name string) string {
 	return base
 }
 
-func validateDingTalkAttachmentName(name string) error {
+func validateDingTalkAttachmentName(name string, isPDF bool) error {
 	trimmed := strings.TrimSpace(name)
 	if trimmed == "" {
 		return nil
@@ -1846,7 +1846,12 @@ func validateDingTalkAttachmentName(name string) error {
 	if hasDingTalkAttachmentNameScheme(trimmed) {
 		return errors.New("DingTalk attachment name must not contain a URI scheme or drive prefix")
 	}
-	if hasUnsafeDingTalkMarkdownLabelCharacters(trimmed) {
+	unsafeCharacters := "\r\n[]()!`<>"
+	if isPDF {
+		// PDF 通过文件消息传递，普通圆括号不参与图片 Markdown 标签语法。
+		unsafeCharacters = "\r\n[]!`<>"
+	}
+	if strings.ContainsAny(trimmed, unsafeCharacters) {
 		return errors.New("DingTalk attachment name contains unsafe Markdown characters")
 	}
 	return nil

@@ -25,6 +25,26 @@ type imFinalReplyDependencies struct {
 	getUnitDocument   func(context.Context, string, string, string, string) (k12usecase.UnitSummaryView, error)
 }
 
+// imReplyModelSummary 只读取本轮冻结的实际模型身份，供短回复与 PDF 说明共用。
+func imReplyModelSummary(reply *adapter.Reply, locale string) string {
+	if reply == nil {
+		return ""
+	}
+	model := adapter.ExecutionSummaryModel{
+		Stage: "answer_generation", Provider: reply.Metadata["provider"],
+		ProviderDisplayName: reply.Metadata["provider_display_name"],
+		ProviderInstanceID:  reply.Metadata["provider_instance_id"], Model: reply.Metadata["model"],
+	}
+	if reply.Usage != nil {
+		if strings.TrimSpace(model.Model) == "" {
+			model.Model, model.Provider = reply.Usage.Model, reply.Usage.Provider
+		} else if strings.TrimSpace(model.Provider) == "" && model.Model == reply.Usage.Model {
+			model.Provider = reply.Usage.Provider
+		}
+	}
+	return adapter.RenderExecutionSummary(locale, adapter.ExecutionSummary{Models: []adapter.ExecutionSummaryModel{model}})
+}
+
 func newIMFinalReplyDependencies(deps *k12usecase.Deps, resolve func(string, string) (string, error), units *k12usecase.UnitSummaryCoordinator) imFinalReplyDependencies {
 	result := imFinalReplyDependencies{delivery: deps, resolveInstanceID: resolve, ownerID: deps.TextbookOwnerID}
 	if units != nil {
@@ -63,7 +83,7 @@ func maybeDeliverIMFinalReply(ctx context.Context, msg *adapter.Message, reply *
 	if len(reply.ToolCalls) > 0 {
 		readableBody = strings.TrimSuffix(readableBody, adapter.ToolCallDigest(reply.ToolCalls))
 	}
-	if !hasUnit && k12usecase.K12FinalReplyReadableCharacters(readableBody) < 600 {
+	if !hasUnit && !k12usecase.FinalReplyUsesPDF(readableBody, false) {
 		return reply, handlerErr
 	}
 	instanceID, err := deps.resolveInstanceID(string(msg.Platform), msg.InstanceID)
@@ -88,8 +108,8 @@ func maybeDeliverIMFinalReply(ctx context.Context, msg *adapter.Message, reply *
 	request := k12usecase.FinalReplyDeliveryRequest{
 		AgentName: proof.AgentName, ObjectKind: "im_final_reply", ObjectID: objectID,
 		SourceKind: k12.PrintSourceIMFinalReply, SourceRef: reply.AssistantMessageID,
-		Message: k12usecase.DeliveryMessage{Content: canonical.Markdown}, Producer: canonical.ProducerKind,
-		Locale: locale, PrivateEvent: &proof,
+		Message: k12usecase.DeliveryMessage{Content: readableBody}, Producer: canonical.ProducerKind,
+		Locale: locale, PrivateEvent: &proof, DingTalkSuffix: imReplyModelSummary(reply, locale),
 	}
 	if hasUnit {
 		completeDocument, err := fillIMFinalReplyUnitPDF(ctx, deps, unit, &request)
@@ -199,7 +219,7 @@ func fillIMFinalReplyUnitPDF(ctx context.Context, deps imFinalReplyDependencies,
 	}
 	request.SourceKind, request.SourceRef = k12.PrintSourceUnitSummary, string(source)
 	request.Title, request.Document, request.PDF = material.Title, true, &pdf
-	if k12usecase.K12FinalReplyReadableCharacters(request.Message.Content) < 600 {
+	if !k12usecase.FinalReplyUsesPDF(request.Message.Content, false) {
 		request.Summary = request.Message.Content
 	}
 	return true, nil

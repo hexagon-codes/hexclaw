@@ -50,6 +50,7 @@ import (
 	genstore "github.com/hexagon-codes/toolkit/blobstore"
 
 	"github.com/hexagon-codes/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/adapter/dingtalk"
 	webadapter "github.com/hexagon-codes/hexclaw/adapter/web"
 	"github.com/hexagon-codes/hexclaw/agents"
 	"github.com/hexagon-codes/hexclaw/api"
@@ -67,7 +68,6 @@ import (
 	"github.com/hexagon-codes/hexclaw/gateway"
 	"github.com/hexagon-codes/hexclaw/heartbeat"
 	"github.com/hexagon-codes/hexclaw/instances"
-	"github.com/hexagon-codes/hexclaw/internal/mathtext"
 	"github.com/hexagon-codes/hexclaw/knowledge"
 	"github.com/hexagon-codes/hexclaw/library"
 	"github.com/hexagon-codes/hexclaw/llmrouter"
@@ -4331,6 +4331,20 @@ func canonicalIMChannelMessage(
 	atts []adapter.Attachment,
 	platform ...string,
 ) (channel.Message, error) {
+	channelPlatform := ""
+	if len(platform) > 0 {
+		channelPlatform = platform[0]
+	}
+	return canonicalIMChannelMessageWithSummary(producer, locale, content, atts, channelPlatform, "")
+}
+
+// canonicalIMChannelMessageWithSummary 在冻结渠道投影前追加执行说明，不改变规范正文。
+func canonicalIMChannelMessageWithSummary(
+	producer messagecontent.ProducerKind,
+	locale, content string,
+	atts []adapter.Attachment,
+	platform, summary string,
+) (channel.Message, error) {
 	attachments := make([]channel.Attachment, 0, len(atts))
 	for _, attachment := range atts {
 		if strings.TrimSpace(attachment.URL) != "" {
@@ -4355,14 +4369,8 @@ func canonicalIMChannelMessage(
 	if projected != content {
 		fallbackReason = messagecontent.FallbackMathToReadableText
 	}
-	if len(platform) > 0 && platform[0] == "dingtalk" {
-		if normalized := mathtext.NormalizeDingTalkMarkdown(projected); normalized != projected {
-			projected = normalized
-			if fallbackReason != "" {
-				fallbackReason += "+"
-			}
-			fallbackReason += "dingtalk_emphasis"
-		}
+	if platform == "dingtalk" {
+		projected, fallbackReason = dingtalk.ProjectMarkdownText(content, summary)
 	}
 	message, err := channel.NewCanonicalMarkdownMessageWithAttachments(
 		producer, locale, content, projected, fallbackReason, attachments,
@@ -4393,7 +4401,14 @@ func appendIMToolDigestAndRebuildCanonical(reply *adapter.Reply, platform ...str
 		}
 	}
 	reply.Content += adapter.ToolCallDigest(reply.ToolCalls)
-	message, err := canonicalIMChannelMessage(producer, locale, reply.Content, reply.Attachments, platform...)
+	channelPlatform, summary := "", ""
+	if len(platform) > 0 {
+		channelPlatform = platform[0]
+	}
+	if channelPlatform == "dingtalk" {
+		summary = imReplyModelSummary(reply, locale)
+	}
+	message, err := canonicalIMChannelMessageWithSummary(producer, locale, reply.Content, reply.Attachments, channelPlatform, summary)
 	if err != nil {
 		return err
 	}
