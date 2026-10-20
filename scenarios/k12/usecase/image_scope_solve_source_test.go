@@ -75,3 +75,37 @@ func TestImageScopeVerifiedQuotationDoesNotRewriteOCR(t *testing.T) {
 		t.Fatal("textbook quotation was used to complete an exercise instruction")
 	}
 }
+
+func TestImageScopeLanguageInitialReadKeepsSourceRiskAndLegacyPolicy(t *testing.T) {
+	confidence := 0.99
+	q := NormalizeRecognizedQuestion(RecognizedQuestion{Question: "找出句中的比喻。", Subject: "语文", RecognitionConfidence: &confidence, AnswerState: AnswerStatePresent, StudentAnswer: "原始手写"})
+	input := &k12.RecognitionImageScopeInputV1{Version: k12.RecognitionImageScopeVersionV1, Action: "solve", SourceReviewPolicy: k12.RecognitionImageSourceReviewPolicyV1}
+	scope := &k12.RecognitionImageScopeV1{Version: k12.RecognitionImageScopeVersionV1, SelectedOrders: []int{1}}
+	if !ImageScopeCanUseInitialLanguageRead(q, input, scope, 1, k12.RecognitionLayoutManifestWithContentV1) {
+		t.Fatal("clear language solving required unrelated arithmetic/answer review")
+	}
+	for _, scenario := range []string{"legacy", "grading", "math", "clipped instruction", "low confidence", "outside scope"} {
+		changed := q
+		policy := *input
+		selection := *scope
+		order := 1
+		switch scenario {
+		case "legacy":
+			policy.SourceReviewPolicy = ""
+		case "grading":
+			policy.Action = "grade"
+		case "math":
+			changed.Subject = "数学"
+		case "clipped instruction":
+			selection.Gaps = []k12.RecognitionImageSourceGapV1{{Order: 1, Kind: "instruction", Before: "visible source"}}
+		case "low confidence":
+			low := 0.5
+			changed.RecognitionConfidence = &low
+		case "outside scope":
+			order = 2
+		}
+		if ImageScopeCanUseInitialLanguageRead(changed, &policy, &selection, order, k12.RecognitionLayoutManifestWithContentV1) {
+			t.Fatalf("%s lost its existing source review", scenario)
+		}
+	}
+}

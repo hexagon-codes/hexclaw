@@ -581,7 +581,7 @@ func (c *ImageTaskCoordinator) Create(
 	}
 	// 展示语言属于接纳的请求事实，模型路由解析器只决定 Provider 与能力。
 	route.MessageLocale = in.RouteRequest.MessageLocale
-	route.ImageScope = &k12.RecognitionImageScopeInputV1{Version: k12.RecognitionImageScopeVersionV1, MessageIntent: in.MessageIntent, Action: explicitImageHomeworkAction(in.MessageIntent)}
+	route.ImageScope = &k12.RecognitionImageScopeInputV1{Version: k12.RecognitionImageScopeVersionV1, MessageIntent: in.MessageIntent, Action: explicitImageHomeworkAction(in.MessageIntent), SourceReviewPolicy: k12.RecognitionImageSourceReviewPolicyV1}
 	route = k12.NormalizeImageTaskRouteSnapshot(route)
 	if (in.SourceKind == k12.ImageTaskSourceIM && in.CreativeEntry == nil) ||
 		(in.CreativeEntry != nil && in.CreativeEntry.Kind == k12.CreativeWorkEntryNewWork && in.CreativeEntry.TaskIntent == k12.ImageTaskIntentUnknown) {
@@ -2524,7 +2524,7 @@ func (c *ImageTaskCoordinator) Result(
 		}
 		intent := photoTaskIntentForImageDispatch(view.Dispatch)
 		mode := PhotoModeGrade
-		if intent == PhotoTaskBlankWorksheet {
+		if intent == PhotoTaskBlankWorksheet && view.Dispatch.ClassificationRouteSnapshot.ImageScope != nil && view.Dispatch.ClassificationRouteSnapshot.ImageScope.Version == k12.RecognitionImageScopeVersionV1 {
 			mode = PhotoModeSolve
 		}
 		_, surface := photoTaskSemantics(mode)

@@ -222,6 +222,9 @@ func (a *RecognizerAdapter) recognizeLayoutInitialReadV1(ctx context.Context, so
 						if question.ConfirmationRequired || question.AnswerState != usecase.AnswerStatePresent || !arithmeticEligible || !engine.ArithmeticTranscriptionConsistent(arithmeticView.Question, question.StudentAnswer) {
 							candidate.Classification = k12.RecognitionLayoutCandidateReviewRequiredV2
 						}
+						if usecase.ImageScopeCanUseInitialLanguageRead(question, plan.ScopeInput, plan.Scope, target.ManifestOrder, plan.InitialReadMode) {
+							candidate.Classification = k12.RecognitionLayoutCandidateValidV2
+						}
 					}
 				}
 			}
