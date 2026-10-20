@@ -27,6 +27,24 @@ func TestSharedSourceContextRestoresOnlyExactFrozenQuestion(t *testing.T) {
 	if err := os.WriteFile(path, data, 0600); err != nil {
 		t.Fatal(err)
 	}
+	// 实际首读回执早于确认；终态审计保存已确认且带完整输入摘要的同一来源。
+	unconfirmed := q
+	unconfirmed.ConfirmedVersion, unconfirmed.InputDigest = 0, ""
+	receipt.Questions = []RecognizedQuestion{unconfirmed}
+	receipt.CanonicalDigest = CanonicalRecognizedQuestionsDigest(receipt.Questions)
+	data, _ = json.Marshal(receipt)
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	audit := gradingRecognitionAuditFile{JobID: job.Record.RecordID, AgentName: job.Record.AgentName, Questions: []RecognizedQuestion{q}, CanonicalDigest: CanonicalRecognizedQuestionsDigest([]RecognizedQuestion{q})}
+	auditPath := o.recognitionAuditPath(job.Record.RecordID)
+	if err := os.MkdirAll(filepath.Dir(auditPath), 0700); err != nil {
+		t.Fatal(err)
+	}
+	data, _ = json.Marshal(audit)
+	if err := os.WriteFile(auditPath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
 	for _, scenario := range []string{"exact", "another question", "changed input", "guardian correction"} {
 		t.Run(scenario, func(t *testing.T) {
 			current := q
