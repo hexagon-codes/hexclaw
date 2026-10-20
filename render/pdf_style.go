@@ -22,13 +22,34 @@ var pdfBrandImage []byte
 //go:embed assets/tool-wrench.svg
 var pdfToolIcon []byte
 
+//go:embed assets/pdf-numbered-lines.lua
+var pdfNumberedLinesFilter []byte
+
 var pdfStyleDigest = func() string {
 	h := sha256.New()
 	h.Write([]byte(pdfStyleTemplate))
 	h.Write(pdfBrandImage)
 	h.Write(pdfToolIcon)
+	h.Write(pdfNumberedLinesFilter)
 	return hex.EncodeToString(h.Sum(nil))
 }()
+
+func (r *PandocRenderer) preparePDFNumberedLinesFilter() (string, error) {
+	f, err := os.CreateTemp(r.SandboxDir, "pdf-numbered-lines-*.lua")
+	if err != nil {
+		return "", err
+	}
+	if _, err = f.Write(pdfNumberedLinesFilter); err != nil {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+		return "", err
+	}
+	if err = f.Close(); err != nil {
+		_ = os.Remove(f.Name())
+		return "", err
+	}
+	return f.Name(), nil
+}
 
 // 每次渲染使用独占临时样式；Logo仅以固定资产字节进入Typst，正文不能指定本机路径。
 func (r *PandocRenderer) preparePDFStyle(opts RenderOptions) (path string, err error) {

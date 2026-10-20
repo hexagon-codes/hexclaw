@@ -89,8 +89,14 @@ func (r *PandocRenderer) Render(ctx context.Context, content string, format Form
 
 	// 构造 pandoc 命令
 	standardPDF := format == FormatPDF && opts.PDFLayout != "custom"
+	var numberedLinesFilter string
 	if standardPDF {
 		content = mathtext.FormatPDFMarkdown(content)
+		numberedLinesFilter, err = r.preparePDFNumberedLinesFilter()
+		if err != nil {
+			return nil, &RenderError{Code: CodeRenderFailed, Format: format, Detail: "prepare PDF numbered lines: " + err.Error()}
+		}
+		defer os.Remove(numberedLinesFilter)
 	}
 	pandocBin, _ := r.lookPandoc() // 已在上方校验过
 
@@ -105,7 +111,7 @@ func (r *PandocRenderer) Render(ctx context.Context, content string, format Form
 				return nil, &RenderError{Code: CodeRenderFailed, Format: format, Detail: "prepare PDF style: " + err.Error()}
 			}
 			defer os.Remove(stylePath)
-			args = append(args, "--include-before-body="+stylePath)
+			args = append(args, "--include-before-body="+stylePath, "--lua-filter="+numberedLinesFilter)
 		}
 		cmd := exec.CommandContext(subCtx, pandocBin, args...)
 		cmd.Stdin = strings.NewReader(content)

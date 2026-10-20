@@ -8,7 +8,7 @@ import (
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 )
 
-const gradingPDFProjectionVersion = "grading-pdf-v5"
+const gradingPDFProjectionVersion = "grading-pdf-v6"
 
 // PDF只重排可核对的结构化终稿，独有讲法与来源不做语义删减。
 func renderGradingPDF(entries []gradingFinalEntry, coverage k12.GradingFinalArtifactCoverageStatus) (string, bool) {

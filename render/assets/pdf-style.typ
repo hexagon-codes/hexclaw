@@ -30,6 +30,13 @@
 #show heading.where(level: 4): it => block(above: 2mm, below: 1.5mm, sticky: true)[
   #text(font: hc-heading-font, size: 13pt, weight: 600, fill: hc-blue, it.body)
 ]
+// 标准PDF将独立题号与下一正文段合并，题号保留标题样式，正文自然换行。
+#let hc-numbered-line(level, number, body) = block(
+  above: if level == 1 { 0pt } else if level >= 4 { 2mm } else { 6mm },
+  below: if level == 1 { 5mm } else if level >= 4 { 1.5mm } else { 3.5mm },
+)[
+  #text(font: hc-heading-font, size: 13pt, weight: if level <= 2 { 650 } else { 600 }, fill: hc-blue, number)#h(2mm)#body
+]
 #set table(stroke: 0.4pt + hc-line, inset: (x: 2.5mm, y: 2mm), align: left)
 #show table.cell.where(y: 0): set text(font: hc-heading-font, weight: 600)
 #let hc-header() = stack(dir: ttb, spacing: 2.5mm,
