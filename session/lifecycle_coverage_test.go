@@ -33,6 +33,7 @@ func TestCompactor_Compact_SummarizesOldAndKeepsRecent(t *testing.T) {
 	store := newMockStore()
 	seedMessages(store, "sess-1", 60)
 	c := NewCompactor(store, DefaultCompactionConfig()) // Max 50, Keep 10
+	c.archiver = NewArchiver(t.TempDir())
 
 	n, err := c.Compact(context.Background(), "sess-1", &titleSuggestProvider{response: "the summary"})
 	if err != nil {
@@ -61,6 +62,7 @@ func TestCompactor_Compact_ProviderErrorPropagates(t *testing.T) {
 	store := newMockStore()
 	seedMessages(store, "sess-2", 60)
 	c := NewCompactor(store, DefaultCompactionConfig())
+	c.archiver = NewArchiver(t.TempDir())
 
 	_, err := c.Compact(context.Background(), "sess-2", &titleSuggestProvider{err: errors.New("llm down")})
 	if err == nil || !strings.Contains(err.Error(), "生成摘要失败") {
