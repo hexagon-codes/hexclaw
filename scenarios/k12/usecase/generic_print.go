@@ -408,6 +408,10 @@ func (d Deps) gradingFinalArtifactPrintRequest(
 			}
 			media = DeliveryAttachment{MIME: annotated.MIME, Data: annotated.Data}
 		}
+		media, err = d.gradingFinalPDFMedia(ctx, artifact, source, media)
+		if err != nil {
+			return PreparePrintableArtifactRequest{}, err
+		}
 		canonical := artifact.CanonicalMarkdown
 		renderMarkdown := canonical
 		projectionVersion := ""

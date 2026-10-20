@@ -32,7 +32,12 @@ var pdfStyleDigest = func() string {
 
 // 每次渲染使用独占临时样式；Logo仅以固定资产字节进入Typst，正文不能指定本机路径。
 func (r *PandocRenderer) preparePDFStyle(opts RenderOptions) (path string, err error) {
+	return r.preparePDFStyleWithImageHeight(opts, 220)
+}
+
+func (r *PandocRenderer) preparePDFStyleWithImageHeight(opts RenderOptions, imageHeightMM int) (path string, err error) {
 	content := strings.ReplaceAll(pdfStyleTemplate, "__HC_HEADER_FOOTER__", strconv.FormatBool(opts.pdfHeaderFooterEnabled()))
+	content = strings.ReplaceAll(content, "__HC_IMAGE_MAX_HEIGHT__", strconv.Itoa(imageHeightMM))
 	for placeholder, asset := range map[string][]byte{"__HC_LOGO__": pdfBrandImage, "__HC_TOOL_ICON__": pdfToolIcon} {
 		var encoded strings.Builder
 		encoded.WriteString("bytes((")

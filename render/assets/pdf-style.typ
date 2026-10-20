@@ -51,8 +51,21 @@
     [#current / #total])
 }
 #set page(paper: "a4", margin: (x: 20mm, top: 24mm, bottom: 22mm), header: if hc-header-footer { hc-header() } else { none }, header-ascent: 3.5mm, footer: if hc-header-footer { hc-footer() } else { none }, footer-descent: 4mm)
+// 正文图片完整等比适配；高度上限预留标题与段距，不裁边、不拉伸、不改变原图坐标。
+#let hc-image-max-height = __HC_IMAGE_MAX_HEIGHT__mm
+#show image: it => layout(size => {
+  let natural = measure(it, width: size.width)
+  let factor = calc.min(1, size.width / natural.width, hc-image-max-height / natural.height)
+  if factor >= 1 { it } else {
+    image(it.source, format: it.format, width: natural.width * factor,
+      height: natural.height * factor, fit: "contain", alt: it.alt,
+      scaling: it.scaling, icc: it.icc)
+  }
+})
 #let hc-meta(body) = block(below: 4mm)[#text(font: hc-heading-font, size: 9pt, fill: hc-muted, body)]
 #let hc-item(body) = layout(size => {
+  // 订正与解答每题固定按批改状态、原始作答、正确答案三项显示，缺值保留空项。
+  // 家长讲题的题号与必要步骤同一行；各题沿同一标题与列表规则。
   let height = measure(body, width: size.width).height
   block(breakable: height > 240mm, above: 0mm, below: 0mm, inset: (top: 3mm, bottom: 3mm), body)
 })

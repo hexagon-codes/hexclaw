@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -87,15 +88,8 @@ func (r *PandocRenderer) Render(ctx context.Context, content string, format Form
 	}()
 
 	// 构造 pandoc 命令
-	args := r.buildArgs(format, tempPath, opts)
-	if format == FormatPDF && opts.PDFLayout != "custom" {
-		stylePath, err := r.preparePDFStyle(opts)
-		if err != nil {
-			return nil, &RenderError{Code: CodeRenderFailed, Format: format, Detail: "prepare PDF style: " + err.Error()}
-		}
-		defer os.Remove(stylePath)
-		// 默认模板先完成conf设置，随后再应用PDF专用样式。
-		args = append(args, "--include-before-body="+stylePath)
+	standardPDF := format == FormatPDF && opts.PDFLayout != "custom"
+	if standardPDF {
 		content = mathtext.FormatPDFMarkdown(content)
 	}
 	pandocBin, _ := r.lookPandoc() // 已在上方校验过
@@ -103,20 +97,37 @@ func (r *PandocRenderer) Render(ctx context.Context, content string, format Form
 	subCtx, cancel := context.WithTimeout(ctx, timeoutFor(format))
 	defer cancel()
 
-	cmd := exec.CommandContext(subCtx, pandocBin, args...)
-	cmd.Stdin = strings.NewReader(content)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	cmd.Env = r.subprocessEnv()
-	// pandoc 处理多媒体（image extraction）/ PDF (typst) 时会写 ./media-* 等相对路径产物。
-	// 父进程 CWD 在 macOS GUI app 下是 /（只读根），必须把子进程 CWD 钉到 SandboxDir 才能写盘。
-	cmd.Dir = r.SandboxDir
-
-	if err := cmd.Run(); err != nil {
-		if errors.Is(subCtx.Err(), context.DeadlineExceeded) {
-			return nil, &RenderError{Code: CodeTimeout, Format: format, Engine: "pandoc", Detail: truncateStderr(stderr.String())}
+	for attempt := 0; attempt < 2; attempt++ {
+		args := r.buildArgs(format, tempPath, opts)
+		if standardPDF {
+			stylePath, err := r.preparePDFStyleWithImageHeight(opts, 220-attempt*20)
+			if err != nil {
+				return nil, &RenderError{Code: CodeRenderFailed, Format: format, Detail: "prepare PDF style: " + err.Error()}
+			}
+			defer os.Remove(stylePath)
+			args = append(args, "--include-before-body="+stylePath)
 		}
-		return nil, &RenderError{Code: CodeRenderFailed, Format: format, Engine: "pandoc", Detail: truncateStderr(stderr.String())}
+		cmd := exec.CommandContext(subCtx, pandocBin, args...)
+		cmd.Stdin = strings.NewReader(content)
+		var stderr bytes.Buffer
+		cmd.Stderr, cmd.Env, cmd.Dir = &stderr, r.subprocessEnv(), r.SandboxDir
+		if err := cmd.Run(); err != nil {
+			if errors.Is(subCtx.Err(), context.DeadlineExceeded) {
+				return nil, &RenderError{Code: CodeTimeout, Format: format, Engine: "pandoc", Detail: truncateStderr(stderr.String())}
+			}
+			return nil, &RenderError{Code: CodeRenderFailed, Format: format, Engine: "pandoc", Detail: truncateStderr(stderr.String())}
+		}
+		if standardPDF {
+			if err := r.validatePDFLayout(subCtx, tempPath, content, attempt); err != nil {
+				var layoutErr *pdfLayoutError
+				if attempt == 0 && errors.As(err, &layoutErr) {
+					slog.WarnContext(ctx, "PDF layout requires reflow", "reason", err.Error())
+					continue
+				}
+				return nil, &RenderError{Code: CodeRenderFailed, Format: format, Engine: "typst", Detail: err.Error()}
+			}
+		}
+		break
 	}
 
 	// 大小检查

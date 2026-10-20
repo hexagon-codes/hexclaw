@@ -8,7 +8,7 @@ import (
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 )
 
-const gradingPDFProjectionVersion = "grading-pdf-v4"
+const gradingPDFProjectionVersion = "grading-pdf-v5"
 
 // PDF只重排可核对的结构化终稿，独有讲法与来源不做语义删减。
 func renderGradingPDF(entries []gradingFinalEntry, coverage k12.GradingFinalArtifactCoverageStatus) (string, bool) {
@@ -69,14 +69,12 @@ func renderGradingPDF(entries []gradingFinalEntry, coverage k12.GradingFinalArti
 			out.WriteString("\n\n")
 		}
 		if d.entry.skip != nil {
-			out.WriteString("**已跳过 · 未判断对错**\n\n")
+			out.WriteString("**批改状态：** 已跳过 · 未判断对错\n\n**原始作答：**\n\n**正确答案：**\n\n")
 			out.WriteString("```{=typst}\n]\n```\n\n")
 			continue
 		}
 		item := *d.item
-		if item.Status != PhotoWrong {
-			fmt.Fprintf(&out, "**批改状态**：%s\n\n", gradingAssessmentParentStatus(d.entry.assessment.Status))
-		}
+		fmt.Fprintf(&out, "**批改状态：** %s\n\n", gradingAssessmentParentStatus(d.entry.assessment.Status))
 		studentAnswer := strings.TrimSpace(item.Recognized.AnswerCanonicalMarkdown)
 		if studentAnswer == "" {
 			studentAnswer = strings.TrimSpace(item.Recognized.StudentAnswer)
@@ -84,14 +82,12 @@ func renderGradingPDF(entries []gradingFinalEntry, coverage k12.GradingFinalArti
 		if studentAnswer == "" {
 			studentAnswer = strings.TrimSpace(item.Recognized.AnswerRawTranscription)
 		}
-		if studentAnswer != "" {
-			fmt.Fprintf(&out, "**原始作答：** %s\n\n", studentAnswer)
-		}
+		fmt.Fprintf(&out, "**原始作答：** %s\n\n", studentAnswer)
+		answer := ""
 		if item.ParentGuide != nil {
-			if answer := strings.TrimSpace(item.ParentGuide.Answer); answer != "" {
-				fmt.Fprintf(&out, "**正确答案：** %s\n\n", answer)
-			}
+			answer = strings.TrimSpace(item.ParentGuide.Answer)
 		}
+		fmt.Fprintf(&out, "**正确答案：** %s\n\n", answer)
 		if item.Status == PhotoWrong || item.Status == PhotoCorrectWithProcessIssue {
 			if s := strings.TrimSpace(item.Grade.Outcome.WrongStep); s != "" {
 				fmt.Fprintf(&out, "**第一个错步**：%s\n\n", s)
@@ -152,8 +148,8 @@ func renderGradingPDF(entries []gradingFinalEntry, coverage k12.GradingFinalArti
 				continue
 			}
 			out.WriteString("```{=typst}\n#hc-item[\n```\n\n")
-			fmt.Fprintf(&out, "### %s\n\n", label(d.entry))
-			writeGuideList("**必要步骤**：", d.item.ParentGuide.FullSolutionSteps)
+			fmt.Fprintf(&out, "### %s 必要步骤\n\n", label(d.entry))
+			writeGuideList("", d.item.ParentGuide.FullSolutionSteps)
 			var unique [5]bool
 			for i := range unique {
 				unique[i] = !common[i]
