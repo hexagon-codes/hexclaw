@@ -25,6 +25,14 @@ type imFinalReplyDependencies struct {
 	getUnitDocument   func(context.Context, string, string, string, string) (k12usecase.UnitSummaryView, error)
 }
 
+// imToolCallDigest 保留各渠道既有投影，钉钉使用不含结果片段的状态尾注。
+func imToolCallDigest(calls []adapter.ToolCall, platform string) string {
+	if platform == string(adapter.PlatformDingtalk) {
+		return adapter.ToolCallStatusDigest(calls)
+	}
+	return adapter.ToolCallDigest(calls)
+}
+
 // imReplyModelSummary 只读取本轮冻结的实际模型身份，供短回复与 PDF 说明共用。
 func imReplyModelSummary(reply *adapter.Reply, locale string) string {
 	if reply == nil {
@@ -81,7 +89,7 @@ func maybeDeliverIMFinalReply(ctx context.Context, msg *adapter.Message, reply *
 	}
 	readableBody := canonical.Markdown
 	if len(reply.ToolCalls) > 0 {
-		readableBody = strings.TrimSuffix(readableBody, adapter.ToolCallDigest(reply.ToolCalls))
+		readableBody = strings.TrimSuffix(readableBody, imToolCallDigest(reply.ToolCalls, string(msg.Platform)))
 	}
 	if !hasUnit && !k12usecase.FinalReplyUsesPDF(readableBody, false) {
 		return reply, handlerErr

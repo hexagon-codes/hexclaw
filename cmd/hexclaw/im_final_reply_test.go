@@ -116,11 +116,11 @@ func TestIMFinalReplyReadableThresholdExcludesActualToolDigest(t *testing.T) {
 	body := strings.Repeat("甲", 999)
 	msg, reply, deps, delivery := imFinalReplyTestInput(t, body)
 	reply.ToolCalls = []adapter.ToolCall{{Name: "code_exec", Status: "success", Result: strings.Repeat("实际工具结果", 20)}}
-	tail := adapter.ToolCallDigest(reply.ToolCalls)
+	tail := adapter.ToolCallStatusDigest(reply.ToolCalls)
 	if tail == "" || k12usecase.K12FinalReplyReadableCharacters(body+tail) < 1000 {
 		t.Fatal("tool digest fixture did not cross the full-string threshold")
 	}
-	if err := appendIMToolDigestAndRebuildCanonical(reply); err != nil {
+	if err := appendIMToolDigestAndRebuildCanonical(reply, "dingtalk"); err != nil {
 		t.Fatal(err)
 	}
 	if reply.Content != body+tail || reply.MessageContent.Validate() != nil {

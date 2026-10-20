@@ -101,7 +101,7 @@ func TestIMHandlerFreezesModelAfterToolDigestWithoutChangingCanonicalOrAttachmen
 	if err := appendIMToolDigestAndRebuildCanonical(reply, "dingtalk"); err != nil {
 		t.Fatal(err)
 	}
-	if reply.Content != body+adapter.ToolCallDigest(reply.ToolCalls) || reply.MessageContent.Markdown != reply.Content || len(reply.Attachments) != 1 || reply.Attachments[0] != attachment {
+	if reply.Content != body+adapter.ToolCallStatusDigest(reply.ToolCalls) || reply.MessageContent.Markdown != reply.Content || len(reply.Attachments) != 1 || reply.Attachments[0] != attachment {
 		t.Fatalf("canonical body or attachment changed: %+v", reply)
 	}
 	if err := reply.RenderManifest.ValidateFor(*reply.MessageContent); err != nil {

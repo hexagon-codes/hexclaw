@@ -4400,11 +4400,11 @@ func appendIMToolDigestAndRebuildCanonical(reply *adapter.Reply, platform ...str
 			locale = value
 		}
 	}
-	reply.Content += adapter.ToolCallDigest(reply.ToolCalls)
 	channelPlatform, summary := "", ""
 	if len(platform) > 0 {
 		channelPlatform = platform[0]
 	}
+	reply.Content += imToolCallDigest(reply.ToolCalls, channelPlatform)
 	if channelPlatform == "dingtalk" {
 		summary = imReplyModelSummary(reply, locale)
 	}

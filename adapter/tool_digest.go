@@ -90,6 +90,15 @@ func toolStatusGlyph(status string) string {
 // ToolCallDigest 把工具调用渲染成 IM 友好的紧凑尾注（带前导分隔）。
 // 空调用返回空串（调用方据此决定是否追加）。
 func ToolCallDigest(calls []ToolCall) string {
+	return renderToolCallDigest(calls, true)
+}
+
+// ToolCallStatusDigest 只展示工具和实际状态，正文不混入截断的工具响应。
+func ToolCallStatusDigest(calls []ToolCall) string {
+	return renderToolCallDigest(calls, false)
+}
+
+func renderToolCallDigest(calls []ToolCall, includeResult bool) string {
 	if len(calls) == 0 {
 		return ""
 	}
@@ -97,10 +106,19 @@ func ToolCallDigest(calls []ToolCall) string {
 	b.WriteString("\n\n———")
 	for _, c := range calls {
 		b.WriteString("\n🔧 ")
-		b.WriteString(toolDisplayName(c.Name))
+		name := toolDisplayName(c.Name)
+		if !includeResult {
+			switch toolBaseName(c.Name) {
+			case "solve":
+				name = "解题"
+			case "knowledge_search":
+				name = "知识库检索"
+			}
+		}
+		b.WriteString(name)
 		b.WriteString(" ")
 		b.WriteString(toolStatusGlyph(c.Status))
-		if sum := toolResultSummary(c.Result, 48); sum != "" {
+		if sum := toolResultSummary(c.Result, 48); includeResult && sum != "" {
 			if toolStatusGlyph(c.Status) == "·" {
 				b.WriteByte(' ')
 			} else {
