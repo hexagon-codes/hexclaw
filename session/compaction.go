@@ -116,7 +116,7 @@ func (c *Compactor) Compact(ctx context.Context, sessionID string, provider hexa
 	// 归档旧消息到文件 (D7: 链路④ 会话转录)
 	if c.archiver != nil {
 		if _, archErr := c.archiver.Archive(sessionID, oldMsgs); archErr != nil {
-			logger.Error("error", "archErr", archErr)
+			return 0, fmt.Errorf("archive conversation before compaction: %w", archErr)
 		}
 	}
 
@@ -204,8 +204,8 @@ func (c *Compactor) generateSummary(ctx context.Context, msgs []*storage.Message
 		return "", err
 	}
 
-	if resp.Content == "" {
-		return "（摘要生成失败）", nil
+	if resp == nil || strings.TrimSpace(resp.Content) == "" {
+		return "", fmt.Errorf("conversation summary is empty")
 	}
 
 	return resp.Content, nil
