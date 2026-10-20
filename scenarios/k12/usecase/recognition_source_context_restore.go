@@ -6,15 +6,20 @@ import (
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 )
 
-// 类型化题目不复制识题扩展；恢复只取同题同作答的冻结识题回执，重算完整输入摘要。
+// 类型化题目不复制识题扩展；恢复只取同题同作答且完整输入摘要相同的冻结来源。
 func (o *GradingOrchestrator) restoreRecognitionSourceContexts(job GradingJobView, questions []RecognizedQuestion) {
-	source, ok := o.readRecognitionReceipt(job.Record.RecordID)
-	if !ok || source.AgentName != job.Record.AgentName {
+	var sources []RecognizedQuestion
+	if audit, ok := o.readRecognitionAudit(job.Record.RecordID); ok && audit.AgentName == job.Record.AgentName {
+		sources = audit.Questions
+	} else if receipt, ok := o.readRecognitionReceipt(job.Record.RecordID); ok && receipt.AgentName == job.Record.AgentName {
+		sources = receipt.Questions
+	}
+	if len(sources) == 0 {
 		return
 	}
 	for i := range questions {
 		q := &questions[i]
-		for _, prior := range source.Questions {
+		for _, prior := range sources {
 			if prior.ImageSourceContext == nil || prior.ProblemID != q.ProblemID || prior.AttemptID != q.AttemptID ||
 				prior.RawTranscription != q.RawTranscription || prior.AnswerRawTranscription != q.AnswerRawTranscription ||
 				prior.CanonicalMarkdown != q.CanonicalMarkdown || prior.AnswerCanonicalMarkdown != q.AnswerCanonicalMarkdown ||
