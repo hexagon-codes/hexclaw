@@ -712,6 +712,17 @@ func (o *SolveSkill) runSolveAgentResult(ctx context.Context, spec SubAgentSpec)
 		classes = []egress.DataClass{egress.ClassGeneral}
 	}
 	execCtx = egress.WithRequest(execCtx, egress.PurposeSolveVerify, spec.RunID, classes...)
+	// 仅受信求解延续当前请求已启用的记忆授权，数据来源类别保持不变。
+	if spec.Source == solveDispatchSource {
+		if requests, ok := egress.RequestsFromContext(ctx); ok {
+			for _, request := range requests {
+				if request.DataClass == egress.ClassMemory && request.ChatMemoryEnabled {
+					egress.EnableChatMemory(execCtx)
+					break
+				}
+			}
+		}
+	}
 	execute := o.executeFunc
 	if spec.Source == solveDispatchSource && spec.Agent == solverAgentName && spec.generationVersion == solveWithParentGuideV1 {
 		execute = func(callCtx context.Context, callSpec SubAgentSpec) (SubAgentResult, error) {
@@ -1326,7 +1337,7 @@ func numberSetsEqual(as, bs []float64) bool {
 }
 
 var singleQuantityEquationLeftRe = regexp.MustCompile(`^[ \t0-9.+*/×÷＋－−()（）-]+$`)
-var singleQuantityEquationRightRe = regexp.MustCompile(`(?i)^[ \t]*` + answerQuantityNumberPattern + `[ \t]*([（(]?)(平方厘米|cm²|cm\^?2|平方米|千克|公斤|千米|公里|张纸|张|本|段|人|份|m²|m2|kg|km|克|米|g|m)([）)]?)[ \t]*$`)
+var singleQuantityEquationRightRe = regexp.MustCompile(`(?i)^[ \t]*` + answerQuantityNumberPattern + `[ \t]*([（(]?)(` + answerQuantityUnitPattern + `)([）)]?)[ \t]*$`)
 
 // singleQuantityEquation 仅接纳自身成立且右侧完整保留明确单位的一个数值等式。
 func singleQuantityEquation(answer string) (answerQuantity, bool) {

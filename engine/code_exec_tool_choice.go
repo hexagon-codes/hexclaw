@@ -189,6 +189,14 @@ func restrictToolsToCodeExecWhenRequired(tools []llm.ToolDefinition, content str
 	if !shouldForceCodeExecTool(content) {
 		return tools
 	}
+	// 组合请求保留用户明确指定的其他已准入工具，代码执行仍由首轮工具选择保证。
+	requested := strings.ToLower(content)
+	for _, tool := range tools {
+		name := strings.ToLower(strings.TrimSpace(tool.Function.Name))
+		if name != "" && name != codeExecToolName && strings.Contains(requested, name) {
+			return tools
+		}
+	}
 	for _, tool := range tools {
 		if tool.Function.Name == codeExecToolName {
 			return []llm.ToolDefinition{tool}

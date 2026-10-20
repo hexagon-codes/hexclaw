@@ -89,10 +89,17 @@ func withUntrustedKnowledgeEvidence(ctx context.Context, userContent ...string) 
 	return context.WithValue(ctx, untrustedKnowledgeEvidenceContextKey{}, true)
 }
 
-// userRequestedEvidenceTool 只恢复用户明确要求的交互代码执行，仍须通过既有权限策略。
-func userRequestedEvidenceTool(ctx context.Context, call *ToolCallInfo) bool {
-	if ctx == nil || call == nil || systemDispatchSource(ctx) != "" || call.Source != "skill" ||
-		canonicalEvidenceToolName(call.Name) != codeExecToolName {
+// evidenceToolUsesExistingPermission 保留交互检索与受控求解的既有权限，资料仍只作为数据。
+// 直接代码执行须来自原始用户意图；无人值守调用继续检查证据作用域授权。
+func evidenceToolUsesExistingPermission(ctx context.Context, call *ToolCallInfo) bool {
+	if ctx == nil || call == nil || systemDispatchSource(ctx) != "" || call.Source != "skill" {
+		return false
+	}
+	switch canonicalEvidenceToolName(call.Name) {
+	case "knowledge_search", "solve":
+		return true
+	case codeExecToolName:
+	default:
 		return false
 	}
 	requested, _ := ctx.Value(evidenceUserCodeIntentContextKey{}).(bool)

@@ -108,7 +108,7 @@ func TestSkillContextReceiptsTier3RequiresActualProviderConsumption(t *testing.T
 	}
 }
 
-func TestSolveTeachingContextRequiresConsumedAndVerifiedFallback(t *testing.T) {
+func TestSolveTeachingContextRequiresConsumedSuccessfulFallback(t *testing.T) {
 	for _, state := range []string{"verified", "unconsumed", "no_execution", "out_of_scope"} {
 		t.Run(state, func(t *testing.T) {
 			ctx := withToolReplyMetaSink(t.Context())
@@ -146,15 +146,21 @@ func TestSolveTeachingContextRequiresConsumedAndVerifiedFallback(t *testing.T) {
 				t.Fatalf("fallback execution: result=%+v err=%v", result, err)
 			}
 			encoded := result.Metadata[teachingContextReceiptsMetadataKey]
-			if state != "verified" {
+			if state == "unconsumed" || state == "out_of_scope" {
 				if encoded != "" {
 					t.Fatalf("untrusted result created teaching context: %s", encoded)
 				}
 				return
 			}
 			var receipts []skill.ContextReceipt
-			if json.Unmarshal([]byte(encoded), &receipts) != nil || len(receipts) != 1 || receipts[0].Name != "tier3-method" || result.Metadata["solve_verification_run_id"] == "" {
-				t.Fatalf("verified fallback lost consumed context: metadata=%+v", result.Metadata)
+			if json.Unmarshal([]byte(encoded), &receipts) != nil || len(receipts) != 1 || receipts[0].Name != "tier3-method" {
+				t.Fatalf("successful fallback lost consumed context: metadata=%+v", result.Metadata)
+			}
+			if state == "verified" && result.Metadata["solve_verification_run_id"] == "" {
+				t.Fatalf("verified fallback lost its execution binding: metadata=%+v", result.Metadata)
+			}
+			if state == "no_execution" && (result.Metadata["solve_evidence"] == "numeric_exec" || result.Metadata["solve_verification_run_id"] != "") {
+				t.Fatalf("teaching context must not promote numerical evidence: metadata=%+v", result.Metadata)
 			}
 		})
 	}

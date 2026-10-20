@@ -247,9 +247,9 @@ func (s *SolveSkill) executeSolveProgram(ctx context.Context, plan solveProgramP
 	return resolved, nil
 }
 
-// 本题指导只关联已消费上下文和成功的独立数值执行，不以模型自报或加载名单补足。
+// 本题指导只关联已消费上下文和成功求解；数值校验等级独立保留，不以加载名单补足。
 func (s *SolveSkill) appendTeachingContextReceipt(ctx context.Context, subject string, metadata map[string]string) {
-	if s.teachingContextSelector == nil || metadata["solve_verdict"] != "agree" || metadata["solve_evidence"] != "numeric_exec" || metadata["solve_verification_run_id"] == "" {
+	if s.teachingContextSelector == nil || metadata["solve_verdict"] != "agree" {
 		return
 	}
 	receipts := s.teachingContextSelector(subject, ConsumedSkillContextReceipts(ctx))

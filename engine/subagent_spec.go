@@ -152,6 +152,11 @@ func ApplySpecToMessage(msg *adapter.Message, spec SubAgentSpec) {
 	msg.Metadata["source"] = firstNonEmptyStr(spec.Source, spawnDispatchSource)
 	msg.Metadata["spawn_depth"] = strconv.Itoa(spec.Depth)
 	msg.Metadata["subagent_run_id"] = spec.RunID
+	// 求解与校验只消费显式任务输入，避免再次召回无关记忆和知识。
+	if spec.Source == solveDispatchSource {
+		msg.Metadata["memory"] = "off"
+		msg.Metadata["knowledge"] = "off"
+	}
 	if len(spec.ToolAllow) > 0 {
 		msg.Metadata["tool_allow"] = joinCSV(spec.ToolAllow)
 	}

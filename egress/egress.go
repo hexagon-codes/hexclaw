@@ -123,7 +123,7 @@ func (p *Policy) decide(req Request) Decision {
 	if !sensitiveClasses[req.DataClass] {
 		return Decision{AllowCloud: true, Reason: "非敏感数据类"}
 	}
-	if req.DataClass == ClassMemory && req.ChatMemoryEnabled && (req.Purpose == PurposeGeneralChat || req.Purpose == PurposeVisionChat) {
+	if req.DataClass == ClassMemory && req.ChatMemoryEnabled && (req.Purpose == PurposeGeneralChat || req.Purpose == PurposeVisionChat || req.Purpose == PurposeSolveVerify) {
 		return Decision{AllowCloud: true, Reason: "Memory enabled for this chat request"}
 	}
 	if allowed, ok := purposeAllowsSensitive[req.Purpose]; ok && allowed[req.DataClass] {

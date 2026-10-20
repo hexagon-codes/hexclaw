@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/hexagon-codes/hexagon/observe/trace"
+	"github.com/hexagon-codes/hexclaw/egress"
 )
 
 // 子 Agent 执行路径硬化（评审 #1 重试/退避 + #2 输出注入防护 + #8 per-子超时）。
@@ -45,6 +46,9 @@ var errSubAgentEmptyOutput = errors.New("subagent empty output")
 // isTransientErr 判定错误是否瞬时可重试。ctx 取消（用户主动停）不算瞬时——不重试。
 func isTransientErr(err error) bool {
 	if err == nil {
+		return false
+	}
+	if errors.Is(err, egress.ErrDenied) {
 		return false
 	}
 	if errors.Is(err, errSubAgentEmptyOutput) {

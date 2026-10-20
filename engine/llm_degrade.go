@@ -68,6 +68,8 @@ func friendlyLLMError(err error) error {
 	}
 	msg := strings.ToLower(err.Error())
 	switch {
+	case errors.Is(err, egress.ErrDenied):
+		return newFriendlyLLMError("The request was blocked by its data egress policy before reaching the model.", err)
 	case isLocalRuntimeUnavailable(err):
 		return newFriendlyLLMError("本地模型未就绪（Ollama 运行时组件缺失）。请在设置里切换到云端模型，或修复本地 Ollama 后重试。", err)
 	case isToolUnsupportedError(err):
