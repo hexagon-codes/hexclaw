@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/hexagon-codes/hexclaw/internal/elementarymath"
@@ -122,6 +123,20 @@ func EvaluateOCRConfirmationRiskForInitialReadMode(q RecognizedQuestion, initial
 			}
 		}
 	}
+	if source := q.ImageSourceContext; source != nil && source.Version == k12.RecognitionImageScopeVersionV1 {
+		for _, recovery := range source.Recoveries {
+			if recovery.State == "verified" {
+				continue
+			}
+			if recovery.Gap.Kind == "handwriting" {
+				if source.Action != "solve" {
+					reasons[OCRRiskUnclearHandwriting] = struct{}{}
+				}
+			} else {
+				reasons[OCRRiskLowConfidence] = struct{}{}
+			}
+		}
+	}
 	if questionEvidenceTranscriptionsConflictForInitialReadMode(q, initialReadMode) ||
 		answerEvidenceTranscriptionsConflict(q.AnswerRawTranscription, q.AnswerEvidenceTranscriptions) {
 		reasons[OCRRiskEvidenceConflict] = struct{}{}
@@ -194,6 +209,13 @@ func questionEvidenceTranscriptionsConflict(q RecognizedQuestion) bool {
 
 func questionEvidenceTranscriptionsConflictForInitialReadMode(q RecognizedQuestion, initialReadMode string) bool {
 	conflicts := func(raw string, values []string) bool {
+		if q.Subject == "语文" && q.ImageSourceContext != nil && q.ImageSourceContext.Version == k12.RecognitionImageScopeVersionV1 {
+			normalized := make([]string, len(values))
+			for i, value := range values {
+				normalized[i] = chinesePrintedBlankComparisonV1(value)
+			}
+			return evidenceTranscriptionsConflict(chinesePrintedBlankComparisonV1(raw), normalized, q.AnswerRawTranscription)
+		}
 		if sixNumberQuestionSourcesEquivalent(raw, values, initialReadMode) {
 			return false
 		}
@@ -221,6 +243,20 @@ func questionEvidenceTranscriptionsConflictForInitialReadMode(q RecognizedQuesti
 		}
 	}
 	return conflicts(trimNumber(q.RawTranscription), values)
+}
+
+var chinesePrintedBlankRunV1 = regexp.MustCompile(`[_＿]{2,}`)
+
+// 填空线长度与跨行排版不是题干差异；只消除已证实的同一仿写连接排版，保留文字、数值和否定。
+func chinesePrintedBlankComparisonV1(value string) string {
+	value = strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) {
+			return -1
+		}
+		return r
+	}, value)
+	value = chinesePrintedBlankRunV1.ReplaceAllString(value, "□")
+	return strings.ReplaceAll(value, "□，我也", "□。我也")
 }
 
 // 六数题只在首读合同内比较完整题干；角色封套、片段和任一异议观察不能被其余来源覆盖。

@@ -2522,10 +2522,16 @@ func (c *ImageTaskCoordinator) Result(
 		if result.FinalArtifact == nil {
 			return result, nil
 		}
+		intent := photoTaskIntentForImageDispatch(view.Dispatch)
+		mode := PhotoModeGrade
+		if intent == PhotoTaskBlankWorksheet {
+			mode = PhotoModeSolve
+		}
+		_, surface := photoTaskSemantics(mode)
 		photo := PhotoGradeResult{
-			Mode:          PhotoModeGrade,
-			TaskIntent:    photoTaskIntentForImageDispatch(view.Dispatch),
-			ResultSurface: PhotoSurfaceAnnotatedHomework,
+			Mode:          mode,
+			TaskIntent:    intent,
+			ResultSurface: surface,
 			Markdown:      result.FinalArtifact.CanonicalMarkdown,
 		}
 		if view.HomeworkProjection == nil {

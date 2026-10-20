@@ -12,6 +12,9 @@ import (
 // 局部复读只覆盖子题像素，整页首读冻结的公共条件作为同源只读材料保留。
 // 不改两次转写或学生作答，不把同一份条件伪装成第二次独立观察。
 func retainInitialReadSharedMaterials(questions []usecase.RecognizedQuestion, plan k12.RecognitionLayoutPlanV2, raw string, width, height int) ([]usecase.RecognizedQuestion, error) {
+	if plan.Scope == nil {
+		return questions, nil
+	}
 	entries, err := parseRecognitionInitialReadEnvelopeV1(raw)
 	if err != nil {
 		return nil, err
@@ -37,7 +40,7 @@ func retainInitialReadSharedMaterials(questions []usecase.RecognizedQuestion, pl
 				continue
 			}
 			if q.ImageSourceContext == nil {
-				q.ImageSourceContext = &k12.RecognitionImageSourceContextV1{ScopeDigest: plan.AuthorizedPlanDigest, TargetIDs: []string{target.TargetID}}
+				q.ImageSourceContext = &k12.RecognitionImageSourceContextV1{Version: k12.RecognitionImageScopeVersionV1, Action: plan.ScopeInput.Action, ScopeDigest: plan.AuthorizedPlanDigest, TargetIDs: []string{target.TargetID}}
 			}
 			found := false
 			for _, material := range q.ImageSourceContext.Materials {

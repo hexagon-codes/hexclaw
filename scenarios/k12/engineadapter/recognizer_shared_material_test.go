@@ -16,7 +16,7 @@ func TestInitialReadSharedConditionsSurviveLocalReview(t *testing.T) {
 		t.Fatal(err)
 	}
 	target := k12.RecognitionLayoutTargetV2{TargetID: "child-one", ManifestOrder: 1, SourceNumberPath: []string{"3", "1"}, DisplayLabel: "（1）", Region: entries[0].manifest.Region}
-	plan := k12.RecognitionLayoutPlanV2{AuthorizedPlanDigest: "frozen-plan", Targets: []k12.RecognitionLayoutTargetV2{target}}
+	plan := k12.RecognitionLayoutPlanV2{ScopeInput: &k12.RecognitionImageScopeInputV1{Version: k12.RecognitionImageScopeVersionV1}, Scope: &k12.RecognitionImageScopeV1{Version: k12.RecognitionImageScopeVersionV1}, AuthorizedPlanDigest: "frozen-plan", Targets: []k12.RecognitionLayoutTargetV2{target}}
 	question := usecase.RecognizedQuestion{SourceNumberPath: []string{"3", "1"}, SourceRegion: &target.Region, Question: "先求一份是多少，再求总容量是多少。", RawTranscription: "先求一份是多少，再求总容量是多少。", StudentAnswer: "2/5÷2=1/5"}
 	got, err := retainInitialReadSharedMaterials([]usecase.RecognizedQuestion{question}, plan, raw, 80, 100)
 	if err != nil || got[0].ImageSourceContext == nil || len(got[0].ImageSourceContext.Materials) != 1 || got[0].ImageSourceContext.Materials[0].Text != shared {

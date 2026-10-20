@@ -52,6 +52,8 @@ type RecognitionImageSourceRecoveryV1 struct {
 
 // 来源上下文与 OCR 原文分离，随原任务运行文件及输入摘要冻结。
 type RecognitionImageSourceContextV1 struct {
+	Version     string                              `json:"version,omitempty"`
+	Action      string                              `json:"action,omitempty"`
 	ScopeDigest string                              `json:"scope_digest"`
 	TargetIDs   []string                            `json:"target_ids"`
 	Materials   []RecognitionImageScopeDependencyV1 `json:"materials,omitempty"`

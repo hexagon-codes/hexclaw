@@ -713,6 +713,24 @@ func recognizedQuestionRequiresGuardianConfirmationForInitialReadMode(question R
 	if question.parentSourceUnclear {
 		return true
 	}
+	if taskIntent == PhotoTaskBlankWorksheet && question.ImageSourceContext != nil && question.ImageSourceContext.Version == k12.RecognitionImageScopeVersionV1 && question.ImageSourceContext.Action == "solve" {
+		// 仅评估副本移除与本次解题无关的作答争议；题干证据、缺损与原始持久事实不变。
+		question = cloneRecognizedQuestions([]RecognizedQuestion{question})[0]
+		hadAnswerEvidence := len(question.AnswerEvidenceTranscriptions) > 0
+		question.AnswerEvidenceTranscriptions = nil
+		question.AnswerRawTranscription, question.AnswerCanonicalMarkdown, question.StudentAnswer = "", "", ""
+		question.AnswerState = AnswerStateBlank
+		onlyAnswerConflict := hadAnswerEvidence && len(question.EvidenceTranscriptions) >= 2 && !questionEvidenceTranscriptionsConflictForInitialReadMode(question, initialReadMode)
+		filtered := question.ConfirmationReasons[:0]
+		for _, reason := range question.ConfirmationReasons {
+			if reason == OCRRiskErasure || reason == OCRRiskUnclearHandwriting || reason == OCRRiskEvidenceConflict && onlyAnswerConflict {
+				continue
+			}
+			filtered = append(filtered, reason)
+		}
+		question.ConfirmationReasons = filtered
+		question.ConfirmationRequired = false
+	}
 	question = NormalizeRecognizedQuestionForInitialReadMode(question, initialReadMode)
 	if !question.ConfirmationRequired {
 		return false

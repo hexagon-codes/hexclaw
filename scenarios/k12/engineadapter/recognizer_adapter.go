@@ -1197,7 +1197,7 @@ func RecognizedQuestionsFromLayoutFinalizationV2(
 			region := target.Region
 			question.SourceRegion = &region
 			if plan.Scope != nil {
-				question.ImageSourceContext = &k12.RecognitionImageSourceContextV1{ScopeDigest: plan.AuthorizedPlanDigest, TargetIDs: []string{target.TargetID}}
+				question.ImageSourceContext = &k12.RecognitionImageSourceContextV1{Version: k12.RecognitionImageScopeVersionV1, Action: plan.ScopeInput.Action, ScopeDigest: plan.AuthorizedPlanDigest, TargetIDs: []string{target.TargetID}}
 				for _, dependency := range plan.Scope.Dependencies {
 					for _, order := range dependency.ForOrders {
 						if order == target.ManifestOrder {
