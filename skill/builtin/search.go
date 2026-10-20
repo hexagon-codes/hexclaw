@@ -3,9 +3,11 @@ package builtin
 import (
 	"context"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -108,13 +110,45 @@ func (s *SearchSkill) Execute(ctx context.Context, args map[string]any) (*skill.
 		sb.WriteString(fmt.Sprintf("%d. **%s**\n   %s\n\n", i+1, r.title, r.snippet))
 	}
 
-	return &skill.Result{Content: sb.String()}, nil
+	sources := make([]map[string]string, 0, len(results))
+	for _, result := range results {
+		if result.url != "" {
+			sources = append(sources, map[string]string{"url": result.url, "title": result.title})
+		}
+	}
+	return &skill.Result{Content: sb.String(), Data: sources}, nil
 }
 
 // searchResult 搜索结果
 type searchResult struct {
 	title   string
 	snippet string
+	url     string
+}
+
+var searchResultHref = regexp.MustCompile(`(?i)href=["']([^"']+)["']`)
+
+// 保留搜索引擎实际返回的链接，摘要本身不能充当已读取的原文。
+func searchSourceURL(part string) string {
+	match := searchResultHref.FindStringSubmatch(part)
+	if len(match) != 2 {
+		return ""
+	}
+	raw := html.UnescapeString(match[1])
+	if strings.HasPrefix(raw, "//") {
+		raw = "https:" + raw
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	if target := parsed.Query().Get("uddg"); target != "" && (parsed.Hostname() == "duckduckgo.com" || parsed.Hostname() == "html.duckduckgo.com") {
+		parsed, err = url.Parse(target)
+	}
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		return ""
+	}
+	return parsed.String()
 }
 
 // parseSearchResults 从 DuckDuckGo HTML 中提取搜索结果
@@ -144,6 +178,7 @@ func parseSearchResults(html string) []searchResult {
 		results = append(results, searchResult{
 			title:   cleanHTML(title),
 			snippet: cleanHTML(snippet),
+			url:     searchSourceURL(part),
 		})
 	}
 
