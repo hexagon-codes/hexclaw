@@ -398,8 +398,14 @@ func (d Deps) assessPhotoItem(
 	q RecognizedQuestion,
 ) (PhotoGradeItem, error) {
 	item := photoItemWithPracticeReference(req, q)
-	if item.Status == PhotoAnswerUnclear {
-		return item, nil
+	independentReference := item.Status == PhotoAnswerUnclear || mode == PhotoModeGrade && q.AnswerState == AnswerStateUnclear
+	if independentReference {
+		item.Status = PhotoAnswerUnclear
+		if !independentReferenceAnswerEligible(req, q) {
+			return item, nil
+		}
+		mode = PhotoModeSolve
+		item.Warning = unclearHandwritingReferenceWarning
 	}
 	gradeReq := photoItemGradeRequest(req, q)
 	if mode == PhotoModeGrade && q.AnswerState != AnswerStateBlank {
@@ -435,8 +441,11 @@ func (d Deps) assessPhotoItem(
 	}
 	item.ParentGuide = &blankResult.Guide
 	item.Status = PhotoBlankSolved
+	if independentReference {
+		item.Status = PhotoAnswerUnclear
+	}
 	if !photoEvidenceTrusted(blankResult.Solved.Evidence) {
-		item.Warning = "Independent programmatic verification is unavailable for this answer."
+		item.Warning = strings.TrimSpace(item.Warning + " Independent programmatic verification is unavailable for this answer.")
 	}
 	return item, nil
 }
@@ -983,6 +992,11 @@ func photoGradeMarkdown(result PhotoGradeResult) string {
 					warning = "无法可靠识别，未判断对错。"
 				}
 				fmt.Fprintf(&b, "- %s：%s\n", photoQuestionReference(item.Recognized), photoInline(warning, 240))
+				if item.ParentGuide != nil {
+					b.WriteString("\n")
+					writeParentTeachingGuideMarkdown(&b, *item.ParentGuide)
+					b.WriteString("\n\n")
+				}
 			}
 		}
 		b.WriteString("\n")

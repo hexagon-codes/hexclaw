@@ -213,7 +213,12 @@ func (v *GradingAssessmentItem) Validate() error {
 		if !hasSolve || v.GradeInvocationID != "" {
 			return fmt.Errorf("blank_solved requires solve only")
 		}
-	case GradingAssessmentUnanswered, GradingAssessmentAnswerUnclear:
+	case GradingAssessmentAnswerUnclear:
+		// 未判学生作答的参考解答必须同时有求解和讲题来源，禁止学生判分。
+		if v.GradeInvocationID != "" || hasSolve != (v.ParentGuideInvocationID != "") {
+			return fmt.Errorf("answer_unclear requires either no invocations or reference solve and parent guide only")
+		}
+	case GradingAssessmentUnanswered:
 		if hasSolve || v.GradeInvocationID != "" {
 			return fmt.Errorf("grading assessment %s must not claim model invocations", v.Status)
 		}
@@ -225,7 +230,8 @@ func (v *GradingAssessmentItem) Validate() error {
 	if v.ParentGuideInvocationID != "" &&
 		v.Status != GradingAssessmentWrong &&
 		v.Status != GradingAssessmentProcessIssue &&
-		v.Status != GradingAssessmentBlankSolved {
+		v.Status != GradingAssessmentBlankSolved &&
+		v.Status != GradingAssessmentAnswerUnclear {
 		return fmt.Errorf("grading assessment %s must not claim a parent guide invocation", v.Status)
 	}
 	return nil
@@ -241,6 +247,9 @@ func (v GradingAssessmentItem) ValidateTerminalParentGuideReference() error {
 		return fmt.Errorf("%w: %v", ErrGradingAssessmentTerminalInvariant, err)
 	}
 	switch v.Status {
+	case GradingAssessmentAnswerUnclear:
+		// Validate已校验新参考解答的成对来源；旧无来源未判回执保持可读。
+		return nil
 	case GradingAssessmentWrong, GradingAssessmentProcessIssue, GradingAssessmentBlankSolved:
 		if v.ParentGuideInvocationID == "" {
 			return fmt.Errorf(

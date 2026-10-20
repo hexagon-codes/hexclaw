@@ -508,6 +508,7 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 	}
 	finalAnswerSolution := ""
 	finalAnswerOnly := false
+	independentReference := false
 	if mode == PhotoModeGrade && finalAnswerObservationUnresolved(req, q) {
 		item.Status = PhotoAnswerUnclear
 		item.Warning = "Unable to reliably recognize the handwriting. No correctness judgment was produced."
@@ -518,9 +519,17 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 			return item, err
 		}
 	}
+	if mode == PhotoModeGrade && q.AnswerState == AnswerStateUnclear {
+		item.Status = PhotoAnswerUnclear
+		item.Warning = unclearHandwritingReferenceWarning
+	}
 	if item.Status == PhotoAnswerUnclear && !finalAnswerOnly {
-		return commitGradingAssessmentItem(ctx, deps, job, q, item, "", "", "",
-			k12storage.GradingAssessmentEffects{})
+		if !o.independentReferenceAnswerEligible(job, req, q) {
+			return commitGradingAssessmentItem(ctx, deps, job, q, item, "", "", "",
+				k12storage.GradingAssessmentEffects{})
+		}
+		mode, independentReference = PhotoModeSolve, true
+		item.Warning = unclearHandwritingReferenceWarning
 	}
 
 	gradeReq := photoItemGradeRequest(req, q)
@@ -653,8 +662,11 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 		}
 		item.ParentGuide = &guide
 		item.Status = PhotoBlankSolved
+		if independentReference {
+			item.Status = PhotoAnswerUnclear
+		}
 		if !photoEvidenceTrusted(solved.Evidence) {
-			item.Warning = "Independent programmatic verification is unavailable for this answer."
+			item.Warning = strings.TrimSpace(item.Warning + " Independent programmatic verification is unavailable for this answer.")
 		}
 		return commitGradingAssessmentItem(durableCtx, deps, job, q, item,
 			solveInvocationID, "", parentGuideInvocationID, k12storage.GradingAssessmentEffects{})
@@ -1180,7 +1192,8 @@ func commitGradingAssessmentItem(
 	if parentGuideInvocationID != "" &&
 		item.Status != PhotoWrong &&
 		item.Status != PhotoCorrectWithProcessIssue &&
-		item.Status != PhotoBlankSolved {
+		item.Status != PhotoBlankSolved &&
+		item.Status != PhotoAnswerUnclear {
 		return item, fmt.Errorf(
 			"%w: parent guide cannot attach to status %s",
 			ErrGradingAssessmentExactSet,
@@ -1377,6 +1390,14 @@ func validateGradingAssessmentTerminalItem(
 		)
 	}
 	switch receipt.Status {
+	case k12.GradingAssessmentAnswerUnclear:
+		if receipt.SolveInvocationID == "" && receipt.AnswerSource == nil && item.ParentGuide == nil {
+			return nil
+		}
+		if receipt.ParentGuideInvocationID == "" || receipt.SolveInvocationID == "" && receipt.AnswerSource == nil || strings.TrimSpace(item.Solve.Solution) == "" {
+			return fmt.Errorf("%w: reference answer requires succeeded solve and guide sources", ErrGradingAssessmentExactSet)
+		}
+		fallthrough
 	case k12.GradingAssessmentWrong, k12.GradingAssessmentProcessIssue, k12.GradingAssessmentBlankSolved:
 		if item.ParentGuide == nil {
 			return fmt.Errorf(

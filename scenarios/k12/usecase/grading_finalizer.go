@@ -896,6 +896,10 @@ func writeCanonicalGradingVisibleAnswers(out *strings.Builder, item PhotoGradeIt
 	if studentAnswer == "" {
 		studentAnswer = strings.TrimSpace(item.Recognized.AnswerRawTranscription)
 	}
+	if source := item.Recognized.ImageSourceContext; source != nil && source.Version == k12.RecognitionImageScopeVersionV1 && source.Action == "solve" {
+		// 解题产物只消费题干；原始笔迹仍留在识别事实中，不作为本轮讲解结论。
+		studentAnswer = ""
+	}
 	if studentAnswer != "" {
 		out.WriteString("**原始作答：** ")
 		out.WriteString(photoInline(studentAnswer, 600))
@@ -903,7 +907,7 @@ func writeCanonicalGradingVisibleAnswers(out *strings.Builder, item PhotoGradeIt
 	}
 	if item.ParentGuide != nil && strings.TrimSpace(item.ParentGuide.Answer) != "" {
 		out.WriteString("**正确答案：** ")
-		out.WriteString(photoInline(item.ParentGuide.Answer, 600))
+		out.WriteString(strings.TrimSpace(item.ParentGuide.Answer))
 		out.WriteString("\n\n")
 	}
 }
@@ -947,7 +951,12 @@ func RenderCanonicalGradingAssessmentDetails(resultJSON string) (string, PhotoIt
 
 	requiresGuide := false
 	switch item.Status {
-	case PhotoCorrect, PhotoUnanswered, PhotoAnswerUnclear, PhotoOutOfScope, PhotoUntrusted:
+	case PhotoCorrect, PhotoUnanswered, PhotoOutOfScope, PhotoUntrusted:
+	case PhotoAnswerUnclear:
+		requiresGuide = item.ParentGuide != nil
+		if requiresGuide && strings.TrimSpace(item.Solve.Solution) == "" {
+			return "", "", false
+		}
 	case PhotoCorrectWithProcessIssue:
 		requiresGuide = true
 		if strings.TrimSpace(item.Grade.Outcome.WrongStep) == "" ||
@@ -991,6 +1000,11 @@ func RenderCanonicalGradingAssessmentDetails(resultJSON string) (string, PhotoIt
 	case PhotoBlankSolved:
 		out.WriteString("### 家长辅导指南\n\n")
 		writeParentTeachingGuideDetailsMarkdown(&out, *item.ParentGuide)
+	case PhotoAnswerUnclear:
+		if item.ParentGuide != nil {
+			out.WriteString("### 家长辅导指南\n\n")
+			writeParentTeachingGuideDetailsMarkdown(&out, *item.ParentGuide)
+		}
 	}
 	return strings.TrimSpace(out.String()), item.Status, true
 }
