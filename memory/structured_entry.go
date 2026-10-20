@@ -29,6 +29,8 @@ type EntryMeta struct {
 	ID               string // 稳定内容寻址 ID（修缺陷H）：append 时生成、随条目持久化，删/改/移行后不漂移；旧条目无标签 → "" → 回退行号 ID。
 	Pinned           bool
 	Subject          string
+	Attribute        string `json:",omitempty"`
+	Value            string `json:",omitempty"`
 	ValidFrom        string
 	ValidTo          string
 	Supersedes       string
@@ -37,7 +39,7 @@ type EntryMeta struct {
 }
 
 func (m EntryMeta) isZero() bool {
-	return m.ID == "" && !m.Pinned && m.Subject == "" && m.ValidFrom == "" &&
+	return m.ID == "" && !m.Pinned && m.Subject == "" && m.Attribute == "" && m.Value == "" && m.ValidFrom == "" &&
 		m.ValidTo == "" && m.Supersedes == "" && m.Confidence == 0 && m.HitCount == 0 && m.ProfileDigest == "" && m.ProfileOperation == "" && !m.ManualCorrection
 }
 
@@ -64,6 +66,12 @@ func (m EntryMeta) serialize() string {
 	}
 	if m.Subject != "" {
 		p = append(p, "subj="+url.QueryEscape(m.Subject))
+	}
+	if m.Attribute != "" {
+		p = append(p, "attr="+url.QueryEscape(m.Attribute))
+	}
+	if m.Value != "" {
+		p = append(p, "val="+url.QueryEscape(m.Value))
 	}
 	if m.ValidFrom != "" {
 		p = append(p, "vf="+m.ValidFrom)
@@ -119,6 +127,10 @@ func splitEntryMeta(content string) (string, EntryMeta) {
 			}
 		case "vf":
 			m.ValidFrom = v
+		case "attr":
+			m.Attribute, _ = url.QueryUnescape(v)
+		case "val":
+			m.Value, _ = url.QueryUnescape(v)
 		case "vt":
 			m.ValidTo = v
 		case "sup":
@@ -370,7 +382,7 @@ const metaTimeFormat = time.RFC3339
 //	② 新条带 Subject/Supersedes(旧条 ID)/ValidFrom=now 落盘，接续有效窗口。
 //
 // 先改旧（行数不变，行号稳定）后追加新（仅在末尾增行，不动既有行号）→ oldID 始终有效。
-func (fm *FileMemory) supersedeEntryUnlocked(oldID, newContent, memType, source, role, subject string, now time.Time) error {
+func (fm *FileMemory) supersedeEntryUnlocked(oldID, newContent, memType, source, role string, meta EntryMeta, now time.Time) error {
 	vt := now.UTC().Format(metaTimeFormat)
 	if err := fm.rewriteEntryMetaUnlocked(oldID, func(m EntryMeta) EntryMeta {
 		m.ValidTo = vt
@@ -383,10 +395,7 @@ func (fm *FileMemory) supersedeEntryUnlocked(oldID, newContent, memType, source,
 		targetDir = fm.roleDir("")
 	}
 	fm.evictIfNeededUnlocked(targetDir)
-	meta := EntryMeta{
-		Subject:    strings.TrimSpace(subject),
-		Supersedes: oldID,
-		ValidFrom:  now.UTC().Format(metaTimeFormat),
-	}
+	meta.Supersedes = oldID
+	meta.ValidFrom = now.UTC().Format(metaTimeFormat)
 	return fm.appendStructuredEntryUnlocked(targetDir, memType, source, newContent, meta)
 }

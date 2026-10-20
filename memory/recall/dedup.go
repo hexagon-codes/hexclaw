@@ -70,6 +70,7 @@ func (o DedupOptions) sim() func(string, string) float64 {
 //
 // existing 应为「当前有效」集合（调用方先过 IsCurrentlyValid）；本函数对每条再次校验以防御。
 func DedupUpsert(newFact Entry, existing []Entry, now time.Time, opts DedupOptions) DedupDecision {
+	newFact = NormalizePersonFact(newFact)
 	nc := normalizeContent(newFact.Content)
 	if nc == "" {
 		return DedupDecision{Action: ActionDiscard, Reason: "empty content"}
@@ -80,6 +81,7 @@ func DedupUpsert(newFact Entry, existing []Entry, now time.Time, opts DedupOptio
 
 	var bestUpdate string
 	for _, e := range existing {
+		e = NormalizePersonFact(e)
 		if !sameUser(e.UserID, newFact.UserID) || e.Role != newFact.Role {
 			continue
 		}
@@ -91,7 +93,27 @@ func DedupUpsert(newFact Entry, existing []Entry, now time.Time, opts DedupOptio
 			continue
 		}
 
-		// 1) 同主语不同取值 → 时序取代（矛盾消解优先于一切）。
+		// 人物事实只在同一主体、同一明确属性及真实冲突下取代。
+		if isPersonSubject(nSubj) || isPersonSubject(e.Subject) {
+			if !strings.EqualFold(strings.TrimSpace(e.Subject), nSubj) {
+				continue
+			}
+			if ec == nc {
+				return DedupDecision{Action: ActionDiscard, TargetID: e.ID, Reason: "identical person fact"}
+			}
+			if newFact.Attribute == "" || e.Attribute == "" || newFact.Attribute != e.Attribute || newFact.Value == "" || e.Value == "" {
+				continue
+			}
+			if normalizeContent(newFact.Value) == normalizeContent(e.Value) {
+				return DedupDecision{Action: ActionDiscard, TargetID: e.ID, Reason: "same person attribute value"}
+			}
+			if newFact.Attribute == "interest" || !personValuesConflict(e, newFact) {
+				continue
+			}
+			return DedupDecision{Action: ActionSupersede, TargetID: e.ID, Reason: "person attribute changed"}
+		}
+
+		// 普通旧属性键保持原有取代合同。
 		if nSubj != "" && strings.EqualFold(strings.TrimSpace(e.Subject), nSubj) {
 			if ec == nc {
 				return DedupDecision{Action: ActionDiscard, TargetID: e.ID, Reason: "same subject, identical value"}

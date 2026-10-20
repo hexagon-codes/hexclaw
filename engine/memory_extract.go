@@ -16,8 +16,10 @@ import (
 // extractedFact 是一条解析后的离散事实：Content 为自包含正文，Subject 为可变属性主语（可空）。
 // Subject 非空 → 该事实是「会随时间改变的属性」（居住地/时区/职业…），供 G3 时序取代矛盾消解。
 type extractedFact struct {
-	Subject string
-	Content string
+	Subject   string
+	Content   string
+	Attribute string
+	Value     string
 }
 
 // cleanFactLine 归一抽取结果的单行：去 bullet / trim / NONE→空；保守不剥数字前缀（防「3年经验」被截）。
@@ -61,11 +63,21 @@ func parseExtractedFacts(result string) []extractedFact {
 			continue
 		}
 		subj, content := splitSubjectPrefix(line)
-		if content == "" || seen[content] {
+		var attribute, value string
+		if strings.HasPrefix(subj, "人物:") && strings.HasPrefix(content, "[") {
+			if end := strings.Index(content, "]"); end > 1 {
+				if key, val, ok := strings.Cut(content[1:end], "="); ok {
+					attribute, value = strings.TrimSpace(key), strings.TrimSpace(val)
+					content = strings.TrimSpace(content[end+1:])
+				}
+			}
+		}
+		identity := subj + "\x00" + attribute + "\x00" + value + "\x00" + content
+		if content == "" || seen[identity] {
 			continue
 		}
-		seen[content] = true
-		out = append(out, extractedFact{Subject: subj, Content: content})
+		seen[identity] = true
+		out = append(out, extractedFact{Subject: subj, Content: content, Attribute: attribute, Value: value})
 	}
 	return out
 }
@@ -128,7 +140,7 @@ func (e *ReActEngine) ingestExtractedFacts(ctx context.Context, facts []extracte
 			trace.L(ctx).Warn("auto-memory: 跳过疑似敏感内容（凭证/PII 不入记忆）")
 			continue
 		}
-		action, err := e.fileMem.UpsertStructuredEntryForRole(f.Content, classifyMemoryType(f.Content), "chat_extract", role, f.Subject)
+		action, err := e.fileMem.UpsertStructuredFactForRole(f.Content, classifyMemoryType(f.Content), "chat_extract", role, f.Subject, f.Attribute, f.Value)
 		if err != nil {
 			trace.L(ctx).Error("auto-memory: 写入失败", "err", err)
 			continue

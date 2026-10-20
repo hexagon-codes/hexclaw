@@ -60,13 +60,15 @@ const (
 // 与 memory.MemoryEntry（文件存储层条目）刻意分离：本类型是**召回/打分内核**的
 // 一等模型，迁移期并存；待砍薄版 + 引擎接线落地后由它统一对外契约。
 type Entry struct {
-	ID      string
-	UserID  string // R9 多租户键（修 P4 串场）；空串视为单租户默认桶
-	Role    string // 角色隔离；rule/identity 落 _global
-	Type    Type
-	Subject string // 该事实陈述的主语/属性（如「居住地」「技术栈」），G3 时序取代的键；可空
-	Pinned  bool   // 逃生口：强制常驻（薄版 standing 的唯一保留语义）
-	Content string
+	ID        string
+	UserID    string // R9 多租户键（修 P4 串场）；空串视为单租户默认桶
+	Role      string // 角色隔离；rule/identity 落 _global
+	Type      Type
+	Subject   string // 该事实陈述的主语/属性（如「居住地」「技术栈」），G3 时序取代的键；可空
+	Attribute string
+	Value     string
+	Pinned    bool // 逃生口：强制常驻（薄版 standing 的唯一保留语义）
+	Content   string
 
 	Embedding   []float32 // 进向量库供 T2 检索；可空（降级纯 BM25）
 	RecallCount int       // 行为 importance：被召回次数，自校正（替代 LLM 静态分）

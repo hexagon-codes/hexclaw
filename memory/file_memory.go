@@ -361,6 +361,8 @@ type MemoryEntry struct {
 	// 地基 A：结构化元数据（内联 meta 标签持久化，G3 时序留史 + Pinned）。
 	Pinned     bool    `json:"pinned,omitempty"`
 	Subject    string  `json:"subject,omitempty"`
+	Attribute  string  `json:"attribute,omitempty"`
+	Value      string  `json:"value,omitempty"`
 	ValidFrom  string  `json:"valid_from,omitempty"`
 	ValidTo    string  `json:"valid_to,omitempty"`
 	Supersedes string  `json:"supersedes,omitempty"`
@@ -909,6 +911,7 @@ func (fm *FileMemory) parseEntriesFromFileUnlocked(dir, filename, status, idPref
 		e.ProfileDigest = emeta.ProfileDigest
 		e.ManualCorrection = emeta.ManualCorrection
 		e.Subject = emeta.Subject
+		e.Attribute, e.Value = emeta.Attribute, emeta.Value
 		e.ValidFrom = emeta.ValidFrom
 		// 画像更新时间来自本次摘要生效时刻，保留原记录的创建时间和标识。
 		if isProfileEntry(e) && e.ProfileDigest != "" && e.ValidFrom != "" {
@@ -1092,6 +1095,10 @@ func (fm *FileMemory) updateEntryUnlocked(id, content string) error {
 	oldFirstLine := strings.TrimSpace(lines[blockStart])
 	_, meta := splitEntryMeta(strings.TrimSpace(lines[metaLineIdx(lines, blockStart, blockEnd)]))
 	newContent := strings.TrimSpace(content)
+	if strings.HasPrefix(meta.Subject, "人物:") {
+		fact := recall.NormalizePersonFact(recall.Entry{Subject: meta.Subject, Content: newContent})
+		meta.Attribute, meta.Value = fact.Attribute, fact.Value
+	}
 	if tag := meta.serialize(); tag != "" {
 		newContent += " " + tag
 	}

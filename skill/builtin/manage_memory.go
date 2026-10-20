@@ -69,6 +69,8 @@ func (s *ManageMemorySkill) ToolDefinition() llm.ToolDefinition {
 					Type:        "string",
 					Description: "For update/remove/pin/unpin: an entry id (m-N) or a distinctive substring of the entry's content",
 				},
+				"attribute": {Type: "string", Description: "For a named person's current fact: grade, current_residence, or interest. Leave unset when uncertain."},
+				"value":     {Type: "string", Description: "The explicit current attribute value; interests are multiple independent values."},
 			},
 			Required: []string{"action"},
 		})
@@ -108,7 +110,7 @@ func (s *ManageMemorySkill) add(args map[string]any) (*skill.Result, error) {
 		memType = "fact"
 	}
 	subject := strings.TrimSpace(memArgString(args, "subject"))
-	act, err := s.fm.UpsertStructuredEntryForRole(content, memType, "ai_managed", "", subject)
+	act, err := s.fm.UpsertStructuredFactForRole(content, memType, "ai_managed", "", subject, memArgString(args, "attribute"), memArgString(args, "value"))
 	if err != nil {
 		return nil, err
 	}

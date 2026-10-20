@@ -31,6 +31,11 @@ func (fm *FileMemory) UpsertEntryForRole(content, memType, source, role string) 
 //
 // 返回动作："insert" | "update" | "discard" | "supersede"。
 func (fm *FileMemory) UpsertStructuredEntryForRole(content, memType, source, role, subject string) (string, error) {
+	return fm.UpsertStructuredFactForRole(content, memType, source, role, subject, "", "")
+}
+
+// UpsertStructuredFactForRole 在原有写入范围内区分人物、属性和值。
+func (fm *FileMemory) UpsertStructuredFactForRole(content, memType, source, role, subject, attribute, value string) (string, error) {
 	defer fm.requestProfileRefresh()
 	if memType == "" {
 		memType = "fact"
@@ -54,7 +59,8 @@ func (fm *FileMemory) UpsertStructuredEntryForRole(content, memType, source, rol
 		}
 	}
 	existing := recallEntriesForDedup(sources)
-	cand := recall.Entry{Content: content, Type: recall.Type(memType), Subject: strings.TrimSpace(subject)}
+	cand := recall.NormalizePersonFact(recall.Entry{Content: content, Type: recall.Type(memType), Subject: strings.TrimSpace(subject), Attribute: attribute, Value: value})
+	meta := EntryMeta{Subject: cand.Subject, Attribute: cand.Attribute, Value: cand.Value}
 	d := recall.DedupUpsert(cand, existing, now,
 		recall.DedupOptions{SimFn: recall.LexicalSim, JaccardThreshold: dedupUpsertThreshold})
 
@@ -66,7 +72,7 @@ func (fm *FileMemory) UpsertStructuredEntryForRole(content, memType, source, rol
 		return "discard", nil
 	case recall.ActionSupersede:
 		if d.TargetID != "" {
-			if err := fm.supersedeEntryUnlocked(d.TargetID, content, memType, source, role, cand.Subject, now); err != nil {
+			if err := fm.supersedeEntryUnlocked(d.TargetID, content, memType, source, role, meta, now); err != nil {
 				return "", err
 			}
 			return "supersede", nil
@@ -78,6 +84,7 @@ func (fm *FileMemory) UpsertStructuredEntryForRole(content, memType, source, rol
 			if cand.Subject != "" {
 				preserved.Subject = cand.Subject // 新主语若有则采纳
 			}
+			preserved.Attribute, preserved.Value = cand.Attribute, cand.Value
 			if err := fm.rewriteEntryContentMetaUnlocked(d.TargetID, content, preserved); err == nil {
 				return "update", nil
 			}
@@ -90,7 +97,7 @@ func (fm *FileMemory) UpsertStructuredEntryForRole(content, memType, source, rol
 		targetDir = fm.roleDir("")
 	}
 	fm.evictIfNeededUnlocked(targetDir)
-	if err := fm.appendStructuredEntryUnlocked(targetDir, memType, source, content, EntryMeta{Subject: cand.Subject}); err != nil {
+	if err := fm.appendStructuredEntryUnlocked(targetDir, memType, source, content, meta); err != nil {
 		return "", err
 	}
 	return "insert", nil
@@ -113,6 +120,8 @@ func toRecallEntry(e MemoryEntry) recall.Entry {
 		ID:          e.ID,
 		Type:        recall.Type(e.Type),
 		Subject:     e.Subject,
+		Attribute:   e.Attribute,
+		Value:       e.Value,
 		Content:     e.Content,
 		Pinned:      e.Pinned,
 		RecallCount: e.HitCount,

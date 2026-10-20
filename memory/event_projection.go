@@ -192,6 +192,7 @@ func (fm *FileMemory) ReviseStructuredEvent(eventID string, revision int, conten
 			lines = removeLineRange(lines, start, end)
 		} else {
 			oldMeta.Subject = meta.Subject
+			oldMeta.Attribute, oldMeta.Value = meta.Attribute, meta.Value
 			entry := rebuildEntryLine(strings.TrimSpace(lines[start]), content+" "+oldMeta.serialize())
 			lines = append(append(lines[:start:start], entry), lines[end:]...)
 		}
