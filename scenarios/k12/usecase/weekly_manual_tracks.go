@@ -198,10 +198,8 @@ func (d Deps) finishWeeklyTextbookTrack(ctx context.Context, plan k12.WeeklyPrac
 	if index < 0 {
 		return k12.WeeklyPracticePlan{}, false, records.ErrIllegalTransition
 	}
-	budget := 600
-	if len(plan.Tracks) > 0 {
-		budget = max(0, 600-len(plan.Tracks[0].Items)*60)
-	}
+	// 显式选择题数的手动分区不消耗自动周练剩余预算，仍遵守分区原有上限。
+	budget := 900
 	nextTrack, nextKeys, _ := d.weeklySupplementRequest(ctx, request, true, budget)
 	if nextTrack.Status != k12.WeeklyTrackReady {
 		return k12.WeeklyPracticePlan{}, false,
