@@ -13,6 +13,7 @@ import (
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/config"
 	"github.com/hexagon-codes/hexclaw/instances"
+	"github.com/hexagon-codes/hexclaw/router"
 )
 
 type UpsertInstanceRequest struct {
@@ -316,8 +317,30 @@ func (s *Server) handleUpdateInstanceByID(w http.ResponseWriter, r *http.Request
 	if next.Name != current.Name {
 		next.Name = strings.TrimSpace(next.Name)
 	}
+	update := func() error { return s.instanceMgr.UpdateByID(r.Context(), id, next) }
+	if next.Name != current.Name && next.Provider == current.Provider && s.agentStore != nil && s.agentRouter != nil {
+		renameStore, ok := s.agentStore.(router.InstanceRuleRenameStore)
+		if !ok {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "The routing store cannot preserve bindings during instance rename."})
+			return
+		}
+		update = func() error {
+			return s.agentRouter.ReplaceRulesPersisted(func() ([]router.Rule, error) {
+				var rules []router.Rule
+				err := s.instanceMgr.UpdateByIDWithTransaction(r.Context(), id, next, func(ctx context.Context, tx *sql.Tx) error {
+					var err error
+					rules, err = renameStore.RenameInstanceRulesTx(ctx, tx, current.Provider, current.Name, next.Name)
+					return err
+				})
+				return rules, err
+			})
+		}
+	}
 	_ = s.instanceMgr.Stop(r.Context(), current.Name)
-	if err := s.instanceMgr.UpdateByID(r.Context(), id, next); err != nil {
+	if err := update(); err != nil {
+		if current.Enabled {
+			_ = s.instanceMgr.Start(r.Context(), current.Name)
+		}
 		status := http.StatusBadRequest
 		if errors.Is(err, sql.ErrNoRows) {
 			status = http.StatusNotFound

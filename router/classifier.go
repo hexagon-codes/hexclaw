@@ -101,6 +101,10 @@ func (r *Dispatcher) RouteWithFallback(ctx context.Context, req RouteRequest, me
 	if result != nil {
 		return result, RouteSourceRule
 	}
+	// 无命名绑定的钉钉实例由内置默认助理接待，不进行内容分类。
+	if req.Platform == "dingtalk" {
+		return nil, RouteSourceDefault
+	}
 
 	// 2. LLM 语义路由（仅在有 classifier 且 Agent >= 2 时触发）
 	r.mu.RLock()
@@ -180,7 +184,7 @@ func (r *Dispatcher) Explain(ctx context.Context, req RouteRequest, message stri
 	if result == nil {
 		return RouteExplanation{
 			Matched: false,
-			Source:  RouteSourceNone,
+			Source:  source,
 			Matches: matches,
 		}
 	}

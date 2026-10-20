@@ -36,6 +36,11 @@ type AtomicAgentUnregisterStore interface {
 	DeleteAgentAndSetDefault(ctx context.Context, name, nextDefault string, wasDefault bool) error
 }
 
+// InstanceRuleRenameStore 在实例事务内迁移精确名称规则，并返回该事务的完整规则快照。
+type InstanceRuleRenameStore interface {
+	RenameInstanceRulesTx(context.Context, *sql.Tx, string, string, string) ([]Rule, error)
+}
+
 // SQLiteStore 基于 SQLite 的 Agent/Rule 持久化实现
 type SQLiteStore struct {
 	db *sql.DB
@@ -419,6 +424,23 @@ func (s *SQLiteStore) LoadRules(ctx context.Context) ([]Rule, error) {
 	if err != nil {
 		return nil, err
 	}
+	return scanRules(rows)
+}
+
+// RenameInstanceRulesTx 保留当前实例的规则身份及优先级，覆盖同名的重复旧规则。
+// 调用方负责提交实例更新所在事务，失败时不得发布返回快照。
+func (s *SQLiteStore) RenameInstanceRulesTx(ctx context.Context, tx *sql.Tx, platform, previousName, nextName string) ([]Rule, error) {
+	if _, err := tx.ExecContext(ctx, `UPDATE OR REPLACE agent_rules SET instance_id=? WHERE platform=? AND instance_id=?`, nextName, platform, previousName); err != nil {
+		return nil, err
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT id, platform, instance_id, user_id, chat_id, agent_name, priority FROM agent_rules ORDER BY priority DESC, id`)
+	if err != nil {
+		return nil, err
+	}
+	return scanRules(rows)
+}
+
+func scanRules(rows *sql.Rows) ([]Rule, error) {
 	defer rows.Close()
 
 	var rules []Rule

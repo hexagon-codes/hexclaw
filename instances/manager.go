@@ -396,6 +396,12 @@ func (m *Manager) Upsert(ctx context.Context, inst *Instance) error {
 }
 
 func (m *Manager) UpdateByID(ctx context.Context, id string, inst *Instance) error {
+	return m.UpdateByIDWithTransaction(ctx, id, inst, nil)
+}
+
+// UpdateByIDWithTransaction 在同一事务内更新实例及关联数据；回调失败时全部回滚。
+// persist只操作传入事务，不执行外部发送或修改运行时状态。
+func (m *Manager) UpdateByIDWithTransaction(ctx context.Context, id string, inst *Instance, persist func(context.Context, *sql.Tx) error) error {
 	if id == "" {
 		return fmt.Errorf("id 不能为空")
 	}
@@ -404,7 +410,12 @@ func (m *Manager) UpdateByID(ctx context.Context, id string, inst *Instance) err
 		return err
 	}
 
-	res, err := m.db.ExecContext(ctx,
+	tx, err := m.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx,
 		`UPDATE platform_instances
 		 SET provider = ?, name = ?, enabled = ?, mode = ?, status = ?, config_json = ?, last_error = ?, updated_at = ?
 		 WHERE id = ?`,
@@ -420,7 +431,12 @@ func (m *Manager) UpdateByID(ctx context.Context, id string, inst *Instance) err
 	if n == 0 {
 		return sql.ErrNoRows
 	}
-	return nil
+	if persist != nil {
+		if err := persist(ctx, tx); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // EncryptExistingAtRest 把库里仍是明文（无 enc:v1: 前缀）的 config_json 就地重写为密文。

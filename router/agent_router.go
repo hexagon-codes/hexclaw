@@ -341,6 +341,19 @@ func (r *Dispatcher) RemoveRulesByInstance(platform, instanceID string) {
 	r.rules = filtered
 }
 
+// ReplaceRulesPersisted 在持久操作提交后发布同一事务的规则快照；失败时保留原内存规则。
+// persist在写锁内执行，不得回调Dispatcher。
+func (r *Dispatcher) ReplaceRulesPersisted(persist func() ([]Rule, error)) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rules, err := persist()
+	if err != nil {
+		return err
+	}
+	r.rules = append([]Rule(nil), rules...)
+	return nil
+}
+
 // RemoveRulesByPlatform 删除指定平台的全部规则（平台最后一个实例删除后的遗留清理）
 func (r *Dispatcher) RemoveRulesByPlatform(platform string) {
 	r.mu.Lock()
@@ -418,6 +431,10 @@ func (r *Dispatcher) Route(req RouteRequest) *RoutingResult {
 	ruleResult := r.routeRulesOnly(req)
 	if ruleResult != nil {
 		return ruleResult
+	}
+	// 钉钉未绑定命名智能体时使用内置默认助理，不选择已注册智能体。
+	if req.Platform == "dingtalk" {
+		return nil
 	}
 
 	r.mu.RLock()
