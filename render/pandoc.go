@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hexagon-codes/hexclaw/internal/mathtext"
 	"github.com/hexagon-codes/toolkit/util/idgen"
 )
 
@@ -87,14 +88,15 @@ func (r *PandocRenderer) Render(ctx context.Context, content string, format Form
 
 	// 构造 pandoc 命令
 	args := r.buildArgs(format, tempPath, opts)
-	if format == FormatPDF {
-		stylePath, err := r.preparePDFStyle()
+	if format == FormatPDF && opts.PDFLayout != "custom" {
+		stylePath, err := r.preparePDFStyle(opts)
 		if err != nil {
 			return nil, &RenderError{Code: CodeRenderFailed, Format: format, Detail: "prepare PDF style: " + err.Error()}
 		}
 		defer os.Remove(stylePath)
 		// 默认模板先完成conf设置，随后再应用PDF专用样式。
 		args = append(args, "--include-before-body="+stylePath)
+		content = mathtext.FormatPDFMarkdown(content)
 	}
 	pandocBin, _ := r.lookPandoc() // 已在上方校验过
 

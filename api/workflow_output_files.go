@@ -249,7 +249,7 @@ func (s *Server) renderWorkflowOutputFile(ctx context.Context, run *WorkflowRun,
 		return "", "", 0, code, "Workflow output file could not be rendered"
 	}
 	// 缓存文件由服务管理；临时渲染结果落入genStore后才清理。
-	if !result.CacheHit {
+	if !result.CacheHit && !result.CacheOwned {
 		defer os.Remove(result.Path)
 	}
 	input, err := os.Open(result.Path)

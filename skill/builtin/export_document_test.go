@@ -124,3 +124,34 @@ func TestExport_ToolDef_Required(t *testing.T) {
 		t.Fatalf("Required must contain content+format, got %v", req)
 	}
 }
+
+func TestExport_PDFExceptionsReachSharedRenderer(t *testing.T) {
+	disabled := false
+	for _, tc := range []struct {
+		name         string
+		args         map[string]any
+		headerFooter *bool
+		layout       string
+	}{
+		{name: "default", args: map[string]any{}},
+		{name: "explicit no header footer", args: map[string]any{"pdf_header_footer": false}, headerFooter: &disabled},
+		{name: "explicit custom", args: map[string]any{"pdf_layout": "custom"}, layout: "custom"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &fakeRenderer{}
+			tc.args["content"], tc.args["format"] = "# Document", "pdf"
+			if _, err := NewExportDocumentSkill(r).Execute(t.Context(), tc.args); err != nil {
+				t.Fatal(err)
+			}
+			if r.lastOpts.PDFLayout != tc.layout {
+				t.Fatal("PDF layout was not forwarded")
+			}
+			if (r.lastOpts.PDFHeaderFooter == nil) != (tc.headerFooter == nil) || tc.headerFooter != nil && *r.lastOpts.PDFHeaderFooter != *tc.headerFooter {
+				t.Fatal("PDF header/footer preference was not forwarded")
+			}
+			if r.lastOpts.AllowRawHTML || r.lastOpts.AllowRawTeX {
+				t.Fatal("PDF exceptions changed raw content permissions")
+			}
+		})
+	}
+}

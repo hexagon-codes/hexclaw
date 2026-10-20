@@ -17,25 +17,34 @@ var pdfStyleTemplate string
 //go:embed assets/pdf-brand.png
 var pdfBrandImage []byte
 
+// PDF使用与桌面一致的矢量工具标记，避免依赖宿主Emoji字体。
+//
+//go:embed assets/tool-wrench.svg
+var pdfToolIcon []byte
+
 var pdfStyleDigest = func() string {
 	h := sha256.New()
 	h.Write([]byte(pdfStyleTemplate))
 	h.Write(pdfBrandImage)
+	h.Write(pdfToolIcon)
 	return hex.EncodeToString(h.Sum(nil))
 }()
 
 // 每次渲染使用独占临时样式；Logo仅以固定资产字节进入Typst，正文不能指定本机路径。
-func (r *PandocRenderer) preparePDFStyle() (path string, err error) {
-	var logo strings.Builder
-	logo.WriteString("bytes((")
-	for i, b := range pdfBrandImage {
-		if i > 0 {
-			logo.WriteByte(',')
+func (r *PandocRenderer) preparePDFStyle(opts RenderOptions) (path string, err error) {
+	content := strings.ReplaceAll(pdfStyleTemplate, "__HC_HEADER_FOOTER__", strconv.FormatBool(opts.pdfHeaderFooterEnabled()))
+	for placeholder, asset := range map[string][]byte{"__HC_LOGO__": pdfBrandImage, "__HC_TOOL_ICON__": pdfToolIcon} {
+		var encoded strings.Builder
+		encoded.WriteString("bytes((")
+		for i, b := range asset {
+			if i > 0 {
+				encoded.WriteByte(',')
+			}
+			encoded.WriteString(strconv.Itoa(int(b)))
 		}
-		logo.WriteString(strconv.Itoa(int(b)))
+		encoded.WriteString("))")
+		content = strings.ReplaceAll(content, placeholder, encoded.String())
 	}
-	logo.WriteString("))")
-	content := strings.ReplaceAll(pdfStyleTemplate, "__HC_LOGO__", logo.String())
 	f, err := os.CreateTemp(r.SandboxDir, "pdf-style-*.typ")
 	if err != nil {
 		return "", err

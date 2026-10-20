@@ -97,6 +97,16 @@ func (c *Cache) Key(content string, format Format, opts RenderOptions) string {
 		"AllowRawTeX":  opts.AllowRawTeX,
 		"Locale":       opts.Locale,
 	}
+	if format == FormatPDF {
+		layout := opts.PDFLayout
+		if layout == "" {
+			layout = "standard"
+		}
+		optMap["PDFLayout"] = layout
+		optMap["PDFHeaderFooter"] = opts.pdfHeaderFooterEnabled()
+		optMap["Locale"] = opts.effectiveLocale(c.defaultLocale)
+		h.Write([]byte("pdf-text:numeric-fractions-v1|"))
+	}
 	keys := mapx.Keys(optMap)
 	sort.Strings(keys)
 	canonical := make([][2]any, 0, len(keys))
@@ -146,6 +156,7 @@ func (c *Cache) Lookup(key string, format Format) (*RenderResult, bool) {
 		Size:        stat.Size(),
 		ContentType: format.MIME(),
 		CacheHit:    true,
+		CacheOwned:  true,
 	}, true
 }
 

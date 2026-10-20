@@ -40,13 +40,13 @@ func (a *RenderAdapter) Render(ctx context.Context, markdown, format string) ([]
 		return nil, "", err // RenderError（含 ENGINE_MISSING 等），调用方按需降级
 	}
 	if res.Size > maxExportBytes {
-		if !res.CacheHit {
+		if !res.CacheHit && !res.CacheOwned {
 			_ = os.Remove(res.Path)
 		}
 		return nil, "", fmt.Errorf("render: 产物过大 %d 字节", res.Size)
 	}
 	data, err := os.ReadFile(res.Path)
-	if !res.CacheHit { // temp 文件，读完清理（cache 命中的不删）
+	if !res.CacheHit && !res.CacheOwned { // 只清理临时文件，首次入缓存的文件仍由服务管理。
 		_ = os.Remove(res.Path)
 	}
 	if err != nil {

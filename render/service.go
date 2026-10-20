@@ -95,6 +95,7 @@ func (s *Service) Render(ctx context.Context, content string, format Format, opt
 		if cachedPath, putErr := s.cache.Put(cacheKey, result.Path); putErr == nil {
 			result.Path = cachedPath
 			result.CacheHit = false // 是首次写入，不算 hit
+			result.CacheOwned = true
 		}
 		// Put 失败时不阻塞响应，让 result 仍指向 temp file
 	}

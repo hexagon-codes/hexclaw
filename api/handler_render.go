@@ -102,8 +102,8 @@ func (s *Server) handleRender(w http.ResponseWriter, r *http.Request) {
 	stat, _ := f.Stat()
 	http.ServeContent(w, r, result.Path, stat.ModTime(), f)
 
-	// 非缓存 temp file 在响应完成后清理
-	if !result.CacheHit {
+	// 只清理服务未接管的临时文件，首次入缓存不表示本次命中。
+	if !result.CacheHit && !result.CacheOwned {
 		_ = os.Remove(result.Path)
 	}
 }

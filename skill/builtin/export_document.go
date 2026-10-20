@@ -33,7 +33,7 @@ func NewExportDocumentSkill(r DocumentExporter) *ExportDocumentSkill {
 
 func (s *ExportDocumentSkill) Name() string { return "export_document" }
 func (s *ExportDocumentSkill) Description() string {
-	return "Render Markdown into a downloadable document and return its file path"
+	return "Render Markdown into a downloadable document; PDF uses the shared HexClaw layout by default"
 }
 
 // Match 只走 LLM tool-call 主路径。
@@ -42,12 +42,17 @@ func (s *ExportDocumentSkill) Match(string) bool { return false }
 func (s *ExportDocumentSkill) ToolDefinition() llm.ToolDefinition {
 	return llm.NewToolDefinition("export_document",
 		"Render Markdown into a downloadable document (md/html/docx/pdf/epub/odt/rtf/txt) and return "+
-			"its file path. Use when the user asks to export/save-as a document; the path can be sent or ingested.",
+			"its file path. Use this tool for generated PDFs so the shared layout is applied. Write formulas as Markdown/LaTeX math. "+
+			"PDF defaults to the standard HexClaw layout with a header and footer on every page. "+
+			"Only set PDF exceptions when the user explicitly requests no header/footer or a custom format. "+
+			"The path can be sent or ingested.",
 		&llm.Schema{Type: "object", Properties: map[string]*llm.Schema{
-			"content":  {Type: "string", Description: "Markdown content to render (required)"},
-			"format":   {Type: "string", Description: "md|html|docx|pdf|epub|odt|rtf|txt (required)"},
-			"filename": {Type: "string", Description: "suggested file name (optional)"},
-			"locale":   {Type: "string", Description: `output language, default "zh-CN"`},
+			"content":           {Type: "string", Description: "Markdown content to render (required)"},
+			"format":            {Type: "string", Description: "md|html|docx|pdf|epub|odt|rtf|txt (required)"},
+			"filename":          {Type: "string", Description: "suggested file name (optional)"},
+			"locale":            {Type: "string", Description: `output language, default "zh-CN"`},
+			"pdf_header_footer": {Type: "boolean", Description: "PDF only: default true; set false only when the user explicitly asks to omit headers and footers"},
+			"pdf_layout":        {Type: "string", Description: "PDF only: standard (default) or custom; custom skips the shared layout and uses Markdown/frontmatter formatting only when explicitly requested by the user"},
 		}, Required: []string{"content", "format"}})
 }
 
@@ -71,6 +76,17 @@ func (s *ExportDocumentSkill) Execute(ctx context.Context, args map[string]any) 
 	}
 	// AllowRawHTML / AllowRawTeX 保持默认 false —— 不暴露 UI，沙箱攻击面收敛。
 	opts := render.RenderOptions{Locale: locale}
+	if value, exists := args["pdf_header_footer"]; exists {
+		enabled, ok := value.(bool)
+		if !ok {
+			return nil, fmt.Errorf("pdf_header_footer must be a boolean")
+		}
+		opts.PDFHeaderFooter = &enabled
+	}
+	opts.PDFLayout = firstStringArg(args, "pdf_layout")
+	if err := opts.Validate(); err != nil {
+		return nil, err
+	}
 
 	res, err := s.render.Render(ctx, content, format, opts)
 	if err != nil {

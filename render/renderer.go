@@ -17,7 +17,10 @@
 // 已冻结的领域产物继续复用原文件，DOCX/HTML等格式不继承PDF样式。
 package render
 
-import "context"
+import (
+	"context"
+	"fmt"
+)
 
 // Format 目标输出格式（稳定枚举，前后端契约的一部分）。
 type Format string
@@ -89,12 +92,23 @@ type RenderOptions struct {
 
 	// AllowRawTeX 是否允许 markdown 中的原生 TeX 进入输出。同上默认 false。
 	AllowRawTeX bool
+
+	// PDFHeaderFooter 未指定时使用统一页眉页脚，仅显式用户要求可关闭本次输出。
+	PDFHeaderFooter *bool `json:"pdf_header_footer,omitempty"`
+	// PDFLayout 为 custom 时保留用户指定的特殊版式，不套共享PDF模板。
+	PDFLayout string `json:"pdf_layout,omitempty"`
 }
 
 // Validate 校验 options 合法性。当前主要校验 Locale 形如 BCP 47（最低限度）。
 func (o RenderOptions) Validate() error {
-	// Locale 留作扩展位；空值即默认。零值即合法。
+	if o.PDFLayout != "" && o.PDFLayout != "standard" && o.PDFLayout != "custom" {
+		return fmt.Errorf("unsupported PDF layout %q", o.PDFLayout)
+	}
 	return nil
+}
+
+func (o RenderOptions) pdfHeaderFooterEnabled() bool {
+	return o.PDFHeaderFooter == nil || *o.PDFHeaderFooter
 }
 
 // effectiveLocale 返回参与缓存键计算的 locale 串（含默认 fallback）。
@@ -120,10 +134,13 @@ type RenderResult struct {
 	// ContentType MIME 类型，对应 Format.MIME()。
 	ContentType string
 
-	// CacheHit 是否命中缓存。
-	// true：Path 指向 cache file，handler 不应清理；
-	// false：Path 指向 temp file，handler 在响应完成后清理。
+	// CacheHit 是否命中已有缓存；首次入缓存仍为false。
+	// 文件清理须同时核对CacheOwned，不能把未命中等同于临时文件。
 	CacheHit bool
+
+	// CacheOwned 表示文件由缓存服务管理，首次生成入缓存也为true。
+	// 调用者只在CacheHit和CacheOwned均为false时清理临时文件。
+	CacheOwned bool
 }
 
 // Renderer 渲染器接口。实现负责：
