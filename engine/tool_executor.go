@@ -45,6 +45,19 @@ func (e *ToolExecutor) AddHook(h any) {
 //  2. Run beforeHooks (any can abort by returning error)
 //  3. Execute the tool
 //  4. Run afterHooks (can modify result, e.g. truncation)
+type toolRawResultContextKey struct{}
+type toolRawResultCapture struct{ value any }
+
+// ExecuteResult 复用同一执行与钩子链，单独保留未截断的结构化结果。
+func (e *ToolExecutor) ExecuteResult(ctx context.Context, toolName string, args map[string]any) (string, any, error) {
+	capture := &toolRawResultCapture{}
+	content, err := e.Execute(context.WithValue(ctx, toolRawResultContextKey{}, capture), toolName, args)
+	if capture.value == nil {
+		capture.value = content
+	}
+	return content, capture.value, err
+}
+
 func (e *ToolExecutor) Execute(ctx context.Context, toolName string, args map[string]any) (result string, err error) {
 	if err := workflowToolAllowed(workflowStepOptions(ctx), toolName, args); err != nil {
 		return "", err
@@ -88,7 +101,7 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolName string, args map[st
 					return "", err
 				}
 				captureCodeExecutionReceipt(ctx, skillName, result)
-				if options := workflowStepOptions(ctx); options != nil && skillName == "knowledge_search" {
+				if skillName == "knowledge_search" {
 					if hits, ok := result.Data.([]knowledge.SearchHit); ok {
 						recordKnowledgeHits(ctx, hits)
 					}
@@ -120,9 +133,15 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolName string, args map[st
 	if e.mcpMgr != nil {
 		call.Source = "mcp"
 		return e.executeWithHooks(ctx, call, func(ctx context.Context) (string, error) {
-			result, owner, err := e.mcpMgr.CallToolWithOwner(ctx, toolName, call.Arguments)
+			result, owner, err := e.mcpMgr.CallToolResultWithOwner(ctx, toolName, call.Arguments)
 			call.ServerName = owner
-			return result, err
+			if capture, ok := ctx.Value(toolRawResultContextKey{}).(*toolRawResultCapture); ok {
+				capture.value = result.Output
+			}
+			if projected, ok := result.Output.(interface{ ToolText() string }); ok {
+				return projected.ToolText(), err
+			}
+			return result.String(), err
 		})
 	}
 
@@ -286,7 +305,7 @@ func (e *ToolExecutor) runSkillViaPipeline(ctx context.Context, toolName string,
 		return "", fmt.Errorf("runSkillViaPipeline: pipeline routed %q → %q (refusing to execute mismatched skill)", toolName, res.Skill.Name())
 	}
 	captureCodeExecutionReceipt(ctx, toolName, res.Result)
-	if options := workflowStepOptions(ctx); options != nil && toolName == "knowledge_search" {
+	if toolName == "knowledge_search" {
 		if hits, ok := res.Result.Data.([]knowledge.SearchHit); ok {
 			recordKnowledgeHits(ctx, hits)
 		}

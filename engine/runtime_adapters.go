@@ -333,15 +333,15 @@ func (e *runtimeToolExecutor) Execute(ctx context.Context, call llm.ToolCall) (h
 			}
 		}
 	}()
-	result, err := e.executor.Execute(ctx, call.Name, args)
+	result, raw, err := e.executor.ExecuteResult(ctx, call.Name, args)
 	finishHeartbeat()
 	if err != nil {
 		trace.L(ctx).Warn("runtime tool call failed", "stage", "tool_execute", "tool", call.Name, "tool_call_id", call.ID, "arguments", argumentsForLog, "reason", "execution_error", "err", err, "elapsed_ms", time.Since(started).Milliseconds())
 		msg := fmt.Sprintf("Error executing tool %q: %s", call.Name, err.Error())
-		return hruntime.ToolResult{Content: msg, Raw: result, Error: err.Error()}, nil
+		return hruntime.ToolResult{Content: msg, Raw: raw, Error: err.Error()}, nil
 	}
 	trace.L(ctx).Info("runtime tool call completed", "stage", "tool_execute", "tool", call.Name, "tool_call_id", call.ID, "elapsed_ms", time.Since(started).Milliseconds())
-	return hruntime.ToolResult{Content: result, Raw: result}, nil
+	return hruntime.ToolResult{Content: result, Raw: raw}, nil
 }
 
 func (e *runtimeToolExecutor) SideEffectOf(call llm.ToolCall) hruntime.ToolSideEffect {

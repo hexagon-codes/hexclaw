@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"github.com/hexagon-codes/ai-core/llm"
+	coretool "github.com/hexagon-codes/ai-core/tool"
 	"github.com/hexagon-codes/hexagon"
 	"github.com/hexagon-codes/toolkit/util/logger"
 )
@@ -660,6 +661,19 @@ func (m *Manager) CallServerTool(ctx context.Context, serverName, toolName strin
 }
 
 func (m *Manager) callTool(ctx context.Context, serverName, toolName string, args map[string]any) (string, string, error) {
+	result, owner, err := m.callToolResult(ctx, serverName, toolName, args)
+	if err != nil {
+		return "", owner, err
+	}
+	return result.String(), owner, nil
+}
+
+// CallToolResultWithOwner 保留实际执行的完整结果及同一次选中的服务器。
+func (m *Manager) CallToolResultWithOwner(ctx context.Context, toolName string, args map[string]any) (coretool.Result, string, error) {
+	return m.callToolResult(ctx, "", toolName, args)
+}
+
+func (m *Manager) callToolResult(ctx context.Context, serverName, toolName string, args map[string]any) (coretool.Result, string, error) {
 	m.mu.RLock()
 	var found hexagon.Tool
 	var owner string
@@ -677,14 +691,14 @@ func (m *Manager) callTool(ctx context.Context, serverName, toolName string, arg
 		}
 		if found != nil {
 			m.mu.RUnlock()
-			return "", "", fmt.Errorf("MCP tool %q is ambiguous; specify server_name", toolName)
+			return coretool.Result{}, "", fmt.Errorf("MCP tool %q is ambiguous; specify server_name", toolName)
 		}
 		found, owner, ownerServer = binding.tool, binding.server.name, binding.server
 	}
 	m.mu.RUnlock()
 
 	if found == nil {
-		return "", "", fmt.Errorf("工具 %q 未找到", toolName)
+		return coretool.Result{}, "", fmt.Errorf("工具 %q 未找到", toolName)
 	}
 
 	result, err := found.Execute(ctx, args)
@@ -697,11 +711,11 @@ func (m *Manager) callTool(ctx context.Context, serverName, toolName string, arg
 			// 否则 ServerStatuses 谎报「已连接」（UI 徽章事实源），且 tryReconnect 因
 			// connected 仍为 true 永远跳过该 server，不自愈。翻转后下个 30s tick 自动重拉。
 			m.markServerDisconnected(ctx, owner, ownerServer, "stdio process exited (detected on tool call)")
-			return "", owner, fmt.Errorf("工具 %q 执行失败: MCP 服务进程已退出，请检查数据库连接配置（主机/端口/账号/密码）后重试", toolName)
+			return result, owner, fmt.Errorf("工具 %q 执行失败: MCP 服务进程已退出，请检查数据库连接配置（主机/端口/账号/密码）后重试", toolName)
 		}
-		return "", owner, fmt.Errorf("工具 %q 执行失败: %w", toolName, err)
+		return result, owner, fmt.Errorf("工具 %q 执行失败: %w", toolName, err)
 	}
-	return result.String(), owner, nil
+	return result, owner, nil
 }
 
 // markServerDisconnected 把指定 server 标记为断连（幂等）：状态即刻对 ServerStatuses
