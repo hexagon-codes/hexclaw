@@ -144,6 +144,9 @@ func EvaluateOCRConfirmationRiskForInitialReadMode(q RecognizedQuestion, initial
 	if q.RecognitionConfidence != nil && *q.RecognitionConfidence < ocrConfidenceConfirmationThreshold {
 		reasons[OCRRiskLowConfidence] = struct{}{}
 	}
+	if verifiedQuotationIsOnlySourceRiskV1(q) {
+		delete(reasons, OCRRiskLowConfidence)
+	}
 	if q.AnswerState == AnswerStateUnclear {
 		reasons[OCRRiskUnclearHandwriting] = struct{}{}
 	}
@@ -246,6 +249,24 @@ func questionEvidenceTranscriptionsConflictForInitialReadMode(q RecognizedQuesti
 }
 
 var chinesePrintedBlankRunV1 = regexp.MustCompile(`[_＿]{2,}`)
+
+func verifiedQuotationIsOnlySourceRiskV1(q RecognizedQuestion) bool {
+	source := q.ImageSourceContext
+	if source == nil || source.Version != k12.RecognitionImageScopeVersionV1 || len(source.Recoveries) == 0 || len(q.OCRSignals) == 0 {
+		return false
+	}
+	for _, signal := range q.OCRSignals {
+		if strings.TrimSpace(signal) != "source_gap_quotation" {
+			return false
+		}
+	}
+	for _, recovery := range source.Recoveries {
+		if recovery.Gap.Kind != "quotation" || recovery.State != "verified" || recovery.AdoptedText == "" || recovery.DocumentID == "" || recovery.DocumentGeneration < 1 || recovery.SourceDigest == "" || recovery.CitationDigest == "" || recovery.TextbookBindingID == "" || recovery.TextbookManifestID == "" || !strings.Contains(q.RawTranscription, recovery.Gap.Before) || !strings.Contains(q.RawTranscription, recovery.Gap.After) {
+			return false
+		}
+	}
+	return true
+}
 
 // 填空线长度与跨行排版不是题干差异；只消除已证实的同一仿写连接排版，保留文字、数值和否定。
 func chinesePrintedBlankComparisonV1(value string) string {

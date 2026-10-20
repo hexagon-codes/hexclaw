@@ -2,6 +2,7 @@ package usecase
 
 import (
 	"encoding/json"
+	"os"
 
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 )
@@ -11,8 +12,22 @@ func (o *GradingOrchestrator) restoreRecognitionSourceContexts(job GradingJobVie
 	var sources []RecognizedQuestion
 	if audit, ok := o.readRecognitionAudit(job.Record.RecordID); ok && audit.AgentName == job.Record.AgentName {
 		sources = audit.Questions
-	} else if receipt, ok := o.readRecognitionReceipt(job.Record.RecordID); ok && receipt.AgentName == job.Record.AgentName {
-		sources = receipt.Questions
+	} else {
+		raw, err := os.ReadFile(o.runPath(job.Record.RecordID, "run.json"))
+		var run gradingRunFile
+		if err == nil && json.Unmarshal(raw, &run) == nil && run.AgentName == job.Record.AgentName {
+			frozen := FreezeRecognizedQuestionInputDigests(run.Questions, run.Grade)
+			for i, q := range run.Questions {
+				if q.InputDigest != "" && frozen[i].InputDigest == q.InputDigest {
+					sources = append(sources, q)
+				}
+			}
+		}
+		if len(sources) == 0 {
+			if receipt, ok := o.readRecognitionReceipt(job.Record.RecordID); ok && receipt.AgentName == job.Record.AgentName {
+				sources = receipt.Questions
+			}
+		}
 	}
 	if len(sources) == 0 {
 		return

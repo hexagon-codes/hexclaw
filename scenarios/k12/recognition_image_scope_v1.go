@@ -37,6 +37,14 @@ type RecognitionImageSourceGapV1 struct {
 }
 
 type RecognitionImageSourceRecoveryV1 struct {
+	TextbookBindingID  string                      `json:"textbook_binding_id,omitempty"`
+	TextbookManifestID string                      `json:"textbook_manifest_id,omitempty"`
+	Edition            string                      `json:"edition,omitempty"`
+	Volume             string                      `json:"volume,omitempty"`
+	VectorRevisionID   string                      `json:"vector_revision_id,omitempty"`
+	QueryDigest        string                      `json:"query_digest,omitempty"`
+	SourceOffsetStart  int64                       `json:"source_offset_start,omitempty"`
+	SourceOffsetEnd    int64                       `json:"source_offset_end,omitempty"`
 	Gap                RecognitionImageSourceGapV1 `json:"gap"`
 	State              string                      `json:"state"`
 	AdoptedText        string                      `json:"adopted_text,omitempty"`

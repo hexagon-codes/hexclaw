@@ -31,6 +31,8 @@ func (a *GroundingAdapter) FindImageSourceCandidate(ctx context.Context, subject
 		result.State, result.SourceKind = "candidate_requires_source_verification", "knowledge_candidate"
 		result.DocumentID, result.DocumentGeneration, result.SourceDigest = hit.DocID, hit.DocumentGeneration, hit.SourceDigest
 		result.CitationDigest, result.PDFPage = hit.CitationDigest, hit.PageStart
+		result.VectorRevisionID, result.QueryDigest = hit.SemanticRevisionID, "sha256:"+sha256Hex(query)
+		result.SourceOffsetStart, result.SourceOffsetEnd = hit.SourceOffsetStart, hit.SourceOffsetEnd
 		break
 	}
 	return result, nil
@@ -39,6 +41,8 @@ func (a *GroundingAdapter) FindImageSourceCandidate(ctx context.Context, subject
 // 教材只能补证引文；练习指令、关键条件和笔迹不由课文相似度推定。
 func (a *GroundingAdapter) RecoverImageSource(ctx context.Context, snapshot usecase.GroundingSnapshot, gap k12.RecognitionImageSourceGapV1) (k12.RecognitionImageSourceRecoveryV1, error) {
 	result := k12.RecognitionImageSourceRecoveryV1{Gap: gap, State: "unresolved"}
+	result.TextbookBindingID, result.TextbookManifestID = snapshot.TextbookBindingID, snapshot.TextbookManifestID
+	result.Edition, result.Volume, result.VectorRevisionID = snapshot.Edition, snapshot.Volume, snapshot.VectorRevisionID
 	if gap.Kind == "handwriting" {
 		result.State = "handwriting_requires_original_pixels"
 		return result, nil
