@@ -41,11 +41,22 @@ type weeklyCandidateStep struct {
 	Generate              weeklyCandidateCall          `json:"generate"`
 	Solve                 weeklyCandidateCall          `json:"solve"`
 	SolveRecoveryAttempts []weeklySolveRecoveryAttempt `json:"solve_recovery_attempts,omitempty"`
+	RejectedAttempts      []weeklyRejectedCandidate    `json:"rejected_attempts,omitempty"`
+}
+
+// weeklyRejectedCandidate 保留被判重题目的实际调用，不把已成功响应改写成失败。
+type weeklyRejectedCandidate struct {
+	Question              string                       `json:"question"`
+	Candidate             *WeeklyPracticeCandidate     `json:"candidate,omitempty"`
+	Generate              weeklyCandidateCall          `json:"generate"`
+	Solve                 weeklyCandidateCall          `json:"solve"`
+	SolveRecoveryAttempts []weeklySolveRecoveryAttempt `json:"solve_recovery_attempts,omitempty"`
 }
 
 type weeklyCandidateGeneration struct {
-	Route k12.GradingModelSnapshot `json:"route"`
-	Items []weeklyCandidateStep    `json:"items"`
+	Route                 k12.GradingModelSnapshot `json:"route"`
+	Items                 []weeklyCandidateStep    `json:"items"`
+	DuplicateReplacements int                      `json:"duplicate_replacements,omitempty"`
 }
 
 type weeklyPracticeCandidateSource struct{ deps *Deps }
@@ -326,150 +337,208 @@ func (s *weeklyPracticeCandidateSource) GenerateWeeklyPracticeCandidates(ctx con
 			return nil, fmt.Errorf("invalid weekly target checkpoint")
 		}
 		target := request.Targets[step.Target]
-		if step.Candidate != nil && step.Candidate.AssetSource != nil {
-			current, checkErr := d.Records.FindPracticeProblemAsset(ctx, k12.PracticeAssetQuery{OwnerID: d.TextbookOwnerID, AgentName: request.AgentName,
-				Subject: target.Subject, GradeTerm: request.GradeTerm, KnowledgePoint: target.KnowledgePoint, OriginalQuestion: target.Question, ExcludedHashes: excluded})
-			if checkErr != nil && !errors.Is(checkErr, k12storage.ErrProblemAssetUnavailable) {
-				return nil, checkErr
-			}
-			if checkErr != nil || current.Source != *step.Candidate.AssetSource {
-				step.Candidate = nil
-			}
-		}
-		if step.Candidate == nil && step.Generate.Status == "" {
-			asset, err := d.Records.FindPracticeProblemAsset(ctx, k12.PracticeAssetQuery{OwnerID: d.TextbookOwnerID, AgentName: request.AgentName,
-				Subject: target.Subject, GradeTerm: request.GradeTerm, KnowledgePoint: target.KnowledgePoint,
-				OriginalQuestion: target.Question, ExcludedHashes: excluded})
-			if err == nil && (request.PlanSection != k12.WeeklySectionArithmeticWarmup || weeklyArithmeticExpression(asset.Version.Facts.Stem)) {
-				step.Candidate = &WeeklyPracticeCandidate{SourceKind: "problem_asset", GenerationMethod: k12.WeeklyGenerationMethodAssetReuse,
-					SourceRef: target.SourceRef, Subject: target.Subject, KnowledgePoint: target.KnowledgePoint, SourceQuestion: target.Question,
-					PromptMarkdown: asset.Version.Facts.Stem, ExpectedAnswer: asset.Version.Answer, EvidenceRefs: append([]string(nil), target.EvidenceRefs...),
-					EstimatedSeconds: 30, AssetSource: &asset.Source}
-				if err := save(); err != nil {
-					return nil, err
+		// 只重新生成被拒的槽位；持久化上限使恢复和幂等重放不能重置补题预算。
+		for {
+			rejectDuplicate := func(question string) error {
+				calls := []*weeklyCandidateCall{&step.Generate, &step.Solve}
+				for i := range step.SolveRecoveryAttempts {
+					calls = append(calls, &step.SolveRecoveryAttempts[i].Call)
 				}
-			} else if err != nil && !errors.Is(err, k12storage.ErrProblemAssetUnavailable) {
-				return nil, err
-			}
-		}
-		if step.Candidate == nil {
-			if d.PracticeVariant == nil || d.Solver == nil || d.PracticeGenerationRoute == nil {
-				return nil, fmt.Errorf("weekly generation capability unavailable")
-			}
-			if request.Generation.Route.Route == "" {
-				route, routeErr := d.PracticeGenerationRoute(ctx, k12.GradingModelSnapshot{})
-				if routeErr != nil {
-					return nil, routeErr
-				}
-				request.Generation.Route = k12.NormalizeGradingModelSnapshot(route)
-				if request.Generation.Route.Provider == "" || request.Generation.Route.Model == "" || request.Generation.Route.Capability != "text" {
-					return nil, fmt.Errorf("weekly generation route incomplete")
-				}
-				if err := save(); err != nil {
-					return nil, err
-				}
-			}
-			callCtx := k12.WithGradingModelSnapshot(ctx, request.Generation.Route)
-			run := func(call *weeklyCandidateCall, invoke func() (SolveResult, error)) (SolveResult, error) {
-				switch call.Status {
-				case "succeeded":
-					if weeklySuccessfulSolveResult(call) == nil {
-						return SolveResult{}, fmt.Errorf("weekly successful response missing")
+				for _, call := range calls {
+					if call.Status == "sent" || call.Status == "outcome_unknown" {
+						return ErrModelInvocationRequiresReconciliation
 					}
-					return *weeklySuccessfulSolveResult(call), nil
-				case "sent", "outcome_unknown":
-					return SolveResult{}, ErrModelInvocationRequiresReconciliation
-				case "failed":
-					return SolveResult{}, fmt.Errorf("weekly prior invocation failed: %s", call.Error)
-				}
-				call.Status = "sent"
-				if err := save(); err != nil {
-					return SolveResult{}, err
-				}
-				result, callErr := invoke()
-				saveCtx = context.WithoutCancel(ctx)
-				if callErr != nil {
-					call.Status, call.Error = "failed", callErr.Error()
-					if errors.Is(callErr, ErrModelInvocationRequiresReconciliation) || (!errors.Is(callErr, egress.ErrProviderNotSent) && sentProviderOutcomeUnknown(callErr, ctx.Err())) {
-						call.Status = "outcome_unknown"
+					for _, receipt := range call.PhysicalCalls {
+						if receipt.Status == "sent" || receipt.Status == "outcome_unknown" {
+							return ErrModelInvocationRequiresReconciliation
+						}
 					}
-				} else {
-					call.Status, call.Result = "succeeded", &result
 				}
-				if err := save(); err != nil {
-					return SolveResult{}, err
+				if request.Generation.DuplicateReplacements >= 2 {
+					return fmt.Errorf("weekly duplicate replacement limit reached")
 				}
-				if call.Status == "outcome_unknown" {
-					return SolveResult{}, ErrModelInvocationRequiresReconciliation
-				}
-				return result, callErr
+				step.RejectedAttempts = append(step.RejectedAttempts, weeklyRejectedCandidate{
+					Question: question, Candidate: step.Candidate, Generate: step.Generate,
+					Solve: step.Solve, SolveRecoveryAttempts: step.SolveRecoveryAttempts,
+				})
+				step.Candidate, step.Generate, step.Solve, step.SolveRecoveryAttempts = nil, weeklyCandidateCall{}, weeklyCandidateCall{}, nil
+				request.Generation.DuplicateReplacements++
+				return save()
 			}
-			generated, err := run(&step.Generate, func() (SolveResult, error) {
-				prompt := fmt.Sprintf("Generate one same-level practice problem for the explicit knowledge point %s, grade %s, textbook %s. Source problem: %s. Do not repeat the source or earlier variants. Variant %d. Output ## 问题 / ## 解答 / ## 答案. Section: %s.", target.KnowledgePoint, request.GradeTerm, request.Textbook, target.Question, index+1, request.PlanSection)
-				if strings.HasPrefix(target.SourceRef, "textbook:") {
-					prompt += " The source is a verified textbook lesson page. Use only its taught methods and prerequisites; generate a new self-contained text problem that needs no diagram. Do not copy the examples or infer student mastery."
+			isDuplicate := func(subject, question string) bool {
+				hash, _, _ := k12.StablePracticeProblemHash(k12.PracticeCandidateProblem{Subject: subject, QuestionMarkdown: question})
+				for _, prior := range excluded {
+					if prior == hash {
+						return true
+					}
 				}
-				if request.PlanSection == k12.WeeklySectionArithmeticWarmup {
-					prompt += " Generate only a numeric arithmetic expression using this lesson's methods; no word problem, diagram, equation variable or explanatory text in the question."
+				return false
+			}
+			if step.Candidate != nil && isDuplicate(step.Candidate.Subject, step.Candidate.PromptMarkdown) {
+				if err := rejectDuplicate(step.Candidate.PromptMarkdown); err != nil {
+					return nil, err
 				}
-				return d.PracticeVariant.GeneratePracticeVariant(callCtx, target.Subject, prompt, request.GradeTerm)
-			})
-			if err != nil {
-				return nil, err
+				continue
 			}
-			question, _, answer := SplitRetryPresentation(generated.Solution)
-			if question == "" || answer == "" || (request.PlanSection == k12.WeeklySectionArithmeticWarmup && !weeklyArithmeticExpression(question)) {
-				return nil, fmt.Errorf("weekly generated problem invalid")
-			}
-			solveCall := weeklyLatestSolve(step)
-			inputDigest := d.weeklySolveInputDigest(callCtx, request, index, question)
-			if solveCall.InputDigest != "" && solveCall.InputDigest != inputDigest {
-				return nil, fmt.Errorf("weekly solve input changed")
-			}
-			validated, err := run(solveCall, func() (SolveResult, error) {
-				solveCall.InputDigest = inputDigest
-				executor := &weeklyPhysicalExecutor{call: solveCall, save: func() error { saveCtx = context.WithoutCancel(ctx); return save() }}
-				solveCtx := WithGradingPhysicalCallExecutor(k12.WithMaterialPreparation(callCtx), executor)
-				result, err := d.solveProblem(solveCtx, target.Subject, question, request.GradeTerm)
-				if executor.err != nil {
-					return SolveResult{}, executor.err
+			if step.Candidate != nil && step.Candidate.AssetSource != nil {
+				current, checkErr := d.Records.FindPracticeProblemAsset(ctx, k12.PracticeAssetQuery{OwnerID: d.TextbookOwnerID, AgentName: request.AgentName,
+					Subject: target.Subject, GradeTerm: request.GradeTerm, KnowledgePoint: target.KnowledgePoint, OriginalQuestion: target.Question, ExcludedHashes: excluded})
+				if checkErr != nil && !errors.Is(checkErr, k12storage.ErrProblemAssetUnavailable) {
+					return nil, checkErr
 				}
-				return result, err
-			})
-			if err != nil {
-				return nil, err
+				if checkErr != nil || current.Source != *step.Candidate.AssetSource {
+					step.Candidate = nil
+				}
 			}
-			_, _, expected := SplitRetryPresentation(validated.Solution)
-			if len(step.SolveRecoveryAttempts) > 0 {
-				if err := d.validateWeeklyRecoverySource(ctx, request); err != nil {
+			if step.Candidate == nil && step.Generate.Status == "" {
+				asset, err := d.Records.FindPracticeProblemAsset(ctx, k12.PracticeAssetQuery{OwnerID: d.TextbookOwnerID, AgentName: request.AgentName,
+					Subject: target.Subject, GradeTerm: request.GradeTerm, KnowledgePoint: target.KnowledgePoint,
+					OriginalQuestion: target.Question, ExcludedHashes: excluded})
+				if err == nil && (request.PlanSection != k12.WeeklySectionArithmeticWarmup || weeklyArithmeticExpression(asset.Version.Facts.Stem)) {
+					step.Candidate = &WeeklyPracticeCandidate{SourceKind: "problem_asset", GenerationMethod: k12.WeeklyGenerationMethodAssetReuse,
+						SourceRef: target.SourceRef, Subject: target.Subject, KnowledgePoint: target.KnowledgePoint, SourceQuestion: target.Question,
+						PromptMarkdown: asset.Version.Facts.Stem, ExpectedAnswer: asset.Version.Answer, EvidenceRefs: append([]string(nil), target.EvidenceRefs...),
+						EstimatedSeconds: 30, AssetSource: &asset.Source}
+					if err := save(); err != nil {
+						return nil, err
+					}
+				} else if err != nil && !errors.Is(err, k12storage.ErrProblemAssetUnavailable) {
 					return nil, err
 				}
 			}
-			status, evidence, _ := classifyGeneratedPracticeItem(target.Subject, validated, strings.TrimSpace(expected) != "")
-			if status != k12.PracticeItemVerified {
-				return nil, fmt.Errorf("weekly generated answer verification insufficient")
+			if step.Candidate == nil {
+				if d.PracticeVariant == nil || d.Solver == nil || d.PracticeGenerationRoute == nil {
+					return nil, fmt.Errorf("weekly generation capability unavailable")
+				}
+				if request.Generation.Route.Route == "" {
+					route, routeErr := d.PracticeGenerationRoute(ctx, k12.GradingModelSnapshot{})
+					if routeErr != nil {
+						return nil, routeErr
+					}
+					request.Generation.Route = k12.NormalizeGradingModelSnapshot(route)
+					if request.Generation.Route.Provider == "" || request.Generation.Route.Model == "" || request.Generation.Route.Capability != "text" {
+						return nil, fmt.Errorf("weekly generation route incomplete")
+					}
+					if err := save(); err != nil {
+						return nil, err
+					}
+				}
+				callCtx := k12.WithGradingModelSnapshot(ctx, request.Generation.Route)
+				run := func(call *weeklyCandidateCall, invoke func() (SolveResult, error)) (SolveResult, error) {
+					switch call.Status {
+					case "succeeded":
+						if weeklySuccessfulSolveResult(call) == nil {
+							return SolveResult{}, fmt.Errorf("weekly successful response missing")
+						}
+						return *weeklySuccessfulSolveResult(call), nil
+					case "sent", "outcome_unknown":
+						return SolveResult{}, ErrModelInvocationRequiresReconciliation
+					case "failed":
+						return SolveResult{}, fmt.Errorf("weekly prior invocation failed: %s", call.Error)
+					}
+					call.Status = "sent"
+					if err := save(); err != nil {
+						return SolveResult{}, err
+					}
+					result, callErr := invoke()
+					saveCtx = context.WithoutCancel(ctx)
+					if callErr != nil {
+						call.Status, call.Error = "failed", callErr.Error()
+						if errors.Is(callErr, ErrModelInvocationRequiresReconciliation) || (!errors.Is(callErr, egress.ErrProviderNotSent) && sentProviderOutcomeUnknown(callErr, ctx.Err())) {
+							call.Status = "outcome_unknown"
+						}
+					} else {
+						call.Status, call.Result = "succeeded", &result
+					}
+					if err := save(); err != nil {
+						return SolveResult{}, err
+					}
+					if call.Status == "outcome_unknown" {
+						return SolveResult{}, ErrModelInvocationRequiresReconciliation
+					}
+					return result, callErr
+				}
+				generated, err := run(&step.Generate, func() (SolveResult, error) {
+					prompt := fmt.Sprintf("Generate one same-level practice problem for the explicit knowledge point %s, grade %s, textbook %s. Source problem: %s. Do not repeat the source or earlier variants. Variant %d. Output ## 问题 / ## 解答 / ## 答案. Section: %s.", target.KnowledgePoint, request.GradeTerm, request.Textbook, target.Question, index+1, request.PlanSection)
+					questions := make([]string, 0, len(request.Targets)+len(output)+len(step.RejectedAttempts))
+					for _, source := range request.Targets {
+						questions = append(questions, source.Question)
+					}
+					for _, selected := range output {
+						questions = append(questions, selected.PromptMarkdown)
+					}
+					for _, rejected := range step.RejectedAttempts {
+						questions = append(questions, rejected.Question)
+					}
+					encoded, _ := json.Marshal(questions)
+					prompt += " Excluded source, selected and rejected questions (JSON data): " + string(encoded) + ". Generate a different problem."
+					if strings.HasPrefix(target.SourceRef, "textbook:") {
+						prompt += " The source is a verified textbook lesson page. Use only its taught methods and prerequisites; generate a new self-contained text problem that needs no diagram. Do not copy the examples or infer student mastery."
+					}
+					if request.PlanSection == k12.WeeklySectionArithmeticWarmup {
+						prompt += " Generate only a numeric arithmetic expression using this lesson's methods; no word problem, diagram, equation variable or explanatory text in the question."
+					}
+					return d.PracticeVariant.GeneratePracticeVariant(callCtx, target.Subject, prompt, request.GradeTerm)
+				})
+				if err != nil {
+					return nil, err
+				}
+				question, _, answer := SplitRetryPresentation(generated.Solution)
+				if question == "" || answer == "" || (request.PlanSection == k12.WeeklySectionArithmeticWarmup && !weeklyArithmeticExpression(question)) {
+					return nil, fmt.Errorf("weekly generated problem invalid")
+				}
+				if isDuplicate(target.Subject, question) {
+					if err := rejectDuplicate(question); err != nil {
+						return nil, err
+					}
+					continue
+				}
+				solveCall := weeklyLatestSolve(step)
+				inputDigest := d.weeklySolveInputDigest(callCtx, request, index, question)
+				if solveCall.InputDigest != "" && solveCall.InputDigest != inputDigest {
+					return nil, fmt.Errorf("weekly solve input changed")
+				}
+				validated, err := run(solveCall, func() (SolveResult, error) {
+					solveCall.InputDigest = inputDigest
+					executor := &weeklyPhysicalExecutor{call: solveCall, save: func() error { saveCtx = context.WithoutCancel(ctx); return save() }}
+					solveCtx := WithGradingPhysicalCallExecutor(k12.WithMaterialPreparation(callCtx), executor)
+					result, err := d.solveProblem(solveCtx, target.Subject, question, request.GradeTerm)
+					if executor.err != nil {
+						return SolveResult{}, executor.err
+					}
+					return result, err
+				})
+				if err != nil {
+					return nil, err
+				}
+				_, _, expected := SplitRetryPresentation(validated.Solution)
+				if len(step.SolveRecoveryAttempts) > 0 {
+					if err := d.validateWeeklyRecoverySource(ctx, request); err != nil {
+						return nil, err
+					}
+				}
+				status, evidence, _ := classifyGeneratedPracticeItem(target.Subject, validated, strings.TrimSpace(expected) != "")
+				if status != k12.PracticeItemVerified {
+					return nil, fmt.Errorf("weekly generated answer verification insufficient")
+				}
+				sourceKind := "mistake_variant"
+				if strings.HasPrefix(target.SourceRef, "assessment:") {
+					sourceKind = "assessment_variant"
+				} else if strings.HasPrefix(target.SourceRef, "textbook:") {
+					sourceKind = "textbook_variant"
+				}
+				step.Candidate = &WeeklyPracticeCandidate{SourceKind: sourceKind, GenerationMethod: k12.WeeklyGenerationMethodAIVariant,
+					SourceRef: fmt.Sprintf("%s:variant:%d", target.SourceRef, index+1), Subject: target.Subject, KnowledgePoint: target.KnowledgePoint, SourceQuestion: target.Question,
+					PromptMarkdown: question, ExpectedAnswer: expected, EvidenceRefs: append(append([]string(nil), target.EvidenceRefs...), evidence), EstimatedSeconds: 30}
+				if err := save(); err != nil {
+					return nil, err
+				}
 			}
-			sourceKind := "mistake_variant"
-			if strings.HasPrefix(target.SourceRef, "assessment:") {
-				sourceKind = "assessment_variant"
-			} else if strings.HasPrefix(target.SourceRef, "textbook:") {
-				sourceKind = "textbook_variant"
-			}
-			step.Candidate = &WeeklyPracticeCandidate{SourceKind: sourceKind, GenerationMethod: k12.WeeklyGenerationMethodAIVariant,
-				SourceRef: fmt.Sprintf("%s:variant:%d", target.SourceRef, index+1), Subject: target.Subject, KnowledgePoint: target.KnowledgePoint, SourceQuestion: target.Question,
-				PromptMarkdown: question, ExpectedAnswer: expected, EvidenceRefs: append(append([]string(nil), target.EvidenceRefs...), evidence), EstimatedSeconds: 30}
-			if err := save(); err != nil {
-				return nil, err
-			}
+			hash, _, _ := k12.StablePracticeProblemHash(k12.PracticeCandidateProblem{Subject: step.Candidate.Subject, QuestionMarkdown: step.Candidate.PromptMarkdown})
+			excluded = append(excluded, hash)
+			output = append(output, *step.Candidate)
+			break
 		}
-		hash, _, _ := k12.StablePracticeProblemHash(k12.PracticeCandidateProblem{Subject: step.Candidate.Subject, QuestionMarkdown: step.Candidate.PromptMarkdown})
-		for _, prior := range excluded {
-			if prior == hash {
-				return nil, fmt.Errorf("weekly candidate duplicates practiced problem")
-			}
-		}
-		excluded = append(excluded, hash)
-		output = append(output, *step.Candidate)
 	}
 	return output, nil
 }
