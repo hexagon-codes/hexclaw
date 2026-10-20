@@ -414,6 +414,7 @@ type ReActEngine struct {
 	skills                  *skill.DefaultRegistry
 	store                   storage.Store
 	cache                   *cache.SemanticCache
+	responseCacheGeneration atomic.Uint64
 	kb                      *knowledge.Manager   // 知识库管理器（可为 nil）
 	compactor               *session.Compactor   // 上下文压缩器
 	fileMem                 *memory.FileMemory   // 文件记忆系统（可为 nil）
@@ -682,6 +683,7 @@ func (e *ReActEngine) ReloadLLMConfig(_ context.Context, llmCfg config.LLMConfig
 		return err
 	}
 	e.cache.Reconfigure(llmCacheOptions(next))
+	e.responseCacheGeneration.Add(1)
 	e.cfg.LLM = cloneLLMConfig(next)
 	return nil
 }
@@ -1034,6 +1036,7 @@ func (e *ReActEngine) Process(ctx context.Context, msg *adapter.Message) (reply 
 	}
 	ctx = withSolveUserProblem(ctx, msg)
 	ctx = e.beginRequestReasoningPolicy(ctx)
+	ctx = e.beginResponseCache(ctx)
 	if replay, err := e.loadDurableAssistantReply(ctx, msg, false); err != nil {
 		return nil, err
 	} else if replay != nil {
@@ -1187,34 +1190,6 @@ func (e *ReActEngine) Process(ctx context.Context, msg *adapter.Message) (reply 
 	e.prepareAgentDefaultSkillContext(msg)
 	ctx = e.prepareSkillPromptContext(ctx, msg)
 	cacheInput := buildLLMCacheInput(msg)
-
-	// 3. Semantic cache lookup. System dispatches and explicit code execution
-	// requests must re-execute every time; the guard runs BEFORE cache.Get so
-	// bypassed lookups never mutate hit counters.
-	if !shouldBypassSemanticCache(msg) {
-		if cached, ok := e.cache.Get(cacheInput, selection.providerName, selection.modelName); ok {
-			trace.L(ctx).Info("语义缓存命中", "query", msg.Content[:min(20, len(msg.Content))], "session", sess.ID)
-			if err := e.sessions.SaveUserMessage(ctx, sess.ID, msg); err != nil {
-				trace.L(ctx).Error("保存用户消息失败", "err", err, "session", sess.ID)
-				recordPersistError(msg, "user_message", err)
-			}
-			assistantMessageID := ""
-			if record, err := e.sessions.SaveAssistantMessageWithMetaAndRequestID(ctx, sess.ID, cached, "", messageRequestID(msg)); err != nil {
-				trace.L(ctx).Error("保存助手回复失败", "err", err, "session", sess.ID)
-				recordPersistError(msg, "assistant_reply", err)
-			} else {
-				assistantMessageID = record.ID
-			}
-			return &adapter.Reply{
-				Content: cached,
-				Metadata: withReplyPersistError(withAssistantMessageID(map[string]string{
-					"source":   "cache",
-					"provider": selection.providerName,
-					"model":    selection.modelName,
-				}, assistantMessageID), msg),
-			}, nil
-		}
-	}
 
 	// 4. 主路径: 构建对话上下文（在 SaveUserMessage 之前，避免 history 重复包含当前消息）
 	// System dispatches (cron/heartbeat) are independent task executions, not
@@ -1378,6 +1353,9 @@ func (e *ReActEngine) completeWithTools(
 		injectNoThink(req.Messages)
 		trace.L(ctx).Info("注入 /no_think", "model", modelName)
 	}
+	if len(req.Tools) == 0 {
+		provider = e.wrapResponseCache(ctx, msg, provider, providerName, modelName)
+	}
 	if input, ok := standaloneVerificationInput(ctx, msg, req.Tools); ok {
 		return e.completeStandaloneVerification(ctx, sessionID, msg, provider, providerName, modelName, req, cacheInput, input)
 	}
@@ -1413,7 +1391,7 @@ func (e *ReActEngine) completeWithTools(
 					trace.L(ctx).Warn("Provider 降级", appendModelErrorLogFields([]any{"from", providerName, "to", fbName, "session", sessionID}, err)...)
 					providerName = fbName
 					modelName = e.getProviderModel(fbName, msg.Metadata)
-					provider = wrapVisionImageLimitProvider(fallbackP, modelName) // 反应式视觉兜底（无工具直连 failover 目标）
+					provider = e.wrapResponseCache(ctx, msg, wrapVisionImageLimitProvider(fallbackP, modelName), providerName, modelName) // 反应式视觉兜底（无工具直连 failover 目标）
 					tried[fbName] = true
 					// BUG-20260712：按目标 provider locality 重建 cloud-safe 请求（回退到云端时
 					// 不再复用带 <memory-context> 的本地请求，规避云 egress 拦截）。无工具直连路径
@@ -1463,6 +1441,7 @@ func (e *ReActEngine) completeWithTools(
 			p = wrapVisionImageLimitProvider(p, model) // 反应式视觉兜底（含 failover 目标 provider）
 			p = wrapCodeExecToolChoiceProvider(p, msg.Content)
 			p = wrapUnitSummaryToolChoiceProvider(p, msg)
+			p = e.wrapResponseCache(ctx, msg, p, name, model)
 			if !e.shouldBoundThinkingCompletion(name, model, req) {
 				return p
 			}
@@ -1717,7 +1696,7 @@ func (e *ReActEngine) finalizeReply(
 		RequestID:     messageRequestID(msg),
 		ToolCalls:     toolCalls, // 同步路径持久化工具调用（IM/HTTP 非流式重载不再蒸发）
 		Blocks:        blocks,
-		ReplyMetadata: msg.Metadata,
+		ReplyMetadata: responseReplyMetadata(ctx, msg.Metadata, providerName, modelName, ""),
 	}); err != nil {
 		trace.L(ctx).Error("保存助手回复失败", "err", err, "session", sessionID)
 		recordPersistError(msg, "assistant_reply", err) // 回复未落库，失败信号随 reply 返回（W12-Bug1）
@@ -1726,7 +1705,7 @@ func (e *ReActEngine) finalizeReply(
 	}
 
 	if cacheable && msg.Metadata["artifacts"] == "" {
-		e.cache.Put(cacheInput, content, providerName, modelName)
+		e.writeResponseCache(ctx, content, providerName, modelName)
 	}
 
 	if resp.Usage.TotalTokens > 0 {
@@ -1781,7 +1760,7 @@ func (e *ReActEngine) finalizeReply(
 	kbHits, memHits := retrievalHitsSnapshot(ctx)
 	return &adapter.Reply{
 		Content:     content,
-		Metadata:    buildReplyMetadata(msg.Metadata, providerName, modelName, assistantMessageID),
+		Metadata:    responseReplyMetadata(ctx, msg.Metadata, providerName, modelName, assistantMessageID),
 		Interactive: buildInteractivePayload(msg.Metadata),
 		Usage:       buildUsage(resp.Usage, providerName, modelName),
 		ToolCalls:   toolCalls,
@@ -1963,6 +1942,7 @@ func (e *ReActEngine) ProcessStream(ctx context.Context, msg *adapter.Message) (
 	}
 	ctx = withSolveUserProblem(ctx, msg)
 	ctx = e.beginRequestReasoningPolicy(ctx)
+	ctx = e.beginResponseCache(ctx)
 	ctx = clearPreparedSkillContext(ctx, msg)
 	delete(msg.Metadata, skillContextReceiptsMetadataKey)
 	delete(msg.Metadata, teachingContextReceiptsMetadataKey)
@@ -2410,31 +2390,6 @@ func (e *ReActEngine) processStream(
 			lifecycleStatus = "completed"
 		}()
 		return ch, nil
-	}
-
-	// 3. Semantic cache hit → single-chunk reply. System dispatches and explicit
-	// code execution requests must re-execute every time; the guard runs BEFORE
-	// cache.Get so bypassed lookups never mutate hit counters.
-	if !shouldBypassSemanticCache(msg) {
-		if cached, ok := e.cache.Get(cacheInput, selection.providerName, selection.modelName); ok {
-			trace.L(ctx).Info("语义缓存命中", "query", msg.Content[:min(20, len(msg.Content))], "session", sess.ID)
-			if err := e.sessions.SaveUserMessage(ctx, sess.ID, msg); err != nil {
-				trace.L(ctx).Error("保存用户消息失败", "err", err, "session", sess.ID)
-				recordPersistError(msg, "user_message", err)
-			}
-			assistantMessageID := ""
-			if record, err := e.sessions.SaveAssistantMessageWithMetaAndRequestID(ctx, sess.ID, cached, "", messageRequestID(msg)); err != nil {
-				trace.L(ctx).Error("保存助手回复失败", "err", err, "session", sess.ID)
-				recordPersistError(msg, "assistant_reply", err)
-			} else {
-				assistantMessageID = record.ID
-			}
-			return singleChunk(cached, withReplyPersistError(withAssistantMessageID(map[string]string{
-				"source":   "cache",
-				"provider": selection.providerName,
-				"model":    selection.modelName,
-			}, assistantMessageID), msg)), nil
-		}
 	}
 
 	// 4. 构建对话上下文（在保存用户消息之前，避免 history 中重复包含当前消息）
@@ -3142,7 +3097,7 @@ func (e *ReActEngine) finalizeRuntimeStreamResult(
 		ToolCalls: runtimeToolCallsToAdapter(result.ToolCalls, origins...),
 		// 有序内容块同步落库：重载后多步 ReAct 仍按真实交错序渲染（与 live wire 同形状）。
 		Blocks:        append(retrievalProcessSnapshot(ctx), runtimeBlocksToAdapter(result.Blocks)...),
-		ReplyMetadata: msgMeta,
+		ReplyMetadata: responseReplyMetadata(ctx, msgMeta, providerName, modelName, ""),
 	}); err != nil {
 		trace.L(ctx).Error("保存助手回复失败", "err", err, "session", sessionID)
 		msgMeta[persistErrorMetaKey] = "assistant_reply: " + err.Error() // 失败信号随 reply 返回（W12-Bug1）
@@ -3151,7 +3106,7 @@ func (e *ReActEngine) finalizeRuntimeStreamResult(
 	}
 
 	if cacheable && msgMeta["artifacts"] == "" {
-		e.cache.Put(cacheInput, content, providerName, modelName)
+		e.writeResponseCache(ctx, content, providerName, modelName)
 	}
 
 	if result.Usage.TotalTokens == 0 && strings.TrimSpace(content) != "" {
@@ -3198,7 +3153,7 @@ func (e *ReActEngine) finalizeRuntimeStreamResult(
 	// 只记录模型回复的诊断元数据；正文与推理内容由会话存储管理，不能进入日志。
 	logModelReply(ctx, "stream", sessionID, providerName, modelName, content, reasoning, len(result.ToolCalls), maxTurnsHit)
 
-	return content, streamTail, buildReplyMetadata(msgMeta, providerName, modelName, assistantMessageID), usage, runtimeToolCallsToAdapter(result.ToolCalls, origins...)
+	return content, streamTail, responseReplyMetadata(ctx, msgMeta, providerName, modelName, assistantMessageID), usage, runtimeToolCallsToAdapter(result.ToolCalls, origins...)
 }
 
 // logModelReply 在回复完成时只记录可用于关联与容量诊断的元数据。
@@ -3406,7 +3361,7 @@ func (e *ReActEngine) processStreamToolLoop(
 				assistantMessageID = record.ID
 			}
 			if cacheable {
-				e.cache.Put(cacheInput, finalContent, selection.providerName, selection.modelName)
+				e.writeResponseCache(ctx, finalContent, selection.providerName, selection.modelName)
 			}
 			saveCancel()
 			return singleChunkWithTools(
@@ -3632,7 +3587,7 @@ func (e *ReActEngine) pipeStream(
 		Model:            modelName,
 		AgentName:        msgMeta["role"],
 		RequestID:        messageRequestID(msg),
-		ReplyMetadata:    msgMeta,
+		ReplyMetadata:    responseReplyMetadata(ctx, msgMeta, providerName, modelName, ""),
 	}); err != nil {
 		trace.L(ctx).Error("保存助手回复失败", "err", err, "session", sessionID)
 		msgMeta[persistErrorMetaKey] = "assistant_reply: " + err.Error() // 失败信号随 reply 返回（W12-Bug1）
@@ -3642,7 +3597,7 @@ func (e *ReActEngine) pipeStream(
 
 	// 写入语义缓存
 	if cacheable {
-		e.cache.Put(cacheInput, content, providerName, modelName)
+		e.writeResponseCache(ctx, content, providerName, modelName)
 	}
 
 	// 当 provider 未返回 token 统计时，使用 tokenizer 估算 (streaming 路径仅估算 completion)
@@ -3655,7 +3610,7 @@ func (e *ReActEngine) pipeStream(
 	// 发送结束标记（携带 Usage 和元数据）
 	doneChunk := &adapter.ReplyChunk{
 		Done:        true,
-		Metadata:    buildReplyMetadata(msgMeta, providerName, modelName, assistantMessageID),
+		Metadata:    responseReplyMetadata(ctx, msgMeta, providerName, modelName, assistantMessageID),
 		Interactive: buildInteractivePayload(msgMeta),
 	}
 	if result != nil && result.Usage.TotalTokens > 0 {
@@ -3859,7 +3814,7 @@ func (e *ReActEngine) pipeStreamWithTools(
 		Model:            modelName,
 		AgentName:        msgMeta["role"],
 		RequestID:        messageRequestID(msg),
-		ReplyMetadata:    msgMeta,
+		ReplyMetadata:    responseReplyMetadata(ctx, msgMeta, providerName, modelName, ""),
 	}); err != nil {
 		trace.L(ctx).Error("保存助手回复失败", "err", err, "session", sessionID)
 		msgMeta[persistErrorMetaKey] = "assistant_reply: " + err.Error() // 失败信号随 reply 返回（W12-Bug1）
@@ -3868,7 +3823,7 @@ func (e *ReActEngine) pipeStreamWithTools(
 	}
 
 	if cacheable {
-		e.cache.Put(cacheInput, content, providerName, modelName)
+		e.writeResponseCache(ctx, content, providerName, modelName)
 	}
 
 	// 当 provider 未返回 token 统计时，使用 tokenizer 估算 (streaming 路径仅估算 completion)
@@ -3899,7 +3854,7 @@ func (e *ReActEngine) pipeStreamWithTools(
 	}
 	doneChunk := &adapter.ReplyChunk{
 		Done:        true,
-		Metadata:    buildReplyMetadata(msgMeta, providerName, modelName, assistantMessageID),
+		Metadata:    responseReplyMetadata(ctx, msgMeta, providerName, modelName, assistantMessageID),
 		Interactive: buildInteractivePayload(msgMeta),
 		ToolCalls:   finalToolCalls,
 	}
@@ -4307,7 +4262,7 @@ func (e *ReActEngine) completeDirect(
 
 	// M5: system-dispatch and explicit code execution results must never enter the semantic cache.
 	if !shouldBypassSemanticCache(msg) {
-		e.cache.Put(cacheInput, resp.Content, providerName, modelName)
+		e.writeResponseCache(ctx, resp.Content, providerName, modelName)
 	}
 
 	if resp.Usage.TotalTokens > 0 {
@@ -4328,7 +4283,7 @@ func (e *ReActEngine) completeDirect(
 
 	return &adapter.Reply{
 		Content:     resp.Content,
-		Metadata:    buildReplyMetadata(msg.Metadata, providerName, modelName, assistantMessageID),
+		Metadata:    responseReplyMetadata(ctx, msg.Metadata, providerName, modelName, assistantMessageID),
 		Interactive: buildInteractivePayload(msg.Metadata),
 		Usage:       buildUsage(resp.Usage, providerName, modelName),
 		ToolCalls:   translateProviderToolCalls(resp.ToolCalls),
@@ -5093,6 +5048,10 @@ func buildReplyMetadata(metadata map[string]string, providerName, modelName, ass
 		"provider": providerName,
 		"model":    modelName,
 	}
+	if presentation, ok := frozenProviderPresentation(metadata, providerName); ok {
+		replyMeta["provider_display_name"] = presentation.DisplayName
+		replyMeta["provider_instance_id"] = presentation.InstanceID
+	}
 	producer, locale, producerErr := resolveProducerContract(metadata)
 	if producerErr == nil {
 		replyMeta["producer_kind"] = string(producer)
@@ -5294,6 +5253,8 @@ func (e *ReActEngine) resolveProvider(ctx context.Context, providerHint string, 
 			if result != nil && result.AgentConfig != nil {
 				msg.Metadata["routed_agent"] = result.AgentName
 				hint = applyAgentConfigToMetadata(msg.Metadata, result.AgentConfig, hint)
+			} else if msg.Platform == adapter.PlatformDingtalk {
+				msg.Metadata["routed_agent"] = "default"
 			}
 		}
 	}
@@ -5376,6 +5337,8 @@ func applyAgentConfigToMetadata(metadata map[string]string, cfg *agentrouter.Age
 }
 
 func (e *ReActEngine) resolveLLMSelection(ctx context.Context, msg *adapter.Message) (llmSelection, error) {
+	ensureMessageMetadata(msg)
+	e.freezeProviderPresentation(msg.Metadata)
 	providerHint := requestedProvider(msg.Metadata)
 	resolvedPinnedAgent := false
 	if providerHint == "" && requestedModel(msg.Metadata) == "" {

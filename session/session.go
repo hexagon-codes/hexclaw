@@ -184,6 +184,8 @@ type AssistantMeta struct {
 }
 
 var replySafeAssistantMetadataKeys = map[string]struct{}{
+	"provider_display_name":     {},
+	"provider_instance_id":      {},
 	"skill_context_receipts":    {},
 	"teaching_context_receipts": {},
 	"record":                    {},

@@ -602,8 +602,12 @@ func TestReActEngine_ProcessCacheSeparatesAttachments(t *testing.T) {
 	if replyB.Content != "reply-b" {
 		t.Fatalf("图片 B 的回复不匹配: %q", replyB.Content)
 	}
-	if provider.CallCount() != 2 {
-		t.Fatalf("缓存应只命中重复图片，期望 provider 调用 2 次，实际 %d", provider.CallCount())
+	// 三次调用均未指定 SessionID，会建立独立会话；重复图片不能跨会话复用回答。
+	if replyA2.Metadata["source"] == "cache" {
+		t.Fatal("independent session reused an attachment response")
+	}
+	if provider.CallCount() != 3 {
+		t.Fatalf("independent attachment sessions need three provider calls, got %d", provider.CallCount())
 	}
 }
 

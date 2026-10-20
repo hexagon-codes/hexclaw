@@ -1,6 +1,9 @@
 package messagecontent
 
-import "strings"
+import (
+	"strings"
+	"unicode"
+)
 
 // ExecutionSummary 只投影本次结果可关联的执行事实，不承载调用参数或结果正文。
 type ExecutionSummary struct {
@@ -27,9 +30,11 @@ type ExecutionSummaryTool struct {
 
 // ExecutionSummaryModel 保存实际调用的模型身份，不读取当前默认设置。
 type ExecutionSummaryModel struct {
-	Stage    string `json:"stage,omitempty"`
-	Provider string `json:"provider,omitempty"`
-	Model    string `json:"model"`
+	Stage               string `json:"stage,omitempty"`
+	Provider            string `json:"provider,omitempty"`
+	ProviderDisplayName string `json:"provider_display_name,omitempty"`
+	ProviderInstanceID  string `json:"provider_instance_id,omitempty"`
+	Model               string `json:"model"`
 }
 
 type executionSummaryLabels struct {
@@ -112,8 +117,15 @@ func RenderExecutionSummary(locale string, facts ExecutionSummary) string {
 		if name == "" || strings.EqualFold(strings.TrimSpace(model.Model), "auto") {
 			continue
 		}
-		provider := executionSummaryName(model.Provider)
-		identity := strings.TrimSpace(model.Provider) + "\x00" + strings.TrimSpace(model.Model)
+		provider := executionSummaryName(model.ProviderDisplayName)
+		if provider == "" {
+			provider = executionSummaryName(model.Provider)
+		}
+		providerIdentity := strings.TrimSpace(model.ProviderInstanceID)
+		if providerIdentity == "" {
+			providerIdentity = strings.TrimSpace(model.Provider)
+		}
+		identity := providerIdentity + "\x00" + strings.TrimSpace(model.Model)
 		found := false
 		stage := executionSummaryStageName(locale, model.Stage)
 		for i := range models {
@@ -132,8 +144,16 @@ func RenderExecutionSummary(locale string, facts ExecutionSummary) string {
 		visible := make([]string, 0, len(models))
 		for _, model := range models {
 			name := model.name
-			if model.provider != "" {
-				name = model.provider + " / " + name
+			provider := model.provider
+			// Markdown没有bdi元素，混排时分别隔离用户名称和LTR技术标识。
+			if locale == "ug-CN" || strings.ContainsFunc(provider, func(r rune) bool { return unicode.Is(unicode.Arabic, r) || unicode.Is(unicode.Hebrew, r) }) {
+				name = "\u2066" + name + "\u2069"
+				if provider != "" {
+					provider = "\u2068" + provider + "\u2069"
+				}
+			}
+			if provider != "" {
+				name = provider + " / " + name
 			}
 			if len(models) > 1 && len(model.stages) > 0 {
 				name = strings.Join(model.stages, " / ") + colon + name
