@@ -1174,7 +1174,8 @@ func buildSolverPrompt(problem, subject, method, grade, constraint string) strin
 2. 解法务必控制在上面「学习阶段/允许范围」之内——宁可用更朴素但学过的方法，也不要为了简便用超纲方法。
 3. 数学一律用 Unicode 符号书写（×÷√≤≥≠、分数写 a/b、平方写 x²、下标写 H₂O、单位直接写 cm³），**禁止输出 LaTeX**（不要 \times \div \frac \text{} ^{} 也不要 $…$、\(…\)、\[…\] 定界符）。
 4. 最后单独用一行给出最终答案，格式严格为：答案：<最终答案>。
-5. 正文只写数学推导和依据，不写已调用、已运行或已用工具核验等运行陈述；实际工具事实由应用执行回执提供。`, subjectLine, gradeLine, constraintLine, problem, methodLine)
+5. 正文只写数学推导和依据，不写已调用、已运行或已用工具核验等运行陈述；实际工具事实由应用执行回执提供。
+6. 填空或数量关系存在多种有效填法时，明确列出各自前提、完整填空答案及列式，并注明答案不唯一；逐种解释，不能只给步骤让家长反推答案，不凭模糊学生作答补造题目条件。`, subjectLine, gradeLine, constraintLine, problem, methodLine)
 }
 
 func buildVerifierPrompt(problem, candidate, constraint string) string {
