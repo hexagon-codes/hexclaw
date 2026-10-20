@@ -15,6 +15,7 @@ require (
 	github.com/line/line-bot-sdk-go/v8 v8.20.1
 	github.com/open-dingtalk/dingtalk-stream-sdk-go v0.9.1
 	github.com/spf13/cobra v1.9.1
+	github.com/yuin/goldmark v1.8.6
 	go.starlark.net v0.0.0-20260613233743-8ba36ccb83fb
 	go.uber.org/goleak v1.3.0
 	golang.org/x/image v0.44.0

@@ -1,6 +1,10 @@
 package adapter
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/hexagon-codes/hexclaw/internal/mathtext"
+)
 
 // IM 端没有桌面那样的结构化工具卡，本文件把工具调用渲染成**紧凑文本尾注**，
 // 让 Telegram / 企业微信 / 飞书等 IM 用户也能看到「调用了什么工具、成没成、结果摘要」。
@@ -58,16 +62,12 @@ func toolDisplayName(name string) string {
 	return base
 }
 
-// toolResultSummary 工具结果一行摘要（rune 安全 + 去 markdown 强调标记 + 折叠空白）。
-// 真实工具结果常是带 emoji 的 markdown 文本，这里压成单行短摘要。
+// toolResultSummary 先提取真实可读文本，再按字符预算截断，避免截断 Markdown 语法。
 func toolResultSummary(result string, maxRunes int) string {
-	if strings.TrimSpace(result) == "" {
+	if strings.TrimSpace(result) == "" || maxRunes <= 0 {
 		return ""
 	}
-	// 去 markdown 强调标记
-	cleaned := strings.NewReplacer("*", "", "`", "").Replace(result)
-	// 折叠所有空白（含换行）为单空格
-	cleaned = strings.Join(strings.Fields(cleaned), " ")
+	cleaned := mathtext.PlainMarkdownText(result)
 	r := []rune(cleaned)
 	if len(r) <= maxRunes {
 		return cleaned
@@ -101,8 +101,12 @@ func ToolCallDigest(calls []ToolCall) string {
 		b.WriteString(" ")
 		b.WriteString(toolStatusGlyph(c.Status))
 		if sum := toolResultSummary(c.Result, 48); sum != "" {
-			b.WriteString(" · ")
-			b.WriteString(sum)
+			if toolStatusGlyph(c.Status) == "·" {
+				b.WriteByte(' ')
+			} else {
+				b.WriteString(" · ")
+			}
+			b.WriteString(mathtext.EscapeMarkdownInline(sum))
 		}
 	}
 	return b.String()
