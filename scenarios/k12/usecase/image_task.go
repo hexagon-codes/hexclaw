@@ -581,7 +581,7 @@ func (c *ImageTaskCoordinator) Create(
 	}
 	// 展示语言属于接纳的请求事实，模型路由解析器只决定 Provider 与能力。
 	route.MessageLocale = in.RouteRequest.MessageLocale
-	route.ImageScope = &k12.RecognitionImageScopeInputV1{Version: k12.RecognitionImageScopeVersionV1, MessageIntent: in.MessageIntent, Action: explicitImageHomeworkAction(in.MessageIntent)}
+	route.ImageScope = &k12.RecognitionImageScopeInputV1{Version: k12.RecognitionImageScopeVersionV1, MessageIntent: in.MessageIntent, Action: explicitImageHomeworkAction(in.MessageIntent), SourceReviewPolicy: k12.RecognitionImageSourceUprightReviewPolicyV1, SourceComparisonPolicy: k12.RecognitionImageSourceComparisonPolicyV1}
 	route = k12.NormalizeImageTaskRouteSnapshot(route)
 	if (in.SourceKind == k12.ImageTaskSourceIM && in.CreativeEntry == nil) ||
 		(in.CreativeEntry != nil && in.CreativeEntry.Kind == k12.CreativeWorkEntryNewWork && in.CreativeEntry.TaskIntent == k12.ImageTaskIntentUnknown) {
@@ -2254,15 +2254,20 @@ func photoTaskIntentFromDispatch(intent k12.ImageTaskIntent) PhotoTaskIntent {
 }
 
 func photoTaskIntentForImageDispatch(dispatch k12.ImageTaskDispatch) PhotoTaskIntent {
+	return photoTaskIntentFromDispatch(EffectiveImageTaskHomeworkIntent(dispatch))
+}
+
+// EffectiveImageTaskHomeworkIntent 供处理与交付共同消费冻结动作；旧任务保留原分类。
+func EffectiveImageTaskHomeworkIntent(dispatch k12.ImageTaskDispatch) k12.ImageTaskIntent {
 	if scope := dispatch.ClassificationRouteSnapshot.ImageScope; scope != nil && scope.Version == k12.RecognitionImageScopeVersionV1 {
 		switch scope.Action {
 		case "solve":
-			return PhotoTaskBlankWorksheet
+			return k12.ImageTaskIntentBlankWorksheet
 		case "grade":
-			return PhotoTaskCompletedHomework
+			return k12.ImageTaskIntentCompletedHomework
 		}
 	}
-	return photoTaskIntentFromDispatch(dispatch.TaskIntent)
+	return dispatch.TaskIntent
 }
 
 func (c *ImageTaskCoordinator) executeWritingOCR(
@@ -3118,7 +3123,8 @@ func (c *ImageTaskCoordinator) Retry(
 		parentWindowOnly := projection == nil ||
 			projection.retryFailureKind == "" ||
 			requiresParentWindow
-		if parentWindowOnly {
+		// 子任务可先于父接纳窗口耗尽预算，重试资格须由实际子任务判断。
+		if parentWindowOnly || genericRetryable {
 			retrier, ok := c.Grading.(imageTaskGradingParentWindowRetrier)
 			if !ok {
 				if !genericRetryable {

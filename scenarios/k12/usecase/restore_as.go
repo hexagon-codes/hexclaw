@@ -173,6 +173,9 @@ func MigrateHexbakOwner(source *Hexbak, targetAgent string) (*Hexbak, error) {
 	}
 	migrated.Assets = assets
 	assetMapping := creativeWorkOCRAssetMapping(source, migrated)
+	for from, to := range migrateTeachingDiagramArchive(source, targetAgent, migrated) {
+		assetMapping[from] = to
+	}
 	jobIDs := creativeWorkOCRJobMapping(sourceOCR, targetAgent)
 	for i := range migrated.CurrentCreativeWorks {
 		work := &migrated.CurrentCreativeWorks[i]
@@ -323,6 +326,11 @@ func cloneHexbak(bak *Hexbak) *Hexbak {
 		out.Assets[i].Data = append([]byte(nil), item.Data...)
 	}
 	out.CreativeWorkOCR = append([]k12.CreativeWorkOCRArchiveEvidence(nil), bak.CreativeWorkOCR...)
+	out.TeachingDiagrams = make([]k12storage.TeachingDiagramArchive, len(bak.TeachingDiagrams))
+	for i, asset := range bak.TeachingDiagrams {
+		out.TeachingDiagrams[i] = asset
+		out.TeachingDiagrams[i].SVG = append([]byte(nil), asset.SVG...)
+	}
 	if bak.CurrentCreativeWorks != nil {
 		raw, _ := json.Marshal(bak.CurrentCreativeWorks)
 		out.CurrentCreativeWorks = nil

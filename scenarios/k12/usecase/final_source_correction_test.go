@@ -123,6 +123,8 @@ func prepareCompletedSourceFixtureForIntent(t *testing.T, intent k12.ImageTaskIn
 		dispatch.DispatchID += "-source-fixture"
 		dispatch.IdempotencyKey += "-source-fixture"
 		dispatch.ClassificationInvocationID += "-source-fixture"
+		// 克隆任务沿用实际持久分类路由，展示视图可能省略内部能力字段。
+		dispatch.ClassificationRouteSnapshot = invocation.RouteSnapshot
 		if sourceImage.frozenDigest != "" {
 			dispatch.SourceDigest = sourceImage.frozenDigest
 		}

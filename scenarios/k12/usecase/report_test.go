@@ -2,6 +2,8 @@ package usecase
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
@@ -56,6 +58,58 @@ func TestInsightReport(t *testing.T) {
 	// 建议：优先提连续挫败点
 	if rep.Suggestion == "" {
 		t.Error("应有本月建议")
+	}
+}
+
+func TestInsightReportSuggestionUsesObservedWorkAndExistingVerifiedVariant(t *testing.T) {
+	d, _ := newPipeline(t, fakeSolver{}, fakeGrader{}, &fakeInsights{})
+	d.Now = nil
+	ctx := context.Background()
+	id := seedMistake(t, d, "suggestion-source", "分数应用", "数量关系", 100)
+	record, err := d.Records.Get(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields, err := k12.ParseMistakeFields(record.Fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields.Question = "已用空间占2/5，已用4.8 TB，求总容量。"
+	fields.ObservedStudentAnswer = "2/5÷2=1/5"
+	fields.CanonicalAnswer = "4.8÷2×5=12（TB）"
+	raw, _ := json.Marshal(fields)
+	if err := d.Records.UpdateStatusFields(ctx, id, record.Status, record.DueAt, string(raw), record.Version); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = d.AddToBasket(ctx, "mingming", "report-variant", k12.PracticeItem{
+		ItemID: "report-variant", SourceProblemID: id, Subject: "数学", QuestionMarkdown: "已用6 GB，占3/5，总容量多少？", ExpectedAnswerMarkdown: "10 GB",
+		VerificationStatus: k12.PracticeItemVerified, VerificationEvidence: "独立验算", GenerationJobID: "report-existing-job", GenerationStatus: k12.PracticeItemGenerationReady,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := d.InsightReport(ctx, "mingming")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{fields.ObservedStudentAnswer, fields.CanonicalAnswer, "已用6 GB", "10 GB", "本次通过依据", "一次做对不代表稳定掌握"} {
+		if !strings.Contains(report.Suggestion, expected) {
+			t.Fatalf("source-backed suggestion omitted %q: %s", expected, report.Suggestion)
+		}
+	}
+	if len(report.SourceRecordIDs) != 2 {
+		t.Fatalf("suggestion sources not included in frozen snapshot: %+v", report.SourceRecordIDs)
+	}
+	unknown := fields
+	unknown.ObservedStudentAnswer = ""
+	record, _ = d.Records.Get(ctx, id)
+	raw, _ = json.Marshal(unknown)
+	if err := d.Records.UpdateStatusFields(ctx, id, record.Status, record.DueAt, string(raw), record.Version); err != nil {
+		t.Fatal(err)
+	}
+	report, err = d.InsightReport(ctx, "mingming")
+	if err != nil || strings.Contains(report.Suggestion, fields.ObservedStudentAnswer) || strings.Contains(report.Suggestion, "核对题：") {
+		t.Fatalf("unknown observation borrowed clear-work advice: %s %v", report.Suggestion, err)
 	}
 }
 

@@ -1395,6 +1395,8 @@ curl -fS -X POST "$HEXCLAW_BASE_URL/api/k12/print-jobs/resource-demo-1/retry" \
 
 ## `POST /api/k12/practice-sets/{id}/submit`
 
+可选 `answer_context` 为 `unknown`、`prompted_answer` 或 `independent_answer`，表示家长对本次作答条件的明确报告，缺省保持未知。服务端冻结来源 `guardian_report`、回传 ID 和接收时间；相同 return_id 不能改报其他条件。回传及题目 DTO 的 `learning_evidence` 保留各事件来源，旧记录只在读取投影为 unknown；延迟复测来自实际回传与前次正确时间，人工确认不冒充系统作答。PDF 下载/发送不生成答案曝光或独立作答证据；三天两次正确掌握策略不变。
+
 提交练习回传照片
 
 return_id 为该照片回传幂等身份；同一 asset 使用现有素材 ID。auto_match=true 与非空 item_ids 严格二选一，空覆盖不代表整卷。HTTP 200 表示接纳，异步复批需继续读取 return_assets 中终态、annotated_asset_id/result_markdown。只对照片实际覆盖且可可靠判定的题积累一次复习证据，重放不重复推进。
@@ -1736,6 +1738,10 @@ curl -fS "$HEXCLAW_BASE_URL/api/k12/weekly-practice/snapshots/resource-demo-1?ag
 
 <a id="k12practiceprepareweeklypracticeoutput"></a>
 
+## `POST /api/k12/weekly-practice/plans/{id}/tracks/{section}/prepare-output`
+
+`section` 为textbook_consolidation或arithmetic_warmup。请求`{agent, expected_revision}`；从服务端完整已验证题面准备本类型PDF，不调用模型、不冻结整周计划。返回`{artifact,replayed}`，首次201、复用200。下载`GET /api/k12/print-artifacts/{artifact_id}/content?agent=...`；打印用相同artifact_id准备PrintJob，读取同一字节。另一类型变化不改变相同题面身份；旧文件保持不可变。无完整题面/不支持类型400，版本冲突409，缺计划404，渲染失败502；下载/打印不修改学生作答状态。
+
 ## `POST /api/k12/weekly-practice/plans/{id}/prepare-output`
 
 冻结周练并准备 PDF
@@ -1858,6 +1864,8 @@ curl -fS -X POST "$HEXCLAW_BASE_URL/api/k12/weekly-practice/snapshots/resource-d
 <a id="k12practicecreateweeklyarithmeticbatch"></a>
 
 ## `POST /api/k12/weekly-practice/plans/{id}/arithmetic-batches`
+
+`replace_current=true` 仅用于显式重新生成：旧口算为ready/in_progress时允许下一批，旧批次及作答状态保留；preparing/unknown不能通过该字段重发。默认false沿旧合同，命令重放必须保持该字段一致。
 
 准备指定题数口算批次
 
@@ -2101,6 +2109,8 @@ curl -fS -X POST "$HEXCLAW_BASE_URL/api/k12/weekly-practice/plans/resource-demo-
 
 ## `POST /api/k12/weekly-practice/plans/{id}/tracks/textbook_consolidation/recovery-attempts`
 
+`continue_remaining` 默认false，仅恢复指定题。显式true还授权继续原冻结批次中尚未开始的剩余题，仍受原MaxItems限制；其他已开始、失败或未知题不能借此重发。原成功结果及未知回执不改写。
+
 追加授权的教材原题验算恢复
 
 恢复命令允许原题追加物理验算，因此 accept_duplicate_execution 必须显式 true。 严格 body 不接受 agent。source_command_key、checkpoint_sha256 和零基 item_index 精确绑定原 checkpoint。旧 plan_revision>0 可同时作为源/期望版本；分离版本时 source_plan_revision>=1 且 expected_plan_revision>=source，若同时给旧字段须等于源版本。源档案/教材/进度变更返回冲突；保留原回执和未知结果。
@@ -2173,6 +2183,8 @@ curl -fS -X POST "$HEXCLAW_BASE_URL/api/k12/weekly-practice/plans/resource-demo-
 重新解释既有教材调用回执
 
 只允许读取和重新解释成功的既有物理回执，不允许新增模型调用。 严格 body 不接受 agent。source_command_key、checkpoint_sha256 和零基 item_index 精确绑定原 checkpoint。旧 plan_revision>0 可同时作为源/期望版本；分离版本时 source_plan_revision>=1 且 expected_plan_revision>=source，若同时给旧字段须等于源版本。源档案/教材/进度变更返回冲突；保留原回执和未知结果。
+
+若原批次还有未生成的题目，本次仅追加指定题目的解析结论并返回当前草稿，不触发补题；其余题目仍由原生成命令或既有显式恢复授权继续。仅当其余题目均已完成时，才用已有回执完成计划投影。
 
 与恢复命令一样，这需要原持久 checkpoint 的实际字节摘要及 `generation.items` 索引。公开计划/快照查询不暴露这些字段；不能使用 `snapshot_digest` 或公开题目顺序替代。示例仅展示请求形状，已有真实恢复上下文时才能提交。省略 `item_index` 的底层默认值为 0，建议显式指定。
 
@@ -2728,7 +2740,7 @@ curl -fS -X POST "$HEXCLAW_BASE_URL/api/k12/weekly-practice/plans/resource-demo-
 | 字段 | 类型 / 约束 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `availability` | string (`available`, `setup_required`, `processing`, `failed_retryable`, `failed_terminal`) | 是 | JSON 投影字段；可选字段在无值时可能省略。 |
-| `selected_item_count` | integer | 是 | JSON 投影字段；可选字段在无值时可能省略。 |
+| `selected_item_count` | integer | 是 | 当前所选题数；口算准备中或失败恢复时投影原批次冻结请求的题数，不取已生成数量或上次偏好。可重试失败的原批次恢复期间，客户端显示并锁定该值。 |
 | `recommended_item_count` | integer | 是 | JSON 投影字段；可选字段在无值时可能省略。 |
 | `min_item_count` | integer | 是 | JSON 投影字段；可选字段在无值时可能省略。 |
 | `max_item_count` | integer | 是 | JSON 投影字段；可选字段在无值时可能省略。 |

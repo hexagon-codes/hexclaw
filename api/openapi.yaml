@@ -15945,6 +15945,49 @@ paths:
           description: K12 Agent 名称 / K12 agent name
       x-reference-module: k12-practice
       x-visibility: public
+  /api/k12/weekly-practice/plans/{id}/tracks/{section}/prepare-output:
+    post:
+      operationId: k12PracticePrepareWeeklyPracticeTrackOutput
+      summary: 准备单类补充练习 PDF / Prepare one supplementary worksheet PDF
+      description: 从服务端已验证题目冻结同一PDF，预览、下载与打印读取相同字节；不冻结或修改整周计划，不调用模型。另一分区修订不改变相同题面的产物身份。Freeze verified questions into one shared PDF without freezing the weekly plan or invoking models.
+      tags: [k12-practice]
+      x-source:
+        file: scenarios/k12/apihttp/weekly_practice_handler.go
+        handler: prepareWeeklyPracticeTrackOutput
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: {type: string}
+        - in: path
+          name: section
+          required: true
+          schema: {type: string, enum: [textbook_consolidation, arithmetic_warmup]}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                agent: {type: string, minLength: 1}
+                expected_revision: {type: integer, minimum: 1}
+              required: [agent, expected_revision]
+      responses:
+        '200':
+          description: 已冻结的同一题面 / Existing frozen worksheet
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/K12PracticeArtifactPrepareResponse'}
+        '201':
+          description: 首次冻结 PDF / New frozen PDF
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/K12PracticeArtifactPrepareResponse'}
+        '400': {description: 无效分区或没有完整已验证题面 / Invalid section or no fully verified questions}
+        '404': {description: 计划或分区不存在 / Plan or section not found}
+        '409': {description: 计划修订冲突 / Plan revision conflict}
+        '502': {description: PDF 渲染失败 / PDF rendering failed}
   /api/k12/weekly-practice/plans/{id}/prepare-output:
     post:
       operationId: k12PracticePrepareWeeklyPracticeOutput
@@ -16718,6 +16761,8 @@ paths:
         可同时作为源/期望版本；分离版本时 source_plan_revision>=1 且
         expected_plan_revision>=source，若同时给旧字段须等于源版本。源档案/教材/进度变更返回冲突；保留原回执和未知结果。
 
+        原批次仍有未生成题目时仅返回当前草稿，不触发补题；其余题目由原生成命令或既有显式恢复授权继续。
+
 
         This recovery may append a physical solve, so accept_duplicate_execution must explicitly be true.
         Strict body rejects agent. source_command_key/checkpoint_sha256/zero-based item_index bind the exact
@@ -16817,6 +16862,9 @@ paths:
         separated source_plan_revision must be >=1 and expected_plan_revision >= source; if legacy is also
         supplied it must equal source. Changed source profile/textbook/progress conflicts; original receipts
         and unknown outcomes are retained.
+
+        Unstarted questions leave the current plan as a draft; only the original generation command or
+        its existing explicit recovery authorization can continue the remaining questions.
       tags:
         - k12-practice
       x-source:
@@ -18546,7 +18594,7 @@ paths:
       operationId: k12RecordsBackup
       summary: Read a complete learner backup
       description: >-
-        Returns JSON, not a download attachment; save the whole response as .hexbak. Current version is 7.
+        Returns JSON, not a download attachment; save the whole response as .hexbak. Current version is 8.
         Preserve archive_id/checksum/records/assets/confirmed OCR/problem attempts/source-action/current
         creative-work archives unchanged. It does not include the complete model configuration or all
         long-term memory. Missing/corrupt referenced assets fail the backup; do not drop fields and recompute
@@ -18568,7 +18616,7 @@ paths:
       responses:
         "200":
           description: Read a complete learner backup; Returns JSON, not a download attachment; save the whole response
-            as .hexbak. Current version is 7. Preserve archive_id/checksum/records/assets/confirmed
+            as .hexbak. Current version is 8. Preserve archive_id/checksum/records/assets/confirmed
             OCR/problem attempts/source-action/current creative-work archives unchanged. It does not include
             the complete model configuration or all long-term memory. Missing/corrupt referenced assets fail
             the backup; do not drop fields and recompute a checksum.
@@ -18685,7 +18733,7 @@ paths:
           description: Migrate a backup to another Tutor; Keep original archive identity/checksum unchanged.
             source_agent must match the original owner; target_agent must differ and identify the rebuilt
             Tutor. guardian_confirmed=true and a 1..200-character idempotency_key are required. Accepts
-            supported backups from v2 through the current v7. Original archive, target pre-restore snapshot,
+            supported backups from v2 through the current v8. Original archive, target pre-restore snapshot,
             owner-rewrite journal and domain writes commit in one SQLite transaction. The result contains
             migration_id; identical commands replay durable receipts.
           content:
@@ -19330,6 +19378,72 @@ paths:
       x-reference-module: k12-records
       x-visibility: public
   /api/k12/profile-bundle:
+    get:
+      operationId: k12RecordsGetProfileBundleSnapshot
+      summary: Read one consistent profile editing snapshot
+      description: >-
+        Reads Agent configuration, six-subject profile, curriculum progress and weekly settings with their
+        revisions in one read-only transaction. Optional idempotency_key returns the original agent-scoped
+        command receipt or null. This read never writes or resends. Use the same snapshot fields and
+        revisions when constructing an update; do not combine stale list fields with new revisions.
+      tags:
+        - k12-records
+      parameters:
+        - name: agent
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: idempotency_key
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Persistent editing snapshot and optional original command receipt.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [agent_config, profile, curriculum_progress, progress_revision, weekly_practice_settings, command]
+                properties:
+                  agent_config:
+                    $ref: "#/components/schemas/K12Recordsscenarios_k12_ProfileBundleAgentConfig"
+                  profile:
+                    allOf:
+                      - $ref: "#/components/schemas/K12Recordsscenarios_k12_ProfileBundleProfile"
+                      - type: object
+                        required: [revision]
+                        properties:
+                          revision:
+                            type: integer
+                  curriculum_progress:
+                    anyOf:
+                      - $ref: "#/components/schemas/K12Recordsscenarios_k12_CurriculumProgress"
+                      - type: "null"
+                  progress_revision:
+                    type: integer
+                  weekly_practice_settings:
+                    $ref: "#/components/schemas/K12Recordsscenarios_k12_WeeklyPracticeSettings"
+                  command:
+                    anyOf:
+                      - $ref: "#/components/schemas/K12Recordsscenarios_k12_ProfileBundleResult"
+                      - type: "null"
+        "400":
+          description: Agent scope is required.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Owned Agent not found.
+        "500":
+          description: Persistent snapshot read failed.
+      x-source:
+        file: scenarios/k12/apihttp/weekly_practice_handler.go
+        handler: getProfileBundleSnapshot
+      x-availability: K12 module and record store.
+      x-reference-module: k12-records
+      x-visibility: public
     put:
       operationId: k12RecordsUpdateProfileBundle
       summary: Atomically update profile, progress and weekly settings
@@ -20550,6 +20664,8 @@ components:
     ChatSessionToolCall:
       type: object
       properties:
+        detail:
+          $ref: "#/components/schemas/ChatSessionToolExecutionDetail"
         origin:
           $ref: "#/components/schemas/ChatSessionToolOrigin"
         execution:
@@ -20572,6 +20688,33 @@ components:
         - id
         - name
         - arguments
+    ChatSessionToolExecutionDetail:
+      type: object
+      description: Facts from this execution; missing historical details remain unknown.
+      properties:
+        phase:
+          type: string
+        outcome:
+          type: string
+          enum: [success, failure, unknown]
+        reason:
+          type: string
+        action:
+          type: string
+        http_status:
+          type: integer
+        response_received:
+          type: boolean
+        target_host:
+          type: string
+        approval_request_id:
+          type: string
+        approval_status:
+          type: string
+        approval_deadline:
+          type: string
+          format: date-time
+      required: [outcome, response_received]
     ChatSessionBlock:
       type: object
       properties:
@@ -33468,6 +33611,10 @@ components:
     K12PracticeHTTPPracticeItemDTO:
       type: object
       properties:
+        learning_evidence:
+          type: array
+          items:
+            $ref: "#/components/schemas/K12LearningEvidence"
         item_id:
           type: string
           description: 当前练习项 ID；不得用来源错题 ID 替代 / Current practice-item ID, distinct from its source mistake ID
@@ -33542,6 +33689,10 @@ components:
     K12PracticeHTTPPracticeReturnAssetDTO:
       type: object
       properties:
+        learning_evidence:
+          type: array
+          items:
+            $ref: "#/components/schemas/K12LearningEvidence"
         return_id:
           type: string
         asset_id:
@@ -35356,6 +35507,10 @@ components:
     K12PracticeHTTPSubmitReturnReq:
       type: object
       properties:
+        answer_context:
+          type: string
+          enum: [unknown, prompted_answer, independent_answer]
+          description: 家长明确报告的本次作答条件，缺省为未知；不从照片或文件交付推断 / Explicit guardian report; omission means unknown
         agent:
           type: string
           minLength: 1
@@ -35394,6 +35549,26 @@ components:
               minItems: 1
           required:
             - item_ids
+    K12LearningEvidence:
+      type: object
+      properties:
+        kind:
+          type: string
+          enum: [unknown, prompted_answer, independent_answer, delayed_retest, human_confirmed]
+        source:
+          type: string
+        event_id:
+          type: string
+        occurred_at:
+          type: integer
+          format: int64
+        basis_id:
+          type: string
+        basis_at:
+          type: integer
+          format: int64
+      required: [kind]
+      additionalProperties: false
     K12PracticeHTTPGradeResultsReq:
       type: object
       properties:
@@ -35683,6 +35858,10 @@ components:
     K12PracticeHTTPWeeklyManualArithmeticRequest:
       type: object
       properties:
+        replace_current:
+          type: boolean
+          default: false
+          description: 显式重新生成已就绪或进行中的口算；保留旧批次及作答状态，不替换preparing/unknown批次。Explicitly regenerate a ready or active batch while retaining its original state; never replace pending or unknown work.
         plan_revision:
           type: integer
           minimum: 1
@@ -35802,6 +35981,10 @@ components:
         accept_duplicate_execution:
           type: boolean
           const: true
+        continue_remaining:
+          type: boolean
+          default: false
+          description: 显式授权继续原冻结批次尚未开始的剩余题；默认仅恢复指定题，其他未知调用仍拒绝重发。Explicit authorization to continue unstarted questions in the original bounded batch; other unknown calls are not resent.
         source_plan_revision:
           type: integer
           minimum: 1
@@ -39526,6 +39709,10 @@ components:
       type: object
     K12Recordsscenarios_k12_usecase_Hexbak:
       properties:
+        teaching_diagrams:
+          type: array
+          items:
+            $ref: "#/components/schemas/K12TeachingDiagramArchive"
         agent_name:
           type: string
         archive_id:
@@ -39576,7 +39763,7 @@ components:
             - "null"
         version:
           type: integer
-          description: Current backup version is 7; restoration supports versioned checksum contracts through 7.
+          description: Current backup version is 8; restoration supports versioned checksum contracts through 8.
             Preserve this complete envelope unchanged.
       required:
         - version
@@ -39585,6 +39772,24 @@ components:
         - records
         - checksum
       type: object
+    K12TeachingDiagramArchive:
+      type: object
+      properties:
+        owner_scope:
+          type: string
+        agent_name:
+          type: string
+        asset_id:
+          type: string
+        asset_digest:
+          type: string
+        svg:
+          type: string
+          contentEncoding: base64
+        created_at:
+          type: integer
+          format: int64
+      required: [owner_scope, agent_name, asset_id, asset_digest, svg, created_at]
     K12Recordsscenarios_k12_usecase_HexbakAsset:
       properties:
         asset_id:

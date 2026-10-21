@@ -234,6 +234,16 @@ type ProfileBundleResult struct {
 	Replayed               bool                      `json:"replayed"`
 }
 
+// ProfileBundleSnapshot 将编辑字段、修订号与可选命令回执绑定到同一只读事务。
+type ProfileBundleSnapshot struct {
+	AgentConfig            ProfileBundleAgentConfig `json:"agent_config"`
+	Profile                WeeklyProfile            `json:"profile"`
+	CurriculumProgress     *CurriculumProgress      `json:"curriculum_progress"`
+	ProgressRevision       int                      `json:"progress_revision"`
+	WeeklyPracticeSettings WeeklyPracticeSettings   `json:"weekly_practice_settings"`
+	Command                *ProfileBundleResult     `json:"command"`
+}
+
 type WeeklyPracticeVerification struct {
 	Status            string   `json:"status"`
 	EvidenceRefs      []string `json:"evidence_refs"`

@@ -91,6 +91,10 @@ func (a *ArchiveRestoreAdapter) RestoreArchiveAs(
 			if err != nil {
 				return fmt.Errorf("snapshot current creative works: %w", err)
 			}
+			snapshot.TeachingDiagrams, err = a.records.ExportTeachingDiagramAssetsTx(ctx, tx, plan.TargetAgent)
+			if err != nil {
+				return fmt.Errorf("snapshot teaching diagrams: %w", err)
+			}
 			recordAssets, err := usecase.PackHexbakAssets(plan.TargetAgent, preRecords)
 			if err != nil {
 				return fmt.Errorf("pack pre-restore snapshot assets: %w", err)
@@ -173,6 +177,9 @@ func (a *ArchiveRestoreAdapter) RestoreArchiveAs(
 			}
 			if err := a.records.ImportCreativeWorksArchiveV7Tx(ctx, tx, plan.TargetAgent, migrated.CurrentCreativeWorks); err != nil {
 				return fmt.Errorf("restore migrated current creative works: %w", err)
+			}
+			if err := a.records.ImportTeachingDiagramAssetsTx(ctx, tx, plan.TargetAgent, migrated.TeachingDiagrams); err != nil {
+				return fmt.Errorf("restore migrated teaching diagrams: %w", err)
 			}
 			if err := a.records.ImportProblemAttemptSnapshotsTx(
 				ctx, tx, plan.TargetAgent, migrated.ProblemAttempts,
@@ -348,6 +355,9 @@ func (a *ArchiveRestoreAdapter) RollbackRestoreAs(
 			}
 			if err := a.records.ImportCreativeWorksArchiveV7Tx(ctx, tx, req.TargetAgent, current.Snapshot.CurrentCreativeWorks); err != nil {
 				return rollbackFailure(fmt.Errorf("restore current creative snapshot: %w", err), nil)
+			}
+			if err := a.records.ImportTeachingDiagramAssetsTx(ctx, tx, req.TargetAgent, current.Snapshot.TeachingDiagrams); err != nil {
+				return rollbackFailure(fmt.Errorf("restore teaching diagram snapshot: %w", err), nil)
 			}
 			if err := a.records.ReplaceProblemAttemptSnapshotsTx(
 				ctx, tx, req.TargetAgent, current.Snapshot.ProblemAttempts,

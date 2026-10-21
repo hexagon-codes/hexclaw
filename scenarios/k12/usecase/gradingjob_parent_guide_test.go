@@ -77,11 +77,11 @@ func TestGradingJobBlankWorksheetCommitsAndReplaysPerItemParentGuide(t *testing.
 	grader := &itemResumeGrader{calls: map[string]int{}}
 	o := newItemResumeOrchestrator(t, t.TempDir(), []RecognizedQuestion{
 		{
-			Question: "q1", Subject: "数学", AnswerState: AnswerStateBlank,
+			Question: "1+1=", Subject: "数学", AnswerState: AnswerStateBlank,
 			KnowledgePoints: []string{"加法"},
 		},
 		{
-			Question: "q2", Subject: "数学", AnswerState: AnswerStateBlank,
+			Question: "2-0=", Subject: "数学", AnswerState: AnswerStateBlank,
 			KnowledgePoints: []string{"减法"},
 		},
 	}, solver, grader)

@@ -2709,7 +2709,16 @@ func restartImageTaskAutomaticWindowVia(
               status='routed'
               AND target_object_type='homework_submission'
               AND automatic_deadline_at>0
-              AND automatic_deadline_at<=?
+              AND (automatic_deadline_at<=? OR EXISTS (
+                SELECT 1 FROM k12_homework_submissions AS homework
+                JOIN k12_grading_jobs AS job ON job.agent_name=homework.agent_name AND job.record_id=homework.grading_job_id
+                WHERE homework.agent_name=k12_image_task_dispatches.agent_name
+                  AND homework.dispatch_id=k12_image_task_dispatches.dispatch_id
+                  AND homework.submission_id=k12_image_task_dispatches.target_object_id
+                  AND job.status='failed_retryable' AND job.retryable=1
+                  AND json_extract(job.budget_snapshot_json,'$.parent_automatic_deadline_at')>0
+                  AND json_extract(job.budget_snapshot_json,'$.parent_automatic_deadline_at')<=?
+              ))
             )
             OR (
               status='routed'
@@ -2723,7 +2732,7 @@ func restartImageTaskAutomaticWindowVia(
 		// 唯一调用方已经在同一事务核对原批改终态及当前确定失败回执。
 		predicate = `AND status IN ('routed','failed') AND target_object_type='homework_submission'`
 	} else {
-		args = append(args, now)
+		args = append(args, now, now)
 	}
 	res, err := q.ExecContext(ctx, `UPDATE k12_image_task_dispatches
         SET status='routed',failure_kind='',retry_safe=0,

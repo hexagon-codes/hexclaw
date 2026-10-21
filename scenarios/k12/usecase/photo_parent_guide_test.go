@@ -80,6 +80,25 @@ func (s *parentTeachingGuideSpy) snapshot() []ParentTeachingGuideRequest {
 	return append([]ParentTeachingGuideRequest(nil), s.calls...)
 }
 
+func TestParentTeachingAnswerLabelKeepsExactVerifiedContent(t *testing.T) {
+	for _, tc := range []struct {
+		name, answer, solution string
+		want                   bool
+	}{
+		{"same Chinese answer with label", "答案：比喻；金水河弯曲、秀美的特点。", "先分析修辞。\n答案：比喻；金水河弯曲、秀美的特点。", true},
+		{"same numeric answer with label", "答案：42 cm", "计算完成。\n答案：42 cm", true},
+		{"different word", "答案：拟人；金水河弯曲、秀美的特点。", "先分析修辞。\n答案：比喻；金水河弯曲、秀美的特点。", false},
+		{"different number", "答案：42 cm", "计算完成。\n答案：142 cm", false},
+		{"empty label", "答案：", "计算完成。\n答案：42 cm", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := answerAnchoredInVerifiedSolution(tc.answer, tc.solution); got != tc.want {
+				t.Fatalf("answer anchor = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestGradeHomeworkPhotoBlankWorksheetBuildsCompleteProblemSpecificParentGuides(t *testing.T) {
 	d, _ := newPipeline(t, blankWorksheetSolver{evidenceType: EvidenceHeuristic}, fakeGrader{}, nil)
 	generator := &parentTeachingGuideSpy{}
@@ -164,6 +183,38 @@ func TestGradeHomeworkPhotoBlankWorksheetBuildsCompleteProblemSpecificParentGuid
 		if strings.Contains(got.Markdown, stale) {
 			t.Fatalf("parent-guide markdown still exposes stale semantic item %q:\n%s", stale, got.Markdown)
 		}
+	}
+}
+
+func TestNumericAnswerDoesNotReplaceApplicationTeachingWithArithmeticTemplate(t *testing.T) {
+	evidence := SolveEvidence{Verdict: VerdictAgree, EvidenceType: EvidenceNumericExec}
+	application := ParentTeachingGuideRequest{Problem: "妈妈从家到学校要走10分钟，红红要走15分钟，同时相向而行，5分钟后相距200米，求全程。", Grade: "六年级上", VerifiedSolution: "全程的1/6对应200米，200÷(1/6)=1200米。\n\n## 答案\n\n1200米"}
+	if _, local := deterministicParentTeachingGuideForEvidence(application, evidence); local {
+		t.Fatal("a verified numeric answer cannot select a generic arithmetic teaching template for an application problem")
+	}
+	application.Problem, application.VerifiedSolution = "计算：4.5×2=？", "4.5×2=9。\n\n## 答案\n\n9"
+	if guide, local := deterministicParentTeachingGuideForEvidence(application, evidence); !local || guide.Answer != "9" {
+		t.Fatal("pure verified arithmetic must retain its local teaching path")
+	}
+}
+
+func TestJointNumericApplicationWithoutCandidateUsesFrozenGuideGenerator(t *testing.T) {
+	d, _ := newPipeline(t, blankWorksheetSolver{}, fakeGrader{}, nil)
+	generator := &parentTeachingGuideSpy{}
+	d.ParentTeachingGuide = generator
+	req := GradeRequest{AgentName: "mingming", Subject: "数学", Grade: "二年级上",
+		Problem:            "小明有1本书，又买了1本，一共有多少本？",
+		SolveOutputVersion: SolveOutputWithParentGuideV1, ParentTeachingContract: "frozen teaching contract"}
+	result, err := d.SolveBlankWorksheetProblem(t.Context(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := generator.snapshot()
+	if len(calls) != 1 || calls[0].FrozenTeachingContract != req.ParentTeachingContract || result.Guide.Answer != "2" {
+		t.Fatalf("missing candidate must use the frozen provider guide: calls=%#v result=%#v", calls, result.Guide)
+	}
+	if !reflect.DeepEqual(result.Guide.FullSolutionSteps, blankWorksheetVerifiedSteps(req.Problem)) {
+		t.Fatal("guide generation replaced the verified solution steps")
 	}
 }
 

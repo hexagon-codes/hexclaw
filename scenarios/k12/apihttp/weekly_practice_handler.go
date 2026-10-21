@@ -107,6 +107,20 @@ func decodeProfileBundleCurriculumProgress(
 	return k12.DecodeCurriculumProgressSelection(raw)
 }
 
+func (h *handler) getProfileBundleSnapshot(w http.ResponseWriter, r *http.Request) {
+	scope, err := h.textbookScope(r.Context(), r.URL.Query().Get("agent"), "math")
+	if err != nil {
+		writeErr(w, httpStatusForK12Error(err, http.StatusInternalServerError), err.Error())
+		return
+	}
+	result, err := h.rt.Deps.GetProfileBundleSnapshot(r.Context(), scope.AgentName, r.URL.Query().Get("idempotency_key"))
+	if err != nil {
+		writeErr(w, httpStatusForK12Error(err, http.StatusInternalServerError), err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
 func (h *handler) updateProfileBundle(w http.ResponseWriter, r *http.Request) {
 	var req profileBundleRequest
 	if !decodeStrict(w, r, &req) {
@@ -292,6 +306,7 @@ type weeklyManualArithmeticRequest struct {
 	PlanRevision   int    `json:"plan_revision"`
 	ItemCount      int    `json:"item_count"`
 	IdempotencyKey string `json:"idempotency_key"`
+	ReplaceCurrent bool   `json:"replace_current,omitempty"`
 }
 
 func (h *handler) prepareWeeklyPracticeOutput(w http.ResponseWriter, r *http.Request) {
@@ -389,7 +404,7 @@ func (h *handler) createWeeklyArithmeticBatch(w http.ResponseWriter, r *http.Req
 	}
 	batch, replay, err := h.rt.Deps.CreateWeeklyArithmeticBatchWithItemCount(
 		r.Context(), agentName, r.PathValue("id"),
-		req.PlanRevision, req.ItemCount, req.IdempotencyKey)
+		req.PlanRevision, req.ItemCount, req.IdempotencyKey, req.ReplaceCurrent)
 	if err != nil {
 		writeErr(w, httpStatusForK12Error(err, http.StatusConflict), err.Error())
 		return

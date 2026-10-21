@@ -996,6 +996,8 @@ Success: `200` `application/json`.
 <a id="backup"></a>
 ## GET /api/k12/backup
 
+v8 adds `teaching_diagrams` with owner, asset identity, SHA-256 and exact SVG bytes. The archive checksum covers this field; asset and record restoration share one transaction. RestoreAs rewrites target asset references. Legacy archives retain their original checksum contract.
+
 Read a complete learner backup.
 
 Returns JSON, not a download attachment; save the whole response as .hexbak. Current version is 7. Preserve archive_id/checksum/records/assets/confirmed OCR/problem attempts/source-action/current creative-work archives unchanged. It does not include the complete model configuration or all long-term memory. Missing/corrupt referenced assets fail the backup; do not drop fields and recompute a checksum.
@@ -1081,7 +1083,7 @@ Success: `200` `application/json`.
 
 Migrate a backup to another Tutor.
 
-Keep original archive identity/checksum unchanged. source_agent must match the original owner; target_agent must differ and identify the rebuilt Tutor. guardian_confirmed=true and a nonblank idempotency_key of at most 200 UTF-8 bytes after trimming are required. Accepts supported backups from v2 through the current v7. Original archive, target pre-restore snapshot, owner-rewrite journal and domain writes commit in one SQLite transaction. The result contains migration_id; identical commands replay durable receipts.
+Keep original archive identity/checksum unchanged. source_agent must match the original owner; target_agent must differ and identify the rebuilt Tutor. guardian_confirmed=true and a nonblank idempotency_key of at most 200 UTF-8 bytes after trimming are required. Accepts supported backups from v2 through the current v8. Original archive, target pre-restore snapshot, owner-rewrite journal and domain writes commit in one SQLite transaction. The result contains migration_id; identical commands replay durable receipts.
 
 Availability: K12 module, record store and the dependencies described for this operation.
 

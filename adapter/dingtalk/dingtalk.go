@@ -83,12 +83,12 @@ type DingtalkAdapter struct {
 	stopped          atomic.Bool
 
 	// handlerTimeout 单条消息的处理总预算；0 → 默认 defaultHandlerTimeout。可注入以在测试中
-	// 复现「占位已发 → handler 超时 → 返回 error」的终态路径，无需真等 2 分钟。
+	// 复现「占位已发 → handler 超时 → 返回 error」的终态路径，无需等待默认预算。
 	handlerTimeout time.Duration
 }
 
-// defaultHandlerTimeout 是单条消息处理的默认总预算。
-const defaultHandlerTimeout = 2 * time.Minute
+// defaultHandlerTimeout 复用长任务总预算，容纳教材检索、独立验算与最终文档生成。
+const defaultHandlerTimeout = photoHandlerTimeout
 
 // photoHandlerTimeout 给整页识题 + 多题批改留出真实预算。注入耐久接纳端口后，图片回调
 // 只同步等待下载与落盘；后续 worker 不阻塞钉钉，用户会先收到带 ETA 的进度消息。
@@ -2154,6 +2154,10 @@ func (a *DingtalkAdapter) messageFromEvent(
 	metadata := map[string]string{
 		"conversation_id":   event.ConversationId,
 		"conversation_type": event.ConversationType,
+	}
+	if name := strings.TrimSpace(a.cfg.Name); name != "" {
+		metadata["channel_instance_name"] = name
+		metadata["channel_instance_name_source"] = "instance_configuration"
 	}
 	if event.Text.IsReplyMsg {
 		replyTo = strings.TrimSpace(event.Text.RepliedMsg.MsgID)

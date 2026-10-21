@@ -9,14 +9,15 @@
 #let hc-body-font = ("Songti SC", "Noto Serif CJK SC", "Noto Serif CJK SC Regular")
 #let hc-heading-font = ("PingFang SC", "Noto Sans CJK SC")
 #set text(font: hc-body-font, size: 12pt, fill: hc-ink)
-#set par(justify: false, leading: 0.86em, spacing: 0.78em)
+#set par(justify: false, leading: 1.02em, spacing: 0.95em)
 #show "🔧": box(image(__HC_TOOL_ICON__, width: 0.9em))
 // 列表项使用独立留白，避免紧凑列表的项间距小于正文换行。
 #set list(tight: false, indent: 4mm, body-indent: 2mm, spacing: 0.85em)
 #set enum(tight: false, indent: 4mm, body-indent: 2mm, spacing: 0.85em)
-#show math.equation.where(block: false): box
+#show math.equation.where(block: false): it => box(inset: (top: 0.08em, bottom: 0.08em), it)
 #show math.equation.where(block: true): set text(size: 12pt)
 #show math.equation.where(block: true): set align(left)
+#show math.equation.where(block: true): set block(above: 0.65em, below: 0.65em)
 #show heading: set text(font: hc-heading-font)
 #show heading.where(level: 1): it => block(above: 0pt, below: 5mm, sticky: true)[
   #text(font: hc-heading-font, size: 13pt, weight: 650, fill: hc-blue, it.body)
@@ -73,11 +74,53 @@
 #let hc-item(body) = layout(size => {
   // 订正与解答每题固定按批改状态、原始作答、正确答案三项显示，缺值保留空项。
   // 家长讲题的题号与必要步骤同一行；各题沿同一标题与列表规则。
-  let height = measure(body, width: size.width).height
-  block(breakable: height > 240mm, above: 0mm, below: 0mm, inset: (top: 3mm, bottom: 3mm), body)
+  // 长答案按正文自然跨页；题号与题干由首行投影保持同行，不把整题强推至下一页。
+  block(breakable: true, above: 0mm, below: 0mm, inset: (top: 3mm, bottom: 3mm), body)
 })
 #let hc-compare(student, answer) = block(above: 0mm, below: 0mm, inset: (top: 3mm, bottom: 3mm))[
   #grid(columns: (1fr, 1fr), column-gutter: 8mm,
     [#text(font: hc-heading-font, size: 9.5pt, fill: hc-muted)[原始作答]#v(4mm)#student],
     [#text(font: hc-heading-font, size: 9.5pt, fill: hc-muted)[正确答案]#v(4mm)#answer])
 ]
+
+// 同步巩固专用练习册投影；正文、品牌页眉页脚和其他PDF版式保持原规则。
+#let hc-workbook-lines(count, gap: 8.5mm) = block(width: 100%, above: 1.5mm, below: 0mm)[
+  #grid(columns: (1fr,), rows: (gap,) * count, align: bottom,
+    ..range(count).map(_ => line(length: 100%, stroke: 0.35pt + hc-line.darken(18%))))
+]
+#let hc-workbook-header(title) = {
+  block(above: 0pt, below: 5mm, breakable: false)[
+    #text(font: hc-heading-font, size: 13pt, weight: 650, fill: hc-blue, title)#h(1fr)#box[姓名：#box(width: 30mm, height: 4mm, stroke: (bottom: 0.4pt + hc-muted))]#h(7mm)#box[日期：#box(width: 35mm, height: 4mm, stroke: (bottom: 0.4pt + hc-muted))]
+  ]
+  v(1mm)
+}
+#let hc-workbook-question(number, title, body, lines: 0) = layout(size => {
+  let content = grid(columns: (7mm, 1fr), column-gutter: 1.5mm, align: left,
+    text(font: hc-heading-font, weight: 600)[#number.],
+    [#title#v(2.5mm)#body#if lines > 0 {
+      if body != [] { v(if lines == 2 { 1mm } else { 2mm }) }
+      [答：]
+      hc-workbook-lines(lines)
+    }])
+  // 普通题整体换页；超一页的长题允许续排，保留完整题面。
+  block(breakable: measure(content, width: size.width).height > 240mm,
+    above: 4.5mm, below: 3mm, content)
+})
+#let hc-workbook-blank() = [（#h(10mm)）]
+#let hc-workbook-fill(cells) = {
+  grid(columns: (1fr, 1fr), row-gutter: 4mm, column-gutter: 12mm, ..cells)
+  v(3mm)
+}
+#let hc-workbook-matching(left, right) = grid(
+  columns: (22mm, 3mm, 70mm, 3mm, 22mm), rows: (15mm,) * left.len(),
+  align: center + horizon,
+  ..range(left.len()).map(index => (
+    left.at(index), circle(radius: 0.55mm, fill: hc-muted, stroke: none), [],
+    circle(radius: 0.55mm, fill: hc-muted, stroke: none), right.at(index),
+  )).flatten())
+#let hc-workbook-matching-group(label, left, right) = block(above: 2mm, below: 2.5mm)[
+  #text(weight: 600, label)
+  #v(2.5mm)
+  #hc-workbook-matching(left, right)
+]
+#let hc-workbook-calculations(cells) = grid(columns: (1fr, 1fr), column-gutter: 8mm, ..cells)

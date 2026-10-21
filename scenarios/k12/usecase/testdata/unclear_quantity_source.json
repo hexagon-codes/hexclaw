@@ -1,0 +1,66 @@
+{
+  "raw_transcription": "根据数量关系：\\((\\quad)=(\\quad)\\times\\frac{2}{5}\\)。\n列式：________",
+  "image_source_context": {
+    "version": "image_scope_v1",
+    "scope_digest": "frozen-scope",
+    "target_ids": [
+      "quantity-relation"
+    ],
+    "materials": [
+      {
+        "for_orders": [
+          1,
+          2,
+          3
+        ],
+        "region": {
+          "x": 832,
+          "y": 49,
+          "width": 433,
+          "height": 2577
+        },
+        "text": "3. 用不同的知识解决问题，想一想这些方法之间有什么联系。\n如下图，一个硬盘，已用空间是总容量的\\(\\frac{2}{5}\\)，正好用了4.8 TB（TB是太字节）。这个硬盘的总容量是多少太字节？"
+      },
+      {
+        "for_orders": [
+          1,
+          2,
+          3
+        ],
+        "region": {
+          "x": 597,
+          "y": 1825,
+          "width": 327,
+          "height": 799
+        },
+        "text": "已用空间　剩余空间\n共？TB"
+      },
+      {
+        "for_orders": [
+          2
+        ],
+        "region": {
+          "x": 0,
+          "y": 0,
+          "width": 1282,
+          "height": 2710
+        },
+        "text": "用不同的知识解决问题，想一想这些方法之间有什么联系。\n如下图，一个硬盘，已用空间是总容量的\\(\\frac{2}{5}\\)，正好用了4.8 TB（TB是太字节）。这个硬盘的总容量是多少太字节？"
+      }
+    ]
+  },
+  "canonical_markdown": "根据数量关系：( )=( )×2/5。\n列式：________",
+  "answer_raw_transcription": "\\(\\frac{?}{5}\\times2\\)\n\\(1\\)",
+  "answer_canonical_markdown": "?/5×2\n1",
+  "recognition_confidence": 0.99,
+  "ocr_signals": [
+    "第一个括号内手写分数的分子被裁切，无法可靠辨认，以 ? 保留；其余手写内容可辨。"
+  ],
+  "confirmation_reasons": [
+    "low_confidence"
+  ],
+  "Question": "根据数量关系：( )=( )×2/5。\n列式：________",
+  "AnswerState": "present",
+  "StudentAnswer": "?/5×2\n1",
+  "Subject": "数学"
+}

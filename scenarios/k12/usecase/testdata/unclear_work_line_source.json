@@ -1,0 +1,86 @@
+{
+  "raw_transcription": "先求一份是多少，再求总容量是多少。\n列式：",
+  "image_source_context": {
+    "source_comparison_policy": "chinese_blank_layout_v1",
+    "version": "image_scope_v1",
+    "scope_digest": "frozen-scope",
+    "target_ids": [
+      "work-line"
+    ],
+    "materials": [
+      {
+        "for_orders": [
+          1,
+          2,
+          3
+        ],
+        "region": {
+          "x": 1148,
+          "y": 52,
+          "width": 119,
+          "height": 2000
+        },
+        "text": "3. 用不同的知识解决问题，想一想这些方法之间有什么联系。"
+      },
+      {
+        "for_orders": [
+          1,
+          2,
+          3
+        ],
+        "region": {
+          "x": 836,
+          "y": 145,
+          "width": 275,
+          "height": 2475
+        },
+        "text": "如下图，一个硬盘，已用空间是总容量的\\(\\frac{2}{5}\\)，正好用了4.8 TB（TB是太字节）。这个硬盘的总容量是多少太字节？"
+      },
+      {
+        "for_orders": [
+          1,
+          2,
+          3
+        ],
+        "region": {
+          "x": 601,
+          "y": 1825,
+          "width": 326,
+          "height": 802
+        },
+        "text": "已用空间　剩余空间\n共？TB"
+      },
+      {
+        "for_orders": [
+          1
+        ],
+        "region": {
+          "x": 0,
+          "y": 0,
+          "width": 1282,
+          "height": 2710
+        },
+        "text": "用不同的知识解决问题，想一想这些方法之间有什么联系。\n如下图，一个硬盘，已用空间是总容量的\\(\\frac{2}{5}\\)，正好用了4.8 TB（TB是太字节）。这个硬盘的总容量是多少太字节？"
+      }
+    ]
+  },
+  "canonical_markdown": "先求一份是多少，再求总容量是多少。\n列式：",
+  "answer_raw_transcription": "\\(\\frac{2}{5}÷2=\\frac{2}{5}×\\frac{1}{2}=\\frac{1}{5}\\)",
+  "answer_canonical_markdown": "2/5÷2=2/5×1/2=1/5",
+  "recognition_confidence": 0.99,
+  "evidence_transcriptions": [
+    "用不同的知识解决问题，想一想这些方法之间有什么联系。\n如下图，一个硬盘，已用空间是总容量的\\(\\frac{2}{5}\\)，正好用了4.8 TB（TB是太字节）。这个硬盘的总容量是多少太字节？\n先求一份是多少，再求总容量是多少。\n列式：________",
+    "先求一份是多少，再求总容量是多少。\n列式："
+  ],
+  "answer_evidence_transcriptions": [
+    "\\(\\frac{2}{5}÷2=\\frac{2}{5}×\\frac{1}{2}=\\frac{1}{5}\\)",
+    "\\(\\frac{2}{5}÷2=\\frac{2}{5}×\\frac{1}{2}=\\frac{1}{5}\\)"
+  ],
+  "confirmation_reasons": [
+    "evidence_conflict"
+  ],
+  "Question": "先求一份是多少，再求总容量是多少。\n列式：",
+  "AnswerState": "present",
+  "StudentAnswer": "2/5÷2=2/5×1/2=1/5",
+  "Subject": "数学"
+}

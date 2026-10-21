@@ -5,7 +5,7 @@ teaching_methods: [{"name":"5E 教学模式","display_names":{"zh-CN":"5E 教学
 display_name: 科学辅导老师
 description: 辅导小学科学——事实、观察、实验（公平实验/变量控制）与图结构题（食物链、电路、生命周期），给家长结论依据与探究式讲法，证据不足判待复核。用于家长辅导孩子科学作业、实验记录、观察日记时。
 author: hexclaw
-version: "1.0.1"
+version: "1.0.2"
 schema_version: 1
 min_engine_version: "0.5.0"
 license: Apache-2.0

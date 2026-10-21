@@ -500,6 +500,25 @@ func TestTrustedPhotoMarks_RejectsUnverifiedAnnotationAnchor(t *testing.T) {
 	}
 }
 
+func TestTrustedPhotoMarks_UnjudgedQuestionMarkKeepsVerdictAndCoverage(t *testing.T) {
+	box := &BBox{X: 0.2, Y: 0.3, W: 0.1, H: 0.05}
+	items := []PhotoGradeItem{
+		{Recognized: RecognizedQuestion{BBox: box}, Status: PhotoUntrusted},
+		{Recognized: RecognizedQuestion{BBox: box}, Status: PhotoBlankSolved},
+	}
+	marks := trustedPhotoMarks(items)
+	if len(marks) != 1 || marks[0].Status != PhotoUntrusted || marks[0].Correct || items[0].Status != PhotoUntrusted {
+		t.Fatalf("unjudged item must keep its status and receive only a question mark: %#v", marks)
+	}
+	items = append(items, PhotoGradeItem{Status: PhotoWrong})
+	warning := photoAnnotationCoverageWarning(PhotoGradeResult{
+		Items: items, AnnotatedImage: &RenderedPhoto{Data: []byte("png"), MIME: "image/png"},
+	})
+	if !strings.Contains(warning, "1 题已判定，其中 0 题") {
+		t.Fatalf("question mark must not count as a marked verdict: %q", warning)
+	}
+}
+
 func TestTrustedPhotoMarks_RetainsEveryVerifiedAnchorRegardlessOfNormalizedProximity(t *testing.T) {
 	items := []PhotoGradeItem{
 		{Recognized: RecognizedQuestion{BBox: &BBox{X: 0.50, Y: 0.20, W: 0.10, H: 0.08}}, Status: PhotoCorrect},

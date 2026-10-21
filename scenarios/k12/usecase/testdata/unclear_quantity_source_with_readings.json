@@ -1,0 +1,90 @@
+{
+  "raw_transcription": "根据数量关系：（　）=（　）×\\(\\frac{2}{5}\\)。\n列式：________",
+  "image_source_context": {
+    "version": "image_scope_v1",
+    "scope_digest": "frozen-scope",
+    "target_ids": [
+      "quantity-relation"
+    ],
+    "materials": [
+      {
+        "for_orders": [
+          1,
+          2,
+          3
+        ],
+        "region": {
+          "x": 1154,
+          "y": 151,
+          "width": 108,
+          "height": 1914
+        },
+        "text": "用不同的知识解决问题，想一想这些方法之间有什么联系。"
+      },
+      {
+        "for_orders": [
+          1,
+          2,
+          3
+        ],
+        "region": {
+          "x": 835,
+          "y": 145,
+          "width": 280,
+          "height": 2480
+        },
+        "text": "如下图，一个硬盘，已用空间是总容量的\\(\\frac{2}{5}\\)，正好用了4.8 TB（TB是太字节）。这个硬盘的总容量是多少太字节？"
+      },
+      {
+        "for_orders": [
+          1,
+          2,
+          3
+        ],
+        "region": {
+          "x": 596,
+          "y": 1818,
+          "width": 334,
+          "height": 817
+        },
+        "text": "已用空间　剩余空间\n共？TB"
+      },
+      {
+        "for_orders": [
+          2
+        ],
+        "region": {
+          "x": 0,
+          "y": 0,
+          "width": 1282,
+          "height": 2710
+        },
+        "text": "用不同的知识解决问题，想一想这些方法之间有什么联系。\n如下图，一个硬盘，已用空间是总容量的\\(\\frac{2}{5}\\)，正好用了4.8 TB（TB是太字节）。这个硬盘的总容量是多少太字节？"
+      }
+    ]
+  },
+  "canonical_markdown": "根据数量关系：（　）=（　）×2/5。\n列式：________",
+  "answer_raw_transcription": "\\(\\frac{[无法辨认]}{5}\\times2\\)\n\\(1\\)",
+  "recognition_confidence": 0.99,
+  "ocr_signals": [
+    "第一个括号内手写分数的分子被裁切，无法可靠辨认；分母5及其后的×2可读。",
+    "evidence_conflict"
+  ],
+  "evidence_transcriptions": [
+    "用不同的知识解决问题，想一想这些方法之间有什么联系。\n如下图，一个硬盘，已用空间是总容量的\\(\\frac{2}{5}\\)，正好用了4.8 TB（TB是太字节）。这个硬盘的总容量是多少太字节？\n根据数量关系：（　　）＝（　　）×\\(\\frac{2}{5}\\)。\n列式：________",
+    "根据数量关系：（　）=（　）×\\(\\frac{2}{5}\\)。\n列式：________"
+  ],
+  "answer_evidence_transcriptions": [
+    "\\(\\frac{1}{5}×2\\)\n1",
+    "\\(\\frac{[无法辨认]}{5}\\times2\\)\n\\(1\\)"
+  ],
+  "confirmation_reasons": [
+    "evidence_conflict",
+    "low_confidence",
+    "unclear_handwriting"
+  ],
+  "Question": "根据数量关系：（　）=（　）×2/5。\n列式：________",
+  "AnswerState": "unclear",
+  "StudentAnswer": "",
+  "Subject": "数学"
+}

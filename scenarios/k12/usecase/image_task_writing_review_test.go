@@ -168,11 +168,99 @@ func reopenWritingCoordinator(t *testing.T, c *ImageTaskCoordinator) *ImageTaskC
 	return restarted
 }
 
+// 历史库只接收当时存在的列，升级前不调用依赖较新 schema 的当前存储映射器。
+func copyCompletedWritingToLegacySchema(t *testing.T, source, target *sql.DB) {
+	t.Helper()
+	var sourcePath string
+	if err := source.QueryRow(`SELECT file FROM pragma_database_list WHERE name='main'`).Scan(&sourcePath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := target.Exec(`ATTACH DATABASE ? AS completed_writing_fixture`, sourcePath); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = target.Exec(`DETACH DATABASE completed_writing_fixture`) })
+	rows, err := target.Query(`SELECT name FROM pragma_table_list WHERE schema='main' AND type='table' AND name IN (
+		'agents', 'k12_creative_works', 'k12_work_feedback', 'k12_work_feedback_generations',
+		'k12_creative_work_intakes', 'k12_image_task_dispatches', 'k12_image_task_invocations',
+		'k12_creative_work_ocr_jobs', 'k12_creative_work_ocr_versions'
+	) ORDER BY name`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tables []string
+	for rows.Next() {
+		var table string
+		if err := rows.Scan(&table); err != nil {
+			t.Fatal(err)
+		}
+		tables = append(tables, table)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := target.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`PRAGMA defer_foreign_keys=ON`); err != nil {
+		t.Fatal(err)
+	}
+	quote := func(name string) string { return `"` + strings.ReplaceAll(name, `"`, `""`) + `"` }
+	for _, table := range tables {
+		columns, err := tx.Query(`SELECT name FROM pragma_table_info(?) ORDER BY cid`, table)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var names []string
+		for columns.Next() {
+			var name string
+			if err := columns.Scan(&name); err != nil {
+				t.Fatal(err)
+			}
+			names = append(names, quote(name))
+		}
+		if err := columns.Err(); err != nil {
+			t.Fatal(err)
+		}
+		if err := columns.Close(); err != nil {
+			t.Fatal(err)
+		}
+		fields := strings.Join(names, ",")
+		if _, err := tx.Exec(`INSERT INTO main.` + quote(table) + ` (` + fields + `) SELECT ` + fields + ` FROM completed_writing_fixture.` + quote(table)); err != nil {
+			t.Fatalf("copy legacy writing table %s: %v", table, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	var version int
+	if err := target.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 102 {
+		t.Fatalf("writing fixture must preserve the V102 migration boundary: version=%d err=%v", version, err)
+	}
+}
+
 func TestImageTaskWritingReviewDurableRecovery(t *testing.T) {
 	t.Run("legacy_migration_preserves_result_and_receipts", func(t *testing.T) {
 		c, _ := newImageTaskCoordinatorForTest(t, &imageTaskClassifierStub{result: ImageTaskClassification{
 			Intent: k12.ImageTaskIntentWriting, IntentEvidence: []string{"handwritten essay"}, Confidence: .98,
 		}})
+		before, _, err := createAndRunImageTask(t, c, testCreateImageTaskInput())
+		if err != nil || before.CreativeFeedback != "feedback_ready" || before.feedbackInvocation == nil {
+			t.Fatalf("completed writing fixture: %+v err=%v", before, err)
+		}
+		ids := []string{"classification-1", "writing-ocr-1", before.feedbackInvocation.InvocationID}
+		var receipts []k12.ImageTaskInvocation
+		for _, id := range ids {
+			receipt, err := c.Records.GetImageTaskInvocation(context.Background(), "mingming", id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			receipts = append(receipts, receipt)
+		}
 		db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "legacy.db")+"?_pragma=foreign_keys(1)")
 		if err != nil {
 			t.Fatal(err)
@@ -189,28 +277,13 @@ func TestImageTaskWritingReviewDurableRecovery(t *testing.T) {
 		if err := migrate.Run(ctx, db, prior); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := db.Exec(`INSERT INTO agents(name,metadata) VALUES('mingming','{"k12.grade_term":"五年级上"}')`); err != nil {
-			t.Fatal(err)
-		}
+		copyCompletedWritingToLegacySchema(t, c.Records.DB(), db)
 		registry := scenario.NewRegistry()
 		if err := registry.Assemble(k12.Pack(k12.NewCurriculumStub())); err != nil {
 			t.Fatal(err)
 		}
 		c.Records = k12storage.NewStore(db, registry.Records)
 		c.WorkFeedback.(*Deps).Records = c.Records
-		before, _, err := createAndRunImageTask(t, c, testCreateImageTaskInput())
-		if err != nil || before.CreativeFeedback != "feedback_ready" || before.feedbackInvocation == nil {
-			t.Fatalf("legacy result: %+v err=%v", before, err)
-		}
-		ids := []string{"classification-1", "writing-ocr-1", before.feedbackInvocation.InvocationID}
-		var receipts []k12.ImageTaskInvocation
-		for _, id := range ids {
-			receipt, err := c.Records.GetImageTaskInvocation(ctx, "mingming", id)
-			if err != nil {
-				t.Fatal(err)
-			}
-			receipts = append(receipts, receipt)
-		}
 		if err := migrate.Run(ctx, db, migrate.All); err != nil {
 			t.Fatalf("upgrade existing writing result: %v", err)
 		}

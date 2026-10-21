@@ -178,6 +178,62 @@ func TestImageTaskPersistsAutomaticAttemptIdentityIntoNestedGrading(t *testing.T
 	}
 }
 
+type imageTaskClampedRetryStub struct {
+	*imageTaskGradingStub
+}
+
+func (s *imageTaskClampedRetryStub) ImageTaskHomeworkProjection(context.Context, string, string) (ImageTaskHomeworkProjection, error) {
+	return ImageTaskHomeworkProjection{
+		Stage: k12.GradingStageFailedRetryable, Retryable: true, retryFailureKind: "assess_item_failed",
+	}, nil
+}
+
+func TestImageTaskHomeworkRetryUsesExpiredChildWindowBeforeParentDeadline(t *testing.T) {
+	now := int64(1000)
+	c, grading := newImageTaskCoordinatorForTest(t, &imageTaskClassifierStub{
+		result: ImageTaskClassification{Intent: k12.ImageTaskIntentCompletedHomework, Confidence: 0.99},
+	})
+	c.Now = func() int64 { return now }
+	c.Grading = &imageTaskClampedRetryStub{grading}
+	created, _, err := c.Create(t.Context(), testCreateImageTaskInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := Deps{Records: c.Records, Now: c.Now}
+	job, _, err := d.CreateGradingJob(t.Context(), "mingming", "child-window-session", CreateGradingJobInput{
+		SubmissionID: "child-window-submission", SourceKind: "image_task", SourceKey: created.Dispatch.DispatchID,
+		ParentAutomaticAttemptID: created.Dispatch.DispatchID + ":1000", ParentAutomaticDeadlineAt: 1180,
+		ModelSnapshot: k12.GradingModelSnapshot{Provider: "test-provider", Model: "test-vision"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	grading.jobID = job.Record.RecordID
+	if _, err = d.AdvanceGradingStage(t.Context(), "mingming", grading.jobID, AdvanceGradingInput{Outcome: GradingOutcomeOK}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = d.AdvanceGradingStage(t.Context(), "mingming", grading.jobID, AdvanceGradingInput{Outcome: GradingOutcomeFailed, FailureKind: "assess_item_failed", Retryable: true}); err != nil {
+		t.Fatal(err)
+	}
+	routed, err := c.Run(t.Context(), "mingming", created.Dispatch.DispatchID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Records.RestartImageTaskAutomaticWindow(t.Context(), "mingming", routed.Dispatch.DispatchID, routed.Dispatch.Version, 1179); err == nil {
+		t.Fatal("unexpired child window allowed a parent restart")
+	}
+	// 实际子任务已过180秒窗口，父接纳窗口仍为300秒；资格由子编排器确认。
+	now = 1181
+	grading.parentRetryAllowed = true
+	got, err := c.Retry(t.Context(), "mingming", routed.Dispatch.DispatchID, routed.Dispatch.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Dispatch.AutomaticStartedAt != 1181 || grading.parentRetryAttemptID != routed.Dispatch.DispatchID+":1181" || grading.parentRetryDeadlineAt != 1481 {
+		t.Fatalf("expired child reused old parent window: dispatch=%+v grading=%+v", got.Dispatch, grading)
+	}
+}
+
 func TestImageTaskExplicitHomeworkRetryStartsFreshParentAutomaticAttempt(t *testing.T) {
 	now := int64(4000)
 	classifier := &imageTaskClassifierStub{

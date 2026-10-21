@@ -8,7 +8,39 @@ import (
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 )
 
-const gradingPDFProjectionVersion = "grading-pdf-v6"
+const gradingPDFProjectionVersion = "grading-pdf-v13"
+const blankWorksheetPDFProjectionVersion = "blank-worksheet-pdf-v4"
+
+// 空白卷的打印副本保留题面字面横线，去除答案的重复标签；冻结原文及评估回执不改写。
+func renderBlankWorksheetPDF(entries []gradingFinalEntry, coverage k12.GradingFinalArtifactCoverageStatus) (string, bool) {
+	projected := append([]gradingFinalEntry(nil), entries...)
+	for i := range projected {
+		question := &projected[i].question
+		if question.Subject == "语文" && strings.TrimSpace(question.CanonicalMarkdown) == strings.TrimSpace(question.RawTranscription) {
+			question.CanonicalMarkdown = strings.NewReplacer(`\_`, `\_`, "_", `\_`).Replace(question.CanonicalMarkdown)
+		}
+		if projected[i].assessment == nil {
+			continue
+		}
+		assessment := *projected[i].assessment
+		var item PhotoGradeItem
+		if json.Unmarshal([]byte(assessment.ResultJSON), &item) != nil {
+			return "", false
+		}
+		if item.ParentGuide != nil {
+			if answer, labeled := splitExplicitAnswerLabel(item.ParentGuide.Answer); labeled && answer != "" {
+				item.ParentGuide.Answer = answer
+			}
+		}
+		raw, err := json.Marshal(item)
+		if err != nil {
+			return "", false
+		}
+		assessment.ResultJSON = string(raw)
+		projected[i].assessment = &assessment
+	}
+	return renderCanonicalFinalForTask(projected, PhotoTaskBlankWorksheet, coverage), true
+}
 
 // PDF只重排可核对的结构化终稿，独有讲法与来源不做语义删减。
 func renderGradingPDF(entries []gradingFinalEntry, coverage k12.GradingFinalArtifactCoverageStatus) (string, bool) {
@@ -64,6 +96,7 @@ func renderGradingPDF(entries []gradingFinalEntry, coverage k12.GradingFinalArti
 		out.WriteString("```{=typst}\n#hc-item[\n```\n\n")
 		fmt.Fprintf(&out, "### %s\n\n", label(d.entry))
 		if q := questionMarkdown[index]; q != "" {
+			q = stripPrintedInstructionNumber(d.entry.question, q)
 			// 数学定界符交由共享reader解析，题面中的代码定界符仍只作为文字。
 			out.WriteString(strings.ReplaceAll(q, "`", "\\`"))
 			out.WriteString("\n\n")
@@ -86,6 +119,8 @@ func renderGradingPDF(entries []gradingFinalEntry, coverage k12.GradingFinalArti
 		answer := ""
 		if item.ParentGuide != nil {
 			answer = strings.TrimSpace(item.ParentGuide.Answer)
+		} else if reference, _, ok := untrustedReferenceAnswer(item); ok {
+			answer = reference
 		}
 		fmt.Fprintf(&out, "**正确答案：** %s\n\n", answer)
 		if item.Status == PhotoWrong || item.Status == PhotoCorrectWithProcessIssue {
@@ -141,15 +176,32 @@ func renderGradingPDF(entries []gradingFinalEntry, coverage k12.GradingFinalArti
 			fmt.Fprintf(&out, "**怎么检查**：%s\n\n", strings.TrimSpace(g.CheckingMethod))
 		}
 	}
-	if len(guides) > 0 {
+	hasReference := false
+	for _, d := range details {
+		if d.item != nil {
+			_, _, ok := untrustedReferenceAnswer(*d.item)
+			hasReference = hasReference || ok
+		}
+	}
+	if len(guides) > 0 || hasReference {
 		out.WriteString("## 家长讲题\n\n")
 		for _, d := range details {
-			if d.item == nil || d.item.ParentGuide == nil {
+			if d.item == nil {
+				continue
+			}
+			if d.item.ParentGuide == nil {
+				if _, solution, ok := untrustedReferenceAnswer(*d.item); ok {
+					fmt.Fprintf(&out, "### %s 必要步骤\n\n%s\n\n", label(d.entry), solution)
+				}
 				continue
 			}
 			out.WriteString("```{=typst}\n#hc-item[\n```\n\n")
 			fmt.Fprintf(&out, "### %s 必要步骤\n\n", label(d.entry))
-			writeGuideList("", d.item.ParentGuide.FullSolutionSteps)
+			if len(d.item.ParentGuide.TeachingDiagrams) > 0 {
+				writeParentGuideStepsMarkdown(&out, "", *d.item.ParentGuide, true)
+			} else {
+				writeGuideList("", d.item.ParentGuide.FullSolutionSteps)
+			}
 			var unique [5]bool
 			for i := range unique {
 				unique[i] = !common[i]

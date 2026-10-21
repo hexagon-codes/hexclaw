@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -65,6 +66,43 @@ func weeklyRecoveryRead(t *testing.T, d *usecase.Deps, plan k12.WeeklyPracticePl
 	}
 	item := body["generation"].(map[string]any)["items"].([]any)[0].(map[string]any)
 	return raw, item
+}
+
+func TestWeeklyRecovery_ExplicitContinuationCompletesOriginalBoundedBatch(t *testing.T) {
+	d, plan := weeklyTextbookSourceFixture(t, weeklyLessonPage)
+	generated, solved := 0, 0
+	d.PracticeVariant = usecase.PracticeVariantGeneratorFunc(func(context.Context, string, string, string) (usecase.SolveResult, error) {
+		generated++
+		n := generated + 4
+		return usecase.SolveResult{Solution: fmt.Sprintf("## 问题\n计算：1/%d×%d\n## 解答\n约分后计算。\n## 答案\n4", n, n*4)}, nil
+	})
+	d.Solver = weeklyRecoverySolver{calls: &solved, unknown: true}
+	d.WeeklyCandidates = usecase.NewWeeklyPracticeCandidateSource(&d)
+	if _, _, err := d.PrepareWeeklyTextbookTrack(context.Background(), "mingming", plan.PlanID, plan.Revision, 5, "original"); err == nil || generated != 1 || solved != 1 {
+		t.Fatalf("expected first unknown result: generated=%d solved=%d err=%v", generated, solved, err)
+	}
+	raw, original := weeklyRecoveryRead(t, &d, plan)
+	sum := sha256.Sum256([]byte(raw))
+	input := usecase.WeeklyTextbookRecoveryRequest{SourceCommandKey: "original", PlanRevision: plan.Revision, CheckpointSHA256: hex.EncodeToString(sum[:]), ItemIndex: 0, IdempotencyKey: "finish-original-five", AcceptDuplicateExecution: true}
+	d.Solver = weeklyRecoverySolver{calls: &solved}
+	if _, _, err := d.RecoverWeeklyTextbookTrack(context.Background(), "mingming", plan.PlanID, input); err == nil || generated != 1 || solved != 1 {
+		t.Fatal("implicit continuation called model")
+	}
+	input.ContinueRemaining = true
+	result, replay, err := d.RecoverWeeklyTextbookTrack(context.Background(), "mingming", plan.PlanID, input)
+	if err != nil || replay || len(result.Tracks[1].Items) != 5 || generated != 5 || solved != 6 {
+		t.Fatalf("bounded continuation: err=%v replay=%v items=%d generated=%d solved=%d", err, replay, len(result.Tracks[1].Items), generated, solved)
+	}
+	_, after := weeklyRecoveryRead(t, &d, plan)
+	if !reflect.DeepEqual(original["generate"], after["generate"]) || !reflect.DeepEqual(original["solve"], after["solve"]) {
+		t.Fatal("original unknown receipt changed")
+	}
+	if pending, err := d.Records.WeeklyPlanHasPendingGeneration(context.Background(), "mingming", plan.PlanID); err != nil || pending {
+		t.Fatalf("completed recovery remained pending because of preserved history: pending=%v err=%v", pending, err)
+	}
+	if _, replay, err = d.RecoverWeeklyTextbookTrack(context.Background(), "mingming", plan.PlanID, input); err != nil || !replay || generated != 5 || solved != 6 {
+		t.Fatalf("replay called model: %v %v", replay, err)
+	}
 }
 
 func TestWeeklyRecovery_PreservedReceiptsReplayAndUnknownRestart(t *testing.T) {

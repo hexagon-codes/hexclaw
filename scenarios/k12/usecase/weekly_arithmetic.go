@@ -127,13 +127,14 @@ func (d Deps) CreateWeeklyArithmeticBatchWithItemCount(
 	agentName, planID string,
 	expectedRevision, itemCount int,
 	key string,
+	replaceCurrent ...bool,
 ) (k12.WeeklyArithmeticBatch, bool, error) {
 	agentName, planID, key = strings.TrimSpace(agentName), strings.TrimSpace(planID), strings.TrimSpace(key)
 	if agentName == "" || planID == "" || key == "" || expectedRevision < 1 ||
 		itemCount < 1 || itemCount > 20 {
 		return k12.WeeklyArithmeticBatch{}, false, fmt.Errorf("%w: invalid arithmetic create", ErrInvalidInput)
 	}
-	return d.createWeeklyArithmeticBatch(ctx, agentName, planID, expectedRevision, itemCount, key)
+	return d.createWeeklyArithmeticBatch(ctx, agentName, planID, expectedRevision, itemCount, key, replaceCurrent...)
 }
 
 func (d Deps) createWeeklyArithmeticBatch(
@@ -141,6 +142,7 @@ func (d Deps) createWeeklyArithmeticBatch(
 	agentName, planID string,
 	expectedRevision, itemCount int,
 	key string,
+	replaceCurrent ...bool,
 ) (k12.WeeklyArithmeticBatch, bool, error) {
 	progress, err := d.GetCurriculumProgress(ctx, agentName, "math")
 	if err != nil {
@@ -160,13 +162,14 @@ func (d Deps) createWeeklyArithmeticBatch(
 	}
 	checkpointJSON, _ := json.Marshal(checkpoint)
 	digest := digestValue(struct {
-		Agent, Plan string
-		Revision    int
-		ItemCount   int
-	}{agentName, planID, expectedRevision, itemCount})
+		Agent, Plan    string
+		Revision       int
+		ItemCount      int
+		ReplaceCurrent bool `json:",omitempty"`
+	}{agentName, planID, expectedRevision, itemCount, len(replaceCurrent) > 0 && replaceCurrent[0]})
 	batch, replay, err := d.Records.PrepareWeeklyArithmeticBatch(
 		ctx, agentName, planID, expectedRevision, key, digest,
-		string(checkpointJSON), d.now())
+		string(checkpointJSON), d.now(), replaceCurrent...)
 	if err != nil {
 		return batch, replay, err
 	}

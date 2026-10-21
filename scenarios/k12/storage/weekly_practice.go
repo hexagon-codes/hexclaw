@@ -223,9 +223,15 @@ func (s *Store) GetWeeklyPracticeSettings(ctx context.Context, agentName string)
 	if err := ensureAgentRegistered(ctx, s.db, agentName); err != nil {
 		return k12.WeeklyPracticeSettings{}, err
 	}
+	return weeklyPracticeSettingsVia(ctx, s.db, agentName)
+}
+
+func weeklyPracticeSettingsVia(ctx context.Context, query interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}, agentName string) (k12.WeeklyPracticeSettings, error) {
 	var out k12.WeeklyPracticeSettings
 	var due, textbook, arithmetic int
-	err := s.db.QueryRowContext(ctx, `SELECT agent_name,revision,timezone,
+	err := query.QueryRowContext(ctx, `SELECT agent_name,revision,timezone,
         due_review_enabled,textbook_consolidation_enabled,arithmetic_warmup_enabled,
         textbook_consolidation_tier,arithmetic_minutes,created_at,updated_at
         FROM k12_weekly_practice_settings WHERE agent_name=?`, agentName).Scan(
@@ -698,11 +704,11 @@ func (s *Store) WeeklyPlanHasPendingGeneration(ctx context.Context, agentName, p
 	var exists bool
 	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(
 	 SELECT 1 FROM k12_weekly_practice_plan_commands c WHERE c.agent_name=? AND c.plan_id=? AND
-	 (json_extract(c.response_json,'$._weekly_pending')=1 OR EXISTS(SELECT 1 FROM json_tree(c.response_json,'$._weekly_generation.generation.items') t WHERE t.key='status' AND t.value IN ('sent','outcome_unknown')))
+	 (json_extract(c.response_json,'$._weekly_pending')=1 OR EXISTS(SELECT 1 FROM json_each(c.response_json,'$._weekly_generation.generation.items') i WHERE json_extract(i.value,'$.candidate') IS NULL AND EXISTS(SELECT 1 FROM json_tree(i.value) t WHERE t.key='status' AND t.value IN ('sent','outcome_unknown'))))
 	 UNION ALL SELECT 1 FROM k12_weekly_track_refresh_commands c WHERE c.agent_name=? AND c.plan_id=? AND
-	 (json_extract(c.response_json,'$._weekly_pending')=1 OR EXISTS(SELECT 1 FROM json_tree(c.response_json,'$._weekly_generation.generation.items') t WHERE t.key='status' AND t.value IN ('sent','outcome_unknown')))
+	 (json_extract(c.response_json,'$._weekly_pending')=1 OR EXISTS(SELECT 1 FROM json_each(c.response_json,'$._weekly_generation.generation.items') i WHERE json_extract(i.value,'$.candidate') IS NULL AND EXISTS(SELECT 1 FROM json_tree(i.value) t WHERE t.key='status' AND t.value IN ('sent','outcome_unknown'))))
 	 UNION ALL SELECT 1 FROM k12_weekly_arithmetic_batches b WHERE b.agent_name=? AND b.plan_id=? AND
-	 (b.state='preparing' OR EXISTS(SELECT 1 FROM json_tree(CASE WHEN json_valid(b.generation_checkpoint_json) THEN b.generation_checkpoint_json ELSE '{}' END,'$.generation.items') t WHERE t.key='status' AND t.value IN ('sent','outcome_unknown')))
+	 (b.state='preparing' OR EXISTS(SELECT 1 FROM json_each(CASE WHEN json_valid(b.generation_checkpoint_json) THEN b.generation_checkpoint_json ELSE '{}' END,'$.generation.items') i WHERE json_extract(i.value,'$.candidate') IS NULL AND EXISTS(SELECT 1 FROM json_tree(i.value) t WHERE t.key='status' AND t.value IN ('sent','outcome_unknown'))))
 	)`, agentName, planID, agentName, planID, agentName, planID).Scan(&exists)
 	return exists, err
 }
@@ -823,6 +829,13 @@ func (s *Store) UpsertWeeklyPracticePlan(ctx context.Context, plan k12.WeeklyPra
 	current, getErr := getWeeklyPlanVia(ctx, tx, plan.AgentName,
 		`iso_week_year=? AND iso_week_number=? AND timezone=?`,
 		plan.ISOWeekYear, plan.ISOWeekNumber, plan.Timezone)
+	if getErr == nil && current.Status == k12.WeeklyPlanDraft && plan.Revision > 1 && current.Revision != plan.Revision {
+		for _, track := range plan.Tracks {
+			if track.PlanSection == k12.WeeklySectionTextbookConsolidation && track.Status == k12.WeeklyTrackReady && len(track.Items) > 0 {
+				return k12.WeeklyPracticePlan{}, false, records.ErrVersionConflict
+			}
+		}
+	}
 	if (getErr == records.ErrNotFound || (getErr == nil && current.Status == k12.WeeklyPlanDraft)) &&
 		(current.SourceDigest != requestDigest || weeklyCandidateResponsePending(responseJSON)) {
 		if err := validateWeeklyPracticeAssets(ctx, tx, plan.AgentName, plan.Tracks, plan.AnswerKeys); err != nil {

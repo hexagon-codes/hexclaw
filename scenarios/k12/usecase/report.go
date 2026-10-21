@@ -7,7 +7,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hexagon-codes/hexclaw/internal/mathtext"
+	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
+	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
 )
 
 const repeatedUnmasteredThreshold = 2
@@ -177,7 +180,7 @@ func (d Deps) InsightReport(ctx context.Context, agentName string) (InsightRepor
 	}
 	report.WeakTop3 = topWeakPoints(weakCount, report.MonthNewMistakes, 3)
 	report.ConsecutiveFailKPs = keysAtLeast(failCount, repeatedUnmasteredThreshold)
-	report.Suggestion = buildSuggestion(report)
+	report.Suggestion = buildSourceBackedSuggestion(report, source)
 	return report, nil
 }
 
@@ -233,12 +236,64 @@ func buildSuggestion(report InsightReport) string {
 		return "本月还没有错题记录，继续保持。"
 	}
 	if len(report.ConsecutiveFailKPs) > 0 {
-		return fmt.Sprintf("「%s」连续受挫，建议本周集中复习这个知识点。", report.ConsecutiveFailKPs[0])
+		return fmt.Sprintf("「%s」有多条尚未掌握的错题记录，建议优先核对这些题的作答。", report.ConsecutiveFailKPs[0])
 	}
 	if len(report.WeakTop3) > 0 {
 		return fmt.Sprintf("本月薄弱点是「%s」，可优先出这个知识点的错题卷。", report.WeakTop3[0].KnowledgePoint)
 	}
 	return "本月复习进展不错，保持节奏。"
+}
+
+func buildSourceBackedSuggestion(report InsightReport, source k12storage.InsightSourceSnapshot) string {
+	base := buildSuggestion(report)
+	mistakes := append([]*records.AgentRecord(nil), source.Mistakes...)
+	sort.Slice(mistakes, func(i, j int) bool {
+		if mistakes[i].CreatedAt != mistakes[j].CreatedAt {
+			return mistakes[i].CreatedAt > mistakes[j].CreatedAt
+		}
+		return mistakes[i].RecordID < mistakes[j].RecordID
+	})
+	for _, record := range mistakes {
+		if record.Status == k12.StatusArchived || record.Status == k12.StatusMastered {
+			continue
+		}
+		fields, err := k12.ParseMistakeFields(record.Fields)
+		if err != nil || strings.TrimSpace(fields.ObservedStudentAnswer) == "" || strings.TrimSpace(fields.CanonicalAnswer) == "" {
+			continue
+		}
+		if len(report.WeakTop3) > 0 && (fields.KnowledgePoint != report.WeakTop3[0].KnowledgePoint || fields.Subject != report.WeakTop3[0].Subject && !(fields.Subject == "" && report.WeakTop3[0].Subject == "数学")) {
+			continue
+		}
+		var out strings.Builder
+		_, _, sourceAnswer := SplitRetryPresentation(fields.CanonicalAnswer)
+		if strings.TrimSpace(sourceAnswer) == "" {
+			sourceAnswer = fields.CanonicalAnswer
+		}
+		fmt.Fprintf(&out, "%s 当前观察：题目“%s”留存的作答是“%s”。家长讲法：先请孩子说明题目条件和每一步的含义，再对照本题参考答案：%s。", base, mathtext.PlainMarkdownText(fields.Question), mathtext.PlainMarkdownText(fields.ObservedStudentAnswer), mathtext.PlainMarkdownText(sourceAnswer))
+		for _, set := range source.PracticeSets {
+			if set.Status == k12.PracticeStatusCancelled || set.Status == k12.PracticeStatusClosed {
+				continue
+			}
+			practice, err := k12.ParsePracticeSetFields(set.Fields)
+			if err != nil {
+				continue
+			}
+			for _, item := range practice.Items {
+				if item.SourceProblemID != record.RecordID || !k12.PracticeItemPublishable(item) || item.ResultCorrect != nil || item.GenerationJobID == "" || item.GenerationStatus != k12.PracticeItemGenerationReady {
+					continue
+				}
+				// 建议正文沿既有纯文本区域展示；保留核对题完整参考，避免泄漏 Markdown 控制字符。
+				fmt.Fprintf(&out, " 核对题：使用已有已验证变式“%s”；家长参考答案：%s。本次通过依据：新作答的答案、单位或题目要求的要点正确，并能说明关键步骤的依据。作答条件仍以真实记录为准，一次做对不代表稳定掌握。", mathtext.PlainMarkdownText(item.QuestionMarkdown), mathtext.PlainMarkdownText(item.ExpectedAnswerMarkdown))
+				return out.String()
+			}
+		}
+		out.WriteString(" 当前没有可用于本次核对的待答已验证变式，先让孩子解释原题各步骤；这只能核对本题理解，不能据此认定独立掌握。")
+		return out.String()
+	}
+	if report.Trend.Total > 0 {
+		return base + " 当前记录没有足够的清楚作答和标准解答来形成逐步讲法，先核对原题与作答，不据此推断具体误区。"
+	}
+	return base
 }
 
 func startOfInsightMonth(unixSeconds int64) int64 {

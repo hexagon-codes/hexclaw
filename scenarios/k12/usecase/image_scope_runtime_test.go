@@ -58,3 +58,21 @@ func TestImageScopeExplicitActionAndLegacyPolicy(t *testing.T) {
 		t.Fatal("legacy recognition policy changed")
 	}
 }
+
+func TestImageScopeLatePrintedClippingTriggersLookupWithoutInventingGap(t *testing.T) {
+	q := RecognizedQuestion{RawTranscription: "可见题干，我也要结\n校园，仿写一句话：", OCRSignals: []string{"印刷文字在右侧被裁切"}, ImageSourceContext: &k12.RecognitionImageSourceContextV1{Version: k12.RecognitionImageScopeVersionV1, ScopeDigest: "unchanged-plan", TargetIDs: []string{"selected-target"}}}
+	ensureUnlocalizedImageSourceGap(&q)
+	if len(q.ImageSourceContext.Recoveries) != 1 || q.ImageSourceContext.Recoveries[0].Gap.Kind != "unlocalized" || q.ImageSourceContext.Recoveries[0].Gap.After != "" || q.ImageSourceContext.ScopeDigest != "unchanged-plan" {
+		t.Fatal("late source risk was lost or a gap location was invented")
+	}
+	ensureUnlocalizedImageSourceGap(&q)
+	if len(q.ImageSourceContext.Recoveries) != 1 {
+		t.Fatal("source lookup was duplicated")
+	}
+	q.ImageSourceContext.Recoveries = nil
+	q.OCRSignals = []string{"手写作答模糊看不清"}
+	ensureUnlocalizedImageSourceGap(&q)
+	if len(q.ImageSourceContext.Recoveries) != 0 {
+		t.Fatal("student handwriting triggered reference-answer recovery")
+	}
+}

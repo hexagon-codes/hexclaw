@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -716,6 +717,27 @@ func recognizedQuestionRequiresGuardianConfirmationForInitialReadMode(question R
 	if taskIntent == PhotoTaskBlankWorksheet && question.ImageSourceContext != nil && question.ImageSourceContext.Version == k12.RecognitionImageScopeVersionV1 && question.ImageSourceContext.Action == "solve" {
 		// 仅评估副本移除与本次解题无关的作答争议；题干证据、缺损与原始持久事实不变。
 		question = cloneRecognizedQuestions([]RecognizedQuestion{question})[0]
+		if receipt := question.ImageSourceContext.PrintedQuestionReceipt; receipt != nil && receipt.PlanDigest == question.ImageSourceContext.ScopeDigest && slices.Contains(question.ImageSourceContext.TargetIDs, receipt.CandidateID) && receipt.Evidence.RawTranscription == question.RawTranscription && receipt.Evidence.Confidence >= .90 && receipt.Evidence.Confidence <= 1 && receipt.AuthorizationID != "" && receipt.SettlementDigest != "" {
+			// 只有已持久核验的完整印刷题干用于解题副本；原题观察和笔迹风险不改。
+			question.EvidenceTranscriptions = nil
+			question.OCRSignals = nil
+			for _, signal := range receipt.Evidence.OCRSignals {
+				switch strings.ToLower(strings.TrimSpace(signal)) {
+				case "erasure", "erasure_detected", "unclear_handwriting", "source_gap_handwriting":
+				default:
+					question.OCRSignals = append(question.OCRSignals, signal)
+				}
+			}
+			confidence := receipt.Evidence.Confidence
+			question.RecognitionConfidence = &confidence
+			filtered := question.ConfirmationReasons[:0]
+			for _, reason := range question.ConfirmationReasons {
+				if reason != OCRRiskEvidenceConflict && reason != OCRRiskLowConfidence {
+					filtered = append(filtered, reason)
+				}
+			}
+			question.ConfirmationReasons = filtered
+		}
 		hadAnswerEvidence := len(question.AnswerEvidenceTranscriptions) > 0
 		question.AnswerEvidenceTranscriptions = nil
 		question.AnswerRawTranscription, question.AnswerCanonicalMarkdown, question.StudentAnswer = "", "", ""
@@ -1190,6 +1212,7 @@ func (o *GradingOrchestrator) runRecognize(ctx context.Context, run *gradingRun,
 	cancelProvider()
 	unregisterProvider()
 	if err != nil {
+		slog.Error("K12 recognition failed", "job_id", jobID, "invocation_id", invocation.InvocationID, "error", err)
 		if errors.Is(err, ErrRecognitionPhysicalCallObservedInFlight) {
 			// Another worker owns the exact same durable child and may already
 			// be inside the Provider request. This worker is a passive observer:
@@ -1248,7 +1271,7 @@ func (o *GradingOrchestrator) runRecognize(ctx context.Context, run *gradingRun,
 				)
 			// 子调用账本优先于聚合错误；局部未发送不能覆盖其他子项的未知结果。
 			physicalUnknown = unresolved || inspectErr != nil
-			beforePhysicalSend = inspectErr == nil && !physicalStarted
+			beforePhysicalSend = inspectErr == nil && (!physicalStarted || beforePhysicalSend && !unresolved)
 		}
 		protocolInvalid := errors.Is(
 			err,

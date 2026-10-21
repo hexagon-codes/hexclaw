@@ -216,6 +216,47 @@ func TestWeeklyPhysicalReceipts_ReinterpretationAndReplay(t *testing.T) {
 	}
 }
 
+func TestWeeklyPhysicalReceipts_PartialBatchReinterpretationDoesNotGenerate(t *testing.T) {
+	ctx := context.Background()
+	d, plan := weeklyTextbookSourceFixture(t, weeklyLessonPage)
+	generated, calls := 0, 0
+	d.PracticeVariant = usecase.PracticeVariantGeneratorFunc(func(context.Context, string, string, string) (usecase.SolveResult, error) {
+		generated++
+		n := generated + 4
+		return usecase.SolveResult{Solution: fmt.Sprintf("## 问题\n计算：1/%d×%d\n## 解答\n约分后计算。\n## 答案\n4", n, n*4)}, nil
+	})
+	d.Solver = weeklyReceiptSolver{calls: &calls}
+	d.WeeklyCandidates = usecase.NewWeeklyPracticeCandidateSource(&d)
+	if _, _, err := d.PrepareWeeklyTextbookTrack(ctx, "mingming", plan.PlanID, plan.Revision, 5, "original"); err == nil || generated != 1 || calls != 2 {
+		t.Fatalf("expected first weak result: generated=%d calls=%d err=%v", generated, calls, err)
+	}
+	raw, original := weeklyRecoveryRead(t, &d, plan)
+	sum := sha256.Sum256([]byte(raw))
+	req := usecase.WeeklyTextbookReinterpretationRequest{SourceCommandKey: "original", PlanRevision: plan.Revision, CheckpointSHA256: hex.EncodeToString(sum[:]), ItemIndex: 0, IdempotencyKey: "parse-partial"}
+	d.Solver = weeklyReceiptSolver{calls: &calls, fixed: true}
+	result, replay, err := d.ReinterpretWeeklyTextbookTrack(ctx, "mingming", plan.PlanID, req)
+	if err != nil || replay || result.Status != k12.WeeklyPlanDraft || generated != 1 || calls != 2 {
+		t.Fatalf("reinterpretation generated unfinished questions: status=%s replay=%v generated=%d calls=%d err=%v", result.Status, replay, generated, calls, err)
+	}
+	afterRaw, after := weeklyRecoveryRead(t, &d, plan)
+	oldSolve, newSolve := original["solve"].(map[string]any), after["solve"].(map[string]any)
+	for _, key := range []string{"result", "physical_calls", "status", "input_digest"} {
+		if !reflect.DeepEqual(oldSolve[key], newSolve[key]) {
+			t.Fatalf("original %s rewritten", key)
+		}
+	}
+	if _, replay, err = d.ReinterpretWeeklyTextbookTrack(ctx, "mingming", plan.PlanID, req); err != nil || !replay || generated != 1 || calls != 2 {
+		t.Fatalf("partial replay called model: replay=%v err=%v", replay, err)
+	}
+	if finalRaw, _ := weeklyRecoveryRead(t, &d, plan); finalRaw != afterRaw {
+		t.Fatal("partial replay changed persisted receipts")
+	}
+	result, _, err = d.PrepareWeeklyTextbookTrack(ctx, "mingming", plan.PlanID, plan.Revision, 5, "original")
+	if err != nil || result.Tracks[1].Status != k12.WeeklyTrackReady || len(result.Tracks[1].Items) != 5 || generated != 5 || calls != 10 {
+		t.Fatalf("original command did not finish only remaining four: generated=%d calls=%d err=%v", generated, calls, err)
+	}
+}
+
 func TestWeeklyPhysicalReceipts_KnownFailureRetryPreservesSuccess(t *testing.T) {
 	s, d, asset, _ := practiceAssetFixture(t)
 	ctx := context.Background()

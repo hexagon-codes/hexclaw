@@ -97,7 +97,7 @@ func (r *PandocRenderer) validatePDFLayout(ctx context.Context, pdf, markdown st
 			if strings.ContainsRune("（「『《“‘", runes[0]) {
 				leftTolerance = max(tolerance, box.Height*0.6)
 			}
-			if strings.ContainsRune("），。！？；：」』》”’", runes[len(runes)-1]) {
+			if strings.ContainsRune("），。、！？；：」』》”’", runes[len(runes)-1]) {
 				rightTolerance = max(tolerance, box.Height*0.6)
 			}
 			if box.Left < left-leftTolerance || box.Left+box.Width > right+rightTolerance || box.Top < top-tolerance || box.Top+box.Height > bottom+tolerance {

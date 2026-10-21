@@ -120,27 +120,33 @@ type profilePublisher interface {
 	PublishProfile(string, k12.ProfileBundleResult) error
 }
 
+type profileUpdatePublisher interface {
+	PublishProfileUpdate(string, func() (k12.ProfileBundleResult, error)) error
+}
+
+// GetProfileBundleSnapshot 读取当前编辑基线及原命令回执，不发布内存状态或写库。
+func (d Deps) GetProfileBundleSnapshot(ctx context.Context, agentName, commandKey string) (k12.ProfileBundleSnapshot, error) {
+	if d.Records == nil || strings.TrimSpace(agentName) == "" {
+		return k12.ProfileBundleSnapshot{}, fmt.Errorf("%w: profile store unavailable", ErrInvalidInput)
+	}
+	return d.Records.GetProfileBundleSnapshot(ctx, strings.TrimSpace(agentName), strings.TrimSpace(commandKey))
+}
+
 func (d Deps) GetProfileWithRevision(ctx context.Context, agentName string) (k12.WeeklyProfile, error) {
 	agentName = strings.TrimSpace(agentName)
+	if d.Records != nil {
+		return d.Records.GetProfileState(ctx, agentName)
+	}
 	if d.Profiles != nil {
 		p, err := d.Profiles.GetProfile(ctx, agentName)
 		if err != nil {
 			return k12.WeeklyProfile{}, err
 		}
-		revision := 0
-		if d.Records != nil {
-			if state, stateErr := d.Records.GetProfileState(ctx, agentName); stateErr == nil {
-				revision = state.Revision
-			}
-		}
 		return k12.WeeklyProfile{
 			ChildName: p.ChildName, GradeTerm: p.GradeTerm,
 			SubjectTextbooks: p.SubjectTextbooks,
-			TextbookEdition:  p.TextbookEdition, Revision: revision,
+			TextbookEdition:  p.TextbookEdition,
 		}, nil
-	}
-	if d.Records != nil {
-		return d.Records.GetProfileState(ctx, agentName)
 	}
 	return k12.WeeklyProfile{}, fmt.Errorf("%w: profile store unavailable", ErrInvalidInput)
 }
@@ -289,6 +295,53 @@ func (d Deps) UpdateProfileBundle(ctx context.Context, req UpdateProfileBundleRe
 	if err != nil {
 		return k12.ProfileBundleResult{}, err
 	}
+	if !req.ClearCurriculumProgress && !req.AutoCurriculumProgress && req.CurriculumProgress.EvidenceSource != k12.CurriculumSourceAIEstimated {
+		req.CurriculumProgress.TextbookManifestID = strings.TrimSpace(req.CurriculumProgress.TextbookManifestID)
+	}
+	requestIdentity := struct {
+		OwnerID                  string
+		AgentName                string
+		ExpectedProfileRevision  int
+		ExpectedProgressRevision int
+		ExpectedSettingsRevision int
+		AgentConfig              *k12.ProfileBundleAgentConfig
+		Profile                  k12.ChildProfile
+		Progress                 CurriculumProgressInput
+		Settings                 WeeklyPracticeSettingsInput
+	}{
+		req.OwnerID, req.AgentName, req.ExpectedProfileRevision, req.ExpectedProgressRevision,
+		req.ExpectedSettingsRevision, req.AgentConfig, req.Profile, req.CurriculumProgress,
+		req.WeeklyPracticeSettings,
+	}
+	var digest string
+	if req.ClearCurriculumProgress {
+		digest = digestValue(struct {
+			OwnerID                  string
+			AgentName                string
+			ExpectedProfileRevision  int
+			ExpectedProgressRevision int
+			ExpectedSettingsRevision int
+			AgentConfig              *k12.ProfileBundleAgentConfig
+			Profile                  k12.ChildProfile
+			Progress                 *CurriculumProgressInput
+			Settings                 WeeklyPracticeSettingsInput
+		}{
+			req.OwnerID, req.AgentName, req.ExpectedProfileRevision,
+			req.ExpectedProgressRevision, req.ExpectedSettingsRevision,
+			req.AgentConfig, req.Profile, nil, req.WeeklyPracticeSettings,
+		})
+	} else {
+		// 非空请求沿用既有摘要字节，避免升级破坏历史幂等命令。
+		digest = digestValue(requestIdentity)
+	}
+	if prior, err := d.Records.GetProfileBundleCommand(ctx, req.AgentName, req.IdempotencyKey, digest); err != nil {
+		return k12.ProfileBundleResult{}, err
+	} else if prior != nil {
+		prior.Replayed = true
+		return d.commitAndPublishProfileBundle(ctx, req.AgentName, func() (k12.ProfileBundleResult, bool, error) {
+			return *prior, true, nil
+		})
+	}
 	var progress *k12.CurriculumProgress
 	preserveProgress := false
 	if !req.ClearCurriculumProgress && (req.AutoCurriculumProgress || req.CurriculumProgress.EvidenceSource == k12.CurriculumSourceAIEstimated) {
@@ -335,69 +388,70 @@ func (d Deps) UpdateProfileBundle(ctx context.Context, req UpdateProfileBundleRe
 		progress = &resolved
 		progress.GradeTerm = req.Profile.GradeTerm
 	}
-	requestIdentity := struct {
-		OwnerID                  string
-		AgentName                string
-		ExpectedProfileRevision  int
-		ExpectedProgressRevision int
-		ExpectedSettingsRevision int
-		AgentConfig              *k12.ProfileBundleAgentConfig
-		Profile                  k12.ChildProfile
-		Progress                 CurriculumProgressInput
-		Settings                 WeeklyPracticeSettingsInput
-	}{
-		req.OwnerID, req.AgentName, req.ExpectedProfileRevision, req.ExpectedProgressRevision,
-		req.ExpectedSettingsRevision, req.AgentConfig, req.Profile, req.CurriculumProgress,
-		req.WeeklyPracticeSettings,
-	}
-	var digest string
-	if req.ClearCurriculumProgress {
-		digest = digestValue(struct {
-			OwnerID                  string
-			AgentName                string
-			ExpectedProfileRevision  int
-			ExpectedProgressRevision int
-			ExpectedSettingsRevision int
-			AgentConfig              *k12.ProfileBundleAgentConfig
-			Profile                  k12.ChildProfile
-			Progress                 *CurriculumProgressInput
-			Settings                 WeeklyPracticeSettingsInput
-		}{
-			req.OwnerID, req.AgentName, req.ExpectedProfileRevision,
-			req.ExpectedProgressRevision, req.ExpectedSettingsRevision,
-			req.AgentConfig, req.Profile, nil, req.WeeklyPracticeSettings,
-		})
-	} else {
-		// 非空请求沿用既有摘要字节，避免升级破坏历史幂等命令。
-		digest = digestValue(requestIdentity)
-	}
 	// 摘要沿用原有归一化语义，事务校验使用原始输入以准确保留旧长字段。
 	req.Profile.ChildName = rawChildName
 	if req.AgentConfig != nil {
 		req.AgentConfig.DisplayName, req.AgentConfig.Description = rawDisplayName, rawDescription
 	}
-	result, _, err := d.Records.UpdateProfileBundle(ctx, k12storage.ProfileBundleMutation{
-		OwnerID: req.OwnerID, AgentName: req.AgentName, IdempotencyKey: req.IdempotencyKey,
-		RequestDigest: digest, ExpectedProfileRevision: req.ExpectedProfileRevision,
-		ExpectedProgressRevision: req.ExpectedProgressRevision,
-		ExpectedSettingsRevision: req.ExpectedSettingsRevision,
-		AgentConfig:              req.AgentConfig,
-		Profile:                  req.Profile,
-		PreserveProgress:         preserveProgress,
-		ProgressSubject:          "math",
-		Progress:                 progress,
-		Settings:                 settings,
-		At:                       d.now(),
+	return d.commitAndPublishProfileBundle(ctx, req.AgentName, func() (k12.ProfileBundleResult, bool, error) {
+		return d.Records.UpdateProfileBundle(ctx, k12storage.ProfileBundleMutation{
+			OwnerID: req.OwnerID, AgentName: req.AgentName, IdempotencyKey: req.IdempotencyKey,
+			RequestDigest: digest, ExpectedProfileRevision: req.ExpectedProfileRevision,
+			ExpectedProgressRevision: req.ExpectedProgressRevision,
+			ExpectedSettingsRevision: req.ExpectedSettingsRevision,
+			AgentConfig:              req.AgentConfig,
+			Profile:                  req.Profile,
+			PreserveProgress:         preserveProgress,
+			ProgressSubject:          "math",
+			Progress:                 progress,
+			Settings:                 settings,
+			At:                       d.now(),
+		})
 	})
+}
+
+// 正常提交与重放都在现有路由临界区内完成短事务和发布，原回执不随当前配置变化。
+func (d Deps) commitAndPublishProfileBundle(ctx context.Context, agentName string,
+	commit func() (k12.ProfileBundleResult, bool, error),
+) (k12.ProfileBundleResult, error) {
+	var receipt k12.ProfileBundleResult
+	update := func() (k12.ProfileBundleResult, error) {
+		var replayed bool
+		var err error
+		receipt, replayed, err = commit()
+		if err != nil {
+			return k12.ProfileBundleResult{}, err
+		}
+		if !replayed {
+			return receipt, nil
+		}
+		snapshot, err := d.Records.GetProfileBundleSnapshot(ctx, agentName, "")
+		if err != nil {
+			return k12.ProfileBundleResult{}, err
+		}
+		current := receipt
+		current.AgentConfig = &snapshot.AgentConfig
+		current.Profile = k12.ProfileBundleProfile{ChildName: snapshot.Profile.ChildName, GradeTerm: snapshot.Profile.GradeTerm,
+			SubjectTextbooks: snapshot.Profile.SubjectTextbooks, TextbookEdition: snapshot.Profile.TextbookEdition}
+		current.CurriculumProgress, current.WeeklyPracticeSettings = snapshot.CurriculumProgress, snapshot.WeeklyPracticeSettings
+		return current, nil
+	}
+	if publisher, ok := d.Profiles.(profileUpdatePublisher); ok {
+		if err := publisher.PublishProfileUpdate(agentName, update); err != nil {
+			return k12.ProfileBundleResult{}, err
+		}
+		return receipt, nil
+	}
+	current, err := update()
 	if err != nil {
 		return k12.ProfileBundleResult{}, err
 	}
 	if publisher, ok := d.Profiles.(profilePublisher); ok {
-		if err := publisher.PublishProfile(req.AgentName, result); err != nil {
+		if err := publisher.PublishProfile(agentName, current); err != nil {
 			return k12.ProfileBundleResult{}, err
 		}
 	}
-	return result, nil
+	return receipt, nil
 }
 
 // ResolveInitialCurriculumProgress 创建前复用编辑的目录进度解析，不发布或预登记实例。
@@ -566,6 +620,20 @@ func (d Deps) EnsureWeeklyPracticePlan(ctx context.Context,
 	}
 	freezer, production := d.WeeklyCandidates.(weeklyCandidateRequestFreezer)
 	planID := "wplan-" + shortDigest(fmt.Sprintf("%s\x00%d\x00%d\x00%s", req.AgentName, window.Year, window.Week, settings.Timezone))
+	current, currentErr := d.Records.GetWeeklyPracticePlan(ctx, req.AgentName, planID)
+	if currentErr != nil && !errors.Is(currentErr, records.ErrNotFound) {
+		return k12.WeeklyPracticePlan{}, false, currentErr
+	}
+	if currentErr == nil && current.Status == k12.WeeklyPlanDraft {
+		pending, err := d.Records.WeeklyPlanHasPendingGeneration(ctx, req.AgentName, planID)
+		if err != nil {
+			return k12.WeeklyPracticePlan{}, false, err
+		}
+		if pending {
+			projected, err := d.projectWeeklyArithmetic(ctx, current)
+			return projected, true, err
+		}
+	}
 	if production && settings.TextbookConsolidationEnabled && strings.TrimSpace(d.TextbookOwnerID) != "" {
 		exists, lookupErr := d.Records.HasWeeklyPracticePlanCommand(ctx, req.AgentName, req.IdempotencyKey)
 		if lookupErr != nil {
@@ -611,6 +679,14 @@ func (d Deps) EnsureWeeklyPracticePlan(ctx context.Context,
 			Targets  []WeeklyPracticeTarget
 		}{syncRequest.GradeTerm, syncRequest.ProfileRevision, syncRequest.Targets})
 	}
+	preservedTrack, preservedKeys, preservedCheckpoint, err := d.completedWeeklyTextbookProjection(ctx, current)
+	if err != nil {
+		return k12.WeeklyPracticePlan{}, false, err
+	}
+	manualDigest := ""
+	if preservedCheckpoint != "" {
+		manualDigest = shortDigest(preservedCheckpoint)
+	}
 	sourceDigest := digestValue(struct {
 		Agent            string
 		Year             int
@@ -620,9 +696,10 @@ func (d Deps) EnsureWeeklyPracticePlan(ctx context.Context,
 		ProgressRevision int
 		Due              k12.WeeklyPracticeTrack
 		Targets          string
+		ManualTextbook   string `json:",omitempty"`
 	}{
 		req.AgentName, window.Year, window.Week, settings.Timezone, settings.Revision,
-		progressLifecycleRevision, dueTrack, targetDigest,
+		progressLifecycleRevision, dueTrack, targetDigest, manualDigest,
 	})
 	if stored, found, replayErr := d.Records.ReplayWeeklyPracticePlan(ctx,
 		req.AgentName, req.IdempotencyKey, sourceDigest, window.Year, window.Week,
@@ -641,10 +718,13 @@ func (d Deps) EnsureWeeklyPracticePlan(ctx context.Context,
 		Status: k12.WeeklyPlanDraft, SettingsRevision: settings.Revision, CurriculumProgressRevision: progressRev,
 		CreatedAt: at, UpdatedAt: at, SourceDigest: sourceDigest, AnswerKeys: dueKeys,
 	}
+	if preservedCheckpoint != "" {
+		plan.Revision, plan.CreatedAt = current.Revision, current.CreatedAt
+	}
 	tracks := []k12.WeeklyPracticeTrack{dueTrack}
 	answerKeys := dueKeys
 	elapsed := len(dueTrack.Items) * 60
-	if production && settings.TextbookConsolidationEnabled && progress != nil && targetErr == nil {
+	if production && settings.TextbookConsolidationEnabled && progress != nil && targetErr == nil && preservedCheckpoint == "" {
 		if current, getErr := d.Records.GetWeeklyPracticePlan(ctx, req.AgentName, plan.PlanID); getErr == nil {
 			plan.Revision, plan.CreatedAt = current.Revision, current.CreatedAt
 		} else if !errors.Is(getErr, records.ErrNotFound) {
@@ -657,8 +737,11 @@ func (d Deps) EnsureWeeklyPracticePlan(ctx context.Context,
 			return k12.WeeklyPracticePlan{}, false, err
 		}
 	}
-	syncTrack, syncKeys, _ := d.weeklySupplementRequest(ctx, syncRequest, settings.TextbookConsolidationEnabled, max(0, 600-elapsed))
-	if targetErr != nil {
+	syncTrack, syncKeys := preservedTrack, preservedKeys
+	if preservedCheckpoint == "" {
+		syncTrack, syncKeys, _ = d.weeklySupplementRequest(ctx, syncRequest, settings.TextbookConsolidationEnabled, max(0, 600-elapsed))
+	}
+	if targetErr != nil && preservedCheckpoint == "" {
 		syncTrack = k12.WeeklyPracticeTrack{PlanSection: k12.WeeklySectionTextbookConsolidation, Status: k12.WeeklyTrackFailed, FailureMessage: targetErr.Error(), Items: []k12.WeeklyPracticeItem{}}
 		syncKeys = map[string]string{}
 	}
@@ -680,9 +763,11 @@ func (d Deps) EnsureWeeklyPracticePlan(ctx context.Context,
 	if err != nil {
 		return k12.WeeklyPracticePlan{}, false, err
 	}
-	if settings.TextbookConsolidationEnabled && progress != nil {
+	if preservedCheckpoint != "" || (settings.TextbookConsolidationEnabled && progress != nil) {
 		checkpoint, _ := json.Marshal(syncRequest)
-		if syncRequest.Checkpoint.Kind != "" {
+		if preservedCheckpoint != "" {
+			checkpoint = []byte(preservedCheckpoint)
+		} else if syncRequest.Checkpoint.Kind != "" {
 			if saved, saveErr := d.Records.GetWeeklyCandidateCheckpoint(ctx, syncRequest.Checkpoint); saveErr == nil {
 				checkpoint = []byte(saved)
 			} else {
@@ -801,7 +886,7 @@ func (d Deps) weeklySupplementTrack(ctx context.Context, agent, section string,
 }
 
 func (d Deps) weeklySupplementRequest(ctx context.Context, request WeeklyPracticeCandidateRequest, enabled bool, budget int) (k12.WeeklyPracticeTrack, map[string]string, int) {
-	section, maxItems, progress := request.PlanSection, request.MaxItems, &request.Progress
+	section, progress := request.PlanSection, &request.Progress
 	track := k12.WeeklyPracticeTrack{PlanSection: section, Items: []k12.WeeklyPracticeItem{}}
 	keys := map[string]string{}
 	if !enabled {
@@ -824,6 +909,14 @@ func (d Deps) weeklySupplementRequest(ctx context.Context, request WeeklyPractic
 		track.FailureMessage = "weekly candidate generation failed: " + err.Error()
 		return track, keys, 0
 	}
+	return projectWeeklySupplementCandidates(request, candidates, budget)
+}
+
+// projectWeeklySupplementCandidates 只从既有候选生成题面与答案投影，不调用生成器。
+func projectWeeklySupplementCandidates(request WeeklyPracticeCandidateRequest, candidates []WeeklyPracticeCandidate, budget int) (k12.WeeklyPracticeTrack, map[string]string, int) {
+	section, maxItems, progress := request.PlanSection, request.MaxItems, &request.Progress
+	track := k12.WeeklyPracticeTrack{PlanSection: section, Items: []k12.WeeklyPracticeItem{}}
+	keys := map[string]string{}
 	elapsed := 0
 	for _, candidate := range candidates {
 		generationMethod := strings.TrimSpace(candidate.GenerationMethod)
@@ -1091,6 +1184,10 @@ func (d Deps) PrepareWeeklyPracticeTrackOutput(ctx context.Context, agent, planI
 	if plan.Revision != expectedRevision {
 		return PrintableArtifactView{}, false, records.ErrVersionConflict
 	}
+	plan, err = d.projectWeeklyArithmetic(ctx, plan)
+	if err != nil {
+		return PrintableArtifactView{}, false, err
+	}
 	for _, track := range plan.Tracks {
 		if string(track.PlanSection) != section {
 			continue
@@ -1117,13 +1214,32 @@ func (d Deps) PrepareWeeklyPracticeTrackOutput(ctx context.Context, agent, planI
 				paper.WriteString("答：\n\n---\n\n---\n\n")
 			}
 		}
+		sourceRef := "weekly-track:" + planID + ":" + section + ":" + identity
+		renderMarkdown := ""
+		if section == "textbook_consolidation" {
+			sourceRef += ":" + weeklyConsolidationWorkbookRenderVersion
+			renderMarkdown = weeklyConsolidationWorkbookMarkdown(title, items)
+		}
 		return d.PreparePrintableArtifact(ctx, PreparePrintableArtifactRequest{
 			AgentName: agent, SourceKind: k12.PrintSourcePracticeQuestion,
-			SourceRef: "weekly-track:" + planID + ":" + section + ":" + identity,
-			Title:     title, CanonicalMarkdown: paper.String(),
+			SourceRef: sourceRef, Title: title, CanonicalMarkdown: paper.String(),
+			RenderMarkdown: renderMarkdown,
 		})
 	}
 	return PrintableArtifactView{}, false, records.ErrNotFound
+}
+
+const weeklyConsolidationWorkbookRenderVersion = "weekly-consolidation-workbook-v2"
+
+// 规范原题保持不变，排版标记仅进入首次冻结的PDF副本。
+func weeklyConsolidationWorkbookMarkdown(title string, items []k12.PracticeItem) string {
+	var paper strings.Builder
+	fmt.Fprintf(&paper, "::: {.hc-weekly-consolidation-title}\n%s\n:::\n\n", title)
+	for i, item := range items {
+		fmt.Fprintf(&paper, "::: {.hc-weekly-consolidation-question number=\"%d\"}\n%s\n:::\n\n",
+			i+1, item.QuestionMarkdown)
+	}
+	return paper.String()
 }
 
 func weeklySnapshotMarkdown(snapshot k12.WeeklyPracticeSnapshot) string {

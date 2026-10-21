@@ -2,6 +2,7 @@ package usecase
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"regexp"
@@ -378,7 +379,7 @@ func photoAnnotationCoverageWarning(result PhotoGradeResult) string {
 	annotated := 0
 	if result.AnnotatedImage != nil && len(result.AnnotatedImage.Data) > 0 {
 		for _, mark := range trustedPhotoMarks(result.Items) {
-			if mark.Status != PhotoAnswerUnclear {
+			if mark.Status != PhotoAnswerUnclear && mark.Status != PhotoUntrusted {
 				annotated++
 			}
 		}
@@ -440,6 +441,7 @@ func (d Deps) assessPhotoItem(
 		return item, nil
 	}
 	item.ParentGuide = &blankResult.Guide
+	item = d.attachPhotoTeachingDiagram(ctx, req.AgentName, q, item)
 	item.Status = PhotoBlankSolved
 	if independentReference {
 		item.Status = PhotoAnswerUnclear
@@ -471,22 +473,22 @@ func photoItemWithPracticeReference(req PhotoGradeRequest, q RecognizedQuestion)
 
 // photoItemGradeRequest 只替换批改输入副本，OCR 题目、作答与持久身份保持不变。
 func photoItemGradeRequest(req PhotoGradeRequest, q RecognizedQuestion) GradeRequest {
+	problem, sourceProblem := photoQuestionProblemTexts(q)
+	observed := q.AnswerRawTranscription
+	if observed == "" {
+		observed = q.StudentAnswer
+	}
 	input := GradeRequest{
+		ObservedAnswerState: q.AnswerState, ObservedStudentAnswer: observed,
 		AgentName: req.AgentName, Subject: firstNonEmpty(q.Subject, req.Subject), Grade: req.Grade,
-		SourceSession: req.SourceSession, Problem: q.Question, StudentAnswer: q.StudentAnswer,
+		SourceSession: req.SourceSession, Problem: problem, SourceProblem: sourceProblem, StudentAnswer: q.StudentAnswer,
 		KnowledgePoints: photoGradeKnowledgePoints(q), PracticeReference: req.practiceReference,
 		SolveOutputVersion: req.SolveOutputVersion, ParentTeachingContract: req.ParentTeachingContract,
 		ParentTeachingSkillSnapshot: req.ParentTeachingSkillSnapshot,
 	}
-	if q.ImageSourceContext != nil {
-		for _, material := range q.ImageSourceContext.Materials {
-			input.Problem += "\n\nRead-only source material (do not answer as another question):\n" + material.Text
-		}
-		for _, recovery := range q.ImageSourceContext.Recoveries {
-			if recovery.State == "verified" && recovery.AdoptedText != "" {
-				input.Problem += "\n\nVerified source fragment for the declared " + recovery.Gap.Kind + " gap (use only this fragment; do not infer other missing content or student handwriting):\n" + recovery.Gap.Before + recovery.AdoptedText + recovery.Gap.After
-			}
-		}
+	if q.ImageSourceContext != nil && (len(q.ImageSourceContext.Materials) > 0 || len(q.ImageSourceContext.Recoveries) > 0) {
+		current, _ := json.Marshal(q.Question)
+		input.Problem += "\n\nCurrent question and answer requirements: " + string(current) + ". The read-only materials supply the shared conditions and any explicitly printed common main problem. When this item specifies a method, relationship or multiplier for that common problem, complete both its own intermediate answers and the common requested final quantity, including the capacity calculation line; do not stop at a ratio conversion. Do not answer other numbered items. Answer every requested blank, relationship, multiplier, intermediate quantity and final expression. Put ALL required reference answers in the Answer section, with the conditions for alternative valid fillings; a final scalar alone is insufficient when the current question asks for other answers. Preserve the printed equation template's sides, operations and fixed coefficients when filling blanks. A rearranged equation can explain a relationship but cannot replace the filling of a different printed template. These completeness requirements apply to the reference solution; a student may give any one valid alternative rather than enumerate all alternatives."
 	}
 	// 可读投影可能把上下分式写成斜杠；只在完整作答一致时保留原分式作为计算输入，
 	// 避免将除以分数误解为连续除法。识读、展示和持久身份仍使用原字段。
@@ -498,6 +500,7 @@ func photoItemGradeRequest(req PhotoGradeRequest, q RecognizedQuestion) GradeReq
 	if req.practiceReference != nil {
 		input.Subject = req.practiceReference.Subject
 		input.Problem = req.practiceReference.QuestionMarkdown
+		input.SourceProblem = req.practiceReference.QuestionMarkdown
 	} else if q.ProblemKind == ProblemKindSubproblem {
 		if input.Subject == "数学" || strings.EqualFold(input.Subject, "math") {
 			if scoped, ok := elementarymath.BuildFractionSlotProblemFromSources(q.Question, q.RawTranscription, currentAssessmentCanonical(q)); ok {
@@ -520,6 +523,26 @@ func photoItemGradeRequest(req PhotoGradeRequest, q RecognizedQuestion) GradeReq
 		}
 	}
 	return input
+}
+
+// 同一只读来源投影供求解与教学图消费，避免局部题面丢掉冻结的公共条件。
+func photoQuestionProblemTexts(q RecognizedQuestion) (problem, sourceProblem string) {
+	problem = q.Question
+	sourceProblem = q.Question
+	if q.ImageSourceContext == nil {
+		return problem, sourceProblem
+	}
+	for _, material := range q.ImageSourceContext.Materials {
+		problem += "\n\nRead-only source material (do not answer as another question):\n" + material.Text
+		sourceProblem += "\n\n" + material.Text
+	}
+	for _, recovery := range q.ImageSourceContext.Recoveries {
+		if recovery.State == "verified" && recovery.AdoptedText != "" {
+			problem += "\n\nVerified source fragment for the declared " + recovery.Gap.Kind + " gap (use only this fragment; do not infer other missing content or student handwriting):\n" + recovery.Gap.Before + recovery.AdoptedText + recovery.Gap.After
+			sourceProblem += "\n\n" + recovery.Gap.Before + recovery.AdoptedText + recovery.Gap.After
+		}
+	}
+	return problem, sourceProblem
 }
 
 func classifyPhotoMode(questions []RecognizedQuestion) PhotoMode {
@@ -665,7 +688,7 @@ func trustedPhotoMarks(items []PhotoGradeItem) []PhotoAnnotation {
 func photoAnnotations(items []PhotoGradeItem) []PhotoAnnotation {
 	marks := make([]PhotoAnnotation, 0, len(items))
 	for i, item := range items {
-		if item.Status != PhotoCorrect && item.Status != PhotoCorrectWithProcessIssue && item.Status != PhotoWrong && item.Status != PhotoAnswerUnclear {
+		if item.Status != PhotoCorrect && item.Status != PhotoCorrectWithProcessIssue && item.Status != PhotoWrong && item.Status != PhotoAnswerUnclear && item.Status != PhotoUntrusted {
 			continue
 		}
 		mark := PhotoAnnotation{
@@ -675,7 +698,7 @@ func photoAnnotations(items []PhotoGradeItem) []PhotoAnnotation {
 		}
 		if anchor := item.Recognized.BBox; anchor != nil {
 			mark.BBox = *anchor
-		} else if item.Status == PhotoAnswerUnclear && item.Recognized.SourceRegion != nil &&
+		} else if (item.Status == PhotoAnswerUnclear || item.Status == PhotoUntrusted) && item.Recognized.SourceRegion != nil &&
 			item.Recognized.SourceWidth > 0 && item.Recognized.SourceHeight > 0 {
 			// 无判分问号可定位到已知题目区域；绝不把该区域当作正确/错误答案框。
 			region := item.Recognized.SourceRegion
@@ -977,6 +1000,11 @@ func photoGradeMarkdown(result PhotoGradeResult) string {
 			case PhotoUntrusted:
 				fmt.Fprintf(&b, "- %s 证据不足：%s\n",
 					photoQuestionReference(item.Recognized), photoInline(item.Warning, 240))
+				if _, solution, ok := untrustedReferenceAnswer(item); ok {
+					b.WriteString("\n")
+					writeCanonicalGradingVisibleAnswers(&b, item)
+					b.WriteString(solution + "\n\n")
+				}
 			case PhotoFailed:
 				fmt.Fprintf(&b, "- %s 处理失败：%s\n",
 					photoQuestionReference(item.Recognized), photoInline(item.Warning, 240))
@@ -1019,7 +1047,7 @@ func writeParentTeachingGuideMarkdown(b *strings.Builder, guide ParentTeachingGu
 }
 
 func writeParentTeachingGuideDetailsMarkdown(b *strings.Builder, guide ParentTeachingGuide) {
-	writeParentGuideListMarkdown(b, "**必要步骤：**", guide.FullSolutionSteps)
+	writeParentGuideStepsMarkdown(b, "**必要步骤：**", guide, false)
 	fmt.Fprintf(b, "**本年级方法：** %s\n\n", photoInline(guide.GradeLevelMethod, 1200))
 	writeParentGuideListMarkdown(b, "**易错点：**", guide.LikelyMistakes)
 	writeParentGuideListMarkdown(b, "**家长怎么讲：**", guide.ParentTeachingSequence)

@@ -5,7 +5,7 @@ teaching_methods: [{"name":"PRIMM 教学法","display_names":{"zh-CN":"PRIMM 教
 display_name: 信息科技辅导老师
 description: 辅导小学信息科技——图形化编程（顺序/循环/分支）、算法步骤、规则题与程序运行结果，用 PRIMM 法带孩子读程序改程序，给家长完整参考与讲法，运行结果以沙箱为准。用于家长辅导孩子编程作业、Scratch 作品、信息科技题时。
 author: hexclaw
-version: "1.0.1"
+version: "1.0.2"
 schema_version: 1
 min_engine_version: "0.5.0"
 license: Apache-2.0

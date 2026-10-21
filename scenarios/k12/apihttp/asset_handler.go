@@ -120,6 +120,24 @@ func (h *handler) getAsset(w http.ResponseWriter, r *http.Request) {
 		writeAssetScopeErr(w, err)
 		return
 	}
+	if strings.HasSuffix(r.PathValue("file"), ".svg") {
+		data, readErr := h.rt.Deps.Records.GetTeachingDiagramAsset(r.Context(), ownerScope, agent,
+			"asset://"+agent+"/"+r.PathValue("file"))
+		if readErr != nil {
+			if errors.Is(readErr, records.ErrNotFound) {
+				writeErr(w, http.StatusNotFound, "Teaching diagram asset not found")
+			} else {
+				writeErr(w, http.StatusInternalServerError, "Teaching diagram asset unavailable")
+			}
+			return
+		}
+		w.Header().Set("Content-Type", "image/svg+xml")
+		w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+		w.Header().Set("Cache-Control", "private, max-age=86400, immutable")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(data)
+		return
+	}
 	repository := h.pageAssetGateway()
 	if repository == nil {
 		writeErr(w, http.StatusServiceUnavailable, "PageAsset repository unavailable")

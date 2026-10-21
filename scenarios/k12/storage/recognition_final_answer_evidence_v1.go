@@ -12,6 +12,9 @@ import (
 
 // 新证据只来自本次成功裁决；已有终稿按不可变结算回放，不再次依赖原响应正文。
 func validateRecognitionFinalAnswerSettlementV1(ctx context.Context, q dbQueryer, parent k12.ModelInvocation, planID string, in k12.RecognitionLayoutAdjudicationSettlementV2, requireContent bool) error {
+	if err := validateRecognitionPrintedQuestionSettlementV1(ctx, q, parent, planID, in, requireContent); err != nil {
+		return err
+	}
 	if in.FinalAnswerEvidence == nil {
 		return nil
 	}
@@ -63,7 +66,11 @@ func validateRecognitionFinalAnswerSettlementV1(ctx context.Context, q dbQueryer
 	if !raw.Valid || physicalInvocationResultDigest(raw.String) != in.SourcePhysicalResultDigest {
 		return fmt.Errorf("%w: final-answer physical response drifted", ErrModelPhysicalInvocationConflict)
 	}
-	response, err := k12.ParseRecognitionFinalAnswerResponseV1(raw.String, *target.AdjudicationRegion)
+	sourcePayload, err := k12.RecognitionLayoutAdjudicationSourceResponseV1(raw.String, plan, *target)
+	if err != nil {
+		return err
+	}
+	response, err := k12.ParseRecognitionFinalAnswerResponseV1(sourcePayload, *target.AdjudicationRegion)
 	if err != nil || response.Evidence == nil || !reflect.DeepEqual(response.Evidence, in.FinalAnswerEvidence) {
 		return fmt.Errorf("%w: final-answer evidence is detached from its response", ErrModelPhysicalInvocationConflict)
 	}

@@ -24,12 +24,21 @@ func TestFinalAnswerObservationCannotGradeUncertainWorkingWithoutReceipt(t *test
 				t.Fatal(err)
 			}
 			if !proof {
-				if item.Status != PhotoAnswerUnclear || grader.calls != 0 || item.Grade.Outcome.WrongStep != "" || item.ParentGuide != nil {
+				if item.Status != PhotoAnswerUnclear || grader.calls != 0 || item.Grade.Outcome.WrongStep != "" || item.ParentGuide == nil || item.ParentGuide.Answer != "1/6" || len(item.ParentGuide.FullSolutionSteps) == 0 || item.Grade.Outcome.FinalAnswerCorrect != nil {
 					t.Fatalf("uncertain intermediate step was graded: %+v", item)
 				}
 				calls, err := o.deps.Records.ListGradingItemInvocations(t.Context(), req.AgentName, job.Record.RecordID)
-				if err != nil || len(calls) != 0 {
+				if err != nil {
 					t.Fatalf("unproven working invoked grading: %v", err)
+				}
+				for _, call := range calls {
+					if call.Operation == k12.GradingItemOperationGrade {
+						t.Fatal("reference answer invoked student grading")
+					}
+				}
+				assessments, err := o.deps.Records.ListGradingAssessmentItems(t.Context(), req.AgentName, job.Record.RecordID)
+				if err != nil || len(assessments) != 1 || assessments[0].ProjectionCreated || assessments[0].ProjectionRecordID != "" || assessments[0].GradeInvocationID != "" {
+					t.Fatalf("reference answer changed learning facts: %+v %v", assessments, err)
 				}
 			} else if item.Status != PhotoWrong || item.Warning != finalAnswerOnlyAssessmentWarning || grader.calls != 1 || item.Grade.Outcome.WrongStep != "" {
 				t.Fatalf("final-only grading fabricated an intermediate error: %+v", item)

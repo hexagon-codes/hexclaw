@@ -17,6 +17,22 @@ import (
 
 func compactInitialReadStorageFixtureV1(t *testing.T, raw string, executionPolicies ...string) initialReadFixtureV1 {
 	t.Helper()
+	var scopeInput *k12.RecognitionImageScopeInputV1
+	var scope *k12.RecognitionImageScopeV1
+	if len(executionPolicies) > 1 && executionPolicies[1] == "upright_printed" {
+		scopeInput = &k12.RecognitionImageScopeInputV1{Version: k12.RecognitionImageScopeVersionV1, Action: "solve", SourceReviewPolicy: k12.RecognitionImageSourceUprightReviewPolicyV1, SourceComparisonPolicy: k12.RecognitionImageSourceComparisonPolicyV1}
+		scope = &k12.RecognitionImageScopeV1{Version: k12.RecognitionImageScopeVersionV1, Source: "explicit", SelectedOrders: []int{1, 2}, Basis: "current request", Dependencies: []k12.RecognitionImageScopeDependencyV1{}, Excluded: []k12.RecognitionImageScopeExclusionV1{}}
+		var envelope map[string]json.RawMessage
+		if json.Unmarshal([]byte(raw), &envelope) != nil {
+			t.Fatal("invalid source fixture")
+		}
+		envelope["scope"], _ = json.Marshal(scope)
+		encoded, err := json.Marshal(envelope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw = string(encoded)
+	}
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "compact-initial.db")
 	store, db := newPhysicalLedgerFileStore(t, path)
@@ -37,7 +53,7 @@ func compactInitialReadStorageFixtureV1(t *testing.T, raw string, executionPolic
 		{ManifestRef: "manifest_0002", ManifestOrder: 2, SourceNumberPath: []string{"2"}, DisplayLabel: "2.", SourceSectionPath: []string{"一"}, SourceSectionLabel: "一、解决问题", Region: k12.SourcePixelRegion{X: 0, Y: 20, Width: 20, Height: 10}},
 	}
 	digest := recognitionLayoutRuntimeTestDigest(raw)
-	plan, err := k12.BuildRecognitionLayoutPlanV2(k12.RecognitionLayoutPlanInputV2{InitialReadMode: k12.RecognitionLayoutManifestWithContentV1, EnableSourceAdjudication: true, RecognitionFormat: k12.RecognitionLayoutCompactV4, PagePNG: page, Manifest: k12.RecognitionLayoutManifestSuccessV2{InvocationID: "whole-compact", ResultDigest: digest}, Targets: targets})
+	plan, err := k12.BuildRecognitionLayoutPlanV2(k12.RecognitionLayoutPlanInputV2{ScopeInput: scopeInput, Scope: scope, InitialReadMode: k12.RecognitionLayoutManifestWithContentV1, EnableSourceAdjudication: true, RecognitionFormat: k12.RecognitionLayoutCompactV4, PagePNG: page, Manifest: k12.RecognitionLayoutManifestSuccessV2{InvocationID: "whole-compact", ResultDigest: digest}, Targets: targets})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -259,6 +259,10 @@ func TestGradingPDFCompoundSourceProjection(t *testing.T) {
 
 // 通过正式来源和最终化构造临时真实库；模型与投递边界不参与本组领域验证。
 func gradingPDFProjectionFixture(t *testing.T, guides []ParentTeachingGuide, sources ...[]RecognizedQuestion) (Deps, k12.GradingFinalArtifact) {
+	return gradingPDFProjectionFixtureForIntent(t, guides, "", sources...)
+}
+
+func gradingPDFProjectionFixtureForIntent(t *testing.T, guides []ParentTeachingGuide, intent string, sources ...[]RecognizedQuestion) (Deps, k12.GradingFinalArtifact) {
 	t.Helper()
 	t.Setenv("HEXCLAW_ASSET_ROOT", t.TempDir())
 	ctx := context.Background()
@@ -272,6 +276,7 @@ func gradingPDFProjectionFixture(t *testing.T, guides []ParentTeachingGuide, sou
 	}
 	coordinator := &ImageTaskCoordinator{Records: store, PageAssets: repo, Classifier: &imageTaskClassifierStub{result: ImageTaskClassification{Intent: k12.ImageTaskIntentCompletedHomework, IntentEvidence: []string{"source content"}, Confidence: 1}}, ResolveRoute: imageTaskRouteForTest}
 	input := testCreateImageTaskInput()
+	input.MessageIntent = intent
 	input.OwnerScope, input.SourceRef = "guardian-pdf-guide", "pdf-guide-source"
 	input.SourceAssetRefs = []string{asset.Metadata.PageAssetID}
 	view, _, err := coordinator.Create(ctx, input)

@@ -2,6 +2,7 @@ package usecase
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -9,6 +10,53 @@ import (
 	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 )
+
+// completedWeeklyTextbookProjection 由完整回执恢复投影，不进入模型或改写旧批次。
+func (d Deps) completedWeeklyTextbookProjection(ctx context.Context, plan k12.WeeklyPracticePlan) (k12.WeeklyPracticeTrack, map[string]string, string, error) {
+	var empty k12.WeeklyPracticeTrack
+	if plan.Status != k12.WeeklyPlanDraft {
+		return empty, nil, "", nil
+	}
+	raw, err := d.Records.GetCompletedWeeklyTextbookCheckpoint(ctx, plan.AgentName, plan.PlanID, plan.Revision)
+	if errors.Is(err, records.ErrNotFound) {
+		return empty, nil, "", nil
+	}
+	if err != nil {
+		return empty, nil, "", err
+	}
+	var request WeeklyPracticeCandidateRequest
+	if err := json.Unmarshal([]byte(raw), &request); err != nil {
+		return empty, nil, "", err
+	}
+	if request.AgentName != plan.AgentName || request.Checkpoint.PlanID != plan.PlanID || request.Checkpoint.Kind != "refresh" ||
+		request.PlanSection != k12.WeeklySectionTextbookConsolidation || request.Generation == nil || request.MaxItems < 1 || len(request.Generation.Items) != request.MaxItems {
+		return empty, nil, "", nil
+	}
+	if err := d.validateWeeklyRecoverySource(ctx, request); err != nil {
+		if errors.Is(err, records.ErrVersionConflict) || errors.Is(err, records.ErrNotFound) {
+			return empty, nil, "", nil
+		}
+		return empty, nil, "", err
+	}
+	candidates := make([]WeeklyPracticeCandidate, 0, request.MaxItems)
+	for _, step := range request.Generation.Items {
+		if step.Candidate == nil || strings.TrimSpace(step.Candidate.ExpectedAnswer) == "" || len(step.Candidate.EvidenceRefs) == 0 {
+			return empty, nil, "", nil
+		}
+		candidates = append(candidates, *step.Candidate)
+	}
+	progress, err := d.GetCurriculumProgress(ctx, plan.AgentName, "math")
+	if err != nil || progress == nil {
+		return empty, nil, "", err
+	}
+	// 旧错误验证页码仅在回执中保留，展示采用当前真实进度的验证事实。
+	request.Progress = *progress
+	track, keys, _ := projectWeeklySupplementCandidates(request, candidates, 900)
+	if track.Status != k12.WeeklyTrackReady || len(track.Items) != request.MaxItems {
+		return empty, nil, "", nil
+	}
+	return track, keys, raw, nil
+}
 
 func (d Deps) projectWeeklyManualRecommendations(
 	ctx context.Context,
@@ -88,6 +136,16 @@ func (d Deps) projectWeeklyManualRecommendations(
 			}
 			if track.ArithmeticBatch == nil {
 				continue
+			}
+			// 未完成批次恢复原冻结请求，数量不由上次成功偏好或失败后的零产出推断。
+			if track.ArithmeticBatch.State == k12.WeeklyArithmeticPreparing ||
+				track.ArithmeticBatch.State == k12.WeeklyArithmeticFailedRetryable ||
+				track.ArithmeticBatch.State == k12.WeeklyArithmeticFailedTerminal {
+				var frozen struct{ MaxItems int }
+				if json.Unmarshal([]byte(track.ArithmeticBatch.GenerationCheckpoint), &frozen) == nil &&
+					frozen.MaxItems >= 1 && frozen.MaxItems <= 20 {
+					arithmeticCount = frozen.MaxItems
+				}
 			}
 			switch track.ArithmeticBatch.State {
 			case k12.WeeklyArithmeticPreparing:

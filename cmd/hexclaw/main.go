@@ -2036,11 +2036,13 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 		if fileMem != nil {
 			k12Opts = append(k12Opts, k12assembly.WithInsights(k12engineadapter.NewInsightsAdapter(fileMem)))
 		}
-		if kb := eng.KnowledgeBase(); kb != nil {
-			k12Opts = append(k12Opts, k12assembly.WithGroundingFactory(func(recordStore *k12storage.Store) k12usecase.Grounding {
+		k12Opts = append(k12Opts, k12assembly.WithGroundingFactory(func(recordStore *k12storage.Store) k12usecase.Grounding {
+			if kb := eng.KnowledgeBase(); kb != nil {
 				return k12engineadapter.NewGroundingAdapter(kb, recordStore).WithImageSourcePageLookup(eng.ReadReferenceSourcePages)
-			}))
-		}
+			}
+			// 关闭知识库不等于关闭网页工具；不建立教材读路径，仍按工具设置核验网页。
+			return k12engineadapter.NewGroundingAdapter(nil).WithImageSourcePageLookup(eng.ReadReferenceSourcePages)
+		}))
 		// 建档/改档：接 agent 路由 + 持久化（读改写 agents.metadata）。
 		k12Opts = append(k12Opts,
 			k12assembly.WithProfiles(k12engineadapter.NewProfileAdapter(agentRouter, agentStore)),
@@ -2150,6 +2152,7 @@ Set source only when the material explicitly names a work, title, or another rel
 			defer ccancel()
 			temp := 0.4
 			systemPrompt := "你是中小学出题老师。据给定学科/年级/知识点直接出一道同类变式练习题并给简要解答，" +
+				"当前任务若包含诊断上下文，题目本身必须区分该假设，保留来源的数量关系与单位，不得只换数字或退成裸算式。" +
 				"直接给最终题目与答案、不要展开长篇推理。输出必须严格使用 GitHub Markdown，固定为 `## 问题`、`## 解答`、`## 答案` 三段；" +
 				"解答步骤必须用 `1. `、`2. ` 有序列表，最终答案用粗体，不要使用 Markdown 代码围栏，也不要用普通的“问题：/解答：/答案：”标签行。" +
 				"数学一律用 Unicode 符号（×÷√≤≥、分数 a/b、平方 x²、下标 H₂O、单位 cm³），" +
@@ -2443,6 +2446,7 @@ Set source only when the material explicitly names a work, title, or another rel
 		if k12rt, k12err := k12assembly.WireInto(ctx, scenarioReg, store.DB(), k12Solve, k12Opts...); k12err != nil {
 			logger.Error("装配 K12 场景包失败", "error", k12err)
 		} else {
+			eng.SetAgentDefaultSkillSelector(k12engineadapter.SelectDefaultTeachingContext)
 			if kbSemanticRuntime != nil {
 				kbSemanticRuntime.Repository.SetDocumentIngestLifecycleObserver(
 					k12engineadapter.NewTextbookManifestLifecycleAdapter(

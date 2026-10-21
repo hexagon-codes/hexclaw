@@ -105,7 +105,7 @@ func (d Deps) finalReplyIntent(ctx context.Context, artifact k12.GradingFinalArt
 	if err != nil {
 		return "", err
 	}
-	return dispatch.TaskIntent, nil
+	return EffectiveImageTaskHomeworkIntent(dispatch), nil
 }
 
 func (d Deps) finalReplyFullMessage(ctx context.Context, artifact k12.GradingFinalArtifact, intent k12.ImageTaskIntent) (DeliveryMessage, error) {

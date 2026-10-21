@@ -123,3 +123,25 @@ func TestImageScopeVerifiedExerciseGapKeepsOriginalEvidence(t *testing.T) {
 		t.Fatal("verified instruction cleared an unrelated source risk")
 	}
 }
+
+func TestImageScopeAdjudicationMatchesBlankFormattingButKeepsWords(t *testing.T) {
+	a := RecognizedQuestion{Subject: "语文", RawTranscription: "弯弯的内金水河像一条玉带。这句话运用了________的修辞手法。", AnswerState: AnswerStateBlank}
+	b := a
+	b.RawTranscription = "弯弯的内金水河像一条玉带。这句话运用了______的修辞手法。"
+	if same, _ := RecognitionSourceReadingsMatchForInitialReadMode(a, b, k12.RecognitionLayoutManifestWithContentV1); same {
+		t.Fatal("legacy matching changed")
+	}
+	a.ImageSourceContext = &k12.RecognitionImageSourceContextV1{Version: k12.RecognitionImageScopeVersionV1, Action: "solve"}
+	b.ImageSourceContext = a.ImageSourceContext
+	if same, _ := RecognitionSourceReadingsMatchForInitialReadMode(a, b, k12.RecognitionLayoutManifestWithContentV1); same {
+		t.Fatal("an old scoped task was reinterpreted")
+	}
+	a.ImageSourceContext.SourceComparisonPolicy = k12.RecognitionImageSourceComparisonPolicyV1
+	if same, _ := RecognitionSourceReadingsMatchForInitialReadMode(a, b, k12.RecognitionLayoutManifestWithContentV1); !same {
+		t.Fatal("independent correct reading was rejected for blank length")
+	}
+	b.RawTranscription = strings.ReplaceAll(b.RawTranscription, "内金水河", "金水河")
+	if same, _ := RecognitionSourceReadingsMatchForInitialReadMode(a, b, k12.RecognitionLayoutManifestWithContentV1); same {
+		t.Fatal("actual source word difference was ignored")
+	}
+}

@@ -30,6 +30,7 @@ func TestSolveAdapterGenerateParentTeachingGuideUsesExactProblemAndVerifiedSolut
 	guide, err := adapter.GenerateParentTeachingGuide(context.Background(), usecase.ParentTeachingGuideRequest{
 		Subject: "数学", Grade: "五年级上", Problem: "4.5×2=",
 		StudentAnswer: "8", KnowledgePoints: []string{"小数乘法"},
+		ObservedAnswerState: usecase.AnswerStatePresent, ObservedStudentAnswer: "8",
 		WrongStep: "45×2 误算为 80", ErrorCause: "乘法事实错误",
 		VerifiedSolution: "verified: 9",
 	})
@@ -41,6 +42,7 @@ func TestSolveAdapterGenerateParentTeachingGuideUsesExactProblemAndVerifiedSolut
 	}
 	for _, exact := range []string{
 		"4.5×2=", "verified: 9", "小数乘法", `"student_answer":"8"`,
+		`"answer_state":"present"`, `"observed_student_answer":"8"`,
 		`"wrong_step":"45×2 误算为 80"`, `"error_cause":"乘法事实错误"`,
 	} {
 		if !strings.Contains(gotPrompt, exact) {

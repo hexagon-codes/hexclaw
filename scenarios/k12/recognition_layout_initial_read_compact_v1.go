@@ -38,10 +38,24 @@ func canonicalRecognitionLayoutInitialReadCompactV1(envelope map[string]json.Raw
 		if json.Unmarshal(raw, &conditions[index]) == nil {
 			continue
 		}
-		// 同一正文的单字段包装可无损展开；其他形态仍拒绝，原响应不改写。
+		// 共享条件可附带来源区域注记；规范转写只取正文，原响应完整保留。
+		// 注记不用于裁剪或证明覆盖，题目区域与归属仍由后续独立校验处理。
 		var wrapped map[string]json.RawMessage
-		if json.Unmarshal(raw, &wrapped) != nil || len(wrapped) != 1 || json.Unmarshal(wrapped["text"], &conditions[index]) != nil {
+		if json.Unmarshal(raw, &wrapped) != nil || json.Unmarshal(wrapped["text"], &conditions[index]) != nil {
 			return fail("shared condition is invalid")
+		}
+		regionJSON, hasRegion := wrapped["region"]
+		if len(wrapped) != 1 && !(len(wrapped) == 2 && hasRegion) {
+			return fail("shared condition fields are invalid")
+		}
+		if hasRegion {
+			region, regionErr := initialReadCompactRegionV1(regionJSON)
+			if regionErr != nil {
+				regionErr = json.Unmarshal(regionJSON, &region)
+			}
+			if regionErr != nil || region.X < 0 || region.Y < 0 || region.Width <= 0 || region.Height <= 0 {
+				return fail("shared condition region is invalid")
+			}
 		}
 	}
 	sections := make([]recognitionInitialReadCompactSectionV1, len(sectionEntries))

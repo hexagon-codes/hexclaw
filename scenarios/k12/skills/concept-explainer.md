@@ -5,7 +5,7 @@ teaching_methods: [{"name":"费曼学习法","display_names":{"zh-CN":"费曼学
 display_name: 知识点讲解
 description: 费曼式把一个知识点讲透——类比、拆解、典型例题、常见误区，按学段不超纲。用于孩子/家长要"讲清楚某概念是什么、怎么理解"（区别于辅导具体作业题）时。
 author: hexclaw
-version: "1.2.1"
+version: "1.2.2"
 schema_version: 1
 min_engine_version: "0.5.0"
 license: Apache-2.0

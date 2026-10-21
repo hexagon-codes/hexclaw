@@ -43,7 +43,7 @@ func (d Deps) validateWeeklyRecoverySource(ctx context.Context, request WeeklyPr
 	if err != nil {
 		return err
 	}
-	if profile.Revision != request.ProfileRevision || progress == nil || digestValue(*progress) != digestValue(request.Progress) {
+	if profile.Revision != request.ProfileRevision || progress == nil || !weeklyRecoveryProgressMatches(request.Progress, *progress) {
 		return fmt.Errorf("%w: weekly recovery source changed", records.ErrVersionConflict)
 	}
 	pages, err := d.Records.ListWeeklyTextbookPages(ctx, k12storage.TextbookScope{OwnerID: d.TextbookOwnerID, AgentName: request.AgentName, Subject: "math"}, *progress)
@@ -60,6 +60,23 @@ func (d Deps) validateWeeklyRecoverySource(ctx context.Context, request WeeklyPr
 		}
 	}
 	return nil
+}
+
+// weeklyRecoveryProgressMatches 兼容旧估算范围被误存为验证页码的快照，不修改原回执。
+func weeklyRecoveryProgressMatches(frozen, current k12.CurriculumProgress) bool {
+	if digestValue(frozen) == digestValue(current) {
+		return true
+	}
+	if frozen.EvidenceSource != "ai_estimated" || current.EvidenceSource != "ai_estimated" ||
+		frozen.PageVerificationStatus != "not_requested" || current.PageVerificationStatus != "not_requested" ||
+		frozen.RequestedPageFrom != nil || frozen.RequestedPageTo != nil ||
+		current.RequestedPageFrom != nil || current.RequestedPageTo != nil ||
+		current.VerifiedPageFrom != nil || current.VerifiedPageTo != nil ||
+		frozen.VerifiedPageFrom == nil || frozen.VerifiedPageTo == nil {
+		return false
+	}
+	frozen.VerifiedPageFrom, frozen.VerifiedPageTo = nil, nil
+	return digestValue(frozen) == digestValue(current)
 }
 
 // RecoverWeeklyTextbookTrack 仅追加明确授权的原题验算，成功生成及未知回执不重置。

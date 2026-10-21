@@ -161,8 +161,9 @@ type PracticeItem struct {
 	NormalizedContentHash  string               `json:"normalized_content_hash,omitempty"` // 服务端规范化题目 Hash；目标练习集内唯一
 	// ResultCorrect 复批逐题结论（§3.8 第 3-4 条）：nil=尚无结论；部分回传允许多次复批，
 	// 每次覆盖已给结论的题、幂等；全部入卷题有结论后卷才转 graded。联动来源错题在用例层执行。
-	ResultCorrect  *bool  `json:"result_correct,omitempty"`
-	ResultEvidence string `json:"result_evidence,omitempty"` // system_verified / human_confirmed
+	ResultCorrect    *bool              `json:"result_correct,omitempty"`
+	ResultEvidence   string             `json:"result_evidence,omitempty"` // system_verified / human_confirmed
+	LearningEvidence []LearningEvidence `json:"learning_evidence,omitempty"`
 }
 
 const (
@@ -182,6 +183,7 @@ const (
 // 不得覆盖旧 asset 与显式题目映射；ReturnID 同时是命令幂等键。自动模式冻结候选集合，
 // ItemIDs 由同一复批任务投影实际覆盖；Regrade* 在同一聚合内通过 CAS 推进。
 type PracticeReturnAsset struct {
+	LearningEvidence  []LearningEvidence   `json:"learning_evidence,omitempty"`
 	ReturnID          string               `json:"return_id"`
 	AssetID           string               `json:"asset_id"`
 	ItemIDs           []string             `json:"item_ids"`

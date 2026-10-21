@@ -12,6 +12,59 @@ import (
 
 func float64Ptr(v float64) *float64 { return &v }
 
+func TestScopedSharedMaterialPrefixDoesNotConflictWithLocalQuestion(t *testing.T) {
+	const shared = "一个硬盘，已用空间是总容量的2/5，正好用了4.8 TB。"
+	const child = "根据总容量是已用空间的（　）。列式：________"
+	for _, tc := range []struct {
+		name     string
+		change   func(*RecognizedQuestion)
+		conflict bool
+	}{
+		{name: "same frozen prefix"},
+		{name: "empty work line layout", change: func(q *RecognizedQuestion) {
+			q.RawTranscription = strings.TrimSuffix(child, "________")
+			q.EvidenceTranscriptions[1] = q.RawTranscription
+		}},
+		{name: "work line contains missing math", conflict: true, change: func(q *RecognizedQuestion) {
+			q.EvidenceTranscriptions[0] = strings.Replace(q.EvidenceTranscriptions[0], "列式：________", "列式：4.8÷________", 1)
+		}},
+		{name: "changed parent value", conflict: true, change: func(q *RecognizedQuestion) {
+			q.EvidenceTranscriptions[0] = strings.Replace(q.EvidenceTranscriptions[0], "4.8", "4.9", 1)
+		}},
+		{name: "changed child meaning", conflict: true, change: func(q *RecognizedQuestion) {
+			q.EvidenceTranscriptions[1] = strings.Replace(child, "总容量是已用空间", "已用空间是总容量", 1)
+		}},
+		{name: "literal multiplication is not emphasis", conflict: true, change: func(q *RecognizedQuestion) {
+			q.RawTranscription = "计算234的值。"
+			q.EvidenceTranscriptions = []string{"计算2*3*4的值。", q.RawTranscription}
+		}},
+		{name: "separate numeric tokens cannot merge", conflict: true, change: func(q *RecognizedQuestion) {
+			q.RawTranscription = "从234中选数。"
+			q.EvidenceTranscriptions = []string{"从2 3 4中选数。", q.RawTranscription}
+		}},
+		{name: "missing frozen identity", conflict: true, change: func(q *RecognizedQuestion) { q.ImageSourceContext.ScopeDigest = "" }},
+		{name: "other material", conflict: true, change: func(q *RecognizedQuestion) { q.ImageSourceContext.Materials[0].Text = "另一个硬盘" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q := RecognizedQuestion{Subject: "数学", RawTranscription: child, Question: child, CanonicalMarkdown: child,
+				AnswerState: AnswerStateBlank, RecognitionConfidence: float64Ptr(.99),
+				EvidenceTranscriptions: []string{shared + "\n" + child, child},
+				ImageSourceContext:     &k12.RecognitionImageSourceContextV1{Version: k12.RecognitionImageScopeVersionV1, ScopeDigest: "same-page", TargetIDs: []string{"child"}, Materials: []k12.RecognitionImageScopeDependencyV1{{Text: shared}}}}
+			if tc.change != nil {
+				tc.change(&q)
+			}
+			before, _ := json.Marshal(q)
+			if got := questionEvidenceTranscriptionsConflict(q); got != tc.conflict {
+				t.Fatalf("conflict=%v want %v", got, tc.conflict)
+			}
+			after, _ := json.Marshal(q)
+			if string(before) != string(after) {
+				t.Fatal("comparison changed frozen source")
+			}
+		})
+	}
+}
+
 const sixNumberInitialSource = "在下列六个数：5、6、12、14、23、29中划去一个数（ ），后，能使其中3个数的和为另外2个数和的2倍。"
 const sixNumberReviewSource = "在下列六个数：5，6，12，14，23，29中划去数（ ）后，能使其中3个数的和为另外2个数和的2倍。"
 const sixNumberStudentWork = "划去：29\n因为：5+23+14=42\n6+12=18\n42=18×2"

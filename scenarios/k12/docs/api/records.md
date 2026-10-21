@@ -996,6 +996,8 @@ JSON 正文（严格解码）：
 <a id="backup"></a>
 ## GET /api/k12/backup
 
+v8 追加 `teaching_diagrams`，携带图示归属、资产身份、SHA-256 与精确 SVG 字节；摘要校验覆盖该字段，恢复与记录写入使用同一事务，RestoreAs 重写目标资产引用。旧版未携带图示时保留原 checksum 合同。
+
 读取完整家庭学习档案备份。
 
 JSON 响应不是附件下载；将完整响应保存为 .hexbak。当前 version=7，保留 archive_id/checksum/记录/图片/确认OCR/题目作答/source-action/当前作品档案原值。当前备份不含完整模型配置与全部长期记忆。任一引用资产缺失或损坏会使整份备份失败，不能丢字段后自行改 checksum。
@@ -1081,7 +1083,7 @@ JSON 正文：
 
 经监护人确认迁移到另一辅导实例。
 
-archive 完整保存源身份与checksum；source_agent 必须等于原归属，target_agent 必须不同且为重建目标；guardian_confirmed=true；idempotency_key 经trim后须非空，且最多200个UTF-8字节。仅接受v2及以上兼容档案，当前上限v7。原档案、目标恢复前快照、owner改写journal与领域写入同一SQLite事务，结果带 migration_id。重复同键返回持久收据，修改内容须新键。
+archive 完整保存源身份与checksum；source_agent 必须等于原归属，target_agent 必须不同且为重建目标；guardian_confirmed=true；idempotency_key 经trim后须非空，且最多200个UTF-8字节。仅接受v2及以上兼容档案，当前上限v8。原档案、目标恢复前快照、owner改写journal与领域写入同一SQLite事务，结果带 migration_id。重复同键返回持久收据，修改内容须新键。
 
 依赖：K12 module, record store and the dependencies described for this operation.
 

@@ -622,8 +622,6 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 		} else if guide, ok := deterministicParentTeachingGuideForEvidence(guideRequest, solved.Evidence); ok {
 			guideExecutionKind = k12.GradingExecutionLocalDeterministic
 			deterministicGuide = &guide
-		} else if gradeReq.SolveOutputVersion == SolveOutputWithParentGuideV1 {
-			guideExecutionKind = k12.GradingExecutionLocalDeterministic
 		}
 		originalGuideRequest := struct {
 			ExecutionKind k12.GradingExecutionKind   `json:"execution_kind"`
@@ -644,7 +642,7 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 					if deterministicGuide != nil {
 						return *deterministicGuide, nil
 					}
-					if gradeReq.SolveOutputVersion == SolveOutputWithParentGuideV1 {
+					if gradeReq.SolveOutputVersion == SolveOutputWithParentGuideV1 && solved.Generation != nil {
 						return auditedSolveParentTeachingGuide(solved)
 					}
 					return deps.generateParentTeachingGuide(callCtx, guideRequest)
@@ -1204,6 +1202,7 @@ func commitGradingAssessmentItem(
 	if err != nil {
 		return item, err
 	}
+	item = deps.attachPhotoTeachingDiagram(ctx, job.Record.AgentName, q, item)
 	raw, err := json.Marshal(gradingAssessmentCanonicalResult(item))
 	if err != nil {
 		return item, err

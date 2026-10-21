@@ -11,10 +11,40 @@ import (
 
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/channel"
+	"github.com/hexagon-codes/hexclaw/internal/mathtext"
 	"github.com/hexagon-codes/hexclaw/messagecontent"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
 )
+
+func TestFinalReplyAutomaticTitleUsesReadableMarkdown(t *testing.T) {
+	for _, tc := range []struct{ name, firstLine, title string }{
+		{"actual bold answer", "**答案：这根绳子原来长40米。**从最后剩下的20米倒推。", "答案：这根绳子原来长40米。 从最后剩下的20米倒推。"},
+		{"linked heading", "### **[教材讲解](https://example.invalid/book?page=36)**", "教材讲解"},
+		{"literal code", "原样 `a*b` 与 `2 ** 3`", "原样 a*b 与 2 ** 3"},
+		{"unicode cap", "## **" + strings.Repeat("题", 60) + "قايتا**", strings.Repeat("题", 60)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, _, _, renderer, req, targets := newFinalReplyContractFixture(t)
+			req.Title, req.SourceKind, req.Locale = "", "accumulation", "zh-CN"
+			req.Message.Content = tc.firstLine + "\n\n" + strings.Repeat("完整正文。", 240)
+			batch, _, err := d.PrepareAndSendFinalReply(t.Context(), req, targets)
+			if err != nil || len(batch.Receipts) != 2 || renderer.calls != 1 {
+				t.Fatalf("PDF preparation changed: batch=%+v renders=%d err=%v", batch, renderer.calls, err)
+			}
+			for _, receipt := range batch.Receipts {
+				payload := readFinalReplyContractPayload(t, batch, receipt)
+				if payload.Source.Canonical.Markdown != req.Message.Content {
+					t.Fatal("title projection changed original body")
+				}
+				want := tc.title + " 完整内容见附件"
+				if got := mathtext.PlainMarkdownText(payload.Content.Markdown); got != want {
+					t.Fatalf("summary lost literal semantics or retained markup: got=%q want=%q", got, want)
+				}
+			}
+		})
+	}
+}
 
 // 复用真实本地 HTTP 上传/发送边界，只让来源和渠道载荷经过正式 canonical 组装。
 type finalReplyContractTransport struct {

@@ -909,7 +909,21 @@ func writeCanonicalGradingVisibleAnswers(out *strings.Builder, item PhotoGradeIt
 		out.WriteString("**正确答案：** ")
 		out.WriteString(strings.TrimSpace(item.ParentGuide.Answer))
 		out.WriteString("\n\n")
+	} else if answer, _, ok := untrustedReferenceAnswer(item); ok {
+		out.WriteString("**正确答案：** ")
+		out.WriteString(answer)
+		out.WriteString("\n\n")
 	}
+}
+
+// 组合答案暂不可完整程序比较时，保留已通过模型过程核对的明确答案，不升级判分证据。
+func untrustedReferenceAnswer(item PhotoGradeItem) (answer, solution string, ok bool) {
+	if item.Status != PhotoUntrusted || item.Grade.Evidence.Verdict != VerdictAgree || item.Grade.Evidence.EvidenceType != EvidenceHeuristic {
+		return "", "", false
+	}
+	solution = strings.TrimSpace(item.Grade.Solution)
+	answer, explicit := explicitVerifiedAnswerScope(solution)
+	return answer, solution, explicit && answer != ""
 }
 
 // RenderCanonicalGradingAssessmentDetails 将最终产物中的受控评估对象投影为家长可读
@@ -984,6 +998,12 @@ func RenderCanonicalGradingAssessmentDetails(resultJSON string) (string, PhotoIt
 	var out strings.Builder
 	writeCanonicalGradingVisibleAnswers(&out, item)
 	switch item.Status {
+	case PhotoUntrusted:
+		if _, solution, ok := untrustedReferenceAnswer(item); ok {
+			out.WriteString("### 完整解法\n\n")
+			out.WriteString(solution)
+			out.WriteString("\n\n")
+		}
 	case PhotoWrong:
 		if wrongStep := strings.TrimSpace(item.Grade.Outcome.WrongStep); wrongStep != "" {
 			out.WriteString("**第一个错步：** ")

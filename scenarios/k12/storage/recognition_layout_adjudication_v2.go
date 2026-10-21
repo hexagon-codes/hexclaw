@@ -374,6 +374,9 @@ func loadRecognitionAdjudicationOverlays(ctx context.Context, q dbQueryer, autho
 
 func applyRecognitionAdjudicationOverlay(result k12.RecognitionLayoutCandidateFinalResultV2, overlay recognitionAdjudicationOverlay) k12.RecognitionLayoutCandidateFinalResultV2 {
 	in := overlay.settlement
+	if in.PrintedQuestionEvidence != nil {
+		result.PrintedQuestionReceipt = &k12.RecognitionPrintedQuestionReceiptV1{Evidence: *in.PrintedQuestionEvidence, PlanDigest: in.PlanDigest, CandidateID: in.CandidateID, SourcePhysicalInvocationID: in.SourcePhysicalInvocationID, SourcePhysicalResultDigest: in.SourcePhysicalResultDigest, AuthorizationID: in.AuthorizationID, SettlementDigest: overlay.projection.SettlementDigest}
+	}
 	if in.FinalAnswerEvidence != nil {
 		result.FinalAnswerReceipt = &k12.RecognitionFinalAnswerReceiptV1{
 			Evidence: *in.FinalAnswerEvidence, PlanDigest: in.PlanDigest, CandidateID: in.CandidateID,

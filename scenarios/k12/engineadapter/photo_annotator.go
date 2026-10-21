@@ -218,7 +218,7 @@ func basePhotoMarkPlacement(bounds image.Rectangle, mark usecase.PhotoAnnotation
 		base = color.RGBA{R: 165, G: 107, B: 214, A: 255}
 	case usecase.PhotoWrong:
 		base = color.RGBA{R: 239, G: 68, B: 68, A: 255}
-	case usecase.PhotoAnswerUnclear:
+	case usecase.PhotoAnswerUnclear, usecase.PhotoUntrusted:
 		base = color.RGBA{R: 211, G: 145, B: 45, A: 255}
 	default:
 		return photoMarkPlacement{}, false
@@ -362,8 +362,8 @@ func drawAssessmentGlyph(
 	case usecase.PhotoWrong:
 		draw(cx-radius*2/3, cy-radius*2/3, cx+radius*2/3, cy+radius*2/3)
 		draw(cx+radius*2/3, cy-radius*2/3, cx-radius*2/3, cy+radius*2/3)
-	case usecase.PhotoAnswerUnclear:
-		// 黄色问号仅表达无法识别，与判分勾叉保持独立。
+	case usecase.PhotoAnswerUnclear, usecase.PhotoUntrusted:
+		// 黄色问号仅表达尚未判定，与判分勾叉保持独立。
 		draw(cx-radius/2, cy-radius/3, cx-radius/3, cy-radius*2/3)
 		draw(cx-radius/3, cy-radius*2/3, cx+radius/3, cy-radius*2/3)
 		draw(cx+radius/3, cy-radius*2/3, cx+radius/2, cy-radius/3)

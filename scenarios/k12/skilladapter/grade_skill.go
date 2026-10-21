@@ -45,7 +45,7 @@ func (s *GradeSkill) ToolDefinition() llm.ToolDefinition {
 			Properties: map[string]*llm.Schema{
 				"problem":          {Type: "string", Description: "The problem statement."},
 				"student_answer":   {Type: "string", Description: "The child's submitted answer or worked steps. LEAVE EMPTY for blank/unanswered problems — do NOT invent one; empty means 'solve & explain' instead of 'grade'."},
-				"subject":          {Type: "string", Description: "Optional explicit subject: 数学/语文/英语/物理/化学."},
+				"subject":          {Type: "string", Description: "Optional explicit subject: 数学/语文/英语/科学/信息科技; legacy 物理/化学 values remain accepted."},
 				"grade":            {Type: "string", Description: "Optional. Effective grade term (e.g. 五年级上); left empty resolves from the child's profile."},
 				"knowledge_points": {Type: "array", Items: &llm.Schema{Type: "string"}, Description: "Optional knowledge points from recognition."},
 				"source_session":   {Type: "string", Description: "Optional source session/chat id for mistake dedup."},

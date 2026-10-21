@@ -276,7 +276,10 @@ func (e *durableRecognitionPhysicalCallExecutor) ExecuteRecognitionPhysicalCall(
 			ctx, invocation.AgentName, invocation.PhysicalInvocationID,
 		)
 		if reuseErr != nil {
-			return zero, fmt.Errorf("%w: reuse recognition receipt: %w", ErrRecognitionPhysicalCallBeforeSend, reuseErr)
+			commitCtx, cancelCommit := gradingDurableCommitContext(ctx)
+			_, ledgerErr := e.o.deps.Records.MarkModelPhysicalInvocationNotSent(commitCtx, invocation.AgentName, invocation.PhysicalInvocationID)
+			cancelCommit()
+			return zero, errors.Join(fmt.Errorf("%w: reuse recognition receipt: %w", ErrRecognitionPhysicalCallBeforeSend, reuseErr), ledgerErr)
 		}
 		if found {
 			payload, loadErr := e.o.deps.Records.LoadSucceededModelPhysicalInvocationResultContent(

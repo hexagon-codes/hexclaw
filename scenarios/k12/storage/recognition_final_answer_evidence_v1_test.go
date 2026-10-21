@@ -41,7 +41,12 @@ func newFinalAnswerStorageFixtureV1(t *testing.T, policy string, conflictingQues
 			t.Fatal(err)
 		}
 	}
-	f := compactInitialReadStorageFixtureV1(t, string(raw), policy)
+	opts := []string{policy}
+	if len(sameReadings) > 1 && sameReadings[1] {
+		raw = []byte(strings.ReplaceAll(string(raw), "数学", "语文"))
+		opts = append(opts, "upright_printed")
+	}
+	f := compactInitialReadStorageFixtureV1(t, string(raw), opts...)
 	if policy == k12.RecognitionExecutionPolicyCompactDAGFinalAnswerV2 {
 		entries, err := k12.CanonicalRecognitionLayoutInitialReadEntriesV1(string(raw))
 		if err != nil {

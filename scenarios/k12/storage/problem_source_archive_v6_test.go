@@ -871,6 +871,8 @@ func TestProblemSourceArchiveV6RestoreAsRewritesTerminalV73DigestLineage(t *test
 	sourceWorkID := source.ReprocessJobs[0].WorkID
 	sourceReceiptID := source.ActionReceipts[0].CommandReceiptID
 	sourceAssetID := source.PageAssets[0].PageAssetID
+	sourceDiagramID := "asset://mingming/" + repeatHex("c", 64) + ".svg"
+	targetDiagramID := "asset://target-tutor/" + repeatHex("c", 64) + ".svg"
 	const sourceSummaryID = "summary-invocation-before-restore-as"
 	canonicalTargetSummaryJSON := problemSourceArchiveSummaryResultJSON(
 		recognitionJob,
@@ -898,7 +900,7 @@ func TestProblemSourceArchiveV6RestoreAsRewritesTerminalV73DigestLineage(t *test
 		CoverageStatus: k12.GradingFinalArtifactCoverageComplete,
 		TotalCount:     1, PublishedCount: 1, SkippedCount: 0,
 		OrderedCurrentDigestsJSON: `["assessment-source"]`,
-		CanonicalMarkdown:         "# canonical source final",
+		CanonicalMarkdown:         "# canonical source final\n\n![容量图](" + sourceDiagramID + ")",
 		SummaryInvocationID:       sourceSummaryID,
 		AnnotatedAssetOwnerScope:  recognitionOwner,
 		AnnotatedAssetID:          sourceAssetID,
@@ -944,7 +946,7 @@ func TestProblemSourceArchiveV6RestoreAsRewritesTerminalV73DigestLineage(t *test
 
 	migrated, err := k12storage.MigrateProblemSourceArchiveV6Owner(
 		"mingming", "target-tutor", source,
-		map[string]string{sourceAssetID: targetAssetID},
+		map[string]string{sourceAssetID: targetAssetID, sourceDiagramID: targetDiagramID},
 	)
 	if err != nil {
 		t.Fatalf("migrate terminal V73 archive: %v", err)
@@ -980,6 +982,7 @@ func TestProblemSourceArchiveV6RestoreAsRewritesTerminalV73DigestLineage(t *test
 	}
 	migratedArtifact := migrated.FinalizationGenerations[0].Artifact
 	if migratedArtifact == nil || migratedArtifact.AgentName != "target-tutor" ||
+		migratedArtifact.CanonicalMarkdown != "# canonical source final\n\n![容量图]("+targetDiagramID+")" ||
 		migratedArtifact.ArtifactID == sourceArtifact.ArtifactID ||
 		migratedArtifact.SummaryInvocationID == sourceSummaryID ||
 		migratedArtifact.ArtifactDigest == sourceArtifact.ArtifactDigest ||

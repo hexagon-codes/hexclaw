@@ -121,6 +121,9 @@ func ReferencedHexbakAssetIDs(recs []*records.AgentRecord) ([]string, error) {
 			if !assetstore.IsAssetID(raw) {
 				return raw, nil
 			}
+			if teachingDiagramAssetIDPattern.MatchString(raw) {
+				return raw, nil
+			}
 			if _, _, err := assetstore.Parse(raw); err != nil {
 				return "", fmt.Errorf("%w: record %q 包含非法 asset id: %v", ErrHexbakAssetManifest, rec.RecordID, err)
 			}
@@ -144,6 +147,9 @@ func ReferencedHexbakAssetIDs(recs []*records.AgentRecord) ([]string, error) {
 func ValidateHexbakAssets(bak *Hexbak) error {
 	if bak == nil {
 		return fmt.Errorf("%w: nil archive", ErrHexbakAssetManifest)
+	}
+	if err := validateHexbakTeachingDiagrams(bak); err != nil {
+		return err
 	}
 	if bak.Version < 3 {
 		if len(bak.Assets) != 0 {
@@ -255,6 +261,9 @@ func migrateHexbakAssets(source *Hexbak, target string, recs []*records.AgentRec
 		return nil, err
 	}
 	mapping := make(map[string]string, len(source.Assets))
+	for _, asset := range source.TeachingDiagrams {
+		mapping[asset.AssetID] = migratedTeachingDiagramID(asset, target)
+	}
 	out := make([]HexbakAsset, 0, len(source.Assets))
 	for _, item := range source.Assets {
 		targetID, mime, digest, err := assetstore.Describe(target, item.Data)

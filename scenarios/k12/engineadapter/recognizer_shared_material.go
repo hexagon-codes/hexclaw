@@ -40,7 +40,7 @@ func retainInitialReadSharedMaterials(questions []usecase.RecognizedQuestion, pl
 				continue
 			}
 			if q.ImageSourceContext == nil {
-				q.ImageSourceContext = &k12.RecognitionImageSourceContextV1{Version: k12.RecognitionImageScopeVersionV1, Action: plan.ScopeInput.Action, ScopeDigest: plan.AuthorizedPlanDigest, TargetIDs: []string{target.TargetID}}
+				q.ImageSourceContext = &k12.RecognitionImageSourceContextV1{Version: k12.RecognitionImageScopeVersionV1, Action: plan.ScopeInput.Action, SourceComparisonPolicy: plan.ScopeInput.SourceComparisonPolicy, ScopeDigest: plan.AuthorizedPlanDigest, TargetIDs: []string{target.TargetID}}
 			}
 			found := false
 			for _, material := range q.ImageSourceContext.Materials {

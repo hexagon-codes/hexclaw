@@ -37,7 +37,7 @@ func projectCompletePrintedQuestionsV2(questions []usecase.RecognizedQuestion, t
 			}
 			question.LayoutSourceProjection = usecase.RecognitionLayoutSourceProjection{PageDigest: plan.PageDigest, PlanID: finalization.PlanID, PlanDigest: finalization.PlanDigest, FinalizationDigest: finalization.FinalizationDigest, TargetIDs: [2]string{left.TargetID, right.TargetID}}
 			if question.ImageSourceContext != nil {
-				merged := &k12.RecognitionImageSourceContextV1{Version: question.ImageSourceContext.Version, Action: question.ImageSourceContext.Action, ScopeDigest: plan.AuthorizedPlanDigest, TargetIDs: []string{left.TargetID, right.TargetID}}
+				merged := &k12.RecognitionImageSourceContextV1{Version: question.ImageSourceContext.Version, Action: question.ImageSourceContext.Action, SourceComparisonPolicy: question.ImageSourceContext.SourceComparisonPolicy, ScopeDigest: plan.AuthorizedPlanDigest, TargetIDs: []string{left.TargetID, right.TargetID}}
 				for _, candidate := range []usecase.RecognizedQuestion{questions[i], questions[j]} {
 					if candidate.ImageSourceContext != nil {
 						merged.Materials = append(merged.Materials, candidate.ImageSourceContext.Materials...)

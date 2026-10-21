@@ -54,7 +54,11 @@ func (o *GradingOrchestrator) recoverImageSourceMaterials(ctx context.Context, r
 	}
 	for i := range run.questions {
 		source := run.questions[i].ImageSourceContext
-		if source == nil || len(source.Recoveries) == 0 {
+		if source == nil {
+			continue
+		}
+		ensureUnlocalizedImageSourceGap(&run.questions[i])
+		if len(source.Recoveries) == 0 {
 			continue
 		}
 		subject := imageSourceTextbookSubject(run.questions[i].Subject)
@@ -80,6 +84,16 @@ func (o *GradingOrchestrator) recoverImageSourceMaterials(ctx context.Context, r
 		snapshot.Subject = run.questions[i].Subject
 		snapshot, err = freezer.FreezeGroundingSnapshot(ctx, snapshot)
 		if err != nil {
+			if library, ok := o.deps.Grounding.(ImageSourceLibraryLookup); ok {
+				for n, recovery := range source.Recoveries {
+					if recovery.State == "unresolved" && recovery.Gap.Kind != "handwriting" {
+						result, queryErr := library.FindImageSourceCandidate(ctx, run.agentName, run.questions[i].Subject, run.req.Grade, run.questions[i].RawTranscription, recovery.Gap)
+						if queryErr == nil {
+							source.Recoveries[n] = result
+						}
+					}
+				}
+			}
 			continue
 		}
 		for n, recovery := range source.Recoveries {
@@ -101,6 +115,29 @@ func (o *GradingOrchestrator) recoverImageSourceMaterials(ctx context.Context, r
 				}
 			}
 		}
+	}
+}
+
+// 独立复读后来才发现题干裁切时仍查来源；位置不明不猜锚点，也不改冻结的选题计划。
+func ensureUnlocalizedImageSourceGap(q *RecognizedQuestion) {
+	if q.ImageSourceContext == nil || q.ImageSourceContext.Version != k12.RecognitionImageScopeVersionV1 || len(q.ImageSourceContext.Recoveries) != 0 {
+		return
+	}
+	for _, signal := range q.OCRSignals {
+		text := strings.ToLower(signal)
+		printed := strings.Contains(text, "题干") || strings.Contains(text, "题面") || strings.Contains(text, "印刷") || strings.Contains(text, "printed") || strings.Contains(text, "instruction") || strings.HasPrefix(text, "source_gap_")
+		if !printed || !(recognitionSignalIndicatesSourceOcclusion(text) || strings.HasPrefix(text, "source_gap_")) {
+			continue
+		}
+		anchor := []rune(strings.TrimSpace(q.RawTranscription))
+		if len(anchor) > 80 {
+			anchor = anchor[:80]
+		}
+		if len(anchor) == 0 {
+			return
+		}
+		q.ImageSourceContext.Recoveries = []k12.RecognitionImageSourceRecoveryV1{{Gap: k12.RecognitionImageSourceGapV1{Kind: "unlocalized", Before: string(anchor)}, State: "unresolved"}}
+		return
 	}
 }
 

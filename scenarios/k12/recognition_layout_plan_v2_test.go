@@ -13,6 +13,40 @@ import (
 	"testing"
 )
 
+func TestRotatedScopedInitialReadKeepsNumberOrderAndCompleteAdjudicationPixels(t *testing.T) {
+	page := recognitionLayoutPlanTestPNG(t, 130, 270)
+	input := RecognitionLayoutPlanInputV2{PagePNG: page,
+		Manifest:        RecognitionLayoutManifestSuccessV2{InvocationID: "whole-read", ResultDigest: "sha256:" + strings.Repeat("a", 64)},
+		InitialReadMode: RecognitionLayoutManifestWithContentV1, RecognitionFormat: RecognitionLayoutCompactV4, EnableSourceAdjudication: true,
+		ScopeInput: &RecognitionImageScopeInputV1{Version: RecognitionImageScopeVersionV1, Action: "grade"},
+		Scope:      &RecognitionImageScopeV1{Version: RecognitionImageScopeVersionV1, Source: "inferred", SelectedOrders: []int{1, 2, 3}, Basis: "same printed numbered question"},
+		Targets: []RecognitionLayoutManifestTargetV2{
+			{ManifestRef: "manifest_0001", ManifestOrder: 1, SourceNumberPath: []string{"3", "(1)"}, DisplayLabel: "(1)", Region: SourcePixelRegion{X: 70, Y: 44, Width: 54, Height: 53}},
+			{ManifestRef: "manifest_0002", ManifestOrder: 2, SourceNumberPath: []string{"3", "(2)"}, DisplayLabel: "(2)", Region: SourcePixelRegion{X: 36, Y: 85, Width: 70, Height: 44}},
+			{ManifestRef: "manifest_0003", ManifestOrder: 3, SourceNumberPath: []string{"3", "(3)"}, DisplayLabel: "(3)", Region: SourcePixelRegion{X: 6, Y: 128, Width: 90, Height: 62}},
+		},
+	}
+	for _, rotation := range []int{90, 180, 270} {
+		input.PageOrientation = &RecognitionPageOrientationV1{Version: "page_orientation_v1", PageDigest: recognitionLayoutSHA256(page), ClockwiseDegrees: rotation, Confidence: .99}
+		plan, err := BuildRecognitionLayoutPlanV2(input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, target := range plan.Targets {
+			if target.Region != (SourcePixelRegion{Width: 130, Height: 270}) {
+				t.Fatal("independent review still clips a rotated source page")
+			}
+			if target.ManifestOrder != i+1 || target.OriginalRegion == nil || *target.OriginalRegion != input.Targets[i].Region {
+				t.Fatalf("rotation %d changed paired source identity: %+v", rotation, target)
+			}
+			pixels, err := BuildRecognitionLayoutAdjudicationImageV2(page, plan, target.TargetID)
+			if err != nil || !bytes.Equal(pixels, page) {
+				t.Fatalf("rotation %d clipped original parent or answer pixels: %v", rotation, err)
+			}
+		}
+	}
+}
+
 func TestREGK12RecognitionManifest20260808001DeterministicPlan(t *testing.T) {
 	pagePNG := recognitionLayoutPlanTestPNG(t, 240, 220)
 	manifest := RecognitionLayoutManifestSuccessV2{

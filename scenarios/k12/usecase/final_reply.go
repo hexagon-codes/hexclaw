@@ -8,6 +8,7 @@ import (
 	"errors"
 	"strings"
 
+	"github.com/hexagon-codes/hexclaw/internal/mathtext"
 	"github.com/hexagon-codes/hexclaw/messagecontent"
 	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/render"
@@ -72,7 +73,7 @@ func finalReplyPDFSummary(req FinalReplyDeliveryRequest) string {
 	case "ug", "ug-CN":
 		note = "تولۇق مەزمۇننى قوشۇمچە ھۆججەتتىن كۆرۈڭ."
 	}
-	return strings.TrimSpace(req.Title) + "\n\n" + note
+	return mathtext.EscapeMarkdownInline(strings.TrimSpace(req.Title)) + "\n\n" + note
 }
 
 func finalReplyFullProjection(ctx context.Context, full DeliveryMessage, suffix string) DeliveryMessage {
@@ -104,7 +105,7 @@ func (d Deps) PrepareAndSendFinalReply(ctx context.Context, req FinalReplyDelive
 	full.WritingFeedback = req.WritingFeedback
 	if strings.TrimSpace(req.Title) == "" {
 		line, _, _ := strings.Cut(full.Content, "\n")
-		line = strings.TrimSpace(strings.TrimLeft(line, "#* "))
+		line = mathtext.PlainMarkdownText(line)
 		runes := []rune(line)
 		if len(runes) > 60 {
 			runes = runes[:60]

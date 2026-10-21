@@ -90,6 +90,9 @@ func EvaluateOCRConfirmationRiskForInitialReadMode(q RecognizedQuestion, initial
 	}
 	for _, signal := range q.OCRSignals {
 		normalizedSignal := strings.ToLower(strings.TrimSpace(signal))
+		if strings.HasPrefix(normalizedSignal, "source_gap_") && normalizedSignal != "source_gap_handwriting" {
+			reasons[OCRRiskLowConfidence] = struct{}{}
+		}
 		switch normalizedSignal {
 		case "erasure", "erasure_detected":
 			reasons[OCRRiskErasure] = struct{}{}
@@ -212,12 +215,24 @@ func questionEvidenceTranscriptionsConflict(q RecognizedQuestion) bool {
 
 func questionEvidenceTranscriptionsConflictForInitialReadMode(q RecognizedQuestion, initialReadMode string) bool {
 	conflicts := func(raw string, values []string) bool {
+		if q.Subject == "数学" && scopedMaterialReadingsEquivalent(q, raw, values) {
+			return false
+		}
+		if q.Subject == "数学" {
+			for _, value := range values {
+				// 去空白后的视图相同不能反证数字分词相同，避免 2 3 4 与 234 合并。
+				if k12.RecognitionSourceComparisonV1(raw) == k12.RecognitionSourceComparisonV1(value) &&
+					!k12.RecognitionSourceQuestionsEqualV1(raw, value) {
+					return true
+				}
+			}
+		}
 		if q.Subject == "语文" && q.ImageSourceContext != nil && q.ImageSourceContext.Version == k12.RecognitionImageScopeVersionV1 {
 			normalized := make([]string, len(values))
 			for i, value := range values {
-				normalized[i] = chinesePrintedBlankComparisonV1(value)
+				normalized[i] = scopedChinesePrintedQuestionComparisonV1(q, value)
 			}
-			return evidenceTranscriptionsConflict(chinesePrintedBlankComparisonV1(raw), normalized, q.AnswerRawTranscription)
+			return evidenceTranscriptionsConflict(scopedChinesePrintedQuestionComparisonV1(q, raw), normalized, q.AnswerRawTranscription)
 		}
 		if sixNumberQuestionSourcesEquivalent(raw, values, initialReadMode) {
 			return false
@@ -246,6 +261,108 @@ func questionEvidenceTranscriptionsConflictForInitialReadMode(q RecognizedQuesti
 		}
 	}
 	return conflicts(trimNumber(q.RawTranscription), values)
+}
+
+var mathWorkLineSuffix = regexp.MustCompile(`((?:列式|算式)[：:])[ \t\x{3000}]*[_＿]+[ \t\x{3000}]*$`)
+var mathEmptyPrintedSlot = regexp.MustCompile(`\((?:[ \t\x{3000}]|\\{1,2}(?:quad|qquad|,|;))*\)`)
+
+// 只在比较副本中剥离同一已冻结范围的完整材料前缀，保留局部题面与数学空位。
+func scopedMaterialReadingsEquivalent(q RecognizedQuestion, raw string, values []string) bool {
+	source := q.ImageSourceContext
+	if source == nil || source.Version != k12.RecognitionImageScopeVersionV1 || source.ScopeDigest == "" || len(source.TargetIDs) == 0 || len(values) < 2 {
+		return false
+	}
+	plain := func(value string) string {
+		value = strings.NewReplacer(`\\(`, `\(`, `\\)`, `\)`, `\\[`, `\[`, `\\]`, `\]`).Replace(value)
+		value = mathRepeatedTeXCommand.ReplaceAllString(value, `\$1`)
+		// 原题比较不能消费 Markdown 标记：星号等字符可能承载真实数学运算。
+		return CanonicalPlainTextFallback(mathEmptyPrintedSlot.ReplaceAllString(value, "()"))
+	}
+	var materials []string
+	for _, material := range source.Materials {
+		// 复读可省略独立的上级指导语，仍引用同一材料中完整的后续行；
+		// 只接受冻结文本的整行后缀，不按任意短语或数值截取条件。
+		lines := strings.Split(material.Text, "\n")
+		for i := range lines {
+			if text := plain(strings.Join(lines[i:], "\n")); text != "" {
+				materials = append(materials, text)
+			}
+		}
+	}
+	trim := func(value string) string {
+		// 只忽略没有数值或关系的容量图标签行；单位必须与同题冻结材料一致。
+		// 原始观察不改写，任何额外条件、数值或异单位仍参与题干冲突比较。
+		value = mathCapacityDiagramLabelLine.ReplaceAllStringFunc(value, func(line string) string {
+			match := mathCapacityDiagramLabelLine.FindStringSubmatch(line)
+			unit := elementarymath.NormalizeUnit(match[2])
+			for _, material := range source.Materials {
+				for _, observed := range mathPrintedUnit.FindAllString(material.Text, -1) {
+					if unit != "" && elementarymath.NormalizeUnit(observed) == unit {
+						return match[1]
+					}
+				}
+			}
+			return line
+		})
+		// 作答标签后的空白横线不承载题目条件；含数值或算式的行不匹配。
+		value = mathWorkLineSuffix.ReplaceAllString(strings.TrimSpace(value), "$1")
+		value = plain(value)
+		for {
+			longest := ""
+			for _, material := range materials {
+				if len(material) > len(longest) && len(value) > len(material) && strings.HasPrefix(value, material) {
+					longest = material
+				}
+			}
+			if longest == "" {
+				break
+			}
+			value = strings.TrimSpace(strings.TrimPrefix(value, longest))
+		}
+		// 首读把印刷编号放在元数据，复读可能再次写入正文；只去掉本题括号编号
+		// 后紧接明确指令词的前缀，不把算式中的括号数或其他题号当作编号。
+		value = stripPrintedInstructionNumber(q, value)
+		// 无数值的列式标签不改变印刷等式；其后存在实际内容时仍完整保留。
+		probe := strings.TrimRight(value, " :：\t\r\n_＿")
+		for _, label := range []string{"列式", "算式"} {
+			if strings.HasSuffix(probe, label) {
+				return strings.TrimSpace(strings.TrimSuffix(probe, label))
+			}
+		}
+		return value
+	}
+	current := trim(raw)
+	if current == "" {
+		return false
+	}
+	for _, value := range values {
+		if !k12.RecognitionSourceQuestionsEqualV1(trim(value), current) {
+			return false
+		}
+	}
+	return true
+}
+
+var mathPrintedUnit = regexp.MustCompile(elementarymath.UnitPattern())
+var mathRepeatedTeXCommand = regexp.MustCompile(`\\{2,}(frac|text|times|div|cdot|leq|geq|neq)\b`)
+var mathCapacityDiagramLabelLine = regexp.MustCompile(`(?m)(^|[。？?\n])[\t ]*图[中上]?(?:示|标注|标签|标记|文字)[：:][\t ]*已用空间[，,、][\t ]*剩余空间[，,、][\t ]*共[？?][\t ]*(` + elementarymath.UnitPattern() + `)(?:[。.]|[\t ]*$)`)
+
+func stripPrintedInstructionNumber(q RecognizedQuestion, value string) string {
+	if len(q.SourceNumberPath) == 0 {
+		return value
+	}
+	parentheses := strings.NewReplacer("（", "(", "）", ")")
+	own := parentheses.Replace(q.SourceNumberPath[len(q.SourceNumberPath)-1])
+	candidate := parentheses.Replace(strings.TrimSpace(value))
+	if strings.HasPrefix(own, "(") && strings.HasSuffix(own, ")") && strings.HasPrefix(candidate, own) {
+		rest := strings.TrimSpace(strings.TrimPrefix(candidate, own))
+		for _, instruction := range []string{"先求", "再求", "根据", "列式", "计算", "求"} {
+			if strings.HasPrefix(rest, instruction) {
+				return rest
+			}
+		}
+	}
+	return value
 }
 
 var chinesePrintedBlankRunV1 = regexp.MustCompile(`[_＿]{2,}`)
@@ -296,6 +413,15 @@ func chinesePrintedBlankComparisonV1(value string) string {
 	}, value)
 	value = chinesePrintedBlankRunV1.ReplaceAllString(value, "□")
 	return strings.ReplaceAll(value, "□，我也", "□。我也")
+}
+
+// 新策略下仿写指令末尾的答题横线只是书写区，不省略题内空位或指令文字。
+func scopedChinesePrintedQuestionComparisonV1(q RecognizedQuestion, value string) string {
+	source := q.ImageSourceContext
+	if source == nil || source.Version != k12.RecognitionImageScopeVersionV1 || source.Action != "solve" || source.SourceComparisonPolicy != k12.RecognitionImageSourceComparisonPolicyV1 {
+		return chinesePrintedBlankComparisonV1(value)
+	}
+	return k12.RecognitionChineseSolvePrintedComparisonV1(value)
 }
 
 // 六数题只在首读合同内比较完整题干；角色封套、片段和任一异议观察不能被其余来源覆盖。
@@ -489,6 +615,15 @@ func RecognitionSourceReadingsMatchForInitialReadMode(prior, review RecognizedQu
 	prior, review = normalizeRecognizedQuestionFacts(prior), normalizeRecognizedQuestionFacts(review)
 	question = strings.TrimSpace(prior.RawTranscription) != "" && strings.TrimSpace(review.RawTranscription) != "" &&
 		!evidenceTranscriptionsConflict(review.RawTranscription, []string{prior.RawTranscription, review.RawTranscription}, "")
+	if !question && strings.TrimSpace(prior.RawTranscription) != "" && strings.TrimSpace(review.RawTranscription) != "" &&
+		prior.Subject == "语文" && review.Subject == "语文" &&
+		prior.ImageSourceContext != nil && review.ImageSourceContext != nil &&
+		prior.ImageSourceContext.Version == k12.RecognitionImageScopeVersionV1 && review.ImageSourceContext.Version == k12.RecognitionImageScopeVersionV1 &&
+		prior.ImageSourceContext.SourceComparisonPolicy == k12.RecognitionImageSourceComparisonPolicyV1 && review.ImageSourceContext.SourceComparisonPolicy == k12.RecognitionImageSourceComparisonPolicyV1 &&
+		prior.ImageSourceContext.Action == "solve" && review.ImageSourceContext.Action == "solve" {
+		// 仅比较填空线和排版，字词、数字、否定及学生作答仍逐项核验。
+		question = scopedChinesePrintedQuestionComparisonV1(prior, prior.RawTranscription) == scopedChinesePrintedQuestionComparisonV1(review, review.RawTranscription)
+	}
 	if !question {
 		readings := append([]string{prior.RawTranscription, review.RawTranscription}, prior.EvidenceTranscriptions...)
 		readings = append(readings, review.EvidenceTranscriptions...)

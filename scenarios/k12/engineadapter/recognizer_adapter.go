@@ -209,7 +209,7 @@ const recognizePrompt = `识别这张作业图片里的所有题目，并逐题�
 - problem_kind=subproblem 时 parent_problem_id 与 subproblem_no 必须同时非空，parent_problem_id 必须精确引用本次 JSON 内唯一对应的 compound_parent。
 - question/student_answer 必须逐字保留视觉原始转写；canonical_markdown/answer_canonical_markdown 独立输出可渲染 Markdown/LaTeX，不得用规范形覆盖原始转写。
 - recognition_confidence 是印刷原题转写的 0~1 置信度，不是对解题答案或学生字迹的信心。空白作答区、没有学生答案、答案区擦痕不得降低清晰原题的置信度。返回前自行对照原图复核有疑问的数字、运算符和小数点；仍无法辨认才保留不确定性。ocr_signals 只可使用 fraction/decimal_point/negative_sign/unit/erasure/unclear_handwriting。高置信度也必须如实输出格式信号。
-- subject 逐题判定题目学科，只能取以下之一：数学 / 语文 / 英语 / 物理 / 化学；确实判不出学科时才留空字符串 ""。
+- subject 逐题判定题目学科，只能取以下之一：数学 / 语文 / 英语 / 物理 / 化学 / 科学 / 信息科技；确实判不出学科时才留空字符串 ""。
 - question 题干只抄印刷体/原题内容，绝不能把铅笔、黑笔等手写墨迹拼进题干；student_answer 只如实誊录图中孩子**已经写下**的手写作答（包括紧跟在印刷等号后的数字）。例如印刷题是“4÷0.5=”且等号后手写“8”，必须让 question 写 "4÷0.5="、student_answer 写 "8"，不能把 question 写成“4÷0.5=8”。
 - Printed worked examples, printed answers, coloured cancellation marks and printed solution steps are source material, never student_answer. Preserve their mathematical content as printed context. If there is no actual student handwriting, use answer_state=blank and empty student_answer/answer_canonical_markdown; genuine student handwriting must still be recovered even beside a printed example.
 - answer_state 只能是 blank / present / unclear：
@@ -239,7 +239,7 @@ Rules:
 - For problem_kind=subproblem, parent_problem_id and subproblem_no must both be non-empty, and parent_problem_id must exactly reference the one corresponding compound_parent in this JSON.
 - Preserve question and student_answer as verbatim visual transcriptions. Emit canonical_markdown and answer_canonical_markdown separately as renderable normalized forms; never overwrite the source transcription with a normalized form.
 - recognition_confidence measures only the printed question transcription, from 0 to 1, not confidence in a solution or the student's handwriting. An empty answer area, missing student answer, or erased answer must not lower confidence in a clearly readable question. Before returning, recheck uncertain digits, operators and decimal points against the image; retain uncertainty only when the source remains unreadable. ocr_signals may contain only fraction, decimal_point, negative_sign, unit, erasure, or unclear_handwriting. Report formatting signals honestly even at high confidence.
-- Determine subject per question. It must be exactly one of 数学, 语文, 英语, 物理, 化学, or an empty string only when the subject truly cannot be determined.
+- Determine subject per question. It must be exactly one of 数学, 语文, 英语, 物理, 化学, 科学, 信息科技, or an empty string only when the subject truly cannot be determined.
 - question copies only printed source text and must never incorporate pencil, pen, or other handwritten marks. student_answer copies only work the student has already written, including a number immediately following a printed equals sign. If the printed question is “4÷0.5=” and the student wrote “8” after the equals sign, question must be "4÷0.5=" and student_answer must be "8"; never make question "4÷0.5=8".
 - Printed worked examples, printed answers, coloured cancellation marks and printed solution steps are source material, never student_answer. Preserve their mathematical content as printed context. If there is no actual student handwriting, use answer_state=blank and empty student_answer/answer_canonical_markdown; genuine student handwriting must still be recovered even beside a printed example.
 - answer_state must be blank, present, or unclear. blank means no student response is present and requires student_answer="". present means a response exists and can be transcribed reliably, and student_answer must contain the visible response. unclear means handwriting, an erasure, or an answer area is visible but cannot be read reliably, and requires student_answer="".
@@ -289,7 +289,7 @@ Each items entry must contain exactly target_id, kind, and recognition:
 A question recognition uses these structured-recognition fields: problem_id, problem_kind, parent_problem_id, subproblem_no, source_number_path, display_label, source_section_path, source_section_label, question, canonical_markdown, subject, knowledge_points, answer_state, student_answer, answer_canonical_markdown, recognition_confidence, ocr_signals, evidence_transcriptions, answer_evidence_transcriptions. Do not output any field outside this list.
 student_answer must transcribe ALL visible handwritten working lines in their original order, including incorrect steps and the final answer, separated by newlines. Never reduce multi-line working to its final value. answer_evidence_transcriptions contains those same visible lines, not alternative answers. Both canonical Markdown fields must enclose every TeX expression in \\( ... \\) or \\[ ... \\]; never return bare TeX commands.
 Printed numbers in the question, choices, or candidate list are never student answers merely because they are visible. For fill-in prompts such as 划去数（ ）, present is allowed only when separate handwriting is visibly written inside or beside the blank, or in an independent working area. With no separate handwriting, return blank with empty student_answer and answer_canonical_markdown; never solve the problem or copy a printed candidate. answer_evidence_transcriptions may contain only independently visible student handwriting.
-answer_state must be blank, present, or unclear. present requires a legible student_answer; blank and unclear require an empty student_answer. subject must be 数学, 语文, 英语, 物理, 化学, or empty.
+answer_state must be blank, present, or unclear. present requires a legible student_answer; blank and unclear require an empty student_answer. subject must be 数学, 语文, 英语, 物理, 化学, 科学, 信息科技, or empty.
 recognition_confidence measures only the printed question transcription, not a solution or student answer. Empty answer areas and erased answers must not lower confidence in a clear printed question. Recheck uncertain source digits, operators and decimal points against the image before returning; never guess an unreadable source. Use unclear only for independently visible unreadable handwriting, not blank space or printed answer lines.
 - If a watermark, overlay, fold, handwriting, or crop obscures any printed glyph, including a fraction numerator, fraction bar, fraction denominator, decimal point, or operator, preserve only what is visibly supported and set recognition_confidence below 0.90. Never infer a missing fraction part from arithmetic, a neighboring target, or the student's answer; keep student_answer empty when the answer is not independently legible.
 The authorized target list, in order, follows:
@@ -300,7 +300,7 @@ const recognitionLayoutCompactPromptV1 = `Recognize the authorized worksheet cro
 Return compact JSON only: {"items":[{"target_id":"exact authorized ID","kind":"question","recognition":{"question":"printed source only","subject":"数学","answer_state":"present","student_answer":"all active handwritten steps and final answer","recognition_confidence":0.99,"ocr_signals":[],"answer_bbox":{"x":0,"y":0,"width":1,"height":1}}}]}.
 Rules:
 - Return every authorized target exactly once. Do not add, merge, split, or duplicate targets. A title, instruction such as 把下面每题的得数化简, decoration, or watermark is kind=non_question with recognition=null. Never hallucinate an expression from an instruction or scribble.
-- For kind=question, output only question, subject, answer_state, student_answer, recognition_confidence, ocr_signals, answer_bbox. Source numbering/section and identity are already frozen by the server; do not repeat them. subject is 数学/语文/英语/物理/化学 or empty.
+- For kind=question, output only question, subject, answer_state, student_answer, recognition_confidence, ocr_signals, answer_bbox. Source numbering/section and identity are already frozen by the server; do not repeat them. subject is 数学/语文/英语/物理/化学/科学/信息科技 or empty.
 - Copy all visible fraction numerators, bars, denominators, decimals, signs and units exactly. Never infer a clipped symbol from the answer or nearby question. Keep math readable using TeX enclosed in \( ... \), using normal JSON string escaping once. Do not output a second canonical copy or repeated evidence arrays.
 - Separate printed source from handwriting even when the student's answer is written on the SAME LINE after the printed equals sign. That handwritten value belongs only in student_answer, never in question. Differentiate typeface and handwriting before declaring an answer area blank. Do not include a neighboring crop's text.
 - Before returning, independently rescan the printed line from left to right against this image: verify every operand, plus/minus sign, decimal point, and each stacked fraction. Do not omit a middle term or a leading zero. Check the pixels, not whether the student's answer would be correct.
@@ -389,7 +389,7 @@ const printedQuestionInventoryPrompt = `这是“整页印刷题清单”识别�
 - question 只允许包含印刷体原题，忽略铅笔、黑笔、涂改和手写等号右侧内容；
 - 分数的分子、分母和横线必须完整保留；看见 5/7−1/5 不能漏成 5−1/5；
 - 小数点、运算符、单位、括号和题号必须按图抄录，不能用数学常识改写；
-- subject 只能取 数学 / 语文 / 英语 / 物理 / 化学，无法判断时留空；
+- subject 只能取 数学 / 语文 / 英语 / 物理 / 化学 / 科学 / 信息科技，无法判断时留空；
 - knowledge_points 只填写从印刷题干可确定的知识点。
 严格只输出紧凑 JSON 数组，每个对象仅含 source_number_path、display_label、source_section_path、source_section_label、question、subject、knowledge_points，不要输出 student_answer、answer_state、bbox、system_section_ordinal、system_display_label 或解释。`
 
@@ -540,7 +540,7 @@ func sanitizeModelJSON(s string) string {
 // recognizedSubjects 是识题允许回填的学科白名单——视觉模型判定越界（返回未知词/编造）时归零，
 // 避免脏学科流入 solve/批改路由（与 usecase.normalizeSubject 的领域约束对齐）。
 var recognizedSubjects = map[string]struct{}{
-	"数学": {}, "语文": {}, "英语": {}, "物理": {}, "化学": {},
+	"数学": {}, "语文": {}, "英语": {}, "物理": {}, "化学": {}, "科学": {}, "信息科技": {},
 }
 
 // normalizeRecognizedSubject 只放行白名单内学科，其余（含空/未知）归一为空字符串。
@@ -1197,7 +1197,7 @@ func RecognizedQuestionsFromLayoutFinalizationV2(
 			region := target.Region
 			question.SourceRegion = &region
 			if plan.Scope != nil {
-				question.ImageSourceContext = &k12.RecognitionImageSourceContextV1{Version: k12.RecognitionImageScopeVersionV1, Action: plan.ScopeInput.Action, ScopeDigest: plan.AuthorizedPlanDigest, TargetIDs: []string{target.TargetID}}
+				question.ImageSourceContext = &k12.RecognitionImageSourceContextV1{Version: k12.RecognitionImageScopeVersionV1, Action: plan.ScopeInput.Action, SourceComparisonPolicy: plan.ScopeInput.SourceComparisonPolicy, ScopeDigest: plan.AuthorizedPlanDigest, TargetIDs: []string{target.TargetID}}
 				for _, dependency := range plan.Scope.Dependencies {
 					for _, order := range dependency.ForOrders {
 						if order == target.ManifestOrder {
@@ -1228,10 +1228,24 @@ func RecognizedQuestionsFromLayoutFinalizationV2(
 				box := receipt.Evidence.BBox
 				question.ObservedAnswerRegion = &box
 			}
+			if receipt := candidate.PrintedQuestionReceipt; receipt != nil {
+				source, found := physicalByID[receipt.SourcePhysicalInvocationID]
+				unit, unitErr := k12.RecognitionLayoutAdjudicationUnitV2(index + 1)
+				exact, exactErr := k12.RecognitionLayoutTargetExactSetDigestV2([]string{target.TargetID})
+				if question.Subject != "语文" || question.ImageSourceContext == nil || !found || unitErr != nil || exactErr != nil ||
+					receipt.PlanDigest != plan.AuthorizedPlanDigest || receipt.CandidateID != target.TargetID || source.PhysicalUnit != unit || source.PlanDigest != receipt.PlanDigest || source.CandidateExactSetDigest != exact || source.ResultDigest != receipt.SourcePhysicalResultDigest || strings.TrimSpace(receipt.AuthorizationID) == "" || !recognitionLayoutSHA256DigestV2.MatchString(receipt.SettlementDigest) ||
+					k12.ValidateRecognitionPrintedQuestionEvidenceV1(receipt.Evidence, plan, question.EvidenceTranscriptions) != nil {
+					return fail("candidate %q printed question is detached from its adjudication", target.TargetID)
+				}
+				copy := *receipt
+				question.ImageSourceContext.PrintedQuestionReceipt = &copy
+				// 派生题面采用独立核验文字，原候选及学生作答继续保留。
+				question.Question, question.RawTranscription, question.CanonicalMarkdown = receipt.Evidence.RawTranscription, receipt.Evidence.RawTranscription, receipt.Evidence.RawTranscription
+			}
 			questions = append(questions, usecase.NormalizeRecognizedQuestionForInitialReadMode(question, plan.InitialReadMode))
 			questionTargets = append(questionTargets, index)
 		case k12.RecognitionLayoutCandidateNonQuestionV2:
-			if candidate.FinalAnswerReceipt != nil || !bytes.Equal(candidate.ResultJSON, []byte(`{}`)) {
+			if candidate.FinalAnswerReceipt != nil || candidate.PrintedQuestionReceipt != nil || !bytes.Equal(candidate.ResultJSON, []byte(`{}`)) {
 				return fail("candidate %q non_question result is not {}", target.TargetID)
 			}
 		default:

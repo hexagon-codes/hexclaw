@@ -185,18 +185,19 @@ func projectPracticeGenerationInvocation(
 }
 
 type singlePracticeRequestSnapshot struct {
-	SourceMistakeID string `json:"source_mistake_id"`
-	SourceVersion   int    `json:"source_version"`
-	SourceProblemID string `json:"source_problem_id"`
-	Question        string `json:"question"`
-	KnowledgePoint  string `json:"knowledge_point"`
-	Subject         string `json:"subject"`
-	Grade           string `json:"grade"`
-	Textbook        string `json:"textbook"`
-	Difficulty      string `json:"difficulty"`
-	Provider        string `json:"provider,omitempty"`
-	Model           string `json:"model,omitempty"`
-	SourceSession   string `json:"source_session,omitempty"`
+	Diagnostic      *practiceDiagnosticContext `json:"diagnostic,omitempty"`
+	SourceMistakeID string                     `json:"source_mistake_id"`
+	SourceVersion   int                        `json:"source_version"`
+	SourceProblemID string                     `json:"source_problem_id"`
+	Question        string                     `json:"question"`
+	KnowledgePoint  string                     `json:"knowledge_point"`
+	Subject         string                     `json:"subject"`
+	Grade           string                     `json:"grade"`
+	Textbook        string                     `json:"textbook"`
+	Difficulty      string                     `json:"difficulty"`
+	Provider        string                     `json:"provider,omitempty"`
+	Model           string                     `json:"model,omitempty"`
+	SourceSession   string                     `json:"source_session,omitempty"`
 }
 
 func normalizeSinglePracticeRequest(
@@ -245,6 +246,7 @@ func normalizeSinglePracticeRequest(
 			fmt.Errorf("%w: difficulty 仅支持 same/easier/harder", ErrInvalidInput)
 	}
 	snapshot := singlePracticeRequestSnapshot{
+		Diagnostic:      singlePracticeDiagnostic(source, fields),
 		SourceMistakeID: source.RecordID,
 		SourceVersion:   source.Version,
 		SourceProblemID: source.RecordID,
@@ -622,7 +624,7 @@ func singlePracticePrompt(request singlePracticeRequestSnapshot) string {
 		"生成一道%s的小学变式练习。保持来源知识点与方法，不复述原题，给家长答案和讲法；教材边界=%s；年级=%s；来源题=%s；知识点=%s。严格输出 ## 问题 / ## 解答 / ## 答案 三段 Markdown。",
 		difficultyCN, request.Textbook, request.Grade,
 		request.Question, request.KnowledgePoint,
-	)
+	) + request.Diagnostic.prompt()
 }
 
 type singlePracticeModelCall func(context.Context) (SolveResult, error)
@@ -951,6 +953,10 @@ func (d Deps) ProcessSinglePracticeGeneration(
 			lastErr = fmt.Errorf("%w: 逐题变式缺少可分离题目或答案", ErrSolveFailed)
 			continue
 		}
+		if !request.Diagnostic.acceptsQuestion(question) {
+			lastErr = fmt.Errorf("%w: generated question does not distinguish the observed hypothesis", ErrSolveFailed)
+			continue
+		}
 		if job.Status != k12.PracticeGenerationValidating {
 			job, err = d.Records.AdvancePracticeGenerationJob(
 				ctx, agentName, job.GenerationJobID,
@@ -999,7 +1005,7 @@ func (d Deps) ProcessSinglePracticeGeneration(
 			}
 			continue
 		}
-		_, _, validatedExpected := SplitRetryPresentation(validated.Solution)
+		_, validatedAnswer, validatedExpected := SplitRetryPresentation(validated.Solution)
 		validatedExpected = strings.TrimSpace(validatedExpected)
 		status, evidence, blocked := classifyGeneratedPracticeItem(
 			request.Subject, validated, validatedExpected != "",
@@ -1010,6 +1016,10 @@ func (d Deps) ProcessSinglePracticeGeneration(
 		}
 		if validatedExpected != "" {
 			expected = validatedExpected
+		}
+		if request.Diagnostic != nil && strings.TrimSpace(validatedAnswer) != "" {
+			// 诊断题要求说明量的含义及中间量；保留独立核验的完整讲解，不能只留下最后一个数值。
+			expected = strings.TrimSpace(validatedAnswer)
 		}
 		ready := k12.PracticeItem{
 			ItemID:                 job.ResultItemIDs[0],

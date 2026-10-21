@@ -247,9 +247,10 @@ func (s *Store) ReuseSucceededRecognitionPhysicalInvocation(
 			left.ManifestInvocationID, right.ManifestInvocationID = "", ""
 			left.AuthorizedPlanDigest, right.AuthorizedPlanDigest = "", ""
 			if !reflect.DeepEqual(left, right) {
-				if isRepair || isAdjudication || partial {
+				if partial {
 					return current, false, fmt.Errorf("%w: partial recognition replay plan changed", ErrModelPhysicalInvocationConflict)
 				}
+				// 已明确失败的旧计划不命中复用；当前完整授权计划继续执行自己的物理调用。
 				continue
 			}
 			if isAdjudication {

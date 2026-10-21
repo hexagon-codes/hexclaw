@@ -131,6 +131,7 @@ func (s *Store) PrepareWeeklyArithmeticBatch(
 	expectedRevision int,
 	idempotencyKey, requestDigest, checkpointJSON string,
 	at int64,
+	replaceCurrent ...bool,
 ) (k12.WeeklyArithmeticBatch, bool, error) {
 	weeklyArithmeticMu.Lock()
 	defer weeklyArithmeticMu.Unlock()
@@ -174,7 +175,10 @@ func (s *Store) PrepareWeeklyArithmeticBatch(
 	latest, latestErr := getWeeklyArithmeticBatchVia(
 		ctx, tx, agentName, `plan_id=? ORDER BY ordinal DESC LIMIT 1`, planID)
 	if latestErr == nil {
-		if latest.State != k12.WeeklyArithmeticCompleted {
+		// 显式重新生成保留旧批次，不将打印或下载伪装为已作答完成。
+		replaceReady := len(replaceCurrent) > 0 && replaceCurrent[0] &&
+			(latest.State == k12.WeeklyArithmeticReady || latest.State == k12.WeeklyArithmeticInProgress)
+		if latest.State != k12.WeeklyArithmeticCompleted && !replaceReady {
 			return k12.WeeklyArithmeticBatch{}, false, records.ErrIllegalTransition
 		}
 		ordinal = latest.Ordinal + 1
@@ -600,6 +604,23 @@ func (s *Store) GetWeeklyTrackCheckpoint(
         WHERE agent_name=? AND plan_id=? AND plan_revision=?
           AND plan_section='textbook_consolidation'`,
 		agentName, planID, revision).Scan(&checkpoint)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", records.ErrNotFound
+	}
+	return checkpoint, err
+}
+
+// GetCompletedWeeklyTextbookCheckpoint 只读最近完成的手动教材批次，跳过未决及自动供题。
+func (s *Store) GetCompletedWeeklyTextbookCheckpoint(ctx context.Context, agentName, planID string, revision int) (string, error) {
+	var checkpoint string
+	err := s.db.QueryRowContext(ctx, `SELECT checkpoint_json FROM k12_weekly_track_checkpoints
+		WHERE agent_name=? AND plan_id=? AND plan_revision<=? AND plan_section='textbook_consolidation'
+		AND json_extract(checkpoint_json,'$.checkpoint.kind')='refresh'
+		AND json_extract(checkpoint_json,'$.MaxItems')>0
+		AND json_array_length(checkpoint_json,'$.generation.items')=json_extract(checkpoint_json,'$.MaxItems')
+		AND NOT EXISTS(SELECT 1 FROM json_each(checkpoint_json,'$.generation.items')
+			WHERE json_extract(value,'$.candidate') IS NULL)
+		ORDER BY plan_revision DESC LIMIT 1`, agentName, planID, revision).Scan(&checkpoint)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", records.ErrNotFound
 	}

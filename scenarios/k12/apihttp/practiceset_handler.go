@@ -13,28 +13,30 @@ import (
 
 // 练习集 DTO（前端契约，PRD §3.8 / §5.5）。
 type practiceItemDTO struct {
-	ItemID              string   `json:"item_id"`
-	SourceProblemID     string   `json:"source_problem_id,omitempty"`
-	Subject             string   `json:"subject,omitempty"`
-	AddedVia            string   `json:"added_via,omitempty"`
-	Question            string   `json:"question_markdown"`
-	ExpectedAnswer      string   `json:"expected_answer_markdown,omitempty"`
-	VerificationStatus  string   `json:"verification_status"`
-	VerificationBadge   string   `json:"verification_evidence,omitempty"`
-	BlockedReason       string   `json:"blocked_reason,omitempty"`
-	PaperSeq            int      `json:"paper_seq,omitempty"`
-	Returned            bool     `json:"returned,omitempty"`
-	ReturnIDs           []string `json:"return_ids,omitempty"`
-	GenerationJobID     string   `json:"generation_job_id,omitempty"`
-	VariantIndex        int      `json:"variant_index,omitempty"`
-	RequestedDifficulty string   `json:"requested_difficulty,omitempty"`
-	ActualDifficulty    string   `json:"actual_difficulty,omitempty"`
+	LearningEvidence    []k12.LearningEvidence `json:"learning_evidence"`
+	ItemID              string                 `json:"item_id"`
+	SourceProblemID     string                 `json:"source_problem_id,omitempty"`
+	Subject             string                 `json:"subject,omitempty"`
+	AddedVia            string                 `json:"added_via,omitempty"`
+	Question            string                 `json:"question_markdown"`
+	ExpectedAnswer      string                 `json:"expected_answer_markdown,omitempty"`
+	VerificationStatus  string                 `json:"verification_status"`
+	VerificationBadge   string                 `json:"verification_evidence,omitempty"`
+	BlockedReason       string                 `json:"blocked_reason,omitempty"`
+	PaperSeq            int                    `json:"paper_seq,omitempty"`
+	Returned            bool                   `json:"returned,omitempty"`
+	ReturnIDs           []string               `json:"return_ids,omitempty"`
+	GenerationJobID     string                 `json:"generation_job_id,omitempty"`
+	VariantIndex        int                    `json:"variant_index,omitempty"`
+	RequestedDifficulty string                 `json:"requested_difficulty,omitempty"`
+	ActualDifficulty    string                 `json:"actual_difficulty,omitempty"`
 	// ResultCorrect 复批逐题结论（§3.8 第 3-4 条）：null=尚无结论。
 	ResultCorrect  *bool  `json:"result_correct,omitempty"`
 	ResultEvidence string `json:"result_evidence,omitempty"`
 }
 
 type practiceReturnAssetDTO struct {
+	LearningEvidence  []k12.LearningEvidence   `json:"learning_evidence"`
 	ReturnID          string                   `json:"return_id"`
 	AssetID           string                   `json:"asset_id"`
 	ItemIDs           []string                 `json:"item_ids"`
@@ -135,7 +137,8 @@ func toPracticeSetDTO(v usecase.PracticeSetView) practiceSetDTO {
 	returnAssets := make([]practiceReturnAssetDTO, 0, len(v.Fields.ReturnAssets))
 	for _, ra := range v.Fields.ReturnAssets {
 		returnAssets = append(returnAssets, practiceReturnAssetDTO{
-			ReturnID: ra.ReturnID, AssetID: ra.AssetID, ItemIDs: ra.ItemIDs, ReturnedAt: ra.ReturnedAt,
+			LearningEvidence: k12.LearningEvidenceOrUnknown(ra.LearningEvidence),
+			ReturnID:         ra.ReturnID, AssetID: ra.AssetID, ItemIDs: ra.ItemIDs, ReturnedAt: ra.ReturnedAt,
 			AutoMatch: ra.AutoMatch, CandidateItemIDs: ra.CandidateItemIDs,
 			RegradeJobID: ra.RegradeJobID, RegradeStatus: ra.RegradeStatus,
 			RouteSnapshot: ra.RouteSnapshot, AnnotatedAssetID: ra.AnnotatedAssetID,
@@ -152,7 +155,8 @@ func toPracticeSetDTO(v usecase.PracticeSetView) practiceSetDTO {
 			continue
 		}
 		items = append(items, practiceItemDTO{
-			ItemID: it.ItemID, SourceProblemID: it.SourceProblemID, Subject: it.Subject,
+			LearningEvidence: k12.LearningEvidenceOrUnknown(it.LearningEvidence),
+			ItemID:           it.ItemID, SourceProblemID: it.SourceProblemID, Subject: it.Subject,
 			AddedVia: it.AddedVia,
 			Question: it.QuestionMarkdown, ExpectedAnswer: it.ExpectedAnswerMarkdown,
 			VerificationStatus: it.VerificationStatus, VerificationBadge: it.VerificationEvidence,
@@ -743,11 +747,12 @@ func (h *handler) retryPracticePrintJob(w http.ResponseWriter, r *http.Request) 
 
 // submitPracticeSet 接纳照片及幂等键；显式覆盖与自动匹配互斥，空题集不等于整卷覆盖。
 type submitReturnReq struct {
-	Agent     string   `json:"agent"`
-	ReturnID  string   `json:"return_id"`
-	AssetID   string   `json:"asset_id"`
-	ItemIDs   []string `json:"item_ids"`
-	AutoMatch bool     `json:"auto_match,omitempty"`
+	AnswerContext string   `json:"answer_context,omitempty"`
+	Agent         string   `json:"agent"`
+	ReturnID      string   `json:"return_id"`
+	AssetID       string   `json:"asset_id"`
+	ItemIDs       []string `json:"item_ids"`
+	AutoMatch     bool     `json:"auto_match,omitempty"`
 }
 
 func (h *handler) submitPracticeSet(w http.ResponseWriter, r *http.Request) {
@@ -761,6 +766,7 @@ func (h *handler) submitPracticeSet(w http.ResponseWriter, r *http.Request) {
 	}
 	v, err := h.rt.Deps.SubmitReturns(r.Context(), req.Agent, r.PathValue("id"), []usecase.PracticeReturnInput{{
 		ReturnID: req.ReturnID, AssetID: req.AssetID, ItemIDs: req.ItemIDs, AutoMatch: req.AutoMatch,
+		AnswerContext: req.AnswerContext,
 	}})
 	if err != nil {
 		writeErr(w, httpStatusForK12Error(err, http.StatusConflict), err.Error())

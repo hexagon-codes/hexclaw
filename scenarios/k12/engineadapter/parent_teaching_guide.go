@@ -71,10 +71,7 @@ var parentTeachingSubjectSkills = map[string]parentTeachingSkillSpec{
 
 // SelectParentTeachingContextReceipts 从本次已消费快照选择通用与同学科指导，不追补当前目录。
 func SelectParentTeachingContextReceipts(subject string, frozen []skill.ContextReceipt) []skill.ContextReceipt {
-	canonical := strings.TrimSpace(subject)
-	if canonical == "math" {
-		canonical = "数学"
-	}
+	canonical := parentTeachingSubject(subject)
 	subjectSkill, known := parentTeachingSubjectSkills[canonical]
 	if !known {
 		return nil
@@ -136,16 +133,21 @@ func (a *SolveAdapter) GenerateParentTeachingGuide(
 	if a.parentTeachingGuideGen == nil {
 		return usecase.ParentTeachingGuide{}, fmt.Errorf("parent teaching guide: 未注入专用生成闭包")
 	}
+	sourceAnswer, _ := usecase.ParentTeachingAnswer(req.VerifiedSolution)
 	facts, err := json.Marshal(struct {
-		Problem          string   `json:"problem"`
-		StudentAnswer    string   `json:"student_answer,omitempty"`
-		VerifiedSolution string   `json:"verified_solution"`
-		KnowledgePoints  []string `json:"knowledge_points,omitempty"`
-		WrongStep        string   `json:"wrong_step,omitempty"`
-		ErrorCause       string   `json:"error_cause,omitempty"`
+		Problem               string              `json:"problem"`
+		StudentAnswer         string              `json:"student_answer,omitempty"`
+		ObservedAnswerState   usecase.AnswerState `json:"answer_state,omitempty"`
+		ObservedStudentAnswer string              `json:"observed_student_answer,omitempty"`
+		VerifiedSolution      string              `json:"verified_solution"`
+		SourceAnswer          string              `json:"source_answer,omitempty"`
+		KnowledgePoints       []string            `json:"knowledge_points,omitempty"`
+		WrongStep             string              `json:"wrong_step,omitempty"`
+		ErrorCause            string              `json:"error_cause,omitempty"`
 	}{
 		Problem: req.Problem, StudentAnswer: req.StudentAnswer,
-		VerifiedSolution: req.VerifiedSolution, KnowledgePoints: req.KnowledgePoints,
+		ObservedAnswerState: req.ObservedAnswerState, ObservedStudentAnswer: req.ObservedStudentAnswer,
+		VerifiedSolution: req.VerifiedSolution, SourceAnswer: sourceAnswer, KnowledgePoints: req.KnowledgePoints,
 		WrongStep: req.WrongStep, ErrorCause: req.ErrorCause,
 	})
 	if err != nil {
@@ -167,9 +169,11 @@ func (a *SolveAdapter) GenerateParentTeachingGuide(
 		}
 	}
 	promptBuilder.WriteString(`请只针对下面这一道题生成家长可照着使用的辅导指南。一次提供正确答案、完整解法和讲题方法，把学科 Skill 的方法落实到具体的讲解、追问、卡点引导和理解检查；内容简洁明确。
+正文不自述工具调用、模型或内部验证流程；检验直接给代回计算、原文依据或可观察事实。已有系统图示就说明其等份、位置与数量，不要求家长重画，不用空格拼字符图；没有实际图示不能声称已经画图。保留全部答案、单位、必要过程和多解前提，减少重复铺垫、结论与无关操作要求。
 verified_solution 是已验算的完整解答，是答案和完整方法的唯一依据，不得改写为其他答案或方法。
-answer 只能填写 verified_solution 中明确出现的简短最终答案，禁止把整段解答塞入 answer；full_solution_steps 按 verified_solution 的解题顺序填写必要步骤，服务端还会用可信原文确定性分段后覆盖核对。
-student_answer、wrong_step、error_cause 是已经冻结的孩子作答与批改事实，只用于生成本题讲解顺序和易错提醒，不得改写或否定这些事实。
+answer 必须完整保留 verified_solution 明确给出的所有空位答案、必要单位及多种有效填法各自的前提，不得只摘其中一种；禁止把无关推导塞入 answer。full_solution_steps 按 verified_solution 的解题顺序填写完整必要步骤，服务端还会用可信原文确定性分段后覆盖核对。
+source_answer 非空时，answer 必须逐字复制 source_answer 的完整字符串，不得增加解释、缩写、重排或改写。它是从同一份 verified_solution 的明确最终答案段提取的原文。单位“1”的含义及其他必要前提放入 grade_level_method 和 parent_teaching_sequence，不要追加到 answer。
+answer_state 与 observed_student_answer 是当前来源中实际观察的状态和原文。student_answer 可能是独立求解时清空的执行副本，空串不能证明孩子未答。状态缺失保持未知；笔迹不清时仍提供独立参考，但不能声称孩子没写、答错或已掌握。wrong_step、error_cause 只有已提供的真实批改事实才可作为该孩子的错因，其他易错点必须作为一般提醒。
 严格只输出一个 JSON 对象，字段必须且只能是：
 answer（字符串）、full_solution_steps（非空字符串数组，完整方法与必要步骤）、grade_level_method（字符串，当前年级/学期/教材允许的方法）、
 likely_mistakes（非空字符串数组，最容易出错的步骤与原因）、
@@ -227,13 +231,15 @@ func (a *SolveAdapter) AuditParentTeachingGuide(ctx context.Context, req usecase
 	guideForAudit := req.Guide
 	guideForAudit.SkillContextReceipts = nil
 	facts, err := json.Marshal(struct {
-		Problem   string `json:"problem"`
-		Candidate struct {
+		Problem               string              `json:"problem"`
+		ObservedAnswerState   usecase.AnswerState `json:"answer_state,omitempty"`
+		ObservedStudentAnswer string              `json:"observed_student_answer,omitempty"`
+		Candidate             struct {
 			SourceDigest string                      `json:"source_digest"`
 			Solution     string                      `json:"solution"`
 			Guide        usecase.ParentTeachingGuide `json:"parent_guide"`
 		} `json:"candidate"`
-	}{Problem: req.Request.Problem, Candidate: struct {
+	}{Problem: req.Request.Problem, ObservedAnswerState: req.Request.ObservedAnswerState, ObservedStudentAnswer: req.Request.ObservedStudentAnswer, Candidate: struct {
 		SourceDigest string                      `json:"source_digest"`
 		Solution     string                      `json:"solution"`
 		Guide        usecase.ParentTeachingGuide `json:"parent_guide"`
@@ -242,7 +248,7 @@ func (a *SolveAdapter) AuditParentTeachingGuide(ctx context.Context, req usecase
 		return usecase.ParentTeachingGuideAudit{}, err
 	}
 	prompt := req.Request.FrozenTeachingContract + "\n" + engine.ParentGuideAuditContract +
-		"\nThe original mathematical solution is already verified and immutable. Audit only this supplied guide; do not generate another solution. Output exactly one line: PARENT_GUIDE_AUDITS: <JSON array containing this one candidate's audit>.\n" + string(facts)
+		"\nThe original mathematical solution is already verified and immutable. Audit only this supplied guide; do not generate another solution. A missing or unreadable student answer does not prove that the student left it blank, made an error, or mastered the concept. Check any student-specific claims against the supplied observation only. Output exactly one line: PARENT_GUIDE_AUDITS: <JSON array containing this one candidate's audit>.\n" + string(facts)
 	out, err := a.parentTeachingGuideAudit(ctx, req.Request.Subject, prompt, req.Request.Grade)
 	if err != nil {
 		return usecase.ParentTeachingGuideAudit{}, providerResponseError(err)
@@ -261,7 +267,7 @@ func buildParentTeachingSkillMethodology(subject string, loader SkillContentLoad
 
 func buildParentTeachingSkillContext(subject string, loader SkillContentLoader) (string, []skill.ContextReceipt) {
 	specs := []parentTeachingSkillSpec{parentTeachingPedagogySkill}
-	if subjectSkill, ok := parentTeachingSubjectSkills[strings.TrimSpace(subject)]; ok {
+	if subjectSkill, ok := parentTeachingSubjectSkills[parentTeachingSubject(subject)]; ok {
 		specs = append(specs, subjectSkill)
 	}
 	var b strings.Builder
@@ -285,6 +291,25 @@ func buildParentTeachingSkillContext(subject string, loader SkillContentLoader) 
 		prepared = append(prepared, snapshot)
 	}
 	return strings.TrimSpace(b.String()), prepared
+}
+
+// 同一学科的已支持入口名称选择同份正文，不以未知名称猜测数学。
+func parentTeachingSubject(subject string) string {
+	trimmed := strings.TrimSpace(subject)
+	switch strings.ToLower(trimmed) {
+	case "math":
+		return "数学"
+	case "chinese":
+		return "语文"
+	case "english":
+		return "英语"
+	case "science":
+		return "科学"
+	case "information technology", "information-technology":
+		return "信息科技"
+	default:
+		return trimmed
+	}
 }
 
 func resolveParentTeachingSkill(

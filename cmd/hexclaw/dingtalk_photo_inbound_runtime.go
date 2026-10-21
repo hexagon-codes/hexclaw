@@ -785,7 +785,7 @@ func (r *k12DingtalkPhotoInboundRuntime) advanceImageTask(
 	}
 	validated := bundle
 	validated.Dispatch.FinalArtifactID = result.FinalArtifact.ArtifactID
-	if _, _, err := r.openValidatedFinalArtifact(ctx, validated, view.Dispatch.TaskIntent); err != nil {
+	if _, _, err := r.openValidatedFinalArtifact(ctx, validated, k12usecase.EffectiveImageTaskHomeworkIntent(view.Dispatch)); err != nil {
 		return false, err
 	}
 	if err := r.reachRestartCheckpoint(
@@ -1223,7 +1223,7 @@ func (r *k12DingtalkPhotoInboundRuntime) advanceFinalReply(
 		if err != nil {
 			return false, err
 		}
-		taskIntent = view.Dispatch.TaskIntent
+		taskIntent = k12usecase.EffectiveImageTaskHomeworkIntent(view.Dispatch)
 		if view.Creative != nil {
 			result, err := r.imageTasks.Result(ctx, bundle.Receipt.AgentName, bundle.Dispatch.ImageTaskID)
 			if err != nil {

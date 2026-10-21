@@ -242,6 +242,10 @@ func BuildRecognitionLayoutPlanV2(input RecognitionLayoutPlanInputV2) (Recogniti
 		})
 		rowStart = rowEnd
 	}
+	if input.InitialReadMode == RecognitionLayoutManifestWithContentV1 && input.Scope != nil && input.PageOrientation != nil && input.PageOrientation.ClockwiseDegrees != 0 {
+		// 横拍首读已按阅读顺序给出配对目标，不再用近似坐标反向重排小问。
+		sort.SliceStable(targets, func(left, right int) bool { return targets[left].ManifestOrder < targets[right].ManifestOrder })
+	}
 
 	pageDigest := recognitionLayoutSHA256(input.PagePNG)
 	if input.PageOrientation != nil && (!input.PageOrientation.Valid() || input.PageOrientation.PageDigest != pageDigest) {
@@ -249,6 +253,7 @@ func BuildRecognitionLayoutPlanV2(input RecognitionLayoutPlanInputV2) (Recogniti
 	}
 	plan := RecognitionLayoutPlanV2{
 		PageOrientation:      input.PageOrientation,
+		ScopeInput:           input.ScopeInput,
 		Version:              RecognitionPlanVersionV2,
 		InitialReadMode:      input.InitialReadMode,
 		RecognitionFormat:    input.RecognitionFormat,
@@ -259,6 +264,10 @@ func BuildRecognitionLayoutPlanV2(input RecognitionLayoutPlanInputV2) (Recogniti
 		Targets:              make([]RecognitionLayoutTargetV2, 0, len(targets)),
 	}
 	for index, target := range targets {
+		if input.InitialReadMode == RecognitionLayoutManifestWithContentV1 && input.Scope != nil && input.PageOrientation != nil && input.PageOrientation.ClockwiseDegrees != 0 {
+			// 复读同样需要完整横拍原页；不能等裁决阶段才补回已经截断的印刷题干。
+			target.Region = SourcePixelRegion{Width: pageBounds.Dx(), Height: pageBounds.Dy()}
+		}
 		crop, cropErr := recognitionLayoutCropPNG(page, target.Region)
 		if cropErr != nil {
 			return RecognitionLayoutPlanV2{}, cropErr
@@ -286,7 +295,16 @@ func BuildRecognitionLayoutPlanV2(input RecognitionLayoutPlanInputV2) (Recogniti
 		if input.EnableSourceAdjudication {
 			original := originalByRef[target.ManifestRef]
 			contextRegion := recognitionLayoutAdjudicationRegion(target.Region, pageBounds)
+			if input.InitialReadMode == RecognitionLayoutManifestWithContentV1 && input.Scope != nil && input.PageOrientation != nil && input.PageOrientation.ClockwiseDegrees != 0 {
+				// 横拍页的近似紧框可能切断纵向题干与父材料；独立核验保留整页像素，仍按目标身份区分作答。
+				// 低可信方向只触发补充上下文，不据此旋转原像素。
+				contextRegion = SourcePixelRegion{Width: pageBounds.Dx(), Height: pageBounds.Dy()}
+			}
 			contextImage, contextErr := recognitionLayoutCropPNG(page, contextRegion)
+			if contextErr != nil {
+				return RecognitionLayoutPlanV2{}, contextErr
+			}
+			contextImage, contextErr = recognitionAdjudicationViewPNG(contextImage, plan.AdjudicationImageRotation())
 			if contextErr != nil {
 				return RecognitionLayoutPlanV2{}, contextErr
 			}
@@ -604,6 +622,9 @@ func BuildRecognitionLayoutAdjudicationImageV2(pagePNG []byte, plan RecognitionL
 			return nil, fmt.Errorf("%w: adjudication region is invalid", ErrRecognitionLayoutPlanInvalid)
 		}
 		crop, cropErr := recognitionLayoutCropPNG(page, *target.AdjudicationRegion)
+		if cropErr == nil {
+			crop, cropErr = recognitionAdjudicationViewPNG(crop, plan.AdjudicationImageRotation())
+		}
 		if cropErr != nil || recognitionLayoutSHA256(crop) != target.AdjudicationDigest {
 			return nil, fmt.Errorf("%w: adjudication image digest mismatch", ErrRecognitionLayoutPlanInvalid)
 		}

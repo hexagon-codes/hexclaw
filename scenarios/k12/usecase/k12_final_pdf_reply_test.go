@@ -410,7 +410,7 @@ func TestK12FinalPDFSourceDigestFamiliesSQLite(t *testing.T) {
 				}
 				if renderer.calls != 1 || printed.Artifact.CanonicalMarkdown != f.old.CanonicalMarkdown ||
 					!strings.Contains(renderer.markdown, "![](data:image/jpeg;base64,"+base64.StdEncoding.EncodeToString(image)+")") ||
-					!strings.HasSuffix(printed.Artifact.SourceRef, ":"+rawDigest+":"+imageFinalPDFRenderContractVersion) {
+					!strings.HasSuffix(printed.Artifact.SourceRef, ":"+rawDigest+":"+blankWorksheetPDFProjectionVersion+":"+imageFinalPDFRenderContractVersion) {
 					t.Fatal("PDF did not preserve frozen body and original JPEG bytes/MIME/identity")
 				}
 				if again, replay, err := d.PrepareGradingFinalArtifactPDFExact(ctx, "mingming", f.old.ArtifactID, f.old.ArtifactDigest, K12FinalArtifactPDFTitle(f.old)); err != nil || !replay || renderer.calls != 1 || !bytes.Equal(again.Render.Payload, printed.Render.Payload) || again.Render.ByteDigest != printed.Render.ByteDigest {

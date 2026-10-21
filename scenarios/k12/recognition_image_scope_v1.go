@@ -11,13 +11,16 @@ import (
 
 const RecognitionImageScopeVersionV1 = "image_scope_v1"
 const RecognitionImageSourceReviewPolicyV1 = "clear_language_solve_v1"
+const RecognitionImageSourceUprightReviewPolicyV1 = "upright_context_v1"
+const RecognitionImageSourceComparisonPolicyV1 = "chinese_blank_layout_v1"
 
 // 范围输入随任务冻结；缺少版本的历史任务继续使用原有整页合同。
 type RecognitionImageScopeInputV1 struct {
-	Version            string `json:"version"`
-	MessageIntent      string `json:"message_intent,omitempty"`
-	Action             string `json:"action,omitempty"`
-	SourceReviewPolicy string `json:"source_review_policy,omitempty"`
+	Version                string `json:"version"`
+	MessageIntent          string `json:"message_intent,omitempty"`
+	Action                 string `json:"action,omitempty"`
+	SourceReviewPolicy     string `json:"source_review_policy,omitempty"`
+	SourceComparisonPolicy string `json:"source_comparison_policy,omitempty"`
 }
 
 type RecognitionImageScopeDependencyV1 struct {
@@ -62,12 +65,14 @@ type RecognitionImageSourceRecoveryV1 struct {
 
 // 来源上下文与 OCR 原文分离，随原任务运行文件及输入摘要冻结。
 type RecognitionImageSourceContextV1 struct {
-	Version     string                              `json:"version,omitempty"`
-	Action      string                              `json:"action,omitempty"`
-	ScopeDigest string                              `json:"scope_digest"`
-	TargetIDs   []string                            `json:"target_ids"`
-	Materials   []RecognitionImageScopeDependencyV1 `json:"materials,omitempty"`
-	Recoveries  []RecognitionImageSourceRecoveryV1  `json:"recoveries,omitempty"`
+	PrintedQuestionReceipt *RecognitionPrintedQuestionReceiptV1 `json:"printed_question_receipt,omitempty"`
+	SourceComparisonPolicy string                               `json:"source_comparison_policy,omitempty"`
+	Version                string                               `json:"version,omitempty"`
+	Action                 string                               `json:"action,omitempty"`
+	ScopeDigest            string                               `json:"scope_digest"`
+	TargetIDs              []string                             `json:"target_ids"`
+	Materials              []RecognitionImageScopeDependencyV1  `json:"materials,omitempty"`
+	Recoveries             []RecognitionImageSourceRecoveryV1   `json:"recoveries,omitempty"`
 }
 
 func RecognitionImageScopeInputIdentityV1(input *RecognitionImageScopeInputV1) string {

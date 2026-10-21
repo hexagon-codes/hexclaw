@@ -64,7 +64,7 @@ func (d Deps) ReinterpretWeeklyTextbookTrack(ctx context.Context, agentName, pla
 				if interpretation.RequestDigest != digest {
 					return k12.WeeklyPracticePlan{}, false, records.ErrVersionConflict
 				}
-				plan, _, err := d.resumeWeeklyTextbookRecovery(ctx, request, expectedRevision)
+				plan, _, err := d.finishWeeklyInterpretation(ctx, request, input.ItemIndex, expectedRevision)
 				return plan, true, err
 			}
 		}
@@ -87,14 +87,6 @@ func (d Deps) ReinterpretWeeklyTextbookTrack(ctx context.Context, agentName, pla
 	call := weeklyLatestSolve(step)
 	if step.Candidate != nil || step.Generate.Status != "succeeded" || step.Generate.Result == nil || step.Target < 0 || step.Target >= len(request.Targets) || !weeklyPhysicalReplayReady(call) {
 		return k12.WeeklyPracticePlan{}, false, records.ErrIllegalTransition
-	}
-	if len(request.Generation.Items) != request.MaxItems {
-		return k12.WeeklyPracticePlan{}, false, records.ErrIllegalTransition
-	}
-	for i, item := range request.Generation.Items {
-		if i != input.ItemIndex && item.Candidate == nil {
-			return k12.WeeklyPracticePlan{}, false, records.ErrIllegalTransition
-		}
 	}
 	capability, ok := d.Solver.(interface{ UsesGradingPhysicalCalls() bool })
 	if !ok || !capability.UsesGradingPhysicalCalls() {
@@ -135,6 +127,25 @@ func (d Deps) ReinterpretWeeklyTextbookTrack(ctx context.Context, agentName, pla
 	if err := d.Records.SaveWeeklyCandidateCheckpoint(context.WithoutCancel(ctx), ref, raw, string(next)); err != nil {
 		return k12.WeeklyPracticePlan{}, false, err
 	}
-	resultPlan, _, err := d.resumeWeeklyTextbookRecovery(ctx, request, expectedRevision)
+	resultPlan, _, err := d.finishWeeklyInterpretation(ctx, request, input.ItemIndex, expectedRevision)
 	return resultPlan, false, err
+}
+
+// finishWeeklyInterpretation 只在其余题已完成时提交计划，缺题仍由原生成命令继续。
+func (d Deps) finishWeeklyInterpretation(ctx context.Context, request WeeklyPracticeCandidateRequest, itemIndex, expectedRevision int) (k12.WeeklyPracticePlan, bool, error) {
+	complete := len(request.Generation.Items) == request.MaxItems
+	for i, item := range request.Generation.Items {
+		if i != itemIndex && item.Candidate == nil {
+			complete = false
+		}
+	}
+	if complete {
+		return d.resumeWeeklyTextbookRecovery(ctx, request, expectedRevision)
+	}
+	plan, _, err := d.weeklyRecoveryPlan(ctx, request, expectedRevision)
+	if err != nil {
+		return k12.WeeklyPracticePlan{}, false, err
+	}
+	projected, err := d.projectWeeklyArithmetic(ctx, plan)
+	return projected, false, err
 }

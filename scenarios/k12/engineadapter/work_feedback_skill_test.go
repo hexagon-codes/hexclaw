@@ -2,6 +2,7 @@ package engineadapter
 
 import (
 	"fmt"
+	"io/fs"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -140,8 +141,8 @@ func TestBuildWorkFeedbackPrompt_DiskUnavailable_FallsBackEmbedded(t *testing.T)
 	if !strings.Contains(prompt, "叶圣陶") {
 		t.Error("盘上缺失时应注入内嵌快照正文")
 	}
-	if stamp != "writing-feedback@1.0.2/embedded" {
-		t.Errorf("来源戳应为 writing-feedback@1.0.2/embedded，got %q", stamp)
+	if expected := expectedEmbeddedFeedbackStamp(t, "writing-feedback"); stamp != expected {
+		t.Errorf("来源戳应为 %q，got %q", expected, stamp)
 	}
 	if !strings.Contains(prompt, writingHardRedline) {
 		t.Error("内嵌路径丢失硬编码红线段")
@@ -176,7 +177,7 @@ func TestBuildWorkFeedbackPrompt_DiskCorrupt_FallsBackEmbedded(t *testing.T) {
 			if !strings.Contains(prompt, "叶圣陶") {
 				t.Error("盘上损坏时应降级注入内嵌快照正文")
 			}
-			if stamp != "writing-feedback@1.0.2/embedded" {
+			if stamp != expectedEmbeddedFeedbackStamp(t, "writing-feedback") {
 				t.Errorf("来源戳应落 embedded，got %q", stamp)
 			}
 			if !strings.Contains(prompt, writingHardRedline) {
@@ -184,6 +185,28 @@ func TestBuildWorkFeedbackPrompt_DiskCorrupt_FallsBackEmbedded(t *testing.T) {
 			}
 		})
 	}
+}
+
+func expectedEmbeddedFeedbackStamp(t *testing.T, name string) string {
+	t.Helper()
+	raw, err := fs.ReadFile(workFeedbackSkillsFS, "skills/"+name+".md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	header := strings.SplitN(string(raw), "---", 3)
+	if len(header) != 3 {
+		t.Fatal("embedded skill frontmatter is missing")
+	}
+	for _, line := range strings.Split(header[1], "\n") {
+		if version, ok := strings.CutPrefix(line, "version:"); ok {
+			version = strings.Trim(strings.TrimSpace(version), `"'`)
+			if version != "" {
+				return name + "@" + version + "/embedded"
+			}
+		}
+	}
+	t.Fatal("embedded skill version is missing")
+	return ""
 }
 
 // TestBuildWorkFeedbackPrompt_DiskMinEngineCompatible min_engine_version 不高于当前应用

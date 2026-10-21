@@ -6,8 +6,8 @@ import (
 	"strings"
 )
 
-// RecognitionPageOrientationV1 绑定首读原图的阅读方向，仅用于派生展示图。
-// 所有识题、定位及批改坐标继续使用原图，不随PDF旋转而改变。
+// RecognitionPageOrientationV1 绑定首读原图的阅读方向，用于派生展示及版本化复核视图。
+// 持久化识题、定位及批改坐标继续使用原图，派生视图坐标须逆映射。
 type RecognitionPageOrientationV1 struct {
 	Version          string  `json:"version"`
 	PageDigest       string  `json:"page_digest"`

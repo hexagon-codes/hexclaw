@@ -7,6 +7,7 @@ import (
 	"unicode"
 
 	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	"github.com/hexagon-codes/hexclaw/skill"
 )
 
@@ -15,14 +16,15 @@ import (
 // FullSolutionSteps is always derived deterministically from the already-
 // verified solver output before this guide leaves the usecase.
 type ParentTeachingGuide struct {
-	SkillContextReceipts   []skill.ContextReceipt `json:"skill_context_receipts,omitempty"`
-	Answer                 string                 `json:"answer"`
-	FullSolutionSteps      []string               `json:"full_solution_steps"`
-	GradeLevelMethod       string                 `json:"grade_level_method"`
-	LikelyMistakes         []string               `json:"likely_mistakes"`
-	ParentTeachingSequence []string               `json:"parent_teaching_sequence"`
-	FollowUpQuestions      []string               `json:"follow_up_questions"`
-	CheckingMethod         string                 `json:"checking_method"`
+	TeachingDiagrams       []k12.TeachingDiagramAsset `json:"teaching_diagrams,omitempty"`
+	SkillContextReceipts   []skill.ContextReceipt     `json:"skill_context_receipts,omitempty"`
+	Answer                 string                     `json:"answer"`
+	FullSolutionSteps      []string                   `json:"full_solution_steps"`
+	GradeLevelMethod       string                     `json:"grade_level_method"`
+	LikelyMistakes         []string                   `json:"likely_mistakes"`
+	ParentTeachingSequence []string                   `json:"parent_teaching_sequence"`
+	FollowUpQuestions      []string                   `json:"follow_up_questions"`
+	CheckingMethod         string                     `json:"checking_method"`
 }
 
 // ParentTeachingGuideRequest carries one exact recognized problem and its
@@ -30,6 +32,8 @@ type ParentTeachingGuide struct {
 // answer, but the usecase accepts it only when it is anchored in that verified
 // solution and never lets the generator rewrite the full method.
 type ParentTeachingGuideRequest struct {
+	ObservedAnswerState         AnswerState            `json:"-"`
+	ObservedStudentAnswer       string                 `json:"-"`
 	ParentTeachingSkillSnapshot []skill.ContextReceipt `json:"parent_teaching_skill_snapshot,omitempty"`
 	Subject                     string
 	Grade                       string
@@ -80,12 +84,14 @@ func (d Deps) parentTeachingGuideRequest(
 	outcome GradeOutcome,
 ) ParentTeachingGuideRequest {
 	return ParentTeachingGuideRequest{
+		ObservedAnswerState: req.ObservedAnswerState, ObservedStudentAnswer: req.ObservedStudentAnswer,
 		Subject: req.Subject, Grade: req.Grade, Problem: req.Problem,
 		StudentAnswer:               req.StudentAnswer,
 		KnowledgePoints:             normalizeParentGuideList(d.projectElementaryEquationKnowledgePoints(ctx, req)),
 		WrongStep:                   outcome.WrongStep,
 		ErrorCause:                  outcome.ErrorCause,
 		VerifiedSolution:            solved.Solution,
+		FrozenTeachingContract:      req.ParentTeachingContract,
 		ParentTeachingSkillSnapshot: req.ParentTeachingSkillSnapshot,
 	}
 }
@@ -114,7 +120,7 @@ func (d Deps) SolveBlankWorksheetProblem(
 		deterministic = false
 	}
 	if !deterministic {
-		if req.SolveOutputVersion == SolveOutputWithParentGuideV1 {
+		if req.SolveOutputVersion == SolveOutputWithParentGuideV1 && solved.Generation != nil {
 			guide, err = auditedSolveParentTeachingGuide(solved)
 		} else {
 			guide, err = d.generateParentTeachingGuide(ctx, guideRequest)
@@ -198,7 +204,7 @@ func deterministicNumericParentTeachingGuide(
 	steps := verifiedFullSolutionSteps(req.VerifiedSolution)
 	knowledge := strings.Join(normalizeParentGuideList(req.KnowledgePoints), "、")
 	if knowledge == "" {
-		knowledge = "题目中的运算顺序和数量关系"
+		knowledge = "四则运算"
 	}
 	guide := ParentTeachingGuide{
 		Answer:            answer,
@@ -252,7 +258,7 @@ func deterministicNumericParentTeachingGuide(
 		guide.ParentTeachingSequence = []string{
 			"先请孩子复述自己的原始解题思路",
 			fmt.Sprintf("一起定位到「%s」，让孩子说明这一步为什么成立", wrongStep),
-			"请孩子按本年级方法独立重算，再与程序验算结果核对",
+			"请孩子独立重算，再与完整订正解法核对",
 			"最后回看原题条件、符号和单位",
 		}
 		guide.FollowUpQuestions = []string{
@@ -274,10 +280,31 @@ func deterministicParentTeachingGuideForEvidence(
 	req ParentTeachingGuideRequest,
 	evidence SolveEvidence,
 ) (ParentTeachingGuide, bool) {
-	if evidence.EvidenceType != EvidenceNumericExec {
+	if evidence.EvidenceType != EvidenceNumericExec || !parentGuidePureArithmetic(req.Problem) {
 		return ParentTeachingGuide{}, false
 	}
 	return deterministicNumericParentTeachingGuide(req)
+}
+
+// 数值验算不能证明应用题适合通用算式讲法，应用题仍使用已冻结的学科生成链。
+func parentGuidePureArithmetic(problem string) bool {
+	value := strings.TrimSpace(problem)
+	for _, prefix := range []string{"脱式计算", "计算下面各题", "计算", "口算", "笔算"} {
+		value = strings.TrimSpace(strings.TrimPrefix(value, prefix))
+	}
+	hasNumber, hasOperation := false, false
+	for _, r := range value {
+		switch {
+		case unicode.IsSpace(r), strings.ContainsRune("：:=＝?？()（）[].．", r):
+		case r >= '0' && r <= '9':
+			hasNumber = true
+		case strings.ContainsRune("+-−×÷*/", r):
+			hasOperation = true
+		default:
+			return false
+		}
+	}
+	return hasNumber && hasOperation
 }
 
 // deterministicNumericAnswer 只接受明确答案段或单行数值执行结果，避免从
@@ -503,6 +530,10 @@ func stripSolutionStepMarker(line string) (string, bool) {
 // section is authoritative; otherwise the concise answer must appear as a
 // bounded token in the verified solver output.
 func answerAnchoredInVerifiedSolution(answer, verifiedSolution string) bool {
+	// 答案标签属于格式；正文仍须完整匹配同一份已验证解答。
+	if content, labeled := splitExplicitAnswerLabel(answer); labeled {
+		answer = content
+	}
 	answer = normalizeAnswerAnchorText(answer)
 	if answer == "" {
 		return false
@@ -540,6 +571,11 @@ func explicitVerifiedAnswerScope(solution string) (string, bool) {
 		lastScope = scope
 	}
 	return strings.TrimSpace(strings.Join(lastScope, "\n")), found
+}
+
+// ParentTeachingAnswer 读取已冻结解答的明确答案段，供讲题生成复用同一答案原文。
+func ParentTeachingAnswer(solution string) (string, bool) {
+	return explicitVerifiedAnswerScope(solution)
 }
 
 func splitExplicitAnswerLabel(line string) (string, bool) {

@@ -282,6 +282,9 @@ func (c *PracticeReturnRegradeCoordinator) projectCompleted(
 	}
 	grades, unresolved := alignedPracticeReturnResults(references, paperSize, result.Items)
 	if len(grades) > 0 {
+		for i := range grades {
+			grades[i].ReturnID = returnID
+		}
 		if _, err := c.Deps.GradePracticeSetItems(ctx, agentName, setID, grades); err != nil {
 			return err
 		}

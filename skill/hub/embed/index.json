@@ -1,6 +1,6 @@
 {
   "version": "2.0.0",
-  "updated_at": "2026-07-18T01:15:01Z",
+  "updated_at": "2026-10-21T12:24:49Z",
   "generated_by": "scripts/generate-index.py",
   "count": 77,
   "skills": [
@@ -80,7 +80,7 @@
       "name": "art-feedback",
       "display_name": "美术作品反馈",
       "description": "小学生美术作品的形成性反馈与指导——构图/色彩/线条/空间/材料效果五要素观察 + 儿童绘画发展阶段适龄评价，只依据画面可见证据，不打分不排名不重画。用于家长上传孩子画作、手工照片求点评时。",
-      "version": "1.0.0",
+      "version": "1.0.2",
       "author": "hexclaw",
       "category": "education",
       "icon": "🎨",
@@ -101,8 +101,8 @@
         "k12-pedagogy"
       ],
       "file": "skills/art-feedback.md",
-      "sha256": "618d78d183f7cb7013307aa080cd57d6184a957d9742e479e604253536374326",
-      "size": 8434,
+      "sha256": "0664db0d8dbf5f633fdd7bd7126a6a7cd73c3b0018cd213819617dbae409243f",
+      "size": 9222,
       "downloads": 0,
       "rating": 0
     },
@@ -198,8 +198,8 @@
     {
       "name": "chinese-tutor",
       "display_name": "语文辅导老师",
-      "description": "辅导、批改小学到初中语文——阅读分点作答、作文共写不代写、字词默写判定、病句六类。用于家长辅导孩子语文作业（字词默写、病句、阅读理解、作文、文言文古诗）时。",
-      "version": "1.2.0",
+      "description": "辅导、批改小学到初中语文——阅读分点作答、作文参考与讲法、字词默写判定、病句六类。用于家长辅导孩子语文作业（字词默写、病句、阅读理解、作文、文言文古诗）时。",
+      "version": "1.2.2",
       "author": "hexclaw",
       "category": "education",
       "icon": "📖",
@@ -208,7 +208,7 @@
       "license": "Apache-2.0",
       "schema_version": "1",
       "eval": "eval/k12/chinese",
-      "acceptance": "阅读答题分点规范 · 作文零代写 · 字词默写判定准确 · 不超纲不泄底",
+      "acceptance": "阅读答题分点规范 · 家长获得完整参考 · 字词默写判定准确 · 不超纲不伪造孩子原创",
       "tags": [
         "k12",
         "chinese",
@@ -225,8 +225,8 @@
         "record-candidate"
       ],
       "file": "skills/chinese-tutor.md",
-      "sha256": "d3d680010c7a596624234d4e69d4a6d9b0fc5fa6efe26e5b7adb3458870d7cee",
-      "size": 4589,
+      "sha256": "3d01a2efac7f974d160554bfe8e6a0b7bd35c1b2c1304d01bc0b632d09bcdc7c",
+      "size": 5198,
       "downloads": 0,
       "rating": 0
     },
@@ -325,7 +325,7 @@
       "name": "concept-explainer",
       "display_name": "知识点讲解",
       "description": "费曼式把一个知识点讲透——类比、拆解、典型例题、常见误区，按学段不超纲。用于孩子/家长要\"讲清楚某概念是什么、怎么理解\"（区别于辅导具体作业题）时。",
-      "version": "1.2.0",
+      "version": "1.2.2",
       "author": "hexclaw",
       "category": "education",
       "tags": [
@@ -348,8 +348,8 @@
         "k12-pedagogy"
       ],
       "file": "skills/concept-explainer.md",
-      "sha256": "f0b8f37e60e3dcf97d7a787cc772f6398cbae8b22f3ce05350fbbaad17f721cd",
-      "size": 2214
+      "sha256": "e8d84ef1d0c44f08cb799cd62727a04d74832813ef127b2b83171f30d58701e7",
+      "size": 2683
     },
     {
       "name": "copywriting-pro",
@@ -517,8 +517,8 @@
     {
       "name": "english-tutor",
       "display_name": "英语辅导老师",
-      "description": "辅导、批改小学到初中英语——用法先于术语讲语法时态、错词订正、作文不代写、口语只鼓励。用于家长辅导孩子英语作业（单词听写、语法、阅读、作文、音标口语）时。",
-      "version": "1.1.0",
+      "description": "辅导、批改小学到初中英语——用法先于术语讲语法时态、错词订正、作文参考与讲法、口语只鼓励。用于家长辅导孩子英语作业（单词听写、语法、阅读、作文、音标口语）时。",
+      "version": "1.1.2",
       "author": "hexclaw",
       "category": "education",
       "icon": "🔤",
@@ -527,7 +527,7 @@
       "license": "Apache-2.0",
       "schema_version": "1",
       "eval": "eval/k12/english",
-      "acceptance": "语法讲解不超纲 · 错词订正准确 · 作文零代写 · 发音口语只鼓励不打击",
+      "acceptance": "语法讲解不超纲 · 错词订正准确 · 家长获得完整参考 · 发音口语只鼓励不打击",
       "tags": [
         "k12",
         "english",
@@ -544,8 +544,8 @@
         "record-candidate"
       ],
       "file": "skills/english-tutor.md",
-      "sha256": "37a1eb9ed645e0ada7b643a7940583ffd930d01af730ae980bd8705e1572eccf",
-      "size": 3929,
+      "sha256": "0e3a17064325af849a809044f04de4765e65489891c071a53bcb4ccbdf85d708",
+      "size": 4584,
       "downloads": 0,
       "rating": 0
     },
@@ -591,7 +591,7 @@
       "name": "exercise-generator",
       "display_name": "K12 出题器",
       "description": "按年级边界出练习题、变式题、错题卷——每题过验算、变式换数换情境不变考点、错题卷精准复现薄弱点。用于家长要给孩子出题、组卷、单元测、默写卷时。",
-      "version": "1.2.0",
+      "version": "1.2.4",
       "author": "hexclaw",
       "category": "education",
       "icon": "✏️",
@@ -615,8 +615,8 @@
         "exercise-set"
       ],
       "file": "skills/exercise-generator.md",
-      "sha256": "40508ad75594b12c36c905fb2fcc388bfca568c9848c4d153def900d0d3995e1",
-      "size": 4226,
+      "sha256": "ab712655c1377c309042f7bb472f13746ffa9fa1c5bead46beb2c84fb00b7f60",
+      "size": 5736,
       "downloads": 0,
       "rating": 0
     },
@@ -732,7 +732,7 @@
       "name": "grade-constraint",
       "display_name": "年级边界约束（基座）",
       "description": "把讲解锁在孩子当前学段学过的知识内，提供超纲说法的学段内替代话术。所有学科 tutor 讲题前套用。用于判断解法/知识点是否超纲、需要按年级找替代讲法时。",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "author": "hexclaw",
       "category": "education",
       "icon": "📏",
@@ -741,7 +741,7 @@
       "license": "Apache-2.0",
       "schema_version": "1",
       "eval": "eval/k12/grade-constraint",
-      "acceptance": "超纲解法零泄露 · 学段内替代说法 100% · 超纲题先反问不硬解",
+      "acceptance": "优先学段内完整讲法 · 未知年级不冒充已核验 · 不以提示代替家长答案",
       "tags": [
         "k12",
         "curriculum",
@@ -753,8 +753,8 @@
         "grade-boundary"
       ],
       "file": "skills/grade-constraint.md",
-      "sha256": "81666df078c333d45c901f5cb4b391fbc1d95db4b50be3bdeff14a0fadc7f01d",
-      "size": 6462,
+      "sha256": "9a606c80e776c9fff8a504c9e2aa02e5c26607580f56874b23adb88ad9b68d44",
+      "size": 7094,
       "downloads": 0,
       "rating": 0
     },
@@ -762,7 +762,7 @@
       "name": "homework-checker",
       "display_name": "作业识题批改助手",
       "description": "拍题批改第一入口——识题、OCR 回显护栏核对、分题、路由到对应学科 tutor、逐题批改并把错题入库。用于家长拍照或粘贴整页作业让检查时。",
-      "version": "1.2.0",
+      "version": "1.5.1",
       "author": "hexclaw",
       "category": "education",
       "icon": "📷",
@@ -793,8 +793,8 @@
         "record-candidate"
       ],
       "file": "skills/homework-checker.md",
-      "sha256": "5d60b179b5ee9f967be0d07559f1a9490ea5bdbc56e9bb4d0f484fd2a255b039",
-      "size": 3588,
+      "sha256": "dd75c12602aaa7b5b2dc544bece89f70538782d0631d8fdc0fc6831f1f911c9f",
+      "size": 6439,
       "downloads": 0,
       "rating": 0
     },
@@ -886,8 +886,8 @@
     {
       "name": "information-technology-tutor",
       "display_name": "信息科技辅导老师",
-      "description": "辅导小学信息科技——图形化编程（顺序/循环/分支）、算法步骤、规则题与程序运行结果，用 PRIMM 法带孩子读程序改程序，不代写完整程序，运行结果以沙箱为准。用于家长辅导孩子编程作业、Scratch 作品、信息科技题时。",
-      "version": "1.0.0",
+      "description": "辅导小学信息科技——图形化编程（顺序/循环/分支）、算法步骤、规则题与程序运行结果，用 PRIMM 法带孩子读程序改程序，给家长完整参考与讲法，运行结果以沙箱为准。用于家长辅导孩子编程作业、Scratch 作品、信息科技题时。",
+      "version": "1.0.2",
       "author": "hexclaw",
       "category": "education",
       "icon": "💻",
@@ -896,7 +896,7 @@
       "license": "Apache-2.0",
       "schema_version": "1",
       "eval": "eval/k12/infotech",
-      "acceptance": "不代写完整程序 · 运行结果以沙箱回传为准 · 小学只用图形化不上文本代码 · 信息安全适龄正向",
+      "acceptance": "完整参考程序与讲法 · 运行结果以沙箱回传为准 · 小学只用图形化不上文本代码 · 信息安全适龄正向",
       "tags": [
         "k12",
         "information-technology",
@@ -912,8 +912,8 @@
         "record-candidate"
       ],
       "file": "skills/information-technology-tutor.md",
-      "sha256": "dd4cae246805766c20d79671a1923f81524952f379c2dcba0555f26f9a7d7b26",
-      "size": 5328,
+      "sha256": "9274c867712c41bd5bf28340e76b03aff35324e7cdfbe8958611d62ad18f1f2c",
+      "size": 5854,
       "downloads": 0,
       "rating": 0
     },
@@ -938,8 +938,8 @@
     {
       "name": "k12-pedagogy",
       "display_name": "K12 教学法（基座）",
-      "description": "K12 各学科辅导的共享教学法基座——答案遮罩、渐进提示三阶段、苏格拉底追问、五类错因、成长型情绪引导。所有学科 tutor 在此之上叠加。用于家长辅导或陪孩子做任何学科作业、讲题、批改时。",
-      "version": "1.1.0",
+      "description": "K12 各学科辅导的共享教学法基座——完整家长参考、渐进讲解方法、苏格拉底追问、五类错因、成长型情绪引导。所有学科 tutor 在此之上叠加。用于家长辅导或陪孩子做任何学科作业、讲题、批改时。",
+      "version": "1.1.3",
       "author": "hexclaw",
       "category": "education",
       "icon": "🎓",
@@ -948,7 +948,7 @@
       "license": "Apache-2.0",
       "schema_version": "1",
       "eval": "eval/k12/pedagogy",
-      "acceptance": "渐进提示不越级泄底 · 答案遮罩纪律 100% · 情绪话术不制造焦虑",
+      "acceptance": "家长获得正确答案、完整解法和讲题方法 · 清晰题自动处理 · 情绪话术不制造焦虑",
       "tags": [
         "k12",
         "tutoring",
@@ -962,8 +962,8 @@
         "hint-staged"
       ],
       "file": "skills/k12-pedagogy.md",
-      "sha256": "0e37d7017cde28bde74c1e11e7d25e94fd4da7caa5d1ec7bf079dd086d1c89f3",
-      "size": 6310,
+      "sha256": "3b0a36a13a1a95a609eb6f17574427ee65614a4d4bbea3b210e299a0ac09cc1e",
+      "size": 7588,
       "downloads": 0,
       "rating": 0
     },
@@ -1042,8 +1042,8 @@
     {
       "name": "math-tutor",
       "display_name": "数学辅导老师",
-      "description": "辅导、讲解、批改小学到初中数学——波利亚四步、按年级边界讲、渐进提示不直接给答案、批改归错因。用于家长辅导孩子数学作业或讲数学题（解方程、应用题、竖式、几何、分数小数）时。",
-      "version": "1.2.0",
+      "description": "辅导、讲解、批改小学到初中数学——波利亚四步、按年级边界讲、完整答案与渐进讲法、批改归错因。用于家长辅导孩子数学作业或讲数学题（解方程、应用题、竖式、几何、分数小数）时。",
+      "version": "1.2.3",
       "author": "hexclaw",
       "category": "education",
       "icon": "🧮",
@@ -1068,8 +1068,8 @@
         "record-candidate"
       ],
       "file": "skills/math-tutor.md",
-      "sha256": "82c19ed9fd7b233865a596755cdf9c1b1b338eec9486d0aab364a805d842ad21",
-      "size": 4390,
+      "sha256": "75553e70588cabb173d5a6a0ce209021de7ebce5f48812ce7a217b2088ea1d79",
+      "size": 5606,
       "downloads": 0,
       "rating": 0
     },
@@ -1291,8 +1291,8 @@
     {
       "name": "science-tutor",
       "display_name": "科学辅导老师",
-      "description": "辅导小学科学——事实、观察、实验（公平实验/变量控制）与图结构题（食物链、电路、生命周期），探究式引导不灌结论，证据不足判待复核。用于家长辅导孩子科学作业、实验记录、观察日记时。",
-      "version": "1.0.0",
+      "description": "辅导小学科学——事实、观察、实验（公平实验/变量控制）与图结构题（食物链、电路、生命周期），给家长结论依据与探究式讲法，证据不足判待复核。用于家长辅导孩子科学作业、实验记录、观察日记时。",
+      "version": "1.0.2",
       "author": "hexclaw",
       "category": "education",
       "icon": "🔬",
@@ -1316,8 +1316,8 @@
         "record-candidate"
       ],
       "file": "skills/science-tutor.md",
-      "sha256": "1013aa65ba8a30d903d8331aa3fc817dbfb726c1421fcc73be4fa6034e902c36",
-      "size": 4965,
+      "sha256": "4d71edbe90301e4ef45fbba633e5ddef3480ae71cc72cdb8a329a21ddebf8588",
+      "size": 5717,
       "downloads": 0,
       "rating": 0
     },
@@ -1584,8 +1584,8 @@
     {
       "name": "writing-feedback",
       "display_name": "语文写作反馈（作品）",
-      "description": "小学生作文/习作的形成性反馈与修改指导——切题、结构、表达、基础规范四维评价，引用原稿证据、一次只改 1～3 处、共写不代写、不打分。用于家长上传孩子作文照片或文字稿求点评、求修改方向时。",
-      "version": "1.0.0",
+      "description": "小学生作文/习作的形成性反馈与家长辅导——引用原稿证据，聚焦一个关键问题，给出1～2处局部修改示范与孩子下一步；完整参考稿仅在用户明确要求时提供，不打分。",
+      "version": "1.0.3",
       "author": "hexclaw",
       "category": "education",
       "icon": "✍️",
@@ -1594,7 +1594,7 @@
       "license": "Apache-2.0",
       "schema_version": "1",
       "eval": "eval/k12/writing-feedback",
-      "acceptance": "零代写正文 · 反馈必引原句 · 一次最多 3 处 · 不打分不评级 · 学段不越级",
+      "acceptance": "原稿证据与家长参考分开 · 反馈必引原句 · 聚焦一个问题与1～2处局部示范 · 孩子独立修改 · 不打分不评级 · 学段不越级",
       "tags": [
         "k12",
         "chinese",
@@ -1611,8 +1611,8 @@
         "record-candidate"
       ],
       "file": "skills/writing-feedback.md",
-      "sha256": "42e8cc5b43b4db75d8b76681448c3d771c0e671b294d31d98fcac194198a9d0c",
-      "size": 8035,
+      "sha256": "0f9cefd0a328c426aee6a832e6f82f3c6ed219a0358ae8915f3b2c5f7db8243e",
+      "size": 8865,
       "downloads": 0,
       "rating": 0
     },

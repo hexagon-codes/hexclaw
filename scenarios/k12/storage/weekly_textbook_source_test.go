@@ -137,3 +137,42 @@ func TestWeeklyTextbookSource_MissingLessonDoesNotGuess(t *testing.T) {
 		t.Fatalf("generic exercise guessed as lesson: %v", err)
 	}
 }
+
+func TestWeeklyTextbookSource_UnitScopeWithoutVerifiedPageClaim(t *testing.T) {
+	d, _ := weeklyTextbookSourceFixture(t, weeklyLessonPage)
+	progress, err := d.Records.GetCurriculumProgress(context.Background(), "mingming", "math")
+	if err != nil {
+		t.Fatal(err)
+	}
+	progress.RequestedPageFrom, progress.RequestedPageTo = nil, nil
+	progress.VerifiedPageFrom, progress.VerifiedPageTo = nil, nil
+	progress.PageVerificationStatus = "not_requested"
+	scope := k12storage.TextbookScope{OwnerID: "desktop-user", AgentName: "mingming", Subject: "math"}
+	pages, err := d.Records.ListWeeklyTextbookPages(context.Background(), scope, progress)
+	if err != nil || len(pages) == 0 {
+		t.Fatalf("published unit unavailable: pages=%d err=%v", len(pages), err)
+	}
+	if progress.VerifiedPageFrom != nil || progress.VerifiedPageTo != nil {
+		t.Fatal("unit scope was persisted as verified pages")
+	}
+	for _, mutation := range []string{"requested", "unit", "lesson", "owner"} {
+		t.Run(mutation, func(t *testing.T) {
+			next, requested := progress, scope
+			switch mutation {
+			case "requested":
+				page := 1
+				next.RequestedPageFrom, next.RequestedPageTo = &page, &page
+			case "unit":
+				next.UnitID = "unknown-unit"
+			case "lesson":
+				next.LessonID = "unknown-lesson"
+			case "owner":
+				requested.OwnerID = "other-owner"
+			}
+			pages, err := d.Records.ListWeeklyTextbookPages(context.Background(), requested, next)
+			if err == nil && len(pages) != 0 {
+				t.Fatalf("expanded invalid scope: %+v", pages)
+			}
+		})
+	}
+}

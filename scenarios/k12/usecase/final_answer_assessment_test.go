@@ -52,7 +52,7 @@ func finalAnswerAssessmentSourceFixture(t *testing.T, sameReadings bool, finalAn
 	}
 	ctx := t.Context()
 	grader := &finalAnswerAssessmentGrader{}
-	deps, _ := newPipeline(t, fakeSolver{}, grader, nil)
+	deps, _ := newPipeline(t, fakeSolver{solution: "7/9×3/14=1/6\n答案：1/6", ev: SolveEvidence{Verdict: VerdictAgree, EvidenceType: EvidenceNumericExec}}, grader, nil)
 	deps.Now = time.Now().Unix
 	deps.VerifiedGrader = grader
 	deps.ParentTeachingGuide = &parentTeachingGuideSpy{}
@@ -357,12 +357,21 @@ func TestFinalAnswerAssessmentKeepsCorrectOrUnsupportedFinalUnclear(t *testing.T
 		t.Run(final, func(t *testing.T) {
 			o, job, req, q, grader := finalAnswerAssessmentFixture(t, final)
 			item, err := o.assessDurablePhotoItem(t.Context(), o.deps, job, req, PhotoModeGrade, q)
-			if err != nil || item.Status != PhotoAnswerUnclear || item.ParentGuide != nil || grader.calls != 0 {
+			if err != nil || item.Status != PhotoAnswerUnclear || item.ParentGuide == nil || item.ParentGuide.Answer != "1/6" || len(item.ParentGuide.FullSolutionSteps) == 0 || grader.calls != 0 || item.Grade.Outcome.FinalAnswerCorrect != nil {
 				t.Fatalf("unproven final was graded: status=%s calls=%d err=%v", item.Status, grader.calls, err)
 			}
 			invocations, err := o.deps.Records.ListGradingItemInvocations(t.Context(), req.AgentName, job.Record.RecordID)
-			if err != nil || len(invocations) != 0 {
+			if err != nil {
 				t.Fatalf("unclear answer invoked grading: %+v err=%v", invocations, err)
+			}
+			for _, invocation := range invocations {
+				if invocation.Operation == k12.GradingItemOperationGrade {
+					t.Fatal("reference answer invoked student grading")
+				}
+			}
+			assessments, err := o.deps.Records.ListGradingAssessmentItems(t.Context(), req.AgentName, job.Record.RecordID)
+			if err != nil || len(assessments) != 1 || assessments[0].ProjectionCreated || assessments[0].ProjectionRecordID != "" || assessments[0].GradeInvocationID != "" {
+				t.Fatalf("reference answer changed learning facts: %+v %v", assessments, err)
 			}
 		})
 	}

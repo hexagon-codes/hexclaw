@@ -627,10 +627,11 @@ func (d Deps) countFinalizedSets(ctx context.Context, agentName string) (int, er
 // 多批；SubmitReturns 会先验证完整集合，再用一次聚合写事务提交，禁止“前一批成功、
 // 后一批失败”的半状态。
 type PracticeReturnInput struct {
-	ReturnID  string
-	AssetID   string
-	ItemIDs   []string
-	AutoMatch bool
+	ReturnID      string
+	AssetID       string
+	ItemIDs       []string
+	AutoMatch     bool
+	AnswerContext string
 }
 
 // SubmitReturn 保留单批命令面，内部统一进入原子多批实现。
@@ -658,6 +659,10 @@ func (d Deps) SubmitReturns(ctx context.Context, agentName, recordID string, inp
 	}
 	changed := false
 	for _, input := range inputs {
+		answerContext, err := normalizePracticeAnswerContext(input.AnswerContext)
+		if err != nil {
+			return PracticeSetView{}, err
+		}
 		returnID := strings.TrimSpace(input.ReturnID)
 		assetID := strings.TrimSpace(input.AssetID)
 		if returnID == "" || assetID == "" || input.AutoMatch == (len(input.ItemIDs) > 0) {
@@ -705,7 +710,7 @@ func (d Deps) SubmitReturns(ctx context.Context, agentName, recordID string, inp
 					sameItems = false
 				}
 			}
-			if prior.AssetID == assetID && prior.AutoMatch == input.AutoMatch && (input.AutoMatch || sameItems) {
+			if prior.AssetID == assetID && prior.AutoMatch == input.AutoMatch && (input.AutoMatch || sameItems) && practiceReturnContextMatches(prior, input) {
 				replayed = true
 				break
 			}
@@ -745,6 +750,9 @@ func (d Deps) SubmitReturns(ctx context.Context, agentName, recordID string, inp
 			ReturnID: returnID, AssetID: assetID, ItemIDs: canonical, ReturnedAt: d.now(),
 			RegradeStatus: k12.PracticeRegradeQueued, RegradeUpdatedAt: d.now(),
 		}
+		if answerContext != "" {
+			ret.LearningEvidence = []k12.LearningEvidence{{Kind: answerContext, Source: "guardian_report", EventID: returnID, OccurredAt: ret.ReturnedAt}}
+		}
 		if input.AutoMatch {
 			ret.AutoMatch = true
 			ret.CandidateItemIDs = canonical
@@ -783,6 +791,9 @@ func practiceReturnsContain(prior []k12.PracticeReturnAsset, inputs []PracticeRe
 		found := false
 		for _, item := range prior {
 			if item.ReturnID == strings.TrimSpace(input.ReturnID) && item.AssetID == strings.TrimSpace(input.AssetID) {
+				if !practiceReturnContextMatches(item, input) {
+					continue
+				}
 				if item.AutoMatch != input.AutoMatch {
 					continue
 				}
@@ -844,8 +855,9 @@ func (d Deps) GradePracticeSet(ctx context.Context, agentName, recordID string) 
 
 // PracticeGradeResult 复批逐题结论（§3.8 历史与回传复批 第 3、4 条）。
 type PracticeGradeResult struct {
-	ItemID  string `json:"item_id"`
-	Correct bool   `json:"correct"`
+	ReturnID string `json:"-"`
+	ItemID   string `json:"item_id"`
+	Correct  bool   `json:"correct"`
 }
 
 // GradePracticeSetItems 逐题结论复批（§3.8 第 3-4 条，2026-07-18 裁决）：
@@ -935,8 +947,13 @@ func (d Deps) gradePracticeSetItemsInTransaction(
 			continue // 幂等：重复同一结论不重复联动错题
 		}
 		correct := res.Correct
+		learningEvidence, err := d.practiceResultLearningEvidence(ctx, v, *it, res, evidence)
+		if err != nil {
+			return PracticeSetView{}, err
+		}
 		it.ResultCorrect = &correct
 		it.ResultEvidence = evidence
+		it.LearningEvidence = learningEvidence
 		// Returned=return_assets 照片覆盖投影、ResultCorrect=复批结论（对错），两字段
 		// 独立不合并；DD-028 后复批不能反向伪造 Returned，证据必须先由 SubmitReturn 追加。
 		if it.SourceProblemID != "" {

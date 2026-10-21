@@ -121,7 +121,18 @@ func (a *RecognizerAdapter) recognizeLayoutAdjudicationV2(ctx context.Context, p
 	if reread == nil || reread.question == nil {
 		return fmt.Errorf("%w: adjudication repair source cannot be parsed", k12.ErrRecognitionProtocolInvalid)
 	}
-	questionMatch, answerMatch := usecase.RecognitionSourceReadingsMatchForInitialReadMode(*initial.question, *reread.question, plan.InitialReadMode)
+	comparison := func(q usecase.RecognizedQuestion) usecase.RecognizedQuestion {
+		if plan.ScopeInput != nil && plan.ScopeInput.Version == k12.RecognitionImageScopeVersionV1 && plan.ScopeInput.Action == "solve" && plan.ScopeInput.SourceComparisonPolicy == k12.RecognitionImageSourceComparisonPolicyV1 {
+			q.ImageSourceContext = &k12.RecognitionImageSourceContextV1{Version: plan.ScopeInput.Version, Action: plan.ScopeInput.Action, SourceComparisonPolicy: plan.ScopeInput.SourceComparisonPolicy}
+		}
+		return q
+	}
+	questionMatch, answerMatch := usecase.RecognitionSourceReadingsMatchForInitialReadMode(comparison(*initial.question), comparison(*reread.question), plan.InitialReadMode)
+	// 既定比较规则已消解排版差异时，不再把旧的泛化冲突原因当成第三读授权。
+	sameAnswerText := strings.TrimSpace(initial.question.AnswerRawTranscription) == strings.TrimSpace(reread.question.AnswerRawTranscription)
+	if questionMatch && (answerMatch || sameAnswerText) && !recognitionUnresolvedSourceObservationsV1(initial.question, reread.question, runtime.Header.ExecutionPolicy) {
+		return nil
+	}
 	conflictKind := "both"
 	switch {
 	case questionMatch && answerMatch && k12.RecognitionFinalAnswerExecutionPolicy(runtime.Header.ExecutionPolicy) && recognitionUnresolvedSourceObservationsV1(initial.question, reread.question, runtime.Header.ExecutionPolicy):
@@ -156,9 +167,16 @@ func (a *RecognizerAdapter) recognizeLayoutAdjudicationV2(ctx context.Context, p
 	if err != nil {
 		return err
 	}
-	prompt, err := buildRecognitionLayoutAdjudicationPromptForPolicy(target, plan.RecognitionFormat, runtime.Header.ExecutionPolicy)
+	viewTarget, err := k12.RecognitionLayoutAdjudicationViewTargetV1(plan, target)
 	if err != nil {
 		return err
+	}
+	prompt, err := buildRecognitionLayoutAdjudicationPromptForPolicy(viewTarget, plan.RecognitionFormat, runtime.Header.ExecutionPolicy)
+	if err != nil {
+		return err
+	}
+	if plan.ScopeInput != nil && plan.ScopeInput.SourceReviewPolicy == k12.RecognitionImageSourceUprightReviewPolicyV1 {
+		prompt += "\nTranscribe printed text verbatim, character by character, including short words, modifiers and full proper names. Do not abbreviate, paraphrase, substitute familiar textbook wording, or complete clipped text from memory. Preserve visible wording even when another edition differs. Report uncertain or missing characters through the existing uncertainty fields rather than silently omitting them.\n"
 	}
 	physicalCtx, cancel, err := recognitionLayoutPhysicalCallContextV2(ctx, time.UnixMilli(runtime.StageDeadlineAtUnixMillis), runtime.Header.PhysicalCallCapMillis)
 	if err != nil {
@@ -169,17 +187,27 @@ func (a *RecognizerAdapter) recognizeLayoutAdjudicationV2(ctx context.Context, p
 	if err != nil {
 		return fmt.Errorf("independent source adjudication failed: %w", err)
 	}
-	candidate, reviewed, verified, finalAnswer, err := parseRecognitionLayoutAdjudicationForPolicy(physical.Payload, target, plan.RecognitionFormat, runtime.Header.ExecutionPolicy)
+	sourcePayload, err := k12.RecognitionLayoutAdjudicationSourceResponseV1(physical.Payload, plan, target)
+	if err != nil {
+		return err
+	}
+	candidate, reviewed, verified, finalAnswer, err := parseRecognitionLayoutAdjudicationForPolicy(sourcePayload, target, plan.RecognitionFormat, runtime.Header.ExecutionPolicy)
 	if err != nil {
 		return err
 	}
 	settlement := k12.RecognitionLayoutAdjudicationSettlementV2{PlanDigest: plan.AuthorizedPlanDigest, AuthorizationID: authorization.AuthorizationID, AuthorizationDigest: authorization.AuthorizationDigest, CandidateID: target.TargetID, SourcePhysicalInvocationID: physical.InvocationID, SourcePhysicalUnit: authorization.PhysicalUnit, SourcePhysicalResultDigest: physical.ResultDigest}
+	if initial.question.Subject == "语文" && reread.question.Subject == "语文" && plan.ScopeInput != nil && plan.ScopeInput.SourceReviewPolicy == k12.RecognitionImageSourceUprightReviewPolicyV1 && k12.RecognitionFinalAnswerExecutionPolicy(runtime.Header.ExecutionPolicy) {
+		settlement.PrintedQuestionEvidence, err = k12.RecognitionPrintedQuestionEvidenceFromResponseV1(physical.Payload, plan, target, []string{initial.question.RawTranscription, reread.question.RawTranscription})
+		if err != nil {
+			return err
+		}
+	}
 	if finalAnswer != nil && (conflictKind == "answer" || conflictKind == "observation_uncertainty") && recognitionFinalAnswerSourcesEligibleV1(initial.question, reread.question, reviewed, plan.InitialReadMode, runtime.Header.ExecutionPolicy) {
 		settlement.FinalAnswerEvidence = finalAnswer
 	}
 	if verified && reviewed != nil && reviewed.question != nil {
-		qp, ap := usecase.RecognitionSourceReadingsMatchForInitialReadMode(*initial.question, *reviewed.question, plan.InitialReadMode)
-		qr, ar := usecase.RecognitionSourceReadingsMatchForInitialReadMode(*reread.question, *reviewed.question, plan.InitialReadMode)
+		qp, ap := usecase.RecognitionSourceReadingsMatchForInitialReadMode(comparison(*initial.question), comparison(*reviewed.question), plan.InitialReadMode)
+		qr, ar := usecase.RecognitionSourceReadingsMatchForInitialReadMode(comparison(*reread.question), comparison(*reviewed.question), plan.InitialReadMode)
 		settlement.MatchedQuestionPrior = matchedRecognitionPrior(qp, qr)
 		settlement.MatchedAnswerPrior = matchedRecognitionPrior(ap, ar)
 		settlement.Adopted = settlement.MatchedQuestionPrior != "" && settlement.MatchedAnswerPrior != ""
@@ -189,6 +217,8 @@ func (a *RecognizerAdapter) recognizeLayoutAdjudicationV2(ctx context.Context, p
 	}
 	if !settlement.Adopted {
 		settlement.MatchedQuestionPrior, settlement.MatchedAnswerPrior = "", ""
+	} else {
+		settlement.PrintedQuestionEvidence = nil
 	}
 	if _, _, err := k12.SettleRecognitionLayoutAdjudicationV2(ctx, physical, settlement); err != nil {
 		return err

@@ -53,7 +53,9 @@
 
 ### 请求与版本
 
-更新前分别读取 `GET /api/k12/profile?agent=...`、`GET /api/k12/curriculum-progress?agent=...&subject=math`、`GET /api/k12/weekly-practice/settings?agent=...` 的 `revision`，放入三个 `expected_*_revision`。未持久化状态可返回 `0`；不要猜测已有数据的版本。
+编辑前使用 `GET /api/k12/profile-bundle?agent=...`，在同一只读事务中取得 `agent_config`、完整六科 `profile`（含 `revision`）、`curriculum_progress`、`progress_revision`、`weekly_practice_settings`。三个版本分别来自 `profile.revision`、`progress_revision` 和 `weekly_practice_settings.revision`；未持久化状态可为 `0`。字段与修订号必须消费同一快照，不可混用旧列表字段与新版本。原独立读接口继续兼容。
+
+GET可选 `idempotency_key` 查询该实例的原保存回执：`command` 为原回执或 `null`，查询本身不写库、不重发。结果未知时先查询，再仅重放同一冻结请求；确认结果后，新的修改使用新键。旧命令返回原回执，但内存路由只能同步当前持久状态，不能覆盖后续编辑。不存在的实例为404，持久状态读取失败为500；该入口沿原实例归属校验。
 
 三个版本字段未传时会解码为 `0`，不表示跳过版本校验；正确调用应发送刚读取的实际值。档案的 `grade_term` 可为空，非空时使用当前小学学期枚举，不借用单题解题接口的其他学段枚举。
 

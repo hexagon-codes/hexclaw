@@ -67,6 +67,39 @@ func TestPhotoAnnotator_DrawsTrustedMarksAndKeepsDimensions(t *testing.T) {
 	}
 }
 
+func TestPhotoAnnotator_UnjudgedUsesExistingAmberQuestionMark(t *testing.T) {
+	src := image.NewRGBA(image.Rect(0, 0, 240, 240))
+	draw.Draw(src, src.Bounds(), image.NewUniform(color.White), image.Point{}, draw.Src)
+	var raw bytes.Buffer
+	if err := png.Encode(&raw, src); err != nil {
+		t.Fatal(err)
+	}
+	rendered, err := NewPhotoAnnotator().Annotate(t.Context(), raw.Bytes(), []usecase.PhotoAnnotation{{
+		BBox: usecase.BBox{X: 0.2, Y: 0.3, W: 0.25, H: 0.15}, Status: usecase.PhotoUntrusted,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := png.Decode(bytes.NewReader(rendered.Data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	amber, verdict := 0, 0
+	for y := 0; y < 240; y++ {
+		for x := 0; x < 240; x++ {
+			switch color.RGBAModel.Convert(out.At(x, y)).(color.RGBA) {
+			case color.RGBA{R: 211, G: 145, B: 45, A: 255}:
+				amber++
+			case color.RGBA{R: 22, G: 163, B: 74, A: 255}, color.RGBA{R: 239, G: 68, B: 68, A: 255}:
+				verdict++
+			}
+		}
+	}
+	if amber == 0 || verdict != 0 || out.Bounds() != src.Bounds() {
+		t.Fatalf("unjudged annotation must be amber only with unchanged dimensions: amber=%d verdict=%d", amber, verdict)
+	}
+}
+
 func TestPhotoAnnotator_BenchmarkStyleUsesCompactGlyphsWithoutTintingAnswerArea(t *testing.T) {
 	src := image.NewRGBA(image.Rect(0, 0, 240, 240))
 	draw.Draw(src, src.Bounds(), image.NewUniform(color.White), image.Point{}, draw.Src)

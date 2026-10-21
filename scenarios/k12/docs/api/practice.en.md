@@ -1395,6 +1395,8 @@ Implementation: [retryPracticePrintJob](../../../../scenarios/k12/apihttp/practi
 
 ## `POST /api/k12/practice-sets/{id}/submit`
 
+Optional `answer_context` accepts `unknown`, `prompted_answer`, or `independent_answer`. It is an explicit guardian report, never inferred from a photo or PDF delivery. The server freezes `guardian_report`, the return ID and reception time; replay cannot relabel that context. Return/item DTO `learning_evidence` preserves provenance. Legacy records project to unknown without historical backfill. Delayed retests use actual timestamps; human confirmation remains distinct from system assessment. The existing two-correct / three-day mastery policy is unchanged.
+
 Submit a returned practice photo
 
 return_id identifies an idempotent photo return, using an existing asset ID. Choose auto_match=true or non-empty item_ids, never both; empty coverage does not mean the whole paper. HTTP 200 accepts the photo; read return_assets terminal regrade state and annotated_asset_id/result_markdown. Only actually covered, reliably assessed answers accumulate review evidence once; replay does not advance it again.
@@ -1736,6 +1738,10 @@ Implementation: [getWeeklyPracticeSnapshot](../../../../scenarios/k12/apihttp/we
 
 <a id="k12practiceprepareweeklypracticeoutput"></a>
 
+## `POST /api/k12/weekly-practice/plans/{id}/tracks/{section}/prepare-output`
+
+`section` is textbook_consolidation or arithmetic_warmup. Body: `{agent, expected_revision}`. Freezes verified questions into one PDF without invoking models or freezing the weekly plan. Returns `{artifact,replayed}`, 201 for new output and 200 for identical frozen content. Download through `GET /api/k12/print-artifacts/{artifact_id}/content?agent=...`; printing uses the same artifact_id and frozen bytes. The other section cannot change this artifact; old outputs remain immutable after regeneration. Invalid/partly verified input: 400; revision conflict: 409; missing plan: 404; rendering failure: 502. Downloading/printing does not change student completion state.
+
 ## `POST /api/k12/weekly-practice/plans/{id}/prepare-output`
 
 Freeze weekly practice and prepare PDF
@@ -1858,6 +1864,8 @@ Implementation: [submitWeeklyPracticeAttempt](../../../../scenarios/k12/apihttp/
 <a id="k12practicecreateweeklyarithmeticbatch"></a>
 
 ## `POST /api/k12/weekly-practice/plans/{id}/arithmetic-batches`
+
+`replace_current=true` explicitly regenerates a ready/in_progress batch while retaining the previous batch and student attempt state. It cannot replace preparing/unknown work. The default is false; replay must preserve the flag.
 
 Prepare an arithmetic batch with an explicit count
 
@@ -2101,6 +2109,8 @@ Implementation: [prepareWeeklyTextbookTrack](../../../../scenarios/k12/apihttp/w
 
 ## `POST /api/k12/weekly-practice/plans/{id}/tracks/textbook_consolidation/recovery-attempts`
 
+`continue_remaining` defaults to false, recovering only the selected question. An explicit true also authorizes unstarted questions in the original frozen batch, bounded by its original MaxItems. It cannot resend other started, failed or unknown calls. Original successful results and unknown receipts remain unchanged.
+
 Authorize a textbook item solve recovery
 
 This recovery may append a physical solve, so accept_duplicate_execution must explicitly be true. Strict body rejects agent. source_command_key/checkpoint_sha256/zero-based item_index bind the exact original checkpoint. Legacy plan_revision>0 supplies both source/expected revisions; separated source_plan_revision must be >=1 and expected_plan_revision >= source; if legacy is also supplied it must equal source. Changed source profile/textbook/progress conflicts; original receipts and unknown outcomes are retained.
@@ -2173,6 +2183,8 @@ Implementation: [recoverWeeklyTextbookTrack](../../../../scenarios/k12/apihttp/w
 Reinterpret existing textbook receipts
 
 Reads and reinterprets successful existing physical receipts only; no new model invocation is authorized. Strict body rejects agent. source_command_key/checkpoint_sha256/zero-based item_index bind the exact original checkpoint. Legacy plan_revision>0 supplies both source/expected revisions; separated source_plan_revision must be >=1 and expected_plan_revision >= source; if legacy is also supplied it must equal source. Changed source profile/textbook/progress conflicts; original receipts and unknown outcomes are retained.
+
+If the original batch has unstarted questions, this operation only appends the selected interpretation and returns the current draft without generating more questions. Remaining questions require the original generation command or its existing explicit recovery authorization. Only an otherwise completed batch is projected into the plan using existing receipts.
 
 As with recovery, this requires the actual raw-byte digest of the original persisted checkpoint and its generation.items index. Public plan/snapshot queries do not expose those fields; snapshot_digest or the public item order cannot substitute for them. The example shows the request shape and requires real existing recovery context before submission. Omitting item_index defaults to 0 in the decoder; specify it explicitly.
 
@@ -2728,7 +2740,7 @@ Source: [scenarios/k12/weekly_practice.go](../../../../scenarios/k12/weekly_prac
 | Field | Type / constraints | Required | Meaning |
 | --- | --- | --- | --- |
 | `availability` | string (`available`, `setup_required`, `processing`, `failed_retryable`, `failed_terminal`) | Yes | JSON projection field; omitted when absent if optional. |
-| `selected_item_count` | integer | Yes | JSON projection field; omitted when absent if optional. |
+| `selected_item_count` | integer | Yes | Current selected count. While an arithmetic batch is preparing or failed, this reflects its frozen requested count rather than generated output or the previous preference. Clients display and lock this value while retrying the original failed batch. |
 | `recommended_item_count` | integer | Yes | JSON projection field; omitted when absent if optional. |
 | `min_item_count` | integer | Yes | JSON projection field; omitted when absent if optional. |
 | `max_item_count` | integer | Yes | JSON projection field; omitted when absent if optional. |

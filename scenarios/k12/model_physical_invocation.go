@@ -190,6 +190,7 @@ type RecognitionLayoutRepairSettlementResultV2 struct {
 // 仅在 Store 所有的精确集合完成最终化后返回。Provider 响应仍为私有内容；
 // 此对象是已为候选项及其不可变来源回执冻结的规范类型化结果。
 type RecognitionLayoutCandidateFinalResultV2 struct {
+	PrintedQuestionReceipt     *RecognitionPrintedQuestionReceiptV1    `json:"printed_question_receipt,omitempty"`
 	FinalAnswerReceipt         *RecognitionFinalAnswerReceiptV1        `json:"final_answer_receipt,omitempty"`
 	CandidateID                string                                  `json:"candidate_id"`
 	ResultKind                 RecognitionLayoutCandidateResultKindV2  `json:"result_kind"`

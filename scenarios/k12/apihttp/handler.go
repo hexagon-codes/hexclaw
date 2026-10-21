@@ -244,6 +244,7 @@ func NewHandler(rt Runtime) http.Handler {
 	mux.HandleFunc("GET /curriculum-progress", h.getCurriculumProgress)
 	mux.HandleFunc("GET /weekly-practice/settings", h.getWeeklyPracticeSettings)
 	mux.HandleFunc("PUT /profile-bundle", h.updateProfileBundle)
+	mux.HandleFunc("GET /profile-bundle", h.getProfileBundleSnapshot)
 	mux.HandleFunc("POST /weekly-practice/plans", h.ensureWeeklyPracticePlan)
 	mux.HandleFunc("GET /weekly-practice/plans/current", h.getCurrentWeeklyPracticePlan)
 	mux.HandleFunc("GET /weekly-practice/plans/history", h.listWeeklyPracticeHistory)

@@ -44,6 +44,8 @@ type MistakeFields struct {
 	KnowledgePoint string `json:"knowledge_point"`   // 命中课标词表；命不中记「其他」
 	ErrorCause     string `json:"error_cause"`       // 五类错因
 	WrongProcess   string `json:"wrong_process"`     // ≤100 字错步摘要，可空
+	// ObservedStudentAnswer 只保存清楚的实际作答，错因摘要不能代替原始观察。
+	ObservedStudentAnswer string `json:"observed_student_answer,omitempty"`
 	// CanonicalAnswer 规范答案（执行计划 §3.0 练习集治本①）：批改入库时从批改结论
 	// （solve 链已验算解法）带入；手工录入路径无家长答案字段则留空。
 	// 老记录空 = 前向兼容：自动装篮时无答案 → pending 诚实阻断（§4.7）。

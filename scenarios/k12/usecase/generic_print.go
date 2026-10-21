@@ -23,6 +23,9 @@ const printPDFRenderContractVersion = "k12-pdf-v2"
 const imageFinalPDFRenderContractVersion = k12storage.ImageFinalPDFRenderContractVersion
 
 func printArtifactRenderContract(sourceRef string) string {
+	if strings.HasPrefix(sourceRef, "weekly-track:") && strings.HasSuffix(sourceRef, ":"+weeklyConsolidationWorkbookRenderVersion) {
+		return weeklyConsolidationWorkbookRenderVersion
+	}
 	if strings.HasPrefix(sourceRef, "automation_weekly-sheet:") && strings.HasSuffix(sourceRef, ":"+weeklyMistakeSheetRenderContract) {
 		return weeklyMistakeSheetRenderContract
 	}
@@ -152,6 +155,13 @@ func (d Deps) renderPrintableArtifact(ctx context.Context,
 		renderMarkdown = artifact.CanonicalMarkdown
 		if artifact.SourceKind == k12.PrintSourcePracticeQuestion && printArtifactRenderContract(artifact.SourceRef) == weeklyMistakeSheetRenderContract {
 			renderMarkdown = weeklyMistakeSheetRenderMarkdown(artifact.CanonicalMarkdown)
+		}
+	}
+	if artifact.SourceKind == k12.PrintSourceGradingFinalArtifact {
+		var err error
+		renderMarkdown, err = d.inlineFrozenTeachingDiagrams(ctx, artifact.AgentName, renderMarkdown)
+		if err != nil {
+			return k12.PrintArtifactRender{}, fmt.Errorf("%w: %v", ErrRenderUnavailable, err)
 		}
 	}
 	pdf, contentType, err := d.Renderer.Render(ctx, renderMarkdown, "pdf")
@@ -418,6 +428,9 @@ func (d Deps) gradingFinalArtifactPrintRequest(
 		if intent == k12.ImageTaskIntentCompletedHomework {
 			renderMarkdown = d.gradingFinalArtifactPrintableMarkdown(ctx, artifact, true)
 			projectionVersion = ":" + gradingPDFProjectionVersion
+		} else if intent == k12.ImageTaskIntentBlankWorksheet {
+			renderMarkdown = d.gradingFinalArtifactPrintableMarkdown(ctx, artifact, true)
+			projectionVersion = ":" + blankWorksheetPDFProjectionVersion
 		}
 		return PreparePrintableArtifactRequest{
 			AgentName: artifact.AgentName, SourceKind: k12.PrintSourceGradingFinalArtifact,
@@ -503,7 +516,7 @@ func (d Deps) gradingFinalArtifactImageSource(ctx context.Context, artifact k12.
 			return DeliveryAttachment{}, "", errors.New("final artifact image task digest mismatch")
 		}
 	}
-	return DeliveryAttachment{MIME: image.Metadata.MediaType, Data: image.Data}, dispatch.TaskIntent, nil
+	return DeliveryAttachment{MIME: image.Metadata.MediaType, Data: image.Data}, EffectiveImageTaskHomeworkIntent(dispatch), nil
 }
 
 func frozenFinalPDFMarkdown(canonical string, media DeliveryAttachment) string {
@@ -598,6 +611,10 @@ func (d Deps) gradingFinalArtifactPrintableMarkdown(
 	}
 	if compact && intent == PhotoTaskCompletedHomework {
 		if markdown, ok := renderGradingPDF(entries, artifact.CoverageStatus); ok {
+			return markdown
+		}
+	} else if compact && intent == PhotoTaskBlankWorksheet {
+		if markdown, ok := renderBlankWorksheetPDF(entries, artifact.CoverageStatus); ok {
 			return markdown
 		}
 	}

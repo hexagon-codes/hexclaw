@@ -46,25 +46,46 @@ var _ usecase.ProfileStore = (*ProfileAdapter)(nil)
 
 // PublishProfile 仅将档案事务已提交的配置与档案发布到内存路由，不重复持久化。
 func (a *ProfileAdapter) PublishProfile(agentName string, result k12.ProfileBundleResult) error {
+	return a.PublishProfileUpdate(agentName, func() (k12.ProfileBundleResult, error) {
+		return result, nil
+	})
+}
+
+// PublishProfileUpdate 将档案短事务与发布放入既有路由临界区，避免提交和发布顺序相反。
+// update 只执行数据库操作，不得调用 Dispatcher；失败时不发布内存配置。
+func (a *ProfileAdapter) PublishProfileUpdate(agentName string, update func() (k12.ProfileBundleResult, error)) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	apply := func(current router.AgentConfig) (router.AgentConfig, error) {
+		result, err := update()
+		if err != nil {
+			return router.AgentConfig{}, err
+		}
+		if committed := result.AgentConfig; committed != nil {
+			current.DisplayName = committed.DisplayName
+			current.Description = committed.Description
+			current.SystemPrompt = committed.SystemPrompt
+			current.Provider = committed.Provider
+			current.Model = committed.Model
+			current.Skills = append([]string(nil), committed.Skills...)
+		}
+		current.Metadata = k12.EnsureTutorAvatar(k12.ApplyProfileToMeta(current.Metadata, k12.ChildProfile{
+			ChildName: result.Profile.ChildName, GradeTerm: result.Profile.GradeTerm,
+			SubjectTextbooks: result.Profile.SubjectTextbooks, TextbookEdition: result.Profile.TextbookEdition,
+		}))
+		return current, nil
+	}
+	if rw, ok := a.rw.(persistedAgentReadWriter); ok {
+		return rw.UpdateAgentPersisted(agentName, apply, nil)
+	}
 	cfg, ok := a.rw.GetAgent(agentName)
 	if !ok {
 		return fmt.Errorf("profile: 实例 %q 不存在", agentName)
 	}
-	updated := *cfg
-	if committed := result.AgentConfig; committed != nil {
-		updated.DisplayName = committed.DisplayName
-		updated.Description = committed.Description
-		updated.SystemPrompt = committed.SystemPrompt
-		updated.Provider = committed.Provider
-		updated.Model = committed.Model
-		updated.Skills = append([]string(nil), committed.Skills...)
+	updated, err := apply(*cfg)
+	if err != nil {
+		return err
 	}
-	updated.Metadata = k12.EnsureTutorAvatar(k12.ApplyProfileToMeta(cfg.Metadata, k12.ChildProfile{
-		ChildName: result.Profile.ChildName, GradeTerm: result.Profile.GradeTerm,
-		SubjectTextbooks: result.Profile.SubjectTextbooks, TextbookEdition: result.Profile.TextbookEdition,
-	}))
 	return a.rw.UpdateAgent(updated)
 }
 

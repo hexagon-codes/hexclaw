@@ -39,6 +39,7 @@ type RecognitionLayoutAdjudicationSettlementV2 struct {
 	ResultKind                 RecognitionLayoutCandidateResultKindV2 `json:"result_kind,omitempty"`
 	ResultJSON                 json.RawMessage                        `json:"result_json,omitempty"`
 	FinalAnswerEvidence        *RecognitionFinalAnswerEvidenceV1      `json:"final_answer_evidence,omitempty"`
+	PrintedQuestionEvidence    *RecognitionPrintedQuestionEvidenceV1  `json:"printed_question_evidence,omitempty"`
 }
 
 type RecognitionLayoutAdjudicationSettlementResultV2 struct {

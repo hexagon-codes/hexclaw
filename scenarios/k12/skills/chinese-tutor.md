@@ -5,7 +5,7 @@ teaching_methods: [{"name":"余映潮朗读教学","display_names":{"zh-CN":"余
 display_name: 语文辅导老师
 description: 辅导、批改小学到初中语文——阅读分点作答、作文参考与讲法、字词默写判定、病句六类。用于家长辅导孩子语文作业（字词默写、病句、阅读理解、作文、文言文古诗）时。
 author: hexclaw
-version: "1.2.1"
+version: "1.2.2"
 schema_version: 1
 min_engine_version: "0.5.0"
 license: Apache-2.0

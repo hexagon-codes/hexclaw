@@ -24,11 +24,8 @@ type WeeklyTextbookPage struct {
 	EvidenceRefs           []string
 }
 
-// ListWeeklyTextbookPages 只读取当前有效绑定中已验证的课程页。
+// ListWeeklyTextbookPages 只读取有效绑定的课程页；单元范围来自已发布目录，不冒充页码验证。
 func (s *Store) ListWeeklyTextbookPages(ctx context.Context, requested TextbookScope, progress k12.CurriculumProgress) ([]WeeklyTextbookPage, error) {
-	if progress.VerifiedPageFrom == nil || progress.VerifiedPageTo == nil {
-		return nil, nil
-	}
 	scope, found, err := s.GetActiveTextbookGroundingScope(ctx, requested)
 	if err != nil || !found {
 		return nil, err
@@ -36,9 +33,38 @@ func (s *Store) ListWeeklyTextbookPages(ctx context.Context, requested TextbookS
 	if scope.TextbookBindingID != progress.TextbookBindingID || scope.TextbookManifestID != progress.TextbookManifestID {
 		return nil, nil
 	}
+	from, to := progress.VerifiedPageFrom, progress.VerifiedPageTo
+	if from == nil && to == nil && progress.RequestedPageFrom == nil && progress.RequestedPageTo == nil && progress.UnitID != "" {
+		catalog, err := s.getTextbookManifestCatalog(ctx, requested.OwnerID, requested.Subject, scope.TextbookManifestID)
+		if err != nil {
+			return nil, err
+		}
+		for _, unit := range catalog.Units {
+			if unit.UnitID != progress.UnitID {
+				continue
+			}
+			pageFrom, pageTo := unit.PageFrom, unit.PageTo
+			if progress.LessonID != "" {
+				pageFrom, pageTo = 0, 0
+				for _, lesson := range unit.Lessons {
+					if lesson.LessonID == progress.LessonID {
+						pageFrom, pageTo = lesson.PageFrom, lesson.PageTo
+						break
+					}
+				}
+			}
+			if pageFrom > 0 && pageTo >= pageFrom {
+				from, to = &pageFrom, &pageTo
+			}
+			break
+		}
+	}
+	if from == nil || to == nil {
+		return nil, nil
+	}
 	var pages []WeeklyTextbookPage
 	for _, ref := range scope.PageRefs {
-		if ref.LogicalPage < *progress.VerifiedPageFrom || ref.LogicalPage > *progress.VerifiedPageTo {
+		if ref.LogicalPage < *from || ref.LogicalPage > *to {
 			continue
 		}
 		page := WeeklyTextbookPage{LogicalPage: ref.LogicalPage, PDFPage: ref.PDFPage}

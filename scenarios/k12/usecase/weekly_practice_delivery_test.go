@@ -134,9 +134,9 @@ func TestWeeklyPracticeSendUsesFrozenArtifactMarkdownAndPDFForEveryDirectTarget(
 		t.Fatal(err)
 	}
 	if renderer.calls != renderCalls+1 || !strings.HasSuffix(renderer.markdown, sheet) ||
-		!strings.Contains(renderer.markdown, `#set page(paper: "a4", margin: 20mm`) ||
+		strings.Contains(renderer.markdown, `#set page(`) ||
 		len(transport.sends) != sends+wantReceiptCount {
-		t.Fatalf("weekly cron must render the complete sheet once and send title/PDF: renders=%d sends=%d", renderer.calls, len(transport.sends))
+		t.Fatalf("weekly cron must render the complete sheet once and send title/PDF: renders=%d sends=%d markdown=%q", renderer.calls, len(transport.sends), renderer.markdown)
 	}
 	var title weeklyDeliveryPayload
 	if err := json.Unmarshal([]byte(transport.sends[sends].PayloadJSON), &title); err != nil || title.Content != "本周错题卷" {

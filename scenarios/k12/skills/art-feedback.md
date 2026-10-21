@@ -5,7 +5,7 @@ teaching_methods: [{"name":"费德门美术鉴赏四步骤","display_names":{"zh
 display_name: 美术作品反馈
 description: 小学生美术作品的形成性反馈与指导——构图/色彩/线条/空间/材料效果五要素观察 + 儿童绘画发展阶段适龄评价，只依据画面可见证据，不打分不排名不重画。用于家长上传孩子画作、手工照片求点评时。
 author: hexclaw
-version: "1.0.1"
+version: "1.0.2"
 schema_version: 1
 min_engine_version: "0.5.0"
 license: Apache-2.0

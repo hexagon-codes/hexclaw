@@ -32,13 +32,9 @@ The old `PUT /api/k12/profile` always returns `405`, `Allow: GET`, and `{"error"
 
 ### Request and revisions
 
-Before updating, read the `revision` from these endpoints:
+Before editing, use `GET /api/k12/profile-bundle?agent=...` to read `agent_config`, the complete six-subject `profile` including `revision`, `curriculum_progress`, `progress_revision`, and `weekly_practice_settings` in one read transaction. The expected revisions come from `profile.revision`, `progress_revision`, and `weekly_practice_settings.revision`; unpersisted states may return zero. Never pair stale list fields with a freshly read revision. Existing individual read endpoints remain compatible.
 
-- `GET /api/k12/profile?agent=...`
-- `GET /api/k12/curriculum-progress?agent=...&subject=math`
-- `GET /api/k12/weekly-practice/settings?agent=...`
-
-Supply their values as the three `expected_*_revision` fields. Unpersisted states may return `0`; do not guess revisions for existing records. A null progress object still has an outer lifecycle revision.
+Optional `idempotency_key` returns the original agent-scoped receipt in `command`, or null if absent. Reading does not write or resend. Reconcile unknown outcomes before replaying the same frozen request; only confirmed new edits use a new key. Replays return the original receipt while publishing the current persisted configuration to memory. Missing agents return 404; persistent-state read failures return 500. Existing agent ownership rules apply.
 
 Omitted revision fields decode as `0`; omission does not bypass revision checks. Correct clients send the actual values just read. Profile `grade_term` may be empty; non-empty values use the current primary-school term enum, rather than other stages accepted by single-question solving.
 
