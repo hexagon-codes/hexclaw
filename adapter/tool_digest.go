@@ -93,7 +93,7 @@ func ToolCallDigest(calls []ToolCall) string {
 	return renderToolCallDigest(calls, true)
 }
 
-// ToolCallStatusDigest 只展示工具和实际状态，正文不混入截断的工具响应。
+// ToolCallStatusDigest 只展示工具名与文字状态，正文不混入截断的工具响应。
 func ToolCallStatusDigest(calls []ToolCall) string {
 	return renderToolCallDigest(calls, false)
 }
@@ -103,9 +103,16 @@ func renderToolCallDigest(calls []ToolCall, includeResult bool) string {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString("\n\n———")
-	for _, c := range calls {
-		b.WriteString("\n🔧 ")
+	b.WriteString("\n\n")
+	if includeResult {
+		b.WriteString("———")
+	}
+	for i, c := range calls {
+		if includeResult {
+			b.WriteString("\n🔧 ")
+		} else if i > 0 {
+			b.WriteString(" · ")
+		}
 		name := toolDisplayName(c.Name)
 		if !includeResult {
 			switch toolBaseName(c.Name) {
@@ -115,9 +122,26 @@ func renderToolCallDigest(calls []ToolCall, includeResult bool) string {
 				name = "知识库检索"
 			}
 		}
+		statusLabel := "未知"
+		if !includeResult {
+			statusIcon := "⚪"
+			switch c.Status {
+			case "success":
+				statusIcon, statusLabel = "🟢", "成功"
+			case "error":
+				statusIcon, statusLabel = "🔴", "失败"
+			}
+			b.WriteString(statusIcon)
+			b.WriteByte(' ')
+		}
 		b.WriteString(name)
-		b.WriteString(" ")
-		b.WriteString(toolStatusGlyph(c.Status))
+		if includeResult {
+			b.WriteString(" ")
+			b.WriteString(toolStatusGlyph(c.Status))
+		} else {
+			b.WriteString("：")
+			b.WriteString(statusLabel)
+		}
 		if sum := toolResultSummary(c.Result, 48); includeResult && sum != "" {
 			if toolStatusGlyph(c.Status) == "·" {
 				b.WriteByte(' ')
