@@ -78,6 +78,22 @@ var elementaryUnitGroups = []unitGroup{
 
 var unitCanonical, unitPattern = buildUnitCatalog()
 
+// UnitCategory 从同一小学单位目录读取量纲类别；未知单位不按名称猜测。
+func UnitCategory(unit string) string {
+	canonical := NormalizeUnit(unit)
+	if canonical == "" {
+		return ""
+	}
+	for _, group := range elementaryUnitGroups {
+		for _, definition := range group.units {
+			if definition.name == canonical {
+				return group.category
+			}
+		}
+	}
+	return ""
+}
+
 func buildUnitCatalog() (map[string]string, string) {
 	canonical := make(map[string]string)
 	var patterns []string

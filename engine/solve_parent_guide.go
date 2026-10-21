@@ -124,6 +124,37 @@ func parentGuideAuditsFromOutput(output string) []parentGuideAudit {
 	return nil
 }
 
+// 单一候选的完整审核对象只缺最外层数组结束符时，可无损恢复语法；
+// 不补对象、字段或审核结论，多候选及来源不匹配仍保持未提供。
+func parentGuideAuditsForCandidates(output string, candidates []guideAuditCandidate) []parentGuideAudit {
+	if audits := parentGuideAuditsFromOutput(output); audits != nil {
+		return audits
+	}
+	if len(candidates) != 1 || candidates[0].SourceDigest == "" {
+		return nil
+	}
+	for _, line := range strings.Split(output, "\n") {
+		raw, found := strings.CutPrefix(strings.TrimSpace(line), "PARENT_GUIDE_AUDITS:")
+		if !found {
+			continue
+		}
+		raw = strings.TrimSpace(raw)
+		if !strings.HasPrefix(raw, "[") || !strings.HasSuffix(raw, "}") {
+			return nil
+		}
+		var audits []parentGuideAudit
+		if json.Unmarshal([]byte(raw+"]"), &audits) != nil || len(audits) != 1 {
+			return nil
+		}
+		verdict := parentGuideAuditVerdict(audits, candidates[0].SourceDigest)
+		if verdict == "VALID" || verdict == "INVALID" {
+			return audits
+		}
+		return nil
+	}
+	return nil
+}
+
 func parentGuideAuditVerdict(audits []parentGuideAudit, digest string) string {
 	var found *parentGuideAudit
 	for i := range audits {

@@ -11,6 +11,9 @@ func TestVerificationStorageQuantityAnswers(t *testing.T) {
 	}{
 		{"storage equation", "12 TB", "4.8÷2×5＝12（TB）", true, true},
 		{"storage alias", "12 TB", "4.8÷2×5＝12（太字节）", true, true},
+		{"complete named conclusion", "12 TB", "这个硬盘的总容量是12 TB。", true, true},
+		{"wrong named conclusion", "12 TB", "这个硬盘的总容量是10 TB。", false, true},
+		{"different named target", "12 TB", "剩余空间是12 TB。", false, false},
 		{"different value", "12 TB", "4.8÷2×6＝14.4（TB）", false, true},
 		{"invalid equation", "12 TB", "4.8÷2×6＝12（TB）", false, false},
 		{"different unit", "12 TB", "4.8÷2×5＝12（kg）", false, false},
@@ -27,7 +30,7 @@ func TestVerificationStorageQuantityAnswers(t *testing.T) {
 		{"extra answer", "已用空间=总容量×2/5；12 TB", relation + "；1 TB", false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			equal, comparable := verificationAnswersEqual("硬盘已用空间占总容量的2/5，已用4.8 TB。", tc.computed, tc.candidate)
+			equal, comparable := verificationAnswersEqual("硬盘已用空间占总容量的2/5，已用4.8 TB。这个硬盘的总容量是多少太字节？", tc.computed, tc.candidate)
 			if equal != tc.equal || comparable != tc.comparable {
 				t.Fatalf("comparison=%t/%t, want %t/%t", equal, comparable, tc.equal, tc.comparable)
 			}

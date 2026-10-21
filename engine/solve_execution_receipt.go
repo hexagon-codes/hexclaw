@@ -25,6 +25,7 @@ type CodeExecutionReceipt struct {
 	RuntimeMissing  bool   `json:"runtime_missing"`
 	Error           string `json:"error,omitempty"`
 	StdoutBytes     int64  `json:"stdout_bytes"`
+	StderrBytes     int64  `json:"stderr_bytes,omitempty"`
 	StdoutTruncated bool   `json:"stdout_truncated"`
 	StderrTruncated bool   `json:"stderr_truncated"`
 	Truncated       bool   `json:"truncated"`

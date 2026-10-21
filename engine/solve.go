@@ -63,7 +63,7 @@ func (o *SolveSkill) ToolDefinition() llm.ToolDefinition {
 			Type: "object",
 			Properties: map[string]*llm.Schema{
 				"problem":          {Type: "string", Description: "The full problem statement to solve."},
-				"subject":          {Type: "string", Description: "Optional subject (math/physics/chemistry/english/chinese) to tune the teaching style."},
+				"subject":          {Type: "string", Description: "Optional subject (math/chinese/english/science/information technology, or legacy physics/chemistry) to tune the teaching style."},
 				"grade":            {Type: "string", Description: "Optional learner grade/level label (opaque). When set, the solution must stay within what a learner at this level has been taught."},
 				"constraint":       {Type: "string", Description: "Optional opaque constraint hint injected verbatim into the solver (e.g. an allowed-methods whitelist). When present, using a method outside it is out-of-scope and the verifier flags it."},
 				"self_consistency": {Type: "integer", Description: "Optional number of independent same-method solver samples to majority-vote (default 1; >1 boosts accuracy on hard problems)."},
@@ -887,7 +887,7 @@ func (o *SolveSkill) verifySolutionWithGuides(ctx context.Context, problem, solu
 	trace.L(ctx).Info("solve execution evidence evaluated", "input_digest", executionInputDigest(usedSpec.Task),
 		"executed", executed, "computed", computed, "candidate", candidate, "process", process,
 		"verdict", verdictString(verdict), "evidence", evidenceKind(numericGrounded))
-	return verdict, computed, numericGrounded, result.ExecutionReceipt, parentGuideAuditsFromOutput(result.Output), nil
+	return verdict, computed, numericGrounded, result.ExecutionReceipt, parentGuideAuditsForCandidates(result.Output, guides), nil
 }
 
 // strictFormatReminder 在校验重试时附加，逼模型只吐固定格式。
@@ -1012,6 +1012,7 @@ Decision rules:
 - FINAL_ANSWER_CORRECT judges only whether the final result, including required units, matches the correct answer, regardless of intermediate work.
 - Apply only the answer-format requirements stated in the problem. For fraction simplification, an improper fraction in lowest terms is valid unless the problem explicitly requires a mixed number.
 - If the final answer is correct but the work contains a clear process error, output CORRECT: no and FINAL_ANSWER_CORRECT: yes, and provide the first incorrect step and misconception.
+- For quantity-relationship blanks, evaluate equivalent conventions using quantity names, actual quantities, or a total normalized to unit 1. Do not call a valid proportional equality incorrect merely because it differs from the reference wording. Identify a missing requested calculation separately from a mathematically incorrect filled relationship, and do not infer an unwritten intention.
 
 Output exactly five lines in the following format:
 CORRECT: yes or no
@@ -1173,9 +1174,9 @@ func buildSolverPrompt(problem, subject, method, grade, constraint string) strin
 1. 分步推导，关键步骤说明依据；涉及计算时可调用 code_exec 写代码精确计算（别口算硬凑）。
 2. 解法务必控制在上面「学习阶段/允许范围」之内——宁可用更朴素但学过的方法，也不要为了简便用超纲方法。
 3. 数学一律用 Unicode 符号书写（×÷√≤≥≠、分数写 a/b、平方写 x²、下标写 H₂O、单位直接写 cm³），**禁止输出 LaTeX**（不要 \times \div \frac \text{} ^{} 也不要 $…$、\(…\)、\[…\] 定界符）。
-4. 最后单独用一行给出最终答案，格式严格为：答案：<最终答案>。
+4. 最后单独用一行给出完整答案，格式严格为：答案：<完整答案>。多问、多空、要求先求中间量再求最终量时，必须逐项保留全部所求量及单位、填空与列式，不能只取最后一个数值。只有单一问项、单一数量的题才只写最终数值和必要单位，完整答句放在前面的推导中。存在多种有效填法时，这一答案行也必须逐项写明各自前提和完整填写，不能只在正文中列出。
 5. 正文只写数学推导和依据，不写已调用、已运行或已用工具核验等运行陈述；实际工具事实由应用执行回执提供。
-6. 填空或数量关系存在多种有效填法时，明确列出各自前提、完整填空答案及列式，并注明答案不唯一；逐种解释，不能只给步骤让家长反推答案，不凭模糊学生作答补造题目条件。`, subjectLine, gradeLine, constraintLine, problem, methodLine)
+6. 填空或数量关系存在多种有效填法时，明确列出各自前提、完整填空答案及列式，并注明答案不唯一；逐种解释，不能只给步骤让家长反推答案，不凭模糊学生作答补造题目条件。数量关系填空应分别说明填写数量名称、实际数量，以及题意允许时把总量或已知部分各自看作单位“1”的有效填法，明确每种单位“1”指什么，区分无量纲比例与实际数量，不把等价比例关系说成错误。合法填法有无穷多种时，用本年级能理解的方式给出一般关系、适用约束和代表性填法，不把有限示例说成穷尽。`, subjectLine, gradeLine, constraintLine, problem, methodLine)
 }
 
 func buildVerifierPrompt(problem, candidate, constraint string) string {

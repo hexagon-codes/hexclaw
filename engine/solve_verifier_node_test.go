@@ -410,6 +410,7 @@ func (s *standaloneVerifierCountingCodeExec) Execute(ctx context.Context, args m
 type standaloneVerifierTestProvider struct {
 	mu          sync.Mutex
 	response    string
+	responses   []string
 	requests    []hexagon.CompletionRequest
 	streamCalls int
 }
@@ -419,8 +420,16 @@ func (*standaloneVerifierTestProvider) Name() string { return "standalone-verifi
 func (p *standaloneVerifierTestProvider) Complete(_ context.Context, req hexagon.CompletionRequest) (*hexagon.CompletionResponse, error) {
 	p.mu.Lock()
 	p.requests = append(p.requests, req)
+	response := p.response
+	if len(p.responses) > 0 {
+		index := len(p.requests) - 1
+		if index >= len(p.responses) {
+			index = len(p.responses) - 1
+		}
+		response = p.responses[index]
+	}
 	p.mu.Unlock()
-	return &hexagon.CompletionResponse{Content: p.response, FinishReason: "stop"}, nil
+	return &hexagon.CompletionResponse{Content: response, FinishReason: "stop"}, nil
 }
 
 func (p *standaloneVerifierTestProvider) Stream(context.Context, hexagon.CompletionRequest) (*llm.Stream, error) {
