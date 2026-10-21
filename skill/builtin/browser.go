@@ -2,8 +2,10 @@ package builtin
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -13,6 +15,7 @@ import (
 	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/hexclaw/skill"
 	"github.com/hexagon-codes/toolkit/net/httpx"
+	"github.com/hexagon-codes/toolkit/util/retry"
 )
 
 // BrowserSkill 网页浏览技能
@@ -79,14 +82,33 @@ func (s *BrowserSkill) Execute(ctx context.Context, args map[string]any) (*skill
 		return nil, fmt.Errorf("无效 URL: %s", targetURL)
 	}
 
-	switch action {
-	case "post":
+	if action == "post" {
 		return s.doPost(ctx, targetURL, args)
-	case "extract":
-		return s.doExtract(ctx, targetURL, args)
-	default: // "fetch" or empty
-		return s.doFetch(ctx, targetURL)
 	}
+
+	// 只重试读取；每次请求仍使用客户端超时，取消与总截止由原上下文决定。
+	const maxReadRetries = 3
+	var result *skill.Result
+	err = retry.DoWithContext(ctx, func() error {
+		var readErr error
+		if action == "extract" {
+			result, readErr = s.doExtract(ctx, targetURL, args)
+		} else {
+			result, readErr = s.doFetch(ctx, targetURL)
+		}
+		return readErr
+	}, retry.Attempts(maxReadRetries+1), retry.Delay(time.Second), retry.MaxDelay(4*time.Second),
+		retry.Multiplier(2), retry.DelayType(retry.ExponentialBackoff),
+		retry.If(func(readErr error) bool {
+			var failure *skill.ExecutionError
+			if errors.As(readErr, &failure) && failure.Detail.Reason == "http_status" {
+				return retry.IsRetryableHTTPError(&retry.HTTPError{StatusCode: failure.Detail.HTTPStatus})
+			}
+			return retry.IsRetryableHTTPError(readErr)
+		}), retry.OnRetry(func(n int, _ error) {
+			slog.InfoContext(ctx, "Retrying browser read", "action", action, "retry", n, "max_retries", maxReadRetries)
+		}))
+	return result, err
 }
 
 const maxBodySize = 64 << 20 // 64MB（桌面端按宿主机语义放宽，覆盖任意正常网页/接口响应，仅防 OOM）
