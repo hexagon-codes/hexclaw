@@ -224,6 +224,12 @@ Returns complete JSON by default, or SSE when Accept contains text/event-stream.
 
 Request body maximum: 20971520 bytes.
 
+Follow-ups use the same owned `session_id` under the authenticated identity. Ordinary agents and bound K12 agents retain their respective histories. Natural-language follow-ups with history reach the model context; fast-matched skills follow the same effective settings, permissions, and hooks. `full_access` removes application execution approval, but does not guarantee external-service success or turn retrieved text into user instructions.
+
+Context assembly follows existing compaction settings, vision routing policies, and model limits. Complete current input and its original images are protected; older tool media is compacted with its call group, and historical images follow the configured policy. Empty summaries or archive failures preserve original messages. Response caching includes effective request context and settings. Long-term person facts are separated by attribute, and a failed replacement preserves the previous fact.
+
+An in-process model fallback can retain completed tool results, media, known usage, and the streamed prefix. Successful tools are not rerun, and an exact duplicate prefix is emitted once. This does not replace durable task recovery or make client replay of an unknown-result request safe.
+
 New model replies may include `provider_display_name` and `provider_instance_id` in metadata, frozen from the configuration when the request selects its route. `provider` retains the actual route key and `model` retains the real model ID. Display names support Unicode and survive history persistence and replay without being replaced by later renames. Older messages do not receive invented historical names. Successful built-in knowledge-tool hits share `knowledge_hits` and retrieval blocks with automatic retrieval, preserving document identity, source digest, and page spans for source preview.
 
 `teaching_context_receipts` identify the subject-specific guidance actually consumed by the current successful solve, without falling back to the entire loaded list. Teaching guidance is independent of numerical verification and does not prove program execution or promote `solve_evidence`. Failed, out-of-scope, or unconsumed guidance does not produce a teaching receipt, and older messages are not backfilled.

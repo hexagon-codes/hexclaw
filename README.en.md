@@ -149,7 +149,7 @@ For published images, model and API token configuration, HTTPS, Kubernetes, back
 | Agent runtime | ReAct tool loops, streaming replies, tool-call records, and runtime events; planning and reflection prompt strategies, Agent routing, and team collaboration |
 | Tools and extensions | Use built-in search, browser, file processing, and sandboxed code execution; connect MCP servers, install Markdown Skills, and extend plugins and scenario packs |
 | Knowledge base | Ingest documents, PDFs, and images; combine full-text and vector retrieval; track asynchronous jobs, progress, checkpoints, and recovery states |
-| Sessions and memory | Persist conversations, search messages, fork sessions, compact context, and maintain file-based long-term memory |
+| Sessions and memory | Persist conversations, search messages, fork sessions, protect current input, compact context, and update long-term facts by attribute |
 | Automation | Schedule Cron and Heartbeat tasks, receive Webhooks, and run multi-step workflows; reuse Agents, tools, and result delivery |
 | Actual outputs | Export documents, generate images and videos, collect code-execution artifacts, and deliver attachments; use resulting files in downloads and subsequent tasks |
 | Primary-school tutoring | Solve and grade homework images, review writing and artwork, revisit mistakes, generate weekly practice, maintain learner profiles, and use real textbook catalogs and curriculum progress suggestions |
@@ -166,7 +166,7 @@ DingTalk primarily receives messages through the official Stream SDK, without re
 
 K12 currently serves primary-school learners, covering mathematics, Chinese, English, science, information technology, and art. Parents can send images through Desktop or a configured DingTalk channel. Both use the same domain tasks to process completed homework, blank questions, writing, and artwork.
 
-Homework-image grading primarily returns the original image with annotations. Content that cannot be read reliably is marked “无法识别” (“unreadable”), while readable portions continue processing. Provider failures are recorded separately from unreadable content. Mistakes, review evidence, and weekly practice belong to the current child's profile and task records.
+Homework-image grading primarily returns the original image with annotations. Content that cannot be read reliably is marked “无法识别” (“unreadable”), while readable portions continue processing. Provider failures are recorded separately from unreadable content. When the printed question is clear but handwriting is uncertain, an independent reference answer is stored separately from the student's verdict; it does not prove correctness or mastery. Supported teaching diagrams use the same frozen explanation in the answer and PDF. Mistakes, review evidence, and weekly practice belong to the current child's profile, observed answer evidence, and task records.
 
 Textbook features extract catalogs and cover evidence from actual uploaded textbooks, supporting math textbook bindings and AI curriculum progress suggestions. Suggestions provide context for subsequent tasks; they do not prove that a child has studied or mastered the material. Estimates never overwrite manually confirmed progress in the same scope. Real questions can still be processed without a usable textbook or curriculum progress.
 
@@ -180,7 +180,7 @@ Entry points connect to one execution service, which uses ReAct Agents, scenario
 
 ### How an Agent task completes
 
-The runtime loads the session and relevant context, calls a model for reasoning, executes tools when needed, and feeds their results back to the model. It then persists the conversation and runtime records, returning the answer and actual outputs.
+The runtime loads the session and relevant context, calls a model for reasoning, executes tools when needed, and feeds their results back to the model. Ordinary chats and bound K12 chats use their own history for follow-ups. Current input and its images are protected, while older tool media is compacted with its call group. An in-process model fallback preserves completed tool results and text already streamed. The runtime then persists the conversation and runtime records, returning the answer and actual outputs.
 
 ![HexClaw Agent workflow swimlane diagram: user request, Agent reasoning, models and tools, persistence, and delivery](.github/assets/hexclaw-agent-workflow.en.svg)
 

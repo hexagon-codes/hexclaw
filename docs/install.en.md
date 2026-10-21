@@ -123,6 +123,8 @@ skills:
     branch: v0.0.10
 ```
 
+`v0.0.10` is the source default when no branch is explicitly configured. An existing `skills.hub.branch` still overrides it. Set that field to `v0.0.10` to use this version; custom repositories and other pinned versions keep their configured values. This setting selects the source for subsequent catalog reads and installations. Installed files continue to follow existing installation and versioned-seed rules, including protection for locally edited files.
+
 After installing or uninstalling a Markdown skill, the engine **syncs** the runtime skill registry; you usually **do not need** to restart the sidecar.
 For online installs through the API, `source` may be `clawhub://skill-name`; `GET /api/v1/clawhub/search` supports `q` and `category`.
 
