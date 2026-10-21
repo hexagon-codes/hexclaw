@@ -1731,6 +1731,14 @@ func (e *ReActEngine) finalizeReply(
 		blocks = append(blocks, adapter.Block{Type: "text", Text: notice})
 	}
 
+	if suffix := hostWechatReplySuffix(msg.Content, content); suffix != "" {
+		if len(blocks) == 0 {
+			blocks = append(blocks, adapter.Block{Type: "text", Text: content})
+		}
+		content += suffix
+		resp.Content = content
+		blocks = append(blocks, adapter.Block{Type: "text", Text: suffix})
+	}
 	ensureMessageMetadata(msg)
 	markReasoningPresentation(msg.Metadata, reasoning)
 
@@ -3116,6 +3124,14 @@ func (e *ReActEngine) finalizeRuntimeStreamResult(
 		// BUG-20260703 B5b：同步进块流（见上方 cron 幻称守卫处的说明）。
 		result.Blocks = append(result.Blocks, template.TextBlock(maxTurnsReachedNotice))
 	}
+	if suffix := hostWechatReplySuffix(msg.Content, content); suffix != "" {
+		if len(result.Blocks) == 0 {
+			result.Blocks = append(result.Blocks, template.TextBlock(content))
+		}
+		content += suffix
+		streamTail += suffix
+		result.Blocks = append(result.Blocks, template.TextBlock(suffix))
+	}
 
 	saveCtx, saveCancel := context.WithTimeout(trace.Detach(ctx), 10*time.Second)
 	defer saveCancel()
@@ -3596,6 +3612,14 @@ func (e *ReActEngine) pipeStream(
 		}
 	}
 
+	if suffix := hostWechatReplySuffix(msg.Content, content); suffix != "" {
+		content += suffix
+		select {
+		case ch <- &adapter.ReplyChunk{Content: suffix}:
+		case <-ctx.Done():
+			return
+		}
+	}
 	// M6: hallucinated "task created" claim guard on the no-tools stream
 	// path (the weak-local-model scenario where hallucination is most
 	// likely). The body is already streamed, so deliver the notice as an
@@ -3826,6 +3850,14 @@ func (e *ReActEngine) pipeStreamWithTools(
 		}
 	}
 
+	if suffix := hostWechatReplySuffix(msg.Content, content); suffix != "" {
+		content += suffix
+		select {
+		case ch <- &adapter.ReplyChunk{Content: suffix}:
+		case <-ctx.Done():
+			return
+		}
+	}
 	// M6: hallucinated "task created" claim guard (shared helper); the body
 	// is already streamed, so push the notice as an extra chunk.
 	if notice, flagged := guardCronCreationClaim(ctx, msg, content, hasCronTaskAdapterCall(toolCalls), sessionID, modelName, len(toolCalls)); flagged {
@@ -3985,6 +4017,9 @@ func (e *ReActEngine) shouldAutoInjectKB(msg *adapter.Message) bool {
 	}
 	content := strings.TrimSpace(msg.Content)
 	if len([]rune(content)) < 4 || explicitlyDeclinesKnowledgeRetrieval(content) {
+		return false
+	}
+	if len(msg.Attachments) == 0 && isStandaloneHostFactsQuery(content) {
 		return false
 	}
 	// 实时天气不应自动混入静态教材；显式资料请求仍沿原检索路径，工具权限不变。

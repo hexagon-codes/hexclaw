@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 )
@@ -16,6 +17,68 @@ var productFactsSource []byte
 var productFactsOnce sync.Once
 var productFactsPublicJSON string
 var productFactsLoadError error
+
+var hostFactsSubject = regexp.MustCompile(`(?i)hexclaw|河蟹|小蟹|本应用|本软件|你|您|\byou(?:r|rself)?\b`)
+var hostFactsTopic = regexp.MustCompile(`(?i)官网|官方网站|公众号|github|仓库|官方入口|二维码|介绍|是谁|website|official account|introduc|who are`)
+var hostFactsQueryWords = regexp.MustCompile(`(?i)微信公众号|官方github|github地址|官方仓库|官方网站|官方入口|公众号id|公众号名称|公众号|二维码|官网|github|仓库|地址|链接|名称|名字|id|完整介绍|详细介绍|自我介绍|介绍一下|介绍|主要功能|主要能力|功能|能力|你自己|你们|你|您|hexclaw|河蟹ai|河蟹|小蟹|本应用|本软件|是什么|是多少|是什么样的|是谁|怎么关注|如何关注|有哪些|有没有|多少|是否|可以|能不能|知道|告诉我|给出|提供|请问|一下|完整|详细|简要|简单|有|的|和|与|及|吗|呢|吧|请|yourself|your|you|what is|what are|who are|website|official account|official|github|repository|repositories|qr code|introduce|introduction|full|detailed|please|and|have|do|a|an|the`)
+var hostFactsQueryPunctuation = regexp.MustCompile(`[\s\p{P}\p{S}]+`)
+
+// isStandaloneHostFactsQuery 仅识别能完全由宿主事实回答的独立问询。
+// 未消费的题目、第三方名称和资料指令保留原检索路径，避免混合请求被短路。
+func isStandaloneHostFactsQuery(content string) bool {
+	if !hostFactsSubject.MatchString(content) || !hostFactsTopic.MatchString(content) {
+		return false
+	}
+	remaining := hostFactsQueryWords.ReplaceAllString(strings.ToLower(content), "")
+	return hostFactsQueryPunctuation.ReplaceAllString(remaining, "") == ""
+}
+
+// hostWechatReplySuffix 补齐明确请求中的已确认二维码，避免模型漏图。
+// 只追加本次缺失的区块；短介绍、无图约束及已有二维码不重复处理。
+func hostWechatReplySuffix(query, content string) string {
+	if strings.TrimSpace(content) == "" || !isStandaloneHostFactsQuery(query) {
+		return ""
+	}
+	lower := strings.ToLower(query)
+	for _, exclusion := range []string{"不要图片", "不用图片", "不带图", "不附图", "只用文字", "不要推广", "no image", "no promotion"} {
+		if strings.Contains(lower, exclusion) {
+			return ""
+		}
+	}
+	accountQuestion := strings.Contains(lower, "公众号") || strings.Contains(lower, "official account")
+	fullIntroduction := (strings.Contains(lower, "完整") || strings.Contains(lower, "详细") || strings.Contains(lower, "full") || strings.Contains(lower, "detailed")) &&
+		(strings.Contains(lower, "介绍") || strings.Contains(lower, "introduc"))
+	if !accountQuestion && !fullIntroduction {
+		return ""
+	}
+	facts, err := PublicProductFactsJSON()
+	if err != nil {
+		return ""
+	}
+	var document struct {
+		Accounts struct {
+			Wechat struct {
+				Status        string `json:"status"`
+				ID            string `json:"id"`
+				IDLabel       string `json:"id_label"`
+				QRCode        string `json:"qr_code"`
+				FollowMessage string `json:"follow_message"`
+			} `json:"wechat"`
+		} `json:"official_accounts"`
+	}
+	if json.Unmarshal([]byte(facts), &document) != nil {
+		return ""
+	}
+	account := document.Accounts.Wechat
+	if account.Status != "confirmed_present" || account.QRCode == "" || account.ID == "" {
+		return ""
+	}
+	image := regexp.MustCompile(`!\[[^\]\n]*\]\(` + regexp.QuoteMeta(account.QRCode) + `\)`)
+	if image.MatchString(content) {
+		return ""
+	}
+	return "\n\n![微信公众号二维码](" + account.QRCode + ")\n\n" + account.IDLabel + "：" + account.ID + "  \n" + account.FollowMessage
+}
 
 // PublicProductFactsJSON 返回与客户端公开副本同源的产品事实，不包含当前用户配置。
 func PublicProductFactsJSON() (string, error) {
@@ -88,7 +151,7 @@ func productFactsContext() string {
 	}
 	return "\n[Host product facts]\n" +
 		"These are versioned facts about the HexClaw host, not a replacement for this agent's name or persona. " +
-		"Use known links directly without web search. Unknown official account details must remain unknown. " +
+		"Answer standalone host identity and official-entry questions directly from these facts without web search or knowledge-base retrieval. Honor explicit requests to consult documents and retrieve information needed by other parts of a mixed question. Unknown official account details must remain unknown. " +
 		"When the user asks about the HexClaw WeChat official account or how to follow it, or requests a full/detailed introduction of this assistant and its host product, show the confirmed account's qr_code exactly once as an inline Markdown image, not as a normal link. " +
 		"Below the image, use exactly two caption lines: id_label and id, then follow_message, using the supplied values exactly. Do not add a separate account-name line above the ID or repeat the name in this caption. Use the label 公众号 ID rather than 微信号 for this identifier. " +
 		"Keep the website and GitHub as ordinary links. Do not output a decoded QR destination or a follow/login-page hyperlink, and do not promise automatic following or cross-app conversation continuity. " +
