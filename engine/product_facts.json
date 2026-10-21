@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "facts_version": "2026-10-21.2",
+  "facts_version": "2026-10-21.3",
   "product_id": "hexclaw",
   "canonical_name": "HexClaw",
   "aliases": ["河蟹", "小蟹"],
@@ -33,10 +33,11 @@
     "status": "confirmed_present",
     "name": "hexclaw",
     "id": "hexclaw",
+    "id_label": "公众号 ID",
+    "follow_message": "微信扫一扫，给小蟹点个关注呗 🦀",
     "follow_entry": "Settings > System Settings > Follow on WeChat",
-    "follow_url": "http://weixin.qq.com/r/mp/tCJ-Z9jEL4VQrZwE93em",
     "qr_code": "https://raw.githubusercontent.com/hexagon-codes/hexclaw/main/.github/assets/wechat-qrcode.jpg"
   }},
   "source_ref": "hexclaw/README.md; hexclaw-desktop/package.json; hexclaw-desktop/src-tauri/Cargo.toml",
-  "_internal": {"hexagon_development_phase": 1}
+  "_internal": {"hexagon_development_phase": 1, "wechat_qr_destination": "http://weixin.qq.com/r/mp/tCJ-Z9jEL4VQrZwE93em"}
 }

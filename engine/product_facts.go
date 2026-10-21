@@ -89,6 +89,10 @@ func productFactsContext() string {
 	return "\n[Host product facts]\n" +
 		"These are versioned facts about the HexClaw host, not a replacement for this agent's name or persona. " +
 		"Use known links directly without web search. Unknown official account details must remain unknown. " +
+		"When the user asks about the HexClaw WeChat official account or how to follow it, or requests a full/detailed introduction of this assistant and its host product, show the confirmed account's qr_code exactly once as an inline Markdown image, not as a normal link. " +
+		"Below the image, use exactly two caption lines: id_label and id, then follow_message, using the supplied values exactly. Do not add a separate account-name line above the ID or repeat the name in this caption. Use the label 公众号 ID rather than 微信号 for this identifier. " +
+		"Keep the website and GitHub as ordinary links. Do not output a decoded QR destination or a follow/login-page hyperlink, and do not promise automatic following or cross-app conversation continuity. " +
+		"Do not append the QR code to brief identity answers, one-sentence introductions, unrelated tasks or introductions of third parties. Respect explicit requests for no images or no promotion. The brand caption does not replace the current agent's identity. " +
 		"Configured endpoints do not prove a direct connection or a complete forwarding chain. " +
 		"Product capabilities do not imply that all tools are enabled for this request.\n" + facts + "\n"
 }
