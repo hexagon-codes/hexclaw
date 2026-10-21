@@ -119,7 +119,7 @@ func DefaultK12GradingBudget() K12GradingBudgetConfig {
 		RenderingSeconds:       60,
 		ProjectingSeconds:      60,
 		AssessingBuckets: []K12AssessingBudgetBucketConfig{
-			{MaxProblems: 1, Seconds: 90},
+			{MaxProblems: 1, Seconds: 180},
 			{MaxProblems: 8, Seconds: 180},
 			{MaxProblems: 16, Seconds: 300},
 			{MaxProblems: 32, Seconds: 540},

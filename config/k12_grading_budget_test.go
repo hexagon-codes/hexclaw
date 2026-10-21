@@ -27,6 +27,7 @@ func validK12GradingBudgetConfig() K12GradingBudgetConfig {
 func TestDefaultK12GradingBudgetProvidesRunnableOperationalBaseline(t *testing.T) {
 	want := validK12GradingBudgetConfig()
 	want.PolicyVersion = 2
+	want.AssessingBuckets[0].Seconds = 180
 	want.RecognitionPlanVersion = 2
 	want.RecognizingSeconds = 300
 	want.RecognizingBuckets = K12RecognizingBudgetBucketsConfig{
