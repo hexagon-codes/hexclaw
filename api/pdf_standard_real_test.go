@@ -99,7 +99,7 @@ func TestPDFRenderAPIUsesSharedDefaultAndExplicitExceptions(t *testing.T) {
 			if err := os.WriteFile(path, data, 0o600); err != nil {
 				t.Fatal(err)
 			}
-			plain, err := exec.Command("pdftotext", path, "-").Output()
+			plain, err := exec.Command("pdftotext", "-enc", "UTF-8", path, "-").Output()
 			if err != nil {
 				t.Fatal(err)
 			}

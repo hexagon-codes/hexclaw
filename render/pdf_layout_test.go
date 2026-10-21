@@ -47,7 +47,8 @@ func TestPDFDefaultBrandingAndExplicitExceptionsRenderRealFiles(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			text, err := exec.Command("pdftotext", result.Path, "-").Output()
+			// 不同发行版的默认编码不一致，提取结果固定为UTF-8。
+			text, err := exec.Command("pdftotext", "-enc", "UTF-8", result.Path, "-").Output()
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -58,11 +59,12 @@ func TestPDFDefaultBrandingAndExplicitExceptionsRenderRealFiles(t *testing.T) {
 			if tc.branded {
 				want = 2
 			}
-			if got := strings.Count(strings.Join(strings.Fields(string(text)), ""), "HexClaw河蟹AI"); got != want {
-				t.Fatalf("header count = %d, want %d", got, want)
+			compactText := strings.Join(strings.Fields(string(text)), "")
+			if got := strings.Count(compactText, "HexClaw河蟹AI"); got != want {
+				t.Fatalf("header count = %d, want %d; text=%q", got, want, text)
 			}
-			if got := strings.Count(string(text), "本地云端均可部署"); got != want {
-				t.Fatalf("footer count = %d, want %d", got, want)
+			if got := strings.Count(compactText, "本地云端均可部署"); got != want {
+				t.Fatalf("footer count = %d, want %d; text=%q", got, want, text)
 			}
 		})
 	}
