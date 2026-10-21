@@ -357,7 +357,7 @@ func (h *PermissionHub) RequestApproval(ctx context.Context, sessionID string, r
 		h.mu.Unlock()
 		// No frontend connected — use default policy (deny)
 		logger.Info("[permission] no sender available, denying", "tool_name", req.ToolName)
-		return false, nil
+		return false, approvalExecutionError(req, "unavailable", errors.New("permission sender is unavailable"))
 	}
 	sender := h.sender
 	h.mu.Unlock()
@@ -402,7 +402,7 @@ func (h *PermissionHub) RequestApproval(ctx context.Context, sessionID string, r
 				h.sendPermissionTerminal(sender, receipt)
 			}
 		}
-		return false, fmt.Errorf("failed to send permission request: %w", err)
+		return false, approvalExecutionError(req, "notification_failed", fmt.Errorf("failed to send permission request: %w", err))
 	}
 
 	// Wait for response
@@ -457,9 +457,9 @@ func (h *PermissionHub) RequestApproval(ctx context.Context, sessionID string, r
 			}
 		}
 		if errors.Is(requestErr, context.DeadlineExceeded) {
-			return false, fmt.Errorf("permission request timed out after %v", h.timeout)
+			return false, approvalExecutionError(req, "expired", fmt.Errorf("permission request timed out after %v: %w", h.timeout, requestErr))
 		}
-		return false, requestErr
+		return false, approvalExecutionError(req, "cancelled", requestErr)
 	}
 }
 
@@ -1139,9 +1139,11 @@ func (h *PermissionHook) BeforeToolCall(ctx context.Context, call *ToolCallInfo)
 	// （未注入策略的调用方）才退化到 classifyRisk 黑名单兜底。
 	if h.policy != nil {
 		dec := h.policy.Evaluate(call)
-		// Retrieved document content is a data-plane input, never an authority
-		// source. Explicit static deny remains first; every other policy outcome
-		// is narrowed by the evidence-aware gate before allow/matrix/solve paths.
+		// 全权限由已保存的主机设置授权，不因本轮附带资料再次要求审批；显式拒绝仍优先。
+		if dec.Action != ActionDeny && h.fullAccessAuthorizes(ctx, call.Name) {
+			h.recordDecision(ctx, call.Name, "allow", "profile", "全权限设置自动执行")
+			return nil
+		}
 		if dec.Action != ActionDeny && hasUntrustedKnowledgeEvidence(ctx) && !evidenceToolUsesExistingPermission(ctx, call) {
 			risk := dec.Risk
 			if risk == "" || risk == "safe" {
@@ -1181,6 +1183,9 @@ func (h *PermissionHook) BeforeToolCall(ctx context.Context, call *ToolCallInfo)
 	}
 
 	// Legacy path: hardcoded dangerous/sensitive lists
+	if h.fullAccessAuthorizes(ctx, call.Name) {
+		return nil
+	}
 	risk := h.classifyRisk(call.Name)
 	if hasUntrustedKnowledgeEvidence(ctx) && !evidenceToolUsesExistingPermission(ctx, call) {
 		if risk == "safe" {
@@ -1193,6 +1198,17 @@ func (h *PermissionHook) BeforeToolCall(ctx context.Context, call *ToolCallInfo)
 	}
 	return h.requestApproval(ctx, call, risk,
 		fmt.Sprintf("Agent wants to execute %s(%s)", call.Name, summarizeArgs(call.Arguments)))
+}
+
+func (h *PermissionHook) fullAccessAuthorizes(ctx context.Context, toolName string) bool {
+	policy := h.DispatchPolicy()
+	if policy.Profile() != SystemDispatchProfileFullAccess {
+		return false
+	}
+	if source := systemDispatchSource(ctx); source != "" {
+		return policy.Allows(source, toolName)
+	}
+	return policy.AllowsInteractiveTool(toolName)
 }
 
 // revokeRememberedToolGrant 在策略 deny 时同步撤销该 owner+tool 的 remembered
@@ -1368,13 +1384,25 @@ func (h *PermissionHook) requestInteractiveApproval(ctx context.Context, call *T
 		return fmt.Errorf("tool %q: approval failed: %w", call.Name, err)
 	}
 	if !approved {
-		return fmt.Errorf("tool %q: user denied execution", call.Name)
+		return approvalExecutionError(req, "denied", fmt.Errorf("tool %q: user denied execution", call.Name))
 	}
 	// Execute exactly the canonical envelope that was hashed and approved. The
 	// caller-owned map may be mutated while the approval is pending and is no
 	// longer an authority input after this point.
 	call.Arguments = req.Arguments
 	return nil
+}
+
+// 仅在审批实际发生的分支记录原因，保留错误链，不从 HTTP 状态推断审批结论。
+func approvalExecutionError(req *PermissionRequest, status string, err error) error {
+	detail := skill.ToolExecutionDetail{Phase: "approval", Outcome: "failure", Reason: "approval_" + status, ApprovalStatus: status}
+	if req != nil {
+		detail.ApprovalRequestID = req.ID
+		if !req.DeadlineAt.IsZero() {
+			detail.ApprovalDeadline = req.DeadlineAt.UTC().Format(time.RFC3339Nano)
+		}
+	}
+	return &skill.ExecutionError{Detail: detail, Err: err}
 }
 
 func (h *PermissionHook) classifyRisk(toolName string) string {

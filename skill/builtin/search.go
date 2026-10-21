@@ -82,23 +82,25 @@ func (s *SearchSkill) Execute(ctx context.Context, args map[string]any) (*skill.
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return &skill.Result{
-			Content: fmt.Sprintf("搜索失败，网络错误：%v\n\n你可以尝试直接访问搜索引擎查找 \"%s\"", err, searchQuery),
-		}, nil
+		return nil, httpExecutionError(httpExecutionDetail(searchURL, "search", resp), "request", err)
 	}
 	defer resp.Body.Close()
+	detail := httpExecutionDetail(searchURL, "search", resp)
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20)) // 2MB 限制
 	if err != nil {
-		return &skill.Result{Content: "搜索结果读取失败"}, nil
+		return partialHTTPResult(body, detail, err)
+	}
+	if detail.Outcome != "success" {
+		return completeHTTPResult(&skill.Result{Content: truncateRunes(stripHTML(string(body)), maxFetchTextLen)}, detail)
 	}
 
 	// 简单提取搜索结果（从 HTML 中提取标题和摘要）
 	results := parseSearchResults(string(body))
 	if len(results) == 0 {
-		return &skill.Result{
+		return completeHTTPResult(&skill.Result{
 			Content: fmt.Sprintf("未找到与 \"%s\" 相关的结果", searchQuery),
-		}, nil
+		}, detail)
 	}
 
 	var sb strings.Builder
@@ -116,7 +118,7 @@ func (s *SearchSkill) Execute(ctx context.Context, args map[string]any) (*skill.
 			sources = append(sources, map[string]string{"url": result.url, "title": result.title})
 		}
 	}
-	return &skill.Result{Content: sb.String(), Data: sources}, nil
+	return completeHTTPResult(&skill.Result{Content: sb.String(), Data: sources}, detail)
 }
 
 // searchResult 搜索结果

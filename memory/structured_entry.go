@@ -3,6 +3,7 @@ package memory
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -381,18 +382,59 @@ const metaTimeFormat = time.RFC3339
 //	① 旧条**正文不动**，仅标 ValidTo=now → 失效但留史（召回默认只取 currently-valid）。
 //	② 新条带 Subject/Supersedes(旧条 ID)/ValidFrom=now 落盘，接续有效窗口。
 //
-// 先改旧（行数不变，行号稳定）后追加新（仅在末尾增行，不动既有行号）→ oldID 始终有效。
-func (fm *FileMemory) supersedeEntryUnlocked(oldID, newContent, memType, source, role string, meta EntryMeta, now time.Time) error {
+// 失败时恢复涉及的文件，避免旧值失效而新值未落盘；写锁内既有行号保持稳定。
+func (fm *FileMemory) supersedeEntryUnlocked(oldID, newContent, memType, source, role string, meta EntryMeta, now time.Time) (err error) {
+	if LooksSensitive(newContent) {
+		return nil
+	}
+	targetDir := fm.roleDir(role)
+	if isGlobalMemType(memType) {
+		targetDir = fm.roleDir("")
+	}
+	oldDir, oldFile, lineIdx := fm.resolveEntryLocationUnlocked(oldID)
+	if lineIdx < 0 {
+		return fmt.Errorf("memory entry not found: %s", oldID)
+	}
+	type snapshot struct {
+		data   []byte
+		exists bool
+	}
+	snapshots := make(map[string]snapshot)
+	for _, path := range []string{filepath.Join(oldDir, oldFile), filepath.Join(targetDir, memoryActiveFile), filepath.Join(targetDir, memoryArchiveFile)} {
+		if _, exists := snapshots[path]; exists {
+			continue
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil && !os.IsNotExist(readErr) {
+			return fmt.Errorf("read memory before replacement: %w", readErr)
+		}
+		snapshots[path] = snapshot{data: data, exists: readErr == nil}
+	}
+	defer func() {
+		if err == nil {
+			return
+		}
+		for path, before := range snapshots {
+			var restoreErr error
+			if before.exists {
+				restoreErr = atomicWriteFile(path, before.data, 0644)
+			} else {
+				restoreErr = os.Remove(path)
+				if os.IsNotExist(restoreErr) {
+					restoreErr = nil
+				}
+			}
+			if restoreErr != nil {
+				err = errors.Join(err, fmt.Errorf("restore memory after failed replacement: %w", restoreErr))
+			}
+		}
+	}()
 	vt := now.UTC().Format(metaTimeFormat)
 	if err := fm.rewriteEntryMetaUnlocked(oldID, func(m EntryMeta) EntryMeta {
 		m.ValidTo = vt
 		return m
 	}); err != nil {
 		return err
-	}
-	targetDir := fm.roleDir(role)
-	if isGlobalMemType(memType) {
-		targetDir = fm.roleDir("")
 	}
 	fm.evictIfNeededUnlocked(targetDir)
 	meta.Supersedes = oldID

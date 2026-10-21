@@ -228,6 +228,10 @@ asyncio.run(main())
 
 `teaching_context_receipts`仅关联本题成功求解实际消费的对应学科指南，不从全部已加载清单补足。教学指导依据与数值验证等级独立，不能据此声称程序验算通过或提升`solve_evidence`；失败、超纲或未消费指南的求解不生成该回执，旧消息不补写。
 
+`metadata.self_context_receipt`是可选的版本化 JSON 字符串，记录同次运行的产品事实版本/摘要、请求身份、实际模型尝试及去重的工具名称集合。回退和去工具降级分别记录，不保存提示词或凭据；历史缺失时不根据当前配置补写。`tool_calls[].detail`可选地携带同次执行的`phase/outcome/reason/action/http_status/response_received/target_host`及实际审批的`approval_request_id/approval_status/approval_deadline`。`outcome`为`success/failure/unknown`，旧`status`仍为`success/error`；HTTP 401/403不代表应用审批拒绝。非2xx的有效诊断正文保留，结果未知的POST不自动重发。同步、SSE终态和持久消息使用相同字段。
+
+`self_context_receipt.identity` 可选包含 `agent_display_name`、`session_title`、`channel_instance_name` 及对应 `*_source`。会话标题取当前同用户会话记录，Agent 显示名取当前路由配置；钉钉连接别名取实例配置，不能由实例别名推定平台当前机器人名称；未取得时保持未知，不新增配置或同步接口。缺失保持未知，旧回执不补写。名称与标题仅为普通上下文数据，不改变身份、人设、任务权限或系统指令，不要求客户端新增字段或页面。
+
 新钉钉回复的工具尾注按Markdown语法提取可读摘要，保留代码字面符号；实际模型显示快照在渠道投影冻结前追加。模型尾注不进入规范正文或1000可读字符的PDF判断；PDF说明沿同一冻结模型事实，正文及附件身份不变。已冻结的历史投影和投递不重新生成。
 
 | 位置 | 字段 | 必填 | 类型 / 规则 |

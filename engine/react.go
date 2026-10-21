@@ -405,22 +405,23 @@ var thinkingOnCompletionTimeout = 90 * time.Second
 // 引擎在内部为每个请求创建临时 Agent 实例，
 // 注入会话上下文和可用工具。
 type ReActEngine struct {
-	mu                      sync.RWMutex
-	cfg                     *config.Config
-	router                  *llmrouter.Selector
-	agentRouter             *agentrouter.Dispatcher // 多 Agent 路由器（可为 nil）
-	agentSystemPromptPolicy AgentSystemPromptPolicy
-	sessions                *session.Manager
-	skills                  *skill.DefaultRegistry
-	store                   storage.Store
-	cache                   *cache.SemanticCache
-	responseCacheGeneration atomic.Uint64
-	kb                      *knowledge.Manager   // 知识库管理器（可为 nil）
-	compactor               *session.Compactor   // 上下文压缩器
-	fileMem                 *memory.FileMemory   // 文件记忆系统（可为 nil）
-	vectorMem               *memory.VectorMemory // 向量语义记忆（可为 nil）
-	memEmbedder             MemoryEmbedder       // 长期记忆召回的向量化器（可为 nil → 纯 BM25 降级）
-	activeRecall            *ActiveRecall        // G②：回复前主动会话深召回（可为 nil → 不跑）
+	mu                        sync.RWMutex
+	cfg                       *config.Config
+	router                    *llmrouter.Selector
+	agentRouter               *agentrouter.Dispatcher // 多 Agent 路由器（可为 nil）
+	agentSystemPromptPolicy   AgentSystemPromptPolicy
+	agentDefaultSkillSelector AgentDefaultSkillSelector
+	sessions                  *session.Manager
+	skills                    *skill.DefaultRegistry
+	store                     storage.Store
+	cache                     *cache.SemanticCache
+	responseCacheGeneration   atomic.Uint64
+	kb                        *knowledge.Manager   // 知识库管理器（可为 nil）
+	compactor                 *session.Compactor   // 上下文压缩器
+	fileMem                   *memory.FileMemory   // 文件记忆系统（可为 nil）
+	vectorMem                 *memory.VectorMemory // 向量语义记忆（可为 nil）
+	memEmbedder               MemoryEmbedder       // 长期记忆召回的向量化器（可为 nil → 纯 BM25 降级）
+	activeRecall              *ActiveRecall        // G②：回复前主动会话深召回（可为 nil → 不跑）
 	// 记忆向量化熔断（BUG-20260703③，lock-free）：连续失败达阈值开闸，冷却期内纯 BM25。
 	memEmbedFailStreak atomic.Int32
 	memEmbedOpenUntil  atomic.Int64    // UnixNano；0=闸门关闭
@@ -944,7 +945,54 @@ func StripReservedDispatchMetadata(m map[string]string) {
 	adapter.StripReservedDispatchMetadata(m)
 }
 
-// matchSkillFastPath gates the keyword fast path around skills.Match.
+// matchSkillFastPathForSession 仅允许无历史、无智能体策略的独立请求直接执行技能。
+// 多轮对话统一由模型结合历史选择工具；显式代码命令仍按原有命令语义执行。
+func (e *ReActEngine) matchSkillFastPathForSession(ctx context.Context, msg *adapter.Message) (skill.Skill, bool) {
+	if !resolveToolsEnabledForMessage(e.cfg.LLM.Tools, false, msg.Metadata) || len(msg.Attachments) > 0 {
+		return nil, false
+	}
+	matched, ok := e.matchSkillFastPath(msg)
+	if !ok {
+		return nil, false
+	}
+	if e.getAgentRouter() != nil && strings.TrimSpace(msg.Metadata["pinned_agent"]) != "default" || strings.TrimSpace(msg.Metadata["role"]) != "" ||
+		strings.TrimSpace(msg.Metadata["pinned_agent"]) != "" && msg.Metadata["pinned_agent"] != "default" ||
+		strings.TrimSpace(msg.Metadata["routed_agent"]) != "" && msg.Metadata["routed_agent"] != "default" {
+		return nil, false
+	}
+	command := strings.ToLower(strings.TrimSpace(msg.Content))
+	if (matched.Name() == "shell" && (strings.HasPrefix(command, "/sh ") || strings.HasPrefix(command, "/shell "))) ||
+		(matched.Name() == "code" && (strings.HasPrefix(command, "/run ") || strings.HasPrefix(command, "/code "))) {
+		return matched, true
+	}
+	if msg.SessionID != "" {
+		// 只读会话计数，不额外加载图片或长消息；在会话锁内读取，避免等待前的旧快照。
+		sess, err := e.store.GetSession(ctx, msg.SessionID)
+		if err != nil || sess.MessageCount > 0 {
+			return nil, false
+		}
+	}
+	return matched, true
+}
+
+// executeSkillFastPath 复用工具执行链，快速匹配只省略模型调用，不省略已配置的权限与钩子。
+func (e *ReActEngine) executeSkillFastPath(ctx context.Context, matched skill.Skill, args map[string]any) (*skill.Result, error) {
+	if e.toolExecutor == nil {
+		return matched.Execute(ctx, args)
+	}
+	content, raw, err := e.toolExecutor.ExecuteResult(ctx, matched.Name(), args)
+	if err != nil {
+		return nil, err
+	}
+	if result, ok := raw.(*skill.Result); ok && result != nil {
+		copy := *result
+		copy.Content = content
+		return &copy, nil
+	}
+	return &skill.Result{Content: content}, nil
+}
+
+// matchSkillFastPath 匹配技能本身的触发条件；会话资格由共用入口判断。
 func (e *ReActEngine) matchSkillFastPath(msg *adapter.Message) (skill.Skill, bool) {
 	if isSystemDispatch(msg) {
 		return nil, false
@@ -1134,7 +1182,7 @@ func (e *ReActEngine) Process(ctx context.Context, msg *adapter.Message) (reply 
 
 	e.prepareAgentDefaultSkillContext(msg)
 	// 2. 尝试快速路径: Skill 关键词匹配
-	if matched, ok := e.matchSkillFastPath(msg); ok && workflowStepOptions(ctx) == nil {
+	if matched, ok := e.matchSkillFastPathForSession(ctx, msg); ok && workflowStepOptions(ctx) == nil {
 		if err := e.sessions.SaveUserMessage(ctx, sess.ID, msg); err != nil {
 			trace.L(ctx).Error("保存用户消息失败", "err", err, "session", sess.ID)
 			recordPersistError(msg, "user_message", err)
@@ -1143,7 +1191,7 @@ func (e *ReActEngine) Process(ctx context.Context, msg *adapter.Message) (reply 
 			"query":   msg.Content,
 			"user_id": msg.UserID,
 		}
-		result, err := matched.Execute(ctx, skillArgs)
+		result, err := e.executeSkillFastPath(ctx, matched, skillArgs)
 		if err != nil {
 			return nil, fmt.Errorf("skill %s 执行失败: %w", matched.Name(), err)
 		}
@@ -1213,7 +1261,7 @@ func (e *ReActEngine) Process(ctx context.Context, msg *adapter.Message) (reply 
 
 	// 5.5 知识库检索（RAG 上下文增强）——策略门（BUG-20260712-N）：场景实例/超短寒暄跳过
 	var kbContext string
-	if e.kb != nil && (e.cfg.Knowledge.Enabled && e.shouldAutoInjectKB(msg) || workflowKnowledgeRequested(ctx)) {
+	if e.kb != nil && (e.cfg.Knowledge.Enabled && e.shouldAutoInjectKBForTurn(msg, history) || workflowKnowledgeRequested(ctx)) {
 		topK := e.cfg.Knowledge.TopK
 		if topK <= 0 {
 			topK = 3
@@ -1263,6 +1311,7 @@ func (e *ReActEngine) completeWithTools(
 	explicitProvider bool,
 	cacheInput string,
 ) (reply *adapter.Reply, runErr error) {
+	ctx = e.withRuntimeSnapshots(ctx, msg, sessionID)
 	runStarted := time.Now()
 	requestID := messageRequestID(msg)
 	trace.L(ctx).Info("agent run stage started", "stage", "run", "provider", providerName, "model", modelName, "session_id", sessionID, "request_id", requestID, "agent", msg.Metadata["routed_agent"], "input", msg.Content)
@@ -1291,11 +1340,6 @@ func (e *ReActEngine) completeWithTools(
 	}
 	useBudget := budget != nil
 
-	// 反应式视觉兜底（BUG-20260713）：套在真实 provider 外——无工具直连 Complete 与工具循环
-	// runner 的初始 provider 都经此。图片数量超限时丢最老图重试（幂等，selector.wrapProvider 里
-	// 的同名包装不会二次叠加）。
-	provider = wrapVisionImageLimitProvider(provider, modelName)
-
 	// 收集工具定义（C1+C2: 按当前 query 渐进召回 + agent_mode 条件过滤；C2/B2 联动）
 	var tools []llm.ToolDefinition
 	isLocal := e.providerIsLocal(providerName)
@@ -1307,7 +1351,7 @@ func (e *ReActEngine) completeWithTools(
 	}
 	toolsCfg := e.cfg.LLM.Tools
 	if e.toolCollector != nil && resolveToolsEnabledForMessage(toolsCfg, isLocal, msg.Metadata) {
-		tools = e.toolCollector.CollectFiltered(msg.Content, skill.Activation{
+		tools = e.toolCollector.collectFilteredForRuntime(ctx, msg.Content, skill.Activation{
 			Mode: string(ResolveMode(msg.Metadata["agent_mode"], msg.Content)),
 		})
 		tools = stripCronRecursiveTools(msg, tools) // 功能优先：cron/webhook/workflow 不再剥离工具
@@ -1320,6 +1364,7 @@ func (e *ReActEngine) completeWithTools(
 		tools = restrictToolsToCodeExecWhenRequired(tools, msg.Content)
 		tools = e.workflowTools(ctx, tools)
 		if cap := effectiveMaxTools(toolsCfg.MaxTools, msg); cap > 0 && len(tools) > cap && !workflowExplicitTools(ctx) {
+			recordRuntimeToolLimit(ctx, tools, cap)
 			tools = tools[:cap]
 		}
 	}
@@ -1354,9 +1399,13 @@ func (e *ReActEngine) completeWithTools(
 		trace.L(ctx).Info("注入 /no_think", "model", modelName)
 	}
 	if len(req.Tools) == 0 {
+		provider = e.wrapVisionImageLimitProvider(e.wrapRuntimeSnapshotProvider(provider, providerName, modelName), modelName)
 		provider = e.wrapResponseCache(ctx, msg, provider, providerName, modelName)
 	}
 	if input, ok := standaloneVerificationInput(ctx, msg, req.Tools); ok {
+		if len(req.Tools) > 0 {
+			provider = e.wrapVisionImageLimitProvider(e.wrapRuntimeSnapshotProvider(provider, providerName, modelName), modelName)
+		}
 		return e.completeStandaloneVerification(ctx, sessionID, msg, provider, providerName, modelName, req, cacheInput, input)
 	}
 
@@ -1391,7 +1440,7 @@ func (e *ReActEngine) completeWithTools(
 					trace.L(ctx).Warn("Provider 降级", appendModelErrorLogFields([]any{"from", providerName, "to", fbName, "session", sessionID}, err)...)
 					providerName = fbName
 					modelName = e.getProviderModel(fbName, msg.Metadata)
-					provider = e.wrapResponseCache(ctx, msg, wrapVisionImageLimitProvider(fallbackP, modelName), providerName, modelName) // 反应式视觉兜底（无工具直连 failover 目标）
+					provider = e.wrapResponseCache(ctx, msg, e.wrapVisionImageLimitProvider(e.wrapRuntimeSnapshotProvider(fallbackP, providerName, modelName), modelName), providerName, modelName) // 反应式视觉兜底（无工具直连 failover 目标）
 					tried[fbName] = true
 					// BUG-20260712：按目标 provider locality 重建 cloud-safe 请求（回退到云端时
 					// 不再复用带 <memory-context> 的本地请求，规避云 egress 拦截）。无工具直连路径
@@ -1438,7 +1487,7 @@ func (e *ReActEngine) completeWithTools(
 			return e.getProviderModel(name, msg.Metadata)
 		},
 		wrapProvider: func(p hexagon.Provider, name, model string) hexagon.Provider {
-			p = wrapVisionImageLimitProvider(p, model) // 反应式视觉兜底（含 failover 目标 provider）
+			p = e.wrapVisionImageLimitProvider(e.wrapRuntimeSnapshotProvider(p, name, model), model) // 反应式视觉兜底（含 failover 目标 provider）
 			p = wrapCodeExecToolChoiceProvider(p, msg.Content)
 			p = wrapUnitSummaryToolChoiceProvider(p, msg)
 			p = e.wrapResponseCache(ctx, msg, p, name, model)
@@ -1456,14 +1505,10 @@ func (e *ReActEngine) completeWithTools(
 	}
 	middleware := []hruntime.Middleware{
 		runtimeRepeatGuardStopMiddleware{},
-		runtimeCompactionMiddleware{
-			provider:  provider,
-			sessionID: sessionID,
-			providerForState: func(*hruntime.State) hexagon.Provider {
-				p, _, _ := selector.Current()
-				return p
-			},
-		},
+		runtimeCompaction(provider, sessionID, func() hexagon.Provider {
+			p, _, _ := selector.Current()
+			return p
+		}),
 	}
 	if useBudget {
 		middleware = append(middleware, runtimeBudgetMiddleware{
@@ -1492,7 +1537,7 @@ func (e *ReActEngine) completeWithTools(
 		"num_ctx", reqNumCtxField(req), "prompt_bytes", promptBytesField(req),
 		"history", len(history), "egress", egressSummaryField(ctx),
 		"agent", msg.Metadata["routed_agent"], "source", msg.Metadata["source"], "session", sessionID)
-	result, err := runner.Run(ctx, hruntime.Request{
+	result, err := runRuntimeAttempt(ctx, runner, hruntime.Request{
 		ID:           messageRequestID(msg),
 		Messages:     req.Messages,
 		Tools:        req.Tools,
@@ -1500,13 +1545,13 @@ func (e *ReActEngine) completeWithTools(
 		ModelName:    modelName,
 		Metadata:     req.Metadata,
 		Limits:       hruntime.Limits{MaxTurns: maxTurns},
-	})
+	}, nil, nil)
 	// BUG-20260711-A：模型/provider 明确“不支持工具调用”（openrouter 免费 Nemotron 等）
 	// → 去掉 tools 重试一次，让对话正常出内容（降级而非把 404 硬失败甩给用户）。错误发生
 	// 在首个 provider 调用、尚未产出任何结果，去工具重试安全。
 	if err != nil && ctx.Err() == nil && len(req.Tools) > 0 && isToolUnsupportedError(err) {
 		trace.L(ctx).Warn("模型不支持工具调用，去工具重试", appendModelErrorLogFields([]any{"provider", providerName, "model", modelName, "session", sessionID}, err)...)
-		result, err = runner.Run(ctx, hruntime.Request{
+		result, err = runRuntimeAttempt(ctx, runner, hruntime.Request{
 			ID:           messageRequestID(msg),
 			Messages:     req.Messages,
 			Tools:        nil,
@@ -1514,7 +1559,7 @@ func (e *ReActEngine) completeWithTools(
 			ModelName:    modelName,
 			Metadata:     req.Metadata,
 			Limits:       hruntime.Limits{MaxTurns: maxTurns},
-		})
+		}, err, nil)
 	}
 	// BUG-20260711 多跳 provider 回退：runner 内建单跳回退能换一个 provider，但若那个也不可用
 	// 就放弃。provider 级不可用（429/5xx/超时/连接失败）且非用户显式 pin 时，遍历剩余健康
@@ -1532,7 +1577,7 @@ func (e *ReActEngine) completeWithTools(
 			req.Tools = tools
 		}
 		applyPerTurnRequestPolicy(ctx, &req, fbModel, e.visionRoutingStrategy(), msg, history)
-		result, err = runner.Run(ctx, hruntime.Request{
+		result, err = runRuntimeAttempt(ctx, runner, hruntime.Request{
 			ID:           messageRequestID(msg),
 			Messages:     req.Messages,
 			Tools:        req.Tools,
@@ -1540,10 +1585,10 @@ func (e *ReActEngine) completeWithTools(
 			ModelName:    fbModel,
 			Metadata:     req.Metadata,
 			Limits:       hruntime.Limits{MaxTurns: maxTurns},
-		})
+		}, err, nil)
 		// 新 provider 若又不支持工具调用，同样去工具重试一次（与首个 provider 对称）。
 		if err != nil && ctx.Err() == nil && len(req.Tools) > 0 && isToolUnsupportedError(err) {
-			result, err = runner.Run(ctx, hruntime.Request{
+			result, err = runRuntimeAttempt(ctx, runner, hruntime.Request{
 				ID:           messageRequestID(msg),
 				Messages:     req.Messages,
 				Tools:        nil,
@@ -1551,7 +1596,7 @@ func (e *ReActEngine) completeWithTools(
 				ModelName:    fbModel,
 				Metadata:     req.Metadata,
 				Limits:       hruntime.Limits{MaxTurns: maxTurns},
-			})
+			}, err, nil)
 		}
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
@@ -1629,7 +1674,8 @@ func (e *ReActEngine) completeWithTools(
 	applyToolReplyMeta(ctx, msg)
 	// 有序内容块经 finalizeReply 透传进 reply（它可能追加守卫提示 text 块，B5b），
 	// 此处不再二次覆盖——否则追加的块会被打回。
-	return e.finalizeReply(ctx, sessionID, msg, provider, req, resp, providerName, modelName, cacheInput, runtimeToolCallsToAdapter(result.ToolCalls, toolOrigins), runtimeBlocksToAdapter(result.Blocks))
+	toolCalls := runtimeToolCallsToAdapter(result.ToolCalls, toolOrigins)
+	return e.finalizeReply(ctx, sessionID, msg, provider, req, resp, providerName, modelName, cacheInput, toolCalls, runtimeBlocksToAdapter(result.Blocks, toolCalls))
 }
 
 // finalizeReply 完成回复的保存、缓存、成本记录等后处理
@@ -2132,7 +2178,7 @@ func (e *ReActEngine) processStream(
 
 	e.prepareAgentDefaultSkillContext(msg)
 	// 2. 尝试快速路径: Skill 匹配 → 单 chunk 返回
-	if matched, ok := e.matchSkillFastPath(msg); ok && workflowStepOptions(ctx) == nil {
+	if matched, ok := e.matchSkillFastPathForSession(ctx, msg); ok && workflowStepOptions(ctx) == nil {
 		if err := e.sessions.SaveUserMessage(ctx, sess.ID, msg); err != nil {
 			trace.L(ctx).Error("保存用户消息失败", "err", err, "session", sess.ID)
 			recordPersistError(msg, "user_message", err)
@@ -2141,7 +2187,7 @@ func (e *ReActEngine) processStream(
 			"query":   msg.Content,
 			"user_id": msg.UserID,
 		}
-		result, err := matched.Execute(ctx, skillArgs)
+		result, err := e.executeSkillFastPath(ctx, matched, skillArgs)
 		if err != nil {
 			return nil, fmt.Errorf("skill %s 执行失败: %w", matched.Name(), err)
 		}
@@ -2411,7 +2457,7 @@ func (e *ReActEngine) processStream(
 
 	// 5.5 知识库检索（RAG）——策略门（BUG-20260712-N）：场景实例/超短寒暄跳过
 	var kbContext string
-	if e.kb != nil && (e.cfg.Knowledge.Enabled && e.shouldAutoInjectKB(msg) || workflowKnowledgeRequested(ctx)) {
+	if e.kb != nil && (e.cfg.Knowledge.Enabled && e.shouldAutoInjectKBForTurn(msg, history) || workflowKnowledgeRequested(ctx)) {
 		topK := e.cfg.Knowledge.TopK
 		if topK <= 0 {
 			topK = 3
@@ -2450,6 +2496,7 @@ func (e *ReActEngine) processStreamRuntime(
 	cacheInput string,
 	sessionUnlock func(),
 ) (<-chan *adapter.ReplyChunk, error) {
+	ctx = e.withRuntimeSnapshots(ctx, msg, sessionID)
 	ch := make(chan *adapter.ReplyChunk, 16)
 	started := make(chan error, 1)
 	requestID := messageRequestID(msg)
@@ -2523,7 +2570,7 @@ func (e *ReActEngine) processStreamRuntime(
 		streamToolsCfg := e.cfg.LLM.Tools
 		if e.toolCollector != nil && resolveToolsEnabledForMessage(streamToolsCfg, isLocal, msg.Metadata) {
 			// C1+C2: 流式路径同样按 query+activation 过滤
-			tools = e.toolCollector.CollectFiltered(msg.Content, skill.Activation{
+			tools = e.toolCollector.collectFilteredForRuntime(ctx, msg.Content, skill.Activation{
 				Mode: string(ResolveMode(msg.Metadata["agent_mode"], msg.Content)),
 			})
 			tools = stripCronRecursiveTools(msg, tools)  // 功能优先：cron/webhook/workflow 不再剥离工具
@@ -2536,6 +2583,7 @@ func (e *ReActEngine) processStreamRuntime(
 			tools = restrictToolsToCodeExecWhenRequired(tools, msg.Content)
 			tools = e.workflowTools(ctx, tools)
 			if cap := effectiveMaxTools(streamToolsCfg.MaxTools, msg); cap > 0 && len(tools) > cap && !workflowExplicitTools(ctx) {
+				recordRuntimeToolLimit(ctx, tools, cap)
 				tools = tools[:cap]
 			}
 		}
@@ -2589,21 +2637,17 @@ func (e *ReActEngine) processStreamRuntime(
 				return e.getProviderModel(name, msg.Metadata)
 			},
 			wrapProvider: func(p hexagon.Provider, name, model string) hexagon.Provider {
-				p = wrapVisionImageLimitProvider(p, model) // 反应式视觉兜底（流式，含 failover 目标）
+				p = e.wrapVisionImageLimitProvider(e.wrapRuntimeSnapshotProvider(p, name, model), model) // 反应式视觉兜底（流式，含 failover 目标）
 				p = wrapCodeExecToolChoiceProvider(p, msg.Content)
 				return wrapUnitSummaryToolChoiceProvider(p, msg)
 			},
 		}
 		maxTurns := defaultAgentMaxTurns
 		middleware := []hruntime.Middleware{
-			runtimeCompactionMiddleware{
-				provider:  selection.provider,
-				sessionID: sessionID,
-				providerForState: func(*hruntime.State) hexagon.Provider {
-					p, _, _ := selector.Current()
-					return p
-				},
-			},
+			runtimeCompaction(selection.provider, sessionID, func() hexagon.Provider {
+				p, _, _ := selector.Current()
+				return p
+			}),
 		}
 		if budget != nil {
 			maxTurns = hardMaxTurns
@@ -2643,7 +2687,7 @@ func (e *ReActEngine) processStreamRuntime(
 		lifecycleStage.Store("provider")
 		providerStageStarted := time.Now()
 		trace.L(ctx).Info("agent stream provider stage started", "stage", "provider", "provider", selection.providerName, "model", selection.modelName, "session_id", sessionID, "request_id", requestID, "agent", msg.Metadata["routed_agent"])
-		result, err := runner.Stream(streamCtx, hruntime.Request{
+		result, err := runRuntimeAttempt(streamCtx, runner, hruntime.Request{
 			ID:           messageRequestID(msg),
 			Messages:     req.Messages,
 			Tools:        req.Tools,
@@ -2652,13 +2696,13 @@ func (e *ReActEngine) processStreamRuntime(
 			Metadata:     req.Metadata,
 			Limits:       hruntime.Limits{MaxTurns: maxTurns},
 			StreamMode:   streamMode,
-		}, sink)
+		}, nil, sink)
 		// BUG-20260711-A：模型/provider 明确“不支持工具调用”→ 去掉 tools 用同 sink 重试一次
 		// （降级而非把 404 硬失败甩给用户）。错误发生在 header/首个 provider 调用、还没 emit
 		// 任何内容，此处不 notify error、不往 ch 塞 error，重试安全。
 		if err != nil && ctx.Err() == nil && len(req.Tools) > 0 && isToolUnsupportedError(err) {
 			trace.L(ctx).Warn("模型不支持工具调用，去工具重试（流式）", appendModelErrorLogFields([]any{"provider", selection.providerName, "model", selection.modelName, "session", sessionID}, err)...)
-			result, err = runner.Stream(streamCtx, hruntime.Request{
+			result, err = runRuntimeAttempt(streamCtx, runner, hruntime.Request{
 				ID:           messageRequestID(msg),
 				Messages:     req.Messages,
 				Tools:        nil,
@@ -2667,7 +2711,7 @@ func (e *ReActEngine) processStreamRuntime(
 				Metadata:     req.Metadata,
 				Limits:       hruntime.Limits{MaxTurns: maxTurns},
 				StreamMode:   streamMode,
-			}, sink)
+			}, err, sink)
 		}
 		// BUG-20260711 多跳 provider 回退（流式，与非流式 completeWithTools 对称）：provider 级
 		// 不可用且非显式 pin 时，遍历剩余健康 provider 一轮，用同一 runner+selector+sink 重跑。
@@ -2687,7 +2731,7 @@ func (e *ReActEngine) processStreamRuntime(
 			sink.setReasoningRoute(fbName, fbModel)
 			ollama.InjectTrustedReasoningDisclosureEvidence(&req, fbName, fbModel)
 			sink.bindReasoningEvidenceObserver(&req)
-			result, err = runner.Stream(streamCtx, hruntime.Request{
+			result, err = runRuntimeAttempt(streamCtx, runner, hruntime.Request{
 				ID:           messageRequestID(msg),
 				Messages:     req.Messages,
 				Tools:        req.Tools,
@@ -2696,9 +2740,9 @@ func (e *ReActEngine) processStreamRuntime(
 				Metadata:     req.Metadata,
 				Limits:       hruntime.Limits{MaxTurns: maxTurns},
 				StreamMode:   streamMode,
-			}, sink)
+			}, err, sink)
 			if err != nil && ctx.Err() == nil && len(req.Tools) > 0 && isToolUnsupportedError(err) {
-				result, err = runner.Stream(streamCtx, hruntime.Request{
+				result, err = runRuntimeAttempt(streamCtx, runner, hruntime.Request{
 					ID:           messageRequestID(msg),
 					Messages:     req.Messages,
 					Tools:        nil,
@@ -2707,7 +2751,7 @@ func (e *ReActEngine) processStreamRuntime(
 					Metadata:     req.Metadata,
 					Limits:       hruntime.Limits{MaxTurns: maxTurns},
 					StreamMode:   streamMode,
-				}, sink)
+				}, err, sink)
 			}
 		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -2798,7 +2842,7 @@ func (e *ReActEngine) processStreamRuntime(
 			Metadata:      metadata,
 			Usage:         usage,
 			ToolCalls:     toolCalls,
-			Blocks:        append(retrievalProcessSnapshot(ctx), runtimeBlocksToAdapter(result.Blocks)...), // 有序内容块（多步交错按序渲染）
+			Blocks:        append(retrievalProcessSnapshot(ctx), runtimeBlocksToAdapter(result.Blocks, toolCalls)...), // 有序内容块（多步交错按序渲染）
 			KnowledgeHits: kbHits,
 			MemoryHits:    memHits,
 		}
@@ -3085,6 +3129,7 @@ func (e *ReActEngine) finalizeRuntimeStreamResult(
 	}
 	markReasoningDisclosure(msgMeta, session.ReasoningDisclosureFromContext(ctx))
 
+	toolCalls := runtimeToolCallsToAdapter(result.ToolCalls, origins...)
 	assistantMessageID := ""
 	if record, err := e.sessions.SaveAssistantReply(saveCtx, sessionID, content, session.AssistantMeta{
 		Reasoning:        reasoning,
@@ -3094,9 +3139,9 @@ func (e *ReActEngine) finalizeRuntimeStreamResult(
 		AgentName:        msgMeta["role"],
 		RequestID:        messageRequestID(msg),
 		// 经同一转换器落库：持久化的 tool_calls 与 live wire 形状一致（含 status/duration），重载后工具卡不蒸发。
-		ToolCalls: runtimeToolCallsToAdapter(result.ToolCalls, origins...),
+		ToolCalls: toolCalls,
 		// 有序内容块同步落库：重载后多步 ReAct 仍按真实交错序渲染（与 live wire 同形状）。
-		Blocks:        append(retrievalProcessSnapshot(ctx), runtimeBlocksToAdapter(result.Blocks)...),
+		Blocks:        append(retrievalProcessSnapshot(ctx), runtimeBlocksToAdapter(result.Blocks, toolCalls)...),
 		ReplyMetadata: responseReplyMetadata(ctx, msgMeta, providerName, modelName, ""),
 	}); err != nil {
 		trace.L(ctx).Error("保存助手回复失败", "err", err, "session", sessionID)
@@ -3153,7 +3198,7 @@ func (e *ReActEngine) finalizeRuntimeStreamResult(
 	// 只记录模型回复的诊断元数据；正文与推理内容由会话存储管理，不能进入日志。
 	logModelReply(ctx, "stream", sessionID, providerName, modelName, content, reasoning, len(result.ToolCalls), maxTurnsHit)
 
-	return content, streamTail, responseReplyMetadata(ctx, msgMeta, providerName, modelName, assistantMessageID), usage, runtimeToolCallsToAdapter(result.ToolCalls, origins...)
+	return content, streamTail, responseReplyMetadata(ctx, msgMeta, providerName, modelName, assistantMessageID), usage, toolCalls
 }
 
 // logModelReply 在回复完成时只记录可用于关联与容量诊断的元数据。
@@ -3254,6 +3299,7 @@ func (e *ReActEngine) processStreamToolLoop(
 	}
 	useBudgetStream := budget != nil
 	messages := req.Messages
+	inputIndex := contextUserMessageIndex(messages, countContextUserMessages(messages))
 	var allToolCalls []adapter.ToolCall
 
 	for turn := 0; turn < maxStreamToolTurns; turn++ {
@@ -3267,7 +3313,7 @@ func (e *ReActEngine) processStreamToolLoop(
 			break
 		}
 		// P4: 工具循环内上下文压缩
-		messages = compressContextIfNeeded(ctx, messages, selection.provider, sess.ID)
+		messages, inputIndex = compressContextWithInput(ctx, messages, selection.provider, sess.ID, inputIndex)
 		req.Messages = messages
 
 		// v0.4.0 E4 接入：当用户没有显式锁定 provider 且当前是第一轮时，走
@@ -3907,6 +3953,29 @@ func (e *ReActEngine) pipeStreamWithTools(
 //	   避免“不要猜，请查询知识库”被否定词误杀。
 //
 // 查无此人的 role 不在此拦（guardExplicitRoleExists 已 fail-loud，本门不越权）。
+// shouldAutoInjectKBForTurn 避免把依赖上文的当前短句直接当作独立检索问题。
+// 多轮中优先由已携带历史的模型按需调用知识检索；显式资料需求和无工具路径保留自动检索。
+func (e *ReActEngine) shouldAutoInjectKBForTurn(msg *adapter.Message, history []llm.Message) bool {
+	if !e.shouldAutoInjectKB(msg) {
+		return false
+	}
+	if len(history) == 0 || e.toolCollector == nil || !resolveToolsEnabledForMessage(e.cfg.LLM.Tools, false, msg.Metadata) {
+		return true
+	}
+	for _, marker := range []string{"知识库", "教材", "课本", "文档", "资料", "knowledge base", "textbook", "document"} {
+		if strings.Contains(strings.ToLower(msg.Content), marker) {
+			return true
+		}
+	}
+	tools := applyInheritedToolPolicy(msg, e.toolCollector.CollectFiltered(msg.Content, skill.Activation{Mode: string(ResolveMode(msg.Metadata["agent_mode"], msg.Content))}))
+	for _, tool := range tools {
+		if tool.Function.Name == "knowledge_search" {
+			return false
+		}
+	}
+	return true
+}
+
 func (e *ReActEngine) shouldAutoInjectKB(msg *adapter.Message) bool {
 	if msg == nil {
 		return false
@@ -3918,6 +3987,13 @@ func (e *ReActEngine) shouldAutoInjectKB(msg *adapter.Message) bool {
 	if len([]rune(content)) < 4 || explicitlyDeclinesKnowledgeRetrieval(content) {
 		return false
 	}
+	// 实时天气不应自动混入静态教材；显式资料请求仍沿原检索路径，工具权限不变。
+	if e.skills != nil && !strings.Contains(content, "知识库") && !strings.Contains(content, "教材") &&
+		!strings.Contains(content, "课本") && !strings.Contains(content, "文档") && !strings.Contains(content, "资料") {
+		if weather, ok := e.skills.Get("weather"); ok && weather.Match(content) {
+			return false
+		}
+	}
 	if msg.Metadata == nil {
 		return true
 	}
@@ -3925,7 +4001,7 @@ func (e *ReActEngine) shouldAutoInjectKB(msg *adapter.Message) bool {
 	if ar == nil {
 		return true
 	}
-	identities := []string{strings.TrimSpace(msg.Metadata["role"])}
+	identities := []string{strings.TrimSpace(msg.Metadata["role"]), strings.TrimSpace(msg.Metadata["routed_agent"])}
 	if pinned := strings.TrimSpace(msg.Metadata["pinned_agent"]); pinned != "" && !strings.EqualFold(pinned, "default") {
 		identities = append(identities, pinned)
 	}
@@ -4040,7 +4116,7 @@ func (e *ReActEngine) buildStreamMessages(ctx context.Context, roleName string, 
 		sysContent = appendPreparedAgentSystemPromptDirective(sysContent, metadata)
 		messages = append(messages, hexagon.Message{Role: "system", Content: sysContent})
 		messages = append(messages, history...)
-		messages = append(messages, adapter.BuildUserMessage(runtimeUserQuery, attachments))
+		messages = append(messages, buildCurrentUserMessage(runtimeUserQuery, attachments))
 		return messages
 	}
 
@@ -4094,7 +4170,8 @@ func (e *ReActEngine) buildStreamMessages(ctx context.Context, roleName string, 
 	if names := effectiveSkillContextNames(metadata); len(names) > 0 || preparedOK && prepared != nil && prepared.prompt != "" {
 		if !preparedOK || prepared == nil {
 			_, explicit := metadata["skills"]
-			prompt, receipts := e.buildMountedSkillsContext(names, !explicit)
+			prompt, receipts := e.buildMountedSkillsContext(names, !explicit,
+				!explicit && metadata[agentDefaultSkillCompleteKey] == "true")
 			prepared = &preparedSkillContext{prompt: prompt, receipts: receipts}
 		}
 		prompt := prepared.prompt
@@ -4142,7 +4219,7 @@ func (e *ReActEngine) buildStreamMessages(ctx context.Context, roleName string, 
 			egress.AddDataClasses(ctx, egress.ClassDocument)
 		}
 	}
-	messages = append(messages, adapter.BuildUserMessage(userContent, attachments))
+	messages = append(messages, buildCurrentUserMessage(userContent, attachments))
 
 	return messages
 }
@@ -4215,10 +4292,11 @@ func (e *ReActEngine) completeDirect(
 	explicitProvider bool,
 	cacheInput string,
 ) (*adapter.Reply, error) {
+	ctx = e.withRuntimeSnapshots(ctx, msg, sessionID)
 	if shouldRejectImageAttachmentsForProvider(provider, providerName, modelName, msg.Attachments) {
 		return nil, fmt.Errorf("当前模型 %s 不支持图片附件，请切换到视觉模型后重试", modelName)
 	}
-	provider = wrapVisionImageLimitProvider(provider, modelName) // 反应式视觉兜底（多模态直连路径）
+	provider = e.wrapVisionImageLimitProvider(e.wrapRuntimeSnapshotProvider(provider, providerName, modelName), modelName)
 	req := e.buildCompletionRequest(ctx, msg, history, kbContext)
 	applyPerTurnRequestPolicy(ctx, &req, modelName, e.visionRoutingStrategy(), msg, history)
 	resp, err := provider.Complete(ctx, req)
@@ -4236,7 +4314,7 @@ func (e *ReActEngine) completeDirect(
 			return nil, fmt.Errorf("多模态补全失败且无可用备用: %w", err)
 		}
 		trace.L(ctx).Warn("Provider 多模态降级", appendModelErrorLogFields([]any{"from", providerName, "to", fbName, "session", sessionID}, err)...)
-		resp, err = wrapVisionImageLimitProvider(fallbackP, e.getProviderModel(fbName, msg.Metadata)).Complete(ctx, req)
+		resp, err = e.wrapVisionImageLimitProvider(e.wrapRuntimeSnapshotProvider(fallbackP, fbName, e.getProviderModel(fbName, msg.Metadata)), e.getProviderModel(fbName, msg.Metadata)).Complete(ctx, req)
 		if err != nil {
 			return nil, fmt.Errorf("多模态补全失败（降级后）: %w", err)
 		}
@@ -4357,6 +4435,14 @@ func applyPerTurnRequestPolicy(ctx context.Context, req *hexagon.CompletionReque
 
 // visionImagePlaceholder 替换被裁剪/淘汰掉的图片：保留「这里曾有张图」的文字上下文，只削图不删话。
 const visionImagePlaceholder = "[早前发送的图片]"
+
+const currentInputMessageName = "hexclaw_current_input"
+
+func buildCurrentUserMessage(content string, attachments []adapter.Attachment) llm.Message {
+	message := adapter.BuildUserMessage(content, attachments)
+	message.Name = currentInputMessageName
+	return message
+}
 
 const (
 	// visionImageBudgetGLM4VFlash 实测 glm-4v-flash 单请求图片上限：1~5 张返回 200，6+ 张返回
@@ -4483,6 +4569,9 @@ func clipVisionImagesForBudget(messages []hexagon.Message, budget int) int {
 	folded := 0
 	// 从最老（最前）往新折叠，折够 toFold 张即停 → 留下的必是最新的 budget 张。
 	for i := 0; i < len(messages) && folded < toFold; i++ {
+		if messages[i].Name == currentInputMessageName {
+			continue
+		}
 		if !messageHasImagePart(messages[i]) {
 			continue
 		}
@@ -4537,6 +4626,9 @@ func dropOldestVisionImage(messages []hexagon.Message) ([]hexagon.Message, bool)
 	out := make([]hexagon.Message, len(messages))
 	copy(out, messages)
 	for i := range out {
+		if out[i].Name == currentInputMessageName {
+			continue
+		}
 		hit := -1
 		for j := range out[i].MultiContent {
 			if out[i].MultiContent[j].Type == "image_url" {
@@ -4561,13 +4653,49 @@ func dropOldestVisionImage(messages []hexagon.Message) ([]hexagon.Message, bool)
 // 一张图 → 重试，循环到通过或图片降到 1 张仍不过才放弃。重试有上限（=初始图片数）防死循环；每次
 // 丢图都 log。只针对数量超限（isVisionImageCountLimitError），格式/解析错误及其它错误照抛。
 type visionImageLimitProvider struct {
-	inner hexagon.Provider
-	model string
+	inner    hexagon.Provider
+	model    string
+	strategy string
+}
+
+// prepareToolMedia 在每次真实模型请求前折叠早前工具图，当前原图始终按身份保留。
+// 最新调用组保留完整媒体；只有已知模型硬上限或真实超限响应才进一步缩减它。
+func (p *visionImageLimitProvider) prepareToolMedia(req llm.CompletionRequest) llm.CompletionRequest {
+	latestGroup, currentImages, latestImages, hasMedia := 0, 0, 0, false
+	for i, message := range req.Messages {
+		if message.Role == llm.RoleAssistant && len(message.ToolCalls) > 0 {
+			latestGroup = i
+		}
+		if message.Name == currentInputMessageName {
+			currentImages += imagePartCount(message.MultiContent)
+		}
+	}
+	for i, message := range req.Messages {
+		if message.Name == hruntime.ToolMediaMessageName {
+			hasMedia = true
+			if i >= latestGroup {
+				latestImages += imagePartCount(message.MultiContent)
+			}
+		}
+	}
+	if !hasMedia {
+		return req
+	}
+	budget := max(effectiveVisionImageBudget(p.model, p.strategy, currentImages), currentImages+latestImages)
+	if strings.Contains(strings.ToLower(p.model), "glm-4v") {
+		budget = min(budget, visionImageBudget(p.model))
+	}
+	if imagePartsInMessages(req.Messages) > budget {
+		req.Messages = append([]llm.Message(nil), req.Messages...)
+		clipVisionImagesForBudget(req.Messages, budget)
+	}
+	return req
 }
 
 func (p *visionImageLimitProvider) Name() string { return p.inner.Name() }
 
 func (p *visionImageLimitProvider) Complete(ctx context.Context, req llm.CompletionRequest) (*llm.CompletionResponse, error) {
+	req = p.prepareToolMedia(req)
 	resp, err := p.inner.Complete(ctx, req)
 	if err == nil || !isVisionImageCountLimitError(err) {
 		return resp, err
@@ -4590,6 +4718,7 @@ func (p *visionImageLimitProvider) Complete(ctx context.Context, req llm.Complet
 }
 
 func (p *visionImageLimitProvider) Stream(ctx context.Context, req llm.CompletionRequest) (*llm.Stream, error) {
+	req = p.prepareToolMedia(req)
 	stream, err := p.inner.Stream(ctx, req)
 	if err == nil || !isVisionImageCountLimitError(err) {
 		return stream, err
@@ -4619,14 +4748,22 @@ func (p *visionImageLimitProvider) CountTokens(messages []llm.Message) (int, err
 
 // wrapVisionImageLimitProvider 给视觉出口 provider 套反应式兜底层（幂等：已套则原样返回，避免
 // 与 selector.wrapProvider 重复叠加）。视觉裁剪层应处最内、最贴近真实 provider，才能就地丢图重试。
-func wrapVisionImageLimitProvider(p hexagon.Provider, modelName string) hexagon.Provider {
+func wrapVisionImageLimitProvider(p hexagon.Provider, modelName string, strategy ...string) hexagon.Provider {
 	if p == nil {
 		return p
 	}
 	if _, already := unwrapContextTokenCounterProvider(p).(*visionImageLimitProvider); already {
 		return p
 	}
-	return preserveContextTokenCounter(&visionImageLimitProvider{inner: p, model: modelName}, p)
+	selectedStrategy := ""
+	if len(strategy) > 0 {
+		selectedStrategy = strategy[0]
+	}
+	return preserveContextTokenCounter(&visionImageLimitProvider{inner: p, model: modelName, strategy: selectedStrategy}, p)
+}
+
+func (e *ReActEngine) wrapVisionImageLimitProvider(p hexagon.Provider, model string) hexagon.Provider {
+	return wrapVisionImageLimitProvider(p, model, e.visionRoutingStrategy())
 }
 
 func applyModelThinkingDefaults(req *hexagon.CompletionRequest, modelName, userContent string) {
@@ -5520,9 +5657,10 @@ const skillContextReceiptsMetadataKey = "skill_context_receipts"
 const teachingContextReceiptsMetadataKey = "teaching_context_receipts"
 
 const (
-	agentDefaultSkillNamesKey = "_agent_default_skill_names"
-	agentDefaultSkillOwnerKey = "_agent_default_skill_owner"
-	skillPromptDigestKey      = "_skill_prompt_digest"
+	agentDefaultSkillNamesKey    = "_agent_default_skill_names"
+	agentDefaultSkillOwnerKey    = "_agent_default_skill_owner"
+	agentDefaultSkillCompleteKey = "_agent_default_skill_complete"
+	skillPromptDigestKey         = "_skill_prompt_digest"
 )
 
 type preparedSkillContextKey struct{}
@@ -5534,6 +5672,7 @@ type preparedSkillContext struct {
 func clearPreparedSkillContext(ctx context.Context, msg *adapter.Message) context.Context {
 	delete(msg.Metadata, agentDefaultSkillNamesKey)
 	delete(msg.Metadata, agentDefaultSkillOwnerKey)
+	delete(msg.Metadata, agentDefaultSkillCompleteKey)
 	delete(msg.Metadata, skillPromptDigestKey)
 	return context.WithValue(ctx, preparedSkillContextKey{}, (*preparedSkillContext)(nil))
 }
@@ -5559,6 +5698,7 @@ func (e *ReActEngine) prepareAgentDefaultSkillContext(msg *adapter.Message) {
 	ensureMessageMetadata(msg)
 	delete(msg.Metadata, agentDefaultSkillNamesKey)
 	delete(msg.Metadata, agentDefaultSkillOwnerKey)
+	delete(msg.Metadata, agentDefaultSkillCompleteKey)
 	if isSystemDispatch(msg) {
 		return
 	}
@@ -5581,13 +5721,21 @@ func (e *ReActEngine) prepareAgentDefaultSkillContext(msg *adapter.Message) {
 	}
 	e.mu.RLock()
 	registry := e.skills
+	selector := e.agentDefaultSkillSelector
 	e.mu.RUnlock()
 	if registry == nil {
 		return
 	}
 	var names []string
 	seen := make(map[string]bool)
-	for _, name := range cfg.Skills {
+	configured := cfg.Skills
+	if selector != nil {
+		if selected, handled := selector(msg.Content, append([]string(nil), configured...)); handled {
+			configured = selected
+			msg.Metadata[agentDefaultSkillCompleteKey] = "true"
+		}
+	}
+	for _, name := range configured {
 		name = strings.TrimSpace(name)
 		if name == "" || seen[name] {
 			continue
@@ -5629,7 +5777,8 @@ func (e *ReActEngine) prepareSkillPromptContext(ctx context.Context, msg *adapte
 	}
 	delete(msg.Metadata, skillPromptDigestKey)
 	_, explicit := msg.Metadata["skills"]
-	prompt, receipts := e.buildMountedSkillsContext(effectiveSkillContextNames(msg.Metadata), !explicit)
+	prompt, receipts := e.buildMountedSkillsContext(effectiveSkillContextNames(msg.Metadata), !explicit,
+		!explicit && msg.Metadata[agentDefaultSkillCompleteKey] == "true")
 	receipts = cloneSkillContextReceipts(receipts)
 	for i := range receipts {
 		receipts[i].Status = "prepared"
@@ -5668,7 +5817,7 @@ func (e *ReActEngine) buildMountedSkillsContext(names []string, defaultContext .
 		if err != nil || strings.TrimSpace(body) == "" {
 			continue
 		}
-		if r := []rune(body); len(r) > perSkillCap {
+		if r := []rune(body); len(r) > perSkillCap && !(len(defaultContext) > 1 && defaultContext[1]) {
 			body = string(r[:perSkillCap]) + "\n..."
 		}
 		if sb.Len() == 0 {
@@ -5862,6 +6011,7 @@ func (e *ReActEngine) buildTurnContext(ctx context.Context, metadata map[string]
 // buildTurnContext（当轮 user 消息），避免每轮击穿前缀缓存。
 func (e *ReActEngine) buildCapabilityContext(ctx context.Context, metadata map[string]string) string {
 	var sb strings.Builder
+	sb.WriteString(productFactsContext())
 
 	// 1. 知识库文档列表
 	if e.kb != nil && e.cfg.Knowledge.Enabled {
@@ -5879,22 +6029,7 @@ func (e *ReActEngine) buildCapabilityContext(ctx context.Context, metadata map[s
 		}
 	}
 
-	// 2. Skill/MCP 工具列表
-	if e.toolCollector != nil {
-		tools := e.toolCollector.Collect()
-		if len(tools) > 0 {
-			sb.WriteString("\n[你可用的工具]\n")
-			sb.WriteString("你可以调用以下工具来完成任务：\n")
-			for _, t := range tools {
-				desc := t.Function.Description
-				if len(desc) > 60 {
-					// rune-safe 截断（委托 toolkit stringx.SubString），避免 CJK 工具描述被 byte 切断成乱码（AP-049）。
-					desc = stringx.SubString(desc, 0, 60) + "..."
-				}
-				sb.WriteString("- " + t.Function.Name + "：" + desc + "\n")
-			}
-		}
-	}
+	// 本次工具与模型由实际 Provider 请求边界注入，不从注册表或默认路由推断。
 
 	// 3. 长期记忆召回 —— 已移至 buildTurnContext（查询相关、每轮易变，放进当轮 user 消息以保前缀缓存）。
 
@@ -5909,10 +6044,6 @@ func (e *ReActEngine) buildCapabilityContext(ctx context.Context, metadata map[s
 
 	// 当前模型
 	if router != nil {
-		if p, name, err := router.Route(ctx); err == nil && p != nil {
-			model := router.ProviderModel(name)
-			sb.WriteString("- 当前模型：" + name + " / " + model + "\n")
-		}
 		// 可用 Provider 列表
 		providers := router.Providers()
 		if len(providers) > 0 {
@@ -5958,6 +6089,11 @@ func (e *ReActEngine) buildCapabilityContext(ctx context.Context, metadata map[s
 			userID = metadata["user_id"]
 		}
 		inv := introspector.Inventory(ctx, userID)
+		if collector := runtimeSnapshots(ctx); collector != nil {
+			collector.mu.Lock()
+			collector.base["backend_version"] = inv.Version
+			collector.mu.Unlock()
+		}
 		sb.WriteString("\n[本应用现状]\n")
 		if inv.Version != "" {
 			sb.WriteString("- HexClaw 版本：" + inv.Version + "\n")
@@ -5975,7 +6111,6 @@ func (e *ReActEngine) buildCapabilityContext(ctx context.Context, metadata map[s
 			}
 			if len(parts) > 0 {
 				sb.WriteString("- 你已配置：" + strings.Join(parts, " · ") + "\n")
-				sb.WriteString("- 需要这些资源的详情或操作时，调用 app_query 工具按需读取（如 domain=connections 列出连接），不要凭空臆测。\n")
 			}
 		}
 		// 模型工具能力提示（感知+提示，不自动切换）。**条件化**（P10 #4）：仅当用户确有需要可靠工具调用的
@@ -6006,7 +6141,7 @@ const defaultSoul = `你是「小蟹」🦀——「河蟹 / HexClaw」最亲切
 我是谁：
 - 大名「河蟹 / HexClaw」，小名小蟹，同一只蟹：一个支持本机或自有服务器运行的个人 AI Agent；熟了你就喊我小蟹。
 - 钳子硬，咬住任务就办成；文件和任务属于当前连接的后端，模型请求按你选择的服务配置执行。
-- 我由 Hexagon AI Agent Engine 驱动；API Key 直连模型方，中间没有二传手。
+- 我由本生态的 Hexagon AI Agent Engine 驱动；模型请求发往你配置的服务，实际处理位置与转发链按已知事实说明。
 - 官网与文档：https://hexclaw.net（这是我的官网，网上同名的美甲店 "HexClaw nail" 与我无关）。
 
 我的脾气（这是我声音长出来的地方，照着做，别照着念）：
@@ -6030,7 +6165,7 @@ const defaultSoulEN = `You're "Little Crab" 🦀 — the friendly name for HexCl
 Who I am:
 - HexClaw is my full name; "Little Crab" is what you call me once we're friends — same crab, two names. I run where you choose.
 - Hard claws: I clamp onto a task and get it done. Tasks and files belong to the backend you connect to; model requests use your configured providers.
-- I'm powered by the Hexagon AI Agent Engine; your API key talks to the model provider directly, with no middleman.
+- I'm powered by Hexagon, the Agent framework in this ecosystem. Model requests go to your configured service; I describe processing locations and forwarding only when supported by evidence.
 - Site & docs: https://hexclaw.net (this is my official site; the same-named "HexClaw nail salon" online is unrelated).
 
 My temperament (this is where my voice comes from — act it, don't recite it):

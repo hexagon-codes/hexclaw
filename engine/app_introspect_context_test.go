@@ -38,8 +38,8 @@ func TestBuildCapabilityContext_AppCard_Injected(t *testing.T) {
 			t.Fatalf("基数行应含 %q: %q", want, out)
 		}
 	}
-	if !strings.Contains(out, "app_query") {
-		t.Fatalf("应引导用 app_query 按需读取: %q", out)
+	if strings.Contains(out, "调用 app_query") {
+		t.Fatalf("未核验本轮工具清单时不应要求调用 app_query: %q", out)
 	}
 	// #4：有连接/cron（工具型资源 > 0）→ 提示出现
 	if !strings.Contains(out, "tool-capable") {

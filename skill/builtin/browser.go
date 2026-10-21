@@ -114,25 +114,26 @@ func (s *BrowserSkill) doFetch(ctx context.Context, targetURL string) (*skill.Re
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("请求失败: %w", err)
+		return nil, httpExecutionError(httpExecutionDetail(targetURL, "fetch", resp), "request", err)
 	}
 	defer resp.Body.Close()
+	detail := httpExecutionDetail(targetURL, "fetch", resp)
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodySize))
 	if err != nil {
-		return nil, fmt.Errorf("读取响应失败: %w", err)
+		return partialHTTPResult(body, detail, err)
 	}
 
 	text := truncateRunes(stripHTML(string(body)), maxFetchTextLen)
 
-	return &skill.Result{
+	return completeHTTPResult(&skill.Result{
 		Content: text,
 		Metadata: map[string]string{
 			"url":          targetURL,
 			"status":       fmt.Sprintf("%d", resp.StatusCode),
 			"content_type": resp.Header.Get("Content-Type"),
 		},
-	}, nil
+	}, detail)
 }
 
 func (s *BrowserSkill) doExtract(ctx context.Context, targetURL string, args map[string]any) (*skill.Result, error) {
@@ -144,13 +145,14 @@ func (s *BrowserSkill) doExtract(ctx context.Context, targetURL string, args map
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("请求失败: %w", err)
+		return nil, httpExecutionError(httpExecutionDetail(targetURL, "extract", resp), "request", err)
 	}
 	defer resp.Body.Close()
+	detail := httpExecutionDetail(targetURL, "extract", resp)
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodySize))
 	if err != nil {
-		return nil, fmt.Errorf("读取响应失败: %w", err)
+		return partialHTTPResult(body, detail, err)
 	}
 	html := string(body)
 
@@ -169,7 +171,7 @@ func (s *BrowserSkill) doExtract(ctx context.Context, targetURL string, args map
 		content = stripHTML(html)
 	}
 
-	return &skill.Result{
+	return completeHTTPResult(&skill.Result{
 		Content: content,
 		Data: map[string]any{
 			"title":       extractTitle(html),
@@ -180,7 +182,7 @@ func (s *BrowserSkill) doExtract(ctx context.Context, targetURL string, args map
 			"url":    targetURL,
 			"action": "extract",
 		},
-	}, nil
+	}, detail)
 }
 
 func (s *BrowserSkill) doPost(ctx context.Context, targetURL string, args map[string]any) (*skill.Result, error) {
@@ -204,22 +206,23 @@ func (s *BrowserSkill) doPost(ctx context.Context, targetURL string, args map[st
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("请求失败: %w", err)
+		return nil, httpExecutionError(httpExecutionDetail(targetURL, "post", resp), "request", err)
 	}
 	defer resp.Body.Close()
+	detail := httpExecutionDetail(targetURL, "post", resp)
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodySize))
 	if err != nil {
-		return nil, fmt.Errorf("读取响应失败: %w", err)
+		return partialHTTPResult(body, detail, err)
 	}
 
-	return &skill.Result{
+	return completeHTTPResult(&skill.Result{
 		Content: stripHTML(string(body)),
 		Metadata: map[string]string{
 			"url":    targetURL,
 			"status": fmt.Sprintf("%d", resp.StatusCode),
 		},
-	}, nil
+	}, detail)
 }
 
 // HTML 处理辅助函数

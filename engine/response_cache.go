@@ -113,6 +113,9 @@ func (e *ReActEngine) writeResponseCache(ctx context.Context, content, provider,
 
 func responseReplyMetadata(ctx context.Context, metadata map[string]string, provider, model, messageID string) map[string]string {
 	result := buildReplyMetadata(metadata, provider, model, messageID)
+	if receipt := runtimeSnapshotReceipt(ctx); receipt != "" {
+		result[selfContextReceiptKey] = receipt
+	}
 	if state, ok := ctx.Value(responseCacheContextKey{}).(*responseCacheState); ok {
 		state.mu.Lock()
 		if state.hit {

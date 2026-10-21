@@ -144,7 +144,8 @@ func (a *appIntrospectorImpl) Query(ctx context.Context, domain, action, id, use
 	if err != nil {
 		return "", err
 	}
-	if len(out) > maxQueryChars {
+	// 单例事实是完整JSON，不能套用资源清单的截断规则破坏当前快照。
+	if domain != "about" && domain != "runtime" && len(out) > maxQueryChars {
 		out = stringx.SubString(out, 0, maxQueryChars) + "\n…（结果过多已截断；用 action=get 查具体项或缩小范围）"
 	}
 	return fenceAppData(domain, out), nil
@@ -166,6 +167,16 @@ func (a *appIntrospectorImpl) queryDomain(ctx context.Context, domain, action, i
 		id = ""
 	}
 	switch domain {
+	case "about":
+		if action == "get" {
+			return "", fmt.Errorf("about only supports action=list")
+		}
+		return engine.PublicProductFactsJSON()
+	case "runtime":
+		if action == "get" {
+			return "", fmt.Errorf("runtime only supports action=list")
+		}
+		return engine.CurrentRequestRuntimeJSON(ctx)
 	case "connections":
 		return a.queryConnections(ctx, id)
 	case "mcp":

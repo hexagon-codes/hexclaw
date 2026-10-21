@@ -14,7 +14,7 @@ import (
 // **单一事实源**（F2：此前 schema Enum / "domain is required" / "unknown domain" 三处各写一份 → 漂移，
 // 错误串漏列 logs/workflows）。新增 domain 只改这里 + queryDomain 的 switch case。
 // 顺序即给模型看的呈现顺序：能直接作答/操作的资源在前，诊断面（config/logs）在后。
-var AppQueryDomains = []string{"connections", "mcp", "cron", "webhooks", "workflows", "agents", "config", "logs"}
+var AppQueryDomains = []string{"connections", "mcp", "cron", "webhooks", "workflows", "agents", "config", "logs", "about", "runtime"}
 
 // domainEnumAny 把 AppQueryDomains 适配成 schema.Enum 需要的 []any。
 func domainEnumAny() []any {
@@ -60,9 +60,9 @@ func (s *AppQuerySkill) ToolDefinition() llm.ToolDefinition {
 			"state instead of guessing. Read-only and redacted — never returns secrets/passwords/tokens. Domains: "+
 			"connections (configured IM/email channels you can send to), mcp (MCP servers including data connectors "+
 			"like MySQL/Postgres and the tools they expose), cron (scheduled tasks), webhooks, workflows, agents, "+
-			"config (app settings, redacted), logs (recent app logs for diagnosis). For collection domains "+
+			"config (app settings, redacted), logs (recent app logs for diagnosis), about (versioned public product facts), runtime (this request's actual model and tools). For collection domains "+
 			"(connections/mcp/cron/webhooks/workflows/agents) use action=get with id (resource id or name) to fetch "+
-			"a single item; config/logs are singletons (action=list).",
+			"a single item; config/logs/about/runtime are singletons (action=list).",
 		&llm.Schema{
 			Type: "object",
 			Properties: map[string]*llm.Schema{

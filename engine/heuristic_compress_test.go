@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -15,21 +16,15 @@ func TestHeuristicCompress_KeepsSystem(t *testing.T) {
 	}
 }
 
-func TestHeuristicCompress_DedupesUser(t *testing.T) {
+func TestHeuristicCompress_PreservesUserTurns(t *testing.T) {
 	hist := []llm.Message{
 		{Role: "user", Content: "Hello"},
 		{Role: "assistant", Content: "Hi"},
-		{Role: "user", Content: "hello"}, // case-insensitive 重复
+		{Role: "user", Content: "hello"},
 	}
 	got := HeuristicCompress(hist, HeuristicCompressOptions{})
-	count := 0
-	for _, m := range got {
-		if strings.ToLower(string(m.Role)) == "user" {
-			count++
-		}
-	}
-	if count != 1 {
-		t.Errorf("user 应去重；got %d", count)
+	if !reflect.DeepEqual(got, hist) {
+		t.Fatalf("distinct user turns changed: got %+v", got)
 	}
 }
 

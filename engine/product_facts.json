@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "facts_version": "2026-10-21.2",
+  "product_id": "hexclaw",
+  "canonical_name": "HexClaw",
+  "aliases": ["河蟹", "小蟹"],
+  "website": "https://hexclaw.net",
+  "documentation": "https://hexclaw.net",
+  "repositories": {
+    "backend": "https://github.com/hexagon-codes/hexclaw",
+    "desktop": "https://github.com/hexagon-codes/hexclaw-desktop",
+    "toolkit": "https://github.com/hexagon-codes/toolkit",
+    "ai_core": "https://github.com/hexagon-codes/ai-core",
+    "hexagon": "https://github.com/hexagon-codes/hexagon",
+    "console": "https://github.com/hexagon-codes/hexagon-ui",
+    "hub": "https://github.com/hexagon-codes/hexclaw-hub"
+  },
+  "stack": {
+    "backend": ["Go"],
+    "desktop": ["Tauri 2", "Vue 3", "TypeScript", "Rust"],
+    "agent_framework": "Hexagon"
+  },
+  "ecosystem": [
+    {"name": "toolkit", "role": "Go infrastructure library", "relation": "foundation"},
+    {"name": "ai-core", "role": "Model and tool integration", "relation": "model foundation"},
+    {"name": "hexagon", "role": "Agent framework maintained in this ecosystem", "relation": "engine"},
+    {"name": "hexclaw", "role": "Self-hosted agent service", "relation": "product backend"},
+    {"name": "hexclaw-desktop", "role": "Desktop workspace", "relation": "optional client"},
+    {"name": "hexagon-ui", "role": "Agent observability console", "relation": "optional console"},
+    {"name": "hexclaw-hub", "role": "Skill and MCP catalog", "relation": "optional catalog"}
+  ],
+  "official_accounts": {"wechat": {
+    "status": "confirmed_present",
+    "name": "hexclaw",
+    "id": "hexclaw",
+    "follow_entry": "Settings > System Settings > Follow on WeChat",
+    "follow_url": "http://weixin.qq.com/r/mp/tCJ-Z9jEL4VQrZwE93em",
+    "qr_code": "https://raw.githubusercontent.com/hexagon-codes/hexclaw/main/.github/assets/wechat-qrcode.jpg"
+  }},
+  "source_ref": "hexclaw/README.md; hexclaw-desktop/package.json; hexclaw-desktop/src-tauri/Cargo.toml",
+  "_internal": {"hexagon_development_phase": 1}
+}

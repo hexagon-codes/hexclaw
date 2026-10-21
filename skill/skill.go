@@ -44,9 +44,10 @@ type Skill interface {
 
 // Result Skill 执行结果
 type Result struct {
-	Content  string            // 结果文本
-	Data     any               // 结构化数据（可选）
-	Metadata map[string]string // 附加元数据
+	Detail   *ToolExecutionDetail // 同次执行详情，旧技能可省略。
+	Content  string               // 结果文本
+	Data     any                  // 结构化数据（可选）
+	Metadata map[string]string    // 附加元数据
 }
 
 // Registry Skill 注册中心

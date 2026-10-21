@@ -184,6 +184,7 @@ type AssistantMeta struct {
 }
 
 var replySafeAssistantMetadataKeys = map[string]struct{}{
+	"self_context_receipt":      {},
 	"provider_display_name":     {},
 	"provider_instance_id":      {},
 	"skill_context_receipts":    {},

@@ -292,11 +292,12 @@ func TestAgentSkillInheritanceReplaySwitchAndActualBodyCacheIdentity(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if provider.calls != 3 || cached.Metadata["source"] != "cache" {
-		t.Fatal("unchanged effective body no longer reused its existing cache partition")
+	// 新一轮已经包含第三轮的对话事实；完整请求缓存不能只按相同问题和Skill正文命中。
+	if provider.calls != 4 || cached.Metadata["source"] == "cache" {
+		t.Fatal("changed conversation reused an earlier effective-request cache entry")
 	}
-	if cached.Metadata[skillContextReceiptsMetadataKey] != "" {
-		t.Fatal("cache preparation falsely claimed a new model context consumption")
+	if cached.Metadata[skillContextReceiptsMetadataKey] == "" {
+		t.Fatal("new model request lost its actual skill context consumption")
 	}
 }
 

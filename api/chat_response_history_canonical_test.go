@@ -428,6 +428,8 @@ func apiMultiTurnRequest(
 	}
 	return ChatResponse{
 		Reply:              visible.String(),
+		Blocks:             terminal.Blocks,
+		ToolCalls:          terminal.ToolCalls,
 		AssistantMessageID: terminal.AssistantMessageID,
 		BackendMessageID:   terminal.BackendMessageID,
 		MessageID:          terminal.MessageID,

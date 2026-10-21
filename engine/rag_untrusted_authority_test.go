@@ -89,7 +89,7 @@ func TestREG_RAG_TaintedInteractiveReusesApprovalCoordinator(t *testing.T) {
 	}
 }
 
-func TestREG_RAG_TaintedFullAccessBlocksWithoutApproval(t *testing.T) {
+func TestREG_RAG_FullAccessExecutesWithoutApproval(t *testing.T) {
 	hub := NewPermissionHub(0)
 	sender := &scriptedPermissionSender{hub: hub}
 	hub.SetSender(sender)
@@ -100,8 +100,8 @@ func TestREG_RAG_TaintedFullAccessBlocksWithoutApproval(t *testing.T) {
 	ctx := skill.WithAuthenticatedUser(context.Background(), "owner-1")
 	ctx = context.WithValue(ctx, ctxKeySessionID, "session-1")
 	ctx = withUntrustedKnowledgeEvidence(ctx)
-	if err := hook.BeforeToolCall(ctx, &ToolCallInfo{Name: "browser", Source: "skill"}); err == nil {
-		t.Fatal("不可信证据不得被 full_access 自动放行")
+	if err := hook.BeforeToolCall(ctx, &ToolCallInfo{Name: "browser", Source: "skill"}); err != nil {
+		t.Fatalf("full_access must preserve the configured automatic execution: %v", err)
 	}
 	if got := sender.callCount(); got != 0 {
 		t.Fatalf("不可信证据的 direct block 不得创建审批请求，得到 %d 次", got)
@@ -112,7 +112,7 @@ func TestREG_RAG_TaintedStaticDenyPrecedesApproval(t *testing.T) {
 	policy := NewPermissionPolicy(ActionAllow, PolicyRule{
 		Name: "deny-probe", ToolPattern: "rag_authority_probe", Action: ActionDeny, Reason: "blocked statically",
 	})
-	hook := NewPermissionHook(NewPermissionHub(0), WithPolicy(policy))
+	hook := NewPermissionHook(NewPermissionHub(0), WithPolicy(policy), WithSystemDispatchPolicy(FullAccessSystemDispatchPolicy()))
 	err := hook.BeforeToolCall(withUntrustedKnowledgeEvidence(context.Background()), &ToolCallInfo{Name: "rag_authority_probe", Source: "skill"})
 	if err == nil || !strings.Contains(err.Error(), "deny-probe") {
 		t.Fatalf("static deny must win before any tainted approval path: %v", err)
@@ -142,7 +142,7 @@ func (g exactEvidenceGrant) GrantAllowsUntrustedEvidence(ownerID, source, taskRe
 		toolName == "shell"
 }
 
-func TestREG_RAG_TaintedUnattendedMatrixCannotAutoApprove(t *testing.T) {
+func TestREG_RAG_FullAccessUnattendedExecutesWithoutApproval(t *testing.T) {
 	hook := NewPermissionHook(NewPermissionHub(0),
 		WithPolicy(DefaultBaselinePolicy()),
 		WithSystemDispatchPolicy(FullAccessSystemDispatchPolicy()),
@@ -152,15 +152,15 @@ func TestREG_RAG_TaintedUnattendedMatrixCannotAutoApprove(t *testing.T) {
 	ctx = withSystemDispatch(ctx, "cron")
 	ctx = skill.WithSystemDispatchTask(ctx, "cron:job-1")
 	ctx = withUntrustedKnowledgeEvidence(ctx)
-	if err := hook.BeforeToolCall(ctx, &ToolCallInfo{Name: "shell", Source: "skill", Arguments: map[string]any{"command": "true"}}); err == nil {
-		t.Fatal("global full-access matrix and legacy broad task grant must not elevate authority from RAG evidence")
+	if err := hook.BeforeToolCall(ctx, &ToolCallInfo{Name: "shell", Source: "skill", Arguments: map[string]any{"command": "true"}}); err != nil {
+		t.Fatalf("full_access must preserve configured unattended execution: %v", err)
 	}
 }
 
 func TestREG_RAG_TaintedUnattendedRequiresExactScopedGrant(t *testing.T) {
 	hook := NewPermissionHook(NewPermissionHub(0),
 		WithPolicy(DefaultBaselinePolicy()),
-		WithSystemDispatchPolicy(FullAccessSystemDispatchPolicy()),
+		WithSystemDispatchPolicy(NewSystemDispatchPolicyFromConfig(config.AutonomyConfig{Profile: SystemDispatchProfileBalanced})),
 		WithTaskGrants(exactEvidenceGrant{allow: true}),
 	)
 	ctx := skill.WithAuthenticatedUser(context.Background(), "owner-1")
@@ -197,7 +197,7 @@ func TestREG_RAG_TaintedUnattendedScopedGrantRejectsMismatch(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			hook := NewPermissionHook(NewPermissionHub(0),
 				WithPolicy(DefaultBaselinePolicy()),
-				WithSystemDispatchPolicy(FullAccessSystemDispatchPolicy()),
+				WithSystemDispatchPolicy(NewSystemDispatchPolicyFromConfig(config.AutonomyConfig{Profile: SystemDispatchProfileBalanced})),
 				WithTaskGrants(tc.grant),
 			)
 			ctx := skill.WithAuthenticatedUser(context.Background(), tc.owner)
@@ -229,7 +229,7 @@ func TestREG_RAG_TaintedUnattendedScopedGrantAllowsExactScope(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			hook := NewPermissionHook(NewPermissionHub(0),
 				WithPolicy(DefaultBaselinePolicy()),
-				WithSystemDispatchPolicy(FullAccessSystemDispatchPolicy()),
+				WithSystemDispatchPolicy(NewSystemDispatchPolicyFromConfig(config.AutonomyConfig{Profile: SystemDispatchProfileBalanced})),
 				WithTaskGrants(tc.grant),
 			)
 			ctx := skill.WithAuthenticatedUser(context.Background(), "owner-1")

@@ -3,7 +3,9 @@ package engine
 import (
 	"testing"
 
+	"github.com/hexagon-codes/ai-core/llm"
 	hruntime "github.com/hexagon-codes/hexagon/runtime"
+	"github.com/hexagon-codes/hexclaw/skill"
 )
 
 // TestRuntimeToolCallsToAdapter_StatusDuration 钉死下沉透传契约：
@@ -51,5 +53,37 @@ func TestRuntimeToolCallsToAdapter_StatusDuration(t *testing.T) {
 	}
 	if out[1].DurationMs != 7 {
 		t.Errorf("out[1].DurationMs = %d, want 7", out[1].DurationMs)
+	}
+}
+
+func TestRuntimeToolExecutorProducesTerminalStatus(t *testing.T) {
+	registry := skill.NewRegistry()
+	if err := registry.Register(&syncChildToolPolicySkill{name: "weather"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, tool, arguments string
+		available             bool
+		want                  string
+	}{
+		{"completed", "weather", `{}`, true, "success"},
+		{"not registered", "missing-tool", `{}`, true, "error"},
+		{"invalid arguments", "weather", `{`, true, "error"},
+		{"unavailable executor", "weather", `{}`, false, "error"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var executor *ToolExecutor
+			if tc.available {
+				executor = NewToolExecutor(registry, nil)
+			}
+			result, err := newRuntimeToolExecutor(executor).Execute(t.Context(), llm.ToolCall{ID: tc.name, Name: tc.tool, Arguments: tc.arguments})
+			if err != nil {
+				t.Fatal(err)
+			}
+			calls := runtimeToolCallsToAdapter([]hruntime.ToolCallRecord{{ID: tc.name, Name: tc.tool, Result: result}})
+			if len(calls) != 1 || calls[0].Status != tc.want {
+				t.Fatalf("actual terminal status lost: calls=%+v want=%s", calls, tc.want)
+			}
+		})
 	}
 }

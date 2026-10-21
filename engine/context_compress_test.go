@@ -3,13 +3,118 @@ package engine
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/hexagon-codes/ai-core/llm"
 	hexagon "github.com/hexagon-codes/hexagon"
+	hruntime "github.com/hexagon-codes/hexagon/runtime"
+	"github.com/hexagon-codes/hexclaw/egress"
 	"github.com/hexagon-codes/toolkit/lang/stringx"
 )
+
+// 当前输入在重复压缩、摘要回退及独立运行中必须保持完整，旧工具仍可缩减。
+func TestRuntimeCompactionPreservesCurrentInput(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		provider hexagon.Provider
+	}{
+		{"cloud", &mockSummaryProvider{response: "Earlier history summary."}},
+		{"local", &localSkipProvider{name: "ollama"}},
+		{"summary_failure", &mockSummaryProvider{err: context.Canceled}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mw := runtimeCompaction(tc.provider, "current-input", nil)
+			for run := 0; run < 2; run++ {
+				initial := []llm.Message{llm.SystemMessage("system")}
+				for i := 0; i < 8; i++ {
+					initial = append(initial, llm.UserMessage(strings.Repeat("history ", 875)))
+				}
+				current := llm.Message{Role: llm.RoleUser, Name: fmt.Sprintf("current-%d", run), Content: strings.Repeat("Current instruction. ", 80) + "Keep the final constraint.", MultiContent: []llm.ContentPart{llm.NewImageURLPart("asset://current-page", "auto")}}
+				initial = append(initial, current)
+				state := &hruntime.State{Request: hruntime.Request{Messages: initial}, Messages: append([]llm.Message(nil), initial...), Attributes: map[string]any{}}
+				checkCurrent := func() {
+					t.Helper()
+					count := 0
+					for _, message := range state.Messages {
+						if message.Name == current.Name {
+							count++
+							if !reflect.DeepEqual(message, current) {
+								t.Fatal("current text or attachments changed during compaction")
+							}
+						}
+					}
+					if count != 1 {
+						t.Fatalf("current input must remain exactly once: got %d", count)
+					}
+				}
+				if err := mw.BeforeLLM(t.Context(), state); err != nil {
+					t.Fatal(err)
+				}
+				checkCurrent()
+				var calls []llm.ToolCallRef
+				for i := 0; i < 5; i++ {
+					calls = append(calls, llm.ToolCallRef{ID: fmt.Sprintf("first-%d", i), Name: "read_page"})
+				}
+				state.Messages = append(state.Messages, llm.AssistantToolCallMessage("", calls))
+				for _, call := range calls {
+					state.Messages = append(state.Messages, llm.ToolResultMessage(call.ID, strings.Repeat("result ", 1300)), llm.Message{Role: llm.RoleUser, MultiContent: []llm.ContentPart{llm.NewImageURLPart("asset://"+call.ID, "auto")}})
+				}
+				if err := mw.BeforeLLM(t.Context(), state); err != nil {
+					t.Fatal(err)
+				}
+				checkCurrent()
+				for i := 0; i < 4; i++ {
+					id := fmt.Sprintf("later-%d", i)
+					state.Messages = append(state.Messages, llm.AssistantToolCallMessage("", []llm.ToolCallRef{{ID: id, Name: "read_page"}}), llm.ToolResultMessage(id, strings.Repeat("later result ", 1300)))
+				}
+				if err := mw.BeforeLLM(t.Context(), state); err != nil {
+					t.Fatal(err)
+				}
+				checkCurrent()
+				for _, message := range state.Messages {
+					if message.Role == llm.RoleTool && message.ToolCallID == "first-0" {
+						t.Fatal("completed old tool groups were pinned with the current input")
+					}
+				}
+				if !reflect.DeepEqual(initial[len(initial)-1], current) {
+					t.Fatal("original input was mutated")
+				}
+			}
+			if local, ok := tc.provider.(*localSkipProvider); ok && local.completeHit {
+				t.Fatal("local provider unexpectedly generated a summary")
+			}
+		})
+	}
+}
+
+func TestToolSummaryRetainsActualRequestClassesWithoutPollutingParent(t *testing.T) {
+	for _, variant := range []string{"general", "record", "enabled_memory"} {
+		t.Run(variant, func(t *testing.T) {
+			classes := []egress.DataClass{egress.ClassGeneral}
+			if variant == "record" {
+				classes = append(classes, egress.ClassRecord)
+			}
+			if variant == "enabled_memory" {
+				classes = append(classes, egress.ClassMemory)
+			}
+			ctx := egress.WithRequest(t.Context(), egress.PurposeGeneralChat, "current-conversation", classes...)
+			if variant == "enabled_memory" {
+				egress.EnableChatMemory(ctx)
+			}
+			before, _ := egress.RequestsFromContext(ctx)
+			provider := &egressCaptureProvider{}
+			if _, err := llmToolSummary(ctx, []llm.Message{{Role: "tool", Content: "已检索教材并验算40米。"}}, provider); err != nil {
+				t.Fatal(err)
+			}
+			after, _ := egress.RequestsFromContext(ctx)
+			if !reflect.DeepEqual(before, after) || !reflect.DeepEqual(before, provider.last(t)) {
+				t.Fatalf("summary changed actual classes or parent: before=%+v child=%+v after=%+v", before, provider.last(t), after)
+			}
+		})
+	}
+}
 
 func TestSplitIndexes_SystemAtStart(t *testing.T) {
 	msgs := []llm.Message{

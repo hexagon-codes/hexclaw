@@ -90,6 +90,7 @@ type Usage struct {
 // 经此透传给客户端——客户端据此渲染成功/失败/耗时，无需对结果正文做字符串嗅探。
 // omitempty：老路径/未填充时不出现在 wire，前端可选字段优雅降级。
 type ToolCall struct {
+	Detail         *ToolExecutionDetail           `json:"detail,omitempty"`
 	Origin         *ToolOrigin                    `json:"origin,omitempty"`
 	Execution      *SandboxExecution              `json:"execution,omitempty"`
 	ID             string                         `json:"id"`                        // 调用 ID
@@ -99,6 +100,20 @@ type ToolCall struct {
 	MessageContent *messagecontent.MessageContent `json:"message_content,omitempty"` // canonical 工具输出
 	Status         string                         `json:"status,omitempty"`          // 执行状态：success / error（框架产出）
 	DurationMs     int64                          `json:"duration_ms,omitempty"`     // 执行耗时（毫秒，框架测量）
+}
+
+// ToolExecutionDetail 仅传递本次执行的公开事实，缺字段的历史消息保持未知。
+type ToolExecutionDetail struct {
+	Phase             string `json:"phase,omitempty"`
+	Outcome           string `json:"outcome"`
+	Reason            string `json:"reason,omitempty"`
+	Action            string `json:"action,omitempty"`
+	HTTPStatus        int    `json:"http_status,omitempty"`
+	ResponseReceived  bool   `json:"response_received"`
+	TargetHost        string `json:"target_host,omitempty"`
+	ApprovalRequestID string `json:"approval_request_id,omitempty"`
+	ApprovalStatus    string `json:"approval_status,omitempty"`
+	ApprovalDeadline  string `json:"approval_deadline,omitempty"`
 }
 
 // Block 有序内容块（wire 形态，对齐前端 ContentBlock 的 camelCase 字段）。

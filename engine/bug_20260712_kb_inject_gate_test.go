@@ -3,8 +3,12 @@ package engine
 import (
 	"testing"
 
+	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/config"
 	agentrouter "github.com/hexagon-codes/hexclaw/router"
+	"github.com/hexagon-codes/hexclaw/skill"
+	"github.com/hexagon-codes/hexclaw/skill/builtin"
 )
 
 // BUG-20260712-N（召回最佳实践落地 · 场景域隔离 + 寒暄门控）：
@@ -45,11 +49,57 @@ func TestBug20260712_KBGate_ScenarioAgentSkipsGlobalKB(t *testing.T) {
 	cases := []map[string]string{
 		{"role": "k12-tutor-abc"},
 		{"pinned_agent": "k12-tutor-abc"},
+		{"routed_agent": "k12-tutor-abc"},
 	}
 	for _, meta := range cases {
 		if e.shouldAutoInjectKB(gateMsg("明天天气怎么样，适合户外写作业吗", meta)) {
 			t.Fatalf("场景实例会话不得注入全局知识库（跨域污染），meta=%v", meta)
 		}
+	}
+}
+
+func TestWeatherConversationSkipsUnrelatedAutomaticKnowledge(t *testing.T) {
+	e := gateEngine(t)
+	registry := skill.NewRegistry()
+	if err := registry.Register(builtin.NewWeatherSkill()); err != nil {
+		t.Fatal(err)
+	}
+	e.skills = registry
+	for _, query := range []string{"杭州今天什么天气？", "下雨吗？", "明天冷吗"} {
+		if e.shouldAutoInjectKB(gateMsg(query, nil)) {
+			t.Fatalf("unrelated automatic knowledge injected into %q", query)
+		}
+	}
+	for _, query := range []string{"请根据教材解释下雨吗", "请查询知识库，了解天气", "公司年假制度是怎么规定的"} {
+		if !e.shouldAutoInjectKB(gateMsg(query, nil)) {
+			t.Fatalf("explicit or relevant knowledge was disabled: %q", query)
+		}
+	}
+}
+
+func TestConversationKnowledgeRetrievalUsesHistoryAwareTool(t *testing.T) {
+	e := gateEngine(t)
+	e.cfg = config.DefaultConfig()
+	e.cfg.LLM.Tools.Enabled = "on"
+	registry := skill.NewRegistry()
+	if err := registry.Register(builtin.NewKnowledgeSearchSkill(nil)); err != nil {
+		t.Fatal(err)
+	}
+	e.toolCollector = NewToolCollector(registry, nil, 40)
+	history := []llm.Message{{Role: llm.RoleUser, Content: "杭州今天什么天气？"}, {Role: llm.RoleAssistant, Content: "杭州小雨"}}
+	for _, query := range []string{"那明天呢？", "继续刚才的话题", "这个城市下周呢？", "那道题为什么这样算？"} {
+		if e.shouldAutoInjectKBForTurn(gateMsg(query, nil), history) {
+			t.Fatalf("context-dependent query automatically retrieved in isolation: %q", query)
+		}
+	}
+	if !e.shouldAutoInjectKBForTurn(gateMsg("请根据教材继续解释", nil), history) {
+		t.Fatal("explicit knowledge request suppressed")
+	}
+	if !e.shouldAutoInjectKBForTurn(gateMsg("公司年假制度是怎么规定的", nil), nil) {
+		t.Fatal("standalone automatic knowledge suppressed")
+	}
+	if !e.shouldAutoInjectKBForTurn(gateMsg("继续刚才的话题", map[string]string{"tools_enabled": "off"}), history) {
+		t.Fatal("automatic retrieval lost when tool retrieval unavailable")
 	}
 }
 

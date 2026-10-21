@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -11,6 +12,49 @@ import (
 
 	"github.com/hexagon-codes/hexclaw/storage"
 )
+
+func TestSuccessfulCompactionArchivesCompleteMediaRecord(t *testing.T) {
+	ctx := t.Context()
+	_, store := newTestManager(t)
+	const sessionID = "archive-media-success"
+	if err := store.CreateSession(ctx, &storage.Session{ID: sessionID, UserID: "parent", Platform: "api"}); err != nil {
+		t.Fatal(err)
+	}
+	original := &storage.MessageRecord{ID: "original-image", SessionID: sessionID, Role: "user", Content: "请解答图片", Metadata: `{"artifacts":[{"id":"source-artifact"}]}`, Attachments: `{"attachments":[{"type":"image","url":"asset://original-worksheet"}]}`, CreatedAt: time.Now().Add(-time.Minute)}
+	for i, msg := range []*storage.MessageRecord{original, {ID: "old-reply", SessionID: sessionID, Role: "assistant", Content: "第一题的解法", CreatedAt: time.Now().Add(-30 * time.Second)}, {ID: "recent-question", SessionID: sessionID, Role: "user", Content: "为什么", CreatedAt: time.Now().Add(-time.Second)}, {ID: "recent-reply", SessionID: sessionID, Role: "assistant", Content: "解释", CreatedAt: time.Now()}} {
+		if err := store.SaveMessage(ctx, msg); err != nil {
+			t.Fatalf("save %d: %v", i, err)
+		}
+	}
+	dir := t.TempDir()
+	c := &Compactor{store: store, config: CompactionConfig{MaxMessages: 3, KeepRecent: 2}, archiver: NewArchiver(dir)}
+	if count, err := c.Compact(ctx, sessionID, &titleSuggestProvider{response: "家长询问第一题的解法"}); err != nil || count != 2 {
+		t.Fatalf("compaction=%d %v", count, err)
+	}
+	if old, err := store.GetMessage(ctx, original.ID); err == nil && old != nil {
+		t.Fatal("old row was not compacted")
+	}
+	files, err := os.ReadDir(dir)
+	if err != nil || len(files) != 1 {
+		t.Fatalf("archive missing: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, files[0].Name()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := strings.Index(string(data), "```json\n") + len("```json\n")
+	end := strings.Index(string(data)[start:], "\n```") + start
+	var archived struct {
+		*storage.MessageRecord
+		Attachments string `json:"attachments"`
+	}
+	if err := json.Unmarshal(data[start:end], &archived); err != nil {
+		t.Fatal(err)
+	}
+	if archived.MessageRecord == nil || archived.ID != original.ID || archived.Content != original.Content || archived.Attachments != original.Attachments || !strings.Contains(archived.Metadata, "source-artifact") {
+		t.Fatalf("incomplete archive: %+v", archived)
+	}
+}
 
 func TestContextReviewCompactionPreservesHistoryOnFailedPreparation(t *testing.T) {
 	tests := []struct {

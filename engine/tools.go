@@ -92,6 +92,10 @@ func (tc *ToolCollector) Collect() []llm.ToolDefinition {
 //
 // 与 Collect() 一样保持去重 / 排序 / Cap 一致。
 func (tc *ToolCollector) CollectFiltered(query string, act skill.Activation) []llm.ToolDefinition {
+	return tc.collectFiltered(query, act, nil)
+}
+
+func (tc *ToolCollector) collectFiltered(query string, act skill.Activation, selection *runtimeToolSelection) []llm.ToolDefinition {
 	seen := make(map[string]bool)
 	var tools []llm.ToolDefinition
 
@@ -131,6 +135,12 @@ func (tc *ToolCollector) CollectFiltered(query string, act skill.Activation) []l
 
 	// 2. MCP tools（不参与激活过滤）
 	if tc.mcpMgr != nil {
+		if selection != nil {
+			for _, server := range tc.mcpMgr.ServerStatuses() {
+				selection.MCPConnections = append(selection.MCPConnections, runtimeMCPConnection{Name: server.Name, Connected: server.Connected, DiscoveredToolCount: server.ToolCount})
+			}
+			sort.Slice(selection.MCPConnections, func(i, j int) bool { return selection.MCPConnections[i].Name < selection.MCPConnections[j].Name })
+		}
 		originalNames := make(map[string]string)
 		for _, info := range tc.mcpMgr.ListToolInfos() {
 			originalNames[info.Name] = info.OriginalName
@@ -167,7 +177,18 @@ func (tc *ToolCollector) CollectFiltered(query string, act skill.Activation) []l
 
 	// Cap
 	if len(tools) > tc.maxTools {
+		if selection != nil {
+			for _, tool := range tools[tc.maxTools:] {
+				selection.CollectorLimitOmitted = append(selection.CollectorLimitOmitted, tool.Function.Name)
+			}
+		}
 		tools = tools[:tc.maxTools]
+	}
+	if selection != nil {
+		selection.CollectorMaxTools = tc.maxTools
+		for _, tool := range tools {
+			selection.CollectedTools = append(selection.CollectedTools, tool.Function.Name)
+		}
 	}
 
 	return tools

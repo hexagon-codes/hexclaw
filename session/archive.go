@@ -1,6 +1,8 @@
 package session
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/hexagon-codes/toolkit/util/logger"
 	"os"
@@ -41,7 +43,7 @@ func (a *Archiver) Archive(sessionID string, messages []*storage.MessageRecord) 
 		return "", fmt.Errorf("create archive dir: %w", err)
 	}
 
-	ts := time.Now().Format("20060102-150405")
+	ts := time.Now().Format("20060102-150405.000000000")
 	filename := fmt.Sprintf("%s_%s.md", sessionID, ts)
 	path := filepath.Join(a.dir, filename)
 
@@ -57,10 +59,31 @@ func (a *Archiver) Archive(sessionID string, messages []*storage.MessageRecord) 
 		sb.WriteString(fmt.Sprintf("### [%s] %s\n\n", ts, role))
 		sb.WriteString(msg.Content)
 		sb.WriteString("\n\n")
+		// 附件列不参与 MessageRecord 的常规 JSON，下沉归档时显式保留以便追溯原始素材。
+		record, err := json.MarshalIndent(struct {
+			*storage.MessageRecord
+			Attachments string `json:"attachments"`
+		}{msg, msg.Attachments}, "", "  ")
+		if err != nil {
+			return "", fmt.Errorf("encode archived message: %w", err)
+		}
+		sb.WriteString("```json\n")
+		sb.Write(record)
+		sb.WriteString("\n```\n\n")
 	}
 
-	if err := os.WriteFile(path, []byte(sb.String()), 0644); err != nil {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
+	if err != nil {
 		return "", fmt.Errorf("write archive: %w", err)
+	}
+	_, writeErr := f.WriteString(sb.String())
+	if writeErr == nil {
+		writeErr = f.Sync()
+	}
+	closeErr := f.Close()
+	if writeErr != nil || closeErr != nil {
+		_ = os.Remove(path)
+		return "", fmt.Errorf("persist archive: %w", errors.Join(writeErr, closeErr))
 	}
 
 	logger.Info("会话归档完成: session", "session", sessionID, "file", filename, "messages", len(messages))

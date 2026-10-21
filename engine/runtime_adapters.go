@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -14,9 +15,31 @@ import (
 	"github.com/hexagon-codes/hexagon"
 	"github.com/hexagon-codes/hexagon/observe/trace"
 	hruntime "github.com/hexagon-codes/hexagon/runtime"
+	"github.com/hexagon-codes/hexagon/runtime/middleware"
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/messagecontent"
 )
+
+// runRuntimeAttempt 只对模型失败续接运行状态；目标模型输入仍由应用按现有配置重建。
+func runRuntimeAttempt(ctx context.Context, runner *hruntime.DefaultRunner, req hruntime.Request, previous error, sink hruntime.EventSink) (*hruntime.Result, error) {
+	if sink == nil {
+		req.StreamMode = hruntime.StreamModeOff
+	}
+	var interrupted *hruntime.ProviderCallError
+	if errors.As(previous, &interrupted) && interrupted.State != nil {
+		copy := *interrupted
+		copy.State = interrupted.State.Snapshot()
+		copy.State.Attributes["hexclaw.current_input_user_ordinal"] = countContextUserMessages(req.Messages)
+		for _, record := range copy.State.ToolCalls {
+			labelToolResultEgress(ctx, record.Name)
+		}
+		return runner.Continue(ctx, req, &copy, sink)
+	}
+	if sink == nil {
+		return runner.Run(ctx, req)
+	}
+	return runner.Stream(ctx, req, sink)
+}
 
 type runtimeProviderSelector struct {
 	router interface {
@@ -248,7 +271,7 @@ func runtimeToolSideEffect(toolName string) hruntime.ToolSideEffect {
 
 // newRuntimeToolExecutor builds a per-run executor with a fresh repeat guard.
 func newRuntimeToolExecutor(executor *ToolExecutor) *runtimeToolExecutor {
-	return &runtimeToolExecutor{executor: executor, callCounts: make(map[string]int)}
+	return &runtimeToolExecutor{executor: executor, callCounts: make(map[string]int), unknownActions: make(map[string]hruntime.ToolResult)}
 }
 
 type runtimeToolExecutor struct {
@@ -256,11 +279,14 @@ type runtimeToolExecutor struct {
 	// 流式请求用现有工具心跳续传活动帧；非流式调用不绑定回调。
 	onActivity func(context.Context) error
 
-	mu         sync.Mutex
-	callCounts map[string]int // (tool+args) signature → times seen this run
+	mu             sync.Mutex
+	callCounts     map[string]int // (tool+args) signature → times seen this run
+	unknownActions map[string]hruntime.ToolResult
 }
 
-func (e *runtimeToolExecutor) Execute(ctx context.Context, call llm.ToolCall) (hruntime.ToolResult, error) {
+func (e *runtimeToolExecutor) Execute(ctx context.Context, call llm.ToolCall) (out hruntime.ToolResult, runErr error) {
+	replayed := false
+	defer func() { recordRuntimeToolReceipt(ctx, call, string(out.Status), out.Raw, replayed) }()
 	started := time.Now()
 	argumentsForLog := call.Arguments
 	if strings.Contains(strings.ToLower(argumentsForLog), "base64") {
@@ -272,12 +298,22 @@ func (e *runtimeToolExecutor) Execute(ctx context.Context, call llm.ToolCall) (h
 		if err := json.Unmarshal([]byte(call.Arguments), &args); err != nil {
 			trace.L(ctx).Warn("runtime tool call failed", "stage", "tool_execute", "tool", call.Name, "tool_call_id", call.ID, "arguments", argumentsForLog, "reason", "invalid_arguments", "err", err, "elapsed_ms", time.Since(started).Milliseconds())
 			msg := fmt.Sprintf("Error: invalid arguments for tool %q: %s", call.Name, err.Error())
-			return hruntime.ToolResult{Content: msg, Error: err.Error()}, nil
+			return hruntime.ToolResult{Content: msg, Error: err.Error(), Status: hruntime.ToolStatusError, DurationMs: time.Since(started).Milliseconds()}, nil
 		}
 	}
 	if e.executor == nil {
 		trace.L(ctx).Warn("runtime tool call failed", "stage", "tool_execute", "tool", call.Name, "tool_call_id", call.ID, "arguments", argumentsForLog, "reason", "executor_unavailable", "err", "tool executor not available", "elapsed_ms", time.Since(started).Milliseconds())
-		return hruntime.ToolResult{Content: "Error: tool executor not available", Error: "tool executor not available"}, nil
+		return hruntime.ToolResult{Content: "Error: tool executor not available", Error: "tool executor not available", Status: hruntime.ToolStatusError, DurationMs: time.Since(started).Milliseconds()}, nil
+	}
+	canonicalArgs, _ := json.Marshal(args)
+	unknownKey := call.Name + "\x00" + string(canonicalArgs)
+	e.mu.Lock()
+	previous, unknown := e.unknownActions[unknownKey]
+	e.mu.Unlock()
+	if unknown {
+		replayed = true
+		previous.Content += "\nThe original POST outcome is unknown. Do not resend it automatically; verify the original operation first."
+		return previous, nil
 	}
 
 	// Loop breaker: if the model repeats the exact same call, stop executing
@@ -333,15 +369,26 @@ func (e *runtimeToolExecutor) Execute(ctx context.Context, call llm.ToolCall) (h
 			}
 		}
 	}()
+	ctx = withRuntimeInvocationSelection(ctx)
 	result, raw, err := e.executor.ExecuteResult(ctx, call.Name, args)
 	finishHeartbeat()
 	if err != nil {
 		trace.L(ctx).Warn("runtime tool call failed", "stage", "tool_execute", "tool", call.Name, "tool_call_id", call.ID, "arguments", argumentsForLog, "reason", "execution_error", "err", err, "elapsed_ms", time.Since(started).Milliseconds())
 		msg := fmt.Sprintf("Error executing tool %q: %s", call.Name, err.Error())
-		return hruntime.ToolResult{Content: msg, Raw: raw, Error: err.Error()}, nil
+		if result != "" {
+			msg += "\n" + result
+		}
+		msg = toolExecutionExplanation(msg, raw)
+		outcome := hruntime.ToolResult{Content: msg, Raw: raw, Error: err.Error(), Status: hruntime.ToolStatusError, DurationMs: time.Since(started).Milliseconds()}
+		if detail := toolExecutionDetail(raw); detail != nil && detail.Action == "post" && detail.Outcome == "unknown" {
+			e.mu.Lock()
+			e.unknownActions[unknownKey] = outcome
+			e.mu.Unlock()
+		}
+		return outcome, nil
 	}
 	trace.L(ctx).Info("runtime tool call completed", "stage", "tool_execute", "tool", call.Name, "tool_call_id", call.ID, "elapsed_ms", time.Since(started).Milliseconds())
-	return hruntime.ToolResult{Content: result, Raw: raw}, nil
+	return hruntime.ToolResult{Content: toolExecutionExplanation(result, raw), Raw: raw, Status: hruntime.ToolStatusSuccess, DurationMs: time.Since(started).Milliseconds()}, nil
 }
 
 func (e *runtimeToolExecutor) SideEffectOf(call llm.ToolCall) hruntime.ToolSideEffect {
@@ -422,36 +469,48 @@ func (runtimeBudgetMiddleware) AfterTool(context.Context, *hruntime.State, llm.T
 
 func (runtimeBudgetMiddleware) Finalize(context.Context, *hruntime.State) error { return nil }
 
-type runtimeCompactionMiddleware struct {
-	provider         hexagon.Provider
-	providerForState func(*hruntime.State) hexagon.Provider
-	sessionID        string
-}
-
-func (m runtimeCompactionMiddleware) BeforeLLM(ctx context.Context, state *hruntime.State) error {
-	provider := m.provider
-	if m.providerForState != nil {
-		if p := m.providerForState(state); p != nil {
-			provider = p
+// runtimeCompaction 将应用触发条件和模型策略注入共享压缩中间件。
+func runtimeCompaction(provider hexagon.Provider, sessionID string, currentProvider func() hexagon.Provider) hruntime.Middleware {
+	return hruntime.MiddlewareFuncSet{BeforeLLMFunc: func(ctx context.Context, state *hruntime.State) error {
+		if state == nil {
+			return nil
 		}
-	}
-	state.Messages = compressContextIfNeeded(ctx, state.Messages, provider, m.sessionID)
-	return nil
+		if state.Attributes == nil {
+			state.Attributes = map[string]any{}
+		}
+		const inputOrdinalKey = "hexclaw.current_input_user_ordinal"
+		ordinal, initialized := state.Attributes[inputOrdinalKey].(int)
+		if !initialized {
+			// 身份来自工具执行前的原始请求，不能把后续工具图片误当当前输入。
+			ordinal = countContextUserMessages(state.Request.Messages)
+		}
+		inputIndex := contextUserMessageIndex(state.Messages, ordinal)
+		compaction := middleware.Compaction{
+			ShouldCompact: func(messages []llm.Message) bool {
+				return contextMessageBytes(messages) >= contextCompressCharThreshold || middleware.HasCompactableToolMedia(messages, 3)
+			},
+			Count: EstimateMessagesTokens,
+			Compact: func(ctx context.Context, messages []llm.Message) []llm.Message {
+				selected := provider
+				if currentProvider != nil {
+					if current := currentProvider(); current != nil {
+						selected = current
+					}
+				}
+				compressed, nextInput := compressContextWithInput(ctx, messages, selected, sessionID, inputIndex)
+				inputIndex = nextInput
+				return compressed
+			},
+		}
+		err := compaction.BeforeLLM(ctx, state)
+		ordinal = 0
+		if inputIndex >= 0 {
+			ordinal = countContextUserMessages(state.Messages[:inputIndex+1])
+		}
+		state.Attributes[inputOrdinalKey] = ordinal
+		return err
+	}}
 }
-
-func (runtimeCompactionMiddleware) AfterLLM(context.Context, *hruntime.State, *llm.CompletionResponse) error {
-	return nil
-}
-
-func (runtimeCompactionMiddleware) BeforeTool(context.Context, *hruntime.State, llm.ToolCall) error {
-	return nil
-}
-
-func (runtimeCompactionMiddleware) AfterTool(context.Context, *hruntime.State, llm.ToolCall, hruntime.ToolResult) error {
-	return nil
-}
-
-func (runtimeCompactionMiddleware) Finalize(context.Context, *hruntime.State) error { return nil }
 
 func runtimeToolCallsToAdapter(calls []hruntime.ToolCallRecord, origins ...map[string]*adapter.ToolOrigin) []adapter.ToolCall {
 	result := make([]adapter.ToolCall, 0, len(calls))
@@ -468,7 +527,7 @@ func runtimeToolCallsToAdapter(calls []hruntime.ToolCallRecord, origins ...map[s
 		if execution != nil {
 			displayContent = displayContent[:strings.LastIndex(displayContent, "\n[hexclaw_sandbox_result]\n")]
 		}
-		displayResult := truncateToolResultForDisplay(c.Name, displayContent)
+		displayResult := truncateToolResultForDisplay(c.Name, toolExecutionDisplayContent(displayContent, c.Result.Raw))
 		status := string(c.Result.Status)
 		// 兼容执行前拦截回执：结束事件不等于工具成功，沿用既有错误信封契约。
 		if strings.HasPrefix(strings.TrimSpace(c.Result.Content), "Error executing tool \"") {
@@ -481,6 +540,7 @@ func runtimeToolCallsToAdapter(calls []hruntime.ToolCallRecord, origins ...map[s
 			status = "success"
 		}
 		result = append(result, adapter.ToolCall{
+			Detail:    toolExecutionDetail(c.Result.Raw),
 			ID:        c.ID,
 			Name:      c.Name,
 			Origin:    origin,
@@ -500,11 +560,17 @@ func runtimeToolCallsToAdapter(calls []hruntime.ToolCallRecord, origins ...map[s
 // runtimeBlocksToAdapter 把 hexagon 产出的有序内容块流（template.Blocks）转成 wire 形态。
 // 块只承载**顺序**（text 片段 + tool_use 位置）；富数据（status/duration）仍走扁平 ToolCalls，
 // 前端按块序渲染、在 tool_use 处用 id 取完整数据。tool_result 的 toolName 由同 id 的 tool_use 回填。
-func runtimeBlocksToAdapter(blocks template.Blocks) []adapter.Block {
+func runtimeBlocksToAdapter(blocks template.Blocks, projectedCalls ...[]adapter.ToolCall) []adapter.Block {
 	if len(blocks) == 0 {
 		return nil
 	}
 	names := make(map[string]string, len(blocks))
+	outputs := make(map[string]string)
+	for _, calls := range projectedCalls {
+		for _, call := range calls {
+			outputs[call.ID] = call.Result
+		}
+	}
 	for _, b := range blocks {
 		if b.Type == template.BlockToolUse {
 			names[b.ID] = b.Name
@@ -523,6 +589,9 @@ func runtimeBlocksToAdapter(blocks template.Blocks) []adapter.Block {
 			out = append(out, adapter.Block{Type: "tool_use", ID: b.ID, Name: b.Name, Input: b.Input})
 		case template.BlockToolResult:
 			output := truncateToolResultForDisplay(names[b.ToolUseID], b.Output)
+			if projected, ok := outputs[b.ToolUseID]; ok {
+				output = projected
+			}
 			out = append(out, adapter.Block{
 				Type:           "tool_result",
 				MessageContent: canonicalProducerContent(messagecontent.ProducerTool, output, "und"),

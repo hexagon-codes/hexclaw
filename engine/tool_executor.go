@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -52,6 +53,14 @@ type toolRawResultCapture struct{ value any }
 func (e *ToolExecutor) ExecuteResult(ctx context.Context, toolName string, args map[string]any) (string, any, error) {
 	capture := &toolRawResultCapture{}
 	content, err := e.Execute(context.WithValue(ctx, toolRawResultContextKey{}, capture), toolName, args)
+	var executionErr *skill.ExecutionError
+	if errors.As(err, &executionErr) {
+		if result, ok := capture.value.(*skill.Result); ok && result != nil {
+			result.Detail = &executionErr.Detail
+		} else {
+			capture.value = &skill.Result{Content: content, Data: capture.value, Detail: &executionErr.Detail}
+		}
+	}
 	if capture.value == nil {
 		capture.value = content
 	}
@@ -96,8 +105,12 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolName string, args map[st
 			}
 			return e.executeWithHooks(ctx, call, func(ctx context.Context) (string, error) {
 				result, err := s.Execute(ctx, call.Arguments)
+				captureSkillRawResult(ctx, result)
 				if err != nil {
 					captureCodeExecutionReceipt(ctx, skillName, nil)
+					if result != nil {
+						return result.Content, err
+					}
 					return "", err
 				}
 				captureCodeExecutionReceipt(ctx, skillName, result)
@@ -296,7 +309,13 @@ func (e *ToolExecutor) runSkillViaPipeline(ctx context.Context, toolName string,
 		Args:  args,
 		TopK:  1,
 	})
+	if res != nil && res.Result != nil {
+		captureSkillRawResult(ctx, res.Result)
+	}
 	if err != nil {
+		if res != nil && res.Result != nil {
+			return res.Result.Content, err
+		}
 		return "", err
 	}
 	if res == nil || res.Result == nil {
@@ -319,6 +338,9 @@ func (e *ToolExecutor) runSkillViaPipeline(ctx context.Context, toolName string,
 
 // 类型化读取与原执行共用钩子和流水线，不为读取元数据再次执行工具。
 func captureSkillRawResult(ctx context.Context, result *skill.Result) {
+	if result == nil {
+		return
+	}
 	if capture, ok := ctx.Value(toolRawResultContextKey{}).(*toolRawResultCapture); ok {
 		capture.value = result
 	}

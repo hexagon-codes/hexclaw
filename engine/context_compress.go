@@ -10,6 +10,8 @@ import (
 
 	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/hexagon/observe/trace"
+	hruntime "github.com/hexagon-codes/hexagon/runtime"
+	"github.com/hexagon-codes/hexagon/runtime/middleware"
 	"github.com/hexagon-codes/hexclaw/egress"
 	"github.com/hexagon-codes/toolkit/lang/stringx"
 )
@@ -50,16 +52,26 @@ func compressContextIfNeeded(
 	provider hexagon.Provider,
 	sessionID string,
 ) []llm.Message {
-	totalChars := 0
-	for _, m := range messages {
-		totalChars += len(m.Content)
-		for _, tc := range m.ToolCalls {
-			totalChars += len(tc.Arguments)
-		}
+	compressed, _ := compressContextWithInput(ctx, messages, provider, sessionID, -1)
+	return compressed
+}
+
+// compressContextWithInput 同时维护当前输入位置，只压缩其余上下文。
+func compressContextWithInput(ctx context.Context, messages []llm.Message, provider hexagon.Provider, sessionID string, inputIndex int) ([]llm.Message, int) {
+	if inputIndex < 0 || inputIndex >= len(messages) || messages[inputIndex].Role != llm.RoleUser {
+		inputIndex = -1
 	}
+	totalChars := contextMessageBytes(messages)
 
 	if totalChars < contextCompressCharThreshold {
-		return messages
+		if middleware.HasCompactableToolMedia(messages, 3) {
+			compressed := HeuristicCompress(messages, HeuristicCompressOptions{})
+			if inputIndex >= 0 {
+				inputIndex = contextUserMessageIndex(compressed, countContextUserMessages(messages[:inputIndex+1]))
+			}
+			return compressed, inputIndex
+		}
+		return messages, inputIndex
 	}
 
 	// 双路径路由（v0.4.0 F4）：
@@ -67,19 +79,29 @@ func compressContextIfNeeded(
 	//   - 大幅超限（>= 2x 阈值）→ LLM 摘要（保留语义）
 	if totalChars < contextHeuristicMaxChars {
 		compressed := HeuristicCompress(messages, HeuristicCompressOptions{})
+		if inputIndex >= 0 {
+			// 共享启发式保留所有用户消息及顺序，按序号跟踪身份，不比较正文。
+			inputIndex = contextUserMessageIndex(compressed, countContextUserMessages(messages[:inputIndex+1]))
+		}
 		trace.L(ctx).Info("工具循环上下文压缩: 启发式路径",
 			"before", len(messages), "after", len(compressed),
 			"chars_before", totalChars, "session", sessionID)
-		return compressed
+		return compressed, inputIndex
 	}
 
 	// 分割消息: system | old (可压缩) | recent (保留)
 	systemEnd, keepStart := splitIndexes(messages)
-	if keepStart-systemEnd < contextMinMessagesToCompress {
-		return messages // 可压缩的消息太少
-	}
-
 	oldMsgs := messages[systemEnd:keepStart]
+	inputInOld := inputIndex >= systemEnd && inputIndex < keepStart
+	if inputInOld {
+		// 当前请求不能进入历史摘要；复制旧消息区，避免改动原始消息数组。
+		oldMsgs = make([]llm.Message, 0, keepStart-systemEnd-1)
+		oldMsgs = append(oldMsgs, messages[systemEnd:inputIndex]...)
+		oldMsgs = append(oldMsgs, messages[inputIndex+1:keepStart]...)
+	}
+	if len(oldMsgs) < contextMinMessagesToCompress {
+		return messages, inputIndex
+	}
 
 	// 生成摘要。本地 provider 慢且工具摘要经 LLM 价值有限——直接走启发式：
 	// 确定性、即时、不挤占整条 chat 的时间预算（避免慢本地模型在 30s 摘要超时上白白
@@ -100,46 +122,66 @@ func compressContextIfNeeded(
 	}
 
 	// 重建 messages
-	compressed := make([]llm.Message, 0, systemEnd+1+len(messages)-keepStart)
+	compressed := make([]llm.Message, 0, systemEnd+2+len(messages)-keepStart)
 	compressed = append(compressed, messages[:systemEnd]...)
 	compressed = append(compressed, llm.SystemMessage("[Prior tool interactions summary]\n"+summary))
+	if inputInOld {
+		current := messages[inputIndex]
+		inputIndex = len(compressed)
+		compressed = append(compressed, current)
+	} else if inputIndex >= keepStart {
+		inputIndex = len(compressed) + inputIndex - keepStart
+	}
 	compressed = append(compressed, messages[keepStart:]...)
 
 	trace.L(ctx).Info("工具循环上下文压缩",
 		"before", len(messages), "after", len(compressed),
 		"chars_before", totalChars, "session", sessionID)
 
-	return compressed
+	return compressed, inputIndex
 }
 
-// splitIndexes 确定压缩分割点。
-// 返回 systemEnd（system 消息结束位置）和 keepStart（保留消息开始位置）。
-func splitIndexes(messages []llm.Message) (systemEnd, keepStart int) {
-	// system 消息通常在开头
-	systemEnd = 0
-	for i, m := range messages {
-		if m.Role == "system" {
-			systemEnd = i + 1
-		} else {
-			break
+// countContextUserMessages 只统计结构位置，用于跟踪原始请求中的用户输入。
+func countContextUserMessages(messages []llm.Message) int {
+	n := 0
+	for _, message := range messages {
+		if message.Role == llm.RoleUser && message.Name != hruntime.ToolMediaMessageName {
+			n++
 		}
 	}
+	return n
+}
 
-	// 保留最近 N 条
-	keepStart = len(messages) - contextKeepRecent
-	if keepStart < systemEnd {
-		keepStart = systemEnd
+func contextUserMessageIndex(messages []llm.Message, ordinal int) int {
+	if ordinal <= 0 {
+		return -1
 	}
-
-	// Don't start the retained segment on an orphan tool result: walk back so its
-	// assistant tool_call stays paired with it (the old segment is flattened into
-	// a summary, so a tool result there is harmless, but one with no preceding
-	// tool_call in the rebuilt messages makes the chat API 400).
-	for keepStart > systemEnd && messages[keepStart].Role == "tool" {
-		keepStart--
+	for i, message := range messages {
+		if message.Role == llm.RoleUser && message.Name != hruntime.ToolMediaMessageName {
+			ordinal--
+			if ordinal == 0 {
+				return i
+			}
+		}
 	}
+	return -1
+}
 
-	return
+// contextMessageBytes 保持既有的正文及工具参数字节统计口径。
+func contextMessageBytes(messages []llm.Message) int {
+	total := 0
+	for _, message := range messages {
+		total += len(message.Content)
+		for _, call := range message.ToolCalls {
+			total += len(call.Arguments)
+		}
+	}
+	return total
+}
+
+// splitIndexes 使用共享边界计算，应用仅提供既有保留条数。
+func splitIndexes(messages []llm.Message) (systemEnd, keepStart int) {
+	return middleware.RecentMessageBounds(messages, contextKeepRecent)
 }
 
 // llmToolSummary 用 LLM 生成工具交互的摘要。
@@ -173,7 +215,18 @@ func llmToolSummary(ctx context.Context, msgs []llm.Message, provider hexagon.Pr
 
 	summaryCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	egress.AddDataClasses(summaryCtx, egress.ClassMemory, egress.ClassRecord)
+	// 工具对话压缩不是长期记忆写入；独立副本沿用真实分类，不能污染主请求。
+	requests, _ := egress.RequestsFromContext(ctx)
+	purpose, auditID := egress.Purpose(""), ""
+	classes := make([]egress.DataClass, 0, len(requests))
+	for _, request := range requests {
+		purpose, auditID = request.Purpose, request.AuditID
+		classes = append(classes, request.DataClass)
+	}
+	summaryCtx = egress.WithRequest(summaryCtx, purpose, auditID, classes...)
+	if len(requests) > 0 && requests[0].ChatMemoryEnabled {
+		egress.EnableChatMemory(summaryCtx)
+	}
 
 	var temp float64 = 0
 	// v0.4.0 E4：用 CompleteWithFailover 做 ClassifyError-aware 重试（同 Provider，
@@ -198,56 +251,7 @@ func llmToolSummary(ctx context.Context, msgs []llm.Message, provider hexagon.Pr
 	return resp.Content, nil
 }
 
-// heuristicToolSummary 启发式工具摘要（无需 LLM 调用）。
-// 提取工具名称 + 简短结果，作为 LLM 摘要的回退方案。
-//
-// 消息序列形如: assistant(ToolCalls:[A,B]) → tool(resultA) → tool(resultB)
-// 输出配对格式: "- A: resultA\n- B: resultB\n"
-func heuristicToolSummary(msgs []llm.Message) string {
-	var userConstraints strings.Builder
-	var toolSummary strings.Builder
-	toolCount := 0
-
-	// 收集待配对的 tool call 名称队列
-	var pendingNames []string
-
-	for _, m := range msgs {
-		if m.Role == "user" && m.Content != "" {
-			// 保留用户消息中的约束和指令
-			userConstraints.WriteString(fmt.Sprintf("User: %s\n", stringx.TruncateWithSuffix(m.Content, 200, "...")))
-		} else if m.Role == "assistant" && len(m.ToolCalls) > 0 {
-			for _, tc := range m.ToolCalls {
-				toolCount++
-				pendingNames = append(pendingNames, tc.Name)
-			}
-		} else if m.Role == "tool" {
-			name := "(unknown)"
-			if len(pendingNames) > 0 {
-				name = pendingNames[0]
-				pendingNames = pendingNames[1:]
-			}
-			content := m.Content
-			if strings.HasPrefix(content, "Error") {
-				toolSummary.WriteString(fmt.Sprintf("- %s: %s\n", name, stringx.TruncateWithSuffix(content, 150, "...")))
-			} else {
-				toolSummary.WriteString(fmt.Sprintf("- %s: %s\n", name, stringx.TruncateWithSuffix(content, 100, "...")))
-			}
-		}
-	}
-
-	if toolCount == 0 && userConstraints.Len() == 0 {
-		return "(no interactions to summarize)"
-	}
-
-	var result strings.Builder
-	if userConstraints.Len() > 0 {
-		result.WriteString("User context:\n")
-		result.WriteString(userConstraints.String())
-		result.WriteByte('\n')
-	}
-	if toolCount > 0 {
-		result.WriteString(fmt.Sprintf("Executed %d tool calls:\n", toolCount))
-		result.WriteString(toolSummary.String())
-	}
-	return result.String()
+// heuristicToolSummary 委托不依赖业务与模型的共享摘要策略。
+func heuristicToolSummary(messages []llm.Message) string {
+	return middleware.HeuristicToolSummary(messages)
 }

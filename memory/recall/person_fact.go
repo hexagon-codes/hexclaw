@@ -20,6 +20,9 @@ func NormalizePersonFact(fact Entry) Entry {
 	attribute := canonicalPersonAttribute(fact.Attribute)
 	if attribute != "" && strings.TrimSpace(fact.Value) != "" {
 		fact.Attribute, fact.Value = attribute, strings.TrimSpace(fact.Value)
+		if attribute == "current_residence" {
+			fact.Value = normalizeResidenceValue(fact.Value)
+		}
 		return fact
 	}
 	fact.Attribute, fact.Value = "", ""
@@ -46,6 +49,9 @@ func NormalizePersonFact(fact Entry) Entry {
 			return fact
 		}
 		fact.Attribute, fact.Value = relation.attribute, value
+		if relation.attribute == "current_residence" {
+			fact.Value = normalizeResidenceValue(value)
+		}
 		return fact
 	}
 	return fact
@@ -80,10 +86,15 @@ func personValuesConflict(old, fresh Entry) bool {
 }
 
 func residenceGranularity(value string) string {
-	for _, suffix := range []string{"街道", "小区", "省", "市", "区", "县", "镇", "村", "路", "号"} {
-		if strings.Contains(value, suffix) {
+	for _, suffix := range []string{"街道", "小区", "自治区", "省", "区", "县", "镇", "村", "路", "号"} {
+		if strings.HasSuffix(value, suffix) {
 			return suffix
 		}
 	}
 	return "place"
+}
+
+// 城市名称中的可省略后缀不构成不同粒度；完整地址保留其末级行政单位。
+func normalizeResidenceValue(value string) string {
+	return strings.TrimSuffix(strings.TrimSpace(value), "市")
 }
