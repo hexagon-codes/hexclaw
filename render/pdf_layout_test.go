@@ -2,6 +2,8 @@ package render
 
 import (
 	"context"
+	"encoding/base64"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -47,6 +49,25 @@ func TestPDFDefaultBrandingAndExplicitExceptionsRenderRealFiles(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			// 固定公开夹具失败时保留PDF证据，区分字体渲染与文字提取缺陷。
+			t.Cleanup(func() {
+				if !t.Failed() {
+					return
+				}
+				for _, binary := range []string{"pandoc", "typst", "pdftotext", "pdffonts"} {
+					args := []string{"--version"}
+					if binary == "pdftotext" {
+						args = []string{"-v"}
+					} else if binary == "pdffonts" {
+						args = []string{result.Path}
+					}
+					output, err := exec.Command(binary, args...).CombinedOutput()
+					t.Logf("PDF diagnostic %s: %s; err=%v", binary, output, err)
+				}
+				if data, err := os.ReadFile(result.Path); err == nil && len(data) <= 128<<10 {
+					t.Logf("PDF fixture base64=%s", base64.StdEncoding.EncodeToString(data))
+				}
+			})
 			// 不同发行版的默认编码不一致，提取结果固定为UTF-8。
 			text, err := exec.Command("pdftotext", "-enc", "UTF-8", result.Path, "-").Output()
 			if err != nil {
