@@ -8,11 +8,12 @@ require (
 	github.com/alibabacloud-go/tea v1.2.2
 	github.com/alibabacloud-go/tea-utils/v2 v2.0.8
 	github.com/gorilla/websocket v1.5.3
-	github.com/hexagon-codes/ai-core v0.2.11
-	github.com/hexagon-codes/hexagon v0.5.14
+	github.com/hexagon-codes/ai-core v0.2.12
+	github.com/hexagon-codes/hexagon v0.5.15
 	github.com/hexagon-codes/toolkit v0.3.5
 	github.com/larksuite/oapi-sdk-go/v3 v3.5.3
 	github.com/line/line-bot-sdk-go/v8 v8.20.1
+	github.com/modelcontextprotocol/go-sdk v1.5.0
 	github.com/open-dingtalk/dingtalk-stream-sdk-go v0.9.1
 	github.com/spf13/cobra v1.9.1
 	github.com/yuin/goldmark v1.8.6
@@ -46,7 +47,6 @@ require (
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
-	github.com/modelcontextprotocol/go-sdk v1.5.0 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.2 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
