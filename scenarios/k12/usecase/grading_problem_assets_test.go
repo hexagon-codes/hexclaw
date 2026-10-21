@@ -350,6 +350,7 @@ func TestGradingProblemAssetSourceFormat(t *testing.T) {
 			solver, grader := &feedbackReassessmentSolver{answer: "0.9kg"}, &assetReuseGrader{}
 			o := newParallelAnchorOrchestrator(t, &countingRecognizer{}, nil, WithGradingRunDir(runDir))
 			o.deps.Solver, o.deps.Grader, o.deps.VerifiedGrader = solver, grader, nil
+			o.deps.ParentTeachingGuide = &parentTeachingGuideSpy{answer: "0.9kg"}
 			o.deps.TextbookOwnerID = DefaultLocalOwnerScope
 			dispatcher := k12storage.NewDispatcher(o.deps.Records, ProblemAssetConsumer{Records: o.deps.Records})
 			seedStem := assetFormatOldBread
@@ -495,6 +496,7 @@ func TestGradingProblemAssetPlainQuantitySpacing(t *testing.T) {
 			solver, grader := &feedbackReassessmentSolver{answer: tc.correct}, &assetReuseGrader{}
 			o := newParallelAnchorOrchestrator(t, &countingRecognizer{}, nil, WithGradingRunDir(t.TempDir()))
 			o.deps.Solver, o.deps.Grader, o.deps.VerifiedGrader = solver, grader, nil
+			o.deps.ParentTeachingGuide = &parentTeachingGuideSpy{answer: tc.correct}
 			o.deps.TextbookOwnerID = DefaultLocalOwnerScope
 			dispatcher := k12storage.NewDispatcher(o.deps.Records, ProblemAssetConsumer{Records: o.deps.Records})
 			o.deps.Recognizer = &countingRecognizer{questions: []RecognizedQuestion{{Question: tc.original, Subject: "数学", StudentAnswer: tc.correct, AnswerState: AnswerStatePresent}}}

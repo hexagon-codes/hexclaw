@@ -493,11 +493,17 @@ func TestReActEngine_ProcessUsesSessionHistoryForTextFollowUp(t *testing.T) {
 			if len(req.Messages) < 4 {
 				t.Fatalf("follow-up 请求应包含历史消息，实际仅 %d 条", len(req.Messages))
 			}
-			if req.Messages[1].Content != "第一句" {
-				t.Fatalf("历史用户消息未注入: %#v", req.Messages)
+			userIndex, assistantIndex := -1, -1
+			for i, message := range req.Messages[:len(req.Messages)-1] {
+				if message.Role == "user" && message.Content == "第一句" {
+					userIndex = i
+				}
+				if message.Role == "assistant" && message.Content == "reply-1" {
+					assistantIndex = i
+				}
 			}
-			if req.Messages[2].Content != "reply-1" {
-				t.Fatalf("历史助手消息未注入: %#v", req.Messages)
+			if userIndex < 0 || assistantIndex <= userIndex {
+				t.Fatalf("history order is not preserved: user=%d assistant=%d", userIndex, assistantIndex)
 			}
 			return &hexagon.CompletionResponse{
 				Content: "reply-2",
@@ -894,7 +900,7 @@ func TestReActEngine_ProcessStreamEstimatesUsageWhenProviderOmitsUsage(t *testin
 
 func TestReActEngine_ProcessUsesMultimodalHistory(t *testing.T) {
 	provider := mockllm.NewLLMProvider("test").WithResponseFn(func(req hexagon.CompletionRequest) (*hexagon.CompletionResponse, error) {
-		if len(req.Messages) >= 3 {
+		if strings.Contains(req.Messages[len(req.Messages)-1].Content, "继续说明细节") {
 			hasHistoryImage := false
 			for _, message := range req.Messages[:len(req.Messages)-1] {
 				if message.HasMultiContent() {

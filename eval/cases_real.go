@@ -39,12 +39,11 @@ func V04SuiteFull() *Suite {
 	return &Suite{Cases: cases}
 }
 
-// caseRealHeuristicCompress 真调 engine.HeuristicCompress：注入 6 条带重复 user
-// 的 history → 断言去重 + tool pair 截断生效（消息数 < 原始）。
+// caseRealHeuristicCompress 校验用户消息逐条保留，旧工具组仍可裁剪。
 func caseRealHeuristicCompress() EvalCase {
 	return EvalCase{
 		ID:          "real-heuristic-compress",
-		Description: "真调 HeuristicCompress 验证去重 + tool pair 截断",
+		Description: "真调 HeuristicCompress 验证用户消息保真与工具组裁剪",
 		Tags:        []string{"real", "compression", "K12"},
 		Run: func(_ context.Context, _ map[string]any) (Output, error) {
 			start := time.Now()
@@ -52,22 +51,31 @@ func caseRealHeuristicCompress() EvalCase {
 				{Role: "system", Content: "you are an assistant"},
 				{Role: "user", Content: "hello"},
 				{Role: "assistant", Content: "hi"},
-				{Role: "user", Content: "Hello"},   // 大小写重复
-				{Role: "user", Content: " hello "}, // 前后空格重复
+				{Role: "user", Content: "Hello"},
+				{Role: "user", Content: " hello "},
 				{Role: "assistant", ToolCalls: []llm.ToolCallRef{{ID: "1"}}},
-				{Role: "tool", Content: "r1"},
+				{Role: "tool", ToolCallID: "1", Content: "r1"},
 				{Role: "assistant", ToolCalls: []llm.ToolCallRef{{ID: "2"}}},
-				{Role: "tool", Content: "r2"},
+				{Role: "tool", ToolCallID: "2", Content: "r2"},
 				{Role: "assistant", ToolCalls: []llm.ToolCallRef{{ID: "3"}}},
-				{Role: "tool", Content: "r3"},
+				{Role: "tool", ToolCallID: "3", Content: "r3"},
 			}
 			compressed := engine.HeuristicCompress(hist, engine.HeuristicCompressOptions{KeepRecentToolPairs: 1})
 
-			// 统计 user 数应为 1（去重后）
+			// 相似文字仍可能是独立指令，必须保留原始内容与顺序。
 			userCount := 0
+			var userContents []string
+			toolResults := 0
 			for _, m := range compressed {
 				if strings.EqualFold(string(m.Role), "user") {
 					userCount++
+					userContents = append(userContents, m.Content)
+				}
+				if m.Role == "tool" {
+					toolResults++
+					if m.ToolCallID != "3" || m.Content != "r3" {
+						return Output{}, fmt.Errorf("retained tool result does not match the latest call")
+					}
 				}
 			}
 			out := Output{
@@ -77,12 +85,15 @@ func caseRealHeuristicCompress() EvalCase {
 			if len(compressed) >= len(hist) {
 				return out, fmt.Errorf("expected message count to drop; got %d ≥ %d", len(compressed), len(hist))
 			}
-			if userCount != 1 {
-				return out, fmt.Errorf("expected user dedup to 1; got %d", userCount)
+			if userCount != 3 || strings.Join(userContents, "\x00") != "hello\x00Hello\x00 hello " {
+				return out, fmt.Errorf("user messages were changed or removed: %q", userContents)
+			}
+			if toolResults != 1 {
+				return out, fmt.Errorf("expected one latest tool result; got %d", toolResults)
 			}
 			return out, nil
 		},
-		Assertions: []Assertion{AssertNoError(), AssertContent("user=1")},
+		Assertions: []Assertion{AssertNoError(), AssertContent("user=3")},
 	}
 }
 

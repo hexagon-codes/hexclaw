@@ -6,15 +6,8 @@ import (
 	"testing"
 )
 
-// BUG-20260712 #9 IM 识题「内联回显」契约回归锁。
-//
-// 背景：桌面拍照识题有交互门（RecognizeGuardPanel 展示 OCR 结果让家长确认后才批改），
-// 但 IM（钉钉/微信）此前无回显护栏——「真图解题门」为单轮效率硬化成「整页全解 + 最终答案直出」，
-// OCR 读错会静默带错整页答案，家长无从察觉。用户定夺方案=「内联回显」：不阻塞等确认，
-// 在解答同一条消息开头先列「我读到的题目」抬头再给整页解答，家长一眼可核对纠正。
-//
-// 本锁校验 homework-checker skill 的 OCR 回显护栏落成「内联回显」契约，且不回退成
-// 「先不解题、等家长确认后才开始」的阻塞式两轮门（IM 场景往返代价高，已弃）。
+// 内联回显只复述有证据的原题，并在同条消息给完整解答。
+// 原图留白、档案资料及未可靠辨认片段分别保留，不引入阻塞式复述确认。
 func TestHomeworkChecker_InlineEchoContract(t *testing.T) {
 	raw, err := fs.ReadFile(BundledSkillsFS(), "skills/homework-checker.md")
 	if err != nil {
@@ -36,12 +29,13 @@ func TestHomeworkChecker_InlineEchoContract(t *testing.T) {
 		}
 	}
 
-	// BUG-20260712 Polish-1：回显作业表头时「姓名」取档案里孩子的称呼，不留空、不编造。
-	// 真机现象：微信识题回显 `姓名：(空)`——印刷作业「姓名：___」是留白行，模型照抄成空。
+	// 原图留白与档案称呼分别保留，不把资料改写为OCR事实。
 	headerName := map[string]string{
-		"姓名":             "缺作业表头姓名回显指令",
-		"k12.child_name": "姓名应取档案 k12.child_name 里孩子的称呼",
-		"绝不编造别的名字":       "姓名护栏须禁止编造别的名字",
+		"原图表头和档案资料分开":      "缺姓名来源区分",
+		"原图「姓名：___」保持识别为空": "缺原图留白保真",
+		"按档案来源单独标识":        "缺档案称呼来源标识",
+		"不能把资料补名写成 OCR 原文": "缺资料与OCR边界",
+		"缺失称呼不编造":          "缺姓名缺失保护",
 	}
 	for sub, why := range headerName {
 		if !strings.Contains(body, sub) {

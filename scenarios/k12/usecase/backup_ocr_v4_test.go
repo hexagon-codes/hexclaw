@@ -15,8 +15,8 @@ import (
 )
 
 func TestHexbakCurrentVersionIsV6ForProblemSourceProblemAttemptAndConfirmedCreativeWorkOCREvidence(t *testing.T) {
-	if HexbakVersion != 7 {
-		t.Fatalf("HexbakVersion=%d want 7 for current creative work evidence", HexbakVersion)
+	if HexbakVersion != 8 {
+		t.Fatalf("HexbakVersion=%d want 8 for current teaching diagram assets", HexbakVersion)
 	}
 }
 

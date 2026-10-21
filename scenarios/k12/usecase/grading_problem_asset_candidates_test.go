@@ -27,6 +27,7 @@ func TestGradingProblemAssetCandidates(t *testing.T) {
 			solver, grader := &feedbackReassessmentSolver{answer: "6"}, &assetReuseGrader{}
 			o := newParallelAnchorOrchestrator(t, &countingRecognizer{}, nil, WithGradingRunDir(t.TempDir()))
 			o.deps.Solver, o.deps.Grader, o.deps.VerifiedGrader = solver, grader, nil
+			o.deps.ParentTeachingGuide = &parentTeachingGuideSpy{answer: "6"}
 			o.deps.TextbookOwnerID = DefaultLocalOwnerScope
 			seedStem := `\(18 \div 3 =\)`
 			o.deps.Recognizer = &countingRecognizer{questions: []RecognizedQuestion{{Question: seedStem, Subject: "数学", StudentAnswer: "5", AnswerState: AnswerStatePresent}}}

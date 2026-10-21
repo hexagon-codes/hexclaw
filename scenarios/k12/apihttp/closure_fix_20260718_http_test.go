@@ -7,8 +7,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hexagon-codes/hexclaw/router"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
-	"github.com/hexagon-codes/hexclaw/scenarios/k12/assembly"
+	"github.com/hexagon-codes/hexclaw/scenarios/k12/apihttp"
+	"github.com/hexagon-codes/hexclaw/scenarios/k12/engineadapter"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/usecase"
 )
 
@@ -105,7 +107,17 @@ func TestHTTPDictationToBasket(t *testing.T) {
 }
 
 func TestHTTPColdStartRequiresConfirmToWrite(t *testing.T) {
-	h := newServerWithSolver(t, fakeSolveExec{}, assembly.WithProfiles(&memProfiles{m: map[string]k12.ChildProfile{}}))
+	runtime := newRuntimeWithSolver(t, fakeSolveExec{})
+	agentStore := router.NewSQLiteStore(runtime.Records.DB())
+	if err := agentStore.Init(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	dispatcher := router.New()
+	if err := dispatcher.Register(router.AgentConfig{Name: "mingming"}); err != nil {
+		t.Fatal(err)
+	}
+	runtime.Deps.Profiles = engineadapter.NewProfileAdapter(dispatcher, agentStore)
+	h := apihttp.NewHandler(runtime)
 	// 不带 confirm：只返回建议，绝不写档案（§3.1 主流程 4）。
 	rec, out := do(t, h, "POST", "/cold-start", `{"agent":"mingming","child_name":"明明","knowledge_points":["简易方程"]}`)
 	if rec.Code != http.StatusOK {

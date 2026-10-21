@@ -81,8 +81,7 @@ func TestBug20260611_HeartbeatDispatchBypassesSemanticCache(t *testing.T) {
 		t.Errorf("[BUG-20260611 Low] dispatch guard evaluated after cache.Get: hit counter mutated (hits=%d)", hits)
 	}
 
-	// 4. The heartbeat result must not overwrite the cached user entry (M5):
-	//    the same user text must still resolve to the original answer.
+	// 上下文不同的请求必须重新执行，不能命中此前用户或系统派发的回答。
 	userReply2, err := eng.Process(ctx, &adapter.Message{
 		ID: "msg-u2", Platform: adapter.PlatformAPI,
 		UserID: "user-1", ChatID: "chat-1", Content: instructions,
@@ -90,9 +89,8 @@ func TestBug20260611_HeartbeatDispatchBypassesSemanticCache(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Process(user 2nd) failed: %v", err)
 	}
-	if userReply2.Content != userReply.Content {
-		t.Errorf("[BUG-20260611 M5] heartbeat output leaked into the user-facing cache: want %q, got %q",
-			userReply.Content, userReply2.Content)
+	if userReply2.Content != "fresh-3" || userReply2.Metadata["source"] == "cache" {
+		t.Errorf("user request with a new context reused an earlier result: got %q metadata=%v", userReply2.Content, userReply2.Metadata)
 	}
 }
 

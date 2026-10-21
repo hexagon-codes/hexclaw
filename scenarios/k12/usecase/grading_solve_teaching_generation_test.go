@@ -330,15 +330,15 @@ func TestSolveTeachingLegacyAndNumericGuideRoutes(t *testing.T) {
 			solver := newSolveTeachingSolver()
 			solver.numeric, solver.noGeneration = route.numeric, true
 			o, run, job := newSolveTeachingJob(t, solver, route.legacy)
+			if route.numeric {
+				o.deps.ParentTeachingGuide.(*parentTeachingGuideSpy).answer = "2张纸"
+			}
 			item, err := o.assessDurablePhotoItem(context.Background(), o.deps, job, run.req, PhotoModeSolve, run.questions[0])
 			if err != nil || item.ParentGuide == nil {
 				t.Fatalf("guide route: item=%+v err=%v", item, err)
 			}
 			rows := gradingVerifierResponseRows(t, o, job)
-			wantKind, wantCalls := k12.GradingExecutionLocalDeterministic, 0
-			if !route.numeric {
-				wantKind, wantCalls = k12.GradingExecutionProvider, 1
-			}
+			wantKind, wantCalls := k12.GradingExecutionProvider, 1
 			if route.legacy {
 				if solver.freezeCalls != 0 || run.req.SolveOutputVersion != "" {
 					t.Fatal("legacy request unexpectedly frozen")
@@ -353,8 +353,8 @@ func TestSolveTeachingLegacyAndNumericGuideRoutes(t *testing.T) {
 			}
 			if route.numeric {
 				if item.ParentGuide.Answer != "2张纸" || item.Solve.Evidence.EvidenceType != EvidenceNumericExec || solver.numericChecks != 1 ||
-					!reflect.DeepEqual(item.ParentGuide.LikelyMistakes, []string{"没有先判断本题的「分数乘整数」和运算顺序", "计算完成后没有检查结果"}) {
-					t.Fatalf("numeric compatibility route no longer uses its local guide: item=%+v checks=%d", item, solver.numericChecks)
+					!reflect.DeepEqual(item.ParentGuide.LikelyMistakes, []string{"易错：" + run.questions[0].Question}) {
+					t.Fatalf("application guidance changed numeric verification: item=%+v checks=%d", item, solver.numericChecks)
 				}
 			}
 			guideRow := solveTeachingRow(rows, k12.GradingItemOperationParentGuide)

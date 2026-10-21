@@ -52,8 +52,9 @@ func blankWorksheetVerifiedSteps(problem string) []string {
 }
 
 type parentTeachingGuideSpy struct {
-	mu    sync.Mutex
-	calls []ParentTeachingGuideRequest
+	mu     sync.Mutex
+	calls  []ParentTeachingGuideRequest
+	answer string
 }
 
 func (s *parentTeachingGuideSpy) GenerateParentTeachingGuide(
@@ -63,8 +64,12 @@ func (s *parentTeachingGuideSpy) GenerateParentTeachingGuide(
 	s.mu.Lock()
 	s.calls = append(s.calls, req)
 	s.mu.Unlock()
+	answer := s.answer
+	if answer == "" {
+		answer = blankWorksheetAnswer(req.Problem)
+	}
 	return ParentTeachingGuide{
-		Answer:                 blankWorksheetAnswer(req.Problem),
+		Answer:                 answer,
 		FullSolutionSteps:      []string{"untrusted generator rewrite"},
 		GradeLevelMethod:       "本年级方法：" + req.Problem,
 		LikelyMistakes:         []string{"易错：" + req.Problem},

@@ -40,7 +40,29 @@ func elementaryEquationAssembly(t *testing.T) (*assembly.K12, *atomic.Int32, *sq
 		calls.Add(1)
 		return engine.SubAgentResult{}, fmt.Errorf("unexpected model call: %s", spec.Agent)
 	}, nil)
-	wired, err := assembly.Wire(db, solver)
+	wired, err := assembly.Wire(db, solver, assembly.WithParentTeachingGuideGenerator(
+		func(_ context.Context, subject, prompt, grade string) (string, error) {
+			_, rawFacts, found := strings.Cut(prompt, "题目事实：")
+			var facts struct {
+				SourceAnswer string `json:"source_answer"`
+			}
+			if err := json.Unmarshal([]byte(rawFacts), &facts); !found || err != nil {
+				return "", fmt.Errorf("invalid teaching facts: %v", err)
+			}
+			answer := strings.NewReplacer(" ", "", "**", "").Replace(facts.SourceAnswer)
+			if subject != "数学" || grade != "六年级上" || answer != "x=24" && answer != "24" {
+				return "", fmt.Errorf("unexpected teaching request: subject=%q grade=%q answer=%q", subject, grade, facts.SourceAnswer)
+			}
+			guide := usecase.ParentTeachingGuide{
+				Answer: facts.SourceAnswer, FullSolutionSteps: []string{"24-24/4=18"},
+				GradeLevelMethod:       "把这个未知量看作4份，剩下3份是18，每份是6，4份是24。",
+				LikelyMistakes:         []string{"不能把一个量的四分之一看成数四分之一直接相减。"},
+				ParentTeachingSequence: []string{"先说明4份与3份的关系。", "再求一份与原数，并代回核对。"},
+				FollowUpQuestions:      []string{"剩下3份为何对应18？"}, CheckingMethod: "代入原式，24-24/4=18。",
+			}
+			raw, err := json.Marshal(guide)
+			return string(raw), err
+		}))
 	if err != nil {
 		t.Fatal(err)
 	}

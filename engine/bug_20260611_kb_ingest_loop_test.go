@@ -476,7 +476,7 @@ func TestBug20260611_CronDispatchSkipsSemanticCache(t *testing.T) {
 		t.Errorf("[BUG-20260611] recurring cron run was served from the semantic cache (want 2 provider calls, got %d)", provider.CallCount())
 	}
 
-	// Control: identical user messages still benefit from the cache.
+	// 相同问句的有效上下文已经变化，不能跨历史复用答案。
 	userMsg := func(id string) *adapter.Message {
 		return &adapter.Message{
 			ID: id, Platform: adapter.PlatformAPI, UserID: "user-001",
@@ -489,8 +489,8 @@ func TestBug20260611_CronDispatchSkipsSemanticCache(t *testing.T) {
 	if _, err := eng.Process(context.Background(), userMsg("msg-cache-u2")); err != nil {
 		t.Fatalf("Process (user 2) failed: %v", err)
 	}
-	if provider.CallCount() != 3 {
-		t.Errorf("identical user messages should hit the cache (want 3 total provider calls, got %d)", provider.CallCount())
+	if provider.CallCount() != 4 {
+		t.Errorf("user requests with different contexts must execute independently (want 4 total provider calls, got %d)", provider.CallCount())
 	}
 }
 

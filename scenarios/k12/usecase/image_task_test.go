@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -1398,7 +1399,7 @@ func TestImageTaskCoordinatorReplayUsesFrozenDispatchBeforeAssetOrRouteResolutio
 		t.Fatalf("replay: created=%v err=%v", created, err)
 	}
 	if replayed.Dispatch.DispatchID != first.Dispatch.DispatchID ||
-		replayed.Dispatch.ClassificationRouteSnapshot != first.Dispatch.ClassificationRouteSnapshot ||
+		!reflect.DeepEqual(replayed.Dispatch.ClassificationRouteSnapshot, first.Dispatch.ClassificationRouteSnapshot) ||
 		classifier.calls != 1 {
 		t.Fatalf("replay drifted frozen dispatch: first=%+v replay=%+v calls=%d",
 			first.Dispatch, replayed.Dispatch, classifier.calls)
@@ -1458,7 +1459,7 @@ func TestImageTaskCoordinatorAutoReplayDoesNotResolveChangedDefault(t *testing.T
 	replayed, created, err := coordinator.Create(context.Background(), input)
 	if err != nil || created ||
 		replayed.Dispatch.DispatchID != first.Dispatch.DispatchID ||
-		replayed.Dispatch.RoutePolicySnapshot != first.Dispatch.RoutePolicySnapshot {
+		!reflect.DeepEqual(replayed.Dispatch.RoutePolicySnapshot, first.Dispatch.RoutePolicySnapshot) {
 		t.Fatalf("auto replay drifted frozen route: first=%+v replay=%+v created=%v err=%v",
 			first.Dispatch, replayed.Dispatch, created, err)
 	}
@@ -1875,7 +1876,7 @@ func TestImageTaskCoordinatorPersistsClassificationFailureAndFrozenRoute(t *test
 		context.Background(), "mingming", "classification-1",
 	)
 	if getErr != nil || invocation.Status != k12.ImageTaskInvocationFailed ||
-		invocation.RouteSnapshot != stored.Dispatch.ClassificationRouteSnapshot {
+		!reflect.DeepEqual(invocation.RouteSnapshot, stored.Dispatch.ClassificationRouteSnapshot) {
 		t.Fatalf("classification receipt drift: invocation=%+v err=%v", invocation, getErr)
 	}
 }

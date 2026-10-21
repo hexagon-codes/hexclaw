@@ -276,7 +276,7 @@ func TestBuildWorkFeedbackPrompt_Writing_InjectsSkillBody(t *testing.T) {
 	if subject != "语文" {
 		t.Errorf("写作学科应为语文, got %q", subject)
 	}
-	if stamp != "writing-feedback@1.0.2/embedded" {
+	if stamp != expectedEmbeddedFeedbackStamp(t, "writing-feedback") {
 		t.Errorf("无 loader 时来源戳应为 embedded，got %q", stamp)
 	}
 	// skill 正文关键方法论句（来自 hub v0.0.7 writing-feedback.md 正文）。
@@ -316,7 +316,7 @@ func TestBuildWorkFeedbackPrompt_Art_InjectsSkillBody(t *testing.T) {
 	if subject != "美术" {
 		t.Errorf("美术学科应为美术, got %q", subject)
 	}
-	if stamp != "art-feedback@1.0.1/embedded" {
+	if stamp != expectedEmbeddedFeedbackStamp(t, "art-feedback") {
 		t.Errorf("无 loader 时来源戳应为 embedded，got %q", stamp)
 	}
 	// skill 正文关键方法论句（来自 hub v0.0.7 art-feedback.md 正文）。
