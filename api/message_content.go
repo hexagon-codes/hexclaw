@@ -2,9 +2,11 @@ package api
 
 import (
 	"encoding/json"
+	"path"
 	"strings"
 
 	"github.com/hexagon-codes/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/internal/mediaflow"
 	"github.com/hexagon-codes/hexclaw/messagecontent"
 	"github.com/hexagon-codes/hexclaw/storage"
 )
@@ -28,20 +30,25 @@ func canonicalChatContent(markdown string, metadata map[string]string) *messagec
 	return &content
 }
 
-func canonicalRenderProjection(producer messagecontent.ProducerKind, locale, markdown string, surface messagecontent.Surface, rendererVersion string) (*messagecontent.MessageContent, *messagecontent.RenderManifest) {
-	content, err := messagecontent.New(producer, locale, markdown, nil)
+func canonicalRenderProjection(producer messagecontent.ProducerKind, locale, markdown string, surface messagecontent.Surface, rendererVersion string, attachments ...messagecontent.AttachmentRef) (*messagecontent.MessageContent, *messagecontent.RenderManifest) {
+	content, err := messagecontent.New(producer, locale, markdown, attachments)
 	if err != nil {
 		return nil, nil
+	}
+	parts := []messagecontent.RenderPart{{Kind: messagecontent.PartMarkdown, Text: markdown}}
+	for _, attachment := range attachments {
+		parts = append(parts, messagecontent.RenderPart{Kind: messagecontent.PartArtifact, ArtifactRef: attachment.AssetID, ArtifactDigest: attachment.Digest, AltText: attachment.AltText})
 	}
 	manifest, err := messagecontent.BuildManifest(content, messagecontent.RenderRequest{
 		Surface:         surface,
 		RendererVersion: rendererVersion,
 		Capabilities: messagecontent.CapabilitySnapshot{
-			Markdown: true,
-			TeXMath:  true,
-			MathML:   true,
+			Markdown:    true,
+			TeXMath:     true,
+			MathML:      true,
+			Attachments: len(attachments) > 0,
 		},
-		Parts: []messagecontent.RenderPart{{Kind: messagecontent.PartMarkdown, Text: markdown}},
+		Parts: parts,
 	})
 	if err != nil {
 		return nil, nil
@@ -61,6 +68,20 @@ func hydrateMessageContents(messages []*storage.MessageRecord) {
 		metadata := make(map[string]string)
 		mergeStringMetadata(metadata, message.Metadata)
 		mergeStringMetadata(metadata, message.Meta)
+		if message.Role == "assistant" && metadata["media_completion_digest"] != "" {
+			if strings.TrimSpace(metadata["locale"]) == "" {
+				metadata["locale"] = "und"
+			}
+			var assets []mediaflow.Asset
+			if json.Unmarshal([]byte(metadata["artifacts"]), &assets) == nil && len(assets) > 0 {
+				refs := make([]messagecontent.AttachmentRef, 0, len(assets))
+				for _, asset := range assets {
+					name := path.Base(asset.Path)
+					refs = append(refs, messagecontent.AttachmentRef{AssetID: asset.ID, Digest: "sha256:" + asset.Digest, Name: name, AltText: name, MIME: asset.MIME})
+				}
+				message.MessageContent, message.RenderManifest = canonicalRenderProjection(messagecontent.ProducerChat, metadata["locale"], message.Content, messagecontent.SurfaceHistory, "history-markdown-v1", refs...)
+			}
+		}
 		if message.MessageContent == nil {
 			message.MessageContent = canonicalChatContent(message.Content, metadata)
 		}

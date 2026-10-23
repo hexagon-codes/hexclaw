@@ -2,6 +2,8 @@ package engine
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -391,7 +393,8 @@ func TestReActEngine_ProcessUsesDirectCompletionForAttachments(t *testing.T) {
 
 	eng := newEngineWithProvider(t, provider)
 
-	reply, err := eng.Process(context.Background(), &adapter.Message{
+	ctx := adapter.WithPlatformInstanceIdentity(context.Background(), "stable-instance", "email")
+	reply, err := eng.Process(ctx, &adapter.Message{
 		ID:       "msg-vision",
 		Platform: adapter.PlatformAPI,
 		UserID:   "user-001",
@@ -405,6 +408,16 @@ func TestReActEngine_ProcessUsesDirectCompletionForAttachments(t *testing.T) {
 	}
 	if reply.Content != "vision reply" {
 		t.Fatalf("回复内容不匹配: %q", reply.Content)
+	}
+	db := eng.store.(interface{ DB() *sql.DB }).DB()
+	var sessionID, meta string
+	var input, output int
+	if err := db.QueryRowContext(ctx, `SELECT session_id,meta,prompt_tokens,completion_tokens FROM cost_records WHERE user_id='user-001'`).Scan(&sessionID, &meta, &input, &output); err != nil {
+		t.Fatal(err)
+	}
+	var identity adapter.PlatformInstanceIdentity
+	if json.Unmarshal([]byte(meta), &identity) != nil || identity.ID != "stable-instance" || identity.Platform != "email" || sessionID == "" || input != 10 || output != 5 {
+		t.Fatalf("actual model usage lost its account attribution: session=%s metadata=%s input=%d output=%d", sessionID, meta, input, output)
 	}
 	if provider.CallCount() != 1 {
 		t.Fatalf("期望 provider 调用 1 次，实际 %d", provider.CallCount())

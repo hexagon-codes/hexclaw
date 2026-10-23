@@ -2,7 +2,7 @@
 
 [API 总览](../api.md) · [English](models-system-media.en.md) · [OpenAPI](../../api/openapi.yaml)
 
-本页覆盖当前源码的 53 个方法/路径组合，包括条件模块及原生内部端点。发布二进制可能不同，应使用对应版本的文档。下文给出调用契约，源码链接仅作实现参考。
+本页覆盖当前源码的 55 个方法/路径组合，包括条件模块及原生内部端点。发布二进制可能不同，应使用对应版本的文档。下文给出调用契约，源码链接仅作实现参考。
 
 ## 调用前提
 
@@ -812,6 +812,18 @@ curl -X PUT "${HEXCLAW_API}/api/v1/assistant/soul" \
 
 ## 语音、图片、视频与生成文件
 
+### 共享媒体操作合同
+
+主程序装配的图片、视频、TTS、单次语音对话入口与 Agent 媒体工具共用持久操作。以下操作合同适用于已注入共享媒体服务的实例。自行嵌入旧 SDK 服务、未调用 `SetMediaFlow` 的服务仍走旧适配：无法使用新操作端点，不具备下述应用幂等和恢复保证。
+
+- 直接生成 API 保持图片/语音对话 JSON、视频 `task_id` 和 TTS 二进制的原返回形态；不会创建 session、助手消息或渠道投递。会话入口则由原回合聚合产物和回复。
+- 图片/视频依次取 body `idempotency_key`、`Idempotency-Key`、`X-Request-ID`；TTS/语音对话取两个 header。键在当前认证归属和媒体动作内生效；都省略则创建新请求。重试应保持原键和完整输入，不能用新键替代结果未知的旧请求。同键显式输入变化返回 409；默认配置变化不改变已受理操作的冻结路由。
+- 成功响应携带 `X-Media-Operation-ID`；部分错误也携带此头，收到后须保存。新视频 `task_id` 等于该操作 ID，必须按不透明字符串使用。旧 SDK 任务引用仍可按原查询接口使用，不把它改写为媒体操作 ID。
+- 用 `GET /api/v1/media/operations/{id}` 查询生成、保存与已持久资产。`generation_state=succeeded` 不等于文件保存成功；完整保存以 `save_state=ready` 为准，`partial` 保留已成功资产。`deliveries` 单独投影已保存的渠道事实，`accepted` 不等于 `delivered`；空数组只表示无投递记录，不能判为送达。
+- 操作查询、恢复、取消均按当前认证用户查找，另一用户与不存在的 ID 都返回 404，不接受 body/query 的 owner 覆盖。能力关闭后仍可读取已有操作。`unknown` 必须查询或恢复原操作，不能推断未计费后再次生成。
+- `cancel_requested=true` 是本地取消意图；排队任务可以停止，已提交任务不保证远端取消，迟到产物仍保存。`resume` 在保存未 ready 时只恢复可恢复保存；已 ready 时才恢复原投递中已确认失败的阶段，保留未知和已成功部分，不重新发送全量附件；无可核对来源时保持真实未知/失败状态。
+- 状态接口的 `enabled` 表示存在可用媒体路由，不能代替 Agent 的 `media_gen` 工具设置或一次实际生成验证。关闭工具不等于删除既有产物。
+
 | 方法 | 路径 | 操作 |
 | --- | --- | --- |
 | GET | `/api/v1/voice/status` | [读取STT/TTS状态](#op-get-api-v1-voice-status) |
@@ -824,6 +836,8 @@ curl -X PUT "${HEXCLAW_API}/api/v1/assistant/soul" \
 | GET | `/api/v1/videos/tasks/{id}` | [查询视频任务](#op-get-api-v1-videos-tasks-id) |
 | GET | `/api/v1/voicechat/status` | [读取语音对话状态](#op-get-api-v1-voicechat-status) |
 | POST | `/api/v1/voicechat/chat` | [语音对话](#op-post-api-v1-voicechat-chat) |
+| GET | `/api/v1/media/operations/{id}` | [查询媒体操作与持久资产](#op-get-api-v1-media-operations-id) |
+| POST | `/api/v1/media/operations/{id}/{action}` | [恢复或取消媒体操作](#op-post-api-v1-media-operations-id-action) |
 | GET | `/api/v1/files/generated/{path}` | [下载生成产物](#op-get-api-v1-files-generated-path) |
 
 <a id="op-get-api-v1-voice-status"></a>
@@ -910,9 +924,12 @@ curl -X POST "${HEXCLAW_API}/api/v1/voice/transcribe" \
 
 挂载条件: `s.voiceSvc != nil`.
 
-1 MiB JSON，text非空白。成功直接返回音频二进制，格式由配置的TTS结果决定；voice为可选音色。调用上游可能计费。
+1 MiB JSON，text非空白，voice可选。共享媒体服务先保存音频，成功仍直接返回音频二进制，Content-Type取实际产物MIME。Idempotency-Key或后备X-Request-ID提供应用去重，X-Media-Operation-ID用于查询/恢复。同键输入变化返回409；直接调用不创建会话或渠道投递。
 
-路径/query/额外请求头：无。认证和 Content-Type 按上文。
+| 参数 | 位置 | 必填 | 类型 | 默认 / 限制 | 含义 |
+| --- | --- | --- | --- | --- | --- |
+| `Idempotency-Key` | header | 否 | string | — | 按当前认证归属和媒体动作使用的应用幂等键 |
+| `X-Request-ID` | header | 否 | string | — | 未提供 Idempotency-Key 时的幂等后备键 |
 
 请求体：
 
@@ -925,6 +942,8 @@ curl -X POST "${HEXCLAW_API}/api/v1/voice/transcribe" \
 
 响应：
 
+成功响应头 `X-Media-Operation-ID`：用于查询原操作；遇到错误时也应检查并保存此头。
+
 | HTTP 状态 | Content-Type | 响应契约 | 含义 |
 | --- | --- | --- | --- |
 | 200 | `audio/mpeg` | string (binary) | 成功响应 |
@@ -934,6 +953,7 @@ curl -X POST "${HEXCLAW_API}/api/v1/voice/transcribe" \
 | 200 | `audio/pcm` | string (binary) | 成功响应 |
 | 400 | `application/json` | [MessageError](#schema-messageerror) | 请求/参数无效 |
 | 401 | `application/json` | [MessageError](#schema-messageerror) | 访问令牌无效 |
+| 409 | `application/json` | [MessageError](#schema-messageerror) | 幂等输入或操作版本冲突 |
 | 500 | `application/json` | [MessageError](#schema-messageerror) | 处理或运行时失败 |
 | 503 | `application/json` | [MessageError](#schema-messageerror) | 对应服务未配置 |
 
@@ -995,12 +1015,12 @@ curl "${HEXCLAW_API}/api/v1/images/status" \
 
 挂载条件: `始终挂载`.
 
-64 KiB JSON，prompt不能是空字符串。Provider选择依次显式名称、model索引、默认；无法路由500。body idempotency_key仅在上游支持时透传；两个header只是日志关联，不代表本服务去重。调用可能计费。genStore存在则落盘并回填file_path，成功后b64清空；落盘失败仍可200且保留URL/B64，必须检查实际图片产物。
+64 KiB JSON，prompt非空白。主程序共享媒体服务按配置的实例/模型精确路由，多候选无法消歧返回400，无可用能力返回503。body idempotency_key、Idempotency-Key、X-Request-ID依次提供应用幂等键；同键同意图复用操作，输入改变返回409。成功保持原图片JSON形态，且全部产物持久化后才返回200；部分或保存失败返回错误并通过操作查询读取已保存资产。响应头X-Media-Operation-ID用于查询，不创建会话或投递。
 
 | 参数 | 位置 | 必填 | 类型 | 默认 / 限制 | 含义 |
 | --- | --- | --- | --- | --- | --- |
-| `Idempotency-Key` | header | 否 | string | — | 仅用作关联日志的后备ID，不自动注入body幂等键 |
-| `X-Request-ID` | header | 否 | string | — | 次级日志关联后备ID |
+| `Idempotency-Key` | header | 否 | string | — | 按当前认证归属和媒体动作使用的应用幂等键 |
+| `X-Request-ID` | header | 否 | string | — | 未提供 Idempotency-Key 时的幂等后备键 |
 
 请求体：
 
@@ -1008,7 +1028,7 @@ curl "${HEXCLAW_API}/api/v1/images/status" \
 
 | 字段 | 类型 / 契约 | 必填 / 必有 | 默认 / 限制 | 含义 |
 | --- | --- | --- | --- | --- |
-| `provider` | string | 否 | — | 可选；依次显式 Provider、model 路由、配置默认 |
+| `provider` | string | 否 | — | 配置的 Provider 实例 ID 或 key；省略时选择可消歧的媒体路由 |
 | `model` | string | 否 | — | 精确模型 ID |
 | `prompt` | string | 是 | — | 生成提示词 |
 | `negative` | string | 否 | — | 负向提示词 |
@@ -1016,7 +1036,7 @@ curl "${HEXCLAW_API}/api/v1/images/status" \
 | `size` | string | 否 | — | 大小/尺寸，见所属对象 |
 | `ratio` | string | 否 | — | 宽高比 |
 | `seed` | integer | 否 | — | 0 表示未指定 |
-| `idempotency_key` | string | 否 | — | 仅上游 Provider 支持时透传 |
+| `idempotency_key` | string | 否 | — | 共享媒体服务的应用幂等键，优先于 header；上游去重仍取决于 Provider |
 | `callback_url` | string | 否 | — | Provider 专有能力；不注册 HexClaw 回调 |
 | `extra` | object（实际附加字段） | 否 | — | Provider 专有参数 |
 | `n` | integer | 否 | — | 由 Provider 决定，通常默认 1 |
@@ -1027,11 +1047,14 @@ curl "${HEXCLAW_API}/api/v1/images/status" \
 
 响应：
 
+成功响应头 `X-Media-Operation-ID`：用于查询原操作；遇到错误时也应检查并保存此头。
+
 | HTTP 状态 | Content-Type | 响应契约 | 含义 |
 | --- | --- | --- | --- |
 | 200 | `application/json` | [ModelsImageResult](#schema-modelsimageresult) | 成功响应 |
 | 400 | `application/json` | [MessageError](#schema-messageerror) | 请求/参数无效 |
 | 401 | `application/json` | [MessageError](#schema-messageerror) | 访问令牌无效 |
+| 409 | `application/json` | [MessageError](#schema-messageerror) | 幂等输入或操作版本冲突 |
 | 500 | `application/json` | [MessageError](#schema-messageerror) | 处理或运行时失败 |
 | 503 | `application/json` | [MessageError](#schema-messageerror) | 对应服务未配置 |
 
@@ -1091,12 +1114,12 @@ curl -X POST "${HEXCLAW_API}/api/v1/images/generate" \
 
 挂载条件: `始终挂载`.
 
-64 KiB JSON，prompt或image_url至少一个非空白值；领域校验错误由handler包装500。body幂等键由上游能力决定，header仅日志关联。200返回provider::raw-task-id表示提交，不是视频完成；保存该task_id供查询，结果未知不盲重发。
+64 KiB JSON，prompt或image_url至少一个非空白值。共享媒体服务应用幂等键优先级为body idempotency_key、Idempotency-Key、X-Request-ID；输入改变返回409。200保留task_id字段，值为不透明媒体操作ID，表示已保存提交引用而非视频已完成；不得拆解ID或重新生成替代未知结果。
 
 | 参数 | 位置 | 必填 | 类型 | 默认 / 限制 | 含义 |
 | --- | --- | --- | --- | --- | --- |
-| `Idempotency-Key` | header | 否 | string | — | 仅用作关联日志的后备ID，不自动注入body幂等键 |
-| `X-Request-ID` | header | 否 | string | — | 次级日志关联后备ID |
+| `Idempotency-Key` | header | 否 | string | — | 应用幂等键；图片/视频 body idempotency_key 优先 |
+| `X-Request-ID` | header | 否 | string | — | 未提供前两项时的幂等后备键 |
 
 请求体：
 
@@ -1104,7 +1127,7 @@ curl -X POST "${HEXCLAW_API}/api/v1/images/generate" \
 
 | 字段 | 类型 / 契约 | 必填 / 必有 | 默认 / 限制 | 含义 |
 | --- | --- | --- | --- | --- |
-| `provider` | string | 否 | — | 可选；依次显式 Provider、model 路由、配置默认 |
+| `provider` | string | 否 | — | 配置的 Provider 实例 ID 或 key；省略时选择可消歧的媒体路由 |
 | `model` | string | 否 | — | 精确模型 ID |
 | `prompt` | string | 否 | — | 生成提示词 |
 | `negative` | string | 否 | — | 负向提示词 |
@@ -1112,7 +1135,7 @@ curl -X POST "${HEXCLAW_API}/api/v1/images/generate" \
 | `size` | string | 否 | — | 大小/尺寸，见所属对象 |
 | `ratio` | string | 否 | — | 宽高比 |
 | `seed` | integer | 否 | — | 0 表示未指定 |
-| `idempotency_key` | string | 否 | — | 仅上游 Provider 支持时透传 |
+| `idempotency_key` | string | 否 | — | 共享媒体服务的应用幂等键，优先于 header；上游去重仍取决于 Provider |
 | `callback_url` | string | 否 | — | Provider 专有能力；不注册 HexClaw 回调 |
 | `extra` | object（实际附加字段） | 否 | — | Provider 专有参数 |
 | `end_image_url` | string | 否 | — | 尾帧图片 URL |
@@ -1124,11 +1147,14 @@ curl -X POST "${HEXCLAW_API}/api/v1/images/generate" \
 
 响应：
 
+成功响应头 `X-Media-Operation-ID`：用于查询原操作；遇到错误时也应检查并保存此头。
+
 | HTTP 状态 | Content-Type | 响应契约 | 含义 |
 | --- | --- | --- | --- |
 | 200 | `application/json` | [ModelsVideoTask](#schema-modelsvideotask) | 成功响应 |
 | 400 | `application/json` | [MessageError](#schema-messageerror) | 请求/参数无效 |
 | 401 | `application/json` | [MessageError](#schema-messageerror) | 访问令牌无效 |
+| 409 | `application/json` | [MessageError](#schema-messageerror) | 幂等输入或操作版本冲突 |
 | 500 | `application/json` | [MessageError](#schema-messageerror) | 处理或运行时失败 |
 | 503 | `application/json` | [MessageError](#schema-messageerror) | 对应服务未配置 |
 
@@ -1145,7 +1171,7 @@ curl -X POST "${HEXCLAW_API}/api/v1/videos/generate" \
 
 ```json
 {
-  "task_id": "example-provider::example-task"
+  "task_id": "media-example-operation"
 }
 ```
 
@@ -1157,7 +1183,7 @@ curl -X POST "${HEXCLAW_API}/api/v1/videos/generate" \
 
 挂载条件: `始终挂载`.
 
-id使用完整provider::task标识，URL编码。查询调用上游；done时可能下载视频/封面到genStore。HTTP200/status=success不保证本地文件持久化成功；读取error与video_file_path，下载失败可保留临时URL。
+使用提交响应的完整task_id并URL编码，不解析其格式。新媒体操作从持久状态读取，由后台续查原上游任务；done仅表示当前轮询终态。保存未就绪的终态映射为status=failed并带error，需用media/operations查询区分unknown、取消与部分保存。已有SDK任务引用仍由旧查询路径处理，依赖对应Provider仍配置。
 
 | 参数 | 位置 | 必填 | 类型 | 默认 / 限制 | 含义 |
 | --- | --- | --- | --- | --- | --- |
@@ -1172,6 +1198,7 @@ id使用完整provider::task标识，URL编码。查询调用上游；done时可
 | 200 | `application/json` | [ModelsVideoStatus](#schema-modelsvideostatus) | 成功响应 |
 | 400 | `application/json` | [MessageError](#schema-messageerror) | 请求/参数无效 |
 | 401 | `application/json` | [MessageError](#schema-messageerror) | 访问令牌无效 |
+| 404 | `application/json` | [MessageError](#schema-messageerror) | 当前认证归属下无此媒体操作 |
 | 500 | `application/json` | [MessageError](#schema-messageerror) | 处理或运行时失败 |
 | 503 | `application/json` | [MessageError](#schema-messageerror) | 对应服务未配置 |
 
@@ -1180,13 +1207,13 @@ id使用完整provider::task标识，URL编码。查询调用上游；done时可
 示例（响应为契约示意，不是实测记录）：
 
 ```bash
-curl "${HEXCLAW_API}/api/v1/videos/tasks/example-provider%3A%3Aexample-task" \
+curl "${HEXCLAW_API}/api/v1/videos/tasks/media-example-operation" \
   -H "Authorization: Bearer ${HEXCLAW_API_TOKEN}"
 ```
 
 ```json
 {
-  "task_id": "example-provider::example-task",
+  "task_id": "media-example-operation",
   "provider": "example-provider",
   "model": "example-model",
   "status": "success",
@@ -1227,9 +1254,12 @@ curl "${HEXCLAW_API}/api/v1/videos/tasks/example-provider%3A%3Aexample-task" \
 
 挂载条件: `始终挂载`.
 
-16 MiB JSON。audio为Base64输入或text兜底，Provider决定格式/模型/音色；调用可能计费。genStore落盘成功返回audio_file_path并清空audio；落盘失败仍200且可能保留audio，不能伪称文件已生成。 audio与text至少一个非空；两者为空的领域校验失败当前返回500。
+16 MiB JSON，audio为Base64输入或text兜底；两者都为空的领域校验当前返回500。共享媒体服务成功保存音频后返回既有JSON及audio_file_path，并清空audio。Idempotency-Key或后备X-Request-ID提供应用去重，X-Media-Operation-ID用于查询/恢复；同键输入变化409。保存失败不返回成功产物，不创建会话或渠道投递。
 
-路径/query/额外请求头：无。认证和 Content-Type 按上文。
+| 参数 | 位置 | 必填 | 类型 | 默认 / 限制 | 含义 |
+| --- | --- | --- | --- | --- | --- |
+| `Idempotency-Key` | header | 否 | string | — | 应用幂等键；图片/视频 body idempotency_key 优先 |
+| `X-Request-ID` | header | 否 | string | — | 未提供前两项时的幂等后备键 |
 
 请求体：
 
@@ -1248,11 +1278,14 @@ curl "${HEXCLAW_API}/api/v1/videos/tasks/example-provider%3A%3Aexample-task" \
 
 响应：
 
+成功响应头 `X-Media-Operation-ID`：用于查询原操作；遇到错误时也应检查并保存此头。
+
 | HTTP 状态 | Content-Type | 响应契约 | 含义 |
 | --- | --- | --- | --- |
 | 200 | `application/json` | [ModelsVoiceChatResult](#schema-modelsvoicechatresult) | 成功响应 |
 | 400 | `application/json` | [MessageError](#schema-messageerror) | 请求/参数无效 |
 | 401 | `application/json` | [MessageError](#schema-messageerror) | 访问令牌无效 |
+| 409 | `application/json` | [MessageError](#schema-messageerror) | 幂等输入或操作版本冲突 |
 | 500 | `application/json` | [MessageError](#schema-messageerror) | 处理或运行时失败 |
 | 503 | `application/json` | [MessageError](#schema-messageerror) | 对应服务未配置 |
 
@@ -1277,6 +1310,63 @@ curl -X POST "${HEXCLAW_API}/api/v1/voicechat/chat" \
 }
 ```
 
+<a id="op-get-api-v1-media-operations-id"></a>
+
+### GET `/api/v1/media/operations/{id}` — 查询媒体操作与持久资产
+
+认证：`Authorization: Bearer ${HEXCLAW_API_TOKEN}`。路由始终挂载，未注入共享媒体服务时返回 503。
+
+路径 `id` 使用 `X-Media-Operation-ID` 或新视频 `task_id` 原值。无请求体。归属来自认证上下文；查询不会重新生成，也不会改变配置。既有操作不会因当前生成能力关闭而消失。
+
+| HTTP 状态 | Content-Type | 响应契约 | 含义 |
+| --- | --- | --- | --- |
+| 200 | `application/json` | [ModelsMediaOperation](#schema-modelsmediaoperation) | 当前状态、已持久资产和投递事实；HTTP 200 本身不是送达证明 |
+| 401 | `application/json` | [MessageError](#schema-messageerror) | 访问令牌无效 |
+| 404 | `application/json` | [MessageError](#schema-messageerror) | 不存在或不属于当前认证用户 |
+| 500 | `application/json` | [MessageError](#schema-messageerror) | 操作读取失败 |
+| 503 | `application/json` | [MessageError](#schema-messageerror) | 共享媒体服务未注入 |
+
+```bash
+curl "${HEXCLAW_API}/api/v1/media/operations/REPLACE_WITH_OPERATION_ID" \
+  -H "Authorization: Bearer ${HEXCLAW_API_TOKEN}"
+```
+
+使用 `assets[].file_path` 调用 [生成文件接口](#op-get-api-v1-files-generated-path)，同时携带当前认证凭据；该接口对已登记媒体资产核对归属，不将路径本身当作授权。不要将其当宿主机路径。操作响应不暴露上游临时签名 URL、凭据或输入音频。可选 `deliveries` 返回 [ModelsMediaDeliveryStatus](#schema-modelsmediadeliverystatus) 数组，只含 `delivery_id`、`message_id`、`platform`、`state`、`part_states`，不含目标 chatID、token、签名 URL 或 payload。当前服务没有投递记录时返回 `[]`；旧版缺少该字段与空数组都不能判为 `delivered`。生成、保存和投递各自独立，部分产物不代表全部成功。
+
+<a id="op-post-api-v1-media-operations-id-action"></a>
+
+### POST `/api/v1/media/operations/{id}/{action}` — 恢复或取消媒体操作
+
+认证与归属同上。`id` 为已有操作 ID，`action` 只允许 `resume`、`cancel`；无需请求体。
+
+| action | 行为 | 返回 200 的含义 |
+| --- | --- | --- |
+| `resume` | 保存未 ready 时只恢复可恢复保存；已 ready 时只恢复原已确认失败的投递阶段，保留未知/成功 part，不新发全量附件或重新生成 | 立即返回当前快照，继续 GET 查询实际状态 |
+| `cancel` | 记录本地取消意图；尚未提交的 queued 操作可停止 | `cancel_requested=true`，不保证远端任务已经取消 |
+
+结果 `unknown` 且没有可核对引用时不会盲目重试上游；不能通过新请求 ID 或新幂等键伪装成恢复。已完成操作的产物保留；已提交任务的迟到产物也保留，取消交付不会假报生成撤销。
+
+HTTP 控制端点不等待保存恢复或渠道送达，返回中的 `deliveries` 只是当前事实。会话工具 `resume` 则等待可恢复的保存阶段：保存恢复成功后，将恢复资产交付到当前回合；如果只恢复原投递，工具仅返回事实状态，不再把全量资产附到新回复。
+
+| HTTP 状态 | Content-Type | 响应契约 | 含义 |
+| --- | --- | --- | --- |
+| 200 | `application/json` | [ModelsMediaOperation](#schema-modelsmediaoperation) | 当前操作快照，不是恢复完成证明 |
+| 400 | `application/json` | [MessageError](#schema-messageerror) | 不支持的 action |
+| 401 | `application/json` | [MessageError](#schema-messageerror) | 访问令牌无效 |
+| 404 | `application/json` | [MessageError](#schema-messageerror) | 不存在或不属于当前认证用户 |
+| 409 | `application/json` | [MessageError](#schema-messageerror) | 操作版本冲突；先读取当前状态 |
+| 500 | `application/json` | [MessageError](#schema-messageerror) | 恢复或取消失败 |
+| 503 | `application/json` | [MessageError](#schema-messageerror) | 共享媒体服务未注入 |
+
+以下请求会改变原操作的恢复状态，不提交替代生成：
+
+```bash
+curl -X POST "${HEXCLAW_API}/api/v1/media/operations/REPLACE_WITH_OPERATION_ID/resume" \
+  -H "Authorization: Bearer ${HEXCLAW_API_TOKEN}"
+```
+
+实现参考：[`handleMediaOperation`](../../api/handler_mediaflow.go)。本 HTTP 接口没有 `resend` 动作；会话内“再发一次”通过媒体工具引用既有操作并交给原会话投递链。
+
 <a id="op-get-api-v1-files-generated-path"></a>
 
 ### GET `/api/v1/files/generated/{path}` — 下载生成产物
@@ -1285,7 +1375,7 @@ curl -X POST "${HEXCLAW_API}/api/v1/voicechat/chat" \
 
 挂载条件: `始终挂载`.
 
-实际Go路由为{path...}，path可含目录斜线，使用生成响应中的相对file_path。query download非空触发attachment；1/true使用原名，其他值为下载名。Cache-Control public,max-age=86400；支持标准范围/条件请求。handler错误text/plain，鉴权错误仍JSON。
+实际 Go 路由为 {path...}，path 可含目录斜线，使用响应中的相对 file_path。共享媒体服务对已登记媒体资产核对当前认证归属；无本用户持有记录返回 404，相同内容被本用户合法生成并登记时仍可读取。未纳入媒体资产登记的旧文件沿用原有访问合同，不追溯新增归属要求。已登记媒体资产返回 Cache-Control: private, max-age=86400；未托管旧文件仍为 public, max-age=86400。Content-Type 按扩展名返回图片、视频或音频 MIME，未知扩展名使用 application/octet-stream。download 非空触发 attachment；1/true 使用原名，其余值作为下载名。支持标准范围/条件请求；handler 错误为 text/plain，认证错误仍为 JSON。
 
 | 参数 | 位置 | 必填 | 类型 | 默认 / 限制 | 含义 |
 | --- | --- | --- | --- | --- | --- |
@@ -1311,11 +1401,17 @@ curl -X POST "${HEXCLAW_API}/api/v1/voicechat/chat" \
 | 200 | `image/gif` | string (binary) | 成功响应 |
 | 200 | `video/mp4` | string (binary) | 成功响应 |
 | 200 | `video/webm` | string (binary) | 成功响应 |
+| 200 | `audio/mpeg` | string (binary) | 成功响应 |
+| 200 | `audio/wav` | string (binary) | 成功响应 |
+| 200 | `audio/ogg` | string (binary) | 成功响应 |
+| 200 | `audio/aac` | string (binary) | 成功响应 |
+| 200 | `audio/flac` | string (binary) | 成功响应 |
+| 200 | `audio/mp4` | string (binary) | 成功响应 |
 | 206 | `application/octet-stream` | string (binary) | Partial binary content |
 | 304 | — | 无响应体 | Not modified |
 | 400 | `text/plain` | string | 缺少path |
 | 401 | `application/json` | [MessageError](#schema-messageerror) | 访问令牌无效 |
-| 404 | `text/plain` | string | 文件未找到或不可打开 |
+| 404 | `text/plain` | string | 文件未找到、不可打开或无当前用户的媒体资产记录 |
 | 412 | — | 无响应体 | Conditional request failed |
 | 416 | `text/plain` | string | Range不可满足 |
 | 500 | `text/plain` | string | 读取文件状态失败 |
@@ -1334,6 +1430,8 @@ curl "${HEXCLAW_API}/api/v1/files/generated/images/example.png" \
 <a id="logs-config"></a>
 
 ## 日志与配置投影
+
+运行日志保留期由全局配置文件 `observe.log_retention_days` 决定，默认 15 天；省略或零值均沿用默认值。修改后重启后端生效。该值作用于现有运行日志 JSONL 的逐条过期清理与历史查询，不删除会话、教学任务、模型调用回执或外部容器日志；原有单文件大小和轮转份数限制保持。时间无法解析的原始行保持，不推断为过期记录。
 
 | 方法 | 路径 | 操作 |
 | --- | --- | --- |
@@ -3034,6 +3132,65 @@ security/sandbox 为字段 patch；Ollama 单独提交并提供四项条件及 I
 | `providers` | string[] | 是 | — | Provider map |
 | `models` | string[] | 是 | — | 模型列表 |
 
+<a id="schema-modelsmediaoperation"></a>
+
+### ModelsMediaOperation
+
+除兼容增量 `deliveries` 外，下列字段均返回。当前服务的 `deliveries` 始终为数组，旧版可缺省。`save_state=ready` 只证明文件保存完整；投递要分别读取 `deliveries[].state` 和 `part_states`，缺省或空数组都不是送达。
+
+| 字段 | 类型 / 契约 | 含义 |
+| --- | --- | --- |
+| `operation_id` | string | 不透明操作 ID |
+| `kind` | string | image / video / audio |
+| `action` | string | generate / synthesize / chat |
+| `provider_instance_id` | string | 首次选定的冻结路由身份 |
+| `actual_provider_instance_id` | string | 实际成功 Provider（含 TTS 回退）；未确定时为空 |
+| `model` | string | 冻结模型；部分 TTS 路由可为空 |
+| `generation_state` | string | queued / submitting / running / succeeded / failed / unknown / cancelled |
+| `save_state` | string | not_started / saving / ready / partial / failed |
+| `assets` | [ModelsMediaAsset](#schema-modelsmediaasset)[] / null | 已成功持久化的资产；无资产时可能为 null |
+| `deliveries` | [ModelsMediaDeliveryStatus](#schema-modelsmediadeliverystatus)[] | 可选兼容字段；当前服务无记录时为 []，只返回安全投递事实 |
+| `cancel_requested` | boolean | 本地取消意图，不等于远端取消成功 |
+| `error_code` | string | 错误分类；没有错误时为空 |
+| `error` | string | 错误说明；没有错误时为空 |
+| `revision` | integer | 操作持久版本 |
+| `created_at` | string | RFC 3339 时间 |
+| `updated_at` | string | RFC 3339 时间 |
+| `timings_ms` | object / null | 已记录阶段耗时（整数毫秒）；缺少项未测量，不是费用 |
+
+<a id="schema-modelsmediadeliverystatus"></a>
+
+### ModelsMediaDeliveryStatus
+
+以下五个字段均返回。`accepted` 表示平台接纳，`delivered` 按渠道回执合同判定，不代表用户已读。投影不包含收件目标、凭据、签名 URL 或发送 payload。
+
+| 字段 | 类型 / 契约 | 含义 |
+| --- | --- | --- |
+| `delivery_id` | string | 原投递稳定 ID |
+| `message_id` | string | 关联的助手消息 ID |
+| `platform` | string | 渠道，例如 dingtalk |
+| `state` | string | 已保存的整体投递状态，例如 pending / accepted / delivered / failed / unknown / cancelled |
+| `part_states` | string[] | 按原投递顺序保存的各 part 状态，例如 pending / preparing / prepared / sending / accepted / delivered / failed / unknown；空数组不表示已投递 |
+
+<a id="schema-modelsmediaasset"></a>
+
+### ModelsMediaAsset
+
+| 字段 | 类型 / 契约 | 必有 | 含义 |
+| --- | --- | --- | --- |
+| `asset_id` | string | 是 | 资产稳定 ID |
+| `operation_id` | string | 是 | 所属操作 ID |
+| `output_index` | integer | 是 | 操作内从 0 开始的稳定输出顺序 |
+| `kind` | string | 是 | image / video / audio |
+| `role` | string | 是 | primary 主产物；cover 视频封面 |
+| `file_path` | string | 是 | 生成文件接口所需相对路径 |
+| `mime` | string | 是 | 持久化真实字节的 MIME |
+| `digest` | string | 是 | 真实字节 SHA-256，64 位小写十六进制，不带 sha256: 前缀 |
+| `size` | integer | 是 | 实际字节数 |
+| `width` | integer | 否 | 可确定时的图片宽度 |
+| `height` | integer | 否 | 可确定时的图片高度 |
+| `parent_asset_id` | string | 否 | 存在明确父资产时返回；不表示已提供独立编辑 API |
+
 <a id="schema-modelsvoicestatus"></a>
 
 ### ModelsVoiceStatus
@@ -3072,7 +3229,7 @@ security/sandbox 为字段 patch；Ollama 单独提交并提供四项条件及 I
 
 | 字段 | 类型 / 契约 | 必填 / 必有 | 默认 / 限制 | 含义 |
 | --- | --- | --- | --- | --- |
-| `provider` | string | 否 | — | 可选；依次显式 Provider、model 路由、配置默认 |
+| `provider` | string | 否 | — | 配置的 Provider 实例 ID 或 key；省略时选择可消歧的媒体路由 |
 | `model` | string | 否 | — | 精确模型 ID |
 | `prompt` | string | 是 | — | 生成提示词 |
 | `negative` | string | 否 | — | 负向提示词 |
@@ -3080,7 +3237,7 @@ security/sandbox 为字段 patch；Ollama 单独提交并提供四项条件及 I
 | `size` | string | 否 | — | 大小/尺寸，见所属对象 |
 | `ratio` | string | 否 | — | 宽高比 |
 | `seed` | integer | 否 | — | 0 表示未指定 |
-| `idempotency_key` | string | 否 | — | 仅上游 Provider 支持时透传 |
+| `idempotency_key` | string | 否 | — | 共享媒体服务的应用幂等键，优先于 header；上游去重仍取决于 Provider |
 | `callback_url` | string | 否 | — | Provider 专有能力；不注册 HexClaw 回调 |
 | `extra` | object（实际附加字段） | 否 | — | Provider 专有参数 |
 | `n` | integer | 否 | — | 由 Provider 决定，通常默认 1 |
@@ -3118,11 +3275,11 @@ security/sandbox 为字段 patch；Ollama 单独提交并提供四项条件及 I
 
 ### ModelsVideoRequest
 
-prompt 或 image_url 至少一个非空白；此 handler 当前将领域校验错误包装为 HTTP 500。
+prompt 或 image_url 至少一个非空白；共享媒体 handler 对缺少输入返回 HTTP 400。
 
 | 字段 | 类型 / 契约 | 必填 / 必有 | 默认 / 限制 | 含义 |
 | --- | --- | --- | --- | --- |
-| `provider` | string | 否 | — | 可选；依次显式 Provider、model 路由、配置默认 |
+| `provider` | string | 否 | — | 配置的 Provider 实例 ID 或 key；省略时选择可消歧的媒体路由 |
 | `model` | string | 否 | — | 精确模型 ID |
 | `prompt` | string | 否 | — | 生成提示词 |
 | `negative` | string | 否 | — | 负向提示词 |
@@ -3130,7 +3287,7 @@ prompt 或 image_url 至少一个非空白；此 handler 当前将领域校验�
 | `size` | string | 否 | — | 大小/尺寸，见所属对象 |
 | `ratio` | string | 否 | — | 宽高比 |
 | `seed` | integer | 否 | — | 0 表示未指定 |
-| `idempotency_key` | string | 否 | — | 仅上游 Provider 支持时透传 |
+| `idempotency_key` | string | 否 | — | 共享媒体服务的应用幂等键，优先于 header；上游去重仍取决于 Provider |
 | `callback_url` | string | 否 | — | Provider 专有能力；不注册 HexClaw 回调 |
 | `extra` | object（实际附加字段） | 否 | — | Provider 专有参数 |
 | `end_image_url` | string | 否 | — | 尾帧图片 URL |

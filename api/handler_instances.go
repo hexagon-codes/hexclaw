@@ -198,9 +198,31 @@ func (s *Server) handleListInstances(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	projected := make([]*instances.Instance, 0, len(list))
+	usage, usageErr := s.instanceMgr.TokenUsageByInstance(r.Context())
+	if usageErr != nil && s.logCollector != nil {
+		s.logCollector.Add("warn", "instances", "Failed to read account token usage", nil)
+	}
+	messageCounts, messageErr := s.instanceMgr.MessageCountsByInstance(r.Context())
+	if messageErr != nil && s.logCollector != nil {
+		s.logCollector.Add("warn", "instances", "Failed to read account message counts", nil)
+	}
+	type instanceUsageResponse struct {
+		*instances.Instance
+		TokenUsage   *instances.TokenUsage `json:"token_usage"`
+		MessageCount *int64                `json:"message_count"`
+	}
+	projected := make([]instanceUsageResponse, 0, len(list))
 	for _, inst := range list {
-		projected = append(projected, maskInstance(inst))
+		item := instanceUsageResponse{Instance: maskInstance(inst)}
+		if usageErr == nil {
+			tokens := usage[inst.ID]
+			item.TokenUsage = &tokens
+		}
+		if messageErr == nil {
+			count := messageCounts[inst.ID]
+			item.MessageCount = &count
+		}
+		projected = append(projected, item)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"instances": projected,

@@ -102,8 +102,10 @@ func (tc *ToolCollector) collectFiltered(query string, act skill.Activation, sel
 	// 1. Skills（按 query+activation 过滤召回；query="" 时 SelectByContext 内部 score=1 兜底全返回）
 	if tc.skills != nil {
 		var skills []skill.Skill
-		if query != "" || hasActivation(act) {
-			skills = tc.skills.SelectByContext(query, act, tc.maxTools)
+		contextSelection := query != "" || hasActivation(act)
+		if contextSelection {
+			// 内容技能不占可调用工具额度；保留召回排序，在过滤后再计算名额。
+			skills = tc.skills.SelectByContext(query, act, 0)
 		} else {
 			skills = tc.skills.All()
 		}
@@ -130,6 +132,9 @@ func (tc *ToolCollector) collectFiltered(query string, act skill.Activation, sel
 				def.Type = "function"
 			}
 			tools = append(tools, def)
+			if contextSelection && len(tools) >= tc.maxTools {
+				break
+			}
 		}
 	}
 

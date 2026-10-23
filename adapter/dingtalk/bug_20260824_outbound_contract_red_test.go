@@ -340,7 +340,7 @@ func TestEngineSkillReplyFlowsToDingTalkMarkdownWithExecutionReceipt(t *testing.
 		t.Fatalf("Engine Skill Reply 发送到 DingTalk adapter: %v", err)
 	}
 	calls := fake.SendCalls()
-	if len(calls) != 1 || calls[0].MsgKey != "sampleMarkdown" || calls[0].Text != "echo: hello\n\n**调用工具**：Skill · outbound-echo" {
+	if len(calls) != 1 || calls[0].MsgKey != "sampleMarkdown" || calls[0].Text != "echo: hello\n\n---\n\n**本次技能**： outbound-echo  \n**本次模型**： 未知" {
 		t.Fatalf("Engine Skill 回执未贯通同一 Markdown: %#v", calls)
 	}
 	if reply.RenderManifest == nil || reply.RenderManifest.RendererVersion != "dingtalk-execution-summary-v1" ||

@@ -30,9 +30,13 @@ func TestBug20260616_TransientFailureAllowsRedelivery(t *testing.T) {
 	m, cleanup := newTestManager(t)
 	defer cleanup()
 
-	inst := &Instance{Name: "feishu-1", Provider: "feishu"}
+	inst := &Instance{ID: "stable-feishu-1", Name: "feishu-1", Provider: "feishu"}
 	attempts := 0
-	h := m.wrapHandler(inst, func(_ context.Context, _ *adapter.Message) (*adapter.Reply, error) {
+	h := m.wrapHandler(inst, func(ctx context.Context, _ *adapter.Message) (*adapter.Reply, error) {
+		identity, ok := adapter.PlatformInstanceIdentityFromContext(ctx)
+		if !ok || identity.ID != "stable-feishu-1" || identity.Platform != "feishu" {
+			t.Fatal("actual instance identity was not preserved across redelivery")
+		}
 		attempts++
 		if attempts == 1 {
 			return nil, fmt.Errorf("transient upstream error")

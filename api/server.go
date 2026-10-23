@@ -59,6 +59,7 @@ import (
 	"github.com/hexagon-codes/hexclaw/engine"
 	"github.com/hexagon-codes/hexclaw/gateway"
 	"github.com/hexagon-codes/hexclaw/instances"
+	"github.com/hexagon-codes/hexclaw/internal/mediaflow"
 	"github.com/hexagon-codes/hexclaw/internal/upstreamerr"
 	"github.com/hexagon-codes/hexclaw/knowledge"
 	"github.com/hexagon-codes/hexclaw/library"
@@ -120,8 +121,9 @@ type Server struct {
 	renderSvc          *render.Service               // 文档渲染服务（可选）
 	capabilities       *llmrouter.CapabilityService  // A7 模型 tool_call 能力探测（可选）
 	genStore           *genstore.Store               // 生成内容持久化（图像/视频）
-	kbEmbedding        *KnowledgeEmbeddingInfo       // 知识库嵌入接线信息（BUG-20260712-B1，可选）
-	reloadGenServices  func()                        // LLM 配置变更后重建 gen 服务（main.go 注入）
+	mediaFlow          *mediaflow.Service
+	kbEmbedding        *KnowledgeEmbeddingInfo // 知识库嵌入接线信息（BUG-20260712-B1，可选）
+	reloadGenServices  func()                  // LLM 配置变更后重建 gen 服务（main.go 注入）
 	// reloadSemanticRuntime builds and atomically installs the next embedding
 	// resolver/registry generation while draining the prior gate. The legacy
 	// invalidator remains for non-desktop callers and compatibility tests.
@@ -256,7 +258,11 @@ type AgentResourceCleaner interface {
 func NewServer(cfg *config.Config, eng engine.Engine, gw gateway.Gateway, store storage.Store) *Server {
 	collector := NewLogCollector(5000)
 	// 挂载日志文件持久化 (JSONL + 轮转)
-	sink, err := NewLogFileSink(LogFileSinkConfig{})
+	retentionDays := config.DefaultLogRetentionDays
+	if cfg != nil && cfg.Observe.LogRetentionDays > 0 {
+		retentionDays = cfg.Observe.LogRetentionDays
+	}
+	sink, err := NewLogFileSink(LogFileSinkConfig{MaxAge: time.Duration(retentionDays) * 24 * time.Hour})
 	if err != nil {
 		logger.Error("[warn] 日志文件持久化初始化失败", "error", err)
 	} else {
@@ -578,6 +584,15 @@ func (s *Server) handleGeneratedFile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing path", http.StatusBadRequest)
 		return
 	}
+	managed := false
+	if s.mediaFlow != nil {
+		var err error
+		managed, err = s.mediaFlow.AuthorizePath(r.Context(), httpPrincipalFromRequest(r).userID, rel)
+		if err != nil {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+	}
 	f, err := s.genStore.Open(rel)
 	if err != nil {
 		http.Error(w, "not found", http.StatusNotFound)
@@ -604,9 +619,24 @@ func (s *Server) handleGeneratedFile(w http.ResponseWriter, r *http.Request) {
 		ct = "video/mp4"
 	case ".webm":
 		ct = "video/webm"
+	case ".mp3":
+		ct = "audio/mpeg"
+	case ".wav":
+		ct = "audio/wav"
+	case ".ogg", ".opus":
+		ct = "audio/ogg"
+	case ".aac":
+		ct = "audio/aac"
+	case ".flac":
+		ct = "audio/flac"
+	case ".m4a":
+		ct = "audio/mp4"
 	}
 	w.Header().Set("Content-Type", ct)
 	w.Header().Set("Cache-Control", "public, max-age=86400")
+	if managed {
+		w.Header().Set("Cache-Control", "private, max-age=86400")
+	}
 	// ?download=1 或 ?download=<filename> → Content-Disposition: attachment 触发浏览器下载
 	// 用途：Tauri WKWebView 下 <a download> 和 blob URL 都不可靠，走 HTTP header 最稳
 	if dl := r.URL.Query().Get("download"); dl != "" {
@@ -997,7 +1027,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/subagents/runs", s.handleListSubAgentRuns)
 
 	// 语音 API
-	if s.voiceSvc != nil {
+	if s.voiceSvc != nil || s.mediaFlow != nil {
 		mux.HandleFunc("GET /api/v1/voice/status", s.handleVoiceStatus)
 		mux.HandleFunc("POST /api/v1/voice/transcribe", s.handleVoiceTranscribe)
 		mux.HandleFunc("POST /api/v1/voice/synthesize", s.handleVoiceSynthesize)
@@ -1015,6 +1045,8 @@ func (s *Server) routes() http.Handler {
 	// 语音对话 API（audio-to-audio，gpt-4o-audio）
 	mux.HandleFunc("GET /api/v1/voicechat/status", s.handleVoiceChatStatus)
 	mux.HandleFunc("POST /api/v1/voicechat/chat", s.handleVoiceChat)
+	mux.HandleFunc("GET /api/v1/media/operations/{id}", s.handleMediaOperation)
+	mux.HandleFunc("POST /api/v1/media/operations/{id}/{action}", s.handleMediaOperation)
 
 	// 生成内容文件服务（图像 / 视频 / 语音持久化产物）
 	mux.HandleFunc("GET /api/v1/files/generated/{path...}", s.handleGeneratedFile)
@@ -1309,7 +1341,12 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	// Validate an explicit provider before constructing/persisting a chat
 	// message. Invalid client input is 400 and must not leave a partial session.
-	if validator, ok := s.engine.(interface{ ValidateProvider(string) error }); ok {
+	mediaReplay, err := s.validateMediaReplayRequest(r, req)
+	if err != nil {
+		writeMediaError(w, nil, err)
+		return
+	}
+	if validator, ok := s.engine.(interface{ ValidateProvider(string) error }); ok && !mediaReplay {
 		if err := validator.ValidateProvider(req.Provider); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{
 				"error": upstreamerr.PublicMessage(err, "error"),
@@ -1317,9 +1354,11 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if err := validateRequestedCompletionModel(s.activeLLMConfig(), req.Provider, req.Model); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
+	if !mediaReplay {
+		if err := s.validateRequestedConversationModel(req.Provider, req.Model, req.Metadata); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
 	}
 
 	// HTTP identity is derived exclusively by apiAuthMiddleware. Client body
@@ -1348,10 +1387,10 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	if metadataModel == "" {
 		metadataModel = strings.TrimSpace(msg.Metadata["agent_model"])
 	}
-	if err := validateRequestedCompletionModel(
-		s.activeLLMConfig(),
+	if err := s.validateRequestedConversationModel(
 		msg.Metadata["provider"],
 		metadataModel,
+		msg.Metadata,
 	); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
@@ -1467,6 +1506,8 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		var lastSequence uint64
 		var reasoningDisclosure adapter.ReasoningDisclosure
 		var runtimeEvents []adapter.SequencedRuntimeEvent
+		var messageContent *messagecontent.MessageContent
+		var renderManifest *messagecontent.RenderManifest
 		for chunk := range chunks {
 			if chunk.Error != nil {
 				trace.L(ctx).Error("处理失败", chatLLMErrorTraceFields(chunk.Error)...)
@@ -1486,6 +1527,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 				})
 			}
 			if chunk.Done {
+				messageContent, renderManifest = chunk.MessageContent, chunk.RenderManifest
 				metadata = chunk.Metadata
 				usage = chunk.Usage
 				toolCalls = chunk.ToolCalls
@@ -1498,8 +1540,13 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		// v0.3.12 H4：改用 engine.StripAllThinking 统一剥离
 		// 覆盖 <think>/<thinking>/<reasoning> 三种标签、任意位置（含中间嵌入）、多段、未闭合残段
 		finalContent := engine.StripAllThinking(content.String())
+		if messageContent != nil && messageContent.Markdown != finalContent {
+			messageContent, renderManifest = canonicalRenderProjection(messageContent.ProducerKind, messageContent.Locale, finalContent, messagecontent.SurfaceDesktop, "api-markdown-v1", messageContent.Attachments...)
+		}
 		reply = &adapter.Reply{
 			Content:             finalContent,
+			MessageContent:      messageContent,
+			RenderManifest:      renderManifest,
 			Metadata:            metadata,
 			Usage:               usage,
 			ToolCalls:           toolCalls,
@@ -1551,6 +1598,9 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 }
 
 func chatErrorStatus(explicitProvider string, err error) int {
+	if errors.Is(err, mediaflow.ErrConflict) {
+		return http.StatusConflict
+	}
 	if classification, ok := llmrouter.ClassifyLLMError(err); ok {
 		return classification.HTTPStatus
 	}
@@ -1669,7 +1719,11 @@ func (s *Server) handleChatSSE(
 
 		if chunk.Done {
 			finalContent := engine.StripAllThinking(canonical.String())
-			chunk.MessageContent = canonicalChatContent(finalContent, chunk.Metadata)
+			if chunk.MessageContent == nil {
+				chunk.MessageContent = canonicalChatContent(finalContent, chunk.Metadata)
+			} else if chunk.MessageContent.Markdown != finalContent {
+				chunk.MessageContent, chunk.RenderManifest = canonicalRenderProjection(chunk.MessageContent.ProducerKind, chunk.MessageContent.Locale, finalContent, messagecontent.SurfaceDesktop, "api-markdown-v1", chunk.MessageContent.Attachments...)
+			}
 		}
 
 		payload, err := json.Marshal(chunk)

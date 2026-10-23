@@ -4,10 +4,16 @@ import "context"
 
 // InvocationContext 由引擎盖章本轮请求身份；模型参数不拥有会话、孩子或消息归属。
 type InvocationContext struct {
+	RequestDigest       string
+	Platform            string
+	PlatformInstanceID  string
+	ChatID              string
 	AuthenticatedUserID string
 	RoutedAgentName     string
 	RequestID           string
 	SourceMessageID     string
+	ToolCallID          string
+	OperationOrdinal    string
 	SessionID           string
 	OriginalUserText    string
 	ScenarioInput       map[string]string

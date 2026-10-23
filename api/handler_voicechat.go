@@ -13,6 +13,10 @@ import (
 
 // handleVoiceChatStatus GET /api/v1/voicechat/status
 func (s *Server) handleVoiceChatStatus(w http.ResponseWriter, r *http.Request) {
+	if s.mediaFlow != nil {
+		s.mediaStatus(w, "audio", "chat")
+		return
+	}
 	enabled := s.voiceChatSvc != nil && s.voiceChatSvc.HasProvider()
 	resp := map[string]any{
 		"enabled":   enabled,
@@ -41,6 +45,10 @@ func (s *Server) handleVoiceChatStatus(w http.ResponseWriter, r *http.Request) {
 //
 // 响应：voicechat.Result（含 audio_file_path 持久化路径 + transcript）
 func (s *Server) handleVoiceChat(w http.ResponseWriter, r *http.Request) {
+	if s.mediaFlow != nil {
+		s.handleMediaVoiceChat(w, r)
+		return
+	}
 	if s.voiceChatSvc == nil || !s.voiceChatSvc.HasProvider() {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
 			"error": "语音对话服务未配置（需要 OpenAI gpt-4o-audio-preview API Key）",

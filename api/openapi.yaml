@@ -4382,13 +4382,33 @@ paths:
   /api/v1/voice/synthesize:
     post:
       summary: 文本转语音
-      description: 1 MiB JSON，text非空白。成功直接返回音频二进制，格式由配置的TTS结果决定；voice为可选音色。调用上游可能计费。
+      description: 1 MiB JSON，text非空白，voice可选。共享媒体服务先保存音频，成功仍直接返回音频二进制，Content-Type取实际产物MIME。Idempotency-Key或后备X-Request-ID提供应用去重，X-Media-Operation-ID用于查询/恢复。同键输入变化返回409；直接调用不创建会话或渠道投递。
       tags:
         - models-system-media
       operationId: models_handleVoiceSynthesize_post
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema:
+            type: string
+          description: Stable application idempotency key scoped to the authenticated owner and media action.
+          x-description-zh: 按当前认证归属和媒体动作使用的应用幂等键。
+        - name: X-Request-ID
+          in: header
+          required: false
+          schema:
+            type: string
+          description: Idempotency fallback when Idempotency-Key is not supplied.
+          x-description-zh: Idempotency-Key为空时的幂等后备键。
       responses:
         "200":
           description: 成功响应 / Successful response
+          headers:
+            X-Media-Operation-ID:
+              description: Durable media operation ID when the shared media service is installed; retain it for queries and recovery.
+              schema:
+                type: string
           content:
             audio/mpeg:
               schema:
@@ -4422,6 +4442,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/MessageError"
+        "409":
+          description: 同一幂等键的显式输入改变，或操作版本冲突 / Idempotency intent or operation revision conflict
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageError"
         "500":
           description: 处理或运行时失败 / Processing/runtime failure
           content:
@@ -4439,8 +4465,7 @@ paths:
         handler: handleVoiceSynthesize
       x-availability:
         - s.voiceSvc != nil
-      x-description-en: 1 MiB JSON, non-whitespace text. Returns audio binary directly in the configured TTS result
-        format; voice is optional. May incur upstream cost.
+      x-description-en: 1 MiB JSON; non-whitespace text and optional voice. The shared media service persists the audio before returning the existing binary response with its actual MIME type. Idempotency-Key or fallback X-Request-ID deduplicates requests; X-Media-Operation-ID enables query/recovery. Changed same-key intent returns 409. Direct calls create no conversation or channel delivery.
       x-summary-en: Synthesize speech
       requestBody:
         required: true
@@ -4490,8 +4515,7 @@ paths:
   /api/v1/images/generate:
     post:
       summary: 生成图片
-      description: 64 KiB JSON，prompt不能是空字符串。Provider选择依次显式名称、model索引、默认；无法路由500。body
-        idempotency_key仅在上游支持时透传；两个header只是日志关联，不代表本服务去重。调用可能计费。genStore存在则落盘并回填file_path，成功后b64清空；落盘失败仍可200且保留URL/B64，必须检查实际图片产物。
+      description: 64 KiB JSON，prompt非空白。主程序共享媒体服务按配置的实例/模型精确路由，多候选无法消歧返回400，无可用能力返回503。body idempotency_key、Idempotency-Key、X-Request-ID依次提供应用幂等键；同键同意图复用操作，输入改变返回409。成功保持原图片JSON形态，且全部产物持久化后才返回200；部分或保存失败返回错误并通过操作查询读取已保存资产。响应头X-Media-Operation-ID用于查询，不创建会话或投递。
       tags:
         - models-system-media
       operationId: models_handleImageGenGenerate_post
@@ -4501,18 +4525,23 @@ paths:
           required: false
           schema:
             type: string
-          description: Fallback log correlation only; not injected into body idempotency_key
-          x-description-zh: 仅用作关联日志的后备ID，不自动注入body幂等键
+          description: Stable application idempotency key scoped to the authenticated owner and media action.
+          x-description-zh: 按当前认证归属和媒体动作使用的应用幂等键。
         - name: X-Request-ID
           in: header
           required: false
           schema:
             type: string
-          description: Secondary log correlation fallback
-          x-description-zh: 次级日志关联后备ID
+          description: Idempotency fallback when Idempotency-Key is not supplied.
+          x-description-zh: Idempotency-Key为空时的幂等后备键。
       responses:
         "200":
           description: 成功响应 / Successful response
+          headers:
+            X-Media-Operation-ID:
+              description: Durable media operation ID when the shared media service is installed; retain it for queries and recovery.
+              schema:
+                type: string
           content:
             application/json:
               schema:
@@ -4536,6 +4565,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/MessageError"
+        "409":
+          description: 同一幂等键的显式输入改变，或操作版本冲突 / Idempotency intent or operation revision conflict
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageError"
         "500":
           description: 处理或运行时失败 / Processing/runtime failure
           content:
@@ -4553,10 +4588,7 @@ paths:
         handler: handleImageGenGenerate
       x-availability:
         - always registered
-      x-description-en: 64 KiB JSON, non-empty prompt string. Provider selection is explicit name, model index, then
-        default; unresolved routing is 500. Body idempotency_key is upstream-specific; headers only correlate
-        logs, not service deduplication. May incur cost. With genStore, successful persistence sets file_path
-        and clears B64. Persistence failures may still return 200 with URL/B64; inspect actual outputs.
+      x-description-en: 64 KiB JSON; non-whitespace prompt. The shared media service resolves an exact configured instance/model; ambiguity is 400 and unavailable capability is 503. Body idempotency_key, Idempotency-Key, then X-Request-ID supply application deduplication. Same-key intent changes return 409. The existing image JSON shape is retained; 200 requires all outputs persisted. Partial/save failures return an error; query the operation for saved assets. X-Media-Operation-ID identifies the durable operation. No session or channel delivery is created.
       x-summary-en: Generate images
       requestBody:
         required: true
@@ -4608,8 +4640,7 @@ paths:
   /api/v1/videos/generate:
     post:
       summary: 提交视频生成
-      description: 64 KiB
-        JSON，prompt或image_url至少一个非空白值；领域校验错误由handler包装500。body幂等键由上游能力决定，header仅日志关联。200返回provider::raw-task-id表示提交，不是视频完成；保存该task_id供查询，结果未知不盲重发。
+      description: 64 KiB JSON，prompt或image_url至少一个非空白值。共享媒体服务应用幂等键优先级为body idempotency_key、Idempotency-Key、X-Request-ID；输入改变返回409。200保留task_id字段，值为不透明媒体操作ID，表示已保存提交引用而非视频已完成；不得拆解ID或重新生成替代未知结果。
       tags:
         - models-system-media
       operationId: models_handleVideoGenSubmit_post
@@ -4619,24 +4650,29 @@ paths:
           required: false
           schema:
             type: string
-          description: Fallback log correlation only; not injected into body idempotency_key
-          x-description-zh: 仅用作关联日志的后备ID，不自动注入body幂等键
+          description: Stable key scoped to the authenticated owner and media action. Image/video body idempotency_key takes precedence.
+          x-description-zh: 按认证归属和媒体动作去重；图片/视频的body idempotency_key优先。
         - name: X-Request-ID
           in: header
           required: false
           schema:
             type: string
-          description: Secondary log correlation fallback
-          x-description-zh: 次级日志关联后备ID
+          description: Idempotency fallback when neither the body key nor Idempotency-Key is supplied.
+          x-description-zh: body与Idempotency-Key均为空时的幂等后备键。
       responses:
         "200":
           description: 成功响应 / Successful response
+          headers:
+            X-Media-Operation-ID:
+              description: Durable media operation ID when the shared media service is installed; retain it for queries and recovery.
+              schema:
+                type: string
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ModelsVideoTask"
               example:
-                task_id: example-provider::example-task
+                task_id: media-example-operation
         "400":
           description: 请求/参数无效 / Invalid input
           content:
@@ -4645,6 +4681,12 @@ paths:
                 $ref: "#/components/schemas/MessageError"
         "401":
           description: 访问令牌无效 / Invalid access token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageError"
+        "409":
+          description: 同一幂等键的显式输入改变，或操作版本冲突 / Idempotency intent or operation revision conflict
           content:
             application/json:
               schema:
@@ -4666,10 +4708,7 @@ paths:
         handler: handleVideoGenSubmit
       x-availability:
         - always registered
-      x-description-en: 64 KiB JSON; non-whitespace prompt or image_url required. Service validation errors are
-        wrapped as 500. Body idempotency is upstream-dependent; headers only correlate logs. 200 returns
-        provider::raw-task-id for accepted submission, not completion; retain it for polling and reconcile
-        unknown outcomes.
+      x-description-en: 64 KiB JSON; non-whitespace prompt or image_url required. The shared media service uses body idempotency_key, Idempotency-Key, then X-Request-ID for application deduplication; changed intent returns 409. The task_id response field is retained but contains an opaque media operation ID. HTTP 200 means a submission reference is persisted, not completed video. Do not parse the ID or regenerate an unknown result.
       x-summary-en: Submit video generation
       requestBody:
         required: true
@@ -4687,7 +4726,7 @@ paths:
   /api/v1/videos/tasks/{id}:
     get:
       summary: 查询视频任务
-      description: id使用完整provider::task标识，URL编码。查询调用上游；done时可能下载视频/封面到genStore。HTTP200/status=success不保证本地文件持久化成功；读取error与video_file_path，下载失败可保留临时URL。
+      description: 使用提交响应的完整task_id并URL编码，不解析其格式。新媒体操作从持久状态读取，由后台续查原上游任务；done仅表示当前轮询终态。保存未就绪的终态映射为status=failed并带error，需用media/operations查询区分unknown、取消与部分保存。已有SDK任务引用仍由旧查询路径处理，依赖对应Provider仍配置。
       tags:
         - models-system-media
       operationId: models_handleVideoGenPoll_get
@@ -4707,7 +4746,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ModelsVideoStatus"
               example:
-                task_id: example-provider::example-task
+                task_id: media-example-operation
                 provider: example-provider
                 model: example-model
                 status: success
@@ -4722,6 +4761,12 @@ paths:
                 $ref: "#/components/schemas/MessageError"
         "401":
           description: 访问令牌无效 / Invalid access token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageError"
+        "404":
+          description: 当前认证归属下无此媒体操作 / Media operation not found for the authenticated owner
           content:
             application/json:
               schema:
@@ -4743,9 +4788,7 @@ paths:
         handler: handleVideoGenPoll
       x-availability:
         - always registered
-      x-description-en: "Use the complete provider::task ID, URL-encoded. Polls upstream and may persist video/cover
-        on done. HTTP 200/status=success does not prove local persistence: inspect error and video_file_path;
-        temporary URLs may remain after download failure."
+      x-description-en: Use the complete returned task_id, URL-encoded, without parsing it. New media operations read durable state while the worker polls the original upstream task. done indicates a polling terminal state only. Settled but unpersisted outputs map to status=failed with error; query media/operations to distinguish unknown, cancellation and partial persistence. Existing SDK references retain the legacy polling path and require their provider to remain configured.
       x-summary-en: Poll video task
       x-reference-module: models-system-media
       x-visibility: public
@@ -4786,15 +4829,33 @@ paths:
   /api/v1/voicechat/chat:
     post:
       summary: 语音对话
-      description: 16 MiB
-        JSON。audio为Base64输入或text兜底，Provider决定格式/模型/音色；调用可能计费。genStore落盘成功返回audio_file_path并清空audio；落盘失败仍200且可能保留audio，不能伪称文件已生成。
-        audio与text至少一个非空；两者为空的领域校验失败当前返回500。
+      description: 16 MiB JSON，audio为Base64输入或text兜底；两者都为空的领域校验当前返回500。共享媒体服务成功保存音频后返回既有JSON及audio_file_path，并清空audio。Idempotency-Key或后备X-Request-ID提供应用去重，X-Media-Operation-ID用于查询/恢复；同键输入变化409。保存失败不返回成功产物，不创建会话或渠道投递。
       tags:
         - models-system-media
       operationId: models_handleVoiceChat_post
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema:
+            type: string
+          description: Stable key scoped to the authenticated owner and media action. Image/video body idempotency_key takes precedence.
+          x-description-zh: 按认证归属和媒体动作去重；图片/视频的body idempotency_key优先。
+        - name: X-Request-ID
+          in: header
+          required: false
+          schema:
+            type: string
+          description: Idempotency fallback when neither the body key nor Idempotency-Key is supplied.
+          x-description-zh: body与Idempotency-Key均为空时的幂等后备键。
       responses:
         "200":
           description: 成功响应 / Successful response
+          headers:
+            X-Media-Operation-ID:
+              description: Durable media operation ID when the shared media service is installed; retain it for queries and recovery.
+              schema:
+                type: string
           content:
             application/json:
               schema:
@@ -4817,6 +4878,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/MessageError"
+        "409":
+          description: 同一幂等键的显式输入改变，或操作版本冲突 / Idempotency intent or operation revision conflict
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageError"
         "500":
           description: 处理或运行时失败 / Processing/runtime failure
           content:
@@ -4834,10 +4901,7 @@ paths:
         handler: handleVoiceChat
       x-availability:
         - always registered
-      x-description-en: 16 MiB JSON. Supply Base64 audio or text fallback; Provider determines model/format/voice.
-        May incur cost. Successful genStore persistence sets audio_file_path and clears audio; failed
-        persistence may still return 200 with Base64 audio. At least audio or text must be non-empty;
-        empty-input service validation currently returns 500.
+      x-description-en: 16 MiB JSON; supply Base64 audio or text fallback. Both empty currently causes domain validation HTTP 500. The shared media service returns the existing JSON with audio_file_path only after persistence and clears audio. Idempotency-Key or fallback X-Request-ID deduplicates requests; X-Media-Operation-ID enables query/recovery; changed same-key intent is 409. Save failures do not report successful output. No session or channel delivery is created.
       x-summary-en: Voice conversation
       requestBody:
         required: true
@@ -4851,12 +4915,129 @@ paths:
       x-request-body-max-bytes: 16777216
       x-reference-module: models-system-media
       x-visibility: public
+  /api/v1/media/operations/{id}:
+    get:
+      summary: 查询媒体操作与持久资产
+      description: 按当前认证用户查询持久操作；不存在或不属于当前用户均404。返回生成/保存状态、资产与deliveries安全事实投影；空deliveries表示没有投递记录，不等于delivered。投影只含delivery_id/message_id/platform/state/part_states，不含目标chatID、token、签名URL或payload。查询不重新生成，关闭当前能力不阻止读取已有操作。
+      tags:
+        - models-system-media
+      operationId: models_handleMediaOperation_get
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Opaque ID from X-Media-Operation-ID or a new video task_id
+      responses:
+        "200":
+          description: 当前操作快照，不代表生成或投递已成功 / Current operation snapshot, not a delivery confirmation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelsMediaOperation"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Operation not found for the authenticated owner
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageError"
+        "500":
+          description: Operation read failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageError"
+        "503":
+          description: Shared media service is unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageError"
+      x-source:
+        file: api/handler_mediaflow.go
+        handler: handleMediaOperation
+      x-availability:
+        - always registered; returns 503 without mediaFlow
+      x-description-en: Reads the durable operation owned by the authenticated user; missing or other-owner IDs return 404. Returns generation/save states, assets and a safe deliveries projection. An empty deliveries array means no delivery record, never delivered. Each projection contains only delivery_id/message_id/platform/state/part_states, not target chat IDs, tokens, signed URLs or payloads. Reading never regenerates; disabling current capability does not hide existing operations.
+      x-summary-en: Read media operation and persistent assets
+      x-reference-module: models-system-media
+      x-visibility: public
+  /api/v1/media/operations/{id}/{action}:
+    post:
+      summary: 恢复或取消已有媒体操作
+      description: action仅resume/cancel，无请求体。resume在保存未ready时仅恢复可恢复保存阶段；已ready时仅恢复原投递中已确认失败的阶段，保留unknown和已成功part，不新发全量附件或重新生成。unknown无可核对引用时保持未知。cancel标记本地意图，queued可终止，不保证已提交任务远端取消。HTTP立即返回当前操作及deliveries状态，不等待恢复或投递完成；200不等于delivered。
+      tags:
+        - models-system-media
+      operationId: models_handleMediaOperation_post
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Existing owned media operation ID
+        - name: action
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [resume, cancel]
+      responses:
+        "200":
+          description: 当前操作快照 / Current operation snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelsMediaOperation"
+        "400":
+          description: Unsupported action
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Operation not found for the authenticated owner
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageError"
+        "409":
+          description: Operation revision conflict; read current state before retrying
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageError"
+        "500":
+          description: Resume or cancel failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageError"
+        "503":
+          description: Shared media service is unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageError"
+      x-source:
+        file: api/handler_mediaflow.go
+        handler: handleMediaOperation
+      x-availability:
+        - always registered; returns 503 without mediaFlow
+      x-description-en: Only resume/cancel are supported; no body is required. Before persistence is ready, resume only restores recoverable persistence. Once ready, it resumes only definitively failed stages in the original delivery, preserving unknown and successful parts; it neither resends all attachments nor regenerates. Unknown outcomes without a verifiable reference remain unknown. Cancel records local intent and can stop queued work, without promising remote cancellation of submitted work. HTTP immediately returns the current operation and deliveries snapshot, without waiting for recovery or delivery completion; 200 does not mean delivered.
+      x-summary-en: Resume or cancel an existing media operation
+      x-reference-module: models-system-media
+      x-visibility: public
   /api/v1/files/generated/{path}:
     get:
       summary: 下载生成产物
-      description: 实际Go路由为{path...}，path可含目录斜线，使用生成响应中的相对file_path。query
-        download非空触发attachment；1/true使用原名，其他值为下载名。Cache-Control
-        public,max-age=86400；支持标准范围/条件请求。handler错误text/plain，鉴权错误仍JSON。
+      description: >-
+        实际 Go 路由为 {path...}，path 可含目录斜线，使用响应中的相对 file_path。共享媒体服务对已登记媒体资产核对当前认证归属；无本用户持有记录返回 404，相同内容被本用户合法生成并登记时仍可读取。未纳入媒体资产登记的旧文件沿用原有访问合同，不追溯新增归属要求。已登记媒体资产返回 Cache-Control: private, max-age=86400；未托管旧文件仍为 public, max-age=86400。Content-Type 按扩展名返回图片、视频或音频 MIME，未知扩展名使用 application/octet-stream。download 非空触发 attachment；1/true 使用原名，其余值作为下载名。支持标准范围/条件请求；handler 错误为 text/plain，认证错误仍为 JSON。
       tags:
         - models-system-media
       operationId: models_handleGeneratedFile_get
@@ -4920,6 +5101,11 @@ paths:
       responses:
         "200":
           description: 成功响应 / Successful response
+          headers:
+            Cache-Control:
+              description: Registered media uses private, max-age=86400; unmanaged legacy files retain public, max-age=86400.
+              schema:
+                type: string
           content:
             application/octet-stream:
               schema:
@@ -4949,6 +5135,30 @@ paths:
               schema:
                 type: string
                 format: binary
+            audio/mpeg:
+              schema:
+                type: string
+                format: binary
+            audio/wav:
+              schema:
+                type: string
+                format: binary
+            audio/ogg:
+              schema:
+                type: string
+                format: binary
+            audio/aac:
+              schema:
+                type: string
+                format: binary
+            audio/flac:
+              schema:
+                type: string
+                format: binary
+            audio/mp4:
+              schema:
+                type: string
+                format: binary
         "206":
           description: Partial binary content
           content:
@@ -4971,7 +5181,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/MessageError"
         "404":
-          description: 文件未找到或不可打开 / File unavailable
+          description: 文件未找到、不可打开或无当前用户的媒体资产记录 / File unavailable or no media asset owned by the current user
           content:
             text/plain:
               schema:
@@ -5001,10 +5211,8 @@ paths:
         handler: handleGeneratedFile
       x-availability:
         - always registered
-      x-description-en: "Actual Go wildcard is {path...}: use returned relative file_path, including directory
-        separators. Non-empty download query sets attachment: 1/true keeps the stored name, other values set
-        download name. Cache-Control public,max-age=86400, standard range/conditional requests. Handler errors
-        are text/plain; authentication errors remain JSON."
+      x-description-en: >-
+        The Go wildcard is {path...}; use the returned relative file_path, including directory separators. The shared media service checks ownership only for registered media assets: no record owned by the authenticated user returns 404, while the same content remains readable when legitimately generated and registered for that user. Legacy files outside media registration retain their existing access contract. Registered media returns Cache-Control: private, max-age=86400; unmanaged legacy files retain public, max-age=86400. Content-Type follows the image, video or audio extension; unknown extensions use application/octet-stream. Non-empty download sets attachment: 1/true keeps the stored name, other values set the download name. Standard range/conditional requests remain supported. Handler errors are text/plain; authentication errors remain JSON.
       x-summary-en: Read generated file
       x-greedy-parameter: path
       x-reference-module: models-system-media
@@ -9575,8 +9783,10 @@ paths:
     post:
       summary: Send a test message to external conversations
       description: This endpoint has real outbound effects and requires an enabled instance. With request_id, it
-        freezes/deduplicates existing bound targets, sends within 30 seconds, and replays only the original
-        receipt; unhealthy or unbound instances send nothing. accepted is not confirmed delivery and unknown
+        merges valid explicit bindings and recorded active conversations for the same platform and account,
+        freezes/deduplicates targets, sends within 30 seconds, and replays only the original receipt.
+        All agents and the default assistant use the same resolver. Unhealthy instances or accounts with no
+        known targets send nothing. accepted is not confirmed delivery and unknown
         results are not automatically resent. Without request_id, target/content are required; the instance is
         started and sends to target. Send failure can still be HTTP 200 success=false. Examples are
         documentation only.
@@ -25637,6 +25847,125 @@ components:
         - enabled
         - providers
         - models
+    ModelsMediaAsset:
+      type: object
+      description: Immutable output reference. Resolve file_path through the generated-file endpoint, not the host filesystem.
+      properties:
+        asset_id:
+          type: string
+        operation_id:
+          type: string
+        output_index:
+          type: integer
+          minimum: 0
+          description: Stable zero-based output order within the operation
+        kind:
+          type: string
+          enum: [image, video, audio]
+        role:
+          type: string
+          enum: [primary, cover]
+        file_path:
+          type: string
+          description: Relative path for GET /api/v1/files/generated/{path}
+        mime:
+          type: string
+        digest:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+          description: SHA-256 hex of the actual persisted bytes; no sha256 prefix
+        size:
+          type: integer
+          format: int64
+          description: Actual persisted byte count
+        width:
+          type: integer
+        height:
+          type: integer
+        parent_asset_id:
+          type: string
+          description: Omitted unless the operation has an explicit parent asset
+      required: [asset_id, operation_id, output_index, kind, role, file_path, mime, digest, size]
+    ModelsMediaOperation:
+      type: object
+      description: Generation, persistence and delivery are separate. ready assets do not imply delivered. The optional deliveries projection reports persisted channel facts; an empty array means no delivery record.
+      properties:
+        operation_id:
+          type: string
+        kind:
+          type: string
+          enum: [image, video, audio]
+        action:
+          type: string
+          enum: [generate, synthesize, chat]
+        provider_instance_id:
+          type: string
+          description: Frozen routing identity for this operation
+        actual_provider_instance_id:
+          type: string
+          description: Actual successful provider where known, including TTS fallback; empty while unknown
+        model:
+          type: string
+        generation_state:
+          type: string
+          enum: [queued, submitting, running, succeeded, failed, unknown, cancelled]
+        save_state:
+          type: string
+          enum: [not_started, saving, ready, partial, failed]
+        assets:
+          type: [array, 'null']
+          items:
+            $ref: "#/components/schemas/ModelsMediaAsset"
+        deliveries:
+          type: array
+          description: Safe persisted delivery facts for this operation. Optional for older servers; current servers return [] when no delivery exists. Missing or empty never means delivered.
+          items:
+            $ref: "#/components/schemas/ModelsMediaDeliveryStatus"
+        cancel_requested:
+          type: boolean
+          description: Local cancellation intent; not proof of remote cancellation
+        error_code:
+          type: string
+        error:
+          type: string
+        revision:
+          type: integer
+          format: int64
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        timings_ms:
+          type: [object, 'null']
+          additionalProperties:
+            type: integer
+            format: int64
+          description: Recorded stage durations in milliseconds; absent stages are not measured and values are not billing data
+      required: [operation_id, kind, action, provider_instance_id, actual_provider_instance_id, model, generation_state, save_state, assets, cancel_requested, error_code, error, revision, created_at, updated_at, timings_ms]
+    ModelsMediaDeliveryStatus:
+      type: object
+      description: Safe delivery projection; excludes target chat IDs, tokens, signed URLs and payloads. accepted is not delivered, and delivered follows the channel receipt contract rather than proving the user read the message.
+      properties:
+        delivery_id:
+          type: string
+          description: Stable original delivery ID
+        message_id:
+          type: string
+          description: Assistant message associated with this delivery
+        platform:
+          type: string
+          description: Delivery platform, for example dingtalk
+        state:
+          type: string
+          description: Persisted aggregate delivery state, such as pending, accepted, delivered, failed, unknown or cancelled
+        part_states:
+          type: array
+          items:
+            type: string
+          description: States in original delivery part order, such as pending, preparing, prepared, sending, accepted, delivered, failed or unknown. An empty array is not delivery confirmation.
+      required: [delivery_id, message_id, platform, state, part_states]
     ModelsVoiceStatus:
       type: object
       properties:
@@ -25685,7 +26014,7 @@ components:
       properties:
         provider:
           type: string
-          description: Optional; explicit provider, then model routing, then configured default
+          description: Exact configured provider instance ID or key; omission uses an unambiguous configured media route
         model:
           type: string
         prompt:
@@ -25703,7 +26032,7 @@ components:
           description: 0 means unspecified
         idempotency_key:
           type: string
-          description: Forwarded only when an upstream Provider supports it
+          description: Application idempotency key in the shared media service; takes precedence over headers, while upstream idempotency support remains provider-specific
         callback_url:
           type: string
           description: Provider-specific; not a HexClaw callback registration
@@ -25770,7 +26099,7 @@ components:
       properties:
         provider:
           type: string
-          description: Optional; explicit provider, then model routing, then configured default
+          description: Exact configured provider instance ID or key; omission uses an unambiguous configured media route
         model:
           type: string
         prompt:
@@ -25788,7 +26117,7 @@ components:
           description: 0 means unspecified
         idempotency_key:
           type: string
-          description: Forwarded only when an upstream Provider supports it
+          description: Application idempotency key in the shared media service; takes precedence over headers, while upstream idempotency support remains provider-specific
         callback_url:
           type: string
           description: Provider-specific; not a HexClaw callback registration
@@ -25809,8 +26138,7 @@ components:
           type: integer
         user_id:
           type: string
-      description: At least non-whitespace prompt or image_url; validation failures from service are returned as
-        HTTP 500 by this handler.
+      description: At least non-whitespace prompt or image_url; missing input is HTTP 400 in the shared media handler.
     ModelsVideoTask:
       type: object
       properties:
@@ -28181,6 +28509,29 @@ components:
     AutomationInstance:
       type: object
       properties:
+        message_count:
+          type: integer
+          format: int64
+          nullable: true
+          description: List endpoint only. Number of persisted messages in conversations attributable to this account and platform. Current unique name references are accepted only for sessions created during this account lifetime. Zero without records; null when counting is unavailable.
+        token_usage:
+          type: object
+          nullable: true
+          description: List endpoint only. Sum of recorded actual input and output tokens attributed to this stable physical instance. Zero totals when no attributable receipt exists; null when accounting is unavailable. Historical data is not inferred from names.
+          properties:
+            input_tokens:
+              type: integer
+              format: int64
+            output_tokens:
+              type: integer
+              format: int64
+            total_tokens:
+              type: integer
+              format: int64
+          required:
+            - input_tokens
+            - output_tokens
+            - total_tokens
         id:
           type: string
         provider:

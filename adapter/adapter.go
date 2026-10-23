@@ -11,6 +11,7 @@ package adapter
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"time"
 
@@ -41,13 +42,21 @@ const (
 // Attachment 消息附件。
 //
 // 当前引擎仅消费图片附件，其余类型会在入口校验阶段被拒绝。
+// AttachmentSource 提供出站资产读取能力，不进入消息JSON。
+type AttachmentSource struct {
+	OpenReader func(context.Context) (io.ReadCloser, error)
+}
+
 type Attachment struct {
-	ID   string `json:"attachment_id,omitempty"` // Sidecar staging 中的 owner-bound opaque ID
-	Type string `json:"type"`                    // 当前仅支持 "image"
-	Name string `json:"name"`                    // 文件名
-	Mime string `json:"mime"`                    // MIME 类型 (image/png, application/pdf, ...)
-	Data string `json:"data,omitempty"`          // base64 编码的文件内容
-	URL  string `json:"url,omitempty"`           // 文件 URL（与 Data 二选一）
+	ContentDigest string            `json:"-"`
+	Source        *AttachmentSource `json:"-"`
+	Size          int64             `json:"size,omitempty"`
+	ID            string            `json:"attachment_id,omitempty"` // 入站暂存引用或出站资产身份，不能互作输入授权
+	Type          string            `json:"type"`                    // 具体入口校验支持的输入或出站媒体/文件类型
+	Name          string            `json:"name"`                    // 文件名
+	Mime          string            `json:"mime"`                    // MIME 类型 (image/png, application/pdf, ...)
+	Data          string            `json:"data,omitempty"`          // base64 编码的文件内容
+	URL           string            `json:"url,omitempty"`           // 文件 URL（与 Data 二选一）
 }
 
 // Message 统一消息模型
@@ -175,7 +184,7 @@ type Reply struct {
 	Content        string // 回复文本内容
 	MessageContent *messagecontent.MessageContent
 	RenderManifest *messagecontent.RenderManifest
-	// Attachments 是出站产物（当前主要为图片）。平台支持时上传并随正文发送；
+	// Attachments 是出站媒体和文件产物。平台支持时上传并随正文发送；
 	// 不支持的平台应保留正文并明确降级，不能静默丢失附件。
 	Attachments []Attachment
 	Metadata    map[string]string // 附加元数据（如工具调用结果、引用来源等）

@@ -2008,11 +2008,16 @@ func (s *Server) handleCanvasEvent(w http.ResponseWriter, r *http.Request) {
 
 // handleVoiceStatus 查看语音服务状态
 func (s *Server) handleVoiceStatus(w http.ResponseWriter, r *http.Request) {
+	voiceSvc := s.activeVoice()
+	if voiceSvc == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"stt_enabled": false, "tts_enabled": false, "stt_provider": "", "tts_provider": ""})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"stt_enabled":  s.voiceSvc.HasSTT(),
-		"tts_enabled":  s.voiceSvc.HasTTS(),
-		"stt_provider": s.voiceSvc.STTName(),
-		"tts_provider": s.voiceSvc.TTSName(),
+		"stt_enabled":  voiceSvc.HasSTT(),
+		"tts_enabled":  voiceSvc.HasTTS(),
+		"stt_provider": voiceSvc.STTName(),
+		"tts_provider": voiceSvc.TTSName(),
 	})
 }
 
@@ -2021,7 +2026,8 @@ func (s *Server) handleVoiceStatus(w http.ResponseWriter, r *http.Request) {
 // 接收音频数据（multipart/form-data 的 audio 字段或 raw body），返回转录文本。
 // 限制 10MB。
 func (s *Server) handleVoiceTranscribe(w http.ResponseWriter, r *http.Request) {
-	if !s.voiceSvc.HasSTT() {
+	voiceSvc := s.activeVoice()
+	if voiceSvc == nil || !voiceSvc.HasSTT() {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "STT 服务未配置"})
 		return
 	}
@@ -2055,7 +2061,7 @@ func (s *Server) handleVoiceTranscribe(w http.ResponseWriter, r *http.Request) {
 		format = "wav"
 	}
 
-	result, err := s.voiceSvc.Transcribe(r.Context(), audioData, voice.TranscribeOptions{
+	result, err := voiceSvc.Transcribe(r.Context(), audioData, voice.TranscribeOptions{
 		Language: lang,
 		Format:   voice.AudioFormat(format),
 	})
@@ -2071,6 +2077,10 @@ func (s *Server) handleVoiceTranscribe(w http.ResponseWriter, r *http.Request) {
 //
 // 接收文本，返回合成的音频数据。
 func (s *Server) handleVoiceSynthesize(w http.ResponseWriter, r *http.Request) {
+	if s.mediaFlow != nil {
+		s.handleMediaSpeech(w, r)
+		return
+	}
 	if !s.voiceSvc.HasTTS() {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "TTS 服务未配置"})
 		return

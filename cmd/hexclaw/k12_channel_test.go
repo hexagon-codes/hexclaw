@@ -421,6 +421,42 @@ func TestK12IMDelivererCreativeImageBridgePreservesMarkdownAndBytes(t *testing.T
 	}
 }
 
+func TestK12IMDelivererPDFOnlyRetainsFrozenArtifact(t *testing.T) {
+	d := &k12IMDeliverer{}
+	payload := []byte("%PDF-1.7\nfrozen-weekly-sheet")
+	prepared, err := d.PrepareMessageForTargets(context.Background(), k12usecase.DeliveryMessage{
+		Attachments: []k12usecase.DeliveryAttachment{{Name: "weekly-sheet.pdf", MIME: "application/pdf", Data: payload}},
+	}, []k12usecase.ResolvedDeliveryTarget{{
+		BindingID: "agent-rule:weekly-pdf-only",
+		Target:    k12.DeliveryTarget{Platform: "dingtalk", InstanceID: "bot-1", ChatID: "parent-1"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prepared) != 1 || prepared[0].PartKind != messagecontent.PartArtifact || prepared[0].PartOrdinal != 1 {
+		t.Fatalf("PDF-only delivery requires exactly one artifact part: %+v", prepared)
+	}
+	var part channel.DeliveryPart
+	if err := json.Unmarshal([]byte(prepared[0].PayloadJSON), &part); err != nil {
+		t.Fatal(err)
+	}
+	if err := part.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if part.Text != "" || part.MessageContent.Markdown != "" || len(part.RenderManifest.Parts) != 1 ||
+		part.Attachment == nil || !bytes.Equal(part.Attachment.Data, payload) {
+		t.Fatalf("PDF-only delivery changed frozen bytes or added text: %+v", part)
+	}
+	projected := adapterDeliveryPartFromChannelPart(part)
+	if projected.Text != "" || projected.Attachment == nil || projected.Attachment.Mime != "application/pdf" {
+		t.Fatalf("PDF-only adapter projection is incomplete: %+v", projected)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(projected.Attachment.Data)
+	if err != nil || !bytes.Equal(decoded, payload) {
+		t.Fatalf("PDF-only adapter changed the file: %v", err)
+	}
+}
+
 func TestK12IMDelivererPDFBridgePreservesCanonicalArtifact(t *testing.T) {
 	d := &k12IMDeliverer{}
 	canonical := "## 本周练习卷\n\n请完成后拍照提交。"

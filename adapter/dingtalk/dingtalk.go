@@ -1343,7 +1343,7 @@ func (a *DingtalkAdapter) PrepareDeliveryPartResource(ctx context.Context, part 
 		return "", err
 	}
 	switch part.Kind {
-	case messagecontent.PartMarkdown:
+	case messagecontent.PartMarkdown, messagecontent.PartText:
 		if part.Attachment != nil || strings.TrimSpace(part.PreparedResourceID) != "" || strings.TrimSpace(part.Text) == "" {
 			return "", errors.New("DingTalk markdown delivery part has an invalid shape")
 		}
@@ -1370,7 +1370,14 @@ func (a *DingtalkAdapter) PrepareDeliveryPartResource(ctx context.Context, part 
 	}
 
 	var mediaID string
-	if isDingTalkPDFAttachment(attachment) {
+	if isDingTalkGeneratedFile(attachment) {
+		fileAPI, ok := api.(dingtalkGeneratedMediaOpenAPI)
+		if !ok {
+			return "", errors.New("DingTalk generated file upload capability is unavailable")
+		}
+		mediaStarted = true
+		mediaID, err = fileAPI.UploadGeneratedFile(ctx, token, attachment)
+	} else if isDingTalkPDFAttachment(attachment) {
 		fileAPI, ok := api.(dingtalkFileMediaOpenAPI)
 		if !ok {
 			return "", errors.New("DingTalk file media upload capability is unavailable")
@@ -1518,7 +1525,7 @@ func validateDingTalkDeliveryPartAttachment(part adapter.DeliveryPart, attachmen
 	if partMIME == "" || attachmentMIME == "" || !strings.EqualFold(partMIME, attachmentMIME) {
 		return errors.New("DingTalk artifact delivery part MIME does not match its attachment")
 	}
-	if !isDingTalkPDFAttachment(attachment) && !strings.HasPrefix(strings.ToLower(attachmentMIME), "image/") {
+	if !isDingTalkPDFAttachment(attachment) && !strings.HasPrefix(strings.ToLower(attachmentMIME), "image/") && !isDingTalkGeneratedFile(attachment) {
 		return errors.New("DingTalk artifact delivery part type is unsupported")
 	}
 	if err := validateDingTalkAttachmentName(attachment.Name, isDingTalkPDFAttachment(attachment)); err != nil {
@@ -1539,12 +1546,15 @@ func validateDingTalkDeliveryPartAttachment(part adapter.DeliveryPart, attachmen
 
 func dingTalkPreparedPartMessage(part adapter.DeliveryPart) (dingtalkOutboundMessage, error) {
 	switch part.Kind {
-	case messagecontent.PartMarkdown:
+	case messagecontent.PartMarkdown, messagecontent.PartText:
 		if part.Attachment != nil || strings.TrimSpace(part.PreparedResourceID) != "" || strings.TrimSpace(part.Text) == "" {
 			return dingtalkOutboundMessage{}, errors.New("DingTalk markdown delivery part has an invalid shape")
 		}
 		if err := validateDingTalkVisibleContent(part.Text); err != nil {
 			return dingtalkOutboundMessage{}, err
+		}
+		if part.Kind == messagecontent.PartText {
+			return dingtalkTextMessage(part.Text), nil
 		}
 		return dingtalkMarkdownMessage(part.Text), nil
 	case messagecontent.PartArtifact:
@@ -1556,6 +1566,9 @@ func dingTalkPreparedPartMessage(part adapter.DeliveryPart) (dingtalkOutboundMes
 			return dingtalkOutboundMessage{}, err
 		}
 		mediaID := strings.TrimSpace(part.PreparedResourceID)
+		if isDingTalkGeneratedFile(attachment) {
+			return generatedDingTalkFileMessage(mediaID, attachment), nil
+		}
 		if isDingTalkPDFAttachment(attachment) {
 			return dingtalkFileMessage(mediaID, dingTalkPDFFileName(attachment)), nil
 		}

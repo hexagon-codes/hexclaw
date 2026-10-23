@@ -93,6 +93,10 @@ func canonicalAttachmentRefs(attachments []adapter.Attachment) []messagecontent.
 	}
 	refs := make([]messagecontent.AttachmentRef, 0, len(attachments))
 	for _, attachment := range attachments {
+		if attachment.Source != nil && attachment.ID != "" && strings.HasPrefix(attachment.ContentDigest, "sha256:") {
+			refs = append(refs, messagecontent.AttachmentRef{AssetID: attachment.ID, Name: attachment.Name, MIME: attachment.Mime, Digest: attachment.ContentDigest, AltText: attachment.Name})
+			continue
+		}
 		payload := canonicalAttachmentPayload(attachment)
 		sum := sha256.Sum256(payload)
 		hexDigest := hex.EncodeToString(sum[:])

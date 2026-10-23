@@ -18,6 +18,7 @@ import (
 	"github.com/hexagon-codes/hexagon/runtime/middleware"
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/messagecontent"
+	"github.com/hexagon-codes/hexclaw/skill"
 )
 
 // runRuntimeAttempt 只对模型失败续接运行状态；目标模型输入仍由应用按现有配置重建。
@@ -275,7 +276,8 @@ func newRuntimeToolExecutor(executor *ToolExecutor) *runtimeToolExecutor {
 }
 
 type runtimeToolExecutor struct {
-	executor *ToolExecutor
+	mediaCalls int
+	executor   *ToolExecutor
 	// 流式请求用现有工具心跳续传活动帧；非流式调用不绑定回调。
 	onActivity func(context.Context) error
 
@@ -370,6 +372,15 @@ func (e *runtimeToolExecutor) Execute(ctx context.Context, call llm.ToolCall) (o
 		}
 	}()
 	ctx = withRuntimeInvocationSelection(ctx)
+	invocation := skill.CurrentInvocation(ctx)
+	invocation.ToolCallID = call.ID
+	if call.Name == "media_generate" {
+		e.mu.Lock()
+		invocation.OperationOrdinal = fmt.Sprintf("media:%d", e.mediaCalls)
+		e.mediaCalls++
+		e.mu.Unlock()
+	}
+	ctx = skill.WithInvocationContext(ctx, invocation)
 	result, raw, err := e.executor.ExecuteResult(ctx, call.Name, args)
 	finishHeartbeat()
 	if err != nil {
@@ -380,7 +391,7 @@ func (e *runtimeToolExecutor) Execute(ctx context.Context, call llm.ToolCall) (o
 		}
 		msg = toolExecutionExplanation(msg, raw)
 		outcome := hruntime.ToolResult{Content: msg, Raw: raw, Error: err.Error(), Status: hruntime.ToolStatusError, DurationMs: time.Since(started).Milliseconds()}
-		if detail := toolExecutionDetail(raw); detail != nil && detail.Action == "post" && detail.Outcome == "unknown" {
+		if detail := toolExecutionDetail(raw); detail != nil && (detail.Action == "post" || call.Name == "media_generate") && detail.Outcome == "unknown" {
 			e.mu.Lock()
 			e.unknownActions[unknownKey] = outcome
 			e.mu.Unlock()

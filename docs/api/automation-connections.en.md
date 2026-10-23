@@ -545,6 +545,10 @@ Implementation: [`handleListConnections`](../../api/handler_connections.go#L55).
 
 Reconciles started adapters with live connection health before returning the list; sensitive config values are masked. This is more than a static configuration read.
 
+Each item includes read-only `token_usage`: int64 `input_tokens`, `output_tokens`, and their sum `total_tokens`. Only recorded actual usage attributed to the stable physical instance ID is counted. Renaming preserves attribution; a new instance with the old name does not inherit usage. All three totals are zero when accounting succeeds without an attributable receipt; the value is null when accounting is unavailable. Historical usage is never inferred from message length, user ID, or account name. This projection does not modify configuration, health checks, or message delivery.
+
+Read-only `message_count` (int64 or null) counts persisted messages in conversations attributable to the account and platform, using the same message-record semantics as the conversation list. It supports stable instance IDs and current unique instance-name references; name references only include sessions created during the current account lifetime. Recreating an account with the same name does not inherit older name-referenced sessions. No records produces zero; counting unavailable produces null. Test notifications and health polling do not add conversation messages. Unattributable historical names are not inferred. Desktop uses the shared `N messages · ≈ N tokens` presentation without changing actual account token accounting.
+
 Implementation: [`handleListInstances`](../../api/handler_instances.go#L191). Registration: `s.instanceMgr != nil`.
 
 | HTTP | Response / condition |
@@ -661,7 +665,7 @@ Implementation: [`handleTestInstanceByID`](../../api/handler_instances.go#L496).
 
 ### `POST /api/v1/platforms/instances/by-id/{id}/send-test` — Send a test message to external conversations
 
-This endpoint has real outbound effects and requires an enabled instance. With request_id, it freezes/deduplicates existing bound targets, sends within 30 seconds, and replays only the original receipt; unhealthy or unbound instances send nothing. accepted is not confirmed delivery and unknown results are not automatically resent. Without request_id, target/content are required; the instance is started and sends to target. Send failure can still be HTTP 200 success=false. Examples are documentation only.
+This endpoint has real outbound effects and requires an enabled instance. With request_id, all agents and the default assistant use the same resolver, merging valid explicit ChatID bindings and recorded active conversations for the current platform and account. Sessions require a persisted user message, must not be archived/deleted or a branch copy, and match the stable instance ID or its current unique name within the account lifetime. Targets are deduplicated and frozen before sending within 30 seconds. Unhealthy connections or no known targets send nothing; target-query errors are returned rather than silently omitting conversations. Replay reads the original frozen receipt first: old empty-target, accepted, and unknown requests are never resent after target changes. A new click after a known terminal outcome uses a new request_id. accepted does not confirm handset delivery; unknown results are not automatically resent. Existing direct/OTO scope is unchanged; no agent binding or routing rule is created. Without request_id, target/content are required; the instance is started and sends to target. Send failure can still be HTTP 200 success=false. Examples are documentation only.
 
 Implementation: [`handleSendTestInstanceByID`](../../api/handler_instances.go#L511). Registration: `s.instanceMgr != nil`.
 

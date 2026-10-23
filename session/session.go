@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"github.com/hexagon-codes/hexagon"
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/internal/mediaflow"
 	"github.com/hexagon-codes/hexclaw/internal/sqliteutil"
 	"github.com/hexagon-codes/hexclaw/storage"
 	"github.com/hexagon-codes/toolkit/lang/stringx"
@@ -184,6 +186,8 @@ type AssistantMeta struct {
 }
 
 var replySafeAssistantMetadataKeys = map[string]struct{}{
+	"producer_kind":             {},
+	"locale":                    {},
 	"self_context_receipt":      {},
 	"provider_display_name":     {},
 	"provider_instance_id":      {},
@@ -288,6 +292,24 @@ func (m *Manager) SaveAssistantReply(ctx context.Context, sessionID, content str
 		Metadata:  meta,
 		RequestID: am.RequestID,
 		CreatedAt: time.Now(),
+	}
+	if completion, ok := mediaflow.ReplyCompletionFromContext(ctx); ok {
+		assetRefs, _ := json.Marshal(completion.Assets)
+		metaMap["artifacts"] = string(assetRefs)
+		operationRefs, _ := json.Marshal(completion.Operations)
+		metaMap["media_operations"] = string(operationRefs)
+		if encoded, err := json.Marshal(metaMap); err == nil {
+			msg.Metadata = string(encoded)
+		}
+		attachments := make([]adapter.Attachment, 0, len(completion.Assets))
+		for _, asset := range completion.Assets {
+			attachments = append(attachments, adapter.Attachment{ID: asset.ID, Type: asset.Kind, Name: path.Base(asset.Path), Mime: asset.MIME, URL: "/api/v1/files/generated/" + asset.Path, Size: asset.Size})
+		}
+		encoded, err := json.Marshal(messageMetadata{Attachments: attachments})
+		if err != nil {
+			return nil, err
+		}
+		msg.Attachments = string(encoded)
 	}
 	if err := m.saveMessage(ctx, msg); err != nil {
 		return nil, err
@@ -446,7 +468,7 @@ func (m *Manager) BuildContext(ctx context.Context, sessionID string) ([]hexagon
 		}
 		messages = append(messages, hexagon.Message{
 			Role:    toRole(r.Role),
-			Content: r.Content,
+			Content: historicalAssistantMediaReferences(r),
 		})
 	}
 

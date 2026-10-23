@@ -2,6 +2,7 @@ package dingtalk
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -11,6 +12,7 @@ import (
 	_ "image/gif"
 	_ "image/jpeg"
 	_ "image/png"
+	"io"
 	"net/http"
 	"strings"
 	"unicode"
@@ -102,7 +104,11 @@ func ensureDingTalkRenderEvidence(reply *adapter.Reply) error {
 	}
 	refs := make([]messagecontent.AttachmentRef, 0, len(reply.Attachments))
 	parts := make([]messagecontent.RenderPart, 0, len(reply.Attachments)+1)
-	summary := adapter.RenderExecutionSummary(locale, dingTalkReplyExecutionSummary(reply))
+	// 通用传输入口也处理占位和连接通知，只有实际执行回执才生成尾注。
+	summary := ""
+	if len(reply.ToolCalls) > 0 || reply.Usage != nil || reply.Metadata["model"] != "" || reply.Metadata["teaching_context_receipts"] != "" {
+		summary = adapter.DingTalkReplyFooter(reply, locale)
+	}
 	projected, fallback := ProjectMarkdownText(sourceMarkdown, summary)
 	if err := validateDingTalkVisibleContent(projected); err != nil {
 		return err
@@ -119,7 +125,7 @@ func ensureDingTalkRenderEvidence(reply *adapter.Reply) error {
 	}
 	parts = append(parts, messagecontent.RenderPart{Kind: partKind, Text: projected})
 	for _, attachment := range reply.Attachments {
-		if !adapter.IsImageAttachment(attachment) && !isDingTalkPDFAttachment(attachment) {
+		if !adapter.IsImageAttachment(attachment) && !isDingTalkPDFAttachment(attachment) && !isDingTalkGeneratedFile(attachment) {
 			return errors.New("DingTalk attachment type is unsupported")
 		}
 		digest, assetID, err := dingTalkAttachmentIdentity(attachment)
@@ -242,7 +248,7 @@ func validateDingTalkAttachmentProjection(
 		return errors.New("dingtalk: render manifest artifact parts do not match reply attachments")
 	}
 	for i, attachment := range attachments {
-		if !adapter.IsImageAttachment(attachment) && !isDingTalkPDFAttachment(attachment) {
+		if !adapter.IsImageAttachment(attachment) && !isDingTalkPDFAttachment(attachment) && !isDingTalkGeneratedFile(attachment) {
 			return errors.New("DingTalk attachment type is unsupported")
 		}
 		digest, _, err := dingTalkAttachmentIdentity(attachment)
@@ -285,7 +291,7 @@ func validateDingTalkDeliveryPartCanonicalEvidence(part adapter.DeliveryPart, re
 	}
 
 	switch part.Kind {
-	case messagecontent.PartMarkdown:
+	case messagecontent.PartMarkdown, messagecontent.PartText:
 		if part.Ordinal != 1 || part.MIME != "" || part.Attachment != nil {
 			return errors.New("DingTalk markdown delivery part has artifact fields")
 		}
@@ -323,7 +329,7 @@ func validateDingTalkDeliveryPartCanonicalEvidence(part adapter.DeliveryPart, re
 			if err != nil {
 				return err
 			}
-			if digest != part.Digest || !dingTalkCanonicalArtifactRefMatchesDigest(ref.AssetID, digest) {
+			if digest != part.Digest || (!dingTalkCanonicalArtifactRefMatchesDigest(ref.AssetID, digest) && !(attachment.Source != nil && ref.AssetID == attachment.ID && digest == attachment.ContentDigest)) {
 				return errors.New("DingTalk artifact delivery part bytes do not match canonical attachment")
 			}
 		}
@@ -357,6 +363,9 @@ func validDingTalkSHA256Digest(value string) bool {
 }
 
 func dingTalkAttachmentIdentity(attachment adapter.Attachment) (string, string, error) {
+	if attachment.Source != nil {
+		return generatedMediaIdentity(attachment)
+	}
 	raw, err := dingTalkAttachmentBytes(attachment)
 	if err != nil {
 		return "", "", err
@@ -367,6 +376,22 @@ func dingTalkAttachmentIdentity(attachment adapter.Attachment) (string, string, 
 }
 
 func dingTalkAttachmentBytes(attachment adapter.Attachment) ([]byte, error) {
+	if attachment.Source != nil {
+		r, err := attachment.Source.OpenReader(context.Background())
+		if err != nil {
+			return nil, err
+		}
+		raw, err := io.ReadAll(io.LimitReader(r, dingtalkMaxOutboundImageBytes+1))
+		err = errors.Join(err, r.Close())
+		if err != nil {
+			return nil, err
+		}
+		copyAttachment := attachment
+		copyAttachment.Source = nil
+		copyAttachment.URL = ""
+		copyAttachment.Data = base64.StdEncoding.EncodeToString(raw)
+		return dingTalkAttachmentBytes(copyAttachment)
+	}
 	isPDF := isDingTalkPDFAttachment(attachment)
 	isImage := adapter.IsImageAttachment(attachment) && !isPDF
 	if !isImage && !isPDF {

@@ -19,6 +19,7 @@ import (
 
 	"github.com/hexagon-codes/hexagon/observe/trace"
 	"github.com/hexagon-codes/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/internal/requestcancel"
 	"github.com/hexagon-codes/hexclaw/internal/upstreamerr"
 	"github.com/hexagon-codes/hexclaw/llmrouter"
 	"github.com/hexagon-codes/hexclaw/messagecontent"
@@ -43,7 +44,7 @@ type WebAdapter struct {
 	sessionRequests           sync.Map // sessionID → requestID
 	requestOwners             sync.Map // requestID → authenticated ownerID
 	requestConns              sync.Map // requestID → *requestSubscribers
-	cancelFuncs               sync.Map // requestID → context.CancelFunc
+	cancelFuncs               sync.Map // requestID → *requestCancellation
 	disconnectTimers          sync.Map // requestID → *time.Timer
 	disconnectGrace           time.Duration
 	streams                   *streamstate.Registry
@@ -63,6 +64,25 @@ type WebAdapter struct {
 type requestSubscribers struct {
 	mu      sync.RWMutex
 	chatIDs map[string]struct{}
+}
+
+// 请求结束前保留主动停止信号，传输断线不能夺走重连续接后的停止能力。
+type requestCancellation struct {
+	transport context.CancelCauseFunc
+	signal    context.CancelCauseFunc
+	ctx       context.Context
+}
+
+func (c *requestCancellation) cancel(cause error) {
+	if errors.Is(cause, requestcancel.ErrUserCancelled) {
+		c.signal(cause)
+	}
+	c.transport(cause)
+}
+
+func (c *requestCancellation) close() {
+	c.transport(nil)
+	c.signal(nil)
 }
 
 type sessionConnectionBinding struct {
@@ -168,8 +188,8 @@ func (a *WebAdapter) Stop(_ context.Context) error {
 		return true
 	})
 	a.cancelFuncs.Range(func(key, value any) bool {
-		if cancel, ok := value.(context.CancelFunc); ok {
-			cancel()
+		if cancellation, ok := value.(*requestCancellation); ok {
+			cancellation.close()
 		}
 		a.cancelFuncs.Delete(key)
 		return true
@@ -685,8 +705,8 @@ func (a *WebAdapter) handleWS(w http.ResponseWriter, r *http.Request) {
 			slog.Info("WebSocket cancel", "session", incoming.SessionID, "request_id", requestID)
 			if requestID != "" && a.requestOwnedBy(requestID, ownerID) {
 				a.stopDisconnectTimer(requestID)
-				if cancelFn, ok := a.cancelFuncs.LoadAndDelete(requestID); ok {
-					cancelFn.(context.CancelFunc)()
+				if cancelFn, ok := a.cancelFuncs.Load(requestID); ok {
+					cancelFn.(*requestCancellation).cancel(requestcancel.ErrUserCancelled)
 				}
 				if a.streams != nil {
 					a.streams.Cancel(requestID)
@@ -802,12 +822,19 @@ func (a *WebAdapter) handleWS(w http.ResponseWriter, r *http.Request) {
 		}
 
 		logger := trace.NewRequest(msg.UserID, msg.SessionID).With("source", "chat", "provider", incoming.Provider, "model", incoming.Model, "request_id", incoming.RequestID)
+		deadlineCtx, stopDeadline := context.WithTimeout(skill.WithAuthenticatedUser(context.Background(), ownerID), 10*time.Minute)
+		signalCtx, cancelSignal := requestcancel.WithSignal(deadlineCtx)
+		ctx, cancel := context.WithCancelCause(signalCtx)
+		cancellation := &requestCancellation{transport: cancel, signal: cancelSignal, ctx: ctx}
+		if incoming.RequestID != "" {
+			// 先登记停止入口，再启动处理，紧随消息到达的cancel不能落在登记空隙。
+			a.cancelFuncs.Store(incoming.RequestID, cancellation)
+		}
 
-		go func(incoming wsMessage, msg *adapter.Message) {
-			ctx, cancel := context.WithTimeout(skill.WithAuthenticatedUser(context.Background(), ownerID), 10*time.Minute)
-			defer cancel()
+		go func(incoming wsMessage, msg *adapter.Message, ctx context.Context, cancellation *requestCancellation, stopDeadline context.CancelFunc) {
+			defer stopDeadline()
+			defer cancellation.close()
 			if incoming.RequestID != "" {
-				a.cancelFuncs.Store(incoming.RequestID, cancel)
 				defer a.cancelFuncs.Delete(incoming.RequestID)
 				defer func() { a.finishRequest(incoming.RequestID, msg.SessionID) }()
 			}
@@ -838,7 +865,7 @@ func (a *WebAdapter) handleWS(w http.ResponseWriter, r *http.Request) {
 				}
 				if err := a.sendStreamWithIDs(ctx, chatID, msg.SessionID, incoming.RequestID, chunks); err != nil {
 					trace.L(ctx).Error("流式发送失败", "err", err)
-					cancel()
+					cancellation.cancel(err)
 					for range chunks {
 					}
 				}
@@ -886,7 +913,7 @@ func (a *WebAdapter) handleWS(w http.ResponseWriter, r *http.Request) {
 			if err := a.sendToTargets(ctx, chatID, "", respMsg); err != nil {
 				trace.L(ctx).Error("error", "err", err)
 			}
-		}(incoming, msg)
+		}(incoming, msg, ctx, cancellation, stopDeadline)
 	}
 }
 
@@ -956,15 +983,21 @@ func (a *WebAdapter) scheduleDisconnectCancel(requestID string, subs *requestSub
 		if !ok || current != subs {
 			return
 		}
+		retained := false
 		canceled := subs.IfEmpty(func() {
-			if cancelFn, ok := a.cancelFuncs.LoadAndDelete(requestID); ok {
-				cancelFn.(context.CancelFunc)()
+			if cancelFn, ok := a.cancelFuncs.Load(requestID); ok {
+				cancellation := cancelFn.(*requestCancellation)
+				if requestcancel.IsRetained(cancellation.ctx) {
+					retained = true
+					return
+				}
+				cancellation.cancel(nil)
 			}
 			if a.streams != nil {
 				a.streams.Cancel(requestID)
 			}
 		})
-		if canceled {
+		if canceled && !retained {
 			a.requestConns.Delete(requestID)
 			slog.Info("WebSocket 请求因无订阅者取消", "request_id", requestID, "grace", grace)
 		}
@@ -1292,6 +1325,9 @@ func (a *WebAdapter) sendToTargets(ctx context.Context, chatID, requestID string
 	var firstErr error
 	for _, targetID := range value.(*requestSubscribers).Snapshot() {
 		if err := a.writeMessage(ctx, targetID, msg); err != nil && firstErr == nil {
+			if requestcancel.IsRetained(ctx) && !requestcancel.IsExplicit(ctx) {
+				continue
+			}
 			firstErr = err
 		}
 	}

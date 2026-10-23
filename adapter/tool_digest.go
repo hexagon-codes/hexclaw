@@ -125,7 +125,12 @@ func renderToolCallDigest(calls []ToolCall, includeResult bool) string {
 		statusLabel := "未知"
 		if !includeResult {
 			statusIcon := "⚪"
-			switch c.Status {
+			status := c.Status
+			// 请求异常不证明远端未执行，优先保留已确认的未知结果。
+			if c.Detail != nil && c.Detail.Outcome == "unknown" {
+				status = "unknown"
+			}
+			switch status {
 			case "success":
 				statusIcon, statusLabel = "🟢", "成功"
 			case "error":

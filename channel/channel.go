@@ -182,7 +182,7 @@ func (e PreparedEnvelope) Validate() error {
 	return nil
 }
 
-// DeliveryParts 把一份 canonical 消息冻结为 Markdown 在前、附件随后的一组单 part 载荷。
+// DeliveryParts 把一份 canonical 消息冻结为可选Markdown和连续附件的单part载荷。
 func (m Message) DeliveryParts() ([]DeliveryPart, error) {
 	if err := m.Validate(); err != nil {
 		return nil, err
@@ -190,9 +190,9 @@ func (m Message) DeliveryParts() ([]DeliveryPart, error) {
 	if m.Content == nil || m.RenderManifest == nil {
 		return nil, errors.New("channel: canonical delivery evidence is required")
 	}
-	if len(m.RenderManifest.Parts) != len(m.Attachments)+1 ||
-		m.RenderManifest.Parts[0].Kind != messagecontent.PartMarkdown {
-		return nil, errors.New("channel: delivery manifest must contain one markdown part followed by its artifacts")
+	offset, err := canonicalArtifactOffset(m.Content, m.RenderManifest)
+	if err != nil {
+		return nil, err
 	}
 
 	content := *m.Content
@@ -201,14 +201,16 @@ func (m Message) DeliveryParts() ([]DeliveryPart, error) {
 	manifest.Parts = append([]messagecontent.RenderPart(nil), m.RenderManifest.Parts...)
 	markdownSum := sha256.Sum256([]byte(content.Markdown))
 	parts := make([]DeliveryPart, 0, len(manifest.Parts))
-	parts = append(parts, DeliveryPart{
-		Kind:           messagecontent.PartMarkdown,
-		Ordinal:        1,
-		Digest:         "sha256:" + hex.EncodeToString(markdownSum[:]),
-		Text:           manifest.Parts[0].Text,
-		MessageContent: &content,
-		RenderManifest: &manifest,
-	})
+	if offset == 1 {
+		parts = append(parts, DeliveryPart{
+			Kind:           messagecontent.PartMarkdown,
+			Ordinal:        1,
+			Digest:         "sha256:" + hex.EncodeToString(markdownSum[:]),
+			Text:           manifest.Parts[0].Text,
+			MessageContent: &content,
+			RenderManifest: &manifest,
+		})
+	}
 	for i, attachment := range m.Attachments {
 		copyAttachment := Attachment{
 			Name: attachment.Name,
@@ -218,7 +220,7 @@ func (m Message) DeliveryParts() ([]DeliveryPart, error) {
 		parts = append(parts, DeliveryPart{
 			Kind:           messagecontent.PartArtifact,
 			MIME:           attachment.MIME,
-			Ordinal:        i + 2,
+			Ordinal:        i + offset + 1,
 			Digest:         content.Attachments[i].Digest,
 			Attachment:     &copyAttachment,
 			MessageContent: &content,
@@ -231,6 +233,22 @@ func (m Message) DeliveryParts() ([]DeliveryPart, error) {
 		}
 	}
 	return parts, nil
+}
+
+// canonicalArtifactOffset 保留旧图文顺序；仅无正文的真实附件消息从第一个part开始。
+func canonicalArtifactOffset(content *messagecontent.MessageContent, manifest *messagecontent.RenderManifest) (int, error) {
+	offset := 0
+	if len(manifest.Parts) == len(content.Attachments)+1 && manifest.Parts[0].Kind == messagecontent.PartMarkdown {
+		offset = 1
+	} else if strings.TrimSpace(content.Markdown) != "" || len(content.Attachments) == 0 || len(manifest.Parts) != len(content.Attachments) {
+		return 0, errors.New("channel: delivery manifest does not match its text and attachments")
+	}
+	for _, part := range manifest.Parts[offset:] {
+		if part.Kind != messagecontent.PartArtifact {
+			return 0, errors.New("channel: delivery attachments must form a continuous suffix")
+		}
+	}
+	return offset, nil
 }
 
 // Validate 校验单 part 与完整 canonical source/manifest 的身份一致性。
@@ -264,13 +282,17 @@ func (p DeliveryPart) Validate() error {
 			return errors.New("channel: markdown delivery part digest does not match canonical source")
 		}
 	case messagecontent.PartArtifact:
-		if p.Ordinal < 2 || p.Text != "" || p.Attachment == nil {
+		offset, err := canonicalArtifactOffset(p.MessageContent, p.RenderManifest)
+		if err != nil {
+			return err
+		}
+		if p.Ordinal <= offset || p.Text != "" || p.Attachment == nil {
 			return errors.New("channel: artifact delivery part fields are incomplete")
 		}
 		if err := validateCanonicalAttachment(*p.Attachment); err != nil {
 			return err
 		}
-		attachmentIndex := p.Ordinal - 2
+		attachmentIndex := p.Ordinal - offset - 1
 		if attachmentIndex >= len(p.MessageContent.Attachments) {
 			return errors.New("channel: artifact delivery part has no canonical attachment")
 		}
@@ -310,7 +332,11 @@ func NewCanonicalMarkdownMessageWithAttachments(producer messagecontent.Producer
 
 func newCanonicalMessage(producer messagecontent.ProducerKind, locale, markdown, projectedText, fallbackReason string, attachments []Attachment, partKind messagecontent.PartKind, supportsMarkdown bool) (Message, error) {
 	refs := make([]messagecontent.AttachmentRef, 0, len(attachments))
-	parts := []messagecontent.RenderPart{{Kind: partKind, Text: projectedText}}
+	parts := make([]messagecontent.RenderPart, 0, len(attachments)+1)
+	// 只有正文和投影均为空且确有附件时，省去无内容的文字part。
+	if strings.TrimSpace(projectedText) != "" || strings.TrimSpace(markdown) != "" || len(attachments) == 0 {
+		parts = append(parts, messagecontent.RenderPart{Kind: partKind, Text: projectedText})
+	}
 	for _, attachment := range attachments {
 		if err := validateCanonicalAttachment(attachment); err != nil {
 			return Message{}, err

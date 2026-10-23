@@ -830,11 +830,11 @@ func (m *Manager) RecallMessage(ctx context.Context, target, externalMessageID s
 func (m *Manager) PrepareDeliveryPartResource(ctx context.Context, target string, part adapter.DeliveryPart) (string, error) {
 	adp := m.resolveRunningAdapterByStableID(target)
 	if adp == nil {
-		return "", fmt.Errorf("no running adapter for stable instance %q", target)
+		return "", &adapter.ResourcePreparationError{Known: true, Cause: fmt.Errorf("no running adapter for stable instance %q", target)}
 	}
 	partAdapter, ok := adp.(adapter.DeliveryPartAdapter)
 	if !ok {
-		return "", fmt.Errorf("adapter %q does not support delivery part preparation", adp.Name())
+		return "", &adapter.ResourcePreparationError{Known: true, Cause: fmt.Errorf("adapter %q does not support delivery part preparation", adp.Name())}
 	}
 	return partAdapter.PrepareDeliveryPartResource(ctx, part)
 }
@@ -1029,6 +1029,7 @@ func (m *Manager) HealthAll(ctx context.Context) ([]*HealthReport, error) {
 
 func (m *Manager) wrapHandler(inst *Instance, next adapter.MessageHandler) adapter.MessageHandler {
 	return func(ctx context.Context, msg *adapter.Message) (*adapter.Reply, error) {
+		ctx = adapter.WithPlatformInstanceIdentity(ctx, inst.ID, inst.Provider)
 		if msg.InstanceID == "" {
 			msg.InstanceID = inst.Name
 		}

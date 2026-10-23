@@ -101,14 +101,14 @@ func TestIMHandlerFreezesModelAfterToolDigestWithoutChangingCanonicalOrAttachmen
 	if err := appendIMToolDigestAndRebuildCanonical(reply, "dingtalk"); err != nil {
 		t.Fatal(err)
 	}
-	if reply.Content != body+adapter.ToolCallStatusDigest(reply.ToolCalls) || reply.MessageContent.Markdown != reply.Content || len(reply.Attachments) != 1 || reply.Attachments[0] != attachment {
+	if reply.Content != body || reply.MessageContent.Markdown != reply.Content || len(reply.Attachments) != 1 || reply.Attachments[0] != attachment {
 		t.Fatalf("canonical body or attachment changed: %+v", reply)
 	}
 	if err := reply.RenderManifest.ValidateFor(*reply.MessageContent); err != nil {
 		t.Fatal(err)
 	}
 	visible := reply.RenderManifest.Parts[0].Text
-	if !strings.Contains(visible, "### 第一步") || !strings.Contains(visible, "`2 ** 3`") || !strings.HasSuffix(visible, "**本次模型**：云端测试 / gpt-6.1-sol") || strings.Count(visible, "本次模型") != 1 {
+	if !strings.Contains(visible, "### 第一步") || !strings.Contains(visible, "`2 ** 3`") || !strings.HasSuffix(visible, "**本次模型**： 云端测试 · gpt-6.1-sol") || strings.Count(visible, "本次模型") != 1 {
 		t.Fatalf("frozen projection lost body formatting or actual model suffix: %q", visible)
 	}
 	if strings.Contains(reply.Content, "本次模型") || strings.Contains(visible, "solve · ·") || strings.Contains(visible, "solve · ###") {

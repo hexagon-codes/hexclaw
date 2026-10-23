@@ -21,6 +21,7 @@ import (
 	"github.com/hexagon-codes/ai-core/llm"
 	imagegen "github.com/hexagon-codes/ai-core/media/image"
 	videogen "github.com/hexagon-codes/ai-core/media/video"
+	"github.com/hexagon-codes/hexclaw/internal/mediaflow"
 	"github.com/hexagon-codes/hexclaw/skill"
 	genstore "github.com/hexagon-codes/toolkit/blobstore"
 	"github.com/hexagon-codes/toolkit/util/logger"
@@ -50,6 +51,7 @@ type blobStore interface {
 
 // MediaGenerateSkill 从文本提示词生成图片（默认）或视频，返回落盘后的稳定文件路径。
 type MediaGenerateSkill struct {
+	flow  *mediaflow.Service
 	img   imageGenerator
 	vid   videoGenerator
 	store blobStore
@@ -83,6 +85,9 @@ func newMediaGenerateSkillWith(img imageGenerator, vid videoGenerator, store blo
 
 func (s *MediaGenerateSkill) Name() string { return "media_generate" }
 func (s *MediaGenerateSkill) Description() string {
+	if s.flow != nil {
+		return "Generate configured images, videos or speech; read, resume or resend previous media operations"
+	}
 	return "Generate an image or video from a text prompt"
 }
 
@@ -90,6 +95,9 @@ func (s *MediaGenerateSkill) Description() string {
 func (s *MediaGenerateSkill) Match(string) bool { return false }
 
 func (s *MediaGenerateSkill) ToolDefinition() llm.ToolDefinition {
+	if s.flow != nil {
+		return s.mediaFlowDefinition()
+	}
 	return llm.NewToolDefinition("media_generate",
 		"Generate an image (default) or video from a text prompt; returns a stable file path "+
 			"(persisted under generated/) usable by export/send/ingest. You MUST call this to actually "+
@@ -108,6 +116,9 @@ func (s *MediaGenerateSkill) ToolDefinition() llm.ToolDefinition {
 }
 
 func (s *MediaGenerateSkill) Execute(ctx context.Context, args map[string]any) (*skill.Result, error) {
+	if s.flow != nil {
+		return s.executeMediaFlow(ctx, args)
+	}
 	prompt := firstStringArg(args, "prompt")
 	if prompt == "" {
 		return nil, fmt.Errorf("prompt must not be empty")

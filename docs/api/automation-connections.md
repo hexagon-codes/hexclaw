@@ -545,6 +545,10 @@ task_ref与至少一条有效entries必填。owner只从可信上下文取得；
 
 先核对运行中适配器的实时连接健康，再返回实例列表；敏感config值掩码。不是单纯读取静态配置。
 
+每项新增只读 `token_usage`：包含 `input_tokens`、`output_tokens`、`total_tokens`，均为 int64，total 为实际输入与输出之和。仅汇总现有成本回执中能以稳定物理实例ID归属的真实用量；账号改名不清零，同名新账号不继承。统计成功但没有可归属回执时三项均为0；统计暂不可用时为 null。不按正文长度、用户ID或名称补猜历史用量。该字段不写回账号配置，不改变创建、更新、健康检查或外部消息投递。
+
+只读 `message_count`（int64或null）统计该平台、账号会话中实际持久化的消息记录，与会话消息列表采用同一消息口径。兼容会话保存的稳定实例ID或当前唯一实例名称；名称引用只接受当前账号创建后建立的会话，同名重建不继承旧会话。没有记录为0，统计失败为null。测试通知和健康轮询不会额外计入会话消息；历史无法归属的名称不补猜。Desktop展示“N 消息 · ≈ N tokens”，不改变上述tokens的实际用量来源。
+
 实现: [`handleListInstances`](../../api/handler_instances.go#L191). 注册条件: `s.instanceMgr != nil`.
 
 | HTTP | 响应 / 条件 |
@@ -661,7 +665,7 @@ path.id定位现有实例；空provider/name沿用旧值，省略config沿用旧
 
 ### `POST /api/v1/platforms/instances/by-id/{id}/send-test` — 向外部会话发送测试消息
 
-此接口确有外发副作用。实例须enabled。request_id非空：根据现有有效绑定冻结目标并去重，30秒内发送，重放只读原回执；不健康或无绑定时不发，accepted不证明送达，未知结果不自动重发。request_id为空：target/content必填，启动实例后向指定target发送；发送失败也可返回200 success=false。示例仅供阅读。
+此接口确有外发副作用。实例须enabled。request_id非空：所有智能体及默认助手共用同一解析器，合并当前平台、账号的有效显式ChatID绑定与已存真实活动会话，冻结目标并去重，30秒内发送。真实会话须有用户消息，非归档/删除或分叉副本；稳定实例ID优先，当前名称引用只接受该账号创建后的会话，不串账号或平台。没有目标或连接不健康时不发送；目标查询失败返回错误，不能静默漏发。重放先读原冻结回执，旧空目标、accepted或unknown请求都不补发；新点击在已知终态后使用新request_id。accepted不证明手机送达，未知结果不自动重发。原direct/OTO范围保持，不创建智能体绑定或修改路由。request_id为空：target/content必填，启动实例后向指定target发送；发送失败也可返回200 success=false。示例仅供阅读。
 
 实现: [`handleSendTestInstanceByID`](../../api/handler_instances.go#L511). 注册条件: `s.instanceMgr != nil`.
 

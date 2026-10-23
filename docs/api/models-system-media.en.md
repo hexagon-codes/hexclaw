@@ -2,7 +2,7 @@
 
 [API overview](../api.en.md) · [中文](models-system-media.md) · [OpenAPI](../../api/openapi.yaml)
 
-This reference covers 53 registered method/path combinations in the current source, including conditional modules and native internal endpoints. A released binary may differ; use the documentation matching its version. Requests and responses below define the public contract; implementation links are supplementary.
+This reference covers 55 registered method/path combinations in the current source, including conditional modules and native internal endpoints. A released binary may differ; use the documentation matching its version. Requests and responses below define the public contract; implementation links are supplementary.
 
 ## Before calling
 
@@ -812,6 +812,18 @@ curl -X PUT "${HEXCLAW_API}/api/v1/assistant/soul" \
 
 ## Voice, images, videos and generated files
 
+### Shared media operation contract
+
+The main application wires image, video, TTS and single-turn audio APIs to the same durable operation service used by Agent media tools. The following contract applies when that service is installed. Embedded servers using only legacy SDK setters without `SetMediaFlow` keep the old adapter behavior: new operation endpoints are unavailable and the application deduplication/recovery guarantees below do not apply.
+
+- Direct APIs retain image/audio-chat JSON, video `task_id`, and TTS binary response shapes. They create no session, assistant message or channel delivery. Conversation entrypoints aggregate outputs through their original turn finalization.
+- Image/video keys are chosen from body `idempotency_key`, then `Idempotency-Key`, then `X-Request-ID`; TTS/audio-chat use the two headers. Keys are scoped to the authenticated owner and media action. Omitting all keys creates a new request. Retry with the original key and complete input, never with a replacement key for an unknown result. Changed explicit input returns 409; later defaults do not reroute an accepted operation.
+- Successful responses include `X-Media-Operation-ID`; some errors also include it. Retain it when present. New video `task_id` equals that opaque operation ID. Legacy SDK task references still use the original polling endpoint and must not be rewritten as operation IDs.
+- `GET /api/v1/media/operations/{id}` exposes generation, persistence and saved assets. `generation_state=succeeded` alone does not prove persistence: all outputs require `save_state=ready`; `partial` preserves successful assets. `deliveries` separately projects persisted channel facts: `accepted` is not `delivered`, and an empty array means no delivery record, never delivery confirmation.
+- Read, resume and cancel are scoped to the authenticated user. Missing and other-owner IDs both return 404; body/query owner overrides are not accepted. Existing operations remain readable after generation is disabled. Query or resume an `unknown` original operation; never infer it was unbilled and regenerate.
+- `cancel_requested=true` records local intent. Queued work can stop; accepted upstream work is not guaranteed to cancel, and late assets are retained. Before persistence is ready, resume restores recoverable persistence only. Once ready, it resumes only definitively failed original delivery stages, preserving unknown and successful parts without resending all attachments. Unverifiable outcomes remain unknown/failed.
+- Status `enabled` means a media route exists. It does not replace the Agent `media_gen` setting or an actual generation check. Disabling the tool does not delete existing assets.
+
 | Method | Path | Operation |
 | --- | --- | --- |
 | GET | `/api/v1/voice/status` | [Read STT/TTS status](#op-get-api-v1-voice-status) |
@@ -824,6 +836,8 @@ curl -X PUT "${HEXCLAW_API}/api/v1/assistant/soul" \
 | GET | `/api/v1/videos/tasks/{id}` | [Poll video task](#op-get-api-v1-videos-tasks-id) |
 | GET | `/api/v1/voicechat/status` | [语音对话 / Voice conversation status](#op-get-api-v1-voicechat-status) |
 | POST | `/api/v1/voicechat/chat` | [Voice conversation](#op-post-api-v1-voicechat-chat) |
+| GET | `/api/v1/media/operations/{id}` | [Read media operation and assets](#op-get-api-v1-media-operations-id) |
+| POST | `/api/v1/media/operations/{id}/{action}` | [Resume or cancel media operation](#op-post-api-v1-media-operations-id-action) |
 | GET | `/api/v1/files/generated/{path}` | [Read generated file](#op-get-api-v1-files-generated-path) |
 
 <a id="op-get-api-v1-voice-status"></a>
@@ -910,9 +924,12 @@ Authentication: `Authorization: Bearer ${HEXCLAW_API_TOKEN}`.
 
 Availability: `s.voiceSvc != nil`.
 
-1 MiB JSON, non-whitespace text. Returns audio binary directly in the configured TTS result format; voice is optional. May incur upstream cost.
+1 MiB JSON; non-whitespace text and optional voice. The shared media service persists the audio before returning the existing binary response with its actual MIME type. Idempotency-Key or fallback X-Request-ID deduplicates requests; X-Media-Operation-ID enables query/recovery. Changed same-key intent returns 409. Direct calls create no conversation or channel delivery.
 
-Path/query/additional headers: none. Authentication and content type are specified above.
+| Parameter | Location | Required | Type | Defaults / constraints | Meaning |
+| --- | --- | --- | --- | --- | --- |
+| `Idempotency-Key` | header | no | string | — | Application key scoped to the authenticated owner and media action |
+| `X-Request-ID` | header | no | string | — | Fallback key when Idempotency-Key is omitted |
 
 Request body:
 
@@ -925,6 +942,8 @@ Request body:
 
 Responses:
 
+Success response header `X-Media-Operation-ID` identifies the original operation. Also inspect and retain this header on errors when present.
+
 | HTTP status | Content type | Body contract | Meaning |
 | --- | --- | --- | --- |
 | 200 | `audio/mpeg` | string (binary) | Successful response |
@@ -934,6 +953,7 @@ Responses:
 | 200 | `audio/pcm` | string (binary) | Successful response |
 | 400 | `application/json` | [MessageError](#schema-messageerror) | Invalid input |
 | 401 | `application/json` | [MessageError](#schema-messageerror) | Invalid access token |
+| 409 | `application/json` | [MessageError](#schema-messageerror) | Idempotency intent or operation revision conflict |
 | 500 | `application/json` | [MessageError](#schema-messageerror) | Processing/runtime failure |
 | 503 | `application/json` | [MessageError](#schema-messageerror) | Service not configured |
 
@@ -995,12 +1015,12 @@ Authentication: `Authorization: Bearer ${HEXCLAW_API_TOKEN}`.
 
 Availability: `always registered`.
 
-64 KiB JSON, non-empty prompt string. Provider selection is explicit name, model index, then default; unresolved routing is 500. Body idempotency_key is upstream-specific; headers only correlate logs, not service deduplication. May incur cost. With genStore, successful persistence sets file_path and clears B64. Persistence failures may still return 200 with URL/B64; inspect actual outputs.
+64 KiB JSON; non-whitespace prompt. The shared media service resolves an exact configured instance/model; ambiguity is 400 and unavailable capability is 503. Body idempotency_key, Idempotency-Key, then X-Request-ID supply application deduplication. Same-key intent changes return 409. The existing image JSON shape is retained; 200 requires all outputs persisted. Partial/save failures return an error; query the operation for saved assets. X-Media-Operation-ID identifies the durable operation. No session or channel delivery is created.
 
 | Parameter | Location | Required | Type | Defaults / constraints | Meaning |
 | --- | --- | --- | --- | --- | --- |
-| `Idempotency-Key` | header | no | string | — | Fallback log correlation only; not injected into body idempotency_key |
-| `X-Request-ID` | header | no | string | — | Secondary log correlation fallback |
+| `Idempotency-Key` | header | no | string | — | Application key scoped to the authenticated owner and media action |
+| `X-Request-ID` | header | no | string | — | Fallback key when Idempotency-Key is omitted |
 
 Request body:
 
@@ -1008,7 +1028,7 @@ Request body:
 
 | Field | Type / contract | Required | Defaults / constraints | Meaning |
 | --- | --- | --- | --- | --- |
-| `provider` | string | no | — | Optional; explicit provider, then model routing, then configured default |
+| `provider` | string | no | — | Configured Provider instance ID or key; omission selects an unambiguous media route |
 | `model` | string | no | — | model |
 | `prompt` | string | yes | — | prompt |
 | `negative` | string | no | — | negative |
@@ -1016,7 +1036,7 @@ Request body:
 | `size` | string | no | — | size |
 | `ratio` | string | no | — | ratio |
 | `seed` | integer | no | — | 0 means unspecified |
-| `idempotency_key` | string | no | — | Forwarded only when an upstream Provider supports it |
+| `idempotency_key` | string | no | — | Application idempotency key, taking precedence over headers; upstream deduplication remains provider-specific |
 | `callback_url` | string | no | — | Provider-specific; not a HexClaw callback registration |
 | `extra` | object (actual extra fields) | no | — | extra |
 | `n` | integer | no | — | Provider default is normally 1 |
@@ -1027,11 +1047,14 @@ Request body:
 
 Responses:
 
+Success response header `X-Media-Operation-ID` identifies the original operation. Also inspect and retain this header on errors when present.
+
 | HTTP status | Content type | Body contract | Meaning |
 | --- | --- | --- | --- |
 | 200 | `application/json` | [ModelsImageResult](#schema-modelsimageresult) | Successful response |
 | 400 | `application/json` | [MessageError](#schema-messageerror) | Invalid input |
 | 401 | `application/json` | [MessageError](#schema-messageerror) | Invalid access token |
+| 409 | `application/json` | [MessageError](#schema-messageerror) | Idempotency intent or operation revision conflict |
 | 500 | `application/json` | [MessageError](#schema-messageerror) | Processing/runtime failure |
 | 503 | `application/json` | [MessageError](#schema-messageerror) | Service not configured |
 
@@ -1091,12 +1114,12 @@ Authentication: `Authorization: Bearer ${HEXCLAW_API_TOKEN}`.
 
 Availability: `always registered`.
 
-64 KiB JSON; non-whitespace prompt or image_url required. Service validation errors are wrapped as 500. Body idempotency is upstream-dependent; headers only correlate logs. 200 returns provider::raw-task-id for accepted submission, not completion; retain it for polling and reconcile unknown outcomes.
+64 KiB JSON; non-whitespace prompt or image_url required. The shared media service uses body idempotency_key, Idempotency-Key, then X-Request-ID for application deduplication; changed intent returns 409. The task_id response field is retained but contains an opaque media operation ID. HTTP 200 means a submission reference is persisted, not completed video. Do not parse the ID or regenerate an unknown result.
 
 | Parameter | Location | Required | Type | Defaults / constraints | Meaning |
 | --- | --- | --- | --- | --- | --- |
-| `Idempotency-Key` | header | no | string | — | Fallback log correlation only; not injected into body idempotency_key |
-| `X-Request-ID` | header | no | string | — | Secondary log correlation fallback |
+| `Idempotency-Key` | header | no | string | — | Application idempotency key; image/video body idempotency_key takes precedence |
+| `X-Request-ID` | header | no | string | — | Fallback key when neither previous key is supplied |
 
 Request body:
 
@@ -1104,7 +1127,7 @@ Request body:
 
 | Field | Type / contract | Required | Defaults / constraints | Meaning |
 | --- | --- | --- | --- | --- |
-| `provider` | string | no | — | Optional; explicit provider, then model routing, then configured default |
+| `provider` | string | no | — | Configured Provider instance ID or key; omission selects an unambiguous media route |
 | `model` | string | no | — | model |
 | `prompt` | string | no | — | prompt |
 | `negative` | string | no | — | negative |
@@ -1112,7 +1135,7 @@ Request body:
 | `size` | string | no | — | size |
 | `ratio` | string | no | — | ratio |
 | `seed` | integer | no | — | 0 means unspecified |
-| `idempotency_key` | string | no | — | Forwarded only when an upstream Provider supports it |
+| `idempotency_key` | string | no | — | Application idempotency key, taking precedence over headers; upstream deduplication remains provider-specific |
 | `callback_url` | string | no | — | Provider-specific; not a HexClaw callback registration |
 | `extra` | object (actual extra fields) | no | — | extra |
 | `end_image_url` | string | no | — | end image url |
@@ -1124,11 +1147,14 @@ Request body:
 
 Responses:
 
+Success response header `X-Media-Operation-ID` identifies the original operation. Also inspect and retain this header on errors when present.
+
 | HTTP status | Content type | Body contract | Meaning |
 | --- | --- | --- | --- |
 | 200 | `application/json` | [ModelsVideoTask](#schema-modelsvideotask) | Successful response |
 | 400 | `application/json` | [MessageError](#schema-messageerror) | Invalid input |
 | 401 | `application/json` | [MessageError](#schema-messageerror) | Invalid access token |
+| 409 | `application/json` | [MessageError](#schema-messageerror) | Idempotency intent or operation revision conflict |
 | 500 | `application/json` | [MessageError](#schema-messageerror) | Processing/runtime failure |
 | 503 | `application/json` | [MessageError](#schema-messageerror) | Service not configured |
 
@@ -1145,7 +1171,7 @@ curl -X POST "${HEXCLAW_API}/api/v1/videos/generate" \
 
 ```json
 {
-  "task_id": "example-provider::example-task"
+  "task_id": "media-example-operation"
 }
 ```
 
@@ -1157,7 +1183,7 @@ Authentication: `Authorization: Bearer ${HEXCLAW_API_TOKEN}`.
 
 Availability: `always registered`.
 
-Use the complete provider::task ID, URL-encoded. Polls upstream and may persist video/cover on done. HTTP 200/status=success does not prove local persistence: inspect error and video_file_path; temporary URLs may remain after download failure.
+Use the complete returned task_id, URL-encoded, without parsing it. New media operations read durable state while the worker polls the original upstream task. done indicates a polling terminal state only. Settled but unpersisted outputs map to status=failed with error; query media/operations to distinguish unknown, cancellation and partial persistence. Existing SDK references retain the legacy polling path and require their provider to remain configured.
 
 | Parameter | Location | Required | Type | Defaults / constraints | Meaning |
 | --- | --- | --- | --- | --- | --- |
@@ -1172,6 +1198,7 @@ Responses:
 | 200 | `application/json` | [ModelsVideoStatus](#schema-modelsvideostatus) | Successful response |
 | 400 | `application/json` | [MessageError](#schema-messageerror) | Invalid input |
 | 401 | `application/json` | [MessageError](#schema-messageerror) | Invalid access token |
+| 404 | `application/json` | [MessageError](#schema-messageerror) | Operation not found for the authenticated owner |
 | 500 | `application/json` | [MessageError](#schema-messageerror) | Processing/runtime failure |
 | 503 | `application/json` | [MessageError](#schema-messageerror) | Service not configured |
 
@@ -1180,13 +1207,13 @@ Implementation reference: [`handleVideoGenPoll`](../../api/handler_videogen.go).
 Example (illustrative response, not a recorded live call):
 
 ```bash
-curl "${HEXCLAW_API}/api/v1/videos/tasks/example-provider%3A%3Aexample-task" \
+curl "${HEXCLAW_API}/api/v1/videos/tasks/media-example-operation" \
   -H "Authorization: Bearer ${HEXCLAW_API_TOKEN}"
 ```
 
 ```json
 {
-  "task_id": "example-provider::example-task",
+  "task_id": "media-example-operation",
   "provider": "example-provider",
   "model": "example-model",
   "status": "success",
@@ -1227,9 +1254,12 @@ Authentication: `Authorization: Bearer ${HEXCLAW_API_TOKEN}`.
 
 Availability: `always registered`.
 
-16 MiB JSON. Supply Base64 audio or text fallback; Provider determines model/format/voice. May incur cost. Successful genStore persistence sets audio_file_path and clears audio; failed persistence may still return 200 with Base64 audio. At least audio or text must be non-empty; empty-input service validation currently returns 500.
+16 MiB JSON; supply Base64 audio or text fallback. Both empty currently causes domain validation HTTP 500. The shared media service returns the existing JSON with audio_file_path only after persistence and clears audio. Idempotency-Key or fallback X-Request-ID deduplicates requests; X-Media-Operation-ID enables query/recovery; changed same-key intent is 409. Save failures do not report successful output. No session or channel delivery is created.
 
-Path/query/additional headers: none. Authentication and content type are specified above.
+| Parameter | Location | Required | Type | Defaults / constraints | Meaning |
+| --- | --- | --- | --- | --- | --- |
+| `Idempotency-Key` | header | no | string | — | Application idempotency key; image/video body idempotency_key takes precedence |
+| `X-Request-ID` | header | no | string | — | Fallback key when neither previous key is supplied |
 
 Request body:
 
@@ -1248,11 +1278,14 @@ Request body:
 
 Responses:
 
+Success response header `X-Media-Operation-ID` identifies the original operation. Also inspect and retain this header on errors when present.
+
 | HTTP status | Content type | Body contract | Meaning |
 | --- | --- | --- | --- |
 | 200 | `application/json` | [ModelsVoiceChatResult](#schema-modelsvoicechatresult) | Successful response |
 | 400 | `application/json` | [MessageError](#schema-messageerror) | Invalid input |
 | 401 | `application/json` | [MessageError](#schema-messageerror) | Invalid access token |
+| 409 | `application/json` | [MessageError](#schema-messageerror) | Idempotency intent or operation revision conflict |
 | 500 | `application/json` | [MessageError](#schema-messageerror) | Processing/runtime failure |
 | 503 | `application/json` | [MessageError](#schema-messageerror) | Service not configured |
 
@@ -1277,6 +1310,63 @@ curl -X POST "${HEXCLAW_API}/api/v1/voicechat/chat" \
 }
 ```
 
+<a id="op-get-api-v1-media-operations-id"></a>
+
+### GET `/api/v1/media/operations/{id}` — Read media operation and persistent assets
+
+Authentication: `Authorization: Bearer ${HEXCLAW_API_TOKEN}`. Always registered; returns 503 without the shared media service.
+
+Use the original `X-Media-Operation-ID` or new video `task_id` as the path `id`. No request body. Ownership comes from authentication. Reading does not regenerate or change configuration, and existing operations remain readable after generation is disabled.
+
+| HTTP status | Content type | Body contract | Meaning |
+| --- | --- | --- | --- |
+| 200 | `application/json` | [ModelsMediaOperation](#schema-modelsmediaoperation) | Current state, saved assets and delivery facts; HTTP 200 alone does not confirm delivery |
+| 401 | `application/json` | [MessageError](#schema-messageerror) | Invalid access token |
+| 404 | `application/json` | [MessageError](#schema-messageerror) | Missing or owned by another authenticated user |
+| 500 | `application/json` | [MessageError](#schema-messageerror) | Operation read failed |
+| 503 | `application/json` | [MessageError](#schema-messageerror) | Shared media service unavailable |
+
+```bash
+curl "${HEXCLAW_API}/api/v1/media/operations/REPLACE_WITH_OPERATION_ID" \
+  -H "Authorization: Bearer ${HEXCLAW_API_TOKEN}"
+```
+
+Read `assets[].file_path` through the [generated-file endpoint](#op-get-api-v1-files-generated-path) with current authentication. That endpoint checks ownership for registered media assets; the path itself does not grant access. Do not use it as a host filesystem path. The operation response excludes temporary signed upstream URLs, credentials and input audio. Optional `deliveries` is an array of [ModelsMediaDeliveryStatus](#schema-modelsmediadeliverystatus), exposing only `delivery_id`, `message_id`, `platform`, `state` and `part_states`, not target chat IDs, tokens, signed URLs or payloads. Current servers return `[]` when no delivery record exists. Neither a missing field on older servers nor an empty array means `delivered`. Generation, persistence and delivery are separate; partial output does not establish complete success.
+
+<a id="op-post-api-v1-media-operations-id-action"></a>
+
+### POST `/api/v1/media/operations/{id}/{action}` — Resume or cancel a media operation
+
+Authentication and ownership are as above. `id` identifies an existing operation; `action` permits only `resume` or `cancel`. No request body.
+
+| action | Behavior | Meaning of HTTP 200 |
+| --- | --- | --- |
+| `resume` | Before persistence is ready, restore recoverable persistence only; once ready, resume only definitively failed original delivery stages, preserving unknown/successful parts without resending all attachments or regenerating | Immediately returns current snapshot; keep querying actual state |
+| `cancel` | Record local cancellation intent; queued, unsubmitted work can stop | `cancel_requested=true`, not guaranteed remote cancellation |
+
+An `unknown` result without a verifiable reference is not blindly resubmitted. A new request ID or idempotency key is not recovery. Completed assets and late results from accepted upstream work remain retained; cancellation of delivery does not establish that generation was undone.
+
+The HTTP control endpoint does not wait for persistence recovery or channel delivery; returned `deliveries` describes current facts only. Conversation-tool `resume` waits for recoverable persistence: after successful restoration it delivers restored assets in the current turn. For delivery-only recovery, the tool reports factual state without attaching the complete asset set to a new reply.
+
+| HTTP status | Content type | Body contract | Meaning |
+| --- | --- | --- | --- |
+| 200 | `application/json` | [ModelsMediaOperation](#schema-modelsmediaoperation) | Current snapshot, not recovery completion |
+| 400 | `application/json` | [MessageError](#schema-messageerror) | Unsupported action |
+| 401 | `application/json` | [MessageError](#schema-messageerror) | Invalid access token |
+| 404 | `application/json` | [MessageError](#schema-messageerror) | Missing or owned by another user |
+| 409 | `application/json` | [MessageError](#schema-messageerror) | Operation revision conflict; read current state first |
+| 500 | `application/json` | [MessageError](#schema-messageerror) | Resume or cancel failed |
+| 503 | `application/json` | [MessageError](#schema-messageerror) | Shared media service unavailable |
+
+The following changes recovery state for the original operation; it does not submit replacement generation:
+
+```bash
+curl -X POST "${HEXCLAW_API}/api/v1/media/operations/REPLACE_WITH_OPERATION_ID/resume" \
+  -H "Authorization: Bearer ${HEXCLAW_API_TOKEN}"
+```
+
+Implementation reference: [`handleMediaOperation`](../../api/handler_mediaflow.go). This HTTP endpoint has no `resend` action. Conversation resends reference an existing operation through the media tool and the original conversation delivery chain.
+
 <a id="op-get-api-v1-files-generated-path"></a>
 
 ### GET `/api/v1/files/generated/{path}` — Read generated file
@@ -1285,7 +1375,7 @@ Authentication: `Authorization: Bearer ${HEXCLAW_API_TOKEN}`.
 
 Availability: `always registered`.
 
-Actual Go wildcard is {path...}: use returned relative file_path, including directory separators. Non-empty download query sets attachment: 1/true keeps the stored name, other values set download name. Cache-Control public,max-age=86400, standard range/conditional requests. Handler errors are text/plain; authentication errors remain JSON.
+The Go wildcard is {path...}; use the returned relative file_path, including directory separators. The shared media service checks ownership only for registered media assets: no record owned by the authenticated user returns 404, while the same content remains readable when legitimately generated and registered for that user. Legacy files outside media registration retain their existing access contract. Registered media returns Cache-Control: private, max-age=86400; unmanaged legacy files retain public, max-age=86400. Content-Type follows the image, video or audio extension; unknown extensions use application/octet-stream. Non-empty download sets attachment: 1/true keeps the stored name, other values set the download name. Standard range/conditional requests remain supported. Handler errors are text/plain; authentication errors remain JSON.
 
 | Parameter | Location | Required | Type | Defaults / constraints | Meaning |
 | --- | --- | --- | --- | --- | --- |
@@ -1311,11 +1401,17 @@ Responses:
 | 200 | `image/gif` | string (binary) | Successful response |
 | 200 | `video/mp4` | string (binary) | Successful response |
 | 200 | `video/webm` | string (binary) | Successful response |
+| 200 | `audio/mpeg` | string (binary) | Successful response |
+| 200 | `audio/wav` | string (binary) | Successful response |
+| 200 | `audio/ogg` | string (binary) | Successful response |
+| 200 | `audio/aac` | string (binary) | Successful response |
+| 200 | `audio/flac` | string (binary) | Successful response |
+| 200 | `audio/mp4` | string (binary) | Successful response |
 | 206 | `application/octet-stream` | string (binary) | Partial binary content |
 | 304 | — | no body | Not modified |
 | 400 | `text/plain` | string | Missing path |
 | 401 | `application/json` | [MessageError](#schema-messageerror) | Invalid access token |
-| 404 | `text/plain` | string | File unavailable |
+| 404 | `text/plain` | string | File unavailable or no media asset owned by the current user |
 | 412 | — | no body | Conditional request failed |
 | 416 | `text/plain` | string | Unsatisfiable Range |
 | 500 | `text/plain` | string | File stat failed |
@@ -1334,6 +1430,8 @@ curl "${HEXCLAW_API}/api/v1/files/generated/images/example.png" \
 <a id="logs-config"></a>
 
 ## Logs and configuration projections
+
+Runtime log retention is configured globally with `observe.log_retention_days` in the configuration file. The default is 15 days; omitted and zero values use the default. Restart the backend after changing it. The value controls entry-level expiration in existing JSONL runtime logs and history queries. It does not delete conversations, teaching tasks, model invocation receipts, or external container logs. Existing size and rotation-count limits remain unchanged; raw lines with an unparseable timestamp are preserved.
 
 | Method | Path | Operation |
 | --- | --- | --- |
@@ -3034,6 +3132,65 @@ Security/sandbox are field patches. Ollama must be submitted separately with all
 | `providers` | string[] | yes | — | providers |
 | `models` | string[] | yes | — | models |
 
+<a id="schema-modelsmediaoperation"></a>
+
+### ModelsMediaOperation
+
+All fields below are returned except the additive optional `deliveries` field, which older servers may omit; current servers always return an array. `save_state=ready` proves persistence only. Read `deliveries[].state` and `part_states` separately; a missing field or empty array is not delivery confirmation.
+
+| Field | Type / contract | Meaning |
+| --- | --- | --- |
+| `operation_id` | string | Opaque operation ID |
+| `kind` | string | image / video / audio |
+| `action` | string | generate / synthesize / chat |
+| `provider_instance_id` | string | Frozen routing identity |
+| `actual_provider_instance_id` | string | Actual successful provider, including TTS fallback; empty when unknown |
+| `model` | string | Frozen model; may be empty for some TTS routes |
+| `generation_state` | string | queued / submitting / running / succeeded / failed / unknown / cancelled |
+| `save_state` | string | not_started / saving / ready / partial / failed |
+| `assets` | [ModelsMediaAsset](#schema-modelsmediaasset)[] / null | Persisted assets; may be null before any output is saved |
+| `deliveries` | [ModelsMediaDeliveryStatus](#schema-modelsmediadeliverystatus)[] | Optional additive field; current servers return [] when no record exists, exposing safe delivery facts only |
+| `cancel_requested` | boolean | Local cancellation intent, not remote cancellation confirmation |
+| `error_code` | string | Error category; empty when none |
+| `error` | string | Error explanation; empty when none |
+| `revision` | integer | Durable operation revision |
+| `created_at` | string | RFC 3339 timestamp |
+| `updated_at` | string | RFC 3339 timestamp |
+| `timings_ms` | object / null | Recorded stage durations in integer milliseconds; absent stages are not measured, not billing data |
+
+<a id="schema-modelsmediadeliverystatus"></a>
+
+### ModelsMediaDeliveryStatus
+
+All five fields are returned. `accepted` means platform acceptance; `delivered` follows the channel receipt contract, not user read confirmation. The projection excludes recipient targets, credentials, signed URLs and send payloads.
+
+| Field | Type / contract | Meaning |
+| --- | --- | --- |
+| `delivery_id` | string | Stable original delivery ID |
+| `message_id` | string | Associated assistant message ID |
+| `platform` | string | Platform, for example dingtalk |
+| `state` | string | Persisted aggregate state, such as pending / accepted / delivered / failed / unknown / cancelled |
+| `part_states` | string[] | States in original delivery order, such as pending / preparing / prepared / sending / accepted / delivered / failed / unknown; an empty array does not confirm delivery |
+
+<a id="schema-modelsmediaasset"></a>
+
+### ModelsMediaAsset
+
+| Field | Type / contract | Required | Meaning |
+| --- | --- | --- | --- |
+| `asset_id` | string | yes | Stable asset ID |
+| `operation_id` | string | yes | Owning operation ID |
+| `output_index` | integer | yes | Stable zero-based output order within the operation |
+| `kind` | string | yes | image / video / audio |
+| `role` | string | yes | primary output or cover image for a video |
+| `file_path` | string | yes | Relative path for the generated-file endpoint |
+| `mime` | string | yes | MIME of persisted bytes |
+| `digest` | string | yes | SHA-256 of actual bytes, 64 lowercase hex digits without sha256: prefix |
+| `size` | integer | yes | Actual byte count |
+| `width` | integer | no | Image width when known |
+| `height` | integer | no | Image height when known |
+| `parent_asset_id` | string | no | Present with an explicit parent asset; does not imply a separate edit API |
+
 <a id="schema-modelsvoicestatus"></a>
 
 ### ModelsVoiceStatus
@@ -3072,7 +3229,7 @@ Security/sandbox are field patches. Ollama must be submitted separately with all
 
 | Field | Type / contract | Required | Defaults / constraints | Meaning |
 | --- | --- | --- | --- | --- |
-| `provider` | string | no | — | Optional; explicit provider, then model routing, then configured default |
+| `provider` | string | no | — | Configured Provider instance ID or key; omission selects an unambiguous media route |
 | `model` | string | no | — | model |
 | `prompt` | string | yes | — | prompt |
 | `negative` | string | no | — | negative |
@@ -3080,7 +3237,7 @@ Security/sandbox are field patches. Ollama must be submitted separately with all
 | `size` | string | no | — | size |
 | `ratio` | string | no | — | ratio |
 | `seed` | integer | no | — | 0 means unspecified |
-| `idempotency_key` | string | no | — | Forwarded only when an upstream Provider supports it |
+| `idempotency_key` | string | no | — | Application idempotency key, taking precedence over headers; upstream deduplication remains provider-specific |
 | `callback_url` | string | no | — | Provider-specific; not a HexClaw callback registration |
 | `extra` | object (actual extra fields) | no | — | extra |
 | `n` | integer | no | — | Provider default is normally 1 |
@@ -3118,11 +3275,11 @@ Security/sandbox are field patches. Ollama must be submitted separately with all
 
 ### ModelsVideoRequest
 
-At least non-whitespace prompt or image_url; validation failures from service are returned as HTTP 500 by this handler.
+At least non-whitespace prompt or image_url; the shared media handler returns HTTP 400 for missing input.
 
 | Field | Type / contract | Required | Defaults / constraints | Meaning |
 | --- | --- | --- | --- | --- |
-| `provider` | string | no | — | Optional; explicit provider, then model routing, then configured default |
+| `provider` | string | no | — | Configured Provider instance ID or key; omission selects an unambiguous media route |
 | `model` | string | no | — | model |
 | `prompt` | string | no | — | prompt |
 | `negative` | string | no | — | negative |
@@ -3130,7 +3287,7 @@ At least non-whitespace prompt or image_url; validation failures from service ar
 | `size` | string | no | — | size |
 | `ratio` | string | no | — | ratio |
 | `seed` | integer | no | — | 0 means unspecified |
-| `idempotency_key` | string | no | — | Forwarded only when an upstream Provider supports it |
+| `idempotency_key` | string | no | — | Application idempotency key, taking precedence over headers; upstream deduplication remains provider-specific |
 | `callback_url` | string | no | — | Provider-specific; not a HexClaw callback registration |
 | `extra` | object (actual extra fields) | no | — | extra |
 | `end_image_url` | string | no | — | end image url |

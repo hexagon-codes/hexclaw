@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/hexagon-codes/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/internal/mediaflow"
 	"github.com/hexagon-codes/hexclaw/skill"
 )
 
@@ -31,7 +32,12 @@ func withSkillInvocationContext(ctx context.Context, msg *adapter.Message, sessi
 		}
 	}
 	input["provider"], input["model"] = provider, model
+	physicalID := ""
+	if identity, ok := adapter.PlatformInstanceIdentityFromContext(ctx); ok && identity.Platform == string(msg.Platform) {
+		physicalID = identity.ID
+	}
 	return skill.WithInvocationContext(ctx, skill.InvocationContext{
+		RequestDigest: mediaflow.SourceRequestDigest(msg.Content, msg.Attachments), Platform: string(msg.Platform), PlatformInstanceID: physicalID, ChatID: msg.ChatID,
 		AuthenticatedUserID: skill.AuthenticatedUserID(ctx),
 		RoutedAgentName:     skill.RoutedAgentName(ctx), RequestID: requestID,
 		SourceMessageID: messageID, SessionID: sessionID,

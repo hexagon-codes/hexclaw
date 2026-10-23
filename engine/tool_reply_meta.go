@@ -32,6 +32,8 @@ var replyMetaSinkKey = replyMetaSinkKeyType{}
 var replySafeToolMetaKeys = map[string]bool{
 	"record":                           true, // 记录本入库徽章（{collection,fields,status} JSON），前端 messageRecordChip 消费
 	"artifacts":                        true, // 只透传持久产物引用，不携带文件字节或内部调用参数。
+	"media_resend_operations":          true,
+	"media_operations":                 true,
 	teachingContextReceiptsMetadataKey: true,
 }
 
@@ -191,6 +193,10 @@ func stampToolReplyMeta(ctx context.Context, meta map[string]string) {
 				s.m[k] = mergeArtifactReplyReferences(s.m[k], v)
 				continue
 			}
+			if k == "media_operations" || k == "media_resend_operations" {
+				s.m[k] = mergeMediaOperationReferences(s.m[k], v)
+				continue
+			}
 			if k == teachingContextReceiptsMetadataKey {
 				s.m[k] = mergeSkillContextReceiptReferences(s.m[k], v)
 				continue
@@ -202,6 +208,25 @@ func stampToolReplyMeta(ctx context.Context, meta map[string]string) {
 }
 
 // 同轮多个工具回执按稳定对象身份合并，避免后一次动作遮蔽前一次已发布引用。
+func mergeMediaOperationReferences(previous, next string) string {
+	var merged []string
+	seen := make(map[string]bool)
+	for _, encoded := range []string{previous, next} {
+		var ids []string
+		if json.Unmarshal([]byte(encoded), &ids) != nil {
+			continue
+		}
+		for _, id := range ids {
+			if id != "" && !seen[id] {
+				seen[id] = true
+				merged = append(merged, id)
+			}
+		}
+	}
+	encoded, _ := json.Marshal(merged)
+	return string(encoded)
+}
+
 func mergeArtifactReplyReferences(previous, next string) string {
 	var merged []json.RawMessage
 	seen := make(map[string]bool)

@@ -39,10 +39,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/hexagon-codes/ai-core/llm"
-	imagegen "github.com/hexagon-codes/ai-core/media/image"
-	videogen "github.com/hexagon-codes/ai-core/media/video"
-	"github.com/hexagon-codes/ai-core/media/voice"
-	"github.com/hexagon-codes/ai-core/media/voicechat"
 	"github.com/hexagon-codes/hexagon"
 	"github.com/hexagon-codes/hexagon/observe/events"
 	"github.com/hexagon-codes/hexagon/observe/trace"
@@ -68,6 +64,8 @@ import (
 	"github.com/hexagon-codes/hexclaw/gateway"
 	"github.com/hexagon-codes/hexclaw/heartbeat"
 	"github.com/hexagon-codes/hexclaw/instances"
+	"github.com/hexagon-codes/hexclaw/internal/mediabridge"
+	"github.com/hexagon-codes/hexclaw/internal/mediaflow"
 	"github.com/hexagon-codes/hexclaw/knowledge"
 	"github.com/hexagon-codes/hexclaw/library"
 	"github.com/hexagon-codes/hexclaw/llmrouter"
@@ -2930,75 +2928,11 @@ Set source only when the material explicitly names a work, title, or another rel
 		fmt.Println("  ✗ Canvas      未启用")
 	}
 
-	// 14. 初始化语音服务（Phase 5）
-	var voiceSvc *voice.Service
-	if cfg.Voice.Enabled {
-		var stt voice.STTProvider
-		var tts voice.TTSProvider
-
-		if cfg.Voice.STT.Provider != "" {
-			llmName := extractLLMName(cfg.Voice.STT.Provider)
-			if pc, ok := cfg.LLM.Providers[llmName]; ok && pc.APIKey != "" {
-				var sttOpts []voice.STTOption
-				if pc.BaseURL != "" {
-					sttOpts = append(sttOpts, voice.STTWithBaseURL(pc.BaseURL))
-				}
-				stt = voice.NewOpenAISTT(pc.APIKey, cfg.Voice.STT.Model, sttOpts...)
-			}
-		}
-
-		if cfg.Voice.TTS.Provider != "" {
-			// Edge TTS 免费、无需 API Key，优先识别
-			// （原代码只初始化 OpenAI TTS，edge-tts Provider 名被静默忽略 —— H5 修复）
-			if cfg.Voice.TTS.Provider == "edge-tts" || cfg.Voice.TTS.Provider == "edge" {
-				var edgeOpts []voice.EdgeTTSOption
-				if cfg.Voice.TTS.Voice != "" {
-					edgeOpts = append(edgeOpts, voice.EdgeTTSWithVoice(cfg.Voice.TTS.Voice))
-				}
-				tts = voice.NewEdgeTTS(edgeOpts...)
-			} else {
-				llmName := extractLLMName(cfg.Voice.TTS.Provider)
-				if pc, ok := cfg.LLM.Providers[llmName]; ok && pc.APIKey != "" {
-					var ttsOpts []voice.TTSOption
-					if pc.BaseURL != "" {
-						ttsOpts = append(ttsOpts, voice.TTSWithBaseURL(pc.BaseURL))
-					}
-					tts = voice.NewOpenAITTS(pc.APIKey, "", ttsOpts...)
-				}
-			}
-		}
-
-		// v0.4.0 F7 接入：当 cfg.Voice.TTS.Provider == "minimax,edge" 这类 chain 形式
-		// 时（用 ',' 分隔的 provider 列表），自动构造 ChainedTTS。flag voice.tts.chain.v1
-		// OFF 时只调第一个 provider。
-		if strings.Contains(cfg.Voice.TTS.Provider, ",") {
-			var multiCfg []voice.MultiTTSConfig
-			for _, name := range strings.Split(cfg.Voice.TTS.Provider, ",") {
-				name = strings.TrimSpace(name)
-				switch name {
-				case "minimax":
-					if pc, ok := cfg.LLM.Providers["minimax"]; ok {
-						multiCfg = append(multiCfg, voice.MultiTTSConfig{Provider: "minimax", APIKey: pc.APIKey, BaseURL: pc.BaseURL, GroupID: cfg.Voice.TTS.Region})
-					}
-				case "edge", "edge-tts":
-					multiCfg = append(multiCfg, voice.MultiTTSConfig{Provider: "edge-tts"})
-				default:
-					// 不再静默丢弃：未识别的 chain provider 显式告警（避免"配了没生效"无感知）。
-					// 付费 provider（openai-tts/azure）在 chain 中的完整接入为后续 feature；
-					// 桌面默认走免费 edge-tts，不受影响。
-					fmt.Printf("  ⚠️  Voice TTS chain: 跳过未识别的 provider %q（chain 目前支持 minimax/edge）\n", name)
-				}
-			}
-			if chained := voice.BuildMultiTTS(multiCfg); chained != nil {
-				tts = chained
-			}
-		}
-
-		voiceSvc = voice.NewService(stt, tts)
+	// 语音服务与媒体路由共用原配置及供应商适配。
+	voiceSvc := configuredVoiceService(cfg)
+	if voiceSvc != nil {
 		srv.SetVoice(voiceSvc)
 		fmt.Printf("  ✓ Voice       STT=%s, TTS=%s\n", voiceSvc.STTName(), voiceSvc.TTSName())
-	} else {
-		fmt.Println("  ✗ Voice       未启用")
 	}
 
 	// 14.4 生成内容存储（图像/视频持久化）
@@ -3017,104 +2951,37 @@ Set source only when the material explicitly names a work, title, or another rel
 		}
 	}
 
-	// 14.5 初始化/热更新 image/video/voice chat 生成服务
-	//
-	// 从已配置的 LLM Provider 派生：任何带 API Key 的 provider 都可以参与生成能力。
-	// 用闭包封装以便 LLM 配置热更新后重建（用户通过 UI 补 API Key → 这里重新拉 cfg）。
-	// Provider map 的 key 是用户起的名字（可能是中文"智谱 AI"），不是 provider type，
-	// 硬编码 cfg.LLM.Providers["zhipu"] 永远查不到。按 BaseURL 特征识别：
-	findProviderByBaseURL := func(substrs ...string) (apiKey, baseURL string) {
-		for _, p := range cfg.LLM.Providers {
-			if p.APIKey == "" {
-				continue
-			}
-			lowered := strings.ToLower(p.BaseURL)
-			for _, s := range substrs {
-				if strings.Contains(lowered, s) {
-					return p.APIKey, p.BaseURL
-				}
-			}
+	// 入口只共享同一应用服务；工具始终读取请求时的不可变能力快照。
+	mediaRouter := mediaflow.NewRouter()
+	mediaRouter.Reload(cfg, voiceSvc)
+	var mediaSvc *mediaflow.Service
+	if genStoreSvc != nil {
+		var mediaOptions []mediaflow.Option
+		if secretBox != nil {
+			mediaOptions = append(mediaOptions, mediaflow.WithRecoveryCodec(secretBox))
 		}
-		return "", ""
-	}
-	reloadGenServices := func(verbose bool) (ig *imagegen.Service, vg *videogen.Service, vc *voicechat.Service) {
-		// Image gen: OpenAI DALL-E / 智谱 CogView
-		ip := map[string]imagegen.Provider{}
-		if k, b := findProviderByBaseURL("openai.com", "/v1"); k != "" && strings.Contains(strings.ToLower(b), "openai") {
-			ip["openai-dalle"] = imagegen.NewOpenAIDallE(k, b)
+		mediaSvc, err = mediaflow.NewService(ctx, mediaRouter, store.MediaRepository(), genStoreSvc, filepath.Join(filepath.Dir(genStoreSvc.Root()), "media-staging"), mediaOptions...)
+		if err != nil {
+			return fmt.Errorf("initialize media service: %w", err)
 		}
-		if k, b := findProviderByBaseURL("bigmodel.cn"); k != "" {
-			ip["zhipu-cogview"] = imagegen.NewZhipuCogView(k, b)
-		}
-		igDefault := ""
-		if _, ok := ip["openai-dalle"]; ok {
-			igDefault = "openai-dalle"
-		} else if _, ok := ip["zhipu-cogview"]; ok {
-			igDefault = "zhipu-cogview"
-		}
-		ig = imagegen.NewService(ip, igDefault)
-		srv.SetImageGen(ig)
-
-		// Video gen: 智谱 CogVideoX
-		vp := map[string]videogen.Provider{}
-		if k, b := findProviderByBaseURL("bigmodel.cn"); k != "" {
-			vp["zhipu-cogvideox"] = videogen.NewZhipuCogVideoX(k, b)
-		}
-		vgDefault := ""
-		if _, ok := vp["zhipu-cogvideox"]; ok {
-			vgDefault = "zhipu-cogvideox"
-		}
-		vg = videogen.NewService(vp, vgDefault)
-		srv.SetVideoGen(vg)
-
-		// 引擎内联媒体生成复用上面构造的 image/video Service（均已是 ai-core/media，
-		// 路线图 §12 risk#5：媒体作为独立内聚包，不再经 LLM Provider 能力接口）。
-		eng.SetMediaServices(ig, vg)
-
-		// Voice chat: OpenAI gpt-4o-audio
-		cp := map[string]voicechat.Provider{}
-		if k, b := findProviderByBaseURL("openai.com"); k != "" {
-			cp["openai-gpt4o-audio"] = voicechat.NewOpenAIVoiceChat(k, b)
-		}
-		vcDefault := ""
-		if _, ok := cp["openai-gpt4o-audio"]; ok {
-			vcDefault = "openai-gpt4o-audio"
-		}
-		vc = voicechat.NewService(cp, vcDefault)
-		srv.SetVoiceChat(vc)
-
-		if verbose {
-			if ig.HasProvider() {
-				fmt.Printf("  ✓ ImageGen    %d providers (%v)\n", len(ip), ig.Providers())
-			} else {
-				fmt.Println("  ✗ ImageGen    无可用 Provider（需要配置 OpenAI 或智谱 API Key）")
-			}
-			if vg.HasProvider() {
-				fmt.Printf("  ✓ VideoGen    %d providers (%v)\n", len(vp), vg.Providers())
-			} else {
-				fmt.Println("  ✗ VideoGen    无可用 Provider（需要配置智谱 API Key）")
-			}
-			if vc.HasProvider() {
-				fmt.Printf("  ✓ VoiceChat   %d providers (%v)\n", len(cp), vc.Providers())
-			} else {
-				fmt.Println("  ✗ VoiceChat   无可用 Provider（需要 OpenAI API Key + gpt-4o-audio-preview）")
-			}
-		}
-		return
-	}
-	imagegenSvc, videogenSvc, voiceChatSvc := reloadGenServices(true)
-	// 配置热更新时重建 gen services（读最新 cfg.LLM.Providers）
-	srv.SetGenServicesReloader(func() { reloadGenServices(false) })
-
-	// 媒体生成 Skill：默认关 + 有 Provider 才注册。
-	// 直调 Generate/Submit + blobstore 落盘，返回稳定 FilePath 供 export/send/ingest 串联。
-	if cfg.Skill.Builtin.MediaGen && imagegenSvc != nil && imagegenSvc.HasProvider() {
-		if err := skills.Register(builtin.NewMediaGenerateSkill(imagegenSvc, videogenSvc, genStoreSvc)); err != nil {
-			logger.Warn("[media] failed to register media_generate skill", "err", err.Error())
-		} else {
-			fmt.Println("  ✓ Skill       media_generate (§11.1)")
+		defer mediaSvc.Close()
+		srv.SetMediaFlow(mediaSvc)
+		eng.SetMediaFlow(mediaSvc)
+		if err := skills.Register(builtin.NewMediaFlowGenerateSkill(mediaSvc)); err != nil {
+			return err
 		}
 	}
+	reloadGenServices := func() {
+		mediaRouter.Reload(cfg, configuredVoiceService(cfg))
+		snapshot := mediaRouter.Current()
+		if mediaSvc != nil {
+			if err := skills.SetEnabled("media_generate", snapshot.ToolEnabled && len(snapshot.Routes) > 0); err != nil {
+				logger.Warn("media tool activation failed", "err", err)
+			}
+		}
+	}
+	reloadGenServices()
+	srv.SetGenServicesReloader(reloadGenServices)
 
 	// 15. 初始化桌面集成服务（Phase 6）
 	desktopSvc := desktop.NewService(version)
@@ -3172,9 +3039,6 @@ Set source only when the material explicitly names a work, title, or another rel
 	_ = agentRouter
 	_ = canvasSvc
 	_ = voiceSvc
-	_ = imagegenSvc
-	_ = videogenSvc
-	_ = voiceChatSvc
 
 	messageHandler := func(ctx context.Context, msg *adapter.Message) (*adapter.Reply, error) {
 		if msg != nil && msg.Platform == "dingtalk" {
@@ -3296,15 +3160,26 @@ Set source only when the material explicitly names a work, title, or another rel
 	// IM 入站回执：所有平台实例共用同一 handler，这里统一包一层，让
 	// 「我不在时 IM 来消息了」进入桌面通知中心。桌面 chat 经 wa（Web 适配器）
 	// 直连 messageHandler，不走 instanceMgr，故不会被此回执波及。
+	if mediaSvc != nil {
+		mediaSvc.SetDeliveryResolver(func(deliveryCtx context.Context, record *mediaflow.Delivery) (mediaflow.DeliveryTransport, []json.RawMessage, error) {
+			return mediabridge.Resolve(deliveryCtx, store, instanceMgr, mediaSvc, record)
+		})
+	}
 	instanceMgr.SetHandler(func(ctx context.Context, msg *adapter.Message) (*adapter.Reply, error) {
 		reply, err := messageHandler(ctx, msg)
 		// IM 端无结构化工具卡：把本轮工具活动追加为紧凑文本尾注，让 Telegram/企业微信/飞书等
 		// 用户也能看到「调用了什么工具、成没成、结果摘要」。桌面经 wa 直连 messageHandler、
 		// 不走此 handler，故工具卡体验不受影响（避免桌面气泡重复展示）。
-		if reply != nil && len(reply.ToolCalls) > 0 {
+		if reply != nil && (len(reply.ToolCalls) > 0 || msg.Platform == adapter.PlatformDingtalk) {
 			if rebuildErr := appendIMToolDigestAndRebuildCanonical(reply, string(msg.Platform)); rebuildErr != nil {
 				err = errors.Join(err, fmt.Errorf("rebuild IM reply canonical evidence: %w", rebuildErr))
 			}
+		}
+		if err == nil && reply != nil && mediaSvc != nil && reply.Metadata["media_delivery_id"] != "" {
+			if deliveryErr := mediaSvc.Deliver(context.WithoutCancel(ctx), msg.UserID, reply.Metadata["media_delivery_id"]); deliveryErr != nil {
+				logger.Warn("media reply delivery remains pending", "error", deliveryErr)
+			}
+			return nil, nil
 		}
 		if k12Runtime != nil {
 			reply, err = maybeDeliverIMFinalReply(ctx, msg, reply, err, newIMFinalReplyDependencies(&k12Runtime.Deps, instanceMgr.ResolveRunningInstanceID, k12TutorPolicy.unitSummary))
@@ -4388,7 +4263,7 @@ func canonicalIMChannelMessageWithSummary(
 // appendIMToolDigestAndRebuildCanonical 追加 IM 工具摘要后重建同一内容对，
 // 避免渠道适配器继续消费追加前的 MessageContent/RenderManifest。
 func appendIMToolDigestAndRebuildCanonical(reply *adapter.Reply, platform ...string) error {
-	if reply == nil || len(reply.ToolCalls) == 0 {
+	if reply == nil {
 		return nil
 	}
 	producer := messagecontent.ProducerChat
@@ -4408,9 +4283,10 @@ func appendIMToolDigestAndRebuildCanonical(reply *adapter.Reply, platform ...str
 	if len(platform) > 0 {
 		channelPlatform = platform[0]
 	}
-	reply.Content += imToolCallDigest(reply.ToolCalls, channelPlatform)
 	if channelPlatform == "dingtalk" {
 		summary = imReplyModelSummary(reply, locale)
+	} else {
+		reply.Content += imToolCallDigest(reply.ToolCalls, channelPlatform)
 	}
 	message, err := canonicalIMChannelMessageWithSummary(producer, locale, reply.Content, reply.Attachments, channelPlatform, summary)
 	if err != nil {

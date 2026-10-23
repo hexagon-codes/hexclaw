@@ -109,6 +109,10 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolName string, args map[st
 				if err != nil {
 					captureCodeExecutionReceipt(ctx, skillName, nil)
 					if result != nil {
+						if skillName == "media_generate" {
+							// 媒体部分成功仍需交付已登记资产，错误状态继续向上传递。
+							stampToolReplyMeta(ctx, result.Metadata)
+						}
 						return result.Content, err
 					}
 					return "", err
@@ -314,6 +318,9 @@ func (e *ToolExecutor) runSkillViaPipeline(ctx context.Context, toolName string,
 	}
 	if err != nil {
 		if res != nil && res.Result != nil {
+			if toolName == "media_generate" && res.Skill != nil && res.Skill.Name() == toolName {
+				stampToolReplyMeta(ctx, res.Result.Metadata)
+			}
 			return res.Result.Content, err
 		}
 		return "", err

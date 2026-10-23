@@ -116,18 +116,18 @@ func TestIMFinalReplyReadableThresholdExcludesActualToolDigest(t *testing.T) {
 	body := strings.Repeat("甲", 999)
 	msg, reply, deps, delivery := imFinalReplyTestInput(t, body)
 	reply.ToolCalls = []adapter.ToolCall{{Name: "code_exec", Status: "success", Result: strings.Repeat("实际工具结果", 20)}}
-	tail := adapter.ToolCallStatusDigest(reply.ToolCalls)
+	tail := adapter.DingTalkReplyFooter(reply, "ug")
 	if tail == "" || k12usecase.K12FinalReplyReadableCharacters(body+tail) < 1000 {
 		t.Fatal("tool digest fixture did not cross the full-string threshold")
 	}
 	if err := appendIMToolDigestAndRebuildCanonical(reply, "dingtalk"); err != nil {
 		t.Fatal(err)
 	}
-	if reply.Content != body+tail || reply.MessageContent.Validate() != nil {
-		t.Fatal("actual IM composition did not append its canonical tool digest")
+	if reply.Content != body || reply.MessageContent.Validate() != nil {
+		t.Fatal("IM projection changed the canonical body")
 	}
 	got, err := maybeDeliverIMFinalReply(t.Context(), msg, reply, nil, deps)
-	if got != reply || err != nil || len(delivery.requests) != 0 || reply.Content != body+tail {
+	if got != reply || err != nil || len(delivery.requests) != 0 || reply.Content != body {
 		t.Fatalf("tool digest changed the short body into a PDF or was removed: reply=%+v error=%v", got, err)
 	}
 }

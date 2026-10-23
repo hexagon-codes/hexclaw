@@ -33,24 +33,9 @@ func imToolCallDigest(calls []adapter.ToolCall, platform string) string {
 	return adapter.ToolCallDigest(calls)
 }
 
-// imReplyModelSummary 只读取本轮冻结的实际模型身份，供短回复与 PDF 说明共用。
+// imReplyModelSummary 用同一执行尾注服务短回复与 PDF 说明，不读取当前默认设置。
 func imReplyModelSummary(reply *adapter.Reply, locale string) string {
-	if reply == nil {
-		return ""
-	}
-	model := adapter.ExecutionSummaryModel{
-		Stage: "answer_generation", Provider: reply.Metadata["provider"],
-		ProviderDisplayName: reply.Metadata["provider_display_name"],
-		ProviderInstanceID:  reply.Metadata["provider_instance_id"], Model: reply.Metadata["model"],
-	}
-	if reply.Usage != nil {
-		if strings.TrimSpace(model.Model) == "" {
-			model.Model, model.Provider = reply.Usage.Model, reply.Usage.Provider
-		} else if strings.TrimSpace(model.Provider) == "" && model.Model == reply.Usage.Model {
-			model.Provider = reply.Usage.Provider
-		}
-	}
-	return adapter.RenderExecutionSummary(locale, adapter.ExecutionSummary{Models: []adapter.ExecutionSummaryModel{model}})
+	return adapter.DingTalkReplyFooter(reply, locale)
 }
 
 func newIMFinalReplyDependencies(deps *k12usecase.Deps, resolve func(string, string) (string, error), units *k12usecase.UnitSummaryCoordinator) imFinalReplyDependencies {
@@ -88,9 +73,6 @@ func maybeDeliverIMFinalReply(ctx context.Context, msg *adapter.Message, reply *
 		return reply, handlerErr
 	}
 	readableBody := canonical.Markdown
-	if len(reply.ToolCalls) > 0 {
-		readableBody = strings.TrimSuffix(readableBody, imToolCallDigest(reply.ToolCalls, string(msg.Platform)))
-	}
 	if !hasUnit && !k12usecase.FinalReplyUsesPDF(readableBody, false) {
 		return reply, handlerErr
 	}

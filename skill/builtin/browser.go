@@ -45,6 +45,7 @@ func (s *BrowserSkill) ToolDefinition() llm.ToolDefinition {
 		Properties: map[string]*llm.Schema{
 			"url":    {Type: "string", Description: "目标网页 URL"},
 			"action": {Type: "string", Description: "操作类型", Enum: []any{"fetch", "extract", "post"}},
+			"data":   {Type: "object", Description: "Form fields required for action=post. Values are encoded as strings. Omit for read actions."},
 		},
 		Required: []string{"url"},
 	})

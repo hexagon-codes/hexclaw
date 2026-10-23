@@ -1,10 +1,47 @@
 package engine
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/hexagon-codes/hexclaw/skill"
+	"github.com/hexagon-codes/hexclaw/skill/marketplace"
 )
+
+func TestToolCollector_ContentSkillsDoNotHideMediaTool(t *testing.T) {
+	registry := skill.NewRegistry()
+	for i := range 24 {
+		if err := registry.Register(&testSkill{name: fmt.Sprintf("builtin_%02d", i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := range 16 {
+		if err := registry.Register(marketplace.WrapAsSkill(&marketplace.MarkdownSkill{Meta: marketplace.SkillMeta{Name: fmt.Sprintf("content_%02d", i)}})); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := registry.Register(&testSkill{name: "media_generate"}); err != nil {
+		t.Fatal(err)
+	}
+	collector := NewToolCollector(registry, nil, 40)
+	query := "请使用已配置的智谱 CogView-4 生成实际图片"
+	tools := collector.CollectFiltered(query, skill.Activation{Mode: "react"})
+	found := false
+	for _, tool := range tools {
+		found = found || tool.Function.Name == "media_generate"
+	}
+	if !found || len(tools) != 25 {
+		t.Fatalf("callable tools lost to content-only candidates: media=%t count=%d", found, len(tools))
+	}
+	if err := registry.SetEnabled("media_generate", false); err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range collector.CollectFiltered(query, skill.Activation{Mode: "react"}) {
+		if tool.Function.Name == "media_generate" {
+			t.Fatal("explicitly disabled media tool was exposed")
+		}
+	}
+}
 
 func TestToolCollector_CollectFromSkills(t *testing.T) {
 	reg := skill.NewRegistry()

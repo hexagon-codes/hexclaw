@@ -17,6 +17,10 @@ import (
 //
 // 返回是否启用了文生图服务，以及已注册的 Provider 和模型列表。
 func (s *Server) handleImageGenStatus(w http.ResponseWriter, r *http.Request) {
+	if s.mediaFlow != nil {
+		s.mediaStatus(w, "image", "generate")
+		return
+	}
 	enabled := s.imagegenSvc != nil && s.imagegenSvc.HasProvider()
 	resp := map[string]any{
 		"enabled":   enabled,
@@ -46,6 +50,10 @@ func (s *Server) handleImageGenStatus(w http.ResponseWriter, r *http.Request) {
 //
 // 响应：imagegen.Result（含 b64_json 或 url）。
 func (s *Server) handleImageGenGenerate(w http.ResponseWriter, r *http.Request) {
+	if s.mediaFlow != nil {
+		s.handleMediaImage(w, r)
+		return
+	}
 	if s.imagegenSvc == nil || !s.imagegenSvc.HasProvider() {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
 			"error": "图像生成服务未配置（请在配置中启用 imagegen Provider）",

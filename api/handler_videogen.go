@@ -78,6 +78,10 @@ func videoDownloadStore(taskID string, rec videoDownloadRecord) {
 
 // handleVideoGenStatus GET /api/v1/videos/status
 func (s *Server) handleVideoGenStatus(w http.ResponseWriter, r *http.Request) {
+	if s.mediaFlow != nil {
+		s.mediaStatus(w, "video", "generate")
+		return
+	}
 	enabled := s.videogenSvc != nil && s.videogenSvc.HasProvider()
 	resp := map[string]any{
 		"enabled":   enabled,
@@ -107,6 +111,10 @@ func (s *Server) handleVideoGenStatus(w http.ResponseWriter, r *http.Request) {
 //
 // 响应：{ "task_id": "..." } — 调用方持有 task_id 后轮询 /api/v1/videos/tasks/{id}
 func (s *Server) handleVideoGenSubmit(w http.ResponseWriter, r *http.Request) {
+	if s.mediaFlow != nil {
+		s.handleMediaVideoSubmit(w, r)
+		return
+	}
 	if s.videogenSvc == nil || !s.videogenSvc.HasProvider() {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
 			"error": "视频生成服务未配置",
@@ -175,6 +183,10 @@ func (s *Server) handleVideoGenSubmit(w http.ResponseWriter, r *http.Request) {
 //
 // 返回 videogen.TaskStatus；done=true 时含 video_url。
 func (s *Server) handleVideoGenPoll(w http.ResponseWriter, r *http.Request) {
+	if s.mediaFlow != nil && strings.HasPrefix(r.PathValue("id"), "media-") {
+		s.handleMediaVideoPoll(w, r)
+		return
+	}
 	if s.videogenSvc == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "视频生成服务未配置"})
 		return
