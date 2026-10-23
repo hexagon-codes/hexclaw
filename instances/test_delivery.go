@@ -27,6 +27,44 @@ type TestDeliveryResult struct {
 	Deliveries []TestDelivery `json:"deliveries"`
 }
 
+// KnownConversationTargets 读取当前账号已保存的真实活动会话，不依赖智能体路由。
+// inst由账号管理器解析；旧名称引用只用于当前账号生命周期内的会话。
+func (m *Manager) KnownConversationTargets(ctx context.Context, inst *Instance) ([]string, error) {
+	rows, err := m.db.QueryContext(ctx, `
+		SELECT s.instance_id, s.chat_id, s.created_at
+		FROM sessions s
+		WHERE s.platform = ? AND (
+			s.instance_id = ? OR (s.instance_id = ? AND NOT EXISTS (
+				SELECT 1 FROM platform_instances other WHERE other.id = s.instance_id)))
+			AND s.status = 1 AND s.parent_session_id = '' AND TRIM(s.chat_id) <> ''
+			AND EXISTS (SELECT 1 FROM messages message
+				WHERE message.session_id = s.id AND message.role = 'user')`,
+		inst.Provider, inst.ID, inst.Name)
+	if err != nil {
+		return nil, fmt.Errorf("read account conversations: %w", err)
+	}
+	defer rows.Close()
+	targets := make([]string, 0)
+	seen := make(map[string]bool)
+	for rows.Next() {
+		var reference, chatID string
+		var created time.Time
+		if err := rows.Scan(&reference, &chatID, &created); err != nil {
+			return nil, err
+		}
+		if reference != inst.ID && created.Before(inst.CreatedAt) {
+			continue
+		}
+		chatID = strings.TrimSpace(chatID)
+		if !seen[chatID] {
+			seen[chatID] = true
+			targets = append(targets, chatID)
+		}
+	}
+	sort.Strings(targets)
+	return targets, rows.Err()
+}
+
 func projectTestDelivery(requestID string, deliveries []TestDelivery) TestDeliveryResult {
 	result := TestDeliveryResult{RequestID: requestID, Success: true, Deliveries: deliveries}
 	if len(deliveries) == 0 {

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"testing"
 
 	"github.com/hexagon-codes/hexclaw/instances"
@@ -23,7 +24,10 @@ func TestBoundInstanceTestTargetsUseCurrentValidBindings(t *testing.T) {
 	}
 	router.LoadAll([]agentrouter.AgentConfig{{Name: "tutor"}}, "tutor", rules)
 	server := &Server{instanceMgr: mgr, agentRouter: router}
-	targets := server.boundInstanceTestTargets(&instances.Instance{ID: "current", Name: "main", Provider: "slack", Enabled: true})
+	targets, err := server.boundInstanceTestTargets(context.Background(), &instances.Instance{ID: "current", Name: "main", Provider: "slack", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(targets) != 2 || targets[0] != "chat" || targets[1] != "group" {
 		t.Fatalf("unexpected targets: %v", targets)
 	}

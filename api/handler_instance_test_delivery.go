@@ -12,13 +12,19 @@ import (
 	"github.com/hexagon-codes/hexclaw/instances"
 )
 
-// boundInstanceTestTargets 复用现有绑定，不将入站通配规则猜测为收件人。
-func (s *Server) boundInstanceTestTargets(inst *instances.Instance) []string {
-	targets := make([]string, 0)
-	if s.agentRouter == nil {
-		return targets
+// boundInstanceTestTargets 为所有智能体统一合并当前账号真实会话与有效显式绑定。
+func (s *Server) boundInstanceTestTargets(ctx context.Context, inst *instances.Instance) ([]string, error) {
+	targets, err := s.instanceMgr.KnownConversationTargets(ctx, inst)
+	if err != nil {
+		return nil, err
 	}
 	seen := map[string]bool{}
+	for _, chatID := range targets {
+		seen[chatID] = true
+	}
+	if s.agentRouter == nil {
+		return targets, nil
+	}
 	for _, rule := range s.agentRouter.ListRules() {
 		chatID := strings.TrimSpace(rule.ChatID)
 		if chatID == "" || strings.TrimSpace(rule.Platform) != inst.Provider {
@@ -42,7 +48,7 @@ func (s *Server) boundInstanceTestTargets(inst *instances.Instance) []string {
 		}
 	}
 	sort.Strings(targets)
-	return targets
+	return targets, nil
 }
 
 func (s *Server) handleBoundInstanceTest(w http.ResponseWriter, r *http.Request, inst *instances.Instance, requestID, content string) {
@@ -63,7 +69,12 @@ func (s *Server) handleBoundInstanceTest(w http.ResponseWriter, r *http.Request,
 		writeJSON(w, http.StatusOK, map[string]any{"success": false, "pending": false, "message": "Connection is not healthy; no test message was sent."})
 		return
 	}
-	result, err := s.instanceMgr.SendBoundTest(ctx, inst.ID, requestID, s.boundInstanceTestTargets(inst), content)
+	targets, err := s.boundInstanceTestTargets(ctx, inst)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "pending": false, "error": err.Error()})
+		return
+	}
+	result, err := s.instanceMgr.SendBoundTest(ctx, inst.ID, requestID, targets, content)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "pending": true, "error": err.Error()})
 		return
