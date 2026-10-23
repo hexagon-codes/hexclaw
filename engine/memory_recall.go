@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/hexagon-codes/hexclaw/knowledge"
 	"github.com/hexagon-codes/hexclaw/memory"
@@ -73,8 +74,13 @@ func (e *ReActEngine) buildLongTermMemoryBlock(ctx context.Context, role, query 
 
 	// 原始常驻条目也参与本轮检索；派生画像不是第二份事实来源。
 	var facts []recall.Entry
+	var exactManual []recall.Entry
 	for i, en := range all {
 		if parsed[i].Source == "reflect_profile" || parsed[i].Subject == memory.ProfileSubject {
+			continue
+		}
+		if parsed[i].Source == "manual" && recall.IsCurrentlyValid(en, now) && matchesManualQuestion(query, en.Content) {
+			exactManual = append(exactManual, en)
 			continue
 		}
 		if recall.IsCurrentlyValid(en, now) && (!en.IsResident() || strings.TrimSpace(query) != "") {
@@ -123,7 +129,8 @@ func (e *ReActEngine) buildLongTermMemoryBlock(ctx context.Context, role, query 
 			}
 		}
 	}
-	write(resident, false) // 常驻本身不计入检索频次；下方只给实际相关者累计。
+	write(exactManual, true) // 明确匹配的手动问答先保留完整正文，不受长答案的向量稀释影响。
+	write(resident, false)   // 常驻本身不计入检索频次；下方只给实际相关者累计。
 	write(ranked, true)
 
 	// 过程区分常驻与本轮相关命中；两类可以引用同一条目，但注入与命中频次不重复。
@@ -142,6 +149,39 @@ func (e *ReActEngine) buildLongTermMemoryBlock(ctx context.Context, role, query 
 		return ""
 	}
 	return "## 长期记忆\n\n" + body
+}
+
+// matchesManualQuestion 只匹配手动问答首行明确声明的完整问题，不从答案正文猜触发词。
+func matchesManualQuestion(query, content string) bool {
+	first, _, _ := strings.Cut(strings.TrimSpace(content), "\n")
+	if !strings.HasPrefix(first, "问") {
+		return false
+	}
+	question, suffix, ok := strings.Cut(strings.TrimPrefix(first, "问"), "时回答")
+	if !ok || (strings.Trim(suffix, " ：:。") != "如下" && strings.Trim(suffix, " ：:。") != "以下" && strings.Trim(suffix, " ：:。") != "") {
+		return false
+	}
+	normalize := func(text string) string {
+		return strings.Map(func(r rune) rune {
+			if unicode.IsSpace(r) || unicode.IsPunct(r) {
+				return -1
+			}
+			return unicode.ToLower(r)
+		}, text)
+	}
+	q := normalize(query)
+	return q != "" && q == normalize(question)
+}
+
+// hasMatchedManualResponse 只认可已完整注入的手动问答，派生画像和自动抽取内容不授权文案采用。
+func (e *ReActEngine) hasMatchedManualResponse(role, query, injected string) bool {
+	for _, entry := range e.fileMem.ParseEntriesForRole(role) {
+		if entry.Source == "manual" && recall.IsCurrentlyValid(memory.ToRecallEntry(entry), time.Now()) &&
+			matchesManualQuestion(query, entry.Content) && strings.Contains(injected, strings.TrimSpace(entry.Content)) {
+			return true
+		}
+	}
+	return false
 }
 
 // rankFacts 按三维打分排序检索层（query 空时退化按 importance+recency；零 LLM）。

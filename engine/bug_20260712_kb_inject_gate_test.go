@@ -95,8 +95,8 @@ func TestConversationKnowledgeRetrievalUsesHistoryAwareTool(t *testing.T) {
 	if !e.shouldAutoInjectKBForTurn(gateMsg("请根据教材继续解释", nil), history) {
 		t.Fatal("explicit knowledge request suppressed")
 	}
-	if !e.shouldAutoInjectKBForTurn(gateMsg("公司年假制度是怎么规定的", nil), nil) {
-		t.Fatal("standalone automatic knowledge suppressed")
+	if e.shouldAutoInjectKBForTurn(gateMsg("公司年假制度是怎么规定的", nil), nil) {
+		t.Fatal("first turn bypassed model-directed knowledge retrieval")
 	}
 	if !e.shouldAutoInjectKBForTurn(gateMsg("继续刚才的话题", map[string]string{"tools_enabled": "off"}), history) {
 		t.Fatal("automatic retrieval lost when tool retrieval unavailable")

@@ -19,17 +19,22 @@ var productFactsPublicJSON string
 var productFactsLoadError error
 
 var hostFactsSubject = regexp.MustCompile(`(?i)hexclaw|河蟹|小蟹|本应用|本软件|你|您|\byou(?:r|rself)?\b`)
-var hostFactsTopic = regexp.MustCompile(`(?i)官网|官方网站|公众号|github|仓库|官方入口|二维码|介绍|是谁|website|official account|introduc|who are`)
-var hostFactsQueryWords = regexp.MustCompile(`(?i)微信公众号|官方github|github地址|官方仓库|官方网站|官方入口|公众号id|公众号名称|公众号|二维码|官网|github|仓库|地址|链接|名称|名字|id|完整介绍|详细介绍|自我介绍|介绍一下|介绍|主要功能|主要能力|功能|能力|你自己|你们|你|您|hexclaw|河蟹ai|河蟹|小蟹|本应用|本软件|是什么|是多少|是什么样的|是谁|怎么关注|如何关注|有哪些|有没有|多少|是否|可以|能不能|知道|告诉我|给出|提供|请问|一下|完整|详细|简要|简单|有|的|和|与|及|吗|呢|吧|请|yourself|your|you|what is|what are|who are|website|official account|official|github|repository|repositories|qr code|introduce|introduction|full|detailed|please|and|have|do|a|an|the`)
+var hostFactsTopic = regexp.MustCompile(`(?i)官网|官方网站|公众号|github|仓库|官方入口|二维码|介绍|是谁|名字|名称|功能|能力|能做|会做|website|official account|introduc|who are`)
+var hostFactsQueryWords = regexp.MustCompile(`(?i)不要图片|不用图片|不带图|不附图|只用文字|不要推广|一句话|回答|叫什么|能做什么|会做什么|微信公众号|官方github|github地址|官方仓库|官方网站|官方入口|公众号id|公众号名称|公众号|二维码|官网|github|仓库|地址|链接|名称|名字|id|完整介绍|详细介绍|自我介绍|介绍一下|介绍|主要功能|主要能力|功能|能力|你自己|你们|你|您|hexclaw|河蟹ai|河蟹|小蟹|本应用|本软件|是什么|是多少|是什么样的|是谁|怎么关注|如何关注|有哪些|有没有|多少|是否|可以|能不能|知道|告诉我|给出|提供|请问|一下|完整|详细|简要|简单|有|的|和|与|及|吗|呢|吧|请|用|但|也|yourself|your|you|what is|what are|who are|website|official account|official|github|repository|repositories|qr code|introduce|introduction|full|detailed|please|and|have|do|a|an|the`)
 var hostFactsQueryPunctuation = regexp.MustCompile(`[\s\p{P}\p{S}]+`)
+var hostFactsGreeting = regexp.MustCompile(`(?i)^\s*(?:你好|您好|hello|hi)(?:[，,！!：:\s]+|$)`)
+var hostFactsRequestModifiers = regexp.MustCompile(`(?i)发送给我|分享给我|发给我|提供给我|给我发|帮我|麻烦|以及|还有|怎么搜索|如何搜索|在哪里搜|在哪搜|怎么搜|怎么找|如何查找|怎样关注|在哪里|在哪|发一下|分享一下|给我|把`)
 
 // isStandaloneHostFactsQuery 仅识别能完全由宿主事实回答的独立问询。
 // 未消费的题目、第三方名称和资料指令保留原检索路径，避免混合请求被短路。
 func isStandaloneHostFactsQuery(content string) bool {
+	content = hostFactsGreeting.ReplaceAllString(strings.TrimSpace(content), "")
 	if !hostFactsSubject.MatchString(content) || !hostFactsTopic.MatchString(content) {
 		return false
 	}
-	remaining := hostFactsQueryWords.ReplaceAllString(strings.ToLower(content), "")
+	// 先处理完整修饰短语，保留未识别的实体、题目和资料指令。
+	remaining := hostFactsRequestModifiers.ReplaceAllString(strings.ToLower(content), "")
+	remaining = hostFactsQueryWords.ReplaceAllString(remaining, "")
 	return hostFactsQueryPunctuation.ReplaceAllString(remaining, "") == ""
 }
 
