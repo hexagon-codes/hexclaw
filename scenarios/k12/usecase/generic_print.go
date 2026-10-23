@@ -29,6 +29,9 @@ func printArtifactRenderContract(sourceRef string) string {
 	if strings.HasPrefix(sourceRef, "automation_weekly-sheet:") && strings.HasSuffix(sourceRef, ":"+weeklyMistakeSheetRenderContract) {
 		return weeklyMistakeSheetRenderContract
 	}
+	if strings.HasPrefix(sourceRef, "automation_weekly-sheet:") && strings.HasSuffix(sourceRef, ":weekly-mistake-sheet-v1") {
+		return "weekly-mistake-sheet-v1"
+	}
 	if strings.HasSuffix(sourceRef, ":"+imageFinalPDFRenderContractVersion) {
 		return imageFinalPDFRenderContractVersion
 	}
@@ -151,10 +154,18 @@ func (d Deps) renderPrintableArtifact(ctx context.Context,
 		return k12.PrintArtifactRender{},
 			fmt.Errorf("%w: PDF renderer 未配置", ErrRenderUnavailable)
 	}
+	metadata := DocumentRenderMetadata{}
+	if d.Records != nil {
+		if snapshot, err := d.GetProfileBundleSnapshot(ctx, artifact.AgentName, ""); err == nil {
+			metadata.AgentDisplayName = snapshot.AgentConfig.DisplayName
+		}
+	}
 	if strings.TrimSpace(renderMarkdown) == "" {
 		renderMarkdown = artifact.CanonicalMarkdown
 		if artifact.SourceKind == k12.PrintSourcePracticeQuestion && printArtifactRenderContract(artifact.SourceRef) == weeklyMistakeSheetRenderContract {
-			renderMarkdown = weeklyMistakeSheetRenderMarkdown(artifact.CanonicalMarkdown)
+			metadata.Title = "本周错题卷"
+			metadata.Subtitle, renderMarkdown = weeklySheetDocumentParts(artifact.CanonicalMarkdown)
+			renderMarkdown = weeklyMistakeSheetRenderMarkdown(renderMarkdown)
 		}
 	}
 	if artifact.SourceKind == k12.PrintSourceGradingFinalArtifact {
@@ -164,7 +175,14 @@ func (d Deps) renderPrintableArtifact(ctx context.Context,
 			return k12.PrintArtifactRender{}, fmt.Errorf("%w: %v", ErrRenderUnavailable, err)
 		}
 	}
-	pdf, contentType, err := d.Renderer.Render(ctx, renderMarkdown, "pdf")
+	var pdf []byte
+	var contentType string
+	var err error
+	if renderer, ok := d.Renderer.(MetadataRenderer); ok {
+		pdf, contentType, err = renderer.RenderWithMetadata(ctx, renderMarkdown, "pdf", metadata)
+	} else {
+		pdf, contentType, err = d.Renderer.Render(ctx, renderMarkdown, "pdf")
+	}
 	if err != nil {
 		return k12.PrintArtifactRender{},
 			fmt.Errorf("%w: %v", ErrRenderUnavailable, err)

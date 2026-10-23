@@ -1242,7 +1242,7 @@ func (o *GradingOrchestrator) reconcileDurableGradingOutcome(
 		// A source-scoped Problem/Attempt snapshot can still contain facts from an
 		// earlier invocation of this Job. Only this Job's append-only recognition
 		// receipt proves which result belongs to the ambiguous invocation.
-		receipt, ok := o.readRecognitionReceipt(job.Record.RecordID)
+		receipt, ok := o.readRecognitionReceipt(job.Record.RecordID, invocation.InvocationID)
 		if !ok || receipt.AgentName != run.agentName ||
 			receipt.InvocationID != invocation.InvocationID ||
 			!sameRecognitionPhysicalReceiptSet(
@@ -1892,6 +1892,10 @@ func (o *GradingOrchestrator) recognitionReceiptPath(jobID string) string {
 	return filepath.Join(o.runDir, "recognition-results", jobID+".json")
 }
 
+func (o *GradingOrchestrator) recognitionInvocationReceiptPath(jobID, invocationID string) string {
+	return filepath.Join(o.runDir, "recognition-results", jobID+"."+invocationID+".json")
+}
+
 // persistRecognitionReceipt writes the immutable provider result before any
 // shared Submission projection. The Job+Invocation binding is the only local
 // evidence allowed to reconcile an ambiguous recognizing call.
@@ -1923,8 +1927,12 @@ func (o *GradingOrchestrator) persistRecognitionReceipt(jobID, invocationID stri
 		}
 	}
 	path := o.recognitionReceiptPath(jobID)
+	// 已存在的旧调用事实保持不可变；显式重试使用自己的调用文件。
+	if existing, ok := o.readRecognitionReceipt(jobID); ok && existing.AgentName == run.agentName && existing.InvocationID != invocationID {
+		path = o.recognitionInvocationReceiptPath(jobID, invocationID)
+	}
 	if _, err := os.Stat(path); err == nil {
-		existing, ok := o.readRecognitionReceipt(jobID)
+		existing, ok := o.readRecognitionReceipt(jobID, invocationID)
 		wantDigest := CanonicalRecognizedQuestionsDigest(run.questions)
 		if !ok || existing.InvocationID != invocationID ||
 			existing.AgentName != run.agentName ||
@@ -1996,29 +2004,39 @@ func sameRecognitionPhysicalReceiptSet(
 	return true
 }
 
-func (o *GradingOrchestrator) readRecognitionReceipt(jobID string) (gradingRecognitionReceiptFile, bool) {
+func (o *GradingOrchestrator) readRecognitionReceipt(jobID string, invocationIDs ...string) (gradingRecognitionReceiptFile, bool) {
 	if o.runDir == "" || strings.TrimSpace(jobID) == "" {
 		return gradingRecognitionReceiptFile{}, false
 	}
-	raw, err := os.ReadFile(o.recognitionReceiptPath(jobID))
-	if err != nil {
-		return gradingRecognitionReceiptFile{}, false
+	paths := []string{o.recognitionReceiptPath(jobID)}
+	if len(invocationIDs) > 0 {
+		paths = append([]string{o.recognitionInvocationReceiptPath(jobID, invocationIDs[0])}, paths...)
 	}
-	var receipt gradingRecognitionReceiptFile
-	if json.Unmarshal(raw, &receipt) != nil || receipt.JobID != jobID ||
-		strings.TrimSpace(receipt.InvocationID) == "" || len(receipt.Questions) == 0 ||
-		receipt.CanonicalDigest != CanonicalRecognizedQuestionsDigest(receipt.Questions) {
-		return gradingRecognitionReceiptFile{}, false
-	}
-	for _, physical := range receipt.PhysicalInvocations {
-		if strings.TrimSpace(physical.PhysicalInvocationID) == "" ||
-			!physical.PhysicalUnit.Valid() ||
-			!validModelInvocationDigest(physical.RequestDigest) ||
-			!validModelInvocationDigest(physical.ResultDigest) {
-			return gradingRecognitionReceiptFile{}, false
+	for _, path := range paths {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			continue
 		}
+		var receipt gradingRecognitionReceiptFile
+		if json.Unmarshal(raw, &receipt) != nil || receipt.JobID != jobID ||
+			strings.TrimSpace(receipt.InvocationID) == "" || len(receipt.Questions) == 0 ||
+			receipt.CanonicalDigest != CanonicalRecognizedQuestionsDigest(receipt.Questions) {
+			continue
+		}
+		if len(invocationIDs) > 0 && receipt.InvocationID != invocationIDs[0] {
+			continue
+		}
+		for _, physical := range receipt.PhysicalInvocations {
+			if strings.TrimSpace(physical.PhysicalInvocationID) == "" ||
+				!physical.PhysicalUnit.Valid() ||
+				!validModelInvocationDigest(physical.RequestDigest) ||
+				!validModelInvocationDigest(physical.ResultDigest) {
+				return gradingRecognitionReceiptFile{}, false
+			}
+		}
+		return receipt, true
 	}
-	return receipt, true
+	return gradingRecognitionReceiptFile{}, false
 }
 
 // archiveRecognitionFacts is the terminal append-only audit. Unlike the

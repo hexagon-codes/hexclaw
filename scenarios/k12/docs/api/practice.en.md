@@ -10,6 +10,8 @@ JSON bodies are limited to 1 MiB and must contain exactly one JSON value. Strict
 
 Profile, textbook and curriculum-progress constraints are maintained in [profile-bundle](../../API.en.md#profile-bundle) and [textbook / progress](../../API.en.md#textbook-and-curriculum-progress).
 
+Unit diagnostic variants are enabled only for explicitly recognized geometry relations. The candidate must preserve the shape and target quantity and request the numerical value and unit separately; its independently verified answer must have the same dimension. Other relations retain ordinary variants. Insight suggestions match the committed generation source, question, knowledge point and diagnostic observation within one read snapshot. Status/version changes alone do not invalidate a matching problem; changed problem semantics retain the old practice history without recommending it as the current check.
+
 ## Contents
 
 | Method / path | Operation |
@@ -1188,7 +1190,7 @@ Implementation: [preparePrintableArtifact](../../../../scenarios/k12/apihttp/pra
 
 Download frozen PDF bytes
 
-Content-Type is the frozen rendered type (PDF); X-Content-SHA256 is the byte digest and ETag is the quoted digest. No kind is accepted and no print job is created. This handler does not implement conditional GET/304.
+Content-Type is the frozen rendered type (PDF). Content-Disposition derives the download filename from the frozen Artifact title and includes UTF-8 filename*. X-Content-SHA256 is the byte digest and ETag is the quoted digest. No kind is accepted and no print job is created. This handler does not implement conditional GET/304. New weekly mistake sheets use “本周错题卷-YYYY-MM-DD-第N周.pdf”; the generation date and ISO week are frozen with the sheet and match its title metadata. Existing frozen files retain their original names and bytes.
 
 | Parameter | Location | Type / constraints | Required | Meaning |
 | --- | --- | --- | --- | --- |
@@ -1396,6 +1398,8 @@ Implementation: [retryPracticePrintJob](../../../../scenarios/k12/apihttp/practi
 ## `POST /api/k12/practice-sets/{id}/submit`
 
 Optional `answer_context` accepts `unknown`, `prompted_answer`, or `independent_answer`. It is an explicit guardian report, never inferred from a photo or PDF delivery. The server freezes `guardian_report`, the return ID and reception time; replay cannot relabel that context. Return/item DTO `learning_evidence` preserves provenance. Legacy records project to unknown without historical backfill. Delayed retests use actual timestamps; human confirmation remains distinct from system assessment. The existing two-correct / three-day mastery policy is unchanged.
+
+The acceptance transaction freezes the observable previous-correct timestamp; delayed evidence is not recalculated from a source already updated by regrading. A different return updates the item's evidence association even when correctness is unchanged, while the same conclusion does not advance review again. Legacy returns freeze traceable evidence when actually regraded without inventing missing history. Replay, restart and archive restore retain a frozen basis.
 
 Submit a returned practice photo
 

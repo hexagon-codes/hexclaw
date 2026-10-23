@@ -30,12 +30,19 @@ func (d Deps) MistakeSheetMarkdown(ctx context.Context, agentName string) (strin
 	if err != nil {
 		return "", err
 	}
+	period, err := d.mistakeSheetPeriod(ctx, agentName)
+	if err != nil {
+		return "", err
+	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "# 本周错题卷\n\n共 %d 题，做完对照错题本订正。\n\n", len(items))
+	fmt.Fprintf(&b, "# 本周错题卷\n\n%s\n\n共 %d 题，做完对照错题本订正。\n\n", period, len(items))
 	for i, it := range items {
-		// BUG-20260710：队列跨集合混排（错题本+积累本），积累项的 Fields.Question 为零值——
-		// 必须用跨集合安全的 Title()（错题项仍返回 Fields.Question，语义不变）。
-		fmt.Fprintf(&b, "**%d.** %s\n\n（　　）\n\n", i+1, it.Title())
+		// 历史照片错题只恢复可识别的题面协议；积累项继续保留自己的正文。
+		question := it.Title()
+		if !it.IsAccum() {
+			question = k12.MistakeQuestionStatement(it.Fields)
+		}
+		fmt.Fprintf(&b, "**%d.** %s\n\n（　　）\n\n", i+1, question)
 	}
 	if len(items) == 0 {
 		b.WriteString("本周没有到期该练的错题，继续保持。\n")

@@ -325,12 +325,12 @@ func TestK12FinalPDFAutomaticRoutePreservesExecutionSummarySQLite(t *testing.T) 
 		t.Fatalf("automatic final delivery incomplete: created=%v batch=%+v err=%v", created, batch, err)
 	}
 	content := transport.preparedMessages[0].Content
-	for _, required := range []string{"完整答案与讲法见附件", "**Processing summary**", "Image recognition", "Problem solving", "**Tools used**", "Skill · Solve homework", "**Models used**: frozen-provider / frozen-model"} {
+	for _, required := range []string{"完整答案与讲法见附件", "\n\n---\n\n", "**Skills used:** Solve homework", "**Model used:** frozen-provider · frozen-model"} {
 		if !strings.Contains(content, required) {
 			t.Errorf("frozen automatic summary omitted %q: %s", required, content)
 		}
 	}
-	if renderer.markdown == "" || strings.Contains(renderer.markdown, "**Models used**") || reads != 1 || len(transport.sends) != 2 {
+	if renderer.markdown == "" || strings.Contains(renderer.markdown, "**Model used:**") || reads != 1 || len(transport.sends) != 2 {
 		t.Fatalf("projection changed PDF or execution count: reads=%d sends=%d", reads, len(transport.sends))
 	}
 	again, created, err := d.PrepareAndSendGradingFinalArtifactExact(ctx, "mingming", f.old.ArtifactID, f.old.ArtifactDigest)

@@ -55,8 +55,8 @@ func normalizeProblem(problem k12.Problem, at int64) (k12.Problem, error) {
 		}
 	}
 	problem.SourceSectionLabel = strings.TrimSpace(problem.SourceSectionLabel)
-	if (len(problem.SourceSectionPath) == 0) != (problem.SourceSectionLabel == "") {
-		return k12.Problem{}, fmt.Errorf("k12storage: source_section_path/source_section_label 必须同时存在或同时为空")
+	if len(problem.SourceSectionPath) > 0 && problem.SourceSectionLabel == "" {
+		return k12.Problem{}, fmt.Errorf("k12storage: source_section_path requires source_section_label")
 	}
 	problem.SystemDisplayLabel = strings.TrimSpace(problem.SystemDisplayLabel)
 	if problem.SystemSectionOrdinal < 0 {

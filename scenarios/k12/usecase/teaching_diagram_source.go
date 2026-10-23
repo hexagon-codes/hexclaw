@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"math/big"
 	"regexp"
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -21,6 +22,7 @@ var diagramJourneyTimes = regexp.MustCompile(`(?:要走|需要|需)([0-9]+(?:\.[
 var diagramJourneyElapsed = regexp.MustCompile(`([0-9]+(?:\.[0-9]+)?)(分钟|小时|秒)后`)
 var diagramJourneyGap = regexp.MustCompile(`相距([0-9]+(?:\.[0-9]+)?)\s*(` + elementarymath.UnitPattern() + `)`)
 var diagramJourneyNames = regexp.MustCompile(`([\p{Han}]{1,6})从([\p{Han}]{1,6})到([\p{Han}]{1,6})(?:要走|需要|需)`)
+var diagramSegmentCount = regexp.MustCompile(`([两二三四五六2-6])(?:段|部分)(?:组成|构成|拼成)`)
 
 func diagramSourceText(value string) string {
 	// 只规范化计算副本中的重复TeX转义，冻结原文不改写。
@@ -105,6 +107,43 @@ func teachingDiagramSourceContext(q RecognizedQuestion, answer string, evidence 
 			relation.Travelers = [2]string{names[0][1], names[1][1]}
 			ctx.Relations["source_relation"] = relation
 		}
+	} else if counts := diagramSegmentCount.FindAllStringSubmatch(source, -1); len(counts) == 1 &&
+		(strings.Contains(source, "全长") || strings.Contains(source, "总长") || strings.Contains(source, "总重") || strings.Contains(source, "总质量")) {
+		count := map[string]int{"两": 2, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6}[counts[0][1]]
+		if parsed, err := strconv.Atoi(counts[0][1]); err == nil {
+			count = parsed
+		}
+		var amounts [][]string
+		for _, amount := range diagramSourceQuantity.FindAllStringSubmatch(source, -1) {
+			if category := elementarymath.UnitCategory(amount[2]); category == "length" || category == "mass" {
+				amounts = append(amounts, amount)
+			}
+		}
+		if len(amounts) != count {
+			return ctx, TeachingDiagramCandidate{}, false
+		}
+		sum := new(big.Rat)
+		unit := amounts[0][2]
+		if category := elementarymath.UnitCategory(unit); category != "length" && category != "mass" {
+			return ctx, TeachingDiagramCandidate{}, false
+		}
+		segments := make([]string, 0, count)
+		for i, amount := range amounts {
+			number, ok := new(big.Rat).SetString(amount[1])
+			if !ok || number.Sign() <= 0 || elementarymath.NormalizeUnit(amount[2]) != elementarymath.NormalizeUnit(unit) {
+				return ctx, TeachingDiagramCandidate{}, false
+			}
+			sum.Add(sum, number)
+			id := "part_" + strconv.Itoa(i+1)
+			segments = append(segments, id)
+			ctx.Quantities[id] = TeachingDiagramQuantity{Value: amount[1], Unit: amount[2]}
+		}
+		whole, found := diagramAnswerQuantity(answerQuantities, sum, unit)
+		if !found {
+			return ctx, TeachingDiagramCandidate{}, false
+		}
+		ctx.Quantities["whole"] = whole
+		ctx.Relations["source_relation"] = TeachingDiagramRelation{Kind: "segment_bar", Whole: "whole", Segments: segments}
 	} else {
 		return ctx, TeachingDiagramCandidate{}, false
 	}

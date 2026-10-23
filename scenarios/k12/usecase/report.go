@@ -2,7 +2,9 @@ package usecase
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -280,6 +282,16 @@ func buildSourceBackedSuggestion(report InsightReport, source k12storage.Insight
 			}
 			for _, item := range practice.Items {
 				if item.SourceProblemID != record.RecordID || !k12.PracticeItemPublishable(item) || item.ResultCorrect != nil || item.GenerationJobID == "" || item.GenerationStatus != k12.PracticeItemGenerationReady {
+					continue
+				}
+				job, exists := source.PracticeGenerations[item.GenerationJobID]
+				var frozen singlePracticeRequestSnapshot
+				if !exists || job.SourceKind != k12.PracticeGenerationSourceMistake || job.SourceID != record.RecordID ||
+					job.ResultSetID != set.RecordID || !slices.Contains(job.ResultItemIDs, item.ItemID) ||
+					json.Unmarshal([]byte(job.RequestSnapshot), &frozen) != nil ||
+					frozen.Question != fields.Question || frozen.KnowledgePoint != fields.KnowledgePoint || frozen.Subject != fields.Subject ||
+					(frozen.CanonicalAnswer != "" && frozen.CanonicalAnswer != fields.CanonicalAnswer) ||
+					(frozen.Diagnostic != nil && frozen.Diagnostic.Observation != fields.ObservedStudentAnswer) {
 					continue
 				}
 				// 建议正文沿既有纯文本区域展示；保留核对题完整参考，避免泄漏 Markdown 控制字符。

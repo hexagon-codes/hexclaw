@@ -135,17 +135,21 @@ func TestWeeklyPracticeSendUsesFrozenArtifactMarkdownAndPDFForEveryDirectTarget(
 	}
 	if renderer.calls != renderCalls+1 || !strings.HasSuffix(renderer.markdown, sheet) ||
 		strings.Contains(renderer.markdown, `#set page(`) ||
-		len(transport.sends) != sends+wantReceiptCount {
-		t.Fatalf("weekly cron must render the complete sheet once and send title/PDF: renders=%d sends=%d markdown=%q", renderer.calls, len(transport.sends), renderer.markdown)
+		len(transport.sends) != sends+len(transport.targets) {
+		t.Fatalf("weekly cron must render the complete sheet once and send one PDF per target: renders=%d sends=%d markdown=%q", renderer.calls, len(transport.sends), renderer.markdown)
 	}
-	var title weeklyDeliveryPayload
-	if err := json.Unmarshal([]byte(transport.sends[sends].PayloadJSON), &title); err != nil || title.Content != "本周错题卷" {
-		t.Fatalf("weekly cron title=%q err=%v", title.Content, err)
+	for _, receipt := range transport.sends[sends:] {
+		var payload weeklyDeliveryPayload
+		if err := json.Unmarshal([]byte(receipt.PayloadJSON), &payload); err != nil ||
+			receipt.PartKind != messagecontent.PartArtifact || payload.Content != "" ||
+			payload.MIME != "application/pdf" || !bytes.Equal(payload.Data, renderer.payload) {
+			t.Fatalf("weekly cron must retain only the frozen PDF part: receipt=%+v err=%v", receipt, err)
+		}
 	}
 	if err := d.DeliverCronResult(context.Background(), "xiaoming", usecase.KindWeeklySheet, sheet+"\n\n2. 1 + 1 = ?", nil); err != nil {
 		t.Fatal(err)
 	}
-	if renderer.calls != renderCalls+1 || len(transport.sends) != sends+wantReceiptCount {
+	if renderer.calls != renderCalls+1 || len(transport.sends) != sends+len(transport.targets) {
 		t.Fatalf("same-week replay rendered or resent: renders=%d sends=%d", renderer.calls, len(transport.sends))
 	}
 }

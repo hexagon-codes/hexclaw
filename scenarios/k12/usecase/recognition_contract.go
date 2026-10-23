@@ -345,7 +345,7 @@ func scopedMaterialReadingsEquivalent(q RecognizedQuestion, raw string, values [
 
 var mathPrintedUnit = regexp.MustCompile(elementarymath.UnitPattern())
 var mathRepeatedTeXCommand = regexp.MustCompile(`\\{2,}(frac|text|times|div|cdot|leq|geq|neq)\b`)
-var mathCapacityDiagramLabelLine = regexp.MustCompile(`(?m)(^|[。？?\n])[\t ]*图[中上]?(?:示|标注|标签|标记|文字)[：:][\t ]*已用空间[，,、][\t ]*剩余空间[，,、][\t ]*共[？?][\t ]*(` + elementarymath.UnitPattern() + `)(?:[。.]|[\t ]*$)`)
+var mathCapacityDiagramLabelLine = regexp.MustCompile(`(?m)(^|[。？?\n])[\t ]*图(?:[中上]?(?:示|标注|标签|标记|文字)|[中上])[：:][\t ]*已用空间[，,、][\t ]*剩余空间[，,、][\t ]*共[？?][\t ]*(` + elementarymath.UnitPattern() + `)(?:[。.]|[\t ]*$)`)
 
 func stripPrintedInstructionNumber(q RecognizedQuestion, value string) string {
 	if len(q.SourceNumberPath) == 0 {
@@ -926,8 +926,9 @@ func validateRecognitionEvidence(index int, question RecognizedQuestion) error {
 			return fmt.Errorf("%w: problem index %d source_number_path 含空 token", ErrInvalidInput, index)
 		}
 	}
-	if (len(question.SourceSectionPath) == 0) != (strings.TrimSpace(question.SourceSectionLabel) == "") {
-		return fmt.Errorf("%w: problem index %d source_section_path/source_section_label 必须同时存在或同时为空", ErrInvalidInput, index)
+	// 可见标题不一定带印刷编号；保留标题原文，不为其虚构编号。
+	if len(question.SourceSectionPath) > 0 && strings.TrimSpace(question.SourceSectionLabel) == "" {
+		return fmt.Errorf("%w: problem index %d source_section_path requires source_section_label", ErrInvalidInput, index)
 	}
 	for _, token := range question.SourceSectionPath {
 		if strings.TrimSpace(token) == "" {

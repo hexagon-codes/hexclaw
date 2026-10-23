@@ -49,6 +49,9 @@ func singlePracticeDiagnostic(source *records.AgentRecord, fields k12.MistakeFie
 		diagnostic.Hypothesis = "may_confuse_ratio_and_quantity"
 		diagnostic.Distinction = "Keep the part/whole relation and use different explicit capacity quantities. Ask for the meaning and unit of each quantity, then one-part capacity and total capacity. State the reference answer and checks separately. A new response may support or weaken the hypothesis; one correct response does not establish mastery."
 	case strings.Contains(fields.WrongProcess, "单位") || strings.Contains(fields.ErrorCause, "单位"):
+		if relation, _ := diagnosticUnitRelation(fields.Question); relation == "" {
+			return nil
+		}
 		diagnostic.Hypothesis = "may_confuse_or_omit_unit"
 		diagnostic.Distinction = "Keep the same mathematical relation with explicit units. Ask for the numerical result and its unit separately, provide a reference answer and separate checks for calculation and units. Do not assume a conceptual error from a missing unit alone."
 	default:
@@ -67,7 +70,7 @@ func (d *practiceDiagnosticContext) prompt() string {
 var diagnosticFraction = regexp.MustCompile(`[0-9]+/[0-9]+`)
 
 // 只排除与当前明确假设无关的题型；计算正确性仍走原独立验算链。
-func (d *practiceDiagnosticContext) acceptsQuestion(question string) bool {
+func (d *practiceDiagnosticContext) acceptsQuestion(source, question string) bool {
 	if d == nil {
 		return true
 	}
@@ -77,7 +80,10 @@ func (d *practiceDiagnosticContext) acceptsQuestion(question string) bool {
 		return false
 	}
 	if d.Hypothesis != "may_confuse_ratio_and_quantity" {
-		return true
+		sourceRelation, _ := diagnosticUnitRelation(source)
+		candidateRelation, _ := diagnosticUnitRelation(question)
+		return sourceRelation != "" && sourceRelation == candidateRelation &&
+			strings.Contains(text, "单位") && (strings.Contains(text, "数值") || strings.Contains(text, "数值结果") || strings.Contains(text, "数字"))
 	}
 	capacity := false
 	for _, amount := range amounts {
@@ -87,4 +93,52 @@ func (d *practiceDiagnosticContext) acceptsQuestion(question string) bool {
 		(strings.Contains(text, "已用") || strings.Contains(text, "用了") || strings.Contains(text, "占")) &&
 		(strings.Contains(text, "每份") || strings.Contains(text, "一份") || strings.Contains(text, "1份")) &&
 		(strings.Contains(text, "表示") || strings.Contains(text, "含义") || strings.Contains(text, "意义") || strings.Contains(text, "分率") || strings.Contains(text, "单位"))
+}
+
+// 单位诊断只覆盖能从题干明确识别的几何关系；其余题仍使用普通变式。
+func diagnosticUnitRelation(question string) (string, string) {
+	text := diagramSourceText(question)
+	shape := ""
+	for _, candidate := range []string{"正方形", "长方形", "三角形", "平行四边形", "梯形", "正方体", "长方体", "圆柱", "圆锥", "圆"} {
+		if strings.Contains(text, candidate) {
+			if candidate == "圆" && (shape == "圆柱" || shape == "圆锥") {
+				continue
+			}
+			if shape != "" {
+				return "", ""
+			}
+			shape = candidate
+		}
+	}
+	if shape == "" {
+		return "", ""
+	}
+	quantity, category := "", ""
+	for _, target := range []struct{ word, unitCategory string }{{"面积", "area"}, {"周长", "length"}, {"体积", "volume"}, {"容积", "volume"}} {
+		if strings.Contains(text, target.word) {
+			if quantity != "" {
+				return "", ""
+			}
+			quantity, category = target.word, target.unitCategory
+		}
+	}
+	if quantity == "" {
+		return "", ""
+	}
+	if strings.Contains(text, "表面积") {
+		quantity = "表面积"
+	}
+	return shape + ":" + quantity, category
+}
+
+func (d *practiceDiagnosticContext) acceptsAnswer(source, answer string) bool {
+	if d == nil {
+		return true
+	}
+	_, category := diagnosticUnitRelation(source)
+	if d.Hypothesis == "may_confuse_ratio_and_quantity" {
+		category = "data"
+	}
+	amounts := diagramSourceQuantity.FindAllStringSubmatch(diagramSourceText(answer), -1)
+	return category != "" && len(amounts) > 0 && elementarymath.UnitCategory(amounts[len(amounts)-1][2]) == category
 }

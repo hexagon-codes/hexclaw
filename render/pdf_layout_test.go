@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -49,9 +50,9 @@ func TestPDFDefaultBrandingAndExplicitExceptionsRenderRealFiles(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			// 固定公开夹具失败时保留PDF证据，区分字体渲染与文字提取缺陷。
+			// 保留失败证据及Windows默认样张，供实际字体和跨平台产物核对。
 			t.Cleanup(func() {
-				if !t.Failed() {
+				if !t.Failed() && (runtime.GOOS != "windows" || !tc.branded) {
 					return
 				}
 				for _, binary := range []string{"pandoc", "typst", "pdftotext", "pdffonts"} {
@@ -81,8 +82,9 @@ func TestPDFDefaultBrandingAndExplicitExceptionsRenderRealFiles(t *testing.T) {
 				want = 2
 			}
 			compactText := strings.Join(strings.Fields(string(text)), "")
-			if got := strings.Count(compactText, "HexClaw河蟹AI"); got != want {
-				t.Fatalf("header count = %d, want %d; text=%q", got, want, text)
+			// 每页页眉和页脚各保留一处品牌；关闭或自定义格式仍无共享品牌。
+			if got := strings.Count(compactText, "HexClaw河蟹AI"); got != want*2 {
+				t.Fatalf("brand count = %d, want %d; text=%q", got, want*2, text)
 			}
 			if got := strings.Count(compactText, "本地云端均可部署"); got != want {
 				t.Fatalf("footer count = %d, want %d; text=%q", got, want, text)

@@ -28,6 +28,11 @@ var _ usecase.Renderer = (*RenderAdapter)(nil)
 // Render 把 markdown 渲染为指定格式，返回二进制 + Content-Type。
 // svc 为 nil 或格式非法 → 返回 ErrRenderUnavailable，调用方回退 markdown。
 func (a *RenderAdapter) Render(ctx context.Context, markdown, format string) ([]byte, string, error) {
+	return a.RenderWithMetadata(ctx, markdown, format, usecase.DocumentRenderMetadata{})
+}
+
+// RenderWithMetadata 把可信展示身份传给共享PDF模板，不改变正文与原资产。
+func (a *RenderAdapter) RenderWithMetadata(ctx context.Context, markdown, format string, metadata usecase.DocumentRenderMetadata) ([]byte, string, error) {
 	if a.svc == nil {
 		return nil, "", usecase.ErrRenderUnavailable
 	}
@@ -35,7 +40,9 @@ func (a *RenderAdapter) Render(ctx context.Context, markdown, format string) ([]
 	if !f.IsValid() {
 		return nil, "", fmt.Errorf("render: 不支持格式 %q", format)
 	}
-	res, err := a.svc.Render(ctx, markdown, f, render.RenderOptions{Locale: "zh-CN"})
+	res, err := a.svc.Render(ctx, markdown, f, render.RenderOptions{Locale: "zh-CN", PDFMetadata: render.PDFDocumentMetadata{
+		AgentDisplayName: metadata.AgentDisplayName, Title: metadata.Title, Subtitle: metadata.Subtitle,
+	}})
 	if err != nil {
 		return nil, "", err // RenderError（含 ENGINE_MISSING 等），调用方按需降级
 	}

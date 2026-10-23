@@ -1342,9 +1342,17 @@ func (h *handler) export(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, markdownResponse(""))
 		return
 	}
-	data, contentType, err := h.rt.Deps.Renderer.Render(
-		r.Context(), usecase.LearningArchiveRenderMarkdown(archive), format,
-	)
+	var data []byte
+	var contentType string
+	if renderer, ok := h.rt.Deps.Renderer.(usecase.MetadataRenderer); ok && format == "pdf" {
+		metadata := usecase.DocumentRenderMetadata{Title: "学习档案", Subtitle: archive.Scope.GradeTerm}
+		if snapshot, profileErr := h.rt.Deps.GetProfileBundleSnapshot(r.Context(), archive.Scope.Agent, ""); profileErr == nil {
+			metadata.AgentDisplayName = snapshot.AgentConfig.DisplayName
+		}
+		data, contentType, err = renderer.RenderWithMetadata(r.Context(), usecase.LearningArchiveRenderMarkdown(archive), format, metadata)
+	} else {
+		data, contentType, err = h.rt.Deps.Renderer.Render(r.Context(), usecase.LearningArchiveRenderMarkdown(archive), format)
+	}
 	if err != nil {
 		writeJSON(w, http.StatusOK, markdownResponse(err.Error()))
 		return

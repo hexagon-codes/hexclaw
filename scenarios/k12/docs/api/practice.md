@@ -10,6 +10,8 @@ JSON body 上限 1 MiB，必须只含一个 JSON 值；严格命令拒绝未知�
 
 档案、教材与课程进度规则以 [profile-bundle](../../API.md#profile-bundle) 和 [教材 / 课程进度](../../API.md#textbook-and-curriculum-progress) 为准。
 
+诊断式单位变式仅在原题能明确识别的几何关系范围启用，生成题须保留相同图形与目标量，并分别要求数值和单位；独立验算后的答案量纲必须一致。其他关系继续使用普通变式。学情建议引用的已验证变式同时核对同一读取快照中的生成任务、题干、知识点及已有诊断作答依据；仅状态或记录版本变化不自动废弃同题变式，题意改变时保留旧练习历史但不再用作当前核对题。
+
 ## 接口索引
 
 | Method / path | 操作 |
@@ -1188,7 +1190,7 @@ curl -fS -X POST "$HEXCLAW_BASE_URL/api/k12/print-artifacts" \
 
 下载冻结 PDF 字节
 
-Content-Type 为冻结渲染类型（PDF）；X-Content-SHA256 为字节摘要，ETag 为带引号摘要。不接受 kind，也不创建打印任务；handler 未实现条件 GET/304。
+Content-Type 为冻结渲染类型（PDF）；Content-Disposition 使用冻结 Artifact 标题生成可下载文件名，包含 UTF-8 filename*；X-Content-SHA256 为字节摘要，ETag 为带引号摘要。不接受 kind，也不创建打印任务；handler 未实现条件 GET/304。新周错题卷文件名为“本周错题卷-YYYY-MM-DD-第N周.pdf”，日期和ISO自然周在生成时确定，与卷面标题旁的信息一致；旧冻结文件保持原名与原字节。
 
 | 参数 | 位置 | 类型 / 约束 | 必填 | 说明 |
 | --- | --- | --- | --- | --- |
@@ -1396,6 +1398,8 @@ curl -fS -X POST "$HEXCLAW_BASE_URL/api/k12/print-jobs/resource-demo-1/retry" \
 ## `POST /api/k12/practice-sets/{id}/submit`
 
 可选 `answer_context` 为 `unknown`、`prompted_answer` 或 `independent_answer`，表示家长对本次作答条件的明确报告，缺省保持未知。服务端冻结来源 `guardian_report`、回传 ID 和接收时间；相同 return_id 不能改报其他条件。回传及题目 DTO 的 `learning_evidence` 保留各事件来源，旧记录只在读取投影为 unknown；延迟复测来自实际回传与前次正确时间，人工确认不冒充系统作答。PDF 下载/发送不生成答案曝光或独立作答证据；三天两次正确掌握策略不变。
+
+服务端在接纳事务内冻结可观察的前次正确时间，不从复批后已更新的来源时间重算延迟证据。不同回传即使对错相同，也更新该题证据的回传关联；同一结论仍不重复推进复习。旧批次仅在首次实际复批时冻结可追溯依据，缺失历史不猜造；重复提交、重启和档案恢复保留已冻结依据。
 
 提交练习回传照片
 

@@ -31,8 +31,19 @@ func MistakeQuestionStatement(fields MistakeFields) string {
 	if index := strings.LastIndex(problem, prefix); index > 0 && strings.HasSuffix(problem, suffix) {
 		subproblem := strings.TrimSuffix(problem[index+len(prefix):], suffix)
 		if strings.TrimSpace(subproblem) != "" && !strings.ContainsAny(subproblem, "\r\n") {
-			return problem[:index]
+			problem = problem[:index]
 		}
 	}
-	return problem
+	return photoStatementWithoutMaterialEnvelope(problem)
+}
+
+// 只逆转照片执行输入追加材料时的完整分隔协议，不按英文关键词删行。
+// 每份材料及其换行、公式原样保留；手工来源不进入该投影。
+func photoStatementWithoutMaterialEnvelope(problem string) string {
+	const separator = "\n\nRead-only source material (do not answer as another question):\n"
+	parts := strings.Split(problem, separator)
+	if len(parts) < 2 || strings.TrimSpace(parts[0]) == "" {
+		return problem
+	}
+	return strings.Join(parts, "\n\n")
 }

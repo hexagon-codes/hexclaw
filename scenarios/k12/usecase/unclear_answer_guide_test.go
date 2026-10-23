@@ -95,7 +95,7 @@ func TestScopedPrintedNumberDifferenceKeepsIndependentReferenceEligible(t *testi
 	if independentReferenceAnswerEligible(PhotoGradeRequest{}, q) {
 		t.Fatal("a changed fraction was treated as an empty-slot formatting difference")
 	}
-	for _, annotation := range []string{"图示：已用空间，剩余空间，共？TB。", "图示：已用空间，剩余空间，共？GB。", "图示：剩余空间大于已用空间。", "图示：已用空间4.8 TB，剩余空间7.2 TB。"} {
+	for _, annotation := range []string{"图示：已用空间，剩余空间，共？TB。", "图中：已用空间，剩余空间，共？TB。", "图示：已用空间，剩余空间，共？GB。", "图中：已用空间，剩余空间，共？GB。", "图示：剩余空间大于已用空间。", "图示：已用空间4.8 TB，剩余空间7.2 TB。"} {
 		diagram := unclearHandwritingQuestion()
 		diagram.ImageSourceContext = q.ImageSourceContext
 		diagram.Question = shared + "\n先求一份是多少，再求总容量是多少。"
@@ -103,7 +103,7 @@ func TestScopedPrintedNumberDifferenceKeepsIndependentReferenceEligible(t *testi
 		diagram.CanonicalMarkdown = diagram.RawTranscription
 		diagram.EvidenceTranscriptions = []string{diagram.Question, diagram.RawTranscription}
 		diagram.ConfirmationReasons = []OCRRiskReason{OCRRiskEvidenceConflict}
-		want := annotation == "图示：已用空间，剩余空间，共？TB。"
+		want := annotation == "图示：已用空间，剩余空间，共？TB。" || annotation == "图中：已用空间，剩余空间，共？TB。"
 		if got := independentReferenceAnswerEligible(PhotoGradeRequest{}, diagram); got != want {
 			t.Fatalf("diagram labels must retain unit and condition differences: annotation=%q eligible=%t want=%t", annotation, got, want)
 		}

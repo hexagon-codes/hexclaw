@@ -159,6 +159,18 @@ type Renderer interface {
 	Render(ctx context.Context, markdown, format string) (data []byte, contentType string, err error)
 }
 
+// DocumentRenderMetadata 来自宿主已确认的报告身份，不从模型正文推断。
+type DocumentRenderMetadata struct {
+	AgentDisplayName string
+	Title            string
+	Subtitle         string
+}
+
+// MetadataRenderer 在保持原渲染端口兼容的同时传递PDF可见身份。
+type MetadataRenderer interface {
+	RenderWithMetadata(ctx context.Context, markdown, format string, metadata DocumentRenderMetadata) (data []byte, contentType string, err error)
+}
+
 // BBox 是学生作答区域的**归一化边界框**（x,y,w,h 全 0~1），用于在作业原图上叠加确定性批改
 // 标记（✓/✗）——对标作业帮/小猿的「检测坐标 + 程序确定性叠加」范式（原图批改架构设计 §3）。
 //

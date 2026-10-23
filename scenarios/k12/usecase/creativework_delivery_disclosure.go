@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 
+	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/messagecontent"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 )
@@ -155,7 +156,7 @@ func WithCreativeWorkResultDeliveryDisclosure(ctx context.Context, view Creative
 		}
 	}
 	// 点评方法来源属于加载依据，不能作为已执行 Skill 或 MCP 的回执。
-	markdown := messagecontent.RenderExecutionSummary(locale, facts)
+	markdown := adapter.DingTalkExecutionSummaryFooter(locale, facts)
 	if markdown == "" {
 		return ctx
 	}

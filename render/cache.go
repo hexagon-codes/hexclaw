@@ -104,6 +104,7 @@ func (c *Cache) Key(content string, format Format, opts RenderOptions) string {
 		}
 		optMap["PDFLayout"] = layout
 		optMap["PDFHeaderFooter"] = opts.pdfHeaderFooterEnabled()
+		optMap["PDFMetadata"] = opts.PDFMetadata
 		optMap["Locale"] = opts.effectiveLocale(c.defaultLocale)
 		h.Write([]byte("pdf-text:numeric-fractions-v1|"))
 	}

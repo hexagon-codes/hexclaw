@@ -25,6 +25,7 @@ type InsightSourceSnapshot struct {
 	Mistakes            []*records.AgentRecord
 	Accumulations       []*records.AgentRecord
 	PracticeSets        []*records.AgentRecord
+	PracticeGenerations map[string]k12.PracticeGenerationJob
 	SourceRecordIDs     []string
 	SourceDigest        string
 	UnscopedSourceCount int
@@ -39,6 +40,13 @@ type insightDigestRecord struct {
 	CreatedAt  int64  `json:"created_at"`
 	UpdatedAt  int64  `json:"updated_at"`
 	Fields     string `json:"fields"`
+}
+
+type insightDigestGeneration struct {
+	JobID   string   `json:"job_id"`
+	Request string   `json:"request"`
+	SetID   string   `json:"set_id"`
+	Items   []string `json:"items"`
 }
 
 func profileFromMetadataJSON(raw string) (k12.ChildProfile, error) {
@@ -118,14 +126,36 @@ func (s *Store) ReadInsightSourceSnapshot(
 	if err != nil {
 		return InsightSourceSnapshot{}, err
 	}
+	// 推荐题与生成时的来源依据在同一读事务内冻结，避免拼接到已修改的题目。
+	jobs, err := tx.QueryContext(ctx, practiceGenerationJobSelect+` WHERE agent_name=? AND scope='single' AND status='committed' AND retired_at=0 ORDER BY generation_job_id`, agentName)
+	if err != nil {
+		return InsightSourceSnapshot{}, fmt.Errorf("k12storage: read insight practice generations: %w", err)
+	}
+	generationJobs := make(map[string]k12.PracticeGenerationJob)
+	var generationDigests []insightDigestGeneration
+	for jobs.Next() {
+		job, scanErr := scanPracticeGenerationJob(jobs)
+		if scanErr != nil {
+			jobs.Close()
+			return InsightSourceSnapshot{}, scanErr
+		}
+		generationJobs[job.GenerationJobID] = job
+		generationDigests = append(generationDigests, insightDigestGeneration{job.GenerationJobID, job.RequestSnapshot, job.ResultSetID, job.ResultItemIDs})
+	}
+	readErr := jobs.Err()
+	jobs.Close()
+	if readErr != nil {
+		return InsightSourceSnapshot{}, readErr
+	}
 	if err := tx.Commit(); err != nil {
 		return InsightSourceSnapshot{}, fmt.Errorf("k12storage: 提交学情只读事务: %w", err)
 	}
 
 	snapshot := InsightSourceSnapshot{
-		Learner: agentName,
-		Profile: profile,
-		AsOf:    asOf,
+		Learner:             agentName,
+		Profile:             profile,
+		AsOf:                asOf,
+		PracticeGenerations: generationJobs,
 	}
 	var digestRecords []insightDigestRecord
 	appendSelected := func(record *records.AgentRecord) {
@@ -188,17 +218,19 @@ func (s *Store) ReadInsightSourceSnapshot(
 	})
 	sort.Strings(snapshot.SourceRecordIDs)
 	payload := struct {
-		Learner             string                `json:"learner"`
-		GradeTerm           string                `json:"grade_term"`
-		AsOf                int64                 `json:"as_of"`
-		UnscopedSourceCount int                   `json:"unscoped_source_count"`
-		Records             []insightDigestRecord `json:"records"`
+		Learner             string                    `json:"learner"`
+		GradeTerm           string                    `json:"grade_term"`
+		AsOf                int64                     `json:"as_of"`
+		UnscopedSourceCount int                       `json:"unscoped_source_count"`
+		Records             []insightDigestRecord     `json:"records"`
+		PracticeGenerations []insightDigestGeneration `json:"practice_generations"`
 	}{
 		Learner:             snapshot.Learner,
 		GradeTerm:           snapshot.Profile.GradeTerm,
 		AsOf:                snapshot.AsOf,
 		UnscopedSourceCount: snapshot.UnscopedSourceCount,
 		Records:             digestRecords,
+		PracticeGenerations: generationDigests,
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {

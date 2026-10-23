@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/hexagon-codes/hexclaw/render"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/usecase"
 )
@@ -529,6 +530,7 @@ func (h *handler) getPrintableArtifactContent(w http.ResponseWriter, r *http.Req
 		return
 	}
 	w.Header().Set("Content-Type", v.Render.ContentType)
+	w.Header().Set("Content-Disposition", render.ContentDispositionHeader(v.Artifact.Title, "pdf"))
 	w.Header().Set("X-Content-SHA256", v.Render.ByteDigest)
 	w.Header().Set("ETag", `"`+v.Render.ByteDigest+`"`)
 	w.WriteHeader(http.StatusOK)

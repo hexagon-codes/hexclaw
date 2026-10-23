@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -993,6 +994,13 @@ func (o *GradingOrchestrator) ReleaseGradingRun(jobID string) {
 		return
 	}
 	_ = os.Remove(o.recognitionReceiptPath(jobID))
+	if o.runDir != "" {
+		if paths, err := filepath.Glob(o.recognitionInvocationReceiptPath(jobID, "*")); err == nil {
+			for _, path := range paths {
+				_ = os.Remove(path)
+			}
+		}
+	}
 	o.releaseRunFiles(jobID)
 }
 
@@ -2782,7 +2790,7 @@ func (o *GradingOrchestrator) recoverRecognizeInvocation(ctx context.Context, ru
 		return false, GradingJobView{}, nil
 	}
 	if len(run.questions) == 0 {
-		if receipt, ok := o.readRecognitionReceipt(jobID); ok && receipt.AgentName == run.agentName && receipt.InvocationID == invocation.InvocationID {
+		if receipt, ok := o.readRecognitionReceipt(jobID, invocation.InvocationID); ok && receipt.AgentName == run.agentName && receipt.InvocationID == invocation.InvocationID {
 			run.questions = cloneRecognizedQuestions(receipt.Questions)
 		}
 	}
@@ -2813,7 +2821,7 @@ func (o *GradingOrchestrator) recoverRecognizeInvocation(ctx context.Context, ru
 		return true, v, errors.Join(physicalErr, ledgerErr, advanceErr)
 	}
 	if !invocation.RequestPolicySnapshot.IsZero() {
-		receipt, ok := o.readRecognitionReceipt(jobID)
+		receipt, ok := o.readRecognitionReceipt(jobID, invocation.InvocationID)
 		if !ok ||
 			receipt.AgentName != run.agentName ||
 			receipt.InvocationID != invocation.InvocationID ||

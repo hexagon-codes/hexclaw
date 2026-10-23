@@ -227,7 +227,7 @@ const wholePageRecognitionPrompt = `Recognize every question in this homework im
 {"problem_id":"temporary reference used only for parent-child links in this JSON","problem_kind":"standalone","parent_problem_id":"","subproblem_no":"","source_number_path":["三","1"],"display_label":"三、1","source_section_path":["三"],"source_section_label":"三、列式计算","question":"verbatim source transcription","canonical_markdown":"renderable Markdown/LaTeX","subject":"数学","knowledge_points":["knowledge point 1"],"answer_state":"present","student_answer":"the student's legible written answer exactly as shown","answer_canonical_markdown":"renderable Markdown/LaTeX","recognition_confidence":0.98,"ocr_signals":[]}
 Rules:
 - Every independently answerable subquestion must be a separate JSON item. Split horizontal arithmetic, fill-in-the-blank, and multiple-choice questions into individual items. A section heading is not a question and must not be emitted as a standalone item.
-- Recover every visible section heading associated with each question. source_section_path contains only the heading-number hierarchy, and source_section_label copies the complete visible heading, for example ["一"] / "一、计算题". When no heading is visible, both fields must be empty.
+- Recover every visible section heading associated with each question. source_section_path contains only the heading-number hierarchy, and source_section_label copies the complete visible heading, for example ["一"] / "一、计算题". For a visible unnumbered heading, use [] and its verbatim heading label. When no heading is visible, both fields must be empty.
 - For the same source_section_path, use the same numbered heading as source_section_label. An unnumbered practice caption such as “做一做” is not another numbered section and must not be appended to that heading.
 - Under a heading, every answerable subquestion with a visible number must include the complete source_number_path and display_label. For example, questions 1 and 2 under “一、计算题” use ["一","1"] / "一、1" and ["一","2"] / "一、2". Never emit only a local subquestion number or replace a visible number with an empty value.
 - When the subquestion itself has no visible printed number, source_number_path and display_label must both be empty. Preserve its source_section_* fields, never invent a number from position, and never emit a system-generated sequence field.
@@ -271,7 +271,7 @@ Each targets item must contain exactly the following fields; none may be omitted
 Rules:
 - Number manifest_ref consecutively from manifest_0001, and manifest_order consecutively from 1.
 - Copy only visible source numbering into source_number_path/display_label and emit them together. Without visible numbering, use [] and "". Never invent numbering from position.
-- Copy the visible owning section heading into source_section_path/source_section_label and emit them together for every target in that section. Without a visible owning section heading, use [] and "". Never infer a section from position or subject.
+- Copy the visible owning section heading into source_section_path/source_section_label for every target in that section. An unnumbered heading uses [] with its verbatim label; without a visible owning section heading, use [] and "". Never infer a section from position or subject.
 - region uses original-image pixel coordinates and must fully cover the question text and answer area without including an adjacent question. x, y, width, and height must all be integers.
 - A watermark, gray overlay, fold, or handwriting crossing a boundary is not a reason to merge two independently answerable items. Keep every visible item in its own target region; never attach a partially obscured item to its neighbor or use the neighbor's text to fill the obscured part. If the obscured item cannot be identified, preserve only the independently visible region and let the semantic stage keep it unresolved; never invent a question or source number.
 - Do not output question transcription, student work, answers, subject, knowledge points, parent/child question content, grading conclusions, or any other field.
@@ -2972,13 +2972,11 @@ func parsePrintedQuestionInventory(raw string) ([]usecase.RecognizedQuestion, er
 	return mergeRecognizedQuestions(nil, out), nil
 }
 
-// clearIncompleteModelSourceSectionPair 只丢弃模型仅提供一半、因而不可信的可选来源章节字段对。
-// adapter 无法推断缺失的原卷事实；同时清空两端可以维持最终领域不变量，并保留所有必需的
-// 题目、答案和来源题号事实。
+// 有编号但没有标题时无法补造原卷事实；无编号的可见标题仍是完整来源证据。
 func clearIncompleteModelSourceSectionPair(question usecase.RecognizedQuestion) usecase.RecognizedQuestion {
 	hasPath := len(question.SourceSectionPath) > 0
 	hasLabel := strings.TrimSpace(question.SourceSectionLabel) != ""
-	if hasPath != hasLabel {
+	if hasPath && !hasLabel {
 		question.SourceSectionPath = nil
 		question.SourceSectionLabel = ""
 	}
@@ -3611,7 +3609,7 @@ func missingSourceSectionEvidence(question usecase.RecognizedQuestion) bool {
 }
 
 func completeSourceSectionEvidence(question usecase.RecognizedQuestion) bool {
-	if len(question.SourceSectionPath) == 0 || strings.TrimSpace(question.SourceSectionLabel) == "" {
+	if strings.TrimSpace(question.SourceSectionLabel) == "" {
 		return false
 	}
 	for _, token := range question.SourceSectionPath {

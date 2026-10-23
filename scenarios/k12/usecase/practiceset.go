@@ -649,6 +649,16 @@ func (d Deps) SubmitReturns(ctx context.Context, agentName, recordID string, inp
 	if agentName == "" || recordID == "" || len(inputs) == 0 {
 		return PracticeSetView{}, fmt.Errorf("%w: agent / record_id / return_assets 均必填", ErrInvalidInput)
 	}
+	var view PracticeSetView
+	err := d.Records.WithPracticeSetTransaction(ctx, agentName, recordID, func(txCtx context.Context) error {
+		var err error
+		view, err = d.submitReturnsInTransaction(txCtx, agentName, recordID, inputs)
+		return err
+	})
+	return view, err
+}
+
+func (d Deps) submitReturnsInTransaction(ctx context.Context, agentName, recordID string, inputs []PracticeReturnInput) (PracticeSetView, error) {
 	v, err := d.GetPracticeSet(ctx, agentName, recordID)
 	if err != nil {
 		return PracticeSetView{}, err
@@ -749,6 +759,10 @@ func (d Deps) SubmitReturns(ctx context.Context, agentName, recordID string, inp
 		ret := k12.PracticeReturnAsset{
 			ReturnID: returnID, AssetID: assetID, ItemIDs: canonical, ReturnedAt: d.now(),
 			RegradeStatus: k12.PracticeRegradeQueued, RegradeUpdatedAt: d.now(),
+		}
+		ret.LearningEvidenceBasis, err = d.practiceReturnLearningEvidenceBasis(ctx, v, ret, canonical)
+		if err != nil {
+			return PracticeSetView{}, err
 		}
 		if answerContext != "" {
 			ret.LearningEvidence = []k12.LearningEvidence{{Kind: answerContext, Source: "guardian_report", EventID: returnID, OccurredAt: ret.ReturnedAt}}
@@ -927,6 +941,11 @@ func (d Deps) gradePracticeSetItemsInTransaction(
 	if len(results) == 0 {
 		return PracticeSetView{}, fmt.Errorf("%w: 逐题复批必须携带至少一条结论（空数组走整卷复批旧入口）", ErrInvalidInput)
 	}
+	if evidence == k12.PracticeResultSystemVerified {
+		if err := d.freezeLegacyPracticeReturnEvidenceBasis(ctx, &v, results); err != nil {
+			return PracticeSetView{}, err
+		}
+	}
 	byID := map[string]int{}
 	for i := range v.Fields.Items {
 		byID[v.Fields.Items[i].ItemID] = i
@@ -943,7 +962,8 @@ func (d Deps) gradePracticeSetItemsInTransaction(
 		if evidence == k12.PracticeResultSystemVerified && !it.Returned {
 			return PracticeSetView{}, fmt.Errorf("%w: 练习项 %s 尚无 return_assets 照片覆盖证据，不能给复批结论", ErrInvalidInput, res.ItemID)
 		}
-		if it.ResultCorrect != nil && *it.ResultCorrect == res.Correct && it.ResultEvidence == evidence {
+		sameConclusion := it.ResultCorrect != nil && *it.ResultCorrect == res.Correct && it.ResultEvidence == evidence
+		if sameConclusion && (evidence != k12.PracticeResultSystemVerified || res.ReturnID == "") {
 			continue // 幂等：重复同一结论不重复联动错题
 		}
 		correct := res.Correct
@@ -951,8 +971,18 @@ func (d Deps) gradePracticeSetItemsInTransaction(
 		if err != nil {
 			return PracticeSetView{}, err
 		}
+		if evidence == k12.PracticeResultSystemVerified && res.ReturnID != "" && olderPracticeResultReturn(v, *it, res.ReturnID) {
+			continue
+		}
+		if sameConclusion {
+			// 新回传更新来源，已给出的相同结论不重复推进复习与掌握。
+			it.LearningEvidence = learningEvidence
+			it.ResultReturnID = res.ReturnID
+			continue
+		}
 		it.ResultCorrect = &correct
 		it.ResultEvidence = evidence
+		it.ResultReturnID = res.ReturnID
 		it.LearningEvidence = learningEvidence
 		// Returned=return_assets 照片覆盖投影、ResultCorrect=复批结论（对错），两字段
 		// 独立不合并；DD-028 后复批不能反向伪造 Returned，证据必须先由 SubmitReturn 追加。

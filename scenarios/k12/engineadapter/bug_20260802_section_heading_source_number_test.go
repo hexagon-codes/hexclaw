@@ -66,8 +66,9 @@ func TestREGK12LegacyFallbackSourceSection20260809002DropsOnlyIncompleteModelSec
 			sourceSection: `"source_section_path":["三"],`,
 		},
 		{
-			name:          "label_without_path_is_cleared",
-			sourceSection: `"source_section_label":"三、列式计算",`,
+			name:             "label_without_path_is_preserved",
+			sourceSection:    `"source_section_label":"三、列式计算",`,
+			wantSectionLabel: "三、列式计算",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

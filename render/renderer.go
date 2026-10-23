@@ -79,6 +79,13 @@ func (f Format) MIME() string {
 	}
 }
 
+// PDFDocumentMetadata 由可信宿主提供文档身份；缺失字段保持空白，不从正文推断智能体。
+type PDFDocumentMetadata struct {
+	AgentDisplayName string `json:"agent_display_name,omitempty"`
+	Title            string `json:"title,omitempty"`
+	Subtitle         string `json:"subtitle,omitempty"`
+}
+
 // RenderOptions 渲染参数。本期不暴露给前端 UI 的字段保留接口位但默认为零值。
 type RenderOptions struct {
 	// Locale 输出文档语言（影响 docx/epub 元数据 + html lang 属性）。
@@ -97,6 +104,8 @@ type RenderOptions struct {
 	PDFHeaderFooter *bool `json:"pdf_header_footer,omitempty"`
 	// PDFLayout 为 custom 时保留用户指定的特殊版式，不套共享PDF模板。
 	PDFLayout string `json:"pdf_layout,omitempty"`
+	// PDFMetadata 只影响标准PDF的标题与页眉，不进入模型工具参数。
+	PDFMetadata PDFDocumentMetadata `json:"pdf_metadata,omitempty"`
 }
 
 // Validate 校验 options 合法性。当前主要校验 Locale 形如 BCP 47（最低限度）。

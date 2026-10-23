@@ -802,9 +802,9 @@ func validateRecognitionLayoutSourceSectionV2(path []string, label string) error
 			ErrRecognitionLayoutPlanInvalid,
 		)
 	}
-	if (len(path) > 0) != labelPresent {
+	if len(path) > 0 && !labelPresent {
 		return fmt.Errorf(
-			"%w: source section path and label must be paired",
+			"%w: source section path requires a label",
 			ErrRecognitionLayoutPlanInvalid,
 		)
 	}

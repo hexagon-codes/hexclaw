@@ -162,7 +162,8 @@ type PracticeItem struct {
 	// ResultCorrect 复批逐题结论（§3.8 第 3-4 条）：nil=尚无结论；部分回传允许多次复批，
 	// 每次覆盖已给结论的题、幂等；全部入卷题有结论后卷才转 graded。联动来源错题在用例层执行。
 	ResultCorrect    *bool              `json:"result_correct,omitempty"`
-	ResultEvidence   string             `json:"result_evidence,omitempty"` // system_verified / human_confirmed
+	ResultEvidence   string             `json:"result_evidence,omitempty"`  // system_verified / human_confirmed
+	ResultReturnID   string             `json:"result_return_id,omitempty"` // 系统结论所属回传；未知作答条件也保留关联
 	LearningEvidence []LearningEvidence `json:"learning_evidence,omitempty"`
 }
 
@@ -183,20 +184,22 @@ const (
 // 不得覆盖旧 asset 与显式题目映射；ReturnID 同时是命令幂等键。自动模式冻结候选集合，
 // ItemIDs 由同一复批任务投影实际覆盖；Regrade* 在同一聚合内通过 CAS 推进。
 type PracticeReturnAsset struct {
-	LearningEvidence  []LearningEvidence   `json:"learning_evidence,omitempty"`
-	ReturnID          string               `json:"return_id"`
-	AssetID           string               `json:"asset_id"`
-	ItemIDs           []string             `json:"item_ids"`
-	AutoMatch         bool                 `json:"auto_match,omitempty"`
-	CandidateItemIDs  []string             `json:"candidate_item_ids,omitempty"`
-	ReturnedAt        int64                `json:"returned_at"`
-	RegradeJobID      string               `json:"regrade_job_id,omitempty"`
-	RegradeStatus     string               `json:"regrade_status,omitempty"`
-	RouteSnapshot     GradingModelSnapshot `json:"route_snapshot,omitempty"`
-	AnnotatedAssetID  string               `json:"annotated_asset_id,omitempty"`
-	ResultMarkdown    string               `json:"result_markdown,omitempty"`
-	UnresolvedItemIDs []string             `json:"unresolved_item_ids,omitempty"`
-	RegradeUpdatedAt  int64                `json:"regrade_updated_at,omitempty"`
+	// LearningEvidenceBasis 固化回传接纳时可观察的来源正确时间，零值不推断延迟复测。
+	LearningEvidenceBasis map[string]int64     `json:"learning_evidence_basis,omitempty"`
+	LearningEvidence      []LearningEvidence   `json:"learning_evidence,omitempty"`
+	ReturnID              string               `json:"return_id"`
+	AssetID               string               `json:"asset_id"`
+	ItemIDs               []string             `json:"item_ids"`
+	AutoMatch             bool                 `json:"auto_match,omitempty"`
+	CandidateItemIDs      []string             `json:"candidate_item_ids,omitempty"`
+	ReturnedAt            int64                `json:"returned_at"`
+	RegradeJobID          string               `json:"regrade_job_id,omitempty"`
+	RegradeStatus         string               `json:"regrade_status,omitempty"`
+	RouteSnapshot         GradingModelSnapshot `json:"route_snapshot,omitempty"`
+	AnnotatedAssetID      string               `json:"annotated_asset_id,omitempty"`
+	ResultMarkdown        string               `json:"result_markdown,omitempty"`
+	UnresolvedItemIDs     []string             `json:"unresolved_item_ids,omitempty"`
+	RegradeUpdatedAt      int64                `json:"regrade_updated_at,omitempty"`
 }
 
 // PracticeSetFields 练习集领域字段（PRD §5.5）。

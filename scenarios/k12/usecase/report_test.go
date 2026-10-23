@@ -62,7 +62,7 @@ func TestInsightReport(t *testing.T) {
 }
 
 func TestInsightReportSuggestionUsesObservedWorkAndExistingVerifiedVariant(t *testing.T) {
-	d, _ := newPipeline(t, fakeSolver{}, fakeGrader{}, &fakeInsights{})
+	d, store := newPipeline(t, fakeSolver{}, fakeGrader{}, &fakeInsights{})
 	d.Now = nil
 	ctx := context.Background()
 	id := seedMistake(t, d, "suggestion-source", "分数应用", "数量关系", 100)
@@ -81,11 +81,27 @@ func TestInsightReportSuggestionUsesObservedWorkAndExistingVerifiedVariant(t *te
 	if err := d.Records.UpdateStatusFields(ctx, id, record.Status, record.DueAt, string(raw), record.Version); err != nil {
 		t.Fatal(err)
 	}
-	_, _, err = d.AddToBasket(ctx, "mingming", "report-variant", k12.PracticeItem{
+	setID, _, err := d.AddToBasket(ctx, "mingming", "report-variant", k12.PracticeItem{
 		ItemID: "report-variant", SourceProblemID: id, Subject: "数学", QuestionMarkdown: "已用6 GB，占3/5，总容量多少？", ExpectedAnswerMarkdown: "10 GB",
 		VerificationStatus: k12.PracticeItemVerified, VerificationEvidence: "独立验算", GenerationJobID: "report-existing-job", GenerationStatus: k12.PracticeItemGenerationReady,
 	})
 	if err != nil {
+		t.Fatal(err)
+	}
+	request, _ := json.Marshal(singlePracticeRequestSnapshot{SourceMistakeID: id, SourceProblemID: id,
+		SourceVersion: record.Version + 1, Question: fields.Question, CanonicalAnswer: fields.CanonicalAnswer,
+		KnowledgePoint: fields.KnowledgePoint, Subject: fields.Subject})
+	_, _, err = store.BeginPracticeGenerationJob(ctx, k12.PracticeGenerationJob{
+		GenerationJobID: "report-existing-job", AgentName: "mingming", IdempotencyKey: "report-existing-job",
+		RequestDigest: "report-source-snapshot", Scope: "single", SourceKind: k12.PracticeGenerationSourceMistake,
+		SourceID: id, SourceVersion: record.Version + 1, SourceSummary: fields.Question,
+		RequestSnapshot: string(request), RouteSnapshot: "{}", ResultItemIDs: []string{"report-variant"},
+		Status: k12.PracticeGenerationQueued,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `UPDATE k12_practice_generation_jobs SET status='committed',result_set_id=? WHERE generation_job_id=? AND agent_name=?`, setID, "report-existing-job", "mingming"); err != nil {
 		t.Fatal(err)
 	}
 	report, err := d.InsightReport(ctx, "mingming")

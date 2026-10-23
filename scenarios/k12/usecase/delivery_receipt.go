@@ -27,8 +27,8 @@ func deliveryDigest(value string) string {
 
 func normalizeDeliveryMessage(message DeliveryMessage) (DeliveryMessage, error) {
 	message.Content = strings.TrimSpace(message.Content)
-	if message.Content == "" {
-		return DeliveryMessage{}, fmt.Errorf("%w: delivery content required", ErrInvalidInput)
+	if message.Content == "" && len(message.Attachments) == 0 {
+		return DeliveryMessage{}, fmt.Errorf("%w: delivery content or attachment required", ErrInvalidInput)
 	}
 	attachments := make([]DeliveryAttachment, len(message.Attachments))
 	for i, attachment := range message.Attachments {
@@ -67,8 +67,8 @@ func deliveryMessageIdentityDigest(
 	attachments []DeliveryAttachmentIdentity,
 ) (string, error) {
 	content = strings.TrimSpace(content)
-	if content == "" {
-		return "", fmt.Errorf("%w: delivery content required", ErrInvalidInput)
+	if content == "" && len(attachments) == 0 {
+		return "", fmt.Errorf("%w: delivery content or attachment required", ErrInvalidInput)
 	}
 	if len(attachments) == 0 {
 		return deliveryDigest(content), nil
@@ -138,12 +138,14 @@ func (d Deps) deliverAutomationText(ctx context.Context, agentName, kind, comman
 			artifact, _, prepareErr := d.PreparePrintableArtifact(ctx, PreparePrintableArtifactRequest{
 				AgentName: agentName, SourceKind: k12.PrintSourcePracticeQuestion,
 				SourceRef: objectKind + ":" + commandID + ":" + weeklyMistakeSheetRenderContract,
-				Title:     "本周错题卷", CanonicalMarkdown: content,
+				Title:     weeklySheetDocumentTitle(content), CanonicalMarkdown: content,
 			})
 			if prepareErr != nil {
 				return k12.DeliveryBatch{}, prepareErr
 			}
 			message = printableArtifactDeliveryMessage(artifact)
+			// 文件名已经完整标识错题卷，正常投递不再生成重复标题消息。
+			message.Content = ""
 		}
 		batch, err = d.buildPreparedMessageBatch(ctx, agentName, objectKind, commandID, message, nil)
 		if err != nil {
@@ -417,7 +419,11 @@ func (d Deps) prepareMessageForResolvedTargets(
 	if err != nil {
 		return nil, err
 	}
-	partsPerTarget := len(message.Attachments) + 1
+	textParts := 0
+	if message.Content != "" {
+		textParts = 1
+	}
+	partsPerTarget := len(message.Attachments) + textParts
 	if len(prepared) != len(targets)*partsPerTarget {
 		return nil, fmt.Errorf(
 			"%w: prepared deliveries=%d resolved target-parts=%d",
@@ -431,8 +437,8 @@ func (d Deps) prepareMessageForResolvedTargets(
 		expectedKind := messagecontent.PartMarkdown
 		expectedMIME := ""
 		expectedDigest := deliveryDigest(message.Content)
-		if partIndex > 0 {
-			attachment := message.Attachments[partIndex-1]
+		if partIndex >= textParts {
+			attachment := message.Attachments[partIndex-textParts]
 			expectedKind = messagecontent.PartArtifact
 			expectedMIME = attachment.MIME
 			expectedDigest = deliveryDigest(string(attachment.Data))

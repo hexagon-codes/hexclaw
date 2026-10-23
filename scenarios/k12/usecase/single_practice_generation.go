@@ -190,6 +190,7 @@ type singlePracticeRequestSnapshot struct {
 	SourceVersion   int                        `json:"source_version"`
 	SourceProblemID string                     `json:"source_problem_id"`
 	Question        string                     `json:"question"`
+	CanonicalAnswer string                     `json:"canonical_answer,omitempty"`
 	KnowledgePoint  string                     `json:"knowledge_point"`
 	Subject         string                     `json:"subject"`
 	Grade           string                     `json:"grade"`
@@ -251,6 +252,7 @@ func normalizeSinglePracticeRequest(
 		SourceVersion:   source.Version,
 		SourceProblemID: source.RecordID,
 		Question:        strings.TrimSpace(fields.Question),
+		CanonicalAnswer: strings.TrimSpace(fields.CanonicalAnswer),
 		KnowledgePoint:  strings.TrimSpace(fields.KnowledgePoint),
 		Subject:         strings.TrimSpace(fields.Subject),
 		Grade:           req.Grade,
@@ -953,7 +955,7 @@ func (d Deps) ProcessSinglePracticeGeneration(
 			lastErr = fmt.Errorf("%w: 逐题变式缺少可分离题目或答案", ErrSolveFailed)
 			continue
 		}
-		if !request.Diagnostic.acceptsQuestion(question) {
+		if !request.Diagnostic.acceptsQuestion(request.Question, question) {
 			lastErr = fmt.Errorf("%w: generated question does not distinguish the observed hypothesis", ErrSolveFailed)
 			continue
 		}
@@ -1012,6 +1014,10 @@ func (d Deps) ProcessSinglePracticeGeneration(
 		)
 		if status != k12.PracticeItemVerified {
 			lastErr = fmt.Errorf("%w: %s", ErrSolveFailed, blocked)
+			continue
+		}
+		if !request.Diagnostic.acceptsAnswer(request.Question, validatedExpected) {
+			lastErr = fmt.Errorf("%w: validated diagnostic answer has a different quantity dimension", ErrSolveFailed)
 			continue
 		}
 		if validatedExpected != "" {

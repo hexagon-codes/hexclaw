@@ -1,64 +1,98 @@
-// PDF共享排版：宋体正文与黑体层级保持小学学习材料的阅读顺序，来源与冻结版本不由样式改写。
-#let hc-ink = rgb("#23313f")
-#let hc-muted = rgb("#65727e")
-#let hc-line = rgb("#cfd7de")
-#let hc-blue = rgb("#2f6484")
+// PDF共享排版保持各业务的内容结构，统一文字层级与品牌，来源和冻结版本不由样式改写。
+#let hc-ink = rgb("#1D2D40")
+#let hc-muted = rgb("#596A7C")
+#let hc-line = rgb("#CCD9E4")
+#let hc-blue = rgb("#2D6088")
 #let hc-logo-blue = rgb("#75b4e9")
 #let hc-red = rgb("#a13d38")
 #let hc-header-footer = __HC_HEADER_FOOTER__
-#let hc-body-font = ("Songti SC", "Noto Serif CJK SC", "Noto Serif CJK SC Regular")
-#let hc-heading-font = ("PingFang SC", "Noto Sans CJK SC")
-#set text(font: hc-body-font, size: 12pt, fill: hc-ink)
-#set par(justify: false, leading: 1.02em, spacing: 0.95em)
+#let hc-metadata = __HC_METADATA__
+#let hc-agent-name = hc-metadata.at("agent_display_name", default: "")
+#let hc-document-title = hc-metadata.at("title", default: "")
+#let hc-document-subtitle = hc-metadata.at("subtitle", default: "")
+// 保留首选字体；缺失时明确回退到Windows中文字体，避免系统回退产生缺字。
+#let hc-body-font = ("Songti SC", "Noto Serif CJK SC", "Noto Serif CJK SC Regular", "SimSun")
+#let hc-heading-font = ("PingFang SC", "Noto Sans CJK SC", "Microsoft YaHei", "SimHei", "SimSun")
+#set text(font: hc-body-font, size: 11pt, fill: hc-ink)
+#set par(justify: false, leading: 0.8em, spacing: 0.9em)
 #show "🔧": box(image(__HC_TOOL_ICON__, width: 0.9em))
 // 列表项使用独立留白，避免紧凑列表的项间距小于正文换行。
 #set list(tight: false, indent: 4mm, body-indent: 2mm, spacing: 0.85em)
 #set enum(tight: false, indent: 4mm, body-indent: 2mm, spacing: 0.85em)
-#show math.equation.where(block: false): it => box(inset: (top: 0.08em, bottom: 0.08em), it)
-#show math.equation.where(block: true): set text(size: 12pt)
+#show math.equation.where(block: false): it => box(inset: (top: 2pt, bottom: 2pt), math.display(it))
+#show math.equation.where(block: true): set text(size: 13pt)
 #show math.equation.where(block: true): set align(left)
-#show math.equation.where(block: true): set block(above: 0.65em, below: 0.65em)
+#show math.equation.where(block: true): set block(above: 6pt, below: 7pt)
 #show heading: set text(font: hc-heading-font)
-#show heading.where(level: 1): it => block(above: 0pt, below: 5mm, sticky: true)[
-  #text(font: hc-heading-font, size: 13pt, weight: 650, fill: hc-blue, it.body)
+#let hc-title-used = state("hexclaw-pdf-document-title-used", false)
+#let hc-heading-text(body) = {
+  if type(body) == str { body }
+  else if type(body) == content {
+    let fields = body.fields()
+    if "text" in fields { fields.text }
+    else if "children" in fields { fields.children.map(hc-heading-text).join("") }
+    else if "body" in fields { hc-heading-text(fields.body) }
+    else { "" }
+  } else { "" }
+}
+#let hc-document-heading(title, subtitle) = layout(size => {
+  let title-content = text(font: hc-heading-font, size: 22pt, weight: 650, fill: hc-ink, title)
+  let details = text(font: hc-heading-font, size: 9.5pt, weight: 400, fill: hc-muted, subtitle)
+  if measure(title-content).width + measure(details).width + 12pt <= size.width {
+    block(above: 0pt, below: 7pt, sticky: true)[#title-content#h(1fr)#details]
+  } else {
+    block(above: 0pt, below: 7pt, sticky: true)[#title-content#v(6pt)#details]
+  }
+})
+#let hc-section-heading(body) = block(above: 18pt, below: 13pt, sticky: true)[
+  #text(font: hc-heading-font, size: 17pt, weight: 650, fill: hc-ink, body)
 ]
-#show heading.where(level: 2): it => block(above: 6mm, below: 3.5mm, sticky: true)[
-  #text(font: hc-heading-font, size: 13pt, weight: 650, fill: hc-blue, it.body)
+#show heading.where(level: 1): it => context {
+  let matches = hc-document-title == "" or hc-heading-text(it.body) == hc-document-title
+  if not hc-title-used.get() and matches {
+    hc-title-used.update(true)
+    hc-document-heading(it.body, hc-document-subtitle)
+  } else { hc-section-heading(it.body) }
+}
+#show heading.where(level: 2): it => hc-section-heading(it.body)
+#show heading.where(level: 3): it => block(above: 14pt, below: 9pt, sticky: true)[
+  #text(font: hc-heading-font, size: 12pt, weight: 600, fill: hc-ink, it.body)
 ]
-#show heading.where(level: 3): it => block(above: 6mm, below: 3.5mm, sticky: true)[
-  #text(font: hc-heading-font, size: 13pt, weight: 600, fill: hc-blue, it.body)
-]
-#show heading.where(level: 4): it => block(above: 2mm, below: 1.5mm, sticky: true)[
-  #text(font: hc-heading-font, size: 13pt, weight: 600, fill: hc-blue, it.body)
+#show heading.where(level: 4): it => block(above: 10pt, below: 7pt, sticky: true)[
+  #text(font: hc-heading-font, size: 11.5pt, weight: 600, fill: hc-ink, it.body)
 ]
 // 标准PDF将独立题号与下一正文段合并，题号保留标题样式，正文自然换行。
 #let hc-numbered-line(level, number, body) = block(
-  above: if level == 1 { 0pt } else if level >= 4 { 2mm } else { 6mm },
-  below: if level == 1 { 5mm } else if level >= 4 { 1.5mm } else { 3.5mm },
+  above: if level == 1 { 0pt } else if level >= 4 { 10pt } else { 14pt },
+  below: if level >= 4 { 7pt } else { 9pt },
 )[
-  #text(font: hc-heading-font, size: 13pt, weight: if level <= 2 { 650 } else { 600 }, fill: hc-blue, number)#h(2mm)#body
+  #text(font: hc-heading-font, size: 12pt, weight: 600, fill: hc-blue, number)#h(6pt)#body
 ]
-#set table(stroke: 0.4pt + hc-line, inset: (x: 2.5mm, y: 2mm), align: left)
+#set table(stroke: 0.4pt + hc-line, inset: (x: 9pt, y: 10pt), align: left)
 #show table.cell.where(y: 0): set text(font: hc-heading-font, weight: 600)
-#let hc-header() = stack(dir: ttb, spacing: 2.5mm,
-  grid(columns: (7mm, 1fr), column-gutter: 3mm, align: (left, horizon),
-    image(__HC_LOGO__, width: 7mm),
-    text(font: hc-heading-font, size: 10pt, weight: 600, fill: hc-muted)[HexClaw 河蟹 AI]),
-  line(length: 100%, stroke: 0.3pt + hc-line))
+#let hc-header() = context {
+  set text(font: hc-heading-font, size: 9pt, weight: 400, fill: hc-muted)
+  let agent = text(font: hc-heading-font, size: 9pt, fill: hc-muted, hc-agent-name)
+  grid(columns: (5mm, 1fr, auto), column-gutter: 6pt, align: horizon,
+    image(__HC_LOGO__, width: 5mm),
+    text(font: hc-heading-font, size: 9pt, weight: 600, fill: hc-ink)[HexClaw 河蟹 AI],
+    box(width: calc.min(measure(agent).width, 65mm), align(right, agent)))
+  v(4pt)
+  line(length: 100%, stroke: 0.5pt + hc-line)
+}
 #let hc-footer() = context {
   let current = counter(page).get().first()
   let total = counter(page).final().first()
-  set text(font: ("PingFang SC", "Noto Sans CJK SC"), size: 8.5pt, weight: 400, fill: hc-muted)
+  set text(font: hc-heading-font, size: 8.5pt, weight: 400, fill: hc-muted)
   line(length: 100%, stroke: 0.4pt + hc-line)
-  v(2mm)
-  grid(columns: (1fr, auto), column-gutter: 3mm, align: (left, bottom),
-    grid(columns: (1fr,), row-gutter: 1.5mm,
-      [#text(size: 9pt, weight: 600, fill: hc-logo-blue)[本地云端均可部署 · 数据自主掌控 · 开源免费]],
-      [#link("https://hexclaw.net/")[官网：hexclaw.net]#h(4mm)#link("https://github.com/hexagon-codes")[GitHub：github.com/hexagon-codes]],
-      [微博：\@HexClaw#h(4mm)#link("https://x.com/hexclawapp")[X：\@hexclawapp]#h(4mm)#link("mailto:ai@hexclaw.net")[邮箱：ai\@hexclaw.net]]),
+  v(5pt)
+  set par(leading: 0.4em, spacing: 0pt)
+  grid(columns: (1fr, auto), column-gutter: 12pt, row-gutter: 5pt,
+    [HexClaw 河蟹 AI · 本地云端均可部署 · 数据自主掌控 · 软件开源免费], [],
+    [#link("https://hexclaw.net/")[官网：hexclaw.net] · 公众号 ID：hexclaw · #link("https://github.com/hexagon-codes/hexclaw-desktop")[GitHub：github.com/hexagon-codes/hexclaw-desktop]],
     [#current / #total])
 }
-#set page(paper: "a4", margin: (x: 20mm, top: 24mm, bottom: 22mm), header: if hc-header-footer { hc-header() } else { none }, header-ascent: 3.5mm, footer: if hc-header-footer { hc-footer() } else { none }, footer-descent: 4mm)
+#set page(paper: "a4", margin: (left: __HC_MARGIN_LEFT__mm, right: __HC_MARGIN_RIGHT__mm, top: __HC_MARGIN_TOP__mm, bottom: __HC_MARGIN_BOTTOM__mm), header: if hc-header-footer { hc-header() } else { none }, footer: if hc-header-footer { hc-footer() } else { none })
 // 正文图片完整等比适配；高度上限预留标题与段距，不裁边、不拉伸、不改变原图坐标。
 #let hc-image-max-height = __HC_IMAGE_MAX_HEIGHT__mm
 #show image: it => layout(size => {
@@ -83,15 +117,13 @@
     [#text(font: hc-heading-font, size: 9.5pt, fill: hc-muted)[正确答案]#v(4mm)#answer])
 ]
 
-// 同步巩固专用练习册投影；正文、品牌页眉页脚和其他PDF版式保持原规则。
+// 同步巩固沿用题型与作答留白，文字层级和品牌使用共享排版。
 #let hc-workbook-lines(count, gap: 8.5mm) = block(width: 100%, above: 1.5mm, below: 0mm)[
   #grid(columns: (1fr,), rows: (gap,) * count, align: bottom,
     ..range(count).map(_ => line(length: 100%, stroke: 0.35pt + hc-line.darken(18%))))
 ]
 #let hc-workbook-header(title) = {
-  block(above: 0pt, below: 5mm, breakable: false)[
-    #text(font: hc-heading-font, size: 13pt, weight: 650, fill: hc-blue, title)#h(1fr)#box[姓名：#box(width: 30mm, height: 4mm, stroke: (bottom: 0.4pt + hc-muted))]#h(7mm)#box[日期：#box(width: 35mm, height: 4mm, stroke: (bottom: 0.4pt + hc-muted))]
-  ]
+  hc-document-heading(title, [#box[姓名：#box(width: 30mm, height: 4mm, stroke: (bottom: 0.4pt + hc-muted))]#h(7mm)#box[日期：#box(width: 35mm, height: 4mm, stroke: (bottom: 0.4pt + hc-muted))]])
   v(1mm)
 }
 #let hc-workbook-question(number, title, body, lines: 0) = layout(size => {

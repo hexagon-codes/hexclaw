@@ -68,7 +68,8 @@ func (r *PandocRenderer) validatePDFLayout(ctx context.Context, pdf, markdown st
 		// 与共享A4模板相同的正文边界，保留字体字框的少量度量误差。
 		const mm = 72.0 / 25.4
 		const tolerance = 4.0
-		left, right, top, bottom := 20*mm, page.Width-20*mm, 24*mm, page.Height-22*mm
+		left, right := standardPDFMarginLeftMM*mm, page.Width-standardPDFMarginRightMM*mm
+		top, bottom := standardPDFMarginTopMM*mm, page.Height-standardPDFMarginBottomMM*mm
 		bodyImages, bodyText := 0, false
 		for _, box := range page.Images {
 			if box.Top+box.Height < top-tolerance || box.Top > bottom+tolerance {
