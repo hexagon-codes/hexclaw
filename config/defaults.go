@@ -162,7 +162,8 @@ func DefaultConfig() *Config {
 			Enabled: true,
 		},
 		Observe: ObserveConfig{
-			LogLevel: "info",
+			LogLevel:         "info",
+			LogRetentionDays: DefaultLogRetentionDays,
 			Metrics: MetricsConfig{
 				Enabled:  true,
 				Endpoint: "/metrics",

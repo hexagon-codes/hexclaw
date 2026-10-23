@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hexagon-codes/hexclaw/config"
 	"github.com/hexagon-codes/toolkit/util/idgen"
 )
 
@@ -21,7 +22,7 @@ import (
 // 保留最近 N 份历史文件。用户可提交日志文件反馈 Bug。
 //
 // 文件路径: ~/.hexclaw/logs/hexclaw.log
-// 轮转规则: 默认单文件 10 MiB，保留 100 份历史及当前文件，条目保留 7 天。
+// 轮转规则: 默认单文件 10 MiB，保留 100 份历史及当前文件，条目保留 15 天。
 // 格式: 每行一条 JSON。
 type LogFileSink struct {
 	mu          sync.Mutex
@@ -40,7 +41,7 @@ type LogFileSinkConfig struct {
 	FileName string        // 日志文件名 (默认 hexclaw.log)
 	MaxSize  int64         // 单文件最大字节 (默认 10MB)
 	MaxFiles int           // 保留历史文件数 (默认 100)
-	MaxAge   time.Duration // 条目保留时长 (默认 7 天)
+	MaxAge   time.Duration // 条目保留时长 (默认 15 天)
 }
 
 // NewLogFileSink 创建日志文件写入器
@@ -59,7 +60,7 @@ func NewLogFileSink(cfg LogFileSinkConfig) (*LogFileSink, error) {
 		cfg.MaxFiles = 100
 	}
 	if cfg.MaxAge <= 0 {
-		cfg.MaxAge = 7 * 24 * time.Hour
+		cfg.MaxAge = config.DefaultLogRetentionDays * 24 * time.Hour
 	}
 
 	if err := os.MkdirAll(cfg.Dir, 0o755); err != nil {

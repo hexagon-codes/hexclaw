@@ -522,6 +522,7 @@ memory:
 # 可观测性
 observe:
   log_level: "info"
+  log_retention_days: 15
   metrics:
     enabled: true
     endpoint: "/metrics"

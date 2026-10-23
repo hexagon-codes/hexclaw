@@ -42,7 +42,7 @@ func TestLogFileSinkHistoryRetentionStartupPreservesMixedAndUnknownRows(t *testi
 	dir := t.TempDir()
 	path := filepath.Join(dir, "hexclaw.log")
 	now := time.Now()
-	expired := historyFixture(t, now.Add(-8*24*time.Hour), "expired")
+	expired := historyFixture(t, now.Add(-16*24*time.Hour), "expired")
 	recent := historyFixture(t, now.Add(-time.Hour), "recent")
 	unknown := []byte("{\"ts\":\"unknown\",\"msg\":\"unparsed\"}\nraw-unknown-row\n")
 	if err := os.WriteFile(path, bytes.Join([][]byte{expired, recent, unknown}, nil), 0o600); err != nil {
@@ -59,7 +59,7 @@ func TestLogFileSinkHistoryRetentionStartupPreservesMixedAndUnknownRows(t *testi
 		t.Fatal(err)
 	}
 	defer sink.Close()
-	if sink.maxAge != 7*24*time.Hour || sink.maxSize != 10*1024*1024 || sink.maxFiles != 100 {
+	if sink.maxAge != 15*24*time.Hour || sink.maxSize != 10*1024*1024 || sink.maxFiles != 100 {
 		t.Fatalf("default retention changed: age=%v size=%d files=%d", sink.maxAge, sink.maxSize, sink.maxFiles)
 	}
 	if got := readHistoryFixtureFile(t, path); !bytes.Equal(got, append(recent, unknown...)) {
@@ -91,7 +91,7 @@ func TestLogFileSinkHistoryRetentionRunsOnWriteAndQuery(t *testing.T) {
 			}
 			defer sink.Close()
 			now := time.Now()
-			sink.Write(LogEntry{Timestamp: now.Add(-8 * 24 * time.Hour).Format(time.RFC3339Nano), Level: "info", Message: "expired"})
+			sink.Write(LogEntry{Timestamp: now.Add(-16 * 24 * time.Hour).Format(time.RFC3339Nano), Level: "info", Message: "expired"})
 			sink.Write(LogEntry{Timestamp: now.Add(-time.Hour).Format(time.RFC3339Nano), Level: "info", Message: "kept"})
 			if !bytes.Contains(readHistoryFixtureFile(t, sink.Path()), []byte("expired")) {
 				t.Fatal("maintenance ran before its hourly interval")

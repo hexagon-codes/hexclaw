@@ -1205,10 +1205,14 @@ type LongTermMemoryConfig struct {
 
 // ObserveConfig 可观测性配置
 type ObserveConfig struct {
-	LogLevel string        `yaml:"log_level"`
-	Metrics  MetricsConfig `yaml:"metrics"`
-	Tracing  TracingConfig `yaml:"tracing"`
+	LogLevel         string        `yaml:"log_level"`
+	LogRetentionDays int           `yaml:"log_retention_days"`
+	Metrics          MetricsConfig `yaml:"metrics"`
+	Tracing          TracingConfig `yaml:"tracing"`
 }
+
+// DefaultLogRetentionDays 为运行日志的默认滚动保留天数。
+const DefaultLogRetentionDays = 15
 
 // MetricsConfig 指标配置
 type MetricsConfig struct {

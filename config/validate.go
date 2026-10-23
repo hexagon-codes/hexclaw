@@ -21,6 +21,13 @@ import (
 // 返回 nil 表示通过。ValidationErrors 含所有违规条目（一次性展示，不是第一个就返回）。
 func (c *Config) Validate() error {
 	var errs ValidationErrors
+	// 日志保留期须能完整表示为time.Duration，零值沿用默认值。
+	if c.Observe.LogRetentionDays < 0 || int64(c.Observe.LogRetentionDays) > int64((1<<63-1)/(24*time.Hour)) {
+		errs = append(errs, &ValidationError{
+			Field: "observe.log_retention_days", Value: strconv.Itoa(c.Observe.LogRetentionDays),
+			Rule: "must be non-negative and fit in a time.Duration", Suggest: "Use 15 for the default rolling retention",
+		})
+	}
 
 	// 1. Server 端口范围（Port=0 也拒绝：YAML 出现显式 `port: 0` 几乎都是手误）
 	if c.Server.Port < 1 || c.Server.Port > 65535 {
