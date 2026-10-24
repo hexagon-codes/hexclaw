@@ -2223,6 +2223,9 @@ func (o *GradingOrchestrator) runProject(ctx context.Context, run *gradingRun, j
 	}
 	finalArtifact, err := o.finalizeGradingPage(ctx, run, job)
 	if err != nil {
+		if run.req.TeachingReport != nil {
+			return o.failStage(ctx, run, jobID, "report_projection_failed", err)
+		}
 		return job, err
 	}
 	return o.completeFinalizedGrading(ctx, run, jobID, finalArtifact.ArtifactDigest)

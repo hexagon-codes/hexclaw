@@ -52,7 +52,9 @@ func (o *GradingOrchestrator) freezeGradingTeachingReport(ctx context.Context, r
 			continue
 		}
 		var guide ParentTeachingGuide
-		if item.ParentGuide != nil {
+		sourceDigest := solved.Evidence.SolverOutputDigest
+		restoredReceipt := ""
+		if item.ParentGuide != nil && item.ParentGuide.ReportContent != nil {
 			guide = *item.ParentGuide
 		} else if solved.ReportContent != nil {
 			guide.ReportContent = solved.ReportContent
@@ -65,14 +67,27 @@ func (o *GradingOrchestrator) freezeGradingTeachingReport(ctx context.Context, r
 			var ok bool
 			guide, ok = deterministicParentTeachingGuideForEvidence(o.deps.parentTeachingGuideRequest(ctx, photoItemGradeRequest(run.req, q), solved, item.Grade.Outcome), solved.Evidence)
 			if !ok {
-				return fmt.Errorf("%w: problem %s has no current report teaching structure", ErrTeachingReportContentRequired, q.ProblemID)
+				guide, sourceDigest, restoredReceipt, err = o.restoreTeachingReportGuide(ctx, job, q, solved)
+				if err != nil {
+					return fmt.Errorf("restore report teaching for problem %s: %w", q.ProblemID, err)
+				}
 			}
 		}
 		if guide.ReportContent == nil {
 			return fmt.Errorf("%w: problem %s", ErrTeachingReportContentRequired, q.ProblemID)
 		}
-		source := TeachingReportContentSource{Source: k12.TeachingReportProblemSource{ProblemID: q.ProblemID, InputRevision: q.ConfirmedVersion, InputDigest: q.InputDigest, SolutionDigest: solved.Evidence.SolverOutputDigest}, Solution: solved.Solution, Guide: &guide}
+		if sourceDigest == "" && solved.Generation != nil {
+			sourceDigest = solved.Generation.SourceSolutionDigest
+		}
+		if sourceDigest == "" {
+			// 这是已冻结解法的内容身份，不提升原来的数值验证等级。
+			sourceDigest = teachingReportResourceDigest([]byte(solved.Solution))
+		}
+		source := TeachingReportContentSource{Source: k12.TeachingReportProblemSource{ProblemID: q.ProblemID, InputRevision: q.ConfirmedVersion, InputDigest: q.InputDigest, SolutionDigest: sourceDigest}, Solution: solved.Solution, Guide: &guide}
 		receipt := assessment.SolveInvocationID
+		if restoredReceipt != "" {
+			receipt = restoredReceipt
+		}
 		if assessment.ParentGuideInvocationID != "" {
 			receipt = assessment.ParentGuideInvocationID
 		}

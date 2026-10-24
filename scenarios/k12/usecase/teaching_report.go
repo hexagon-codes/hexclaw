@@ -13,9 +13,10 @@ var ErrTeachingReportContentRequired = errors.New("structured teaching report co
 // TeachingReportQuestionContent 是教学阶段已核对的展示结构，不包含学生状态或原始作答。
 // 旧指南不能可靠拆成该结构时由调用方选择历史回放，组装器不截句或猜答案。
 type TeachingReportQuestionContent struct {
-	ProblemID      string
-	ShortTitle     string
-	AnswerAnalysis k12.TeachingReportAnswerAnalysis
+	ProblemID            string
+	SourceSolutionDigest string
+	ShortTitle           string
+	AnswerAnalysis       k12.TeachingReportAnswerAnalysis
 }
 
 // GradingTeachingReportInput 必须来自调用方按真实身份读回的同次作业快照。
@@ -133,8 +134,12 @@ func BuildGradingTeachingReport(input GradingTeachingReportInput) (k12.TeachingR
 			evidence = item.Grade.Evidence
 		}
 		analysis := teaching.AnswerAnalysis
+		solutionDigest := firstNonEmpty(evidence.SolverOutputDigest, teaching.SourceSolutionDigest)
+		if evidence.SolverOutputDigest != "" && teaching.SourceSolutionDigest != "" && evidence.SolverOutputDigest != teaching.SourceSolutionDigest {
+			return invalid("teaching content refers to a different source solution")
+		}
 		if analysis.State != k12.TeachingReportReferenceUnavailable &&
-			(strings.TrimSpace(solution) == "" || strings.TrimSpace(evidence.SolverOutputDigest) == "") {
+			(strings.TrimSpace(solution) == "" || strings.TrimSpace(solutionDigest) == "") {
 			return k12.TeachingReport{}, fmt.Errorf("%w: problem %s has no source solution identity", ErrTeachingReportContentRequired, question.ProblemID)
 		}
 		receipt := assessment.SolveInvocationID
@@ -143,14 +148,14 @@ func BuildGradingTeachingReport(input GradingTeachingReportInput) (k12.TeachingR
 		}
 		analysis.Evidence = k12.TeachingReportReferenceEvidence{
 			Verdict: string(evidence.Verdict), EvidenceType: string(evidence.EvidenceType),
-			ReceiptRef: receipt, SolutionDigest: evidence.SolverOutputDigest,
+			ReceiptRef: receipt, SolutionDigest: solutionDigest,
 			VerificationRunID: evidence.VerificationRunID, VerificationDigest: evidence.VerificationInputDigest,
 		}
 		source := k12.TeachingReportProblemSource{
 			ProblemID: question.ProblemID, ParentProblemID: question.ParentProblemID, AttemptID: question.AttemptID,
 			InputRevision: question.ConfirmedVersion, InputDigest: question.InputDigest,
 			AssessmentDigest: assessment.ResultDigest, AssessmentStatus: assessment.Status,
-			SolutionDigest: evidence.SolverOutputDigest, AnswerState: state, AnswerRaw: raw,
+			SolutionDigest: solutionDigest, AnswerState: state, AnswerRaw: raw,
 			AnswerCanonical: canonical, AnswerSource: assessment.AnswerSource,
 		}
 		report.ProblemSources = append(report.ProblemSources, source)

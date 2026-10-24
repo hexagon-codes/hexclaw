@@ -722,7 +722,9 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 		ctx, o, deps, job, q, gradeReq, solved,
 	)
 	item.Grade = graded
-	item.Solve = SolveHomeworkResult{}
+	if gradeReq.SolveOutputVersion != SolveOutputWithTeachingReportV2 {
+		item.Solve = SolveHomeworkResult{}
+	}
 	if err != nil {
 		return item, err
 	}

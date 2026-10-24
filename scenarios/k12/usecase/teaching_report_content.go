@@ -137,7 +137,7 @@ func AssembleTeachingReportContent(req TeachingReportContentRequest, draft Teach
 			analysis.Steps = append(analysis.Steps, k12.TeachingReportCalculationStep{ID: step.ID,
 				Text: step.Text, LaTeX: step.LaTeX, Origin: origin(source.Source)})
 		}
-		content[item.ProblemID] = TeachingReportQuestionContent{ProblemID: item.ProblemID, ShortTitle: item.ShortTitle, AnswerAnalysis: analysis}
+		content[item.ProblemID] = TeachingReportQuestionContent{ProblemID: item.ProblemID, SourceSolutionDigest: source.Source.SolutionDigest, ShortTitle: item.ShortTitle, AnswerAnalysis: analysis}
 	}
 	var ordered []TeachingReportQuestionContent
 	for _, source := range req.Sources {

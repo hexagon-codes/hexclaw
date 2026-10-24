@@ -172,7 +172,7 @@ func (d Deps) renderPrintableArtifact(ctx context.Context,
 		renderMarkdown = artifact.CanonicalMarkdown
 		if artifact.SourceKind == k12.PrintSourcePracticeQuestion && printArtifactRenderContract(artifact.SourceRef) == weeklyMistakeSheetRenderContract {
 			metadata.Title = "本周错题卷"
-			metadata.Subtitle, renderMarkdown = weeklySheetDocumentParts(artifact.CanonicalMarkdown)
+			_, metadata.Subtitle, renderMarkdown = weeklySheetDocumentParts(artifact.CanonicalMarkdown)
 			renderMarkdown = weeklyMistakeSheetRenderMarkdown(renderMarkdown)
 		}
 	}
