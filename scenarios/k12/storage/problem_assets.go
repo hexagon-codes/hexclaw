@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 
 	"github.com/hexagon-codes/hexclaw/records"
@@ -99,9 +100,7 @@ func (s *Store) publishProblemAsset(ctx context.Context, p k12.ProblemAssetPubli
 	if !errors.Is(err, sql.ErrNoRows) {
 		return k12.ProblemAssetVersion{}, false, err
 	}
-	inv, err := scanGradingItemInvocation(tx.QueryRowContext(ctx, `SELECT `+gradingItemInvocationColumns+
-		` FROM k12_grading_item_invocations WHERE agent_name=? AND item_invocation_id=?`,
-		p.Verification.AgentName, p.Verification.InvocationID))
+	inv, err := loadProblemAssetInvocation(ctx, tx, p.OwnerID, p.Verification, p.Verification.InvocationID)
 	if err != nil {
 		return k12.ProblemAssetVersion{}, false, fmt.Errorf("%w: %v", ErrProblemAssetEvidence, err)
 	}
@@ -109,6 +108,15 @@ func (s *Store) publishProblemAsset(ctx context.Context, p k12.ProblemAssetPubli
 		inv.InputDigest != p.Verification.InputDigest || inv.ResultDigest != p.Verification.ResultDigest ||
 		!json.Valid([]byte(inv.ResultJSON)) {
 		return k12.ProblemAssetVersion{}, false, ErrProblemAssetEvidence
+	}
+	if p.Verification.SourceKind == k12.ProblemAssetSourceTextSolve {
+		finalized, readErr := getTextSolveFinalization(ctx, tx, p.OwnerID, p.Verification.AgentName, inv.JobID)
+		if readErr != nil || finalized.Publication == nil || !reflect.DeepEqual(*finalized.Publication, p) {
+			return k12.ProblemAssetVersion{}, false, ErrProblemAssetEvidence
+		}
+		if err := validateTextSolvePublication(ctx, tx, finalized, p); err != nil {
+			return k12.ProblemAssetVersion{}, false, err
+		}
 	}
 	if assessedJobID != "" {
 		if inv.JobID != assessedJobID {
@@ -161,7 +169,7 @@ func (s *Store) publishProblemAsset(ctx context.Context, p k12.ProblemAssetPubli
 			answerResult.Evidence.VerificationRunID != p.Verification.VerificationRunID {
 			return k12.ProblemAssetVersion{}, false, ErrProblemAssetEvidence
 		}
-		generated, err := validateModelAssetProof(ctx, tx, p.Verification, inv)
+		generated, err := validateModelAssetProof(ctx, tx, p.OwnerID, p.Verification, inv)
 		if err != nil {
 			return k12.ProblemAssetVersion{}, false, err
 		}

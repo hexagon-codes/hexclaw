@@ -10,14 +10,15 @@ import (
 )
 
 // 发布层核对持久调用与实际执行回执；解法选择和数学判定仍由原求解引擎负责。
-func validateModelAssetProof(ctx context.Context, db dbHandle, proof k12.ProblemAssetVerification, verifier k12.GradingItemInvocation) (k12.GradingItemInvocation, error) {
+func validateModelAssetProof(ctx context.Context, db dbHandle, owner string, proof k12.ProblemAssetVerification, verifier k12.GradingItemInvocation) (k12.GradingItemInvocation, error) {
 	var zero k12.GradingItemInvocation
-	if verifier.Operation != k12.GradingItemOperationSolveVerify || verifier.ExecutionKind != k12.GradingExecutionProvider ||
+	validVerifierKind := verifier.ExecutionKind == k12.GradingExecutionProvider ||
+		proof.SourceKind == k12.ProblemAssetSourceTextSolve && verifier.ExecutionKind == k12.GradingExecutionLocalDeterministic
+	if verifier.Operation != k12.GradingItemOperationSolveVerify || !validVerifierKind ||
 		proof.GenerationInvocationID == "" || proof.VerificationRunID == "" || proof.VerificationInputDigest == "" || proof.SolverOutputDigest == "" {
 		return zero, ErrProblemAssetEvidence
 	}
-	generator, err := scanGradingItemInvocation(db.QueryRowContext(ctx, `SELECT `+gradingItemInvocationColumns+
-		` FROM k12_grading_item_invocations WHERE agent_name=? AND item_invocation_id=?`, proof.AgentName, proof.GenerationInvocationID))
+	generator, err := loadProblemAssetInvocation(ctx, db, owner, proof, proof.GenerationInvocationID)
 	if err != nil || generator.Operation != k12.GradingItemOperationSolveGenerate || generator.ExecutionKind != k12.GradingExecutionProvider ||
 		generator.Status != k12.ModelInvocationSucceeded || generator.ResultDigest != proof.GenerationResultDigest ||
 		generator.JobID != verifier.JobID || generator.ProblemID != verifier.ProblemID || generator.InputRevision != verifier.InputRevision || generator.InputDigest != verifier.InputDigest {
@@ -30,6 +31,18 @@ func validateModelAssetProof(ctx context.Context, db dbHandle, proof k12.Problem
 	if decodeAssetPhysicalResult(generator, &generated) != nil || generated.Output == "" || decodeAssetPhysicalResult(verifier, &verified) != nil {
 		return zero, ErrProblemAssetEvidence
 	}
+	if !validProblemAssetExecutionReceipt(verified.Execution, proof) {
+		return zero, ErrProblemAssetEvidence
+	}
+	digest := sha256.Sum256([]byte(generated.Output))
+	if hex.EncodeToString(digest[:]) != proof.SolverOutputDigest {
+		return zero, ErrProblemAssetEvidence
+	}
+	return generator, nil
+}
+
+// validProblemAssetExecutionReceipt 让模型与确定性文字来源遵守同一真实程序回执合同。
+func validProblemAssetExecutionReceipt(raw json.RawMessage, proof k12.ProblemAssetVerification) bool {
 	var execution struct {
 		InputDigest     string `json:"input_digest"`
 		RunID           string `json:"run_id"`
@@ -44,16 +57,12 @@ func validateModelAssetProof(ctx context.Context, db dbHandle, proof k12.Problem
 		StdoutBytes     int64  `json:"stdout_bytes"`
 		Stdout          string `json:"stdout"`
 	}
-	if json.Unmarshal(verified.Execution, &execution) != nil || execution.RunID != proof.VerificationRunID || execution.InputDigest != proof.VerificationInputDigest ||
+	if json.Unmarshal(raw, &execution) != nil || execution.RunID == "" || execution.InputDigest == "" || execution.RunID != proof.VerificationRunID || execution.InputDigest != proof.VerificationInputDigest ||
 		execution.Status != "success" || execution.ExitCode != 0 || execution.Error != "" || execution.Timeout || execution.RuntimeMissing ||
 		execution.Truncated || execution.StdoutTruncated || execution.StderrTruncated || execution.StdoutBytes <= 0 || int64(len(execution.Stdout)) != execution.StdoutBytes {
-		return zero, ErrProblemAssetEvidence
+		return false
 	}
-	digest := sha256.Sum256([]byte(generated.Output))
-	if hex.EncodeToString(digest[:]) != proof.SolverOutputDigest {
-		return zero, ErrProblemAssetEvidence
-	}
-	return generator, nil
+	return true
 }
 
 func decodeAssetPhysicalResult(inv k12.GradingItemInvocation, target any) error {

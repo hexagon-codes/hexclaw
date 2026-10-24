@@ -15,6 +15,7 @@ const ProblemAssetNormalizationVersion = "k12-facts-v1"
 // ProblemAssetVerification 绑定用例已判定合格的题目事实和实际成功执行；不接受前端 verified 标记。
 // 存储核对回执身份与结果摘要，题目完整性和答案质量由发布用例负责。
 type ProblemAssetVerification struct {
+	SourceKind              string                  `json:"source_kind,omitempty"`
 	GenerationInvocationID  string                  `json:"generation_invocation_id,omitempty"`
 	GenerationResultDigest  string                  `json:"generation_result_digest,omitempty"`
 	SolverOutputDigest      string                  `json:"solver_output_digest,omitempty"`
