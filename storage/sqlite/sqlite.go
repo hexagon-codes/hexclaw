@@ -247,10 +247,10 @@ func scanMessage(sc scannable) (*storage.MessageRecord, error) {
 	// （老消息 attachments='' → 保留其原 metadata；assistant 等无附件消息不受影响）。
 	if m.Attachments != "" && m.Attachments != "{}" {
 		persistedMetadata := m.Metadata
-		// 媒体助手消息的附件独立存储，不能覆盖回合终态和投递关联。
+		// 已提交产物助手消息的附件独立存储，不能覆盖回合终态和投递关联。
 		if m.Role == "assistant" {
 			var persisted, attachmentMeta map[string]json.RawMessage
-			if json.Unmarshal([]byte(persistedMetadata), &persisted) == nil && len(persisted["media_completion_digest"]) > 0 &&
+			if json.Unmarshal([]byte(persistedMetadata), &persisted) == nil && (len(persisted["media_completion_digest"]) > 0 || len(persisted["print_reply_digest"]) > 0) &&
 				json.Unmarshal([]byte(m.Attachments), &attachmentMeta) == nil {
 				persisted["attachments"] = attachmentMeta["attachments"]
 				if merged, err := json.Marshal(persisted); err == nil {
@@ -614,9 +614,20 @@ func (s *Store) saveMessageTx(ctx context.Context, msg *storage.MessageRecord) e
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	replayed := false
+	if completion, ok := storage.AssistantCompletionFromContext(ctx); ok && completion.Commit != nil {
+		if replay, err := completion.Commit(ctx, tx, msg); err != nil {
+			return err
+		} else if replay {
+			replayed = true
+		}
+	}
 	if replay, err := commitMediaReply(ctx, tx, msg); err != nil {
 		return err
 	} else if replay {
+		replayed = true
+	}
+	if replayed {
 		return tx.Commit()
 	}
 	_, err = tx.ExecContext(ctx,
