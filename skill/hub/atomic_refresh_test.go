@@ -623,7 +623,7 @@ func TestHubRefreshRevalidatesSeedBeforeAtomicReplace(t *testing.T) {
 	prepared := make(chan struct{})
 	releasePrepare := make(chan struct{})
 	var preparedOnce sync.Once
-	h := New(HubConfig{Enabled: true, RepoURL: "https://hub.test/repo", Branch: "main"}, "")
+	h := New(HubConfig{Enabled: true}, "")
 	h.SetCacheDir(cacheDir)
 	h.cacheWriteOps = &hubCacheWriteOps{
 		syncTemp: func(file *os.File) error {

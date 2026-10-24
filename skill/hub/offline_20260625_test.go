@@ -139,9 +139,9 @@ func TestHub_Seed_PrefersNewerEmbedOverStaleCache(t *testing.T) {
 	stale := `{"version":"old","updated_at":"2020-01-01T00:00:00Z","skills":[{"name":"stale-cache-skill","type":"skill"}]}`
 	writeFile(t, filepath.Join(cacheDir, "hub-catalog.json"), stale)
 
-	h := New(HubConfig{Enabled: true, RepoURL: "/nonexistent-upgrade-xyz"}, "")
+	h := New(HubConfig{Enabled: true}, "")
 	h.SetCacheDir(cacheDir)
-	h.EnsureCatalog()
+	h.seed()
 
 	cat := h.GetCatalog()
 	for _, s := range cat.Skills {
