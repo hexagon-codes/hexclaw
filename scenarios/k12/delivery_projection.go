@@ -131,7 +131,7 @@ func ValidateDeliveryProjection(batchAgent, objectKind, objectID, contentDigest 
 		return fail()
 	}
 	switch objectKind {
-	case "im_final_reply", "creative_work", "accumulation", PrintSourceGradingFinalArtifact, "dingtalk_photo_grading_reply":
+	case "im_final_reply", "creative_work", "accumulation", PrintSourceGradingFinalArtifact, "dingtalk_photo_grading_reply", "conversation_print_reply":
 	default:
 		return fail()
 	}

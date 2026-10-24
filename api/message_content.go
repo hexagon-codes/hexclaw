@@ -82,6 +82,27 @@ func hydrateMessageContents(messages []*storage.MessageRecord) {
 				message.MessageContent, message.RenderManifest = canonicalRenderProjection(messagecontent.ProducerChat, metadata["locale"], message.Content, messagecontent.SurfaceHistory, "history-markdown-v1", refs...)
 			}
 		}
+		if message.Role == "assistant" && metadata["print_reply_digest"] != "" {
+			var artifacts []struct {
+				ArtifactID string `json:"artifact_id"`
+				ByteDigest string `json:"byte_digest"`
+				Name       string `json:"name"`
+			}
+			if json.Unmarshal([]byte(metadata["print_artifacts"]), &artifacts) == nil && len(artifacts) > 0 {
+				var refs []messagecontent.AttachmentRef
+				if message.MessageContent != nil {
+					refs = append(refs, message.MessageContent.Attachments...)
+				}
+				for _, artifact := range artifacts {
+					refs = append(refs, messagecontent.AttachmentRef{AssetID: artifact.ArtifactID, Digest: "sha256:" + artifact.ByteDigest, Name: artifact.Name, AltText: artifact.Name, MIME: "application/pdf"})
+				}
+				locale := metadata["locale"]
+				if locale == "" {
+					locale = "und"
+				}
+				message.MessageContent, message.RenderManifest = canonicalRenderProjection(messagecontent.ProducerChat, locale, message.Content, messagecontent.SurfaceHistory, "history-markdown-v1", refs...)
+			}
+		}
 		if message.MessageContent == nil {
 			message.MessageContent = canonicalChatContent(message.Content, metadata)
 		}
