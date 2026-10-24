@@ -168,8 +168,12 @@ func (s *Service) Begin(ctx context.Context, req Request) (*Operation, error) {
 		return nil, err
 	}
 	if policy := req.Selection; policy != nil && policy.Mode != "auto" {
-		if len(policy.Models) == 1 { req.Model = policy.Models[0] }
-		if policy.Provider != "" { req.Provider = policy.Provider }
+		if len(policy.Models) == 1 {
+			req.Model = policy.Models[0]
+		}
+		if policy.Provider != "" {
+			req.Provider = policy.Provider
+		}
 	}
 	key := digest([]string{req.Origin.Kind, req.Origin.SessionID, req.Origin.RequestID, req.Origin.Ordinal})
 	intentRequest := req
@@ -179,6 +183,9 @@ func (s *Service) Begin(ctx context.Context, req Request) (*Operation, error) {
 		intentRequest.Provider, intentRequest.Model = "", ""
 	}
 	intentRequest.Selection = nil
+	if req.Selection != nil && req.Selection.Provider == "" {
+		intentRequest.Provider = ""
+	}
 	intent := digest(intentRequest)
 	if op, err := s.repo.Find(ctx, req.Origin.Owner, key); err == nil {
 		if op.Request.Origin.RequestDigest != "" && req.Origin.RequestDigest != "" && op.Request.Origin.RequestDigest != req.Origin.RequestDigest {
@@ -507,6 +514,10 @@ func (s *Service) advance(op *Operation) {
 		generationID = fmt.Sprintf("%s:%d", op.ID, op.AttemptIndex)
 	}
 	snapshot := s.router.Current()
+	if op.Route.Protocol != "tts" && !snapshot.allowsGeneration(op.Route, op.Request) {
+		s.fail(op, "failed", "capability_unavailable", "original media route is no longer available")
+		return
+	}
 	pc, hasCredential := snapshot.providers[op.Route.ProviderID]
 	if op.Route.Protocol != "tts" && (!hasCredential || pc.APIKey == "") {
 		s.fail(op, "failed", "capability_unavailable", "original provider credentials are unavailable")
@@ -557,6 +568,10 @@ func (s *Service) advance(op *Operation) {
 			op.ActualProviderID = result.ProviderID
 		}
 		op.Timings["generation"] = time.Since(started).Milliseconds()
+		if errors.Is(err, ErrUnavailable) && (result == nil || len(result.Attempts) == 0) {
+			s.fail(op, "failed", "capability_unavailable", "original speech route is no longer available")
+			return
+		}
 		if err == nil {
 			s.saveSpeech(op, result)
 			return
@@ -593,14 +608,15 @@ func (s *Service) advance(op *Operation) {
 		state, code = "failed", "upstream_failed"
 	}
 	s.recordAttempt(op, started, state, code)
-	if state == "failed" && s.failover(op, err) {
-		return
-	}
 	// 只记录可公开的错误类别，供应商响应可能包含凭据或临时签名URL。
 	detail := "media provider request did not complete"
 	var providerError *transport.ProviderError
 	if errors.As(err, &providerError) && providerError.StatusCode > 0 {
 		detail = fmt.Sprintf("media provider request did not complete (HTTP %d)", providerError.StatusCode)
+		op.Attempts[len(op.Attempts)-1].StatusCode = providerError.StatusCode
+	}
+	if state == "failed" && s.failover(op, err) {
+		return
 	}
 	s.fail(op, state, code, detail)
 }
@@ -611,7 +627,35 @@ func (s *Service) fail(op *Operation, state, code, detail string) {
 	op.Error = detail
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(s.ctx), 5*time.Second)
 	defer cancel()
-	_ = s.repo.Update(ctx, op, op.Revision)
+	for {
+		if err := s.repo.Update(ctx, op, op.Revision); !errors.Is(err, ErrConflict) {
+			return
+		}
+		current, err := s.repo.Get(ctx, op.Owner, op.ID)
+		if err != nil {
+			return
+		}
+		current.GenerationState, current.ErrorCode, current.Error = state, code, detail
+		mergeExecutionReceipts(current, op)
+		*op = *current
+	}
+}
+
+// mergeExecutionReceipts 保留已发生尝试与阶段计时，不覆盖当前取消意图或任务身份。
+func mergeExecutionReceipts(target, source *Operation) {
+	for i, attempt := range source.Attempts {
+		if i < len(target.Attempts) {
+			target.Attempts[i] = attempt
+		} else {
+			target.Attempts = append(target.Attempts, attempt)
+		}
+	}
+	if target.Timings == nil {
+		target.Timings = make(map[string]int64)
+	}
+	for stage, elapsed := range source.Timings {
+		target.Timings[stage] = elapsed
+	}
 }
 
 func (s *Service) pollVideo(op *Operation) {
@@ -867,6 +911,7 @@ func (s *Service) finalizeAssets(op *Operation) {
 			current.RecoveryRef = op.RecoveryRef
 			current.ErrorCode = op.ErrorCode
 			current.Error = op.Error
+			mergeExecutionReceipts(current, op)
 			current.CompletionRevision = current.Revision + 1
 			_ = s.repo.Update(s.ctx, current, current.Revision)
 		}

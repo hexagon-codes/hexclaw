@@ -117,14 +117,13 @@ func (s *Service) restoreAssets(op *Operation) bool {
 		op.UpstreamID = staged.UpstreamID
 		op.GenerationState = "running"
 		op.Error, op.ErrorCode = "", ""
+		mergeExecutionReceipts(op, &staged.Operation)
 		return s.repo.Update(s.ctx, op, op.Revision) == nil
 	}
 	if staged.GenerationState != "succeeded" {
 		return false
 	}
-	if op.Timings == nil {
-		op.Timings = make(map[string]int64)
-	}
+	mergeExecutionReceipts(op, &staged.Operation)
 	op.GenerationState = "succeeded"
 	op.ActualProviderID = staged.ActualProviderID
 	op.Result = staged.Result
