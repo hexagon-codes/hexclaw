@@ -43,6 +43,11 @@ type weeklyPhysicalExecutor struct {
 	err        error
 }
 
+func (e *weeklyPhysicalExecutor) ExecuteGradingProgramCall(ctx context.Context, spec GradingPhysicalCallSpec, next func(context.Context) (string, error)) (GradingPhysicalCallResult, error) {
+	spec.ExecutionKind = k12.GradingExecutionLocalDeterministic
+	return e.ExecuteGradingPhysicalCall(ctx, spec, next)
+}
+
 // GradingPhysicalCallsReplayOnly 让适配器在只读回执模式下拒绝未受拦截的调用。
 func GradingPhysicalCallsReplayOnly(ctx context.Context) bool {
 	if ctx == nil {

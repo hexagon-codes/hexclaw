@@ -1,0 +1,61 @@
+{
+  "profile_id": "k12-homework-report/v2",
+  "render_profile_api": 2,
+  "input_schema": "homework-report-render-v2",
+  "entrypoint": "assets/template.typ",
+  "components": [
+    "assets/components.typ"
+  ],
+  "host_inputs": [
+    "report.json",
+    "formulas.typ",
+    "resolved_local_assets"
+  ],
+  "formula_compiler": "host-pandoc-batch",
+  "paper": "a4",
+  "margin_mm": {
+    "left": 18,
+    "right": 18,
+    "top": 22,
+    "bottom": 23
+  },
+  "body_font_size_pt": 11,
+  "title_font_size_pt": 22,
+  "metadata_font_size_pt": 9.5,
+  "quick_answer_font_size_pt": 14,
+  "calculation_font_size_pt": 11.5,
+  "original_answer_font_size_pt": 9,
+  "source_image_max_height_mm": 225,
+  "diagram_max_height_mm": 50,
+  "required_typst_features": [
+    "json",
+    "grid",
+    "table.header",
+    "math.display",
+    "image.fit-contain"
+  ],
+  "font_policy": "host-resolved-font-manifest",
+  "font_inputs": {
+    "sans": "font-sans",
+    "serif": "font-serif",
+    "math": "font-math"
+  },
+  "requested_fonts": {
+    "sans": [
+      "PingFang SC",
+      "Noto Sans CJK SC",
+      "Microsoft YaHei"
+    ],
+    "serif": [
+      "Songti SC",
+      "Noto Serif CJK SC",
+      "SimSun"
+    ],
+    "math": [
+      "New Computer Modern Math",
+      "STIX Two Math"
+    ]
+  },
+  "network_required": false,
+  "automatic_scripts": false
+}

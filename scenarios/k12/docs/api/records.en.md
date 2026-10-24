@@ -2,7 +2,7 @@
 
 For photo mistakes, `question` is the problem statement. Recognized versioned solver-scope wrappers and complete internal scope suffixes remain model-request details; list and review responses project the original statement. Unknown formats remain unchanged. This read projection preserves historical rows, IDs, versions, states and frozen artifacts; new mistakes store the same statement representation.
 
-This reference covers the 46 method/path registrations in the current source, including worktree changes, for a HexClaw service with the K12 scenario enabled. Use the documentation and installer at the relevant Tag for a released version; a mainline route is not a promise that an older installer contains it.
+This reference covers the 51 method/path registrations in the current source, including worktree changes, for a HexClaw service with the K12 scenario enabled. Use the documentation and installer at the relevant Tag for a released version; a mainline route is not a promise that an older installer contains it.
 
 - [Scenario API and shared rules](../../API.en.md) · [中文](records.md) · [Complete OpenAPI](../../../../api/openapi.yaml)
 - The scenario reference owns [atomic profile updates](../../API.en.md#profile-bundle) and the [ten shared textbook/progress rules](../../API.en.md#textbook-and-curriculum-progress). This page documents each operation's fields, responses and side effects.
@@ -21,7 +21,12 @@ For sends, follow server-owned batch/receipt state: `pending → sending → del
 | `POST` | [`/api/k12/grade`](#grade) | Grade one problem |
 | `POST` | [`/api/k12/record-mistake`](#recordmistake) | Record a known mistake |
 | `POST` | [`/api/k12/solve`](#solve) | Solve one problem |
+| `GET` | [`/api/k12/text-solves/{solve_run_id}`](#gettextsolve) | Read a text-solve ledger and finalization |
+| `POST` | [`/api/k12/text-solves/{solve_run_id}/resume-publication`](#resumetextsolvepublication) | Recover the original text finalization and answer publication |
+| `GET` | [`/api/k12/print-replies/{message_id}`](#print-replies) | Read original-turn PDF delivery facts |
+| `POST` | [`/api/k12/print-replies/{message_id}/resume`](#print-replies) | Resume the original-turn PDF batch |
 | `GET` | [`/api/k12/review-queue`](#reviewqueue) | Read the due review queue |
+| `POST` | [`/api/k12/review-source-groups`](#recordreviewsourcegroup) | Record reviewed equivalent question sources |
 | `GET` | [`/api/k12/insight-report`](#insightreport) | Read an insight snapshot |
 | `POST` | [`/api/k12/mark-mastered`](#markmastered) | Record parent confirmation and schedule a spot check |
 | `POST` | [`/api/k12/tutoring-tips`](#tutoringtips) | Build tutoring tips for completed homework |
@@ -134,6 +139,8 @@ Success: `200` `application/json`.
 | `out_of_scope_kp` | string | No | Knowledge point triggering the scope boundary; optional. |
 | `record_created` | boolean | Yes | Whether this operation created a mistake record. |
 | `record_id` | string | No | Server-issued record identity. |
+| `teaching_report` | object | No | Versioned immutable report derived from the actual frozen source; omitted for legacy or unsupported reports. |
+| `report_markdown` | string | No | Canonical quick answers and deep explanation from the same report object as the PDF. |
 | `solution` | string | Yes | Complete solution text. |
 | `solve_only` | boolean | Yes | true means solve-only; do not render it as a grading verdict. |
 | `verdict` | `agree` / `disagree` / `unverifiable` / `out_of_scope` / `verbatim` | Yes |  |
@@ -202,6 +209,8 @@ Solve one problem.
 
 agent/problem are required. Returns the solution, verification evidence and scope projection without grading or creating a mistake. Subject accepts empty or 数学/语文/英语/物理/化学; an omitted term uses the stored profile when available.
 
+When the text execution ledger is wired, owner/agent/solve_run_id freeze the complete input, origin and route. Identical input replays the original result; a changed problem, revision or origin under the same key returns409. Freeze a stable solve_run_id before sending; omitting it creates a new run, so repeating unkeyed requests is not recovery. An absent origin stays empty; a supplied message must be a real user message in the supplied session, with session access checked by the existing authenticated wiring. An unavailable model route does not block local deterministic arithmetic or verified answer adoption; only a new step that actually needs a Provider fails.
+
 Availability: K12 Solver and optional curriculum adapter.
 
 JSON body:
@@ -212,6 +221,10 @@ JSON body:
 | `grade` | `` / `一年级上` / `一年级下` / `二年级上` / `二年级下` / `三年级上` / `三年级下` / `四年级上` / `四年级下` / `五年级上` / `五年级下` / `六年级上` / `六年级下` / `初一上` / `初一下` / `初二上` / `初二下` / `初三上` / `初三下` | No | When omitted or empty, use the saved profile term if available; otherwise no term constraint is injected. |
 | `knowledge_points` | array<string> / null | No | Knowledge-point names. |
 | `problem` | string | Yes | Problem text. minLength=1 |
+| `solve_run_id` | string | No | Stable caller run ID scoped by authenticated owner and agent; a new value is generated when omitted. |
+| `source_session` | string | No | Actual originating session; stays empty when absent. |
+| `source_message_id` | string | No | Existing user message in the supplied session; do not fabricate a reference. |
+| `input_revision` | integer | No | Defaults to1 and must be positive; an existing run cannot change revision. |
 | `subject` | `` / `数学` / `语文` / `英语` / `物理` / `化学` | No | Empty preserves the default route; these direct-calibration endpoints use Chinese subject names. |
 
 Success: `200` `application/json`.
@@ -219,10 +232,14 @@ Success: `200` `application/json`.
 | Field | Type | Present | Meaning |
 | --- | --- | --- | --- |
 | `badge` | string | Yes | Verification badge value, such as verified-strong. |
+| `answer_source` | object | No | Actual asset, deterministic or model answer source with adoption/execution references; this is not a learner assessment. |
+| `finalization` | object | No | Immutable text finalization: source_kind=text_solve, solve_run_id, finalization_id, input_revision, input_digest, facts_digest, result_json/result_digest, invocation_id and optional publication. |
 | `curriculum_unmapped` | array<string> / null | No | Knowledge points missing from curriculum mapping; separate from out-of-scope. |
 | `evidence_type` | `numeric_exec` / `symbolic_exec` / `heterogeneous_model` / `heuristic` / `verbatim` / `none` | Yes |  |
 | `out_of_scope` | boolean | Yes | Whether the term boundary was triggered. |
 | `out_of_scope_kp` | string | No | Knowledge point triggering the scope boundary; optional. |
+| `teaching_report` | object | No | Versioned immutable report derived from the actual frozen source; omitted for legacy or unsupported reports. |
+| `report_markdown` | string | No | Canonical quick answers and deep explanation from the same report object as the PDF. |
 | `solution` | string | Yes | Complete solution text. |
 | `verdict` | `agree` / `disagree` / `unverifiable` / `out_of_scope` / `verbatim` | Yes |  |
 
@@ -237,6 +254,55 @@ Success: `200` `application/json`.
 | `413` | Body limit exceeded. |
 
 [Implementation](../../apihttp/handler.go)
+
+
+<a id="gettextsolve"></a>
+## GET /api/k12/text-solves/{solve_run_id}
+
+Read the original text-solve ledger in the authenticated owner/agent scope. Read-only: it sends no model request and does not turn an unknown outcome into success. An existing run without a finalization still returns200 with its invocations. Provider steps and local actions remain distinct; ledger row counts are not HTTP request or billing counts.
+
+| Parameter | Location | Required | Type / constraint |
+| --- | --- | --- | --- |
+| `solve_run_id` | path | Yes | Nonempty stable run ID. |
+| `agent` | query | Yes | Actual Tutor in the authenticated ownership scope. |
+
+Success: `200` `application/json`.
+
+| Field | Type | Present | Meaning |
+| --- | --- | --- | --- |
+| `run` | object | Yes | Frozen identity, origin, input revision, complete facts/digests, request_json and route_snapshot. |
+| `invocations` | array<object> / null | Yes | Actual execution steps, original states and result digests/JSON; execution_kind separates provider and local_deterministic. Do not blindly resend sent/outcome_unknown. |
+| `finalized` | boolean | Yes | Whether a committed finalization exists. |
+| `publication_eligible` | boolean | Yes | Whether the original finalization has a publication intent; not a substitute for publication-time validation and not evidence of publication. |
+| `finalization` | object | No | Original immutable finalization when complete; historical read access does not establish current adoption validity. |
+| `adoption_currently_valid` | boolean | No | Present only for an adopted answer; checks the original adoption and current asset validity. |
+
+| Status | Error meaning |
+| --- | --- |
+| `400` | Missing agent or solve_run_id. |
+| `404` | Missing run or invisible Tutor scope. |
+| `409` | Identity, version or result conflict. |
+| `503` | Text execution records are not wired. |
+| `500` | Unclassified storage/read error. |
+
+[Implementation](../../apihttp/text_solve_handler.go)
+
+<a id="resumetextsolvepublication"></a>
+## POST /api/k12/text-solves/{solve_run_id}/resume-publication
+
+No JSON body; path/query parameters match the preceding read endpoint. Consumes the original finalization and answer-publication contract without invoking the Solver or a Provider. If a successful solve result was saved but its final transaction was not committed, reconstruct only the local finalization from the complete, digest-matching actual result. Missing recoverable results return404; sent/outcome_unknown returns409 without solving again. Original agree+numeric_exec, supported scope and actual source validation still apply; no GradingJob or learner assessment is manufactured. Recovery cannot automatically revive an archived asset.
+
+Success: `200` `application/json`. Without an original eligible publication intent, published=false and asset=null; this does not mean solving failed.
+
+| Field | Type | Present | Meaning |
+| --- | --- | --- | --- |
+| `published` | boolean | Yes | Whether this operation returns the original published asset. |
+| `asset` | object / null | Yes | Original answer asset version and revision, or null without an eligible intent. |
+| `model_invocations_added` | integer | Yes | Always0; recovery invokes no model. |
+
+Uses the preceding read endpoint's status mappings.409 includes unknown outcomes and mapped identity/adoption/publication conflicts; unclassified publication-evidence or storage errors return500 in the actual handler. Technical errors are not replaced with a new unverified answer.
+
+[Implementation](../../apihttp/text_solve_handler.go)
 
 
 <a id="reviewqueue"></a>
@@ -266,6 +332,15 @@ Success: `200` `application/json`.
 
 [Implementation](../../apihttp/handler.go)
 
+
+<a id="recordreviewsourcegroup"></a>
+## POST /api/k12/review-source-groups
+
+Persist reviewed source equivalence for read-only mistake-sheet and weekly-practice grouping. Strict JSON requires `agent`, a member `canonical_record_id`, at least two distinct records with complete frozen source tuples, and `evidence: {kind: "reviewed_sources", note: "..."}`. The server derives statements, page digests and numbering; replacement answers or client-authored canonical statements are not accepted.
+
+Returns 201 on creation and 200 on replay. Invalid input is 400, missing/cross-agent records 404, changed sources or overlapping active groups 409, and storage failure 500. The response `{group, created, replayed}` retains the first statement, note and timestamp. Existing mistakes, learning states and PDFs remain intact. A stale member disables the whole group for projection. No model call or message delivery occurs.
+
+See the [complete contract](review-source-groups.en.md) and [handler](../../apihttp/review_source_group_handler.go).
 
 <a id="insightreport"></a>
 ## GET /api/k12/insight-report
@@ -1997,6 +2072,24 @@ A successful tutoring-tips response contains exactly three sections from the sam
 | `media_type` | string | Yes |  |
 | `relative_path` | string | Yes |  |
 | `sha256` | string | Yes |  |
+
+<a id="print-replies"></a>
+## Original-turn PDF replies and recovery
+
+Ordinary chat returns a frozen PDF through its original assistant message. For DingTalk, a `PrintArtifact` enters the original assistant transaction and Outbox through tool metadata `print_artifacts`, then uses the existing K12 DeliveryBatch. It is neither a `MediaOperation` nor a separate send-to-phone operation. These endpoints only consume committed original-turn facts. `message_id` is the original **assistant_message_id**, not ArtifactID or the platform inbound message ID.
+
+| Method / path | Input | Response and side effects |
+|---|---|---|
+| `GET /api/k12/print-replies/{message_id}` | Required query `agent` | `{source,batch?,state}`; read-only. Source freezes owner/session/request, Agent, physical instance/Chat and original PDF references. Reads an existing batch state without sending |
+| `POST /api/k12/print-replies/{message_id}/resume` | Required query `agent`; no body fields | `{batch,model_invocations_added:0}`; resumes the original frozen batch without solving/rendering or resending successful parts. Accepted/unknown parts follow their original receipt query. HTTP200 does not mean delivered |
+
+Both use existing authentication and Agent ownership. Missing agent/message_id returns400; an absent or out-of-scope source returns404; persisted source read failure returns500. Further GET domain/storage errors use the existing K12 error mapping. POST preparation/send/query failure returns502 `{batch,error,model_invocations_added:0}` with actual batch facts. A new message ID is not recovery permission for an unknown outcome.
+
+Each `source.artifacts[]` freezes `kind=print_artifact`, `agent_name/artifact_id/source_digest/byte_digest/byte_size/name/url`. The URL is an authenticated read address. Recovery uses persisted identity and byte digest, never a filename or current template regeneration. Original assistant digest is checked before first batch preparation; an existing batch resumes its frozen plan. Platform acceptance, delivery and handset observation remain separate facts.
+
+When the same turn returns a PDF with generated images, video or speech, the original PDF reply batch freezes the body and every attachment together. Media operations, assets, execution receipts and assistant associations remain persisted without a second media delivery batch. Recovery validates assets and bytes against the original owner; PDFs never become MediaOperations. Each physical send still checks explicit media cancellation, with the existing exception for an explicit resend. GET may return `state=cancelled` for an unsent plan; already sent or unknown receipts retain their actual facts. Cancellation does not imply recall or delivery. Transport disconnects and service shutdown are not business cancellation and do not complete the Outbox event.
+
+For a non-DingTalk conversation without this PDF Outbox, the original inline reply is returned. Trusted attachment bytes are read and verified through Source; the stable download URL is not used as an external byte source. Existing channel attachment capabilities remain unchanged; this does not introduce PDF support to additional channels.
 
 ## Copyable examples
 

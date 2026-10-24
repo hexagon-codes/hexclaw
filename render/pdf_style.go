@@ -26,6 +26,9 @@ var pdfStyleTemplate string
 //go:embed assets/pdf-brand.png
 var pdfBrandImage []byte
 
+// PDFBrandImage 返回共享页眉已有品牌图的独立副本。
+func PDFBrandImage() []byte { return append([]byte(nil), pdfBrandImage...) }
+
 // PDF使用与桌面一致的矢量工具标记，避免依赖宿主Emoji字体。
 //
 //go:embed assets/tool-wrench.svg

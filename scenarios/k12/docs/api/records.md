@@ -2,7 +2,7 @@
 
 照片错题的 `question` 表示原题。已知版本的求解范围包装和完整内部限定尾注仅用于模型请求，列表与复习队列返回恢复后的原题；未知格式保持原文。此读取投影不修改历史记录、ID、版本、状态或冻结产物，新错题写入同一原题表示。
 
-本参考覆盖当前源码（包含工作区变更）注册的 46 个方法/路径，适用于 K12 场景已启用的 HexClaw 服务。已发布版本以相应 Tag 的文档与安装包为准；当前主线接口不保证已进入旧版安装包。
+本参考覆盖当前源码（包含工作区变更）注册的 51 个方法/路径，适用于 K12 场景已启用的 HexClaw 服务。已发布版本以相应 Tag 的文档与安装包为准；当前主线接口不保证已进入旧版安装包。
 
 - [场景 API 与共同规则](../../API.md) · [English](records.en.md) · [完整 OpenAPI](../../../../api/openapi.yaml)
 - [档案原子更新](../../API.md#profile-bundle)与[教材/进度十条共同契约](../../API.md#textbook-and-curriculum-progress)由场景 API 维护；本页列出逐接口字段、响应与副作用。
@@ -21,7 +21,12 @@
 | `POST` | [`/api/k12/grade`](#grade) | 单题补批 |
 | `POST` | [`/api/k12/record-mistake`](#recordmistake) | 手动记录已知错题 |
 | `POST` | [`/api/k12/solve`](#solve) | 单题求解 |
+| `GET` | [`/api/k12/text-solves/{solve_run_id}`](#gettextsolve) | 读取文字求解账本与最终结算 |
+| `POST` | [`/api/k12/text-solves/{solve_run_id}/resume-publication`](#resumetextsolvepublication) | 恢复原文字结算及题库发布 |
+| `GET` | [`/api/k12/print-replies/{message_id}`](#print-replies) | 读取原回合 PDF 投递事实 |
+| `POST` | [`/api/k12/print-replies/{message_id}/resume`](#print-replies) | 恢复原回合 PDF 批次 |
 | `GET` | [`/api/k12/review-queue`](#reviewqueue) | 读取到期复习队列 |
+| `POST` | [`/api/k12/review-source-groups`](#recordreviewsourcegroup) | 记录经核验的同题来源关联 |
 | `GET` | [`/api/k12/insight-report`](#insightreport) | 读取一份学情快照 |
 | `POST` | [`/api/k12/mark-mastered`](#markmastered) | 记录家长确认并安排复验 |
 | `POST` | [`/api/k12/tutoring-tips`](#tutoringtips) | 生成已完成作业的家长辅导要点 |
@@ -134,6 +139,8 @@ JSON 正文：
 | `out_of_scope_kp` | string | 否 | 触发超纲的知识点，可省略。 |
 | `record_created` | boolean | 是 | 本次是否实际创建错题记录。 |
 | `record_id` | string | 否 | 服务端记录ID。 |
+| `teaching_report` | object | 否 | 来自实际冻结来源的不可变结构化报告；旧记录或不适用来源可省略。 |
+| `report_markdown` | string | 否 | 与PDF使用同一报告对象的快速解答和深度讲解。 |
 | `solution` | string | 是 | 完整解法正文。 |
 | `solve_only` | boolean | 是 | true表示只解题，不能显示批改对错。 |
 | `verdict` | `agree` / `disagree` / `unverifiable` / `out_of_scope` / `verbatim` | 是 |  |
@@ -202,6 +209,8 @@ JSON 正文：
 
 agent/problem 必填；只给解法、验算证据和超纲投影，不批改、不写错题。与 grade 一样支持空或数学/语文/英语/物理/化学学科；省略年级优先采用持久档案。
 
+启用文字执行账本时，同一 owner/agent/solve_run_id 冻结完整输入、来源和路由，相同输入重放原结果；同键异题、修订或来源冲突返回409。建议调用方在发送前冻结稳定solve_run_id；省略则创建新run，不能以重复无键请求代替恢复。未提供来源时保持空，非空消息须实际属于给定会话；会话访问沿现有认证装配核查。模型路由不可用不影响本地确定性计算或已验证题库采用，实际需要Provider的新执行才失败。
+
 依赖：K12 Solver and optional curriculum adapter.
 
 JSON 正文：
@@ -212,6 +221,10 @@ JSON 正文：
 | `grade` | `` / `一年级上` / `一年级下` / `二年级上` / `二年级下` / `三年级上` / `三年级下` / `四年级上` / `四年级下` / `五年级上` / `五年级下` / `六年级上` / `六年级下` / `初一上` / `初一下` / `初二上` / `初二下` / `初三上` / `初三下` | 否 | When omitted or empty, use the saved profile term if available; otherwise no term constraint is injected. |
 | `knowledge_points` | array<string> / null | 否 | 相关知识点名称。 |
 | `problem` | string | 是 | 题目正文。 minLength=1 |
+| `solve_run_id` | string | 否 | 调用方稳定run标识，限定在可信owner和agent内；省略时生成新值。 |
+| `source_session` | string | 否 | 实际来源会话；不提供时保持空。 |
+| `source_message_id` | string | 否 | 给定来源会话内实际存在的user消息；不能伪造。 |
+| `input_revision` | integer | 否 | 默认为1，必须为正；同run不能改变修订。 |
 | `subject` | `` / `数学` / `语文` / `英语` / `物理` / `化学` | 否 | Empty preserves the default route; these direct-calibration endpoints use Chinese subject names. |
 
 成功：`200` `application/json`.
@@ -219,10 +232,14 @@ JSON 正文：
 | 字段 | 类型 | 必含 | 含义 |
 | --- | --- | --- | --- |
 | `badge` | string | 是 | 验算徽章机器值，如verified-strong。 |
+| `answer_source` | object | 否 | 实际答案来源：asset、deterministic或model，携采用或执行窄引用；不等于学生批改结论。 |
+| `finalization` | object | 否 | 不可变文字结算，含source_kind=text_solve、solve_run_id、finalization_id、input_revision、input_digest、facts_digest、result_json/result_digest、invocation_id及可选publication。 |
 | `curriculum_unmapped` | array<string> / null | 否 | 不在课标映射中的知识点；与超纲不同。 |
 | `evidence_type` | `numeric_exec` / `symbolic_exec` / `heterogeneous_model` / `heuristic` / `verbatim` / `none` | 是 |  |
 | `out_of_scope` | boolean | 是 | 是否触发年级边界投影。 |
 | `out_of_scope_kp` | string | 否 | 触发超纲的知识点，可省略。 |
+| `teaching_report` | object | 否 | 来自实际冻结来源的不可变结构化报告；旧记录或不适用来源可省略。 |
+| `report_markdown` | string | 否 | 与PDF使用同一报告对象的快速解答和深度讲解。 |
 | `solution` | string | 是 | 完整解法正文。 |
 | `verdict` | `agree` / `disagree` / `unverifiable` / `out_of_scope` / `verbatim` | 是 |  |
 
@@ -237,6 +254,55 @@ JSON 正文：
 | `413` | 请求正文超过该接口上限。 |
 
 [实现参考](../../apihttp/handler.go)
+
+
+<a id="gettextsolve"></a>
+## GET /api/k12/text-solves/{solve_run_id}
+
+读取可信owner/agent内的文字求解原账本。无副作用，不重发模型，不把unknown状态变成成功。未最终结算但run已存在时仍可返回200及原invocations；实际Provider步骤与本地动作分开，账本行数不是逐HTTP请求或计费次数。
+
+| 参数 | 位置 | 必填 | 类型 / 约束 |
+| --- | --- | --- | --- |
+| `solve_run_id` | path | 是 | 非空稳定run标识。 |
+| `agent` | query | 是 | 实际辅导实例，必须处于认证归属范围。 |
+
+成功：`200` `application/json`。
+
+| 字段 | 类型 | 必含 | 含义 |
+| --- | --- | --- | --- |
+| `run` | object | 是 | 冻结的身份、来源、输入修订、完整事实/摘要、request_json及route_snapshot。 |
+| `invocations` | array<object> / null | 是 | 实际执行步骤及原状态、结果摘要/JSON；execution_kind区分provider与local_deterministic，sent/outcome_unknown不得盲重发。 |
+| `finalized` | boolean | 是 | 是否存在已提交最终结算。 |
+| `publication_eligible` | boolean | 是 | 是否存在原结算发布意图；不替代发布时资格复核或表示已发布。 |
+| `finalization` | object | 否 | 已完成时返回原不可变结算；读取历史不表示采用来源当前仍有效。 |
+| `adoption_currently_valid` | boolean | 否 | 仅采用过题库答案时返回；核对原采用回执及资产当前有效性。 |
+
+| 状态 | 错误含义 |
+| --- | --- |
+| `400` | agent或solve_run_id为空。 |
+| `404` | run不存在，或辅导实例归属不可见。 |
+| `409` | 身份、版本或结果冲突。 |
+| `503` | 文字执行账本未装配。 |
+| `500` | 未分类存储/读取错误。 |
+
+[实现参考](../../apihttp/text_solve_handler.go)
+
+<a id="resumetextsolvepublication"></a>
+## POST /api/k12/text-solves/{solve_run_id}/resume-publication
+
+不需要JSON正文；path/query与上一个读取接口相同。只消费原最终结算及原题库发布合同，不调用Solver或Provider。若求解执行已成功落账而最终事务尚未提交，仅从完整、摘要一致的真实成功结果恢复本地结算；缺结果返回404，存在sent/outcome_unknown则409，不重解。原发布资格继续要求实际agree+numeric_exec及现有范围/来源复核，不创建GradingJob或学生评价。归档资产不因恢复而自动复活。
+
+成功：`200` `application/json`。没有原发布资格时published=false、asset=null，不代表求解失败。
+
+| 字段 | 类型 | 必含 | 含义 |
+| --- | --- | --- | --- |
+| `published` | boolean | 是 | 本次是否返回原发布资产。 |
+| `asset` | object / null | 是 | 原题库版本及修订；没有可发布意图时为null。 |
+| `model_invocations_added` | integer | 是 | 恒为0；恢复不调用模型。 |
+
+状态同上述读取接口；409包括结果未知和已映射的身份/采用/发布冲突，未分类的发布证据或存储错误按实际handler返回500。技术错误不改成新的未验证答案。
+
+[实现参考](../../apihttp/text_solve_handler.go)
 
 
 <a id="reviewqueue"></a>
@@ -266,6 +332,15 @@ JSON 正文：
 
 [实现参考](../../apihttp/handler.go)
 
+
+<a id="recordreviewsourcegroup"></a>
+## POST /api/k12/review-source-groups
+
+保存已经核验的同题来源，供错题卷和周练只读归并。严格JSON，必需`agent`、成员中的`canonical_record_id`、至少两个不同记录的完整来源元组及`evidence: {kind: "reviewed_sources", note: "..."}`。服务端从已发布冻结输入取得题面、图摘要和题号，不接收替代答案或客户端自编题面。
+
+首次201，重放200；无效请求400，不存在或跨实例记录404，来源变化或有效组重叠409，存储失败500。响应`{group, created, replayed}`，保存首次审核正文、说明及创建时间。原错题、学习状态和旧PDF不改，来源失效则不再用整组归并。无模型调用或消息投递。
+
+完整字段与语义见[来源关联合同](review-source-groups.md)，实现见[handler](../../apihttp/review_source_group_handler.go)。
 
 <a id="insightreport"></a>
 ## GET /api/k12/insight-report
@@ -1997,6 +2072,24 @@ JSON 正文：
 | `media_type` | string | 是 |  |
 | `relative_path` | string | 是 |  |
 | `sha256` | string | 是 |  |
+
+<a id="print-replies"></a>
+## 原回合 PDF 回复与恢复
+
+普通会话的冻结 PDF 由原助手消息返回；钉钉的 `PrintArtifact` 经工具元数据 `print_artifacts` 进入同一原助手事务及 Outbox，再沿原 K12 DeliveryBatch 投递。它不是 `MediaOperation`，也不是另一次“发送到手机”。下列 API 只消费已经持久提交的原回合来源；`message_id` 是原 **assistant_message_id**，不是 ArtifactID 或平台入站消息ID。
+
+| 方法 / 路径 | 输入 | 响应与副作用 |
+|---|---|---|
+| `GET /api/k12/print-replies/{message_id}` | 必需 query `agent` | `{source,batch?,state}`。只读；source 固定原 owner/session/request、Agent、物理实例/Chat及原PDF引用；存在batch时读取其实际状态，不触发发送 |
+| `POST /api/k12/print-replies/{message_id}/resume` | 必需 query `agent`；无请求体字段 | `{batch,model_invocations_added:0}`；恢复原冻结批次，不再解题/渲染、不重发成功part。accepted/unknown沿原回执查询处理，HTTP200不等于delivered |
+
+两接口沿现有认证与Agent归属。缺agent/message_id返回400，来源不存在或不属于当前scope返回404；持久来源读取失败返回500。GET的进一步领域/存储错误沿原K12错误映射；POST准备/发送/查询失败返回502 `{batch,error,model_invocations_added:0}`，保留实际批次状态。失败或结果未知不能通过新消息ID伪装为恢复。
+
+`source.artifacts[]` 固定 `kind=print_artifact`、`agent_name/artifact_id/source_digest/byte_digest/byte_size/name/url`。URL是认证读取地址；恢复以真实持久身份和字节摘要为准，不按名称或当前模板重生成。首次批次准备前核原助手摘要；已存在批次恢复使用原冻结发送计划。平台接纳、最终送达、手机观察是不同事实。
+
+同轮同时生成 PDF 与图片、视频或语音时，由原 PDF 回复批次统一冻结正文及全部附件；媒体操作、资产、执行回执和原助手关联继续保存，不另建媒体发送批次。恢复按原 owner 校验媒体资产与字节摘要，PDF 不转换为 MediaOperation。每次实际发送前仍检查媒体的主动停止意图；明确重发的原操作按既有重发语义处理。尚未发送的计划停止后，GET 的 `state` 可为 `cancelled`；已发送或结果未知的回执保持原事实，停止不表示撤回或已送达。主动停止与请求断线、服务退出分别处理，后两者不会被当成业务取消而结束 Outbox。
+
+非钉钉原会话没有本 PDF Outbox 时，沿原内联回复返回，不静默接管。可信附件从 Source 读取并核验冻结字节，稳定下载 URL 不会被当作外部下载来源；各渠道原有附件发送能力保持，不据此宣称新增渠道 PDF 支持。
 
 ## 可复制示例
 

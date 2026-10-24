@@ -1,0 +1,278 @@
+{
+  "schema_version": "homework-report-render-v2",
+  "document": {
+    "title": "作业讲解示例",
+    "agent_name": "小学辅导助手",
+    "grade_term": "六年级上册",
+    "subject": "数学",
+    "date": "",
+    "example_label": "AI 生成示例 · 非真实学生作业",
+    "source_kind": "grading"
+  },
+  "branding": {
+    "name": "HexClaw 河蟹 AI",
+    "tagline": "本地云端均可部署 · 数据自主掌控 · 软件开源免费",
+    "website_url": "https://hexclaw.net",
+    "website_label": "hexclaw.net",
+    "wechat_id": "hexclaw",
+    "github_url": "https://github.com/hexagon-codes/hexclaw-desktop",
+    "github_label": "github.com/hexagon-codes/hexclaw-desktop"
+  },
+  "source_images": [
+    {
+      "path": "worksheet.svg",
+      "alt": "AI 生成示例：红苹果占全部苹果的三分之一，已有六个；两道小题及示例作答。"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q1",
+      "number": "（1）",
+      "title": "求这筐苹果的总数",
+      "status": {
+        "label": "待核对",
+        "tone": "amber"
+      },
+      "answer": [
+        {
+          "kind": "text",
+          "text": "这筐苹果共有 18 个"
+        }
+      ],
+      "calculations": [
+        [
+          {
+            "kind": "math",
+            "math_ref": "total"
+          }
+        ]
+      ],
+      "original_answer": [
+        {
+          "content": [
+            {
+              "kind": "math",
+              "math_ref": "first-original"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "q2",
+      "number": "（2）",
+      "title": "求其他苹果的数量",
+      "status": {
+        "label": "已解答",
+        "tone": "green"
+      },
+      "answer": [
+        {
+          "kind": "text",
+          "text": "其他苹果有 12 个"
+        }
+      ],
+      "calculations": [
+        [
+          {
+            "kind": "math",
+            "math_ref": "remaining"
+          }
+        ]
+      ],
+      "original_answer": [
+        {
+          "content": [
+            {
+              "kind": "text",
+              "text": "未填写"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "deep": {
+    "method": {
+      "name": "数形结合",
+      "application": "用等分图看清已知量，再用原条件检查。"
+    },
+    "steps": [
+      {
+        "number": "1",
+        "title": "先看 6 个对应哪一份",
+        "blocks": [
+          {
+            "kind": "columns",
+            "widths": [
+              1,
+              1.15
+            ],
+            "columns": [
+              [
+                {
+                  "kind": "paragraph",
+                  "content": [
+                    {
+                      "kind": "text",
+                      "text": "三格一样长，每格表示全部苹果的"
+                    },
+                    {
+                      "kind": "math",
+                      "math_ref": "one-third"
+                    },
+                    {
+                      "kind": "text",
+                      "text": "。红苹果正好占一格，共 6 个；求三格一共有多少，用 6 乘 3。"
+                    }
+                  ]
+                }
+              ],
+              [
+                {
+                  "kind": "diagram",
+                  "path": "fraction-bar.svg",
+                  "alt": "三格等长，红苹果为第一格，共六个；三格共十八个。",
+                  "caption": [
+                    {
+                      "kind": "text",
+                      "text": "1 份有 6 个，全部有 3 份"
+                    }
+                  ]
+                }
+              ]
+            ]
+          }
+        ]
+      },
+      {
+        "number": "2",
+        "title": "把数量关系说明白",
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "content": [
+              {
+                "kind": "text",
+                "text": "红苹果是全部苹果的一部分。先求全部，再减去红苹果，就得到其他苹果的数量。"
+              }
+            ]
+          },
+          {
+            "kind": "equation",
+            "content": [
+              {
+                "kind": "math",
+                "math_ref": "relation"
+              }
+            ]
+          },
+          {
+            "kind": "table",
+            "widths": [
+              31,
+              69
+            ],
+            "headers": [
+              [
+                {
+                  "kind": "text",
+                  "text": "表示方式"
+                }
+              ],
+              [
+                {
+                  "kind": "text",
+                  "text": "对应的关系"
+                }
+              ]
+            ],
+            "rows": [
+              [
+                [
+                  {
+                    "kind": "text",
+                    "text": "填写实际数量"
+                  }
+                ],
+                [
+                  {
+                    "kind": "math",
+                    "math_ref": "amount-fill"
+                  }
+                ]
+              ],
+              [
+                [
+                  {
+                    "kind": "text",
+                    "text": "把全部看作单位“1”"
+                  }
+                ],
+                [
+                  {
+                    "kind": "math",
+                    "math_ref": "fraction-fill"
+                  }
+                ]
+              ]
+            ]
+          },
+          {
+            "kind": "note",
+            "label": "注意",
+            "content": [
+              {
+                "kind": "text",
+                "text": "比例和实际数量不能混在同一条等式中。"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "number": "3",
+        "title": "用原条件检查",
+        "blocks": [
+          {
+            "kind": "equation",
+            "content": [
+              {
+                "kind": "math",
+                "math_ref": "check"
+              }
+            ]
+          },
+          {
+            "kind": "paragraph",
+            "content": [
+              {
+                "kind": "text",
+                "text": "算回的红苹果数量是 6 个，与题目一致。"
+              }
+            ]
+          },
+          {
+            "kind": "paragraph",
+            "content": [
+              {
+                "kind": "text",
+                "text": "让孩子试一试：遮住答案，说出 6 个对应几份，再独立列式。"
+              }
+            ]
+          },
+          {
+            "kind": "paragraph",
+            "content": [
+              {
+                "kind": "text",
+                "text": "家长核对：能说明先求全部，再减去已知部分，并能代回原条件。"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "source_text": []
+}

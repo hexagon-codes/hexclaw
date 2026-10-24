@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="255" viewBox="0 0 1100 255" role="img" aria-labelledby="title desc">
+  <title id="title">AI 生成示例，非真实学生作业</title><desc id="desc">一筐苹果中红苹果占三分之一，共有六个红苹果。第一问求总数，示例作答为六乘三等于十八；第二问求其他苹果数量，示例未填写。</desc>
+  <rect width="1100" height="255" fill="#FAFBFC"/>
+  <g font-family="PingFang SC,Noto Sans CJK SC,sans-serif" fill="#1D2D40" font-size="27">
+    <text x="24" y="45">AI 生成示例 · 非真实学生作业</text>
+    <text x="24" y="93">一筐苹果中，红苹果占全部的三分之一，共有 6 个。</text>
+    <text x="24" y="151">（1）这筐苹果共有多少个？　示例作答：6 × 3 = 18</text>
+    <text x="24" y="213">（2）其他苹果有多少个？　　示例作答：未填写</text>
+  </g>
+</svg>

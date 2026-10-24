@@ -74,7 +74,7 @@ func (e *ReActEngine) finishMediaRecovery(ctx context.Context, msg *adapter.Mess
 	if err != nil {
 		return nil, true, err
 	}
-	record, err := e.sessions.SaveAssistantReply(completionCtx, msg.SessionID, content, session.AssistantMeta{RequestID: messageRequestID(msg), ReplyMetadata: metadata})
+	record, err := e.sessions.SaveAssistantReply(completionCtx, msg.SessionID, content, session.AssistantMeta{AgentName: assistantAgentName(msg.Metadata), RequestID: messageRequestID(msg), ReplyMetadata: metadata})
 	if err != nil {
 		return nil, true, err
 	}

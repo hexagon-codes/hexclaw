@@ -39,27 +39,32 @@ type GradingPhysicalCallResult struct {
 
 // ExecuteGradingProgramCall 复用当前题目的本地执行账本，不建立 Provider 调用或计费回执。
 func ExecuteGradingProgramCall(ctx context.Context, spec GradingPhysicalCallSpec, run func(context.Context) (string, error)) (GradingPhysicalCallResult, error) {
-	if executor, ok := ctx.Value(gradingPhysicalCallContextKey{}).(*durableGradingPhysicalCallExecutor); ok {
-		payload, invocationID, err := executeGradingItemOperationWithKind(ctx, executor.o, executor.job, executor.q,
-			spec.Operation, k12.GradingExecutionLocalDeterministic,
-			struct {
-				ProgramDigest string `json:"program_digest"`
-			}{spec.RequestDigest}, run)
-		// 成功后仍由原求解主链保存完整本地 solve 回执，供资产／讲法引用；程序行只保存执行证据。
-		if err != nil {
-			executor.remember(spec.Operation, invocationID)
-		}
-		return GradingPhysicalCallResult{Payload: payload, InvocationID: invocationID}, err
-	}
-	if executor, ok := ctx.Value(gradingPhysicalCallContextKey{}).(*weeklyPhysicalExecutor); ok {
-		spec.ExecutionKind = k12.GradingExecutionLocalDeterministic
-		return executor.ExecuteGradingPhysicalCall(ctx, spec, run)
+	if executor, ok := ctx.Value(gradingPhysicalCallContextKey{}).(GradingProgramCallExecutor); ok {
+		return executor.ExecuteGradingProgramCall(ctx, spec, run)
 	}
 	if HasGradingPhysicalCallExecutor(ctx) {
 		return GradingPhysicalCallResult{}, fmt.Errorf("grading program ledger is unavailable")
 	}
 	payload, err := run(ctx)
 	return GradingPhysicalCallResult{Payload: payload}, err
+}
+
+// GradingProgramCallExecutor 只提供程序执行账本能力，不识别调用方的具体任务类型。
+type GradingProgramCallExecutor interface {
+	ExecuteGradingProgramCall(context.Context, GradingPhysicalCallSpec, func(context.Context) (string, error)) (GradingPhysicalCallResult, error)
+}
+
+func (executor *durableGradingPhysicalCallExecutor) ExecuteGradingProgramCall(ctx context.Context, spec GradingPhysicalCallSpec, run func(context.Context) (string, error)) (GradingPhysicalCallResult, error) {
+	payload, invocationID, err := executeGradingItemOperationWithKind(ctx, executor.o, executor.job, executor.q,
+		spec.Operation, k12.GradingExecutionLocalDeterministic,
+		struct {
+			ProgramDigest string `json:"program_digest"`
+		}{spec.RequestDigest}, run)
+	// 成功后仍由原求解主链保存完整本地 solve 回执，供资产／讲法引用；程序行只保存执行证据。
+	if err != nil {
+		executor.remember(spec.Operation, invocationID)
+	}
+	return GradingPhysicalCallResult{Payload: payload, InvocationID: invocationID}, err
 }
 
 // GradingPhysicalCallExecutor is the shared durable boundary that authorizes

@@ -158,6 +158,7 @@ func NewHandler(rt Runtime) http.Handler {
 	mux.HandleFunc("POST /mistakes/{record_id}/restore-review", h.restoreMistakeReview)
 	mux.HandleFunc("POST /mistakes/{record_id}/defer-this-week", h.deferMistakeThisWeek)
 	mux.HandleFunc("GET /review-queue", h.reviewQueue)
+	mux.HandleFunc("POST /review-source-groups", h.recordReviewSourceGroup)
 	mux.HandleFunc("GET /insight-report", h.insightReport)
 	mux.HandleFunc("POST /mark-mastered", h.markMastered)
 	mux.HandleFunc("POST /tutoring-tips", h.tutoringTips)
@@ -196,6 +197,8 @@ func NewHandler(rt Runtime) http.Handler {
 	mux.HandleFunc("POST /print-jobs", h.prepareGenericPrintJob)
 	mux.HandleFunc("POST /print-artifacts", h.preparePrintableArtifact)
 	mux.HandleFunc("GET /print-artifacts/{id}/content", h.getPrintableArtifactContent)
+	h.registerTextSolve(mux)
+	h.registerPrintReplies(mux)
 	mux.HandleFunc("GET /print-jobs/{id}", h.getPracticePrintJob)
 	mux.HandleFunc("GET /print-jobs/{id}/paper", h.getPracticePrintJobPaper)
 	mux.HandleFunc("POST /print-jobs/{id}/events", h.recordPracticePrintEvent)
@@ -297,7 +300,11 @@ type gradeReq struct {
 }
 
 type gradeResp struct {
-	Solution string `json:"solution"`
+	TeachingReport *k12.TeachingReport        `json:"teaching_report,omitempty"`
+	ReportMarkdown string                     `json:"report_markdown,omitempty"`
+	Finalization   *k12.TextSolveFinalization `json:"finalization,omitempty"`
+	AnswerSource   *k12.ProblemAnswerSource   `json:"answer_source,omitempty"`
+	Solution       string                     `json:"solution"`
 	// Verdict 判定五值（§4.5 布尔 correct 删除，§6.14 授权破坏性契约变更）：
 	// 批改路径 = 批改判定（agree=答对 / disagree=答错）；解题分叉与超纲 = 验算/超纲结论。
 	// 徽章强弱仍由 badge/evidence_type（验算证据）承载，与批改判定解耦。
@@ -549,6 +556,10 @@ func (h *handler) grade(w http.ResponseWriter, r *http.Request) {
 // 批改发生时 verdict = 批改判定（Outcome.Verdict）；解题分叉/超纲无批改判定，
 // 沿用验算/超纲 verdict（Evidence.Verdict），不伪造二元结论。
 func gradeRespFromResult(res usecase.GradeResult) gradeResp {
+	reportMarkdown := ""
+	if res.TeachingReport != nil {
+		reportMarkdown, _ = usecase.TeachingReportMarkdown(*res.TeachingReport)
+	}
 	verdict := res.Outcome.Verdict
 	assessmentStatus := ""
 	if verdict != "" {
@@ -558,6 +569,8 @@ func gradeRespFromResult(res usecase.GradeResult) gradeResp {
 		verdict = res.Evidence.Verdict
 	}
 	return gradeResp{
+		TeachingReport: res.TeachingReport, ReportMarkdown: reportMarkdown,
+		Finalization: res.Finalization, AnswerSource: res.AnswerSource,
 		Solution: res.Solution, Verdict: string(verdict),
 		AssessmentStatus: assessmentStatus, FinalAnswerCorrect: res.Outcome.FinalAnswerCorrect,
 		EvidenceType: string(res.Evidence.EvidenceType), Badge: res.Evidence.Badge(),
@@ -613,17 +626,25 @@ type solveReq struct {
 	Grade           string   `json:"grade"`
 	Problem         string   `json:"problem"`
 	KnowledgePoints []string `json:"knowledge_points"`
+	SolveRunID      string   `json:"solve_run_id,omitempty"`
+	SourceSession   string   `json:"source_session,omitempty"`
+	SourceMessageID string   `json:"source_message_id,omitempty"`
+	InputRevision   int      `json:"input_revision,omitempty"`
 }
 
 type solveResp struct {
-	Solution     string `json:"solution"`
-	Verdict      string `json:"verdict"`
-	EvidenceType string `json:"evidence_type"`
-	Badge        string `json:"badge"`
-	OutOfScope   bool   `json:"out_of_scope"`
-	OutOfScopeKP string `json:"out_of_scope_kp,omitempty"`
+	TeachingReport *k12.TeachingReport `json:"teaching_report,omitempty"`
+	ReportMarkdown string              `json:"report_markdown,omitempty"`
+	Solution       string              `json:"solution"`
+	Verdict        string              `json:"verdict"`
+	EvidenceType   string              `json:"evidence_type"`
+	Badge          string              `json:"badge"`
+	OutOfScope     bool                `json:"out_of_scope"`
+	OutOfScopeKP   string              `json:"out_of_scope_kp,omitempty"`
 	// CurriculumUnmapped 词表外知识点（fail-visible，同 gradeResp）。
-	CurriculumUnmapped []string `json:"curriculum_unmapped,omitempty"`
+	CurriculumUnmapped []string                   `json:"curriculum_unmapped,omitempty"`
+	Finalization       *k12.TextSolveFinalization `json:"finalization,omitempty"`
+	AnswerSource       *k12.ProblemAnswerSource   `json:"answer_source,omitempty"`
 }
 
 // solve POST /solve —— 空白/未作答题求解：给解法+答案+讲解，**不批改、不入错题本**。
@@ -633,20 +654,38 @@ func (h *handler) solve(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	res, err := h.rt.Deps.SolveHomeworkProblem(r.Context(), usecase.GradeRequest{
+	owner, scopeErr := h.authorizedAgentOwnerScope(r.Context(), req.Agent)
+	if scopeErr != nil {
+		writeErr(w, http.StatusNotFound, "agent not found")
+		return
+	}
+	if req.SourceSession != "" && h.rt.AuthorizeSessionScope != nil {
+		if err := h.rt.AuthorizeSessionScope(r.Context(), req.Agent, req.SourceSession); err != nil {
+			writeErr(w, http.StatusNotFound, "source session not found")
+			return
+		}
+	}
+	solveCtx := usecase.WithTextSolveOrigin(r.Context(), k12.TextSolveOrigin{OwnerID: owner, RunID: req.SolveRunID, SourceSessionID: req.SourceSession, SourceMessageID: req.SourceMessageID, InputRevision: req.InputRevision})
+	res, err := h.rt.Deps.SolveHomeworkProblem(solveCtx, usecase.GradeRequest{
 		AgentName: req.Agent, Subject: req.Subject,
-		Grade:   h.resolveGrade(r.Context(), req.Agent, req.Grade),
+		Grade: h.resolveGrade(r.Context(), req.Agent, req.Grade), GradeFromProfile: req.Grade == "",
 		Problem: req.Problem, KnowledgePoints: req.KnowledgePoints,
 	})
 	if err != nil {
 		writeErr(w, httpStatusForK12Error(err, http.StatusInternalServerError), err.Error())
 		return
 	}
+	reportMarkdown := ""
+	if res.TeachingReport != nil {
+		reportMarkdown, _ = usecase.TeachingReportMarkdown(*res.TeachingReport)
+	}
 	writeJSON(w, http.StatusOK, solveResp{
+		TeachingReport: res.TeachingReport, ReportMarkdown: reportMarkdown,
 		Solution: res.Solution, Verdict: string(res.Evidence.Verdict),
 		EvidenceType: string(res.Evidence.EvidenceType), Badge: res.Evidence.Badge(),
 		OutOfScope: res.OutOfScope, OutOfScopeKP: res.OutOfScopeKP,
 		CurriculumUnmapped: res.CurriculumUnmapped,
+		Finalization:       res.Finalization, AnswerSource: res.AnswerSource,
 	})
 }
 
@@ -1989,6 +2028,7 @@ func writeErr(w http.ResponseWriter, status int, msg string) {
 func httpStatusForK12Error(err error, fallback int) int {
 	switch {
 	case errors.Is(err, records.ErrVersionConflict), errors.Is(err, usecase.ErrVersionUnsupported),
+		errors.Is(err, k12storage.ErrTextSolveConflict), errors.Is(err, k12storage.ErrTextSolveUnknown),
 		errors.Is(err, records.ErrIllegalTransition),
 		errors.Is(err, k12storage.ErrImageTaskVersionConflict),
 		errors.Is(err, k12storage.ErrImageTaskConflict),

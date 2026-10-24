@@ -19,7 +19,8 @@
 // 列表项使用独立留白，避免紧凑列表的项间距小于正文换行。
 #set list(tight: false, indent: 4mm, body-indent: 2mm, spacing: 0.85em)
 #set enum(tight: false, indent: 4mm, body-indent: 2mm, spacing: 0.85em)
-#show math.equation.where(block: false): it => box(inset: (top: 2pt, bottom: 2pt), math.display(it))
+// 行内公式按实际字形边界占位，分数进入页首时完整保留分子与分母。
+#show math.equation.where(block: false): it => box(inset: (top: 2pt, bottom: 2pt), text(top-edge: "bounds", bottom-edge: "bounds", math.display(it)))
 #show math.equation.where(block: true): set text(size: 13pt)
 #show math.equation.where(block: true): set align(left)
 #show math.equation.where(block: true): set block(above: 6pt, below: 7pt)

@@ -1,0 +1,73 @@
+{
+  "bundle_contract_version": 1,
+  "files": [
+    {
+      "path": "LICENSE",
+      "role": "license",
+      "sha256": "ea7ae69231d997be9a3835012e27ea90ea1832ceb53bd0a3d843be2ac9d4c0f1",
+      "size": 562
+    },
+    {
+      "path": "SKILL.md",
+      "role": "skill",
+      "sha256": "b818fe033c66f12ab1a17620b366e15eca56b277713f8cd65bb9fa62bfb35ed7",
+      "size": 2415
+    },
+    {
+      "path": "assets/components.typ",
+      "role": "template",
+      "sha256": "666da6180d4d60749e2d4fec187cf49be1c34f9277caddb3be2c8e0ee3c185e6",
+      "size": 12024
+    },
+    {
+      "path": "assets/profile.json",
+      "role": "profile",
+      "sha256": "cf8f3ca0650d4ff9b89a31acbef4563129041933bf5e43db263cad54f24c6829",
+      "size": 1320
+    },
+    {
+      "path": "assets/report.schema.json",
+      "role": "schema",
+      "sha256": "3425e908ef4e81068ad5f4e8231413871e0bfa2ed2d2e6406aa314fce5e2b64b",
+      "size": 11256
+    },
+    {
+      "path": "assets/template.typ",
+      "role": "template",
+      "sha256": "92c09edbb81ea75f3175880989163e88a7733065833b9c55fbef5455b6e113c3",
+      "size": 243
+    },
+    {
+      "path": "examples/formulas.typ",
+      "role": "example",
+      "sha256": "8ca52e6bde6cb1825c6d28623593a28a4b8c2607d4294a2215f0aef8bc55c9e3",
+      "size": 499
+    },
+    {
+      "path": "examples/fraction-bar.svg",
+      "role": "example",
+      "sha256": "b82917cbec8d0900dc7b8c771dacf05e4bf6dbd87c57e759fc234d74d2051595",
+      "size": 952
+    },
+    {
+      "path": "examples/report.json",
+      "role": "example",
+      "sha256": "4978088a282a5d6581c743889a6fe659ec77e859c4e577d30864ef1bb9325276",
+      "size": 6912
+    },
+    {
+      "path": "examples/worksheet.svg",
+      "role": "example",
+      "sha256": "026cf46cf39f7f5cf54aa36019dff566dba90b353fcd9171500a8755612aafc5",
+      "size": 922
+    },
+    {
+      "path": "references/report-contract.md",
+      "role": "reference",
+      "sha256": "16125760ed955d18ff46a01db80fb46f9ee826df3b9b725e8f774e21c5e07c89",
+      "size": 6754
+    }
+  ],
+  "skill_id": "homework-pdf",
+  "version": "1.1.0"
+}

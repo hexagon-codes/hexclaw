@@ -24,6 +24,9 @@ import (
 	"github.com/hexagon-codes/hexagon"
 	"github.com/hexagon-codes/hexagon/observe/trace"
 	hruntime "github.com/hexagon-codes/hexagon/runtime"
+	"github.com/hexagon-codes/toolkit/lang/stringx"
+	"github.com/hexagon-codes/toolkit/util/idgen"
+
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/agents"
 	"github.com/hexagon-codes/hexclaw/config"
@@ -38,8 +41,6 @@ import (
 	"github.com/hexagon-codes/hexclaw/session"
 	"github.com/hexagon-codes/hexclaw/skill"
 	"github.com/hexagon-codes/hexclaw/storage"
-	"github.com/hexagon-codes/toolkit/lang/stringx"
-	"github.com/hexagon-codes/toolkit/util/idgen"
 )
 
 type ctxKey string
@@ -457,10 +458,11 @@ type ReActEngine struct {
 	// 媒体生成服务（图片/视频）走 ai-core/media 子域（路线图 §12 risk#5：
 	// 媒体作为独立内聚包，不再经 LLM Provider 的能力接口）。由 cmd/hexclaw
 	// 启动时通过 SetMediaServices 注入；nil 表示未配置该能力。
-	imageSvc      *mediaimg.Service
-	videoSvc      *mediavid.Service
-	mediaFlow     *mediaflow.Service
-	mediaRequests map[string]int
+	imageSvc              *mediaimg.Service
+	videoSvc              *mediavid.Service
+	mediaFlow             *mediaflow.Service
+	mediaRequests         map[string]int
+	replyArtifactResolver ReplyArtifactResolver
 }
 
 // SetMediaServices 注入图片/视频生成服务（ai-core/media）。
@@ -1230,6 +1232,7 @@ func (e *ReActEngine) Process(ctx context.Context, msg *adapter.Message) (reply 
 		// 经 SaveAssistantReply 带上 tool_calls（同步 skill 快速路径，此前用 deprecated wrapper 丢工具）。
 		if record, err := e.sessions.SaveAssistantReply(ctx, sess.ID, result.Content, session.AssistantMeta{
 			RequestID:     messageRequestID(msg),
+			AgentName:     assistantAgentName(msg.Metadata),
 			ToolCalls:     tc,
 			ReplyMetadata: result.Metadata,
 		}); err != nil {
@@ -1776,14 +1779,15 @@ func (e *ReActEngine) finalizeReply(
 	if record, err := e.sessions.SaveAssistantReply(ctx, sessionID, content, session.AssistantMeta{
 		Provider:      providerName,
 		Model:         modelName,
-		AgentName:     msg.Metadata["role"],
+		AgentName:     assistantAgentName(msg.Metadata),
 		RequestID:     messageRequestID(msg),
 		ToolCalls:     toolCalls, // 同步路径持久化工具调用（IM/HTTP 非流式重载不再蒸发）
 		Blocks:        blocks,
 		ReplyMetadata: responseReplyMetadata(ctx, msg.Metadata, providerName, modelName, ""),
 	}); err != nil {
 		trace.L(ctx).Error("保存助手回复失败", "err", err, "session", sessionID)
-		if _, media := mediaflow.ReplyCompletionFromContext(ctx); media {
+		_, artifact := storage.AssistantCompletionFromContext(ctx)
+		if _, media := mediaflow.ReplyCompletionFromContext(ctx); media || artifact {
 			return nil, fmt.Errorf("persist media reply: %w", err)
 		}
 		recordPersistError(msg, "assistant_reply", err) // 回复未落库，失败信号随 reply 返回（W12-Bug1）
@@ -1791,7 +1795,7 @@ func (e *ReActEngine) finalizeReply(
 		assistantMessageID = record.ID
 	}
 
-	if cacheable && msg.Metadata["artifacts"] == "" {
+	if cacheable && msg.Metadata["artifacts"] == "" && msg.Metadata["print_artifacts"] == "" {
 		e.writeResponseCache(ctx, content, providerName, modelName)
 	}
 
@@ -2119,7 +2123,7 @@ func (e *ReActEngine) ProcessStream(ctx context.Context, msg *adapter.Message) (
 						MessageID:           assistantMessageID,
 						Provider:            terminal.Metadata["provider"],
 						Model:               terminal.Metadata["model"],
-						AgentName:           msg.Metadata["role"],
+						AgentName:           assistantAgentName(msg.Metadata),
 						RequestID:           messageRequestID(msg),
 						ToolCalls:           terminal.ToolCalls,
 						Blocks:              terminal.Blocks,
@@ -2275,6 +2279,7 @@ func (e *ReActEngine) processStream(
 		// 经 SaveAssistantReply 带上 tool_calls（此前用 deprecated wrapper 丢工具 → 重载即蒸发）。
 		if record, err := e.sessions.SaveAssistantReply(ctx, sess.ID, result.Content, session.AssistantMeta{
 			RequestID:     messageRequestID(msg),
+			AgentName:     assistantAgentName(msg.Metadata),
 			ToolCalls:     tc,
 			ReplyMetadata: result.Metadata,
 		}); err != nil {
@@ -3246,7 +3251,7 @@ func (e *ReActEngine) finalizeRuntimeStreamResult(
 		ThinkingDuration: thinkingDuration,
 		Provider:         providerName,
 		Model:            modelName,
-		AgentName:        msgMeta["role"],
+		AgentName:        assistantAgentName(msgMeta),
 		RequestID:        messageRequestID(msg),
 		// 经同一转换器落库：持久化的 tool_calls 与 live wire 形状一致（含 status/duration），重载后工具卡不蒸发。
 		ToolCalls: toolCalls,
@@ -3256,14 +3261,15 @@ func (e *ReActEngine) finalizeRuntimeStreamResult(
 	}); err != nil {
 		trace.L(ctx).Error("保存助手回复失败", "err", err, "session", sessionID)
 		msgMeta[persistErrorMetaKey] = "assistant_reply: " + err.Error() // 失败信号随 reply 返回（W12-Bug1）
-		if _, media := mediaflow.ReplyCompletionFromContext(saveCtx); media {
+		_, artifact := storage.AssistantCompletionFromContext(saveCtx)
+		if _, media := mediaflow.ReplyCompletionFromContext(saveCtx); media || artifact {
 			msgMeta["media_finalize_error"] = err.Error()
 		}
 	} else {
 		assistantMessageID = record.ID
 	}
 
-	if cacheable && msgMeta["artifacts"] == "" {
+	if cacheable && msgMeta["artifacts"] == "" && msgMeta["print_artifacts"] == "" {
 		e.writeResponseCache(ctx, content, providerName, modelName)
 	}
 
@@ -3754,7 +3760,7 @@ func (e *ReActEngine) pipeStream(
 		ThinkingDuration: thinkingDuration,
 		Provider:         providerName,
 		Model:            modelName,
-		AgentName:        msgMeta["role"],
+		AgentName:        assistantAgentName(msgMeta),
 		RequestID:        messageRequestID(msg),
 		ReplyMetadata:    responseReplyMetadata(ctx, msgMeta, providerName, modelName, ""),
 	}); err != nil {
@@ -3991,7 +3997,7 @@ func (e *ReActEngine) pipeStreamWithTools(
 		ThinkingDuration: thinkingDuration2,
 		Provider:         providerName,
 		Model:            modelName,
-		AgentName:        msgMeta["role"],
+		AgentName:        assistantAgentName(msgMeta),
 		RequestID:        messageRequestID(msg),
 		ReplyMetadata:    responseReplyMetadata(ctx, msgMeta, providerName, modelName, ""),
 	}); err != nil {
@@ -5143,6 +5149,16 @@ func (e *ReActEngine) loadDurableAssistantReply(
 	if requireRuntimeTerminal && terminal == nil {
 		return nil, fmt.Errorf("durable assistant reply terminal is incomplete")
 	}
+	// 回放恢复原终稿的 Agent，原生入站不需要再次携带路由派生字段。
+	agentName := strings.TrimSpace(persisted.AgentName)
+	if agentName == "" {
+		agentName = assistantAgentName(metadata)
+	}
+	if agentName != "" {
+		ensureMessageMetadata(msg)
+		msg.Metadata["routed_agent"] = agentName
+		metadata["routed_agent"] = agentName
+	}
 	lastSequence := persisted.LastSequence
 	if lastSequence < terminalSequence {
 		lastSequence = terminalSequence
@@ -5169,6 +5185,24 @@ func (e *ReActEngine) loadDurableAssistantReply(
 		reasoning:     persisted.Reasoning,
 		terminalEvent: terminal,
 	}, nil
+}
+
+// assistantAgentName 保存实际路由身份，旧记录可从原运行回执恢复。
+func assistantAgentName(metadata map[string]string) string {
+	for _, key := range []string{"routed_agent", "role"} {
+		if name := strings.TrimSpace(metadata[key]); name != "" {
+			return name
+		}
+	}
+	var receipt struct {
+		Identity struct {
+			RoutedAgent string `json:"routed_agent"`
+		} `json:"identity"`
+	}
+	if json.Unmarshal([]byte(metadata[selfContextReceiptKey]), &receipt) == nil {
+		return strings.TrimSpace(receipt.Identity.RoutedAgent)
+	}
+	return ""
 }
 
 func (r *durableAssistantReply) streamChunk(requestMetadata map[string]string) (*adapter.ReplyChunk, error) {
@@ -5357,7 +5391,7 @@ func buildReplyMetadata(metadata map[string]string, providerName, modelName, ass
 	if v := metadata["routed_agent"]; v != "" {
 		replyMeta["routed_agent"] = v
 	}
-	for _, key := range []string{"request_id", "session_id", "finish_reason", "recovered_from_reasoning_only", "thinking", "reasoning_visibility", "thinking_duration", "record", "artifacts", "media_delivery_id", "media_finalize_error", skillContextReceiptsMetadataKey, teachingContextReceiptsMetadataKey, persistErrorMetaKey} {
+	for _, key := range []string{"request_id", "session_id", "finish_reason", "recovered_from_reasoning_only", "thinking", "reasoning_visibility", "thinking_duration", "record", "artifacts", "print_artifacts", "text_solve_refs", "text_solve_run_id", "text_solve_finalization_id", "text_solve_input_digest", "answer_source", "media_delivery_id", "media_finalize_error", skillContextReceiptsMetadataKey, teachingContextReceiptsMetadataKey, persistErrorMetaKey} {
 		if v := metadata[key]; v != "" {
 			replyMeta[key] = v
 		}

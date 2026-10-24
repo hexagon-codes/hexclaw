@@ -18,6 +18,10 @@ import (
 	"time"
 
 	"github.com/hexagon-codes/hexagon/observe/trace"
+	"github.com/hexagon-codes/toolkit/util/idgen"
+	"nhooyr.io/websocket"
+	"nhooyr.io/websocket/wsjson"
+
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/internal/requestcancel"
 	"github.com/hexagon-codes/hexclaw/internal/upstreamerr"
@@ -25,9 +29,6 @@ import (
 	"github.com/hexagon-codes/hexclaw/messagecontent"
 	"github.com/hexagon-codes/hexclaw/skill"
 	"github.com/hexagon-codes/hexclaw/streamstate"
-	"github.com/hexagon-codes/toolkit/util/idgen"
-	"nhooyr.io/websocket"
-	"nhooyr.io/websocket/wsjson"
 )
 
 // WebAdapter Web UI WebSocket 适配器。

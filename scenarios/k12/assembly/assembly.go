@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/scenario"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/assetstore"
@@ -44,6 +45,11 @@ type K12 struct {
 
 // Option 装配可选项（注入 Insights/Grounding 等 adapter）。
 type Option func(*usecase.Deps)
+
+// WithReplyAttachments 将宿主的冻结媒体读取接到同一原回复批次，领域不依赖媒体存储。
+func WithReplyAttachments(resolve func(context.Context, string, string) ([]adapter.Attachment, error)) Option {
+	return func(d *usecase.Deps) { d.ReplyAttachments = resolve }
+}
 
 // WithInsights 注入学情信号写入 adapter（memory 反思管线）。
 func WithInsights(ins usecase.Insights) Option {
@@ -275,7 +281,7 @@ func WireInto(ctx context.Context, reg *scenario.Registry, db *sql.DB, solveSkil
 	// 消费者持 Deps.Insights（opts 应用后再建，确保拿到注入的 adapter）。
 	feedbackWorker := usecase.NewProblemAssetFeedbackConsumer(store)
 	outbox := k12storage.NewDispatcher(store, usecase.InsightsConsumer{Insights: deps.Insights, Records: store},
-		usecase.ProblemAssetConsumer{Records: store}, feedbackWorker)
+		usecase.ProblemAssetConsumer{Records: store}, feedbackWorker, usecase.PrintReplyConsumer{Deps: deps})
 	catalogWorker := usecase.NewTextbookCatalogWorker(
 		store,
 		usecase.TextbookCatalogCheckpointExtractor{},

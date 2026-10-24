@@ -49,6 +49,10 @@ import (
 	"github.com/hexagon-codes/ai-core/media/voicechat"
 	"github.com/hexagon-codes/hexagon"
 	"github.com/hexagon-codes/hexagon/observe/trace"
+	genstore "github.com/hexagon-codes/toolkit/blobstore"
+	"github.com/hexagon-codes/toolkit/net/sse"
+	"github.com/hexagon-codes/toolkit/util/idgen"
+
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/autonomy"
 	"github.com/hexagon-codes/hexclaw/canvas"
@@ -71,13 +75,11 @@ import (
 	"github.com/hexagon-codes/hexclaw/router"
 	"github.com/hexagon-codes/hexclaw/skill"
 	"github.com/hexagon-codes/hexclaw/skill/hub"
+	"github.com/hexagon-codes/hexclaw/skill/lifecycle"
 	"github.com/hexagon-codes/hexclaw/skill/marketplace"
 	"github.com/hexagon-codes/hexclaw/storage"
 	"github.com/hexagon-codes/hexclaw/streamstate"
 	"github.com/hexagon-codes/hexclaw/webhook"
-	genstore "github.com/hexagon-codes/toolkit/blobstore"
-	"github.com/hexagon-codes/toolkit/net/sse"
-	"github.com/hexagon-codes/toolkit/util/idgen"
 )
 
 // Server HTTP API 服务器
@@ -96,17 +98,18 @@ type Server struct {
 	// sessionDeletedHook 在会话删除成功（durable 撤销已提交）后回调，供
 	// PermissionHub 等进程内状态清理使用；hook 缺失或失败不改变删除结果。
 	sessionDeletedHook func(sessionID string)
-	kb                 *knowledge.Manager            // 知识库管理器（可选）
-	semanticIndex      SemanticIndexAPI              // corpus 级语义索引策略/持久 Job（可选）
-	knowledgeOwnerID   string                        // 单用户部署显式绑定的知识库业务归属
-	webhookMgr         *webhook.Manager              // Webhook 管理器（可选）
-	scheduler          *cron.Scheduler               // Cron 调度器（可选）
-	promptStore        *library.PromptStore          // §11.8 Prompt 库（可选）
-	fileMem            *memory.FileMemory            // 文件记忆（可选）
-	vectorMem          *memory.VectorMemory          // 向量语义记忆（可选）
-	mcpMgr             *hexmcp.Manager               // MCP 管理器（可选）
-	mp                 *marketplace.Marketplace      // 技能市场（可选）
-	skillHub           *hub.Hub                      // 在线技能市场（可选）
+	kb                 *knowledge.Manager       // 知识库管理器（可选）
+	semanticIndex      SemanticIndexAPI         // corpus 级语义索引策略/持久 Job（可选）
+	knowledgeOwnerID   string                   // 单用户部署显式绑定的知识库业务归属
+	webhookMgr         *webhook.Manager         // Webhook 管理器（可选）
+	scheduler          *cron.Scheduler          // Cron 调度器（可选）
+	promptStore        *library.PromptStore     // §11.8 Prompt 库（可选）
+	fileMem            *memory.FileMemory       // 文件记忆（可选）
+	vectorMem          *memory.VectorMemory     // 向量语义记忆（可选）
+	mcpMgr             *hexmcp.Manager          // MCP 管理器（可选）
+	mp                 *marketplace.Marketplace // 技能市场（可选）
+	skillHub           *hub.Hub                 // 在线技能市场（可选）
+	skillLifecycle     *lifecycle.Service
 	agentRouter        *router.Dispatcher            // 多 Agent 路由器（可选）
 	agentStore         router.Store                  // Agent/Rule 持久化（可选）
 	agentMetadataGuard func(map[string]string) error // 场景 metadata capability guard（可选）
@@ -454,7 +457,9 @@ func (s *Server) SetMarketplace(mp *marketplace.Marketplace) {
 	}
 	s.skillHub = hub.New(hc, mp.Dir())
 	// 启用「最近一次成功拉取」磁盘缓存层（离线优先：内存→磁盘缓存→内嵌种子→后台刷新）。
-	s.skillHub.SetCacheDir(hub.DefaultCacheDir())
+	s.skillHub.SetCacheDir(s.skillHub.SourceCacheDir())
+	runtime, _ := s.engine.(lifecycle.Runtime)
+	s.skillLifecycle = lifecycle.New(mp, s.skillHub, runtime)
 }
 
 // SetAgentRouter 设置多 Agent 路由器
@@ -921,6 +926,7 @@ func (s *Server) routes() http.Handler {
 		mux.HandleFunc("POST /api/v1/mcp/servers", s.handleAddMCPServer)
 		mux.HandleFunc("DELETE /api/v1/mcp/servers/{name}", s.handleRemoveMCPServer)
 		mux.HandleFunc("POST /api/v1/mcp/servers/{name}/restart", s.handleRestartMCPServer) // M3-20260710
+		mux.HandleFunc("PUT /api/v1/mcp/servers/{name}/status", s.handleMCPResourceStatus)
 		mux.HandleFunc("POST /api/v1/mcp/tools/call", s.handleCallMCPTool)
 		mux.HandleFunc("GET /api/v1/mcp/status", s.handleMCPStatus)
 	} else {
@@ -938,6 +944,9 @@ func (s *Server) routes() http.Handler {
 	if s.mp != nil {
 		mux.HandleFunc("GET /api/v1/skills", s.handleListSkills)
 		mux.HandleFunc("GET /api/v1/skills/{name}/content", s.handleSkillContent)
+		mux.HandleFunc("POST /api/v1/skills/refresh", s.handleRefreshSkills)
+		mux.HandleFunc("GET /api/v1/skills/{name}/resources", s.handleSkillResources)
+		mux.HandleFunc("GET /api/v1/skills/{name}/resources/{path...}", s.handleSkillResource)
 		mux.HandleFunc("PUT /api/v1/skills/{name}/status", s.handleSkillStatus)
 		mux.HandleFunc("POST /api/v1/skills/install", s.handleInstallSkill)
 		mux.HandleFunc("POST /api/v1/skills/generate", s.handleGenerateSkill)
@@ -945,6 +954,7 @@ func (s *Server) routes() http.Handler {
 	}
 
 	// 多 Agent 路由 API
+	mux.HandleFunc("GET /api/v1/agents/templates", s.handleAgentTemplates)
 	if s.agentRouter != nil {
 		mux.HandleFunc("GET /api/v1/agents", s.handleListAgents)
 		mux.HandleFunc("POST /api/v1/agents", s.handleRegisterAgent)

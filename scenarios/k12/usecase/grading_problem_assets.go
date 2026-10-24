@@ -36,6 +36,20 @@ func gradingProblemAssetFacts(q RecognizedQuestion, req GradeRequest) (k12.Probl
 func executeDurableSolveOperation(ctx context.Context, o *GradingOrchestrator, deps Deps,
 	job GradingJobView, q RecognizedQuestion, req GradeRequest,
 ) (SolveHomeworkResult, string, error) {
+	solved, invocation, err := executeDurableSolveSource(ctx, o, deps, job, q, req)
+	if err != nil {
+		return solved, invocation, err
+	}
+	if req.SolveOutputVersion == SolveOutputWithTeachingReportV2 && solved.AnswerSource != nil {
+		ctx = WithGradingPhysicalCallExecutor(k12.WithGradingModelSnapshot(ctx, job.Fields.ModelSnapshot), newDurableGradingPhysicalCallExecutor(o, job, q))
+		solved, err = deps.adaptReusedReportTeaching(ctx, req, solved)
+	}
+	return solved, invocation, err
+}
+
+func executeDurableSolveSource(ctx context.Context, o *GradingOrchestrator, deps Deps,
+	job GradingJobView, q RecognizedQuestion, req GradeRequest,
+) (SolveHomeworkResult, string, error) {
 	facts, eligible := gradingProblemAssetFacts(q, req)
 	owner, ownerErr := resolveGradingGroundingTextbookOwner(ctx, deps, job)
 	if !eligible || deps.Records == nil || ownerErr != nil || owner == "" {
@@ -219,6 +233,7 @@ func adoptedSolveResult(v k12.ProblemAssetVersion, a k12.ProblemAssetAdoption) (
 	if solved.Solution != v.Answer || solved.OutOfScope {
 		return SolveHomeworkResult{}, "", k12storage.ErrProblemAssetEvidence
 	}
+	solved.reportLocalSource = solved.ReportContent != nil && solved.Generation == nil
 	solved.AnswerSource = &k12.ProblemAnswerSource{Kind: k12.ProblemAnswerAsset, FactsDigest: a.FactsDigest,
 		AssetID: a.AssetID, AssetVersion: a.AssetVersion, AssetRevision: a.AssetRevision, AdoptionID: a.AdoptionID}
 	return solved, "", nil

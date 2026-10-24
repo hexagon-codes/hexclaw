@@ -41,6 +41,13 @@ func (s *Service) RenderReport(ctx context.Context, bundle ReportBundle, input R
 	if !ok {
 		return nil, &RenderError{Code: CodeEngineMissing, Format: FormatPDF, Engine: "report-profile"}
 	}
+	if input.Fonts.Sans == "" || input.Fonts.Serif == "" || input.Fonts.Math == "" {
+		fonts, err := renderer.resolveReportFonts(ctx, bundle.profile)
+		if err != nil {
+			return nil, err
+		}
+		input.Fonts = fonts
+	}
 	engineID, err := renderer.reportEngineIdentity(ctx)
 	if err != nil {
 		return nil, err
@@ -80,6 +87,36 @@ func (s *Service) RenderReport(ctx context.Context, bundle ReportBundle, input R
 		}
 	}
 	return result, nil
+}
+
+// resolveReportFonts 选择当前Typst实际可用的字体，保留模板声明的回退顺序。
+// 未取得字体文件身份时保持缓存关闭，避免将不同机器的字体回退误作同一产物。
+func (r *PandocRenderer) resolveReportFonts(ctx context.Context, profile reportProfile) (ReportFonts, error) {
+	path, err := r.lookTypst()
+	if err != nil {
+		return ReportFonts{}, err
+	}
+	raw, err := exec.CommandContext(ctx, path, "fonts").Output()
+	if err != nil {
+		return ReportFonts{}, fmt.Errorf("resolve report fonts: %w", err)
+	}
+	available := make(map[string]bool)
+	for _, line := range strings.Split(string(raw), "\n") {
+		available[strings.TrimSpace(line)] = true
+	}
+	selected := make(map[string]string)
+	for _, role := range []string{"sans", "serif", "math"} {
+		for _, candidate := range profile.RequestedFonts[role] {
+			if available[candidate] {
+				selected[role] = candidate
+				break
+			}
+		}
+		if selected[role] == "" {
+			return ReportFonts{}, fmt.Errorf("report font is unavailable: %s", role)
+		}
+	}
+	return ReportFonts{Sans: selected["sans"], Serif: selected["serif"], Math: selected["math"]}, nil
 }
 
 func (r *PandocRenderer) reportEngineIdentity(ctx context.Context) (string, error) {

@@ -186,14 +186,20 @@ type AssistantMeta struct {
 }
 
 var replySafeAssistantMetadataKeys = map[string]struct{}{
-	"producer_kind":             {},
-	"locale":                    {},
-	"self_context_receipt":      {},
-	"provider_display_name":     {},
-	"provider_instance_id":      {},
-	"skill_context_receipts":    {},
-	"teaching_context_receipts": {},
-	"record":                    {},
+	"producer_kind":              {},
+	"locale":                     {},
+	"self_context_receipt":       {},
+	"provider_display_name":      {},
+	"provider_instance_id":       {},
+	"skill_context_receipts":     {},
+	"teaching_context_receipts":  {},
+	"record":                     {},
+	"print_artifacts":            {},
+	"text_solve_run_id":          {},
+	"text_solve_refs":            {},
+	"text_solve_finalization_id": {},
+	"text_solve_input_digest":    {},
+	"answer_source":              {},
 }
 
 // SaveAssistantMessageWithMeta 保存助手回复（含 reasoning 等元数据）并返回消息记录。
@@ -306,6 +312,20 @@ func (m *Manager) SaveAssistantReply(ctx context.Context, sessionID, content str
 			attachments = append(attachments, adapter.Attachment{ID: asset.ID, Type: asset.Kind, Name: path.Base(asset.Path), Mime: asset.MIME, URL: "/api/v1/files/generated/" + asset.Path, Size: asset.Size})
 		}
 		encoded, err := json.Marshal(messageMetadata{Attachments: attachments})
+		if err != nil {
+			return nil, err
+		}
+		msg.Attachments = string(encoded)
+	}
+	if completion, ok := storage.AssistantCompletionFromContext(ctx); ok {
+		var existing messageMetadata
+		if msg.Attachments != "" {
+			if err := json.Unmarshal([]byte(msg.Attachments), &existing); err != nil {
+				return nil, err
+			}
+		}
+		existing.Attachments = append(existing.Attachments, completion.Attachments...)
+		encoded, err := json.Marshal(existing)
 		if err != nil {
 			return nil, err
 		}

@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="780" height="175" viewBox="0 0 780 175" role="img" aria-labelledby="title desc">
+  <title id="title">苹果的三等分示例</title><desc id="desc">三格等长，第一格表示六个红苹果，三格共十八个苹果。</desc>
+  <rect width="780" height="175" fill="white"/>
+  <g font-family="PingFang SC,Noto Sans CJK SC,sans-serif" font-size="24" fill="#1D2D40">
+    <text x="140" y="31" text-anchor="middle">红苹果 6 个</text>
+    <text x="500" y="31" text-anchor="middle">其他苹果</text>
+    <rect x="20" y="55" width="240" height="48" fill="#D3E2F0" stroke="#2D6088"/>
+    <rect x="260" y="55" width="240" height="48" fill="white" stroke="#2D6088"/>
+    <rect x="500" y="55" width="240" height="48" fill="white" stroke="#2D6088"/>
+    <path d="M20 117 V128 H740 V117" stroke="#2D6088" fill="none"/>
+    <text x="380" y="162" text-anchor="middle">全部苹果 18 个</text>
+  </g>
+</svg>

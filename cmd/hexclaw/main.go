@@ -14,11 +14,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"log/slog"
 
@@ -578,9 +581,12 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 		} else if n > 0 {
 			logger.Info("K12 场景包 skill 已出厂 seed", "count", n, "dir", cfg.Skills.Dir)
 		}
+		if _, err := mp.SeedBundlesFromFS(k12.BundledSkillsFS(), "skill-bundles"); err != nil {
+			logger.Warn("Bundled skill resources are unavailable", "error", err)
+		}
 		if err := mp.Init(); err != nil {
 			// 静默，后面统一报告
-		} else {
+		} else if cfg.Skills.AutoLoad {
 			for _, mdSkill := range mp.List() {
 				w := marketplace.WrapAsSkill(mdSkill)
 				if err := skills.Register(w); err == nil {
@@ -630,9 +636,6 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 		var mcpConfigs []hexmcp.ServerConfig
 		for _, s := range cfg.MCP.Servers {
 			enabled := s.Enabled
-			if !enabled && (s.Command != "" || s.Endpoint != "") {
-				enabled = true
-			}
 			mcpConfigs = append(mcpConfigs, hexmcp.ServerConfig{
 				Name:      s.Name,
 				Transport: s.Transport,
@@ -1680,6 +1683,45 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 	}
 	if mp != nil {
 		srv.SetMarketplace(mp)
+		srv.SkillLifecycle().SetBundledSource(k12.BundledSkillsFS(), "skill-bundles")
+		if existing, ok := skills.Get("create_skill"); ok {
+			if writer, ok := existing.(*builtin.SkillWriterSkill); ok {
+				writer.SetLifecycle(srv.SkillLifecycle())
+			}
+		}
+		if existing, ok := skills.Get("patch_skill"); ok {
+			if patcher, ok := existing.(*builtin.SkillPatcherSkill); ok {
+				patcher.SetLifecycle(srv.SkillLifecycle())
+			}
+		} else {
+			patcher := builtin.NewSkillPatcherSkill(srv.SkillLifecycle().Dir(), security.NewSkillScanner())
+			patcher.SetLifecycle(srv.SkillLifecycle())
+			if err := skills.Register(patcher); err != nil {
+				logger.Warn("Skill patch tool registration failed", "error", err)
+			}
+		}
+		if existing, ok := skills.Get("manage_skill_pending"); ok {
+			if pending, ok := existing.(*builtin.SkillPendingSkill); ok {
+				pending.SetLifecycle(srv.SkillLifecycle())
+			}
+		} else {
+			pending := builtin.NewSkillPendingSkill(srv.SkillLifecycle().Dir())
+			pending.SetLifecycle(srv.SkillLifecycle())
+			if err := skills.Register(pending); err != nil {
+				logger.Warn("Skill pending tool registration failed", "error", err)
+			}
+		}
+		if err := skills.Register(builtin.NewSkillLifecycleSkill(srv.SkillLifecycle())); err != nil {
+			logger.Warn("Skill lifecycle tool registration failed", "error", err)
+		}
+		if err := skills.Register(engine.NewSkillViewSkill(skills)); err != nil {
+			logger.Warn("Skill view tool registration failed", "error", err)
+		}
+	}
+	if mcpMgr != nil {
+		if err := skills.Register(builtin.NewMcpLifecycleSkill(srv.MCPHub(), srv)); err != nil {
+			logger.Warn("MCP lifecycle tool registration failed", "error", err)
+		}
 	}
 
 	// 12. 初始化多 Agent 路由 + 持久化
@@ -2031,6 +2073,15 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 			k12assembly.WithPhotoAnnotator(k12engineadapter.NewPhotoAnnotator()),
 			k12assembly.WithDeliveryTransport(k12Deliver),
 		}
+		if mp != nil {
+			k12Opts = append(k12Opts, k12assembly.WithTeachingReportResources(srv.SkillLifecycle()))
+		} else {
+			// 静态模板与模型Skill启用分开；这里只读现有目录，不seed或恢复已卸载包。
+			installedResources := marketplace.NewMarketplace(cfg.Skills.Dir)
+			if err := installedResources.Init(); err == nil {
+				k12Opts = append(k12Opts, k12assembly.WithTeachingReportResources(installedResources))
+			}
+		}
 		if fileMem != nil {
 			k12Opts = append(k12Opts, k12assembly.WithInsights(k12engineadapter.NewInsightsAdapter(fileMem)))
 		}
@@ -2043,6 +2094,7 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 		}))
 		// 建档/改档：接 agent 路由 + 持久化（读改写 agents.metadata）。
 		k12Opts = append(k12Opts,
+			k12assembly.WithReplyAttachments(eng.ResolveMediaReplyAttachments),
 			k12assembly.WithProfiles(k12engineadapter.NewProfileAdapter(agentRouter, agentStore)),
 			k12assembly.WithArchiveRestorer(func(recordStore *k12storage.Store) k12usecase.ArchiveRestorer {
 				return k12engineadapter.NewArchiveRestoreAdapter(store.DB(), recordStore, agentRouter, agentStore)
@@ -2460,6 +2512,20 @@ Set source only when the material explicitly names a work, title, or another rel
 			k12rt.Deps.GradingBudgetSnapshot = k12GradingBudgetSnapshotFromConfig(gradingBudget)
 			k12Runtime = k12rt
 			k12rt.Deps.DeliveryLocale = srv.DisplayLocale
+			k12rt.Deps.TextSolveRoute = func(requestCtx context.Context, agent string) (k12.GradingModelSnapshot, error) {
+				requested, pinned := k12.GradingModelSnapshotFromContext(requestCtx)
+				if !pinned {
+					if configured, ok := agentRouter.GetAgent(agent); ok {
+						requested.Provider, requested.Model = configured.Provider, configured.Model
+					}
+				}
+				resolved, err := resolveK12PracticeModelSnapshotWithCapabilityReceipt(requestCtx, router, k12ModelCapabilityReceipts, requested)
+				if err == nil && resolved.MathExecutionContract == "" {
+					resolved.MathExecutionContract = k12.MathExecutionContractProgramFirst
+				}
+				return resolved, err
+			}
+			eng.SetReplyArtifactResolver(k12engineadapter.NewPrintReplyResolver(k12rt.Deps))
 			k12TutorPolicy.followup = &k12rt.Deps
 			k12InboundPhotos = k12usecase.NewInboundPhotoCoordinator(k12rt.Records)
 			logger.Info("K12 场景已按 Manifest v2 安装",
@@ -2975,7 +3041,7 @@ Set source only when the material explicitly names a work, title, or another rel
 		mediaRouter.Reload(cfg, configuredVoiceService(cfg))
 		snapshot := mediaRouter.Current()
 		if mediaSvc != nil {
-			if err := skills.SetEnabled("media_generate", snapshot.ToolEnabled && len(snapshot.Routes) > 0); err != nil {
+			if err := skills.SetEnabled("media_generate", snapshot.ToolEnabled && len(snapshot.Routes)+len(snapshot.ExplicitImageRoutes) > 0); err != nil {
 				logger.Warn("media tool activation failed", "err", err)
 			}
 		}
@@ -3167,12 +3233,22 @@ Set source only when the material explicitly names a work, title, or another rel
 	}
 	instanceMgr.SetHandler(func(ctx context.Context, msg *adapter.Message) (*adapter.Reply, error) {
 		reply, err := messageHandler(ctx, msg)
-		// IM 端无结构化工具卡：把本轮工具活动追加为紧凑文本尾注，让 Telegram/企业微信/飞书等
-		// 用户也能看到「调用了什么工具、成没成、结果摘要」。桌面经 wa 直连 messageHandler、
-		// 不走此 handler，故工具卡体验不受影响（避免桌面气泡重复展示）。
-		if reply != nil && (len(reply.ToolCalls) > 0 || msg.Platform == adapter.PlatformDingtalk) {
-			if rebuildErr := appendIMToolDigestAndRebuildCanonical(reply, string(msg.Platform)); rebuildErr != nil {
-				err = errors.Join(err, fmt.Errorf("rebuild IM reply canonical evidence: %w", rebuildErr))
+		if err == nil && reply != nil && k12Runtime != nil && reply.Metadata["print_artifacts"] != "" && reply.AssistantMessageID != "" && reply.Metadata["persist_error"] == "" {
+			// 只有实际持久意图证明接管时才抑制渠道内联回复。
+			agentName := msg.Metadata["routed_agent"]
+			if agentName == "" {
+				agentName = msg.Metadata["role"]
+			}
+			source, getErr := k12Runtime.Records.GetConversationPrintReply(ctx, agentName, reply.AssistantMessageID)
+			if getErr == nil {
+				if source.Owner != msg.UserID || source.SessionID != msg.SessionID {
+					return nil, fmt.Errorf("print reply origin mismatch")
+				}
+				k12Runtime.Outbox.Nudge()
+				return nil, nil
+			}
+			if !errors.Is(getErr, sql.ErrNoRows) && !errors.Is(getErr, records.ErrNotFound) {
+				return nil, getErr
 			}
 		}
 		if err == nil && reply != nil && mediaSvc != nil && reply.Metadata["media_delivery_id"] != "" {
@@ -3180,6 +3256,14 @@ Set source only when the material explicitly names a work, title, or another rel
 				logger.Warn("media reply delivery remains pending", "error", deliveryErr)
 			}
 			return nil, nil
+		}
+		// IM 端无结构化工具卡：把本轮工具活动追加为紧凑文本尾注，让 Telegram/企业微信/飞书等
+		// 用户也能看到「调用了什么工具、成没成、结果摘要」。桌面经 wa 直连 messageHandler、
+		// 不走此 handler，故工具卡体验不受影响（避免桌面气泡重复展示）。
+		if reply != nil && (len(reply.ToolCalls) > 0 || msg.Platform == adapter.PlatformDingtalk) {
+			if rebuildErr := appendIMToolDigestAndRebuildCanonical(reply, string(msg.Platform)); rebuildErr != nil {
+				err = errors.Join(err, fmt.Errorf("rebuild IM reply canonical evidence: %w", rebuildErr))
+			}
 		}
 		if k12Runtime != nil {
 			reply, err = maybeDeliverIMFinalReply(ctx, msg, reply, err, newIMFinalReplyDependencies(&k12Runtime.Deps, instanceMgr.ResolveRunningInstanceID, k12TutorPolicy.unitSummary))
@@ -3236,7 +3320,10 @@ Set source only when the material explicitly names a work, title, or another rel
 		srv:         srv,
 	}
 	eng.SetAppIntrospector(appIntrospector)
-	if err := skills.Register(builtin.NewAppQuerySkill(appIntrospector)); err != nil {
+	appQuerySkill := builtin.NewAppQuerySkill(appIntrospector)
+	appQuerySkill.SetSkillLifecycle(srv.SkillLifecycle())
+	appQuerySkill.SetMCPResourceController(srv)
+	if err := skills.Register(appQuerySkill); err != nil {
 		logger.Warn("[app_query] failed to register app_query skill", "err", err.Error())
 	} else {
 		fmt.Println("  ✓ Skill       app_query (P0 自感知：连接/MCP/cron/webhook/agents/config/logs 只读·脱敏·fence)")
@@ -4226,15 +4313,36 @@ func canonicalIMChannelMessageWithSummary(
 ) (channel.Message, error) {
 	attachments := make([]channel.Attachment, 0, len(atts))
 	for _, attachment := range atts {
-		if strings.TrimSpace(attachment.URL) != "" {
-			return channel.Message{}, fmt.Errorf("IM attachment URL sources are forbidden")
+		var raw []byte
+		if attachment.Source != nil && attachment.Source.OpenReader != nil {
+			reader, err := attachment.Source.OpenReader(context.Background())
+			if err != nil {
+				return channel.Message{}, err
+			}
+			var readErr error
+			raw, readErr = io.ReadAll(reader)
+			if err := errors.Join(readErr, reader.Close()); err != nil {
+				return channel.Message{}, err
+			}
+			sum := sha256.Sum256(raw)
+			if attachment.Size > 0 && attachment.Size != int64(len(raw)) || attachment.ContentDigest != "" && attachment.ContentDigest != "sha256:"+hex.EncodeToString(sum[:]) {
+				return channel.Message{}, fmt.Errorf("IM attachment digest mismatch")
+			}
+		} else {
+			if strings.TrimSpace(attachment.URL) != "" {
+				return channel.Message{}, fmt.Errorf("IM attachment URL sources are forbidden")
+			}
+			encoded := strings.TrimSpace(attachment.Data)
+			if strings.HasPrefix(strings.ToLower(encoded), "data:") {
+				return channel.Message{}, fmt.Errorf("IM attachment data URI sources are forbidden")
+			}
+			var err error
+			raw, err = base64.StdEncoding.DecodeString(encoded)
+			if err != nil {
+				return channel.Message{}, fmt.Errorf("IM attachment bytes are invalid")
+			}
 		}
-		encoded := strings.TrimSpace(attachment.Data)
-		if strings.HasPrefix(strings.ToLower(encoded), "data:") {
-			return channel.Message{}, fmt.Errorf("IM attachment data URI sources are forbidden")
-		}
-		raw, err := base64.StdEncoding.DecodeString(encoded)
-		if err != nil || len(raw) == 0 {
+		if len(raw) == 0 {
 			return channel.Message{}, fmt.Errorf("IM attachment bytes are invalid")
 		}
 		attachments = append(attachments, channel.Attachment{

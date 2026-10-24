@@ -37,6 +37,7 @@ type ReportBundle struct {
 
 func (b ReportBundle) Ref() ReportBundleRef { return b.ref }
 func (b ReportBundle) ProfileID() string    { return b.profile.ID }
+func (b ReportBundle) InputSchema() string  { return b.profile.InputSchema }
 
 // LoadReportBundle 读取宿主已确定的本地版本目录；调用者负责安装与有效设置。
 // 摘要来自冻结引用，内嵌副本和安装目录使用同一规范化清单身份。
@@ -45,6 +46,24 @@ func LoadReportBundle(directory, expectedDigest string) (ReportBundle, error) {
 	if err != nil {
 		return ReportBundle{}, fmt.Errorf("read report bundle: %w", err)
 	}
+	return loadReportBundle(raw, expectedDigest, func(path string) ([]byte, error) {
+		return os.ReadFile(filepath.Join(directory, filepath.FromSlash(path)))
+	})
+}
+
+// LoadReportBundleSnapshot 读取任务已经冻结的资源，不重读当前安装目录或启用状态。
+// 返回包拥有独立字节，调用方在加载结束后修改输入映射不会改变已加载模板。
+func LoadReportBundleSnapshot(manifest []byte, resources map[string][]byte, expectedDigest string) (ReportBundle, error) {
+	return loadReportBundle(manifest, expectedDigest, func(path string) ([]byte, error) {
+		content, ok := resources[path]
+		if !ok {
+			return nil, fs.ErrNotExist
+		}
+		return content, nil
+	})
+}
+
+func loadReportBundle(raw []byte, expectedDigest string, read func(string) ([]byte, error)) (ReportBundle, error) {
 	var canonical map[string]any
 	if err := json.Unmarshal(raw, &canonical); err != nil {
 		return ReportBundle{}, fmt.Errorf("decode report bundle: %w", err)
@@ -77,16 +96,16 @@ func LoadReportBundle(directory, expectedDigest string) (ReportBundle, error) {
 			return ReportBundle{}, fmt.Errorf("report bundle paths must be unique, relative and ordered")
 		}
 		previous = file.Path
-		content, err := os.ReadFile(filepath.Join(directory, filepath.FromSlash(file.Path)))
+		content, err := read(file.Path)
 		if err != nil {
 			return ReportBundle{}, fmt.Errorf("read report resource %s: %w", file.Path, err)
 		}
 		if int64(len(content)) != file.Size || reportDigest(content) != file.SHA256 {
 			return ReportBundle{}, fmt.Errorf("report resource digest mismatch: %s", file.Path)
 		}
-		bundle.files[file.Path] = content
+		bundle.files[file.Path] = bytes.Clone(content)
 	}
-	if err := json.Unmarshal(bundle.files["assets/profile.json"], &bundle.profile); err != nil || bundle.profile.API != 1 {
+	if err := json.Unmarshal(bundle.files["assets/profile.json"], &bundle.profile); err != nil || (bundle.profile.API != 1 && bundle.profile.API != 2) {
 		return ReportBundle{}, fmt.Errorf("unsupported report profile")
 	}
 	if !reportRelativePath(bundle.profile.Entrypoint) || len(bundle.files[bundle.profile.Entrypoint]) == 0 || bundle.profile.InputSchema == "" {

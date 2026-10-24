@@ -6,13 +6,16 @@ import (
 	"fmt"
 	"io"
 	"path"
+	"slices"
 	"strings"
 
 	imagegen "github.com/hexagon-codes/ai-core/media/image"
 	videogen "github.com/hexagon-codes/ai-core/media/video"
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/internal/mediaflow"
+	"github.com/hexagon-codes/hexclaw/internal/requestcancel"
 	"github.com/hexagon-codes/hexclaw/session"
+	"github.com/hexagon-codes/hexclaw/storage"
 )
 
 func directMediaKind(msg *adapter.Message) string {
@@ -76,7 +79,7 @@ func (e *ReActEngine) processDirectMedia(ctx context.Context, msg *adapter.Messa
 	if err != nil {
 		return nil, err
 	}
-	record, err := e.sessions.SaveAssistantReply(completionCtx, msg.SessionID, content, session.AssistantMeta{Provider: op.Route.ProviderID, Model: op.Route.Model, RequestID: messageRequestID(msg), ReplyMetadata: metadata})
+	record, err := e.sessions.SaveAssistantReply(completionCtx, msg.SessionID, content, session.AssistantMeta{Provider: op.Route.ProviderID, Model: op.Route.Model, AgentName: assistantAgentName(msg.Metadata), RequestID: messageRequestID(msg), ReplyMetadata: metadata})
 	if err != nil {
 		return nil, err
 	}
@@ -138,6 +141,59 @@ func (e *ReActEngine) mediaAttachments(ctx context.Context, msg *adapter.Message
 			return e.mediaFlow.OpenAsset(openCtx, msg.UserID, ref)
 		}}})
 	}
+	domainAttachments, err := e.domainReplyAttachments(ctx, msg, metadata)
+	if err != nil {
+		return nil, err
+	}
+	return append(attachments, domainAttachments...), nil
+}
+
+// ResolveMediaReplyAttachments 为原回复批次恢复已冻结的媒体，不创建操作或投递意图。
+func (e *ReActEngine) ResolveMediaReplyAttachments(ctx context.Context, owner, metadata string) ([]adapter.Attachment, error) {
+	var saved map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(metadata), &saved); err != nil {
+		return nil, err
+	}
+	var refs []mediaflow.Asset
+	if raw := saved["media_assets"]; len(raw) != 0 {
+		if err := json.Unmarshal(raw, &refs); err != nil {
+			return nil, err
+		}
+	}
+	if len(refs) == 0 {
+		return nil, nil
+	}
+	e.mu.RLock()
+	flow := e.mediaFlow
+	e.mu.RUnlock()
+	if flow == nil {
+		return nil, fmt.Errorf("media asset resolver is unavailable")
+	}
+	assets, err := flow.ResolveAssets(ctx, owner, refs)
+	if err != nil {
+		return nil, err
+	}
+	var resendOperations []string
+	var encodedResends string
+	if json.Unmarshal(saved["media_resend_operations"], &encodedResends) == nil {
+		_ = json.Unmarshal([]byte(encodedResends), &resendOperations)
+	}
+	for _, asset := range assets {
+		op, err := flow.Read(ctx, owner, asset.OperationID)
+		if err != nil {
+			return nil, err
+		}
+		if op.CancelRequested && !slices.Contains(resendOperations, op.ID) {
+			return nil, requestcancel.ErrUserCancelled
+		}
+	}
+	attachments := make([]adapter.Attachment, 0, len(assets))
+	for _, asset := range assets {
+		ref := asset
+		attachments = append(attachments, adapter.Attachment{ID: ref.ID, Type: ref.Kind, Name: path.Base(ref.Path), Mime: ref.MIME, ContentDigest: "sha256:" + ref.Digest, Size: ref.Size, Source: &adapter.AttachmentSource{OpenReader: func(openCtx context.Context) (io.ReadCloser, error) {
+			return flow.OpenAsset(openCtx, owner, ref)
+		}}})
+	}
 	return attachments, nil
 }
 
@@ -159,6 +215,10 @@ func (e *ReActEngine) finalizeMediaChunk(ctx context.Context, msg *adapter.Messa
 
 // prepareMediaReply 将产物交回既有回合完成路径，操作本身不写助手消息。
 func (e *ReActEngine) prepareMediaReply(ctx context.Context, msg *adapter.Message, metadata map[string]string, content string) (context.Context, string, error) {
+	ctx, err := e.prepareReplyArtifacts(ctx, msg, metadata)
+	if err != nil {
+		return ctx, content, err
+	}
 	assets, err := e.mediaAssets(ctx, msg, metadata)
 	if err != nil {
 		return ctx, content, err
@@ -198,10 +258,15 @@ func (e *ReActEngine) prepareMediaReply(ctx context.Context, msg *adapter.Messag
 		}
 	}
 	if identity, ok := adapter.PlatformInstanceIdentityFromContext(ctx); ok && identity.Platform == string(msg.Platform) && msg.Platform == adapter.PlatformDingtalk {
-		completion.Platform = identity.Platform
-		completion.InstanceID = identity.ID
-		completion.ChatID = msg.ChatID
-		metadata["media_delivery_id"] = mediaflow.DeliveryID(completion)
+		if domain, owns := storage.AssistantCompletionFromContext(ctx); owns && domain.OwnsDelivery {
+			// 资产结算仍在原事务执行，渠道发送和恢复由已有原回复批次统一负责。
+			delete(metadata, "media_delivery_id")
+		} else {
+			completion.Platform = identity.Platform
+			completion.InstanceID = identity.ID
+			completion.ChatID = msg.ChatID
+			metadata["media_delivery_id"] = mediaflow.DeliveryID(completion)
+		}
 	}
 	return mediaflow.WithReplyCompletion(ctx, completion), content, nil
 }

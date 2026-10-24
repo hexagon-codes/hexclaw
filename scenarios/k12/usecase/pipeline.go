@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/scenario"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
@@ -20,8 +21,14 @@ const FirstReviewInterval int64 = 86400 // 1 天
 
 // Deps 用例依赖（端口注入 + 通用能力）。
 type Deps struct {
+	// TeachingReportResources 只读取已安装资源，与模型Skill启用状态分开。
+	TeachingReportResources TeachingReportResourceReader
+	// TextSolveRoute 冻结文字求解实际路由，后续生成和验证不能重读可变默认。
+	TextSolveRoute func(context.Context, string) (k12.GradingModelSnapshot, error)
 	// DeliveryLocale 只在新显式投递时读取显示语言，冻结后重放不再读取。
 	DeliveryLocale func() string
+	// ReplyAttachments 读取原助手元数据中已冻结的其他附件；不求解、生成或重新路由。
+	ReplyAttachments func(context.Context, string, string) ([]adapter.Attachment, error)
 	// ImageTaskResult 读取同一领域终态及冻结调用证据，供新投递生成只读摘要。
 	ImageTaskResult func(context.Context, string, string) (ImageTaskResult, error)
 	Solver          Solver
@@ -192,6 +199,8 @@ func (d Deps) anchorHomeworkGeometry(ctx context.Context, image []byte, question
 
 // GradeRequest 一道题的批改请求（识题后的结构化输入）。
 type GradeRequest struct {
+	GradeFromProfile bool                        `json:"-"`
+	TeachingReport   *TeachingReportTaskSnapshot `json:"teaching_report,omitempty"`
 	// 来源观察只供执行；持久身份与恢复仍使用已冻结题目的输入摘要。
 	ObservedAnswerState   AnswerState `json:"-"`
 	ObservedStudentAnswer string      `json:"-"`
@@ -214,11 +223,14 @@ type GradeRequest struct {
 
 // GradeResult 批改闭环结果。
 type GradeResult struct {
-	Solution     string
-	Evidence     SolveEvidence
-	Outcome      GradeOutcome
-	OutOfScope   bool   // 题目/解法超纲（错发）
-	OutOfScopeKP string // 触发超纲的知识点
+	TeachingReport *k12.TeachingReport        `json:"teaching_report,omitempty"`
+	Finalization   *k12.TextSolveFinalization `json:"finalization,omitempty"`
+	AnswerSource   *k12.ProblemAnswerSource   `json:"answer_source,omitempty"`
+	Solution       string
+	Evidence       SolveEvidence
+	Outcome        GradeOutcome
+	OutOfScope     bool   // 题目/解法超纲（错发）
+	OutOfScopeKP   string // 触发超纲的知识点
 	// CurriculumUnmapped 词表外知识点（fail-visible，PRD §5.2.4 / bug 2026-07-18）：
 	// 这些 KP 不在课标映射内，超纲硬拦截对它们**不生效**——调用方必须显性提示
 	// 「不在课标映射内」，不得静默呈现为「已过年级校验」。
@@ -233,6 +245,12 @@ type GradeResult struct {
 // SolveResult2 解题分叉结果（空白题只求解，不批改）。
 // 复用证据对象体系，但不产 GradeOutcome / 不入库。
 type SolveHomeworkResult struct {
+	// ReportContent 冻结本地确定性讲解，恢复不重读宿主当前表达规则。
+	ReportContent     *TeachingReportContentDraft `json:"report_content,omitempty"`
+	reportLocalSource bool
+	// TeachingReport 是原结算内容的派生投影，不回写求解结果摘要。
+	TeachingReport *k12.TeachingReport        `json:"-"`
+	Finalization   *k12.TextSolveFinalization `json:"finalization,omitempty"`
 	// 资产整理在批改回执提交后通过 Outbox 执行，不进入用户结果正文。
 	assetPublication *k12.ProblemAssetPublication
 	AnswerSource     *k12.ProblemAnswerSource `json:"answer_source,omitempty"`
@@ -253,6 +271,15 @@ type SolveHomeworkResult struct {
 // 与 GradeHomeworkProblem 的本质区别：**不批改、不产 grade_correct、不入错题本、不写学情**。
 // 空白题没有学生答案可批改，硬走批改路径会让底层要 grade_correct 而 502（治本前的 P0 根因）。
 func (d Deps) SolveHomeworkProblem(ctx context.Context, req GradeRequest) (SolveHomeworkResult, error) {
+	if d.Records != nil && !HasGradingPhysicalCallExecutor(ctx) {
+		if origin, enabled := d.textSolveOrigin(ctx, req); enabled {
+			return d.SolveTextProblem(ctx, origin, req)
+		}
+	}
+	return d.solveHomeworkProblem(ctx, req)
+}
+
+func (d Deps) solveHomeworkProblem(ctx context.Context, req GradeRequest) (SolveHomeworkResult, error) {
 	if req.AgentName == "" || req.Problem == "" {
 		return SolveHomeworkResult{}, fmt.Errorf("%w: AgentName / Problem 不可空", ErrInvalidInput)
 	}
@@ -299,7 +326,24 @@ func (d Deps) SolveHomeworkProblem(ctx context.Context, req GradeRequest) (Solve
 			Evidence:           sr.Evidence,
 		}, nil
 	}
-	return SolveHomeworkResult{Solution: sr.Solution, Evidence: sr.Evidence, Generation: sr.Generation, ProblemIssue: sr.ProblemIssue, CurriculumUnmapped: unmapped}, nil
+	result := SolveHomeworkResult{Solution: sr.Solution, Evidence: sr.Evidence, Generation: sr.Generation, ProblemIssue: sr.ProblemIssue, CurriculumUnmapped: unmapped}
+	if req.SolveOutputVersion == SolveOutputWithTeachingReportV2 && result.Generation == nil {
+		request := d.parentTeachingGuideRequest(ctx, req, result, GradeOutcome{})
+		request.ReportRequired = false
+		if guide, ok := deterministicParentTeachingGuideForEvidence(request, result.Evidence); ok {
+			result.ReportContent = deterministicReportContent(guide)
+		}
+	}
+	if req.SolveOutputVersion == SolveOutputWithTeachingReportV2 && result.Generation != nil && result.Evidence.Verdict == VerdictAgree && HasGradingPhysicalCallExecutor(ctx) {
+		if _, err := auditedSolveParentTeachingGuide(result); err != nil {
+			repaired, repairErr := d.adaptReusedReportTeaching(ctx, req, result)
+			if repairErr != nil {
+				return result, repairErr
+			}
+			result = repaired
+		}
+	}
+	return result, nil
 }
 
 // 只有确定性题意校验的具体矛盾可单独结算，普通验算失败仍保留原错误语义。
@@ -393,6 +437,8 @@ func (d Deps) GradeHomeworkProblem(ctx context.Context, req GradeRequest) (Grade
 			return GradeResult{}, err
 		}
 		return GradeResult{
+			TeachingReport: sr.TeachingReport,
+			Finalization:   sr.Finalization, AnswerSource: sr.AnswerSource,
 			Solution:           sr.Solution,
 			Evidence:           sr.Evidence,
 			OutOfScope:         sr.OutOfScope,
@@ -445,6 +491,7 @@ func (d Deps) gradeSolvedHomeworkProblem(
 		}, nil
 	}
 	res := GradeResult{
+		Finalization: solved.Finalization, AnswerSource: solved.AnswerSource,
 		Solution: solved.Solution, Evidence: solved.Evidence,
 		CurriculumUnmapped: append([]string(nil), solved.CurriculumUnmapped...),
 	}
