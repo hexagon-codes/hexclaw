@@ -9,6 +9,7 @@ import (
 	"github.com/hexagon-codes/hexclaw/internal/elementarymath"
 	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
+	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
 )
 
 func TestWeeklyMistakeSheetRestoresHistoricalSourcesWithoutWritingRecords(t *testing.T) {
@@ -37,6 +38,7 @@ func TestWeeklyMistakeSheetRestoresHistoricalSourcesWithoutWritingRecords(t *tes
 		"Read and translate this sentence into Chinese.",
 	}
 	before := make(map[string]string)
+	var scopedRecordID string
 	for index, text := range legacy {
 		fields := k12.MistakeFields{GradeTerm: "五年级上", Subject: "数学", Question: text, EntrySource: k12.MistakeEntryPhoto, CanonicalAnswer: "DO_NOT_PRINT_THE_STORED_ANSWER"}
 		raw, err := json.Marshal(fields)
@@ -54,6 +56,9 @@ func TestWeeklyMistakeSheetRestoresHistoricalSourcesWithoutWritingRecords(t *tes
 			t.Fatal(err)
 		}
 		before[stored.RecordID] = stored.Fields
+		if index == 0 {
+			scopedRecordID = stored.RecordID
+		}
 	}
 	seedAccumDue(t, d, "英语", "错词", "Read-only source material is an English phrase.", 900)
 	markdown, err := d.MistakeSheetMarkdown(ctx, "mingming")
@@ -72,6 +77,32 @@ func TestWeeklyMistakeSheetRestoresHistoricalSourcesWithoutWritingRecords(t *tes
 	}
 	if strings.Count(markdown, "\n\n（　　）\n\n") != 4 {
 		t.Fatal("source recovery dropped or duplicated a review item")
+	}
+	exported, err := d.ExportMistakesMarkdown(ctx, "mingming")
+	if err != nil {
+		t.Fatal(err)
+	}
+	records, err := d.Records.ListByScope(ctx, "mingming", k12.CollectionMistakes, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive, err := renderLearningArchiveMarkdown(k12storage.LearningArchiveSourceSnapshot{
+		Mistakes: records, WeeklyReview: []k12.WeeklyPracticeItem{{SourceRef: scopedRecordID, PromptMarkdown: scoped}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, content := range []string{exported, archive} {
+		for _, wanted := range []string{current, shared, "Read and translate this sentence into Chinese."} {
+			if !strings.Contains(content, wanted) {
+				t.Fatalf("another human-readable export lost source content: %q", wanted)
+			}
+		}
+		for _, unwanted := range []string{"k12-part-count-slot-v1", "Answer target:", "Read-only source material (do not answer as another question):"} {
+			if strings.Contains(content, unwanted) {
+				t.Fatalf("another human-readable export leaked an execution protocol: %q", unwanted)
+			}
+		}
 	}
 	for id, fields := range before {
 		after, err := d.Records.Get(ctx, id)

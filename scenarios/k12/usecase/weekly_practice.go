@@ -810,14 +810,16 @@ func (d Deps) weeklyDueTrack(ctx context.Context, agent string) (k12.WeeklyPract
 	if err != nil {
 		return k12.WeeklyPracticeTrack{}, nil, err
 	}
+	projected, err := d.reviewPaperProjection(ctx, agent, queue)
+	if err != nil {
+		return k12.WeeklyPracticeTrack{}, nil, err
+	}
 	track := k12.WeeklyPracticeTrack{
 		PlanSection: k12.WeeklySectionDueReview, Status: k12.WeeklyTrackReady,
 		Items: []k12.WeeklyPracticeItem{},
 	}
 	keys := map[string]string{}
-	seenSourceRefs := map[string]struct{}{}
-	seenCanonicalProblems := map[string]struct{}{}
-	for _, due := range queue {
+	for _, due := range projected {
 		if due.Record == nil || due.Record.Collection != k12.CollectionMistakes {
 			continue
 		}
@@ -825,33 +827,13 @@ func (d Deps) weeklyDueTrack(ctx context.Context, agent string) (k12.WeeklyPract
 		if sourceRef == "" {
 			continue
 		}
-		if _, duplicate := seenSourceRefs[sourceRef]; duplicate {
-			continue
-		}
-		canonicalHash, _, err := k12.StablePracticeProblemHash(k12.PracticeCandidateProblem{
-			Subject: due.Subject(), QuestionMarkdown: due.Title(),
-		})
-		if err != nil {
-			return k12.WeeklyPracticeTrack{}, nil, err
-		}
-		if _, duplicate := seenCanonicalProblems[canonicalHash]; duplicate {
-			continue
-		}
 		if len(track.Items) >= 15 {
 			break
 		}
-		seenSourceRefs[sourceRef] = struct{}{}
-		seenCanonicalProblems[canonicalHash] = struct{}{}
 		itemID := "witem-" + shortDigest(k12.WeeklySectionDueReview+"\x00"+due.Record.RecordID)
 		evidence := strings.TrimSpace(due.Point())
 		if evidence == "" {
 			evidence = "原错题事实"
-		}
-		prompt := due.Title()
-		if due.Fields.EntrySource == k12.MistakeEntryPhoto {
-			fields := due.Fields
-			fields.Question = prompt
-			prompt = k12.MistakeQuestionStatement(fields)
 		}
 		item := k12.WeeklyPracticeItem{
 			ItemID: itemID, Position: len(track.Items) + 1,
@@ -865,7 +847,7 @@ func (d Deps) weeklyDueTrack(ctx context.Context, agent string) (k12.WeeklyPract
 				Status:       k12.WeeklyVerificationVerified,
 				EvidenceRefs: []string{evidence},
 			},
-			PromptMarkdown: prompt,
+			PromptMarkdown: due.Statement,
 		}
 		track.Items = append(track.Items, item)
 		if strings.TrimSpace(due.Fields.CanonicalAnswer) != "" {
