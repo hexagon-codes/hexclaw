@@ -1,4 +1,4 @@
-// skill_pending.go 实现 v0.4.0 F2 "用户审批闭环" 工具：
+// skill_pending.go 兼容旧版待激活草稿，并提供已接线生命周期中的历史草稿维护：
 //
 //   - list:    扫描 skillDir 下所有 SKILL.md.pending，输出名字 + diff 摘要
 //   - approve: 把指定 skill 的 SKILL.md.pending 原子 rename 为 SKILL.md
@@ -9,8 +9,7 @@
 //   - approve 用 os.Rename 原子替换，避免半写入状态
 //   - 永远不写 production 路径（只 rename / unlink）
 //
-// 该工具同样作为 LLM tool 暴露，但预期由用户在前端确认后才让 LLM 触发；
-// 真实部署可在前端把这个工具放进"需要 approval"白名单。
+// 未接线生命周期的构造器保留旧版待审批语义；接线后只维护已有草稿，普通创建和修改已直接应用。
 package builtin
 
 import (
@@ -23,11 +22,18 @@ import (
 
 	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/hexclaw/skill"
+	"github.com/hexagon-codes/hexclaw/skill/lifecycle"
 )
 
 // SkillPendingSkill 暴露 manage_skill_pending 工具：list/approve/reject 三动作。
 type SkillPendingSkill struct {
-	skillDir string
+	skillDir  string
+	lifecycle *lifecycle.Service
+}
+
+func (s *SkillPendingSkill) SetLifecycle(service *lifecycle.Service) {
+	s.lifecycle = service
+	s.skillDir = service.Dir()
 }
 
 // NewSkillPendingSkill 构造 manage_skill_pending 工具。
@@ -37,11 +43,17 @@ func NewSkillPendingSkill(skillDir string) *SkillPendingSkill {
 
 func (s *SkillPendingSkill) Name() string { return "manage_skill_pending" }
 func (s *SkillPendingSkill) Description() string {
+	if s.lifecycle != nil {
+		return "Optionally inspect, activate or reject legacy staged skill drafts; current create/patch already apply through the shared lifecycle"
+	}
 	return "List / approve / reject pending Skill drafts (SKILL.md.pending) created by create_skill or patch_skill"
 }
 func (s *SkillPendingSkill) Match(_ string) bool { return false }
 
 func (s *SkillPendingSkill) ToolDefinition() llm.ToolDefinition {
+	if s.lifecycle != nil {
+		return llm.NewToolDefinition("manage_skill_pending", "Optional maintenance for existing legacy staged drafts. Current create_skill and patch_skill already apply through the application's authorized lifecycle; do not require a separate approve call after them. list inspects old pending files, approve activates an explicitly selected existing draft, reject removes that draft.", &llm.Schema{Type: "object", Properties: map[string]*llm.Schema{"action": {Type: "string", Enum: []any{"list", "approve", "reject"}}, "name": {Type: "string", Description: "Exact staged skill name"}}, Required: []string{"action"}})
+	}
 	return llm.NewToolDefinition("manage_skill_pending",
 		"Review and decide on Skill drafts. action='list' returns all pending skills with their diff summary. "+
 			"action='approve' atomically promotes the named skill's SKILL.md.pending to SKILL.md. "+
@@ -57,7 +69,7 @@ func (s *SkillPendingSkill) ToolDefinition() llm.ToolDefinition {
 		})
 }
 
-func (s *SkillPendingSkill) Execute(_ context.Context, args map[string]any) (*skill.Result, error) {
+func (s *SkillPendingSkill) Execute(ctx context.Context, args map[string]any) (*skill.Result, error) {
 	action, _ := args["action"].(string)
 	action = strings.ToLower(strings.TrimSpace(action))
 	switch action {
@@ -65,6 +77,24 @@ func (s *SkillPendingSkill) Execute(_ context.Context, args map[string]any) (*sk
 		return s.listPending()
 	case "approve":
 		name, _ := args["name"].(string)
+		if s.lifecycle != nil {
+			if !validSkillName.MatchString(name) {
+				return nil, fmt.Errorf("invalid skill name")
+			}
+			dir, err := s.resolveDir(name)
+			if err != nil {
+				return nil, err
+			}
+			data, _, err := readRegularFileNoFollow(filepath.Join(dir, "SKILL.md"+PendingSuffix))
+			if err != nil {
+				return nil, err
+			}
+			state, err := s.lifecycle.ApplyContent(ctx, name, string(data))
+			if err != nil {
+				return nil, err
+			}
+			return skillLifecycleResult("Staged skill content installed and runtime refreshed", state)
+		}
 		return s.approve(name)
 	case "reject":
 		name, _ := args["name"].(string)

@@ -75,7 +75,14 @@ func (s *Server) handleClawHubSkillContent(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "MCP 条目没有 SKILL.md 可预览"})
 		return
 	}
-	content, err := s.skillHub.Content(r.Context(), name)
+	var content []byte
+	var err error
+	source := "hub"
+	if s.skillLifecycle != nil {
+		content, source, err = s.skillLifecycle.CatalogContent(r.Context(), name)
+	} else {
+		content, err = s.skillHub.Content(r.Context(), name)
+	}
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "获取技能内容失败: " + err.Error()})
 		return
@@ -83,5 +90,6 @@ func (s *Server) handleClawHubSkillContent(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, map[string]string{
 		"name":    name,
 		"content": string(content),
+		"source":  source,
 	})
 }

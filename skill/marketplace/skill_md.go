@@ -67,6 +67,7 @@ import (
 //	preferred_mode: tot
 //	---
 type SkillMeta struct {
+	Category        string                 `yaml:"category"`
 	Name            string                 `yaml:"name"` // 唯一标识（必需）
 	DisplayName     string                 `yaml:"display_name"`
 	DisplayNames    map[string]string      `yaml:"display_names"`
@@ -90,6 +91,9 @@ type SkillMeta struct {
 	// 用于上层做"环境画像"路由判断；不强制为可执行工具名。
 	Requires []string `yaml:"requires"`
 }
+
+// ParseMetadata 复用说明文件元数据解析，供只读出厂目录投影使用。
+func ParseMetadata(content string) SkillMeta { meta, _ := parseFrontmatter(content); return meta }
 
 // MarkdownSkill Markdown 格式的技能
 //
@@ -338,6 +342,9 @@ func LoadSkillsFromDir(dir string) ([]*MarkdownSkill, error) {
 	}
 
 	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
 		path := filepath.Join(dir, entry.Name())
 
 		if entry.IsDir() {

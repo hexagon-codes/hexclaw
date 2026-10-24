@@ -30,13 +30,13 @@ import (
 // DefaultHubBranch 是技能/MCP 市场未显式配置分支时的默认拉取分支。
 // 单一来源：hub.New 与 NewMcpHub 共用，避免两处硬编码漂移（曾出现 hub.go=v0.0.5 / mcp_hub.go=v0.0.2 不一致）。
 // 发版时随 config/defaults.go 的 Hub.Branch 一并更新。
-const DefaultHubBranch = "v0.0.10"
+const DefaultHubBranch = "v0.0.11"
 
 // HubConfig 技能市场配置
 type HubConfig struct {
 	Enabled bool   `yaml:"enabled"`
 	RepoURL string `yaml:"repo_url"` // 默认: https://github.com/hexagon-codes/hexclaw-hub
-	Branch  string `yaml:"branch"`   // 默认: v0.0.10
+	Branch  string `yaml:"branch"`   // 默认: v0.0.11
 }
 
 // MCPArtifact identifies the package release declared by a Hub MCP entry.
@@ -93,6 +93,7 @@ type SkillMeta struct {
 	SchemaVersion    string            `json:"schema_version,omitempty"`
 	Eval             string            `json:"eval,omitempty"`
 	Acceptance       string            `json:"acceptance,omitempty"`
+	BundleSHA256     string            `json:"bundle_sha256,omitempty"`
 	Downloads        int               `json:"downloads"`
 	Rating           float64           `json:"rating"`
 }
@@ -114,18 +115,19 @@ const hubRetryBackoff = 60 * time.Second
 
 // Hub 在线技能市场客户端（离线优先：内存 → 磁盘缓存 → 内嵌种子 → 后台网络刷新）。
 type Hub struct {
-	cfg           HubConfig
-	catalog       *Catalog
-	mu            sync.RWMutex
-	refreshMu     sync.Mutex
-	cacheCommitMu sync.Mutex
-	client        *http.Client
-	skillsDir     string
-	cacheDir      string      // 磁盘缓存目录（空=禁用磁盘缓存层）；最近一次成功拉取落此
-	lastSync      time.Time   // 最近一次「网络」刷新成功时间（seed 不计），用于 TTL 节流
-	lastAttempt   time.Time   // 最近一次刷新尝试时间（含失败），用于失败退避节流
-	refreshing    atomic.Bool // 保证同一时刻至多一个后台刷新协程
-	cacheWriteOps *hubCacheWriteOps
+	cfg             HubConfig
+	catalog         *Catalog
+	catalogFallback bool
+	mu              sync.RWMutex
+	refreshMu       sync.Mutex
+	cacheCommitMu   sync.Mutex
+	client          *http.Client
+	skillsDir       string
+	cacheDir        string      // 磁盘缓存目录（空=禁用磁盘缓存层）；最近一次成功拉取落此
+	lastSync        time.Time   // 最近一次「网络」刷新成功时间（seed 不计），用于 TTL 节流
+	lastAttempt     time.Time   // 最近一次刷新尝试时间（含失败），用于失败退避节流
+	refreshing      atomic.Bool // 保证同一时刻至多一个后台刷新协程
+	cacheWriteOps   *hubCacheWriteOps
 	// cacheLockRelease is nil in production and permits failure injection in tests.
 	cacheLockRelease func(*hubCacheFileLock) error
 }
@@ -147,6 +149,12 @@ func (h *Hub) SetCacheDir(dir string) {
 	h.mu.Lock()
 	h.cacheDir = dir
 	h.mu.Unlock()
+}
+
+// SourceCacheDir 将默认缓存绑定到实际仓库与分支，切换源不能复用另一目录快照。
+func (h *Hub) SourceCacheDir() string {
+	sum := sha256.Sum256([]byte(h.cfg.RepoURL + "\x00" + h.cfg.Branch))
+	return filepath.Join(DefaultCacheDir(), fmt.Sprintf("%x", sum[:]))
 }
 
 // New 创建技能市场客户端
@@ -325,19 +333,32 @@ func (h *Hub) seed() {
 		return
 	}
 
-	// 内嵌出厂快照永远可用；磁盘缓存仅在「不比内嵌旧」时才采用——否则二进制升级后离线，
-	// 旧缓存（上次拉取的旧版分支内容）会盖过更新的内嵌种子，市场退化成旧版。
-	// moving-branch 场景缓存比内嵌新时仍优先缓存（保留新鲜度）。
+	// 默认源缓存与出厂快照比较新鲜度；显式来源的缓存不与默认源跨源比较。
+	// 指定源暂不可用时保留出厂兜底，首次成功刷新应替换这份临时目录。
 	chosen := embeddedCatalog()
-	if c, ok := h.readCache(); ok && !c.UpdatedAt.Before(chosen.UpdatedAt) {
-		chosen = c
+	fallback := !h.usesEmbeddedSource()
+	if c, ok := h.readCache(); ok && (fallback || !c.UpdatedAt.Before(chosen.UpdatedAt)) {
+		chosen, fallback = c, false
 	}
 
 	h.mu.Lock()
 	if h.catalog == nil {
 		h.catalog = chosen
+		h.catalogFallback = fallback
 	}
 	h.mu.Unlock()
+}
+
+func (h *Hub) usesEmbeddedSource() bool {
+	return strings.EqualFold(strings.TrimSuffix(strings.TrimSuffix(h.cfg.RepoURL, "/"), ".git"), "https://github.com/hexagon-codes/hexclaw-hub") && h.cfg.Branch == DefaultHubBranch
+}
+
+// catalogForAdvanceLocked 只比较同一配置来源的刷新代次，离线出厂兜底不是指定源的旧版本。
+func (h *Hub) catalogForAdvanceLocked() *Catalog {
+	if h.catalogFallback {
+		return nil
+	}
+	return h.catalog
 }
 
 // maybeRefreshAsync 在 catalog 陈旧时启动至多一个后台网络刷新协程（自带 ctx，与请求生命周期解耦）。
@@ -405,10 +426,11 @@ func (h *Hub) commitRefreshedCatalog(ctx context.Context, c *Catalog) error {
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if err := validateCatalogAdvance(h.catalog, c); err != nil {
+	if err := validateCatalogAdvance(h.catalogForAdvanceLocked(), c); err != nil {
 		return err
 	}
 	h.catalog = c
+	h.catalogFallback = false
 	h.lastSync = time.Now()
 	return nil
 }
@@ -460,13 +482,14 @@ func (h *Hub) commitSharedCache(ctx context.Context, dir string, candidate *Cata
 		// seed may have published a snapshot while this refresh waited for the
 		// shared lock or prepared its temp file. Revalidate immediately before
 		// the atomic replace so disk and memory cannot move backwards.
-		if err := validateCatalogAdvance(h.catalog, candidate); err != nil {
+		if err := validateCatalogAdvance(h.catalogForAdvanceLocked(), candidate); err != nil {
 			return err
 		}
 		if err := prepared.replace(ops); err != nil {
 			return err
 		}
 		h.catalog = candidate
+		h.catalogFallback = false
 		h.lastSync = time.Now()
 		committed = true
 		return nil
@@ -1001,8 +1024,15 @@ func (h *Hub) findSkill(name string) (SkillMeta, bool) {
 // resolveDownloadURL 计算技能 SKILL.md 的下载地址：
 // 优先 meta.URL；其次本地仓库 skills/<name>.md；最后回退默认 raw URL 模式。
 func (h *Hub) resolveDownloadURL(target SkillMeta, name string) (string, error) {
+	relative := "skills/" + name + ".md"
+	if target.File != "" {
+		if !filepath.IsLocal(filepath.FromSlash(target.File)) || strings.Contains(target.File, "\\") {
+			return "", fmt.Errorf("invalid catalog skill file")
+		}
+		relative = target.File
+	}
 	if dir, ok := h.localRepoDir(); ok {
-		expected := filepath.Join(dir, "skills", name+".md")
+		expected := filepath.Join(dir, filepath.FromSlash(relative))
 		if target.URL == "" {
 			return expected, nil
 		}
@@ -1013,7 +1043,7 @@ func (h *Hub) resolveDownloadURL(target SkillMeta, name string) (string, error) 
 	}
 	repoURL := strings.TrimSuffix(h.cfg.RepoURL, ".git")
 	repoURL = strings.Replace(repoURL, "github.com", "raw.githubusercontent.com", 1)
-	expected := repoURL + "/" + h.cfg.Branch + "/skills/" + name + ".md"
+	expected := repoURL + "/" + h.cfg.Branch + "/" + relative
 	if target.URL == "" {
 		return expected, nil
 	}

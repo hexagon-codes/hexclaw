@@ -38,7 +38,9 @@ func (m *Manager) RestartServer(ctx context.Context, name string) error {
 	// invocation wins" semantics even when an older connector finishes later.
 	delete(m.failures, name)
 	revision := m.bumpRevisionLocked(name)
+	m.connecting[name] = revision
 	m.mu.Unlock()
+	defer m.finishConnecting(name, revision)
 
 	newServer, err := m.connectServer(ctx, *cfg)
 	if err != nil {

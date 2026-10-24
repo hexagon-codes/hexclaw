@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"github.com/hexagon-codes/hexclaw/config"
 	"github.com/hexagon-codes/hexclaw/engine"
 	"github.com/hexagon-codes/hexclaw/httpua"
+	"github.com/hexagon-codes/hexclaw/internal/agentcatalog"
 	"github.com/hexagon-codes/hexclaw/internal/inputlimits"
 	hexmcp "github.com/hexagon-codes/hexclaw/mcp"
 	"github.com/hexagon-codes/hexclaw/memory"
@@ -212,6 +214,7 @@ func (s *Server) handleSearchMemory(w http.ResponseWriter, r *http.Request) {
 // command、args、env、endpoint 和凭据只属于 sidecar 内部运行配置，不得进入此响应。
 type mcpServerSummary struct {
 	Name        string `json:"name"`
+	Enabled     bool   `json:"enabled"`
 	Description string `json:"description"`
 	Status      string `json:"status"`
 	Transport   string `json:"transport"`
@@ -283,16 +286,23 @@ func (s *Server) mcpServerSummaries() []mcpServerSummary {
 		s.cfgMu.RUnlock()
 	}
 
-	statuses := s.mcpMgr.ServerStatuses()
-	summaries := make([]mcpServerSummary, 0, len(statuses))
-	for _, status := range statuses {
-		cfg := configured[status.Name]
+	statuses := make(map[string]hexmcp.ServerStatus)
+	for _, status := range s.mcpMgr.ServerStatuses() {
+		statuses[status.Name] = status
+		if _, exists := configured[status.Name]; !exists {
+			configured[status.Name] = config.MCPServerConfig{Name: status.Name, Enabled: true}
+		}
+	}
+	summaries := make([]mcpServerSummary, 0, len(configured))
+	for name, cfg := range configured {
+		status := statuses[name]
 		serverState := "disconnected"
 		if status.Connected {
 			serverState = "connected"
 		}
 		summaries = append(summaries, mcpServerSummary{
-			Name:        status.Name,
+			Name:        name,
+			Enabled:     cfg.Enabled,
 			Description: mcpServerDescription(status.Kind),
 			Status:      serverState,
 			Transport:   mcpServerTransport(cfg),
@@ -304,6 +314,7 @@ func (s *Server) mcpServerSummaries() []mcpServerSummary {
 			NextRetryAt: status.NextRetryAt,
 		})
 	}
+	sort.Slice(summaries, func(i, j int) bool { return summaries[i].Name < summaries[j].Name })
 	return summaries
 }
 
@@ -442,92 +453,47 @@ func (s *Server) handleAddMCPServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 连接器编辑请求只携带脱敏 projection；preserve 必须从 Sidecar 当前解密投影恢复，
-	// 然后在写盘前由 Writer 重新 Seal。没有 Writer/secret.Box 时禁止把 secret 交给运行时。
+	// 配置保存与运行代次在同一短提交阶段裁决，连接和清理不持有该锁。
 	hasSecretMutations := len(req.SecretArgs) > 0 || len(req.SecretEnv) > 0
-	var persistedSecretConfig *config.MCPServerConfig
-	if hasSecretMutations {
-		if s.cfgWriter == nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "MCP secret persistence is unavailable"})
-			return
-		}
-		current, err := s.cfgWriter.GetMCPServer(req.Name)
-		if err != nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "MCP secret persistence is unavailable"})
-			return
-		}
-		merged, err := mergeMCPSecretMutations(current, config.MCPServerConfig{
-			Name:      req.Name,
-			Transport: transport,
-			Command:   req.Command,
-			Args:      req.Args,
-			Env:       req.Env,
-			Endpoint:  req.Endpoint,
-			Enabled:   true,
-		}, req.SecretArgs, req.SecretEnv)
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
-		}
-		// 先写入已归一化的密文配置，确保 secret.Box 失败时不会启动带未持久化凭据的 MCP。
-		if err := s.cfgWriter.UpsertMCPServer(merged); err != nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "MCP secret persistence is unavailable"})
-			return
-		}
-		req.Args = merged.Args
-		req.Env = merged.Env
-		persistedSecretConfig = &merged
+	if hasSecretMutations && s.cfgWriter == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "MCP secret persistence is unavailable"})
+		return
 	}
-
-	// 先保存配置；写盘失败时保留现有运行态，避免显示成功却在重启后丢失。
-	if s.cfgWriter != nil && persistedSecretConfig == nil {
-		if err := s.cfgWriter.UpsertMCPServer(config.MCPServerConfig{
-			Name:      req.Name,
-			Transport: transport,
-			Command:   req.Command,
-			Args:      req.Args,
-			Env:       req.Env,
-			Endpoint:  req.Endpoint,
-			Enabled:   true,
-		}); err != nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "MCP configuration could not be saved"})
-			return
-		}
-	}
-
-	cfg := hexmcp.ServerConfig{
-		Name:      req.Name,
-		Transport: transport,
-		Command:   req.Command,
-		Args:      req.Args,
-		Env:       req.Env,
-		Endpoint:  req.Endpoint,
-		Enabled:   true,
-	}
-
-	// best-effort 注册：即时连接给一个较短窗口（暖装秒连=connected；冷装 npx/uvx 下载超时则
-	// 转后台重连，不硬失败）。根治「添加数据源」首次冷装失败（详见 Manager.AddServerBestEffort）。
+	failureStatus := http.StatusBadRequest
 	ctx, cancel := context.WithTimeout(r.Context(), mcpAddImmediateConnectTimeout)
 	defer cancel()
-
-	connected, err := s.mcpMgr.AddServerBestEffort(ctx, cfg)
+	connected, err := s.mcpMgr.ConfigureServerBestEffort(ctx, req.Name, func() (*hexmcp.ServerConfig, error) {
+		candidate := config.MCPServerConfig{Name: req.Name, Transport: transport, Command: req.Command, Args: req.Args, Env: req.Env, Endpoint: req.Endpoint, Enabled: true}
+		if hasSecretMutations {
+			current, err := s.cfgWriter.GetMCPServer(req.Name)
+			if err != nil {
+				failureStatus = http.StatusServiceUnavailable
+				return nil, fmt.Errorf("MCP secret persistence is unavailable")
+			}
+			merged, err := mergeMCPSecretMutations(current, candidate, req.SecretArgs, req.SecretEnv)
+			if err != nil {
+				return nil, err
+			}
+			candidate = merged
+		}
+		if s.cfgWriter != nil {
+			if err := s.cfgWriter.UpsertMCPServer(candidate); err != nil {
+				failureStatus = http.StatusServiceUnavailable
+				return nil, fmt.Errorf("MCP configuration could not be saved")
+			}
+		} else {
+			s.rememberMCPServerConfig(candidate)
+		}
+		return &hexmcp.ServerConfig{Name: candidate.Name, Transport: candidate.Transport, Command: candidate.Command, Args: candidate.Args, Env: candidate.Env, Endpoint: candidate.Endpoint, Enabled: true}, nil
+	})
 	if err != nil {
-		// 仅不可恢复错误（name 空 / Manager 已关闭）走 400；即时连接失败属可恢复，不会到这。
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": fmt.Sprintf("MCP Server %q 添加失败: %v", req.Name, err),
-		})
+		if errors.Is(err, hexmcp.ErrServerChangeSuperseded) {
+			failureStatus = http.StatusConflict
+		}
+		writeJSON(w, failureStatus, map[string]string{"error": err.Error()})
 		return
 	}
 
-	s.rememberMCPServerConfig(config.MCPServerConfig{
-		Name:      req.Name,
-		Transport: transport,
-		Command:   req.Command,
-		Args:      req.Args,
-		Env:       req.Env,
-		Endpoint:  req.Endpoint,
-		Enabled:   true,
-	})
 	msg := fmt.Sprintf("MCP Server %q 已添加", req.Name)
 	if !connected {
 		msg = fmt.Sprintf("MCP Server %q 已添加，正在后台连接（首次需下载组件）", req.Name)
@@ -547,32 +513,15 @@ func (s *Server) handleRemoveMCPServer(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "MCP 未启用"})
 		return
 	}
-	// 先移除持久化配置；失败时保留运行态，允许用户修复写盘条件后重试。
-	if s.cfgWriter != nil {
-		persisted, err := s.cfgWriter.GetMCPServer(name)
-		if err == nil && persisted != nil {
-			err = s.cfgWriter.RemoveMCPServer(name)
+	if _, err := s.ManageMCP(r.Context(), "remove", name); err != nil {
+		status := http.StatusServiceUnavailable
+		if strings.Contains(err.Error(), "not configured") {
+			status = http.StatusNotFound
 		}
-		if err != nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "MCP configuration could not be removed"})
-			return
-		}
-	}
-	if err := s.mcpMgr.RemoveServer(name); err != nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		writeJSON(w, status, map[string]string{"error": err.Error()})
 		return
 	}
-	if s.cfg != nil {
-		s.cfgMu.Lock()
-		servers := s.cfg.MCP.Servers[:0]
-		for _, server := range s.cfg.MCP.Servers {
-			if server.Name != name {
-				servers = append(servers, server)
-			}
-		}
-		s.cfg.MCP.Servers = servers
-		s.cfgMu.Unlock()
-	}
+
 	writeJSON(w, http.StatusOK, map[string]string{"message": fmt.Sprintf("MCP Server %q 已移除", name)})
 }
 
@@ -661,6 +610,15 @@ func (s *Server) handleSkillStatus(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
 		return
 	}
+	if s.skillLifecycle != nil {
+		state, err := s.skillLifecycle.SetEnabled(r.Context(), name, req.Enabled)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, skillStatusResponse{Name: name, Enabled: state.Enabled, EffectiveEnabled: state.EffectiveEnabled, RequiresRestart: state.RequiresRestart, Message: "技能状态已更新并立即生效"})
+		return
+	}
 	if err := s.mp.SetEnabled(name, req.Enabled); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "保存状态失败: " + err.Error()})
 		return
@@ -741,7 +699,7 @@ func (s *Server) handleInstallSkill(w http.ResponseWriter, r *http.Request) {
 	case "clawhub":
 		s.installSkillFromClawHub(w, r, strings.TrimPrefix(req.Source, "clawhub://"))
 	case "file":
-		s.installSkillFromFile(w, req.Source)
+		s.installSkillFromFile(w, r.Context(), req.Source)
 	case "url":
 		if err := inputlimits.Bytes("source", req.Source, "", inputlimits.URLBytes); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -749,7 +707,7 @@ func (s *Server) handleInstallSkill(w http.ResponseWriter, r *http.Request) {
 		}
 		s.installSkillFromURL(w, r, req.Source)
 	case "content":
-		s.installSkillFromContent(w, req.Content)
+		s.installSkillFromContent(w, r.Context(), req.Content)
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]string{
 			"error": "不支持的安装类型: " + req.Type,
@@ -790,7 +748,7 @@ func validSkillIdentifier(name string) bool {
 
 // installSkillFromContent 把一份完整 SKILL.md 原文写盘安装（AI 生成 / 就地编辑后落盘）。
 // 复用 URL 安装的「临时文件 → mp.Install」路径，校验 frontmatter 标记、name 合法性与大小上限。
-func (s *Server) installSkillFromContent(w http.ResponseWriter, content string) {
+func (s *Server) installSkillFromContent(w http.ResponseWriter, ctx context.Context, content string) {
 	trimmed := strings.TrimSpace(content)
 	if trimmed == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "content 不能为空"})
@@ -829,21 +787,14 @@ func (s *Server) installSkillFromContent(w http.ResponseWriter, content string) 
 	}
 	tmpFile.Close()
 
-	sk, err := s.mp.Install(tmpPath)
+	sk, err := s.installSkillSource(ctx, tmpPath)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "安装技能失败: " + err.Error()})
 		return
 	}
 
 	s.syncEngineMarketplaceSkills()
-	writeJSON(w, http.StatusOK, map[string]any{
-		"name":               sk.Meta.Name,
-		"description":        sk.Meta.Description,
-		"version":            sk.Meta.Version,
-		"message":            "技能已创建并同步到运行引擎",
-		"requires_restart":   false,
-		"runtime_registered": true,
-	})
+	s.writeSkillInstallResponse(w, sk, "技能已创建并同步到运行引擎")
 }
 
 // installSkillFromClawHub 从 ClawHub 在线安装
@@ -857,6 +808,10 @@ func (s *Server) installSkillFromClawHub(w http.ResponseWriter, r *http.Request,
 	// 离线优先：即时 seed（磁盘缓存/内嵌种子）保证目录非空；实际下载 .md 仍需网络（下方各自处理）。
 	s.skillHub.EnsureCatalog()
 	meta, ok := s.findClawHubEntry(skillName)
+	if !ok && s.skillLifecycle != nil && s.skillLifecycle.HasBundled(skillName) {
+		meta = hub.SkillMeta{Name: skillName, Type: "skill"}
+		ok = true
+	}
 	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]string{
 			"error": "技能未找到: " + skillName,
@@ -875,31 +830,45 @@ func (s *Server) installSkillFromClawHub(w http.ResponseWriter, r *http.Request,
 		s.installMCPFromClawHubEntry(w, r, entry)
 		return
 	}
-	if err := s.skillHub.Install(r.Context(), skillName); err != nil {
+	var installed *marketplace.MarkdownSkill
+	var installErr error
+	source := "hub"
+	if s.skillLifecycle != nil {
+		result, err := s.skillLifecycle.InstallFromCatalog(r.Context(), skillName)
+		installed, installErr, source = result.Skill, err, result.Source
+	} else {
+		installErr = s.skillHub.Install(r.Context(), skillName)
+	}
+	if installErr != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{
-			"error": "安装技能失败: " + err.Error(),
+			"error": "安装技能失败: " + installErr.Error(),
 		})
 		return
 	}
-	_ = s.mp.Init()
+	if err := s.mp.Init(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
 	s.syncEngineMarketplaceSkills()
-	writeJSON(w, http.StatusOK, map[string]any{
-		"name":               skillName,
-		"message":            "技能已从 ClawHub 安装并已同步到运行引擎",
-		"requires_restart":   false,
-		"runtime_registered": true,
-	})
+	if installed == nil {
+		installed, _ = s.mp.Get(skillName)
+	}
+	if installed == nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Installed skill could not be read back"})
+		return
+	}
+	message := "技能已从 ClawHub 安装并已同步到运行引擎"
+	if source == "bundled" {
+		message = "Bundled skill package installed and runtime refreshed"
+	}
+	s.writeSkillInstallResponse(w, installed, message, source)
 }
 
 func (s *Server) findClawHubEntry(skillName string) (hub.SkillMeta, bool) {
 	if s.skillHub == nil {
 		return hub.SkillMeta{}, false
 	}
-	catalog := s.skillHub.GetCatalog()
-	if catalog == nil {
-		return hub.SkillMeta{}, false
-	}
-	for _, entry := range catalog.Skills {
+	for _, entry := range s.skillCatalog() {
 		if entry.Name != skillName {
 			continue
 		}
@@ -910,67 +879,26 @@ func (s *Server) findClawHubEntry(skillName string) (hub.SkillMeta, bool) {
 
 func (s *Server) installMCPFromClawHubEntry(w http.ResponseWriter, r *http.Request, entry hub.ValidatedMCPServer) {
 	if s.mcpMgr == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
-			"error": "MCP 模块未启用，无法安装 MCP 市场条目: " + entry.Name(),
-		})
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "MCP is disabled"})
 		return
 	}
-
-	cfg := hexmcp.ServerConfig{
-		Name:      entry.Name(),
-		Transport: "stdio",
-		Command:   entry.Command(),
-		Args:      entry.Args(),
-		Env:       entry.Env(),
-		Enabled:   true,
-	}
-
-	// 先保存市场配置，写盘失败时不创建仅本次运行可见的连接。
-	if s.cfgWriter != nil {
-		if err := s.cfgWriter.AppendMCPServer(entry.Name(), cfg.Transport, cfg.Command, cfg.Args, cfg.Env, cfg.Endpoint); err != nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "MCP configuration could not be saved"})
-			return
-		}
-	}
-
-	// best-effort：即时连接给较短窗口，冷装 npx/uvx 首次下载超时则转后台 reconnectLoop(30s)，不硬失败
-	// （与 handleAddMCPServer 一致，修复 BUG-20260627：hub 安装路径冷装硬失败 → 装不上/点了没反应）。
-	ctx, cancel := context.WithTimeout(r.Context(), mcpAddImmediateConnectTimeout)
-	defer cancel()
-
-	connected, err := s.mcpMgr.AddServerBestEffort(ctx, cfg)
+	state, err := s.installMCPEntry(r.Context(), entry)
 	if err != nil {
-		// 仅不可恢复错误（name 空 / Manager 已关闭）走 400；即时连接失败属可恢复，不会到这。
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": fmt.Sprintf("MCP Server %q 添加失败: %v", entry.Name(), err),
-		})
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
 		return
 	}
-
-	s.rememberMCPServerConfig(config.MCPServerConfig{
-		Name: cfg.Name, Transport: cfg.Transport, Command: cfg.Command,
-		Args: cfg.Args, Env: cfg.Env, Endpoint: cfg.Endpoint, Enabled: true,
-	})
-	msg := "MCP 条目已从 ClawHub 安装并已连接"
-	if !connected {
-		msg = "MCP 条目已从 ClawHub 安装，正在后台连接（首次需下载组件）"
+	message := "MCP 条目已从 ClawHub 安装并已连接"
+	if !state.Connected {
+		message = "MCP 条目已从 ClawHub 安装，正在后台连接（首次需下载组件）"
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"name":               entry.Name(),
-		"type":               "mcp",
-		"message":            msg,
-		"requires_restart":   false,
-		"runtime_registered": connected,
-		"config_hint":        entry.ConfigHint(),
-		"artifact":           entry.Artifact(),
-	})
+	writeJSON(w, http.StatusOK, map[string]any{"name": entry.Name(), "type": "mcp", "message": message, "requires_restart": false, "runtime_registered": state.Connected, "connected": state.Connected, "enabled": state.Enabled, "persisted": state.Persisted, "config_hint": entry.ConfigHint(), "artifact": entry.Artifact()})
 }
 
 // installSkillFromFile 从本地文件安装
 //
 // 允许绝对路径（桌面端文件选择器返回绝对路径）。
 // 安全校验：后缀 .md、无路径穿越、文件大小 < 1 MB。
-func (s *Server) installSkillFromFile(w http.ResponseWriter, source string) {
+func (s *Server) installSkillFromFile(w http.ResponseWriter, ctx context.Context, source string) {
 	// 路径穿越检查
 	if strings.Contains(source, "..") {
 		writeJSON(w, http.StatusBadRequest, map[string]string{
@@ -1003,7 +931,7 @@ func (s *Server) installSkillFromFile(w http.ResponseWriter, source string) {
 		}
 	}
 
-	sk, err := s.mp.Install(source)
+	sk, err := s.installSkillSource(ctx, source)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{
 			"error": "安装技能失败: " + err.Error(),
@@ -1012,14 +940,7 @@ func (s *Server) installSkillFromFile(w http.ResponseWriter, source string) {
 	}
 
 	s.syncEngineMarketplaceSkills()
-	writeJSON(w, http.StatusOK, map[string]any{
-		"name":               sk.Meta.Name,
-		"description":        sk.Meta.Description,
-		"version":            sk.Meta.Version,
-		"message":            "技能已安装并已同步到运行引擎",
-		"requires_restart":   false,
-		"runtime_registered": true,
-	})
+	s.writeSkillInstallResponse(w, sk, "技能已安装并已同步到运行引擎")
 }
 
 const skillURLMaxSize = 1 << 20 // 1 MB
@@ -1114,7 +1035,7 @@ func (s *Server) installSkillFromURL(w http.ResponseWriter, r *http.Request, raw
 	}
 	tmpFile.Close()
 
-	sk, err := s.mp.Install(tmpPath)
+	sk, err := s.installSkillSource(r.Context(), tmpPath)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{
 			"error": "安装技能失败: " + err.Error(),
@@ -1123,20 +1044,19 @@ func (s *Server) installSkillFromURL(w http.ResponseWriter, r *http.Request, raw
 	}
 
 	s.syncEngineMarketplaceSkills()
-	writeJSON(w, http.StatusOK, map[string]any{
-		"name":               sk.Meta.Name,
-		"description":        sk.Meta.Description,
-		"version":            sk.Meta.Version,
-		"message":            "技能已从远程 URL 安装并已同步到运行引擎",
-		"requires_restart":   false,
-		"runtime_registered": true,
-	})
+	s.writeSkillInstallResponse(w, sk, "技能已从远程 URL 安装并已同步到运行引擎")
 }
 
 // handleUninstallSkill 删除技能
 func (s *Server) handleUninstallSkill(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	if err := s.mp.Uninstall(name); err != nil {
+	var uninstallErr error
+	if s.skillLifecycle != nil {
+		uninstallErr = s.skillLifecycle.Uninstall(r.Context(), name)
+	} else {
+		uninstallErr = s.mp.Uninstall(name)
+	}
+	if err := uninstallErr; err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, marketplace.ErrSkillNotInstalled) {
 			status = http.StatusNotFound
@@ -1151,6 +1071,18 @@ func (s *Server) handleUninstallSkill(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) skillEffectiveState(name string, enabled bool) (bool, bool, string) {
+	if s.skillLifecycle != nil {
+		if state, err := s.skillLifecycle.State(name); err == nil {
+			if !state.Registered && state.Enabled {
+				message := "Skill is installed; refresh to activate"
+				if state.RequiresRestart {
+					message = "Skill is installed; this runtime requires restart"
+				}
+				return false, state.RequiresRestart, message
+			}
+			return state.EffectiveEnabled, state.RequiresRestart, ""
+		}
+	}
 	runtime, ok := s.engine.(skillRuntimeController)
 	if !ok {
 		if enabled {
@@ -1509,6 +1441,10 @@ func (s *Server) handleRegisterAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := agentcatalog.ValidateMetadata(cfg.Metadata); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
 	if err := s.validateAgentMetadataCapabilities(cfg.Metadata); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
@@ -1627,6 +1563,10 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 		cfg.Metadata = *req.Metadata
 	}
 	cfg.Metadata = k12.EnsureTutorAvatar(cfg.Metadata)
+	if err := agentcatalog.ValidateMetadataUpdate(existing.Metadata, cfg.Metadata); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
 	if err := s.validateAgentMetadataCapabilities(cfg.Metadata); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
@@ -2127,6 +2067,9 @@ func (s *Server) handleVoiceSynthesize(w http.ResponseWriter, r *http.Request) {
 
 // syncEngineMarketplaceSkills 将磁盘上的 Markdown 技能与 ReAct 引擎注册表对齐（安装/卸载后调用）
 func (s *Server) syncEngineMarketplaceSkills() {
+	if s.skillLifecycle != nil {
+		return
+	}
 	if s.mp == nil {
 		return
 	}

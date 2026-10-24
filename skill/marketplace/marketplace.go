@@ -79,9 +79,23 @@ func (m *Marketplace) Init() error {
 	if err != nil {
 		return fmt.Errorf("扫描技能目录失败: %w", err)
 	}
+	disabled := m.getDisabled()
 
 	m.mu.Lock()
+	m.skills = make(map[string]*MarkdownSkill, len(skills))
 	for _, skill := range skills {
+		if disabled[uninstalledSkillKey(skill.Name())] {
+			continue
+		}
+		if previous, exists := m.skills[skill.Name()]; exists && filepath.Base(previous.FilePath) == "SKILL.md" && filepath.Base(skill.FilePath) != "SKILL.md" {
+			if _, err := os.Stat(filepath.Join(filepath.Dir(previous.FilePath), "bundle.json")); err == nil {
+				left, leftErr := os.ReadFile(previous.FilePath)
+				right, rightErr := os.ReadFile(skill.FilePath)
+				if leftErr == nil && rightErr == nil && bytes.Equal(left, right) {
+					continue
+				}
+			}
+		}
 		m.skills[skill.Meta.Name] = skill
 	}
 	m.mu.Unlock()
@@ -109,6 +123,7 @@ func (m *Marketplace) SeedFromFS(fsys fs.FS, subdir string) (int, error) {
 	// manifest 记录每个 seed 文件「上次由本程序写入的内容哈希」，用于版本感知 re-seed 时
 	// 区分「用户未改动（可安全升级覆盖）」与「用户已自定义（保护不覆盖）」（BUG-20260712）。
 	manifest := loadSeedManifest(m.skillDir)
+	disabled := m.getDisabled()
 	manifestDirty := false
 	seeded := 0
 	for _, e := range entries {
@@ -118,6 +133,14 @@ func (m *Marketplace) SeedFromFS(fsys fs.FS, subdir string) (int, error) {
 		data, rerr := fs.ReadFile(fsys, path.Join(subdir, e.Name()))
 		if rerr != nil {
 			return seeded, fmt.Errorf("读取内嵌 skill %q 失败: %w", e.Name(), rerr)
+		}
+		meta, _ := parseFrontmatter(string(data))
+		name := meta.Name
+		if name == "" {
+			name = strings.TrimSuffix(e.Name(), ".md")
+		}
+		if disabled[uninstalledSkillKey(name)] {
+			continue
 		}
 		dest := filepath.Join(m.skillDir, e.Name())
 		published, recordHash, werr := publishSeedVersionAware(dest, data, manifest[e.Name()])
@@ -467,6 +490,11 @@ func (m *Marketplace) Install(source string) (*MarkdownSkill, error) {
 	var skill *MarkdownSkill
 
 	if info.IsDir() {
+		if _, err := os.Stat(filepath.Join(source, "bundle.json")); err == nil {
+			return m.installBundle(source)
+		} else if !os.IsNotExist(err) {
+			return nil, err
+		}
 		// 目录安装：复制整个目录
 		skillFile := filepath.Join(source, "SKILL.md")
 		if _, err := os.Stat(skillFile); err != nil {
@@ -513,6 +541,9 @@ func (m *Marketplace) Install(source string) (*MarkdownSkill, error) {
 		if err != nil {
 			return nil, err
 		}
+		if updated, handled, err := m.updateInstalledContent(skill, data); handled {
+			return updated, err
+		}
 		if err := os.WriteFile(destPath, data, 0644); err != nil {
 			return nil, fmt.Errorf("写入技能文件失败: %w", err)
 		}
@@ -524,6 +555,10 @@ func (m *Marketplace) Install(source string) (*MarkdownSkill, error) {
 
 	// 注册技能
 	m.mu.Lock()
+	if err := m.clearUninstalledLocked(skill.Name()); err != nil {
+		m.mu.Unlock()
+		return nil, err
+	}
 	m.skills[skill.Meta.Name] = skill
 	m.mu.Unlock()
 
@@ -540,13 +575,16 @@ func (m *Marketplace) Uninstall(name string) error {
 	}
 
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	skill, ok := m.skills[name]
 	if !ok {
-		m.mu.Unlock()
 		return fmt.Errorf("技能 %q: %w", name, ErrSkillNotInstalled)
 	}
-	delete(m.skills, name)
-	m.mu.Unlock()
+	disabled := m.getDisabledLocked()
+	disabled[uninstalledSkillKey(name)] = true
+	if err := m.saveDisabledLocked(disabled); err != nil {
+		return err
+	}
 
 	// 删除文件/目录 — 验证路径在 skillDir 内
 	dir := filepath.Dir(skill.FilePath)
@@ -568,6 +606,7 @@ func (m *Marketplace) Uninstall(name string) error {
 			return fmt.Errorf("删除技能文件失败: %w", err)
 		}
 	}
+	delete(m.skills, name)
 
 	logger.Info("name", "name", name)
 	return nil

@@ -2,7 +2,7 @@
 
 # Agent、集成与工具 API
 
-本文覆盖当前源码的 33 个方法/路径组合。基于实际 handler 与 DTO；已发布安装包可能使用不同源码版本。完整机器可读规范由 [OpenAPI](../../api/openapi.yaml)提供。
+本文覆盖当前源码的 38 个方法/路径组合。基于实际 handler 与 DTO；已发布安装包可能使用不同源码版本。完整机器可读规范由 [OpenAPI](../../api/openapi.yaml)提供。
 
 ## 认证与公共约定
 
@@ -26,15 +26,20 @@ K12 实例创建 metadata、profile-bundle 与初始 `curriculum_progress` 特�
 | `POST` | `/api/v1/mcp/servers` | 登记或替换 MCP 服务器 |
 | `DELETE` | `/api/v1/mcp/servers/{name}` | 移除 MCP 服务器 |
 | `POST` | `/api/v1/mcp/servers/{name}/restart` | 重建指定 MCP 连接 |
+| `PUT` | `/api/v1/mcp/servers/{name}/status` | 保存 MCP 启停状态并更新连接 |
 | `POST` | `/api/v1/mcp/tools/call` | 调用 MCP 工具 |
 | `GET` | `/api/v1/mcp/status` | 查询 MCP 运行状态 |
 | `GET` | `/api/v1/skills` | 列出已安装技能及生效状态 |
 | `GET` | `/api/v1/skills/{name}/content` | 读取已安装 SKILL.md |
+| `POST` | `/api/v1/skills/refresh` | 重新发现并热加载已安装技能 |
+| `GET` | `/api/v1/skills/{name}/resources` | 列出已安装包的资源清单 |
+| `GET` | `/api/v1/skills/{name}/resources/{path...}` | 读取声明资源的原始字节 |
 | `PUT` | `/api/v1/skills/{name}/status` | 保存技能启用状态 |
 | `POST` | `/api/v1/skills/install` | 安装技能或 Hub MCP 条目 |
 | `POST` | `/api/v1/skills/generate` | 生成 Skill 草稿 |
 | `DELETE` | `/api/v1/skills/{name}` | 卸载技能 |
 | `GET` | `/api/v1/agents` | 列出实例、规则与默认值 |
+| `GET` | `/api/v1/agents/templates` | 查询通用 Agent 模板及精确快照 |
 | `POST` | `/api/v1/agents` | 注册 Agent 实例 |
 | `PUT` | `/api/v1/agents/{name}` | 局部更新 Agent 配置 |
 | `DELETE` | `/api/v1/agents/{name}` | 注销 Agent 实例 |
@@ -175,13 +180,15 @@ name 为公开可调用名，server_name 标明归属，input_schema 为工具�
 
 认证：Bearer；成功 HTTP 200。
 
-返回已配置服务器的连接摘要，未连接项仍保留；不返回 command、args、env、endpoint 或秘密值。关闭时 servers=[]、total=0。
+返回已配置服务器的连接摘要，未连接项仍保留；不返回 command、args、env、endpoint 或秘密值。整个 MCP 模块未挂载时 servers=[]、total=0。
 
 可用性：{"mounted_when": "s.mcpMgr != nil", "disabled_projection": {"status": 200, "body": {"servers": [], "total": 0}}}.
 
 请求体：无。
 
 成功体：`AgentsMCPServers`（字段见数据结构）。
+
+列表包含已保存的启用和停用服务器，并合并仅存在于运行时的连接。每项 `enabled` 表示保存的启停选择，`status` 表示实际连接状态；停用项仍保留在列表中，通常为 `enabled:false`、`status:"disconnected"`、`tool_count:0`。停用不等于卸载，不返回启动参数或凭据。
 
 实现：[api/handler_misc.go](../../api/handler_misc.go) · `handleListMCPServers`.
 
@@ -193,6 +200,8 @@ name 为公开可调用名，server_name 标明归属，input_schema 为工具�
 
 先保存配置，再用最多 10 秒的即时连接窗口登记运行配置。connected=false 表示配置已登记，后续后台连接；不是失败回滚保证。可启动/替换 stdio 子进程或访问网络端点。秘密变更须有配置 Writer，同一 index/key 不可重复，replace 值非空且最多 64 KiB；参见秘密变更 DTO。
 
+新增、替换、启停、移除和 Hub 安装共用短配置提交阶段，绑定持久状态与运行代次；连接网络与关闭资源不持有此协调锁。较新的同名命令可以取代尚在连接的旧命令；旧请求返回409时，查询当前配置与运行状态，不盲目重放旧配置。
+
 可用性：{"mounted_when": "s.mcpMgr != nil", "disabled_projection": {"status": [404, 405], "description": "Route is not mounted; ServeMux returns 405 when another method remains registered for the same path, otherwise 404."}}.
 
 请求体：`AgentsMCPAddRequest`; 最大读取 65536 bytes. 字段详见下方结构表；“必填”以 handler 实际拒绝条件为准。
@@ -202,6 +211,7 @@ name 为公开可调用名，server_name 标明归属，input_schema 为工具�
 | 状态 | 实际错误 / 副作用边界 |
 | --- | --- |
 | `400` | 格式、名称、传输、命令/端点、秘密变更或 Manager 状态无效。配置可能已先保存。 |
+| `409` | 在途连接被较新的同名命令取代；错误体为 `{"error":"MCP server change was superseded"}`。 |
 | `503` | 配置或秘密持久化不可用/失败。 |
 
 实现：[api/handler_misc.go](../../api/handler_misc.go) · `handleAddMCPServer`.
@@ -212,7 +222,7 @@ name 为公开可调用名，server_name 标明归属，input_schema 为工具�
 
 认证：Bearer；成功 HTTP 200。
 
-先删持久配置，再关闭运行连接/子进程与工具注册；运行移除返回 404 时，持久配置可能已移除。
+与会话工具共用移除用例：先删持久配置并撤销运行代次，再关闭连接/子进程与工具注册。已停用或尚未连通的已配置服务器正常返回200，运行项缺失不构成删除失败。真正缺少已配置服务器时返回404；持久化失败仍返回503，不作为成功处理。
 
 可用性：{"mounted_when": "s.mcpMgr != nil", "disabled_projection": {"status": [404, 405], "description": "Route is not mounted; ServeMux returns 405 when another method remains registered for the same path, otherwise 404."}}.
 
@@ -227,7 +237,7 @@ name 为公开可调用名，server_name 标明归属，input_schema 为工具�
 | 状态 | 实际错误 / 副作用边界 |
 | --- | --- |
 | `400` | name 为空。 |
-| `404` | 运行服务器不存在。 |
+| `404` | 服务器未配置。 |
 | `503` | 配置移除失败或 MCP 未启用。 |
 
 实现：[api/handler_misc.go](../../api/handler_misc.go) · `handleRemoveMCPServer`.
@@ -239,6 +249,8 @@ name 为公开可调用名，server_name 标明归属，input_schema 为工具�
 认证：Bearer；成功 HTTP 200。
 
 20 秒连接窗口；新连接成功才替换旧连接，失败保留旧状态。不会修改服务器配置。
+
+与正在进行的配置替换交错时，重启读取最新已提交配置并接管连接代次；旧端点的晚到结果不能覆盖新连接。当前代次连接期间后台重连不会重复启动同名连接。
 
 可用性：{"mounted_when": "s.mcpMgr != nil", "disabled_projection": {"status": [404, 405], "description": "Route is not mounted; ServeMux returns 405 when another method remains registered for the same path, otherwise 404."}}.
 
@@ -258,6 +270,28 @@ name 为公开可调用名，server_name 标明归属，input_schema 为工具�
 | `503` | MCP 未启用。 |
 
 实现：[api/handler_misc.go](../../api/handler_misc.go) · `handleRestartMCPServer`.
+
+### `PUT /api/v1/mcp/servers/{name}/status`
+
+保存已配置 MCP 的启停状态并更新实际连接；认证：Bearer，成功 HTTP 200。
+
+路由仅在 `s.mcpMgr != nil` 时挂载；未挂载为 404/405。与 Skill 是否启用、Hub 是否可用无关。先保存 enabled，再启用连接或关闭连接/子进程并移除工具；启用有最多10秒即时连接窗口，connected=false可表示后续后台连接。禁用状态在进程重开后保持。失败不保证回滚先前的配置写入。
+
+| 位置 / 字段 | 必填 | 类型 | 合同 |
+| --- | --- | --- | --- |
+| `path.name` | 是 | `string` | 已保存的服务器名称。 |
+| `body.enabled` | 是 | `boolean` | 必须显式提供 true 或 false，省略/null 无效；最大读取1024字节。 |
+
+成功体为 `AgentsMCPLifecycleState`，不返回 command、args、env、endpoint 或秘密值。
+
+保存与运行代次预留共用短提交阶段，网络连接和资源关闭在其外执行。停用或移除同时撤销同名在途连接代次；此前尚未完成的启用不能在之后重新接通。旧启用请求被较新操作取代时返回409，应查询保存与运行状态，不盲目重新启用。
+
+| 状态 | 实际错误 / 副作用边界 |
+| --- | --- |
+| `400` | JSON/enabled 无效，服务器未配置/未保存，持久化不可用或失败，或连接/运行态更新失败；配置可能已保存。 |
+| `409` | 在途连接被较新的同名命令取代；错误体为 `{"error":"MCP server change was superseded"}`。 |
+
+实现：[api/resource_mcp_lifecycle.go](../../api/resource_mcp_lifecycle.go) · `handleMCPResourceStatus` / `ManageMCP`。
 
 ### `POST /api/v1/mcp/tools/call`
 
@@ -302,7 +336,7 @@ name 为公开可调用名，server_name 标明归属，input_schema 为工具�
 
 认证：Bearer；成功 HTTP 200。
 
-enabled 是保存状态，effective_enabled 是当前运行时状态；requires_restart 表示未生效/不支持探测。列表 dir 是服务端路径。
+enabled 是保存状态，effective_enabled 是当前运行时状态；requires_restart 表示当前宿主不能通过热刷新应用已启用技能，不等同于所有状态差异。AutoLoad=false 时已安装但未注册的技能返回 effective_enabled=false、requires_restart=false，可显式 refresh 激活；重启仍遵守不自动加载。列表 dir 是服务端路径。
 
 可用性：{"mounted_when": "s.mp != nil", "disabled_projection": {"status": [404, 405], "description": "Route is not mounted; ServeMux returns 405 when another method remains registered for the same path, otherwise 404."}}.
 
@@ -319,6 +353,8 @@ enabled 是保存状态，effective_enabled 是当前运行时状态；requires_
 认证：Bearer；成功 HTTP 200。
 
 只读文件，不安装或修改技能。name 必须是单个文件名且不能含 ..；path 是服务端路径。
+
+会话工具 `patch_skill` 基于所读正文摘要提交片段修改：同一正文在此期间被其他修改替换时返回 `skill patch conflict: installed content changed` 工具错误，不覆盖已经提交的内容。调用方应重新读取并匹配片段；整篇 `create_skill` 写入仍保留明确替换语义。此错误属于会话工具结果，不是本读取端点的HTTP409。
 
 可用性：{"mounted_when": "s.mp != nil", "disabled_projection": {"status": [404, 405], "description": "Route is not mounted; ServeMux returns 405 when another method remains registered for the same path, otherwise 404."}}.
 
@@ -338,13 +374,58 @@ enabled 是保存状态，effective_enabled 是当前运行时状态；requires_
 
 实现：[api/handler_skill_content.go](../../api/handler_skill_content.go) · `handleSkillContent`.
 
+### `POST /api/v1/skills/refresh`
+
+重新扫描安装目录并热更新运行时 Markdown 技能；认证：Bearer，成功 HTTP 200。
+
+与安装、启停和卸载共用生命周期服务：替换修改后的正文、注销已删除项，保留已保存的 disabled 状态，不下载目录条目、不调用模型。显式刷新可在 AutoLoad=false 时注册技能。路由仅在 `s.mp != nil` 时挂载，未挂载为404/405。
+
+请求体不读取，无需提供；`{}` 也可。成功体为 `{"skills":[AgentsSkillRuntimeState...]}`，没有 total 或 dir 字段。
+
+| 状态 | 实际错误 / 副作用边界 |
+| --- | --- |
+| `500` | 扫描或运行态刷新失败；不承诺回滚已发生的磁盘变化。 |
+| `503` | 已挂载 Marketplace，但宿主未装配生命周期服务。 |
+
+实现：[api/handler_skill_lifecycle.go](../../api/handler_skill_lifecycle.go) · `handleRefreshSkills`。
+
+### `GET /api/v1/skills/{name}/resources`
+
+列出当前已安装包的声明资源；认证：Bearer，成功 HTTP 200。路由仅在 `s.mp != nil` 时挂载，未挂载为404/405。
+
+`path.name` 为已安装技能名，请求体无。成功体为 `{"name":"...","resources":[AgentsSkillResource...]}`，按 path 排序；不返回资源正文或把它们注入模型。旧单文件技能仅返回 SKILL.md。完整包读取时校验清单及全部声明文件的身份、大小和摘要，不能把缺资源的包返回为完整成功。
+
+| 状态 | 实际错误 / 副作用边界 |
+| --- | --- |
+| `400` | 包/清单/文件无效、不完整，摘要不一致或其他资源读取失败。 |
+| `404` | 技能未安装。 |
+| `503` | 生命周期服务未装配。 |
+
+实现：[api/handler_skill_lifecycle.go](../../api/handler_skill_lifecycle.go) · `handleSkillResources`。
+
+### `GET /api/v1/skills/{name}/resources/{path...}`
+
+读取当前已安装包的精确资源字节；认证：Bearer，成功 HTTP 200。路由仅在 `s.mp != nil` 时挂载，未挂载为404/405。
+
+`path.name` 为技能名；`path.path` 为包内相对路径，例如 assets/template.typ、SKILL.md 或 bundle.json。只读清单声明文件和清单本身，不执行脚本、不生成媒体、不修改启用状态；旧单文件技能只支持 SKILL.md。没有历史版本参数，调用方应冻结所需资源版本、摘要及字节，不能在恢复时假定当前安装包仍是原版本。
+
+成功体为原始字节，不是JSON封装。Content-Type按扩展名推断，未知为 application/octet-stream；Content-Length为实际字节数；ETag为带引号的文件SHA256，X-Skill-Version为当前包版本，X-Content-SHA256为文件SHA256。ETag仅作为身份返回，handler未实现条件请求/304；bundle.json文件SHA不等于清单的规范化语义摘要。
+
+| 状态 | 实际错误 / 副作用边界 |
+| --- | --- |
+| `400` | 路径未声明/无效、无资源包、包身份变化需刷新、文件缺失/摘要不符或读取失败。 |
+| `404` | 技能未安装；包内缺文件仍为400。 |
+| `503` | 生命周期服务未装配。 |
+
+实现：[api/handler_skill_lifecycle.go](../../api/handler_skill_lifecycle.go) · `handleSkillResource`。
+
 ### `PUT /api/v1/skills/{name}/status`
 
 保存技能启用状态.
 
 认证：Bearer；成功 HTTP 200。
 
-请求省略 enabled 等同 false，不保留旧状态。先持久化再尝试热更新；热更新失败仍返回 200，并由 effective_enabled/requires_restart/message 说明。
+请求省略 enabled 等同 false，不保留旧状态。标准宿主通过统一生命周期先持久化再扫描/热更新，返回真实 enabled/effective_enabled/requires_restart；失败返回500，先前状态写入可能已发生。旧宿主未注入生命周期时保留原兼容分支：热更新失败仍可返回200并通过状态字段/message说明。操作不会删除资源或旧冻结产物。
 
 可用性：{"mounted_when": "s.mp != nil", "disabled_projection": {"status": [404, 405], "description": "Route is not mounted; ServeMux returns 405 when another method remains registered for the same path, otherwise 404."}}.
 
@@ -360,7 +441,7 @@ enabled 是保存状态，effective_enabled 是当前运行时状态；requires_
 | --- | --- |
 | `400` | 名称或 JSON 无效。 |
 | `404` | 技能未安装。 |
-| `500` | 状态保存失败。 |
+| `500` | 状态保存或生命周期刷新失败；已保存状态不保证回滚。 |
 
 实现：[api/handler_misc.go](../../api/handler_misc.go) · `handleSkillStatus`.
 
@@ -370,7 +451,9 @@ enabled 是保存状态，effective_enabled 是当前运行时状态；requires_
 
 认证：Bearer；成功 HTTP 200。
 
-file 读取执行服务所在机器的路径，可为 .md 文件或技能目录，不能含 ..；单文件上限 1 MiB。url 必须 HTTPS，下载窗口 30 秒，内容上限 1 MiB 且具有 frontmatter。content 要求闭合 frontmatter 与合法 name。clawhub 解析目录名称，普通技能下载并落盘；MCP 条目需通过既有 pinned artifact 校验，保存配置并最佳努力连接。会写入技能/配置并同步运行引擎，实际启用状态以 GET skills/MCP 状态为准。
+file 读取执行服务所在机器的路径，可为 .md 文件或技能目录，不能含 ..；单文件上限1 MiB。url 必须HTTPS，下载窗口30秒，内容上限1 MiB且具有frontmatter。content 要求闭合frontmatter与合法name。目录或Hub条目声明bundle.json时，校验并安装全部声明资源，不能只保存SKILL.md。向已有完整包写入新正文会保留其他资源，并更新正文和清单摘要。
+
+普通技能安装、启停、卸载和刷新共用生命周期；重装保持原disabled选择，显式安装可清除该技能的卸载标记。clawhub 从同一目录选择Hub资源或版本/摘要匹配的只读出厂资源，source分别为hub/bundled；Hub声明不同版本或摘要时不静默改用旧出厂包。安装成功不保证已启用，必须读取 enabled、runtime_registered、effective_enabled。MCP条目仍需既有pinned artifact校验，保存配置并最佳努力连接；重复安装相同已保存配置保留原enabled，不把已禁用服务器偷偷开启。写入/刷新失败可能发生在落盘之后，不能盲目重发。
 
 可用性：{"mounted_when": "s.mp != nil", "disabled_projection": {"status": [404, 405], "description": "Route is not mounted; ServeMux returns 405 when another method remains registered for the same path, otherwise 404."}}.
 
@@ -416,7 +499,7 @@ file 读取执行服务所在机器的路径，可为 .md 文件或技能目录�
 
 认证：Bearer；成功 HTTP 200。
 
-删除市场安装内容并同步运行引擎。
+删除市场安装内容并同步运行引擎。统一生命周期记录内部卸载标记，后续刷新或出厂播种不自动复活；不把内部标记列为用户技能。旧冻结产物不随技能卸载删除。
 
 可用性：{"mounted_when": "s.mp != nil", "disabled_projection": {"status": [404, 405], "description": "Route is not mounted; ServeMux returns 405 when another method remains registered for the same path, otherwise 404."}}.
 
@@ -441,7 +524,7 @@ file 读取执行服务所在机器的路径，可为 .md 文件或技能目录�
 
 认证：Bearer；成功 HTTP 200。
 
-返回实例完整配置与规则；关闭路由器时 agents=[]、rules=[]、total=0、default=""。
+返回实例完整配置与规则；default="" 表示未选择命名默认实例，即使已注册其他实例也保持为空。关闭路由器时 agents=[]、rules=[]、total=0、default=""。
 
 可用性：{"mounted_when": "s.agentRouter != nil", "disabled_projection": {"status": 200, "body": {"agents": [], "rules": [], "total": 0, "default": ""}}}.
 
@@ -451,13 +534,32 @@ file 读取执行服务所在机器的路径，可为 .md 文件或技能目录�
 
 实现：[api/handler_misc.go](../../api/handler_misc.go) · `handleListAgents`.
 
+### `GET /api/v1/agents/templates`
+
+读取通用Agent模板的后端主源与精确快照；认证：Bearer，成功HTTP 200。始终挂载，不依赖Agent路由器是否开启。不创建实例、不调用模型、不修改模板或现有Agent；K12专属模板仍使用原场景合同。
+
+| 位置 / 字段 | 必填 | 类型 | 合同 |
+| --- | --- | --- | --- |
+| `query.locale` | 否 | `string` | 省略/空串或zh使用zh-CN；支持zh-CN、en、ug-CN。 |
+| `query.key` | 否 | `string` | 非空时读取单个template_key；省略/空串列出全部模板。 |
+
+请求体无。列表成功体为 `AgentsTemplateCatalog`；指定key时直接返回 `AgentsTemplateSnapshot`，没有外层templates数组。来源元数据可写入既有Agent metadata：catalog_source、catalog_version、template_key、template_version、template_digest、template_locale、template_snapshot（序列化快照字符串）。创建或明确替换backend快照时校验当前目录；普通编辑保留原来源字段时，即使目录已升级也保留原快照，不覆盖用户编辑的人设。
+
+| 状态 | 实际错误 / 副作用边界 |
+| --- | --- |
+| `400` | 列表请求的locale不可用。 |
+| `404` | 指定key的模板或locale不可用；单项分支的目录读取错误也映射为404。 |
+| `500` | 列表分支读取后端目录失败。 |
+
+实现：[api/handler_agent_templates.go](../../api/handler_agent_templates.go) · `handleAgentTemplates`。
+
 ### `POST /api/v1/agents`
 
 注册 Agent 实例.
 
 认证：Bearer；成功 HTTP 200。
 
-持久化成功后才发布运行时实例；无 Store 时只保存当前运行态。当前没有默认实例时，新注册实例会成为默认实例，包括之前主动清除默认值后的注册。provider/model 对要么均空跟随全局，要么选择当前可用配置；reasoning_policy 省略/null 为 inherit。K12 metadata、档案、初始进度的特殊事务规则见 K12 API，不将普通 Agent 注册理解为任意进度写入口。
+持久化成功后才发布运行时实例；无 Store 时只保存当前运行态。注册不会改变显式默认值；未设置或已清除默认值时，不会自动选择新实例。provider/model 对要么均空跟随全局，要么选择当前可用配置；reasoning_policy 省略/null 为 inherit。K12 metadata、档案、初始进度的特殊事务规则见 K12 API，不将普通 Agent 注册理解为任意进度写入口。
 
 可用性：{"mounted_when": "s.agentRouter != nil", "disabled_projection": {"status": [404, 405], "description": "Route is not mounted; ServeMux returns 405 when another method remains registered for the same path, otherwise 404."}}.
 
@@ -508,7 +610,7 @@ file 读取执行服务所在机器的路径，可为 .md 文件或技能目录�
 
 认证：Bearer；成功 HTTP 200。
 
-删除实例与关联内存路由，默认实例需要原子重分配；调用已注入的归属资源清理器。持久化/资源清理失败会保留实例并尝试补偿，不承诺删除所有场景历史数据。
+删除实例与关联内存路由；删除显式默认实例时在同一事务内清除默认值，不自动选择其他实例；调用已注入的归属资源清理器。持久化/资源清理失败会保留实例并尝试补偿，不承诺删除所有场景历史数据。
 
 可用性：{"mounted_when": "s.agentRouter != nil", "disabled_projection": {"status": [404, 405], "description": "Route is not mounted; ServeMux returns 405 when another method remains registered for the same path, otherwise 404."}}.
 
@@ -533,7 +635,7 @@ file 读取执行服务所在机器的路径，可为 .md 文件或技能目录�
 
 认证：Bearer；成功 HTTP 200。
 
-非空 name 设为默认实例；省略/空串清除默认值，成功 name=""。先持久化再发布默认配置。
+非空 name 设为默认实例；省略/空串清除默认值，成功 name=""。先持久化再发布默认配置。清除后重启仍保持空默认；没有显式规则或其他路由选择时由内置默认助理接待，不按注册顺序或名称自动选择实例。
 
 可用性：{"mounted_when": "s.agentRouter != nil", "disabled_projection": {"status": [404, 405], "description": "Route is not mounted; ServeMux returns 405 when another method remains registered for the same path, otherwise 404."}}.
 
@@ -686,7 +788,7 @@ file 读取执行服务所在机器的路径，可为 .md 文件或技能目录�
 
 认证：Bearer；成功 HTTP 200。
 
-获取目录原文，可能访问网络，不安装或写入安装目录；MCP 条目没有 SKILL.md 预览语义。
+读取与目录安装相同的实际来源：版本/摘要兼容的只读出厂资源，或可能访问网络的Hub原文；响应source为hub/bundled。不安装、不启用、不写安装目录。MCP条目无SKILL.md预览。
 
 可用性：{"mounted_when": "always", "disabled_projection": {"status": 503, "body": {"error": "ClawHub 未启用"}}}.
 
@@ -706,7 +808,6 @@ file 读取执行服务所在机器的路径，可为 .md 文件或技能目录�
 | `503` | Hub 未挂载。 |
 
 实现：[api/handler_skill_content.go](../../api/handler_skill_content.go) · `handleClawHubSkillContent`.
-
 ### `GET /api/v1/tools/cache/stats`
 
 查询工具缓存统计.
@@ -980,6 +1081,7 @@ file 读取执行服务所在机器的路径，可为 .md 文件或技能目录�
 | 字段 | 必有 / 必填 | 类型 | 说明 |
 | --- | --- | --- | --- |
 | `name` | 是 | `string` | 服务器名。 |
+| `enabled` | 是 | `boolean` | 当前保存的启停选择；仅运行态条目为 true，停用条目仍保留。 |
 | `description` | 是 | `string` | 服务器用途摘要。 |
 | `status` | 是 | `string` | 连接状态。 枚举：`connected`, `disconnected`. |
 | `transport` | 是 | `string` | 已配置传输投影；http 别名当前可能投影为 unknown。 枚举：`stdio`, `sse`, `streamable`, `unknown`. |
@@ -1010,6 +1112,17 @@ file 读取执行服务所在机器的路径，可为 .md 文件或技能目录�
 | `retry_state` | 否 | `string` | 连接重试状态，以实际值为准。 |
 | `retry_count` | 否 | `integer` | 连接重试计数，可省略。 |
 | `next_retry_at` | 否 | `string` | 下次连接重试时间，可省略。 |
+
+### `AgentsMCPLifecycleState`
+
+| 字段 | 必有 / 必填 | 类型 | 说明 |
+| --- | --- | --- | --- |
+| `name` | 是 | `string` | 服务器名。 |
+| `configured` | 是 | `boolean` | 已保存配置或运行配置存在；不等同于连接成功。 |
+| `persisted` | 是 | `boolean` | 配置Writer确认该服务器已保存。 |
+| `enabled` | 是 | `boolean` | 已配置的期望启停状态。 |
+| `connected` | 是 | `boolean` | 当前真实连接状态。 |
+| `tool_count` | 是 | `integer` | 当前连接发现的工具数，禁用后为0。 |
 
 ### `AgentsMCPStatus`
 
@@ -1082,6 +1195,58 @@ file 读取执行服务所在机器的路径，可为 .md 文件或技能目录�
 
 `{"result":"..."}` 或 `{"error":"..."}`；两者都可能 HTTP 200。
 
+### `AgentsTemplateCatalog`
+
+| 字段 | 必有 / 必填 | 类型 | 说明 |
+| --- | --- | --- | --- |
+| `schema_version` | 是 | `integer` | 目录结构版本，当前为1。 |
+| `catalog_source` | 是 | `string` | 当前API固定为backend。 |
+| `catalog_version` | 是 | `string` | 后端主源目录版本。 |
+| `templates` | 是 | `array<AgentsTemplateSnapshot>` | 指定语言的通用模板快照。 |
+| `total` | 是 | `integer` | 模板数量。 |
+
+### `AgentsTemplateSnapshot`
+
+| 字段 | 必有 / 必填 | 类型 | 说明 |
+| --- | --- | --- | --- |
+| `catalog_source` | 是 | `string` | 当前API固定为backend。 |
+| `catalog_version` | 是 | `string` | 来源目录版本。 |
+| `template_key` | 是 | `string` | 稳定模板标识，用于query.key。 |
+| `template_version` | 是 | `string` | 模板版本。 |
+| `template_digest` | 是 | `string` | 版本、语言、模板身份和内容的确定性SHA256十六进制摘要。 |
+| `locale` | 是 | `string` | 实际语言：zh-CN、en或ug-CN。 |
+| `slug` | 是 | `string` | 原模板建议实例标识。 |
+| `icon_key` | 是 | `string` | 原模板图标键。 |
+| `name` | 是 | `string` | 本地化名称。 |
+| `description` | 是 | `string` | 本地化说明。 |
+| `system_prompt` | 是 | `string` | 原模板人设正文。 |
+| `expertise` | 是 | `array<string>` | 原模板专业项。 |
+
+### `AgentsSkillRuntimeState`
+
+`skills/refresh` 的条目使用此结构，不复用含display字段的既有 `AgentsSkillStatus`。
+
+| 字段 | 必有 / 必填 | 类型 | 说明 |
+| --- | --- | --- | --- |
+| `name` | 是 | `string` | 已安装技能名。 |
+| `version` | 是 | `string` | 当前元数据版本。 |
+| `description` | 是 | `string` | 当前说明。 |
+| `enabled` | 是 | `boolean` | 保存的启用状态。 |
+| `runtime_registered` | 是 | `boolean` | 实际运行注册表中是否存在。 |
+| `effective_enabled` | 是 | `boolean` | 运行注册表当前是否启用。 |
+| `requires_restart` | 是 | `boolean` | 启用且宿主无热刷新接口时为true；AutoLoad=false未注册本身不要求重启。 |
+
+### `AgentsSkillResource`
+
+| 字段 | 必有 / 必填 | 类型 | 说明 |
+| --- | --- | --- | --- |
+| `path` | 是 | `string` | 包内相对路径。 |
+| `role` | 是 | `string` | 包清单声明的资源角色。 |
+| `size` | 是 | `integer` | 原资源字节数。 |
+| `sha256` | 是 | `string` | 文件SHA256十六进制摘要。 |
+
+资源清单不包含Content、skill_id或version字段；版本由资源内容响应的X-Skill-Version、技能元数据或bundle.json获取。bundle.json可读取但不加入自己的files清单。
+
 ### `AgentsSkillStatus`
 
 | 字段 | 必有 / 必填 | 类型 | 说明 |
@@ -1095,7 +1260,7 @@ file 读取执行服务所在机器的路径，可为 .md 文件或技能目录�
 | `icon` | 否 | `string` | 图标。 |
 | `enabled` | 是 | `boolean` | 持久化的期望状态。 |
 | `effective_enabled` | 是 | `boolean` | 当前运行时实际状态。 |
-| `requires_restart` | 是 | `boolean` | 持久化与运行时未对齐时可能为 true。 |
+| `requires_restart` | 是 | `boolean` | 当前标准宿主启用且无热刷新接口时为true；可显式刷新不等于必须重启。旧宿主兼容分支按实际运行能力返回。 |
 | `message` | 否 | `string` | 状态说明。 |
 
 ### `AgentsSkillList`
@@ -1129,8 +1294,13 @@ file 读取执行服务所在机器的路径，可为 .md 文件或技能目录�
 | `version` | 否 | `string` | 技能版本，部分来源省略。 |
 | `type` | 否 | `string` | Hub MCP 安装为 mcp，普通技能可省略。 |
 | `message` | 是 | `string` | 结果说明。 |
-| `requires_restart` | 是 | `boolean` | 安装 handler 返回 false；实际启用状态另看 GET skills。 |
-| `runtime_registered` | 是 | `boolean` | 普通技能返回 true；Hub MCP 为即时连接结果，不替代状态查询。 |
+| `requires_restart` | 是 | `boolean` | 普通技能按当前宿主热加载能力返回；Hub MCP返回false。 |
+| `runtime_registered` | 是 | `boolean` | 普通技能的实际注册状态；Hub MCP为即时连接结果，不等于已保存或已启用。 |
+| `enabled` | 是 | `boolean` | 已保存的启用状态；重装保持原显式禁用。 |
+| `effective_enabled` | 否 | `boolean` | 普通技能当前运行启用状态；MCP响应不含此字段。 |
+| `source` | 否 | `string` | 普通clawhub技能实际采用hub或bundled来源；其他安装类型可省略。 |
+| `connected` | 否 | `boolean` | Hub MCP实际连接状态。 |
+| `persisted` | 否 | `boolean` | Hub MCP配置是否确认已保存。 |
 | `config_hint` | 否 | `string` | Hub MCP 配置提示，可省略。 |
 | `artifact` | 否 | `AgentsHubArtifact` |  |
 
@@ -1179,11 +1349,12 @@ file 读取执行服务所在机器的路径，可为 .md 文件或技能目录�
 | `url` | 是 | `string` | 文件来源 URL。 |
 | `command` | 否 | `string` | MCP 命令，可省略。 |
 | `config_hint` | 否 | `string` | 配置提示，可省略。 |
-| `source` | 否 | `string` | 目录来源标识。 |
+| `source` | 否 | `string` | 目录来源标识，bundled表示只读出厂候选；不能据此推定已安装。 |
 | `status` | 否 | `string` | 如 pinned / quarantined，以目录实际值为准。 |
 | `quarantine_reason` | 否 | `string` | 隔离说明，可省略。 |
 | `file` | 否 | `string` | 文件标识，可省略。 |
 | `sha256` | 否 | `string` | 摘要，可省略。 |
+| `bundle_sha256` | 否 | `string` | 完整资源清单的规范化语义摘要，不是原bundle.json文件SHA。 |
 | `trust` | 否 | `string` | 信任元数据，可省略。 |
 | `min_engine_version` | 否 | `string` | 声明的最低引擎版本。 |
 | `license` | 否 | `string` | 许可证。 |
@@ -1215,6 +1386,7 @@ file 读取执行服务所在机器的路径，可为 .md 文件或技能目录�
 | --- | --- | --- | --- |
 | `name` | 是 | `string` | 条目名。 |
 | `content` | 是 | `string` | 原始 SKILL.md 文本。 |
+| `source` | 是 | `string` | 实际预览来源：hub或bundled。预览不安装或启用技能。 |
 
 ### `AgentsSubAgentRun`
 

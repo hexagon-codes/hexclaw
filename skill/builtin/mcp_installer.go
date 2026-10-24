@@ -14,9 +14,19 @@ import (
 
 // McpInstallerSkill allows the LLM to search, install, remove, and list MCP servers from Hub.
 type McpInstallerSkill struct {
-	mcpHub    mcpCatalog
-	mcpMgr    *mcp.Manager
-	cfgWriter *config.Writer
+	mcpHub     mcpCatalog
+	mcpMgr     *mcp.Manager
+	cfgWriter  *config.Writer
+	controller MCPResourceController
+}
+
+// MCPResourceController 复用宿主已有配置、连接、移除和刷新用例。
+type MCPResourceController interface {
+	ManageMCP(context.Context, string, string) (*skill.Result, error)
+}
+
+func NewMcpLifecycleSkill(catalog *hub.McpHub, controller MCPResourceController) *McpInstallerSkill {
+	return &McpInstallerSkill{mcpHub: catalog, controller: controller}
 }
 
 // mcpCatalog keeps the installer on the narrow read boundary it consumes.
@@ -48,12 +58,13 @@ func (m *McpInstallerSkill) Match(_ string) bool { return false }
 
 func (m *McpInstallerSkill) ToolDefinition() llm.ToolDefinition {
 	return llm.NewToolDefinition("manage_mcp_server",
-		"Search, install, or remove MCP servers from HexClaw Hub. Use when the user asks to add/remove an MCP server or tool integration.",
+		"Discover MCP catalog entries or installed server states. Install, enable, disable, remove and refresh through the application's existing persisted manager. Connected tools and saved configuration are separate facts. List or get before changing a named server.",
 		&llm.Schema{
 			Type: "object",
 			Properties: map[string]*llm.Schema{
-				"action":  {Type: "string", Description: "Action to perform: search, install, remove, list"},
+				"action":  {Type: "string", Enum: []any{"search", "install", "remove", "list", "get", "enable", "disable", "refresh"}},
 				"keyword": {Type: "string", Description: "Search keyword or MCP server name (required for search/install/remove)"},
+				"view":    {Type: "string", Enum: []any{"installed", "catalog"}},
 			},
 			Required: []string{"action"},
 		})
@@ -62,6 +73,18 @@ func (m *McpInstallerSkill) ToolDefinition() llm.ToolDefinition {
 func (m *McpInstallerSkill) Execute(ctx context.Context, args map[string]any) (*skill.Result, error) {
 	action, _ := args["action"].(string)
 	keyword, _ := args["keyword"].(string)
+	if action == "list" && args["view"] == "catalog" {
+		if m.mcpHub == nil {
+			return nil, fmt.Errorf("MCP catalog is unavailable")
+		}
+		return &skill.Result{Content: formatMcpSearchResults(m.mcpHub.Search(""))}, nil
+	}
+	if m.controller != nil && action != "search" {
+		return m.controller.ManageMCP(ctx, action, keyword)
+	}
+	if m.mcpHub == nil {
+		return nil, fmt.Errorf("MCP catalog is unavailable")
+	}
 
 	switch action {
 	case "search":

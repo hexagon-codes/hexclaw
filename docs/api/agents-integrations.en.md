@@ -2,7 +2,7 @@
 
 # Agents, integrations, and tools API
 
-This reference covers 33 method/path combinations in the current source, based on actual handlers and DTOs. Published installers may use a different revision. See the complete [OpenAPI specification](../../api/openapi.yaml).
+This reference covers 38 method/path combinations in the current source, based on actual handlers and DTOs. Published installers may use a different revision. See the complete [OpenAPI specification](../../api/openapi.yaml).
 
 ## Authentication and common conventions
 
@@ -26,15 +26,20 @@ See the [K12 API](../../scenarios/k12/API.md) for instance metadata, profile-bun
 | `POST` | `/api/v1/mcp/servers` | Register or replace an MCP server |
 | `DELETE` | `/api/v1/mcp/servers/{name}` | Remove an MCP server |
 | `POST` | `/api/v1/mcp/servers/{name}/restart` | Reconnect an MCP server |
+| `PUT` | `/api/v1/mcp/servers/{name}/status` | Persist MCP enabled state and update the connection |
 | `POST` | `/api/v1/mcp/tools/call` | Call an MCP tool |
 | `GET` | `/api/v1/mcp/status` | Read MCP runtime status |
 | `GET` | `/api/v1/skills` | List installed skills and effective state |
 | `GET` | `/api/v1/skills/{name}/content` | Read an installed SKILL.md |
+| `POST` | `/api/v1/skills/refresh` | Rediscover and hot-load installed skills |
+| `GET` | `/api/v1/skills/{name}/resources` | List installed package resources |
+| `GET` | `/api/v1/skills/{name}/resources/{path...}` | Read exact declared resource bytes |
 | `PUT` | `/api/v1/skills/{name}/status` | Persist skill enabled state |
 | `POST` | `/api/v1/skills/install` | Install a skill or Hub MCP entry |
 | `POST` | `/api/v1/skills/generate` | Generate a Skill draft |
 | `DELETE` | `/api/v1/skills/{name}` | Uninstall a skill |
 | `GET` | `/api/v1/agents` | List instances, rules, and default |
+| `GET` | `/api/v1/agents/templates` | Read generic Agent templates and exact snapshots |
 | `POST` | `/api/v1/agents` | Register an Agent instance |
 | `PUT` | `/api/v1/agents/{name}` | Partially update an Agent |
 | `DELETE` | `/api/v1/agents/{name}` | Unregister an Agent |
@@ -175,13 +180,15 @@ List MCP server summaries.
 
 Authentication: Bearer. Successful HTTP status: 200.
 
-Lists configured server connection summaries, retaining disconnected entries; does not return command, args, env, endpoint, or secret values. Disabled MCP returns servers=[] and total=0.
+Lists configured server connection summaries, retaining disconnected entries; does not return command, args, env, endpoint, or secret values. An unavailable global MCP module returns servers=[] and total=0.
 
 Availability: {"mounted_when": "s.mcpMgr != nil", "disabled_projection": {"status": 200, "body": {"servers": [], "total": 0}}}.
 
 Request body: none.
 
 Success body: `AgentsMCPServers` (see data structures).
+
+The list includes saved enabled and disabled servers, merged with runtime-only connections. Each item's `enabled` reflects the saved setting, while `status` reflects the actual connection. Disabled entries remain listed, normally with `enabled:false`, `status:"disconnected"`, and `tool_count:0`. Disabling does not uninstall the server or expose launch arguments or credentials.
 
 Implementation: [api/handler_misc.go](../../api/handler_misc.go) · `handleListMCPServers`.
 
@@ -193,6 +200,8 @@ Authentication: Bearer. Successful HTTP status: 200.
 
 Persists configuration before registration with an immediate connection window of up to 10 seconds. connected=false means registered with background connection pending, not rollback. This can start/replace a stdio subprocess or access a network endpoint. Secret mutations require a configuration Writer, unique index/key, and a nonempty replacement of at most 64 KiB; see the secret mutation DTOs.
 
+Add, replace, enable, disable, remove, and Hub installation share a short configuration commit phase that binds persisted state to the runtime generation. Network connection and resource closing occur outside its coordination lock. A newer command for the same name can supersede an older connection attempt. After a 409, query current configuration and runtime state rather than blindly replaying old configuration.
+
 Availability: {"mounted_when": "s.mcpMgr != nil", "disabled_projection": {"status": [404, 405], "description": "Route is not mounted; ServeMux returns 405 when another method remains registered for the same path, otherwise 404."}}.
 
 Request body: `AgentsMCPAddRequest`; maximum read 65536 bytes. Fields are listed below; required status follows actual handler rejection conditions.
@@ -202,6 +211,7 @@ Success body: `AgentsMCPAdded` (see data structures).
 | Status | Error / side-effect boundary |
 | --- | --- |
 | `400` | Invalid format, name, transport, command/endpoint, secret mutation, or Manager state. Configuration may already have been saved. |
+| `409` | A newer command superseded the in-flight connection; body: `{"error":"MCP server change was superseded"}`. |
 | `503` | Configuration or secret persistence unavailable/failed. |
 
 Implementation: [api/handler_misc.go](../../api/handler_misc.go) · `handleAddMCPServer`.
@@ -212,7 +222,7 @@ Remove an MCP server.
 
 Authentication: Bearer. Successful HTTP status: 200.
 
-Removes persisted configuration before shutting down the runtime connection/subprocess and tools; a runtime 404 can occur after persistence was removed.
+Uses the same removal use case as the conversation tool: removes persisted configuration and invalidates the runtime generation before closing the connection/subprocess and unregistering tools. A configured server that is disabled or not yet connected returns 200; an absent runtime entry does not make deletion fail. An unconfigured server returns 404. Persistence failures still return 503 and are not reported as success.
 
 Availability: {"mounted_when": "s.mcpMgr != nil", "disabled_projection": {"status": [404, 405], "description": "Route is not mounted; ServeMux returns 405 when another method remains registered for the same path, otherwise 404."}}.
 
@@ -227,7 +237,7 @@ Success body: `AgentsMessage` (see data structures).
 | Status | Error / side-effect boundary |
 | --- | --- |
 | `400` | Empty name. |
-| `404` | Runtime server not found. |
+| `404` | Server is not configured. |
 | `503` | Configuration removal failed or MCP unavailable. |
 
 Implementation: [api/handler_misc.go](../../api/handler_misc.go) · `handleRemoveMCPServer`.
@@ -239,6 +249,8 @@ Reconnect an MCP server.
 Authentication: Bearer. Successful HTTP status: 200.
 
 A 20-second connection window; replaces the old connection only after successful new connection, preserving old state on failure. It does not change server configuration.
+
+When interleaved with configuration replacement, restart reads the latest committed configuration and takes over its connection generation; a late result from an older attempt cannot overwrite it. Background reconnection does not duplicate a same-name connection for the current in-flight generation.
 
 Availability: {"mounted_when": "s.mcpMgr != nil", "disabled_projection": {"status": [404, 405], "description": "Route is not mounted; ServeMux returns 405 when another method remains registered for the same path, otherwise 404."}}.
 
@@ -258,6 +270,28 @@ Success body: `AgentsMessage` (see data structures).
 | `503` | MCP unavailable. |
 
 Implementation: [api/handler_misc.go](../../api/handler_misc.go) · `handleRestartMCPServer`.
+
+### `PUT /api/v1/mcp/servers/{name}/status`
+
+Persist an existing MCP server's enabled state and update its actual connection. Authentication: Bearer; success: HTTP 200.
+
+Mounted only when `s.mcpMgr != nil`; otherwise 404/405. Skill enablement and Hub availability do not gate this operation. Configuration is saved before connecting or closing the connection/subprocess and removing its tools. Enabling has an immediate connection window of up to 10 seconds; connected=false can mean background connection is pending. Explicit disablement survives process restart. Failure does not guarantee rollback of an earlier configuration write.
+
+| Location / field | Required | Type | Contract |
+| --- | --- | --- | --- |
+| `path.name` | true | `string` | Saved server name. |
+| `body.enabled` | true | `boolean` | Explicit true or false; omission/null is invalid. Maximum read: 1024 bytes. |
+
+Success body: `AgentsMCPLifecycleState`. It contains no command, args, env, endpoint, or secret values.
+
+Persistence and runtime-generation reservation share a short commit phase; network connection and resource closing occur outside it. Disabling or removing invalidates an in-flight connection for the same name. An older enable request superseded by a newer operation returns 409; query saved and runtime state instead of blindly enabling again.
+
+| Status | Error / side-effect boundary |
+| --- | --- |
+| `400` | Invalid JSON/enabled, unconfigured/unsaved server, persistence unavailable/failed, or connection/runtime update failed. Configuration may already be saved. |
+| `409` | A newer command superseded the in-flight connection; body: `{"error":"MCP server change was superseded"}`. |
+
+Implementation: [api/resource_mcp_lifecycle.go](../../api/resource_mcp_lifecycle.go) · `handleMCPResourceStatus` / `ManageMCP`.
 
 ### `POST /api/v1/mcp/tools/call`
 
@@ -302,7 +336,7 @@ List installed skills and effective state.
 
 Authentication: Bearer. Successful HTTP status: 200.
 
-enabled is persisted state; effective_enabled is current runtime state; requires_restart indicates unapplied state or unsupported probing. dir is a server-side path.
+enabled is persisted state and effective_enabled is current runtime state. requires_restart means the host cannot apply an enabled skill through hot refresh, rather than every state mismatch. With AutoLoad=false, an installed but unregistered skill has effective_enabled=false and requires_restart=false; explicit refresh can activate it, while the next restart still respects disabled automatic loading. dir is a server-side path.
 
 Availability: {"mounted_when": "s.mp != nil", "disabled_projection": {"status": [404, 405], "description": "Route is not mounted; ServeMux returns 405 when another method remains registered for the same path, otherwise 404."}}.
 
@@ -319,6 +353,8 @@ Read an installed SKILL.md.
 Authentication: Bearer. Successful HTTP status: 200.
 
 Read-only file access without installing or modifying a skill. name must be a single filename without ..; path is server-side.
+
+The conversation tool `patch_skill` submits a snippet edit against the digest of the instructions it read. If another write replaced those instructions meanwhile, it returns the tool error `skill patch conflict: installed content changed`, preserving already committed content. The caller should reread and match the snippet again. Whole-content `create_skill` writes retain explicit replacement semantics. This is a conversation tool error, not an HTTP 409 from this read endpoint.
 
 Availability: {"mounted_when": "s.mp != nil", "disabled_projection": {"status": [404, 405], "description": "Route is not mounted; ServeMux returns 405 when another method remains registered for the same path, otherwise 404."}}.
 
@@ -338,13 +374,58 @@ Success body: `AgentsSkillContent` (see data structures).
 
 Implementation: [api/handler_skill_content.go](../../api/handler_skill_content.go) · `handleSkillContent`.
 
+### `POST /api/v1/skills/refresh`
+
+Rescan installed files and hot-update runtime Markdown skills. Authentication: Bearer; success: HTTP 200.
+
+Uses the same lifecycle service as install, enablement, and uninstall: replaces changed instructions, unregisters removed entries, and preserves saved disabled state. It does not download catalog entries or call a model. Explicit refresh can register skills with AutoLoad=false. Mounted only when `s.mp != nil`; otherwise 404/405.
+
+The body is not read; omit it or send `{}`. Success body: `{"skills":[AgentsSkillRuntimeState...]}`, without total or dir.
+
+| Status | Error / side-effect boundary |
+| --- | --- |
+| `500` | Discovery or runtime refresh failed; existing disk changes are not guaranteed to roll back. |
+| `503` | Marketplace is mounted but the host has not injected a lifecycle service. |
+
+Implementation: [api/handler_skill_lifecycle.go](../../api/handler_skill_lifecycle.go) · `handleRefreshSkills`.
+
+### `GET /api/v1/skills/{name}/resources`
+
+List declared resources in the current installed package. Authentication: Bearer; success: HTTP 200. Mounted only when `s.mp != nil`; otherwise 404/405.
+
+`path.name` is the installed skill name; no request body. Success body: `{"name":"...","resources":[AgentsSkillResource...]}`, sorted by path. Resource content is neither returned nor injected into model context. Legacy single-file skills list only SKILL.md. For a complete package, the manifest and all declared files are checked for identity, size, and digest; missing resources cannot be reported as a complete success.
+
+| Status | Error / side-effect boundary |
+| --- | --- |
+| `400` | Invalid/incomplete package, manifest, or files; digest mismatch; or another resource read failure. |
+| `404` | Skill is not installed. |
+| `503` | Lifecycle service is not injected. |
+
+Implementation: [api/handler_skill_lifecycle.go](../../api/handler_skill_lifecycle.go) · `handleSkillResources`.
+
+### `GET /api/v1/skills/{name}/resources/{path...}`
+
+Read exact resource bytes from the current installed package. Authentication: Bearer; success: HTTP 200. Mounted only when `s.mp != nil`; otherwise 404/405.
+
+`path.name` identifies the skill; `path.path` is a package-relative path, such as assets/template.typ, SKILL.md, or bundle.json. Reads only declared files and the manifest itself. It does not execute scripts, generate media, or change enabled state. Legacy single-file skills support only SKILL.md. There is no historical-version parameter: callers must freeze resource versions, digests, and bytes rather than assume the installed package stays unchanged during recovery.
+
+The success body is raw bytes, without a JSON wrapper. Content-Type is inferred from the extension, falling back to application/octet-stream. Content-Length is the byte count; ETag is the quoted file SHA256; X-Skill-Version is the current package version; X-Content-SHA256 is the file SHA256. The handler does not implement conditional requests/304. The raw bundle.json file SHA differs from its canonical semantic manifest digest.
+
+| Status | Error / side-effect boundary |
+| --- | --- |
+| `400` | Undeclared/invalid path, absent bundle, changed package identity requiring refresh, missing/mismatched files, or read failure. |
+| `404` | Skill is not installed; a missing package file instead returns 400. |
+| `503` | Lifecycle service is not injected. |
+
+Implementation: [api/handler_skill_lifecycle.go](../../api/handler_skill_lifecycle.go) · `handleSkillResource`.
+
 ### `PUT /api/v1/skills/{name}/status`
 
 Persist skill enabled state.
 
 Authentication: Bearer. Successful HTTP status: 200.
 
-Omitted enabled means false rather than preserving old state. Persistence precedes hot-update; hot-update failure still returns 200, explained by effective_enabled/requires_restart/message.
+Omitted enabled means false rather than preserving the previous value. The standard host persists state and then rescans/hot-updates through the shared lifecycle, returning actual enabled/effective_enabled/requires_restart values. A failure returns 500 and may follow a completed state write. Legacy hosts without the lifecycle retain the previous compatibility branch: hot-update failure can return 200 with state fields/message. This operation does not delete resources or previously frozen artifacts.
 
 Availability: {"mounted_when": "s.mp != nil", "disabled_projection": {"status": [404, 405], "description": "Route is not mounted; ServeMux returns 405 when another method remains registered for the same path, otherwise 404."}}.
 
@@ -360,7 +441,7 @@ Success body: `AgentsSkillStatus` (see data structures).
 | --- | --- |
 | `400` | Invalid name or JSON. |
 | `404` | Skill not installed. |
-| `500` | State persistence failed. |
+| `500` | Saving state or lifecycle refresh failed; an earlier state write is not guaranteed to roll back. |
 
 Implementation: [api/handler_misc.go](../../api/handler_misc.go) · `handleSkillStatus`.
 
@@ -370,7 +451,9 @@ Install a skill or Hub MCP entry.
 
 Authentication: Bearer. Successful HTTP status: 200.
 
-file reads a path on the executing server, accepting an .md file or skill directory without ..; a single file is limited to 1 MiB. url requires HTTPS, a 30-second download window, at most 1 MiB, and frontmatter. content requires closed frontmatter and a valid name. clawhub resolves a catalog name, downloads and saves ordinary skills; MCP entries use existing pinned-artifact validation, persisted configuration, and best-effort connection. This writes skill/config data and synchronizes the engine; use GET skills/MCP status for effective state.
+file reads a path on the executing server, accepting an .md file or skill directory without ..; a single file is limited to 1 MiB. url requires HTTPS, a 30-second download window, at most 1 MiB, and frontmatter. content requires closed frontmatter and a valid name. When a directory or Hub entry declares bundle.json, all declared resources are validated and installed, not only SKILL.md. Updating instructions within an existing complete package preserves other resources and updates instruction/manifest digests.
+
+Ordinary skill installation, enablement, uninstall, and refresh use the shared lifecycle. Reinstall preserves saved disabled state; explicit install clears that skill's uninstall marker. clawhub resolves the same catalog to Hub resources or compatible read-only bundled resources with matching version/digests, returning source=hub/bundled. A different version or digest declared by the Hub does not silently fall back to an old bundle. A successful installation does not imply enablement: inspect enabled, runtime_registered, and effective_enabled. MCP entries retain pinned-artifact validation, persisted configuration, and best-effort connection. Reinstalling identical saved MCP configuration preserves enabled, including explicit false. A write/refresh failure may follow completed disk changes; do not blindly replay.
 
 Availability: {"mounted_when": "s.mp != nil", "disabled_projection": {"status": [404, 405], "description": "Route is not mounted; ServeMux returns 405 when another method remains registered for the same path, otherwise 404."}}.
 
@@ -416,7 +499,7 @@ Uninstall a skill.
 
 Authentication: Bearer. Successful HTTP status: 200.
 
-Deletes marketplace-installed content and synchronizes the runtime engine.
+Deletes marketplace-installed content and synchronizes the runtime engine. The shared lifecycle records an internal uninstall marker so refresh or bundled seeding does not resurrect it; the marker is not exposed as a user skill. Previously frozen artifacts are not deleted with the skill.
 
 Availability: {"mounted_when": "s.mp != nil", "disabled_projection": {"status": [404, 405], "description": "Route is not mounted; ServeMux returns 405 when another method remains registered for the same path, otherwise 404."}}.
 
@@ -441,7 +524,7 @@ List instances, rules, and default.
 
 Authentication: Bearer. Successful HTTP status: 200.
 
-Returns complete instance configurations and rules; a disabled router returns agents=[], rules=[], total=0, and default="".
+Returns complete instance configurations and rules; default="" means no named default is selected, even when other instances are registered. A disabled router returns agents=[], rules=[], total=0, and default="".
 
 Availability: {"mounted_when": "s.agentRouter != nil", "disabled_projection": {"status": 200, "body": {"agents": [], "rules": [], "total": 0, "default": ""}}}.
 
@@ -451,13 +534,32 @@ Success body: `AgentsAgentList` (see data structures).
 
 Implementation: [api/handler_misc.go](../../api/handler_misc.go) · `handleListAgents`.
 
+### `GET /api/v1/agents/templates`
+
+Read the backend source of generic Agent templates and exact snapshots. Authentication: Bearer; success: HTTP 200. Always mounted, independently of Agent router enablement. It does not create instances, call a model, or change templates/existing Agents. K12-specific templates retain their scenario contract.
+
+| Location / field | Required | Type | Contract |
+| --- | --- | --- | --- |
+| `query.locale` | false | `string` | Omitted/empty or zh selects zh-CN; supported values: zh-CN, en, ug-CN. |
+| `query.key` | false | `string` | Nonempty selects one template_key; omitted/empty lists all templates. |
+
+No request body. List success body: `AgentsTemplateCatalog`. With key, the response is directly `AgentsTemplateSnapshot`, without a templates wrapper. The existing Agent metadata can store catalog_source, catalog_version, template_key, template_version, template_digest, template_locale, and template_snapshot (a serialized snapshot string). Creation or explicit replacement of a backend snapshot validates the current catalog. Ordinary edits preserving the original source fields retain the frozen source across catalog upgrades and do not overwrite edited persona fields.
+
+| Status | Error / side-effect boundary |
+| --- | --- |
+| `400` | List request uses an unavailable locale. |
+| `404` | Requested key or locale is unavailable; single-item catalog read errors also map to 404. |
+| `500` | Catalog read failed in the list branch. |
+
+Implementation: [api/handler_agent_templates.go](../../api/handler_agent_templates.go) · `handleAgentTemplates`.
+
 ### `POST /api/v1/agents`
 
 Register an Agent instance.
 
 Authentication: Bearer. Successful HTTP status: 200.
 
-Publishes the runtime instance only after persistence succeeds; without a Store it is runtime-only. When no default exists, the newly registered instance becomes the default, including registrations after explicitly clearing the default. provider/model are both empty for global configuration or select an available configured pair; reasoning_policy omission/null is inherit. K12 metadata/profile/initial-progress transaction rules are in the K12 API; ordinary registration is not an arbitrary progress-write endpoint.
+Publishes the runtime instance only after persistence succeeds; without a Store it is runtime-only. Registration preserves the explicit default; an unset or cleared default does not automatically select the new instance. provider/model are both empty for global configuration or select an available configured pair; reasoning_policy omission/null is inherit. K12 metadata/profile/initial-progress transaction rules are in the K12 API; ordinary registration is not an arbitrary progress-write endpoint.
 
 Availability: {"mounted_when": "s.agentRouter != nil", "disabled_projection": {"status": [404, 405], "description": "Route is not mounted; ServeMux returns 405 when another method remains registered for the same path, otherwise 404."}}.
 
@@ -508,7 +610,7 @@ Unregister an Agent.
 
 Authentication: Bearer. Successful HTTP status: 200.
 
-Removes the instance and associated in-memory rules, atomically reassigning the default when needed; invokes an attached resource cleaner. Persistence/resource failure preserves the instance and attempts compensation; this does not promise deletion of all scenario history.
+Removes the instance and associated in-memory rules; deleting the explicit default clears it in the same transaction without selecting another instance. Invokes an attached resource cleaner. Persistence/resource failure preserves the instance and attempts compensation; this does not promise deletion of all scenario history.
 
 Availability: {"mounted_when": "s.agentRouter != nil", "disabled_projection": {"status": [404, 405], "description": "Route is not mounted; ServeMux returns 405 when another method remains registered for the same path, otherwise 404."}}.
 
@@ -533,7 +635,7 @@ Set or clear the default Agent.
 
 Authentication: Bearer. Successful HTTP status: 200.
 
-Nonempty name selects a registered default; omission/empty clears it and returns name="". Persistence precedes runtime publication.
+Nonempty name selects a registered default; omission/empty clears it and returns name="". Persistence precedes runtime publication. A cleared default remains empty after restart; when no explicit rule or other routing selection applies, the built-in assistant handles the request without selecting an instance by registration order or name.
 
 Availability: {"mounted_when": "s.agentRouter != nil", "disabled_projection": {"status": [404, 405], "description": "Route is not mounted; ServeMux returns 405 when another method remains registered for the same path, otherwise 404."}}.
 
@@ -686,7 +788,7 @@ Preview a Hub SKILL.md without installing.
 
 Authentication: Bearer. Successful HTTP status: 200.
 
-Fetches catalog source text, potentially over the network, without installing or writing the install directory; MCP entries have no SKILL.md preview.
+Reads instructions from the same resolved source as catalog installation: compatible read-only bundled resources or Hub content, potentially over the network. The response identifies source=hub/bundled. It does not install, enable, or write the install directory; MCP entries have no SKILL.md preview.
 
 Availability: {"mounted_when": "always", "disabled_projection": {"status": 503, "body": {"error": "ClawHub 未启用"}}}.
 
@@ -980,6 +1082,7 @@ Omission, null, and defaults can differ; combine each field description with ope
 | Field | Required | Type | Description |
 | --- | --- | --- | --- |
 | `name` | true | `string` | Server name. |
+| `enabled` | true | `boolean` | Saved enabled setting; runtime-only entries are true and disabled saved entries remain listed. |
 | `description` | true | `string` | Server-purpose summary. |
 | `status` | true | `string` | Connection state. Enum: `connected`, `disconnected`. |
 | `transport` | true | `string` | Configured transport projection; the http alias may currently project as unknown. Enum: `stdio`, `sse`, `streamable`, `unknown`. |
@@ -996,6 +1099,17 @@ Omission, null, and defaults can differ; combine each field description with ope
 | --- | --- | --- | --- |
 | `servers` | true | `array<AgentsMCPServerSummary>` | Configuration and connection projection without command/args/env/endpoint. |
 | `total` | true | `integer` | Server count. |
+
+### `AgentsMCPLifecycleState`
+
+| Field | Required | Type | Description |
+| --- | --- | --- | --- |
+| `name` | true | `string` | Server name. |
+| `configured` | true | `boolean` | Saved or runtime configuration exists; not proof of connection. |
+| `persisted` | true | `boolean` | Configuration Writer confirms the server is saved. |
+| `enabled` | true | `boolean` | Configured desired enabled state. |
+| `connected` | true | `boolean` | Actual current connection state. |
+| `tool_count` | true | `integer` | Tools discovered on the current connection; zero after disablement. |
 
 ### `AgentsMCPServerStatus`
 
@@ -1082,6 +1196,58 @@ Omission, null, and defaults can differ; combine each field description with ope
 
 `{"result":"..."}` or `{"error":"..."}`; both can use HTTP 200.
 
+### `AgentsTemplateCatalog`
+
+| Field | Required | Type | Description |
+| --- | --- | --- | --- |
+| `schema_version` | true | `integer` | Catalog structure version, currently 1. |
+| `catalog_source` | true | `string` | Always backend for this API. |
+| `catalog_version` | true | `string` | Backend source catalog version. |
+| `templates` | true | `array<AgentsTemplateSnapshot>` | Generic template snapshots in the selected locale. |
+| `total` | true | `integer` | Template count. |
+
+### `AgentsTemplateSnapshot`
+
+| Field | Required | Type | Description |
+| --- | --- | --- | --- |
+| `catalog_source` | true | `string` | Always backend for this API. |
+| `catalog_version` | true | `string` | Source catalog version. |
+| `template_key` | true | `string` | Stable template identifier for query.key. |
+| `template_version` | true | `string` | Template version. |
+| `template_digest` | true | `string` | Deterministic SHA256 hex digest of version, locale, template identity, and content. |
+| `locale` | true | `string` | Actual locale: zh-CN, en, or ug-CN. |
+| `slug` | true | `string` | Original template's suggested instance identifier. |
+| `icon_key` | true | `string` | Original template icon key. |
+| `name` | true | `string` | Localized name. |
+| `description` | true | `string` | Localized description. |
+| `system_prompt` | true | `string` | Original template persona instructions. |
+| `expertise` | true | `array<string>` | Original template expertise entries. |
+
+### `AgentsSkillRuntimeState`
+
+Entries returned by skills/refresh use this structure, rather than the existing display-oriented `AgentsSkillStatus`.
+
+| Field | Required | Type | Description |
+| --- | --- | --- | --- |
+| `name` | true | `string` | Installed skill name. |
+| `version` | true | `string` | Current metadata version. |
+| `description` | true | `string` | Current description. |
+| `enabled` | true | `boolean` | Saved enabled state. |
+| `runtime_registered` | true | `boolean` | Actual presence in the runtime registry. |
+| `effective_enabled` | true | `boolean` | Actual enabled state in the runtime registry. |
+| `requires_restart` | true | `boolean` | True when enabled and the host lacks hot refresh; AutoLoad=false alone does not require restart. |
+
+### `AgentsSkillResource`
+
+| Field | Required | Type | Description |
+| --- | --- | --- | --- |
+| `path` | true | `string` | Package-relative path. |
+| `role` | true | `string` | Resource role declared by the manifest. |
+| `size` | true | `integer` | Original resource byte count. |
+| `sha256` | true | `string` | File SHA256 hex digest. |
+
+The resource list has no Content, skill_id, or version fields. Obtain version from X-Skill-Version on the content response, skill metadata, or bundle.json. The manifest itself is readable but not included in its own files list.
+
 ### `AgentsSkillStatus`
 
 | Field | Required | Type | Description |
@@ -1095,9 +1261,8 @@ Omission, null, and defaults can differ; combine each field description with ope
 | `icon` | false | `string` | Icon. |
 | `enabled` | true | `boolean` | Persisted desired state. |
 | `effective_enabled` | true | `boolean` | Current effective runtime state. |
-| `requires_restart` | true | `boolean` | May be true when persistence and runtime are not aligned. |
+| `requires_restart` | true | `boolean` | In the standard host, true when enabled without hot-refresh support; explicit refreshability does not require restart. Legacy hosts report their actual runtime capability. |
 | `message` | false | `string` | Status message. |
-
 ### `AgentsSkillList`
 
 | Field | Required | Type | Description |
@@ -1129,8 +1294,13 @@ Omission, null, and defaults can differ; combine each field description with ope
 | `version` | false | `string` | Skill version, omitted for some sources. |
 | `type` | false | `string` | mcp for Hub MCP installations; may be omitted for ordinary skills. |
 | `message` | true | `string` | Result message. |
-| `requires_restart` | true | `boolean` | Installation handlers return false; check GET skills for actual enabled state. |
-| `runtime_registered` | true | `boolean` | true for ordinary skills; immediate connection result for Hub MCP, not a replacement for a status query. |
+| `requires_restart` | true | `boolean` | Ordinary skills reflect the host's actual hot-load capability; Hub MCP returns false. |
+| `runtime_registered` | true | `boolean` | Actual ordinary-skill registration; for Hub MCP, immediate connection result rather than saved/enabled state. |
+| `enabled` | true | `boolean` | Saved enabled state; reinstall preserves explicit disablement. |
+| `effective_enabled` | false | `boolean` | Current runtime enablement for ordinary skills; absent from the MCP response. |
+| `source` | false | `string` | hub or bundled for ordinary clawhub skills; may be absent for other install types. |
+| `connected` | false | `boolean` | Actual Hub MCP connection state. |
+| `persisted` | false | `boolean` | Whether Hub MCP configuration is confirmed saved. |
 | `config_hint` | false | `string` | Optional Hub MCP configuration hint. |
 | `artifact` | false | `AgentsHubArtifact` |  |
 
@@ -1179,11 +1349,12 @@ Omission, null, and defaults can differ; combine each field description with ope
 | `url` | true | `string` | File source URL. |
 | `command` | false | `string` | Optional MCP command. |
 | `config_hint` | false | `string` | Optional configuration hint. |
-| `source` | false | `string` | Catalog source identifier. |
+| `source` | false | `string` | Catalog source identifier; bundled denotes a read-only factory candidate, not an installed skill. |
 | `status` | false | `string` | For example pinned / quarantined; use the catalog value. |
 | `quarantine_reason` | false | `string` | Optional quarantine reason. |
 | `file` | false | `string` | Optional file identifier. |
 | `sha256` | false | `string` | Optional digest. |
+| `bundle_sha256` | false | `string` | Canonical semantic digest of the full resource manifest, not the raw bundle.json file SHA. |
 | `trust` | false | `string` | Optional trust metadata. |
 | `min_engine_version` | false | `string` | Declared minimum engine version. |
 | `license` | false | `string` | License. |
@@ -1215,6 +1386,7 @@ Omission, null, and defaults can differ; combine each field description with ope
 | --- | --- | --- | --- |
 | `name` | true | `string` | Entry name. |
 | `content` | true | `string` | Raw SKILL.md text. |
+| `source` | true | `string` | Actual preview source: hub or bundled. Preview does not install or enable the skill. |
 
 ### `AgentsSubAgentRun`
 

@@ -11,24 +11,34 @@ import (
 	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/hexclaw/security"
 	"github.com/hexagon-codes/hexclaw/skill"
+	"github.com/hexagon-codes/hexclaw/skill/lifecycle"
 )
 
 var validSkillName = regexp.MustCompile(`^[a-z][a-z0-9-]{0,63}$`)
 
 // SkillWriterSkill allows the LLM to create new Skills as SKILL.md files.
 //
-// v0.4.0 F2 安全底线（强制 .pending 流）：
-//   - LLM 永远不直接覆盖 production 的 SKILL.md
+// 未接线生命周期的 legacy 构造器保留 v0.4.0 F2 .pending 流：
+//   - 旧路径不直接覆盖 production 的 SKILL.md
 //   - 所有写入落到 SKILL.md.pending；marketplace loader 不会扫描 .pending
-//   - 用户通过 manage_skill_pending(approve|reject) 审核闭环
+//   - 旧路径通过 manage_skill_pending(approve|reject) 激活草稿
+//
+// 接线生命周期后，同一工具调用通过安装和热刷新用例完成正文应用，保留显式启停设置。
 //
 // Security:
 //   - Name validation (no path traversal)
 //   - Content scanned by SkillScanner before writing
 //   - Written to user's skill directory only as .pending file
 type SkillWriterSkill struct {
-	skillDir string
-	scanner  *security.SkillScanner
+	skillDir  string
+	scanner   *security.SkillScanner
+	lifecycle *lifecycle.Service
+}
+
+// SetLifecycle 使用宿主已配置的技能目录与统一激活用例。
+func (s *SkillWriterSkill) SetLifecycle(service *lifecycle.Service) {
+	s.lifecycle = service
+	s.skillDir = service.Dir()
 }
 
 // PendingSuffix 是 LLM-written Skill 文件的待审批后缀。marketplace loader 不会
@@ -46,15 +56,21 @@ func NewSkillWriterSkill(skillDir string, scanner *security.SkillScanner) *Skill
 
 func (s *SkillWriterSkill) Name() string { return "create_skill" }
 func (s *SkillWriterSkill) Description() string {
+	if s.lifecycle != nil {
+		return "Create and activate a reusable skill through the application lifecycle"
+	}
 	return "Draft a new reusable skill (writes to SKILL.md.pending; user must approve before activation)"
 }
 func (s *SkillWriterSkill) Match(_ string) bool { return false }
 
 func (s *SkillWriterSkill) ToolDefinition() llm.ToolDefinition {
-	return llm.NewToolDefinition("create_skill",
-		"Draft a new reusable skill. The content is saved as SKILL.md.pending and is NOT loaded "+
-			"into the live skill registry until the user runs manage_skill_pending(action='approve'). "+
-			"Use when a needed capability doesn't yet exist.",
+	description := "Draft a new reusable skill. The content is saved as SKILL.md.pending and is NOT loaded " +
+		"into the live skill registry until the user runs manage_skill_pending(action='approve'). " +
+		"Use when a needed capability doesn't yet exist."
+	if s.lifecycle != nil {
+		description = "Create a reusable skill. The current authorized call installs its content and refreshes the live registry using the same lifecycle as the settings API. Existing explicit disabled state is preserved. Return only actual activation state; no second approval step is required."
+	}
+	return llm.NewToolDefinition("create_skill", description,
 		&llm.Schema{
 			Type: "object",
 			Properties: map[string]*llm.Schema{
@@ -66,7 +82,7 @@ func (s *SkillWriterSkill) ToolDefinition() llm.ToolDefinition {
 		})
 }
 
-func (s *SkillWriterSkill) Execute(_ context.Context, args map[string]any) (*skill.Result, error) {
+func (s *SkillWriterSkill) Execute(ctx context.Context, args map[string]any) (*skill.Result, error) {
 	name, _ := args["name"].(string)
 	content, _ := args["content"].(string)
 
@@ -107,6 +123,13 @@ func (s *SkillWriterSkill) Execute(_ context.Context, args map[string]any) (*ski
 	pendingPath := filepath.Join(resolvedDir, "SKILL.md"+PendingSuffix)
 	if err := writeRegularFileAtomicNoFollow(pendingPath, []byte(content), 0o644); err != nil {
 		return nil, fmt.Errorf("failed to write skill pending file: %w", err)
+	}
+	if s.lifecycle != nil {
+		state, err := s.lifecycle.ApplyContent(ctx, name, content)
+		if err != nil {
+			return nil, err
+		}
+		return skillLifecycleResult("Skill content installed and runtime state read back", state)
 	}
 
 	livePath := filepath.Join(resolvedDir, "SKILL.md")

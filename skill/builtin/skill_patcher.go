@@ -1,5 +1,5 @@
 // skill_patcher.go 实现 v0.4.0 F2 patch 工具：让 LLM 通过"老文本→新文本"
-// 片段编辑既有 Skill，结果统一落到 SKILL.md.pending，等用户审批后才生效。
+// 片段编辑既有 Skill；legacy 构造器先保存 pending，接线生命周期后在同一调用中应用并刷新。
 //
 // Fuzzy 匹配策略（轻量级，不依赖第三方 diff 库）：
 //  1. 严格 substring 匹配：原始 old_text 在 SKILL.md 中是否原样存在
@@ -13,6 +13,7 @@ package builtin
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -21,12 +22,19 @@ import (
 	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/hexclaw/security"
 	"github.com/hexagon-codes/hexclaw/skill"
+	"github.com/hexagon-codes/hexclaw/skill/lifecycle"
 )
 
 // SkillPatcherSkill 让 LLM 修改既有 Skill 的小片段，结果落到 SKILL.md.pending。
 type SkillPatcherSkill struct {
-	skillDir string
-	scanner  *security.SkillScanner
+	skillDir  string
+	scanner   *security.SkillScanner
+	lifecycle *lifecycle.Service
+}
+
+func (s *SkillPatcherSkill) SetLifecycle(service *lifecycle.Service) {
+	s.lifecycle = service
+	s.skillDir = service.Dir()
 }
 
 // NewSkillPatcherSkill 构造 patch_skill 工具。
@@ -36,16 +44,22 @@ func NewSkillPatcherSkill(skillDir string, scanner *security.SkillScanner) *Skil
 
 func (s *SkillPatcherSkill) Name() string { return "patch_skill" }
 func (s *SkillPatcherSkill) Description() string {
+	if s.lifecycle != nil {
+		return "Patch an existing skill and refresh its actual runtime content"
+	}
 	return "Patch an existing skill by replacing a snippet (writes to SKILL.md.pending; user must approve)"
 }
 func (s *SkillPatcherSkill) Match(_ string) bool { return false }
 
 func (s *SkillPatcherSkill) ToolDefinition() llm.ToolDefinition {
-	return llm.NewToolDefinition("patch_skill",
-		"Patch an existing skill by replacing one snippet of its SKILL.md content. "+
-			"Saves the result to SKILL.md.pending — the user must call manage_skill_pending to approve. "+
-			"Fuzzy whitespace tolerance is applied so minor indentation drift in old_text is forgiven; "+
-			"if the snippet still cannot be located the call returns an error and nothing is written.",
+	description := "Patch an existing skill by replacing one snippet of its SKILL.md content. " +
+		"Saves the result to SKILL.md.pending — the user must call manage_skill_pending to approve. " +
+		"Fuzzy whitespace tolerance is applied so minor indentation drift in old_text is forgiven; " +
+		"if the snippet still cannot be located the call returns an error and nothing is written."
+	if s.lifecycle != nil {
+		description = "Patch one uniquely matched snippet in an installed skill and activate through the shared application lifecycle. Preserve package resources and explicit disabled state. The current authorized tool execution requires no second approval step."
+	}
+	return llm.NewToolDefinition("patch_skill", description,
 		&llm.Schema{
 			Type: "object",
 			Properties: map[string]*llm.Schema{
@@ -57,7 +71,7 @@ func (s *SkillPatcherSkill) ToolDefinition() llm.ToolDefinition {
 		})
 }
 
-func (s *SkillPatcherSkill) Execute(_ context.Context, args map[string]any) (*skill.Result, error) {
+func (s *SkillPatcherSkill) Execute(ctx context.Context, args map[string]any) (*skill.Result, error) {
 	name, _ := args["name"].(string)
 	oldText, _ := args["old_text"].(string)
 	newText, _ := args["new_text"].(string)
@@ -73,6 +87,17 @@ func (s *SkillPatcherSkill) Execute(_ context.Context, args map[string]any) (*sk
 	}
 
 	dir := filepath.Join(s.skillDir, name)
+	if s.lifecycle != nil {
+		if _, err := os.Stat(dir); os.IsNotExist(err) {
+			if _, err := s.lifecycle.State(name); err != nil {
+				return nil, err
+			}
+			if err := os.MkdirAll(dir, 0755); err != nil {
+				return nil, err
+			}
+			defer os.Remove(dir)
+		}
+	}
 	resolvedDir, err := filepath.EvalSymlinks(dir)
 	if err != nil {
 		return nil, fmt.Errorf("skill %q not found: %w", name, err)
@@ -86,6 +111,11 @@ func (s *SkillPatcherSkill) Execute(_ context.Context, args map[string]any) (*sk
 	}
 
 	livePath := filepath.Join(resolvedDir, "SKILL.md")
+	if s.lifecycle != nil {
+		if _, err := os.Stat(livePath); os.IsNotExist(err) {
+			livePath = filepath.Join(s.skillDir, name+".md")
+		}
+	}
 	original, _, err := readRegularFileNoFollow(livePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read existing SKILL.md: %w", err)
@@ -102,6 +132,13 @@ func (s *SkillPatcherSkill) Execute(_ context.Context, args map[string]any) (*sk
 		}
 	}
 
+	if s.lifecycle != nil {
+		state, err := s.lifecycle.ApplyContentIfUnchanged(ctx, name, patched, sha256.Sum256(original))
+		if err != nil {
+			return nil, err
+		}
+		return skillLifecycleResult("Skill content patched and runtime state read back", state)
+	}
 	pendingPath := filepath.Join(resolvedDir, "SKILL.md"+PendingSuffix)
 	if err := writeRegularFileAtomicNoFollow(pendingPath, []byte(patched), 0o644); err != nil {
 		return nil, fmt.Errorf("failed to write pending file: %w", err)

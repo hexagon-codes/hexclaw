@@ -8,13 +8,14 @@ import (
 
 	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/hexclaw/skill"
+	"github.com/hexagon-codes/hexclaw/skill/lifecycle"
 )
 
 // AppQueryDomains 是 app_query 支持的 domain 全集 —— 工具 schema Enum、入参校验、各处错误文案的
 // **单一事实源**（F2：此前 schema Enum / "domain is required" / "unknown domain" 三处各写一份 → 漂移，
 // 错误串漏列 logs/workflows）。新增 domain 只改这里 + queryDomain 的 switch case。
 // 顺序即给模型看的呈现顺序：能直接作答/操作的资源在前，诊断面（config/logs）在后。
-var AppQueryDomains = []string{"connections", "mcp", "cron", "webhooks", "workflows", "agents", "config", "logs", "about", "runtime"}
+var AppQueryDomains = []string{"connections", "mcp", "cron", "webhooks", "workflows", "agents", "config", "logs", "about", "runtime", "skills"}
 
 // domainEnumAny 把 AppQueryDomains 适配成 schema.Enum 需要的 []any。
 func domainEnumAny() []any {
@@ -38,7 +39,31 @@ type AppQuerier interface {
 // 这是"自省读"的**收口**工具：一个工具 + domain 枚举，避免 N 个 list_* 工具撑爆工具列表、
 // 也让模型从枚举里发现所有可读域。详情按需拉，不灌进每轮静态 prompt。
 type AppQuerySkill struct {
-	querier AppQuerier
+	querier       AppQuerier
+	skills        *lifecycle.Service
+	mcpController MCPResourceController
+}
+
+// QueryOptions 是资源查询的统一输入；未提供 limit 与显式零保持不同语义。
+type QueryOptions struct {
+	Domain   string `json:"domain"`
+	Action   string `json:"action"`
+	ID       string `json:"id,omitempty"`
+	Query    string `json:"query,omitempty"`
+	View     string `json:"view,omitempty"`
+	Cursor   string `json:"cursor,omitempty"`
+	Limit    *int   `json:"limit,omitempty"`
+	TimeFrom string `json:"time_from,omitempty"`
+	TimeTo   string `json:"time_to,omitempty"`
+	Level    string `json:"level,omitempty"`
+	Locale   string `json:"locale,omitempty"`
+}
+
+// SetSkillLifecycle 只补齐同一应用资源用例，不改变原有域的身份或查询实现。
+func (s *AppQuerySkill) SetSkillLifecycle(service *lifecycle.Service) { s.skills = service }
+
+func (s *AppQuerySkill) SetMCPResourceController(controller MCPResourceController) {
+	s.mcpController = controller
 }
 
 func NewAppQuerySkill(querier AppQuerier) *AppQuerySkill {
@@ -48,7 +73,7 @@ func NewAppQuerySkill(querier AppQuerier) *AppQuerySkill {
 func (s *AppQuerySkill) Name() string { return "app_query" }
 
 func (s *AppQuerySkill) Description() string {
-	return "Read the user's configured HexClaw resources (connections/MCP data-connectors/cron/webhooks/workflows/config/agents)"
+	return "Read configured HexClaw resources, installed and installable skills/MCP servers, and the actual agent template catalog"
 }
 
 // Match 一律走 LLM tool-calling，无关键词快路径。
@@ -61,6 +86,7 @@ func (s *AppQuerySkill) ToolDefinition() llm.ToolDefinition {
 			"connections (configured IM/email channels you can send to), mcp (MCP servers including data connectors "+
 			"like MySQL/Postgres and the tools they expose), cron (scheduled tasks), webhooks, workflows, agents, "+
 			"config (app settings, redacted), logs (recent app logs for diagnosis), about (versioned public product facts), runtime (this request's actual model and tools). For collection domains "+
+			"skills (view=installed or catalog, list/get/search with id or query and pagination; use skill_view for full instructions). agents with view=templates reads the current template catalog; action=get with id returns the frozen source and creation parameters, with optional locale. mcp with view=catalog lists installable entries; default view reads saved server state including disabled entries. For collection domains "+
 			"(connections/mcp/cron/webhooks/workflows/agents) use action=get with id (resource id or name) to fetch "+
 			"a single item; config/logs/about/runtime are singletons (action=list).",
 		&llm.Schema{
@@ -74,18 +100,43 @@ func (s *AppQuerySkill) ToolDefinition() llm.ToolDefinition {
 				"action": {
 					Type:        "string",
 					Description: "list (all, default) or get (single by id, for collection domains)",
-					Enum:        []any{"list", "get"},
+					Enum:        []any{"list", "get", "search"},
 				},
 				"id": {
 					Type:        "string",
 					Description: "Resource id/name (required for action=get)",
 				},
+				"query":  {Type: "string", Description: "Search text for skill resources"},
+				"view":   {Type: "string", Description: "skills: installed or catalog"},
+				"cursor": {Type: "string", Description: "Continuation cursor returned by the same query"},
+				"limit":  {Type: "integer", Description: "Maximum items; explicit zero returns no items"},
+				"locale": {Type: "string", Description: "Template locale: zh-CN, en, ug-CN"},
 			},
 			Required: []string{"domain"},
 		})
 }
 
 func (s *AppQuerySkill) Execute(ctx context.Context, args map[string]any) (*skill.Result, error) {
+	if cronArgString(args, "domain") == "mcp" && s.mcpController != nil {
+		action := cronArgString(args, "action")
+		if action == "" {
+			action = "list"
+		}
+		name := cronArgString(args, "id")
+		if cronArgString(args, "view") == "catalog" {
+			return s.mcpController.ManageMCP(ctx, "catalog", cronArgString(args, "query"))
+		}
+		if action != "list" && action != "get" {
+			return nil, fmt.Errorf("installed MCP queries support only list or get")
+		}
+		return s.mcpController.ManageMCP(ctx, action, name)
+	}
+	if cronArgString(args, "domain") == "agents" && cronArgString(args, "view") == "templates" {
+		return s.queryAgentTemplates(ctx, args)
+	}
+	if cronArgString(args, "domain") == "skills" {
+		return s.querySkills(ctx, args)
+	}
 	if s.querier == nil {
 		return nil, fmt.Errorf("app introspection is not enabled")
 	}
@@ -96,6 +147,9 @@ func (s *AppQuerySkill) Execute(ctx context.Context, args map[string]any) (*skil
 	action := cronArgString(args, "action")
 	if action == "" {
 		action = "list"
+	}
+	if action != "list" && action != "get" {
+		return nil, fmt.Errorf("this resource domain supports only list or get")
 	}
 	id := cronArgString(args, "id")
 	// 兑现 schema 契约（AP-058）：action=get 必须带 id —— 否则 get 退化成 list 是 over-promise。

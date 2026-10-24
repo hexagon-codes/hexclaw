@@ -93,7 +93,10 @@ def main():
         if name in entries:
             raise ValueError(f"Duplicate skill in source index: {name}")
         entries[name] = entry
-    eligible = {name for name, entry in entries.items() if "k12" in entry.get("tags", []) and name not in EXCLUDED}
+    # 出厂种子只接收单文件；目录包随完整市场目录提供，由共享生命周期安装全部资源。
+    eligible = {name for name, entry in entries.items()
+                if "k12" in entry.get("tags", []) and name not in EXCLUDED
+                and entry.get("file") == f"skills/{name}.md"}
     selected = sorted(set(args.skills) if args.skills else eligible)
     if set(selected) - eligible:
         raise ValueError("Selection contains an unknown or excluded K12 seed")

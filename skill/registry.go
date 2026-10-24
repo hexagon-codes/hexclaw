@@ -70,6 +70,17 @@ func (r *DefaultRegistry) Get(name string) (Skill, bool) {
 	return s, ok
 }
 
+// Replace 原子替换同名技能正文，保留顺序及启用状态，进行中的引用保持原快照。
+func (r *DefaultRegistry) Replace(replacement Skill) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, exists := r.skills[replacement.Name()]; !exists {
+		return fmt.Errorf("skill %q is not registered", replacement.Name())
+	}
+	r.skills[replacement.Name()] = replacement
+	return nil
+}
+
 // Match 快速路径匹配
 //
 // 遍历所有 Skill（按注册顺序），返回第一个 Match() 为 true 的 Skill。

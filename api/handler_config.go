@@ -16,14 +16,16 @@ import (
 
 	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/hexagon"
+	"github.com/hexagon-codes/toolkit/util/logger"
+
 	"github.com/hexagon-codes/hexclaw/config"
 	"github.com/hexagon-codes/hexclaw/egress"
 	"github.com/hexagon-codes/hexclaw/engine"
 	"github.com/hexagon-codes/hexclaw/internal/inputlimits"
+	"github.com/hexagon-codes/hexclaw/internal/mediaflow"
 	"github.com/hexagon-codes/hexclaw/internal/upstreamerr"
 	"github.com/hexagon-codes/hexclaw/llmrouter"
 	"github.com/hexagon-codes/hexclaw/storage"
-	"github.com/hexagon-codes/toolkit/util/logger"
 )
 
 // LLMConfigResponse GET /api/v1/config/llm 响应
@@ -1305,7 +1307,7 @@ func (s *Server) handleTestLLMConfig(w http.ResponseWriter, r *http.Request) {
 // handleFetchProviderModels POST /api/v1/config/llm/models
 //
 // 动态获取 Provider 的可用模型列表。
-// 向 {base_url}/models 发请求（OpenAI 兼容格式），返回标准化的模型列表。
+// 按已保存的端点协议读取模型目录，返回标准化的模型列表。
 func (s *Server) handleFetchProviderModels(w http.ResponseWriter, r *http.Request) {
 	ollamaTargetBase := ""
 	var nativeSourceProvider config.LLMProviderConfig
@@ -1389,11 +1391,20 @@ func (s *Server) handleFetchProviderModels(w http.ResponseWriter, r *http.Reques
 	defer cancel()
 
 	modelsURL := baseURL + "/models"
-	// Google 兼容目录只有 ID；同域原生目录提供生成方法，调用仍使用保存的兼容地址。
-	googleCatalog := baseURL == "https://generativelanguage.googleapis.com/v1beta/openai" ||
-		baseURL == "https://generativelanguage.googleapis.com/v1beta"
+	// 兼容端点保留自身的认证和目录协议，只有原生地址使用原生目录。
+	googleCatalog := baseURL == "https://generativelanguage.googleapis.com/v1beta"
 	if googleCatalog {
 		modelsURL = "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000"
+	}
+	cloudflareCatalog := false
+	if endpoint, parseErr := url.Parse(baseURL); parseErr == nil && endpoint.Scheme == "https" && endpoint.Host == "api.cloudflare.com" {
+		parts := strings.Split(strings.Trim(endpoint.Path, "/"), "/")
+		if len(parts) == 6 && parts[0] == "client" && parts[1] == "v4" && parts[2] == "accounts" && parts[3] != "" && parts[4] == "ai" && parts[5] == "v1" {
+			cloudflareCatalog = true
+			endpoint.Path = strings.TrimSuffix(endpoint.Path, "/v1") + "/models/search"
+			endpoint.RawQuery = "per_page=1000"
+			modelsURL = endpoint.String()
+		}
 	}
 	httpReq, err := http.NewRequestWithContext(ctx, "GET", modelsURL, nil)
 	if err != nil {
@@ -1425,6 +1436,7 @@ func (s *Server) handleFetchProviderModels(w http.ResponseWriter, r *http.Reques
 	var body struct {
 		Data   []json.RawMessage `json:"data"`
 		Models []json.RawMessage `json:"models"`
+		Result []json.RawMessage `json:"result"`
 	}
 	// OpenRouter 等聚合商返回全量目录（数百模型 + 元数据），1MB 不够用
 	if err := json.NewDecoder(http.MaxBytesReader(w, resp.Body, 8<<20)).Decode(&body); err != nil {
@@ -1436,6 +1448,9 @@ func (s *Server) handleFetchProviderModels(w http.ResponseWriter, r *http.Reques
 	if len(rawModels) == 0 {
 		rawModels = body.Models
 	}
+	if cloudflareCatalog {
+		rawModels = body.Result
+	}
 	if len(rawModels) == 0 {
 		writeJSON(w, http.StatusOK, map[string]any{"models": []any{}, "error": "上游返回空模型目录"})
 		return
@@ -1443,6 +1458,28 @@ func (s *Server) handleFetchProviderModels(w http.ResponseWriter, r *http.Reques
 
 	models := make([]providerModelInfo, 0, len(rawModels))
 	for _, raw := range rawModels {
+		if cloudflareCatalog {
+			var entry struct {
+				Name string `json:"name"`
+				Task struct {
+					Name string `json:"name"`
+				} `json:"task"`
+			}
+			if json.Unmarshal(raw, &entry) != nil || entry.Name == "" {
+				continue
+			}
+			// 此兼容地址只实现文本和向量协议，其他原生任务不能冒充可调用模型。
+			var capability string
+			switch entry.Task.Name {
+			case "Text Generation":
+				capability = config.LLMModelCapabilityText
+			case "Text Embeddings":
+				capability = config.LLMModelCapabilityEmbedding
+			default:
+				continue
+			}
+			raw, _ = json.Marshal(map[string]any{"id": entry.Name, "name": entry.Name, "capabilities": []string{capability}})
+		}
 		if m, ok := parseProviderModel(raw); ok {
 			if nativeSourceProviderKey != "" {
 				m.NativeReasoningSourceFingerprint = nativeReasoningSourceFingerprint(nativeSourceProviderKey, nativeSourceProvider, m.ID)
@@ -1453,6 +1490,40 @@ func (s *Server) handleFetchProviderModels(w http.ResponseWriter, r *http.Reques
 	if len(models) == 0 {
 		writeJSON(w, http.StatusOK, map[string]any{"models": []any{}, "error": "上游模型目录未包含可识别的模型 ID"})
 		return
+	}
+	// 管理与执行共用已实现协议的 SDK 目录；第三方目录仅补已有条目的可信能力。
+	byID := make(map[string]int, len(models))
+	for i := range models {
+		byID[models[i].ID] = i
+	}
+	mergeSpecs := func(specs []config.LLMProviderModelSpec, appendMissing bool) {
+		for _, spec := range specs {
+			i, found := byID[spec.ID]
+			if !found {
+				if !appendMissing {
+					continue
+				}
+				i = len(models)
+				models = append(models, providerModelInfo{ID: spec.ID, Name: spec.ID})
+				byID[spec.ID] = i
+			}
+			if len(spec.Capabilities) > 0 && (models[i].Capabilities == nil || len(*models[i].Capabilities) == 0) {
+				capabilities := append([]string(nil), spec.Capabilities...)
+				models[i].Capabilities = &capabilities
+			}
+		}
+	}
+	_, configuredSpecs := config.NormalizeProviderModelSpecs(nativeSourceProvider)
+	mergeSpecs(configuredSpecs, false)
+	mergeSpecs(mediaflow.NativeProviderModelSpecs(baseURL), true)
+	if s.mediaFlow != nil && nativeSourceProviderKey != "" {
+		providerID := config.EffectiveProviderInstanceID(nativeSourceProviderKey, nativeSourceProvider)
+		observed, observedErr := s.mediaFlow.ObservedModelSpecs(r.Context(), providerID)
+		if observedErr != nil {
+			logger.Warn("Verified media capability enrichment is unavailable", "error", observedErr)
+		} else {
+			mergeSpecs(observed, false)
+		}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"models": models})
@@ -1498,6 +1569,20 @@ func parseProviderModel(raw json.RawMessage) (providerModelInfo, bool) {
 		return providerModelInfo{}, false
 	}
 	info := providerModelInfo{ID: id, Name: id}
+	if values, exists := m["capabilities"]; exists {
+		if declared, valid := values.([]any); valid {
+			capabilities := []string{}
+			for _, value := range declared {
+				if capability, ok := value.(string); ok {
+					switch capability {
+					case "text", "vision", "video", "audio", "code", "image_generation", "video_generation", "embedding":
+						capabilities = append(capabilities, capability)
+					}
+				}
+			}
+			info.Capabilities = &capabilities
+		}
+	}
 	if name, _ := m["name"].(string); name != "" {
 		info.Name = name
 	}

@@ -79,13 +79,15 @@ type connectedServer struct {
 // 通过 RegisterServer / UnregisterServer 在运行时动态加挂 / 卸载 server
 // （flag mcp.lifecycle.v2 控制 hook 是否触发；动态 API 始终可用）。
 type Manager struct {
-	mu        sync.RWMutex
-	servers   map[string]*connectedServer
-	configs   []ServerConfig // 保存配置用于重连
-	stopCh    chan struct{}
-	closeOnce sync.Once
-	revisions map[string]uint64         // per-name lifecycle generation; guarded by mu
-	failures  map[string]connectFailure // 最近一次连接失败事实；guarded by mu
+	configurationMu sync.Mutex // 只协调配置提交与代次预留，不覆盖网络连接或清理。
+	mu              sync.RWMutex
+	servers         map[string]*connectedServer
+	configs         []ServerConfig // 保存配置用于重连
+	stopCh          chan struct{}
+	closeOnce       sync.Once
+	revisions       map[string]uint64         // per-name lifecycle generation; guarded by mu
+	connecting      map[string]uint64         // 当前正在连接的配置代次；guarded by mu
+	failures        map[string]connectFailure // 最近一次连接失败事实；guarded by mu
 
 	hooks hooksRegistry // v0.4.0 H3 LifecycleHook 列表
 }
@@ -93,10 +95,11 @@ type Manager struct {
 // NewManager 创建 MCP 管理器
 func NewManager() *Manager {
 	return &Manager{
-		servers:   make(map[string]*connectedServer),
-		stopCh:    make(chan struct{}),
-		revisions: make(map[string]uint64),
-		failures:  make(map[string]connectFailure),
+		servers:    make(map[string]*connectedServer),
+		stopCh:     make(chan struct{}),
+		revisions:  make(map[string]uint64),
+		connecting: make(map[string]uint64),
+		failures:   make(map[string]connectFailure),
 	}
 }
 
@@ -112,6 +115,14 @@ func (m *Manager) closedLocked() bool {
 func (m *Manager) bumpRevisionLocked(name string) uint64 {
 	m.revisions[name]++
 	return m.revisions[name]
+}
+
+func (m *Manager) finishConnecting(name string, revision uint64) {
+	m.mu.Lock()
+	if m.connecting[name] == revision {
+		delete(m.connecting, name)
+	}
+	m.mu.Unlock()
 }
 
 // AddLifecycleHook 注册一个 LifecycleHook。flag mcp.lifecycle.v2 关闭时 hook
@@ -344,19 +355,23 @@ func (m *Manager) tryReconnect() {
 	m.mu.RUnlock()
 
 	for _, cfg := range cfgsCopy {
-		if !cfg.Enabled {
-			continue
-		}
-
 		m.mu.RLock()
+		configured := false
+		for _, current := range m.configs {
+			if current.Name == cfg.Name {
+				cfg, configured = current, true
+				break
+			}
+		}
 		server, exists := m.servers[cfg.Name]
 		needReconnect := !exists || !server.connected
 		revision := m.revisions[cfg.Name]
+		connecting := m.connecting[cfg.Name] == revision && revision != 0
 		closed := m.closedLocked()
 		failure, failed := m.failures[cfg.Name]
 		m.mu.RUnlock()
 
-		if closed || !needReconnect || (failed && !mcpRetryDue(failure, time.Now())) {
+		if closed || !configured || !cfg.Enabled || connecting || !needReconnect || (failed && !mcpRetryDue(failure, time.Now())) {
 			continue
 		}
 
@@ -372,7 +387,7 @@ func (m *Manager) tryReconnect() {
 		m.mu.Lock()
 		current, exists := m.servers[cfg.Name]
 		stillNeedsReconnect := !exists || !current.connected
-		configured := false
+		configured = false
 		for i := range m.configs {
 			if m.configs[i].Name == cfg.Name && m.configs[i].Enabled {
 				configured = true
@@ -963,42 +978,96 @@ func (m *Manager) AddServer(ctx context.Context, cfg ServerConfig) error {
 
 // AddServerBestEffort 注册并尽力连接 MCP Server（运行时动态添加，如「连接中心 → 添加数据源」）。
 //
-// 与 AddServer（严格：即时连接失败即不注册）不同：本方法**先尝试一次即时连接，再在同一把锁下登记
-// cfg(Enabled=true)**——成功则同时落 server，失败则只落 cfg，交后台 reconnectLoop(30s) 在 npx/uvx
-// 缓存就绪后自动拉起。这样「添加数据源」首次冷装不再硬失败（根因：旧路径连接失败即 400 且不入 configs，
-// 重连循环永不接管）。
-//
-// ★为何「连接在前、登记在后」：connectServer 期间 cfg 尚未进 m.configs，reconnectLoop 看不到它，
-// 不会对同名并发再连一次（避免双开子进程）。登记与落 server 在同一把锁内完成，登记后状态即自洽。
-//
-// 返回 (connected, err)：err 仅在不可恢复时（name 空 / Manager 已关闭）非 nil；
+// 与 AddServer（严格：即时连接失败即不注册）不同：先登记启用配置与在途代次，
+// 再在锁外尝试连接；在途标记阻止后台重复连接，失败后由重连循环接管。
+// 此入口始终启用；保存原禁用状态的安装应使用 ConfigureServerBestEffort 返回 nil 配置。
+// 返回 (connected, err)：名称为空、Manager 关闭或 ErrServerChangeSuperseded 时返回错误；
 // 即时连接失败属可恢复，返回 (false, nil)。
 func (m *Manager) AddServerBestEffort(ctx context.Context, cfg ServerConfig) (bool, error) {
 	if cfg.Name == "" {
 		return false, fmt.Errorf("server name 不能为空")
 	}
 	cfg.Enabled = true
+	return m.ConfigureServerBestEffort(ctx, cfg.Name, func() (*ServerConfig, error) { return &cfg, nil })
+}
 
+// ErrServerChangeSuperseded 表示网络连接期间同名配置已由较新的命令取代。
+var ErrServerChangeSuperseded = errors.New("MCP server change was superseded")
+
+// ConfigureServerBestEffort 将配置提交与运行代次预留绑定，网络连接和资源清理在锁外执行。
+// configure 在独立配置协调锁内调用，不持运行表锁；只提交同名配置且不得重入配置变更。
+// 写盘失败不更改运行态，宿主关闭期间配置可能已提交，调用方需按持久状态查询。
+// 返回 nil 配置表示保持原运行态；Enabled=false 幂等移除运行项并取代在途连接。
+func (m *Manager) ConfigureServerBestEffort(ctx context.Context, name string, configure func() (*ServerConfig, error)) (bool, error) {
+	if name == "" || configure == nil {
+		return false, fmt.Errorf("MCP server name and configuration callback are required")
+	}
+	m.configurationMu.Lock()
 	m.mu.Lock()
 	if m.closedLocked() {
 		m.mu.Unlock()
+		m.configurationMu.Unlock()
 		return false, fmt.Errorf("Manager 已关闭")
 	}
-	delete(m.failures, cfg.Name)
-	revision := m.bumpRevisionLocked(cfg.Name)
 	m.mu.Unlock()
+	candidate, err := configure()
+	if err != nil {
+		m.configurationMu.Unlock()
+		return false, err
+	}
+	m.mu.Lock()
+	if m.closedLocked() {
+		m.mu.Unlock()
+		m.configurationMu.Unlock()
+		return false, fmt.Errorf("Manager 已关闭")
+	}
+	if candidate == nil {
+		connected := m.servers[name] != nil && m.servers[name].connected
+		m.mu.Unlock()
+		m.configurationMu.Unlock()
+		return connected, nil
+	}
+	if candidate.Name != name {
+		m.mu.Unlock()
+		m.configurationMu.Unlock()
+		return false, fmt.Errorf("MCP server configuration identity mismatch")
+	}
+	cfg := *candidate
+	delete(m.failures, name)
+	revision := m.bumpRevisionLocked(name)
+	if !cfg.Enabled {
+		delete(m.connecting, name)
+		for i, current := range m.configs {
+			if current.Name == name {
+				m.configs = append(m.configs[:i], m.configs[i+1:]...)
+				break
+			}
+		}
+		old := m.servers[name]
+		if old != nil {
+			old.connected = false
+			delete(m.servers, name)
+		}
+		m.mu.Unlock()
+		m.configurationMu.Unlock()
+		closeServer(old)
+		return false, nil
+	}
+	m.configs = appendOrReplaceConfig(m.configs, cfg)
+	m.connecting[name] = revision
+	m.mu.Unlock()
+	m.configurationMu.Unlock()
+	defer m.finishConnecting(name, revision)
 
-	// 即时连接（此刻 cfg 未登记 → reconnectLoop 不会对同名并发连接，杜绝双开子进程）。
+	// 新配置先对显式重启可见，在途代次阻止后台重复连接。
 	server, connErr := m.connectServer(ctx, cfg)
 
 	m.mu.Lock()
 	if m.closedLocked() || m.revisions[cfg.Name] != revision {
 		m.mu.Unlock()
 		closeServer(server)
-		return false, fmt.Errorf("Manager 已关闭或添加操作已被更新操作取代")
+		return false, ErrServerChangeSuperseded
 	}
-	// 登记 config（替换同名或追加），使 reconnectLoop 拥有它——连接失败时由后台 30s 周期重试拉起。
-	m.configs = appendOrReplaceConfig(m.configs, cfg)
 	if connErr != nil {
 		// 新配置已生效，旧连接不能继续承接该名称的调用。
 		old := m.servers[cfg.Name]
@@ -1028,6 +1097,16 @@ func (m *Manager) AddServerBestEffort(ctx context.Context, cfg ServerConfig) (bo
 //
 // 断开指定 Server 的连接并从管理器中移除。
 func (m *Manager) RemoveServer(name string) error {
+	return m.removeServer(name, false)
+}
+
+// RemoveServerIfPresent 移除运行项并取消同名在途连接；缺项时幂等成功。
+// 已关闭的 Manager 仍返回错误，资源清理在释放管理器锁后执行。
+func (m *Manager) RemoveServerIfPresent(name string) error {
+	return m.removeServer(name, true)
+}
+
+func (m *Manager) removeServer(name string, allowAbsent bool) error {
 	m.mu.Lock()
 	if m.closedLocked() {
 		m.mu.Unlock()
@@ -1052,13 +1131,18 @@ func (m *Manager) RemoveServer(name string) error {
 		delete(m.servers, name)
 	}
 	delete(m.failures, name)
+	delete(m.connecting, name)
+	// 即时添加在连接完成后才登记配置，缺项也必须撤销其预留的代次。
+	m.bumpRevisionLocked(name)
 
 	// 既不在 configs 也不在 servers → 确实不存在。
 	if !inConfigs && !connected {
 		m.mu.Unlock()
+		if allowAbsent {
+			return nil
+		}
 		return fmt.Errorf("MCP Server %q 不存在", name)
 	}
-	m.bumpRevisionLocked(name)
 	m.mu.Unlock()
 
 	closeServer(server)

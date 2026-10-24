@@ -17,6 +17,9 @@ func WrapAsSkill(s *MarkdownSkill) skill.Skill {
 	return &markdownSkillAdapter{s: s}
 }
 
+// IsMarkdownSkill 识别已由本加载器登记的运行态条目，避免刷新覆盖内置工具。
+func IsMarkdownSkill(s skill.Skill) bool { _, ok := s.(*markdownSkillAdapter); return ok }
+
 func (a *markdownSkillAdapter) Name() string              { return a.s.Name() }
 func (a *markdownSkillAdapter) Description() string       { return a.s.Description() }
 func (a *markdownSkillAdapter) Match(content string) bool { return a.s.Match(content) }

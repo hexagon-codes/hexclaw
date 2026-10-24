@@ -1,8 +1,8 @@
 {
   "version": "2.0.0",
-  "updated_at": "2026-10-21T12:24:49Z",
+  "updated_at": "2026-10-24T00:47:43Z",
   "generated_by": "scripts/generate-index.py",
-  "count": 77,
+  "count": 78,
   "skills": [
     {
       "name": "agent-browser",
@@ -795,6 +795,35 @@
       "file": "skills/homework-checker.md",
       "sha256": "dd75c12602aaa7b5b2dc544bece89f70538782d0631d8fdc0fc6831f1f911c9f",
       "size": 6439,
+      "downloads": 0,
+      "rating": 0
+    },
+    {
+      "name": "homework-pdf",
+      "display_name": "作业讲解报告",
+      "description": "将已有的小学作业结果组织为快速解答与深度讲解，引用宿主的确定性 PDF 渲染能力。",
+      "version": "1.0.0",
+      "author": "hexclaw",
+      "category": "education",
+      "license": "Apache-2.0",
+      "schema_version": "1",
+      "tags": [
+        "k12",
+        "primary",
+        "homework",
+        "report",
+        "pdf"
+      ],
+      "requires": [
+        "k12-pedagogy"
+      ],
+      "outputs": [
+        "homework-report"
+      ],
+      "file": "skills/homework-pdf/SKILL.md",
+      "sha256": "d86eac7066cdc5c2e43b87ea8119ce0d1778406e8c6005cbdd05658b8c7e09a4",
+      "size": 2200,
+      "bundle_sha256": "d4b6b5e796646215c5d520356e9eee2072c31578b26005eb0eb23b5bc7ccf555",
       "downloads": 0,
       "rating": 0
     },

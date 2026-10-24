@@ -32,12 +32,15 @@ type McpHub struct {
 	inner *Hub
 }
 
+// NewMcpHubFromHub 复用应用同一目录及刷新代次，避免会话安装与设置页使用不同源。
+func NewMcpHubFromHub(inner *Hub) *McpHub { return &McpHub{inner: inner} }
+
 // NewMcpHub 创建 MCP 市场门面。
 // repoURL 为空（CLI / agentic 的用法）时走默认 hub 仓库 + DefaultHubBranch；
 // 非空时作为 Hub 的仓库基址（github 基址）。
 func NewMcpHub(repoURL string) *McpHub {
 	h := New(HubConfig{Enabled: true, RepoURL: repoURL}, "")
-	h.SetCacheDir(DefaultCacheDir())
+	h.SetCacheDir(h.SourceCacheDir())
 	return &McpHub{inner: h}
 }
 

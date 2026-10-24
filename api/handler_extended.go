@@ -1385,24 +1385,14 @@ func (s *Server) handleClawHubSearch(w http.ResponseWriter, r *http.Request) {
 	category := strings.TrimSpace(strings.ToLower(r.URL.Query().Get("category")))
 	typeFilter := strings.TrimSpace(strings.ToLower(r.URL.Query().Get("type")))
 	var skills []hub.SkillMeta
-	if query != "" {
-		skills = s.skillHub.Search(query)
-		if category != "" && category != "all" {
-			var filtered []hub.SkillMeta
-			for _, sm := range skills {
-				if strings.ToLower(sm.Category) == category {
-					filtered = append(filtered, sm)
-				}
-			}
-			skills = filtered
+	for _, entry := range s.skillCatalog() {
+		if query != "" && !strings.Contains(strings.ToLower(entry.Name+" "+entry.Description+" "+strings.Join(entry.Tags, " ")), strings.ToLower(query)) {
+			continue
 		}
-	} else if category != "" && category != "all" {
-		skills = s.skillHub.ListByCategory(category)
-	} else {
-		catalog := s.skillHub.GetCatalog()
-		if catalog != nil {
-			skills = catalog.Skills
+		if category != "" && category != "all" && strings.ToLower(entry.Category) != category {
+			continue
 		}
+		skills = append(skills, entry)
 	}
 
 	// 按 type 过滤 (skill / mcp)
