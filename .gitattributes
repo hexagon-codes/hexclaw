@@ -1,0 +1,2 @@
+# 内容寻址资源必须保持原始字节，避免工作区换行转换改变冻结摘要。
+scenarios/k12/skill-bundles/** -text
