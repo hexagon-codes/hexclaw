@@ -15,6 +15,7 @@ import (
 	videogen "github.com/hexagon-codes/ai-core/media/video"
 	"github.com/hexagon-codes/ai-core/media/voice"
 	"github.com/hexagon-codes/ai-core/media/voicechat"
+
 	"github.com/hexagon-codes/hexclaw/config"
 )
 
@@ -38,16 +39,18 @@ type Route struct {
 
 // Snapshot 在请求内只读，热更新整体替换，不修改已有服务或路由。
 type Snapshot struct {
-	Revision        string
-	ToolEnabled     bool
-	Routes          []Route
-	Images          *imagegen.Service
-	Videos          *videogen.Service
-	Voice           *voice.Service
-	Chat            *voicechat.Service
-	providers       map[string]config.LLMProviderConfig
-	providerKeys    map[string]string
-	defaultProvider string
+	Revision            string
+	ToolEnabled         bool
+	Routes              []Route
+	ExplicitImageRoutes []Route             // 未声明能力的配置模型，只供用户明确指定时尝试
+	MediaModels         map[string][]string // 包含已配置但暂未启用的目录，用于识别用户约束
+	Images              *imagegen.Service
+	Videos              *videogen.Service
+	Voice               *voice.Service
+	Chat                *voicechat.Service
+	providers           map[string]config.LLMProviderConfig
+	providerKeys        map[string]string
+	defaultProvider     string
 }
 
 type Router struct{ current atomic.Pointer[Snapshot] }
@@ -55,9 +58,30 @@ type Router struct{ current atomic.Pointer[Snapshot] }
 func NewRouter() *Router             { return &Router{} }
 func (r *Router) Current() *Snapshot { return r.current.Load() }
 
+// allowsGeneration 只核对新生成尝试，既有任务查询与已保存资产恢复不受此检查影响。
+func (s *Snapshot) allowsGeneration(route Route, request Request) bool {
+	if s == nil {
+		return false
+	}
+	routeSets := [][]Route{s.Routes}
+	if request.Selection == nil && request.Model == route.Model || request.Selection != nil && hasModel(request.Selection.Models, route.Model) {
+		routeSets = append(routeSets, s.ExplicitImageRoutes)
+	}
+	for _, routes := range routeSets {
+		for _, current := range routes {
+			if current.ProviderID == route.ProviderID && current.Model == route.Model &&
+				current.Kind == route.Kind && current.Action == route.Action &&
+				current.Protocol == route.Protocol {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // Reload 只消费已有能力声明和兼容协议，不以域名推断供应商。
 func (r *Router) Reload(cfg *config.Config, speech *voice.Service) {
-	s := &Snapshot{ToolEnabled: cfg.Skill.Builtin.MediaGen, Voice: speech, providers: make(map[string]config.LLMProviderConfig), providerKeys: make(map[string]string)}
+	s := &Snapshot{ToolEnabled: cfg.Skill.Builtin.MediaGen, Voice: speech, providers: make(map[string]config.LLMProviderConfig), providerKeys: make(map[string]string), MediaModels: make(map[string][]string)}
 	images := make(map[string]imagegen.Provider)
 	videos := make(map[string]videogen.Provider)
 	chats := make(map[string]voicechat.Provider)
@@ -74,9 +98,6 @@ func (r *Router) Reload(cfg *config.Config, speech *voice.Service) {
 		if key == cfg.LLM.Default {
 			s.defaultProvider = id
 		}
-		if pc.Enabled != nil && !*pc.Enabled || pc.APIKey == "" {
-			continue
-		}
 		protocol := strings.ToLower(strings.TrimSpace(pc.Compatible))
 		if protocol == "" && (key == "openai" || key == "zhipu" || key == "智谱 AI") {
 			protocol = "openai"
@@ -84,9 +105,24 @@ func (r *Router) Reload(cfg *config.Config, speech *voice.Service) {
 		if protocol != "openai" {
 			continue
 		}
-		_, specs := config.NormalizeProviderModelSpecs(pc)
-		var imageModels, videoModels, chatModels []string
+		modelSpecsMode, specs := config.NormalizeProviderModelSpecs(pc)
+		nativeSpecs := NativeProviderModelSpecs(pc.BaseURL)
+		nativeModels := func(capability string) []string {
+			var models []string
+			for _, spec := range nativeSpecs {
+				for _, declared := range spec.Capabilities {
+					if declared == capability {
+						models = append(models, spec.ID)
+					}
+				}
+			}
+			return models
+		}
+		var imageModels, videoModels, chatModels, explicitImageModels []string
 		for _, spec := range specs {
+			if len(spec.Capabilities) == 0 {
+				explicitImageModels = append(explicitImageModels, spec.ID)
+			}
 			for _, capability := range spec.Capabilities {
 				switch capability {
 				case config.LLMModelCapabilityImageGeneration:
@@ -110,23 +146,41 @@ func (r *Router) Reload(cfg *config.Config, speech *voice.Service) {
 		nativeZhipu := false
 		if endpoint, err := url.Parse(pc.BaseURL); err == nil && endpoint.Scheme == "https" && endpoint.Host == "open.bigmodel.cn" && strings.TrimRight(endpoint.Path, "/") == "/api/paas/v4" {
 			nativeZhipu = true
-			if len(imageModels) == 0 {
-				imageModels = append(imageModels, imagegen.NewZhipuCogView("", "").SupportedModels()...)
-				if len(imageModels) > 0 {
-					nativeImageDefault = imageModels[0]
-				}
+			nativeImages := nativeModels(config.LLMModelCapabilityImageGeneration)
+			if len(nativeImages) > 0 {
+				nativeImageDefault = nativeImages[0]
 			}
-			if len(videoModels) == 0 {
-				videoModels = append(videoModels, videogen.NewZhipuCogVideoX("", "").SupportedModels()...)
+			if modelSpecsMode != config.LLMModelSpecsModeExplicit {
+				if len(imageModels) == 0 {
+					imageModels = append(imageModels, nativeImages...)
+				}
+				if len(videoModels) == 0 {
+					videoModels = append(videoModels, nativeModels(config.LLMModelCapabilityVideoGeneration)...)
+				}
 			}
 		}
 		if endpoint, err := url.Parse(pc.BaseURL); err == nil && endpoint.Scheme == "https" && endpoint.Host == "api.openai.com" && strings.TrimRight(endpoint.Path, "/") == "/v1" {
-			chatModels = voicechat.NewOpenAIVoiceChat("", "").SupportedModels()
-			if len(chatModels) > 0 {
-				nativeChatDefault = chatModels[0]
+			nativeChats := nativeModels(config.LLMModelCapabilityAudio)
+			if len(nativeChats) > 0 {
+				nativeChatDefault = nativeChats[0]
+			}
+			if modelSpecsMode != config.LLMModelSpecsModeExplicit {
+				chatModels = nativeChats
 			}
 		}
+		s.MediaModels["image"] = append(s.MediaModels["image"], nativeModels(config.LLMModelCapabilityImageGeneration)...)
+		s.MediaModels["video"] = append(s.MediaModels["video"], nativeModels(config.LLMModelCapabilityVideoGeneration)...)
+		s.MediaModels["image"] = append(s.MediaModels["image"], imageModels...)
+		s.MediaModels["video"] = append(s.MediaModels["video"], videoModels...)
+		if pc.Enabled != nil && !*pc.Enabled || pc.APIKey == "" {
+			continue
+		}
 		base := Route{ProviderID: id, ProviderKey: key, Endpoint: pc.BaseURL, CredentialRef: pc.CredentialRef}
+		for _, model := range explicitImageModels {
+			route := base
+			route.Kind, route.Action, route.Protocol, route.Model = "image", "generate", "openai-image", model
+			s.ExplicitImageRoutes = append(s.ExplicitImageRoutes, route)
+		}
 		for _, model := range imageModels {
 			route := base
 			route.Kind = "image"
@@ -190,10 +244,13 @@ func (r *Router) Reload(cfg *config.Config, speech *voice.Service) {
 		}
 		s.Routes = append(s.Routes, Route{ProviderID: selected, ProviderKey: cfg.Voice.TTS.Provider, Kind: "audio", Action: "synthesize", Protocol: "tts", SpeechProviders: providers, SpeechVoice: cfg.Voice.TTS.Voice, SpeechSpeed: cfg.Voice.TTS.Speed})
 	}
-	digest := sha256.Sum256([]byte(fmt.Sprintf("%v|%t", s.Routes, s.ToolEnabled)))
+	digest := sha256.Sum256([]byte(fmt.Sprintf("%v|%v|%t", s.Routes, s.ExplicitImageRoutes, s.ToolEnabled)))
 	s.Revision = hex.EncodeToString(digest[:])
 	for i := range s.Routes {
 		s.Routes[i].Revision = s.Revision
+	}
+	for i := range s.ExplicitImageRoutes {
+		s.ExplicitImageRoutes[i].Revision = s.Revision
 	}
 	s.Images = imagegen.NewService(images, "")
 	s.Videos = videogen.NewService(videos, "")
