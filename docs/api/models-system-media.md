@@ -821,8 +821,11 @@ curl -X PUT "${HEXCLAW_API}/api/v1/assistant/soul" \
 - 成功响应携带 `X-Media-Operation-ID`；部分错误也携带此头，收到后须保存。新视频 `task_id` 等于该操作 ID，必须按不透明字符串使用。旧 SDK 任务引用仍可按原查询接口使用，不把它改写为媒体操作 ID。
 - 用 `GET /api/v1/media/operations/{id}` 查询生成、保存与已持久资产。`generation_state=succeeded` 不等于文件保存成功；完整保存以 `save_state=ready` 为准，`partial` 保留已成功资产。`deliveries` 单独投影已保存的渠道事实，`accepted` 不等于 `delivered`；空数组只表示无投递记录，不能判为送达。
 - 操作查询、恢复、取消均按当前认证用户查找，另一用户与不存在的 ID 都返回 404，不接受 body/query 的 owner 覆盖。能力关闭后仍可读取已有操作。`unknown` 必须查询或恢复原操作，不能推断未计费后再次生成。
-- `cancel_requested=true` 是本地取消意图；排队任务可以停止，已提交任务不保证远端取消，迟到产物仍保存。`resume` 在保存未 ready 时只恢复可恢复保存；已 ready 时才恢复原投递中已确认失败的阶段，保留未知和已成功部分，不重新发送全量附件；无可核对来源时保持真实未知/失败状态。
+- `cancel_requested=true` 是本地取消意图；排队任务可以停止，已提交任务不保证远端取消，迟到产物仍保存。取消后的晚到结果合并保留原取消意图、已保存资产及实际 `attempts`、`timings_ms`。`resume` 在保存未 ready 时只恢复可恢复保存；已 ready 时才恢复原投递中已确认失败的阶段，保留未知和已成功部分，不重新发送全量附件；无可核对来源时保持真实未知/失败状态。
 - 状态接口的 `enabled` 表示存在可用媒体路由，不能代替 Agent 的 `media_gen` 工具设置或一次实际生成验证。关闭工具不等于删除既有产物。
+- 用户明确指定模型/供应商时，按实际选择指令识别；画面文字中的同名提及不能遮住后续明确“使用”指令，也不会单独构成选型。
+- 已受理候选保留原实例、型号与协议；首次发送或失败切换发起新生成前，仍核对当前启用集合及原路由是否有效。此检查同样适用于 `audio/chat`；TTS每次新尝试遵守当前Voice及所选Provider启用状态，原端点和参数保持冻结。关闭模型后不再新发生成请求；已提交视频的原任务查询、已保存文件与投递恢复继续沿原身份处理。未分类模型仍仅在明确指定时尝试，不因旧候选或工具hint进入自动降级。
+- 媒体投递在原队列按稳定身份分页推进；旧回执查询失败保留真实状态与引用，不阻止后续独立投递，也不授权重发未知或已成功part。
 
 | 方法 | 路径 | 操作 |
 | --- | --- | --- |
@@ -978,6 +981,8 @@ curl -X POST "${HEXCLAW_API}/api/v1/voice/synthesize" \
 挂载条件: `始终挂载`.
 
 路由始终挂载；服务未配置返回200且enabled=false，providers/models均为空数组。
+
+`models` 是已声明的生图模型。`explicit_candidates` 另列已配置、能力尚未声明、可沿现有图片协议按用户明确指定尝试的模型，字段为 `provider_instance_id`、`model`。它们不加入自动候选；出现于列表也不证明供应商已通过实测。只有这类候选时 `enabled=true`，`models` 仍可为空。
 
 路径/query/额外请求头：无。认证和 Content-Type 按上文。
 
@@ -3131,21 +3136,26 @@ security/sandbox 为字段 patch；Ollama 单独提交并提供四项条件及 I
 | `enabled` | boolean | 是 | — | 是否启用 |
 | `providers` | string[] | 是 | — | Provider map |
 | `models` | string[] | 是 | — | 模型列表 |
+| `explicit_candidates` | object[] | 否 | 图片状态增量 | 未分类且仅可显式选择的配置模型；每项为 provider_instance_id、model，不代表上游已可用 |
 
 <a id="schema-modelsmediaoperation"></a>
 
 ### ModelsMediaOperation
 
-除兼容增量 `deliveries` 外，下列字段均返回。当前服务的 `deliveries` 始终为数组，旧版可缺省。`save_state=ready` 只证明文件保存完整；投递要分别读取 `deliveries[].state` 和 `part_states`，缺省或空数组都不是送达。
+会话中的明确模型选择由可信用户原文约束；`selection` 返回 auto/pinned/preferred 与已识别的模型/Provider 约束，显式直调 API 和旧操作可为 null。图片/视频候选在接纳时冻结，最多尝试 3 个路由；pinned 只使用一条。当前自动切换只处理明确的 401、404、429 拒绝；未知结果、已提交视频或生成后保存失败不重新生成。`attempts` 保留实际 Provider、模型、结果、HTTP 状态及耗时；视频 submitted 仅表示已拿到上游 task ID。调用方不应把原模型字段作为所有尝试的共同模型。
+
+`deliveries`、`selection` 和 `attempts` 是兼容增量，旧版可缺省；当前服务返回这些字段，历史记录的选择或尝试信息可为 null，`deliveries` 始终为数组。`save_state=ready` 只证明文件保存完整；投递要分别读取 `deliveries[].state` 和 `part_states`，缺省或空数组都不是送达。
 
 | 字段 | 类型 / 契约 | 含义 |
 | --- | --- | --- |
 | `operation_id` | string | 不透明操作 ID |
 | `kind` | string | image / video / audio |
 | `action` | string | generate / synthesize / chat |
-| `provider_instance_id` | string | 首次选定的冻结路由身份 |
+| `provider_instance_id` | string | 当前尝试的路由身份；历史尝试见 attempts |
 | `actual_provider_instance_id` | string | 实际成功 Provider（含 TTS 回退）；未确定时为空 |
-| `model` | string | 冻结模型；部分 TTS 路由可为空 |
+| `model` | string | 当前尝试的模型；部分 TTS 路由可为空 |
+| `selection` | object / null | 可信会话模型选择；mode、provider、models、provider_order 及排除项 |
+| `attempts` | array / null | 实际生成尝试；provider_instance_id、model、outcome、error_code、status_code、elapsed_ms；旧操作可为空 |
 | `generation_state` | string | queued / submitting / running / succeeded / failed / unknown / cancelled |
 | `save_state` | string | not_started / saving / ready / partial / failed |
 | `assets` | [ModelsMediaAsset](#schema-modelsmediaasset)[] / null | 已成功持久化的资产；无资产时可能为 null |

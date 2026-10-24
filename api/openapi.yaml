@@ -6677,7 +6677,7 @@ paths:
         - agents-integrations
       summary: 登记或替换 MCP 服务器
       description: 先保存配置，再用最多 10 秒的即时连接窗口登记运行配置。connected=false 表示配置已登记，后续后台连接；不是失败回滚保证。可启动/替换 stdio
-        子进程或访问网络端点。秘密变更须有配置 Writer，同一 index/key 不可重复，replace 值非空且最多 64 KiB；参见秘密变更 DTO。
+        子进程或访问网络端点。保存与运行代次预留统一协调，网络连接期间被较新同名变更取代返回409，旧连接结果不覆盖新状态。秘密变更须有配置 Writer，同一 index/key 不可重复，replace 值非空且最多 64 KiB；参见秘密变更 DTO。
       x-source:
         file: api/handler_misc.go
         handler: handleAddMCPServer
@@ -6719,6 +6719,12 @@ paths:
             text/plain:
               schema:
                 type: string
+        "409":
+          description: 同名较新变更已取代本次连接，错误为 MCP server change was superseded；查询当前状态，不据旧请求结果重写配置。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageError"
         "503":
           description: 配置或秘密持久化不可用/失败。
           content:
@@ -7140,8 +7146,7 @@ paths:
         - agents-integrations
       summary: 安装技能或 Hub MCP 条目
       description: file 读取执行服务所在机器的路径，可为 .md 文件或技能目录，不能含 ..；单文件上限 1 MiB。url 必须 HTTPS，下载窗口 30 秒，内容上限 1 MiB 且具有
-        frontmatter。content 要求闭合 frontmatter 与合法 name。clawhub 解析目录名称，普通技能下载并落盘；MCP 条目需通过既有 pinned artifact
-        校验，保存配置并最佳努力连接。会写入技能/配置并同步运行引擎，实际启用状态以 GET skills/MCP 状态为准。
+        frontmatter。content 要求闭合 frontmatter 与合法 name。含 bundle.json 的目录与 Hub 包校验并安装全部声明资源，不只保存正文。clawhub 按真实目录和兼容摘要选择 Hub 或只读 bundled 来源，source 如实区分；重装保留已有禁用状态。MCP 条目沿原 pinned artifact 校验、配置与连接链。安装和刷新复用同一生命周期，enabled/runtime_registered/effective_enabled/requires_restart 分别表示实际状态，不能只据落盘声称可运行。
       x-source:
         file: api/handler_misc.go
         handler: handleInstallSkill
@@ -9786,7 +9791,8 @@ paths:
         merges valid explicit bindings and recorded active conversations for the same platform and account,
         freezes/deduplicates targets, sends within 30 seconds, and replays only the original receipt.
         All agents and the default assistant use the same resolver. Unhealthy instances or accounts with no
-        known targets send nothing. accepted is not confirmed delivery and unknown
+        known targets send nothing and return success=false. Success requires at least one target and
+        an accepted or delivered receipt for every target. accepted is not confirmed delivery and unknown
         results are not automatically resent. Without request_id, target/content are required; the instance is
         started and sends to target. Send failure can still be HTTP 200 success=false. Examples are
         documentation only.
@@ -14936,11 +14942,11 @@ paths:
       operationId: k12PracticePreparePrintableArtifact
       summary: 冻结可下载 PDF 产物 / Freeze a downloadable PDF artifact
       description: >-
-        canonical 输入与 final_artifact_id+final_artifact_digest 二选一；最终批注产物模式还需 title，摘要必须匹配当前冻结产物。无需
+        canonical、图片终稿身份、文字结算身份三选一。文字使用 solve_run_id + text_finalization_id + text_finalization_digest，标题可省略并沿用冻结日期。图片终稿模式仍需 title；摘要必须匹配当前冻结产物。无需
         idempotency_key，产物按内容身份去重。响应是 PDF 元信息；随后 content 获取实际字节。JSON HTTP 请求体上限 1 MiB，即使渲染层文本边界更大。
 
 
-        Choose canonical input or final_artifact_id+final_artifact_digest; the grading final-artifact variant
+        Choose canonical input, a grading final-artifact identity, or solve_run_id + text_finalization_id + text_finalization_digest. Text titles may be omitted. The grading final-artifact variant
         also requires title and an exact frozen digest. No idempotency_key is required; artifacts deduplicate
         by content identity. The response is PDF metadata; fetch content for actual bytes. HTTP JSON bodies
         remain limited to 1 MiB.
@@ -17473,7 +17479,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/MessageError"
         "409":
-          description: Model invocation needs reconciliation; do not blindly resend.
+          description: Immutable input/run conflict, invalid source or model invocation needs reconciliation; do not blindly resend.
           content:
             application/json:
               schema:
@@ -17562,6 +17568,69 @@ paths:
         file: scenarios/k12/apihttp/handler.go
         handler: reviewQueue
       x-availability: K12 module, record store and the dependencies described for this operation.
+      x-reference-module: k12-records
+      x-visibility: public
+  /api/k12/review-source-groups:
+    post:
+      operationId: k12RecordsRecordReviewSourceGroup
+      summary: Record reviewed equivalent question sources
+      description: >-
+        Append an explicitly reviewed source association without solving, grading, changing learning
+        state or sending messages. The server derives the canonical statement and source fingerprints
+        from exact published receipts. Replays return the first frozen snapshot; changed inputs and
+        overlapping still-valid groups return 409. See scenarios/k12/docs/api/review-source-groups.md
+        and review-source-groups.en.md for the complete contract.
+      tags:
+        - k12-records
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/K12RecordsReviewSourceGroupRequest"
+      responses:
+        "201":
+          description: Reviewed source group first persisted atomically.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/K12RecordsReviewSourceGroupResponse"
+        "200":
+          description: Exact identity replay; original group, note and timestamp retained.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/K12RecordsReviewSourceGroupResponse"
+        "400":
+          description: Invalid request, evidence or member set.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Record missing or outside the requested agent and mistake collection.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageError"
+        "409":
+          description: Source unpublished or changed, or members overlap another still-valid group.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageError"
+        "500":
+          description: Storage or internal failure.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageError"
+      x-source:
+        file: scenarios/k12/apihttp/review_source_group_handler.go
+        handler: recordReviewSourceGroup
+      x-availability: K12 module and record store.
       x-reference-module: k12-records
       x-visibility: public
   /api/k12/insight-report:
@@ -20419,6 +20488,556 @@ paths:
               $ref: "#/components/schemas/K12Recordsscenarios_k12_apihttp_bindIMReq"
       x-reference-module: k12-records
       x-visibility: public
+  /api/v1/agents/templates:
+    get:
+      operationId: agentsTemplateCatalog
+      summary: Read the existing general Agent template catalog
+      description: Read-only. With key returns one immutable snapshot; without key returns the catalog wrapper. Locale
+        defaults and fallbacks follow the current catalog. K12-specific creation remains in the existing scenario.
+      tags:
+      - agents-integrations
+      parameters:
+      - name: locale
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: key
+        in: query
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                oneOf:
+                - $ref: '#/components/schemas/AgentsTemplateSnapshot'
+                - type: object
+                  properties:
+                    schema_version:
+                      type: integer
+                    catalog_source:
+                      type: string
+                    catalog_version:
+                      type: string
+                    templates:
+                      type:
+                      - array
+                      - 'null'
+                      items:
+                        $ref: '#/components/schemas/AgentsTemplateSnapshot'
+                    total:
+                      type: integer
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '400':
+          description: Unsupported catalog locale for list.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageError'
+        '404':
+          description: Unknown template or unsupported locale for a keyed snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageError'
+        '500':
+          description: Catalog read failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageError'
+      x-source:
+        file: api/handler_agent_templates.go
+      x-visibility: public
+      x-reference-module: agents-integrations
+  /api/v1/skills/refresh:
+    post:
+      operationId: agentsRefreshSkills
+      summary: Refresh installed skills and runtime registration
+      description: Rescan the existing installation and atomically refresh Markdown adapters. Preserves explicit disabled
+        state. No model call or package installation.
+      tags:
+      - agents-integrations
+      parameters: []
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  skills:
+                    type:
+                    - array
+                    - 'null'
+                    items:
+                      $ref: '#/components/schemas/AgentsResourceState'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          description: Skill lifecycle unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageError'
+        '500':
+          description: Refresh failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageError'
+      x-source:
+        file: api/handler_skill_lifecycle.go
+      x-visibility: public
+      x-reference-module: agents-integrations
+      x-availability: Skill marketplace routes mounted; lifecycle must be assembled.
+  /api/v1/skills/{name}/resources:
+    get:
+      operationId: agentsSkillResources
+      summary: List the declared resources of an installed package
+      description: Read-only. Returns manifest file identities; does not expand resource content or execute scripts.
+      tags:
+      - agents-integrations
+      parameters:
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  name:
+                    type: string
+                  resources:
+                    type:
+                    - array
+                    - 'null'
+                    items:
+                      $ref: '#/components/schemas/AgentsBundleFile'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '400':
+          description: Invalid manifest or resource request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageError'
+        '404':
+          description: Skill not installed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageError'
+        '503':
+          description: Skill lifecycle unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageError'
+      x-source:
+        file: api/handler_skill_lifecycle.go
+      x-visibility: public
+      x-reference-module: agents-integrations
+  /api/v1/skills/{name}/resources/{path}:
+    get:
+      operationId: agentsSkillResourceContent
+      summary: Read an exact declared package resource
+      description: 'path consumes the remaining path segments, including nested directories. Reads the current installed
+        snapshot, validates declared size/SHA, and returns original bytes. Headers: ETag, X-Skill-Version, X-Content-SHA256
+        and Content-Length. Does not provide historical package snapshots.'
+      tags:
+      - agents-integrations
+      parameters:
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: path
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Declared original resource bytes; MIME is inferred by extension, falling back to application/octet-stream.
+          headers:
+            ETag:
+              schema:
+                type: string
+            X-Skill-Version:
+              schema:
+                type: string
+            X-Content-SHA256:
+              schema:
+                type: string
+            Content-Length:
+              schema:
+                type: string
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '400':
+          description: Undeclared path, malformed manifest, missing or changed resource.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageError'
+        '404':
+          description: Skill not installed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageError'
+        '503':
+          description: Skill lifecycle unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageError'
+      x-source:
+        file: api/handler_skill_lifecycle.go
+      x-visibility: public
+      x-reference-module: agents-integrations
+  /api/v1/mcp/servers/{name}/status:
+    put:
+      operationId: agentsMCPResourceStatus
+      summary: Enable or disable an existing MCP server
+      description: Uses the original configuration writer and running Manager. Explicit false is persisted. Connected
+        and tool_count describe actual runtime. Configuration commit and runtime generation reservation are coordinated;
+        a newer same-name change superseding an in-flight connection returns 409 without overwriting current state.
+      tags:
+      - agents-integrations
+      parameters:
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentsMCPResourceState'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '400':
+          description: Invalid JSON, missing enabled, unknown server or configuration/runtime transition error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageError'
+        '409':
+          description: MCP server change was superseded. Query current state instead of restoring the older configuration.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageError'
+      x-source:
+        file: api/resource_mcp_lifecycle.go
+      x-visibility: public
+      x-reference-module: agents-integrations
+      x-availability: Mounted only when the existing MCP Manager is assembled; otherwise ServeMux 404/405.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                enabled:
+                  type: boolean
+              required:
+              - enabled
+  /api/k12/text-solves/{solve_run_id}:
+    get:
+      operationId: k12TextSolveRead
+      summary: Read durable text solve facts
+      description: Read-only history, including incomplete or unknown runs. finalized does not imply current adoption
+        validity. Reports must call ValidateTextSolveFinalization before adopting results; this endpoint does not
+        execute a solver.
+      tags:
+      - k12-records
+      parameters:
+      - name: agent
+        in: query
+        required: true
+        schema:
+          type: string
+      - name: solve_run_id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  run:
+                    $ref: '#/components/schemas/K12TextSolveRun'
+                  invocations:
+                    type:
+                    - array
+                    - 'null'
+                    items:
+                      $ref: '#/components/schemas/K12TextSolveInvocation'
+                  finalized:
+                    type: boolean
+                  publication_eligible:
+                    type: boolean
+                  finalization:
+                    $ref: '#/components/schemas/K12TextSolveFinalization'
+                  adoption_currently_valid:
+                    type: boolean
+                required:
+                - run
+                - invocations
+                - finalized
+                - publication_eligible
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '400':
+          description: Missing agent or run.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageError'
+        '404':
+          description: Scoped run not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageError'
+        '409':
+          description: Immutable fact conflict or unknown outcome requires reconciliation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageError'
+        '500':
+          description: Storage failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageError'
+        '503':
+          description: Text solve records unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageError'
+      x-source:
+        file: scenarios/k12/apihttp/text_solve_handler.go
+      x-visibility: public
+      x-reference-module: k12-records
+  /api/k12/text-solves/{solve_run_id}/resume-publication:
+    post:
+      operationId: k12TextSolveResumePublication
+      summary: Recover original finalization and publication
+      description: Only uses already stored complete successful execution results. Never calls the solver/model. Missing
+        finalization may be reconstructed from those results; sent/unknown cannot authorize another physical call.
+        published=false means no publication eligibility; it is not a solve failure.
+      tags:
+      - k12-records
+      parameters:
+      - name: agent
+        in: query
+        required: true
+        schema:
+          type: string
+      - name: solve_run_id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  published:
+                    type: boolean
+                  asset:
+                    type:
+                    - object
+                    - 'null'
+                  model_invocations_added:
+                    type: integer
+                    enum:
+                    - 0
+                required:
+                - published
+                - asset
+                - model_invocations_added
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '400':
+          description: Missing agent or run.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageError'
+        '404':
+          description: Run or recoverable complete result not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageError'
+        '409':
+          description: Fact conflict, invalid source or unresolved outcome.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageError'
+        '500':
+          description: Publication/storage failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageError'
+        '503':
+          description: Text solve records unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageError'
+      x-source:
+        file: scenarios/k12/apihttp/text_solve_handler.go
+      x-visibility: public
+      x-reference-module: k12-records
+  /api/k12/print-replies/{message_id}:
+    get:
+      operationId: k12PrintReplyRead
+      summary: Read the original-turn PDF delivery facts
+      description: message_id is the original assistant message ID, not ArtifactID or platform inbound ID. Returns
+        persisted source/batch/state without sending. Source exists only after the original assistant and Outbox transaction
+        commits.
+      tags:
+      - k12-records
+      parameters:
+      - name: agent
+        in: query
+        required: true
+        schema:
+          type: string
+      - name: message_id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/K12PrintReplyView'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '400':
+          description: Missing agent or message ID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageError'
+        '404':
+          description: Scoped print reply not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageError'
+        '500':
+          description: Source, digest or storage failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageError'
+      x-source:
+        file: scenarios/k12/apihttp/print_reply_handler.go
+      x-visibility: public
+      x-reference-module: k12-records
+  /api/k12/print-replies/{message_id}/resume:
+    post:
+      operationId: k12PrintReplyResume
+      summary: Resume original-turn PDF delivery
+      description: Resumes the original frozen K12 DeliveryBatch and original target. Does not solve, render or create
+        MediaOperation. Existing accepted/unknown parts are reconciled; HTTP200 is not delivered. Successful parts
+        are not resent.
+      tags:
+      - k12-records
+      parameters:
+      - name: agent
+        in: query
+        required: true
+        schema:
+          type: string
+      - name: message_id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/K12PrintReplyResume'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '400':
+          description: Missing agent or message ID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageError'
+        '404':
+          description: Scoped original print reply not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageError'
+        '500':
+          description: Persisted source unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageError'
+        '502':
+          description: Original batch preparation/send/query failed; batch and zero model-call count are retained.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/K12PrintReplyResume'
+      x-source:
+        file: scenarios/k12/apihttp/print_reply_handler.go
+      x-visibility: public
+      x-reference-module: k12-records
 components:
   securitySchemes:
     bearerAuth:
@@ -20441,6 +21060,274 @@ components:
           example:
             error: Valid access token required
   schemas:
+    AgentsResourceState:
+      type: object
+      properties:
+        name:
+          type: string
+        version:
+          type: string
+        description:
+          type: string
+        enabled:
+          type: boolean
+        runtime_registered:
+          type: boolean
+        effective_enabled:
+          type: boolean
+        requires_restart:
+          type: boolean
+    AgentsBundleFile:
+      type: object
+      properties:
+        path:
+          type: string
+        role:
+          type: string
+        sha256:
+          type: string
+        size:
+          type: integer
+      required:
+      - path
+      - role
+      - size
+      - sha256
+    AgentsMCPResourceState:
+      type: object
+      properties:
+        name:
+          type: string
+        configured:
+          type: boolean
+        persisted:
+          type: boolean
+        enabled:
+          type: boolean
+        connected:
+          type: boolean
+        tool_count:
+          type: integer
+    AgentsTemplateSnapshot:
+      type: object
+      properties:
+        catalog_source:
+          type: string
+        catalog_version:
+          type: string
+        template_key:
+          type: string
+        template_version:
+          type: string
+        template_digest:
+          type: string
+        locale:
+          type: string
+        slug:
+          type: string
+        icon_key:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        system_prompt:
+          type: string
+        expertise:
+          type:
+          - array
+          - 'null'
+          items:
+            type: string
+    K12TextSolveOrigin:
+      type: object
+      properties:
+        owner_id:
+          type: string
+        solve_run_id:
+          type: string
+        source_session_id:
+          type: string
+        source_message_id:
+          type: string
+        input_revision:
+          type: integer
+      required:
+      - owner_id
+      - solve_run_id
+      - input_revision
+    K12TextSolveRun:
+      allOf:
+      - $ref: '#/components/schemas/K12TextSolveOrigin'
+      - type: object
+        properties:
+          agent_name:
+            type: string
+          facts_digest:
+            type: string
+          input_digest:
+            type: string
+          request_json:
+            type: string
+          facts:
+            type: object
+          route_snapshot:
+            $ref: '#/components/schemas/K12Recordsscenarios_k12_GradingModelSnapshot'
+          created_at:
+            type: integer
+    K12TextSolveInvocation:
+      allOf:
+      - $ref: '#/components/schemas/K12TextSolveOrigin'
+      - type: object
+        properties:
+          invocation_id:
+            type: string
+          agent_name:
+            type: string
+          facts_digest:
+            type: string
+          input_digest:
+            type: string
+          operation:
+            type: string
+          execution_kind:
+            type: string
+          request_digest:
+            type: string
+          status:
+            type: string
+          result_digest:
+            type: string
+          result_json:
+            type: string
+          external_request_id:
+            type: string
+          failure_class:
+            type: string
+          failure_code:
+            type: string
+          operation_attempt:
+            type: integer
+          route_snapshot:
+            $ref: '#/components/schemas/K12Recordsscenarios_k12_GradingModelSnapshot'
+          created_at:
+            type: integer
+          updated_at:
+            type: integer
+    K12TextSolveFinalization:
+      allOf:
+      - $ref: '#/components/schemas/K12TextSolveOrigin'
+      - type: object
+        properties:
+          source_kind:
+            type: string
+          finalization_id:
+            type: string
+          agent_name:
+            type: string
+          facts_digest:
+            type: string
+          input_digest:
+            type: string
+          result_json:
+            type: string
+          result_digest:
+            type: string
+          invocation_id:
+            type: string
+          answer_source:
+            $ref: '#/components/schemas/K12TasksProblemAnswerSource'
+          publication:
+            type: object
+            description: Immutable original ProblemAssetPublication; presence means publication eligibility, not delivery.
+          created_at:
+            type: integer
+    K12PrintReplyArtifact:
+      type: object
+      properties:
+        kind:
+          type: string
+        agent_name:
+          type: string
+        artifact_id:
+          type: string
+        source_digest:
+          type: string
+        byte_digest:
+          type: string
+        name:
+          type: string
+        url:
+          type: string
+        byte_size:
+          type: integer
+      required:
+      - kind
+      - agent_name
+      - artifact_id
+      - source_digest
+      - byte_digest
+      - byte_size
+      - name
+      - url
+    K12ConversationPrintReply:
+      type: object
+      properties:
+        owner:
+          type: string
+        agent_name:
+          type: string
+        session_id:
+          type: string
+        request_id:
+          type: string
+        source_message_id:
+          type: string
+        assistant_message_id:
+          type: string
+        platform:
+          type: string
+        instance_id:
+          type: string
+        chat_id:
+          type: string
+        binding_id:
+          type: string
+        locale:
+          type: string
+        artifacts:
+          type:
+          - array
+          - 'null'
+          items:
+            $ref: '#/components/schemas/K12PrintReplyArtifact'
+    K12PrintReplyView:
+      type: object
+      properties:
+        source:
+          $ref: '#/components/schemas/K12ConversationPrintReply'
+        batch:
+          $ref: '#/components/schemas/K12Recordsscenarios_k12_DeliveryBatch'
+        state:
+          type: string
+          description: 原批次实际状态；含媒体的尚未发送计划主动停止时可为 cancelled，已送达或结果未知回执保留原事实。
+      required:
+      - source
+      - state
+    K12PrintReplyResume:
+      type: object
+      properties:
+        batch:
+          $ref: '#/components/schemas/K12Recordsscenarios_k12_DeliveryBatch'
+        model_invocations_added:
+          type: integer
+          enum:
+          - 0
+        error:
+          type: string
+      required:
+      - batch
+      - model_invocations_added
     ChatRequest:
       type: object
       description: 至少有非空 message 或有效 attachments，JSON 请求体上限 20 MiB；user_id/platform 仅兼容解码，不授予身份
@@ -25833,6 +26720,17 @@ components:
     ModelsMediaStatus:
       type: object
       properties:
+        explicit_candidates:
+          type: array
+          description: Configured image models with undeclared capabilities; usable only when explicitly selected, not automatic candidates. An empty list does not establish upstream availability.
+          items:
+            type: object
+            properties:
+              provider_instance_id:
+                type: string
+              model:
+                type: string
+            required: [provider_instance_id, model]
         enabled:
           type: boolean
         providers:
@@ -25888,7 +26786,7 @@ components:
       required: [asset_id, operation_id, output_index, kind, role, file_path, mime, digest, size]
     ModelsMediaOperation:
       type: object
-      description: Generation, persistence and delivery are separate. ready assets do not imply delivered. The optional deliveries projection reports persisted channel facts; an empty array means no delivery record.
+      description: Generation, persistence and delivery are separate. ready assets do not imply delivered. deliveries reports persisted channel facts. selection is a trusted turn constraint; attempts records actual generation routes without credentials or endpoints.
       properties:
         operation_id:
           type: string
@@ -25900,7 +26798,7 @@ components:
           enum: [generate, synthesize, chat]
         provider_instance_id:
           type: string
-          description: Frozen routing identity for this operation
+          description: Current attempted routing identity; previous attempts remain in attempts
         actual_provider_instance_id:
           type: string
           description: Actual successful provider where known, including TTS fallback; empty while unknown
@@ -25921,6 +26819,13 @@ components:
           description: Safe persisted delivery facts for this operation. Optional for older servers; current servers return [] when no delivery exists. Missing or empty never means delivered.
           items:
             $ref: "#/components/schemas/ModelsMediaDeliveryStatus"
+        selection:
+          $ref: "#/components/schemas/ModelsMediaSelection"
+        attempts:
+          type: [array, 'null']
+          description: Actual generation attempts; submitted means an upstream video task was accepted, not that its artifact is ready. Legacy operations may have no records.
+          items:
+            $ref: "#/components/schemas/ModelsMediaGenerationAttempt"
         cancel_requested:
           type: boolean
           description: Local cancellation intent; not proof of remote cancellation
@@ -25944,6 +26849,36 @@ components:
             format: int64
           description: Recorded stage durations in milliseconds; absent stages are not measured and values are not billing data
       required: [operation_id, kind, action, provider_instance_id, actual_provider_instance_id, model, generation_state, save_state, assets, cancel_requested, error_code, error, revision, created_at, updated_at, timings_ms]
+    ModelsMediaSelection:
+      type: [object, 'null']
+      properties:
+        mode:
+          type: string
+          enum: [auto, pinned, preferred]
+        provider:
+          type: string
+        models:
+          type: array
+          items: {type: string}
+        provider_order:
+          type: array
+          items: {type: string}
+        excluded_models:
+          type: array
+          items: {type: string}
+        excluded_providers:
+          type: array
+          items: {type: string}
+    ModelsMediaGenerationAttempt:
+      type: object
+      properties:
+        provider_instance_id: {type: string}
+        model: {type: string}
+        outcome: {type: string, enum: [submitted, succeeded, failed, unknown]}
+        error_code: {type: string}
+        status_code: {type: integer}
+        elapsed_ms: {type: integer, format: int64}
+      required: [provider_instance_id, model, outcome, elapsed_ms]
     ModelsMediaDeliveryStatus:
       type: object
       description: Safe delivery projection; excludes target chat IDs, tokens, signed URLs and payloads. accepted is not delivered, and delivered follows the channel receipt contract rather than proving the user read the message.
@@ -27187,6 +28122,9 @@ components:
         description:
           type: string
           description: 服务器用途摘要。
+        enabled:
+          type: boolean
+          description: 已保存的启用设置；停用服务器仍保留在列表中，连接状态独立表示。
         status:
           type: string
           description: 连接状态。
@@ -27577,18 +28515,23 @@ components:
           description: 安装 handler 返回 false；实际启用状态另看 GET skills。
         runtime_registered:
           type: boolean
-          description: 普通技能返回 true；Hub MCP 为即时连接结果，不替代状态查询。
         config_hint:
           type: string
           description: Hub MCP 配置提示，可省略。
         artifact:
-          $ref: "#/components/schemas/AgentsHubArtifact"
+          $ref: '#/components/schemas/AgentsHubArtifact'
+        source:
+          type: string
+          enum:
+          - hub
+          - bundled
+          description: Present for catalog installation; bundled is offline embedded content, not a network receipt.
       additionalProperties: true
       required:
-        - name
-        - message
-        - requires_restart
-        - runtime_registered
+      - name
+      - message
+      - requires_restart
+      - runtime_registered
     AgentsGenerateSkillRequest:
       type: object
       properties:
@@ -28649,6 +29592,7 @@ components:
           type: string
         success:
           type: boolean
+          description: True only when at least one target exists and every target has an accepted or delivered receipt. An empty target list returns false.
         message:
           type: string
         pending:
@@ -35682,16 +36626,25 @@ components:
           type: string
         final_artifact_digest:
           type: string
+        solve_run_id:
+          type: string
+        text_finalization_id:
+          type: string
+        text_finalization_digest:
+          type: string
       required:
         - agent
-        - title
       additionalProperties: true
       oneOf:
         - required:
+            - title
             - source_kind
             - source_ref
             - canonical_markdown
           properties:
+            solve_run_id: { const: "" }
+            text_finalization_id: { const: "" }
+            text_finalization_digest: { const: "" }
             final_artifact_id:
               const: ""
             final_artifact_digest:
@@ -35714,9 +36667,13 @@ components:
               type: string
               minLength: 1
         - required:
+            - title
             - final_artifact_id
             - final_artifact_digest
           properties:
+            solve_run_id: { const: "" }
+            text_finalization_id: { const: "" }
+            text_finalization_digest: { const: "" }
             source_kind:
               const: ""
             source_ref:
@@ -35729,6 +36686,16 @@ components:
             final_artifact_digest:
               type: string
               minLength: 1
+        - required: [solve_run_id, text_finalization_id, text_finalization_digest]
+          properties:
+            solve_run_id: { type: string, minLength: 1 }
+            text_finalization_id: { type: string, minLength: 1 }
+            text_finalization_digest: { type: string, minLength: 1 }
+            final_artifact_id: { const: "" }
+            final_artifact_digest: { const: "" }
+            source_kind: { const: "" }
+            source_ref: { const: "" }
+            canonical_markdown: { const: "" }
     K12PracticePrintPaper:
       type: object
       properties:
@@ -38147,6 +39114,15 @@ components:
       type: object
     K12Recordsscenarios_k12_apihttp_gradeResp:
       properties:
+        finalization:
+          $ref: '#/components/schemas/K12TextSolveFinalization'
+        answer_source:
+          $ref: '#/components/schemas/K12TasksProblemAnswerSource'
+        teaching_report:
+          $ref: '#/components/schemas/K12TeachingReport'
+        report_markdown:
+          type: string
+          description: Canonical two-layer projection; original solution and verification evidence remain unchanged.
         assessment_status:
           type: string
           enum:
@@ -38511,69 +39487,124 @@ components:
         grade:
           type: string
           enum:
-            - ""
-            - 一年级上
-            - 一年级下
-            - 二年级上
-            - 二年级下
-            - 三年级上
-            - 三年级下
-            - 四年级上
-            - 四年级下
-            - 五年级上
-            - 五年级下
-            - 六年级上
-            - 六年级下
-            - 初一上
-            - 初一下
-            - 初二上
-            - 初二下
-            - 初三上
-            - 初三下
-          description: When omitted or empty, use the saved profile term if available; otherwise no term constraint is
-            injected.
+          - ''
+          - 一年级上
+          - 一年级下
+          - 二年级上
+          - 二年级下
+          - 三年级上
+          - 三年级下
+          - 四年级上
+          - 四年级下
+          - 五年级上
+          - 五年级下
+          - 六年级上
+          - 六年级下
+          - 初一上
+          - 初一下
+          - 初二上
+          - 初二下
+          - 初三上
+          - 初三下
+          description: When omitted or empty, use the saved profile term if available; otherwise no term constraint
+            is injected.
         knowledge_points:
           items:
             type: string
           type:
-            - array
-            - "null"
+          - array
+          - 'null'
         problem:
           type: string
           minLength: 1
         subject:
           type: string
           enum:
-            - ""
-            - 数学
-            - 语文
-            - 英语
-            - 物理
-            - 化学
+          - ''
+          - 数学
+          - 语文
+          - 英语
+          - 物理
+          - 化学
           description: Empty preserves the default route; these direct-calibration endpoints use Chinese subject names.
+        solve_run_id:
+          type: string
+          description: Stable caller-owned run ID; omitted means a new task.
+        source_session:
+          type: string
+          description: Optional actual accessible session; absent remains empty.
+        source_message_id:
+          type: string
+          description: Optional actual user message in source_session.
+        input_revision:
+          type: integer
+          description: Omitted or zero defaults to 1; changing a stored run conflicts.
       required:
-        - agent
-        - problem
+      - agent
+      - problem
       type: object
+    K12TeachingReport:
+      type: object
+      required: [schema_version, content_version, source, metadata, problem_sources, items, deep_sections]
+      properties:
+        schema_version: { type: integer, const: 1 }
+        content_version: { type: string, const: answer-first-v3 }
+        source:
+          type: object
+          required: [kind, source_id, revision, digest]
+          properties:
+            kind: { type: string, enum: [grading, text_solve] }
+            source_id: { type: string }
+            revision: { type: integer }
+            digest: { type: string }
+        metadata:
+          type: object
+          properties:
+            title: { type: string }
+            agent_display_name: { type: string }
+            grade_term: { type: string }
+            subject: { type: string }
+            report_date: { type: string }
+            timezone: { type: string }
+        source_pages:
+          type: [array, 'null']
+          items: { type: object }
+        problem_sources:
+          type: array
+          items: { type: object }
+          description: Exact source/revision, original answer and reference-solution provenance; never inferred from model prose.
+        items:
+          type: array
+          items: { type: object }
+          description: Every requested problem, direct answers, required calculations, actual assessment and original answer.
+        deep_sections:
+          type: [array, 'null']
+          items: { type: object }
+          description: Source-bound explanations, trusted diagrams and actual teaching-method annotations.
     K12Recordsscenarios_k12_apihttp_solveResp:
       properties:
+        teaching_report:
+          $ref: '#/components/schemas/K12TeachingReport'
+        report_markdown:
+          type: string
+          description: Canonical two-layer projection of the frozen content; does not replace the solver proof.
         badge:
           type: string
         curriculum_unmapped:
           items:
             type: string
           type:
-            - array
-            - "null"
+          - array
+          - 'null'
         evidence_type:
           type: string
           enum:
-            - numeric_exec
-            - symbolic_exec
-            - heterogeneous_model
-            - heuristic
-            - verbatim
-            - none
+          - numeric_exec
+          - symbolic_exec
+          - heterogeneous_model
+          - heuristic
+          - verbatim
+          - none
         out_of_scope:
           type: boolean
         out_of_scope_kp:
@@ -38583,17 +39614,21 @@ components:
         verdict:
           type: string
           enum:
-            - agree
-            - disagree
-            - unverifiable
-            - out_of_scope
-            - verbatim
+          - agree
+          - disagree
+          - unverifiable
+          - out_of_scope
+          - verbatim
+        finalization:
+          $ref: '#/components/schemas/K12TextSolveFinalization'
+        answer_source:
+          $ref: '#/components/schemas/K12TasksProblemAnswerSource'
       required:
-        - solution
-        - verdict
-        - evidence_type
-        - badge
-        - out_of_scope
+      - solution
+      - verdict
+      - evidence_type
+      - badge
+      - out_of_scope
       type: object
     K12Recordsscenarios_k12_apihttp_tutorTurnReq:
       properties:
@@ -40526,6 +41561,141 @@ components:
       required:
         - agent
       additionalProperties: false
+    K12RecordsReviewSourceMemberRequest:
+      type: object
+      additionalProperties: false
+      required: [record_id, job_id, problem_id, attempt_id, confirmed_version, input_revision, input_digest, result_digest]
+      properties:
+        record_id:
+          type: string
+          minLength: 1
+        job_id:
+          type: string
+          minLength: 1
+        problem_id:
+          type: string
+          minLength: 1
+        attempt_id:
+          type: string
+          minLength: 1
+        confirmed_version:
+          type: integer
+          minimum: 1
+        input_revision:
+          type: integer
+          minimum: 1
+        input_digest:
+          type: string
+          minLength: 1
+        result_digest:
+          type: string
+          minLength: 1
+    K12RecordsReviewSourceGroupRequest:
+      type: object
+      additionalProperties: false
+      required: [agent, canonical_record_id, members, evidence]
+      properties:
+        agent:
+          type: string
+          minLength: 1
+        canonical_record_id:
+          type: string
+          minLength: 1
+        members:
+          type: array
+          minItems: 2
+          items:
+            $ref: "#/components/schemas/K12RecordsReviewSourceMemberRequest"
+        evidence:
+          type: object
+          additionalProperties: false
+          required: [kind, note]
+          properties:
+            kind:
+              type: string
+              const: reviewed_sources
+            note:
+              type: string
+              minLength: 1
+    K12RecordsReviewSourceGroup:
+      type: object
+      additionalProperties: false
+      required: [group_id, agent_name, canonical_record_id, canonical_statement, canonical_statement_digest, evidence, members, created_at]
+      properties:
+        group_id:
+          type: string
+        agent_name:
+          type: string
+        canonical_record_id:
+          type: string
+        canonical_statement:
+          type: string
+        canonical_statement_digest:
+          type: string
+        created_at:
+          type: integer
+          format: int64
+        evidence:
+          type: object
+          additionalProperties: false
+          required: [kind, note, source_digests]
+          properties:
+            kind:
+              type: string
+              const: reviewed_sources
+            note:
+              type: string
+            source_digests:
+              type: array
+              items:
+                type: string
+        members:
+          type: array
+          minItems: 2
+          items:
+            type: object
+            additionalProperties: false
+            required: [record_id, question_digest, job_id, problem_id, attempt_id, confirmed_version, input_revision, input_digest, result_digest, page_digest]
+            properties:
+              record_id:
+                type: string
+              question_digest:
+                type: string
+              job_id:
+                type: string
+              problem_id:
+                type: string
+              attempt_id:
+                type: string
+              confirmed_version:
+                type: integer
+              input_revision:
+                type: integer
+              input_digest:
+                type: string
+              result_digest:
+                type: string
+              page_digest:
+                type: string
+              source_number_path:
+                type: array
+                items:
+                  type: string
+              parent_source_number_path:
+                type: array
+                items:
+                  type: string
+    K12RecordsReviewSourceGroupResponse:
+      type: object
+      additionalProperties: false
+      required: [group, created, replayed]
+      properties:
+        group:
+          $ref: "#/components/schemas/K12RecordsReviewSourceGroup"
+        created:
+          type: boolean
+        replayed:
+          type: boolean
     K12RecordsMarkMasteredRequest:
       type: object
       properties:

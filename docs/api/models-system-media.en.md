@@ -821,8 +821,11 @@ The main application wires image, video, TTS and single-turn audio APIs to the s
 - Successful responses include `X-Media-Operation-ID`; some errors also include it. Retain it when present. New video `task_id` equals that opaque operation ID. Legacy SDK task references still use the original polling endpoint and must not be rewritten as operation IDs.
 - `GET /api/v1/media/operations/{id}` exposes generation, persistence and saved assets. `generation_state=succeeded` alone does not prove persistence: all outputs require `save_state=ready`; `partial` preserves successful assets. `deliveries` separately projects persisted channel facts: `accepted` is not `delivered`, and an empty array means no delivery record, never delivery confirmation.
 - Read, resume and cancel are scoped to the authenticated user. Missing and other-owner IDs both return 404; body/query owner overrides are not accepted. Existing operations remain readable after generation is disabled. Query or resume an `unknown` original operation; never infer it was unbilled and regenerate.
-- `cancel_requested=true` records local intent. Queued work can stop; accepted upstream work is not guaranteed to cancel, and late assets are retained. Before persistence is ready, resume restores recoverable persistence only. Once ready, it resumes only definitively failed original delivery stages, preserving unknown and successful parts without resending all attachments. Unverifiable outcomes remain unknown/failed.
+- `cancel_requested=true` records local intent. Queued work can stop; accepted upstream work is not guaranteed to cancel, and late assets are retained. Merging a late result preserves the original cancellation intent, saved assets, and actual `attempts` and `timings_ms`. Before persistence is ready, resume restores recoverable persistence only. Once ready, it resumes only definitively failed original delivery stages, preserving unknown and successful parts without resending all attachments. Unverifiable outcomes remain unknown/failed.
 - Status `enabled` means a media route exists. It does not replace the Agent `media_gen` setting or an actual generation check. Disabling the tool does not delete existing assets.
+- Explicit model/provider selection follows the actual selection directive. An earlier occurrence inside picture text cannot hide a later explicit use directive, and incidental content alone does not select a model.
+- Accepted candidates retain their original instance, model and protocol. Before a first submission or a new fallback generation attempt, the service checks the current enabled set and original route identity. This also applies to `audio/chat`; each new TTS attempt respects current Voice and selected Provider enablement while retaining the frozen endpoint and parameters. Disabled models receive no new generation request; original submitted video polling, saved assets and delivery recovery keep their original identities. Unclassified models remain explicit-selection only and do not become automatic fallback candidates through an old route or tool hint.
+- Media delivery traverses the original queue by stable identity. Old receipt-query failures retain their actual states/references while later independent deliveries progress; they do not authorize resending unknown or successful parts.
 
 | Method | Path | Operation |
 | --- | --- | --- |
@@ -978,6 +981,8 @@ Authentication: `Authorization: Bearer ${HEXCLAW_API_TOKEN}`.
 Availability: `always registered`.
 
 Always registered; unconfigured service returns HTTP 200, enabled=false, and empty provider/model arrays.
+
+`models` lists declared image-generation models. `explicit_candidates` separately lists configured models whose capabilities are undeclared, with `provider_instance_id` and `model`; the existing image protocol may be attempted only when the user explicitly selects one. These are excluded from automatic candidates, and their presence does not establish upstream availability. `enabled` may be true with an empty `models` array when explicit candidates exist.
 
 Path/query/additional headers: none. Authentication and content type are specified above.
 
@@ -3131,21 +3136,26 @@ Security/sandbox are field patches. Ollama must be submitted separately with all
 | `enabled` | boolean | yes | — | enabled |
 | `providers` | string[] | yes | — | providers |
 | `models` | string[] | yes | — | models |
+| `explicit_candidates` | object[] | no | Image status addition | Configured models with undeclared capabilities; each item contains provider_instance_id and model. Explicit selection only; not proof of upstream availability. |
 
 <a id="schema-modelsmediaoperation"></a>
 
 ### ModelsMediaOperation
 
-All fields below are returned except the additive optional `deliveries` field, which older servers may omit; current servers always return an array. `save_state=ready` proves persistence only. Read `deliveries[].state` and `part_states` separately; a missing field or empty array is not delivery confirmation.
+Conversation selection is derived from trusted user text. `selection` records auto/pinned/preferred constraints; explicit direct API requests and legacy operations may return null. Image/video candidates are frozen on acceptance, with at most three route attempts; pinned requests use one route. Automatic switching currently handles definitive HTTP 401, 404 and 429 rejections only. Unknown outcomes, submitted video tasks and post-generation persistence failures do not trigger regeneration. `attempts` records actual provider/model, outcome, HTTP status and duration. A submitted video attempt only confirms that an upstream task ID was accepted.
+
+`deliveries`, `selection` and `attempts` are additive fields that older servers may omit. Current servers return them; historical selection or attempt data may be null, while `deliveries` is always an array. `save_state=ready` proves persistence only. Read `deliveries[].state` and `part_states` separately; a missing field or empty array is not delivery confirmation.
 
 | Field | Type / contract | Meaning |
 | --- | --- | --- |
 | `operation_id` | string | Opaque operation ID |
 | `kind` | string | image / video / audio |
 | `action` | string | generate / synthesize / chat |
-| `provider_instance_id` | string | Frozen routing identity |
+| `provider_instance_id` | string | Current attempted route; previous attempts remain in attempts |
 | `actual_provider_instance_id` | string | Actual successful provider, including TTS fallback; empty when unknown |
-| `model` | string | Frozen model; may be empty for some TTS routes |
+| `model` | string | Current attempted model; may be empty for some TTS routes |
+| `selection` | object / null | Trusted turn constraints: mode, provider, models, provider_order and exclusions |
+| `attempts` | array / null | Actual generation attempts: provider_instance_id, model, outcome, error_code, status_code, elapsed_ms; legacy operations may have none |
 | `generation_state` | string | queued / submitting / running / succeeded / failed / unknown / cancelled |
 | `save_state` | string | not_started / saving / ready / partial / failed |
 | `assets` | [ModelsMediaAsset](#schema-modelsmediaasset)[] / null | Persisted assets; may be null before any output is saved |
