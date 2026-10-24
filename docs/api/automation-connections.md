@@ -665,6 +665,8 @@ path.id定位现有实例；空provider/name沿用旧值，省略config沿用旧
 
 ### `POST /api/v1/platforms/instances/by-id/{id}/send-test` — 向外部会话发送测试消息
 
+发送测试只有在至少存在一个接收目标，且每个目标都取得 `accepted` 或 `delivered` 回执时才返回 `success=true`。无目标时返回 `success=false`、`pending=false` 和空 `deliveries`；连接健康不能代替实际发送。
+
 此接口确有外发副作用。实例须enabled。request_id非空：所有智能体及默认助手共用同一解析器，合并当前平台、账号的有效显式ChatID绑定与已存真实活动会话，冻结目标并去重，30秒内发送。真实会话须有用户消息，非归档/删除或分叉副本；稳定实例ID优先，当前名称引用只接受该账号创建后的会话，不串账号或平台。没有目标或连接不健康时不发送；目标查询失败返回错误，不能静默漏发。重放先读原冻结回执，旧空目标、accepted或unknown请求都不补发；新点击在已知终态后使用新request_id。accepted不证明手机送达，未知结果不自动重发。原direct/OTO范围保持，不创建智能体绑定或修改路由。request_id为空：target/content必填，启动实例后向指定target发送；发送失败也可返回200 success=false。示例仅供阅读。
 
 实现: [`handleSendTestInstanceByID`](../../api/handler_instances.go#L511). 注册条件: `s.instanceMgr != nil`.
