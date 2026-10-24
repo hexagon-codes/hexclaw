@@ -62,6 +62,9 @@ func k12FinalReplyUsesPDF(artifact k12.GradingFinalArtifact, intent k12.ImageTas
 
 // K12FinalArtifactPDFTitle 由冻结标题与冻结日期派生文件名，不使用内部任务身份。
 func K12FinalArtifactPDFTitle(artifact k12.GradingFinalArtifact) string {
+	if artifact.TeachingReport != nil {
+		return artifact.TeachingReport.Metadata.Title + " · " + artifact.TeachingReport.Metadata.ReportDate
+	}
 	heading, _, _ := strings.Cut(strings.TrimSpace(artifact.CanonicalMarkdown), "\n")
 	heading = strings.TrimSpace(strings.TrimPrefix(heading, "# "))
 	if heading == "" {

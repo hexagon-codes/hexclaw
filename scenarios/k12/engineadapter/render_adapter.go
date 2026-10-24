@@ -25,6 +25,32 @@ func NewRenderAdapter(svc renderService) *RenderAdapter { return &RenderAdapter{
 
 var _ usecase.Renderer = (*RenderAdapter)(nil)
 
+// RenderTeachingReport 使用同一宿主服务编译冻结资源，不进入通用Markdown重排。
+func (a *RenderAdapter) RenderTeachingReport(ctx context.Context, bundle render.ReportBundle, input render.ReportRenderInput) ([]byte, string, error) {
+	service, ok := a.svc.(interface {
+		RenderReport(context.Context, render.ReportBundle, render.ReportRenderInput) (*render.ReportRenderResult, error)
+	})
+	if !ok {
+		return nil, "", usecase.ErrRenderUnavailable
+	}
+	result, err := service.RenderReport(ctx, bundle, input)
+	if err != nil {
+		return nil, "", err
+	}
+	if result == nil || result.File == nil {
+		return nil, "", fmt.Errorf("report renderer returned no file")
+	}
+	file := result.File
+	if !file.CacheHit && !file.CacheOwned {
+		defer os.Remove(file.Path)
+	}
+	if file.Size > maxExportBytes {
+		return nil, "", fmt.Errorf("report output exceeds the export limit")
+	}
+	data, err := os.ReadFile(file.Path)
+	return data, file.ContentType, err
+}
+
 // Render 把 markdown 渲染为指定格式，返回二进制 + Content-Type。
 // svc 为 nil 或格式非法 → 返回 ErrRenderUnavailable，调用方回退 markdown。
 func (a *RenderAdapter) Render(ctx context.Context, markdown, format string) ([]byte, string, error) {

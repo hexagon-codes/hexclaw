@@ -15,11 +15,23 @@ import (
 // commandKey 非空时附带该实例的原命令回执；不存在的回执为 nil，不触发重发或写入。
 func (s *Store) GetProfileBundleSnapshot(ctx context.Context, agentName, commandKey string) (k12.ProfileBundleSnapshot, error) {
 	var out k12.ProfileBundleSnapshot
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
-	if err != nil {
-		return out, err
+	var tx *sql.Tx
+	var err error
+	owned := true
+	if bound := s.recordTransaction(ctx); bound != nil {
+		if bound.agentName != strings.TrimSpace(agentName) {
+			return out, records.ErrNotFound
+		}
+		tx, owned = bound.tx, false
+	} else {
+		tx, err = s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+		if err != nil {
+			return out, err
+		}
 	}
-	defer tx.Rollback()
+	if owned {
+		defer tx.Rollback()
+	}
 	var metadata, skills string
 	err = tx.QueryRowContext(ctx, `SELECT a.display_name,a.description,a.system_prompt,
 	    a.provider,a.model,a.skills,a.metadata,
@@ -78,7 +90,10 @@ func (s *Store) GetProfileBundleSnapshot(ctx context.Context, agentName, command
 			}
 		}
 	}
-	return out, tx.Commit()
+	if owned {
+		return out, tx.Commit()
+	}
+	return out, nil
 }
 
 // GetProfileBundleCommand 在解析当前教材之前核对已提交命令；原请求不因目录更新而失去可重放性。

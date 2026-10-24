@@ -190,6 +190,10 @@ checking_method（字符串，家长可独立执行的检查或反向验算）�
 		promptBuilder.Write(rejected)
 	}
 	prompt := promptBuilder.String()
+	if req.ReportRequired {
+		prompt = strings.Replace(prompt, "字段必须且只能是：", "字段包含下列七项和 report_content：", 1)
+		prompt += teachingReportJointContract
+	}
 	out, err := a.parentTeachingGuideGen(ctx, req.Subject, prompt, req.Grade)
 	if err != nil {
 		return usecase.ParentTeachingGuide{}, providerResponseError(err)
@@ -206,6 +210,13 @@ checking_method（字符串，家长可独立执行的检查或反向验算）�
 	}
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		return usecase.ParentTeachingGuide{}, fmt.Errorf("parent teaching guide: unexpected trailing JSON: %w", egress.ErrProviderResponseProcessed)
+	}
+	if req.ReportRequired {
+		if err := usecase.ValidateSingleProblemReportDraft(guide.ReportContent); err != nil {
+			return guide, fmt.Errorf("parent teaching report: %v: %w", err, egress.ErrProviderResponseProcessed)
+		}
+	} else if guide.ReportContent != nil {
+		return guide, fmt.Errorf("parent teaching guide: unexpected report content for legacy contract: %w", egress.ErrProviderResponseProcessed)
 	}
 	guide.SkillContextReceipts = append([]skill.ContextReceipt(nil), prepared...)
 	for i := range guide.SkillContextReceipts {
@@ -247,15 +258,26 @@ func (a *SolveAdapter) AuditParentTeachingGuide(ctx context.Context, req usecase
 	if err != nil {
 		return usecase.ParentTeachingGuideAudit{}, err
 	}
-	prompt := req.Request.FrozenTeachingContract + "\n" + engine.ParentGuideAuditContract +
+	auditContract := engine.ParentGuideAuditContract
+	if req.Request.ReportRequired {
+		auditContract = engine.TeachingReportGuideAuditInstructions()
+	}
+	prompt := req.Request.FrozenTeachingContract + "\n" + auditContract +
 		"\nThe original mathematical solution is already verified and immutable. Audit only this supplied guide; do not generate another solution. A missing or unreadable student answer does not prove that the student left it blank, made an error, or mastered the concept. Check any student-specific claims against the supplied observation only. Output exactly one line: PARENT_GUIDE_AUDITS: <JSON array containing this one candidate's audit>.\n" + string(facts)
+	if req.Request.ReportRequired {
+		prompt += teachingReportJointAudit
+	}
 	out, err := a.parentTeachingGuideAudit(ctx, req.Request.Subject, prompt, req.Request.Grade)
 	if err != nil {
 		return usecase.ParentTeachingGuideAudit{}, providerResponseError(err)
 	}
+	verdict := engine.ParentGuideAuditVerdict(out, req.SourceSolutionDigest)
+	if req.Request.ReportRequired {
+		verdict = engine.TeachingReportGuideAuditVerdict(out, req.SourceSolutionDigest)
+	}
 	return usecase.ParentTeachingGuideAudit{
 		SourceSolutionDigest: req.SourceSolutionDigest,
-		Verdict:              engine.ParentGuideAuditVerdict(out, req.SourceSolutionDigest),
+		Verdict:              verdict,
 		Output:               out,
 	}, nil
 }

@@ -249,6 +249,11 @@ func (a *SolveAdapter) SolveSubject(ctx context.Context, subject, problem, grade
 		return usecase.SolveResult{}, fmt.Errorf("solve adapter: empty solve result")
 	}
 	generation := solveGenerationFromMetadata(version, res.Metadata)
+	if version == usecase.SolveOutputWithTeachingReportV2 && generation != nil && generation.ParentGuideCandidate != nil {
+		if err := usecase.ValidateSingleProblemReportDraft(generation.ParentGuideCandidate.ReportContent); err != nil {
+			generation.GuideAudit = "INVALID"
+		}
+	}
 	if generation != nil && generation.ParentGuideCandidate != nil {
 		generation.SkillContextReceipts = usecase.SolveTeachingSkillSnapshot(ctx)
 		for i := range generation.SkillContextReceipts {
@@ -295,7 +300,7 @@ func solveGenerationFromMetadata(version string, metadata map[string]string) *us
 		var guide usecase.ParentTeachingGuide
 		decoder := json.NewDecoder(strings.NewReader(raw))
 		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&guide); err == nil && decoder.Decode(&struct{}{}) == io.EOF && !hasModelTeachingReceiptField(raw) {
+		if err := decoder.Decode(&guide); err == nil && decoder.Decode(&struct{}{}) == io.EOF && !hasModelTeachingReceiptField(raw) && (version == usecase.SolveOutputWithTeachingReportV2 || guide.ReportContent == nil) {
 			generation.ParentGuideCandidate = &guide
 		} else {
 			generation.GuideAudit = "INVALID"

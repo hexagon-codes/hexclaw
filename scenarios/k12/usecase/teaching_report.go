@@ -26,6 +26,7 @@ type GradingTeachingReportInput struct {
 	Metadata      k12.TeachingReportMetadata
 	Questions     []RecognizedQuestion
 	Assessments   []k12.GradingAssessmentItem
+	Skips         []k12.ProblemSkipReceipt
 	Content       []TeachingReportQuestionContent
 	ObservedSlots map[string][]k12.TeachingReportAnswerSlot
 	SourcePages   []k12.TeachingReportSourcePage
@@ -42,6 +43,13 @@ func BuildGradingTeachingReport(input GradingTeachingReportInput) (k12.TeachingR
 		return invalid("grading source and agent are required")
 	}
 	assessments := make(map[string]k12.GradingAssessmentItem, len(input.Assessments))
+	skips := make(map[string]k12.ProblemSkipReceipt, len(input.Skips))
+	for _, skip := range input.Skips {
+		if skip.AgentName != input.AgentName || skip.JobID != input.Source.SourceID || skip.CurrentDisposition != k12.GradingAssessmentDispositionCurrent || skips[skip.ProblemID].ProblemID != "" {
+			return invalid("skip does not match the current grading source")
+		}
+		skips[skip.ProblemID] = skip
+	}
 	for _, assessment := range input.Assessments {
 		if _, duplicate := assessments[assessment.ProblemID]; duplicate {
 			return invalid("duplicate assessment problem")
@@ -72,6 +80,23 @@ func BuildGradingTeachingReport(input GradingTeachingReportInput) (k12.TeachingR
 			return invalid("duplicate or empty question identity")
 		}
 		seen[question.ProblemID] = true
+		if skip, ok := skips[question.ProblemID]; ok {
+			if _, duplicate := assessments[question.ProblemID]; duplicate || skip.InputRevision != question.ConfirmedVersion {
+				return invalid("skip and question revision do not match")
+			}
+			state := reportObservedAnswerState(question.AnswerState)
+			raw, canonical := question.AnswerRawTranscription, question.AnswerCanonicalMarkdown
+			if raw == "" {
+				raw = question.StudentAnswer
+			}
+			if canonical == "" {
+				canonical = question.StudentAnswer
+			}
+			report.ProblemSources = append(report.ProblemSources, k12.TeachingReportProblemSource{ProblemID: question.ProblemID, ParentProblemID: question.ParentProblemID, AttemptID: question.AttemptID, InputRevision: question.ConfirmedVersion, InputDigest: question.InputDigest, AssessmentDigest: skip.ResultDigest, AnswerState: state, AnswerRaw: raw, AnswerCanonical: canonical})
+			report.Items = append(report.Items, k12.TeachingReportItem{ProblemID: question.ProblemID, DisplayLabel: RecognizedQuestionSourceDisplayLabel(question), ShortTitle: question.Question, Assessment: k12.TeachingReportAssessment{Reason: "problem_skipped"},
+				AnswerAnalysis: k12.TeachingReportAnswerAnalysis{State: k12.TeachingReportReferenceUnavailable, UnavailableReason: "暂未提供参考解答"}, OriginalAnswer: k12.TeachingReportOriginalAnswer{State: state, RawText: raw, CanonicalText: canonical}})
+			continue
+		}
 		assessment, ok := assessments[question.ProblemID]
 		if !ok {
 			return k12.TeachingReport{}, fmt.Errorf("%w: problem %s has no current assessment", ErrTeachingReportContentRequired, question.ProblemID)
@@ -112,9 +137,13 @@ func BuildGradingTeachingReport(input GradingTeachingReportInput) (k12.TeachingR
 			(strings.TrimSpace(solution) == "" || strings.TrimSpace(evidence.SolverOutputDigest) == "") {
 			return k12.TeachingReport{}, fmt.Errorf("%w: problem %s has no source solution identity", ErrTeachingReportContentRequired, question.ProblemID)
 		}
+		receipt := assessment.SolveInvocationID
+		if receipt == "" && assessment.AnswerSource != nil {
+			receipt = firstNonEmpty(assessment.AnswerSource.InvocationID, assessment.AnswerSource.AdoptionID)
+		}
 		analysis.Evidence = k12.TeachingReportReferenceEvidence{
 			Verdict: string(evidence.Verdict), EvidenceType: string(evidence.EvidenceType),
-			ReceiptRef: assessment.SolveInvocationID, SolutionDigest: evidence.SolverOutputDigest,
+			ReceiptRef: receipt, SolutionDigest: evidence.SolverOutputDigest,
 			VerificationRunID: evidence.VerificationRunID, VerificationDigest: evidence.VerificationInputDigest,
 		}
 		source := k12.TeachingReportProblemSource{
@@ -133,7 +162,7 @@ func BuildGradingTeachingReport(input GradingTeachingReportInput) (k12.TeachingR
 			},
 		})
 	}
-	if len(seen) != len(assessments) || len(seen) != len(content) {
+	if len(seen) != len(assessments)+len(skips) || len(assessments) != len(content) {
 		return invalid("report questions, assessments and content must have the same exact set")
 	}
 	for problemID := range input.ObservedSlots {

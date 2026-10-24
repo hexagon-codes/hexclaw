@@ -23,6 +23,9 @@ const printPDFRenderContractVersion = "k12-pdf-v2"
 const imageFinalPDFRenderContractVersion = k12storage.ImageFinalPDFRenderContractVersion
 
 func printArtifactRenderContract(sourceRef string) string {
+	if strings.Contains(sourceRef, ":teaching-report:") {
+		return "k12-teaching-report-v2"
+	}
 	if strings.HasPrefix(sourceRef, "weekly-track:") && strings.HasSuffix(sourceRef, ":"+weeklyConsolidationWorkbookRenderVersion) {
 		return weeklyConsolidationWorkbookRenderVersion
 	}
@@ -55,6 +58,8 @@ type PreparePrintableArtifactRequest struct {
 	CanonicalMarkdown string
 	// RenderMarkdown 只在首次冻结 PDF 时承载同源媒体，不进入公开 Artifact 或 Desktop。
 	RenderMarkdown string
+	// TeachingReport 由原来源用例组装，不接受客户端传入任意模板或资产。
+	TeachingReport *TeachingReportPrintInput
 }
 
 type PrintableArtifactView struct {
@@ -111,6 +116,9 @@ func normalizePrintableArtifactRequest(req PreparePrintableArtifactRequest) (Pre
 		return PreparePrintableArtifactRequest{},
 			fmt.Errorf("%w: source_kind 不支持 %q", ErrInvalidInput, req.SourceKind)
 	}
+	if req.SourceKind == k12.PrintSourceTextSolveFinalization && req.TeachingReport == nil {
+		return PreparePrintableArtifactRequest{}, fmt.Errorf("%w: text finalization requires its typed report snapshot", ErrInvalidInput)
+	}
 	if len(req.SourceRef) > 512 || len(req.Title) > 256 || len(req.CanonicalMarkdown) > 4<<20 {
 		return PreparePrintableArtifactRequest{},
 			fmt.Errorf("%w: 打印 Artifact 字段超出限制", ErrInvalidInput)
@@ -120,7 +128,7 @@ func normalizePrintableArtifactRequest(req PreparePrintableArtifactRequest) (Pre
 
 func buildPrintArtifact(req PreparePrintableArtifactRequest, at int64) k12.PrintArtifact {
 	renderContract := ""
-	if req.SourceKind == k12.PrintSourceGradingFinalArtifact {
+	if req.SourceKind == k12.PrintSourceGradingFinalArtifact || req.SourceKind == k12.PrintSourceTextSolveFinalization {
 		renderContract = printArtifactRenderContract(req.SourceRef)
 	}
 	artifactBytes, _ := json.Marshal(struct {
@@ -149,7 +157,7 @@ func samePrintArtifact(left, right k12.PrintArtifact) bool {
 }
 
 func (d Deps) renderPrintableArtifact(ctx context.Context,
-	artifact k12.PrintArtifact, renderMarkdown string) (k12.PrintArtifactRender, error) {
+	artifact k12.PrintArtifact, renderMarkdown string, report ...*TeachingReportPrintInput) (k12.PrintArtifactRender, error) {
 	if d.Renderer == nil {
 		return k12.PrintArtifactRender{},
 			fmt.Errorf("%w: PDF renderer 未配置", ErrRenderUnavailable)
@@ -168,7 +176,7 @@ func (d Deps) renderPrintableArtifact(ctx context.Context,
 			renderMarkdown = weeklyMistakeSheetRenderMarkdown(renderMarkdown)
 		}
 	}
-	if artifact.SourceKind == k12.PrintSourceGradingFinalArtifact {
+	if artifact.SourceKind == k12.PrintSourceGradingFinalArtifact && (len(report) == 0 || report[0] == nil) {
 		var err error
 		renderMarkdown, err = d.inlineFrozenTeachingDiagrams(ctx, artifact.AgentName, renderMarkdown)
 		if err != nil {
@@ -178,7 +186,9 @@ func (d Deps) renderPrintableArtifact(ctx context.Context,
 	var pdf []byte
 	var contentType string
 	var err error
-	if renderer, ok := d.Renderer.(MetadataRenderer); ok {
+	if len(report) > 0 && report[0] != nil {
+		pdf, contentType, err = d.renderTeachingReport(ctx, *report[0])
+	} else if renderer, ok := d.Renderer.(MetadataRenderer); ok {
 		pdf, contentType, err = renderer.RenderWithMetadata(ctx, renderMarkdown, "pdf", metadata)
 	} else {
 		pdf, contentType, err = d.Renderer.Render(ctx, renderMarkdown, "pdf")
@@ -232,7 +242,7 @@ func (d Deps) PreparePrintableArtifact(ctx context.Context,
 		return PrintableArtifactView{}, false,
 			fmt.Errorf("usecase: 取打印 Artifact: %w", getErr)
 	}
-	render, err := d.renderPrintableArtifact(ctx, artifact, req.RenderMarkdown)
+	render, err := d.renderPrintableArtifact(ctx, artifact, req.RenderMarkdown, req.TeachingReport)
 	if err != nil {
 		return PrintableArtifactView{}, false, err
 	}
@@ -420,6 +430,9 @@ func (d Deps) gradingFinalArtifactPrintRequest(
 	artifact k12.GradingFinalArtifact,
 	title string,
 ) (PreparePrintableArtifactRequest, error) {
+	if artifact.ReportSnapshotJSON != "" {
+		return d.gradingTeachingReportPrintRequest(ctx, artifact, title)
+	}
 	source, intent, err := d.gradingFinalArtifactImageSource(ctx, artifact)
 	if err != nil {
 		return PreparePrintableArtifactRequest{}, err

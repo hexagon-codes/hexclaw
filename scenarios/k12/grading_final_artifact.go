@@ -26,6 +26,9 @@ var ErrGradingFinalArtifactInvariant = errors.New("grading final artifact invari
 // to print, export and formal delivery. OrderedCurrentDigestsJSON freezes the
 // exact current per-problem receipts used to build CanonicalMarkdown.
 type GradingFinalArtifact struct {
+	// ReportSnapshotJSON 同时冻结报告与模板字节，公开结果仅投影类型化报告。
+	ReportSnapshotJSON        string                             `json:"-"`
+	TeachingReport            *TeachingReport                    `json:"teaching_report,omitempty"`
 	ArtifactID                string                             `json:"artifact_id"`
 	AgentName                 string                             `json:"agent_name"`
 	JobID                     string                             `json:"job_id"`
@@ -140,11 +143,20 @@ func ComputeGradingFinalArtifactDigest(artifact GradingFinalArtifact) string {
 			artifact.SummaryInvocationID,
 		})
 	}
+	if artifact.ReportSnapshotJSON != "" {
+		raw, _ = json.Marshal(struct {
+			Base           json.RawMessage
+			ReportSnapshot string
+		}{raw, artifact.ReportSnapshotJSON})
+	}
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:])
 }
 
 func (a GradingFinalArtifact) Validate() error {
+	if a.ReportSnapshotJSON != "" && (!json.Valid([]byte(a.ReportSnapshotJSON)) || a.ArtifactDigest != ComputeGradingFinalArtifactDigest(a)) {
+		return ErrGradingFinalArtifactInvariant
+	}
 	if strings.TrimSpace(a.ArtifactID) == "" ||
 		strings.TrimSpace(a.AgentName) == "" ||
 		strings.TrimSpace(a.JobID) == "" ||

@@ -16,15 +16,16 @@ import (
 // FullSolutionSteps is always derived deterministically from the already-
 // verified solver output before this guide leaves the usecase.
 type ParentTeachingGuide struct {
-	TeachingDiagrams       []k12.TeachingDiagramAsset `json:"teaching_diagrams,omitempty"`
-	SkillContextReceipts   []skill.ContextReceipt     `json:"skill_context_receipts,omitempty"`
-	Answer                 string                     `json:"answer"`
-	FullSolutionSteps      []string                   `json:"full_solution_steps"`
-	GradeLevelMethod       string                     `json:"grade_level_method"`
-	LikelyMistakes         []string                   `json:"likely_mistakes"`
-	ParentTeachingSequence []string                   `json:"parent_teaching_sequence"`
-	FollowUpQuestions      []string                   `json:"follow_up_questions"`
-	CheckingMethod         string                     `json:"checking_method"`
+	ReportContent          *TeachingReportContentDraft `json:"report_content,omitempty"`
+	TeachingDiagrams       []k12.TeachingDiagramAsset  `json:"teaching_diagrams,omitempty"`
+	SkillContextReceipts   []skill.ContextReceipt      `json:"skill_context_receipts,omitempty"`
+	Answer                 string                      `json:"answer"`
+	FullSolutionSteps      []string                    `json:"full_solution_steps"`
+	GradeLevelMethod       string                      `json:"grade_level_method"`
+	LikelyMistakes         []string                    `json:"likely_mistakes"`
+	ParentTeachingSequence []string                    `json:"parent_teaching_sequence"`
+	FollowUpQuestions      []string                    `json:"follow_up_questions"`
+	CheckingMethod         string                      `json:"checking_method"`
 }
 
 // ParentTeachingGuideRequest carries one exact recognized problem and its
@@ -32,9 +33,11 @@ type ParentTeachingGuide struct {
 // answer, but the usecase accepts it only when it is anchored in that verified
 // solution and never lets the generator rewrite the full method.
 type ParentTeachingGuideRequest struct {
-	ObservedAnswerState         AnswerState            `json:"-"`
-	ObservedStudentAnswer       string                 `json:"-"`
-	ParentTeachingSkillSnapshot []skill.ContextReceipt `json:"parent_teaching_skill_snapshot,omitempty"`
+	FrozenReportContent         *TeachingReportContentDraft `json:"-"`
+	ReportRequired              bool                        `json:"report_required,omitempty"`
+	ObservedAnswerState         AnswerState                 `json:"-"`
+	ObservedStudentAnswer       string                      `json:"-"`
+	ParentTeachingSkillSnapshot []skill.ContextReceipt      `json:"parent_teaching_skill_snapshot,omitempty"`
 	Subject                     string
 	Grade                       string
 	Problem                     string
@@ -84,6 +87,8 @@ func (d Deps) parentTeachingGuideRequest(
 	outcome GradeOutcome,
 ) ParentTeachingGuideRequest {
 	return ParentTeachingGuideRequest{
+		FrozenReportContent: solved.ReportContent,
+		ReportRequired:      req.SolveOutputVersion == SolveOutputWithTeachingReportV2,
 		ObservedAnswerState: req.ObservedAnswerState, ObservedStudentAnswer: req.ObservedStudentAnswer,
 		Subject: req.Subject, Grade: req.Grade, Problem: req.Problem,
 		StudentAnswer:               req.StudentAnswer,
@@ -116,11 +121,11 @@ func (d Deps) SolveBlankWorksheetProblem(
 	guideRequest := d.parentTeachingGuideRequest(ctx, req, solved, GradeOutcome{})
 	guide, deterministic := deterministicParentTeachingGuideForEvidence(guideRequest, solved.Evidence)
 	// 联合输出已有本题候选时必须保留其审计结果，不能用通用数值讲法覆盖。
-	if req.SolveOutputVersion == SolveOutputWithParentGuideV1 && solved.Generation != nil {
+	if solveTeachingVersionSupported(req.SolveOutputVersion) && solved.Generation != nil {
 		deterministic = false
 	}
 	if !deterministic {
-		if req.SolveOutputVersion == SolveOutputWithParentGuideV1 && solved.Generation != nil {
+		if solveTeachingVersionSupported(req.SolveOutputVersion) && solved.Generation != nil {
 			guide, err = auditedSolveParentTeachingGuide(solved)
 		} else {
 			guide, err = d.generateParentTeachingGuide(ctx, guideRequest)
@@ -270,6 +275,12 @@ func deterministicNumericParentTeachingGuide(
 	guide, err := finalizeParentTeachingGuide(guide, req.VerifiedSolution)
 	if err != nil {
 		return ParentTeachingGuide{}, false
+	}
+	if req.ReportRequired {
+		guide.ReportContent = req.FrozenReportContent
+		if guide.ReportContent == nil {
+			guide.ReportContent = legacyDeterministicReportContent(guide)
+		}
 	}
 	return guide, true
 }

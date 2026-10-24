@@ -227,6 +227,13 @@ func readFinalRevision(row rowScanner) (k12.GradingFinalArtifact, error) {
 	if err := json.Unmarshal([]byte(raw), &a); err != nil {
 		return a, err
 	}
+	var snapshot struct {
+		ReportSnapshotJSON string `json:"report_snapshot_json"`
+	}
+	if err := json.Unmarshal([]byte(raw), &snapshot); err != nil {
+		return a, err
+	}
+	a.ReportSnapshotJSON = snapshot.ReportSnapshotJSON
 	a.AnnotatedAssetOwnerScope = owner
 	return a, a.Validate()
 }
@@ -387,7 +394,10 @@ func (s *Store) CommitFinalBlankSourceCorrection(ctx context.Context, id string,
 	if _, err = appendOutboxEvent(ctx, tx, OutboxEvent{EventID: "assessment-corrected:" + id, AgentName: r.AgentName, AggregateID: r.JobID + ":" + r.ProblemID, EventType: EventAssessmentCorrected, PayloadVersion: 1, Payload: string(payload)}); err != nil {
 		return a, err
 	}
-	raw, _ := json.Marshal(a)
+	raw, _ := json.Marshal(struct {
+		k12.GradingFinalArtifact
+		ReportSnapshotJSON string `json:"report_snapshot_json,omitempty"`
+	}{a, a.ReportSnapshotJSON})
 	_, err = tx.ExecContext(ctx, `INSERT INTO k12_grading_final_revisions(artifact_id,agent_name,job_id,previous_artifact_id,correction_id,artifact_json,asset_owner_scope,source_question_json,created_at) VALUES(?,?,?,?,?,?,?,?,?)`, a.ArtifactID, a.AgentName, a.JobID, current.ArtifactID, id, string(raw), a.AnnotatedAssetOwnerScope, string(source), now)
 	if err != nil {
 		return a, err

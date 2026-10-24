@@ -71,6 +71,35 @@ type ProblemSourceArchiveFinalizationGeneration struct {
 	Artifact   *k12.GradingFinalArtifact `json:"artifact,omitempty"`
 }
 
+// MarshalJSON 只在归档中包含宿主资源快照，不把模板字节扩散到普通业务响应。
+func (v ProblemSourceArchiveFinalizationGeneration) MarshalJSON() ([]byte, error) {
+	type state ProblemSourceArchiveFinalizationGeneration
+	snapshot := ""
+	if v.Artifact != nil {
+		snapshot = v.Artifact.ReportSnapshotJSON
+	}
+	return json.Marshal(struct {
+		state
+		ReportSnapshotJSON string `json:"report_snapshot_json,omitempty"`
+	}{state(v), snapshot})
+}
+
+func (v *ProblemSourceArchiveFinalizationGeneration) UnmarshalJSON(raw []byte) error {
+	type state ProblemSourceArchiveFinalizationGeneration
+	var decoded struct {
+		state
+		ReportSnapshotJSON string `json:"report_snapshot_json,omitempty"`
+	}
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return err
+	}
+	*v = ProblemSourceArchiveFinalizationGeneration(decoded.state)
+	if v.Artifact != nil {
+		v.Artifact.ReportSnapshotJSON = decoded.ReportSnapshotJSON
+	}
+	return nil
+}
+
 // ProblemSourceArchiveFinalAnnotatedAsset 是 V89 一对一关系的归档事实。
 // 图片字节仍只由既有 PageAsset/assetstore 承载，不在归档内复制第二份内容。
 type ProblemSourceArchiveFinalAnnotatedAsset struct {
@@ -2699,6 +2728,11 @@ func restoreProblemSourceFinalizationsTx(
 			artifact.CreatedAt, artifact.UpdatedAt, state.Generation,
 		); err != nil {
 			return fmt.Errorf("restore source final artifact: %w", err)
+		}
+		if artifact.ReportSnapshotJSON != "" {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO k12_grading_final_artifact_reports(artifact_id,snapshot_json) VALUES(?,?)`, artifact.ArtifactID, artifact.ReportSnapshotJSON); err != nil {
+				return err
+			}
 		}
 		if relation, ok := annotatedByArtifact[artifact.ArtifactID]; ok {
 			if _, err := tx.ExecContext(ctx, `INSERT INTO k12_grading_final_artifact_assets(

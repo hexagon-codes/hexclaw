@@ -1696,6 +1696,9 @@ func (d Deps) sendPreparedDelivery(ctx context.Context, receipt k12.DeliveryRece
 	if receipt.PartKind == messagecontent.PartArtifact && strings.TrimSpace(receipt.PreparedResourceID) == "" {
 		return receipt, fmt.Errorf("%w: artifact part has no prepared provider resource", records.ErrIllegalTransition)
 	}
+	if err := d.checkConversationPrintReplyAttempt(ctx, receipt); err != nil {
+		return receipt, err
+	}
 	started, began, err := d.Records.BeginDeliveryAttempt(ctx, receipt.AgentName, receipt.DeliveryID)
 	if err != nil {
 		return receipt, err

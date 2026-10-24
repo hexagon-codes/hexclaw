@@ -213,6 +213,9 @@ func (o *GradingOrchestrator) finalizeGradingPage(
 			artifact.CanonicalMarkdown += "\n\n> ℹ️ " + warning
 		}
 	}
+	if err := o.freezeGradingTeachingReport(ctx, run, job, &artifact, assessments, skips, orderedJSON, finalizationGeneration); err != nil {
+		return k12.GradingFinalArtifact{}, err
+	}
 	artifact.ArtifactDigest = k12.ComputeGradingFinalArtifactDigest(artifact)
 	stored, _, err := o.deps.Records.CommitGradingFinalArtifact(
 		ctx,

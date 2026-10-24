@@ -324,22 +324,44 @@ func (o *GradingOrchestrator) StartPhotoGradingJob(ctx context.Context, in Start
 		in.Photo.SolveOutputVersion = ""
 		in.Photo.ParentTeachingContract = ""
 		in.Photo.ParentTeachingSkillSnapshot = nil
-		if in.Photo.TaskIntent == PhotoTaskBlankWorksheet {
-			if freezer, ok := o.deps.Solver.(SolveTeachingContextFreezer); ok {
-				contract, prepared, freezeErr := freezer.FreezeSolveTeachingContext(ctx, in.Photo.Subject, in.Photo.Grade)
-				if freezeErr != nil {
-					return GradingJobView{}, false, fmt.Errorf("freeze solve teaching context: %w", freezeErr)
+		in.Photo.TeachingReport = nil
+		if in.Photo.TaskIntent == PhotoTaskBlankWorksheet || in.Photo.TaskIntent == PhotoTaskCompletedHomework {
+			if o.deps.TeachingReportResources != nil {
+				title := "作业批改结果"
+				if in.Photo.TaskIntent == PhotoTaskBlankWorksheet {
+					title = "解题报告"
 				}
-				in.Photo.SolveOutputVersion = SolveOutputWithParentGuideV1
+				snapshot, err := o.deps.freezeTeachingReportTask(ctx, in.Photo.AgentName, in.Photo.Subject, in.Photo.Grade, title)
+				if err != nil {
+					return GradingJobView{}, false, err
+				}
+				in.Photo.TeachingReport = snapshot
+			}
+			if freezer, ok := o.deps.Solver.(ReportSolveTeachingContextFreezer); ok && in.Photo.TeachingReport != nil {
+				contract, prepared, err := freezer.FreezeReportSolveTeachingContext(ctx, in.Photo.Subject, in.Photo.Grade)
+				if err != nil {
+					return GradingJobView{}, false, err
+				}
+				in.Photo.SolveOutputVersion = SolveOutputWithTeachingReportV2
 				in.Photo.ParentTeachingContract = contract
 				in.Photo.ParentTeachingSkillSnapshot = prepared
-			} else if freezer, ok := o.deps.Solver.(SolveTeachingContractFreezer); ok {
-				contract, freezeErr := freezer.FreezeSolveTeachingContract(ctx, in.Photo.Subject, in.Photo.Grade)
-				if freezeErr != nil {
-					return GradingJobView{}, false, fmt.Errorf("freeze solve teaching contract: %w", freezeErr)
+			} else if in.Photo.TaskIntent == PhotoTaskBlankWorksheet {
+				if freezer, ok := o.deps.Solver.(SolveTeachingContextFreezer); ok {
+					contract, prepared, freezeErr := freezer.FreezeSolveTeachingContext(ctx, in.Photo.Subject, in.Photo.Grade)
+					if freezeErr != nil {
+						return GradingJobView{}, false, fmt.Errorf("freeze solve teaching context: %w", freezeErr)
+					}
+					in.Photo.SolveOutputVersion = SolveOutputWithParentGuideV1
+					in.Photo.ParentTeachingContract = contract
+					in.Photo.ParentTeachingSkillSnapshot = prepared
+				} else if freezer, ok := o.deps.Solver.(SolveTeachingContractFreezer); ok {
+					contract, freezeErr := freezer.FreezeSolveTeachingContract(ctx, in.Photo.Subject, in.Photo.Grade)
+					if freezeErr != nil {
+						return GradingJobView{}, false, fmt.Errorf("freeze solve teaching contract: %w", freezeErr)
+					}
+					in.Photo.SolveOutputVersion = SolveOutputWithParentGuideV1
+					in.Photo.ParentTeachingContract = contract
 				}
-				in.Photo.SolveOutputVersion = SolveOutputWithParentGuideV1
-				in.Photo.ParentTeachingContract = contract
 			}
 		}
 		var trustedRecognitionPolicy *k12.GradingBudgetSnapshot
@@ -389,6 +411,19 @@ func (o *GradingOrchestrator) StartPhotoGradingJob(ctx context.Context, in Start
 			trustedRecognitionPolicy.StageSeconds.Locating = 120
 			if snap.TimeoutMS > 0 {
 				trustedRecognitionPolicy.StageSeconds.Locating = min(int64(120), (int64(snap.TimeoutMS)+999)/1000)
+			}
+		}
+		if in.Photo.SolveOutputVersion == SolveOutputWithTeachingReportV2 && in.BudgetSnapshot.IsFrozen() {
+			in.BudgetSnapshot.AssessingBuckets = append([]k12.GradingAssessingBudgetBucket(nil), in.BudgetSnapshot.AssessingBuckets...)
+			for i := range in.BudgetSnapshot.AssessingBuckets {
+				in.BudgetSnapshot.AssessingBuckets[i].Seconds = max(in.BudgetSnapshot.AssessingBuckets[i].Seconds, 420)
+			}
+			if in.SourceKind == "image_task" {
+				deadline, err := o.deps.Records.FreezeTeachingReportAutomaticBudget(ctx, in.Photo.AgentName, in.SourceKey, o.deps.now())
+				if err != nil {
+					return GradingJobView{}, false, err
+				}
+				in.ParentAutomaticDeadlineAt = deadline
 			}
 		}
 		v, created, err = o.deps.CreateGradingJob(ctx, in.Photo.AgentName, in.Photo.SourceSession, CreateGradingJobInput{

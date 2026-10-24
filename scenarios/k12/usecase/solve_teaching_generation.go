@@ -13,13 +13,26 @@ import (
 
 const SolveOutputWithParentGuideV1 = "solve_with_parent_guide_v1"
 
+const SolveOutputWithTeachingReportV2 = "solve_with_teaching_report_v2"
+
+func solveTeachingVersionSupported(version string) bool {
+	return version == SolveOutputWithParentGuideV1 || version == SolveOutputWithTeachingReportV2
+}
+
+// ReportSolveTeachingContextFreezer 扩展同一次生成，不追加默认润色调用。
+type ReportSolveTeachingContextFreezer interface {
+	FreezeReportSolveTeachingContext(context.Context, string, string) (string, []skill.ContextReceipt, error)
+}
+
 // SolveGeneration 保存实际选中解法的教学候选和独立审计，不作为数值验算证据。
 type SolveGeneration struct {
-	SkillContextReceipts []skill.ContextReceipt `json:"skill_context_receipts,omitempty"`
-	OutputVersion        string                 `json:"output_version"`
-	ParentGuideCandidate *ParentTeachingGuide   `json:"parent_guide_candidate,omitempty"`
-	GuideAudit           string                 `json:"guide_audit"`
-	SourceSolutionDigest string                 `json:"source_solution_digest"`
+	AdaptationGenerationID string                 `json:"adaptation_generation_id,omitempty"`
+	AdaptationAuditID      string                 `json:"adaptation_audit_id,omitempty"`
+	SkillContextReceipts   []skill.ContextReceipt `json:"skill_context_receipts,omitempty"`
+	OutputVersion          string                 `json:"output_version"`
+	ParentGuideCandidate   *ParentTeachingGuide   `json:"parent_guide_candidate,omitempty"`
+	GuideAudit             string                 `json:"guide_audit"`
+	SourceSolutionDigest   string                 `json:"source_solution_digest"`
 }
 
 // SolveTeachingContractFreezer 只组装教学合同，不调用模型；新建求解任务将其固化到运行时。
@@ -72,9 +85,17 @@ func SolveTeachingRequest(ctx context.Context) (version, contract string) {
 
 func auditedSolveParentTeachingGuide(solved SolveHomeworkResult) (ParentTeachingGuide, error) {
 	generation := solved.Generation
-	if generation == nil || generation.OutputVersion != SolveOutputWithParentGuideV1 ||
+	if generation == nil || !solveTeachingVersionSupported(generation.OutputVersion) ||
 		generation.GuideAudit != "VALID" || generation.ParentGuideCandidate == nil {
 		return ParentTeachingGuide{}, fmt.Errorf("%w: selected solve parent guide has no valid independent audit", ErrSolveFailed)
+	}
+	if generation.OutputVersion == SolveOutputWithTeachingReportV2 && generation.ParentGuideCandidate.ReportContent == nil {
+		return ParentTeachingGuide{}, fmt.Errorf("%w: selected solve report content is missing", ErrSolveFailed)
+	}
+	if generation.OutputVersion == SolveOutputWithTeachingReportV2 {
+		if err := ValidateSingleProblemReportDraft(generation.ParentGuideCandidate.ReportContent); err != nil {
+			return ParentTeachingGuide{}, err
+		}
 	}
 	digest, err := hex.DecodeString(generation.SourceSolutionDigest)
 	if err != nil || len(digest) != 32 || (solved.Evidence.SolverOutputDigest != "" &&
@@ -90,7 +111,7 @@ func auditedSolveParentTeachingGuide(solved SolveHomeworkResult) (ParentTeaching
 func finalizeSolveParentTeachingGuide(guide ParentTeachingGuide, solved SolveHomeworkResult) (ParentTeachingGuide, error) {
 	generation := solved.Generation
 	if solved.Evidence.EvidenceType == EvidenceNumericExec && solved.Evidence.Verdict == VerdictDisagree &&
-		generation != nil && generation.OutputVersion == SolveOutputWithParentGuideV1 &&
+		generation != nil && solveTeachingVersionSupported(generation.OutputVersion) &&
 		generation.GuideAudit == "VALID" && generation.ParentGuideCandidate != nil {
 		digest, err := hex.DecodeString(generation.SourceSolutionDigest)
 		candidate := normalizeParentTeachingGuide(*generation.ParentGuideCandidate)
@@ -113,7 +134,7 @@ func finalizeSolveParentTeachingGuide(guide ParentTeachingGuide, solved SolveHom
 }
 
 func parentGuideGenerationForRequest(req GradeRequest, solved SolveHomeworkResult) *SolveGeneration {
-	if req.SolveOutputVersion == SolveOutputWithParentGuideV1 {
+	if solveTeachingVersionSupported(req.SolveOutputVersion) {
 		return solved.Generation
 	}
 	return nil
@@ -125,8 +146,8 @@ func executeDurableParentTeachingGuideRepair(
 ) (ParentTeachingGuide, string, bool, error) {
 	var zero ParentTeachingGuide
 	generation := solved.Generation
-	if gradeReq.SolveOutputVersion != SolveOutputWithParentGuideV1 || generation == nil ||
-		generation.OutputVersion != SolveOutputWithParentGuideV1 || generation.GuideAudit != "INVALID" ||
+	if !solveTeachingVersionSupported(gradeReq.SolveOutputVersion) || generation == nil ||
+		!solveTeachingVersionSupported(generation.OutputVersion) || generation.GuideAudit != "INVALID" ||
 		generation.ParentGuideCandidate == nil {
 		return zero, "", false, nil
 	}

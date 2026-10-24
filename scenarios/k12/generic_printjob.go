@@ -7,6 +7,7 @@ const (
 	PrintSourcePracticeQuestion       = "practice_question"
 	PrintSourcePracticeAnswer         = "practice_answer"
 	PrintSourceGradingFinalArtifact   = "grading_final_artifact"
+	PrintSourceTextSolveFinalization  = "text_solve_finalization"
 	PrintSourceWeeklyPracticeSnapshot = "weekly_practice_snapshot"
 	MaxPrintAttempts                  = 3
 )
@@ -15,7 +16,7 @@ func GenericPrintSourceKindAllowed(kind string) bool {
 	switch kind {
 	case PrintSourceTutoringTips, PrintSourceCreativeObservation,
 		PrintSourcePracticeQuestion, PrintSourcePracticeAnswer,
-		PrintSourceGradingFinalArtifact, PrintSourceWeeklyPracticeSnapshot,
+		PrintSourceGradingFinalArtifact, PrintSourceTextSolveFinalization, PrintSourceWeeklyPracticeSnapshot,
 		PrintSourceLearningArchive:
 		return true
 	case PrintSourceUnitSummary:

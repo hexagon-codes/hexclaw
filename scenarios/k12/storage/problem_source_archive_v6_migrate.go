@@ -328,7 +328,8 @@ func MigrateProblemSourceArchiveV6Owner(
 			}
 		}
 		hasMigratedDiagram := migratedMarkdown != artifact.CanonicalMarkdown
-		if (artifact.SummaryInvocationID != "" || hasAnnotatedAsset || hasMigratedDiagram) &&
+		hasReport := artifact.ReportSnapshotJSON != ""
+		if (artifact.SummaryInvocationID != "" || hasAnnotatedAsset || hasMigratedDiagram || hasReport) &&
 			k12.ComputeGradingFinalArtifactDigest(*artifact) != artifact.ArtifactDigest {
 			return ProblemSourceArchiveV6{}, fmt.Errorf(
 				"problem-source final artifact %q digest is not canonical",
@@ -337,6 +338,14 @@ func MigrateProblemSourceArchiveV6Owner(
 		}
 		artifact.AgentName = targetAgent
 		artifact.CanonicalMarkdown = migratedMarkdown
+		if hasReport {
+			migrated, report, err := migrateTeachingReportSnapshotReferences(artifact.ReportSnapshotJSON, assetIDs, parentIDs)
+			if err != nil {
+				return ProblemSourceArchiveV6{}, err
+			}
+			artifact.ReportSnapshotJSON = migrated
+			artifact.TeachingReport = &report
+		}
 		if artifact.SummaryInvocationID != "" {
 			mapped := parentIDs[artifact.SummaryInvocationID]
 			if mapped == "" {
@@ -359,7 +368,7 @@ func MigrateProblemSourceArchiveV6Owner(
 			artifact.AnnotatedAssetID = relation.AssetID
 			artifact.AnnotatedAssetOwnerScope = relation.OwnerScope
 		}
-		if artifact.SummaryInvocationID != "" || hasAnnotatedAsset || hasMigratedDiagram {
+		if artifact.SummaryInvocationID != "" || hasAnnotatedAsset || hasMigratedDiagram || hasReport {
 			artifact.ArtifactDigest = k12.ComputeGradingFinalArtifactDigest(*artifact)
 		}
 		artifact.ArtifactID = migratedProblemSourceFinalArtifactID(

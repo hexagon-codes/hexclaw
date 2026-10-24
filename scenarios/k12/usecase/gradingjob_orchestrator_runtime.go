@@ -1676,6 +1676,7 @@ type gradingRunFile struct {
 	ImageScope                  *k12.RecognitionImageScopeInputV1 `json:"image_scope,omitempty"`
 	RecognitionExecutionPolicy  string                            `json:"recognition_execution_policy,omitempty"`
 	SolveOutputVersion          string                            `json:"solve_output_version,omitempty"`
+	TeachingReport              *TeachingReportTaskSnapshot       `json:"teaching_report,omitempty"`
 	ParentTeachingContract      string                            `json:"parent_teaching_contract,omitempty"`
 	ParentTeachingSkillSnapshot []skill.ContextReceipt            `json:"parent_teaching_skill_snapshot,omitempty"`
 	SourceUncertaintyFinalized  bool                              `json:"source_uncertainty_finalized,omitempty"`
@@ -1754,6 +1755,7 @@ func (o *GradingOrchestrator) persistRun(jobID string, run *gradingRun) error {
 		ImageScope:                 run.req.ImageScope,
 		RecognitionExecutionPolicy: run.req.RecognitionExecutionPolicy,
 		SolveOutputVersion:         run.req.SolveOutputVersion, ParentTeachingContract: run.req.ParentTeachingContract,
+		TeachingReport:              run.req.TeachingReport,
 		ParentTeachingSkillSnapshot: run.req.ParentTeachingSkillSnapshot,
 		SourceUncertaintyFinalized:  run.req.SourceUncertaintyFinalized,
 		PracticeReferences:          run.req.PracticeReferences, PracticePaperSize: run.req.PracticePaperSize,
@@ -1836,6 +1838,7 @@ func (o *GradingOrchestrator) ensureRun(ctx context.Context, jobID string) (*gra
 			ImageScope:                 meta.ImageScope,
 			RecognitionExecutionPolicy: meta.RecognitionExecutionPolicy,
 			SolveOutputVersion:         meta.SolveOutputVersion, ParentTeachingContract: meta.ParentTeachingContract,
+			TeachingReport:              meta.TeachingReport,
 			ParentTeachingSkillSnapshot: meta.ParentTeachingSkillSnapshot,
 			SourceUncertaintyFinalized:  meta.SourceUncertaintyFinalized,
 			PracticeReferences:          meta.PracticeReferences, PracticePaperSize: meta.PracticePaperSize,

@@ -50,11 +50,34 @@ type reportProjectionBuilder struct {
 // ProjectTeachingReportPDF 把已校验报告转换为Hub模板输入，不求解、不改状态或原始作答。
 // 图片字节必须先由宿主完成同源方向处理并形成对应资产引用，本函数不猜测旋转。
 func ProjectTeachingReportPDF(report k12.TeachingReport, branding TeachingReportBranding, assets map[string]TeachingReportAsset) (TeachingReportPDFProjection, error) {
+	return projectTeachingReportPDF(report, branding, assets, false)
+}
+
+// ProjectTeachingReportPDFV2 复用同一语义投影，增加完整文字原题及来源标签。
+func ProjectTeachingReportPDFV2(report k12.TeachingReport, branding TeachingReportBranding, assets map[string]TeachingReportAsset) (TeachingReportPDFProjection, error) {
+	return projectTeachingReportPDF(report, branding, assets, true)
+}
+
+func projectTeachingReportPDF(report k12.TeachingReport, branding TeachingReportBranding, assets map[string]TeachingReportAsset, textSourceSupported bool) (TeachingReportPDFProjection, error) {
 	report, err := k12.NewTeachingReport(report)
 	if err != nil {
 		return TeachingReportPDFProjection{}, err
 	}
 	b := reportProjectionBuilder{formulas: make(map[string]string), resources: make(map[string][]byte), assets: assets}
+	sourceText := make([]any, 0)
+	if report.Source.Kind == k12.TeachingReportSourceTextSolve {
+		if !textSourceSupported {
+			return TeachingReportPDFProjection{}, fmt.Errorf("text source requires report render input v2")
+		}
+		for _, source := range report.ProblemSources {
+			if strings.TrimSpace(source.QuestionText) == "" {
+				return TeachingReportPDFProjection{}, fmt.Errorf("text source question is unavailable: %s", source.ProblemID)
+			}
+			for _, paragraph := range strings.Split(source.QuestionText, "\n\n") {
+				sourceText = append(sourceText, map[string]any{"kind": "paragraph", "content": b.value(paragraph, "")})
+			}
+		}
+	}
 	images := make([]any, 0, len(report.SourcePages))
 	for _, source := range report.SourcePages {
 		path, err := b.asset(source.AssetID, source.AssetDigest, source.MIME)
@@ -102,9 +125,12 @@ func ProjectTeachingReportPDF(report k12.TeachingReport, branding TeachingReport
 			if item.OriginalAnswer.State == k12.TeachingReportAnswerBlank {
 				text = "未填写"
 			}
+			if textSourceSupported && item.OriginalAnswer.State == k12.TeachingReportAnswerNotProvided {
+				text = "未提供"
+			}
 			original = append(original, map[string]any{"content": b.value(text, "")})
 		}
-		label, tone := teachingReportStatus(item.Assessment)
+		label, tone := teachingReportItemStatus(report.Source.Kind, item)
 		columns := 1
 		if len(calculations) == 2 {
 			columns = 2
@@ -190,6 +216,11 @@ func ProjectTeachingReportPDF(report k12.TeachingReport, branding TeachingReport
 		"branding": brand, "source_images": images, "questions": questions,
 		"deep": map[string]any{"steps": steps},
 	}
+	if textSourceSupported {
+		document["schema_version"] = "homework-report-render-v2"
+		document["source_text"] = sourceText
+		document["document"].(map[string]string)["source_kind"] = string(report.Source.Kind)
+	}
 	raw, err := json.Marshal(document)
 	if err != nil {
 		return TeachingReportPDFProjection{}, err
@@ -264,6 +295,16 @@ func (b *reportProjectionBuilder) value(text, latex string) []any {
 		value = value[end+len(delimiter):]
 	}
 	return parts
+}
+
+func teachingReportItemStatus(kind k12.TeachingReportSourceKind, item k12.TeachingReportItem) (string, string) {
+	if kind == k12.TeachingReportSourceTextSolve && item.Assessment.Status == "" {
+		if item.AnswerAnalysis.State == k12.TeachingReportReferenceUnavailable {
+			return "待核对", "amber"
+		}
+		return "已解答", "green"
+	}
+	return teachingReportStatus(item.Assessment)
 }
 
 func teachingReportStatus(assessment k12.TeachingReportAssessment) (string, string) {

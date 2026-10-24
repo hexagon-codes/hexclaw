@@ -330,6 +330,24 @@ func (o *GradingOrchestrator) CorrectCompletedSource(ctx context.Context, owner,
 	if err = o.freezeGradingFinalAnnotatedAsset(ctx, run, job, &artifact); err != nil {
 		return out, err
 	}
+	if original.ReportSnapshotJSON != "" {
+		var previousReport TeachingReportFrozenSnapshot
+		if err = json.Unmarshal([]byte(original.ReportSnapshotJSON), &previousReport); err != nil {
+			return out, err
+		}
+		run.req.TeachingReport = &TeachingReportTaskSnapshot{Metadata: previousReport.Report.Metadata, Bundle: previousReport.Bundle}
+		run.req.Grade = previousReport.Report.Metadata.GradeTerm
+		run.req.Subject = previousReport.Report.Metadata.Subject
+		run.req.SolveOutputVersion = SolveOutputWithTeachingReportV2
+		run.questions = questions
+		current := make([]k12.GradingAssessmentItem, 0, len(byProblem))
+		for _, assessment := range byProblem {
+			current = append(current, assessment)
+		}
+		if err = o.freezeGradingTeachingReport(ctx, run, job, &artifact, current, skips, ordered, int64(previousReport.Report.Source.Revision)); err != nil {
+			return out, err
+		}
+	}
 	artifact.ArtifactDigest = k12.ComputeGradingFinalArtifactDigest(artifact)
 	source, _ := json.Marshal(q)
 	artifact, err = store.CommitFinalBlankSourceCorrection(ctx, id, artifact, source, receipt)

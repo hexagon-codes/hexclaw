@@ -617,7 +617,7 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 		guideRequest := deps.parentTeachingGuideRequest(ctx, gradeReq, solved, GradeOutcome{})
 		guideExecutionKind := k12.GradingExecutionProvider
 		var deterministicGuide *ParentTeachingGuide
-		if gradeReq.SolveOutputVersion == SolveOutputWithParentGuideV1 && solved.Generation != nil {
+		if solveTeachingVersionSupported(gradeReq.SolveOutputVersion) && solved.Generation != nil {
 			guideExecutionKind = k12.GradingExecutionLocalDeterministic
 		} else if guide, ok := deterministicParentTeachingGuideForEvidence(guideRequest, solved.Evidence); ok {
 			guideExecutionKind = k12.GradingExecutionLocalDeterministic
@@ -642,7 +642,7 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 					if deterministicGuide != nil {
 						return *deterministicGuide, nil
 					}
-					if gradeReq.SolveOutputVersion == SolveOutputWithParentGuideV1 && solved.Generation != nil {
+					if solveTeachingVersionSupported(gradeReq.SolveOutputVersion) && solved.Generation != nil {
 						return auditedSolveParentTeachingGuide(solved)
 					}
 					return deps.generateParentTeachingGuide(callCtx, guideRequest)
@@ -759,7 +759,14 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 		guideRequest := deps.parentTeachingGuideRequest(ctx, gradeReq, solved, graded.Outcome)
 		guideExecutionKind := k12.GradingExecutionProvider
 		var deterministicGuide *ParentTeachingGuide
-		if guide, ok := deterministicParentTeachingGuideForEvidence(guideRequest, solved.Evidence); ok {
+		if gradeReq.SolveOutputVersion == SolveOutputWithTeachingReportV2 && solved.Generation != nil {
+			guide, err := auditedSolveParentTeachingGuide(solved)
+			if err != nil {
+				return item, err
+			}
+			guideExecutionKind = k12.GradingExecutionLocalDeterministic
+			deterministicGuide = &guide
+		} else if guide, ok := deterministicParentTeachingGuideForEvidence(guideRequest, solved.Evidence); ok {
 			guideExecutionKind = k12.GradingExecutionLocalDeterministic
 			deterministicGuide = &guide
 		}

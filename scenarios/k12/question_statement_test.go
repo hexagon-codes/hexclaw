@@ -24,6 +24,7 @@ func TestMistakeQuestionStatementRestoresOnlyKnownPhotoEnvelopes(t *testing.T) {
 		name, question, want, entry string
 	}{
 		{"versioned source", scoped, current + "\n\n" + shared, k12.MistakeEntryPhoto},
+		{"legacy source without entry metadata", scoped, current + "\n\n" + shared, ""},
 		{"old exact suffix", plain + suffix, plain, k12.MistakeEntryPhoto},
 		{"material envelope", plain + materialMarker + material + materialMarker + shared, plain + "\n\n" + material + "\n\n" + shared, k12.MistakeEntryPhoto},
 		{"material and exact suffix", plain + materialMarker + material + suffix, plain + "\n\n" + material, k12.MistakeEntryPhoto},

@@ -3,6 +3,7 @@ package k12storage
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -23,6 +24,9 @@ const DispatcherMaxAttempts = 5
 const DispatcherPollInterval = 5 * time.Second
 
 const dispatcherBatchSize = 100
+
+// ErrOutboxDeferred 表示已接纳业务正在等待可查询回执，不累计失败次数。
+var ErrOutboxDeferred = errors.New("outbox consumer is waiting for a durable result")
 
 // Dispatcher 单进程 Outbox 投递器（§6.15）：顺序消费 pending 事件，
 // 逐消费者投递并以 event_id 去重；全部消费者成功 → delivered；
@@ -177,6 +181,7 @@ func (d *Dispatcher) ProcessDeadEvent(ctx context.Context, eventID string) error
 // 不向调用方冒泡业务错误——投影失败不撤销成功域写（§6.9），重试只补投影。
 func (d *Dispatcher) deliverOne(ctx context.Context, ev OutboxEvent) error {
 	var firstErr error
+	deferred := false
 	for _, c := range d.consumers {
 		consumed, err := d.alreadyConsumed(ctx, c.Name(), ev.EventID)
 		if err != nil {
@@ -186,6 +191,10 @@ func (d *Dispatcher) deliverOne(ctx context.Context, ev OutboxEvent) error {
 			continue // event_id 去重（§6.9）：重放/重试不重复投递
 		}
 		if err := c.Handle(ctx, ev); err != nil {
+			if errors.Is(err, ErrOutboxDeferred) {
+				deferred = true
+				continue
+			}
 			if firstErr == nil {
 				firstErr = fmt.Errorf("consumer %s: %w", c.Name(), err)
 			}
@@ -196,6 +205,10 @@ func (d *Dispatcher) deliverOne(ctx context.Context, ev OutboxEvent) error {
 		}
 	}
 	now := nowUnix()
+	if firstErr == nil && deferred {
+		_, err := d.db.ExecContext(ctx, `UPDATE outbox_events SET updated_at=? WHERE event_id=?`, now, ev.EventID)
+		return err
+	}
 	if firstErr == nil {
 		_, err := d.db.ExecContext(ctx,
 			`UPDATE outbox_events SET status = ?, updated_at = ? WHERE event_id = ?`,

@@ -49,6 +49,7 @@ const (
 // 数组顺序就是冻结题序；共享父材料不作为可作答题放入该数组。
 type TeachingReportProblemSource struct {
 	ProblemID        string                    `json:"problem_id"`
+	QuestionText     string                    `json:"question_text,omitempty"`
 	ParentProblemID  string                    `json:"parent_problem_id,omitempty"`
 	AttemptID        string                    `json:"attempt_id,omitempty"`
 	InputRevision    int                       `json:"input_revision"`

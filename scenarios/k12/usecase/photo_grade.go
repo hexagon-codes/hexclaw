@@ -82,6 +82,7 @@ type PhotoGradeRequest struct {
 	ImageScope                  *k12.RecognitionImageScopeInputV1 `json:"image_scope,omitempty"`
 	RecognitionExecutionPolicy  string                            `json:"recognition_execution_policy,omitempty"`
 	SolveOutputVersion          string                            `json:"solve_output_version,omitempty"`
+	TeachingReport              *TeachingReportTaskSnapshot       `json:"teaching_report,omitempty"`
 	ParentTeachingContract      string                            `json:"parent_teaching_contract,omitempty"`
 	ParentTeachingSkillSnapshot []skill.ContextReceipt            `json:"parent_teaching_skill_snapshot,omitempty"`
 	// TaskIntent is frozen by ImageTaskDispatch. Empty preserves the legacy
@@ -532,16 +533,18 @@ func photoQuestionProblemTexts(q RecognizedQuestion) (problem, sourceProblem str
 	if q.ImageSourceContext == nil {
 		return problem, sourceProblem
 	}
+	sourceFragments := []string{q.Question}
 	for _, material := range q.ImageSourceContext.Materials {
 		problem += "\n\nRead-only source material (do not answer as another question):\n" + material.Text
-		sourceProblem += "\n\n" + material.Text
+		sourceFragments = append(sourceFragments, material.Text)
 	}
 	for _, recovery := range q.ImageSourceContext.Recoveries {
 		if recovery.State == "verified" && recovery.AdoptedText != "" {
 			problem += "\n\nVerified source fragment for the declared " + recovery.Gap.Kind + " gap (use only this fragment; do not infer other missing content or student handwriting):\n" + recovery.Gap.Before + recovery.AdoptedText + recovery.Gap.After
-			sourceProblem += "\n\n" + recovery.Gap.Before + recovery.AdoptedText + recovery.Gap.After
+			sourceFragments = append(sourceFragments, recovery.Gap.Before+recovery.AdoptedText+recovery.Gap.After)
 		}
 	}
+	sourceProblem = k12.CompactQuestionSourceFragments(sourceFragments...)
 	return problem, sourceProblem
 }
 

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -99,7 +100,7 @@ func getGradingFinalArtifactVia(
 	artifactID string,
 ) (k12.GradingFinalArtifact, error) {
 	if revised, err := getFinalRevisionByID(ctx, q, agentName, artifactID); err == nil {
-		return revised, nil
+		return loadGradingFinalReport(ctx, q, revised)
 	} else if !errors.Is(err, records.ErrNotFound) {
 		return k12.GradingFinalArtifact{}, err
 	}
@@ -132,7 +133,7 @@ func getGradingFinalArtifactVia(
 			err,
 		)
 	}
-	return artifact, nil
+	return loadGradingFinalReport(ctx, q, artifact)
 }
 
 func getGradingFinalArtifactByJobVia(
@@ -142,7 +143,7 @@ func getGradingFinalArtifactByJobVia(
 	jobID string,
 ) (k12.GradingFinalArtifact, error) {
 	if revised, err := getFinalRevisionHead(ctx, q, agentName, jobID); err == nil {
-		return revised, nil
+		return loadGradingFinalReport(ctx, q, revised)
 	} else if !errors.Is(err, records.ErrNotFound) {
 		return k12.GradingFinalArtifact{}, err
 	}
@@ -173,6 +174,34 @@ func getGradingFinalArtifactByJobVia(
 			err,
 		)
 	}
+	return loadGradingFinalReport(ctx, q, artifact)
+}
+
+func loadGradingFinalReport(ctx context.Context, q dbQueryer, artifact k12.GradingFinalArtifact) (k12.GradingFinalArtifact, error) {
+	err := q.QueryRowContext(ctx, `SELECT snapshot_json FROM k12_grading_final_artifact_reports WHERE artifact_id=?`, artifact.ArtifactID).Scan(&artifact.ReportSnapshotJSON)
+	if (errors.Is(err, sql.ErrNoRows) || (err != nil && strings.Contains(err.Error(), "no such table: k12_grading_final_artifact_reports"))) && artifact.ReportSnapshotJSON == "" {
+		return artifact, nil
+	}
+	if errors.Is(err, sql.ErrNoRows) && artifact.ReportSnapshotJSON != "" {
+		err = nil
+	}
+	if err != nil {
+		return k12.GradingFinalArtifact{}, err
+	}
+	var snapshot struct {
+		Report k12.TeachingReport `json:"report"`
+	}
+	if err := json.Unmarshal([]byte(artifact.ReportSnapshotJSON), &snapshot); err != nil {
+		return k12.GradingFinalArtifact{}, err
+	}
+	report, err := k12.NewTeachingReport(snapshot.Report)
+	if err != nil {
+		return k12.GradingFinalArtifact{}, err
+	}
+	if report.Source.Kind != k12.TeachingReportSourceGrading || report.Source.SourceID != artifact.JobID {
+		return k12.GradingFinalArtifact{}, ErrGradingFinalArtifactConflict
+	}
+	artifact.TeachingReport = &report
 	return artifact, nil
 }
 
@@ -217,7 +246,7 @@ func (s *Store) GetCurrentGradingFinalArtifactByJob(
 		return k12.GradingFinalArtifact{}, records.ErrNotFound
 	}
 	if revised, err := getFinalRevisionHead(ctx, s.db, agentName, jobID); err == nil {
-		return revised, nil
+		return loadGradingFinalReport(ctx, s.db, revised)
 	} else if !errors.Is(err, records.ErrNotFound) {
 		return k12.GradingFinalArtifact{}, err
 	}
@@ -262,7 +291,7 @@ func (s *Store) GetCurrentGradingFinalArtifactByJob(
 			err,
 		)
 	}
-	return artifact, nil
+	return loadGradingFinalReport(ctx, s.db, artifact)
 }
 
 // GetGradingFinalizationGeneration snapshots the durable aggregate generation
@@ -342,6 +371,7 @@ func sameGradingFinalArtifactContent(
 		stored.SkippedCount == requested.SkippedCount &&
 		stored.OrderedCurrentDigestsJSON == requested.OrderedCurrentDigestsJSON &&
 		stored.CanonicalMarkdown == requested.CanonicalMarkdown &&
+		stored.ReportSnapshotJSON == requested.ReportSnapshotJSON &&
 		stored.ArtifactDigest == requested.ArtifactDigest &&
 		stored.SummaryInvocationID == requested.SummaryInvocationID &&
 		stored.AnnotatedAssetOwnerScope == requested.AnnotatedAssetOwnerScope &&
@@ -553,6 +583,11 @@ func (s *Store) CommitGradingFinalArtifact(
 			"k12storage: commit grading final artifact: %w",
 			err,
 		)
+	}
+	if artifact.ReportSnapshotJSON != "" {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO k12_grading_final_artifact_reports(artifact_id,snapshot_json) VALUES(?,?) ON CONFLICT DO NOTHING`, artifact.ArtifactID, artifact.ReportSnapshotJSON); err != nil {
+			return k12.GradingFinalArtifact{}, false, err
+		}
 	}
 	if artifact.HasAnnotatedAsset() {
 		if _, err := tx.ExecContext(ctx, `

@@ -30,21 +30,20 @@ func (d Deps) MistakeSheetMarkdown(ctx context.Context, agentName string) (strin
 	if err != nil {
 		return "", err
 	}
+	projected, err := d.reviewPaperProjection(ctx, agentName, items)
+	if err != nil {
+		return "", err
+	}
 	period, err := d.mistakeSheetPeriod(ctx, agentName)
 	if err != nil {
 		return "", err
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "# 本周错题卷\n\n%s\n\n共 %d 题，做完对照错题本订正。\n\n", period, len(items))
-	for i, it := range items {
-		// 历史照片错题只恢复可识别的题面协议；积累项继续保留自己的正文。
-		question := it.Title()
-		if !it.IsAccum() {
-			question = k12.MistakeQuestionStatement(it.Fields)
-		}
-		fmt.Fprintf(&b, "**%d.** %s\n\n（　　）\n\n", i+1, question)
+	fmt.Fprintf(&b, "# 本周错题卷\n\n%s · 共%d题\n\n", period, len(projected))
+	for i, statement := range reviewPaperDisplayStatements(projected) {
+		fmt.Fprintf(&b, "**%d.** %s\n\n（　　）\n\n", i+1, statement)
 	}
-	if len(items) == 0 {
+	if len(projected) == 0 {
 		b.WriteString("本周没有到期该练的错题，继续保持。\n")
 	}
 	return b.String(), nil
@@ -65,7 +64,7 @@ func (d Deps) ExportMistakesMarkdown(ctx context.Context, agentName string) (str
 	fmt.Fprintf(&b, "# 错题本导出\n\n共 %d 题\n\n", len(recs))
 	for i, r := range recs {
 		f, _ := k12.ParseMistakeFields(r.Fields)
-		fmt.Fprintf(&b, "## %d. %s\n\n", i+1, f.Question)
+		fmt.Fprintf(&b, "## %d. %s\n\n", i+1, k12.MistakeQuestionStatement(f))
 		if f.KnowledgePoint != "" {
 			fmt.Fprintf(&b, "- 知识点：%s\n", f.KnowledgePoint)
 		}
@@ -311,11 +310,24 @@ func renderLearningArchiveMarkdown(
 ) (string, error) {
 	var b strings.Builder
 	b.WriteString("# 学习档案\n\n")
+	mistakeSources := make(map[string]k12.MistakeFields, len(snapshot.Mistakes))
+	for _, record := range snapshot.Mistakes {
+		if record != nil {
+			if fields, err := k12.ParseMistakeFields(record.Fields); err == nil {
+				mistakeSources[record.RecordID] = fields
+			}
+		}
+	}
 	b.WriteString("## 本周该练\n\n")
 	fmt.Fprintf(&b, "共 %d 项\n\n", len(snapshot.WeeklyReview))
 	for i, item := range snapshot.WeeklyReview {
 		fmt.Fprintf(&b, "### %d\n\n", i+1)
-		writeLearningArchiveBlock(&b, item.PromptMarkdown)
+		prompt := item.PromptMarkdown
+		if fields, ok := mistakeSources[item.SourceRef]; ok {
+			fields.Question = prompt
+			prompt = k12.MistakeQuestionStatement(fields)
+		}
+		writeLearningArchiveBlock(&b, prompt)
 		writeLearningArchiveMeta(&b, "学科", item.Subject)
 		writeLearningArchiveMeta(&b, "知识点", item.KnowledgePoint)
 		b.WriteByte('\n')
@@ -329,7 +341,7 @@ func renderLearningArchiveMarkdown(
 			return "", fmt.Errorf("usecase: parse learning archive mistake: %w", err)
 		}
 		fmt.Fprintf(&b, "### %d\n\n", i+1)
-		writeLearningArchiveBlock(&b, fields.Question)
+		writeLearningArchiveBlock(&b, k12.MistakeQuestionStatement(fields))
 		writeLearningArchiveMeta(&b, "知识点", fields.KnowledgePoint)
 		writeLearningArchiveMeta(&b, "错因", fields.ErrorCause)
 		writeLearningArchiveLabeledBlock(&b, "规范答案", fields.CanonicalAnswer)

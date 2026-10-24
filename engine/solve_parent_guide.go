@@ -11,6 +11,12 @@ import (
 
 const solveWithParentGuideV1 = "solve_with_parent_guide_v1"
 
+const solveWithTeachingReportV2 = "solve_with_teaching_report_v2"
+
+func solveTeachingVersionSupported(version string) bool {
+	return version == solveWithParentGuideV1 || version == solveWithTeachingReportV2
+}
+
 // SolveGenerationAttachment 保留同一次生成的原响应及讲法，数值证明仍只绑定纯解法。
 type SolveGenerationAttachment struct {
 	OutputVersion   string `json:"output_version"`
@@ -19,9 +25,10 @@ type SolveGenerationAttachment struct {
 }
 
 type guideAuditCandidate struct {
-	SourceDigest string          `json:"source_digest"`
-	Solution     string          `json:"solution"`
-	Guide        json.RawMessage `json:"parent_guide"`
+	SourceDigest   string          `json:"source_digest"`
+	Solution       string          `json:"solution"`
+	Guide          json.RawMessage `json:"parent_guide"`
+	RequiredFields []string        `json:"required_fields,omitempty"`
 }
 
 type guideFieldAudit struct {
@@ -52,9 +59,20 @@ Frozen teaching contract:
 	return spec
 }
 
+func withVersionedParentGuideGeneration(spec SubAgentSpec, version, contract string) SubAgentSpec {
+	spec = withParentGuideGeneration(spec, contract)
+	if version == solveWithTeachingReportV2 {
+		spec.generationVersion = version
+		spec.Task = strings.ReplaceAll(spec.Task, solveWithParentGuideV1, version)
+		spec.Task = strings.Replace(spec.Task, `"checking_method":"..."}}.`, `"checking_method":"...","report_content":{"version":"teaching-report-content-v1","items":[{"problem_id":"current","short_title":"...","answers":[{"id":"a1","text":"..."}],"steps":[]}],"sections":[{"id":"s1","title":"...","problem_ids":["current"],"blocks":[{"id":"b1","problem_ids":["current"],"text":"..."}],"diagram_ids":[],"method_notes":[]}]}}}.`, 1)
+		spec.Task += "\nThe parent_guide also requires report_content, with the exact structure in the frozen contract. It belongs to this candidate and must be audited with the original solution. Do not execute another solve or claim verification."
+	}
+	return spec
+}
+
 // decodeSolveGeneration 位于物理回执保存之前，重放时无需重新请求或重新解释旧正文。
 func decodeSolveGeneration(result SubAgentResult) (SubAgentResult, error) {
-	if result.Generation != nil && result.Generation.OutputVersion == solveWithParentGuideV1 {
+	if result.Generation != nil && solveTeachingVersionSupported(result.Generation.OutputVersion) {
 		return result, nil
 	}
 	raw := result.Output
@@ -72,7 +90,7 @@ func decodeSolveGeneration(result SubAgentResult) (SubAgentResult, error) {
 	if err := decoder.Decode(&envelope); err != nil {
 		return result, fmt.Errorf("solve generation is invalid: %w: %w", err, egress.ErrProviderResponseProcessed)
 	}
-	if err := decoder.Decode(new(any)); err != io.EOF || envelope.Schema != solveWithParentGuideV1 || strings.TrimSpace(envelope.Solution) == "" {
+	if err := decoder.Decode(new(any)); err != io.EOF || !solveTeachingVersionSupported(envelope.Schema) || strings.TrimSpace(envelope.Solution) == "" {
 		return result, fmt.Errorf("solve generation is incomplete: %w", egress.ErrProviderResponseProcessed)
 	}
 	result.Output = envelope.Solution
@@ -83,10 +101,14 @@ func decodeSolveGeneration(result SubAgentResult) (SubAgentResult, error) {
 func guideCandidates(sols []solverSolution) []guideAuditCandidate {
 	var candidates []guideAuditCandidate
 	for _, solution := range sols {
-		if solution.generation == nil || solution.generation.OutputVersion != solveWithParentGuideV1 || !json.Valid([]byte(solution.generation.ParentGuideJSON)) {
+		if solution.generation == nil || !solveTeachingVersionSupported(solution.generation.OutputVersion) || !json.Valid([]byte(solution.generation.ParentGuideJSON)) {
 			continue
 		}
-		candidates = append(candidates, guideAuditCandidate{SourceDigest: executionInputDigest(solution.output), Solution: solution.output, Guide: json.RawMessage(solution.generation.ParentGuideJSON)})
+		candidate := guideAuditCandidate{SourceDigest: executionInputDigest(solution.output), Solution: solution.output, Guide: json.RawMessage(solution.generation.ParentGuideJSON)}
+		if solution.generation.OutputVersion == solveWithTeachingReportV2 {
+			candidate.RequiredFields = append(append([]string(nil), parentGuideFields[:]...), "report_content")
+		}
+		candidates = append(candidates, candidate)
 	}
 	return candidates
 }
@@ -96,9 +118,20 @@ const ParentGuideAuditContract = `Independently audit every supplied parent_guid
 
 const parentGuideAuditContract = ParentGuideAuditContract
 
+// TeachingReportGuideAuditInstructions 扩展审核字段，保留旧版七字段合同的原文与行为。
+func TeachingReportGuideAuditInstructions() string {
+	contract := strings.Replace(ParentGuideAuditContract, "Check all seven fields:", "Check all eight fields, including report_content, and these existing fields:", 1)
+	return strings.Replace(contract, "with exactly one entry for each of the seven fields.", "with exactly one entry for each of the eight fields, including report_content.", 1)
+}
+
 // ParentGuideAuditVerdict 按实际审核原文判定给定解答来源的七字段合同。
 func ParentGuideAuditVerdict(output, sourceDigest string) string {
 	return parentGuideAuditVerdict(parentGuideAuditsFromOutput(output), sourceDigest)
+}
+
+// TeachingReportGuideAuditVerdict 额外要求同次审核双层报告内容，不改变旧七字段审核。
+func TeachingReportGuideAuditVerdict(output, sourceDigest string) string {
+	return parentGuideAuditVerdictForFields(parentGuideAuditsFromOutput(output), sourceDigest, append(append([]string(nil), parentGuideFields[:]...), "report_content"))
 }
 
 func withParentGuideVerification(spec SubAgentSpec, candidates []guideAuditCandidate) SubAgentSpec {
@@ -107,7 +140,20 @@ func withParentGuideVerification(spec SubAgentSpec, candidates []guideAuditCandi
 	}
 	spec.verification.ParentGuides = candidates
 	raw, _ := json.Marshal(candidates)
-	spec.Task += "\n\n" + parentGuideAuditContract + "\nCandidates:\n" + string(raw) + "\nAfter the four verdict lines, output one additional single line PARENT_GUIDE_AUDITS: <JSON array of audits>."
+	contract := parentGuideAuditContract
+	for _, candidate := range candidates {
+		if len(candidate.RequiredFields) != 0 {
+			contract = TeachingReportGuideAuditInstructions()
+			break
+		}
+	}
+	spec.Task += "\n\n" + contract + "\nCandidates:\n" + string(raw) + "\nAfter the four verdict lines, output one additional single line PARENT_GUIDE_AUDITS: <JSON array of audits>."
+	for _, candidate := range candidates {
+		if len(candidate.RequiredFields) != 0 {
+			spec.Task += "\nFor each candidate with required_fields, audit exactly those fields, including report_content. Check every answer, unit, condition, calculation, explanation and method note in its two-layer content against that candidate's solution. Missing report_content or omitted targets must be invalid; it is not numerical execution evidence."
+			break
+		}
+	}
 	return spec
 }
 
@@ -147,6 +193,9 @@ func parentGuideAuditsForCandidates(output string, candidates []guideAuditCandid
 			return nil
 		}
 		verdict := parentGuideAuditVerdict(audits, candidates[0].SourceDigest)
+		if len(candidates[0].RequiredFields) != 0 {
+			verdict = parentGuideAuditVerdictForFields(audits, candidates[0].SourceDigest, candidates[0].RequiredFields)
+		}
 		if verdict == "VALID" || verdict == "INVALID" {
 			return audits
 		}
@@ -156,6 +205,10 @@ func parentGuideAuditsForCandidates(output string, candidates []guideAuditCandid
 }
 
 func parentGuideAuditVerdict(audits []parentGuideAudit, digest string) string {
+	return parentGuideAuditVerdictForFields(audits, digest, parentGuideFields[:])
+}
+
+func parentGuideAuditVerdictForFields(audits []parentGuideAudit, digest string, required []string) string {
 	var found *parentGuideAudit
 	for i := range audits {
 		if audits[i].SourceDigest == digest {
@@ -171,14 +224,14 @@ func parentGuideAuditVerdict(audits []parentGuideAudit, digest string) string {
 	if found.Scope == "OUT_OF_SCOPE" {
 		return "INVALID"
 	}
-	if found.Scope != "IN_SCOPE" || len(found.Fields) != len(parentGuideFields) {
+	if found.Scope != "IN_SCOPE" || len(found.Fields) != len(required) {
 		return "NOT_PROVIDED"
 	}
-	seen := make(map[string]bool, len(parentGuideFields))
+	seen := make(map[string]bool, len(required))
 	invalid := false
 	for _, field := range found.Fields {
 		known := false
-		for _, name := range parentGuideFields {
+		for _, name := range required {
 			if field.Field == name {
 				known = true
 				break
@@ -209,6 +262,9 @@ func addParentGuideMetadata(metadata map[string]string, selected solverSolution,
 	digest := executionInputDigest(selected.output)
 	metadata["solve_parent_guide_source_digest"] = digest
 	metadata["solve_parent_guide_audit"] = parentGuideAuditVerdict(audits, digest)
+	if selected.generation != nil && selected.generation.OutputVersion == solveWithTeachingReportV2 {
+		metadata["solve_parent_guide_audit"] = parentGuideAuditVerdictForFields(audits, digest, append(append([]string(nil), parentGuideFields[:]...), "report_content"))
+	}
 	if selected.generation != nil {
 		metadata["solve_parent_guide_json"] = selected.generation.ParentGuideJSON
 	}
