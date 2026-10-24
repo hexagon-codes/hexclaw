@@ -89,7 +89,11 @@ func (o *GradingOrchestrator) RetryPhotoGradingJobForKnownLocalTechnical(
 	now := o.deps.now()
 	fields := job.Fields
 	fields.ParentAutomaticAttemptID = fmt.Sprintf("%s:%d", dispatchID, now)
-	fields.ParentAutomaticDeadlineAt = now + k12.ImageTaskAutomaticBudgetSeconds
+	dispatch, err := o.deps.Records.GetImageTaskDispatch(ctx, agentName, dispatchID)
+	if err != nil {
+		return GradingJobView{}, false, err
+	}
+	fields.ParentAutomaticDeadlineAt = now + int64(dispatch.AutomaticBudgetSeconds)
 	fields.ParentAutomaticRemainingSeconds = k12.ImageTaskAutomaticBudgetSeconds
 	if err := (Deps{Records: o.deps.Records, Now: func() int64 { return now }}).setGradingDeadline(ctx, agentName, &fields, k12.GradingStageQueued); err != nil {
 		return job, false, err

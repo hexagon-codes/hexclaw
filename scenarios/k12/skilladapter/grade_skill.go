@@ -10,11 +10,13 @@ package skilladapter
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
+	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/usecase"
 	"github.com/hexagon-codes/hexclaw/skill"
 )
@@ -79,18 +81,45 @@ func (s *GradeSkill) Execute(ctx context.Context, args map[string]any) (*skill.R
 
 	knowledgePoints := argStrSlice(args, "knowledge_points")
 	res, err := s.deps.GradeHomeworkProblem(ctx, usecase.GradeRequest{
-		AgentName:       agent,
-		Subject:         argStr(args, "subject"),
-		Grade:           grade,
-		SourceSession:   argStr(args, "source_session"),
-		Problem:         problem,
-		StudentAnswer:   argStr(args, "student_answer"),
-		KnowledgePoints: knowledgePoints,
+		AgentName:        agent,
+		Subject:          argStr(args, "subject"),
+		Grade:            grade,
+		GradeFromProfile: argStr(args, "grade") == "",
+		SourceSession:    argStr(args, "source_session"),
+		Problem:          problem,
+		StudentAnswer:    argStr(args, "student_answer"),
+		KnowledgePoints:  knowledgePoints,
 	})
 	if err != nil {
+		if errors.Is(err, k12storage.ErrTextSolveUnknown) {
+			return nil, &skill.ExecutionError{Detail: skill.ToolExecutionDetail{Phase: "text_solve", Outcome: "unknown", Reason: "Query the original solve_run_id; do not start a replacement model request", Action: "post"}, Err: fmt.Errorf("k12_grade: %w", err)}
+		}
 		return nil, fmt.Errorf("k12_grade: %w", err)
 	}
 
+	if res.SolveOnly && res.TeachingReport != nil && !res.OutOfScope {
+		content, err := usecase.TeachingReportMarkdown(*res.TeachingReport)
+		if err != nil {
+			return nil, err
+		}
+		metadata := gradeMetadata(res, problem, knowledgePoints)
+		if usecase.FinalReplyUsesPDF(content, false) && res.Finalization != nil {
+			f := res.Finalization
+			printable, _, err := s.deps.PrepareTextSolveTeachingReportPDF(ctx, f.OwnerID, agent, f.RunID, f.FinalizationID, f.ResultDigest, "")
+			if err != nil {
+				return nil, err
+			}
+			result, err := PrintableArtifactResult(ctx, s.deps, agent, printable.Artifact.ArtifactID, res.TeachingReport.Metadata.Title+"\n\n完整答案与讲解见附件")
+			if err != nil {
+				return nil, err
+			}
+			for key, value := range metadata {
+				result.Metadata[key] = value
+			}
+			return result, nil
+		}
+		return &skill.Result{Content: content, Metadata: metadata}, nil
+	}
 	return &skill.Result{
 		Content:  renderGradeContent(res),
 		Metadata: gradeMetadata(res, problem, knowledgePoints),
@@ -136,6 +165,22 @@ func gradeMetadata(res usecase.GradeResult, problem string, knowledgePoints []st
 	}
 	if res.RecordID != "" {
 		m["k12_record_id"] = res.RecordID
+	}
+	if res.Finalization != nil {
+		m["text_solve_run_id"] = res.Finalization.RunID
+		m["text_solve_finalization_id"] = res.Finalization.FinalizationID
+		m["text_solve_input_digest"] = res.Finalization.InputDigest
+		if res.AnswerSource != nil {
+			raw, _ := json.Marshal(res.AnswerSource)
+			m["answer_source"] = string(raw)
+		}
+		refs, _ := json.Marshal([]struct {
+			RunID          string                   `json:"solve_run_id"`
+			FinalizationID string                   `json:"finalization_id"`
+			InputDigest    string                   `json:"input_digest"`
+			AnswerSource   *k12.ProblemAnswerSource `json:"answer_source,omitempty"`
+		}{{RunID: res.Finalization.RunID, FinalizationID: res.Finalization.FinalizationID, InputDigest: res.Finalization.InputDigest, AnswerSource: res.AnswerSource}})
+		m["text_solve_refs"] = string(refs)
 	}
 	// BUG-1：判错入库时额外产出前端可消费的结构化 record 元数据（engine 层作为领域中立
 	// reply-safe 键透传到消息 metadata.record，前端 messageRecordChip 据 schema 渲染入库徽章）。

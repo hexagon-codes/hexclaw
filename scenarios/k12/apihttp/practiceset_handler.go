@@ -445,15 +445,18 @@ func (h *handler) preparePracticePrintJob(w http.ResponseWriter, r *http.Request
 }
 
 type prepareGenericPrintReq struct {
-	Agent               string `json:"agent"`
-	IdempotencyKey      string `json:"idempotency_key"`
-	ArtifactID          string `json:"artifact_id,omitempty"`
-	FinalArtifactID     string `json:"final_artifact_id,omitempty"`
-	FinalArtifactDigest string `json:"final_artifact_digest,omitempty"`
-	SourceKind          string `json:"source_kind"`
-	SourceRef           string `json:"source_ref"`
-	Title               string `json:"title"`
-	CanonicalMarkdown   string `json:"canonical_markdown"`
+	Agent                  string `json:"agent"`
+	IdempotencyKey         string `json:"idempotency_key"`
+	ArtifactID             string `json:"artifact_id,omitempty"`
+	FinalArtifactID        string `json:"final_artifact_id,omitempty"`
+	FinalArtifactDigest    string `json:"final_artifact_digest,omitempty"`
+	SolveRunID             string `json:"solve_run_id,omitempty"`
+	TextFinalizationID     string `json:"text_finalization_id,omitempty"`
+	TextFinalizationDigest string `json:"text_finalization_digest,omitempty"`
+	SourceKind             string `json:"source_kind"`
+	SourceRef              string `json:"source_ref"`
+	Title                  string `json:"title"`
+	CanonicalMarkdown      string `json:"canonical_markdown"`
 }
 
 func printableArtifactDTO(v usecase.PrintableArtifactView) map[string]any {
@@ -477,9 +480,16 @@ func (h *handler) preparePrintableArtifact(w http.ResponseWriter, r *http.Reques
 	canonicalVariant := strings.TrimSpace(req.SourceKind) != "" ||
 		strings.TrimSpace(req.SourceRef) != "" ||
 		strings.TrimSpace(req.CanonicalMarkdown) != ""
-	if finalVariant == canonicalVariant {
+	textVariant := req.SolveRunID != "" || req.TextFinalizationID != "" || req.TextFinalizationDigest != ""
+	variants := 0
+	for _, enabled := range []bool{finalVariant, canonicalVariant, textVariant} {
+		if enabled {
+			variants++
+		}
+	}
+	if variants != 1 {
 		writeErr(w, http.StatusBadRequest,
-			"final_artifact identity 与 canonical_markdown variant 必须且只能选择一个")
+			"exactly one print source identity is required")
 		return
 	}
 	var (
@@ -487,7 +497,18 @@ func (h *handler) preparePrintableArtifact(w http.ResponseWriter, r *http.Reques
 		replay bool
 		err    error
 	)
-	if finalVariant {
+	if textVariant {
+		if req.SolveRunID == "" || req.TextFinalizationID == "" || req.TextFinalizationDigest == "" {
+			writeErr(w, http.StatusBadRequest, "complete text finalization identity is required")
+			return
+		}
+		owner, scopeErr := h.authorizedAgentOwnerScope(r.Context(), req.Agent)
+		if scopeErr != nil {
+			writeErr(w, http.StatusNotFound, "text solve not found")
+			return
+		}
+		v, replay, err = h.rt.Deps.PrepareTextSolveTeachingReportPDF(r.Context(), owner, req.Agent, req.SolveRunID, req.TextFinalizationID, req.TextFinalizationDigest, req.Title)
+	} else if finalVariant {
 		if strings.TrimSpace(req.Agent) == "" ||
 			strings.TrimSpace(req.FinalArtifactID) == "" ||
 			strings.TrimSpace(req.FinalArtifactDigest) == "" ||

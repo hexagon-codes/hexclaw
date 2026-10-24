@@ -1078,7 +1078,7 @@ Implementation: [prepareGenericPrintJob](../../../../scenarios/k12/apihttp/pract
 
 Freeze a downloadable PDF artifact
 
-Choose canonical input or final_artifact_id+final_artifact_digest; the grading final-artifact variant also requires title and an exact frozen digest. No idempotency_key is required; artifacts deduplicate by content identity. The response is PDF metadata; fetch content for actual bytes. HTTP JSON bodies remain limited to 1 MiB.
+Choose exactly one source: canonical input, grading final_artifact_id+final_artifact_digest, or solve_run_id+text_finalization_id+text_finalization_digest. The grading variant requires title; the text variant defaults to its frozen report title and validates the actual text finalization. Existing PDF replay reads the same bytes and sends no model or channel request. No idempotency_key is required; artifacts deduplicate by content identity. The response is PDF metadata; fetch content for actual bytes. HTTP JSON bodies remain limited to 1 MiB.
 
 JSON body: [PrintableArtifactRequest](#schema-k12practiceprintableartifactrequest)；unknown fields are not used by this operation.
 
@@ -1087,10 +1087,13 @@ JSON body: [PrintableArtifactRequest](#schema-k12practiceprintableartifactreques
 | `agent` | string；minLength=1 | Yes | JSON projection field; omitted when absent if optional. |
 | `source_kind` | string | No | JSON projection field; omitted when absent if optional. |
 | `source_ref` | string | No | JSON projection field; omitted when absent if optional. |
-| `title` | string；minLength=1 | Yes | Title, at most 256 UTF-8 bytes |
+| `title` | string；minLength=1 | Conditional | Title, at most 256 UTF-8 bytes |
 | `canonical_markdown` | string | No | JSON projection field; omitted when absent if optional. |
 | `final_artifact_id` | string | No | JSON projection field; omitted when absent if optional. |
 | `final_artifact_digest` | string | No | JSON projection field; omitted when absent if optional. |
+| `solve_run_id` | string | Conditional | Required together for the text finalization variant. |
+| `text_finalization_id` | string | Conditional | Required together for the text finalization variant. |
+| `text_finalization_digest` | string | Conditional | Required together for the text finalization variant. |
 
 Unknown fields are not part of this schema.
 
@@ -1101,11 +1104,21 @@ Variant and conditional requirements:
   "oneOf": [
     {
       "required": [
+        "title",
         "source_kind",
         "source_ref",
         "canonical_markdown"
       ],
       "properties": {
+        "solve_run_id": {
+          "const": ""
+        },
+        "text_finalization_id": {
+          "const": ""
+        },
+        "text_finalization_digest": {
+          "const": ""
+        },
         "final_artifact_id": {
           "const": ""
         },
@@ -1137,10 +1150,20 @@ Variant and conditional requirements:
     },
     {
       "required": [
+        "title",
         "final_artifact_id",
         "final_artifact_digest"
       ],
       "properties": {
+        "solve_run_id": {
+          "const": ""
+        },
+        "text_finalization_id": {
+          "const": ""
+        },
+        "text_finalization_digest": {
+          "const": ""
+        },
         "source_kind": {
           "const": ""
         },
@@ -1157,6 +1180,42 @@ Variant and conditional requirements:
         "final_artifact_digest": {
           "type": "string",
           "minLength": 1
+        }
+      }
+    },
+    {
+      "required": [
+        "solve_run_id",
+        "text_finalization_id",
+        "text_finalization_digest"
+      ],
+      "properties": {
+        "solve_run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "text_finalization_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "text_finalization_digest": {
+          "type": "string",
+          "minLength": 1
+        },
+        "final_artifact_id": {
+          "const": ""
+        },
+        "final_artifact_digest": {
+          "const": ""
+        },
+        "source_kind": {
+          "const": ""
+        },
+        "source_ref": {
+          "const": ""
+        },
+        "canonical_markdown": {
+          "const": ""
         }
       }
     }

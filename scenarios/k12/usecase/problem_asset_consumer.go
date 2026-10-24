@@ -39,7 +39,12 @@ func (c ProblemAssetConsumer) Handle(ctx context.Context, ev k12storage.OutboxEv
 		// 资产保存平面解法，原事件与成功调用封套仍作为完整来源保留。
 		p.AnswerResultJSON = payload
 	}
-	_, _, err := c.Records.PublishAssessedProblemAsset(ctx, p, ev.AggregateID)
+	var err error
+	if p.Verification.SourceKind == k12.ProblemAssetSourceTextSolve {
+		_, _, err = c.Records.PublishProblemAsset(ctx, p)
+	} else {
+		_, _, err = c.Records.PublishAssessedProblemAsset(ctx, p, ev.AggregateID)
+	}
 	if errors.Is(err, k12storage.ErrProblemAssetUnavailable) {
 		// 已纠正的批改和已停用资产不接受迟到的后台发布。
 		return nil

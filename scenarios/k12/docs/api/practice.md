@@ -1078,7 +1078,7 @@ curl -fS -X POST "$HEXCLAW_BASE_URL/api/k12/print-jobs" \
 
 冻结可下载 PDF 产物
 
-canonical 输入与 final_artifact_id+final_artifact_digest 二选一；最终批注产物模式还需 title，摘要必须匹配当前冻结产物。无需 idempotency_key，产物按内容身份去重。响应是 PDF 元信息；随后 content 获取实际字节。JSON HTTP 请求体上限 1 MiB，即使渲染层文本边界更大。
+三种来源身份互斥：canonical 输入、图片终稿 final_artifact_id+final_artifact_digest、文字结算 solve_run_id+text_finalization_id+text_finalization_digest。图片终稿模式需 title；文字模式可省略 title，使用原冻结报告标题并核对真实文字结算，不伪造图片任务。已有PDF重放读取原字节，不重发模型或通道请求。无需 idempotency_key，产物按内容身份去重。响应是 PDF 元信息；随后 content 获取实际字节。JSON HTTP 请求体上限 1 MiB，即使渲染层文本边界更大。
 
 JSON body：[PrintableArtifactRequest](#schema-k12practiceprintableartifactrequest)；未知字段不作为本操作输入使用。
 
@@ -1087,10 +1087,13 @@ JSON body：[PrintableArtifactRequest](#schema-k12practiceprintableartifactreque
 | `agent` | string；minLength=1 | 是 | JSON 投影字段；可选字段在无值时可能省略。 |
 | `source_kind` | string | 否 | JSON 投影字段；可选字段在无值时可能省略。 |
 | `source_ref` | string | 否 | JSON 投影字段；可选字段在无值时可能省略。 |
-| `title` | string；minLength=1 | 是 | 标题，UTF-8 字节数不超过 256 |
+| `title` | string；minLength=1 | 条件必填 | 标题，UTF-8 字节数不超过 256 |
 | `canonical_markdown` | string | 否 | JSON 投影字段；可选字段在无值时可能省略。 |
 | `final_artifact_id` | string | 否 | JSON 投影字段；可选字段在无值时可能省略。 |
 | `final_artifact_digest` | string | 否 | JSON 投影字段；可选字段在无值时可能省略。 |
+| `solve_run_id` | string | 条件必填 | 文字结算模式下三项同时提供。 |
+| `text_finalization_id` | string | 条件必填 | 文字结算模式下三项同时提供。 |
+| `text_finalization_digest` | string | 条件必填 | 文字结算模式下三项同时提供。 |
 
 本结构未声明的字段不属于公开契约。
 
@@ -1101,11 +1104,21 @@ JSON body：[PrintableArtifactRequest](#schema-k12practiceprintableartifactreque
   "oneOf": [
     {
       "required": [
+        "title",
         "source_kind",
         "source_ref",
         "canonical_markdown"
       ],
       "properties": {
+        "solve_run_id": {
+          "const": ""
+        },
+        "text_finalization_id": {
+          "const": ""
+        },
+        "text_finalization_digest": {
+          "const": ""
+        },
         "final_artifact_id": {
           "const": ""
         },
@@ -1137,10 +1150,20 @@ JSON body：[PrintableArtifactRequest](#schema-k12practiceprintableartifactreque
     },
     {
       "required": [
+        "title",
         "final_artifact_id",
         "final_artifact_digest"
       ],
       "properties": {
+        "solve_run_id": {
+          "const": ""
+        },
+        "text_finalization_id": {
+          "const": ""
+        },
+        "text_finalization_digest": {
+          "const": ""
+        },
         "source_kind": {
           "const": ""
         },
@@ -1157,6 +1180,42 @@ JSON body：[PrintableArtifactRequest](#schema-k12practiceprintableartifactreque
         "final_artifact_digest": {
           "type": "string",
           "minLength": 1
+        }
+      }
+    },
+    {
+      "required": [
+        "solve_run_id",
+        "text_finalization_id",
+        "text_finalization_digest"
+      ],
+      "properties": {
+        "solve_run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "text_finalization_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "text_finalization_digest": {
+          "type": "string",
+          "minLength": 1
+        },
+        "final_artifact_id": {
+          "const": ""
+        },
+        "final_artifact_digest": {
+          "const": ""
+        },
+        "source_kind": {
+          "const": ""
+        },
+        "source_ref": {
+          "const": ""
+        },
+        "canonical_markdown": {
+          "const": ""
         }
       }
     }

@@ -2703,6 +2703,14 @@ func restartImageTaskAutomaticWindowVia(
 	ctx context.Context, q dbHandle, agentName, dispatchID string,
 	expectedVersion int, now int64, knownLocalTechnical bool,
 ) (k12.ImageTaskDispatch, error) {
+	current, err := getImageTaskDispatch(ctx, q, agentName, dispatchID, "")
+	if err != nil {
+		return k12.ImageTaskDispatch{}, err
+	}
+	budget := current.AutomaticBudgetSeconds
+	if budget <= 0 {
+		budget = imageTaskAutomaticBudgetSeconds
+	}
 	predicate := `AND (
             (status='failed' AND retry_safe=1)
             OR (
@@ -2725,8 +2733,8 @@ func restartImageTaskAutomaticWindowVia(
               AND target_object_type='creative_work_intake'
             )
           )`
-	args := []any{imageTaskAutomaticBudgetSeconds, now,
-		now + imageTaskAutomaticBudgetSeconds, imageTaskAutomaticBudgetSeconds,
+	args := []any{budget, now,
+		now + int64(budget), budget,
 		now, agentName, dispatchID, expectedVersion}
 	if knownLocalTechnical {
 		// 唯一调用方已经在同一事务核对原批改终态及当前确定失败回执。
