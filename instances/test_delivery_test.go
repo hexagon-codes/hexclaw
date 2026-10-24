@@ -131,7 +131,7 @@ func TestBoundTestDeliveryNoBindingAndActualReceipt(t *testing.T) {
 	adp := &testReceiptAdapter{ack: adapter.DeliveryAck{Status: adapter.DeliveryDelivered, ExternalMessageID: "platform-message"}}
 	attachTestMessageAdapter(t, mgr, adp)
 	empty, err := mgr.SendBoundTest(ctx, "test-instance", "unbound", nil, "")
-	if err != nil || !empty.Success || len(adp.targets) != 0 || !strings.Contains(empty.Message, "No bound conversation") {
+	if err != nil || empty.Success || empty.Pending || len(empty.Deliveries) != 0 || len(adp.targets) != 0 || !strings.Contains(empty.Message, "No bound conversation") {
 		t.Fatalf("unbound sent: %+v %v", empty, err)
 	}
 	result, err := mgr.SendBoundTest(ctx, "test-instance", "receipt", []string{"chat"}, "")

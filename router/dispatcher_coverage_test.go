@@ -14,17 +14,16 @@ func mustRegister(t *testing.T, d *Dispatcher, name string) {
 	}
 }
 
-// TestDispatcher_FirstRegisterBecomesDefault verifies the first registered agent
-// is auto-promoted to default, and later registrations do not change it.
-func TestDispatcher_FirstRegisterBecomesDefault(t *testing.T) {
+// 注册实例不自动改变默认值，包括第一个实例。
+func TestDispatcher_RegisterPreservesUnsetDefault(t *testing.T) {
 	d := New()
 	mustRegister(t, d, "first")
-	if d.DefaultAgent() != "first" {
-		t.Fatalf("first agent should become default, got %q", d.DefaultAgent())
+	if d.DefaultAgent() != "" {
+		t.Fatalf("registration should leave default unset, got %q", d.DefaultAgent())
 	}
 	mustRegister(t, d, "second")
-	if d.DefaultAgent() != "first" {
-		t.Fatalf("default should remain 'first', got %q", d.DefaultAgent())
+	if d.DefaultAgent() != "" {
+		t.Fatalf("later registration should leave default unset, got %q", d.DefaultAgent())
 	}
 }
 
@@ -137,6 +136,9 @@ func TestDispatcher_AddRule_Validation(t *testing.T) {
 func TestDispatcher_SetDefault(t *testing.T) {
 	d := New()
 	mustRegister(t, d, "a1")
+	if err := d.SetDefault("a1"); err != nil {
+		t.Fatalf("SetDefault: %v", err)
+	}
 
 	t.Run("clear_default_with_empty", func(t *testing.T) {
 		if err := d.SetDefault(""); err != nil {
@@ -153,7 +155,7 @@ func TestDispatcher_SetDefault(t *testing.T) {
 	})
 }
 
-// TestDispatcher_Unregister covers rule cleanup and default reselection.
+// 注销实例清理路由，同时清除被删除的显式默认。
 func TestDispatcher_Unregister(t *testing.T) {
 	t.Run("unregister_missing_errors", func(t *testing.T) {
 		d := New()
@@ -162,10 +164,13 @@ func TestDispatcher_Unregister(t *testing.T) {
 		}
 	})
 
-	t.Run("unregister_default_reselects", func(t *testing.T) {
+	t.Run("unregister_default_clears", func(t *testing.T) {
 		d := New()
-		mustRegister(t, d, "a1") // becomes default
+		mustRegister(t, d, "a1")
 		mustRegister(t, d, "a2")
+		if err := d.SetDefault("a1"); err != nil {
+			t.Fatalf("SetDefault: %v", err)
+		}
 		if err := d.AddRule(Rule{Platform: "feishu", AgentName: "a1"}); err != nil {
 			t.Fatalf("AddRule: %v", err)
 		}
@@ -176,9 +181,9 @@ func TestDispatcher_Unregister(t *testing.T) {
 		if len(d.ListRules()) != 0 {
 			t.Fatalf("expected a1 rules purged, got %+v", d.ListRules())
 		}
-		// Default should have been reselected to the remaining agent.
-		if d.DefaultAgent() != "a2" {
-			t.Fatalf("expected default to reselect a2, got %q", d.DefaultAgent())
+		// 其他实例不能在注销后自动成为默认。
+		if d.DefaultAgent() != "" {
+			t.Fatalf("expected default to be cleared, got %q", d.DefaultAgent())
 		}
 	})
 }
@@ -191,12 +196,11 @@ func TestDispatcher_LoadAll(t *testing.T) {
 	tests := []struct {
 		name        string
 		defaultArg  string
-		wantDefault string // exact, or "" meaning "any registered agent"
-		anyDefault  bool
+		wantDefault string
 	}{
 		{name: "explicit_valid_default", defaultArg: "a2", wantDefault: "a2"},
-		{name: "explicit_invalid_default_falls_back", defaultArg: "ghost", anyDefault: true},
-		{name: "empty_default_picks_some_agent", defaultArg: "", anyDefault: true},
+		{name: "explicit_invalid_default_is_cleared", defaultArg: "ghost", wantDefault: ""},
+		{name: "empty_default_stays_empty", defaultArg: "", wantDefault: ""},
 	}
 
 	for _, tc := range tests {
@@ -211,11 +215,7 @@ func TestDispatcher_LoadAll(t *testing.T) {
 				t.Fatalf("expected 1 rule loaded, got %d", len(d.ListRules()))
 			}
 			def := d.DefaultAgent()
-			if tc.anyDefault {
-				if def != "a1" && def != "a2" {
-					t.Fatalf("expected default to be one of the registered agents, got %q", def)
-				}
-			} else if def != tc.wantDefault {
+			if def != tc.wantDefault {
 				t.Fatalf("expected default %q, got %q", tc.wantDefault, def)
 			}
 			// Rule routing should work after LoadAll.
@@ -235,6 +235,38 @@ func TestDispatcher_LoadAll_EmptyAgents(t *testing.T) {
 	}
 	if got := d.Route(RouteRequest{Platform: "feishu"}); got != nil {
 		t.Fatalf("routing with no agents should return nil, got %+v", got)
+	}
+}
+
+// 重载以本次持久快照为准，不能保留旧的显式默认。
+func TestDispatcher_LoadAllReplacesDefaultSnapshot(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		agents []AgentConfig
+		given  string
+		want   string
+	}{
+		{name: "cleared", agents: []AgentConfig{{Name: "old"}, {Name: "new"}}},
+		{name: "missing", agents: []AgentConfig{{Name: "new"}}, given: "missing"},
+		{name: "empty"},
+		{name: "explicit", agents: []AgentConfig{{Name: "new"}}, given: "new", want: "new"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := New()
+			d.LoadAll([]AgentConfig{{Name: "old"}}, "old", nil)
+			d.LoadAll(tc.agents, tc.given, nil)
+			if got := d.DefaultAgent(); got != tc.want {
+				t.Fatalf("reloaded default=%q, want %q", got, tc.want)
+			}
+			result := d.Route(RouteRequest{Platform: "api"})
+			if tc.want == "" {
+				if result != nil {
+					t.Fatalf("unset default selected an agent: %+v", result)
+				}
+			} else if result == nil || result.AgentName != tc.want {
+				t.Fatalf("explicit default route=%+v, want %q", result, tc.want)
+			}
+		})
 	}
 }
 
@@ -280,7 +312,10 @@ func TestDispatcher_Explain_RuleSource(t *testing.T) {
 // but a default agent exists.
 func TestDispatcher_Explain_DefaultSource(t *testing.T) {
 	d := New()
-	mustRegister(t, d, "a1") // default
+	mustRegister(t, d, "a1")
+	if err := d.SetDefault("a1"); err != nil {
+		t.Fatalf("SetDefault: %v", err)
+	}
 	exp := d.Explain(context.Background(), RouteRequest{Platform: "unknown"}, "")
 	if !exp.Matched {
 		t.Fatal("expected match via default")
@@ -336,7 +371,10 @@ func TestDispatcher_Explain_LLMSource(t *testing.T) {
 // classifier confidence yields the default agent with default source.
 func TestRouteWithFallback_LowConfidenceFallsBackToDefault(t *testing.T) {
 	d := New()
-	mustRegister(t, d, "a1") // default
+	mustRegister(t, d, "a1")
+	if err := d.SetDefault("a1"); err != nil {
+		t.Fatalf("SetDefault: %v", err)
+	}
 	mustRegister(t, d, "a2")
 	clf := NewLLMClassifier(func(_ context.Context, _, _ string) (string, error) {
 		return `{"agent":"a2","confidence":0.2}`, nil
@@ -356,7 +394,10 @@ func TestRouteWithFallback_LowConfidenceFallsBackToDefault(t *testing.T) {
 // TestRouteWithFallback_ClassifierError falls back to default when the classifier errors.
 func TestRouteWithFallback_ClassifierError(t *testing.T) {
 	d := New()
-	mustRegister(t, d, "a1") // default
+	mustRegister(t, d, "a1")
+	if err := d.SetDefault("a1"); err != nil {
+		t.Fatalf("SetDefault: %v", err)
+	}
 	mustRegister(t, d, "a2")
 	clf := NewLLMClassifier(func(_ context.Context, _, _ string) (string, error) {
 		return "", errors.New("upstream down")
@@ -373,7 +414,10 @@ func TestRouteWithFallback_ClassifierError(t *testing.T) {
 // consulted when fewer than 2 agents exist.
 func TestRouteWithFallback_SingleAgentSkipsClassifier(t *testing.T) {
 	d := New()
-	mustRegister(t, d, "a1") // sole agent, also default
+	mustRegister(t, d, "a1")
+	if err := d.SetDefault("a1"); err != nil {
+		t.Fatalf("SetDefault: %v", err)
+	}
 	called := false
 	clf := NewLLMClassifier(func(_ context.Context, _, _ string) (string, error) {
 		called = true

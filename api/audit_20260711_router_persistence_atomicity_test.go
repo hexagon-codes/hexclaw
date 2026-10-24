@@ -43,6 +43,9 @@ func TestAudit20260711SetDefaultFailureDoesNotPublishMemoryChange(t *testing.T) 
 			t.Fatal(err)
 		}
 	}
+	if err := dispatcher.SetDefault("alpha"); err != nil {
+		t.Fatal(err)
+	}
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/agents/default", strings.NewReader(`{"name":"beta"}`))
 	w := httptest.NewRecorder()
 

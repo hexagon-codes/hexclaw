@@ -32,9 +32,9 @@ func TestRouter_RegisterAndList(t *testing.T) {
 		t.Fatalf("应有 2 个 Agent，实际 %d", len(agents))
 	}
 
-	// 第一个注册的应为默认
-	if r.DefaultAgent() != "assistant" {
-		t.Errorf("默认 Agent 应为 assistant，实际 %q", r.DefaultAgent())
+	// 注册不改变默认值。
+	if r.DefaultAgent() != "" {
+		t.Errorf("默认 Agent 应保持未设置，实际 %q", r.DefaultAgent())
 	}
 }
 
@@ -63,6 +63,9 @@ func TestRouter_Unregister(t *testing.T) {
 	r := New()
 	r.Register(AgentConfig{Name: "a"})
 	r.Register(AgentConfig{Name: "b"})
+	if err := r.SetDefault("a"); err != nil {
+		t.Fatal(err)
+	}
 	r.AddRule(Rule{Platform: "api", AgentName: "a"})
 
 	err := r.Unregister("a")
@@ -81,9 +84,9 @@ func TestRouter_Unregister(t *testing.T) {
 		t.Errorf("注销后关联规则应被清除，实际 %d", len(rules))
 	}
 
-	// 默认 Agent 应更新
-	if r.DefaultAgent() != "b" {
-		t.Errorf("默认 Agent 应更新为 b，实际 %q", r.DefaultAgent())
+	// 删除默认后不自动提升其他实例。
+	if r.DefaultAgent() != "" {
+		t.Errorf("默认 Agent 应清空，实际 %q", r.DefaultAgent())
 	}
 }
 
@@ -131,6 +134,9 @@ func TestRouter_RouteUserID(t *testing.T) {
 func TestRouter_RouteDefault(t *testing.T) {
 	r := New()
 	r.Register(AgentConfig{Name: "fallback"})
+	if err := r.SetDefault("fallback"); err != nil {
+		t.Fatal(err)
+	}
 
 	// 无规则匹配时应返回默认 Agent
 	result := r.Route(RouteRequest{Platform: "unknown", UserID: "nobody"})

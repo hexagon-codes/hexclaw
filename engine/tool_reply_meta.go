@@ -9,6 +9,8 @@ import (
 
 	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/internal/mediaflow"
+	"github.com/hexagon-codes/hexclaw/internal/requestcancel"
 	"github.com/hexagon-codes/hexclaw/skill"
 )
 
@@ -32,6 +34,12 @@ var replyMetaSinkKey = replyMetaSinkKeyType{}
 var replySafeToolMetaKeys = map[string]bool{
 	"record":                           true, // 记录本入库徽章（{collection,fields,status} JSON），前端 messageRecordChip 消费
 	"artifacts":                        true, // 只透传持久产物引用，不携带文件字节或内部调用参数。
+	"print_artifacts":                  true,
+	"text_solve_run_id":                true,
+	"text_solve_refs":                  true,
+	"text_solve_finalization_id":       true,
+	"text_solve_input_digest":          true,
+	"answer_source":                    true,
 	"media_resend_operations":          true,
 	"media_operations":                 true,
 	teachingContextReceiptsMetadataKey: true,
@@ -181,6 +189,12 @@ func stampToolReplyMeta(ctx context.Context, meta map[string]string) {
 	if len(meta) == 0 {
 		return
 	}
+	// 已冻结的领域文件复用宿主原回合生命周期，不创建媒体操作。
+	if meta["print_artifacts"] != "" {
+		if err := mediaflow.RetainRequest(ctx); err == nil {
+			requestcancel.Retain(ctx)
+		}
+	}
 	s := replyMetaSinkFrom(ctx)
 	if s == nil {
 		return
@@ -189,7 +203,7 @@ func stampToolReplyMeta(ctx context.Context, meta map[string]string) {
 	defer s.mu.Unlock()
 	for k, v := range meta {
 		if v != "" && replySafeToolMetaKeys[k] {
-			if k == "artifacts" {
+			if k == "artifacts" || k == "print_artifacts" || k == "text_solve_refs" {
 				s.m[k] = mergeArtifactReplyReferences(s.m[k], v)
 				continue
 			}
@@ -241,7 +255,7 @@ func mergeArtifactReplyReferences(previous, next string) string {
 				continue
 			}
 			identity := string(item)
-			for _, key := range []string{"revision_id", "artifact_id", "attempt_id"} {
+			for _, key := range []string{"revision_id", "artifact_id", "attempt_id", "solve_run_id"} {
 				if value, ok := fields[key].(string); ok && value != "" {
 					kind, _ := fields["kind"].(string)
 					identity = kind + ":" + key + ":" + value

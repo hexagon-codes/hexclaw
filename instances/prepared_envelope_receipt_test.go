@@ -15,6 +15,16 @@ type preparedEnvelopeCall struct {
 	parts  []adapter.DeliveryPart
 }
 
+func TestMediaPreparationStoppedInstanceIsKnownNotSent(t *testing.T) {
+	mgr, cleanup := newTestManager(t)
+	defer cleanup()
+	_, err := mgr.PrepareDeliveryPartResource(t.Context(), "missing-stable-instance", adapter.DeliveryPart{Kind: "text", Text: "hello"})
+	var preparation *adapter.ResourcePreparationError
+	if !errors.As(err, &preparation) || !preparation.ResourcePreparationKnown() {
+		t.Fatalf("preflight failure lost its known-not-sent classification: %v", err)
+	}
+}
+
 type preparedEnvelopeCapableAdapter struct {
 	deliveryPartCapableAdapter
 	envelopeCalls  []preparedEnvelopeCall

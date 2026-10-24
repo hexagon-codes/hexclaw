@@ -12,7 +12,7 @@ import (
 	agentrouter "github.com/hexagon-codes/hexclaw/router"
 )
 
-func TestHandleUnregisterAgentDefaultReassignmentFailureRollsBackEverything(t *testing.T) {
+func TestHandleUnregisterAgentDeletionFailureRollsBackEverything(t *testing.T) {
 	store, err := sqlitefixture.New(filepath.Join(t.TempDir(), "atomic-unregister.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -37,6 +37,9 @@ func TestHandleUnregisterAgentDefaultReassignmentFailureRollsBackEverything(t *t
 			t.Fatal(err)
 		}
 	}
+	if err := dispatcher.SetDefault("beta"); err != nil {
+		t.Fatal(err)
+	}
 	if err := agentStore.SetDefault(ctx, "beta"); err != nil {
 		t.Fatal(err)
 	}
@@ -48,15 +51,13 @@ func TestHandleUnregisterAgentDefaultReassignmentFailureRollsBackEverything(t *t
 		t.Fatal(err)
 	}
 
-	// Force the second durable step (new-default publication) to fail after
-	// DELETE has executed. The transaction must restore the deleted Agent and
-	// its cascaded rules.
+	// 删除及级联规则清理后触发失败，事务必须同时恢复实例、默认值和路由。
 	if _, err := store.DB().ExecContext(ctx, `
-		CREATE TRIGGER fail_default_reassignment
-		BEFORE UPDATE OF is_default ON agents
-		WHEN NEW.name = 'alpha' AND NEW.is_default = 1
+		CREATE TRIGGER fail_default_deletion
+		AFTER DELETE ON agents
+		WHEN OLD.name = 'beta'
 		BEGIN
-			SELECT RAISE(ABORT, 'injected default reassignment failure');
+			SELECT RAISE(ABORT, 'injected default deletion failure');
 		END
 	`); err != nil {
 		t.Fatal(err)

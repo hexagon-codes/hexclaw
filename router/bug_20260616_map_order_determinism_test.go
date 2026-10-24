@@ -53,18 +53,18 @@ func TestBug20260616_LoadAllDefaultDeterministic(t *testing.T) {
 	seen := map[string]int{}
 	for i := 0; i < 256; i++ {
 		d := New()
-		d.LoadAll(agentList, "", nil) // no explicit default -> auto-pick
+		d.LoadAll(agentList, "", nil)
 		seen[d.DefaultAgent()]++
 	}
 	if len(seen) != 1 {
-		t.Fatalf("auto default agent non-deterministic across 256 loads: %v", seen)
+		t.Fatalf("unset default changed across 256 loads: %v", seen)
 	}
-	if _, ok := seen["alpha"]; !ok {
-		t.Fatalf("auto default must be smallest name 'alpha', got %v", seen)
+	if _, ok := seen[""]; !ok {
+		t.Fatalf("loading without an explicit default must preserve it, got %v", seen)
 	}
 }
 
-func TestBug20260616_UnregisterDefaultRepickDeterministic(t *testing.T) {
+func TestBug20260616_UnregisterDefaultClearDeterministic(t *testing.T) {
 	seen := map[string]int{}
 	for i := 0; i < 256; i++ {
 		d := New()
@@ -76,15 +76,15 @@ func TestBug20260616_UnregisterDefaultRepickDeterministic(t *testing.T) {
 		if err := d.SetDefault("gamma"); err != nil {
 			t.Fatalf("SetDefault: %v", err)
 		}
-		if err := d.Unregister("gamma"); err != nil { // removing the default forces a re-pick
+		if err := d.Unregister("gamma"); err != nil {
 			t.Fatalf("Unregister: %v", err)
 		}
 		seen[d.DefaultAgent()]++
 	}
 	if len(seen) != 1 {
-		t.Fatalf("default re-pick after Unregister non-deterministic: %v", seen)
+		t.Fatalf("default clearing after Unregister non-deterministic: %v", seen)
 	}
-	if _, ok := seen["alpha"]; !ok {
-		t.Fatalf("re-picked default must be smallest remaining name 'alpha', got %v", seen)
+	if _, ok := seen[""]; !ok {
+		t.Fatalf("deleting the default must clear it without promoting another agent, got %v", seen)
 	}
 }

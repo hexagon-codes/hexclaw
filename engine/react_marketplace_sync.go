@@ -45,9 +45,16 @@ func (e *ReActEngine) SyncMarkdownSkillsFromMarketplace(mp *marketplace.Marketpl
 	}
 
 	e.mu.Lock()
-	tracked := e.mpTracked
-	if tracked == nil {
-		tracked = make(map[string]struct{})
+	tracked := make(map[string]struct{}, len(e.mpTracked))
+	for name := range e.mpTracked {
+		tracked[name] = struct{}{}
+	}
+	e.mu.Unlock()
+	// 启动时已注册的 Markdown 也属于当前加载器，首次刷新前不能遗漏。
+	for _, current := range e.skills.All() {
+		if marketplace.IsMarkdownSkill(current) {
+			tracked[current.Name()] = struct{}{}
+		}
 	}
 	// 复制一份待删除列表，避免在迭代中修改 map
 	var toRemove []string
@@ -56,10 +63,11 @@ func (e *ReActEngine) SyncMarkdownSkillsFromMarketplace(mp *marketplace.Marketpl
 			toRemove = append(toRemove, name)
 		}
 	}
-	e.mu.Unlock()
-
 	sk := e.skills
 	for _, name := range toRemove {
+		if current, ok := sk.Get(name); !ok || !marketplace.IsMarkdownSkill(current) {
+			continue
+		}
 		if err := sk.Unregister(name); err != nil {
 			logger.Warn("技能市场同步: 注销", "name", name, "跳过", err)
 		}
@@ -70,12 +78,18 @@ func (e *ReActEngine) SyncMarkdownSkillsFromMarketplace(mp *marketplace.Marketpl
 		if n == "" {
 			continue
 		}
-		if _, ok := sk.Get(n); !ok {
+		if current, ok := sk.Get(n); !ok {
 			w := marketplace.WrapAsSkill(md)
 			if err := sk.Register(w); err != nil {
 				logger.Error("技能市场同步: 注册", "n", n, "error", err)
 				continue
 			}
+		} else if _, managed := tracked[n]; managed || marketplace.IsMarkdownSkill(current) {
+			if err := sk.Replace(marketplace.WrapAsSkill(md)); err != nil {
+				return err
+			}
+		} else {
+			return fmt.Errorf("skill %q conflicts with a registered runtime tool", n)
 		}
 		if err := sk.SetEnabled(n, mp.IsEnabled(n)); err != nil {
 			logger.Error("技能市场同步: 设置", "n", n, "启用状态失败", err)

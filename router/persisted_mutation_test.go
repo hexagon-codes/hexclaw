@@ -13,14 +13,17 @@ func TestUnregisterPersistedFailureKeepsWholeSnapshot(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if err := d.SetDefault("beta"); err != nil {
+		t.Fatal(err)
+	}
 	if err := d.AddRule(Rule{ID: 7, Platform: "web", AgentName: "beta"}); err != nil {
 		t.Fatal(err)
 	}
 
 	wantErr := errors.New("disk full")
 	err := d.UnregisterPersisted("beta", func(name, nextDefault string, wasDefault bool) error {
-		if name != "beta" || nextDefault != "alpha" || !wasDefault {
-			t.Fatalf("callback snapshot=(%q,%q,%v), want (beta,alpha,true)", name, nextDefault, wasDefault)
+		if name != "beta" || nextDefault != "" || !wasDefault {
+			t.Fatalf("callback snapshot=(%q,%q,%v), want (beta,empty,true)", name, nextDefault, wasDefault)
 		}
 		return wantErr
 	})
@@ -44,6 +47,9 @@ func TestSetDefaultPersistedFailureKeepsPreviousDefault(t *testing.T) {
 		if err := d.Register(AgentConfig{Name: name}); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if err := d.SetDefault("alpha"); err != nil {
+		t.Fatal(err)
 	}
 
 	wantErr := errors.New("disk full")

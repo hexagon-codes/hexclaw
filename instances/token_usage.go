@@ -2,8 +2,46 @@ package instances
 
 import (
 	"context"
+	"database/sql"
 	"time"
 )
+
+// 改名时只归一当前账号生命周期内的名称引用，与账号及路由更新一并提交或回滚。
+func preserveInstanceConversationsTx(ctx context.Context, tx *sql.Tx, inst *Instance, nextName string) error {
+	var exists bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='sessions')`).Scan(&exists); err != nil || !exists {
+		return err
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT id,created_at FROM sessions
+		WHERE platform=? AND instance_id=? AND NOT EXISTS (
+			SELECT 1 FROM platform_instances other WHERE other.id=sessions.instance_id)`, inst.Provider, inst.Name)
+	if err != nil {
+		return err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		var created time.Time
+		if err := rows.Scan(&id, &created); err != nil {
+			rows.Close()
+			return err
+		}
+		if !created.Before(inst.CreatedAt) {
+			ids = append(ids, id)
+		}
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if _, err := tx.ExecContext(ctx, `UPDATE sessions SET instance_id=? WHERE id=?`, nextName, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 // TokenUsage 是可由稳定账号身份证明的累计实际模型用量，不包含正文估算。
 type TokenUsage struct {

@@ -162,12 +162,14 @@ func matchesManualQuestion(query, content string) bool {
 		return false
 	}
 	normalize := func(text string) string {
-		return strings.Map(func(r rune) rune {
-			if unicode.IsSpace(r) || unicode.IsPunct(r) {
+		text = strings.Map(func(r rune) rune {
+			if unicode.IsSpace(r) {
 				return -1
 			}
 			return unicode.ToLower(r)
 		}, text)
+		// 仅忽略句末问号和句号；小数点、分数线及运算标点保留其语义。
+		return strings.TrimRight(text, "?？。.")
 	}
 	q := normalize(query)
 	return q != "" && q == normalize(question)

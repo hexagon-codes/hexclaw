@@ -66,7 +66,7 @@ func (m *Manager) KnownConversationTargets(ctx context.Context, inst *Instance) 
 }
 
 func projectTestDelivery(requestID string, deliveries []TestDelivery) TestDeliveryResult {
-	result := TestDeliveryResult{RequestID: requestID, Success: true, Deliveries: deliveries}
+	result := TestDeliveryResult{RequestID: requestID, Deliveries: deliveries}
 	if len(deliveries) == 0 {
 		result.Message = "Connection healthy. No bound conversation; no test message was sent."
 		return result
@@ -76,7 +76,7 @@ func projectTestDelivery(requestID string, deliveries []TestDelivery) TestDelive
 		counts[delivery.Status]++
 	}
 	result.Pending = counts["sending"]+counts["not_sent"]+counts[string(adapter.DeliveryOutcomeUnknown)] > 0
-	result.Success = !result.Pending && counts[string(adapter.DeliveryFailed)] == 0
+	result.Success = counts[string(adapter.DeliveryAccepted)]+counts[string(adapter.DeliveryDelivered)] == len(deliveries)
 	result.Message = fmt.Sprintf("Connection healthy. Test messages: %d delivered, %d accepted, %d failed, %d unknown, %d sending, %d not sent.", counts["delivered"], counts["accepted"], counts["failed"], counts["outcome_unknown"], counts["sending"], counts["not_sent"])
 	if counts["accepted"] > 0 {
 		result.Message += " Accepted does not confirm delivery."

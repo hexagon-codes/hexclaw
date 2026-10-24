@@ -2,6 +2,7 @@ package instances
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/hexagon-codes/toolkit/util/idgen"
 
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/adapter/dingtalk"
@@ -26,7 +29,6 @@ import (
 	"github.com/hexagon-codes/hexclaw/adapter/whatsapp"
 	"github.com/hexagon-codes/hexclaw/config"
 	"github.com/hexagon-codes/hexclaw/secret"
-	"github.com/hexagon-codes/toolkit/util/idgen"
 )
 
 type Status string
@@ -415,6 +417,16 @@ func (m *Manager) UpdateByIDWithTransaction(ctx context.Context, id string, inst
 		return err
 	}
 	defer tx.Rollback()
+	var previous Instance
+	if err := tx.QueryRowContext(ctx, `SELECT id,provider,name,created_at FROM platform_instances WHERE id=?`, id).
+		Scan(&previous.ID, &previous.Provider, &previous.Name, &previous.CreatedAt); err != nil {
+		return err
+	}
+	if previous.Name != inst.Name && previous.Provider == inst.Provider {
+		if err := preserveInstanceConversationsTx(ctx, tx, &previous, inst.Name); err != nil {
+			return err
+		}
+	}
 	res, err := tx.ExecContext(ctx,
 		`UPDATE platform_instances
 		 SET provider = ?, name = ?, enabled = ?, mode = ?, status = ?, config_json = ?, last_error = ?, updated_at = ?
@@ -1030,6 +1042,18 @@ func (m *Manager) HealthAll(ctx context.Context) ([]*HealthReport, error) {
 func (m *Manager) wrapHandler(inst *Instance, next adapter.MessageHandler) adapter.MessageHandler {
 	return func(ctx context.Context, msg *adapter.Message) (*adapter.Reply, error) {
 		ctx = adapter.WithPlatformInstanceIdentity(ctx, inst.ID, inst.Provider)
+		if msg.Metadata == nil {
+			msg.Metadata = make(map[string]string)
+		}
+		// 原始消息按物理实例隔离，接纳时冻结请求身份，供回合保存、媒体恢复和投递共用。
+		if strings.TrimSpace(msg.Metadata["request_id"]) == "" && strings.TrimSpace(msg.ID) != "" {
+			instanceID := inst.ID
+			if instanceID == "" {
+				instanceID = inst.Name
+			}
+			digest := sha256.Sum256([]byte(inst.Provider + "\x00" + instanceID + "\x00" + msg.ID))
+			msg.Metadata["request_id"] = fmt.Sprintf("imreq-%x", digest)
+		}
 		if msg.InstanceID == "" {
 			msg.InstanceID = inst.Name
 		}

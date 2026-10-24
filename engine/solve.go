@@ -190,7 +190,7 @@ func (o *SolveSkill) Execute(ctx context.Context, args map[string]any) (*skill.R
 	gradingMode := strings.TrimSpace(studentAnswer) != ""
 	outputVersion, _ := args["solve_output_version"].(string)
 	teachingContract, _ := args["parent_teaching_contract"].(string)
-	if outputVersion != "" && (outputVersion != solveWithParentGuideV1 || gradingMode || strings.TrimSpace(teachingContract) == "") {
+	if outputVersion != "" && (!solveTeachingVersionSupported(outputVersion) || gradingMode || strings.TrimSpace(teachingContract) == "") {
 		return nil, fmt.Errorf("solve output contract is invalid")
 	}
 	// 显式传 method_diversity/self_consistency 表示调用方要求完整的 solver/verifier 流程；
@@ -331,7 +331,7 @@ func (o *SolveSkill) Execute(ctx context.Context, args map[string]any) (*skill.R
 	// 加交叉校验，简单题（单步算术）直接作答、省去校验子 Agent 的额外一次调用（桌面延迟优先，
 	// "默认轻、按需重"）。显式传 method_diversity/self_consistency 即视为调用方接管、不再自动 triage。
 	complexityProblem := problem
-	if outputVersion == solveWithParentGuideV1 {
+	if solveTeachingVersionSupported(outputVersion) {
 		// 联合讲法已限定当前评估目标；唯一编号可位于共享条件之后，只从复杂度副本排除。
 		complexityProblem = complexityProblemStem(problem)
 		markerInput := complexityMathMarkerInput(complexityProblem)
@@ -345,7 +345,7 @@ func (o *SolveSkill) Execute(ctx context.Context, args map[string]any) (*skill.R
 		complexity = complexityStandard
 	}
 	// 完整匹配的计算规律问答只减少默认候选采样，讲解内容与独立审计仍走原合同。
-	if auto && outputVersion == solveWithParentGuideV1 && !gradingMode && fractionIntegerCalculationRuleRe.MatchString(strings.TrimSpace(deterministicProblem)) {
+	if auto && solveTeachingVersionSupported(outputVersion) && !gradingMode && fractionIntegerCalculationRuleRe.MatchString(strings.TrimSpace(deterministicProblem)) {
 		complexity = complexityStandard
 	}
 	if auto && complexity == complexityHard {
@@ -379,8 +379,8 @@ func (o *SolveSkill) Execute(ctx context.Context, args map[string]any) (*skill.R
 		if childCtx.Err() != nil {
 			break
 		}
-		if outputVersion == solveWithParentGuideV1 {
-			sp = withParentGuideGeneration(sp, teachingContract)
+		if solveTeachingVersionSupported(outputVersion) {
+			sp = withVersionedParentGuideGeneration(sp, outputVersion, teachingContract)
 		}
 		result, err := o.runSolveAgentResult(childCtx, sp)
 		if err != nil {
@@ -425,8 +425,8 @@ func (o *SolveSkill) Execute(ctx context.Context, args map[string]any) (*skill.R
 	// 仅在有约束、非批改、还有墙钟时尝试一次，避免无界重试。
 	if verdict == verdictOutOfScope && !gradingMode && strings.TrimSpace(constraint) != "" && childCtx.Err() == nil {
 		reSpec := solverSpec(problem, subject, "只用「"+constraint+"」范围内、学生已学过的最朴素方法，禁止任何超纲技巧", grade, constraint)
-		if outputVersion == solveWithParentGuideV1 {
-			reSpec = withParentGuideGeneration(reSpec, teachingContract)
+		if solveTeachingVersionSupported(outputVersion) {
+			reSpec = withVersionedParentGuideGeneration(reSpec, outputVersion, teachingContract)
 		}
 		if result, err := o.runSolveAgentResult(childCtx, reSpec); err == nil && strings.TrimSpace(result.Output) != "" {
 			// **纠正性替换**（非又一次投票样本）：重解的学段内解法直接取代原超纲解作为 primary。
@@ -493,7 +493,7 @@ func (o *SolveSkill) Execute(ctx context.Context, args map[string]any) (*skill.R
 		"solve_evidence": evidenceKind(numericGrounded),
 	}
 	selected := selectedSolverSolution(groups, verdict, computed, numericGrounded)
-	if outputVersion == solveWithParentGuideV1 {
+	if solveTeachingVersionSupported(outputVersion) {
 		addParentGuideMetadata(metadata, selected, guideAudits)
 	}
 	// 执行关联独立于过程裁决，复用资格仍由调用方核对；来源与最终选中解法一致。
@@ -724,7 +724,7 @@ func (o *SolveSkill) runSolveAgentResult(ctx context.Context, spec SubAgentSpec)
 		}
 	}
 	execute := o.executeFunc
-	if spec.Source == solveDispatchSource && spec.Agent == solverAgentName && spec.generationVersion == solveWithParentGuideV1 {
+	if spec.Source == solveDispatchSource && spec.Agent == solverAgentName && solveTeachingVersionSupported(spec.generationVersion) {
 		execute = func(callCtx context.Context, callSpec SubAgentSpec) (SubAgentResult, error) {
 			result, err := o.executeFunc(callCtx, callSpec)
 			if err != nil {

@@ -103,19 +103,6 @@ func New() *Dispatcher {
 	}
 }
 
-// smallestAgentName returns the lexicographically smallest registered agent
-// name (or "" when none exist). Auto-selecting a default agent uses this so the
-// choice is deterministic instead of dependent on Go's random map iteration.
-func smallestAgentName(agents map[string]*AgentConfig) string {
-	best := ""
-	for n := range agents {
-		if best == "" || n < best {
-			best = n
-		}
-	}
-	return best
-}
-
 // Register 注册 Agent
 func (r *Dispatcher) Register(cfg AgentConfig) error {
 	return r.RegisterPersisted(cfg, nil)
@@ -152,11 +139,6 @@ func (r *Dispatcher) RegisterPersisted(cfg AgentConfig, persist func(*AgentConfi
 	candidate = cloneAgentConfig(candidate)
 	r.agents[cfg.Name] = &candidate
 
-	// 如果是第一个注册的 Agent，设为默认
-	if r.defaultAgent == "" {
-		r.defaultAgent = cfg.Name
-	}
-
 	logger.Info("Agent 已注册", "name", candidate.Name, "display_name", candidate.DisplayName)
 	return nil
 }
@@ -166,11 +148,8 @@ func (r *Dispatcher) Unregister(name string) error {
 	return r.UnregisterPersisted(name, nil)
 }
 
-// UnregisterPersisted removes an Agent only after persist succeeds. The
-// callback runs under the dispatcher write lock so readers cannot observe a
-// deletion before its durable counterpart is accepted. nextDefault is the
-// deterministic default that will be published after deletion; persist must
-// not call back into this Dispatcher.
+// UnregisterPersisted 仅在持久化成功后删除实例。回调持有写锁，不能调用 Dispatcher。
+// nextDefault 保留未受影响的显式默认；删除当前默认时为空。
 func (r *Dispatcher) UnregisterPersisted(
 	name string,
 	persist func(name, nextDefault string, wasDefault bool) error,
@@ -184,7 +163,7 @@ func (r *Dispatcher) UnregisterPersisted(
 	wasDefault := r.defaultAgent == name
 	nextDefault := r.defaultAgent
 	if wasDefault {
-		nextDefault = smallestAgentNameExcept(r.agents, name)
+		nextDefault = ""
 	}
 	if persist != nil {
 		if err := persist(name, nextDefault, wasDefault); err != nil {
@@ -203,25 +182,12 @@ func (r *Dispatcher) UnregisterPersisted(
 	}
 	r.rules = filtered
 
-	// 如果删除的是默认 Agent，重新选择一个确定的默认值
+	// 删除显式默认后恢复内置助理，不自动提升其他命名 Agent。
 	if wasDefault {
 		r.defaultAgent = nextDefault
 	}
 
 	return nil
-}
-
-func smallestAgentNameExcept(agents map[string]*AgentConfig, excluded string) string {
-	best := ""
-	for name := range agents {
-		if name == excluded {
-			continue
-		}
-		if best == "" || name < best {
-			best = name
-		}
-	}
-	return best
 }
 
 // SetDefault 设置默认 Agent（空字符串清除默认设置）
@@ -408,13 +374,12 @@ func (r *Dispatcher) LoadAll(agents []AgentConfig, defaultAgent string, rules []
 		r.agents[a.Name] = &a
 	}
 	r.rules = append([]Rule(nil), rules...)
+	// 空默认是有效持久状态；重载时不能沿用旧值或按名称自动认领。
+	r.defaultAgent = ""
 	if defaultAgent != "" {
 		if _, ok := r.agents[defaultAgent]; ok {
 			r.defaultAgent = defaultAgent
 		}
-	}
-	if r.defaultAgent == "" {
-		r.defaultAgent = smallestAgentName(r.agents)
 	}
 	logger.Info("Agent 路由已加载", "agents", len(r.agents), "len", len(r.rules), "default", r.defaultAgent)
 }

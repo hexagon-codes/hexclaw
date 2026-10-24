@@ -143,7 +143,7 @@ func TestBug20260703G1_SetDefaultPersistFailureReturns500(t *testing.T) {
 }
 
 // G2 + 孤儿规则：用真 SQLite 走完整链路。
-func TestBug20260703G2_UnregisterDefaultAgentPersistsNewDefaultAndCleansRules(t *testing.T) {
+func TestBug20260703G2_UnregisterDefaultAgentPersistsClearedDefaultAndCleansRules(t *testing.T) {
 	store, err := sqlitefixture.New(filepath.Join(t.TempDir(), "g2-default.db"))
 	if err != nil {
 		t.Fatalf("创建 SQLite 存储失败: %v", err)
@@ -159,7 +159,7 @@ func TestBug20260703G2_UnregisterDefaultAgentPersistsNewDefaultAndCleansRules(t 
 
 	dispatcher := agentrouter.New()
 	ctx := context.Background()
-	// 先注册 beta（成为默认），再注册 alpha；两层都落库。
+	// 注册两个实例，再显式选择 beta；两层都落库。
 	for _, name := range []string{"beta", "alpha"} {
 		cfg := agentrouter.AgentConfig{Name: name}
 		if err := dispatcher.Register(cfg); err != nil {
@@ -168,6 +168,9 @@ func TestBug20260703G2_UnregisterDefaultAgentPersistsNewDefaultAndCleansRules(t 
 		if err := agentStore.SaveAgent(ctx, &cfg); err != nil {
 			t.Fatalf("落库 %s 失败: %v", name, err)
 		}
+	}
+	if err := dispatcher.SetDefault("beta"); err != nil {
+		t.Fatalf("设置默认失败: %v", err)
 	}
 	if err := agentStore.SetDefault(ctx, "beta"); err != nil {
 		t.Fatalf("落库默认失败: %v", err)
@@ -190,16 +193,16 @@ func TestBug20260703G2_UnregisterDefaultAgentPersistsNewDefaultAndCleansRules(t 
 		t.Fatalf("注销期望 200，实际 %d: %s", w.Code, w.Body.String())
 	}
 
-	// G2：内存重选的新默认（alpha=smallest）必须显式落库，而非依赖 LoadAll 兜底巧合。
-	if got := dispatcher.DefaultAgent(); got != "alpha" {
-		t.Fatalf("内存默认应重选为 alpha，实际 %q", got)
+	// 删除显式默认后，两层都保持空默认，不提升其他实例。
+	if got := dispatcher.DefaultAgent(); got != "" {
+		t.Fatalf("内存默认应清空，实际 %q", got)
 	}
 	_, storedDefault, err := agentStore.LoadAgents(ctx)
 	if err != nil {
 		t.Fatalf("LoadAgents 失败: %v", err)
 	}
-	if storedDefault != "alpha" {
-		t.Fatalf("注销默认 Agent 后新默认未落库：期望 alpha，实际 %q", storedDefault)
+	if storedDefault != "" {
+		t.Fatalf("注销默认 Agent 后清空默认未落库，实际 %q", storedDefault)
 	}
 
 	// 孤儿规则：注销 Agent 后其持久化规则必须清理，否则重启还魂引用不存在的 Agent。
