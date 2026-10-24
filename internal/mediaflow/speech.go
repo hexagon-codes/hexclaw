@@ -22,8 +22,18 @@ type SpeechProvider struct {
 
 type namedSpeechProvider struct {
 	voice.TTSProvider
-	id string
+	id      string
+	allowed func() bool
 }
+
+// speechRouteUnavailableError 表示调用前的配置变化，不是供应商结果未知。
+type speechRouteUnavailableError struct{}
+
+func (speechRouteUnavailableError) Error() string {
+	return "original speech route is no longer available"
+}
+func (speechRouteUnavailableError) Unwrap() error           { return ErrUnavailable }
+func (speechRouteUnavailableError) DefinitiveFailure() bool { return true }
 
 type speechAttemptContextKey struct{}
 type SpeechAttempt struct {
@@ -45,6 +55,9 @@ type SpeechOutcome struct {
 func (p namedSpeechProvider) Synthesize(ctx context.Context, text string, opts voice.SynthesizeOptions) (*voice.SynthesizeResult, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	if p.allowed != nil && !p.allowed() {
+		return nil, speechRouteUnavailableError{}
 	}
 	result, err := p.TTSProvider.Synthesize(ctx, text, opts)
 	if state, ok := ctx.Value(speechAttemptContextKey{}).(*speechAttemptState); ok {
@@ -140,9 +153,12 @@ func speechProviders(cfg *config.Config) []SpeechProvider {
 	return providers
 }
 
-func frozenSpeech(providers []SpeechProvider, credentials map[string]config.LLMProviderConfig, defaultVoice string) (voice.TTSProvider, error) {
+func frozenSpeech(providers []SpeechProvider, credentials map[string]config.LLMProviderConfig, defaultVoice string, allowed func(SpeechProvider) bool) (voice.TTSProvider, error) {
 	var chain []voice.TTSProvider
 	for _, route := range providers {
+		if allowed != nil && !allowed(route) {
+			continue
+		}
 		var provider voice.TTSProvider
 		if route.Adapter == "edge-tts" {
 			var opts []voice.EdgeTTSOption
@@ -172,9 +188,16 @@ func frozenSpeech(providers []SpeechProvider, credentials map[string]config.LLMP
 				return nil, fmt.Errorf("original speech protocol is unavailable")
 			}
 		}
-		chain = append(chain, namedSpeechProvider{TTSProvider: provider, id: route.ID})
+		wrapped := namedSpeechProvider{TTSProvider: provider, id: route.ID}
+		if allowed != nil {
+			wrapped.allowed = func() bool { return allowed(route) }
+		}
+		chain = append(chain, wrapped)
 	}
 	if len(chain) == 0 {
+		if allowed != nil {
+			return nil, speechRouteUnavailableError{}
+		}
 		return nil, fmt.Errorf("speech is not configured")
 	}
 	if len(chain) == 1 {
@@ -200,7 +223,7 @@ func ConfiguredVoice(cfg *config.Config) *voice.Service {
 	for key, pc := range cfg.LLM.Providers {
 		credentials[config.EffectiveProviderInstanceID(key, pc)] = pc
 	}
-	tts, _ := frozenSpeech(speechProviders(cfg), credentials, cfg.Voice.TTS.Voice)
+	tts, _ := frozenSpeech(speechProviders(cfg), credentials, cfg.Voice.TTS.Voice, nil)
 	return voice.NewService(stt, tts)
 }
 
@@ -217,7 +240,7 @@ func (s *Service) synthesize(ctx context.Context, op *Operation, snapshot *Snaps
 		opts.Speed = op.Route.SpeechSpeed
 	}
 	if len(op.Route.SpeechProviders) > 0 {
-		provider, err := frozenSpeech(op.Route.SpeechProviders, snapshot.providers, op.Route.SpeechVoice)
+		provider, err := frozenSpeech(op.Route.SpeechProviders, snapshot.providers, op.Route.SpeechVoice, s.speechProviderAllowed)
 		if err != nil {
 			return nil, err
 		}
@@ -225,10 +248,29 @@ func (s *Service) synthesize(ctx context.Context, op *Operation, snapshot *Snaps
 		return &SpeechOutcome{Result: result, ProviderID: state.winner, Attempts: append([]SpeechAttempt(nil), state.attempts...)}, err
 	}
 	if snapshot.Voice == nil || snapshot.Revision != op.Route.Revision {
-		return nil, fmt.Errorf("original speech service is unavailable")
+		return nil, speechRouteUnavailableError{}
 	}
 	result, err := snapshot.Voice.Synthesize(ctx, op.Request.Speech.Text, opts)
 	return &SpeechOutcome{Result: result, ProviderID: snapshot.Voice.TTSName()}, err
+}
+
+// speechProviderAllowed 核对每次新调用的启用选择，原端点及参数仍使用冻结路由。
+func (s *Service) speechProviderAllowed(provider SpeechProvider) bool {
+	snapshot := s.router.Current()
+	if snapshot == nil || snapshot.Voice == nil {
+		return false
+	}
+	for _, route := range snapshot.Routes {
+		if route.Protocol != "tts" || route.Kind != "audio" || route.Action != "synthesize" {
+			continue
+		}
+		for _, current := range route.SpeechProviders {
+			if current.ID == provider.ID && current.Adapter == provider.Adapter {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func speechResultJSON(outcome *SpeechOutcome) json.RawMessage {

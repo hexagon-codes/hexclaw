@@ -69,6 +69,11 @@ type DeliveryRepository interface {
 	InterruptDeliveries(context.Context) error
 }
 
+// DeliveryPageRepository 允许推进器继续读取失败项之后的投递，旧仓储仍可沿原接口工作。
+type DeliveryPageRepository interface {
+	PendingDeliveriesAfter(context.Context, string, int) ([]*Delivery, error)
+}
+
 type DeliveryResumeRepository interface {
 	DeliveriesForOperation(context.Context, string, string) ([]*Delivery, error)
 }
@@ -114,15 +119,29 @@ func (s *Service) Deliver(ctx context.Context, owner, id string) error {
 func (s *Service) runDeliveries() {
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
+	afterID := ""
 	for {
 		repo, ok := s.repo.(DeliveryRepository)
 		if ok {
-			if records, err := repo.PendingDeliveries(s.ctx, 16); err == nil {
+			var records []*Delivery
+			var err error
+			pages, paged := repo.(DeliveryPageRepository)
+			if paged {
+				records, err = pages.PendingDeliveriesAfter(s.ctx, afterID, 16)
+			} else {
+				records, err = repo.PendingDeliveries(s.ctx, 16)
+			}
+			if err == nil {
 				for _, d := range records {
 					if s.ctx.Err() != nil {
 						return
 					}
+					// 单项失败不改变原回执，游标仍推进以便后续独立投递取得机会。
+					afterID = d.ID
 					_ = s.advanceDelivery(s.ctx, repo, d)
+				}
+				if !paged || len(records) < 16 {
+					afterID = ""
 				}
 			}
 		}

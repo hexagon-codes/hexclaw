@@ -19,13 +19,14 @@ import (
 
 	imagegen "github.com/hexagon-codes/ai-core/media/image"
 	"github.com/hexagon-codes/ai-core/media/voicechat"
+	"github.com/hexagon-codes/toolkit/blobstore"
+
 	"github.com/hexagon-codes/hexclaw/config"
 	"github.com/hexagon-codes/hexclaw/engine"
 	"github.com/hexagon-codes/hexclaw/internal/mediaflow"
 	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/llmrouter"
 	"github.com/hexagon-codes/hexclaw/skill"
-	"github.com/hexagon-codes/toolkit/blobstore"
 )
 
 func TestMediaHTTPImageReturnsDurableResultAndPreservesDirectContract(t *testing.T) {
@@ -274,5 +275,15 @@ func TestMediaHTTPImageReturnsDurableResultAndPreservesDirectContract(t *testing
 	_ = response.Body.Close()
 	if err != nil || response.StatusCode != http.StatusOK || !bytes.Contains(stream, []byte(`"attachments":[`)) || calls.Load() != beforeReplay {
 		t.Fatalf("SSE replay incomplete: %v status=%d %s", err, response.StatusCode, stream)
+	}
+	status, _, body = call("POST", "/api/v1/chat", `{"message":"Draw a different bird","provider":"gateway","model":"drawing-model","request_id":"chat-media-http","session_id":"`+chat.SessionID+`","metadata":{"image_generation":"true"}}`)
+	if status != http.StatusConflict || calls.Load() != beforeReplay {
+		t.Fatalf("changed intent replayed or generated: status=%d calls=%d", status, calls.Load())
+	}
+	cfg.LLM.Providers = map[string]config.LLMProviderConfig{}
+	router.Reload(cfg, nil)
+	status, _, body = call("POST", "/api/v1/chat", `{"message":"Draw a square","provider":"gateway","model":"drawing-model","request_id":"chat-media-http","session_id":"`+chat.SessionID+`","metadata":{"image_generation":"true"}}`)
+	if status != http.StatusOK || calls.Load() != beforeReplay || !bytes.Contains(body, []byte(chat.MessageContent.Attachments[0].AssetID)) {
+		t.Fatalf("disabled generation broke a durable reply: status=%d calls=%d", status, calls.Load())
 	}
 }

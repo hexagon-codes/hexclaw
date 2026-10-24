@@ -2,15 +2,39 @@ package mediaflow_test
 
 import (
 	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
 	"time"
 
 	"github.com/hexagon-codes/ai-core/media/voice"
 	"github.com/hexagon-codes/ai-core/media/voicechat"
+
 	"github.com/hexagon-codes/hexclaw/config"
 	"github.com/hexagon-codes/hexclaw/internal/mediaflow"
 )
+
+func TestDisabledNativeMediaNameRemainsAnExplicitConstraint(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("disabled named model must not switch to another configured model")
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer upstream.Close()
+	cfg := mediaConfig(upstream.URL)
+	enabled := false
+	cfg.LLM.Providers["native-account"] = config.LLMProviderConfig{Enabled: &enabled, APIKey: "fixture-key", Compatible: "openai", BaseURL: "https://open.bigmodel.cn/api/paas/v4", ModelSpecsMode: config.LLMModelSpecsModeExplicit, ModelSpecs: []config.LLMProviderModelSpec{{ID: "glm-4", Capabilities: []string{config.LLMModelCapabilityText}}}}
+	svc, router, _, _ := newMedia(t, cfg)
+	req := request("disabled-native")
+	req.Selection = router.UserSelection("请使用 CogView-4 生成图片", "image")
+	if req.Selection.Mode != "pinned" || len(req.Selection.Models) != 1 || req.Selection.Models[0] != "cogview-4" {
+		t.Fatalf("disabled catalog lost user selection: %+v", req.Selection)
+	}
+	if _, err := svc.Begin(t.Context(), req); !errors.Is(err, mediaflow.ErrUnavailable) {
+		t.Fatalf("disabled selection was replaced: %v", err)
+	}
+}
 
 func TestAudioOnlyCapabilityPersistsPlayableSpeech(t *testing.T) {
 	data, err := os.ReadFile("testdata/short-audio.wav")
@@ -45,7 +69,7 @@ func TestAudioOnlyCapabilityPersistsPlayableSpeech(t *testing.T) {
 
 func TestNativeMediaDirectoryKeepsExistingDefaultModels(t *testing.T) {
 	cfg := config.DefaultConfig()
-	cfg.LLM.Providers = map[string]config.LLMProviderConfig{"native-account": {APIKey: "fixture-key", Compatible: "openai", BaseURL: "https://open.bigmodel.cn/api/paas/v4", ModelSpecsMode: config.LLMModelSpecsModeExplicit, ModelSpecs: []config.LLMProviderModelSpec{{ID: "glm-4", Capabilities: []string{config.LLMModelCapabilityText}}}}}
+	cfg.LLM.Providers = map[string]config.LLMProviderConfig{"native-account": {APIKey: "fixture-key", Compatible: "openai", BaseURL: "https://open.bigmodel.cn/api/paas/v4", ModelSpecsMode: config.LLMModelSpecsModeLegacy, Model: "glm-4"}}
 	router := mediaflow.NewRouter()
 	router.Reload(cfg, nil)
 	imageRoute, err := router.Resolve("image", "generate", "native-account", "", "")
@@ -74,6 +98,15 @@ func TestNativeMediaDirectoryKeepsExistingDefaultModels(t *testing.T) {
 			configuredAudio := knownChatModels[len(knownChatModels)-1]
 			if tc.explicitAudio {
 				specs = append(specs, config.LLMProviderModelSpec{ID: configuredAudio, Capabilities: []string{config.LLMModelCapabilityAudio}})
+			}
+			// 完整启用目录保留原生别名与默认；自定义端点仍只使用明确声明。
+			if tc.native {
+				for _, model := range knownChatModels {
+					if tc.explicitAudio && model == configuredAudio {
+						continue
+					}
+					specs = append(specs, config.LLMProviderModelSpec{ID: model, Capabilities: []string{config.LLMModelCapabilityAudio}})
+				}
 			}
 			cfg.LLM.Providers = map[string]config.LLMProviderConfig{"audio-account": {APIKey: "fixture-key", Compatible: "openai", BaseURL: tc.endpoint, ModelSpecsMode: config.LLMModelSpecsModeExplicit, ModelSpecs: specs}}
 			router := mediaflow.NewRouter()

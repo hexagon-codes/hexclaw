@@ -12,12 +12,13 @@ import (
 	"time"
 
 	mockllm "github.com/hexagon-codes/hexagon/testing/mock"
+	"nhooyr.io/websocket"
+	"nhooyr.io/websocket/wsjson"
+
 	webadapter "github.com/hexagon-codes/hexclaw/adapter/web"
 	"github.com/hexagon-codes/hexclaw/internal/mediaflow"
 	"github.com/hexagon-codes/hexclaw/skill"
 	"github.com/hexagon-codes/hexclaw/streamstate"
-	"nhooyr.io/websocket"
-	"nhooyr.io/websocket/wsjson"
 )
 
 func TestMediaWebSocketExplicitCancelKeepsLateAssetWithoutCompletingTurn(t *testing.T) {

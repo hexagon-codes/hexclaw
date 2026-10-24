@@ -19,6 +19,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hexagon-codes/toolkit/blobstore"
+	"nhooyr.io/websocket"
+	"nhooyr.io/websocket/wsjson"
+
 	webadapter "github.com/hexagon-codes/hexclaw/adapter/web"
 	"github.com/hexagon-codes/hexclaw/config"
 	"github.com/hexagon-codes/hexclaw/engine"
@@ -29,9 +33,6 @@ import (
 	"github.com/hexagon-codes/hexclaw/storage"
 	sqlitestore "github.com/hexagon-codes/hexclaw/storage/sqlite"
 	"github.com/hexagon-codes/hexclaw/streamstate"
-	"github.com/hexagon-codes/toolkit/blobstore"
-	"nhooyr.io/websocket"
-	"nhooyr.io/websocket/wsjson"
 )
 
 const lifecycleToken = "isolated-media-lifecycle-fixture"

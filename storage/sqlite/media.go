@@ -18,6 +18,24 @@ import (
 // MediaRepository 复用应用数据库，媒体操作不会伪造会话记录。
 type MediaRepository struct{ db *sql.DB }
 
+// SuccessfulModelKinds 为配置目录返回精确实例上已验证的媒体种类，不返回内容或凭据。
+func (r *MediaRepository) SuccessfulModelKinds(ctx context.Context, providerID string) (map[string][]string, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT DISTINCT json_extract(data,'$.route.model'),json_extract(data,'$.request.kind') FROM media_operations WHERE COALESCE(NULLIF(json_extract(data,'$.actual_provider_instance_id'),''),json_extract(data,'$.route.provider_instance_id'))=? AND json_extract(data,'$.generation_state')='succeeded' AND json_extract(data,'$.save_state')='ready' AND COALESCE(json_extract(data,'$.route.model'),'')<>''`, providerID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	result := make(map[string][]string)
+	for rows.Next() {
+		var model, kind string
+		if err := rows.Scan(&model, &kind); err != nil {
+			return nil, err
+		}
+		result[model] = append(result[model], kind)
+	}
+	return result, rows.Err()
+}
+
 // commitMediaReply 与原消息写入共用事务，完整资产关联和投递意图一起提交。
 func commitMediaReply(ctx context.Context, tx *sql.Tx, msg *storage.MessageRecord) (bool, error) {
 	c, ok := mediaflow.ReplyCompletionFromContext(ctx)
@@ -204,10 +222,15 @@ func (r *MediaRepository) SaveDelivery(ctx context.Context, d *mediaflow.Deliver
 }
 
 func (r *MediaRepository) PendingDeliveries(ctx context.Context, limit int) ([]*mediaflow.Delivery, error) {
+	return r.PendingDeliveriesAfter(ctx, "", limit)
+}
+
+// PendingDeliveriesAfter 按稳定身份分页，回执查询失败不会永久遮住后续投递。
+func (r *MediaRepository) PendingDeliveriesAfter(ctx context.Context, afterID string, limit int) ([]*mediaflow.Delivery, error) {
 	if limit <= 0 {
 		limit = -1
 	}
-	rows, err := r.db.QueryContext(ctx, `SELECT id,owner,message_id,state,revision,data FROM media_deliveries WHERE state NOT IN ('delivered','cancelled') AND (state IN ('pending','accepted') OR EXISTS(SELECT 1 FROM json_each(media_deliveries.data,'$.parts') p WHERE json_extract(p.value,'$.state') IN ('accepted','unknown') AND COALESCE(json_extract(p.value,'$.receipt_ref'),'')<>'')) ORDER BY updated_at LIMIT ?`, limit)
+	rows, err := r.db.QueryContext(ctx, `SELECT id,owner,message_id,state,revision,data FROM media_deliveries WHERE id>? AND state NOT IN ('delivered','cancelled') AND (state IN ('pending','accepted') OR EXISTS(SELECT 1 FROM json_each(media_deliveries.data,'$.parts') p WHERE json_extract(p.value,'$.state') IN ('accepted','unknown') AND COALESCE(json_extract(p.value,'$.receipt_ref'),'')<>'')) ORDER BY id LIMIT ?`, afterID, limit)
 	if err != nil {
 		return nil, err
 	}

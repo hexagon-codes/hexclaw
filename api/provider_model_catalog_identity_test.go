@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -25,7 +26,7 @@ func TestFetchProviderModels_UsesPersistedProviderIdentityAndCredential(t *testi
 			t.Fatalf("Authorization=%q, want persisted server credential", got)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"data":[{"id":"server-model"}]}`)
+		_, _ = io.WriteString(w, `{"data":[{"id":"server-model","capabilities":["image_generation"]}]}`)
 	}))
 	defer upstream.Close()
 
@@ -55,6 +56,12 @@ func TestFetchProviderModels_UsesPersistedProviderIdentityAndCredential(t *testi
 	}
 	if body := rec.Body.String(); !strings.Contains(body, `"id":"server-model"`) {
 		t.Fatalf("body=%s, want persisted provider catalog", body)
+	}
+	var catalog struct {
+		Models []providerModelInfo `json:"models"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &catalog); err != nil || len(catalog.Models) != 1 || catalog.Models[0].Capabilities == nil || len(*catalog.Models[0].Capabilities) != 1 || (*catalog.Models[0].Capabilities)[0] != "image_generation" {
+		t.Fatalf("declared upstream media capability was dropped: %+v, error=%v", catalog, err)
 	}
 }
 

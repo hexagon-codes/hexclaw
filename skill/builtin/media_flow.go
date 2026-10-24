@@ -11,6 +11,7 @@ import (
 	videogen "github.com/hexagon-codes/ai-core/media/video"
 	"github.com/hexagon-codes/ai-core/media/voice"
 	"github.com/hexagon-codes/ai-core/media/voicechat"
+
 	"github.com/hexagon-codes/hexclaw/internal/mediaflow"
 	"github.com/hexagon-codes/hexclaw/skill"
 )
@@ -22,6 +23,7 @@ func NewMediaFlowGenerateSkill(flow *mediaflow.Service) *MediaGenerateSkill {
 func (s *MediaGenerateSkill) mediaFlowDefinition() llm.ToolDefinition {
 	var kinds, actions []any
 	var routes []string
+	var explicitRoutes []string
 	seenKinds, seenActions := map[string]bool{}, map[string]bool{}
 	if snapshot := s.flow.Router().Current(); snapshot != nil {
 		for _, route := range snapshot.Routes {
@@ -39,9 +41,25 @@ func (s *MediaGenerateSkill) mediaFlowDefinition() llm.ToolDefinition {
 				seenActions[route.Action] = true
 			}
 		}
+		for _, route := range snapshot.ExplicitImageRoutes {
+			explicitRoutes = append(explicitRoutes, fmt.Sprintf("provider=%q, model=%q", route.ProviderKey, route.Model))
+		}
+		if len(explicitRoutes) > 0 {
+			if !seenKinds["image"] {
+				kinds = append(kinds, "image")
+			}
+			if !seenActions["generate"] {
+				actions = append(actions, "generate")
+			}
+		}
 	}
 	actions = append(actions, "read", "resend", "resume", "cancel")
-	return llm.NewToolDefinition("media_generate", "Use configured media models to generate actual images, videos or speech. Read, resume or resend a previous operation by its operation_id; resending does not generate again. Returned assets are durable files, not a prompt description. Available routes: "+strings.Join(routes, "; "), &llm.Schema{Type: "object", Properties: map[string]*llm.Schema{
+	description := "Use configured media models to generate actual images, videos or speech. Read, resume or resend a previous operation by its operation_id; resending does not generate again. Returned assets are durable files, not a prompt description. Declared media routes: " + strings.Join(routes, "; ")
+	description += ". For generation or resend in the current conversation, the original turn commits and delivers returned assets after the final assistant response. Missing delivery receipts during tool execution are not evidence of delivery failure. Let the original turn attach the assets; do not claim a platform receipt before finalization."
+	if len(explicitRoutes) > 0 {
+		description += ". Configured image candidates with undeclared capabilities, for explicit user requests only: " + strings.Join(explicitRoutes, "; ") + ". When the user explicitly requests one of these models, call this tool with that exact model and provider to obtain the actual result. Undeclared capability does not mean unsupported. Do not replace an explicitly requested model or claim it is unavailable without executing it. Do not use these candidates for automatic model selection."
+	}
+	return llm.NewToolDefinition("media_generate", description, &llm.Schema{Type: "object", Properties: map[string]*llm.Schema{
 		"kind": {Type: "string", Enum: kinds}, "action": {Type: "string", Enum: actions}, "prompt": {Type: "string", Description: "Content to generate or speak"},
 		"provider": {Type: "string", Description: "Exact configured provider instance or key"}, "model": {Type: "string"}, "operation_id": {Type: "string", Description: "Existing owned operation for read/resend/resume/cancel"},
 		"size": {Type: "string"}, "n": {Type: "integer"}, "style": {Type: "string"}, "quality": {Type: "string"}, "with_audio": {Type: "boolean"}, "duration": {Type: "integer"}, "voice": {Type: "string"}, "format": {Type: "string"},

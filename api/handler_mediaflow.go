@@ -14,6 +14,7 @@ import (
 	videogen "github.com/hexagon-codes/ai-core/media/video"
 	"github.com/hexagon-codes/ai-core/media/voice"
 	"github.com/hexagon-codes/ai-core/media/voicechat"
+
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/engine"
 	"github.com/hexagon-codes/hexclaw/internal/mediaflow"
@@ -66,6 +67,7 @@ func (s *Server) activeVoice() *voice.Service {
 
 func (s *Server) mediaStatus(w http.ResponseWriter, kind, action string) {
 	providers, models := []string{}, []string{}
+	explicitCandidates := []map[string]string{}
 	seenProviders, seenModels := map[string]bool{}, map[string]bool{}
 	if snapshot := s.mediaFlow.Router().Current(); snapshot != nil {
 		for _, route := range snapshot.Routes {
@@ -81,10 +83,19 @@ func (s *Server) mediaStatus(w http.ResponseWriter, kind, action string) {
 				seenModels[route.Model] = true
 			}
 		}
+		if kind == "image" && action == "generate" {
+			for _, route := range snapshot.ExplicitImageRoutes {
+				explicitCandidates = append(explicitCandidates, map[string]string{"provider_instance_id": route.ProviderID, "model": route.Model})
+			}
+		}
 	}
 	sort.Strings(providers)
 	sort.Strings(models)
-	writeJSON(w, http.StatusOK, map[string]any{"enabled": len(providers) > 0, "providers": providers, "models": models})
+	response := map[string]any{"enabled": len(providers)+len(explicitCandidates) > 0, "providers": providers, "models": models}
+	if kind == "image" {
+		response["explicit_candidates"] = explicitCandidates
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 func mediaOrigin(r *http.Request, kind, action, key string) mediaflow.Origin {
@@ -284,5 +295,5 @@ func (s *Server) handleMediaOperation(w http.ResponseWriter, r *http.Request) {
 		writeMediaError(w, op, err)
 		return
 	}
-	writeJSON(w, 200, map[string]any{"operation_id": op.ID, "kind": op.Route.Kind, "action": op.Route.Action, "provider_instance_id": op.Route.ProviderID, "actual_provider_instance_id": op.ActualProviderID, "model": op.Route.Model, "generation_state": op.GenerationState, "save_state": op.SaveState, "assets": op.Assets, "deliveries": deliveries, "cancel_requested": op.CancelRequested, "error_code": op.ErrorCode, "error": op.Error, "revision": op.Revision, "created_at": op.CreatedAt, "updated_at": op.UpdatedAt, "timings_ms": op.Timings})
+	writeJSON(w, 200, map[string]any{"operation_id": op.ID, "kind": op.Route.Kind, "action": op.Route.Action, "provider_instance_id": op.Route.ProviderID, "actual_provider_instance_id": op.ActualProviderID, "model": op.Route.Model, "generation_state": op.GenerationState, "save_state": op.SaveState, "assets": op.Assets, "deliveries": deliveries, "cancel_requested": op.CancelRequested, "error_code": op.ErrorCode, "error": op.Error, "revision": op.Revision, "created_at": op.CreatedAt, "updated_at": op.UpdatedAt, "timings_ms": op.Timings, "attempts": op.Attempts, "selection": op.Request.Selection})
 }

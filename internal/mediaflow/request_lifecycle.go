@@ -6,8 +6,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hexagon-codes/hexclaw/internal/requestcancel"
 	"github.com/hexagon-codes/toolkit/util/logger"
+
+	"github.com/hexagon-codes/hexclaw/internal/requestcancel"
 )
 
 type requestLifetimeKey struct{}
