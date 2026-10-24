@@ -280,6 +280,7 @@ func photoResultDTO(res usecase.PhotoGradeResult) map[string]any {
 		if d.ParentGuide != nil {
 			guide := *d.ParentGuide
 			guide.SkillContextReceipts = nil
+			guide.ReportContent = nil
 			d.ParentGuide = &guide
 		}
 		switch {

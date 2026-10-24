@@ -23,7 +23,7 @@ func (a *SolveAdapter) RestoreTeachingReportGuide(solution, sourceDigest string,
 		}
 		sum := sha256.Sum256([]byte(generated.Output))
 		digest := hex.EncodeToString(sum[:])
-		if (sourceDigest != "" && sourceDigest != digest) || (sourceDigest == "" && !strings.Contains(solution, generated.Output)) {
+		if (sourceDigest != "" && sourceDigest != digest) || (sourceDigest == "" && !strings.Contains(solution, normalizeSolveMarkdown(generated.Output))) {
 			continue
 		}
 		for _, auditReceipt := range receipts {
