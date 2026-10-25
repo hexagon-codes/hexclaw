@@ -25,6 +25,9 @@ func (m *Marketplace) clearUninstalledLocked(name string) error {
 
 // SeedBundlesFromFS 通过原出厂链首装完整包；只补齐与官方正文逐字相同的存量，不覆盖用户内容。
 func (m *Marketplace) SeedBundlesFromFS(source fs.FS, subdir string) (int, error) {
+	if err := m.recoverBundleInstalls(); err != nil {
+		return 0, err
+	}
 	entries, err := fs.ReadDir(source, subdir)
 	if os.IsNotExist(err) {
 		return 0, nil
@@ -111,27 +114,44 @@ func (m *Marketplace) SeedBundlesFromFS(source fs.FS, subdir string) (int, error
 		if custom {
 			continue
 		}
-		if err := os.MkdirAll(destination, 0755); err != nil {
+		if _, err := ReadBundleManifest(destination); err == nil {
+			continue
+		}
+		stage, err := os.MkdirTemp("", "hexclaw-bundled-source-*")
+		if err != nil {
 			return count, err
 		}
-		wrote := false
-		for relative, data := range files {
-			target := filepath.Join(destination, filepath.FromSlash(relative))
-			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
-				return count, err
+		seedErr := func() error {
+			defer os.RemoveAll(stage)
+			for relative, data := range files {
+				target := filepath.Join(stage, filepath.FromSlash(relative))
+				if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+					return err
+				}
+				if err := os.WriteFile(target, data, 0644); err != nil {
+					return err
+				}
 			}
-			published, err := publishSeedNoReplace(target, data)
-			if err != nil {
-				return count, err
+			if _, err := m.validateBundleStage(stage); err != nil {
+				return err
 			}
-			wrote = wrote || published
+			// 首装补齐仍使用不覆盖发布，保留目录中未列入官方清单的用户文件。
+			for relative, data := range files {
+				target := filepath.Join(destination, filepath.FromSlash(relative))
+				if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+					return err
+				}
+				if _, err := publishSeedNoReplace(target, data); err != nil {
+					return err
+				}
+			}
+			_, err := ReadBundleManifest(destination)
+			return err
+		}()
+		if seedErr != nil {
+			return count, seedErr
 		}
-		if _, err := ReadBundleManifest(destination); err != nil {
-			return count, err
-		}
-		if wrote {
-			count++
-		}
+		count++
 	}
 	return count, nil
 }

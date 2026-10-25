@@ -29,6 +29,33 @@ type BundleManifest struct {
 	Files           []BundleFile `json:"files"`
 }
 
+// BundleValidator 由宿主核对已暂存包的实际消费契约；其他类型的包应直接返回 nil。
+// root 是只读候选目录，校验失败不会替换已安装版本。
+type BundleValidator func(root string, manifest BundleManifest) error
+
+// SetBundleValidator 由宿主启动时注入资源兼容检查，不改变普通 Markdown 技能的合同。
+func (m *Marketplace) SetBundleValidator(validator BundleValidator) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.bundleValidator = validator
+}
+
+func (m *Marketplace) validateBundleStage(root string) (BundleManifest, error) {
+	manifest, err := ReadBundleManifest(root)
+	if err != nil {
+		return manifest, err
+	}
+	m.mu.RLock()
+	validator := m.bundleValidator
+	m.mu.RUnlock()
+	if validator != nil {
+		if err := validator(root, manifest); err != nil {
+			return manifest, fmt.Errorf("skill bundle is incompatible with this host: %w", err)
+		}
+	}
+	return manifest, nil
+}
+
 // SemanticDigest 使用既有包合同的四个根字段和确定性 JSON，排除清单自身的传输空白。
 func (m BundleManifest) SemanticDigest() (string, error) {
 	files := make([]map[string]any, 0, len(m.Files))
@@ -145,7 +172,12 @@ func (m *Marketplace) installBundle(source string) (*MarkdownSkill, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer os.RemoveAll(stage)
+	defer func() {
+		// 发布记录尚未收尾时保留候选，恢复过程仍需据此区分未提交与已提交。
+		if _, err := os.Lstat(stage + ".pending"); os.IsNotExist(err) {
+			_ = os.RemoveAll(stage)
+		}
+	}()
 	for _, entry := range append(append([]BundleFile(nil), manifest.Files...), BundleFile{Path: "bundle.json"}) {
 		file, err := bundlePath(source, entry.Path)
 		if err != nil {
@@ -163,39 +195,39 @@ func (m *Marketplace) installBundle(source string) (*MarkdownSkill, error) {
 			return nil, err
 		}
 	}
-	if _, err := ReadBundleManifest(stage); err != nil {
+	manifest, err = m.validateBundleStage(stage)
+	if err != nil {
 		return nil, err
 	}
 	destination := filepath.Join(m.skillDir, sk.Meta.Name)
 	backup := stage + ".previous"
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if err := m.clearUninstalledLocked(sk.Name()); err != nil {
+	if err := m.recoverBundleInstallsLocked(); err != nil {
+		return nil, err
+	}
+	if err := writeBundleInstallRecord(stage, manifest); err != nil {
 		return nil, err
 	}
 	_, existingErr := os.Lstat(destination)
 	if existingErr == nil {
 		if err := os.Rename(destination, backup); err != nil {
+			_ = os.Remove(stage + ".pending")
 			return nil, err
 		}
 	} else if !os.IsNotExist(existingErr) {
+		_ = os.Remove(stage + ".pending")
 		return nil, existingErr
 	}
 	if err := os.Rename(stage, destination); err != nil {
-		if existingErr == nil {
-			_ = os.Rename(backup, destination)
+		if recoveryErr := m.recoverBundleInstallLocked(stage + ".pending"); recoveryErr != nil {
+			return nil, fmt.Errorf("publish skill bundle: %w; recovery failed: %v", err, recoveryErr)
 		}
 		return nil, err
 	}
-	// 旧单文件条目会与目录条目同名，安装完成后只保留包的权威入口。
-	if err := os.Remove(filepath.Join(m.skillDir, sk.Meta.Name+".md")); err != nil && !os.IsNotExist(err) {
-		_ = os.RemoveAll(destination)
-		if existingErr == nil {
-			_ = os.Rename(backup, destination)
-		}
+	if err := m.recoverBundleInstallLocked(stage + ".pending"); err != nil {
 		return nil, err
 	}
-	_ = os.RemoveAll(backup)
 	sk, err = LoadSkillFromFile(filepath.Join(destination, "SKILL.md"))
 	if err != nil {
 		return nil, err

@@ -42,9 +42,10 @@ const (
 // 管理本地已安装的技能，支持从远程安装新技能。
 // 技能安装到 ~/.hexclaw/skills/ 目录。
 type Marketplace struct {
-	mu       sync.RWMutex
-	skillDir string                    // 技能安装目录
-	skills   map[string]*MarkdownSkill // name -> skill
+	mu              sync.RWMutex
+	skillDir        string                    // 技能安装目录
+	skills          map[string]*MarkdownSkill // name -> skill
+	bundleValidator BundleValidator
 }
 
 // NewMarketplace 创建技能市场管理器
@@ -76,6 +77,9 @@ func (m *Marketplace) Init() error {
 	// 确保目录存在
 	if err := fileutil.MkdirAll(m.skillDir); err != nil {
 		return fmt.Errorf("创建技能目录失败: %w", err)
+	}
+	if err := m.recoverBundleInstalls(); err != nil {
+		return err
 	}
 
 	skills, err := LoadSkillsFromDir(m.skillDir)
@@ -116,6 +120,9 @@ func (m *Marketplace) SeedFromFS(fsys fs.FS, subdir string) (int, error) {
 	if err := fileutil.MkdirAll(m.skillDir); err != nil {
 		return 0, fmt.Errorf("创建技能目录失败: %w", err)
 	}
+	if err := m.recoverBundleInstalls(); err != nil {
+		return 0, err
+	}
 	if err := cleanupStaleSeedTemps(m.skillDir, time.Now()); err != nil {
 		return 0, fmt.Errorf("清理 seed 临时文件失败: %w", err)
 	}
@@ -144,6 +151,12 @@ func (m *Marketplace) SeedFromFS(fsys fs.FS, subdir string) (int, error) {
 		}
 		if disabled[uninstalledSkillKey(name)] {
 			continue
+		}
+		// 目录包持有同名正文的权威版本，首启单文件 seed 不再生成另一份旧入口。
+		if _, err := os.Stat(filepath.Join(m.skillDir, name, "bundle.json")); err == nil {
+			continue
+		} else if !os.IsNotExist(err) {
+			return seeded, err
 		}
 		dest := filepath.Join(m.skillDir, e.Name())
 		published, recordHash, werr := publishSeedVersionAware(dest, data, manifest[e.Name()])

@@ -574,6 +574,7 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 	mdCount := 0
 	if cfg.Skills.Enabled {
 		mp = marketplace.NewMarketplace(cfg.Skills.Dir)
+		mp.SetBundleValidator(validateReportSkillBundle)
 		// 场景包出厂 seed（batteries-included·零下载）：K12 pack go:embed 的 skill 首启幂等注入
 		// ~/.hexclaw/skills/（已存在不覆盖），须在 Init 前调用，本次启动即被扫描注册。
 		if n, serr := mp.SeedFromFS(k12.BundledSkillsFS(), "skills"); serr != nil {
