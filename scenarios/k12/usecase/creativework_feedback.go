@@ -441,7 +441,7 @@ func (d Deps) GenerateWorkFeedbackCommand(
 		)
 		return CreativeWorkView{}, fmt.Errorf("%w: 作品点评生成为空", ErrSolveFailed)
 	}
-	if reason := workFeedbackInvariantViolation(feedback); reason != "" {
+	if reason := workFeedbackInvariantViolation(feedback, req.ContentMarkdown); reason != "" {
 		if invocation != nil && replay == nil {
 			_ = d.Records.FailWorkFeedbackInvocation(
 				context.WithoutCancel(ctx), agentName, invocation.InvocationID,
@@ -738,6 +738,9 @@ var scorePattern = regexp.MustCompile(`[0-9０-９]+(\.[0-9]+)?\s*分`)
 // scoreOutOfPattern 命中“85/100”类比值打分。
 var scoreOutOfPattern = regexp.MustCompile(`[0-9]+\s*/\s*(10|100)\b`)
 
+var workFeedbackSourceQuotePattern = regexp.MustCompile(`“[^”\n]+”|「[^」\n]+」|‘[^’\n]+’|"[^"\n]+"`)
+var workFeedbackScoreClaimPattern = regexp.MustCompile(`(?m)(?:^|[\n。！？；])\s*(?:\*\*)?得分(?:\*\*)?\s*(?:[:：]|为|是|很|较|偏|高|低|优秀|良好)|(?:作文|作品|画作|绘画|文章|全文|整体|本篇|本幅|这幅画)(?:的)?得分`)
+
 // 评分与替换原画的关键词边界；参考稿不作为违规判据。
 var (
 	scoreWords  = []string{"打分", "评分", "得分", "满分", "总分", "计分", "评级", "评等", "排名", "名次"}
@@ -753,8 +756,29 @@ func WorkFeedbackRedlineViolation(feedback string) string {
 }
 
 // workFeedbackInvariantViolation 检查延期点评、评分与替换原画的边界。
-// 返回非空原因即违规。关键词/模式为确定性契约（契约测试钉死），不依赖模型自律。
-func workFeedbackInvariantViolation(feedback string) string {
+// 原稿的逐字引用和明确否定声明不是本次评价，评分检查只消费其余反馈内容。
+func workFeedbackInvariantViolation(feedback string, original ...string) string {
+	if len(original) > 0 && original[0] != "" {
+		searchFrom := 0
+		unfiltered := feedback
+		feedback = workFeedbackSourceQuotePattern.ReplaceAllStringFunc(feedback, func(quoted string) string {
+			start := searchFrom + strings.Index(unfiltered[searchFrom:], quoted)
+			searchFrom = start + len(quoted)
+			prefix := strings.TrimSpace(unfiltered[strings.LastIndex(unfiltered[:start], "\n")+1 : start])
+			isSourceQuote := prefix == "" || strings.HasSuffix(prefix, "原句：") || strings.HasSuffix(prefix, "原句:") ||
+				strings.HasSuffix(prefix, "原文：") || strings.HasSuffix(prefix, "原文:") ||
+				strings.HasSuffix(prefix, "写道") || strings.HasSuffix(prefix, "写了") || strings.HasSuffix(prefix, "写到")
+			runes := []rune(quoted)
+			content := string(runes[1 : len(runes)-1])
+			if isSourceQuote && strings.Contains(original[0], content) {
+				return ""
+			}
+			return quoted
+		})
+	}
+	for _, word := range []string{"不打分", "不评分", "不排名", "不计分", "不评级", "不评等", "不替孩子重画"} {
+		feedback = strings.ReplaceAll(feedback, word, "")
+	}
 	for _, marker := range []string{
 		"在继续点评前",
 		"等孩子讲完后",
@@ -767,6 +791,9 @@ func workFeedbackInvariantViolation(feedback string) string {
 		}
 	}
 	for _, w := range scoreWords {
+		if w == "得分" && !workFeedbackScoreClaimPattern.MatchString(feedback) {
+			continue
+		}
 		if strings.Contains(feedback, w) {
 			return "出现打分口径「" + w + "」"
 		}

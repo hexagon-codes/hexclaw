@@ -16,6 +16,7 @@ import (
 
 	"github.com/hexagon-codes/hexclaw"
 	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/egress"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/assetstore"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/usecase"
@@ -75,11 +76,11 @@ func (a *SolveAdapter) GenerateWorkFeedback(ctx context.Context, req usecase.Wor
 		req, err = a.FreezeWorkFeedbackContext(ctx, req)
 	}
 	if err != nil {
-		return usecase.WorkFeedbackOutput{}, err
+		return usecase.WorkFeedbackOutput{}, errors.Join(egress.ErrProviderNotSent, err)
 	}
 	frozen := req.FrozenContext
 	if err := frozen.Validate(); err != nil {
-		return usecase.WorkFeedbackOutput{}, err
+		return usecase.WorkFeedbackOutput{}, errors.Join(egress.ErrProviderNotSent, err)
 	}
 	prompt := config.ParentExpressionInstructions(ctx) + frozen.Prompt
 	if req.WorkType == k12.WorkTypeArt {
@@ -90,7 +91,7 @@ func (a *SolveAdapter) GenerateWorkFeedback(ctx context.Context, req usecase.Wor
 		return usecase.WorkFeedbackOutput{Feedback: out, SkillStamp: frozen.SkillStamp}, nil
 	}
 	if a.workFeedbackGen == nil {
-		return usecase.WorkFeedbackOutput{}, fmt.Errorf("work feedback: 未注入作品点评生成闭包")
+		return usecase.WorkFeedbackOutput{}, errors.Join(egress.ErrProviderNotSent, fmt.Errorf("work feedback: 未注入作品点评生成闭包"))
 	}
 	out, err := a.workFeedbackGen(ctx, frozen.Subject, prompt, req.Grade)
 	if err != nil {
@@ -120,11 +121,11 @@ func (a *SolveAdapter) FreezeWorkFeedbackContext(_ context.Context, req usecase.
 // 「需要视觉通道」的诚实报错只保留两种情形：视觉闭包未接入、原图确实缺失/读不到。
 func (a *SolveAdapter) generateArtFeedback(ctx context.Context, req usecase.WorkFeedbackRequest, prompt string) (string, error) {
 	if a.workFeedbackVision == nil {
-		return "", fmt.Errorf("work feedback: 美术观察式点评需要读取原图的视觉通道，当前未接入，暂不能生成")
+		return "", errors.Join(egress.ErrProviderNotSent, fmt.Errorf("work feedback: 美术观察式点评需要读取原图的视觉通道，当前未接入，暂不能生成"))
 	}
 	image, err := loadWorkArtImage(req.SourceAssetID)
 	if err != nil {
-		return "", fmt.Errorf("work feedback: %w", err)
+		return "", errors.Join(egress.ErrProviderNotSent, fmt.Errorf("work feedback: %w", err))
 	}
 	out, err := a.workFeedbackVision(ctx, image, prompt)
 	if err != nil {

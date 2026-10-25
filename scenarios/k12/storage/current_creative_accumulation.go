@@ -285,6 +285,19 @@ func (s *Store) ImportCreativeWorksArchiveV7Tx(ctx context.Context, tx *sql.Tx, 
 				if existing.Status == k12.WorkFeedbackSucceeded || (g.Status != k12.WorkFeedbackSucceeded && existing.UpdatedAt >= g.UpdatedAt) {
 					continue
 				}
+				if existing.RequestSnapshotJSON == "" && g.RequestSnapshotJSON != "" {
+					// 同一事务先恢复未发送停点的原快照，再合并结果状态，避免把归档终态当作新调用冻结。
+					if existing.Status == k12.WorkFeedbackFailed && existing.RetrySafe {
+						if _, err := tx.ExecContext(ctx, `UPDATE k12_work_feedback_generations SET status='queued'
+							WHERE generation_id=? AND agent_name=? AND status='failed'`, g.ID, agent); err != nil {
+							return err
+						}
+					}
+					if _, err := tx.ExecContext(ctx, `UPDATE k12_work_feedback_generations SET request_snapshot_json=?
+						WHERE generation_id=? AND agent_name=? AND request_snapshot_json IN ('','{}')`, g.RequestSnapshotJSON, g.ID, agent); err != nil {
+						return err
+					}
+				}
 			}
 			source, _ := json.Marshal(g.Source)
 			feedback, projection := "", ""
