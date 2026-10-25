@@ -29,6 +29,16 @@ func asksSingleJudgment(problem string) bool {
 
 // orderedVerificationScope 只比较原题明确的多个填空，混合判断时必须一并保留。
 func orderedVerificationScope(problem string) (int, bool) {
+	// 分数的分子/分母及完整配对、算式族沿各自领域合同，不能当成独立数值列表。
+	if _, _, fraction := elementarymath.ParseFractionSlotProblem(problem); fraction {
+		return 0, false
+	}
+	if _, family := verificationDivisionFamilyScope(problem); family {
+		return 0, false
+	}
+	if _, pairing := verificationPairingScope(problem); pairing {
+		return 0, false
+	}
 	count := len(verificationBlankSlotRe.FindAllStringIndex(problem, -1))
 	return count, count >= 2
 }
@@ -53,8 +63,21 @@ func parseOrderedVerificationAnswer(problem, answer string, count int) (orderedV
 	if len(values) != count {
 		return out, false
 	}
-	for _, value := range values {
+	slots := verificationBlankSlotRe.FindAllStringIndex(problem, -1)
+	for i, value := range values {
 		quantity, ok := completeVerificationQuantity(strings.TrimSpace(value))
+		if !ok && i < len(slots) {
+			// 具名答案只在名称属于当前空位时去掉标签，不能借其他空位交换目标。
+			if named := namedQuantityConclusionRe.FindStringSubmatch(strings.TrimSpace(value)); len(named) == 3 {
+				start := 0
+				if i > 0 {
+					start = slots[i-1][1]
+				}
+				if strings.Contains(problem[start:slots[i][0]], named[1]) {
+					quantity, ok = completeVerificationQuantity(named[2])
+				}
+			}
+		}
 		if !ok {
 			return out, false
 		}
