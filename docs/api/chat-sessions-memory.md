@@ -6,6 +6,8 @@
 
 ## 通用调用约定
 
+会话压缩只收敛模型上下文窗口，保留原消息、图片及附件供历史查询和已提交终稿恢复。终稿按原会话与 `request_id` 查询，不全量装载历史；这不保证结果未知的请求可安全重发。旧版本已经删除的消息不会由新增迁移自动重建。
+
 所有端点：`Authorization: Bearer $HEXCLAW_API_TOKEN`，认证失败 `401 {"error":"Valid access token required"}`。JSON body 使用 `Content-Type: application/json`；附件暂存例外为 multipart。没有列出的 query/header 不作为功能契约；除明确字段外，不从客户端 body 读取身份。时间对象使用 RFC 3339；MemoryEntry 的时间字段是存储字符串，不保证完整时间戳。
 
 ## 端点索引

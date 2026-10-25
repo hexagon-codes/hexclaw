@@ -43,9 +43,9 @@ func TestCompactor_Compact_SummarizesOldAndKeepsRecent(t *testing.T) {
 		t.Fatalf("compacted count = %d, want 50 (60 - keepRecent 10)", n)
 	}
 
-	remaining := store.messages["sess-1"]
-	if len(remaining) != 11 {
-		t.Fatalf("remaining messages = %d, want 11 (10 recent + 1 summary)", len(remaining))
+	remaining, err := store.ListContextMessages(context.Background(), "sess-1", 100, 0)
+	if err != nil || len(remaining) != 11 || len(store.messages["sess-1"]) != 61 {
+		t.Fatalf("active messages = %d, total records = %d, want 11 active and 61 preserved: %v", len(remaining), len(store.messages["sess-1"]), err)
 	}
 	var summaries int
 	for _, m := range remaining {
@@ -125,8 +125,9 @@ func TestCompactor_CompactIfNeeded(t *testing.T) {
 	if err := NewCompactor(above, DefaultCompactionConfig()).CompactIfNeeded(ctx, "s", prov); err != nil {
 		t.Fatalf("CompactIfNeeded above threshold errored: %v", err)
 	}
-	if len(above.messages["s"]) != 11 {
-		t.Fatalf("above-threshold CompactIfNeeded must compact to 11, got %d", len(above.messages["s"]))
+	active, err := above.ListContextMessages(ctx, "s", 100, 0)
+	if err != nil || len(active) != 11 || len(above.messages["s"]) != 61 {
+		t.Fatalf("compaction must retain 60 original records and one summary, with 11 active messages: active=%d total=%d err=%v", len(active), len(above.messages["s"]), err)
 	}
 }
 

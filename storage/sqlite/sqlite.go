@@ -1091,15 +1091,16 @@ func (s *Store) ForkSession(ctx context.Context, sourceSessionID, messageID, use
 	if !includeMessage {
 		comparison = "<"
 	}
-	// 不依赖插入顺序；读取时仍按 created_at 排序
+	// 只继承分支前已经存在的摘要；较晚压缩的原始前缀在分支中重新参与上下文。
 	forkPrefix := "msg-fork-" + strings.TrimPrefix(newSessionID, "sess-") + "-"
 	_, err = tx.ExecContext(ctx,
-		`INSERT INTO messages (`+messageCols+`)
-			 SELECT ? || rowid, ?, parent_id, role, content, content_type, metadata, feedback,
-			        model_name, prompt_tokens, completion_tokens, finish_reason, latency_ms, request_id, meta, attachments, created_at
-			 FROM messages
-		 WHERE session_id = ? AND rowid `+comparison+` ?`,
-		forkPrefix, newSessionID, sourceSessionID, msgRowID,
+		`INSERT INTO messages (`+messageCols+`, context_compaction_id)
+			 SELECT ? || m.rowid, ?, m.parent_id, m.role, m.content, m.content_type, m.metadata, m.feedback,
+			        m.model_name, m.prompt_tokens, m.completion_tokens, m.finish_reason, m.latency_ms, m.request_id, m.meta, m.attachments, m.created_at,
+			        CASE WHEN c.id IS NULL THEN '' ELSE ? || c.rowid END
+			 FROM messages m LEFT JOIN messages c ON c.id=m.context_compaction_id AND c.session_id=m.session_id AND c.rowid `+comparison+` ?
+		 WHERE m.session_id = ? AND m.rowid `+comparison+` ?`,
+		forkPrefix, newSessionID, forkPrefix, msgRowID, sourceSessionID, msgRowID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("复制消息失败: %w", err)

@@ -40,7 +40,7 @@ func DefaultCompactionConfig() CompactionConfig {
 //  1. 检测消息数是否超过阈值
 //  2. 取出需要压缩的旧消息（保留最近 N 条完整）
 //  3. 使用 LLM 生成摘要
-//  4. 删除旧消息，插入摘要消息
+//  4. 从模型窗口排除旧消息并插入摘要，原消息仍保留
 //
 // 对标 OpenClaw 的 Context Compaction 机制。
 type Compactor struct {
@@ -69,7 +69,7 @@ func NewCompactor(store storage.Store, cfg CompactionConfig) *Compactor {
 func (c *Compactor) NeedsCompaction(ctx context.Context, sessionID string) (bool, error) {
 	// 使用 MaxMessages+1 作为 limit 来判断是否超过阈值，
 	// 避免 limit=0 时 SQLite LIMIT 0 返回空结果的问题
-	msgs, err := c.store.ListMessages(ctx, sessionID, c.config.MaxMessages+1, 0)
+	msgs, err := storage.ListContextMessages(ctx, c.store, sessionID, c.config.MaxMessages+1, 0)
 	if err != nil {
 		return false, err
 	}
@@ -79,7 +79,7 @@ func (c *Compactor) NeedsCompaction(ctx context.Context, sessionID string) (bool
 // Compact 执行上下文压缩
 //
 // provider 用于调用 LLM 生成摘要。
-// 返回压缩后删除的消息数。
+// 返回从模型窗口移出的消息数。
 //
 // Fix 10: 使用 sync.Map 防止同一 session 的并发双重压缩。
 func (c *Compactor) Compact(ctx context.Context, sessionID string, provider hexagon.Provider) (int, error) {
@@ -93,7 +93,7 @@ func (c *Compactor) Compact(ctx context.Context, sessionID string, provider hexa
 	if loadLimit < 200 {
 		loadLimit = 200
 	}
-	msgs, err := c.store.ListMessages(ctx, sessionID, loadLimit, 0)
+	msgs, err := storage.ListContextMessages(ctx, c.store, sessionID, loadLimit, 0)
 	if err != nil {
 		return 0, fmt.Errorf("获取消息列表失败: %w", err)
 	}
@@ -113,7 +113,7 @@ func (c *Compactor) Compact(ctx context.Context, sessionID string, provider hexa
 		return 0, nil
 	}
 
-	// 归档旧消息到文件 (D7: 链路④ 会话转录)
+	// 摘要前继续保存原转录，数据库消息和附件也保持可回放。
 	if c.archiver != nil {
 		if _, archErr := c.archiver.Archive(sessionID, oldMsgs); archErr != nil {
 			return 0, fmt.Errorf("archive conversation before compaction: %w", archErr)
@@ -135,12 +135,18 @@ func (c *Compactor) Compact(ctx context.Context, sessionID string, provider hexa
 		CreatedAt: time.Now(),
 	}
 
-	// 在事务中仅执行快速的数据库操作：删除旧消息 + 插入摘要
+	// 标记和摘要一起提交，不改变原消息身份、内容或附件。
 	err = c.store.WithTx(ctx, func(txStore storage.Store) error {
+		writer, ok := txStore.(storage.ContextHistoryWriter)
+		if !ok {
+			return fmt.Errorf("storage does not support non-destructive context compaction")
+		}
+		ids := make([]string, 0, len(oldMsgs))
 		for _, msg := range oldMsgs {
-			if err := txStore.DeleteMessage(ctx, msg.ID); err != nil {
-				return fmt.Errorf("删除旧消息失败: %w", err)
-			}
+			ids = append(ids, msg.ID)
+		}
+		if err := writer.MarkContextCompacted(ctx, sessionID, ids, summaryMsg.ID); err != nil {
+			return fmt.Errorf("mark compacted context: %w", err)
 		}
 		return txStore.SaveMessage(ctx, summaryMsg)
 	})

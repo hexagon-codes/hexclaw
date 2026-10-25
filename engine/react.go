@@ -5080,14 +5080,20 @@ func (e *ReActEngine) loadDurableAssistantReply(
 	if sess.UserID != msg.UserID {
 		return nil, fmt.Errorf("durable assistant session does not belong to current user")
 	}
-	count, err := e.store.CountMessages(ctx, sessionID)
-	if err != nil {
-		return nil, fmt.Errorf("load durable assistant reply count: %w", err)
+	var records []*storage.MessageRecord
+	if reader, ok := e.store.(storage.AssistantReplyReader); ok {
+		records, err = reader.FindAssistantReplies(ctx, sessionID, requestID)
+	} else {
+		// 旧存储适配器保持原有查询合同；应用SQLite走请求索引。
+		count, countErr := e.store.CountMessages(ctx, sessionID)
+		if countErr != nil {
+			return nil, fmt.Errorf("load durable assistant reply count: %w", countErr)
+		}
+		if count == 0 {
+			return nil, nil
+		}
+		records, err = e.store.ListMessages(ctx, sessionID, count, 0)
 	}
-	if count == 0 {
-		return nil, nil
-	}
-	records, err := e.store.ListMessages(ctx, sessionID, count, 0)
 	if err != nil {
 		return nil, fmt.Errorf("load durable assistant reply history: %w", err)
 	}

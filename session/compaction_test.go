@@ -11,7 +11,8 @@ import (
 
 // mockStore 测试用存储
 type mockStore struct {
-	messages map[string][]*storage.MessageRecord
+	messages  map[string][]*storage.MessageRecord
+	compacted map[string]bool
 }
 
 func newMockStore() *mockStore {
@@ -89,6 +90,38 @@ func (s *mockStore) UpdateMessageMetadata(_ context.Context, id, metadata string
 
 func (s *mockStore) CountMessages(_ context.Context, sessionID string) (int, error) {
 	return len(s.messages[sessionID]), nil
+}
+
+func (s *mockStore) ListContextMessages(_ context.Context, sessionID string, limit, offset int) ([]*storage.MessageRecord, error) {
+	var active []*storage.MessageRecord
+	for _, message := range s.messages[sessionID] {
+		if !s.compacted[message.ID] {
+			active = append(active, message)
+		}
+	}
+	end := len(active) - offset
+	if end < 0 {
+		end = 0
+	}
+	start := end - limit
+	if start < 0 {
+		start = 0
+	}
+	return append([]*storage.MessageRecord(nil), active[start:end]...), nil
+}
+
+func (s *mockStore) MarkContextCompacted(_ context.Context, sessionID string, ids []string, _ string) error {
+	if s.compacted == nil {
+		s.compacted = make(map[string]bool)
+	}
+	for _, message := range s.messages[sessionID] {
+		for _, id := range ids {
+			if message.ID == id {
+				s.compacted[id] = true
+			}
+		}
+	}
+	return nil
 }
 func (s *mockStore) UpdateMessageFeedback(_ context.Context, _, _ string) error { return nil }
 func (s *mockStore) UpdateSession(_ context.Context, _ *storage.Session) error  { return nil }

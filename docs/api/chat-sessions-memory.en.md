@@ -6,6 +6,8 @@ This reference covers 33 method/path combinations in the current source. Release
 
 ## Common request rules
 
+Compaction reduces the model context window while retaining original messages, images and attachments for history and completed-reply recovery. Completed replies are located by session and request_id without loading the full history. This does not make requests with unknown outcomes safe to resend. The migration does not reconstruct records already deleted by older versions.
+
 All endpoints: Authorization: Bearer $HEXCLAW_API_TOKEN. Authentication failure is 401 {"error":"Valid access token required"}. JSON bodies use Content-Type: application/json; attachment staging uses multipart. Unlisted query/header fields are not part of the functional contract; client body fields do not grant identity. Time objects use RFC 3339; MemoryEntry timestamps are stored strings and need not be full timestamps.
 
 ## Endpoint index

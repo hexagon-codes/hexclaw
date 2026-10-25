@@ -31,8 +31,17 @@ func TestSuccessfulCompactionArchivesCompleteMediaRecord(t *testing.T) {
 	if count, err := c.Compact(ctx, sessionID, &titleSuggestProvider{response: "家长询问第一题的解法"}); err != nil || count != 2 {
 		t.Fatalf("compaction=%d %v", count, err)
 	}
-	if old, err := store.GetMessage(ctx, original.ID); err == nil && old != nil {
-		t.Fatal("old row was not compacted")
+	if old, err := store.GetMessage(ctx, original.ID); err != nil || old == nil || old.Content != original.Content || old.Attachments != original.Attachments {
+		t.Fatalf("compaction changed the original message: %v", err)
+	}
+	active, err := storage.ListContextMessages(ctx, store, sessionID, 20, 0)
+	if err != nil || len(active) != 3 {
+		t.Fatalf("active context should contain the summary and two recent messages: %d %v", len(active), err)
+	}
+	for _, message := range active {
+		if message.ID == original.ID || message.ID == "old-reply" {
+			t.Fatal("compacted history leaked into the model window")
+		}
 	}
 	files, err := os.ReadDir(dir)
 	if err != nil || len(files) != 1 {

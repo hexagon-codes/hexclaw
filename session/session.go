@@ -474,7 +474,7 @@ func (m *Manager) BuildContext(ctx context.Context, sessionID string) ([]hexagon
 		maxTurns = 50
 	}
 
-	records, err := m.store.ListMessages(ctx, sessionID, maxTurns, 0)
+	records, err := storage.ListContextMessages(ctx, m.store, sessionID, maxTurns, 0)
 	if err != nil {
 		return nil, fmt.Errorf("加载消息历史失败: %w", err)
 	}
