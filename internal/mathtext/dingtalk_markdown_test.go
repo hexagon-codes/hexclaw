@@ -9,6 +9,8 @@ func TestDingTalkEmphasisNormalizeReliableBoundaries(t *testing.T) {
 		{"nested strong emphasis", "***原因：***后文继续。", "***原因***：后文继续。"},
 		{"closing Chinese quote", "最后让她说：**“为什么等式两边要同时除以0.75？”**检查她是否理解。", "最后让她说：**“为什么等式两边要同时除以0.75？”** 检查她是否理解。"},
 		{"already separated quote", "**“先验算。”** 再说理由。", "**“先验算。”** 再说理由。"},
+		{"punctuation before dog emoji", "**欢迎新同事！**🐶", "**欢迎新同事！** 🐶"},
+		{"punctuation before crab emoji", "接下来继续交流。**合作顺利！**🦀", "接下来继续交流。**合作顺利！** 🦀"},
 		{"preserve label spacing", "**原因：** 后文继续。", "**原因**： 后文继续。"},
 		{"two independent labels", "**原句：**保留原句。\n\n**建议：**修改建议。", "**原句**：保留原句。\n\n**建议**：修改建议。"},
 		{"link visible label", "[**原因：**说明](https://example.invalid/path)", "[**原因**：说明](https://example.invalid/path)"},

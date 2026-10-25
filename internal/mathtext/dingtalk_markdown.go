@@ -101,7 +101,8 @@ func NormalizeDingTalkMarkdown(s string) string {
 				if last == '：' || last == ':' {
 					deletes[i-size] = size
 					inserts[end] = string(last)
-				} else if !right {
+				} else if !right || (unicode.IsPunct(last) && unicode.IsSymbol(after)) {
+					// 钉钉在句末标点后紧接emoji时仍需显式分隔强调闭合标记。
 					inserts[end] = " "
 				}
 			}
