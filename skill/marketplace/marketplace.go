@@ -28,6 +28,9 @@ import (
 // ErrSkillNotInstalled is returned when operating on a skill that is not installed.
 var ErrSkillNotInstalled = errors.New("skill not installed")
 
+// ErrSkillDisabled 区分用户停用/卸载与读取失败，消费者不能据此回退同名内嵌正文。
+var ErrSkillDisabled = errors.New("skill is disabled")
+
 const (
 	seedTempPrefix = ".hexclaw-seed-"
 	seedTempSuffix = ".tmp"
@@ -625,7 +628,7 @@ func (m *Marketplace) disabledPath() string {
 // IsEnabled 检查技能是否启用（默认启用）
 func (m *Marketplace) IsEnabled(name string) bool {
 	disabled := m.getDisabled()
-	return !disabled[name]
+	return !disabled[name] && !disabled[uninstalledSkillKey(name)]
 }
 
 // SetEnabled 设置技能启用状态

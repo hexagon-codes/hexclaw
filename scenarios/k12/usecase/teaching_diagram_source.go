@@ -40,9 +40,17 @@ func diagramSourceText(value string) string {
 
 // 只识别当前支持的明确关系，不用讲法模型重抽数值，也不从孩子作答取题目条件。
 func teachingDiagramSourceContext(q RecognizedQuestion, answer string, evidence SolveEvidence) (TeachingDiagramContext, TeachingDiagramCandidate, bool) {
+	if !photoEvidenceTrusted(evidence) {
+		return TeachingDiagramContext{}, TeachingDiagramCandidate{}, false
+	}
+	return teachingDiagramQuantityContext(q, answer, evidence.SolverOutputDigest)
+}
+
+// 数量关系校验与学生判定分开；输入只取同题冻结题干、解答及其内容身份。
+func teachingDiagramQuantityContext(q RecognizedQuestion, answer, solutionDigest string) (TeachingDiagramContext, TeachingDiagramCandidate, bool) {
 	ctx := TeachingDiagramContext{ProblemID: q.ProblemID, InputRevision: q.ConfirmedVersion, ProblemInputDigest: q.InputDigest,
-		SolutionDigest: evidence.SolverOutputDigest, TargetQuantityID: "whole", Quantities: map[string]TeachingDiagramQuantity{}, Relations: map[string]TeachingDiagramRelation{}}
-	if !photoEvidenceTrusted(evidence) || ctx.ProblemID == "" || ctx.InputRevision <= 0 || !diagramDigest(ctx.ProblemInputDigest) || !diagramDigest(ctx.SolutionDigest) {
+		SolutionDigest: solutionDigest, TargetQuantityID: "whole", Quantities: map[string]TeachingDiagramQuantity{}, Relations: map[string]TeachingDiagramRelation{}}
+	if ctx.ProblemID == "" || ctx.InputRevision <= 0 || !diagramDigest(ctx.ProblemInputDigest) || !diagramDigest(ctx.SolutionDigest) {
 		return ctx, TeachingDiagramCandidate{}, false
 	}
 	if q.Subject != "数学" || q.parentSourceUnclear {
@@ -55,8 +63,8 @@ func teachingDiagramSourceContext(q RecognizedQuestion, answer string, evidence 
 	_, printedSource := photoQuestionProblemTexts(q)
 	source := diagramSourceText(printedSource)
 	if strings.Contains(source, "硬盘") {
-		ratio := diagramDiskRatio.FindAllStringSubmatch(source, -1)
-		used := diagramDiskUsed.FindAllStringSubmatch(source, -1)
+		ratio := distinctDiagramSourceMatches(diagramDiskRatio.FindAllStringSubmatch(source, -1))
+		used := distinctDiagramSourceMatches(diagramDiskUsed.FindAllStringSubmatch(source, -1))
 		if len(ratio) != 1 || len(used) != 1 || elementarymath.UnitCategory(used[0][2]) != "data" {
 			return ctx, TeachingDiagramCandidate{}, false
 		}
@@ -148,6 +156,20 @@ func teachingDiagramSourceContext(q RecognizedQuestion, answer string, evidence 
 		return ctx, TeachingDiagramCandidate{}, false
 	}
 	return ctx, TeachingDiagramCandidate{ProblemInputDigest: ctx.ProblemInputDigest, SolutionDigest: ctx.SolutionDigest, RelationID: "source_relation", Kind: ctx.Relations["source_relation"].Kind}, true
+}
+
+// 同题共享材料可能重复呈现同一条件；只合并完全相同的捕获量，冲突量仍分别保留。
+func distinctDiagramSourceMatches(matches [][]string) [][]string {
+	seen := map[string]bool{}
+	var out [][]string
+	for _, match := range matches {
+		key := strings.Join(match[1:], "\x00")
+		if !seen[key] {
+			seen[key] = true
+			out = append(out, match)
+		}
+	}
+	return out
 }
 
 func diagramAnswerQuantity(values [][]string, expected *big.Rat, unit string) (TeachingDiagramQuantity, bool) {

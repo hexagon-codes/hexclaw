@@ -218,6 +218,9 @@ func questionEvidenceTranscriptionsConflictForInitialReadMode(q RecognizedQuesti
 		if q.Subject == "数学" && scopedMaterialReadingsEquivalent(q, raw, values) {
 			return false
 		}
+		if q.Subject == "数学" && sequentialWorkReadingsEquivalent(raw, values) {
+			return false
+		}
 		if q.Subject == "数学" {
 			for _, value := range values {
 				// 去空白后的视图相同不能反证数字分词相同，避免 2 3 4 与 234 合并。
@@ -265,6 +268,11 @@ func questionEvidenceTranscriptionsConflictForInitialReadMode(q RecognizedQuesti
 
 var mathWorkLineSuffix = regexp.MustCompile(`((?:列式|算式)[：:])[ \t\x{3000}]*[_＿]+[ \t\x{3000}]*$`)
 var mathEmptyPrintedSlot = regexp.MustCompile(`\((?:[ \t\x{3000}]|\\{1,2}(?:quad|qquad|,|;))*\)`)
+var mathEmptyFractionSlot = regexp.MustCompile(`\\frac\s*\{[□▢_＿\s\p{Zs}\\]+\}\s*\{[□▢_＿\s\p{Zs}\\]+\}`)
+var mathLiteralFraction = regexp.MustCompile(`\\frac\s*\{([0-9]+(?:\.[0-9]+)?)\}\s*\{([0-9]+(?:\.[0-9]+)?)\}`)
+var mathPlainLiteralFraction = regexp.MustCompile(`\b([0-9]+(?:\.[0-9]+)?)/([0-9]+(?:\.[0-9]+)?)\b`)
+var mathRepeatedFractionGroup = regexp.MustCompile(`\(\(([0-9]+(?:\.[0-9]+)?/[0-9]+(?:\.[0-9]+)?)\)\)`)
+var mathDiagramReadingLabel = regexp.MustCompile(`(?m)^图(?:示|中标注)?[：:]`)
 
 // 只在比较副本中剥离同一已冻结范围的完整材料前缀，保留局部题面与数学空位。
 func scopedMaterialReadingsEquivalent(q RecognizedQuestion, raw string, values []string) bool {
@@ -275,8 +283,53 @@ func scopedMaterialReadingsEquivalent(q RecognizedQuestion, raw string, values [
 	plain := func(value string) string {
 		value = strings.NewReplacer(`\\(`, `\(`, `\\)`, `\)`, `\\[`, `\[`, `\\]`, `\]`).Replace(value)
 		value = mathRepeatedTeXCommand.ReplaceAllString(value, `\$1`)
+		value = strings.NewReplacer(`\square`, "□", `\Box`, "□").Replace(value)
+		value = mathDiagramReadingLabel.ReplaceAllString(value, "图：")
+		value = strings.ReplaceAll(value, "计算过程中“", "推算过程中“")
+		// 空白分数框和横线都是未填写区域；数字分数按同一完整字面量比较。
+		value = mathEmptyFractionSlot.ReplaceAllString(value, "____")
+		value = mathLiteralFraction.ReplaceAllString(value, "($1/$2)")
+		value = mathPlainLiteralFraction.ReplaceAllString(value, "($1/$2)")
+		for mathRepeatedFractionGroup.MatchString(value) {
+			value = mathRepeatedFractionGroup.ReplaceAllString(value, "($1)")
+		}
 		// 原题比较不能消费 Markdown 标记：星号等字符可能承载真实数学运算。
 		return CanonicalPlainTextFallback(mathEmptyPrintedSlot.ReplaceAllString(value, "()"))
+	}
+	type scopedDiagramRows struct {
+		pattern *regexp.Regexp
+		text    string
+	}
+	var diagramRows []scopedDiagramRows
+	for _, material := range source.Materials {
+		var rows []string
+		for _, line := range strings.Split(material.Text, "\n") {
+			row := strings.Join(strings.Fields(plain(line)), "")
+			if row != "" {
+				rows = append(rows, row)
+			}
+		}
+		if len(rows) < 2 {
+			continue
+		}
+		parts, numeric := make([]string, 0, len(rows)), true
+		for _, row := range rows {
+			first := []rune(row)[0]
+			if !unicode.IsDigit(first) && first != '(' && first != '（' {
+				numeric = false
+				break
+			}
+			var pattern strings.Builder
+			for _, char := range row {
+				pattern.WriteString(regexp.QuoteMeta(string(char)))
+				pattern.WriteString(`[\s\p{Zs}]*`)
+			}
+			parts = append(parts, pattern.String())
+		}
+		if numeric {
+			pattern := `(?:图[:：][\s\p{Zs}]*)?` + strings.Join(parts, `[\s\p{Zs}；;。]*`) + `[\s\p{Zs}；;。]*`
+			diagramRows = append(diagramRows, scopedDiagramRows{regexp.MustCompile(pattern), strings.Join(rows, "\n") + "\n"})
+		}
 	}
 	var materials []string
 	for _, material := range source.Materials {
@@ -307,6 +360,14 @@ func scopedMaterialReadingsEquivalent(q RecognizedQuestion, raw string, values [
 		// 作答标签后的空白横线不承载题目条件；含数值或算式的行不匹配。
 		value = mathWorkLineSuffix.ReplaceAllString(strings.TrimSpace(value), "$1")
 		value = plain(value)
+		// 同一冻结图的完整数量行可换行或用分号分隔，行内数字、单位与关系逐字匹配。
+		for _, diagram := range diagramRows {
+			value = diagram.pattern.ReplaceAllStringFunc(value, func(string) string { return diagram.text })
+		}
+		// 图示标题只修饰已冻结的完整材料，不承载另一组数量或条件。
+		for _, material := range materials {
+			value = strings.ReplaceAll(value, "图："+material, material)
+		}
 		for {
 			longest := ""
 			for _, material := range materials {
@@ -344,7 +405,33 @@ func scopedMaterialReadingsEquivalent(q RecognizedQuestion, raw string, values [
 }
 
 var mathPrintedUnit = regexp.MustCompile(elementarymath.UnitPattern())
-var mathRepeatedTeXCommand = regexp.MustCompile(`\\{2,}(frac|text|times|div|cdot|leq|geq|neq)\b`)
+var completeSequentialWorkQuestion = regexp.MustCompile(`^一项工程甲单独[0-9]+(?:\.[0-9]+)?天完成乙单独[0-9]+(?:\.[0-9]+)?天完成这项工程先由甲做了若干天然后由乙单独完成(?:剩下|余下)工作从头至尾(?:只用|共用)[0-9]+(?:\.[0-9]+)?天完成(?:求|那么)甲乙各工作几天[？?]$`)
+
+// 仅在完整的先甲后乙工程题中比较固定同义措辞，所有数值、角色与先后关系仍须相同。
+func sequentialWorkReadingsEquivalent(raw string, values []string) bool {
+	if len(values) < 2 {
+		return false
+	}
+	view := func(value string) string {
+		value = k12.RecognitionSourceComparisonV1(value)
+		if !completeSequentialWorkQuestion.MatchString(value) {
+			return ""
+		}
+		return strings.NewReplacer("完成余下工作", "完成剩下工作", "从头至尾只用", "从头至尾共用", "完成那么甲乙", "完成求甲乙").Replace(value)
+	}
+	current := view(raw)
+	if current == "" {
+		return false
+	}
+	for _, value := range values {
+		if view(value) != current {
+			return false
+		}
+	}
+	return true
+}
+
+var mathRepeatedTeXCommand = regexp.MustCompile(`\\{2,}(frac|text|times|div|cdot|leq|geq|neq|square|Box)\b`)
 var mathCapacityDiagramLabelLine = regexp.MustCompile(`(?m)(^|[。？?\n])[\t ]*图(?:[中上]?(?:示|标注|标签|标记|文字)|[中上])[：:][\t ]*已用空间[，,、][\t ]*剩余空间[，,、][\t ]*共[？?][\t ]*(` + elementarymath.UnitPattern() + `)(?:[。.]|[\t ]*$)`)
 
 func stripPrintedInstructionNumber(q RecognizedQuestion, value string) string {
@@ -628,7 +715,8 @@ func RecognitionSourceReadingsMatchForInitialReadMode(prior, review RecognizedQu
 		readings := append([]string{prior.RawTranscription, review.RawTranscription}, prior.EvidenceTranscriptions...)
 		readings = append(readings, review.EvidenceTranscriptions...)
 		question = sixNumberQuestionSourcesEquivalent(review.RawTranscription, readings, initialReadMode) ||
-			completeRatioQuestionSourcesEquivalent(review.RawTranscription, readings)
+			completeRatioQuestionSourcesEquivalent(review.RawTranscription, readings) ||
+			sequentialWorkReadingsEquivalent(review.RawTranscription, readings)
 	}
 	if prior.AnswerState != review.AnswerState {
 		return question, false

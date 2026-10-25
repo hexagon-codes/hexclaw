@@ -325,7 +325,7 @@ func TestCompletedHomeworkRejectsGuideAnswerOutsideVerifiedSolutionWithoutChangi
 	}
 }
 
-func TestCompletedHomeworkRejectsIntermediateValueAsGuideAnswer(t *testing.T) {
+func TestCompletedHomeworkRestoresVerifiedAnswerForGuide(t *testing.T) {
 	solver := &itemResumeSolver{
 		calls:        map[string]int{},
 		evidenceType: EvidenceHeterogeneousModel,
@@ -349,12 +349,15 @@ func TestCompletedHomeworkRejectsIntermediateValueAsGuideAnswer(t *testing.T) {
 	o.deps.ParentTeachingGuide = generator
 
 	jobID := runItemResumeJobToAssessing(t, o, "completed-homework-intermediate-answer")
-	failed, err := o.ConfirmAndRun(context.Background(), jobID, nil)
-	if err == nil || failed.Record.Status == k12.GradingStageCompleted {
-		t.Fatalf("intermediate value accepted as final answer: stage=%s err=%v", failed.Record.Status, err)
+	completed, err := o.ConfirmAndRun(context.Background(), jobID, nil)
+	if err != nil || completed.Record.Status != k12.GradingStageCompleted {
+		t.Fatalf("verified answer recovery did not complete: stage=%s err=%v", completed.Record.Status, err)
 	}
-	if !strings.Contains(err.Error(), "answer is not anchored") {
-		t.Fatalf("intermediate-value rejection was not explicit: %v", err)
+	result, ok := o.PhotoResult(jobID)
+	if !ok || len(result.Items) != 1 || result.Items[0].ParentGuide == nil ||
+		result.Items[0].ParentGuide.Answer != "3" || result.Items[0].Status != PhotoWrong ||
+		result.Items[0].Recognized.StudentAnswer != "4" || solver.callCount("q-wrong") != 1 {
+		t.Fatalf("guide recovery changed the answer, original assessment or solve count: %#v", result)
 	}
 	if calls := generator.snapshot(); len(calls) != 1 ||
 		calls[0].VerifiedSolution != solver.solutions["q-wrong"] {

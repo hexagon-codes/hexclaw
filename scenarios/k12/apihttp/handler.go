@@ -543,7 +543,8 @@ func (h *handler) grade(w http.ResponseWriter, r *http.Request) {
 	}
 	res, err := h.rt.Deps.GradeHomeworkProblem(r.Context(), usecase.GradeRequest{
 		AgentName: req.Agent, Subject: req.Subject, Grade: h.resolveGrade(r.Context(), req.Agent, req.Grade), SourceSession: req.SourceSession,
-		Problem: req.Problem, StudentAnswer: req.StudentAnswer, KnowledgePoints: req.KnowledgePoints,
+		GradeFromProfile: req.Grade == "",
+		Problem:          req.Problem, StudentAnswer: req.StudentAnswer, KnowledgePoints: req.KnowledgePoints,
 	})
 	if err != nil {
 		writeErr(w, httpStatusForK12Error(err, http.StatusInternalServerError), err.Error())

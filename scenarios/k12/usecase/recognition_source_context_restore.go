@@ -8,27 +8,30 @@ import (
 )
 
 // 类型化题目不复制识题扩展；恢复只取同题同作答且完整输入摘要相同的冻结来源。
-func (o *GradingOrchestrator) restoreRecognitionSourceContexts(job GradingJobView, questions []RecognizedQuestion) {
+func (o *GradingOrchestrator) frozenRecognitionSourceQuestions(job GradingJobView) []RecognizedQuestion {
 	var sources []RecognizedQuestion
 	if audit, ok := o.readRecognitionAudit(job.Record.RecordID); ok && audit.AgentName == job.Record.AgentName {
-		sources = audit.Questions
-	} else {
-		raw, err := os.ReadFile(o.runPath(job.Record.RecordID, "run.json"))
-		var run gradingRunFile
-		if err == nil && json.Unmarshal(raw, &run) == nil && run.AgentName == job.Record.AgentName {
-			frozen := FreezeRecognizedQuestionInputDigests(run.Questions, run.Grade)
-			for i, q := range run.Questions {
-				if q.InputDigest != "" && frozen[i].InputDigest == q.InputDigest {
-					sources = append(sources, q)
-				}
-			}
-		}
-		if len(sources) == 0 {
-			if receipt, ok := o.readRecognitionReceipt(job.Record.RecordID); ok && receipt.AgentName == job.Record.AgentName {
-				sources = receipt.Questions
+		sources = append(sources, audit.Questions...)
+	}
+	raw, err := os.ReadFile(o.runPath(job.Record.RecordID, "run.json"))
+	var run gradingRunFile
+	if err == nil && json.Unmarshal(raw, &run) == nil && run.AgentName == job.Record.AgentName {
+		frozen := FreezeRecognizedQuestionInputDigests(run.Questions, run.Grade)
+		for i, q := range run.Questions {
+			if q.InputDigest != "" && frozen[i].InputDigest == q.InputDigest {
+				sources = append(sources, q)
 			}
 		}
 	}
+	// 评估时终态审计尚未生成；原识题回执仍是已冻结且可核对身份的观察来源。
+	if receipt, ok := o.readRecognitionReceipt(job.Record.RecordID); ok && receipt.AgentName == job.Record.AgentName {
+		sources = append(sources, receipt.Questions...)
+	}
+	return sources
+}
+
+func (o *GradingOrchestrator) restoreRecognitionSourceContexts(job GradingJobView, questions []RecognizedQuestion) {
+	sources := o.frozenRecognitionSourceQuestions(job)
 	if len(sources) == 0 {
 		return
 	}

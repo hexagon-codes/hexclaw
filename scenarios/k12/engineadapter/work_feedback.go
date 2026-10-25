@@ -3,6 +3,7 @@ package engineadapter
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -16,6 +17,7 @@ import (
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/assetstore"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/usecase"
+	"github.com/hexagon-codes/hexclaw/skill/marketplace"
 )
 
 // WorkFeedbackGenerateFunc 是作品证据化点评的轻量生成闭包（composition root 注入，
@@ -42,12 +44,9 @@ func WithWorkFeedbackVision(fn VisionFunc) SolveAdapterOption {
 // SetWorkFeedbackVision 事后注入美术点评视觉闭包（composition root 回填）。
 func (a *SolveAdapter) SetWorkFeedbackVision(fn VisionFunc) { a.workFeedbackVision = fn }
 
-// SkillContentLoader 按 skill 名（不含 .md，如 "writing-feedback"）返回**盘上** skill 的
-// 原始内容（含 frontmatter）。窄闭包注入而非 import skill/marketplace——依赖方向裁决：
-// marketplace 是 composition root 从 config 构造的有状态单例（Skills.Enabled=false 时不存在），
-// 包 import 拿不到实例；传 *Marketplace 又会把 Install/Uninstall/seed 整个管理面漏进场景
-// adapter。窄闭包与本文件 workFeedbackGen/vision 的注入模式同构，场景层不新增对平台管理层的
-// 依赖边。每次调用都应读盘取当前内容（hub Refresh/Install 更新后无需重启即生效）。
+// SkillContentLoader 按名称返回当前盘上正文（含frontmatter），不向消费者暴露安装管理实例。
+// 明确停用或卸载返回marketplace.ErrSkillDisabled，消费者不得回退同名内嵌正文；
+// 一般读取错误保留既有内嵌兼容。新任务读取当前内容，旧任务复用已经冻结的内容和结果。
 type SkillContentLoader func(name string) (string, error)
 
 // WithWorkFeedbackSkillLoader 注入盘上 skill 内容加载闭包（marketplace 消费缝）。
@@ -164,9 +163,10 @@ func loadWorkArtImage(assetID string) ([]byte, error) {
 // 与首启 SeedFromFS 写盘到 ~/.hexclaw/skills/ 的是同一份字节）。加载链：
 // ① 盘上 marketplace 版本（SkillContentLoader 注入，hub Install/Refresh/seed 升级后
 //
-//	不重新编译即用新正文）→ ② 本内嵌快照（盘上缺失/损坏/不兼容时兜底，永远可用）
+//	不重新编译即用新正文）→ ② 本内嵌快照（盘上缺失/损坏/不兼容时兜底）
 //
-// → ③ 硬编码红线提示词（最终兜底）。每级降级 slog 记原因。
+// → ③ 硬编码红线提示词（最终兜底）。明确停用或卸载跳过同名内嵌正文，仍保留基础点评合同。
+// 每级读取降级 slog 记原因。
 // 包级变量仅为测试注入缺失场景；生产恒为 k12.BundledSkillsFS()。
 var workFeedbackSkillsFS fs.FS = k12.BundledSkillsFS()
 
@@ -209,6 +209,9 @@ func resolveWorkFeedbackSkill(loader SkillContentLoader, name, embeddedFile stri
 	// ① 盘上 marketplace 版本（优先：可随 hub 演进，不重编译生效）。
 	if loader != nil {
 		raw, err := loader(name)
+		if errors.Is(err, marketplace.ErrSkillDisabled) {
+			return "", "", false
+		}
 		if err != nil {
 			slog.Warn("k12 作品点评：盘上 skill 读取失败，降级内嵌快照", "skill", name, "err", err)
 		} else if diskBody, verr := validateDiskWorkFeedbackSkill(raw, redlineAnchors); verr != nil {
@@ -285,8 +288,7 @@ func skillFrontmatterField(raw, key string) string {
 // compareLooseVersions 宽松比较点分版本号，返回 -1/0/1：剥前缀 v 与预发布后缀
 // （-beta/+meta——所以 min_engine_version "0.5.0" 兼容应用 "0.5.0-beta"，宽松放行）；
 // 数字段按整数比、缺段补 0、非数字段回退字典序；空串视为最低。
-// 与 skill/marketplace.compareSkillVersions 同语义但本地实现——依赖方向裁决见
-// SkillContentLoader 注释：场景 adapter 不 import 平台管理层。
+// 与 skill/marketplace.compareSkillVersions 同语义；用于校验作品点评内容的最低引擎版本。
 func compareLooseVersions(a, b string) int {
 	norm := func(s string) string {
 		s = strings.TrimPrefix(strings.TrimSpace(s), "v")

@@ -30,6 +30,8 @@ type GradingPhysicalCallSpec struct {
 	ExecutionKind k12.GradingExecutionKind `json:"execution_kind,omitempty"`
 	// KnownExecutionFailure 由适配器识别同输入的明确失败执行回执；不用于一般格式或能力校验。
 	KnownExecutionFailure func(string) error `json:"-"`
+	// ReplayResultFailure 只拒绝业务未通过的旧成功回执；新返回值仍完整保存物理成功事实。
+	ReplayResultFailure func(string) error `json:"-"`
 }
 
 type GradingPhysicalCallResult struct {
@@ -1201,15 +1203,20 @@ func (e *durableGradingPhysicalCallExecutor) ExecuteGradingPhysicalCall(
 			if decodeErr != nil {
 				return zero, decodeErr
 			}
+			var executionErr error
 			if spec.KnownExecutionFailure != nil {
-				if executionErr := spec.KnownExecutionFailure(payload); executionErr != nil {
-					if matching.OperationAttempt/1000 >= currentGeneration {
-						return zero, errors.Join(ErrGradingItemInvocationFailed, executionErr)
-					}
-					// 只有已进入新重试代次的确定失败可派生调用，原成功账本保持只读。
-					matching = nil
-					break
+				executionErr = spec.KnownExecutionFailure(payload)
+			}
+			if executionErr == nil && spec.ReplayResultFailure != nil {
+				executionErr = spec.ReplayResultFailure(payload)
+			}
+			if executionErr != nil {
+				if matching.OperationAttempt/1000 >= currentGeneration {
+					return zero, errors.Join(ErrGradingItemInvocationFailed, executionErr)
 				}
+				// 只有已进入新重试代次的确定失败可派生调用，原成功账本保持只读。
+				matching = nil
+				break
 			}
 			e.remember(spec.Operation, matching.InvocationID)
 			return GradingPhysicalCallResult{

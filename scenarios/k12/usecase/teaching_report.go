@@ -94,7 +94,7 @@ func BuildGradingTeachingReport(input GradingTeachingReportInput) (k12.TeachingR
 				canonical = question.StudentAnswer
 			}
 			report.ProblemSources = append(report.ProblemSources, k12.TeachingReportProblemSource{ProblemID: question.ProblemID, ParentProblemID: question.ParentProblemID, AttemptID: question.AttemptID, InputRevision: question.ConfirmedVersion, InputDigest: question.InputDigest, AssessmentDigest: skip.ResultDigest, AnswerState: state, AnswerRaw: raw, AnswerCanonical: canonical})
-			report.Items = append(report.Items, k12.TeachingReportItem{ProblemID: question.ProblemID, DisplayLabel: RecognizedQuestionSourceDisplayLabel(question), ShortTitle: question.Question, Assessment: k12.TeachingReportAssessment{Reason: "problem_skipped"},
+			report.Items = append(report.Items, k12.TeachingReportItem{ProblemID: question.ProblemID, DisplayLabel: RecognizedQuestionSourceDisplayLabel(question), ShortTitle: "本题所求", Assessment: k12.TeachingReportAssessment{Reason: "problem_skipped"},
 				AnswerAnalysis: k12.TeachingReportAnswerAnalysis{State: k12.TeachingReportReferenceUnavailable, UnavailableReason: "暂未提供参考解答"}, OriginalAnswer: k12.TeachingReportOriginalAnswer{State: state, RawText: raw, CanonicalText: canonical}})
 			continue
 		}
@@ -175,7 +175,12 @@ func BuildGradingTeachingReport(input GradingTeachingReportInput) (k12.TeachingR
 			return invalid("answer slots refer to an unrelated problem")
 		}
 	}
-	return k12.NewTeachingReport(report)
+	frozen, err := k12.NewTeachingReport(report)
+	if err != nil {
+		return k12.TeachingReport{}, err
+	}
+	frozen.DeepSections = consolidateGradingReportSections(input.Questions, frozen.DeepSections)
+	return k12.NewTeachingReport(frozen)
 }
 
 func reportObservedAnswerState(state AnswerState) k12.TeachingReportAnswerState {

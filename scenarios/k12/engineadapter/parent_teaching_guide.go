@@ -3,6 +3,7 @@ package engineadapter
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -345,6 +346,9 @@ func resolveParentTeachingSkill(
 func resolveParentTeachingSkillContext(loader SkillContentLoader, spec parentTeachingSkillSpec) (body, source string, snapshot skill.ContextReceipt, ok bool) {
 	if loader != nil {
 		raw, err := loader(spec.name)
+		if errors.Is(err, marketplace.ErrSkillDisabled) {
+			return "", "", skill.ContextReceipt{}, false
+		}
 		if err == nil {
 			if diskBody, validateErr := validateDiskWorkFeedbackSkill(raw, spec.anchors); validateErr == nil {
 				return diskBody, "installed", marketplace.LoadedContextReceiptFromMarkdown(spec.name, string(raw), diskBody), true

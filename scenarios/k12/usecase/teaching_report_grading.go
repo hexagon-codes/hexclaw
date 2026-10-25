@@ -48,7 +48,7 @@ func (o *GradingOrchestrator) freezeGradingTeachingReport(ctx context.Context, r
 			solved.Evidence = item.Grade.Evidence
 		}
 		if solved.Solution == "" || solved.OutOfScope || solved.hasDeterministicProblemIssue() {
-			input.Content = append(input.Content, TeachingReportQuestionContent{ProblemID: q.ProblemID, ShortTitle: q.Question, AnswerAnalysis: k12.TeachingReportAnswerAnalysis{State: k12.TeachingReportReferenceUnavailable, UnavailableReason: "本题尚无可用的参考解答"}})
+			input.Content = append(input.Content, TeachingReportQuestionContent{ProblemID: q.ProblemID, ShortTitle: "本题所求", AnswerAnalysis: k12.TeachingReportAnswerAnalysis{State: k12.TeachingReportReferenceUnavailable, UnavailableReason: firstNonEmpty(solved.ReportUnavailableReason, "本题尚无可用的参考解答")}})
 			continue
 		}
 		var guide ParentTeachingGuide
@@ -82,6 +82,10 @@ func (o *GradingOrchestrator) freezeGradingTeachingReport(ctx context.Context, r
 		if sourceDigest == "" {
 			// 这是已冻结解法的内容身份，不提升原来的数值验证等级。
 			sourceDigest = teachingReportResourceDigest([]byte(solved.Solution))
+		}
+		guide, err = o.deps.attachReportTeachingDiagram(ctx, job.Record.AgentName, q, solved.Solution, sourceDigest, guide)
+		if err != nil {
+			return err
 		}
 		source := TeachingReportContentSource{Source: k12.TeachingReportProblemSource{ProblemID: q.ProblemID, InputRevision: q.ConfirmedVersion, InputDigest: q.InputDigest, SolutionDigest: sourceDigest}, Solution: solved.Solution, Guide: &guide}
 		receipt := assessment.SolveInvocationID

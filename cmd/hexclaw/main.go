@@ -2290,8 +2290,8 @@ Set source only when the material explicitly names a work, title, or another rel
 					{Role: hexagon.RoleSystem, Content: "你是中小学家长辅导助手。只处理用户给出的这一道题及已验算解答，" +
 						"不得改写答案或完整方法，不得声称引用未提供的教材。answer 只能是已验算解答中明确出现的简短最终答案，" +
 						"禁止把整段解答塞入 answer。输出必须是单个 JSON 对象且不要代码围栏；" +
-						"必须且只能包含 answer、full_solution_steps、grade_level_method、likely_mistakes、" +
-						"parent_teaching_sequence、follow_up_questions、checking_method 七个字段，四个复数字段必须是非空字符串数组。" +
+						"字段及类型必须严格遵守本次任务明确给出的输出合同；本次合同要求 report_content 时必须一并输出，" +
+						"未要求时不得增加。full_solution_steps、likely_mistakes、parent_teaching_sequence、follow_up_questions 必须是非空字符串数组。" +
 						"每一项都要针对当前题目，不得输出可套用到任意题的通用建议。"},
 					{Role: hexagon.RoleUser, Content: task},
 				},
@@ -2320,7 +2320,7 @@ Set source only when the material explicitly names a work, title, or another rel
 			resp, err := provider.Complete(k12NonIdempotentLLMContext(cctx), hexagon.CompletionRequest{
 				Model: model,
 				Messages: []hexagon.Message{
-					{Role: hexagon.RoleSystem, Content: "Independently audit the supplied parent tutoring guide against its frozen verified solution and curriculum. Check all seven fields, mathematical examples, explanations and checks. Do not rewrite or generate a solution or guide. Output exactly one PARENT_GUIDE_AUDITS line containing the requested JSON array; incorrect, missing or out-of-scope content must not pass."},
+					{Role: hexagon.RoleSystem, Content: "Independently audit the supplied parent tutoring guide against its frozen verified solution and curriculum. Check every field required by the supplied task contract, including report_content when required, and all mathematical examples, explanations and checks. Do not rewrite or generate a solution or guide. Output exactly one PARENT_GUIDE_AUDITS line containing the requested JSON array; incorrect, missing or out-of-scope content must not pass."},
 					{Role: hexagon.RoleUser, Content: prompt},
 				},
 				Temperature: &temp,
@@ -2459,11 +2459,13 @@ Set source only when the material explicitly names a work, title, or another rel
 		// 盘上 marketplace skill 内容加载闭包：作品点评方法论基座链的第一级（盘上→内嵌→硬编码）。
 		// 每次点评现读盘（不缓存）：hub Install/Refresh 或 seed 升级覆盖盘上文件后，
 		// 无需重编译/重启即用新正文；内容校验（非空/frontmatter/红线锚点/min_engine_version）
-		// 在 engineadapter 侧统一做，此处只负责取字节。marketplace 未启用/未注册时诚实报错，
-		// adapter 记日志并降级内嵌快照。
+		// 在 engineadapter 侧统一做；明确停用/卸载不回退内嵌，其他读取失败沿原兼容路径。
 		k12SkillLoaderFn := func(name string) (string, error) {
 			if mp == nil {
-				return "", fmt.Errorf("skill marketplace 未启用")
+				return "", marketplace.ErrSkillDisabled
+			}
+			if !mp.IsEnabled(name) {
+				return "", marketplace.ErrSkillDisabled
 			}
 			mdSkill, ok := mp.Get(name)
 			if !ok {

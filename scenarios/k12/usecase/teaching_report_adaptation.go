@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 )
@@ -59,7 +60,16 @@ func (d Deps) adaptReusedReportTeaching(ctx context.Context, req GradeRequest, s
 		sourceDigest = teachingReportResourceDigest([]byte(solved.Solution))
 	}
 	auditRequest := ParentTeachingGuideAuditRequest{Request: request, Guide: guide, SourceSolutionDigest: sourceDigest}
-	audited, err := ExecuteGradingPhysicalCall(ctx, GradingPhysicalCallSpec{Operation: k12.GradingItemOperationParentGuide, RequestDigest: modelInvocationResultDigest(struct {
+	audited, err := ExecuteGradingPhysicalCall(ctx, GradingPhysicalCallSpec{Operation: k12.GradingItemOperationParentGuide, ReplayResultFailure: func(payload string) error {
+		var prior ParentTeachingGuideAudit
+		if err := json.Unmarshal([]byte(payload), &prior); err != nil {
+			return err
+		}
+		if prior.Verdict != "VALID" || prior.SourceSolutionDigest != sourceDigest {
+			return fmt.Errorf("report teaching audit did not accept the candidate")
+		}
+		return nil
+	}, RequestDigest: modelInvocationResultDigest(struct {
 		Phase   string
 		Request ParentTeachingGuideAuditRequest
 	}{"report_current_teaching_audit", auditRequest})}, func(callCtx context.Context) (string, error) {
@@ -105,4 +115,23 @@ func deterministicReportContent(guide ParentTeachingGuide) *TeachingReportConten
 	section.Title = "计算过程"
 	section.Blocks = section.Blocks[:len(guide.FullSolutionSteps)]
 	return draft
+}
+
+// deterministicReportUnavailableReason 仅呈现已由本地规则确认的矛盾说明，随原结算冻结。
+func deterministicReportUnavailableReason(solved SolveHomeworkResult) string {
+	if !solved.hasDeterministicProblemIssue() {
+		return ""
+	}
+	hint, ok := deterministicNumericAnswer(solved.Solution)
+	if !ok {
+		return ""
+	}
+	var lines []string
+	for _, line := range strings.Split(hint, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" && !strings.HasPrefix(line, "#") {
+			lines = append(lines, strings.Trim(line, "*"))
+		}
+	}
+	return strings.Join(lines, " ")
 }

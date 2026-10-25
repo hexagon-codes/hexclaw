@@ -31,7 +31,7 @@ func TestDefaultK12GradingBudgetProvidesRunnableOperationalBaseline(t *testing.T
 	want.RecognitionPlanVersion = 2
 	want.RecognizingSeconds = 300
 	want.RecognizingBuckets = K12RecognizingBudgetBucketsConfig{
-		UpTo1ProblemMillis: 60_000, UpTo8ProblemsMillis: 120_000,
+		UpTo1ProblemMillis: 180_000, UpTo8ProblemsMillis: 120_000,
 		UpTo16ProblemsMillis: 300_000, UpTo32ProblemsMillis: 300_000,
 	}
 	want.PhysicalCallCapMillis = 120_000

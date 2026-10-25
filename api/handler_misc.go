@@ -31,6 +31,7 @@ import (
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	"github.com/hexagon-codes/hexclaw/skill"
 	"github.com/hexagon-codes/hexclaw/skill/hub"
+	"github.com/hexagon-codes/hexclaw/skill/lifecycle"
 	"github.com/hexagon-codes/hexclaw/skill/marketplace"
 	"github.com/hexagon-codes/toolkit/util/logger"
 )
@@ -1071,7 +1072,8 @@ func (s *Server) handleUninstallSkill(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) skillEffectiveState(name string, enabled bool) (bool, bool, string) {
-	if s.skillLifecycle != nil {
+	// 旧运行时仍能查询有效状态，但不具备共享服务的热刷新接口。
+	if _, sharedRuntime := s.engine.(lifecycle.Runtime); s.skillLifecycle != nil && sharedRuntime {
 		if state, err := s.skillLifecycle.State(name); err == nil {
 			if !state.Registered && state.Enabled {
 				message := "Skill is installed; refresh to activate"

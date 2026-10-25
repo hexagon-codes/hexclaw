@@ -16,16 +16,17 @@ import (
 // FullSolutionSteps is always derived deterministically from the already-
 // verified solver output before this guide leaves the usecase.
 type ParentTeachingGuide struct {
-	ReportContent          *TeachingReportContentDraft `json:"report_content,omitempty"`
-	TeachingDiagrams       []k12.TeachingDiagramAsset  `json:"teaching_diagrams,omitempty"`
-	SkillContextReceipts   []skill.ContextReceipt      `json:"skill_context_receipts,omitempty"`
-	Answer                 string                      `json:"answer"`
-	FullSolutionSteps      []string                    `json:"full_solution_steps"`
-	GradeLevelMethod       string                      `json:"grade_level_method"`
-	LikelyMistakes         []string                    `json:"likely_mistakes"`
-	ParentTeachingSequence []string                    `json:"parent_teaching_sequence"`
-	FollowUpQuestions      []string                    `json:"follow_up_questions"`
-	CheckingMethod         string                      `json:"checking_method"`
+	ReportContent        *TeachingReportContentDraft `json:"report_content,omitempty"`
+	TeachingDiagrams     []k12.TeachingDiagramAsset  `json:"teaching_diagrams,omitempty"`
+	SkillContextReceipts []skill.ContextReceipt      `json:"skill_context_receipts,omitempty"`
+	// Answer保留已验证解答的完整明确答案；无明确答案段的历史解答仍沿既有锚定合同。
+	Answer                 string   `json:"answer"`
+	FullSolutionSteps      []string `json:"full_solution_steps"`
+	GradeLevelMethod       string   `json:"grade_level_method"`
+	LikelyMistakes         []string `json:"likely_mistakes"`
+	ParentTeachingSequence []string `json:"parent_teaching_sequence"`
+	FollowUpQuestions      []string `json:"follow_up_questions"`
+	CheckingMethod         string   `json:"checking_method"`
 }
 
 // ParentTeachingGuideRequest carries one exact recognized problem and its
@@ -181,6 +182,18 @@ func finalizeParentTeachingGuide(
 	// The solver remains the immutable method authority. The explanatory
 	// generator cannot replace, abbreviate, or silently alter its result.
 	guide.FullSolutionSteps = verifiedFullSolutionSteps(verifiedSolution)
+	// 明确答案段是完整结论的事实来源，不能由讲解模型摘掉所求量或否定条件。
+	if answer, explicit := explicitVerifiedAnswerScope(verifiedSolution); explicit && strings.TrimSpace(answer) != "" {
+		candidate := guide.Answer
+		if content, labeled := splitExplicitAnswerLabel(candidate); labeled {
+			candidate = content
+		}
+		trustedText := strings.TrimRight(normalizeAnswerAnchorText(answer), "。.!！;；")
+		candidateText := strings.TrimRight(normalizeAnswerAnchorText(candidate), "。.!！;；")
+		if trustedText != candidateText {
+			guide.Answer = strings.TrimSpace(answer)
+		}
+	}
 	if err := validateParentTeachingGuide(guide); err != nil {
 		return ParentTeachingGuide{}, fmt.Errorf(
 			"%w: parent teaching guide: %v",

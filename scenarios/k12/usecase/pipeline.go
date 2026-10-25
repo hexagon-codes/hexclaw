@@ -245,6 +245,7 @@ type GradeResult struct {
 // SolveResult2 解题分叉结果（空白题只求解，不批改）。
 // 复用证据对象体系，但不产 GradeOutcome / 不入库。
 type SolveHomeworkResult struct {
+	ReportUnavailableReason string `json:"report_unavailable_reason,omitempty"`
 	// ReportContent 冻结本地确定性讲解，恢复不重读宿主当前表达规则。
 	ReportContent     *TeachingReportContentDraft `json:"report_content,omitempty"`
 	reportLocalSource bool
@@ -327,6 +328,9 @@ func (d Deps) solveHomeworkProblem(ctx context.Context, req GradeRequest) (Solve
 		}, nil
 	}
 	result := SolveHomeworkResult{Solution: sr.Solution, Evidence: sr.Evidence, Generation: sr.Generation, ProblemIssue: sr.ProblemIssue, CurriculumUnmapped: unmapped}
+	if req.SolveOutputVersion == SolveOutputWithTeachingReportV2 && result.hasDeterministicProblemIssue() {
+		result.ReportUnavailableReason = deterministicReportUnavailableReason(result)
+	}
 	if req.SolveOutputVersion == SolveOutputWithTeachingReportV2 && result.Generation == nil {
 		request := d.parentTeachingGuideRequest(ctx, req, result, GradeOutcome{})
 		request.ReportRequired = false

@@ -36,7 +36,7 @@ func (d Deps) textSolveTeachingReport(ctx context.Context, final k12.TextSolveFi
 	content := TeachingReportQuestionContent{ProblemID: final.FinalizationID, ShortTitle: "解题结果"}
 	var sections []k12.TeachingReportDeepSection
 	if solved.Solution == "" || solved.OutOfScope || solved.hasDeterministicProblemIssue() {
-		content.AnswerAnalysis = k12.TeachingReportAnswerAnalysis{State: k12.TeachingReportReferenceUnavailable, UnavailableReason: "本题尚无可用的参考解答"}
+		content.AnswerAnalysis = k12.TeachingReportAnswerAnalysis{State: k12.TeachingReportReferenceUnavailable, UnavailableReason: firstNonEmpty(solved.ReportUnavailableReason, "本题尚无可用的参考解答")}
 	} else {
 		var guide ParentTeachingGuide
 		if solved.ReportContent != nil {

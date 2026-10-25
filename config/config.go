@@ -126,7 +126,7 @@ func DefaultK12GradingBudget() K12GradingBudgetConfig {
 		},
 		ItemConcurrency: 2,
 		RecognizingBuckets: K12RecognizingBudgetBucketsConfig{
-			UpTo1ProblemMillis:   60_000,
+			UpTo1ProblemMillis:   180_000,
 			UpTo8ProblemsMillis:  120_000,
 			UpTo16ProblemsMillis: 300_000,
 			UpTo32ProblemsMillis: 300_000,

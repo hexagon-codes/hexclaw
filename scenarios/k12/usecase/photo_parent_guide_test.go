@@ -345,18 +345,20 @@ func (intermediateResultAnswerGuide) GenerateParentTeachingGuide(
 	}, nil
 }
 
-func TestBlankWorksheetGuideRejectsIntermediateResultAsFinalAnswer(t *testing.T) {
+func TestBlankWorksheetGuideRestoresVerifiedAnswerInsteadOfIntermediateResult(t *testing.T) {
 	d, _ := newPipeline(t, blankWorksheetSolver{evidenceType: EvidenceHeuristic}, fakeGrader{}, nil)
 	d.ParentTeachingGuide = intermediateResultAnswerGuide{}
 
 	result, err := d.SolveBlankWorksheetProblem(context.Background(), GradeRequest{
 		AgentName: "mingming", Subject: "数学", Grade: "五年级上", Problem: "4.5×2=",
 	})
-	if err == nil {
-		t.Fatalf("intermediate result was accepted as final answer: %#v", result.Guide)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(err.Error(), "answer") || !strings.Contains(err.Error(), "verified solution") {
-		t.Fatalf("unanchored answer error=%v, want explicit solver-anchor failure", err)
+	if normalizeAnswerAnchorText(result.Guide.Answer) != "9" ||
+		result.Solved.Solution != blankWorksheetVerifiedSolution("4.5×2=") ||
+		!reflect.DeepEqual(result.Guide.FullSolutionSteps, blankWorksheetVerifiedSteps("4.5×2=")) {
+		t.Fatalf("guide did not preserve the verified answer and solution: %#v", result)
 	}
 }
 
