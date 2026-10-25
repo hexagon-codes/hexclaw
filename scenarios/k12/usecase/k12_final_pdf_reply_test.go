@@ -266,6 +266,7 @@ func (f *finalReplyHTTPTransport) SendPrepared(ctx context.Context, r k12.Delive
 func TestK12FinalPDFSharedSourceAndReplaySQLite(t *testing.T) {
 	f := prepareCompletedSourceFixtureForIntent(t, k12.ImageTaskIntentBlankWorksheet)
 	d := f.o.deps
+	d.ExecutionSummaryFooter = adapter.DingTalkExecutionSummaryFooter
 	renderer := &finalReplyPDFRenderer{}
 	d.Renderer = renderer
 	transport := newFinalReplyHTTPTransport(t, f.store)
@@ -305,6 +306,7 @@ func TestK12FinalPDFAutomaticRoutePreservesExecutionSummarySQLite(t *testing.T) 
 	f := prepareCompletedSourceFixtureForIntent(t, k12.ImageTaskIntentBlankWorksheet,
 		completedSourceImageFixture{data: validPNGFixture(t, "automatic-final-language"), messageLocale: "en"})
 	d := f.o.deps
+	d.ExecutionSummaryFooter = adapter.DingTalkExecutionSummaryFooter
 	renderer := &finalReplyPDFRenderer{}
 	transport := newFinalReplyHTTPTransport(t, f.store)
 	d.Renderer, d.Delivery = renderer, transport
@@ -358,6 +360,7 @@ func TestK12FinalPDFSourceDigestFamiliesSQLite(t *testing.T) {
 			}
 			f := prepareCompletedSourceFixtureForIntent(t, k12.ImageTaskIntentBlankWorksheet, source)
 			d := f.o.deps
+			d.ExecutionSummaryFooter = adapter.DingTalkExecutionSummaryFooter
 			renderer := &finalReplyPDFRenderer{}
 			d.Renderer = renderer
 			transport := newFinalReplyHTTPTransport(t, f.store)
@@ -451,6 +454,7 @@ func TestK12FinalPDFPreparationAndVisibleBoundariesSQLite(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			f := prepareCompletedSourceFixtureForIntent(t, k12.ImageTaskIntentBlankWorksheet)
 			d := f.o.deps
+			d.ExecutionSummaryFooter = adapter.DingTalkExecutionSummaryFooter
 			renderer := &finalReplyPDFRenderer{}
 			d.Renderer = renderer
 			transport := newFinalReplyHTTPTransport(t, f.store)

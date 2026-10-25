@@ -31,6 +31,7 @@ var inv012AllowedImportPrefixes = []string{
 	"github.com/hexagon-codes/hexclaw/internal/elementarymath", // 小学数学来源等价判断
 	"github.com/hexagon-codes/hexclaw/internal/inputlimits",    // 领域文字字段长度校验与历史值兼容
 	"github.com/hexagon-codes/hexclaw/internal/mathtext",       // 数学语义与现有周练排版投影
+	"github.com/hexagon-codes/hexclaw/internal/requestcancel",  // 仅标准库的主动停止与传输中断合同
 	"github.com/hexagon-codes/hexclaw/internal/sqliteutil",     // 存储层完整 SQLite 事务的 BUSY/BUSY_SNAPSHOT 有界重试
 	"github.com/hexagon-codes/hexclaw/internal/upstreamerr",    // 已知上游响应与结果未知的错误分类契约
 	"github.com/hexagon-codes/hexclaw/knowledge",               // 教材来源证明与现有知识摄取事实
@@ -43,6 +44,8 @@ var inv012AllowedImportPrefixes = []string{
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/storage",      // 用例层 → 存储层
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/viewcontract", // BUG-20260802-022：仅标准库的 frozen wire schema leaf
 	"github.com/hexagon-codes/hexclaw/skill",                      // 冻结教学上下文与已加载技能的事实回执
+	"github.com/hexagon-codes/hexclaw/skill/marketplace",          // 只读资源字节与资源包清单合同
+	"github.com/hexagon-codes/hexclaw/storage",                    // 原回合助手消息与同一事务的持久化合同
 	"github.com/hexagon-codes/toolkit/util/idgen",                 // 存储层 ID 生成
 	"github.com/hexagon-codes/toolkit/util/logger",                // Provider 调用的日志上下文与故障记录
 	"golang.org/x/image/webp",                                     // 领域层规范化页面需要注册 WebP 解码器

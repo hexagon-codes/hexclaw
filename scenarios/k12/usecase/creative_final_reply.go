@@ -40,7 +40,11 @@ func (d Deps) PrepareAndSendCreativeFinalReply(ctx context.Context, view Creativ
 		return k12.DeliveryBatch{}, false, err
 	}
 	ctx = d.WithCreativeWorkDeliveryDisclosure(ctx, view, message.Content)
-	frozenLocale, disclosure := CreativeWorkDeliveryDisclosure(ctx, message.Content)
+	frozenLocale, facts, proven := CreativeWorkDeliveryExecutionSummary(ctx, message.Content)
+	var disclosure string
+	if proven {
+		disclosure = d.executionSummaryFooter(frozenLocale, facts)
+	}
 	if locale == "" {
 		locale = frozenLocale
 	}

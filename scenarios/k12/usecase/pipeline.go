@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hexagon-codes/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/messagecontent"
 	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/scenario"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
@@ -28,7 +28,10 @@ type Deps struct {
 	// DeliveryLocale 只在新显式投递时读取显示语言，冻结后重放不再读取。
 	DeliveryLocale func() string
 	// ReplyAttachments 读取原助手元数据中已冻结的其他附件；不求解、生成或重新路由。
-	ReplyAttachments func(context.Context, string, string) ([]adapter.Attachment, error)
+	ReplyAttachments func(context.Context, string, string) ([]FrozenReplyAttachment, error)
+	// ExecutionSummaryFooter 和 ReplyMetadataFooter 由装配层投影渠道说明，用例只提供事实。
+	ExecutionSummaryFooter func(string, messagecontent.ExecutionSummary) string
+	ReplyMetadataFooter    func(string, map[string]json.RawMessage) string
 	// ImageTaskResult 读取同一领域终态及冻结调用证据，供新投递生成只读摘要。
 	ImageTaskResult func(context.Context, string, string) (ImageTaskResult, error)
 	Solver          Solver

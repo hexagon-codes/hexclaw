@@ -11,7 +11,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/internal/mathtext"
 	"github.com/hexagon-codes/hexclaw/messagecontent"
 	"github.com/hexagon-codes/hexclaw/records"
@@ -379,7 +378,7 @@ func (d Deps) finalReplyExecutionSummary(ctx context.Context, artifact k12.Gradi
 			facts.Steps = append(facts.Steps, messagecontent.ExecutionSummaryStep{Key: key, Status: "success"})
 		}
 	}
-	return adapter.DingTalkExecutionSummaryFooter(dispatch.OperationRouteRequest.MessageLocale, facts), nil
+	return d.executionSummaryFooter(dispatch.OperationRouteRequest.MessageLocale, facts), nil
 }
 
 // 旧资产的验算证明继续用于答案资格；当前工具披露只采用本题本任务的实际执行回执。

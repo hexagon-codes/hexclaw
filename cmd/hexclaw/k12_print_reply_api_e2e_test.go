@@ -364,7 +364,7 @@ func TestK12PrintReplyAPIOriginalTurnAndRecovery(t *testing.T) {
 	if err != nil || ref.ByteDigest != frozen.Render.ByteDigest || attachment.ContentDigest != "sha256:"+frozen.Render.ByteDigest {
 		t.Fatalf("recovered attachment identity changed: ref=%+v err=%v", ref, err)
 	}
-	reader, err := attachment.Source.OpenReader(ctx)
+	reader, err := attachment.OpenReader(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}

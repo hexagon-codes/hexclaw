@@ -3,6 +3,7 @@ package usecase
 import (
 	"context"
 	"errors"
+	"io"
 	"strings"
 
 	"github.com/hexagon-codes/hexclaw/messagecontent"
@@ -51,6 +52,13 @@ type DeliveryAttachmentIdentity struct {
 	Name          string
 	MIME          string
 	ContentDigest string
+}
+
+// FrozenReplyAttachment 只携带冻结附件身份及延迟读取能力，不包含渠道运行时类型。
+type FrozenReplyAttachment struct {
+	DeliveryAttachmentIdentity
+	Size       int64
+	OpenReader func(context.Context) (io.ReadCloser, error) `json:"-"`
 }
 
 // DeliveryMessage 是一个投递批次为全部已解析目标冻结的通道中立源消息。

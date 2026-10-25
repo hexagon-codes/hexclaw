@@ -48,7 +48,27 @@ type Option func(*usecase.Deps)
 
 // WithReplyAttachments 将宿主的冻结媒体读取接到同一原回复批次，领域不依赖媒体存储。
 func WithReplyAttachments(resolve func(context.Context, string, string) ([]adapter.Attachment, error)) Option {
-	return func(d *usecase.Deps) { d.ReplyAttachments = resolve }
+	return func(d *usecase.Deps) {
+		if resolve == nil {
+			d.ReplyAttachments = nil
+			return
+		}
+		d.ReplyAttachments = func(ctx context.Context, owner, metadata string) ([]usecase.FrozenReplyAttachment, error) {
+			attachments, err := resolve(ctx, owner, metadata)
+			if err != nil {
+				return nil, err
+			}
+			frozen := make([]usecase.FrozenReplyAttachment, 0, len(attachments))
+			for _, attachment := range attachments {
+				item := usecase.FrozenReplyAttachment{DeliveryAttachmentIdentity: usecase.DeliveryAttachmentIdentity{Name: attachment.Name, MIME: attachment.Mime, ContentDigest: attachment.ContentDigest}, Size: attachment.Size}
+				if attachment.Source != nil {
+					item.OpenReader = attachment.Source.OpenReader
+				}
+				frozen = append(frozen, item)
+			}
+			return frozen, nil
+		}
+	}
 }
 
 // WithInsights 注入学情信号写入 adapter（memory 反思管线）。
@@ -262,6 +282,8 @@ func WireInto(ctx context.Context, reg *scenario.Registry, db *sql.DB, solveSkil
 	solveAdapter := engineadapter.NewSolveAdapter(solveSkill)
 
 	deps := usecase.Deps{
+		ExecutionSummaryFooter:   adapter.DingTalkExecutionSummaryFooter,
+		ReplyMetadataFooter:      ReplyMetadataFooter,
 		Solver:                   solveAdapter,
 		Grader:                   solveAdapter,
 		VerifiedGrader:           solveAdapter,

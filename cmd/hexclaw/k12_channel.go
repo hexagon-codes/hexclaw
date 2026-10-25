@@ -30,6 +30,7 @@ import (
 	agentrouter "github.com/hexagon-codes/hexclaw/router"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/apihttp"
+	k12assembly "github.com/hexagon-codes/hexclaw/scenarios/k12/assembly"
 	k12usecase "github.com/hexagon-codes/hexclaw/scenarios/k12/usecase"
 )
 
@@ -326,7 +327,7 @@ func (d *k12IMDeliverer) PrepareMessageForTargets(
 				}
 			}
 		}
-		disclosureLocale, disclosure := k12usecase.CreativeWorkDeliveryDisclosure(ctx, canonical)
+		disclosureLocale, disclosure := k12assembly.CreativeWorkDeliveryDisclosure(ctx, canonical)
 		if target.Platform == "dingtalk" {
 			if normalized := mathtext.NormalizeDingTalkMarkdown(targetProjection); normalized != targetProjection {
 				targetProjection = normalized

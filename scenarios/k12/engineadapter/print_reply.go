@@ -72,7 +72,11 @@ func NewPrintReplyResolver(deps usecase.Deps) func(context.Context, *adapter.Mes
 			}
 			if !seen[ref.ArtifactID] {
 				seen[ref.ArtifactID] = true
-				attachments = append(attachments, attachment)
+				attachments = append(attachments, adapter.Attachment{
+					ID: actual.ArtifactID, Type: "file", Name: attachment.Name, Mime: attachment.MIME,
+					Size: attachment.Size, ContentDigest: attachment.ContentDigest, URL: actual.URL,
+					Source: &adapter.AttachmentSource{OpenReader: attachment.OpenReader},
+				})
 				source.Artifacts = append(source.Artifacts, actual)
 			}
 		}

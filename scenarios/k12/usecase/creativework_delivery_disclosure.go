@@ -4,7 +4,6 @@ import (
 	"context"
 	"strings"
 
-	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/messagecontent"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 )
@@ -75,6 +74,7 @@ type creativeWorkDeliveryDisclosure struct {
 	canonicalDigest string
 	locale          string
 	markdown        string
+	facts           messagecontent.ExecutionSummary
 }
 
 // WithCreativeWorkDeliveryDisclosure 仅从当前作品来源读取同代次的真实执行事实。
@@ -156,7 +156,7 @@ func WithCreativeWorkResultDeliveryDisclosure(ctx context.Context, view Creative
 		}
 	}
 	// 点评方法来源属于加载依据，不能作为已执行 Skill 或 MCP 的回执。
-	markdown := adapter.DingTalkExecutionSummaryFooter(locale, facts)
+	markdown := messagecontent.RenderExecutionSummary(locale, facts)
 	if markdown == "" {
 		return ctx
 	}
@@ -164,7 +164,7 @@ func WithCreativeWorkResultDeliveryDisclosure(ctx context.Context, view Creative
 		ctx = context.Background()
 	}
 	return context.WithValue(ctx, creativeWorkDeliveryDisclosureKey{}, creativeWorkDeliveryDisclosure{
-		canonicalDigest: deliveryDigest(strings.TrimSpace(canonical)), locale: locale, markdown: markdown,
+		canonicalDigest: deliveryDigest(strings.TrimSpace(canonical)), locale: locale, markdown: markdown, facts: facts,
 	})
 }
 
@@ -178,4 +178,23 @@ func CreativeWorkDeliveryDisclosure(ctx context.Context, canonical string) (loca
 		return "", ""
 	}
 	return disclosure.locale, disclosure.markdown
+}
+
+// CreativeWorkDeliveryExecutionSummary 只向装配层提供同一正文的执行事实。
+func CreativeWorkDeliveryExecutionSummary(ctx context.Context, canonical string) (string, messagecontent.ExecutionSummary, bool) {
+	if ctx == nil {
+		return "", messagecontent.ExecutionSummary{}, false
+	}
+	disclosure, ok := ctx.Value(creativeWorkDeliveryDisclosureKey{}).(creativeWorkDeliveryDisclosure)
+	if !ok || disclosure.canonicalDigest != deliveryDigest(strings.TrimSpace(canonical)) {
+		return "", messagecontent.ExecutionSummary{}, false
+	}
+	return disclosure.locale, disclosure.facts, true
+}
+
+func (d Deps) executionSummaryFooter(locale string, facts messagecontent.ExecutionSummary) string {
+	if d.ExecutionSummaryFooter != nil {
+		return d.ExecutionSummaryFooter(locale, facts)
+	}
+	return messagecontent.RenderExecutionSummary(locale, facts)
 }

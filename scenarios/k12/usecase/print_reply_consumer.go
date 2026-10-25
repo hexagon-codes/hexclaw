@@ -11,7 +11,6 @@ import (
 	"io"
 	"reflect"
 
-	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/internal/requestcancel"
 	"github.com/hexagon-codes/hexclaw/messagecontent"
 	"github.com/hexagon-codes/hexclaw/records"
@@ -202,10 +201,10 @@ func (d Deps) SendConversationPrintReply(ctx context.Context, source k12.Convers
 			return k12.DeliveryBatch{}, fmt.Errorf("frozen reply attachments are missing")
 		}
 		for _, attachment := range attachments {
-			if attachment.Source == nil || attachment.Source.OpenReader == nil {
+			if attachment.OpenReader == nil {
 				return k12.DeliveryBatch{}, fmt.Errorf("frozen reply attachment source is unavailable")
 			}
-			reader, err := attachment.Source.OpenReader(ctx)
+			reader, err := attachment.OpenReader(ctx)
 			if err != nil {
 				return k12.DeliveryBatch{}, err
 			}
@@ -217,22 +216,18 @@ func (d Deps) SendConversationPrintReply(ctx context.Context, source k12.Convers
 			if int64(len(raw)) != attachment.Size || "sha256:"+hex.EncodeToString(sum[:]) != attachment.ContentDigest {
 				return k12.DeliveryBatch{}, fmt.Errorf("frozen reply attachment digest mismatch")
 			}
-			message.Attachments = append(message.Attachments, DeliveryAttachment{Name: attachment.Name, MIME: attachment.Mime, Data: raw})
+			message.Attachments = append(message.Attachments, DeliveryAttachment{Name: attachment.Name, MIME: attachment.MIME, Data: raw})
 		}
 	}
 	message.Source, err = finalReplySource(request, message)
 	if err != nil {
 		return k12.DeliveryBatch{}, err
 	}
-	reply := &adapter.Reply{Content: record.Content, Metadata: make(map[string]string)}
-	for key, raw := range savedMetadata {
-		var value string
-		if json.Unmarshal(raw, &value) == nil {
-			reply.Metadata[key] = value
-		}
+	var suffix string
+	if d.ReplyMetadataFooter != nil {
+		suffix = d.ReplyMetadataFooter(source.Locale, savedMetadata)
 	}
-	_ = json.Unmarshal(savedMetadata["tool_calls"], &reply.ToolCalls)
-	if suffix := adapter.DingTalkReplyFooter(reply, source.Locale); suffix != "" {
+	if suffix != "" {
 		message.Source.DingTalkSuffix = suffix
 		projected := message
 		projected.Content += "\n\n" + suffix

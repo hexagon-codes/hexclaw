@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/scenario"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/curriculum"
@@ -31,7 +32,8 @@ func newDataDeps(t *testing.T, agents ...string) usecase.Deps {
 		t.Fatal(err)
 	}
 	return usecase.Deps{
-		Records: k12storage.NewStore(db, reg.Records), Constraint: cur,
+		ExecutionSummaryFooter: adapter.DingTalkExecutionSummaryFooter,
+		Records:                k12storage.NewStore(db, reg.Records), Constraint: cur,
 		TextbookOwnerID: "desktop-user",
 		Now:             func() int64 { return 1000 },
 		WorkFeedbackRoute: func(
