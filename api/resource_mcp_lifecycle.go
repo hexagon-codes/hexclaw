@@ -122,14 +122,14 @@ func (s *Server) installMCPEntry(ctx context.Context, entry hub.ValidatedMCPServ
 				if previous.Command != candidate.Command || !reflect.DeepEqual(previous.Args, candidate.Args) || !reflect.DeepEqual(previous.Env, candidate.Env) {
 					return nil, fmt.Errorf("MCP server already has different saved configuration")
 				}
+				s.rememberMCPServerConfig(*previous)
 				return nil, nil
 			}
 			if err := s.cfgWriter.AppendMCPServer(candidate.Name, candidate.Transport, candidate.Command, candidate.Args, candidate.Env, ""); err != nil {
 				return nil, err
 			}
-		} else {
-			s.rememberMCPServerConfig(candidate)
 		}
+		s.rememberMCPServerConfig(candidate)
 		return &hexmcp.ServerConfig{Name: candidate.Name, Transport: candidate.Transport, Command: candidate.Command, Args: candidate.Args, Env: candidate.Env, Enabled: true}, nil
 	})
 	if err != nil {
@@ -231,7 +231,8 @@ func (s *Server) ManageMCP(ctx context.Context, action, name string) (*skill.Res
 						return nil, err
 					}
 				}
-			} else if s.cfg != nil {
+			}
+			if s.cfg != nil {
 				s.cfgMu.Lock()
 				var retained []config.MCPServerConfig
 				for _, cfg := range s.cfg.MCP.Servers {
