@@ -287,6 +287,9 @@ func findMatchingBacktickRun(s string, from, runLength int) int {
 func convertSegment(s string) string {
 	// 仅还原明确的空白编码；代码与 URL 已由调用方隔离，数学命令保持原意。
 	s = strings.NewReplacer(`\u3000`, "　", `\n\(`, "\n\\(", `\n\[`, "\n\\[", `\n=`, "\n=", `\n答：`, "\n答：", `\n答:`, "\n答:").Replace(s)
+	// 先处理成对的双转义定界符，避免逐个剥离时遗留两侧反斜杠。
+	s = stripDelimited(s, `\\(`, `\\)`)
+	s = stripDelimited(s, `\\[`, `\\]`)
 	s = stripDelimited(s, `\(`, `\)`)
 	s = stripDelimited(s, `\[`, `\]`)
 	s = stripDollarMath(s)
@@ -436,6 +439,9 @@ func convertMath(s string, math bool) string {
 	s = strings.ReplaceAll(s, `^\circ`, "°")
 	s = latexCommandRe.ReplaceAllStringFunc(s, func(m string) string {
 		name := m[1:]
+		if math && (name == "square" || name == "Box") {
+			return "□"
+		}
 		if rep, ok := latexSymbols[name]; ok {
 			return rep
 		}
@@ -475,7 +481,7 @@ func isKnownDoubleEscapedMathToken(name string) bool {
 	if _, ok := latexSymbols[name]; ok {
 		return true
 	}
-	if name == "begin" || name == "end" || name == "circ" {
+	if name == "begin" || name == "end" || name == "circ" || name == "square" || name == "Box" {
 		return true
 	}
 	for _, command := range structCmds {
@@ -642,6 +648,16 @@ func expandStructural(s string, math bool) string {
 			continue
 		}
 		if out, next, ok := expandStructuralAt(s, i, math); ok {
+			// 展开后以字母开头时保留前一命令的词法边界，避免 times 与 x 拼成 timesx。
+			if len(out) > 0 && (out[0] >= 'a' && out[0] <= 'z' || out[0] >= 'A' && out[0] <= 'Z') {
+				start := i
+				for start > 0 && (s[start-1] >= 'a' && s[start-1] <= 'z' || s[start-1] >= 'A' && s[start-1] <= 'Z') {
+					start--
+				}
+				if start > 0 && start < i && s[start-1] == '\\' {
+					b.WriteByte(' ')
+				}
+			}
 			fraction := strings.HasPrefix(s[i:], `\frac`) || strings.HasPrefix(s[i:], `\dfrac`) || strings.HasPrefix(s[i:], `\tfrac`)
 			if fraction {
 				prefix := strings.TrimRightFunc(s[:i], unicode.IsSpace)
