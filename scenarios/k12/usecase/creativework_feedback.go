@@ -30,8 +30,32 @@ type WorkFeedbackRequest struct {
 	ContentMarkdown    string // 最新版本文字内容（写作）
 	PartialContent     bool   // 只评价可靠片段，不生成整篇结论或完整参考稿
 	ContentLimitations string
-	SourceAssetID      string // 最新版本原图（美术）
-	Grade              string // 生效年级（约束点评口径）
+	SourceAssetID      string                       // 最新版本原图（美术）
+	Grade              string                       // 生效年级（约束点评口径）
+	FrozenContext      *WorkFeedbackContextSnapshot `json:"frozen_context,omitempty"`
+}
+
+// WorkFeedbackContextSnapshot 保存本次实际方法及完整提示正文，不依赖后续安装目录。
+type WorkFeedbackContextSnapshot struct {
+	Version       int    `json:"version"`
+	Subject       string `json:"subject"`
+	Prompt        string `json:"prompt"`
+	SkillStamp    string `json:"skill_stamp"`
+	ContentDigest string `json:"content_digest"`
+}
+
+// Validate 核对本次实际提示正文，避免在供应商调用已发送后才发现本地快照损坏。
+func (s WorkFeedbackContextSnapshot) Validate() error {
+	sum := sha256.Sum256([]byte(s.Prompt))
+	if s.Version != 1 || s.Subject == "" || s.Prompt == "" || s.ContentDigest != "sha256:"+hex.EncodeToString(sum[:]) {
+		return fmt.Errorf("work feedback context snapshot is invalid")
+	}
+	return nil
+}
+
+// WorkFeedbackContextFreezer 在持久调用准备前解析方法内容；旧生成器保持原兼容行为。
+type WorkFeedbackContextFreezer interface {
+	FreezeWorkFeedbackContext(context.Context, WorkFeedbackRequest) (WorkFeedbackRequest, error)
 }
 
 // WorkFeedbackOutput 是作品点评生成结果：点评正文 + 方法论基座来源戳。
@@ -221,6 +245,15 @@ func (d Deps) GenerateWorkFeedbackCommand(
 	if generation.Status == k12.WorkFeedbackFailed {
 		return CreativeWorkView{}, fmt.Errorf("%w: %s", ErrSolveFailed, generation.FailureReason)
 	}
+	if generation.RequestSnapshotJSON != "" {
+		if err := json.Unmarshal([]byte(generation.RequestSnapshotJSON), &req); err != nil {
+			return CreativeWorkView{}, fmt.Errorf("work feedback request snapshot: %w", err)
+		}
+		if req.FrozenContext == nil {
+			_, _ = d.Records.FailWorkFeedbackGeneration(context.WithoutCancel(ctx), agentName, generation.GenerationID, "work feedback context snapshot is missing")
+			return CreativeWorkView{}, fmt.Errorf("work feedback context snapshot is missing")
+		}
+	}
 	generation, err = d.Records.MarkWorkFeedbackGenerationRunning(
 		ctx, agentName, generation.GenerationID,
 	)
@@ -242,7 +275,7 @@ func (d Deps) GenerateWorkFeedbackCommand(
 	invocationVersion := last
 	invocationVersion.VersionID = generation.GenerationID
 
-	invocation, replay, err := d.prepareWorkFeedbackInvocation(ctx, v, invocationVersion, req, generation, legacyVersionID)
+	invocation, replay, err := d.prepareWorkFeedbackInvocation(ctx, v, invocationVersion, &req, generation, legacyVersionID)
 	if err != nil {
 		_, _ = d.Records.FailWorkFeedbackGeneration(
 			context.WithoutCancel(ctx), agentName, generation.GenerationID, err.Error(),
@@ -253,6 +286,17 @@ func (d Deps) GenerateWorkFeedbackCommand(
 	if replay != nil {
 		out = *replay
 	} else {
+		// 快照恢复可替换请求字段，实际发送前仍使用原有资产归属规则。
+		if err := validateWorkAssetOwner(agentName, req.SourceAssetID); err != nil {
+			_, _ = d.Records.FailWorkFeedbackGeneration(context.WithoutCancel(ctx), agentName, generation.GenerationID, err.Error())
+			return CreativeWorkView{}, err
+		}
+		if req.FrozenContext != nil {
+			if err := req.FrozenContext.Validate(); err != nil {
+				_, _ = d.Records.FailWorkFeedbackGeneration(context.WithoutCancel(ctx), agentName, generation.GenerationID, err.Error())
+				return CreativeWorkView{}, err
+			}
+		}
 		providerCtx := ctx
 		if invocation != nil {
 			now := time.Now().Unix()
@@ -504,7 +548,7 @@ func (d Deps) prepareWorkFeedbackInvocation(
 	ctx context.Context,
 	work CreativeWorkView,
 	version k12.CreativeWorkVersion,
-	req WorkFeedbackRequest,
+	req *WorkFeedbackRequest,
 	generation k12.WorkFeedbackGeneration,
 	legacyVersionID string,
 ) (*k12.ImageTaskInvocation, *WorkFeedbackOutput, error) {
@@ -526,7 +570,7 @@ func (d Deps) prepareWorkFeedbackInvocation(
 	}
 	operationKey := "work:" + work.Record.RecordID + ":version:" +
 		version.VersionID + ":feedback"
-	requestDigest := digestJSON(req)
+	requestDigest := digestJSON(*req)
 	preparedAt := time.Now()
 	deadlineAt := preparedAt.Add(time.Duration(k12.ImageTaskAutomaticBudgetSeconds) * time.Second).Unix()
 	if window, ok := imageTaskAutomaticWindowFromContext(ctx); ok {
@@ -626,6 +670,36 @@ func (d Deps) prepareWorkFeedbackInvocation(
 	route = k12.NormalizeImageTaskRouteSnapshot(route)
 	if err := route.Validate(); err != nil {
 		return nil, nil, err
+	}
+	// 已有物理调用在上方按原账本恢复；只有新调用可首次冻结当前方法，避免补造旧历史。
+	if generation.RequestSnapshotJSON == "" {
+		if freezer, ok := d.Solver.(WorkFeedbackContextFreezer); ok {
+			frozen, freezeErr := freezer.FreezeWorkFeedbackContext(ctx, *req)
+			if freezeErr != nil {
+				return nil, nil, freezeErr
+			}
+			if frozen.FrozenContext == nil {
+				return nil, nil, fmt.Errorf("work feedback context snapshot is missing")
+			}
+			if err := frozen.FrozenContext.Validate(); err != nil {
+				return nil, nil, err
+			}
+			if err := validateWorkAssetOwner(work.Record.AgentName, frozen.SourceAssetID); err != nil {
+				return nil, nil, err
+			}
+			raw, marshalErr := json.Marshal(frozen)
+			if marshalErr != nil {
+				return nil, nil, marshalErr
+			}
+			stored, saveErr := d.Records.FreezeWorkFeedbackGenerationRequest(ctx, work.Record.AgentName, generation.GenerationID, string(raw))
+			if saveErr != nil {
+				return nil, nil, saveErr
+			}
+			if err := json.Unmarshal([]byte(stored), req); err != nil {
+				return nil, nil, fmt.Errorf("work feedback request snapshot: %w", err)
+			}
+			requestDigest = digestJSON(*req)
+		}
 	}
 	snapshot := config.ReadAgentInstructions()
 	route.ParentInstructions = snapshot

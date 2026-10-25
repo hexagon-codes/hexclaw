@@ -181,6 +181,7 @@ func MigrateHexbakOwner(source *Hexbak, targetAgent string) (*Hexbak, error) {
 		work := &migrated.CurrentCreativeWorks[i]
 		work.AgentName = targetAgent
 		generationIDs := map[string]string{}
+		frozenRequests := map[string]WorkFeedbackRequest{}
 		for _, g := range work.Generations {
 			sum := sha256.Sum256([]byte(targetAgent + "\x00" + g.ID))
 			generationIDs[g.ID] = "cwgen-" + hex.EncodeToString(sum[:16])
@@ -194,6 +195,23 @@ func MigrateHexbakOwner(source *Hexbak, targetAgent string) (*Hexbak, error) {
 			g.ID = generationIDs[g.ID]
 			if id := g.Source.SourceAssetID; id != "" {
 				g.Source.SourceAssetID = assetMapping[id]
+			}
+			if g.RequestSnapshotJSON != "" {
+				var request WorkFeedbackRequest
+				if err := json.Unmarshal([]byte(g.RequestSnapshotJSON), &request); err != nil {
+					return nil, fmt.Errorf("restore work feedback request snapshot: %w", err)
+				}
+				if request.SourceAssetID != "" {
+					request.SourceAssetID = assetMapping[request.SourceAssetID]
+				}
+				raw, err := json.Marshal(request)
+				if err != nil {
+					return nil, err
+				}
+				g.RequestSnapshotJSON = string(raw)
+				frozenRequests[g.ID] = request
+				request.FrozenContext = nil
+				g.RequestDigest = digestJSON(request)
 			}
 			if g.Feedback != nil {
 				raw, _ := json.Marshal(g.Feedback)
@@ -226,6 +244,11 @@ func MigrateHexbakOwner(source *Hexbak, targetAgent string) (*Hexbak, error) {
 			inv.InvocationID = "cwinv-" + hex.EncodeToString(sum[:16])
 			for from, to := range generationIDs {
 				inv.OperationKey = strings.ReplaceAll(inv.OperationKey, ":version:"+from+":", ":version:"+to+":")
+			}
+			for generationID, request := range frozenRequests {
+				if strings.Contains(inv.OperationKey, ":version:"+generationID+":") {
+					inv.RequestDigest = requestDigestWithParentInstructions(digestJSON(request), inv.RouteSnapshot.ParentInstructions)
+				}
 			}
 		}
 		for j := range work.PageAssets {

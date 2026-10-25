@@ -38,17 +38,18 @@ type CreativeWorkArchiveV7 struct {
 
 // 归档显式包含 Source 等内部字段；公开 generation DTO 仍保持原合同。
 type CreativeWorkArchiveGenerationV7 struct {
-	ID            string                         `json:"id"`
-	Number        int                            `json:"number"`
-	CommandKey    string                         `json:"command_key"`
-	RequestDigest string                         `json:"request_digest"`
-	Status        string                         `json:"status"`
-	Source        k12.CreativeWorkSourceSnapshot `json:"source"`
-	Feedback      *k12.WorkFeedback              `json:"feedback,omitempty"`
-	FailureReason string                         `json:"failure_reason,omitempty"`
-	Attempt       int                            `json:"attempt"`
-	CreatedAt     int64                          `json:"created_at"`
-	UpdatedAt     int64                          `json:"updated_at"`
+	ID                  string                         `json:"id"`
+	Number              int                            `json:"number"`
+	CommandKey          string                         `json:"command_key"`
+	RequestDigest       string                         `json:"request_digest"`
+	RequestSnapshotJSON string                         `json:"request_snapshot_json,omitempty"`
+	Status              string                         `json:"status"`
+	Source              k12.CreativeWorkSourceSnapshot `json:"source"`
+	Feedback            *k12.WorkFeedback              `json:"feedback,omitempty"`
+	FailureReason       string                         `json:"failure_reason,omitempty"`
+	Attempt             int                            `json:"attempt"`
+	CreatedAt           int64                          `json:"created_at"`
+	UpdatedAt           int64                          `json:"updated_at"`
 }
 
 func (s *Store) ExportCreativeWorksArchiveV7(ctx context.Context, agent string) ([]CreativeWorkArchiveV7, error) {
@@ -115,7 +116,8 @@ func (s *Store) ExportCreativeWorksArchiveV7Tx(ctx context.Context, tx *sql.Tx, 
 			}
 			item.Generations = append(item.Generations, CreativeWorkArchiveGenerationV7{
 				ID: g.GenerationID, Number: g.GenerationNo, CommandKey: g.CommandKey, RequestDigest: g.RequestDigest,
-				Status: g.Status, Source: g.Source, Feedback: g.Feedback, FailureReason: g.FailureReason,
+				RequestSnapshotJSON: g.RequestSnapshotJSON,
+				Status:              g.Status, Source: g.Source, Feedback: g.Feedback, FailureReason: g.FailureReason,
 				Attempt: g.Attempt, CreatedAt: g.CreatedAt, UpdatedAt: g.UpdatedAt,
 			})
 			if id := g.Source.SourceAssetID; id != "" {
@@ -277,6 +279,9 @@ func (s *Store) ImportCreativeWorksArchiveV7Tx(ctx context.Context, tx *sql.Tx, 
 				if existing.WorkID != item.WorkID || existing.GenerationNo != g.Number || existing.CommandKey != g.CommandKey || existing.RequestDigest != g.RequestDigest || existing.Source != g.Source {
 					return ErrCurrentCommandConflict
 				}
+				if existing.RequestSnapshotJSON != "" && g.RequestSnapshotJSON != "" && existing.RequestSnapshotJSON != g.RequestSnapshotJSON {
+					return ErrCurrentCommandConflict
+				}
 				if existing.Status == k12.WorkFeedbackSucceeded || (g.Status != k12.WorkFeedbackSucceeded && existing.UpdatedAt >= g.UpdatedAt) {
 					continue
 				}
@@ -291,8 +296,12 @@ func (s *Store) ImportCreativeWorksArchiveV7Tx(ctx context.Context, tx *sql.Tx, 
 				feedback = string(raw)
 				projection = g.Feedback.ProjectionMarkdown
 			}
-			result, err := tx.ExecContext(ctx, `INSERT INTO k12_work_feedback_generations(generation_id,work_id,agent_name,generation_no,command_key,request_digest,status,feedback_type,source_snapshot_json,feedback_json,projection_markdown,failure_reason,attempt,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-				ON CONFLICT(generation_id) DO UPDATE SET status=excluded.status,feedback_json=excluded.feedback_json,projection_markdown=excluded.projection_markdown,failure_reason=excluded.failure_reason,attempt=excluded.attempt,updated_at=excluded.updated_at WHERE agent_name=excluded.agent_name AND work_id=excluded.work_id`, g.ID, item.WorkID, agent, g.Number, g.CommandKey, g.RequestDigest, g.Status, g.Source.WorkType, string(source), feedback, projection, g.FailureReason, g.Attempt, g.CreatedAt, g.UpdatedAt)
+			requestJSON := g.RequestSnapshotJSON
+			if requestJSON == "" {
+				requestJSON = "{}"
+			}
+			result, err := tx.ExecContext(ctx, `INSERT INTO k12_work_feedback_generations(generation_id,work_id,agent_name,generation_no,command_key,request_digest,status,feedback_type,source_snapshot_json,feedback_json,projection_markdown,failure_reason,attempt,created_at,updated_at,request_snapshot_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+				ON CONFLICT(generation_id) DO UPDATE SET status=excluded.status,feedback_json=excluded.feedback_json,projection_markdown=excluded.projection_markdown,failure_reason=excluded.failure_reason,attempt=excluded.attempt,updated_at=excluded.updated_at,request_snapshot_json=CASE WHEN request_snapshot_json IN ('','{}') THEN excluded.request_snapshot_json ELSE request_snapshot_json END WHERE agent_name=excluded.agent_name AND work_id=excluded.work_id`, g.ID, item.WorkID, agent, g.Number, g.CommandKey, g.RequestDigest, g.Status, g.Source.WorkType, string(source), feedback, projection, g.FailureReason, g.Attempt, g.CreatedAt, g.UpdatedAt, requestJSON)
 			if err != nil {
 				return err
 			}
@@ -860,15 +869,19 @@ func insertWorkFeedbackGeneration(
 
 func scanWorkFeedbackGeneration(row rowScanner) (k12.WorkFeedbackGeneration, error) {
 	var generation k12.WorkFeedbackGeneration
-	var sourceJSON, feedbackJSON, projection string
+	var sourceJSON, feedbackJSON, projection, requestJSON string
 	if err := row.Scan(
 		&generation.GenerationID, &generation.WorkID, &generation.AgentName,
 		&generation.GenerationNo, &generation.CommandKey, &generation.RequestDigest,
 		&generation.Status, &generation.FeedbackType, &sourceJSON, &feedbackJSON,
 		&projection, &generation.FailureReason, &generation.Attempt,
 		&generation.CreatedAt, &generation.UpdatedAt,
+		&requestJSON,
 	); err != nil {
 		return k12.WorkFeedbackGeneration{}, err
+	}
+	if requestJSON != "" && requestJSON != "{}" {
+		generation.RequestSnapshotJSON = requestJSON
 	}
 	if sourceJSON != "" {
 		if err := json.Unmarshal([]byte(sourceJSON), &generation.Source); err != nil {
@@ -905,7 +918,7 @@ func getWorkFeedbackGenerationVia(
 SELECT generation_id, work_id, agent_name, generation_no, command_key,
        request_digest, status, feedback_type, source_snapshot_json,
        feedback_json, projection_markdown, failure_reason, attempt,
-       created_at, updated_at
+       created_at, updated_at, request_snapshot_json
 FROM k12_work_feedback_generations
 WHERE generation_id=? AND agent_name=?`, generationID, agentName))
 	if err == sql.ErrNoRows {
@@ -1026,7 +1039,7 @@ func (s *Store) ListDirectWorkFeedbackGenerationsForRecovery(
 SELECT g.generation_id, g.work_id, g.agent_name, g.generation_no,
        g.command_key, g.request_digest, g.status, g.feedback_type,
        g.source_snapshot_json, g.feedback_json, g.projection_markdown,
-       g.failure_reason, g.attempt, g.created_at, g.updated_at
+       g.failure_reason, g.attempt, g.created_at, g.updated_at, g.request_snapshot_json
 FROM k12_work_feedback_generations g
 JOIN k12_creative_works w
   ON w.record_id=g.work_id AND w.agent_name=g.agent_name
@@ -1200,13 +1213,14 @@ func (s *Store) PrepareWorkFeedbackGeneration(
 SELECT generation_id, work_id, agent_name, generation_no, command_key,
        request_digest, status, feedback_type, source_snapshot_json,
        feedback_json, projection_markdown, failure_reason, attempt,
-       created_at, updated_at
+       created_at, updated_at, request_snapshot_json
 FROM k12_work_feedback_generations
 WHERE work_id=? AND agent_name=? AND (command_key=? OR generation_id=?)`,
 		workID, agentName, commandKey, commandKey,
 	))
 	if err == nil {
-		if existing.RequestDigest != requestDigest {
+		// generation ID 是已有任务的恢复别名；完整快照存在时消费原请求，不重解释创建请求摘要。
+		if existing.RequestDigest != requestDigest && (commandKey != existing.GenerationID || existing.RequestSnapshotJSON == "") {
 			return k12.WorkFeedbackGeneration{}, false, ErrCurrentCommandConflict
 		}
 		if err := projectWorkFeedbackRecovery(ctx, tx, &existing); err != nil {
@@ -1288,6 +1302,32 @@ WHERE work_id=? AND agent_name=? AND (command_key=? OR generation_id=?)`,
 		return k12.WorkFeedbackGeneration{}, false, err
 	}
 	return next, true, nil
+}
+
+// FreezeWorkFeedbackGenerationRequest 只写入尚未冻结的请求，同一代次的竞争调用读取首份内容。
+func (s *Store) FreezeWorkFeedbackGenerationRequest(ctx context.Context, agent, generationID, requestJSON string) (string, error) {
+	if !json.Valid([]byte(requestJSON)) || strings.TrimSpace(requestJSON) == "{}" {
+		return "", fmt.Errorf("work feedback request snapshot is invalid")
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE k12_work_feedback_generations SET request_snapshot_json=?
+		WHERE agent_name=? AND generation_id=? AND status IN ('queued','running')
+		AND (request_snapshot_json='' OR request_snapshot_json='{}')`, requestJSON, agent, generationID)
+	if err != nil {
+		return "", err
+	}
+	var stored string
+	err = s.db.QueryRowContext(ctx, `SELECT request_snapshot_json FROM k12_work_feedback_generations
+		WHERE agent_name=? AND generation_id=?`, agent, generationID).Scan(&stored)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", records.ErrNotFound
+	}
+	if err != nil {
+		return "", err
+	}
+	if stored == "" || stored == "{}" {
+		return "", records.ErrVersionConflict
+	}
+	return stored, nil
 }
 
 // ExpirePreparedWorkFeedbackGenerations 原子收敛过期 prepared/sent 及未知调用对应的点评，保留成功的 latest。

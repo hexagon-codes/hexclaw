@@ -1075,6 +1075,8 @@ Success: `200` `application/json`.
 <a id="backup"></a>
 ## GET /api/k12/backup
 
+New work feedback calls freeze the complete request and consumed method context before sending. Recovery and safe retries use that snapshot; successful results are read-only and unknown calls are not resent. The optional archive string `current_creative_works[].generations[].request_snapshot_json` contains the request, method prompt and digest. Preserve it verbatim instead of rebuilding it from the current Skill directory. Missing legacy snapshots remain missing. Public work generation DTOs do not expose raw prompts; a `feedback_skill` stamp alone does not prove complete context freezing.
+
 v8 adds `teaching_diagrams` with owner, asset identity, SHA-256 and exact SVG bytes. The archive checksum covers this field; asset and record restoration share one transaction. RestoreAs rewrites target asset references. Legacy archives retain their original checksum contract.
 
 Read a complete learner backup.

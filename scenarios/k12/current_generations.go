@@ -33,17 +33,18 @@ type CreativeWorkSourceSnapshot struct {
 // uses the existing closed canonical fact; version_id remains an internal
 // legacy-adapter detail and is never exposed by the current HTTP DTO.
 type WorkFeedbackGeneration struct {
-	GenerationID  string                     `json:"generation_id"`
-	WorkID        string                     `json:"work_id"`
-	AgentName     string                     `json:"-"`
-	GenerationNo  int                        `json:"-"`
-	CommandKey    string                     `json:"-"`
-	RequestDigest string                     `json:"-"`
-	Status        string                     `json:"status"`
-	FeedbackType  string                     `json:"-"`
-	Source        CreativeWorkSourceSnapshot `json:"-"`
-	Feedback      *WorkFeedback              `json:"feedback,omitempty"`
-	FailureReason string                     `json:"failure_message,omitempty"`
+	GenerationID        string                     `json:"generation_id"`
+	WorkID              string                     `json:"work_id"`
+	AgentName           string                     `json:"-"`
+	GenerationNo        int                        `json:"-"`
+	CommandKey          string                     `json:"-"`
+	RequestDigest       string                     `json:"-"`
+	RequestSnapshotJSON string                     `json:"-"`
+	Status              string                     `json:"status"`
+	FeedbackType        string                     `json:"-"`
+	Source              CreativeWorkSourceSnapshot `json:"-"`
+	Feedback            *WorkFeedback              `json:"feedback,omitempty"`
+	FailureReason       string                     `json:"failure_message,omitempty"`
 	// 恢复状态和重试许可由调用账本投影，不单独持久化。
 	RecoveryState string `json:"recovery_state,omitempty"`
 	RetrySafe     bool   `json:"retry_safe"`

@@ -2,7 +2,9 @@ package engineadapter
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -68,26 +70,50 @@ var _ usecase.WorkFeedbackGenerator = (*SolveAdapter)(nil)
 // 绝不回退 solve 全链（点评不是解题，跑验算链既慢又语义错位）。
 // 返回值带 SkillStamp：本次点评实际使用的方法论基座来源戳（盘上/内嵌/硬编码），随点评落库可追溯。
 func (a *SolveAdapter) GenerateWorkFeedback(ctx context.Context, req usecase.WorkFeedbackRequest) (usecase.WorkFeedbackOutput, error) {
-	subject, prompt, stamp, err := buildWorkFeedbackPrompt(req, a.workFeedbackSkillLoader)
+	var err error
+	if req.FrozenContext == nil {
+		req, err = a.FreezeWorkFeedbackContext(ctx, req)
+	}
 	if err != nil {
 		return usecase.WorkFeedbackOutput{}, err
 	}
-	prompt = config.ParentExpressionInstructions(ctx) + prompt
+	frozen := req.FrozenContext
+	if err := frozen.Validate(); err != nil {
+		return usecase.WorkFeedbackOutput{}, err
+	}
+	prompt := config.ParentExpressionInstructions(ctx) + frozen.Prompt
 	if req.WorkType == k12.WorkTypeArt {
 		out, aerr := a.generateArtFeedback(ctx, req, prompt)
 		if aerr != nil {
 			return usecase.WorkFeedbackOutput{}, aerr
 		}
-		return usecase.WorkFeedbackOutput{Feedback: out, SkillStamp: stamp}, nil
+		return usecase.WorkFeedbackOutput{Feedback: out, SkillStamp: frozen.SkillStamp}, nil
 	}
 	if a.workFeedbackGen == nil {
 		return usecase.WorkFeedbackOutput{}, fmt.Errorf("work feedback: 未注入作品点评生成闭包")
 	}
-	out, err := a.workFeedbackGen(ctx, subject, prompt, req.Grade)
+	out, err := a.workFeedbackGen(ctx, frozen.Subject, prompt, req.Grade)
 	if err != nil {
 		return usecase.WorkFeedbackOutput{}, providerResponseError(err)
 	}
-	return usecase.WorkFeedbackOutput{Feedback: stripReports(out), SkillStamp: stamp, ProjectionContract: k12.WorkFeedbackProjectionWritingConciseV1}, nil
+	return usecase.WorkFeedbackOutput{Feedback: stripReports(out), SkillStamp: frozen.SkillStamp, ProjectionContract: k12.WorkFeedbackProjectionWritingConciseV1}, nil
+}
+
+// FreezeWorkFeedbackContext 在发送前解析完整方法与任务正文；恢复不再读取可变Skill。
+func (a *SolveAdapter) FreezeWorkFeedbackContext(_ context.Context, req usecase.WorkFeedbackRequest) (usecase.WorkFeedbackRequest, error) {
+	if req.FrozenContext != nil {
+		return req, nil
+	}
+	subject, prompt, stamp, err := buildWorkFeedbackPrompt(req, a.workFeedbackSkillLoader)
+	if err != nil {
+		return req, err
+	}
+	if req.WorkType == k12.WorkTypeArt && req.Grade != "" {
+		prompt += "\n（点评口径贴合" + req.Grade + "孩子的水平，用家长和孩子都能懂的话。）"
+	}
+	sum := sha256.Sum256([]byte(prompt))
+	req.FrozenContext = &usecase.WorkFeedbackContextSnapshot{Version: 1, Subject: subject, Prompt: prompt, SkillStamp: stamp, ContentDigest: "sha256:" + hex.EncodeToString(sum[:])}
+	return req, nil
 }
 
 // generateArtFeedback 美术观察式点评：解析原图 asset → 多模态视觉调用。
@@ -99,9 +125,6 @@ func (a *SolveAdapter) generateArtFeedback(ctx context.Context, req usecase.Work
 	image, err := loadWorkArtImage(req.SourceAssetID)
 	if err != nil {
 		return "", fmt.Errorf("work feedback: %w", err)
-	}
-	if req.Grade != "" {
-		prompt += "\n（点评口径贴合" + req.Grade + "孩子的水平，用家长和孩子都能懂的话。）"
 	}
 	out, err := a.workFeedbackVision(ctx, image, prompt)
 	if err != nil {

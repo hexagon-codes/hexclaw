@@ -39753,6 +39753,9 @@ components:
           type: integer
         request_digest:
           type: string
+        request_snapshot_json:
+          type: string
+          description: Optional immutable work feedback request and method context. Preserve the original string when transferring an archive; missing legacy snapshots remain missing.
         source:
           $ref: "#/components/schemas/K12Recordsscenarios_k12_CreativeWorkSourceSnapshot"
         status:
