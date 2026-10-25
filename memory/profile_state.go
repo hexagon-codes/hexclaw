@@ -38,7 +38,7 @@ func isProfileEntry(entry MemoryEntry) bool {
 func (fm *FileMemory) profileSnapshotUnlocked(role string, now time.Time) profileSnapshot {
 	var snapshot profileSnapshot
 	for _, entry := range fm.parseEntriesForRoleUnlocked(role) {
-		if isProfileEntry(entry) || entry.Status == MemoryStatusArchived || !entryValidAt(entry, now) || isPersonSubject(entry.Subject) {
+		if isProfileEntry(entry) || entry.Status == MemoryStatusArchived || !entryValidAt(entry, now) || isPersonSubject(entry.Subject) || !entry.Scope.Matches(Scope{Agent: role}) {
 			continue
 		}
 		switch entry.Type {
@@ -69,7 +69,11 @@ func profileEntriesDigest(entries []MemoryEntry) string {
 		if looksLikeLineID(id) {
 			id = ""
 		}
-		versions = append(versions, profileHash([]any{id, entry.Type, entry.Source, entry.Subject, entry.Content, entry.Pinned, entry.ValidFrom, entry.ValidTo, entry.ManualCorrection}))
+		version := []any{id, entry.Type, entry.Source, entry.Subject, entry.Content, entry.Pinned, entry.ValidFrom, entry.ValidTo, entry.ManualCorrection}
+		if key := entry.Scope.Key(); key != "" {
+			version = append(version, key)
+		}
+		versions = append(versions, profileHash(version))
 	}
 	sort.Strings(versions)
 	return profileHash(versions)

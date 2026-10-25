@@ -59,7 +59,7 @@ func (e *ReActEngine) buildLongTermMemoryBlock(ctx context.Context, role, query 
 	if e.fileMem == nil {
 		return ""
 	}
-	parsed := e.fileMem.ParseEntriesForRole(role)
+	parsed := memory.EntriesForScope(e.fileMem.ParseEntriesForRole(role), memory.ScopeFromContext(ctx))
 	if len(parsed) == 0 {
 		if len([]rune(strings.TrimSpace(query))) >= 4 {
 			recordMemoryHits(ctx, role, nil)
@@ -175,15 +175,43 @@ func matchesManualQuestion(query, content string) bool {
 	return q != "" && q == normalize(question)
 }
 
-// hasMatchedManualResponse 只认可已完整注入的手动问答，派生画像和自动抽取内容不授权文案采用。
-func (e *ReActEngine) hasMatchedManualResponse(role, query, injected string) bool {
-	for _, entry := range e.fileMem.ParseEntriesForRole(role) {
+// hasManualMemoryContext 识别实际注入的用户手记，不要求自然语言约定使用固定问答格式。
+func (e *ReActEngine) hasManualMemoryContext(ctx context.Context, role, injected string) bool {
+	for _, entry := range memory.EntriesForScope(e.fileMem.ParseEntriesForRole(role), memory.ScopeFromContext(ctx)) {
 		if entry.Source == "manual" && recall.IsCurrentlyValid(memory.ToRecallEntry(entry), time.Now()) &&
-			matchesManualQuestion(query, entry.Content) && strings.Contains(injected, strings.TrimSpace(entry.Content)) {
+			strings.Contains(injected, strings.TrimSpace(entry.Content)) {
 			return true
 		}
 	}
 	return false
+}
+
+// 本轮范围仅使用稳定上下文身份；没有项目或对象时不从问题正文猜测。
+func (e *ReActEngine) memoryScopeForMetadata(metadata map[string]string) memory.Scope {
+	agent := strings.TrimSpace(metadata["role"])
+	if agent == "" {
+		agent = strings.TrimSpace(metadata["routed_agent"])
+	}
+	if agent == "" {
+		agent = strings.TrimSpace(metadata["pinned_agent"])
+	}
+	e.mu.RLock()
+	registry := e.skills
+	e.mu.RUnlock()
+	var names []string
+	if registry != nil {
+		for _, name := range mountedSkillNames(metadata) {
+			if selected, ok := registry.Get(name); ok {
+				if _, body := selected.(skillContentLoader); body {
+					names = append(names, name)
+				}
+			}
+		}
+	}
+	return memory.Scope{
+		Agent: agent, Skills: names,
+		SubjectID: metadata["memory_subject_id"], ProjectID: metadata["memory_project_id"],
+	}.Normalized()
 }
 
 // rankFacts 按三维打分排序检索层（query 空时退化按 importance+recency；零 LLM）。

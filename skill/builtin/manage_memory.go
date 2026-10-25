@@ -43,7 +43,9 @@ func (s *ManageMemorySkill) ToolDefinition() llm.ToolDefinition {
 			"(e.g. \"记住我喜欢…\", \"忘掉…\", \"以后都…\"). Do NOT save transient tasks, one-off "+
 			"questions, or this conversation's working details, and NEVER store passwords, API keys, or "+
 			"other credentials. For changeable attributes (居住地/时区/职业…) pass `subject` so a new "+
-			"value supersedes the old one.",
+			"value supersedes the old one. Use persona scope for a convention specific to the mounted persona, "+
+			"agent scope for this assistant's working rules, and subject/project scope for their durable facts. "+
+			"Global scope is for reusable user facts and preferences. Scope identities come from the current context; never invent IDs.",
 		&llm.Schema{
 			Type: "object",
 			Properties: map[string]*llm.Schema{
@@ -55,6 +57,10 @@ func (s *ManageMemorySkill) ToolDefinition() llm.ToolDefinition {
 				"content": {
 					Type:        "string",
 					Description: "Memory text (required for add/update)",
+				},
+				"scope": {
+					Type: "string", Enum: []any{"global", "agent", "persona", "subject", "project"},
+					Description: "Applicability of a new memory; defaults to global. Other scopes bind to the current context.",
 				},
 				"type": {
 					Type:        "string",
@@ -76,28 +82,28 @@ func (s *ManageMemorySkill) ToolDefinition() llm.ToolDefinition {
 		})
 }
 
-func (s *ManageMemorySkill) Execute(_ context.Context, args map[string]any) (*skill.Result, error) {
+func (s *ManageMemorySkill) Execute(ctx context.Context, args map[string]any) (*skill.Result, error) {
 	if s.fm == nil {
 		return nil, fmt.Errorf("file memory is not enabled")
 	}
 	action := strings.ToLower(strings.TrimSpace(memArgString(args, "action")))
 	switch action {
 	case "add":
-		return s.add(args)
+		return s.add(ctx, args)
 	case "update":
-		return s.update(args)
+		return s.update(ctx, args)
 	case "remove":
-		return s.remove(args)
+		return s.remove(ctx, args)
 	case "pin":
-		return s.setPin(args, true)
+		return s.setPin(ctx, args, true)
 	case "unpin":
-		return s.setPin(args, false)
+		return s.setPin(ctx, args, false)
 	default:
 		return nil, fmt.Errorf("unsupported action %q (available: add/update/remove/pin/unpin)", action)
 	}
 }
 
-func (s *ManageMemorySkill) add(args map[string]any) (*skill.Result, error) {
+func (s *ManageMemorySkill) add(ctx context.Context, args map[string]any) (*skill.Result, error) {
 	content := strings.TrimSpace(memArgString(args, "content"))
 	if content == "" {
 		return nil, fmt.Errorf("add requires content")
@@ -110,7 +116,34 @@ func (s *ManageMemorySkill) add(args map[string]any) (*skill.Result, error) {
 		memType = "fact"
 	}
 	subject := strings.TrimSpace(memArgString(args, "subject"))
-	act, err := s.fm.UpsertStructuredFactForRole(content, memType, "ai_managed", "", subject, memArgString(args, "attribute"), memArgString(args, "value"))
+	current := memory.ScopeFromContext(ctx)
+	var scope memory.Scope
+	switch strings.TrimSpace(memArgString(args, "scope")) {
+	case "", "global":
+	case "agent":
+		if current.Agent == "" {
+			return nil, fmt.Errorf("Current agent identity is unavailable")
+		}
+		scope.Agent = current.Agent
+	case "persona":
+		if len(current.Skills) == 0 {
+			return nil, fmt.Errorf("Current persona identity is unavailable")
+		}
+		scope.Skills = current.Skills
+	case "subject":
+		if current.SubjectID == "" {
+			return nil, fmt.Errorf("Current subject identity is unavailable")
+		}
+		scope.SubjectID = current.SubjectID
+	case "project":
+		if current.ProjectID == "" {
+			return nil, fmt.Errorf("Current project identity is unavailable")
+		}
+		scope.ProjectID = current.ProjectID
+	default:
+		return nil, fmt.Errorf("Unsupported memory scope")
+	}
+	act, err := s.fm.UpsertScopedFactForRole(content, memType, "ai_managed", "", subject, memArgString(args, "attribute"), memArgString(args, "value"), scope)
 	if err != nil {
 		return nil, err
 	}
@@ -121,7 +154,7 @@ func (s *ManageMemorySkill) add(args map[string]any) (*skill.Result, error) {
 	return &skill.Result{Content: verb + "：" + content, Metadata: map[string]string{"action": act}}, nil
 }
 
-func (s *ManageMemorySkill) update(args map[string]any) (*skill.Result, error) {
+func (s *ManageMemorySkill) update(ctx context.Context, args map[string]any) (*skill.Result, error) {
 	content := strings.TrimSpace(memArgString(args, "content"))
 	if content == "" {
 		return nil, fmt.Errorf("update requires content")
@@ -129,7 +162,7 @@ func (s *ManageMemorySkill) update(args map[string]any) (*skill.Result, error) {
 	if memory.LooksSensitive(content) {
 		return &skill.Result{Content: "出于安全考虑未更新：新内容疑似含凭证。"}, nil
 	}
-	id, found, err := s.resolveTarget(args)
+	id, found, err := s.resolveTarget(ctx, args)
 	if err != nil {
 		return nil, err
 	}
@@ -142,8 +175,8 @@ func (s *ManageMemorySkill) update(args map[string]any) (*skill.Result, error) {
 	return &skill.Result{Content: "已更新记忆：" + content, Metadata: map[string]string{"id": id}}, nil
 }
 
-func (s *ManageMemorySkill) remove(args map[string]any) (*skill.Result, error) {
-	id, found, err := s.resolveTarget(args)
+func (s *ManageMemorySkill) remove(ctx context.Context, args map[string]any) (*skill.Result, error) {
+	id, found, err := s.resolveTarget(ctx, args)
 	if err != nil {
 		return nil, err
 	}
@@ -156,8 +189,8 @@ func (s *ManageMemorySkill) remove(args map[string]any) (*skill.Result, error) {
 	return &skill.Result{Content: "已删除该条记忆。", Metadata: map[string]string{"id": id}}, nil
 }
 
-func (s *ManageMemorySkill) setPin(args map[string]any, pinned bool) (*skill.Result, error) {
-	id, found, err := s.resolveTarget(args)
+func (s *ManageMemorySkill) setPin(ctx context.Context, args map[string]any, pinned bool) (*skill.Result, error) {
+	id, found, err := s.resolveTarget(ctx, args)
 	if err != nil {
 		return nil, err
 	}
@@ -174,12 +207,12 @@ func (s *ManageMemorySkill) setPin(args map[string]any, pinned bool) (*skill.Res
 }
 
 // resolveTarget 把 target 参数解析为条目 id：精确 id（m-N）直用，否则按内容子串唯一匹配活跃条目。
-func (s *ManageMemorySkill) resolveTarget(args map[string]any) (id string, found bool, err error) {
+func (s *ManageMemorySkill) resolveTarget(ctx context.Context, args map[string]any) (id string, found bool, err error) {
 	target := strings.TrimSpace(memArgString(args, "target"))
 	if target == "" {
 		return "", false, fmt.Errorf("this action requires `target` (entry id or content substring)")
 	}
-	entries := s.fm.ParseEntries()
+	entries := memory.EntriesForScope(s.fm.ParseEntries(), memory.ScopeFromContext(ctx))
 	// 1) 精确 id 命中。
 	for _, e := range entries {
 		if e.ID == target {

@@ -131,9 +131,10 @@ func (s *Server) handleGetMemory(w http.ResponseWriter, r *http.Request) {
 
 // SaveMemoryRequest 保存记忆请求
 type SaveMemoryRequest struct {
-	Content string `json:"content"` // 记忆内容
-	Type    string `json:"type"`    // identity/preference/fact/instruction/context
-	Source  string `json:"source"`  // manual/chat_explicit/chat_extract/system
+	Scope   memory.Scope `json:"scope,omitzero"`
+	Content string       `json:"content"` // 记忆内容
+	Type    string       `json:"type"`    // identity/preference/fact/instruction/context
+	Source  string       `json:"source"`  // manual/chat_explicit/chat_extract/system
 }
 
 // handleSaveMemory 创建单条记忆
@@ -153,7 +154,7 @@ func (s *Server) handleSaveMemory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.fileMem.SaveStructuredEntry(req.Content, req.Type, req.Source, "", memory.EntryMeta{}); err != nil {
+	if err := s.fileMem.SaveStructuredEntry(req.Content, req.Type, req.Source, "", memory.EntryMeta{Scope: req.Scope.Normalized()}); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{
 			"error": "保存记忆失败: " + err.Error(),
 		})

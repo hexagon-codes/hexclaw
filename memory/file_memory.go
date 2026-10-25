@@ -346,6 +346,7 @@ type SearchResult struct {
 
 // MemoryEntry 结构化记忆条目（从 MEMORY.md 行解析而来）
 type MemoryEntry struct {
+	Scope            Scope  `json:"scope,omitzero"`
 	ProfileDigest    string `json:"profile_digest,omitempty"`
 	ProfileRevision  string `json:"profile_revision,omitempty"`
 	ManualCorrection bool   `json:"manual_correction,omitempty"`
@@ -911,6 +912,7 @@ func (fm *FileMemory) parseEntriesFromFileUnlocked(dir, filename, status, idPref
 		e.ProfileDigest = emeta.ProfileDigest
 		e.ManualCorrection = emeta.ManualCorrection
 		e.Subject = emeta.Subject
+		e.Scope = emeta.Scope
 		e.Attribute, e.Value = emeta.Attribute, emeta.Value
 		e.ValidFrom = emeta.ValidFrom
 		// 画像更新时间来自本次摘要生效时刻，保留原记录的创建时间和标识。

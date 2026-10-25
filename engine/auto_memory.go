@@ -136,7 +136,7 @@ func (e *ReActEngine) autoExtractMemoryForRole(parentCtx context.Context, userTe
 		ctx, cancel := context.WithTimeout(base, memoryExtractionTimeout(isLocal))
 		defer cancel()
 
-		existingMemory := e.fileMem.GetMemoryForPrompt() // 剥存储层内联 meta 标签，不把 eid/pin 噪声注入抽取提示
+		existingMemory := e.memoryExtractionContext(ctx, role)
 		prompt := buildMemoryExtractionPrompt(userText, assistantText, existingMemory)
 		var temp float64 = 0
 		// v0.4.0 E4：用 CompleteWithFailover；接 router.Fallback 让 auto-memory 在

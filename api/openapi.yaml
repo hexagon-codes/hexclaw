@@ -1090,7 +1090,9 @@ paths:
       description: Writes active _global memory and requests a profile refresh; capacity eviction may run. type
         defaults to fact and source to manual; neither is enum-validated. Returns the last parsed entry, or
         {message:"记忆已保存"} when no entry is available. Whitespace-only content is ignored by storage and should
-        not be used to create an entry.
+        not be used to create an entry. Optional scope limits applicability within the current user's memory
+        space; omitted scope preserves existing global behavior. Content may use natural-language conventions
+        and question-answer examples without a required prefix or template.
       tags:
         - chat-sessions-memory
       security:
@@ -22605,6 +22607,8 @@ components:
     ChatSessionMemoryEntry:
       type: object
       properties:
+        scope:
+          $ref: "#/components/schemas/ChatSessionMemoryScope"
         profile_digest:
           type: string
         profile_revision:
@@ -22904,9 +22908,28 @@ components:
             before it.
       required:
         - message_id
+    ChatSessionMemoryScope:
+      type: object
+      description: Optional applicability constraints within the existing memory space, not an authorization
+        boundary. All nonempty dimensions must match the current turn; any named mounted body skill matches
+        skills. Agent uses the current role/routed/pinned identity. Subject and project use chat metadata
+        memory_subject_id and memory_project_id. Missing context does not satisfy a nonempty constraint.
+      properties:
+        agent:
+          type: string
+        skills:
+          type: array
+          items:
+            type: string
+        subject_id:
+          type: string
+        project_id:
+          type: string
     ChatSessionSaveMemoryRequest:
       type: object
       properties:
+        scope:
+          $ref: "#/components/schemas/ChatSessionMemoryScope"
         content:
           type: string
           minLength: 1

@@ -36,7 +36,13 @@ func (fm *FileMemory) UpsertStructuredEntryForRole(content, memType, source, rol
 
 // UpsertStructuredFactForRole 在原有写入范围内区分人物、属性和值。
 func (fm *FileMemory) UpsertStructuredFactForRole(content, memType, source, role, subject, attribute, value string) (string, error) {
+	return fm.UpsertScopedFactForRole(content, memType, source, role, subject, attribute, value, Scope{})
+}
+
+// UpsertScopedFactForRole 只在相同适用范围内去重与取代，保留既有原子写入入口。
+func (fm *FileMemory) UpsertScopedFactForRole(content, memType, source, role, subject, attribute, value string, scope Scope) (string, error) {
 	defer fm.requestProfileRefresh()
+	scope = scope.Normalized()
 	if memType == "" {
 		memType = "fact"
 	}
@@ -54,13 +60,13 @@ func (fm *FileMemory) UpsertStructuredFactForRole(content, memType, source, role
 	now := time.Now()
 	var sources []MemoryEntry
 	for _, entry := range fm.parseEntriesForRoleUnlocked(role) {
-		if !isProfileEntry(entry) {
+		if !isProfileEntry(entry) && entry.Scope.Equal(scope) {
 			sources = append(sources, entry)
 		}
 	}
 	existing := recallEntriesForDedup(sources)
 	cand := recall.NormalizePersonFact(recall.Entry{Content: content, Type: recall.Type(memType), Subject: strings.TrimSpace(subject), Attribute: attribute, Value: value})
-	meta := EntryMeta{Subject: cand.Subject, Attribute: cand.Attribute, Value: cand.Value}
+	meta := EntryMeta{Subject: cand.Subject, Attribute: cand.Attribute, Value: cand.Value, Scope: scope}
 	d := recall.DedupUpsert(cand, existing, now,
 		recall.DedupOptions{SimFn: recall.LexicalSim, JaccardThreshold: dedupUpsertThreshold})
 

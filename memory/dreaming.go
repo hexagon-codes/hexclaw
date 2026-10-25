@@ -196,6 +196,7 @@ type dreamMember struct {
 
 // dreamPlan 是一簇的整合计划（LLM 已算出合成正文，待单遍落盘）。
 type dreamPlan struct {
+	scope       Scope
 	foldLines   []int  // 待折叠（标 ValidTo 留史）的原始条目行号
 	synthesized string // LLM 合成正文
 	subject     string // 继承的共同主语（成员主语不一致则空）
@@ -268,6 +269,9 @@ func (fm *FileMemory) deepReflectDirUnlocked(ctx context.Context, dir string, no
 	thr := opts.clusterSim()
 	for i := 0; i < len(cand); i++ {
 		for j := i + 1; j < len(cand); j++ {
+			if !cand[i].me.Scope.Equal(cand[j].me.Scope) {
+				continue
+			}
 			si := strings.TrimSpace(cand[i].re.Subject)
 			sj := strings.TrimSpace(cand[j].re.Subject)
 			if si != "" && strings.EqualFold(si, sj) {
@@ -367,6 +371,7 @@ func (fm *FileMemory) deepReflectDirUnlocked(ctx context.Context, dir string, no
 			lines[k] = cand[i].line
 		}
 		plans = append(plans, dreamPlan{
+			scope:       cand[fold[0]].me.Scope,
 			foldLines:   lines,
 			synthesized: out,
 			subject:     subj,
@@ -401,7 +406,7 @@ func (fm *FileMemory) deepReflectDirUnlocked(ctx context.Context, dir string, no
 	// ② 内存里追加整合新条（与 appendEntryUnlocked 同格式：空行分隔 + `- [时] [type:source] body`）。
 	ts := now.Format("15:04")
 	for _, p := range plans {
-		meta := EntryMeta{Subject: p.subject, Supersedes: p.primaryID, ValidFrom: vt}
+		meta := EntryMeta{Subject: p.subject, Supersedes: p.primaryID, ValidFrom: vt, Scope: p.scope}
 		if !strings.Contains(p.synthesized, "\n") { // 修缺陷H：合成条目铸稳定 ID（仅单行，多行不挂内联 meta）
 			meta.ID = newStableID()
 		}

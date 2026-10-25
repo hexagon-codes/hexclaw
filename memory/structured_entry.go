@@ -3,6 +3,7 @@ package memory
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -24,6 +25,7 @@ const (
 
 // EntryMeta 是一条记忆的结构化元数据。
 type EntryMeta struct {
+	Scope            Scope
 	ProfileOperation string
 	ProfileDigest    string
 	ManualCorrection bool
@@ -41,7 +43,7 @@ type EntryMeta struct {
 
 func (m EntryMeta) isZero() bool {
 	return m.ID == "" && !m.Pinned && m.Subject == "" && m.Attribute == "" && m.Value == "" && m.ValidFrom == "" &&
-		m.ValidTo == "" && m.Supersedes == "" && m.Confidence == 0 && m.HitCount == 0 && m.ProfileDigest == "" && m.ProfileOperation == "" && !m.ManualCorrection
+		m.ValidTo == "" && m.Supersedes == "" && m.Confidence == 0 && m.HitCount == 0 && m.ProfileDigest == "" && m.ProfileOperation == "" && !m.ManualCorrection && m.Scope.IsZero()
 }
 
 // serialize 编码为内联标签；全零返回 ""。Subject 经 url 转义防 `;=` 冲突。
@@ -50,6 +52,10 @@ func (m EntryMeta) serialize() string {
 		return ""
 	}
 	var p []string
+	if scope := m.Scope.Normalized(); !scope.IsZero() {
+		encoded, _ := json.Marshal(scope)
+		p = append(p, "scope="+url.QueryEscape(string(encoded)))
+	}
 	if m.ProfileOperation != "" {
 		p = append(p, "po="+m.ProfileOperation)
 	}
@@ -112,6 +118,11 @@ func splitEntryMeta(content string) (string, EntryMeta) {
 			continue
 		}
 		switch k {
+		case "scope":
+			if decoded, err := url.QueryUnescape(v); err == nil {
+				_ = json.Unmarshal([]byte(decoded), &m.Scope)
+				m.Scope = m.Scope.Normalized()
+			}
 		case "po":
 			m.ProfileOperation = v
 		case "pd":

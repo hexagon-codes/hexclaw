@@ -152,20 +152,28 @@ func (fm *FileMemory) reflectDirUnlocked(dir string, now time.Time) (ReflectRepo
 
 	// 映射 → recall.Entry，并按当前有效性分桶：有效条目进 Reflect；失效历史（被 supersede）直接归档释放活跃区。
 	byID := make(map[string]int, len(memEntries)) // recall.ID → 起始行号
-	var valid []recall.Entry
+	valid := make(map[string][]recall.Entry)
+	var scopeOrder []string
 	staleHistory := make(map[int]bool) // 行号 → 失效历史，待归档
 	for _, me := range memEntries {
 		re := toRecallEntry(me)
 		line := me.lineIdx
 		byID[re.ID] = line
 		if recall.IsCurrentlyValid(re, now) {
-			valid = append(valid, re)
+			key := me.Scope.Key()
+			if _, exists := valid[key]; !exists {
+				scopeOrder = append(scopeOrder, key)
+			}
+			valid[key] = append(valid[key], re)
 		} else if !re.Pinned {
 			staleHistory[line] = true
 		}
 	}
 
-	ops := recall.Reflect(valid, now, recall.DefaultLifecyclePolicy(), defaultReflectDedup())
+	var ops []recall.Op
+	for _, key := range scopeOrder {
+		ops = append(ops, recall.Reflect(valid[key], now, recall.DefaultLifecyclePolicy(), defaultReflectDedup())...)
+	}
 
 	actions := make(map[int]*lineAction)
 	act := func(line int) *lineAction {

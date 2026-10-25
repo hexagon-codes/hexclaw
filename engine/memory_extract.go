@@ -3,9 +3,11 @@ package engine
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/hexagon-codes/hexagon/observe/trace"
 	"github.com/hexagon-codes/hexclaw/memory"
+	"github.com/hexagon-codes/hexclaw/memory/recall"
 )
 
 // 增量 3/4：自动记忆写链命脉（重点一 —— 记得准、记得净）。
@@ -133,6 +135,10 @@ func (e *ReActEngine) ingestExtractedFacts(ctx context.Context, facts []extracte
 	if e.fileMem == nil || len(facts) == 0 {
 		return 0
 	}
+	scope := memory.ScopeFromContext(ctx)
+	if scope.Agent != "" {
+		role = scope.Agent
+	}
 	n := 0
 	for _, f := range facts {
 		// PII / 凭证守卫（§4.10）：敏感内容一律不落记忆任何层，即便 LLM 误抽出。
@@ -140,7 +146,7 @@ func (e *ReActEngine) ingestExtractedFacts(ctx context.Context, facts []extracte
 			trace.L(ctx).Warn("auto-memory: 跳过疑似敏感内容（凭证/PII 不入记忆）")
 			continue
 		}
-		action, err := e.fileMem.UpsertStructuredFactForRole(f.Content, classifyMemoryType(f.Content), "chat_extract", role, f.Subject, f.Attribute, f.Value)
+		action, err := e.fileMem.UpsertScopedFactForRole(f.Content, classifyMemoryType(f.Content), "chat_extract", role, f.Subject, f.Attribute, f.Value, scope)
 		if err != nil {
 			trace.L(ctx).Error("auto-memory: 写入失败", "err", err)
 			continue
@@ -150,4 +156,20 @@ func (e *ReActEngine) ingestExtractedFacts(ctx context.Context, facts []extracte
 		}
 	}
 	return n
+}
+
+// 抽取模型只接收本轮适用的有效正文，避免其他对象的资料影响事实判定。
+func (e *ReActEngine) memoryExtractionContext(ctx context.Context, role string) string {
+	scope := memory.ScopeFromContext(ctx)
+	if scope.Agent != "" {
+		role = scope.Agent
+	}
+	var content []string
+	now := time.Now()
+	for _, entry := range memory.EntriesForScope(e.fileMem.ParseEntriesForRole(role), scope) {
+		if entry.Status != memory.MemoryStatusArchived && recall.IsCurrentlyValid(memory.ToRecallEntry(entry), now) {
+			content = append(content, entry.Content)
+		}
+	}
+	return strings.Join(content, "\n")
 }
