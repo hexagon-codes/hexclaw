@@ -1707,7 +1707,27 @@ All schema names match the complete OpenAPI document. Response "required" means 
 | `grade_level_method` | string | Yes |
 | `likely_mistakes` | array<string> / null | Yes |
 | `parent_teaching_sequence` | array<string> / null | Yes |
+| `teaching_diagrams` | array<[K12TasksTeachingDiagramAsset](#schema-k12tasksteachingdiagramasset)> | No; optional immutable diagrams bound to the same problem and solution; legacy responses remain valid |
 | `teaching_diagram_warnings` | array<string> | No; diagnostics for a new optional diagram storage failure, separate from the seven teaching items |
+
+<a id="schema-k12tasksteachingdiagramasset"></a>
+
+### `K12TasksTeachingDiagramAsset`
+
+| Field | Type / values | Key required |
+| --- | --- | --- |
+| `asset_id` | string; immutable reference read through the authenticated asset endpoint | Yes |
+| `asset_digest` | string; digest of the actual SVG bytes | Yes |
+| `spec_digest` | string; digest of the validated diagram specification | Yes |
+| `renderer_version` | string; renderer version that produced the frozen diagram | Yes |
+| `problem_id` | string | Yes |
+| `input_revision` | integer | Yes |
+| `problem_input_digest` | string | Yes |
+| `solution_digest` | string | Yes |
+| `mime` | `image/svg+xml` | Yes |
+| `width` | integer; intrinsic width | Yes |
+| `height` | integer; intrinsic height | Yes |
+| `alt_text` | string; alternative description from the same diagram facts | Yes |
 
 <a id="schema-k12taskspartkind"></a>
 

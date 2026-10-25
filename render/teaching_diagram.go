@@ -9,7 +9,7 @@ import (
 	"unicode"
 )
 
-const TeachingDiagramRendererVersion = "teaching-svg-v2"
+const TeachingDiagramRendererVersion = "teaching-svg-v3"
 
 // TeachingDiagramInput 只承载用例已校验的图元，不包含题目、学生状态或求解逻辑。
 type TeachingDiagramInput struct {
@@ -148,13 +148,16 @@ func renderTeachingJourneyLine(input TeachingDiagramInput) (TeachingDiagramSVG, 
 	const left, length = 40.0, 820.0
 	first := left + length*input.Segments[0].Fraction
 	second := first + length*input.Segments[1].Fraction
+	// 短端点保留原中心位置，长名称仅向画布内侧平移，避免裁切字形。
+	startLabel := math.Max(left, 8+teachingDiagramTextWidth(input.Endpoints[0])/2)
+	endLabel := math.Min(left+length, 900-8-teachingDiagramTextWidth(input.Endpoints[1])/2)
 	var b strings.Builder
 	fmt.Fprintf(&b, `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 270" width="900" height="270" role="img" aria-labelledby="title description"><title id="title">%s</title><desc id="description">%s</desc><rect width="900" height="270" fill="white"/><g font-family="PingFang SC, Noto Sans CJK SC, sans-serif" font-size="22" fill="#243746"><text x="40" y="30">全程平均分成%d份</text><path d="M 40 118 H 860" fill="none" stroke="#243746" stroke-width="2"/>`, escape(input.Title), escape(input.AltText), input.EqualParts)
 	for i := 0; i <= input.EqualParts; i++ {
 		x := left + length*float64(i)/float64(input.EqualParts)
 		fmt.Fprintf(&b, `<path data-division="%d" d="M %.6f 110 V 126" stroke="#243746" stroke-width="2"/>`, i, x)
 	}
-	fmt.Fprintf(&b, `<text x="40" y="101" text-anchor="middle">%s</text><text x="860" y="101" text-anchor="middle">%s</text><text x="%.6f" y="101" text-anchor="middle">%s</text><text x="%.6f" y="101" text-anchor="middle">%s</text>`, escape(input.Endpoints[0]), escape(input.Endpoints[1]), first, escape(input.Travelers[0]), second, escape(input.Travelers[1]))
+	fmt.Fprintf(&b, `<text x="%.6f" y="101" text-anchor="middle">%s</text><text x="%.6f" y="101" text-anchor="middle">%s</text><text x="%.6f" y="101" text-anchor="middle">%s</text><text x="%.6f" y="101" text-anchor="middle">%s</text>`, startLabel, escape(input.Endpoints[0]), endLabel, escape(input.Endpoints[1]), first, escape(input.Travelers[0]), second, escape(input.Travelers[1]))
 	fmt.Fprintf(&b, `<path d="M 40 71 H %.6f M %.6f 65 L %.6f 71 L %.6f 77 M 860 71 H %.6f M %.6f 65 L %.6f 71 L %.6f 77" fill="none" stroke="#243746" stroke-width="2"/>`, first-8, first-16, first-8, first-16, second+8, second+16, second+8, second+16)
 	x := left
 	for i, segment := range input.Segments {

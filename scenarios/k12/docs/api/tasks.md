@@ -1707,7 +1707,27 @@ curl "$BASE/api/k12/creative-works/work-1?agent=TutorAgent" \
 | `grade_level_method` | string | 是 |
 | `likely_mistakes` | array<string> / null | 是 |
 | `parent_teaching_sequence` | array<string> / null | 是 |
+| `teaching_diagrams` | array<[K12TasksTeachingDiagramAsset](#schema-k12tasksteachingdiagramasset)> | 否；同题、同解答冻结的可选教学图，旧无图响应兼容 |
 | `teaching_diagram_warnings` | array<string> | 否；新增可选图保存失败时的诊断，不替代七项教学正文 |
+
+<a id="schema-k12tasksteachingdiagramasset"></a>
+
+### `K12TasksTeachingDiagramAsset`
+
+| 字段 | 类型 / 取值 | 必含键 |
+| --- | --- | --- |
+| `asset_id` | string；经认证资产接口读取的不可变引用 | 是 |
+| `asset_digest` | string；实际 SVG 字节摘要 | 是 |
+| `spec_digest` | string；已校验图示结构摘要 | 是 |
+| `renderer_version` | string；生成该冻结图的渲染器版本 | 是 |
+| `problem_id` | string | 是 |
+| `input_revision` | integer | 是 |
+| `problem_input_digest` | string | 是 |
+| `solution_digest` | string | 是 |
+| `mime` | `image/svg+xml` | 是 |
+| `width` | integer；固有宽度 | 是 |
+| `height` | integer；固有高度 | 是 |
+| `alt_text` | string；同一图示事实的替代说明 | 是 |
 
 <a id="schema-k12taskspartkind"></a>
 

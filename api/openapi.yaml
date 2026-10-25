@@ -32982,6 +32982,11 @@ components:
     K12TasksParentTeachingGuide:
       additionalProperties: false
       properties:
+        teaching_diagrams:
+          description: Optional immutable diagrams bound to this problem and verified solution. Omitted for legacy or unsupported results.
+          type: array
+          items:
+            $ref: "#/components/schemas/K12TasksTeachingDiagramAsset"
         teaching_diagram_warnings:
           description: Optional diagnostics for a new teaching diagram that could not be stored. The verified answer and reliable explanation remain available.
           type: array
@@ -33026,6 +33031,49 @@ components:
         - parent_teaching_sequence
         - follow_up_questions
         - checking_method
+      type: object
+    K12TasksTeachingDiagramAsset:
+      additionalProperties: false
+      properties:
+        asset_id:
+          type: string
+        asset_digest:
+          type: string
+        spec_digest:
+          type: string
+        renderer_version:
+          type: string
+        problem_id:
+          type: string
+        input_revision:
+          type: integer
+        problem_input_digest:
+          type: string
+        solution_digest:
+          type: string
+        mime:
+          type: string
+          enum:
+            - image/svg+xml
+        width:
+          type: integer
+        height:
+          type: integer
+        alt_text:
+          type: string
+      required:
+        - asset_id
+        - asset_digest
+        - spec_digest
+        - renderer_version
+        - problem_id
+        - input_revision
+        - problem_input_digest
+        - solution_digest
+        - mime
+        - width
+        - height
+        - alt_text
       type: object
     K12TasksPartKind:
       enum:

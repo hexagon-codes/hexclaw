@@ -40,41 +40,55 @@ func diagramSourceText(value string) string {
 
 // 只识别当前支持的明确关系，不用讲法模型重抽数值，也不从孩子作答取题目条件。
 func teachingDiagramSourceContext(q RecognizedQuestion, answer string, evidence SolveEvidence) (TeachingDiagramContext, TeachingDiagramCandidate, bool) {
+	ctx, candidate, reason := teachingDiagramSourceContextWithReason(q, answer, evidence)
+	return ctx, candidate, reason == ""
+}
+
+func teachingDiagramSourceContextWithReason(q RecognizedQuestion, answer string, evidence SolveEvidence) (TeachingDiagramContext, TeachingDiagramCandidate, string) {
 	if !photoEvidenceTrusted(evidence) {
-		return TeachingDiagramContext{}, TeachingDiagramCandidate{}, false
+		return TeachingDiagramContext{}, TeachingDiagramCandidate{}, "solution_unverified"
 	}
-	return teachingDiagramQuantityContext(q, answer, evidence.SolverOutputDigest)
+	return teachingDiagramQuantityContextWithReason(q, answer, evidence.SolverOutputDigest)
 }
 
 // 数量关系校验与学生判定分开；输入只取同题冻结题干、解答及其内容身份。
 func teachingDiagramQuantityContext(q RecognizedQuestion, answer, solutionDigest string) (TeachingDiagramContext, TeachingDiagramCandidate, bool) {
+	ctx, candidate, reason := teachingDiagramQuantityContextWithReason(q, answer, solutionDigest)
+	return ctx, candidate, reason == ""
+}
+
+// 保留来源未形成图示的具体原因，不从缺图反推学生作答或改变原调用合同。
+func teachingDiagramQuantityContextWithReason(q RecognizedQuestion, answer, solutionDigest string) (TeachingDiagramContext, TeachingDiagramCandidate, string) {
 	ctx := TeachingDiagramContext{ProblemID: q.ProblemID, InputRevision: q.ConfirmedVersion, ProblemInputDigest: q.InputDigest,
 		SolutionDigest: solutionDigest, TargetQuantityID: "whole", Quantities: map[string]TeachingDiagramQuantity{}, Relations: map[string]TeachingDiagramRelation{}}
 	if ctx.ProblemID == "" || ctx.InputRevision <= 0 || !diagramDigest(ctx.ProblemInputDigest) || !diagramDigest(ctx.SolutionDigest) {
-		return ctx, TeachingDiagramCandidate{}, false
+		return ctx, TeachingDiagramCandidate{}, "source_identity_unavailable"
 	}
-	if q.Subject != "数学" || q.parentSourceUnclear {
-		return ctx, TeachingDiagramCandidate{}, false
+	if q.Subject != "数学" {
+		return ctx, TeachingDiagramCandidate{}, "subject_unsupported"
+	}
+	if q.parentSourceUnclear {
+		return ctx, TeachingDiagramCandidate{}, "source_unclear"
 	}
 	answerQuantities := diagramSourceQuantity.FindAllStringSubmatch(diagramSourceText(answer), -1)
 	if len(answerQuantities) == 0 {
-		return ctx, TeachingDiagramCandidate{}, false
+		return ctx, TeachingDiagramCandidate{}, "answer_quantity_unavailable"
 	}
 	_, printedSource := photoQuestionProblemTexts(q)
 	source := diagramSourceText(printedSource)
 	if ratio := distinctDiagramSourceMatches(diagramFractionRatio.FindAllStringSubmatch(source, -1)); len(ratio) > 0 {
 		used := distinctDiagramSourceMatches(diagramFractionUsed.FindAllStringSubmatch(source, -1))
 		if len(ratio) != 1 || len(used) != 1 || elementarymath.UnitCategory(used[0][2]) != "data" {
-			return ctx, TeachingDiagramCandidate{}, false
+			return ctx, TeachingDiagramCandidate{}, "fraction_source_quantity_unavailable"
 		}
 		fraction, ratioOK := new(big.Rat).SetString(ratio[0][1])
 		part, partOK := new(big.Rat).SetString(used[0][1])
 		if !ratioOK || !partOK || fraction.Sign() <= 0 || part.Sign() <= 0 {
-			return ctx, TeachingDiagramCandidate{}, false
+			return ctx, TeachingDiagramCandidate{}, "fraction_source_value_invalid"
 		}
 		whole, found := diagramAnswerQuantity(answerQuantities, new(big.Rat).Quo(part, fraction), used[0][2])
 		if !found {
-			return ctx, TeachingDiagramCandidate{}, false
+			return ctx, TeachingDiagramCandidate{}, "answer_quantity_mismatch"
 		}
 		ctx.Quantities["whole"] = whole
 		ctx.Quantities["used"] = TeachingDiagramQuantity{Value: used[0][1], Unit: used[0][2]}
@@ -84,7 +98,7 @@ func teachingDiagramQuantityContext(q RecognizedQuestion, answer, solutionDigest
 		elapsed := diagramJourneyElapsed.FindAllStringSubmatch(source, -1)
 		gap := diagramJourneyGap.FindAllStringSubmatch(source, -1)
 		if len(times) != 2 || len(elapsed) != 1 || len(gap) != 1 || elementarymath.UnitCategory(gap[0][2]) != "length" {
-			return ctx, TeachingDiagramCandidate{}, false
+			return ctx, TeachingDiagramCandidate{}, "journey_source_quantity_unavailable"
 		}
 		// 多项答案中选出同一已验证关系的全程量，不把路程分量当作全程。
 		first, a := new(big.Rat).SetString(times[0][1])
@@ -92,15 +106,15 @@ func teachingDiagramQuantityContext(q RecognizedQuestion, answer, solutionDigest
 		spent, c := new(big.Rat).SetString(elapsed[0][1])
 		remaining, e := new(big.Rat).SetString(gap[0][1])
 		if !a || !b || !c || !e || first.Sign() <= 0 || second.Sign() <= 0 || spent.Sign() <= 0 || remaining.Sign() <= 0 || elementarymath.NormalizeUnit(times[0][2]) != elementarymath.NormalizeUnit(times[1][2]) || elementarymath.NormalizeUnit(times[0][2]) != elementarymath.NormalizeUnit(elapsed[0][2]) {
-			return ctx, TeachingDiagramCandidate{}, false
+			return ctx, TeachingDiagramCandidate{}, "journey_source_value_invalid"
 		}
 		rest := new(big.Rat).Sub(big.NewRat(1, 1), new(big.Rat).Add(new(big.Rat).Quo(spent, first), new(big.Rat).Quo(spent, second)))
 		if rest.Sign() <= 0 {
-			return ctx, TeachingDiagramCandidate{}, false
+			return ctx, TeachingDiagramCandidate{}, "journey_already_met"
 		}
 		whole, found := diagramAnswerQuantity(answerQuantities, new(big.Rat).Quo(remaining, rest), gap[0][2])
 		if !found {
-			return ctx, TeachingDiagramCandidate{}, false
+			return ctx, TeachingDiagramCandidate{}, "answer_quantity_mismatch"
 		}
 		ctx.Quantities["whole"] = whole
 		ctx.Quantities["first_time"] = TeachingDiagramQuantity{Value: times[0][1], Unit: times[0][2]}
@@ -127,18 +141,18 @@ func teachingDiagramQuantityContext(q RecognizedQuestion, answer, solutionDigest
 			}
 		}
 		if len(amounts) != count {
-			return ctx, TeachingDiagramCandidate{}, false
+			return ctx, TeachingDiagramCandidate{}, "segment_source_quantity_unavailable"
 		}
 		sum := new(big.Rat)
 		unit := amounts[0][2]
 		if category := elementarymath.UnitCategory(unit); category != "length" && category != "mass" {
-			return ctx, TeachingDiagramCandidate{}, false
+			return ctx, TeachingDiagramCandidate{}, "segment_unit_unsupported"
 		}
 		segments := make([]string, 0, count)
 		for i, amount := range amounts {
 			number, ok := new(big.Rat).SetString(amount[1])
 			if !ok || number.Sign() <= 0 || elementarymath.NormalizeUnit(amount[2]) != elementarymath.NormalizeUnit(unit) {
-				return ctx, TeachingDiagramCandidate{}, false
+				return ctx, TeachingDiagramCandidate{}, "segment_source_value_invalid"
 			}
 			sum.Add(sum, number)
 			id := "part_" + strconv.Itoa(i+1)
@@ -147,14 +161,14 @@ func teachingDiagramQuantityContext(q RecognizedQuestion, answer, solutionDigest
 		}
 		whole, found := diagramAnswerQuantity(answerQuantities, sum, unit)
 		if !found {
-			return ctx, TeachingDiagramCandidate{}, false
+			return ctx, TeachingDiagramCandidate{}, "answer_quantity_mismatch"
 		}
 		ctx.Quantities["whole"] = whole
 		ctx.Relations["source_relation"] = TeachingDiagramRelation{Kind: "segment_bar", Whole: "whole", Segments: segments}
 	} else {
-		return ctx, TeachingDiagramCandidate{}, false
+		return ctx, TeachingDiagramCandidate{}, "relation_unsupported"
 	}
-	return ctx, TeachingDiagramCandidate{ProblemInputDigest: ctx.ProblemInputDigest, SolutionDigest: ctx.SolutionDigest, RelationID: "source_relation", Kind: ctx.Relations["source_relation"].Kind}, true
+	return ctx, TeachingDiagramCandidate{ProblemInputDigest: ctx.ProblemInputDigest, SolutionDigest: ctx.SolutionDigest, RelationID: "source_relation", Kind: ctx.Relations["source_relation"].Kind}, ""
 }
 
 // 同题共享材料可能重复呈现同一条件；只合并完全相同的捕获量，冲突量仍分别保留。
@@ -193,14 +207,16 @@ func (d Deps) attachPhotoTeachingDiagram(ctx context.Context, agent string, q Re
 	guide.TeachingDiagrams = nil
 	item.ParentGuide = &guide
 	if d.Records == nil || q.PageAssetID == "" {
+		slog.DebugContext(ctx, "Teaching diagram omitted", "problem_id", q.ProblemID, "reason", "source_asset_unavailable")
 		return item
 	}
 	evidence := item.Solve.Evidence
 	if item.Grade.Solution != "" {
 		evidence = item.Grade.Evidence
 	}
-	source, candidate, supported := teachingDiagramSourceContext(q, guide.Answer, evidence)
-	if !supported {
+	source, candidate, reason := teachingDiagramSourceContextWithReason(q, guide.Answer, evidence)
+	if reason != "" {
+		slog.DebugContext(ctx, "Teaching diagram omitted", "problem_id", q.ProblemID, "reason", reason)
 		return item
 	}
 	result := BuildTeachingDiagram(source, candidate)
@@ -210,11 +226,12 @@ func (d Deps) attachPhotoTeachingDiagram(ctx context.Context, agent string, q Re
 	}
 	owner, err := d.Records.ReadyPageAssetOwnerForAgent(ctx, agent, q.PageAssetID)
 	if err != nil {
+		slog.WarnContext(ctx, "Teaching diagram asset unavailable", "problem_id", q.ProblemID, "reason", "source_asset_unavailable", "err", err)
 		return item
 	}
 	assetID, err := d.Records.PutTeachingDiagramAsset(ctx, owner, agent, result.SVG, d.now())
 	if err != nil {
-		slog.WarnContext(ctx, "Teaching diagram asset unavailable", "problem_id", q.ProblemID, "err", err)
+		slog.WarnContext(ctx, "Teaching diagram asset unavailable", "problem_id", q.ProblemID, "reason", "asset_storage_failed", "err", err)
 		return item
 	}
 	guide.TeachingDiagrams = []k12.TeachingDiagramAsset{{AssetID: assetID, AssetDigest: result.AssetDigest, SpecDigest: result.SpecDigest,
