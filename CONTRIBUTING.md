@@ -81,6 +81,8 @@ Deploy 的工具上传与远程执行共用 SSH 保活参数：每 20 秒发送�
 
 Release 门禁解析 Tag 的完整 SHA，确认其在 main 历史中，并核对该 SHA 的成功 main push CI 和 `hexclaw-cloud` 最终部署结果。构建使用门禁固定的 SHA，避免 Tag 名称与实际构建提交不一致。现有部署回执只导出状态、SHA、镜像 digest、来源 CI/run 和环境，不上传配置正文或凭据。缺少或不匹配的必需结果明确失败，不虚构通过；真实模型、IM 和业务产物验收仍按对应任务范围完成。
 
+Create Release 仅下载 `hexclaw-*` 发布二进制产物，不下载同一运行中的 Docker `.dockerbuild` 构建记录。保留 Docker 构建成功依赖、全部目标平台及 checksum 校验；发布步骤恢复不移动已有 Tag，也不以无差别重跑替代产物核对。
+
 ### CI/CD 固定基线
 
 以上执行边界为固定基线，由本节统一维护：
