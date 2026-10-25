@@ -1080,6 +1080,8 @@ curl -fS -X POST "$HEXCLAW_BASE_URL/api/k12/print-jobs" \
 
 三种来源身份互斥：canonical 输入、图片终稿 final_artifact_id+final_artifact_digest、文字结算 solve_run_id+text_finalization_id+text_finalization_digest。图片终稿可省略 title，服务端按冻结报告标题和日期补齐，与原终稿自动交付使用同一文件身份；显式 title 继续兼容。文字模式可省略 title，使用原冻结报告标题并核对真实文字结算，不伪造图片任务。已有PDF重放读取原字节，不重发模型或通道请求。无需 idempotency_key，产物按内容身份去重。响应是 PDF 元信息；随后 content 获取实际字节。JSON HTTP 请求体上限 1 MiB，即使渲染层文本边界更大。
 
+响应 `artifact` 可包含 `render_spec_digest`、`render_spec_json` 和 `layout_check`，分别表示冻结渲染规格摘要、规格 JSON 字符串及布局检查结果，详见 [PrintableArtifact](#schema-k12practiceprintableartifact)。成功冻结文件的检查结果为 `passed` 或 `not_run`；未记录这些字段的旧文件继续省略，不补写检查结论。布局检查失败时返回错误，`failed` 由当次错误或日志反映，不承诺作为冻结文件状态持久保存或跨重启查询。
+
 JSON body：[PrintableArtifactRequest](#schema-k12practiceprintableartifactrequest)；未知字段不作为本操作输入使用。
 
 | 字段 | 类型 / 约束 | 必填 | 说明 |
@@ -1308,6 +1310,8 @@ curl -fS "$HEXCLAW_BASE_URL/api/k12/print-jobs/resource-demo-1?agent=tutor-demo"
 读取打印任务冻结源
 
 返回来源摘要和 Markdown，与准备阶段冻结源一致；练习卷请求可按冻结来源惰性补建对应 question/answer PDF。通用任务响应含 source_kind/source_ref，不含练习卷 kind/paper_no。PDF 下载另用 print-artifacts content。
+
+通用任务还可返回冻结文件的 `render_spec_digest`、`render_spec_json` 和 `layout_check`，语义及旧文件字段省略规则与 [PrintableArtifact](#schema-k12practiceprintableartifact) 相同；读取已有文件不重新执行布局检查。
 
 | 参数 | 位置 | 类型 / 约束 | 必填 | 说明 |
 | --- | --- | --- | --- | --- |
@@ -2999,6 +3003,9 @@ curl -fS -X POST "$HEXCLAW_BASE_URL/api/k12/weekly-practice/plans/resource-demo-
 | `source_digest` | string | 是 | 冻结来源内容摘要，用于确认读取同一版本 |
 | `format` | string | 是 | JSON 投影字段；可选字段在无值时可能省略。 |
 | `render_contract_version` | string | 是 | JSON 投影字段；可选字段在无值时可能省略。 |
+| `render_spec_digest` | string | 否 | 冻结渲染规格摘要；旧产物保留原身份，缺值时省略 |
+| `render_spec_json` | string | 否 | 本文件冻结的引擎、profile 及字体规格 JSON 字符串；缺值时省略 |
+| `layout_check` | string (`passed`, `not_run`) | 否 | 成功冻结文件的布局检查结果；`not_run` 表示未执行检查，字段缺失不代表通过 |
 | `content_type` | string | 是 | JSON 投影字段；可选字段在无值时可能省略。 |
 | `byte_digest` | string | 是 | 冻结 PDF 字节摘要，与下载 X-Content-SHA256 一致 |
 | `byte_size` | integer | 是 | PDF 实际字节数 |
@@ -3667,6 +3674,9 @@ curl -fS -X POST "$HEXCLAW_BASE_URL/api/k12/weekly-practice/plans/resource-demo-
 | `source_ref` | string | 是 | JSON 投影字段；可选字段在无值时可能省略。 |
 | `title` | string | 是 | JSON 投影字段；可选字段在无值时可能省略。 |
 | `source_digest` | string | 是 | 冻结来源内容摘要，用于确认读取同一版本 |
+| `render_spec_digest` | string | 否 | 冻结渲染规格摘要；旧文件缺值时省略 |
+| `render_spec_json` | string | 否 | 冻结渲染规格的 JSON 字符串；与 `render_spec_digest` 一同返回 |
+| `layout_check` | string (`passed`, `not_run`) | 否 | 原冻结文件的布局检查结果；旧文件缺值时省略，不重新检查 |
 | `markdown` | string | 是 | JSON 投影字段；可选字段在无值时可能省略。 |
 
 本结构未声明的字段不属于公开契约。

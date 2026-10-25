@@ -29,9 +29,23 @@ type TeachingReportRenderer interface {
 	RenderTeachingReport(context.Context, render.ReportBundle, render.ReportRenderInput) ([]byte, string, error)
 }
 
+// TeachingReportSpecRenderer 扩展现有渲染端口；旧适配器仍可回放原合同。
+type TeachingReportSpecRenderer interface {
+	ResolveTeachingReportSpec(context.Context, render.ReportBundle) (render.ReportRenderSpec, error)
+	RenderTeachingReportResult(context.Context, render.ReportBundle, render.ReportRenderInput) (TeachingReportRendered, error)
+}
+
+type TeachingReportRendered struct {
+	Data        []byte
+	ContentType string
+	Spec        render.ReportRenderSpec
+	LayoutCheck string
+}
+
 type TeachingReportPrintInput struct {
 	Snapshot TeachingReportFrozenSnapshot
 	Assets   map[string]TeachingReportAsset
+	Spec     *render.ReportRenderSpec
 }
 
 func (d Deps) freezeTeachingReportTask(ctx context.Context, agent, subject, grade, title string) (*TeachingReportTaskSnapshot, error) {

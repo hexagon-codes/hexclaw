@@ -59,7 +59,9 @@ type PreparePrintableArtifactRequest struct {
 	// RenderMarkdown 只在首次冻结 PDF 时承载同源媒体，不进入公开 Artifact 或 Desktop。
 	RenderMarkdown string
 	// TeachingReport 由原来源用例组装，不接受客户端传入任意模板或资产。
-	TeachingReport *TeachingReportPrintInput
+	TeachingReport   *TeachingReportPrintInput
+	RenderSpecDigest string
+	RenderSpecJSON   string
 }
 
 type PrintableArtifactView struct {
@@ -99,6 +101,9 @@ type GenericPrintArtifactView struct {
 	ContentType           string
 	ByteDigest            string
 	ByteSize              int64
+	RenderSpecDigest      string
+	RenderSpecJSON        string
+	LayoutCheck           string
 	PDF                   []byte
 }
 
@@ -137,7 +142,8 @@ func buildPrintArtifact(req PreparePrintableArtifactRequest, at int64) k12.Print
 		Title             string `json:"title"`
 		CanonicalMarkdown string `json:"canonical_markdown"`
 		RenderContract    string `json:"render_contract,omitempty"`
-	}{req.SourceKind, req.SourceRef, req.Title, req.CanonicalMarkdown, renderContract})
+		RenderSpecDigest  string `json:"render_spec_digest,omitempty"`
+	}{req.SourceKind, req.SourceRef, req.Title, req.CanonicalMarkdown, renderContract, req.RenderSpecDigest})
 	sourceSum := sha256.Sum256(artifactBytes)
 	sourceDigest := hex.EncodeToString(sourceSum[:])
 	artifactIDSum := sha256.Sum256([]byte(req.AgentName + "\x00" + sourceDigest))
@@ -145,7 +151,7 @@ func buildPrintArtifact(req PreparePrintableArtifactRequest, at int64) k12.Print
 		ArtifactID: "part-" + hex.EncodeToString(artifactIDSum[:12]),
 		AgentName:  req.AgentName, SourceKind: req.SourceKind,
 		SourceRef: req.SourceRef, Title: req.Title, CanonicalMarkdown: req.CanonicalMarkdown,
-		SourceDigest: sourceDigest, CreatedAt: at,
+		SourceDigest: sourceDigest, RenderSpecDigest: req.RenderSpecDigest, CreatedAt: at,
 	}
 }
 
@@ -153,7 +159,7 @@ func samePrintArtifact(left, right k12.PrintArtifact) bool {
 	return left.ArtifactID == right.ArtifactID && left.AgentName == right.AgentName &&
 		left.SourceKind == right.SourceKind && left.SourceRef == right.SourceRef &&
 		left.Title == right.Title && left.CanonicalMarkdown == right.CanonicalMarkdown &&
-		left.SourceDigest == right.SourceDigest
+		left.SourceDigest == right.SourceDigest && left.RenderSpecDigest == right.RenderSpecDigest
 }
 
 func (d Deps) renderPrintableArtifact(ctx context.Context,
@@ -186,14 +192,19 @@ func (d Deps) renderPrintableArtifact(ctx context.Context,
 	var pdf []byte
 	var contentType string
 	var err error
+	var reportResult TeachingReportRendered
 	if len(report) > 0 && report[0] != nil {
-		pdf, contentType, err = d.renderTeachingReport(ctx, *report[0])
+		reportResult, err = d.renderTeachingReport(ctx, *report[0])
+		pdf, contentType = reportResult.Data, reportResult.ContentType
 	} else if renderer, ok := d.Renderer.(MetadataRenderer); ok {
 		pdf, contentType, err = renderer.RenderWithMetadata(ctx, renderMarkdown, "pdf", metadata)
 	} else {
 		pdf, contentType, err = d.Renderer.Render(ctx, renderMarkdown, "pdf")
 	}
 	if err != nil {
+		if reportResult.LayoutCheck != "" {
+			err = fmt.Errorf("report layout_check=%s: %w", reportResult.LayoutCheck, err)
+		}
 		return k12.PrintArtifactRender{},
 			fmt.Errorf("%w: %v", ErrRenderUnavailable, err)
 	}
@@ -205,6 +216,16 @@ func (d Deps) renderPrintableArtifact(ctx context.Context,
 			fmt.Errorf("%w: renderer 未返回有效 PDF", ErrRenderUnavailable)
 	}
 	sum := sha256.Sum256(pdf)
+	specDigest, specJSON := "", ""
+	if reportResult.Spec.Version != "" {
+		specDigest, specJSON, err = reportResult.Spec.Identity()
+		if err != nil {
+			return k12.PrintArtifactRender{}, err
+		}
+		if specDigest != artifact.RenderSpecDigest {
+			return k12.PrintArtifactRender{}, fmt.Errorf("report render specification changed before freeze")
+		}
+	}
 	return k12.PrintArtifactRender{
 		ArtifactID: artifact.ArtifactID, Format: "pdf",
 		RenderContractVersion: printArtifactRenderContract(artifact.SourceRef),
@@ -212,7 +233,8 @@ func (d Deps) renderPrintableArtifact(ctx context.Context,
 		ByteDigest:            hex.EncodeToString(sum[:]),
 		ByteSize:              int64(len(pdf)),
 		Payload:               append([]byte(nil), pdf...),
-		CreatedAt:             d.now(),
+		RenderSpecDigest:      specDigest, RenderSpecJSON: specJSON, LayoutCheck: reportResult.LayoutCheck,
+		CreatedAt: d.now(),
 	}, nil
 }
 
@@ -241,6 +263,27 @@ func (d Deps) PreparePrintableArtifact(ctx context.Context,
 	} else if !errors.Is(getErr, records.ErrNotFound) {
 		return PrintableArtifactView{}, false,
 			fmt.Errorf("usecase: 取打印 Artifact: %w", getErr)
+	}
+	// 先读旧身份的冻结文件；只有尚无文件时才解析当前引擎与字体建立新版身份。
+	if req.TeachingReport != nil && req.RenderSpecDigest == "" {
+		if renderer, ok := d.Renderer.(TeachingReportSpecRenderer); ok {
+			bundle, err := req.TeachingReport.Snapshot.Bundle.Resolve()
+			if err != nil {
+				return PrintableArtifactView{}, false, err
+			}
+			spec, err := renderer.ResolveTeachingReportSpec(ctx, bundle)
+			if err != nil {
+				return PrintableArtifactView{}, false, err
+			}
+			req.RenderSpecDigest, req.RenderSpecJSON, err = spec.Identity()
+			if err != nil {
+				return PrintableArtifactView{}, false, err
+			}
+			input := *req.TeachingReport
+			input.Spec = &spec
+			req.TeachingReport = &input
+			return d.PreparePrintableArtifact(ctx, req)
+		}
 	}
 	render, err := d.renderPrintableArtifact(ctx, artifact, req.RenderMarkdown, req.TeachingReport)
 	if err != nil {
@@ -372,7 +415,8 @@ func (d Deps) RenderGenericPrintArtifact(ctx context.Context, agentName, jobID s
 		Title: v.Artifact.Title, SourceDigest: v.Artifact.SourceDigest,
 		Markdown: v.Artifact.CanonicalMarkdown, RenderFormat: v.Render.Format,
 		RenderContractVersion: v.Render.RenderContractVersion,
-		ContentType:           v.Render.ContentType, ByteDigest: v.Render.ByteDigest,
+		RenderSpecDigest:      v.Render.RenderSpecDigest, RenderSpecJSON: v.Render.RenderSpecJSON, LayoutCheck: v.Render.LayoutCheck,
+		ContentType: v.Render.ContentType, ByteDigest: v.Render.ByteDigest,
 		ByteSize: v.Render.ByteSize, PDF: append([]byte(nil), v.Render.Payload...),
 	}, nil
 }

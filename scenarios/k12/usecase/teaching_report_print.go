@@ -8,14 +8,14 @@ import (
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 )
 
-func (d Deps) renderTeachingReport(ctx context.Context, input TeachingReportPrintInput) ([]byte, string, error) {
+func (d Deps) renderTeachingReport(ctx context.Context, input TeachingReportPrintInput) (TeachingReportRendered, error) {
 	renderer, ok := d.Renderer.(TeachingReportRenderer)
 	if !ok {
-		return nil, "", ErrRenderUnavailable
+		return TeachingReportRendered{}, ErrRenderUnavailable
 	}
 	bundle, err := input.Snapshot.Bundle.Resolve()
 	if err != nil {
-		return nil, "", err
+		return TeachingReportRendered{}, err
 	}
 	logo := render.PDFBrandImage()
 	logoDigest := teachingReportResourceDigest(logo)
@@ -36,9 +36,14 @@ func (d Deps) renderTeachingReport(ctx context.Context, input TeachingReportPrin
 	}
 	projection, err := project(input.Snapshot.Report, branding, assets)
 	if err != nil {
-		return nil, "", err
+		return TeachingReportRendered{}, err
 	}
-	return renderer.RenderTeachingReport(ctx, bundle, render.ReportRenderInput{Document: projection.Document, Formulas: projection.Formulas, Resources: projection.Resources})
+	renderInput := render.ReportRenderInput{Document: projection.Document, Formulas: projection.Formulas, Resources: projection.Resources, Spec: input.Spec}
+	if typed, ok := d.Renderer.(TeachingReportSpecRenderer); ok {
+		return typed.RenderTeachingReportResult(ctx, bundle, renderInput)
+	}
+	data, mime, err := renderer.RenderTeachingReport(ctx, bundle, renderInput)
+	return TeachingReportRendered{Data: data, ContentType: mime, LayoutCheck: "not_run"}, err
 }
 
 // prepareTeachingReportPrintRequest 只用实际来源与冻结内容建立既有PrintArtifact。

@@ -1080,6 +1080,8 @@ Freeze a downloadable PDF artifact
 
 Choose exactly one source: canonical input, grading final_artifact_id+final_artifact_digest, or solve_run_id+text_finalization_id+text_finalization_digest. The grading variant may omit title to use the frozen report title and date, matching the original final-report delivery identity; explicit titles remain supported. The text variant defaults to its frozen report title and validates the actual text finalization. Existing PDF replay reads the same bytes and sends no model or channel request. No idempotency_key is required; artifacts deduplicate by content identity. The response is PDF metadata; fetch content for actual bytes. HTTP JSON bodies remain limited to 1 MiB.
 
+The response `artifact` may include `render_spec_digest`, `render_spec_json`, and `layout_check`: the frozen rendering specification digest, its JSON string, and the layout check result. See [PrintableArtifact](#schema-k12practiceprintableartifact). A successfully frozen file can report `passed` or `not_run`; legacy files without these values omit the fields without inventing a check result. A failed layout check returns an error. Its `failed` state is reflected in the current error or logs, with no promise of a persisted frozen-file status or a queryable failure after restart.
+
 JSON body: [PrintableArtifactRequest](#schema-k12practiceprintableartifactrequest)；unknown fields are not used by this operation.
 
 | Field | Type / constraints | Required | Meaning |
@@ -1308,6 +1310,8 @@ Implementation: [getPracticePrintJob](../../../../scenarios/k12/apihttp/practice
 Read a print job frozen source
 
 Returns the prepared immutable source digest/Markdown; practice requests can lazily freeze the requested question/answer PDF from that source. Generic responses include source_kind/source_ref rather than practice kind/paper_no. Download PDF through print-artifacts content.
+
+Generic responses may also include the frozen file's `render_spec_digest`, `render_spec_json`, and `layout_check`, with the same semantics and legacy-field omission rules as [PrintableArtifact](#schema-k12practiceprintableartifact). Reading an existing file does not rerun the layout check.
 
 | Parameter | Location | Type / constraints | Required | Meaning |
 | --- | --- | --- | --- | --- |
@@ -2999,6 +3003,9 @@ Unknown fields are not part of this schema.
 | `source_digest` | string | Yes | Digest of the frozen source used to verify the same content revision |
 | `format` | string | Yes | JSON projection field; omitted when absent if optional. |
 | `render_contract_version` | string | Yes | JSON projection field; omitted when absent if optional. |
+| `render_spec_digest` | string | No | Frozen rendering specification digest; legacy artifacts retain their original identity and omit an absent value |
+| `render_spec_json` | string | No | JSON string containing the engine, profile, and font specification frozen for this file; omitted when absent |
+| `layout_check` | string (`passed`, `not_run`) | No | Layout check result for a successfully frozen file; `not_run` means no check ran, and an absent field does not mean passed |
 | `content_type` | string | Yes | JSON projection field; omitted when absent if optional. |
 | `byte_digest` | string | Yes | Frozen PDF byte digest matching downloaded X-Content-SHA256 |
 | `byte_size` | integer | Yes | Actual PDF byte count |
@@ -3667,6 +3674,9 @@ Unknown fields are not part of this schema.
 | `source_ref` | string | Yes | JSON projection field; omitted when absent if optional. |
 | `title` | string | Yes | JSON projection field; omitted when absent if optional. |
 | `source_digest` | string | Yes | Digest of the frozen source used to verify the same content revision |
+| `render_spec_digest` | string | No | Frozen rendering specification digest; omitted for legacy files without a value |
+| `render_spec_json` | string | No | Frozen rendering specification as a JSON string, returned together with `render_spec_digest` |
+| `layout_check` | string (`passed`, `not_run`) | No | The original frozen file's layout check result; omitted when absent in legacy files, without rerunning the check |
 | `markdown` | string | Yes | JSON projection field; omitted when absent if optional. |
 
 Unknown fields are not part of this schema.

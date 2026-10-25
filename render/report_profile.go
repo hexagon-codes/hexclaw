@@ -20,12 +20,13 @@ type ReportBundleRef struct {
 }
 
 type reportProfile struct {
-	ID             string              `json:"profile_id"`
-	API            int                 `json:"render_profile_api"`
-	InputSchema    string              `json:"input_schema"`
-	Entrypoint     string              `json:"entrypoint"`
-	Margins        map[string]float64  `json:"margin_mm"`
-	RequestedFonts map[string][]string `json:"requested_fonts"`
+	ID               string              `json:"profile_id"`
+	API              int                 `json:"render_profile_api"`
+	InputSchema      string              `json:"input_schema"`
+	Entrypoint       string              `json:"entrypoint"`
+	Margins          map[string]float64  `json:"margin_mm"`
+	RequestedFonts   map[string][]string `json:"requested_fonts"`
+	RequiredFeatures []string            `json:"required_typst_features"`
 }
 
 // ReportBundle 保存已经核对字节的只读资源快照，不包含安装器或目录注册。
@@ -38,6 +39,24 @@ type ReportBundle struct {
 func (b ReportBundle) Ref() ReportBundleRef { return b.ref }
 func (b ReportBundle) ProfileID() string    { return b.profile.ID }
 func (b ReportBundle) InputSchema() string  { return b.profile.InputSchema }
+
+// ValidateHostCompatibility 由报告宿主在安装提交前核对可消费合同，不改变历史快照读取。
+func (b ReportBundle) ValidateHostCompatibility() error {
+	if b.profile.ID == "" {
+		return fmt.Errorf("report profile identity is unavailable")
+	}
+	if b.profile.InputSchema != "homework-report-render-v1" && b.profile.InputSchema != "homework-report-render-v2" {
+		return fmt.Errorf("unsupported report input schema: %s", b.profile.InputSchema)
+	}
+	for _, feature := range b.profile.RequiredFeatures {
+		switch feature {
+		case "json", "grid", "table.header", "math.display", "image.fit-contain":
+		default:
+			return fmt.Errorf("unsupported report compiler feature: %s", feature)
+		}
+	}
+	return nil
+}
 
 // LoadReportBundle 读取宿主已确定的本地版本目录；调用者负责安装与有效设置。
 // 摘要来自冻结引用，内嵌副本和安装目录使用同一规范化清单身份。
@@ -129,6 +148,7 @@ type ReportRenderInput struct {
 	Formulas  map[string]string `json:"formulas"`
 	Resources map[string][]byte `json:"-"`
 	Fonts     ReportFonts       `json:"fonts"`
+	Spec      *ReportRenderSpec `json:"-"`
 }
 
 func reportRelativePath(path string) bool {

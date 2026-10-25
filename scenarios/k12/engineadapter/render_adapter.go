@@ -27,28 +27,49 @@ var _ usecase.Renderer = (*RenderAdapter)(nil)
 
 // RenderTeachingReport 使用同一宿主服务编译冻结资源，不进入通用Markdown重排。
 func (a *RenderAdapter) RenderTeachingReport(ctx context.Context, bundle render.ReportBundle, input render.ReportRenderInput) ([]byte, string, error) {
+	result, err := a.RenderTeachingReportResult(ctx, bundle, input)
+	return result.Data, result.ContentType, err
+}
+
+func (a *RenderAdapter) ResolveTeachingReportSpec(ctx context.Context, bundle render.ReportBundle) (render.ReportRenderSpec, error) {
+	service, ok := a.svc.(interface {
+		ResolveReportSpec(context.Context, render.ReportBundle) (render.ReportRenderSpec, error)
+	})
+	if !ok {
+		return render.ReportRenderSpec{}, usecase.ErrRenderUnavailable
+	}
+	return service.ResolveReportSpec(ctx, bundle)
+}
+
+func (a *RenderAdapter) RenderTeachingReportResult(ctx context.Context, bundle render.ReportBundle, input render.ReportRenderInput) (usecase.TeachingReportRendered, error) {
 	service, ok := a.svc.(interface {
 		RenderReport(context.Context, render.ReportBundle, render.ReportRenderInput) (*render.ReportRenderResult, error)
 	})
 	if !ok {
-		return nil, "", usecase.ErrRenderUnavailable
+		return usecase.TeachingReportRendered{}, usecase.ErrRenderUnavailable
 	}
 	result, err := service.RenderReport(ctx, bundle, input)
+	var output usecase.TeachingReportRendered
+	if result != nil {
+		output.Spec = result.Spec
+		output.LayoutCheck = result.LayoutCheck
+	}
 	if err != nil {
-		return nil, "", err
+		return output, err
 	}
 	if result == nil || result.File == nil {
-		return nil, "", fmt.Errorf("report renderer returned no file")
+		return output, fmt.Errorf("report renderer returned no file")
 	}
 	file := result.File
 	if !file.CacheHit && !file.CacheOwned {
 		defer os.Remove(file.Path)
 	}
 	if file.Size > maxExportBytes {
-		return nil, "", fmt.Errorf("report output exceeds the export limit")
+		return output, fmt.Errorf("report output exceeds the export limit")
 	}
 	data, err := os.ReadFile(file.Path)
-	return data, file.ContentType, err
+	output.Data, output.ContentType = data, file.ContentType
+	return output, err
 }
 
 // Render 把 markdown 渲染为指定格式，返回二进制 + Content-Type。

@@ -20,6 +20,7 @@ type ReportRenderResult struct {
 	ProfileID          string
 	LayoutCheck        string
 	FontManifestDigest string
+	Spec               ReportRenderSpec
 }
 
 // RenderReport 复用同一Service的并发控制和缓存，不把JSON交给Markdown图片预处理。
@@ -41,27 +42,33 @@ func (s *Service) RenderReport(ctx context.Context, bundle ReportBundle, input R
 	if !ok {
 		return nil, &RenderError{Code: CodeEngineMissing, Format: FormatPDF, Engine: "report-profile"}
 	}
-	if input.Fonts.Sans == "" || input.Fonts.Serif == "" || input.Fonts.Math == "" {
-		fonts, err := renderer.resolveReportFonts(ctx, bundle.profile)
+	if input.Spec == nil {
+		spec, err := s.ResolveReportSpec(ctx, bundle)
 		if err != nil {
 			return nil, err
 		}
-		input.Fonts = fonts
+		input.Spec = &spec
 	}
-	engineID, err := renderer.reportEngineIdentity(ctx)
-	if err != nil {
-		return nil, err
+	if input.Spec.Bundle != bundle.Ref() || input.Spec.ProfileID != bundle.ProfileID() {
+		return nil, fmt.Errorf("report render specification does not match its bundle")
 	}
+	input.Fonts = input.Spec.Fonts
+	engineID := input.Spec.Engine
 	resources := make(map[string]string, len(input.Resources))
 	for path, data := range input.Resources {
 		resources[path] = reportDigest(data)
 	}
+	specDigest, _, err := input.Spec.Identity()
+	if err != nil {
+		return nil, err
+	}
 	identity, err := reportCanonicalJSON(struct {
-		Bundle    ReportBundleRef   `json:"bundle"`
-		Input     ReportRenderInput `json:"input"`
-		Resources map[string]string `json:"resources"`
-		Engine    string            `json:"engine"`
-	}{bundle.ref, input, resources, engineID})
+		Bundle     ReportBundleRef   `json:"bundle"`
+		Input      ReportRenderInput `json:"input"`
+		Resources  map[string]string `json:"resources"`
+		Engine     string            `json:"engine"`
+		SpecDigest string            `json:"spec_digest"`
+	}{bundle.ref, input, resources, engineID, specDigest})
 	if err != nil {
 		return nil, err
 	}
@@ -74,13 +81,17 @@ func (s *Service) RenderReport(ctx context.Context, bundle ReportBundle, input R
 			if err != nil {
 				return nil, err
 			}
-			return &ReportRenderResult{File: hit, Bundle: bundle.ref, ProfileID: bundle.profile.ID, LayoutCheck: check, FontManifestDigest: input.Fonts.ManifestDigest}, nil
+			return &ReportRenderResult{File: hit, Bundle: bundle.ref, ProfileID: bundle.profile.ID, LayoutCheck: check, FontManifestDigest: input.Fonts.ManifestDigest, Spec: *input.Spec}, nil
 		}
 	}
 	result, err := renderer.renderReportProfile(ctx, bundle, input)
 	if err != nil {
-		return nil, err
+		if result != nil {
+			result.Spec = *input.Spec
+		}
+		return result, err
 	}
+	result.Spec = *input.Spec
 	if key != "" {
 		if cached, err := s.cache.Put(key, result.File.Path); err == nil {
 			result.File.Path, result.File.CacheOwned = cached, true
@@ -136,7 +147,8 @@ func (r *PandocRenderer) reportEngineIdentity(ctx context.Context) (string, erro
 		if err != nil {
 			return "", reportCommandError(ctx, filepath.Base(binary), err, "read report engine version")
 		}
-		identity.Write(out)
+		line, _, _ := strings.Cut(strings.TrimSpace(string(out)), "\n")
+		identity.WriteString(line + "\n")
 	}
 	return identity.String(), nil
 }
@@ -213,7 +225,7 @@ func (r *PandocRenderer) renderReportProfile(ctx context.Context, bundle ReportB
 	}
 	check, err := r.validateReportProfileLayout(subCtx, output, bundle.profile)
 	if err != nil {
-		return nil, err
+		return &ReportRenderResult{Bundle: bundle.ref, ProfileID: bundle.profile.ID, LayoutCheck: check, FontManifestDigest: input.Fonts.ManifestDigest}, err
 	}
 	success = true
 	return &ReportRenderResult{

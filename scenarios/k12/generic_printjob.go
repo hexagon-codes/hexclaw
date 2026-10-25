@@ -36,6 +36,7 @@ type PrintArtifact struct {
 	Title             string `json:"title"`
 	CanonicalMarkdown string `json:"canonical_markdown"`
 	SourceDigest      string `json:"source_digest"`
+	RenderSpecDigest  string `json:"render_spec_digest,omitempty"`
 	CreatedAt         int64  `json:"created_at"`
 }
 
@@ -50,6 +51,9 @@ type PrintArtifactRender struct {
 	ByteDigest            string `json:"byte_digest"`
 	ByteSize              int64  `json:"byte_size"`
 	Payload               []byte `json:"-"`
+	RenderSpecDigest      string `json:"render_spec_digest,omitempty"`
+	RenderSpecJSON        string `json:"render_spec_json,omitempty"`
+	LayoutCheck           string `json:"layout_check,omitempty"`
 	CreatedAt             int64  `json:"created_at"`
 }
 
