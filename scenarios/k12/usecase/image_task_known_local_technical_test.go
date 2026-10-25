@@ -217,9 +217,20 @@ func newKnownTechnicalFixture(t *testing.T, failedCounts ...int) knownTechnicalF
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("seed current known failure: %v", err)
 	}
+	// 使用较早的持久化时间，确定性覆盖跨秒写入，不依赖机器速度或固定等待。
+	if _, err := o.deps.Records.DB().ExecContext(ctx, `UPDATE k12_grading_jobs
+		SET created_at = created_at - 60, updated_at = updated_at - 60
+		WHERE record_id = ? AND agent_name = ?`, jobID, "mingming"); err != nil {
+		t.Fatal(err)
+	}
 	job, err = o.deps.AdvanceGradingStage(ctx, "mingming", jobID, AdvanceGradingInput{Outcome: GradingOutcomeFailed, FailureKind: "item_assessment_failed", Retryable: true})
 	if err != nil || job.Record.Status != k12.GradingStageFailedTerminal || job.Fields.AttemptCount != failedCount {
 		t.Fatalf("terminal fixture: %+v %v", job, err)
+	}
+	// 命令返回值未刷新存储层时间戳；零写入比较必须使用前置操作完成后的数据库快照。
+	job, err = o.deps.GetGradingJob(ctx, "mingming", jobID)
+	if err != nil {
+		t.Fatal(err)
 	}
 	before, err := o.deps.Records.ListGradingItemInvocations(ctx, "mingming", jobID)
 	if err != nil {
@@ -336,8 +347,18 @@ func TestKnownLocalTechnicalRuntimeUnavailableRejectsWithoutWrites(t *testing.T)
 				t.Fatalf("rejected dispatch changed: %+v %v", dispatch, err)
 			}
 			job, err := f.o.deps.GetGradingJob(context.Background(), "mingming", f.job.Record.RecordID)
-			if err != nil || !reflect.DeepEqual(job.Record, f.job.Record) {
-				t.Fatalf("rejected job changed: %+v %v", job, err)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(job.Record, f.job.Record) {
+				before, after := reflect.ValueOf(f.job.Record).Elem(), reflect.ValueOf(job.Record).Elem()
+				for i := 0; i < before.NumField(); i++ {
+					if !reflect.DeepEqual(before.Field(i).Interface(), after.Field(i).Interface()) {
+						t.Errorf("rejected job changed: field=%s before=%v after=%v", before.Type().Field(i).Name,
+							before.Field(i).Interface(), after.Field(i).Interface())
+					}
+				}
+				t.FailNow()
 			}
 			if f.generateCalls.Load() != 0 || f.verifyCalls.Load() != 0 {
 				t.Fatal("rejected recovery sent provider call")
