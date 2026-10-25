@@ -132,6 +132,12 @@ func newKnownTechnicalFixture(t *testing.T, failedCounts ...int) knownTechnicalF
 	waitGradingView(t, o, jobID, func(v GradingJobView) bool {
 		return v.Fields.AnchorState == k12.GradingAnchorLocated || v.Fields.AnchorState == k12.GradingAnchorDegraded
 	})
+	// 锚点落库后仍可能调度后续任务，构造失败快照前需等后台任务完全退出。
+	idleCtx, cancelIdle := context.WithTimeout(ctx, 10*time.Second)
+	defer cancelIdle()
+	if err := o.WaitForIdle(idleCtx); err != nil {
+		t.Fatalf("wait for fixture workers: %v", err)
+	}
 	run, job := confirmItemResumeJobWithoutRun(t, o, jobID)
 	c := &ImageTaskCoordinator{Records: o.deps.Records, Grading: o, Classifier: &imageTaskClassifierStub{},
 		ReadAsset: func(string, string) ([]byte, error) { return run.req.Image, nil },
