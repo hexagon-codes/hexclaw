@@ -634,6 +634,7 @@ var structCmds = []struct {
 	{`\text`, 1, false}, {`\mathrm`, 1, false}, {`\mathbf`, 1, false},
 	{`\mathit`, 1, false}, {`\mathsf`, 1, false}, {`\mathtt`, 1, false},
 	{`\operatorname`, 1, false},
+	{`\boxed`, 1, false},
 }
 
 // expandStructural 展开 \frac{a}{b}→a/b、\sqrt{x}→√x、\text/\mathrm{…}→内容原样。
@@ -740,6 +741,9 @@ func renderStructural(name string, args []string, math bool) string {
 			return "√(" + inner + ")"
 		}
 		return "√" + inner
+	case `\boxed`:
+		// 方框仅强调答案，移除排版外壳后继续保留内部公式与单位。
+		return convertMath(args[0], math)
 	default: // \text / \mathrm：内容原样
 		return args[0]
 	}

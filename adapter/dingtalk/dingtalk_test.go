@@ -713,3 +713,31 @@ func TestBug20260712_MarkdownMessageNormalizesLatexMath(t *testing.T) {
 		t.Fatalf("应转换为 Unicode 数学符号：%s", payload)
 	}
 }
+
+func TestDingTalkBoxedAnswerKeepsCanonicalAndVisibleResult(t *testing.T) {
+	const source = `甲单独修完需要：
+\[
+1\div\frac1{10}=\boxed{10\text{天}}
+\]
+
+**检验：**甲做3天完成 \(\frac3{10}\)，乙做10.5天完成 \(\frac7{10}\)，合起来恰好完成整条公路，符合题意。`
+	reply := &adapter.Reply{Content: source}
+	if err := ensureDingTalkRenderEvidence(reply); err != nil {
+		t.Fatal(err)
+	}
+	if reply.Content != source || reply.MessageContent.Markdown != source {
+		t.Fatal("mathematical projection changed the canonical assistant response")
+	}
+	visible, err := dingTalkManifestMarkdown(*reply.RenderManifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fragment := range []string{"1÷(1/10)=10天", "甲做3天完成 3/10", "乙做10.5天完成 7/10", "合起来恰好完成整条公路，符合题意。"} {
+		if !strings.Contains(visible, fragment) {
+			t.Fatalf("DingTalk projection lost %q: %q", fragment, visible)
+		}
+	}
+	if strings.Contains(visible, "boxed") || strings.Contains(string(dingtalkMarkdownMessage(visible).MsgParam), "boxed") {
+		t.Fatal("DingTalk payload exposed the boxed layout command")
+	}
+}
