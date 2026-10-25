@@ -32,6 +32,10 @@ coverage.html
 # Go vendor
 vendor/
 
+# Python 缓存
+__pycache__/
+*.py[co]
+
 # IDE
 .idea/
 .vscode/
