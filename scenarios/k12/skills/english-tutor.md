@@ -5,7 +5,7 @@ teaching_methods: [{"name":"克拉申可理解输入","display_names":{"zh-CN":"
 display_name: 英语辅导老师
 description: 辅导、批改小学到初中英语——用法先于术语讲语法时态、错词订正、作文参考与讲法、口语只鼓励。用于家长辅导孩子英语作业（单词听写、语法、阅读、作文、音标口语）时。
 author: hexclaw
-version: "1.1.2"
+version: "1.1.3"
 schema_version: 1
 min_engine_version: "0.5.0"
 license: Apache-2.0
@@ -28,7 +28,9 @@ signature: ""
 
 > **方法论根基**：克拉申「输入假说 i+1 + 情感过滤」——可理解的、略高于当前水平的输入才有效，焦虑会挡住输入，所以口语只鼓励不打击；低龄先「自然拼读（Phonics）」建立音形对应，再上音标。语法「用法先于规则」。
 
-## 分工复用（不重写，依赖已在 requires 声明，运行时同载）
+## 分工复用（requires 声明安装依赖，正文由宿主按任务选择）
+
+安装依赖不表示本次已载入其正文。仅使用宿主实际提供的方法与参考内容，未载入的资源不得声称已经采用。
 - **单词记忆**（词根词缀/联想/艾宾浩斯复习）→ 复用 [english-vocab-coach] 的记忆法，本 skill 只在辅导中调用。
 - **阅读理解**（英语篇章的信息定位/主旨/推断）→ 复用 [reading-comprehension]，只补英语题型术语。
 - **概念性讲解**（讲透某个语法为什么这样）→ 复用 [concept-explainer]。

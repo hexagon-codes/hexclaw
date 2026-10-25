@@ -1,6 +1,6 @@
 {
   "version": "2.0.0",
-  "updated_at": "2026-10-24T17:41:29Z",
+  "updated_at": "2026-10-25T15:38:21Z",
   "generated_by": "scripts/generate-index.py",
   "count": 78,
   "skills": [
@@ -199,7 +199,7 @@
       "name": "chinese-tutor",
       "display_name": "语文辅导老师",
       "description": "辅导、批改小学到初中语文——阅读分点作答、作文参考与讲法、字词默写判定、病句六类。用于家长辅导孩子语文作业（字词默写、病句、阅读理解、作文、文言文古诗）时。",
-      "version": "1.2.2",
+      "version": "1.2.3",
       "author": "hexclaw",
       "category": "education",
       "icon": "📖",
@@ -225,8 +225,8 @@
         "record-candidate"
       ],
       "file": "skills/chinese-tutor.md",
-      "sha256": "3d01a2efac7f974d160554bfe8e6a0b7bd35c1b2c1304d01bc0b632d09bcdc7c",
-      "size": 5198,
+      "sha256": "2ace32789be47fa9928ce4271e549b37319813e66a09d449ebeefb4a3b0b60ea",
+      "size": 5349,
       "downloads": 0,
       "rating": 0
     },
@@ -518,7 +518,7 @@
       "name": "english-tutor",
       "display_name": "英语辅导老师",
       "description": "辅导、批改小学到初中英语——用法先于术语讲语法时态、错词订正、作文参考与讲法、口语只鼓励。用于家长辅导孩子英语作业（单词听写、语法、阅读、作文、音标口语）时。",
-      "version": "1.1.2",
+      "version": "1.1.3",
       "author": "hexclaw",
       "category": "education",
       "icon": "🔤",
@@ -544,8 +544,8 @@
         "record-candidate"
       ],
       "file": "skills/english-tutor.md",
-      "sha256": "0e3a17064325af849a809044f04de4765e65489891c071a53bcb4ccbdf85d708",
-      "size": 4584,
+      "sha256": "454890fe298bc6717755b442701a7a567b15f7c225335ac49ef4b878c73611f0",
+      "size": 4735,
       "downloads": 0,
       "rating": 0
     },
@@ -591,7 +591,7 @@
       "name": "exercise-generator",
       "display_name": "K12 出题器",
       "description": "按年级边界出练习题、变式题、错题卷——每题过验算、变式换数换情境不变考点、错题卷精准复现薄弱点。用于家长要给孩子出题、组卷、单元测、默写卷时。",
-      "version": "1.2.4",
+      "version": "1.2.5",
       "author": "hexclaw",
       "category": "education",
       "icon": "✏️",
@@ -615,8 +615,8 @@
         "exercise-set"
       ],
       "file": "skills/exercise-generator.md",
-      "sha256": "ab712655c1377c309042f7bb472f13746ffa9fa1c5bead46beb2c84fb00b7f60",
-      "size": 5736,
+      "sha256": "8e2c52e2a23d85fb779f5b57ff97df2c3d23ca2f6a6b128b25efa7bc73e74475",
+      "size": 5935,
       "downloads": 0,
       "rating": 0
     },

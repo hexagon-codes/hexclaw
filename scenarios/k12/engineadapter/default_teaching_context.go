@@ -32,8 +32,7 @@ func SelectDefaultTeachingContext(text string, configured []string) ([]string, b
 	if has("你是谁", "介绍你自己", "官网", "GitHub", "github", "导出", "保存PDF", "打印PDF", "发送到手机") &&
 		!has("讲题", "解题", "批改", "辅导", "讲解", "为什么", "怎么教") {
 		wanted = map[string]bool{}
-	}
-	if has("作业", "题", "辅导", "孩子", "练习", "知识", "讲解", "批改", "作文", "阅读", "写作", "实验", "程序", "数学", "语文", "英语", "科学", "信息科技", "美术") {
+	} else if has("作业", "题", "辅导", "孩子", "练习", "知识", "讲解", "批改", "作文", "阅读", "写作", "实验", "程序", "数学", "语文", "英语", "科学", "信息科技", "美术") {
 		wanted["k12-pedagogy"], wanted["grade-constraint"] = true, true
 		var subjects []string
 		for _, subject := range []struct{ label, name string }{{"数学", "math-tutor"}, {"语文", "chinese-tutor"}, {"英语", "english-tutor"}, {"科学", "science-tutor"}, {"信息科技", "information-technology-tutor"}, {"美术", "art-feedback"}} {
@@ -54,7 +53,7 @@ func SelectDefaultTeachingContext(text string, configured []string) ([]string, b
 		if has("出变式", "出题", "生成练习", "生成题", "设计练习") {
 			wanted["exercise-generator"] = true
 		}
-		if has("作文", "写作") {
+		if has("作文", "写作") && !has("英文") && (len(subjects) == 0 || len(subjects) == 1 && subjects[0] == "chinese-tutor") {
 			wanted["writing-feedback"] = true
 		}
 		if len(subjects) == 1 && subjects[0] == "chinese-tutor" {
