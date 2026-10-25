@@ -919,9 +919,11 @@ func writeCanonicalGradingVisibleAnswers(out *strings.Builder, item PhotoGradeIt
 	}
 }
 
-// 组合答案暂不可完整程序比较时，保留已通过模型过程核对的明确答案，不升级判分证据。
+// 判分仍未核实时保留可信独立参考；参考答案不能反向证明学生过程正确。
 func untrustedReferenceAnswer(item PhotoGradeItem) (answer, solution string, ok bool) {
-	if item.Status != PhotoUntrusted || item.Grade.Evidence.Verdict != VerdictAgree || item.Grade.Evidence.EvidenceType != EvidenceHeuristic {
+	modelReviewed := item.Grade.Evidence.Verdict == VerdictAgree && item.Grade.Evidence.EvidenceType == EvidenceHeuristic
+	verifiedReference := item.Grade.Outcome.Verdict == VerdictUnverifiable && photoEvidenceTrusted(item.Grade.Evidence)
+	if item.Status != PhotoUntrusted || (!modelReviewed && !verifiedReference) {
 		return "", "", false
 	}
 	solution = strings.TrimSpace(item.Grade.Solution)

@@ -1517,6 +1517,7 @@ func (e *ReActEngine) completeWithTools(
 		},
 		wrapProvider: func(p hexagon.Provider, name, model string) hexagon.Provider {
 			p = e.wrapVisionImageLimitProvider(e.wrapRuntimeSnapshotProvider(p, name, model), model) // 反应式视觉兜底（含 failover 目标 provider）
+			p = wrapSolveGenerationFormatProvider(ctx, p)
 			p = wrapCodeExecToolChoiceProvider(p, msg.Content)
 			p = wrapUnitSummaryToolChoiceProvider(p, msg)
 			p = e.wrapResponseCache(ctx, msg, p, name, model)
@@ -2735,6 +2736,7 @@ func (e *ReActEngine) processStreamRuntime(
 			},
 			wrapProvider: func(p hexagon.Provider, name, model string) hexagon.Provider {
 				p = e.wrapVisionImageLimitProvider(e.wrapRuntimeSnapshotProvider(p, name, model), model) // 反应式视觉兜底（流式，含 failover 目标）
+				p = wrapSolveGenerationFormatProvider(ctx, p)
 				p = wrapCodeExecToolChoiceProvider(p, msg.Content)
 				return wrapUnitSummaryToolChoiceProvider(p, msg)
 			},
@@ -4403,6 +4405,7 @@ func (e *ReActEngine) buildCompletionRequest(ctx context.Context, msg *adapter.M
 		Messages: e.buildStreamMessages(ctx, msg.Metadata["role"], history, kbContext, msg.Content, msg.Metadata, msg.Attachments),
 	}
 	applyCompletionOverrides(&req, msg.Metadata)
+	req.ResponseFormat = solveGenerationResponseFormat(ctx)
 	return req
 }
 

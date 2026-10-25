@@ -473,6 +473,7 @@ func (o *SolveSkill) Execute(ctx context.Context, args map[string]any) (*skill.R
 				"solve_verdict":              verdictString(verdict),
 				"solve_evidence":             evidenceKind(numericGrounded),
 				"grade_correct":              strconv.FormatBool(assess.correct),
+				"grade_verdict":              assess.verdict(),
 				"grade_final_answer_correct": strconv.FormatBool(assess.finalAnswerCorrect),
 				"grade_wrong_step":           assess.wrongStep,
 				"grade_misconception":        assess.misconception,
@@ -625,6 +626,7 @@ func (o *SolveSkill) GradeVerified(ctx context.Context, problem, verifiedSolutio
 			"solve_run_id":               runID,
 			"solve_mode":                 "grading_verified_reuse",
 			"grade_correct":              strconv.FormatBool(assess.correct),
+			"grade_verdict":              assess.verdict(),
 			"grade_final_answer_correct": strconv.FormatBool(assess.finalAnswerCorrect),
 			"grade_wrong_step":           assess.wrongStep,
 			"grade_misconception":        assess.misconception,
@@ -656,6 +658,7 @@ func deterministicGradeResult(studentAnswer, groundTruth, mode string, assess gr
 			"solve_mode":                 mode,
 			"solve_evidence":             "numeric_exec",
 			"grade_correct":              strconv.FormatBool(assess.correct),
+			"grade_verdict":              assess.verdict(),
 			"grade_final_answer_correct": strconv.FormatBool(assess.finalAnswerCorrect),
 			"grade_wrong_step":           assess.wrongStep,
 			"grade_misconception":        assess.misconception,
@@ -726,7 +729,7 @@ func (o *SolveSkill) runSolveAgentResult(ctx context.Context, spec SubAgentSpec)
 	execute := o.executeFunc
 	if spec.Source == solveDispatchSource && spec.Agent == solverAgentName && solveTeachingVersionSupported(spec.generationVersion) {
 		execute = func(callCtx context.Context, callSpec SubAgentSpec) (SubAgentResult, error) {
-			result, err := o.executeFunc(callCtx, callSpec)
+			result, err := o.executeFunc(withSolveGenerationFormat(callCtx, spec.generationVersion), callSpec)
 			if err != nil {
 				return result, err
 			}
@@ -963,8 +966,10 @@ type gradeAssessment struct {
 	correct            bool
 	finalAnswerCorrect bool
 	wrongStep          string
+	wrongStepSource    string
 	misconception      string
 	guidance           string
+	unverifiable       bool
 }
 
 // grade 只消费完整批改判定；调用失败或判定缺失不能转为学生答错的事实。
@@ -982,7 +987,7 @@ func (o *SolveSkill) grade(ctx context.Context, problem, solution, groundTruth, 
 	if !gradingParseable(out) {
 		return gradeAssessment{}, fmt.Errorf("grading response has no valid judgment")
 	}
-	return parseGrading(out, studentAnswer, groundTruth), nil
+	return groundGradingAssessment(parseGrading(out, studentAnswer, groundTruth), problem, studentAnswer, groundTruth), nil
 }
 
 // graderSpec 构造批改子 Agent：可用 code_exec 核对学生算术；fresh-context、受信来源、leaf。
@@ -1012,12 +1017,14 @@ Decision rules:
 - FINAL_ANSWER_CORRECT judges only whether the final result, including required units, matches the correct answer, regardless of intermediate work.
 - Apply only the answer-format requirements stated in the problem. For fraction simplification, an improper fraction in lowest terms is valid unless the problem explicitly requires a mixed number.
 - If the final answer is correct but the work contains a clear process error, output CORRECT: no and FINAL_ANSWER_CORRECT: yes, and provide the first incorrect step and misconception.
+- WRONG_STEP_SOURCE must quote the actual student-written fragment supporting WRONG_STEP. Keep the source quote separate from your explanation. Never invent an intermediate step when the student supplied only a final answer. Leave the source empty when there is no observed process error.
 - For quantity-relationship blanks, evaluate equivalent conventions using quantity names, actual quantities, or a total normalized to unit 1. Do not call a valid proportional equality incorrect merely because it differs from the reference wording. Identify a missing requested calculation separately from a mathematically incorrect filled relationship, and do not infer an unwritten intention.
 
-Output exactly five lines in the following format:
+Output exactly six lines in the following format:
 CORRECT: yes or no
 FINAL_ANSWER_CORRECT: yes or no
 WRONG_STEP: <the first incorrect step, or empty when fully correct>
+WRONG_STEP_SOURCE: <an exact fragment of the student's supplied work, or empty when no process error is observed>
 MISCONCEPTION: <the underlying misconception, or empty when fully correct>
 GUIDANCE: <one guiding or encouraging sentence>`, problem, solution, groundTruth, studentAnswer)
 }
@@ -1029,9 +1036,10 @@ var (
 	)
 	// 标签值必须限制在同一行。这里不能用 \s*：它会吞掉换行，使空 WRONG_STEP
 	// 错把下一行 `MISCONCEPTION:` 当值，随后又把 GUIDANCE 当成 misconception。
-	gradeStepRe   = regexp.MustCompile(`(?im)^\s*WRONG_STEP[ \t]*[:：][ \t]*(.*)$`)
-	gradeMisconRe = regexp.MustCompile(`(?im)^\s*MISCONCEPTION[ \t]*[:：][ \t]*(.*)$`)
-	gradeGuideRe  = regexp.MustCompile(`(?im)^\s*GUIDANCE[ \t]*[:：][ \t]*(.*)$`)
+	gradeStepRe       = regexp.MustCompile(`(?im)^\s*WRONG_STEP[ \t]*[:：][ \t]*(.*)$`)
+	gradeStepSourceRe = regexp.MustCompile(`(?im)^[ \t]*WRONG_STEP_SOURCE[ \t]*[:：][ \t]*(.*)$`)
+	gradeMisconRe     = regexp.MustCompile(`(?im)^\s*MISCONCEPTION[ \t]*[:：][ \t]*(.*)$`)
+	gradeGuideRe      = regexp.MustCompile(`(?im)^\s*GUIDANCE[ \t]*[:：][ \t]*(.*)$`)
 )
 
 // parseGrading 解析 grader 输出；CORRECT 缺失 → 回退按答案文本直接比对（防误判）。
@@ -1064,6 +1072,9 @@ func parseGrading(out, studentAnswer, groundTruth string) gradeAssessment {
 	if m := gradeStepRe.FindStringSubmatch(out); len(m) > 1 {
 		a.wrongStep = strings.TrimSpace(m[1])
 	}
+	if m := gradeStepSourceRe.FindStringSubmatch(out); len(m) > 1 {
+		a.wrongStepSource = strings.TrimSpace(m[1])
+	}
 	if m := gradeMisconRe.FindStringSubmatch(out); len(m) > 1 {
 		a.misconception = strings.TrimSpace(m[1])
 	}
@@ -1080,6 +1091,9 @@ func parseGrading(out, studentAnswer, groundTruth string) gradeAssessment {
 
 // formatGrading 组装批改反馈：答对→肯定；答错→错步+误区+引导（不直接塞完整答案）。
 func formatGrading(studentAnswer, groundTruth string, a gradeAssessment) string {
+	if a.unverifiable {
+		return fmt.Sprintf("The student's process could not be verified from the supplied work. Reference answer: %s.\n", groundTruth)
+	}
 	if a.correct {
 		s := fmt.Sprintf("> ✅ 你做对了！答案「%s」正确。", studentAnswer)
 		if a.guidance != "" {

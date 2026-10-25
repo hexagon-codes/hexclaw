@@ -1,17 +1,59 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
 
+	"github.com/hexagon-codes/ai-core/llm"
+	"github.com/hexagon-codes/hexagon"
 	"github.com/hexagon-codes/hexclaw/egress"
 )
 
 const solveWithParentGuideV1 = "solve_with_parent_guide_v1"
 
 const solveWithTeachingReportV2 = "solve_with_teaching_report_v2"
+
+type solveGenerationFormatKey struct{}
+
+// withSolveGenerationFormat 只为受信版本化求解请求启用已有 Provider 的 JSON 输出能力。
+func withSolveGenerationFormat(ctx context.Context, version string) context.Context {
+	return context.WithValue(ctx, solveGenerationFormatKey{}, version)
+}
+
+func solveGenerationResponseFormat(ctx context.Context) *llm.ResponseFormat {
+	version, _ := ctx.Value(solveGenerationFormatKey{}).(string)
+	if !solveGrantFromContext(ctx) || !solveTeachingVersionSupported(version) {
+		return nil
+	}
+	return &llm.ResponseFormat{Type: "json_object"}
+}
+
+type solveGenerationFormatProvider struct {
+	hexagon.Provider
+	format *llm.ResponseFormat
+}
+
+// 工具运行器会重建补全请求，格式约束在最终 Provider 边界重新应用。
+func wrapSolveGenerationFormatProvider(ctx context.Context, provider hexagon.Provider) hexagon.Provider {
+	format := solveGenerationResponseFormat(ctx)
+	if format == nil {
+		return provider
+	}
+	return preserveContextTokenCounter(&solveGenerationFormatProvider{Provider: provider, format: format}, provider)
+}
+
+func (p *solveGenerationFormatProvider) Complete(ctx context.Context, req llm.CompletionRequest) (*llm.CompletionResponse, error) {
+	req.ResponseFormat = p.format
+	return p.Provider.Complete(ctx, req)
+}
+
+func (p *solveGenerationFormatProvider) Stream(ctx context.Context, req llm.CompletionRequest) (*llm.Stream, error) {
+	req.ResponseFormat = p.format
+	return p.Provider.Stream(ctx, req)
+}
 
 func solveTeachingVersionSupported(version string) bool {
 	return version == solveWithParentGuideV1 || version == solveWithTeachingReportV2

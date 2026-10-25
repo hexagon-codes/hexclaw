@@ -479,6 +479,14 @@ func gradeOutcomeFromResult(res *skill.Result, err error) (usecase.GradeOutcome,
 	if correct {
 		verdict = usecase.VerdictAgree
 	}
+	if rawVerdict := m["grade_verdict"]; rawVerdict != "" {
+		switch usecase.Verdict(rawVerdict) {
+		case usecase.VerdictAgree, usecase.VerdictDisagree, usecase.VerdictUnverifiable:
+			verdict = usecase.Verdict(rawVerdict)
+		default:
+			return usecase.GradeOutcome{}, fmt.Errorf("solve adapter: invalid grading verdict %q", rawVerdict)
+		}
+	}
 	return usecase.GradeOutcome{
 		Verdict:            verdict,
 		FinalAnswerCorrect: finalAnswerCorrect,

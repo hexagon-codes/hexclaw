@@ -4,6 +4,8 @@ import (
 	"regexp"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/hexagon-codes/hexclaw/internal/elementarymath"
 )
 
 type orderedVerificationAnswer struct {
@@ -28,7 +30,7 @@ func asksSingleJudgment(problem string) bool {
 // orderedVerificationScope 只比较原题明确的多个填空，混合判断时必须一并保留。
 func orderedVerificationScope(problem string) (int, bool) {
 	count := len(verificationBlankSlotRe.FindAllStringIndex(problem, -1))
-	return count, count >= 2 && strings.Contains(problem, "填")
+	return count, count >= 2
 }
 
 func parseOrderedVerificationAnswer(problem, answer string, count int) (orderedVerificationAnswer, bool) {
@@ -87,6 +89,10 @@ func parseOrderedVerificationAnswer(problem, answer string, count int) (orderedV
 }
 
 func orderedVerificationAnswersEqual(problem, computed, candidate string) (equal, comparable, scoped bool) {
+	// 公共材料与规范题面不是额外问项；只按本次原始子问确定空位和判断对象。
+	if _, current, _, ok := elementarymath.ParseMathSubproblem(problem); ok {
+		problem = current
+	}
 	count, scoped := orderedVerificationScope(problem)
 	if !scoped {
 		return false, false, false
