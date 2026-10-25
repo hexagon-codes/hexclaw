@@ -1082,6 +1082,8 @@ curl -fS -X POST "$HEXCLAW_BASE_URL/api/k12/print-jobs" \
 
 响应 `artifact` 可包含 `render_spec_digest`、`render_spec_json` 和 `layout_check`，分别表示冻结渲染规格摘要、规格 JSON 字符串及布局检查结果，详见 [PrintableArtifact](#schema-k12practiceprintableartifact)。成功冻结文件的检查结果为 `passed` 或 `not_run`；未记录这些字段的旧文件继续省略，不补写检查结论。布局检查失败时返回错误，`failed` 由当次错误或日志反映，不承诺作为冻结文件状态持久保存或跨重启查询。
 
+文字结算模式可附带 `/grade` 返回的 [grade_report_ref](records.md#text-grade-report-reference)，读取同一 run 的真实成功评分并生成带原始作答及评分状态的报告；求解 finalization 不变。省略或传 null 时读取原未评分投影，即使后来有评分也不补入。引用缺少任一字段返回400；非成功、跨run或摘要不符返回409，不能自动回退为未评分。非文字来源不能混入该引用，否则返回400。准备成功后，原生打印继续使用返回的 `artifact_id`，不在 `POST /print-jobs` 重传评分引用。
+
 JSON body：[PrintableArtifactRequest](#schema-k12practiceprintableartifactrequest)；未知字段不作为本操作输入使用。
 
 | 字段 | 类型 / 约束 | 必填 | 说明 |
@@ -1096,6 +1098,7 @@ JSON body：[PrintableArtifactRequest](#schema-k12practiceprintableartifactreque
 | `solve_run_id` | string | 条件必填 | 文字结算模式下三项同时提供。 |
 | `text_finalization_id` | string | 条件必填 | 文字结算模式下三项同时提供。 |
 | `text_finalization_digest` | string | 条件必填 | 文字结算模式下三项同时提供。 |
+| `grade_report_ref` | [TextGradeReportReference](records.md#text-grade-report-reference) / null | 否 | 仅文字结算模式使用；提供对象时 `invocation_id` 与评分 `result_digest` 均必填。 |
 
 本结构未声明的字段不属于公开契约。
 
@@ -1120,6 +1123,9 @@ JSON body：[PrintableArtifactRequest](#schema-k12practiceprintableartifactreque
         },
         "text_finalization_digest": {
           "const": ""
+        },
+        "grade_report_ref": {
+          "type": "null"
         },
         "final_artifact_id": {
           "const": ""
@@ -1164,6 +1170,9 @@ JSON body：[PrintableArtifactRequest](#schema-k12practiceprintableartifactreque
         },
         "text_finalization_digest": {
           "const": ""
+        },
+        "grade_report_ref": {
+          "type": "null"
         },
         "source_kind": {
           "const": ""
@@ -3569,10 +3578,14 @@ curl -fS -X POST "$HEXCLAW_BASE_URL/api/k12/weekly-practice/plans/resource-demo-
 | `agent` | string；minLength=1 | 是 | JSON 投影字段；可选字段在无值时可能省略。 |
 | `source_kind` | string | 否 | JSON 投影字段；可选字段在无值时可能省略。 |
 | `source_ref` | string | 否 | JSON 投影字段；可选字段在无值时可能省略。 |
-| `title` | string；minLength=1 | 是 | 标题，UTF-8 字节数不超过 256 |
+| `title` | string；minLength=1 | 条件必填 | canonical 模式必填；图片或文字冻结来源可省略，UTF-8 字节数不超过 256 |
 | `canonical_markdown` | string | 否 | JSON 投影字段；可选字段在无值时可能省略。 |
 | `final_artifact_id` | string | 否 | JSON 投影字段；可选字段在无值时可能省略。 |
 | `final_artifact_digest` | string | 否 | JSON 投影字段；可选字段在无值时可能省略。 |
+| `solve_run_id` | string | 条件必填 | 文字结算模式下三项同时提供。 |
+| `text_finalization_id` | string | 条件必填 | 文字结算模式下三项同时提供。 |
+| `text_finalization_digest` | string | 条件必填 | 原求解结算摘要，与评分引用中的摘要分开。 |
+| `grade_report_ref` | [TextGradeReportReference](records.md#text-grade-report-reference) / null | 否 | 仅文字结算模式可携带；无引用历史保持原未评分投影。 |
 
 本结构未声明的字段不属于公开契约。
 
@@ -3583,11 +3596,24 @@ curl -fS -X POST "$HEXCLAW_BASE_URL/api/k12/weekly-practice/plans/resource-demo-
   "oneOf": [
     {
       "required": [
+        "title",
         "source_kind",
         "source_ref",
         "canonical_markdown"
       ],
       "properties": {
+        "solve_run_id": {
+          "const": ""
+        },
+        "text_finalization_id": {
+          "const": ""
+        },
+        "text_finalization_digest": {
+          "const": ""
+        },
+        "grade_report_ref": {
+          "type": "null"
+        },
         "final_artifact_id": {
           "const": ""
         },
@@ -3623,6 +3649,18 @@ curl -fS -X POST "$HEXCLAW_BASE_URL/api/k12/weekly-practice/plans/resource-demo-
         "final_artifact_digest"
       ],
       "properties": {
+        "solve_run_id": {
+          "const": ""
+        },
+        "text_finalization_id": {
+          "const": ""
+        },
+        "text_finalization_digest": {
+          "const": ""
+        },
+        "grade_report_ref": {
+          "type": "null"
+        },
         "source_kind": {
           "const": ""
         },
@@ -3639,6 +3677,42 @@ curl -fS -X POST "$HEXCLAW_BASE_URL/api/k12/weekly-practice/plans/resource-demo-
         "final_artifact_digest": {
           "type": "string",
           "minLength": 1
+        }
+      }
+    },
+    {
+      "required": [
+        "solve_run_id",
+        "text_finalization_id",
+        "text_finalization_digest"
+      ],
+      "properties": {
+        "solve_run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "text_finalization_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "text_finalization_digest": {
+          "type": "string",
+          "minLength": 1
+        },
+        "final_artifact_id": {
+          "const": ""
+        },
+        "final_artifact_digest": {
+          "const": ""
+        },
+        "source_kind": {
+          "const": ""
+        },
+        "source_ref": {
+          "const": ""
+        },
+        "canonical_markdown": {
+          "const": ""
         }
       }
     }

@@ -36650,6 +36650,11 @@ components:
           type: string
         text_finalization_digest:
           type: string
+        grade_report_ref:
+          anyOf:
+            - $ref: '#/components/schemas/K12TextGradeReportReference'
+            - type: "null"
+          description: 仅文字结算来源可携带的成功评分回执引用；省略或null保留原未评分投影，不改变求解结算 / Successful grading receipt reference for text finalization only; omission or null retains the ungraded projection without changing the solve finalization
       required:
         - agent
       additionalProperties: true
@@ -36663,6 +36668,7 @@ components:
             solve_run_id: { const: "" }
             text_finalization_id: { const: "" }
             text_finalization_digest: { const: "" }
+            grade_report_ref: { type: "null" }
             final_artifact_id:
               const: ""
             final_artifact_digest:
@@ -36691,6 +36697,7 @@ components:
             solve_run_id: { const: "" }
             text_finalization_id: { const: "" }
             text_finalization_digest: { const: "" }
+            grade_report_ref: { type: "null" }
             source_kind:
               const: ""
             source_ref:
@@ -39141,8 +39148,23 @@ components:
         - agent
         - problem
       type: object
+    K12TextGradeReportReference:
+      type: object
+      properties:
+        invocation_id:
+          type: string
+          minLength: 1
+          description: 同一owner、agent、文字run与输入的成功grade回执ID / Successful grade receipt ID for the same owner, agent, text run and input
+        result_digest:
+          type: string
+          minLength: 1
+          description: 评分回执结果摘要，不是求解finalization摘要 / Grading receipt result digest, distinct from the solve finalization digest
+      required: [invocation_id, result_digest]
+      additionalProperties: true
     K12Recordsscenarios_k12_apihttp_gradeResp:
       properties:
+        grade_report_ref:
+          $ref: '#/components/schemas/K12TextGradeReportReference'
         finalization:
           $ref: '#/components/schemas/K12TextSolveFinalization'
         answer_source:

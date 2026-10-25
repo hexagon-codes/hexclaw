@@ -44,6 +44,7 @@ func NewPrintReplyResolver(deps usecase.Deps) func(context.Context, *adapter.Mes
 				msg.Metadata = make(map[string]string)
 			}
 			msg.Metadata["routed_agent"] = agent
+			metadata["routed_agent"] = agent
 		}
 		requestID := msg.Metadata["request_id"]
 		if requestID == "" {

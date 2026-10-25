@@ -33,7 +33,10 @@ import (
 )
 
 // 仅控制工具选择和最终短话术；原题由真实本地数学链求解，正文由正式resolver读回。
-type textReportChatModel struct{ printReplyAPIModel }
+type textReportChatModel struct {
+	printReplyAPIModel
+	studentAnswer string
+}
 
 func (m *textReportChatModel) Complete(_ context.Context, req llm.CompletionRequest) (*llm.CompletionResponse, error) {
 	m.calls.Add(1)
@@ -42,7 +45,15 @@ func (m *textReportChatModel) Complete(_ context.Context, req llm.CompletionRequ
 			return &llm.CompletionResponse{Content: "已算好，答案见附件。"}, nil
 		}
 	}
-	return &llm.CompletionResponse{ToolCalls: []llm.ToolCall{{ID: "current-math", Name: "k12_grade", Arguments: `{"problem":"1+1=","subject":"数学","grade":"六年级上"}`}}}, nil
+	args := map[string]string{"problem": "1+1=", "subject": "数学", "grade": "六年级上"}
+	if m.studentAnswer != "" {
+		args["student_answer"] = m.studentAnswer
+	}
+	raw, err := json.Marshal(args)
+	if err != nil {
+		return nil, err
+	}
+	return &llm.CompletionResponse{ToolCalls: []llm.ToolCall{{ID: "current-math", Name: "k12_grade", Arguments: string(raw)}}}, nil
 }
 
 func (m *textReportChatModel) Stream(ctx context.Context, req llm.CompletionRequest) (*llm.Stream, error) {
@@ -81,10 +92,17 @@ func (r *textReportChatRenderer) RenderTeachingReport(_ context.Context, _ rende
 }
 
 func TestK12TextReportChatHTTPKeepsFrozenBodyAfterModelSummary(t *testing.T) {
-	for _, failPDF := range []bool{false, true} {
+	for _, tc := range []struct {
+		failPDF bool
+		answer  string
+	}{{false, ""}, {true, ""}, {false, "3"}, {true, "3"}} {
+		failPDF := tc.failPDF
 		name := "pdf_ready"
 		if failPDF {
 			name = "pdf_failed"
+		}
+		if tc.answer != "" {
+			name = "graded_" + name
 		}
 		t.Run(name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
@@ -112,7 +130,7 @@ func TestK12TextReportChatHTTPKeepsFrozenBodyAfterModelSummary(t *testing.T) {
 			if err := registry.Register(skilladapter.NewGradeSkill(runtime.Deps)); err != nil {
 				t.Fatal(err)
 			}
-			model := &textReportChatModel{}
+			model := &textReportChatModel{studentAnswer: tc.answer}
 			cfg := config.DefaultConfig()
 			cfg.Compaction.Enabled, cfg.FileMemory.Enabled, cfg.LLM.Cache.Enabled = false, false, false
 			cfg.LLM.Default, cfg.LLM.Tools.Enabled = "fixture", "on"
@@ -187,6 +205,9 @@ func TestK12TextReportChatHTTPKeepsFrozenBodyAfterModelSummary(t *testing.T) {
 				return res.StatusCode, data
 			}
 			body := map[string]string{"request_id": requestID, "session_id": sessionID, "message": "请解答1+1，给出完整快速解答、深度讲解和PDF。"}
+			if tc.answer != "" {
+				body["message"] = "请批改1+1，我的作答是3，给出完整快速解答、深度讲解和PDF。"
+			}
 			status, raw := call(http.MethodPost, "/api/v1/chat", body)
 			if status != http.StatusOK {
 				t.Fatalf("normal chat failed: %d %s", status, raw)
@@ -201,7 +222,7 @@ func TestK12TextReportChatHTTPKeepsFrozenBodyAfterModelSummary(t *testing.T) {
 			}
 			historical, err := runtime.Records.GetConversationReportMessage(ctx, "api-user", "default", sessionID, saved.ID, failPDF)
 			if err != nil || historical.ID != saved.ID {
-				t.Fatalf("the original default conversation cannot find its report for prepare/resend: %v", err)
+				t.Fatalf("the original default conversation cannot find its report for prepare/resend: %v metadata=%s", err, saved.Metadata)
 			}
 			var metadata map[string]json.RawMessage
 			if err := json.Unmarshal([]byte(saved.Metadata), &metadata); err != nil {
@@ -217,10 +238,11 @@ func TestK12TextReportChatHTTPKeepsFrozenBodyAfterModelSummary(t *testing.T) {
 				return value
 			}
 			var refs []struct {
-				RunID     string `json:"solve_run_id"`
-				ID        string `json:"finalization_id"`
-				Digest    string `json:"finalization_digest"`
-				PDFStatus string `json:"pdf_status"`
+				RunID          string                        `json:"solve_run_id"`
+				ID             string                        `json:"finalization_id"`
+				Digest         string                        `json:"finalization_digest"`
+				PDFStatus      string                        `json:"pdf_status"`
+				GradeReportRef *k12.TextGradeReportReference `json:"grade_report_ref"`
 			}
 			if err := json.Unmarshal([]byte(metadataString("text_solve_refs")), &refs); err != nil || len(refs) != 1 {
 				t.Fatalf("missing actual text finalization reference: %v %v", refs, err)
@@ -229,7 +251,31 @@ func TestK12TextReportChatHTTPKeepsFrozenBodyAfterModelSummary(t *testing.T) {
 			if err != nil || final.FinalizationID != refs[0].ID || final.ResultDigest != refs[0].Digest || final.SourceSessionID != sessionID {
 				t.Fatalf("text finalization lost original source: %+v %v", final, err)
 			}
-			canonical, err := runtime.Deps.TextSolveTeachingReportContent(ctx, final.OwnerID, "default", final.RunID, final.FinalizationID, final.ResultDigest)
+			var canonical string
+			if tc.answer == "" {
+				if refs[0].GradeReportRef != nil {
+					t.Fatal("unscored report acquired a grading reference")
+				}
+				canonical, err = runtime.Deps.TextSolveTeachingReportContent(ctx, final.OwnerID, "default", final.RunID, final.FinalizationID, final.ResultDigest)
+			} else {
+				if refs[0].GradeReportRef == nil {
+					t.Fatal("graded conversation lost its exact assessment reference")
+				}
+				inv, invErr := runtime.Records.ValidateTextGradeReportReference(ctx, final, *refs[0].GradeReportRef)
+				if invErr != nil || inv.Status != k12.ModelInvocationSucceeded {
+					t.Fatalf("graded conversation refers to a missing actual assessment: %v", invErr)
+				}
+				var assessment struct {
+					Result k12usecase.GradeResult `json:"result"`
+				}
+				if err := json.Unmarshal([]byte(inv.ResultJSON), &assessment); err != nil || assessment.Result.Outcome.AssessmentStatus() != k12.GradingAssessmentWrong {
+					t.Fatalf("graded conversation did not preserve the actual wrong verdict: %v", err)
+				}
+				canonical, err = runtime.Deps.TextSolveTeachingReportContentWithGrade(ctx, final.OwnerID, "default", final.RunID, final.FinalizationID, final.ResultDigest, *refs[0].GradeReportRef)
+				if !strings.Contains(canonical, "原始作答：3") {
+					t.Fatalf("actual original answer or wrong verdict missing: %q", canonical)
+				}
+			}
 			if err != nil || len([]rune(canonical)) >= 1000 {
 				t.Fatalf("short actual report unavailable: %v", err)
 			}

@@ -117,6 +117,8 @@
 
 当前调用者的可信owner由服务端认证装配确定。真实辅导档案继续核对owner与辅导实例归属；普通助手和默认助手可直接解题或批改，不要求创建学生档案，不写入学生错题、复习或学情记录。直接HTTP请求不必伪造工具回合的request/session/message；提供来源会话时仍核对实际访问权。
 
+有学生作答且真实评分成功时，可返回 `grade_report_ref`，将快速解答和深度讲解绑定到同一文字 run 的评分回执；原 `finalization` 仍是不可变的求解结算。准备该评分报告的 PDF 时，将此引用连同文字结算三元组传给 [print-artifacts](practice.md#k12practiceprepareprintableartifact)。无引用的历史来源始终读取原未评分投影，不查询最新评分来补写历史。
+
 依赖：K12 record store, Solver/Grader and optional curriculum/insight adapters.
 
 JSON 正文：
@@ -145,6 +147,9 @@ JSON 正文：
 | `out_of_scope_kp` | string | 否 | 触发超纲的知识点，可省略。 |
 | `record_created` | boolean | 是 | 本次是否实际创建错题记录。 |
 | `record_id` | string | 否 | 服务端记录ID。 |
+| `finalization` | object | 否 | 原不可变文字求解结算，含 `solve_run_id`、`finalization_id`、`result_digest` 等打印来源身份；评分不改写它。 |
+| `answer_source` | object | 否 | 原求解的实际生成、确定性执行或已采用答案来源；与学生评分回执分开。 |
+| `grade_report_ref` | [TextGradeReportReference](#text-grade-report-reference) | 否 | 真实成功评分回执的精确引用；只解题或没有该回执时省略。 |
 | `teaching_report` | object | 否 | 来自实际冻结来源的不可变结构化报告；旧记录或不适用来源可省略。 |
 | `report_markdown` | string | 否 | 与PDF使用同一报告对象的快速解答和深度讲解。 |
 | `solution` | string | 是 | 完整解法正文。 |
@@ -164,6 +169,16 @@ JSON 正文：
 
 [实现参考](../../apihttp/handler.go)
 
+
+<a id="text-grade-report-reference"></a>
+### TextGradeReportReference
+
+| 字段 | 类型 | 必填 | 含义 |
+| --- | --- | --- | --- |
+| `invocation_id` | string | 是 | 服务端返回的成功 `grade` 评分回执 ID；绑定同一 owner、agent、文字 run 与输入。 |
+| `result_digest` | string | 是 | 该评分回执的结果摘要；不能用求解 `finalization.result_digest` 替代。 |
+
+该对象引用实际评分事实，不接受调用方自行指定对错状态。打印时核对回执状态、原输入及摘要；提供无效引用会报错，不回退为未评分报告。
 
 <a id="recordmistake"></a>
 ## POST /api/k12/record-mistake

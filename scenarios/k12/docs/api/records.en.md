@@ -117,6 +117,8 @@ Retained direct calibration endpoint, not the image-task entry point. agent/prob
 
 The authenticated server wiring determines the trusted owner. Tutor profiles retain their owner-to-tutor checks. Ordinary and default assistants can solve or grade without creating a learner profile and do not write student mistakes, review state or learning records. Direct HTTP requests do not need fabricated tool request/session/message identities. A supplied source session still requires actual access.
 
+When a submitted student answer is successfully graded, `grade_report_ref` can bind the quick answers and deep explanation to the actual grading receipt for the same text run. The original `finalization` remains an immutable solve result. To prepare this graded report as a PDF, pass the reference with the text finalization identity to [print-artifacts](practice.en.md#k12practiceprepareprintableartifact). Historical sources without a reference always retain their original ungraded projection; reading them does not look up the latest grade to backfill history.
+
 Availability: K12 record store, Solver/Grader and optional curriculum/insight adapters.
 
 JSON body:
@@ -145,6 +147,9 @@ Success: `200` `application/json`.
 | `out_of_scope_kp` | string | No | Knowledge point triggering the scope boundary; optional. |
 | `record_created` | boolean | Yes | Whether this operation created a mistake record. |
 | `record_id` | string | No | Server-issued record identity. |
+| `finalization` | object | No | Original immutable text-solve finalization, including `solve_run_id`, `finalization_id`, and `result_digest` for printing; grading does not rewrite it. |
+| `answer_source` | object | No | Actual generated, deterministic, or adopted answer source from the original solve, separate from the student grading receipt. |
+| `grade_report_ref` | [TextGradeReportReference](#text-grade-report-reference) | No | Exact reference to a successful grading receipt; omitted for solve-only results or when no such receipt exists. |
 | `teaching_report` | object | No | Versioned immutable report derived from the actual frozen source; omitted for legacy or unsupported reports. |
 | `report_markdown` | string | No | Canonical quick answers and deep explanation from the same report object as the PDF. |
 | `solution` | string | Yes | Complete solution text. |
@@ -164,6 +169,16 @@ Success: `200` `application/json`.
 
 [Implementation](../../apihttp/handler.go)
 
+
+<a id="text-grade-report-reference"></a>
+### TextGradeReportReference
+
+| Field | Type | Required | Meaning |
+| --- | --- | --- | --- |
+| `invocation_id` | string | Yes | Server-issued ID of a successful `grade` receipt, bound to the same owner, agent, text run, and input. |
+| `result_digest` | string | Yes | Digest of that grading receipt's result; it cannot be replaced with the solve `finalization.result_digest`. |
+
+This object references an actual assessment; callers cannot supply a grading verdict through it. Printing validates the receipt status, original input, and digest. An invalid supplied reference returns an error instead of falling back to an ungraded report.
 
 <a id="recordmistake"></a>
 ## POST /api/k12/record-mistake

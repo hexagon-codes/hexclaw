@@ -1082,6 +1082,8 @@ Choose exactly one source: canonical input, grading final_artifact_id+final_arti
 
 The response `artifact` may include `render_spec_digest`, `render_spec_json`, and `layout_check`: the frozen rendering specification digest, its JSON string, and the layout check result. See [PrintableArtifact](#schema-k12practiceprintableartifact). A successfully frozen file can report `passed` or `not_run`; legacy files without these values omit the fields without inventing a check result. A failed layout check returns an error. Its `failed` state is reflected in the current error or logs, with no promise of a persisted frozen-file status or a queryable failure after restart.
 
+The text finalization variant may include the [grade_report_ref](records.en.md#text-grade-report-reference) returned by `/grade`. It reads the actual successful grading receipt for the same run and projects the original student answer and assessment without changing the solve finalization. Omission or null retains the original ungraded projection, even if grading happened later. An incomplete reference returns 400; a non-successful receipt, another run, or a digest mismatch returns 409 without an ungraded fallback. Including this reference with a non-text source returns 400. After preparation, native printing uses the returned `artifact_id`; do not resend the grading reference to `POST /print-jobs`.
+
 JSON body: [PrintableArtifactRequest](#schema-k12practiceprintableartifactrequest)；unknown fields are not used by this operation.
 
 | Field | Type / constraints | Required | Meaning |
@@ -1096,6 +1098,7 @@ JSON body: [PrintableArtifactRequest](#schema-k12practiceprintableartifactreques
 | `solve_run_id` | string | Conditional | Required together for the text finalization variant. |
 | `text_finalization_id` | string | Conditional | Required together for the text finalization variant. |
 | `text_finalization_digest` | string | Conditional | Required together for the text finalization variant. |
+| `grade_report_ref` | [TextGradeReportReference](records.en.md#text-grade-report-reference) / null | No | Text finalization variant only; an object must contain both `invocation_id` and the grading `result_digest`. |
 
 Unknown fields are not part of this schema.
 
@@ -1120,6 +1123,9 @@ Variant and conditional requirements:
         },
         "text_finalization_digest": {
           "const": ""
+        },
+        "grade_report_ref": {
+          "type": "null"
         },
         "final_artifact_id": {
           "const": ""
@@ -1164,6 +1170,9 @@ Variant and conditional requirements:
         },
         "text_finalization_digest": {
           "const": ""
+        },
+        "grade_report_ref": {
+          "type": "null"
         },
         "source_kind": {
           "const": ""
@@ -3569,10 +3578,14 @@ Request schema; parameters are also shown at each operation.
 | `agent` | string；minLength=1 | Yes | JSON projection field; omitted when absent if optional. |
 | `source_kind` | string | No | JSON projection field; omitted when absent if optional. |
 | `source_ref` | string | No | JSON projection field; omitted when absent if optional. |
-| `title` | string；minLength=1 | Yes | Title, at most 256 UTF-8 bytes |
+| `title` | string；minLength=1 | Conditional | Required for canonical input; optional for a frozen image or text source, at most 256 UTF-8 bytes |
 | `canonical_markdown` | string | No | JSON projection field; omitted when absent if optional. |
 | `final_artifact_id` | string | No | JSON projection field; omitted when absent if optional. |
 | `final_artifact_digest` | string | No | JSON projection field; omitted when absent if optional. |
+| `solve_run_id` | string | Conditional | Required together for the text finalization variant. |
+| `text_finalization_id` | string | Conditional | Required together for the text finalization variant. |
+| `text_finalization_digest` | string | Conditional | Original solve finalization digest, separate from the grading reference digest. |
+| `grade_report_ref` | [TextGradeReportReference](records.en.md#text-grade-report-reference) / null | No | Text finalization variant only; historical sources without it keep their ungraded projection. |
 
 Unknown fields are not part of this schema.
 
@@ -3583,11 +3596,24 @@ Variant and conditional requirements:
   "oneOf": [
     {
       "required": [
+        "title",
         "source_kind",
         "source_ref",
         "canonical_markdown"
       ],
       "properties": {
+        "solve_run_id": {
+          "const": ""
+        },
+        "text_finalization_id": {
+          "const": ""
+        },
+        "text_finalization_digest": {
+          "const": ""
+        },
+        "grade_report_ref": {
+          "type": "null"
+        },
         "final_artifact_id": {
           "const": ""
         },
@@ -3623,6 +3649,18 @@ Variant and conditional requirements:
         "final_artifact_digest"
       ],
       "properties": {
+        "solve_run_id": {
+          "const": ""
+        },
+        "text_finalization_id": {
+          "const": ""
+        },
+        "text_finalization_digest": {
+          "const": ""
+        },
+        "grade_report_ref": {
+          "type": "null"
+        },
         "source_kind": {
           "const": ""
         },
@@ -3639,6 +3677,42 @@ Variant and conditional requirements:
         "final_artifact_digest": {
           "type": "string",
           "minLength": 1
+        }
+      }
+    },
+    {
+      "required": [
+        "solve_run_id",
+        "text_finalization_id",
+        "text_finalization_digest"
+      ],
+      "properties": {
+        "solve_run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "text_finalization_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "text_finalization_digest": {
+          "type": "string",
+          "minLength": 1
+        },
+        "final_artifact_id": {
+          "const": ""
+        },
+        "final_artifact_digest": {
+          "const": ""
+        },
+        "source_kind": {
+          "const": ""
+        },
+        "source_ref": {
+          "const": ""
+        },
+        "canonical_markdown": {
+          "const": ""
         }
       }
     }

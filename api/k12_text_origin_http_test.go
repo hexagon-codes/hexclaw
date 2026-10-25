@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -9,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -21,6 +23,7 @@ import (
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/apihttp"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/assembly"
+	"github.com/hexagon-codes/hexclaw/scenarios/k12/engineadapter"
 	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/usecase"
 	"github.com/hexagon-codes/hexclaw/skill"
@@ -74,7 +77,28 @@ func TestK12AuthenticatedDirectHTTPTextOriginAndStandaloneScope(t *testing.T) {
 		return engine.SubAgentResult{}, fmt.Errorf("unexpected provider invocation")
 	}, nil)
 	renderer := &k12HTTPReportRenderer{}
-	runtime, err := assembly.Wire(store.DB(), solver, assembly.WithTeachingReportResources(k12HTTPReportResources{}), assembly.WithRenderer(renderer))
+	var activeRenderer usecase.Renderer = renderer
+	realOutput := ""
+	if os.Getenv("HEXCLAW_GRADED_REAL_PDF") == "1" {
+		pandoc, typst := os.Getenv("HEXCLAW_GRADED_PANDOC"), os.Getenv("HEXCLAW_GRADED_TYPST")
+		realOutput = os.Getenv("HEXCLAW_GRADED_PDF_OUTPUT")
+		if pandoc == "" || typst == "" || realOutput == "" || !filepath.IsAbs(realOutput) {
+			t.Fatal("explicit pandoc, typst and absolute output directory are required")
+		}
+		compiler, err := render.NewPandocRenderer(pandoc, typst, t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		service, err := render.NewService(render.ServiceConfig{Renderer: compiler})
+		if err != nil {
+			t.Fatal(err)
+		}
+		activeRenderer = engineadapter.NewRenderAdapter(service)
+		if err := os.MkdirAll(realOutput, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runtime, err := assembly.Wire(store.DB(), solver, assembly.WithTeachingReportResources(k12HTTPReportResources{}), assembly.WithRenderer(activeRenderer))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,6 +161,10 @@ func TestK12AuthenticatedDirectHTTPTextOriginAndStandaloneScope(t *testing.T) {
 		}
 	}
 	var defaultFinal k12.TextSolveFinalization
+	var defaultGradedFinal k12.TextSolveFinalization
+	var defaultGradeRef k12.TextGradeReportReference
+	var defaultGradedBody string
+	var defaultGradeResponse []byte
 	for _, actor := range []string{"http-tutor", "http-helper", "default"} {
 		for _, endpoint := range []string{"grade", "solve"} {
 			t.Run(actor+"/"+endpoint, func(t *testing.T) {
@@ -146,9 +174,12 @@ func TestK12AuthenticatedDirectHTTPTextOriginAndStandaloneScope(t *testing.T) {
 					t.Fatalf("authenticated direct HTTP must not require a tool turn: %d %s", rec.Code, rec.Body.String())
 				}
 				var result struct {
-					Finalization  *k12.TextSolveFinalization `json:"finalization"`
-					RecordCreated bool                       `json:"record_created"`
-					Solution      string                     `json:"solution"`
+					Finalization   *k12.TextSolveFinalization    `json:"finalization"`
+					RecordCreated  bool                          `json:"record_created"`
+					Solution       string                        `json:"solution"`
+					GradeReportRef *k12.TextGradeReportReference `json:"grade_report_ref"`
+					TeachingReport *k12.TeachingReport           `json:"teaching_report"`
+					ReportMarkdown string                        `json:"report_markdown"`
 				}
 				if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
 					t.Fatal(err)
@@ -161,6 +192,15 @@ func TestK12AuthenticatedDirectHTTPTextOriginAndStandaloneScope(t *testing.T) {
 				}
 				if endpoint == "grade" && actor == "http-tutor" && !result.RecordCreated {
 					t.Fatal("registered learner lost the normal mistake projection")
+				}
+				if endpoint == "grade" {
+					if result.GradeReportRef == nil || result.TeachingReport == nil || len(result.TeachingReport.Items) != 1 || result.TeachingReport.Items[0].Assessment.Status != k12.GradingAssessmentWrong || result.TeachingReport.Items[0].OriginalAnswer.RawText != "3" || !strings.Contains(result.ReportMarkdown, "一、快速解答") || !strings.Contains(result.ReportMarkdown, "二、深度讲解") {
+						t.Fatalf("HTTP lost actual grading or the submitted answer: %s", rec.Body.String())
+					}
+					if actor == "default" {
+						defaultGradedFinal, defaultGradeRef, defaultGradedBody = *result.Finalization, *result.GradeReportRef, result.ReportMarkdown
+						defaultGradeResponse = bytes.Clone(rec.Body.Bytes())
+					}
 				}
 				if read := request(h, http.MethodGet, "/api/k12/text-solves/"+result.Finalization.RunID+"?agent="+actor, "", cfg.Server.APIToken); read.Code != http.StatusOK {
 					t.Fatalf("own result cannot be read: %d %s", read.Code, read.Body.String())
@@ -190,6 +230,137 @@ func TestK12AuthenticatedDirectHTTPTextOriginAndStandaloneScope(t *testing.T) {
 	path := "/api/k12/print-artifacts/" + printResult.Artifact.ID + "/content?agent=default"
 	if read := request(h, http.MethodGet, path, "", cfg.Server.APIToken); read.Code != http.StatusOK || !strings.HasPrefix(read.Body.String(), "%PDF-") {
 		t.Fatalf("own PDF cannot be read: %d", read.Code)
+	}
+	gradedInput := map[string]any{"agent": "default", "solve_run_id": defaultGradedFinal.RunID, "text_finalization_id": defaultGradedFinal.FinalizationID, "text_finalization_digest": defaultGradedFinal.ResultDigest, "grade_report_ref": defaultGradeRef}
+	postPrint := func(input map[string]any) *httptest.ResponseRecorder {
+		t.Helper()
+		raw, err := json.Marshal(input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return request(h, http.MethodPost, "/api/k12/print-artifacts", string(raw), cfg.Server.APIToken)
+	}
+	gradedPrint := postPrint(gradedInput)
+	if gradedPrint.Code != http.StatusCreated {
+		t.Fatalf("actual grading reference could not print: %d %s", gradedPrint.Code, gradedPrint.Body.String())
+	}
+	var gradedPrintResult struct {
+		Artifact struct {
+			ID        string `json:"artifact_id"`
+			SourceRef string `json:"source_ref"`
+		} `json:"artifact"`
+	}
+	if err := json.Unmarshal(gradedPrint.Body.Bytes(), &gradedPrintResult); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(gradedPrintResult.Artifact.SourceRef, ":grade:"+defaultGradeRef.InvocationID+":"+defaultGradeRef.ResultDigest) || gradedPrintResult.Artifact.ID == printResult.Artifact.ID {
+		t.Fatalf("graded PDF lost exact assessment identity: %s", gradedPrint.Body.String())
+	}
+	gradedPDF, err := runtime.Deps.GetPrintableArtifactPDF(t.Context(), "default", gradedPrintResult.Artifact.ID)
+	if err != nil || gradedPDF.Artifact.CanonicalMarkdown != defaultGradedBody {
+		t.Fatalf("HTTP PDF and graded body differ: %v", err)
+	}
+	// 显式启用时，沿同一正式HTTP链路保存真实编译和下载产物。
+	if realOutput != "" {
+		saveRealPDF := func(name, answer string, gradeResponse []byte, input map[string]any, prepared *httptest.ResponseRecorder, expected k12.GradingAssessmentStatus) {
+			t.Helper()
+			var identity struct {
+				Artifact struct {
+					ID string `json:"artifact_id"`
+				} `json:"artifact"`
+			}
+			if err := json.Unmarshal(prepared.Body.Bytes(), &identity); err != nil {
+				t.Fatal(err)
+			}
+			frozen, err := runtime.Deps.GetPrintableArtifactPDF(t.Context(), "default", identity.Artifact.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			download := request(h, http.MethodGet, "/api/k12/print-artifacts/"+identity.Artifact.ID+"/content?agent=default", "", cfg.Server.APIToken)
+			if download.Code != http.StatusOK || download.Header().Get("Content-Type") != "application/pdf" || !bytes.Equal(download.Body.Bytes(), frozen.Render.Payload) {
+				t.Fatalf("real grading PDF download changed the frozen result: %d", download.Code)
+			}
+			digest := sha256.Sum256(download.Body.Bytes())
+			if hex.EncodeToString(digest[:]) != frozen.Render.ByteDigest || download.Header().Get("X-Content-SHA256") != frozen.Render.ByteDigest {
+				t.Fatal("real grading PDF download digest does not match")
+			}
+			var result struct {
+				Report *k12.TeachingReport           `json:"teaching_report"`
+				Ref    *k12.TextGradeReportReference `json:"grade_report_ref"`
+			}
+			if err := json.Unmarshal(gradeResponse, &result); err != nil || result.Report == nil || result.Ref == nil || len(result.Report.Items) != 1 || result.Report.Items[0].Assessment.Status != expected || result.Report.Items[0].OriginalAnswer.RawText != answer {
+				t.Fatalf("real grading result has incorrect facts: %v", err)
+			}
+			prepareInput, err := json.MarshalIndent(input, "", "  ")
+			if err != nil {
+				t.Fatal(err)
+			}
+			gradeInput, err := json.MarshalIndent(map[string]string{"agent": "default", "subject": "数学", "grade": "六年级上", "problem": "1+1=", "student_answer": answer}, "", "  ")
+			if err != nil {
+				t.Fatal(err)
+			}
+			summary, err := json.MarshalIndent(map[string]any{"grade_status": http.StatusOK, "prepare_status": prepared.Code, "download_status": download.Code, "download_headers": download.Header(), "assessment_status": expected, "grade_report_ref": result.Ref, "artifact_id": frozen.Artifact.ArtifactID, "source_ref": frozen.Artifact.SourceRef, "source_digest": frozen.Artifact.SourceDigest, "pdf_sha256": frozen.Render.ByteDigest, "pdf_bytes": len(download.Body.Bytes()), "model_calls": providerCalls}, "", "  ")
+			if err != nil {
+				t.Fatal(err)
+			}
+			for suffix, content := range map[string][]byte{".pdf": download.Body.Bytes(), "-grade-request.json": gradeInput, "-grade-response.json": gradeResponse, "-prepare-request.json": prepareInput, "-prepare-response.json": prepared.Body.Bytes(), "-result.json": summary, "-frozen-markdown.md": []byte(frozen.Artifact.CanonicalMarkdown)} {
+				if err := os.WriteFile(filepath.Join(realOutput, name+suffix), content, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Logf("REAL_GRADED_PDF_OK case=%s artifact=%s bytes=%d sha256=%s", name, frozen.Artifact.ArtifactID, len(download.Body.Bytes()), frozen.Render.ByteDigest)
+		}
+		saveRealPDF("wrong", "3", defaultGradeResponse, gradedInput, gradedPrint, k12.GradingAssessmentWrong)
+		t.Run("real_pdf_correct", func(t *testing.T) {
+			graded := request(h, http.MethodPost, "/api/k12/grade", `{"agent":"default","subject":"数学","grade":"六年级上","problem":"1+1=","student_answer":"2"}`, cfg.Server.APIToken)
+			if graded.Code != http.StatusOK {
+				t.Fatalf("real correct grading failed: %d %s", graded.Code, graded.Body.String())
+			}
+			var correct struct {
+				Final *k12.TextSolveFinalization    `json:"finalization"`
+				Ref   *k12.TextGradeReportReference `json:"grade_report_ref"`
+			}
+			if err := json.Unmarshal(graded.Body.Bytes(), &correct); err != nil || correct.Final == nil || correct.Ref == nil {
+				t.Fatalf("real correct grading identity missing: %v", err)
+			}
+			input := map[string]any{"agent": "default", "solve_run_id": correct.Final.RunID, "text_finalization_id": correct.Final.FinalizationID, "text_finalization_digest": correct.Final.ResultDigest, "grade_report_ref": correct.Ref}
+			prepared := postPrint(input)
+			if prepared.Code != http.StatusCreated {
+				t.Fatalf("real correct grading PDF failed: %d %s", prepared.Code, prepared.Body.String())
+			}
+			saveRealPDF("correct", "2", graded.Body.Bytes(), input, prepared, k12.GradingAssessmentCorrect)
+		})
+	}
+	beforeRejected := renderer.calls
+	for _, tc := range []struct {
+		name   string
+		change func(map[string]any)
+		status int
+	}{
+		{"incomplete", func(v map[string]any) {
+			v["grade_report_ref"] = map[string]string{"invocation_id": defaultGradeRef.InvocationID}
+		}, http.StatusBadRequest},
+		{"mixed_source", func(v map[string]any) { v["canonical_markdown"] = "other report" }, http.StatusBadRequest},
+		{"wrong_digest", func(v map[string]any) {
+			v["grade_report_ref"] = k12.TextGradeReportReference{InvocationID: defaultGradeRef.InvocationID, ResultDigest: "sha256:wrong"}
+		}, http.StatusConflict},
+		{"different_run", func(v map[string]any) {
+			v["solve_run_id"], v["text_finalization_id"], v["text_finalization_digest"] = defaultFinal.RunID, defaultFinal.FinalizationID, defaultFinal.ResultDigest
+		}, http.StatusConflict},
+	} {
+		t.Run("graded_print/"+tc.name, func(t *testing.T) {
+			input := make(map[string]any, len(gradedInput))
+			for key, value := range gradedInput {
+				input[key] = value
+			}
+			tc.change(input)
+			if rec := postPrint(input); rec.Code != tc.status {
+				t.Fatalf("invalid grading reference accepted or changed error contract: %d %s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+	if renderer.calls != beforeRejected {
+		t.Fatal("invalid grading reference rendered a replacement PDF")
 	}
 	other := newHandler("different-owner")
 	for _, path := range []string{path, "/api/k12/text-solves/" + defaultFinal.RunID + "?agent=default"} {
