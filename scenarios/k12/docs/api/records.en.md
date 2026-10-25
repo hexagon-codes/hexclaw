@@ -234,6 +234,8 @@ When the text execution ledger is wired, owner/agent/solve_run_id freeze the com
 
 Ordinary, default and tutor assistants share the same text finalization contract without fabricated learner or source-message records. Completed results are read using the original input, receipts and result digest; later answer-asset updates or archival do not rewrite that finalization. A new adoption still checks current eligibility. Failed teaching enrichment retains the verified complete answer and reliable steps while preserving failed or unknown receipts. Reading history does not resend model requests.
 
+Multiple explicit blanks are compared in the order of the current original subproblem, without requiring the word “填”. Repeated shared/canonical descriptions do not add answer slots. A claimed first error must be grounded in actual student work, allowing normalized mathematical symbols, whitespace and explanatory paraphrases. Missing process evidence retains the verified reference answer under the existing unverifiable judgment; it does not publish invented steps or establish that the complete work was correct.
+
 Availability: K12 Solver and optional curriculum adapter.
 
 JSON body:
@@ -367,6 +369,8 @@ See the [complete contract](review-source-groups.en.md) and [handler](../../apih
 
 <a id="insightreport"></a>
 ## GET /api/k12/insight-report
+
+Identically named knowledge points are counted separately by subject. The suggestion opening and detailed observation select the same target. A new return from the same diagnostic problem can update the supporting evidence; learning-event and condition rules are documented in the [practice API](practice.en.md).
 
 Read an insight snapshot.
 

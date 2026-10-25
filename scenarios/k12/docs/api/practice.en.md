@@ -12,6 +12,10 @@ Profile, textbook and curriculum-progress constraints are maintained in [profile
 
 Unit diagnostic variants are enabled only for explicitly recognized geometry relations. The candidate must preserve the shape and target quantity and request the numerical value and unit separately; its independently verified answer must have the same dimension. Other relations retain ordinary variants. Insight suggestions match the committed generation source, question, knowledge point and diagnostic observation within one read snapshot. Status/version changes alone do not invalidate a matching problem; changed problem semantics retain the old practice history without recommending it as the current check.
 
+System regrading measures mastery gaps using the actual learning event: the matching photo return's `returned_at`, or the weekly attempt's frozen submission time. Queueing and recovery delays do not count as learning intervals. The next review due date still uses settlement time and the existing interval policy. Legacy calls without an event identity retain their previous behavior without fabricated historical timestamps.
+
+The existing insight `suggestion` can cite the latest completed return from the same diagnostic source. System judgments, guardian-reported independent work, prompted work and unknown conditions remain distinct. The original hypothesis snapshot stays immutable; one correct attempt does not automatically establish mastery or generate another problem.
+
 ## Contents
 
 | Method / path | Operation |

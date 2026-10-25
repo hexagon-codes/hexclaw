@@ -95,7 +95,7 @@ func (d Deps) InsightReport(ctx context.Context, agentName string) (InsightRepor
 	}
 	monthStart := startOfInsightMonth(asOf)
 	weakCount := map[weakPointKey]int{}
-	failCount := map[string]int{}
+	failCount := map[weakPointKey]int{}
 
 	for _, record := range source.Mistakes {
 		fields, parseErr := k12.ParseMistakeFields(record.Fields)
@@ -113,20 +113,21 @@ func (d Deps) InsightReport(ctx context.Context, agentName string) (InsightRepor
 		default:
 			report.Trend.Reviewing++
 		}
+		subject := strings.TrimSpace(fields.Subject)
+		if subject == "" {
+			subject = "数学"
+		}
+		point := strings.TrimSpace(fields.KnowledgePoint)
+		key := weakPointKey{subject: subject, point: point}
 		if record.Status != k12.StatusMastered &&
 			record.Status != k12.StatusArchived &&
-			strings.TrimSpace(fields.KnowledgePoint) != "" {
-			failCount[fields.KnowledgePoint]++
+			point != "" {
+			failCount[key]++
 		}
 		if record.CreatedAt >= monthStart && record.CreatedAt <= asOf {
 			report.MonthNewMistakes++
-			point := strings.TrimSpace(fields.KnowledgePoint)
 			if point != "" {
-				subject := strings.TrimSpace(fields.Subject)
-				if subject == "" {
-					subject = "数学"
-				}
-				weakCount[weakPointKey{subject: subject, point: point}]++
+				weakCount[key]++
 			}
 		}
 		if insightMistakeDue(record.Status, fields.SpotCheckState, record.DueAt, asOf) {
@@ -181,8 +182,25 @@ func (d Deps) InsightReport(ctx context.Context, agentName string) (InsightRepor
 		report.ReviewCompletionRate = float64(done) / float64(total)
 	}
 	report.WeakTop3 = topWeakPoints(weakCount, report.MonthNewMistakes, 3)
-	report.ConsecutiveFailKPs = keysAtLeast(failCount, repeatedUnmasteredThreshold)
-	report.Suggestion = buildSourceBackedSuggestion(report, source)
+	repeated := keysAtLeast(failCount, repeatedUnmasteredThreshold)
+	pointSubjects := make(map[string]int)
+	for key := range failCount {
+		pointSubjects[key.point]++
+	}
+	for _, key := range repeated {
+		label := key.point
+		if pointSubjects[key.point] > 1 {
+			label = key.subject + "·" + key.point
+		}
+		report.ConsecutiveFailKPs = append(report.ConsecutiveFailKPs, label)
+	}
+	var priority weakPointKey
+	if len(repeated) > 0 {
+		priority = repeated[0]
+	} else if len(report.WeakTop3) > 0 {
+		priority = weakPointKey{subject: report.WeakTop3[0].Subject, point: report.WeakTop3[0].KnowledgePoint}
+	}
+	report.Suggestion = buildSourceBackedSuggestion(report, source, priority)
 	return report, nil
 }
 
@@ -222,14 +240,19 @@ func topWeakPoints(counts map[weakPointKey]int, denominator, limit int) []WeakPo
 	return out
 }
 
-func keysAtLeast(counts map[string]int, minimum int) []string {
-	var out []string
+func keysAtLeast(counts map[weakPointKey]int, minimum int) []weakPointKey {
+	var out []weakPointKey
 	for key, count := range counts {
 		if count >= minimum {
 			out = append(out, key)
 		}
 	}
-	sort.Strings(out)
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].point != out[j].point {
+			return out[i].point < out[j].point
+		}
+		return out[i].subject < out[j].subject
+	})
 	return out
 }
 
@@ -246,7 +269,7 @@ func buildSuggestion(report InsightReport) string {
 	return "本月复习进展不错，保持节奏。"
 }
 
-func buildSourceBackedSuggestion(report InsightReport, source k12storage.InsightSourceSnapshot) string {
+func buildSourceBackedSuggestion(report InsightReport, source k12storage.InsightSourceSnapshot, priority weakPointKey) string {
 	base := buildSuggestion(report)
 	mistakes := append([]*records.AgentRecord(nil), source.Mistakes...)
 	sort.Slice(mistakes, func(i, j int) bool {
@@ -263,7 +286,11 @@ func buildSourceBackedSuggestion(report InsightReport, source k12storage.Insight
 		if err != nil || strings.TrimSpace(fields.ObservedStudentAnswer) == "" || strings.TrimSpace(fields.CanonicalAnswer) == "" {
 			continue
 		}
-		if len(report.WeakTop3) > 0 && (fields.KnowledgePoint != report.WeakTop3[0].KnowledgePoint || fields.Subject != report.WeakTop3[0].Subject && !(fields.Subject == "" && report.WeakTop3[0].Subject == "数学")) {
+		subject := strings.TrimSpace(fields.Subject)
+		if subject == "" {
+			subject = "数学"
+		}
+		if priority.point != "" && (strings.TrimSpace(fields.KnowledgePoint) != priority.point || subject != priority.subject) {
 			continue
 		}
 		var out strings.Builder
@@ -272,8 +299,11 @@ func buildSourceBackedSuggestion(report InsightReport, source k12storage.Insight
 			sourceAnswer = fields.CanonicalAnswer
 		}
 		fmt.Fprintf(&out, "%s 当前观察：题目“%s”留存的作答是“%s”。家长讲法：先请孩子说明题目条件和每一步的含义，再对照本题参考答案：%s。", base, mathtext.PlainMarkdownText(fields.Question), mathtext.PlainMarkdownText(fields.ObservedStudentAnswer), mathtext.PlainMarkdownText(sourceAnswer))
+		var pending *k12.PracticeItem
+		var diagnosticEvidence string
+		var diagnosticEvidenceAt int64
 		for _, set := range source.PracticeSets {
-			if set.Status == k12.PracticeStatusCancelled || set.Status == k12.PracticeStatusClosed {
+			if set.Status == k12.PracticeStatusCancelled {
 				continue
 			}
 			practice, err := k12.ParsePracticeSetFields(set.Fields)
@@ -281,7 +311,7 @@ func buildSourceBackedSuggestion(report InsightReport, source k12storage.Insight
 				continue
 			}
 			for _, item := range practice.Items {
-				if item.SourceProblemID != record.RecordID || !k12.PracticeItemPublishable(item) || item.ResultCorrect != nil || item.GenerationJobID == "" || item.GenerationStatus != k12.PracticeItemGenerationReady {
+				if item.SourceProblemID != record.RecordID || !k12.PracticeItemPublishable(item) || item.GenerationJobID == "" || item.GenerationStatus != k12.PracticeItemGenerationReady {
 					continue
 				}
 				job, exists := source.PracticeGenerations[item.GenerationJobID]
@@ -294,10 +324,23 @@ func buildSourceBackedSuggestion(report InsightReport, source k12storage.Insight
 					(frozen.Diagnostic != nil && frozen.Diagnostic.Observation != fields.ObservedStudentAnswer) {
 					continue
 				}
-				// 建议正文沿既有纯文本区域展示；保留核对题完整参考，避免泄漏 Markdown 控制字符。
-				fmt.Fprintf(&out, " 核对题：使用已有已验证变式“%s”；家长参考答案：%s。本次通过依据：新作答的答案、单位或题目要求的要点正确，并能说明关键步骤的依据。作答条件仍以真实记录为准，一次做对不代表稳定掌握。", mathtext.PlainMarkdownText(item.QuestionMarkdown), mathtext.PlainMarkdownText(item.ExpectedAnswerMarkdown))
-				return out.String()
+				if item.ResultCorrect != nil {
+					if text, at := diagnosticPracticeResultEvidence(frozen.Diagnostic, item, practice.ReturnAssets); text != "" && at > diagnosticEvidenceAt {
+						diagnosticEvidence, diagnosticEvidenceAt = text, at
+					}
+					continue
+				}
+				if pending == nil && set.Status != k12.PracticeStatusClosed {
+					candidate := item
+					pending = &candidate
+				}
 			}
+		}
+		out.WriteString(diagnosticEvidence)
+		if pending != nil {
+			// 建议正文沿既有纯文本区域展示；保留核对题完整参考，避免泄漏 Markdown 控制字符。
+			fmt.Fprintf(&out, " 核对题：使用已有已验证变式“%s”；家长参考答案：%s。本次通过依据：新作答的答案、单位或题目要求的要点正确，并能说明关键步骤的依据。作答条件仍以真实记录为准，一次做对不代表稳定掌握。", mathtext.PlainMarkdownText(pending.QuestionMarkdown), mathtext.PlainMarkdownText(pending.ExpectedAnswerMarkdown))
+			return out.String()
 		}
 		out.WriteString(" 当前没有可用于本次核对的待答已验证变式，先让孩子解释原题各步骤；这只能核对本题理解，不能据此认定独立掌握。")
 		return out.String()
@@ -306,6 +349,47 @@ func buildSourceBackedSuggestion(report InsightReport, source k12storage.Insight
 		return base + " 当前记录没有足够的清楚作答和标准解答来形成逐步讲法，先核对原题与作答，不据此推断具体误区。"
 	}
 	return base
+}
+
+// diagnosticPracticeResultEvidence 只投影同一已冻结诊断题的实际回传，不改写原假设或掌握策略。
+func diagnosticPracticeResultEvidence(diagnostic *practiceDiagnosticContext, item k12.PracticeItem, returns []k12.PracticeReturnAsset) (string, int64) {
+	if diagnostic == nil || item.ResultCorrect == nil || item.ResultEvidence != k12.PracticeResultSystemVerified || item.ResultReturnID == "" {
+		return "", 0
+	}
+	hypothesis := ""
+	switch diagnostic.Hypothesis {
+	case "may_confuse_ratio_and_quantity":
+		hypothesis = "可能混淆分率与实际数量"
+	case "may_confuse_or_omit_unit":
+		hypothesis = "可能混淆或遗漏单位"
+	default:
+		return "", 0
+	}
+	for _, ret := range returns {
+		if ret.ReturnID != item.ResultReturnID || ret.RegradeStatus != k12.PracticeRegradeCompleted || ret.ReturnedAt <= 0 || !slices.Contains(ret.ItemIDs, item.ItemID) {
+			continue
+		}
+		answerContext := k12.LearningEvidenceUnknown
+		for _, event := range ret.LearningEvidence {
+			if event.Source == "guardian_report" && event.EventID == ret.ReturnID && event.OccurredAt == ret.ReturnedAt &&
+				(event.Kind == k12.LearningEvidenceIndependent || event.Kind == k12.LearningEvidencePrompted) {
+				answerContext = event.Kind
+			}
+		}
+		prefix := fmt.Sprintf(" 新作答依据：区分题“%s”", mathtext.PlainMarkdownText(item.QuestionMarkdown))
+		if !*item.ResultCorrect {
+			return prefix + "本次系统批改仍未通过，支持继续核对“" + hypothesis + "”这一假设；单次错误不足以确定误区，不据此增加练习。", ret.ReturnedAt
+		}
+		if answerContext == k12.LearningEvidenceIndependent {
+			return prefix + "本次系统批改正确，家长明确报告为独立作答；这为削弱“" + hypothesis + "”这一假设提供了一次新证据，不等于稳定掌握。", ret.ReturnedAt
+		}
+		condition := "作答条件尚不明确"
+		if answerContext == k12.LearningEvidencePrompted {
+			condition = "家长报告使用过提示"
+		}
+		return prefix + "本次系统批改正确，但" + condition + "，尚不足以判断“" + hypothesis + "”是否减弱；保留现有复习安排。", ret.ReturnedAt
+	}
+	return "", 0
 }
 
 func startOfInsightMonth(unixSeconds int64) int64 {

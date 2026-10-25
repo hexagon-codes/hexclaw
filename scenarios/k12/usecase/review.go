@@ -354,14 +354,19 @@ const MasteryGapInterval int64 = 3 * 86400 // 3 天
 // （轮次越高间隔越长）。轮次写回卡片 fields（乐观锁校验 expectedVersion）。
 //
 // T2.2（PRD §5.3.1）：若已是 retried（做对过一次）且距上次做对 ≥3 天 → 升 mastered、清到期
-// （连对两次且隔天才算掌握，抗隔天遗忘）；否则停留/进入 retried 并记录本次做对时间。
+// （两次独立正确证据的间隔不少于三天）；否则停留/进入 retried 并记录本次做对时间。
 func (d Deps) MarkRetried(ctx context.Context, recordID string, expectedVersion int) error {
+	return d.markRetriedAt(ctx, recordID, expectedVersion, d.now())
+}
+
+// markRetriedAt 用实际作答时间计算掌握间隔，处理延迟只影响后续复习调度。
+func (d Deps) markRetriedAt(ctx context.Context, recordID string, expectedVersion int, occurredAt int64) error {
 	rec, err := d.Records.Get(ctx, recordID)
 	if err != nil {
 		return fmt.Errorf("usecase: 取错题记录: %w", err)
 	}
 	if rec.Collection == k12.CollectionAccumulation {
-		return d.markRetriedAccum(ctx, rec, expectedVersion) // 语英纠错型：同艾宾浩斯阶梯，用积累本状态
+		return d.markRetriedAccum(ctx, rec, expectedVersion, occurredAt) // 语英纠错型：同艾宾浩斯阶梯，用积累本状态
 	}
 	// 已掌握（家长确认/证据掌握）再做对：幂等不倒退——mastered→retried 仅保留给
 	// 抽查复验未过路径（§3.6 规则 3，applySpotCheckOutcome），普通复批不得触发。
@@ -371,8 +376,8 @@ func (d Deps) MarkRetried(ctx context.Context, recordID string, expectedVersion 
 	f, _ := k12.ParseMistakeFields(rec.Fields)
 	now := d.now()
 
-	if rec.Status == k12.StatusRetried && f.LastRetriedAt > 0 && now-f.LastRetriedAt >= MasteryGapInterval {
-		f.LastRetriedAt = now
+	if rec.Status == k12.StatusRetried && reviewEvidenceGapReached(f.LastRetriedAt, occurredAt) {
+		f.LastRetriedAt = max(f.LastRetriedAt, occurredAt)
 		raw, err := json.Marshal(f)
 		if err != nil {
 			return fmt.Errorf("usecase: marshal 错题字段: %w", err)
@@ -382,7 +387,7 @@ func (d Deps) MarkRetried(ctx context.Context, recordID string, expectedVersion 
 	}
 
 	f.ReviewStage++ // 完成一次成功重做 → 进阶到下一档间隔
-	f.LastRetriedAt = now
+	f.LastRetriedAt = max(f.LastRetriedAt, occurredAt)
 	due := now + reviewIntervalForStage(f.ReviewStage)
 	raw, err := json.Marshal(f)
 	if err != nil {
@@ -392,12 +397,12 @@ func (d Deps) MarkRetried(ctx context.Context, recordID string, expectedVersion 
 }
 
 // markRetriedAccum 语英纠错型「重做做对」：同错题本艾宾浩斯口径，但走积累本状态（待复习/已掌握）。
-// 连对两次且隔天 ≥MasteryGapInterval → 已掌握清到期；否则轮次 +1 按阶梯重排到期。
-func (d Deps) markRetriedAccum(ctx context.Context, rec *records.AgentRecord, expectedVersion int) error {
+// 两次独立正确证据相隔 ≥MasteryGapInterval → 已掌握清到期；否则轮次 +1 按阶梯重排到期。
+func (d Deps) markRetriedAccum(ctx context.Context, rec *records.AgentRecord, expectedVersion int, occurredAt int64) error {
 	f, _ := k12.ParseAccumFields(rec.Fields)
 	now := d.now()
-	if rec.Status == k12.AccumStatusReviewing && f.LastRetriedAt > 0 && now-f.LastRetriedAt >= MasteryGapInterval {
-		f.LastRetriedAt = now
+	if rec.Status == k12.AccumStatusReviewing && reviewEvidenceGapReached(f.LastRetriedAt, occurredAt) {
+		f.LastRetriedAt = max(f.LastRetriedAt, occurredAt)
 		raw, err := json.Marshal(f)
 		if err != nil {
 			return fmt.Errorf("usecase: marshal 积累字段: %w", err)
@@ -405,13 +410,19 @@ func (d Deps) markRetriedAccum(ctx context.Context, rec *records.AgentRecord, ex
 		return d.Records.UpdateStatusFields(ctx, rec.RecordID, k12.AccumStatusMastered, nil, string(raw), expectedVersion)
 	}
 	f.ReviewStage++
-	f.LastRetriedAt = now
+	f.LastRetriedAt = max(f.LastRetriedAt, occurredAt)
 	due := now + reviewIntervalForStage(f.ReviewStage)
 	raw, err := json.Marshal(f)
 	if err != nil {
 		return fmt.Errorf("usecase: marshal 积累字段: %w", err)
 	}
 	return d.Records.UpdateStatusFields(ctx, rec.RecordID, k12.AccumStatusReviewing, &due, string(raw), expectedVersion)
+}
+
+// 迟到结算不改写最新作答时间；两份已有时间的独立证据仍按实际间隔判断。
+func reviewEvidenceGapReached(previous, occurredAt int64) bool {
+	return previous > 0 && occurredAt > 0 &&
+		(occurredAt-previous >= MasteryGapInterval || previous-occurredAt >= MasteryGapInterval)
 }
 
 func toItems(recs []*records.AgentRecord) []ReviewItem {

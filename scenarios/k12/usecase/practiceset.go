@@ -989,7 +989,18 @@ func (d Deps) gradePracticeSetItemsInTransaction(
 		if it.SourceProblemID != "" {
 			var projectionErr error
 			if evidence == k12.PracticeResultSystemVerified {
-				projectionErr = d.applyRegradeOutcome(ctx, it.SourceProblemID, correct)
+				occurredAt := d.now()
+				if res.ReturnID != "" {
+					// 回传已在同一命令内核对归属；已知回传不能借用批改完成时间。
+					occurredAt = 0
+					for _, ret := range v.Fields.ReturnAssets {
+						if ret.ReturnID == res.ReturnID {
+							occurredAt = ret.ReturnedAt
+							break
+						}
+					}
+				}
+				projectionErr = d.applyRegradeOutcome(ctx, it.SourceProblemID, correct, occurredAt)
 			} else {
 				projectionErr = d.applyHumanConfirmedRegradeOutcome(ctx, it.SourceProblemID, correct)
 			}
@@ -1014,7 +1025,7 @@ func (d Deps) gradePracticeSetItemsInTransaction(
 // two facts are reserved for system-verified attempts.
 func (d Deps) applyHumanConfirmedRegradeOutcome(ctx context.Context, sourceID string, correct bool) error {
 	if !correct {
-		return d.applyRegradeOutcome(ctx, sourceID, false)
+		return d.applyRegradeOutcome(ctx, sourceID, false, d.now())
 	}
 	rec, err := d.Records.Get(ctx, sourceID)
 	if err != nil {
@@ -1078,7 +1089,7 @@ func allItemsConcluded(f k12.PracticeSetFields) bool {
 // 通过 → MarkRetried 链路（进下一档间隔 / 满足条件升 mastered，积掌握证据）；
 // 未通过 → due_at 重置回本周（due=now）、复习轮次重置首档（§4.6：未通过重置回首档），
 // 状态不变——回到本周复习队列由 due 驱动，不倒退状态机。
-func (d Deps) applyRegradeOutcome(ctx context.Context, sourceID string, correct bool) error {
+func (d Deps) applyRegradeOutcome(ctx context.Context, sourceID string, correct bool, occurredAt int64) error {
 	rec, err := d.Records.Get(ctx, sourceID)
 	if err != nil {
 		return fmt.Errorf("usecase: 取复批来源题 %s: %w", sourceID, err)
@@ -1091,11 +1102,11 @@ func (d Deps) applyRegradeOutcome(ctx context.Context, sourceID string, correct 
 	// 结论写 spot_check_state 而非普通复习联动。
 	if rec.Collection == k12.CollectionMistakes {
 		if f, _ := k12.ParseMistakeFields(rec.Fields); f.SpotCheckState == k12.SpotCheckScheduled {
-			return d.applySpotCheckOutcome(ctx, rec, f, correct)
+			return d.applySpotCheckOutcome(ctx, rec, f, correct, occurredAt)
 		}
 	}
 	if correct {
-		return d.MarkRetried(ctx, sourceID, rec.Version)
+		return d.markRetriedAt(ctx, sourceID, rec.Version, occurredAt)
 	}
 	now := d.now()
 	firstDue := now + reviewIntervalForStage(0)
@@ -1127,7 +1138,7 @@ func (d Deps) applyRegradeOutcome(ctx context.Context, sourceID string, correct 
 //     间隔档保持确认前档位（确认动作未改 ReviewStage，不清零）；档案据 failed 呈现
 //     「家长确认（复验未过）」标注，话术温和不指责由前端文案承担；
 //   - 无论通过与否，抽查只此一次：scheduled 翻出后不再进入候选（规则 4 幂等基座）。
-func (d Deps) applySpotCheckOutcome(ctx context.Context, rec *records.AgentRecord, f k12.MistakeFields, correct bool) error {
+func (d Deps) applySpotCheckOutcome(ctx context.Context, rec *records.AgentRecord, f k12.MistakeFields, correct bool, occurredAt int64) error {
 	if correct {
 		f.SpotCheckState = k12.SpotCheckPassed
 		now := d.now()
@@ -1135,14 +1146,13 @@ func (d Deps) applySpotCheckOutcome(ctx context.Context, rec *records.AgentRecor
 		var due *int64
 		if status == k12.StatusMastered {
 			due = nil // 兼容旧 mastered+scheduled 数据；系统证据已在旧状态中。
-		} else if status == k12.StatusRetried && f.LastRetriedAt > 0 &&
-			now-f.LastRetriedAt >= MasteryGapInterval {
-			f.LastRetriedAt = now
+		} else if status == k12.StatusRetried && reviewEvidenceGapReached(f.LastRetriedAt, occurredAt) {
+			f.LastRetriedAt = max(f.LastRetriedAt, occurredAt)
 			status = k12.StatusMastered
 			due = nil
 		} else {
 			f.ReviewStage++
-			f.LastRetriedAt = now
+			f.LastRetriedAt = max(f.LastRetriedAt, occurredAt)
 			nextDue := now + reviewIntervalForStage(f.ReviewStage)
 			due = &nextDue
 			status = k12.StatusRetried

@@ -293,13 +293,12 @@ func (d Deps) weeklyPracticeAssessmentEffects(
 		now := d.now()
 		status := k12.StatusRetried
 		var due *int64
-		if rec.Status == k12.StatusRetried && fields.LastRetriedAt > 0 &&
-			now-fields.LastRetriedAt >= MasteryGapInterval {
+		if rec.Status == k12.StatusRetried && reviewEvidenceGapReached(fields.LastRetriedAt, attempt.CreatedAt) {
 			status = k12.StatusMastered
-			fields.LastRetriedAt = now
+			fields.LastRetriedAt = max(fields.LastRetriedAt, attempt.CreatedAt)
 		} else {
 			fields.ReviewStage++
-			fields.LastRetriedAt = now
+			fields.LastRetriedAt = max(fields.LastRetriedAt, attempt.CreatedAt)
 			next := now + reviewIntervalForStage(fields.ReviewStage)
 			due = &next
 		}
