@@ -113,17 +113,17 @@ The default config directory is `~/.hexclaw/`, containing:
 
 ### Skill marketplace (hexclaw-hub)
 
-The desktop **Skill Marketplace** fetches `index.json` and `skills/*.md` from a GitHub repo. The default is **`hexagon-codes/hexclaw-hub`** on tag **`v0.0.10`**. Override for a mirror:
+The desktop **Skill Marketplace** fetches `index.json` and `skills/*.md` from a GitHub repo. The default is **`hexagon-codes/hexclaw-hub`** on tag **`v0.0.13`**. Override for a mirror:
 
 ```yaml
 skills:
   enabled: true
   hub:
     repo_url: https://github.com/hexagon-codes/hexclaw-hub
-    branch: v0.0.10
+    branch: v0.0.13
 ```
 
-`v0.0.10` is the source default when no branch is explicitly configured. An existing `skills.hub.branch` still overrides it. Set that field to `v0.0.10` to use this version; custom repositories and other pinned versions keep their configured values. This setting selects the source for subsequent catalog reads and installations. Installed files continue to follow existing installation and versioned-seed rules, including protection for locally edited files.
+`v0.0.13` is the source default when no branch is explicitly configured. An existing `skills.hub.branch` still overrides it. Set that field to `v0.0.13` to use this version; custom repositories and other pinned versions keep their configured values. This setting selects the source for subsequent catalog reads and installations. Installed files continue to follow existing installation and versioned-seed rules, including protection for locally edited files.
 
 After installing or uninstalling a Markdown skill, the engine **syncs** the runtime skill registry; you usually **do not need** to restart the sidecar.
 For online installs through the API, `source` may be `clawhub://skill-name`; `GET /api/v1/clawhub/search` supports `q` and `category`.

@@ -113,17 +113,17 @@ hexclaw init
 
 ### 技能市场（hexclaw-hub）
 
-桌面端「技能市场」从在线目录拉取 `index.json` 与 `skills/*.md`。默认仓库为 **`hexagon-codes/hexclaw-hub`** 的 **`v0.0.10`** 标签。自建镜像时可覆盖：
+桌面端「技能市场」从在线目录拉取 `index.json` 与 `skills/*.md`。默认仓库为 **`hexagon-codes/hexclaw-hub`** 的 **`v0.0.13`** 标签。自建镜像时可覆盖：
 
 ```yaml
 skills:
   enabled: true
   hub:
     repo_url: https://github.com/hexagon-codes/hexclaw-hub
-    branch: v0.0.10
+    branch: v0.0.13
 ```
 
-`v0.0.10` 是未显式配置分支时的源码默认值。已有配置中的 `skills.hub.branch` 会继续覆盖默认值；若希望使用本版本，可将该字段改为 `v0.0.10`，自建仓库或其他固定版本继续使用原设置。该字段选择后续市场目录与安装内容的来源；已安装文件继续遵循现有安装和版本化种子规则，自行修改文件的保护保持。
+`v0.0.13` 是未显式配置分支时的源码默认值。已有配置中的 `skills.hub.branch` 会继续覆盖默认值；若希望使用本版本，可将该字段改为 `v0.0.13`，自建仓库或其他固定版本继续使用原设置。该字段选择后续市场目录与安装内容的来源；已安装文件继续遵循现有安装和版本化种子规则，自行修改文件的保护保持。
 
 安装或卸载 Markdown 技能后，引擎会**自动同步**运行时技能注册表，一般**无需重启** sidecar。
 通过 API 在线安装时，`source` 可写为 `clawhub://skill-name`；`GET /api/v1/clawhub/search` 支持 `q` 和 `category` 参数。
