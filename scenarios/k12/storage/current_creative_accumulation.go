@@ -225,8 +225,9 @@ func ValidateCreativeWorksArchiveV7(agent string, items []CreativeWorkArchiveV7)
 			}
 			if inv.ResultJSON != "" {
 				var result struct {
-					Feedback   string
-					SkillStamp string
+					Feedback           string
+					SkillStamp         string
+					ProjectionContract string `json:"projection_contract,omitempty"`
 				}
 				decoder := json.NewDecoder(strings.NewReader(inv.ResultJSON))
 				decoder.DisallowUnknownFields()

@@ -263,6 +263,9 @@ func MigrateHexbakOwner(source *Hexbak, targetAgent string) (*Hexbak, error) {
 	} else {
 		migrated.ProblemSource = nil
 	}
+	if err := migrateReviewSourceArchive(source, migrated, assetMapping); err != nil {
+		return nil, err
+	}
 	if err := SealHexbak(migrated); err != nil {
 		return nil, err
 	}
@@ -340,6 +343,11 @@ func cloneHexbak(bak *Hexbak) *Hexbak {
 	if bak.ProblemSource != nil {
 		cloned := k12storageCloneProblemSourceArchive(*bak.ProblemSource)
 		out.ProblemSource = &cloned
+	}
+	if bak.ReviewSources != nil {
+		raw, _ := json.Marshal(bak.ReviewSources)
+		out.ReviewSources = nil
+		_ = json.Unmarshal(raw, &out.ReviewSources)
 	}
 	return &out
 }

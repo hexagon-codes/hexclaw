@@ -1,5 +1,9 @@
 # K12 档案、教材与投递 API
 
+家长指南的`answer`在已验证解答有明确答案段时保留该段的完整所求量、单位和否定条件；讲法模型的缺项候选由用例从可信原文恢复，不为此重调模型。无明确答案段的历史解答保留原锚定兼容，原作答及批改事实不因答案投影改变。
+
+新专用教学和作品点评遵从Skill当前启用设置；明确停用/卸载不回退同名内嵌方法，应用必要的解题/事实/输出合同仍保留。旧已冻结结果继续按原身份读取，不因当前目录或设置变化重新生成。
+
 照片错题的 `question` 表示原题。已知版本的求解范围包装和完整内部限定尾注仅用于模型请求，列表与复习队列返回恢复后的原题；未知格式保持原文。此读取投影不修改历史记录、ID、版本、状态或冻结产物，新错题写入同一原题表示。
 
 本参考覆盖当前源码（包含工作区变更）注册的 51 个方法/路径，适用于 K12 场景已启用的 HexClaw 服务。已发布版本以相应 Tag 的文档与安装包为准；当前主线接口不保证已进入旧版安装包。
@@ -1073,9 +1077,13 @@ JSON 正文（严格解码）：
 
 v8 追加 `teaching_diagrams`，携带图示归属、资产身份、SHA-256 与精确 SVG 字节；摘要校验覆盖该字段，恢复与记录写入使用同一事务，RestoreAs 重写目标资产引用。旧版未携带图示时保留原 checksum 合同。
 
+v9 追加 `review_sources`：保存同题来源关联、原已提交来源快照与所需页元数据；相应原图字节仍通过 `assets` 的单一清单保存。恢复与原记录共用事务，不重建模型调用或投递任务。来源读取继续核对当前题面、页摘要与作答身份，任何已有批改账本均优先于归档来源；失效关系不会因再次导出或恢复而重新生效。跨 Tutor 恢复重写资产归属及关联ID，回退恢复原关联集合。旧版归档继续按原版本校验和读取。
+
+`snapshots[].source` 与 `pages[]` 保留冻结投影的 PascalCase 字段名，客户端须原样传输，不做大小写转换。`active` 只是导出时的来源状态，不是置信度，也不能绕过恢复后的当前身份复核；跨 Tutor 迁移前已不匹配原题的关系继续失效。
+
 读取完整家庭学习档案备份。
 
-JSON 响应不是附件下载；将完整响应保存为 .hexbak。当前 version=7，保留 archive_id/checksum/记录/图片/确认OCR/题目作答/source-action/当前作品档案原值。当前备份不含完整模型配置与全部长期记忆。任一引用资产缺失或损坏会使整份备份失败，不能丢字段后自行改 checksum。
+JSON 响应不是附件下载；将完整响应保存为 .hexbak。当前 version=9，保留 archive_id/checksum/记录/图片/确认OCR/题目作答/source-action/当前作品档案原值。当前备份不含完整模型配置与全部长期记忆。任一引用资产缺失或损坏会使整份备份失败，不能丢字段后自行改 checksum。
 
 依赖：K12 module, record store and the dependencies described for this operation.
 
@@ -1158,7 +1166,7 @@ JSON 正文：
 
 经监护人确认迁移到另一辅导实例。
 
-archive 完整保存源身份与checksum；source_agent 必须等于原归属，target_agent 必须不同且为重建目标；guardian_confirmed=true；idempotency_key 经trim后须非空，且最多200个UTF-8字节。仅接受v2及以上兼容档案，当前上限v8。原档案、目标恢复前快照、owner改写journal与领域写入同一SQLite事务，结果带 migration_id。重复同键返回持久收据，修改内容须新键。
+archive 完整保存源身份与checksum；source_agent 必须等于原归属，target_agent 必须不同且为重建目标；guardian_confirmed=true；idempotency_key 经trim后须非空，且最多200个UTF-8字节。仅接受v2及以上兼容档案，当前上限v9。原档案、目标恢复前快照、owner改写journal与领域写入同一SQLite事务，结果带 migration_id。重复同键返回持久收据，修改内容须新键。
 
 依赖：K12 module, record store and the dependencies described for this operation.
 

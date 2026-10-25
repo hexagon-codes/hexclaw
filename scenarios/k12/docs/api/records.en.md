@@ -1,5 +1,9 @@
 # K12 records, textbooks and delivery API
 
+When a verified solution has an explicit answer section, a parent guide's `answer` preserves all requested quantities, units and negative conditions. The use case restores incomplete explanatory candidates from that source without another model call. Legacy solutions without an explicit answer section retain their existing validation; original student answers and assessments remain unchanged.
+
+New dedicated teaching and work-feedback calls honor current Skill enablement. Explicitly disabled or uninstalled methods do not fall back to an embedded Skill of the same name; required application facts and solving/output contracts remain. Existing frozen results retain their original identity and are not regenerated when the catalog or settings change.
+
 For photo mistakes, `question` is the problem statement. Recognized versioned solver-scope wrappers and complete internal scope suffixes remain model-request details; list and review responses project the original statement. Unknown formats remain unchanged. This read projection preserves historical rows, IDs, versions, states and frozen artifacts; new mistakes store the same statement representation.
 
 This reference covers the 51 method/path registrations in the current source, including worktree changes, for a HexClaw service with the K12 scenario enabled. Use the documentation and installer at the relevant Tag for a released version; a mainline route is not a promise that an older installer contains it.
@@ -1075,7 +1079,11 @@ v8 adds `teaching_diagrams` with owner, asset identity, SHA-256 and exact SVG by
 
 Read a complete learner backup.
 
-Returns JSON, not a download attachment; save the whole response as .hexbak. Current version is 7. Preserve archive_id/checksum/records/assets/confirmed OCR/problem attempts/source-action/current creative-work archives unchanged. It does not include the complete model configuration or all long-term memory. Missing/corrupt referenced assets fail the backup; do not drop fields and recompute a checksum.
+v9 adds `review_sources`: reviewed relationships, their committed source snapshots and required page metadata. Original image bytes remain in the single `assets` manifest. Restoration shares the record transaction and does not recreate model calls or delivery tasks. Readers recheck the current question, page digest and attempt identity; an existing grading ledger always takes precedence over archived sources. Invalid relationships cannot become valid through re-export/restoration. Cross-Tutor migration rewrites asset ownership and group identity; rollback restores the original relationship set. Earlier checksum formats remain supported.
+
+`snapshots[].source` and `pages[]` retain the frozen projection's PascalCase field names; clients must transfer them unchanged. `active` records the exported source state, not confidence or an exemption from current identity checks. Relationships that no longer match the original question remain invalid during cross-Tutor migration.
+
+Returns JSON, not a download attachment; save the whole response as .hexbak. Current version is 9. Preserve archive_id/checksum/records/assets/confirmed OCR/problem attempts/source-action/current creative-work archives unchanged. It does not include the complete model configuration or all long-term memory. Missing/corrupt referenced assets fail the backup; do not drop fields and recompute a checksum.
 
 Availability: K12 module, record store and the dependencies described for this operation.
 
@@ -1158,7 +1166,7 @@ Success: `200` `application/json`.
 
 Migrate a backup to another Tutor.
 
-Keep original archive identity/checksum unchanged. source_agent must match the original owner; target_agent must differ and identify the rebuilt Tutor. guardian_confirmed=true and a nonblank idempotency_key of at most 200 UTF-8 bytes after trimming are required. Accepts supported backups from v2 through the current v8. Original archive, target pre-restore snapshot, owner-rewrite journal and domain writes commit in one SQLite transaction. The result contains migration_id; identical commands replay durable receipts.
+Keep original archive identity/checksum unchanged. source_agent must match the original owner; target_agent must differ and identify the rebuilt Tutor. guardian_confirmed=true and a nonblank idempotency_key of at most 200 UTF-8 bytes after trimming are required. Accepts supported backups from v2 through the current v9. Original archive, target pre-restore snapshot, owner-rewrite journal and domain writes commit in one SQLite transaction. The result contains migration_id; identical commands replay durable receipts.
 
 Availability: K12 module, record store and the dependencies described for this operation.
 

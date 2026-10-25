@@ -18,7 +18,7 @@ import (
 // canonical evidence 纳入 checksum；v5 纳入 V19 Problem/Attempt canonical
 // ledger 与其 page asset；v6 纳入 V50/V51/V72/V73 source-action durability
 // closure；v7 纳入当前作品来源、点评与调用停点；v8 纳入教学图。旧版校验字节契约继续兼容。
-const HexbakVersion = 8
+const HexbakVersion = 9
 
 // ErrChecksumMismatch 恢复时校验和不符（归档损坏或载荷不一致）。
 var ErrChecksumMismatch = errors.New("hexbak checksum mismatch")
@@ -50,6 +50,8 @@ type Hexbak struct {
 	CurrentCreativeWorks []k12storage.CreativeWorkArchiveV7 `json:"current_creative_works,omitempty"`
 	// TeachingDiagrams v8 覆盖已生成图示的冻结字节，旧版本无此字段时保持历史摘要。
 	TeachingDiagrams []k12storage.TeachingDiagramArchive `json:"teaching_diagrams,omitempty"`
+	// ReviewSources v9保留来源关联与恢复所需的冻结来源，不恢复运行任务。
+	ReviewSources *k12storage.ReviewSourceArchive `json:"review_sources,omitempty"`
 	// Profile 孩子档案（T2.6 全量导出 PRD §3.12.4-1：不止 records，还含档案）。可空（老归档/无档案）。
 	// 注：学情记忆 + 实例配置的导出需跨子系统新 port（Insights 目前只写不可导），属后续。
 	Profile  *k12.ChildProfile `json:"profile,omitempty"`
@@ -76,6 +78,10 @@ func (d Deps) Backup(ctx context.Context, agentName string) (*Hexbak, error) {
 	bak.TeachingDiagrams, err = d.Records.ExportTeachingDiagramAssets(ctx, agentName)
 	if err != nil {
 		return nil, fmt.Errorf("export teaching diagrams: %w", err)
+	}
+	bak.ReviewSources, err = d.Records.ExportReviewSourceArchive(ctx, agentName)
+	if err != nil {
+		return nil, fmt.Errorf("export reviewed sources: %w", err)
 	}
 	// T2.6 全量导出：附孩子档案（有档案存储且档案存在时）。
 	if d.Profiles != nil {
@@ -116,7 +122,11 @@ func (d Deps) Backup(ctx context.Context, agentName string) (*Hexbak, error) {
 	if err != nil {
 		return nil, err
 	}
-	bak.Assets, err = MergeHexbakAssets(recordAssets, problemAssets, problemSourceAssets, currentAssets)
+	reviewAssets, err := PackHexbakReviewSourceAssets(agentName, bak.ReviewSources)
+	if err != nil {
+		return nil, fmt.Errorf("pack reviewed source assets: %w", err)
+	}
+	bak.Assets, err = MergeHexbakAssets(recordAssets, problemAssets, problemSourceAssets, currentAssets, reviewAssets)
 	if err != nil {
 		return nil, fmt.Errorf("usecase: 合并档案资产: %w", err)
 	}
@@ -176,7 +186,7 @@ func (d Deps) Restore(ctx context.Context, bak *Hexbak) (int, error) {
 		// boundary; compensation cannot close a process-crash window.
 		if d.ArchiveRestorer == nil && (d.Profiles != nil || restoreBak.Profile != nil ||
 			len(restoreBak.CreativeWorkOCR) > 0 || len(restoreBak.ProblemAttempts) > 0 ||
-			restoreBak.ProblemSource != nil || len(restoreBak.CurrentCreativeWorks) > 0 || len(restoreBak.TeachingDiagrams) > 0) {
+			restoreBak.ProblemSource != nil || len(restoreBak.CurrentCreativeWorks) > 0 || len(restoreBak.TeachingDiagrams) > 0 || restoreBak.ReviewSources != nil) {
 			return 0, fmt.Errorf("%w: 未配置 records/profile 原子恢复能力", ErrInvalidInput)
 		}
 		if d.ArchiveRestorer != nil {
@@ -399,6 +409,12 @@ func VerifyHexbak(bak *Hexbak) error {
 	}
 	if sum != bak.Checksum {
 		return ErrChecksumMismatch
+	}
+	if bak.Version < 9 && bak.ReviewSources != nil {
+		return fmt.Errorf("reviewed source archive is not covered by this version")
+	}
+	if err := k12storage.ValidateReviewSourceArchive(bak.AgentName, bak.ReviewSources); err != nil {
+		return err
 	}
 	if bak.Version < 8 && len(bak.TeachingDiagrams) != 0 {
 		return fmt.Errorf("teaching diagram archive is not covered by this version")

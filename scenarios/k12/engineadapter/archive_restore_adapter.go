@@ -81,6 +81,9 @@ func (a *ArchiveRestoreAdapter) RestoreHexbak(ctx context.Context, bak *usecase.
 					return fmt.Errorf("merge problem-source durability closure: %w", err)
 				}
 			}
+			if err := a.records.ImportReviewSourceArchiveTx(ctx, tx, bak.AgentName, bak.ArchiveID, bak.ReviewSources); err != nil {
+				return fmt.Errorf("restore reviewed source archive: %w", err)
+			}
 			if err := a.agents.SaveAgentTx(ctx, tx, updated); err != nil {
 				return fmt.Errorf("replace hexbak profile metadata: %w", err)
 			}

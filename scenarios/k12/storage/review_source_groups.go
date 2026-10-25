@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 
@@ -74,25 +75,8 @@ func (s *Store) PutReviewSourceGroup(ctx context.Context, group k12.ReviewSource
 		}
 		return k12.ReviewSourceGroup{}, false, fmt.Errorf("%w: group %s", ErrReviewSourceGroupConflict, prior.GroupID)
 	}
-	digestsJSON, err := json.Marshal(group.Evidence.SourceDigests)
-	if err != nil {
+	if err := appendReviewSourceGroup(ctx, tx, group); err != nil {
 		return k12.ReviewSourceGroup{}, false, err
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO k12_review_source_groups (`+reviewSourceGroupColumns+`)
-        VALUES(?,?,?,?,?,?,?,?,?)`, group.GroupID, group.AgentName, group.CanonicalRecordID,
-		group.CanonicalStatement, group.CanonicalStatementDigest, group.Evidence.Kind, group.Evidence.Note,
-		string(digestsJSON), group.CreatedAt); err != nil {
-		return k12.ReviewSourceGroup{}, false, fmt.Errorf("k12storage: append reviewed source group: %w", err)
-	}
-	for _, member := range group.Members {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO k12_review_source_group_members
-            (group_id,agent_name,`+reviewSourceGroupMemberColumns+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			group.GroupID, group.AgentName, member.RecordID, member.QuestionDigest, member.JobID,
-			member.ProblemID, member.AttemptID, member.ConfirmedVersion, member.InputRevision, member.InputDigest,
-			member.ResultDigest, member.PageDigest, reviewSourcePathJSON(member.SourceNumberPath),
-			reviewSourcePathJSON(member.ParentSourceNumberPath)); err != nil {
-			return k12.ReviewSourceGroup{}, false, fmt.Errorf("k12storage: append reviewed source member: %w", err)
-		}
 	}
 	if err := tx.Commit(); err != nil {
 		return k12.ReviewSourceGroup{}, false, fmt.Errorf("k12storage: commit reviewed source group: %w", err)
@@ -250,6 +234,11 @@ func validateReviewSourceGroupMember(ctx context.Context, tx *sql.Tx, agentName 
 		member.InputRevision, member.InputDigest, member.ResultDigest).Scan(&question, &resultJSON, &pageID, &pageDigest,
 		&parentID, &parentPageID, &parentKind, &parentVersion, &parentPathJSON)
 	if errors.Is(err, sql.ErrNoRows) {
+		if source, found, archiveErr := restoredReviewSource(ctx, tx, agentName, member.RecordID); archiveErr != nil {
+			return archiveErr
+		} else if found && reflect.DeepEqual(source.Member, member) {
+			return nil
+		}
 		return fmt.Errorf("%w: record %s", ErrReviewSourceGroupStale, member.RecordID)
 	}
 	if err != nil {

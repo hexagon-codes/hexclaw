@@ -32172,6 +32172,8 @@ components:
     K12TasksGradingFinalArtifact:
       additionalProperties: false
       properties:
+        teaching_report:
+          $ref: "#/components/schemas/K12TeachingReport"
         agent_name:
           type: string
         annotated_asset_id:
@@ -32981,6 +32983,7 @@ components:
       additionalProperties: false
       properties:
         answer:
+          description: Preserves the complete explicit answer from the verified solution, including requested quantities, units and negative conditions. Explanatory candidates cannot replace it. Legacy solutions without an explicit answer section retain their existing validation.
           type: string
         checking_method:
           type: string
@@ -38034,6 +38037,8 @@ components:
       type: object
     K12Recordsscenarios_k12_GradingFinalArtifact:
       properties:
+        teaching_report:
+          $ref: "#/components/schemas/K12TeachingReport"
         agent_name:
           type: string
         annotated_asset_id:
@@ -41147,9 +41152,13 @@ components:
           type:
             - array
             - "null"
+        review_sources:
+          anyOf:
+            - $ref: "#/components/schemas/K12ReviewedSourceArchiveV9"
+            - type: "null"
         version:
           type: integer
-          description: Current backup version is 8; restoration supports versioned checksum contracts through 8.
+          description: Current backup version is 9; restoration supports versioned checksum contracts through 9.
             Preserve this complete envelope unchanged.
       required:
         - version
@@ -41158,6 +41167,142 @@ components:
         - records
         - checksum
       type: object
+    K12ArchivedReviewSourceMember:
+      type: object
+      properties:
+        record_id:
+          type: string
+        question_digest:
+          type: string
+        job_id:
+          type: string
+        problem_id:
+          type: string
+        attempt_id:
+          type: string
+        confirmed_version:
+          type: integer
+        input_revision:
+          type: integer
+        input_digest:
+          type: string
+        result_digest:
+          type: string
+        page_digest:
+          type: string
+        source_number_path:
+          type: array
+          items:
+            type: string
+        parent_source_number_path:
+          type: array
+          items:
+            type: string
+      required: [record_id, question_digest, job_id, problem_id, attempt_id, confirmed_version, input_revision, input_digest, result_digest, page_digest]
+    K12FrozenReviewPaperSource:
+      type: object
+      properties:
+        AgentName:
+          type: string
+        RecordID:
+          type: string
+        JobID:
+          type: string
+        ProblemID:
+          type: string
+        AttemptID:
+          type: string
+        InputRevision:
+          type: integer
+        PublishedRevision:
+          type: integer
+        ConfirmedVersion:
+          type: integer
+        InputDigest:
+          type: string
+        ResultJSON:
+          type: string
+        ResultDigest:
+          type: string
+        PageAssetID:
+          type: string
+        PageDigest:
+          type: string
+        ParentProblemID:
+          type: string
+        ParentPageAssetID:
+          type: string
+        ParentKind:
+          type: string
+        ParentCanonicalVersion:
+          type: integer
+        ParentSourceNumberPathJSON:
+          type: string
+        ParentStemRaw:
+          type: string
+      required: [AgentName, RecordID, JobID, ProblemID, AttemptID, InputRevision, PublishedRevision, ConfirmedVersion, InputDigest, ResultJSON, ResultDigest, PageAssetID, PageDigest, ParentProblemID, ParentPageAssetID, ParentKind, ParentCanonicalVersion, ParentSourceNumberPathJSON, ParentStemRaw]
+    K12FrozenReviewPageMetadata:
+      type: object
+      properties:
+        OwnerScope:
+          type: string
+        AgentName:
+          type: string
+        PageAssetID:
+          type: string
+        ContentDigest:
+          type: string
+        MediaType:
+          type: string
+        SizeBytes:
+          type: integer
+        PixelWidth:
+          type: integer
+        PixelHeight:
+          type: integer
+        OrientationPolicy:
+          type: string
+        OrientationPolicyVersion:
+          type: string
+        TransformChainJSON:
+          type: string
+        StorageState:
+          type: string
+        ReadyAt:
+          type: integer
+        LastError:
+          type: string
+        CreatedAt:
+          type: integer
+        UpdatedAt:
+          type: integer
+      required: [OwnerScope, AgentName, PageAssetID, ContentDigest, MediaType, SizeBytes, PixelWidth, PixelHeight, OrientationPolicy, OrientationPolicyVersion, TransformChainJSON, StorageState, ReadyAt, LastError, CreatedAt, UpdatedAt]
+    K12ReviewedSourceSnapshot:
+      type: object
+      properties:
+        member:
+          $ref: "#/components/schemas/K12ArchivedReviewSourceMember"
+        source:
+          $ref: "#/components/schemas/K12FrozenReviewPaperSource"
+        active:
+          type: boolean
+      required: [member, source, active]
+    K12ReviewedSourceArchiveV9:
+      type: object
+      properties:
+        groups:
+          type: [array, "null"]
+          items:
+            $ref: "#/components/schemas/K12RecordsReviewSourceGroup"
+        snapshots:
+          type: [array, "null"]
+          items:
+            $ref: "#/components/schemas/K12ReviewedSourceSnapshot"
+        pages:
+          type: array
+          items:
+            $ref: "#/components/schemas/K12FrozenReviewPageMetadata"
+      required: [groups, snapshots]
     K12TeachingDiagramArchive:
       type: object
       properties:

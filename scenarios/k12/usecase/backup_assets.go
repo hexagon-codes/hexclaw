@@ -204,6 +204,9 @@ func referencedHexbakArchiveAssetIDs(bak *Hexbak) ([]string, error) {
 	for _, id := range recordRefs {
 		seen[id] = struct{}{}
 	}
+	for _, id := range reviewedSourceAssetIDs(bak.ReviewSources) {
+		seen[id] = struct{}{}
+	}
 	for _, work := range bak.CurrentCreativeWorks {
 		for _, generation := range work.Generations {
 			id := generation.Source.SourceAssetID

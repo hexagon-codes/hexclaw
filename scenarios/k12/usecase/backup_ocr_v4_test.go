@@ -14,9 +14,9 @@ import (
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/assetstore"
 )
 
-func TestHexbakCurrentVersionIsV6ForProblemSourceProblemAttemptAndConfirmedCreativeWorkOCREvidence(t *testing.T) {
-	if HexbakVersion != 8 {
-		t.Fatalf("HexbakVersion=%d want 8 for current teaching diagram assets", HexbakVersion)
+func TestHexbakCurrentVersionCoversReviewedSourceArchives(t *testing.T) {
+	if HexbakVersion < 9 {
+		t.Fatalf("HexbakVersion=%d must cover the v9 reviewed source archive", HexbakVersion)
 	}
 }
 

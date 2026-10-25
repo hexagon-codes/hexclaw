@@ -95,6 +95,10 @@ func (a *ArchiveRestoreAdapter) RestoreArchiveAs(
 			if err != nil {
 				return fmt.Errorf("snapshot teaching diagrams: %w", err)
 			}
+			snapshot.ReviewSources, err = a.records.ExportReviewSourceArchiveTx(ctx, tx, plan.TargetAgent)
+			if err != nil {
+				return fmt.Errorf("snapshot target reviewed sources: %w", err)
+			}
 			recordAssets, err := usecase.PackHexbakAssets(plan.TargetAgent, preRecords)
 			if err != nil {
 				return fmt.Errorf("pack pre-restore snapshot assets: %w", err)
@@ -113,8 +117,12 @@ func (a *ArchiveRestoreAdapter) RestoreArchiveAs(
 			if err != nil {
 				return err
 			}
+			reviewAssets, err := usecase.PackHexbakReviewSourceAssets(plan.TargetAgent, snapshot.ReviewSources)
+			if err != nil {
+				return fmt.Errorf("pack pre-restore reviewed source assets: %w", err)
+			}
 			snapshot.Assets, err = usecase.MergeHexbakAssets(
-				recordAssets, problemAssets, problemSourceAssets, currentAssets,
+				recordAssets, problemAssets, problemSourceAssets, currentAssets, reviewAssets,
 			)
 			if err != nil {
 				return fmt.Errorf("merge pre-restore snapshot assets: %w", err)
@@ -192,6 +200,9 @@ func (a *ArchiveRestoreAdapter) RestoreArchiveAs(
 				); err != nil {
 					return fmt.Errorf("merge owner-rewritten problem-source closure: %w", err)
 				}
+			}
+			if err := a.records.ImportReviewSourceArchiveTx(ctx, tx, plan.TargetAgent, migrated.ArchiveID, migrated.ReviewSources); err != nil {
+				return fmt.Errorf("restore migrated reviewed sources: %w", err)
 			}
 			updated.Metadata = k12.ReplaceProfileInMeta(updated.Metadata, migrated.Profile)
 			if err := a.agents.SaveAgentTx(ctx, tx, updated); err != nil {
@@ -328,6 +339,37 @@ func (a *ArchiveRestoreAdapter) RollbackRestoreAs(
 			if err != nil {
 				return rollbackFailure(err, nil)
 			}
+			beforeReviewed, err := a.records.ExportReviewSourceArchiveTx(ctx, tx, req.TargetAgent)
+			if err != nil {
+				return rollbackFailure(err, nil)
+			}
+			expectedGroups := map[string]bool{}
+			for _, archive := range []*k12storage.ReviewSourceArchive{current.Snapshot.ReviewSources, migrated.ReviewSources} {
+				if archive != nil {
+					for _, group := range archive.Groups {
+						expectedGroups[group.GroupID] = true
+					}
+				}
+			}
+			if beforeReviewed != nil {
+				for _, group := range beforeReviewed.Groups {
+					if !expectedGroups[group.GroupID] {
+						return rollbackFailure(fmt.Errorf("%w: reviewed sources changed after restore", records.ErrVersionConflict), nil)
+					}
+					delete(expectedGroups, group.GroupID)
+				}
+			}
+			if len(expectedGroups) != 0 {
+				return rollbackFailure(fmt.Errorf("%w: reviewed sources changed after restore", records.ErrVersionConflict), nil)
+			}
+			if migrated.ReviewSources != nil {
+				for _, source := range migrated.ReviewSources.Snapshots {
+					var origin string
+					if err := tx.QueryRowContext(ctx, `SELECT archive_id FROM k12_review_source_archive WHERE agent_name=? AND record_id=?`, req.TargetAgent, source.Member.RecordID).Scan(&origin); err != nil || origin != migrated.ArchiveID {
+						return rollbackFailure(fmt.Errorf("%w: reviewed source selection changed after restore", records.ErrVersionConflict), nil)
+					}
+				}
+			}
 			invocations := map[string]k12.ImageTaskInvocation{}
 			for _, works := range [][]k12storage.CreativeWorkArchiveV7{current.Snapshot.CurrentCreativeWorks, migrated.CurrentCreativeWorks} {
 				for _, work := range works {
@@ -370,6 +412,9 @@ func (a *ArchiveRestoreAdapter) RollbackRestoreAs(
 				); err != nil {
 					return rollbackFailure(fmt.Errorf("restore pre-migration problem-source closure: %w", err), nil)
 				}
+			}
+			if err := a.records.ReplaceReviewSourceArchiveTx(ctx, tx, req.TargetAgent, current.Snapshot.ArchiveID, current.Snapshot.ReviewSources); err != nil {
+				return rollbackFailure(fmt.Errorf("restore pre-migration reviewed sources: %w", err), nil)
 			}
 			createdPageAssetIDs := make([]string, 0, len(assetMigrations))
 			for _, item := range assetMigrations {
