@@ -145,7 +145,10 @@ func grantCoversCategory(grants *GrantStore, source, taskRef, category string) b
 // estimateCategories 从任务描述启发式预估会用到的能力类别。
 // 这是预估不是承诺：漏判由运行时审批兜底，多判不产生授权。
 func estimateCategories(req PreflightRequest) []string {
-	out := []string{"read"}
+	var out []string
+	if len(req.Tools) == 0 || strings.TrimSpace(req.Prompt) != "" {
+		out = append(out, "read")
+	}
 	prompt := strings.ToLower(req.Prompt)
 
 	// prompt 驱动的任务（无显式工具清单）按 agent 模式预估沙箱计算。

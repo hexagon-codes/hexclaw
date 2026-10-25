@@ -1273,7 +1273,7 @@ func (h *PermissionHook) authorizeUntrustedEvidenceTool(ctx context.Context, cal
 // 无人值守触发（cron/webhook/…）下的 MCP 连接器工具是「外部写入」风险面
 // （GitHub/Jira/DB 等第三方系统），矩阵没有它们的内置类别，必须由任务级
 // grant 或显式矩阵条目（含全功能 profile 的 "*"）授权，否则转待审批。
-// skill/builtin 工具不经此闸（它们有类别与 policy 规则治理）。
+// 严格档的内置工具也消费该矩阵，避免默认 allow 绕过已选择的审批要求。
 func (h *PermissionHook) gateUnattendedConnectorTool(ctx context.Context, call *ToolCallInfo) error {
 	src := systemDispatchSource(ctx)
 	if src == "" {
@@ -1286,8 +1286,9 @@ func (h *PermissionHook) gateUnattendedConnectorTool(ctx context.Context, call *
 	//     builtin(Source≠mcp)、DefaultBaselinePolicy 无其规则 → 走 ActionAllow 分支
 	//     直达本闸，若仍按「非 mcp 早退」放行，则 SystemDispatchPolicy 矩阵对 cron_task
 	//     形同虚设，cron agent 可自建 cron job 成自我复制回路。故 automation 类别
-	//     builtin 在此一并按矩阵/grant 求值（read/files/media 等其它类别不受影响）。
-	if call.Source != "mcp" && SystemDispatchToolCategory(call.Name) != "automation" {
+	//     builtin 在此一并按矩阵/grant 求值；严格档同时核对其他内置工具，其他档位保持原有范围。
+	policy := h.DispatchPolicy()
+	if call.Source != "mcp" && SystemDispatchToolCategory(call.Name) != "automation" && policy.Profile() != SystemDispatchProfileStrict {
 		return nil
 	}
 	if taskRef := systemDispatchTaskRef(ctx); taskRef != "" && h.taskGrants != nil && h.taskGrants.GrantAllows(src, taskRef, call.Name) {
@@ -1296,7 +1297,6 @@ func (h *PermissionHook) gateUnattendedConnectorTool(ctx context.Context, call *
 		h.recordDecision(ctx, call.Name, "allow", "task_grant", "任务级授权命中（连接器工具）")
 		return nil
 	}
-	policy := h.DispatchPolicy()
 	if policy.Allows(src, call.Name) {
 		h.recordDecision(ctx, call.Name, "allow", "matrix", "矩阵显式条目放行（连接器工具）")
 		return nil

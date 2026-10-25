@@ -326,7 +326,10 @@ func normalizeSystemDispatchEntries(entries []string) []string {
 	out := make([]string, 0, len(entries))
 	seen := map[string]bool{}
 	for _, entry := range entries {
-		entry = strings.ToLower(strings.TrimSpace(entry))
+		entry = strings.TrimSpace(entry)
+		if _, category := systemDispatchToolCategories[strings.ToLower(entry)]; category {
+			entry = strings.ToLower(entry)
+		}
 		if entry == "" || seen[entry] {
 			continue
 		}

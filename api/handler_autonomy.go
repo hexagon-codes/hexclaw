@@ -59,8 +59,35 @@ func (s *Server) autonomyPolicy() *engine.SystemDispatchPolicy {
 // （agent 节点走 eng.Process 有闸，tool 节点没有）。语义与 engine 连接器闸一致：
 // workflow 源 + 连接器工具需矩阵显式条目（含 full_access 的 *）或任务级授权。
 func (s *Server) authorizeWorkflowConnectorTool(workflowID, toolName string) error {
-	policy := s.autonomyPolicy()
 	taskRef := "workflow:" + workflowID
+	// 路由别名不改变权限语义，和普通工具执行器一样按上游原名消费既有规则。
+	permissionToolName := toolName
+	if s.mcpMgr != nil {
+		for _, info := range s.mcpMgr.ListToolInfos() {
+			if info.Name == toolName {
+				permissionToolName = info.OriginalName
+				break
+			}
+		}
+	}
+	permissions := s.toolPerms
+	if permissions == nil {
+		s.cfgMu.RLock()
+		if s.cfg != nil {
+			configured := s.cfg.Security.ToolPermissions
+			if len(configured.Allow) > 0 || len(configured.Deny) > 0 {
+				permissions = engine.NewToolPermissions(append([]string(nil), configured.Allow...), append([]string(nil), configured.Deny...))
+			}
+		}
+		s.cfgMu.RUnlock()
+	}
+	if permissions != nil {
+		if err := permissions.Check(permissionToolName, ""); err != nil {
+			s.recordWorkflowDecision(taskRef, permissionToolName, "deny", "policy", err.Error())
+			return err
+		}
+	}
+	policy := s.autonomyPolicy()
 	if policy.Allows("workflow", toolName) {
 		s.recordWorkflowDecision(taskRef, toolName, "allow", "matrix", "矩阵显式条目放行（workflow 连接器工具）")
 		return nil
@@ -161,13 +188,13 @@ func (s *Server) handleUpdateAutonomyProfile(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	s.cfg.Security.Autonomy.Profile = profile
-	s.cfgMu.Unlock()
 
-	// 用本地副本构建策略：以落盘内容为准，且不在锁外再读共享 s.cfg。
+	// 保存和运行策略交换处于同一事务，后续请求不能被旧副本反向覆盖。
 	newPolicy := engine.NewSystemDispatchPolicyFromConfig(nextCfg.Security.Autonomy)
 	if s.autonomyHook != nil {
 		s.autonomyHook.SetSystemDispatchPolicy(newPolicy)
 	}
+	s.cfgMu.Unlock()
 	logger.Info("[autonomy] Profile 已切换并热更新", "profile", profile)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"profile": profile,
