@@ -103,7 +103,7 @@ func TestUpdateProfile_LegacyRouteRejectedBeforeStorage(t *testing.T) {
 
 func TestMarkMastered_RequiresMatchingAgentScope(t *testing.T) {
 	h := newServer(t)
-	_, out := do(t, h, http.MethodPost, "/grade", `{"agent":"mingming","grade":"五年级上","source_session":"scope","problem":"3.8x3","student_answer":"10.4","knowledge_points":["小数乘法"]}`)
+	_, out := do(t, h, http.MethodPost, "/grade", `{"agent":"mingming","grade":"五年级上","source_session":"s1","problem":"3.8x3","student_answer":"10.4","knowledge_points":["小数乘法"]}`)
 	rid, _ := out["record_id"].(string)
 	if rid == "" {
 		t.Fatalf("seed record failed: %v", out)

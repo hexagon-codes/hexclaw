@@ -12,7 +12,7 @@ func TestE2E_ParentSession(t *testing.T) {
 
 	// 1) 家长贴一道题、孩子答错 → 批改闭环
 	_, out := do(t, h, "POST", "/grade",
-		`{"agent":"mingming","grade":"五年级上","source_session":"s-home-1","problem":"3.8×3=?","student_answer":"10.4","knowledge_points":["小数乘法"]}`)
+		`{"agent":"mingming","grade":"五年级上","source_session":"s1","problem":"3.8×3=?","student_answer":"10.4","knowledge_points":["小数乘法"]}`)
 	if out["record_created"] != true {
 		t.Fatalf("答错应入库: %v", out)
 	}

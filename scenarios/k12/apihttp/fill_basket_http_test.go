@@ -27,7 +27,12 @@ func newServerWithDB(t *testing.T) (http.Handler, *sql.DB) {
 	if err := migrate.Run(context.Background(), db, migrate.All); err != nil {
 		t.Fatal(err)
 	}
-	db.Exec(`INSERT INTO agents(name) VALUES('mingming')`)
+	if _, err := db.Exec(`INSERT INTO agents(name,metadata) VALUES('mingming','{"scenario":"k12-tutor"}')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO sessions(id,user_id,platform,created_at,updated_at) VALUES('s1','desktop-user','desktop',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`); err != nil {
+		t.Fatal(err)
+	}
 	k, err := assembly.Wire(db, fakeSolveExec{})
 	if err != nil {
 		t.Fatal(err)
