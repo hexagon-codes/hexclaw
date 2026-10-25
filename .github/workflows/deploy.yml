@@ -98,17 +98,18 @@ jobs:
               for name in ('backup.py', 'deploy.py'):
                   archive.add('scripts/ops/' + name, arcname=name)
           upload = 'umask 077; mkdir -p -- ' + shlex.quote(directory) + ' && tar -xf - -C ' + shlex.quote(directory)
-          uploaded = subprocess.run(['ssh', '--', os.environ['DEPLOY_HOST'], upload], input=stream.getvalue(), capture_output=True)
+          ssh = ['ssh', '-o', 'ServerAliveInterval=20', '-o', 'ServerAliveCountMax=6', '--', os.environ['DEPLOY_HOST']]
+          uploaded = subprocess.run(ssh + [upload], input=stream.getvalue(), capture_output=True)
           if uploaded.returncode:
               raise SystemExit('Deployment tools upload failed; inspect the private target connection')
           args = ['python3', directory + '/deploy.py', '--project-dir', project,
                   '--target-config', project + '/deployment-target.json',
                   '--image', 'ghcr.io/hexagon-codes/hexclaw@' + os.environ['DEPLOY_DIGEST'],
                   '--commit', commit, '--run-id', os.environ['DEPLOY_RUN']]
-          result = subprocess.run(['ssh', '--', os.environ['DEPLOY_HOST'], shlex.join(args)], capture_output=True, text=True)
+          result = subprocess.run(ssh + [shlex.join(args)], capture_output=True, text=True)
           if result.returncode:
               message = next((line for line in reversed(result.stderr.splitlines()) if line.startswith(('Deployment failed:', 'Deployment interrupted'))), 'Deployment command failed; inspect the server receipt')
-              raise SystemExit(message)
+              raise SystemExit(f'{message} (SSH command exit {result.returncode})')
           receipt = json.loads(result.stdout)
           deployed = receipt.get('status') == 'deployed'
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
