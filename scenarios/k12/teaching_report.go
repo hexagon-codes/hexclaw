@@ -223,6 +223,7 @@ type TeachingReport struct {
 	SourcePages    []TeachingReportSourcePage    `json:"source_pages"`
 	Items          []TeachingReportItem          `json:"items"`
 	DeepSections   []TeachingReportDeepSection   `json:"deep_sections"`
+	Warnings       []string                      `json:"warnings,omitempty"`
 }
 
 // NewTeachingReport 校验引用和完整性并隔离输入切片，不验证模型答案或持久来源真伪。
@@ -237,6 +238,7 @@ func NewTeachingReport(input TeachingReport) (TeachingReport, error) {
 // Clone 深拷贝所有可变成员，调用方修改原输入不会改变返回快照。
 func (r TeachingReport) Clone() TeachingReport {
 	out := r
+	out.Warnings = append([]string(nil), r.Warnings...)
 	out.ProblemSources = append([]TeachingReportProblemSource(nil), r.ProblemSources...)
 	for i := range out.ProblemSources {
 		if r.ProblemSources[i].AnswerSource != nil {

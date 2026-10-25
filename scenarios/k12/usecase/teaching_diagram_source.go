@@ -16,8 +16,8 @@ import (
 var diagramSourceFraction = regexp.MustCompile(`\\(?:frac|dfrac|tfrac)\s*\{([0-9]+)\}\s*\{([0-9]+)\}`)
 var diagramSourceUnitText = regexp.MustCompile(`\\(?:text|mathrm)\{([^{}]+)\}`)
 var diagramSourceQuantity = regexp.MustCompile(`([0-9]+(?:\.[0-9]+)?)\s*(` + elementarymath.UnitPattern() + `)`)
-var diagramDiskRatio = regexp.MustCompile(`已用(?:空间|容量)(?:占|是)总(?:容量|空间)的([0-9]+/[0-9]+)`)
-var diagramDiskUsed = regexp.MustCompile(`(?:正好)?(?:用了|用去|用厂|已用)([0-9]+(?:\.[0-9]+)?)\s*(` + elementarymath.UnitPattern() + `)`)
+var diagramFractionRatio = regexp.MustCompile(`已用(?:空间|容量)(?:占|是)总(?:容量|空间)的([0-9]+/[0-9]+)`)
+var diagramFractionUsed = regexp.MustCompile(`(?:正好)?(?:用了|用去|用厂|已用)([0-9]+(?:\.[0-9]+)?)\s*(` + elementarymath.UnitPattern() + `)`)
 var diagramJourneyTimes = regexp.MustCompile(`(?:要走|需要|需)([0-9]+(?:\.[0-9]+)?)(分钟|小时|秒)`)
 var diagramJourneyElapsed = regexp.MustCompile(`([0-9]+(?:\.[0-9]+)?)(分钟|小时|秒)后`)
 var diagramJourneyGap = regexp.MustCompile(`相距([0-9]+(?:\.[0-9]+)?)\s*(` + elementarymath.UnitPattern() + `)`)
@@ -62,9 +62,8 @@ func teachingDiagramQuantityContext(q RecognizedQuestion, answer, solutionDigest
 	}
 	_, printedSource := photoQuestionProblemTexts(q)
 	source := diagramSourceText(printedSource)
-	if strings.Contains(source, "硬盘") {
-		ratio := distinctDiagramSourceMatches(diagramDiskRatio.FindAllStringSubmatch(source, -1))
-		used := distinctDiagramSourceMatches(diagramDiskUsed.FindAllStringSubmatch(source, -1))
+	if ratio := distinctDiagramSourceMatches(diagramFractionRatio.FindAllStringSubmatch(source, -1)); len(ratio) > 0 {
+		used := distinctDiagramSourceMatches(diagramFractionUsed.FindAllStringSubmatch(source, -1))
 		if len(ratio) != 1 || len(used) != 1 || elementarymath.UnitCategory(used[0][2]) != "data" {
 			return ctx, TeachingDiagramCandidate{}, false
 		}

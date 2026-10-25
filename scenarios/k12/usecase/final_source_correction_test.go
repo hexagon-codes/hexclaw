@@ -67,6 +67,7 @@ type completedSourceFixture struct {
 }
 
 type completedSourceImageFixture struct {
+	sourceKind    k12.ImageTaskSourceKind
 	data          []byte
 	rawReader     bool
 	unannotated   bool
@@ -106,6 +107,9 @@ func prepareCompletedSourceFixtureForIntent(t *testing.T, intent k12.ImageTaskIn
 		}
 	}
 	in := testCreateImageTaskInput()
+	if sourceImage.sourceKind != "" {
+		in.SourceKind = sourceImage.sourceKind
+	}
 	in.OwnerScope = "guardian-final"
 	in.SourceRef = "source-correction"
 	in.SourceAssetRefs = []string{original.Metadata.PageAssetID}
@@ -150,7 +154,7 @@ func prepareCompletedSourceFixtureForIntent(t *testing.T, intent k12.ImageTaskIn
 		t.Fatal(err)
 	}
 	assetRefs, _ := json.Marshal(in.SourceAssetRefs)
-	_, err = store.DB().Exec(`INSERT INTO k12_homework_submissions(submission_id,dispatch_id,agent_name,learner_id,source_kind,source_ref,source_asset_refs_json,task_intent,status,grading_job_id,idempotency_key,created_at,updated_at) VALUES('submission-final',?,'mingming','mingming','desktop','source-correction',?,?,'completed',?,'homework-final',100,100)`, dispatchID, string(assetRefs), intent, jobRecord.RecordID)
+	_, err = store.DB().Exec(`INSERT INTO k12_homework_submissions(submission_id,dispatch_id,agent_name,learner_id,source_kind,source_ref,source_asset_refs_json,task_intent,status,grading_job_id,idempotency_key,created_at,updated_at) VALUES('submission-final',?,'mingming','mingming',?,'source-correction',?,?,'completed',?,'homework-final',100,100)`, dispatchID, in.SourceKind, string(assetRefs), intent, jobRecord.RecordID)
 	if err != nil {
 		t.Fatal(err)
 	}

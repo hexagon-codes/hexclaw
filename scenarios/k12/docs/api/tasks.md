@@ -1707,6 +1707,7 @@ curl "$BASE/api/k12/creative-works/work-1?agent=TutorAgent" \
 | `grade_level_method` | string | 是 |
 | `likely_mistakes` | array<string> / null | 是 |
 | `parent_teaching_sequence` | array<string> / null | 是 |
+| `teaching_diagram_warnings` | array<string> | 否；新增可选图保存失败时的诊断，不替代七项教学正文 |
 
 <a id="schema-k12taskspartkind"></a>
 

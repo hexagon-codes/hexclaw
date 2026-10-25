@@ -2,7 +2,7 @@ package usecase
 
 import (
 	"context"
-	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
@@ -32,11 +32,15 @@ func (d Deps) attachReportTeachingDiagram(ctx context.Context, agent string, q R
 	}
 	owner, err := d.Records.ReadyPageAssetOwnerForAgent(ctx, agent, q.PageAssetID)
 	if err != nil {
-		return guide, fmt.Errorf("report diagram source: %w", err)
+		slog.WarnContext(ctx, "Teaching report diagram omitted", "problem_id", q.ProblemID, "reason", "source_unavailable", "err", err)
+		guide.TeachingDiagramWarnings = append(guide.TeachingDiagramWarnings, "Optional teaching diagram source unavailable: "+q.ProblemID)
+		return guide, nil
 	}
 	id, err := d.Records.PutTeachingDiagramAsset(ctx, owner, agent, diagram.SVG, d.now())
 	if err != nil {
-		return guide, fmt.Errorf("store report diagram: %w", err)
+		slog.WarnContext(ctx, "Teaching report diagram omitted", "problem_id", q.ProblemID, "reason", "storage_unavailable", "err", err)
+		guide.TeachingDiagramWarnings = append(guide.TeachingDiagramWarnings, "Optional teaching diagram storage unavailable: "+q.ProblemID)
+		return guide, nil
 	}
 	guide.TeachingDiagrams = []k12.TeachingDiagramAsset{{
 		AssetID: id, AssetDigest: diagram.AssetDigest, SpecDigest: diagram.SpecDigest,

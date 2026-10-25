@@ -32,6 +32,9 @@ type TeachingReportBranding struct {
 type TeachingReportAsset struct {
 	Data []byte
 	MIME string
+	// 展示副本只来自宿主核对后的同源方向变换，不替换原资产身份。
+	DisplayData []byte
+	DisplayMIME string
 }
 
 // TeachingReportPDFProjection 仅包含渲染数据与资源，不携带数据库或交付动作。
@@ -48,7 +51,7 @@ type reportProjectionBuilder struct {
 }
 
 // ProjectTeachingReportPDF 把已校验报告转换为Hub模板输入，不求解、不改状态或原始作答。
-// 图片字节必须先由宿主完成同源方向处理并形成对应资产引用，本函数不猜测旋转。
+// 同源方向副本由宿主提供；先验证原资产，再选择展示副本，不猜测旋转。
 func ProjectTeachingReportPDF(report k12.TeachingReport, branding TeachingReportBranding, assets map[string]TeachingReportAsset) (TeachingReportPDFProjection, error) {
 	return projectTeachingReportPDF(report, branding, assets, false)
 }
@@ -240,12 +243,17 @@ func (b *reportProjectionBuilder) asset(id, expectedDigest, expectedMIME string)
 	if asset.MIME != expectedMIME {
 		return "", fmt.Errorf("report asset MIME mismatch: %s", id)
 	}
-	extensions, err := mime.ExtensionsByType(expectedMIME)
+	data, mediaType := asset.Data, expectedMIME
+	if len(asset.DisplayData) > 0 {
+		data, mediaType = asset.DisplayData, asset.DisplayMIME
+		sum = sha256.Sum256(data)
+	}
+	extensions, err := mime.ExtensionsByType(mediaType)
 	if err != nil || len(extensions) == 0 {
 		return "", fmt.Errorf("report asset has no file extension: %s", id)
 	}
 	name := "resources/" + hex.EncodeToString(sum[:]) + extensions[0]
-	b.resources[name] = append([]byte(nil), asset.Data...)
+	b.resources[name] = append([]byte(nil), data...)
 	return name, nil
 }
 

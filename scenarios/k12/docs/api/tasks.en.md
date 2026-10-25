@@ -1707,6 +1707,7 @@ All schema names match the complete OpenAPI document. Response "required" means 
 | `grade_level_method` | string | Yes |
 | `likely_mistakes` | array<string> / null | Yes |
 | `parent_teaching_sequence` | array<string> / null | Yes |
+| `teaching_diagram_warnings` | array<string> | No; diagnostics for a new optional diagram storage failure, separate from the seven teaching items |
 
 <a id="schema-k12taskspartkind"></a>
 

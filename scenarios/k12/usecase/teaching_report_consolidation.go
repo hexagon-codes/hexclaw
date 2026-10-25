@@ -121,6 +121,10 @@ func consolidateGradingReportSections(questions []RecognizedQuestion, sections [
 		}
 		out[i].Blocks = kept
 	}
+	// 只含共享算式的后组可能已清空；其来源已并入保留块，不再留下无内容的讲解组。
+	out = slices.DeleteFunc(out, func(section k12.TeachingReportDeepSection) bool {
+		return len(section.Blocks) == 0 && len(section.Diagrams) == 0
+	})
 	return out
 }
 

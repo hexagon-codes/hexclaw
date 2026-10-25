@@ -263,7 +263,8 @@ func (a *SolveAdapter) AuditParentTeachingGuide(ctx context.Context, req usecase
 	if req.Request.ReportRequired {
 		auditContract = engine.TeachingReportGuideAuditInstructions()
 	}
-	prompt := req.Request.FrozenTeachingContract + "\n" + auditContract +
+	// 冻结背景提供教学方法与年级依据，表达偏好不改变共享内容审核的判据。
+	prompt := "Frozen generation context (use its facts, teaching methods and curriculum; assess validity only under the audit contract below):\n" + req.Request.FrozenTeachingContract + "\n\nAudit contract:\n" + auditContract +
 		"\nThe original mathematical solution is already verified and immutable. Audit only this supplied guide; do not generate another solution. A missing or unreadable student answer does not prove that the student left it blank, made an error, or mastered the concept. Check any student-specific claims against the supplied observation only. Output exactly one line: PARENT_GUIDE_AUDITS: <JSON array containing this one candidate's audit>.\n" + string(facts)
 	if req.Request.ReportRequired {
 		prompt += teachingReportJointAudit

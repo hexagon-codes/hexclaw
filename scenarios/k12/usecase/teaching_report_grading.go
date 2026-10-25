@@ -33,6 +33,7 @@ func (o *GradingOrchestrator) freezeGradingTeachingReport(ctx context.Context, r
 		input.Metadata.Subject = strings.Join(subjects, "、")
 	}
 	byID := make(map[string]RecognizedQuestion, len(run.questions))
+	var warnings []string
 	for _, q := range run.questions {
 		byID[q.ProblemID] = q
 	}
@@ -87,6 +88,7 @@ func (o *GradingOrchestrator) freezeGradingTeachingReport(ctx context.Context, r
 		if err != nil {
 			return err
 		}
+		warnings = append(warnings, guide.TeachingDiagramWarnings...)
 		source := TeachingReportContentSource{Source: k12.TeachingReportProblemSource{ProblemID: q.ProblemID, InputRevision: q.ConfirmedVersion, InputDigest: q.InputDigest, SolutionDigest: sourceDigest}, Solution: solved.Solution, Guide: &guide}
 		receipt := assessment.SolveInvocationID
 		if restoredReceipt != "" {
@@ -151,6 +153,7 @@ func (o *GradingOrchestrator) freezeGradingTeachingReport(ctx context.Context, r
 	if err != nil {
 		return err
 	}
+	report.Warnings = append(report.Warnings, warnings...)
 	canonical, err := TeachingReportMarkdown(report)
 	if err != nil {
 		return err
@@ -196,6 +199,17 @@ func (d Deps) gradingTeachingReportPrintRequest(ctx context.Context, artifact k1
 			}
 			assets[page.AssetID] = TeachingReportAsset{Data: media.Data, MIME: media.MIME}
 		}
+		original, _, err := d.gradingFinalArtifactImageSource(ctx, artifact)
+		if err != nil {
+			return PreparePrintableArtifactRequest{}, err
+		}
+		asset := assets[page.AssetID]
+		display, err := d.gradingFinalPDFMedia(ctx, artifact, original, DeliveryAttachment{Data: asset.Data, MIME: asset.MIME})
+		if err != nil {
+			return PreparePrintableArtifactRequest{}, err
+		}
+		asset.DisplayData, asset.DisplayMIME = display.Data, display.MIME
+		assets[page.AssetID] = asset
 	}
 	for _, section := range snapshot.Report.DeepSections {
 		for _, diagram := range section.Diagrams {
