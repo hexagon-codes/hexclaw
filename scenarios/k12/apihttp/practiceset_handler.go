@@ -511,10 +511,9 @@ func (h *handler) preparePrintableArtifact(w http.ResponseWriter, r *http.Reques
 	} else if finalVariant {
 		if strings.TrimSpace(req.Agent) == "" ||
 			strings.TrimSpace(req.FinalArtifactID) == "" ||
-			strings.TrimSpace(req.FinalArtifactDigest) == "" ||
-			strings.TrimSpace(req.Title) == "" {
+			strings.TrimSpace(req.FinalArtifactDigest) == "" {
 			writeErr(w, http.StatusBadRequest,
-				"agent / final_artifact_id / final_artifact_digest / title required")
+				"agent / final_artifact_id / final_artifact_digest required")
 			return
 		}
 		v, replay, err = h.rt.Deps.PrepareGradingFinalArtifactPDFExact(

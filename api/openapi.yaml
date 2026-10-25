@@ -36670,7 +36670,6 @@ components:
               type: string
               minLength: 1
         - required:
-            - title
             - final_artifact_id
             - final_artifact_digest
           properties:

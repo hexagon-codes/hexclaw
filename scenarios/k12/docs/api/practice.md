@@ -1078,7 +1078,7 @@ curl -fS -X POST "$HEXCLAW_BASE_URL/api/k12/print-jobs" \
 
 冻结可下载 PDF 产物
 
-三种来源身份互斥：canonical 输入、图片终稿 final_artifact_id+final_artifact_digest、文字结算 solve_run_id+text_finalization_id+text_finalization_digest。图片终稿模式需 title；文字模式可省略 title，使用原冻结报告标题并核对真实文字结算，不伪造图片任务。已有PDF重放读取原字节，不重发模型或通道请求。无需 idempotency_key，产物按内容身份去重。响应是 PDF 元信息；随后 content 获取实际字节。JSON HTTP 请求体上限 1 MiB，即使渲染层文本边界更大。
+三种来源身份互斥：canonical 输入、图片终稿 final_artifact_id+final_artifact_digest、文字结算 solve_run_id+text_finalization_id+text_finalization_digest。图片终稿可省略 title，服务端按冻结报告标题和日期补齐，与原终稿自动交付使用同一文件身份；显式 title 继续兼容。文字模式可省略 title，使用原冻结报告标题并核对真实文字结算，不伪造图片任务。已有PDF重放读取原字节，不重发模型或通道请求。无需 idempotency_key，产物按内容身份去重。响应是 PDF 元信息；随后 content 获取实际字节。JSON HTTP 请求体上限 1 MiB，即使渲染层文本边界更大。
 
 JSON body：[PrintableArtifactRequest](#schema-k12practiceprintableartifactrequest)；未知字段不作为本操作输入使用。
 
@@ -1150,7 +1150,6 @@ JSON body：[PrintableArtifactRequest](#schema-k12practiceprintableartifactreque
     },
     {
       "required": [
-        "title",
         "final_artifact_id",
         "final_artifact_digest"
       ],

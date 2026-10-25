@@ -1078,7 +1078,7 @@ Implementation: [prepareGenericPrintJob](../../../../scenarios/k12/apihttp/pract
 
 Freeze a downloadable PDF artifact
 
-Choose exactly one source: canonical input, grading final_artifact_id+final_artifact_digest, or solve_run_id+text_finalization_id+text_finalization_digest. The grading variant requires title; the text variant defaults to its frozen report title and validates the actual text finalization. Existing PDF replay reads the same bytes and sends no model or channel request. No idempotency_key is required; artifacts deduplicate by content identity. The response is PDF metadata; fetch content for actual bytes. HTTP JSON bodies remain limited to 1 MiB.
+Choose exactly one source: canonical input, grading final_artifact_id+final_artifact_digest, or solve_run_id+text_finalization_id+text_finalization_digest. The grading variant may omit title to use the frozen report title and date, matching the original final-report delivery identity; explicit titles remain supported. The text variant defaults to its frozen report title and validates the actual text finalization. Existing PDF replay reads the same bytes and sends no model or channel request. No idempotency_key is required; artifacts deduplicate by content identity. The response is PDF metadata; fetch content for actual bytes. HTTP JSON bodies remain limited to 1 MiB.
 
 JSON body: [PrintableArtifactRequest](#schema-k12practiceprintableartifactrequest)；unknown fields are not used by this operation.
 
@@ -1150,7 +1150,6 @@ Variant and conditional requirements:
     },
     {
       "required": [
-        "title",
         "final_artifact_id",
         "final_artifact_digest"
       ],

@@ -693,6 +693,9 @@ func (d Deps) PrepareGradingFinalArtifactPDFExact(
 	if err != nil {
 		return PrintableArtifactView{}, false, err
 	}
+	if strings.TrimSpace(title) == "" {
+		title = K12FinalArtifactPDFTitle(finalArtifact)
+	}
 	req, err := d.gradingFinalArtifactPrintRequest(ctx, finalArtifact, title)
 	if err != nil {
 		return PrintableArtifactView{}, false, err
