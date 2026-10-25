@@ -32982,6 +32982,11 @@ components:
     K12TasksParentTeachingGuide:
       additionalProperties: false
       properties:
+        teaching_diagram_warnings:
+          description: Optional diagnostics for a new teaching diagram that could not be stored. The verified answer and reliable explanation remain available.
+          type: array
+          items:
+            type: string
         answer:
           description: Preserves the complete explicit answer from the verified solution, including requested quantities, units and negative conditions. Explanatory candidates cannot replace it. Legacy solutions without an explicit answer section retain their existing validation.
           type: string
@@ -35770,6 +35775,16 @@ components:
           type: string
         render_contract_version:
           type: string
+        render_spec_digest:
+          type: string
+          description: Optional frozen rendering specification digest. Legacy artifacts retain their original identity.
+        render_spec_json:
+          type: string
+          description: Optional frozen engine, profile and font specification used for this PDF.
+        layout_check:
+          type: string
+          enum: [passed, not_run]
+          description: Optional check state for a successfully frozen PDF; failed layout checks do not freeze a PDF.
         content_type:
           type: string
         byte_digest:
@@ -36754,6 +36769,16 @@ components:
         source_digest:
           type: string
           description: 冻结来源内容摘要，用于确认读取同一版本 / Digest of the frozen source used to verify the same content revision
+        render_spec_digest:
+          type: string
+          description: 冻结渲染规格摘要；旧文件缺值时省略 / Frozen rendering specification digest; omitted for legacy files without a value
+        render_spec_json:
+          type: string
+          description: 冻结渲染规格的 JSON 字符串，与 render_spec_digest 一同返回 / Frozen rendering specification as a JSON string, returned with render_spec_digest
+        layout_check:
+          type: string
+          enum: [passed, not_run]
+          description: 原成功冻结文件的检查结果；旧文件缺值时省略，读取不重新检查 / Original check result for a successfully frozen file; omitted when absent in legacy files, without rerunning the check
         markdown:
           type: string
       required:
