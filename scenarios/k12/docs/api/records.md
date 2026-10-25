@@ -115,6 +115,8 @@
 
 保留的单题校准接口，并非图片任务入口。agent/problem 必填；空 student_answer 转为只解题，solve_only=true，不作对错判定、不入错题本。有作答时真实批改可写错题和复习状态；record_created 与 record_id 表达实际入库，不能凭 verdict 推测。超纲与词表未映射分别用 out_of_scope 与 curriculum_unmapped 表达。
 
+当前调用者的可信owner由服务端认证装配确定。真实辅导档案继续核对owner与辅导实例归属；普通助手和默认助手可直接解题或批改，不要求创建学生档案，不写入学生错题、复习或学情记录。直接HTTP请求不必伪造工具回合的request/session/message；提供来源会话时仍核对实际访问权。
+
 依赖：K12 record store, Solver/Grader and optional curriculum/insight adapters.
 
 JSON 正文：
@@ -214,6 +216,8 @@ JSON 正文：
 agent/problem 必填；只给解法、验算证据和超纲投影，不批改、不写错题。与 grade 一样支持空或数学/语文/英语/物理/化学学科；省略年级优先采用持久档案。
 
 启用文字执行账本时，同一 owner/agent/solve_run_id 冻结完整输入、来源和路由，相同输入重放原结果；同键异题、修订或来源冲突返回409。建议调用方在发送前冻结稳定solve_run_id；省略则创建新run，不能以重复无键请求代替恢复。未提供来源时保持空，非空消息须实际属于给定会话；会话访问沿现有认证装配核查。模型路由不可用不影响本地确定性计算或已验证题库采用，实际需要Provider的新执行才失败。
+
+普通助手、默认助手与辅导助手复用同一文字结算合同，不补造学生或来源消息。已结算结果按原输入、回执和结果摘要读取，后续题库资产更新或归档不追溯改写该结算。首次采用新资产仍核对当前资格。教学补充失败保留已验证完整答案和可靠步骤，失败或未知回执继续保留，读取历史不重发模型调用。
 
 依赖：K12 Solver and optional curriculum adapter.
 

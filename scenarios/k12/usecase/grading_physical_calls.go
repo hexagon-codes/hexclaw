@@ -1092,8 +1092,9 @@ type gradingPhysicalNoRetryError struct {
 	cause error
 }
 
+// 禁止自动重试不等于结果未知；失败类别与文案由原始错误决定。
 func (e gradingPhysicalNoRetryError) Error() string {
-	return fmt.Sprintf("%v: %v", ErrGradingPhysicalCallOutcomeUnknown, e.cause)
+	return e.cause.Error()
 }
 func (e gradingPhysicalNoRetryError) Unwrap() error           { return e.cause }
 func (e gradingPhysicalNoRetryError) SubAgentRetryable() bool { return false }

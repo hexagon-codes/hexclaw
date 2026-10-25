@@ -196,6 +196,7 @@ var replySafeAssistantMetadataKeys = map[string]struct{}{
 	"teaching_context_receipts":  {},
 	"record":                     {},
 	"print_artifacts":            {},
+	"print_reply_action":         {},
 	"text_solve_run_id":          {},
 	"text_solve_refs":            {},
 	"text_solve_finalization_id": {},

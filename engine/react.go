@@ -116,8 +116,9 @@ func labelMessagePayloadEgress(ctx context.Context, msg *adapter.Message) contex
 func labelToolResultEgress(ctx context.Context, toolName string) {
 	name := strings.ToLower(strings.TrimSpace(toolName))
 	switch {
-	case toolName == unitSummaryToolName:
-		// 单元工具只返回资料状态与文件引用，不含学生作答、评分或证据正文。
+	case name == "k12_grade" || toolName == unitSummaryToolName:
+		// 本次题目的解答、批改讲解与资料引用是面向请求者的教学产物，
+		// 不等同于读取历史学习记录；原始记录工具仍保留自己的分类。
 		egress.AddDataClasses(ctx, egress.ClassDocument)
 	case name == "knowledge_search" || name == "knowledge_ingest" || name == "knowledge_ingest_path":
 		egress.AddDataClasses(ctx, egress.ClassDocument)
@@ -5404,7 +5405,7 @@ func buildReplyMetadata(metadata map[string]string, providerName, modelName, ass
 	if v := metadata["routed_agent"]; v != "" {
 		replyMeta["routed_agent"] = v
 	}
-	for _, key := range []string{"request_id", "session_id", "finish_reason", "recovered_from_reasoning_only", "thinking", "reasoning_visibility", "thinking_duration", "record", "artifacts", "print_artifacts", "text_solve_refs", "text_solve_run_id", "text_solve_finalization_id", "text_solve_input_digest", "answer_source", "media_delivery_id", "media_finalize_error", skillContextReceiptsMetadataKey, teachingContextReceiptsMetadataKey, persistErrorMetaKey} {
+	for _, key := range []string{"request_id", "session_id", "finish_reason", "recovered_from_reasoning_only", "thinking", "reasoning_visibility", "thinking_duration", "record", "artifacts", "print_artifacts", "print_reply_action", "text_solve_refs", "text_solve_run_id", "text_solve_finalization_id", "text_solve_input_digest", "answer_source", "media_delivery_id", "media_finalize_error", skillContextReceiptsMetadataKey, teachingContextReceiptsMetadataKey, persistErrorMetaKey} {
 		if v := metadata[key]; v != "" {
 			replyMeta[key] = v
 		}
@@ -6030,18 +6031,35 @@ func (e *ReActEngine) buildMountedSkillsContext(names []string, defaultContext .
 	return sb.String(), receipts
 }
 
-// ensureMountedSkillTools 保证用户显式挂载技能的工具一定出现在工具集里并前置（bug#2 2026-06-23）。
-// 与 query 召回打分无关——挂载即"必给"，即使该技能触发词不匹配当前正文、或 maxTools 截断也不丢。
-// 前置（与 ensureSystemDispatchToolFloor 同款 floor 模式）让后续 maxTools 截断保留它们。
+// ensureMountedSkillTools 将显式挂载及当前K12实例绑定的作业入口前置，避免召回截断丢失作业闭环。
+// 普通默认技能仍只控制教学正文；内部派发继续使用调用方已冻结的工具策略。
 func (e *ReActEngine) ensureMountedSkillTools(tools []llm.ToolDefinition, metadata map[string]string) []llm.ToolDefinition {
 	names := mountedSkillNames(metadata)
-	if len(names) == 0 {
-		return tools
-	}
 	e.mu.RLock()
 	skills := e.skills
 	e.mu.RUnlock()
 	if skills == nil {
+		return tools
+	}
+	request := &adapter.Message{Metadata: metadata}
+	bound := make(map[string]bool)
+	var boundAgent *agentrouter.AgentConfig
+	if !isSystemDispatch(request) {
+		if configured, ok := e.agentConfigForSystemPromptPolicy(metadata); ok && configured.Metadata["scenario"] == "k12-tutor" {
+			boundAgent = configured
+			for _, name := range configured.Skills {
+				name = strings.TrimSpace(name)
+				if name != "k12_grade" {
+					continue
+				}
+				if enabled, exists := skills.IsEnabled(name); name != "" && enabled && exists {
+					bound[name] = true
+					names = append(names, name)
+				}
+			}
+		}
+	}
+	if len(names) == 0 {
 		return tools
 	}
 	wanted := make(map[string]bool, len(names))
@@ -6065,6 +6083,9 @@ func (e *ReActEngine) ensureMountedSkillTools(tools []llm.ToolDefinition, metada
 		if def.Type == "" {
 			def.Type = "function"
 		}
+		if bound[name] && len(applyInheritedToolPolicy(request, []llm.ToolDefinition{def})) == 0 {
+			continue
+		}
 		if wanted[def.Function.Name] {
 			continue
 		}
@@ -6074,10 +6095,21 @@ func (e *ReActEngine) ensureMountedSkillTools(tools []llm.ToolDefinition, metada
 	if len(front) == 0 {
 		return tools
 	}
+	// 已绑定作业闭环的顶层助手只有一个作业执行入口；领域内部仍直接复用原求解器。
+	preferBoundHomework := boundAgent != nil && boundAgent.Metadata["scenario"] == "k12-tutor" && bound["k12_grade"] && wanted["k12_grade"]
+	if preferBoundHomework {
+		selected := front[:0]
+		for _, tool := range front {
+			if tool.Function.Name != "solve" {
+				selected = append(selected, tool)
+			}
+		}
+		front = selected
+	}
 	// 已在召回里的挂载技能去重，其余保序接在 front 之后
 	rest := make([]llm.ToolDefinition, 0, len(tools))
 	for _, t := range tools {
-		if wanted[t.Function.Name] {
+		if wanted[t.Function.Name] || preferBoundHomework && t.Function.Name == "solve" {
 			continue
 		}
 		rest = append(rest, t)

@@ -2,10 +2,27 @@ package engine
 
 import (
 	"context"
+	"strings"
 
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/storage"
 )
+
+// completeRequiredReplyContent 补齐冻结正文，保留本轮其他工具的结果与模型说明。
+func completeRequiredReplyContent(content string, required []string) string {
+	for _, body := range required {
+		body = strings.TrimSpace(body)
+		if body == "" || strings.Contains(content, body) {
+			continue
+		}
+		if strings.TrimSpace(content) == "" {
+			content = body
+		} else {
+			content = strings.TrimSpace(content) + "\n\n" + body
+		}
+	}
+	return content
+}
 
 // ReplyArtifactResolver 由应用装配；领域负责读取冻结资产并接入原消息事务。
 type ReplyArtifactResolver func(context.Context, *adapter.Message, map[string]string) (context.Context, error)

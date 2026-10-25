@@ -22,7 +22,7 @@ func (h *handler) textSolveScope(w http.ResponseWriter, r *http.Request) (owner,
 		return
 	}
 	var err error
-	owner, err = h.authorizedAgentOwnerScope(r.Context(), agent)
+	owner, err = h.authorizedTextSolveOwnerScope(r.Context(), agent)
 	if err != nil {
 		writeErr(w, http.StatusNotFound, "text solve not found")
 		return

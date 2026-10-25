@@ -46,9 +46,9 @@ func newFaithfulServer(t *testing.T, seededProfiles ...k12.ChildProfile) http.Ha
 	if err := migrate.Run(context.Background(), db, migrate.All); err != nil {
 		t.Fatal(err)
 	}
-	metadata := "{}"
+	metadata := `{"scenario":"k12-tutor"}`
 	if len(seededProfiles) > 0 {
-		encoded, marshalErr := json.Marshal(k12.ApplyProfileToMeta(nil, seededProfiles[0]))
+		encoded, marshalErr := json.Marshal(k12.ApplyProfileToMeta(map[string]string{"scenario": "k12-tutor"}, seededProfiles[0]))
 		if marshalErr != nil {
 			t.Fatal(marshalErr)
 		}

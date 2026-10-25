@@ -34,7 +34,7 @@ func newRuntimeWithSolver(
 	if err := migrate.Run(context.Background(), db, migrate.All); err != nil {
 		t.Fatal(err)
 	}
-	db.Exec(`INSERT INTO agents(name) VALUES('mingming')`)
+	db.Exec(`INSERT INTO agents(name,metadata) VALUES('mingming','{"scenario":"k12-tutor"}')`)
 	allOptions := append(
 		[]assembly.Option{
 			assembly.WithAccumulationMetadataDeriver(fixedAccumulationMetadataDeriver{}),

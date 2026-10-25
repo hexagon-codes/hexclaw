@@ -70,7 +70,7 @@ func newServer(t *testing.T, seededProfiles ...k12.ChildProfile) http.Handler {
 	}
 	if len(seededProfiles) > 0 {
 		profile := seededProfiles[0]
-		metadata, marshalErr := json.Marshal(k12.ApplyProfileToMeta(nil, profile))
+		metadata, marshalErr := json.Marshal(k12.ApplyProfileToMeta(map[string]string{"scenario": "k12-tutor"}, profile))
 		if marshalErr != nil {
 			t.Fatal(marshalErr)
 		}
@@ -80,7 +80,10 @@ func newServer(t *testing.T, seededProfiles ...k12.ChildProfile) http.Handler {
 		options = append(options, assembly.WithProfiles(&memProfiles{
 			m: map[string]k12.ChildProfile{"mingming": profile},
 		}))
-	} else if _, err = db.Exec(`INSERT INTO agents(name) VALUES('mingming')`); err != nil {
+	} else if _, err = db.Exec(`INSERT INTO agents(name,metadata) VALUES('mingming','{"scenario":"k12-tutor"}')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO sessions(id,user_id,platform,created_at,updated_at) VALUES('s1','desktop-user','desktop',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`); err != nil {
 		t.Fatal(err)
 	}
 	k, err := assembly.Wire(db, fakeSolveExec{}, options...)

@@ -445,22 +445,23 @@ func (h *handler) preparePracticePrintJob(w http.ResponseWriter, r *http.Request
 }
 
 type prepareGenericPrintReq struct {
-	Agent                  string `json:"agent"`
-	IdempotencyKey         string `json:"idempotency_key"`
-	ArtifactID             string `json:"artifact_id,omitempty"`
-	FinalArtifactID        string `json:"final_artifact_id,omitempty"`
-	FinalArtifactDigest    string `json:"final_artifact_digest,omitempty"`
-	SolveRunID             string `json:"solve_run_id,omitempty"`
-	TextFinalizationID     string `json:"text_finalization_id,omitempty"`
-	TextFinalizationDigest string `json:"text_finalization_digest,omitempty"`
-	SourceKind             string `json:"source_kind"`
-	SourceRef              string `json:"source_ref"`
-	Title                  string `json:"title"`
-	CanonicalMarkdown      string `json:"canonical_markdown"`
+	GradeReportRef         *k12.TextGradeReportReference `json:"grade_report_ref,omitempty"`
+	Agent                  string                        `json:"agent"`
+	IdempotencyKey         string                        `json:"idempotency_key"`
+	ArtifactID             string                        `json:"artifact_id,omitempty"`
+	FinalArtifactID        string                        `json:"final_artifact_id,omitempty"`
+	FinalArtifactDigest    string                        `json:"final_artifact_digest,omitempty"`
+	SolveRunID             string                        `json:"solve_run_id,omitempty"`
+	TextFinalizationID     string                        `json:"text_finalization_id,omitempty"`
+	TextFinalizationDigest string                        `json:"text_finalization_digest,omitempty"`
+	SourceKind             string                        `json:"source_kind"`
+	SourceRef              string                        `json:"source_ref"`
+	Title                  string                        `json:"title"`
+	CanonicalMarkdown      string                        `json:"canonical_markdown"`
 }
 
 func printableArtifactDTO(v usecase.PrintableArtifactView) map[string]any {
-	return map[string]any{
+	dto := map[string]any{
 		"artifact_id": v.Artifact.ArtifactID, "source_kind": v.Artifact.SourceKind,
 		"source_ref": v.Artifact.SourceRef, "title": v.Artifact.Title,
 		"source_digest": v.Artifact.SourceDigest, "format": v.Render.Format,
@@ -468,6 +469,16 @@ func printableArtifactDTO(v usecase.PrintableArtifactView) map[string]any {
 		"content_type":            v.Render.ContentType, "byte_digest": v.Render.ByteDigest,
 		"byte_size": v.Render.ByteSize,
 	}
+	if v.Artifact.RenderSpecDigest != "" {
+		dto["render_spec_digest"] = v.Artifact.RenderSpecDigest
+	}
+	if v.Render.RenderSpecJSON != "" {
+		dto["render_spec_json"] = v.Render.RenderSpecJSON
+	}
+	if v.Render.LayoutCheck != "" {
+		dto["layout_check"] = v.Render.LayoutCheck
+	}
+	return dto
 }
 
 func (h *handler) preparePrintableArtifact(w http.ResponseWriter, r *http.Request) {
@@ -480,7 +491,7 @@ func (h *handler) preparePrintableArtifact(w http.ResponseWriter, r *http.Reques
 	canonicalVariant := strings.TrimSpace(req.SourceKind) != "" ||
 		strings.TrimSpace(req.SourceRef) != "" ||
 		strings.TrimSpace(req.CanonicalMarkdown) != ""
-	textVariant := req.SolveRunID != "" || req.TextFinalizationID != "" || req.TextFinalizationDigest != ""
+	textVariant := req.SolveRunID != "" || req.TextFinalizationID != "" || req.TextFinalizationDigest != "" || req.GradeReportRef != nil
 	variants := 0
 	for _, enabled := range []bool{finalVariant, canonicalVariant, textVariant} {
 		if enabled {
@@ -502,12 +513,20 @@ func (h *handler) preparePrintableArtifact(w http.ResponseWriter, r *http.Reques
 			writeErr(w, http.StatusBadRequest, "complete text finalization identity is required")
 			return
 		}
-		owner, scopeErr := h.authorizedAgentOwnerScope(r.Context(), req.Agent)
+		if req.GradeReportRef != nil && (req.GradeReportRef.InvocationID == "" || req.GradeReportRef.ResultDigest == "") {
+			writeErr(w, http.StatusBadRequest, "complete grading reference is required")
+			return
+		}
+		owner, scopeErr := h.authorizedTextSolveOwnerScope(r.Context(), req.Agent)
 		if scopeErr != nil {
 			writeErr(w, http.StatusNotFound, "text solve not found")
 			return
 		}
-		v, replay, err = h.rt.Deps.PrepareTextSolveTeachingReportPDF(r.Context(), owner, req.Agent, req.SolveRunID, req.TextFinalizationID, req.TextFinalizationDigest, req.Title)
+		if req.GradeReportRef != nil {
+			v, replay, err = h.rt.Deps.PrepareTextSolveTeachingReportPDFWithGrade(r.Context(), owner, req.Agent, req.SolveRunID, req.TextFinalizationID, req.TextFinalizationDigest, req.Title, *req.GradeReportRef)
+		} else {
+			v, replay, err = h.rt.Deps.PrepareTextSolveTeachingReportPDF(r.Context(), owner, req.Agent, req.SolveRunID, req.TextFinalizationID, req.TextFinalizationDigest, req.Title)
+		}
 	} else if finalVariant {
 		if strings.TrimSpace(req.Agent) == "" ||
 			strings.TrimSpace(req.FinalArtifactID) == "" ||
@@ -548,6 +567,18 @@ func (h *handler) getPrintableArtifactContent(w http.ResponseWriter, r *http.Req
 	if err != nil {
 		writeErr(w, httpStatusForK12Error(err, http.StatusNotFound), err.Error())
 		return
+	}
+	if v.Artifact.SourceKind == k12.PrintSourceTextSolveFinalization {
+		owner, err := h.authorizedTextSolveOwnerScope(r.Context(), agent)
+		if err != nil {
+			writeErr(w, http.StatusNotFound, "text report not found")
+			return
+		}
+		source, err := h.rt.Records.TextSolvePrintArtifactSource(r.Context(), v.Artifact)
+		if err != nil || source.OwnerID != owner {
+			writeErr(w, http.StatusNotFound, "text report not found")
+			return
+		}
 	}
 	w.Header().Set("Content-Type", v.Render.ContentType)
 	w.Header().Set("Content-Disposition", render.ContentDispositionHeader(v.Artifact.Title, "pdf"))
@@ -637,11 +668,19 @@ func (h *handler) getPracticePrintJobPaper(w http.ResponseWriter, r *http.Reques
 			writeErr(w, httpStatusForK12Error(err, http.StatusNotFound), err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{
+		body := map[string]any{
 			"print_job_id": v.PrintJobID, "artifact_id": v.ArtifactID,
 			"source_kind": v.SourceKind, "source_ref": v.SourceRef,
 			"title": v.Title, "source_digest": v.SourceDigest, "markdown": v.Markdown,
-		})
+		}
+		if v.RenderSpecDigest != "" {
+			body["render_spec_digest"] = v.RenderSpecDigest
+			body["render_spec_json"] = v.RenderSpecJSON
+		}
+		if v.LayoutCheck != "" {
+			body["layout_check"] = v.LayoutCheck
+		}
+		writeJSON(w, http.StatusOK, body)
 		return
 	}
 	v, err := h.rt.Deps.RenderPracticePrintJobPaper(r.Context(), agent, jobID, r.URL.Query().Get("kind"))

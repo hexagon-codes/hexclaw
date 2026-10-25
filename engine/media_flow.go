@@ -216,6 +216,11 @@ func (e *ReActEngine) finalizeMediaChunk(ctx context.Context, msg *adapter.Messa
 // prepareMediaReply 将产物交回既有回合完成路径，操作本身不写助手消息。
 func (e *ReActEngine) prepareMediaReply(ctx context.Context, msg *adapter.Message, metadata map[string]string, content string) (context.Context, string, error) {
 	ctx, err := e.prepareReplyArtifacts(ctx, msg, metadata)
+	if err == nil {
+		if completion, ok := storage.AssistantCompletionFromContext(ctx); ok {
+			content = completeRequiredReplyContent(content, completion.RequiredContent)
+		}
+	}
 	if err != nil {
 		return ctx, content, err
 	}

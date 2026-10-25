@@ -226,9 +226,10 @@ type GradeRequest struct {
 
 // GradeResult 批改闭环结果。
 type GradeResult struct {
-	TeachingReport *k12.TeachingReport        `json:"teaching_report,omitempty"`
-	Finalization   *k12.TextSolveFinalization `json:"finalization,omitempty"`
-	AnswerSource   *k12.ProblemAnswerSource   `json:"answer_source,omitempty"`
+	GradeReportRef *k12.TextGradeReportReference `json:"grade_report_ref,omitempty"`
+	TeachingReport *k12.TeachingReport           `json:"teaching_report,omitempty"`
+	Finalization   *k12.TextSolveFinalization    `json:"finalization,omitempty"`
+	AnswerSource   *k12.ProblemAnswerSource      `json:"answer_source,omitempty"`
 	Solution       string
 	Evidence       SolveEvidence
 	Outcome        GradeOutcome
@@ -249,6 +250,8 @@ type GradeResult struct {
 // 复用证据对象体系，但不产 GradeOutcome / 不入库。
 type SolveHomeworkResult struct {
 	ReportUnavailableReason string `json:"report_unavailable_reason,omitempty"`
+	// ReportDegradationReason 记录教学补充失败，不改变已验证解答及物理调用回执。
+	ReportDegradationReason string `json:"report_degradation_reason,omitempty"`
 	// ReportContent 冻结本地确定性讲解，恢复不重读宿主当前表达规则。
 	ReportContent     *TeachingReportContentDraft `json:"report_content,omitempty"`
 	reportLocalSource bool
@@ -462,12 +465,27 @@ func (d Deps) GradeHomeworkProblem(ctx context.Context, req GradeRequest) (Grade
 	if err != nil {
 		return GradeResult{}, err
 	}
-	res, err := d.gradeSolvedHomeworkProblem(ctx, req, solved)
+	res, err := d.gradeFinalizedTextProblem(ctx, req, solved)
 	if err != nil {
 		return GradeResult{}, err
 	}
 	if req.PracticeReference != nil {
 		return res, nil
+	}
+	// 普通助手可直接求解和批改；只有当前真实学生身份拥有错题与学情投影。
+	invocation := skill.CurrentInvocation(ctx)
+	scopedActor := invocation.AuthenticatedUserID != "" && invocation.RequestID != ""
+	if origin, ok := d.textSolveOrigin(ctx, req); ok && k12storage.TextSolveActorScopeMatches(ctx, origin.OwnerID, req.AgentName) {
+		scopedActor = true
+	}
+	if scopedActor && d.Records != nil {
+		learner, err := d.Records.HasLearnerProfile(ctx, req.AgentName)
+		if err != nil {
+			return res, err
+		}
+		if !learner {
+			return res, nil
+		}
 	}
 	return d.projectGradeResult(ctx, req, res)
 }

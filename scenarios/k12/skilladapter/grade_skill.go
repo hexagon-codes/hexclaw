@@ -34,25 +34,28 @@ func NewGradeSkill(deps usecase.Deps) *GradeSkill {
 func (s *GradeSkill) Name() string      { return "k12_grade" }
 func (s *GradeSkill) Match(string) bool { return false } // 只经 LLM 工具调用，不走关键词快路
 func (s *GradeSkill) Description() string {
-	return "处理孩子的一道作业题：已作答则批改（指出第一个错步与错因，判错自动入错题本）；空白/未作答则求解给完整解法与讲解（不批改、不入库）。空白题请把 student_answer 留空，绝不编造。"
+	return "解答或批改一道作业题，返回完整解法与讲解；任何当前助手都可直接调用。已关联学生档案时，真实错误作答自动入该学生错题本；独立解题或批改不创建学生记录。未作答时 student_answer 留空，绝不编造。"
 }
 
 func (s *GradeSkill) ToolDefinition() llm.ToolDefinition {
 	return llm.NewToolDefinition("k12_grade",
-		"Handle ONE of the child's homework problems. If the child HAS written an answer, pass it as student_answer to GRADE it (independently solves & verifies, names the FIRST wrong step + error cause + a guiding hint, and silently logs wrong ones to the mistake book). "+
+		"The preferred entry for primary-school homework, exercises and exam questions in the CURRENT assistant. Use this instead of the generic solve tool when the user naturally provides a problem; the user does not need to name a tool. No separate tutor or learner profile is required. If an answer was submitted, pass it as student_answer to GRADE it (independently solves & verifies, names the FIRST wrong step + error cause + a guiding hint). "+
 			"If the problem is BLANK / UNANSWERED, LEAVE student_answer EMPTY — the tool will SOLVE it and return the full solution + answer + explanation (no grading, nothing logged). NEVER fabricate a student_answer. "+
-			"The child instance is resolved automatically — do NOT pass an agent id.",
+			"An existing learner profile is used only for the current assistant. Only that learner's submitted mistakes are recorded; standalone use returns the answer or assessment without creating student records. Do NOT create or switch assistants, borrow another learner profile, or pass an agent id. "+
+			"For an explicit request to resend the previous PDF, use action=resend_report without repeating the problem. It reads only a saved report in this conversation and never solves or renders again. "+
+			"Use action=prepare_report only to retry a previously failed PDF preparation from this conversation. The verified report remains unchanged. report_message_id selects an exact persisted assistant message in this conversation; omit it for the latest report.",
 		&llm.Schema{
 			Type: "object",
 			Properties: map[string]*llm.Schema{
-				"problem":          {Type: "string", Description: "The problem statement."},
-				"student_answer":   {Type: "string", Description: "The child's submitted answer or worked steps. LEAVE EMPTY for blank/unanswered problems — do NOT invent one; empty means 'solve & explain' instead of 'grade'."},
-				"subject":          {Type: "string", Description: "Optional explicit subject: 数学/语文/英语/科学/信息科技; legacy 物理/化学 values remain accepted."},
-				"grade":            {Type: "string", Description: "Optional. Effective grade term (e.g. 五年级上); left empty resolves from the child's profile."},
-				"knowledge_points": {Type: "array", Items: &llm.Schema{Type: "string"}, Description: "Optional knowledge points from recognition."},
-				"source_session":   {Type: "string", Description: "Optional source session/chat id for mistake dedup."},
+				"action":            {Type: "string", Enum: []any{"grade", "prepare_report", "resend_report"}, Description: "Optional; defaults to grade. Report actions reuse trusted current-conversation history."},
+				"report_message_id": {Type: "string", Description: "Optional persisted assistant message ID in the current conversation; only for report actions."},
+				"problem":           {Type: "string", Description: "The problem statement."},
+				"student_answer":    {Type: "string", Description: "The child's submitted answer or worked steps. LEAVE EMPTY for blank/unanswered problems — do NOT invent one; empty means 'solve & explain' instead of 'grade'."},
+				"subject":           {Type: "string", Description: "Optional explicit subject: 数学/语文/英语/科学/信息科技; legacy 物理/化学 values remain accepted."},
+				"grade":             {Type: "string", Description: "Optional. Effective grade term (e.g. 五年级上); left empty resolves from the child's profile."},
+				"knowledge_points":  {Type: "array", Items: &llm.Schema{Type: "string"}, Description: "Optional knowledge points from recognition."},
+				"source_session":    {Type: "string", Description: "Optional source session/chat id for mistake dedup."},
 			},
-			Required: []string{"problem"},
 		})
 }
 
@@ -62,9 +65,22 @@ func (s *GradeSkill) Execute(ctx context.Context, args map[string]any) (*skill.R
 	// BUG-20260710-H1：实例 scope 只认 ctx（engine stamp 的已路由 Agent），绝不回退
 	// 采信 LLM 传的 agent 参数——否则幻觉参数可把批改记录/错题写进任意孩子的命名
 	// 空间，击穿多孩隔离（同 authUserCtxKey 纪律）。测试用 skill.WithRoutedAgent 构造 ctx。
-	agent := skill.RoutedAgentName(ctx)
+	invocation := skill.CurrentInvocation(ctx)
+	agent := invocation.RoutedAgentName
+	// 内置默认助手没有学生实体；可信会话仍提供完整执行身份。
+	if agent == "" && invocation.AuthenticatedUserID != "" && invocation.SessionID != "" && invocation.SourceMessageID != "" && invocation.RequestID != "" {
+		agent = "default"
+		ctx = skill.WithRoutedAgent(ctx, agent)
+	}
 	if agent == "" {
-		return nil, fmt.Errorf("k12_grade: 无法确定辅导实例（ctx 无已路由 Agent）")
+		return nil, fmt.Errorf("k12_grade: current request identity is unavailable")
+	}
+	switch action := argStr(args, "action"); action {
+	case "", "grade":
+	case "prepare_report", "resend_report":
+		return s.savedReportResult(ctx, agent, action, argStr(args, "report_message_id"))
+	default:
+		return nil, fmt.Errorf("k12_grade: unsupported action %q", action)
 	}
 	problem := argStr(args, "problem")
 	if problem == "" {
@@ -97,28 +113,16 @@ func (s *GradeSkill) Execute(ctx context.Context, args map[string]any) (*skill.R
 		return nil, fmt.Errorf("k12_grade: %w", err)
 	}
 
-	if res.SolveOnly && res.TeachingReport != nil && !res.OutOfScope {
+	if res.TeachingReport != nil && !res.OutOfScope {
 		content, err := usecase.TeachingReportMarkdown(*res.TeachingReport)
 		if err != nil {
 			return nil, err
 		}
 		metadata := gradeMetadata(res, problem, knowledgePoints)
-		if usecase.FinalReplyUsesPDF(content, false) && res.Finalization != nil {
-			f := res.Finalization
-			printable, _, err := s.deps.PrepareTextSolveTeachingReportPDF(ctx, f.OwnerID, agent, f.RunID, f.FinalizationID, f.ResultDigest, "")
-			if err != nil {
-				return nil, err
-			}
-			result, err := PrintableArtifactResult(ctx, s.deps, agent, printable.Artifact.ArtifactID, res.TeachingReport.Metadata.Title+"\n\n完整答案与讲解见附件")
-			if err != nil {
-				return nil, err
-			}
-			for key, value := range metadata {
-				result.Metadata[key] = value
-			}
-			return result, nil
+		if res.GradeReportRef != nil {
+			return s.prepareReportResult(ctx, agent, res.Finalization, content, metadata, *res.GradeReportRef)
 		}
-		return &skill.Result{Content: content, Metadata: metadata}, nil
+		return s.prepareReportResult(ctx, agent, res.Finalization, content, metadata)
 	}
 	return &skill.Result{
 		Content:  renderGradeContent(res),
@@ -174,12 +178,7 @@ func gradeMetadata(res usecase.GradeResult, problem string, knowledgePoints []st
 			raw, _ := json.Marshal(res.AnswerSource)
 			m["answer_source"] = string(raw)
 		}
-		refs, _ := json.Marshal([]struct {
-			RunID          string                   `json:"solve_run_id"`
-			FinalizationID string                   `json:"finalization_id"`
-			InputDigest    string                   `json:"input_digest"`
-			AnswerSource   *k12.ProblemAnswerSource `json:"answer_source,omitempty"`
-		}{{RunID: res.Finalization.RunID, FinalizationID: res.Finalization.FinalizationID, InputDigest: res.Finalization.InputDigest, AnswerSource: res.AnswerSource}})
+		refs, _ := json.Marshal([]textSolveReplyReference{{RunID: res.Finalization.RunID, FinalizationID: res.Finalization.FinalizationID, FinalizationDigest: res.Finalization.ResultDigest, InputDigest: res.Finalization.InputDigest, AnswerSource: res.AnswerSource, GradeReportRef: res.GradeReportRef}})
 		m["text_solve_refs"] = string(refs)
 	}
 	// BUG-1：判错入库时额外产出前端可消费的结构化 record 元数据（engine 层作为领域中立

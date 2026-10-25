@@ -57,6 +57,25 @@ func (h *handler) authorizedAgentOwnerScope(
 	return ownerID, nil
 }
 
+// 文字执行沿当前调用者的实际档案决定作用域；独立助手不借用其他学生，也不创建档案。
+func (h *handler) authorizedTextSolveOwnerScope(ctx context.Context, agentName string) (string, error) {
+	owner, err := h.ownerScope(ctx)
+	if err != nil {
+		return "", err
+	}
+	if h.rt.Records == nil {
+		return "", errAgentScopeNotFound
+	}
+	learner, err := h.rt.Records.HasLearnerProfile(ctx, strings.TrimSpace(agentName))
+	if err != nil {
+		return "", err
+	}
+	if learner {
+		return h.authorizedAgentOwnerScope(ctx, agentName)
+	}
+	return owner, nil
+}
+
 func (h *handler) textbookScope(
 	ctx context.Context,
 	agentName, subject string,

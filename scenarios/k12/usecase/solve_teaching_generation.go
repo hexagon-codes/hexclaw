@@ -109,6 +109,12 @@ func auditedSolveParentTeachingGuide(solved SolveHomeworkResult) (ParentTeaching
 }
 
 func finalizeSolveParentTeachingGuide(guide ParentTeachingGuide, solved SolveHomeworkResult) (ParentTeachingGuide, error) {
+	if solved.ReportDegradationReason != "" {
+		if err := validateDegradedReportGuide(guide, solved); err != nil {
+			return ParentTeachingGuide{}, err
+		}
+		return guide, nil
+	}
 	generation := solved.Generation
 	if solved.Evidence.EvidenceType == EvidenceNumericExec && solved.Evidence.Verdict == VerdictDisagree &&
 		generation != nil && solveTeachingVersionSupported(generation.OutputVersion) &&

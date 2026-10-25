@@ -18,6 +18,7 @@ import (
 	k12 "github.com/hexagon-codes/hexclaw/scenarios/k12"
 	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/usecase"
+	"github.com/hexagon-codes/hexclaw/skill"
 )
 
 type tutorIdentityAgentStore interface {
@@ -108,8 +109,20 @@ func (p *k12TutorIdentityPolicy) CompileTerminalDirective(
 		}
 	}()
 	directive, err = p.compileIdentity(ctx, input)
-	if err != nil || directive.Content == "" || p.followup == nil {
+	if err != nil || directive.Content == "" {
 		return directive, err
+	}
+	for _, name := range input.Agent.Skills {
+		if skill.SystemDispatchSource(ctx) != "" {
+			break
+		}
+		if strings.TrimSpace(name) == "k12_grade" {
+			directive = k12TutorDirective(directive.Content + "\n\n[Bound homework capability]\nk12_grade is already bound to this assistant. When it is available in this turn's tool list, use k12_grade as the execution entry for a concrete homework/exercise/exam problem, including a naturally pasted problem without an explicit command. It provides the complete solution, independent verification and teaching result. Do not bypass an available k12_grade with the generic solve tool or ask the user to name a tool, create another assistant or repeat the problem. Pass student_answer only when an actual submitted answer is present; leave it empty for an unanswered problem. Use only this assistant's current learner context. If the original execution is pending or has an unknown outcome, preserve its identity and do not start a replacement solve. Ordinary conversation, identity questions and profile/curriculum explanations do not require a homework call; reuse an already established result for a follow-up that does not ask a new problem.")
+			break
+		}
+	}
+	if p.followup == nil {
+		return directive, nil
 	}
 	courseText, err := p.followup.TutorCurriculumDirective(ctx, input.Agent.Name)
 	if err != nil {

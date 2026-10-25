@@ -81,6 +81,11 @@ func getPrintArtifactVia(ctx context.Context, q dbQueryer, agentName, artifactID
 	if err != nil {
 		return k12.PrintArtifact{}, fmt.Errorf("k12storage: 读打印 Artifact: %w", err)
 	}
+	var spec k12.PrintArtifactRender
+	if err := readPrintRenderSpec(ctx, q, artifactID, &spec); err != nil {
+		return k12.PrintArtifact{}, err
+	}
+	artifact.RenderSpecDigest = spec.RenderSpecDigest
 	return artifact, nil
 }
 
@@ -98,7 +103,18 @@ func getPrintArtifactRenderVia(ctx context.Context, q dbQueryer, agentName,
 	if err != nil {
 		return k12.PrintArtifactRender{}, fmt.Errorf("k12storage: 读打印 Artifact PDF: %w", err)
 	}
+	if err := readPrintRenderSpec(ctx, q, artifactID, &render); err != nil {
+		return k12.PrintArtifactRender{}, err
+	}
 	return render, nil
+}
+
+func readPrintRenderSpec(ctx context.Context, q dbQueryer, artifactID string, result *k12.PrintArtifactRender) error {
+	err := q.QueryRowContext(ctx, `SELECT render_spec_digest,render_spec_json,layout_check FROM k12_print_artifact_render_specs WHERE artifact_id=?`, artifactID).Scan(&result.RenderSpecDigest, &result.RenderSpecJSON, &result.LayoutCheck)
+	if err == sql.ErrNoRows {
+		return nil
+	}
+	return err
 }
 
 func (s *Store) GetGenericPrintJob(ctx context.Context, agentName, jobID string) (k12.GenericPrintJob, error) {
@@ -136,6 +152,15 @@ func (s *Store) GetPrintArtifactRender(ctx context.Context, agentName,
 }
 
 func validPrintArtifactRender(artifact k12.PrintArtifact, render k12.PrintArtifactRender) bool {
+	if artifact.RenderSpecDigest != render.RenderSpecDigest {
+		return false
+	}
+	if render.RenderSpecDigest != "" {
+		sum := sha256.Sum256([]byte(render.RenderSpecJSON))
+		if hex.EncodeToString(sum[:]) != render.RenderSpecDigest || (render.LayoutCheck != "passed" && render.LayoutCheck != "not_run") {
+			return false
+		}
+	}
 	if render.ArtifactID != artifact.ArtifactID || render.Format != "pdf" ||
 		strings.TrimSpace(render.RenderContractVersion) == "" ||
 		render.ContentType != "application/pdf" || len(render.ByteDigest) != 64 ||
@@ -170,7 +195,7 @@ func (s *Store) FreezePrintArtifact(ctx context.Context, artifact k12.PrintArtif
 		}
 		return freezePrintArtifactVia(ctx, bound.tx, artifact, render)
 	}
-	if err := ensureAgentRegistered(ctx, s.db, artifact.AgentName); err != nil {
+	if err := s.validatePrintArtifactScope(ctx, artifact); err != nil {
 		return k12.PrintArtifact{}, k12.PrintArtifactRender{}, false, err
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -188,16 +213,73 @@ func (s *Store) FreezePrintArtifact(ctx context.Context, artifact k12.PrintArtif
 	return storedArtifact, storedRender, replay, nil
 }
 
+// 文字报告沿原执行的不可变结算核对归属，其他学生产物继续要求已注册实例。
+func (s *Store) validatePrintArtifactScope(ctx context.Context, artifact k12.PrintArtifact) error {
+	if artifact.SourceKind != k12.PrintSourceTextSolveFinalization {
+		return ensureAgentRegistered(ctx, s.db, artifact.AgentName)
+	}
+	_, err := s.textSolvePrintArtifactSource(ctx, artifact)
+	return err
+}
+
+func (s *Store) textSolvePrintArtifactSource(ctx context.Context, artifact k12.PrintArtifact) (k12.TextSolveFinalization, error) {
+	var final k12.TextSolveFinalization
+	if artifact.SourceKind != k12.PrintSourceTextSolveFinalization {
+		return final, ErrTextSolveConflict
+	}
+	reference, ok := strings.CutPrefix(artifact.SourceRef, "text_solve:")
+	if !ok {
+		return final, ErrTextSolveConflict
+	}
+	source, bundle, ok := strings.Cut(reference, ":teaching-report:")
+	digestIndex := strings.LastIndex(source, ":sha256:")
+	if !ok || bundle == "" || digestIndex <= 0 {
+		return final, ErrTextSolveConflict
+	}
+	finalID := source[:digestIndex]
+	var raw string
+	if err := s.db.QueryRowContext(ctx, `SELECT data FROM k12_text_solve_finalizations WHERE finalization_id=? AND agent_name=?`, finalID, artifact.AgentName).Scan(&raw); err != nil {
+		return final, err
+	}
+	if json.Unmarshal([]byte(raw), &final) != nil || final.FinalizationID != finalID || final.AgentName != artifact.AgentName || final.ResultDigest != textSolveDigest(final.ResultJSON) ||
+		!strings.HasPrefix(artifact.SourceRef, "text_solve:"+final.FinalizationID+":"+final.ResultDigest+":teaching-report:") {
+		return final, ErrTextSolveConflict
+	}
+	if _, grading, hasGrade := strings.Cut(bundle, ":grade:"); hasGrade {
+		separator := strings.LastIndex(grading, ":sha256:")
+		if separator <= 0 {
+			return final, ErrTextSolveConflict
+		}
+		ref := k12.TextGradeReportReference{InvocationID: grading[:separator], ResultDigest: grading[separator+1:]}
+		if _, err := s.ValidateTextGradeReportReference(ctx, final, ref); err != nil {
+			return final, err
+		}
+	}
+	return final, nil
+}
+
 func freezePrintArtifactVia(ctx context.Context, tx *sql.Tx, artifact k12.PrintArtifact,
 	render k12.PrintArtifactRender) (storedArtifact k12.PrintArtifact,
 	storedRender k12.PrintArtifactRender, replay bool, err error) {
-	if _, err := tx.ExecContext(ctx, `INSERT INTO k12_print_artifacts
+	artifactInsert, err := tx.ExecContext(ctx, `INSERT INTO k12_print_artifacts
         (artifact_id,agent_name,source_kind,source_ref,title,canonical_markdown,source_digest,created_at)
         VALUES(?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING`, artifact.ArtifactID, artifact.AgentName,
 		artifact.SourceKind, artifact.SourceRef, artifact.Title, artifact.CanonicalMarkdown,
-		artifact.SourceDigest, artifact.CreatedAt); err != nil {
+		artifact.SourceDigest, artifact.CreatedAt)
+	if err != nil {
 		return k12.PrintArtifact{}, k12.PrintArtifactRender{}, false,
 			fmt.Errorf("k12storage: freeze 打印 Artifact: %w", err)
+	}
+	if artifact.RenderSpecDigest != "" {
+		if inserted, _ := artifactInsert.RowsAffected(); inserted == 0 {
+			var existing string
+			if err := tx.QueryRowContext(ctx, `SELECT render_spec_digest FROM k12_print_artifact_render_specs WHERE artifact_id=?`, artifact.ArtifactID).Scan(&existing); err != nil || existing != artifact.RenderSpecDigest {
+				return k12.PrintArtifact{}, k12.PrintArtifactRender{}, false, fmt.Errorf("print artifact already has a different render specification")
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO k12_print_artifact_render_specs (artifact_id,render_spec_digest,render_spec_json,layout_check) VALUES(?,?,?,?) ON CONFLICT DO NOTHING`, artifact.ArtifactID, render.RenderSpecDigest, render.RenderSpecJSON, render.LayoutCheck); err != nil {
+			return k12.PrintArtifact{}, k12.PrintArtifactRender{}, false, err
+		}
 	}
 	storedArtifact, err = getPrintArtifactVia(ctx, tx, artifact.AgentName, artifact.ArtifactID)
 	if err != nil {
@@ -206,7 +288,7 @@ func freezePrintArtifactVia(ctx context.Context, tx *sql.Tx, artifact k12.PrintA
 	if storedArtifact.SourceKind != artifact.SourceKind || storedArtifact.SourceRef != artifact.SourceRef ||
 		storedArtifact.Title != artifact.Title ||
 		storedArtifact.CanonicalMarkdown != artifact.CanonicalMarkdown ||
-		storedArtifact.SourceDigest != artifact.SourceDigest {
+		storedArtifact.SourceDigest != artifact.SourceDigest || storedArtifact.RenderSpecDigest != artifact.RenderSpecDigest {
 		return k12.PrintArtifact{}, k12.PrintArtifactRender{}, false,
 			fmt.Errorf("k12storage: 打印 Artifact ID 已绑定其他内容")
 	}

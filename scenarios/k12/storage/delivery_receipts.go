@@ -11,6 +11,7 @@ import (
 	"github.com/hexagon-codes/hexclaw/messagecontent"
 	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
+	"github.com/hexagon-codes/hexclaw/storage"
 )
 
 var ErrDeliveryReceiptConflict = errors.New("delivery receipt immutable identity conflict")
@@ -456,23 +457,35 @@ func (s *Store) PrepareDeliveryBatch(ctx context.Context, input k12.DeliveryBatc
 	if err != nil {
 		return k12.DeliveryBatch{}, false, err
 	}
-	// Keep the deferred SQLite transaction write-first. A transactional read
-	// followed by INSERT can fail its lock upgrade under concurrent writers.
-	if err := ensureAgentRegistered(ctx, s.db, batch.AgentName); err != nil {
-		return k12.DeliveryBatch{}, false, err
+	var projection struct {
+		Source *k12.DeliveryProjectionSource `json:"delivery_source"`
 	}
+	_ = json.Unmarshal([]byte(batch.Receipts[0].PayloadJSON), &projection)
+	var standalone *storage.MessageRecord
+	if err := ensureAgentRegistered(ctx, s.db, batch.AgentName); err != nil {
+		if !errors.Is(err, records.ErrScopeNotFound) {
+			return k12.DeliveryBatch{}, false, err
+		}
+		standalone, err = s.standalonePrintReplySource(ctx, batch, projection.Source)
+		if err != nil {
+			return k12.DeliveryBatch{}, false, err
+		}
+	}
+	// 先写后读以持有SQLite写锁；来源是已注册学生或原助手消息，不创建占位助手。
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return k12.DeliveryBatch{}, false, fmt.Errorf("k12storage: begin DeliveryBatch: %w", err)
 	}
 	defer tx.Rollback()
-	var projection struct {
-		Source *k12.DeliveryProjectionSource `json:"delivery_source"`
-	}
-	_ = json.Unmarshal([]byte(batch.Receipts[0].PayloadJSON), &projection)
 	if projection.Source != nil {
 		// 同一来源对象只冻结首份计划；先取得写锁，防止不同 PDF 字节或目标快照生成第二份计划。
-		locked, lockErr := tx.ExecContext(ctx, `UPDATE agents SET name=name WHERE name=?`, batch.AgentName)
+		var locked sql.Result
+		var lockErr error
+		if standalone != nil {
+			locked, lockErr = tx.ExecContext(ctx, `UPDATE messages SET id=id WHERE id=? AND session_id=? AND request_id=? AND metadata=?`, standalone.ID, standalone.SessionID, standalone.RequestID, standalone.Metadata)
+		} else {
+			locked, lockErr = tx.ExecContext(ctx, `UPDATE agents SET name=name WHERE name=?`, batch.AgentName)
+		}
 		if lockErr != nil {
 			return k12.DeliveryBatch{}, false, lockErr
 		}

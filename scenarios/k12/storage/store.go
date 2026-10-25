@@ -148,6 +148,13 @@ func ensureAgentRegistered(ctx context.Context, q dbQueryer, agentName string) e
 	return nil
 }
 
+// HasLearnerProfile 仅核对当前调用者自己的已登记学生身份，不寻找或借用其他档案。
+func (s *Store) HasLearnerProfile(ctx context.Context, agentName string) (bool, error) {
+	var exists bool
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM agents WHERE name=? AND json_extract(metadata,'$.scenario')='k12-tutor')`, agentName).Scan(&exists)
+	return exists, err
+}
+
 func isForeignKeyErr(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "FOREIGN KEY constraint failed")
 }

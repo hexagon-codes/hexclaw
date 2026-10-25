@@ -15,6 +15,20 @@ import (
 var ErrTextSolveConflict = errors.New("text solve identity or result conflict")
 var ErrTextSolveUnknown = errors.New("text solve invocation outcome requires reconciliation")
 
+type textSolveActorScopeKey struct{}
+type textSolveActorScope struct{ owner, agent string }
+
+// WithTextSolveActorScope 由已完成当前调用者授权的入口盖章；正文参数不能创建该作用域。
+func WithTextSolveActorScope(ctx context.Context, owner, agent string) context.Context {
+	return context.WithValue(ctx, textSolveActorScopeKey{}, textSolveActorScope{owner: owner, agent: agent})
+}
+
+// TextSolveActorScopeMatches 只授权同一owner/assistant的文字执行，不授予学生记录或其他资产权限。
+func TextSolveActorScopeMatches(ctx context.Context, owner, agent string) bool {
+	scope, ok := ctx.Value(textSolveActorScopeKey{}).(textSolveActorScope)
+	return ok && scope.owner != "" && scope.agent != "" && scope.owner == owner && scope.agent == agent
+}
+
 func textSolveDigest(raw string) string {
 	h := sha256.Sum256(append([]byte{0}, []byte(raw)...))
 	return "sha256:" + hex.EncodeToString(h[:])
@@ -28,8 +42,12 @@ func (s *Store) PrepareTextSolveRun(ctx context.Context, run k12.TextSolveRun) (
 	if err != nil || identity.FactsDigest != run.FactsDigest {
 		return run, false, ErrTextSolveConflict
 	}
-	if err = ensureAgentRegistered(ctx, s.db, run.AgentName); err != nil {
-		return run, false, err
+	// 文字求解归属于真实请求，不要求调用它的通用助手同时拥有学生档案。
+	// 没有会话来源的领域调用仍沿用已注册实例约束。
+	if (run.SourceSessionID == "" || run.SourceMessageID == "") && !TextSolveActorScopeMatches(ctx, run.OwnerID, run.AgentName) {
+		if err = ensureAgentRegistered(ctx, s.db, run.AgentName); err != nil {
+			return run, false, err
+		}
 	}
 	if run.SourceMessageID != "" && run.SourceSessionID == "" {
 		return run, false, ErrTextSolveConflict
@@ -69,6 +87,25 @@ func (s *Store) PrepareTextSolveRun(ctx context.Context, run k12.TextSolveRun) (
 		return prior, false, ErrTextSolveConflict
 	}
 	return prior, n == 1, nil
+}
+
+// ValidateTextSolveRequest 核对工具入口盖章的用户、会话和原消息，应用 owner 不等同于 IM 用户。
+func (s *Store) ValidateTextSolveRequest(ctx context.Context, origin k12.TextSolveOrigin, user, requestID string) error {
+	if user == "" || requestID == "" || origin.SourceSessionID == "" || origin.SourceMessageID == "" {
+		return ErrTextSolveConflict
+	}
+	var exists bool
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(
+ SELECT 1 FROM sessions s JOIN messages m ON m.session_id=s.id
+ WHERE s.id=? AND s.user_id=? AND m.id=? AND m.role='user' AND m.request_id=?)`,
+		origin.SourceSessionID, user, origin.SourceMessageID, requestID).Scan(&exists)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return ErrTextSolveConflict
+	}
+	return nil
 }
 
 func getTextSolveRun(ctx context.Context, db dbHandle, owner, agent, id string) (k12.TextSolveRun, error) {
@@ -217,6 +254,34 @@ func getTextSolveFinalization(ctx context.Context, db dbHandle, owner, agent, ru
 }
 func (s *Store) GetTextSolveFinalization(ctx context.Context, owner, agent, runID string) (k12.TextSolveFinalization, error) {
 	return getTextSolveFinalization(ctx, s.db, owner, agent, runID)
+}
+
+// TextSolvePrintArtifactSource 读回文字PDF的真实冻结来源，供调用入口核对owner。
+func (s *Store) TextSolvePrintArtifactSource(ctx context.Context, artifact k12.PrintArtifact) (k12.TextSolveFinalization, error) {
+	return s.textSolvePrintArtifactSource(ctx, artifact)
+}
+
+// ValidateTextGradeReportReference 核对实际评分编排回执与原文字来源，不查询“最新评分”。
+func (s *Store) ValidateTextGradeReportReference(ctx context.Context, final k12.TextSolveFinalization, ref k12.TextGradeReportReference) (k12.TextSolveInvocation, error) {
+	if ref.InvocationID == "" || ref.ResultDigest == "" {
+		return k12.TextSolveInvocation{}, ErrTextSolveConflict
+	}
+	inv, err := s.GetTextSolveInvocation(ctx, final.OwnerID, final.AgentName, ref.InvocationID)
+	if err != nil {
+		return inv, err
+	}
+	if inv.RunID != final.RunID || inv.TextSolveOrigin != final.TextSolveOrigin || inv.InputDigest != final.InputDigest || inv.FactsDigest != final.FactsDigest || inv.Operation != k12.GradingItemOperationGrade || inv.ExecutionKind != k12.GradingExecutionLocalDeterministic || inv.Status != k12.ModelInvocationSucceeded || inv.ResultDigest != ref.ResultDigest || inv.ResultDigest != textSolveDigest(inv.ResultJSON) {
+		return inv, ErrTextSolveConflict
+	}
+	var source struct {
+		Version            string `json:"version"`
+		FinalizationID     string `json:"finalization_id"`
+		FinalizationDigest string `json:"finalization_digest"`
+	}
+	if json.Unmarshal([]byte(inv.ResultJSON), &source) != nil || source.Version != k12.TextGradeAssessmentVersion || source.FinalizationID != final.FinalizationID || source.FinalizationDigest != final.ResultDigest {
+		return inv, ErrTextSolveConflict
+	}
+	return inv, nil
 }
 
 // FinalizeTextSolve 将真实结果、来源和待发布事件原子提交，失败发布不再次求解。

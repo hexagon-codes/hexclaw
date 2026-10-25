@@ -52,13 +52,13 @@ func (*SolveSkill) SupportsSubAgentCallInterceptor() bool { return true }
 
 func (o *SolveSkill) Name() string { return "solve" }
 func (o *SolveSkill) Description() string {
-	return "Solve a homework/exam problem and return a step-by-step solution whose final answer has been independently verified by executing code."
+	return "Solve general reasoning and calculation problems with independent code verification. For primary-school homework, use k12_grade when it is available."
 }
 func (o *SolveSkill) Match(_ string) bool { return false }
 
 func (o *SolveSkill) ToolDefinition() llm.ToolDefinition {
 	return llm.NewToolDefinition("solve",
-		"Solve a homework/exam problem with a step-by-step teaching explanation whose final answer is INDEPENDENTLY VERIFIED by a separate agent that runs code (code_exec) to recompute it. Use for math/physics/chemistry word problems or any problem where correctness matters (don't bother for trivial single-step arithmetic a student can check by hand — just answer those directly). Effort auto-scales to difficulty; returns the worked solution plus a verification verdict, and on disagreement honestly surfaces both answers instead of guessing.",
+		"Solve general reasoning, advanced math/physics/chemistry and non-homework calculation problems with an answer INDEPENDENTLY VERIFIED by a separate agent using code_exec. When k12_grade is available, use k12_grade instead for primary-school homework, exercises and exam questions: that entry owns the full teaching result and any applicable learner records. This tool remains available for other reasoning tasks, or as the homework solver when k12_grade is not available. Do not use it to replace a pending or outcome-unknown homework execution. Effort auto-scales to difficulty; returns the worked solution plus a verification verdict, and on disagreement honestly surfaces both answers instead of guessing.",
 		&llm.Schema{
 			Type: "object",
 			Properties: map[string]*llm.Schema{

@@ -16,9 +16,10 @@ import (
 // FullSolutionSteps is always derived deterministically from the already-
 // verified solver output before this guide leaves the usecase.
 type ParentTeachingGuide struct {
-	ReportContent        *TeachingReportContentDraft `json:"report_content,omitempty"`
-	TeachingDiagrams     []k12.TeachingDiagramAsset  `json:"teaching_diagrams,omitempty"`
-	SkillContextReceipts []skill.ContextReceipt      `json:"skill_context_receipts,omitempty"`
+	ReportContent           *TeachingReportContentDraft `json:"report_content,omitempty"`
+	TeachingDiagrams        []k12.TeachingDiagramAsset  `json:"teaching_diagrams,omitempty"`
+	TeachingDiagramWarnings []string                    `json:"teaching_diagram_warnings,omitempty"`
+	SkillContextReceipts    []skill.ContextReceipt      `json:"skill_context_receipts,omitempty"`
 	// Answer保留已验证解答的完整明确答案；无明确答案段的历史解答仍沿既有锚定合同。
 	Answer                 string   `json:"answer"`
 	FullSolutionSteps      []string `json:"full_solution_steps"`
@@ -113,6 +114,10 @@ func (d Deps) SolveBlankWorksheetProblem(
 	result := BlankWorksheetProblemResult{Solved: solved}
 	if err != nil || solved.OutOfScope || solved.hasDeterministicProblemIssue() {
 		return result, err
+	}
+	if guide, ok := degradedReportParentGuide(solved); ok {
+		result.Guide = guide
+		return result, nil
 	}
 	subject, err := normalizeSubject(req.Subject)
 	if err != nil {
@@ -397,6 +402,7 @@ func deterministicNumericAnswerCandidate(value string) (string, bool) {
 }
 
 func normalizeParentTeachingGuide(guide ParentTeachingGuide) ParentTeachingGuide {
+	guide.TeachingDiagramWarnings = append([]string(nil), guide.TeachingDiagramWarnings...)
 	guide.Answer = strings.TrimSpace(guide.Answer)
 	guide.GradeLevelMethod = strings.TrimSpace(guide.GradeLevelMethod)
 	guide.CheckingMethod = strings.TrimSpace(guide.CheckingMethod)

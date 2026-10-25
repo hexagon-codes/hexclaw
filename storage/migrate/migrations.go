@@ -614,6 +614,8 @@ WHERE status IN ('confirmed','assigned','submitted','graded','closed','cancelled
 	ConversationContextV140,
 	K12ReviewSourceArchiveV141,
 	K12WorkFeedbackContextV142,
+	K12TextSolveScopeV143,
+	K12PrintRenderSpecV144,
 }
 
 const k12PrintJobsV13DDL = `CREATE TABLE IF NOT EXISTS k12_paper_no_counters (

@@ -10,8 +10,7 @@ import (
 	"github.com/hexagon-codes/hexclaw/skill"
 )
 
-// TestGradeSkill_StudentAnswerOptional IM 侧契约：k12_grade 的 student_answer 改为可选
-// （Required 只剩 problem）。RED（治本前）：Required 含 student_answer → 空白题 LLM 被迫编答案。
+// 空白题不要求学生答案；历史报告动作无须重传题干，默认批改仍在运行时校验题干。
 func TestGradeSkill_StudentAnswerOptional(t *testing.T) {
 	sk := skilladapter.NewGradeSkill(usecase.Deps{})
 	req := sk.ToolDefinition().Function.Parameters.Required
@@ -20,14 +19,14 @@ func TestGradeSkill_StudentAnswerOptional(t *testing.T) {
 			t.Fatalf("student_answer 不应再必填（空白题要能不填走解题）: required=%v", req)
 		}
 	}
-	hasProblem := false
 	for _, r := range req {
 		if r == "problem" {
-			hasProblem = true
+			t.Errorf("report actions must not require a new problem: required=%v", req)
 		}
 	}
-	if !hasProblem {
-		t.Errorf("problem 应仍必填: required=%v", req)
+	ctx := skill.WithRoutedAgent(context.Background(), "mingming")
+	if _, err := sk.Execute(ctx, map[string]any{}); err == nil {
+		t.Error("default grade action must still require the problem")
 	}
 }
 

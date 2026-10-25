@@ -115,6 +115,8 @@ Grade one problem.
 
 Retained direct calibration endpoint, not the image-task entry point. agent/problem are required. An empty student_answer selects solve-only: solve_only=true, no grading or mistake creation. Grading may persist mistakes/review changes; inspect record_created and record_id rather than infer persistence from verdict. out_of_scope and curriculum_unmapped are separate facts.
 
+The authenticated server wiring determines the trusted owner. Tutor profiles retain their owner-to-tutor checks. Ordinary and default assistants can solve or grade without creating a learner profile and do not write student mistakes, review state or learning records. Direct HTTP requests do not need fabricated tool request/session/message identities. A supplied source session still requires actual access.
+
 Availability: K12 record store, Solver/Grader and optional curriculum/insight adapters.
 
 JSON body:
@@ -214,6 +216,8 @@ Solve one problem.
 agent/problem are required. Returns the solution, verification evidence and scope projection without grading or creating a mistake. Subject accepts empty or 数学/语文/英语/物理/化学; an omitted term uses the stored profile when available.
 
 When the text execution ledger is wired, owner/agent/solve_run_id freeze the complete input, origin and route. Identical input replays the original result; a changed problem, revision or origin under the same key returns409. Freeze a stable solve_run_id before sending; omitting it creates a new run, so repeating unkeyed requests is not recovery. An absent origin stays empty; a supplied message must be a real user message in the supplied session, with session access checked by the existing authenticated wiring. An unavailable model route does not block local deterministic arithmetic or verified answer adoption; only a new step that actually needs a Provider fails.
+
+Ordinary, default and tutor assistants share the same text finalization contract without fabricated learner or source-message records. Completed results are read using the original input, receipts and result digest; later answer-asset updates or archival do not rewrite that finalization. A new adoption still checks current eligibility. Failed teaching enrichment retains the verified complete answer and reliable steps while preserving failed or unknown receipts. Reading history does not resend model requests.
 
 Availability: K12 Solver and optional curriculum adapter.
 

@@ -617,7 +617,10 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 		guideRequest := deps.parentTeachingGuideRequest(ctx, gradeReq, solved, GradeOutcome{})
 		guideExecutionKind := k12.GradingExecutionProvider
 		var deterministicGuide *ParentTeachingGuide
-		if solveTeachingVersionSupported(gradeReq.SolveOutputVersion) && solved.Generation != nil {
+		if guide, ok := degradedReportParentGuide(solved); ok {
+			guideExecutionKind = k12.GradingExecutionLocalDeterministic
+			deterministicGuide = &guide
+		} else if solveTeachingVersionSupported(gradeReq.SolveOutputVersion) && solved.Generation != nil {
 			guideExecutionKind = k12.GradingExecutionLocalDeterministic
 		} else if guide, ok := deterministicParentTeachingGuideForEvidence(guideRequest, solved.Evidence); ok {
 			guideExecutionKind = k12.GradingExecutionLocalDeterministic
@@ -761,7 +764,10 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 		guideRequest := deps.parentTeachingGuideRequest(ctx, gradeReq, solved, graded.Outcome)
 		guideExecutionKind := k12.GradingExecutionProvider
 		var deterministicGuide *ParentTeachingGuide
-		if gradeReq.SolveOutputVersion == SolveOutputWithTeachingReportV2 && solved.Generation != nil {
+		if guide, ok := degradedReportParentGuide(solved); ok {
+			guideExecutionKind = k12.GradingExecutionLocalDeterministic
+			deterministicGuide = &guide
+		} else if gradeReq.SolveOutputVersion == SolveOutputWithTeachingReportV2 && solved.Generation != nil {
 			guide, err := auditedSolveParentTeachingGuide(solved)
 			if err != nil {
 				return item, err
@@ -789,7 +795,7 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 		if guideErr != nil {
 			return item, guideErr
 		}
-		guide, guideErr := finalizeParentTeachingGuide(rawGuide, solved.Solution)
+		guide, guideErr := finalizeSolveParentTeachingGuide(rawGuide, solved)
 		if guideErr != nil {
 			return item, guideErr
 		}
@@ -1415,7 +1421,11 @@ func validateGradingAssessmentTerminalItem(
 				receipt.Status,
 			)
 		}
-		if err := validateParentTeachingGuide(*item.ParentGuide); err != nil {
+		validateGuide := validateParentTeachingGuide
+		if item.Solve.ReportDegradationReason != "" {
+			validateGuide = func(guide ParentTeachingGuide) error { return validateDegradedReportGuide(guide, item.Solve) }
+		}
+		if err := validateGuide(*item.ParentGuide); err != nil {
 			return fmt.Errorf(
 				"%w: problem=%s incomplete parent guide: %v",
 				ErrGradingAssessmentExactSet,

@@ -124,3 +124,38 @@ func (s *Store) GetConversationPrintReply(ctx context.Context, agent, messageID 
 	}
 	return source, nil
 }
+
+// 独立文字报告只沿原助手消息回原私聊，不赋予学生记录或任意目标投递权限。
+func (s *Store) standalonePrintReplySource(ctx context.Context, batch k12.DeliveryBatch, projection *k12.DeliveryProjectionSource) (*storage.MessageRecord, error) {
+	if batch.ObjectKind != "im_final_reply" || projection == nil || projection.PrivateEvent == nil {
+		return nil, ErrDeliveryBatchConflict
+	}
+	source, err := s.GetConversationPrintReply(ctx, batch.AgentName, projection.SourceRef)
+	if err != nil {
+		return nil, err
+	}
+	proof := projection.PrivateEvent
+	if source.BindingID != "" || source.Owner != source.ChatID || len(source.Artifacts) == 0 ||
+		source.AgentName != proof.AgentName || source.Platform != proof.Platform || source.InstanceID != proof.InstanceID ||
+		source.Owner != proof.SenderID || source.SourceMessageID != proof.MessageID || source.AssistantMessageID != proof.AssistantMessageID {
+		return nil, ErrDeliveryBatchConflict
+	}
+	message, err := s.ConversationPrintReplyMessage(ctx, source)
+	if err != nil {
+		return nil, err
+	}
+	for _, ref := range source.Artifacts {
+		artifact, err := s.GetPrintArtifact(ctx, source.AgentName, ref.ArtifactID)
+		if err != nil || artifact.SourceDigest != ref.SourceDigest {
+			return nil, ErrDeliveryBatchConflict
+		}
+		final, err := s.textSolvePrintArtifactSource(ctx, artifact)
+		if err != nil || final.SourceSessionID != source.SessionID {
+			return nil, ErrDeliveryBatchConflict
+		}
+		if err := s.ValidateTextSolveRequest(ctx, final.TextSolveOrigin, source.Owner, source.RequestID); err != nil {
+			return nil, err
+		}
+	}
+	return message, nil
+}

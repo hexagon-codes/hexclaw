@@ -184,7 +184,8 @@ func TestToolResultsAcquireTheirSpecificDataClass(t *testing.T) {
 	}{
 		{tool: "knowledge_search", class: egress.ClassDocument},
 		{tool: "session_search", class: egress.ClassMemory},
-		{tool: "k12_grade", class: egress.ClassRecord},
+		{tool: "k12_grade", class: egress.ClassDocument},
+		{tool: "k12_review", class: egress.ClassRecord},
 	}
 	for _, tt := range tests {
 		t.Run(tt.tool, func(t *testing.T) {

@@ -22,6 +22,8 @@ import (
 
 func TestBUG20260710_H1_GradeSkillMustNotTrustLLMAgentArg(t *testing.T) {
 	deps := newDeps(t, usecase.GradeOutcome{Verdict: usecase.VerdictAgree})
+	solver := &standaloneSolveFixture{}
+	deps.Solver = solver
 	s := skilladapter.NewGradeSkill(deps)
 
 	// ctx 无 routed agent + LLM 幻觉传 agent 参数 → 必须报错拒绝，不得写库。
@@ -33,8 +35,12 @@ func TestBUG20260710_H1_GradeSkillMustNotTrustLLMAgentArg(t *testing.T) {
 	if err == nil {
 		t.Fatal("BUG 复现：ctx 无已路由 Agent 时采信了 LLM 传的 agent 参数——多孩隔离被打穿（want fail-loud error）")
 	}
-	if !strings.Contains(err.Error(), "无法确定辅导实例") {
-		t.Fatalf("应报「无法确定辅导实例」，got: %v", err)
+	if solver.calls != 0 {
+		t.Fatal("untrusted agent arguments reached the solver")
+	}
+	var mistakes int
+	if err := deps.Records.DB().QueryRow(`SELECT COUNT(*) FROM k12_mistakes`).Scan(&mistakes); err != nil || mistakes != 0 {
+		t.Fatalf("untrusted agent arguments changed student records: count=%d err=%v", mistakes, err)
 	}
 }
 

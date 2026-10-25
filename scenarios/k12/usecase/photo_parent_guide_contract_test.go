@@ -35,11 +35,14 @@ func TestParentTeachingGuideContractIsExactlySevenApprovedItems(t *testing.T) {
 		"FollowUpQuestions",
 		"CheckingMethod",
 	}
-	if guideType.NumField() != len(wantFields)+3 {
-		t.Fatalf("ParentTeachingGuide fields=%d, want seven teaching items plus optional diagrams, skill receipts and report content: %#v", guideType.NumField(), wantFields)
+	if guideType.NumField() != len(wantFields)+4 {
+		t.Fatalf("ParentTeachingGuide fields=%d, want seven teaching items plus optional diagrams, diagram warnings, skill receipts and report content: %#v", guideType.NumField(), wantFields)
 	}
 	if field, ok := guideType.FieldByName("TeachingDiagrams"); !ok || field.Tag.Get("json") != "teaching_diagrams,omitempty" {
 		t.Fatal("ParentTeachingGuide must preserve optional diagram attachments separately from its seven teaching items")
+	}
+	if field, ok := guideType.FieldByName("TeachingDiagramWarnings"); !ok || field.Tag.Get("json") != "teaching_diagram_warnings,omitempty" || field.Type != reflect.TypeOf([]string{}) {
+		t.Fatal("ParentTeachingGuide must preserve optional diagram warnings separately from its seven teaching items")
 	}
 	if field, ok := guideType.FieldByName("SkillContextReceipts"); !ok || field.Tag.Get("json") != "skill_context_receipts,omitempty" {
 		t.Fatal("ParentTeachingGuide must preserve optional skill evidence separately from its seven teaching items")

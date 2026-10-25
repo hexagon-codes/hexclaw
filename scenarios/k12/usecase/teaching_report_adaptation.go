@@ -3,15 +3,29 @@ package usecase
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
+	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
 )
 
 // adaptReusedReportTeaching 只适配本次教学内容，原采用解法、数值证据和资产保持不变。
 // 每个真实调用沿原任务账本恢复；已发送未知结果由该账本阻止重复发送。
-func (d Deps) adaptReusedReportTeaching(ctx context.Context, req GradeRequest, solved SolveHomeworkResult) (SolveHomeworkResult, error) {
+func (d Deps) adaptReusedReportTeaching(ctx context.Context, req GradeRequest, solved SolveHomeworkResult) (result SolveHomeworkResult, err error) {
+	failureReason := "teaching_generation_failed"
+	defer func() {
+		if err == nil || ctx.Err() != nil || req.SolveOutputVersion != SolveOutputWithTeachingReportV2 {
+			return
+		}
+		if errors.Is(err, k12storage.ErrTextSolveUnknown) || errors.Is(err, ErrGradingPhysicalCallOutcomeUnknown) || errors.Is(err, ErrModelInvocationRequiresReconciliation) {
+			failureReason = "teaching_outcome_unknown"
+		}
+		if degraded, ok := degradeVerifiedReportTeaching(solved, failureReason); ok {
+			result, err = degraded, nil
+		}
+	}()
 	if req.SolveOutputVersion != SolveOutputWithTeachingReportV2 || solved.OutOfScope || solved.Solution == "" {
 		return solved, nil
 	}
@@ -21,9 +35,13 @@ func (d Deps) adaptReusedReportTeaching(ctx context.Context, req GradeRequest, s
 		if guide, ok := deterministicParentTeachingGuideForEvidence(request, solved.Evidence); ok {
 			solved.Generation = nil
 			solved.ReportContent = deterministicReportContent(guide)
+			solved.ReportDegradationReason = ""
 			return solved, nil
 		}
 	}
+	// 新任务的讲法只能来自本次适配，不能携带答案资产上的旧降级投影。
+	solved.ReportContent = nil
+	solved.ReportDegradationReason = ""
 	if d.ParentTeachingGuide == nil || d.ParentTeachingGuideAudit == nil {
 		return solved, fmt.Errorf("report teaching adapter is unavailable")
 	}
@@ -60,6 +78,7 @@ func (d Deps) adaptReusedReportTeaching(ctx context.Context, req GradeRequest, s
 		sourceDigest = teachingReportResourceDigest([]byte(solved.Solution))
 	}
 	auditRequest := ParentTeachingGuideAuditRequest{Request: request, Guide: guide, SourceSolutionDigest: sourceDigest}
+	failureReason = "teaching_audit_failed"
 	audited, err := ExecuteGradingPhysicalCall(ctx, GradingPhysicalCallSpec{Operation: k12.GradingItemOperationParentGuide, ReplayResultFailure: func(payload string) error {
 		var prior ParentTeachingGuideAudit
 		if err := json.Unmarshal([]byte(payload), &prior); err != nil {
@@ -88,6 +107,7 @@ func (d Deps) adaptReusedReportTeaching(ctx context.Context, req GradeRequest, s
 		return solved, err
 	}
 	if audit.Verdict != "VALID" || audit.SourceSolutionDigest != sourceDigest {
+		failureReason = "teaching_audit_rejected"
 		return solved, fmt.Errorf("report teaching audit did not accept the candidate")
 	}
 	solved.Generation = &SolveGeneration{OutputVersion: SolveOutputWithTeachingReportV2, ParentGuideCandidate: &guide, GuideAudit: audit.Verdict, SourceSolutionDigest: sourceDigest,

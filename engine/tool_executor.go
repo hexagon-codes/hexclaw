@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/hexagon-codes/hexagon/observe/events"
@@ -255,7 +256,10 @@ func (e *ToolExecutor) executeWithHooks(ctx context.Context, call *ToolCallInfo,
 	for _, h := range afterHooks {
 		runAfterHook(ctx, h, call, result, v2)
 	}
-	labelToolResultEgress(ctx, call.Name)
+	// 只有实际返回的业务内容进入后续模型上下文；无内容的执行错误不代表读取了记录。
+	if strings.TrimSpace(result.Content) != "" {
+		labelToolResultEgress(ctx, call.Name)
+	}
 
 	// v0.4.0 H6：投递结构化事件；是否落盘/外发由注入的 events.Sink 决定。
 	severity := events.SeverityInfo

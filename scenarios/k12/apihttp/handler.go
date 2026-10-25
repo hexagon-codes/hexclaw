@@ -300,11 +300,12 @@ type gradeReq struct {
 }
 
 type gradeResp struct {
-	TeachingReport *k12.TeachingReport        `json:"teaching_report,omitempty"`
-	ReportMarkdown string                     `json:"report_markdown,omitempty"`
-	Finalization   *k12.TextSolveFinalization `json:"finalization,omitempty"`
-	AnswerSource   *k12.ProblemAnswerSource   `json:"answer_source,omitempty"`
-	Solution       string                     `json:"solution"`
+	GradeReportRef *k12.TextGradeReportReference `json:"grade_report_ref,omitempty"`
+	TeachingReport *k12.TeachingReport           `json:"teaching_report,omitempty"`
+	ReportMarkdown string                        `json:"report_markdown,omitempty"`
+	Finalization   *k12.TextSolveFinalization    `json:"finalization,omitempty"`
+	AnswerSource   *k12.ProblemAnswerSource      `json:"answer_source,omitempty"`
+	Solution       string                        `json:"solution"`
 	// Verdict 判定五值（§4.5 布尔 correct 删除，§6.14 授权破坏性契约变更）：
 	// 批改路径 = 批改判定（agree=答对 / disagree=答错）；解题分叉与超纲 = 验算/超纲结论。
 	// 徽章强弱仍由 badge/evidence_type（验算证据）承载，与批改判定解耦。
@@ -541,7 +542,19 @@ func (h *handler) grade(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	res, err := h.rt.Deps.GradeHomeworkProblem(r.Context(), usecase.GradeRequest{
+	owner, scopeErr := h.authorizedTextSolveOwnerScope(r.Context(), req.Agent)
+	if scopeErr != nil {
+		writeErr(w, http.StatusNotFound, "agent not found")
+		return
+	}
+	if req.SourceSession != "" && h.rt.AuthorizeSessionScope != nil {
+		if err := h.rt.AuthorizeSessionScope(r.Context(), req.Agent, req.SourceSession); err != nil {
+			writeErr(w, http.StatusNotFound, "source session not found")
+			return
+		}
+	}
+	gradeCtx := usecase.WithAuthorizedTextSolveOrigin(r.Context(), k12.TextSolveOrigin{OwnerID: owner, SourceSessionID: req.SourceSession}, req.Agent)
+	res, err := h.rt.Deps.GradeHomeworkProblem(gradeCtx, usecase.GradeRequest{
 		AgentName: req.Agent, Subject: req.Subject, Grade: h.resolveGrade(r.Context(), req.Agent, req.Grade), SourceSession: req.SourceSession,
 		GradeFromProfile: req.Grade == "",
 		Problem:          req.Problem, StudentAnswer: req.StudentAnswer, KnowledgePoints: req.KnowledgePoints,
@@ -570,6 +583,7 @@ func gradeRespFromResult(res usecase.GradeResult) gradeResp {
 		verdict = res.Evidence.Verdict
 	}
 	return gradeResp{
+		GradeReportRef: res.GradeReportRef,
 		TeachingReport: res.TeachingReport, ReportMarkdown: reportMarkdown,
 		Finalization: res.Finalization, AnswerSource: res.AnswerSource,
 		Solution: res.Solution, Verdict: string(verdict),
@@ -655,7 +669,7 @@ func (h *handler) solve(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	owner, scopeErr := h.authorizedAgentOwnerScope(r.Context(), req.Agent)
+	owner, scopeErr := h.authorizedTextSolveOwnerScope(r.Context(), req.Agent)
 	if scopeErr != nil {
 		writeErr(w, http.StatusNotFound, "agent not found")
 		return
@@ -666,7 +680,7 @@ func (h *handler) solve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	solveCtx := usecase.WithTextSolveOrigin(r.Context(), k12.TextSolveOrigin{OwnerID: owner, RunID: req.SolveRunID, SourceSessionID: req.SourceSession, SourceMessageID: req.SourceMessageID, InputRevision: req.InputRevision})
+	solveCtx := usecase.WithAuthorizedTextSolveOrigin(r.Context(), k12.TextSolveOrigin{OwnerID: owner, RunID: req.SolveRunID, SourceSessionID: req.SourceSession, SourceMessageID: req.SourceMessageID, InputRevision: req.InputRevision}, req.Agent)
 	res, err := h.rt.Deps.SolveHomeworkProblem(solveCtx, usecase.GradeRequest{
 		AgentName: req.Agent, Subject: req.Subject,
 		Grade: h.resolveGrade(r.Context(), req.Agent, req.Grade), GradeFromProfile: req.Grade == "",

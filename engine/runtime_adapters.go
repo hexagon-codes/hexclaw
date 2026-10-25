@@ -32,7 +32,24 @@ func runRuntimeAttempt(ctx context.Context, runner *hruntime.DefaultRunner, req 
 		copy.State = interrupted.State.Snapshot()
 		copy.State.Attributes["hexclaw.current_input_user_ordinal"] = countContextUserMessages(req.Messages)
 		for _, record := range copy.State.ToolCalls {
-			labelToolResultEgress(ctx, record.Name)
+			// 恢复同次模型调用时沿用实际工具内容，不能把包装后的错误提示当作业务记录。
+			content := record.Result.Content
+			if record.Result.Status == hruntime.ToolStatusError || record.Result.Error != "" {
+				switch raw := record.Result.Raw.(type) {
+				case *skill.Result:
+					content = ""
+					if raw != nil {
+						content = raw.Content
+					}
+				case string:
+					content = raw
+				case nil:
+					content = ""
+				}
+			}
+			if strings.TrimSpace(content) != "" {
+				labelToolResultEgress(ctx, record.Name)
+			}
 		}
 		return runner.Continue(ctx, req, &copy, sink)
 	}

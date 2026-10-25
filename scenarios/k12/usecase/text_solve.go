@@ -27,6 +27,11 @@ func WithTextSolveOrigin(ctx context.Context, origin k12.TextSolveOrigin) contex
 	return context.WithValue(ctx, textSolveOriginKey{}, origin)
 }
 
+// WithAuthorizedTextSolveOrigin 供已校验owner和当前assistant的直接入口使用，不补造回合或学生身份。
+func WithAuthorizedTextSolveOrigin(ctx context.Context, origin k12.TextSolveOrigin, agent string) context.Context {
+	return WithTextSolveOrigin(k12storage.WithTextSolveActorScope(ctx, origin.OwnerID, agent), origin)
+}
+
 func (d Deps) textSolveOrigin(ctx context.Context, req GradeRequest) (k12.TextSolveOrigin, bool) {
 	if origin, ok := ctx.Value(textSolveOriginKey{}).(k12.TextSolveOrigin); ok {
 		return origin, true
@@ -157,6 +162,18 @@ func (d Deps) solveTextProblem(ctx context.Context, origin k12.TextSolveOrigin, 
 	if d.Records == nil || strings.TrimSpace(origin.OwnerID) == "" || req.AgentName == "" || req.Problem == "" {
 		return SolveHomeworkResult{}, fmt.Errorf("%w: text solve store and trusted owner are required", ErrInvalidInput)
 	}
+	if invocation := skill.CurrentInvocation(ctx); invocation.AuthenticatedUserID != "" {
+		// HTTP身份只有认证用户；实际工具回合仍必须携带并核对其路由、会话和原消息。
+		toolTurn := invocation.RequestID != "" || invocation.RoutedAgentName != "" || invocation.SessionID != "" || invocation.SourceMessageID != "" || invocation.ToolCallID != ""
+		if toolTurn || !k12storage.TextSolveActorScopeMatches(ctx, origin.OwnerID, req.AgentName) {
+			if invocation.RoutedAgentName != req.AgentName || invocation.SessionID != origin.SourceSessionID || invocation.SourceMessageID != origin.SourceMessageID {
+				return SolveHomeworkResult{}, k12storage.ErrTextSolveConflict
+			}
+			if err := d.Records.ValidateTextSolveRequest(ctx, origin, invocation.AuthenticatedUserID, invocation.RequestID); err != nil {
+				return SolveHomeworkResult{}, err
+			}
+		}
+	}
 	if origin.RunID == "" {
 		origin.RunID = "text-" + idgen.NanoID()
 	}
@@ -264,16 +281,14 @@ func (d Deps) solveTextProblem(ctx context.Context, origin k12.TextSolveOrigin, 
 	if err != nil {
 		return SolveHomeworkResult{}, err
 	}
-	for _, call := range calls {
-		if call.Status == k12.ModelInvocationSent || call.Status == k12.ModelInvocationOutcomeUnknown {
-			return SolveHomeworkResult{}, gradingPhysicalNoRetryError{cause: fmt.Errorf("%w: solve_run_id=%s invocation=%s", k12storage.ErrTextSolveUnknown, origin.RunID, call.InvocationID)}
-		}
-	}
 	if len(calls) > 0 {
 		// 已成功的本地结果先补原最终事务，不能退回新的求解动作。
 		if finalized, recoverErr := d.RecoverTextSolveFinalization(ctx, run.OwnerID, run.AgentName, run.RunID); recoverErr == nil {
 			return d.restoreTextSolveResult(ctx, finalized)
 		} else if !errors.Is(recoverErr, sql.ErrNoRows) {
+			if errors.Is(recoverErr, k12storage.ErrTextSolveUnknown) {
+				return SolveHomeworkResult{}, gradingPhysicalNoRetryError{cause: recoverErr}
+			}
 			return SolveHomeworkResult{}, recoverErr
 		}
 	}
@@ -582,10 +597,9 @@ func (d Deps) restoreTextSolveResult(ctx context.Context, f k12.TextSolveFinaliz
 	if f.ResultDigest != modelInvocationDigest([]byte(f.ResultJSON)) {
 		return SolveHomeworkResult{}, k12storage.ErrTextSolveConflict
 	}
-	if f.AnswerSource != nil && f.AnswerSource.Kind == k12.ProblemAnswerAsset {
-		if err := d.Records.ValidateProblemAssetAdoption(ctx, f.OwnerID, f.AnswerSource.AdoptionID); err != nil {
-			return SolveHomeworkResult{}, errors.Join(k12storage.ErrTextSolveConflict, err)
-		}
+	// 已完成任务只核对原冻结来源；资产更新或归档仅影响未来首次采用提交。
+	if _, err := d.validateTextSolveFinalization(ctx, f.OwnerID, f.AgentName, f.RunID, false); err != nil {
+		return SolveHomeworkResult{}, err
 	}
 	var solved SolveHomeworkResult
 	if json.Unmarshal([]byte(f.ResultJSON), &solved) != nil {
@@ -674,10 +688,11 @@ func (d Deps) RecoverTextSolveFinalization(ctx context.Context, owner, agent, ru
 		return k12.TextSolveFinalization{}, err
 	}
 	var source *k12.TextSolveInvocation
+	var pending []k12.TextSolveInvocation
 	for i := range calls {
 		call := &calls[i]
 		if call.Status == k12.ModelInvocationSent || call.Status == k12.ModelInvocationOutcomeUnknown {
-			return k12.TextSolveFinalization{}, fmt.Errorf("%w: solve_run_id=%s invocation=%s", k12storage.ErrTextSolveUnknown, runID, call.InvocationID)
+			pending = append(pending, *call)
 		}
 		if call.ExecutionKind != k12.GradingExecutionLocalDeterministic || call.Status != k12.ModelInvocationSucceeded || call.ResultDigest != modelInvocationDigest([]byte(call.ResultJSON)) {
 			continue
@@ -689,11 +704,21 @@ func (d Deps) RecoverTextSolveFinalization(ctx context.Context, owner, agent, ru
 		}
 	}
 	if source == nil {
+		if len(pending) > 0 {
+			return k12.TextSolveFinalization{}, fmt.Errorf("%w: solve_run_id=%s invocation=%s", k12storage.ErrTextSolveUnknown, runID, pending[0].InvocationID)
+		}
 		return k12.TextSolveFinalization{}, sql.ErrNoRows
 	}
 	var solved SolveHomeworkResult
 	if json.Unmarshal([]byte(source.ResultJSON), &solved) != nil {
 		return k12.TextSolveFinalization{}, k12storage.ErrTextSolveConflict
+	}
+	_, degraded := degradedReportParentGuide(solved)
+	for _, call := range pending {
+		// 只补已持久化的本地降级终稿事务；未知教学回执保留，不再发送。
+		if source.Operation != textSolveFinalizeOperation || !degraded || call.Operation != k12.GradingItemOperationParentGuide {
+			return k12.TextSolveFinalization{}, fmt.Errorf("%w: solve_run_id=%s invocation=%s", k12storage.ErrTextSolveUnknown, runID, call.InvocationID)
+		}
 	}
 	result, err := d.FinalizeTextSolve(ctx, run, solved)
 	if err != nil {

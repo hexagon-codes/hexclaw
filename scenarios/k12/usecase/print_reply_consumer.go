@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"strings"
 
 	"github.com/hexagon-codes/hexclaw/internal/requestcancel"
 	"github.com/hexagon-codes/hexclaw/messagecontent"
@@ -171,6 +172,7 @@ func (d Deps) SendConversationPrintReply(ctx context.Context, source k12.Convers
 		return k12.DeliveryBatch{}, err
 	}
 	message := DeliveryMessage{Content: record.Content}
+	var reportPDFs []PrintableArtifactView
 	for _, ref := range source.Artifacts {
 		actual, _, err := d.ResolvePrintReplyArtifact(ctx, source.AgentName, ref.ArtifactID)
 		if err != nil {
@@ -183,7 +185,12 @@ func (d Deps) SendConversationPrintReply(ctx context.Context, source k12.Convers
 		if err != nil {
 			return k12.DeliveryBatch{}, err
 		}
-		message.Attachments = append(message.Attachments, DeliveryAttachment{Name: ref.Name, MIME: "application/pdf", Data: pdf.Render.Payload})
+		if source.Platform == "dingtalk" && (pdf.Artifact.SourceKind == k12.PrintSourceTextSolveFinalization || pdf.Artifact.SourceKind == k12.PrintSourceGradingFinalArtifact) && strings.Contains(pdf.Artifact.SourceRef, ":teaching-report:") &&
+			strings.Contains(record.Content, strings.TrimSpace(pdf.Artifact.CanonicalMarkdown)) {
+			reportPDFs = append(reportPDFs, pdf)
+		} else {
+			message.Attachments = append(message.Attachments, DeliveryAttachment{Name: ref.Name, MIME: "application/pdf", Data: pdf.Render.Payload})
+		}
 	}
 	var savedMetadata map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(record.Metadata), &savedMetadata); err != nil {
@@ -219,20 +226,15 @@ func (d Deps) SendConversationPrintReply(ctx context.Context, source k12.Convers
 			message.Attachments = append(message.Attachments, DeliveryAttachment{Name: attachment.Name, MIME: attachment.MIME, Data: raw})
 		}
 	}
-	message.Source, err = finalReplySource(request, message)
-	if err != nil {
-		return k12.DeliveryBatch{}, err
-	}
 	var suffix string
 	if d.ReplyMetadataFooter != nil {
 		suffix = d.ReplyMetadataFooter(source.Locale, savedMetadata)
 	}
-	if suffix != "" {
-		message.Source.DingTalkSuffix = suffix
-		projected := message
-		projected.Content += "\n\n" + suffix
-		projected.Projections = nil
-		message.Projections = map[string]DeliveryMessage{"dingtalk": projected}
+	var action string
+	_ = json.Unmarshal(savedMetadata["print_reply_action"], &action)
+	message, err = conversationReportDeliveryMessage(ctx, request, message, reportPDFs, action == "resend_report", suffix)
+	if err != nil {
+		return k12.DeliveryBatch{}, err
 	}
 	targets := []ResolvedDeliveryTarget{{BindingID: bindingID, Target: k12.DeliveryTarget{Platform: source.Platform, InstanceID: source.InstanceID, ChatID: source.ChatID}}}
 	batch, _, err := d.PrepareAndSendMessageBatchForTargets(ctx, source.AgentName, objectKind, objectID, message, targets)
