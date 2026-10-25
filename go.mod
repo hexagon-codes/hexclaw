@@ -8,7 +8,7 @@ require (
 	github.com/alibabacloud-go/tea v1.2.2
 	github.com/alibabacloud-go/tea-utils/v2 v2.0.8
 	github.com/gorilla/websocket v1.5.3
-	github.com/hexagon-codes/ai-core v0.2.12
+	github.com/hexagon-codes/ai-core v0.2.13
 	github.com/hexagon-codes/hexagon v0.5.15
 	github.com/hexagon-codes/toolkit v0.3.5
 	github.com/larksuite/oapi-sdk-go/v3 v3.5.3
