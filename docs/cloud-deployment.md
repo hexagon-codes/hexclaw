@@ -32,9 +32,9 @@ docker compose exec -T hexclaw python3 -c 'import yaml; print(yaml.safe_load(ope
 
 ### 可选 HTTPS 路径前缀
 
-[`deploy/docker-compose.https.yml`](../deploy/docker-compose.https.yml) 提供独立 Nginx gateway，默认对外端口 16061，不占用已有 443。准备包含 `letsencrypt/` 证书目录和 `nginx.conf` 的私有目录，在部署 `.env` 设置 `HEXCLAW_TLS_DIR`；将 [`deploy/nginx.conf.example`](../deploy/nginx.conf.example) 中 `HEXCLAW_CERT_NAME` 替换为实际证书名。示例提供 `/hexclaw/` 前缀、WebSocket Upgrade 和不缓冲的 SSE，上传大小仍由应用自身决定。
+[`deploy/docker-compose.https.yml`](../deploy/docker-compose.https.yml) 提供独立 Nginx gateway，默认对外端口 16061，不占用已有 443。准备包含 `letsencrypt/` 证书目录和 `nginx.conf` 的私有目录，在部署 `.env` 设置 `HEXCLAW_TLS_DIR`；将 [`deploy/nginx.conf.example`](../deploy/nginx.conf.example) 中 `HEXCLAW_CERT_NAME` 替换为实际证书名，`HEXCLAW_CONTAINER_NAME` 替换为主服务唯一容器名（例如 `hexclaw-hexclaw-1`，以实际部署结果为准）。共享网络中的验收容器可能使用相同服务别名，网关上游应绑定主容器唯一名称，避免请求进入另一实例。示例提供 `/hexclaw/` 前缀、WebSocket Upgrade 和不缓冲的 SSE，上传大小仍由应用自身决定。
 
-gateway 使用 Docker DNS 动态解析 `hexclaw`，后端容器重建后继续解析新地址，不依赖人工重启代理。示例的 upstream `resolve` 需要 Nginx 1.27.3 以上；override 使用满足该条件的版本。参见 [Nginx upstream resolve](https://nginx.org/en/docs/http/ngx_http_upstream_module.html#resolve)。
+gateway 使用 Docker DNS 动态解析所配置的主服务唯一容器名，后端容器以相同名称重建后继续解析新地址，不依赖人工重启代理。示例的 upstream `resolve` 需要 Nginx 1.27.3 以上；override 使用满足该条件的版本。参见 [Nginx upstream resolve](https://nginx.org/en/docs/http/ngx_http_upstream_module.html#resolve)。
 
 ```bash
 docker compose -f docker-compose.yml -f deploy/docker-compose.https.yml up -d
@@ -111,6 +111,12 @@ CI 与 K12 使用 `GOWORK=off`、`GOFLAGS=-mod=readonly`，按已发布依赖检
 ```
 
 `compose_files` 必须使用该项目现有文件，不照抄示例中的 HTTPS 文件名；也可省略该字段并沿用 `.env` 的完整 `COMPOSE_FILE`。`minimum_free_bytes` 为运维确定的预留空间，`0` 不额外设置空间门槛，实际备份写入失败仍停止更新。服务器需有 Python 3、Git、Docker Compose 和镜像拉取权限；私有仓库的 Git／GHCR 凭据由服务器自己的登录配置提供。
+
+专属开发测试目标明确要求不保留部署历史时，可在同一 `deployment-target.json` 添加 `"development_retention": "current_only"`；省略该字段沿用原保留策略。服务更新通过校验后，脚本再次使用已有一致备份链路保存更新后的状态，原容器会为此短暂停止并恢复；重新核对健康后，只保留配置的 `backup_directory` 中 `latest-deployment.tar`、对应摘要及当前 Compose 快照。仅清理本项目终态部署回执引用的旧归档和无容器引用的旧应用镜像，不清理独立运行 `backup.py` 生成的业务备份、数据卷或其他服务。
+
+当前快照失败时不执行历史清理；若服务仍健康，命令返回非零并记录 `deployed_retention_pending`，更新前的恢复材料保持。应先读回实际服务与回执，不能根据这一返回值盲目重放部署或回退已迁移的数据。该选项不代替把现用容器纳入已有 Compose 项目、固定正确镜像引用和保留完整启动元数据。
+
+目标已有受控执行所需的系统路径配置时，可在目标文件用 `runtime_system_paths` 保存从该目标实际读回的 `MaskedPaths` 和 `ReadonlyPaths` 两个数组，不跨目标照抄。部署及启动前恢复会先用 Compose 准备容器，再保留同一镜像、挂载、环境、网络和 Compose 标签，通过 Engine API 应用这两个字段后启动。该配置不更改 AppArmor、seccomp 或其他权限；未配置的目标沿用 Compose 默认行为。配置了此对象的目标须使用该部署入口重建，直接执行 Compose 不会读取目标文件中的系统路径配置。
 
 GitHub 配置项：
 

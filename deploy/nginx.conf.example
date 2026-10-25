@@ -1,9 +1,11 @@
 # 将 HEXCLAW_CERT_NAME 替换为 Certbot 实际证书名称。
+# 将 HEXCLAW_CONTAINER_NAME 替换为主服务唯一容器名，例如 hexclaw-hexclaw-1。
+# 共享网络可能同时存在验收实例，不能使用重复的 hexclaw 服务别名。
 map $http_upgrade $connection_upgrade { default upgrade; '' close; }
 resolver 127.0.0.11 valid=10s;
 upstream hexclaw_backend {
     zone hexclaw_backend 64k;
-    server hexclaw:16060 resolve;
+    server HEXCLAW_CONTAINER_NAME:16060 resolve;
 }
 server {
     listen 443 ssl;

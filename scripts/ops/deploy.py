@@ -2,19 +2,23 @@
 """按固定镜像摘要更新单个 Compose 服务，保留部署回执和发布前完整备份。"""
 
 import argparse
+import copy
 import datetime
+import http.client
 import json
 import os
 from pathlib import Path
 import re
 import shutil
 import signal
+import socket
 import sys
 import tempfile
 import time
 import uuid
+import urllib.parse
 
-from backup import OperationError, backup, complete_service_command, compose_args, docker_json, maintenance_lock, run, write_json
+from backup import OperationError, backup, complete_service_command, compose_args, docker_json, maintenance_lock, run, sha256, write_json
 
 
 def atomic_bytes(path, content):
@@ -40,6 +44,173 @@ def current_target(configuration):
     if len(matches) != 1:
         raise OperationError("The deployment target cannot be resolved")
     return matches[0]
+
+
+class DockerConnection(http.client.HTTPConnection):
+    def connect(self):
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(self.timeout)
+        self.sock.connect("/var/run/docker.sock")
+
+
+def ensure_runtime_system_paths(configuration, candidate):
+    """保留目标已声明的运行路径策略，未配置的部署继续使用 Compose 默认值。"""
+    paths = configuration.get("runtime_system_paths")
+    if paths is None:
+        return candidate
+    if (not isinstance(paths, dict) or set(paths) != {"MaskedPaths", "ReadonlyPaths"}
+            or any(not isinstance(values, list) or any(not isinstance(value, str) for value in values)
+                   for values in paths.values())):
+        raise OperationError("The runtime system path configuration is invalid")
+    if all(candidate["HostConfig"].get(key) == value for key, value in paths.items()):
+        return candidate
+    if candidate["State"]["Running"]:
+        raise OperationError("Runtime system paths must be applied before starting the replacement")
+    body = copy.deepcopy(candidate["Config"])
+    body["Image"] = candidate["Image"]
+    body["HostConfig"] = copy.deepcopy(candidate["HostConfig"])
+    body["HostConfig"].update(copy.deepcopy(paths))
+    body["NetworkingConfig"] = {"EndpointsConfig": {}}
+    for network, endpoint in candidate["NetworkSettings"]["Networks"].items():
+        selected = {"Aliases": endpoint.get("Aliases") or []}
+        if endpoint.get("IPAMConfig"):
+            selected["IPAMConfig"] = endpoint["IPAMConfig"]
+        body["NetworkingConfig"]["EndpointsConfig"][network] = selected
+    name = candidate["Name"].lstrip("/")
+    version = run(["docker", "version", "--format", "{{.Server.APIVersion}}" ]).decode().strip()
+    run(["docker", "rm", candidate["Id"]])
+    creation_error = None
+    connection = DockerConnection("localhost", timeout=60)
+    try:
+        connection.request("POST", "/v" + version + "/containers/create?name=" + urllib.parse.quote(name),
+                           json.dumps(body), {"Content-Type": "application/json"})
+        response = connection.getresponse()
+        response.read()
+        if response.status >= 300:
+            creation_error = OperationError("Docker create returned status " + str(response.status))
+    except Exception as error:
+        creation_error = error
+    finally:
+        connection.close()
+    # 创建回执丢失时仅核对原名称，不自动创建第二个容器。
+    try:
+        current = json.loads(run(["docker", "inspect", name]))[0]
+    except OperationError as error:
+        raise OperationError("The replacement has no matching container after applying runtime paths") from (creation_error or error)
+    if current["Image"] != candidate["Image"] or mounted_data(current) != mounted_data(candidate):
+        raise OperationError("Applying runtime paths changed the image or persistent data mount")
+    if current["Config"].get("Labels") != candidate["Config"].get("Labels") or current["Config"].get("Env") != candidate["Config"].get("Env"):
+        raise OperationError("Applying runtime paths changed Compose ownership or environment")
+    for key, value in paths.items():
+        if current["HostConfig"].get(key) != value:
+            raise OperationError("The replacement runtime system paths differ: " + key)
+    return current
+
+
+def copy_state_file(source, destination):
+    fd, temporary = tempfile.mkstemp(prefix=".current-state-", dir=destination.parent)
+    try:
+        with os.fdopen(fd, "wb") as output, source.open("rb") as input_file:
+            shutil.copyfileobj(input_file, output, 1024 * 1024)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, destination)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def retain_development_state(args, configuration, report, report_file, current_image):
+    """仅处理有本项目部署回执归属的历史，独立业务备份不参与清理。"""
+    if configuration.get("development_retention") != "current_only":
+        return None
+    output = (args.project_dir / configuration.get("backup_directory", "backups")).resolve()
+    output.mkdir(parents=True, exist_ok=True)
+    state_dir = report_file.parent
+    history = []
+    terminal = {"deployed", "deployed_retention_pending", "failed_before_start", "recovery_required", "superseded"}
+    for path in state_dir.glob("*.json"):
+        if path == report_file or not re.fullmatch(r"\d{8}T\d{6}Z-[0-9a-f]{8}\.json", path.name):
+            continue
+        saved = json.loads(path.read_text())
+        if saved.get("status") in terminal and "commit" in saved and "image" in saved:
+            history.append((path, saved))
+    report["retention_stage"] = "snapshot"
+    write_json(report_file, report)
+    current_configuration = json.loads(run(compose_args(args) + ["config", "--format", "json"], cwd=args.project_dir))
+    current_compose = state_dir / "current.compose.json"
+    write_json(current_compose, current_configuration)
+    # 取更新后的完整一致快照；失败时原部署备份和镜像都保持。
+    with tempfile.TemporaryDirectory(prefix=".current-state-", dir=output) as directory:
+        snapshot_args = argparse.Namespace(**vars(args))
+        snapshot_args.output = Path(directory)
+        recovery_compose = report_file.with_suffix(".compose.json")
+        snapshot_args.include = [path for path in args.include if path != recovery_compose] + [current_compose]
+        latest = backup(snapshot_args, lock_held=True, emit_report=False)
+        source = Path(directory) / latest["archive"]
+        if sha256(source) != latest["sha256"]:
+            raise OperationError("The current deployment snapshot digest changed")
+        destination = output / "latest-deployment.tar"
+        copy_state_file(source, destination)
+        latest["archive"] = destination.name
+        latest["retained"] = True
+        write_json(output / "latest-deployment.json", latest)
+    report["current_backup"] = latest
+    report["post_snapshot_verification"] = wait_service(compose_args(args), args.project_dir, current_image, report["verification"])
+    report["retention_stage"] = "cleanup"
+    write_json(report_file, report)
+
+    removed_archives = 0
+    images = {report.get("previous_image_id")}
+    for _, saved in history + [(report_file, report)]:
+        images.update((saved.get("previous_image_id"), saved.get("image_id")))
+        for key in ("backup", "current_backup"):
+            entry = saved.get(key) or {}
+            name = entry.get("archive", "")
+            if not name or Path(name).name != name or name == "latest-deployment.tar":
+                continue
+            archive = output / name
+            if archive.is_file():
+                archive.unlink()
+                removed_archives += 1
+            metadata = archive.with_suffix(".json")
+            if metadata.is_file():
+                metadata.unlink()
+    containers = run(["docker", "ps", "--all", "--quiet"]).decode().split()
+    used_images = set(run(["docker", "inspect", "--format", "{{.Image}}", *containers]).decode().split()) if containers else set()
+    available = set(run(["docker", "image", "ls", "--no-trunc", "--quiet"]).decode().split())
+    removed_images, retained_images = 0, 0
+    for image in sorted(value for value in images if value and value != current_image):
+        if image in used_images:
+            retained_images += 1
+            continue
+        if image not in available:
+            continue
+        # 只解除已核对旧应用镜像的引用，不使用全局prune或强制删除。
+        tags = json.loads(run(["docker", "image", "inspect", "--format", "{{json .RepoTags}}", image])) or []
+        digests = json.loads(run(["docker", "image", "inspect", "--format", "{{json .RepoDigests}}", image])) or []
+        for reference in tags + digests:
+            if image not in set(run(["docker", "image", "ls", "--no-trunc", "--quiet"]).decode().split()):
+                break
+            run(["docker", "image", "rm", reference])
+        if image in set(run(["docker", "image", "ls", "--no-trunc", "--quiet"]).decode().split()):
+            run(["docker", "image", "rm", image])
+        removed_images += 1
+    # 清理结束后才收敛旧部署回执；在途任务和非部署备份均保留。
+    for path, _ in history:
+        recovery = path.with_suffix(".compose.json")
+        if recovery.is_file():
+            recovery.unlink()
+        path.unlink()
+    recovery = report_file.with_suffix(".compose.json")
+    if recovery.is_file():
+        recovery.unlink()
+    if report.get("backup"):
+        report["backup"]["retained"] = False
+    report.pop("retention_stage", None)
+    return {"policy": "current_only", "current_archive": "latest-deployment.tar",
+            "removed_archives": removed_archives, "removed_images": removed_images,
+            "preserved_in_use_images": retained_images}
 
 
 def mounted_data(container):
@@ -183,7 +354,16 @@ def deploy(args):
                 with complete_service_command():
                     run(["docker", "stop", "--time", "60", old["Id"]])
                 args.output = args.project_dir / configuration.get("backup_directory", "backups")
-                args.include = [settings_path, recovery_config] + ([image_file] if image_file.exists() else [])
+                args.include = [settings_path, recovery_config] + list(args.include) + ([image_file] if image_file.exists() else [])
+                for option in frozen_configuration["services"]["hexclaw"].get("security_opt") or []:
+                    if option.startswith("seccomp="):
+                        value = option.split("=", 1)[1]
+                        if value not in {"unconfined", "builtin"} and not value.startswith("{"):
+                            profile = Path(value)
+                            if not profile.is_absolute():
+                                profile = args.project_dir / profile
+                            if profile.is_file() and profile not in args.include:
+                                args.include.append(profile)
                 args.remote_host = None
                 args.remote_dir = None
                 report["backup"] = backup(args, lock_held=True, emit_report=False)
@@ -201,6 +381,7 @@ def deploy(args):
                 with complete_service_command():
                     run(command + ["up", "--no-start", "--no-build", "--no-deps", "--pull", "never", "--force-recreate", "hexclaw"], cwd=args.project_dir)
                 candidate = only_container(command, args.project_dir)
+                candidate = ensure_runtime_system_paths(configuration, candidate)
                 if candidate["Image"] != target_image["Id"] or mounted_data(candidate) != data_mount:
                     raise OperationError("The replacement changed the image or persistent data mount")
                 # 一旦发出 start，即可能已有迁移及副作用；失败后不能猜测数据库仍可回退。
@@ -210,12 +391,22 @@ def deploy(args):
                 run(["docker", "start", candidate["Id"]])
                 report["verification"] = wait_service(command, args.project_dir, target_image["Id"], baseline)
                 report["status"] = "deployed"
+                retention = retain_development_state(args, configuration, report, report_file, target_image["Id"])
+                if retention is not None:
+                    report["retention"] = retention
                 write_json(report_file, report)
                 atomic_bytes(state_dir / "current.json", json.dumps(report, ensure_ascii=False, indent=2).encode() + b"\n")
                 return report
             except BaseException as error:
                 report["error_type"] = type(error).__name__
                 report["status"] = "recovery_required" if start_requested else "failed_before_start"
+                if report.get("retention_stage"):
+                    try:
+                        report["verification"] = inspect_service(only_container(command, args.project_dir))
+                        report["status"] = "deployed_retention_pending"
+                    except OperationError:
+                        # 健康回查失败时保留恢复状态，原异常仍向外报告。
+                        pass
                 if isinstance(error, OperationError):
                     report["error"] = str(error)
                 if stopped and not start_requested:
@@ -227,7 +418,9 @@ def deploy(args):
                                         "--project-name", frozen_configuration["name"], "--file", str(recovery_config)]
                     try:
                         with complete_service_command():
-                            run(recovery_command + ["up", "--detach", "--no-build", "--no-deps", "--pull", "never", "hexclaw"], cwd=args.project_dir)
+                            run(recovery_command + ["up", "--no-start", "--no-build", "--no-deps", "--pull", "never", "hexclaw"], cwd=args.project_dir)
+                        recovered = ensure_runtime_system_paths(configuration, only_container(recovery_command, args.project_dir))
+                        run(["docker", "start", recovered["Id"]])
                         wait_service(recovery_command, args.project_dir, old["Image"], baseline)
                         report["original_service_restored"] = True
                         # 保留原部署文件，镜像恢复使用的 ID 已记录到部署回执。
