@@ -320,7 +320,7 @@ type SkillsConfig struct {
 // SkillsHubConfig 在线技能市场 Git 源
 type SkillsHubConfig struct {
 	RepoURL string `yaml:"repo_url"` // 默认 github.com/hexagon-codes/hexclaw-hub
-	Branch  string `yaml:"branch"`   // 默认 v0.0.12
+	Branch  string `yaml:"branch"`   // 默认 v0.0.13
 }
 
 // FileMemoryConfig 文件记忆配置
