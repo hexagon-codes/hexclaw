@@ -190,6 +190,7 @@ var replySafeAssistantMetadataKeys = map[string]struct{}{
 	"locale":                     {},
 	"self_context_receipt":       {},
 	"provider_display_name":      {},
+	"model_display_label":        {},
 	"provider_instance_id":       {},
 	"skill_context_receipts":     {},
 	"teaching_context_receipts":  {},

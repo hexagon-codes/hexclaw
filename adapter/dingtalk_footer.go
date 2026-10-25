@@ -7,6 +7,7 @@ import (
 	"unicode"
 
 	"github.com/hexagon-codes/hexclaw/internal/mathtext"
+	"github.com/hexagon-codes/hexclaw/messagecontent"
 )
 
 // DingTalkReplyFooter 只用本次回执生成渠道尾注，规范正文和历史投递不受影响。
@@ -180,7 +181,7 @@ func renderDingTalkReplyFooter(reply *Reply, locale string, models []ExecutionSu
 		if provider == "" {
 			provider = receipt.Provider
 		}
-		if strings.TrimSpace(model) == "" || model == "auto" {
+		if strings.TrimSpace(model) == "" || strings.EqualFold(strings.TrimSpace(model), "auto") {
 			model = labels[5]
 		}
 		identity := receipt.ProviderInstanceID + "\x00" + receipt.Provider + "\x00" + model
@@ -197,9 +198,7 @@ func renderDingTalkReplyFooter(reply *Reply, locale string, models []ExecutionSu
 				provider = "\u2068" + provider + "\u2069"
 			}
 		}
-		if provider != "" {
-			visible = mathtext.EscapeMarkdownInline(provider) + " · " + visible
-		}
+		visible = messagecontent.FormatModelIdentity(mathtext.EscapeMarkdownInline(provider), visible)
 		visibleModels = append(visibleModels, visible)
 	}
 	lines = append(lines, "**"+labels[2]+"** "+strings.Join(visibleModels, "；"))

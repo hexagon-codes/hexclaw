@@ -264,6 +264,19 @@ func appendExecutionSummaryUnique(items []string, value string) []string {
 	return append(items, value)
 }
 
+// FormatModelIdentity 统一已冻结供应商和模型的展示，不读取当前配置或默认选项。
+func FormatModelIdentity(provider, model string) string {
+	provider = strings.Join(strings.Fields(provider), " ")
+	model = strings.Join(strings.Fields(model), " ")
+	if model == "" || strings.EqualFold(model, "auto") {
+		return ""
+	}
+	if provider != "" {
+		return provider + " · " + model
+	}
+	return model
+}
+
 func executionSummaryName(value string) string {
 	value = strings.Join(strings.Fields(value), " ")
 	return strings.NewReplacer("\\", "\\\\", "`", "\\`", "*", "\\*", "_", "\\_", "[", "\\[", "]", "\\]", "<", "&lt;", ">", "&gt;").Replace(value)

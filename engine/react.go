@@ -5372,6 +5372,13 @@ func buildReplyMetadata(metadata map[string]string, providerName, modelName, ass
 		replyMeta["provider_display_name"] = presentation.DisplayName
 		replyMeta["provider_instance_id"] = presentation.InstanceID
 	}
+	providerDisplay := replyMeta["provider_display_name"]
+	if providerDisplay == "" {
+		providerDisplay = providerName
+	}
+	if label := messagecontent.FormatModelIdentity(providerDisplay, modelName); label != "" {
+		replyMeta["model_display_label"] = label
+	}
 	producer, locale, producerErr := resolveProducerContract(metadata)
 	if producerErr == nil {
 		replyMeta["producer_kind"] = string(producer)
