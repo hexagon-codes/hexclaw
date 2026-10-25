@@ -209,7 +209,8 @@ func TestBug20260611_VideoGenerationDetachesFromRequestCtx(t *testing.T) {
 	if got != "" {
 		t.Errorf("[BUG-20260611] video generation ctx was cancelled with the request ctx: %v", got)
 	}
-	if final == nil || final.Error != nil {
+	// 断连订阅者可以收不到终态；已经收到的终态仍必须成功。
+	if final != nil && final.Error != nil {
 		t.Fatalf("expected a successful final chunk, got %+v", final)
 	}
 

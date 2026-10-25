@@ -571,7 +571,7 @@ func TestE2E_MultiTurn_HistoryConsistency(t *testing.T) {
 // ============================================================================
 
 // TestE2E_Compaction_TriggersAndPreservesRecentHistory 验证压缩闭环：
-// 当会话消息超过阈值，finalizeReply 异步触发压缩，旧消息被摘要替换、保留最近 N 条。
+// 当会话消息超过阈值，finalizeReply 异步压缩活动上下文，原始消息仍完整保留。
 // 压缩在后台 goroutine 执行，由 eng.Stop()（bgWg.Wait）保证完成，无需 sleep 轮询。
 func TestE2E_Compaction_TriggersAndPreservesRecentHistory(t *testing.T) {
 	var summarizeCalls atomic.Int32
@@ -614,29 +614,45 @@ func TestE2E_Compaction_TriggersAndPreservesRecentHistory(t *testing.T) {
 		t.Fatal("超过阈值后应至少触发一次压缩摘要 LLM 调用")
 	}
 
-	// 压缩后历史一致性：必须存在一条 system 摘要消息，且消息总数显著小于 10。
+	// 压缩只缩短模型上下文，不删除用户可查询的原始问答。
 	recs := h.dbMessages(t, sessionID)
 	var hasSummary bool
+	questions := make(map[string]bool)
+	assistantCount := 0
 	for _, r := range recs {
 		if r.Role == "system" && strings.Contains(r.Content, "[上下文摘要]") {
 			hasSummary = true
+		}
+		if r.Role == "user" {
+			questions[r.Content] = true
+		}
+		if r.Role == "assistant" && r.Content == "ok" {
+			assistantCount++
 		}
 	}
 	if !hasSummary {
 		t.Fatalf("压缩后应存在 [上下文摘要] system 消息，实际全量=%s", dumpRecs(recs))
 	}
-	if len(recs) >= 10 {
-		t.Fatalf("压缩后消息数应小于压缩前(10)，实际 %d", len(recs))
+	for i := 0; i < 5; i++ {
+		if !questions[fmt.Sprintf("第%d个问题", i)] {
+			t.Fatalf("压缩删除了第 %d 个原始问题", i)
+		}
+	}
+	if assistantCount != 5 {
+		t.Fatalf("压缩后应保留 5 条原始回答，实际 %d", assistantCount)
 	}
 
 	// 最关键：压缩后会话仍可正常 BuildContext（历史未损坏），
-	// 且摘要消息位于历史前部、最近消息保留在尾部。
+	// 且活动上下文同时保留摘要和最近一轮问答。
 	ctxMsgs, err := h.mgr.BuildContext(context.Background(), sessionID)
 	if err != nil {
 		t.Fatalf("压缩后 BuildContext 失败（历史损坏）: %v", err)
 	}
-	if len(ctxMsgs) == 0 {
-		t.Fatal("压缩后 BuildContext 不应为空")
+	if len(ctxMsgs) == 0 || len(ctxMsgs) >= 10 {
+		t.Fatalf("活动上下文应非空且短于原始问答，实际 %d", len(ctxMsgs))
+	}
+	if !strings.Contains(allContent(ctxMsgs), "[上下文摘要]") || !strings.Contains(allContent(ctxMsgs), "user:第4个问题") || !strings.Contains(allContent(ctxMsgs), "assistant:ok") {
+		t.Fatalf("活动上下文未保留摘要及最近一轮问答: %+v", ctxMsgs)
 	}
 }
 
