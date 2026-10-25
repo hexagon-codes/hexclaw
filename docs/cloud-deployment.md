@@ -2,7 +2,7 @@
 
 适用于本仓库包含云端连接支持的源码构建。当前镜像为 Linux amd64，包含 Pandoc、Typst、Poppler、中文和数学字体、Python 及 SymPy。Poppler 提供 PDF 页数读取、文本提取及原页渲染。服务存储使用 SQLite；同一数据目录只运行一个实例。单机日常运行推荐 Docker Compose；已有 Kubernetes 集群使用相同镜像和独立 PVC。
 
-本次源码与文档版本为 `v0.5.1`；版本标识不表示已创建对应 Tag、完成 GitHub Release、发布版本镜像或更新当前服务器，实际状态以对应 Actions 记录及产物为准。Desktop 正式包固定引用后端 `refs/tags/v0.5.0`，须先发布包含最终修复的后端 Tag，再同步该引用并构建 Desktop；当前云端部署仍沿原指定分支，不因版本准备切换策略。
+本次源码与文档版本为 `v0.5.1`；版本标识不表示已创建对应 Tag、完成 GitHub Release、发布版本镜像或更新当前服务器，实际状态以对应 Actions 记录及产物为准。Desktop 正式包固定引用后端 `refs/tags/v0.5.0`，须先发布包含最终修复的后端 Tag，再同步该引用并构建 Desktop。部署入口仅接纳 main push 的完整 CI 成功事件；Tag Release 不自动更新测试服务器。
 
 ## Docker Compose
 
@@ -81,10 +81,10 @@ Compose 留出 60 秒停止窗口，覆盖服务当前 30 秒收尾预算。已�
 
 | 入口 | 执行范围 | 与部署／发布的关系 |
 | --- | --- | --- |
-| `feat/**` 分支 push（纯说明文档改动除外） | [CI](../.github/workflows/ci.yml) 使用 `go test -run '^$' ./...` 编译应用和测试包，不执行测试用例 | 部署已启用且分支等于 `HEXCLAW_DEPLOY_BRANCH` 时，CI 编译成功就会触发自动云端部署；不需要先合并 main |
-| main push／指向 main 的 PR（纯说明文档改动除外） | 一个主 CI 执行 Linux 普通全量测试（含 K12 确定性）、Windows 编译和必要的跨平台 sandbox／CodeExec；不使用真实模型密钥 | PR 验证不触发云端部署；main push 也只在 main 是已配置部署分支时部署。feature 编译成功不代表这些检查通过 |
+| `feat/**` 分支 push（纯说明文档改动除外） | [CI](../.github/workflows/ci.yml) 使用 `go test -run '^$' ./...` 编译应用和测试包，不执行测试用例 | 不部署；编译成功不能代替完整 CI |
+| main push／指向 main 的 PR（纯说明文档改动除外） | 一个主 CI 执行 Linux 普通全量测试（含 K12 确定性）、Windows 编译和必要的跨平台 sandbox／CodeExec；不使用真实模型密钥 | 仅 main push 的完整 CI 成功后部署，PR 不部署；实际镜像固定到该次 CI 的完整 SHA |
 | 现有主 CI 手动触发 | Linux 全量 race，以及现有 Windows／macOS 平台检查；不使用真实模型密钥 | 不触发按 push CI 成功接续的自动部署，也不代替部署结果核对 |
-| `v*` Tag push／手动指定已有 Tag | [Release](../.github/workflows/release.yml) 构建 Linux、macOS、Windows 二进制，生成 checksum、GitHub Release 和 Linux amd64 镜像 | 独立发布入口，只依赖自身构建任务，不等待主 CI 的完整测试；不会代替分支自动部署或业务验收 |
+| `v*` Tag push／手动指定已有 Tag | [Release](../.github/workflows/release.yml) 先核对同一 SHA 的主 CI 和最终部署结果，再构建版本产物 | 二进制和镜像均构建成功后生成 checksum 并创建 Release；不会触发服务器部署，也不代替业务验收 |
 
 分支 push／PR 仅修改 `README*.md`、`CHANGELOG.md`、`CONTRIBUTING.md`、`SECURITY*.md`、`docs/**/*.md` 或 `LICENSE` 时不触发 CI，因此该提交不会触发 CI 构建或接续自动云端部署。此范围只包含说明文档；其他目录的 Markdown 可能是 `go:embed` 运行资源，不能广义忽略 `**/*.md`。独立 Tag Release 入口不受这项分支文档过滤影响。
 
@@ -94,14 +94,14 @@ CI 与 K12 使用 `GOWORK=off`、`GOFLAGS=-mod=readonly`，按已发布依赖检
 
 主 CI 提供手动全量 race 入口，K12 Eval Gate 与 Sandbox CodeExec 仅手动补验，公网爬虫仅在手动 Sandbox 的 `run_live_network=true` 时运行。render 仍按自身路径规则独立运行：main push 路径包含工作流自身，PR 路径只包含渲染代码；仅修改 CI／render 工作流后推送 feature 分支，不会运行 render 的三平台检查。render 每周上游版本查询与覆盖率上传已移除。
 
-`workflow_run` 的监听文件必须存在于仓库默认分支；实际构建仍检出上游 CI 已通过的 `head_sha`。`HEXCLAW_DEPLOY_BRANCH` 应选择既有 CI 监听的分支，不能只配置变量而没有相应 CI 运行。首次接入时若该提交的 CI 在监听文件合入前已经完成，可重新运行该次 CI，让完成事件接续部署，无需创建空提交。
+`workflow_run` 的监听文件必须存在于仓库默认分支；实际构建检出上游 CI 已通过的 `head_sha`。入口明确要求 main push，不再通过 feature 分支变量允许仅编译后部署。服务器目标 `ref` 同样配置为 `refs/heads/main`。代码和配置变更必须先发布到对应工作流使用的源码；本地修改不等于远端 Actions 已采用。
 
 部署目录放置私有 `deployment-target.json`，按该服务器的实际项目填写。例如：
 
 ```json
 {
   "repository": "https://github.com/hexagon-codes/hexclaw.git",
-  "ref": "refs/heads/<已确认的部署分支>",
+  "ref": "refs/heads/main",
   "project_name": "<当前Compose项目名>",
   "compose_files": ["docker-compose.yml", "docker-compose.https.yml"],
   "env_files": [".env"],
@@ -122,11 +122,11 @@ GitHub 配置项：
 
 | 位置 | 配置 |
 | --- | --- |
-| Repository variables | `HEXCLAW_DEPLOY_BRANCH`：上述同一分支；`HEXCLAW_DEPLOY_ENABLED=true`：完成恢复验收后启用 |
+| Repository variables | `HEXCLAW_DEPLOY_ENABLED=true`：对应源码和恢复验收完成后启用；部署入口固定为 main push |
 | Environment `hexclaw-cloud` variables | `HEXCLAW_DEPLOY_PROJECT`：服务器部署目录绝对路径 |
 | Environment `hexclaw-cloud` secrets | `HEXCLAW_DEPLOY_HOST`、`HEXCLAW_DEPLOY_SSH_KEY`、`HEXCLAW_DEPLOY_KNOWN_HOSTS`：配置部署专用 SSH 凭据及已核对的主机信息，保留服务器原有登录方式 |
 
-CI 对指定分支的 push 完成且成功后，构建对应的完整提交 SHA，推送 `sha-<commit>` 镜像；部署任务传递构建返回的 digest。构建可取消过期任务，进入服务器变更的部署不被下一次提交自动取消。服务端与备份共用 `.hexclaw-maintenance.lock`，取得锁后及备份完成后再次向仓库核对绑定分支的当前提交，过期任务只记录 `superseded`。
+main push 的完整 CI 成功后，构建对应 SHA 并推送 `sha-<commit>` 镜像，部署传递该构建返回的 digest。构建可取消过期任务，服务器变更不被下一次提交自动取消。服务端在 `.hexclaw-maintenance.lock` 内读取目标配置、校验原数据挂载、拉取镜像并冻结完整 Compose 配置；正常替换和启动前恢复使用同一冻结配置。目标已前进时记录 `superseded`，不会伪称该候选已部署。
 
 手工发布同样调用该脚本，使用已经核实的提交和 digest，不另起绕过锁的自动更新命令：
 
@@ -138,6 +138,18 @@ python3 scripts/ops/deploy.py \
 ```
 
 脚本先拉取镜像并核对 OCI revision，然后检查原项目、原卷及配置；停止旧进程、完整备份、只重建 HexClaw，再启动唯一的新进程。就绪检查包含健康端点、受保护配置／知识库读取、原 backend ID 和配置摘要，记录前后 schema 版本。该检查不发送模型或 IM 请求，不能替代实际批改、图片附件和语义召回验收。
+
+自动和手动使用同一版本的 `deploy.py/backup.py`、相同镜像 digest 与同一目标配置。正常维护不重新构建同 SHA 镜像，也不直接向运行容器覆盖二进制。配置和工具摘要匹配、当前容器仍运行同一镜像且原最终回执完整时，重复入口只核验并复用现用结果，返回 `reused=true`，不会再次停机替换；这可用于恢复结果交接失败的同一候选。
+
+未解决的 `starting`、`recovery_required` 或未恢复的启动前失败，会阻止后续任务把异常现状当作健康基线，也不会被成功清理函数删除。只有 `deployed_retention_pending` 且候选 SHA/digest 匹配时，可在同一入口继续快照/清理，返回 `resumed=true`；不再次替换健康容器。恢复结论必须依据现场和数据，不能直接改状态掩盖问题。
+
+原 `/data` 数据卷及必要挂载继续使用，包括数据库/WAL、知识库、模型配置、加密密钥和应用文件日志。日志保留期沿用 `observe.log_retention_days`，既有默认 15 天，部署不清空日志。成功后 `current_only` 定向解除旧 HexClaw 镜像引用；其他应用共享的镜像标签或仍被容器使用的镜像保持，不全局 prune，也不删除卷。
+
+### Release 检查与结果记录
+
+[release_gate.py](../scripts/ops/release_gate.py) 在构建发布产物前解析 Tag 的完整 SHA，检查其在 main 历史中，并验证相同 SHA 的成功 main push CI。Deploy 仅在共用脚本完成并返回最终 `deployed` 后，从真实回执导出状态、SHA、镜像 digest、来源 CI/run 编号和环境，保存为一份 Actions artifact；配置、密钥和用户数据不上传。
+
+Release 核对该结果来自本仓库对应 Deploy 工作流，运行已完成且成功，SHA、digest 和来源 CI 都匹配。仅 Actions success、`superseded`、恢复未决、清理待完成或缺失的结果均不放行。门禁通过的 SHA 作为二进制和镜像构建输入；所有必要构建成功后才创建 Release，不另建证据服务或重复运行主 CI。
 
 成功后 `.hexclaw-image.env` 固定当前 digest，`.hexclaw-deploy/current.json` 和独立历史回执记录结果。此后手工 Compose 操作也须在原参数之后追加 `--env-file .hexclaw-image.env`，并保留原 `.env`，避免退回其中的旧镜像。部署回执、展开后的 Compose 配置和备份属于私有运维资料，不提交 Git。
 

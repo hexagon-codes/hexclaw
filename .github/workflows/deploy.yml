@@ -16,7 +16,7 @@ jobs:
       github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_repository.full_name == github.repository &&
       vars.HEXCLAW_DEPLOY_ENABLED == 'true' &&
-      github.event.workflow_run.head_branch == vars.HEXCLAW_DEPLOY_BRANCH
+      github.event.workflow_run.head_branch == 'main'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -77,15 +77,18 @@ jobs:
           (directory / 'known_hosts').write_text(os.environ['DEPLOY_HOST_KEYS'] + '\n')
           PY
       - name: Deploy exact digest
+        id: update
         env:
           DEPLOY_HOST: ${{ secrets.HEXCLAW_DEPLOY_HOST }}
           DEPLOY_PROJECT: ${{ vars.HEXCLAW_DEPLOY_PROJECT }}
           DEPLOY_COMMIT: ${{ github.event.workflow_run.head_sha }}
           DEPLOY_DIGEST: ${{ needs.image.outputs.digest }}
           DEPLOY_RUN: ${{ github.run_id }}
+          SOURCE_CI_RUN: ${{ github.event.workflow_run.id }}
         run: |
           python3 - <<'PY'
-          import io, os, posixpath, shlex, subprocess, tarfile
+          import io, json, os, posixpath, shlex, subprocess, tarfile
+          from pathlib import Path
           project = os.environ['DEPLOY_PROJECT']
           if not posixpath.isabs(project): raise SystemExit('An absolute deployment project directory is required')
           commit = os.environ['DEPLOY_COMMIT']
@@ -95,10 +98,40 @@ jobs:
               for name in ('backup.py', 'deploy.py'):
                   archive.add('scripts/ops/' + name, arcname=name)
           upload = 'umask 077; mkdir -p -- ' + shlex.quote(directory) + ' && tar -xf - -C ' + shlex.quote(directory)
-          subprocess.run(['ssh', '--', os.environ['DEPLOY_HOST'], upload], input=stream.getvalue(), check=True)
+          uploaded = subprocess.run(['ssh', '--', os.environ['DEPLOY_HOST'], upload], input=stream.getvalue(), capture_output=True)
+          if uploaded.returncode:
+              raise SystemExit('Deployment tools upload failed; inspect the private target connection')
           args = ['python3', directory + '/deploy.py', '--project-dir', project,
                   '--target-config', project + '/deployment-target.json',
                   '--image', 'ghcr.io/hexagon-codes/hexclaw@' + os.environ['DEPLOY_DIGEST'],
                   '--commit', commit, '--run-id', os.environ['DEPLOY_RUN']]
-          subprocess.run(['ssh', '--', os.environ['DEPLOY_HOST'], shlex.join(args)], check=True)
+          result = subprocess.run(['ssh', '--', os.environ['DEPLOY_HOST'], shlex.join(args)], capture_output=True, text=True)
+          if result.returncode:
+              message = next((line for line in reversed(result.stderr.splitlines()) if line.startswith(('Deployment failed:', 'Deployment interrupted'))), 'Deployment command failed; inspect the server receipt')
+              raise SystemExit(message)
+          receipt = json.loads(result.stdout)
+          deployed = receipt.get('status') == 'deployed'
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('deployed=' + str(deployed).lower() + '\n')
+          if not deployed:
+              if receipt.get('status') != 'superseded':
+                  raise SystemExit('Deployment has no finalized success result')
+              print('Deployment superseded; the candidate was not applied')
+          else:
+              image = 'ghcr.io/hexagon-codes/hexclaw@' + os.environ['DEPLOY_DIGEST']
+              if receipt.get('commit') != commit or receipt.get('image') != image or str(receipt.get('actions_run')) != os.environ['DEPLOY_RUN'] or receipt.get('retention_stage'):
+                  raise SystemExit('The deployment receipt does not match this operation')
+              exported = {key: receipt[key] for key in ('status', 'commit', 'image', 'actions_run')}
+              exported.update(source_ci_run_id=os.environ['SOURCE_CI_RUN'], environment='hexclaw-cloud')
+              Path('deployment-result.json').write_text(json.dumps(exported) + '\n')
+              print('Deployment finalized: ' + commit)
           PY
+
+      - name: Preserve finalized deployment result
+        if: steps.update.outputs.deployed == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: hexclaw-deployment-${{ github.event.workflow_run.head_sha }}
+          path: deployment-result.json
+          if-no-files-found: error
+          overwrite: true

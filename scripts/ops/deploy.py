@@ -4,6 +4,7 @@
 import argparse
 import copy
 import datetime
+import hashlib
 import http.client
 import json
 import os
@@ -18,7 +19,7 @@ import time
 import uuid
 import urllib.parse
 
-from backup import OperationError, backup, complete_service_command, compose_args, docker_json, maintenance_lock, run, sha256, write_json
+from backup import OperationError, backup, complete_service_command, compose_args, deployment_paths, docker_json, maintenance_lock, run, sha256, write_json
 
 
 def atomic_bytes(path, content):
@@ -44,6 +45,39 @@ def current_target(configuration):
     if len(matches) != 1:
         raise OperationError("The deployment target cannot be resolved")
     return matches[0]
+
+
+def configuration_digest(configuration, compose):
+    content = json.dumps({"target": configuration, "compose": compose}, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(content.encode()).hexdigest()
+
+
+def deployment_tools_digest():
+    digest = hashlib.sha256()
+    for name in ("deploy.py", "backup.py"):
+        digest.update(name.encode())
+        digest.update(Path(__file__).with_name(name).read_bytes())
+    return digest.hexdigest()
+
+
+def pending_deployment(state_dir):
+    """恢复未决状态不能被后来的部署当作健康基线。"""
+    pending = []
+    for path in state_dir.glob("*.json"):
+        if not re.fullmatch(r"\d{8}T\d{6}Z-[0-9a-f]{8}\.json", path.name):
+            continue
+        saved = json.loads(path.read_text())
+        if saved.get("resolved"):
+            continue
+        status = saved.get("status")
+        unresolved = status in {"stopping", "starting", "recovery_required", "deployed_retention_pending"}
+        unresolved = unresolved or (status == "failed_before_start" and not saved.get("original_service_restored"))
+        unresolved = unresolved or (status == "preparing" and saved.get("previous_image_id"))
+        if unresolved:
+            pending.append((path, saved))
+    if len(pending) > 1:
+        raise OperationError("Multiple deployment receipts require recovery; inspect them before updating")
+    return pending[0] if pending else None
 
 
 class DockerConnection(http.client.HTTPConnection):
@@ -128,12 +162,14 @@ def retain_development_state(args, configuration, report, report_file, current_i
     output.mkdir(parents=True, exist_ok=True)
     state_dir = report_file.parent
     history = []
-    terminal = {"deployed", "deployed_retention_pending", "failed_before_start", "recovery_required", "superseded"}
+    terminal = {"deployed", "preflight_failed", "failed_before_start", "superseded"}
     for path in state_dir.glob("*.json"):
         if path == report_file or not re.fullmatch(r"\d{8}T\d{6}Z-[0-9a-f]{8}\.json", path.name):
             continue
         saved = json.loads(path.read_text())
-        if saved.get("status") in terminal and "commit" in saved and "image" in saved:
+        status = saved.get("status")
+        recoverable = status == "failed_before_start" and not saved.get("original_service_restored")
+        if ((status in terminal and not recoverable) or saved.get("resolved")) and "commit" in saved and "image" in saved:
             history.append((path, saved))
     report["retention_stage"] = "snapshot"
     write_json(report_file, report)
@@ -162,8 +198,13 @@ def retain_development_state(args, configuration, report, report_file, current_i
 
     removed_archives = 0
     images = {report.get("previous_image_id")}
+    references = {}
     for _, saved in history + [(report_file, report)]:
         images.update((saved.get("previous_image_id"), saved.get("image_id")))
+        for image_id, reference in ((saved.get("previous_image_id"), saved.get("previous_image")),
+                                    (saved.get("image_id"), saved.get("image"))):
+            if image_id and reference:
+                references.setdefault(image_id, set()).add(reference)
         for key in ("backup", "current_backup"):
             entry = saved.get(key) or {}
             name = entry.get("archive", "")
@@ -179,21 +220,29 @@ def retain_development_state(args, configuration, report, report_file, current_i
     containers = run(["docker", "ps", "--all", "--quiet"]).decode().split()
     used_images = set(run(["docker", "inspect", "--format", "{{.Image}}", *containers]).decode().split()) if containers else set()
     available = set(run(["docker", "image", "ls", "--no-trunc", "--quiet"]).decode().split())
-    removed_images, retained_images = 0, 0
+    removed_images, retained_images, shared_images = 0, 0, 0
     for image in sorted(value for value in images if value and value != current_image):
         if image in used_images:
             retained_images += 1
             continue
         if image not in available:
             continue
-        # 只解除已核对旧应用镜像的引用，不使用全局prune或强制删除。
+        # 只解除本项目回执所属仓库的引用，保留其他应用共享的标签。
         tags = json.loads(run(["docker", "image", "inspect", "--format", "{{json .RepoTags}}", image])) or []
         digests = json.loads(run(["docker", "image", "inspect", "--format", "{{json .RepoDigests}}", image])) or []
+        owned = references.get(image, set())
+        repositories = {image_repository(value) for value in owned} - {None}
         for reference in tags + digests:
+            if reference not in owned and image_repository(reference) not in repositories:
+                continue
             if image not in set(run(["docker", "image", "ls", "--no-trunc", "--quiet"]).decode().split()):
                 break
             run(["docker", "image", "rm", reference])
         if image in set(run(["docker", "image", "ls", "--no-trunc", "--quiet"]).decode().split()):
+            remaining = docker_json("image", "inspect", image)[0]
+            if remaining.get("RepoTags") or remaining.get("RepoDigests"):
+                shared_images += 1
+                continue
             run(["docker", "image", "rm", image])
         removed_images += 1
     # 清理结束后才收敛旧部署回执；在途任务和非部署备份均保留。
@@ -210,7 +259,16 @@ def retain_development_state(args, configuration, report, report_file, current_i
     report.pop("retention_stage", None)
     return {"policy": "current_only", "current_archive": "latest-deployment.tar",
             "removed_archives": removed_archives, "removed_images": removed_images,
-            "preserved_in_use_images": retained_images}
+            "preserved_in_use_images": retained_images, "preserved_shared_images": shared_images}
+
+
+def image_repository(reference):
+    if reference.startswith("sha256:"):
+        return None
+    repository = reference.split("@", 1)[0]
+    if ":" in repository.rsplit("/", 1)[-1]:
+        repository = repository.rsplit(":", 1)[0]
+    return repository
 
 
 def mounted_data(container):
@@ -295,17 +353,16 @@ def wait_service(command, project, image_id, baseline):
 def deploy(args):
     args.project_dir = args.project_dir.resolve()
     settings_path = args.target_config.resolve()
-    configuration = json.loads(settings_path.read_text())
     if not re.fullmatch(r"[0-9a-f]{40}", args.commit):
         raise OperationError("A full commit SHA is required")
     if not re.fullmatch(r"[^\s@]+@sha256:[0-9a-f]{64}", args.image):
         raise OperationError("An immutable image digest is required")
-    state_dir = args.project_dir / ".hexclaw-deploy"
-    state_dir.mkdir(exist_ok=True)
-    report_file = state_dir / (datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8] + ".json")
-    report = {"commit": args.commit, "image": args.image, "actions_run": args.run_id, "status": "preparing"}
-    write_json(report_file, report)
-    try:
+    args.include = [Path(value) for value in getattr(args, "include", [])]
+    args.remote_host = None
+    args.remote_dir = None
+
+    with maintenance_lock(args.project_dir):
+        configuration = json.loads(settings_path.read_text())
         image_file = args.project_dir / ".hexclaw-image.env"
         args.compose_file = [args.project_dir / item for item in configuration.get("compose_files", [])]
         args.env_file = [args.project_dir / item for item in configuration.get("env_files", [])]
@@ -315,68 +372,139 @@ def deploy(args):
             args.env_file.append(image_file)
         args.project_name = configuration.get("project_name")
         command = compose_args(args)
-        # 镜像下载失败不影响原容器；摘要和 OCI 提交一致后才进入停机区间。
-        run(["docker", "pull", args.image])
-        target_image = docker_json("image", "inspect", args.image)[0]
-        if (target_image["Config"].get("Labels") or {}).get("org.opencontainers.image.revision") != args.commit:
-            raise OperationError("The image revision does not match the requested commit")
-        report["image_id"] = target_image["Id"]
-        with maintenance_lock(args.project_dir):
+        original_files = list(args.compose_file) + list(args.env_file)
+        state_dir = args.project_dir / ".hexclaw-deploy"
+        state_dir.mkdir(exist_ok=True)
+        pending = pending_deployment(state_dir)
+        if pending:
+            pending_file, saved = pending
+            if (saved.get("status") != "deployed_retention_pending"
+                    or saved.get("commit") != args.commit or saved.get("image") != args.image):
+                raise OperationError("A previous deployment requires recovery; its data and recovery files are preserved")
+            current = only_container(command, args.project_dir)
+            target_image = docker_json("image", "inspect", args.image)[0]
+            if mounted_data(current) != configured_data(json.loads(run(command + ["config", "--format", "json"], cwd=args.project_dir))):
+                raise OperationError("The pending deployment no longer uses the configured data mount")
+            saved["verification"] = wait_service(command, args.project_dir, target_image["Id"], saved["baseline"])
+            args.output = args.project_dir / configuration.get("backup_directory", "backups")
+            recovery_config = pending_file.with_suffix(".compose.json")
+            args.include = [settings_path] + original_files + args.include
+            if recovery_config.is_file():
+                args.include.append(recovery_config)
+            saved["original_actions_run"] = saved.get("original_actions_run", saved.get("actions_run"))
+            saved["actions_run"] = args.run_id
+            saved["resumed"] = True
+            try:
+                saved["retention"] = retain_development_state(args, configuration, saved, pending_file, target_image["Id"])
+                saved["status"] = "deployed"
+                write_json(pending_file, saved)
+                atomic_bytes(state_dir / "current.json", (json.dumps(saved, ensure_ascii=False, indent=2) + "\n").encode())
+                return saved
+            except BaseException:
+                saved["status"] = "deployed_retention_pending"
+                write_json(pending_file, saved)
+                raise
+
+        old = only_container(command, args.project_dir)
+        baseline = inspect_service(old)
+        data_mount = mounted_data(old)
+        if not data_mount[2]:
+            raise OperationError("The existing data mount is read-only")
+        frozen_configuration = json.loads(run(command + ["config", "--format", "json"], cwd=args.project_dir))
+        if configured_data(frozen_configuration) != data_mount:
+            raise OperationError("The Compose configuration no longer points to the running data mount")
+        labels = old["Config"].get("Labels") or {}
+        if frozen_configuration["name"] != labels.get("com.docker.compose.project"):
+            raise OperationError("The Compose project does not match the existing container")
+        desired_configuration = copy.deepcopy(frozen_configuration)
+        desired_configuration["services"]["hexclaw"]["image"] = args.image
+        desired_digest = configuration_digest(configuration, desired_configuration)
+        tools_digest = deployment_tools_digest()
+        current_file = state_dir / "current.json"
+        if current_file.is_file():
+            previous = json.loads(current_file.read_text())
+            if (previous.get("status") == "deployed" and not previous.get("retention_stage")
+                    and previous.get("commit") == args.commit and previous.get("image") == args.image
+                    and previous.get("configuration_sha256") == desired_digest
+                    and previous.get("tools_sha256") == tools_digest
+                    and previous.get("verification", {}).get("backend_id") == baseline["backend_id"]):
+                existing_image = docker_json("image", "inspect", args.image)[0]
+                if old["Image"] == existing_image["Id"]:
+                    previous["original_actions_run"] = previous.get("original_actions_run", previous.get("actions_run"))
+                    previous["actions_run"] = args.run_id
+                    previous["verification"] = baseline
+                    previous["reused"] = True
+                    write_json(current_file, previous)
+                    return previous
+
+        report_file = state_dir / (datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8] + ".json")
+        report = {"commit": args.commit, "image": args.image, "actions_run": args.run_id,
+                  "status": "preparing", "configuration_sha256": desired_digest, "tools_sha256": tools_digest}
+        write_json(report_file, report)
+        try:
             if current_target(configuration) != args.commit:
                 report["status"] = "superseded"
                 write_json(report_file, report)
                 return report
-            old = only_container(command, args.project_dir)
-            baseline = inspect_service(old)
-            data_mount = mounted_data(old)
-            if not data_mount[2]:
-                raise OperationError("The existing data mount is read-only")
-            frozen_configuration = json.loads(run(command + ["config", "--format", "json"], cwd=args.project_dir))
-            if configured_data(frozen_configuration) != data_mount:
-                raise OperationError("The Compose configuration no longer points to the running data mount")
-            labels = old["Config"].get("Labels") or {}
-            if frozen_configuration["name"] != labels.get("com.docker.compose.project"):
-                raise OperationError("The Compose project does not match the existing container")
+            # 拉取、校验和清理共用维护锁，避免删除其他排队任务刚拉取的候选。
+            run(["docker", "pull", args.image])
+            target_image = docker_json("image", "inspect", args.image)[0]
+            if (target_image["Config"].get("Labels") or {}).get("org.opencontainers.image.revision") != args.commit:
+                raise OperationError("The image revision does not match the requested commit")
+            report["image_id"] = target_image["Id"]
             frozen_configuration["services"]["hexclaw"]["image"] = old["Image"]
             recovery_config = report_file.with_suffix(".compose.json")
             write_json(recovery_config, frozen_configuration)
-            # 只检查运行所在文件系统，实际归档过程仍以写入结果为准。
+            args.include = [settings_path, recovery_config] + original_files + args.include
+            if image_file.is_file() and image_file not in args.include:
+                args.include.append(image_file)
+            services = frozen_configuration.get("services", {})
+            gateway_ids = run(command + ["ps", "--all", "--quiet", "gateway"], cwd=args.project_dir).decode().split() if "gateway" in services else []
+            gateways = docker_json("inspect", *gateway_ids) if gateway_ids else []
+            for option in services["hexclaw"].get("security_opt") or []:
+                if option.startswith("seccomp="):
+                    value = option.split("=", 1)[1]
+                    if value not in {"unconfined", "builtin"} and not value.startswith("{"):
+                        profile = Path(value)
+                        if not profile.is_absolute():
+                            profile = args.project_dir / profile
+                        args.include.append(profile)
+            deployment_paths(args, old, gateways)
             minimum_free = int(configuration.get("minimum_free_bytes", 0))
             if shutil.disk_usage(args.project_dir).free < minimum_free:
                 raise OperationError("There is not enough free space for this deployment")
             previous_image_file = image_file.read_bytes() if image_file.exists() else None
-            report.update(previous_image_id=old["Image"], previous_image=old["Config"]["Image"], baseline=baseline)
+            active_compose = state_dir / "current.compose.json"
+            previous_compose = active_compose.read_bytes() if active_compose.exists() else None
+            report.update(previous_image_id=old["Image"], previous_image=old["Config"]["Image"],
+                          baseline=baseline, data_mount=list(data_mount))
             write_json(report_file, report)
             start_requested = False
             stopped = False
             try:
+                report["status"] = "stopping"
+                write_json(report_file, report)
                 stopped = True
                 with complete_service_command():
                     run(["docker", "stop", "--time", "60", old["Id"]])
                 args.output = args.project_dir / configuration.get("backup_directory", "backups")
-                args.include = [settings_path, recovery_config] + list(args.include) + ([image_file] if image_file.exists() else [])
-                for option in frozen_configuration["services"]["hexclaw"].get("security_opt") or []:
-                    if option.startswith("seccomp="):
-                        value = option.split("=", 1)[1]
-                        if value not in {"unconfined", "builtin"} and not value.startswith("{"):
-                            profile = Path(value)
-                            if not profile.is_absolute():
-                                profile = args.project_dir / profile
-                            if profile.is_file() and profile not in args.include:
-                                args.include.append(profile)
-                args.remote_host = None
-                args.remote_dir = None
                 report["backup"] = backup(args, lock_held=True, emit_report=False)
-                # 备份可能耗时，真正替换前再次核对分支，避免等待期间新提交已到达。
                 if current_target(configuration) != args.commit:
-                    report["status"] = "superseded"
                     with complete_service_command():
                         run(["docker", "start", old["Id"]])
+                    wait_service(command, args.project_dir, old["Image"], baseline)
+                    report["status"] = "superseded"
+                    report["original_service_restored"] = True
                     write_json(report_file, report)
                     return report
                 atomic_bytes(image_file, ("HEXCLAW_IMAGE=" + args.image + "\n").encode())
-                if image_file not in args.env_file:
-                    args.env_file.append(image_file)
+                if image_file not in args.include:
+                    args.include.append(image_file)
+                # 正常替换和恢复均使用锁内冻结的完整配置，不再解释可变 env 文件。
+                write_json(active_compose, desired_configuration)
+                args.compose_file = [active_compose]
+                args.env_file = []
+                args.project_name = desired_configuration["name"]
                 command = compose_args(args)
                 with complete_service_command():
                     run(command + ["up", "--no-start", "--no-build", "--no-deps", "--pull", "never", "--force-recreate", "hexclaw"], cwd=args.project_dir)
@@ -384,7 +512,6 @@ def deploy(args):
                 candidate = ensure_runtime_system_paths(configuration, candidate)
                 if candidate["Image"] != target_image["Id"] or mounted_data(candidate) != data_mount:
                     raise OperationError("The replacement changed the image or persistent data mount")
-                # 一旦发出 start，即可能已有迁移及副作用；失败后不能猜测数据库仍可回退。
                 start_requested = True
                 report["status"] = "starting"
                 write_json(report_file, report)
@@ -395,25 +522,21 @@ def deploy(args):
                 if retention is not None:
                     report["retention"] = retention
                 write_json(report_file, report)
-                atomic_bytes(state_dir / "current.json", json.dumps(report, ensure_ascii=False, indent=2).encode() + b"\n")
+                atomic_bytes(current_file, (json.dumps(report, ensure_ascii=False, indent=2) + "\n").encode())
                 return report
             except BaseException as error:
                 report["error_type"] = type(error).__name__
                 report["status"] = "recovery_required" if start_requested else "failed_before_start"
                 if report.get("retention_stage"):
                     try:
-                        report["verification"] = inspect_service(only_container(command, args.project_dir))
+                        wait_service(command, args.project_dir, target_image["Id"], baseline)
                         report["status"] = "deployed_retention_pending"
-                    except OperationError:
-                        # 健康回查失败时保留恢复状态，原异常仍向外报告。
+                    except (OperationError, OSError, ValueError):
                         pass
                 if isinstance(error, OperationError):
                     report["error"] = str(error)
                 if stopped and not start_requested:
-                    # 新程序未执行，原数据尚未迁移；先固定原本地镜像，再恢复同一 Compose 项目。
                     atomic_bytes(image_file, ("HEXCLAW_IMAGE=" + old["Image"] + "\n").encode())
-                    if image_file not in args.env_file:
-                        args.env_file.append(image_file)
                     recovery_command = ["docker", "compose", "--project-directory", str(args.project_dir),
                                         "--project-name", frozen_configuration["name"], "--file", str(recovery_config)]
                     try:
@@ -423,24 +546,27 @@ def deploy(args):
                         run(["docker", "start", recovered["Id"]])
                         wait_service(recovery_command, args.project_dir, old["Image"], baseline)
                         report["original_service_restored"] = True
-                        # 保留原部署文件，镜像恢复使用的 ID 已记录到部署回执。
                         if previous_image_file is None:
                             image_file.unlink()
                         else:
                             atomic_bytes(image_file, previous_image_file)
+                        if previous_compose is None:
+                            active_compose.unlink(missing_ok=True)
+                        else:
+                            atomic_bytes(active_compose, previous_compose)
                     except BaseException as recovery_error:
                         report["recovery_error_type"] = type(recovery_error).__name__
                         report["original_service_restored"] = False
                 write_json(report_file, report)
                 raise
-    except BaseException as error:
-        if report['status'] == 'preparing':
-            report['status'] = 'preflight_failed'
-            report['error_type'] = type(error).__name__
-            if isinstance(error, OperationError):
-                report['error'] = str(error)
-            write_json(report_file, report)
-        raise
+        except BaseException as error:
+            if report["status"] == "preparing":
+                report["status"] = "preflight_failed"
+                report["error_type"] = type(error).__name__
+                if isinstance(error, OperationError):
+                    report["error"] = str(error)
+                write_json(report_file, report)
+            raise
 
 
 def main():

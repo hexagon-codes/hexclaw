@@ -31,10 +31,10 @@ GOWORK=off GOFLAGS=-mod=readonly go test ./path/to/package -run '^TestAffectedBe
 | K12 Eval Gate | 手动触发 | 定向重跑 K12 harness；真实模型评测仅在本专项配置相应密钥时执行 |
 | render | main push 或 PR 匹配渲染路径 | Linux / macOS / Windows 构建及 render、API Render 测试；不再每周定时执行 |
 | Sandbox CodeExec | 手动触发 | 三平台 toolkit sandbox 与 HexClaw code_exec 专项验证；公网爬虫仅在手动输入 `run_live_network=true` 时运行（该输入默认 true） |
-| Deploy | 已启用部署，且指定分支的 push CI 成功 | 构建已验证提交的镜像，以 digest 更新云端并核对部署结果 |
-| Release | `v*` Tag push，或手动指定已有 Tag | 五组平台二进制、checksum、GitHub Release 和 Linux amd64 镜像 |
+| Deploy | 已启用部署，且 main push 的完整 CI 成功 | 构建同一 SHA 的镜像，以 digest 更新测试环境；保存脱敏的最终部署结果 |
+| Release | `v*` Tag push，或手动指定已有 Tag；先检查对应提交的主 CI 与实际部署结果 | 五组平台二进制和 Linux amd64 镜像均构建成功后，生成 checksum 并创建 GitHub Release |
 
-功能分支的编译成功可以触发现有自动部署，但不代表 main / PR 全量测试通过。Deploy 或 render 独立成功不能代替主 CI。Release 只依赖自身构建，不等待主 CI 或专项工作流；发布产物与云端部署结果应分别核对。
+功能分支只编译，不触发 Deploy。main push 的完整 CI 成功后才会部署；PR、手动 CI 和 Release Tag 不自动部署。Deploy 或 render 独立成功不能代替主 CI。Release 复用同一提交已有的成功主 CI 和最终部署结果，不重复运行整套测试；`superseded` 跳过不算实际部署通过。
 
 CI 的 push / PR 仅修改 `README*.md`、`CHANGELOG.md`、`CONTRIBUTING.md`、`SECURITY*.md`、`docs/**/*.md` 或 `LICENSE` 时跳过，不触发该提交的 CI 构建及后续自动部署。这是明确的纯说明文档范围，不使用 `**/*.md` 广义忽略：其他目录中的 Markdown 可能参与 `go:embed`，影响运行产物。
 
@@ -58,7 +58,7 @@ Windows 的平台 sandbox 硬门禁继续执行。Go 构建缓存组仅两项真
 
 主 CI 提供手动全量 race 入口；K12 Eval Gate 与 Sandbox CodeExec 也提供各自的手动入口，公网爬虫不进入普通自动 CI。手动 Sandbox 的 `run_live_network` 输入默认 true，可设为 false 不运行公网爬虫。render 的 main push 路径包含 `.github/workflows/render.yml` 自身，PR 路径不包含该文件；仅推送 CI / render 工作流文件到功能分支，不能验证完整平台矩阵或 render 三平台测试。工作流配置和绿色编译结果不等于功能缺陷已修复，也不表示手动全量 race 已通过。
 
-云端配置、部署结果及恢复边界见[云端部署与日常运维](docs/cloud-deployment.md)。Deploy 只接受配置中指定分支的成功 push CI；其他分支的 Deploy 跳过不等于发布故障，也不应为消除跳过而修改部署分支。版本记录不表示已创建 Tag 或完成 Release。
+云端配置、部署结果及恢复边界见[云端部署与日常运维](docs/cloud-deployment.md)。Deploy 只接受 main 的成功 push CI；其他事件跳过不等于发布故障。部署主机通过环境配置提供，不写死地址。版本记录不表示已创建 Tag 或完成 Release。
 
 ### 维护可持续的测试合同
 
@@ -70,12 +70,14 @@ Windows 的平台 sandbox 硬门禁继续执行。Go 构建缓存组仅两项真
 
 ### 发版流程
 
-当前源码版本为 `0.5.1`，库常量、CLI 默认版本与 OpenAPI 文档版本保持一致；构建时仍可注入实际版本、提交与日期。Desktop 当前固定后端来源为 `refs/tags/v0.5.0`，发布后端 `v0.5.1` Tag 后需同步该引用，再构建 Desktop。更新版本元数据不创建 Tag 或发布产物，也不改变既有云端部署分支。
+当前源码版本为 `0.5.1`，库常量、CLI 默认版本与 OpenAPI 文档版本保持一致；构建时仍可注入实际版本、提交与日期。Desktop 当前固定后端来源为 `refs/tags/v0.5.0`，发布后端 `v0.5.1` Tag 后需同步该引用，再构建 Desktop。更新版本元数据不创建 Tag 或发布产物。
 
 1. 在最终发布提交上完成主 CI；使用 `GOWORK=off`、`GOFLAGS=-mod=readonly` 和已发布依赖，不以本地 workspace 结果替代。
 2. 打 Tag 前按现有 Release 目标核对编译：Linux amd64 / arm64、macOS amd64 / arm64、Windows amd64，统一使用 `CGO_ENABLED=0`。这是发版前的编译预检，不增加普通提交门禁，也不要求先打测试 Tag。
 3. 编译通过后再推送版本 Tag，由 Release 生成二进制、checksum 和镜像；含预发布标识的版本应标记为 GitHub Pre-release，不作为稳定版 latest。
 4. 已推送 Tag 不删除或移动。未改变源码的临时环境或发布步骤失败可针对同一 Tag 重跑；源码需要修复时，修复、验证后使用新版本 Tag。
+
+Release 门禁解析 Tag 的完整 SHA，确认其在 main 历史中，并核对该 SHA 的成功 main push CI 和 `hexclaw-cloud` 最终部署结果。构建使用门禁固定的 SHA，避免 Tag 名称与实际构建提交不一致。现有部署回执只导出状态、SHA、镜像 digest、来源 CI/run 和环境，不上传配置正文或凭据。缺少或不匹配的必需结果明确失败，不虚构通过；真实模型、IM 和业务产物验收仍按对应任务范围完成。
 
 ### CI/CD 固定基线
 

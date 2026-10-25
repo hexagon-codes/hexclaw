@@ -2,6 +2,7 @@
 """显式运行的隔离 Docker 运维回归；不连接云端、现存项目或真实模型。"""
 
 import fcntl
+import hashlib
 import io
 import json
 import os
@@ -66,6 +67,7 @@ class DockerOperations(unittest.TestCase):
         cls.git = git
         command('git', '-C', git, 'update-ref', 'refs/heads/deploy', cls.next)
         build = cls.root / 'build'
+        cls.build = build
         build.mkdir()
         shutil.copyfile(Path(__file__).with_name('fixture_service.py'), build / 'service.py')
         (build / 'Dockerfile').write_text('''FROM python:3.13-alpine
@@ -73,7 +75,9 @@ RUN pip install --no-cache-dir PyYAML==6.0.3
 ARG REVISION
 ARG CRASH=0
 ARG ARCHIVE_FAIL=0
+ARG FIXTURE_VARIANT=common
 LABEL org.opencontainers.image.revision=$REVISION
+LABEL fixture.variant=$FIXTURE_VARIANT
 ENV HOME=/data FIXTURE_CRASH=$CRASH
 COPY service.py /service.py
 RUN if [ "$ARCHIVE_FAIL" = "1" ]; then mv /bin/tar /bin/real-tar; printf '#!/bin/sh\\nexit 42\\n' > /bin/tar; chmod +x /bin/tar; fi
@@ -126,8 +130,8 @@ CMD ["--config", "/data/.hexclaw/hexclaw.yaml"]
         seed = """from pathlib import Path
 import json
 p=Path('/data/.hexclaw');p.mkdir(exist_ok=True)
-(p/'hexclaw.yaml').write_text(json.dumps({'server':{'port':16060,'api_token':'fixture-only'},'storage':{'sqlite':{'path':str(p/'data.db')}}}))
-for name,content in [('objects/original.txt','original attachment'),('memory/entries.json','[{"id":"memory-1","content":"original memory"}]'),('memory/events.json','{"event-1":"applied"}')]:
+(p/'hexclaw.yaml').write_text(json.dumps({'server':{'port':16060,'api_token':'fixture-only'},'storage':{'sqlite':{'path':str(p/'data.db')}},'llm':{'provider':'fixture-provider','model':'fixture-model','api_key':'fixture-only-key'},'observe':{'log_retention_days':15}}))
+for name,content in [('objects/original.txt','original attachment'),('memory/entries.json','[{"id":"memory-1","content":"original memory"}]'),('memory/events.json','{"event-1":"applied"}'),('master.key','fixture-master-key'),('logs/hexclaw.log','existing application log'),('knowledge/original.txt','existing knowledge content')]:
  f=p/name;f.parent.mkdir(exist_ok=True);f.write_text(content)
 """
         command('docker', 'run', '--rm', '--network', 'none', '-v', self.volume + ':/data',
@@ -157,11 +161,25 @@ for name,content in [('objects/original.txt','original attachment'),('memory/ent
         files = [p for p in (self.project / '.hexclaw-deploy').glob('*.json') if not p.name.endswith('.compose.json') and p.name != 'current.json']
         return json.loads(max(files, key=lambda p: p.stat().st_mtime_ns).read_text())
 
+    def observed_deploy_command(self):
+        """仅观察真实维护锁的进入时机，文件、Docker 和 CLI 均真实执行。"""
+        marker = self.project / 'waiting-for-lock'
+        wrapper = self.project / 'observed_deploy.py'
+        wrapper.write_text('import contextlib,pathlib,sys\n'
+                          'sys.path.insert(0,' + repr(str(ROOT)) + ')\nimport deploy\n'
+                          'original=deploy.maintenance_lock\n'
+                          '@contextlib.contextmanager\n'
+                          'def observed(project):\n'
+                          ' pathlib.Path(' + repr(str(marker)) + ').write_text("waiting")\n'
+                          ' with original(project): yield\n'
+                          'deploy.maintenance_lock=observed\nsys.exit(deploy.main())\n')
+        return [sys.executable, str(wrapper), *self.deploy_command()[2:]], marker
+
     def read_data(self, volume=None):
         script = """import json,sqlite3,pathlib
 p=pathlib.Path('/data/.hexclaw')
 db=sqlite3.connect(str(p/'data.db'))
-print(json.dumps({'receipts':db.execute('SELECT id,state FROM receipts ORDER BY id').fetchall(),'schema':db.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0],'attachment':(p/'objects/original.txt').read_text(),'memory':(p/'memory/entries.json').read_text(),'events':(p/'memory/events.json').read_text()}))
+print(json.dumps({'receipts':db.execute('SELECT id,state FROM receipts ORDER BY id').fetchall(),'schema':db.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0],'attachment':(p/'objects/original.txt').read_text(),'memory':(p/'memory/entries.json').read_text(),'events':(p/'memory/events.json').read_text(),'config':json.loads((p/'hexclaw.yaml').read_text()),'master_key':(p/'master.key').read_text(),'log':(p/'logs/hexclaw.log').read_text(),'knowledge':(p/'knowledge/original.txt').read_text()}))
 """
         return json.loads(command('docker', 'run', '--rm', '--network', 'none', '-v', (volume or self.volume) + ':/data',
                          '--entrypoint', 'python3', self.images['old']['id'], '-c', script).stdout)
@@ -233,9 +251,10 @@ print(json.dumps({'receipts':db.execute('SELECT id,state FROM receipts ORDER BY 
         original = self.container()['Id']
         with (self.project / '.hexclaw-maintenance.lock').open('a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            process = subprocess.Popen(self.deploy_command(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            invocation, marker = self.observed_deploy_command()
+            process = subprocess.Popen(invocation, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             try:
-                wait_for(lambda: list((self.project / '.hexclaw-deploy').glob('*.json')))
+                wait_for(marker.exists)
                 command('git', '-C', self.git, 'update-ref', 'refs/heads/deploy', self.first)
                 fcntl.flock(lock, fcntl.LOCK_UN)
                 stdout, stderr = process.communicate(timeout=30)
@@ -249,6 +268,60 @@ print(json.dumps({'receipts':db.execute('SELECT id,state FROM receipts ORDER BY 
         self.assertEqual(self.images['old']['id'], self.container()['Image'])
         self.assertTrue(self.ready())
 
+    def test_waiting_deployment_reads_updated_target_configuration(self):
+        self.start()
+        original = self.container()['Id']
+        command('git', '-C', self.git, 'update-ref', 'refs/heads/maintenance', self.first)
+        invocation, marker = self.observed_deploy_command()
+        with (self.project / '.hexclaw-maintenance.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            process = subprocess.Popen(invocation, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                wait_for(marker.exists)
+                configuration = json.loads(self.settings.read_text())
+                configuration['ref'] = 'refs/heads/maintenance'
+                self.settings.write_text(json.dumps(configuration))
+                fcntl.flock(lock, fcntl.LOCK_UN)
+                stdout, stderr = process.communicate(timeout=30)
+                self.assertEqual(0, process.returncode, stderr.decode())
+                self.assertEqual('superseded', json.loads(stdout)['status'])
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait()
+        self.assertEqual(original, self.container()['Id'])
+        self.assertTrue(self.ready())
+
+    def test_current_only_cleanup_preserves_data_and_reuses_final_result(self):
+        tag = self.repository + ':retention-old'
+        self.tags.append(tag)
+        command('docker', 'build', '--quiet', '--tag', tag, '--build-arg', 'REVISION=' + self.first,
+                '--build-arg', 'FIXTURE_VARIANT=' + self.name, self.build, timeout=180)
+        command('docker', 'push', tag)
+        image = docker_json('image', 'inspect', tag)[0]
+        self.images['retention-old'] = {'id': image['Id'], 'digest': image['RepoDigests'][0]}
+        self.start('retention-old')
+        configuration = json.loads(self.settings.read_text())
+        configuration['development_retention'] = 'current_only'
+        self.settings.write_text(json.dumps(configuration))
+        old_container = self.container()['Id']
+        before = self.read_data()
+        result = json.loads(command(*self.deploy_command()).stdout)
+        self.assertEqual('deployed', result['status'])
+        self.assertEqual('current_only', result['retention']['policy'])
+        self.assertNotEqual(0, command('docker', 'inspect', old_container, check=False).returncode)
+        self.assertNotEqual(0, command('docker', 'image', 'inspect', image['Id'], check=False).returncode)
+        self.assertEqual(before, self.read_data())
+        self.assertEqual(['latest-deployment.tar'], [p.name for p in (self.project/'backups').glob('*.tar')])
+        current_container = self.container()['Id']
+        invocation = self.deploy_command()
+        invocation[-1] = 'manual-verification'
+        reused = json.loads(command(*invocation).stdout)
+        self.assertTrue(reused['reused'])
+        self.assertEqual('manual-verification', reused['actions_run'])
+        self.assertEqual(current_container, self.container()['Id'])
+        self.assertEqual(before, self.read_data())
+
     def test_successful_deployment_retains_identity_and_data(self):
         self.start()
         before = self.read_data()
@@ -258,6 +331,43 @@ print(json.dumps({'receipts':db.execute('SELECT id,state FROM receipts ORDER BY 
         self.assertEqual(before, self.read_data())
         self.assertEqual(value['baseline'], value['verification'])
         self.assertTrue(self.ready())
+
+    def test_retention_retry_keeps_current_container_and_data(self):
+        tag = self.repository + ':retry-old'
+        self.tags.append(tag)
+        command('docker', 'build', '--quiet', '--tag', tag, '--build-arg', 'REVISION=' + self.first,
+                '--build-arg', 'FIXTURE_VARIANT=' + self.name, self.build, timeout=180)
+        command('docker', 'push', tag)
+        image = docker_json('image', 'inspect', tag)[0]
+        self.images['retry-old'] = {'id': image['Id'], 'digest': image['RepoDigests'][0]}
+        self.start('retry-old')
+        configuration = json.loads(self.settings.read_text())
+        configuration['development_retention'] = 'current_only'
+        self.settings.write_text(json.dumps(configuration))
+        before = self.read_data()
+        boundary = self.project / 'retention-boundary'
+        boundary.mkdir()
+        real_docker = shutil.which('docker')
+        wrapper = ('#!' + sys.executable + '\nimport os,pathlib,sys\n'
+                   'marker=pathlib.Path(__file__).with_name("failed-once")\n'
+                   'if sys.argv[1:3]==["image","rm"] and not marker.exists():\n'
+                   ' marker.write_text("failed");sys.exit(73)\n'
+                   'os.execv(' + repr(real_docker) + ',[' + repr(real_docker) + ']+sys.argv[1:])\n')
+        (boundary/'docker').write_text(wrapper)
+        (boundary/'docker').chmod(0o755)
+        env = dict(os.environ, PATH=str(boundary)+os.pathsep+os.environ['PATH'])
+        result = command(*self.deploy_command(), env=env, check=False)
+        self.assertNotEqual(0, result.returncode)
+        self.assertEqual('deployed_retention_pending', self.receipt()['status'])
+        current_container = self.container()['Id']
+        self.assertTrue(self.ready())
+        self.assertEqual(before, self.read_data())
+        resumed = json.loads(command(*self.deploy_command()).stdout)
+        self.assertEqual('deployed', resumed['status'])
+        self.assertTrue(resumed['resumed'])
+        self.assertEqual(current_container, self.container()['Id'])
+        self.assertEqual(before, self.read_data())
+        self.assertNotEqual(0, command('docker','image','inspect',image['Id'],check=False).returncode)
 
     def test_prestart_failure_restores_old_program_on_original_data(self):
         self.start()
@@ -296,6 +406,20 @@ print(json.dumps({'receipts':db.execute('SELECT id,state FROM receipts ORDER BY 
         self.assertEqual(2, data['schema'])
         self.assertEqual([['new-process', 'unknown'], ['original-unknown', 'unknown']], data['receipts'])
         self.assertEqual('original attachment', data['attachment'])
+
+    def test_unresolved_recovery_blocks_next_deployment_and_preserves_backup(self):
+        self.start()
+        self.assertNotEqual(0, command(*self.deploy_command('crash'), check=False).returncode)
+        saved = self.receipt()
+        before = self.read_data()
+        archive = self.project / 'backups' / saved['backup']['archive']
+        digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+        self.assertNotEqual(0, command(*self.deploy_command(), check=False).returncode)
+        self.assertEqual('recovery_required', self.receipt()['status'])
+        self.assertEqual(saved, self.receipt())
+        self.assertEqual(before, self.read_data())
+        self.assertTrue(archive.exists())
+        self.assertEqual(digest, hashlib.sha256(archive.read_bytes()).hexdigest())
 
 
 if __name__ == '__main__':
