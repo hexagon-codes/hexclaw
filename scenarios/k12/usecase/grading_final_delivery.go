@@ -125,7 +125,7 @@ func (d Deps) finalReplyFullMessage(ctx context.Context, artifact k12.GradingFin
 }
 
 // PrepareAndSendK12FinalReplyBatch 是自动图片回复与显式发送的唯一长指南投影入口。
-// 旧计划只查询；全文退路必须是原计划零发送且有明确失败证据。
+// 旧计划只接续未发送子项；全文退路必须是原计划零发送且有明确失败证据。
 func (d Deps) PrepareAndSendK12FinalReplyBatch(ctx context.Context, agentName, objectKind, objectID, finalID, expectedDigest string, full DeliveryMessage, targets []ResolvedDeliveryTarget) (k12.DeliveryBatch, bool, error) {
 	artifact, err := d.getExactGradingFinalArtifact(ctx, agentName, finalID, expectedDigest)
 	if err != nil {
@@ -138,9 +138,9 @@ func (d Deps) PrepareAndSendK12FinalReplyBatch(ctx context.Context, agentName, o
 		return k12.DeliveryBatch{}, false, errors.New("final artifact digest mismatch")
 	}
 	existing, lookupErr := d.GetK12FinalReplyBatch(ctx, agentName, objectKind, objectID)
-	if lookupErr == nil && !k12storage.PDFPreparationFallbackAllowed(existing) {
-		batch, e := d.QueryDeliveryBatch(ctx, agentName, existing.BatchID)
-		return batch, false, e
+	if lookupErr == nil && (strings.HasSuffix(existing.ObjectID, ":"+k12.DeliveryProjectionVersionIMFinalPDFV1) ||
+		!k12storage.PDFPreparationFallbackAllowed(existing)) {
+		return d.resumeFinalReplyBatch(ctx, existing)
 	}
 	if lookupErr != nil && !errors.Is(lookupErr, records.ErrNotFound) {
 		return k12.DeliveryBatch{}, false, lookupErr
@@ -168,9 +168,6 @@ func (d Deps) PrepareAndSendK12FinalReplyBatch(ctx context.Context, agentName, o
 	}
 	if lookupErr == nil {
 		frozenTargets := deliveryBatchResolvedTargets(existing)
-		if strings.HasSuffix(existing.ObjectID, ":"+k12.DeliveryProjectionVersionIMFinalPDFV1) {
-			return d.resumeFinalReplyBatch(ctx, existing)
-		}
 		return d.sendK12FinalReplyFallback(ctx, existing, full, frozenTargets)
 	}
 	if targets == nil {

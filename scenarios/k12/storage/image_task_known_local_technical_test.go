@@ -301,6 +301,7 @@ func assertKnownLocalRecoveryOriginalHistory(t *testing.T, f knownLocalRecoveryF
 	}
 	if fields.AttemptCount != originalFields.AttemptCount || fields.Deadline != 1017 ||
 		fields.ParentAutomaticAttemptID != "dispatch-1:1000" ||
+		fields.AssessingAutomaticAttemptID != originalFields.ParentAutomaticAttemptID ||
 		fields.ParentAutomaticDeadlineAt != 1300 || fields.ParentAutomaticRemainingSeconds != 300 {
 		t.Fatalf("recovery reset attempts or returned wrong job window: %+v", fields)
 	}
@@ -319,7 +320,7 @@ func assertKnownLocalRecoveryOriginalHistory(t *testing.T, f knownLocalRecoveryF
 		if err := json.Unmarshal([]byte(jobRow["budget_snapshot_json"].(string)), &budget); err != nil {
 			t.Fatal(err)
 		}
-		for _, key := range []string{"parent_automatic_attempt_id", "parent_automatic_deadline_at", "parent_automatic_remaining_seconds"} {
+		for _, key := range []string{"parent_automatic_attempt_id", "parent_automatic_deadline_at", "parent_automatic_remaining_seconds", "assessing_automatic_attempt_id"} {
 			delete(budget, key)
 		}
 		jobRow["budget_snapshot_json"] = budget

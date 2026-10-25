@@ -247,6 +247,8 @@ func (o *GradingOrchestrator) AuthorizeGroundingSourceRecovery(ctx context.Conte
 	payload, _ := json.Marshal(state)
 	next := job.Fields
 	next.FailureKind, next.FailedStage, next.Retryable = "", "", false
+	// 明确授权的新来源恢复单独分配窗口，不复用旧尝试的评估分配标记。
+	next.AssessingAutomaticAttemptID = ""
 	now := o.deps.now()
 	next.ParentAutomaticDeadlineAt = now + int64(dispatch.AutomaticBudgetSeconds)
 	next.ParentAutomaticRemainingSeconds = int64(dispatch.AutomaticBudgetSeconds)

@@ -163,6 +163,9 @@ func (s *Store) RestoreImageTaskKnownLocalTechnical(
 		return k12.ImageTaskDispatch{}, nil, err
 	}
 	fields.Deadline = command.QueuedDeadline
+	if !recognizing && fields.AssessingAutomaticAttemptID == "" {
+		fields.AssessingAutomaticAttemptID = fields.ParentAutomaticAttemptID
+	}
 	fields.ParentAutomaticAttemptID = fmt.Sprintf("%s:%d", dispatch.DispatchID, dispatch.AutomaticStartedAt)
 	fields.ParentAutomaticDeadlineAt = dispatch.AutomaticDeadlineAt
 	fields.ParentAutomaticRemainingSeconds = int64(dispatch.AutomaticRemainingSeconds)

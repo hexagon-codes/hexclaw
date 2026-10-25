@@ -184,6 +184,8 @@ type GradingJobFields struct {
 	FailureKind                     string                   `json:"failure_kind,omitempty"`  // 仅失败态有值
 	Retryable                       bool                     `json:"retryable,omitempty"`     // 是否安全重试（由阶段和错误决定）
 	FailedStage                     string                   `json:"failed_stage,omitempty"`  // 失败发生的自动阶段（审计/恢复取证）
+	// AssessingAutomaticAttemptID 标识已分配过评估窗口的父尝试，恢复不能重复领取预算。
+	AssessingAutomaticAttemptID string `json:"assessing_automatic_attempt_id,omitempty"`
 }
 
 // BuildGradingIdempotencyKey 统一批改幂等键（§4.10）：创建来源 + 来源键 + confirmed_version。

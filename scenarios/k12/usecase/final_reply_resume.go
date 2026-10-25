@@ -29,18 +29,19 @@ func (d Deps) resumeFinalReplyBatch(ctx context.Context, existing k12.DeliveryBa
 		}
 		return d.sendK12FinalReplyFallback(ctx, existing, full, deliveryBatchResolvedTargets(existing))
 	}
-	batch, err := d.QueryDeliveryBatch(ctx, existing.AgentName, existing.BatchID)
-	if err != nil {
+	batch, queryErr := d.QueryDeliveryBatch(ctx, existing.AgentName, existing.BatchID)
+	if queryErr != nil && !errors.Is(queryErr, ErrDeliveryQueryUnavailable) {
 		if batch.BatchID == "" {
 			batch = existing
 		}
-		return batch, false, err
+		return batch, false, queryErr
 	}
-	result, err := d.sendDeliveryBatch(ctx, batch)
+	// 无查询编号的已发送子项仍保持未知，独立的未发送子项可按原计划继续。
+	result, sendErr := d.sendDeliveryBatch(ctx, batch)
 	if result.BatchID == "" {
 		result = batch
 	}
-	return result, false, err
+	return result, false, errors.Join(queryErr, sendErr)
 }
 
 func frozenFinalReplyFullMessage(batch k12.DeliveryBatch) (DeliveryMessage, error) {

@@ -189,12 +189,14 @@ func (s *Store) AuthorizeGroundingSourceRecovery(ctx context.Context, claim Grou
 				k12.GradingResumeStage(old.StageCheckpoints) == k12.GradingStageAssessing
 		if !assessmentReady || next.FailureKind != "" || next.FailedStage != "" || next.Retryable ||
 			next.Deadline <= now || next.ParentAutomaticDeadlineAt != next.Deadline || startedAt > now ||
+			(next.AssessingAutomaticAttemptID != "" && next.AssessingAutomaticAttemptID != next.ParentAutomaticAttemptID) ||
 			next.ParentAutomaticRemainingSeconds <= 0 || next.ParentAutomaticRemainingSeconds > budget {
 			return ErrModelInvocationConflict
 		}
 		unchanged := next
 		unchanged.Deadline, unchanged.ParentAutomaticDeadlineAt = old.Deadline, old.ParentAutomaticDeadlineAt
 		unchanged.ParentAutomaticRemainingSeconds = old.ParentAutomaticRemainingSeconds
+		unchanged.AssessingAutomaticAttemptID = old.AssessingAutomaticAttemptID
 		unchanged.FailureKind, unchanged.FailedStage, unchanged.Retryable = old.FailureKind, old.FailedStage, old.Retryable
 		if !reflect.DeepEqual(old, unchanged) {
 			return ErrModelInvocationConflict

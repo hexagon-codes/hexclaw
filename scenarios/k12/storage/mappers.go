@@ -594,6 +594,7 @@ type gradingJobBudgetEnvelope struct {
 	ParentAutomaticAttemptID        string                    `json:"parent_automatic_attempt_id"`
 	ParentAutomaticDeadlineAt       int64                     `json:"parent_automatic_deadline_at"`
 	ParentAutomaticRemainingSeconds int64                     `json:"parent_automatic_remaining_seconds"`
+	AssessingAutomaticAttemptID     string                    `json:"assessing_automatic_attempt_id,omitempty"`
 }
 
 type gradingJobBudgetEnvelopeWire struct {
@@ -602,6 +603,7 @@ type gradingJobBudgetEnvelopeWire struct {
 	ParentAutomaticAttemptID        string          `json:"parent_automatic_attempt_id"`
 	ParentAutomaticDeadlineAt       int64           `json:"parent_automatic_deadline_at"`
 	ParentAutomaticRemainingSeconds int64           `json:"parent_automatic_remaining_seconds"`
+	AssessingAutomaticAttemptID     string          `json:"assessing_automatic_attempt_id,omitempty"`
 }
 
 func (gradingJobMapper) collection() string { return k12.CollectionGradingJob }
@@ -629,6 +631,7 @@ func (gradingJobMapper) encode(fieldsJSON string) ([]any, error) {
 			ParentAutomaticAttemptID:        f.ParentAutomaticAttemptID,
 			ParentAutomaticDeadlineAt:       f.ParentAutomaticDeadlineAt,
 			ParentAutomaticRemainingSeconds: f.ParentAutomaticRemainingSeconds,
+			AssessingAutomaticAttemptID:     f.AssessingAutomaticAttemptID,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("k12storage: marshal grading budget envelope: %w", err)
@@ -707,6 +710,7 @@ func (gradingJobMapper) newScan() ([]any, func() (string, error)) {
 				f.ParentAutomaticAttemptID = envelope.ParentAutomaticAttemptID
 				f.ParentAutomaticDeadlineAt = envelope.ParentAutomaticDeadlineAt
 				f.ParentAutomaticRemainingSeconds = envelope.ParentAutomaticRemainingSeconds
+				f.AssessingAutomaticAttemptID = envelope.AssessingAutomaticAttemptID
 			}
 			if err := f.BudgetSnapshot.Validate(); err != nil {
 				return "", fmt.Errorf("k12storage: invalid budget_snapshot: %w", err)

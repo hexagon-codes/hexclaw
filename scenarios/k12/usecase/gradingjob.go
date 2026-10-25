@@ -763,6 +763,11 @@ func (d Deps) RetryGradingJobWithParentAutomaticWindow(
 			"%w: fresh parent automatic attempt identity/deadline required", ErrInvalidInput,
 		)
 	}
+	// 旧快照没有分配标记时，显式新窗口仍须与原尝试区分。
+	if v.Fields.AssessingAutomaticAttemptID == "" &&
+		(v.Fields.FailedStage == k12.GradingStageAssessing || k12.GradingResumeStage(v.Fields.StageCheckpoints) == k12.GradingStageAssessing) {
+		v.Fields.AssessingAutomaticAttemptID = v.Fields.ParentAutomaticAttemptID
+	}
 	v.Fields.ParentAutomaticAttemptID = parentAutomaticAttemptID
 	v.Fields.ParentAutomaticDeadlineAt = parentAutomaticDeadlineAt
 	v.Fields.ParentAutomaticRemainingSeconds = parentAutomaticDeadlineAt - now
@@ -966,8 +971,19 @@ func reserveImageTaskAssessingParentAutomaticWindow(
 		strings.TrimSpace(f.ParentAutomaticAttemptID) == "" || assessingBudget <= 0 {
 		return
 	}
+	if f.AssessingAutomaticAttemptID == f.ParentAutomaticAttemptID {
+		return
+	}
+	// 旧任务已在评估或其恢复起点失败时，保守保留原截止；只有显式新尝试才重新分配。
+	if f.AssessingAutomaticAttemptID == "" &&
+		(f.FailedStage == k12.GradingStageAssessing ||
+			(f.FailedStage == k12.GradingStageQueued && k12.GradingResumeStage(f.StageCheckpoints) == k12.GradingStageAssessing)) {
+		f.AssessingAutomaticAttemptID = f.ParentAutomaticAttemptID
+		return
+	}
 	f.ParentAutomaticRemainingSeconds = assessingBudget
 	f.ParentAutomaticDeadlineAt = now + assessingBudget
+	f.AssessingAutomaticAttemptID = f.ParentAutomaticAttemptID
 }
 
 func pauseParentAutomaticWindow(f *k12.GradingJobFields, now int64) {
