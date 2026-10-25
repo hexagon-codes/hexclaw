@@ -10,14 +10,14 @@
     {
       "path": "SKILL.md",
       "role": "skill",
-      "sha256": "b818fe033c66f12ab1a17620b366e15eca56b277713f8cd65bb9fa62bfb35ed7",
-      "size": 2415
+      "sha256": "6d818c8a976f7b821a6602a1abf1e1fba8d6243a9b5057792b7f7b1e6a853730",
+      "size": 2636
     },
     {
       "path": "assets/components.typ",
       "role": "template",
-      "sha256": "666da6180d4d60749e2d4fec187cf49be1c34f9277caddb3be2c8e0ee3c185e6",
-      "size": 12024
+      "sha256": "2daa62f7df74d288addc8217a9f65cf758dcc38fb8f5f06afd7b8c3629b0c60b",
+      "size": 13610
     },
     {
       "path": "assets/profile.json",
@@ -64,10 +64,10 @@
     {
       "path": "references/report-contract.md",
       "role": "reference",
-      "sha256": "16125760ed955d18ff46a01db80fb46f9ee826df3b9b725e8f774e21c5e07c89",
-      "size": 6754
+      "sha256": "fde4cea2fbf2bb2a09fa5a2edbbe42a38307d8bc71de2e5ed23c57707e561b06",
+      "size": 7059
     }
   ],
   "skill_id": "homework-pdf",
-  "version": "1.1.0"
+  "version": "1.1.3"
 }

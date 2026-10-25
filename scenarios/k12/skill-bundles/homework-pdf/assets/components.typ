@@ -24,6 +24,34 @@
   }
 }
 
+// 数学作答的换行仅作显示分隔，不改原文或推断空位；含叙述文字时保留原换行。
+#let original-inlines(items, formulas) = {
+  let mathematical = items.any(item => item.kind == "math") and items.all(item => {
+    item.kind == "math" or (item.kind == "text" and item.text.match(regex("^[0-9\\s+*/=().−×÷-]*$")) != none)
+  })
+  let display = if mathematical {
+    items.map(item => if item.kind == "text" {
+      item + (text: item.text.replace(regex("[\\r\\n]+"), "；"))
+    } else { item })
+  } else { items }
+  inlines(display, formulas)
+}
+
+// 连续关键式使用块公式的实际高度，避免相邻行的分子分母叠压。
+#let calculation-content(items, formulas) = {
+  set align(left)
+  for item in items {
+    if item.kind == "math" {
+      assert(item.math_ref in formulas, message: "Missing formula reference: " + item.math_ref)
+      let formula = formulas.at(item.math_ref)
+      if formula.func() == math.equation {
+        math.equation(block: true, math.display(formula.body))
+      } else { formula }
+    } else if item.kind == "text" { text(item.text) }
+    else { panic("Unsupported calculation kind: " + item.kind) }
+  }
+}
+
 #let report-heading(title, details) = layout(size => {
   let heading = label(title, size: 22pt)
   let metadata = text(font: sans, size: 9.5pt, fill: muted, details)
@@ -57,9 +85,8 @@
   } else { candidate }
 })
 
-#let quick-question(q, formulas, first: false, source-kind: "grading") = block(
-  above: if first { 0pt } else { 10pt }, below: 4pt, breakable: true, width: 100%,
-)[
+#let quick-question(q, formulas, first: false, source-kind: "grading") = {
+  let content = [
   #block(sticky: true)[
     #grid(columns: (1fr, auto), align: horizon, column-gutter: 8pt,
       [#if q.number != "" { label(q.number, size: 12pt, fill: blue); h(6pt) }#label(q.title, size: 11.5pt)],
@@ -74,10 +101,11 @@
     )
     #if q.calculations.len() > 0 {
       v(8pt)
-      let cells = q.calculations.map(calculation => text(size: 11.5pt, inlines(calculation, formulas)))
+      let widths = q.calculations.map(calculation => text(size: 11.5pt, inlines(calculation, formulas)))
+      let cells = q.calculations.map(calculation => text(size: 11.5pt, calculation-content(calculation, formulas)))
       layout(size => {
         let column-width = (size.width - 12pt) / 2
-        let fits = cells.all(cell => measure(cell).width <= column-width)
+        let fits = widths.all(cell => measure(cell).width <= column-width)
         if q.at("calculation_columns", default: 1) == 2 and fits {
           grid(columns: (1fr, 1fr), column-gutter: 12pt, row-gutter: 5pt, ..cells)
         } else {
@@ -94,10 +122,17 @@
     #for (index, part) in q.original_answer.enumerate() {
       if index > 0 { [；] }
       if part.at("label", default: "") != "" { [#part.label：] }
-      inlines(part.content, formulas)
+      original-inlines(part.content, formulas)
     }
   ]
-]
+  ]
+  layout(size => {
+    // 短题连同答案、算式与原答整体移页；超过整页正文的长题继续自然分页。
+    let height = measure(content, width: size.width).height
+    block(above: if first { 0pt } else { 10pt }, below: 4pt,
+      breakable: height > 252mm - 14pt, width: 100%, content)
+  })
+}
 
 #let block-content(node, formulas) = {
   if node.kind == "paragraph" {
@@ -160,7 +195,7 @@
   } else if node.kind == "columns" {
     let widths = node.at("widths", default: node.columns.map(_ => 1))
     assert(widths.len() == node.columns.len(), message: "Column widths differ from content")
-    layout(size => {
+    block(above: 0pt, below: 6pt, layout(size => {
       let contents = node.columns.map(column => { for child in column { block-content(child, formulas) } })
       let width-sum = widths.fold(0, (total, value) => total + value)
       let available-width = size.width - 17pt * (contents.len() - 1)
@@ -175,7 +210,7 @@
         // 过高的图文列改为顺序正文，各段沿原有分页规则继续排版。
         for content in contents { block(width: 100%, breakable: true, content) }
       }
-    })
+    }))
   } else { panic("Unsupported block kind: " + node.kind) }
 }
 
