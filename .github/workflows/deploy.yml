@@ -80,7 +80,7 @@ jobs:
         id: update
         env:
           DEPLOY_HOST: ${{ secrets.HEXCLAW_DEPLOY_HOST }}
-          DEPLOY_PROJECT: ${{ vars.HEXCLAW_DEPLOY_PROJECT }}
+          DEPLOY_PROJECT: ${{ secrets.HEXCLAW_DEPLOY_PROJECT }}
           DEPLOY_COMMIT: ${{ github.event.workflow_run.head_sha }}
           DEPLOY_DIGEST: ${{ needs.image.outputs.digest }}
           DEPLOY_RUN: ${{ github.run_id }}

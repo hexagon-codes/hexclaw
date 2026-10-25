@@ -123,8 +123,9 @@ GitHub 配置项：
 | 位置 | 配置 |
 | --- | --- |
 | Repository variables | `HEXCLAW_DEPLOY_ENABLED=true`：对应源码和恢复验收完成后启用；部署入口固定为 main push |
-| Environment `hexclaw-cloud` variables | `HEXCLAW_DEPLOY_PROJECT`：服务器部署目录绝对路径 |
-| Environment `hexclaw-cloud` secrets | `HEXCLAW_DEPLOY_HOST`、`HEXCLAW_DEPLOY_SSH_KEY`、`HEXCLAW_DEPLOY_KNOWN_HOSTS`：配置部署专用 SSH 凭据及已核对的主机信息，保留服务器原有登录方式 |
+| Environment `hexclaw-cloud` secrets | `HEXCLAW_DEPLOY_HOST`、`HEXCLAW_DEPLOY_PROJECT`、`HEXCLAW_DEPLOY_SSH_KEY`、`HEXCLAW_DEPLOY_KNOWN_HOSTS`：配置目标主机、部署目录、专用 SSH 凭据及已核对的主机信息，保留服务器原有登录方式 |
+
+部署目录与主机信息使用 Secrets，避免步骤环境变量表在公开 Actions 日志中显示私有值；从旧版 Variable 迁移时保留原值，在新版工作流采用 Secret 前保持旧入口兼容。服务器完整回执、展开的 Compose、配置和运行日志只留在私有环境，公开部署结果只保留下方 Release 门禁需要的字段。公开通用脚本不影响运行时从 Secrets 和目标配置取得实际部署参数。
 
 main push 的完整 CI 成功后，构建对应 SHA 并推送 `sha-<commit>` 镜像，部署传递该构建返回的 digest。构建可取消过期任务，服务器变更不被下一次提交自动取消。服务端在 `.hexclaw-maintenance.lock` 内读取目标配置、校验原数据挂载、拉取镜像并冻结完整 Compose 配置；正常替换和启动前恢复使用同一冻结配置。目标已前进时记录 `superseded`，不会伪称该候选已部署。
 
@@ -137,7 +138,7 @@ python3 scripts/ops/deploy.py \
   --commit <完整提交SHA> --run-id <发布记录编号>
 ```
 
-脚本先拉取镜像并核对 OCI revision，然后检查原项目、原卷及配置；停止旧进程、完整备份、只重建 HexClaw，再启动唯一的新进程。就绪检查包含健康端点、受保护配置／知识库读取、原 backend ID 和配置摘要，记录前后 schema 版本。该检查不发送模型或 IM 请求，不能替代实际批改、图片附件和语义召回验收。
+脚本在锁内核对原项目、原卷及配置，再拉取镜像并核对 OCI revision；停止旧进程、完整备份、只重建 HexClaw，再启动唯一的新进程。就绪检查包含健康端点、受保护配置／知识库读取、原 backend ID 和配置摘要，记录前后 schema 版本。该检查不发送模型或 IM 请求，不能替代实际批改、图片附件和语义召回验收。
 
 自动和手动使用同一版本的 `deploy.py/backup.py`、相同镜像 digest 与同一目标配置。正常维护不重新构建同 SHA 镜像，也不直接向运行容器覆盖二进制。配置和工具摘要匹配、当前容器仍运行同一镜像且原最终回执完整时，重复入口只核验并复用现用结果，返回 `reused=true`，不会再次停机替换；这可用于恢复结果交接失败的同一候选。
 
