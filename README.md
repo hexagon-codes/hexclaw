@@ -15,7 +15,7 @@ HexClaw 是用 Go 编写的 Agent 服务，可独立运行，也可作为 HexCla
 
 对话之外，HexClaw 可以处理文件、生成文档和图片、执行代码、运行工作流，并把结果送到已配置的渠道。模型、工具和场景能力按配置接入，数据保存在当前使用的后端。
 
-> 本 README 描述 `v0.5.0` 源码能力。版本与文档更新不代表已发布；已发布二进制、镜像与桌面安装包以所选 Release 的代码和文档为准，可能与当前源码存在差异。Desktop 正式构建固定引用后端 `refs/tags/v0.5.0`，须先发布包含最终修复的后端 Tag，再构建桌面安装包。
+> 本 README 描述 `v0.5.1` 源码能力。已发布二进制、镜像与桌面安装包以所选 Release 为准。Desktop 当前仍固定后端 `refs/tags/v0.5.0`；发布后端 `v0.5.1` Tag 后，需同步 Desktop 固定引用，再构建桌面安装包。
 
 ![HexClaw 驱动的 Desktop K12 场景：返回带批注的作业原图](.github/assets/hexclaw-k12-workspace.png)
 

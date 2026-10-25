@@ -70,7 +70,7 @@ Windows 的平台 sandbox 硬门禁继续执行。Go 构建缓存组仅两项真
 
 ### 发版流程
 
-当前源码版本为 `0.5.0`，库常量、CLI 默认版本与 OpenAPI 文档版本保持一致；构建时仍可注入实际版本、提交与日期。Desktop 固定后端来源为 `refs/tags/v0.5.0`，因此应先发布包含最终修复的后端 Tag，再构建 Desktop。更新版本元数据不创建 Tag 或发布产物，也不改变既有云端部署分支。
+当前源码版本为 `0.5.1`，库常量、CLI 默认版本与 OpenAPI 文档版本保持一致；构建时仍可注入实际版本、提交与日期。Desktop 当前固定后端来源为 `refs/tags/v0.5.0`，发布后端 `v0.5.1` Tag 后需同步该引用，再构建 Desktop。更新版本元数据不创建 Tag 或发布产物，也不改变既有云端部署分支。
 
 1. 在最终发布提交上完成主 CI；使用 `GOWORK=off`、`GOFLAGS=-mod=readonly` 和已发布依赖，不以本地 workspace 结果替代。
 2. 打 Tag 前按现有 Release 目标核对编译：Linux amd64 / arm64、macOS amd64 / arm64、Windows amd64，统一使用 `CGO_ENABLED=0`。这是发版前的编译预检，不增加普通提交门禁，也不要求先打测试 Tag。

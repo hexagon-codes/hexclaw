@@ -22,9 +22,10 @@ We will acknowledge receipt within 48 hours and provide a detailed response with
 
 | Version | Supported |
 |---------|-----------|
-| v0.5.0 (current source) | ✅ Yes |
+| v0.5.1 (current source) | ✅ Yes |
+| v0.5.0 | ✅ Yes |
 | v0.5.0-beta / v0.5.0-beta.1 (prerelease) | ✅ Yes |
-| v0.4.9 (latest stable) | ✅ Yes |
+| v0.4.9 | ✅ Yes |
 | <= v0.4.8 | No |
 
 The current source version does not establish that a release has been published. Check [Releases](https://github.com/hexagon-codes/hexclaw/releases) for available binaries and images; existing supported-version entries remain unchanged.
