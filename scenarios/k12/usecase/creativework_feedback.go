@@ -739,7 +739,7 @@ var scorePattern = regexp.MustCompile(`[0-9０-９]+(\.[0-9]+)?\s*分`)
 var scoreOutOfPattern = regexp.MustCompile(`[0-9]+\s*/\s*(10|100)\b`)
 
 var workFeedbackSourceQuotePattern = regexp.MustCompile(`“[^”\n]+”|「[^」\n]+」|‘[^’\n]+’|"[^"\n]+"`)
-var workFeedbackScoreClaimPattern = regexp.MustCompile(`(?m)(?:^|[\n。！？；])\s*(?:\*\*)?得分(?:\*\*)?\s*(?:[:：]|为|是|很|较|偏|高|低|优秀|良好)|(?:作文|作品|画作|绘画|文章|全文|整体|本篇|本幅|这幅画)(?:的)?得分`)
+var workFeedbackScoreClaimPattern = regexp.MustCompile(`(?m)(?:^|[\n。！？；])\s*(?:\*\*)?得分(?:\*\*)?\s*(?:[:：]|为|是|很|较|偏|高|低|优秀|良好|[0-9０-９])|(?:作文|作品|画作|绘画|文章|全文|整体|本篇|本幅|这幅画)(?:的)?得分`)
 
 // 评分与替换原画的关键词边界；参考稿不作为违规判据。
 var (
