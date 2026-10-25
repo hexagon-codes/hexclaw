@@ -295,11 +295,11 @@ func TestSolve_Grading_Correct(t *testing.T) {
 func TestSolve_Grading_WrongFindsStep(t *testing.T) {
 	se := &solveExec{
 		verifierOut: "VERDICT: AGREE\nCOMPUTED: 42",
-		graderOut:   "CORRECT: no\nFINAL_ANSWER_CORRECT: no\nWRONG_STEP: 第2步把 6×7 当成 6+7 了\nMISCONCEPTION: 把乘法当成加法\nGUIDANCE: 再看看“每盒7支”应该用哪种运算？",
+		graderOut:   "CORRECT: no\nFINAL_ANSWER_CORRECT: no\nWRONG_STEP: 第2步把 6×7 当成 6+7 了\nWRONG_STEP_SOURCE: 6+7=13\nMISCONCEPTION: 把乘法当成加法\nGUIDANCE: 再看看“每盒7支”应该用哪种运算？",
 	}
 	o := NewSolveSkill(se.fn, nil)
 	res, _ := o.Execute(context.Background(), map[string]any{
-		"problem": "小明有 6 盒铅笔，每盒 7 支，一共多少支？", "student_answer": "13",
+		"problem": "小明有 6 盒铅笔，每盒 7 支，一共多少支？", "student_answer": "6+7=13\n答案：13",
 	})
 	if !strings.Contains(res.Content, "第2步") || !strings.Contains(res.Content, "误区") {
 		t.Errorf("答错应指出错步与误区，得：%s", res.Content)
@@ -329,11 +329,11 @@ func TestSolve_Verifier_ValidateRetryOnBadFormat(t *testing.T) {
 func TestSolve_Grader_ValidateRetryOnBadFormat(t *testing.T) {
 	se := &solveExec{
 		verifierOut: "VERDICT: AGREE\nCOMPUTED: 42",
-		graderOuts:  []string{"你写得不错呀，再想想哦", "CORRECT: no\nFINAL_ANSWER_CORRECT: no\nWRONG_STEP: 第2步\nMISCONCEPTION: 乘法当加法\nGUIDANCE: 再看看"},
+		graderOuts:  []string{"你写得不错呀，再想想哦", "CORRECT: no\nFINAL_ANSWER_CORRECT: no\nWRONG_STEP: 第2步\nWRONG_STEP_SOURCE: 6+7=13\nMISCONCEPTION: 乘法当加法\nGUIDANCE: 再看看"},
 	}
 	o := NewSolveSkill(se.fn, nil)
 	res, _ := o.Execute(context.Background(), map[string]any{
-		"problem": "小明有 6 盒铅笔，每盒 7 支，一共多少支？", "student_answer": "13",
+		"problem": "小明有 6 盒铅笔，每盒 7 支，一共多少支？", "student_answer": "6+7=13\n答案：13",
 	})
 	if se.graderCalls() != 2 {
 		t.Fatalf("grader 解析失败应校验重试一次（共 2 次），实得 %d", se.graderCalls())
