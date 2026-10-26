@@ -1258,6 +1258,7 @@ The resource list has no Content, skill_id, or version fields. Obtain version fr
 | `version` | false | `string` | Version. |
 | `triggers` | false | `array<string>` | Triggers. |
 | `tags` | false | `array<string>` | Tags. |
+| `is_persona` | Yes | `boolean` | Derived from the declared persona tag; identifies an ordinary conversation persona. Task skills remain per-turn. |
 | `icon` | false | `string` | Icon. |
 | `enabled` | true | `boolean` | Persisted desired state. |
 | `effective_enabled` | true | `boolean` | Current effective runtime state. |

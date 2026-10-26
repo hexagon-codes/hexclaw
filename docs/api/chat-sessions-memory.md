@@ -2,7 +2,7 @@
 
 [English](chat-sessions-memory.en.md) · [公共 API 总览](../api.md) · [OpenAPI](../../api/openapi.yaml)
 
-本文覆盖当前源码的 33 个方法/路径组合。安装包与发布标签以各自版本为准。每个端点都使用当前服务的 Bearer 令牌；声明为兼容字段的 user_id 不改变鉴权身份。模块未挂载通常是普通 HTTP 404，不能当作 handler 结构化错误。
+本文覆盖当前源码的 34 个方法/路径组合。安装包与发布标签以各自版本为准。每个端点都使用当前服务的 Bearer 令牌；声明为兼容字段的 user_id 不改变鉴权身份。模块未挂载通常是普通 HTTP 404，不能当作 handler 结构化错误。
 
 ## 通用调用约定
 
@@ -20,6 +20,7 @@
 | `GET` | `/api/v1/sessions` | [列出会话](#operation-chatsessionlistsessions) | 持久化存储可用时挂载（s.store != nil） |
 | `GET` | `/api/v1/sessions/{id}` | [获取会话](#operation-chatsessiongetsession) | 持久化存储可用时挂载（s.store != nil） |
 | `PATCH` | `/api/v1/sessions/{id}` | [修改标题](#operation-chatsessionupdatesession) | 持久化存储可用时挂载（s.store != nil） |
+| `PUT` | `/api/v1/sessions/{id}/persona` | [保存或取消会话人设](#operation-chatsessionsetpersona) | 持久化存储可用时挂载（s.store != nil） |
 | `POST` | `/api/v1/sessions/{id}/suggest-title` | [生成建议标题](#operation-chatsessionsuggestsessiontitle) | 持久化存储可用时挂载（s.store != nil） |
 | `DELETE` | `/api/v1/sessions/{id}` | [删除会话](#operation-chatsessiondeletesession) | 持久化存储可用时挂载（s.store != nil） |
 | `GET` | `/api/v1/sessions/{id}/messages` | [读取消息历史](#operation-chatsessionlistmessages) | 持久化存储可用时挂载（s.store != nil） |
@@ -1977,3 +1978,10 @@ Repeat the complete identity from the original approval request. owner_id must m
 | `decision_id` | string | 是 | minLength=1 |
 | `decision` | string | 是 | enum="approved_once", "approved_remember", "denied" |
 | `idempotency_key` | string | 是 | minLength=1 |
+
+<a id="operation-chatsessionsetpersona"></a>
+### 保存或取消会话人设
+
+`PUT /api/v1/sessions/{id}/persona`，请求 `{"skill_name":"role-name"}`，空字符串取消。非空名称必须为已安装、已启用且 `tags` 含 `persona` 的 Skill。沿已有会话所有权校验，返回完整 `ChatSessionSession`；`meta` 为 JSON 字符串，存在 `persona_skill` 时表示当前普通会话绑定。普通后续轮次继承这一绑定，任务 Skill 仍只作用本轮；业务智能体、工作流及系统调度遵守原策略。标题与其他 meta 字段不被覆盖。
+
+错误：400 请求或人设无效；404 会话不存在或不属于当前身份；500 存储失败；503 缺少技能市场或人设持久化能力。最大请求体 1 MiB；Bearer 认证沿现有管理 API。技能列表 `is_persona` 从同一 `persona` 标签派生，正文加载回执仍独立表示本轮实际注入。

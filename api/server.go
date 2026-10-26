@@ -800,6 +800,7 @@ func (s *Server) routes() http.Handler {
 		mux.HandleFunc("GET /api/v1/sessions", s.handleListSessions)
 		mux.HandleFunc("GET /api/v1/sessions/{id}", s.handleGetSession)
 		mux.HandleFunc("PATCH /api/v1/sessions/{id}", s.handleUpdateSession)
+		mux.HandleFunc("PUT /api/v1/sessions/{id}/persona", s.handleSetSessionPersona)
 		mux.HandleFunc("POST /api/v1/sessions/{id}/suggest-title", s.handleSuggestSessionTitle)
 		mux.HandleFunc("DELETE /api/v1/sessions/{id}", s.handleDeleteSession)
 		mux.HandleFunc("GET /api/v1/sessions/{id}/messages", s.handleListMessages)

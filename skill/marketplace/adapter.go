@@ -24,6 +24,8 @@ func (a *markdownSkillAdapter) Name() string              { return a.s.Name() }
 func (a *markdownSkillAdapter) Description() string       { return a.s.Description() }
 func (a *markdownSkillAdapter) Match(content string) bool { return a.s.Match(content) }
 
+func (a *markdownSkillAdapter) IsPersona() bool { return skill.HasPersonaTag(a.s.Meta.Tags) }
+
 // LoadContent 转发底层 MarkdownSkill 的正文加载，使引擎能把"用户显式挂载的 persona 类
 // Markdown 技能"正文注入 system prompt（engine.buildMountedSkillsPrompt 通过窄接口
 // `interface{ LoadContent() (string, error) }` 断言获取）。

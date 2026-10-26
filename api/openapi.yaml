@@ -426,6 +426,55 @@ paths:
             type: string
       x-reference-module: chat-sessions-memory
       x-visibility: public
+  /api/v1/sessions/{id}/persona:
+    put:
+      operationId: chatSessionSetPersona
+      summary: Set or clear the ordinary conversation persona
+      description: Stores one persona_skill in the existing session meta JSON. An empty skill_name clears it. Nonempty names must identify an installed, enabled skill tagged persona. Later ordinary chat turns inherit this binding; task skills remain per-turn. Agent and workflow execution policies are unchanged.
+      tags:
+        - chat-sessions-memory
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [skill_name]
+              properties:
+                skill_name:
+                  type: string
+      responses:
+        "200":
+          description: Saved session with the current meta JSON
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatSessionSession"
+        "400":
+          description: Invalid body or unavailable persona skill
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Session missing or not owned by the current principal
+        "500":
+          description: Storage operation failed
+        "503":
+          description: Skill marketplace or session persona persistence unavailable
+      x-source:
+        file: api/handler_session.go
+        handler: handleSetSessionPersona
+      x-availability: Mounted only when s.store != nil
+      x-request-body-max-bytes: 1048576
+      x-reference-module: chat-sessions-memory
+      x-visibility: public
   /api/v1/sessions/{id}/suggest-title:
     post:
       operationId: chatSessionSuggestSessionTitle
@@ -22399,7 +22448,7 @@ components:
           type: string
         meta:
           type: string
-          description: Additional stored JSON encoded as a string.
+          description: Additional stored JSON encoded as a string. persona_skill, when present, is the ordinary conversation persona skill name; absence means no binding.
         created_at:
           type: string
           format: date-time
@@ -28449,6 +28498,9 @@ components:
           description: 标签。
           items:
             type: string
+        is_persona:
+          type: boolean
+          description: Derived from the declared persona tag; identifies a session persona rather than a per-turn task skill.
         icon:
           type: string
           description: 图标。
@@ -28466,6 +28518,7 @@ components:
           description: 状态说明。
       additionalProperties: true
       required:
+        - is_persona
         - enabled
         - effective_enabled
         - requires_restart

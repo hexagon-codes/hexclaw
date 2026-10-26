@@ -874,6 +874,35 @@ func (s *Store) UpdateSession(ctx context.Context, session *storage.Session) err
 	return err
 }
 
+// SetSessionPersona 仅更新人设字段，避免标题和其他元数据的并发写入相互覆盖。
+func (s *Store) SetSessionPersona(ctx context.Context, id, skillName string) error {
+	query := `UPDATE sessions SET meta = json_set(CASE WHEN meta IS NULL OR meta = '' THEN '{}' ELSE meta END, '$.persona_skill', ?), updated_at = ? WHERE id = ? AND (meta IS NULL OR meta = '' OR json_type(meta) = 'object')`
+	args := []any{skillName, time.Now(), id}
+	if skillName == "" {
+		query = `UPDATE sessions SET meta = json_remove(CASE WHEN meta IS NULL OR meta = '' THEN '{}' ELSE meta END, '$.persona_skill'), updated_at = ? WHERE id = ? AND (meta IS NULL OR meta = '' OR json_type(meta) = 'object')`
+		args = []any{time.Now(), id}
+	}
+	result, err := s.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		var found string
+		if err := s.db.QueryRowContext(ctx, `SELECT id FROM sessions WHERE id = ?`, id).Scan(&found); err == sql.ErrNoRows {
+			return storage.ErrNotFound
+		} else if err != nil {
+			return err
+		}
+		return fmt.Errorf("session metadata must be a JSON object")
+	}
+	s.invalidateForkCache()
+	return nil
+}
+
 // SearchMessages 全文搜索消息内容
 //
 // 优先使用 FTS5 全文索引搜索；FTS 不可用或无结果时自动降级为 LIKE 搜索。

@@ -1257,6 +1257,7 @@ file 读取执行服务所在机器的路径，可为 .md 文件或技能目录�
 | `version` | 否 | `string` | 版本。 |
 | `triggers` | 否 | `array<string>` | 触发词。 |
 | `tags` | 否 | `array<string>` | 标签。 |
+| `is_persona` | 是 | `boolean` | 从声明的 persona 标签派生；用于普通会话人设绑定，普通任务 Skill 仍为单次。 |
 | `icon` | 否 | `string` | 图标。 |
 | `enabled` | 是 | `boolean` | 持久化的期望状态。 |
 | `effective_enabled` | 是 | `boolean` | 当前运行时实际状态。 |

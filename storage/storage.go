@@ -46,6 +46,12 @@ type Session struct {
 	UpdatedAt             time.Time `json:"updated_at"`
 }
 
+// SessionPersonaStore 在保留其他会话元数据的同时原子更新人设绑定。
+// 空名称表示取消绑定；不存在的会话返回 ErrNotFound。
+type SessionPersonaStore interface {
+	SetSessionPersona(ctx context.Context, id, skillName string) error
+}
+
 // MessageRecord 消息记录
 //
 // 生产级设计：

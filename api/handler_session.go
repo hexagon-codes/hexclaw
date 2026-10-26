@@ -357,6 +357,49 @@ type sessionTitleSuggester interface {
 	SuggestSessionTitle(context.Context, []*storage.MessageRecord) (string, error)
 }
 
+// handleSetSessionPersona 沿已有会话所有权边界保存或清除声明人设。
+func (s *Server) handleSetSessionPersona(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, err := s.getOwnedSession(r, id, sessionUserIDFromRequest(r)); err != nil {
+		writeSessionLookupError(w, err)
+		return
+	}
+	var req struct {
+		SkillName *string `json:"skill_name"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil || req.SkillName == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "A skill_name string is required"})
+		return
+	}
+	name := strings.TrimSpace(*req.SkillName)
+	if name != "" {
+		if s.mp == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "Skill marketplace is unavailable"})
+			return
+		}
+		sk, exists := s.mp.Get(name)
+		if !exists || !s.mp.IsEnabled(name) || !skill.HasPersonaTag(sk.Meta.Tags) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "The skill must be an installed, enabled persona"})
+			return
+		}
+	}
+	writer, ok := s.store.(storage.SessionPersonaStore)
+	if !ok {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "Session persona persistence is unavailable"})
+		return
+	}
+	if err := writer.SetSessionPersona(r.Context(), id, name); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to save session persona: " + err.Error()})
+		return
+	}
+	updated, err := s.store.GetSession(r.Context(), id)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to read session persona: " + err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, updated)
+}
+
 // handleUpdateSession 更新会话（标题）
 func (s *Server) handleUpdateSession(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")

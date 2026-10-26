@@ -974,7 +974,10 @@ func (e *ReActEngine) matchSkillFastPathForSession(ctx context.Context, msg *ada
 	if msg.SessionID != "" {
 		// 只读会话计数，不额外加载图片或长消息；在会话锁内读取，避免等待前的旧快照。
 		sess, err := e.store.GetSession(ctx, msg.SessionID)
-		if err != nil || sess.MessageCount > 0 {
+		if err != nil || sess == nil || sess.MessageCount > 0 {
+			return nil, false
+		}
+		if ordinaryPersonaRequest(ctx, msg) && e.enabledDeclaredPersona(boundSessionPersona(sess.Meta)) {
 			return nil, false
 		}
 	}
@@ -1262,6 +1265,9 @@ func (e *ReActEngine) Process(ctx context.Context, msg *adapter.Message) (reply 
 	e.freezeSelectedRequestReasoningPolicy(ctx, msg, selection)
 	ctx, err = e.prepareAgentSystemPromptPolicy(ctx, msg)
 	if err != nil {
+		return nil, err
+	}
+	if err := e.applySessionPersona(ctx, msg); err != nil {
 		return nil, err
 	}
 	e.prepareAgentDefaultSkillContext(msg)
@@ -2327,6 +2333,9 @@ func (e *ReActEngine) processStream(
 	e.freezeSelectedRequestReasoningPolicy(ctx, msg, selection)
 	ctx, err = e.prepareAgentSystemPromptPolicy(ctx, msg)
 	if err != nil {
+		return nil, err
+	}
+	if err := e.applySessionPersona(ctx, msg); err != nil {
 		return nil, err
 	}
 	e.prepareAgentDefaultSkillContext(msg)
@@ -4269,9 +4278,19 @@ func (e *ReActEngine) buildStreamMessages(ctx context.Context, roleName string, 
 
 	// System prompt 优先级: 角色名 > Agent 路由注入 > 默认助理(小蟹)人设
 	// 默认分支：存在用户自定义 SOUL.md(~/.hexclaw/SOUL.md) 则取代内置默认，否则用内置 defaultSystemPrompt。
+	prepared, preparedOK := ctx.Value(preparedSkillContextKey{}).(*preparedSkillContext)
+	if !preparedOK || prepared == nil {
+		_, explicit := metadata["skills"]
+		prompt, receipts := e.buildMountedSkillsContext(effectiveSkillContextNames(metadata), !explicit,
+			!explicit && metadata[agentDefaultSkillCompleteKey] == "true")
+		prepared = &preparedSkillContext{prompt: prompt, receipts: receipts}
+	}
+	usePersona := (roleName == "" || roleName == "default") && ordinaryPersonaRequest(ctx, &adapter.Message{Metadata: metadata}) && e.loadedDeclaredPersona(prepared.receipts)
 	sysContent := systemPrompt(metadata)
 	fromAgent := false
-	if roleName != "" {
+	if usePersona {
+		sysContent = decorateSystemPrompt(sessionPersonaInstructions, metadata)
+	} else if roleName != "" {
 		if role, ok := e.factory.GetRole(roleName); ok {
 			sysContent = role.ToSystemPrompt()
 			fromAgent = true
@@ -4313,14 +4332,7 @@ func (e *ReActEngine) buildStreamMessages(ctx context.Context, roleName string, 
 	// bug#2 2026-06-23：用户在对话框显式挂载/召唤的技能（前端 skillNames → metadata["skills"]）。
 	// persona 类（Markdown）技能把正文注入 system prompt，使其当轮即生效，不依赖模型主动调用工具。
 	delete(metadata, skillContextReceiptsMetadataKey)
-	prepared, preparedOK := ctx.Value(preparedSkillContextKey{}).(*preparedSkillContext)
 	if names := effectiveSkillContextNames(metadata); len(names) > 0 || preparedOK && prepared != nil && prepared.prompt != "" {
-		if !preparedOK || prepared == nil {
-			_, explicit := metadata["skills"]
-			prompt, receipts := e.buildMountedSkillsContext(names, !explicit,
-				!explicit && metadata[agentDefaultSkillCompleteKey] == "true")
-			prepared = &preparedSkillContext{prompt: prompt, receipts: receipts}
-		}
 		prompt := prepared.prompt
 		receipts := append([]skill.ContextReceipt(nil), prepared.receipts...)
 		for i := range receipts {

@@ -2,7 +2,7 @@
 
 [中文](chat-sessions-memory.md) · [Public API overview](../api.en.md) · [OpenAPI](../../api/openapi.yaml)
 
-This reference covers 33 method/path combinations in the current source. Released packages and tags follow their own versions. Every endpoint requires the current service Bearer token. Body/query user_id is compatibility-only and cannot change identity. An unmounted module normally returns a plain HTTP 404, rather than a structured handler error.
+This reference covers 34 method/path combinations in the current source. Released packages and tags follow their own versions. Every endpoint requires the current service Bearer token. Body/query user_id is compatibility-only and cannot change identity. An unmounted module normally returns a plain HTTP 404, rather than a structured handler error.
 
 ## Common request rules
 
@@ -20,6 +20,7 @@ All endpoints: Authorization: Bearer $HEXCLAW_API_TOKEN. Authentication failure 
 | `GET` | `/api/v1/sessions` | [List sessions](#operation-chatsessionlistsessions) | Mounted only when s.store != nil |
 | `GET` | `/api/v1/sessions/{id}` | [Get a session](#operation-chatsessiongetsession) | Mounted only when s.store != nil |
 | `PATCH` | `/api/v1/sessions/{id}` | [Rename a session](#operation-chatsessionupdatesession) | Mounted only when s.store != nil |
+| `PUT` | `/api/v1/sessions/{id}/persona` | [Set or clear a session persona](#operation-chatsessionsetpersona) | Mounted when persistent storage is available (`s.store != nil`) |
 | `POST` | `/api/v1/sessions/{id}/suggest-title` | [Suggest a session title](#operation-chatsessionsuggestsessiontitle) | Mounted only when s.store != nil |
 | `DELETE` | `/api/v1/sessions/{id}` | [Delete a session](#operation-chatsessiondeletesession) | Mounted only when s.store != nil |
 | `GET` | `/api/v1/sessions/{id}/messages` | [List message history](#operation-chatsessionlistmessages) | Mounted only when s.store != nil |
@@ -1977,3 +1978,10 @@ Repeat the complete identity from the original approval request. owner_id must m
 | `decision_id` | string | Yes | minLength=1 |
 | `decision` | string | Yes | enum="approved_once", "approved_remember", "denied" |
 | `idempotency_key` | string | Yes | minLength=1 |
+
+<a id="operation-chatsessionsetpersona"></a>
+### Set or clear a session persona
+
+`PUT /api/v1/sessions/{id}/persona` accepts `{"skill_name":"role-name"}`; an empty string clears the binding. Nonempty names must identify an installed, enabled Skill whose `tags` include `persona`. Existing session ownership checks apply. The response is a full `ChatSessionSession`; its `meta` is a JSON string with optional `persona_skill`. Subsequent ordinary chat turns inherit that persona; task skills remain per-turn. Agent, workflow and system-dispatch policies remain unchanged. Title and unrelated meta fields are preserved.
+
+Errors: 400 invalid body/persona; 404 absent or unowned session; 500 storage failure; 503 unavailable marketplace or persona persistence. Body limit: 1 MiB; existing Bearer authentication applies. Skill-list `is_persona` is derived from the same tag. A loaded-context receipt separately describes the content actually injected for a turn.

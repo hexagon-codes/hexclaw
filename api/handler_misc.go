@@ -51,6 +51,7 @@ type skillStatusResponse struct {
 	Version          string                 `json:"version,omitempty"`
 	Triggers         []string               `json:"triggers,omitempty"`
 	Tags             []string               `json:"tags,omitempty"`
+	IsPersona        bool                   `json:"is_persona"`
 	Icon             string                 `json:"icon,omitempty"`
 	Enabled          bool                   `json:"enabled"`
 	EffectiveEnabled bool                   `json:"effective_enabled"`
@@ -572,6 +573,7 @@ func (s *Server) handleListSkills(w http.ResponseWriter, r *http.Request) {
 			Version:          sk.Meta.Version,
 			Triggers:         sk.Meta.Triggers,
 			Tags:             sk.Meta.Tags,
+			IsPersona:        skill.HasPersonaTag(sk.Meta.Tags),
 			Icon:             sk.Meta.Icon,
 			Enabled:          enabled,
 			EffectiveEnabled: effective,
@@ -603,7 +605,8 @@ func (s *Server) handleSkillStatus(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "非法技能名称"})
 		return
 	}
-	if _, ok := s.mp.Get(name); !ok {
+	installed, ok := s.mp.Get(name)
+	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "技能未安装"})
 		return
 	}
@@ -618,7 +621,7 @@ func (s *Server) handleSkillStatus(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, skillStatusResponse{Name: name, Enabled: state.Enabled, EffectiveEnabled: state.EffectiveEnabled, RequiresRestart: state.RequiresRestart, Message: "技能状态已更新并立即生效"})
+		writeJSON(w, http.StatusOK, skillStatusResponse{Name: name, IsPersona: skill.HasPersonaTag(installed.Meta.Tags), Enabled: state.Enabled, EffectiveEnabled: state.EffectiveEnabled, RequiresRestart: state.RequiresRestart, Message: "技能状态已更新并立即生效"})
 		return
 	}
 	if err := s.mp.SetEnabled(name, req.Enabled); err != nil {
@@ -645,6 +648,7 @@ func (s *Server) handleSkillStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, skillStatusResponse{
+		IsPersona:        skill.HasPersonaTag(installed.Meta.Tags),
 		Enabled:          req.Enabled,
 		EffectiveEnabled: effective,
 		RequiresRestart:  requiresRestart,
