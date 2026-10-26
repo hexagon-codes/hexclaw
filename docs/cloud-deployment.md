@@ -30,6 +30,23 @@ docker compose exec -T hexclaw python3 -c 'import yaml; print(yaml.safe_load(ope
 
 模型、渠道、孩子、任务和产物属于选中的服务器；连接或切换不会自动上传本机配置、数据或规则。通过该服务器的设置配置模型与钉钉实例，再创建或配置 TutorAgent。迁移同一钉钉实例时先停止旧实例消费，避免两台服务同时争用消息；不要把两套独立任务库同时绑定到同一实际渠道进行验收。
 
+### 钉钉图片下载的独立出口
+
+钉钉 Stream 接收、主动发送 OpenAPI 和图片媒体下载是不同网络路径。Stream 已连接且文字能回复，不代表媒体下载地址可达；媒体地址也可能使用 HTTP。
+
+需要为图片下载指定独立出口时，在服务端私有 Compose 配置中给 `hexclaw` 服务设置 `HEXCLAW_DINGTALK_IMAGE_PROXY`，值为该容器可以访问的 HTTP 或 SOCKS 代理 URL。例如：
+
+```yaml
+services:
+  hexclaw:
+    environment:
+      HEXCLAW_DINGTALK_IMAGE_PROXY: http://egress-service:7890
+```
+
+`egress-service` 是示例，需要替换为同一私有网络内实际存在的服务名。这个变量只由钉钉图片下载客户端读取，不修改全局 `HTTP_PROXY`、`HTTPS_PROXY`、模型客户端、Stream 客户端或主动发送 OpenAPI 客户端；未设置时保留原下载行为。图片大小、MIME 检查、持久接纳及平台 ACK 顺序保持原有契约。代理地址无效时不回退到已知不可达的直连路径。
+
+代理地址和认证信息只存服务端私有配置，不写入公开仓库或日志。若钉钉返回 HTTP 媒体 URL，代理出口可以看到该 HTTP 请求和图片内容；配置前应确认这个数据流适用于当前业务。通过原机器人真实发送图文，核对附件下载、持久接纳和用户实际收到的结果，才能判定图片链路恢复。
+
 ### 可选 HTTPS 路径前缀
 
 [`deploy/docker-compose.https.yml`](../deploy/docker-compose.https.yml) 提供独立 Nginx gateway，默认对外端口 16061，不占用已有 443。准备包含 `letsencrypt/` 证书目录和 `nginx.conf` 的私有目录，在部署 `.env` 设置 `HEXCLAW_TLS_DIR`；将 [`deploy/nginx.conf.example`](../deploy/nginx.conf.example) 中 `HEXCLAW_CERT_NAME` 替换为实际证书名，`HEXCLAW_CONTAINER_NAME` 替换为主服务唯一容器名（例如 `hexclaw-hexclaw-1`，以实际部署结果为准）。共享网络中的验收容器可能使用相同服务别名，网关上游应绑定主容器唯一名称，避免请求进入另一实例。示例提供 `/hexclaw/` 前缀、WebSocket Upgrade 和不缓冲的 SSE，上传大小仍由应用自身决定。

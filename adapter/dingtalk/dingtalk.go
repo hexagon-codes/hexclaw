@@ -20,6 +20,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/url"
+	"os"
 	"path"
 	"strings"
 	"sync"
@@ -2342,15 +2343,33 @@ func (a *DingtalkAdapter) downloadPictureAttachment(ctx context.Context, downloa
 	if err != nil {
 		return adapter.Attachment{}, fmt.Errorf("初始化钉钉官方 SDK 失败: %w", err)
 	}
-	url, err := api.DownloadMessageFile(ctx, token, a.cfg.RobotCode, downloadCode)
+	downloadURL, err := api.DownloadMessageFile(ctx, token, a.cfg.RobotCode, downloadCode)
 	if err != nil {
 		return adapter.Attachment{}, fmt.Errorf("换取下载 URL 失败: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
 	if err != nil {
 		return adapter.Attachment{}, fmt.Errorf("构造下载请求失败: %w", err)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	// 图片下载独立选择出口，保留其他业务及钉钉 OpenAPI 的客户端配置。
+	downloadClient := http.DefaultClient
+	if address := strings.TrimSpace(os.Getenv("HEXCLAW_DINGTALK_IMAGE_PROXY")); address != "" {
+		proxyURL, parseErr := url.Parse(address)
+		if parseErr != nil || proxyURL.Scheme == "" || proxyURL.Host == "" {
+			return adapter.Attachment{}, errors.New("DingTalk image proxy URL is invalid")
+		}
+		baseTransport, ok := http.DefaultTransport.(*http.Transport)
+		if !ok {
+			return adapter.Attachment{}, errors.New("DingTalk image proxy requires a standard HTTP transport")
+		}
+		transport := baseTransport.Clone()
+		transport.Proxy = http.ProxyURL(proxyURL)
+		defer transport.CloseIdleConnections()
+		client := *http.DefaultClient
+		client.Transport = transport
+		downloadClient = &client
+	}
+	resp, err := downloadClient.Do(req)
 	if err != nil {
 		return adapter.Attachment{}, fmt.Errorf("下载图片失败: %w", err)
 	}
