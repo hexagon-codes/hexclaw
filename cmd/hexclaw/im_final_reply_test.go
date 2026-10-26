@@ -63,6 +63,7 @@ func imFinalReplyTestInput(t *testing.T, text string) (*adapter.Message, *adapte
 
 func TestIMFinalReplyUsesActualPrivateIdentityProducerAndFrozenLocale(t *testing.T) {
 	msg, reply, deps, delivery := imFinalReplyTestInput(t, strings.Repeat("正文", 500))
+	msg.Attachments = []adapter.Attachment{{Type: "image", Mime: "image/png"}}
 	beforeMsg, beforeReply := *msg, *reply
 	got, err := maybeDeliverIMFinalReply(t.Context(), msg, reply, nil, deps)
 	if err != nil || got != nil || len(delivery.requests) != 1 || len(delivery.targets) != 1 {
@@ -207,8 +208,8 @@ func TestIMFinalReplyLeavesNonFinalAndIneligibleInputsOnOriginalPath(t *testing.
 		{"interactive control", func(_ *adapter.Message, reply *adapter.Reply, _ *imFinalReplyDependencies) {
 			reply.Interactive = &adapter.InteractivePayload{}
 		}},
-		{"inbound image", func(msg *adapter.Message, _ *adapter.Reply, _ *imFinalReplyDependencies) {
-			msg.Attachments = []adapter.Attachment{{Type: "image"}}
+		{"inbound document", func(msg *adapter.Message, _ *adapter.Reply, _ *imFinalReplyDependencies) {
+			msg.Attachments = []adapter.Attachment{{Type: "file", Mime: "application/pdf"}}
 		}},
 		{"outbound image", func(_ *adapter.Message, reply *adapter.Reply, _ *imFinalReplyDependencies) {
 			reply.Attachments = []adapter.Attachment{{Type: "image"}}
@@ -285,3 +286,28 @@ func TestIMFinalReplyReusesExactUnitMaterialPDF(t *testing.T) {
 		t.Fatal("mismatched revision was delivered")
 	}
 }
+
+func TestIMFinalReplyWithInboundImageDeliversPDFWhenOverThreshold(t *testing.T) {
+	// 用户拍作业提问（带图片附件），长回复超过 1000 字符应走 PDF 投递
+	msg, reply, deps, delivery := imFinalReplyTestInput(t, strings.Repeat("作业讲解逐题解析", 200))
+	msg.Attachments = []adapter.Attachment{
+		{Type: "image", Mime: "image/jpeg"},
+		{Type: "image", Mime: "image/png"},
+	}
+	got, err := maybeDeliverIMFinalReply(t.Context(), msg, reply, nil, deps)
+	if err != nil || got != nil || len(delivery.requests) != 1 {
+		t.Fatalf("inbound homework image did not deliver PDF: reply=%+v err=%v requests=%d", got, err, len(delivery.requests))
+	}
+
+	// 若混入非图片附件，则安全保留在原路径
+	msgWithDoc, replyWithDoc, depsWithDoc, deliveryWithDoc := imFinalReplyTestInput(t, strings.Repeat("作业讲解逐题解析", 200))
+	msgWithDoc.Attachments = []adapter.Attachment{
+		{Type: "image", Mime: "image/jpeg"},
+		{Type: "file", Mime: "application/zip"},
+	}
+	gotWithDoc, errWithDoc := maybeDeliverIMFinalReply(t.Context(), msgWithDoc, replyWithDoc, nil, depsWithDoc)
+	if errWithDoc != nil || gotWithDoc != replyWithDoc || len(deliveryWithDoc.requests) != 0 {
+		t.Fatalf("inbound non-image attachment must remain on original path: got=%+v err=%v", gotWithDoc, errWithDoc)
+	}
+}
+

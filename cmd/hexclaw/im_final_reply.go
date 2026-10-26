@@ -53,10 +53,16 @@ func maybeDeliverIMFinalReply(ctx context.Context, msg *adapter.Message, reply *
 	if handlerErr != nil || msg == nil || reply == nil || deps.delivery == nil || deps.resolveInstanceID == nil ||
 		msg.Platform != adapter.PlatformDingtalk || msg.Metadata["conversation_type"] != "1" ||
 		msg.UserID == "" || msg.ChatID != msg.UserID || msg.ID == "" || msg.InstanceID == "" ||
-		len(msg.Attachments) != 0 || len(reply.Attachments) != 0 || reply.Interactive != nil ||
+		len(reply.Attachments) != 0 || reply.Interactive != nil ||
 		reply.Metadata["persist_error"] != "" || msg.Metadata["persist_error"] != "" ||
 		reply.AssistantMessageID == "" || reply.Metadata["routed_agent"] == "" {
 		return reply, handlerErr
+	}
+	// 已接纳的图片输入不改变终稿正文的长回复投影，其他附件沿原处理链路交付。
+	for _, attachment := range msg.Attachments {
+		if !adapter.IsImageAttachment(attachment) {
+			return reply, handlerErr
+		}
 	}
 	canonical := reply.MessageContent
 	locale := msg.Metadata["user_locale"]
