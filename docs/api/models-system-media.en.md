@@ -335,7 +335,7 @@ Authentication: `Authorization: Bearer ${HEXCLAW_API_TOKEN}`.
 
 Availability: `always registered`.
 
-1 MiB JSON. providers omission/null preserves; a map replaces the complete set. model_specs omission/null preserves declaration mode; [] is explicit unclassified. Empty default preserves; selected default requires text. Supply both conditions together. Key and mutation are mutually exclusive; preserve requires existing identity, replace requires native hydration, delete clears. Only a masked **** key preserves the old key; ordinary empty key does not. Successful persistence hot-reloads runtime. Conflicting idempotency content is 409; reconcile unknown outcomes via receipts.
+1 MiB JSON. providers omission/null preserves; a map replaces the complete set. model_specs omission/null preserves declaration mode; [] is explicit unclassified. Empty default preserves a valid prior selection. If replacing providers invalidates it, an existing enabled text model is selected, or the default is cleared when none remains. An explicitly selected non-empty default must reference an existing enabled provider whose selected model has text capability. Supply both conditions together. Key and mutation are mutually exclusive; preserve requires existing identity, replace requires native hydration, delete clears. Only a masked **** key preserves the old key; ordinary empty key does not. Successful persistence hot-reloads runtime. Conflicting idempotency content is 409; reconcile unknown outcomes via receipts.
 
 | Parameter | Location | Required | Type | Defaults / constraints | Meaning |
 | --- | --- | --- | --- | --- | --- |
@@ -347,7 +347,7 @@ Request body:
 
 | Field | Type / contract | Required | Defaults / constraints | Meaning |
 | --- | --- | --- | --- | --- |
-| `default` | string | no | — | Non-empty switches default; empty preserves it |
+| `default` | string | no | — | Non-empty must reference an existing enabled provider and switches default; empty preserves a valid prior selection. Replacing providers that invalidates it selects an existing enabled text model, or clears the default when none remains |
 | `default_reasoning_policy` | [ModelsReasoningPolicyWrite](#schema-modelsreasoningpolicywrite) or null | no | — | default reasoning policy |
 | `providers` | map&lt;string, [ModelsProviderWrite](#schema-modelsproviderwrite)&gt; or null | no | — | providers |
 | `routing` | [ModelsRoutingWrite](#schema-modelsroutingwrite) or null | no | — | routing |
@@ -2692,7 +2692,7 @@ providers omitted/null preserves; a supplied map replaces the complete provider 
 
 | Field | Type / contract | Required | Defaults / constraints | Meaning |
 | --- | --- | --- | --- | --- |
-| `default` | string | no | — | Non-empty switches default; empty preserves it |
+| `default` | string | no | — | Non-empty must reference an existing enabled provider and switches default; empty preserves a valid prior selection. Replacing providers that invalidates it selects an existing enabled text model, or clears the default when none remains |
 | `default_reasoning_policy` | [ModelsReasoningPolicyWrite](#schema-modelsreasoningpolicywrite) or null | no | — | default reasoning policy |
 | `providers` | map&lt;string, [ModelsProviderWrite](#schema-modelsproviderwrite)&gt; or null | no | — | providers |
 | `routing` | [ModelsRoutingWrite](#schema-modelsroutingwrite) or null | no | — | routing |

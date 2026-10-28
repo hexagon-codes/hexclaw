@@ -533,7 +533,31 @@ func (p *completionCapabilityProvider) Stream(
 	return p.next.Stream(ctx, req)
 }
 
-func (p *completionCapabilityProvider) Models() []llm.ModelInfo { return p.next.Models() }
+func (p *completionCapabilityProvider) Models() []llm.ModelInfo {
+	models := append([]llm.ModelInfo(nil), p.next.Models()...)
+	_, specs := config.NormalizeProviderModelSpecs(p.providerConfig)
+	// 执行闸口必须看见当前有效声明，不能被 SDK 内置的旧模型目录覆盖。
+	for _, spec := range specs {
+		if !config.ModelHasCapability(p.providerConfig, spec.ID, config.LLMModelCapabilityVision) {
+			continue
+		}
+		found := false
+		for i := range models {
+			if !strings.EqualFold(strings.TrimSpace(models[i].ID), spec.ID) {
+				continue
+			}
+			if !models[i].HasFeature(llm.FeatureVision) {
+				models[i].Features = append(append([]string(nil), models[i].Features...), llm.FeatureVision)
+			}
+			found = true
+			break
+		}
+		if !found {
+			models = append(models, llm.ModelInfo{ID: spec.ID, Name: spec.DisplayName, Features: []string{llm.FeatureVision}})
+		}
+	}
+	return models
+}
 
 func (p *completionCapabilityProvider) CountTokens(messages []llm.Message) (int, error) {
 	return p.next.CountTokens(messages)

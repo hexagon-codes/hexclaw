@@ -3630,7 +3630,7 @@ paths:
     put:
       summary: 替换或更新LLM配置
       description: 1 MiB
-        JSON。providers省略/null保留，提供map则整体替换；model_specs省略/null保留既有声明模式，[]为显式未分类。default空保留；默认模型必须含text。expected_config_revision/digest必须一起提供。api_key与api_key_mutation互斥；preserve需已有Provider，replace仅引用已注入的原生凭据，delete清除。仅****脱敏Key保留旧Key；普通空api_key不会自动保留。成功持久化并热更新；同Idempotency-Key内容冲突409；结果未知先查提交证明。
+        JSON。providers省略/null保留，提供map则整体替换；model_specs省略/null保留既有声明模式，[]为显式未分类。default空保留有效旧选择；整体替换providers使原默认失效时，协调到已有启用文本模型，若不存在则清空默认。显式指定的非空default必须引用存在且启用的Provider，且其默认模型必须含text。expected_config_revision/digest必须一起提供。api_key与api_key_mutation互斥；preserve需已有Provider，replace仅引用已注入的原生凭据，delete清除。仅****脱敏Key保留旧Key；普通空api_key不会自动保留。成功持久化并热更新；同Idempotency-Key内容冲突409；结果未知先查提交证明。
       tags:
         - models-system-media
       operationId: models_handleUpdateLLMConfig_put
@@ -25901,7 +25901,7 @@ components:
       properties:
         default:
           type: string
-          description: Non-empty switches default; empty preserves it
+          description: Non-empty must reference an existing enabled provider and switches default; empty preserves a valid prior selection. Replacing providers that invalidates it selects an existing enabled text model, or clears the default when none remains.
         default_reasoning_policy:
           anyOf:
             - $ref: "#/components/schemas/ModelsReasoningPolicyWrite"

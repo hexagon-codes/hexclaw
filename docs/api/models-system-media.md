@@ -335,7 +335,7 @@ curl "${HEXCLAW_API}/api/v1/config/mutations/llm-example-1?operation_kind=llm" \
 
 挂载条件: `始终挂载`.
 
-1 MiB JSON。providers省略/null保留，提供map则整体替换；model_specs省略/null保留既有声明模式，[]为显式未分类。default空保留；默认模型必须含text。expected_config_revision/digest必须一起提供。api_key与api_key_mutation互斥；preserve需已有Provider，replace仅引用已注入的原生凭据，delete清除。仅****脱敏Key保留旧Key；普通空api_key不会自动保留。成功持久化并热更新；同Idempotency-Key内容冲突409；结果未知先查提交证明。
+1 MiB JSON。providers省略/null保留，提供map则整体替换；model_specs省略/null保留既有声明模式，[]为显式未分类。default空保留有效旧选择；整体替换providers使原默认失效时，协调到已有启用文本模型，若不存在则清空默认。显式指定的非空default必须引用存在且启用的Provider，且其默认模型必须含text。expected_config_revision/digest必须一起提供。api_key与api_key_mutation互斥；preserve需已有Provider，replace仅引用已注入的原生凭据，delete清除。仅****脱敏Key保留旧Key；普通空api_key不会自动保留。成功持久化并热更新；同Idempotency-Key内容冲突409；结果未知先查提交证明。
 
 | 参数 | 位置 | 必填 | 类型 | 默认 / 限制 | 含义 |
 | --- | --- | --- | --- | --- | --- |
@@ -347,7 +347,7 @@ curl "${HEXCLAW_API}/api/v1/config/mutations/llm-example-1?operation_kind=llm" \
 
 | 字段 | 类型 / 契约 | 必填 / 必有 | 默认 / 限制 | 含义 |
 | --- | --- | --- | --- | --- |
-| `default` | string | 否 | — | 非空切换默认 Provider；空值保留 |
+| `default` | string | 否 | — | 非空必须引用存在且启用的 Provider 并切换默认；空值保留有效旧选择。替换 providers 使原默认失效时选择已有启用文本模型，无可用项则清空 |
 | `default_reasoning_policy` | [ModelsReasoningPolicyWrite](#schema-modelsreasoningpolicywrite) 或 null | 否 | — | 全局默认推理策略 |
 | `providers` | map&lt;string, [ModelsProviderWrite](#schema-modelsproviderwrite)&gt; 或 null | 否 | — | Provider map |
 | `routing` | [ModelsRoutingWrite](#schema-modelsroutingwrite) 或 null | 否 | — | 模型路由 |
@@ -2692,7 +2692,7 @@ providers 省略/null 保留；提供 map 则整体替换。两项配置条件�
 
 | 字段 | 类型 / 契约 | 必填 / 必有 | 默认 / 限制 | 含义 |
 | --- | --- | --- | --- | --- |
-| `default` | string | 否 | — | 非空切换默认 Provider；空值保留 |
+| `default` | string | 否 | — | 非空必须引用存在且启用的 Provider 并切换默认；空值保留有效旧选择。替换 providers 使原默认失效时选择已有启用文本模型，无可用项则清空 |
 | `default_reasoning_policy` | [ModelsReasoningPolicyWrite](#schema-modelsreasoningpolicywrite) 或 null | 否 | — | 全局默认推理策略 |
 | `providers` | map&lt;string, [ModelsProviderWrite](#schema-modelsproviderwrite)&gt; 或 null | 否 | — | Provider map |
 | `routing` | [ModelsRoutingWrite](#schema-modelsroutingwrite) 或 null | 否 | — | 模型路由 |

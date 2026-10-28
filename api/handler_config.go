@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -977,7 +978,40 @@ func (s *Server) updateLLMConfig(w http.ResponseWriter, r *http.Request, req LLM
 	}
 
 	if req.Default != "" {
+		if provider, exists := nextLLM.Providers[req.Default]; !exists {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": fmt.Sprintf("default provider %q is not configured", req.Default),
+			})
+			return
+		} else if provider.Enabled != nil && !*provider.Enabled {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": fmt.Sprintf("default provider %q is disabled", req.Default),
+			})
+			return
+		}
 		nextLLM.Default = req.Default
+	} else if req.Providers != nil {
+		provider, exists := nextLLM.Providers[nextLLM.Default]
+		if !exists || (provider.Enabled != nil && !*provider.Enabled) ||
+			!config.ModelHasCapability(provider, provider.Model, config.LLMModelCapabilityText) {
+			// 空默认保留有效旧选择；删除或停用原模型后只协调到已有有效文本选择。
+			nextLLM.Default = ""
+			names := make([]string, 0, len(nextLLM.Providers))
+			for name := range nextLLM.Providers {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			for _, name := range names {
+				candidate := nextLLM.Providers[name]
+				if candidate.Enabled != nil && !*candidate.Enabled {
+					continue
+				}
+				if config.ModelHasCapability(candidate, candidate.Model, config.LLMModelCapabilityText) {
+					nextLLM.Default = name
+					break
+				}
+			}
+		}
 	}
 
 	if req.Routing != nil {
