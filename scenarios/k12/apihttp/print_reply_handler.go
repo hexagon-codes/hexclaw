@@ -11,6 +11,7 @@ import (
 )
 
 func (h *handler) registerPrintReplies(mux *http.ServeMux) {
+	h.registerDocumentRecovery(mux)
 	mux.HandleFunc("GET /print-replies/{message_id}", h.getPrintReply)
 	mux.HandleFunc("POST /print-replies/{message_id}/resume", h.resumePrintReply)
 }

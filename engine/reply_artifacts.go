@@ -33,6 +33,26 @@ func (e *ReActEngine) SetReplyArtifactResolver(resolve ReplyArtifactResolver) {
 	e.replyArtifactResolver = resolve
 }
 
+// AddReplyArtifactResolver 让独立产物提供者共享原回合的完成事务。
+func (e *ReActEngine) AddReplyArtifactResolver(resolve ReplyArtifactResolver) {
+	if resolve == nil {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	previous := e.replyArtifactResolver
+	e.replyArtifactResolver = func(ctx context.Context, msg *adapter.Message, metadata map[string]string) (context.Context, error) {
+		var err error
+		if previous != nil {
+			ctx, err = previous(ctx, msg, metadata)
+			if err != nil {
+				return ctx, err
+			}
+		}
+		return resolve(ctx, msg, metadata)
+	}
+}
+
 func (e *ReActEngine) prepareReplyArtifacts(ctx context.Context, msg *adapter.Message, metadata map[string]string) (context.Context, error) {
 	e.mu.RLock()
 	resolve := e.replyArtifactResolver

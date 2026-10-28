@@ -67,6 +67,7 @@ import (
 	"github.com/hexagon-codes/hexclaw/gateway"
 	"github.com/hexagon-codes/hexclaw/heartbeat"
 	"github.com/hexagon-codes/hexclaw/instances"
+	"github.com/hexagon-codes/hexclaw/internal/documentflow"
 	"github.com/hexagon-codes/hexclaw/internal/mediabridge"
 	"github.com/hexagon-codes/hexclaw/internal/mediaflow"
 	"github.com/hexagon-codes/hexclaw/knowledge"
@@ -1942,8 +1943,16 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 
 	// 文档渲染服务（提前构建到函数作用域，K12 导出与平台 export skill 复用同一实例，避免 sandbox/cache 冲突）。
 	var renderSvc *render.Service
+	var documentFlow *documentflow.Service
 	if rs, rErr := buildRenderService(); rErr == nil {
 		renderSvc = rs
+		documentFlow = documentflow.NewService(renderSvc, store.DocumentRepository())
+		documentFlow.SetAgentDisplayNameResolver(func(_ context.Context, agent string) string {
+			if configured, ok := agentRouter.GetAgent(agent); ok {
+				return configured.DisplayName
+			}
+			return ""
+		})
 	} else {
 		logger.Warn("[warn] 文档渲染服务未启用", "error", rErr)
 	}
@@ -2096,6 +2105,25 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 		// 建档/改档：接 agent 路由 + 持久化（读改写 agents.metadata）。
 		k12Opts = append(k12Opts,
 			k12assembly.WithReplyAttachments(eng.ResolveMediaReplyAttachments),
+			func(d *k12usecase.Deps) {
+				if documentFlow != nil {
+					d.ResolveAdditionalReplyAttachments = func(ctx context.Context, message *storage.MessageRecord) ([]k12usecase.FrozenReplyAttachment, error) {
+						attachments, err := documentFlow.ResolveMessageAttachments(ctx, message)
+						if err != nil {
+							return nil, err
+						}
+						frozen := make([]k12usecase.FrozenReplyAttachment, 0, len(attachments))
+						for _, attachment := range attachments {
+							item := k12usecase.FrozenReplyAttachment{DeliveryAttachmentIdentity: k12usecase.DeliveryAttachmentIdentity{Name: attachment.Name, MIME: attachment.Mime, ContentDigest: attachment.ContentDigest}, Size: attachment.Size}
+							if attachment.Source != nil {
+								item.OpenReader = attachment.Source.OpenReader
+							}
+							frozen = append(frozen, item)
+						}
+						return frozen, nil
+					}
+				}
+			},
 			k12assembly.WithProfiles(k12engineadapter.NewProfileAdapter(agentRouter, agentStore)),
 			k12assembly.WithArchiveRestorer(func(recordStore *k12storage.Store) k12usecase.ArchiveRestorer {
 				return k12engineadapter.NewArchiveRestoreAdapter(store.DB(), recordStore, agentRouter, agentStore)
@@ -3087,13 +3115,17 @@ Set source only when the material explicitly names a work, title, or another rel
 	// 复用前面提前构建的 renderSvc（K12 导出与本处 export skill / /api/v1/render 共用一实例）。
 	if renderSvc != nil {
 		srv.SetRenderService(renderSvc)
+		srv.SetDocumentFlow(documentFlow)
+		eng.AddReplyArtifactResolver(documentFlow.ReplyResolver)
 		logger.Info("[info] 文档渲染服务已启用",
 			"engine", "pandoc",
 			"endpoint", "/api/v1/render")
 		// 文档导出 Skill：默认关 + render service 就绪才注册。
 		// 包一层 render.Service，返回落盘路径供送达附件 / 入库 / 下载串联。
 		if cfg.Skill.Builtin.ExportDoc {
-			if rerr := skills.Register(builtin.NewExportDocumentSkill(renderSvc)); rerr != nil {
+			exportSkill := builtin.NewExportDocumentSkill(renderSvc)
+			exportSkill.SetArtifactPublisher(documentFlow)
+			if rerr := skills.Register(exportSkill); rerr != nil {
 				logger.Warn("[render] failed to register export_document skill", "err", rerr.Error())
 			} else {
 				fmt.Println("  ✓ Skill       export_document (§11.3)")

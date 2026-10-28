@@ -13,6 +13,7 @@ import (
 	"github.com/hexagon-codes/hexclaw/messagecontent"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
+	"github.com/hexagon-codes/hexclaw/storage"
 )
 
 func projectionDigest(raw string) string {
@@ -36,6 +37,12 @@ func projectedDeliveryFixture(t *testing.T, private, secondTarget, fallback bool
 	batch := k12.DeliveryBatch{BatchID: "projection-batch", AgentName: "mingming", ObjectKind: "creative_work", ObjectID: "work-1:" + k12.DeliveryProjectionVersionIMFinalPDFV1, ContentDigest: canonical.SourceDigest}
 	if private {
 		source.PrivateEvent = &k12.AcceptedPrivateReplySource{AgentName: batch.AgentName, Platform: "dingtalk", InstanceID: "bot-a", SenderID: "parent-a", MessageID: "inbound-1", AssistantMessageID: "assistant-1"}
+		canonical, err = messagecontent.New(canonical.ProducerKind, canonical.Locale, canonical.Markdown, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		source.Canonical, source.SourceRef = canonical, source.PrivateEvent.AssistantMessageID
+		batch.ContentDigest = canonical.SourceDigest
 		batch.ObjectKind = "im_final_reply"
 		batch.ObjectID, err = k12.PrivateReplyObjectID(*source.PrivateEvent)
 		if err != nil {
@@ -56,7 +63,10 @@ func projectedDeliveryFixture(t *testing.T, private, secondTarget, fallback bool
 	for targetIndex, target := range targets {
 		body := canonical.Markdown
 		attachments := append([]messagecontent.AttachmentRef(nil), canonical.Attachments...)
-		data := [][]byte{imageBytes}
+		var data [][]byte
+		if len(attachments) > 0 {
+			data = [][]byte{imageBytes}
+		}
 		if target.Platform == "dingtalk" && !fallback {
 			body = "短摘要，完整内容见附件。"
 			attachments = append(attachments, messagecontent.AttachmentRef{AssetID: "complete-pdf", Name: "完整回复.pdf", MIME: "application/pdf", Digest: projectionDigest(string(pdfBytes)), AltText: "完整回复"})
@@ -263,6 +273,28 @@ func TestDeliveryProjectionSQLitePrivateEventCannotChangeRecipient(t *testing.T)
 		})
 	}
 	input := projectedDeliveryFixture(t, true, false, false)
+	var persisted struct {
+		Source *k12.DeliveryProjectionSource `json:"delivery_source"`
+	}
+	if err := json.Unmarshal([]byte(input.Receipts[0].PayloadJSON), &persisted); err != nil {
+		t.Fatal(err)
+	}
+	p := persisted.Source.PrivateEvent
+	request := storage.IMRequestIDForEvent(p.Platform, p.InstanceID, p.MessageID)
+	metadata, _ := json.Marshal(map[string]string{"agent_name": input.AgentName, "producer_kind": string(persisted.Source.Canonical.ProducerKind), "locale": persisted.Source.Canonical.Locale})
+	for _, stmt := range []struct {
+		sql  string
+		args []any
+	}{
+		{`INSERT INTO platform_instances(id,provider,name,created_at,updated_at) VALUES(?,?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, []any{p.InstanceID, p.Platform, "saved-bot"}},
+		{`INSERT INTO sessions(id,user_id,platform,instance_id,chat_id,created_at,updated_at) VALUES('saved-session',?,?,?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, []any{p.SenderID, p.Platform, "saved-bot", p.SenderID}},
+		{`INSERT INTO messages(id,session_id,role,content,request_id,created_at) VALUES('saved-user','saved-session','user','real input',?,CURRENT_TIMESTAMP)`, []any{request}},
+		{`INSERT INTO messages(id,session_id,role,content,request_id,metadata,created_at) VALUES(?,'saved-session','assistant',?,?,?,CURRENT_TIMESTAMP)`, []any{p.AssistantMessageID, persisted.Source.Canonical.Markdown, request, string(metadata)}},
+	} {
+		if _, err := store.DB().ExecContext(t.Context(), stmt.sql, stmt.args...); err != nil {
+			t.Fatal(err)
+		}
+	}
 	batch, created, err := store.PrepareDeliveryBatch(t.Context(), input)
 	if err != nil || !created || !strings.HasPrefix(batch.Receipts[0].BindingID, "accepted-event:") {
 		t.Fatalf("accepted event rejected: created=%v err=%v", created, err)

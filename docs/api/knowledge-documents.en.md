@@ -2,7 +2,7 @@
 
 [中文 / English](knowledge-documents.md) · [OpenAPI](../../api/openapi.yaml)
 
-This reference covers the current main source plus uncommitted working-tree behavior. It documents 26 unique method/path contracts; it does not imply those changes are already included in a published installer. All endpoints inherit the selected service’s Bearer authentication.
+This reference covers the current main source plus uncommitted working-tree behavior. It documents 27 unique method/path contracts; it does not imply those changes are already included in a published installer. All endpoints inherit the selected service’s Bearer authentication.
 
 Owner scope comes from authentication/service binding, never body/query user_id. The public Knowledge corpus currently only supports `default`. A missing module means its routes are not mounted (404 or 405 depending on other registered methods), except GET documents which returns an empty projection when KB is disabled. Additional ingest/source/projection capabilities are stated per endpoint.
 
@@ -26,6 +26,7 @@ Unknown OCR/embedding outcomes are preserved and must not be blindly resent. The
 | Method and path | Operation | Availability |
 | --- | --- | --- |
 | `POST /api/v1/render` | Render Markdown and download the artifact | Render service configured |
+| `GET /api/v1/document-artifacts/{id}/content` | Download an immutable document owned by the current user | Document flow configured |
 | `POST /api/v1/knowledge/documents` | Add text or accept an asynchronous source upload | KB configured |
 | `GET /api/v1/knowledge/documents` | List, paginate, and count document sources | KB configured; empty projection if disabled |
 | `GET /api/v1/knowledge/documents/{id}` | Read content and asynchronous document state | KB configured |
@@ -1285,6 +1286,18 @@ No Range handling and no JSON envelope. A missing token uses Go http.NotFound pl
 | `200` | application/octet-stream: string; Successful payload/file; read the command-specific completion semantics. |
 | `404` | text/plain: string; Resource/token absent or inaccessible in the current scope. |
 
+
+## 27. `GET /api/v1/document-artifacts/{id}/content`
+
+Reads the original bytes registered by `export_document`. Ownership comes from the Bearer principal, never a client-supplied owner. The artifact has a stable ID, source, MIME type, size, and byte digest, and remains readable after service restart. Downloads do not call a model or render again.
+
+Implementation: [`handleDocumentArtifactContent`](../../api/handler_document_artifacts.go).
+
+| Parameter | Location | Required | Contract |
+| --- | --- | --- | --- |
+| `id` | path | Yes | document_export artifact_id returned by the tool |
+
+A successful response contains file bytes, the persisted MIME type in `Content-Type`, an attachment filename in `Content-Disposition`, and the byte SHA256 in `ETag`. Conditional reads and Range use `http.ServeContent`. Missing artifacts and artifacts owned by another user return a plain-text 404; missing authentication returns 401. The route is mounted only when document flow is configured.
 
 ## Shared error interpretation
 

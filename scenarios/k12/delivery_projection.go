@@ -33,6 +33,8 @@ type DeliveryProjectionSource struct {
 	DingTalkFullProjection string                        `json:"dingtalk_full_projection,omitempty"`
 	WritingFeedback        bool                          `json:"writing_feedback,omitempty"`
 	EmbeddedGradingImage   *PDFEmbeddedGradingImage      `json:"embedded_grading_image,omitempty"`
+	PreparationID          string                        `json:"preparation_id,omitempty"`
+	RenderRevision         string                        `json:"render_revision,omitempty"`
 }
 
 // PDFEmbeddedGradingImage 保留已嵌入PDF的原图，供零发送的已知准备失败恢复。
@@ -72,6 +74,19 @@ func PrivateReplyObjectID(source AcceptedPrivateReplySource) (string, error) {
 		return "", err
 	}
 	return "private-reply-" + digest + ":" + DeliveryProjectionVersionIMFinalPDFV1, nil
+}
+
+// PrivateReplyRevisionObjectID 为同一原结果的显式重排保留独立投递身份。
+func PrivateReplyRevisionObjectID(source AcceptedPrivateReplySource, revision string) (string, error) {
+	id, err := PrivateReplyObjectID(source)
+	if err != nil || revision == "" {
+		return id, err
+	}
+	if strings.TrimSpace(revision) != revision || len(revision) > 256 {
+		return "", fmt.Errorf("document render revision is invalid")
+	}
+	sum := sha256.Sum256([]byte(revision))
+	return strings.TrimSuffix(id, ":"+DeliveryProjectionVersionIMFinalPDFV1) + ":revision-" + hex.EncodeToString(sum[:]) + ":" + DeliveryProjectionVersionIMFinalPDFV1, nil
 }
 
 // PrivateReplyAuthorityID 在既有回执身份列中明确记录事件回送授权，不代表路由绑定实体。
@@ -137,7 +152,7 @@ func ValidateDeliveryProjection(batchAgent, objectKind, objectID, contentDigest 
 	}
 	if source.PrivateEvent != nil {
 		private := *source.PrivateEvent
-		wantID, err := PrivateReplyObjectID(private)
+		wantID, err := PrivateReplyRevisionObjectID(private, source.RenderRevision)
 		authority, authorityErr := PrivateReplyAuthorityID(private)
 		if err != nil || objectKind != "im_final_reply" || objectID != wantID || private.AgentName != batchAgent ||
 			authorityErr != nil || bindingID != authority || target.Platform != private.Platform || target.InstanceID != private.InstanceID || target.ChatID != private.SenderID {

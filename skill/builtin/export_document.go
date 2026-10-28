@@ -4,7 +4,7 @@ package builtin
 //
 // 行为：
 //   - 包一层 render.Service（pandoc/typst sidecar），不经过 LLM。
-//   - 返回落盘路径（RenderResult.Path）非 bytes —— 下游可作送达附件 / 入库 / 用户下载。
+//   - 应用注入持久化后返回归属当前会话的产物引用；独立渲染调用保留路径返回合同。
 //   - raw_html / raw_tex 默认禁（沙箱攻击面收敛，不暴露 UI 开关）。
 
 import (
@@ -12,7 +12,9 @@ import (
 	"fmt"
 	"strings"
 
+	"encoding/json"
 	"github.com/hexagon-codes/ai-core/llm"
+	"github.com/hexagon-codes/hexclaw/internal/documentflow"
 	"github.com/hexagon-codes/hexclaw/render"
 	"github.com/hexagon-codes/hexclaw/skill"
 )
@@ -24,7 +26,17 @@ type DocumentExporter interface {
 
 // ExportDocumentSkill 把 Markdown 渲染成可下载文档并返回文件路径。
 type ExportDocumentSkill struct {
-	render DocumentExporter
+	render    DocumentExporter
+	publisher DocumentArtifactPublisher
+}
+
+// DocumentArtifactPublisher 由应用注入持久产物能力，工具本身不管理归属数据库。
+type DocumentArtifactPublisher interface {
+	ExportDocument(context.Context, string, render.Format, render.RenderOptions, string) (documentflow.Artifact, error)
+}
+
+func (s *ExportDocumentSkill) SetArtifactPublisher(publisher DocumentArtifactPublisher) {
+	s.publisher = publisher
 }
 
 func NewExportDocumentSkill(r DocumentExporter) *ExportDocumentSkill {
@@ -42,10 +54,10 @@ func (s *ExportDocumentSkill) Match(string) bool { return false }
 func (s *ExportDocumentSkill) ToolDefinition() llm.ToolDefinition {
 	return llm.NewToolDefinition("export_document",
 		"Render Markdown into a downloadable document (md/html/docx/pdf/epub/odt/rtf/txt) and return "+
-			"its file path. Use this tool for generated PDFs so the shared layout is applied. Write formulas as Markdown/LaTeX math. "+
+			"a persistent attachment reference when the application document service is available. Use this tool for generated PDFs so the shared layout is applied. Write formulas as Markdown/LaTeX math. "+
 			"PDF defaults to the standard HexClaw layout with a header and footer on every page. "+
 			"Only set PDF exceptions when the user explicitly requests no header/footer or a custom format. "+
-			"The path can be sent or ingested.",
+			"The application attaches a registered document to the current reply; do not claim delivery from a local file path alone.",
 		&llm.Schema{Type: "object", Properties: map[string]*llm.Schema{
 			"content":           {Type: "string", Description: "Markdown content to render (required)"},
 			"format":            {Type: "string", Description: "md|html|docx|pdf|epub|odt|rtf|txt (required)"},
@@ -86,6 +98,15 @@ func (s *ExportDocumentSkill) Execute(ctx context.Context, args map[string]any) 
 	opts.PDFLayout = firstStringArg(args, "pdf_layout")
 	if err := opts.Validate(); err != nil {
 		return nil, err
+	}
+	if s.publisher != nil {
+		artifact, err := s.publisher.ExportDocument(ctx, content, format, opts, firstStringArg(args, "filename"))
+		if err != nil {
+			return nil, fmt.Errorf("export document failed: %w", err)
+		}
+		ref := documentflow.ReferenceFor(artifact)
+		raw, _ := json.Marshal([]documentflow.Reference{ref})
+		return &skill.Result{Content: fmt.Sprintf("Exported %s (%d bytes): %s", format, artifact.Size, ref.URL), Data: ref, Metadata: map[string]string{"artifacts": string(raw)}}, nil
 	}
 
 	res, err := s.render.Render(ctx, content, format, opts)

@@ -2,7 +2,7 @@
 
 [中文 / English](knowledge-documents.en.md) · [OpenAPI](../../api/openapi.yaml)
 
-本参考覆盖当前 main 源码与工作区未提交行为，共 26 个唯一方法/路径；不据此宣称已包含在公开安装包中。全部端点继承所选服务的 Bearer 访问令牌鉴权。
+本参考覆盖当前 main 源码与工作区未提交行为，共 27 个唯一方法/路径；不据此宣称已包含在公开安装包中。全部端点继承所选服务的 Bearer 访问令牌鉴权。
 
 业务归属取鉴权上下文及服务绑定，不由 body/query 的 user_id 指定。公开知识库目前只支持 `default`。未装配模块时其路由不挂载（依其他已注册方法可能为 404 或 405），但 KB 关闭时 `GET documents` 仍返回空投影；异步摄取、原文件及投影能力的额外前提逐项注明。
 
@@ -26,6 +26,7 @@ OCR/embedding 结果未知时保留已完成事实，不能盲目重发。恢复
 | 方法与路径 | 用途 | 挂载条件 |
 | --- | --- | --- |
 | `POST /api/v1/render` | 渲染Markdown并下载产物 | s.renderSvc != nil |
+| `GET /api/v1/document-artifacts/{id}/content` | 下载当前用户的持久文档产物 | s.documentFlow != nil |
 | `POST /api/v1/knowledge/documents` | 新增文本或异步上传原文件 | s.kb != nil |
 | `GET /api/v1/knowledge/documents` | 列表、分页与来源计数 | KB启用返回分页列表；KB未启用仍注册并返回documents=[]、total=0空投影 |
 | `GET /api/v1/knowledge/documents/{id}` | 读取正文及异步状态 | s.kb != nil |
@@ -1285,6 +1286,18 @@ multipart file；成功返回token，不返回解析文本、不入知识库。
 | `200` | application/octet-stream: string; 缓存文件字节 |
 | `404` | text/plain: string; token不存在/已淘汰/服务重启，text/plain而非JSON |
 
+
+## 27. `GET /api/v1/document-artifacts/{id}/content`
+
+读取 `export_document` 已登记的原始文件，归属取当前 Bearer 身份，不接受请求指定的 owner。文件具有稳定 ID、来源、MIME、大小与字节摘要，服务重启后继续可读；下载不重新调用模型或渲染。
+
+实现：[`handleDocumentArtifactContent`](../../api/handler_document_artifacts.go)
+
+| 参数 | 位置 | 必填 | 类型 / 约束 |
+| --- | --- | --- | --- |
+| `id` | path | 是 | 工具返回的 document_export artifact_id |
+
+成功响应为文件字节，`Content-Type` 取持久 MIME，`Content-Disposition` 为附件名称，`ETag` 为字节 SHA256；沿 `http.ServeContent` 支持条件读取和 Range。其他用户文件与不存在文件均返回纯文本 404；未鉴权返回 401。仅文档服务已装配时挂载。
 
 ## 通用错误解读
 

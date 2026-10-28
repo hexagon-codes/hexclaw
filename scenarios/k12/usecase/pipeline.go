@@ -14,6 +14,7 @@ import (
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
 	"github.com/hexagon-codes/hexclaw/skill"
+	"github.com/hexagon-codes/hexclaw/storage"
 )
 
 // FirstReviewInterval 错题首次复习到期间隔（秒）。间隔重排的起点（§5.3.1）。
@@ -29,6 +30,8 @@ type Deps struct {
 	DeliveryLocale func() string
 	// ReplyAttachments 读取原助手元数据中已冻结的其他附件；不求解、生成或重新路由。
 	ReplyAttachments func(context.Context, string, string) ([]FrozenReplyAttachment, error)
+	// ResolveAdditionalReplyAttachments 读取同一持久回合产生的通用文档，随原批次交付。
+	ResolveAdditionalReplyAttachments func(context.Context, *storage.MessageRecord) ([]FrozenReplyAttachment, error)
 	// ExecutionSummaryFooter 和 ReplyMetadataFooter 由装配层投影渠道说明，用例只提供事实。
 	ExecutionSummaryFooter func(string, messagecontent.ExecutionSummary) string
 	ReplyMetadataFooter    func(string, map[string]json.RawMessage) string

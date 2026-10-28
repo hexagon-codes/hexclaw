@@ -20,6 +20,17 @@ func (d Deps) ResumeFinalReplyBatch(ctx context.Context, agentName, batchID stri
 
 func (d Deps) resumeFinalReplyBatch(ctx context.Context, existing k12.DeliveryBatch) (k12.DeliveryBatch, bool, error) {
 	if k12storage.PDFPreparationFallbackAllowed(existing) {
+		var payload struct {
+			Source *k12.DeliveryProjectionSource `json:"delivery_source"`
+		}
+		if len(existing.Receipts) > 0 && json.Unmarshal([]byte(existing.Receipts[0].PayloadJSON), &payload) == nil && payload.Source != nil && payload.Source.PreparationID != "" {
+			reset, err := d.Records.RetryKnownFinalReplyPreparation(ctx, existing.AgentName, existing.BatchID)
+			if err != nil {
+				return existing, false, err
+			}
+			result, err := d.sendDeliveryBatch(ctx, reset)
+			return result, false, err
+		}
 		if err := validateProjectedDeliveryBatch(existing); err != nil {
 			return existing, false, err
 		}

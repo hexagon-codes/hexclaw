@@ -303,7 +303,8 @@ func WireInto(ctx context.Context, reg *scenario.Registry, db *sql.DB, solveSkil
 	// 消费者持 Deps.Insights（opts 应用后再建，确保拿到注入的 adapter）。
 	feedbackWorker := usecase.NewProblemAssetFeedbackConsumer(store)
 	outbox := k12storage.NewDispatcher(store, usecase.InsightsConsumer{Insights: deps.Insights, Records: store},
-		usecase.ProblemAssetConsumer{Records: store}, feedbackWorker, usecase.PrintReplyConsumer{Deps: deps})
+		usecase.ProblemAssetConsumer{Records: store}, feedbackWorker, usecase.PrintReplyConsumer{Deps: deps},
+		usecase.FinalReplyPreparationConsumer{Deps: deps})
 	catalogWorker := usecase.NewTextbookCatalogWorker(
 		store,
 		usecase.TextbookCatalogCheckpointExtractor{},

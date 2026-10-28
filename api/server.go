@@ -63,6 +63,7 @@ import (
 	"github.com/hexagon-codes/hexclaw/engine"
 	"github.com/hexagon-codes/hexclaw/gateway"
 	"github.com/hexagon-codes/hexclaw/instances"
+	"github.com/hexagon-codes/hexclaw/internal/documentflow"
 	"github.com/hexagon-codes/hexclaw/internal/mediaflow"
 	"github.com/hexagon-codes/hexclaw/internal/upstreamerr"
 	"github.com/hexagon-codes/hexclaw/knowledge"
@@ -122,6 +123,7 @@ type Server struct {
 	imagegenSvc        *imagegen.Service             // 图像生成服务（可选）
 	videogenSvc        *videogen.Service             // 视频生成服务（可选）
 	renderSvc          *render.Service               // 文档渲染服务（可选）
+	documentFlow       *documentflow.Service         // 当前会话的持久文档与下载。
 	capabilities       *llmrouter.CapabilityService  // A7 模型 tool_call 能力探测（可选）
 	genStore           *genstore.Store               // 生成内容持久化（图像/视频）
 	mediaFlow          *mediaflow.Service
@@ -746,6 +748,11 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/service/restart", s.handleRestartService)
 	mux.HandleFunc("POST /api/v1/chat", s.handleChat)
 	mux.HandleFunc("POST /api/v1/attachments", s.handleStageAttachment)
+	if s.documentFlow != nil {
+		mux.HandleFunc("GET /api/v1/document-artifacts/{id}/content", s.handleDocumentArtifactContent)
+		mux.HandleFunc("POST /api/v1/document-artifacts/{id}/resume", s.handleResumeDocumentArtifact)
+		mux.HandleFunc("POST /api/v1/document-artifacts/{id}/reexport", s.handleReexportDocumentArtifact)
+	}
 	// Native-only internal API. apiAuthMiddleware requires an exact loopback
 	// sidecar capability and rejects the general API token for this namespace.
 	mux.HandleFunc("POST /api/internal/desktop/credentials/hydrate", s.handleHydrateDesktopCredentials)

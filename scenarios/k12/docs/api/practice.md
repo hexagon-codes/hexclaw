@@ -2,6 +2,8 @@
 
 [English](practice.en.md) · [K12 API 总览](../../API.md)
 
+文件阶段恢复与显式新版排版见[会话文件恢复与排版修订 API](document-recovery.md)。
+
 本页覆盖当前源码（包括未提交改动）注册的全部 52 个方法 / 路径组合。请按实际运行服务的发布版本使用；路径已经包含 `/api/k12` 前缀。需启用 K12 场景和记录存储；模型、渲染、投递操作另需对应已配置依赖。
 
 使用所调用 HexClaw 实例的 Bearer 令牌，JSON 写操作设置 `Content-Type: application/json`。示例 ID 是占位说明，应替换为前一响应中的真实 ID。`agent` 选择当前孩子的 K12 Agent 范围，不改变认证身份。部分严格周练命令按计划 ID 解析 agent，body 中反而不能携带 `agent`。

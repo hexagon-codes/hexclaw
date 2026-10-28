@@ -29,6 +29,7 @@ type FinalReplyDeliveryRequest struct {
 	Summary                         string
 	DingTalkSuffix                  string
 	WritingFeedback                 bool
+	RenderRevision                  string
 	// 仅精确批改PDF路径可声明图已嵌入；规范源与其他渠道仍保留原图。
 	GradingImageInPDF bool
 }
@@ -54,7 +55,11 @@ func finalReplySource(req FinalReplyDeliveryRequest, message DeliveryMessage) (*
 	if strings.TrimSpace(req.SourceRef) == "" {
 		return nil, errors.New("final reply source reference is required")
 	}
-	return &k12.DeliveryProjectionSource{Version: k12.DeliveryProjectionVersionIMFinalPDFV1, SourceRef: req.SourceRef, Canonical: canonical, PrivateEvent: req.PrivateEvent, DingTalkSuffix: req.DingTalkSuffix}, nil
+	source := &k12.DeliveryProjectionSource{Version: k12.DeliveryProjectionVersionIMFinalPDFV1, SourceRef: req.SourceRef, Canonical: canonical, PrivateEvent: req.PrivateEvent, DingTalkSuffix: req.DingTalkSuffix, RenderRevision: req.RenderRevision}
+	if req.PrivateEvent != nil {
+		source.PreparationID = k12storage.FinalReplyPreparationID(req.AgentName, req.SourceRef, req.RenderRevision)
+	}
+	return source, nil
 }
 
 func finalReplyAttachmentName(title string) string {
@@ -95,6 +100,13 @@ func finalReplyFullProjection(ctx context.Context, full DeliveryMessage, suffix 
 
 // PrepareAndSendFinalReply 在原批次中冻结各渠道完整计划；任何已接纳批次都接续原回执。
 func (d Deps) PrepareAndSendFinalReply(ctx context.Context, req FinalReplyDeliveryRequest, targets []ResolvedDeliveryTarget) (k12.DeliveryBatch, bool, error) {
+	if req.PrivateEvent != nil {
+		return d.preparePrivateFinalReply(ctx, req, targets)
+	}
+	return d.prepareAndSendFinalReply(ctx, req, targets)
+}
+
+func (d Deps) prepareAndSendFinalReply(ctx context.Context, req FinalReplyDeliveryRequest, targets []ResolvedDeliveryTarget) (k12.DeliveryBatch, bool, error) {
 	if d.Records == nil || d.Delivery == nil {
 		return k12.DeliveryBatch{}, false, ErrDeliveryUnavailable
 	}
@@ -154,6 +166,9 @@ func (d Deps) PrepareAndSendFinalReply(ctx context.Context, req FinalReplyDelive
 				}
 			}
 			printRequest := PreparePrintableArtifactRequest{AgentName: req.AgentName, SourceKind: req.SourceKind, SourceRef: req.SourceRef, Title: req.Title, CanonicalMarkdown: full.Content, RenderMarkdown: renderMarkdown}
+			if req.RenderRevision != "" {
+				printRequest.SourceRef += ":render-revision:" + deliveryDigest(req.RenderRevision)
+			}
 			var prepared PrintableArtifactView
 			var prepareErr error
 			if (req.SourceKind == k12.PrintSourceIMFinalReply && req.PrivateEvent != nil) || (req.SourceKind == "accumulation" && req.ObjectKind == "accumulation") {
@@ -166,6 +181,8 @@ func (d Deps) PrepareAndSendFinalReply(ctx context.Context, req FinalReplyDelive
 			}
 			if prepareErr == nil {
 				pdf = &prepared
+			} else if req.PrivateEvent != nil {
+				return k12.DeliveryBatch{}, false, prepareErr
 			}
 			// 此时尚无投递批次或可见发送，已知准备失败沿原全文继续。
 		}
@@ -193,7 +210,7 @@ func (d Deps) PrepareAndSendFinalReply(ctx context.Context, req FinalReplyDelive
 		}
 	}
 	batch, created, err := d.PrepareAndSendMessageBatchForTargets(ctx, req.AgentName, req.ObjectKind, req.ObjectID, full, targets)
-	if k12storage.PDFPreparationFallbackAllowed(batch) {
+	if req.PrivateEvent == nil && k12storage.PDFPreparationFallbackAllowed(batch) {
 		return d.sendK12FinalReplyFallback(ctx, batch, fullFallback, targets)
 	}
 	return batch, created, err

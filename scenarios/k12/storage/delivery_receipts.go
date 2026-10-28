@@ -462,7 +462,12 @@ func (s *Store) PrepareDeliveryBatch(ctx context.Context, input k12.DeliveryBatc
 	}
 	_ = json.Unmarshal([]byte(batch.Receipts[0].PayloadJSON), &projection)
 	var standalone *storage.MessageRecord
-	if err := ensureAgentRegistered(ctx, s.db, batch.AgentName); err != nil {
+	if projection.Source != nil && projection.Source.PrivateEvent != nil {
+		standalone, err = s.standalonePrintReplySource(ctx, batch, projection.Source)
+		if err != nil {
+			return k12.DeliveryBatch{}, false, err
+		}
+	} else if err := ensureAgentRegistered(ctx, s.db, batch.AgentName); err != nil {
 		if !errors.Is(err, records.ErrScopeNotFound) {
 			return k12.DeliveryBatch{}, false, err
 		}
@@ -491,6 +496,15 @@ func (s *Store) PrepareDeliveryBatch(ctx context.Context, input k12.DeliveryBatc
 		}
 		if count, countErr := locked.RowsAffected(); countErr != nil || count != 1 {
 			return k12.DeliveryBatch{}, false, records.ErrNotFound
+		}
+		if standalone != nil {
+			var metadata map[string]any
+			_ = json.Unmarshal([]byte(standalone.Metadata), &metadata)
+			if metadata["print_reply_digest"] == nil {
+				if _, err := acceptedConversationReplySourceVia(ctx, tx, batch.AgentName, projection.Source); err != nil {
+					return k12.DeliveryBatch{}, false, err
+				}
+			}
 		}
 		root, readErr := scanDeliveryBatchRoot(tx.QueryRowContext(ctx,
 			`SELECT `+deliveryBatchColumns+` FROM k12_delivery_batches

@@ -1765,6 +1765,44 @@ paths:
         $ref: "#/components/schemas/ChatSessionWebSocketFrame"
       x-reference-module: chat-sessions-memory
       x-visibility: public
+  /api/v1/document-artifacts/{id}/content:
+    get:
+      tags:
+        - Knowledge and documents
+      operationId: knowledge_get_DocumentArtifactContent
+      summary: 下载当前用户的持久文档产物
+      description: 读取 export_document 已登记的不可变文件字节；不重新调用模型或渲染。归属由 Bearer 鉴权身份确定，其他用户的文件按不存在处理。
+      x-source:
+        file: api/handler_document_artifacts.go
+        handler: handleDocumentArtifactContent
+      x-availability: s.documentFlow != nil
+      x-reference-module: knowledge-documents
+      x-visibility: public
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: 原始文件字节；Content-Type 取持久 MIME，ETag 为字节 SHA256，支持条件读取和 Range。
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+            ETag:
+              schema:
+                type: string
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "401":
+          description: Bearer 鉴权失败。
+        "404":
+          description: 文件不存在或不属于当前用户，text/plain。
   /api/v1/render:
     post:
       tags:

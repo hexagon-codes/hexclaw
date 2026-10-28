@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
@@ -131,6 +132,9 @@ func (s *Store) standalonePrintReplySource(ctx context.Context, batch k12.Delive
 		return nil, ErrDeliveryBatchConflict
 	}
 	source, err := s.GetConversationPrintReply(ctx, batch.AgentName, projection.SourceRef)
+	if errors.Is(err, sql.ErrNoRows) {
+		return acceptedConversationReplySourceVia(ctx, s.db, batch.AgentName, projection)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -156,6 +160,52 @@ func (s *Store) standalonePrintReplySource(ctx context.Context, batch k12.Delive
 		if err := s.ValidateTextSolveRequest(ctx, final.TextSolveOrigin, source.Owner, source.RequestID); err != nil {
 			return nil, err
 		}
+	}
+	return message, nil
+}
+
+// acceptedConversationReplySourceVia 核对真实接纳回合，不要求教学档案或教学打印事件。
+func acceptedConversationReplySourceVia(ctx context.Context, q dbQueryer, agent string, projection *k12.DeliveryProjectionSource) (*storage.MessageRecord, error) {
+	if projection == nil || projection.PrivateEvent == nil || projection.Canonical.Validate() != nil {
+		return nil, ErrDeliveryBatchConflict
+	}
+	proof := projection.PrivateEvent
+	if proof.AgentName != agent || proof.AssistantMessageID != projection.SourceRef || proof.Platform != "dingtalk" {
+		return nil, ErrDeliveryBatchConflict
+	}
+	message := &storage.MessageRecord{ID: proof.AssistantMessageID, Role: "assistant"}
+	var owner, platform, instance, chat, physicalID, instanceName string
+	err := q.QueryRowContext(ctx, `SELECT m.session_id,m.request_id,m.content,m.metadata,s.user_id,s.platform,s.instance_id,s.chat_id
+		FROM messages m JOIN sessions s ON s.id=m.session_id WHERE m.id=? AND m.role='assistant'`, proof.AssistantMessageID).
+		Scan(&message.SessionID, &message.RequestID, &message.Content, &message.Metadata, &owner, &platform, &instance, &chat)
+	if err != nil {
+		return nil, err
+	}
+	if owner != proof.SenderID || chat != owner || platform != proof.Platform || message.Content != projection.Canonical.Markdown || len(projection.Canonical.Attachments) != 0 {
+		return nil, ErrDeliveryBatchConflict
+	}
+	if err := q.QueryRowContext(ctx, `SELECT id,name FROM platform_instances WHERE id=? AND provider=?`, proof.InstanceID, proof.Platform).Scan(&physicalID, &instanceName); err != nil {
+		return nil, err
+	}
+	if instance != physicalID && instance != instanceName {
+		return nil, ErrDeliveryBatchConflict
+	}
+	if message.RequestID != storage.IMRequestIDForEvent(platform, physicalID, proof.MessageID) {
+		return nil, ErrDeliveryBatchConflict
+	}
+	var metadata struct {
+		AgentName string `json:"agent_name"`
+		Producer  string `json:"producer_kind"`
+		Locale    string `json:"locale"`
+	}
+	if json.Unmarshal([]byte(message.Metadata), &metadata) != nil || metadata.AgentName != agent ||
+		(metadata.Producer != "" && metadata.Producer != string(projection.Canonical.ProducerKind)) ||
+		(metadata.Locale != "" && metadata.Locale != projection.Canonical.Locale) {
+		return nil, ErrDeliveryBatchConflict
+	}
+	var original string
+	if err := q.QueryRowContext(ctx, `SELECT id FROM messages WHERE session_id=? AND request_id=? AND role='user' LIMIT 1`, message.SessionID, message.RequestID).Scan(&original); err != nil {
+		return nil, err
 	}
 	return message, nil
 }

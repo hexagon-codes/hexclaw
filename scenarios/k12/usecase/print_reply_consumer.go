@@ -226,6 +226,40 @@ func (d Deps) SendConversationPrintReply(ctx context.Context, source k12.Convers
 			message.Attachments = append(message.Attachments, DeliveryAttachment{Name: attachment.Name, MIME: attachment.MIME, Data: raw})
 		}
 	}
+	if d.ResolveAdditionalReplyAttachments != nil {
+		attachments, err := d.ResolveAdditionalReplyAttachments(ctx, record)
+		if err != nil {
+			return k12.DeliveryBatch{}, err
+		}
+		for _, attachment := range attachments {
+			if attachment.OpenReader == nil {
+				return k12.DeliveryBatch{}, fmt.Errorf("frozen document source is unavailable")
+			}
+			reader, err := attachment.OpenReader(ctx)
+			if err != nil {
+				return k12.DeliveryBatch{}, err
+			}
+			raw, readErr := io.ReadAll(reader)
+			if err = errors.Join(readErr, reader.Close()); err != nil {
+				return k12.DeliveryBatch{}, err
+			}
+			sum := sha256.Sum256(raw)
+			if int64(len(raw)) != attachment.Size || "sha256:"+hex.EncodeToString(sum[:]) != attachment.ContentDigest {
+				return k12.DeliveryBatch{}, fmt.Errorf("frozen document digest mismatch")
+			}
+			duplicate := false
+			for _, existing := range message.Attachments {
+				digest := sha256.Sum256(existing.Data)
+				if existing.MIME == attachment.MIME && "sha256:"+hex.EncodeToString(digest[:]) == attachment.ContentDigest {
+					duplicate = true
+					break
+				}
+			}
+			if !duplicate {
+				message.Attachments = append(message.Attachments, DeliveryAttachment{Name: attachment.Name, MIME: attachment.MIME, Data: raw})
+			}
+		}
+	}
 	var suffix string
 	if d.ReplyMetadataFooter != nil {
 		suffix = d.ReplyMetadataFooter(source.Locale, savedMetadata)

@@ -207,21 +207,9 @@ func renderDingTalkReplyFooter(reply *Reply, locale string, models []ExecutionSu
 
 // DingTalkExecutionSummaryFooter 将异步任务的同源执行回执接到统一尾注，不重算历史投递。
 func DingTalkExecutionSummaryFooter(locale string, facts ExecutionSummary) string {
-	if len(facts.Steps) == 0 && len(facts.Tools) == 0 && len(facts.Models) == 0 {
+	summary := messagecontent.RenderExecutionSummary(locale, facts)
+	if summary == "" {
 		return ""
 	}
-	reply := &Reply{Metadata: make(map[string]string)}
-	displayNames := make(map[string]string)
-	for index, tool := range facts.Tools {
-		name := tool.DisplayNames[locale]
-		if name == "" {
-			name = tool.DisplayName
-		}
-		displayNames[tool.Kind+"\x00"+tool.ServerName+"\x00"+tool.Name] = name
-		reply.ToolCalls = append(reply.ToolCalls, ToolCall{
-			ID: "summary:" + strconv.Itoa(index), Name: tool.Name, Status: tool.Status,
-			Origin: &ToolOrigin{Kind: tool.Kind, Name: tool.Name, ServerName: tool.ServerName},
-		})
-	}
-	return renderDingTalkReplyFooter(reply, locale, facts.Models, displayNames)
+	return "---\n\n" + summary
 }

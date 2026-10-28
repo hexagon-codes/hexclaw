@@ -2,6 +2,8 @@
 
 [简体中文](practice.md) · [K12 API overview](../../API.en.md)
 
+For document-stage recovery and explicit render revisions, see [Conversation document recovery](document-recovery.en.md).
+
 This reference covers all 52 registered method/path pairs in the current source, including uncommitted changes. Match the service version to the release you run. Paths include the `/api/k12` prefix. The K12 scenario and record store must be enabled; model, rendering and delivery operations also require their corresponding configured dependencies.
 
 Use the serving HexClaw instance's Bearer token. Set `Content-Type: application/json` on JSON writes. IDs below are illustrative: replace them with actual response IDs. `agent` selects the current learner/K12 agent; it is not an authentication identity. Some strict weekly commands intentionally resolve agent from the plan ID and reject a body `agent` field.
