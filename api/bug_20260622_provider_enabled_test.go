@@ -28,8 +28,8 @@ func TestBug20260622_DisableProviderPreservesKey(t *testing.T) {
 	eng := &mockEngine{activeLLM: cfg.LLM}
 	srv := NewServer(cfg, eng, nil, nil)
 
-	// 前端禁用 openai：回传脱敏 Key + enabled:false
-	body := `{"default":"openai","providers":{"openai":{"api_key":"` + masked +
+	// 禁用原默认时不再把它显式选为默认；没有其他可用模型则协调为空。
+	body := `{"providers":{"openai":{"api_key":"` + masked +
 		`","base_url":"https://api.openai.com/v1","model":"gpt-4o","enabled":false}}}`
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/config/llm", strings.NewReader(body))
 	w := httptest.NewRecorder()
@@ -46,6 +46,9 @@ func TestBug20260622_DisableProviderPreservesKey(t *testing.T) {
 	// 2) enabled=false 持久化
 	if got.Enabled == nil || *got.Enabled != false {
 		t.Errorf("enabled 未持久化为 false, got %v", got.Enabled)
+	}
+	if srv.cfg.LLM.Default != "" {
+		t.Errorf("禁用唯一模型后默认引用未清空: %q", srv.cfg.LLM.Default)
 	}
 
 	// 3) 磁盘配置仍含真实 Key（禁用 ≠ 删除）
