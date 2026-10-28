@@ -158,8 +158,7 @@ func TestDocumentFlowPersistsOriginalBytesAcrossReopenAndReplyReplay(t *testing.
 	if !ok || len(completion.Attachments) != 1 || completion.OwnsDelivery {
 		t.Fatal("generic document must join the original reply")
 	}
-	raw, _ := json.Marshal(metadata)
-	assistant := &storage.MessageRecord{ID: "document-assistant", SessionID: msg.SessionID, Role: "assistant", RequestID: msg.ID, Content: "The meeting notes are attached.", Metadata: string(raw)}
+	assistant := &storage.MessageRecord{ID: "document-assistant", SessionID: msg.SessionID, Role: "assistant", RequestID: msg.ID, Content: "The meeting notes are attached.", Metadata: "{}"}
 	attachmentJSON, _ := json.Marshal(map[string]any{"attachments": completion.Attachments})
 	assistant.Attachments = string(attachmentJSON)
 	if err := store.SaveMessage(completionCtx, assistant); err != nil {

@@ -36,7 +36,7 @@ func TestDocumentExportToolArtifactDownloadsThroughAuthenticatedRoute(t *testing
 	}
 	defer store.Close()
 	ctx := context.Background()
-	if err := store.CreateSession(ctx, &storage.Session{ID: "document-api-session", UserID: "api-user", Platform: "api", Status: 1, CreatedAt: time.Now(), UpdatedAt: time.Now()}); err != nil {
+	if err := store.CreateSession(ctx, &storage.Session{ID: "document-api-session", UserID: "api-user", Platform: "web", Status: 1, CreatedAt: time.Now(), UpdatedAt: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.SaveMessage(ctx, &storage.MessageRecord{ID: "document-api-user", SessionID: "document-api-session", Role: "user", RequestID: "document-api-request", Content: "Export the meeting notes"}); err != nil {
@@ -47,7 +47,7 @@ func TestDocumentExportToolArtifactDownloadsThroughAuthenticatedRoute(t *testing
 	flow := documentflow.NewService(renderer, store.DocumentRepository())
 	exporter := builtin.NewExportDocumentSkill(renderer)
 	exporter.SetArtifactPublisher(flow)
-	const body = "Meeting notes\nThe review starts at 10:00."
+	const body = "Meeting notes\nThe review starts at 10:00.\n"
 	result, err := exporter.Execute(invocation, map[string]any{"content": body, "format": "txt", "filename": "meeting-notes.txt"})
 	if err != nil {
 		t.Fatal(err)

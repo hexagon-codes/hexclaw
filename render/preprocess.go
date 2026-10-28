@@ -34,6 +34,21 @@ type PreprocessConfig struct {
 var imageRefPattern = regexp.MustCompile(
 	`!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)`)
 
+// ResolveImageReferences 只替换宿主已解析的精确图片别名，不读取文件或发起下载。
+func ResolveImageReferences(content string, sources map[string]string) string {
+	return imageRefPattern.ReplaceAllStringFunc(content, func(match string) string {
+		groups := imageRefPattern.FindStringSubmatchIndex(match)
+		if len(groups) < 6 {
+			return match
+		}
+		start, end := groups[4], groups[5]
+		if resolved, ok := sources[match[start:end]]; ok {
+			return match[:start] + resolved + match[end:]
+		}
+		return match
+	})
+}
+
 // PreprocessMarkdown 对 markdown 中的图片引用做预处理：
 //
 //   - https?:// → 拉到内存（限大小/超时/重定向跳数）后转 base64 data URL 注入回 markdown

@@ -9,6 +9,25 @@ import (
 	"time"
 )
 
+func TestResolveImageReferences_PreservesDescriptionAndTitle(t *testing.T) {
+	const data = "data:image/png;base64,aGVsbG8="
+	cases := []struct {
+		name, input, want string
+	}{
+		{"same name", `![equation.png](equation.png)`, `![equation.png](` + data + `)`},
+		{"title", `![equation.png](equation.png "equation.png")`, `![equation.png](` + data + ` "equation.png")`},
+		{"different description", `![original equation](equation.png)`, `![original equation](` + data + `)`},
+		{"unknown source", `![equation.png](another.png)`, `![equation.png](another.png)`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ResolveImageReferences(tc.input, map[string]string{"equation.png": data}); got != tc.want {
+				t.Fatalf("resolved image = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestPreprocessMarkdown_DataURLPreserved(t *testing.T) {
 	in := "before ![alt](data:image/png;base64,iVBORw0KGgo) after"
 	out, err := PreprocessMarkdown(context.Background(), in, PreprocessConfig{})

@@ -11,6 +11,11 @@ import (
 
 // 两条引擎路径共用请求身份桥；场景输入只是提示，领域用例仍核验真实归属和来源。
 func withSkillInvocationContext(ctx context.Context, msg *adapter.Message, sessionID, provider, model string) context.Context {
+	var images []skill.InputImage
+	for _, image := range adapter.FilterImageAttachments(msg.Attachments) {
+		images = append(images, skill.InputImage{ID: image.ID, Name: image.Name, MIME: image.Mime, Data: image.Data, URL: image.URL})
+	}
+	ctx = skill.WithInputImages(ctx, images)
 	requestID := strings.TrimSpace(messageRequestID(msg))
 	if requestID == "" {
 		requestID = strings.TrimSpace(msg.ID)

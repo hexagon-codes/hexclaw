@@ -57,14 +57,16 @@ func (s *ExportDocumentSkill) ToolDefinition() llm.ToolDefinition {
 			"a persistent attachment reference when the application document service is available. Use this tool for generated PDFs so the shared layout is applied. Write formulas as Markdown/LaTeX math. "+
 			"PDF defaults to the standard HexClaw layout with a header and footer on every page. "+
 			"Only set PDF exceptions when the user explicitly requests no header/footer or a custom format. "+
+			"When the user asks to retain the current input images, set include_input_images=true; the application embeds the accepted originals without guessed paths or copied base64. "+
 			"The application attaches a registered document to the current reply; do not claim delivery from a local file path alone.",
 		&llm.Schema{Type: "object", Properties: map[string]*llm.Schema{
-			"content":           {Type: "string", Description: "Markdown content to render (required)"},
-			"format":            {Type: "string", Description: "md|html|docx|pdf|epub|odt|rtf|txt (required)"},
-			"filename":          {Type: "string", Description: "suggested file name (optional)"},
-			"locale":            {Type: "string", Description: `output language, default "zh-CN"`},
-			"pdf_header_footer": {Type: "boolean", Description: "PDF only: default true; set false only when the user explicitly asks to omit headers and footers"},
-			"pdf_layout":        {Type: "string", Description: "PDF only: standard (default) or custom; custom skips the shared layout and uses Markdown/frontmatter formatting only when explicitly requested by the user"},
+			"content":              {Type: "string", Description: "Markdown content to render (required)"},
+			"format":               {Type: "string", Description: "md|html|docx|pdf|epub|odt|rtf|txt (required)"},
+			"filename":             {Type: "string", Description: "suggested file name (optional)"},
+			"locale":               {Type: "string", Description: `output language, default "zh-CN"`},
+			"include_input_images": {Type: "boolean", Description: "Default false; include the current request's accepted original images only when requested by the user"},
+			"pdf_header_footer":    {Type: "boolean", Description: "PDF only: default true; set false only when the user explicitly asks to omit headers and footers"},
+			"pdf_layout":           {Type: "string", Description: "PDF only: standard (default) or custom; custom skips the shared layout and uses Markdown/frontmatter formatting only when explicitly requested by the user"},
 		}, Required: []string{"content", "format"}})
 }
 
@@ -72,9 +74,53 @@ func (s *ExportDocumentSkill) Execute(ctx context.Context, args map[string]any) 
 	if s.render == nil {
 		return nil, fmt.Errorf("document export is not enabled")
 	}
-	content := firstStringArg(args, "content")
+	content, _ := args["content"].(string)
 	if strings.TrimSpace(content) == "" {
 		return nil, fmt.Errorf("content must not be empty")
+	}
+	images := skill.InputImages(ctx)
+	inputReferences := make(map[string]string)
+	for _, image := range images {
+		imageURL := image.URL
+		if image.Data != "" {
+			imageURL = "data:" + image.MIME + ";base64," + image.Data
+		}
+		if imageURL == "" {
+			continue
+		}
+		if image.Name != "" {
+			inputReferences[image.Name] = imageURL
+			inputReferences["attachment://"+image.Name] = imageURL
+		}
+		if image.ID != "" {
+			inputReferences["attachment://"+image.ID] = imageURL
+		}
+	}
+	content = render.ResolveImageReferences(content, inputReferences)
+	if value, exists := args["include_input_images"]; exists {
+		include, ok := value.(bool)
+		if !ok {
+			return nil, fmt.Errorf("include_input_images must be a boolean")
+		}
+		if include {
+			if len(images) == 0 {
+				return nil, fmt.Errorf("original input images are unavailable for this request")
+			}
+			for _, image := range images {
+				imageURL := image.URL
+				if image.Data != "" {
+					imageURL = "data:" + image.MIME + ";base64," + image.Data
+				}
+				if imageURL == "" {
+					return nil, fmt.Errorf("original input image content is unavailable")
+				}
+				if strings.Contains(content, imageURL) {
+					continue
+				}
+				name := strings.NewReplacer("[", "\\[", "]", "\\]", "\n", " ", "\r", " ").Replace(image.Name)
+				content += "\n\n![" + name + "](" + imageURL + ")\n"
+			}
+		}
 	}
 
 	format := render.Format(strings.ToLower(firstStringArg(args, "format")))

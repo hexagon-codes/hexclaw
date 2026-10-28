@@ -1765,6 +1765,38 @@ paths:
         $ref: "#/components/schemas/ChatSessionWebSocketFrame"
       x-reference-module: chat-sessions-memory
       x-visibility: public
+  /api/v1/document-artifacts/{id}/resume:
+    post:
+      tags: [Knowledge and documents]
+      operationId: knowledge_post_DocumentArtifactResume
+      summary: 接续原文档渲染
+      description: 仅恢复原持久文档操作，不调用内容模型；ready时复用原字节，标准样式版本冲突要求显式重新导出。
+      x-source: {file: api/handler_document_artifacts.go, handler: handleResumeDocumentArtifact}
+      x-availability: s.documentFlow != nil
+      x-reference-module: knowledge-documents
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: 持久文档引用，包含下载URL和摘要。}
+        "401": {description: Bearer鉴权失败。}
+        "409": {description: 来源不存在、样式版本冲突或渲染尚未完成。}
+  /api/v1/document-artifacts/{id}/reexport:
+    post:
+      tags: [Knowledge and documents]
+      operationId: knowledge_post_DocumentArtifactReexport
+      summary: 用原内容生成独立文档修订
+      description: 沿用原文和冻结图片资源，使用当前样式生成新产物；保留原文件，不调用内容模型。同一Idempotency-Key重放首次修订。
+      x-source: {file: api/handler_document_artifacts.go, handler: handleReexportDocumentArtifact}
+      x-availability: s.documentFlow != nil
+      x-reference-module: knowledge-documents
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+        - {name: Idempotency-Key, in: header, required: true, schema: {type: string}}
+      responses:
+        "200": {description: 新修订或同键重放的持久文档引用。}
+        "400": {description: 缺少Idempotency-Key。}
+        "401": {description: Bearer鉴权失败。}
+        "409": {description: 来源不存在、版本冲突或渲染失败。}
   /api/v1/document-artifacts/{id}/content:
     get:
       tags:
@@ -15026,6 +15058,69 @@ paths:
               artifact_id: artifact-demo-1
       x-reference-module: k12-practice
       x-visibility: public
+  /api/k12/final-replies/{message_id}:
+    get:
+      tags: [k12-tasks]
+      operationId: document_get_FinalReplyPreparation
+      summary: 读取原私聊终稿的文件准备状态
+      x-source: {file: scenarios/k12/apihttp/document_recovery_handler.go, handler: getFinalReplyPreparation}
+      parameters:
+        - {name: message_id, in: path, required: true, schema: {type: string}}
+        - {name: agent, in: query, required: true, schema: {type: string}}
+      responses:
+        "200": {description: preparation_id、state、failure及model_invocations_added。}
+        "400": {description: 缺少agent或message_id。}
+        "404": {description: 来源不存在或不属于当前身份。}
+  /api/k12/final-replies/{message_id}/resume:
+    post:
+      tags: [k12-tasks]
+      operationId: document_post_FinalReplyResume
+      summary: 接续原终稿的文档准备与投递
+      description: 使用原正文、图片和目标；未知投递只核对原批次，不盲重发，不调用内容模型。
+      x-source: {file: scenarios/k12/apihttp/document_recovery_handler.go, handler: resumeFinalReplyPreparation}
+      parameters:
+        - {name: message_id, in: path, required: true, schema: {type: string}}
+        - {name: agent, in: query, required: true, schema: {type: string}}
+      responses:
+        "200": {description: 原持久投递batch及model_invocations_added。}
+        "400": {description: 缺少agent或message_id。}
+        "404": {description: 来源不存在或不属于当前身份。}
+        "502": {description: 原准备或投递未完成，保留可查询batch。}
+  /api/k12/final-replies/{message_id}/reexport:
+    post:
+      tags: [k12-tasks]
+      operationId: document_post_FinalReplyReexport
+      summary: 原私聊正文按新样式生成独立投递修订
+      description: 同一Idempotency-Key复用首次修订，不重新求解；原批次和原文件不变。
+      x-source: {file: scenarios/k12/apihttp/document_recovery_handler.go, handler: reexportFinalReply}
+      parameters:
+        - {name: message_id, in: path, required: true, schema: {type: string}}
+        - {name: agent, in: query, required: true, schema: {type: string}}
+        - {name: Idempotency-Key, in: header, required: true, schema: {type: string}}
+      responses:
+        "200": {description: 新修订投递batch及model_invocations_added。}
+        "400": {description: 缺少必要身份或Idempotency-Key。}
+        "404": {description: 来源不存在或不属于当前身份。}
+        "502": {description: 新修订准备或投递失败。}
+  /api/k12/print-artifacts/{id}/reexport:
+    post:
+      tags: [k12-tasks]
+      operationId: document_post_PrintArtifactReexport
+      summary: 复用原教学结果和图片重新导出
+      description: 冻结当前模板与渲染规格生成新文件；send=true时沿现有有效绑定投递。原结果、原图片和旧PDF不变，不调用模型。
+      x-source: {file: scenarios/k12/apihttp/document_recovery_handler.go, handler: reexportPrintableArtifact}
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+        - {name: agent, in: query, required: true, schema: {type: string}}
+        - {name: send, in: query, schema: {type: string, enum: ["true", "false"]}}
+        - {name: Idempotency-Key, in: header, required: true, schema: {type: string}}
+      responses:
+        "201": {description: 新的artifact与replayed=false，可选batch。}
+        "200": {description: 首次修订的幂等重放。}
+        "400": {description: 缺少必要身份或Idempotency-Key。}
+        "404": {description: 原artifact不存在或不属于当前身份。}
+        "409": {description: 原结果或渲染修订发生冲突。}
+        "502": {description: 文件已生成，但投递失败，返回对应batch。}
   /api/k12/print-artifacts:
     post:
       operationId: k12PracticePreparePrintableArtifact

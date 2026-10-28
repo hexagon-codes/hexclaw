@@ -2,7 +2,7 @@
 
 [中文 / English](knowledge-documents.md) · [OpenAPI](../../api/openapi.yaml)
 
-This reference covers the current main source plus uncommitted working-tree behavior. It documents 27 unique method/path contracts; it does not imply those changes are already included in a published installer. All endpoints inherit the selected service’s Bearer authentication.
+This reference covers the current main source plus uncommitted working-tree behavior. It documents 29 unique method/path contracts; it does not imply those changes are already included in a published installer. All endpoints inherit the selected service’s Bearer authentication.
 
 Owner scope comes from authentication/service binding, never body/query user_id. The public Knowledge corpus currently only supports `default`. A missing module means its routes are not mounted (404 or 405 depending on other registered methods), except GET documents which returns an empty projection when KB is disabled. Additional ingest/source/projection capabilities are stated per endpoint.
 
@@ -27,6 +27,8 @@ Unknown OCR/embedding outcomes are preserved and must not be blindly resent. The
 | --- | --- | --- |
 | `POST /api/v1/render` | Render Markdown and download the artifact | Render service configured |
 | `GET /api/v1/document-artifacts/{id}/content` | Download an immutable document owned by the current user | Document flow configured |
+| `POST /api/v1/document-artifacts/{id}/resume` | Resume the original document without calling a content model | Document flow configured |
+| `POST /api/v1/document-artifacts/{id}/reexport` | Create an independent layout revision from the original content | Document flow configured |
 | `POST /api/v1/knowledge/documents` | Add text or accept an asynchronous source upload | KB configured |
 | `GET /api/v1/knowledge/documents` | List, paginate, and count document sources | KB configured; empty projection if disabled |
 | `GET /api/v1/knowledge/documents/{id}` | Read content and asynchronous document state | KB configured |
@@ -1291,6 +1293,8 @@ No Range handling and no JSON envelope. A missing token uses Go http.NotFound pl
 
 Reads the original bytes registered by `export_document`. Ownership comes from the Bearer principal, never a client-supplied owner. The artifact has a stable ID, source, MIME type, size, and byte digest, and remains readable after service restart. Downloads do not call a model or render again.
 
+The `export_document` tool defaults `include_input_images` to false. When the user explicitly requests the current originals, true makes the host embed the accepted input images without guessed paths or copied base64. Markdown may also use an exact current-image filename or `attachment://<attachment_id>`; only accepted aliases from this turn are resolved, and existing images are not appended again. Missing current images cause an explicit error; images from another turn are not substituted. A local session created through the session API may continue over HTTP, WebSocket, or a desktop connection while retaining the same owner, session, and source-message checks. Physical IM instance and target scopes remain independently validated.
+
 Implementation: [`handleDocumentArtifactContent`](../../api/handler_document_artifacts.go).
 
 | Parameter | Location | Required | Contract |
@@ -1298,6 +1302,14 @@ Implementation: [`handleDocumentArtifactContent`](../../api/handler_document_art
 | `id` | path | Yes | document_export artifact_id returned by the tool |
 
 A successful response contains file bytes, the persisted MIME type in `Content-Type`, an attachment filename in `Content-Disposition`, and the byte SHA256 in `ETag`. Conditional reads and Range use `http.ServeContent`. Missing artifacts and artifacts owned by another user return a plain-text 404; missing authentication returns 401. The route is mounted only when document flow is configured.
+
+## 28. `POST /api/v1/document-artifacts/{id}/resume`
+
+Resumes an owned `prepared/failed` document using its original text, frozen images, and options. A `ready` artifact returns its original reference and bytes without rendering again. A changed standard-style digest requires explicit re-export. Success returns a document reference with status 200; missing source, version conflict, or render failure returns 409 with `artifact_id/state/error`. The caller cannot replace the content, origin, or owner.
+
+## 29. `POST /api/v1/document-artifacts/{id}/reexport`
+
+Requires `Idempotency-Key`. Reads an owned artifact's original text, frozen images, and options and renders an independent revision with the current style, preserving the original file and tool-call identity. The same key returns the first revision even if templates later change. No content model is called. Success returns a document reference with status 200; a missing key returns 400; source or rendering conflicts return 409. Download the new revision through its returned URL.
 
 ## Shared error interpretation
 

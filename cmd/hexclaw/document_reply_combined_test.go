@@ -260,9 +260,9 @@ func TestCombinedNativeAndGenericDocumentsUseOnePersistentDeliveryBatch(t *testi
 			t.Fatalf("%s must remain unique after replay: count=%d err=%v", check.name, count, err)
 		}
 	}
-	var receiptBatch string
-	if err := store.DB().QueryRowContext(ctx, `SELECT batch_id FROM k12_delivery_receipts WHERE agent_name='child-a'`).Scan(&receiptBatch); err != nil || receiptBatch != view.Batch.BatchID {
-		t.Fatalf("documents escaped the original persistent batch: batch=%s want=%s err=%v", receiptBatch, view.Batch.BatchID, err)
+	var receipts, escaped int
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*),SUM(CASE WHEN batch_id<>? THEN 1 ELSE 0 END) FROM k12_delivery_receipts WHERE agent_name='child-a'`, view.Batch.BatchID).Scan(&receipts, &escaped); err != nil || receipts != 3 || escaped != 0 {
+		t.Fatalf("documents escaped the original persistent batch: receipts=%d escaped=%d err=%v", receipts, escaped, err)
 	}
 	t.Logf("real Engine/SQLite/Outbox batch=%s sent two distinct frozen documents; replay added no model, render, tool or send calls", view.Batch.BatchID)
 }

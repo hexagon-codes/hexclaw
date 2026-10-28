@@ -40,14 +40,53 @@ func (r *DocumentRepository) Get(ctx context.Context, owner, id string) (documen
 	return a, nil
 }
 
-func (r *DocumentRepository) GetForMessage(ctx context.Context, message *storage.MessageRecord, id string) (documentflow.Artifact, error) {
+func (r *DocumentRepository) readReply(ctx context.Context, message *storage.MessageRecord) (string, string, error) {
 	var owner, metadata, content, request string
 	err := r.db.QueryRowContext(ctx, `SELECT s.user_id,m.metadata,m.content,m.request_id FROM messages m JOIN sessions s ON s.id=m.session_id WHERE m.id=? AND m.session_id=? AND m.role='assistant'`, message.ID, message.SessionID).Scan(&owner, &metadata, &content, &request)
 	if err != nil {
-		return documentflow.Artifact{}, err
+		return "", "", err
 	}
 	if content != message.Content || request != message.RequestID {
-		return documentflow.Artifact{}, documentflow.ErrConflict
+		return "", "", documentflow.ErrConflict
+	}
+	return owner, metadata, nil
+}
+
+func (r *DocumentRepository) ReplyReferences(ctx context.Context, message *storage.MessageRecord) ([]documentflow.Reference, error) {
+	_, metadata, err := r.readReply(ctx, message)
+	if err != nil {
+		return nil, err
+	}
+	return documentReplyReferences(metadata)
+}
+
+func documentReplyReferences(metadata string) ([]documentflow.Reference, error) {
+	var saved map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(metadata), &saved); err != nil {
+		return nil, err
+	}
+	raw := saved["document_artifacts"]
+	if len(raw) == 0 {
+		raw = saved["artifacts"]
+	}
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var encoded string
+	if json.Unmarshal(raw, &encoded) == nil {
+		raw = []byte(encoded)
+	}
+	var refs []documentflow.Reference
+	if err := json.Unmarshal(raw, &refs); err != nil {
+		return nil, err
+	}
+	return refs, nil
+}
+
+func (r *DocumentRepository) GetForMessage(ctx context.Context, message *storage.MessageRecord, id string) (documentflow.Artifact, error) {
+	owner, metadata, err := r.readReply(ctx, message)
+	if err != nil {
+		return documentflow.Artifact{}, err
 	}
 	a, err := r.Get(ctx, owner, id)
 	if err != nil {
@@ -56,18 +95,9 @@ func (r *DocumentRepository) GetForMessage(ctx context.Context, message *storage
 	if a.Origin.SessionID != message.SessionID || a.Origin.RequestID != message.RequestID {
 		return a, documentflow.ErrConflict
 	}
-	var savedMeta map[string]json.RawMessage
-	if json.Unmarshal([]byte(metadata), &savedMeta) != nil {
-		return a, documentflow.ErrConflict
-	}
-	var encoded string
-	refsJSON := savedMeta["artifacts"]
-	if json.Unmarshal(refsJSON, &encoded) == nil {
-		refsJSON = []byte(encoded)
-	}
-	var refs []documentflow.Reference
-	if json.Unmarshal(refsJSON, &refs) != nil {
-		return a, documentflow.ErrConflict
+	refs, err := documentReplyReferences(metadata)
+	if err != nil {
+		return a, err
 	}
 	matched := false
 	for _, ref := range refs {
@@ -138,7 +168,13 @@ func validateDocumentOrigin(ctx context.Context, tx *sql.Tx, origin documentflow
 			return documentflow.ErrConflict
 		}
 	}
-	if owner != origin.Owner || platform != origin.Platform || chat != origin.ChatID {
+	platformMatches := platform == origin.Platform
+	// 本机会话可先由会话 API 创建，再通过 HTTP 或 WebSocket 继续；两种传输共用原用户回合。
+	if !platformMatches && instance == "" && origin.InstanceID == "" && chat == "" && origin.ChatID == "" {
+		localPlatform := func(value string) bool { return value == "web" || value == "api" || value == "desktop" }
+		platformMatches = localPlatform(platform) && localPlatform(origin.Platform)
+	}
+	if owner != origin.Owner || !platformMatches || chat != origin.ChatID {
 		return documentflow.ErrConflict
 	}
 	var found int

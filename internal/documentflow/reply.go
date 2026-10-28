@@ -109,21 +109,8 @@ func (s *Service) ResolveMessageAttachments(ctx context.Context, message *storag
 	if message == nil || message.Role != "assistant" {
 		return nil, ErrConflict
 	}
-	var metadata map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(message.Metadata), &metadata); err != nil {
-		return nil, err
-	}
-	var encoded string
-	if raw := metadata["artifacts"]; len(raw) > 0 {
-		if json.Unmarshal(raw, &encoded) != nil {
-			encoded = string(raw)
-		}
-	}
-	var refs []Reference
-	if encoded == "" {
-		return nil, nil
-	}
-	if err := json.Unmarshal([]byte(encoded), &refs); err != nil {
+	refs, err := s.repo.ReplyReferences(ctx, message)
+	if err != nil {
 		return nil, err
 	}
 	var result []adapter.Attachment

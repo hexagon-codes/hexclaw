@@ -2,7 +2,7 @@
 
 [中文 / English](knowledge-documents.en.md) · [OpenAPI](../../api/openapi.yaml)
 
-本参考覆盖当前 main 源码与工作区未提交行为，共 27 个唯一方法/路径；不据此宣称已包含在公开安装包中。全部端点继承所选服务的 Bearer 访问令牌鉴权。
+本参考覆盖当前 main 源码与工作区未提交行为，共 29 个唯一方法/路径；不据此宣称已包含在公开安装包中。全部端点继承所选服务的 Bearer 访问令牌鉴权。
 
 业务归属取鉴权上下文及服务绑定，不由 body/query 的 user_id 指定。公开知识库目前只支持 `default`。未装配模块时其路由不挂载（依其他已注册方法可能为 404 或 405），但 KB 关闭时 `GET documents` 仍返回空投影；异步摄取、原文件及投影能力的额外前提逐项注明。
 
@@ -27,6 +27,8 @@ OCR/embedding 结果未知时保留已完成事实，不能盲目重发。恢复
 | --- | --- | --- |
 | `POST /api/v1/render` | 渲染Markdown并下载产物 | s.renderSvc != nil |
 | `GET /api/v1/document-artifacts/{id}/content` | 下载当前用户的持久文档产物 | s.documentFlow != nil |
+| `POST /api/v1/document-artifacts/{id}/resume` | 接续原文档渲染，不调用内容模型 | s.documentFlow != nil |
+| `POST /api/v1/document-artifacts/{id}/reexport` | 用原内容生成独立排版修订 | s.documentFlow != nil |
 | `POST /api/v1/knowledge/documents` | 新增文本或异步上传原文件 | s.kb != nil |
 | `GET /api/v1/knowledge/documents` | 列表、分页与来源计数 | KB启用返回分页列表；KB未启用仍注册并返回documents=[]、total=0空投影 |
 | `GET /api/v1/knowledge/documents/{id}` | 读取正文及异步状态 | s.kb != nil |
@@ -1291,6 +1293,8 @@ multipart file；成功返回token，不返回解析文本、不入知识库。
 
 读取 `export_document` 已登记的原始文件，归属取当前 Bearer 身份，不接受请求指定的 owner。文件具有稳定 ID、来源、MIME、大小与字节摘要，服务重启后继续可读；下载不重新调用模型或渲染。
 
+`export_document` 的 `include_input_images` 默认 false；用户明确要求保留当前原图时可设为 true，由宿主嵌入本轮已接纳图片，模型无需猜测文件路径或复制 base64。正文也可引用当前图片的精确文件名或 `attachment://<attachment_id>`，宿主只解析本轮已接纳的别名；已有图片不重复附加。没有当前图片时明确失败，不从其他回合补图。会话 API 创建的本机会话可经 HTTP、WebSocket 或桌面连接继续，文档仍核对同一 owner、会话和原消息；IM 物理实例与目标范围独立校验。
+
 实现：[`handleDocumentArtifactContent`](../../api/handler_document_artifacts.go)
 
 | 参数 | 位置 | 必填 | 类型 / 约束 |
@@ -1298,6 +1302,14 @@ multipart file；成功返回token，不返回解析文本、不入知识库。
 | `id` | path | 是 | 工具返回的 document_export artifact_id |
 
 成功响应为文件字节，`Content-Type` 取持久 MIME，`Content-Disposition` 为附件名称，`ETag` 为字节 SHA256；沿 `http.ServeContent` 支持条件读取和 Range。其他用户文件与不存在文件均返回纯文本 404；未鉴权返回 401。仅文档服务已装配时挂载。
+
+## 28. `POST /api/v1/document-artifacts/{id}/resume`
+
+恢复当前身份拥有的 `prepared/failed` 文档，沿原正文、已冻结图片和选项只执行文件阶段。`ready` 返回原引用与原字节，不再次渲染。标准样式摘要变化时返回明确冲突，使用下一节显式建立新修订。成功为 200 文档引用；源不存在、版本冲突或渲染失败为 409，保留 `artifact_id/state/error`。不接受客户端更改正文、来源或 owner。
+
+## 29. `POST /api/v1/document-artifacts/{id}/reexport`
+
+必填 `Idempotency-Key`。从当前身份拥有的原产物读取原文、冻结图片和选项，按当前样式生成独立文件，保留旧文件及原工具调用身份。同一键返回首次修订，不因后续模板变化再生成；不调用内容模型。成功为 200 文档引用，缺少键为 400，来源或生成冲突为 409。下载使用新引用的 URL。
 
 ## 通用错误解读
 

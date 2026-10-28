@@ -61,6 +61,7 @@ type Artifact struct {
 type Repository interface {
 	Get(context.Context, string, string) (Artifact, error)
 	GetForMessage(context.Context, *storage.MessageRecord, string) (Artifact, error)
+	ReplyReferences(context.Context, *storage.MessageRecord) ([]Reference, error)
 	CanonicalInstanceID(context.Context, string, string) (string, error)
 	Save(context.Context, Artifact) (Artifact, error)
 	CommitReply(context.Context, *sql.Tx, *storage.MessageRecord, Origin, []Artifact) (bool, error)
