@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path"
+	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -225,7 +226,7 @@ func (d Deps) PrepareAndSendK12FinalReplyBatch(ctx context.Context, agentName, o
 			return k12.DeliveryBatch{}, false, err
 		}
 	}
-	locale, localeErr := d.finalReplyFrozenLocale(ctx, artifact)
+	locale, explicitDocument, localeErr := d.finalReplyFrozenDeliveryIntent(ctx, artifact)
 	if localeErr != nil {
 		return k12.DeliveryBatch{}, false, localeErr
 	}
@@ -234,7 +235,7 @@ func (d Deps) PrepareAndSendK12FinalReplyBatch(ctx context.Context, agentName, o
 		if err != nil {
 			return k12.DeliveryBatch{}, false, err
 		}
-		req := FinalReplyDeliveryRequest{AgentName: agentName, ObjectKind: objectKind, ObjectID: objectID, SourceKind: k12.PrintSourceGradingFinalArtifact, SourceRef: artifact.ArtifactID + ":" + artifact.ArtifactDigest, Title: K12FinalArtifactPDFTitle(artifact), Message: full, Producer: messagecontent.ProducerK12, Locale: locale, Document: intent == k12.ImageTaskIntentBlankWorksheet && artifact.TotalCount > 1, Summary: k12FinalReplySummary(artifact, intent), DingTalkSuffix: disclosure}
+		req := FinalReplyDeliveryRequest{AgentName: agentName, ObjectKind: objectKind, ObjectID: objectID, SourceKind: k12.PrintSourceGradingFinalArtifact, SourceRef: artifact.ArtifactID + ":" + artifact.ArtifactDigest, Title: K12FinalArtifactPDFTitle(artifact), Message: full, Producer: messagecontent.ProducerK12, Locale: locale, Document: explicitDocument || intent == k12.ImageTaskIntentBlankWorksheet && artifact.TotalCount > 1, Summary: k12FinalReplySummary(artifact, intent), DingTalkSuffix: disclosure}
 		hasDing := false
 		for _, target := range targets {
 			hasDing = hasDing || target.Target.Platform == "dingtalk"
@@ -270,7 +271,7 @@ func (d Deps) PrepareAndSendK12FinalReplyBatch(ctx context.Context, agentName, o
 		}
 	}
 	message := full
-	if allDing && k12FinalReplyUsesPDF(artifact, intent) {
+	if allDing && (explicitDocument || k12FinalReplyUsesPDF(artifact, intent)) {
 		objectID += ":" + imageFinalPDFRenderContractVersion
 		pdf, _, prepareErr := d.PrepareGradingFinalArtifactPDFExact(ctx, agentName, finalID, expectedDigest, K12FinalArtifactPDFTitle(artifact))
 		if prepareErr == nil && len(pdf.Render.Payload) <= messagecontent.DingTalkMaxOutboundPDFBytes {
@@ -295,26 +296,42 @@ func (d Deps) PrepareAndSendK12FinalReplyBatch(ctx context.Context, agentName, o
 	return batch, created, sendErr
 }
 
-func (d Deps) finalReplyFrozenLocale(ctx context.Context, artifact k12.GradingFinalArtifact) (string, error) {
+func (d Deps) finalReplyFrozenDeliveryIntent(ctx context.Context, artifact k12.GradingFinalArtifact) (string, bool, error) {
 	job, err := d.GetGradingJob(ctx, artifact.AgentName, artifact.JobID)
 	if errors.Is(err, records.ErrNotFound) {
-		return "", nil
+		return "", false, nil
 	}
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	if job.Fields.SourceKind != "image_task" {
-		return "", nil
+		return "", false, nil
 	}
 	id, err := gradingFinalImageTaskDispatchID(job)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	dispatch, err := d.Records.GetImageTaskDispatch(ctx, artifact.AgentName, id)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
-	return dispatch.OperationRouteRequest.MessageLocale, nil
+	return dispatch.OperationRouteRequest.MessageLocale, imageFinalReplyExplicitPDF(dispatch.MessageIntent), nil
+}
+
+var imageFinalPDFRequestPattern = regexp.MustCompile(`(?i)(输出|导出|生成|制作|提供|交付|发送|保存|需要|给我|我要|想要|\b(export|generate|create|provide|deliver|send|save|want|need)\b)[^。；;！!？?\n]{0,80}\bpdf\b`)
+var imageFinalPDFNegationPattern = regexp.MustCompile(`(?i)(不要|不用|无需|不必|别|不需要)\s*(再|另外|额外)?\s*(pdf|(输出|导出|生成|制作|提供|交付|发送|保存)[^。；;！!？?\n]{0,60}\bpdf\b)|(\b(do not|don't|no need to|without|skip|avoid)\b)[^。；;！!？?\n]{0,60}\bpdf\b|不输出[^。；;！!？?\n]{0,60}\bpdf\b|\bno\s+pdf\b`)
+
+// 只把明确的PDF交付请求传给现有文档策略，提及格式或否定请求不强制短回复导出。
+func imageFinalReplyExplicitPDF(message string) bool {
+	requested := false
+	for _, clause := range strings.FieldsFunc(message, func(r rune) bool { return strings.ContainsRune("，,。；;！!？?\n", r) }) {
+		if imageFinalPDFNegationPattern.MatchString(clause) {
+			requested = false
+		} else if imageFinalPDFRequestPattern.MatchString(clause) {
+			requested = true
+		}
+	}
+	return requested
 }
 
 // 同源图片PDF准备失败只回退完整正文和必需原图，不转成缺图文档。
