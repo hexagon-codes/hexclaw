@@ -69,16 +69,16 @@ func NewCronDispatchMessage(userID, chatID, jobID, prompt string) *adapter.Messa
 	}
 }
 
-// cronIntentKeywords are cron-like trigger words (common Chinese and English
-// phrasings). Any single hit marks the text as cron-like. False positives are
-// cheap (one extra clarification prompt); false negatives are expensive
-// (they used to trigger the tool_use_id chain 400).
+// 调度词只识别执行意图；文档内容中的提醒要点不能剥夺本轮其他工具。
 var cronIntentKeywords = []string{
 	"定时", "每天", "每周", "每月", "每年", "每小时", "每分钟", "每秒",
 	"提醒", "周期", "周期性", "schedule", "cron", "remind",
 	"daily", "hourly", "weekly", "monthly",
 	"每隔", "每过",
 }
+
+var reminderActionPattern = regexp.MustCompile(`(?i)(提醒\s*(?:我|我们|一下|下)|(?:创建|设置|添加|新增|取消|删除|暂停|恢复|查看|列出)(?:一个|一条|这个|这条|我的|所有)?(?:定时)?提醒|\bremind\s+(?:me|us)\b|\b(?:set|create|add|cancel|delete|pause|resume|list)\s+(?:a\s+|the\s+|my\s+)?reminders?\b)`)
+var timedReminderPattern = regexp.MustCompile(`(?i)(?:今天|明天|后天|今晚|上午|下午|晚上|\d{1,2}[:点时])[^\n。！？]{0,24}提醒|提醒[^\n。！？]{0,24}(?:今天|明天|后天|今晚|上午|下午|晚上|\d{1,2}[:点时])`)
 
 // detectCronIntent returns (isCronLike, lookupMissing).
 //
@@ -93,6 +93,9 @@ func detectCronIntent(text string) (bool, bool) {
 	hit := false
 	for _, kw := range cronIntentKeywords {
 		if strings.Contains(lower, strings.ToLower(kw)) {
+			if (kw == "提醒" || kw == "remind") && !reminderActionPattern.MatchString(lower) && !timedReminderPattern.MatchString(lower) {
+				continue
+			}
 			hit = true
 			break
 		}
