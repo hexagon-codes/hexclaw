@@ -41,12 +41,13 @@ func (fn TextbookCatalogExtractorFunc) Extract(
 type TextbookCatalogCheckpointExtractor struct{}
 
 var (
-	textbookVolumePattern       = regexp.MustCompile(`([一二三四五六]年级)\s*(上册|下册)`)
-	textbookApprovalYearPattern = regexp.MustCompile(`([12][0-9]{3})\s*年\s*经国家教材委员会专家委员会审核通过`)
-	textbookEditionYearPattern  = regexp.MustCompile(`（\s*([12][0-9]{3})\s*年版\s*）`)
-	textbookTOCMajorPattern     = regexp.MustCompile(`^\s*([1-9][0-9]*)\.?\s+(.+?)\s+([1-9][0-9]*)\s*$`)
-	textbookTOCChinesePattern   = regexp.MustCompile(`^\s*([一二三四五六七八九])\s+(.+?)\s+([1-9][0-9]*)\s*$`)
-	textbookTOCChildPattern     = regexp.MustCompile(`^\s{2,}(\S.*?)\s+([1-9][0-9]*)\s*$`)
+	textbookVolumePattern           = regexp.MustCompile(`([一二三四五六]年级)\s*(上册|下册)`)
+	textbookApprovalYearPattern     = regexp.MustCompile(`([12][0-9]{3})\s*年\s*经国家教材委员会专家委员会审核通过`)
+	textbookPrintEditionYearPattern = regexp.MustCompile(`版次([12][0-9]{3})年(?:[1-9]|1[0-2])月第[0-9一二三四五六七八九十]+版`)
+	textbookEditionYearPattern      = regexp.MustCompile(`（\s*([12][0-9]{3})\s*年版\s*）`)
+	textbookTOCMajorPattern         = regexp.MustCompile(`^\s*([1-9][0-9]*)\.?\s+(.+?)\s+([1-9][0-9]*)\s*$`)
+	textbookTOCChinesePattern       = regexp.MustCompile(`^\s*([一二三四五六七八九])\s+(.+?)\s+([1-9][0-9]*)\s*$`)
+	textbookTOCChildPattern         = regexp.MustCompile(`^\s{2,}(\S.*?)\s+([1-9][0-9]*)\s*$`)
 )
 
 type extractedTextbookUnit struct {
@@ -256,6 +257,8 @@ func (TextbookCatalogCheckpointExtractor) Extract(
 	versionEvidence := removeTextbookWhitespace(metadata)
 	version := ""
 	if match := textbookApprovalYearPattern.FindStringSubmatch(versionEvidence); len(match) == 2 {
+		version = match[1]
+	} else if match := textbookPrintEditionYearPattern.FindStringSubmatch(versionEvidence); len(match) == 2 {
 		version = match[1]
 	} else if match := textbookEditionYearPattern.FindStringSubmatch(versionEvidence); len(match) == 2 {
 		version = match[1]

@@ -16,7 +16,10 @@ import (
 	"github.com/hexagon-codes/hexclaw/records"
 )
 
-const TextbookCatalogExtractorContract = "checkpoint-toc-footer-v5"
+const TextbookCatalogExtractorContract = "checkpoint-toc-footer-v6"
+
+// 仅将明确兼容的旧合同交给恢复迁移，未知合同保留原状态。
+const textbookCatalogLegacyExtractorSQL = `'checkpoint-toc-footer-v1','checkpoint-toc-footer-v2','checkpoint-toc-footer-v3','checkpoint-toc-footer-v4','checkpoint-toc-footer-v5'`
 
 var ErrTextbookCatalogSourceIncomplete = errors.New("textbook catalog source evidence incomplete")
 
@@ -523,7 +526,7 @@ func (s *Store) RecoverTextbookCatalogJobs(
 	legacyRows, err := tx.QueryContext(ctx, `SELECT j.job_id,j.manifest_id,j.owner_id,
 		j.document_id,j.document_generation,j.source_digest,
 		CASE WHEN j.state='failed_terminal' AND j.failure_code='catalog_evidence_incomplete'
-		          AND j.extractor_contract<>? THEN 1 ELSE 0 END
+		          AND j.extractor_contract IN (`+textbookCatalogLegacyExtractorSQL+`) AND j.extractor_contract<>? THEN 1 ELSE 0 END
 		FROM k12_textbook_catalog_jobs j
 		JOIN k12_textbook_manifests m ON m.manifest_id=j.manifest_id
 		WHERE (((j.state IN ('queued','retry_wait','failed_retryable')
@@ -533,7 +536,7 @@ func (s *Store) RecoverTextbookCatalogJobs(
 		          OR (j.state='failed_terminal' AND j.failure_code='source_evidence_incomplete'
 		              AND m.state='failed_terminal')))
 		    OR (j.state='failed_terminal' AND j.failure_code='catalog_evidence_incomplete'
-		        AND j.extractor_contract<>? AND m.state='failed_terminal'))
+		        AND j.extractor_contract IN (`+textbookCatalogLegacyExtractorSQL+`) AND j.extractor_contract<>? AND m.state='failed_terminal'))
 		ORDER BY j.created_at,j.job_id LIMIT ?`,
 		TextbookCatalogExtractorContract, TextbookCatalogExtractorContract, limit)
 	if err != nil {
@@ -595,7 +598,7 @@ func (s *Store) RecoverTextbookCatalogJobs(
 			  OR (state='failed_terminal' AND failure_code='source_evidence_incomplete'))
 			  AND (ingest_job_id='' OR length(source_plan_digest)<>64))
 			  OR (?=1 AND state='failed_terminal'
-			      AND failure_code='catalog_evidence_incomplete' AND extractor_contract<>?))`,
+			      AND failure_code='catalog_evidence_incomplete' AND extractor_contract IN (`+textbookCatalogLegacyExtractorSQL+`) AND extractor_contract<>?))`,
 			ingestJobID, sourcePlanDigest, TextbookCatalogExtractorContract,
 			requestDigest, state, failureCode, lastError,
 			item.staleExtractor, item.staleExtractor, nowMilli, item.jobID,

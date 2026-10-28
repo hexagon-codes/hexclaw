@@ -171,66 +171,70 @@ func TestREGTextbookCatalog_AcceptsCompletedPageFactsFromPriorIngestLease(t *tes
 }
 
 func TestREGTextbookCatalog_ReopensOnlySourceEvidenceTerminalAfterFactsComplete(t *testing.T) {
-	store, _, _ := seedTextbookCatalogMaterialization(t)
-	db := store.DB()
-	if err := store.RecoverTextbookCatalogJobs(context.Background(), time.UnixMilli(9_000), 8); err != nil {
-		t.Fatalf("pin complete source snapshot: %v", err)
-	}
-	if _, err := db.Exec(`UPDATE kb_knowledge_jobs
+	for _, priorContract := range []string{"checkpoint-toc-footer-v2", "checkpoint-toc-footer-v5"} {
+		t.Run(priorContract, func(t *testing.T) {
+			store, _, _ := seedTextbookCatalogMaterialization(t)
+			db := store.DB()
+			if err := store.RecoverTextbookCatalogJobs(context.Background(), time.UnixMilli(9_000), 8); err != nil {
+				t.Fatalf("pin complete source snapshot: %v", err)
+			}
+			if _, err := db.Exec(`UPDATE kb_knowledge_jobs
 		SET lease_epoch=2 WHERE job_id='catalog-ingest'`); err != nil {
-		t.Fatal(err)
-	}
-	// 构造旧合同已冻结的完整来源，不能以空 source plan 绕过不可变快照触发器。
-	if _, err := db.Exec(`INSERT OR REPLACE INTO k12_textbook_catalog_jobs
+				t.Fatal(err)
+			}
+			// 构造旧合同已冻结的完整来源，不能以空 source plan 绕过不可变快照触发器。
+			if _, err := db.Exec(`INSERT OR REPLACE INTO k12_textbook_catalog_jobs
 		(job_id,manifest_id,owner_id,document_id,document_generation,source_digest,
 		 state,attempt,request_digest,result_digest,last_error,created_at,updated_at,
 		 ingest_job_id,source_plan_digest,extractor_contract,failure_code)
 		SELECT job_id,manifest_id,owner_id,document_id,document_generation,source_digest,
 		 'failed_terminal',4,'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
 		 '','识别失败',created_at,updated_at,
-		 ingest_job_id,source_plan_digest,'checkpoint-toc-footer-v2','catalog_evidence_incomplete'
-		FROM k12_textbook_catalog_jobs WHERE job_id='catalog-job'`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`UPDATE k12_textbook_manifests
+		 ingest_job_id,source_plan_digest,?,'catalog_evidence_incomplete'
+		FROM k12_textbook_catalog_jobs WHERE job_id='catalog-job'`, priorContract); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`UPDATE k12_textbook_manifests
 		SET state='failed_terminal',retryable=0,failure_message='识别失败'
 		WHERE manifest_id='catalog-manifest'`); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.RecoverTextbookCatalogJobs(context.Background(), time.UnixMilli(10_000), 8); err != nil {
-		t.Fatalf("recover prior extractor terminal: %v", err)
-	}
-	var state, manifestState, ingestJobID, sourcePlanDigest, extractorContract string
-	var attempt int
-	if err := db.QueryRow(`SELECT state,ingest_job_id,source_plan_digest,extractor_contract,attempt
+				t.Fatal(err)
+			}
+			if err := store.RecoverTextbookCatalogJobs(context.Background(), time.UnixMilli(10_000), 8); err != nil {
+				t.Fatalf("recover prior extractor terminal: %v", err)
+			}
+			var state, manifestState, ingestJobID, sourcePlanDigest, extractorContract string
+			var attempt int
+			if err := db.QueryRow(`SELECT state,ingest_job_id,source_plan_digest,extractor_contract,attempt
 		FROM k12_textbook_catalog_jobs WHERE job_id='catalog-job'`).Scan(
-		&state, &ingestJobID, &sourcePlanDigest, &extractorContract, &attempt,
-	); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.QueryRow(`SELECT state FROM k12_textbook_manifests
+				&state, &ingestJobID, &sourcePlanDigest, &extractorContract, &attempt,
+			); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.QueryRow(`SELECT state FROM k12_textbook_manifests
 		WHERE manifest_id='catalog-manifest'`).Scan(&manifestState); err != nil {
-		t.Fatal(err)
-	}
-	if state != "queued" || manifestState != "extracting" || ingestJobID != "catalog-ingest" ||
-		len(sourcePlanDigest) != 64 || extractorContract != k12storage.TextbookCatalogExtractorContract || attempt != 0 {
-		t.Fatalf("reopened source-evidence terminal job=%s manifest=%s ingest=%s plan=%q",
-			state, manifestState, ingestJobID, sourcePlanDigest)
-	}
-	if _, err := db.Exec(`UPDATE k12_textbook_catalog_jobs
+				t.Fatal(err)
+			}
+			if state != "queued" || manifestState != "extracting" || ingestJobID != "catalog-ingest" ||
+				len(sourcePlanDigest) != 64 || extractorContract != k12storage.TextbookCatalogExtractorContract || attempt != 0 {
+				t.Fatalf("reopened source-evidence terminal job=%s manifest=%s ingest=%s plan=%q",
+					state, manifestState, ingestJobID, sourcePlanDigest)
+			}
+			if _, err := db.Exec(`UPDATE k12_textbook_catalog_jobs
 		SET state='failed_terminal',failure_code='evidence_incomplete',
 		    last_error='catalog proof incomplete'
 		WHERE job_id='catalog-job'`); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.RecoverTextbookCatalogJobs(context.Background(), time.UnixMilli(11_000), 8); err != nil {
-		t.Fatalf("recover unrelated terminal: %v", err)
-	}
-	if err := db.QueryRow(`SELECT state FROM k12_textbook_catalog_jobs
+				t.Fatal(err)
+			}
+			if err := store.RecoverTextbookCatalogJobs(context.Background(), time.UnixMilli(11_000), 8); err != nil {
+				t.Fatalf("recover unrelated terminal: %v", err)
+			}
+			if err := db.QueryRow(`SELECT state FROM k12_textbook_catalog_jobs
 		WHERE job_id='catalog-job'`).Scan(&state); err != nil {
-		t.Fatal(err)
-	}
-	if state != "failed_terminal" {
-		t.Fatalf("unrelated terminal state=%s want failed_terminal", state)
+				t.Fatal(err)
+			}
+			if state != "failed_terminal" {
+				t.Fatalf("unrelated terminal state=%s want failed_terminal", state)
+			}
+		})
 	}
 }

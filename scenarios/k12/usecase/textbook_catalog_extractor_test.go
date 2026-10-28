@@ -64,31 +64,37 @@ func TestTextbookCatalogCheckpointExtractorUsesTOCAndPrintedFooterProof(t *testi
 }
 
 func TestTextbookCatalogCheckpointExtractorPrefersCurrentApprovalYearAcrossPDFLineBreaks(t *testing.T) {
-	source := syntheticTextbookCatalogSource()
-	source.Pages[0].Content = strings.Replace(
-		source.Pages[0].Content,
-		"2022年经国家教材委员会专家委员会审核通过",
-		"《义务教育教科书数学五年级下册》（2014 年版）基础上修订，\n"+
-			"2022 年经国家教材委员会专家\n委员会审核通过",
-		1,
-	)
-	source.Pages[0].ContentDigest = testTextbookContentDigest(source.Pages[0].Content)
+	for _, tc := range []struct{ name, evidence string }{
+		{"approval across lines", "《义务教育教科书数学五年级下册》（2014 年版）基础上修订，\n2022 年经国家教材委员会专家\n委员会审核通过"},
+		{"printed edition", "《义务教育教科书数学五年级下册》（2014 年版）基础上修订，\n版　次　2022年8月第2版"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			source := syntheticTextbookCatalogSource()
+			source.Pages[0].Content = strings.Replace(
+				source.Pages[0].Content,
+				"2022年经国家教材委员会专家委员会审核通过",
+				tc.evidence,
+				1,
+			)
+			source.Pages[0].ContentDigest = testTextbookContentDigest(source.Pages[0].Content)
 
-	publication, err := (TextbookCatalogCheckpointExtractor{}).Extract(
-		context.Background(), source,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var catalog struct {
-		TextbookVersion string `json:"textbook_version"`
-	}
-	if err := json.Unmarshal(publication.CatalogJSON, &catalog); err != nil {
-		t.Fatal(err)
-	}
-	if catalog.TextbookVersion != "2022" {
-		t.Fatalf("current approval year=%q, want 2022 rather than superseded base edition 2014",
-			catalog.TextbookVersion)
+			publication, err := (TextbookCatalogCheckpointExtractor{}).Extract(
+				context.Background(), source,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var catalog struct {
+				TextbookVersion string `json:"textbook_version"`
+			}
+			if err := json.Unmarshal(publication.CatalogJSON, &catalog); err != nil {
+				t.Fatal(err)
+			}
+			if catalog.TextbookVersion != "2022" {
+				t.Fatalf("current approval year=%q, want 2022 rather than superseded base edition 2014",
+					catalog.TextbookVersion)
+			}
+		})
 	}
 }
 
@@ -192,6 +198,14 @@ func TestTextbookCatalogCheckpointExtractorFailsClosedOnMissingVersionOrPage(t *
 					"2022年经国家教材委员会专家委员会审核通过",
 					"经国家教材委员会专家委员会审核通过",
 				)
+				source.Pages[0].ContentDigest = testTextbookContentDigest(source.Pages[0].Content)
+			},
+		},
+		{
+			name: "unrelated body year is not an edition",
+			mutate: func(source *k12storage.TextbookCatalogSource) {
+				source.Pages[0].Content = strings.ReplaceAll(source.Pages[0].Content,
+					"2022年经国家教材委员会专家委员会审核通过", "例题：2022年夏令营招收120名学生。")
 				source.Pages[0].ContentDigest = testTextbookContentDigest(source.Pages[0].Content)
 			},
 		},
