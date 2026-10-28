@@ -9,12 +9,15 @@ package apihttp
 // 契约：魔数非 image/* → 415；>10MB → 413；跨 agent / 穿越名 → 404。
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
+	"time"
 
 	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/assetstore"
@@ -131,11 +134,7 @@ func (h *handler) getAsset(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
-		w.Header().Set("Content-Type", "image/svg+xml")
-		w.Header().Set("Content-Length", strconv.Itoa(len(data)))
-		w.Header().Set("Cache-Control", "private, max-age=86400, immutable")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(data)
+		writeAssetBytes(w, r, "image/svg+xml", data)
 		return
 	}
 	repository := h.pageAssetGateway()
@@ -161,11 +160,17 @@ func (h *handler) getAsset(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "资产服务暂时不可用")
 		return
 	}
-	w.Header().Set("Content-Type", ready.Metadata.MediaType)
-	w.Header().Set("Content-Length", strconv.Itoa(len(ready.Data)))
-	w.Header().Set("Cache-Control", "private, max-age=86400, immutable") // 内容寻址：同名即同内容
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(ready.Data)
+	writeAssetBytes(w, r, ready.Metadata.MediaType, ready.Data)
+}
+
+// writeAssetBytes 只负责已授权资源的内容摘要与标准条件读取，归属核对仍由调用方完成。
+func writeAssetBytes(w http.ResponseWriter, r *http.Request, mediaType string, data []byte) {
+	digest := fmt.Sprintf("%x", sha256.Sum256(data))
+	w.Header().Set("Content-Type", mediaType)
+	w.Header().Set("Cache-Control", "private, max-age=86400, immutable")
+	w.Header().Set("ETag", `"`+digest+`"`)
+	w.Header().Set("X-Content-Sha256", digest)
+	http.ServeContent(w, r, r.PathValue("file"), time.Time{}, bytes.NewReader(data))
 }
 
 func (h *handler) pageAssetGateway() usecase.PageAssetGateway {

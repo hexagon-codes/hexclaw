@@ -29,6 +29,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -610,6 +611,18 @@ func (s *Server) handleGeneratedFile(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, "stat failed", http.StatusInternalServerError)
 		return
+	}
+	// 在原有归属核对后计算实际内容摘要；摘要读取失败时仍沿原文件读取路径处理。
+	contentHash := sha256.New()
+	_, digestErr := io.Copy(contentHash, f)
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		http.Error(w, "seek failed", http.StatusInternalServerError)
+		return
+	}
+	if digestErr == nil {
+		digest := fmt.Sprintf("%x", contentHash.Sum(nil))
+		w.Header().Set("ETag", `"`+digest+`"`)
+		w.Header().Set("X-Content-Sha256", digest)
 	}
 	// MIME 推断
 	ct := "application/octet-stream"

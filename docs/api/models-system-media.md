@@ -1380,7 +1380,7 @@ curl -X POST "${HEXCLAW_API}/api/v1/media/operations/REPLACE_WITH_OPERATION_ID/r
 
 挂载条件: `始终挂载`.
 
-实际 Go 路由为 {path...}，path 可含目录斜线，使用响应中的相对 file_path。共享媒体服务对已登记媒体资产核对当前认证归属；无本用户持有记录返回 404，相同内容被本用户合法生成并登记时仍可读取。未纳入媒体资产登记的旧文件沿用原有访问合同，不追溯新增归属要求。已登记媒体资产返回 Cache-Control: private, max-age=86400；未托管旧文件仍为 public, max-age=86400。Content-Type 按扩展名返回图片、视频或音频 MIME，未知扩展名使用 application/octet-stream。download 非空触发 attachment；1/true 使用原名，其余值作为下载名。支持标准范围/条件请求；handler 错误为 text/plain，认证错误仍为 JSON。
+实际 Go 路由为 {path...}，path 可含目录斜线，使用响应中的相对 file_path。共享媒体服务对已登记媒体资产核对当前认证归属；无本用户持有记录返回 404，相同内容被本用户合法生成并登记时仍可读取。未纳入媒体资产登记的旧文件沿用原有访问合同，不追溯新增归属要求。已登记媒体资产返回 Cache-Control: private, max-age=86400；未托管旧文件仍为 public, max-age=86400。Content-Type 按扩展名返回图片、视频或音频 MIME，未知扩展名使用 application/octet-stream。download 非空触发 attachment；1/true 使用原名，其余值作为下载名。归属核对后，完整可读文件返回按实际字节计算的强ETag及X-Content-Sha256；If-None-Match匹配时返回304且无文件正文，权限失败仍先返回原错误，不以缓存条件绕过归属核对。支持标准范围/条件请求；handler 错误为 text/plain，认证错误仍为 JSON。
 
 | 参数 | 位置 | 必填 | 类型 | 默认 / 限制 | 含义 |
 | --- | --- | --- | --- | --- | --- |

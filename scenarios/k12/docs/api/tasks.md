@@ -527,14 +527,14 @@ action=correct_text/select_region/retake/skip/resume，structure_version和expec
 
 下载原图资产。
 
-file是asset://<agent>/<file>的末段，不是完整URL/本机路径。成功为真实图片字节，Content-Type为已核验mime、Content-Length为实际大小，Cache-Control=private, max-age=86400, immutable；同agent不同owner或越界引用不存在为404，完整性/存储失败500。
+file是asset://<agent>/<file>的末段，不是完整URL/本机路径。成功为真实图片字节，Content-Type为已核验mime、Content-Length为实际大小，Cache-Control=private, max-age=86400, immutable。原图与教学SVG在归属核对后返回实际内容SHA256的强ETag及X-Content-Sha256，支持标准条件/范围读取；If-None-Match匹配时304且无图片正文。同agent不同owner或越界引用不存在仍为404，完整性/存储失败500。
 
 | 位置 | 参数 | 必填 | 类型 / 契约 |
 | --- | --- | --- | --- |
 | path | `file` | 是 | string；当前资源身份 |
 | query | `agent` | 是 | string；孩子 TutorAgent 名称；不作为 owner 身份 |
 
-成功响应：`200` → 图片二进制字节。
+成功响应：`200` → 图片二进制字节；`206` → 请求的字节范围；`304` → 内容未修改，无响应体。条件不满足为`412`，无法满足的范围为`416`。
 
 错误：`400` 请求 JSON、字段、身份或格式无效; `401` 当前服务令牌/已认证 principal 不可用; `404` 目标不存在或不属于当前作用域; `500` 持久化、投影或资产基础设施失败; `503` 该路由依赖的运行时不可用。
 

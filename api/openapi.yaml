@@ -5158,7 +5158,7 @@ paths:
     get:
       summary: 下载生成产物
       description: >-
-        实际 Go 路由为 {path...}，path 可含目录斜线，使用响应中的相对 file_path。共享媒体服务对已登记媒体资产核对当前认证归属；无本用户持有记录返回 404，相同内容被本用户合法生成并登记时仍可读取。未纳入媒体资产登记的旧文件沿用原有访问合同，不追溯新增归属要求。已登记媒体资产返回 Cache-Control: private, max-age=86400；未托管旧文件仍为 public, max-age=86400。Content-Type 按扩展名返回图片、视频或音频 MIME，未知扩展名使用 application/octet-stream。download 非空触发 attachment；1/true 使用原名，其余值作为下载名。支持标准范围/条件请求；handler 错误为 text/plain，认证错误仍为 JSON。
+        实际 Go 路由为 {path...}，path 可含目录斜线，使用响应中的相对 file_path。共享媒体服务对已登记媒体资产核对当前认证归属；无本用户持有记录返回 404，相同内容被本用户合法生成并登记时仍可读取。未纳入媒体资产登记的旧文件沿用原有访问合同，不追溯新增归属要求。已登记媒体资产返回 Cache-Control: private, max-age=86400；未托管旧文件仍为 public, max-age=86400。Content-Type 按扩展名返回图片、视频或音频 MIME，未知扩展名使用 application/octet-stream。download 非空触发 attachment；1/true 使用原名，其余值作为下载名。归属核对后，完整可读文件返回按实际字节计算的强ETag及X-Content-Sha256；If-None-Match匹配时返回304且无文件正文，权限失败仍先返回原错误，不以缓存条件绕过归属核对。支持标准范围/条件请求；handler 错误为 text/plain，认证错误仍为 JSON。
       tags:
         - models-system-media
       operationId: models_handleGeneratedFile_get
@@ -13090,7 +13090,7 @@ paths:
       operationId: k12TasksGetAssetGet
       summary: 下载原图资产
       description: file是asset://<agent>/<file>的末段，不是完整URL/本机路径。成功为真实图片字节，Content-Type为已核验mime、Content-Length为实际大小，Cache-Control=private,
-        max-age=86400, immutable；同agent不同owner或越界引用不存在为404，完整性/存储失败500。
+        max-age=86400, immutable。原图与教学SVG在归属核对后提供实际内容SHA256的强ETag及X-Content-Sha256，支持标准条件和范围读取；If-None-Match匹配时304且无图片正文。同agent不同owner或越界引用不存在仍为404，完整性/存储失败500。
       tags:
         - k12-tasks
       x-source:
@@ -13111,15 +13111,33 @@ paths:
           schema:
             type: string
           description: 孩子 TutorAgent 名称；不作为 owner 身份
+        - name: If-None-Match
+          in: header
+          required: false
+          schema:
+            type: string
+          description: Strong content ETag from a prior authenticated response
+        - name: Range
+          in: header
+          required: false
+          schema:
+            type: string
+          description: Standard HTTP byte-range request
       responses:
         "200":
           description: file是asset://<agent>/<file>的末段，不是完整URL/本机路径。成功为真实图片字节，Content-Type为已核验mime、Content-Length为实际大小，Cache-Control=private,
-            max-age=86400, immutable；同agent不同owner或越界引用不存在为404，完整性/存储失败500。
+            max-age=86400, immutable；ETag与X-Content-Sha256表示实际内容摘要。归属核对保持，同agent不同owner或越界引用不存在为404，完整性/存储失败500。
           headers:
             Content-Length:
               schema:
                 type: integer
             Cache-Control:
+              schema:
+                type: string
+            ETag:
+              schema:
+                type: string
+            X-Content-Sha256:
               schema:
                 type: string
           content:
@@ -13139,6 +13157,23 @@ paths:
               schema:
                 type: string
                 format: binary
+            image/svg+xml:
+              schema:
+                type: string
+                format: binary
+        "206":
+          description: Requested image byte range
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "304":
+          description: Content unchanged after ownership checks; no response body
+        "412":
+          description: Conditional request precondition failed
+        "416":
+          description: Requested byte range is unsatisfiable
         "400":
           description: 请求 JSON、字段、身份或格式无效
           content:

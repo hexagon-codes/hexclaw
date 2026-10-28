@@ -527,14 +527,14 @@ Errors: `400` Invalid JSON, fields, command identity or format; `401` Service to
 
 Download a source image。
 
-file is the final segment of asset://<agent>/<file>, never a full URL or host path. Success returns real image bytes with verified Content-Type, actual Content-Length and Cache-Control=private, max-age=86400, immutable. Wrong-owner/absent assets are 404; integrity/storage failures are 500.
+file is the final segment of asset://<agent>/<file>, never a full URL or host path. Success returns real image bytes with verified Content-Type, actual Content-Length and Cache-Control=private, max-age=86400, immutable. After ownership checks, source images and teaching SVGs return a strong ETag and X-Content-Sha256 based on the actual bytes, with standard conditional/range handling. A matching If-None-Match returns 304 without image bytes. Wrong-owner/absent assets remain 404; integrity/storage failures remain 500.
 
 | Location | Parameter | Required | Type / contract |
 | --- | --- | --- | --- |
 | path | `file` | Yes | string；Current resource identity |
 | query | `agent` | Yes | string；Child TutorAgent name; never an owner identity |
 
-Success: `200` → binary image bytes。
+Success: `200` → binary image bytes; `206` → the requested byte range; `304` → unchanged content with no response body. Failed preconditions return `412`; unsatisfiable ranges return `416`.
 
 Errors: `400` Invalid JSON, fields, command identity or format; `401` Service token or authenticated principal unavailable; `404` Resource absent or outside the addressed scope; `500` Persistence, projection or asset infrastructure failure; `503` Required route runtime is unavailable。
 
