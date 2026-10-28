@@ -44,6 +44,7 @@ var pdfNumberedLinesFilter []byte
 
 var pdfStyleDigest = func() string {
 	h := sha256.New()
+	h.Write([]byte(pdfMarkdownReaderExtensions))
 	h.Write([]byte(pdfStyleTemplate))
 	h.Write([]byte(pdfChromeTemplate))
 	branding, _ := json.Marshal(DefaultPDFBranding())

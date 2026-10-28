@@ -41,6 +41,9 @@ type PandocRenderer struct {
 	ReferenceDocPath string
 }
 
+// PDF接受无需前置空行的行首ATX标题，保留渠道传入的单换行正文。
+const pdfMarkdownReaderExtensions = "-blank_before_header"
+
 // NewPandocRenderer 构造渲染器；SandboxDir 必填，referenceDocPath 可空。
 func NewPandocRenderer(pandocPath, typstPath, sandboxDir string) (*PandocRenderer, error) {
 	if sandboxDir == "" {
@@ -182,6 +185,9 @@ func (r *PandocRenderer) buildArgs(format Format, outPath string, opts RenderOpt
 	// 保留 LLM 输出常用扩展
 	// 数学定界符交给 reader 解析；不开放原始 TeX 执行，代码区仍按代码处理。
 	reader += "+pipe_tables+task_lists+tex_math_single_backslash+tex_math_double_backslash"
+	if format == FormatPDF {
+		reader += pdfMarkdownReaderExtensions
+	}
 	args = append(args, "--from="+reader)
 
 	// writer
