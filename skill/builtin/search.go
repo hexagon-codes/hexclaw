@@ -95,7 +95,7 @@ func (s *SearchSkill) Execute(ctx context.Context, args map[string]any) (*skill.
 		return completeHTTPResult(&skill.Result{Content: truncateRunes(stripHTML(string(body)), maxFetchTextLen)}, detail)
 	}
 
-	// 简单提取搜索结果（从 HTML 中提取标题和摘要）
+	// 提取搜索结果的标题、来源链接和摘要。
 	results := parseSearchResults(string(body))
 	if len(results) == 0 {
 		return completeHTTPResult(&skill.Result{
@@ -109,7 +109,11 @@ func (s *SearchSkill) Execute(ctx context.Context, args map[string]any) (*skill.
 		if i >= 3 {
 			break
 		}
-		sb.WriteString(fmt.Sprintf("%d. **%s**\n   %s\n\n", i+1, r.title, r.snippet))
+		title := r.title
+		if r.url != "" {
+			title = fmt.Sprintf("[%s](%s)", title, r.url)
+		}
+		sb.WriteString(fmt.Sprintf("%d. **%s**\n   %s\n\n", i+1, title, r.snippet))
 	}
 
 	sources := make([]map[string]string, 0, len(results))
