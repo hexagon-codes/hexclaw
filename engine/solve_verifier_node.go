@@ -127,6 +127,9 @@ var namedQuantityConclusionRe = regexp.MustCompile(`^([\p{Han}]+)(?:是|为)\s*(
 // 列式后的重复答句只有明确回答原题同一目标且数值、单位均一致时才能合并。
 // 原始答案和执行正文保持不变，其他目标、冲突结论和漏答仍需完整核对。
 func verificationAnswerProjection(problem, answer string) string {
+	if quantity, ok := processAnswerQuantityProjection(problem, answer); ok {
+		return quantity.value + " " + quantity.unit
+	}
 	if named := namedQuantityConclusionRe.FindStringSubmatch(normalizeAnswer(answer)); len(named) == 3 && affirmativeCountLabel(named[1]) &&
 		(strings.Contains(problem, named[1]+"是多少") || strings.Contains(problem, named[1]+"为多少")) {
 		if quantity, ok := completeVerificationQuantity(named[2]); ok {
@@ -143,6 +146,75 @@ func verificationAnswerProjection(problem, answer string) string {
 		return answer
 	}
 	return equation.value + " " + equation.unit
+}
+
+var quantityQuestionMarker = regexp.MustCompile(`多少|几`)
+
+// processAnswerQuantityProjection 只比较单一数量问句的结论，关系、方程和验算仍由完整过程审计。
+// 其他问项、填空及缺少步骤的复合答案不能被末句数值遮蔽，原始正文始终不变。
+func processAnswerQuantityProjection(problem, answer string) (answerQuantity, bool) {
+	if _, current, _, parsed := elementarymath.ParseMathSubproblem(problem); parsed {
+		problem = current
+	}
+	if len(verificationBlankSlotRe.FindAllStringIndex(problem, -1)) != 0 ||
+		!strings.Contains(problem, "数量关系") || !strings.Contains(problem, "方程") || !strings.Contains(problem, "验算") {
+		return answerQuantity{}, false
+	}
+	markers := quantityQuestionMarker.FindAllStringIndex(problem, -1)
+	if len(markers) != 1 {
+		return answerQuantity{}, false
+	}
+	left := strings.FieldsFunc(problem[:markers[0][0]], func(r rune) bool {
+		return strings.ContainsRune("。！？?!；;，,\n：:", r)
+	})
+	right := strings.FieldsFunc(problem[markers[0][1]:], func(r rune) bool {
+		return strings.ContainsRune("。！？?!；;，,\n", r)
+	})
+	if len(left) == 0 || len(right) == 0 {
+		return answerQuantity{}, false
+	}
+	prefix := strings.TrimSpace(left[len(left)-1])
+	unit, ok := completeVerificationQuantity("1" + strings.TrimSpace(right[0]))
+	if !ok || unit.unit == "" || !affirmativeCountLabel(prefix) || strings.Contains(prefix, "分别") ||
+		strings.Contains(prefix, "依次") || strings.HasSuffix(prefix, "各有") || !strings.HasPrefix(problem[markers[0][1]:], right[0]) {
+		return answerQuantity{}, false
+	}
+	start := strings.LastIndex(problem[:markers[0][0]], prefix)
+	outside := problem[:start] + problem[markers[0][1]+len(right[0]):]
+	outside = strings.ReplaceAll(outside, "求解", "")
+	if strings.ContainsAny(outside, "求填") || strings.Contains(outside, "计算") {
+		return answerQuantity{}, false
+	}
+	parts := strings.FieldsFunc(normalizeAnswer(answer), func(r rune) bool { return r == ';' || r == '；' })
+	if len(parts) < 4 {
+		return answerQuantity{}, false
+	}
+	var relation, equation, check bool
+	for _, part := range parts[:len(parts)-1] {
+		part = normalizeAnswer(part)
+		if !strings.ContainsAny(part, "=＝") {
+			return answerQuantity{}, false
+		}
+		switch {
+		case strings.HasPrefix(part, "数量关系"):
+			relation = true
+		case strings.HasPrefix(part, "设"), strings.HasPrefix(part, "列方程"), strings.HasPrefix(part, "方程"), strings.HasPrefix(part, "解得"):
+			equation = true
+		case strings.HasPrefix(part, "代回验算"), strings.HasPrefix(part, "验算"):
+			check = true
+		default:
+			return answerQuantity{}, false
+		}
+	}
+	last := normalizeAnswer(parts[len(parts)-1])
+	if !relation || !equation || !check || !strings.HasPrefix(last, prefix) {
+		return answerQuantity{}, false
+	}
+	conclusion, ok := completeVerificationQuantity(strings.TrimSpace(strings.TrimPrefix(last, prefix)))
+	if !ok || conclusion.unit != unit.unit {
+		return answerQuantity{}, false
+	}
+	return conclusion, true
 }
 
 type quantityRelationAnswer struct {

@@ -488,7 +488,7 @@ func (o *SolveSkill) Execute(ctx context.Context, args map[string]any) (*skill.R
 	}
 
 	// 3) 组装教学结果与结构化回执。
-	content := formatSolve(groups, verdict, computed, len(sols), methodDiversity, numericGrounded)
+	content := formatSolve(groups, verdict, computed, len(sols), methodDiversity, numericGrounded, problem)
 	reports := []SubAgentReport{
 		{Agent: solverAgentName, Status: subAgentStatusOK},
 		newVerifierReport(verdict),
@@ -497,7 +497,7 @@ func (o *SolveSkill) Execute(ctx context.Context, args map[string]any) (*skill.R
 		"solve_run_id": solveRunID, "solve_verdict": verdictString(verdict),
 		"solve_evidence": evidenceKind(numericGrounded),
 	}
-	selected := selectedSolverSolution(groups, verdict, computed, numericGrounded)
+	selected := selectedSolverSolution(groups, verdict, computed, numericGrounded, problem)
 	if solveTeachingVersionSupported(outputVersion) {
 		addParentGuideMetadata(metadata, selected, guideAudits)
 	}
@@ -877,6 +877,13 @@ func (o *SolveSkill) verifySolutionWithGuides(ctx context.Context, problem, solu
 	// 完整解法只有明确通过过程审计时才允许数值等值纠偏；缺字段不猜测过程正确。
 	allowNumericAgreement := process != "INVALID" && (strings.TrimSpace(solution) == "" || process == "VALID")
 	equal, comparable := verificationAnswersEqual(problem, computed, candidate)
+	_, candidateHasProcess := processAnswerQuantityProjection(problem, candidate)
+	_, computedHasProcess := processAnswerQuantityProjection(problem, computed)
+	_, cardPool := verificationCardPoolScope(problem)
+	if (candidateHasProcess || computedHasProcess || cardPool) && process != "VALID" && process != "INVALID" {
+		// 复合答案的关系比较不能代替完整过程审计。
+		comparable = false
+	}
 	// 有执行回执时只比较实际 stdout；过程否决与超纲否决不因最终数值相同而失效。
 	if computed != "" {
 		switch {
@@ -1560,23 +1567,28 @@ func hasCleanFinalAnswer(output, answer string) bool {
 }
 
 // formatSolve 保留教学正文，仅在结论冲突或证据不足时追加必要说明。
-func formatSolve(groups []answerGroup, verdict verifyVerdict, computed string, total int, methodDiversity, numericGrounded bool) string {
+func formatSolve(groups []answerGroup, verdict verifyVerdict, computed string, total int, methodDiversity, numericGrounded bool, problem ...string) string {
 	primary := groups[0]
 
 	// 字面分组不等于结论冲突；同义文字不能仅因未归入同组就判为错误。
 	if len(groups) > 1 {
 		if numericGrounded && verdict != verdictUnverifiable && computed != "" {
-			if g := findGroup(groups, computed); g != nil {
-				return g.sols[0].output
+			if g := findGroup(groups, computed, problem...); g != nil {
+				// 主解的数值关系相同但过程被否决时，仍须保留后面的过程警告。
+				if verdict != verdictDisagree || g != &groups[0] {
+					return g.sols[0].output
+				}
+			} else {
+				return fmt.Sprintf("%s\n\n> ⚠️ 几种解法结论不一致（%s），且独立代码核验得「%s」与各解法都不符——本题存疑，请务必人工复核。\n",
+					primary.sols[0].output, joinAnswers(groups), computed)
 			}
-			return fmt.Sprintf("%s\n\n> ⚠️ 几种解法结论不一致（%s），且独立代码核验得「%s」与各解法都不符——本题存疑，请务必人工复核。\n",
-				primary.sols[0].output, joinAnswers(groups), computed)
-		}
-		for i := range groups {
-			for j := i + 1; j < len(groups); j++ {
-				if answersDefinitelyDiffer(groups[i].answer, groups[j].answer) {
-					return fmt.Sprintf("%s\n\n> ⚠️ 几种解法得到不一致的结论（%s），且无法用代码客观裁决，请人工复核后再下结论。\n",
-						primary.sols[0].output, joinAnswers(groups))
+		} else {
+			for i := range groups {
+				for j := i + 1; j < len(groups); j++ {
+					if answersDefinitelyDiffer(groups[i].answer, groups[j].answer) {
+						return fmt.Sprintf("%s\n\n> ⚠️ 几种解法得到不一致的结论（%s），且无法用代码客观裁决，请人工复核后再下结论。\n",
+							primary.sols[0].output, joinAnswers(groups))
+					}
 				}
 			}
 		}
@@ -1592,7 +1604,13 @@ func formatSolve(groups []answerGroup, verdict verifyVerdict, computed string, t
 		}
 	case verdictDisagree:
 		b.WriteString("\n\n")
-		if numericGrounded && answersEqual(primary.answer, computed) {
+		sameAnswer := answersEqual(primary.answer, computed)
+		if len(problem) > 0 {
+			if equal, comparable := verificationAnswersEqual(problem[0], primary.answer, computed); comparable {
+				sameAnswer = equal
+			}
+		}
+		if numericGrounded && sameAnswer {
 			b.WriteString("> ⚠️ 答案数值一致，但解题过程未通过核验，请复核错误步骤。\n")
 		} else if numericGrounded {
 			fmt.Fprintf(&b, "> ⚠️ 注意：独立代码核验得到**不同**答案——解题得「%s」，代码核验得「%s」。两者不一致，请勿直接采信，建议复核关键步骤再下结论。\n", primary.answer, fallbackStr(computed, "（未给出）"))
@@ -1607,8 +1625,16 @@ func formatSolve(groups []answerGroup, verdict verifyVerdict, computed string, t
 
 // findGroup 找出答案与 ans 语义等值的那组（裁决用 computed 命中正确解法组）。语义等值而非精确字符串，
 // 这样 computed 写成等价形式（'8和12' vs '12和8'、'0.5' vs '1/2'）也能命中对应解法组。
-func findGroup(groups []answerGroup, ans string) *answerGroup {
+func findGroup(groups []answerGroup, ans string, problem ...string) *answerGroup {
 	for i := range groups {
+		if len(problem) > 0 {
+			if equal, comparable := verificationAnswersEqual(problem[0], groups[i].answer, ans); comparable {
+				if equal {
+					return &groups[i]
+				}
+				continue
+			}
+		}
 		if groups[i].answer == ans || answersEqual(groups[i].answer, ans) {
 			return &groups[i]
 		}

@@ -293,9 +293,9 @@ func parentGuideAuditVerdictForFields(audits []parentGuideAudit, digest string, 
 	return "VALID"
 }
 
-func selectedSolverSolution(groups []answerGroup, verdict verifyVerdict, computed string, grounded bool) solverSolution {
+func selectedSolverSolution(groups []answerGroup, verdict verifyVerdict, computed string, grounded bool, problem ...string) solverSolution {
 	if len(groups) > 1 && grounded && verdict != verdictUnverifiable && computed != "" {
-		if group := findGroup(groups, computed); group != nil {
+		if group := findGroup(groups, computed, problem...); group != nil {
 			return group.sols[0]
 		}
 	}
