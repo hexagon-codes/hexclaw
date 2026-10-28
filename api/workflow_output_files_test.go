@@ -195,7 +195,12 @@ func TestWorkflowOutputFilesCanonicalAttachmentReference(t *testing.T) {
 func TestWorkflowOutputFilesRetryFailedFormatAndPreserveExistingDirectory(t *testing.T) {
 	pandoc, typst := workflowOutputRenderTools(t)
 	s := workflowDeliveryServer(t)
-	setWorkflowOutputRenderer(t, s, pandoc, filepath.Join(t.TempDir(), "missing-typst"))
+	setWorkflowOutputRenderer(t, s, pandoc, typst)
+	var err error
+	s.renderSvc, err = render.NewService(render.ServiceConfig{Renderer: workflowPDFUnavailableRenderer{Renderer: s.renderSvc}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	directory := t.TempDir()
 	run := workflowOutputRun(t, s, "run-format-retry", map[string]any{"directory": map[string]any{"enabled": true, "location": "service", "path": directory}}, "md", "pdf")
 	s.dispatchWorkflowDelivery(t.Context(), run.ID)
@@ -226,6 +231,16 @@ func TestWorkflowOutputFilesRetryFailedFormatAndPreserveExistingDirectory(t *tes
 	if delivery.Status != "delivered" || len(delivery.Files) != 2 {
 		t.Fatalf("directory retry did not reuse ready files: %+v", delivery)
 	}
+}
+
+// PDF准备失败由明确边界返回，其他格式仍使用真实引擎，避免依赖宿主工具缺失。
+type workflowPDFUnavailableRenderer struct{ render.Renderer }
+
+func (r workflowPDFUnavailableRenderer) Render(ctx context.Context, content string, format render.Format, opts render.RenderOptions) (*render.RenderResult, error) {
+	if format == render.FormatPDF {
+		return nil, &render.RenderError{Code: render.CodeEngineMissing, Format: format, Engine: "typst", Detail: "PDF engine unavailable for this attempt"}
+	}
+	return r.Renderer.Render(ctx, content, format, opts)
 }
 
 func TestWorkflowOutputFilesDesktopPendingAndIdempotentAcknowledgement(t *testing.T) {

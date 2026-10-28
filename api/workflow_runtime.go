@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
+
 	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/hexagon"
 	"github.com/hexagon-codes/hexclaw/adapter"
@@ -837,6 +839,14 @@ func (e *workflowExecutor) recordWorkflowInvocationOutcome(node *workflowNode, e
 	unknown := true
 	if errors.As(err, &rejected) && rejected.StatusCode >= 400 && rejected.StatusCode <= 599 {
 		unknown = false
+	}
+	// MCP 的前置协议校验错误表示未执行目标；服务内部错误和传输中断仍保留未知副作用。
+	var protocolError *jsonrpc.Error
+	if node.Type == "tool" && errors.As(err, &protocolError) {
+		switch protocolError.Code {
+		case jsonrpc.CodeInvalidRequest, jsonrpc.CodeMethodNotFound, jsonrpc.CodeInvalidParams:
+			unknown = false
+		}
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()

@@ -67,7 +67,12 @@ func (e *ReActEngine) queryWorkflowKnowledge(ctx context.Context, query string, 
 		if len(options.KnowledgeFilter.DocumentIDs) == 0 {
 			return "", nil, nil
 		}
-		return e.kb.QueryHitsWithFilter(ctx, query, topK, options.KnowledgeFilter)
+		// 显式选定资料沿用户检索语义读取，纯词法知识库仍可使用；自动注入保持自己的相关度判据。
+		hits, err := e.kb.SearchWithFilter(ctx, query, topK, options.KnowledgeFilter)
+		if err != nil {
+			return "", nil, err
+		}
+		return encodeKnowledgeEvidence(hits), hits, nil
 	}
 	return e.kb.QueryHits(ctx, query, topK)
 }
