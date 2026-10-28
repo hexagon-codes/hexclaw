@@ -1,4 +1,5 @@
 // 报告组件只处理展示内容，不据答案推导评价或改写学生作答。
+#import "pdf-chrome.typ": hc-brand-header, hc-brand-footer
 #let ink = rgb("#1D2D40")
 #let blue = rgb("#2D6088")
 #let muted = rgb("#596A7C")
@@ -216,15 +217,19 @@
 
 #let blocks(nodes, formulas) = { for node in nodes { block-content(node, formulas) } }
 
-#let deep-step(step, formulas) = [
+#let deep-step(step, formulas) = {
+  // 两位编号保持既有尺寸；显式去除圆形内边距，较长编号同步扩展列宽与正文缩进。
+  let marker-size = calc.max(16pt, 8pt * str(step.number).len())
+  [
   #block(above: 18pt, below: 9pt, sticky: true)[
-    #grid(columns: (17pt, 1fr), column-gutter: 7pt, align: horizon,
-      circle(radius: 8pt, fill: blue, stroke: none)[#text(font: sans, fill: white, size: 9pt, weight: "semibold")[#step.number]],
+    #grid(columns: (marker-size + 1pt, 1fr), column-gutter: 7pt, align: horizon,
+      circle(radius: marker-size / 2, inset: 0pt, fill: blue, stroke: none)[#align(center + horizon)[#text(font: sans, fill: white, size: 9pt, weight: "semibold")[#step.number]]],
       label(step.title, size: 12pt),
     )
   ]
-  #pad(left: 24pt, blocks(step.blocks, formulas))
-]
+  #pad(left: marker-size + 8pt, blocks(step.blocks, formulas))
+  ]
+}
 
 #let render-report(data, formulas: (:)) = {
   assert(data.schema_version == "homework-report-render-v2", message: "Unsupported report schema")
@@ -234,26 +239,12 @@
   set text(font: serif, size: 11pt, lang: "zh", fill: ink)
   set par(justify: false, leading: 0.8em, spacing: 0.9em)
   set page(paper: "a4", margin: (left: 18mm, right: 18mm, top: 22mm, bottom: 23mm),
-    header: [
-      #set text(font: sans, size: 9pt, fill: muted)
-      #grid(columns: if brand.at("logo_path", default: "") == "" { (1fr, auto) } else { (auto, 1fr, auto) },
-        align: horizon, column-gutter: 6pt,
-        ..if brand.at("logo_path", default: "") == "" { () } else { (image(brand.logo_path, width: 5mm),) },
-        label(brand.name, size: 9pt), [#doc.agent_name])
-      #v(4pt)
-      #line(length: 100%, stroke: 0.5pt + rule)
-    ],
-    footer: [
-      #set text(font: sans, size: 8.5pt, fill: muted)
-      #line(length: 100%, stroke: 0.4pt + rule)
-      #v(5pt)
-      #set par(leading: 0.4em, spacing: 0pt)
-      #grid(columns: (1fr, auto), column-gutter: 12pt, row-gutter: 5pt,
-        [#brand.name · #brand.tagline], [],
-        [官网：#link(brand.website_url, brand.website_label) · 公众号 ID：#brand.wechat_id · GitHub：#link(brand.github_url, brand.github_label)],
-        context counter(page).display("1 / 1", both: true))
-    ])
+    header: hc-brand-header(brand, doc.agent_name, sans,
+      logo: if brand.at("logo_path", default: "") == "" { none } else { brand.logo_path }),
+    footer: hc-brand-footer(brand, sans))
   show math.equation: set text(font: (math-font, serif))
+  // 行内分数按实际字形高度参与分页，避免页首分子伸入正文上边距。
+  show math.equation.where(block: false): set text(top-edge: "bounds", bottom-edge: "bounds")
   show math.equation.where(block: true): set block(above: 4pt, below: 4pt)
   let source-kind = doc.source_kind
   let date-label = if source-kind == "text_solve" { "生成日期：" } else { "批改日期：" }

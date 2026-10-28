@@ -4,7 +4,8 @@
   "input_schema": "homework-report-render-v2",
   "entrypoint": "assets/template.typ",
   "components": [
-    "assets/components.typ"
+    "assets/components.typ",
+    "assets/pdf-chrome.typ"
   ],
   "host_inputs": [
     "report.json",

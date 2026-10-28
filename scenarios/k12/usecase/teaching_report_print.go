@@ -24,10 +24,11 @@ func (d Deps) renderTeachingReport(ctx context.Context, input TeachingReportPrin
 		assets[id] = asset
 	}
 	assets["pdf-brand"] = TeachingReportAsset{Data: logo, MIME: "image/png"}
+	brand := render.DefaultPDFBranding()
 	branding := TeachingReportBranding{
-		Name: "HexClaw 河蟹 AI", Tagline: "本地云端均可部署 · 数据自主掌控 · 软件开源免费",
-		WebsiteURL: "https://hexclaw.net/", WebsiteLabel: "hexclaw.net", WeChatID: "hexclaw",
-		GitHubURL: "https://github.com/hexagon-codes/hexclaw-desktop", GitHubLabel: "github.com/hexagon-codes/hexclaw-desktop",
+		Name: brand.Name, Tagline: brand.Tagline,
+		WebsiteURL: brand.WebsiteURL, WebsiteLabel: brand.WebsiteLabel, WeChatID: brand.WeChatID,
+		GitHubURL: brand.GitHubURL, GitHubLabel: brand.GitHubLabel,
 		LogoAssetID: "pdf-brand", LogoAssetDigest: logoDigest, LogoMIME: "image/png",
 	}
 	project := ProjectTeachingReportPDF

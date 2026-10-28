@@ -69,6 +69,8 @@ deep: {method?: {name, application}, steps: [{number, title, blocks: Block[]}]}
 
 ## 内容包身份
 
+`assets/pdf-chrome.typ` 是 HexClaw `render/assets/pdf-chrome.typ` 共享页眉页脚的版本化分发副本。更新资源包时同步该组件，并把实际字节纳入清单；恢复旧报告只读取原包冻结的组件，不读取宿主最新版。该组件只定义页眉页脚，不设置题目、章节、表格或正文样式。
+
 `bundle.json` 保存按 UTF-8 路径字节序排序的文件清单。清单仅含包内实际资源，不含自身；每项为 `path/size/sha256/role`。语义摘要的计算对象为根对象 `{bundle_contract_version,skill_id,version,files}` 的 UTF-8 JSON：所有对象 key 按字典序、无额外空白、保留非 ASCII 字符。宿主外层索引存这个摘要，避免包内自引用；压缩包摘要另记为 transport digest。
 
 本目录仅提供内容包。共享安装、索引、注册、热加载和离线种子需要宿主按已批准生命周期接入；存在目录或可编译示例不等于安装完成。

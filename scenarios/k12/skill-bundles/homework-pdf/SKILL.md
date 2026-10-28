@@ -2,7 +2,7 @@
 name: homework-pdf
 display_name: 作业讲解报告
 description: 将已有的小学作业结果组织为快速解答与深度讲解，引用宿主的确定性 PDF 渲染能力。
-version: "1.1.3"
+version: "1.1.7"
 schema_version: 1
 author: hexclaw
 license: Apache-2.0
@@ -37,7 +37,9 @@ outputs: [homework-report]
 
 ## 渲染边界
 
-报告输入合同见 `references/report-contract.md`，结构见 `assets/report.schema.json`。宿主将完整的结构化报告、预编译公式和已解析本地资源交给 `k12-homework-report/v1` profile。
+报告输入合同见 `references/report-contract.md`，结构见 `assets/report.schema.json`。宿主将完整的结构化报告、预编译公式和已解析本地资源交给 `k12-homework-report/v2` profile。
+
+页眉页脚由 `assets/pdf-chrome.typ` 提供，与通用文档使用同一共享组件；品牌资料由宿主提供，真实助手名称和页码随本次报告变化。正文仍由本包的教学组件组织。
 
 本包的 Typst 组件只排版，不自行识题、求解、下载资源、安装依赖、调用模型或发送消息。LaTeX 由宿主批量交给既有 Pandoc 转换，不直接执行输入中的 Typst 代码。
 

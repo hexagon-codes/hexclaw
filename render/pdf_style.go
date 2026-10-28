@@ -23,6 +23,11 @@ const (
 //go:embed assets/pdf-style.typ
 var pdfStyleTemplate string
 
+// 同一组件以固定字节进入标准文档和版本化报告资源包。
+//
+//go:embed assets/pdf-chrome.typ
+var pdfChromeTemplate string
+
 //go:embed assets/pdf-brand.png
 var pdfBrandImage []byte
 
@@ -40,6 +45,9 @@ var pdfNumberedLinesFilter []byte
 var pdfStyleDigest = func() string {
 	h := sha256.New()
 	h.Write([]byte(pdfStyleTemplate))
+	h.Write([]byte(pdfChromeTemplate))
+	branding, _ := json.Marshal(DefaultPDFBranding())
+	h.Write(branding)
 	h.Write(pdfBrandImage)
 	h.Write(pdfToolIcon)
 	h.Write(pdfNumberedLinesFilter)
@@ -74,6 +82,12 @@ func (r *PandocRenderer) preparePDFStyle(opts RenderOptions) (path string, err e
 
 func (r *PandocRenderer) preparePDFStyleWithImageHeight(opts RenderOptions, imageHeightMM int) (path string, err error) {
 	content := strings.ReplaceAll(pdfStyleTemplate, "__HC_HEADER_FOOTER__", strconv.FormatBool(opts.pdfHeaderFooterEnabled()))
+	content = strings.ReplaceAll(content, "__HC_PDF_CHROME__", pdfChromeTemplate)
+	branding, err := json.Marshal(DefaultPDFBranding())
+	if err != nil {
+		return "", err
+	}
+	content = strings.ReplaceAll(content, "__HC_BRANDING__", "json("+typstAssetBytes(branding)+")")
 	content = strings.ReplaceAll(content, "__HC_IMAGE_MAX_HEIGHT__", strconv.Itoa(imageHeightMM))
 	content = strings.NewReplacer(
 		"__HC_MARGIN_LEFT__", strconv.Itoa(standardPDFMarginLeftMM),

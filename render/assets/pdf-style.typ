@@ -8,6 +8,8 @@
 #let hc-header-footer = __HC_HEADER_FOOTER__
 #let hc-metadata = __HC_METADATA__
 #let hc-agent-name = hc-metadata.at("agent_display_name", default: "")
+#let hc-branding = __HC_BRANDING__
+__HC_PDF_CHROME__
 #let hc-document-title = hc-metadata.at("title", default: "")
 #let hc-document-subtitle = hc-metadata.at("subtitle", default: "")
 // 保留首选字体；缺失时明确回退到Windows中文字体，避免系统回退产生缺字。
@@ -71,28 +73,8 @@
 ]
 #set table(stroke: 0.4pt + hc-line, inset: (x: 9pt, y: 10pt), align: left)
 #show table.cell.where(y: 0): set text(font: hc-heading-font, weight: 600)
-#let hc-header() = context {
-  set text(font: hc-heading-font, size: 9pt, weight: 400, fill: hc-muted)
-  let agent = text(font: hc-heading-font, size: 9pt, fill: hc-muted, hc-agent-name)
-  grid(columns: (5mm, 1fr, auto), column-gutter: 6pt, align: horizon,
-    image(__HC_LOGO__, width: 5mm),
-    text(font: hc-heading-font, size: 9pt, weight: 600, fill: hc-ink)[HexClaw 河蟹 AI],
-    box(width: calc.min(measure(agent).width, 65mm), align(right, agent)))
-  v(4pt)
-  line(length: 100%, stroke: 0.5pt + hc-line)
-}
-#let hc-footer() = context {
-  let current = counter(page).get().first()
-  let total = counter(page).final().first()
-  set text(font: hc-heading-font, size: 8.5pt, weight: 400, fill: hc-muted)
-  line(length: 100%, stroke: 0.4pt + hc-line)
-  v(5pt)
-  set par(leading: 0.4em, spacing: 0pt)
-  grid(columns: (1fr, auto), column-gutter: 12pt, row-gutter: 5pt,
-    [HexClaw 河蟹 AI · 本地云端均可部署 · 数据自主掌控 · 软件开源免费], [],
-    [#link("https://hexclaw.net/")[官网：hexclaw.net] · 公众号 ID：hexclaw · #link("https://github.com/hexagon-codes/hexclaw-desktop")[GitHub：github.com/hexagon-codes/hexclaw-desktop]],
-    [#current / #total])
-}
+#let hc-header() = hc-brand-header(hc-branding, hc-agent-name, hc-heading-font, logo: __HC_LOGO__)
+#let hc-footer() = hc-brand-footer(hc-branding, hc-heading-font)
 #set page(paper: "a4", margin: (left: __HC_MARGIN_LEFT__mm, right: __HC_MARGIN_RIGHT__mm, top: __HC_MARGIN_TOP__mm, bottom: __HC_MARGIN_BOTTOM__mm), header: if hc-header-footer { hc-header() } else { none }, footer: if hc-header-footer { hc-footer() } else { none })
 // 正文图片完整等比适配；高度上限预留标题与段距，不裁边、不拉伸、不改变原图坐标。
 #let hc-image-max-height = __HC_IMAGE_MAX_HEIGHT__mm
