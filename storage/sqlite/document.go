@@ -111,7 +111,7 @@ func (r *DocumentRepository) Save(ctx context.Context, a documentflow.Artifact) 
 	if err := json.Unmarshal([]byte(savedData), &saved); err != nil {
 		return saved, err
 	}
-	if saved.Origin != a.Origin || saved.InputDigest != a.InputDigest || saved.Markdown != a.Markdown || saved.Name != a.Name || saved.Format != a.Format || saved.StyleDigest != a.StyleDigest {
+	if saved.Origin != a.Origin || saved.InputDigest != a.InputDigest || saved.Markdown != a.Markdown || saved.Name != a.Name || saved.Format != a.Format || saved.StyleDigest != a.StyleDigest || saved.ParentID != a.ParentID || saved.RevisionKey != a.RevisionKey || saved.ResolvedMarkdown != "" && saved.ResolvedMarkdown != a.ResolvedMarkdown {
 		return saved, documentflow.ErrConflict
 	}
 	saved.Payload = raw

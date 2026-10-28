@@ -23,6 +23,9 @@ type RenderAdapter struct{ svc renderService }
 // NewRenderAdapter 创建 adapter。svc 可为 nil（render 服务未启用 → 调用方降级 markdown）。
 func NewRenderAdapter(svc renderService) *RenderAdapter { return &RenderAdapter{svc: svc} }
 
+// PDFStyleDigest 供持久文件请求核对接纳时的默认样式版本。
+func (*RenderAdapter) PDFStyleDigest() string { return render.StandardPDFStyleDigest() }
+
 var _ usecase.Renderer = (*RenderAdapter)(nil)
 
 // RenderTeachingReport 使用同一宿主服务编译冻结资源，不进入通用Markdown重排。

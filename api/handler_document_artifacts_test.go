@@ -75,4 +75,27 @@ func TestDocumentExportToolArtifactDownloadsThroughAuthenticatedRoute(t *testing
 	if _, err := os.Stat(renderer.path); !os.IsNotExist(err) {
 		t.Fatal("download must not depend on a render temp file")
 	}
+	resume := httptest.NewRequest(http.MethodPost, "/api/v1/document-artifacts/"+refs[0].ID+"/resume", nil)
+	resume.Header.Set("Authorization", "Bearer "+srv.cfg.Server.APIToken)
+	resumed := httptest.NewRecorder()
+	srv.routes().ServeHTTP(resumed, resume)
+	if resumed.Code != http.StatusOK {
+		t.Fatalf("resume route status=%d", resumed.Code)
+	}
+	reexport := httptest.NewRequest(http.MethodPost, "/api/v1/document-artifacts/"+refs[0].ID+"/reexport", nil)
+	reexport.Header.Set("Authorization", "Bearer "+srv.cfg.Server.APIToken)
+	reexport.Header.Set("Idempotency-Key", "document-api-revision")
+	reexported := httptest.NewRecorder()
+	srv.routes().ServeHTTP(reexported, reexport)
+	var revision documentflow.Reference
+	if reexported.Code != http.StatusOK || json.Unmarshal(reexported.Body.Bytes(), &revision) != nil || revision.ID == refs[0].ID {
+		t.Fatalf("reexport route status=%d body=%s", reexported.Code, reexported.Body.String())
+	}
+	read := httptest.NewRequest(http.MethodGet, revision.URL, nil)
+	read.Header.Set("Authorization", "Bearer "+srv.cfg.Server.APIToken)
+	download := httptest.NewRecorder()
+	srv.routes().ServeHTTP(download, read)
+	if download.Code != http.StatusOK || download.Body.String() != body {
+		t.Fatal("new revision does not contain the original content")
+	}
 }

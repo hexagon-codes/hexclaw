@@ -20,9 +20,10 @@ import (
 
 // 文本渲染替身只隔离外部编译器，来源、事务、文件字节与重开均使用真实依赖。
 type documentTextRenderer struct {
-	dir   string
-	calls int
-	fail  bool
+	dir    string
+	calls  int
+	fail   bool
+	suffix string
 }
 
 func (r *documentTextRenderer) Render(_ context.Context, content string, format render.Format, _ render.RenderOptions) (*render.RenderResult, error) {
@@ -31,10 +32,46 @@ func (r *documentTextRenderer) Render(_ context.Context, content string, format 
 		return nil, fmt.Errorf("renderer unavailable")
 	}
 	p := filepath.Join(r.dir, "rendered.txt")
-	if err := os.WriteFile(p, []byte(content), 0600); err != nil {
+	output := content + r.suffix
+	if err := os.WriteFile(p, []byte(output), 0600); err != nil {
 		return nil, err
 	}
-	return &render.RenderResult{Path: p, Size: int64(len(content)), ContentType: format.MIME()}, nil
+	return &render.RenderResult{Path: p, Size: int64(len(output)), ContentType: format.MIME()}, nil
+}
+
+func TestDocumentFlowReexportKeepsOriginalContentAssetsAndRevisionIdentity(t *testing.T) {
+	store := newTestStore(t)
+	ctx, _ := documentSourceFixture(t, store)
+	renderer := &documentTextRenderer{dir: t.TempDir(), suffix: "\noriginal-render"}
+	flow := documentflow.NewService(renderer, store.DocumentRepository())
+	const body = "# Meeting diagram\n\n![diagram](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+P+/HgAFgAJ/wM5ZewAAAABJRU5ErkJggg==)"
+	original, err := flow.ExportDocument(ctx, body, render.FormatTXT, render.RenderOptions{}, "diagram.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	renderer.suffix = "\nnew-render"
+	revision, err := flow.Reexport(ctx, "document-owner", original.ID, "new-style-revision")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if revision.ID == original.ID || revision.ParentID != original.ID || revision.Origin != original.Origin || revision.Markdown != original.Markdown || revision.ResolvedMarkdown != original.ResolvedMarkdown || revision.ByteDigest == original.ByteDigest {
+		t.Fatal("reexport did not preserve original content and assets as a new render")
+	}
+	renderer.suffix = "\nlater-render"
+	replay, err := flow.Reexport(ctx, "document-owner", original.ID, "new-style-revision")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replay.ID != revision.ID || replay.ByteDigest != revision.ByteDigest || renderer.calls != 2 {
+		t.Fatal("same revision key changed the frozen render")
+	}
+	unchanged, err := flow.Get(ctx, "document-owner", original.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unchanged.ByteDigest != original.ByteDigest || string(unchanged.Payload) != string(original.Payload) {
+		t.Fatal("reexport overwrote the original file")
+	}
 }
 
 func TestDocumentFlowFailedRenderResumesFrozenContentAfterReopen(t *testing.T) {

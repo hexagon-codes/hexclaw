@@ -9,10 +9,10 @@ package builtin
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
-	"encoding/json"
 	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/hexclaw/internal/documentflow"
 	"github.com/hexagon-codes/hexclaw/render"
@@ -24,7 +24,7 @@ type DocumentExporter interface {
 	Render(ctx context.Context, content string, format render.Format, opts render.RenderOptions) (*render.RenderResult, error)
 }
 
-// ExportDocumentSkill 把 Markdown 渲染成可下载文档并返回文件路径。
+// ExportDocumentSkill 把 Markdown 渲染成可下载文档并返回原会话的持久产物引用。
 type ExportDocumentSkill struct {
 	render    DocumentExporter
 	publisher DocumentArtifactPublisher

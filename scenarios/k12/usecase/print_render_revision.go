@@ -103,6 +103,9 @@ func (d Deps) printRenderRevisionRequest(ctx context.Context, original k12.Print
 	}
 	sum := sha256.Sum256([]byte(key))
 	req.SourceRef += ":render-revision:" + hex.EncodeToString(sum[:])
+	if req.TeachingReport == nil {
+		req.PDFStyleDigest = d.currentPDFStyleDigest()
+	}
 	if _, grade, ok := strings.Cut(original.SourceRef, ":grade:"); ok {
 		req.SourceRef += ":grade:" + grade
 	}

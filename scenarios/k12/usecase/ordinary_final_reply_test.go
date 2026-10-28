@@ -158,3 +158,29 @@ func TestOrdinaryPrivateFinalReplyKnownUploadCanResumeUnknownCannotSQLite(t *tes
 		})
 	}
 }
+
+type versionedFinalReplyRenderer struct {
+	*finalReplyPDFRenderer
+	style string
+}
+
+func (r *versionedFinalReplyRenderer) PDFStyleDigest() string { return r.style }
+
+func TestOrdinaryPrivateFinalReplyDoesNotSilentlyChangeFrozenStyleSQLite(t *testing.T) {
+	d, _, transport, renderer, req, targets := ordinaryFinalReplyFixture(t)
+	versioned := &versionedFinalReplyRenderer{finalReplyPDFRenderer: renderer, style: "style-a"}
+	d.Renderer = versioned
+	renderer.err = errors.New("temporary render failure")
+	if _, _, err := d.PrepareAndSendFinalReply(t.Context(), req, targets); err == nil {
+		t.Fatal("initial preparation failure hidden")
+	}
+	versioned.style = "style-b"
+	renderer.err = nil
+	if _, _, err := d.ResumeFinalReplyPreparation(t.Context(), req.AgentName, req.SourceRef); !errors.Is(err, ErrDocumentStyleRevisionConflict) || renderer.calls != 1 || len(transport.sends) != 0 {
+		t.Fatalf("resume silently adopted a new style: %v", err)
+	}
+	revision, _, err := d.ReexportFinalReply(t.Context(), req.AgentName, req.SourceRef, "explicit-new-style")
+	if err != nil || revision.Status != k12.DeliveryBatchDelivered || renderer.calls != 2 || len(transport.sends) != 2 {
+		t.Fatalf("explicit revision did not adopt current style: %+v %v", revision, err)
+	}
+}

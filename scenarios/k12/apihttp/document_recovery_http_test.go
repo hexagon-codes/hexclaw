@@ -118,7 +118,7 @@ func TestFinalReplyRecoveryHTTPUsesOriginalSourceAndOwner(t *testing.T) {
 	renderer.fail = false
 	for attempt := 0; attempt < 2; attempt++ {
 		rec, out = do(t, h, http.MethodPost, "/final-replies/saved-final/resume?agent=default", "")
-		if rec.Code != http.StatusOK || out["batch"].(map[string]any)["status"] != "delivered" || len(transport.envelopeSends) != 1 {
+		if rec.Code != http.StatusOK || out["batch"].(map[string]any)["status"] != "delivered" || len(transport.sends) != 2 {
 			t.Fatalf("resume repeated send or lost PDF: %d %s", rec.Code, rec.Body.String())
 		}
 	}
@@ -126,7 +126,7 @@ func TestFinalReplyRecoveryHTTPUsesOriginalSourceAndOwner(t *testing.T) {
 	reexport.Header.Set("Idempotency-Key", "explicit-api-reexport")
 	recorder := httptest.NewRecorder()
 	h.ServeHTTP(recorder, reexport)
-	if recorder.Code != http.StatusOK || len(transport.envelopeSends) != 2 {
+	if recorder.Code != http.StatusOK || len(transport.sends) != 4 {
 		t.Fatalf("explicit re-export did not deliver: %d %s", recorder.Code, recorder.Body.String())
 	}
 	owner = "unrelated-owner"

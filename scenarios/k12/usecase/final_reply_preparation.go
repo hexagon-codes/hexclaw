@@ -16,6 +16,15 @@ type finalReplyPreparation struct {
 	PDFPayload []byte                    `json:"pdf_payload,omitempty"`
 }
 
+var ErrDocumentStyleRevisionConflict = errors.New("document style revision changed; explicit re-export is required")
+
+func (d Deps) currentPDFStyleDigest() string {
+	if versioned, ok := d.Renderer.(interface{ PDFStyleDigest() string }); ok {
+		return versioned.PDFStyleDigest()
+	}
+	return ""
+}
+
 func decodeFinalReplyPreparation(event k12storage.OutboxEvent) (finalReplyPreparation, error) {
 	var frozen finalReplyPreparation
 	if event.EventType != k12storage.EventFinalReplyPreparation || event.PayloadVersion != 1 || json.Unmarshal([]byte(event.Payload), &frozen) != nil || frozen.Request.AgentName != event.AgentName || frozen.Request.SourceRef != event.AggregateID || frozen.Request.PrivateEvent == nil || event.EventID != k12storage.FinalReplyPreparationID(event.AgentName, event.AggregateID, frozen.Request.RenderRevision) {
@@ -30,6 +39,9 @@ func decodeFinalReplyPreparation(event k12storage.OutboxEvent) (finalReplyPrepar
 func (d Deps) preparePrivateFinalReply(ctx context.Context, req FinalReplyDeliveryRequest, targets []ResolvedDeliveryTarget) (k12.DeliveryBatch, bool, error) {
 	if d.Records == nil || d.Delivery == nil {
 		return k12.DeliveryBatch{}, false, ErrDeliveryUnavailable
+	}
+	if req.PDF == nil && req.PDFStyleDigest == "" {
+		req.PDFStyleDigest = d.currentPDFStyleDigest()
 	}
 	full, err := normalizeDeliveryMessage(req.Message)
 	if err != nil {
@@ -96,6 +108,7 @@ func (d Deps) ReexportFinalReply(ctx context.Context, agent, assistantMessageID,
 		return k12.DeliveryBatch{}, false, fmt.Errorf("typed report re-export requires its original report projection")
 	}
 	frozen.Request.RenderRevision = revisionKey
+	frozen.Request.PDFStyleDigest = ""
 	frozen.Request.ObjectID, err = k12.PrivateReplyRevisionObjectID(*frozen.Request.PrivateEvent, revisionKey)
 	if err != nil {
 		return k12.DeliveryBatch{}, false, err

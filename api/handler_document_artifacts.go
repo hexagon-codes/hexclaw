@@ -40,3 +40,21 @@ func (s *Server) handleResumeDocumentArtifact(w http.ResponseWriter, r *http.Req
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(documentflow.ReferenceFor(a))
 }
+
+func (s *Server) handleReexportDocumentArtifact(w http.ResponseWriter, r *http.Request) {
+	if s.documentFlow == nil {
+		http.NotFound(w, r)
+		return
+	}
+	key := r.Header.Get("Idempotency-Key")
+	if key == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Idempotency-Key is required"})
+		return
+	}
+	a, err := s.documentFlow.Reexport(r.Context(), httpPrincipalFromRequest(r).userID, r.PathValue("id"), key)
+	if err != nil {
+		writeJSON(w, http.StatusConflict, map[string]any{"artifact_id": a.ID, "state": a.State, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, documentflow.ReferenceFor(a))
+}

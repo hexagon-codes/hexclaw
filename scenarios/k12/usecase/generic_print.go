@@ -62,6 +62,7 @@ type PreparePrintableArtifactRequest struct {
 	TeachingReport   *TeachingReportPrintInput
 	RenderSpecDigest string
 	RenderSpecJSON   string
+	PDFStyleDigest   string
 }
 
 type PrintableArtifactView struct {
@@ -263,6 +264,9 @@ func (d Deps) PreparePrintableArtifact(ctx context.Context,
 	} else if !errors.Is(getErr, records.ErrNotFound) {
 		return PrintableArtifactView{}, false,
 			fmt.Errorf("usecase: 取打印 Artifact: %w", getErr)
+	}
+	if req.TeachingReport == nil && req.PDFStyleDigest != "" && req.PDFStyleDigest != d.currentPDFStyleDigest() {
+		return PrintableArtifactView{}, false, ErrDocumentStyleRevisionConflict
 	}
 	// 先读旧身份的冻结文件；只有尚无文件时才解析当前引擎与字体建立新版身份。
 	if req.TeachingReport != nil && req.RenderSpecDigest == "" {

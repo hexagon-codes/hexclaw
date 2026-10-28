@@ -30,6 +30,7 @@ type FinalReplyDeliveryRequest struct {
 	DingTalkSuffix                  string
 	WritingFeedback                 bool
 	RenderRevision                  string
+	PDFStyleDigest                  string
 	// 仅精确批改PDF路径可声明图已嵌入；规范源与其他渠道仍保留原图。
 	GradingImageInPDF bool
 }
@@ -134,6 +135,9 @@ func (d Deps) prepareAndSendFinalReply(ctx context.Context, req FinalReplyDelive
 		return d.resumeFinalReplyBatch(ctx, existing)
 	} else if !errors.Is(lookupErr, records.ErrNotFound) {
 		return k12.DeliveryBatch{}, false, lookupErr
+	}
+	if req.PDF == nil && req.PDFStyleDigest != "" && req.PDFStyleDigest != d.currentPDFStyleDigest() {
+		return k12.DeliveryBatch{}, false, ErrDocumentStyleRevisionConflict
 	}
 	full.Source, err = finalReplySource(req, full)
 	if err != nil {

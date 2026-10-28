@@ -38,21 +38,24 @@ type Origin struct {
 
 // Artifact 的文件字节和来源一起冻结，临时路径不构成下载或发送授权。
 type Artifact struct {
-	ID          string               `json:"artifact_id"`
-	Origin      Origin               `json:"origin"`
-	Name        string               `json:"name"`
-	Format      render.Format        `json:"format"`
-	MIME        string               `json:"mime"`
-	ByteDigest  string               `json:"byte_digest"`
-	Size        int64                `json:"size"`
-	InputDigest string               `json:"input_digest"`
-	CreatedAt   time.Time            `json:"created_at"`
-	State       string               `json:"state"`
-	Error       string               `json:"error,omitempty"`
-	Markdown    string               `json:"markdown"`
-	Options     render.RenderOptions `json:"options"`
-	StyleDigest string               `json:"style_digest,omitempty"`
-	Payload     []byte               `json:"-"`
+	ID               string               `json:"artifact_id"`
+	Origin           Origin               `json:"origin"`
+	Name             string               `json:"name"`
+	Format           render.Format        `json:"format"`
+	MIME             string               `json:"mime"`
+	ByteDigest       string               `json:"byte_digest"`
+	Size             int64                `json:"size"`
+	InputDigest      string               `json:"input_digest"`
+	CreatedAt        time.Time            `json:"created_at"`
+	State            string               `json:"state"`
+	Error            string               `json:"error,omitempty"`
+	Markdown         string               `json:"markdown"`
+	Options          render.RenderOptions `json:"options"`
+	StyleDigest      string               `json:"style_digest,omitempty"`
+	ParentID         string               `json:"parent_artifact_id,omitempty"`
+	RevisionKey      string               `json:"revision_key,omitempty"`
+	ResolvedMarkdown string               `json:"resolved_markdown,omitempty"`
+	Payload          []byte               `json:"-"`
 }
 
 type Repository interface {
@@ -121,7 +124,7 @@ func (s *Service) ExportDocument(ctx context.Context, content string, format ren
 		filename = "document"
 	}
 	_, name := render.SanitizeFilename(filename, format.Extension())
-	artifact := Artifact{ID: id, Origin: origin, Name: name, Format: format, MIME: format.MIME(), InputDigest: input, CreatedAt: time.Now().UTC(), State: "prepared", Markdown: content, Options: opts, StyleDigest: render.StandardPDFStyleDigest()}
+	artifact := Artifact{ID: id, Origin: origin, Name: name, Format: format, MIME: format.MIME(), InputDigest: input, CreatedAt: time.Now().UTC(), State: "prepared", Markdown: content, Options: opts, StyleDigest: styleDigestFor(format, opts)}
 	artifact, err = s.repo.Save(ctx, artifact)
 	if err != nil {
 		return artifact, err
@@ -148,10 +151,24 @@ func (s *Service) Resume(ctx context.Context, owner, id string) (Artifact, error
 }
 
 func (s *Service) renderPrepared(ctx context.Context, artifact Artifact) (Artifact, error) {
-	if artifact.Format == render.FormatPDF && artifact.StyleDigest != render.StandardPDFStyleDigest() {
+	if artifact.StyleDigest != styleDigestFor(artifact.Format, artifact.Options) {
 		return artifact, fmt.Errorf("document style revision changed; export a new artifact revision")
 	}
-	result, err := s.renderer.Render(ctx, artifact.Markdown, artifact.Format, artifact.Options)
+	if artifact.ResolvedMarkdown == "" {
+		resolved, err := render.PreprocessMarkdown(ctx, artifact.Markdown, render.PreprocessConfig{})
+		if err != nil {
+			return s.saveRenderFailure(ctx, artifact, err)
+		}
+		artifact.ResolvedMarkdown = resolved
+		artifact, err = s.repo.Save(ctx, artifact)
+		if err != nil {
+			return artifact, err
+		}
+		if artifact.State == "ready" {
+			return artifact, nil
+		}
+	}
+	result, err := s.renderer.Render(ctx, artifact.ResolvedMarkdown, artifact.Format, artifact.Options)
 	if err != nil {
 		return s.saveRenderFailure(ctx, artifact, err)
 	}
@@ -174,6 +191,57 @@ func (s *Service) renderPrepared(ctx context.Context, artifact Artifact) (Artifa
 	artifact.Payload = data
 	artifact.State, artifact.Error = "ready", ""
 	return s.repo.Save(ctx, artifact)
+}
+
+// Reexport 使用原文和已冻结资源创建独立排版修订，不改写旧文件或原工具身份。
+func (s *Service) Reexport(ctx context.Context, owner, id, key string) (Artifact, error) {
+	if s == nil || s.repo == nil || s.renderer == nil {
+		return Artifact{}, fmt.Errorf("document persistence or renderer is unavailable")
+	}
+	if strings.TrimSpace(key) == "" {
+		return Artifact{}, fmt.Errorf("an idempotency key is required")
+	}
+	original, err := s.repo.Get(ctx, owner, id)
+	if err != nil {
+		return original, err
+	}
+	revisionID := "document-" + digest([]string{owner, id, key})
+	previous, err := s.repo.Get(ctx, owner, revisionID)
+	if err == nil {
+		if previous.ParentID != id || previous.RevisionKey != key {
+			return previous, ErrConflict
+		}
+		if previous.State == "ready" {
+			return s.Get(ctx, owner, revisionID)
+		}
+		return s.renderPrepared(ctx, previous)
+	}
+	if !errors.Is(err, ErrNotFound) {
+		return Artifact{}, err
+	}
+	revision := original
+	revision.ID, revision.ParentID, revision.RevisionKey = revisionID, id, key
+	revision.State, revision.Error = "prepared", ""
+	revision.Payload = nil
+	revision.ByteDigest = ""
+	revision.Size = 0
+	revision.CreatedAt = time.Now().UTC()
+	revision.StyleDigest = styleDigestFor(revision.Format, revision.Options)
+	revision, err = s.repo.Save(ctx, revision)
+	if err != nil {
+		return revision, err
+	}
+	if revision.State == "ready" {
+		return revision, nil
+	}
+	return s.renderPrepared(ctx, revision)
+}
+
+func styleDigestFor(format render.Format, opts render.RenderOptions) string {
+	if format != render.FormatPDF || opts.PDFLayout == "custom" {
+		return ""
+	}
+	return render.StandardPDFStyleDigest()
 }
 
 func (s *Service) saveRenderFailure(ctx context.Context, artifact Artifact, cause error) (Artifact, error) {

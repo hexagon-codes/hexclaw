@@ -2,6 +2,7 @@ package apihttp
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -65,6 +66,9 @@ func (h *handler) resumeFinalReplyPreparation(w http.ResponseWriter, r *http.Req
 	status := http.StatusOK
 	if err != nil {
 		status = http.StatusBadGateway
+		if errors.Is(err, usecase.ErrDocumentStyleRevisionConflict) {
+			status = http.StatusConflict
+		}
 	}
 	out := map[string]any{"batch": batch, "model_invocations_added": 0}
 	if err != nil {
@@ -87,6 +91,9 @@ func (h *handler) reexportFinalReply(w http.ResponseWriter, r *http.Request) {
 	status := http.StatusOK
 	if err != nil {
 		status = http.StatusBadGateway
+		if errors.Is(err, usecase.ErrDocumentStyleRevisionConflict) {
+			status = http.StatusConflict
+		}
 	}
 	out := map[string]any{"batch": batch, "model_invocations_added": 0}
 	if err != nil {
