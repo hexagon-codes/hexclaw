@@ -158,34 +158,36 @@ func (d Deps) freezePracticePrintArtifact(ctx context.Context, job k12.PracticeP
 		artifactID = job.AnswerArtifactID
 		sourceKind = k12.PrintSourcePracticeAnswer
 	}
-	markdown := k12.RenderPaperMarkdown(fields, kind, k12.PaperMeta{
-		Term: fields.GradeTerm, Date: time.Unix(job.PreparedAt, 0), Preview: false,
-	})
-	artifact := buildPrintArtifact(PreparePrintableArtifactRequest{
-		AgentName:         job.AgentName,
-		SourceKind:        sourceKind,
-		SourceRef:         "practice-print-job:" + job.PrintJobID + ":" + kind,
-		Title:             fields.Title,
-		CanonicalMarkdown: markdown,
-	}, job.PreparedAt)
-	artifact.ArtifactID = artifactID
-	if strings.TrimSpace(artifact.ArtifactID) == "" {
+	if strings.TrimSpace(artifactID) == "" {
 		return k12.PrintArtifact{}, k12.PrintArtifactRender{}, fmt.Errorf("usecase: practice print artifact id is empty")
 	}
-
-	if frozen, getErr := d.Records.GetPrintArtifact(ctx, job.AgentName, artifact.ArtifactID); getErr == nil {
-		if !samePrintArtifact(frozen, artifact) {
+	sourceRef := "practice-print-job:" + job.PrintJobID + ":" + kind
+	var artifact k12.PrintArtifact
+	if frozen, getErr := d.Records.GetPrintArtifact(ctx, job.AgentName, artifactID); getErr == nil {
+		if frozen.AgentName != job.AgentName || frozen.SourceKind != sourceKind || frozen.SourceRef != sourceRef ||
+			frozen.Title != strings.TrimSpace(fields.Title) {
 			return k12.PrintArtifact{}, k12.PrintArtifactRender{}, fmt.Errorf("usecase: practice print artifact id is bound to different content")
 		}
-		frozenRender, renderErr := d.Records.GetPrintArtifactRender(ctx, job.AgentName, artifact.ArtifactID)
+		frozenRender, renderErr := d.Records.GetPrintArtifactRender(ctx, job.AgentName, artifactID)
 		if renderErr == nil {
 			return frozen, frozenRender, nil
 		}
 		if !errors.Is(renderErr, records.ErrNotFound) {
 			return k12.PrintArtifact{}, k12.PrintArtifactRender{}, fmt.Errorf("usecase: read frozen practice print PDF: %w", renderErr)
 		}
+		// 历史原件使用原规范正文补齐文件，不受当前打印投影变化影响。
+		artifact = frozen
 	} else if !errors.Is(getErr, records.ErrNotFound) {
 		return k12.PrintArtifact{}, k12.PrintArtifactRender{}, fmt.Errorf("usecase: read practice print artifact: %w", getErr)
+	} else {
+		markdown := k12.RenderPaperMarkdown(fields, kind, k12.PaperMeta{
+			Term: fields.GradeTerm, Date: time.Unix(job.PreparedAt, 0), Preview: false,
+		})
+		artifact = buildPrintArtifact(PreparePrintableArtifactRequest{
+			AgentName: job.AgentName, SourceKind: sourceKind, SourceRef: sourceRef,
+			Title: fields.Title, CanonicalMarkdown: markdown,
+		}, job.PreparedAt)
+		artifact.ArtifactID = artifactID
 	}
 
 	render, err := d.renderPrintableArtifact(ctx, artifact, "")

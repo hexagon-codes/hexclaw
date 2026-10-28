@@ -3,6 +3,8 @@ package usecase_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -11,6 +13,44 @@ import (
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/usecase"
 )
+
+func TestPracticePrintPaperKeepsFrozenOriginalAcrossProjectionChanges(t *testing.T) {
+	d := newDataDeps(t)
+	renderer := &v45PDFRenderer{data: []byte("%PDF-1.7\nnew-projection")}
+	d.Renderer = renderer
+	ctx := context.Background()
+	id := seedPaperBasket(t, d, ctx, "xiaoming")
+	prepared, _, err := d.PreparePracticePrint(ctx, "xiaoming", id, "legacy-frozen-answer", k12.PaperKindAnswer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields k12.PracticeSetFields
+	if err := json.Unmarshal([]byte(prepared.Job.PreparedFieldsJSON), &fields); err != nil {
+		t.Fatal(err)
+	}
+	canonical := "# 历史答案\n\n完整答案与原始教材审计引用保持原样。\n"
+	payload := []byte("%PDF-1.7\noriginal-frozen-answer")
+	artifact := k12.PrintArtifact{
+		ArtifactID: prepared.Job.AnswerArtifactID, AgentName: "xiaoming", SourceKind: k12.PrintSourcePracticeAnswer,
+		SourceRef: "practice-print-job:" + prepared.Job.PrintJobID + ":answer", Title: fields.Title,
+		CanonicalMarkdown: canonical, SourceDigest: fmt.Sprintf("%x", sha256.Sum256([]byte(canonical))), CreatedAt: prepared.Job.PreparedAt,
+	}
+	render := k12.PrintArtifactRender{
+		ArtifactID: artifact.ArtifactID, Format: "pdf", ContentType: "application/pdf", RenderContractVersion: "legacy-practice-paper-v1",
+		Payload: payload, ByteDigest: fmt.Sprintf("%x", sha256.Sum256(payload)), ByteSize: int64(len(payload)), CreatedAt: artifact.CreatedAt,
+	}
+	if _, _, _, err := d.Records.FreezePrintArtifact(ctx, artifact, render); err != nil {
+		t.Fatal(err)
+	}
+	paper, err := d.RenderPracticePrintJobPaper(ctx, "xiaoming", prepared.Job.PrintJobID, k12.PaperKindAnswer)
+	if err != nil || paper.Markdown != canonical {
+		t.Fatalf("new projection replaced the historical canonical paper: %+v %v", paper, err)
+	}
+	stored, err := d.Records.GetPrintArtifactRender(ctx, "xiaoming", artifact.ArtifactID)
+	if err != nil || !bytes.Equal(stored.Payload, payload) || stored.ByteDigest != render.ByteDigest || stored.RenderContractVersion != render.RenderContractVersion || renderer.callCount() != 0 {
+		t.Fatalf("historical PDF was changed or rendered again: %+v %v calls=%d", stored, err, renderer.callCount())
+	}
+}
 
 // DD-004/DD-023：Desktop 打印是 prepare → 原生对话框 → receipt commit 两阶段协议。
 // prepare 必须预占稳定 paper_no 和冻结同源卷面，但绝不能提前固化/清空待打印篮。

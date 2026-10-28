@@ -1,12 +1,45 @@
 package k12_test
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 )
+
+func TestRenderAnswerPaperProjectsMachineEvidenceWithoutChangingSource(t *testing.T) {
+	question := "卡片2/9、9/2、4、1/4、1、0能怎样配对？请说明1和0的情况。"
+	answer := "2/9和9/2、4和1/4分别配对；1再添一张1可配对，因为1×1=1；0与任何数相乘都得0，不能配对。"
+	evidence := "textbook:binding:manifest:doc_source:1:32:" + strings.Repeat("a", 64) +
+		",logical_page:27,source_sha256:" + strings.Repeat("b", 64) + ",doc_source-chunk-137,numeric_exec"
+	fields := k12.PracticeSetFields{Title: "本周该练", PaperNo: "P-2644-01", Items: []k12.PracticeItem{{
+		ItemID: "q1", Subject: "数学", QuestionMarkdown: question, ExpectedAnswerMarkdown: answer,
+		VerificationStatus: k12.PracticeItemVerified, VerificationEvidence: evidence,
+	}}}
+	before := fields.Items[0]
+	md := k12.RenderPaperMarkdown(fields, k12.PaperKindAnswer, k12.PaperMeta{Date: time.Now()})
+	for _, content := range []string{question, answer, "独立数值验算 · 教材第27页"} {
+		if !strings.Contains(md, content) {
+			t.Fatalf("answer paper lost required content %q: %s", content, md)
+		}
+	}
+	for _, machine := range []string{"textbook:", "source_sha256:", "doc_source-chunk-"} {
+		if strings.Contains(md, machine) {
+			t.Fatalf("answer paper exposed machine evidence %q", machine)
+		}
+	}
+	if !reflect.DeepEqual(fields.Items[0], before) {
+		t.Fatal("paper projection changed the original question, answer or audit evidence")
+	}
+	human := "独立验算；保留1/3×3=1及完整说明，numeric_exec仅是原文中提到的方法名。"
+	fields.Items[0].VerificationEvidence = human
+	md = k12.RenderPaperMarkdown(fields, k12.PaperKindAnswer, k12.PaperMeta{Date: time.Now()})
+	if !strings.Contains(md, human) {
+		t.Fatalf("human-readable verification evidence changed: %s", md)
+	}
+}
 
 // 2026-07-18 呈现物真实渲染契约（架构设计 §4.13 卷面版面）：
 //   ① 题目卷只题面 + 留白，不含答案；答案卷题面 + 答案，两卷绝不混排；

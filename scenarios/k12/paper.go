@@ -3,6 +3,7 @@ package k12
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -82,8 +83,8 @@ func RenderPaperMarkdown(f PracticeSetFields, kind string, meta PaperMeta) strin
 		b.WriteString(fmt.Sprintf("%d. %s\n\n", it.PaperSeq, it.QuestionMarkdown))
 		if kind == PaperKindAnswer {
 			line := "**答案：** " + strings.TrimSpace(it.ExpectedAnswerMarkdown)
-			if it.VerificationEvidence != "" {
-				line += " · " + it.VerificationEvidence
+			if evidence := paperVerificationEvidence(it); evidence != "" {
+				line += " · " + evidence
 			}
 			b.WriteString(line + "\n\n")
 		} else {
@@ -96,6 +97,52 @@ func RenderPaperMarkdown(f PracticeSetFields, kind string, meta PaperMeta) strin
 		}
 	}
 	return strings.TrimRight(b.String(), "\n") + "\n"
+}
+
+// paperVerificationEvidence 仅投影已有核验事实，机器来源引用仍保留在原题记录中。
+func paperVerificationEvidence(item PracticeItem) string {
+	original := strings.TrimSpace(item.VerificationEvidence)
+	if item.VerificationStatus != PracticeItemVerified {
+		return original
+	}
+	var readable []string
+	var pages []int
+	machine, numeric := false, false
+	for _, part := range strings.Split(original, ",") {
+		part = strings.TrimSpace(part)
+		switch {
+		case part == "numeric_exec":
+			numeric = true
+		case strings.HasPrefix(part, "logical_page:"):
+			page, err := strconv.Atoi(strings.TrimPrefix(part, "logical_page:"))
+			if err != nil || page < 1 {
+				readable = append(readable, part)
+				continue
+			}
+			machine = true
+			pages = append(pages, page)
+		case strings.HasPrefix(part, "textbook:"), strings.HasPrefix(part, "source_sha256:"),
+			strings.HasPrefix(part, "doc_") && strings.Contains(part, "-chunk-"):
+			machine = true
+		default:
+			if part != "" {
+				readable = append(readable, part)
+			}
+		}
+	}
+	if !machine && !numeric {
+		return original
+	}
+	if numeric {
+		readable = append([]string{"独立数值验算"}, readable...)
+	}
+	sort.Ints(pages)
+	for i, page := range pages {
+		if i == 0 || page != pages[i-1] {
+			readable = append(readable, fmt.Sprintf("教材第%d页", page))
+		}
+	}
+	return strings.Join(readable, " · ")
 }
 
 // publishableSorted 取入卷（verified）题并按 paper_seq 升序；题号缺失（draft 预览）时
