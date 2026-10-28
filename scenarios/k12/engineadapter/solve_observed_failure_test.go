@@ -12,9 +12,10 @@ import (
 )
 
 type observedFailurePhysicalCall struct {
-	payload  string
-	calls    int
-	requests []string
+	payload   string
+	calls     int
+	requests  []string
+	ledgerErr error
 }
 
 func (p *observedFailurePhysicalCall) ExecuteGradingPhysicalCall(ctx context.Context, spec usecase.GradingPhysicalCallSpec, send func(context.Context) (string, error)) (usecase.GradingPhysicalCallResult, error) {
@@ -22,7 +23,19 @@ func (p *observedFailurePhysicalCall) ExecuteGradingPhysicalCall(ctx context.Con
 	p.requests = append(p.requests, spec.RequestDigest)
 	payload, err := send(ctx)
 	p.payload = payload
-	return usecase.GradingPhysicalCallResult{Payload: payload, InvocationID: "observed-failure"}, err
+	return usecase.GradingPhysicalCallResult{Payload: payload, InvocationID: "observed-failure"}, errors.Join(err, p.ledgerErr)
+}
+
+func TestSolveAdapterReconciliationStopsIndependentCandidate(t *testing.T) {
+	physical := &observedFailurePhysicalCall{ledgerErr: usecase.ErrModelInvocationRequiresReconciliation}
+	ctx := usecase.WithGradingPhysicalCallExecutor(t.Context(), physical)
+	solver := engine.NewSolveSkill(func(context.Context, engine.SubAgentSpec) (engine.SubAgentResult, error) {
+		return engine.SubAgentResult{Output: "Observed response with unsettled local ledger."}, errors.Join(egress.ErrProviderResponseProcessed, errors.New("local persistence failed"))
+	}, engine.NewSubAgentRegistry(""))
+	_, err := NewSolveAdapter(solver).Solve(ctx, "根据图中条件解方程并说明依据。", "", "")
+	if !errors.Is(err, usecase.ErrModelInvocationRequiresReconciliation) || physical.calls != 1 {
+		t.Fatalf("unsettled original physical result started another candidate: calls=%d err=%v", physical.calls, err)
+	}
 }
 
 func TestSolveAdapterPreservesObservedResponseOnLocalFailure(t *testing.T) {

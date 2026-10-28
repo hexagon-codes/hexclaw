@@ -133,7 +133,7 @@ func (e *textSolvePhysicalExecutor) ExecuteGradingPhysicalCall(ctx context.Conte
 	defer cancel()
 	inv, saveErr := e.records.FinishTextSolveInvocation(commitCtx, e.run.OwnerID, e.run.AgentName, inv.InvocationID, status, payload, failureClass, failureCode)
 	if saveErr != nil {
-		return GradingPhysicalCallResult{}, errors.Join(callErr, saveErr)
+		return GradingPhysicalCallResult{}, gradingPhysicalNoRetryError{cause: errors.Join(ErrModelInvocationRequiresReconciliation, callErr, saveErr)}
 	}
 	if callErr != nil {
 		if status == k12.ModelInvocationOutcomeUnknown {

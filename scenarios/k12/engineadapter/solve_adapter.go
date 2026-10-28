@@ -32,6 +32,13 @@ type SolveExecutor interface {
 	Execute(ctx context.Context, args map[string]any) (*skill.Result, error)
 }
 
+type unreconciledSolveCallError struct{ cause error }
+
+func (e unreconciledSolveCallError) Error() string              { return e.cause.Error() }
+func (e unreconciledSolveCallError) Unwrap() error              { return e.cause }
+func (unreconciledSolveCallError) SubAgentRetryable() bool      { return false }
+func (unreconciledSolveCallError) SolveExecutionMustStop() bool { return true }
+
 // VerifiedGradeExecutor 是 engine.SolveSkill 的内部快口：正确解已在上一步验证时，只派 grader。
 // 不放进 LLM tool schema，外部模型不能伪造“已验证”输入。
 type VerifiedGradeExecutor interface {
@@ -196,6 +203,10 @@ func (a *SolveAdapter) withGradingPhysicalCallInterceptor(ctx context.Context) c
 				},
 			)
 			if err != nil {
+				// 多个错误合并时仍以整个物理结果的待核对状态裁决，不能只看首个重试标记。
+				if errors.Is(err, usecase.ErrModelInvocationRequiresReconciliation) || errors.Is(err, usecase.ErrGradingPhysicalCallOutcomeUnknown) {
+					err = unreconciledSolveCallError{cause: err}
+				}
 				var observed engine.SubAgentResult
 				if physical.Payload != "" {
 					if decodeErr := json.Unmarshal([]byte(physical.Payload), &observed); decodeErr != nil {

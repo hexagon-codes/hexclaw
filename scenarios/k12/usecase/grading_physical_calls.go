@@ -1352,7 +1352,7 @@ func (e *durableGradingPhysicalCallExecutor) ExecuteGradingPhysicalCall(
 			"local", "result_encode_failed",
 		)
 		return zero, errors.Join(
-			gradingPhysicalNoRetryError{cause: errors.New("physical result is not valid JSON")},
+			gradingPhysicalNoRetryError{cause: errors.Join(ErrModelInvocationRequiresReconciliation, errors.New("physical result is not valid JSON"))},
 			ledgerErr,
 		)
 	}
@@ -1377,7 +1377,7 @@ func (e *durableGradingPhysicalCallExecutor) ExecuteGradingPhysicalCall(
 				commitCtx, e.job.Record.AgentName, invocation.InvocationID,
 				"local", "grounding_envelope_encode_failed",
 			)
-			return zero, errors.Join(gradingPhysicalNoRetryError{cause: err}, ledgerErr)
+			return zero, errors.Join(gradingPhysicalNoRetryError{cause: errors.Join(ErrModelInvocationRequiresReconciliation, err)}, ledgerErr)
 		}
 	}
 	commitCtx, cancelCommit = gradingDurableCommitContext(ctx)
