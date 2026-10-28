@@ -1,5 +1,9 @@
 # K12 records, textbooks and delivery API
 
+New text-solve, practice-generation, and accumulation-metadata tasks automatically prepare missing or stale text-capability receipts for the exact selected model; no manual probe is required. Preparation failures retain their original errors instead of admitting a permanently empty model snapshot. Frozen tasks retain their original route and receipt, and current failed probes or unknown outcomes are not automatically resent. First-use preparation calls the actual Provider; declarations or model self-reports do not replace a successful receipt.
+
+When text grading has a genuine settlement for the same Agent, a persisted assessment reference, and strong verification evidence, new mistakes use the existing `entry_source: verified` rather than claiming a photo source. Image grading and legacy direct calls retain `photo`; manual entry retains `manual`. Existing records are not rewritten by this projection rule.
+
 When a verified solution has an explicit answer section, a parent guide's `answer` preserves all requested quantities, units and negative conditions. The use case restores incomplete explanatory candidates from that source without another model call. Legacy solutions without an explicit answer section retain their existing validation; original student answers and assessments remain unchanged.
 
 New dedicated teaching and work-feedback calls honor current Skill enablement. Explicitly disabled or uninstalled methods do not fall back to an embedded Skill of the same name; required application facts and solving/output contracts remain. Existing frozen results retain their original identity and are not regenerated when the catalog or settings change.

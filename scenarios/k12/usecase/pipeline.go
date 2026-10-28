@@ -572,6 +572,14 @@ func (d Deps) projectGradeResult(ctx context.Context, req GradeRequest, res Grad
 	}
 
 	// 判错（disagree）→ 无感入库错题（幂等去重）+ 首次复习到期 + 学情薄弱信号。
+	entrySource := k12.MistakeEntryPhoto
+	// 已验证文字结算及其真实评分回执属于验算来源，图片与旧直接路径保留原来源。
+	if res.Finalization != nil && res.Finalization.AgentName == req.AgentName &&
+		res.Finalization.SourceKind == k12.ProblemAssetSourceTextSolve &&
+		res.GradeReportRef != nil && res.GradeReportRef.InvocationID != "" && res.GradeReportRef.ResultDigest != "" &&
+		res.Evidence.StrongTrust() {
+		entrySource = k12.MistakeEntryVerified
+	}
 	rec, err := k12.NewMistakeRecord(req.AgentName, req.SourceSession, k12.MistakeFields{
 		GradeTerm:             d.creationGradeTerm(ctx, req.AgentName, req.Grade),
 		Subject:               req.Subject,
@@ -581,7 +589,7 @@ func (d Deps) projectGradeResult(ctx context.Context, req GradeRequest, res Grad
 		WrongProcess:          res.Outcome.WrongStep,
 		ObservedStudentAnswer: clearObservedStudentAnswer(req),
 		CanonicalAnswer:       res.Solution, // §3.8 治本①：solve 链已验算解法随判错入库，供每周自动装篮出答案卷
-		EntrySource:           k12.MistakeEntryPhoto,
+		EntrySource:           entrySource,
 	})
 	if err != nil {
 		return res, fmt.Errorf("usecase: 构造错题记录: %w", err)

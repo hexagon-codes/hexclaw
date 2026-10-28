@@ -1877,6 +1877,12 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 	// K12 的能力回执由 SQLite 控制面持久化；所有冻结任务在真实 Provider 边界复核它，
 	// 不把静态声明或旧任务快照当作可发送证据。
 	k12ModelCapabilityReceipts := storage.ModelCapabilityProbeReceiptStore(store)
+	k12AutoTextProbe := func(probeCtx context.Context, providerID, modelID, kind string) error {
+		if kind != config.LLMModelCapabilityText {
+			return fmt.Errorf("K12 text preparation received an invalid capability kind")
+		}
+		return srv.ProbeSavedModelTextCapability(probeCtx, providerID, modelID, time.Duration(config.DefaultK12GradingBudget().PhysicalCallCapMillis)*time.Millisecond)
+	}
 
 	// OrchestrateSkill + SpawnSkill 共享 executor: 通过 engine.Process 执行子任务。
 	// spec 携带 role/source/spawn_depth/工具继承/run_id/session，由 ApplySpecToMessage 落到 metadata。
@@ -2157,6 +2163,7 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 					Provider: agentConfig.Provider,
 					Model:    agentConfig.Model,
 				},
+				k12AutoTextProbe,
 			)
 			if err != nil {
 				return "", err
@@ -2550,7 +2557,7 @@ Set source only when the material explicitly names a work, title, or another rel
 						requested.Provider, requested.Model = configured.Provider, configured.Model
 					}
 				}
-				resolved, err := resolveK12PracticeModelSnapshotWithCapabilityReceipt(requestCtx, router, k12ModelCapabilityReceipts, requested)
+				resolved, err := resolveK12PracticeModelSnapshotWithCapabilityReceipt(requestCtx, router, k12ModelCapabilityReceipts, requested, k12AutoTextProbe)
 				if err == nil && resolved.MathExecutionContract == "" {
 					resolved.MathExecutionContract = k12.MathExecutionContractProgramFirst
 				}
@@ -2615,6 +2622,7 @@ Set source only when the material explicitly names a work, title, or another rel
 			) (k12.GradingModelSnapshot, error) {
 				resolved, err := resolveK12PracticeModelSnapshotWithCapabilityReceipt(
 					requestCtx, router, k12ModelCapabilityReceipts, requested,
+					k12AutoTextProbe,
 				)
 				if err == nil && !requested.HasFrozenCapabilityProbeEvidence() && resolved.MathExecutionContract == "" {
 					resolved.MathExecutionContract = k12.MathExecutionContractProgramFirst

@@ -571,6 +571,11 @@ func (s *Server) ProbeSavedModelVisionCapability(ctx context.Context, providerIn
 	return s.probeSavedModelCapability(ctx, providerInstanceID, modelID, modelCapabilityProbeKindVision, timeout)
 }
 
+// ProbeSavedModelTextCapability 让新业务任务按其单次预算准备真实文本能力回执。
+func (s *Server) ProbeSavedModelTextCapability(ctx context.Context, providerInstanceID, modelID string, timeout time.Duration) error {
+	return s.probeSavedModelCapability(ctx, providerInstanceID, modelID, modelCapabilityProbeKindText, timeout)
+}
+
 func (s *Server) probeSavedModelCapability(ctx context.Context, providerInstanceID, modelID, kind string, timeout time.Duration) error {
 	kinds, err := normalizeModelCapabilityProbeKinds([]string{kind})
 	if err != nil {
@@ -604,7 +609,7 @@ func (s *Server) executeAndPersistModelCapabilityProbe(
 	}
 	probeStartedAt := nextProviderProbeStartedAt()
 	timeout := modelCapabilityProbeTimeout
-	if kind == modelCapabilityProbeKindVision && len(timeouts) > 0 && timeouts[0] > 0 {
+	if (kind == modelCapabilityProbeKindVision || kind == modelCapabilityProbeKindText) && len(timeouts) > 0 && timeouts[0] > 0 {
 		timeout = timeouts[0]
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, timeout)

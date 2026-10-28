@@ -254,12 +254,10 @@ func (d Deps) solveTextProblem(ctx context.Context, origin k12.TextSolveOrigin, 
 		route, _ := k12.GradingModelSnapshotFromContext(ctx)
 		if d.TextSolveRoute != nil {
 			resolved, routeErr := d.TextSolveRoute(ctx, req.AgentName)
-			if routeErr == nil {
-				route = resolved
-			} else {
-				// 本地计算和已有答案采用不依赖当前模型，缺路由只在真实Provider分支阻断。
-				route = k12.GradingModelSnapshot{}
+			if routeErr != nil {
+				return SolveHomeworkResult{}, fmt.Errorf("text solve route preparation failed: %w", routeErr)
 			}
+			route = resolved
 		}
 		run = k12.TextSolveRun{TextSolveOrigin: origin, AgentName: req.AgentName, Facts: facts, FactsDigest: identity.FactsDigest, InputDigest: inputDigest, RequestJSON: string(requestJSON), RouteSnapshot: k12.NormalizeGradingModelSnapshot(route)}
 	} else if err != nil {

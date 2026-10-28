@@ -72,17 +72,22 @@ func ensureK12NewTaskVisionCapabilityReceipt(
 	providerName, modelID string,
 	probes []k12SavedModelCapabilityProbe,
 ) (k12CapabilityReceiptEvidence, error) {
+	return ensureK12NewTaskCapabilityReceipt(ctx, router, receipts, providerName, modelID, config.LLMModelCapabilityVision, probes)
+}
+
+// ensureK12NewTaskCapabilityReceipt 仅新任务补齐指定能力，已知失败或未知探测不自动重发。
+func ensureK12NewTaskCapabilityReceipt(ctx context.Context, router *llmrouter.Selector, receipts storage.ModelCapabilityProbeReceiptStore, providerName, modelID, kind string, probes []k12SavedModelCapabilityProbe) (k12CapabilityReceiptEvidence, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	evidence, err := k12CapabilityReceiptEvidenceForRoute(ctx, router, receipts, providerName, modelID, config.LLMModelCapabilityVision)
+	evidence, err := k12CapabilityReceiptEvidenceForRoute(ctx, router, receipts, providerName, modelID, kind)
 	if err == nil || len(probes) == 0 || probes[0] == nil || router == nil || receipts == nil {
 		return evidence, err
 	}
-	// 同时到达的首图在锁内重读，避免为同一模型发送多次前置探测。
+	// 同时到达的新任务在锁内重读，避免为同一模型发送多次前置探测。
 	k12NewTaskCapabilityProbeMu.Lock()
 	defer k12NewTaskCapabilityProbeMu.Unlock()
-	evidence, err = k12CapabilityReceiptEvidenceForRoute(ctx, router, receipts, providerName, modelID, config.LLMModelCapabilityVision)
+	evidence, err = k12CapabilityReceiptEvidenceForRoute(ctx, router, receipts, providerName, modelID, kind)
 	if err == nil {
 		return evidence, nil
 	}
@@ -92,14 +97,14 @@ func ensureK12NewTaskVisionCapabilityReceipt(
 	}
 	providerInstanceID := config.EffectiveProviderInstanceID(providerName, provider)
 	fingerprint := api.ModelCapabilityProbeConfigFingerprint(providerName, provider, modelID)
-	receipt, readErr := receipts.GetModelCapabilityProbeReceipt(ctx, providerInstanceID, modelID, config.LLMModelCapabilityVision)
+	receipt, readErr := receipts.GetModelCapabilityProbeReceipt(ctx, providerInstanceID, modelID, kind)
 	if readErr != nil || (receipt != nil && receipt.ConfigFingerprint == fingerprint && receipt.ProbePolicyVersion == api.ModelCapabilityProbePolicyVersion) {
 		return evidence, err
 	}
-	if probeErr := probes[0](ctx, providerInstanceID, modelID, config.LLMModelCapabilityVision); probeErr != nil {
+	if probeErr := probes[0](ctx, providerInstanceID, modelID, kind); probeErr != nil {
 		return k12CapabilityReceiptEvidence{}, fmt.Errorf("%w: %v", k12.ErrModelCapabilityUnverified, probeErr)
 	}
-	return k12CapabilityReceiptEvidenceForRoute(ctx, router, receipts, providerName, modelID, config.LLMModelCapabilityVision)
+	return k12CapabilityReceiptEvidenceForRoute(ctx, router, receipts, providerName, modelID, kind)
 }
 
 // resolveK12PracticeModelSnapshotWithCapabilityReceipt 冻结逐题生成实际发送前需要的
@@ -109,13 +114,24 @@ func resolveK12PracticeModelSnapshotWithCapabilityReceipt(
 	router *llmrouter.Selector,
 	receipts storage.ModelCapabilityProbeReceiptStore,
 	requested k12.GradingModelSnapshot,
+	probes ...k12SavedModelCapabilityProbe,
 ) (k12.GradingModelSnapshot, error) {
 	snapshot, err := resolveK12PracticeModelSnapshot(router, requested)
 	if err != nil {
 		return k12.GradingModelSnapshot{}, err
 	}
-	evidence, err := k12CapabilityReceiptEvidenceForRoute(
-		ctx, router, receipts, snapshot.Provider, snapshot.Model, config.LLMModelCapabilityText,
+	requested = k12.NormalizeGradingModelSnapshot(requested)
+	if requested.Capability == config.LLMModelCapabilityText && requested.HasFrozenCapabilityProbeEvidence() {
+		if requested.Provider != snapshot.Provider || requested.Model != snapshot.Model || requested.ProviderInstanceID != snapshot.ProviderInstanceID {
+			return k12.GradingModelSnapshot{}, k12.ErrModelCapabilityUnverified
+		}
+		if err := validateK12FrozenModelCapabilityReceipt(ctx, router, receipts, requested, config.LLMModelCapabilityText); err != nil {
+			return k12.GradingModelSnapshot{}, err
+		}
+		return requested, nil
+	}
+	evidence, err := ensureK12NewTaskCapabilityReceipt(
+		ctx, router, receipts, snapshot.Provider, snapshot.Model, config.LLMModelCapabilityText, probes,
 	)
 	if err != nil {
 		return k12.GradingModelSnapshot{}, err
