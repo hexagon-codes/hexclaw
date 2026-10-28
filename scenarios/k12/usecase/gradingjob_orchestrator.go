@@ -563,6 +563,20 @@ func (o *GradingOrchestrator) runLoop(ctx context.Context, run *gradingRun, jobI
 				return v, err
 			}
 		case k12.GradingStageAwaitingConfirmation:
+			if v.Fields.SourceKind == "image_task" &&
+				run.req.TaskIntent == PhotoTaskCompletedHomework &&
+				run.req.ImageScope != nil && run.req.ImageScope.Action == "grade" &&
+				len(run.questions) > 0 && !hasAnswerCandidate(run.questions) {
+				// 明确批改与全卷无作答是确定的输入冲突，不启动答案定位或重试识图。
+				cause := fmt.Errorf("%w: frozen grading action conflicts with recognized blank answers", ErrInvalidInput)
+				failed, failErr := o.deps.AdvanceGradingStage(context.WithoutCancel(ctx), run.agentName, jobID, AdvanceGradingInput{
+					Outcome: GradingOutcomeFailed, FailureKind: "grading_request_invalid", Retryable: false,
+				})
+				if failErr != nil {
+					return failed, failErr
+				}
+				return failed, cause
+			}
 			// 规则 1：识别冻结后，确认与锚点是两个独立分支。锚点模型调用在 Job 锁外
 			// 异步执行，主链立即返回确认停点；二者任意顺序到达，均由状态机显式汇合。
 			if v.Fields.AnchorState == k12.GradingAnchorPending {

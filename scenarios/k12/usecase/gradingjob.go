@@ -439,6 +439,10 @@ func (d Deps) advanceGradingFailed(ctx context.Context, v GradingJobView, in Adv
 	switch stage {
 	case k12.GradingStageQueued, k12.GradingStageNormalizing, k12.GradingStageRecognizing,
 		k12.GradingStageLocating, k12.GradingStageAssessing, k12.GradingStageRendering, k12.GradingStageProjecting:
+	case k12.GradingStageAwaitingConfirmation:
+		if in.FailureKind != "grading_request_invalid" || in.Retryable {
+			return GradingJobView{}, errGradingStageConflict("waiting stage requires a conclusive invalid grading request")
+		}
 	default:
 		return GradingJobView{}, errGradingStageConflict("阶段 %s 无失败转移", stage)
 	}
