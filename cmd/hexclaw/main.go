@@ -4400,7 +4400,7 @@ func canonicalIMChannelMessageWithSummary(
 		fallbackReason = messagecontent.FallbackMathToReadableText
 	}
 	if platform == "dingtalk" {
-		projected, fallbackReason = dingtalk.ProjectMarkdownText(content, summary)
+		projected, fallbackReason = dingtalk.ProjectMarkdownTextWithAttachments(content, summary, atts)
 	}
 	message, err := channel.NewCanonicalMarkdownMessageWithAttachments(
 		producer, locale, content, projected, fallbackReason, attachments,

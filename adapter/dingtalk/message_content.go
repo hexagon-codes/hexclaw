@@ -14,6 +14,7 @@ import (
 	_ "image/png"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"unicode"
 
@@ -44,6 +45,19 @@ func ProjectMarkdownText(source, summary string) (projected, fallback string) {
 			fallback += "+"
 		}
 		fallback += "dingtalk_emphasis"
+	}
+	return projected, fallback
+}
+
+// ProjectMarkdownTextWithAttachments 在冻结渠道投影前消费同源文档附件，规范正文保持不变。
+func ProjectMarkdownTextWithAttachments(source, summary string, attachments []adapter.Attachment) (projected, fallback string) {
+	projected, fallback = ProjectMarkdownText(source, summary)
+	if normalized := projectDingTalkDocumentAttachmentLinks(projected, attachments); normalized != projected {
+		projected = normalized
+		if fallback != "" {
+			fallback += "+"
+		}
+		fallback += "document_attachment_link"
 	}
 	return projected, fallback
 }
@@ -109,7 +123,7 @@ func ensureDingTalkRenderEvidence(reply *adapter.Reply) error {
 	if len(reply.ToolCalls) > 0 || reply.Usage != nil || reply.Metadata["model"] != "" || reply.Metadata["teaching_context_receipts"] != "" {
 		summary = adapter.DingTalkReplyFooter(reply, locale)
 	}
-	projected, fallback := ProjectMarkdownText(sourceMarkdown, summary)
+	projected, fallback := ProjectMarkdownTextWithAttachments(sourceMarkdown, summary, reply.Attachments)
 	if err := validateDingTalkVisibleContent(projected); err != nil {
 		return err
 	}
@@ -181,6 +195,21 @@ func ensureDingTalkRenderEvidence(reply *adapter.Reply) error {
 	reply.MessageContent = &content
 	reply.RenderManifest = &manifest
 	return nil
+}
+
+// 当前原请求拥有的文档由实际文件卡交付，渠道正文保留链接标签而非应用内部下载地址。
+func projectDingTalkDocumentAttachmentLinks(content string, attachments []adapter.Attachment) string {
+	for _, attachment := range attachments {
+		if !isDingTalkPDFAttachment(attachment) || attachment.Source == nil || attachment.Source.OpenReader == nil ||
+			!strings.HasPrefix(attachment.ID, "document-") ||
+			!validDingTalkSHA256Digest("sha256:"+strings.TrimPrefix(attachment.ID, "document-")) ||
+			attachment.URL != "/api/v1/document-artifacts/"+attachment.ID+"/content" {
+			continue
+		}
+		link := regexp.MustCompile(`(^|[^!\\])\[([^\[\]\r\n]+)\]\(` + regexp.QuoteMeta(attachment.URL) + `\)`)
+		content = link.ReplaceAllString(content, "${1}${2}")
+	}
+	return content
 }
 
 func dingTalkReplyExecutionSummary(reply *adapter.Reply) adapter.ExecutionSummary {

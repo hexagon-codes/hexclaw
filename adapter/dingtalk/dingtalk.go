@@ -12,7 +12,9 @@ package dingtalk
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1274,10 +1276,80 @@ func (a *DingtalkAdapter) Send(ctx context.Context, chatID string, reply *adapte
 	if err := ensureDingTalkRenderEvidence(reply); err != nil {
 		return fmt.Errorf("钉钉渲染协议校验失败: %w", err)
 	}
+	if reply != nil {
+		for _, attachment := range reply.Attachments {
+			if isDingTalkPDFAttachment(attachment) {
+				return a.sendPreparedPDFReply(ctx, chatID, reply)
+			}
+		}
+	}
 	if a.queue == nil {
 		return a.sendReplyNow(ctx, chatID, reply)
 	}
 	return a.queue.Send(ctx, chatID, reply)
+}
+
+// sendPreparedPDFReply 沿冻结清单发送普通文件回复，所有资源准备完成后才发送可见部分。
+// 普通 Send 不合并多条平台回执；部分发送后的错误交回调用方，不在此重发。
+func (a *DingtalkAdapter) sendPreparedPDFReply(ctx context.Context, chatID string, reply *adapter.Reply) error {
+	attachments := make(map[string]adapter.Attachment, len(reply.Attachments))
+	for index, attachment := range reply.Attachments {
+		digest, _, err := dingTalkAttachmentIdentity(attachment)
+		if err != nil {
+			return err
+		}
+		ref := reply.MessageContent.Attachments[index]
+		mime := strings.TrimSpace(attachment.Mime)
+		if mime == "" {
+			mime = "application/octet-stream"
+		}
+		if ref.Digest != digest || ref.MIME != mime || ref.Name != safeDingTalkAttachmentName(attachment.Name) {
+			return errors.New("DingTalk reply attachment does not match canonical content")
+		}
+		attachment.Mime, attachment.Name = ref.MIME, ref.Name
+		attachments[ref.AssetID] = attachment
+	}
+	sum := sha256.Sum256([]byte(reply.MessageContent.Markdown))
+	textDigest := "sha256:" + hex.EncodeToString(sum[:])
+	parts := make([]adapter.DeliveryPart, 0, len(reply.RenderManifest.Parts))
+	for index, projected := range reply.RenderManifest.Parts {
+		part := adapter.DeliveryPart{Kind: projected.Kind, Ordinal: index + 1, Digest: textDigest,
+			MessageContent: reply.MessageContent, RenderManifest: reply.RenderManifest}
+		if projected.Kind == messagecontent.PartArtifact {
+			attachment, ok := attachments[projected.ArtifactRef]
+			if !ok {
+				return errors.New("DingTalk reply artifact attachment is unavailable")
+			}
+			part.Digest, part.MIME, part.Attachment = projected.ArtifactDigest, attachment.Mime, &attachment
+		} else {
+			part.Text = projected.Text
+		}
+		if err := validateDingTalkDeliveryPartCanonicalEvidence(part, true); err != nil {
+			return err
+		}
+		parts = append(parts, part)
+	}
+	for index := range parts {
+		resource, err := a.PrepareDeliveryPartResource(ctx, parts[index])
+		if err != nil {
+			return err
+		}
+		parts[index].PreparedResourceID = resource
+	}
+	for _, part := range parts {
+		ack, err := a.SendPreparedPartWithReceipt(ctx, chatID, part)
+		if err != nil {
+			return err
+		}
+		logger.Info("[dingtalk] reply part accepted",
+			"instance_sha256", dingtalkIdentityHash(a.Name()),
+			"chat_sha256", dingtalkIdentityHash(chatID),
+			"assistant_message_id", reply.AssistantMessageID,
+			"part_ordinal", part.Ordinal,
+			"external_message_id", ack.ExternalMessageID,
+		)
+	}
+	return nil
 }
 
 // SendWithReceipt sends through the same per-adapter queue as ordinary
