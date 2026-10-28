@@ -203,19 +203,23 @@ func (e *ReActEngine) SolveProgramExecutor() SubAgentExecFunc {
 		sink := &codeExecutionReceiptSink{inputDigest: executionInputDigest(spec.Task)}
 		ctx = context.WithValue(withSystemDispatch(ctx, solveDispatchSource), codeExecutionReceiptKey{}, sink)
 		_, err := e.toolExecutor.Execute(ctx, codeExecToolName, map[string]any{"mode": "snippet", "language": "python", "code": plan.Code, "timeout": 30})
-		if err != nil {
-			return SubAgentResult{}, err
-		}
 		sink.mu.Lock()
 		defer sink.mu.Unlock()
+		observed := SubAgentResult{ExecutionReceipt: sink.receipt, ExecutionReceipts: append([]CodeExecutionReceipt(nil), sink.receipts...)}
+		if sink.receipt != nil {
+			observed.Output = sink.receipt.Stdout
+		}
+		if err != nil {
+			return observed, err
+		}
 		if sink.receipt == nil {
 			return SubAgentResult{}, fmt.Errorf("solve program execution receipt is missing")
 		}
 		computed, valid := compiledProgramComputed(sink.receipt, spec.Task, plan.Answer)
 		if !valid || !(answersEqual(computed, plan.Answer) || computed == plan.Answer) {
-			return SubAgentResult{}, fmt.Errorf("solve program execution result is invalid")
+			return observed, fmt.Errorf("solve program execution result is invalid")
 		}
-		return SubAgentResult{Output: sink.receipt.Stdout, ExecutionReceipt: sink.receipt}, nil
+		return observed, nil
 	}
 }
 

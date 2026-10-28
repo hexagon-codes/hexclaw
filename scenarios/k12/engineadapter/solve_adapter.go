@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -129,9 +130,8 @@ func (a *SolveAdapter) withGradingPhysicalCallInterceptor(ctx context.Context) c
 	if !usecase.HasGradingPhysicalCallExecutor(ctx) {
 		return ctx
 	}
-	// Only the durable K12 item path explicitly selects its frozen stage
-	// deadline as the authority. Ordinary engine callers retain their existing
-	// 3m/5m anti-hang guards even when they happen to carry a deadline.
+	// 持久调用方拥有任务预算；模板版本和年级不改变同一任务的取消语义。
+	ctx = engine.WithCallerOwnedExecution(ctx)
 	if _, hasDeadline := ctx.Deadline(); hasDeadline {
 		ctx = engine.WithAuthoritativeCallerDeadline(ctx)
 	}
@@ -188,15 +188,21 @@ func (a *SolveAdapter) withGradingPhysicalCallInterceptor(ctx context.Context) c
 				},
 				func(providerCtx context.Context) (string, error) {
 					result, callErr := next(providerCtx, spec)
-					if callErr != nil {
+					if callErr != nil && result.Output == "" && result.ExecutionReceipt == nil && len(result.ExecutionReceipts) == 0 {
 						return "", providerResponseError(callErr)
 					}
 					raw, marshalErr := json.Marshal(result)
-					return string(raw), marshalErr
+					return string(raw), errors.Join(providerResponseError(callErr), marshalErr)
 				},
 			)
 			if err != nil {
-				return engine.SubAgentResult{}, err
+				var observed engine.SubAgentResult
+				if physical.Payload != "" {
+					if decodeErr := json.Unmarshal([]byte(physical.Payload), &observed); decodeErr != nil {
+						return engine.SubAgentResult{}, errors.Join(err, fmt.Errorf("solve adapter: decode observed failure response: %w", decodeErr))
+					}
+				}
+				return observed, err
 			}
 			var result engine.SubAgentResult
 			if err := json.Unmarshal([]byte(physical.Payload), &result); err != nil {

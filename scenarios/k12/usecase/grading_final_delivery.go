@@ -72,8 +72,53 @@ func K12FinalArtifactPDFTitle(artifact k12.GradingFinalArtifact) string {
 	return heading + " · " + time.Unix(artifact.CreatedAt, 0).In(time.FixedZone("CST", 8*60*60)).Format("2006-01-02")
 }
 
-func k12FinalReplySummary(artifact k12.GradingFinalArtifact) string {
+func k12FinalReplySummary(artifact k12.GradingFinalArtifact, intent k12.ImageTaskIntent) string {
 	canonical := strings.TrimSpace(artifact.CanonicalMarkdown)
+	if artifact.TeachingReport != nil {
+		// 报告排版标题不承载批改统计；摘要直接读取同一冻结报告的逐题状态。
+		correct, processIssue, attention, solved, unanswered := 0, 0, 0, 0, 0
+		for _, item := range artifact.TeachingReport.Items {
+			switch item.Assessment.Status {
+			case k12.GradingAssessmentCorrect:
+				correct++
+			case k12.GradingAssessmentProcessIssue:
+				processIssue++
+			case k12.GradingAssessmentBlankSolved:
+				solved++
+			case k12.GradingAssessmentUnanswered:
+				unanswered++
+			default:
+				if item.Assessment.Status != "" {
+					attention++
+				}
+			}
+		}
+		heading, _, _ := strings.Cut(canonical, "\n")
+		summaryHeading := "批改摘要"
+		if intent == k12.ImageTaskIntentBlankWorksheet {
+			summaryHeading = "解题摘要"
+		}
+		summary := fmt.Sprintf("%s\n\n## %s\n\n**共 %d 题", heading, summaryHeading, artifact.TotalCount)
+		if intent != k12.ImageTaskIntentBlankWorksheet && correct+processIssue+attention > 0 {
+			summary += fmt.Sprintf(" · %d 题正确", correct)
+		}
+		for _, count := range []struct {
+			value int
+			label string
+		}{
+			{processIssue, "题过程需关注"}, {attention, "题需关注"}, {solved, "题已解答"},
+			{unanswered, "题未作答"}, {artifact.SkippedCount, "题未判断"},
+		} {
+			if count.value > 0 {
+				summary += fmt.Sprintf(" · %d %s", count.value, count.label)
+			}
+		}
+		summary += "**"
+		if intent != k12.ImageTaskIntentBlankWorksheet && processIssue+attention+artifact.SkippedCount > 0 {
+			summary += "\n\n## 需关注的题"
+		}
+		return summary + "\n\n完整答案与讲法见附件"
+	}
 	if split := strings.Index(canonical, "\n### "); split >= 0 {
 		summary := strings.TrimSpace(canonical[:split])
 		if note := strings.Index(canonical, "\n\n## 说明\n"); note >= 0 {
@@ -189,7 +234,7 @@ func (d Deps) PrepareAndSendK12FinalReplyBatch(ctx context.Context, agentName, o
 		if err != nil {
 			return k12.DeliveryBatch{}, false, err
 		}
-		req := FinalReplyDeliveryRequest{AgentName: agentName, ObjectKind: objectKind, ObjectID: objectID, SourceKind: k12.PrintSourceGradingFinalArtifact, SourceRef: artifact.ArtifactID + ":" + artifact.ArtifactDigest, Title: K12FinalArtifactPDFTitle(artifact), Message: full, Producer: messagecontent.ProducerK12, Locale: locale, Document: intent == k12.ImageTaskIntentBlankWorksheet && artifact.TotalCount > 1, Summary: k12FinalReplySummary(artifact), DingTalkSuffix: disclosure}
+		req := FinalReplyDeliveryRequest{AgentName: agentName, ObjectKind: objectKind, ObjectID: objectID, SourceKind: k12.PrintSourceGradingFinalArtifact, SourceRef: artifact.ArtifactID + ":" + artifact.ArtifactDigest, Title: K12FinalArtifactPDFTitle(artifact), Message: full, Producer: messagecontent.ProducerK12, Locale: locale, Document: intent == k12.ImageTaskIntentBlankWorksheet && artifact.TotalCount > 1, Summary: k12FinalReplySummary(artifact, intent), DingTalkSuffix: disclosure}
 		hasDing := false
 		for _, target := range targets {
 			hasDing = hasDing || target.Target.Platform == "dingtalk"
@@ -229,7 +274,7 @@ func (d Deps) PrepareAndSendK12FinalReplyBatch(ctx context.Context, agentName, o
 		objectID += ":" + imageFinalPDFRenderContractVersion
 		pdf, _, prepareErr := d.PrepareGradingFinalArtifactPDFExact(ctx, agentName, finalID, expectedDigest, K12FinalArtifactPDFTitle(artifact))
 		if prepareErr == nil && len(pdf.Render.Payload) <= messagecontent.DingTalkMaxOutboundPDFBytes {
-			message.Content = k12FinalReplySummary(artifact)
+			message.Content = k12FinalReplySummary(artifact, intent)
 			if suffix := strings.TrimSpace(strings.TrimPrefix(full.Content, artifact.CanonicalMarkdown)); suffix != "" {
 				message.Content += "\n\n" + suffix
 			}
@@ -320,7 +365,7 @@ func (d Deps) finalReplyExecutionSummary(ctx context.Context, artifact k12.Gradi
 	}
 	facts := messagecontent.ExecutionSummary{}
 	steps := make(map[string]bool)
-	solved := false
+	usedSolveSkill := false
 	for _, receipt := range result.OperationReceipts {
 		if receipt.Status != "succeeded" || receipt.InvocationID == "" || receipt.ResultDigest == "" {
 			continue
@@ -331,9 +376,11 @@ func (d Deps) finalReplyExecutionSummary(ctx context.Context, artifact k12.Gradi
 			stage = "image_recognition"
 		case "solve", "solve_generate", "solve_verify":
 			stage = "question_solving"
-			solved = true
+			usedSolveSkill = true
 		case "grade":
 			stage = "grading"
+			// 实际模型批改同样经 SolveSkill 的批改入口，不能因答案复用而漏报。
+			usedSolveSkill = usedSolveSkill || receipt.ExecutionKind == string(k12.GradingExecutionProvider)
 		case "parent_guide":
 			stage = "parent_guide"
 		case "annotation":
@@ -354,7 +401,7 @@ func (d Deps) finalReplyExecutionSummary(ctx context.Context, artifact k12.Gradi
 			facts.Models = append(facts.Models, model)
 		}
 	}
-	if solved {
+	if usedSolveSkill {
 		facts.Tools = append(facts.Tools, messagecontent.ExecutionSummaryTool{Kind: "skill", Name: "solve", Status: "success", DisplayNames: map[string]string{"zh-CN": "解题", "en": "Solve homework", "ug-CN": "مەسىلە يېشىش"}})
 	}
 	if result.Photo != nil {

@@ -43,6 +43,16 @@ var statusContextMarkers = []string{"status", "code", "http", "api", "response",
 
 var errSubAgentEmptyOutput = errors.New("subagent empty output")
 
+// solveExecutionMustStop 只裁决整项求解能否继续，单次物理调用的重试策略独立处理。
+func solveExecutionMustStop(ctx context.Context, err error) bool {
+	if ctx.Err() != nil || errors.Is(err, context.Canceled) ||
+		(errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, egress.ErrProviderResponseProcessed)) {
+		return true
+	}
+	var policy interface{ SolveExecutionMustStop() bool }
+	return errors.As(err, &policy) && policy.SolveExecutionMustStop()
+}
+
 // isTransientErr 判定错误是否瞬时可重试。ctx 取消（用户主动停）不算瞬时——不重试。
 func isTransientErr(err error) bool {
 	if err == nil {

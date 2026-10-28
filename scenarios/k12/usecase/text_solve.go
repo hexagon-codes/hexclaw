@@ -94,7 +94,7 @@ func (e *textSolvePhysicalExecutor) ExecuteGradingPhysicalCall(ctx context.Conte
 	}
 	if inv.Status != k12.ModelInvocationPrepared {
 		if inv.Status == k12.ModelInvocationFailed {
-			return GradingPhysicalCallResult{}, gradingPhysicalNoRetryError{cause: fmt.Errorf("text solve invocation failed: solve_run_id=%s invocation=%s", e.run.RunID, inv.InvocationID)}
+			return GradingPhysicalCallResult{Payload: inv.ResultJSON, InvocationID: inv.InvocationID}, gradingPhysicalNoRetryError{cause: fmt.Errorf("text solve invocation failed: solve_run_id=%s invocation=%s", e.run.RunID, inv.InvocationID)}
 		}
 		return GradingPhysicalCallResult{}, gradingPhysicalNoRetryError{cause: fmt.Errorf("%w: solve_run_id=%s invocation=%s status=%s", k12storage.ErrTextSolveUnknown, e.run.RunID, inv.InvocationID, inv.Status)}
 	}
@@ -139,7 +139,7 @@ func (e *textSolvePhysicalExecutor) ExecuteGradingPhysicalCall(ctx context.Conte
 		if status == k12.ModelInvocationOutcomeUnknown {
 			return GradingPhysicalCallResult{}, gradingPhysicalNoRetryError{cause: fmt.Errorf("%w: solve_run_id=%s invocation=%s: %w", k12storage.ErrTextSolveUnknown, e.run.RunID, inv.InvocationID, callErr)}
 		}
-		return GradingPhysicalCallResult{}, gradingPhysicalNoRetryError{cause: callErr}
+		return GradingPhysicalCallResult{Payload: inv.ResultJSON, InvocationID: inv.InvocationID}, gradingPhysicalNoRetryError{cause: callErr}
 	}
 	return GradingPhysicalCallResult{Payload: payload, InvocationID: inv.InvocationID}, nil
 }

@@ -408,6 +408,7 @@ func TestFinalReplySharedPrivatePDFStoredOnlyInBatchSQLite(t *testing.T) {
 	}
 	req.ObjectKind, req.ObjectID, req.SourceKind, req.SourceRef, req.PrivateEvent = "im_final_reply", objectID, k12.PrintSourceIMFinalReply, proof.AssistantMessageID, &proof
 	targets[0].BindingID = authorityID
+	seedAcceptedFinalReply(t, store, req, "saved-private-session")
 	batch, accepted, err := d.PrepareAndSendFinalReply(t.Context(), req, targets)
 	if err != nil || !accepted || batch.BatchID == "" || batch.Status != k12.DeliveryBatchDelivered || len(batch.Receipts) != 2 || renderer.calls != 1 || len(transport.uploads) != 1 || len(transport.sends) != 2 {
 		t.Fatalf("ordinary private reply did not deliver the complete PDF plan: %+v %v", batch, err)

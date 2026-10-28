@@ -28,6 +28,9 @@ func TestGradingNoRetryPreservesKnownFailureAndUnknownOutcome(t *testing.T) {
 			if err.SubAgentRetryable() {
 				t.Fatal("known failure and unknown outcome must not trigger an automatic model retry")
 			}
+			if err.SolveExecutionMustStop() != tc.wantUnknown {
+				t.Fatalf("whole solve stop=%v, want unknown=%v", err.SolveExecutionMustStop(), tc.wantUnknown)
+			}
 		})
 	}
 }

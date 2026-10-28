@@ -1099,6 +1099,15 @@ func (e gradingPhysicalNoRetryError) Error() string {
 func (e gradingPhysicalNoRetryError) Unwrap() error           { return e.cause }
 func (e gradingPhysicalNoRetryError) SubAgentRetryable() bool { return false }
 
+// 结果未知或调用方取消必须停在原任务；已知候选失败不阻断独立的后续候选。
+func (e gradingPhysicalNoRetryError) SolveExecutionMustStop() bool {
+	return errors.Is(e.cause, ErrGradingPhysicalCallOutcomeUnknown) ||
+		errors.Is(e.cause, ErrModelInvocationRequiresReconciliation) ||
+		errors.Is(e.cause, k12storage.ErrTextSolveUnknown) ||
+		errors.Is(e.cause, context.Canceled) ||
+		(errors.Is(e.cause, context.DeadlineExceeded) && !errors.Is(e.cause, egress.ErrProviderResponseProcessed))
+}
+
 type durableGradingPhysicalCallExecutor struct {
 	o   *GradingOrchestrator
 	job GradingJobView
@@ -1227,7 +1236,7 @@ func (e *durableGradingPhysicalCallExecutor) ExecuteGradingPhysicalCall(
 			// Claim below.
 		case k12.ModelInvocationFailed:
 			if matching.OperationAttempt/1000 >= currentGeneration {
-				return zero, fmt.Errorf("%w: invocation=%s class=%s code=%s",
+				return GradingPhysicalCallResult{Payload: matching.ResultJSON, InvocationID: matching.InvocationID}, fmt.Errorf("%w: invocation=%s class=%s code=%s",
 					ErrGradingItemInvocationFailed, matching.InvocationID,
 					matching.FailureClass, matching.FailureCode)
 			}
@@ -1305,9 +1314,9 @@ func (e *durableGradingPhysicalCallExecutor) ExecuteGradingPhysicalCall(
 			return zero, errors.Join(callErr, ledgerErr)
 		}
 		if errors.Is(callErr, egress.ErrProviderResponseProcessed) {
-			_, ledgerErr := e.o.deps.Records.MarkGradingItemInvocationFailed(
-				commitCtx, e.job.Record.AgentName, invocation.InvocationID, "local", "provider_response_processed")
-			return zero, errors.Join(callErr, ledgerErr)
+			_, ledgerErr := e.o.deps.Records.MarkGradingItemInvocationFailedWithPayload(
+				commitCtx, e.job.Record.AgentName, invocation.InvocationID, "local", "provider_response_processed", payload)
+			return GradingPhysicalCallResult{Payload: payload, InvocationID: invocation.InvocationID}, errors.Join(callErr, ledgerErr)
 		}
 		if sentProviderOutcomeUnknown(callErr, callCtxErr) {
 			_, ledgerErr := e.o.deps.Records.MarkGradingItemInvocationOutcomeUnknown(
@@ -1351,11 +1360,11 @@ func (e *durableGradingPhysicalCallExecutor) ExecuteGradingPhysicalCall(
 		if executionErr := spec.KnownExecutionFailure(payload); executionErr != nil {
 			commitCtx, cancelCommit = gradingDurableCommitContext(ctx)
 			defer cancelCommit()
-			_, ledgerErr := e.o.deps.Records.MarkGradingItemInvocationFailed(
+			_, ledgerErr := e.o.deps.Records.MarkGradingItemInvocationFailedWithPayload(
 				commitCtx, e.job.Record.AgentName, invocation.InvocationID,
-				"local", "verification_execution_failed",
+				"local", "verification_execution_failed", payload,
 			)
-			return zero, errors.Join(egress.ErrProviderResponseProcessed, executionErr, ledgerErr)
+			return GradingPhysicalCallResult{Payload: payload, InvocationID: invocation.InvocationID}, errors.Join(egress.ErrProviderResponseProcessed, executionErr, ledgerErr)
 		}
 	}
 	storedPayload := payload

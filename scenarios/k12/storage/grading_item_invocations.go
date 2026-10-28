@@ -2,7 +2,9 @@ package k12storage
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -242,6 +244,20 @@ func (s *Store) MarkGradingItemInvocationFailed(ctx context.Context, agentName, 
 	}
 	return s.transitionGradingItemInvocation(ctx, agentName, invocationID,
 		k12.ModelInvocationSent, k12.ModelInvocationFailed, "", "", "", failureClass, failureCode)
+}
+
+// MarkGradingItemInvocationFailedWithPayload 保存已观察到的响应，状态仍为失败，不产生成功或费用回执。
+func (s *Store) MarkGradingItemInvocationFailedWithPayload(ctx context.Context, agentName, invocationID, failureClass, failureCode, payload string) (k12.GradingItemInvocation, error) {
+	if payload == "" {
+		return s.MarkGradingItemInvocationFailed(ctx, agentName, invocationID, failureClass, failureCode)
+	}
+	failureClass, failureCode = strings.TrimSpace(failureClass), strings.TrimSpace(failureCode)
+	if failureClass == "" || failureCode == "" || !json.Valid([]byte(payload)) {
+		return k12.GradingItemInvocation{}, fmt.Errorf("k12storage: observed failed response requires valid JSON and failure classification")
+	}
+	sum := sha256.Sum256([]byte(payload))
+	return s.transitionGradingItemInvocation(ctx, agentName, invocationID,
+		k12.ModelInvocationSent, k12.ModelInvocationFailed, "", hex.EncodeToString(sum[:]), payload, failureClass, failureCode)
 }
 
 func (s *Store) MarkGradingItemInvocationOutcomeUnknown(ctx context.Context, agentName, invocationID, failureClass, failureCode string) (k12.GradingItemInvocation, error) {

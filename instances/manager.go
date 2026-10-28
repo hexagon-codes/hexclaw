@@ -2,7 +2,6 @@ package instances
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -29,6 +28,7 @@ import (
 	"github.com/hexagon-codes/hexclaw/adapter/whatsapp"
 	"github.com/hexagon-codes/hexclaw/config"
 	"github.com/hexagon-codes/hexclaw/secret"
+	"github.com/hexagon-codes/hexclaw/storage"
 )
 
 type Status string
@@ -1051,8 +1051,7 @@ func (m *Manager) wrapHandler(inst *Instance, next adapter.MessageHandler) adapt
 			if instanceID == "" {
 				instanceID = inst.Name
 			}
-			digest := sha256.Sum256([]byte(inst.Provider + "\x00" + instanceID + "\x00" + msg.ID))
-			msg.Metadata["request_id"] = fmt.Sprintf("imreq-%x", digest)
+			msg.Metadata["request_id"] = storage.IMRequestIDForEvent(inst.Provider, instanceID, msg.ID)
 		}
 		if msg.InstanceID == "" {
 			msg.InstanceID = inst.Name

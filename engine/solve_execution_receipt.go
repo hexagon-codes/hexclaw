@@ -76,6 +76,7 @@ type codeExecutionReceiptSink struct {
 	mu          sync.Mutex
 	inputDigest string
 	receipt     *CodeExecutionReceipt
+	receipts    []CodeExecutionReceipt
 }
 
 func executionInputDigest(task string) string {
@@ -111,10 +112,59 @@ func captureCodeExecutionReceipt(ctx context.Context, toolName string, result *s
 		receipt.Stdout = result.Content[:receipt.StdoutBytes]
 	}
 	sink.receipt = &receipt
+	sink.receipts = append(sink.receipts, receipt)
 	trace.L(ctx).Info("solve execution receipt captured", "input_digest", receipt.InputDigest,
 		"sandbox_run_id", receipt.RunID, "status", receipt.Status, "exit_code", receipt.ExitCode,
 		"timeout", receipt.Timeout, "truncated", receipt.Truncated,
 		"stdout_bytes", receipt.StdoutBytes, "stdout_digest", executionInputDigest(receipt.Stdout))
+}
+
+var executionRunReference = regexp.MustCompile(`(?im)^EXECUTION_RUN_ID:[ \t]*([^\s]+)[ \t]*$`)
+
+// selectForResult 将实际执行与本次最终数学结论关联，不用文件制作的最后一次命令覆盖证明。
+// 多份证据无法唯一关联时保持无证明；原始回执仍全部保存供恢复核对。
+func (s *codeExecutionReceiptSink) selectForResult(spec SubAgentSpec, output string) *CodeExecutionReceipt {
+	if len(s.receipts) == 0 {
+		return nil
+	}
+	if refs := executionRunReference.FindAllStringSubmatch(output, -1); len(refs) != 0 {
+		if len(refs) != 1 {
+			return nil
+		}
+		for i := range s.receipts {
+			if s.receipts[i].RunID == refs[0][1] {
+				copy := s.receipts[i]
+				return &copy
+			}
+		}
+		return nil
+	}
+	expected := extractFinalAnswer(output)
+	if spec.Agent == verifierAgentName {
+		_, expected = parseVerdict(output)
+	}
+	var selected *CodeExecutionReceipt
+	for i := range s.receipts {
+		receipt := &s.receipts[i]
+		computed, ok := receipt.computed(spec.Task)
+		if !ok || !answersEqual(computed, expected) {
+			continue
+		}
+		if selected != nil && selected.RunID != receipt.RunID {
+			return nil
+		}
+		copy := *receipt
+		selected = &copy
+	}
+	if selected != nil {
+		return selected
+	}
+	// 单调用保留原有失败及弱证据合同；多调用失败不冒充已通过的数学证明。
+	if len(s.receipts) == 1 {
+		copy := s.receipts[0]
+		return &copy
+	}
+	return nil
 }
 
 var executionComputedMarker = regexp.MustCompile(`(?im)^COMPUTED:[ \t]*([^\r\n]+)[ \t]*\r?$`)

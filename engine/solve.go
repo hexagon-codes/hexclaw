@@ -353,7 +353,7 @@ func (o *SolveSkill) Execute(ctx context.Context, args map[string]any) (*skill.R
 	}
 	skipVerify := auto && complexity == complexityTrivial && !gradingMode && outputVersion == "" // 新讲法须有独立审计
 
-	// P2 防卡死：整次 solve 套总墙钟（solver 采样/多法 + verifier）。
+	// 持久任务的调用方预算由上下文显式选择，与报告格式无关。
 	runCtx, cancel := newSubAgentAttemptContext(ctx, orchestrateMaxWall)
 	defer cancel()
 
@@ -385,6 +385,10 @@ func (o *SolveSkill) Execute(ctx context.Context, args map[string]any) (*skill.R
 		result, err := o.runSolveAgentResult(childCtx, sp)
 		if err != nil {
 			solverErrs = append(solverErrs, err)
+			if solveExecutionMustStop(childCtx, err) {
+				o.registry.Finish(solveRunID, subAgentStatusError, "", "solver execution cannot be repeated", "")
+				return nil, fmt.Errorf("solve: solver execution failed: %w", err)
+			}
 			continue
 		}
 		if strings.TrimSpace(result.Output) != "" {
@@ -768,9 +772,10 @@ func (o *SolveSkill) runSolveAgentResult(ctx context.Context, spec SubAgentSpec)
 			result, callErr := next(callCtx, callSpec)
 			sink.mu.Lock()
 			defer sink.mu.Unlock()
-			result.ExecutionReceipt = nil
+			result.ExecutionReceipts = append([]CodeExecutionReceipt(nil), sink.receipts...)
+			result.ExecutionReceipt = sink.selectForResult(callSpec, result.Output)
+			result.Output = strings.TrimSpace(executionRunReference.ReplaceAllString(result.Output, ""))
 			if callErr == nil {
-				result.ExecutionReceipt = sink.receipt
 				if executionErr := result.ExecutionReceipt.KnownExecutionFailure(executionInputDigest(callSpec.Task)); executionErr != nil {
 					return result, errors.Join(egress.ErrProviderResponseProcessed, executionErr)
 				}
@@ -792,7 +797,6 @@ func (o *SolveSkill) runSolveAgentResult(ctx context.Context, spec SubAgentSpec)
 	status, errStr := subAgentStatusOK, ""
 	if err != nil {
 		status, errStr = subAgentStatusError, err.Error()
-		res.ExecutionReceipt = nil
 	}
 	o.registry.Finish(spec.RunID, status, res.Output, errStr, res.SessionID)
 	return res, err
@@ -1190,7 +1194,9 @@ func buildSolverPrompt(problem, subject, method, grade, constraint string) strin
 3. 数学一律用 Unicode 符号书写（×÷√≤≥≠、分数写 a/b、平方写 x²、下标写 H₂O、单位直接写 cm³），**禁止输出 LaTeX**（不要 \times \div \frac \text{} ^{} 也不要 $…$、\(…\)、\[…\] 定界符）。
 4. 最后单独用一行给出完整答案，格式严格为：答案：<完整答案>。多问、多空、要求先求中间量再求最终量时，必须逐项保留全部所求量及单位、填空与列式，不能只取最后一个数值。只有单一问项、单一数量的题才只写最终数值和必要单位，完整答句放在前面的推导中。存在多种有效填法时，这一答案行也必须逐项写明各自前提和完整填写，不能只在正文中列出。
 5. 正文只写数学推导和依据，不写已调用、已运行或已用工具核验等运行陈述；实际工具事实由应用执行回执提供。
-6. 填空或数量关系存在多种有效填法时，明确列出各自前提、完整填空答案及列式，并注明答案不唯一；逐种解释，不能只给步骤让家长反推答案，不凭模糊学生作答补造题目条件。数量关系填空应分别说明填写数量名称、实际数量，以及题意允许时把总量或已知部分各自看作单位“1”的有效填法，明确每种单位“1”指什么，区分无量纲比例与实际数量，不把等价比例关系说成错误。合法填法有无穷多种时，用本年级能理解的方式给出一般关系、适用约束和代表性填法，不把有限示例说成穷尽。`, subjectLine, gradeLine, constraintLine, problem, methodLine)
+6. 填空或数量关系存在多种有效填法时，明确列出各自前提、完整填空答案及列式，并注明答案不唯一；逐种解释，不能只给步骤让家长反推答案，不凭模糊学生作答补造题目条件。数量关系填空应分别说明填写数量名称、实际数量，以及题意允许时把总量或已知部分各自看作单位“1”的有效填法，明确每种单位“1”指什么，区分无量纲比例与实际数量，不把等价比例关系说成错误。合法填法有无穷多种时，用本年级能理解的方式给出一般关系、适用约束和代表性填法，不把有限示例说成穷尽。
+7. This subtask produces the mathematical solution and verification evidence. Document formatting, PDF creation and delivery are handled separately by the calling assistant and its document skill. Preserve requested explanations in the solution; do not attempt file production here.
+8. When using code_exec for the final computation, print one COMPUTED: <complete answer> line to stdout. For plain-text output, identify the actual computation with a separate EXECUTION_RUN_ID: <run_id from the successful code_exec report> line. Never invent a run id. If a structured output contract is required, follow that contract instead of adding a text marker.`, subjectLine, gradeLine, constraintLine, problem, methodLine)
 }
 
 func buildVerifierPrompt(problem, candidate, constraint string) string {

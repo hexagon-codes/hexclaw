@@ -27,10 +27,11 @@ type SubAgentSpec struct {
 
 // SubAgentResult 是子 Agent 执行结果。
 type SubAgentResult struct {
-	Output           string
-	SessionID        string                     // 子会话 id，session-mode 回传供后续续聊
-	ExecutionReceipt *CodeExecutionReceipt      `json:"execution_receipt,omitempty"` // 随既有结果保存实际执行证据
-	Generation       *SolveGenerationAttachment `json:"generation,omitempty"`
+	Output            string
+	SessionID         string                     // 子会话 id，session-mode 回传供后续续聊
+	ExecutionReceipt  *CodeExecutionReceipt      `json:"execution_receipt,omitempty"`  // 随既有结果保存实际执行证据
+	ExecutionReceipts []CodeExecutionReceipt     `json:"execution_receipts,omitempty"` // 保留逐调用事实，选中的数学证明另行关联
+	Generation        *SolveGenerationAttachment `json:"generation,omitempty"`
 }
 
 // SubAgentExecFunc 执行一个子 Agent spec。由 cmd/hexclaw 注入（内部经 eng.Process 跑子任务）。
