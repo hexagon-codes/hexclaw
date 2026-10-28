@@ -87,6 +87,10 @@ func (c *Cache) Key(content string, format Format, opts RenderOptions) string {
 	if format == FormatPDF {
 		h.Write([]byte("pdf-style:" + pdfStyleDigest + "|"))
 	}
+	if format == FormatRTF {
+		// 完整 RTF 文档不能复用旧片段缓存。
+		h.Write([]byte("rtf-layout:standalone|"))
+	}
 	h.Write([]byte(content))
 	h.Write([]byte("|F:"))
 	h.Write([]byte(format))
@@ -106,7 +110,7 @@ func (c *Cache) Key(content string, format Format, opts RenderOptions) string {
 		optMap["PDFHeaderFooter"] = opts.pdfHeaderFooterEnabled()
 		optMap["PDFMetadata"] = opts.PDFMetadata
 		optMap["Locale"] = opts.effectiveLocale(c.defaultLocale)
-		h.Write([]byte("pdf-text:numeric-fractions-v1|"))
+		h.Write([]byte("pdf-text:numeric-fractions-v2|"))
 	}
 	keys := mapx.Keys(optMap)
 	sort.Strings(keys)

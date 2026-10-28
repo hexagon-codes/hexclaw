@@ -199,6 +199,10 @@ func (r *PandocRenderer) buildArgs(format Format, outPath string, opts RenderOpt
 	if format == FormatHTML {
 		args = append(args, "--standalone", "--embed-resources")
 	}
+	// RTF 片段没有文档头和字体表，系统阅读器只能解析部分正文。
+	if format == FormatRTF {
+		args = append(args, "--standalone")
+	}
 
 	// docx 走默认 reference-doc（统一字体 / 页边距 / 标题样式）
 	if format == FormatDocx && r.ReferenceDocPath != "" {
