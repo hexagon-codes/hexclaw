@@ -43,6 +43,7 @@ type Snapshot struct {
 	ToolEnabled         bool
 	Routes              []Route
 	ExplicitImageRoutes []Route             // 未声明能力的配置模型，只供用户明确指定时尝试
+	ExplicitAudioRoutes []Route             // 已声明音频能力的配置模型，只供明确实例与模型的单次对话
 	MediaModels         map[string][]string // 包含已配置但暂未启用的目录，用于识别用户约束
 	Images              *imagegen.Service
 	Videos              *videogen.Service
@@ -66,6 +67,9 @@ func (s *Snapshot) allowsGeneration(route Route, request Request) bool {
 	routeSets := [][]Route{s.Routes}
 	if request.Selection == nil && request.Model == route.Model || request.Selection != nil && hasModel(request.Selection.Models, route.Model) {
 		routeSets = append(routeSets, s.ExplicitImageRoutes)
+	}
+	if request.Model == route.Model && (request.Provider == route.ProviderID || request.Provider == route.ProviderKey) {
+		routeSets = append(routeSets, s.ExplicitAudioRoutes)
 	}
 	for _, routes := range routeSets {
 		for _, current := range routes {
@@ -118,7 +122,7 @@ func (r *Router) Reload(cfg *config.Config, speech *voice.Service) {
 			}
 			return models
 		}
-		var imageModels, videoModels, chatModels, explicitImageModels []string
+		var imageModels, videoModels, chatModels, explicitImageModels, explicitAudioModels []string
 		for _, spec := range specs {
 			if len(spec.Capabilities) == 0 {
 				explicitImageModels = append(explicitImageModels, spec.ID)
@@ -130,7 +134,8 @@ func (r *Router) Reload(cfg *config.Config, speech *voice.Service) {
 				case config.LLMModelCapabilityVideoGeneration:
 					videoModels = append(videoModels, spec.ID)
 				case config.LLMModelCapabilityAudio:
-					// 单次音频协议仅复用已有明确支持的模型，宽泛audio不猜为TTS。
+					// 自动选择保持既有型号；声明的新型号仅供明确来源与模型的单次对话。
+					explicitAudioModels = append(explicitAudioModels, spec.ID)
 					for _, known := range voicechat.NewOpenAIVoiceChat("", "").SupportedModels() {
 						if spec.ID == known {
 							chatModels = append(chatModels, spec.ID)
@@ -180,6 +185,11 @@ func (r *Router) Reload(cfg *config.Config, speech *voice.Service) {
 			route := base
 			route.Kind, route.Action, route.Protocol, route.Model = "image", "generate", "openai-image", model
 			s.ExplicitImageRoutes = append(s.ExplicitImageRoutes, route)
+		}
+		for _, model := range explicitAudioModels {
+			route := base
+			route.Kind, route.Action, route.Protocol, route.Model = "audio", "chat", "openai-voicechat", model
+			s.ExplicitAudioRoutes = append(s.ExplicitAudioRoutes, route)
 		}
 		for _, model := range imageModels {
 			route := base
@@ -244,13 +254,16 @@ func (r *Router) Reload(cfg *config.Config, speech *voice.Service) {
 		}
 		s.Routes = append(s.Routes, Route{ProviderID: selected, ProviderKey: cfg.Voice.TTS.Provider, Kind: "audio", Action: "synthesize", Protocol: "tts", SpeechProviders: providers, SpeechVoice: cfg.Voice.TTS.Voice, SpeechSpeed: cfg.Voice.TTS.Speed})
 	}
-	digest := sha256.Sum256([]byte(fmt.Sprintf("%v|%v|%t", s.Routes, s.ExplicitImageRoutes, s.ToolEnabled)))
+	digest := sha256.Sum256([]byte(fmt.Sprintf("%v|%v|%v|%t", s.Routes, s.ExplicitImageRoutes, s.ExplicitAudioRoutes, s.ToolEnabled)))
 	s.Revision = hex.EncodeToString(digest[:])
 	for i := range s.Routes {
 		s.Routes[i].Revision = s.Revision
 	}
 	for i := range s.ExplicitImageRoutes {
 		s.ExplicitImageRoutes[i].Revision = s.Revision
+	}
+	for i := range s.ExplicitAudioRoutes {
+		s.ExplicitAudioRoutes[i].Revision = s.Revision
 	}
 	s.Images = imagegen.NewService(images, "")
 	s.Videos = videogen.NewService(videos, "")
@@ -283,6 +296,14 @@ func (r *Router) Resolve(kind, action, provider, model, preferred string) (Route
 			continue
 		}
 		candidates = append(candidates, route)
+	}
+	// 已保存的音频声明可执行既有单次对话协议，不据此扩大自动型号目录。
+	if len(candidates) == 0 && kind == "audio" && action == "chat" && provider != "" && model != "" {
+		for _, route := range s.ExplicitAudioRoutes {
+			if route.Model == model && (provider == route.ProviderID || provider == route.ProviderKey) {
+				candidates = append(candidates, route)
+			}
+		}
 	}
 	// 已明确选择的未分类模型可按已知图片协议执行一次，不修改其能力声明。
 	if len(candidates) == 0 && kind == "image" && action == "generate" && model != "" {
