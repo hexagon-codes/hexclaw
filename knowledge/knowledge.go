@@ -1204,6 +1204,7 @@ func (m *Manager) searchResultsModeAtRevision(
 	started := time.Now()
 	vectorRouteRan, revisionEmbeddingReady := false, false
 	candidateCount := 0
+	fallbackReason := ""
 	queryDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(query)))
 	trace.L(ctx).Info("Knowledge retrieval started", "query_digest", queryDigest, "query_chars", len([]rune(query)), "top_k", topK,
 		"document_ids", append([]string(nil), filter.DocumentIDs...), "strict_floor", strictFloor, "expected_revision_id", expectedRevisionID)
@@ -1219,17 +1220,29 @@ func (m *Manager) searchResultsModeAtRevision(
 				"page_start": result.Chunk.PageStart, "page_end": result.Chunk.PageEnd})
 		}
 		outcome := "completed"
+		if !vectorRouteRan && fallbackReason == "" {
+			if m.revisionSearcher != nil && !revisionEmbeddingReady {
+				fallbackReason = "semantic_revision_not_ready"
+			} else if m.embedder == nil {
+				fallbackReason = "embedding_not_configured"
+			}
+		}
+		if fallbackReason != "" {
+			outcome = "completed_with_fallback"
+		}
 		if returnErr != nil {
 			outcome = "failed"
 		}
 		trace.L(ctx).Info("Knowledge retrieval finished", "query_digest", queryDigest, "outcome", outcome, "hit_count", len(hits),
 			"candidate_count", candidateCount, "vector_route_ran", vectorRouteRan, "revision_ready", revisionEmbeddingReady,
+			"fallback_reason", fallbackReason,
 			"vector_search_configured", m.revisionSearcher != nil || m.embedder != nil,
 			"hits", hits, "embedding_receipts", embeddingReceipts, "elapsed_ms", time.Since(started).Milliseconds(), "error_type", fmt.Sprintf("%T", returnErr))
 	}()
 	var permitted bool
 	filter, permitted = scopedDocumentFilter(ctx, filter)
 	if !permitted {
+		fallbackReason = "document_scope_empty"
 		return nil, nil, nil
 	}
 	if !SearchQueryWithinBudget(query) {
@@ -1361,7 +1374,8 @@ func (m *Manager) searchResultsModeAtRevision(
 					return nil, nil, fmt.Errorf("pinned revision vector search failed: %w", vErr)
 				}
 				if !errors.Is(vErr, ErrEmbeddingUnavailable) {
-					logger.Error("[knowledge] frozen revision 向量搜索失败", "error", vErr)
+					fallbackReason = "vector_search_failed"
+					trace.L(ctx).Error("[knowledge] frozen revision 向量搜索失败", "error", vErr)
 				}
 			} else if ran {
 				if err := appendQueryEmbeddingReceipt(
@@ -1399,7 +1413,8 @@ func (m *Manager) searchResultsModeAtRevision(
 			observeRetrievalLane(ctx, RetrievalLaneVector, time.Since(vectorStarted), len(vres), vErr, false)
 			if vErr != nil {
 				if !errors.Is(vErr, ErrEmbeddingUnavailable) {
-					logger.Error("[knowledge] active revision 向量搜索失败", "error", vErr)
+					fallbackReason = "vector_search_failed"
+					trace.L(ctx).Error("[knowledge] active revision 向量搜索失败", "error", vErr)
 				}
 			} else if ran {
 				if receipt != nil {
@@ -1440,13 +1455,15 @@ func (m *Manager) searchResultsModeAtRevision(
 			if err != nil {
 				observeRetrievalLane(ctx, RetrievalLaneVector, time.Since(vectorStarted), 0, err, false)
 				if !errors.Is(err, ErrEmbeddingUnavailable) {
-					logger.Error("[knowledge] 查询向量嵌入失败", "error", err)
+					fallbackReason = "query_embedding_failed"
+					trace.L(ctx).Error("[knowledge] 查询向量嵌入失败", "error", err)
 				}
 			} else if len(qv) > 0 {
 				vres, vErr := m.searcher.VectorSearch(ctx, qv[0], candidateK, filter)
 				observeRetrievalLane(ctx, RetrievalLaneVector, time.Since(vectorStarted), len(vres), vErr, false)
 				if vErr != nil {
-					logger.Error("[knowledge] 向量搜索失败", "error", vErr)
+					fallbackReason = "vector_search_failed"
+					trace.L(ctx).Error("[knowledge] 向量搜索失败", "error", vErr)
 				} else {
 					list, mergeErr := mergeRanked(resultMap, vres, true)
 					if mergeErr != nil {

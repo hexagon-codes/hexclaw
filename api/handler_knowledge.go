@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hexagon-codes/hexagon/observe/trace"
 	"github.com/hexagon-codes/hexclaw/config"
 	"github.com/hexagon-codes/hexclaw/internal/inputlimits"
 	"github.com/hexagon-codes/hexclaw/internal/upstreamerr"
@@ -891,8 +892,9 @@ func (s *Server) handleSearchKnowledge(w http.ResponseWriter, r *http.Request) {
 		CreatedBefore: createdBefore,
 	}
 
+	ctx := trace.WithLogger(r.Context(), trace.NewRequest(knowledgePrincipalID(r), "").With("source", "knowledge_search"))
 	results, receipts, err := s.kb.SearchWithFilterReceipt(
-		r.Context(), req.Query, topK, filter,
+		ctx, req.Query, topK, filter,
 	)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{
