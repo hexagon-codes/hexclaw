@@ -8,7 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/hexagon-codes/hexagon/observe/trace"
+	"github.com/hexagon-codes/toolkit/util/logger"
 	"image"
 	_ "image/jpeg"
 	_ "image/png"
@@ -109,31 +109,41 @@ func (o *GradingOrchestrator) photoGradingCacheKey(ctx context.Context, in Start
 		ImageTaskContext              any
 	}{photoGradingCacheContract, owner, photoGradingRequestDigest(in.Photo), profile, child, snap, budget, in.Photo.SolveOutputVersion,
 		in.Photo.ParentTeachingContract, in.Photo.ParentTeachingSkillSnapshot, report, imageTaskContext})
-	trace.L(ctx).Info("Photo grading cache identity frozen", "agent_id", in.Photo.AgentName, "source_kind", in.SourceKind, "source_key", in.SourceKey,
+	logger.FromContext(ctx).Info("Photo grading cache identity frozen", "agent_id", in.Photo.AgentName, "source_kind", in.SourceKind, "source_key", in.SourceKey,
 		"cache_key", key, "image_digest", photoGradingImageDigest(in.Photo.Image), "profile_digest", digestJSON([]any{profile, child}),
 		"model_digest", digestJSON(snap), "budget_digest", digestJSON(budget), "teaching_digest", digestJSON(report), "intent_digest", digestJSON(imageTaskContext))
 	return key, nil
 }
 
-func (o *GradingOrchestrator) validCachedPhotoResult(ctx context.Context, agent string, cached k12storage.PhotoGradingReuse) (GradingJobView, bool, error) {
+func (o *GradingOrchestrator) validCachedPhotoResult(ctx context.Context, agent string, cached k12storage.PhotoGradingReuse) (job GradingJobView, reusable bool, resultErr error) {
+	reason := "job_unavailable_or_incomplete"
+	defer func() {
+		if !reusable {
+			logger.FromContext(ctx).Info("Photo grading cache candidate unavailable", "agent_id", agent, "source_job_id", cached.JobID, "artifact_id", cached.ArtifactID, "reason", reason, "error_type", fmt.Sprintf("%T", resultErr))
+		}
+	}()
 	job, err := o.deps.GetGradingJob(ctx, agent, cached.JobID)
 	if err != nil || job.Record.Status != k12.GradingStageCompleted {
 		return job, false, err
 	}
+	reason = "final_artifact_unavailable"
 	artifact, err := o.deps.Records.GetGradingFinalArtifactByJob(ctx, agent, cached.JobID)
 	if err != nil {
 		return job, false, err
 	}
+	reason = "final_artifact_identity_changed"
 	if artifact.ArtifactID != cached.ArtifactID || artifact.ArtifactDigest != cached.ArtifactDigest ||
 		artifact.Validate() != nil || artifact.ArtifactDigest != k12.ComputeGradingFinalArtifactDigest(artifact) ||
 		artifact.CoverageStatus != k12.GradingFinalArtifactCoverageComplete {
 		return job, false, nil
 	}
 	if artifact.HasAnnotatedAsset() {
+		reason = "annotated_asset_unavailable"
 		if _, err := o.deps.Records.OpenGradingFinalAnnotatedAsset(ctx, agent, artifact.ArtifactID); err != nil {
 			return job, false, err
 		}
 	}
+	reason = "assessment_set_unavailable"
 	items, err := o.deps.Records.ListEffectiveGradingAssessments(ctx, agent, cached.JobID)
 	if err != nil {
 		return job, false, err
@@ -141,14 +151,17 @@ func (o *GradingOrchestrator) validCachedPhotoResult(ctx context.Context, agent 
 	if len(items) != artifact.TotalCount {
 		return job, false, nil
 	}
+	reason = "source_owner_unavailable"
 	owner, err := resolveGradingGroundingTextbookOwner(ctx, o.deps, job)
 	if err != nil {
 		return job, false, err
 	}
 	for _, item := range items {
+		reason = "verification_execution_failed"
 		if failed, failureErr := failedAssessmentVerification(ctx, o.deps, item); failed != nil || failureErr != nil {
 			return job, false, failureErr
 		}
+		reason = "assessment_not_reusable"
 		switch item.Status {
 		case k12.GradingAssessmentCorrect, k12.GradingAssessmentWrong, k12.GradingAssessmentProcessIssue,
 			k12.GradingAssessmentBlankSolved, k12.GradingAssessmentAnswerUnclear,
@@ -161,12 +174,14 @@ func (o *GradingOrchestrator) validCachedPhotoResult(ctx context.Context, agent 
 			return job, false, nil
 		}
 		if item.AnswerSource != nil && item.AnswerSource.Kind == k12.ProblemAnswerAsset {
+			reason = "answer_asset_no_longer_valid"
 			if err := o.deps.Records.ValidateProblemAssetAdoption(ctx, owner, item.AnswerSource.AdoptionID); err != nil {
 				return job, false, err
 			}
 		}
 	}
 	// 内容不确定可以是正常终态；技术失败、在途或结果未知不能成为新消息的完成来源。
+	reason = "model_calls_not_succeeded"
 	parents, err := o.deps.Records.ListModelInvocations(ctx, agent, cached.JobID)
 	if err != nil {
 		return job, false, err
@@ -176,6 +191,7 @@ func (o *GradingOrchestrator) validCachedPhotoResult(ctx context.Context, agent 
 			return job, false, nil
 		}
 	}
+	reason = "physical_calls_not_succeeded"
 	physical, err := o.deps.Records.ListModelPhysicalInvocations(ctx, agent, cached.JobID)
 	if err != nil {
 		return job, false, err
@@ -185,6 +201,7 @@ func (o *GradingOrchestrator) validCachedPhotoResult(ctx context.Context, agent 
 			return job, false, nil
 		}
 	}
+	reason = "grading_item_calls_not_succeeded"
 	operations, err := o.deps.Records.ListGradingItemInvocations(ctx, agent, cached.JobID)
 	if err != nil {
 		return job, false, err
@@ -222,11 +239,11 @@ func (o *GradingOrchestrator) findPhotoGradingReuse(ctx context.Context, in Star
 		slog.Warn("K12 photo grading cache lookup failed", "agent_id", in.Photo.AgentName, "error", err)
 		return GradingJobView{}, false, nil
 	}
-	trace.L(ctx).Info("Photo grading cache lookup completed", "agent_id", in.Photo.AgentName, "source_key", in.SourceKey, "cache_key", cacheKey, "candidate_count", len(candidates))
+	logger.FromContext(ctx).Info("Photo grading cache lookup completed", "agent_id", in.Photo.AgentName, "source_key", in.SourceKey, "cache_key", cacheKey, "candidate_count", len(candidates))
 	for _, cached := range candidates {
 		job, valid, err := o.validCachedPhotoResult(ctx, in.Photo.AgentName, cached)
 		if err != nil || !valid {
-			trace.L(ctx).Info("Photo grading cache candidate rejected", "agent_id", in.Photo.AgentName, "source_job_id", cached.JobID,
+			logger.FromContext(ctx).Info("Photo grading cache candidate rejected", "agent_id", in.Photo.AgentName, "source_job_id", cached.JobID,
 				"artifact_id", cached.ArtifactID, "reason", "frozen_result_not_reusable", "error_type", fmt.Sprintf("%T", err))
 			continue
 		}
@@ -237,7 +254,7 @@ func (o *GradingOrchestrator) findPhotoGradingReuse(ctx context.Context, in Star
 		slog.Info("K12 photo grading result reused", "agent_id", in.Photo.AgentName, "source_kind", in.SourceKind, "source_key", in.SourceKey, "source_job_id", cached.JobID, "artifact_id", cached.ArtifactID)
 		return job, true, nil
 	}
-	trace.L(ctx).Info("Photo grading cache miss", "agent_id", in.Photo.AgentName, "source_key", in.SourceKey, "cache_key", cacheKey, "candidate_count", len(candidates))
+	logger.FromContext(ctx).Info("Photo grading cache miss", "agent_id", in.Photo.AgentName, "source_key", in.SourceKey, "cache_key", cacheKey, "candidate_count", len(candidates))
 	return GradingJobView{}, false, nil
 }
 
