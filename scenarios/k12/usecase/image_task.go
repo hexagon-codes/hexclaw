@@ -2012,7 +2012,10 @@ func (c *ImageTaskCoordinator) continueTarget(
 			return view, err
 		}
 		view.Homework = &submission
-		accepted := c.Grading.StartAsync(job.Record.RecordID)
+		accepted := false
+		if job.Record.Status != k12.GradingStageCompleted {
+			accepted = c.Grading.StartAsync(job.Record.RecordID)
+		}
 		elapsedMS := int64(0)
 		if view.Dispatch.AutomaticStartedAt > 0 {
 			elapsedSeconds := c.now() - view.Dispatch.AutomaticStartedAt

@@ -276,6 +276,8 @@ type RecognizedQuestion struct {
 }
 
 type assessmentQuestionSource struct {
+	// 仅在评估副本实际合并了清晰公共父题后置真，不以父题 ID 的存在推断完整材料。
+	parentComplete   bool
 	problemID        string
 	inputDigest      string
 	raw              string

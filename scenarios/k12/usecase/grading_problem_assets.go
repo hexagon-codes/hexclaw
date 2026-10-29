@@ -16,10 +16,11 @@ import (
 	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
 )
 
-// gradingProblemAssetFacts 只为当前已可靠冻结的独立题建立精确身份。
-// 复合题和图表依赖尚未形成完整事实快照时继续原求解链，不以一个片段发布资产。
+// gradingProblemAssetFacts 为可靠冻结的完整求解输入建立精确身份。
+// 子题须已实际合并清晰公共材料；图表依赖仍沿原求解链，不以相似片段复用答案。
 func gradingProblemAssetFacts(q RecognizedQuestion, req GradeRequest) (k12.ProblemAssetFacts, bool) {
-	if q.ParentProblemID != "" || q.ProblemKind == ProblemKindCompoundParent || q.parentSourceUnclear ||
+	completeParent := q.assessmentSource != nil && q.assessmentSource.parentComplete
+	if (q.ParentProblemID != "" && !completeParent) || q.ProblemKind == ProblemKindCompoundParent || q.parentSourceUnclear ||
 		q.ConfirmationRequired || q.ConfirmedVersion < 1 || q.InputDigest == "" || req.Subject != "数学" ||
 		strings.TrimSpace(req.Problem) == "" {
 		return k12.ProblemAssetFacts{}, false

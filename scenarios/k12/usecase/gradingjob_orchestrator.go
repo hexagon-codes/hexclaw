@@ -228,6 +228,10 @@ func (o *GradingOrchestrator) StartPhotoGradingJob(ctx context.Context, in Start
 	if err := validateGradingSourceIdentity(in.SourceKind, in.SourceKey); err != nil {
 		return GradingJobView{}, false, err
 	}
+	// 单进程创建边界按来源串行；缓存采用与普通创建不能为同一消息各自产生结果。
+	sourceLock := o.jobLock("photo-source:" + in.Photo.AgentName + ":" + k12.BuildGradingIdempotencyKey(in.SourceKind, in.SourceKey, 0))
+	sourceLock.Lock()
+	defer sourceLock.Unlock()
 	if strings.TrimSpace(in.SourceKind) == "image_task" {
 		if in.BudgetSnapshot.PolicyVersion == 0 {
 			return GradingJobView{}, false, fmt.Errorf(
@@ -252,6 +256,9 @@ func (o *GradingOrchestrator) StartPhotoGradingJob(ctx context.Context, in Start
 			)
 		}
 	}
+	if reused, found, err := o.replayPhotoGradingReuse(ctx, in); err != nil || found {
+		return reused, false, err
+	}
 	submissionID := scopedPhotoSubmissionID(
 		in.Photo.Image,
 		in.SourceKind,
@@ -264,6 +271,7 @@ func (o *GradingOrchestrator) StartPhotoGradingJob(ctx context.Context, in Start
 		return GradingJobView{}, false, err
 	}
 	created := false
+	cacheKey := ""
 	if found {
 		if policyErr := k12.ValidateGradingRecognizingRequestPolicy(
 			v.Fields.ModelSnapshot,
@@ -426,10 +434,29 @@ func (o *GradingOrchestrator) StartPhotoGradingJob(ctx context.Context, in Start
 				in.ParentAutomaticDeadlineAt = deadline
 			}
 		}
+		cacheBudget := in.BudgetSnapshot
+		if !cacheBudget.IsFrozen() {
+			cacheBudget = o.deps.GradingBudgetSnapshot
+		}
+		if trustedRecognitionPolicy != nil {
+			cacheBudget = cacheBudget.WithRecognitionPolicyFrom(*trustedRecognitionPolicy)
+		}
+		cacheKey, err = o.photoGradingCacheKey(ctx, in, snap, cacheBudget)
+		if err == nil {
+			if reused, found, reuseErr := o.findPhotoGradingReuse(ctx, in, cacheKey); reuseErr == nil && found {
+				return reused, false, nil
+			} else if reuseErr != nil {
+				return GradingJobView{}, false, reuseErr
+			}
+		} else {
+			// 缓存身份缺失不阻断正常批改，也不把查询失败记成命中。
+			slog.Warn("K12 photo grading cache identity unavailable", "agent_id", in.Photo.AgentName, "error", err)
+			cacheKey = ""
+		}
 		v, created, err = o.deps.CreateGradingJob(ctx, in.Photo.AgentName, in.Photo.SourceSession, CreateGradingJobInput{
 			// Submission 聚合未落库（§6.9 类型化存储待接线）：新任务以图片摘要和
 			// canonical source command 的组合摘要为提交标识。同一来源命令重放稳定
-			// 命中；不同来源即使图片字节相同也必须隔离 Problem/Attempt 事实域。
+			// 命中；未采用完整冻结结果的新来源独立建立 Problem/Attempt 事实域。
 			SubmissionID:                submissionID,
 			SourceKind:                  in.SourceKind,
 			SourceKey:                   in.SourceKey,
@@ -464,6 +491,11 @@ func (o *GradingOrchestrator) StartPhotoGradingJob(ctx context.Context, in Start
 	// §6.15：原图与运行时状态即刻落盘（崩溃后从检查点恢复的载体；见 *_runtime.go 设计申报）。
 	if err := o.persistRun(v.Record.RecordID, run); err != nil {
 		return GradingJobView{}, false, fmt.Errorf("usecase: 固化批改任务运行时: %w", err)
+	}
+	if created && cacheKey != "" {
+		if err := o.deps.Records.RegisterPhotoGradingCache(ctx, in.Photo.AgentName, v.Record.RecordID, cacheKey); err != nil {
+			slog.Warn("K12 photo grading cache registration failed", "job_id", v.Record.RecordID, "error", err)
+		}
 	}
 	return v, created, nil
 }
@@ -639,6 +671,7 @@ func (o *GradingOrchestrator) runLoop(ctx context.Context, run *gradingRun, jobI
 					return v, err
 				}
 			}
+			o.publishPhotoGradingCache(ctx, run, v)
 			return v, nil
 		default:
 			// completed / cancelled / failed_retryable / failed_terminal：推进结束。

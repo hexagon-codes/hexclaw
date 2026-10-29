@@ -1291,6 +1291,11 @@ func RecognizedQuestionsForAssessmentForInitialReadMode(questions []RecognizedQu
 					canonicalVersion: question.CanonicalVersion, confirmedVersion: question.ConfirmedVersion,
 				}
 			}
+			if question.assessmentSource != nil {
+				source := *question.assessmentSource
+				source.parentComplete = false
+				question.assessmentSource = &source
+			}
 			if parent, ok := parents[question.ParentProblemID]; ok {
 				composed := strings.TrimSpace(RecognizedQuestionDisplayText(parent)) + "\n\n" + strings.TrimSpace(RecognizedQuestionDisplayText(question))
 				// 这是仅供 Assessment port 消费的副本；覆盖副本 canonical 才能穿过
@@ -1300,6 +1305,9 @@ func RecognizedQuestionsForAssessmentForInitialReadMode(questions []RecognizedQu
 				// 子题解答依赖公共题干；只向其传递真实内容风险，不改变原始父/子事实。
 				parent = NormalizeRecognizedQuestionForInitialReadMode(parent, initialReadMode)
 				question.parentSourceUnclear = parent.ConfirmationRequired
+				if question.assessmentSource != nil {
+					question.assessmentSource.parentComplete = !parent.ConfirmationRequired && strings.TrimSpace(RecognizedQuestionDisplayText(parent)) != ""
+				}
 			}
 		}
 		out = append(out, question)
