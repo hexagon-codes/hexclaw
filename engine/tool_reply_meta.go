@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/hexagon-codes/ai-core/llm"
+	"github.com/hexagon-codes/hexagon/observe/trace"
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/internal/mediaflow"
 	"github.com/hexagon-codes/hexclaw/internal/requestcancel"
@@ -82,7 +83,17 @@ func confirmConsumedToolSkillContexts(ctx context.Context, messages []llm.Messag
 		return
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	defer func() {
+		raw := s.m[skillContextReceiptsMetadataKey]
+		s.mu.Unlock()
+		var receipts []skill.ContextReceipt
+		if json.Unmarshal([]byte(raw), &receipts) != nil {
+			return
+		}
+		for _, receipt := range receipts {
+			trace.L(ctx).Info("Skill context consumed by provider", "skill", receipt.Name, "skill_version", receipt.Version, "content_digest", receipt.ContentDigest, "status", receipt.Status)
+		}
+	}()
 	if prepared, _ := ctx.Value(preparedSkillContextKey{}).(*preparedSkillContext); prepared != nil && prepared.prompt != "" {
 		for _, message := range messages {
 			if message.Role != llm.RoleSystem || !strings.Contains(message.Content, prepared.prompt) {

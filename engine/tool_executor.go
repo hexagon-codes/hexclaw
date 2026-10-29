@@ -96,6 +96,8 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolName string, args map[st
 		if ok {
 			call.Source = "skill"
 			skillName := s.Name()
+			trace.L(ctx).Info("Skill execution resolved", "tool", toolName, "skill", skillName, "routed_agent", skill.CurrentInvocation(ctx).RoutedAgentName,
+				"pipeline_enabled", featureflag.Enabled(ctx, skill.FlagSkillPipelineV1))
 			// v0.4.0 G2：flag skill.pipeline.v1 ON 时 Skill 走 7 阶段 pipeline，
 			// 触发 Loading / Verification / Persistence / Improvement 钩子；
 			// flag OFF 退化到直接 Execute（与 v0.3 行为一致）。

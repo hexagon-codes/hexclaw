@@ -109,6 +109,11 @@ func (tc *ToolCollector) collectFiltered(query string, act skill.Activation, sel
 		} else {
 			skills = tc.skills.All()
 		}
+		if selection != nil {
+			for _, candidate := range skills {
+				selection.SkillCandidates = append(selection.SkillCandidates, candidate.Name())
+			}
+		}
 		for _, s := range skills {
 			// persona/prompt 类技能（skill.ContentLoader，无副作用、Execute 只回吐 prompt 正文）不是
 			// 可调用工具：其激活方式是把正文注入 system prompt（挂载 → buildMountedSkillsPrompt），而非
