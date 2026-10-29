@@ -15,6 +15,7 @@ import (
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/egress"
 	"github.com/hexagon-codes/hexclaw/skill"
+	"github.com/hexagon-codes/toolkit/util/logger"
 )
 
 const selfContextReceiptKey = "self_context_receipt"
@@ -119,6 +120,8 @@ func withRuntimeSnapshots(ctx context.Context, msg *adapter.Message, sessionID s
 	if msg == nil {
 		return ctx
 	}
+	// 在平台入口桥接请求日志，用例层只依赖已有日志接口。
+	ctx = logger.ContextWithLogger(ctx, logger.NewWithHandler(trace.L(ctx).Handler()))
 	sourceMessageID := msg.Metadata["source_message_id"]
 	if sourceMessageID == "" {
 		sourceMessageID = msg.ID
@@ -147,21 +150,25 @@ func (e *ReActEngine) withRuntimeSnapshots(ctx context.Context, msg *adapter.Mes
 			collector.base["session_title_source"] = "current_session_record"
 		}
 	}
+	name := strings.TrimSpace(msg.Metadata["routed_agent"])
+	if name == "" {
+		name = strings.TrimSpace(msg.Metadata["role"])
+	}
+	resolved, metadataDigest, configured := name, "", false
+	var configuredSkills []string
 	if router := e.getAgentRouter(); router != nil {
-		name := strings.TrimSpace(msg.Metadata["routed_agent"])
-		if name == "" {
-			name = strings.TrimSpace(msg.Metadata["role"])
-		}
 		if cfg, ok := router.GetAgent(name); ok && cfg != nil {
 			collector.base["agent_display_name"] = cfg.DisplayName
 			collector.base["agent_display_name_source"] = "routed_agent_configuration"
 			metadata, _ := json.Marshal(cfg.Metadata)
 			digest := sha256.Sum256(metadata)
-			trace.L(ctx).Info("Agent routing context resolved", "request_id", messageRequestID(msg), "source_message_id", collector.base["source_message_id"],
-				"session_id", sessionID, "platform", msg.Platform, "platform_instance_id", msg.InstanceID,
-				"requested_agent", name, "resolved_agent", cfg.Name, "agent_metadata_digest", hex.EncodeToString(digest[:]), "configured_skills", cfg.Skills)
+			resolved, metadataDigest, configured = cfg.Name, hex.EncodeToString(digest[:]), true
+			configuredSkills = append([]string(nil), cfg.Skills...)
 		}
 	}
+	trace.L(ctx).Info("Agent routing context resolved", "request_id", messageRequestID(msg), "source_message_id", collector.base["source_message_id"],
+		"session_id", sessionID, "platform", msg.Platform, "platform_instance_id", msg.InstanceID,
+		"requested_agent", name, "resolved_agent", resolved, "agent_configured", configured, "agent_metadata_digest", metadataDigest, "configured_skills", configuredSkills)
 	if msg.Platform == adapter.PlatformDingtalk && msg.InstanceID != "" {
 		for _, key := range []string{"channel_instance_name", "channel_instance_name_source"} {
 			if value := strings.TrimSpace(msg.Metadata[key]); value != "" {
