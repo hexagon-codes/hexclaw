@@ -163,7 +163,7 @@ func completeKnowledgePDFPageOCR(
 
 // 版本信息通过 -ldflags 注入；桌面打包身份用于在不执行目标文件时校验产物版本。
 var (
-	version                = "v0.5.1"
+	version                = "v0.5.2"
 	commit                 = "none"
 	date                   = "unknown"
 	sidecarVersionIdentity = "hexclaw-sidecar-version=development;"

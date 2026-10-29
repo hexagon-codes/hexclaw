@@ -15,7 +15,7 @@ HexClaw is an Agent service written in Go. Run it independently, as the local Si
 
 Beyond conversation, HexClaw can process files, generate documents and images, execute code, run workflows, and deliver results to configured channels. Models, tools, and scenario capabilities are connected through configuration, and data belongs to the backend in use.
 
-> This README describes the `v0.5.1` source. Published binaries, images, and desktop installers follow their selected Release. Desktop still pins backend `refs/tags/v0.5.0`; publish the backend `v0.5.1` tag, update that pin, then build desktop installers.
+> This README describes the `v0.5.2` source. Published binaries, images, and desktop installers follow their selected Release. Desktop currently pins backend `refs/tags/v0.5.1`; complete backend `v0.5.2` CI, deployment, and tagging before updating that pin and building desktop installers.
 
 ![A HexClaw-powered K12 scenario in Desktop returning the original homework image with annotations](.github/assets/hexclaw-k12-workspace.png)
 
