@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/hexagon-codes/ai-core/llm"
+	"github.com/hexagon-codes/hexagon/observe/trace"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/usecase"
@@ -96,6 +97,9 @@ func (s *GradeSkill) Execute(ctx context.Context, args map[string]any) (*skill.R
 	}
 
 	knowledgePoints := argStrSlice(args, "knowledge_points")
+	trace.L(ctx).Info("K12 skill context resolved", "request_id", invocation.RequestID, "session_id", invocation.SessionID,
+		"source_message_id", invocation.SourceMessageID, "resolved_agent", agent, "effective_grade", grade, "grade_from_profile", argStr(args, "grade") == "",
+		"subject", argStr(args, "subject"), "has_student_answer", argStr(args, "student_answer") != "")
 	res, err := s.deps.GradeHomeworkProblem(ctx, usecase.GradeRequest{
 		AgentName:        agent,
 		Subject:          argStr(args, "subject"),

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/hexagon-codes/hexagon/observe/trace"
 	"image"
 	_ "image/jpeg"
 	_ "image/png"
@@ -108,6 +109,9 @@ func (o *GradingOrchestrator) photoGradingCacheKey(ctx context.Context, in Start
 		ImageTaskContext              any
 	}{photoGradingCacheContract, owner, photoGradingRequestDigest(in.Photo), profile, child, snap, budget, in.Photo.SolveOutputVersion,
 		in.Photo.ParentTeachingContract, in.Photo.ParentTeachingSkillSnapshot, report, imageTaskContext})
+	trace.L(ctx).Info("Photo grading cache identity frozen", "agent_id", in.Photo.AgentName, "source_kind", in.SourceKind, "source_key", in.SourceKey,
+		"cache_key", key, "image_digest", photoGradingImageDigest(in.Photo.Image), "profile_digest", digestJSON([]any{profile, child}),
+		"model_digest", digestJSON(snap), "budget_digest", digestJSON(budget), "teaching_digest", digestJSON(report), "intent_digest", digestJSON(imageTaskContext))
 	return key, nil
 }
 
@@ -218,9 +222,12 @@ func (o *GradingOrchestrator) findPhotoGradingReuse(ctx context.Context, in Star
 		slog.Warn("K12 photo grading cache lookup failed", "agent_id", in.Photo.AgentName, "error", err)
 		return GradingJobView{}, false, nil
 	}
+	trace.L(ctx).Info("Photo grading cache lookup completed", "agent_id", in.Photo.AgentName, "source_key", in.SourceKey, "cache_key", cacheKey, "candidate_count", len(candidates))
 	for _, cached := range candidates {
 		job, valid, err := o.validCachedPhotoResult(ctx, in.Photo.AgentName, cached)
 		if err != nil || !valid {
+			trace.L(ctx).Info("Photo grading cache candidate rejected", "agent_id", in.Photo.AgentName, "source_job_id", cached.JobID,
+				"artifact_id", cached.ArtifactID, "reason", "frozen_result_not_reusable", "error_type", fmt.Sprintf("%T", err))
 			continue
 		}
 		if err := o.deps.Records.AdoptPhotoGradingCache(ctx, in.Photo.AgentName,
@@ -230,6 +237,7 @@ func (o *GradingOrchestrator) findPhotoGradingReuse(ctx context.Context, in Star
 		slog.Info("K12 photo grading result reused", "agent_id", in.Photo.AgentName, "source_kind", in.SourceKind, "source_key", in.SourceKey, "source_job_id", cached.JobID, "artifact_id", cached.ArtifactID)
 		return job, true, nil
 	}
+	trace.L(ctx).Info("Photo grading cache miss", "agent_id", in.Photo.AgentName, "source_key", in.SourceKey, "cache_key", cacheKey, "candidate_count", len(candidates))
 	return GradingJobView{}, false, nil
 }
 

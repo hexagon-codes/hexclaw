@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/hexagon-codes/hexagon/observe/trace"
 	"mime"
 	"strings"
 
@@ -255,6 +256,7 @@ func (d Deps) PreparePrintableArtifact(ctx context.Context,
 		}
 		render, renderErr := d.Records.GetPrintArtifactRender(ctx, req.AgentName, artifact.ArtifactID)
 		if renderErr == nil {
+			trace.L(ctx).Info("Frozen PDF artifact reused", "agent_id", req.AgentName, "source_kind", req.SourceKind, "source_ref", req.SourceRef, "artifact_id", frozen.ArtifactID)
 			return PrintableArtifactView{Artifact: frozen, Render: render}, true, nil
 		}
 		if !errors.Is(renderErr, records.ErrNotFound) {
@@ -298,6 +300,7 @@ func (d Deps) PreparePrintableArtifact(ctx context.Context,
 		return PrintableArtifactView{}, false,
 			fmt.Errorf("usecase: freeze 打印 Artifact/PDF: %w", err)
 	}
+	trace.L(ctx).Info("PDF artifact prepared", "agent_id", req.AgentName, "source_kind", req.SourceKind, "source_ref", req.SourceRef, "artifact_id", frozenArtifact.ArtifactID, "replayed", replay)
 	return PrintableArtifactView{Artifact: frozenArtifact, Render: frozenRender}, replay, nil
 }
 
