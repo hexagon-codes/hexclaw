@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/hexagon-codes/hexagon"
+	"github.com/hexagon-codes/hexagon/observe/trace"
 
 	"github.com/hexagon-codes/hexclaw/egress"
 	"github.com/hexagon-codes/hexclaw/storage"
@@ -112,6 +113,12 @@ func (c *Compactor) Compact(ctx context.Context, sessionID string, provider hexa
 	if len(oldMsgs) == 0 {
 		return 0, nil
 	}
+	started := time.Now()
+	providerName := ""
+	if provider != nil {
+		providerName = provider.Name()
+	}
+	trace.L(ctx).Info("Conversation compaction started", "session_id", sessionID, "source_messages", len(oldMsgs), "keep_recent", keepCount, "provider", providerName)
 
 	// 摘要前继续保存原转录，数据库消息和附件也保持可回放。
 	if c.archiver != nil {
@@ -156,6 +163,7 @@ func (c *Compactor) Compact(ctx context.Context, sessionID string, provider hexa
 
 	compactedCount := len(oldMsgs)
 	logger.Info("上下文压缩完成: session", "session", sessionID, "compactedCount", compactedCount)
+	trace.L(ctx).Info("Conversation compaction completed", "session_id", sessionID, "summary_message_id", summaryMsg.ID, "source_messages", compactedCount, "elapsed_ms", time.Since(started).Milliseconds())
 	return compactedCount, nil
 }
 
