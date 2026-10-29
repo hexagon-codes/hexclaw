@@ -30,13 +30,13 @@ import (
 // DefaultHubBranch 是技能/MCP 市场未显式配置分支时的默认拉取分支。
 // 单一来源：hub.New 与 NewMcpHub 共用，避免两处硬编码漂移（曾出现 hub.go=v0.0.5 / mcp_hub.go=v0.0.2 不一致）。
 // 发版时随 config/defaults.go 的 Hub.Branch 一并更新。
-const DefaultHubBranch = "v0.0.13"
+const DefaultHubBranch = "v0.1.0"
 
 // HubConfig 技能市场配置
 type HubConfig struct {
 	Enabled bool   `yaml:"enabled"`
 	RepoURL string `yaml:"repo_url"` // 默认: https://github.com/hexagon-codes/hexclaw-hub
-	Branch  string `yaml:"branch"`   // 默认: v0.0.13
+	Branch  string `yaml:"branch"`   // 默认: v0.1.0
 }
 
 // MCPArtifact identifies the package release declared by a Hub MCP entry.
