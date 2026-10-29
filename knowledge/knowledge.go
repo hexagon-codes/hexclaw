@@ -20,6 +20,7 @@ package knowledge
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"math"
@@ -31,6 +32,7 @@ import (
 	"time"
 
 	"github.com/hexagon-codes/hexagon"
+	"github.com/hexagon-codes/hexagon/observe/trace"
 	hrag "github.com/hexagon-codes/hexagon/rag"
 	ragquery "github.com/hexagon-codes/hexagon/rag/query"
 	"github.com/hexagon-codes/hexagon/rag/reranker"
@@ -1198,7 +1200,33 @@ func (m *Manager) searchResultsModeAtRevision(
 	filter Filter,
 	strictFloor bool,
 	expectedRevisionID string,
-) ([]*SearchResult, []QueryEmbeddingReceipt, error) {
+) (returned []*SearchResult, embeddingReceipts []QueryEmbeddingReceipt, returnErr error) {
+	started := time.Now()
+	vectorRouteRan, revisionEmbeddingReady := false, false
+	candidateCount := 0
+	queryDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(query)))
+	trace.L(ctx).Info("Knowledge retrieval started", "query_digest", queryDigest, "query_chars", len([]rune(query)), "top_k", topK,
+		"document_ids", append([]string(nil), filter.DocumentIDs...), "strict_floor", strictFloor, "expected_revision_id", expectedRevisionID)
+	defer func() {
+		hits := make([]map[string]any, 0, len(returned))
+		for _, result := range returned {
+			if result == nil || result.Chunk == nil {
+				continue
+			}
+			hits = append(hits, map[string]any{"document_id": result.Chunk.DocID, "chunk_id": result.Chunk.ID,
+				"document_generation": result.Chunk.DocumentGeneration, "revision_id": result.Chunk.SemanticRevisionID,
+				"vector_score": result.VectorScore, "text_score": result.TextScore, "score": result.Chunk.Score,
+				"page_start": result.Chunk.PageStart, "page_end": result.Chunk.PageEnd})
+		}
+		outcome := "completed"
+		if returnErr != nil {
+			outcome = "failed"
+		}
+		trace.L(ctx).Info("Knowledge retrieval finished", "query_digest", queryDigest, "outcome", outcome, "hit_count", len(hits),
+			"candidate_count", candidateCount, "vector_route_ran", vectorRouteRan, "revision_ready", revisionEmbeddingReady,
+			"vector_search_configured", m.revisionSearcher != nil || m.embedder != nil,
+			"hits", hits, "embedding_receipts", embeddingReceipts, "elapsed_ms", time.Since(started).Milliseconds(), "error_type", fmt.Sprintf("%T", returnErr))
+	}()
 	var permitted bool
 	filter, permitted = scopedDocumentFilter(ctx, filter)
 	if !permitted {
@@ -1255,7 +1283,7 @@ func (m *Manager) searchResultsModeAtRevision(
 
 	// 1. 查询扩展（#8 HyDE + multi-query）。向量能力待机时直接走原始 query
 	// 的 FTS 路径：自动注入没有语义证据本就 fail-closed，调用辅助 LLM 只会平添延迟。
-	revisionEmbeddingReady := false
+	revisionEmbeddingReady = false
 	if planner != nil {
 		if planActive {
 			ready, readyErr := planner.RetrievalPlanReady(ctx, plan)
@@ -1288,7 +1316,7 @@ func (m *Manager) searchResultsModeAtRevision(
 	receipts := make([]QueryEmbeddingReceipt, 0)
 	// vectorRouteRan：查询时向量路是否真实跑通。嵌入/向量搜索失败（如 embedding 服务
 	// 不可用）时无语义证据可要求，严格地板退回宽召回语义，避免降级态下 RAG 全盲。
-	vectorRouteRan := false
+	vectorRouteRan = false
 	var executionProfile EmbeddingExecutionProfile
 	var hasExecutionProfile bool
 	if planActive {
@@ -1456,6 +1484,7 @@ func (m *Manager) searchResultsModeAtRevision(
 		}
 	}
 
+	candidateCount = len(resultMap)
 	if len(resultMap) == 0 {
 		return nil, receipts, nil
 	}
