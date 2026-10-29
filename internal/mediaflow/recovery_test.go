@@ -222,6 +222,11 @@ func (*explicitDeliveryRepository) PendingDeliveries(context.Context, int) ([]*m
 	return nil, nil
 }
 
+// 显式编排同时屏蔽普通与分页后台发现，发送和查询只由用例触发。
+func (*explicitDeliveryRepository) PendingDeliveriesAfter(context.Context, string, int) ([]*mediaflow.Delivery, error) {
+	return nil, nil
+}
+
 type controlledDelivery struct {
 	prepare func(context.Context, json.RawMessage) (string, error)
 	send    func(context.Context, json.RawMessage, string) (mediaflow.DeliveryOutcome, error)
