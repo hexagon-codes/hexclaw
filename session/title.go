@@ -35,7 +35,8 @@ func SuggestTitle(ctx context.Context, provider hexagon.Provider, messages []*st
 	}
 
 	temp := 0.2
-	ctx = egress.WithRequest(ctx, egress.PurposeGeneralChat, "", egress.ClassGeneral, egress.ClassMemory)
+	// 标题只消费本会话已有消息，不继承其他操作的敏感记忆分类。
+	ctx = egress.WithRequest(ctx, egress.PurposeGeneralChat, "session-title", egress.ClassGeneral)
 	resp, err := provider.Complete(ctx, hexagon.CompletionRequest{
 		Messages: []hexagon.Message{
 			{Role: "system", Content: titleSuggestionPrompt},

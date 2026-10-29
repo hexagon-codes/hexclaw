@@ -199,7 +199,8 @@ func (c *Compactor) generateSummary(ctx context.Context, msgs []*storage.Message
 	}
 
 	// 调用 LLM
-	ctx = egress.WithRequest(ctx, egress.PurposeGeneralChat, "", egress.ClassGeneral, egress.ClassMemory)
+	// 仅摘要本会话转录，不读取跨会话记忆或画像。
+	ctx = egress.WithRequest(ctx, egress.PurposeGeneralChat, "session-compaction", egress.ClassGeneral)
 	resp, err := provider.Complete(ctx, hexagon.CompletionRequest{
 		Messages: []hexagon.Message{
 			{Role: "user", Content: prompt},

@@ -18,6 +18,11 @@ func (p *egressSessionProvider) Name() string { return "egress-session" }
 func (p *egressSessionProvider) Complete(ctx context.Context, _ hexagon.CompletionRequest) (*hexagon.CompletionResponse, error) {
 	reqs, _ := egress.RequestsFromContext(ctx)
 	p.requests = append(p.requests, reqs)
+	for _, req := range reqs {
+		if err := (&egress.Policy{}).Guard(req); err != nil {
+			return nil, err
+		}
+	}
 	return &hexagon.CompletionResponse{Content: "summary"}, nil
 }
 func (p *egressSessionProvider) Stream(context.Context, hexagon.CompletionRequest) (*hexagon.LLMStream, error) {
@@ -28,14 +33,15 @@ func (p *egressSessionProvider) CountTokens([]llm.Message) (int, error) { return
 
 func requireSessionEgress(t *testing.T, reqs []egress.Request) {
 	t.Helper()
-	want := map[egress.DataClass]bool{egress.ClassGeneral: false, egress.ClassMemory: false}
+	want := map[egress.DataClass]bool{egress.ClassGeneral: false}
 	for _, req := range reqs {
 		if req.Purpose != egress.PurposeGeneralChat {
 			t.Fatalf("purpose=%s, want general_chat", req.Purpose)
 		}
-		if _, ok := want[req.DataClass]; ok {
-			want[req.DataClass] = true
+		if _, ok := want[req.DataClass]; !ok {
+			t.Fatalf("conversation transcript was classified as %s", req.DataClass)
 		}
+		want[req.DataClass] = true
 	}
 	for class, found := range want {
 		if !found {
@@ -44,7 +50,7 @@ func requireSessionEgress(t *testing.T, reqs []egress.Request) {
 	}
 }
 
-func TestSuggestTitle_LabelsConversationMemory(t *testing.T) {
+func TestSuggestTitle_LabelsConversationTranscript(t *testing.T) {
 	p := &egressSessionProvider{}
 	_, err := SuggestTitle(context.Background(), p, []*storage.MessageRecord{{Role: "user", Content: "hello"}})
 	if err != nil {
@@ -56,7 +62,7 @@ func TestSuggestTitle_LabelsConversationMemory(t *testing.T) {
 	requireSessionEgress(t, p.requests[0])
 }
 
-func TestCompactorGenerateSummary_LabelsConversationMemory(t *testing.T) {
+func TestCompactorGenerateSummary_LabelsConversationTranscript(t *testing.T) {
 	p := &egressSessionProvider{}
 	c := NewCompactor(newMockStore(), DefaultCompactionConfig())
 	_, err := c.generateSummary(context.Background(), []*storage.MessageRecord{{Role: "user", Content: "hello"}}, p)
