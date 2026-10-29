@@ -89,6 +89,7 @@ type DeliveryResolver func(context.Context, *Delivery) (DeliveryTransport, []jso
 type deliveryRuntime struct {
 	mu      sync.RWMutex
 	resolve DeliveryResolver
+	active  sync.Map // 同一交付只保留一个推进者，结束后立即释放。
 }
 
 // SetDeliveryResolver 只接线原渠道准备/发送/回执能力，不建立第二发送队列。
@@ -154,6 +155,17 @@ func (s *Service) runDeliveries() {
 }
 
 func (s *Service) advanceDelivery(ctx context.Context, repo DeliveryRepository, d *Delivery) error {
+	key := [2]string{d.Owner, d.ID}
+	if _, busy := s.deliveries.active.LoadOrStore(key, struct{}{}); busy {
+		return nil
+	}
+	defer s.deliveries.active.Delete(key)
+	// 候选可能来自后台旧快照，取得推进权后重新读取，避免覆盖更新后的回执。
+	current, err := repo.Delivery(ctx, d.Owner, d.ID)
+	if err != nil {
+		return err
+	}
+	*d = *current
 	if d.State == "delivered" || d.State == "cancelled" {
 		return nil
 	}
