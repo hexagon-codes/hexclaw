@@ -178,11 +178,11 @@ func TestModelCapabilityProbe_AutomaticVisionTimeoutDoesNotClaimUnsupported(t *t
 	cfg.LLM.Providers["custom"] = provider
 	srv := NewServer(cfg, &mockEngine{}, nil, store)
 	err := srv.ProbeSavedModelVisionCapability(context.Background(), bug20260728ProviderInstanceID, "gpt-5.6-terra", 120*time.Second)
-	if err == nil || !strings.Contains(err.Error(), "UPSTREAM_UNAVAILABLE") {
+	if err == nil || !strings.Contains(err.Error(), "PROBE_TIMEOUT") {
 		t.Fatalf("timeout error=%v, want unavailable evidence", err)
 	}
 	receipt, err := store.GetModelCapabilityProbeReceipt(context.Background(), bug20260728ProviderInstanceID, "gpt-5.6-terra", "vision")
-	if err != nil || receipt == nil || receipt.Outcome != "failed" || receipt.FailureCode != "UPSTREAM_UNAVAILABLE" {
+	if err != nil || receipt == nil || receipt.Outcome != "failed" || receipt.FailureCode != "PROBE_TIMEOUT" {
 		t.Fatalf("timeout receipt=%+v err=%v", receipt, err)
 	}
 	if receipt.ProbePolicyVersion != ModelCapabilityProbePolicyVersion || receipt.ConfigFingerprint != ModelCapabilityProbeConfigFingerprint("custom", provider, "gpt-5.6-terra") {

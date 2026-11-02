@@ -120,6 +120,12 @@ func TestHandleUpdateLLMConfig_RenamePreservesModelSpecsByStableInstance(t *test
 			for i := range want {
 				for _, original := range before.Providers["source"].ModelSpecs {
 					if original.ID == want[i].ID {
+						want[i].CapabilitiesSource = original.CapabilitiesSource
+						if explicit && !reflect.DeepEqual(want[i].Capabilities, original.Capabilities) {
+							want[i].CapabilitiesSource = config.LLMModelCapabilitiesSourceManual
+						}
+						want[i].CapabilitiesSourceFingerprint = original.CapabilitiesSourceFingerprint
+						want[i].CapabilitiesMetadataPresent = original.CapabilitiesMetadataPresent
 						want[i].NativeReasoningSupport = original.NativeReasoningSupport
 						want[i].NativeReasoningSourceFingerprint = original.NativeReasoningSourceFingerprint
 					}

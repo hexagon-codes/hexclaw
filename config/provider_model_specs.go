@@ -12,6 +12,11 @@ const (
 	LLMModelSpecsModeLegacy   = "legacy"
 	LLMModelSpecsModeExplicit = "explicit"
 
+	LLMModelCapabilitiesSourceManual        = "manual"
+	LLMModelCapabilitiesSourceCatalog       = "catalog"
+	LLMModelCapabilitiesSourcePreset        = "preset"
+	LLMModelCapabilitiesSourceLegacyUnknown = "legacy_unknown"
+
 	LLMModelCapabilityText            = "text"
 	LLMModelCapabilityVision          = "vision"
 	LLMModelCapabilityVideo           = "video"
@@ -20,6 +25,7 @@ const (
 	LLMModelCapabilityImageGeneration = "image_generation"
 	LLMModelCapabilityVideoGeneration = "video_generation"
 	LLMModelCapabilityEmbedding       = "embedding"
+	LLMModelCapabilityComputerUse     = "computer_use"
 
 	LLMReasoningSupportSupported   = "supported"
 	LLMReasoningSupportUnsupported = "unsupported"
@@ -50,6 +56,7 @@ var validLLMModelCapabilities = map[string]struct{}{
 	LLMModelCapabilityImageGeneration: {},
 	LLMModelCapabilityVideoGeneration: {},
 	LLMModelCapabilityEmbedding:       {},
+	LLMModelCapabilityComputerUse:     {},
 }
 
 var validLLMReasoningEfforts = map[string]struct{}{
@@ -85,11 +92,85 @@ type LLMProviderModelSpec struct {
 	DisplayName                      string                   `yaml:"display_name,omitempty" json:"display_name,omitempty"`
 	IsCustom                         bool                     `yaml:"is_custom,omitempty" json:"is_custom,omitempty"`
 	Capabilities                     []string                 `yaml:"capabilities" json:"capabilities"`
+	CapabilitiesSource               string                   `yaml:"capabilities_source,omitempty" json:"capabilities_source,omitempty"`
+	CapabilitiesSourceFingerprint    string                   `yaml:"capabilities_source_fingerprint,omitempty" json:"capabilities_source_fingerprint,omitempty"`
+	CapabilitiesMetadataPresent      bool                     `yaml:"capabilities_metadata_present,omitempty" json:"capabilities_metadata_present,omitempty"`
 	ReasoningSupport                 string                   `yaml:"reasoning_support,omitempty" json:"reasoning_support,omitempty"`
 	ReasoningControl                 *LLMReasoningControlSpec `yaml:"reasoning_control,omitempty" json:"reasoning_control,omitempty"`
 	NativeReasoningSupport           string                   `yaml:"native_reasoning_support,omitempty" json:"native_reasoning_support,omitempty"`
 	NativeReasoningSourceFingerprint string                   `yaml:"native_reasoning_source_fingerprint,omitempty" json:"native_reasoning_source_fingerprint,omitempty"`
 	Embedding                        *LLMEmbeddingModelSpec   `yaml:"embedding,omitempty" json:"embedding,omitempty"`
+}
+
+// ModelCapabilityEvidence 只承接当前配置指纹匹配的既有正向回执，不成为新的持久事实源。
+type ModelCapabilityEvidence struct {
+	SourceFingerprint string
+	Passed            []string
+}
+
+// ResolveEffectiveModelSpecs 在声明副本上补齐自动来源的精确能力，不改变持久配置。
+// 手动列表及旧显式未知来源（包括空列表）保留原义，失败或超时不推导为不支持。
+func ResolveEffectiveModelSpecs(providerKey string, provider LLMProviderConfig, evidence map[string]ModelCapabilityEvidence) LLMProviderConfig {
+	mode, specs := NormalizeProviderModelSpecs(provider)
+	resolved := provider
+	resolved.Models = append([]string(nil), provider.Models...)
+	resolved.ModelSpecsMode = LLMModelSpecsModeExplicit
+	resolved.ModelSpecs = specs
+	for index := range resolved.ModelSpecs {
+		spec := &resolved.ModelSpecs[index]
+		if spec.CapabilitiesSource == "" && mode == LLMModelSpecsModeExplicit {
+			spec.CapabilitiesSource = LLMModelCapabilitiesSourceLegacyUnknown
+		}
+		automatic := spec.CapabilitiesSource == LLMModelCapabilitiesSourceCatalog || spec.CapabilitiesSource == LLMModelCapabilitiesSourcePreset || mode == LLMModelSpecsModeLegacy
+		if !automatic {
+			continue
+		}
+		current := evidence[spec.ID]
+		if current.SourceFingerprint != "" && spec.CapabilitiesSourceFingerprint != "" && current.SourceFingerprint != spec.CapabilitiesSourceFingerprint {
+			// 自动目录跨执行配置后只保留原有文本兼容，不继承旧端点的媒体或执行协议。
+			if modelSpecHasCapabilities(*spec, []string{LLMModelCapabilityText}) {
+				spec.Capabilities = []string{LLMModelCapabilityText}
+			} else {
+				spec.Capabilities = []string{}
+			}
+			spec.CapabilitiesMetadataPresent = false
+		}
+		official, officialEndpoint := OfficialModelCapabilities(providerKey, provider, spec.ID)
+		if spec.CapabilitiesSource == LLMModelCapabilitiesSourcePreset && !officialEndpoint {
+			var retained []string
+			for _, capability := range spec.Capabilities {
+				if capability != LLMModelCapabilityComputerUse {
+					retained = append(retained, capability)
+				}
+			}
+			if retained == nil {
+				retained = []string{}
+			}
+			spec.Capabilities = retained
+		}
+		appendCapabilities := func(values []string) {
+			for _, capability := range values {
+				if _, valid := validLLMModelCapabilities[capability]; !valid {
+					continue
+				}
+				found := false
+				for _, declared := range spec.Capabilities {
+					found = found || declared == capability
+				}
+				if !found {
+					spec.Capabilities = append(spec.Capabilities, capability)
+				}
+			}
+		}
+		if officialEndpoint && !spec.CapabilitiesMetadataPresent {
+			appendCapabilities(official)
+		}
+		appendCapabilities(current.Passed)
+		if current.SourceFingerprint != "" {
+			spec.CapabilitiesSourceFingerprint = current.SourceFingerprint
+		}
+	}
+	return resolved
 }
 
 // NewProviderInstanceID creates a stable opaque provider identity. It contains
@@ -198,15 +279,15 @@ func NormalizeProviderModelSpecs(provider LLMProviderConfig) (string, []LLMProvi
 	if mode == LLMModelSpecsModeExplicit {
 		specs := make([]LLMProviderModelSpec, len(provider.ModelSpecs))
 		for i, spec := range provider.ModelSpecs {
-			// These two exact catalog IDs are intrinsic embedding-only models.
-			// Canonicalize even an explicit stale/malicious text declaration so
-			// old clients cannot route them to completion or tool probes. Keep
-			// presentation/ownership metadata because it does not affect routing.
-			if catalogSpec, ok := MigrateOpenRouterEmbeddingModelSpec(spec.ID); ok {
+			// 精确向量目录的旧自动声明继续迁移；手动数组原样保留，实际选路单独保持向量协议约束。
+			if catalogSpec, ok := MigrateOpenRouterEmbeddingModelSpec(spec.ID); ok && spec.CapabilitiesSource != LLMModelCapabilitiesSourceManual {
 				if spec.DisplayName != "" {
 					catalogSpec.DisplayName = spec.DisplayName
 				}
 				catalogSpec.IsCustom = spec.IsCustom
+				catalogSpec.CapabilitiesSource = spec.CapabilitiesSource
+				catalogSpec.CapabilitiesSourceFingerprint = spec.CapabilitiesSourceFingerprint
+				catalogSpec.CapabilitiesMetadataPresent = spec.CapabilitiesMetadataPresent
 				catalogSpec.ReasoningSupport = LLMReasoningSupportUnknown
 				catalogSpec.ReasoningControl = nil
 				nativeSpec := normalizeProviderModelReasoning(cloneProviderModelSpec(spec))
@@ -216,7 +297,7 @@ func NormalizeProviderModelSpecs(provider LLMProviderConfig) (string, []LLMProvi
 				continue
 			}
 			specs[i] = normalizeProviderModelReasoning(cloneProviderModelSpec(spec))
-			if spec.Capabilities == nil {
+			if spec.Capabilities == nil && spec.CapabilitiesSource != LLMModelCapabilitiesSourceManual {
 				specs[i].Capabilities = []string{LLMModelCapabilityText}
 			}
 		}
@@ -333,6 +414,10 @@ func modelSpecHasCapabilities(spec LLMProviderModelSpec, required []string) bool
 		return false
 	}
 	for _, capability := range required {
+		// 精确向量型号不因手动显示声明变成补全模型；空数组也保留原样。
+		if _, intrinsicEmbedding := MigrateOpenRouterEmbeddingModelSpec(spec.ID); intrinsicEmbedding && capability != LLMModelCapabilityEmbedding {
+			return false
+		}
 		found := false
 		for _, candidate := range spec.Capabilities {
 			if candidate == capability {
@@ -350,6 +435,11 @@ func modelSpecHasCapabilities(spec LLMProviderModelSpec, required []string) bool
 // ValidateProviderModelSpecs rejects ambiguous or internally inconsistent
 // capability declarations before config persistence or runtime hot reload.
 func ValidateProviderModelSpecs(provider LLMProviderConfig) error {
+	switch strings.ToLower(strings.TrimSpace(provider.APIProtocol)) {
+	case "", "auto", "responses", "chat_completions":
+	default:
+		return fmt.Errorf("unsupported api_protocol %q", provider.APIProtocol)
+	}
 	switch provider.ModelSpecsMode {
 	case "", LLMModelSpecsModeLegacy, LLMModelSpecsModeExplicit:
 	default:
@@ -382,6 +472,11 @@ func ValidateProviderModelSpecs(provider LLMProviderConfig) error {
 			return fmt.Errorf("model_specs[%d].id=%q 重复", i, spec.ID)
 		}
 		seenSpecs[spec.ID] = struct{}{}
+		switch spec.CapabilitiesSource {
+		case "", LLMModelCapabilitiesSourceManual, LLMModelCapabilitiesSourceCatalog, LLMModelCapabilitiesSourcePreset, LLMModelCapabilitiesSourceLegacyUnknown:
+		default:
+			return fmt.Errorf("model_specs[%d].capabilities_source is invalid", i)
+		}
 		switch spec.ReasoningSupport {
 		case LLMReasoningSupportSupported, LLMReasoningSupportUnsupported, LLMReasoningSupportUnknown:
 		default:

@@ -58,6 +58,7 @@ type LLMProviderConfigResponse struct {
 	ModelSpecs                       []config.LLMProviderModelSpec        `json:"model_specs"`
 	ModelSpecsMode                   string                               `json:"model_specs_mode"`
 	Compatible                       string                               `json:"compatible"`
+	APIProtocol                      string                               `json:"api_protocol,omitempty"`
 	Locality                         string                               `json:"locality,omitempty"`
 	LocalitySource                   string                               `json:"locality_source,omitempty"`
 	ConfirmedEndpointHost            string                               `json:"confirmed_endpoint_host,omitempty"`
@@ -117,6 +118,7 @@ type LLMProviderConfigUpdateItem struct {
 	Models                []string                            `json:"models,omitempty"`
 	ModelSpecs            *[]config.LLMProviderModelSpec      `json:"model_specs"`
 	Compatible            string                              `json:"compatible"`
+	APIProtocol           *string                             `json:"api_protocol,omitempty"`
 	Locality              string                              `json:"locality,omitempty"`
 	LocalitySource        string                              `json:"locality_source,omitempty"`
 	ConfirmedEndpointHost string                              `json:"confirmed_endpoint_host,omitempty"`
@@ -132,6 +134,7 @@ type LLMProviderConfigUpdateItem struct {
 type llmConnectionTestProvider struct {
 	ProviderInstanceID   string                              `json:"provider_instance_id,omitempty"`
 	Type                 string                              `json:"type"`
+	APIProtocol          string                              `json:"api_protocol,omitempty"`
 	BaseURL              string                              `json:"base_url"`
 	APIKey               string                              `json:"api_key"`
 	Model                string                              `json:"model"`
@@ -371,6 +374,7 @@ var llmTestProviderFactory = func(cfg llmConnectionTestProvider) completionProvi
 		BaseURL:              cfg.BaseURL,
 		APIKey:               cfg.APIKey,
 		Model:                cfg.Model,
+		APIProtocol:          cfg.APIProtocol,
 		PrivateNetworkAccess: cfg.PrivateNetworkAccess,
 		HTTPAuthorization:    cfg.HTTPAuthorization,
 		OllamaTargetBaseURL:  cfg.OllamaTargetBaseURL,
@@ -400,6 +404,7 @@ type providerProbeFingerprintPayload struct {
 	PrivateNetworkAccess bool                              `json:"private_network_access"`
 	HTTPAuthorization    *config.ProviderHTTPAuthorization `json:"http_authorization,omitempty"`
 	OllamaTargetBaseURL  string                            `json:"ollama_target_base_url,omitempty"`
+	APIProtocol          string                            `json:"api_protocol,omitempty"`
 }
 
 func nextProviderProbeStartedAt() int64 {
@@ -475,6 +480,10 @@ func providerProbeConfigFingerprint(
 	}
 	if provider.HasOllamaTarget() {
 		payload.OllamaTargetBaseURL = normalizeProviderProbeBaseURL(provider.OllamaTargetBaseURL)
+	}
+	// 只有实际传输改变为 Responses 才变更旧指纹；原聊天协议的既有回执继续有效。
+	if llmrouter.EffectiveModelAPIProtocol(providerType, provider, payload.Model) == llmrouter.APIProtocolResponses {
+		payload.APIProtocol = llmrouter.APIProtocolResponses
 	}
 	canonical, _ := json.Marshal(payload)
 	digest := sha256.Sum256(canonical)
@@ -556,6 +565,7 @@ func (s *Server) providerProbePersistenceCandidate(
 			descriptor: llmConnectionTestProvider{
 				ProviderInstanceID:   providerInstanceID,
 				Type:                 providerType,
+				APIProtocol:          saved.APIProtocol,
 				BaseURL:              strings.TrimSpace(saved.BaseURL),
 				APIKey:               saved.APIKey,
 				Model:                providerProbeModel(saved),
@@ -688,6 +698,7 @@ func (s *Server) handleGetLLMConfig(w http.ResponseWriter, r *http.Request) {
 	providers := make(map[string]LLMProviderConfigResponse, len(llmCfg.Providers))
 	for name, p := range llmCfg.Providers {
 		modelSpecsMode, modelSpecs := nativeReasoningModelSpecs(name, p)
+		modelSpecs = declaredModelCapabilitySources(name, p, modelSpecsMode, modelSpecs)
 		response := LLMProviderConfigResponse{
 			ProviderInstanceID:               config.EffectiveProviderInstanceID(name, p),
 			NativeReasoningSourceFingerprint: nativeReasoningSourceFingerprint(name, p, ""),
@@ -702,6 +713,7 @@ func (s *Server) handleGetLLMConfig(w http.ResponseWriter, r *http.Request) {
 			ModelSpecs:                       modelSpecs,
 			ModelSpecsMode:                   modelSpecsMode,
 			Compatible:                       p.Compatible,
+			APIProtocol:                      p.APIProtocol,
 			Locality:                         p.Locality,
 			LocalitySource:                   p.LocalitySource,
 			ConfirmedEndpointHost:            p.ConfirmedEndpointHost,
@@ -906,6 +918,16 @@ func (s *Server) updateLLMConfig(w http.ResponseWriter, r *http.Request, req LLM
 				credentialRefsToForget[credentialOld.CredentialRef] = struct{}{}
 			}
 			modelSpecsMode, modelSpecs := resolveProviderModelSpecs(credentialOld, credentialOldExists, p)
+			apiProtocol := credentialOld.APIProtocol
+			if p.APIProtocol != nil {
+				apiProtocol = strings.ToLower(strings.TrimSpace(*p.APIProtocol))
+			}
+			switch apiProtocol {
+			case "", llmrouter.APIProtocolAuto, llmrouter.APIProtocolResponses, llmrouter.APIProtocolChatCompletions:
+			default:
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unsupported api_protocol"})
+				return
+			}
 			candidate := config.LLMProviderConfig{
 				ProviderInstanceID:    providerInstanceID,
 				DisplayName:           p.DisplayName,
@@ -917,6 +939,7 @@ func (s *Server) updateLLMConfig(w http.ResponseWriter, r *http.Request, req LLM
 				ModelSpecsMode:        modelSpecsMode,
 				ModelSpecs:            modelSpecs,
 				Compatible:            p.Compatible,
+				APIProtocol:           apiProtocol,
 				Locality:              p.Locality,
 				LocalitySource:        p.LocalitySource,
 				ConfirmedEndpointHost: p.ConfirmedEndpointHost,
@@ -943,6 +966,7 @@ func (s *Server) updateLLMConfig(w http.ResponseWriter, r *http.Request, req LLM
 				}
 			}
 			resolveProviderNativeReasoning(name, &candidate, credentialOld, credentialOldExists, p)
+			resolveProviderCapabilitySources(name, &candidate, credentialOld, credentialOldExists)
 			if err := config.ValidateProviderModelSpecs(candidate); err != nil {
 				writeJSON(w, http.StatusBadRequest, map[string]string{
 					"error": fmt.Sprintf("provider %q 的模型能力配置非法: %v", name, err),
@@ -1249,9 +1273,15 @@ func (s *Server) handleTestLLMConfig(w http.ResponseWriter, r *http.Request) {
 	if embeddingOnly {
 		probeKind = modelCapabilityProbeKindEmbedding
 	}
+	completionAllowed := !embeddingOnly
+	if canPersist {
+		if saved, candidateErr := s.modelCapabilityProbeCandidate(persistenceCandidate.providerInstanceID, model, ctx); candidateErr == nil {
+			completionAllowed = saved.completionProbeAllowed
+		}
+	}
 	// 连接与能力探测共用请求及响应验收，一次执行生成两种事实投影。
 	err := s.executeModelCapabilityProbe(ctx, modelCapabilityProbeCandidate{
-		modelID: model, descriptor: probeDescriptor,
+		modelID: model, descriptor: probeDescriptor, completionProbeAllowed: completionAllowed,
 	}, probeKind)
 	latency := time.Since(start).Milliseconds()
 	testedAt := time.Now().UnixMilli()
@@ -1529,6 +1559,22 @@ func (s *Server) handleFetchProviderModels(w http.ResponseWriter, r *http.Reques
 	byID := make(map[string]int, len(models))
 	for i := range models {
 		byID[models[i].ID] = i
+		if official, found := config.OfficialModelCapabilities(nativeSourceProviderKey, config.LLMProviderConfig{BaseURL: baseURL, Compatible: nativeSourceProvider.Compatible, OllamaTargetBaseURL: nativeSourceProvider.OllamaTargetBaseURL}, models[i].ID); found && !models[i].CapabilitiesMetadataPresent {
+			var capabilities []string
+			if models[i].Capabilities != nil {
+				capabilities = append(capabilities, (*models[i].Capabilities)...)
+			}
+			for _, capability := range official {
+				present := false
+				for _, existing := range capabilities {
+					present = present || existing == capability
+				}
+				if !present {
+					capabilities = append(capabilities, capability)
+				}
+			}
+			models[i].Capabilities = &capabilities
+		}
 	}
 	mergeSpecs := func(specs []config.LLMProviderModelSpec, appendMissing bool) {
 		for _, spec := range specs {
@@ -1541,13 +1587,17 @@ func (s *Server) handleFetchProviderModels(w http.ResponseWriter, r *http.Reques
 				models = append(models, providerModelInfo{ID: spec.ID, Name: spec.ID})
 				byID[spec.ID] = i
 			}
-			if len(spec.Capabilities) > 0 && (models[i].Capabilities == nil || len(*models[i].Capabilities) == 0) {
+			if len(spec.Capabilities) > 0 && models[i].Capabilities == nil && !models[i].CapabilitiesMetadataPresent {
 				capabilities := append([]string(nil), spec.Capabilities...)
 				models[i].Capabilities = &capabilities
+				if spec.CapabilitiesSource != "" {
+					models[i].CapabilitiesSource = spec.CapabilitiesSource
+				}
 			}
 		}
 	}
-	_, configuredSpecs := config.NormalizeProviderModelSpecs(nativeSourceProvider)
+	configuredMode, configuredSpecs := config.NormalizeProviderModelSpecs(nativeSourceProvider)
+	configuredSpecs = declaredModelCapabilitySources(nativeSourceProviderKey, nativeSourceProvider, configuredMode, configuredSpecs)
 	mergeSpecs(configuredSpecs, false)
 	mergeSpecs(mediaflow.NativeProviderModelSpecs(baseURL), true)
 	if s.mediaFlow != nil && nativeSourceProviderKey != "" {
@@ -1557,6 +1607,18 @@ func (s *Server) handleFetchProviderModels(w http.ResponseWriter, r *http.Reques
 			logger.Warn("Verified media capability enrichment is unavailable", "error", observedErr)
 		} else {
 			mergeSpecs(observed, false)
+		}
+	}
+	for index := range models {
+		if models[index].CapabilitiesSource == "" {
+			models[index].CapabilitiesSource = config.LLMModelCapabilitiesSourceCatalog
+		}
+		if nativeSourceProviderKey != "" {
+			models[index].CapabilitiesSourceFingerprint = ModelCapabilityProbeConfigFingerprint(nativeSourceProviderKey, nativeSourceProvider, models[index].ID)
+		}
+		if models[index].Capabilities == nil {
+			unknown := []string{}
+			models[index].Capabilities = &unknown
 		}
 	}
 
@@ -1570,6 +1632,9 @@ func (s *Server) handleFetchProviderModels(w http.ResponseWriter, r *http.Reques
 // 标准 OpenAI /models 只有裸 id，这些字段会缺省——前端按"有则展示、无则启发式兜底"处理。
 type providerModelInfo struct {
 	Capabilities                     *[]string                       `json:"capabilities,omitempty"`
+	CapabilitiesSource               string                          `json:"capabilities_source,omitempty"`
+	CapabilitiesSourceFingerprint    string                          `json:"capabilities_source_fingerprint,omitempty"`
+	CapabilitiesMetadataPresent      bool                            `json:"capabilities_metadata_present,omitempty"`
 	ID                               string                          `json:"id"`
 	Name                             string                          `json:"name,omitempty"`
 	ContextLength                    int64                           `json:"context_length,omitempty"`
@@ -1602,14 +1667,15 @@ func parseProviderModel(raw json.RawMessage) (providerModelInfo, bool) {
 	if id == "" {
 		return providerModelInfo{}, false
 	}
-	info := providerModelInfo{ID: id, Name: id}
+	info := providerModelInfo{ID: id, Name: id, CapabilitiesSource: config.LLMModelCapabilitiesSourceCatalog}
 	if values, exists := m["capabilities"]; exists {
 		if declared, valid := values.([]any); valid {
+			info.CapabilitiesMetadataPresent = true
 			capabilities := []string{}
 			for _, value := range declared {
 				if capability, ok := value.(string); ok {
 					switch capability {
-					case "text", "vision", "video", "audio", "code", "image_generation", "video_generation", "embedding":
+					case "text", "vision", "video", "audio", "code", "image_generation", "video_generation", "embedding", "computer_use":
 						capabilities = append(capabilities, capability)
 					}
 				}
@@ -1645,14 +1711,80 @@ func parseProviderModel(raw json.RawMessage) (providerModelInfo, bool) {
 		info.PromptPrice = anyPriceToString(pricing["prompt"])
 		info.CompletionPrice = anyPriceToString(pricing["completion"])
 	}
-	if arch, ok := m["architecture"].(map[string]any); ok {
-		if mods, ok := arch["input_modalities"].([]any); ok {
-			for _, v := range mods {
-				if s, ok := v.(string); ok {
-					info.InputModalities = append(info.InputModalities, s)
+	readModalities := func(value any) []string {
+		var modalities []string
+		if values, ok := value.([]any); ok {
+			modalities = []string{}
+			for _, value := range values {
+				if modality, ok := value.(string); ok {
+					modalities = append(modalities, modality)
 				}
 			}
 		}
+		return modalities
+	}
+	info.InputModalities = readModalities(m["input_modalities"])
+	outputModalities := readModalities(m["output_modalities"])
+	if arch, ok := m["architecture"].(map[string]any); ok {
+		if info.InputModalities == nil {
+			info.InputModalities = readModalities(arch["input_modalities"])
+		}
+		if outputModalities == nil {
+			outputModalities = readModalities(arch["output_modalities"])
+		}
+	}
+	if info.InputModalities != nil {
+		info.CapabilitiesMetadataPresent = true
+	}
+	contains := func(values []string, target string) bool {
+		for _, value := range values {
+			if value == target {
+				return true
+			}
+		}
+		return false
+	}
+	nestedImageInput := false
+	if capabilities, ok := m["capabilities"].(map[string]any); ok {
+		switch input := capabilities["image_input"].(type) {
+		case bool:
+			nestedImageInput = input
+			info.CapabilitiesMetadataPresent = true
+		case map[string]any:
+			if supported, provided := input["supported"].(bool); provided {
+				nestedImageInput = supported
+				info.CapabilitiesMetadataPresent = true
+			}
+		}
+	}
+	var advertised []string
+	if info.Capabilities != nil {
+		advertised = append(advertised, (*info.Capabilities)...)
+	}
+	appendCapability := func(capability string) {
+		if !contains(advertised, capability) {
+			advertised = append(advertised, capability)
+		}
+	}
+	pureNonTextOutput := len(outputModalities) > 0 && !contains(outputModalities, "text")
+	pureSpecialized := (contains(advertised, "embedding") || contains(advertised, "image_generation") || contains(advertised, "video_generation")) && !contains(advertised, "text")
+	if !pureNonTextOutput && !pureSpecialized && (contains(info.InputModalities, "text") || contains(outputModalities, "text") || nestedImageInput) {
+		appendCapability("text")
+	}
+	if contains(info.InputModalities, "image") || nestedImageInput {
+		appendCapability("vision")
+	}
+	if contains(info.InputModalities, "audio") {
+		appendCapability("audio")
+	}
+	if contains(info.InputModalities, "video") {
+		appendCapability("video")
+	}
+	if len(advertised) > 0 || info.CapabilitiesMetadataPresent {
+		if advertised == nil {
+			advertised = []string{}
+		}
+		info.Capabilities = &advertised
 	}
 	if params, ok := m["supported_parameters"].([]any); ok {
 		for _, v := range params {

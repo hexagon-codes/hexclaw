@@ -65,6 +65,7 @@ var (
 	errModelCapabilityProbeCatalogMiss      = errors.New("model capability probe catalog did not contain the target model")
 	errModelCapabilityProbeConfigStale      = errors.New("model capability probe configuration became stale")
 	errModelCapabilityProbeReasoningUnknown = errors.New("model capability probe received no positive native reasoning evidence")
+	errModelCapabilityProbeNotEligible      = errors.New("the model declaration does not permit this completion probe")
 )
 
 // LLMModelCapabilityProbeRequest 只接受已保存 Provider 的稳定身份和目标模型。
@@ -108,11 +109,15 @@ type LLMModelCapabilityProbeReceiptResponse struct {
 }
 
 // LLMEffectiveModelResponse 将静态授权、探测事实与实时可用性拆开输出。
-// Capabilities 永远是静态路由授权；ProbeReceipts 不会反写配置。
+// 声明与有效能力分别返回；正向证据只派生运行副本，不反写配置。
 type LLMEffectiveModelResponse struct {
 	ID                               string                                   `json:"id"`
 	DisplayName                      string                                   `json:"display_name,omitempty"`
 	Capabilities                     []string                                 `json:"capabilities"`
+	DeclaredCapabilities             []string                                 `json:"declared_capabilities"`
+	CapabilitiesSource               string                                   `json:"capabilities_source,omitempty"`
+	CapabilitiesSourceFingerprint    string                                   `json:"capabilities_source_fingerprint,omitempty"`
+	CapabilitiesMetadataPresent      bool                                     `json:"capabilities_metadata_present,omitempty"`
 	CapabilityStates                 map[string]string                        `json:"capability_states"`
 	RouteEligible                    bool                                     `json:"route_eligible"`
 	Availability                     string                                   `json:"availability"`
@@ -129,6 +134,7 @@ type modelCapabilityProbeCandidate struct {
 	nativeConfigFingerprint string
 	descriptor              llmConnectionTestProvider
 	textDeclared            bool
+	completionProbeAllowed  bool
 	probeKind               string
 }
 
@@ -216,6 +222,7 @@ func modelCapabilityProbeCandidateMatches(
 func (s *Server) modelCapabilityProbeCandidate(
 	providerInstanceID string,
 	modelID string,
+	contexts ...context.Context,
 ) (modelCapabilityProbeCandidate, error) {
 	providerInstanceID = strings.TrimSpace(providerInstanceID)
 	modelID = strings.TrimSpace(modelID)
@@ -240,16 +247,33 @@ func (s *Server) modelCapabilityProbeCandidate(
 		if strings.TrimSpace(provider.APIKey) == "" && !strings.EqualFold(providerType, "ollama") {
 			return modelCapabilityProbeCandidate{}, errors.New("saved provider credential is unavailable")
 		}
+		probeCtx := context.Background()
+		if len(contexts) > 0 && contexts[0] != nil {
+			probeCtx = contexts[0]
+		}
+		readCtx, cancel := context.WithTimeout(probeCtx, 2*time.Second)
+		effective := s.ResolveEffectiveProviderModelSpecs(readCtx, providerKey, provider)
+		cancel()
+		textCapable := config.ModelHasCapability(effective, modelID, config.LLMModelCapabilityText)
+		unclassified := false
+		_, effectiveSpecs := config.NormalizeProviderModelSpecs(effective)
+		for _, spec := range effectiveSpecs {
+			if spec.ID == modelID && len(spec.Capabilities) == 0 {
+				unclassified = true
+			}
+		}
 		return modelCapabilityProbeCandidate{
 			providerInstanceID:      providerInstanceID,
 			providerType:            providerType,
 			modelID:                 modelID,
 			configFingerprint:       modelCapabilityProbeConfigFingerprint(providerType, provider, modelID),
 			nativeConfigFingerprint: nativeReasoningSourceFingerprint(providerKey, provider, modelID),
-			textDeclared:            config.ModelHasCapability(provider, modelID, config.LLMModelCapabilityText),
+			textDeclared:            textCapable,
+			completionProbeAllowed:  textCapable || unclassified,
 			descriptor: llmConnectionTestProvider{
 				ProviderInstanceID:   providerInstanceID,
 				Type:                 providerType,
+				APIProtocol:          provider.APIProtocol,
 				BaseURL:              strings.TrimSpace(provider.BaseURL),
 				APIKey:               provider.APIKey,
 				Model:                modelID,
@@ -289,6 +313,12 @@ func modelCapabilityProbeFailureCode(err error) string {
 	switch {
 	case err == nil:
 		return ""
+	case errors.Is(err, context.DeadlineExceeded):
+		return "PROBE_TIMEOUT"
+	case errors.Is(err, context.Canceled):
+		return "PROBE_CANCELLED" //nolint:misspell // 既有回执使用英式拼写，保持协议兼容。
+	case errors.Is(err, errModelCapabilityProbeNotEligible):
+		return "PROBE_CAPABILITY_NOT_ELIGIBLE"
 	case errors.Is(err, errModelCapabilityProbeEmptyResponse):
 		return "PROBE_EMPTY_RESPONSE"
 	case errors.Is(err, errModelCapabilityProbeOutputTruncated):
@@ -515,6 +545,9 @@ func (s *Server) executeModelCapabilityProbe(
 	}
 	switch kind {
 	case modelCapabilityProbeKindText:
+		if !candidate.completionProbeAllowed && !candidate.textDeclared {
+			return errModelCapabilityProbeNotEligible
+		}
 		response, err := provider.Complete(ctx, modelCapabilityProbeTextRequest(candidate.modelID))
 		if err != nil {
 			return err
@@ -524,6 +557,9 @@ func (s *Server) executeModelCapabilityProbe(
 		}
 		return nil
 	case modelCapabilityProbeKindVision:
+		if !candidate.completionProbeAllowed && !candidate.textDeclared {
+			return errModelCapabilityProbeNotEligible
+		}
 		response, err := provider.Complete(ctx, modelCapabilityProbeVisionRequest(candidate.modelID))
 		if err != nil {
 			return err
@@ -533,6 +569,9 @@ func (s *Server) executeModelCapabilityProbe(
 		}
 		return nil
 	case modelCapabilityProbeKindTools:
+		if !candidate.completionProbeAllowed && !candidate.textDeclared {
+			return errModelCapabilityProbeNotEligible
+		}
 		response, err := provider.Complete(ctx, modelCapabilityProbeToolsRequest(candidate.modelID))
 		if err != nil {
 			return err
@@ -581,7 +620,7 @@ func (s *Server) probeSavedModelCapability(ctx context.Context, providerInstance
 	if err != nil {
 		return err
 	}
-	candidate, err := s.modelCapabilityProbeCandidate(providerInstanceID, modelID)
+	candidate, err := s.modelCapabilityProbeCandidate(providerInstanceID, modelID, ctx)
 	if err != nil {
 		return err
 	}
@@ -669,7 +708,7 @@ func (s *Server) handleProbeModelCapability(w http.ResponseWriter, r *http.Reque
 		writeAPIError(w, http.StatusBadRequest, CodeBadRequest, err.Error())
 		return
 	}
-	candidate, err := s.modelCapabilityProbeCandidate(req.ProviderInstanceID, req.Model)
+	candidate, err := s.modelCapabilityProbeCandidate(req.ProviderInstanceID, req.Model, r.Context())
 	if err != nil {
 		writeAPIError(w, http.StatusBadRequest, CodeBadRequest, err.Error())
 		return
@@ -778,6 +817,12 @@ func (s *Server) effectiveModelsForProvider(
 	provider config.LLMProviderConfig,
 ) []LLMEffectiveModelResponse {
 	_, specs := nativeReasoningModelSpecs(providerKey, provider)
+	resolved, receiptsByModel := s.effectiveProviderModelEvidence(ctx, providerKey, provider)
+	_, effectiveSpecs := config.NormalizeProviderModelSpecs(resolved)
+	byID := make(map[string]config.LLMProviderModelSpec, len(effectiveSpecs))
+	for _, spec := range effectiveSpecs {
+		byID[spec.ID] = spec
+	}
 	models := make([]LLMEffectiveModelResponse, 0, len(specs))
 	for _, spec := range specs {
 		nativeSupport := spec.NativeReasoningSupport
@@ -788,23 +833,29 @@ func (s *Server) effectiveModelsForProvider(
 		for _, capability := range spec.Capabilities {
 			states[capability] = "declared"
 		}
-		receipts := make([]LLMModelCapabilityProbeReceiptResponse, 0, len(modelCapabilityProbeKinds))
-		for _, kind := range modelCapabilityProbeKinds {
-			receipt := s.matchingModelCapabilityProbeReceipt(ctx, providerKey, provider, spec.ID, kind)
-			if receipt == nil {
-				continue
-			}
-			receipts = append(receipts, *receipt)
+		receipts := receiptsByModel[spec.ID]
+		if receipts == nil {
+			receipts = []LLMModelCapabilityProbeReceiptResponse{}
+		}
+		for _, receipt := range receipts {
+			kind := receipt.ProbeKind
 			if receipt.Outcome == "passed" {
 				states[kind] = "verified"
 				if kind == modelCapabilityProbeKindReasoning {
 					nativeSupport = config.LLMReasoningSupportSupported
 				}
 			} else {
-				states[kind] = "failed"
+				switch receipt.FailureCode {
+				case "PROBE_TIMEOUT", "PROBE_CANCELLED", "PROBE_EXECUTION_FAILED", "PROBE_EMPTY_RESPONSE", "PROBE_OUTPUT_TRUNCATED", "PROBE_REASONING_EVIDENCE_UNAVAILABLE", //nolint:misspell // 既有回执使用英式拼写，保持协议兼容。
+					string(llmrouter.LLMErrorCodeUpstreamRateLimited), string(llmrouter.LLMErrorCodeUpstreamPoolExhausted), string(llmrouter.LLMErrorCodeUpstreamUnavailable):
+					states[kind] = "unknown"
+				default:
+					states[kind] = "failed"
+				}
 			}
 		}
-		capabilities := append([]string{}, spec.Capabilities...)
+		effective := byID[spec.ID]
+		capabilities := append([]string{}, effective.Capabilities...)
 		if capabilities == nil {
 			capabilities = []string{}
 		}
@@ -812,8 +863,12 @@ func (s *Server) effectiveModelsForProvider(
 			ID:                               spec.ID,
 			DisplayName:                      spec.DisplayName,
 			Capabilities:                     capabilities,
+			DeclaredCapabilities:             append([]string{}, spec.Capabilities...),
+			CapabilitiesSource:               effective.CapabilitiesSource,
+			CapabilitiesSourceFingerprint:    spec.CapabilitiesSourceFingerprint,
+			CapabilitiesMetadataPresent:      spec.CapabilitiesMetadataPresent,
 			CapabilityStates:                 states,
-			RouteEligible:                    config.ModelHasCapability(provider, spec.ID, config.LLMModelCapabilityText),
+			RouteEligible:                    config.ModelHasCapability(resolved, spec.ID, config.LLMModelCapabilityText),
 			Availability:                     modelCapabilityProbeAvailability(receipts),
 			ProbeReceipts:                    receipts,
 			EffectiveNativeReasoningSupport:  nativeSupport,
@@ -821,4 +876,35 @@ func (s *Server) effectiveModelsForProvider(
 		})
 	}
 	return models
+}
+
+// ResolveEffectiveProviderModelSpecs 使用传入的执行快照查证已有回执，不读取配置锁或 Selector。
+// facade 每次实际请求和模型能力读取均调用它，避免旧包装器遮挡新的成功探测。
+func (s *Server) ResolveEffectiveProviderModelSpecs(ctx context.Context, providerKey string, provider config.LLMProviderConfig) config.LLMProviderConfig {
+	resolved, _ := s.effectiveProviderModelEvidence(ctx, providerKey, provider)
+	return resolved
+}
+
+func (s *Server) effectiveProviderModelEvidence(ctx context.Context, providerKey string, provider config.LLMProviderConfig) (config.LLMProviderConfig, map[string][]LLMModelCapabilityProbeReceiptResponse) {
+	_, specs := config.NormalizeProviderModelSpecs(provider)
+	evidence := make(map[string]config.ModelCapabilityEvidence, len(specs))
+	receipts := make(map[string][]LLMModelCapabilityProbeReceiptResponse, len(specs))
+	for _, spec := range specs {
+		current := config.ModelCapabilityEvidence{SourceFingerprint: ModelCapabilityProbeConfigFingerprint(providerKey, provider, spec.ID)}
+		for _, kind := range modelCapabilityProbeKinds {
+			receipt := s.matchingModelCapabilityProbeReceipt(ctx, providerKey, provider, spec.ID, kind)
+			if receipt == nil {
+				continue
+			}
+			receipts[spec.ID] = append(receipts[spec.ID], *receipt)
+			if receipt.Outcome == "passed" {
+				switch kind {
+				case modelCapabilityProbeKindText, modelCapabilityProbeKindVision, modelCapabilityProbeKindEmbedding:
+					current.Passed = append(current.Passed, kind)
+				}
+			}
+		}
+		evidence[spec.ID] = current
+	}
+	return config.ResolveEffectiveModelSpecs(providerKey, provider, evidence), receipts
 }

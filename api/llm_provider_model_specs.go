@@ -3,6 +3,7 @@ package api
 import (
 	"crypto/sha256"
 	"fmt"
+	"reflect"
 	"strings"
 
 	"github.com/hexagon-codes/hexclaw/config"
@@ -157,6 +158,77 @@ func resolveProviderModelSpecs(
 		})
 	}
 	return config.LLMModelSpecsModeExplicit, filtered
+}
+
+// resolveProviderCapabilitySources 保留声明来源，普通往返不能把手选合同重新变为自动目录。
+// 指纹复用连接探测身份，不包含能力列表或来源字段，因此没有自引用。
+func resolveProviderCapabilitySources(providerKey string, candidate *config.LLMProviderConfig, old config.LLMProviderConfig, oldExists bool) {
+	oldSpecs := map[string]config.LLMProviderModelSpec{}
+	if oldExists && config.EffectiveProviderInstanceID(providerKey, old) == config.EffectiveProviderInstanceID(providerKey, *candidate) {
+		mode, specs := config.NormalizeProviderModelSpecs(old)
+		for _, spec := range specs {
+			if spec.CapabilitiesSource == "" && mode == config.LLMModelSpecsModeExplicit {
+				spec.CapabilitiesSource = config.LLMModelCapabilitiesSourceLegacyUnknown
+			}
+			oldSpecs[spec.ID] = spec
+		}
+	}
+	for index := range candidate.ModelSpecs {
+		spec := &candidate.ModelSpecs[index]
+		previous, existed := oldSpecs[spec.ID]
+		if existed && reflect.DeepEqual(spec.Capabilities, previous.Capabilities) && previous.CapabilitiesMetadataPresent {
+			spec.CapabilitiesMetadataPresent = true
+		}
+		if spec.CapabilitiesSource == "" {
+			if existed && reflect.DeepEqual(spec.Capabilities, previous.Capabilities) {
+				spec.CapabilitiesSource = previous.CapabilitiesSource
+				spec.CapabilitiesSourceFingerprint = previous.CapabilitiesSourceFingerprint
+				spec.CapabilitiesMetadataPresent = previous.CapabilitiesMetadataPresent
+			} else if existed {
+				spec.CapabilitiesSource = config.LLMModelCapabilitiesSourceManual
+			} else {
+				spec.CapabilitiesSource = config.LLMModelCapabilitiesSourceLegacyUnknown
+			}
+		}
+		automatic := spec.CapabilitiesSource == config.LLMModelCapabilitiesSourceCatalog || spec.CapabilitiesSource == config.LLMModelCapabilitiesSourcePreset
+		if existed && automatic && (previous.CapabilitiesSource == config.LLMModelCapabilitiesSourceManual || previous.CapabilitiesSource == config.LLMModelCapabilitiesSourceLegacyUnknown) {
+			spec.CapabilitiesSource = previous.CapabilitiesSource
+			spec.CapabilitiesSourceFingerprint = previous.CapabilitiesSourceFingerprint
+			spec.Capabilities = append([]string{}, previous.Capabilities...)
+			spec.CapabilitiesMetadataPresent = previous.CapabilitiesMetadataPresent
+			automatic = false
+		}
+		if automatic {
+			if spec.CapabilitiesSourceFingerprint == "" {
+				spec.CapabilitiesSourceFingerprint = ModelCapabilityProbeConfigFingerprint(providerKey, *candidate, spec.ID)
+			}
+		} else {
+			spec.CapabilitiesSourceFingerprint = ""
+			if spec.CapabilitiesSource == config.LLMModelCapabilitiesSourceManual {
+				spec.CapabilitiesMetadataPresent = false
+				hasEmbedding := false
+				for _, capability := range spec.Capabilities {
+					hasEmbedding = hasEmbedding || capability == config.LLMModelCapabilityEmbedding
+				}
+				if !hasEmbedding {
+					spec.Embedding = nil
+				}
+			}
+		}
+	}
+}
+
+func declaredModelCapabilitySources(providerKey string, provider config.LLMProviderConfig, mode string, specs []config.LLMProviderModelSpec) []config.LLMProviderModelSpec {
+	for index := range specs {
+		spec := &specs[index]
+		if spec.CapabilitiesSource == "" && mode == config.LLMModelSpecsModeExplicit {
+			spec.CapabilitiesSource = config.LLMModelCapabilitiesSourceLegacyUnknown
+		}
+		if spec.CapabilitiesSourceFingerprint == "" && (spec.CapabilitiesSource == config.LLMModelCapabilitiesSourceCatalog || spec.CapabilitiesSource == config.LLMModelCapabilitiesSourcePreset) {
+			spec.CapabilitiesSourceFingerprint = ModelCapabilityProbeConfigFingerprint(providerKey, provider, spec.ID)
+		}
+	}
+	return specs
 }
 
 func isEmbeddingOnlyCompletionModel(llmCfg config.LLMConfig, providerInstanceID, providerType, baseURL, modelID string) bool {

@@ -29,6 +29,7 @@ import (
 	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/ai-core/llm/anthropic"
 	"github.com/hexagon-codes/ai-core/llm/ollama"
+	"github.com/hexagon-codes/ai-core/llm/openai"
 	"github.com/hexagon-codes/hexagon"
 	"github.com/hexagon-codes/hexclaw/config"
 	"github.com/hexagon-codes/hexclaw/egress"
@@ -65,14 +66,42 @@ var latencyPriority = map[string]int{
 // 管理多个 LLM Provider，根据策略选择最优 Provider 处理请求。
 // 线程安全，可并发调用。
 type Selector struct {
-	mu             sync.RWMutex
-	providers      map[string]hexagon.Provider // 已初始化的 Provider
-	cfg            config.LLMConfig            // 当前活跃的 LLM 配置（仅包含已加载 Provider）
-	defaultP       string                      // 默认 Provider 名称
-	unhealthyUntil map[string]time.Time        // 运行时短期熔断，避免刚失败的 provider 立即被再次选中
-	now            func() time.Time
-	egressPolicy   *egress.Policy // nil only for explicitly unguarded/test selectors
-	localInference *localinfer.Coordinator
+	mu                sync.RWMutex
+	providers         map[string]hexagon.Provider // 已初始化的 Provider
+	cfg               config.LLMConfig            // 当前活跃的 LLM 配置（仅包含已加载 Provider）
+	defaultP          string                      // 默认 Provider 名称
+	unhealthyUntil    map[string]time.Time        // 运行时短期熔断，避免刚失败的 provider 立即被再次选中
+	now               func() time.Time
+	egressPolicy      *egress.Policy // nil only for explicitly unguarded/test selectors
+	localInference    *localinfer.Coordinator
+	modelSpecResolver EffectiveModelSpecResolver
+}
+
+// EffectiveModelSpecResolver 只读取传入执行快照的已有能力证据，不修改配置或调用 Selector。
+type EffectiveModelSpecResolver func(context.Context, string, config.LLMProviderConfig) config.LLMProviderConfig
+
+// SetEffectiveModelSpecResolver 复用同一有效能力投影；已存在的 facade 通过读取器获取新回执。
+func (r *Selector) SetEffectiveModelSpecResolver(resolve EffectiveModelSpecResolver) {
+	r.mu.Lock()
+	r.modelSpecResolver = resolve
+	r.mu.Unlock()
+}
+
+func (r *Selector) effectiveModelSpecs(ctx context.Context, name string, provider config.LLMProviderConfig) config.LLMProviderConfig {
+	r.mu.RLock()
+	resolve := r.modelSpecResolver
+	r.mu.RUnlock()
+	if resolve != nil {
+		return resolve(ctx, name, provider)
+	}
+	return config.ResolveEffectiveModelSpecs(name, provider, nil)
+}
+
+func (r *Selector) effectiveModelSpecsLocked(name string, provider config.LLMProviderConfig) config.LLMProviderConfig {
+	if r.modelSpecResolver != nil {
+		return r.modelSpecResolver(context.Background(), name, provider)
+	}
+	return config.ResolveEffectiveModelSpecs(name, provider, nil)
 }
 
 const defaultProviderCooldown = 2 * time.Minute
@@ -262,7 +291,7 @@ func (r *Selector) providerLocked(name string, scopes ...completionRouteScope) h
 		// unable to send embedding-only/unclassified IDs to chat transports.
 		inner := p
 		capabilityProvider := &completionCapabilityProvider{
-			next: inner, providerName: name, providerConfig: providerConfig,
+			next: inner, providerName: name, providerConfig: providerConfig, modelSpecResolver: r.effectiveModelSpecs,
 		}
 		if len(scopes) == 1 {
 			capabilityProvider.knowledgeOCR = scopes[0].knowledgeOCR
@@ -286,11 +315,22 @@ func (p *providerAttemptProvider) Stream(ctx context.Context, req llm.Completion
 }
 
 type completionCapabilityProvider struct {
-	next           hexagon.Provider
-	providerName   string
-	providerConfig config.LLMProviderConfig
-	knowledgeOCR   *knowledgeOCRScope
-	k12Vision      *k12VisionScope
+	next              hexagon.Provider
+	providerName      string
+	providerConfig    config.LLMProviderConfig
+	modelSpecResolver EffectiveModelSpecResolver
+	knowledgeOCR      *knowledgeOCRScope
+	k12Vision         *k12VisionScope
+}
+
+func (p *completionCapabilityProvider) withEffectiveModelSpecs(ctx context.Context) *completionCapabilityProvider {
+	if p.modelSpecResolver == nil {
+		return p
+	}
+	current := *p
+	current.providerConfig = p.modelSpecResolver(ctx, p.providerName, p.providerConfig)
+	current.modelSpecResolver = nil
+	return &current
 }
 
 type completionRouteScope struct {
@@ -503,6 +543,7 @@ func (p *completionCapabilityProvider) Complete(
 	ctx context.Context,
 	req llm.CompletionRequest,
 ) (*llm.CompletionResponse, error) {
+	p = p.withEffectiveModelSpecs(ctx)
 	req = p.projectTextOnlyHistory(req)
 	if err := p.validateK12Vision(ctx, req); err != nil {
 		return nil, err
@@ -520,6 +561,7 @@ func (p *completionCapabilityProvider) Stream(
 	ctx context.Context,
 	req llm.CompletionRequest,
 ) (*llm.Stream, error) {
+	p = p.withEffectiveModelSpecs(ctx)
 	req = p.projectTextOnlyHistory(req)
 	if err := p.validateK12Vision(ctx, req); err != nil {
 		return nil, err
@@ -534,11 +576,13 @@ func (p *completionCapabilityProvider) Stream(
 }
 
 func (p *completionCapabilityProvider) Models() []llm.ModelInfo {
+	p = p.withEffectiveModelSpecs(context.Background())
 	models := append([]llm.ModelInfo(nil), p.next.Models()...)
-	_, specs := config.NormalizeProviderModelSpecs(p.providerConfig)
+	mode, specs := config.NormalizeProviderModelSpecs(p.providerConfig)
 	// 执行闸口必须看见当前有效声明，不能被 SDK 内置的旧模型目录覆盖。
 	for _, spec := range specs {
-		if !config.ModelHasCapability(p.providerConfig, spec.ID, config.LLMModelCapabilityVision) {
+		vision := config.ModelHasCapability(p.providerConfig, spec.ID, config.LLMModelCapabilityVision)
+		if !vision && mode != config.LLMModelSpecsModeExplicit {
 			continue
 		}
 		found := false
@@ -546,13 +590,20 @@ func (p *completionCapabilityProvider) Models() []llm.ModelInfo {
 			if !strings.EqualFold(strings.TrimSpace(models[i].ID), spec.ID) {
 				continue
 			}
-			if !models[i].HasFeature(llm.FeatureVision) {
+			features := make([]string, 0, len(models[i].Features))
+			for _, feature := range models[i].Features {
+				if feature != llm.FeatureVision {
+					features = append(features, feature)
+				}
+			}
+			models[i].Features = features
+			if vision {
 				models[i].Features = append(append([]string(nil), models[i].Features...), llm.FeatureVision)
 			}
 			found = true
 			break
 		}
-		if !found {
+		if !found && vision {
 			models = append(models, llm.ModelInfo{ID: spec.ID, Name: spec.DisplayName, Features: []string{llm.FeatureVision}})
 		}
 	}
@@ -817,7 +868,7 @@ func providerEndpointBaseURL(name string, pc config.LLMProviderConfig) string {
 		// SDK 追加的协议路径以斜杠开头；挂载地址仅去除末尾分隔符，保留自定义前缀。
 		return strings.TrimRight(baseURL, "/")
 	}
-	if name == "anthropic" {
+	if usesAnthropicNativeAdapter(name, pc) {
 		return defaultAnthropicProviderBaseURL
 	}
 	return defaultOpenAIProviderBaseURL
@@ -872,7 +923,7 @@ func NewProviderFromConfig(name string, pc config.LLMProviderConfig) hexagon.Pro
 	}
 
 	// Anthropic 使用原生 SDK（非 OpenAI 兼容协议）
-	if name == "anthropic" {
+	if usesAnthropicNativeAdapter(name, pc) {
 		aopts := []anthropic.Option{
 			anthropic.WithBaseURL(baseURL),
 			anthropic.WithHTTPClient(httpClient),
@@ -884,14 +935,14 @@ func NewProviderFromConfig(name string, pc config.LLMProviderConfig) hexagon.Pro
 	}
 
 	// 其他 Provider 统一使用 OpenAI 兼容协议
-	opts := []hexagon.OpenAIOption{
-		hexagon.OpenAIWithBaseURL(baseURL),
-		hexagon.OpenAIWithHTTPClient(httpClient),
+	opts := []openai.Option{
+		openai.WithBaseURL(baseURL),
+		openai.WithHTTPClient(httpClient),
 	}
 	if pc.Model != "" {
-		opts = append(opts, hexagon.OpenAIWithModel(pc.Model))
+		opts = append(opts, openai.WithModel(pc.Model))
 	}
-	return hexagon.NewOpenAI(pc.APIKey, opts...)
+	return &openAIProtocolProvider{Provider: openai.New(pc.APIKey, opts...), name: name, config: pc}
 }
 
 // UsesOllamaNativeAdapter 返回实际工厂选择的协议，供关联目标复用。
@@ -1134,6 +1185,7 @@ func (r *Selector) ResolveRouteForCapabilities(
 			key,
 		)
 	}
+	providerConfig = r.effectiveModelSpecsLocked(key, providerConfig)
 
 	if explicit {
 		if !config.ModelHasCapabilities(providerConfig, model, required...) {

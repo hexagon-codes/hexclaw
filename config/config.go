@@ -302,9 +302,11 @@ type MCPServerConfig struct {
 type MCPAuthConfig struct {
 	Type     string   `yaml:"type"` // "oauth"
 	ClientID string   `yaml:"client_id"`
+	Issuer   string   `yaml:"issuer,omitempty" json:"issuer,omitempty"`
 	AuthURL  string   `yaml:"auth_url"`
 	TokenURL string   `yaml:"token_url"`
 	Scopes   []string `yaml:"scopes,omitempty"`
+	Resource string   `yaml:"resource,omitempty" json:"resource,omitempty"`
 }
 
 // SkillsConfig 技能市场配置
@@ -705,6 +707,7 @@ type LLMProviderConfig struct {
 	ModelSpecsMode      string                 `yaml:"model_specs_mode,omitempty"`                                           // legacy / explicit；区分 omitted 与显式 []
 	ModelSpecs          []LLMProviderModelSpec `yaml:"model_specs,omitempty"`                                                // 模型级能力声明
 	Compatible          string                 `yaml:"compatible"`                                                           // 兼容协议: "openai"（用于中转/私有部署）
+	APIProtocol         string                 `yaml:"api_protocol,omitempty" json:"api_protocol,omitempty"`                 // OpenAI 兼容通道的普通补全协议；空值按精确官方声明选择
 	// Locality 描述模型算力/数据最终位置，而非 HTTP 监听地址：
 	//   - auto/空：按 endpoint host 自动判断
 	//   - local：本机/LAN 私有部署
