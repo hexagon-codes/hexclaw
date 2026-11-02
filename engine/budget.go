@@ -3,30 +3,27 @@ package engine
 import (
 	"context"
 	"fmt"
-	"math"
-	"sync"
 	"sync/atomic"
 	"time"
+
+	hruntime "github.com/hexagon-codes/hexagon/runtime"
 )
 
 // BudgetController 三维预算控制器
 //
 // 三个维度独立计量，任一耗尽即停止：
 //   - Token: 输入+输出 token 总量
-//   - Duration: 从首次工具调用开始的已用时间
+//   - Duration: 从首次Token记量开始的已用时间
 //   - Cost: 估算美元成本
 //
-// 线程安全：使用 atomic 操作，支持并行 Sub-agent 共享预算。
+// 计量操作线程安全，支持嵌套调用共享预算；配置与取消函数应在运行前设置。
 // 对标 OpenClaw Budget 但更精细（三维度 vs OpenClaw 仅 token 上限）。
 type BudgetController struct {
 	maxTokens   int64
 	maxDuration time.Duration
 	maxCost     float64 // USD
 
-	usedTokens atomic.Int64
-	usedCost   atomic.Int64 // 存储 cost * 1_000_000 micro-dollars (避免浮点原子操作)
-	startTime  atomic.Int64 // UnixNano，用 atomic 避免数据竞争
-	startOnce  sync.Once
+	usage hruntime.UsageAccumulator
 
 	cancelFunc context.CancelFunc // 级联取消子 Agent
 }
@@ -67,24 +64,12 @@ func NewBudgetController(cfg BudgetConfig) *BudgetController {
 
 // Check 检查预算是否耗尽，返回 nil 表示预算充足
 func (b *BudgetController) Check() error {
-	if b.usedTokens.Load() >= b.maxTokens {
-		return fmt.Errorf("token budget exhausted: %d/%d", b.usedTokens.Load(), b.maxTokens)
-	}
-	if st := b.startTime.Load(); st > 0 && time.Since(time.Unix(0, st)) > b.maxDuration {
-		return fmt.Errorf("duration budget exhausted: %v/%v", time.Since(time.Unix(0, st)).Round(time.Second), b.maxDuration)
-	}
-	usedCostCents := b.usedCost.Load()
-	maxCostCents := int64(b.maxCost * 1_000_000)
-	if usedCostCents >= maxCostCents {
-		return fmt.Errorf("cost budget exhausted: $%.4f/$%.2f", float64(usedCostCents)/1_000_000, b.maxCost)
-	}
-	return nil
+	return b.usage.CheckLimits(b.maxTokens, b.maxDuration, b.maxCost)
 }
 
 // RecordTokens 记录 token 使用量
 func (b *BudgetController) RecordTokens(tokens int) {
-	b.startOnce.Do(func() { b.startTime.Store(time.Now().UnixNano()) })
-	b.usedTokens.Add(int64(tokens))
+	b.usage.RecordTokens(tokens)
 }
 
 // RecordCost 记录成本 (USD)
@@ -92,7 +77,7 @@ func (b *BudgetController) RecordTokens(tokens int) {
 // 内部以 micro-dollar (1/1,000,000 USD) 存储，支持 $0.000001 精度，
 // 避免 Gemini Flash 等低价模型的微小成本累积丢失。
 func (b *BudgetController) RecordCost(cost float64) {
-	b.usedCost.Add(int64(math.Round(cost * 1_000_000)))
+	b.usage.RecordCost(cost)
 }
 
 // modelPrice 每 1K token 的价格 (USD)
@@ -190,28 +175,8 @@ func (b *BudgetController) Allocate(fraction float64) *BudgetController {
 // Without pre-deduction in Allocate(), blindly subtracting the unused
 // portion would drive parent.usedTokens / usedCost negative.
 func (b *BudgetController) Release(parent *BudgetController) {
-	// 未用 = 分配额 - 已用
-	unusedTokens := b.maxTokens - b.usedTokens.Load()
-	if unusedTokens > 0 {
-		// Only subtract down to 0, never below
-		current := parent.usedTokens.Load()
-		if unusedTokens > current {
-			unusedTokens = current
-		}
-		if unusedTokens > 0 {
-			parent.usedTokens.Add(-unusedTokens)
-		}
-	}
-	unusedCostCents := int64(b.maxCost*1_000_000) - b.usedCost.Load()
-	if unusedCostCents > 0 {
-		currentCost := parent.usedCost.Load()
-		if unusedCostCents > currentCost {
-			unusedCostCents = currentCost
-		}
-		if unusedCostCents > 0 {
-			parent.usedCost.Add(-unusedCostCents)
-		}
-	}
+	unused := b.Remaining()
+	parent.usage.RefundUnused(unused.Tokens, unused.Cost)
 }
 
 // BudgetRemaining 剩余预算
@@ -223,18 +188,18 @@ type BudgetRemaining struct {
 
 // Remaining 返回剩余预算
 func (b *BudgetController) Remaining() BudgetRemaining {
-	tokens := b.maxTokens - b.usedTokens.Load()
+	tokens := b.maxTokens - b.usage.Snapshot().Tokens
 	if tokens < 0 {
 		tokens = 0
 	}
 	dur := b.maxDuration
-	if st := b.startTime.Load(); st > 0 {
-		dur = b.maxDuration - time.Since(time.Unix(0, st))
+	if st := b.usage.Snapshot().StartedAt; !st.IsZero() {
+		dur = b.maxDuration - time.Since(st)
 		if dur < 0 {
 			dur = 0
 		}
 	}
-	costCents := int64(b.maxCost*1_000_000) - b.usedCost.Load()
+	costCents := int64(b.maxCost*1_000_000) - b.usage.Snapshot().CostMicroUSD
 	cost := float64(costCents) / 1_000_000
 	if cost < 0 {
 		cost = 0
@@ -242,12 +207,19 @@ func (b *BudgetController) Remaining() BudgetRemaining {
 	return BudgetRemaining{Tokens: tokens, Duration: dur, Cost: cost}
 }
 
+func budgetElapsed(start time.Time) time.Duration {
+	if start.IsZero() {
+		return 0
+	}
+	return time.Since(start)
+}
+
 // Summary 返回使用概况
 func (b *BudgetController) Summary() string {
 	return fmt.Sprintf("tokens: %d/%d, duration: %v/%v, cost: $%.4f/$%.2f",
-		b.usedTokens.Load(), b.maxTokens,
-		time.Since(time.Unix(0, b.startTime.Load())).Round(time.Second), b.maxDuration,
-		float64(b.usedCost.Load())/1_000_000, b.maxCost)
+		b.usage.Snapshot().Tokens, b.maxTokens,
+		budgetElapsed(b.usage.Snapshot().StartedAt).Round(time.Second), b.maxDuration,
+		float64(b.usage.Snapshot().CostMicroUSD)/1_000_000, b.maxCost)
 }
 
 // BudgetStatus 预算状态快照
@@ -267,12 +239,12 @@ type BudgetStatus struct {
 // Status 返回结构化的预算状态快照
 func (b *BudgetController) Status() BudgetStatus {
 	rem := b.Remaining()
-	usedTokens := b.usedTokens.Load()
-	usedCost := float64(b.usedCost.Load()) / 1_000_000
+	usedTokens := b.usage.Snapshot().Tokens
+	usedCost := float64(b.usage.Snapshot().CostMicroUSD) / 1_000_000
 
 	var durUsed time.Duration
-	if st := b.startTime.Load(); st > 0 {
-		durUsed = time.Since(time.Unix(0, st))
+	if st := b.usage.Snapshot().StartedAt; !st.IsZero() {
+		durUsed = time.Since(st)
 	}
 
 	return BudgetStatus{

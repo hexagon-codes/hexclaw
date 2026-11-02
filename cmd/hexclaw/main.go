@@ -68,6 +68,7 @@ import (
 	"github.com/hexagon-codes/hexclaw/heartbeat"
 	"github.com/hexagon-codes/hexclaw/instances"
 	"github.com/hexagon-codes/hexclaw/internal/documentflow"
+	"github.com/hexagon-codes/hexclaw/internal/externaltools"
 	"github.com/hexagon-codes/hexclaw/internal/mediabridge"
 	"github.com/hexagon-codes/hexclaw/internal/mediaflow"
 	"github.com/hexagon-codes/hexclaw/knowledge"
@@ -567,7 +568,14 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 
 	// 4. 初始化 Skill 注册中心
 	skills := skill.NewRegistry()
-	builtin.RegisterAll(skills, cfg.Skill.Builtin)
+	var permHook *engine.PermissionHook
+	executionPolicy := func() skill.ExecutionPolicy {
+		if permHook != nil {
+			return permHook.EffectiveExecutionPolicy()
+		}
+		return skill.ExecutionPolicy{Profile: string(engine.NewSystemDispatchPolicyFromConfig(cfg.Security.Autonomy).Profile())}
+	}
+	builtin.RegisterAll(skills, cfg.Skill.Builtin, executionPolicy)
 	builtinCount := len(skills.All())
 
 	// 4.5 加载 Markdown 技能（技能市场）
@@ -631,10 +639,12 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 	}
 
 	// 4.6 连接 MCP Server（即使无预配 Server 也初始化 Manager，支持动态添加）
-	var mcpMgr *hexmcp.Manager
+	mcpMgr := hexmcp.NewManager()
+	defer mcpMgr.Close()
+	if err := configureExternalOAuth(ctx, cfg, mcpMgr, skills); err != nil {
+		return fmt.Errorf("configure external authorization: %w", err)
+	}
 	if cfg.MCP.Enabled {
-		mcpMgr = hexmcp.NewManager()
-		defer mcpMgr.Close()
 		var mcpConfigs []hexmcp.ServerConfig
 		for _, s := range cfg.MCP.Servers {
 			enabled := s.Enabled
@@ -646,6 +656,7 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 				Env:       s.Env,
 				Endpoint:  s.Endpoint,
 				Enabled:   enabled,
+				Auth:      mcpOAuthConfig(s.Auth),
 			})
 		}
 		// 空配置也必须 Connect：Connect 内启动后台 reconnectLoop，
@@ -661,11 +672,16 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 				fmt.Println("  ✗ MCP         未连接")
 			}
 		}
+	} else {
+		if _, err := mcpMgr.Connect(ctx, nil); err != nil {
+			return fmt.Errorf("initialize MCP lifecycle: %w", err)
+		}
 	}
 
 	// 4.7 注册高级 Skill (需依赖注入: sandbox/hub/mcp)
 	skillDeps := builtin.SkillDeps{
-		McpMgr: mcpMgr,
+		McpMgr:          mcpMgr,
+		ExecutionPolicy: executionPolicy,
 		// 用户经数据连接器授权的本地目录 → 注入 code_exec 沙箱只读放行（BUG-20260626）。
 		SandboxReadablePaths: cfg.Skill.Sandbox.Filesystem.AllowedPaths,
 	}
@@ -769,7 +785,7 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 	if autonomyDecisions != nil {
 		permOpts = append(permOpts, engine.WithPermissionDecisionRecorder(autonomy.NewRecorder(autonomyDecisions)))
 	}
-	permHook := engine.NewPermissionHook(permHub, permOpts...)
+	permHook = engine.NewPermissionHook(permHub, permOpts...)
 	toolExecutor.AddHook(permHook)
 
 	// 6.1.2 接入 per-tool 权限控制 (Phase 9 D40)
@@ -797,6 +813,7 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 
 	eng.SetToolCollector(toolCollector)
 	eng.SetToolExecutor(toolExecutor)
+	engine.RegisterExternalToolAccess(skills, toolCollector, toolExecutor, mcpMgr)
 
 	// v0.4.0 H1 闭环：启动时调一次 InitLifecycle，让所有实现 LifecycleTool 接口的 Skill
 	// 在请求到达前完成一次性资源初始化（数据库连接 / 索引预热 / 远程 token 预换）。
@@ -1266,6 +1283,13 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 
 	// 8. 启动 HTTP 服务
 	srv := api.NewServer(cfg, eng, gw, store)
+	router.SetEffectiveModelSpecResolver(func(requestCtx context.Context, providerKey string, provider config.LLMProviderConfig) config.LLMProviderConfig {
+		readCtx, cancel := context.WithTimeout(requestCtx, 2*time.Second)
+		defer cancel()
+		stop := context.AfterFunc(ctx, cancel)
+		defer stop()
+		return srv.ResolveEffectiveProviderModelSpecs(readCtx, providerKey, provider)
+	})
 	srv.SetDesktopAPIToken(desktopAPIToken)
 	srv.SetOllamaProcessManaged(desktopMode)
 	srv.SetRuntimeConfigPath(configFile)
@@ -3057,6 +3081,16 @@ Set source only when the material explicitly names a work, title, or another rel
 	}
 
 	// 入口只共享同一应用服务；工具始终读取请求时的不可变能力快照。
+	{
+		externalSvc := externaltools.New(ctx, store.ExternalToolExecutionRepository(), genStoreSvc)
+		toolExecutor.SetExternalTools(externalSvc)
+		srv.SetExternalTools(externalSvc)
+		eng.AddReplyArtifactResolver(externalSvc.ResolveReply)
+		configureExternalToolIO(skills, &skillDeps, externalSvc, toolExecutor)
+		if err := configureBrowserTools(ctx, cfg, mcpMgr, skills, eng, toolExecutor, permHook, externalSvc, router, store, skillDeps.FileAccess, skillDeps.Workspace); err != nil {
+			return fmt.Errorf("configure browser tools: %w", err)
+		}
+	}
 	mediaRouter := mediaflow.NewRouter()
 	mediaRouter.Reload(cfg, voiceSvc)
 	var mediaSvc *mediaflow.Service

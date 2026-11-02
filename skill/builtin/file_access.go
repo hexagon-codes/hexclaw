@@ -3,6 +3,7 @@ package builtin
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -31,6 +32,15 @@ func NewFileAccessBroker(paths []string) *FileAccessBroker {
 	return newFileAccessBrokerFromPolicy(prepareFileAccessPolicy(paths))
 }
 
+// OpenReadContext 为上传与标准输入复用同一有效文件权限，不经过文本大小限制。
+func (b *FileAccessBroker) OpenReadContext(ctx context.Context, path string) (io.ReadCloser, error) {
+	resolved, err := b.AuthorizeExistingContext(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	return os.Open(resolved)
+}
+
 // prepareFileAccessPolicy 在事务 Prepare 阶段完成规范化和路径解析。
 func prepareFileAccessPolicy(paths []string) fileAccessPolicy {
 	return fileAccessPolicy{allowedDirs: normalizeAllowedPaths(paths)}
@@ -57,7 +67,11 @@ func (b *FileAccessBroker) AllowedDirectories() []string {
 }
 
 func (b *FileAccessBroker) ListDirectory(path string) (string, error) {
-	resolved, err := b.authorizeExisting(path)
+	return b.ListDirectoryContext(context.Background(), path)
+}
+
+func (b *FileAccessBroker) ListDirectoryContext(ctx context.Context, path string) (string, error) {
+	resolved, err := b.AuthorizeExistingContext(ctx, path)
 	if err != nil {
 		return "", err
 	}
@@ -94,7 +108,11 @@ func (b *FileAccessBroker) ListDirectory(path string) (string, error) {
 }
 
 func (b *FileAccessBroker) ReadFile(path string, offset, limit int) (string, error) {
-	resolved, err := b.authorizeExisting(path)
+	return b.ReadFileContext(context.Background(), path, offset, limit)
+}
+
+func (b *FileAccessBroker) ReadFileContext(ctx context.Context, path string, offset, limit int) (string, error) {
+	resolved, err := b.AuthorizeExistingContext(ctx, path)
 	if err != nil {
 		return "", err
 	}
@@ -133,6 +151,11 @@ func (b *FileAccessBroker) ReadFile(path string, offset, limit int) (string, err
 }
 
 func (b *FileAccessBroker) authorizeExisting(path string) (string, error) {
+	return b.AuthorizeExistingContext(context.Background(), path)
+}
+
+// AuthorizeExistingContext 复用有效权限源；全权限按系统账户访问，其他档位沿用目录授权。
+func (b *FileAccessBroker) AuthorizeExistingContext(ctx context.Context, path string) (string, error) {
 	if strings.TrimSpace(path) == "" {
 		return "", fmt.Errorf("path is required")
 	}
@@ -143,6 +166,12 @@ func (b *FileAccessBroker) authorizeExisting(path string) (string, error) {
 	target, err = filepath.EvalSymlinks(filepath.Clean(target))
 	if err != nil {
 		return "", fmt.Errorf("path not accessible: %w", err)
+	}
+	if skill.FullAccess(ctx) {
+		return target, nil
+	}
+	if b == nil {
+		return "", fmt.Errorf("file access broker is unavailable")
 	}
 
 	b.mu.RLock()
@@ -158,6 +187,26 @@ func (b *FileAccessBroker) authorizeExisting(path string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("access denied - path outside allowed directories: %s", path)
+}
+
+// ResolveToolPath 为文件传输复用现有工作区与有效档位解析。
+func ResolveToolPath(ctx context.Context, workspace, path string) (string, error) {
+	return resolveToolPath(ctx, workspace, path)
+}
+
+// resolveToolPath 保留原目录合同，全权限时直接采用操作系统的绝对路径和符号链接语义。
+func resolveToolPath(ctx context.Context, workspace, path string) (string, error) {
+	if !skill.FullAccess(ctx) {
+		return resolveSafePath(workspace, path)
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(workspace, path)
+	}
+	resolved, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("invalid path: %w", err)
+	}
+	return filepath.Clean(resolved), nil
 }
 
 func normalizeAllowedPaths(paths []string) []string {
@@ -214,7 +263,7 @@ func (s *ListDirectorySkill) Description() string {
 func (s *ListDirectorySkill) Match(_ string) bool { return false }
 
 func (s *ListDirectorySkill) ToolDefinition() llm.ToolDefinition {
-	return llm.NewToolDefinition("list_directory", "List files in a local directory authorized in HexClaw data connectors. Access is enforced by HexClaw, not by external MCP server permissions.", &llm.Schema{
+	return llm.NewToolDefinition("list_directory", "List files in a local directory. The current execution profile applies: full_access uses OS-account access, other profiles use the configured HexClaw directories.", &llm.Schema{
 		Type: "object",
 		Properties: map[string]*llm.Schema{
 			"path": {Type: "string", Description: "Absolute path of the authorized directory to list"},
@@ -223,9 +272,9 @@ func (s *ListDirectorySkill) ToolDefinition() llm.ToolDefinition {
 	})
 }
 
-func (s *ListDirectorySkill) Execute(_ context.Context, args map[string]any) (*skill.Result, error) {
+func (s *ListDirectorySkill) Execute(ctx context.Context, args map[string]any) (*skill.Result, error) {
 	path, _ := args["path"].(string)
-	content, err := s.broker.ListDirectory(path)
+	content, err := s.broker.ListDirectoryContext(ctx, path)
 	if err != nil {
 		return nil, err
 	}
@@ -247,7 +296,7 @@ func (s *ReadFileSkill) Description() string {
 func (s *ReadFileSkill) Match(_ string) bool { return false }
 
 func (s *ReadFileSkill) ToolDefinition() llm.ToolDefinition {
-	return llm.NewToolDefinition("read_file", "Read a file under a local directory authorized in HexClaw data connectors. Access is enforced by HexClaw, not by external MCP server permissions.", &llm.Schema{
+	return llm.NewToolDefinition("read_file", "Read a local file. The current execution profile applies: full_access uses OS-account access, other profiles use the configured HexClaw directories.", &llm.Schema{
 		Type: "object",
 		Properties: map[string]*llm.Schema{
 			"path":   {Type: "string", Description: "Absolute path of the authorized file to read"},
@@ -258,9 +307,9 @@ func (s *ReadFileSkill) ToolDefinition() llm.ToolDefinition {
 	})
 }
 
-func (s *ReadFileSkill) Execute(_ context.Context, args map[string]any) (*skill.Result, error) {
+func (s *ReadFileSkill) Execute(ctx context.Context, args map[string]any) (*skill.Result, error) {
 	path, _ := args["path"].(string)
-	content, err := s.broker.ReadFile(path, intArg(args, "offset", 0), intArg(args, "limit", 0))
+	content, err := s.broker.ReadFileContext(ctx, path, intArg(args, "offset", 0), intArg(args, "limit", 0))
 	if err != nil {
 		return nil, err
 	}
@@ -282,13 +331,16 @@ func (s *ListAllowedDirectoriesSkill) Description() string {
 func (s *ListAllowedDirectoriesSkill) Match(_ string) bool { return false }
 
 func (s *ListAllowedDirectoriesSkill) ToolDefinition() llm.ToolDefinition {
-	return llm.NewToolDefinition("list_allowed_directories", "List local directories currently authorized in HexClaw. This is HexClaw's grant store, not external MCP server state.", &llm.Schema{
+	return llm.NewToolDefinition("list_allowed_directories", "Describe the current local directory access policy. full_access permits directories accessible to the OS account; other profiles list configured HexClaw directories. This is not external MCP server state.", &llm.Schema{
 		Type:       "object",
 		Properties: map[string]*llm.Schema{},
 	})
 }
 
-func (s *ListAllowedDirectoriesSkill) Execute(_ context.Context, _ map[string]any) (*skill.Result, error) {
+func (s *ListAllowedDirectoriesSkill) Execute(ctx context.Context, _ map[string]any) (*skill.Result, error) {
+	if skill.FullAccess(ctx) {
+		return &skill.Result{Content: "All directories accessible to the current OS account (full_access).", Data: skill.CurrentExecutionPolicy(ctx)}, nil
+	}
 	dirs := s.broker.AllowedDirectories()
 	if len(dirs) == 0 {
 		return &skill.Result{Content: "Allowed directories:"}, nil

@@ -1,5 +1,5 @@
 # 编译与运行时分层，镜像包含真实文档渲染及中文、数学字体。
-FROM golang:1.25.13-alpine AS builder
+FROM golang:1.26.10-alpine AS builder
 RUN apk add --no-cache git
 ARG VERSION=dev
 ARG COMMIT=none
@@ -39,17 +39,33 @@ RUN curl -fsSL https://github.com/containers/bubblewrap/releases/download/v0.11.
     && grep -Fq -- '--disable-userns' /tmp/bubblewrap-help.txt \
     && grep -Fq -- '--assert-userns-disabled' /tmp/bubblewrap-help.txt
 
+# MCP运行器使用固定官方二进制，下载与解包工具不进入运行层。
+RUN curl -fsSL https://nodejs.org/dist/v22.23.4/node-v22.23.4-linux-x64.tar.xz -o /tmp/node.tar.xz \
+    && echo '1805bcd35e6815559bd2eb97db438d3fdb0eb3a5e6a977b7c1badca76337e9ce  /tmp/node.tar.xz' | sha256sum -c - \
+    && tar -xJf /tmp/node.tar.xz -C /tmp \
+    && cp /tmp/node-v22.23.4-linux-x64/bin/node /usr/local/bin/node \
+    && mkdir -p /usr/local/lib/node_modules \
+    && cp -R /tmp/node-v22.23.4-linux-x64/lib/node_modules/npm /usr/local/lib/node_modules/ \
+    && curl -fsSL https://github.com/astral-sh/uv/releases/download/0.13.6/uv-x86_64-unknown-linux-gnu.tar.gz -o /tmp/uv.tar.gz \
+    && echo 'f29c3e94ffabd7e6f3ba521dba169a9b7ec12100bf3257087f0f24f6123f3645  /tmp/uv.tar.gz' | sha256sum -c - \
+    && tar -xzf /tmp/uv.tar.gz -C /tmp \
+    && cp /tmp/uv-x86_64-unknown-linux-gnu/uv /tmp/uv-x86_64-unknown-linux-gnu/uvx /usr/local/bin/
+
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates tzdata fontconfig fonts-noto-cjk fonts-dejavu-core fonts-stix \
-    python3 python3-yaml python3-requests python3-sympy curl poppler-utils libcap2 \
+    python3 python3-yaml python3-requests python3-sympy curl poppler-utils libcap2 antiword libstdc++6 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /hexclaw /usr/local/bin/hexclaw
 COPY --from=render-tools /usr/local/bin/pandoc /usr/local/bin/typst /usr/local/bin/
 COPY --from=render-tools /usr/bin/bwrap /usr/bin/bwrap
+COPY --from=render-tools /usr/local/bin/node /usr/local/bin/uv /usr/local/bin/uvx /usr/local/bin/
+COPY --from=render-tools /usr/local/lib/node_modules /usr/local/lib/node_modules
 COPY render/assets/reference.docx /usr/local/share/hexclaw/assets/render/reference.docx
 COPY docker/entrypoint.py /usr/local/bin/hexclaw-container-entrypoint
-RUN mkdir -p /data/.hexclaw && chmod 700 /data/.hexclaw && chmod 755 /usr/local/bin/hexclaw-container-entrypoint
+RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
+    && mkdir -p /data/.hexclaw && chmod 700 /data/.hexclaw && chmod 755 /usr/local/bin/hexclaw-container-entrypoint
 ENV HOME=/data TZ=Asia/Shanghai HEXCLAW_RESOURCE_DIR=/usr/local/share/hexclaw
 WORKDIR /data
 EXPOSE 16060

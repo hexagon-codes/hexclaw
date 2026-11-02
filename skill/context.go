@@ -2,6 +2,37 @@ package skill
 
 import "context"
 
+// ExecutionPolicy 是运行时从同一权限配置投影的有效策略，不接受模型参数覆盖。
+type ExecutionPolicy struct {
+	Profile  string `json:"profile"`
+	Revision uint64 `json:"revision"`
+}
+
+// ExecutionPolicySource 每次派发读取当前策略，使排队调用与后续动作及时消费设置变更。
+type ExecutionPolicySource func() ExecutionPolicy
+
+type executionPolicySourceKey struct{}
+
+func WithExecutionPolicySource(ctx context.Context, source ExecutionPolicySource) context.Context {
+	if source == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, executionPolicySourceKey{}, source)
+}
+
+func CurrentExecutionPolicy(ctx context.Context) ExecutionPolicy {
+	if ctx != nil {
+		if source, ok := ctx.Value(executionPolicySourceKey{}).(ExecutionPolicySource); ok && source != nil {
+			return source()
+		}
+	}
+	return ExecutionPolicy{Profile: "function_first"}
+}
+
+func FullAccess(ctx context.Context) bool {
+	return CurrentExecutionPolicy(ctx).Profile == "full_access"
+}
+
 // InvocationContext 由引擎盖章本轮请求身份；模型参数不拥有会话、孩子或消息归属。
 type InvocationContext struct {
 	RequestDigest       string

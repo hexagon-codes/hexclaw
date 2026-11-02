@@ -1,18 +1,53 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"strings"
 	"testing"
 
 	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/hexagon"
+	"github.com/hexagon-codes/hexagon/observe/trace"
+
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/mcp"
 	"github.com/hexagon-codes/hexclaw/skill"
 )
+
+func TestRuntimeToolReceiptLogsUnknownOutcome(t *testing.T) {
+	var output bytes.Buffer
+	ctx := trace.WithLogger(t.Context(), slog.New(slog.NewJSONHandler(&output, nil)))
+	ctx = withRuntimeSnapshots(ctx, &adapter.Message{ID: "receipt-source"}, "receipt-session")
+	provider := (&ReActEngine{}).wrapRuntimeSnapshotProvider(&snapshotCaptureProvider{}, "provider", "model")
+	if _, err := provider.Complete(ctx, llm.CompletionRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	output.Reset()
+	raw := &skill.Result{Detail: &skill.ToolExecutionDetail{Phase: "request", Outcome: "unknown", Reason: "timeout", Action: "post"}}
+	recordRuntimeToolReceipt(ctx, llm.ToolCall{ID: "unknown-post", Name: "browser"}, "error", raw, false)
+	var record map[string]any
+	if err := json.Unmarshal(output.Bytes(), &record); err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]string{"status": "error", "outcome": "unknown", "phase": "request", "reason": "timeout", "tool_call_id": "unknown-post"} {
+		if record[key] != want {
+			t.Fatalf("%s=%v, want %s", key, record[key], want)
+		}
+	}
+	var receipt struct {
+		Calls []runtimeToolReceipt `json:"tool_calls"`
+	}
+	if err := json.Unmarshal([]byte(runtimeSnapshotReceipt(ctx)), &receipt); err != nil {
+		t.Fatal(err)
+	}
+	if len(receipt.Calls) != 1 || receipt.Calls[0].Status != "error" || receipt.Calls[0].Detail == nil || receipt.Calls[0].Detail.Outcome != "unknown" {
+		t.Fatal("log projection changed persisted unknown contract")
+	}
+}
 
 type snapshotCaptureProvider struct {
 	hexagon.Provider

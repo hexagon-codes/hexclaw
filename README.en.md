@@ -38,9 +38,9 @@ This desktop-client example reuses the real interface and K12 skin from the [off
 
 | Usage | Prerequisites |
 | --- | --- |
-| Desktop client | Current macOS bundled components require macOS 14 or later; see [Desktop runtime requirements](https://github.com/hexagon-codes/hexclaw-desktop/blob/main/README.en.md#runtime-requirements) for Windows and Linux architectures and dependencies |
+| Desktop client | The app requires macOS 12 or later; browser/CU and some bundled components require macOS 14 or later. See [Desktop runtime requirements](https://github.com/hexagon-codes/hexclaw-desktop/blob/main/README.en.md#runtime-requirements) for Windows and Linux architectures and dependencies |
 | Standalone binary | A [Release asset](https://github.com/hexagon-codes/hexclaw/releases) for your system and architecture; no Go toolchain required |
-| Go installation or source build | Current source requires Go 1.25.13 or later; source builds also need Git and Make. For a release, use its tag's `go.mod` |
+| Go installation or source build | Current source requires Go 1.26.10 or later; source builds also need Git and Make. For a release, use its tag's `go.mod` |
 | Model tasks | An online Provider and credentials, or local Ollama with a downloaded model; image tasks also require the relevant vision capabilities |
 
 Configure [optional runtime dependencies](#optional-runtime-dependencies) for document rendering, code execution, and media generation as needed.

@@ -1,6 +1,6 @@
 {
   "version": "2.0.0",
-  "updated_at": "2026-10-28T14:25:36Z",
+  "updated_at": "2026-11-02T08:05:25Z",
   "generated_by": "scripts/generate-index.py",
   "count": 78,
   "skills": [
@@ -104,7 +104,8 @@
       "sha256": "0664db0d8dbf5f633fdd7bd7126a6a7cd73c3b0018cd213819617dbae409243f",
       "size": 9222,
       "downloads": 0,
-      "rating": 0
+      "rating": 0,
+      "outputs": []
     },
     {
       "name": "arxiv-reader",
@@ -349,7 +350,8 @@
       ],
       "file": "skills/concept-explainer.md",
       "sha256": "e8d84ef1d0c44f08cb799cd62727a04d74832813ef127b2b83171f30d58701e7",
-      "size": 2683
+      "size": 2683,
+      "outputs": []
     },
     {
       "name": "copywriting-pro",
@@ -756,7 +758,8 @@
       "sha256": "9a606c80e776c9fff8a504c9e2aa02e5c26607580f56874b23adb88ad9b68d44",
       "size": 7094,
       "downloads": 0,
-      "rating": 0
+      "rating": 0,
+      "requires": []
     },
     {
       "name": "homework-checker",

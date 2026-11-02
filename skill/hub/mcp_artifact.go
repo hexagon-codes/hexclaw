@@ -9,8 +9,9 @@ import (
 )
 
 var (
-	npmExactVersion  = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)([-+][0-9A-Za-z.-]+)?$`)
-	pypiExactVersion = regexp.MustCompile(`^[0-9][0-9A-Za-z.!+_-]*$`)
+	npmExactVersion          = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)([-+][0-9A-Za-z.-]+)?$`)
+	pypiExactVersion         = regexp.MustCompile(`^[0-9][0-9A-Za-z.!+_-]*$`)
+	pypiDependencyConstraint = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9][A-Za-z0-9._-]*(,[A-Za-z0-9][A-Za-z0-9._-]*)*\])?((==|!=)[0-9][0-9A-Za-z.!+_*-]*|(~=|<=|>=|<|>)[0-9][0-9A-Za-z.!+_-]*)(,((==|!=)[0-9][0-9A-Za-z.!+_*-]*|(~=|<=|>=|<|>)[0-9][0-9A-Za-z.!+_-]*))*$`)
 )
 
 // ValidatedMCPServer is an immutable-by-construction projection. Callers can
@@ -54,8 +55,12 @@ func ValidatePinnedMCPServer(meta McpServerMeta) (ValidatedMCPServer, error) {
 	if strings.TrimSpace(a.Package) == "" || strings.ContainsAny(a.Package, " \t\r\n\x00") {
 		return ValidatedMCPServer{}, fmt.Errorf("artifact package 非法")
 	}
+	if a.DependencyConstraint != "" && (a.Ecosystem != "pypi" || !pypiDependencyConstraint.MatchString(a.DependencyConstraint)) {
+		return ValidatedMCPServer{}, fmt.Errorf("uvx 条目不得注入额外 dependency source")
+	}
 
 	exactSpec := ""
+	constraintArgument := -1
 	switch a.Ecosystem {
 	case "npm":
 		if meta.Command != "npx" || !npmExactVersion.MatchString(a.Version) {
@@ -87,8 +92,18 @@ func ValidatePinnedMCPServer(meta McpServerMeta) (ValidatedMCPServer, error) {
 			return ValidatedMCPServer{}, fmt.Errorf("PyPI artifact 缺少有效 sha256")
 		}
 		exactSpec = a.Package + "==" + a.Version
-		for _, arg := range meta.Args {
-			if arg == "--with" || arg == "--with-editable" || arg == "-r" || arg == "--requirements" ||
+		withCount := 0
+		for i, arg := range meta.Args {
+			// 只接纳元数据显式声明且精确绑定的一组依赖约束。
+			if arg == "--with" {
+				if withCount != 0 || a.DependencyConstraint == "" || i+1 >= len(meta.Args) || meta.Args[i+1] != a.DependencyConstraint {
+					return ValidatedMCPServer{}, fmt.Errorf("uvx 条目不得注入额外 dependency source")
+				}
+				withCount++
+				constraintArgument = i + 1
+				continue
+			}
+			if arg == "--with-editable" || arg == "-r" || arg == "--requirements" ||
 				arg == "--index-url" || arg == "--extra-index-url" || arg == "--find-links" ||
 				strings.HasPrefix(arg, "--with=") || strings.HasPrefix(arg, "--requirements=") ||
 				strings.HasPrefix(arg, "--index-url=") || strings.HasPrefix(arg, "--extra-index-url=") ||
@@ -96,13 +111,16 @@ func ValidatePinnedMCPServer(meta McpServerMeta) (ValidatedMCPServer, error) {
 				return ValidatedMCPServer{}, fmt.Errorf("uvx 条目不得注入额外 dependency source")
 			}
 		}
+		if a.DependencyConstraint != "" && withCount != 1 {
+			return ValidatedMCPServer{}, fmt.Errorf("uvx 条目不得注入额外 dependency source")
+		}
 	default:
 		return ValidatedMCPServer{}, fmt.Errorf("不支持的 artifact ecosystem %q", a.Ecosystem)
 	}
 
 	found := false
-	for _, arg := range meta.Args {
-		if arg == exactSpec {
+	for i, arg := range meta.Args {
+		if i != constraintArgument && arg == exactSpec {
 			found = true
 			break
 		}

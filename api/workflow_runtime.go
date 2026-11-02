@@ -1090,7 +1090,8 @@ func (e *workflowExecutor) listNodeRuns() []WorkflowNodeRun {
 }
 
 func mergeWorkflowStates(original hexagon.MapState, outputs []hexagon.MapState) hexagon.MapState {
-	merged := original.Clone().(hexagon.MapState)
+	// 图执行边界负责深隔离；这里只替换顶层字段，字符串表在读取时单独复制。
+	merged := hexagon.MapState(cloneMap(original))
 	combinedOutputs := stringMapStateValue(merged, stateKeyNodeOutputs)
 	combinedHandoffs := stringMapStateValue(merged, stateKeyNodeHandoffs)
 	// C6：并行分支各自可能停用不同出边/标记不同死节点，合并时取并集。
@@ -1152,7 +1153,7 @@ func stringMapStateValue(state hexagon.MapState, key string) map[string]string {
 }
 
 func putStringMapStateValue(state hexagon.MapState, key, entryKey, entryValue string) hexagon.MapState {
-	next := state.Clone().(hexagon.MapState)
+	next := hexagon.MapState(cloneMap(state))
 	values := stringMapStateValue(next, key)
 	values[entryKey] = entryValue
 	next.Set(key, values)
@@ -1169,7 +1170,7 @@ func stringStateValue(state hexagon.MapState, key string) string {
 }
 
 func setStringStateValue(state hexagon.MapState, key, value string) hexagon.MapState {
-	next := state.Clone().(hexagon.MapState)
+	next := hexagon.MapState(cloneMap(state))
 	next.Set(key, value)
 	return next
 }

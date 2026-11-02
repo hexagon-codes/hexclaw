@@ -7,8 +7,10 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 )
@@ -35,12 +37,15 @@ func TestOAuthManager_SaveLoadRoundTrip(t *testing.T) {
 	if got.AccessToken != "a" || got.RefreshToken != "r" || got.TokenType != "Bearer" {
 		t.Errorf("round-trip mismatch: %+v", got)
 	}
-	// path-traversal: a name with directory components is reduced to its base.
+	// 完整服务身份可原名读回，不同完整名称不能共享凭据。
 	if err := m.saveToken("../evil", want); err != nil {
 		t.Fatalf("save traversal name: %v", err)
 	}
-	if _, err := m.loadToken("evil"); err != nil {
-		t.Errorf("base-named credential must load: %v", err)
+	if _, err := m.loadToken("../evil"); err != nil {
+		t.Errorf("full-name credential must load: %v", err)
+	}
+	if _, err := m.loadToken("evil"); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("another full name must not load the credential: %v", err)
 	}
 }
 
@@ -80,10 +85,15 @@ func TestOAuthManager_GetToken_Branches(t *testing.T) {
 
 	// valid on-disk token is returned without a network call
 	m1 := NewOAuthManager(t.TempDir())
-	if err := m1.saveToken("s1", &OAuthToken{AccessToken: "V", ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+	cfg1 := &OAuthConfig{ClientID: "c", AuthURL: "https://auth.example/authorize", TokenURL: "https://auth.example/token", Resource: "https://service.example/mcp"}
+	source1, err := oauthSourceFingerprint("s1", cfg1)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if got, err := m1.GetToken(ctx, "s1", &OAuthConfig{}); err != nil || got.AccessToken != "V" {
+	if err := m1.saveToken("s1", &OAuthToken{AccessToken: "V", SourceFingerprint: source1, ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := m1.GetToken(ctx, "s1", cfg1); err != nil || got.AccessToken != "V" {
 		t.Fatalf("valid token must be returned: %v %+v", err, got)
 	}
 
@@ -100,10 +110,15 @@ func TestOAuthManager_GetToken_Branches(t *testing.T) {
 	srv := tokenServer(t, 200, `{"access_token":"NEW","token_type":"Bearer","expires_in":3600}`)
 	defer srv.Close()
 	m3 := NewOAuthManager(t.TempDir())
-	if err := m3.saveToken("s3", &OAuthToken{AccessToken: "OLD", RefreshToken: "rt", ExpiresAt: time.Now().Add(-time.Hour)}); err != nil {
+	cfg3 := &OAuthConfig{ClientID: "c", AuthURL: srv.URL + "/authorize", TokenURL: srv.URL, Resource: srv.URL + "/mcp"}
+	source3, err := oauthSourceFingerprint("s3", cfg3)
+	if err != nil {
 		t.Fatal(err)
 	}
-	got3, err := m3.GetToken(ctx, "s3", &OAuthConfig{ClientID: "c", TokenURL: srv.URL})
+	if err := m3.saveToken("s3", &OAuthToken{AccessToken: "OLD", RefreshToken: "rt", SourceFingerprint: source3, ExpiresAt: time.Now().Add(-time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	got3, err := m3.GetToken(ctx, "s3", cfg3)
 	if err != nil || got3.AccessToken != "NEW" {
 		t.Fatalf("refresh branch must return the new token: %v %+v", err, got3)
 	}

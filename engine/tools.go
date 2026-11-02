@@ -85,7 +85,7 @@ func (tc *ToolCollector) Collect() []llm.ToolDefinition {
 // CollectFiltered 按 query 召回 + 按 activation 过滤后返回工具定义。
 //
 // v0.4.x C1+C2 真闭环路径：
-//   - query 非空时，skill 包按 trigger/tag/name/desc 打分 Top-K（K=maxTools）
+//   - query 非空时，skill 包按 trigger/tag/name/desc 打分，最终统一按预算选择
 //   - act.Mode/Subject/Grade/Custom 用于条件激活（when/not_when 过滤）
 //   - 内置 Skill（不实现 MetaProvider）默认通过条件检查，全部出现在召回里
 //   - MCP 工具不参与 activation 过滤（MCP 不在 Skills 闭环范围）
@@ -95,7 +95,7 @@ func (tc *ToolCollector) CollectFiltered(query string, act skill.Activation) []l
 	return tc.collectFiltered(query, act, nil)
 }
 
-func (tc *ToolCollector) collectFiltered(query string, act skill.Activation, selection *runtimeToolSelection) []llm.ToolDefinition {
+func (tc *ToolCollector) collectFiltered(query string, act skill.Activation, selection *runtimeToolSelection, required ...string) []llm.ToolDefinition {
 	seen := make(map[string]bool)
 	var tools []llm.ToolDefinition
 
@@ -137,9 +137,6 @@ func (tc *ToolCollector) collectFiltered(query string, act skill.Activation, sel
 				def.Type = "function"
 			}
 			tools = append(tools, def)
-			if contextSelection && len(tools) >= tc.maxTools {
-				break
-			}
 		}
 	}
 
@@ -180,19 +177,17 @@ func (tc *ToolCollector) collectFiltered(query string, act skill.Activation, sel
 		}
 	}
 
-	// Sort for deterministic ordering
-	sort.Slice(tools, func(i, j int) bool {
-		return tools[i].Function.Name < tools[j].Function.Name
-	})
-
-	// Cap
-	if len(tools) > tc.maxTools {
-		if selection != nil {
-			for _, tool := range tools[tc.maxTools:] {
-				selection.CollectorLimitOmitted = append(selection.CollectorLimitOmitted, tool.Function.Name)
-			}
+	// 无召回时沿用名字顺序；有召回时先保留已有相关性顺序选择，再稳定展示。
+	if query == "" && !hasActivation(act) {
+		sort.Slice(tools, func(i, j int) bool { return tools[i].Function.Name < tools[j].Function.Name })
+	}
+	selected, omitted := selectToolDefinitions(tools, tc.maxTools, required)
+	tools = selected
+	sort.Slice(tools, func(i, j int) bool { return tools[i].Function.Name < tools[j].Function.Name })
+	if selection != nil {
+		for _, tool := range omitted {
+			selection.CollectorLimitOmitted = append(selection.CollectorLimitOmitted, tool.Function.Name)
 		}
-		tools = tools[:tc.maxTools]
 	}
 	if selection != nil {
 		selection.CollectorMaxTools = tc.maxTools
@@ -202,6 +197,43 @@ func (tc *ToolCollector) collectFiltered(query string, act skill.Activation, sel
 	}
 
 	return tools
+}
+
+// selectToolDefinitions 统一限制模型 schema；单槽保留可代理发现的调用入口。
+// required 只接收原系统派发地板。其占满预算时，最多为调用入口增加一个固定结构位。
+func selectToolDefinitions(tools []llm.ToolDefinition, limit int, required []string) ([]llm.ToolDefinition, []llm.ToolDefinition) {
+	if limit <= 0 || len(tools) <= limit {
+		return tools, nil
+	}
+	requiredSet := make(map[string]bool, len(required))
+	for _, name := range required {
+		requiredSet[name] = true
+	}
+	var invoke, discovery, floor, other []llm.ToolDefinition
+	for _, tool := range tools {
+		switch {
+		case tool.Function.Name == invokeToolName:
+			invoke = append(invoke, tool)
+		case requiredSet[tool.Function.Name]:
+			floor = append(floor, tool)
+		case tool.Function.Name == discoverToolsName:
+			discovery = append(discovery, tool)
+		default:
+			other = append(other, tool)
+		}
+	}
+	if len(invoke) > 0 && len(required) > 0 && limit < len(floor)+1 {
+		limit = len(floor) + 1
+	}
+	ordered := make([]llm.ToolDefinition, 0, len(tools))
+	ordered = append(ordered, invoke...)
+	ordered = append(ordered, floor...)
+	ordered = append(ordered, discovery...)
+	ordered = append(ordered, other...)
+	if len(ordered) <= limit {
+		return ordered, nil
+	}
+	return ordered[:limit], ordered[limit:]
 }
 
 // hasActivation 判断 Activation 是否非零（任一字段非空即视为有上下文，触发条件激活路径）。

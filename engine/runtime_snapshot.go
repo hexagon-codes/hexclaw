@@ -13,7 +13,9 @@ import (
 	"github.com/hexagon-codes/hexagon"
 	"github.com/hexagon-codes/hexagon/observe/trace"
 	"github.com/hexagon-codes/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/config"
 	"github.com/hexagon-codes/hexclaw/egress"
+	"github.com/hexagon-codes/hexclaw/llmrouter"
 	"github.com/hexagon-codes/hexclaw/skill"
 	"github.com/hexagon-codes/toolkit/util/logger"
 )
@@ -50,27 +52,48 @@ type runtimeToolSelection struct {
 }
 
 func recordRuntimeToolLimit(ctx context.Context, tools []llm.ToolDefinition, cap int) {
+	if cap <= 0 || len(tools) <= cap {
+		return
+	}
+	recordRuntimeToolOmissions(ctx, tools[cap:])
+}
+
+func recordRuntimeToolOmissions(ctx context.Context, omitted []llm.ToolDefinition) {
 	collector := runtimeSnapshots(ctx)
-	if collector == nil || cap <= 0 || len(tools) <= cap {
+	if collector == nil || len(omitted) == 0 {
 		return
 	}
 	collector.mu.Lock()
 	defer collector.mu.Unlock()
 	if collector.selection != nil {
-		for _, tool := range tools[cap:] {
+		for _, tool := range omitted {
 			collector.selection.RequestLimitOmitted = append(collector.selection.RequestLimitOmitted, tool.Function.Name)
 		}
 	}
 }
 
+func limitRuntimeToolDefinitions(ctx context.Context, tools []llm.ToolDefinition, configured int, msg *adapter.Message) []llm.ToolDefinition {
+	if workflowExplicitTools(ctx) {
+		return tools
+	}
+	var required []string
+	if isSystemDispatch(msg) {
+		required = systemDispatchToolFloorForSource(systemDispatchSourceFromMessage(msg))
+	}
+	selected, omitted := selectToolDefinitions(tools, effectiveMaxTools(configured, msg), required)
+	recordRuntimeToolOmissions(ctx, omitted)
+	return selected
+}
+
 func (tc *ToolCollector) collectFilteredForRuntime(ctx context.Context, query string, act skill.Activation) []llm.ToolDefinition {
 	started := time.Now()
 	collector := runtimeSnapshots(ctx)
+	required := systemDispatchToolFloorForSource(systemDispatchSource(ctx))
 	if collector == nil {
-		return tc.CollectFiltered(query, act)
+		return tc.collectFiltered(query, act, nil, required...)
 	}
 	selection := &runtimeToolSelection{CapturedAt: time.Now().UTC().Format(time.RFC3339Nano), MCPConnections: []runtimeMCPConnection{}, CollectedTools: []string{}}
-	tools := tc.collectFiltered(query, act, selection)
+	tools := tc.collectFiltered(query, act, selection, required...)
 	collector.mu.Lock()
 	collector.selection = selection
 	collector.mu.Unlock()
@@ -98,7 +121,11 @@ func recordRuntimeToolReceipt(ctx context.Context, call llm.ToolCall, status str
 	collector.toolCalls = append(collector.toolCalls, runtimeToolReceipt{ToolCallID: call.ID, Name: call.Name, Attempt: len(collector.attempts), Status: status, Detail: toolExecutionDetail(raw), Replayed: replayed})
 	attempt := len(collector.attempts)
 	collector.mu.Unlock()
-	trace.L(ctx).Info("Tool execution receipt recorded", "tool_call_id", call.ID, "tool", call.Name, "attempt", attempt, "status", status, "replayed", replayed)
+	fields := []any{"tool_call_id", call.ID, "tool", call.Name, "attempt", attempt, "status", status, "replayed", replayed}
+	if detail := toolExecutionDetail(raw); detail != nil {
+		fields = append(fields, "outcome", detail.Outcome, "phase", detail.Phase, "reason", detail.Reason)
+	}
+	trace.L(ctx).Info("Tool execution receipt recorded", fields...)
 }
 
 type runtimeSnapshotAttempt struct {
@@ -256,19 +283,74 @@ type runtimeSnapshotProvider struct {
 	hexagon.Provider
 	name, model     string
 	configuredTools *bool
+	providerConfig  config.LLMProviderConfig
+	configRevision  func() uint64
 }
 
 func (e *ReActEngine) wrapRuntimeSnapshotProvider(provider hexagon.Provider, name, model string) hexagon.Provider {
 	var configured *bool
+	var providerConfig config.LLMProviderConfig
 	e.mu.RLock()
 	if e.cfg != nil {
-		if config, ok := e.cfg.LLM.Providers[name]; ok && config.ToolsEnabled != nil {
-			value := *config.ToolsEnabled
-			configured = &value
+		if current, ok := e.cfg.LLM.Providers[name]; ok {
+			providerConfig = current
+			if current.ToolsEnabled != nil {
+				value := *current.ToolsEnabled
+				configured = &value
+			}
 		}
 	}
 	e.mu.RUnlock()
-	return preserveContextTokenCounter(&runtimeSnapshotProvider{Provider: provider, name: name, model: model, configuredTools: configured}, provider)
+	revision := func() uint64 {
+		e.mu.RLock()
+		defer e.mu.RUnlock()
+		if e.cfg != nil {
+			return e.cfg.LLM.ConfigRevision
+		}
+		return 0
+	}
+	return preserveContextTokenCounter(&runtimeSnapshotProvider{
+		Provider: provider, name: name, model: model, configuredTools: configured,
+		providerConfig: providerConfig, configRevision: revision,
+	}, provider)
+}
+
+// 续传来源绑定可信请求身份与当前配置代次；SDK 再叠加实际 endpoint、凭据及模型身份。
+func (p *runtimeSnapshotProvider) protocolContext(ctx context.Context, request llm.CompletionRequest) context.Context {
+	invocation := skill.CurrentInvocation(ctx)
+	scope := struct {
+		Owner, Session, Request, SourceMessage, Agent, ProviderInstance string
+		Revision                                                        uint64
+	}{
+		Owner: invocation.AuthenticatedUserID, Session: invocation.SessionID, Request: invocation.RequestID,
+		SourceMessage: invocation.SourceMessageID, Agent: invocation.RoutedAgentName,
+		ProviderInstance: config.EffectiveProviderInstanceID(p.name, p.providerConfig),
+	}
+	if collector := runtimeSnapshots(ctx); collector != nil {
+		collector.mu.Lock()
+		if scope.Session == "" {
+			scope.Session = collector.base["session_id"]
+		}
+		if scope.Request == "" {
+			scope.Request = collector.base["request_id"]
+		}
+		if scope.SourceMessage == "" {
+			scope.SourceMessage = collector.base["source_message_id"]
+		}
+		if scope.Agent == "" {
+			scope.Agent = collector.base["routed_agent"]
+		}
+		collector.mu.Unlock()
+	}
+	if p.configRevision != nil {
+		scope.Revision = p.configRevision()
+	}
+	model := strings.TrimSpace(request.Model)
+	if model == "" {
+		model = p.model
+	}
+	encoded, _ := json.Marshal(scope)
+	return llmrouter.WithModelAPIProtocol(ctx, p.name, p.providerConfig, model, string(encoded))
 }
 
 func (p *runtimeSnapshotProvider) prepare(ctx context.Context, req llm.CompletionRequest) (llm.CompletionRequest, int) {
@@ -387,6 +469,7 @@ func (p *runtimeSnapshotProvider) finish(ctx context.Context, index int, err err
 }
 
 func (p *runtimeSnapshotProvider) Complete(ctx context.Context, req llm.CompletionRequest) (*llm.CompletionResponse, error) {
+	ctx = p.protocolContext(ctx, req)
 	req, index := p.prepare(ctx, req)
 	response, err := p.Provider.Complete(ctx, req)
 	p.finish(ctx, index, err, false)
@@ -394,6 +477,7 @@ func (p *runtimeSnapshotProvider) Complete(ctx context.Context, req llm.Completi
 }
 
 func (p *runtimeSnapshotProvider) Stream(ctx context.Context, req llm.CompletionRequest) (*llm.Stream, error) {
+	ctx = p.protocolContext(ctx, req)
 	req, index := p.prepare(ctx, req)
 	stream, err := p.Provider.Stream(ctx, req)
 	p.finish(ctx, index, err, true)

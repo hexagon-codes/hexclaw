@@ -65,6 +65,7 @@ import (
 	"github.com/hexagon-codes/hexclaw/gateway"
 	"github.com/hexagon-codes/hexclaw/instances"
 	"github.com/hexagon-codes/hexclaw/internal/documentflow"
+	"github.com/hexagon-codes/hexclaw/internal/externaltools"
 	"github.com/hexagon-codes/hexclaw/internal/mediaflow"
 	"github.com/hexagon-codes/hexclaw/internal/upstreamerr"
 	"github.com/hexagon-codes/hexclaw/knowledge"
@@ -86,6 +87,7 @@ import (
 
 // Server HTTP API 服务器
 type Server struct {
+	externalTools   *externaltools.Service
 	cfg             *config.Config
 	runtimeCfgPath  string
 	backendID       string
@@ -143,6 +145,8 @@ type Server struct {
 	attachmentStaging         *attachmentStagingStore      // owner-bound ephemeral binary receipts
 	extraMounts               []mountedHandler             // 场景包子路由（前缀 → handler，AP-1：平台不认识场景内容）
 	streamStates              streamstate.Provider         // 流式 in-flight 状态（可选）
+	restStreams               *streamstate.Registry        // REST 请求复用同一快照与显式取消合同
+	chatAdmissionMu           sync.Mutex                   // 同 owner/request 的 REST/WS 接纳与原登记串行
 	logCollector              *LogCollector                // 日志收集器
 	workflowStore             *WorkflowStore               // 工作流存储
 	teamStore                 *TeamStore                   // 团队数据存储
@@ -287,6 +291,7 @@ func NewServer(cfg *config.Config, eng engine.Engine, gw gateway.Gateway, store 
 		ollamaBaseURL:      defaultOllamaBaseURL,
 		credentialResolver: newInMemoryCredentialResolver(),
 		attachmentStaging:  newAttachmentStagingStore(),
+		restStreams:        streamstate.NewRegistry(0),
 	}
 }
 
@@ -325,6 +330,25 @@ func (s *Server) SetDesktopAPIToken(token string) { s.desktopAPIToken = token }
 // SetStreamStateProvider 设置流式 in-flight 状态提供器。
 func (s *Server) SetStreamStateProvider(p streamstate.Provider) {
 	s.streamStates = p
+	if admission, ok := p.(interface {
+		SetRequestAdmission(func(context.Context, *adapter.Message, func() error) error)
+	}); ok {
+		admission.SetRequestAdmission(func(ctx context.Context, msg *adapter.Message, register func() error) error {
+			s.chatAdmissionMu.Lock()
+			defer s.chatAdmissionMu.Unlock()
+			requestID := msg.Metadata["request_id"]
+			if _, exists := s.restStreams.GetStreamSnapshot(msg.UserID, requestID); exists {
+				return streamstate.ErrRequestConflict
+			}
+			if _, exists := p.GetStreamSnapshot(msg.UserID, requestID); exists {
+				return streamstate.ErrRequestConflict
+			}
+			if err := s.checkDurableChatRequest(ctx, msg.UserID, requestID); err != nil {
+				return err
+			}
+			return register()
+		})
+	}
 }
 
 // SetKnowledgeBase 设置知识库管理器
@@ -593,7 +617,15 @@ func (s *Server) handleGeneratedFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	managed := false
-	if s.mediaFlow != nil {
+	if s.externalTools != nil {
+		var err error
+		managed, err = s.externalTools.AuthorizePath(r.Context(), httpPrincipalFromRequest(r).userID, rel)
+		if err != nil {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+	}
+	if !managed && s.mediaFlow != nil {
 		var err error
 		managed, err = s.mediaFlow.AuthorizePath(r.Context(), httpPrincipalFromRequest(r).userID, rel)
 		if err != nil {
@@ -761,6 +793,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/service/restart", s.handleRestartService)
 	mux.HandleFunc("POST /api/v1/chat", s.handleChat)
 	mux.HandleFunc("POST /api/v1/attachments", s.handleStageAttachment)
+	mux.HandleFunc("GET /api/v1/attachments/{id}/content", s.handleAttachmentContent)
 	if s.documentFlow != nil {
 		mux.HandleFunc("GET /api/v1/document-artifacts/{id}/content", s.handleDocumentArtifactContent)
 		mux.HandleFunc("POST /api/v1/document-artifacts/{id}/resume", s.handleResumeDocumentArtifact)
@@ -824,6 +857,7 @@ func (s *Server) routes() http.Handler {
 		mux.HandleFunc("POST /api/v1/sessions/{id}/suggest-title", s.handleSuggestSessionTitle)
 		mux.HandleFunc("DELETE /api/v1/sessions/{id}", s.handleDeleteSession)
 		mux.HandleFunc("GET /api/v1/sessions/{id}/messages", s.handleListMessages)
+		mux.HandleFunc("GET /api/v1/sessions/{id}/messages/{message}/attachments/{index}/content", s.handleMessageAttachmentContent)
 		mux.HandleFunc("POST /api/v1/sessions/{id}/messages", s.handleAppendMessage)
 		mux.HandleFunc("POST /api/v1/sessions/{id}/messages/batch", s.handleBatchAppendMessages)
 		mux.HandleFunc("GET /api/v1/sessions/{id}/branches", s.handleListBranches)
@@ -833,10 +867,9 @@ func (s *Server) routes() http.Handler {
 		mux.HandleFunc("PUT /api/v1/messages/{id}/feedback", s.handleUpdateMessageFeedback)
 	}
 
-	if s.streamStates != nil {
-		mux.HandleFunc("GET /api/v1/streams/active", s.handleListActiveStreams)
-		mux.HandleFunc("GET /api/v1/streams/{request_id}", s.handleGetStreamSnapshot)
-	}
+	mux.HandleFunc("GET /api/v1/streams/active", s.handleListActiveStreams)
+	mux.HandleFunc("GET /api/v1/streams/{request_id}", s.handleGetStreamSnapshot)
+	mux.HandleFunc("POST /api/v1/streams/{request_id}/cancel", s.handleCancelStream)
 
 	// 配置 API
 	mux.HandleFunc("GET /api/v1/config/llm", s.handleGetLLMConfig)
@@ -1501,23 +1534,55 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	// 不再把所有 chunk 攒成完整 JSON 才返回。
 	// 避免前端因"LLM 推理时长不可预测"被迫设固定 HTTP 总时长 timeout。
 	wantsSSE := strings.Contains(r.Header.Get("Accept"), "text/event-stream")
+	stream, hasStream := s.engine.(streamEngine)
+	var replayed bool
+	if reader, ok := s.engine.(interface {
+		ReplayCompletedStream(context.Context, *adapter.Message) (<-chan *adapter.ReplyChunk, bool, error)
+	}); ok {
+		var chunks <-chan *adapter.ReplyChunk
+		chunks, replayed, err = reader.ReplayCompletedStream(ctx, msg)
+		if err != nil {
+			writeChatRequestConflict(w, msg, err)
+			return
+		}
+		if replayed {
+			stream, hasStream = completedChatStream{chunks: chunks}, true
+		}
+	}
+	var run *restChatRun
+	if !replayed {
+		run, err = s.beginRESTChat(ctx, msg)
+		if err != nil {
+			if errors.Is(err, streamstate.ErrRequestConflict) {
+				writeChatRequestConflict(w, msg, err)
+			} else {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "chat request identity could not be verified"})
+			}
+			return
+		}
+		defer run.finishUnstarted()
+		ctx = run.ctx
+		if hasStream {
+			stream = restObservedStream{source: stream, run: run}
+		}
+	}
+	w.Header().Set("X-Request-ID", msg.Metadata["request_id"])
 
 	if wantsSSE {
-		se, ok := s.engine.(streamEngine)
-		if !ok {
+		if !hasStream {
 			trace.L(ctx).Error("引擎不支持流式但收到 SSE 请求")
 			writeJSON(w, http.StatusInternalServerError, map[string]string{
 				"error": "engine does not support streaming",
 			})
 			return
 		}
-		s.handleChatSSE(ctx, w, msg, se, start)
+		s.handleChatSSE(ctx, w, msg, stream, start)
 		return
 	}
 
 	var reply *adapter.Reply
-	if se, ok := s.engine.(streamEngine); ok {
-		chunks, err := se.ProcessStream(ctx, msg)
+	if hasStream {
+		chunks, err := stream.ProcessStream(ctx, msg)
 		if err != nil {
 			trace.L(ctx).Error("处理失败", chatLLMErrorTraceFields(err)...)
 			writeChatLLMError(w, chatErrorStatus(req.Provider, err), err)
@@ -1593,7 +1658,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		var err error
-		reply, err = s.engine.Process(ctx, msg)
+		reply, err = run.process(s.engine, msg)
 		if err != nil {
 			trace.L(ctx).Error("处理失败", chatLLMErrorTraceFields(err)...)
 			writeChatLLMError(w, chatErrorStatus(req.Provider, err), err)

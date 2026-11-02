@@ -2,6 +2,10 @@ package skill
 
 // ToolExecutionDetail 描述同一次执行的实际结果，不将上游 HTTP 拒绝等同于本应用审批。
 type ToolExecutionDetail struct {
+	ExecutionID       string `json:"execution_id,omitempty"`
+	PolicyProfile     string `json:"policy_profile,omitempty"`
+	PolicyRevision    uint64 `json:"policy_revision,omitempty"`
+	Replayed          bool   `json:"replayed,omitempty"`
 	Phase             string `json:"phase,omitempty"`
 	Outcome           string `json:"outcome"`
 	Reason            string `json:"reason,omitempty"`

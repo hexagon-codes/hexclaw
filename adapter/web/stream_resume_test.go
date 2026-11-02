@@ -11,6 +11,7 @@ import (
 
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/skill"
+	"github.com/hexagon-codes/hexclaw/streamstate"
 	"nhooyr.io/websocket"
 	"nhooyr.io/websocket/wsjson"
 )
@@ -183,15 +184,22 @@ func TestWebAdapter_CancelSuppressesLateStreamTerminal(t *testing.T) {
 		t.Fatal("stream handler context was not cancelled")
 	}
 
-	// 模拟 Provider 忽略取消并晚到 terminal；取消后的事实不得再次投影给 Desktop。
+	snapshot, ok := a.GetStreamSnapshot("desktop-user", "req-cancel-late")
+	if !ok || snapshot.Done {
+		t.Fatal("cancel acceptance must leave the source stream running")
+	}
+	// 源退出后只发布真实取消快照，迟到成功内容不能覆盖已接收的部分回复。
 	chunks <- &adapter.ReplyChunk{Content: "late success", Done: true}
 	close(chunks)
 
-	readCtx, cancelRead := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	readCtx, cancelRead := context.WithTimeout(context.Background(), time.Second)
 	defer cancelRead()
 	var late wsMessage
-	if err := wsjson.Read(readCtx, conn, &late); err == nil {
-		t.Fatalf("late terminal was sent after cancel: %+v", late)
+	if err := wsjson.Read(readCtx, conn, &late); err != nil {
+		t.Fatalf("read cancellation terminal: %v", err)
+	}
+	if late.Type != "stream_snapshot" || !late.Done || late.Status != string(streamstate.StatusCancelled) || late.Content != "首帧" {
+		t.Fatalf("cancellation terminal = %+v", late)
 	}
 }
 

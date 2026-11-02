@@ -39,6 +39,7 @@ type WebAdapter struct {
 	handler                   adapter.MessageHandler
 	streamHandler             adapter.StreamMessageHandler
 	attachmentResolver        func(context.Context, string, []adapter.Attachment) ([]adapter.Attachment, error)
+	requestAdmission          func(context.Context, *adapter.Message, func() error) error
 	conns                     sync.Map // chatID → *websocket.Conn
 	connectionOwners          sync.Map // chatID → authenticated ownerID
 	sessionConns              sync.Map // sessionID → sessionConnectionBinding
@@ -148,6 +149,12 @@ func (s *requestSubscribers) IfEmpty(fn func()) bool {
 // SetStreamHandler 设置流式消息处理器。
 func (a *WebAdapter) SetStreamHandler(h adapter.StreamMessageHandler) {
 	a.streamHandler = h
+}
+
+// SetRequestAdmission 让服务在同一临界区核对跨传输身份并登记原WS运行。
+// resume和已有连接的取消仍走原适配器，不进入新请求接纳。
+func (a *WebAdapter) SetRequestAdmission(admit func(context.Context, *adapter.Message, func() error) error) {
+	a.requestAdmission = admit
 }
 
 // SetAttachmentResolver installs the Sidecar-owned staging resolver. WebSocket
@@ -709,9 +716,6 @@ func (a *WebAdapter) handleWS(w http.ResponseWriter, r *http.Request) {
 				if cancelFn, ok := a.cancelFuncs.Load(requestID); ok {
 					cancelFn.(*requestCancellation).cancel(requestcancel.ErrUserCancelled)
 				}
-				if a.streams != nil {
-					a.streams.Cancel(requestID)
-				}
 			}
 			continue
 		case "resume":
@@ -815,11 +819,6 @@ func (a *WebAdapter) handleWS(w http.ResponseWriter, r *http.Request) {
 				_ = wsjson.Write(r.Context(), conn, wsMessage{Type: "error", Content: "session ownership mismatch"})
 				continue
 			}
-			a.sessionRequests.Store(incoming.SessionID, incoming.RequestID)
-		}
-		if existing, loaded := a.requestOwners.LoadOrStore(incoming.RequestID, ownerID); loaded && existing != ownerID {
-			_ = wsjson.Write(r.Context(), conn, wsMessage{Type: "error", Content: "request ownership mismatch"})
-			continue
 		}
 
 		logger := trace.NewRequest(msg.UserID, msg.SessionID).With("source", "chat", "provider", incoming.Provider, "model", incoming.Model, "request_id", incoming.RequestID)
@@ -827,30 +826,66 @@ func (a *WebAdapter) handleWS(w http.ResponseWriter, r *http.Request) {
 		signalCtx, cancelSignal := requestcancel.WithSignal(deadlineCtx)
 		ctx, cancel := context.WithCancelCause(signalCtx)
 		cancellation := &requestCancellation{transport: cancel, signal: cancelSignal, ctx: ctx}
-		if incoming.RequestID != "" {
-			// 先登记停止入口，再启动处理，紧随消息到达的cancel不能落在登记空隙。
+		register := func() error {
+			if existing, loaded := a.requestOwners.LoadOrStore(incoming.RequestID, ownerID); loaded && existing != ownerID {
+				return errors.New("request ownership mismatch")
+			}
+			if incoming.SessionID != "" {
+				a.sessionRequests.Store(incoming.SessionID, incoming.RequestID)
+			}
+			// 先登记停止入口和快照，再启动处理，跨传输接纳不能穿过登记空隙。
 			a.cancelFuncs.Store(incoming.RequestID, cancellation)
+			if a.streamHandler != nil && a.streams != nil {
+				a.streams.Start(msg.UserID, msg.SessionID, incoming.RequestID)
+			}
+			return nil
+		}
+		if a.requestAdmission != nil {
+			err = a.requestAdmission(ctx, msg, register)
+		} else {
+			err = register()
+		}
+		if err != nil {
+			cancellation.close()
+			stopDeadline()
+			_ = wsjson.Write(r.Context(), conn, wsMessage{Type: "error", Content: "request identity is already in use or unavailable; read its original receipt", RequestID: incoming.RequestID, SessionID: incoming.SessionID})
+			continue
 		}
 
 		go func(incoming wsMessage, msg *adapter.Message, ctx context.Context, cancellation *requestCancellation, stopDeadline context.CancelFunc) {
 			defer stopDeadline()
 			defer cancellation.close()
+
 			if incoming.RequestID != "" {
 				defer a.cancelFuncs.Delete(incoming.RequestID)
 				defer func() { a.finishRequest(incoming.RequestID, msg.SessionID) }()
 			}
+
+			defer func() {
+				// 源处理及排空结束才发布取消终态，指令接纳不能冒充资源退出。
+				if ctx.Err() == nil || a.streams == nil {
+					return
+				}
+				snapshot, ok := a.streams.GetStreamSnapshot(ownerID, incoming.RequestID)
+				if !ok || snapshot.Done {
+					return
+				}
+				snapshot = a.streams.Cancel(incoming.RequestID)
+				if snapshot != nil {
+					terminalCtx, stop := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+					defer stop()
+					_ = a.sendToTargets(terminalCtx, chatID, incoming.RequestID, snapshotToMessage(snapshot))
+				}
+			}()
 
 			ctx = trace.WithLogger(ctx, logger)
 			logger.Info("← 收到消息", "content_len", len([]rune(msg.Content)), "platform", string(msg.Platform), "attachments", len(msg.Attachments))
 
 			if a.streamHandler != nil {
 				a.addSubscriber(incoming.RequestID, chatID)
-				if a.streams != nil {
-					a.streams.Start(msg.UserID, msg.SessionID, incoming.RequestID)
-				}
 				chunks, err := a.streamHandler(ctx, msg)
 				if err != nil {
-					if a.streams != nil {
+					if a.streams != nil && (!errors.Is(err, context.Canceled) || !errors.Is(context.Cause(ctx), requestcancel.ErrUserCancelled)) {
 						a.streams.Fail(incoming.RequestID, err)
 					}
 					trace.L(ctx).Error("流式处理失败", "err", err)
@@ -1355,6 +1390,7 @@ func snapshotToMessage(snapshot *streamstate.Snapshot) wsMessage {
 		SessionID:           snapshot.SessionID,
 		RequestID:           snapshot.RequestID,
 		Done:                snapshot.Done,
+		Status:              string(snapshot.Status),
 		Metadata:            snapshot.Metadata,
 		Usage:               snapshot.Usage,
 		ToolCalls:           snapshot.ToolCalls,

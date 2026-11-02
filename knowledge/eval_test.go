@@ -1,9 +1,13 @@
 package knowledge
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/hexagon-codes/hexagon/evaluate"
 )
 
 // fakeEvalSearcher 按预设把 query 映射到有序文档标题，确定性单测指标计算。
@@ -53,6 +57,30 @@ func TestRunEval_Metrics(t *testing.T) {
 	}
 	if rep.Cases[2].Rank != 0 {
 		t.Errorf("c 未命中 rank 应为 0，got %d", rep.Cases[2].Rank)
+	}
+	report, err := rep.ToEvaluationReport(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]float64{"hit_at_1": 1.0 / 3, "hit_at_k": 2.0 / 3, "reciprocal_rank": (1 + 1.0/3) / 3} {
+		if summary := report.Summary[name]; summary == nil || summary.Count != 3 || !approxEq(summary.Mean, want) {
+			t.Fatalf("shared metric %s = %+v, want %v", name, summary, want)
+		}
+	}
+	var encoded bytes.Buffer
+	if exportErr := evaluate.NewJSONReporter(false).Generate(report, &encoded); exportErr != nil {
+		t.Fatal(exportErr)
+	}
+	if !json.Valid(encoded.Bytes()) {
+		t.Fatal("invalid shared JSON report")
+	}
+	duplicate := EvalReport{K: 3, N: 2, Cases: []EvalCaseResult{
+		{Name: "same", Query: "same", TopTitle: "A", Rank: 1},
+		{Name: "same", Query: "same", TopTitle: "B", Rank: 2},
+	}}
+	shared, err := duplicate.ToEvaluationReport(context.Background())
+	if err != nil || len(shared.Results) != 2 || shared.Results[0].SampleID == shared.Results[1].SampleID {
+		t.Fatalf("duplicate sample identities: report=%+v err=%v", shared, err)
 	}
 }
 

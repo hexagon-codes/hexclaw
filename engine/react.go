@@ -1039,6 +1039,7 @@ func (e *ReActEngine) matchSkillFastPath(msg *adapter.Message) (skill.Skill, boo
 //  6. 保存助手回复
 //  7. 返回回复
 func (e *ReActEngine) Process(ctx context.Context, msg *adapter.Message) (reply *adapter.Reply, processErr error) {
+	defer func() { e.finalizeExternalRun(ctx, msg) }()
 	defer e.trackMediaRequest(msg)()
 	if e.mediaFlow != nil {
 		owned, cleanup := e.mediaFlow.RequestContext(ctx)
@@ -1217,15 +1218,22 @@ func (e *ReActEngine) Process(ctx context.Context, msg *adapter.Message) (reply 
 			"query":   msg.Content,
 			"user_id": msg.UserID,
 		}
+		var fastToolCallID string
+		ctx, fastToolCallID = withFastPathInvocation(ctx, msg, sess.ID, matched.Name())
 		result, err := e.executeSkillFastPath(ctx, matched, skillArgs)
 		if err != nil {
 			return nil, fmt.Errorf("skill %s 执行失败: %w", matched.Name(), err)
 		}
 		result.Metadata = withProducerMetadata(result.Metadata, messagecontent.ProducerSkill, msg.Metadata["user_locale"])
+		ctx, result.Content, err = e.prepareMediaReply(ctx, msg, result.Metadata, result.Content)
+		if err != nil {
+			return nil, err
+		}
 
 		argsJSON, _ := json.Marshal(skillArgs)
 		tc := []adapter.ToolCall{{
-			ID:        "tc-" + idgen.ShortID(),
+			ID:        fastToolCallID,
+			Detail:    toolExecutionDetail(result),
 			Name:      matched.Name(),
 			Origin:    &adapter.ToolOrigin{Kind: "skill", Name: matched.Name()},
 			Arguments: string(argsJSON),
@@ -1296,19 +1304,21 @@ func (e *ReActEngine) Process(ctx context.Context, msg *adapter.Message) (reply 
 
 	// 5.5 知识库检索（RAG 上下文增强）——策略门（BUG-20260712-N）：场景实例/超短寒暄跳过
 	var kbContext string
-	if e.kb != nil && (e.cfg.Knowledge.Enabled && e.shouldAutoInjectKBForTurn(msg, history) || workflowKnowledgeRequested(ctx)) {
+	kbQuery := knowledgeRetrievalQuery(msg)
+	if strings.TrimSpace(kbQuery) != "" && e.kb != nil && (e.cfg.Knowledge.Enabled && e.shouldAutoInjectKBForTurn(msg, history) || workflowKnowledgeRequested(ctx)) {
 		topK := e.cfg.Knowledge.TopK
 		if topK <= 0 {
 			topK = 3
 		}
-		kbResult, kbHits, kbErr := e.queryWorkflowKnowledge(ctx, msg.Content, topK)
+		kbResult, kbHits, kbErr := e.queryWorkflowKnowledge(ctx, kbQuery, topK)
 		if kbErr != nil {
 			recordRetrievalActivity(ctx, adapter.RetrievalActivity{Kind: "knowledge", Status: "failed"})
 			trace.L(ctx).Error("知识库检索失败", "err", kbErr, "session", sess.ID)
 		} else if kbResult != "" && len(kbHits) > 0 {
 			kbContext = encodeKnowledgeEvidence(kbHits)
 			recordKnowledgeHits(ctx, kbHits) // U9：命中结构化记入本轮 sink，回传前端渲染标签+详情
-			trace.L(ctx).Info("知识库命中", "query", msg.Content[:min(20, len(msg.Content))], "hits", len(kbHits), "session", sess.ID)
+			queryRunes := []rune(kbQuery)
+			trace.L(ctx).Info("知识库命中", "query", string(queryRunes[:min(20, len(queryRunes))]), "hits", len(kbHits), "session", sess.ID)
 		} else {
 			recordKnowledgeHits(ctx, nil)
 		}
@@ -1374,6 +1384,7 @@ func (e *ReActEngine) completeWithTools(
 		budget = NewBudgetController(*cfg)
 	}
 	useBudget := budget != nil
+	ctx = withToolBudget(ctx, budget)
 
 	// 收集工具定义（C1+C2: 按当前 query 渐进召回 + agent_mode 条件过滤；C2/B2 联动）
 	var tools []llm.ToolDefinition
@@ -1398,10 +1409,7 @@ func (e *ReActEngine) completeWithTools(
 		tools = e.filterInternalRetrievalToolsForPersona(tools, msg.Metadata) // BUG-20260704：挂载 persona 时剥离内部检索工具，防模型主动拉回旧内容压过人设
 		tools = restrictToolsToCodeExecWhenRequired(tools, msg.Content)
 		tools = e.workflowTools(ctx, tools)
-		if cap := effectiveMaxTools(toolsCfg.MaxTools, msg); cap > 0 && len(tools) > cap && !workflowExplicitTools(ctx) {
-			recordRuntimeToolLimit(ctx, tools, cap)
-			tools = tools[:cap]
-		}
+		tools = limitRuntimeToolDefinitions(ctx, tools, toolsCfg.MaxTools, msg)
 	}
 
 	toolOrigins := e.toolCollector.originsFor(tools)
@@ -1540,7 +1548,6 @@ func (e *ReActEngine) completeWithTools(
 		},
 	}
 	middleware := []hruntime.Middleware{
-		runtimeRepeatGuardStopMiddleware{},
 		runtimeCompaction(provider, sessionID, func() hexagon.Provider {
 			p, _, _ := selector.Current()
 			return p
@@ -1690,12 +1697,14 @@ func (e *ReActEngine) completeWithTools(
 			resp.Model = model
 		}
 	}
+	ctx = withRuntimeUsageAccounting(ctx, result.Usage, result.Metadata)
 	if result.Usage.TotalTokens == 0 && strings.TrimSpace(result.Content) != "" {
 		p, c, t := estimateResponseUsage(providerName, req.Messages, result.Content)
 		result.Usage.PromptTokens = p
 		result.Usage.CompletionTokens = c
 		result.Usage.TotalTokens = t
 		resp.Usage = result.Usage
+		ctx = withEstimatedUsageAccounting(ctx, result.Usage)
 	}
 	if thinkingTracker.timeout.Load() {
 		ensureMessageMetadata(msg)
@@ -1711,6 +1720,7 @@ func (e *ReActEngine) completeWithTools(
 	// 有序内容块经 finalizeReply 透传进 reply（它可能追加守卫提示 text 块，B5b），
 	// 此处不再二次覆盖——否则追加的块会被打回。
 	toolCalls := runtimeToolCallsToAdapter(result.ToolCalls, toolOrigins)
+	ctx = session.WithProviderOutputMessages(ctx, result.OutputMessages)
 	return e.finalizeReply(ctx, sessionID, msg, provider, req, resp, providerName, modelName, cacheInput, toolCalls, runtimeBlocksToAdapter(result.Blocks, toolCalls))
 }
 
@@ -1726,6 +1736,17 @@ func (e *ReActEngine) finalizeReply(
 	toolCalls []adapter.ToolCall,
 	blocks []adapter.Block,
 ) (*adapter.Reply, error) {
+	ctx = withResponseUsageAccounting(ctx, resp.Usage, resp.UsageReceipt)
+	if resp.ProviderContinuation != nil {
+		calls := make([]llm.ToolCallRef, len(resp.ToolCalls))
+		for i, call := range resp.ToolCalls {
+			calls[i] = llm.ToolCallRef{ID: call.ID, Name: call.Name, Arguments: call.Arguments}
+		}
+		ctx = session.WithProviderOutputMessages(ctx, []llm.Message{{
+			Role: llm.RoleAssistant, Content: resp.Content, ToolCalls: calls,
+			ProviderContinuation: resp.ProviderContinuation,
+		}})
+	}
 	blocks = append(retrievalProcessSnapshot(ctx), blocks...)
 	// 兜底解析：某些模型在 content 中嵌入 <think>/<thinking> 标签（同步路径）
 	content := resp.Content
@@ -1807,7 +1828,7 @@ func (e *ReActEngine) finalizeReply(
 		e.writeResponseCache(ctx, content, providerName, modelName)
 	}
 
-	if resp.Usage.TotalTokens > 0 {
+	if shouldRecordUsageAccounting(ctx, resp.Usage) {
 		costRecord := &storage.CostRecord{
 			ID:               "cost-" + idgen.ShortID(),
 			SessionID:        sessionID,
@@ -1963,10 +1984,15 @@ func shouldRejectImageAttachmentsForProvider(provider hexagon.Provider, provider
 	if providerModelSupportsImageInput(provider, modelName) {
 		return false
 	}
-	if modelSupportsImageInput(modelName) {
-		return false
+	if provider != nil {
+		for _, model := range provider.Models() {
+			if sameModelID(model, modelName) {
+				return !model.HasFeature(llm.FeatureVision)
+			}
+		}
 	}
-	return isKnownTextOnlyModel(providerName, modelName)
+	// 未列举的精确模型交给同一能力 facade 处理，名称片段不是不支持视觉的证据。
+	return false
 }
 
 func providerModelSupportsImageInput(provider hexagon.Provider, modelName string) bool {
@@ -2061,6 +2087,7 @@ func (e *ReActEngine) ProcessStream(ctx context.Context, msg *adapter.Message) (
 	route := adapter.FrozenReasoningRoute{}
 	raw, err := e.processStream(ctx, msg, &route)
 	if err != nil {
+		e.finalizeExternalRun(ctx, msg)
 		cleanup()
 		finishMediaRequest()
 		return nil, err
@@ -2076,6 +2103,7 @@ func (e *ReActEngine) ProcessStream(ctx context.Context, msg *adapter.Message) (
 	out := make(chan *adapter.ReplyChunk, 16)
 	go func() {
 		defer close(out)
+		defer e.finalizeExternalRun(ctx, msg)
 		defer cleanup()
 		defer finishMediaRequest()
 		emit := func(chunk *adapter.ReplyChunk) {
@@ -2269,14 +2297,21 @@ func (e *ReActEngine) processStream(
 			"query":   msg.Content,
 			"user_id": msg.UserID,
 		}
+		var fastToolCallID string
+		ctx, fastToolCallID = withFastPathInvocation(ctx, msg, sess.ID, matched.Name())
 		result, err := e.executeSkillFastPath(ctx, matched, skillArgs)
 		if err != nil {
 			return nil, fmt.Errorf("skill %s 执行失败: %w", matched.Name(), err)
 		}
 		result.Metadata = withProducerMetadata(result.Metadata, messagecontent.ProducerSkill, msg.Metadata["user_locale"])
+		ctx, result.Content, err = e.prepareMediaReply(ctx, msg, result.Metadata, result.Content)
+		if err != nil {
+			return nil, err
+		}
 		argsJSON, _ := json.Marshal(skillArgs)
 		tc := []adapter.ToolCall{{
-			ID:        "tc-" + idgen.ShortID(),
+			ID:        fastToolCallID,
+			Detail:    toolExecutionDetail(result),
 			Name:      matched.Name(),
 			Origin:    &adapter.ToolOrigin{Kind: "skill", Name: matched.Name()},
 			Arguments: string(argsJSON),
@@ -2564,19 +2599,21 @@ func (e *ReActEngine) processStream(
 
 	// 5.5 知识库检索（RAG）——策略门（BUG-20260712-N）：场景实例/超短寒暄跳过
 	var kbContext string
-	if e.kb != nil && (e.cfg.Knowledge.Enabled && e.shouldAutoInjectKBForTurn(msg, history) || workflowKnowledgeRequested(ctx)) {
+	kbQuery := knowledgeRetrievalQuery(msg)
+	if strings.TrimSpace(kbQuery) != "" && e.kb != nil && (e.cfg.Knowledge.Enabled && e.shouldAutoInjectKBForTurn(msg, history) || workflowKnowledgeRequested(ctx)) {
 		topK := e.cfg.Knowledge.TopK
 		if topK <= 0 {
 			topK = 3
 		}
-		kbResult, kbHits, kbErr := e.queryWorkflowKnowledge(ctx, msg.Content, topK)
+		kbResult, kbHits, kbErr := e.queryWorkflowKnowledge(ctx, kbQuery, topK)
 		if kbErr != nil {
 			recordRetrievalActivity(ctx, adapter.RetrievalActivity{Kind: "knowledge", Status: "failed"})
 			trace.L(ctx).Error("知识库检索失败", "err", kbErr, "session", sess.ID)
 		} else if kbResult != "" && len(kbHits) > 0 {
 			kbContext = encodeKnowledgeEvidence(kbHits)
 			recordKnowledgeHits(ctx, kbHits) // U9：命中结构化记入本轮 sink，回传前端渲染标签+详情
-			trace.L(ctx).Info("知识库命中", "query", msg.Content[:min(20, len(msg.Content))], "hits", len(kbHits), "session", sess.ID)
+			queryRunes := []rune(kbQuery)
+			trace.L(ctx).Info("知识库命中", "query", string(queryRunes[:min(20, len(queryRunes))]), "hits", len(kbHits), "session", sess.ID)
 		} else {
 			recordKnowledgeHits(ctx, nil)
 		}
@@ -2689,10 +2726,7 @@ func (e *ReActEngine) processStreamRuntime(
 			tools = e.filterInternalRetrievalToolsForPersona(tools, msg.Metadata) // BUG-20260704：挂载 persona 时剥离内部检索工具，防模型主动拉回旧内容压过人设
 			tools = restrictToolsToCodeExecWhenRequired(tools, msg.Content)
 			tools = e.workflowTools(ctx, tools)
-			if cap := effectiveMaxTools(streamToolsCfg.MaxTools, msg); cap > 0 && len(tools) > cap && !workflowExplicitTools(ctx) {
-				recordRuntimeToolLimit(ctx, tools, cap)
-				tools = tools[:cap]
-			}
+			tools = limitRuntimeToolDefinitions(ctx, tools, streamToolsCfg.MaxTools, msg)
 		}
 		// §11.11 注入扫描（同非流式路径，组装点纵深防御一层）。
 		if err := security.ScanAssembled(msg.Content+"\n"+kbContext, len(tools) > 0, kbContext != ""); err != nil {
@@ -2732,6 +2766,7 @@ func (e *ReActEngine) processStreamRuntime(
 		if cfg != nil {
 			budget = NewBudgetController(*cfg)
 		}
+		ctx = withToolBudget(ctx, budget)
 		selector := &runtimeProviderSelector{
 			router:                      e.router,
 			markUnhealthy:               e.failoverMarkUnhealthy,
@@ -3235,6 +3270,7 @@ func (e *ReActEngine) finalizeRuntimeStreamResult(
 
 	saveCtx, saveCancel := context.WithTimeout(trace.Detach(ctx), 10*time.Second)
 	defer saveCancel()
+	saveCtx = session.WithProviderOutputMessages(saveCtx, result.OutputMessages)
 
 	// 思考时长（BUG-20260703 B3）：随 wire metadata 透出（live 一致性）并落库（重载不丢）。
 	// 仅在确有 reasoning 时写入，与 legacy 流式路径同门槛。
@@ -3285,15 +3321,17 @@ func (e *ReActEngine) finalizeRuntimeStreamResult(
 		e.writeResponseCache(ctx, content, providerName, modelName)
 	}
 
+	ctx = withRuntimeUsageAccounting(ctx, result.Usage, result.Metadata)
 	if result.Usage.TotalTokens == 0 && strings.TrimSpace(content) != "" {
 		p, c, t := estimateResponseUsage(providerName, req.Messages, content)
 		result.Usage.PromptTokens = p
 		result.Usage.CompletionTokens = c
 		result.Usage.TotalTokens = t
+		ctx = withEstimatedUsageAccounting(ctx, result.Usage)
 	}
 
 	var usage *adapter.Usage
-	if result.Usage.TotalTokens > 0 {
+	if shouldRecordUsageAccounting(ctx, result.Usage) {
 		usage = buildUsage(result.Usage, providerName, modelName)
 		costRecord := &storage.CostRecord{
 			ID:               "cost-" + idgen.ShortID(),
@@ -3431,6 +3469,7 @@ func (e *ReActEngine) processStreamToolLoop(
 		budget = NewBudgetController(*e.budgetCfg)
 	}
 	useBudgetStream := budget != nil
+	ctx = withToolBudget(ctx, budget)
 	messages := req.Messages
 	inputIndex := contextUserMessageIndex(messages, countContextUserMessages(messages))
 	var allToolCalls []adapter.ToolCall
@@ -3674,6 +3713,9 @@ func (e *ReActEngine) pipeStream(
 	if ctx.Err() != nil {
 		return
 	}
+	if result != nil {
+		ctx = withResponseUsageAccounting(ctx, result.Usage, result.UsageReceipt)
+	}
 
 	content := fullContent.String()
 	generatedContent := false
@@ -3792,6 +3834,7 @@ func (e *ReActEngine) pipeStream(
 		_, c, t := estimateResponseUsage(providerName, nil, content)
 		result.Usage.CompletionTokens = c
 		result.Usage.TotalTokens = t
+		ctx = withEstimatedUsageAccounting(ctx, result.Usage)
 	}
 
 	// 发送结束标记（携带 Usage 和元数据）
@@ -3812,7 +3855,7 @@ func (e *ReActEngine) pipeStream(
 	ch <- doneChunk
 
 	// 记录 Token 使用
-	if result != nil && result.Usage.TotalTokens > 0 {
+	if result != nil && shouldRecordUsageAccounting(ctx, result.Usage) {
 		costRecord := &storage.CostRecord{
 			ID:               "cost-" + idgen.ShortID(),
 			SessionID:        sessionID,
@@ -3914,6 +3957,9 @@ func (e *ReActEngine) pipeStreamWithTools(
 	result := llmStream.Result()
 	if ctx.Err() != nil {
 		return
+	}
+	if result != nil {
+		ctx = withResponseUsageAccounting(ctx, result.Usage, result.UsageReceipt)
 	}
 	content := fullContent.String()
 	generatedContent := false
@@ -4028,6 +4074,7 @@ func (e *ReActEngine) pipeStreamWithTools(
 		_, c, t := estimateResponseUsage(providerName, nil, content)
 		result.Usage.CompletionTokens = c
 		result.Usage.TotalTokens = t
+		ctx = withEstimatedUsageAccounting(ctx, result.Usage)
 	}
 
 	// 合并参数传入的 toolCalls 和 result 中 LLM 返回的 ToolCalls
@@ -4066,7 +4113,7 @@ func (e *ReActEngine) pipeStreamWithTools(
 	}
 	ch <- doneChunk
 
-	if result != nil && result.Usage.TotalTokens > 0 {
+	if result != nil && shouldRecordUsageAccounting(ctx, result.Usage) {
 		costRecord := &storage.CostRecord{
 			ID:               "cost-" + idgen.ShortID(),
 			SessionID:        sessionID,
@@ -4483,11 +4530,13 @@ func (e *ReActEngine) completeDirect(
 	}
 
 	// 当 provider 未返回 token 统计时，使用 tokenizer 估算
+	ctx = withResponseUsageAccounting(ctx, resp.Usage, resp.UsageReceipt)
 	if resp.Usage.TotalTokens == 0 {
 		p, c, t := estimateResponseUsage(providerName, req.Messages, resp.Content)
 		resp.Usage.PromptTokens = p
 		resp.Usage.CompletionTokens = c
 		resp.Usage.TotalTokens = t
+		ctx = withEstimatedUsageAccounting(ctx, resp.Usage)
 	}
 
 	assistantMessageID := ""
@@ -4503,7 +4552,7 @@ func (e *ReActEngine) completeDirect(
 		e.writeResponseCache(ctx, resp.Content, providerName, modelName)
 	}
 
-	if resp.Usage.TotalTokens > 0 {
+	if shouldRecordUsageAccounting(ctx, resp.Usage) {
 		costRecord := &storage.CostRecord{
 			ID:               "cost-" + idgen.ShortID(),
 			SessionID:        sessionID,
@@ -4857,7 +4906,9 @@ func (p *visionImageLimitProvider) prepareToolMedia(req llm.CompletionRequest) l
 func (p *visionImageLimitProvider) Name() string { return p.inner.Name() }
 
 func (p *visionImageLimitProvider) Complete(ctx context.Context, req llm.CompletionRequest) (*llm.CompletionResponse, error) {
+	ctx, req = prepareToolObservations(ctx, req, p.inner, p.model)
 	req = p.prepareToolMedia(req)
+	ctx = labelToolObservationEgress(ctx, req)
 	resp, err := p.inner.Complete(ctx, req)
 	if err == nil || !isVisionImageCountLimitError(err) {
 		return resp, err
@@ -4880,7 +4931,9 @@ func (p *visionImageLimitProvider) Complete(ctx context.Context, req llm.Complet
 }
 
 func (p *visionImageLimitProvider) Stream(ctx context.Context, req llm.CompletionRequest) (*llm.Stream, error) {
+	ctx, req = prepareToolObservations(ctx, req, p.inner, p.model)
 	req = p.prepareToolMedia(req)
+	ctx = labelToolObservationEgress(ctx, req)
 	stream, err := p.inner.Stream(ctx, req)
 	if err == nil || !isVisionImageCountLimitError(err) {
 		return stream, err

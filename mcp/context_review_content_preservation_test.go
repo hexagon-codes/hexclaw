@@ -1,12 +1,16 @@
 package mcp_test
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/hexagon-codes/ai-core/llm"
 	hexagonmcp "github.com/hexagon-codes/hexagon/mcp"
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -18,15 +22,18 @@ func TestMCPProxyPreservesRequiredResultContent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode image fixture: %v", err)
 	}
+	imageDigest := sha256.Sum256(imageData)
+	wantDigest := "sha256:" + hex.EncodeToString(imageDigest[:])
 
 	const summary = "The marked worksheet is ready."
 	const artifactURI = "mcp://worksheet/result/question-3.png"
 	const questionID = "worksheet-question-3"
 
 	tests := []struct {
-		name   string
-		result *sdkmcp.CallToolResult
-		want   []string
+		name     string
+		result   *sdkmcp.CallToolResult
+		want     []string
+		hasImage bool
 	}{
 		{
 			name: "image_only",
@@ -35,7 +42,8 @@ func TestMCPProxyPreservesRequiredResultContent(t *testing.T) {
 					&sdkmcp.ImageContent{Data: imageData, MIMEType: "image/png"},
 				},
 			},
-			want: []string{"image/png", imageBase64},
+			want:     []string{"image/png", wantDigest},
+			hasImage: true,
 		},
 		{
 			name: "text_and_image",
@@ -45,7 +53,8 @@ func TestMCPProxyPreservesRequiredResultContent(t *testing.T) {
 					&sdkmcp.ImageContent{Data: imageData, MIMEType: "image/png"},
 				},
 			},
-			want: []string{summary, "image/png", imageBase64},
+			want:     []string{summary, "image/png", wantDigest},
+			hasImage: true,
 		},
 		{
 			name: "text_and_structured_artifact",
@@ -104,12 +113,43 @@ func TestMCPProxyPreservesRequiredResultContent(t *testing.T) {
 				t.Fatalf("worksheet tool reported failure: %s", result.Error)
 			}
 
-			// 应用通过 String 回填工具结果；同时检查摘要、图片内容和可引用资产。
+			// 文本保留摘要、媒体描述及资产引用；图片原字节走独立的内容合同。
 			got := result.String()
 			for _, required := range tc.want {
 				if !strings.Contains(got, required) {
 					t.Errorf("required MCP content missing from public result: want %q in %s", required, got)
 				}
+			}
+			if strings.Contains(got, imageBase64) {
+				t.Error("image encoding must not be copied into tool text")
+			}
+			content, ok := result.Output.(interface {
+				ToolMessageContent() []llm.ContentPart
+				ToolBinaryContents() []hexagonmcp.BinaryContent
+			})
+			if !ok {
+				t.Fatal("MCP result does not expose typed content")
+			}
+			parts, binaries := content.ToolMessageContent(), content.ToolBinaryContents()
+			if !tc.hasImage {
+				if len(parts) != 0 || len(binaries) != 0 {
+					t.Fatal("text-only result unexpectedly contains image data")
+				}
+				return
+			}
+			if len(parts) != 1 || parts[0].Type != "image_url" || parts[0].ImageURL == nil {
+				t.Fatal("MCP image observation missing from typed content")
+			}
+			encoded, ok := strings.CutPrefix(parts[0].ImageURL.URL, "data:image/png;base64,")
+			if !ok {
+				t.Fatal("MCP image observation MIME changed")
+			}
+			observed, err := base64.StdEncoding.DecodeString(encoded)
+			if err != nil || !bytes.Equal(observed, imageData) {
+				t.Fatal("MCP image observation bytes changed")
+			}
+			if len(binaries) != 1 || binaries[0].Type != "image" || binaries[0].MIMEType != "image/png" || !bytes.Equal(binaries[0].Data, imageData) {
+				t.Fatal("MCP binary image bytes or MIME changed")
 			}
 		})
 	}

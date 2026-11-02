@@ -4,7 +4,7 @@ package requestcancel
 import (
 	"context"
 	"errors"
-	"sync/atomic"
+	"sync"
 )
 
 type userCancellation struct{}
@@ -19,7 +19,10 @@ type signalKey struct{}
 
 type requestSignal struct {
 	context.Context
-	retained atomic.Bool
+	mu           sync.Mutex
+	retained     bool
+	transport    context.Context
+	outputCancel context.CancelCauseFunc
 }
 
 // WithSignal 建立独立于传输生命周期的停止信号；调用方在处理结束时以nil关闭。
@@ -39,13 +42,73 @@ func Signal(ctx context.Context) context.Context {
 
 // Retain 标记已持久接纳的工作，传输断线不能把业务快照改为取消终态。
 func Retain(ctx context.Context) {
-	if signal, ok := ctx.Value(signalKey{}).(*requestSignal); ok {
-		signal.retained.Store(true)
-	}
+	_ = RetainWith(ctx, nil)
 }
 func IsRetained(ctx context.Context) bool {
 	signal, ok := ctx.Value(signalKey{}).(*requestSignal)
-	return ok && signal.retained.Load()
+	if !ok {
+		return false
+	}
+	signal.mu.Lock()
+	defer signal.mu.Unlock()
+	return signal.retained
+}
+
+// RetainWith 把实际接纳与传输断连串行交接；接纳失败不能延长原请求。
+// accept 仅承担已有的持久接纳，不在这里启动外部执行或新任务状态机。
+func RetainWith(ctx context.Context, accept func() error) error {
+	signal, ok := ctx.Value(signalKey{}).(*requestSignal)
+	if !ok {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if accept != nil {
+			return accept()
+		}
+		return nil
+	}
+	signal.mu.Lock()
+	defer signal.mu.Unlock()
+	if signal.Err() != nil {
+		return context.Cause(signal)
+	}
+	if !signal.retained && signal.transport != nil && signal.transport.Err() != nil {
+		cause := context.Cause(signal.transport)
+		signal.outputCancel(cause)
+		return cause
+	}
+	if accept != nil {
+		if err := accept(); err != nil {
+			return err
+		}
+	}
+	signal.retained = true
+	return nil
+}
+
+// WithRetainedOutput 保留已接纳运行的输出通道；接纳前仍受原HTTP断连取消。
+// 同一 RetainWith 临界区决定交接，不能因异步取消回调尚未运行而误接纳。
+func WithRetainedOutput(parent, host context.Context) (context.Context, func()) {
+	signal, ok := parent.Value(signalKey{}).(*requestSignal)
+	if !ok {
+		return parent, func() {}
+	}
+	output, cancel := context.WithCancelCause(context.WithoutCancel(parent))
+	signal.mu.Lock()
+	signal.transport, signal.outputCancel = parent, cancel
+	signal.mu.Unlock()
+	stopTransport := context.AfterFunc(parent, func() {
+		signal.mu.Lock()
+		defer signal.mu.Unlock()
+		if !signal.retained {
+			cancel(context.Cause(parent))
+		}
+	})
+	stopHost := func() bool { return true }
+	if host != nil {
+		stopHost = context.AfterFunc(host, func() { cancel(context.Cause(host)) })
+	}
+	return output, func() { stopTransport(); stopHost(); cancel(nil) }
 }
 
 // IsExplicit 保留首次取消原因，并从独立信号识别断线后的主动停止。

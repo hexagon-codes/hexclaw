@@ -48,7 +48,15 @@ type CodeExecSkill struct {
 	goBuildCacheCleaner func(codeExecRun) error
 	// scratchBase is instance-scoped so tests can keep project staging inside
 	// testing.T's lifetime. Empty preserves the production /tmp default.
-	scratchBase string
+	scratchBase  string
+	hostExecutor func(context.Context, map[string]any) (*skill.Result, error)
+}
+
+// SetHostExecutor 为全权限注入统一宿主命令执行链，复用输出持久化和任务取消。
+func (s *CodeExecSkill) SetHostExecutor(execute func(context.Context, map[string]any) (*skill.Result, error)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.hostExecutor = execute
 }
 
 // codeExecPolicyState 是一次发布后只读的完整策略代际。
@@ -2471,7 +2479,7 @@ func (s *CodeExecSkill) Description() string {
 func (s *CodeExecSkill) Match(_ string) bool { return false } // LLM-only, no keyword trigger
 
 func (s *CodeExecSkill) ToolDefinition() llm.ToolDefinition {
-	return llm.NewToolDefinition("code_exec", "Execute code, existing files, or project commands inside the HexClaw Sandbox. For quick Python/shell calculations use mode=snippet and provide both language and the complete code in the same tool call; never call snippet with only mode/language/timeout. Prefer mode=project with command for repository tests/builds, mode=file with entrypoint for existing scripts, mode=module with files for multi-file snippets. Each run has an isolated run_id workspace, bounded output, resource-limit metadata, runtime diagnostics, and artifact manifest.", &llm.Schema{
+	return llm.NewToolDefinition("code_exec", "Execute code, existing files, or project commands. full_access uses host files and network; other profiles use the HexClaw Sandbox. For quick Python/shell calculations use mode=snippet and provide both language and the complete code in the same tool call; never call snippet with only mode/language/timeout. Prefer mode=project with command for repository tests/builds, mode=file with entrypoint for existing scripts, mode=module with files for multi-file snippets. Each run records its run_id, actual execution environment, output, runtime diagnostics, and artifact manifest.", &llm.Schema{
 		Type: "object",
 		Properties: map[string]*llm.Schema{
 			"mode": {
@@ -2490,7 +2498,7 @@ func (s *CodeExecSkill) ToolDefinition() llm.ToolDefinition {
 			},
 			"entrypoint": {
 				Type:        "string",
-				Description: "Existing script path or file path to run for mode=file. Absolute paths are copied into the run workspace before execution.",
+				Description: "Existing script path or file path for mode=file. full_access executes the original host file; other profiles copy authorized files into the run workspace.",
 			},
 			"project_root": {
 				Type:        "string",
@@ -2515,7 +2523,7 @@ func (s *CodeExecSkill) ToolDefinition() llm.ToolDefinition {
 			},
 			"artifacts": {
 				Type:        "boolean",
-				Description: "Whether to scan artifacts/ and include artifact manifest entries. Defaults false and requires enforced process containment.",
+				Description: "Whether to scan the task-owned artifacts directory and include artifact manifest entries. Defaults false; sandbox profiles require enforced process containment.",
 			},
 			"timeout": {
 				Type:        "integer",
@@ -2529,14 +2537,19 @@ func (s *CodeExecSkill) Execute(ctx context.Context, args map[string]any) (*skil
 	if ctx == nil {
 		return nil, errors.New("code execution context must not be nil")
 	}
-	if err := s.initializationError(); err != nil {
-		return nil, fmt.Errorf("code execution sandbox initialization failed: %w", err)
+	if !skill.FullAccess(ctx) {
+		if err := s.initializationError(); err != nil {
+			return nil, fmt.Errorf("code execution sandbox initialization failed: %w", err)
+		}
 	}
 	req, err := parseCodeExecRequest(args)
 	if err != nil {
 		return nil, err
 	}
 
+	if skill.FullAccess(ctx) {
+		return s.executeHost(ctx, req, args)
+	}
 	cfg, broker, factory, goHelperFactory, scratchBase, projectStager, goBuildCacheBase, goBuildCacheCleaner := s.snapshot()
 	if strings.TrimSpace(cfg.Workspace) == "" {
 		return nil, errors.New("sandbox workspace is required")

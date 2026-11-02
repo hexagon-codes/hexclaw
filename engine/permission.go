@@ -991,7 +991,7 @@ func WithPolicy(p *PermissionPolicy) PermissionHookOption {
 func WithSystemDispatchPolicy(p *SystemDispatchPolicy) PermissionHookOption {
 	return func(h *PermissionHook) {
 		if p != nil {
-			h.systemDispatchPolicy.Store(p)
+			h.SetSystemDispatchPolicy(p)
 		}
 	}
 }
@@ -1000,9 +1000,26 @@ func WithSystemDispatchPolicy(p *SystemDispatchPolicy) PermissionHookOption {
 // runtime (profile changes from the settings UI take effect without a
 // restart). Safe for concurrent use with in-flight tool calls.
 func (h *PermissionHook) SetSystemDispatchPolicy(p *SystemDispatchPolicy) {
-	if p != nil {
-		h.systemDispatchPolicy.Store(p)
+	if p == nil {
+		return
 	}
+	for {
+		previous := h.systemDispatchPolicy.Load()
+		next := *p
+		next.revision = 1
+		if previous != nil {
+			next.revision = previous.revision + 1
+		}
+		if h.systemDispatchPolicy.CompareAndSwap(previous, &next) {
+			return
+		}
+	}
+}
+
+// EffectiveExecutionPolicy 供文件、进程和后续动作读取权限闸同一份实时策略。
+func (h *PermissionHook) EffectiveExecutionPolicy() skill.ExecutionPolicy {
+	p := h.DispatchPolicy()
+	return skill.ExecutionPolicy{Profile: p.Profile(), Revision: p.Revision()}
 }
 
 // DispatchPolicy returns the currently effective unattended matrix.
@@ -1028,6 +1045,8 @@ func DefaultBaselinePolicy() *PermissionPolicy {
 		PolicyRule{Name: "code-exec-dangerous", ToolPattern: "code_exec", Action: ActionRequireApproval, Risk: "dangerous", Reason: "代码执行（exec）"},
 		// sensitive：首次需用户审批
 		PolicyRule{Name: "browser-sensitive", ToolPattern: "browser", Action: ActionRequireApproval, Risk: "sensitive", Reason: "浏览器自动化"},
+		PolicyRule{Name: "browser-session-sensitive", ToolPattern: "browser_session", Action: ActionRequireApproval, Risk: "sensitive", Reason: "Browser automation"},
+		PolicyRule{Name: "computer-use-sensitive", ToolPattern: "computer_use", Action: ActionRequireApproval, Risk: "sensitive", Reason: "Computer Use"},
 		PolicyRule{Name: "create-skill-sensitive", ToolPattern: "create_skill", Action: ActionRequireApproval, Risk: "sensitive", Reason: "创建新 Skill"},
 		// manage_skill 安装/卸载市场技能 = 引入新代码 = 能力注入；与 create_skill 同级。
 		// 它已在 cronRecursiveToolDenylist（历史 cron 剥离清单）中，证明它是能力注入向量。
@@ -1099,6 +1118,8 @@ func NewPermissionHook(hub *PermissionHub, opts ...PermissionHookOption) *Permis
 		},
 		sensitiveTools: map[string]bool{
 			"browser":           true,
+			"browser_session":   true,
+			"computer_use":      true,
 			"create_skill":      true,
 			"manage_mcp_server": true,
 			"file_edit":         true,
@@ -1134,16 +1155,16 @@ func (h *PermissionHook) recordDecision(ctx context.Context, tool, decision, via
 }
 
 func (h *PermissionHook) BeforeToolCall(ctx context.Context, call *ToolCallInfo) error {
+	// 全权限在应用层统一放行，旧 deny、审批或资料门控不能在下层重新缩窄该档位。
+	if h.fullAccessAuthorizes(ctx, call.Name) {
+		h.recordDecision(ctx, call.Name, "allow", "profile", "全权限设置自动执行")
+		return nil
+	}
 	// v0.4.3 §11.10 统一安全闸：PermissionPolicy 是单一权限闸，配置即生效（不再 flag-gated）——
 	// cron/webhook 的 ctx 不携带 flags，flag-gating 会让无人值守路径漏过闸。policy==nil 时
 	// （未注入策略的调用方）才退化到 classifyRisk 黑名单兜底。
 	if h.policy != nil {
 		dec := h.policy.Evaluate(call)
-		// 全权限由已保存的主机设置授权，不因本轮附带资料再次要求审批；显式拒绝仍优先。
-		if dec.Action != ActionDeny && h.fullAccessAuthorizes(ctx, call.Name) {
-			h.recordDecision(ctx, call.Name, "allow", "profile", "全权限设置自动执行")
-			return nil
-		}
 		if dec.Action != ActionDeny && hasUntrustedKnowledgeEvidence(ctx) && !evidenceToolUsesExistingPermission(ctx, call) {
 			risk := dec.Risk
 			if risk == "" || risk == "safe" {
@@ -1183,9 +1204,6 @@ func (h *PermissionHook) BeforeToolCall(ctx context.Context, call *ToolCallInfo)
 	}
 
 	// Legacy path: hardcoded dangerous/sensitive lists
-	if h.fullAccessAuthorizes(ctx, call.Name) {
-		return nil
-	}
 	risk := h.classifyRisk(call.Name)
 	if hasUntrustedKnowledgeEvidence(ctx) && !evidenceToolUsesExistingPermission(ctx, call) {
 		if risk == "safe" {
@@ -1201,14 +1219,7 @@ func (h *PermissionHook) BeforeToolCall(ctx context.Context, call *ToolCallInfo)
 }
 
 func (h *PermissionHook) fullAccessAuthorizes(ctx context.Context, toolName string) bool {
-	policy := h.DispatchPolicy()
-	if policy.Profile() != SystemDispatchProfileFullAccess {
-		return false
-	}
-	if source := systemDispatchSource(ctx); source != "" {
-		return policy.Allows(source, toolName)
-	}
-	return policy.AllowsInteractiveTool(toolName)
+	return strings.TrimSpace(toolName) != "" && h.DispatchPolicy().Profile() == SystemDispatchProfileFullAccess
 }
 
 // revokeRememberedToolGrant 在策略 deny 时同步撤销该 owner+tool 的 remembered
@@ -1227,18 +1238,12 @@ func (h *PermissionHook) revokeRememberedToolGrant(ctx context.Context, toolName
 	}
 }
 
-// authorizeUntrustedEvidenceTool 隔离资料内容与执行授权。全权限下的内部验算只消费
-// 运行时已有的 solve grant；其余无人值守调用仍要求证据作用域授权，不能由资料提权。
+// authorizeUntrustedEvidenceTool 在受限档位隔离资料内容与执行授权。
 func (h *PermissionHook) authorizeUntrustedEvidenceTool(ctx context.Context, call *ToolCallInfo, risk string) error {
+	if h.fullAccessAuthorizes(ctx, call.Name) {
+		return nil
+	}
 	if src := systemDispatchSource(ctx); src != "" {
-		if src == solveDispatchSource && solveGrantFromContext(ctx) &&
-			h.DispatchPolicy().Profile() == SystemDispatchProfileFullAccess &&
-			call.Source == "skill" && canonicalEvidenceToolName(call.Name) == codeExecToolName {
-			logger.Info("[permission] solve-internal code_exec auto-approved with evidence",
-				"tool_name", call.Name, "source", src, "profile", SystemDispatchProfileFullAccess)
-			h.recordDecision(ctx, call.Name, "allow", "solve_grant", "全权限下消费运行时内部验算授权")
-			return nil
-		}
 		taskRef := systemDispatchTaskRef(ctx)
 		scopeDigest, err := untrustedEvidenceSecurityScopeDigest(call.Arguments)
 		if err != nil {
@@ -1257,12 +1262,6 @@ func (h *PermissionHook) authorizeUntrustedEvidenceTool(ctx context.Context, cal
 		h.recordDecision(ctx, toolName, "deny", "policy", "不可信 RAG 证据禁止全局矩阵或宽泛 grant 提权")
 		return fmt.Errorf("tool %q blocked for untrusted evidence in unattended %s dispatch: an exact owner/task/tool/security-scope grant is required", toolName, src)
 	}
-	if h.DispatchPolicy().Profile() == SystemDispatchProfileFullAccess {
-		logger.Warn("[permission] full_access does not elevate untrusted evidence",
-			"tool_name", call.Name)
-		return fmt.Errorf("tool %q blocked for untrusted evidence: full_access does not bypass the evidence authorization boundary", call.Name)
-	}
-
 	return h.requestInteractiveApproval(ctx, call, risk,
 		fmt.Sprintf("Agent wants to execute %s(%s)", call.Name, summarizeArgs(call.Arguments)))
 }

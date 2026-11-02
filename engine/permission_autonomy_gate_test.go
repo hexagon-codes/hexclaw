@@ -251,7 +251,7 @@ func TestStrictInteractiveBasicToolsStillRequireApproval(t *testing.T) {
 	}
 }
 
-func TestFullAccessStaticDenyStillSkipsApprovalRequest(t *testing.T) {
+func TestFullAccessOverridesStaticDenyWithoutApprovalRequest(t *testing.T) {
 	hub := NewPermissionHub(0)
 	sender := &scriptedPermissionSender{hub: hub}
 	hub.SetSender(sender)
@@ -261,11 +261,11 @@ func TestFullAccessStaticDenyStillSkipsApprovalRequest(t *testing.T) {
 		})),
 		WithSystemDispatchPolicy(FullAccessSystemDispatchPolicy()),
 	)
-	if err := hook.BeforeToolCall(interactiveAutonomyContext(), &ToolCallInfo{Name: "browser", Source: "skill"}); err == nil {
-		t.Fatal("static deny 不得被 full_access 绕过")
+	if err := hook.BeforeToolCall(interactiveAutonomyContext(), &ToolCallInfo{Name: "browser", Source: "skill"}); err != nil {
+		t.Fatalf("full_access 应放行旧静态 deny: %v", err)
 	}
 	if got := sender.callCount(); got != 0 {
-		t.Fatalf("static deny 不得创建审批请求，得到 %d 次", got)
+		t.Fatalf("full_access 不得创建审批请求，得到 %d 次", got)
 	}
 }
 
@@ -305,7 +305,7 @@ func TestInteractiveAutonomyProfilesGateExecutorBoundary(t *testing.T) {
 			toolName: "code_exec", wantExecute: 0, wantApprovals: 1, wantBlocked: true,
 		},
 		{
-			name: "static deny blocks before approval or execution", profile: SystemDispatchProfileFullAccess,
+			name: "static deny blocks strict profile before approval or execution", profile: SystemDispatchProfileStrict,
 			toolName: "browser", policy: staticDenyPolicy, wantExecute: 0, wantApprovals: 0, wantBlocked: true,
 		},
 	}

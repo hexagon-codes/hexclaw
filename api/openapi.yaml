@@ -20,7 +20,9 @@ paths:
       summary: Start or continue a chat
       description: Returns complete JSON by default, or SSE when Accept contains text/event-stream. Processing may
         create/continue a session, persist messages, consume model quota and invoke tools. request_id does not
-        make unknown outcomes safe to replay.
+        make unknown outcomes safe to replay. A complete durable assistant result for the same owner/session/request
+        is read back without starting another run. An active identity, an incomplete result, or an existing external
+        execution without a readable completed result returns 409, including after snapshot expiry or process restart.
       tags:
         - chat-sessions-memory
       security:
@@ -65,6 +67,38 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ChatSessionError"
+        "409":
+          description: The request is already active or has an original receipt that cannot be safely rerun
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error, receipt_ref]
+                properties:
+                  error:
+                    type: string
+                  receipt_ref:
+                    type: object
+                    description: Owner-scoped original identity and available history or snapshot references; no new run is started
+                    required: [request_id]
+                    properties:
+                      request_id:
+                        type: string
+                      session_id:
+                        type: string
+                      execution_id:
+                        type: string
+                      phase:
+                        type: string
+                      outcome:
+                        type: string
+                      source:
+                        type: string
+                        enum: [rest, websocket]
+                      snapshot_url:
+                        type: string
+                      history_url:
+                        type: string
         "429":
           description: UPSTREAM_RATE_LIMITED
           content:
@@ -103,6 +137,75 @@ paths:
       x-request-body-max-bytes: 20971520
       x-stream-error-schema:
         $ref: "#/components/schemas/ChatSessionSSEError"
+      x-reference-module: chat-sessions-memory
+      x-visibility: public
+  /api/v1/attachments/{id}/content:
+    get:
+      operationId: getStagedImageContent
+      summary: Read the current principal's staged image bytes
+      description: Returns the same image represented by an unexpired upload receipt. Original owner, digest and expiry checks apply; this does not consume the receipt or submit a model request. ETag supports conditional reads.
+      tags:
+        - chat-sessions-memory
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Original staged image
+          content:
+            image/*:
+              schema:
+                type: string
+                format: binary
+        "304":
+          description: Image bytes unchanged
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Receipt not found, expired, corrupted or owned by another principal
+      x-source:
+        file: api/attachment_staging.go
+        handler: handleAttachmentContent
+      x-availability: Always mounted
+      x-reference-module: chat-sessions-memory
+      x-visibility: public
+  /api/v1/sessions/{id}/messages/{message}/attachments/{index}/content:
+    get:
+      operationId: getMessageImageContent
+      summary: Read a persisted message image
+      description: Reads original image bytes from the owned session and message. Upload receipt expiry and process restart do not affect saved images. Before message persistence only, pending may identify an owned upload receipt. Invalid message ownership or attachment index never falls back to another image. Supports HEAD and ETag conditional reads.
+      tags:
+        - chat-sessions-memory
+      security:
+        - bearerAuth: []
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+        - {name: message, in: path, required: true, schema: {type: string}}
+        - {name: index, in: path, required: true, schema: {type: integer, minimum: 0}}
+        - {name: pending, in: query, required: false, schema: {type: string}}
+      responses:
+        "200":
+          description: Original message image bytes
+          content:
+            image/*:
+              schema: {type: string, format: binary}
+        "304":
+          description: Image unchanged
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Session, message or image missing, deleted or not owned
+        "500":
+          description: Message storage lookup failed
+      x-source:
+        file: api/attachment_staging.go
+        handler: handleMessageAttachmentContent
+      x-availability: Mounted when message storage is available
       x-reference-module: chat-sessions-memory
       x-visibility: public
   /api/v1/attachments:
@@ -540,7 +643,8 @@ paths:
       summary: List message history
       description: Messages are ordered by creation time ascending. total uses CountMessages when available,
         otherwise len(page)+offset. message_content is an egress projection; metadata/meta are JSON-encoded
-        strings.
+        strings. With attachment_mode=url, stored image data is projected to authenticated message
+        image URLs; database bytes and the default response remain unchanged.
       tags:
         - chat-sessions-memory
       security:
@@ -591,6 +695,13 @@ paths:
           schema:
             type: integer
             default: 0
+        - name: attachment_mode
+          in: query
+          required: false
+          description: Set url to read stored images through authenticated binary endpoints instead of inline base64.
+          schema:
+            type: string
+            enum: [url]
       x-reference-module: chat-sessions-memory
       x-visibility: public
     post:
@@ -990,7 +1101,8 @@ paths:
       operationId: chatSessionListActiveStreams
       summary: List active streams
       description: Owner-scoped, nonterminal pending/streaming snapshots ordered by updated time descending. Reads
-        state without triggering/resending a model operation.
+        REST and WebSocket state without triggering/resending a model operation. A cancellation request remains
+        nonterminal until the original producer and its run finalizer have exited.
       tags:
         - chat-sessions-memory
       security:
@@ -1007,7 +1119,7 @@ paths:
       x-source:
         file: api/handler_streams.go
         handler: handleListActiveStreams
-      x-availability: Mounted only when s.streamStates != nil
+      x-availability: Always mounted; WebSocket snapshots are included when its provider is configured
       x-reference-module: chat-sessions-memory
       x-visibility: public
   /api/v1/streams/{request_id}:
@@ -1016,7 +1128,10 @@ paths:
       summary: Get a stream snapshot
       description: Returns accumulated content/reasoning, status/done, message identity, runtime_events and
         last_sequence. Retention is process-local and registry-configured; the default keeps terminal
-        snapshots for two minutes, without restart durability.
+        snapshots for two minutes, without restart durability. REST and WebSocket lookups both verify
+        the authenticated owner; transport disconnection does not itself cancel retained external work.
+        Specify source when both transports retain the same owner/request identity; an ambiguous unqualified
+        lookup returns 409 instead of choosing a different run silently.
       tags:
         - chat-sessions-memory
       security:
@@ -1042,10 +1157,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ChatSessionError"
+        "409":
+          description: Both REST and WebSocket snapshots exist; specify the original source
       x-source:
         file: api/handler_streams.go
         handler: handleGetStreamSnapshot
-      x-availability: Mounted only when s.streamStates != nil
+      x-availability: Always mounted; WebSocket snapshots are included when its provider is configured
       parameters:
         - name: request_id
           in: path
@@ -1053,6 +1170,78 @@ paths:
           description: Original stream request ID
           schema:
             type: string
+        - name: source
+          in: query
+          required: false
+          description: Select the original transport explicitly when an identity is ambiguous
+          schema:
+            type: string
+            enum: [rest, websocket]
+      x-reference-module: chat-sessions-memory
+      x-visibility: public
+  /api/v1/streams/{request_id}/cancel:
+    post:
+      operationId: chatSessionCancelRESTStream
+      summary: Request cancellation of an owned REST chat run
+      description: Sends the existing explicit-user-cancellation signal to the authenticated owner's REST
+        chat run, including retained external work after the original HTTP connection has closed. No body
+        or caller-provided owner is accepted. A 202 receipt acknowledges the signal only; poll the original
+        stream snapshot for its actual terminal state after the producer and run finalizer exit. Cancellation
+        does not assert reversal of external effects or termination of shared browsers and MCP services.
+        Repeating cancellation is idempotent; a retained terminal snapshot returns 200 with cancel_requested=false.
+        WebSocket-only requests continue to use their existing WebSocket cancel command.
+      tags:
+        - chat-sessions-memory
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: request_id
+          in: path
+          required: true
+          description: Original REST chat request ID
+          schema:
+            type: string
+      responses:
+        "202":
+          description: Explicit cancellation signal accepted; execution may still be stopping
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [request_id, cancel_requested, snapshot]
+                properties:
+                  request_id:
+                    type: string
+                  cancel_requested:
+                    type: boolean
+                    const: true
+                  snapshot:
+                    $ref: "#/components/schemas/ChatSessionSnapshot"
+        "200":
+          description: The owned REST request already reached a terminal state
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [request_id, cancel_requested, snapshot]
+                properties:
+                  request_id:
+                    type: string
+                  cancel_requested:
+                    type: boolean
+                    const: false
+                  snapshot:
+                    $ref: "#/components/schemas/ChatSessionSnapshot"
+        "400":
+          description: Empty request_id
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: No retained REST request for this authenticated owner
+      x-source:
+        file: api/handler_streams.go
+        handler: handleCancelStream
+      x-availability: Always mounted
       x-reference-module: chat-sessions-memory
       x-visibility: public
   /api/v1/memory:
@@ -3267,7 +3456,7 @@ paths:
         - Knowledge and documents
       operationId: knowledge_post_ExtractDocument
       summary: 无状态提取文档文本
-      description: multipart file输入，成功返回文本，供调用者注入上下文；不创建知识文档或任务。
+      description: multipart file输入，成功返回文本，供调用者注入上下文；不创建知识文档或任务。支持PDF、DOC、DOCX、PPTX、HTML/HTM、ODT、RTF、EPUB及TXT/MD/CSV/JSON；HTML/ODT/RTF/EPUB依赖Pandoc，仅提取文本层，内嵌图片不进行视觉识别并通过warnings说明。XLSX/XLS由桌面客户端解析。
       x-source:
         file: api/handler_documents.go
         handler: handleExtractDocument
@@ -22008,6 +22197,15 @@ components:
       type: object
       description: Facts from this execution; missing historical details remain unknown.
       properties:
+        execution_id:
+          type: string
+        policy_profile:
+          type: string
+        policy_revision:
+          type: integer
+          format: int64
+        replayed:
+          type: boolean
         phase:
           type: string
         outcome:
@@ -22738,6 +22936,10 @@ components:
       properties:
         request_id:
           type: string
+        source:
+          type: string
+          enum: [rest, websocket]
+          description: Transport that owns the run. Optional for compatibility with older servers.
         session_id:
           type: string
         user_id:
@@ -25709,6 +25911,7 @@ components:
               - image_generation
               - video_generation
               - embedding
+              - computer_use
         reasoning_support:
           type: string
           enum:
@@ -27648,6 +27851,7 @@ components:
                   - image_generation
                   - video_generation
                   - embedding
+                  - computer_use
             - type: "null"
         reasoning_support:
           type: string

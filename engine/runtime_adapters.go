@@ -280,7 +280,7 @@ func maxIdenticalToolCallsFor(toolName string) int {
 
 func runtimeToolSideEffect(toolName string) hruntime.ToolSideEffect {
 	switch toolName {
-	case "app_query", "browser", "knowledge_search", "list_agents", "search", "session_search", "weather", "web_search":
+	case "app_query", "knowledge_search", "list_agents", "search", "session_search", "weather", "web_search":
 		return hruntime.SideEffectReadOnly
 	default:
 		return hruntime.SideEffectUnsafe
@@ -289,7 +289,7 @@ func runtimeToolSideEffect(toolName string) hruntime.ToolSideEffect {
 
 // newRuntimeToolExecutor builds a per-run executor with a fresh repeat guard.
 func newRuntimeToolExecutor(executor *ToolExecutor) *runtimeToolExecutor {
-	return &runtimeToolExecutor{executor: executor, callCounts: make(map[string]int), unknownActions: make(map[string]hruntime.ToolResult)}
+	return &runtimeToolExecutor{executor: executor, unknownActions: make(map[string]hruntime.ToolResult)}
 }
 
 type runtimeToolExecutor struct {
@@ -299,7 +299,7 @@ type runtimeToolExecutor struct {
 	onActivity func(context.Context) error
 
 	mu             sync.Mutex
-	callCounts     map[string]int // (tool+args) signature → times seen this run
+	repeatGuard    hruntime.ToolRepeatGuard
 	unknownActions map[string]hruntime.ToolResult
 }
 
@@ -307,10 +307,8 @@ func (e *runtimeToolExecutor) Execute(ctx context.Context, call llm.ToolCall) (o
 	replayed := false
 	defer func() { recordRuntimeToolReceipt(ctx, call, string(out.Status), out.Raw, replayed) }()
 	started := time.Now()
-	argumentsForLog := call.Arguments
-	if strings.Contains(strings.ToLower(argumentsForLog), "base64") {
-		argumentsForLog = "[omitted: contains base64 media]"
-	}
+	// 任意工具参数均可能携带认证或用户文件；普通日志只记录字段名。
+	argumentsForLog := "[argument values omitted]"
 	trace.L(ctx).Info("runtime tool call started", "stage", "tool_execute", "tool", call.Name, "tool_call_id", call.ID, "arguments", argumentsForLog)
 	var args map[string]any
 	if call.Arguments != "" {
@@ -331,23 +329,26 @@ func (e *runtimeToolExecutor) Execute(ctx context.Context, call llm.ToolCall) (o
 	e.mu.Unlock()
 	if unknown {
 		replayed = true
-		previous.Content += "\nThe original POST outcome is unknown. Do not resend it automatically; verify the original operation first."
+		previous.Content += "\nThe original operation outcome is unknown. Do not resend it automatically; verify the original operation first."
 		return previous, nil
 	}
 
 	// Loop breaker: if the model repeats the exact same call, stop executing
 	// it and nudge it to answer from the result it already has.
-	sig := call.Name + "\x00" + call.Arguments
-	e.mu.Lock()
-	e.callCounts[sig]++
-	count := e.callCounts[sig]
-	e.mu.Unlock()
-	if count > maxIdenticalToolCallsFor(call.Name) {
+	count, err := e.repeatGuard.Observe(call.Name, args)
+	if err != nil {
+		return hruntime.ToolResult{}, err
+	}
+	limit := maxIdenticalToolCallsFor(call.Name)
+	if runtimeCallSideEffect(call) == hruntime.SideEffectReadOnly {
+		limit = maxIdenticalToolCalls
+	}
+	if count > limit {
 		trace.L(ctx).Warn("tool-loop repeat guard tripped",
 			"stage", "tool_execute", "tool", call.Name, "tool_call_id", call.ID, "arguments", argumentsForLog,
 			"reason", "repeat_guard", "err", repeatToolCallBlockedError, "identical_calls", count, "elapsed_ms", time.Since(started).Milliseconds())
 		msg := fmt.Sprintf("You have already called %q with these exact arguments %d times and received the same result above. Do NOT call it again. Produce your final answer now using the information you already have; if it is insufficient, explain what is missing and stop.", call.Name, count-1)
-		return hruntime.ToolResult{Content: msg, Raw: repeatToolCallBlockedError, Status: hruntime.ToolStatusError}, nil
+		return hruntime.ToolResult{Content: msg, Raw: repeatToolCallBlockedError, Status: hruntime.ToolStatusError, Stop: true}, nil
 	}
 
 	// 已进入真实执行阶段即续传一次活动，不能等第一个周期心跳才续期。
@@ -399,6 +400,9 @@ func (e *runtimeToolExecutor) Execute(ctx context.Context, call llm.ToolCall) (o
 	}
 	ctx = skill.WithInvocationContext(ctx, invocation)
 	result, raw, err := e.executor.ExecuteResult(ctx, call.Name, args)
+	if detail := toolExecutionDetail(raw); detail != nil && detail.Replayed {
+		replayed = true
+	}
 	finishHeartbeat()
 	if err != nil {
 		trace.L(ctx).Warn("runtime tool call failed", "stage", "tool_execute", "tool", call.Name, "tool_call_id", call.ID, "arguments", argumentsForLog, "reason", "execution_error", "err", err, "elapsed_ms", time.Since(started).Milliseconds())
@@ -408,7 +412,7 @@ func (e *runtimeToolExecutor) Execute(ctx context.Context, call llm.ToolCall) (o
 		}
 		msg = toolExecutionExplanation(msg, raw)
 		outcome := hruntime.ToolResult{Content: msg, Raw: raw, Error: err.Error(), Status: hruntime.ToolStatusError, DurationMs: time.Since(started).Milliseconds()}
-		if detail := toolExecutionDetail(raw); detail != nil && (detail.Action == "post" || call.Name == "media_generate") && detail.Outcome == "unknown" {
+		if detail := toolExecutionDetail(raw); detail != nil && detail.Outcome == "unknown" && runtimeCallSideEffect(call) != hruntime.SideEffectReadOnly {
 			e.mu.Lock()
 			e.unknownActions[unknownKey] = outcome
 			e.mu.Unlock()
@@ -420,33 +424,26 @@ func (e *runtimeToolExecutor) Execute(ctx context.Context, call llm.ToolCall) (o
 }
 
 func (e *runtimeToolExecutor) SideEffectOf(call llm.ToolCall) hruntime.ToolSideEffect {
-	return runtimeToolSideEffect(call.Name)
+	return runtimeCallSideEffect(call)
 }
 
-type runtimeRepeatGuardStopMiddleware struct{}
-
-func (runtimeRepeatGuardStopMiddleware) BeforeLLM(context.Context, *hruntime.State) error {
-	return nil
-}
-
-func (runtimeRepeatGuardStopMiddleware) AfterLLM(context.Context, *hruntime.State, *llm.CompletionResponse) error {
-	return nil
-}
-
-func (runtimeRepeatGuardStopMiddleware) BeforeTool(context.Context, *hruntime.State, llm.ToolCall) error {
-	return nil
-}
-
-func (runtimeRepeatGuardStopMiddleware) AfterTool(_ context.Context, state *hruntime.State, _ llm.ToolCall, result hruntime.ToolResult) error {
-	if state != nil && result.Raw == repeatToolCallBlockedError {
-		state.Final = true
-		state.FinalText = result.Content
+func runtimeCallSideEffect(call llm.ToolCall) hruntime.ToolSideEffect {
+	if call.Name == "browser" {
+		var args map[string]any
+		if json.Unmarshal([]byte(call.Arguments), &args) != nil {
+			return hruntime.SideEffectUnsafe
+		}
+		action, _ := args["action"].(string)
+		if action == "fetch" || action == "extract" || action == "" {
+			return hruntime.SideEffectReadOnly
+		}
+		method, _ := args["method"].(string)
+		if action == "request" && (strings.EqualFold(method, "GET") || strings.EqualFold(method, "HEAD") || strings.EqualFold(method, "OPTIONS") || method == "") {
+			return hruntime.SideEffectReadOnly
+		}
+		return hruntime.SideEffectUnsafe
 	}
-	return nil
-}
-
-func (runtimeRepeatGuardStopMiddleware) Finalize(context.Context, *hruntime.State) error {
-	return nil
+	return runtimeToolSideEffect(call.Name)
 }
 
 type runtimeBudgetMiddleware struct {
@@ -518,7 +515,7 @@ func runtimeCompaction(provider hexagon.Provider, sessionID string, currentProvi
 				return contextMessageBytes(messages) >= contextCompressCharThreshold || middleware.HasCompactableToolMedia(messages, 3)
 			},
 			Count: EstimateMessagesTokens,
-			Compact: func(ctx context.Context, messages []llm.Message) []llm.Message {
+			Compact: func(ctx context.Context, messages []llm.Message) ([]llm.Message, error) {
 				selected := provider
 				if currentProvider != nil {
 					if current := currentProvider(); current != nil {
@@ -527,7 +524,7 @@ func runtimeCompaction(provider hexagon.Provider, sessionID string, currentProvi
 				}
 				compressed, nextInput := compressContextWithInput(ctx, messages, selected, sessionID, inputIndex)
 				inputIndex = nextInput
-				return compressed
+				return compressed, nil
 			},
 		}
 		err := compaction.BeforeLLM(ctx, state)

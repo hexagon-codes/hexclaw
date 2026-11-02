@@ -7,6 +7,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/hexagon-codes/ai-core/llm"
 	hruntime "github.com/hexagon-codes/hexagon/runtime"
+	"github.com/hexagon-codes/hexclaw/adapter"
 )
 
 func TestBug20260613_ToolRepeatGuardShortCircuits(t *testing.T) {
@@ -96,7 +98,6 @@ func TestToolRepeatGuard_RuntimeStopsAfterRepeatedMutatingTool(t *testing.T) {
 	runner := hruntime.NewRunner(hruntime.Config{
 		ProviderSelector: hruntime.StaticProviderSelector{Provider: provider, Name: "repeat", Model: "m"},
 		ToolExecutor:     newRuntimeToolExecutor(&ToolExecutor{}),
-		Middleware:       []hruntime.Middleware{runtimeRepeatGuardStopMiddleware{}},
 		DefaultMaxTurns:  25,
 	})
 
@@ -116,5 +117,68 @@ func TestToolRepeatGuard_RuntimeStopsAfterRepeatedMutatingTool(t *testing.T) {
 	}
 	if !strings.Contains(result.Content, "already called") {
 		t.Fatalf("final content should explain the repeat guard, got %q", result.Content)
+	}
+}
+
+func TestToolRepeatGuardEquivalentJSONArguments(t *testing.T) {
+	rte := newRuntimeToolExecutor(&ToolExecutor{})
+	first, err := rte.Execute(context.Background(), llm.ToolCall{Name: "cron_task", Arguments: `{"action":"create","prompt":"sample"}`})
+	if err != nil || first.Stop {
+		t.Fatalf("first call = %+v, %v", first, err)
+	}
+	second, err := rte.Execute(context.Background(), llm.ToolCall{Name: "cron_task", Arguments: ` { "prompt": "sample", "action": "create" } `})
+	if err != nil || !second.Stop || second.Raw != repeatToolCallBlockedError {
+		t.Fatalf("equivalent repeat = %+v, %v", second, err)
+	}
+}
+
+type repeatStreamToolProvider struct{ repeatToolProvider }
+
+func (p *repeatStreamToolProvider) Stream(ctx context.Context, req llm.CompletionRequest) (*llm.Stream, error) {
+	resp, err := p.Complete(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	data, err := json.Marshal(map[string]any{"choices": []any{map[string]any{
+		"index": 0, "delta": map[string]any{"tool_calls": []any{map[string]any{
+			"index": 0, "id": resp.ToolCalls[0].ID, "type": "function",
+			"function": map[string]any{"name": resp.ToolCalls[0].Name, "arguments": resp.ToolCalls[0].Arguments},
+		}}}, "finish_reason": "tool_calls",
+	}}})
+	if err != nil {
+		return nil, err
+	}
+	return llm.NewStream(strings.NewReader("data: "+string(data)+"\n\ndata: [DONE]\n\n"), llm.StreamOpenAIFormat), nil
+}
+
+func (*repeatStreamToolProvider) Models() []llm.ModelInfo                { return []llm.ModelInfo{{ID: "mock-model"}} }
+func (*repeatStreamToolProvider) CountTokens([]llm.Message) (int, error) { return 1, nil }
+
+func TestToolRepeatGuardProcessStreamStopsAndPersists(t *testing.T) {
+	provider := &repeatStreamToolProvider{}
+	eng := newEngineWithProvider(t, provider)
+	eng.SetToolExecutor(&ToolExecutor{})
+	chunks, err := eng.ProcessStream(context.Background(), &adapter.Message{
+		ID: "repeat-stream", Platform: adapter.PlatformAPI, UserID: "repeat-user",
+		SessionID: "repeat-session", Content: "Create a sample task.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var terminal *adapter.ReplyChunk
+	for chunk := range chunks {
+		if chunk.Done {
+			terminal = chunk
+		}
+	}
+	if provider.calls != 2 || terminal == nil || terminal.Error != nil {
+		t.Fatalf("calls=%d, expected two calls and a successful terminal chunk", provider.calls)
+	}
+	record, err := eng.store.GetMessage(context.Background(), terminal.AssistantMessageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(record.Content, "already called") {
+		t.Fatalf("persisted terminal content = %q", record.Content)
 	}
 }

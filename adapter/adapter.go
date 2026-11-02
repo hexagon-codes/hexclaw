@@ -113,6 +113,10 @@ type ToolCall struct {
 
 // ToolExecutionDetail 仅传递本次执行的公开事实，缺字段的历史消息保持未知。
 type ToolExecutionDetail struct {
+	ExecutionID       string `json:"execution_id,omitempty"`
+	PolicyProfile     string `json:"policy_profile,omitempty"`
+	PolicyRevision    uint64 `json:"policy_revision,omitempty"`
+	Replayed          bool   `json:"replayed,omitempty"`
 	Phase             string `json:"phase,omitempty"`
 	Outcome           string `json:"outcome"`
 	Reason            string `json:"reason,omitempty"`

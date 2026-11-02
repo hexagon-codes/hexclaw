@@ -112,7 +112,7 @@ func TestREG_RAG_TaintedStaticDenyPrecedesApproval(t *testing.T) {
 	policy := NewPermissionPolicy(ActionAllow, PolicyRule{
 		Name: "deny-probe", ToolPattern: "rag_authority_probe", Action: ActionDeny, Reason: "blocked statically",
 	})
-	hook := NewPermissionHook(NewPermissionHub(0), WithPolicy(policy), WithSystemDispatchPolicy(FullAccessSystemDispatchPolicy()))
+	hook := NewPermissionHook(NewPermissionHub(0), WithPolicy(policy), WithSystemDispatchPolicy(DefaultSystemDispatchPolicy()))
 	err := hook.BeforeToolCall(withUntrustedKnowledgeEvidence(context.Background()), &ToolCallInfo{Name: "rag_authority_probe", Source: "skill"})
 	if err == nil || !strings.Contains(err.Error(), "deny-probe") {
 		t.Fatalf("static deny must win before any tainted approval path: %v", err)

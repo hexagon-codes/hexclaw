@@ -1,6 +1,6 @@
 {
   "version": "2.0.0",
-  "updated_at": "2026-08-02",
+  "updated_at": "2026-11-02T03:28:26Z",
   "servers": [
     {
       "name": "tiger",
@@ -1265,7 +1265,7 @@
       "description": "全球天气实况与预报 — 基于 Open-Meteo 免费 API，无需密钥",
       "category": "utility",
       "command": "uvx",
-      "args": ["--from","mcp_weather_server==0.6.1","python","-m","mcp_weather_server"],
+      "args": ["--with","mcp[cli]>=1.12.0,<2","--from","mcp_weather_server==0.6.1","python","-m","mcp_weather_server"],
       "source": "community",
       "source_url": "https://github.com/isdaniel/mcp_weather_server",
       "downloads": 0,
@@ -1276,6 +1276,7 @@
         "ecosystem": "pypi",
         "package": "mcp_weather_server",
         "version": "0.6.1",
+        "dependency_constraint": "mcp[cli]>=1.12.0,<2",
         "integrity": "sha256:ad85f11949c038e52c08dcea3d84c0410042d22fe47c63c87695a6fedc4d798c",
         "source_registry": "https://pypi.org",
         "resolved_at": "2026-08-02"

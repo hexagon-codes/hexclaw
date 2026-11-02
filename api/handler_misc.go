@@ -467,6 +467,11 @@ func (s *Server) handleAddMCPServer(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	connected, err := s.mcpMgr.ConfigureServerBestEffort(ctx, req.Name, func() (*hexmcp.ServerConfig, error) {
 		candidate := config.MCPServerConfig{Name: req.Name, Transport: transport, Command: req.Command, Args: req.Args, Env: req.Env, Endpoint: req.Endpoint, Enabled: true}
+		if previousMCP.Auth != nil {
+			auth := *previousMCP.Auth
+			auth.Scopes = append([]string(nil), previousMCP.Auth.Scopes...)
+			candidate.Auth = &auth
+		}
 		if hasSecretMutations {
 			current, err := s.cfgWriter.GetMCPServer(req.Name)
 			if err != nil {
@@ -487,7 +492,7 @@ func (s *Server) handleAddMCPServer(w http.ResponseWriter, r *http.Request) {
 		} else {
 			s.rememberMCPServerConfig(candidate)
 		}
-		return &hexmcp.ServerConfig{Name: candidate.Name, Transport: candidate.Transport, Command: candidate.Command, Args: candidate.Args, Env: candidate.Env, Endpoint: candidate.Endpoint, Enabled: true}, nil
+		return &hexmcp.ServerConfig{Name: candidate.Name, Transport: candidate.Transport, Command: candidate.Command, Args: candidate.Args, Env: candidate.Env, Endpoint: candidate.Endpoint, Enabled: true, Auth: runtimeMCPOAuthConfig(candidate.Auth, candidate.Endpoint)}, nil
 	})
 	if err != nil {
 		if errors.Is(err, hexmcp.ErrServerChangeSuperseded) {
@@ -1349,7 +1354,6 @@ func (s *Server) activeLLMConfig() config.LLMConfig {
 	// lock yields one immutable generation and prevents catalog probes from
 	// racing a concurrent config transition.
 	s.cfgMu.Lock()
-	defer s.cfgMu.Unlock()
 
 	llmCfg := cloneLLMConfigSnapshot(s.cfg.LLM)
 	if runtime, ok := s.engine.(llmConfigRuntime); ok {
@@ -1357,6 +1361,13 @@ func (s *Server) activeLLMConfig() config.LLMConfig {
 		if len(live.Providers) > 0 {
 			llmCfg = cloneLLMConfigSnapshot(live)
 		}
+	}
+	s.cfgMu.Unlock()
+	// 运行时只读检查与实际 Provider facade 使用同一能力副本；声明快照不被写回。
+	readCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	for name, provider := range llmCfg.Providers {
+		llmCfg.Providers[name] = s.ResolveEffectiveProviderModelSpecs(readCtx, name, provider)
 	}
 	return llmCfg
 }

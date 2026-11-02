@@ -44,12 +44,13 @@ type HubConfig struct {
 // it does not prove the bytes eventually selected by a package manager and is
 // not a statement that the package is trusted or safe.
 type MCPArtifact struct {
-	Ecosystem      string `json:"ecosystem"`
-	Package        string `json:"package"`
-	Version        string `json:"version"`
-	Integrity      string `json:"integrity"`
-	SourceRegistry string `json:"source_registry,omitempty"`
-	ResolvedAt     string `json:"resolved_at,omitempty"`
+	Ecosystem            string `json:"ecosystem"`
+	Package              string `json:"package"`
+	Version              string `json:"version"`
+	Integrity            string `json:"integrity"`
+	SourceRegistry       string `json:"source_registry,omitempty"`
+	ResolvedAt           string `json:"resolved_at,omitempty"`
+	DependencyConstraint string `json:"dependency_constraint,omitempty"`
 }
 
 // MCPRegistryIdentity records which registry document was merged into a

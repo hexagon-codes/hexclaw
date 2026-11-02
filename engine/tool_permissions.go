@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/hexagon-codes/hexclaw/skill"
 )
 
 // ToolPermissions manages per-tool allow/deny rules.
@@ -39,6 +41,11 @@ func NewToolPermissions(allow, deny []string) *ToolPermissions {
 
 // Check returns nil if the tool is permitted, error otherwise.
 func (p *ToolPermissions) Check(toolName string, sessionID string) error {
+	return p.check(toolName, sessionID, false)
+}
+
+// check 对调用通道只略过具体动作 allowlist；显式拒绝和会话禁用仍在同一裁决中。
+func (p *ToolPermissions) check(toolName, sessionID string, accessUtility bool) error {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
@@ -59,7 +66,7 @@ func (p *ToolPermissions) Check(toolName string, sessionID string) error {
 	}
 
 	// If allow rules exist, tool must match at least one
-	if len(p.allow) > 0 {
+	if len(p.allow) > 0 && !accessUtility {
 		for _, pattern := range p.allow {
 			if matchGlob(pattern, toolName) {
 				return nil
@@ -126,6 +133,12 @@ func NewToolPermissionHook(perms *ToolPermissions) *ToolPermissionHook {
 func (h *ToolPermissionHook) Priority() int { return 1 }
 
 func (h *ToolPermissionHook) BeforeToolCall(ctx context.Context, call *ToolCallInfo) error {
+	if skill.FullAccess(ctx) {
+		return nil
+	}
 	sessionID, _ := ctx.Value(ctxKeySessionID).(string)
+	if call.Name == invokeToolName || call.Name == discoverToolsName {
+		return h.perms.check(call.Name, sessionID, true)
+	}
 	return h.perms.Check(call.Name, sessionID)
 }

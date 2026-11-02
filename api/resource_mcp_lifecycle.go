@@ -266,7 +266,8 @@ func (s *Server) ManageMCP(ctx context.Context, action, name string) (*skill.Res
 			if err := s.cfgWriter.UpsertMCPServer(*cfg); err != nil {
 				return nil, err
 			}
-			return &hexmcp.ServerConfig{Name: name, Transport: cfg.Transport, Command: cfg.Command, Args: cfg.Args, Env: cfg.Env, Endpoint: cfg.Endpoint, Enabled: cfg.Enabled}, nil
+			auth := runtimeMCPOAuthConfig(cfg.Auth, cfg.Endpoint)
+			return &hexmcp.ServerConfig{Name: name, Transport: cfg.Transport, Command: cfg.Command, Args: cfg.Args, Env: cfg.Env, Endpoint: cfg.Endpoint, Enabled: cfg.Enabled, Auth: auth}, nil
 		})
 		if err != nil {
 			return nil, err
@@ -279,4 +280,14 @@ func (s *Server) ManageMCP(ctx context.Context, action, name string) (*skill.Res
 		return nil, err
 	}
 	return mcpResourceResult(action, state)
+}
+
+func runtimeMCPOAuthConfig(auth *config.MCPAuthConfig, endpoint string) *hexmcp.OAuthConfig {
+	if auth == nil || !strings.EqualFold(auth.Type, "oauth") {
+		return nil
+	}
+	return hexmcp.OAuthConfigForResource(&hexmcp.OAuthConfig{
+		ClientID: auth.ClientID, Issuer: auth.Issuer, AuthURL: auth.AuthURL,
+		TokenURL: auth.TokenURL, Scopes: append([]string(nil), auth.Scopes...), Resource: auth.Resource,
+	}, endpoint)
 }

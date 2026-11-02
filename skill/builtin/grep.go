@@ -34,7 +34,7 @@ func (s *GrepSkill) ToolDefinition() llm.ToolDefinition {
 	return llm.NewToolDefinition("grep",
 		"Search file contents recursively by text or regex pattern. "+
 			"Returns matching lines with file paths and line numbers. "+
-			"Paths are relative to workspace or absolute within workspace.",
+			"Paths use the current execution profile: workspace-scoped normally, or OS-account-accessible paths in full_access.",
 		&llm.Schema{
 			Type: "object",
 			Properties: map[string]*llm.Schema{
@@ -61,14 +61,14 @@ var skipDirs = map[string]bool{
 	"target":       true,
 }
 
-func (s *GrepSkill) Execute(_ context.Context, args map[string]any) (*skill.Result, error) {
+func (s *GrepSkill) Execute(ctx context.Context, args map[string]any) (*skill.Result, error) {
 	pattern, _ := args["pattern"].(string)
 	if pattern == "" {
 		return nil, fmt.Errorf("pattern is required")
 	}
 
 	rawPath, _ := args["path"].(string)
-	searchPath, err := resolveSafePath(s.workspace, rawPath)
+	searchPath, err := resolveToolPath(ctx, s.workspace, rawPath)
 	if err != nil {
 		return nil, fmt.Errorf("path rejected: %w", err)
 	}
@@ -99,7 +99,7 @@ func (s *GrepSkill) Execute(_ context.Context, args map[string]any) (*skill.Resu
 				return nil // skip inaccessible entries
 			}
 			if d.IsDir() {
-				if skipDirs[d.Name()] {
+				if !skill.FullAccess(ctx) && skipDirs[d.Name()] {
 					return filepath.SkipDir
 				}
 				return nil

@@ -57,15 +57,15 @@ func TestSystemDispatchPolicy_FunctionFirstMatrix(t *testing.T) {
 	}
 }
 
-func TestSystemDispatchPolicy_FullAccessIsExplicitButSolveStillGrantScoped(t *testing.T) {
+func TestSystemDispatchPolicy_FullAccessAllowsAllDispatchSources(t *testing.T) {
 	p := FullAccessSystemDispatchPolicy()
 	for _, tool := range []string{"manage_skill", "publish_wechat", "cron_task", "shell"} {
 		if !p.Allows(webhookDispatchSource, tool) {
 			t.Errorf("full_access should allow webhook tool=%s", tool)
 		}
 	}
-	if p.Allows(solveDispatchSource, "code_exec") {
-		t.Fatal("full_access must not make forgeable source=solve a code_exec grant")
+	if !p.Allows(solveDispatchSource, "code_exec") {
+		t.Fatal("full_access must allow code_exec for the active application execution profile")
 	}
 }
 

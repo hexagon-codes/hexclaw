@@ -12,6 +12,7 @@ import (
 	"context"
 
 	"github.com/hexagon-codes/ai-core/llm"
+	coretool "github.com/hexagon-codes/ai-core/tool"
 	"github.com/hexagon-codes/hexclaw/adapter"
 )
 
@@ -48,6 +49,66 @@ type Result struct {
 	Content  string               // 结果文本
 	Data     any                  // 结构化数据（可选）
 	Metadata map[string]string    // 附加元数据
+}
+
+// ToolObservationRefsMetadataKey 保存同次执行已经登记的文件引用。
+const ToolObservationRefsMetadataKey = "tool_observation_refs"
+
+// ToolMessageContent 透传底层真实工具媒体，复用 Runtime 的来源与图像消息链。
+// browser_session 的 result 字段属于固定的工具结果合同，不扫描任意数据中的编码字符串。
+func (r *Result) ToolMessageContent() []llm.ContentPart {
+	if r == nil {
+		return nil
+	}
+	parts := resultMediaContent(r.Data)
+	if refs := r.Metadata[ToolObservationRefsMetadataKey]; refs != "" {
+		parts = append([]llm.ContentPart{llm.NewTextPart("Registered tool files: " + refs)}, parts...)
+	}
+	return parts
+}
+
+func resultMediaContent(data any) []llm.ContentPart {
+	switch value := data.(type) {
+	case coretool.Result:
+		return resultMediaContent(value.Output)
+	case *coretool.Result:
+		if value != nil {
+			return resultMediaContent(value.Output)
+		}
+	case map[string]any:
+		if result, ok := value["result"].(coretool.Result); ok {
+			return resultMediaContent(result.Output)
+		}
+	case interface{ ToolMessageContent() []llm.ContentPart }:
+		return append([]llm.ContentPart(nil), value.ToolMessageContent()...)
+	}
+	return nil
+}
+
+// ToolAttachments 透传实际工具字节，文件归属与持久化仍由原执行链负责。
+func (r *Result) ToolAttachments() []adapter.Attachment {
+	if r == nil {
+		return nil
+	}
+	return resultAttachments(r.Data)
+}
+
+func resultAttachments(data any) []adapter.Attachment {
+	switch value := data.(type) {
+	case coretool.Result:
+		return resultAttachments(value.Output)
+	case *coretool.Result:
+		if value != nil {
+			return resultAttachments(value.Output)
+		}
+	case map[string]any:
+		if result, ok := value["result"].(coretool.Result); ok {
+			return resultAttachments(result.Output)
+		}
+	case interface{ ToolAttachments() []adapter.Attachment }:
+		return append([]adapter.Attachment(nil), value.ToolAttachments()...)
+	}
+	return nil
 }
 
 // Registry Skill 注册中心

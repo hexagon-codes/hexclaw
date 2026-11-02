@@ -1,6 +1,6 @@
 module github.com/hexagon-codes/hexclaw
 
-go 1.25.13
+go 1.26.10
 
 require (
 	github.com/alibabacloud-go/darabonba-openapi/v2 v2.0.12
@@ -10,7 +10,7 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/hexagon-codes/ai-core v0.2.13
 	github.com/hexagon-codes/hexagon v0.5.15
-	github.com/hexagon-codes/toolkit v0.3.5
+	github.com/hexagon-codes/toolkit v0.3.6
 	github.com/larksuite/oapi-sdk-go/v3 v3.5.3
 	github.com/line/line-bot-sdk-go/v8 v8.20.1
 	github.com/modelcontextprotocol/go-sdk v1.5.0
@@ -20,10 +20,10 @@ require (
 	go.starlark.net v0.0.0-20260613233743-8ba36ccb83fb
 	go.uber.org/goleak v1.3.0
 	golang.org/x/image v0.44.0
-	golang.org/x/net v0.55.0
-	golang.org/x/sync v0.22.0
-	golang.org/x/sys v0.45.0
-	golang.org/x/text v0.40.0
+	golang.org/x/net v0.60.0
+	golang.org/x/sync v0.23.0
+	golang.org/x/sys v0.48.0
+	golang.org/x/text v0.42.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.52.0
 	nhooyr.io/websocket v1.8.17
@@ -58,7 +58,7 @@ require (
 	github.com/tjfoc/gmsm v1.4.1 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
-	golang.org/x/crypto v0.52.0 // indirect
+	golang.org/x/crypto v0.57.0 // indirect
 	golang.org/x/oauth2 v0.35.0 // indirect
 	golang.org/x/time v0.8.0 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect

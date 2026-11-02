@@ -32,11 +32,11 @@ func (s *FileEditSkill) ToolDefinition() llm.ToolDefinition {
 	return llm.NewToolDefinition("file_edit",
 		"Replace exact text in a file. Read the file first to see current content, "+
 			"then use this tool to make precise edits. old_string must match exactly once. "+
-			"Paths are relative to workspace or absolute within workspace.",
+			"Paths use the current execution profile: workspace-scoped normally, or OS-account-accessible paths in full_access.",
 		&llm.Schema{
 			Type: "object",
 			Properties: map[string]*llm.Schema{
-				"file_path":  {Type: "string", Description: "Path to the file (relative to workspace, or absolute within workspace)"},
+				"file_path":  {Type: "string", Description: "Path to the file (workspace-scoped normally; OS-account-accessible paths in full_access)"},
 				"old_string": {Type: "string", Description: "Exact text to find and replace (must appear exactly once)"},
 				"new_string": {Type: "string", Description: "Replacement text"},
 			},
@@ -44,7 +44,7 @@ func (s *FileEditSkill) ToolDefinition() llm.ToolDefinition {
 		})
 }
 
-func (s *FileEditSkill) Execute(_ context.Context, args map[string]any) (*skill.Result, error) {
+func (s *FileEditSkill) Execute(ctx context.Context, args map[string]any) (*skill.Result, error) {
 	rawPath, _ := args["file_path"].(string)
 	oldStr, _ := args["old_string"].(string)
 	newStr, _ := args["new_string"].(string)
@@ -59,7 +59,7 @@ func (s *FileEditSkill) Execute(_ context.Context, args map[string]any) (*skill.
 		return nil, fmt.Errorf("old_string and new_string are identical, no change needed")
 	}
 
-	filePath, err := resolveSafePath(s.workspace, rawPath)
+	filePath, err := resolveToolPath(ctx, s.workspace, rawPath)
 	if err != nil {
 		return nil, fmt.Errorf("path rejected: %w", err)
 	}

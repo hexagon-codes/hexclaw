@@ -111,13 +111,17 @@ func (s *Service) acceptRequestOperation(ctx context.Context, accept func() (*Op
 	if state.cancelled || ctx.Err() != nil {
 		return nil, context.Canceled
 	}
-	op, err := accept()
+	var op *Operation
+	err := requestcancel.RetainWith(state.parent, func() error {
+		var acceptErr error
+		op, acceptErr = accept()
+		return acceptErr
+	})
 	if err != nil {
 		return op, err
 	}
 	state.operations[requestOperation{owner: op.Owner, id: op.ID}] = struct{}{}
 	state.retained = true
-	requestcancel.Retain(state.parent)
 	state.cancelFromParent(s)
 	if state.cancelled || ctx.Err() != nil {
 		return op, context.Canceled
@@ -125,11 +129,11 @@ func (s *Service) acceptRequestOperation(ctx context.Context, accept func() (*Op
 	return op, nil
 }
 
-// RetainRequest 只由实际媒体调用入口接纳任务；与断连取消串行决定归属。
+// RetainRequest 由实际外部任务派发入口接纳任务；与断连取消串行决定归属。
 func RetainRequest(ctx context.Context) error {
 	state, _ := ctx.Value(requestLifetimeKey{}).(*requestLifetime)
 	if state == nil {
-		return ctx.Err()
+		return requestcancel.RetainWith(ctx, nil)
 	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
@@ -141,6 +145,11 @@ func RetainRequest(ctx context.Context) error {
 		}
 		state.cancel(cause)
 		return context.Canceled
+	}
+	if err := requestcancel.RetainWith(state.parent, nil); err != nil {
+		state.cancelled = true
+		state.cancel(err)
+		return err
 	}
 	state.retained = true
 	return nil

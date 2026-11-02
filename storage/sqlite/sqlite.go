@@ -250,8 +250,11 @@ func scanMessage(sc scannable) (*storage.MessageRecord, error) {
 		// 已提交产物助手消息的附件独立存储，不能覆盖回合终态和投递关联。
 		if m.Role == "assistant" {
 			var persisted, attachmentMeta map[string]json.RawMessage
-			if json.Unmarshal([]byte(persistedMetadata), &persisted) == nil && (len(persisted["media_completion_digest"]) > 0 || len(persisted["print_reply_digest"]) > 0) &&
+			if json.Unmarshal([]byte(persistedMetadata), &persisted) == nil &&
 				json.Unmarshal([]byte(m.Attachments), &attachmentMeta) == nil {
+				if persisted == nil {
+					persisted = make(map[string]json.RawMessage)
+				}
 				persisted["attachments"] = attachmentMeta["attachments"]
 				if merged, err := json.Marshal(persisted); err == nil {
 					m.Metadata = string(merged)
@@ -289,20 +292,10 @@ func sessionInsertArgs(s *storage.Session) []any {
 // 单字段大小限制（见 Fix #3 背景：本地推理 reasoning 动辄 5000+ 字，
 // AI 生成 HTML 模板单条 500KB+，历史 messages 最大单条达 500,002 字节）
 const (
-	maxMessageContentBytes  = 128 * 1024      // 128 KB：单条 content
-	maxMessageMetadataBytes = 64 * 1024       // 64 KB：metadata（含 reasoning）
-	maxAttachmentBytes      = 8 * 1024 * 1024 // 8 MB：attachments 独立列（图片 base64），远高于 metadata
+	maxMessageContentBytes  = 128 * 1024 // 128 KB：单条 content
+	maxMessageMetadataBytes = 64 * 1024  // 64 KB：metadata（含 reasoning）
 	truncationSuffix        = "\n\n…[truncated by hexclaw to protect DB size]"
 )
-
-// clampAttachments 保证 attachments 列始终是 valid JSON：超限整体丢弃为 "{}"（而非 truncateLarge
-// 从中间硬截断产生损坏 JSON）。损坏 JSON 会让重载解析失败、把整条消息的附件全毁掉（BUG-20260626）。
-func clampAttachments(s string) string {
-	if len(s) > maxAttachmentBytes {
-		return "{}"
-	}
-	return s
-}
 
 // previewByteLimit 按字节上限截断会话预览，回退到 UTF-8 边界避免切碎 CJK 字符
 // （bug 2026-06-22：原 `preview[:200]` 在 3 字节字符中间硬切产生 `�`）。
@@ -334,16 +327,22 @@ func truncateLarge(s string, limit int) string {
 }
 
 func messageInsertArgs(m *storage.MessageRecord) []any {
+	metadata := truncateLarge(m.Metadata, maxMessageMetadataBytes)
+	if m.HasInternalProviderOutputHistory() {
+		// 完整运行输出包含关联工具和原图，不能从中截断协议条目。
+		metadata = m.Metadata
+	}
 	return []any{
 		m.ID, m.SessionID, m.ParentID, m.Role,
 		truncateLarge(m.Content, maxMessageContentBytes),
 		m.ContentType,
-		truncateLarge(m.Metadata, maxMessageMetadataBytes),
+		metadata,
 		m.Feedback,
 		m.ModelName, m.PromptTokens, m.CompletionTokens,
 		m.FinishReason, m.LatencyMs, m.RequestID,
 		truncateLarge(m.Meta, maxMessageMetadataBytes),
-		clampAttachments(m.Attachments),
+		// 附件大小由输入接纳边界限制；持久化保留完整原图，不另行静默置空。
+		m.Attachments,
 		m.CreatedAt,
 	}
 }

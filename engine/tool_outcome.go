@@ -15,7 +15,9 @@ func toolExecutionDetail(raw any) *adapter.ToolExecutionDetail {
 	}
 	detail := result.Detail
 	return &adapter.ToolExecutionDetail{
-		Phase: detail.Phase, Outcome: detail.Outcome, Reason: detail.Reason,
+		ExecutionID: detail.ExecutionID, PolicyProfile: detail.PolicyProfile, PolicyRevision: detail.PolicyRevision,
+		Replayed: detail.Replayed,
+		Phase:    detail.Phase, Outcome: detail.Outcome, Reason: detail.Reason,
 		Action: detail.Action, HTTPStatus: detail.HTTPStatus,
 		ResponseReceived: detail.ResponseReceived, TargetHost: detail.TargetHost,
 		ApprovalRequestID: detail.ApprovalRequestID, ApprovalStatus: detail.ApprovalStatus, ApprovalDeadline: detail.ApprovalDeadline,

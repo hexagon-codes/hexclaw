@@ -6,13 +6,12 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -29,11 +28,15 @@ var oauthHTTPClient = httpx.MustNewRawClient(httpx.WithResponseHeaderTimeout(30 
 
 // OAuthConfig holds OAuth 2.0 configuration for an MCP server.
 type OAuthConfig struct {
-	ClientID    string   `yaml:"client_id" json:"client_id"`
-	AuthURL     string   `yaml:"auth_url" json:"auth_url"`
-	TokenURL    string   `yaml:"token_url" json:"token_url"`
-	Scopes      []string `yaml:"scopes" json:"scopes"`
-	RedirectURI string   `yaml:"redirect_uri,omitempty" json:"redirect_uri,omitempty"`
+	ClientID string `yaml:"client_id" json:"client_id"`
+	// Issuer 仅使用服务明确提供的发行者身份，不根据域名猜测。
+	Issuer   string   `yaml:"issuer,omitempty" json:"issuer,omitempty"`
+	AuthURL  string   `yaml:"auth_url" json:"auth_url"`
+	TokenURL string   `yaml:"token_url" json:"token_url"`
+	Scopes   []string `yaml:"scopes" json:"scopes"`
+	// Resource 只用于凭据来源绑定，缺省由实际 MCP 端点补齐。
+	Resource    string `yaml:"resource,omitempty" json:"resource,omitempty"`
+	RedirectURI string `yaml:"redirect_uri,omitempty" json:"redirect_uri,omitempty"`
 }
 
 // OAuthToken stored credentials.
@@ -43,151 +46,124 @@ type OAuthToken struct {
 	TokenType    string    `json:"token_type"`
 	ExpiresAt    time.Time `json:"expires_at"`
 	Scopes       []string  `json:"scopes,omitempty"`
+	// SourceFingerprint 缺失的旧凭据不能被当前配置自动认领。
+	SourceFingerprint string `json:"source_fingerprint,omitempty"`
 }
 
 // IsExpired checks if the token needs refresh.
 func (t *OAuthToken) IsExpired() bool {
-	return time.Now().After(t.ExpiresAt.Add(-5 * time.Minute)) // refresh 5 min early
+	return !t.ExpiresAt.IsZero() && time.Now().After(t.ExpiresAt.Add(-5*time.Minute))
 }
+
+var ErrOAuthAuthorizationRequired = errors.New("OAuth re-authorization required")
 
 // OAuthManager handles OAuth flows for MCP servers.
 type OAuthManager struct {
 	mu      sync.Mutex
 	credDir string // ~/.hexclaw/credentials/
 	tokens  map[string]*OAuthToken
+	dirty   map[string]bool
+	locks   map[string]*sync.Mutex
+	flows   map[string]*OAuthAuthorization
+	sources map[string]string
+	initErr error
 }
 
 // NewOAuthManager creates an OAuth manager.
 func NewOAuthManager(credDir string) *OAuthManager {
-	os.MkdirAll(credDir, 0700)
+	err := os.MkdirAll(credDir, 0700)
 	return &OAuthManager{
 		credDir: credDir,
 		tokens:  make(map[string]*OAuthToken),
+		dirty:   make(map[string]bool),
+		locks:   make(map[string]*sync.Mutex),
+		flows:   make(map[string]*OAuthAuthorization),
+		sources: make(map[string]string),
+		initErr: err,
 	}
 }
 
 // GetToken returns a valid token for the server, refreshing if needed.
 func (m *OAuthManager) GetToken(ctx context.Context, serverName string, cfg *OAuthConfig) (*OAuthToken, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	// Try cached
-	if token, ok := m.tokens[serverName]; ok && !token.IsExpired() {
-		return token, nil
-	}
-
-	// Try file
-	token, err := m.loadToken(serverName)
-	if err == nil && !token.IsExpired() {
-		m.tokens[serverName] = token
-		return token, nil
-	}
-
-	// Try refresh
-	if token != nil && token.RefreshToken != "" {
-		refreshed, err := m.refreshToken(ctx, cfg, token.RefreshToken)
-		if err == nil {
-			m.tokens[serverName] = refreshed
-			m.saveToken(serverName, refreshed)
-			return refreshed, nil
-		}
-	}
-
-	// Need new authorization
-	return nil, fmt.Errorf("OAuth token for %q expired or missing — re-authorization needed", serverName)
+	return m.getToken(ctx, serverName, cfg, true)
 }
 
-// Authorize runs the full OAuth 2.0 + PKCE flow.
-// Starts a local HTTP server to receive the callback.
-func (m *OAuthManager) Authorize(ctx context.Context, serverName string, cfg *OAuthConfig) (*OAuthToken, error) {
-	// Generate PKCE code verifier + challenge
-	verifier, err := generateCodeVerifier()
+func (m *OAuthManager) getToken(ctx context.Context, serverName string, cfg *OAuthConfig, currentConfiguration bool) (*OAuthToken, error) {
+	if m.initErr != nil {
+		return nil, fmt.Errorf("initialize OAuth credential storage: %w", m.initErr)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	cfg = OAuthConfigForResource(cfg, "")
+	source, err := oauthSourceFingerprint(serverName, cfg)
 	if err != nil {
-		return nil, fmt.Errorf("generate PKCE verifier: %w", err)
+		return nil, err
 	}
-	challenge := codeChallenge(verifier)
-
-	// Start local callback server
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return nil, fmt.Errorf("start callback server: %w", err)
+	lock := m.serverLock(serverName)
+	lock.Lock()
+	defer lock.Unlock()
+	if currentConfiguration {
+		m.setCurrentSource(serverName, source)
 	}
-	port := listener.Addr().(*net.TCPAddr).Port
-	redirectURI := fmt.Sprintf("http://127.0.0.1:%d/callback", port)
-
-	state, err := generateRandomString(16)
-	if err != nil {
-		return nil, fmt.Errorf("generate OAuth state: %w", err)
-	}
-	codeCh := make(chan string, 1)
-	errCh := make(chan error, 1)
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
-		if !oauthStateValid(state, r.URL.Query().Get("state")) {
-			errCh <- fmt.Errorf("state mismatch")
-			http.Error(w, "State mismatch", http.StatusBadRequest)
-			return
+	key := oauthTokenCacheKey(serverName, source)
+	m.mu.Lock()
+	token := cloneOAuthToken(m.tokens[key])
+	dirty := m.dirty[key]
+	m.mu.Unlock()
+	if token != nil && token.AccessToken != "" && !token.IsExpired() {
+		if dirty {
+			if err := m.persistToken(serverName, token); err != nil {
+				return nil, err
+			}
 		}
-		if errMsg := r.URL.Query().Get("error"); errMsg != "" {
-			errCh <- fmt.Errorf("OAuth error: %s", errMsg)
-			http.Error(w, errMsg, http.StatusBadRequest)
-			return
-		}
-		code := r.URL.Query().Get("code")
-		if code == "" {
-			errCh <- fmt.Errorf("no authorization code")
-			http.Error(w, "No code", http.StatusBadRequest)
-			return
-		}
-		codeCh <- code
-		w.Header().Set("Content-Type", "text/html")
-		fmt.Fprint(w, `<html><body><h2>Authorization successful!</h2><p>You can close this window.</p><script>window.close()</script></body></html>`)
-	})
-
-	srv := &http.Server{Handler: mux}
-	go srv.Serve(listener)
-	defer srv.Close()
-
-	// Build authorization URL
-	authURL := fmt.Sprintf("%s?response_type=code&client_id=%s&redirect_uri=%s&state=%s&code_challenge=%s&code_challenge_method=S256",
-		cfg.AuthURL,
-		url.QueryEscape(cfg.ClientID),
-		url.QueryEscape(redirectURI),
-		url.QueryEscape(state),
-		url.QueryEscape(challenge),
-	)
-	if len(cfg.Scopes) > 0 {
-		authURL += "&scope=" + url.QueryEscape(joinScopes(cfg.Scopes))
+		return token, nil
 	}
-
-	// Return the auth URL — caller (frontend) should open it in browser
-	// For now, we wait for the callback
-	select {
-	case code := <-codeCh:
-		token, err := m.exchangeCode(ctx, cfg, code, verifier, redirectURI)
+	if token == nil {
+		token, err = m.loadToken(serverName, source)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("load OAuth token: %w", err)
+		}
+	}
+	if token != nil && token.AccessToken != "" && !token.IsExpired() {
+		m.mu.Lock()
+		m.tokens[key] = token
+		m.mu.Unlock()
+		return cloneOAuthToken(token), nil
+	}
+	if token != nil && token.RefreshToken != "" && cfg != nil && cfg.TokenURL != "" {
+		refreshed, err := m.refreshToken(ctx, cfg, token.RefreshToken)
 		if err != nil {
 			return nil, err
 		}
-		m.mu.Lock()
-		m.tokens[serverName] = token
-		m.saveToken(serverName, token)
-		m.mu.Unlock()
-		return token, nil
-	case err := <-errCh:
-		return nil, err
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-time.After(5 * time.Minute):
-		return nil, fmt.Errorf("OAuth authorization timed out (5 minutes)")
+		if len(refreshed.Scopes) == 0 {
+			refreshed.Scopes = append([]string(nil), token.Scopes...)
+		}
+		refreshed.SourceFingerprint = source
+		if err := m.persistToken(serverName, refreshed); err != nil {
+			return nil, err
+		}
+		return cloneOAuthToken(refreshed), nil
 	}
+	return nil, fmt.Errorf("%w for server %q", ErrOAuthAuthorizationRequired, serverName)
 }
 
-// GetAuthURL returns the authorization URL without blocking.
-// The caller opens it in the browser; the callback is handled by Authorize().
+// Authorize 兼容原阻塞入口；需要先展示链接的调用方使用StartAuthorization和Wait。
+func (m *OAuthManager) Authorize(ctx context.Context, serverName string, cfg *OAuthConfig) (*OAuthToken, error) {
+	flow, err := m.StartAuthorization(ctx, serverName, cfg)
+	if err != nil {
+		return nil, err
+	}
+	return flow.Wait(ctx)
+}
+
+// GetAuthURL 兼容旧链接入口，返回真实持有回调与PKCE状态的授权链接。
 func (m *OAuthManager) GetAuthURL(serverName string, cfg *OAuthConfig) string {
-	return fmt.Sprintf("%s?response_type=code&client_id=%s&scope=%s",
-		cfg.AuthURL, url.QueryEscape(cfg.ClientID), url.QueryEscape(joinScopes(cfg.Scopes)))
+	flow, err := m.StartAuthorization(context.Background(), serverName, cfg)
+	if err != nil {
+		return ""
+	}
+	return flow.AuthorizationURL
 }
 
 func (m *OAuthManager) exchangeCode(ctx context.Context, cfg *OAuthConfig, code, verifier, redirectURI string) (*OAuthToken, error) {
@@ -209,11 +185,19 @@ func (m *OAuthManager) refreshToken(ctx context.Context, cfg *OAuthConfig, refre
 		"client_id":     {cfg.ClientID},
 	}
 
-	return m.tokenRequest(ctx, cfg.TokenURL, data)
+	token, err := m.tokenRequest(ctx, cfg.TokenURL, data)
+	if err == nil && token.RefreshToken == "" {
+		token.RefreshToken = refreshToken
+	}
+	return token, err
 }
 
 func (m *OAuthManager) tokenRequest(ctx context.Context, tokenURL string, data url.Values) (*OAuthToken, error) {
-	req, err := http.NewRequestWithContext(ctx, "POST", tokenURL, strings.NewReader(data.Encode()))
+	endpoint, err := oauthEndpoint(tokenURL)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, "POST", endpoint.String(), strings.NewReader(data.Encode()))
 	if err != nil {
 		return nil, err
 	}
@@ -221,48 +205,104 @@ func (m *OAuthManager) tokenRequest(ctx context.Context, tokenURL string, data u
 
 	resp, err := oauthHTTPClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("token request failed: %w", err)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, fmt.Errorf("OAuth token request transport failed")
 	}
 	defer resp.Body.Close()
 
-	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
 	if readErr != nil {
-		return nil, fmt.Errorf("failed to read token response body: %w", readErr)
+		return nil, fmt.Errorf("OAuth token response body could not be read completely")
+	}
+	if len(body) > 1<<20 {
+		return nil, fmt.Errorf("OAuth token response body is too large")
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("token request returned %d: %s", resp.StatusCode, truncateForErr(string(body), 256))
+		var failure struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(body, &failure) == nil && failure.Error == "invalid_grant" {
+			return nil, fmt.Errorf("%w: OAuth grant is no longer valid", ErrOAuthAuthorizationRequired)
+		}
+		return nil, fmt.Errorf("OAuth token request returned HTTP %d", resp.StatusCode)
 	}
 
 	var tokenResp struct {
 		AccessToken  string `json:"access_token"`
 		RefreshToken string `json:"refresh_token"`
 		TokenType    string `json:"token_type"`
-		ExpiresIn    int    `json:"expires_in"`
+		ExpiresIn    *int64 `json:"expires_in"`
+		Scope        string `json:"scope"`
 	}
 	if err := json.Unmarshal(body, &tokenResp); err != nil {
-		return nil, fmt.Errorf("parse token response: %w", err)
+		return nil, fmt.Errorf("OAuth token response is invalid")
 	}
-
-	return &OAuthToken{
+	if tokenResp.AccessToken == "" {
+		return nil, fmt.Errorf("OAuth token response has no access token")
+	}
+	if tokenResp.TokenType == "" {
+		tokenResp.TokenType = "Bearer"
+	}
+	token := &OAuthToken{
 		AccessToken:  tokenResp.AccessToken,
 		RefreshToken: tokenResp.RefreshToken,
 		TokenType:    tokenResp.TokenType,
-		ExpiresAt:    time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second),
-	}, nil
+		Scopes:       strings.Fields(tokenResp.Scope),
+	}
+	if tokenResp.ExpiresIn != nil {
+		seconds := *tokenResp.ExpiresIn
+		if seconds > int64((time.Duration(1<<63-1))/time.Second) || seconds < 0 {
+			return nil, fmt.Errorf("OAuth token expiry is invalid")
+		}
+		token.ExpiresAt = time.Now().Add(time.Duration(seconds) * time.Second)
+	}
+	return token, nil
 }
 
-func (m *OAuthManager) loadToken(serverName string) (*OAuthToken, error) {
-	safeName := filepath.Base(serverName) // strips directory components to prevent path traversal
-	path := filepath.Join(m.credDir, safeName+".json")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
+func (m *OAuthManager) loadToken(serverName string, sources ...string) (*OAuthToken, error) {
+	source := ""
+	if len(sources) != 0 {
+		source = sources[0]
 	}
-	var token OAuthToken
-	if err := json.Unmarshal(data, &token); err != nil {
-		return nil, err
+	canonical := m.tokenPath(serverName, source)
+	paths := []string{canonical}
+	if source != "" {
+		paths = append(paths, m.tokenPath(serverName, ""))
+		if legacy := legacyOAuthTokenPath(m.credDir, serverName); legacy != "" {
+			paths = append(paths, legacy)
+		}
 	}
-	return &token, nil
+	found := false
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		found = true
+		var token OAuthToken
+		if err := json.Unmarshal(data, &token); err != nil {
+			return nil, err
+		}
+		if source != "" && token.SourceFingerprint != source {
+			continue
+		}
+		if source != "" && path != canonical {
+			// 只有现有来源证明完全匹配才迁移；旧文件保留，不认领未绑定凭据。
+			if err := m.saveToken(serverName, &token); err != nil {
+				return nil, err
+			}
+		}
+		return &token, nil
+	}
+	if found {
+		return nil, fmt.Errorf("%w: stored OAuth credentials have no matching source binding", ErrOAuthAuthorizationRequired)
+	}
+	return nil, os.ErrNotExist
 }
 
 func (m *OAuthManager) saveToken(serverName string, token *OAuthToken) error {
@@ -270,9 +310,61 @@ func (m *OAuthManager) saveToken(serverName string, token *OAuthToken) error {
 	if err != nil {
 		return err
 	}
-	safeName := filepath.Base(serverName) // strips directory components to prevent path traversal
-	path := filepath.Join(m.credDir, safeName+".json")
-	return os.WriteFile(path, data, 0600)
+	path := m.tokenPath(serverName, token.SourceFingerprint)
+	file, err := os.CreateTemp(m.credDir, ".oauth-*.tmp")
+	if err != nil {
+		return err
+	}
+	temporary := file.Name()
+	defer os.Remove(temporary)
+	if _, err := file.Write(data); err != nil {
+		file.Close()
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	return os.Rename(temporary, path)
+}
+
+func (m *OAuthManager) serverLock(server string) *sync.Mutex {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	lock := m.locks[server]
+	if lock == nil {
+		lock = &sync.Mutex{}
+		m.locks[server] = lock
+	}
+	return lock
+}
+
+// persistToken 保留已取得的新token；落盘失败必须显式返回，并在下次使用前补登记。
+func (m *OAuthManager) persistToken(server string, token *OAuthToken) error {
+	key := oauthTokenCacheKey(server, token.SourceFingerprint)
+	m.mu.Lock()
+	m.tokens[key] = cloneOAuthToken(token)
+	m.dirty[key] = true
+	m.mu.Unlock()
+	if err := m.saveToken(server, token); err != nil {
+		return fmt.Errorf("persist OAuth token: %w", err)
+	}
+	m.mu.Lock()
+	m.dirty[key] = false
+	m.mu.Unlock()
+	return nil
+}
+
+func cloneOAuthToken(token *OAuthToken) *OAuthToken {
+	if token == nil {
+		return nil
+	}
+	copy := *token
+	copy.Scopes = append([]string(nil), token.Scopes...)
+	return &copy
 }
 
 // PKCE helpers

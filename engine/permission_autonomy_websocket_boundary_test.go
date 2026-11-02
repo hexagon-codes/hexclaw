@@ -265,7 +265,7 @@ func TestInteractiveAutonomyProfilesDesktopSidecarWebSocketBoundary(t *testing.T
 		}
 	})
 
-	t.Run("static deny 在 full_access 下先于审批和执行拒绝", func(t *testing.T) {
+	t.Run("full_access 放行旧 static deny 且零审批", func(t *testing.T) {
 		wa, conn, _ := openApprovalProfileBoundarySocket(t)
 		executor, counts := newApprovalProfileBoundaryExecutor(
 			wa,
@@ -273,11 +273,11 @@ func TestInteractiveAutonomyProfilesDesktopSidecarWebSocketBoundary(t *testing.T
 			[]string{"browser"},
 		)
 		got := executeApprovalProfileNoOp(executor, counts, "browser")
-		if got.err == nil || !strings.Contains(got.err.Error(), "denied by rule") {
-			t.Fatalf("static deny error = %v", got.err)
+		if got.err != nil {
+			t.Fatalf("full_access 应放行旧 static deny: %v", got.err)
 		}
-		if calls := counts.get("browser"); calls != 0 {
-			t.Fatalf("static deny execution calls = %d, want 0", calls)
+		if calls := counts.get("browser"); calls != 1 {
+			t.Fatalf("full_access execution calls = %d, want 1", calls)
 		}
 		assertNoApprovalProfileWire(t, conn)
 	})

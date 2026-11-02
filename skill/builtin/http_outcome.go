@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/hexagon-codes/hexclaw/skill"
 )
@@ -41,12 +42,24 @@ func httpExecutionError(detail skill.ToolExecutionDetail, phase string, err erro
 	case errors.As(err, &dns):
 		detail.Reason = "dns"
 	}
-	// POST 缺少确定响应时可能已经产生远端副作用，保留未知而不声称未执行。
-	if detail.Action == "post" {
+	// 写请求缺少完整响应时可能已经产生远端副作用，不能作为未执行而重放。
+	if isHTTPWriteMethod(detail.Action) {
 		detail.Outcome = "unknown"
 	}
-	return &skill.ExecutionError{Detail: detail, Err: fmt.Errorf("HTTP %s failed: %w", phase, err)}
+	return &skill.ExecutionError{Detail: detail, Err: &httpPublicError{phase: phase, reason: detail.Reason, cause: err}}
 }
+
+// httpPublicError 保留取消/超时错误链，但不把 url.Error 中的认证查询参数带回模型和日志。
+type httpPublicError struct {
+	phase  string
+	reason string
+	cause  error
+}
+
+func (e *httpPublicError) Error() string {
+	return "HTTP " + e.phase + " failed: " + strings.ReplaceAll(e.reason, "_", " ")
+}
+func (e *httpPublicError) Unwrap() error { return e.cause }
 
 func completeHTTPResult(result *skill.Result, detail skill.ToolExecutionDetail) (*skill.Result, error) {
 	result.Detail = &detail

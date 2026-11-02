@@ -27,6 +27,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -37,6 +38,7 @@ import (
 	"github.com/hexagon-codes/ai-core/llm"
 	coretool "github.com/hexagon-codes/ai-core/tool"
 	"github.com/hexagon-codes/hexagon"
+	hexagonmcp "github.com/hexagon-codes/hexagon/mcp"
 	"github.com/hexagon-codes/toolkit/util/logger"
 )
 
@@ -49,6 +51,33 @@ type ServerConfig struct {
 	Env       map[string]string `yaml:"env,omitempty"` // stdio 子进程环境变量（数据连接器走 MCP 的凭证注入：MYSQL_HOST/PASSWORD 等）
 	Endpoint  string            `yaml:"endpoint"`      // sse 模式的端点 URL
 	Enabled   bool              `yaml:"enabled"`       // 是否启用，默认 true
+	Auth      *OAuthConfig      `yaml:"auth,omitempty"`
+}
+
+// ConfiguredServerConfig 返回当前已登记配置的副本，供账号接线读取实际服务归属。
+func (m *Manager) ConfiguredServerConfig(name string) (ServerConfig, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, current := range m.configs {
+		if current.Name != name {
+			continue
+		}
+		current.Args = append([]string(nil), current.Args...)
+		if current.Env != nil {
+			copy := make(map[string]string, len(current.Env))
+			for key, value := range current.Env {
+				copy[key] = value
+			}
+			current.Env = copy
+		}
+		if current.Auth != nil {
+			auth := *current.Auth
+			auth.Scopes = append([]string(nil), current.Auth.Scopes...)
+			current.Auth = &auth
+		}
+		return current, true
+	}
+	return ServerConfig{}, false
 }
 
 // ToolInfo 已发现的 MCP 工具信息
@@ -62,12 +91,18 @@ type ToolInfo struct {
 
 // connectedServer 已连接的 MCP Server
 type connectedServer struct {
-	name      string
-	tools     []hexagon.Tool // MCP 工具（已适配为 hexagon Tool）
-	cleanup   func()         // stdio 模式的清理函数
-	closer    io.Closer      // sse 模式的关闭接口
-	connected bool           // 连接状态
-	closeOnce sync.Once      // transport cleanup/Close 只执行一次
+	name                string
+	transport           string
+	tools               []hexagon.Tool // MCP 工具（已适配为 hexagon Tool）
+	cleanup             func()         // stdio 模式的清理函数
+	closer              io.Closer      // sse 模式的关闭接口
+	session             sessionHandle  // 工具、资源与模板共享的官方 SDK 会话
+	connected           bool           // 连接状态
+	closeOnce           sync.Once      // transport cleanup/Close 只执行一次
+	closeErr            error
+	transportCloseErr   error
+	replacementCloseErr error
+	replacementFinish   func(bool) error
 }
 
 // Manager MCP 连接管理器
@@ -89,17 +124,33 @@ type Manager struct {
 	connecting      map[string]uint64         // 当前正在连接的配置代次；guarded by mu
 	failures        map[string]connectFailure // 最近一次连接失败事实；guarded by mu
 
-	hooks hooksRegistry // v0.4.0 H3 LifecycleHook 列表
+	hooks             hooksRegistry // v0.4.0 H3 LifecycleHook 列表
+	httpClientFactory HTTPClientFactory
+	beforeReplace     map[string]BeforeReplaceHook
+	toolDispatchHooks map[string]ToolDispatchHook
+}
+
+// HTTPClientFactory 为确切服务器解析现有账号的认证传输，不在 Manager 复制凭据。
+// 返回的客户端须可供本连接持有；工厂不能依赖连接请求结束后的临时状态。
+type HTTPClientFactory func(context.Context, ServerConfig) (*http.Client, error)
+
+// SetHTTPClientFactory 在后续 HTTP 连接时使用应用已装配的账号与代理配置。
+func (m *Manager) SetHTTPClientFactory(factory HTTPClientFactory) {
+	m.mu.Lock()
+	m.httpClientFactory = factory
+	m.mu.Unlock()
 }
 
 // NewManager 创建 MCP 管理器
 func NewManager() *Manager {
 	return &Manager{
-		servers:    make(map[string]*connectedServer),
-		stopCh:     make(chan struct{}),
-		revisions:  make(map[string]uint64),
-		connecting: make(map[string]uint64),
-		failures:   make(map[string]connectFailure),
+		servers:           make(map[string]*connectedServer),
+		stopCh:            make(chan struct{}),
+		revisions:         make(map[string]uint64),
+		connecting:        make(map[string]uint64),
+		failures:          make(map[string]connectFailure),
+		beforeReplace:     make(map[string]BeforeReplaceHook),
+		toolDispatchHooks: make(map[string]ToolDispatchHook),
 	}
 }
 
@@ -159,7 +210,7 @@ func (m *Manager) Connect(ctx context.Context, configs []ServerConfig) (int, err
 		revision := m.bumpRevisionLocked(cfg.Name)
 		m.mu.Unlock()
 
-		server, err := m.connectServer(ctx, cfg)
+		server, err := m.connectServer(ctx, cfg, revision)
 		if err != nil {
 			m.recordConnectFailureForRevision(cfg.Name, revision, err)
 			continue
@@ -178,6 +229,10 @@ func (m *Manager) Connect(ctx context.Context, configs []ServerConfig) (int, err
 		m.servers[cfg.Name] = server
 		m.mu.Unlock()
 		closeServer(old)
+		if err := m.finishPublishedServer(ctx, server); err != nil {
+			m.recordConnectFailureForRevision(cfg.Name, revision, err)
+			continue
+		}
 		m.clearConnectFailure(cfg.Name)
 
 		totalTools += len(server.tools)
@@ -238,7 +293,7 @@ func (m *Manager) RegisterServer(ctx context.Context, cfg ServerConfig) error {
 	}
 	m.mu.Unlock()
 
-	server, err := m.connectServer(ctx, cfg)
+	server, err := m.connectServer(ctx, cfg, revision)
 	if err != nil {
 		return fmt.Errorf("connect %q: %w", cfg.Name, err)
 	}
@@ -258,6 +313,10 @@ func (m *Manager) RegisterServer(ctx context.Context, cfg ServerConfig) error {
 	delete(m.failures, cfg.Name)
 	m.mu.Unlock()
 	closeServer(old)
+	if err := m.finishPublishedServer(ctx, server); err != nil {
+		m.recordConnectFailureForRevision(cfg.Name, revision, err)
+		return err
+	}
 
 	logger.Info("MCP Server registered", "name", cfg.Name, "tools", len(server.tools))
 	if old != nil {
@@ -295,18 +354,24 @@ func (m *Manager) UnregisterServer(ctx context.Context, name string) bool {
 }
 
 // closeServer 调用 cleanup / closer 关闭单个 server 的传输层。
-func closeServer(s *connectedServer) {
+func closeServer(s *connectedServer) error {
 	if s == nil {
-		return
+		return nil
 	}
 	s.closeOnce.Do(func() {
 		if s.cleanup != nil {
 			s.cleanup()
 		}
 		if s.closer != nil {
-			_ = s.closer.Close()
+			s.transportCloseErr = s.closer.Close()
+			s.closeErr = s.transportCloseErr
+		}
+		if s.replacementFinish != nil {
+			s.replacementCloseErr = s.replacementFinish(false)
+			s.closeErr = errors.Join(s.closeErr, s.replacementCloseErr)
 		}
 	})
+	return s.closeErr
 }
 
 // appendOrReplaceConfig 替换同名 config 或追加。
@@ -375,8 +440,9 @@ func (m *Manager) tryReconnect() {
 			continue
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		newServer, err := m.connectServer(ctx, cfg)
+		background := context.WithValue(context.Background(), backgroundLifecycleKey{}, true)
+		ctx, cancel := context.WithTimeout(background, 10*time.Second)
+		newServer, err := m.connectServer(ctx, cfg, revision)
 		cancel()
 
 		if err != nil {
@@ -404,10 +470,14 @@ func (m *Manager) tryReconnect() {
 			old.connected = false
 		}
 		m.servers[cfg.Name] = newServer
-		m.bumpRevisionLocked(cfg.Name)
+		committedRevision := m.bumpRevisionLocked(cfg.Name)
 		delete(m.failures, cfg.Name)
 		m.mu.Unlock()
 		closeServer(old)
+		if err := m.finishPublishedServer(ctx, newServer); err != nil {
+			m.recordConnectFailureForRevision(cfg.Name, committedRevision, err)
+			continue
+		}
 
 		logger.Info("MCP Server", "name", cfg.Name, "len", len(newServer.tools))
 		if old != nil {
@@ -418,8 +488,17 @@ func (m *Manager) tryReconnect() {
 }
 
 // connectServer 连接单个 MCP Server
-func (m *Manager) connectServer(ctx context.Context, cfg ServerConfig) (server *connectedServer, err error) {
-	server = &connectedServer{name: cfg.Name, connected: true}
+func (m *Manager) connectServer(ctx context.Context, cfg ServerConfig, revisions ...uint64) (server *connectedServer, err error) {
+	finish, err := m.prepareReplacement(ctx, cfg.Name, revisions)
+	if err != nil {
+		return nil, err
+	}
+	server = &connectedServer{name: cfg.Name, transport: cfg.Transport, connected: finish == nil, replacementFinish: finish}
+	defer func() {
+		if err != nil && finish != nil {
+			err = errors.Join(err, finish(false))
+		}
+	}()
 	// 所有传输在连接阶段跟随请求取消，成功后由 Manager 持有连接生命周期。
 	connectionCtx, cancelConnection := context.WithCancel(context.WithoutCancel(ctx))
 	stopCancellation := context.AfterFunc(ctx, cancelConnection)
@@ -444,6 +523,18 @@ func (m *Manager) connectServer(ctx context.Context, cfg ServerConfig) (server *
 			}
 		}
 	}()
+	var httpClient *http.Client
+	if cfg.Transport == "sse" || cfg.Transport == "streamable" || cfg.Transport == "http" {
+		m.mu.RLock()
+		factory := m.httpClientFactory
+		m.mu.RUnlock()
+		if factory != nil {
+			httpClient, err = factory(connectionCtx, cfg)
+			if err != nil {
+				return nil, fmt.Errorf("MCP authentication for %q: %w", cfg.Name, err)
+			}
+		}
+	}
 
 	switch cfg.Transport {
 	case "stdio":
@@ -470,34 +561,37 @@ func (m *Manager) connectServer(ctx context.Context, cfg ServerConfig) (server *
 			}
 			resolvedArgs[i] = arg
 		}
-		tools, cleanup, err := hexagon.ConnectMCPStdioWithEnv(connectionCtx, cfg.Command, cfg.Env, resolvedArgs...)
+		session, err := connectStdioSession(connectionCtx, cfg.Command, cfg.Env, resolvedArgs...)
 		if err != nil {
 			return nil, fmt.Errorf("stdio 连接失败: %w", err)
 		}
-		server.tools = tools
-		server.cleanup = cleanup
+		server.tools = session.Tools()
+		server.session = session
+		server.closer = session
 
 	case "sse":
 		if cfg.Endpoint == "" {
 			return nil, fmt.Errorf("sse 传输需要指定 endpoint")
 		}
-		tools, closer, err := hexagon.ConnectMCPSSE(connectionCtx, cfg.Endpoint)
+		session, err := hexagonmcp.ConnectSSESession(connectionCtx, cfg.Endpoint, httpClient)
 		if err != nil {
 			return nil, fmt.Errorf("sse 连接失败: %w", err)
 		}
-		server.tools = tools
-		server.closer = closer
+		server.tools = session.Tools()
+		server.session = session
+		server.closer = session
 
 	case "streamable", "http":
 		if cfg.Endpoint == "" {
 			return nil, fmt.Errorf("streamable HTTP 传输需要指定 endpoint")
 		}
-		tools, closer, err := hexagon.ConnectMCPStreamable(connectionCtx, cfg.Endpoint)
+		session, err := hexagonmcp.ConnectStreamableSession(connectionCtx, cfg.Endpoint, httpClient)
 		if err != nil {
 			return nil, fmt.Errorf("streamable HTTP 连接失败: %w", err)
 		}
-		server.tools = tools
-		server.closer = closer
+		server.tools = session.Tools()
+		server.session = session
+		server.closer = session
 
 	default:
 		return nil, fmt.Errorf("不支持的传输方式: %q（支持 stdio/sse/streamable）", cfg.Transport)
@@ -516,6 +610,9 @@ func (m *Manager) Tools() []hexagon.Tool {
 
 	var tools []hexagon.Tool
 	for _, server := range m.servers {
+		if !server.connected {
+			continue
+		}
 		tools = append(tools, server.tools...)
 	}
 	return tools
@@ -528,6 +625,9 @@ func (m *Manager) ToolInfos() []ToolInfo {
 
 	var infos []ToolInfo
 	for _, server := range m.servers {
+		if !server.connected {
+			continue
+		}
 		for _, t := range server.tools {
 			info := ToolInfo{
 				Name:        t.Name(),
@@ -636,6 +736,7 @@ func (m *Manager) ListToolInfos() []ToolInfo {
 			OriginalName: binding.tool.Name(),
 			Description:  binding.tool.Description(),
 			ServerName:   binding.server.name,
+			InputSchema:  binding.tool.Schema(),
 		})
 	}
 	return infos
@@ -675,6 +776,15 @@ func (m *Manager) CallServerTool(ctx context.Context, serverName, toolName strin
 	return result, err
 }
 
+// CallServerToolResult 按绑定服务器调用并保留截图、文件和结构化内容。
+func (m *Manager) CallServerToolResult(ctx context.Context, serverName, toolName string, args map[string]any) (coretool.Result, error) {
+	if serverName == "" {
+		return coretool.Result{}, fmt.Errorf("MCP tool server is required")
+	}
+	result, _, err := m.callToolResult(ctx, serverName, toolName, args)
+	return result, err
+}
+
 func (m *Manager) callTool(ctx context.Context, serverName, toolName string, args map[string]any) (string, string, error) {
 	result, owner, err := m.callToolResult(ctx, serverName, toolName, args)
 	if err != nil {
@@ -693,6 +803,7 @@ func (m *Manager) callToolResult(ctx context.Context, serverName, toolName strin
 	var found hexagon.Tool
 	var owner string
 	var ownerServer *connectedServer
+	var dispatch ToolDispatchHook
 	for _, binding := range m.callableToolsLocked() {
 		if serverName != "" && binding.server.name != serverName {
 			continue
@@ -709,6 +820,7 @@ func (m *Manager) callToolResult(ctx context.Context, serverName, toolName strin
 			return coretool.Result{}, "", fmt.Errorf("MCP tool %q is ambiguous; specify server_name", toolName)
 		}
 		found, owner, ownerServer = binding.tool, binding.server.name, binding.server
+		dispatch = m.toolDispatchHooks[owner]
 	}
 	m.mu.RUnlock()
 
@@ -716,21 +828,34 @@ func (m *Manager) callToolResult(ctx context.Context, serverName, toolName strin
 		return coretool.Result{}, "", fmt.Errorf("工具 %q 未找到", toolName)
 	}
 
-	result, err := found.Execute(ctx, args)
-	if err != nil {
-		// stdio MCP 子进程退出（多因数据源连不上而自退）→ 传输层抛 EOF/连接已关，对用户是天书。
-		// 翻译成可操作的友好提示；底层传输错误只进日志，不糊用户脸上（bug-20260626 #3c）。
-		if isMCPConnClosed(err) {
-			logger.Error("MCP 工具调用失败：连接已关闭/进程退出", "tool", toolName, "server", owner, "error", err)
-			// BUG-20260704：识别到进程退出必须同步翻转属主 server 的连接状态——
-			// 否则 ServerStatuses 谎报「已连接」（UI 徽章事实源），且 tryReconnect 因
-			// connected 仍为 true 永远跳过该 server，不自愈。翻转后下个 30s tick 自动重拉。
-			m.markServerDisconnected(ctx, owner, ownerServer, "stdio process exited (detected on tool call)")
-			return result, owner, fmt.Errorf("工具 %q 执行失败: MCP 服务进程已退出，请检查数据库连接配置（主机/端口/账号/密码）后重试", toolName)
+	execute := func(physicalCtx context.Context) (coretool.Result, error) {
+		result, err := found.Execute(physicalCtx, args)
+		if preserved, ok := result.Output.(*hexagonmcp.PreservedToolResult); ok {
+			result.Output = &toolContentResult{PreservedToolResult: preserved}
 		}
-		return result, owner, fmt.Errorf("工具 %q 执行失败: %w", toolName, err)
+		if err != nil {
+			// stdio MCP 子进程退出（多因数据源连不上而自退）→ 传输层抛 EOF/连接已关，对用户是天书。
+			// 翻译成可操作的友好提示；底层传输错误只进日志，不糊用户脸上（bug-20260626 #3c）。
+			if isMCPConnClosed(err) {
+				logger.Error("MCP 工具调用失败：连接已关闭/进程退出", "tool", toolName, "server", owner, "error", err)
+				// BUG-20260704：识别到进程退出必须同步翻转属主 server 的连接状态——
+				// 否则 ServerStatuses 谎报「已连接」（UI 徽章事实源），且 tryReconnect 因
+				// connected 仍为 true 永远跳过该 server，不自愈。翻转后下个 30s tick 自动重拉。
+				m.markServerDisconnected(physicalCtx, owner, ownerServer, "stdio process exited (detected on tool call)")
+				return result, fmt.Errorf("工具 %q 执行失败: MCP 服务进程已退出，请检查数据库连接配置（主机/端口/账号/密码）后重试", toolName)
+			}
+			return result, fmt.Errorf("工具 %q 执行失败: %w", toolName, err)
+		}
+		return result, nil
 	}
-	return result, owner, nil
+	var result coretool.Result
+	var err error
+	if dispatch != nil {
+		result, err = dispatch(ctx, owner, found.Name(), args, execute)
+	} else {
+		result, err = execute(ctx)
+	}
+	return result, owner, err
 }
 
 // markServerDisconnected 把指定 server 标记为断连（幂等）：状态即刻对 ServerStatuses
@@ -951,7 +1076,7 @@ func (m *Manager) AddServer(ctx context.Context, cfg ServerConfig) error {
 	revision := m.bumpRevisionLocked(cfg.Name)
 	m.mu.Unlock()
 
-	server, err := m.connectServer(ctx, cfg)
+	server, err := m.connectServer(ctx, cfg, revision)
 	if err != nil {
 		return fmt.Errorf("连接 MCP Server %q 失败: %w", cfg.Name, err)
 	}
@@ -971,6 +1096,10 @@ func (m *Manager) AddServer(ctx context.Context, cfg ServerConfig) error {
 	delete(m.failures, cfg.Name)
 	m.mu.Unlock()
 	closeServer(old)
+	if err := m.finishPublishedServer(ctx, server); err != nil {
+		m.recordConnectFailureForRevision(cfg.Name, revision, err)
+		return err
+	}
 
 	logger.Info("MCP Server", "name", cfg.Name, "len", len(server.tools))
 	return nil
@@ -1060,7 +1189,7 @@ func (m *Manager) ConfigureServerBestEffort(ctx context.Context, name string, co
 	defer m.finishConnecting(name, revision)
 
 	// 新配置先对显式重启可见，在途代次阻止后台重复连接。
-	server, connErr := m.connectServer(ctx, cfg)
+	server, connErr := m.connectServer(ctx, cfg, revision)
 
 	m.mu.Lock()
 	if m.closedLocked() || m.revisions[cfg.Name] != revision {
@@ -1088,6 +1217,10 @@ func (m *Manager) ConfigureServerBestEffort(ctx context.Context, name string, co
 	delete(m.failures, cfg.Name)
 	m.mu.Unlock()
 	closeServer(old)
+	if err := m.finishPublishedServer(ctx, server); err != nil {
+		m.recordConnectFailureForRevision(cfg.Name, revision, err)
+		return false, nil
+	}
 
 	logger.Info("MCP Server", "name", cfg.Name, "len", len(server.tools))
 	return true, nil

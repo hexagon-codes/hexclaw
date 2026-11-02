@@ -1,6 +1,8 @@
 package streamstate
 
 import (
+	"context"
+	"errors"
 	"sort"
 	"sync"
 	"time"
@@ -20,6 +22,7 @@ const (
 
 type Snapshot struct {
 	RequestID           string                          `json:"request_id"`
+	Source              string                          `json:"source,omitempty"`
 	SessionID           string                          `json:"session_id"`
 	UserID              string                          `json:"user_id,omitempty"`
 	Content             string                          `json:"content,omitempty"`
@@ -50,6 +53,31 @@ type Registry struct {
 	ttl      time.Duration
 	items    map[string]*Snapshot
 	accepted map[string]map[uint64]struct{}
+	controls map[string]*RunControl
+}
+
+var ErrRequestConflict = errors.New("request identity is already in use")
+
+// RunControl 只持有现有运行的取消句柄，终态仍由源运行结束后写入快照。
+type RunControl struct {
+	registry  *Registry
+	requestID string
+	cancel    context.CancelCauseFunc
+}
+
+// SetSession 在引擎完成会话分配后补齐原快照，不重置已累计事件。
+func (c *RunControl) SetSession(sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	r := c.registry
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.controls[c.requestID] == c {
+		if item := r.items[c.requestID]; item != nil {
+			item.SessionID = sessionID
+		}
+	}
 }
 
 func NewRegistry(ttl time.Duration) *Registry {
@@ -60,6 +88,7 @@ func NewRegistry(ttl time.Duration) *Registry {
 		ttl:      ttl,
 		items:    make(map[string]*Snapshot),
 		accepted: make(map[string]map[uint64]struct{}),
+		controls: make(map[string]*RunControl),
 	}
 }
 
@@ -73,6 +102,10 @@ func (r *Registry) StartMessage(userID, sessionID, requestID, assistantMessageID
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.startMessageLocked(userID, sessionID, requestID, assistantMessageID)
+}
+
+func (r *Registry) startMessageLocked(userID, sessionID, requestID, assistantMessageID string) {
 	r.cleanupLocked(time.Now())
 	now := time.Now()
 	if existing, ok := r.items[requestID]; ok {
@@ -108,12 +141,74 @@ func (r *Registry) StartMessage(userID, sessionID, requestID, assistantMessageID
 	r.accepted[requestID] = make(map[uint64]struct{})
 }
 
+// StartCancellable 原子绑定可信 owner 和取消函数，不能覆盖另一所有者或在途运行。
+func (r *Registry) StartCancellable(userID, sessionID, requestID string, cancel context.CancelCauseFunc) (*RunControl, error) {
+	if userID == "" || requestID == "" || cancel == nil {
+		return nil, errors.New("cancellable stream requires owner, request and cancel function")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.cleanupLocked(time.Now())
+	if r.items[requestID] != nil || r.controls[requestID] != nil {
+		return nil, ErrRequestConflict
+	}
+	r.startMessageLocked(userID, sessionID, requestID, "")
+	control := &RunControl{registry: r, requestID: requestID, cancel: cancel}
+	r.controls[requestID] = control
+	return control, nil
+}
+
+// RequestCancel 仅发送已有运行的停止信号，不把“已请求取消”伪装为资源已退出。
+// 返回的布尔值依次表示已发送取消请求、同 owner 快照存在；终态调用保持幂等。
+func (r *Registry) RequestCancel(userID, requestID string, cause error) (*Snapshot, bool, bool) {
+	r.mu.Lock()
+	r.cleanupLocked(time.Now())
+	item := r.items[requestID]
+	if item == nil || item.UserID != userID {
+		r.mu.Unlock()
+		return nil, false, false
+	}
+	copy := cloneSnapshot(item)
+	control := r.controls[requestID]
+	if item.Done || control == nil {
+		r.mu.Unlock()
+		return &copy, false, true
+	}
+	r.mu.Unlock()
+	control.cancel(cause)
+	return &copy, true, true
+}
+
+// Finish 只能在实际生产者退出后调用，释放句柄和提交终态在同一把锁下完成。
+func (c *RunControl) Finish(status Status, err error) *Snapshot {
+	return c.FinishWithChunk(status, err, nil)
+}
+
+// FinishWithChunk 在同一临界区合并真实终帧与最终状态，不短暂暴露伪成功。
+func (c *RunControl) FinishWithChunk(status Status, err error, terminal *adapter.ReplyChunk) *Snapshot {
+	r := c.registry
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.controls[c.requestID] != c {
+		return nil
+	}
+	if terminal != nil {
+		r.appendLocked(c.requestID, terminal)
+	}
+	delete(r.controls, c.requestID)
+	return r.finishLocked(c.requestID, status, err)
+}
+
 func (r *Registry) Append(requestID string, chunk *adapter.ReplyChunk) *Snapshot {
 	if requestID == "" || chunk == nil {
 		return nil
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.appendLocked(requestID, chunk)
+}
+
+func (r *Registry) appendLocked(requestID string, chunk *adapter.ReplyChunk) *Snapshot {
 	r.cleanupLocked(time.Now())
 	item, ok := r.items[requestID]
 	if !ok {
@@ -219,6 +314,10 @@ func (r *Registry) finish(requestID string, status Status, err error) *Snapshot 
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.finishLocked(requestID, status, err)
+}
+
+func (r *Registry) finishLocked(requestID string, status Status, err error) *Snapshot {
 	r.cleanupLocked(time.Now())
 	item, ok := r.items[requestID]
 	if !ok {

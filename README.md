@@ -38,9 +38,9 @@ HexClaw 是用 Go 编写的 Agent 服务，可独立运行，也可作为 HexCla
 
 | 使用方式 | 前提 |
 | --- | --- |
-| 桌面客户端 | 当前 macOS 随包组件需要 macOS 14 及以上；Windows、Linux 架构与依赖见 [Desktop 运行要求](https://github.com/hexagon-codes/hexclaw-desktop#运行要求) |
+| 桌面客户端 | 应用最低 macOS 12；浏览器/CU 与部分随包组件需要 macOS 14 及以上；Windows、Linux 架构与依赖见 [Desktop 运行要求](https://github.com/hexagon-codes/hexclaw-desktop#运行要求) |
 | 独立二进制 | 对应系统与架构的 [Release 资产](https://github.com/hexagon-codes/hexclaw/releases)，无需 Go 工具链 |
-| Go 安装或源码构建 | 当前源码需要 Go 1.25.13 及以上；源码构建另需 Git、Make，发布版本以该 tag 的 `go.mod` 为准 |
+| Go 安装或源码构建 | 当前源码需要 Go 1.26.10 及以上；源码构建另需 Git、Make，发布版本以该 tag 的 `go.mod` 为准 |
 | 模型任务 | 可用的在线 Provider 与凭据，或本地 Ollama 与已下载模型；图片任务另需对应视觉能力 |
 
 文档渲染、代码执行和媒体生成按需配置[可选运行依赖](#可选运行依赖)。

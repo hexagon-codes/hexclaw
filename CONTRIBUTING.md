@@ -76,7 +76,7 @@ Deploy 的工具上传与远程执行共用 SSH 保活参数：每 20 秒发送�
 
 ### 发版流程
 
-当前源码版本为 `0.5.1`，库常量、CLI 默认版本与 OpenAPI 文档版本保持一致；构建时仍可注入实际版本、提交与日期。Desktop 当前固定后端来源为 `refs/tags/v0.5.0`，发布后端 `v0.5.1` Tag 后需同步该引用，再构建 Desktop。更新版本元数据不创建 Tag 或发布产物。
+当前源码版本为 `0.5.2`，库常量、CLI 默认版本与 OpenAPI 文档版本保持一致；构建时仍可注入实际版本、提交与日期。Desktop 固定后端来源按其实际构建配置核对；确认后端 `v0.5.2` Tag 和 Release 已存在后，再同步固定引用并构建 Desktop。更新版本元数据不创建 Tag 或发布产物。
 
 1. 在最终发布提交上完成主 CI；使用 `GOWORK=off`、`GOFLAGS=-mod=readonly` 和已发布依赖，不以本地 workspace 结果替代。
 2. 打 Tag 前按现有 Release 目标核对编译：Linux amd64 / arm64、macOS amd64 / arm64、Windows amd64，统一使用 `CGO_ENABLED=0`。这是发版前的编译预检，不增加普通提交门禁，也不要求先打测试 Tag。

@@ -1,11 +1,9 @@
 package builtin
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	"os"
-	"os/exec"
+	"io"
 	"strings"
 	"time"
 
@@ -15,21 +13,41 @@ import (
 
 // ShellSkill Shell 命令执行 Skill
 //
-// 执行 Shell 命令。功能优先：不做命令白名单拦截，避免正常工程任务、
-// 脚本、包管理、测试命令被默认阻断；仍保留超时和输出截断。
-//   - 超时限制（默认 30 秒）
-//   - 输出大小限制（最大 64KB）
-//   - 环境变量清洗
-//   - 配置开关（默认开启）
+// 结构化调用保留 argv，明确需要解释器语义时兼容原 command 和 /sh 入口。
+// 完整输出流写入本次结果文件，摘要大小不限制实际输出的持久化。
 type ShellSkill struct {
-	timeout time.Duration
+	timeout         time.Duration
+	outputStore     ShellOutputStore
+	outputDirectory string
+}
+
+// ShellOutputStore 将单个输出流接入既有产物存储及调用归属。
+// ctx 保留原调用身份，可能已取消；实现负责使用有界的应用生命周期上下文收口。
+type ShellOutputStore interface {
+	SaveShellOutput(context.Context, skill.InvocationContext, string, io.Reader) (map[string]any, error)
+}
+
+type ShellOption func(*ShellSkill)
+
+func WithShellOutputStore(store ShellOutputStore) ShellOption {
+	return func(s *ShellSkill) { s.outputStore = store }
+}
+
+// SetOutputStore 在启动装配阶段注入统一产物服务，保持已注册实例的身份。
+func (s *ShellSkill) SetOutputStore(store ShellOutputStore) { s.outputStore = store }
+
+// WithShellOutputDirectory 设置私有输出暂存根；未配置时使用系统临时目录。
+func WithShellOutputDirectory(directory string) ShellOption {
+	return func(s *ShellSkill) { s.outputDirectory = directory }
 }
 
 // NewShellSkill 创建 Shell 执行 Skill
-func NewShellSkill() *ShellSkill {
-	return &ShellSkill{
-		timeout: 30 * time.Second,
+func NewShellSkill(options ...ShellOption) *ShellSkill {
+	s := &ShellSkill{}
+	for _, option := range options {
+		option(s)
 	}
+	return s
 }
 
 func (s *ShellSkill) Name() string        { return "shell" }
@@ -37,12 +55,19 @@ func (s *ShellSkill) Description() string { return "执行 Shell 命令，返回
 
 // ToolDefinition 返回 Shell 工具的 LLM 定义
 func (s *ShellSkill) ToolDefinition() llm.ToolDefinition {
-	return llm.NewToolDefinition("shell", "执行 Shell 命令，返回命令输出", &llm.Schema{
+	return llm.NewToolDefinition("shell", "Run an installed program with exact argv, working directory, environment and stdin. Use command only when shell syntax is needed. Full stdout/stderr are retained as execution artifacts; exit zero alone does not prove the requested business result. Use action=discover to locate a program before invoking its documented help or task command.", &llm.Schema{
 		Type: "object",
 		Properties: map[string]*llm.Schema{
-			"command": {Type: "string", Description: "要执行的 Shell 命令"},
+			"action":          {Type: "string", Description: "run (default) or discover"},
+			"executable":      {Type: "string", Description: "Installed program name on PATH or explicit executable path"},
+			"args":            {Type: "array", Items: &llm.Schema{Type: "string"}, Description: "Exact arguments without shell interpolation"},
+			"command":         {Type: "string", Description: "Command interpreted by the platform shell; mutually exclusive with executable"},
+			"cwd":             {Type: "string", Description: "Working directory; defaults to the current application directory"},
+			"env":             {Type: "object", Description: "Explicit string environment overrides; otherwise inherit the existing runtime environment"},
+			"stdin":           {Type: "string", Description: "Exact UTF-8 input followed by EOF"},
+			"stdin_file":      {Type: "string", Description: "File supplied as stdin, relative to cwd or absolute; mutually exclusive with stdin"},
+			"timeout_seconds": {Type: "number", Description: "Optional positive timeout; otherwise use the task context without the old 30 second limit"},
 		},
-		Required: []string{"command"},
 	})
 }
 
@@ -56,81 +81,27 @@ func (s *ShellSkill) Match(content string) bool {
 
 // Execute 执行 Shell 命令
 func (s *ShellSkill) Execute(ctx context.Context, args map[string]any) (*skill.Result, error) {
-	cmd, _ := args["command"].(string)
-	if cmd == "" {
-		cmd, _ = args["query"].(string) // fallback for quick-path
+	request, err := parseShellRequest(args)
+	if err != nil {
+		return nil, err
 	}
-	if cmd == "" {
+	if request.Executable == "" && request.Command == "" {
 		return &skill.Result{Content: "请提供命令，格式：/sh ls -la"}, nil
 	}
-
-	// 提取命令内容
-	command := extractShellCommand(cmd)
-	if command == "" {
-		return &skill.Result{Content: "请提供要执行的命令"}, nil
-	}
-
-	if reason := checkAllowed(command); reason != "" {
-		return &skill.Result{
-			Content:  fmt.Sprintf("**执行被配置拦截**: %s", reason),
-			Metadata: map[string]string{"status": "blocked"},
-		}, nil
-	}
-
-	output, err := s.runShell(ctx, command)
-	if err != nil {
-		return &skill.Result{
-			Content:  fmt.Sprintf("**执行失败**\n```\n$ %s\n%s\n```", command, err.Error()),
-			Metadata: map[string]string{"status": "error"},
-		}, nil
-	}
-
-	return &skill.Result{
-		Content:  fmt.Sprintf("```\n$ %s\n%s\n```", command, truncateOutput(output, 64*1024)),
-		Metadata: map[string]string{"status": "ok"},
-	}, nil
+	return s.executeRequest(ctx, request)
 }
 
-// runShell 执行 Shell 命令
+// runShell 保留包内旧调用方式，实际执行与结构化工具共享同一生命周期。
 func (s *ShellSkill) runShell(ctx context.Context, command string) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, s.timeout)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "sh", "-c", command)
-
-	// 清洗环境变量
-	cmd.Env = []string{
-		"PATH=" + os.Getenv("PATH"),
-		"HOME=" + os.Getenv("HOME"),
-		"LANG=en_US.UTF-8",
-	}
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	err := cmd.Run()
-
-	output := stdout.String()
-	if stderr.Len() > 0 {
-		if output != "" {
-			output += "\n"
-		}
-		output += stderr.String()
-	}
-
-	if ctx.Err() != nil {
-		return "", fmt.Errorf("执行超时（限制 %v）", s.timeout)
-	}
-
-	if err != nil {
-		if output != "" {
-			return "", fmt.Errorf("%s", output)
-		}
+	result, err := s.Execute(ctx, map[string]any{"command": command})
+	if result == nil {
 		return "", err
 	}
-
-	return output, nil
+	execution, ok := result.Data.(*ShellExecution)
+	if !ok {
+		return result.Content, err
+	}
+	return strings.TrimRight(execution.Stdout+"\n"+execution.Stderr, "\n"), err
 }
 
 // extractShellCommand 从用户输入中提取命令

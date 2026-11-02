@@ -92,6 +92,8 @@ type MessageRecord struct {
 	ReasoningDisclosure adapter.ReasoningDisclosure     `json:"reasoning_disclosure"`
 	RuntimeEvents       []adapter.SequencedRuntimeEvent `json:"runtime_events"`
 	LastSequence        uint64                          `json:"last_sequence"`
+
+	providerOutputMetadata string
 }
 
 // SearchResult 消息搜索结果

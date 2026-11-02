@@ -42,7 +42,7 @@ func (m *Manager) RestartServer(ctx context.Context, name string) error {
 	m.mu.Unlock()
 	defer m.finishConnecting(name, revision)
 
-	newServer, err := m.connectServer(ctx, *cfg)
+	newServer, err := m.connectServer(ctx, *cfg, revision)
 	if err != nil {
 		m.recordConnectFailureForRevision(name, revision, err)
 		return fmt.Errorf("mcp: restart %q: %w", name, err)
@@ -81,6 +81,10 @@ func (m *Manager) RestartServer(ctx context.Context, name string) error {
 
 	// Never invoke arbitrary transport cleanup under Manager.mu.
 	closeServer(old)
+	if err := m.finishPublishedServer(ctx, newServer); err != nil {
+		m.recordConnectFailureForRevision(name, revision, err)
+		return err
+	}
 	if old != nil {
 		m.hooks.fireDisconnected(ctx, name, "manual restart")
 	}

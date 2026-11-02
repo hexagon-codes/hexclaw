@@ -7,9 +7,18 @@ import (
 	"strings"
 	"time"
 
+	"encoding/json"
+
+	coretool "github.com/hexagon-codes/ai-core/tool"
 	"github.com/hexagon-codes/hexagon/observe/events"
 	"github.com/hexagon-codes/hexagon/observe/trace"
+	hruntime "github.com/hexagon-codes/hexagon/runtime"
+	"github.com/hexagon-codes/toolkit/util/idgen"
+
+	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/featureflag"
+	"github.com/hexagon-codes/hexclaw/internal/externaltools"
+	"github.com/hexagon-codes/hexclaw/internal/mediaflow"
 	"github.com/hexagon-codes/hexclaw/knowledge"
 	"github.com/hexagon-codes/hexclaw/mcp"
 	"github.com/hexagon-codes/hexclaw/skill"
@@ -20,10 +29,25 @@ import (
 // Resolution order: Skill registry → MCP Manager.
 // Hook chain: beforeHooks → execute → afterHooks.
 type ToolExecutor struct {
-	skills      *skill.DefaultRegistry
-	mcpMgr      *mcp.Manager
-	beforeHooks []BeforeToolHook
-	afterHooks  []AfterToolHook
+	skills          *skill.DefaultRegistry
+	mcpMgr          *mcp.Manager
+	beforeHooks     []BeforeToolHook
+	afterHooks      []AfterToolHook
+	executionPolicy skill.ExecutionPolicySource
+	externalTools   *externaltools.Service
+	mcpDispatch     func(context.Context, string, string, map[string]any) (coretool.Result, error)
+	runFinalizer    func(context.Context, *adapter.Message)
+}
+
+func (e *ToolExecutor) SetExecutionPolicySource(source skill.ExecutionPolicySource) {
+	e.executionPolicy = source
+}
+func (e *ToolExecutor) SetExternalTools(service *externaltools.Service) { e.externalTools = service }
+func (e *ToolExecutor) SetMCPDispatch(dispatch func(context.Context, string, string, map[string]any) (coretool.Result, error)) {
+	e.mcpDispatch = dispatch
+}
+func (e *ToolExecutor) SetRunFinalizer(finalize func(context.Context, *adapter.Message)) {
+	e.runFinalizer = finalize
 }
 
 // NewToolExecutor creates a new executor.
@@ -33,6 +57,9 @@ func NewToolExecutor(skills *skill.DefaultRegistry, mcpMgr *mcp.Manager) *ToolEx
 
 // AddHook adds a hook that implements BeforeToolHook and/or AfterToolHook.
 func (e *ToolExecutor) AddHook(h any) {
+	if permission, ok := h.(*PermissionHook); ok && e.executionPolicy == nil {
+		e.executionPolicy = permission.EffectiveExecutionPolicy
+	}
 	if bh, ok := h.(BeforeToolHook); ok {
 		e.beforeHooks = append(e.beforeHooks, bh)
 	}
@@ -69,6 +96,15 @@ func (e *ToolExecutor) ExecuteResult(ctx context.Context, toolName string, args 
 }
 
 func (e *ToolExecutor) Execute(ctx context.Context, toolName string, args map[string]any) (result string, err error) {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return "", ctxErr
+	}
+	if _, ok := ctx.Value(toolRawResultContextKey{}).(*toolRawResultCapture); !ok {
+		ctx = context.WithValue(ctx, toolRawResultContextKey{}, &toolRawResultCapture{})
+	}
+	if e.executionPolicy != nil {
+		ctx = skill.WithExecutionPolicySource(ctx, e.executionPolicy)
+	}
 	if err := workflowToolAllowed(workflowStepOptions(ctx), toolName, args); err != nil {
 		return "", err
 	}
@@ -153,9 +189,24 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolName string, args map[st
 	// 3. Try MCP Manager
 	if e.mcpMgr != nil {
 		call.Source = "mcp"
+		if call.ServerName == "" {
+			return "", fmt.Errorf("tool %q has no ready MCP server", toolName)
+		}
 		return e.executeWithHooks(ctx, call, func(ctx context.Context) (string, error) {
-			result, owner, err := e.mcpMgr.CallToolResultWithOwner(ctx, toolName, call.Arguments)
+			var result coretool.Result
+			var owner string
+			var err error
+			if e.mcpDispatch != nil && call.ServerName != "" {
+				owner = call.ServerName
+				result, err = e.mcpDispatch(ctx, owner, call.Name, call.Arguments)
+			} else {
+				result, owner, err = e.mcpMgr.CallToolResultWithOwner(ctx, toolName, call.Arguments)
+			}
 			call.ServerName = owner
+			var existingExecutionErr *skill.ExecutionError
+			if err != nil && result.Error != "" && !errors.As(err, &existingExecutionErr) {
+				err = &skill.ExecutionError{Detail: skill.ToolExecutionDetail{Phase: "response", Outcome: "failure", Reason: "upstream_tool_error", ResponseReceived: true}, Err: err}
+			}
 			if capture, ok := ctx.Value(toolRawResultContextKey{}).(*toolRawResultCapture); ok {
 				capture.value = result.Output
 			}
@@ -229,25 +280,176 @@ func (e *ToolExecutor) isBuiltinSkillName(name string) bool {
 	return ok
 }
 
+// AuthorizeToolDispatch 为后续物理派发复用同一完整钩子链。
+func (e *ToolExecutor) AuthorizeToolDispatch(ctx context.Context, call *ToolCallInfo) (context.Context, error) {
+	if err := ctx.Err(); err != nil {
+		return ctx, err
+	}
+	if e.executionPolicy != nil {
+		ctx = skill.WithExecutionPolicySource(ctx, e.executionPolicy)
+	}
+	for {
+		policy := skill.CurrentExecutionPolicy(ctx)
+		for _, hook := range sortBeforeHooks(e.beforeHooks) {
+			if err := hook.BeforeToolCall(ctx, call); err != nil {
+				return ctx, fmt.Errorf("tool call blocked by hook: %w", err)
+			}
+		}
+		if skill.CurrentExecutionPolicy(ctx) == policy {
+			return skill.WithToolDispatchGrant(ctx, call.Name, policy), nil
+		}
+		if ctx.Err() != nil {
+			return ctx, ctx.Err()
+		}
+	}
+}
+
 func (e *ToolExecutor) executeWithHooks(ctx context.Context, call *ToolCallInfo, exec func(context.Context) (string, error)) (string, error) {
+	if e.executionPolicy != nil {
+		ctx = skill.WithExecutionPolicySource(ctx, e.executionPolicy)
+	}
 	v2 := featureflag.Enabled(ctx, FlagToolLifecycleV2)
 
-	beforeHooks := sortBeforeHooks(e.beforeHooks)
 	afterHooks := e.afterHooks
 	if v2 {
 		afterHooks = sortAfterHooks(afterHooks)
 	}
 
-	// Before hooks
-	for _, h := range beforeHooks {
-		if err := h.BeforeToolCall(ctx, call); err != nil {
-			return "", fmt.Errorf("tool call blocked by hook: %w", err)
-		}
+	// 审批可能等待用户，保存新档位后必须重新按新版本求值。
+	authorize := func() (skill.ExecutionPolicy, error) {
+		var err error
+		ctx, err = e.AuthorizeToolDispatch(ctx, call)
+		policy, _ := skill.ToolDispatchPolicy(ctx, call.Name)
+		return policy, err
+	}
+	authorizedPolicy, gateErr := authorize()
+	if gateErr != nil {
+		return "", gateErr
 	}
 
+	// 外部执行记录在权限处理后、真实派发前提交。HTTP内部重试另有逐次回执。
+	ctx = skill.WithToolDispatchGrant(ctx, call.Name, authorizedPolicy)
+	var attempt *externaltools.Attempt
+	if e.externalTools != nil && (call.Source == "mcp" || call.Name == "shell" || call.Name == "code_exec" || call.Name == "browser" || call.Name == "computer_use" || call.Name == "browser_session" || call.Name == "mcp_resources" || call.Name == "mcp_prompts" || (call.Name == "file_ops" && call.Arguments["action"] == "attach")) {
+		if retainErr := mediaflow.RetainRequest(ctx); retainErr != nil {
+			return "", retainErr
+		}
+		inv := skill.CurrentInvocation(ctx)
+		if inv.ToolCallID == "" {
+			inv.ToolCallID = "direct:" + idgen.ShortID()
+			ctx = skill.WithInvocationContext(ctx, inv)
+		}
+		var prepareErr error
+		for policyAttempt := 0; policyAttempt < 2; policyAttempt++ {
+			ctx, attempt, prepareErr = e.externalTools.Begin(ctx, externaltools.Intent{Kind: "tool_call", ToolName: call.Name, ServerName: call.ServerName, Input: call.Arguments}, false)
+			if prepareErr != nil {
+				return "", prepareErr
+			}
+			if attempt.Record.Phase != "prepared" {
+				return replayExternalReceipt(ctx, attempt)
+			}
+			if attempt.Record.PolicyProfile != authorizedPolicy.Profile || attempt.Record.PolicyRevision != authorizedPolicy.Revision {
+				prepareErr = errors.Join(externaltools.ErrPolicyChanged, e.externalTools.Finish(attempt, "observed", "failed", "policy_changed_before_dispatch", nil, false))
+			} else {
+				prepareErr = e.externalTools.Dispatch(ctx, attempt)
+			}
+			if !errors.Is(prepareErr, externaltools.ErrPolicyChanged) {
+				break
+			}
+			authorizedPolicy, gateErr = authorize()
+			if gateErr != nil {
+				return "", gateErr
+			}
+			ctx = skill.WithToolDispatchGrant(ctx, call.Name, authorizedPolicy)
+		}
+		if prepareErr != nil {
+			return "", prepareErr
+		}
+	}
 	// Execute
 	startedAt := time.Now()
 	content, err := exec(ctx)
+	// 观察字节与归属在本次回执封存前登记，终态记录保持不可覆盖。
+	if capture, ok := ctx.Value(toolRawResultContextKey{}).(*toolRawResultCapture); ok {
+		capture.value, err = e.captureToolObservations(ctx, call.Name, capture.value, err)
+	}
+	if attempt != nil {
+		phase, outcome, reason := "observed", "success", ""
+		if err != nil {
+			outcome = "failed"
+			reason = "execution_failed"
+		}
+		var detail *skill.ToolExecutionDetail
+		var executionErr *skill.ExecutionError
+		if errors.As(err, &executionErr) {
+			detail = &executionErr.Detail
+		}
+		if capture, ok := ctx.Value(toolRawResultContextKey{}).(*toolRawResultCapture); ok {
+			if raw, ok := capture.value.(*skill.Result); ok && raw != nil && raw.Detail != nil {
+				detail = raw.Detail
+			}
+		}
+		metadata := map[string]any{"content_bytes": len(content)}
+		if capture, ok := ctx.Value(toolRawResultContextKey{}).(*toolRawResultCapture); ok {
+			if raw, ok := capture.value.(*skill.Result); ok && raw != nil {
+				if facts, ok := raw.Data.(interface{ ExternalExecutionFacts() map[string]any }); ok {
+					metadata["execution"] = facts.ExternalExecutionFacts()
+				}
+				if data, ok := raw.Data.(map[string]any); ok {
+					facts := map[string]any{}
+					for _, key := range []string{"method", "status", "bytes_read", "response_complete", "artifact", "pending_artifact", "transport_replay"} {
+						if value, ok := data[key]; ok {
+							facts[key] = value
+						}
+					}
+					if len(facts) > 0 {
+						metadata["execution"] = facts
+					}
+				}
+			}
+		}
+		var pendingArtifact *externaltools.ArtifactRegistrationError
+		if errors.As(err, &pendingArtifact) {
+			metadata["pending_artifacts"] = []externaltools.Artifact{pendingArtifact.Artifact}
+		}
+		if detail != nil {
+			metadata["detail"] = detail
+			outcome = detail.Outcome
+			reason = detail.Reason
+		}
+		if detail == nil && err != nil && call.Source == "mcp" {
+			phase = "unknown"
+			outcome = "unknown"
+			reason = "mcp_result_unconfirmed"
+		}
+		if outcome == "unknown" || (detail == nil && errors.Is(err, context.Canceled) && runtimeToolSideEffect(call.Name) != hruntime.SideEffectReadOnly) {
+			phase = "unknown"
+			outcome = "unknown"
+		}
+		if finishErr := e.externalTools.Finish(attempt, phase, outcome, reason, metadata, false); finishErr != nil {
+			err = errors.Join(err, fmt.Errorf("persist external execution receipt: %w", finishErr))
+		}
+		if detail == nil {
+			publicOutcome := outcome
+			if publicOutcome == "failed" {
+				publicOutcome = "failure"
+			}
+			detail = &skill.ToolExecutionDetail{Outcome: publicOutcome, Phase: phase, Reason: reason}
+		}
+		detail.ExecutionID = attempt.Record.ID
+		detail.PolicyProfile = attempt.Record.PolicyProfile
+		detail.PolicyRevision = attempt.Record.PolicyRevision
+		if executionErr != nil {
+			executionErr.Detail = *detail
+		}
+		if capture, ok := ctx.Value(toolRawResultContextKey{}).(*toolRawResultCapture); ok {
+			if raw, ok := capture.value.(*skill.Result); ok && raw != nil {
+				raw.Detail = detail
+			} else {
+				capture.value = &skill.Result{Content: content, Data: capture.value, Detail: detail}
+			}
+		}
+	}
 	result := &ToolCallResult{Content: content, Error: err}
 	if v2 {
 		result.StartedAt = startedAt
@@ -277,6 +479,26 @@ func (e *ToolExecutor) executeWithHooks(ctx context.Context, call *ToolCallInfo,
 		With("content_len", len(result.Content)))
 
 	return result.Content, result.Error
+}
+
+func replayExternalReceipt(ctx context.Context, attempt *externaltools.Attempt) (string, error) {
+	r := attempt.Record
+	outcome := r.Outcome
+	if r.Phase == "dispatched" || r.Phase == "unknown" {
+		outcome = "unknown"
+	}
+	if outcome == "failed" {
+		outcome = "failure"
+	}
+	detail := &skill.ToolExecutionDetail{ExecutionID: r.ID, PolicyProfile: r.PolicyProfile, PolicyRevision: r.PolicyRevision, Phase: r.Phase, Outcome: outcome, Reason: r.Reason, Replayed: true}
+	data := map[string]any{"execution_id": r.ID, "phase": r.Phase, "outcome": outcome, "original_receipt": r.ResultManifestJSON}
+	encoded, _ := json.Marshal(data)
+	result := &skill.Result{Content: string(encoded), Data: data, Detail: detail}
+	captureSkillRawResult(ctx, result)
+	if outcome != "success" && outcome != "succeeded" && outcome != "completed" {
+		return result.Content, &skill.ExecutionError{Detail: *detail, Err: fmt.Errorf("original external execution %s has outcome %s; reconcile its receipt before retrying", r.ID, outcome)}
+	}
+	return result.Content, nil
 }
 
 // runAfterHook 在 lifecycle.v2 启用时用 panic recover 隔离单个 hook 失败，避免

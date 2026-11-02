@@ -20,6 +20,7 @@ var systemDispatchToolCategories = map[string][]string{
 	},
 	"browser": {
 		"browser",
+		"browser_session", "computer_use", "mcp_resources", "mcp_prompts",
 	},
 	// exec 拆两级信任：exec_sandboxed 是进沙箱执行（code_exec，走执行边界+资源限额+
 	// 危险拦截），exec_host 是宿主机直执行（shell/code，不进沙箱、不过 broker）。
@@ -110,10 +111,11 @@ func SystemDispatchEntryAllowsTool(entry, toolName string) bool {
 }
 
 // SystemDispatchPolicy 保存有效权限档位及无人值守自动放行矩阵。
-// 显式 PermissionPolicy ActionDeny 始终先于该策略生效。
+// 全权限统一放行应用层工具；其他档位继续消费原有矩阵和显式拒绝规则。
 type SystemDispatchPolicy struct {
-	profile string
-	matrix  map[string][]string
+	profile  string
+	matrix   map[string][]string
+	revision uint64
 }
 
 func DefaultSystemDispatchPolicy() *SystemDispatchPolicy {
@@ -127,13 +129,24 @@ func FullAccessSystemDispatchPolicy() *SystemDispatchPolicy {
 func NewSystemDispatchPolicyFromConfig(cfg config.AutonomyConfig) *SystemDispatchPolicy {
 	profile := normalizeAutonomyProfile(cfg.Profile)
 	matrix := profileSystemDispatchMatrix(profile)
+	if profile == SystemDispatchProfileFullAccess {
+		return &SystemDispatchPolicy{profile: profile, matrix: matrix, revision: 1}
+	}
 	applySystemDispatchOverride(matrix, cronDispatchSource, cfg.SystemDispatch.Cron)
 	applySystemDispatchOverride(matrix, webhookDispatchSource, cfg.SystemDispatch.Webhook)
 	applySystemDispatchOverride(matrix, heartbeatDispatchSource, cfg.SystemDispatch.Heartbeat)
 	applySystemDispatchOverride(matrix, workflowDispatchSource, cfg.SystemDispatch.Workflow)
 	applySystemDispatchOverride(matrix, spawnDispatchSource, cfg.SystemDispatch.Spawn)
 	applySystemDispatchOverride(matrix, solveDispatchSource, cfg.SystemDispatch.Solve)
-	return &SystemDispatchPolicy{profile: profile, matrix: matrix}
+	return &SystemDispatchPolicy{profile: profile, matrix: matrix, revision: 1}
+}
+
+// Revision 返回本次发布的有效策略版本。
+func (p *SystemDispatchPolicy) Revision() uint64 {
+	if p == nil {
+		return 0
+	}
+	return p.revision
 }
 
 func (p *SystemDispatchPolicy) Profile() string {
@@ -164,6 +177,9 @@ func (p *SystemDispatchPolicy) AllowsCategory(source, category string) bool {
 	if source == "" || category == "" || len(tools) == 0 {
 		return false
 	}
+	if p.Profile() == SystemDispatchProfileFullAccess {
+		return true
+	}
 	entries := p.matrix[source]
 	for _, entry := range entries {
 		if entry == "*" || entry == category {
@@ -193,6 +209,9 @@ func (p *SystemDispatchPolicy) Allows(source, toolName string) bool {
 	toolName = strings.TrimSpace(toolName)
 	if source == "" || toolName == "" {
 		return false
+	}
+	if p.Profile() == SystemDispatchProfileFullAccess {
+		return true
 	}
 	for _, entry := range p.matrix[source] {
 		if systemDispatchEntryAllows(entry, toolName) {
@@ -267,7 +286,7 @@ func profileSystemDispatchMatrix(profile string) map[string][]string {
 			heartbeatDispatchSource: {"*"},
 			workflowDispatchSource:  {"*"},
 			spawnDispatchSource:     {"*"},
-			solveDispatchSource:     {},
+			solveDispatchSource:     {"*"},
 		})
 	case SystemDispatchProfileBalanced:
 		// cron 源不含 automation（GO-9）：cron job 里的 agent 再建 cron job 是

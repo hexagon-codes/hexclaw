@@ -9,18 +9,42 @@ import (
 	"github.com/hexagon-codes/hexagon/testing/mock"
 )
 
-// stubStdioConnect temporarily replaces hexagon.ConnectMCPStdioWithEnv so AddServer /
-// tryReconnect success paths run without spawning a real subprocess. It returns
-// a cleanup that restores the original and a pointer to the live call counter.
-// （connectServer 现走 ConnectMCPStdioWithEnv 以支持 env 注入，桩目标随之迁移。）
+// stubSession 保留现有生命周期夹具的工具和关闭计数。
+// 未使用的协议操作留给嵌入接口，不模拟资源或模板成功。
+type stubSession struct {
+	sessionHandle
+	tools   []hexagon.Tool
+	cleanup func()
+}
+
+func (s *stubSession) Tools() []hexagon.Tool { return s.tools }
+func (s *stubSession) Close() error {
+	if s.cleanup != nil {
+		s.cleanup()
+	}
+	return nil
+}
+
+// adaptStdioStub 只迁移已有连接夹具，保持其失败、清理和时序合同。
+func adaptStdioStub(fn func(context.Context, string, map[string]string, ...string) ([]hexagon.Tool, func(), error)) func(context.Context, string, map[string]string, ...string) (sessionHandle, error) {
+	return func(ctx context.Context, command string, env map[string]string, args ...string) (sessionHandle, error) {
+		tools, cleanup, err := fn(ctx, command, env, args...)
+		if err != nil {
+			return nil, err
+		}
+		return &stubSession{tools: tools, cleanup: cleanup}, nil
+	}
+}
+
+// stubStdioConnect 替换同会话连接工厂，保留已有关闭计数断言。
 func stubStdioConnect(t *testing.T, tools []hexagon.Tool) (cleanupCalls *int) {
 	t.Helper()
-	orig := hexagon.ConnectMCPStdioWithEnv
+	orig := connectStdioSession
 	calls := 0
-	hexagon.ConnectMCPStdioWithEnv = func(ctx context.Context, command string, env map[string]string, args ...string) ([]hexagon.Tool, func(), error) {
+	connectStdioSession = adaptStdioStub(func(ctx context.Context, command string, env map[string]string, args ...string) ([]hexagon.Tool, func(), error) {
 		return tools, func() { calls++ }, nil
-	}
-	t.Cleanup(func() { hexagon.ConnectMCPStdioWithEnv = orig })
+	})
+	t.Cleanup(func() { connectStdioSession = orig })
 	return &calls
 }
 
@@ -276,14 +300,14 @@ func TestTryReconnect_Reconnects(t *testing.T) {
 func TestTryReconnect_SkipsHealthyAndDisabled(t *testing.T) {
 	var mu sync.Mutex
 	calls := 0
-	orig := hexagon.ConnectMCPStdio
-	hexagon.ConnectMCPStdio = func(ctx context.Context, command string, args ...string) ([]hexagon.Tool, func(), error) {
+	orig := connectStdioSession
+	connectStdioSession = adaptStdioStub(func(ctx context.Context, command string, env map[string]string, args ...string) ([]hexagon.Tool, func(), error) {
 		mu.Lock()
 		calls++
 		mu.Unlock()
 		return nil, func() {}, nil
-	}
-	t.Cleanup(func() { hexagon.ConnectMCPStdio = orig })
+	})
+	t.Cleanup(func() { connectStdioSession = orig })
 
 	m := NewManager()
 	m.mu.Lock()

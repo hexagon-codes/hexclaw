@@ -46,7 +46,7 @@ func TestRecordCost_ManySmallCosts_NoDrift(t *testing.T) {
 	}
 
 	// Expected total: $1.0000
-	usedCostCents := b.usedCost.Load()
+	usedCostCents := int64(math.Round(b.Status().CostUsed * 1_000_000))
 	usedCost := float64(usedCostCents) / 1_000_000.0
 	expected := 1.0
 
@@ -65,7 +65,7 @@ func TestRecordCost_VerySmallCost_NowAccurate(t *testing.T) {
 		b.RecordCost(0.00004)
 	}
 
-	usedMicro := b.usedCost.Load()
+	usedMicro := int64(math.Round(b.Status().CostUsed * 1_000_000))
 	usedCost := float64(usedMicro) / 1_000_000
 	expected := 0.40
 	if math.Abs(usedCost-expected) > 0.001 {
@@ -77,8 +77,8 @@ func TestStartOnce_ConcurrentRecordTokens(t *testing.T) {
 	b := NewBudgetController(BudgetConfig{MaxTokens: 1000000, MaxDuration: 1 * time.Hour, MaxCost: 10.0})
 
 	// Verify startTime is 0 before any recording
-	if st := b.startTime.Load(); st != 0 {
-		t.Fatalf("startTime should be 0 before any RecordTokens, got %d", st)
+	if st := b.usage.Snapshot().StartedAt; !st.IsZero() {
+		t.Fatalf("startTime should be 0 before any RecordTokens, got %v", st)
 	}
 
 	before := time.Now()
@@ -94,18 +94,18 @@ func TestStartOnce_ConcurrentRecordTokens(t *testing.T) {
 	after := time.Now()
 
 	// startTime should be set exactly once
-	st := b.startTime.Load()
-	if st == 0 {
+	st := b.usage.Snapshot().StartedAt
+	if st.IsZero() {
 		t.Fatal("startTime should be set after RecordTokens")
 	}
 
-	startTime := time.Unix(0, st)
+	startTime := st
 	if startTime.Before(before) || startTime.After(after) {
 		t.Errorf("startTime %v should be between %v and %v", startTime, before, after)
 	}
 
 	// Total tokens should be 10 * 100 = 1000
-	totalTokens := b.usedTokens.Load()
+	totalTokens := b.Status().TokensUsed
 	if totalTokens != 1000 {
 		t.Errorf("total tokens: got %d, want 1000", totalTokens)
 	}
@@ -134,7 +134,7 @@ func TestBudgetController_StatusBeforeRecording(t *testing.T) {
 		t.Error("fresh budget should not be exhausted")
 	}
 	if status.TokensUsed != 0 {
-		t.Errorf("tokens used should be 0, got %d", status.TokensUsed)
+		t.Errorf("tokens used should be 0, got %v", status.TokensUsed)
 	}
 	if status.CostUsed != 0 {
 		t.Errorf("cost used should be 0, got %f", status.CostUsed)

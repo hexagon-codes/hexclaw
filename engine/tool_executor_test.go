@@ -3,12 +3,13 @@ package engine
 import (
 	"context"
 	"errors"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/hexagon-codes/ai-core/llm"
 	aitool "github.com/hexagon-codes/ai-core/tool"
-	"github.com/hexagon-codes/hexagon"
+	hexagonmcp "github.com/hexagon-codes/hexagon/mcp"
 	"github.com/hexagon-codes/hexagon/testing/mock"
 	"github.com/hexagon-codes/hexclaw/featureflag"
 	hexmcp "github.com/hexagon-codes/hexclaw/mcp"
@@ -70,14 +71,14 @@ func (h *recordingHook) AfterToolCall(_ context.Context, call *ToolCallInfo, res
 }
 
 func TestToolExecutor_MCPAfterHookReceivesResolvedServerOwner(t *testing.T) {
-	orig := hexagon.ConnectMCPStdioWithEnv
-	hexagon.ConnectMCPStdioWithEnv = func(context.Context, string, map[string]string, ...string) ([]hexagon.Tool, func(), error) {
-		return []hexagon.Tool{mock.NewTool("write_file")}, func() {}, nil
-	}
-	t.Cleanup(func() { hexagon.ConnectMCPStdioWithEnv = orig })
+	server := hexagonmcp.NewMCPServerV2("filesystem-b", "1.0.0")
+	server.RegisterTool(mock.NewTool("write_file"))
+	httpServer := httptest.NewServer(server.HTTPHandler())
+	t.Cleanup(httpServer.Close)
 	mgr := hexmcp.NewManager()
+	t.Cleanup(mgr.Close)
 	if err := mgr.AddServer(context.Background(), hexmcp.ServerConfig{
-		Name: "filesystem-b", Transport: "stdio", Command: "stub", Enabled: true,
+		Name: "filesystem-b", Transport: "streamable", Endpoint: httpServer.URL, Enabled: true,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -119,19 +120,19 @@ func TestToolExecutor_BuiltinFileToolOverridesSameNameMCP(t *testing.T) {
 	reg := skill.NewRegistry()
 	reg.Register(&testSkill{name: "list_directory", result: "from builtin file broker"})
 
-	orig := hexagon.ConnectMCPStdioWithEnv
-	hexagon.ConnectMCPStdioWithEnv = func(ctx context.Context, command string, env map[string]string, args ...string) ([]hexagon.Tool, func(), error) {
-		return []hexagon.Tool{mock.NewTool("list_directory", mock.WithToolExecuteFn(func(context.Context, map[string]any) (aitool.Result, error) {
-			return aitool.NewResult("from external mcp filesystem"), nil
-		}))}, func() {}, nil
-	}
-	t.Cleanup(func() { hexagon.ConnectMCPStdioWithEnv = orig })
+	server := hexagonmcp.NewMCPServerV2("filesystem", "1.0.0")
+	server.RegisterTool(mock.NewTool("list_directory", mock.WithToolExecuteFn(func(context.Context, map[string]any) (aitool.Result, error) {
+		return aitool.NewResult("from external mcp filesystem"), nil
+	})))
+	httpServer := httptest.NewServer(server.HTTPHandler())
+	t.Cleanup(httpServer.Close)
 
 	mgr := hexmcp.NewManager()
+	t.Cleanup(mgr.Close)
 	if err := mgr.AddServer(context.Background(), hexmcp.ServerConfig{
 		Name:      "filesystem",
-		Transport: "stdio",
-		Command:   "stub",
+		Transport: "streamable",
+		Endpoint:  httpServer.URL,
 		Enabled:   true,
 	}); err != nil {
 		t.Fatalf("add mcp server: %v", err)

@@ -15,16 +15,16 @@ import (
 // 可切换行为的 stdio 连接桩：connectErr 非空 → 模拟连接失败（冷装超时）；否则返回 tools。
 func stubStdioToggle(t *testing.T) (setErr func(error), setTools func([]hexagon.Tool)) {
 	t.Helper()
-	orig := hexagon.ConnectMCPStdioWithEnv
+	orig := connectStdioSession
 	var curErr error
 	var curTools []hexagon.Tool
-	hexagon.ConnectMCPStdioWithEnv = func(ctx context.Context, command string, env map[string]string, args ...string) ([]hexagon.Tool, func(), error) {
+	connectStdioSession = adaptStdioStub(func(ctx context.Context, command string, env map[string]string, args ...string) ([]hexagon.Tool, func(), error) {
 		if curErr != nil {
 			return nil, nil, curErr
 		}
 		return curTools, func() {}, nil
-	}
-	t.Cleanup(func() { hexagon.ConnectMCPStdioWithEnv = orig })
+	})
+	t.Cleanup(func() { connectStdioSession = orig })
 	return func(e error) { curErr = e }, func(ts []hexagon.Tool) { curErr = nil; curTools = ts }
 }
 

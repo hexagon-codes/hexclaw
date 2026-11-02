@@ -27,12 +27,12 @@ func TestRestartServer_AfterCloseRejectsWithoutConnecting(t *testing.T) {
 	seedRestartableServer(m, "fs", func() {})
 	m.Close()
 	var connects atomic.Int32
-	orig := hexagon.ConnectMCPStdioWithEnv
-	hexagon.ConnectMCPStdioWithEnv = func(context.Context, string, map[string]string, ...string) ([]hexagon.Tool, func(), error) {
+	orig := connectStdioSession
+	connectStdioSession = adaptStdioStub(func(context.Context, string, map[string]string, ...string) ([]hexagon.Tool, func(), error) {
 		connects.Add(1)
 		return []hexagon.Tool{fakeTool("new")}, func() {}, nil
-	}
-	t.Cleanup(func() { hexagon.ConnectMCPStdioWithEnv = orig })
+	})
+	t.Cleanup(func() { connectStdioSession = orig })
 
 	err := m.RestartServer(context.Background(), "fs")
 	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "closed") && !strings.Contains(err.Error(), "关闭") {
@@ -47,12 +47,12 @@ func TestConnect_AfterCloseRejectsWithoutConnecting(t *testing.T) {
 	m := NewManager()
 	m.Close()
 	var connects atomic.Int32
-	orig := hexagon.ConnectMCPStdioWithEnv
-	hexagon.ConnectMCPStdioWithEnv = func(context.Context, string, map[string]string, ...string) ([]hexagon.Tool, func(), error) {
+	orig := connectStdioSession
+	connectStdioSession = adaptStdioStub(func(context.Context, string, map[string]string, ...string) ([]hexagon.Tool, func(), error) {
 		connects.Add(1)
 		return nil, func() {}, nil
-	}
-	t.Cleanup(func() { hexagon.ConnectMCPStdioWithEnv = orig })
+	})
+	t.Cleanup(func() { connectStdioSession = orig })
 	_, err := m.Connect(context.Background(), []ServerConfig{{Name: "fs", Enabled: true, Transport: "stdio", Command: "stub"}})
 	if err == nil {
 		t.Fatal("Connect after Close must fail")
@@ -67,13 +67,13 @@ func TestConnect_CloseDuringConnectorCannotResurrect(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
 	var candidateClosed atomic.Int32
-	orig := hexagon.ConnectMCPStdioWithEnv
-	hexagon.ConnectMCPStdioWithEnv = func(context.Context, string, map[string]string, ...string) ([]hexagon.Tool, func(), error) {
+	orig := connectStdioSession
+	connectStdioSession = adaptStdioStub(func(context.Context, string, map[string]string, ...string) ([]hexagon.Tool, func(), error) {
 		close(started)
 		<-release
 		return []hexagon.Tool{fakeTool("candidate")}, func() { candidateClosed.Add(1) }, nil
-	}
-	t.Cleanup(func() { hexagon.ConnectMCPStdioWithEnv = orig })
+	})
+	t.Cleanup(func() { connectStdioSession = orig })
 	errCh := make(chan error, 1)
 	go func() {
 		_, err := m.Connect(context.Background(), []ServerConfig{{Name: "fs", Enabled: true, Transport: "stdio", Command: "stub"}})
@@ -99,13 +99,13 @@ func TestRestartServer_CloseDuringConnectCannotResurrect(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
 	var candidateClosed atomic.Int32
-	orig := hexagon.ConnectMCPStdioWithEnv
-	hexagon.ConnectMCPStdioWithEnv = func(context.Context, string, map[string]string, ...string) ([]hexagon.Tool, func(), error) {
+	orig := connectStdioSession
+	connectStdioSession = adaptStdioStub(func(context.Context, string, map[string]string, ...string) ([]hexagon.Tool, func(), error) {
 		close(started)
 		<-release
 		return []hexagon.Tool{fakeTool("candidate")}, func() { candidateClosed.Add(1) }, nil
-	}
-	t.Cleanup(func() { hexagon.ConnectMCPStdioWithEnv = orig })
+	})
+	t.Cleanup(func() { connectStdioSession = orig })
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- m.RestartServer(context.Background(), "fs") }()
@@ -130,13 +130,13 @@ func TestRestartServer_RemoveDuringConnectCannotResurrect(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
 	var candidateClosed atomic.Int32
-	orig := hexagon.ConnectMCPStdioWithEnv
-	hexagon.ConnectMCPStdioWithEnv = func(context.Context, string, map[string]string, ...string) ([]hexagon.Tool, func(), error) {
+	orig := connectStdioSession
+	connectStdioSession = adaptStdioStub(func(context.Context, string, map[string]string, ...string) ([]hexagon.Tool, func(), error) {
 		close(started)
 		<-release
 		return []hexagon.Tool{fakeTool("candidate")}, func() { candidateClosed.Add(1) }, nil
-	}
-	t.Cleanup(func() { hexagon.ConnectMCPStdioWithEnv = orig })
+	})
+	t.Cleanup(func() { connectStdioSession = orig })
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- m.RestartServer(context.Background(), "fs") }()
@@ -164,14 +164,14 @@ func TestRestartServer_ConcurrentLatestInvocationWins(t *testing.T) {
 	releases := []chan struct{}{make(chan struct{}), make(chan struct{})}
 	var calls atomic.Int32
 	var candidateClosed [2]atomic.Int32
-	orig := hexagon.ConnectMCPStdioWithEnv
-	hexagon.ConnectMCPStdioWithEnv = func(context.Context, string, map[string]string, ...string) ([]hexagon.Tool, func(), error) {
+	orig := connectStdioSession
+	connectStdioSession = adaptStdioStub(func(context.Context, string, map[string]string, ...string) ([]hexagon.Tool, func(), error) {
 		idx := int(calls.Add(1)) - 1
 		started <- idx
 		<-releases[idx]
 		return []hexagon.Tool{fakeTool(fmt.Sprintf("candidate-%d", idx+1))}, func() { candidateClosed[idx].Add(1) }, nil
-	}
-	t.Cleanup(func() { hexagon.ConnectMCPStdioWithEnv = orig })
+	})
+	t.Cleanup(func() { connectStdioSession = orig })
 
 	errCh := make(chan error, 2)
 	go func() { errCh <- m.RestartServer(context.Background(), "fs") }()
@@ -221,11 +221,11 @@ func TestCallTool_StaleConnectionFailureCannotDisconnectRestartedServer(t *testi
 	m.servers["fs"] = &connectedServer{name: "fs", connected: true, tools: []hexagon.Tool{oldTool}}
 	m.mu.Unlock()
 
-	orig := hexagon.ConnectMCPStdioWithEnv
-	hexagon.ConnectMCPStdioWithEnv = func(context.Context, string, map[string]string, ...string) ([]hexagon.Tool, func(), error) {
+	orig := connectStdioSession
+	connectStdioSession = adaptStdioStub(func(context.Context, string, map[string]string, ...string) ([]hexagon.Tool, func(), error) {
 		return []hexagon.Tool{fakeTool("fresh")}, func() {}, nil
-	}
-	t.Cleanup(func() { hexagon.ConnectMCPStdioWithEnv = orig })
+	})
+	t.Cleanup(func() { connectStdioSession = orig })
 
 	callDone := make(chan error, 1)
 	go func() {
@@ -291,11 +291,11 @@ func TestRemoveAndCloseReleaseManagerLockBeforeTransportClose(t *testing.T) {
 }
 
 func TestAllReplacementPathsReleaseManagerLockBeforeTransportClose(t *testing.T) {
-	orig := hexagon.ConnectMCPStdioWithEnv
-	hexagon.ConnectMCPStdioWithEnv = func(context.Context, string, map[string]string, ...string) ([]hexagon.Tool, func(), error) {
+	orig := connectStdioSession
+	connectStdioSession = adaptStdioStub(func(context.Context, string, map[string]string, ...string) ([]hexagon.Tool, func(), error) {
 		return []hexagon.Tool{fakeTool("new")}, func() {}, nil
-	}
-	t.Cleanup(func() { hexagon.ConnectMCPStdioWithEnv = orig })
+	})
+	t.Cleanup(func() { connectStdioSession = orig })
 	cfg := ServerConfig{Name: "fs", Enabled: true, Transport: "stdio", Command: "stub"}
 	tests := []struct {
 		name string

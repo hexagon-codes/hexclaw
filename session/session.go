@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/hexagon-codes/hexagon"
+	"github.com/hexagon-codes/hexagon/runtime"
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/config"
 	"github.com/hexagon-codes/hexclaw/internal/mediaflow"
@@ -333,6 +334,9 @@ func (m *Manager) SaveAssistantReply(ctx context.Context, sessionID, content str
 		}
 		msg.Attachments = string(encoded)
 	}
+	if err := persistProviderOutputHistory(ctx, msg); err != nil {
+		return nil, err
+	}
 	if err := m.saveMessage(ctx, msg); err != nil {
 		return nil, err
 	}
@@ -488,6 +492,16 @@ func (m *Manager) BuildContext(ctx context.Context, sessionID string) ([]hexagon
 			messages = append(messages, buildHistoricalUserMessage(r.Content, attachments))
 			continue
 		}
+		if r.Role == "assistant" {
+			group, found, err := restoreProviderOutputHistory(r.Metadata)
+			if err != nil {
+				return nil, err
+			}
+			if found {
+				messages = append(messages, alignProviderOutputHistory(group, historicalAssistantMediaReferences(r))...)
+				continue
+			}
+		}
 		messages = append(messages, hexagon.Message{
 			Role:    toRole(r.Role),
 			Content: historicalAssistantMediaReferences(r),
@@ -513,7 +527,7 @@ func (m *Manager) BuildContext(ctx context.Context, sessionID string) ([]hexagon
 	}
 	if cutIdx > 0 && cutIdx < len(messages) {
 		// Fix 12: 确保截断后以 user 消息开头，避免孤立的 assistant 消息
-		for cutIdx < len(messages) && messages[cutIdx].Role != "user" {
+		for cutIdx < len(messages) && (messages[cutIdx].Role != "user" || messages[cutIdx].Name == runtime.ToolMediaMessageName) {
 			cutIdx++
 		}
 		if cutIdx < len(messages) {
