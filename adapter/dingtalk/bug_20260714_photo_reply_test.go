@@ -11,7 +11,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -92,16 +91,14 @@ func TestDingTalkV05GroupPhotoDoesNotCallOutboundProvider(t *testing.T) {
 	}
 }
 
-func TestBUG20260714_PhotoTaskUsesLongBudgetAndUsefulETA(t *testing.T) {
+func TestBUG20260714_PhotoTaskKeepsLongBudgetAndShortFeedback(t *testing.T) {
 	a := newTestAdapter()
 	if got := a.messageHandlerTimeoutFor(dtEvent{MsgType: dtMsgTypePicture}); got < 10*time.Minute {
 		t.Fatalf("photo grading budget = %s, want >= 10m", got)
 	}
 	text := thinkingFeedbackForEvent(dtEvent{MsgType: dtMsgTypePicture})
-	for _, want := range []string{"2–5 分钟", "5–10 分钟", "当前对话", "如有批改图"} {
-		if !strings.Contains(text, want) {
-			t.Fatalf("photo ETA feedback %q missing %q", text, want)
-		}
+	if text != "已收到图片，正在识别和处理。" {
+		t.Fatalf("unexpected ordinary photo feedback: %q", text)
 	}
 }
 
@@ -127,7 +124,7 @@ type orderedPictureOpenAPI struct {
 
 func (f *orderedPictureOpenAPI) DownloadMessageFile(_ context.Context, _, _, _ string) (string, error) {
 	calls := f.SendCalls()
-	f.etaSeenBeforeDownload = len(calls) > 0 && strings.Contains(calls[0].Text, "2–5 分钟")
+	f.etaSeenBeforeDownload = len(calls) > 0 && calls[0].Text == "已收到图片，正在识别和处理。"
 	return "", context.DeadlineExceeded
 }
 

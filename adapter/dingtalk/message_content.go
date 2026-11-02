@@ -139,7 +139,7 @@ func ensureDingTalkRenderEvidence(reply *adapter.Reply) error {
 	}
 	parts = append(parts, messagecontent.RenderPart{Kind: partKind, Text: projected})
 	for _, attachment := range reply.Attachments {
-		if !adapter.IsImageAttachment(attachment) && !isDingTalkPDFAttachment(attachment) && !isDingTalkGeneratedFile(attachment) {
+		if !adapter.IsImageAttachment(attachment) && !isDingTalkDocumentAttachment(attachment) && !isDingTalkGeneratedFile(attachment) {
 			return errors.New("DingTalk attachment type is unsupported")
 		}
 		digest, assetID, err := dingTalkAttachmentIdentity(attachment)
@@ -200,7 +200,7 @@ func ensureDingTalkRenderEvidence(reply *adapter.Reply) error {
 // 当前原请求拥有的文档由实际文件卡交付，渠道正文保留链接标签而非应用内部下载地址。
 func projectDingTalkDocumentAttachmentLinks(content string, attachments []adapter.Attachment) string {
 	for _, attachment := range attachments {
-		if !isDingTalkPDFAttachment(attachment) || attachment.Source == nil || attachment.Source.OpenReader == nil ||
+		if !isDingTalkDocumentAttachment(attachment) || attachment.Source == nil || attachment.Source.OpenReader == nil ||
 			!strings.HasPrefix(attachment.ID, "document-") ||
 			!validDingTalkSHA256Digest("sha256:"+strings.TrimPrefix(attachment.ID, "document-")) ||
 			attachment.URL != "/api/v1/document-artifacts/"+attachment.ID+"/content" {
@@ -277,7 +277,7 @@ func validateDingTalkAttachmentProjection(
 		return errors.New("dingtalk: render manifest artifact parts do not match reply attachments")
 	}
 	for i, attachment := range attachments {
-		if !adapter.IsImageAttachment(attachment) && !isDingTalkPDFAttachment(attachment) && !isDingTalkGeneratedFile(attachment) {
+		if !adapter.IsImageAttachment(attachment) && !isDingTalkDocumentAttachment(attachment) && !isDingTalkGeneratedFile(attachment) {
 			return errors.New("DingTalk attachment type is unsupported")
 		}
 		digest, _, err := dingTalkAttachmentIdentity(attachment)
@@ -422,8 +422,9 @@ func dingTalkAttachmentBytes(attachment adapter.Attachment) ([]byte, error) {
 		return dingTalkAttachmentBytes(copyAttachment)
 	}
 	isPDF := isDingTalkPDFAttachment(attachment)
-	isImage := adapter.IsImageAttachment(attachment) && !isPDF
-	if !isImage && !isPDF {
+	isDocument := isDingTalkDocumentAttachment(attachment)
+	isImage := adapter.IsImageAttachment(attachment) && !isDocument
+	if !isImage && !isDocument {
 		return nil, errors.New("DingTalk attachment type is unsupported")
 	}
 	if strings.TrimSpace(attachment.URL) != "" {
@@ -468,6 +469,10 @@ func dingTalkAttachmentBytes(attachment adapter.Attachment) ([]byte, error) {
 
 func isDingTalkPDFAttachment(attachment adapter.Attachment) bool {
 	return strings.EqualFold(strings.TrimSpace(attachment.Mime), "application/pdf")
+}
+
+func isDingTalkDocumentAttachment(attachment adapter.Attachment) bool {
+	return messagecontent.IsDocumentMIME(attachment.Mime)
 }
 
 func dingTalkCompatibleManifest(manifest messagecontent.RenderManifest) bool {

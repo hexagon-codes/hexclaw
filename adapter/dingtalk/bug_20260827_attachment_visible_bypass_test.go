@@ -73,7 +73,7 @@ func TestDingTalkReplyAttachmentFieldsCannotBecomeVisibleMedia(t *testing.T) {
 		{
 			name: "unsupported attachment",
 			attachment: adapter.Attachment{
-				Type: "file", Name: "private-notes.txt", Mime: "text/plain",
+				Type: "file", Name: "private-notes.bin", Mime: "application/octet-stream",
 				Data: base64.StdEncoding.EncodeToString([]byte("private notes")),
 			},
 		},

@@ -8,6 +8,28 @@ import (
 	"github.com/hexagon-codes/hexclaw/messagecontent"
 )
 
+func TestCanonicalMessageAcceptsExportedDocuments(t *testing.T) {
+	for _, mime := range []string{
+		"application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+		"application/vnd.oasis.opendocument.text", "application/epub+zip", "application/rtf",
+		"text/markdown", "text/html", "text/plain; charset=utf-8",
+	} {
+		t.Run(mime, func(t *testing.T) {
+			raw := []byte("frozen document bytes")
+			msg, err := NewCanonicalMarkdownMessageWithAttachments(messagecontent.ProducerChat, "zh-CN", "Document ready", "Document ready", "", []Attachment{{Name: "document", MIME: mime, Data: raw}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := msg.Validate(); err != nil {
+				t.Fatal(err)
+			}
+			if len(msg.Attachments) != 1 || !bytes.Equal(msg.Attachments[0].Data, raw) || msg.Attachments[0].MIME != mime {
+				t.Fatal("canonical document lost frozen bytes or MIME")
+			}
+		})
+	}
+}
+
 func TestNewCanonicalMessageBindsReadableProjectionToManifest(t *testing.T) {
 	msg, err := NewCanonicalMessage(
 		messagecontent.ProducerK12,

@@ -1,11 +1,13 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,11 +16,13 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/hexagon-codes/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/storage"
 )
 
 const (
@@ -317,6 +321,86 @@ func (s *attachmentStagingStore) Close() error {
 		}
 	})
 	return s.closeErr
+}
+
+// handleAttachmentContent 回显同一已上传图片，复用原回执的归属、摘要和有效期。
+func (s *Server) handleAttachmentContent(w http.ResponseWriter, r *http.Request) {
+	attachment, err := s.attachmentStaging.Resolve(httpPrincipalFromRequest(r).userID, r.PathValue("id"))
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	serveAttachmentImage(w, r, attachment)
+}
+
+// handleMessageAttachmentContent从持久消息读取原图，暂存仅用于消息保存前的回显。
+func (s *Server) handleMessageAttachmentContent(w http.ResponseWriter, r *http.Request) {
+	ownerID := sessionUserIDFromRequest(r)
+	sessionID := r.PathValue("id")
+	if _, err := s.getOwnedSession(r, sessionID, ownerID); err != nil {
+		writeSessionLookupError(w, err)
+		return
+	}
+	index, err := strconv.Atoi(r.PathValue("index"))
+	if err != nil || index < 0 {
+		http.NotFound(w, r)
+		return
+	}
+	message, err := s.store.GetMessage(r.Context(), r.PathValue("message"))
+	if errors.Is(err, storage.ErrNotFound) {
+		attachment, pendingErr := s.attachmentStaging.Resolve(ownerID, r.URL.Query().Get("pending"))
+		if pendingErr == nil {
+			serveAttachmentImage(w, r, attachment)
+			return
+		}
+		http.NotFound(w, r)
+		return
+	}
+	if err != nil {
+		http.Error(w, "Message attachment lookup failed", http.StatusInternalServerError)
+		return
+	}
+	if message.SessionID != sessionID {
+		http.NotFound(w, r)
+		return
+	}
+	metadata := message.Attachments
+	if metadata == "" || metadata == "{}" {
+		metadata = message.Metadata
+	}
+	var content struct {
+		Attachments []adapter.Attachment `json:"attachments"`
+	}
+	if json.Unmarshal([]byte(metadata), &content) != nil || index >= len(content.Attachments) {
+		http.NotFound(w, r)
+		return
+	}
+	serveAttachmentImage(w, r, content.Attachments[index])
+}
+
+func serveAttachmentImage(w http.ResponseWriter, r *http.Request, attachment adapter.Attachment) {
+	data := attachment.Data
+	if strings.HasPrefix(data, "data:") {
+		_, data, _ = strings.Cut(data, ",")
+	}
+	raw, err := base64.StdEncoding.DecodeString(data)
+	if err != nil || len(raw) == 0 || attachment.Type != "image" {
+		http.NotFound(w, r)
+		return
+	}
+	mediaType := attachment.Mime
+	if mediaType == "" {
+		mediaType = http.DetectContentType(raw)
+	}
+	if !strings.HasPrefix(mediaType, "image/") {
+		http.NotFound(w, r)
+		return
+	}
+	digest := sha256.Sum256(raw)
+	w.Header().Set("Content-Type", mediaType)
+	w.Header().Set("ETag", `"`+hex.EncodeToString(digest[:])+`"`)
+	w.Header().Set("Cache-Control", "private, no-cache")
+	http.ServeContent(w, r, attachment.Name, time.Time{}, bytes.NewReader(raw))
 }
 
 func (s *Server) handleStageAttachment(w http.ResponseWriter, r *http.Request) {

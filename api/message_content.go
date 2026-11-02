@@ -2,7 +2,9 @@ package api
 
 import (
 	"encoding/json"
+	"net/url"
 	"path"
+	"strconv"
 	"strings"
 
 	"github.com/hexagon-codes/hexclaw/adapter"
@@ -10,6 +12,42 @@ import (
 	"github.com/hexagon-codes/hexclaw/messagecontent"
 	"github.com/hexagon-codes/hexclaw/storage"
 )
+
+// projectMessageImages仅缩小本次历史响应，数据库原图与模型历史保持原样。
+func projectMessageImages(messages []*storage.MessageRecord) {
+	for _, message := range messages {
+		if message == nil {
+			continue
+		}
+		var metadata map[string]json.RawMessage
+		if json.Unmarshal([]byte(message.Metadata), &metadata) != nil {
+			continue
+		}
+		var attachments []map[string]json.RawMessage
+		if json.Unmarshal(metadata["attachments"], &attachments) != nil {
+			continue
+		}
+		changed := false
+		for index, attachment := range attachments {
+			var kind, data string
+			_ = json.Unmarshal(attachment["type"], &kind)
+			_ = json.Unmarshal(attachment["data"], &data)
+			if kind != "image" || data == "" {
+				continue
+			}
+			attachment["data"] = json.RawMessage(`""`)
+			attachment["url"], _ = json.Marshal("/api/v1/sessions/" + url.PathEscape(message.SessionID) + "/messages/" + url.PathEscape(message.ID) + "/attachments/" + strconv.Itoa(index) + "/content")
+			changed = true
+		}
+		if changed {
+			metadata["attachments"], _ = json.Marshal(attachments)
+			encoded, err := json.Marshal(metadata)
+			if err == nil {
+				message.Metadata = string(encoded)
+			}
+		}
+	}
+}
 
 func canonicalChatContent(markdown string, metadata map[string]string) *messagecontent.MessageContent {
 	if strings.TrimSpace(markdown) == "" {

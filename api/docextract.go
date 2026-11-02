@@ -14,7 +14,8 @@ import (
 
 // 文档文本抽取：在桌面 WKWebView 前端无法可靠解析（PDF 需 Web Worker、老 .doc 需原生工具）的格式
 // 统一下沉后端处理。PDF 用 poppler pdftotext（CJK/ToUnicode 完整，解决中文乱码）、老 .doc 用 macOS
-// textutil、.pptx 复用 hexagon PPTXLoader；.docx 见 handler_knowledge.go 的 extractDocxText。
+// textutil或antiword、.pptx 复用 hexagon PPTXLoader；.docx 见 handler_knowledge.go 的 extractDocxText。
+// 无状态会话附件的HTML/ODT/RTF/EPUB复用Pandoc固定reader提取文本层。
 
 // findTool 解析外部工具可执行路径：
 //  1. 环境变量覆盖 HEXCLAW_<NAME>（打包时注入内嵌二进制路径）
@@ -157,14 +158,49 @@ func normalizeExtractedPDFText(raw string) (string, int) {
 	return b.String(), pageCount
 }
 
-// extractDOCText 解析老版 .doc（OLE2 二进制）：用 macOS 内置 textutil（CJK 安全）。
-// 无成熟跨平台纯 Go 方案，其他平台暂不支持，提示用户转存 .docx。
+// extractDOCText解析老版DOC：优先沿用textutil，其他环境使用antiword的UTF-8文本输出。
+// 文本提取不代表已完成内嵌图片的视觉解析。
 func extractDOCText(ctx context.Context, data []byte) (string, error) {
-	bin := findTool("textutil", "/usr/bin/textutil")
-	if bin == "" {
-		return "", fmt.Errorf("当前平台暂不支持解析老版 .doc，请另存为 .docx 后再上传")
+	var textutilErr error
+	if bin := findTool("textutil", "/usr/bin/textutil"); bin != "" {
+		text, err := runToolOnTemp(ctx, bin, ".doc", data, "-convert", "txt", "-encoding", "UTF-8", "-stdout", "{}")
+		if err == nil {
+			return text, nil
+		}
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		textutilErr = err
 	}
-	return runToolOnTemp(ctx, bin, ".doc", data, "-convert", "txt", "-encoding", "UTF-8", "-stdout", "{}")
+	if bin := findTool("antiword", "/usr/bin/antiword", "/usr/local/bin/antiword"); bin != "" {
+		return runToolOnTemp(ctx, bin, ".doc", data, "-m", "UTF-8.txt", "-w", "0", "{}")
+	}
+	if textutilErr != nil {
+		return "", textutilErr
+	}
+	return "", fmt.Errorf("legacy DOC extraction requires textutil or antiword; save the file as DOCX if neither is available")
+}
+
+// extractPandocDocumentText 只接纳已声明的文档格式，不根据上传内容推断任意转换器。
+func extractPandocDocumentText(ctx context.Context, ext string, data []byte) (string, error) {
+	var format string
+	switch ext {
+	case ".html", ".htm":
+		format = "html"
+	case ".odt":
+		format = "odt"
+	case ".rtf":
+		format = "rtf"
+	case ".epub":
+		format = "epub"
+	default:
+		return "", fmt.Errorf("unsupported Pandoc document format: %s", ext)
+	}
+	bin := findTool("pandoc", "/opt/homebrew/bin/pandoc", "/usr/local/bin/pandoc", "/usr/bin/pandoc")
+	if bin == "" {
+		return "", fmt.Errorf("document extraction requires Pandoc for %s files", ext)
+	}
+	return runToolOnTemp(ctx, bin, ext, data, "--from", format, "--to", "plain", "--wrap=none", "{}")
 }
 
 // extractPPTXText 复用 hexagon PPTXLoader（OOXML 即 UTF-8 XML，CJK 安全）。其 API 仅吃文件路径，落临时文件。

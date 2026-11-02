@@ -48,7 +48,7 @@ func k12DingtalkPhotoStatusText(locale, state string) string {
 	}
 	switch state {
 	case "accepted":
-		return "已收到图片，正在识别和处理。"
+		return "📷 已收到图片，正在识别和处理。通常预计 2–5 分钟；题量或图片内容较多时约 5–10 分钟。完成后会把处理结果（如有批改图）发回当前对话。"
 	case "failed":
 		return "这张图片处理失败，暂未生成完整结果。"
 	case "outcome_unknown":

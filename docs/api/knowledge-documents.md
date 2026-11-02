@@ -1221,7 +1221,7 @@ multipart file输入，成功返回文本，供调用者注入上下文；不创
 
 实现：[`handleExtractDocument`](../../api/handler_documents.go)
 
-文件最多200 MiB；完整multipart请求最多201 MiB，解析错误仍是400。支持.pdf/.doc/.docx/.pptx/.txt/.md/.csv/.json；.xlsx/.xls不走此端点，iWork私有格式须先自行导出支持格式。视觉内容提取依赖当前服务VLM能力，422不是成功空文本。
+文件最多200 MiB；完整multipart请求最多201 MiB，解析错误仍是400。支持.pdf/.doc/.docx/.pptx/.html/.htm/.odt/.rtf/.epub/.txt/.md/.csv/.json；.xlsx/.xls不走此端点，iWork私有格式须先自行导出支持格式。HTML/ODT/RTF/EPUB使用Pandoc提取文本层，内嵌图片不进行视觉识别，该边界通过warnings返回；其他格式的视觉内容提取依赖当前服务VLM能力，422不是成功空文本。
 
 | HTTP | 响应契约 |
 | --- | --- |

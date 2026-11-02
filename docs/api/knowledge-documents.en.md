@@ -1221,7 +1221,7 @@ Accepts a multipart file and returns text for the caller to use as context. It c
 
 Implementation: [`handleExtractDocument`](../../api/handler_documents.go)
 
-File limit is 200 MiB and multipart body limit is 201 MiB; parse/size errors use 400. Supports .pdf/.doc/.docx/.pptx/.txt/.md/.csv/.json. .xlsx/.xls are not handled here, and iWork formats must first be exported to a supported format. Visual extraction depends on the current service VLM; 422 is not a successful empty text result.
+File limit is 200 MiB and multipart body limit is 201 MiB; parse/size errors use 400. Supports .pdf/.doc/.docx/.pptx/.html/.htm/.odt/.rtf/.epub/.txt/.md/.csv/.json. .xlsx/.xls are not handled here, and iWork formats must first be exported to a supported format. HTML/ODT/RTF/EPUB use Pandoc to extract text only; embedded images are not visually analyzed, and this limitation is returned through warnings. Visual extraction for other formats depends on the current service VLM; 422 is not a successful empty text result.
 
 | HTTP | Response contract |
 | --- | --- |

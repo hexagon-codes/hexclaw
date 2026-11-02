@@ -439,7 +439,7 @@ func validateCanonicalAttachment(attachment Attachment) error {
 		return errors.New("channel: attachment bytes are required")
 	}
 	mime := strings.ToLower(strings.TrimSpace(attachment.MIME))
-	if mime == "application/pdf" || (strings.HasPrefix(mime, "image/") && mime != "image/") {
+	if messagecontent.IsDocumentMIME(mime) || (strings.HasPrefix(mime, "image/") && mime != "image/") {
 		return nil
 	}
 	return fmt.Errorf("channel: unsupported attachment MIME %q", attachment.MIME)

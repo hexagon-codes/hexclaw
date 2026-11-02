@@ -176,6 +176,9 @@ func (s *Server) handleListMessages(w http.ResponseWriter, r *http.Request) {
 	if messages == nil {
 		messages = []*storage.MessageRecord{}
 	}
+	if r.URL.Query().Get("attachment_mode") == "url" {
+		projectMessageImages(messages)
+	}
 	hydrateMessageContents(messages)
 
 	// 获取真实总数用于分页
@@ -756,7 +759,7 @@ func buildMessageRecord(sessionID string, req *appendMessageRequest) *storage.Me
 	if id == "" {
 		id = "msg-" + idgen.ShortID()
 	}
-	metadata := string(req.Metadata)
+	metadata := storage.PublicMessageMetadata(string(req.Metadata))
 	attachments := ""
 	if metadataContainsAttachments(req.Metadata) {
 		// Keep the complete metadata envelope in the dedicated attachments

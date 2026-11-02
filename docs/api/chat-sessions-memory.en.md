@@ -24,6 +24,7 @@ All endpoints: Authorization: Bearer $HEXCLAW_API_TOKEN. Authentication failure 
 | `POST` | `/api/v1/sessions/{id}/suggest-title` | [Suggest a session title](#operation-chatsessionsuggestsessiontitle) | Mounted only when s.store != nil |
 | `DELETE` | `/api/v1/sessions/{id}` | [Delete a session](#operation-chatsessiondeletesession) | Mounted only when s.store != nil |
 | `GET` | `/api/v1/sessions/{id}/messages` | [List message history](#operation-chatsessionlistmessages) | Mounted only when s.store != nil |
+| `GET` | `/api/v1/sessions/{id}/messages/{message}/attachments/{index}/content` | [Read a persisted message image](#operation-getmessageimagecontent) | s.store != nil |
 | `POST` | `/api/v1/sessions/{id}/messages` | [Append a stored message](#operation-chatsessionappendmessage) | Mounted only when s.store != nil |
 | `POST` | `/api/v1/sessions/{id}/messages/batch` | [Append stored messages atomically](#operation-chatsessionbatchappendmessages) | Mounted only when s.store != nil |
 | `GET` | `/api/v1/sessions/{id}/branches` | [List session branches](#operation-chatsessionlistbranches) | Mounted only when s.store != nil |
@@ -440,8 +441,15 @@ Errors: 401 authentication failure; 404: Session missing or not owned by the cur
 
 Source: [api/handler_session.go](../../api/handler_session.go) — `handleDeleteSession`.
 
+<a id="operation-getmessageimagecontent"></a>
+### `GET /api/v1/sessions/{id}/messages/{message}/attachments/{index}/content`
+
+Reads the original stored image from an owned session and message. `index` is a zero-based attachment index. An optional `pending` receipt is read only while the message is absent. Saved message bytes do not depend on upload TTL or process memory. GET/HEAD, Range and ETag are supported. Returns 200/206/304, 401 for missing authentication, 404 for invalid ownership/index/missing content, or 500 for storage errors. No model request or message delivery is triggered.
+
 <a id="operation-chatsessionlistmessages"></a>
 ### `GET /api/v1/sessions/{id}/messages`
+
+With `attachment_mode=url`, stored image data is projected to authenticated message-image URLs in this response only. The database and default inline response remain unchanged. Read original bytes using `GET /api/v1/sessions/{id}/messages/{message}/attachments/{index}/content` (HEAD, Range and ETag supported). Session/message ownership is required. An optional `pending` upload receipt supports display while the message is not yet present; saved images survive upload expiry and process restart.
 
 List message history
 

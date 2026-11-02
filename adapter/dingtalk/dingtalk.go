@@ -246,7 +246,7 @@ func (a *DingtalkAdapter) currentInboundPhotoAdmissionPort() InboundPhotoAdmissi
 // 最终答案输出后再撤回（recall），使占位不残留（BUG-20260704：不删除占位、改为答案就位后撤回）。
 const dingtalkThinkingFeedback = "⌨️ 已收到，正在思考…"
 
-const dingtalkPhotoProcessingFeedback = "📷 已收到图片，正在识别和处理。通常预计 2–5 分钟；题量或图片内容较多时约 5–10 分钟。完成后会把处理结果（如有批改图）发回当前对话。"
+const dingtalkPhotoProcessingFeedback = "已收到图片，正在识别和处理。"
 
 func thinkingFeedbackForEvent(event dtEvent) string {
 	if event.MsgType == dtMsgTypePicture {
@@ -512,6 +512,20 @@ func uploadDingtalkPDFFile(
 	accessToken string,
 	attachment adapter.Attachment,
 ) (mediaID string, resultErr error) {
+	if !isDingTalkPDFAttachment(attachment) {
+		return "", &adapter.ResourcePreparationError{Known: true, Cause: errors.New("DingTalk file attachment must be a valid application/pdf document")}
+	}
+	return uploadDingtalkDocumentFile(ctx, httpClient, endpoint, accessToken, attachment)
+}
+
+// uploadDingtalkDocumentFile 共用原文件上传和结果分类，文档种类由应用支持的MIME确定。
+func uploadDingtalkDocumentFile(
+	ctx context.Context,
+	httpClient *http.Client,
+	endpoint string,
+	accessToken string,
+	attachment adapter.Attachment,
+) (mediaID string, resultErr error) {
 	requestStarted := false
 	knownResponse := false
 	var safeCause error
@@ -543,7 +557,10 @@ func uploadDingtalkPDFFile(
 	if err != nil {
 		return "", err
 	}
-	if !isDingTalkPDFAttachment(attachment) || !bytes.HasPrefix(raw, []byte("%PDF-")) {
+	if !isDingTalkDocumentAttachment(attachment) {
+		return "", errors.New("DingTalk document attachment MIME is unsupported")
+	}
+	if messagecontent.DocumentExtension(attachment.Mime) == "pdf" && !bytes.HasPrefix(raw, []byte("%PDF-")) {
 		return "", errors.New("DingTalk file attachment must be a valid application/pdf document")
 	}
 	if len(raw) > dingtalkMaxOutboundPDFBytes {
@@ -614,17 +631,25 @@ func uploadDingtalkPDFFile(
 }
 
 func dingtalkFileMessage(mediaID string, fileName string) dingtalkOutboundMessage {
+	fileType := strings.TrimPrefix(strings.ToLower(path.Ext(fileName)), ".")
+	if fileType == "" {
+		fileType = "pdf"
+	}
 	payload, _ := json.Marshal(struct {
 		MediaID  string `json:"mediaId"`
 		FileName string `json:"fileName"`
 		FileType string `json:"fileType"`
-	}{MediaID: mediaID, FileName: fileName, FileType: "pdf"})
+	}{MediaID: mediaID, FileName: fileName, FileType: fileType})
 	return dingtalkOutboundMessage{MsgKey: "sampleFile", MsgParam: string(payload)}
 }
 
 func dingTalkPDFFileName(attachment adapter.Attachment) string {
 	if strings.TrimSpace(attachment.Name) == "" {
-		return "document.pdf"
+		ext := messagecontent.DocumentExtension(attachment.Mime)
+		if ext == "" {
+			ext = "pdf"
+		}
+		return "document." + ext
 	}
 	return safeDingTalkAttachmentName(attachment.Name)
 }
@@ -720,7 +745,7 @@ func (c *officialDingtalkOpenAPI) UploadImage(ctx context.Context, accessToken s
 }
 
 func (c *officialDingtalkOpenAPI) UploadFile(ctx context.Context, accessToken string, attachment adapter.Attachment) (string, error) {
-	return uploadDingtalkPDFFile(ctx, c.http, c.mediaURL, accessToken, attachment)
+	return uploadDingtalkDocumentFile(ctx, c.http, c.mediaURL, accessToken, attachment)
 }
 
 func (a *DingtalkAdapter) apiClient() (dingtalkOpenAPI, error) {
@@ -1278,8 +1303,8 @@ func (a *DingtalkAdapter) Send(ctx context.Context, chatID string, reply *adapte
 	}
 	if reply != nil {
 		for _, attachment := range reply.Attachments {
-			if isDingTalkPDFAttachment(attachment) {
-				return a.sendPreparedPDFReply(ctx, chatID, reply)
+			if isDingTalkDocumentAttachment(attachment) {
+				return a.sendPreparedDocumentReply(ctx, chatID, reply)
 			}
 		}
 	}
@@ -1289,9 +1314,9 @@ func (a *DingtalkAdapter) Send(ctx context.Context, chatID string, reply *adapte
 	return a.queue.Send(ctx, chatID, reply)
 }
 
-// sendPreparedPDFReply 沿冻结清单发送普通文件回复，所有资源准备完成后才发送可见部分。
+// sendPreparedDocumentReply 沿冻结清单发送普通文件回复，所有资源准备完成后才发送可见部分。
 // 普通 Send 不合并多条平台回执；部分发送后的错误交回调用方，不在此重发。
-func (a *DingtalkAdapter) sendPreparedPDFReply(ctx context.Context, chatID string, reply *adapter.Reply) error {
+func (a *DingtalkAdapter) sendPreparedDocumentReply(ctx context.Context, chatID string, reply *adapter.Reply) error {
 	attachments := make(map[string]adapter.Attachment, len(reply.Attachments))
 	for index, attachment := range reply.Attachments {
 		digest, _, err := dingTalkAttachmentIdentity(attachment)
@@ -1450,7 +1475,7 @@ func (a *DingtalkAdapter) PrepareDeliveryPartResource(ctx context.Context, part 
 		}
 		mediaStarted = true
 		mediaID, err = fileAPI.UploadGeneratedFile(ctx, token, attachment)
-	} else if isDingTalkPDFAttachment(attachment) {
+	} else if isDingTalkDocumentAttachment(attachment) {
 		fileAPI, ok := api.(dingtalkFileMediaOpenAPI)
 		if !ok {
 			return "", errors.New("DingTalk file media upload capability is unavailable")
@@ -1598,7 +1623,7 @@ func validateDingTalkDeliveryPartAttachment(part adapter.DeliveryPart, attachmen
 	if partMIME == "" || attachmentMIME == "" || !strings.EqualFold(partMIME, attachmentMIME) {
 		return errors.New("DingTalk artifact delivery part MIME does not match its attachment")
 	}
-	if !isDingTalkPDFAttachment(attachment) && !strings.HasPrefix(strings.ToLower(attachmentMIME), "image/") && !isDingTalkGeneratedFile(attachment) {
+	if !isDingTalkDocumentAttachment(attachment) && !strings.HasPrefix(strings.ToLower(attachmentMIME), "image/") && !isDingTalkGeneratedFile(attachment) {
 		return errors.New("DingTalk artifact delivery part type is unsupported")
 	}
 	if err := validateDingTalkAttachmentName(attachment.Name, isDingTalkPDFAttachment(attachment)); err != nil {
@@ -1642,7 +1667,7 @@ func dingTalkPreparedPartMessage(part adapter.DeliveryPart) (dingtalkOutboundMes
 		if isDingTalkGeneratedFile(attachment) {
 			return generatedDingTalkFileMessage(mediaID, attachment), nil
 		}
-		if isDingTalkPDFAttachment(attachment) {
+		if isDingTalkDocumentAttachment(attachment) {
 			return dingtalkFileMessage(mediaID, dingTalkPDFFileName(attachment)), nil
 		}
 		alt := strings.TrimSpace(attachment.Name)

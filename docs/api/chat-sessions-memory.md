@@ -24,6 +24,7 @@
 | `POST` | `/api/v1/sessions/{id}/suggest-title` | [生成建议标题](#operation-chatsessionsuggestsessiontitle) | 持久化存储可用时挂载（s.store != nil） |
 | `DELETE` | `/api/v1/sessions/{id}` | [删除会话](#operation-chatsessiondeletesession) | 持久化存储可用时挂载（s.store != nil） |
 | `GET` | `/api/v1/sessions/{id}/messages` | [读取消息历史](#operation-chatsessionlistmessages) | 持久化存储可用时挂载（s.store != nil） |
+| `GET` | `/api/v1/sessions/{id}/messages/{message}/attachments/{index}/content` | [读取持久消息原图](#operation-getmessageimagecontent) | s.store != nil |
 | `POST` | `/api/v1/sessions/{id}/messages` | [追加持久消息](#operation-chatsessionappendmessage) | 持久化存储可用时挂载（s.store != nil） |
 | `POST` | `/api/v1/sessions/{id}/messages/batch` | [批量追加持久消息](#operation-chatsessionbatchappendmessages) | 持久化存储可用时挂载（s.store != nil） |
 | `GET` | `/api/v1/sessions/{id}/branches` | [列出分支](#operation-chatsessionlistbranches) | 持久化存储可用时挂载（s.store != nil） |
@@ -440,6 +441,11 @@ Body: 不读取 / 不需要。
 
 源码：[api/handler_session.go](../../api/handler_session.go) — `handleDeleteSession`.
 
+<a id="operation-getmessageimagecontent"></a>
+### `GET /api/v1/sessions/{id}/messages/{message}/attachments/{index}/content`
+
+读取当前用户所属会话与消息中的原图，`index` 从0起算。消息不存在时可通过可选 `pending` 读取同一用户的暂存回执；已保存消息不依赖上传TTL或进程内缓存。支持GET/HEAD、Range与ETag，返回200/206/304；未认证401，归属/序号不符或来源不存在404，存储错误500。不发起模型请求或消息投递。
+
 <a id="operation-chatsessionlistmessages"></a>
 ### `GET /api/v1/sessions/{id}/messages`
 
@@ -449,11 +455,14 @@ Body: 不读取 / 不需要。
 
 按创建时间正序；total 优先 CountMessages，计数失败才回退 len(本页)+offset。message_content 为读取投影；metadata/meta 是 JSON 字符串。
 
+`attachment_mode=url` 将本次响应中的已存图片投影为认证原图地址，避免大图经历史 JSON 传输；不改变数据库原图和不带该参数的响应。原图读取使用 `GET /api/v1/sessions/{id}/messages/{message}/attachments/{index}/content`，支持 HEAD、Range 和 ETag。会话与消息必须属于当前用户；消息尚不存在时，可带 `pending` 上传回执用于保存前回显。已保存消息不依赖暂存有效期或进程内缓存，未提供有效pending时，不存在或归属不符的资源返回404。
+
 | 位置 | 字段 | 必填 | 类型 / 规则 |
 | --- | --- | --- | --- |
 | path | `id` | 是 | Session ID — |
 | query | `limit` | 否 | Missing, invalid, <=0 or >200 uses 50. default=50 |
 | query | `offset` | 否 | Missing/invalid uses 0; negative values clamp to 0. default=0 |
+| query | `attachment_mode` | 否 | `url`：返回持久图片地址；省略保持原响应 |
 
 Body: 不读取 / 不需要。
 

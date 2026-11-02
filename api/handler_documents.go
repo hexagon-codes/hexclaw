@@ -20,9 +20,10 @@ type DocumentExtractResponse struct {
 //
 // 格式路由（见 docextract.go）：
 //   - .pdf  → poppler pdftotext（CJK 完整，降级 hexagon）
-//   - .doc  → macOS textutil（OLE 二进制）
+//   - .doc  → textutil或antiword（OLE 二进制文本层）
 //   - .docx → extractDocxText（OOXML，知识库同款）
 //   - .pptx → hexagon PPTXLoader
+//   - .html/.htm/.odt/.rtf/.epub → Pandoc固定reader提取文本层
 //   - .txt/.md/.csv/.json → 直接按 UTF-8 文本
 //
 // 注：.xlsx/.xls 由前端 SheetJS 解析（唯一能解老 .xls 且更强），不走本端点。
@@ -61,6 +62,11 @@ func (s *Server) handleExtractDocument(w http.ResponseWriter, r *http.Request) {
 	switch ext {
 	case ".pdf", ".doc", ".docx", ".pptx", ".txt", ".md", ".csv", ".json":
 		extracted, err = extractDocumentForKnowledge(r.Context(), ext, data, s.kb)
+	case ".html", ".htm", ".odt", ".rtf", ".epub":
+		extracted.Text, err = extractPandocDocumentText(r.Context(), ext, data)
+		if err == nil {
+			extracted.Warnings = append(extracted.Warnings, "Only the document text was extracted; embedded images in this format are not visually analyzed.")
+		}
 	case ".pages", ".numbers", ".key":
 		// 苹果 iWork 私有格式（现代版为压缩 Protobuf，无可靠解析方案）——引导导出 PDF。
 		writeJSON(w, http.StatusBadRequest, map[string]string{
@@ -69,7 +75,7 @@ func (s *Server) handleExtractDocument(w http.ResponseWriter, r *http.Request) {
 		return
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "不支持的文件格式：" + ext + "（支持 .pdf / .doc / .docx / .pptx / .txt / .md / .csv / .json；表格用 .xlsx/.xls）",
+			"error": "Unsupported document format: " + ext + " (supported: .pdf / .doc / .docx / .pptx / .html / .htm / .odt / .rtf / .epub / .txt / .md / .csv / .json; spreadsheets: .xlsx/.xls)",
 		})
 		return
 	}
