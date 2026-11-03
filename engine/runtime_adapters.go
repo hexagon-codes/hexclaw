@@ -30,6 +30,11 @@ func runRuntimeAttempt(ctx context.Context, runner *hruntime.DefaultRunner, req 
 	if errors.As(previous, &interrupted) && interrupted.State != nil {
 		copy := *interrupted
 		copy.State = interrupted.State.Snapshot()
+		// 首轮没有显式 request_id 时 Runner 会生成运行 ID；同次回退必须沿用原 ID，
+		// 否则 Continue 会把同一运行误判为另一请求并拒绝续接。
+		if req.ID == "" {
+			req.ID = copy.State.Request.ID
+		}
 		copy.State.Attributes["hexclaw.current_input_user_ordinal"] = countContextUserMessages(req.Messages)
 		for _, record := range copy.State.ToolCalls {
 			// 恢复同次模型调用时沿用实际工具内容，不能把包装后的错误提示当作业务记录。
