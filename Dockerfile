@@ -51,16 +51,32 @@ RUN curl -fsSL https://nodejs.org/dist/v22.23.4/node-v22.23.4-linux-x64.tar.xz -
     && tar -xzf /tmp/uv.tar.gz -C /tmp \
     && cp /tmp/uv-x86_64-unknown-linux-gnu/uv /tmp/uv-x86_64-unknown-linux-gnu/uvx /usr/local/bin/
 
-FROM debian:bookworm-slim
+# 浏览器运行资源与桌面使用同一固定版本；package-lock 是独立交付身份。
+FROM node:22.23.4-bookworm AS browser-runtime
+WORKDIR /runtime
+COPY scripts/browser-runtime/package.json scripts/browser-runtime/package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts
+RUN node node_modules/playwright-core/cli.js install chromium
+RUN mkdir -p node/bin chromium \
+    && cp /usr/local/bin/node node/bin/node \
+    && browser_dir="$(find /root/.cache/ms-playwright -maxdepth 1 -type d -name 'chromium-*' | head -n1)" \
+    && test -n "$browser_dir" \
+    && cp -R "$browser_dir" chromium/chrome-linux \
+    && node -e "const fs=require('fs');const mcp=require('./node_modules/@playwright/mcp/package.json');const pw=require('./node_modules/playwright-core/package.json');const browsers=require('./node_modules/playwright-core/browsers.json');const chromium=browsers.browsers.find(b=>b.name==='chromium');if(!chromium)process.exit(2);fs.writeFileSync('manifest.json',JSON.stringify({schema_version:1,platform:'linux',arch:'amd64',generation:'server-linux-amd64-v1',minimum_os_version:'',node:{version:process.versions.node,path:'node/bin/node'},mcp:{package:'@playwright/mcp',version:mcp.version,entry:'node_modules/@playwright/mcp/cli.js'},playwright:{version:pw.version,browser_revision:chromium.revision,chromium_executable:'chromium/chrome-linux/chrome-linux64/chrome'}},null,2)+'\n')"
+
+FROM debian:bookworm-slim AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates tzdata fontconfig fonts-noto-cjk fonts-dejavu-core fonts-stix \
+    ca-certificates tzdata fontconfig fonts-noto-cjk fonts-dejavu-core fonts-stix fonts-liberation \
     python3 python3-yaml python3-requests python3-sympy curl poppler-utils libcap2 antiword libstdc++6 \
+    libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libgbm1 libgtk-3-0 libasound2 \
+    libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 libpango-1.0-0 libcairo2 libx11-xcb1 \
+    libxcb1 libxext6 libxi6 libxtst6 libxss1 \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /hexclaw /usr/local/bin/hexclaw
 COPY --from=render-tools /usr/local/bin/pandoc /usr/local/bin/typst /usr/local/bin/
 COPY --from=render-tools /usr/bin/bwrap /usr/bin/bwrap
 COPY --from=render-tools /usr/local/bin/node /usr/local/bin/uv /usr/local/bin/uvx /usr/local/bin/
 COPY --from=render-tools /usr/local/lib/node_modules /usr/local/lib/node_modules
+COPY --from=browser-runtime /runtime /usr/local/share/hexclaw/browser-runtime
 COPY render/assets/reference.docx /usr/local/share/hexclaw/assets/render/reference.docx
 COPY docker/entrypoint.py /usr/local/bin/hexclaw-container-entrypoint
 RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
@@ -73,3 +89,12 @@ STOPSIGNAL SIGTERM
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 CMD curl -fsS http://127.0.0.1:16060/health >/dev/null || exit 1
 ENTRYPOINT ["/usr/local/bin/hexclaw-container-entrypoint"]
 CMD ["serve", "--config", "/data/.hexclaw/hexclaw.yaml"]
+
+# 本地开发镜像：用 go.work 编译出的 Linux 二进制，避免依赖未发布的模块版本。
+FROM runtime AS local
+ARG HEXCLAW_LOCAL_BINARY=hexclaw-linux
+COPY ${HEXCLAW_LOCAL_BINARY} /usr/local/bin/hexclaw
+
+# 正式发布镜像：Go builder 使用模块版本；本地验证可用 --target local。
+FROM runtime AS final
+COPY --from=builder /hexclaw /usr/local/bin/hexclaw
