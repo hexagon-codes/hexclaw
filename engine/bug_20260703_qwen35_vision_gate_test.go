@@ -26,9 +26,13 @@ func TestBug20260703_Qwen35VisionGate(t *testing.T) {
 	if shouldRejectImageAttachmentsForProvider(provider, "ollama", "qwen3.5:9b", img) {
 		t.Error("vision-capable provider model should allow image attachments")
 	}
-	// 回归保护：真文本模型仍应拒图
-	if !shouldRejectImageAttachments("deepseek", "deepseek-chat", img) {
-		t.Error("deepseek-chat 应保持拒绝图片附件（已知文本模型）")
+	// 回归保护：已列举为纯文本的模型仍应拒图；未列举名称不再按字符串推断。
+	textOnly := modelFeatureProvider{models: []llm.ModelInfo{{
+		ID:   "deepseek-chat",
+		Name: "deepseek-chat",
+	}}}
+	if !shouldRejectImageAttachmentsForProvider(textOnly, "deepseek", "deepseek-chat", img) {
+		t.Error("deepseek-chat 应保持拒绝图片附件（已声明纯文本模型）")
 	}
 }
 

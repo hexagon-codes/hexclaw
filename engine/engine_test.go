@@ -433,7 +433,7 @@ func TestReActEngine_ProcessRejectsKnownTextOnlyModelForAttachments(t *testing.T
 		t,
 		map[string]hexagon.Provider{"ollama": provider},
 		map[string]config.LLMProviderConfig{
-			"ollama": {BaseURL: "http://127.0.0.1:11434/v1", Model: "qwen3:0.6b"},
+			"ollama": {BaseURL: "http://127.0.0.1:11434/v1", Model: "mock-model"},
 		},
 		"ollama",
 	)
@@ -467,7 +467,7 @@ func TestReActEngine_ProcessStreamRejectsKnownTextOnlyModelForAttachments(t *tes
 		t,
 		map[string]hexagon.Provider{"ollama": provider},
 		map[string]config.LLMProviderConfig{
-			"ollama": {BaseURL: "http://127.0.0.1:11434/v1", Model: "qwen3:0.6b"},
+			"ollama": {BaseURL: "http://127.0.0.1:11434/v1", Model: "mock-model"},
 		},
 		"ollama",
 	)

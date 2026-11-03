@@ -2,10 +2,12 @@ package engine
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
-	"github.com/hexagon-codes/hexagon"
-	"github.com/hexagon-codes/hexagon/testing/mock"
+	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"github.com/hexagon-codes/hexclaw/mcp"
 	"github.com/hexagon-codes/hexclaw/skill"
 )
@@ -17,16 +19,24 @@ import (
 // MCP 工具都会进入 LLM 工具列表 —— 这正是「云端已证 chat→mysql_query」对 cron/webhook/workflow
 // 同样成立的结构性根据。本测试把该不变量钉死：未来若有人按触发源/平台门控工具收集，立即 FAIL。
 func TestMCPToolsCollectedRegardlessOfTriggerSource_20260623(t *testing.T) {
-	// 桩 hexagon stdio 连接，产出一个假 MCP 工具（无需真子进程）。
-	orig := hexagon.ConnectMCPStdioWithEnv
-	hexagon.ConnectMCPStdioWithEnv = func(ctx context.Context, command string, env map[string]string, args ...string) ([]hexagon.Tool, func(), error) {
-		return []hexagon.Tool{mock.NewTool("mysql_query", mock.WithToolDescription("run sql"))}, func() {}, nil
-	}
-	t.Cleanup(func() { hexagon.ConnectMCPStdioWithEnv = orig })
+	// 使用官方 SDK 的内存/HTTP 传输，避免真实子进程，同时经过当前生产连接路径。
+	upstream := sdkmcp.NewServer(&sdkmcp.Implementation{Name: "mysql", Version: "1"}, nil)
+	upstream.AddTool(&sdkmcp.Tool{
+		Name:        "mysql_query",
+		Description: "run sql",
+		InputSchema: map[string]any{"type": "object"},
+	}, func(context.Context, *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
+		return &sdkmcp.CallToolResult{Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: "ok"}}}, nil
+	})
+	remote := httptest.NewServer(sdkmcp.NewStreamableHTTPHandler(func(*http.Request) *sdkmcp.Server {
+		return upstream
+	}, nil))
+	t.Cleanup(remote.Close)
 
 	mgr := mcp.NewManager()
+	t.Cleanup(mgr.Close)
 	if connected, err := mgr.AddServerBestEffort(context.Background(), mcp.ServerConfig{
-		Name: "mysql", Transport: "stdio", Command: "npx", Args: []string{"-y", "@benborla29/mcp-server-mysql"},
+		Name: "mysql", Transport: "streamable", Endpoint: remote.URL,
 	}); err != nil || !connected {
 		t.Fatalf("准备 MCP server 失败: connected=%v err=%v", connected, err)
 	}

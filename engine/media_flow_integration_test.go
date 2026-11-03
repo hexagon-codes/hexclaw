@@ -247,8 +247,13 @@ func TestMediaPartialFailureAndResumeKeepAssetsWithoutRegeneration(t *testing.T)
 			defer upstream.Close()
 			resumeID := ""
 			model := mockllm.NewLLMProvider("test").WithResponseFn(func(req llm.CompletionRequest) (*llm.CompletionResponse, error) {
+				// 只统计当前用户轮之后的工具结果，历史轮不能改变本轮动作。
 				tools := 0
-				for _, message := range req.Messages {
+				for i := len(req.Messages) - 1; i >= 0; i-- {
+					message := req.Messages[i]
+					if message.Role == llm.RoleUser {
+						break
+					}
 					if message.Role == llm.RoleTool {
 						tools++
 					}

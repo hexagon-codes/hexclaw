@@ -29,10 +29,9 @@ type semanticStatefulProvider struct{ turns atomic.Int32 }
 
 func (p *semanticStatefulProvider) Name() string { return "test" }
 func (p *semanticStatefulProvider) Complete(_ context.Context, req llm.CompletionRequest) (*llm.CompletionResponse, error) {
-	for _, msg := range req.Messages {
-		if msg.Role == llm.RoleTool {
-			return &llm.CompletionResponse{Content: fmt.Sprintf("turn-%d", p.turns.Load())}, nil
-		}
+	// 只有当前轮刚返回工具结果时才收尾；历史工具消息不能阻止下一轮再次执行。
+	if len(req.Messages) > 0 && req.Messages[len(req.Messages)-1].Role == llm.RoleTool {
+		return &llm.CompletionResponse{Content: fmt.Sprintf("turn-%d", p.turns.Load())}, nil
 	}
 	p.turns.Add(1)
 	return &llm.CompletionResponse{ToolCalls: []llm.ToolCall{{ID: "stateful-call", Name: "stateful_probe", Arguments: "{}"}}}, nil
