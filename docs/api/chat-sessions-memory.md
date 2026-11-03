@@ -2,7 +2,7 @@
 
 [English](chat-sessions-memory.en.md) · [公共 API 总览](../api.md) · [OpenAPI](../../api/openapi.yaml)
 
-本文覆盖当前源码的 34 个方法/路径组合。安装包与发布标签以各自版本为准。每个端点都使用当前服务的 Bearer 令牌；声明为兼容字段的 user_id 不改变鉴权身份。模块未挂载通常是普通 HTTP 404，不能当作 handler 结构化错误。
+本文覆盖当前源码的 35 个方法/路径组合。安装包与发布标签以各自版本为准。每个端点都使用当前服务的 Bearer 令牌；声明为兼容字段的 user_id 不改变鉴权身份。模块未挂载通常是普通 HTTP 404，不能当作 handler 结构化错误。
 
 ## 通用调用约定
 
@@ -34,6 +34,7 @@
 | `PUT` | `/api/v1/messages/{id}/feedback` | [更新消息反馈](#operation-chatsessionupdatemessagefeedback) | 持久化存储可用时挂载（s.store != nil） |
 | `GET` | `/api/v1/streams/active` | [列出活跃运行流](#operation-chatsessionlistactivestreams) | 运行流状态管理器可用时挂载（s.streamStates != nil） |
 | `GET` | `/api/v1/streams/{request_id}` | [读取运行流快照](#operation-chatsessiongetstreamsnapshot) | 运行流状态管理器可用时挂载（s.streamStates != nil） |
+| `POST` | `/api/v1/streams/{request_id}/cancel` | [请求取消 REST 运行](#operation-chatsessioncancelreststream) | 始终挂载 |
 | `GET` | `/api/v1/memory` | [读取文件记忆](#operation-chatsessiongetmemory) | 始终挂载；文件记忆启用时读取，关闭时返回空投影 |
 | `POST` | `/api/v1/memory` | [创建记忆条目](#operation-chatsessionsavememory) | 文件记忆启用时挂载（s.fileMem != nil） |
 | `PUT` | `/api/v1/memory` | [替换全部活跃记忆文本](#operation-chatsessionupdatememorywhole) | 文件记忆启用时挂载（s.fileMem != nil） |
@@ -696,6 +697,27 @@ Body: 不读取 / 不需要。
 错误：401 认证失败；400: Empty request_id; 404: No retained snapshot for this owner/request
 
 源码：[api/handler_streams.go](../../api/handler_streams.go) — `handleGetStreamSnapshot`.
+
+<a id="operation-chatsessioncancelreststream"></a>
+### `POST /api/v1/streams/{request_id}/cancel`
+
+请求取消当前 REST 聊天运行
+
+认证：Bearer. 挂载：始终挂载.
+
+向当前 owner 的 REST 运行发送既有显式取消信号；HTTP 断连不自动取消保留的外部工作，取消也不撤销已发生的外部副作用或关闭共享浏览器/MCP 服务。`202` 只表示取消信号已受理，执行可能仍在停止；继续用原 `request_id` 读取快照直到终态。重复取消幂等；已保留终态快照返回 `200` 且 `cancel_requested=false`。
+
+| 位置 | 字段 | 必填 | 类型 / 规则 |
+| --- | --- | --- | --- |
+| path | `request_id` | 是 | 原 REST 聊天请求 ID |
+
+Body: 不读取 / 不需要。
+
+成功：`202` 表示取消信号已受理；`200` 表示原请求已终态。两者均返回 `request_id`、`cancel_requested` 和 [ChatSessionSnapshot](#schema-chatsessionsnapshot)。
+
+错误：401 认证失败；400: request_id 为空；404: 当前 owner 没有该 REST 请求的保留记录
+
+源码：[api/handler_streams.go](../../api/handler_streams.go) — `handleCancelStream`.
 
 <a id="operation-chatsessiongetmemory"></a>
 ### `GET /api/v1/memory`

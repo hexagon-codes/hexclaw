@@ -22,7 +22,8 @@ We will acknowledge receipt within 48 hours and provide a detailed response with
 
 | Version | Supported |
 |---------|-----------|
-| v0.5.1 (current source) | ✅ Yes |
+| v0.5.2 (current source) | ✅ Yes |
+| v0.5.1 | ✅ Yes |
 | v0.5.0 | ✅ Yes |
 | v0.5.0-beta / v0.5.0-beta.1 (prerelease) | ✅ Yes |
 | v0.4.9 | ✅ Yes |

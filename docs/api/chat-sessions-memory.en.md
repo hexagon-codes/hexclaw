@@ -2,7 +2,7 @@
 
 [中文](chat-sessions-memory.md) · [Public API overview](../api.en.md) · [OpenAPI](../../api/openapi.yaml)
 
-This reference covers 34 method/path combinations in the current source. Released packages and tags follow their own versions. Every endpoint requires the current service Bearer token. Body/query user_id is compatibility-only and cannot change identity. An unmounted module normally returns a plain HTTP 404, rather than a structured handler error.
+This reference covers 35 method/path combinations in the current source. Released packages and tags follow their own versions. Every endpoint requires the current service Bearer token. Body/query user_id is compatibility-only and cannot change identity. An unmounted module normally returns a plain HTTP 404, rather than a structured handler error.
 
 ## Common request rules
 
@@ -34,6 +34,7 @@ All endpoints: Authorization: Bearer $HEXCLAW_API_TOKEN. Authentication failure 
 | `PUT` | `/api/v1/messages/{id}/feedback` | [Update message feedback](#operation-chatsessionupdatemessagefeedback) | Mounted only when s.store != nil |
 | `GET` | `/api/v1/streams/active` | [List active streams](#operation-chatsessionlistactivestreams) | Mounted only when s.streamStates != nil |
 | `GET` | `/api/v1/streams/{request_id}` | [Get a stream snapshot](#operation-chatsessiongetstreamsnapshot) | Mounted only when s.streamStates != nil |
+| `POST` | `/api/v1/streams/{request_id}/cancel` | [Request cancellation of a REST run](#operation-chatsessioncancelreststream) | Always mounted |
 | `GET` | `/api/v1/memory` | [List file memory](#operation-chatsessiongetmemory) | Always mounted; FileMemory-enabled handler or disabled empty response |
 | `POST` | `/api/v1/memory` | [Create a memory entry](#operation-chatsessionsavememory) | Mounted only when s.fileMem != nil |
 | `PUT` | `/api/v1/memory` | [Replace the active memory file](#operation-chatsessionupdatememorywhole) | Mounted only when s.fileMem != nil |
@@ -695,6 +696,27 @@ Success: `200` [ChatSessionSnapshot](#schema-chatsessionsnapshot).
 Errors: 401 authentication failure; 400: Empty request_id; 404: No retained snapshot for this owner/request
 
 Source: [api/handler_streams.go](../../api/handler_streams.go) — `handleGetStreamSnapshot`.
+
+<a id="operation-chatsessioncancelreststream"></a>
+### `POST /api/v1/streams/{request_id}/cancel`
+
+Request cancellation of a REST chat run
+
+Authentication: Bearer. Availability: Always mounted.
+
+Sends the existing explicit cancellation signal to the authenticated owner's REST run. A transport disconnect does not cancel retained external work, and cancellation does not reverse external effects or stop shared browsers/MCP services. `202` only acknowledges the signal; execution may still be stopping. Keep polling the original `request_id` snapshot until terminal. Repeated cancellation is idempotent; a retained terminal snapshot returns `200` with `cancel_requested=false`.
+
+| Location | Field | Required | Type / rules |
+| --- | --- | --- | --- |
+| path | `request_id` | Yes | Original REST chat request ID |
+
+Body: not read / not required.
+
+Success: `202` means the cancellation signal was accepted; `200` means the original request is already terminal. Both return `request_id`, `cancel_requested`, and [ChatSessionSnapshot](#schema-chatsessionsnapshot).
+
+Errors: 401 authentication failure; 400: empty request_id; 404: no retained REST request for this authenticated owner
+
+Source: [api/handler_streams.go](../../api/handler_streams.go) — `handleCancelStream`.
 
 <a id="operation-chatsessiongetmemory"></a>
 ### `GET /api/v1/memory`

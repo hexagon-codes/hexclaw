@@ -2541,7 +2541,7 @@ Unknown fields are rejected.
 | `is_custom` | boolean | no | — | is custom |
 | `native_reasoning_support` | string | no | enum: `"supported"`, `"unsupported"`, `"unknown"` | Static native reasoning declaration, independent of controls |
 | `native_reasoning_source_fingerprint` | string | no | Server-generated | Source binding for the exact instance, model, and execution target |
-| `capabilities` | string[] | yes | item enum: `"text"`, `"vision"`, `"video"`, `"audio"`, `"code"`, `"image_generation"`, `"video_generation"`, `"embedding"` | capabilities |
+| `capabilities` | string[] | yes | item enum: `"text"`, `"vision"`, `"video"`, `"audio"`, `"code"`, `"image_generation"`, `"video_generation"`, `"embedding"`, `"computer_use"` | capabilities |
 | `reasoning_support` | string | no | enum: `"supported"`, `"unsupported"`, `"unknown"` | reasoning support |
 | `reasoning_control` | [ModelsReasoningControl](#schema-modelsreasoningcontrol) | no | — | reasoning control |
 | `embedding` | [ModelsEmbeddingSpec](#schema-modelsembeddingspec) | no | — | embedding |
@@ -3504,7 +3504,7 @@ At least one branch must be satisfied; see the operation for the handler's actua
 | `id` | string | yes | min length: 1 | id |
 | `display_name` | string | no | — | display name |
 | `is_custom` | boolean | no | — | is custom |
-| `capabilities` | string[] or null | no | item enum: `"text"`, `"vision"`, `"video"`, `"audio"`, `"code"`, `"image_generation"`, `"video_generation"`, `"embedding"` | capabilities |
+| `capabilities` | string[] or null | no | item enum: `"text"`, `"vision"`, `"video"`, `"audio"`, `"code"`, `"image_generation"`, `"video_generation"`, `"embedding"`, `"computer_use"` | capabilities |
 | `reasoning_support` | string | no | enum: `"supported"`, `"unsupported"`, `"unknown"` | reasoning support |
 | `reasoning_control` | [ModelsReasoningControl](#schema-modelsreasoningcontrol) | no | — | reasoning control |
 | `embedding` | [ModelsEmbeddingSpec](#schema-modelsembeddingspec) | no | — | embedding |

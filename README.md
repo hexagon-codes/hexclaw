@@ -145,9 +145,9 @@ docker compose up -d hexclaw
 
 | 能力 | 可以做什么 |
 | --- | --- |
-| 多模型接入 | 接入 DeepSeek、OpenAI、Anthropic、通义千问、Gemini、Ollama 和 OpenAI 兼容服务；按文本、视觉、推理、Embedding 等用途选择模型 |
+| 多模型接入 | 接入 DeepSeek、OpenAI、Anthropic、通义千问、Gemini、Ollama 和 OpenAI 兼容服务；按文本、视觉、推理、Embedding 等用途选择模型，并记录 Provider API 协议与模型能力探测证据 |
 | Agent 运行时 | ReAct 工具循环、流式回复、工具调用记录和运行事件；支持规划执行、反思等提示策略，以及 Agent 路由与团队协作 |
-| 工具与扩展 | 内置搜索、浏览器、文件处理、沙箱代码执行等工具；连接 MCP Server，安装 Markdown Skill，扩展插件与场景包 |
+| 工具与扩展 | 内置搜索、浏览器、Computer Use、文件处理、沙箱代码执行等工具；外部工具执行保留运行态回执；连接 MCP Server，安装 Markdown Skill，扩展插件与场景包 |
 | 知识库 | 文档、PDF 和图片摄取；全文与向量混合检索；异步任务、进度、检查点和恢复状态 |
 | 会话与记忆 | 持久化会话、消息搜索、会话分支、本轮输入保护、上下文压缩，以及按属性更新的长期记忆 |
 | 自动化 | Cron、Heartbeat、Webhook 和多步骤工作流；复用 Agent、工具和结果投递能力 |

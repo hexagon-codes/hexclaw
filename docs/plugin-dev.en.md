@@ -4,7 +4,7 @@
 
 ## Overview
 
-HexClaw's Go plugin SDK builds on the [Hexagon](https://github.com/hexagon-codes/hexagon) public `plugin` subpackage and adds HexClaw-specific interfaces. The examples use Hexagon `v0.5.14`, currently pinned in [go.mod](../go.mod), and retain the upstream-recommended direct subpackage import. HexClaw's internal root-package facades such as `hexagon.PluginPlugin` are compatible aliases; they do not make the public subpackage obsolete.
+HexClaw's Go plugin SDK builds on the [Hexagon](https://github.com/hexagon-codes/hexagon) public `plugin` subpackage and adds HexClaw-specific interfaces. The examples use Hexagon `v0.5.15`, currently pinned in [go.mod](../go.mod), and retain the upstream-recommended direct subpackage import. HexClaw's internal root-package facades such as `hexagon.PluginPlugin` are compatible aliases; they do not make the public subpackage obsolete.
 
 **This is currently an embedded Go host API.** [The CLI](../cmd/hexclaw/main.go) does not instantiate the third-party plugin Manager or automatically discover/register/load Go plugins. [Config](../config/config.go) has no top-level `plugins` field. Your own host must register, start, and connect plugin capabilities explicitly.
 
@@ -258,7 +258,7 @@ The current CLI has no third-party Go plugin `plugins:` YAML entry point and doe
 
 ## References
 
-- [Hexagon Plugin Package](https://github.com/hexagon-codes/hexagon/tree/v0.5.14/plugin) — Base plugin interfaces and registry
+- [Hexagon Plugin Package](https://github.com/hexagon-codes/hexagon/tree/v0.5.15/plugin) — Base plugin interfaces and registry
 - [HexClaw Skill Interface](../skill/skill.go) — Skill interface definition
 - [HexClaw Adapter Interface](../adapter/adapter.go) — Adapter interface definition
 - [GitHub Issues](https://github.com/hexagon-codes/hexclaw/issues) — Bug reports and feedback

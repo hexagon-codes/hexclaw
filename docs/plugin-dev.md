@@ -4,7 +4,7 @@
 
 ## 概述
 
-HexClaw 的 Go 插件 SDK 基于 [Hexagon](https://github.com/hexagon-codes/hexagon) 的公共 `plugin` 子包，扩展了 HexClaw 专属接口。示例使用 [go.mod](../go.mod) 当前锁定的 Hexagon `v0.5.14`，保留上游推荐的直接子包导入。HexClaw 内部的 `hexagon.PluginPlugin` 等根包 facade 是兼容别名，不代表公共子包已过时。
+HexClaw 的 Go 插件 SDK 基于 [Hexagon](https://github.com/hexagon-codes/hexagon) 的公共 `plugin` 子包，扩展了 HexClaw 专属接口。示例使用 [go.mod](../go.mod) 当前锁定的 Hexagon `v0.5.15`，保留上游推荐的直接子包导入。HexClaw 内部的 `hexagon.PluginPlugin` 等根包 facade 是兼容别名，不代表公共子包已过时。
 
 **当前这是嵌入式 Go Host 的编程接口。** [CLI](../cmd/hexclaw/main.go) 未创建第三方插件 Manager，也没有自动发现、注册或加载 Go 插件的流程；[Config](../config/config.go) 没有顶层 `plugins` 字段。开发者需要在自己的 Host 中显式注册、启动并接入能力。
 
@@ -258,7 +258,7 @@ registry 必须是引擎实际使用的注册表。示例用于 Host 初始化�
 
 ## 参考
 
-- [Hexagon Plugin 包](https://github.com/hexagon-codes/hexagon/tree/v0.5.14/plugin) — 基础插件接口和注册表
+- [Hexagon Plugin 包](https://github.com/hexagon-codes/hexagon/tree/v0.5.15/plugin) — 基础插件接口和注册表
 - [HexClaw Skill 接口](../skill/skill.go) — Skill 接口定义
 - [HexClaw Adapter 接口](../adapter/adapter.go) — 适配器接口定义
 - [GitHub Issues](https://github.com/hexagon-codes/hexclaw/issues) — 问题反馈

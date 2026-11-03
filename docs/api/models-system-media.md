@@ -2541,7 +2541,7 @@ curl -X POST "${HEXCLAW_API}/api/internal/desktop/provider-credentials/reserve" 
 | `is_custom` | boolean | 否 | — | 是否自定义 |
 | `native_reasoning_support` | string | 否 | 枚举：`"supported"`, `"unsupported"`, `"unknown"` | 原生推理的静态声明，与推理控制独立 |
 | `native_reasoning_source_fingerprint` | string | 否 | 服务端生成 | 当前精确实例、模型及执行目标的来源绑定 |
-| `capabilities` | string[] | 是 | 条目枚举：`"text"`, `"vision"`, `"video"`, `"audio"`, `"code"`, `"image_generation"`, `"video_generation"`, `"embedding"` | 模态能力声明 |
+| `capabilities` | string[] | 是 | 条目枚举：`"text"`, `"vision"`, `"video"`, `"audio"`, `"code"`, `"image_generation"`, `"video_generation"`, `"embedding"`, `"computer_use"` | 模态能力声明 |
 | `reasoning_support` | string | 否 | 枚举：`"supported"`, `"unsupported"`, `"unknown"` | 推理支持状态 |
 | `reasoning_control` | [ModelsReasoningControl](#schema-modelsreasoningcontrol) | 否 | — | 推理协议声明 |
 | `embedding` | [ModelsEmbeddingSpec](#schema-modelsembeddingspec) | 否 | — | Embedding 声明 |
@@ -3504,7 +3504,7 @@ audio 或 text 至少一个非空；此 handler 当前将领域校验失败包�
 | `id` | string | 是 | 最短: 1 | 标识 |
 | `display_name` | string | 否 | — | 展示名称 |
 | `is_custom` | boolean | 否 | — | 是否自定义 |
-| `capabilities` | string[] 或 null | 否 | 条目枚举：`"text"`, `"vision"`, `"video"`, `"audio"`, `"code"`, `"image_generation"`, `"video_generation"`, `"embedding"` | 模态能力声明 |
+| `capabilities` | string[] 或 null | 否 | 条目枚举：`"text"`, `"vision"`, `"video"`, `"audio"`, `"code"`, `"image_generation"`, `"video_generation"`, `"embedding"`, `"computer_use"` | 模态能力声明 |
 | `reasoning_support` | string | 否 | 枚举：`"supported"`, `"unsupported"`, `"unknown"` | 推理支持状态 |
 | `reasoning_control` | [ModelsReasoningControl](#schema-modelsreasoningcontrol) | 否 | — | 推理协议声明 |
 | `embedding` | [ModelsEmbeddingSpec](#schema-modelsembeddingspec) | 否 | — | Embedding 声明 |

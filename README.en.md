@@ -145,9 +145,9 @@ For published images, model and API token configuration, HTTPS, Kubernetes, back
 
 | Capability | What you can do |
 | --- | --- |
-| Multiple model providers | Connect DeepSeek, OpenAI, Anthropic, Qwen, Gemini, Ollama, and OpenAI-compatible services; select models for text, vision, reasoning, and Embedding |
+| Multiple model providers | Connect DeepSeek, OpenAI, Anthropic, Qwen, Gemini, Ollama, and OpenAI-compatible services; select models for text, vision, reasoning, and Embedding, with recorded Provider API protocol and capability-probe evidence |
 | Agent runtime | ReAct tool loops, streaming replies, tool-call records, and runtime events; planning and reflection prompt strategies, Agent routing, and team collaboration |
-| Tools and extensions | Use built-in search, browser, file processing, and sandboxed code execution; connect MCP servers, install Markdown Skills, and extend plugins and scenario packs |
+| Tools and extensions | Use built-in search, browser, Computer Use, file processing, and sandboxed code execution; external tool execution retains runtime receipts; connect MCP servers, install Markdown Skills, and extend plugins and scenario packs |
 | Knowledge base | Ingest documents, PDFs, and images; combine full-text and vector retrieval; track asynchronous jobs, progress, checkpoints, and recovery states |
 | Sessions and memory | Persist conversations, search messages, fork sessions, protect current input, compact context, and update long-term facts by attribute |
 | Automation | Schedule Cron and Heartbeat tasks, receive Webhooks, and run multi-step workflows; reuse Agents, tools, and result delivery |
