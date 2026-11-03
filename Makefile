@@ -11,7 +11,7 @@ LDFLAGS := -ldflags "-X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main
 # 二进制输出目录
 BIN_DIR := bin
 
-.PHONY: all build run test lint fmt vet clean help init
+.PHONY: all build run test lint fmt vet clean help init docker-local
 
 ## 默认目标：构建
 all: build
@@ -24,6 +24,13 @@ build:
 ## 运行服务（开发模式）
 run: build
 	$(BIN_DIR)/hexclaw serve
+
+## 使用本地 go.work 最新代码构建服务器镜像
+## 仅用于本地/联调；正式发布仍使用 Dockerfile 的 final 目标。
+docker-local:
+	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build $(LDFLAGS) -o hexclaw-linux ./cmd/hexclaw/
+	docker build --platform linux/amd64 --target local -t hexclaw:local .
+	@rm -f hexclaw-linux
 
 ## 运行所有测试
 test:
@@ -66,4 +73,5 @@ help:
 	@echo "  make vet         静态检查"
 	@echo "  make lint        golangci-lint 检查"
 	@echo "  make clean       清理构建产物"
+	@echo "  make docker-local 使用本地 go.work 构建服务器镜像"
 	@echo "  make init        初始化配置"
