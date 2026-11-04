@@ -35,6 +35,13 @@ func (s *externalAccessSkill) Execute(ctx context.Context, args map[string]any) 
 	return s.run(ctx, args)
 }
 
+func nonNilSlice[T any](items []T) []T {
+	if items == nil {
+		return []T{}
+	}
+	return items
+}
+
 func jsonSkillResult(value any, err error) (*skill.Result, error) {
 	if projected, ok := value.(interface{ ToolText() string }); ok {
 		return &skill.Result{Content: projected.ToolText(), Data: value}, err
@@ -99,13 +106,13 @@ func RegisterExternalToolAccess(registry *skill.DefaultRegistry, collector *Tool
 		case "", "list":
 			if server != "" {
 				value, err := manager.ListServerResources(ctx, server)
-				return jsonSkillResult(value, err)
+				return jsonSkillResult(nonNilSlice(value), err)
 			}
 			value, err := manager.DiscoverResources(ctx)
-			return jsonSkillResult(value, err)
+			return jsonSkillResult(nonNilSlice(value), err)
 		case "templates":
 			value, err := manager.ListResourceTemplates(ctx, server)
-			return jsonSkillResult(value, err)
+			return jsonSkillResult(nonNilSlice(value), err)
 		case "read":
 			uri, _ := args["uri"].(string)
 			value, err := manager.ReadServerResource(ctx, server, uri)
@@ -120,10 +127,10 @@ func RegisterExternalToolAccess(registry *skill.DefaultRegistry, collector *Tool
 		if action == "" || action == "list" {
 			if server != "" {
 				value, err := manager.ListServerPrompts(ctx, server)
-				return jsonSkillResult(value, err)
+				return jsonSkillResult(nonNilSlice(value), err)
 			}
 			value, err := manager.DiscoverPrompts(ctx)
-			return jsonSkillResult(value, err)
+			return jsonSkillResult(nonNilSlice(value), err)
 		}
 		if action != "get" {
 			return nil, errors.New("unsupported MCP prompt action")
