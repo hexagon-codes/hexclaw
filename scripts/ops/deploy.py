@@ -237,13 +237,16 @@ def retain_development_state(args, configuration, report, report_file, current_i
                 continue
             if image not in set(run(["docker", "image", "ls", "--no-trunc", "--quiet"]).decode().split()):
                 break
-            run(["docker", "image", "rm", reference])
+            remove_image_reference(reference)
         if image in set(run(["docker", "image", "ls", "--no-trunc", "--quiet"]).decode().split()):
             remaining = docker_json("image", "inspect", image)[0]
             if remaining.get("RepoTags") or remaining.get("RepoDigests"):
                 shared_images += 1
                 continue
-            run(["docker", "image", "rm", image])
+            # 旧镜像可能仍是新镜像的父层；无法删除不等于部署失败，保留并如实计数。
+            if not remove_image_reference(image):
+                shared_images += 1
+                continue
         removed_images += 1
     # 清理结束后才收敛旧部署回执；在途任务和非部署备份均保留。
     for path, _ in history:
@@ -260,6 +263,15 @@ def retain_development_state(args, configuration, report, report_file, current_i
     return {"policy": "current_only", "current_archive": "latest-deployment.tar",
             "removed_archives": removed_archives, "removed_images": removed_images,
             "preserved_in_use_images": retained_images, "preserved_shared_images": shared_images}
+
+
+def remove_image_reference(reference):
+    """删除不再使用的旧镜像引用；父层依赖或共享引用导致无法删除时返回 False。"""
+    try:
+        run(["docker", "image", "rm", reference])
+        return True
+    except OperationError:
+        return False
 
 
 def image_repository(reference):
