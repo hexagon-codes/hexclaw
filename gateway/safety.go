@@ -40,10 +40,9 @@ func NewInputSafetyLayer(cfg *config.SecurityConfig) *InputSafetyLayer {
 		guards = append(guards, l.injectionGuard)
 	}
 
-	// PII 检测
+	// PII 只做检测和日志，不进入阻断链；IP/URL 等合法请求不得被误判为不安全输入。
 	if cfg.PIIRedaction.Enabled {
 		l.piiGuard = hexagon.NewPIIGuard()
-		guards = append(guards, l.piiGuard)
 	}
 
 	// 内容过滤
@@ -70,25 +69,37 @@ func (l *InputSafetyLayer) Name() string { return "input_safety" }
 //  2. PII 信息检测（不阻止，但记录日志）
 //  3. 如果检测到高风险注入，拒绝请求
 func (l *InputSafetyLayer) Check(ctx context.Context, msg *adapter.Message) error {
-	if l.guardChain == nil || msg.Content == "" {
+	if msg.Content == "" {
 		return nil
 	}
 
-	result, err := l.guardChain.Check(ctx, msg.Content)
-	if err != nil {
-		logger.Error("error", "error", err)
-		return &GatewayError{
-			Layer:   "input_safety",
-			Code:    "safety_check_error",
-			Message: "安全检查服务异常，请稍后重试",
+	if l.guardChain != nil {
+		result, err := l.guardChain.Check(ctx, msg.Content)
+		if err != nil {
+			logger.Error("error", "error", err)
+			return &GatewayError{
+				Layer:   "input_safety",
+				Code:    "safety_check_error",
+				Message: "安全检查服务异常，请稍后重试",
+			}
+		}
+
+		if !result.Passed {
+			return &GatewayError{
+				Layer:   "input_safety",
+				Code:    "unsafe_input",
+				Message: fmt.Sprintf("输入内容未通过安全检查: %s", result.Reason),
+			}
 		}
 	}
 
-	if !result.Passed {
-		return &GatewayError{
-			Layer:   "input_safety",
-			Code:    "unsafe_input",
-			Message: fmt.Sprintf("输入内容未通过安全检查: %s", result.Reason),
+	if l.piiGuard != nil {
+		result, err := l.piiGuard.Check(ctx, msg.Content)
+		if err != nil {
+			logger.Warn("输入 PII 检测失败，保留原输入继续", "error", err)
+		} else if len(result.Findings) > 0 {
+			// 只记录命中类型和数量，不记录原文或位置；PII 不构成应用层拒绝。
+			logger.Warn("输入包含 PII，已检测并记录，不阻断", "findings", len(result.Findings))
 		}
 	}
 

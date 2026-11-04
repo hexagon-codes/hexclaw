@@ -60,3 +60,13 @@ func TestInputSafetyLayer_Check(t *testing.T) {
 		t.Errorf("with no guard configured the layer must be a no-op: %v", err)
 	}
 }
+
+func TestInputSafetyLayer_PIIDoesNotBlockNetworkURL(t *testing.T) {
+	layer := NewInputSafetyLayer(&config.SecurityConfig{
+		PIIRedaction: config.PIIRedactionConfig{Enabled: true},
+	})
+	// 合法 API/浏览器任务经常包含回环或私网 IP；PII 检测只记录，不得拒绝请求。
+	if err := layer.Check(context.Background(), &adapter.Message{Content: "GET http://127.0.0.1:18080/echo?x=1"}); err != nil {
+		t.Fatalf("PII detection must not block a legitimate network URL: %v", err)
+	}
+}
