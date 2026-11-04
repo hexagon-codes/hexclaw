@@ -212,3 +212,29 @@ func TestRegistry_CleanupAfterTTL(t *testing.T) {
 		t.Error("超 TTL 应被清理")
 	}
 }
+
+// TestRegistry_SetSessionFillsAutoCreatedSession 锁住 WebSocket 运行在引擎分配会话后补齐快照身份，
+// 且不重置已累计内容、状态或已有身份。
+func TestRegistry_SetSessionFillsAutoCreatedSession(t *testing.T) {
+	r := NewRegistry(time.Minute)
+	r.Start("user-1", "", "req-auto-session")
+	r.Append("req-auto-session", &adapter.ReplyChunk{Content: "partial"})
+	r.SetSession("req-auto-session", "sess-created")
+
+	snap, ok := r.GetStreamSnapshot("user-1", "req-auto-session")
+	if !ok {
+		t.Fatal("运行流快照应可读取")
+	}
+	if snap.SessionID != "sess-created" {
+		t.Fatalf("会话身份未补齐: %q", snap.SessionID)
+	}
+	if snap.Content != "partial" || snap.Status != StatusStreaming {
+		t.Fatalf("补齐会话身份不得重置累计内容或状态: content=%q status=%q", snap.Content, snap.Status)
+	}
+
+	r.SetSession("req-auto-session", "sess-other")
+	snap, _ = r.GetStreamSnapshot("user-1", "req-auto-session")
+	if snap.SessionID != "sess-created" {
+		t.Fatalf("已有会话身份不应被覆盖: %q", snap.SessionID)
+	}
+}

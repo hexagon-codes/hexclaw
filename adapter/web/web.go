@@ -552,6 +552,10 @@ func (a *WebAdapter) sendStreamWithIDs(ctx context.Context, chatID, sessionID, r
 			a.bindSession(sessionID, chatID, owner.(string))
 		}
 		a.sessionRequests.Store(sessionID, requestID)
+		// 引擎在流启动后才分配会话身份；运行流快照需同步补齐，供重连和恢复映射。
+		if requestID != "" && a.streams != nil {
+			a.streams.SetSession(requestID, sessionID)
+		}
 	}
 	chunkCount := 0
 	reasoningCount := 0

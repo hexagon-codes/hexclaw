@@ -80,6 +80,19 @@ func (c *RunControl) SetSession(sessionID string) {
 	}
 }
 
+// SetSession 在引擎完成会话分配后补齐运行流快照的会话身份。
+// 只补空值，不重置已累计内容、事件或终态；同一运行已有会话身份时不覆盖。
+func (r *Registry) SetSession(requestID, sessionID string) {
+	if requestID == "" || sessionID == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if item := r.items[requestID]; item != nil && item.SessionID == "" {
+		item.SessionID = sessionID
+	}
+}
+
 func NewRegistry(ttl time.Duration) *Registry {
 	if ttl <= 0 {
 		ttl = 2 * time.Minute
