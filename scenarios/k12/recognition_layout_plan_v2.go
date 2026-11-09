@@ -264,6 +264,13 @@ func BuildRecognitionLayoutPlanV2(input RecognitionLayoutPlanInputV2) (Recogniti
 		Targets:              make([]RecognitionLayoutTargetV2, 0, len(targets)),
 	}
 	for index, target := range targets {
+		if input.InitialReadMode == RecognitionLayoutManifestWithContentV1 && input.ScopeInput != nil &&
+			input.ScopeInput.SourceReviewPolicy == RecognitionImageSourceUprightReviewPolicyV2 &&
+			len(input.Targets) == 1 && input.Scope != nil && input.Scope.Source == "inferred" &&
+			len(input.Scope.SelectedOrders) == 1 && input.Scope.SelectedOrders[0] == 1 && len(input.Scope.Excluded) == 0 {
+			// 单目标整页没有邻题，复核先保留已有宽视野，避免模型紧框切掉换行或页边公式。
+			target.Region = recognitionLayoutAdjudicationRegion(target.Region, pageBounds)
+		}
 		if input.InitialReadMode == RecognitionLayoutManifestWithContentV1 && input.Scope != nil && input.PageOrientation != nil && input.PageOrientation.ClockwiseDegrees != 0 {
 			// 复读同样需要完整横拍原页；不能等裁决阶段才补回已经截断的印刷题干。
 			target.Region = SourcePixelRegion{Width: pageBounds.Dx(), Height: pageBounds.Dy()}

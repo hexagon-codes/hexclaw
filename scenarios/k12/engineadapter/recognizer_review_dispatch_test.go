@@ -11,6 +11,40 @@ import (
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/usecase"
 )
 
+func TestRecognitionArithmeticFastPathRetainsUnresolvedSourceReview(t *testing.T) {
+	for _, risky := range []bool{true, false} {
+		name := "no unresolved source observation"
+		q := usecase.RecognizedQuestion{Subject: "数学", Question: "5/9×7/8+5/9×1/8",
+			StudentAnswer: "=5/9×(7/8+1/8)=5/9", AnswerState: usecase.AnswerStatePresent}
+		confidence := .95
+		q.RecognitionConfidence = &confidence
+		if risky {
+			name = "captured unresolved source observation"
+			q.OCRSignals = []string{"There is crossed-out handwriting above the active line; it is not transcribed because it appears to be abandoned work."}
+		}
+		t.Run(name, func(t *testing.T) {
+			before, _ := json.Marshal(q)
+			decision := recognitionLayoutBatchClassificationDecisionV2{
+				classification: k12.RecognitionLayoutBatchClassifiedV2,
+				candidates:     []k12.RecognitionLayoutCandidateSettlementV2{{CandidateID: "question-8", Classification: k12.RecognitionLayoutCandidateValidV2}},
+				outcomes:       []recognitionLayoutBatchOutcomeV2{{targetID: "question-8", question: &q}},
+			}
+			selectRecognitionSourceReviewV3(&decision)
+			if risky {
+				if len(decision.outcomes) != 0 || decision.candidates[0].Classification != k12.RecognitionLayoutCandidateReviewRequiredV2 {
+					t.Fatal("arithmetic agreement bypassed unresolved source review")
+				}
+			} else if len(decision.outcomes) != 1 || decision.candidates[0].Classification != k12.RecognitionLayoutCandidateValidV2 {
+				t.Fatal("risk-free arithmetic stopped using the existing fast path")
+			}
+			after, _ := json.Marshal(q)
+			if string(before) != string(after) {
+				t.Fatal("review selection rewrote the source observation")
+			}
+		})
+	}
+}
+
 func TestRecognitionReviewUnresolvedObservationsReachIndependentRead(t *testing.T) {
 	for _, scenario := range []struct {
 		name, question, initialAnswer, reviewAnswer, signal string

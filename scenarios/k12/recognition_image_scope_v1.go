@@ -12,7 +12,13 @@ import (
 const RecognitionImageScopeVersionV1 = "image_scope_v1"
 const RecognitionImageSourceReviewPolicyV1 = "clear_language_solve_v1"
 const RecognitionImageSourceUprightReviewPolicyV1 = "upright_context_v1"
+const RecognitionImageSourceUprightReviewPolicyV2 = "upright_context_v2"
 const RecognitionImageSourceComparisonPolicyV1 = "chinese_blank_layout_v1"
+
+// RecognitionImageSourceUprightReviewEnabled 让新几何策略沿用原直立视图与来源证明。
+func RecognitionImageSourceUprightReviewEnabled(policy string) bool {
+	return policy == RecognitionImageSourceUprightReviewPolicyV1 || policy == RecognitionImageSourceUprightReviewPolicyV2
+}
 
 // 范围输入随任务冻结；缺少版本的历史任务继续使用原有整页合同。
 type RecognitionImageScopeInputV1 struct {

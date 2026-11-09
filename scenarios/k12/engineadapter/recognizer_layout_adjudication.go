@@ -176,7 +176,7 @@ func (a *RecognizerAdapter) recognizeLayoutAdjudicationV2(ctx context.Context, p
 	if err != nil {
 		return err
 	}
-	if plan.ScopeInput != nil && plan.ScopeInput.SourceReviewPolicy == k12.RecognitionImageSourceUprightReviewPolicyV1 {
+	if plan.ScopeInput != nil && k12.RecognitionImageSourceUprightReviewEnabled(plan.ScopeInput.SourceReviewPolicy) {
 		prompt += "\nTranscribe printed text verbatim, character by character, including short words, modifiers and full proper names. Do not abbreviate, paraphrase, substitute familiar textbook wording, or complete clipped text from memory. Preserve visible wording even when another edition differs. Report uncertain or missing characters through the existing uncertainty fields rather than silently omitting them.\n"
 	}
 	physicalCtx, cancel, err := recognitionLayoutPhysicalCallContextV2(ctx, time.UnixMilli(runtime.StageDeadlineAtUnixMillis), runtime.Header.PhysicalCallCapMillis)
@@ -197,7 +197,7 @@ func (a *RecognizerAdapter) recognizeLayoutAdjudicationV2(ctx context.Context, p
 		return err
 	}
 	settlement := k12.RecognitionLayoutAdjudicationSettlementV2{PlanDigest: plan.AuthorizedPlanDigest, AuthorizationID: authorization.AuthorizationID, AuthorizationDigest: authorization.AuthorizationDigest, CandidateID: target.TargetID, SourcePhysicalInvocationID: physical.InvocationID, SourcePhysicalUnit: authorization.PhysicalUnit, SourcePhysicalResultDigest: physical.ResultDigest}
-	if initial.question.Subject == "语文" && reread.question.Subject == "语文" && plan.ScopeInput != nil && plan.ScopeInput.SourceReviewPolicy == k12.RecognitionImageSourceUprightReviewPolicyV1 && k12.RecognitionFinalAnswerExecutionPolicy(runtime.Header.ExecutionPolicy) {
+	if initial.question.Subject == "语文" && reread.question.Subject == "语文" && plan.ScopeInput != nil && k12.RecognitionImageSourceUprightReviewEnabled(plan.ScopeInput.SourceReviewPolicy) && k12.RecognitionFinalAnswerExecutionPolicy(runtime.Header.ExecutionPolicy) {
 		settlement.PrintedQuestionEvidence, err = k12.RecognitionPrintedQuestionEvidenceFromResponseV1(physical.Payload, plan, target, []string{initial.question.RawTranscription, reread.question.RawTranscription})
 		if err != nil {
 			return err

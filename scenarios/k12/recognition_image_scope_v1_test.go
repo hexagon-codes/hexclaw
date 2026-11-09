@@ -1,11 +1,73 @@
 package k12
 
 import (
+	"bytes"
 	"encoding/json"
+	"image"
+	"image/color"
+	"image/png"
 	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestRecognitionSingleTargetContextPreservesPrintedEdgesAndSelection(t *testing.T) {
+	canvas := image.NewRGBA(image.Rect(0, 0, 960, 642))
+	printedEdge := image.Pt(900, 570)
+	canvas.Set(printedEdge.X, printedEdge.Y, color.Black)
+	var page bytes.Buffer
+	if err := png.Encode(&page, canvas); err != nil {
+		t.Fatal(err)
+	}
+	first := RecognitionLayoutManifestTargetV2{ManifestRef: "manifest_0001", ManifestOrder: 1,
+		SourceNumberPath: []string{"1"}, DisplayLabel: "1.", Region: SourcePixelRegion{X: 120, Y: 165, Width: 650, Height: 445}}
+	for _, selectedFromMany := range []bool{false, true} {
+		name := "single original question"
+		if selectedFromMany {
+			name = "one selected from multiple questions"
+		}
+		t.Run(name, func(t *testing.T) {
+			input := RecognitionLayoutPlanInputV2{PagePNG: page.Bytes(),
+				Manifest: RecognitionLayoutManifestSuccessV2{InvocationID: "original-whole-page", ResultDigest: "sha256:" + strings.Repeat("a", 64)},
+				Targets:  []RecognitionLayoutManifestTargetV2{first}, RecognitionFormat: RecognitionLayoutCompactV4,
+				InitialReadMode: RecognitionLayoutManifestWithContentV1, EnableSourceAdjudication: true,
+				ScopeInput: &RecognitionImageScopeInputV1{Version: RecognitionImageScopeVersionV1, SourceReviewPolicy: RecognitionImageSourceUprightReviewPolicyV1},
+				Scope:      &RecognitionImageScopeV1{Version: RecognitionImageScopeVersionV1, Source: "inferred", SelectedOrders: []int{1}, Basis: "One complete numbered question is visible."}}
+			if selectedFromMany {
+				input.Targets = append(input.Targets, RecognitionLayoutManifestTargetV2{ManifestRef: "manifest_0002", ManifestOrder: 2,
+					SourceNumberPath: []string{"2"}, DisplayLabel: "2.", Region: SourcePixelRegion{X: 800, Y: 165, Width: 140, Height: 445}})
+				input.Scope.Source = "explicit"
+				input.Scope.Excluded = []RecognitionImageScopeExclusionV1{{Order: 2, Reason: "Only question 1 was requested."}}
+			}
+			legacy, err := BuildRecognitionLayoutPlanV2(input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			policy := *input.ScopeInput
+			policy.SourceReviewPolicy = RecognitionImageSourceUprightReviewPolicyV2
+			input.ScopeInput = &policy
+			current, err := BuildRecognitionLayoutPlanV2(input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			region := current.Targets[0].Region
+			visible := printedEdge.In(image.Rect(region.X, region.Y, region.X+region.Width, region.Y+region.Height))
+			if selectedFromMany {
+				if visible || region != legacy.Targets[0].Region || len(current.ObservedTargets) != 2 {
+					t.Fatal("selecting one question exposed excluded neighboring pixels")
+				}
+			} else if !visible {
+				t.Fatal("single-question review still clips the printed equation at the right edge")
+			}
+			if current.Targets[0].OriginalRegion == nil || *current.Targets[0].OriginalRegion != first.Region {
+				t.Fatal("review context replaced the original manifest region")
+			}
+			if ValidateRecognitionLayoutPlanV2(legacy) != nil || ValidateRecognitionLayoutPlanV2(current) != nil {
+				t.Fatal("old or current frozen geometry cannot be replayed")
+			}
+		})
+	}
+}
 
 func TestRecognitionImageScopeV1PreservesGeometryAndExactSet(t *testing.T) {
 	input := RecognitionLayoutPlanInputV2{InitialReadMode: RecognitionLayoutManifestWithContentV1, RecognitionFormat: RecognitionLayoutCompactV4, PagePNG: recognitionLayoutPlanTestPNG(t, 240, 220), Manifest: RecognitionLayoutManifestSuccessV2{InvocationID: "whole-scope", ResultDigest: "sha256:" + strings.Repeat("a", 64)}, Targets: recognitionLayoutPlanTestTargets(3), EnableSourceAdjudication: true}

@@ -12,7 +12,7 @@ import (
 // AdjudicationImageRotation 仅为新解题计划采用同页可信方向；持久坐标仍属于原图。
 func (p RecognitionLayoutPlanV2) AdjudicationImageRotation() int {
 	if p.ScopeInput == nil || p.ScopeInput.Version != RecognitionImageScopeVersionV1 ||
-		p.ScopeInput.Action != "solve" || p.ScopeInput.SourceReviewPolicy != RecognitionImageSourceUprightReviewPolicyV1 ||
+		p.ScopeInput.Action != "solve" || !RecognitionImageSourceUprightReviewEnabled(p.ScopeInput.SourceReviewPolicy) ||
 		p.PageOrientation == nil || p.PageOrientation.PageDigest != p.PageDigest {
 		return 0
 	}
