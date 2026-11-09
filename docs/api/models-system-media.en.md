@@ -1558,6 +1558,8 @@ Implementation reference: [`handleLogStream`](../../api/handler_logs.go).
 
 ### GET `/api/v1/config` — Read projected full configuration
 
+`heartbeat` reports backend-wide patrol configuration: `enabled` is the saved value (new configurations default to `false`), and `available` indicates an installed runtime toggle. This is separate from connection keepalives and Cron.
+
 Authentication: `Authorization: Bearer ${HEXCLAW_API_TOKEN}`.
 
 Availability: `always registered`.
@@ -1580,6 +1582,8 @@ Implementation reference: [`handleGetFullConfig`](../../api/handler_extended.go)
 <a id="op-put-api-v1-config"></a>
 
 ### PUT `/api/v1/config` — Patch full config or Ollama target
+
+Submit `{"heartbeat":{"enabled":false}}` to disable patrols or `true` to enable them. Omission or `null` preserves the value. Successful persistence applies the toggle immediately; disabling cancels the current patrol without changing its interval, instructions, providers, or Cron. A host without the runtime toggle returns 503 for a changed value. Submit this separately from an `ollama` target update.
 
 Authentication: `Authorization: Bearer ${HEXCLAW_API_TOKEN}`.
 

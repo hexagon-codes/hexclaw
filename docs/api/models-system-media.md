@@ -1558,6 +1558,8 @@ GET须标准WebSocket升级握手并携带Bearer。成功101后文本帧为LogEn
 
 ### GET `/api/v1/config` — 读取脱敏整体配置
 
+`heartbeat` 返回当前后端全局巡查配置：`enabled` 为保存状态（新配置默认 `false`），`available` 表示宿主已装配运行开关。它不代表连接保活或 Cron 状态。
+
 认证: `Authorization: Bearer ${HEXCLAW_API_TOKEN}`.
 
 挂载条件: `始终挂载`.
@@ -1580,6 +1582,8 @@ GET须标准WebSocket升级握手并携带Bearer。成功101后文本帧为LogEn
 <a id="op-put-api-v1-config"></a>
 
 ### PUT `/api/v1/config` — 修改整体配置或Ollama目标
+
+可提交 `{"heartbeat":{"enabled":false}}` 关闭全局巡查；`true` 开启，省略或 `null` 保持原值。保存成功后即时启停，关闭会取消当前巡查，不修改频率、指令、其它供应商或 Cron。宿主未装配运行开关时，变更该字段返回 503；不得与 `ollama` 目标更新混合。
 
 认证: `Authorization: Bearer ${HEXCLAW_API_TOKEN}`.
 
