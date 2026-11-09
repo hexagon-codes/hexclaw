@@ -12,6 +12,25 @@ import (
 
 func float64Ptr(v float64) *float64 { return &v }
 
+func TestRecognitionFrozenQuestionIdentityPreservesFractionGrouping(t *testing.T) {
+	const original = "9. (7/8)/(7/12)-(1/2)"
+	const changed = "9. (7/8)/(7)/(12)-(1/2)"
+	prior := RecognizedQuestion{Subject: "数学", SourceNumberPath: []string{"9"}, DisplayLabel: "9.",
+		Question: original, RawTranscription: original, AnswerState: AnswerStateBlank, RecognitionConfidence: float64Ptr(.99)}
+	review := prior
+	review.Question, review.RawTranscription = changed, changed
+	review.EvidenceTranscriptions = []string{original, changed}
+	before, _ := json.Marshal(review)
+	match, _ := RecognitionSourceReadingsMatchForInitialReadMode(prior, review, k12.RecognitionLayoutManifestWithContentV1)
+	if match || !questionEvidenceTranscriptionsConflictForInitialReadMode(review, k12.RecognitionLayoutManifestWithContentV1) {
+		t.Fatal("different divisor grouping was treated as the same printed question")
+	}
+	after, _ := json.Marshal(review)
+	if string(before) != string(after) {
+		t.Fatal("comparison rewrote the mathematical source")
+	}
+}
+
 func TestRecognitionFrozenQuestionIdentityFormatting(t *testing.T) {
 	const initial = "x − (1/4)x = 18"
 	for _, tc := range []struct {

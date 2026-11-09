@@ -91,7 +91,7 @@ func ValidateRecognitionFinalAnswerEvidenceV1(evidence RecognitionFinalAnswerEvi
 	return nil
 }
 
-func recognitionFinalAnswerObjectV1(raw json.RawMessage, keys []string) (map[string]json.RawMessage, error) {
+func recognitionFinalAnswerObjectV1(raw json.RawMessage, keys []string, allowRepeatedNullFinalAnswer ...bool) (map[string]json.RawMessage, error) {
 	fail := func() (map[string]json.RawMessage, error) {
 		return nil, fmt.Errorf("%w: final answer object fields are invalid", ErrRecognitionProtocolInvalid)
 	}
@@ -106,11 +106,16 @@ func recognitionFinalAnswerObjectV1(raw json.RawMessage, keys []string) (map[str
 		if err != nil || !ok {
 			return fail()
 		}
-		if _, duplicate := fields[key]; duplicate {
-			return fail()
-		}
 		var value json.RawMessage
 		if err := decoder.Decode(&value); err != nil {
+			return fail()
+		}
+		if prior, duplicate := fields[key]; duplicate {
+			// 仅裁决顶层允许重复的空观察；冲突、非空答案及其它字段仍无歧义地拒绝。
+			if len(allowRepeatedNullFinalAnswer) == 1 && allowRepeatedNullFinalAnswer[0] && key == "final_answer" &&
+				bytes.Equal(bytes.TrimSpace(prior), []byte("null")) && bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+				continue
+			}
 			return fail()
 		}
 		fields[key] = value

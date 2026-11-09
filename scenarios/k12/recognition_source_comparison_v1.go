@@ -9,14 +9,14 @@ import (
 )
 
 var (
-	sourceLatexFractionV1      = regexp.MustCompile(`\\frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}`)
-	sourceLatexTextV1          = regexp.MustCompile(`\\text\s*\{([^{}]*)\}`)
-	sourceEvidenceNewlineV1    = regexp.MustCompile(`\\n(?:\b|([0-9]))`)
-	sourceNumericFractionV1    = regexp.MustCompile(`\b([0-9]+(?:\.[0-9]+)?)\s*/\s*([0-9]+(?:\.[0-9]+)?)\b`)
-	sourceNumericRatioV1       = regexp.MustCompile(`([0-9])[:：∶]([0-9])`)
-	sourceNumberTokensV1       = regexp.MustCompile(`[0-9]+(?:\.[0-9]+)?`)
-	sourceGroupedFractionV1    = regexp.MustCompile(`\(([0-9]+(?:\.[0-9]+)?)/([0-9]+(?:\.[0-9]+)?)\)`)
-	sourceRepeatedMathEscapeV1 = regexp.MustCompile(`\\{2,}(frac|text|times|div|cdot|left|right|qquad|quad|\(|\)|\[|\])`)
+	sourceLatexFractionV1              = regexp.MustCompile(`\\frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}`)
+	sourceLatexTextV1                  = regexp.MustCompile(`\\text\s*\{([^{}]*)\}`)
+	sourceEvidenceNewlineV1            = regexp.MustCompile(`\\n(?:\b|([0-9]))`)
+	sourceNumericFractionV1            = regexp.MustCompile(`\b([0-9]+(?:\.[0-9]+)?)\s*/\s*([0-9]+(?:\.[0-9]+)?)\b`)
+	sourceNumericRatioV1               = regexp.MustCompile(`([0-9])[:：∶]([0-9])`)
+	sourceNumberTokensV1               = regexp.MustCompile(`[0-9]+(?:\.[0-9]+)?`)
+	sourceGroupedCoefficientFractionV1 = regexp.MustCompile(`(^|[=+\-−])\s*\(([0-9]+(?:\.[0-9]+)?)/([0-9]+(?:\.[0-9]+)?)\)(\s*[xX])`)
+	sourceRepeatedMathEscapeV1         = regexp.MustCompile(`\\{2,}(frac|text|times|div|cdot|left|right|qquad|quad|\(|\)|\[|\])`)
 )
 
 // RecognitionQuestionSourceTextV1 只投影已知题号的印刷排版，不改写原始观察。
@@ -27,24 +27,23 @@ func RecognitionQuestionSourceTextV1(value string, numberPath []string, label st
 	}
 	text := sourceRepeatedMathEscapeV1.ReplaceAllString(value, `\${1}`)
 	text = strings.NewReplacer(`\left`, "", `\right`, "").Replace(text)
-	text = sourceGroupedFractionV1.ReplaceAllString(text, `($1)/($2)`)
 	text = RecognitionSourcePlainTextV1(text)
 	text = strings.NewReplacer(`\qquad`, " ", `\quad`, " ", "−", "-").Replace(text)
 	text = strings.TrimSpace(text)
 	if rest, ok := strings.CutPrefix(text, numberPath[0]+"、"); ok {
-		return strings.TrimSpace(rest)
+		return sourceGroupedCoefficientFractionV1.ReplaceAllString(strings.TrimSpace(rest), `$1($2)/($3)$4`)
 	}
 	if label == numberPath[0]+"." {
 		if rest, ok := strings.CutPrefix(text, label); ok && rest != "" {
 			for _, first := range rest {
 				if unicode.IsSpace(first) {
-					return strings.TrimSpace(rest)
+					return sourceGroupedCoefficientFractionV1.ReplaceAllString(strings.TrimSpace(rest), `$1($2)/($3)$4`)
 				}
 				break
 			}
 		}
 	}
-	return text
+	return sourceGroupedCoefficientFractionV1.ReplaceAllString(text, `$1($2)/($3)$4`)
 }
 
 // RecognitionSourcePlainTextV1 保留既有来源排版投影；分数显式加括号，不计算数值。

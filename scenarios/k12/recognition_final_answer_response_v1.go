@@ -27,7 +27,7 @@ func ParseRecognitionFinalAnswerResponseV1(raw string, region SourcePixelRegion)
 	if start < 0 || end <= start {
 		return fail()
 	}
-	envelope, err := recognitionFinalAnswerObjectV1([]byte(sanitizeInitialReadModelJSONV1(raw[start:end+1])), []string{"verification", "items", "final_answer"})
+	envelope, err := recognitionFinalAnswerObjectV1([]byte(sanitizeInitialReadModelJSONV1(raw[start:end+1])), []string{"verification", "items", "final_answer"}, true)
 	if err != nil {
 		return fail()
 	}
