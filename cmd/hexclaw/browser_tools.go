@@ -68,12 +68,15 @@ type browserScreenshotDeliveryKey struct{}
 type browserPhysicalCallKey struct{}
 type browserManualCallKey struct{}
 
+const browserCancellationSettleWait = 30 * time.Second
+
 // browserMCPOutput 只投影同次持久回执引用，保留原 MCP content 和图像字节。
 type browserMCPOutput struct {
 	original    any
 	executionID string
 	artifacts   []map[string]any
 	generation  uint64
+	sessionRef  browserruntime.SessionRef
 }
 
 func (p browserMCPOutput) MarshalJSON() ([]byte, error) {
@@ -105,6 +108,9 @@ func (p browserMCPOutput) ToolArtifactExecutionID() string { return p.executionI
 
 func (p browserMCPOutput) ToolArtifactBrowserGeneration() uint64 { return p.generation }
 
+// ToolBrowserSession 仅返回执行租约盖章的实际会话，不读取上游 JSON 自报身份。
+func (p browserMCPOutput) ToolBrowserSession() browserruntime.SessionRef { return p.sessionRef }
+
 func (p browserMCPOutput) ToolMessageContent() []llm.ContentPart {
 	if original, ok := p.original.(interface{ ToolMessageContent() []llm.ContentPart }); ok {
 		return original.ToolMessageContent()
@@ -129,6 +135,8 @@ type browserToolRuntime struct {
 	runs        map[string]*browserToolRun
 	leases      map[*browserruntime.Lease]struct{}
 	ordinals    map[string]map[string]uint64
+	// 仅内部定向验证可缩短取消后的收口等待；零值沿用正式等待时间。
+	cancelSettlementWait time.Duration
 }
 
 // configureBrowserTools 只装配现有执行链；资源与账号未就绪只影响实际调用，不阻止应用启动。
@@ -247,6 +255,35 @@ func (w *browserToolRuntime) callServer(ctx context.Context, server, name string
 		return coretool.Result{}, err
 	}
 	physical := context.WithValue(ctx, browserPhysicalCallKey{}, server)
+	// 已登记的同一次 RPC 等待真实响应；任务取消只阻止后续动作，不能丢弃物理结果。
+	// 原期限与应用关闭仍结束等待，真正断连继续保留结果未知语义。
+	var cancelPhysical context.CancelFunc
+	if deadline, ok := ctx.Deadline(); ok {
+		physical, cancelPhysical = context.WithDeadline(context.WithoutCancel(physical), deadline)
+	} else {
+		physical, cancelPhysical = context.WithCancel(context.WithoutCancel(physical))
+	}
+	defer cancelPhysical()
+	stopApplication := context.AfterFunc(w.ctx, cancelPhysical)
+	defer stopApplication()
+	if w.ctx.Err() != nil {
+		cancelPhysical()
+	}
+	settleWait := w.cancelSettlementWait
+	if settleWait <= 0 {
+		settleWait = browserCancellationSettleWait
+	}
+	// 正常任务不加期限；只有任务取消后才有限等待原响应，超窗仍按未知处理。
+	stopTaskCancellation := context.AfterFunc(ctx, func() {
+		timer := time.NewTimer(settleWait)
+		defer timer.Stop()
+		select {
+		case <-physical.Done():
+		case <-timer.C:
+			cancelPhysical()
+		}
+	})
+	defer stopTaskCancellation()
 	result, callErr := w.manager.CallServerToolResult(physical, server, name, args)
 	responseReceived := callErr == nil
 	if hexagonmcp.ResultIsError(result) {
@@ -403,13 +440,28 @@ func (w *browserToolRuntime) resolveProfile(ctx context.Context, target browserr
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	var serverProfile, resolvedProfile *browserToolProfile
 	for _, profile := range w.profiles {
-		if target.ServerName != "" && profile.ref.ServerName == target.ServerName || target.ProfileID != "" && profile.ref.ProfileID == target.ProfileID {
-			if profile.owner != "" && profile.owner != task.OwnerID {
-				return nil, errors.New("the browser profile belongs to a different application owner")
-			}
-			return profile, nil
+		if target.ServerName != "" && profile.ref.ServerName == target.ServerName {
+			serverProfile = profile
 		}
+		if target.ProfileID != "" && profile.ref.ProfileID == target.ProfileID {
+			resolvedProfile = profile
+		}
+	}
+	selected := resolvedProfile
+	if target.ServerName != "" {
+		// 显式服务独立选路；逻辑标签保留兼容，已登记真实身份必须与服务一致。
+		if resolvedProfile != nil && resolvedProfile.ref.ServerName != target.ServerName {
+			return nil, browserruntime.ErrTargetRequired
+		}
+		selected = serverProfile
+	}
+	if selected != nil {
+		if selected.owner != "" && selected.owner != task.OwnerID {
+			return nil, errors.New("the browser profile belongs to a different application owner")
+		}
+		return selected, nil
 	}
 	if target.ServerName != "" {
 		cfg, _ := w.manager.ConfiguredServerConfig(target.ServerName)
@@ -666,7 +718,12 @@ func (w *browserToolRuntime) closeBrowserRuntime() {
 	}
 }
 
-func (w *browserToolRuntime) borrow(ctx context.Context, _ browserruntime.TaskRef, target browserruntime.Target) (*browserruntime.Lease, error) {
+func (w *browserToolRuntime) borrow(ctx context.Context, _ browserruntime.TaskRef, target browserruntime.Target) (lease *browserruntime.Lease, err error) {
+	defer func() {
+		if lease == nil {
+			err = browserPreLeaseError(err)
+		}
+	}()
 	task, err := browserTask(ctx)
 	if err != nil {
 		return nil, err
@@ -734,7 +791,7 @@ func (w *browserToolRuntime) borrow(ctx context.Context, _ browserruntime.TaskRe
 		run.lease = nil
 	}
 	target.ServerName, target.ProfileID = profile.ref.ServerName, profile.ref.ProfileID
-	lease, err := w.browser.Acquire(ctx, task, target)
+	lease, err = w.browser.Acquire(ctx, task, target)
 	if err == nil {
 		run.lease = lease
 		w.mu.Lock()
@@ -767,6 +824,10 @@ func (w *browserToolRuntime) dispatch(ctx context.Context, server, name string, 
 		return coretool.Result{}, err
 	}
 	result, err := lease.Execute(ctx, browserruntime.Action{Type: "mcp", ToolName: name, Arguments: args})
+	if output, ok := result.Result.Output.(browserMCPOutput); ok {
+		output.sessionRef = lease.Ref()
+		result.Result.Output = output
+	}
 	for index, image := range result.Images {
 		if browserImageArtifact(result.Result, image.Data) != nil {
 			continue
@@ -1068,7 +1129,7 @@ func (s *browserSessionSkill) Execute(ctx context.Context, args map[string]any) 
 		target.ServerName, target.ProfileID = profile.ref.ServerName, profile.ref.ProfileID
 		observation, err := w.browser.Inspect(ctx, task, target)
 		if err != nil {
-			return nil, err
+			return nil, browserPreLeaseError(err)
 		}
 		data := map[string]any{"server": profile.ref.ServerName, "profile": profile.ref.ProfileID, "observation": observation}
 		body, _ := json.Marshal(data)
@@ -1259,6 +1320,16 @@ func (w *browserToolRuntime) waitForLogin(ctx context.Context, lease *browserrun
 		case <-timer.C:
 		}
 	}
+}
+
+// browserPreLeaseError 区分前一任务未确认与本次尚未派发；真实未知调用保留原错误链。
+func browserPreLeaseError(err error) error {
+	var executionErr *skill.ExecutionError
+	var unknown *browserruntime.UnknownCallError
+	if !errors.Is(err, browserruntime.ErrNotQuiescent) || errors.As(err, &executionErr) || errors.As(err, &unknown) {
+		return err
+	}
+	return &skill.ExecutionError{Detail: skill.ToolExecutionDetail{Phase: "browser", Outcome: "failure", Reason: "profile_not_quiescent"}, Err: err}
 }
 
 func browserExecutionError(err error) error {

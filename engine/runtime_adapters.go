@@ -17,6 +17,7 @@ import (
 	hruntime "github.com/hexagon-codes/hexagon/runtime"
 	"github.com/hexagon-codes/hexagon/runtime/middleware"
 	"github.com/hexagon-codes/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/internal/mediaflow"
 	"github.com/hexagon-codes/hexclaw/messagecontent"
 	"github.com/hexagon-codes/hexclaw/skill"
 )
@@ -293,19 +294,28 @@ func runtimeToolSideEffect(toolName string) hruntime.ToolSideEffect {
 }
 
 // newRuntimeToolExecutor builds a per-run executor with a fresh repeat guard.
-func newRuntimeToolExecutor(executor *ToolExecutor) *runtimeToolExecutor {
-	return &runtimeToolExecutor{executor: executor, unknownActions: make(map[string]hruntime.ToolResult)}
+func newRuntimeToolExecutor(executor *ToolExecutor, media ...*mediaflow.Service) *runtimeToolExecutor {
+	runtime := &runtimeToolExecutor{executor: executor, unknownActions: make(map[string]hruntime.ToolResult)}
+	if len(media) > 0 {
+		runtime.mediaFlow = media[0]
+	}
+	return runtime
 }
 
 type runtimeToolExecutor struct {
-	mediaCalls int
-	executor   *ToolExecutor
+	mediaCalls   int
+	mediaFlow    *mediaflow.Service
+	mediaIntents map[string]runtimeMediaIntent
+	executor     *ToolExecutor
 	// 流式请求用现有工具心跳续传活动帧；非流式调用不绑定回调。
 	onActivity func(context.Context) error
 
 	mu             sync.Mutex
 	repeatGuard    hruntime.ToolRepeatGuard
 	unknownActions map[string]hruntime.ToolResult
+	// 只记录本次运行已经观察到的可信浏览器身份，不能代替真实目标绑定。
+	browserObservations []runtimeBrowserObservation
+	browserRepeats      map[string]*runtimeBrowserRepeatSegment
 }
 
 func (e *runtimeToolExecutor) Execute(ctx context.Context, call llm.ToolCall) (out hruntime.ToolResult, runErr error) {
@@ -327,8 +337,27 @@ func (e *runtimeToolExecutor) Execute(ctx context.Context, call llm.ToolCall) (o
 		trace.L(ctx).Warn("runtime tool call failed", "stage", "tool_execute", "tool", call.Name, "tool_call_id", call.ID, "arguments", argumentsForLog, "reason", "executor_unavailable", "err", "tool executor not available", "elapsed_ms", time.Since(started).Milliseconds())
 		return hruntime.ToolResult{Content: "Error: tool executor not available", Error: "tool executor not available", Status: hruntime.ToolStatusError, DurationMs: time.Since(started).Milliseconds()}, nil
 	}
-	canonicalArgs, _ := json.Marshal(args)
-	unknownKey := call.Name + "\x00" + string(canonicalArgs)
+	guardName, guardArgs := e.toolCallIdentity(call.Name, args)
+	canonicalArgs, _ := json.Marshal(guardArgs)
+	unknownKey := guardName + "\x00" + string(canonicalArgs)
+	guardCall := llm.ToolCall{Name: guardName, Arguments: string(canonicalArgs)}
+	sideEffect := e.callSideEffect(guardCall, guardArgs)
+	browserCall := e.browserCall(guardName, guardArgs)
+	browserScope := ""
+	if browserCall.kind != "" {
+		if ref, known := e.browserReference(browserCall, true); known {
+			browserScope = browserRepeatScope(browserCall, ref)
+		}
+	}
+	sourceServer := browserCall.server
+	if sourceServer == "" && guardName == "browser_session" {
+		sourceServer = browserCall.selector.server
+		if ref, known := e.browserReference(browserCall, false); sourceServer == "" && known {
+			sourceServer = ref.ServerName
+		}
+	}
+	sourceIdentity := e.browserSourceIdentity(sourceServer)
+	mediaOrdinal := ""
 	e.mu.Lock()
 	previous, unknown := e.unknownActions[unknownKey]
 	e.mu.Unlock()
@@ -338,22 +367,32 @@ func (e *runtimeToolExecutor) Execute(ctx context.Context, call llm.ToolCall) (o
 		return previous, nil
 	}
 
-	// Loop breaker: if the model repeats the exact same call, stop executing
-	// it and nudge it to answer from the result it already has.
-	count, err := e.repeatGuard.Observe(call.Name, args)
-	if err != nil {
-		return hruntime.ToolResult{}, err
-	}
-	limit := maxIdenticalToolCallsFor(call.Name)
-	if runtimeCallSideEffect(call) == hruntime.SideEffectReadOnly {
-		limit = maxIdenticalToolCalls
-	}
-	if count > limit {
-		trace.L(ctx).Warn("tool-loop repeat guard tripped",
-			"stage", "tool_execute", "tool", call.Name, "tool_call_id", call.ID, "arguments", argumentsForLog,
-			"reason", "repeat_guard", "err", repeatToolCallBlockedError, "identical_calls", count, "elapsed_ms", time.Since(started).Milliseconds())
-		msg := fmt.Sprintf("You have already called %q with these exact arguments %d times and received the same result above. Do NOT call it again. Produce your final answer now using the information you already have; if it is insufficient, explain what is missing and stop.", call.Name, count-1)
-		return hruntime.ToolResult{Content: msg, Raw: repeatToolCallBlockedError, Status: hruntime.ToolStatusError, Stop: true}, nil
+	// 浏览器现场与工具目录会在运行中变化；同参数不代表重复结果，仍由原运行预算约束。
+	if !e.liveToolObservation(guardName, guardArgs) {
+		var count int
+		var err error
+		if browserScope != "" {
+			count, err = e.observeBrowserRepeat(browserScope, guardName, guardArgs)
+		} else {
+			count, err = e.repeatGuard.Observe(guardName, guardArgs)
+		}
+		if err != nil {
+			return hruntime.ToolResult{}, err
+		}
+		limit := maxIdenticalToolCallsFor(guardName)
+		if sideEffect == hruntime.SideEffectReadOnly {
+			limit = maxIdenticalToolCalls
+		}
+		if count > limit && guardName == "media_generate" {
+			mediaOrdinal = e.repeatedMediaOrdinal(ctx, unknownKey, count)
+		}
+		if count > limit && mediaOrdinal == "" {
+			trace.L(ctx).Warn("tool-loop repeat guard tripped",
+				"stage", "tool_execute", "tool", call.Name, "tool_call_id", call.ID, "arguments", argumentsForLog,
+				"reason", "repeat_guard", "err", repeatToolCallBlockedError, "identical_calls", count, "elapsed_ms", time.Since(started).Milliseconds())
+			msg := fmt.Sprintf("You have already called %q with these exact arguments %d times and received the same result above. Do NOT call it again. Produce your final answer now using the information you already have; if it is insufficient, explain what is missing and stop.", guardName, count-1)
+			return hruntime.ToolResult{Content: msg, Raw: repeatToolCallBlockedError, Status: hruntime.ToolStatusError, Stop: true}, nil
+		}
 	}
 
 	// 已进入真实执行阶段即续传一次活动，不能等第一个周期心跳才续期。
@@ -397,14 +436,16 @@ func (e *runtimeToolExecutor) Execute(ctx context.Context, call llm.ToolCall) (o
 	ctx = withRuntimeInvocationSelection(ctx)
 	invocation := skill.CurrentInvocation(ctx)
 	invocation.ToolCallID = call.ID
-	if call.Name == "media_generate" {
-		e.mu.Lock()
-		invocation.OperationOrdinal = fmt.Sprintf("media:%d", e.mediaCalls)
-		e.mediaCalls++
-		e.mu.Unlock()
+	if guardName == "media_generate" {
+		mediaCallID := call.ID
+		if guardName != call.Name {
+			mediaCallID += "/" + guardName
+		}
+		invocation.OperationOrdinal = e.mediaInvocationOrdinal(ctx, unknownKey, mediaCallID, mediaOrdinal)
 	}
 	ctx = skill.WithInvocationContext(ctx, invocation)
 	result, raw, err := e.executor.ExecuteResult(ctx, call.Name, args)
+	e.recordBrowserProgress(browserCall, browserScope, sourceServer, sourceIdentity, guardName, guardArgs, raw, err)
 	if detail := toolExecutionDetail(raw); detail != nil && detail.Replayed {
 		replayed = true
 	}
@@ -417,7 +458,7 @@ func (e *runtimeToolExecutor) Execute(ctx context.Context, call llm.ToolCall) (o
 		}
 		msg = toolExecutionExplanation(msg, raw)
 		outcome := hruntime.ToolResult{Content: msg, Raw: raw, Error: err.Error(), Status: hruntime.ToolStatusError, DurationMs: time.Since(started).Milliseconds()}
-		if detail := toolExecutionDetail(raw); detail != nil && detail.Outcome == "unknown" && runtimeCallSideEffect(call) != hruntime.SideEffectReadOnly {
+		if detail := toolExecutionDetail(raw); detail != nil && detail.Outcome == "unknown" && sideEffect != hruntime.SideEffectReadOnly {
 			e.mu.Lock()
 			e.unknownActions[unknownKey] = outcome
 			e.mu.Unlock()
@@ -429,10 +470,100 @@ func (e *runtimeToolExecutor) Execute(ctx context.Context, call llm.ToolCall) (o
 }
 
 func (e *runtimeToolExecutor) SideEffectOf(call llm.ToolCall) hruntime.ToolSideEffect {
+	var args map[string]any
+	if call.Arguments != "" && json.Unmarshal([]byte(call.Arguments), &args) != nil {
+		return hruntime.SideEffectUnsafe
+	}
+	name, input := e.toolCallIdentity(call.Name, args)
+	encoded, _ := json.Marshal(input)
+	return e.callSideEffect(llm.ToolCall{Name: name, Arguments: string(encoded)}, input)
+}
+
+// toolCallIdentity 只展开现有调用桥；实际执行仍保留原工具、权限链和公开调用标识。
+func (e *runtimeToolExecutor) toolCallIdentity(name string, args map[string]any) (string, map[string]any) {
+	if name != invokeToolName || e.executor == nil || e.executor.skills == nil {
+		return name, args
+	}
+	wrapper, exists := e.executor.skills.Get(invokeToolName)
+	if _, bridge := wrapper.(*externalAccessSkill); !exists || !bridge {
+		return name, args
+	}
+	target, _ := args["name"].(string)
+	if target == "" || target == invokeToolName {
+		return name, args
+	}
+	input, _ := args["arguments"].(map[string]any)
+	return target, input
+}
+
+func (e *runtimeToolExecutor) callSideEffect(call llm.ToolCall, args map[string]any) hruntime.ToolSideEffect {
+	if e.liveToolObservation(call.Name, args) {
+		return hruntime.SideEffectReadOnly
+	}
 	return runtimeCallSideEffect(call)
 }
 
+func (e *runtimeToolExecutor) liveToolObservation(name string, args map[string]any) bool {
+	if e.executor == nil {
+		return false
+	}
+	if e.executor.skills != nil {
+		if registered, exists := e.executor.skills.Get(name); exists {
+			switch name {
+			case "browser_session":
+				return browserSessionObservation(args)
+			case discoverToolsName:
+				_, bridge := registered.(*externalAccessSkill)
+				return bridge
+			default:
+				return false
+			}
+		}
+	}
+	if e.executor.mcpMgr != nil {
+		for _, info := range e.executor.mcpMgr.ListToolInfos() {
+			if info.Name == name {
+				return e.knownBrowserSource(info.ServerName) && browserMCPObservation(info.OriginalName, args)
+			}
+		}
+	}
+	return false
+}
+
+func browserSessionObservation(args map[string]any) bool {
+	action, _ := args["action"].(string)
+	switch action {
+	case "status", "tools", "list_tabs", "inspect", "observe", "screenshot", "read_artifact", "wait_for_login":
+		return true
+	case "call":
+		name, _ := args["tool_name"].(string)
+		input, _ := args["arguments"].(map[string]any)
+		return browserMCPObservation(name, input)
+	default:
+		return false
+	}
+}
+
+func browserMCPObservation(name string, args map[string]any) bool {
+	switch name {
+	case "browser_snapshot", "browser_take_screenshot", "browser_console_messages", "browser_network_requests", "browser_wait_for":
+		return true
+	case "browser_tabs":
+		action, _ := args["action"].(string)
+		return action == "list"
+	default:
+		return false
+	}
+}
+
 func runtimeCallSideEffect(call llm.ToolCall) hruntime.ToolSideEffect {
+	if call.Name == "browser_session" {
+		var args map[string]any
+		if json.Unmarshal([]byte(call.Arguments), &args) == nil && browserSessionObservation(args) {
+			return hruntime.SideEffectReadOnly
+		}
+		return hruntime.SideEffectUnsafe
+	}
 	if call.Name == "browser" {
 		var args map[string]any
 		if json.Unmarshal([]byte(call.Arguments), &args) != nil {

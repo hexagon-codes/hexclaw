@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"image"
 	"image/png"
 	"io"
@@ -315,6 +316,132 @@ func TestMediaPartialFailureAndResumeKeepAssetsWithoutRegeneration(t *testing.T)
 			}
 			if generations.Load() != 1 || len(statusOnly.Attachments) != 0 {
 				t.Fatal("delivery recovery created another media reply or generation")
+			}
+		})
+	}
+}
+
+func TestMediaPartialRepeatRetainsOriginalIntentAcrossWrapper(t *testing.T) {
+	for _, firstWrapped := range []bool{false, true} {
+		t.Run(fmt.Sprintf("first_wrapped=%t", firstWrapped), func(t *testing.T) {
+			data := mediaPNG(t)
+			var generations atomic.Int32
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				generations.Add(1)
+				_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]string{{"b64_json": data}, {"b64_json": data}}})
+			}))
+			defer upstream.Close()
+			model := mockllm.NewLLMProvider("test").WithResponseFn(func(req llm.CompletionRequest) (*llm.CompletionResponse, error) {
+				tools := 0
+				for _, message := range req.Messages {
+					if message.Role == llm.RoleTool {
+						tools++
+					}
+				}
+				if tools >= 3 {
+					return &llm.CompletionResponse{Content: "The original partial operation remains available."}, nil
+				}
+				name, args := "media_generate", `{"kind":"image","prompt":"two fixture outputs","n":2}`
+				if firstWrapped != (tools == 1) {
+					name, args = invokeToolName, `{"name":"media_generate","arguments":{"n":2,"prompt":"two fixture outputs","kind":"image"}}`
+				}
+				return &llm.CompletionResponse{ToolCalls: []llm.ToolCall{{ID: fmt.Sprintf("media-call-%d", tools), Name: name, Arguments: args}}}, nil
+			})
+			eng, _ := mediaEngineFixture(t, upstream.URL, model, func(store mediaflow.BlobStore) mediaflow.BlobStore {
+				interrupted := &interruptedMediaSave{BlobStore: store}
+				interrupted.blocked.Store(true)
+				return interrupted
+			})
+			RegisterExternalToolAccess(eng.skills, eng.toolCollector, eng.toolExecutor, nil)
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			reply, err := eng.Process(ctx, &adapter.Message{ID: "repeat-media", UserID: "user", SessionID: "repeat-media-session", Platform: adapter.PlatformAPI, Content: "Generate two fixture images", Metadata: map[string]string{"request_id": "repeat-media", "tools": "on"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if generations.Load() != 1 || len(reply.ToolCalls) != 3 {
+				t.Fatalf("partial consultation lost or regenerated: generations=%d tools=%+v", generations.Load(), reply.ToolCalls)
+			}
+			for index := 0; index < 2; index++ {
+				tool := reply.ToolCalls[index]
+				if tool.Detail == nil || tool.Detail.Outcome != "failed" || tool.Detail.Reason != "persist_failed" || strings.Contains(tool.Result, "already called") {
+					t.Fatalf("call %d lost the original partial result: %+v", index, tool)
+				}
+			}
+			if !strings.Contains(reply.ToolCalls[2].Result, "already called") {
+				t.Fatalf("third identical call escaped the original limit: %+v", reply.ToolCalls[2])
+			}
+			operations, err := eng.mediaFlow.RequestOperations(ctx, "user", mediaflow.Origin{Kind: "conversation", SessionID: "repeat-media-session", RequestID: "repeat-media"})
+			wantCallID := "media-call-0"
+			if firstWrapped {
+				wantCallID = "media-call-0/media_generate"
+			}
+			if err != nil || len(operations) != 1 || operations[0].Request.Origin.Ordinal != "media:0" || operations[0].Request.Origin.ToolCallID != wantCallID || len(operations[0].Assets) != 1 {
+				t.Fatalf("original durable media identity changed: operations=%+v err=%v", operations, err)
+			}
+		})
+	}
+}
+
+func TestMediaRepeatPreservesReadyFailedAndUnknownProtection(t *testing.T) {
+	for _, state := range []string{"ready", "failed", "unknown"} {
+		t.Run(state, func(t *testing.T) {
+			data := mediaPNG(t)
+			var generations atomic.Int32
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				generations.Add(1)
+				_, _ = io.Copy(io.Discard, r.Body)
+				switch state {
+				case "failed":
+					w.WriteHeader(http.StatusBadRequest)
+					_, _ = io.WriteString(w, `{"error":{"message":"fixture generation declined"}}`)
+				case "unknown":
+					connection, _, err := w.(http.Hijacker).Hijack()
+					if err != nil {
+						t.Error(err)
+						return
+					}
+					_ = connection.Close()
+				default:
+					_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]string{{"b64_json": data}}})
+				}
+			}))
+			defer upstream.Close()
+			model := mockllm.NewLLMProvider("test").WithResponseFn(func(req llm.CompletionRequest) (*llm.CompletionResponse, error) {
+				tools := 0
+				for _, message := range req.Messages {
+					if message.Role == llm.RoleTool {
+						tools++
+					}
+				}
+				if tools >= 2 {
+					return &llm.CompletionResponse{Content: "The original result remains authoritative."}, nil
+				}
+				name, args := "media_generate", `{"kind":"image","prompt":"one fixture output"}`
+				if tools == 1 {
+					name, args = invokeToolName, `{"arguments":{"prompt":"one fixture output","kind":"image"},"name":"media_generate"}`
+				}
+				return &llm.CompletionResponse{ToolCalls: []llm.ToolCall{{ID: fmt.Sprintf("media-%d", tools), Name: name, Arguments: args}}}, nil
+			})
+			eng, _ := mediaEngineFixture(t, upstream.URL, model)
+			RegisterExternalToolAccess(eng.skills, eng.toolCollector, eng.toolExecutor, nil)
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			reply, err := eng.Process(ctx, &adapter.Message{ID: "media-boundary", UserID: "user", SessionID: "media-boundary-session", Platform: adapter.PlatformAPI, Content: "Generate one fixture image", Metadata: map[string]string{"request_id": "media-boundary", "tools": "on"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if generations.Load() != 1 || len(reply.ToolCalls) != 2 {
+				t.Fatalf("repeat performed a new generation: calls=%d tools=%+v", generations.Load(), reply.ToolCalls)
+			}
+			if state == "unknown" {
+				for _, tool := range reply.ToolCalls {
+					if tool.Detail == nil || tool.Detail.Outcome != "unknown" || strings.Contains(tool.Result, "already called") {
+						t.Fatalf("unknown result was not retained: %+v", tool)
+					}
+				}
+			} else if !strings.Contains(reply.ToolCalls[1].Result, "already called") {
+				t.Fatalf("non-partial repeated generation was allowed: %+v", reply.ToolCalls[1])
 			}
 		})
 	}
