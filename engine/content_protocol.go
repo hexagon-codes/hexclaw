@@ -25,6 +25,43 @@ func canonicalProducerContent(producer messagecontent.ProducerKind, markdown, lo
 	return &content
 }
 
+// canonicalizeCancelledPartial 对齐正常完成时的正文规则，并重建文本块的规范身份。
+func canonicalizeCancelledPartial(content string, snapshot adapter.RuntimeSnapshot) (string, adapter.RuntimeSnapshot, error) {
+	content = StripAllThinking(content)
+	blocks := make([]adapter.Block, 0, len(snapshot.Blocks))
+	for _, block := range snapshot.Blocks {
+		if block.Type != "text" {
+			blocks = append(blocks, block)
+			continue
+		}
+		text := block.Text
+		if block.MessageContent != nil {
+			text = block.MessageContent.Markdown
+		}
+		text = StripAllThinking(text)
+		if block.MessageContent == nil {
+			if text == "" {
+				continue
+			}
+			block.MessageContent = canonicalProducerContent(messagecontent.ProducerChat, text, "und")
+		} else {
+			source := block.MessageContent
+			if text == "" && len(source.Attachments) == 0 {
+				continue
+			}
+			canonical, err := messagecontent.New(source.ProducerKind, source.Locale, text, source.Attachments)
+			if err != nil {
+				return "", snapshot, fmt.Errorf("canonicalize cancelled text block: %w", err)
+			}
+			block.MessageContent = &canonical
+		}
+		block.Text = text
+		blocks = append(blocks, block)
+	}
+	snapshot.Blocks = blocks
+	return content, snapshot, nil
+}
+
 func resolveProducerContract(metadata ...map[string]string) (messagecontent.ProducerKind, string, error) {
 	producer := messagecontent.ProducerChat
 	producerFound := false

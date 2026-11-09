@@ -1587,7 +1587,7 @@ func (e *ReActEngine) completeWithTools(
 		ProviderName: providerName,
 		ModelName:    modelName,
 		Metadata:     req.Metadata,
-		Generation: runtimeGenerationOptions(req),
+		Generation:   runtimeGenerationOptions(req),
 		Limits:       hruntime.Limits{MaxTurns: maxTurns},
 	}, nil, nil)
 	// BUG-20260711-A：模型/provider 明确“不支持工具调用”（openrouter 免费 Nemotron 等）
@@ -1602,7 +1602,7 @@ func (e *ReActEngine) completeWithTools(
 			ProviderName: providerName,
 			ModelName:    modelName,
 			Metadata:     req.Metadata,
-			Generation: runtimeGenerationOptions(req),
+			Generation:   runtimeGenerationOptions(req),
 			Limits:       hruntime.Limits{MaxTurns: maxTurns},
 		}, err, nil)
 	}
@@ -1629,7 +1629,7 @@ func (e *ReActEngine) completeWithTools(
 			ProviderName: fbName,
 			ModelName:    fbModel,
 			Metadata:     req.Metadata,
-			Generation: runtimeGenerationOptions(req),
+			Generation:   runtimeGenerationOptions(req),
 			Limits:       hruntime.Limits{MaxTurns: maxTurns},
 		}, err, nil)
 		// 新 provider 若又不支持工具调用，同样去工具重试一次（与首个 provider 对称）。
@@ -1641,7 +1641,7 @@ func (e *ReActEngine) completeWithTools(
 				ProviderName: fbName,
 				ModelName:    fbModel,
 				Metadata:     req.Metadata,
-				Generation: runtimeGenerationOptions(req),
+				Generation:   runtimeGenerationOptions(req),
 				Limits:       hruntime.Limits{MaxTurns: maxTurns},
 			}, err, nil)
 		}
@@ -2142,23 +2142,49 @@ func (e *ReActEngine) ProcessStream(ctx context.Context, msg *adapter.Message) (
 			emit(decorated)
 		}
 		if terminal == nil {
-			return
+			if !errors.Is(ctx.Err(), context.Canceled) || content.Len() == 0 {
+				return
+			}
+			terminal = wire.Decorate(&adapter.ReplyChunk{Done: true, Error: ctx.Err()})
 		}
 		if e.sessions != nil {
 			saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 			snapshot := wire.Snapshot()
+			persistedContent := content.String()
+			// 取消只保存已经收到的部分正文和取消快照，不进入成功 finalize 或重发模型。
+			cancelledPartial := errors.Is(terminal.Error, context.Canceled) && content.Len() > 0
+			if cancelledPartial {
+				var err error
+				persistedContent, snapshot, err = canonicalizeCancelledPartial(persistedContent, snapshot)
+				if err != nil {
+					trace.L(ctx).Warn("Failed to canonicalize cancelled partial", "message_id", assistantMessageID, "err", err)
+					cancel()
+					return
+				}
+				if persistedContent == "" && len(snapshot.Blocks) == 0 {
+					cancel()
+					return
+				}
+				// 软删除会保留历史行，但取消收尾不能继续向已删除会话写入。
+				if _, err := e.store.GetSession(saveCtx, msg.SessionID); errors.Is(err, storage.ErrNotFound) {
+					cancel()
+					return
+				}
+				terminal.Blocks = snapshot.Blocks
+				terminal.ToolCalls = snapshot.ToolCalls
+			}
 			persistErr := e.sessions.PersistAssistantRuntimeSnapshot(
 				saveCtx,
 				assistantMessageID,
 				snapshot,
 			)
 			if errors.Is(persistErr, storage.ErrNotFound) &&
-				terminal.Error == nil &&
+				(terminal.Error == nil || cancelledPartial) &&
 				msg.SessionID != "" {
 				_, persistErr = e.sessions.SaveAssistantReply(
 					saveCtx,
 					msg.SessionID,
-					content.String(),
+					persistedContent,
 					session.AssistantMeta{
 						MessageID:           assistantMessageID,
 						Provider:            terminal.Metadata["provider"],
@@ -2841,7 +2867,7 @@ func (e *ReActEngine) processStreamRuntime(
 			ProviderName: selection.providerName,
 			ModelName:    selection.modelName,
 			Metadata:     req.Metadata,
-			Generation: runtimeGenerationOptions(req),
+			Generation:   runtimeGenerationOptions(req),
 			Limits:       hruntime.Limits{MaxTurns: maxTurns},
 			StreamMode:   streamMode,
 		}, nil, sink)
@@ -2857,7 +2883,7 @@ func (e *ReActEngine) processStreamRuntime(
 				ProviderName: selection.providerName,
 				ModelName:    selection.modelName,
 				Metadata:     req.Metadata,
-				Generation: runtimeGenerationOptions(req),
+				Generation:   runtimeGenerationOptions(req),
 				Limits:       hruntime.Limits{MaxTurns: maxTurns},
 				StreamMode:   streamMode,
 			}, err, sink)
@@ -2887,7 +2913,7 @@ func (e *ReActEngine) processStreamRuntime(
 				ProviderName: fbName,
 				ModelName:    fbModel,
 				Metadata:     req.Metadata,
-				Generation: runtimeGenerationOptions(req),
+				Generation:   runtimeGenerationOptions(req),
 				Limits:       hruntime.Limits{MaxTurns: maxTurns},
 				StreamMode:   streamMode,
 			}, err, sink)
@@ -2899,7 +2925,7 @@ func (e *ReActEngine) processStreamRuntime(
 					ProviderName: fbName,
 					ModelName:    fbModel,
 					Metadata:     req.Metadata,
-					Generation: runtimeGenerationOptions(req),
+					Generation:   runtimeGenerationOptions(req),
 					Limits:       hruntime.Limits{MaxTurns: maxTurns},
 					StreamMode:   streamMode,
 				}, err, sink)
