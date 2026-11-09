@@ -36,6 +36,42 @@ func newTestManager(t *testing.T) (*Manager, storage.Store) {
 	return NewManager(store, cfg), store
 }
 
+type storeWithoutActiveWriter struct{ storage.Store }
+
+// 显式原子要求不允许非原子降级；默认false继续支持原存储保存合同。
+func TestSaveAssistantReplyActiveSessionCapabilityIsExplicit(t *testing.T) {
+	manager, store := newTestManager(t)
+	ctx := context.Background()
+	if err := store.CreateSession(ctx, &storage.Session{ID: "capability-session", UserID: "owner", Platform: "web"}); err != nil {
+		t.Fatal(err)
+	}
+	manager.store = &storeWithoutActiveWriter{Store: store}
+	if _, err := manager.SaveAssistantReply(ctx, "capability-session", "normal", AssistantMeta{MessageID: "normal-save"}); err != nil {
+		t.Fatalf("default save contract changed: %v", err)
+	}
+	if _, err := manager.SaveAssistantReply(ctx, "capability-session", "observed", AssistantMeta{MessageID: "atomic-save", RequireActiveSession: true}); err == nil || !strings.Contains(err.Error(), "atomic active-session") {
+		t.Fatalf("missing atomic capability was hidden: %v", err)
+	}
+	if _, err := store.GetMessage(ctx, "atomic-save"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("unsupported capability wrote non-atomically: %v", err)
+	}
+	before, err := store.GetMessage(ctx, "normal-save")
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := adapter.RuntimeSnapshot{LastSequence: 3, ReasoningDisclosure: adapter.ReasoningDisclosure{Visibility: adapter.ReasoningNotExposed}}
+	if err := manager.PersistAssistantRuntimeSnapshotIfSessionActive(ctx, "normal-save", snapshot); err == nil || !strings.Contains(err.Error(), "atomic active-session metadata") {
+		t.Fatalf("missing atomic metadata capability was hidden: %v", err)
+	}
+	after, err := store.GetMessage(ctx, "normal-save")
+	if err != nil || after.Metadata != before.Metadata {
+		t.Fatalf("unsupported metadata writer changed row: %#v %v", after, err)
+	}
+	if err := manager.PersistAssistantRuntimeSnapshot(ctx, "normal-save", snapshot); err != nil {
+		t.Fatalf("default metadata contract changed: %v", err)
+	}
+}
+
 type getSessionErrorStore struct {
 	*mockStore
 	err error

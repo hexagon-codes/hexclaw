@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -17,7 +18,193 @@ import (
 	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
 	"github.com/hexagon-codes/hexclaw/llmrouter"
 	"github.com/hexagon-codes/hexclaw/skill"
+	"github.com/hexagon-codes/hexclaw/storage"
+	sqlitebackend "github.com/hexagon-codes/hexclaw/storage/sqlite"
 )
+
+type partialFailureSkill struct {
+	err    error
+	cancel context.CancelFunc
+	calls  int
+}
+
+func (*partialFailureSkill) Name() string { return "shell" }
+func (*partialFailureSkill) ToolDefinition() llm.ToolDefinition {
+	return llm.NewToolDefinition("shell", "Return an observed failed process result", &llm.Schema{Type: "object"})
+}
+func (*partialFailureSkill) Description() string    { return "Return an observed failed process result" }
+func (*partialFailureSkill) Match(text string) bool { return strings.HasPrefix(text, "/sh ") }
+func (s *partialFailureSkill) Execute(context.Context, map[string]any) (*skill.Result, error) {
+	s.calls++
+	if s.cancel != nil {
+		s.cancel()
+	}
+	detail := skill.ToolExecutionDetail{Phase: "host_process", Outcome: "failure", Reason: "nonzero_exit", Action: "run"}
+	if errors.Is(s.err, context.Canceled) {
+		detail.Outcome, detail.Reason = "unknown", "cancelled"
+	}
+	return &skill.Result{Content: "Process outcome: failure; exit code: 7.\nstdout:\npartial-output\nstderr:\nstderr-marker\nComplete stdout artifact: {\"artifact_id\":\"stdout-ref\",\"url\":\"/api/v1/files/generated/stdout.txt\"}", Detail: &detail}, &skill.ExecutionError{Detail: detail, Err: s.err}
+}
+
+// 失败与取消仍有可交付的观察结果；错误不得抹掉原文、工具回执和助手历史。
+func TestReActEngine_SkillFastPathPreservesFailedResult(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		for _, cancelled := range []bool{false, true} {
+			name := "sync-nonzero"
+			if stream {
+				name = "stream-nonzero"
+			}
+			if cancelled {
+				name += "-cancelled"
+			}
+			t.Run(name, func(t *testing.T) {
+				store, err := sqlitefixture.New(filepath.Join(t.TempDir(), "test.db"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer store.Close()
+				if err := store.Init(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+				cfg := config.DefaultConfig()
+				cfg.LLM.Tools.Enabled = "on"
+				reg := skill.NewRegistry()
+				cause := errors.New("exit status 7")
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				fixture := &partialFailureSkill{err: cause}
+				if cancelled {
+					cause = context.Canceled
+					fixture.err, fixture.cancel = cause, cancel
+				}
+				reg.Register(fixture)
+				eng := NewReActEngine(cfg, nil, store, reg)
+				eng.SetToolExecutor(NewToolExecutor(reg, nil))
+				msg := &adapter.Message{ID: "failed-fastpath", Platform: adapter.PlatformAPI, UserID: "test-user", Content: "/sh controlled-task", Metadata: map[string]string{"request_id": name, "pinned_agent": "default"}}
+				var content string
+				var calls []adapter.ToolCall
+				var executionErr error
+				if stream {
+					chunks, startErr := eng.ProcessStream(ctx, msg)
+					if startErr != nil {
+						t.Fatalf("observed failure must be a terminal result: %v", startErr)
+					}
+					for chunk := range chunks {
+						content += chunk.Content
+						if chunk.Done {
+							calls, executionErr = chunk.ToolCalls, chunk.Error
+							if chunk.MessageContent == nil {
+								t.Error("failed terminal lost canonical result")
+							}
+							want := adapter.RuntimeTerminalFailed
+							if cancelled {
+								want = adapter.RuntimeTerminalCancelled
+							}
+							if chunk.RuntimeEvent == nil || chunk.RuntimeEvent.TerminalStatus != want {
+								t.Errorf("terminal = %#v, want %s", chunk.RuntimeEvent, want)
+							}
+						}
+					}
+				} else {
+					reply, gotErr := eng.Process(ctx, msg)
+					executionErr = gotErr
+					if reply == nil {
+						t.Fatalf("failure discarded observed reply: %v", gotErr)
+					}
+					content, calls = reply.Content, reply.ToolCalls
+					if reply.MessageContent == nil {
+						t.Error("failed reply lost canonical result")
+					}
+				}
+				if !errors.Is(executionErr, cause) {
+					t.Errorf("error = %v, want original cause %v", executionErr, cause)
+				}
+				for _, fragment := range []string{"exit code: 7", "partial-output", "stderr-marker", "stdout-ref", "/api/v1/files/generated/stdout.txt"} {
+					if !strings.Contains(content, fragment) {
+						t.Errorf("result lost %q", fragment)
+					}
+				}
+				if len(calls) != 1 || calls[0].Status != "error" || calls[0].Detail == nil {
+					t.Fatalf("failed tool receipt = %#v", calls)
+				}
+				if fixture.calls != 1 {
+					t.Errorf("original command repeated %d times", fixture.calls)
+				}
+				record, err := store.GetMessage(context.Background(), name+":assistant")
+				if err != nil {
+					t.Fatalf("failed assistant history missing: %v", err)
+				}
+				if record.Content != content || !strings.Contains(record.Metadata, `"status":"error"`) {
+					t.Fatalf("history lost observed result or failed receipt: %#v", record)
+				}
+				if replay, replayErr := eng.Process(context.Background(), msg); replayErr == nil || replay != nil || fixture.calls != 1 {
+					t.Fatalf("failed history was replayed as success or re-executed: reply=%#v err=%v calls=%d", replay, replayErr, fixture.calls)
+				}
+			})
+		}
+	}
+}
+
+// 会话删除拥有历史生命周期，取消收口不得重新写入已软删除会话。
+func TestReActEngine_SkillFastPathCancelledDeletedSessionDoesNotWrite(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		name := "sync"
+		if stream {
+			name = "stream"
+		}
+		t.Run(name, func(t *testing.T) {
+			store, err := sqlitefixture.New(filepath.Join(t.TempDir(), "test.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			if err := store.Init(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			cfg := config.DefaultConfig()
+			cfg.LLM.Tools.Enabled = "on"
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			msg := &adapter.Message{ID: "deleted-fastpath", Platform: adapter.PlatformAPI, UserID: "test-user", Content: "/sh controlled-task", Metadata: map[string]string{"request_id": "deleted-" + name, "pinned_agent": "default"}}
+			fixture := &partialFailureSkill{err: context.Canceled, cancel: func() {
+				cancel()
+				if err := store.DeleteSession(context.Background(), msg.SessionID); err != nil {
+					t.Fatal(err)
+				}
+			}}
+			reg := skill.NewRegistry()
+			reg.Register(fixture)
+			eng := NewReActEngine(cfg, nil, store, reg)
+			eng.SetToolExecutor(NewToolExecutor(reg, nil))
+			if stream {
+				chunks, err := eng.ProcessStream(ctx, msg)
+				if err != nil || chunks == nil {
+					t.Fatalf("observed cancelled result discarded: %v", err)
+				}
+				observed := false
+				for chunk := range chunks {
+					if chunk.Done {
+						observed = errors.Is(chunk.Error, context.Canceled) && strings.Contains(chunk.Content, "partial-output") && chunk.Metadata["persist_error"] != "" && chunk.Metadata["backend_message_id"] == ""
+					}
+				}
+				if !observed {
+					t.Error("deleted session lost cancellation receipt or falsely claimed persistence")
+				}
+			} else {
+				reply, err := eng.Process(ctx, msg)
+				if !errors.Is(err, context.Canceled) || reply == nil || !strings.Contains(reply.Content, "partial-output") || reply.Metadata["persist_error"] == "" || reply.Metadata["backend_message_id"] != "" {
+					t.Errorf("deleted reply = %#v, %v", reply, err)
+				}
+			}
+			if _, err := store.GetMessage(context.Background(), "deleted-"+name+":assistant"); !errors.Is(err, sql.ErrNoRows) && !errors.Is(err, storage.ErrNotFound) {
+				t.Fatalf("assistant written after session deletion: %v", err)
+			}
+			if fixture.calls != 1 {
+				t.Fatalf("deleted command repeated: %d", fixture.calls)
+			}
+		})
+	}
+}
 
 func TestReActEngine_Lifecycle(t *testing.T) {
 	dir := t.TempDir()
@@ -1206,4 +1393,113 @@ func newEngineWithProviders(
 	}
 	t.Cleanup(func() { _ = eng.Stop(context.Background()) })
 	return eng
+}
+
+// 公开产物解析回调内删除会话，原子运行写入仍须阻止尾写。
+func TestReActEngine_SkillFastPathDeleteDuringArtifactResolutionDoesNotWrite(t *testing.T) {
+	st, err := sqlitefixture.New(filepath.Join(t.TempDir(), "review.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.Init(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.DefaultConfig()
+	cfg.LLM.Tools.Enabled = "on"
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fixture := &partialFailureSkill{err: context.Canceled, cancel: cancel}
+	reg := skill.NewRegistry()
+	reg.Register(fixture)
+	eng := NewReActEngine(cfg, nil, st, reg)
+	eng.SetToolExecutor(NewToolExecutor(reg, nil))
+	deleted := false
+	eng.SetReplyArtifactResolver(func(inner context.Context, msg *adapter.Message, meta map[string]string) (context.Context, error) {
+		if !deleted {
+			deleted = true
+			if err := st.DeleteSession(context.Background(), msg.SessionID); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return inner, nil
+	})
+	msg := &adapter.Message{ID: "review-delete", Platform: adapter.PlatformAPI, UserID: "review-user", Content: "/sh controlled", Metadata: map[string]string{"request_id": "review-delete", "pinned_agent": "default"}}
+	reply, executionErr := eng.Process(ctx, msg)
+	if !errors.Is(executionErr, context.Canceled) || !deleted {
+		t.Fatalf("fixture did not reach cancellation/guard window: deleted=%v err=%v", deleted, executionErr)
+	}
+	_, sessionErr := st.GetSession(context.Background(), msg.SessionID)
+	record, recordErr := st.GetMessage(context.Background(), "review-delete:assistant")
+	t.Logf("deleted=%v session_missing=%v assistant_written=%v reply_returned=%v", deleted, errors.Is(sessionErr, storage.ErrNotFound), recordErr == nil && record != nil, reply != nil)
+	if recordErr == nil && record != nil {
+		t.Fatal("failed fast path wrote assistant after real SQLite session deletion occurred after the guard")
+	}
+}
+
+// 读取原快照后删除会话，后续更新不得尾写，也不能抹掉已存消息事实与取消结果。
+type snapshotDeleteAfterReadStore struct {
+	*sqlitebackend.Store
+	deleted bool
+	before  string
+}
+
+func (s *snapshotDeleteAfterReadStore) GetMessage(ctx context.Context, id string) (*storage.MessageRecord, error) {
+	rec, err := s.Store.GetMessage(ctx, id)
+	if err == nil && rec.Role == "assistant" && !s.deleted {
+		s.before = rec.Metadata
+		if err := s.Store.DeleteSession(context.Background(), rec.SessionID); err != nil {
+			return nil, err
+		}
+		s.deleted = true
+	}
+	return rec, err
+}
+func TestReActEngine_CancelledSnapshotDeleteWindowDoesNotUpdate(t *testing.T) {
+	real, err := sqlitefixture.New(filepath.Join(t.TempDir(), "metadata.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer real.Close()
+	if err := real.Init(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	st := &snapshotDeleteAfterReadStore{Store: real}
+	cfg := config.DefaultConfig()
+	cfg.LLM.Tools.Enabled = "on"
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fixture := &partialFailureSkill{err: context.Canceled, cancel: cancel}
+	reg := skill.NewRegistry()
+	reg.Register(fixture)
+	eng := NewReActEngine(cfg, nil, st, reg)
+	eng.SetToolExecutor(NewToolExecutor(reg, nil))
+	msg := &adapter.Message{ID: "metadata-tail", Platform: adapter.PlatformAPI, UserID: "metadata-owner", Content: "/sh controlled", Metadata: map[string]string{"request_id": "metadata-tail", "pinned_agent": "default"}}
+	ch, err := eng.ProcessStream(ctx, msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var terminal *adapter.ReplyChunk
+	for chunk := range ch {
+		if chunk.Done {
+			terminal = chunk
+		}
+	}
+	if terminal == nil || !errors.Is(terminal.Error, context.Canceled) {
+		t.Fatalf("cancellation result lost: %#v", terminal)
+	}
+	rec, err := real.GetMessage(context.Background(), "metadata-tail:assistant")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("deleted=%v metadata_changed=%v saved_marker=%v", st.deleted, rec.Metadata != st.before, terminal.Metadata["backend_message_id"] != "")
+	if !st.deleted || st.before == "" {
+		t.Fatal("fixture did not reach read/update deletion window")
+	}
+	if rec.Metadata != st.before {
+		t.Fatal("cancelled runtime snapshot updated an existing assistant after its session was deleted")
+	}
+	if terminal.Metadata["backend_message_id"] != "metadata-tail:assistant" || terminal.Metadata["runtime_snapshot_error"] == "" {
+		t.Fatal("saved message fact or snapshot failure was lost")
+	}
 }

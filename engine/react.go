@@ -990,15 +990,25 @@ func (e *ReActEngine) executeSkillFastPath(ctx context.Context, matched skill.Sk
 		return matched.Execute(ctx, args)
 	}
 	content, raw, err := e.toolExecutor.ExecuteResult(ctx, matched.Name(), args)
-	if err != nil {
-		return nil, err
-	}
 	if result, ok := raw.(*skill.Result); ok && result != nil {
 		copy := *result
 		copy.Content = content
-		return &copy, nil
+		return &copy, err
+	}
+	if err != nil {
+		return nil, err
 	}
 	return &skill.Result{Content: content}, nil
+}
+
+// fastPathFailureSnapshot 复用现有运行协议记录观察结果，失败和取消不会被历史重放成成功。
+func fastPathFailureSnapshot(msg *adapter.Message, content string, calls []adapter.ToolCall, err error) adapter.RuntimeSnapshot {
+	if err == nil {
+		return adapter.RuntimeSnapshot{}
+	}
+	wire := adapter.NewRuntimeWire(canonicalAssistantMessageID(msg), adapter.ReasoningDisclosure{})
+	wire.Decorate(&adapter.ReplyChunk{Content: content, ToolCalls: calls, Done: true, Error: err})
+	return wire.Snapshot()
 }
 
 // matchSkillFastPath 匹配技能本身的触发条件；会话资格由共用入口判断。
@@ -1220,14 +1230,26 @@ func (e *ReActEngine) Process(ctx context.Context, msg *adapter.Message) (reply 
 		}
 		var fastToolCallID string
 		ctx, fastToolCallID = withFastPathInvocation(ctx, msg, sess.ID, matched.Name())
-		result, err := e.executeSkillFastPath(ctx, matched, skillArgs)
-		if err != nil {
-			return nil, fmt.Errorf("skill %s 执行失败: %w", matched.Name(), err)
+		result, executionErr := e.executeSkillFastPath(ctx, matched, skillArgs)
+		if executionErr != nil && result == nil {
+			return nil, fmt.Errorf("skill %s 执行失败: %w", matched.Name(), executionErr)
+		}
+		// 进程已经终止后只收口观察结果和持久化，不再派发工具；取消不应抹掉已取得的输出。
+		if executionErr != nil {
+			var finishCancel context.CancelFunc
+			ctx, finishCancel = context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer finishCancel()
 		}
 		result.Metadata = withProducerMetadata(result.Metadata, messagecontent.ProducerSkill, msg.Metadata["user_locale"])
+		if executionErr != nil {
+			result.Metadata["session_id"] = sess.ID
+		}
 		ctx, result.Content, err = e.prepareMediaReply(ctx, msg, result.Metadata, result.Content)
 		if err != nil {
-			return nil, err
+			if executionErr == nil {
+				return nil, err
+			}
+			executionErr = errors.Join(executionErr, err)
 		}
 
 		argsJSON, _ := json.Marshal(skillArgs)
@@ -1240,13 +1262,20 @@ func (e *ReActEngine) Process(ctx context.Context, msg *adapter.Message) (reply 
 			Result:    stringx.TruncateWithSuffix(result.Content, 500, "..."),
 			Status:    "success",
 		}}
+		if executionErr != nil {
+			tc[0].Status = "error"
+		}
+		snapshot := fastPathFailureSnapshot(msg, result.Content, tc, executionErr)
 		assistantMessageID := ""
 		// 经 SaveAssistantReply 带上 tool_calls（同步 skill 快速路径，此前用 deprecated wrapper 丢工具）。
 		if record, err := e.sessions.SaveAssistantReply(ctx, sess.ID, result.Content, session.AssistantMeta{
-			RequestID:     messageRequestID(msg),
-			AgentName:     assistantAgentName(msg.Metadata),
-			ToolCalls:     tc,
-			ReplyMetadata: result.Metadata,
+			RequestID:            messageRequestID(msg),
+			AgentName:            assistantAgentName(msg.Metadata),
+			ToolCalls:            tc,
+			ReplyMetadata:        result.Metadata,
+			RuntimeEvents:        snapshot.RuntimeEvents,
+			LastSequence:         snapshot.LastSequence,
+			RequireActiveSession: executionErr != nil,
 		}); err != nil {
 			trace.L(ctx).Error("保存助手回复失败", "err", err, "session", sess.ID)
 			recordPersistError(msg, "assistant_reply", err)
@@ -1254,11 +1283,21 @@ func (e *ReActEngine) Process(ctx context.Context, msg *adapter.Message) (reply 
 			assistantMessageID = record.ID
 		}
 
-		return &adapter.Reply{
-			Content:   result.Content,
-			Metadata:  withReplyPersistError(withAssistantMessageID(result.Metadata, assistantMessageID), msg),
-			ToolCalls: tc,
-		}, nil
+		observed := &adapter.Reply{
+			Content:       result.Content,
+			Metadata:      withReplyPersistError(withAssistantMessageID(result.Metadata, assistantMessageID), msg),
+			ToolCalls:     tc,
+			RuntimeEvents: snapshot.RuntimeEvents,
+			LastSequence:  snapshot.LastSequence,
+		}
+		if executionErr != nil {
+			attachments, attachmentErr := e.mediaAttachments(ctx, msg, observed.Metadata)
+			observed.Attachments = attachments
+			executionErr = errors.Join(executionErr, attachmentErr, finalizeProducerReply(observed, msg.Metadata))
+			observed.AssistantMessageID, observed.BackendMessageID, observed.MessageID = assistantMessageID, assistantMessageID, assistantMessageID
+			return observed, fmt.Errorf("skill %s 执行失败: %w", matched.Name(), executionErr)
+		}
+		return observed, nil
 	}
 
 	if e.mediaFlow != nil {
@@ -1562,7 +1601,7 @@ func (e *ReActEngine) completeWithTools(
 	}
 	runner := hruntime.NewRunner(hruntime.Config{
 		ProviderSelector: selector,
-		ToolExecutor:     newRuntimeToolExecutor(e.toolExecutor),
+		ToolExecutor:     newRuntimeToolExecutor(e.toolExecutor, e.mediaFlow),
 		Middleware:       middleware,
 		DefaultMaxTurns:  maxTurns,
 	})
@@ -1648,7 +1687,7 @@ func (e *ReActEngine) completeWithTools(
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		trace.L(ctx).Info("model request canceled; fallback stopped", "ctx_err", ctxErr, "provider", providerName, "session", sessionID)
-		return nil, ctxErr
+		return e.completeObservedRuntimeFailure(ctx, sessionID, msg, result, ctxErr, providerName, modelName, toolOrigins)
 	}
 	// 用一等终止原因判断（而非 errors.Is 反查错误）：达到轮次上限时 runtime 仍带回模型已
 	// 产出的部分结果（含已计费 token），不当硬错误丢弃——照常落库/返回 + 追加轮次上限提示，
@@ -1658,7 +1697,7 @@ func (e *ReActEngine) completeWithTools(
 		// BUG-20260711-B：不把原始 500 / cmake / llama-server 堆栈甩给用户——原始 err 只进
 		// 日志，返回翻译后的友好中文（本地运行时缺组件 / 工具不支持兜底 / 限流 / 鉴权 / 超时）。
 		trace.L(ctx).Warn("runtime 工具循环失败", appendModelErrorLogFields([]any{"provider", providerName, "model", modelName, "num_ctx", reqNumCtxField(req), "attachments", len(msg.Attachments), "egress", egressSummaryField(ctx), "session", sessionID}, err)...)
-		return nil, friendlyLLMError(err)
+		return e.completeObservedRuntimeFailure(ctx, sessionID, msg, result, friendlyLLMError(err), providerName, modelName, toolOrigins)
 	}
 	if result == nil {
 		// 防御：runtime 正常返回时 result 必非 nil；与流式路径对称兜底，杜绝下方解引用 panic。
@@ -1726,6 +1765,100 @@ func (e *ReActEngine) completeWithTools(
 	toolCalls := runtimeToolCallsToAdapter(result.ToolCalls, toolOrigins)
 	ctx = session.WithProviderOutputMessages(ctx, result.OutputMessages)
 	return e.finalizeReply(ctx, sessionID, msg, provider, req, resp, providerName, modelName, cacheInput, toolCalls, runtimeBlocksToAdapter(result.Blocks, toolCalls))
+}
+
+// completeObservedRuntimeFailure 只保存本次运行已经发生的观察，不进入成功回复的缓存、补答或自动推进。
+func (e *ReActEngine) completeObservedRuntimeFailure(ctx context.Context, sessionID string, msg *adapter.Message, result *hruntime.Result, executionErr error, providerName, modelName string, origins map[string]*adapter.ToolOrigin) (*adapter.Reply, error) {
+	if result == nil {
+		return nil, executionErr
+	}
+	records := make([]hruntime.ToolCallRecord, 0, len(result.ToolCalls))
+	for _, call := range result.ToolCalls {
+		if call.Result.Status != "" || call.Result.Content != "" || call.Result.Error != "" || call.Result.Raw != nil || call.Result.DurationMs > 0 {
+			records = append(records, call)
+		}
+	}
+	// OutputMessages仅包含本次真实模型输出；Result.Messages中的旧会话上下文不能补成新助手。
+	if len(result.OutputMessages) == 0 && len(records) == 0 {
+		return nil, executionErr
+	}
+	finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	finishCtx = session.WithProviderOutputMessages(finishCtx, result.OutputMessages)
+	applyToolReplyMeta(ctx, msg)
+	metadata := responseReplyMetadata(ctx, msg.Metadata, providerName, modelName, "")
+	calls := runtimeToolCallsToAdapter(records, origins)
+	known := make(map[string]bool, len(calls))
+	for _, call := range calls {
+		known[call.ID] = true
+	}
+	var blocks []adapter.Block
+	content := ""
+	if len(result.OutputMessages) > 0 {
+		blocks = runtimeBlocksToAdapter(result.Blocks, calls)
+		content = StripAllThinking(result.Content)
+		if content == "" {
+			var partial strings.Builder
+			for _, output := range result.OutputMessages {
+				if output.Role == llm.RoleAssistant {
+					partial.WriteString(output.Content)
+				}
+			}
+			content = StripAllThinking(partial.String())
+		}
+	}
+	observedBlocks := blocks[:0]
+	for _, block := range blocks {
+		if block.Type == "tool_use" && !known[block.ID] || block.Type == "tool_result" && !known[block.ToolUseID] {
+			continue
+		}
+		observedBlocks = append(observedBlocks, block)
+	}
+	if cleanContent, clean, err := canonicalizeCancelledPartial(content, adapter.RuntimeSnapshot{Blocks: observedBlocks}); err == nil {
+		content, observedBlocks = cleanContent, clean.Blocks
+	} else {
+		metadata["media_finalize_error"] = err.Error()
+		kept := observedBlocks[:0]
+		for _, block := range observedBlocks {
+			if block.Type != "text" {
+				kept = append(kept, block)
+			}
+		}
+		observedBlocks = kept
+	}
+	if nextCtx, nextContent, err := e.prepareMediaReply(finishCtx, msg, metadata, content); err == nil {
+		finishCtx, content = nextCtx, nextContent
+	} else {
+		metadata["media_finalize_error"] = err.Error()
+	}
+	observed := &adapter.Reply{Content: content, Metadata: metadata, ToolCalls: calls, Blocks: observedBlocks}
+	if result.Usage.TotalTokens > 0 || result.Usage.PromptTokens > 0 || result.Usage.CompletionTokens > 0 {
+		observed.Usage = buildUsage(result.Usage, providerName, modelName)
+	}
+	wire := adapter.NewRuntimeWire(canonicalAssistantMessageID(msg), adapter.ReasoningDisclosure{Visibility: adapter.ReasoningNotExposed, Provider: providerName, Model: modelName})
+	wire.Decorate(&adapter.ReplyChunk{Content: content, ToolCalls: calls, Blocks: observedBlocks, Done: true, Error: executionErr})
+	snapshot := wire.Snapshot()
+	if record, err := e.sessions.SaveAssistantReply(finishCtx, sessionID, content, session.AssistantMeta{Provider: providerName, Model: modelName, AgentName: assistantAgentName(msg.Metadata), RequestID: messageRequestID(msg), ToolCalls: calls, Blocks: observedBlocks, ReplyMetadata: metadata, ReasoningDisclosure: snapshot.ReasoningDisclosure, ReasoningReceipt: &snapshot.ReasoningReceipt, RuntimeEvents: snapshot.RuntimeEvents, LastSequence: snapshot.LastSequence, RequireActiveSession: true}); err != nil {
+		recordPersistError(msg, "assistant_reply", err)
+		observed.Metadata = withReplyPersistError(metadata, msg)
+		_, artifact := storage.AssistantCompletionFromContext(finishCtx)
+		if _, media := mediaflow.ReplyCompletionFromContext(finishCtx); media || artifact {
+			observed.Metadata["media_finalize_error"] = err.Error()
+		}
+	} else {
+		observed.Metadata = withAssistantMessageID(metadata, record.ID)
+		observed.AssistantMessageID, observed.BackendMessageID, observed.MessageID = record.ID, record.ID, record.ID
+	}
+	observed.RuntimeEvents, observed.LastSequence = snapshot.RuntimeEvents, snapshot.LastSequence
+	attachments, err := e.mediaAttachments(finishCtx, msg, observed.Metadata)
+	observed.Attachments = attachments
+	if err != nil {
+		observed.Metadata["media_finalize_error"] = err.Error()
+	}
+	if err := finalizeProducerReply(observed, msg.Metadata); err != nil {
+		observed.Metadata["media_finalize_error"] = err.Error()
+	}
+	return observed, executionErr
 }
 
 // finalizeReply 完成回复的保存、缓存、成本记录等后处理
@@ -2111,6 +2244,12 @@ func (e *ReActEngine) ProcessStream(ctx context.Context, msg *adapter.Message) (
 		defer cleanup()
 		defer finishMediaRequest()
 		emit := func(chunk *adapter.ReplyChunk) {
+			// 已观察终态先进入现有缓冲，避免主动取消与可用发送分支随机竞争而丢回执。
+			select {
+			case out <- chunk:
+				return
+			default:
+			}
 			select {
 			case out <- chunk:
 			case <-transportCtx.Done():
@@ -2126,7 +2265,7 @@ func (e *ReActEngine) ProcessStream(ctx context.Context, msg *adapter.Message) (
 				return
 			}
 			content.WriteString(chunk.Content)
-			if chunk.Done && chunk.Metadata["media_finalize_error"] != "" {
+			if chunk.Done && chunk.Error == nil && chunk.Metadata["media_finalize_error"] != "" {
 				chunk.Error = errors.New(chunk.Metadata["media_finalize_error"])
 			}
 			if chunk.Done && chunk.Error == nil {
@@ -2147,10 +2286,14 @@ func (e *ReActEngine) ProcessStream(ctx context.Context, msg *adapter.Message) (
 			}
 			terminal = wire.Decorate(&adapter.ReplyChunk{Done: true, Error: ctx.Err()})
 		}
-		if e.sessions != nil {
+		snapshot := wire.Snapshot()
+		failedObserved := terminal.Error != nil && (content.Len() > 0 || len(snapshot.ToolCalls) > 0 || len(snapshot.Blocks) > 0 || terminal.MessageContent != nil)
+		if e.sessions != nil && (terminal.Error == nil || failedObserved) {
 			saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-			snapshot := wire.Snapshot()
 			persistedContent := content.String()
+			if terminal.MessageContent != nil {
+				persistedContent = terminal.MessageContent.Markdown
+			}
 			// 取消只保存已经收到的部分正文和取消快照，不进入成功 finalize 或重发模型。
 			cancelledPartial := errors.Is(terminal.Error, context.Canceled) && content.Len() > 0
 			if cancelledPartial {
@@ -2165,43 +2308,49 @@ func (e *ReActEngine) ProcessStream(ctx context.Context, msg *adapter.Message) (
 					cancel()
 					return
 				}
-				// 软删除会保留历史行，但取消收尾不能继续向已删除会话写入。
-				if _, err := e.store.GetSession(saveCtx, msg.SessionID); errors.Is(err, storage.ErrNotFound) {
-					cancel()
-					return
-				}
 				terminal.Blocks = snapshot.Blocks
 				terminal.ToolCalls = snapshot.ToolCalls
 			}
-			persistErr := e.sessions.PersistAssistantRuntimeSnapshot(
-				saveCtx,
-				assistantMessageID,
-				snapshot,
-			)
+			var persistErr error
+			if failedObserved {
+				persistErr = e.sessions.PersistAssistantRuntimeSnapshotIfSessionActive(saveCtx, assistantMessageID, snapshot)
+			} else {
+				persistErr = e.sessions.PersistAssistantRuntimeSnapshot(saveCtx, assistantMessageID, snapshot)
+			}
 			if errors.Is(persistErr, storage.ErrNotFound) &&
-				(terminal.Error == nil || cancelledPartial) &&
+				(terminal.Error == nil || failedObserved) &&
+				terminal.Metadata["media_finalize_error"] == "" &&
 				msg.SessionID != "" {
-				_, persistErr = e.sessions.SaveAssistantReply(
+				var record *storage.MessageRecord
+				record, persistErr = e.sessions.SaveAssistantReply(
 					saveCtx,
 					msg.SessionID,
 					persistedContent,
 					session.AssistantMeta{
-						MessageID:           assistantMessageID,
-						Provider:            terminal.Metadata["provider"],
-						Model:               terminal.Metadata["model"],
-						AgentName:           assistantAgentName(msg.Metadata),
-						RequestID:           messageRequestID(msg),
-						ToolCalls:           terminal.ToolCalls,
-						Blocks:              terminal.Blocks,
-						ReplyMetadata:       terminal.Metadata,
-						ReasoningDisclosure: snapshot.ReasoningDisclosure,
-						ReasoningReceipt:    &snapshot.ReasoningReceipt,
-						RuntimeEvents:       snapshot.RuntimeEvents,
-						LastSequence:        snapshot.LastSequence,
+						MessageID:            assistantMessageID,
+						Provider:             terminal.Metadata["provider"],
+						Model:                terminal.Metadata["model"],
+						AgentName:            assistantAgentName(msg.Metadata),
+						RequestID:            messageRequestID(msg),
+						ToolCalls:            terminal.ToolCalls,
+						Blocks:               terminal.Blocks,
+						ReplyMetadata:        terminal.Metadata,
+						ReasoningDisclosure:  snapshot.ReasoningDisclosure,
+						ReasoningReceipt:     &snapshot.ReasoningReceipt,
+						RuntimeEvents:        snapshot.RuntimeEvents,
+						LastSequence:         snapshot.LastSequence,
+						RequireActiveSession: failedObserved,
 					},
 				)
+				if persistErr == nil && record != nil {
+					terminal.Metadata = withAssistantMessageID(terminal.Metadata, record.ID)
+				}
 			}
 			if persistErr != nil {
+				if terminal.Metadata == nil {
+					terminal.Metadata = map[string]string{}
+				}
+				terminal.Metadata["runtime_snapshot_error"] = persistErr.Error()
 				trace.L(ctx).Warn("Failed to persist assistant runtime snapshot", "message_id", assistantMessageID, "err", persistErr)
 				if terminal.Error == nil {
 					terminal.Error = persistErr
@@ -2212,8 +2361,11 @@ func (e *ReActEngine) ProcessStream(ctx context.Context, msg *adapter.Message) (
 						TerminalStatus: adapter.RuntimeTerminalFailed,
 					}
 				}
-			} else if terminal.Metadata != nil {
+			} else {
+				// 读取并更新原消息成功后才确认落盘身份，不把运行预分配ID当成持久化证据。
+				terminal.Metadata = withAssistantMessageID(terminal.Metadata, assistantMessageID)
 				delete(terminal.Metadata, persistErrorMetaKey)
+				delete(terminal.Metadata, "runtime_snapshot_error")
 			}
 			cancel()
 		}
@@ -2329,14 +2481,26 @@ func (e *ReActEngine) processStream(
 		}
 		var fastToolCallID string
 		ctx, fastToolCallID = withFastPathInvocation(ctx, msg, sess.ID, matched.Name())
-		result, err := e.executeSkillFastPath(ctx, matched, skillArgs)
-		if err != nil {
-			return nil, fmt.Errorf("skill %s 执行失败: %w", matched.Name(), err)
+		result, executionErr := e.executeSkillFastPath(ctx, matched, skillArgs)
+		if executionErr != nil && result == nil {
+			return nil, fmt.Errorf("skill %s 执行失败: %w", matched.Name(), executionErr)
+		}
+		// 进程已经终止后只收口观察结果和持久化，不再派发工具；取消不应抹掉已取得的输出。
+		if executionErr != nil {
+			var finishCancel context.CancelFunc
+			ctx, finishCancel = context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer finishCancel()
 		}
 		result.Metadata = withProducerMetadata(result.Metadata, messagecontent.ProducerSkill, msg.Metadata["user_locale"])
+		if executionErr != nil {
+			result.Metadata["session_id"] = sess.ID
+		}
 		ctx, result.Content, err = e.prepareMediaReply(ctx, msg, result.Metadata, result.Content)
 		if err != nil {
-			return nil, err
+			if executionErr == nil {
+				return nil, err
+			}
+			executionErr = errors.Join(executionErr, err)
 		}
 		argsJSON, _ := json.Marshal(skillArgs)
 		tc := []adapter.ToolCall{{
@@ -2346,22 +2510,38 @@ func (e *ReActEngine) processStream(
 			Origin:    &adapter.ToolOrigin{Kind: "skill", Name: matched.Name()},
 			Arguments: string(argsJSON),
 			Result:    stringx.TruncateWithSuffix(result.Content, 500, "..."),
-			Status:    "success", // 快速路径执行成功（err 已在上面拦截）
+			Status:    "success",
 		}}
+		if executionErr != nil {
+			tc[0].Status = "error"
+		}
+		snapshot := fastPathFailureSnapshot(msg, result.Content, tc, executionErr)
 		assistantMessageID := ""
 		// 经 SaveAssistantReply 带上 tool_calls（此前用 deprecated wrapper 丢工具 → 重载即蒸发）。
 		if record, err := e.sessions.SaveAssistantReply(ctx, sess.ID, result.Content, session.AssistantMeta{
-			RequestID:     messageRequestID(msg),
-			AgentName:     assistantAgentName(msg.Metadata),
-			ToolCalls:     tc,
-			ReplyMetadata: result.Metadata,
+			RequestID:            messageRequestID(msg),
+			AgentName:            assistantAgentName(msg.Metadata),
+			ToolCalls:            tc,
+			ReplyMetadata:        result.Metadata,
+			RuntimeEvents:        snapshot.RuntimeEvents,
+			LastSequence:         snapshot.LastSequence,
+			RequireActiveSession: executionErr != nil,
 		}); err != nil {
 			trace.L(ctx).Error("保存助手回复失败", "err", err, "session", sess.ID)
 			recordPersistError(msg, "assistant_reply", err)
 		} else {
 			assistantMessageID = record.ID
 		}
-		return singleChunkWithTools(result.Content, withReplyPersistError(withAssistantMessageID(result.Metadata, assistantMessageID), msg), tc), nil
+		metadata := withReplyPersistError(withAssistantMessageID(result.Metadata, assistantMessageID), msg)
+		if executionErr != nil {
+			terminal := &adapter.ReplyChunk{Content: result.Content, Metadata: metadata, ToolCalls: tc, Done: true, Error: executionErr}
+			terminal.Error = errors.Join(executionErr, e.finalizeMediaChunk(ctx, msg, terminal, result.Content))
+			out := make(chan *adapter.ReplyChunk, 1)
+			out <- terminal
+			close(out)
+			return out, nil
+		}
+		return singleChunkWithTools(result.Content, metadata, tc), nil
 	}
 
 	if e.mediaFlow != nil {
@@ -2830,7 +3010,7 @@ func (e *ReActEngine) processStreamRuntime(
 				modelName:    selection.modelName,
 			})
 		}
-		runtimeExecutor := newRuntimeToolExecutor(e.toolExecutor)
+		runtimeExecutor := newRuntimeToolExecutor(e.toolExecutor, e.mediaFlow)
 		runtimeExecutor.onActivity = sink.emitToolActivity
 		runner := hruntime.NewRunner(hruntime.Config{
 			ProviderSelector: selector,
@@ -2931,11 +3111,29 @@ func (e *ReActEngine) processStreamRuntime(
 				}, err, sink)
 			}
 		}
+		emitObservedFailure := func(failure error) {
+			partial := result
+			if result != nil && sink.visibleContent.Len() > 0 {
+				copy := *result
+				copy.Content = sink.visibleContent.String()
+				partial = &copy
+			}
+			observed, observedErr := e.completeObservedRuntimeFailure(streamCtx, sessionID, msg, partial, failure, selection.providerName, selection.modelName, sink.toolOrigins)
+			sink.notifyStarted(observedErr)
+			terminal := &adapter.ReplyChunk{Error: observedErr, Done: true}
+			if observed != nil {
+				terminal.MessageContent, terminal.RenderManifest = observed.MessageContent, observed.RenderManifest
+				terminal.Metadata, terminal.Usage, terminal.ToolCalls, terminal.Blocks = observed.Metadata, observed.Usage, observed.ToolCalls, observed.Blocks
+				if !sink.sentContent {
+					terminal.Content = observed.Content
+				}
+			}
+			ch <- terminal
+		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			lifecycleErr = ctxErr
 			trace.L(ctx).Info("model request canceled; fallback stopped", "ctx_err", ctxErr, "provider", selection.providerName, "session", sessionID)
-			sink.notifyStarted(ctxErr)
-			ch <- &adapter.ReplyChunk{Error: ctxErr, Done: true}
+			emitObservedFailure(ctxErr)
 			return
 		}
 		// 用一等终止原因判断（而非 errors.Is 反查错误）：达到轮次上限时 runtime 仍带回模型
@@ -2949,8 +3147,7 @@ func (e *ReActEngine) processStreamRuntime(
 			// 进日志，往客户端只发翻译后的友好中文。
 			trace.L(ctx).Warn("runtime stream 失败", appendModelErrorLogFields([]any{"provider", selection.providerName, "model", selection.modelName, "num_ctx", reqNumCtxField(req), "attachments", len(msg.Attachments), "egress", egressSummaryField(ctx), "session", sessionID}, err)...)
 			friendly := friendlyLLMError(err)
-			sink.notifyStarted(friendly)
-			ch <- &adapter.ReplyChunk{Error: friendly, Done: true}
+			emitObservedFailure(friendly)
 			return
 		}
 		if maxTurnsHit {
@@ -5320,6 +5517,97 @@ func (e *ReActEngine) loadDurableAssistantReply(
 		ReasoningReceipt:    persisted.ReasoningReceipt,
 		RuntimeEvents:       append([]adapter.SequencedRuntimeEvent(nil), persisted.RuntimeEvents...),
 	}
+	// 重放只查询原登记数据，不进入完成器、生成器或文件读取。
+	readCtx := skill.WithInvocationContext(ctx, skill.InvocationContext{AuthenticatedUserID: msg.UserID, RequestID: requestID, SessionID: sessionID})
+	readCtx = storage.WithAssistantCompletion(readCtx, storage.AssistantCompletion{})
+	mediaAttachments, mediaErr := e.mediaAttachments(readCtx, msg, metadata)
+	if mediaErr != nil {
+		mediaAttachments = nil
+	}
+	available := append([]adapter.Attachment(nil), mediaAttachments...)
+	e.mu.RLock()
+	executor := e.toolExecutor
+	e.mu.RUnlock()
+	if executor != nil && executor.externalTools != nil {
+		if resolved, resolveErr := executor.externalTools.ResolveReply(readCtx, msg, metadata); resolveErr == nil {
+			completion, _ := storage.AssistantCompletionFromContext(resolved)
+			available = append(available, completion.Attachments...)
+		}
+	}
+	var savedAttachments struct {
+		Attachments []adapter.Attachment `json:"attachments"`
+	}
+	for _, raw := range []string{match.Attachments, rawMetadata} {
+		var decoded struct {
+			Attachments []adapter.Attachment `json:"attachments"`
+		}
+		if json.Unmarshal([]byte(raw), &decoded) == nil && len(decoded.Attachments) > 0 {
+			savedAttachments = decoded
+			break
+		}
+	}
+	knownRefs := make(map[string]messagecontent.AttachmentRef)
+	for _, attachment := range available {
+		if attachment.Source != nil && attachment.ID != "" && strings.HasPrefix(attachment.ContentDigest, "sha256:") {
+			knownRefs[attachment.ID] = canonicalAttachmentRefs([]adapter.Attachment{attachment})[0]
+		}
+	}
+	var prints []struct {
+		ArtifactID string `json:"artifact_id"`
+		ByteDigest string `json:"byte_digest"`
+		Name       string `json:"name"`
+	}
+	if json.Unmarshal([]byte(metadata["print_artifacts"]), &prints) == nil {
+		for _, artifact := range prints {
+			if artifact.ArtifactID != "" && artifact.ByteDigest != "" {
+				if _, exists := knownRefs[artifact.ArtifactID]; exists {
+					continue
+				}
+				knownRefs[artifact.ArtifactID] = messagecontent.AttachmentRef{AssetID: artifact.ArtifactID, Name: artifact.Name, MIME: "application/pdf", Digest: "sha256:" + strings.TrimPrefix(artifact.ByteDigest, "sha256:"), AltText: artifact.Name}
+			}
+		}
+	}
+	var refs []messagecontent.AttachmentRef
+	for _, attachment := range savedAttachments.Attachments {
+		assetID := attachment.ID
+		if assetID == "" && attachment.URL != "" {
+			for _, registered := range available {
+				if registered.URL == attachment.URL {
+					assetID = registered.ID
+					break
+				}
+			}
+		}
+		if ref, found := knownRefs[assetID]; found {
+			refs = append(refs, ref)
+			for _, registered := range available {
+				if registered.ID == assetID {
+					reply.Attachments = append(reply.Attachments, registered)
+					break
+				}
+			}
+		}
+	}
+	if len(savedAttachments.Attachments) == 0 {
+		reply.Attachments = append(reply.Attachments, mediaAttachments...)
+		refs = append(refs, canonicalAttachmentRefs(mediaAttachments)...)
+		for _, artifact := range prints {
+			if ref, found := knownRefs[artifact.ArtifactID]; found {
+				refs = append(refs, ref)
+			}
+		}
+	}
+	reply.MessageContent, reply.RenderManifest = match.MessageContent, match.RenderManifest
+	if reply.MessageContent == nil && len(refs) > 0 {
+		producer, locale, contractErr := resolveProducerContract(metadata, msg.Metadata)
+		if contractErr != nil {
+			return nil, contractErr
+		}
+		reply.MessageContent, reply.RenderManifest, err = canonicalProducerProjection(producer, reply.Content, locale, refs)
+		if err != nil {
+			return nil, err
+		}
+	}
 	return &durableAssistantReply{
 		reply:         reply,
 		reasoning:     persisted.Reasoning,
@@ -5351,6 +5639,8 @@ func (r *durableAssistantReply) streamChunk(requestMetadata map[string]string) (
 	}
 	chunk := &adapter.ReplyChunk{
 		Content:             r.reply.Content,
+		MessageContent:      r.reply.MessageContent,
+		RenderManifest:      r.reply.RenderManifest,
 		Reasoning:           r.reasoning,
 		Done:                true,
 		Metadata:            cloneStringMap(r.reply.Metadata),

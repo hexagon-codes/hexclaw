@@ -561,8 +561,14 @@ func (a *WebAdapter) sendStreamWithIDs(ctx context.Context, chatID, sessionID, r
 	reasoningCount := 0
 	var canonical strings.Builder
 	for chunk := range chunks {
+		outputCtx := ctx
+		finishOutput := func() {}
 		if err := ctx.Err(); err != nil {
-			return err
+			if !chunk.Done || chunk.Error == nil || !requestcancel.IsExplicit(ctx) {
+				return err
+			}
+			// 用户停止只取消执行；真实终态已到达时仍向存活连接交付同次回执。
+			outputCtx, finishOutput = context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		}
 		if chunk.Error != nil {
 			if requestID != "" && a.streams != nil {
@@ -583,11 +589,28 @@ func (a *WebAdapter) sendStreamWithIDs(ctx context.Context, chatID, sessionID, r
 				ReasoningDisclosure: chunk.ReasoningDisclosure,
 				ReasoningReceipt:    normalizedReasoningReceipt(chunk.ReasoningReceipt),
 				RuntimeEvent:        chunk.RuntimeEvent,
+				MessageContent:      chunk.MessageContent,
+				RenderManifest:      chunk.RenderManifest,
+				Metadata:            chunk.Metadata,
+				ToolCalls:           chunk.ToolCalls,
+				Blocks:              chunk.Blocks,
+				Usage:               chunk.Usage,
+				Done:                chunk.Done,
+			}
+			if errMsg.SessionID == "" {
+				errMsg.SessionID = chunk.Metadata["session_id"]
+			}
+			if errMsg.SessionID != "" {
+				if owner, ok := a.connectionOwners.Load(chatID); ok {
+					a.bindSession(errMsg.SessionID, chatID, owner.(string))
+				}
 			}
 			attachLLMErrorTaxonomy(&errMsg, chunk.Error)
-			_ = a.sendToTargets(ctx, chatID, requestID, errMsg)
+			_ = a.sendToTargets(outputCtx, chatID, requestID, errMsg)
+			finishOutput()
 			return chunk.Error
 		}
+		finishOutput()
 
 		chunkCount++
 		canonical.WriteString(chunk.Content)
@@ -1386,10 +1409,15 @@ func snapshotToMessage(snapshot *streamstate.Snapshot) wsMessage {
 	if snapshot == nil {
 		return wsMessage{Type: "error", Content: "stream not found"}
 	}
+	canonical := snapshot.MessageContent
+	if canonical == nil {
+		canonical = canonicalReplyContent(snapshot.Content, snapshot.Metadata)
+	}
 	return wsMessage{
 		Type:                "stream_snapshot",
 		Content:             snapshot.Content,
-		MessageContent:      canonicalReplyContent(snapshot.Content, snapshot.Metadata),
+		MessageContent:      canonical,
+		RenderManifest:      snapshot.RenderManifest,
 		Reasoning:           snapshot.Reasoning,
 		SessionID:           snapshot.SessionID,
 		RequestID:           snapshot.RequestID,

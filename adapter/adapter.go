@@ -210,6 +210,32 @@ type Reply struct {
 	ReasoningReceipt    *ReasoningReceipt  `json:"reasoning_receipt,omitempty"`
 	ReasoningEvidence   *ReasoningEvidence `json:"-"`
 	RuntimeEvents       []SequencedRuntimeEvent
+	deliveryAttempted   *replyDeliveryAttempt
+}
+
+type replyDeliveryAttempt struct {
+	platform                                         Platform
+	instanceID, eventID, userID, chatID, assistantID string
+}
+
+func (r *Reply) deliveryAttemptIdentity(msg *Message) replyDeliveryAttempt {
+	return replyDeliveryAttempt{platform: msg.Platform, instanceID: msg.InstanceID, eventID: msg.ID,
+		userID: msg.UserID, chatID: msg.ChatID, assistantID: r.AssistantMessageID}
+}
+
+// MarkDeliveryAttempted 只在原事件的最终回复开始物理发送时调用，不表示已接纳或已送达。
+// 标记仅保留于进程内，不接受 JSON 或模型元数据，并绑定原消息及助手身份。
+func (r *Reply) MarkDeliveryAttempted(msg *Message) {
+	if r == nil || msg == nil {
+		return
+	}
+	attempt := r.deliveryAttemptIdentity(msg)
+	r.deliveryAttempted = &attempt
+}
+
+// DeliveryAttempted 只识别同一原事件的发送尝试，供入站去重保留已派发事实。
+func (r *Reply) DeliveryAttempted(msg *Message) bool {
+	return r != nil && msg != nil && r.deliveryAttempted != nil && *r.deliveryAttempted == r.deliveryAttemptIdentity(msg)
 }
 
 // ReplyChunk 流式回复片段

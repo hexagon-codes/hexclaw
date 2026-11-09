@@ -20,6 +20,21 @@ import (
 // ErrNotFound 表示请求的资源不存在
 var ErrNotFound = errors.New("not found")
 
+// ActiveSessionMessageWriter 为显式要求会话仍可写的运行收口提供可选原子能力。
+// 检查沿 GetSession 的可见语义（status >= 0），与消息及其完成器在同一事务提交；
+// 已删除或不存在的会话返回 ErrNotFound，且不提交任何消息或完成器副作用。
+// 普通 SaveMessage 不受此合同限制，历史导入等调用方保持原有语义。
+type ActiveSessionMessageWriter interface {
+	SaveMessageIfSessionActive(context.Context, *MessageRecord) error
+}
+
+// ActiveSessionMessageMetadataWriter 保护原运行取消后的快照更新。
+// 存储在同一事务从消息真实归属检查会话可见性，再更新metadata；不可写时返回ErrNotFound。
+// 普通 UpdateMessageMetadata 保持原合同，不能用非原子检查模拟本能力。
+type ActiveSessionMessageMetadataWriter interface {
+	UpdateMessageMetadataIfSessionActive(context.Context, string, string) error
+}
+
 // Session 会话记录
 //
 // 生产级设计：

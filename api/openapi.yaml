@@ -106,11 +106,12 @@ paths:
               schema:
                 $ref: "#/components/schemas/ChatSessionError"
         "500":
-          description: Unclassified engine/application error or streaming unavailable
+          description: Unclassified engine/application error or streaming unavailable. Failed or cancelled tool execution
+            retains its original error and may include the observed reply, tool receipts and artifact references.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ChatSessionError"
+                $ref: "#/components/schemas/ChatSessionExecutionError"
         "503":
           description: Engine not ready, UPSTREAM_UNAVAILABLE or UPSTREAM_POOL_EXHAUSTED
           content:
@@ -1127,7 +1128,9 @@ paths:
       operationId: chatSessionGetStreamSnapshot
       summary: Get a stream snapshot
       description: Returns accumulated content/reasoning, status/done, message identity, runtime_events and
-        last_sequence. Retention is process-local and registry-configured; the default keeps terminal
+        last_sequence. Optional message_content/render_manifest preserve the original terminal owner's body and
+        attachment references, including authoritative empty Markdown. Failure reasons remain in metadata.error.
+        Retention is process-local and registry-configured; the default keeps terminal
         snapshots for two minutes, without restart durability. REST and WebSocket lookups both verify
         the authenticated owner; transport disconnection does not itself cancel retained external work.
         Specify source when both transports retain the same owner/request identity; an ambiguous unqualified
@@ -22956,6 +22959,10 @@ components:
           type: string
         content:
           type: string
+        message_content:
+          $ref: "#/components/schemas/ChatSessionMessageContent"
+        render_manifest:
+          $ref: "#/components/schemas/ChatSessionRenderManifest"
         reasoning:
           type: string
         done:
@@ -22969,6 +22976,9 @@ components:
             - errored
             - cancelled
         metadata:
+          description: Existing producer metadata; error retains the original failure reason when recorded.
+            runtime_snapshot_error reports a runtime snapshot write failure without revoking a previously saved
+            backend_message_id; persist_error still identifies failed assistant-message persistence.
           type: object
           additionalProperties:
             type: string
@@ -23434,9 +23444,79 @@ components:
           type: boolean
       required:
         - error
+    ChatSessionExecutionError:
+      allOf:
+        - $ref: "#/components/schemas/ChatSessionError"
+        - type: object
+          description: Observed partial result from the same failed or cancelled chat execution. Existing HTTP status,
+            error and taxonomy retain authority; these fields do not indicate successful execution or safe retry.
+            Tool receipts preserve original exit status and original stdout/stderr artifact references. When present,
+            assistant_message_id refers to the same persisted assistant history; read its runtime terminal status.
+          properties:
+            reply:
+              type: string
+            session_id:
+              type: string
+            message_content:
+              $ref: "#/components/schemas/ChatSessionMessageContent"
+            render_manifest:
+              $ref: "#/components/schemas/ChatSessionRenderManifest"
+            metadata:
+              description: persist_error identifies assistant save failure. runtime_snapshot_error identifies only
+                snapshot update failure; a previously confirmed backend_message_id remains a saved-message fact.
+              type: object
+              additionalProperties:
+                type: string
+            usage:
+              $ref: "#/components/schemas/ChatSessionUsage"
+            tool_calls:
+              type: array
+              items:
+                $ref: "#/components/schemas/ChatSessionToolCall"
+            blocks:
+              type: array
+              items:
+                $ref: "#/components/schemas/ChatSessionBlock"
+            assistant_message_id:
+              type: string
+            backend_message_id:
+              type: string
+            message_id:
+              type: string
+            last_sequence:
+              type: integer
+              minimum: 0
+            reasoning_disclosure:
+              $ref: "#/components/schemas/ChatSessionReasoningDisclosure"
+            runtime_events:
+              type: array
+              items:
+                $ref: "#/components/schemas/ChatSessionSequencedRuntimeEvent"
     ChatSessionSSEError:
       type: object
+      description: Error terminal frames may preserve observed content, tool receipts and canonical artifact references
+        from the same execution. error/done and runtime_event remain the failed or cancelled terminal authority.
       properties:
+        content:
+          type: string
+        message_content:
+          $ref: "#/components/schemas/ChatSessionMessageContent"
+        render_manifest:
+          $ref: "#/components/schemas/ChatSessionRenderManifest"
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+        usage:
+          $ref: "#/components/schemas/ChatSessionUsage"
+        tool_calls:
+          type: array
+          items:
+            $ref: "#/components/schemas/ChatSessionToolCall"
+        blocks:
+          type: array
+          items:
+            $ref: "#/components/schemas/ChatSessionBlock"
         error:
           type: string
         done:
@@ -23751,6 +23831,9 @@ components:
         - action
     ChatSessionWebSocketFrame:
       type: object
+      description: An error terminal keeps the public error in content. Existing message_content, tool_calls,
+        metadata and blocks may carry the same execution's observed partial output and artifact references.
+        An explicit stop remains cancelled; it does not clear the result or close the live WebSocket connection.
       properties:
         type:
           type: string

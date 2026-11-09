@@ -10,11 +10,102 @@ import (
 	"time"
 
 	"github.com/hexagon-codes/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/messagecontent"
 	"github.com/hexagon-codes/hexclaw/skill"
 	"github.com/hexagon-codes/hexclaw/streamstate"
 	"nhooyr.io/websocket"
 	"nhooyr.io/websocket/wsjson"
 )
+
+func TestWebAdapter_ResumeRetainsEmptyCanonicalArtifact(t *testing.T) {
+	ref := messagecontent.AttachmentRef{AssetID: "stdout-ref", Name: "stdout.bin", MIME: "application/octet-stream", Digest: "sha256:" + strings.Repeat("b", 64), AltText: "stdout.bin"}
+	content, err := messagecontent.New(messagecontent.ProducerSkill, "en", "", []messagecontent.AttachmentRef{ref})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := messagecontent.BuildManifest(content, messagecontent.RenderRequest{Surface: messagecontent.SurfaceDesktop, RendererVersion: "test-v1", Capabilities: messagecontent.CapabilitySnapshot{Markdown: true, Attachments: true}, Parts: []messagecontent.RenderPart{{Kind: messagecontent.PartArtifact, ArtifactRef: ref.AssetID, ArtifactDigest: ref.Digest, AltText: ref.AltText}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := New()
+	a.streams.Start("desktop-user", "original-session", "restore-artifact")
+	a.streams.Append("restore-artifact", &adapter.ReplyChunk{Content: "older preview"})
+	a.streams.Append("restore-artifact", &adapter.ReplyChunk{Done: true, MessageContent: &content, RenderManifest: &manifest})
+	a.streams.Cancel("restore-artifact")
+	conn, ctx, _ := dialWebAdapter(t, a)
+	if err := wsjson.Write(ctx, conn, wsMessage{Type: "resume", RequestID: "restore-artifact"}); err != nil {
+		t.Fatal(err)
+	}
+	var frame wsMessage
+	if err := wsjson.Read(ctx, conn, &frame); err != nil {
+		t.Fatal(err)
+	}
+	if frame.Type != "stream_snapshot" || frame.Status != "cancelled" || frame.Content != "" || frame.MessageContent == nil || frame.MessageContent.Markdown != "" || len(frame.MessageContent.Attachments) != 1 || frame.MessageContent.Attachments[0].AssetID != "stdout-ref" || frame.RenderManifest == nil || frame.RenderManifest.RenderID != manifest.RenderID {
+		t.Fatalf("resume lost authoritative artifact: %#v", frame)
+	}
+}
+
+// 用户停止后连接仍存活；错误帧必须交付真实部分结果而不是只剩错误文字。
+func TestWebAdapter_FailedTerminalPreservesObservedResult(t *testing.T) {
+	for _, cancelled := range []bool{false, true} {
+		name := "nonzero"
+		if cancelled {
+			name = "cancelled"
+		}
+		t.Run(name, func(t *testing.T) {
+			a := New()
+			started := make(chan struct{})
+			content := "partial-output; exit code: 7; artifact /api/v1/files/generated/stdout.txt"
+			a.SetStreamHandler(func(ctx context.Context, _ *adapter.Message) (<-chan *adapter.ReplyChunk, error) {
+				out := make(chan *adapter.ReplyChunk, 1)
+				close(started)
+				go func() {
+					cause := errors.New("exit status 7")
+					status := adapter.RuntimeTerminalFailed
+					if cancelled {
+						<-ctx.Done()
+						cause, status = context.Canceled, adapter.RuntimeTerminalCancelled
+					}
+					out <- &adapter.ReplyChunk{Content: content, Done: true, Error: cause, MessageContent: canonicalReplyContent(content, nil), Metadata: map[string]string{"producer_kind": "skill", "session_id": "failure-session"}, ToolCalls: []adapter.ToolCall{{ID: "original-call", Name: "shell", Status: "error", Result: content}}, RuntimeEvent: &adapter.RuntimeEvent{Kind: adapter.RuntimeEventTerminal, TerminalStatus: status}}
+					close(out)
+				}()
+				return out, nil
+			})
+			conn, ctx, _ := dialWebAdapter(t, a)
+			incomingSession := "failure-session"
+			if !cancelled {
+				incomingSession = ""
+			}
+			if err := wsjson.Write(ctx, conn, wsMessage{Type: "message", Content: "/sh task", SessionID: incomingSession, RequestID: "failure-" + name}); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-started:
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			}
+			if cancelled {
+				if err := wsjson.Write(ctx, conn, wsMessage{Type: "cancel", RequestID: "failure-" + name}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var frame wsMessage
+			if err := wsjson.Read(ctx, conn, &frame); err != nil {
+				t.Fatalf("terminal not delivered: %v", err)
+			}
+			if frame.Type != "error" || !frame.Done || frame.SessionID != "failure-session" || frame.MessageContent == nil || frame.MessageContent.Markdown != content || len(frame.ToolCalls) != 1 || frame.ToolCalls[0].Status != "error" {
+				t.Fatalf("failed result lost: %#v", frame)
+			}
+			if err := wsjson.Write(ctx, conn, wsMessage{Type: "ping"}); err != nil {
+				t.Fatal(err)
+			}
+			var pong wsMessage
+			if err := wsjson.Read(ctx, conn, &pong); err != nil || pong.Type != "pong" {
+				t.Fatalf("connection closed after terminal: %#v, %v", pong, err)
+			}
+		})
+	}
+}
 
 // 真实事故复现(2026-06-25)：流式中途 chunk.Error 经 WS 'error' 帧下发时
 // 直接用 chunk.Error.Error()（原始串），未走 upstreamerr.PublicMessage，

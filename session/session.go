@@ -162,9 +162,12 @@ func (m *Manager) SaveAssistantMessageRecord(ctx context.Context, sessionID, con
 
 // AssistantMeta 助手消息的完整元数据。
 type AssistantMeta struct {
-	MessageID        string
-	Reasoning        string
-	ThinkingDuration int
+	// RequireActiveSession 仅为原运行收口请求原子会话检查，默认false保持普通保存合同。
+	// 底层必须实现 ActiveSessionMessageWriter；不支持时明确报告失败，不作非原子降级。
+	RequireActiveSession bool
+	MessageID            string
+	Reasoning            string
+	ThinkingDuration     int
 	// ReasoningReceipt 是助手消息冻结的推理执行回执，必须与 runtime snapshot 一起持久化。
 	ReasoningReceipt *adapter.ReasoningReceipt
 	Provider         string
@@ -337,8 +340,18 @@ func (m *Manager) SaveAssistantReply(ctx context.Context, sessionID, content str
 	if err := persistProviderOutputHistory(ctx, msg); err != nil {
 		return nil, err
 	}
-	if err := m.saveMessage(ctx, msg); err != nil {
-		return nil, err
+	var saveErr error
+	if am.RequireActiveSession {
+		writer, ok := m.store.(storage.ActiveSessionMessageWriter)
+		if !ok {
+			return nil, fmt.Errorf("storage does not support atomic active-session message writes")
+		}
+		saveErr = sqliteutil.RetryOnBusy(ctx, func() error { return writer.SaveMessageIfSessionActive(ctx, msg) })
+	} else {
+		saveErr = m.saveMessage(ctx, msg)
+	}
+	if saveErr != nil {
+		return nil, saveErr
 	}
 	return msg, nil
 }
@@ -400,6 +413,16 @@ func (m *Manager) PersistAssistantRuntimeSnapshot(
 	messageID string,
 	snapshot adapter.RuntimeSnapshot,
 ) error {
+	return m.persistAssistantRuntimeSnapshot(ctx, messageID, snapshot, false)
+}
+
+// PersistAssistantRuntimeSnapshotIfSessionActive 仅供原运行取消收口显式请求原子活动检查。
+// 不支持该存储能力时返回持久化失败，不降级成存在检查后的普通UPDATE。
+func (m *Manager) PersistAssistantRuntimeSnapshotIfSessionActive(ctx context.Context, messageID string, snapshot adapter.RuntimeSnapshot) error {
+	return m.persistAssistantRuntimeSnapshot(ctx, messageID, snapshot, true)
+}
+
+func (m *Manager) persistAssistantRuntimeSnapshot(ctx context.Context, messageID string, snapshot adapter.RuntimeSnapshot, requireActiveSession bool) error {
 	record, err := m.store.GetMessage(ctx, messageID)
 	if err != nil {
 		return err
@@ -433,6 +456,13 @@ func (m *Manager) PersistAssistantRuntimeSnapshot(
 	raw, err := json.Marshal(meta)
 	if err != nil {
 		return err
+	}
+	if requireActiveSession {
+		writer, ok := m.store.(storage.ActiveSessionMessageMetadataWriter)
+		if !ok {
+			return fmt.Errorf("storage does not support atomic active-session metadata writes")
+		}
+		return writer.UpdateMessageMetadataIfSessionActive(ctx, messageID, string(raw))
 	}
 	return m.store.UpdateMessageMetadata(ctx, messageID, string(raw))
 }

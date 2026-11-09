@@ -1,12 +1,55 @@
 package streamstate
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
 
 	"github.com/hexagon-codes/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/messagecontent"
 )
+
+// 终态空正文与二进制引用共同拥有结果，调用方修改输入或副本都不能串写权威快照。
+func TestRegistry_TerminalCanonicalArtifactIsCloned(t *testing.T) {
+	ref := messagecontent.AttachmentRef{AssetID: "stdout-ref", Name: "stdout.bin", MIME: "application/octet-stream", Digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", AltText: "stdout.bin"}
+	content, err := messagecontent.New(messagecontent.ProducerSkill, "en", "", []messagecontent.AttachmentRef{ref})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := messagecontent.BuildManifest(content, messagecontent.RenderRequest{Surface: messagecontent.SurfaceDesktop, RendererVersion: "test-v1", Capabilities: messagecontent.CapabilitySnapshot{Markdown: true, Attachments: true}, Parts: []messagecontent.RenderPart{{Kind: messagecontent.PartArtifact, ArtifactRef: ref.AssetID, ArtifactDigest: ref.Digest, AltText: ref.AltText}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := NewRegistry(time.Minute)
+	r.Start("owner", "session", "request")
+	missingManifest := NewRegistry(time.Minute)
+	missingManifest.Start("owner", "session", "missing-manifest")
+	missingManifest.Append("missing-manifest", &adapter.ReplyChunk{Done: true, MessageContent: &content})
+	withoutManifest, _ := missingManifest.GetStreamSnapshot("owner", "missing-manifest")
+	if withoutManifest.MessageContent == nil || len(withoutManifest.MessageContent.Attachments) != 1 || withoutManifest.RenderManifest != nil {
+		t.Fatalf("missing manifest discarded canonical attachment: %#v", withoutManifest)
+	}
+	r.Append("request", &adapter.ReplyChunk{Content: "older preview"})
+	r.Append("request", &adapter.ReplyChunk{Done: true, Error: context.Canceled, MessageContent: &content, RenderManifest: &manifest})
+	r.Cancel("request")
+	content.Attachments[0].Name = "mutated-input"
+	manifest.Parts[0].ArtifactRef = "mutated-input"
+	first, ok := r.GetStreamSnapshot("owner", "request")
+	if !ok || first.Status != StatusCancelled || first.Content != "" || first.MessageContent == nil || first.RenderManifest == nil {
+		t.Fatalf("terminal canonical absent: %#v", first)
+	}
+	if first.MessageContent.Attachments[0].Name != "stdout.bin" || first.RenderManifest.Parts[0].ArtifactRef != "stdout-ref" {
+		t.Fatalf("input mutated owned snapshot: %#v", first)
+	}
+	first.MessageContent.Markdown = "mutated-copy"
+	first.MessageContent.Attachments[0].Name = "mutated-copy"
+	first.RenderManifest.Parts[0].ArtifactRef = "mutated-copy"
+	again, _ := r.GetStreamSnapshot("owner", "request")
+	if again.MessageContent.Markdown != "" || again.MessageContent.Attachments[0].Name != "stdout.bin" || again.RenderManifest.Parts[0].ArtifactRef != "stdout-ref" {
+		t.Fatalf("returned copy mutated owned snapshot: %#v", again)
+	}
+}
 
 // TestNewRegistry_DefaultTTL 零值 TTL 应使用默认 2 分钟。
 func TestNewRegistry_DefaultTTL(t *testing.T) {

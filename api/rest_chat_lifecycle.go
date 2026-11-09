@@ -92,10 +92,15 @@ func (r *restChatRun) finishUnstarted() {
 func (r *restChatRun) process(eng engine.Engine, msg *adapter.Message) (*adapter.Reply, error) {
 	reply, err := eng.Process(r.ctx, msg)
 	r.control.SetSession(msg.SessionID)
+	var terminal *adapter.ReplyChunk
 	if reply != nil {
-		r.registry.Append(r.requestID, &adapter.ReplyChunk{Content: reply.Content, Metadata: reply.Metadata, Usage: reply.Usage, ToolCalls: reply.ToolCalls, Blocks: reply.Blocks, AssistantMessageID: reply.AssistantMessageID, BackendMessageID: reply.BackendMessageID, MessageID: reply.MessageID, ReasoningDisclosure: reply.ReasoningDisclosure})
+		terminal = &adapter.ReplyChunk{Content: reply.Content, MessageContent: reply.MessageContent, RenderManifest: reply.RenderManifest, Done: true, Error: err, Metadata: reply.Metadata, Usage: reply.Usage, ToolCalls: reply.ToolCalls, Blocks: reply.Blocks, AssistantMessageID: reply.AssistantMessageID, BackendMessageID: reply.BackendMessageID, MessageID: reply.MessageID, Sequence: reply.LastSequence, ReasoningDisclosure: reply.ReasoningDisclosure}
+		if len(reply.RuntimeEvents) > 0 {
+			event := reply.RuntimeEvents[len(reply.RuntimeEvents)-1].Event
+			terminal.RuntimeEvent = &event
+		}
 	}
-	r.finish(err)
+	r.finishWithChunk(err, terminal)
 	return reply, err
 }
 

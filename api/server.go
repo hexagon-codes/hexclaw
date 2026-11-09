@@ -1585,6 +1585,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var reply *adapter.Reply
+	var observedErr error
 	if hasStream {
 		chunks, err := stream.ProcessStream(ctx, msg)
 		if err != nil {
@@ -1609,11 +1610,6 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		var messageContent *messagecontent.MessageContent
 		var renderManifest *messagecontent.RenderManifest
 		for chunk := range chunks {
-			if chunk.Error != nil {
-				trace.L(ctx).Error("处理失败", chatLLMErrorTraceFields(chunk.Error)...)
-				writeChatLLMError(w, chatErrorStatus(req.Provider, chunk.Error), chunk.Error)
-				return
-			}
 			content.WriteString(chunk.Content)
 			assistantMessageID = chunk.AssistantMessageID
 			backendMessageID = chunk.BackendMessageID
@@ -1635,13 +1631,19 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 				knowledgeHits = chunk.KnowledgeHits // U9：命中结构化透出
 				memoryHits = chunk.MemoryHits
 			}
+			if chunk.Error != nil {
+				observedErr = chunk.Error
+				trace.L(ctx).Error("处理失败", chatLLMErrorTraceFields(chunk.Error)...)
+				break
+			}
 		}
 		trace.L(ctx).Info("流式消费完成", "content_len", content.Len())
 		// v0.3.12 H4：改用 engine.StripAllThinking 统一剥离
 		// 覆盖 <think>/<thinking>/<reasoning> 三种标签、任意位置（含中间嵌入）、多段、未闭合残段
 		finalContent := engine.StripAllThinking(content.String())
-		if messageContent != nil && messageContent.Markdown != finalContent {
-			messageContent, renderManifest = canonicalRenderProjection(messageContent.ProducerKind, messageContent.Locale, finalContent, messagecontent.SurfaceDesktop, "api-markdown-v1", messageContent.Attachments...)
+		if messageContent != nil {
+			// 终态生产者已冻结正文和附件；空正文同样优先于传输预览。
+			finalContent = messageContent.Markdown
 		}
 		reply = &adapter.Reply{
 			Content:             finalContent,
@@ -1665,9 +1667,13 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		reply, err = run.process(s.engine, msg)
 		if err != nil {
 			trace.L(ctx).Error("处理失败", chatLLMErrorTraceFields(err)...)
-			writeChatLLMError(w, chatErrorStatus(req.Provider, err), err)
+			writeChatLLMErrorResult(w, chatErrorStatus(req.Provider, err), err, reply, msg.SessionID)
 			return
 		}
+	}
+	if observedErr != nil {
+		writeChatLLMErrorResult(w, chatErrorStatus(req.Provider, observedErr), observedErr, reply, msg.SessionID)
+		return
 	}
 
 	trace.L(ctx).Info("→ 回复", "content_len", len([]rune(reply.Content)), "elapsed_ms", time.Since(start).Milliseconds())
@@ -1798,12 +1804,7 @@ func (s *Server) handleChatSSE(
 			errFields = append(errFields, "chunks_so_far", chunkCount)
 			trace.L(ctx).Error("[SSE] chunk 错误", errFields...)
 			payloadFields := llmErrorPayload(chunk.Error)
-			payloadFields["assistant_message_id"] = chunk.AssistantMessageID
-			payloadFields["backend_message_id"] = chunk.BackendMessageID
-			payloadFields["message_id"] = chunk.MessageID
-			payloadFields["sequence"] = chunk.Sequence
-			payloadFields["reasoning_disclosure"] = chunk.ReasoningDisclosure
-			payloadFields["runtime_event"] = chunk.RuntimeEvent
+			appendObservedChatError(payloadFields, chunk)
 			errPayload, _ := json.Marshal(payloadFields)
 			_ = writer.WriteData(string(errPayload))
 			return
@@ -1821,8 +1822,6 @@ func (s *Server) handleChatSSE(
 			finalContent := engine.StripAllThinking(canonical.String())
 			if chunk.MessageContent == nil {
 				chunk.MessageContent = canonicalChatContent(finalContent, chunk.Metadata)
-			} else if chunk.MessageContent.Markdown != finalContent {
-				chunk.MessageContent, chunk.RenderManifest = canonicalRenderProjection(chunk.MessageContent.ProducerKind, chunk.MessageContent.Locale, finalContent, messagecontent.SurfaceDesktop, "api-markdown-v1", chunk.MessageContent.Attachments...)
 			}
 		}
 

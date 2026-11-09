@@ -145,8 +145,8 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolName string, args map[st
 			return e.executeWithHooks(ctx, call, func(ctx context.Context) (string, error) {
 				result, err := s.Execute(ctx, call.Arguments)
 				captureSkillRawResult(ctx, result)
+				captureCodeExecutionReceipt(ctx, skillName, result)
 				if err != nil {
-					captureCodeExecutionReceipt(ctx, skillName, nil)
 					if result != nil {
 						if skillName == "media_generate" {
 							// 媒体部分成功仍需交付已登记资产，错误状态继续向上传递。
@@ -156,7 +156,6 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolName string, args map[st
 					}
 					return "", err
 				}
-				captureCodeExecutionReceipt(ctx, skillName, result)
 				captureSkillRawResult(ctx, result)
 				if skillName == "knowledge_search" {
 					if hits, ok := result.Data.([]knowledge.SearchHit); ok {
@@ -543,6 +542,10 @@ func (e *ToolExecutor) runSkillViaPipeline(ctx context.Context, toolName string,
 	})
 	if res != nil && res.Result != nil {
 		captureSkillRawResult(ctx, res.Result)
+		// 失败执行仍有真实回执；不能因流水线返回错误而丢失编译诊断。
+		if res.Skill != nil && res.Skill.Name() == toolName {
+			captureCodeExecutionReceipt(ctx, toolName, res.Result)
+		}
 	}
 	if err != nil {
 		if res != nil && res.Result != nil {
@@ -559,7 +562,6 @@ func (e *ToolExecutor) runSkillViaPipeline(ctx context.Context, toolName string,
 	if res.Skill != nil && res.Skill.Name() != toolName {
 		return "", fmt.Errorf("runSkillViaPipeline: pipeline routed %q → %q (refusing to execute mismatched skill)", toolName, res.Skill.Name())
 	}
-	captureCodeExecutionReceipt(ctx, toolName, res.Result)
 	captureSkillRawResult(ctx, res.Result)
 	if toolName == "knowledge_search" {
 		if hits, ok := res.Result.Data.([]knowledge.SearchHit); ok {

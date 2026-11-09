@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/hexagon-codes/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/messagecontent"
 )
 
 type Status string
@@ -26,6 +27,8 @@ type Snapshot struct {
 	SessionID           string                          `json:"session_id"`
 	UserID              string                          `json:"user_id,omitempty"`
 	Content             string                          `json:"content,omitempty"`
+	MessageContent      *messagecontent.MessageContent  `json:"message_content,omitempty"`
+	RenderManifest      *messagecontent.RenderManifest  `json:"render_manifest,omitempty"`
 	Reasoning           string                          `json:"reasoning,omitempty"`
 	Done                bool                            `json:"done"`
 	Status              Status                          `json:"status"`
@@ -134,6 +137,7 @@ func (r *Registry) startMessageLocked(userID, sessionID, requestID, assistantMes
 		}
 		existing.ReasoningDisclosure = adapter.ReasoningDisclosure{Visibility: adapter.ReasoningNotExposed}
 		existing.RuntimeEvents = nil
+		existing.MessageContent, existing.RenderManifest = nil, nil
 		existing.LastSequence = 0
 		r.accepted[requestID] = make(map[uint64]struct{})
 		return
@@ -265,6 +269,12 @@ func (r *Registry) appendLocked(requestID string, chunk *adapter.ReplyChunk) *Sn
 		}
 	}
 	item.Content += chunk.Content
+	if chunk.Done && chunk.MessageContent != nil {
+		// 终态生产者的正文与附件共同拥有结果；空正文不能由先前预览回填。
+		item.MessageContent = cloneMessageContent(chunk.MessageContent)
+		item.RenderManifest = cloneRenderManifest(chunk.RenderManifest)
+		item.Content = chunk.MessageContent.Markdown
+	}
 	if chunk.ReasoningDisclosure.Visibility == adapter.ReasoningVisible {
 		item.Reasoning += chunk.Reasoning
 	}
@@ -305,6 +315,16 @@ func (r *Registry) appendLocked(requestID string, chunk *adapter.ReplyChunk) *Sn
 	if chunk.Done {
 		item.Done = true
 		item.Status = StatusCompleted
+		if chunk.Error != nil {
+			item.Status = StatusErrored
+			if errors.Is(chunk.Error, context.Canceled) {
+				item.Status = StatusCancelled
+			}
+			if item.Metadata == nil {
+				item.Metadata = map[string]string{}
+			}
+			item.Metadata["error"] = chunk.Error.Error()
+		}
 	} else {
 		item.Status = StatusStreaming
 	}
@@ -314,6 +334,9 @@ func (r *Registry) appendLocked(requestID string, chunk *adapter.ReplyChunk) *Sn
 }
 
 func (r *Registry) Fail(requestID string, err error) *Snapshot {
+	if errors.Is(err, context.Canceled) {
+		return r.finish(requestID, StatusCancelled, err)
+	}
 	return r.finish(requestID, StatusErrored, err)
 }
 
@@ -395,6 +418,8 @@ func (r *Registry) cleanupLocked(now time.Time) {
 
 func cloneSnapshot(item *Snapshot) Snapshot {
 	copy := *item
+	copy.MessageContent = cloneMessageContent(item.MessageContent)
+	copy.RenderManifest = cloneRenderManifest(item.RenderManifest)
 	if item.Metadata != nil {
 		copy.Metadata = make(map[string]string, len(item.Metadata))
 		for k, v := range item.Metadata {
@@ -417,6 +442,28 @@ func cloneSnapshot(item *Snapshot) Snapshot {
 		copy.RuntimeEvents = []adapter.SequencedRuntimeEvent{}
 	}
 	return copy
+}
+
+func cloneMessageContent(content *messagecontent.MessageContent) *messagecontent.MessageContent {
+	if content == nil {
+		return nil
+	}
+	copy := *content
+	if content.Attachments != nil {
+		copy.Attachments = append([]messagecontent.AttachmentRef{}, content.Attachments...)
+	}
+	return &copy
+}
+
+func cloneRenderManifest(manifest *messagecontent.RenderManifest) *messagecontent.RenderManifest {
+	if manifest == nil {
+		return nil
+	}
+	copy := *manifest
+	if manifest.Parts != nil {
+		copy.Parts = append([]messagecontent.RenderPart{}, manifest.Parts...)
+	}
+	return &copy
 }
 
 func runtimeChunkMessageID(chunk *adapter.ReplyChunk) (string, bool) {

@@ -11,6 +11,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -574,6 +575,15 @@ func (s *Store) CleanupOldSessions(ctx context.Context, olderThanDays int) (int6
 // 经 sqliteutil.RetryOnBusy 做有限退避重试：冲突方提交后重试即可成功落库，
 // 避免并发写竞争下消息被静默丢弃。事务在每次重试内独立开启/回滚，保证幂等。
 func (s *Store) SaveMessage(ctx context.Context, msg *storage.MessageRecord) error {
+	return s.saveMessage(ctx, msg, false)
+}
+
+// SaveMessageIfSessionActive 在原消息事务中校验会话，避免检查与写入之间的删除窗口。
+func (s *Store) SaveMessageIfSessionActive(ctx context.Context, msg *storage.MessageRecord) error {
+	return s.saveMessage(ctx, msg, true)
+}
+
+func (s *Store) saveMessage(ctx context.Context, msg *storage.MessageRecord, requireActiveSession bool) error {
 	if msg.CreatedAt.IsZero() {
 		msg.CreatedAt = time.Now()
 	}
@@ -585,7 +595,7 @@ func (s *Store) SaveMessage(ctx context.Context, msg *storage.MessageRecord) err
 	}
 
 	if err := s.withMessageMutation(ctx, func() error {
-		return s.saveMessageTx(ctx, msg)
+		return s.saveMessageTx(ctx, msg, requireActiveSession)
 	}); err != nil {
 		return err
 	}
@@ -606,12 +616,21 @@ func (s *Store) withMessageMutation(ctx context.Context, fn func() error) error 
 
 // saveMessageTx 在单个事务内插入消息并更新会话冗余字段。
 // 拆出独立方法以便 RetryOnBusy 在 BUSY 冲突时整体重试（每次重试独立事务）。
-func (s *Store) saveMessageTx(ctx context.Context, msg *storage.MessageRecord) error {
+func (s *Store) saveMessageTx(ctx context.Context, msg *storage.MessageRecord, requireActiveSession bool) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("开启事务失败: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	if requireActiveSession {
+		var visible int
+		if err := tx.QueryRowContext(ctx, `SELECT 1 FROM sessions WHERE id = ? AND status >= 0`, msg.SessionID).Scan(&visible); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return storage.ErrNotFound
+			}
+			return err
+		}
+	}
 
 	replayed := false
 	if completion, ok := storage.AssistantCompletionFromContext(ctx); ok && completion.Commit != nil {
@@ -669,22 +688,52 @@ func (s *Store) GetMessage(ctx context.Context, id string) (*storage.MessageReco
 // UpdateMessageMetadata 原位更新已有消息的 metadata。
 // runtime terminal snapshot 是后续写入，不得经 SaveMessage 重插同一 ID。
 func (s *Store) UpdateMessageMetadata(ctx context.Context, id, metadata string) error {
+	return s.updateMessageMetadata(ctx, id, metadata, false)
+}
+
+// UpdateMessageMetadataIfSessionActive 在消息真实归属的活动会话事务中更新原快照。
+func (s *Store) UpdateMessageMetadataIfSessionActive(ctx context.Context, id, metadata string) error {
+	return s.updateMessageMetadata(ctx, id, metadata, true)
+}
+
+func (s *Store) updateMessageMetadata(ctx context.Context, id, metadata string, requireActiveSession bool) error {
 	if metadata == "" {
 		metadata = "{}"
 	}
 	if err := s.withMessageMutation(ctx, func() error {
-		result, err := s.db.ExecContext(ctx, `UPDATE messages SET metadata = ? WHERE id = ?`, metadata, id)
+		update := func(exec func(context.Context, string, ...any) (sql.Result, error)) error {
+			result, err := exec(ctx, `UPDATE messages SET metadata = ? WHERE id = ?`, metadata, id)
+			if err != nil {
+				return err
+			}
+			rowsAffected, err := result.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if rowsAffected == 0 {
+				return storage.ErrNotFound
+			}
+			return nil
+		}
+		if !requireActiveSession {
+			return update(s.db.ExecContext)
+		}
+		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
 			return err
 		}
-		rowsAffected, err := result.RowsAffected()
-		if err != nil {
+		defer func() { _ = tx.Rollback() }()
+		var visible int
+		if err := tx.QueryRowContext(ctx, `SELECT 1 FROM messages m JOIN sessions s ON s.id=m.session_id WHERE m.id=? AND s.status>=0`, id).Scan(&visible); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return storage.ErrNotFound
+			}
 			return err
 		}
-		if rowsAffected == 0 {
-			return storage.ErrNotFound
+		if err := update(tx.ExecContext); err != nil {
+			return err
 		}
-		return nil
+		return tx.Commit()
 	}); err != nil {
 		return err
 	}
