@@ -8,6 +8,28 @@ import (
 	"github.com/hexagon-codes/hexclaw/internal/elementarymath"
 )
 
+func TestPhotoComputationPreservesUnrelatedFrozenNumberOrDecimal(t *testing.T) {
+	for _, tc := range []struct{ name, question, label string }{
+		{"different question number", "13. x-1/4x=18", "12."},
+		{"decimal coefficient", "12.5x-1/4x=18", "12."},
+		{"missing frozen label", "12. x-1/4x=18", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q := RecognizedQuestion{Subject: "数学", Question: tc.question, RawTranscription: tc.question,
+				SourceNumberPath: []string{"12"}, DisplayLabel: tc.label}
+			before, _ := json.Marshal(q)
+			problem, source := photoQuestionProblemTexts(q)
+			if problem != tc.question || source != tc.question {
+				t.Fatalf("unrelated prefix was removed: problem=%q source=%q", problem, source)
+			}
+			after, _ := json.Marshal(q)
+			if string(before) != string(after) {
+				t.Fatal("computation rewrote frozen source")
+			}
+		})
+	}
+}
+
 func TestMathSubproblemCapturedSourcesKeepEachActualAnswerTarget(t *testing.T) {
 	raw, err := os.ReadFile("../testdata/d20_current_tasks.json")
 	if err != nil {

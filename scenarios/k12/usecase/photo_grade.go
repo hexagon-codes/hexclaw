@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/hexagon-codes/hexclaw/internal/elementarymath"
@@ -528,7 +529,7 @@ func photoItemGradeRequest(req PhotoGradeRequest, q RecognizedQuestion) GradeReq
 
 // 同一只读来源投影供求解与教学图消费，避免局部题面丢掉冻结的公共条件。
 func photoQuestionProblemTexts(q RecognizedQuestion) (problem, sourceProblem string) {
-	problem = q.Question
+	problem = photoQuestionComputationText(q)
 	sourceProblem = q.Question
 	if q.ImageSourceContext == nil {
 		return problem, sourceProblem
@@ -546,6 +547,35 @@ func photoQuestionProblemTexts(q RecognizedQuestion) (problem, sourceProblem str
 	}
 	sourceProblem = k12.CompactQuestionSourceFragments(sourceFragments...)
 	return problem, sourceProblem
+}
+
+// 计算副本只移除冻结题号，数学正文保留原括号与分数结合关系。
+func photoQuestionComputationText(q RecognizedQuestion) string {
+	if q.Subject != "数学" || len(q.SourceNumberPath) != 1 || q.SourceNumberPath[0] == "" ||
+		strings.Trim(q.SourceNumberPath[0], "0123456789") != "" {
+		return q.Question
+	}
+	view := strings.TrimSpace(q.Question)
+	open, close := "", ""
+	if strings.HasPrefix(view, `\(`) && strings.HasSuffix(view, `\)`) {
+		open, close = `\(`, `\)`
+		view = strings.TrimSpace(view[len(open) : len(view)-len(close)])
+	}
+	if rest, ok := strings.CutPrefix(view, q.SourceNumberPath[0]+"、"); ok {
+		return open + strings.TrimSpace(rest) + close
+	}
+	if q.DisplayLabel == q.SourceNumberPath[0]+"." {
+		if rest, ok := strings.CutPrefix(view, q.DisplayLabel); ok && rest != "" {
+			for _, layout := range []string{"", `\qquad`, `\quad`} {
+				if body, found := strings.CutPrefix(rest, layout); found && body != "" {
+					if unspaced := strings.TrimLeftFunc(body, unicode.IsSpace); unspaced != body {
+						return open + unspaced + close
+					}
+				}
+			}
+		}
+	}
+	return q.Question
 }
 
 func classifyPhotoMode(questions []RecognizedQuestion) PhotoMode {

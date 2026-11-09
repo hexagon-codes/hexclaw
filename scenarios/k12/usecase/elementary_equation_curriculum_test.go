@@ -85,6 +85,40 @@ func assertElementaryEquationGuide(t *testing.T, result usecase.BlankWorksheetPr
 	t.Logf("ELEMENTARY_EQUATION_SAMPLE=%s", sample)
 }
 
+func TestPhotoFrozenEquationLabelUsesNumericEvidenceWithoutChangingSource(t *testing.T) {
+	for _, raw := range []string{"12.  x-1/4x=18", `\(12.\quad x-\frac{1}{4}x=18\)`} {
+		t.Run(raw, func(t *testing.T) {
+			wired, calls, _ := elementaryEquationAssembly(t)
+			confidence := .99
+			q := usecase.RecognizedQuestion{Question: raw, RawTranscription: raw, CanonicalMarkdown: raw,
+				SourceNumberPath: []string{"12"}, DisplayLabel: "12.", Subject: "数学",
+				AnswerState: usecase.AnswerStateBlank, RecognitionConfidence: &confidence}
+			before, _ := json.Marshal(q)
+			wired.Deps.Recognizer = elementaryEquationSavedRecognition{question: q}
+			photo, err := wired.Deps.GradeHomeworkPhoto(context.Background(), usecase.PhotoGradeRequest{
+				AgentName: "scope-child", Subject: "数学", Grade: "六年级上", Image: []byte("saved worksheet fixture"),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(photo.Items) != 1 || photo.Items[0].Status != usecase.PhotoBlankSolved ||
+				photo.Items[0].Solve.Evidence.EvidenceType != usecase.EvidenceNumericExec ||
+				!strings.Contains(photo.Items[0].Solve.Solution, "x = 24") || calls.Load() != 0 {
+				t.Fatalf("frozen equation did not use exact numeric verification: result=%+v calls=%d", photo, calls.Load())
+			}
+			item := photo.Items[0].Recognized
+			if item.Question != raw || item.RawTranscription != raw || item.CanonicalMarkdown != raw ||
+				item.DisplayLabel != "12." || !reflect.DeepEqual(item.SourceNumberPath, []string{"12"}) {
+				t.Fatal("computed result lost original printed source")
+			}
+			after, _ := json.Marshal(q)
+			if string(before) != string(after) {
+				t.Fatal("computation changed the recognition input")
+			}
+		})
+	}
+}
+
 func TestElementaryEquationCurriculumRealAssemblyPreservesSourceAndProducesGuide(t *testing.T) {
 	for _, tc := range []struct {
 		question string
