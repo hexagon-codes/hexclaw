@@ -3,6 +3,8 @@ services:
   hexclaw:
     image: ${HEXCLAW_IMAGE:-hexclaw:dev}
     platform: linux/amd64
+    # 容器 init 转发停止信号并回收工具执行产生的孤儿进程。
+    init: true
     build:
       context: .
       dockerfile: Dockerfile

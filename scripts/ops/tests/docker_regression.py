@@ -324,10 +324,23 @@ print(json.dumps({'receipts':db.execute('SELECT id,state FROM receipts ORDER BY 
 
     def test_successful_deployment_retains_identity_and_data(self):
         self.start()
+        previous = self.container()
+        self.assertFalse(previous['HostConfig'].get('Init'))
         before = self.read_data()
         value = json.loads(command(*self.deploy_command()).stdout)
+        current = self.container()
         self.assertEqual('deployed', value['status'])
-        self.assertEqual(self.images['next']['id'], self.container()['Image'])
+        self.assertEqual(self.images['next']['id'], current['Image'])
+        self.assertTrue(current['HostConfig']['Init'])
+        for key in ('CapAdd', 'CapDrop', 'SecurityOpt', 'MaskedPaths', 'ReadonlyPaths',
+                    'NetworkMode', 'PortBindings', 'Binds'):
+            self.assertEqual(previous['HostConfig'].get(key), current['HostConfig'].get(key), key)
+        self.assertEqual(previous['Mounts'], current['Mounts'])
+        recovery = [p for p in (self.project / '.hexclaw-deploy').glob('*.compose.json')
+                    if p.name != 'current.compose.json']
+        self.assertEqual(1, len(recovery))
+        saved = json.loads(recovery[0].read_text())
+        self.assertEqual(previous['HostConfig'].get('Init') is True, saved['services']['hexclaw']['init'])
         self.assertEqual(before, self.read_data())
         self.assertEqual(value['baseline'], value['verification'])
         self.assertTrue(self.ready())

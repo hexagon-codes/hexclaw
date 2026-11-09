@@ -428,8 +428,12 @@ def deploy(args):
         labels = old["Config"].get("Labels") or {}
         if frozen_configuration["name"] != labels.get("com.docker.compose.project"):
             raise OperationError("The Compose project does not match the existing container")
+        # 恢复快照保留实际容器的回收器状态，避免原 Compose 文件落后于已部署配置。
+        frozen_configuration["services"]["hexclaw"]["init"] = old["HostConfig"].get("Init") is True
         desired_configuration = copy.deepcopy(frozen_configuration)
         desired_configuration["services"]["hexclaw"]["image"] = args.image
+        # 为既有部署补齐容器回收器，其余冻结的运行配置保持原值。
+        desired_configuration["services"]["hexclaw"]["init"] = True
         desired_digest = configuration_digest(configuration, desired_configuration)
         tools_digest = deployment_tools_digest()
         current_file = state_dir / "current.json"
@@ -441,7 +445,7 @@ def deploy(args):
                     and previous.get("tools_sha256") == tools_digest
                     and previous.get("verification", {}).get("backend_id") == baseline["backend_id"]):
                 existing_image = docker_json("image", "inspect", args.image)[0]
-                if old["Image"] == existing_image["Id"]:
+                if old["Image"] == existing_image["Id"] and old["HostConfig"].get("Init") is True:
                     previous["original_actions_run"] = previous.get("original_actions_run", previous.get("actions_run"))
                     previous["actions_run"] = args.run_id
                     previous["verification"] = baseline
