@@ -566,17 +566,22 @@ func (e *workflowExecutor) executeAgent(ctx context.Context, node *workflowNode,
 		Content:    inputText,
 		Metadata:   metadata,
 	}).Message())
-	if err != nil {
-		e.recordWorkflowInvocationOutcome(node, err, branchIndex...)
-		return "", err
-	}
 	if reply == nil {
-		err := fmt.Errorf("Agent returned no response")
+		if err == nil {
+			err = fmt.Errorf("Agent returned no response")
+		}
 		e.recordWorkflowInvocationOutcome(node, err, branchIndex...)
 		return "", err
 	}
 	e.freezeRunRouteFromEngineReply(node, reply)
-	artifacts := e.server.freezeWorkflowArtifacts(ctx, reply)
+	freezeCtx := ctx
+	if err != nil && ctx.Err() != nil {
+		// 已观察产物的冻结不再受原调用取消影响，也不启动新的节点执行。
+		var cancel context.CancelFunc
+		freezeCtx, cancel = context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+	}
+	artifacts := e.server.freezeWorkflowArtifacts(freezeCtx, reply)
 	e.mu.Lock()
 	if len(artifacts) > 0 {
 		if e.run.ArtifactSnapshots == nil {
@@ -598,6 +603,10 @@ func (e *workflowExecutor) executeAgent(ctx context.Context, node *workflowNode,
 		}
 	}
 	e.mu.Unlock()
+	if err != nil {
+		e.recordWorkflowInvocationOutcome(node, err, branchIndex...)
+		return reply.Content, err
+	}
 	outputErr := validateWorkflowOutput(resources, reply)
 	e.recordStepReceipt(node, resources, reply, outputErr, branchIndex...)
 	if outputErr != nil {

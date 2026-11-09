@@ -1,17 +1,23 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/messagecontent"
 )
 
 type workflowTestEngine struct {
@@ -325,4 +331,115 @@ func getRunSnapshot(t *testing.T, s *Server, runID string) WorkflowRun {
 		t.Fatalf("解析 run 响应失败: %v", err)
 	}
 	return run
+}
+
+// 失败回复的已观察附件必须随运行快照保留，原失败分类与下游停止语义不变。
+func TestWorkflowRunFailurePreservesObservedArtifact(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		cause   error
+		status  string
+		unknown bool
+	}{
+		{"provider_rejected", &llm.ProviderError{StatusCode: 503, Body: "controlled upstream failure"}, "failed", false},
+		{"outcome_unknown", errors.New("controlled unknown invocation"), "outcome_unknown", true},
+		{"cancelled", context.Canceled, "outcome_unknown", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := workflowDeliveryServer(t)
+			raw := []byte("workflow-partial-artifact-unique-marker\n")
+			ref, attachment := workflowArtifactFixture(t, "partial.txt", "text/plain", raw)
+			storedPath, err := s.genStore.SaveBytes(raw, "txt")
+			if err != nil {
+				t.Fatal(err)
+			}
+			attachment.Data = ""
+			attachment.URL = "/api/v1/files/generated/" + storedPath
+			canonical, err := messagecontent.New(messagecontent.ProducerWorkflow, "en", "observed partial", []messagecontent.AttachmentRef{ref})
+			if err != nil {
+				t.Fatal(err)
+			}
+			manifest, err := messagecontent.BuildManifest(canonical, messagecontent.RenderRequest{Surface: messagecontent.SurfaceHistory, RendererVersion: "workflow-partial-test-v1", Capabilities: messagecontent.CapabilitySnapshot{Markdown: true, Attachments: true}, Parts: []messagecontent.RenderPart{{Kind: messagecontent.PartMarkdown, Text: canonical.Markdown}, {Kind: messagecontent.PartArtifact, ArtifactRef: ref.AssetID, ArtifactDigest: ref.Digest, AltText: ref.AltText}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var calls atomic.Int32
+			s.engine = &workflowContractEngine{process: func(_ context.Context, _ *adapter.Message) (*adapter.Reply, error) {
+				calls.Add(1)
+				return &adapter.Reply{Content: canonical.Markdown, MessageContent: &canonical, RenderManifest: &manifest, Attachments: []adapter.Attachment{attachment}, ToolCalls: []adapter.ToolCall{{ID: "observed-get", Name: "browser", Arguments: `{"action":"request","method":"GET","url":"http://127.0.0.1/synthetic"}`, Status: "success", Result: "observed synthetic download", Detail: &adapter.ToolExecutionDetail{Phase: "observed", Outcome: "success"}}}}, tc.cause
+			}}
+			wf := contractWorkflow(contractNode("agent", "agent", nil), contractNode("after", "output", nil))
+			s.workflowStore.workflows[wf.ID] = wf
+			mux := http.NewServeMux()
+			mux.HandleFunc("POST /api/v1/canvas/workflows/{id}/run", s.handleRunWorkflow)
+			mux.HandleFunc("GET /api/v1/canvas/runs/{id}", s.handleGetWorkflowRun)
+			server := httptest.NewServer(mux)
+			defer server.Close()
+			response, err := server.Client().Post(server.URL+"/api/v1/canvas/workflows/"+wf.ID+"/run", "application/json", strings.NewReader(`{"input":"synthetic-only","user_id":"workflow-test-owner"}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var launched WorkflowRun
+			decodeErr := json.NewDecoder(response.Body).Decode(&launched)
+			response.Body.Close()
+			if response.StatusCode != 200 || decodeErr != nil || launched.ID == "" {
+				t.Fatalf("run start: %d %v", response.StatusCode, decodeErr)
+			}
+			var got WorkflowRun
+			for range 100 {
+				response, err = server.Client().Get(server.URL + "/api/v1/canvas/runs/" + launched.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				decodeErr = json.NewDecoder(response.Body).Decode(&got)
+				response.Body.Close()
+				if response.StatusCode != 200 || decodeErr != nil {
+					t.Fatalf("run read: %d %v", response.StatusCode, decodeErr)
+				}
+				if got.Status != "running" {
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			if got.Status != tc.status || !strings.Contains(got.Error, tc.cause.Error()) || calls.Load() != 1 {
+				t.Fatalf("original failure changed: status=%s error=%q calls=%d", got.Status, got.Error, calls.Load())
+			}
+			check := func(label string, run *WorkflowRun) {
+				t.Helper()
+				snapshot, found := run.ArtifactSnapshots[ref.AssetID]
+				var node *WorkflowNodeRun
+				for i := range run.NodeResults {
+					item := &run.NodeResults[i]
+					if item.NodeID == "agent" {
+						node = item
+					}
+					if item.NodeID == "after" && item.Status == nodeStatusCompleted {
+						t.Fatal("failed invocation advanced downstream")
+					}
+				}
+				canonicalOK := node != nil && node.MessageContent != nil && node.MessageContent.SourceDigest == canonical.SourceDigest && node.RenderManifest != nil && node.RenderManifest.RenderID == manifest.RenderID
+				t.Logf("%s status=%s artifact=%t path=%t canonical=%t unknown=%t calls=%d", label, run.Status, found, snapshot.FilePath != "", canonicalOK, node != nil && node.OutcomeUnknown, calls.Load())
+				if node == nil || node.Status != nodeStatusFailed || node.OutcomeUnknown != tc.unknown || !found || snapshot.Error != "" || snapshot.FilePath == "" || !canonicalOK {
+					t.Fatalf("%s lost failed observed artifact/canonical: node=%+v artifact=%+v", label, node, snapshot)
+				}
+				file, err := s.genStore.Open(snapshot.FilePath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				actual, err := io.ReadAll(file)
+				file.Close()
+				if err != nil || !bytes.Equal(actual, raw) {
+					t.Fatalf("artifact bytes changed: %v", err)
+				}
+			}
+			check("http", &got)
+			reloaded := &WorkflowStore{runs: map[string]*WorkflowRun{}, runsFilePath: s.workflowStore.runsFilePath}
+			reloaded.loadRunsFromFile()
+			persisted := reloaded.runs[launched.ID]
+			if persisted == nil {
+				t.Fatal("run was not durably recorded")
+			}
+			check("reloaded", persisted)
+		})
+	}
 }
