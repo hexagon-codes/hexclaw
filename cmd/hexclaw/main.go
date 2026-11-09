@@ -1942,6 +1942,10 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 		// message routing disables the engine's normal cross-provider fallback;
 		// a settings change therefore affects only newly created Jobs.
 		if gradingCall {
+			// 持久图片任务的子调用继承真实归属；工具仍使用子请求自己的调用身份。
+			if owner := skill.AuthenticatedUserID(ctx); owner != "" {
+				msg.UserID = owner
+			}
 			if err := validateK12FrozenModelCapabilityReceipt(
 				ctx, router, k12ModelCapabilityReceipts, snapshot, k12ProbeKindForSnapshot(snapshot),
 			); err != nil {
@@ -3351,6 +3355,12 @@ Set source only when the material explicitly names a work, title, or another rel
 				err = errors.Join(err, fmt.Errorf("rebuild IM reply canonical evidence: %w", rebuildErr))
 			}
 		}
+		partialDocuments := imPartialDocumentDependencies{store: store, documents: documentFlow,
+			resolveInstanceID: instanceMgr.ResolveRunningInstanceID, prepareDelivery: instanceMgr.PrepareReplyDelivery, send: instanceMgr.Send}
+		if k12Runtime != nil {
+			partialDocuments.getPrintReply = k12Runtime.Records.GetConversationPrintReply
+		}
+		reply, err = maybeDeliverIMPartialDocuments(ctx, msg, reply, err, partialDocuments)
 		if k12Runtime != nil {
 			reply, err = maybeDeliverIMFinalReply(ctx, msg, reply, err, newIMFinalReplyDependencies(&k12Runtime.Deps, instanceMgr.ResolveRunningInstanceID, k12TutorPolicy.unitSummary))
 		}

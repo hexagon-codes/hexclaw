@@ -82,6 +82,15 @@ type Manager struct {
 	metadata map[string]*Instance
 }
 
+type replyDeliveryClaimKey struct{}
+
+// 仅保存当前入站回调已取得的原表所有权，不替代数据库中的事件记录。
+type replyDeliveryClaim struct {
+	manager               *Manager
+	instanceName, eventID string
+	owned                 bool
+}
+
 func NewManager(db *sql.DB) *Manager {
 	return &Manager{
 		db:                db,
@@ -672,6 +681,29 @@ func (m *Manager) Send(ctx context.Context, target, chatID string, reply *adapte
 	return adp.Send(ctx, chatID, reply)
 }
 
+// PrepareReplyDelivery 仅供原同步入站回调在最终回复发送前调用，不改变普通消息接纳策略。
+// true 表示本回调拥有已登记事件；false,nil 表示其他回调已取得该事件，不应再次发送。
+// 初次登记失败时只补写原事件表；错误表示准备未完成，不能据此标记发送已派发。
+// ctx 必须来自本 Manager 的原 MessageHandler，msg 必须保留同一提供方事件身份。
+func (m *Manager) PrepareReplyDelivery(ctx context.Context, msg *adapter.Message) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	claim, ok := ctx.Value(replyDeliveryClaimKey{}).(*replyDeliveryClaim)
+	if !ok || claim == nil || claim.manager != m || msg == nil || claim.eventID == "" || msg.ID != claim.eventID {
+		return false, errors.New("original inbound delivery claim is unavailable")
+	}
+	if claim.owned {
+		return true, nil
+	}
+	seen, err := m.recordEvent(ctx, claim.instanceName, claim.eventID)
+	if err != nil || seen {
+		return false, err
+	}
+	claim.owned = true
+	return true, nil
+}
+
 // RunningPlatform 只读返回 Send 按相同优先级解析出的实际平台，不更改运行实例或路由。
 // 未命中时返回 false，调用方不得根据实例 ID 或名称猜测平台能力。
 func (m *Manager) RunningPlatform(target string) (adapter.Platform, bool) {
@@ -1056,19 +1088,23 @@ func (m *Manager) wrapHandler(inst *Instance, next adapter.MessageHandler) adapt
 		if msg.InstanceID == "" {
 			msg.InstanceID = inst.Name
 		}
+		claim := &replyDeliveryClaim{manager: m, instanceName: inst.Name, eventID: msg.ID}
 		if msg.ID != "" {
 			seen, err := m.recordEvent(ctx, inst.Name, msg.ID)
 			if err == nil && seen {
 				return nil, nil
 			}
+			claim.owned = err == nil
 		}
+		ctx = context.WithValue(ctx, replyDeliveryClaimKey{}, claim)
 		_ = m.touchEvent(ctx, inst.Name)
 		reply, err := next(ctx, msg)
 		if err != nil {
 			// The dedup marker is provisional: a transient failure must release it
 			// so the platform's redelivery of the same event_id can be retried
 			// instead of being silently dropped.
-			if msg.ID != "" {
+			// 原事件已开始发送必要产物时保留去重，未知发送结果不能随原处理错误重放。
+			if msg.ID != "" && claim.owned && !reply.DeliveryAttempted(msg) {
 				_ = m.deleteEvent(ctx, inst.Name, msg.ID)
 			}
 			_ = m.setStatus(ctx, inst.Name, StatusError, err.Error())

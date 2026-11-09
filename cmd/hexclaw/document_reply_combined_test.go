@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -169,7 +170,7 @@ func TestCombinedNativeAndGenericDocumentsUseOnePersistentDeliveryBatch(t *testi
 		}
 		return reply
 	}
-	process()
+	reply := process()
 	saved, err := store.GetMessage(ctx, requestID+":assistant")
 	if err != nil {
 		t.Fatal(err)
@@ -189,6 +190,26 @@ func TestCombinedNativeAndGenericDocumentsUseOnePersistentDeliveryBatch(t *testi
 	native, err := runtime.Deps.GetPrintableArtifactPDF(ctx, "child-a", frozen.Artifact.ArtifactID)
 	if err != nil || !bytes.Equal(native.Render.Payload, nativeRenderer.pdf) {
 		t.Fatalf("persisted teaching report changed: %v", err)
+	}
+	// 同一打印投递已冻结原助手的全部附件，错误分支不再另行发送普通文档。
+	partialErr := errors.New("controlled later model failure")
+	partialMessage := &adapter.Message{ID: "combined-platform-message", UserID: "combined-owner", SessionID: sessionID,
+		Platform: adapter.PlatformDingtalk, InstanceID: "bot-1", ChatID: "parent-chat", Metadata: map[string]string{"request_id": requestID}}
+	partialDeps := imPartialDocumentDependencies{
+		store: store, documents: flow, getPrintReply: runtime.Records.GetConversationPrintReply,
+		prepareDelivery:   func(context.Context, *adapter.Message) (bool, error) { return true, nil },
+		resolveInstanceID: func(_, instance string) (string, error) { return instance, nil },
+		send: func(context.Context, string, string, *adapter.Reply) error {
+			t.Fatal("registered print delivery was duplicated")
+			return nil
+		},
+	}
+	if _, _, owned, err := prepareIMPartialDocuments(ctx, partialMessage, reply, partialDeps); err != nil || !owned {
+		t.Fatalf("actual print outbox did not own the same assistant documents: owned=%v err=%v", owned, err)
+	}
+	partialReply, partialResultErr := maybeDeliverIMPartialDocuments(ctx, partialMessage, reply, partialErr, partialDeps)
+	if partialReply != reply || partialResultErr != partialErr || reply.DeliveryAttempted(partialMessage) {
+		t.Fatal("print delivery ownership changed the original error or claimed another send")
 	}
 	if err := runtime.Outbox.ProcessPending(ctx); err != nil {
 		t.Fatal(err)
