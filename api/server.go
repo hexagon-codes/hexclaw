@@ -132,6 +132,7 @@ type Server struct {
 	mediaFlow          *mediaflow.Service
 	kbEmbedding        *KnowledgeEmbeddingInfo // 知识库嵌入接线信息（BUG-20260712-B1，可选）
 	reloadGenServices  func()                  // LLM 配置变更后重建 gen 服务（main.go 注入）
+	heartbeatToggle    func(bool)              // 当前后端唯一巡查实例的运行开关。
 	// reloadSemanticRuntime builds and atomically installs the next embedding
 	// resolver/registry generation while draining the prior gate. The legacy
 	// invalidator remains for non-desktop callers and compatibility tests.
@@ -437,6 +438,9 @@ func (s *Server) SetCfgWriter(w *config.Writer) {
 
 // SetRuntimeConfigPath 固定当前服务所有设置写入和补偿的实际启动路径。
 func (s *Server) SetRuntimeConfigPath(path string) { s.runtimeCfgPath = path }
+
+// SetHeartbeatToggle 由宿主在启动服务前装配同一生命周期内的巡查开关；不得使用请求上下文启动循环。
+func (s *Server) SetHeartbeatToggle(toggle func(bool)) { s.heartbeatToggle = toggle }
 
 // SetBackendID 注入随数据库持久化的数据实例身份。
 func (s *Server) SetBackendID(id string) { s.backendID = id }

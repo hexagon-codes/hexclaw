@@ -1641,14 +1641,14 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 
 	// 11. 初始化心跳巡查
 	var hb *heartbeat.Heartbeat
-	if cfg.Heartbeat.Enabled {
+	{
 		intervalMins := cfg.Heartbeat.IntervalMins
 		if intervalMins <= 0 {
 			intervalMins = 15
 		}
 
 		hbCfg := heartbeat.Config{
-			Enabled:      true,
+			Enabled:      cfg.Heartbeat.Enabled,
 			Interval:     time.Duration(intervalMins) * time.Minute,
 			Instructions: cfg.Heartbeat.Instructions,
 			QuietHours: heartbeat.QuietHours{
@@ -1675,10 +1675,19 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 			lc.Info("heartbeat", message)
 			return nil
 		}
-		hb.Start(ctx, executor, notifier)
-		fmt.Printf("  ✓ Heartbeat   每 %d 分钟巡查\n", intervalMins)
-	} else {
-		fmt.Println("  ✗ Heartbeat   未启用")
+		srv.SetHeartbeatToggle(func(enabled bool) {
+			if enabled {
+				hb.Start(ctx, executor, notifier)
+			} else {
+				hb.Stop()
+			}
+		})
+		if cfg.Heartbeat.Enabled {
+			hb.Start(ctx, executor, notifier)
+			fmt.Printf("  ✓ Heartbeat   每 %d 分钟巡查\n", intervalMins)
+		} else {
+			fmt.Println("  ✗ Heartbeat   未启用")
+		}
 	}
 
 	// 挂载 Phase 3 API 端点

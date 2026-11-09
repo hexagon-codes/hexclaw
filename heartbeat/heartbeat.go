@@ -71,6 +71,7 @@ type Heartbeat struct {
 	notifier     NotifyFunc
 	instructions string // 解析后的巡查指令
 	stopCh       chan struct{}
+	runCancel    context.CancelFunc
 	stopped      bool
 	lastRunAt    time.Time
 	runCount     int
@@ -94,27 +95,50 @@ func New(cfg Config) *Heartbeat {
 
 // Start 启动心跳巡查
 //
+// 跟随宿主上下文退出；重复开启不创建额外循环，停止后可重新开启。
+//
 // executor: Agent 处理回调，传入巡查指令，返回处理结果
 // notifier: 通知回调，将有价值的结果推送给用户
-func (h *Heartbeat) Start(_ context.Context, executor Executor, notifier NotifyFunc) {
+func (h *Heartbeat) Start(parent context.Context, executor Executor, notifier NotifyFunc) {
 	h.mu.Lock()
+	if h.stopCh != nil && !h.stopped {
+		h.mu.Unlock()
+		return
+	}
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithCancel(parent)
 	h.executor = executor
 	h.notifier = notifier
 	h.stopCh = make(chan struct{})
+	stopCh := h.stopCh
+	h.runCancel = cancel
 	h.stopped = false
+	h.config.Enabled = true
 	h.mu.Unlock()
 
-	go h.runLoop()
+	// 每次启动固定自己的上下文与通道，旧循环不能接管重新开启后的状态。
+	go func() {
+		defer cancel()
+		h.runLoop(ctx, stopCh)
+	}()
 	logger.Info("Heartbeat 已启动: 间隔", "interval", h.config.Interval)
 }
 
-// Stop 停止心跳巡查
+// Stop 停止后续巡查并请求取消当前执行；执行器应响应上下文，已发生的副作用不回滚。
 func (h *Heartbeat) Stop() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	h.config.Enabled = false
 	if !h.stopped {
 		h.stopped = true
-		close(h.stopCh)
+		if h.stopCh != nil {
+			close(h.stopCh)
+		}
+		if h.runCancel != nil {
+			h.runCancel()
+		}
 		logger.Info("Heartbeat 已停止")
 	}
 }
@@ -142,22 +166,35 @@ func (h *Heartbeat) Stats() Stats {
 // --- 内部方法 ---
 
 // runLoop 心跳主循环
-func (h *Heartbeat) runLoop() {
+func (h *Heartbeat) runLoop(ctx context.Context, stopCh <-chan struct{}) {
 	ticker := time.NewTicker(h.config.Interval)
 	defer ticker.Stop()
+	defer func() {
+		h.mu.Lock()
+		if h.stopCh == stopCh {
+			h.stopped = true
+			h.runCancel = nil
+		}
+		h.mu.Unlock()
+	}()
 
 	for {
 		select {
-		case <-h.stopCh:
+		case <-ctx.Done():
+			return
+		case <-stopCh:
 			return
 		case <-ticker.C:
-			h.beat()
+			h.beat(ctx)
 		}
 	}
 }
 
 // beat 执行一次心跳
-func (h *Heartbeat) beat() {
+func (h *Heartbeat) beat(parent context.Context) {
+	if parent.Err() != nil {
+		return
+	}
 	// 检查免打扰时段
 	if h.isQuietHour() {
 		return
@@ -173,13 +210,16 @@ func (h *Heartbeat) beat() {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(parent, 5*time.Minute)
 	defer cancel()
 
 	logger.Info("Heartbeat: 开始巡查")
 
 	// 执行巡查
 	result, err := executor(ctx, instructions)
+	if ctx.Err() != nil {
+		return
+	}
 	if err != nil {
 		logger.Error("Heartbeat: 巡查执行失败", "error", err)
 		return

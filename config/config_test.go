@@ -107,8 +107,8 @@ func TestDefaultConfig(t *testing.T) {
 	}
 
 	// Heartbeat 默认值
-	if !cfg.Heartbeat.Enabled {
-		t.Error("Heartbeat 应默认开启")
+	if cfg.Heartbeat.Enabled {
+		t.Error("Heartbeat should be disabled by default")
 	}
 	if cfg.Heartbeat.IntervalMins != 15 {
 		t.Errorf("期望 IntervalMins=15，得到 %d", cfg.Heartbeat.IntervalMins)

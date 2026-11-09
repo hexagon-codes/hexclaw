@@ -265,6 +265,7 @@ func (s *Server) handleGetFullConfig(w http.ResponseWriter, r *http.Request) {
 		"knowledge":      map[string]any{"enabled": s.cfg.Knowledge.Enabled},
 		"mcp":            map[string]any{"enabled": s.cfg.MCP.Enabled},
 		"cron":           map[string]any{"enabled": s.cfg.Cron.Enabled},
+		"heartbeat":      map[string]any{"enabled": s.cfg.Heartbeat.Enabled, "available": s.heartbeatToggle != nil},
 		"webhook":        map[string]any{"enabled": s.cfg.Webhook.Enabled},
 		"canvas":         map[string]any{"enabled": s.cfg.Canvas.Enabled},
 		"voice":          map[string]any{"enabled": s.cfg.Voice.Enabled},
@@ -355,6 +356,9 @@ func (s *Server) handleUpdateFullConfig(w http.ResponseWriter, r *http.Request) 
 		Memory *struct {
 			Enabled *bool `json:"enabled"`
 		} `json:"memory"`
+		Heartbeat *struct {
+			Enabled *bool `json:"enabled"`
+		} `json:"heartbeat"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid request body"})
@@ -370,7 +374,7 @@ func (s *Server) handleUpdateFullConfig(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if body.Ollama != nil {
-		if body.DisplayLocale != nil || body.Security != nil || body.Sandbox != nil || body.Memory != nil {
+		if body.DisplayLocale != nil || body.Security != nil || body.Sandbox != nil || body.Memory != nil || body.Heartbeat != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Ollama target update must be submitted separately"})
 			return
 		}
@@ -390,6 +394,14 @@ func (s *Server) handleUpdateFullConfig(w http.ResponseWriter, r *http.Request) 
 	memoryChanged := body.Memory != nil && body.Memory.Enabled != nil
 	if memoryChanged {
 		nextCfg.FileMemory.Enabled = *body.Memory.Enabled
+	}
+	heartbeatChanged := body.Heartbeat != nil && body.Heartbeat.Enabled != nil && *body.Heartbeat.Enabled != nextCfg.Heartbeat.Enabled
+	if heartbeatChanged {
+		if s.heartbeatToggle == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "Heartbeat runtime is unavailable"})
+			return
+		}
+		nextCfg.Heartbeat.Enabled = *body.Heartbeat.Enabled
 	}
 
 	if sec := body.Security; sec != nil {
@@ -477,6 +489,9 @@ func (s *Server) handleUpdateFullConfig(w http.ResponseWriter, r *http.Request) 
 	if memoryChanged {
 		// 只热更已保存的记忆字段，模型草稿与其他文件记忆旋钮均保持原值。
 		s.applyFileMemoryConfig(nextCfg.FileMemory, true)
+	}
+	if heartbeatChanged {
+		s.heartbeatToggle(nextCfg.Heartbeat.Enabled)
 	}
 
 	// 运行时代际发布后再暴露内存配置；cfgMu 使并发读写只观察完整提交。

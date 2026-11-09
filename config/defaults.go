@@ -155,7 +155,7 @@ func DefaultConfig() *Config {
 			},
 		},
 		Heartbeat: HeartbeatConfig{
-			Enabled:      true,
+			Enabled:      false,
 			IntervalMins: 15,
 		},
 		Router: RouterConfig{

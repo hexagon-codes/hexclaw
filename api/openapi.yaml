@@ -5820,7 +5820,7 @@ paths:
   /api/v1/config:
     get:
       summary: 读取脱敏整体配置
-      description: 只读投影；无API Key明文。Provider switchable是enabled/key/local条件推导，不是实时连通性；Ollama包括目标身份、revision/digest及管理能力。
+      description: 只读投影；无API Key明文。Provider switchable是enabled/key/local条件推导，不是实时连通性；Ollama包括目标身份、revision/digest及管理能力。heartbeat为当前后端的全局巡查状态，enabled默认false，available表示宿主已装配运行开关。
       tags:
         - models-system-media
       operationId: models_handleGetFullConfig_get
@@ -5844,14 +5844,15 @@ paths:
         - always registered
       x-description-en: Read-only projection without plaintext keys. Provider switchable derives from
         enabled/key/local conditions, not a live connection test. Ollama includes target identity,
-        revision/digest and process capability.
+        revision/digest and process capability. Heartbeat is backend-wide, disabled by default; available
+        indicates that the host has installed its runtime toggle.
       x-summary-en: Read projected full configuration
       x-reference-module: models-system-media
       x-visibility: public
     put:
       summary: 修改整体配置或Ollama目标
       description: security/sandbox为字段patch，落盘成功后发布运行时；allowed_paths提供数组为整体替换，[]清空。network_enabled=true当前拒绝400。ollama必须单独提交，不可混security/sandbox：四个expected
-        revision/digest、非空Idempotency-Key及associated_provider_instance_ids数组必需；更新关联Provider端点并返回提交证明。普通patch返回message。
+        revision/digest、非空Idempotency-Key及associated_provider_instance_ids数组必需；更新关联Provider端点并返回提交证明。heartbeat仅patch可选enabled，省略或null保持；落盘后立即启停，关闭取消当前巡查，不影响保活或Cron。普通patch返回message。
       tags:
         - models-system-media
       operationId: models_handleUpdateFullConfig_put
@@ -5901,16 +5902,25 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/MessageError"
+        "503":
+          description: 心跳运行开关尚未装配 / Heartbeat runtime toggle is unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageError"
       x-source:
         file: api/handler_extended.go
         handler: handleUpdateFullConfig
       x-availability:
         - always registered
-      x-description-en: security/sandbox are field patches persisted before runtime publication; supplied
+      x-description-en: >-
+        security/sandbox are field patches persisted before runtime publication; supplied
         allowed_paths replaces the set, [] clears. network_enabled=true is currently rejected with 400. Ollama
         must be submitted separately, with all four expected revision/digest values, Idempotency-Key, and an
         associated_provider_instance_ids array. Updates associated Provider endpoints and returns a receipt;
-        ordinary patches return message.
+        ordinary patches return message. Heartbeat patches only enabled: omission or null preserves the value.
+        After persistence the host starts or stops the loop; disabling cancels the current patrol without
+        changing connection keepalives or Cron.
       x-summary-en: Patch full config or Ollama target
       requestBody:
         required: true
@@ -26825,6 +26835,17 @@ components:
       properties:
         backend_id:
           type: string
+        heartbeat:
+          type: object
+          properties:
+            enabled:
+              type: boolean
+              default: false
+            available:
+              type: boolean
+          required:
+            - enabled
+            - available
         ollama:
           $ref: "#/components/schemas/ModelsOllamaTarget"
         server:
@@ -26923,6 +26944,7 @@ components:
           $ref: "#/components/schemas/ModelsSandboxRead"
       required:
         - backend_id
+        - heartbeat
         - ollama
         - server
         - llm
@@ -26937,6 +26959,12 @@ components:
     ModelsFullWrite:
       type: object
       properties:
+        heartbeat:
+          type: [object, "null"]
+          description: Backend-wide patrol toggle; omitted or null enabled preserves the current value.
+          properties:
+            enabled:
+              type: [boolean, "null"]
         security:
           anyOf:
             - $ref: "#/components/schemas/ModelsSecurity"
