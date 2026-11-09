@@ -179,7 +179,7 @@ func (s *Server) handleListMessages(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("attachment_mode") == "url" {
 		projectMessageImages(messages)
 	}
-	hydrateMessageContents(messages)
+	s.hydrateMessageContents(r.Context(), sessionUserIDFromRequest(r), messages)
 
 	// 获取真实总数用于分页
 	total := len(messages) + offset // 近似值，实际由 store 提供
@@ -592,7 +592,7 @@ func (s *Server) handleSearchMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, result := range results {
 		if result != nil {
-			hydrateMessageContents([]*storage.MessageRecord{result.Message})
+			s.hydrateMessageContents(r.Context(), userID, []*storage.MessageRecord{result.Message})
 		}
 	}
 

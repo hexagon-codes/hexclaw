@@ -69,9 +69,11 @@ type ExternalToolExecutionFilter struct {
 	ModelExchangeID   string
 	Kind              string
 	Phase             string
-	Intent            *ExternalToolExecutionIntentFilter
-	Limit             int
-	Offset            int
+	// ArtifactID 非空时精确匹配已登记产物身份；空值保留原执行查询。
+	ArtifactID string
+	Intent     *ExternalToolExecutionIntentFilter
+	Limit      int
+	Offset     int
 }
 
 // ExternalToolExecutionIntentFilter 精确匹配同任务的动作，空值也是查询条件。

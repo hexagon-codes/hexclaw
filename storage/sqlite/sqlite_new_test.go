@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -26,6 +27,66 @@ func newTestStoreV2(t *testing.T) *Store {
 	}
 	t.Cleanup(func() { store.Close() })
 	return store
+}
+
+func TestExternalExecutionListArtifactIdentity(t *testing.T) {
+	store := newTestStoreV2(t)
+	repository := store.ExternalToolExecutionRepository()
+	for _, sample := range []struct{ id, owner, request, artifact string }{
+		{"original", "owner-a", "original-request", "original-asset"},
+		{"newer", "owner-a", "newer-request", "newer-asset"},
+		{"other-owner", "owner-b", "original-request", "original-asset"},
+		{"legacy", "owner-a", "legacy-request", ""},
+	} {
+		record, err := repository.Prepare(t.Context(), storage.ExternalToolExecution{
+			ID: sample.id, OwnerID: sample.owner, RequestID: sample.request,
+			Kind: "tool", LogicalCallKey: sample.id, InputDigest: sample.id,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		manifest, err := json.Marshal(map[string]any{"artifacts": []map[string]string{{"id": sample.artifact, "path": "shared.bin"}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if sample.artifact == "" {
+			manifest = []byte(`{"artifacts":["legacy",null,1,{}]}`)
+		}
+		if _, err := repository.Update(t.Context(), sample.owner, record.ID, record.Revision, storage.ExternalToolExecutionUpdate{Phase: storage.ExternalExecutionObserved, Outcome: "success", ResultManifestJSON: manifest}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 旧清单中的非对象条目不匹配资产身份，也不能改变原执行查询。
+	for _, sample := range []struct {
+		name   string
+		filter storage.ExternalToolExecutionFilter
+		ids    []string
+	}{
+		{"original-identity", storage.ExternalToolExecutionFilter{OwnerID: "owner-a", ArtifactID: "original-asset", Limit: 1}, []string{"original"}},
+		{"owner-unchanged", storage.ExternalToolExecutionFilter{OwnerID: "owner-b", ArtifactID: "original-asset"}, []string{"other-owner"}},
+		{"original-request-filter", storage.ExternalToolExecutionFilter{OwnerID: "owner-a", RequestID: "original-request"}, []string{"original"}},
+		{"request-and-asset", storage.ExternalToolExecutionFilter{OwnerID: "owner-a", RequestID: "newer-request", ArtifactID: "original-asset"}, nil},
+		{"empty-artifact-filter", storage.ExternalToolExecutionFilter{OwnerID: "owner-a"}, []string{"legacy", "newer", "original"}},
+	} {
+		t.Run(sample.name, func(t *testing.T) {
+			rows, err := repository.List(t.Context(), sample.filter)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(rows) != len(sample.ids) {
+				t.Fatalf("execution count=%d want=%d", len(rows), len(sample.ids))
+			}
+			for _, expected := range sample.ids {
+				found := false
+				for _, row := range rows {
+					found = found || row.ID == expected
+				}
+				if !found {
+					t.Fatalf("missing execution %s in %+v", expected, rows)
+				}
+			}
+		})
+	}
 }
 
 // --- #5 Usage: 验证 CostRecord 新字段的持久化 ---

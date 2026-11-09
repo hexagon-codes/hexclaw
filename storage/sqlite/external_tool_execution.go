@@ -171,6 +171,12 @@ func (r *ExternalToolExecutionRepository) List(ctx context.Context, filter stora
 			args = append(args, part.value)
 		}
 	}
+	if filter.ArtifactID != "" {
+		query += ` AND EXISTS (
+SELECT 1 FROM json_each(CASE WHEN json_valid(result_manifest_json) THEN result_manifest_json ELSE '{}' END,'$.artifacts') artifact
+WHERE artifact.type='object' AND json_extract(artifact.value,'$.id')=?)`
+		args = append(args, filter.ArtifactID)
+	}
 	if intent := filter.Intent; intent != nil {
 		for _, part := range []struct{ column, value string }{
 			{"request_id", intent.RequestID}, {"dispatch_task_ref", intent.DispatchTaskRef},

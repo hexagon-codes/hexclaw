@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/url"
 	"path"
@@ -10,6 +11,7 @@ import (
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/internal/mediaflow"
 	"github.com/hexagon-codes/hexclaw/messagecontent"
+	"github.com/hexagon-codes/hexclaw/skill"
 	"github.com/hexagon-codes/hexclaw/storage"
 )
 
@@ -49,8 +51,8 @@ func projectMessageImages(messages []*storage.MessageRecord) {
 	}
 }
 
-func canonicalChatContent(markdown string, metadata map[string]string) *messagecontent.MessageContent {
-	if strings.TrimSpace(markdown) == "" {
+func canonicalChatContent(markdown string, metadata map[string]string, attachments ...messagecontent.AttachmentRef) *messagecontent.MessageContent {
+	if strings.TrimSpace(markdown) == "" && len(attachments) == 0 {
 		return nil
 	}
 	producer := messagecontent.ProducerChat
@@ -61,7 +63,7 @@ func canonicalChatContent(markdown string, metadata map[string]string) *messagec
 	if locale == "" {
 		locale = "und"
 	}
-	content, err := messagecontent.New(producer, locale, markdown, nil)
+	content, err := messagecontent.New(producer, locale, markdown, attachments)
 	if err != nil {
 		return nil
 	}
@@ -73,7 +75,10 @@ func canonicalRenderProjection(producer messagecontent.ProducerKind, locale, mar
 	if err != nil {
 		return nil, nil
 	}
-	parts := []messagecontent.RenderPart{{Kind: messagecontent.PartMarkdown, Text: markdown}}
+	parts := make([]messagecontent.RenderPart, 0, len(attachments)+1)
+	if strings.TrimSpace(markdown) != "" {
+		parts = append(parts, messagecontent.RenderPart{Kind: messagecontent.PartMarkdown, Text: markdown})
+	}
 	for _, attachment := range attachments {
 		parts = append(parts, messagecontent.RenderPart{Kind: messagecontent.PartArtifact, ArtifactRef: attachment.AssetID, ArtifactDigest: attachment.Digest, AltText: attachment.AltText})
 	}
@@ -97,7 +102,7 @@ func canonicalRenderProjection(producer messagecontent.ProducerKind, locale, mar
 func hydrateMessageContents(messages []*storage.MessageRecord) {
 	for _, message := range messages {
 		hydrateMessageRuntimeWire(message)
-		if message == nil || strings.TrimSpace(message.Content) == "" {
+		if message == nil {
 			continue
 		}
 		if message.ContentType != "" && message.ContentType != "text" {
@@ -151,7 +156,139 @@ func hydrateMessageContents(messages []*storage.MessageRecord) {
 				message.MessageContent.Markdown,
 				messagecontent.SurfaceHistory,
 				"history-markdown-v1",
+				message.MessageContent.Attachments...,
 			)
+		}
+	}
+}
+
+// hydrateMessageContents 在历史出口补回同一消息已登记的文件身份，不读取文件内容。
+func (s *Server) hydrateMessageContents(ctx context.Context, owner string, messages []*storage.MessageRecord) {
+	hydrateMessageContents(messages)
+	if s.externalTools == nil || owner == "" {
+		return
+	}
+	for _, message := range messages {
+		if message == nil || message.Role != "assistant" ||
+			message.ContentType != "" && message.ContentType != "text" {
+			continue
+		}
+		var persisted struct {
+			Attachments []adapter.Attachment `json:"attachments"`
+		}
+		for _, raw := range []string{message.Attachments, message.Metadata, message.Meta} {
+			persisted.Attachments = nil
+			if json.Unmarshal([]byte(raw), &persisted) != nil {
+				persisted.Attachments = nil
+				continue
+			}
+			if len(persisted.Attachments) > 0 {
+				break
+			}
+		}
+		// 搜索结果可能只含轻量字段；仍从原消息的独立附件列恢复，不以请求产物替代消息归属。
+		if len(persisted.Attachments) == 0 && s.store != nil {
+			original, err := s.store.GetMessage(ctx, message.ID)
+			if err == nil && original != nil && original.SessionID == message.SessionID && original.RequestID == message.RequestID {
+				if json.Unmarshal([]byte(original.Attachments), &persisted) != nil {
+					persisted.Attachments = nil
+				} else if len(persisted.Attachments) > 0 {
+					message.Attachments = original.Attachments
+					message.Metadata = original.Metadata
+				}
+			}
+		}
+		if len(persisted.Attachments) == 0 {
+			continue
+		}
+		var completion storage.AssistantCompletion
+		seenRequests := map[string]bool{}
+		resolveRequest := func(requestID string) {
+			if requestID == "" || seenRequests[requestID] {
+				return
+			}
+			seenRequests[requestID] = true
+			invocation := skill.InvocationContext{AuthenticatedUserID: owner, RequestID: requestID, SessionID: message.SessionID}
+			resolveCtx := storage.WithAssistantCompletion(skill.WithInvocationContext(ctx, invocation), storage.AssistantCompletion{})
+			resolved, err := s.externalTools.ResolveReply(resolveCtx, &adapter.Message{UserID: owner}, nil)
+			if err == nil {
+				registered, _ := storage.AssistantCompletionFromContext(resolved)
+				completion.Attachments = append(completion.Attachments, registered.Attachments...)
+			}
+		}
+		resolveRequest(message.RequestID)
+		// 转引附件或缺少请求字段的历史，优先按原资产身份找回登记请求，路径只关联旧附件。
+		if provider, ok := s.store.(interface {
+			ExternalToolExecutionRepository() storage.ExternalToolExecutionRepository
+		}); ok {
+			for _, attachment := range persisted.Attachments {
+				found := false
+				for _, registered := range completion.Attachments {
+					if attachment.ID != "" && attachment.ID == registered.ID ||
+						attachment.ID == "" && attachment.URL != "" && attachment.URL == registered.URL {
+						found = true
+						break
+					}
+				}
+				if found {
+					continue
+				}
+				if attachment.ID != "" {
+					rows, err := provider.ExternalToolExecutionRepository().List(ctx, storage.ExternalToolExecutionFilter{OwnerID: owner, ArtifactID: attachment.ID, Limit: 1})
+					if err == nil && len(rows) > 0 {
+						resolveRequest(rows[0].RequestID)
+					}
+					continue
+				}
+				parsed, err := url.Parse(attachment.URL)
+				const prefix = "/api/v1/files/generated/"
+				if err != nil || !strings.HasPrefix(parsed.Path, prefix) {
+					continue
+				}
+				record, err := provider.ExternalToolExecutionRepository().FindArtifact(ctx, owner, strings.TrimPrefix(parsed.Path, prefix))
+				if err == nil && record != nil {
+					resolveRequest(record.RequestID)
+				}
+			}
+		}
+		var refs []messagecontent.AttachmentRef
+		metadata := map[string]string{}
+		mergeStringMetadata(metadata, message.Metadata)
+		mergeStringMetadata(metadata, message.Meta)
+		if message.MessageContent != nil {
+			refs = append(refs, message.MessageContent.Attachments...)
+			metadata["producer_kind"] = string(message.MessageContent.ProducerKind)
+			metadata["locale"] = message.MessageContent.Locale
+		}
+		originalCount := len(refs)
+		for _, attachment := range persisted.Attachments {
+			for _, registered := range completion.Attachments {
+				if attachment.ID != "" && attachment.ID != registered.ID ||
+					attachment.ID == "" && (attachment.URL == "" || attachment.URL != registered.URL) {
+					continue
+				}
+				if registered.ID == "" || registered.Mime == "" || registered.ContentDigest == "" {
+					continue
+				}
+				found := false
+				for _, ref := range refs {
+					if ref.AssetID == registered.ID {
+						found = true
+						break
+					}
+				}
+				if !found {
+					refs = append(refs, messagecontent.AttachmentRef{AssetID: registered.ID, Name: registered.Name, MIME: registered.Mime, Digest: registered.ContentDigest, AltText: registered.Name})
+				}
+				break
+			}
+		}
+		if len(refs) == originalCount {
+			continue
+		}
+		content := canonicalChatContent(message.Content, metadata, refs...)
+		if content != nil {
+			message.MessageContent, message.RenderManifest = canonicalRenderProjection(content.ProducerKind, content.Locale, content.Markdown, messagecontent.SurfaceHistory, "history-markdown-v1", content.Attachments...)
 		}
 	}
 }
