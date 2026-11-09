@@ -8,9 +8,9 @@ require (
 	github.com/alibabacloud-go/tea v1.2.2
 	github.com/alibabacloud-go/tea-utils/v2 v2.0.8
 	github.com/gorilla/websocket v1.5.3
-	github.com/hexagon-codes/ai-core v0.2.14-0.20261109142754-c41d39893b36
-	github.com/hexagon-codes/hexagon v0.5.16-0.20261109160037-b2915e23a424
-	github.com/hexagon-codes/toolkit v0.3.7
+	github.com/hexagon-codes/ai-core v0.3.0
+	github.com/hexagon-codes/hexagon v0.6.0
+	github.com/hexagon-codes/toolkit v0.3.8
 	github.com/larksuite/oapi-sdk-go/v3 v3.5.3
 	github.com/line/line-bot-sdk-go/v8 v8.20.1
 	github.com/modelcontextprotocol/go-sdk v1.5.0
