@@ -3574,6 +3574,9 @@ func (e *ReActEngine) processStreamToolLoop(
 			// drain chunks — 中间轮不推给前端
 		}
 		result := llmStream.Result()
+		if streamErr := llmStream.Err(); streamErr != nil {
+			return nil, fmt.Errorf("provider %s stream failed: %w", selection.providerName, streamErr)
+		}
 
 		// 当 provider 未返回 token 统计时，使用 tokenizer 估算
 		if result.Usage.TotalTokens == 0 {
@@ -3745,6 +3748,13 @@ func (e *ReActEngine) pipeStream(
 	// 获取最终结果（含 Usage 统计）
 	result := llmStream.Result()
 	if ctx.Err() != nil {
+		return
+	}
+	if streamErr := llmStream.Err(); streamErr != nil {
+		select {
+		case ch <- &adapter.ReplyChunk{Error: friendlyLLMError(streamErr), Done: true}:
+		case <-ctx.Done():
+		}
 		return
 	}
 	if result != nil {
@@ -3990,6 +4000,13 @@ func (e *ReActEngine) pipeStreamWithTools(
 
 	result := llmStream.Result()
 	if ctx.Err() != nil {
+		return
+	}
+	if streamErr := llmStream.Err(); streamErr != nil {
+		select {
+		case ch <- &adapter.ReplyChunk{Error: friendlyLLMError(streamErr), Done: true}:
+		case <-ctx.Done():
+		}
 		return
 	}
 	if result != nil {
