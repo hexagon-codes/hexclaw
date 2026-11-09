@@ -590,6 +590,7 @@ func (s *BrowserSkill) readAPIResponse(ctx context.Context, req *http.Request, r
 	data := map[string]any{"method": req.Method, "url": safeHTTPRequestURL(req.URL), "status": resp.StatusCode, "headers": responseHTTPHeaders(resp.Header), "auth_source": authSource, "business_success": "not_evaluated"}
 	result := &skill.Result{Data: data, Metadata: map[string]string{"url": safeHTTPRequestURL(req.URL), "method": req.Method, "status": strconv.Itoa(resp.StatusCode), "content_type": contentType}, Detail: &detail}
 	var persistErr error
+	var registeredArtifact map[string]any
 	if s.artifactWriter != nil {
 		// 先区分无正文响应与待保存文件；缓冲在 capture 外，文件保存仍能核对实际消费字节。
 		buffered := bufio.NewReader(resp.Body)
@@ -612,6 +613,7 @@ func (s *BrowserSkill) readAPIResponse(ctx context.Context, req *http.Request, r
 					persistErr = fmt.Errorf("response artifact reference is missing")
 				} else {
 					data["artifact"] = ref
+					registeredArtifact = ref
 				}
 			} else if len(ref) > 0 {
 				data["pending_artifact"] = ref
@@ -656,6 +658,15 @@ func (s *BrowserSkill) readAPIResponse(ctx context.Context, req *http.Request, r
 		}
 	} else {
 		result.Content = fmt.Sprintf("HTTP %d; binary response (%d bytes).", resp.StatusCode, capture.bytes)
+	}
+	if registeredArtifact != nil && persistErr == nil && capture.readErr == nil && capture.eof {
+		// 仅投影可信写入器已完整保存的同一引用，沿现有媒体消息链交给模型。
+		refs, err := json.Marshal([]map[string]any{registeredArtifact})
+		if err != nil {
+			persistErr = fmt.Errorf("encode response artifact reference: %w", err)
+		} else {
+			result.Metadata[skill.ToolObservationRefsMetadataKey] = string(refs)
+		}
 	}
 	if capture.readErr != nil || !capture.eof {
 		readErr := capture.readErr

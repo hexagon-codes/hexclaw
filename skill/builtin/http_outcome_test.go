@@ -1,10 +1,18 @@
 package builtin
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -80,5 +88,103 @@ func TestBrowserPostUnknownDoesNotRetry(t *testing.T) {
 	var failure *skill.ExecutionError
 	if !errors.As(err, &failure) || !errors.Is(err, context.DeadlineExceeded) || failure.Detail.Outcome != "unknown" || calls != 1 {
 		t.Fatalf("unknown POST was guessed or repeated: calls=%d err=%v", calls, err)
+	}
+}
+
+func TestBrowserRequestArtifactModelProjection(t *testing.T) {
+	for _, tc := range []struct {
+		name, contentType, body string
+		status                  int
+		attachment              bool
+	}{
+		{name: "binary", contentType: "application/octet-stream", body: "\x00download\xff", status: http.StatusOK, attachment: true},
+		{name: "empty attachment", contentType: "application/octet-stream", status: http.StatusOK, attachment: true},
+		{name: "json", contentType: "application/json", body: `{"ok":false,"value":7}`, status: http.StatusOK},
+		{name: "text", contentType: "text/plain; charset=utf-8", body: "原始正文\n第二行", status: http.StatusOK},
+		{name: "failed response", contentType: "application/json", body: `{"error":"upstream failed"}`, status: http.StatusInternalServerError},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", tc.contentType)
+				if tc.attachment {
+					w.Header().Set("Content-Disposition", `attachment; filename="download.bin"`)
+				}
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer server.Close()
+			path := filepath.Join(t.TempDir(), "registered-response")
+			var registered map[string]any
+			writes := 0
+			s := &BrowserSkill{client: server.Client()}
+			s.SetArtifactWriter(func(_ context.Context, name, contentType string, reader io.Reader) (map[string]any, error) {
+				writes++
+				data, err := io.ReadAll(reader)
+				if err != nil {
+					return nil, err
+				}
+				if err := os.WriteFile(path, data, 0600); err != nil {
+					return nil, err
+				}
+				registered = map[string]any{
+					"artifact_id": "registered-http-file", "name": name, "mime": contentType,
+					"path": "registered/response", "url": "/api/v1/files/generated/registered/response",
+					"digest": fmt.Sprintf("sha256:%x", sha256.Sum256(data)), "size": int64(len(data)),
+				}
+				return registered, nil
+			})
+			result, err := s.Execute(t.Context(), map[string]any{"action": "request", "method": "GET", "url": server.URL + "/response"})
+			if tc.status >= 400 {
+				var failure *skill.ExecutionError
+				if !errors.As(err, &failure) || failure.Detail.HTTPStatus != tc.status || failure.Detail.Reason != "http_status" {
+					t.Fatalf("HTTP failure changed: result=%+v err=%v", result, err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if writes != 1 || result == nil {
+				t.Fatalf("response was not registered once: writes=%d result=%+v", writes, result)
+			}
+			stored, readErr := os.ReadFile(path)
+			if readErr != nil || !bytes.Equal(stored, []byte(tc.body)) {
+				t.Fatalf("original response bytes changed: bytes=%q err=%v", stored, readErr)
+			}
+			data := result.Data.(map[string]any)
+			if !reflect.DeepEqual(data["artifact"], registered) || data["status"] != tc.status || data["response_complete"] != true || data["business_success"] != "not_evaluated" {
+				t.Fatalf("response data contract changed: %+v", data)
+			}
+			if tc.contentType == "application/json" {
+				var want any
+				if err := json.Unmarshal([]byte(tc.body), &want); err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(data["json"], want) {
+					t.Fatalf("structured JSON response changed: got=%+v want=%+v", data["json"], want)
+				}
+			}
+			wantContent := tc.body
+			if tc.contentType == "application/octet-stream" {
+				wantContent = fmt.Sprintf("HTTP %d; binary response (%d bytes).", tc.status, len(tc.body))
+			}
+			if result.Content != wantContent {
+				t.Fatalf("original response text changed: got=%q want=%q", result.Content, wantContent)
+			}
+			parts := result.ToolMessageContent()
+			if len(parts) != 1 || parts[0].Type != "text" || !strings.HasPrefix(parts[0].Text, "Registered tool files: ") {
+				t.Fatalf("model message lost registered file: %+v", parts)
+			}
+			var refs []map[string]any
+			if err := json.Unmarshal([]byte(strings.TrimPrefix(parts[0].Text, "Registered tool files: ")), &refs); err != nil || len(refs) != 1 {
+				t.Fatalf("model file reference is invalid: refs=%+v err=%v", refs, err)
+			}
+			for _, key := range []string{"artifact_id", "name", "mime", "path", "url", "digest"} {
+				if refs[0][key] != registered[key] {
+					t.Errorf("model file %s differs from registration: got=%v want=%v", key, refs[0][key], registered[key])
+				}
+			}
+			if refs[0]["size"] != float64(len(tc.body)) {
+				t.Errorf("model file size changed: %+v", refs[0])
+			}
+		})
 	}
 }
