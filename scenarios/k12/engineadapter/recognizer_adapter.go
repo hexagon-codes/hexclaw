@@ -1751,6 +1751,9 @@ func recognitionLayoutBatchTargetsV2(
 	return targets, nil
 }
 
+// 填空题的完整题干归属在所有复核格式中一致，裁决复用同一批次提示入口。
+const recognitionReviewSourcePrompt = "\nFor a printed worked example containing fill-in blanks, retain the ENTIRE printed explanation, diagram labels, equations and every blank as the question under its original printed number. Do not reduce that target to its introductory word problem or omit blank-bearing explanatory sentences. Never create an extra unnumbered target for a continuation of that same numbered worked example. Printed diagram labels, including time and distance labels, remain question context, never student handwriting. Only separately handwritten fill-ins belong in student_answer, in their source order; printed worked steps are never student working. Preserve genuinely unreadable fill-ins through the existing uncertainty fields without guessing. Never insert editorial descriptions such as （上方有划掉的草稿） or [crossed out] into question or student_answer. These labels are not literal active handwriting. Exclude clearly cancelled whole lines; report genuinely uncertain cancellation through the existing uncertainty fields rather than adding an editorial label or guessing.\n"
+
 func buildRecognitionLayoutBatchPromptV2(
 	targets []k12.RecognitionLayoutTargetV2,
 	format ...string,
@@ -1775,7 +1778,7 @@ func buildRecognitionLayoutBatchPromptV2(
 		if err != nil {
 			return "", err
 		}
-		return recognitionLayoutCompactPromptV1 + string(encoded), nil
+		return recognitionLayoutCompactPromptV1 + string(encoded) + recognitionReviewSourcePrompt, nil
 	}
 	descriptors := make([]struct {
 		TargetID           string   `json:"target_id"`
@@ -1803,7 +1806,7 @@ func buildRecognitionLayoutBatchPromptV2(
 	if err != nil {
 		return "", fmt.Errorf("encode authorized target list: %w", err)
 	}
-	return recognitionLayoutBatchPromptV2 + string(encoded), nil
+	return recognitionLayoutBatchPromptV2 + string(encoded) + recognitionReviewSourcePrompt, nil
 }
 
 func parseRecognitionLayoutManifestV2(

@@ -51,7 +51,7 @@ func validateRecognitionFinalAnswerSettlementV1(ctx context.Context, q dbQueryer
 		k12.ValidateRecognitionFinalAnswerEvidenceV1(*in.FinalAnswerEvidence, *target.AdjudicationRegion) != nil {
 		return fmt.Errorf("%w: final-answer evidence target or region drifted", ErrModelPhysicalInvocationConflict)
 	}
-	sources, err := loadRecognitionFinalAnswerSourcesV1(ctx, q, parent, in.CandidateID, originalJSON, header.ExecutionPolicy)
+	sources, err := loadRecognitionFinalAnswerSourcesV1(ctx, q, parent, in.CandidateID, originalJSON, header.ExecutionPolicy, target.SourceNumberPath, target.DisplayLabel)
 	if err != nil {
 		return err
 	}
@@ -86,6 +86,7 @@ func validateRecognitionFinalAnswerSettlementV1(ctx context.Context, q dbQueryer
 	if err != nil {
 		return err
 	}
+	third.Question = k12.RecognitionQuestionSourceTextV1(third.Question, target.SourceNumberPath, target.DisplayLabel)
 	if !k12.RecognitionFinalAnswerSourcesTrustedForPolicyV1(header.ExecutionPolicy, append(sources, third)...) {
 		return ErrModelPhysicalInvocationConflict
 	}
@@ -100,7 +101,7 @@ func recognitionFinalAnswerSourceV1(raw json.RawMessage) (k12.RecognitionFinalAn
 	return source, nil
 }
 
-func loadRecognitionFinalAnswerSourcesV1(ctx context.Context, q dbQueryer, parent k12.ModelInvocation, candidateID, originalJSON, policy string) ([]k12.RecognitionFinalAnswerSourceV1, error) {
+func loadRecognitionFinalAnswerSourcesV1(ctx context.Context, q dbQueryer, parent k12.ModelInvocation, candidateID, originalJSON, policy string, numberPath []string, label string) ([]k12.RecognitionFinalAnswerSourceV1, error) {
 	initial, found, err := loadInitialReadV1(ctx, q, parent.AgentName, parent.InvocationID)
 	if err != nil {
 		return nil, err
@@ -123,12 +124,14 @@ func loadRecognitionFinalAnswerSourcesV1(ctx context.Context, q dbQueryer, paren
 	if err != nil {
 		return nil, err
 	}
+	first.Question = k12.RecognitionQuestionSourceTextV1(first.Question, numberPath, label)
+	review.Question = k12.RecognitionQuestionSourceTextV1(review.Question, numberPath, label)
 	var observations struct {
 		Questions []string `json:"evidence_transcriptions"`
 	}
 	if json.Unmarshal([]byte(originalJSON), &observations) != nil || len(observations.Questions) != 2 ||
-		!k12.RecognitionSourceQuestionsEqualV1(first.Question, observations.Questions[0]) ||
-		!k12.RecognitionSourceQuestionsEqualV1(review.Question, observations.Questions[1]) ||
+		!k12.RecognitionSourceQuestionsEqualV1(first.Question, k12.RecognitionQuestionSourceTextV1(observations.Questions[0], numberPath, label)) ||
+		!k12.RecognitionSourceQuestionsEqualV1(review.Question, k12.RecognitionQuestionSourceTextV1(observations.Questions[1], numberPath, label)) ||
 		!k12.RecognitionFinalAnswerSourcesTrustedForPolicyV1(policy, first, review) {
 		return nil, fmt.Errorf("%w: final-answer source observations drifted", ErrModelPhysicalInvocationConflict)
 	}
@@ -149,7 +152,17 @@ func validateRecognitionObservationUncertaintyV1(ctx context.Context, q dbQuerye
 	if _, actual, err := k12.CanonicalRecognitionLayoutPlanHeaderV2(header); err != nil || actual != digest {
 		return ErrModelPhysicalInvocationConflict
 	}
-	sources, err := loadRecognitionFinalAnswerSourcesV1(ctx, q, parent, candidateID, originalJSON, header.ExecutionPolicy)
+	var target *k12.RecognitionLayoutTargetV2
+	for i := range plan.Targets {
+		if plan.Targets[i].TargetID == candidateID {
+			target = &plan.Targets[i]
+			break
+		}
+	}
+	if target == nil {
+		return ErrModelPhysicalInvocationConflict
+	}
+	sources, err := loadRecognitionFinalAnswerSourcesV1(ctx, q, parent, candidateID, originalJSON, header.ExecutionPolicy, target.SourceNumberPath, target.DisplayLabel)
 	if err != nil {
 		return err
 	}

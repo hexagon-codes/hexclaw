@@ -86,6 +86,13 @@ const (
 var maxSelfConsistency = 5
 
 type solveEgressClassesKey struct{}
+type requiredSolveVerificationKey struct{}
+
+// WithRequiredSolveVerification 为持久评分保留独立核验，本地确定性求值仍先行。
+// 仅改变模型求解后的核验选择，不通过模型参数或消息元数据启用。
+func WithRequiredSolveVerification(ctx context.Context) context.Context {
+	return context.WithValue(ctx, requiredSolveVerificationKey{}, true)
+}
 
 func solveEgressClasses(ctx context.Context, args map[string]any) []egress.DataClass {
 	classes := make([]egress.DataClass, 0, 3)
@@ -351,7 +358,8 @@ func (o *SolveSkill) Execute(ctx context.Context, args map[string]any) (*skill.R
 	if auto && complexity == complexityHard {
 		methodDiversity = true
 	}
-	skipVerify := auto && complexity == complexityTrivial && !gradingMode && outputVersion == "" // 新讲法须有独立审计
+	requiredVerification, _ := ctx.Value(requiredSolveVerificationKey{}).(bool)
+	skipVerify := auto && complexity == complexityTrivial && !gradingMode && outputVersion == "" && !requiredVerification // 新讲法须有独立审计
 
 	// 持久任务的调用方预算由上下文显式选择，与报告格式无关。
 	runCtx, cancel := newSubAgentAttemptContext(ctx, orchestrateMaxWall)

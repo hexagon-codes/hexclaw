@@ -187,13 +187,21 @@ func TestStandaloneVerificationIdentifiesProcessedResponseFailures(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
+	runtimeSyntaxProgram := failedProgram
+	runtimeSyntaxProgram.Program = "raise SyntaxError('controlled runtime exception')"
+	runtimeSyntaxRaw, err := json.Marshal(runtimeSyntaxProgram)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, tc := range []struct {
 		name, response, reason string
-		throughSolve           bool
+		throughSolve, pipeline bool
 	}{
-		{"program-parse-failure", "not JSON", "verification program is invalid", false},
-		{"missing-execution-receipt", string(raw), "verification execution receipt is invalid", false},
-		{"execution-failure-through-solve", string(failedRaw), "verification execution receipt is invalid", true},
+		{"program-parse-failure", "not JSON", "verification program is invalid", false, false},
+		{"missing-execution-receipt", string(raw), "verification execution receipt is invalid", false, false},
+		{"execution-failure-through-solve", string(failedRaw), "verification execution receipt is invalid", true, false},
+		{"runtime-failure-through-pipeline", string(failedRaw), "pipeline execution failed", true, true},
+		{"runtime-syntax-exception-through-pipeline", string(runtimeSyntaxRaw), "pipeline execution failed", true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			provider := &standaloneVerifierTestProvider{response: tc.response}
@@ -239,7 +247,14 @@ func TestStandaloneVerificationIdentifiesProcessedResponseFailures(t *testing.T)
 					}
 					return SubAgentResult{}, err
 				}
-				result, err := NewSolveSkill(execute, nil).Execute(t.Context(), jointGuideArgs())
+				solveCtx := t.Context()
+				if tc.pipeline {
+					solveCtx = withFlagOn(solveCtx, skill.FlagSkillPipelineV1)
+					solveCtx = skill.WithExecutionPolicySource(solveCtx, func() skill.ExecutionPolicy {
+						return skill.ExecutionPolicy{Profile: "full_access", Revision: 1}
+					})
+				}
+				result, err := NewSolveSkill(execute, nil).Execute(solveCtx, jointGuideArgs())
 				if result != nil || !errors.Is(err, executionErr) || !errors.Is(err, egress.ErrProviderResponseProcessed) ||
 					!strings.Contains(err.Error(), tc.reason) || strings.Contains(err.Error(), "no valid independent audit") {
 					t.Fatalf("solve lost the original processed execution failure: result=%+v err=%v original=%v", result, err, executionErr)

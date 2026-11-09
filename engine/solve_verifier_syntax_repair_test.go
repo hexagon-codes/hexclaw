@@ -13,13 +13,14 @@ import (
 )
 
 func TestStandaloneVerificationSyntaxRepairUsesRealExecution(t *testing.T) {
-	for _, variant := range []string{"repaired", "still_invalid", "preserve_invalid_audit"} {
+	for _, variant := range []string{"repaired", "still_invalid", "preserve_invalid_audit", "pipeline_repaired", "pipeline_still_invalid"} {
 		t.Run(variant, func(t *testing.T) {
-			first := standaloneVerifierTestProgram("IN_SCOPE", variant != "preserve_invalid_audit")
+			baseVariant := strings.TrimPrefix(variant, "pipeline_")
+			first := standaloneVerifierTestProgram("IN_SCOPE", baseVariant != "preserve_invalid_audit")
 			first.Program = "from fractions import Fraction\n\n value = Fraction(6) * 7\n print(f'COMPUTED: {value}张')\n"
 			second := standaloneVerifierTestProgram("IN_SCOPE", true)
 			second.Program = "from fractions import Fraction\nvalue = Fraction(6) * 7\nprint(f'COMPUTED: {value}张')\n"
-			if variant == "still_invalid" {
+			if baseVariant == "still_invalid" {
 				second.Program = first.Program
 			}
 			firstRaw, _ := json.Marshal(first)
@@ -41,6 +42,12 @@ func TestStandaloneVerificationSyntaxRepairUsesRealExecution(t *testing.T) {
 			eng.SetToolExecutor(NewToolExecutor(registry, nil))
 			spec := verifierSpecWithSolution("每盒6张卡片，7盒共有多少张？", "6×7=42张。", "42张", "小学乘法")
 			ctx := context.WithValue(withSolveGrant(t.Context()), verificationInputKey{}, spec.verification)
+			if strings.HasPrefix(variant, "pipeline_") {
+				ctx = withFlagOn(ctx, skill.FlagSkillPipelineV1)
+				ctx = skill.WithExecutionPolicySource(ctx, func() skill.ExecutionPolicy {
+					return skill.ExecutionPolicy{Profile: "full_access", Revision: 1}
+				})
+			}
 			ctx = context.WithValue(ctx, codeExecutionReceiptKey{}, &codeExecutionReceiptSink{inputDigest: executionInputDigest(spec.Task)})
 			msg := &adapter.Message{ID: variant, Platform: adapter.PlatformAPI, UserID: "test-user", Content: spec.Task, Metadata: map[string]string{"memory": "off", "knowledge": "off"}}
 			ApplySpecToMessage(msg, spec)
@@ -51,7 +58,7 @@ func TestStandaloneVerificationSyntaxRepairUsesRealExecution(t *testing.T) {
 			if count != 2 || tool.calls.Load() != 2 {
 				t.Fatalf("repair bound changed: model=%d executions=%d err=%v", count, tool.calls.Load(), err)
 			}
-			if variant == "still_invalid" {
+			if baseVariant == "still_invalid" {
 				if err == nil || reply != nil {
 					t.Fatal("second syntax failure became successful")
 				}
@@ -62,7 +69,7 @@ func TestStandaloneVerificationSyntaxRepairUsesRealExecution(t *testing.T) {
 			}
 			verdict, _ := parseVerdict(reply.Content)
 			want := verdictAgree
-			if variant == "preserve_invalid_audit" {
+			if baseVariant == "preserve_invalid_audit" {
 				want = verdictDisagree
 			}
 			if verdict != want {

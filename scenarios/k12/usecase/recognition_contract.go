@@ -250,7 +250,7 @@ func questionEvidenceTranscriptionsConflictForInitialReadMode(q RecognizedQuesti
 		return conflicts(q.RawTranscription, q.EvidenceTranscriptions)
 	}
 	trimNumber := func(value string) string {
-		return strings.TrimPrefix(strings.TrimSpace(value), number+"、")
+		return k12.RecognitionQuestionSourceTextV1(value, q.SourceNumberPath, q.DisplayLabel)
 	}
 	values := make([]string, len(q.EvidenceTranscriptions))
 	for i, value := range q.EvidenceTranscriptions {
@@ -700,6 +700,8 @@ func RecognitionSourceReadingsMatch(prior, review RecognizedQuestion) (question,
 // RecognitionSourceReadingsMatchForInitialReadMode 仅对冻结模式内的完整题干应用来源等价规则。
 func RecognitionSourceReadingsMatchForInitialReadMode(prior, review RecognizedQuestion, initialReadMode string) (question, answer bool) {
 	prior, review = normalizeRecognizedQuestionFacts(prior), normalizeRecognizedQuestionFacts(review)
+	prior.RawTranscription = k12.RecognitionQuestionSourceTextV1(prior.RawTranscription, prior.SourceNumberPath, prior.DisplayLabel)
+	review.RawTranscription = k12.RecognitionQuestionSourceTextV1(review.RawTranscription, review.SourceNumberPath, review.DisplayLabel)
 	question = strings.TrimSpace(prior.RawTranscription) != "" && strings.TrimSpace(review.RawTranscription) != "" &&
 		!evidenceTranscriptionsConflict(review.RawTranscription, []string{prior.RawTranscription, review.RawTranscription}, "")
 	if !question && strings.TrimSpace(prior.RawTranscription) != "" && strings.TrimSpace(review.RawTranscription) != "" &&

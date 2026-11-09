@@ -448,15 +448,17 @@ func (e *ReActEngine) completeStandaloneVerification(ctx context.Context, sessio
 		}
 		args := map[string]any{"mode": "snippet", "language": "python", "code": program.Program, "timeout": 30}
 		started := time.Now()
-		result, err := e.toolExecutor.Execute(ctx, codeExecToolName, args)
-		if err != nil {
-			return nil, err
-		}
+		result, executionErr := e.toolExecutor.Execute(ctx, codeExecToolName, args)
 		var receipt *CodeExecutionReceipt
 		if sink != nil {
 			sink.mu.Lock()
 			receipt = sink.receipt
 			sink.mu.Unlock()
+		}
+		diagnostic, repairable := verificationSyntaxDiagnostic(receipt, msg.Content, result)
+		if executionErr != nil && (attempt != 0 || !repairable || ctx.Err() != nil ||
+			errors.Is(executionErr, context.Canceled) || errors.Is(executionErr, context.DeadlineExceeded)) {
+			return nil, executionErr
 		}
 		arguments, _ := json.Marshal(args)
 		call := adapter.ToolCall{ID: "verify-exec-" + idgen.ShortID(), Name: codeExecToolName,
@@ -470,7 +472,6 @@ func (e *ReActEngine) completeStandaloneVerification(ctx context.Context, sessio
 			}
 			break
 		}
-		diagnostic, repairable := verificationSyntaxDiagnostic(receipt, msg.Content, result)
 		if attempt != 0 || !repairable || ctx.Err() != nil {
 			return nil, fmt.Errorf("verification execution receipt is invalid")
 		}
@@ -503,7 +504,12 @@ var verificationCompilerErrorRe = regexp.MustCompile(`(?m)^(?:IndentationError|S
 func verificationSyntaxDiagnostic(receipt *CodeExecutionReceipt, task, output string) (string, bool) {
 	if receipt.KnownExecutionFailure(executionInputDigest(task)) == nil || receipt.ExitCode != 1 ||
 		receipt.RuntimeMissing || receipt.Truncated || receipt.StdoutTruncated || receipt.StderrTruncated ||
-		receipt.StdoutBytes != 0 || receipt.StderrBytes <= 0 || receipt.StderrBytes > 4096 || !strings.HasPrefix(output, "[stderr]\n") {
+		receipt.StdoutBytes != 0 || receipt.StderrBytes <= 0 || receipt.StderrBytes > 4096 {
+		return "", false
+	}
+	// 宿主与沙箱仅在空 stdout 后的分隔换行不同，诊断仍按回执的原始字节数读取。
+	output = strings.TrimPrefix(output, "\n")
+	if !strings.HasPrefix(output, "[stderr]\n") {
 		return "", false
 	}
 	start := len("[stderr]\n")
@@ -511,5 +517,5 @@ func verificationSyntaxDiagnostic(receipt *CodeExecutionReceipt, task, output st
 		return "", false
 	}
 	diagnostic := output[start : start+int(receipt.StderrBytes)]
-	return diagnostic, verificationCompilerErrorRe.MatchString(diagnostic)
+	return diagnostic, strings.HasPrefix(diagnostic, "  File ") && verificationCompilerErrorRe.MatchString(diagnostic)
 }

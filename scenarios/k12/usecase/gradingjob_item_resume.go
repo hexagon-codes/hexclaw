@@ -1014,6 +1014,10 @@ func executeGradingItemOperationWithKind[T any](
 				ErrModelInvocationRequiresReconciliation, invocation.InvocationID, invocation.Status)
 		}
 	}
+	executionCtx, err := o.gradingExecutionContext(ctx, job, invocation)
+	if err != nil {
+		return zero, invocation.InvocationID, err
+	}
 	if invocation.Status == k12.ModelInvocationPrepared {
 		claimCtx, cancelClaim := gradingDurableCommitContext(ctx)
 		invocation, claimed, claimErr := o.deps.Records.ClaimGradingItemInvocationSent(
@@ -1030,7 +1034,7 @@ func executeGradingItemOperationWithKind[T any](
 			)
 		}
 	}
-	callCtx, cancelCall := gradingIndependentCallContext(ctx, job.Fields.ModelSnapshot.TimeoutMS)
+	callCtx, cancelCall := gradingIndependentCallContext(executionCtx, job.Fields.ModelSnapshot.TimeoutMS)
 	if operation == k12.GradingItemOperationParentGuide {
 		callCtx = withParentInstructions(callCtx, invocation.RouteSnapshot.ParentInstructions)
 	}

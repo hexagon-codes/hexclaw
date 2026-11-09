@@ -9,6 +9,62 @@ import (
 	"testing"
 )
 
+func TestRecognitionInitialReadCompactV1PreservesNonQuestionObservations(t *testing.T) {
+	raw, err := os.ReadFile("testdata/initial_read_compact_footer_v1.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := CanonicalRecognitionLayoutInitialReadEntriesV1(string(raw))
+	if err != nil || len(entries) != 2 {
+		t.Fatalf("valid equation and footer rejected: count=%d err=%v", len(entries), err)
+	}
+	var equation struct {
+		SourceNumberPath []string `json:"source_number_path"`
+		InitialRead      struct {
+			Recognition struct {
+				Question string `json:"question"`
+			} `json:"recognition"`
+		} `json:"initial_read"`
+	}
+	var footer struct {
+		InitialRead struct {
+			Kind        string          `json:"kind"`
+			Recognition json.RawMessage `json:"recognition"`
+		} `json:"initial_read"`
+	}
+	if json.Unmarshal(entries[0], &equation) != nil || json.Unmarshal(entries[1], &footer) != nil ||
+		!reflect.DeepEqual(equation.SourceNumberPath, []string{"12"}) || equation.InitialRead.Recognition.Question != "x - (1/4)x = 18" ||
+		footer.InitialRead.Kind != "non_question" || string(footer.InitialRead.Recognition) != "null" {
+		t.Fatal("equation source or non-question projection changed")
+	}
+	for _, scenario := range []struct {
+		name  string
+		field string
+		value any
+	}{
+		{"invalid confidence type", "confidence", "high"},
+		{"invalid confidence range", "confidence", 1.1},
+		{"invalid risks type", "risks", "none"},
+		{"question in footer", "question", "x = 24"},
+		{"answer in footer", "student_answer", "24"},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			var envelope map[string]any
+			if err := json.Unmarshal(raw, &envelope); err != nil {
+				t.Fatal(err)
+			}
+			envelope["targets"].([]any)[1].(map[string]any)[scenario.field] = scenario.value
+			changed, err := json.Marshal(envelope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := CanonicalRecognitionLayoutInitialReadEntriesV1(string(changed)); err == nil {
+				t.Fatal("invalid non-question observation accepted")
+			}
+		})
+	}
+}
+
 func TestRecognitionInitialReadCompactV1PreservesSourceObservations(t *testing.T) {
 	raw, err := os.ReadFile("testdata/initial_read_compact_v1.json")
 	if err != nil {

@@ -12,6 +12,40 @@ import (
 
 func float64Ptr(v float64) *float64 { return &v }
 
+func TestRecognitionFrozenQuestionIdentityFormatting(t *testing.T) {
+	const initial = "x − (1/4)x = 18"
+	for _, tc := range []struct {
+		name, review, label string
+		match               bool
+	}{
+		{"captured review", `12. \(x-(1/4)x=18\)`, "12.", true},
+		{"captured adjudication", `\(12.\quad x-\frac{1}{4}x=18\)`, "12.", true},
+		{"captured escaped layout", `\\(12.\\quad x-\\frac{1}{4}x=18\\)`, "12.", true},
+		{"changed denominator", `12. \(x-(1/5)x=18\)`, "12.", false},
+		{"changed operator", `12. \(x+(1/4)x=18\)`, "12.", false},
+		{"different printed number", `13. \(x-(1/4)x=18\)`, "12.", false},
+		{"decimal remains content", `12.5x-(1/4)x=18`, "12.", false},
+		{"missing frozen label", `12. \(x-(1/4)x=18\)`, "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			prior := RecognizedQuestion{Subject: "数学", SourceNumberPath: []string{"12"}, DisplayLabel: tc.label,
+				Question: initial, RawTranscription: initial, AnswerState: AnswerStateBlank, RecognitionConfidence: float64Ptr(.99)}
+			review := prior
+			review.Question, review.RawTranscription = tc.review, tc.review
+			review.EvidenceTranscriptions = []string{initial, tc.review}
+			before, _ := json.Marshal(review)
+			question, _ := RecognitionSourceReadingsMatchForInitialReadMode(prior, review, k12.RecognitionLayoutManifestWithContentV1)
+			if question != tc.match || questionEvidenceTranscriptionsConflictForInitialReadMode(review, k12.RecognitionLayoutManifestWithContentV1) == tc.match {
+				t.Fatalf("source comparison differs from frozen identity: match=%v want=%v", question, tc.match)
+			}
+			after, _ := json.Marshal(review)
+			if string(before) != string(after) {
+				t.Fatal("comparison rewrote original observations")
+			}
+		})
+	}
+}
+
 func TestScopedSharedMaterialPrefixDoesNotConflictWithLocalQuestion(t *testing.T) {
 	const shared = "一个硬盘，已用空间是总容量的2/5，正好用了4.8 TB。"
 	const child = "根据总容量是已用空间的（　）。列式：________"

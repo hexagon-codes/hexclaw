@@ -69,7 +69,7 @@ func (h *handler) uploadAsset(w http.ResponseWriter, r *http.Request) {
 		data = raw
 	default:
 		var req assetUploadReq
-		if !decode(w, r, &req) {
+		if !decodeLimit(w, r, &req, assetstore.MaxAssetBytes*3/2+1<<20) {
 			return
 		}
 		if agent == "" {

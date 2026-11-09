@@ -156,7 +156,12 @@ func (f *partialRecognitionFixture) vision(_ context.Context, _ []byte, prompt s
 	var targets []struct {
 		TargetID string `json:"target_id"`
 	}
-	if err := json.Unmarshal([]byte(prompt[strings.LastIndex(prompt, "["):]), &targets); err != nil {
+	// 只解码目标描述数组，后续识读说明中的方括号不属于目标元数据。
+	start := strings.LastIndex(prompt, "\n[")
+	if start < 0 {
+		return "", fmt.Errorf("target descriptors are missing")
+	}
+	if err := json.NewDecoder(strings.NewReader(prompt[start+1:])).Decode(&targets); err != nil {
 		return "", err
 	}
 	count := len(targets)

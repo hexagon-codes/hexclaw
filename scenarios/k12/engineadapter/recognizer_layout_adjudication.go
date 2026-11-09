@@ -97,7 +97,7 @@ func recognitionFinalAnswerSourceV1(q *usecase.RecognizedQuestion) k12.Recogniti
 	if q == nil {
 		return k12.RecognitionFinalAnswerSourceV1{}
 	}
-	return k12.RecognitionFinalAnswerSourceV1{Question: q.RawTranscription, Subject: q.Subject, AnswerState: string(q.AnswerState), Confidence: q.RecognitionConfidence, OCRSignals: q.OCRSignals}
+	return k12.RecognitionFinalAnswerSourceV1{Question: k12.RecognitionQuestionSourceTextV1(q.RawTranscription, q.SourceNumberPath, q.DisplayLabel), Subject: q.Subject, AnswerState: string(q.AnswerState), Confidence: q.RecognitionConfidence, OCRSignals: q.OCRSignals}
 }
 
 func recognitionUnresolvedSourceObservationsV1(initial, current *usecase.RecognizedQuestion, policies ...string) bool {
@@ -129,8 +129,9 @@ func (a *RecognizerAdapter) recognizeLayoutAdjudicationV2(ctx context.Context, p
 	}
 	questionMatch, answerMatch := usecase.RecognitionSourceReadingsMatchForInitialReadMode(comparison(*initial.question), comparison(*reread.question), plan.InitialReadMode)
 	// 既定比较规则已消解排版差异时，不再把旧的泛化冲突原因当成第三读授权。
-	sameAnswerText := strings.TrimSpace(initial.question.AnswerRawTranscription) == strings.TrimSpace(reread.question.AnswerRawTranscription)
-	if questionMatch && (answerMatch || sameAnswerText) && !recognitionUnresolvedSourceObservationsV1(initial.question, reread.question, runtime.Header.ExecutionPolicy) {
+	sameAnswerText := (initial.question.AnswerState == usecase.AnswerStateBlank && reread.question.AnswerState == usecase.AnswerStateBlank) ||
+		k12.RecognitionSourceQuestionsEqualV1(initial.question.AnswerRawTranscription, reread.question.AnswerRawTranscription)
+	if questionMatch && sameAnswerText && !recognitionUnresolvedSourceObservationsV1(initial.question, reread.question, runtime.Header.ExecutionPolicy) {
 		return nil
 	}
 	conflictKind := "both"
@@ -141,7 +142,7 @@ func (a *RecognizerAdapter) recognizeLayoutAdjudicationV2(ctx context.Context, p
 		if !k12.RecognitionSourceQuestionsEqualV1(initial.question.AnswerRawTranscription, reread.question.AnswerRawTranscription) {
 			conflictKind = "answer"
 		}
-	case questionMatch && !answerMatch:
+	case questionMatch && (!answerMatch || !sameAnswerText):
 		conflictKind = "answer"
 	case !questionMatch && answerMatch:
 		conflictKind = "question"

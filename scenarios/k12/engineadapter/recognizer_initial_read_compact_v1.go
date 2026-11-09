@@ -22,7 +22,7 @@ func buildRecognitionInitialReadPromptForPolicy(executionPolicy string) (string,
 	case "":
 		return recognitionLayoutInitialReadPromptV1, nil
 	case k12.RecognitionExecutionPolicyCompactDAGV1, k12.RecognitionExecutionPolicyCompactDAGFinalAnswerV1, k12.RecognitionExecutionPolicyCompactDAGFinalAnswerV2:
-		return recognitionLayoutInitialReadCompactPromptV1, nil
+		return recognitionLayoutInitialReadCompactPromptV1 + recognitionReviewSourcePrompt, nil
 	default:
 		return "", fmt.Errorf("%w: unsupported initial read execution policy", k12.ErrRecognitionProtocolInvalid)
 	}

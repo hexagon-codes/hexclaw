@@ -15,6 +15,7 @@ import (
 	"github.com/hexagon-codes/hexclaw/egress"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
+	"github.com/hexagon-codes/hexclaw/skill"
 )
 
 var (
@@ -1283,6 +1284,10 @@ func (e *durableGradingPhysicalCallExecutor) ExecuteGradingPhysicalCall(
 			return zero, err
 		}
 	}
+	executionCtx, err := e.o.gradingExecutionContext(ctx, e.job, invocation)
+	if err != nil {
+		return zero, err
+	}
 	commitCtx, cancelCommit = gradingDurableCommitContext(ctx)
 	invocation, claimed, err := e.o.deps.Records.ClaimGradingItemInvocationSent(
 		commitCtx, e.job.Record.AgentName, invocation.InvocationID,
@@ -1298,7 +1303,7 @@ func (e *durableGradingPhysicalCallExecutor) ExecuteGradingPhysicalCall(
 		)}
 	}
 
-	callCtx, cancelCall := gradingIndependentCallContext(ctx, e.job.Fields.ModelSnapshot.TimeoutMS)
+	callCtx, cancelCall := gradingIndependentCallContext(executionCtx, e.job.Fields.ModelSnapshot.TimeoutMS)
 	payload, callErr := send(callCtx)
 	callCtxErr := callCtx.Err()
 	cancelCall()
@@ -1429,6 +1434,24 @@ func stableGradingPhysicalInvocationID(
 	}, "\x00")
 	sum := sha256.Sum256([]byte(identity))
 	return "gradingitem-" + hex.EncodeToString(sum[:16])
+}
+
+// 两种执行入口在发送前共用持久身份桥，恢复时不借用当前请求或全局默认归属。
+func (o *GradingOrchestrator) gradingExecutionContext(ctx context.Context, job GradingJobView, invocation k12.GradingItemInvocation) (context.Context, error) {
+	if job.Fields.SourceKind != "image_task" {
+		return ctx, nil
+	}
+	owner, err := resolveGradingGroundingTextbookOwner(ctx, o.deps, job)
+	if err != nil {
+		return nil, err
+	}
+	ctx = skill.WithAuthenticatedUser(ctx, owner)
+	ctx = skill.WithRoutedAgent(ctx, job.Record.AgentName)
+	inv := skill.CurrentInvocation(ctx)
+	inv.AuthenticatedUserID, inv.RoutedAgentName = owner, job.Record.AgentName
+	inv.RequestID, inv.ToolCallID = job.Record.RecordID, invocation.InvocationID
+	inv.SessionID = job.Record.SourceSession
+	return skill.WithInvocationContext(ctx, inv), nil
 }
 
 func gradingIndependentCallContext(

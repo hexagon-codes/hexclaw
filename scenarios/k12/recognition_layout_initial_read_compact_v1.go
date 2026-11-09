@@ -158,9 +158,22 @@ func expandRecognitionInitialReadCompactTargetV1(
 			"recognition_confidence": *confidence, "ocr_signals": risks, "answer_bbox": answerBox,
 		}
 	case "non_question":
-		for _, key := range []string{"question", "subject", "answer_state", "student_answer", "confidence", "risks", "answer_bbox"} {
+		for _, key := range []string{"question", "subject", "answer_state", "student_answer", "answer_bbox"} {
 			if !bytes.Equal(bytes.TrimSpace(target[key]), []byte("null")) {
 				return nil, fmt.Errorf("non-question contains recognition content")
+			}
+		}
+		// 非题目的分类观察仍留在原响应，不应使整页有效题目转写失效。
+		if !bytes.Equal(bytes.TrimSpace(target["confidence"]), []byte("null")) {
+			var confidence float64
+			if json.Unmarshal(target["confidence"], &confidence) != nil || confidence < 0 || confidence > 1 {
+				return nil, fmt.Errorf("non-question confidence is invalid")
+			}
+		}
+		if !bytes.Equal(bytes.TrimSpace(target["risks"]), []byte("null")) {
+			var risks []string
+			if json.Unmarshal(target["risks"], &risks) != nil || risks == nil {
+				return nil, fmt.Errorf("non-question risks are invalid")
 			}
 		}
 	default:

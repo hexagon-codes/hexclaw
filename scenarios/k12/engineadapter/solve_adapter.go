@@ -255,6 +255,7 @@ func (a *SolveAdapter) SolveSubject(ctx context.Context, subject, problem, grade
 	if usecase.HasGradingPhysicalCallExecutor(ctx) {
 		// 持久批改仍拦截复杂题的真实 solver / verifier 调用；本机可精确计算的题先走
 		// numeric_exec 快路，由用例层单独持久化本地确定性结果。
+		ctx = engine.WithRequiredSolveVerification(ctx)
 		ctx = a.withGradingPhysicalCallInterceptor(ctx)
 	}
 	res, err := a.exec.Execute(ctx, args)

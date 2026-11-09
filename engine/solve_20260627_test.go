@@ -243,6 +243,43 @@ func TestSolve_Triage_TrivialSkipsVerifier(t *testing.T) {
 	}
 }
 
+func TestSolveDurableVerificationPreservesOrdinaryAndArithmeticPaths(t *testing.T) {
+	for _, tc := range []struct {
+		name, problem      string
+		required           bool
+		solvers, verifiers int
+	}{
+		{"ordinary lightweight", "12. x-1/4x=18", false, 1, 0},
+		{"durable assessment", "12. x-1/4x=18", true, 1, 1},
+		{"local arithmetic", "8×9", true, 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			se := &solveExec{solverOuts: []string{"3/4x=18，所以x=24。\n答案：24"},
+				verifierOut: "VERDICT: AGREE\nPROCESS: VALID\nCOMPUTED: 24", verifierStdout: "COMPUTED: 24\n"}
+			ctx := t.Context()
+			if tc.required {
+				ctx = WithRequiredSolveVerification(ctx)
+			}
+			res, err := NewSolveSkill(se.fn, nil).Execute(ctx, solveArgs(tc.problem))
+			verifiers := 0
+			for _, agent := range se.agents() {
+				if agent == verifierAgentName {
+					verifiers++
+				}
+			}
+			if err != nil || res == nil || se.solverCalls() != tc.solvers || verifiers != tc.verifiers {
+				t.Fatalf("solve path changed: err=%v solvers=%d verifiers=%d want=%d/%d", err, se.solverCalls(), verifiers, tc.solvers, tc.verifiers)
+			}
+			if tc.name == "durable assessment" && res.Metadata["solve_evidence"] != "numeric_exec" {
+				t.Fatal("durable assessment lost its independent execution proof")
+			}
+			if tc.name == "local arithmetic" && !strings.Contains(res.Content, "72") {
+				t.Fatal("arithmetic result changed")
+			}
+		})
+	}
+}
+
 // P0.5 triage：难题（求证/多问）→ 自动上 method_diversity（2 solver）+ 校验。
 func TestSolve_Triage_HardEnablesMethodDiversity(t *testing.T) {
 	se := &solveExec{verifierOut: "VERDICT: AGREE\nCOMPUTED: 42"}

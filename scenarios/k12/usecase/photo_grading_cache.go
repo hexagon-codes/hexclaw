@@ -21,7 +21,7 @@ import (
 )
 
 // 修改识题、评估或报告语义时升级此合同；模型、技能、档案及模板另按冻结内容隔离。
-const photoGradingCacheContract = "photo-grading-result-v1"
+const photoGradingCacheContract = "photo-grading-result-v3"
 
 // 文件精确匹配保留方向等元数据；重拍、重新压缩或任何笔迹变化均不沿用旧评分。
 func photoGradingImageDigest(data []byte) string {
