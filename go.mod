@@ -9,7 +9,7 @@ require (
 	github.com/alibabacloud-go/tea-utils/v2 v2.0.8
 	github.com/gorilla/websocket v1.5.3
 	github.com/hexagon-codes/ai-core v0.2.14-0.20261109142754-c41d39893b36
-	github.com/hexagon-codes/hexagon v0.5.16-0.20261109155346-9071517b8dac
+	github.com/hexagon-codes/hexagon v0.5.16-0.20261109160037-b2915e23a424
 	github.com/hexagon-codes/toolkit v0.3.7
 	github.com/larksuite/oapi-sdk-go/v3 v3.5.3
 	github.com/line/line-bot-sdk-go/v8 v8.20.1
@@ -19,7 +19,7 @@ require (
 	github.com/yuin/goldmark v1.8.6
 	go.starlark.net v0.0.0-20260613233743-8ba36ccb83fb
 	go.uber.org/goleak v1.3.0
-	golang.org/x/image v0.44.0
+	golang.org/x/image v0.45.0
 	golang.org/x/net v0.60.0
 	golang.org/x/sync v0.23.0
 	golang.org/x/sys v0.48.0
