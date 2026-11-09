@@ -1587,6 +1587,7 @@ func (e *ReActEngine) completeWithTools(
 		ProviderName: providerName,
 		ModelName:    modelName,
 		Metadata:     req.Metadata,
+		Generation: runtimeGenerationOptions(req),
 		Limits:       hruntime.Limits{MaxTurns: maxTurns},
 	}, nil, nil)
 	// BUG-20260711-A：模型/provider 明确“不支持工具调用”（openrouter 免费 Nemotron 等）
@@ -1601,6 +1602,7 @@ func (e *ReActEngine) completeWithTools(
 			ProviderName: providerName,
 			ModelName:    modelName,
 			Metadata:     req.Metadata,
+			Generation: runtimeGenerationOptions(req),
 			Limits:       hruntime.Limits{MaxTurns: maxTurns},
 		}, err, nil)
 	}
@@ -1627,6 +1629,7 @@ func (e *ReActEngine) completeWithTools(
 			ProviderName: fbName,
 			ModelName:    fbModel,
 			Metadata:     req.Metadata,
+			Generation: runtimeGenerationOptions(req),
 			Limits:       hruntime.Limits{MaxTurns: maxTurns},
 		}, err, nil)
 		// 新 provider 若又不支持工具调用，同样去工具重试一次（与首个 provider 对称）。
@@ -1638,6 +1641,7 @@ func (e *ReActEngine) completeWithTools(
 				ProviderName: fbName,
 				ModelName:    fbModel,
 				Metadata:     req.Metadata,
+				Generation: runtimeGenerationOptions(req),
 				Limits:       hruntime.Limits{MaxTurns: maxTurns},
 			}, err, nil)
 		}
@@ -2837,6 +2841,7 @@ func (e *ReActEngine) processStreamRuntime(
 			ProviderName: selection.providerName,
 			ModelName:    selection.modelName,
 			Metadata:     req.Metadata,
+			Generation: runtimeGenerationOptions(req),
 			Limits:       hruntime.Limits{MaxTurns: maxTurns},
 			StreamMode:   streamMode,
 		}, nil, sink)
@@ -2852,6 +2857,7 @@ func (e *ReActEngine) processStreamRuntime(
 				ProviderName: selection.providerName,
 				ModelName:    selection.modelName,
 				Metadata:     req.Metadata,
+				Generation: runtimeGenerationOptions(req),
 				Limits:       hruntime.Limits{MaxTurns: maxTurns},
 				StreamMode:   streamMode,
 			}, err, sink)
@@ -2881,6 +2887,7 @@ func (e *ReActEngine) processStreamRuntime(
 				ProviderName: fbName,
 				ModelName:    fbModel,
 				Metadata:     req.Metadata,
+				Generation: runtimeGenerationOptions(req),
 				Limits:       hruntime.Limits{MaxTurns: maxTurns},
 				StreamMode:   streamMode,
 			}, err, sink)
@@ -2892,6 +2899,7 @@ func (e *ReActEngine) processStreamRuntime(
 					ProviderName: fbName,
 					ModelName:    fbModel,
 					Metadata:     req.Metadata,
+					Generation: runtimeGenerationOptions(req),
 					Limits:       hruntime.Limits{MaxTurns: maxTurns},
 					StreamMode:   streamMode,
 				}, err, sink)
@@ -4577,6 +4585,20 @@ func (e *ReActEngine) completeDirect(
 		Usage:       buildUsage(resp.Usage, providerName, modelName),
 		ToolCalls:   translateProviderToolCalls(resp.ToolCalls),
 	}, nil
+}
+
+// runtimeGenerationOptions 保留补全请求的生成参数；Runtime 负责冻结其可变值。
+func runtimeGenerationOptions(req hexagon.CompletionRequest) llm.GenerationOptions {
+	return llm.GenerationOptions{
+		ToolChoice:           req.ToolChoice,
+		MaxTokens:            req.MaxTokens,
+		Temperature:          req.Temperature,
+		TopP:                 req.TopP,
+		Stop:                 req.Stop,
+		User:                 req.User,
+		ReasoningPolicyScope: req.ReasoningPolicyScope,
+		ResponseFormat:       req.ResponseFormat,
+	}
 }
 
 func applyCompletionOverrides(req *hexagon.CompletionRequest, metadata map[string]string) {
