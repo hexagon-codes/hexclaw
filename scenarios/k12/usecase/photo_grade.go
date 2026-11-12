@@ -566,7 +566,7 @@ func photoQuestionComputationText(q RecognizedQuestion) string {
 	}
 	if q.DisplayLabel == q.SourceNumberPath[0]+"." {
 		if rest, ok := strings.CutPrefix(view, q.DisplayLabel); ok && rest != "" {
-			for _, layout := range []string{"", `\qquad`, `\quad`} {
+			for _, layout := range []string{"", `\qquad`, `\quad`, `\`} {
 				if body, found := strings.CutPrefix(rest, layout); found && body != "" {
 					if unspaced := strings.TrimLeftFunc(body, unicode.IsSpace); unspaced != body {
 						return open + unspaced + close

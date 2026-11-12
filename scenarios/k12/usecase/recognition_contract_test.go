@@ -40,6 +40,8 @@ func TestRecognitionFrozenQuestionIdentityFormatting(t *testing.T) {
 		{"captured review", `12. \(x-(1/4)x=18\)`, "12.", true},
 		{"captured adjudication", `\(12.\quad x-\frac{1}{4}x=18\)`, "12.", true},
 		{"captured escaped layout", `\\(12.\\quad x-\\frac{1}{4}x=18\\)`, "12.", true},
+		{"captured control space", `\(12.\ x-\frac{1}{4}x=18\)`, "12.", true},
+		{"captured escaped control space", `\\(12.\\ x-\\frac{1}{4}x=18\\)`, "12.", true},
 		{"changed denominator", `12. \(x-(1/5)x=18\)`, "12.", false},
 		{"changed operator", `12. \(x+(1/4)x=18\)`, "12.", false},
 		{"different printed number", `13. \(x-(1/4)x=18\)`, "12.", false},

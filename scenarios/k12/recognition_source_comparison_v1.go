@@ -16,7 +16,7 @@ var (
 	sourceNumericRatioV1               = regexp.MustCompile(`([0-9])[:：∶]([0-9])`)
 	sourceNumberTokensV1               = regexp.MustCompile(`[0-9]+(?:\.[0-9]+)?`)
 	sourceGroupedCoefficientFractionV1 = regexp.MustCompile(`(^|[=+\-−])\s*\(([0-9]+(?:\.[0-9]+)?)/([0-9]+(?:\.[0-9]+)?)\)(\s*[xX])`)
-	sourceRepeatedMathEscapeV1         = regexp.MustCompile(`\\{2,}(frac|text|times|div|cdot|left|right|qquad|quad|\(|\)|\[|\])`)
+	sourceRepeatedMathEscapeV1         = regexp.MustCompile(`\\{2,}(frac|text|times|div|cdot|left|right|qquad|quad|\(|\)|\[|\]| )`)
 )
 
 // RecognitionQuestionSourceTextV1 只投影已知题号的印刷排版，不改写原始观察。
@@ -28,7 +28,7 @@ func RecognitionQuestionSourceTextV1(value string, numberPath []string, label st
 	text := sourceRepeatedMathEscapeV1.ReplaceAllString(value, `\${1}`)
 	text = strings.NewReplacer(`\left`, "", `\right`, "").Replace(text)
 	text = RecognitionSourcePlainTextV1(text)
-	text = strings.NewReplacer(`\qquad`, " ", `\quad`, " ", "−", "-").Replace(text)
+	text = strings.NewReplacer(`\qquad`, " ", `\quad`, " ", `\ `, " ", "−", "-").Replace(text)
 	text = strings.TrimSpace(text)
 	if rest, ok := strings.CutPrefix(text, numberPath[0]+"、"); ok {
 		return sourceGroupedCoefficientFractionV1.ReplaceAllString(strings.TrimSpace(rest), `$1($2)/($3)$4`)

@@ -301,9 +301,31 @@ func scopedMaterialReadingsEquivalent(q RecognizedQuestion, raw string, values [
 		text    string
 	}
 	var diagramRows []scopedDiagramRows
+	var diagramTexts []string
 	for _, material := range source.Materials {
+		diagramTexts = append(diagramTexts, material.Text)
+	}
+	// 本题图示也可直接写在冻结转写中，不必另列为共享材料；只提取完整连续数量行。
+	for _, reading := range values {
 		var rows []string
-		for _, line := range strings.Split(material.Text, "\n") {
+		for _, line := range append(strings.Split(reading, "\n"), "") {
+			row := strings.TrimSpace(plain(line))
+			if row != "" {
+				first := []rune(row)[0]
+				if unicode.IsDigit(first) || first == '(' || first == '（' {
+					rows = append(rows, row)
+					continue
+				}
+			}
+			if len(rows) >= 2 {
+				diagramTexts = append(diagramTexts, strings.Join(rows, "\n"))
+			}
+			rows = nil
+		}
+	}
+	for _, text := range diagramTexts {
+		var rows []string
+		for _, line := range strings.Split(text, "\n") {
 			row := strings.Join(strings.Fields(plain(line)), "")
 			if row != "" {
 				rows = append(rows, row)
@@ -320,9 +342,20 @@ func scopedMaterialReadingsEquivalent(q RecognizedQuestion, raw string, values [
 				break
 			}
 			var pattern strings.Builder
-			for _, char := range row {
+			characters := []rune(row)
+			for i, char := range characters {
 				pattern.WriteString(regexp.QuoteMeta(string(char)))
-				pattern.WriteString(`[\s\p{Zs}]*`)
+				// 数字及小数点内部不吸收空白，不能把独立数字合并成一个数。
+				insideNumber := false
+				if i+1 < len(characters) {
+					next := characters[i+1]
+					insideNumber = unicode.IsDigit(char) && unicode.IsDigit(next) ||
+						unicode.IsDigit(char) && next == '.' && i+2 < len(characters) && unicode.IsDigit(characters[i+2]) ||
+						char == '.' && i > 0 && unicode.IsDigit(characters[i-1]) && unicode.IsDigit(next)
+				}
+				if !insideNumber {
+					pattern.WriteString(`[\s\p{Zs}]*`)
+				}
 			}
 			parts = append(parts, pattern.String())
 		}

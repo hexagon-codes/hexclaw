@@ -86,7 +86,7 @@ func assertElementaryEquationGuide(t *testing.T, result usecase.BlankWorksheetPr
 }
 
 func TestPhotoFrozenEquationLabelUsesNumericEvidenceWithoutChangingSource(t *testing.T) {
-	for _, raw := range []string{"12.  x-1/4x=18", `\(12.\quad x-\frac{1}{4}x=18\)`} {
+	for _, raw := range []string{"12.  x-1/4x=18", `\(12.\quad x-\frac{1}{4}x=18\)`, `\(12.\ x-\frac{1}{4}x=18\)`} {
 		t.Run(raw, func(t *testing.T) {
 			wired, calls, _ := elementaryEquationAssembly(t)
 			confidence := .99

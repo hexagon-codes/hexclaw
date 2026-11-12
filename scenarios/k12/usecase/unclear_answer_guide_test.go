@@ -39,6 +39,53 @@ func TestParentGuidePreservesUnclearAnswerObservation(t *testing.T) {
 	}
 }
 
+func TestOwnDiagramLayoutKeepsIndependentReferenceEligible(t *testing.T) {
+	data, err := os.ReadFile("testdata/scoped-reference-own-diagram.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var original RecognizedQuestion
+	if err := json.Unmarshal(data, &original); err != nil {
+		t.Fatal(err)
+	}
+	for _, scenario := range []string{"same quantities", "changed distance", "changed unit", "changed time", "changed operation", "split number", "split decimal", "missing scope"} {
+		t.Run(scenario, func(t *testing.T) {
+			q := cloneRecognizedQuestions([]RecognizedQuestion{original})[0]
+			switch scenario {
+			case "changed distance":
+				q.EvidenceTranscriptions[0] = strings.Replace(q.EvidenceTranscriptions[0], "小时走了2 km", "小时走了3 km", 1)
+			case "changed unit":
+				q.EvidenceTranscriptions[0] = strings.Replace(q.EvidenceTranscriptions[0], "小时走了2 km", "小时走了2 m", 1)
+			case "changed time":
+				q.EvidenceTranscriptions[0] = strings.Replace(q.EvidenceTranscriptions[0], "1小时走了？km", "2小时走了？km", 1)
+			case "changed operation":
+				q.EvidenceTranscriptions[0] = strings.Replace(q.EvidenceTranscriptions[0], `2\div2`, `2\times2`, 1)
+			case "split number":
+				for _, view := range []*string{&q.Question, &q.RawTranscription, &q.CanonicalMarkdown, &q.EvidenceTranscriptions[1]} {
+					*view = strings.Replace(*view, "1小时走了？km", "12小时走了？km", 1)
+				}
+				q.EvidenceTranscriptions[0] = strings.Replace(q.EvidenceTranscriptions[0], "1小时走了？km", "1 2小时走了？km", 1)
+			case "split decimal":
+				for _, view := range []*string{&q.Question, &q.RawTranscription, &q.CanonicalMarkdown, &q.EvidenceTranscriptions[1]} {
+					*view = strings.Replace(*view, "1小时走了？km", "1.2小时走了？km", 1)
+				}
+				q.EvidenceTranscriptions[0] = strings.Replace(q.EvidenceTranscriptions[0], "1小时走了？km", "1 . 2小时走了？km", 1)
+			case "missing scope":
+				q.ImageSourceContext = nil
+			}
+			before, _ := json.Marshal(q)
+			got := independentReferenceAnswerEligible(PhotoGradeRequest{InitialReadMode: k12.RecognitionLayoutManifestWithContentV1}, q)
+			if want := scenario == "same quantities"; got != want {
+				t.Fatalf("printed diagram reference eligibility = %t, want %t", got, want)
+			}
+			after, _ := json.Marshal(q)
+			if string(before) != string(after) {
+				t.Fatal("reference eligibility changed the frozen source observation")
+			}
+		})
+	}
+}
+
 func TestScopedPrintedNumberDifferenceKeepsIndependentReferenceEligible(t *testing.T) {
 	observedJSON, err := os.ReadFile("testdata/scoped-reference-printed-q1.json")
 	if err != nil {
