@@ -228,6 +228,30 @@ func sanitizeInitialReadModelJSONV1(s string) string {
 	return out.String()
 }
 
+// RecognitionInitialReadAnswerRegionV1 提取首读已声明的可读作答绝对区域，原始观察不变。
+func RecognitionInitialReadAnswerRegionV1(entry json.RawMessage) *SourcePixelRegion {
+	var source struct {
+		InitialRead struct {
+			Kind        string `json:"kind"`
+			Recognition struct {
+				AnswerState   string             `json:"answer_state"`
+				StudentAnswer string             `json:"student_answer"`
+				AnswerBBox    *SourcePixelRegion `json:"answer_bbox"`
+			} `json:"recognition"`
+		} `json:"initial_read"`
+	}
+	if json.Unmarshal(entry, &source) != nil || source.InitialRead.Kind != "question" ||
+		source.InitialRead.Recognition.AnswerState != "present" || strings.TrimSpace(source.InitialRead.Recognition.StudentAnswer) == "" {
+		return nil
+	}
+	box := source.InitialRead.Recognition.AnswerBBox
+	if box == nil || box.X < 0 || box.Y < 0 || box.Width <= 0 || box.Height <= 0 {
+		return nil
+	}
+	copyBox := *box
+	return &copyBox
+}
+
 // ProjectRecognitionLayoutInitialObservationV1 仅投影两个观察字符串的位置，原来源条目由调用者保留。
 // 外层唯一值可补到缺值的观察层；双值必须逐字一致，不从其他字段推断观察事实。
 func ProjectRecognitionLayoutInitialObservationV1(entry json.RawMessage) (manifest, read json.RawMessage, moved bool, err error) {

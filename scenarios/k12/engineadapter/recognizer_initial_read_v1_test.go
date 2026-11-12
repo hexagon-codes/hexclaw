@@ -33,6 +33,9 @@ func TestRecognitionInitialReadV1RedundantObservationsPreserveActualManifest(t *
 		if json.Unmarshal(entry.raw, &observation) != nil || len(observation["shared_conditions"]) == 0 || len(observation["answer_ownership"]) == 0 || entry.manifest.ManifestOrder != index+1 {
 			t.Fatalf("raw observation or manifest identity lost: %s", entry.raw)
 		}
+		if !reflect.DeepEqual(entry.manifest.ObservedAnswerRegion, k12.RecognitionInitialReadAnswerRegionV1(entry.raw)) {
+			t.Fatal("manifest omitted or changed the original answer region")
+		}
 	}
 	for _, failure := range []string{"conflicting shared conditions", "conflicting ownership", "unknown field", "duplicate reference"} {
 		t.Run(failure, func(t *testing.T) {
@@ -400,6 +403,50 @@ func TestRecognitionInitialReadV1JSONOutputScopeSurvivesPhysicalSender(t *testin
 	}
 	if !reflect.DeepEqual(jsonOutput, []bool{true, false, false}) {
 		t.Fatalf("actual sender JSON output scopes=%v, want first read only", jsonOutput)
+	}
+}
+
+func TestRecognitionInitialReadV1PublicRiskCannotUseArithmeticFastPath(t *testing.T) {
+	const question = "5/9×7/8+5/9×1/8"
+	const answer = "=5/9×(7/8+1/8)=5/9"
+	const risk = "There is a heavily crossed-out handwritten line above the legible active line; its content is not reliably readable."
+	for _, risky := range []bool{true, false} {
+		t.Run(fmt.Sprintf("unresolved_source_%v", risky), func(t *testing.T) {
+			entry := initialReadAdapterEntryV1("manifest_0001", 1, 40, question, answer, "", .96)
+			entry["source_number_path"], entry["display_label"] = []string{"8"}, "8."
+			if risky {
+				entry["initial_read"].(map[string]any)["recognition"].(map[string]any)["ocr_signals"] = []string{risk}
+			}
+			raw, _ := json.Marshal(map[string]any{"targets": []any{entry}})
+			executor := &initialReadAdapterExecutorV1{}
+			ctx := k12.WithRecognitionLayoutPlanV2(t.Context(), recognitionLayoutV2TestDigest("initial-read-header"))
+			ctx = k12.WithRecognitionLayoutInitialReadMode(ctx, k12.RecognitionLayoutManifestWithContentV1)
+			ctx = k12.WithRecognitionPhysicalCallExecutor(ctx, executor)
+			review, _ := json.Marshal(map[string]any{"items": []any{map[string]any{"target_id": "t1", "kind": "question", "recognition": map[string]any{
+				"question": question, "subject": "数学", "answer_state": "present", "student_answer": answer,
+				"recognition_confidence": .99, "ocr_signals": []string{}, "answer_bbox": nil,
+			}}}})
+			recognizer := NewRecognizerAdapter(func(_ context.Context, _ []byte, prompt string) (string, error) {
+				if strings.Contains(prompt, "SAME JSON response") {
+					return string(raw), nil
+				}
+				return string(review), nil
+			})
+			questions, err := recognizer.Recognize(ctx, denseWorksheetTestImage(t, 320, 320))
+			if err != nil || len(questions) != 1 || questions[0].AnswerRawTranscription != answer {
+				t.Fatalf("public recognition lost the actual answer: %+v %v", questions, err)
+			}
+			wantCalls := 1
+			if risky {
+				wantCalls = 2
+			}
+			if len(executor.calls) != wantCalls || executor.calls[0].Unit != k12.RecognitionPhysicalUnitWholePage {
+				t.Fatalf("public initial-read physical calls=%d, want %d", len(executor.calls), wantCalls)
+			}
+			if risky && (string(executor.calls[1].Unit) != "layout_review_batch_0001" || !bytes.Contains(executor.initial.FirstReads[0].FirstReadJSON, []byte(risk))) {
+				t.Fatal("source risk did not reach independent review with its original receipt")
+			}
+		})
 	}
 }
 

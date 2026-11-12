@@ -190,6 +190,12 @@ func validateInitialReadSourceV1(ctx context.Context, q dbQueryer, owner, parent
 			return ErrModelPhysicalInvocationConflict
 		}
 		target := plan.Targets[i]
+		if target.ObservedAnswerRegion != nil {
+			observed := k12.RecognitionInitialReadAnswerRegionV1(candidate.FirstReadJSON)
+			if observed == nil || *observed != *target.ObservedAnswerRegion {
+				return ErrModelPhysicalInvocationConflict
+			}
+		}
 		region := target.Region
 		if target.OriginalRegion != nil {
 			region = *target.OriginalRegion

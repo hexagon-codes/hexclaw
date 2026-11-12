@@ -251,6 +251,56 @@ func TestK12VisionRequestInitialReadJSONObjectIsRequestLocal(t *testing.T) {
 	}
 }
 
+func TestK12VisionRequestConfiguredLayoutJSONStagesAndLegacyIsolation(t *testing.T) {
+	legacy := k12.ApprovedRecognizingRequestPolicy()
+	legacy.PolicyVersion = "k12-recognizing-v2"
+	for _, scenario := range []struct {
+		name   string
+		policy k12.ModelRequestPolicySnapshot
+		all    bool
+	}{
+		{"new configured policy", k12.ConfiguredRecognizingRequestPolicy(), true},
+		{"frozen configured v2", legacy, false},
+		{"frozen explicit v1", k12.ApprovedRecognizingRequestPolicy(), false},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			provider := &k12VisionRequestCaptureProvider{}
+			snapshot := k12.GradingModelSnapshot{Provider: "configured", Model: k12.RecognizingPolicyModel, RecognizingRequestPolicy: scenario.policy}
+			base := k12.WithGradingModelRequestPolicy(k12.WithGradingModelSnapshot(t.Context(), snapshot), scenario.policy)
+			layout := k12.WithRecognitionLayoutPlanV2(base, "sha256:"+strings.Repeat("3", 64))
+			layout = k12.WithRecognitionLayoutInitialReadMode(layout, k12.RecognitionLayoutManifestWithContentV1)
+			for _, stage := range []struct {
+				name string
+				ctx  context.Context
+				json bool
+			}{
+				{"whole_page", k12.WithRecognitionLayoutInitialReadJSONOutput(layout), true},
+				{"review", layout, scenario.all},
+				{"adjudication", layout, scenario.all},
+				{"without layout", base, false},
+			} {
+				if _, err := completeK12VisionRequest(stage.ctx, provider, snapshot.Model, []byte("\x89PNG\r\n\x1a\n"), stage.name); err != nil {
+					t.Fatal(err)
+				}
+				format := provider.request.ResponseFormat
+				if stage.json {
+					if format == nil || format.Type != "json_object" || format.JSONSchema != nil {
+						t.Fatalf("%s lost structured JSON output: %+v", stage.name, format)
+					}
+				} else if format != nil {
+					t.Fatalf("%s changed a legacy or unrelated request: %+v", stage.name, format)
+				}
+				if scenario.name != "frozen explicit v1" && provider.request.Metadata["expected_reasoning_effort"] != "none" {
+					t.Fatal("configured frozen reasoning policy was lost")
+				}
+			}
+			if provider.calls != 4 {
+				t.Fatalf("provider calls=%d, want one per request", provider.calls)
+			}
+		})
+	}
+}
+
 // 通过实际非首读适配器与共享请求构建器检查输出合同，模型边界由 capture Provider 替代。
 func TestK12VisionRequestNonBAdaptersKeepUnconstrainedOutput(t *testing.T) {
 	var encoded bytes.Buffer

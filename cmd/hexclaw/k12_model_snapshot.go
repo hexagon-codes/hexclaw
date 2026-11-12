@@ -181,7 +181,8 @@ func k12VisionRequestMetadata(
 		return nil, "", fmt.Errorf("K12 vision request policy is not approved")
 	}
 	metadata := map[string]any{"thinking": policy.Thinking}
-	if snapshot.RecognizingRequestPolicy == k12.ConfiguredRecognizingRequestPolicy() {
+	if snapshot.RecognizingRequestPolicy.IsApprovedRecognizing() &&
+		snapshot.RecognizingRequestPolicy.PolicyVersion != k12.RecognizingRequestPolicyVersion {
 		metadata["expected_reasoning_effort"] = policy.ReasoningEffort
 	}
 	return metadata,

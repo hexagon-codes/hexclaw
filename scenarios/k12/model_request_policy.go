@@ -13,7 +13,8 @@ const (
 	// RecognizingRequestPolicyVersion 控制共享的 DD-036 线上协议策略。
 	// 它有意与 recognition_plan_version V1/V2 保持独立。
 	RecognizingRequestPolicyVersion    = "dd036-recognizing-v1"
-	ConfiguredRecognizingPolicyVersion = "k12-recognizing-v2"
+	ConfiguredRecognizingPolicyVersion = "k12-recognizing-v3"
+	configuredRecognizingPolicyV2      = "k12-recognizing-v2"
 	LocatingRequestPolicyVersion       = "k12-locating-v1"
 	RecognizingPolicyModel             = "gpt-5.6-sol"
 )
@@ -22,6 +23,7 @@ const (
 // frozen before an external model invocation. ReasoningEffort records the
 // expected adapter-resolved wire policy for audit; HexClaw sends only Thinking
 // as semantic CompletionRequest metadata.
+// v3 对显式布局识别同时声明 JSON 对象输出，旧 v1/v2 快照仍按原请求恢复。
 type ModelRequestPolicySnapshot struct {
 	PolicyVersion   string `json:"policy_version"`
 	Stage           string `json:"stage"`
@@ -47,10 +49,16 @@ func ApprovedLocatingRequestPolicy() ModelRequestPolicySnapshot {
 	}
 }
 
-// ConfiguredRecognizingRequestPolicy 用于创建时已核实适配映射的新任务。
+// ConfiguredRecognizingRequestPolicy 为新任务冻结已核实的推理映射和布局 JSON 输出。
 func ConfiguredRecognizingRequestPolicy() ModelRequestPolicySnapshot {
 	policy := ApprovedRecognizingRequestPolicy()
 	policy.PolicyVersion = ConfiguredRecognizingPolicyVersion
+	return policy
+}
+
+func configuredRecognizingRequestPolicyV2() ModelRequestPolicySnapshot {
+	policy := ApprovedRecognizingRequestPolicy()
+	policy.PolicyVersion = configuredRecognizingPolicyV2
 	return policy
 }
 
@@ -70,7 +78,8 @@ func (policy ModelRequestPolicySnapshot) IsZero() bool {
 
 func (policy ModelRequestPolicySnapshot) IsApprovedRecognizing() bool {
 	policy = NormalizeModelRequestPolicySnapshot(policy)
-	return policy == ApprovedRecognizingRequestPolicy() || policy == ConfiguredRecognizingRequestPolicy()
+	return policy == ApprovedRecognizingRequestPolicy() || policy == ConfiguredRecognizingRequestPolicy() ||
+		policy == configuredRecognizingRequestPolicyV2()
 }
 
 func (policy ModelRequestPolicySnapshot) IsApprovedLocating() bool {
@@ -94,7 +103,7 @@ func (policy ModelRequestPolicySnapshot) Digest() string {
 func ValidateGradingRecognizingRequestPolicy(snapshot GradingModelSnapshot) error {
 	snapshot = NormalizeGradingModelSnapshot(snapshot)
 	policy := NormalizeModelRequestPolicySnapshot(snapshot.RecognizingRequestPolicy)
-	if policy.IsZero() || policy == ConfiguredRecognizingRequestPolicy() {
+	if policy.IsZero() || policy == ConfiguredRecognizingRequestPolicy() || policy == configuredRecognizingRequestPolicyV2() {
 		return nil
 	}
 	// 历史任务的显式策略只按原合同读取，不再按型号给新任务补策略。

@@ -11,6 +11,147 @@ import (
 	"testing"
 )
 
+func TestRecognitionOwnAnswerContextPreservesObservedPixelsAndLegacyPlans(t *testing.T) {
+	canvas := image.NewRGBA(image.Rect(0, 0, 1076, 1462))
+	answerPixel := image.Pt(949, 650)
+	canvas.Set(answerPixel.X, answerPixel.Y, color.Black)
+	var page bytes.Buffer
+	if err := png.Encode(&page, canvas); err != nil {
+		t.Fatal(err)
+	}
+	own := SourcePixelRegion{X: 758, Y: 625, Width: 197, Height: 45}
+	input := RecognitionLayoutPlanInputV2{PagePNG: page.Bytes(),
+		Manifest: RecognitionLayoutManifestSuccessV2{InvocationID: "original-answer-page", ResultDigest: "sha256:" + strings.Repeat("a", 64)},
+		Targets: []RecognitionLayoutManifestTargetV2{
+			{ManifestRef: "manifest_0001", ManifestOrder: 1, SourceNumberPath: []string{"8"}, DisplayLabel: "8.", Region: SourcePixelRegion{X: 365, Y: 550, Width: 310, Height: 160}},
+			{ManifestRef: "manifest_0002", ManifestOrder: 2, SourceNumberPath: []string{"9"}, DisplayLabel: "9.", Region: SourcePixelRegion{X: 690, Y: 556, Width: 190, Height: 126}, ObservedAnswerRegion: &own},
+		}, RecognitionFormat: RecognitionLayoutCompactV4, InitialReadMode: RecognitionLayoutManifestWithContentV1,
+		EnableSourceAdjudication: true,
+		ScopeInput:               &RecognitionImageScopeInputV1{Version: RecognitionImageScopeVersionV1},
+		Scope: &RecognitionImageScopeV1{Version: RecognitionImageScopeVersionV1, Source: "explicit", SelectedOrders: []int{2}, Basis: "Only question 9 was requested.",
+			Excluded: []RecognitionImageScopeExclusionV1{{Order: 1, Reason: "Question 8 is outside the request."}}},
+	}
+	for _, policy := range []string{RecognitionImageSourceUprightReviewPolicyV1, RecognitionImageSourceUprightReviewPolicyV2, RecognitionImageSourceUprightReviewPolicyV3} {
+		t.Run(policy, func(t *testing.T) {
+			input.ScopeInput.SourceReviewPolicy = policy
+			plan, err := BuildRecognitionLayoutPlanV2(input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			target := plan.Targets[0]
+			region := target.Region
+			visible := answerPixel.In(image.Rect(region.X, region.Y, region.X+region.Width, region.Y+region.Height))
+			if len(plan.Targets) != 1 || len(plan.ObservedTargets) != 2 || target.ManifestOrder != 2 || *target.OriginalRegion != input.Targets[1].Region || region.X < 675 || region.Width >= 1076 {
+				t.Fatal("own answer expansion changed original identity or selected neighboring question")
+			}
+			if policy == RecognitionImageSourceUprightReviewPolicyV3 {
+				if !visible || target.ObservedAnswerRegion == nil || *target.ObservedAnswerRegion != own {
+					t.Fatal("review still clips this question's declared final answer")
+				}
+			} else {
+				if visible || target.ObservedAnswerRegion != nil {
+					t.Fatal("legacy review geometry changed")
+				}
+				legacyInput := input
+				legacyInput.Targets = append([]RecognitionLayoutManifestTargetV2(nil), input.Targets...)
+				legacyInput.Targets[1].ObservedAnswerRegion = nil
+				legacy, err := BuildRecognitionLayoutPlanV2(legacyInput)
+				if err != nil || !reflect.DeepEqual(plan, legacy) {
+					t.Fatal("legacy serialized plan or digest changed")
+				}
+			}
+			encoded, _ := json.Marshal(plan)
+			var restored RecognitionLayoutPlanV2
+			if json.Unmarshal(encoded, &restored) != nil || ValidateRecognitionLayoutPlanV2(restored) != nil || !reflect.DeepEqual(plan, restored) {
+				t.Fatal("frozen own-answer geometry cannot be restored")
+			}
+			if policy == RecognitionImageSourceUprightReviewPolicyV3 {
+				entries := make([]map[string]any, len(input.Targets))
+				for index, source := range input.Targets {
+					entry, _ := json.Marshal(source)
+					_ = json.Unmarshal(entry, &entries[index])
+					entries[index]["initial_read"] = map[string]any{"kind": "question", "recognition": map[string]any{"answer_state": "present", "student_answer": "=1", "answer_bbox": own}}
+				}
+				raw, _ := json.Marshal(map[string]any{"targets": entries})
+				if err := ValidateRecognitionImageScopeSourceV1(plan, string(raw)); err != nil {
+					t.Fatalf("original answer observation rejected: %v", err)
+				}
+				changed := own
+				changed.X++
+				restored.ObservedTargets[1].ObservedAnswerRegion = &changed
+				if ValidateRecognitionImageScopeSourceV1(restored, string(raw)) == nil {
+					t.Fatal("answer geometry detached from its original observation was accepted")
+				}
+			}
+		})
+	}
+}
+
+func TestRecognitionOwnAnswerRegionComesFromReadableOriginalObservation(t *testing.T) {
+	for _, tc := range []struct {
+		name, raw string
+		want      *SourcePixelRegion
+	}{
+		{"present", `{"initial_read":{"kind":"question","recognition":{"answer_state":"present","student_answer":"=1","answer_bbox":{"x":758,"y":625,"width":197,"height":45}}}}`, &SourcePixelRegion{X: 758, Y: 625, Width: 197, Height: 45}},
+		{"blank", `{"initial_read":{"kind":"question","recognition":{"answer_state":"blank","student_answer":"","answer_bbox":{"x":1,"y":1,"width":10,"height":10}}}}`, nil},
+		{"non question", `{"initial_read":{"kind":"non_question","recognition":null}}`, nil},
+		{"invalid box", `{"initial_read":{"kind":"question","recognition":{"answer_state":"present","student_answer":"1","answer_bbox":{"x":-1,"y":1,"width":10,"height":10}}}}`, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := RecognitionInitialReadAnswerRegionV1(json.RawMessage(tc.raw)); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("observed answer region=%+v, want=%+v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRecognitionPartiallyVisibleRegionPreservesRawSource(t *testing.T) {
+	original := SourcePixelRegion{X: 91, Y: 158, Width: 903, Height: 480}
+	answer := SourcePixelRegion{X: 204, Y: 409, Width: 481, Height: 118}
+	for _, tc := range []struct {
+		name, policy string
+		region       SourcePixelRegion
+		wantValid    bool
+	}{
+		{"visible intersection", RecognitionImageSourceUprightReviewPolicyV3, original, true},
+		{"legacy first", RecognitionImageSourceUprightReviewPolicyV1, original, false},
+		{"legacy second", RecognitionImageSourceUprightReviewPolicyV2, original, false},
+		{"entirely outside", RecognitionImageSourceUprightReviewPolicyV3, SourcePixelRegion{X: 960, Y: 158, Width: 34, Height: 480}, false},
+		{"empty", RecognitionImageSourceUprightReviewPolicyV3, SourcePixelRegion{X: 91, Y: 158, Height: 480}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input := RecognitionLayoutPlanInputV2{PagePNG: recognitionLayoutPlanTestPNG(t, 960, 642),
+				Manifest:          RecognitionLayoutManifestSuccessV2{InvocationID: "partial-source-page", ResultDigest: "sha256:" + strings.Repeat("a", 64)},
+				Targets:           []RecognitionLayoutManifestTargetV2{{ManifestRef: "manifest_0001", ManifestOrder: 1, SourceNumberPath: []string{"1"}, DisplayLabel: "1.", Region: tc.region, ObservedAnswerRegion: &answer}},
+				RecognitionFormat: RecognitionLayoutCompactV4, InitialReadMode: RecognitionLayoutManifestWithContentV1, EnableSourceAdjudication: true,
+				ScopeInput: &RecognitionImageScopeInputV1{Version: RecognitionImageScopeVersionV1, Action: "solve", SourceReviewPolicy: tc.policy},
+				Scope:      &RecognitionImageScopeV1{Version: RecognitionImageScopeVersionV1, Source: "explicit", SelectedOrders: []int{1}, Basis: "Only question 1 was requested."}}
+			plan, err := BuildRecognitionLayoutPlanV2(input)
+			if !tc.wantValid {
+				if err == nil {
+					t.Fatal("invalid or legacy region contract changed")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("visible question rejected instead of retaining its page intersection: %v", err)
+			}
+			target := plan.Targets[0]
+			if *target.OriginalRegion != original || target.Region.X < 0 || target.Region.Y < 0 || target.Region.X+target.Region.Width != 960 || target.Region.Y+target.Region.Height > 642 || *target.ObservedAnswerRegion != answer || ValidateRecognitionLayoutPlanV2(plan) != nil {
+				t.Fatal("raw observation changed or derived crop left the original page")
+			}
+			rawTarget, _ := json.Marshal(input.Targets[0])
+			var entry map[string]any
+			_ = json.Unmarshal(rawTarget, &entry)
+			entry["initial_read"] = map[string]any{"kind": "question", "recognition": map[string]any{"answer_state": "present", "student_answer": "2 1/2 3 1/2", "answer_bbox": answer}}
+			raw, _ := json.Marshal(map[string]any{"targets": []any{entry}})
+			if ValidateRecognitionImageScopeSourceV1(plan, string(raw)) != nil {
+				t.Fatal("original outlying observation lost its source binding")
+			}
+		})
+	}
+}
+
 func TestRecognitionSingleTargetContextPreservesPrintedEdgesAndSelection(t *testing.T) {
 	canvas := image.NewRGBA(image.Rect(0, 0, 960, 642))
 	printedEdge := image.Pt(900, 570)

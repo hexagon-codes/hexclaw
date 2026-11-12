@@ -13,11 +13,12 @@ const RecognitionImageScopeVersionV1 = "image_scope_v1"
 const RecognitionImageSourceReviewPolicyV1 = "clear_language_solve_v1"
 const RecognitionImageSourceUprightReviewPolicyV1 = "upright_context_v1"
 const RecognitionImageSourceUprightReviewPolicyV2 = "upright_context_v2"
+const RecognitionImageSourceUprightReviewPolicyV3 = "upright_answer_context_v3"
 const RecognitionImageSourceComparisonPolicyV1 = "chinese_blank_layout_v1"
 
 // RecognitionImageSourceUprightReviewEnabled 让新几何策略沿用原直立视图与来源证明。
 func RecognitionImageSourceUprightReviewEnabled(policy string) bool {
-	return policy == RecognitionImageSourceUprightReviewPolicyV1 || policy == RecognitionImageSourceUprightReviewPolicyV2
+	return policy == RecognitionImageSourceUprightReviewPolicyV1 || policy == RecognitionImageSourceUprightReviewPolicyV2 || policy == RecognitionImageSourceUprightReviewPolicyV3
 }
 
 // 范围输入随任务冻结；缺少版本的历史任务继续使用原有整页合同。
@@ -155,6 +156,12 @@ func ValidateRecognitionImageScopeSourceV1(plan RecognitionLayoutPlanV2, raw str
 		var entry RecognitionLayoutManifestTargetV2
 		if json.Unmarshal(entries[target.ManifestOrder-1], &entry) != nil || entry.ManifestOrder != target.ManifestOrder || entry.Region != *target.OriginalRegion || !slices.Equal(entry.SourceNumberPath, target.SourceNumberPath) || entry.DisplayLabel != target.DisplayLabel || !slices.Equal(entry.SourceSectionPath, target.SourceSectionPath) || entry.SourceSectionLabel != target.SourceSectionLabel {
 			return fmt.Errorf("image scope observation source drifted")
+		}
+		if target.ObservedAnswerRegion != nil {
+			observed := RecognitionInitialReadAnswerRegionV1(entries[target.ManifestOrder-1])
+			if observed == nil || *observed != *target.ObservedAnswerRegion {
+				return fmt.Errorf("image scope answer observation source drifted")
+			}
 		}
 	}
 	return nil

@@ -6,6 +6,30 @@ import (
 	"testing"
 )
 
+func TestConfiguredRecognizingPolicyV3PreservesFrozenV2(t *testing.T) {
+	current := ConfiguredRecognizingRequestPolicy()
+	if current.PolicyVersion != "k12-recognizing-v3" {
+		t.Fatalf("new recognition policy=%q, want structured-output policy", current.PolicyVersion)
+	}
+	const frozen = `{"policy_version":"k12-recognizing-v2","stage":"recognizing","thinking":"off","reasoning_effort":"none"}`
+	var legacy ModelRequestPolicySnapshot
+	if err := json.Unmarshal([]byte(frozen), &legacy); err != nil {
+		t.Fatal(err)
+	}
+	route := GradingModelSnapshot{Provider: "configured", Model: "gpt-6-luna", RecognizingRequestPolicy: legacy}
+	if !legacy.IsApprovedRecognizing() || ValidateGradingRecognizingRequestPolicy(route) != nil ||
+		ValidateModelInvocationRequestPolicy(GradingStageRecognizing, route, legacy) != nil {
+		t.Fatal("frozen configured v2 recognition is no longer supported")
+	}
+	if NormalizeGradingModelSnapshot(route).RecognizingRequestPolicy != legacy {
+		t.Fatal("loading a frozen route silently upgraded its request policy")
+	}
+	raw, err := json.Marshal(legacy)
+	if err != nil || string(raw) != frozen {
+		t.Fatal("frozen v2 policy bytes changed")
+	}
+}
+
 func TestApprovedRecognizingRequestPolicyIsStableAndScoped(t *testing.T) {
 	policy := ApprovedRecognizingRequestPolicy()
 	if !policy.IsApprovedRecognizing() || policy.Digest() == "" {

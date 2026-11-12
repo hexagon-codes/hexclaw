@@ -60,6 +60,8 @@ type RecognitionLayoutManifestTargetV2 struct {
 	SourceSectionPath  []string          `json:"source_section_path,omitempty"`
 	SourceSectionLabel string            `json:"source_section_label,omitempty"`
 	Region             SourcePixelRegion `json:"region"`
+	// 首读作答区域由原始观察投影，模型清单协议不新增字段。
+	ObservedAnswerRegion *SourcePixelRegion `json:"-"`
 }
 
 type RecognitionLayoutPlanInputV2 struct {
@@ -86,9 +88,11 @@ type RecognitionLayoutTargetV2 struct {
 	Region             SourcePixelRegion `json:"region"`
 	CropDigest         string            `json:"crop_digest"`
 	// 原始目标与独立核验上下文分别冻结，周边像素不改变题目归属。
-	OriginalRegion     *SourcePixelRegion `json:"original_region,omitempty"`
-	AdjudicationRegion *SourcePixelRegion `json:"adjudication_region,omitempty"`
-	AdjudicationDigest string             `json:"adjudication_digest,omitempty"`
+	OriginalRegion *SourcePixelRegion `json:"original_region,omitempty"`
+	// 首读已声明的本题作答区域只用于派生视野，不替代独立识别与判定。
+	ObservedAnswerRegion *SourcePixelRegion `json:"observed_answer_region,omitempty"`
+	AdjudicationRegion   *SourcePixelRegion `json:"adjudication_region,omitempty"`
+	AdjudicationDigest   string             `json:"adjudication_digest,omitempty"`
 }
 
 type RecognitionLayoutBatchV2 struct {
@@ -154,17 +158,40 @@ func BuildRecognitionLayoutPlanV2(input RecognitionLayoutPlanInputV2) (Recogniti
 	}
 
 	targets := append([]RecognitionLayoutManifestTargetV2(nil), input.Targets...)
+	originalByRef := make(map[string]SourcePixelRegion, len(targets))
+	for index, target := range targets {
+		originalByRef[target.ManifestRef] = target.Region
+		if input.InitialReadMode == RecognitionLayoutManifestWithContentV1 && input.ScopeInput != nil && input.ScopeInput.SourceReviewPolicy == RecognitionImageSourceUprightReviewPolicyV3 {
+			region := &targets[index].Region
+			if region.X >= 0 && region.Y >= 0 && region.X < pageBounds.Dx() && region.Y < pageBounds.Dy() {
+				// 模型框可能略过页边；实际裁片只取可见交集，原始观察仍独立冻结。
+				region.Width = min(region.Width, pageBounds.Dx()-region.X)
+				region.Height = min(region.Height, pageBounds.Dy()-region.Y)
+			}
+		}
+	}
 	if targetErr := validateRecognitionLayoutManifestTargetsV2(targets, pageBounds); targetErr != nil {
 		return RecognitionLayoutPlanV2{}, targetErr
 	}
-	originalByRef := make(map[string]SourcePixelRegion, len(targets))
-	for _, target := range targets {
-		originalByRef[target.ManifestRef] = target.Region
+	observedByRef := make(map[string]SourcePixelRegion)
+	geometryTargets := append([]RecognitionLayoutManifestTargetV2(nil), targets...)
+	if input.InitialReadMode == RecognitionLayoutManifestWithContentV1 && input.ScopeInput != nil && input.ScopeInput.SourceReviewPolicy == RecognitionImageSourceUprightReviewPolicyV3 {
+		for index, target := range targets {
+			box := target.ObservedAnswerRegion
+			if box == nil || validateRecognitionLayoutRegionV2(*box, pageBounds) != nil {
+				continue
+			}
+			// 本题已观察到的作答属于同一来源，先保留其像素，再沿既有邻题规则派生上下文。
+			observedByRef[target.ManifestRef] = *box
+			r := target.Region
+			combined := image.Rect(r.X, r.Y, r.X+r.Width, r.Y+r.Height).Union(image.Rect(box.X, box.Y, box.X+box.Width, box.Y+box.Height))
+			geometryTargets[index].Region = SourcePixelRegion{X: combined.Min.X, Y: combined.Min.Y, Width: combined.Dx(), Height: combined.Dy()}
+		}
 	}
 	for index := range targets {
 		region := targets[index].Region
 		if input.RecognitionFormat == RecognitionLayoutCompactV1 || input.RecognitionFormat == RecognitionLayoutCompactV2 || input.RecognitionFormat == RecognitionLayoutCompactV3 || input.RecognitionFormat == RecognitionLayoutCompactV4 {
-			targets[index].Region = expandRecognitionLayoutRegionV2(input.Targets, index, pageBounds)
+			targets[index].Region = expandRecognitionLayoutRegionV2(geometryTargets, index, pageBounds)
 			continue
 		}
 		// 紧框可能切掉首位数字；在冻结裁图前补充页内左侧上下文，最多半个题框高度。
@@ -265,7 +292,7 @@ func BuildRecognitionLayoutPlanV2(input RecognitionLayoutPlanInputV2) (Recogniti
 	}
 	for index, target := range targets {
 		if input.InitialReadMode == RecognitionLayoutManifestWithContentV1 && input.ScopeInput != nil &&
-			input.ScopeInput.SourceReviewPolicy == RecognitionImageSourceUprightReviewPolicyV2 &&
+			(input.ScopeInput.SourceReviewPolicy == RecognitionImageSourceUprightReviewPolicyV2 || input.ScopeInput.SourceReviewPolicy == RecognitionImageSourceUprightReviewPolicyV3) &&
 			len(input.Targets) == 1 && input.Scope != nil && input.Scope.Source == "inferred" &&
 			len(input.Scope.SelectedOrders) == 1 && input.Scope.SelectedOrders[0] == 1 && len(input.Scope.Excluded) == 0 {
 			// 单目标整页没有邻题，复核先保留已有宽视野，避免模型紧框切掉换行或页边公式。
@@ -298,6 +325,9 @@ func BuildRecognitionLayoutPlanV2(input RecognitionLayoutPlanInputV2) (Recogniti
 		if input.InitialReadMode == RecognitionLayoutManifestWithContentV1 {
 			original := originalByRef[target.ManifestRef]
 			plan.Targets[len(plan.Targets)-1].OriginalRegion = &original
+		}
+		if observed, ok := observedByRef[target.ManifestRef]; ok {
+			plan.Targets[len(plan.Targets)-1].ObservedAnswerRegion = &observed
 		}
 		if input.EnableSourceAdjudication {
 			original := originalByRef[target.ManifestRef]

@@ -63,7 +63,12 @@ func completeK12VisionRequest(
 			},
 		}},
 	}
-	if k12.RecognitionLayoutInitialReadJSONOutputFromContext(ctx) {
+	jsonOutput := k12.RecognitionLayoutInitialReadJSONOutputFromContext(ctx)
+	if policy, frozen := k12.GradingModelRequestPolicyFromContext(ctx); frozen &&
+		policy == k12.ConfiguredRecognizingRequestPolicy() && k12.RecognitionLayoutPlanV2Enabled(ctx) {
+		jsonOutput = true
+	}
+	if jsonOutput {
 		request.ResponseFormat = &llm.ResponseFormat{Type: "json_object"}
 	}
 	started := time.Now()

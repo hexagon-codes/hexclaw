@@ -54,6 +54,7 @@ func parseRecognitionInitialReadEnvelopeV1(raw string) ([]recognitionInitialRead
 			return fail("manifest identity is invalid or duplicated")
 		}
 		seen[manifest.ManifestRef] = true
+		manifest.ObservedAnswerRegion = k12.RecognitionInitialReadAnswerRegionV1(entry)
 		result = append(result, recognitionInitialReadEntryV1{manifest, append(json.RawMessage(nil), entry...), append(json.RawMessage(nil), read...)})
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].manifest.ManifestOrder < result[j].manifest.ManifestOrder })
@@ -219,7 +220,8 @@ func (a *RecognizerAdapter) recognizeLayoutInitialReadV1(ctx context.Context, so
 					if len(decision.outcomes) == 1 && decision.outcomes[0].question != nil {
 						question := usecase.EvaluateOCRConfirmationRiskForInitialReadMode(*decision.outcomes[0].question, plan.InitialReadMode)
 						arithmeticView, arithmeticEligible := recognitionInitialReadArithmeticViewV1(question, entry)
-						if question.ConfirmationRequired || question.AnswerState != usecase.AnswerStatePresent || !arithmeticEligible || !engine.ArithmeticTranscriptionConsistent(arithmeticView.Question, question.StudentAnswer) {
+						if question.ConfirmationRequired || k12.RecognitionSourceObservationUnresolvedV1(question.OCRSignals) ||
+							question.AnswerState != usecase.AnswerStatePresent || !arithmeticEligible || !engine.ArithmeticTranscriptionConsistent(arithmeticView.Question, question.StudentAnswer) {
 							candidate.Classification = k12.RecognitionLayoutCandidateReviewRequiredV2
 						}
 						if usecase.ImageScopeCanUseInitialLanguageRead(question, plan.ScopeInput, plan.Scope, target.ManifestOrder, plan.InitialReadMode) {

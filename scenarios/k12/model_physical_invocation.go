@@ -645,6 +645,13 @@ func ValidateRecognitionLayoutPlanV2(plan RecognitionLayoutPlanV2) error {
 	}
 	targetIDs := make([]string, len(plan.Targets))
 	for index, target := range plan.Targets {
+		if box := target.ObservedAnswerRegion; box != nil {
+			r := target.Region
+			if plan.InitialReadMode != RecognitionLayoutManifestWithContentV1 || plan.ScopeInput == nil || plan.ScopeInput.SourceReviewPolicy != RecognitionImageSourceUprightReviewPolicyV3 ||
+				box.X < r.X || box.Y < r.Y || box.Width <= 0 || box.Height <= 0 || box.X-r.X > r.Width || box.Y-r.Y > r.Height || box.Width > r.Width-(box.X-r.X) || box.Height > r.Height-(box.Y-r.Y) {
+				return fmt.Errorf("%w: observed answer region differs from review context", ErrRecognitionLayoutPlanInvalid)
+			}
+		}
 		if plan.SourceAdjudication {
 			if target.OriginalRegion == nil || target.AdjudicationRegion == nil || !validRecognitionLayoutSHA256(target.AdjudicationDigest) {
 				return fmt.Errorf("%w: adjudication target lacks frozen regions", ErrRecognitionLayoutPlanInvalid)
