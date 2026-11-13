@@ -11,6 +11,7 @@ import (
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/internal/mediaflow"
 	"github.com/hexagon-codes/hexclaw/messagecontent"
+	"github.com/hexagon-codes/hexclaw/scenarios/k12/assetstore"
 	"github.com/hexagon-codes/hexclaw/skill"
 	"github.com/hexagon-codes/hexclaw/storage"
 )
@@ -31,10 +32,25 @@ func projectMessageImages(messages []*storage.MessageRecord) {
 		}
 		changed := false
 		for index, attachment := range attachments {
-			var kind, data string
+			var kind, data, sourceURL string
 			_ = json.Unmarshal(attachment["type"], &kind)
 			_ = json.Unmarshal(attachment["data"], &data)
-			if kind != "image" || data == "" {
+			if kind != "image" {
+				continue
+			}
+			_ = json.Unmarshal(attachment["url"], &sourceURL)
+			reference := data
+			if reference == "" {
+				reference = sourceURL
+			}
+			if agent, file, err := assetstore.Parse(reference); err == nil {
+				// 持久资产由原资产接口读取，不能作为内联图片解码。
+				attachment["data"] = json.RawMessage(`""`)
+				attachment["url"], _ = json.Marshal("/api/k12/assets/" + url.PathEscape(file) + "?agent=" + url.QueryEscape(agent))
+				changed = true
+				continue
+			}
+			if data == "" {
 				continue
 			}
 			attachment["data"] = json.RawMessage(`""`)
