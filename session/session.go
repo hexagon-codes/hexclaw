@@ -528,7 +528,7 @@ func (m *Manager) BuildContext(ctx context.Context, sessionID string) ([]hexagon
 				return nil, err
 			}
 			if found {
-				messages = append(messages, alignProviderOutputHistory(group, historicalAssistantMediaReferences(r))...)
+				messages = append(messages, alignProviderOutputHistory(projectChatToolHistory(group), historicalAssistantMediaReferences(r))...)
 				continue
 			}
 		}

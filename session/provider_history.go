@@ -103,3 +103,54 @@ func restoreProviderOutputHistory(metadata string) ([]llm.Message, bool, error) 
 	}
 	return runtime.CloneOutputMessages(messages), true, nil
 }
+
+// projectChatToolHistory 只为下一轮普通聊天保留真实配对的工具组，原持久观察不改写。
+// 原生续传包含协议私有状态，由对应 Provider 解释，不能按普通 Chat 消息裁剪。
+func projectChatToolHistory(messages []llm.Message) []llm.Message {
+	for _, message := range messages {
+		if message.ProviderContinuation != nil {
+			return messages
+		}
+	}
+	projected := make([]llm.Message, 0, len(messages))
+	for i := 0; i < len(messages); {
+		message := messages[i]
+		if message.Role != llm.RoleAssistant || len(message.ToolCalls) == 0 {
+			projected = append(projected, message)
+			i++
+			continue
+		}
+		end := i + 1
+		results := make(map[string]bool)
+		for end < len(messages) && messages[end].Role != llm.RoleAssistant {
+			if messages[end].Role == llm.RoleTool {
+				results[messages[end].ToolCallID] = true
+			}
+			end++
+		}
+		paired := make(map[string]bool)
+		calls := make([]llm.ToolCallRef, 0, len(message.ToolCalls))
+		for _, call := range message.ToolCalls {
+			if results[call.ID] {
+				calls = append(calls, call)
+				paired[call.ID] = true
+			}
+		}
+		message.ToolCalls = calls
+		projected = append(projected, message)
+		keepMedia := false
+		for j := i + 1; j < end; j++ {
+			next := messages[j]
+			if next.Role == llm.RoleTool {
+				keepMedia = paired[next.ToolCallID]
+				if keepMedia {
+					projected = append(projected, next)
+				}
+			} else if next.Name != runtime.ToolMediaMessageName || keepMedia {
+				projected = append(projected, next)
+			}
+		}
+		i = end
+	}
+	return projected
+}
