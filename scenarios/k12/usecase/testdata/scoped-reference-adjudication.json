@@ -1,0 +1,83 @@
+{
+  "question": {
+    "problem_id": "problem-6bbe98531c16f7c94da3",
+    "problem_kind": "standalone",
+    "source_number_path": [
+      "1"
+    ],
+    "display_label": "1.",
+    "source_section_label": "基础",
+    "page_asset_id": "asset://k12-core-1113-j10-cloud-sol/a24d2c71f83b028160b6e74047ba3c194e32ead007c6e4c6602987a03e4b4dad.jpg",
+    "source_width": 960,
+    "source_height": 642,
+    "source_region": {
+      "x": 25,
+      "y": 125,
+      "width": 935,
+      "height": 517
+    },
+    "attempt_id": "attempt-2f80a806dd961d3d0190",
+    "raw_transcription": "小明\\(\\frac{2}{3}\\)小时走了2千米，照这样的速度，他每小时行走多少千米？\n图示：1小时走了？km；\\(\\frac{1}{3}\\)小时走了？km；\\(\\frac{2}{3}\\)小时走了2 km。\n从上图看出：已知（ ）份是2千米，可以先求出这样的1份是多少，也就是\\(2÷2=2×\\frac{□}{□}\\)；再求这样的（ ）份是多少，也就是\\(2×\\frac{□}{□}×3\\)。由此推算出：\n\\(2÷\\frac{2}{3}=2÷2×3=2×\\frac{1}{2}×3=2×（\\frac{1}{2}×3）=2×\\frac{3}{2}=3\\)（km）。推算过程中“\\(2×\\frac{1}{2}×3=2×（\\frac{1}{2}×3）\\)”的依据是（ ）。",
+    "image_source_context": {
+      "source_comparison_policy": "chinese_blank_layout_v1",
+      "version": "image_scope_v1",
+      "scope_digest": "sha256:3d0048dd56ddd3e666d0d39ec8e92e53592e3f644f0f0fb09ca3996db5f89132",
+      "target_ids": [
+        "layout_target_v2_39e511d15e0e6abbd4bf3695304f36b655219e368ea23a112fe4433f8ee30c83"
+      ],
+      "recoveries": [
+        {
+          "gap": {
+            "order": 1,
+            "kind": "handwriting",
+            "before": "的依据是（",
+            "after": "）。"
+          },
+          "state": "no_verified_bound_textbook"
+        }
+      ]
+    },
+    "canonical_markdown": "小明2/3小时走了2千米，照这样的速度，他每小时行走多少千米？\n图示：1小时走了？km；1/3小时走了？km；2/3小时走了2 km。\n从上图看出：已知（ ）份是2千米，可以先求出这样的1份是多少，也就是2÷2=2×□/□；再求这样的（ ）份是多少，也就是2×□/□×3。由此推算出：\n2÷(2/3)=2÷2×3=2×1/2×3=2×（1/2×3）=2×3/2=3（km）。推算过程中“2×1/2×3=2×（1/2×3）”的依据是（ ）。",
+    "answer_raw_transcription": "\\(\\frac{2}{3}\\)\n\\(\\frac{1}{2}\\)\n3\n\\(\\frac{1}{2}\\)",
+    "answer_canonical_markdown": "2/3\n1/2\n3\n1/2",
+    "canonical_version": 1,
+    "confirmed_version": 1,
+    "input_digest": "76a0824069d491350ee6890805fac777c38975e5e820ea0d6352ec5361fa05cf",
+    "recognition_confidence": 0.95,
+    "ocr_signals": [
+      "末尾“的依据是”后的填空区域被黄色块遮挡，无法核实被遮挡的印刷内容及是否存在其他有效手写答案；可见手写填空按源顺序转录。"
+    ],
+    "evidence_transcriptions": [
+      "小明\\(\\frac{2}{3}\\)小时走了2千米，照这样的速度，他每小时行走多少千米？\n图示：1小时走了？km；\\(\\frac{1}{3}\\)小时走了？km；\\(\\frac{2}{3}\\)小时走了2km。\n从上图看出：已知（ ）份是2千米，可以先求出这样的1份是多少，也就是\\(2÷2=2×\\frac{\\square}{\\square}\\)；再求这样的（ ）份是多少，也就是\\(2×\\frac{\\square}{\\square}×3\\)。由此推算出：\n\\(2÷\\frac{2}{3}=2÷2×3=2×\\frac{1}{2}×3=2×（\\frac{1}{2}×3）=2×\\frac{3}{2}=3\\)（km）。推算过程中“\\(2×\\frac{1}{2}×3=2×（\\frac{1}{2}×3）\\)”的依据是（ ）。",
+      "小明\\(\\frac{2}{3}\\)小时走了2千米，照这样的速度，他每小时行走多少千米？\n图示：1小时走了？km；\\(\\frac{1}{3}\\)小时走了？km；\\(\\frac{2}{3}\\)小时走了2 km。\n从上图看出：已知（ ）份是2千米，可以先求出这样的1份是多少，也就是\\(2÷2=2×\\frac{□}{□}\\)；再求这样的（ ）份是多少，也就是\\(2×\\frac{□}{□}×3\\)。由此推算出：\n\\(2÷\\frac{2}{3}=2÷2×3=2×\\frac{1}{2}×3=2×（\\frac{1}{2}×3）=2×\\frac{3}{2}=3\\)（km）。推算过程中“\\(2×\\frac{1}{2}×3=2×（\\frac{1}{2}×3）\\)”的依据是（ ）。"
+    ],
+    "answer_evidence_transcriptions": [
+      "\\(\\frac{2}{3}\\)\n\\(\\frac{1}{2}\\)\n3\n\\(\\frac{1}{2}\\)",
+      "\\(\\frac{2}{3}\\)\n\\(\\frac{1}{2}\\)\n3\n\\(\\frac{1}{2}\\)"
+    ],
+    "confirmation_required": true,
+    "confirmation_reasons": [
+      "low_confidence",
+      "unclear_handwriting"
+    ],
+    "Question": "小明2/3小时走了2千米，照这样的速度，他每小时行走多少千米？\n图示：1小时走了？km；1/3小时走了？km；2/3小时走了2 km。\n从上图看出：已知（ ）份是2千米，可以先求出这样的1份是多少，也就是2÷2=2×□/□；再求这样的（ ）份是多少，也就是2×□/□×3。由此推算出：\n2÷(2/3)=2÷2×3=2×1/2×3=2×（1/2×3）=2×3/2=3（km）。推算过程中“2×1/2×3=2×（1/2×3）”的依据是（ ）。",
+    "KnowledgePoints": null,
+    "AnswerState": "present",
+    "StudentAnswer": "2/3\n1/2\n3\n1/2",
+    "Subject": "数学",
+    "BBox": null
+  },
+  "initial_read_mode": "manifest_with_content_v1",
+  "physical": {
+    "physical_invocation_id": "modelphysical-4c834a93cbfe509bcb0bb311258625ef",
+    "parent_invocation_id": "modelinv-PVx-jbkk",
+    "agent_name": "k12-core-1113-j10-cloud-sol",
+    "job_id": "jXV-at-s6QnXsiPPcKhc4",
+    "stage": "recognizing",
+    "physical_unit": "layout_adjudicate_0001",
+    "request_digest": "sha256:5cb84bd5d6b25f80ac603205f66bc4f06e986e3dea745d56ed474985c20fcba4",
+    "status": "succeeded",
+    "result_digest": "sha256:e3d113c4364d05f75ef0e2f0ef7292b13c923cc6fd8b931358fde18312e71354",
+    "result_content": "{\"verification\":{\"question_complete_and_legible\":true,\"target_ownership_confirmed\":true,\"active_answer_complete\":false},\"final_answer\":null,\"items\":[{\"target_id\":\"t1\",\"kind\":\"question\",\"recognition\":{\"question\":\"小明\\\\(\\\\frac{2}{3}\\\\)小时走了2千米，照这样的速度，他每小时行走多少千米？\\n1小时走了？km\\n\\\\(\\\\frac{1}{3}\\\\)小时走了？km\\n\\\\(\\\\frac{2}{3}\\\\)小时走了2 km\\n从上图看出：已知（ ）份是2千米，可以先求出这样的1份是多少，也就是\\\\(2÷2=2×\\\\frac{\\\\square}{\\\\square}\\\\)；再求这样的（ ）份是多少，也就是\\\\(2×\\\\frac{\\\\square}{\\\\square}×3\\\\)。由此推算出：\\n\\\\(2÷\\\\frac{2}{3}=2÷2×3=2×\\\\frac{1}{2}×3=2×（\\\\frac{1}{2}×3）=2×\\\\frac{3}{2}=3\\\\)（km）。推算过程中“\\\\(2×\\\\frac{1}{2}×3=2×（\\\\frac{1}{2}×3）\\\\)”的依据是（ ）。\",\"subject\":\"数学\",\"answer_state\":\"present\",\"student_answer\":\"\\\\(\\\\frac{2}{3}\\\\)\\n\\\\(\\\\frac{1}{2}\\\\)\\n3\\n\\\\(\\\\frac{1}{2}\\\\)\",\"recognition_confidence\":0.97,\"ocr_signals\":[\"末尾“依据是”后的填空区域被遮挡，残留笔画无法可靠辨认，不能确认该处完整作答内容。\"],\"answer_bbox\":null}}]}"
+  }
+}

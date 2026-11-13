@@ -524,7 +524,11 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 		item.Warning = unclearHandwritingReferenceWarning
 	}
 	if item.Status == PhotoAnswerUnclear && !finalAnswerOnly {
-		if !o.independentReferenceAnswerEligible(job, req, q) {
+		eligible, referenceErr := o.independentReferenceAnswerEligible(ctx, job, req, q)
+		if referenceErr != nil {
+			return item, referenceErr
+		}
+		if !eligible {
 			return commitGradingAssessmentItem(ctx, deps, job, q, item, "", "", "",
 				k12storage.GradingAssessmentEffects{})
 		}

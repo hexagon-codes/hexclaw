@@ -13,7 +13,7 @@ var (
 	sourceLatexTextV1                  = regexp.MustCompile(`\\text\s*\{([^{}]*)\}`)
 	sourceEvidenceNewlineV1            = regexp.MustCompile(`\\n(?:\b|([0-9]))`)
 	sourceNumericFractionV1            = regexp.MustCompile(`\b([0-9]+(?:\.[0-9]+)?)\s*/\s*([0-9]+(?:\.[0-9]+)?)\b`)
-	sourceNumericRatioV1               = regexp.MustCompile(`([0-9])[:：∶]([0-9])`)
+	sourceMathRatioV1                  = regexp.MustCompile(`([0-9)π]|\b[A-Za-z]\b)[:：]([0-9A-Za-z(.+\\√π-])`)
 	sourceNumberTokensV1               = regexp.MustCompile(`[0-9]+(?:\.[0-9]+)?`)
 	sourceGroupedCoefficientFractionV1 = regexp.MustCompile(`(^|[=+\-−])\s*\(([0-9]+(?:\.[0-9]+)?)/([0-9]+(?:\.[0-9]+)?)\)(\s*[xX])`)
 	sourceRepeatedMathEscapeV1         = regexp.MustCompile(`\\{2,}(frac|text|times|div|cdot|left|right|qquad|quad|\(|\)|\[|\]| )`)
@@ -71,9 +71,11 @@ func RecognitionSourceComparisonV1(value string) string {
 	value = strings.ReplaceAll(value, `\ `, " ")
 	value = strings.NewReplacer("²", "^2", "³", "^3", "^{2}", "^2", "^{3}", "^3").Replace(value)
 	value = strings.Join(strings.Fields(RecognitionSourcePlainTextV1(value)), "")
-	value = sourceNumericRatioV1.ReplaceAllString(value, "$1∶$2")
-	value = sourceNumericRatioV1.ReplaceAllString(value, "$1∶$2")
-	return strings.NewReplacer(`\,`, "", "（", "(", "）", ")", "＝", "=", "＋", "+", "。", "", "；", "", "，", "", "：", "", "、", "", ";", "", ":", "").Replace(value)
+	value = strings.NewReplacer("（", "(", "）", ")", "＝", "=", "＋", "+", "−", "-", "－", "-").Replace(value)
+	// 已规范的比号不再占用相邻比项，第二遍补齐连续比中的交错边界。
+	value = sourceMathRatioV1.ReplaceAllString(value, "$1∶$2")
+	value = sourceMathRatioV1.ReplaceAllString(value, "$1∶$2")
+	return strings.NewReplacer(`\,`, "", "。", "", "；", "", "，", "", "：", "", "、", "", ";", "", ":", "").Replace(value)
 }
 
 // RecognitionSourceQuestionsEqualV1 只接受完整来源的排版差异，数字 token 不能因去空格而合并。

@@ -395,7 +395,14 @@ func scopedMaterialReadingsEquivalent(q RecognizedQuestion, raw string, values [
 		value = plain(value)
 		// 同一冻结图的完整数量行可换行或用分号分隔，行内数字、单位与关系逐字匹配。
 		for _, diagram := range diagramRows {
-			value = diagram.pattern.ReplaceAllStringFunc(value, func(string) string { return diagram.text })
+			value = diagram.pattern.ReplaceAllStringFunc(value, func(observed string) string {
+				withoutLabel := strings.TrimPrefix(strings.TrimPrefix(observed, "图："), "图:")
+				// 行间排版也不能合并数字；先比较原片段，再生成统一的图示视图。
+				if !k12.RecognitionSourceQuestionsEqualV1(withoutLabel, diagram.text) {
+					return observed
+				}
+				return diagram.text
+			})
 		}
 		// 图示标题只修饰已冻结的完整材料，不承载另一组数量或条件。
 		for _, material := range materials {

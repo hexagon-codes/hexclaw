@@ -1,9 +1,11 @@
 package usecase
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -11,6 +13,84 @@ import (
 
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 )
+
+func TestIndependentReferenceLatestAnswerOnlyObservation(t *testing.T) {
+	raw, err := os.ReadFile("testdata/scoped-reference-adjudication.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixture struct {
+		Question        RecognizedQuestion `json:"question"`
+		InitialReadMode string             `json:"initial_read_mode"`
+		Physical        struct {
+			Content string `json:"result_content"`
+		} `json:"physical"`
+	}
+	if err = json.Unmarshal(raw, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	var response struct {
+		Items []struct {
+			Recognition struct {
+				Question   string   `json:"question"`
+				OCRSignals []string `json:"ocr_signals"`
+			} `json:"recognition"`
+		} `json:"items"`
+	}
+	if err = json.Unmarshal([]byte(fixture.Physical.Content), &response); err != nil || len(response.Items) != 1 {
+		t.Fatalf("invalid observed response: %v", err)
+	}
+	request := PhotoGradeRequest{InitialReadMode: fixture.InitialReadMode}
+	if independentReferenceAnswerEligible(request, fixture.Question) {
+		t.Fatal("older mixed printed risk unexpectedly passed")
+	}
+	current := cloneRecognizedQuestions([]RecognizedQuestion{fixture.Question})[0]
+	current.OCRSignals = response.Items[0].Recognition.OCRSignals
+	current.EvidenceTranscriptions = append(current.EvidenceTranscriptions, response.Items[0].Recognition.Question)
+	if !independentReferenceAnswerEligible(request, current) {
+		t.Fatalf("latest answer-only observation blocked reference: printed_conflict=%t signals=%q", questionEvidenceTranscriptionsConflictForInitialReadMode(current, request.InitialReadMode), current.OCRSignals)
+	}
+	for _, scenario := range []string{"latest clear question", "question denied", "ownership denied", "changed distance", "printed risk", "missing handwriting scope"} {
+		t.Run(scenario, func(t *testing.T) {
+			q := cloneRecognizedQuestions([]RecognizedQuestion{fixture.Question})[0]
+			before, _ := json.Marshal(q)
+			var envelope map[string]any
+			if decodeErr := json.Unmarshal([]byte(fixture.Physical.Content), &envelope); decodeErr != nil {
+				t.Fatal(decodeErr)
+			}
+			verification := envelope["verification"].(map[string]any)
+			observed := envelope["items"].([]any)[0].(map[string]any)["recognition"].(map[string]any)
+			switch scenario {
+			case "question denied":
+				verification["question_complete_and_legible"] = false
+			case "ownership denied":
+				verification["target_ownership_confirmed"] = false
+			case "changed distance":
+				prior := observed["question"].(string)
+				observed["question"] = strings.Replace(prior, "走了2千米", "走了3千米", 1)
+				if observed["question"] == prior {
+					t.Fatal("distance fixture did not change")
+				}
+			case "printed risk":
+				observed["ocr_signals"] = []string{"印刷题干条件被遮挡，不能核实距离。"}
+			case "missing handwriting scope":
+				q.ImageSourceContext.Recoveries = nil
+				before, _ = json.Marshal(q)
+			}
+			payload, encodeErr := json.Marshal(envelope)
+			if encodeErr != nil {
+				t.Fatal(encodeErr)
+			}
+			if got := independentReferenceFromAdjudication(request, q, string(payload)); got != (scenario == "latest clear question") {
+				t.Fatalf("reference eligibility=%t", got)
+			}
+			after, _ := json.Marshal(q)
+			if !bytes.Equal(before, after) {
+				t.Fatal("frozen recognition observation changed")
+			}
+		})
+	}
+}
 
 func TestParentGuidePreservesUnclearAnswerObservation(t *testing.T) {
 	question := RecognizedQuestion{
@@ -81,6 +161,33 @@ func TestOwnDiagramLayoutKeepsIndependentReferenceEligible(t *testing.T) {
 			after, _ := json.Marshal(q)
 			if string(before) != string(after) {
 				t.Fatal("reference eligibility changed the frozen source observation")
+			}
+		})
+	}
+}
+
+func TestOwnDiagramRowBoundaryPreservesDifferentNumbers(t *testing.T) {
+	for _, tc := range []struct{ name, initial, review string }{
+		{"integer boundary", "图示：\n1\n2米\n3米\n求总长。", "图示：\n12米\n3米\n求总长。"},
+		{"decimal boundary", "图示：\n1.\n2米\n3米\n求总长。", "图示：\n1.2米\n3米\n求总长。"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q := RecognizedQuestion{Subject: "数学", Question: tc.review, RawTranscription: tc.review,
+				CanonicalMarkdown: tc.review, AnswerState: AnswerStateBlank, RecognitionConfidence: float64Ptr(.99),
+				EvidenceTranscriptions: []string{tc.initial, tc.review},
+				ImageSourceContext: &k12.RecognitionImageSourceContextV1{Version: k12.RecognitionImageScopeVersionV1,
+					Action: "solve", ScopeDigest: "frozen-page", TargetIDs: []string{"target-1"}}}
+			before, _ := json.Marshal(q)
+			normalized := EvaluateOCRConfirmationRiskForInitialReadMode(q, k12.RecognitionLayoutManifestWithContentV1)
+			if !normalized.ConfirmationRequired || !slices.Contains(normalized.ConfirmationReasons, OCRRiskEvidenceConflict) {
+				t.Fatal("diagram projection erased a numeric token boundary")
+			}
+			if independentReferenceAnswerEligible(PhotoGradeRequest{InitialReadMode: k12.RecognitionLayoutManifestWithContentV1}, q) {
+				t.Fatal("different printed numbers became eligible for an independent reference")
+			}
+			after, _ := json.Marshal(q)
+			if !bytes.Equal(before, after) {
+				t.Fatal("source comparison changed the frozen observation")
 			}
 		})
 	}

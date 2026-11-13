@@ -1,8 +1,13 @@
 package usecase
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
+	"slices"
 	"strings"
 
+	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 )
 
@@ -99,7 +104,7 @@ func removeHandwritingGapMarkersForReference(q *RecognizedQuestion) {
 func handwritingOnlySourceSignal(signal string) bool {
 	signal = strings.ToLower(strings.TrimSpace(signal))
 	answerContent := false
-	for _, marker := range []string{"手写", "笔迹", "填空中", "填空内", "作答区", "答案栏", "答案框", "填写的", "handwriting", "handwritten", "filled answer", "answer box"} {
+	for _, marker := range []string{"手写", "笔迹", "填空中", "填空内", "作答", "答案栏", "答案框", "填写的", "handwriting", "handwritten", "filled answer", "answer box"} {
 		answerContent = answerContent || strings.Contains(signal, marker)
 	}
 	if !answerContent {
@@ -114,7 +119,7 @@ func handwritingOnlySourceSignal(signal string) bool {
 }
 
 // 类型化恢复未复制观察明细时，只读取同任务同输入的冻结审计用于风险分离。
-func (o *GradingOrchestrator) independentReferenceAnswerEligible(job GradingJobView, req PhotoGradeRequest, q RecognizedQuestion) bool {
+func (o *GradingOrchestrator) independentReferenceAnswerEligible(ctx context.Context, job GradingJobView, req PhotoGradeRequest, q RecognizedQuestion) (bool, error) {
 	if len(q.EvidenceTranscriptions) < 2 {
 		for _, prior := range o.frozenRecognitionSourceQuestions(job) {
 			if prior.ProblemID == q.ProblemID && prior.AttemptID == q.AttemptID && prior.InputDigest != "" && prior.InputDigest == q.InputDigest &&
@@ -130,5 +135,96 @@ func (o *GradingOrchestrator) independentReferenceAnswerEligible(job GradingJobV
 			}
 		}
 	}
-	return independentReferenceAnswerEligible(req, q)
+	if independentReferenceAnswerEligible(req, q) {
+		return true, nil
+	}
+	if o.deps.Records == nil || q.Subject != "数学" || q.SourceRegion == nil {
+		return false, nil
+	}
+	receipt, ok := o.readRecognitionReceipt(job.Record.RecordID)
+	if !ok || receipt.AgentName != job.Record.AgentName || len(receipt.Questions) != 1 {
+		return false, nil
+	}
+	prior := receipt.Questions[0]
+	// 布局页标识与绑定后的资产 URI 分属不同投影，像素归属由原计划和目标核对。
+	if prior.ProblemID != q.ProblemID || prior.AttemptID != q.AttemptID ||
+		!slices.Equal(prior.SourceNumberPath, q.SourceNumberPath) || prior.ImageSourceContext == nil || q.ImageSourceContext == nil ||
+		prior.ImageSourceContext.ScopeDigest != q.ImageSourceContext.ScopeDigest || !slices.Equal(prior.ImageSourceContext.TargetIDs, q.ImageSourceContext.TargetIDs) || prior.RawTranscription != q.RawTranscription ||
+		prior.CanonicalMarkdown != q.CanonicalMarkdown || prior.AnswerRawTranscription != q.AnswerRawTranscription || prior.AnswerCanonicalMarkdown != q.AnswerCanonicalMarkdown {
+		return false, nil
+	}
+	runtime, err := o.deps.Records.LoadRecognitionLayoutPlanRuntimeV2(ctx, job.Record.AgentName, receipt.InvocationID)
+	if errors.Is(err, records.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	plan := runtime.AuthorizedPlan
+	if plan == nil || len(plan.Targets) != 1 || runtime.Header.JobID != job.Record.RecordID ||
+		q.ImageSourceContext == nil || len(q.ImageSourceContext.TargetIDs) != 1 || plan.Targets[0].TargetID != q.ImageSourceContext.TargetIDs[0] ||
+		!slices.Equal(plan.Targets[0].SourceNumberPath, q.SourceNumberPath) {
+		return false, nil
+	}
+	physicalCalls, err := o.deps.Records.ListModelPhysicalInvocations(ctx, job.Record.AgentName, job.Record.RecordID)
+	if err != nil {
+		return false, err
+	}
+	var proof *k12.ModelPhysicalInvocation
+	for i := range physicalCalls {
+		physical := &physicalCalls[i]
+		if physical.ParentInvocationID == receipt.InvocationID && strings.HasPrefix(string(physical.PhysicalUnit), "layout_adjudicate_") {
+			if proof != nil {
+				return false, nil
+			}
+			proof = physical
+		}
+	}
+	if proof == nil || proof.Stage != k12.GradingStageRecognizing || proof.Status != k12.ModelInvocationSucceeded ||
+		proof.PlanDigest != plan.AuthorizedPlanDigest || proof.CandidateExactSetDigest != runtime.CandidateExactSetDigest || !validModelInvocationDigest(proof.RequestDigest) {
+		return false, nil
+	}
+	payload, err := o.deps.Records.LoadSucceededModelPhysicalInvocationResultContent(ctx, job.Record.AgentName, proof.PhysicalInvocationID, proof.ResultDigest)
+	if err != nil {
+		return false, err
+	}
+	return independentReferenceFromAdjudication(req, q, payload), nil
+}
+
+// 单题参考解只采用同范围最新裁决的印刷观察，不结算学生作答。
+func independentReferenceFromAdjudication(req PhotoGradeRequest, q RecognizedQuestion, payload string) bool {
+	source := q.ImageSourceContext
+	if q.Subject != "数学" || q.SourceRegion == nil || source == nil || source.Version != k12.RecognitionImageScopeVersionV1 ||
+		source.ScopeDigest == "" || len(source.TargetIDs) != 1 || len(source.Recoveries) == 0 || len(q.EvidenceTranscriptions) < 2 {
+		return false
+	}
+	for _, recovery := range source.Recoveries {
+		if recovery.Gap.Kind != "handwriting" {
+			return false
+		}
+	}
+	observed, err := k12.ParseRecognitionFinalAnswerResponseV1(payload, *q.SourceRegion)
+	if err != nil || !observed.QuestionCompleteAndLegible || !observed.TargetOwnershipConfirmed || observed.ActiveAnswerComplete {
+		return false
+	}
+	var envelope struct {
+		Items []struct {
+			Recognition struct {
+				Subject    string   `json:"subject"`
+				Confidence *float64 `json:"recognition_confidence"`
+				OCRSignals []string `json:"ocr_signals"`
+			} `json:"recognition"`
+		} `json:"items"`
+	}
+	if json.Unmarshal(observed.LegacyEnvelope, &envelope) != nil || len(envelope.Items) != 1 || envelope.Items[0].Recognition.Subject != q.Subject {
+		return false
+	}
+	printed := cloneRecognizedQuestions([]RecognizedQuestion{q})[0]
+	printed.EvidenceTranscriptions = append(printed.EvidenceTranscriptions, observed.QuestionRawTranscription)
+	if questionEvidenceTranscriptionsConflictForInitialReadMode(printed, req.InitialReadMode) {
+		return false
+	}
+	printed.RecognitionConfidence = envelope.Items[0].Recognition.Confidence
+	printed.OCRSignals = envelope.Items[0].Recognition.OCRSignals
+	return independentReferenceAnswerEligible(req, printed)
 }

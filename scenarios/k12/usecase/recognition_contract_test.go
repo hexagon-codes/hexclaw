@@ -1067,6 +1067,25 @@ func TestRecognitionSourceReadingsMatch_IndependentCompleteReview(t *testing.T) 
 	}
 }
 
+func TestRecognitionSourceReadingsMatch_FractionRatioGlyphRisk(t *testing.T) {
+	question := RecognizedQuestion{
+		Subject: "数学", AnswerState: AnswerStatePresent, RecognitionConfidence: float64Ptr(0.99),
+		RawTranscription:             `把\(\frac{3}{4}:\frac{1}{2}\)化成最简单的整数比。`,
+		AnswerRawTranscription:       `\(3:2\)`,
+		EvidenceTranscriptions:       []string{`把\(\frac{3}{4}∶\frac{1}{2}\)化成最简单的整数比。`, `把\(\frac{3}{4}:\frac{1}{2}\)化成最简单的整数比。`},
+		AnswerEvidenceTranscriptions: []string{"3∶2", `\(3:2\)`},
+	}
+	before, _ := json.Marshal(question)
+	observed := NormalizeRecognizedQuestionForInitialReadMode(question, k12.RecognitionLayoutManifestWithContentV1)
+	if observed.ConfirmationRequired {
+		t.Fatalf("equivalent ratio glyphs became source risk: %v", observed.ConfirmationReasons)
+	}
+	after, _ := json.Marshal(question)
+	if string(before) != string(after) {
+		t.Fatal("source observation changed")
+	}
+}
+
 func TestRecognitionSourceReadingsMatch_CompleteRatioWording(t *testing.T) {
 	const source = `把 \(\frac{3}{4}:\frac{1}{2}\) 化成最简单的整数比。`
 	const traditional = `把 \(\frac{3}{4}:\frac{1}{2}\) 化成最簡單的整數比。`
