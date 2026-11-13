@@ -2705,6 +2705,13 @@ func gradingItemInvocationReceipt(
 	invocation k12.GradingItemInvocation,
 	canonicalInputDigest string,
 ) ImageTaskOperationReceipt {
+	resultDigest := invocation.ResultDigest
+	// 失败回执可保存裸摘要；公共副本统一算法标识，原账本身份不变。
+	if len(resultDigest) == sha256.Size*2 {
+		if _, err := hex.DecodeString(resultDigest); err == nil {
+			resultDigest = "sha256:" + resultDigest
+		}
+	}
 	receipt := ImageTaskOperationReceipt{
 		InvocationID:         invocation.InvocationID,
 		Operation:            string(invocation.Operation),
@@ -2712,7 +2719,7 @@ func gradingItemInvocationReceipt(
 		CanonicalInputDigest: canonicalInputDigest,
 		Status:               string(invocation.Status),
 		Attempt:              invocation.OperationAttempt,
-		ResultDigest:         invocation.ResultDigest,
+		ResultDigest:         resultDigest,
 	}
 	if invocation.ExecutionKind == k12.GradingExecutionProvider {
 		receipt.Provider = invocation.RouteSnapshot.Provider

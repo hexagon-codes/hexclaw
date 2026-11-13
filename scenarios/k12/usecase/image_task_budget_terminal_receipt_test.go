@@ -5,10 +5,29 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 )
+
+func TestGradingItemReceiptProjectsResultDigestAlgorithm(t *testing.T) {
+	const rawDigest = "aa650f1d4d0b3385eaf6fdd531ab8a3051d285b00133dd240628b47a3906ce28"
+	for _, tc := range []struct{ name, stored, public string }{
+		{"failed_result", rawDigest, "sha256:" + rawDigest},
+		{"prefixed", "sha256:" + rawDigest, "sha256:" + rawDigest},
+		{"empty", "", ""},
+		{"invalid", strings.Repeat("z", 64), strings.Repeat("z", 64)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			invocation := k12.GradingItemInvocation{ResultDigest: tc.stored}
+			got := gradingItemInvocationReceipt(invocation, "source")
+			if got.ResultDigest != tc.public || invocation.ResultDigest != tc.stored {
+				t.Fatalf("public digest or stored identity changed: public=%q stored=%q", got.ResultDigest, invocation.ResultDigest)
+			}
+		})
+	}
+}
 
 func TestImageTaskBudgetPreflightFailureConvergesToDurableSolveReceipt(t *testing.T) {
 	classifier := &imageTaskClassifierStub{result: ImageTaskClassification{
