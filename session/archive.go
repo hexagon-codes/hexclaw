@@ -59,11 +59,15 @@ func (a *Archiver) Archive(sessionID string, messages []*storage.MessageRecord) 
 		sb.WriteString(fmt.Sprintf("### [%s] %s\n\n", ts, role))
 		sb.WriteString(msg.Content)
 		sb.WriteString("\n\n")
-		// 附件列不参与 MessageRecord 的常规 JSON，下沉归档时显式保留以便追溯原始素材。
+		// 无方法副本避免公共 JSON 方法遮蔽外层附件列，元数据仍沿原过滤规则。
+		type archivedRecord storage.MessageRecord
+		public := archivedRecord(*msg)
+		public.Metadata = storage.PublicMessageMetadata(public.Metadata)
+		public.Meta = storage.PublicMessageMetadata(public.Meta)
 		record, err := json.MarshalIndent(struct {
-			*storage.MessageRecord
+			*archivedRecord
 			Attachments string `json:"attachments"`
-		}{msg, msg.Attachments}, "", "  ")
+		}{&public, msg.Attachments}, "", "  ")
 		if err != nil {
 			return "", fmt.Errorf("encode archived message: %w", err)
 		}
