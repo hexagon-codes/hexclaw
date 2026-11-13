@@ -1552,7 +1552,7 @@ func executeUncachedDurableSolveOperation(
 				Request     GradeRequest `json:"request"`
 			}{q.InputDigest, gradeReq},
 			func(callCtx context.Context) (SolveHomeworkResult, error) {
-				return deps.SolveHomeworkProblem(callCtx, gradeReq)
+				return deps.solveHomeworkProblem(callCtx, gradeReq)
 			})
 	}
 	if err := ctx.Err(); err != nil {
