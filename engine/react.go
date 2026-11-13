@@ -2269,7 +2269,12 @@ func (e *ReActEngine) ProcessStream(ctx context.Context, msg *adapter.Message) (
 				chunk.Error = errors.New(chunk.Metadata["media_finalize_error"])
 			}
 			if chunk.Done && chunk.Error == nil {
-				if err := e.finalizeMediaChunk(ctx, msg, chunk, content.String()); err != nil {
+				finalContent := content.String()
+				if chunk.MessageContent != nil {
+					// 已冻结正文优先于传输预览，附件登记不能把旧预览重新写回终稿。
+					finalContent = chunk.MessageContent.Markdown
+				}
+				if err := e.finalizeMediaChunk(ctx, msg, chunk, finalContent); err != nil {
 					chunk.Error = fmt.Errorf("finalize producer stream: %w", err)
 				}
 			}
@@ -3211,7 +3216,7 @@ func (e *ReActEngine) processStreamRuntime(
 		}
 		// U9：读出本轮 RAG/记忆命中，结构化随 done chunk 回传前端（命中标签+详情）。
 		kbHits, memHits := retrievalHitsSnapshot(ctx)
-		ch <- &adapter.ReplyChunk{
+		terminal := &adapter.ReplyChunk{
 			Done:          true,
 			Metadata:      metadata,
 			Usage:         usage,
@@ -3220,6 +3225,10 @@ func (e *ReActEngine) processStreamRuntime(
 			KnowledgeHits: kbHits,
 			MemoryHits:    memHits,
 		}
+		if err := finalizeProducerChunk(terminal, finalContent, msg.Metadata); err != nil {
+			terminal.Error = fmt.Errorf("finalize runtime stream: %w", err)
+		}
+		ch <- terminal
 		lifecycleStage.Store("complete")
 		lifecycleStatus = "completed"
 	}()

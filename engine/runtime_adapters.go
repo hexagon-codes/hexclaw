@@ -741,10 +741,18 @@ func runtimeBlocksToAdapter(blocks template.Blocks, projectedCalls ...[]adapter.
 	for _, b := range blocks {
 		switch b.Type {
 		case template.BlockText:
+			text := b.Text
+			if cleaned := StripAllThinking(text); cleaned != strings.TrimSpace(text) {
+				// 与规范正文同步剥离思考块；未发生剥离的业务文字保留原始空白。
+				text = cleaned
+				if text == "" {
+					continue
+				}
+			}
 			out = append(out, adapter.Block{
 				Type:           "text",
-				Text:           b.Text,
-				MessageContent: canonicalProducerContent(messagecontent.ProducerChat, b.Text, "und"),
+				Text:           text,
+				MessageContent: canonicalProducerContent(messagecontent.ProducerChat, text, "und"),
 			})
 		case template.BlockToolUse:
 			out = append(out, adapter.Block{Type: "tool_use", ID: b.ID, Name: b.Name, Input: b.Input})

@@ -227,6 +227,18 @@ func apiCanonicalHistoryAssertEqual(
 	if response.Reply != wantContent {
 		t.Fatalf("HTTP reply bytes=%q, want canonical bytes=%q", response.Reply, wantContent)
 	}
+	for _, block := range response.Blocks {
+		if block.Type != "text" {
+			continue
+		}
+		text := block.Text
+		if block.MessageContent != nil {
+			text += block.MessageContent.Markdown
+		}
+		if strings.Contains(text, "private-one") || strings.Contains(text, "private-two") {
+			t.Fatal("public text blocks retained private thinking content")
+		}
+	}
 	if assistant.Content != response.Reply {
 		t.Fatalf(
 			"HTTP reply/history bytes differ: response_len=%d response_sha256=%s history_len=%d history_sha256=%s",

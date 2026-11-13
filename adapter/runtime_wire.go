@@ -247,7 +247,8 @@ func (w *RuntimeWire) Decorate(chunk *ReplyChunk) *ReplyChunk {
 	if len(w.blocks) > 0 && copy.Done {
 		w.blocks = mergeProcessRetrievals(w.blocks, copy.Blocks)
 		// 某些兼容路径仅在终态返回工具块，不能被不完整的实时轨迹覆盖。
-		if hasMissingProcessCalls(w.blocks, copy.Blocks) {
+		if hasMissingProcessCalls(w.blocks, copy.Blocks) || copy.MessageContent != nil {
+			// 已冻结的规范块快照包含终稿文字，不能被先前的传输预览覆盖。
 			var prefix []Block
 			for _, block := range w.blocks {
 				if block.Type == "retrieval" {
@@ -258,6 +259,15 @@ func (w *RuntimeWire) Decorate(chunk *ReplyChunk) *ReplyChunk {
 				if block.Type != "retrieval" {
 					prefix = append(prefix, block)
 				}
+			}
+			if len(copy.Blocks) == 0 && copy.MessageContent != nil {
+				// 清理后没有正文块时，保留真实过程观察并按规范正文补回最终文字。
+				for _, block := range w.blocks {
+					if block.Type != "text" && block.Type != "thinking" && block.Type != "retrieval" {
+						prefix = append(prefix, block)
+					}
+				}
+				prefix = AppendProcessChunk(prefix, &ReplyChunk{Content: copy.MessageContent.Markdown})
 			}
 			copy.Blocks = prefix
 		} else {

@@ -5,7 +5,33 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/hexagon-codes/hexclaw/messagecontent"
 )
+
+func TestRuntimeWireCanonicalFallbackReplacesPrivatePreviewAndRetainsProcess(t *testing.T) {
+	wire := NewRuntimeWire("fallback-message", ReasoningDisclosure{})
+	wire.Decorate(&ReplyChunk{Blocks: []Block{
+		{Type: "retrieval", ID: "observed-retrieval"},
+		{Type: "tool_use", ID: "observed-call", Name: "browser"},
+		{Type: "text", Text: "<think>private-only</think>"},
+	}})
+	canonical, err := messagecontent.New(messagecontent.ProducerChat, "en", "Visible fallback", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminal := wire.Decorate(&ReplyChunk{Done: true, MessageContent: &canonical})
+	raw, err := json.Marshal(terminal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "private-only") || len(terminal.Blocks) != 3 {
+		t.Fatalf("canonical fallback lost process or retained private text: %s", raw)
+	}
+	if terminal.Blocks[0].ID != "observed-retrieval" || terminal.Blocks[1].ID != "observed-call" || terminal.Blocks[2].Text != "Visible fallback" || terminal.Blocks[2].MessageContent == nil {
+		t.Fatalf("canonical process blocks = %#v", terminal.Blocks)
+	}
+}
 
 func TestRuntimeWireAssignsTrustedIdentityMonotonicSequenceAndSafeTerminal(t *testing.T) {
 	wire := NewRuntimeWire("msg-assistant-007", ReasoningDisclosure{})
