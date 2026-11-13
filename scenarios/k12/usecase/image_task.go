@@ -190,6 +190,8 @@ type ImageTaskHomeworkProjection struct {
 	// serialized by the public ImageTask projection, but lets the facade keep
 	// interactive deadline retries on their specialized parent-window path.
 	retryFailureKind string
+	// 子阶段截止只经既有外层操作字段公开，不复制为新的目标投影字段。
+	operationDeadlineAt int64
 }
 
 type ImageTaskProgressiveSnapshot struct {
@@ -1625,6 +1627,7 @@ func (c *ImageTaskCoordinator) projectTarget(
 				return ImageTaskView{}, projectErr
 			}
 			view.HomeworkProjection = &projection
+			view.ActiveInvocationDeadlineAt = projection.operationDeadlineAt
 			if projection.Stage == k12.GradingStageCompleted && projection.FinalArtifact != nil &&
 				projection.FinalArtifact.Validate() == nil &&
 				(dispatch.Status == k12.ImageTaskStatusRouted ||
