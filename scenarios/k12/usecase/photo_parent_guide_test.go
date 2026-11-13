@@ -214,6 +214,21 @@ func TestNumericGuideAcceptsFullwidthMinusFromVerifiedWorksheet(t *testing.T) {
 	}
 }
 
+func TestNumericGuideAcceptsFullwidthPlusFromVerifiedWorksheet(t *testing.T) {
+	for _, tc := range []struct{ name, problem, solution, answer string }{
+		{"seventh_problem", "(3/4＋1/6)×12", "## 解答\n\n(3÷4+1÷6)×12=11\n\n## 答案\n\n**11**", "11"},
+		{"eighth_problem", "5/9×7/8＋5/9×1/8", "## 解答\n\n(5÷9)×(7÷8)+(5÷9)×(1÷8)=5/9\n\n## 答案\n\n**5/9**", "5/9"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := ParentTeachingGuideRequest{Problem: tc.problem, Grade: "六年级上", ReportRequired: true, VerifiedSolution: tc.solution}
+			guide, local := deterministicParentTeachingGuideForEvidence(req, SolveEvidence{Verdict: VerdictAgree, EvidenceType: EvidenceNumericExec})
+			if !local || guide.Answer != tc.answer || guide.ReportContent == nil {
+				t.Fatalf("verified arithmetic lost report teaching: local=%t answer=%q content_present=%t", local, guide.Answer, guide.ReportContent != nil)
+			}
+		})
+	}
+}
+
 func TestJointNumericApplicationWithoutCandidateUsesFrozenGuideGenerator(t *testing.T) {
 	d, _ := newPipeline(t, blankWorksheetSolver{}, fakeGrader{}, nil)
 	generator := &parentTeachingGuideSpy{}

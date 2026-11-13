@@ -327,7 +327,7 @@ func parentGuidePureArithmetic(problem string) bool {
 		case unicode.IsSpace(r), strings.ContainsRune("：:=＝?？()（）[].．", r):
 		case r >= '0' && r <= '9':
 			hasNumber = true
-		case strings.ContainsRune("+-−－×÷*/", r):
+		case strings.ContainsRune("+＋-−－×÷*/", r):
 			hasOperation = true
 		default:
 			return false
