@@ -203,6 +203,17 @@ func TestNumericAnswerDoesNotReplaceApplicationTeachingWithArithmeticTemplate(t 
 	}
 }
 
+func TestNumericGuideAcceptsFullwidthMinusFromVerifiedWorksheet(t *testing.T) {
+	req := ParentTeachingGuideRequest{
+		Problem: "7/8÷(7/12)－1/2", Grade: "六年级上", ReportRequired: true,
+		VerifiedSolution: "## 解答\n\n按四则运算规则计算：\n(7÷8)÷((7÷12))-(1÷2) = 1\n\n## 答案\n\n**1**",
+	}
+	guide, local := deterministicParentTeachingGuideForEvidence(req, SolveEvidence{Verdict: VerdictAgree, EvidenceType: EvidenceNumericExec})
+	if !local || guide.Answer != "1" || guide.ReportContent == nil {
+		t.Fatalf("verified arithmetic lost report teaching: local=%t answer=%q content_present=%t", local, guide.Answer, guide.ReportContent != nil)
+	}
+}
+
 func TestJointNumericApplicationWithoutCandidateUsesFrozenGuideGenerator(t *testing.T) {
 	d, _ := newPipeline(t, blankWorksheetSolver{}, fakeGrader{}, nil)
 	generator := &parentTeachingGuideSpy{}
