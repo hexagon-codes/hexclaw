@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/hexagon-codes/ai-core/llm"
 
@@ -60,13 +61,23 @@ func RegisterExternalToolAccess(registry *skill.DefaultRegistry, collector *Tool
 			slog.Warn("External tool registration skipped", "tool", tool.Name(), "error", err)
 		}
 	}
-	register(&externalAccessSkill{name: discoverToolsName, description: "Find ready tools by task or program name. Returns exact schemas and source; catalog entries and disconnected services are not ready tools. Invoke a discovered tool through invoke_tool when its schema is outside the current context.", properties: map[string]*llm.Schema{"query": {Type: "string"}}, run: func(ctx context.Context, args map[string]any) (*skill.Result, error) {
+	register(&externalAccessSkill{name: discoverToolsName, description: "Find ready tools by task or program name. Broad or empty queries return a compact index and omitted count; query the exact returned tool name for its complete schema and source. Catalog entries and disconnected services are not ready tools. Invoke the exact tool through invoke_tool.", properties: map[string]*llm.Schema{"query": {Type: "string", Description: "Task/name search for the compact index, or an exact tool name for its complete schema"}}, run: func(ctx context.Context, args map[string]any) (*skill.Result, error) {
+		if collector == nil {
+			return nil, errors.New("tool discovery runtime is unavailable")
+		}
 		all := *collector
 		all.maxTools = 1 << 20
 		query, _ := args["query"].(string)
 		terms := strings.Fields(strings.ToLower(query))
 		var matches []llm.ToolDefinition
 		for _, definition := range all.Collect() {
+			if strings.EqualFold(strings.TrimSpace(query), definition.Function.Name) {
+				result, err := jsonSkillResult(map[string]any{"mode": "schema", "tools": []llm.ToolDefinition{definition}, "origins": collector.originsFor([]llm.ToolDefinition{definition})}, nil)
+				if err == nil && utf8.RuneCountInString(result.Content) > toolDiscoveryResultBudget(executor) {
+					return nil, errors.New("the exact tool schema exceeds the current tool result budget")
+				}
+				return result, err
+			}
 			text := strings.ToLower(definition.Function.Name + " " + definition.Function.Description)
 			match := len(terms) == 0
 			for _, term := range terms {
@@ -79,7 +90,7 @@ func RegisterExternalToolAccess(registry *skill.DefaultRegistry, collector *Tool
 				matches = append(matches, definition)
 			}
 		}
-		return jsonSkillResult(map[string]any{"tools": matches, "origins": collector.originsFor(matches)}, nil)
+		return compactToolDiscoveryIndex(collector, matches, toolDiscoveryResultBudget(executor))
 	}})
 	register(&externalAccessSkill{name: invokeToolName, description: "Invoke an exact tool through the original executor, current permissions and execution receipts. To discover available tools first, call with name='discover_tools' and arguments={query:'task or tool name'}, then invoke the returned exact name and arguments. This also works when only invoke_tool fits the current context. Do not invoke invoke_tool itself or retry unresolved external writes.", properties: map[string]*llm.Schema{"name": {Type: "string"}, "arguments": {Type: "object"}}, run: func(ctx context.Context, args map[string]any) (*skill.Result, error) {
 		name, _ := args["name"].(string)
@@ -149,4 +160,59 @@ func RegisterExternalToolAccess(registry *skill.DefaultRegistry, collector *Tool
 		value, err := manager.GetServerPrompt(ctx, server, name, input)
 		return jsonSkillResult(value, err)
 	}})
+}
+
+// toolDiscoveryResultBudget 沿用执行器已有截断预算，不另设配置或绕过结果钩子。
+func toolDiscoveryResultBudget(executor *ToolExecutor) int {
+	budget, found := 8000, false
+	if executor != nil {
+		for _, hook := range executor.afterHooks {
+			if truncate, ok := hook.(*TruncateHook); ok {
+				limit := truncate.MaxChars
+				if limit <= 0 {
+					limit = 8000
+				}
+				if !found || limit < budget {
+					budget = limit
+				}
+				found = true
+			}
+		}
+	}
+	return budget
+}
+
+// compactToolDiscoveryIndex 只缩短索引说明；完整 schema 始终来自同一原工具定义。
+func compactToolDiscoveryIndex(collector *ToolCollector, matches []llm.ToolDefinition, budget int) (*skill.Result, error) {
+	entries := make([]map[string]string, 0, len(matches))
+	origins := collector.originsFor(matches)
+	visibleOrigins := map[string]any{}
+	encode := func() (*skill.Result, error) {
+		return jsonSkillResult(map[string]any{"mode": "index", "tools": entries, "origins": visibleOrigins,
+			"total": len(matches), "returned": len(entries), "omitted": len(matches) - len(entries),
+			"hint": "Use an exact tool name as query for its complete schema; refine the query to find omitted tools."}, nil)
+	}
+	for _, definition := range matches {
+		name := definition.Function.Name
+		description := []rune(strings.Join(strings.Fields(definition.Function.Description), " "))
+		if len(description) > 160 {
+			description = append(description[:159], '…')
+		}
+		entries = append(entries, map[string]string{"name": name, "description": string(description)})
+		visibleOrigins[name] = origins[name]
+		candidate, err := encode()
+		if err != nil {
+			return nil, err
+		}
+		if utf8.RuneCountInString(candidate.Content) > budget {
+			entries = entries[:len(entries)-1]
+			delete(visibleOrigins, name)
+			break
+		}
+	}
+	result, err := encode()
+	if err == nil && (utf8.RuneCountInString(result.Content) > budget || len(matches) > 0 && len(entries) == 0) {
+		return nil, errors.New("the current tool result budget cannot hold a tool discovery index entry")
+	}
+	return result, err
 }
