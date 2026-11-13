@@ -621,7 +621,11 @@ func (o *GradingOrchestrator) runLoop(ctx context.Context, run *gradingRun, jobI
 				(run.req.TaskIntent == PhotoTaskBlankWorksheet || run.req.TaskIntent == PhotoTaskCompletedHomework ||
 					!recognizedQuestionsRequireGuardianConfirmationForInitialReadMode(run.questions, run.req.TaskIntent, run.req.InitialReadMode)) {
 				if v, err = o.autoFreezeRecognition(ctx, run, v); err != nil {
-					return v, err
+					// 冻结失败必须持久收口，不能留在自动任务的人工等待停点。
+					failed, failErr := o.deps.AdvanceGradingStage(context.WithoutCancel(ctx), run.agentName, jobID, AdvanceGradingInput{
+						Outcome: GradingOutcomeFailed, FailureKind: "recognize_failed", Retryable: gradingErrRetryable(err),
+					})
+					return failed, errors.Join(err, failErr)
 				}
 				if v.Record.Status == k12.GradingStageAssessing {
 					continue

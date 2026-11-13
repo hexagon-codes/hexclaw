@@ -54,6 +54,85 @@ func seedGradingImageTaskOwnerScopeForTest(t *testing.T, d Deps, dispatchID stri
 	return input.SourceAssetRefs[0]
 }
 
+func TestImageTaskPhotoGrading_InvalidCanonicalFreezingPersistsFailure(t *testing.T) {
+	for _, invalidAnswer := range []bool{false, true} {
+		name := "question"
+		if invalidAnswer {
+			name = "answer"
+		}
+		t.Run(name, func(t *testing.T) {
+			question := RecognizedQuestion{
+				Question: "(3/4+1/6)×12", RawTranscription: "(3/4+1/6)×12", CanonicalMarkdown: "(3/4+1/6)×12",
+				Subject: "数学", AnswerState: AnswerStatePresent, StudentAnswer: "=9+2=11",
+				AnswerRawTranscription: "=9+2=11", AnswerCanonicalMarkdown: "=9+2=11",
+				RecognitionConfidence: float64Ptr(0.99),
+			}
+			if invalidAnswer {
+				question.AnswerRawTranscription, question.AnswerCanonicalMarkdown = `\(9+2=11`, `\(9+2=11`
+			} else {
+				question.RawTranscription, question.CanonicalMarkdown = `\((3/4+1/6)×12`, `\((3/4+1/6)×12`
+			}
+			recognizer := &countingRecognizer{questions: []RecognizedQuestion{question}}
+			d := recoveryDeps(t, recognizer, nil, nil)
+			key := "invalid-canonical-freeze-" + name
+			seedGradingImageTaskOwnerScopeForTest(t, d, key)
+			o := newRecoverableOrchestrator(t, d, t.TempDir())
+			photo := orchestratorPhotoRequest()
+			photo.TaskIntent = PhotoTaskCompletedHomework
+			v, _, err := o.StartPhotoGradingJob(t.Context(), StartPhotoGradingInput{
+				Photo: photo, SourceKind: "image_task", SourceKey: key, BudgetSnapshot: frozenWiringBudget(),
+				ParentAutomaticAttemptID: key + ":1", ParentAutomaticDeadlineAt: d.now() + 300,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = o.RunGradingJob(t.Context(), v.Record.RecordID)
+			if !errors.Is(err, ErrInvalidInput) {
+				t.Fatalf("expected original canonical error, got %v", err)
+			}
+			current, err := d.GetGradingJob(t.Context(), "mingming", v.Record.RecordID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if current.Record.Status != k12.GradingStageFailedTerminal || current.Fields.FailureKind != "recognize_failed" {
+				t.Fatalf("canonical failure must settle: stage=%s failure=%s", current.Record.Status, current.Fields.FailureKind)
+			}
+			questions, ok := o.RecognizedQuestions(t.Context(), v.Record.RecordID)
+			if !ok || len(questions) != 1 || questions[0].RawTranscription != question.RawTranscription || questions[0].AnswerRawTranscription != question.AnswerRawTranscription {
+				t.Fatalf("original recognition changed: %#v", questions)
+			}
+		})
+	}
+}
+
+func TestPhotoGrading_ManualConfirmationRejectsAutomaticFreezeFailure(t *testing.T) {
+	d := recoveryDeps(t, &countingRecognizer{questions: []RecognizedQuestion{{
+		Question: "1+1=", Subject: "数学", AnswerState: AnswerStatePresent, StudentAnswer: "2",
+	}}}, nil, nil)
+	o := newRecoverableOrchestrator(t, d, t.TempDir())
+	v, _, err := o.StartPhotoGradingJob(t.Context(), StartPhotoGradingInput{
+		Photo: orchestratorPhotoRequest(), SourceKind: "im", SourceKey: "manual-confirmation-freeze-failure",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = o.RunGradingJob(t.Context(), v.Record.RecordID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = d.AdvanceGradingStage(t.Context(), "mingming", v.Record.RecordID, AdvanceGradingInput{
+		Outcome: GradingOutcomeFailed, FailureKind: "recognize_failed", Retryable: false,
+	}); err == nil {
+		t.Fatal("manual confirmation accepted an automatic freeze failure")
+	}
+	current, err := d.GetGradingJob(t.Context(), "mingming", v.Record.RecordID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Record.Status != k12.GradingStageAwaitingConfirmation || current.Fields.ConfirmationState != k12.GradingConfirmationPending {
+		t.Fatalf("manual confirmation changed: stage=%s confirmation=%s", current.Record.Status, current.Fields.ConfirmationState)
+	}
+}
+
 func TestImageTaskPhotoGrading_ClearFormattedOCRAutoFreezesAndCompletes(t *testing.T) {
 	ctx := context.Background()
 	rec := &countingRecognizer{questions: []RecognizedQuestion{

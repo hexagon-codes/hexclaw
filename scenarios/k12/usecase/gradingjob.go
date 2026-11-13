@@ -440,7 +440,10 @@ func (d Deps) advanceGradingFailed(ctx context.Context, v GradingJobView, in Adv
 	case k12.GradingStageQueued, k12.GradingStageNormalizing, k12.GradingStageRecognizing,
 		k12.GradingStageLocating, k12.GradingStageAssessing, k12.GradingStageRendering, k12.GradingStageProjecting:
 	case k12.GradingStageAwaitingConfirmation:
-		if in.FailureKind != "grading_request_invalid" || in.Retryable {
+		invalidRequest := in.FailureKind == "grading_request_invalid" && !in.Retryable
+		automaticFreezeFailure := automaticPhotoConfirmationSource(v.Fields.SourceKind) &&
+			v.Fields.ConfirmationState == k12.GradingConfirmationPending && in.FailureKind == "recognize_failed"
+		if !invalidRequest && !automaticFreezeFailure {
 			return GradingJobView{}, errGradingStageConflict("waiting stage requires a conclusive invalid grading request")
 		}
 	default:
