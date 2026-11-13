@@ -47,12 +47,16 @@ func TestWebAdapter_ResumeRetainsEmptyCanonicalArtifact(t *testing.T) {
 
 // 用户停止后连接仍存活；错误帧必须交付真实部分结果而不是只剩错误文字。
 func TestWebAdapter_FailedTerminalPreservesObservedResult(t *testing.T) {
-	for _, cancelled := range []bool{false, true} {
-		name := "nonzero"
-		if cancelled {
-			name = "cancelled"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, scenario := range []struct {
+		name             string
+		canceled, queued bool
+	}{
+		{name: "nonzero"},
+		{name: "canceled", canceled: true},
+		{name: "canceled_queued", canceled: true, queued: true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			name, canceled := scenario.name, scenario.canceled
 			a := New()
 			started := make(chan struct{})
 			content := "partial-output; exit code: 7; artifact /api/v1/files/generated/stdout.txt"
@@ -62,9 +66,13 @@ func TestWebAdapter_FailedTerminalPreservesObservedResult(t *testing.T) {
 				go func() {
 					cause := errors.New("exit status 7")
 					status := adapter.RuntimeTerminalFailed
-					if cancelled {
+					if canceled {
 						<-ctx.Done()
 						cause, status = context.Canceled, adapter.RuntimeTerminalCancelled
+						if scenario.queued {
+							// 取消后的运行事件不能让消费端提前丢弃后续真实终帧。
+							out <- &adapter.ReplyChunk{Sequence: 1, RuntimeEvent: &adapter.RuntimeEvent{Kind: adapter.RuntimeEventToolFailed, ToolCallID: "original-call", ToolName: "shell"}}
+						}
 					}
 					out <- &adapter.ReplyChunk{Content: content, Done: true, Error: cause, MessageContent: canonicalReplyContent(content, nil), Metadata: map[string]string{"producer_kind": "skill", "session_id": "failure-session"}, ToolCalls: []adapter.ToolCall{{ID: "original-call", Name: "shell", Status: "error", Result: content}}, RuntimeEvent: &adapter.RuntimeEvent{Kind: adapter.RuntimeEventTerminal, TerminalStatus: status}}
 					close(out)
@@ -73,7 +81,7 @@ func TestWebAdapter_FailedTerminalPreservesObservedResult(t *testing.T) {
 			})
 			conn, ctx, _ := dialWebAdapter(t, a)
 			incomingSession := "failure-session"
-			if !cancelled {
+			if !canceled {
 				incomingSession = ""
 			}
 			if err := wsjson.Write(ctx, conn, wsMessage{Type: "message", Content: "/sh task", SessionID: incomingSession, RequestID: "failure-" + name}); err != nil {
@@ -84,7 +92,7 @@ func TestWebAdapter_FailedTerminalPreservesObservedResult(t *testing.T) {
 			case <-ctx.Done():
 				t.Fatal(ctx.Err())
 			}
-			if cancelled {
+			if canceled {
 				if err := wsjson.Write(ctx, conn, wsMessage{Type: "cancel", RequestID: "failure-" + name}); err != nil {
 					t.Fatal(err)
 				}
@@ -95,6 +103,15 @@ func TestWebAdapter_FailedTerminalPreservesObservedResult(t *testing.T) {
 			}
 			if frame.Type != "error" || !frame.Done || frame.SessionID != "failure-session" || frame.MessageContent == nil || frame.MessageContent.Markdown != content || len(frame.ToolCalls) != 1 || frame.ToolCalls[0].Status != "error" {
 				t.Fatalf("failed result lost: %#v", frame)
+			}
+			if canceled {
+				snapshot, ok := a.GetStreamSnapshot("desktop-user", "failure-"+name)
+				if !ok || !snapshot.Done || snapshot.Content != content || len(snapshot.ToolCalls) != 1 || snapshot.ToolCalls[0].Status != "error" {
+					t.Fatalf("canceled snapshot lost observed terminal: %#v", snapshot)
+				}
+				if scenario.queued && (snapshot.LastSequence != 1 || len(snapshot.RuntimeEvents) != 1 || snapshot.RuntimeEvents[0].Event.Kind != adapter.RuntimeEventToolFailed) {
+					t.Fatalf("queued observed event was discarded: %#v", snapshot)
+				}
 			}
 			if err := wsjson.Write(ctx, conn, wsMessage{Type: "ping"}); err != nil {
 				t.Fatal(err)

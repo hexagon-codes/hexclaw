@@ -564,8 +564,16 @@ func (a *WebAdapter) sendStreamWithIDs(ctx context.Context, chatID, sessionID, r
 		outputCtx := ctx
 		finishOutput := func() {}
 		if err := ctx.Err(); err != nil {
-			if !chunk.Done || chunk.Error == nil || !requestcancel.IsExplicit(ctx) {
+			if !requestcancel.IsExplicit(ctx) {
 				return err
+			}
+			if !chunk.Done || chunk.Error == nil {
+				// 停止后继续消费到真实失败终帧；中间事件和迟到成功不能冻结快照。
+				if !chunk.Done && requestID != "" && a.streams != nil {
+					// 已观察的序列与运行事件仍进入恢复账本，终帧会覆盖正文和工具终态。
+					a.streams.Append(requestID, chunk)
+				}
+				continue
 			}
 			// 用户停止只取消执行；真实终态已到达时仍向存活连接交付同次回执。
 			outputCtx, finishOutput = context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
@@ -624,6 +632,9 @@ func (a *WebAdapter) sendStreamWithIDs(ctx context.Context, chatID, sessionID, r
 			a.streams.Append(requestID, chunk)
 		}
 		if err := ctx.Err(); err != nil {
+			if requestcancel.IsExplicit(ctx) {
+				continue
+			}
 			return err
 		}
 
@@ -669,9 +680,15 @@ func (a *WebAdapter) sendStreamWithIDs(ctx context.Context, chatID, sessionID, r
 			a.sessionRequests.Store(msg.SessionID, requestID)
 		}
 		if err := ctx.Err(); err != nil {
+			if requestcancel.IsExplicit(ctx) {
+				continue
+			}
 			return err
 		}
 		if err := a.sendToTargets(ctx, chatID, requestID, msg); err != nil {
+			if requestcancel.IsExplicit(ctx) && errors.Is(err, context.Canceled) {
+				continue
+			}
 			return err
 		}
 	}
