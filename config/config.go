@@ -121,8 +121,8 @@ func DefaultK12GradingBudget() K12GradingBudgetConfig {
 		AssessingBuckets: []K12AssessingBudgetBucketConfig{
 			{MaxProblems: 1, Seconds: 180},
 			{MaxProblems: 8, Seconds: 180},
-			{MaxProblems: 16, Seconds: 300},
-			{MaxProblems: 32, Seconds: 540},
+			{MaxProblems: 16, Seconds: 840},
+			{MaxProblems: 32, Seconds: 1080},
 		},
 		ItemConcurrency: 2,
 		RecognizingBuckets: K12RecognizingBudgetBucketsConfig{
