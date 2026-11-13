@@ -105,6 +105,36 @@ func TestRecognitionOwnAnswerRegionComesFromReadableOriginalObservation(t *testi
 	}
 }
 
+func TestRecognitionOwnAnswerContextPreservesQuestionOrder(t *testing.T) {
+	answer := SourcePixelRegion{X: 50, Y: 110, Width: 220, Height: 450}
+	input := RecognitionLayoutPlanInputV2{PagePNG: recognitionLayoutPlanTestPNG(t, 800, 800),
+		Manifest: RecognitionLayoutManifestSuccessV2{InvocationID: "answer-reading-order", ResultDigest: "sha256:" + strings.Repeat("a", 64)},
+		Targets: []RecognitionLayoutManifestTargetV2{
+			{ManifestRef: "manifest_0001", ManifestOrder: 1, SourceNumberPath: []string{"1"}, DisplayLabel: "1.", Region: SourcePixelRegion{X: 50, Y: 50, Width: 220, Height: 70}, ObservedAnswerRegion: &answer},
+			{ManifestRef: "manifest_0002", ManifestOrder: 2, SourceNumberPath: []string{"2"}, DisplayLabel: "2.", Region: SourcePixelRegion{X: 400, Y: 50, Width: 220, Height: 70}},
+			{ManifestRef: "manifest_0003", ManifestOrder: 3, SourceNumberPath: []string{"3"}, DisplayLabel: "3.", Region: SourcePixelRegion{X: 400, Y: 220, Width: 220, Height: 70}},
+		}, RecognitionFormat: RecognitionLayoutCompactV4, InitialReadMode: RecognitionLayoutManifestWithContentV1,
+		EnableSourceAdjudication: true,
+		ScopeInput:               &RecognitionImageScopeInputV1{Version: RecognitionImageScopeVersionV1, SourceReviewPolicy: RecognitionImageSourceUprightReviewPolicyV3},
+		Scope:                    &RecognitionImageScopeV1{Version: RecognitionImageScopeVersionV1, Source: "inferred", SelectedOrders: []int{1, 2, 3}, Basis: "All visible questions."}}
+	plan, err := BuildRecognitionLayoutPlanV2(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, target := range plan.Targets {
+		if target.ManifestOrder != index+1 {
+			t.Fatalf("answer extent changed printed reading order: position=%d order=%d", index, target.ManifestOrder)
+		}
+	}
+	r := plan.Targets[0].Region
+	if answer.Y+answer.Height > r.Y+r.Height || plan.Targets[0].ObservedAnswerRegion == nil || *plan.Targets[0].ObservedAnswerRegion != answer {
+		t.Fatal("stable printed order clipped the observed answer")
+	}
+	if err := ValidateRecognitionLayoutPlanV2(plan); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRecognitionPartiallyVisibleRegionPreservesRawSource(t *testing.T) {
 	original := SourcePixelRegion{X: 91, Y: 158, Width: 903, Height: 480}
 	answer := SourcePixelRegion{X: 204, Y: 409, Width: 481, Height: 118}

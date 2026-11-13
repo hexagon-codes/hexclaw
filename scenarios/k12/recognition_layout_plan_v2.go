@@ -223,6 +223,12 @@ func BuildRecognitionLayoutPlanV2(input RecognitionLayoutPlanInputV2) (Recogniti
 	// 同一视觉行的题框会有少量纵坐标噪声；先按中心纵坐标归入行带，再在行内从左到右排序。
 	orderRegion := func(target RecognitionLayoutManifestTargetV2) SourcePixelRegion {
 		region := target.Region
+		if input.InitialReadMode == RecognitionLayoutManifestWithContentV1 && input.ScopeInput != nil && input.ScopeInput.SourceReviewPolicy == RecognitionImageSourceUprightReviewPolicyV3 {
+			// 阅读顺序属于原题布局，不能随手写答案长度或裁图补边变化。
+			region = originalByRef[target.ManifestRef]
+			region.Width = min(region.Width, pageBounds.Dx()-region.X)
+			region.Height = min(region.Height, pageBounds.Dy()-region.Y)
+		}
 		// 排序使用直立阅读视角，持久区域、裁图和批注仍保持原始像素坐标。
 		switch input.PageOrientation.Rotation() {
 		case 90:
