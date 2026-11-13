@@ -12,22 +12,59 @@ import (
 	"testing"
 
 	"github.com/hexagon-codes/hexclaw/render"
+	"github.com/hexagon-codes/hexclaw/skill"
 )
 
 // fakeRenderer 记录最后一次 opts，并返回与格式相关的 fake 产物。
 type fakeRenderer struct {
-	lastOpts render.RenderOptions
-	calls    int
+	lastOpts    render.RenderOptions
+	lastContent string
+	calls       int
 }
 
-func (f *fakeRenderer) Render(_ context.Context, _ string, format render.Format, opts render.RenderOptions) (*render.RenderResult, error) {
+func (f *fakeRenderer) Render(_ context.Context, content string, format render.Format, opts render.RenderOptions) (*render.RenderResult, error) {
 	f.calls++
 	f.lastOpts = opts
+	f.lastContent = content
 	return &render.RenderResult{
 		Path:        "/tmp/out." + string(format),
 		Size:        42,
 		ContentType: "application/octet-stream",
 	}, nil
+}
+
+func TestExport_InputImagesRequireActualMarkdownImage(t *testing.T) {
+	const data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+	const source = "data:image/png;base64," + data
+	for _, tc := range []struct {
+		name, content string
+		appendImage   bool
+	}{
+		{"no reference", "# Notes", true},
+		{"ordinary link", "[Original source](" + source + ")", true},
+		{"plain source text", "Original source: " + source, true},
+		{"fenced image example", "```markdown\n![Example](" + source + ")\n```", true},
+		{"inline image example", "`![Example](" + source + ")`", true},
+		{"embedded image", "![Original](" + source + ")", false},
+		{"reference image", "![Original][source]\n\n[source]: " + source, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			renderer := &fakeRenderer{}
+			ctx := skill.WithInputImages(t.Context(), []skill.InputImage{{Name: "original.png", MIME: "image/png", Data: data}})
+			if _, err := NewExportDocumentSkill(renderer).Execute(ctx, map[string]any{
+				"content": tc.content, "format": "pdf", "include_input_images": true,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			want := tc.content
+			if tc.appendImage {
+				want += "\n\n![original.png](" + source + ")\n"
+			}
+			if renderer.lastContent != want {
+				t.Fatalf("accepted original image or existing document content changed: got %q, want %q", renderer.lastContent, want)
+			}
+		})
+	}
 }
 
 func TestExport_AllFormats_ProduceFile(t *testing.T) {

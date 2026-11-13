@@ -14,6 +14,10 @@ import (
 	"strings"
 
 	"github.com/hexagon-codes/ai-core/llm"
+	"github.com/yuin/goldmark"
+	"github.com/yuin/goldmark/ast"
+	"github.com/yuin/goldmark/text"
+
 	"github.com/hexagon-codes/hexclaw/internal/documentflow"
 	"github.com/hexagon-codes/hexclaw/render"
 	"github.com/hexagon-codes/hexclaw/skill"
@@ -106,6 +110,15 @@ func (s *ExportDocumentSkill) Execute(ctx context.Context, args map[string]any) 
 			if len(images) == 0 {
 				return nil, fmt.Errorf("original input images are unavailable for this request")
 			}
+			// 只有实际图片节点才表示已嵌入；普通链接和代码中的同源文字不能代替原图。
+			embeddedImages := map[string]bool{}
+			document := goldmark.New().Parser().Parse(text.NewReader([]byte(content)))
+			_ = ast.Walk(document, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
+				if image, ok := node.(*ast.Image); entering && ok {
+					embeddedImages[string(image.Destination)] = true
+				}
+				return ast.WalkContinue, nil
+			})
 			for _, image := range images {
 				imageURL := image.URL
 				if image.Data != "" {
@@ -114,11 +127,12 @@ func (s *ExportDocumentSkill) Execute(ctx context.Context, args map[string]any) 
 				if imageURL == "" {
 					return nil, fmt.Errorf("original input image content is unavailable")
 				}
-				if strings.Contains(content, imageURL) {
+				if embeddedImages[imageURL] {
 					continue
 				}
 				name := strings.NewReplacer("[", "\\[", "]", "\\]", "\n", " ", "\r", " ").Replace(image.Name)
 				content += "\n\n![" + name + "](" + imageURL + ")\n"
+				embeddedImages[imageURL] = true
 			}
 		}
 	}
