@@ -232,6 +232,9 @@ func TestIMPartialDocumentAfterUpstreamFailureReachesDelivery(t *testing.T) {
 	if replayErr != handlerErr || received.Load() != 1 || model.calls.Load() != modelCalls || renderer.calls.Load() != renders {
 		t.Fatal("the same delivered reply regenerated or resent its document")
 	}
+	if err := store.DB().QueryRowContext(ctx, `SELECT count(*) FROM outbox_events`).Scan(&outboxCount); err != nil {
+		t.Fatal(err)
+	}
 	if outboxCount != 0 {
 		t.Fatal("generic document unexpectedly created an outbox")
 	}
