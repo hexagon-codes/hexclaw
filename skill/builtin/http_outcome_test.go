@@ -188,3 +188,59 @@ func TestBrowserRequestArtifactModelProjection(t *testing.T) {
 		})
 	}
 }
+
+func TestBrowserRequestRedirectKeepsAuthenticationAtItsOrigin(t *testing.T) {
+	for _, declared := range []bool{false, true} {
+		t.Run(fmt.Sprintf("declared_api_key=%t", declared), func(t *testing.T) {
+			type observation struct {
+				stage  string
+				header http.Header
+			}
+			observed := make(chan observation, 3)
+			target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				observed <- observation{"other_origin", r.Header.Clone()}
+				w.Header().Set("Content-Type", "text/plain")
+				_, _ = io.WriteString(w, "response preserved")
+			}))
+			defer target.Close()
+			source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/start" {
+					observed <- observation{"original", r.Header.Clone()}
+					http.Redirect(w, r, "/same-origin", http.StatusFound)
+					return
+				}
+				observed <- observation{"same_origin", r.Header.Clone()}
+				http.Redirect(w, r, target.URL, http.StatusFound)
+			}))
+			defer source.Close()
+			args := map[string]any{"action": "request", "url": source.URL + "/start",
+				"headers": map[string]any{"Authorization": "Bearer synthetic", "X-Goog-Api-Key": "synthetic-google", "PRIVATE-TOKEN": "synthetic-private", "X-Request-ID": "request-marker", "Accept": "text/plain"}}
+			if declared {
+				args["auth"] = map[string]any{"type": "api_key", "in": "header", "name": "X-Service-Credential", "value": "synthetic-service"}
+			}
+			result, err := NewBrowserSkill().Execute(t.Context(), args)
+			if err != nil || result == nil || result.Content != "response preserved" {
+				t.Fatalf("redirected response changed: result=%+v err=%v", result, err)
+			}
+			for index := 0; index < 3; index++ {
+				var request observation
+				select {
+				case request = <-observed:
+				default:
+					t.Fatal("redirect chain lost an observed physical request")
+				}
+				for _, name := range []string{"Authorization", "X-Goog-Api-Key", "PRIVATE-TOKEN"} {
+					if present := request.header.Get(name) != ""; present != (request.stage != "other_origin") {
+						t.Errorf("%s authentication header %s present=%t", request.stage, name, present)
+					}
+				}
+				if present := request.header.Get("X-Service-Credential") != ""; present != (declared && request.stage != "other_origin") {
+					t.Errorf("%s declared credential present=%t", request.stage, present)
+				}
+				if request.header.Get("X-Request-ID") != "request-marker" || request.header.Get("Accept") != "text/plain" {
+					t.Errorf("%s lost ordinary task headers", request.stage)
+				}
+			}
+		})
+	}
+}

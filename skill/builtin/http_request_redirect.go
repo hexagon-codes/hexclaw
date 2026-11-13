@@ -43,7 +43,7 @@ func rememberHTTPRequestAuth(req *http.Request, auth HTTPRequestAuth) {
 	}
 	for name := range req.Header {
 		switch strings.ToLower(name) {
-		case "authorization", "proxy-authorization", "cookie", "x-api-key", "api-key", "x-auth-token", "x-access-token":
+		case "authorization", "proxy-authorization", "cookie", "x-api-key", "api-key", "x-auth-token", "x-access-token", "x-goog-api-key", "private-token":
 			scope.headers[http.CanonicalHeaderKey(name)] = struct{}{}
 		}
 	}
