@@ -405,6 +405,20 @@ func gradingOperationSupersededByCurrentAssessment(
 	case k12.GradingItemOperationParentGuide:
 		referenceID = assessment.ParentGuideInvocationID
 	}
+	// 正确题可仅采用可信原解的确定性报告；未采用的已知失败讲法仍保留为观察。
+	if invocation.Operation == k12.GradingItemOperationParentGuide &&
+		invocation.Status == k12.ModelInvocationFailed && referenceID == "" &&
+		assessment.Status == k12.GradingAssessmentCorrect &&
+		assessment.InputRevision == invocation.InputRevision &&
+		assessment.InputDigest == invocation.InputDigest &&
+		assessment.ResultDigest == modelInvocationDigest([]byte(assessment.ResultJSON)) {
+		var item PhotoGradeItem
+		if json.Unmarshal([]byte(assessment.ResultJSON), &item) == nil &&
+			item.Status == PhotoCorrect && item.ParentGuide == nil {
+			_, covered := degradedReportParentGuide(item.Solve)
+			return covered
+		}
+	}
 	reference, ok := invocationByID[referenceID]
 	if !ok ||
 		reference.InvocationID == invocation.InvocationID ||

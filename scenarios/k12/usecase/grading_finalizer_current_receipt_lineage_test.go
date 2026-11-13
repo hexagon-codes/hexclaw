@@ -2,12 +2,50 @@ package usecase
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"testing"
 
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 )
+
+func TestCurrentVerifiedReportCoversOnlyKnownFailedUnadoptedGuide(t *testing.T) {
+	solved, ok := degradeVerifiedReportTeaching(SolveHomeworkResult{
+		Solution: "## 解答\n\n1+1=2\n\n## 答案\n\n2",
+		Evidence: SolveEvidence{Verdict: VerdictAgree, EvidenceType: EvidenceNumericExec},
+	}, "teaching_generation_failed")
+	if !ok {
+		t.Fatal("verified solution must have a deterministic report")
+	}
+	raw, err := json.Marshal(PhotoGradeItem{Status: PhotoCorrect, Solve: solved})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := k12.GradingItemInvocation{AgentName: "mingming", JobID: "job", ProblemID: "problem", AttemptID: "attempt", Operation: k12.GradingItemOperationParentGuide, Status: k12.ModelInvocationFailed, InputRevision: 1, InputDigest: "input"}
+	assessment := k12.GradingAssessmentItem{AgentName: base.AgentName, JobID: base.JobID, ProblemID: base.ProblemID, AttemptID: base.AttemptID, InputRevision: 1, InputDigest: "input", Status: k12.GradingAssessmentCorrect, CurrentDisposition: k12.GradingAssessmentDispositionCurrent, ResultJSON: string(raw), ResultDigest: modelInvocationDigest(raw)}
+	for _, status := range []k12.ModelInvocationStatus{k12.ModelInvocationFailed, k12.ModelInvocationPrepared, k12.ModelInvocationSent, k12.ModelInvocationOutcomeUnknown} {
+		invocation := base
+		invocation.Status = status
+		if got := gradingOperationSupersededByCurrentAssessment(invocation, assessment, nil); got != (status == k12.ModelInvocationFailed) {
+			t.Fatalf("status %s covered=%t", status, got)
+		}
+	}
+	for _, invalid := range []k12.GradingAssessmentItem{
+		func() k12.GradingAssessmentItem { v := assessment; v.ResultDigest = "invalid"; return v }(),
+		func() k12.GradingAssessmentItem { v := assessment; v.InputDigest = "other"; return v }(),
+		func() k12.GradingAssessmentItem {
+			v := assessment
+			v.ResultJSON = `{"Status":"correct","Solve":{}}`
+			v.ResultDigest = modelInvocationDigest([]byte(v.ResultJSON))
+			return v
+		}(),
+	} {
+		if gradingOperationSupersededByCurrentAssessment(base, invalid, nil) {
+			t.Fatal("incomplete or mismatched report covered a failed guide")
+		}
+	}
+}
 
 func TestK12ProjectingCurrentReceiptLineageFinalizesPastOlderTerminalAttempt(t *testing.T) {
 	for _, status := range []k12.ModelInvocationStatus{
