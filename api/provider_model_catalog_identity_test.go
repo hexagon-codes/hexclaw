@@ -289,27 +289,28 @@ func TestActiveLLMConfig_PreservesNilAndExplicitEmptyCapabilitySemantics(t *test
 	srv := NewServer(cfg, &mockEngine{activeLLM: cfg.LLM}, nil, nil)
 
 	snapshot := srv.activeLLMConfig()
+	declarations := srv.persistedLLMConfig()
 	legacy := snapshot.Providers["legacy"]
-	if legacy.ModelSpecs != nil {
-		t.Fatalf("legacy ModelSpecs=%#v, want nil so legacy text synthesis remains enabled", legacy.ModelSpecs)
+	if declarations.Providers["legacy"].ModelSpecs != nil {
+		t.Fatalf("legacy declaration ModelSpecs=%#v, want nil", declarations.Providers["legacy"].ModelSpecs)
 	}
 	if !config.ModelHasCapability(legacy, "legacy-chat", config.LLMModelCapabilityText) {
 		t.Fatal("legacy text model lost text capability after snapshot clone")
 	}
 
-	emptyCatalog := snapshot.Providers["explicit-empty-catalog"]
+	emptyCatalog := declarations.Providers["explicit-empty-catalog"]
 	if emptyCatalog.ModelSpecs == nil || len(emptyCatalog.ModelSpecs) != 0 {
 		t.Fatalf("explicit empty ModelSpecs=%#v, want non-nil empty slice", emptyCatalog.ModelSpecs)
 	}
-	if config.ModelHasCapability(emptyCatalog, "unclassified", config.LLMModelCapabilityText) {
+	if config.ModelHasCapability(snapshot.Providers["explicit-empty-catalog"], "unclassified", config.LLMModelCapabilityText) {
 		t.Fatal("explicit empty catalog must remain fail-closed after snapshot clone")
 	}
 
-	emptyCapabilities := snapshot.Providers["explicit-empty-capabilities"]
+	emptyCapabilities := declarations.Providers["explicit-empty-capabilities"]
 	if emptyCapabilities.ModelSpecs[0].Capabilities == nil || len(emptyCapabilities.ModelSpecs[0].Capabilities) != 0 {
 		t.Fatalf("explicit empty capabilities=%#v, want non-nil empty slice", emptyCapabilities.ModelSpecs[0].Capabilities)
 	}
-	if config.ModelHasCapability(emptyCapabilities, "unclassified", config.LLMModelCapabilityText) {
+	if config.ModelHasCapability(snapshot.Providers["explicit-empty-capabilities"], "unclassified", config.LLMModelCapabilityText) {
 		t.Fatal("explicit empty capabilities must remain fail-closed after snapshot clone")
 	}
 }
