@@ -91,3 +91,50 @@ func TestWorkflowToolNodeAllowedWithTaskGrant(t *testing.T) {
 		t.Fatalf("已授权的连接器工具不应被授权闸拦下，得到: %v", err)
 	}
 }
+
+func TestWorkflowConnectorToolUsesExecutionProfile(t *testing.T) {
+	const toolName = "review_readonly_echo"
+	tests := []struct {
+		name    string
+		profile string
+		allow   []string
+		deny    []string
+		wantErr string
+	}{
+		{name: "full access ignores old deny", profile: engine.SystemDispatchProfileFullAccess, deny: []string{toolName}},
+		{name: "full access ignores old allowlist", profile: engine.SystemDispatchProfileFullAccess, allow: []string{"other_tool"}},
+		{name: "function first retains deny", profile: engine.SystemDispatchProfileFunctionFirst, deny: []string{toolName}, wantErr: "denied by rule"},
+		{name: "balanced retains allowlist", profile: engine.SystemDispatchProfileBalanced, allow: []string{"other_tool"}, wantErr: "not in allow list"},
+	}
+	for _, tt := range tests {
+		for _, injected := range []bool{false, true} {
+			source := "config"
+			if injected {
+				source = "injected"
+			}
+			t.Run(tt.name+"/"+source, func(t *testing.T) {
+				cfg := config.DefaultConfig()
+				cfg.Security.Autonomy.Profile = tt.profile
+				cfg.Security.ToolPermissions = config.ToolPermissionsConfig{Allow: tt.allow, Deny: tt.deny}
+				srv := NewServer(cfg, &mockEngine{}, nil, nil)
+				if injected {
+					srv.SetToolPermissions(engine.NewToolPermissions(tt.allow, tt.deny))
+				}
+				hook := engine.NewPermissionHook(engine.NewPermissionHub(0),
+					engine.WithSystemDispatchPolicy(engine.NewSystemDispatchPolicyFromConfig(cfg.Security.Autonomy)),
+				)
+				srv.SetAutonomy(hook, nil, nil, "")
+				err := srv.authorizeWorkflowConnectorTool("wf-profile", toolName)
+				if tt.wantErr == "" {
+					if err != nil {
+						t.Fatalf("全权限不应被旧静态规则拦截: %v", err)
+					}
+					return
+				}
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("受限档应保留静态规则 %q，得到: %v", tt.wantErr, err)
+				}
+			})
+		}
+	}
+}

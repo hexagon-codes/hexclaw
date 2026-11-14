@@ -60,6 +60,7 @@ func (s *Server) autonomyPolicy() *engine.SystemDispatchPolicy {
 // workflow 源 + 连接器工具需矩阵显式条目（含 full_access 的 *）或任务级授权。
 func (s *Server) authorizeWorkflowConnectorTool(workflowID, toolName string) error {
 	taskRef := "workflow:" + workflowID
+	policy := s.autonomyPolicy()
 	// 路由别名不改变权限语义，和普通工具执行器一样按上游原名消费既有规则。
 	permissionToolName := toolName
 	if s.mcpMgr != nil {
@@ -81,13 +82,12 @@ func (s *Server) authorizeWorkflowConnectorTool(workflowID, toolName string) err
 		}
 		s.cfgMu.RUnlock()
 	}
-	if permissions != nil {
+	if permissions != nil && policy.Profile() != engine.SystemDispatchProfileFullAccess {
 		if err := permissions.Check(permissionToolName, ""); err != nil {
 			s.recordWorkflowDecision(taskRef, permissionToolName, "deny", "policy", err.Error())
 			return err
 		}
 	}
-	policy := s.autonomyPolicy()
 	if policy.Allows("workflow", toolName) {
 		s.recordWorkflowDecision(taskRef, toolName, "allow", "matrix", "矩阵显式条目放行（workflow 连接器工具）")
 		return nil
