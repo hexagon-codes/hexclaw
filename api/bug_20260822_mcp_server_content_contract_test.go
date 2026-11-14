@@ -5,11 +5,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
-	"github.com/hexagon-codes/hexagon"
-	"github.com/hexagon-codes/hexagon/testing/mock"
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/config"
 	hexmcp "github.com/hexagon-codes/hexclaw/mcp"
@@ -18,20 +17,21 @@ import (
 // BUG-20260723-009/010：MCP 服务器列表必须返回可直接投影到 UI 的结构化内容，
 // 但不能把 stdio command、args、env 或凭据带回 Desktop。
 func TestHandleListMCPServers_ReturnsRedactedStructuredProjection(t *testing.T) {
-	origConnect := hexagon.ConnectMCPStdioWithEnv
-	hexagon.ConnectMCPStdioWithEnv = func(context.Context, string, map[string]string, ...string) ([]hexagon.Tool, func(), error) {
-		return []hexagon.Tool{mock.NewTool("read_file")}, func() {}, nil
+	command, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
 	}
-	t.Cleanup(func() { hexagon.ConnectMCPStdioWithEnv = origConnect })
+	args := []string{"-test.run=^TestMCPAPIProcessFixture$", "--", "-y", "@modelcontextprotocol/server-filesystem", "--token", "ARG_SECRET"}
+	env := map[string]string{"HEXCLAW_MCP_API_FIXTURE": "healthy", "FILESYSTEM_PASSWORD": "ENV_SECRET"}
 
 	mgr := hexmcp.NewManager()
 	t.Cleanup(mgr.Close)
 	if _, err := mgr.AddServerBestEffort(context.Background(), hexmcp.ServerConfig{
 		Name:      "filesystem",
 		Transport: "stdio",
-		Command:   "npx",
-		Args:      []string{"-y", "@modelcontextprotocol/server-filesystem", "--token", "ARG_SECRET"},
-		Env:       map[string]string{"FILESYSTEM_PASSWORD": "ENV_SECRET"},
+		Command:   command,
+		Args:      args,
+		Env:       env,
 	}); err != nil {
 		t.Fatalf("AddServerBestEffort: %v", err)
 	}
@@ -40,9 +40,9 @@ func TestHandleListMCPServers_ReturnsRedactedStructuredProjection(t *testing.T) 
 	cfg.MCP.Servers = []config.MCPServerConfig{{
 		Name:      "filesystem",
 		Transport: "stdio",
-		Command:   "npx",
-		Args:      []string{"-y", "@modelcontextprotocol/server-filesystem", "--token", "ARG_SECRET"},
-		Env:       map[string]string{"FILESYSTEM_PASSWORD": "ENV_SECRET"},
+		Command:   command,
+		Args:      args,
+		Env:       env,
 		Enabled:   true,
 	}}
 	srv := NewServer(cfg, &mockEngine{reply: &adapter.Reply{Content: "ok"}}, nil, nil)
@@ -77,7 +77,7 @@ func TestHandleListMCPServers_ReturnsRedactedStructuredProjection(t *testing.T) 
 	if strings.TrimSpace(server.Description) == "" {
 		t.Fatal("server description must be non-empty")
 	}
-	for _, secret := range []string{"npx", "@modelcontextprotocol/server-filesystem", "--token", "ARG_SECRET", "FILESYSTEM_PASSWORD", "ENV_SECRET"} {
+	for _, secret := range []string{command, "npx", "@modelcontextprotocol/server-filesystem", "--token", "ARG_SECRET", "FILESYSTEM_PASSWORD", "ENV_SECRET"} {
 		if strings.Contains(w.Body.String(), secret) {
 			t.Fatalf("server projection leaked %q: %s", secret, w.Body.String())
 		}
@@ -85,11 +85,10 @@ func TestHandleListMCPServers_ReturnsRedactedStructuredProjection(t *testing.T) 
 }
 
 func TestHandleAddMCPServer_UpdatesStructuredProjectionTransport(t *testing.T) {
-	origConnect := hexagon.ConnectMCPStdioWithEnv
-	hexagon.ConnectMCPStdioWithEnv = func(context.Context, string, map[string]string, ...string) ([]hexagon.Tool, func(), error) {
-		return nil, func() {}, nil
+	command, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
 	}
-	t.Cleanup(func() { hexagon.ConnectMCPStdioWithEnv = origConnect })
 
 	cfg := config.DefaultConfig()
 	mgr := hexmcp.NewManager()
@@ -97,7 +96,17 @@ func TestHandleAddMCPServer_UpdatesStructuredProjectionTransport(t *testing.T) {
 	srv := NewServer(cfg, &mockEngine{reply: &adapter.Reply{Content: "ok"}}, nil, nil)
 	srv.SetMCPManager(mgr)
 
-	add := httptest.NewRequest(http.MethodPost, "/api/v1/mcp/servers", strings.NewReader(`{"name":"redis","transport":"stdio","command":"npx"}`))
+	body, err := json.Marshal(addMCPServerRequest{
+		Name:      "redis",
+		Transport: "stdio",
+		Command:   command,
+		Args:      []string{"-test.run=^TestMCPAPIProcessFixture$"},
+		Env:       map[string]string{"HEXCLAW_MCP_API_FIXTURE": "healthy"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	add := httptest.NewRequest(http.MethodPost, "/api/v1/mcp/servers", strings.NewReader(string(body)))
 	addResponse := httptest.NewRecorder()
 	srv.handleAddMCPServer(addResponse, add)
 	if addResponse.Code != http.StatusOK {
