@@ -23,7 +23,8 @@ func TestGeminiCatalogCapabilities(t *testing.T) {
 	srv.handleFetchProviderModels(w, httptest.NewRequest(http.MethodPost, "/api/v1/config/llm/models", strings.NewReader(`{"base_url":"`+upstream.URL+`/v1beta","api_key":"fixture"}`)))
 	var body struct {
 		Models []struct {
-			Capabilities *[]string `json:"capabilities"`
+			Capabilities                *[]string `json:"capabilities"`
+			CapabilitiesMetadataPresent bool      `json:"capabilities_metadata_present"`
 		} `json:"models"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil || len(body.Models) != 5 {
@@ -34,8 +35,9 @@ func TestGeminiCatalogCapabilities(t *testing.T) {
 			t.Fatalf("model %d capabilities=%v", i, body.Models[i].Capabilities)
 		}
 	}
-	if body.Models[4].Capabilities != nil {
-		t.Fatal("model name was treated as a capability")
+	unknown := body.Models[4]
+	if unknown.Capabilities == nil || len(*unknown.Capabilities) != 0 || unknown.CapabilitiesMetadataPresent {
+		t.Fatal("unknown model must keep an empty, undeclared capability set")
 	}
 }
 
