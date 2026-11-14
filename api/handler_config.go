@@ -1014,28 +1014,6 @@ func (s *Server) updateLLMConfig(w http.ResponseWriter, r *http.Request, req LLM
 			return
 		}
 		nextLLM.Default = req.Default
-	} else if req.Providers != nil {
-		provider, exists := nextLLM.Providers[nextLLM.Default]
-		if !exists || (provider.Enabled != nil && !*provider.Enabled) ||
-			!config.ModelHasCapability(provider, provider.Model, config.LLMModelCapabilityText) {
-			// 空默认保留有效旧选择；删除或停用原模型后只协调到已有有效文本选择。
-			nextLLM.Default = ""
-			names := make([]string, 0, len(nextLLM.Providers))
-			for name := range nextLLM.Providers {
-				names = append(names, name)
-			}
-			sort.Strings(names)
-			for _, name := range names {
-				candidate := nextLLM.Providers[name]
-				if candidate.Enabled != nil && !*candidate.Enabled {
-					continue
-				}
-				if config.ModelHasCapability(candidate, candidate.Model, config.LLMModelCapabilityText) {
-					nextLLM.Default = name
-					break
-				}
-			}
-		}
 	}
 
 	if req.Routing != nil {
@@ -1048,18 +1026,6 @@ func (s *Server) updateLLMConfig(w http.ResponseWriter, r *http.Request, req LLM
 	if req.DefaultReasoningPolicy != nil {
 		nextLLM.DefaultReasoningPolicy = *req.DefaultReasoningPolicy
 	}
-	if err := reconcileReasoningSelection(oldLLM, &nextLLM, req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
-	}
-	if defaultProvider, exists := nextLLM.Providers[nextLLM.Default]; exists {
-		if defaultProvider.Model == "" || !config.ModelHasCapability(defaultProvider, defaultProvider.Model, config.LLMModelCapabilityText) {
-			writeJSON(w, http.StatusBadRequest, map[string]string{
-				"error": fmt.Sprintf("default provider %q 必须选择包含 text capability 的 model", nextLLM.Default),
-			})
-			return
-		}
-	}
 	if joint != nil {
 		var targetErr error
 		nextOllama, nextLLM, targetErr = s.prepareOllamaTargetUpdate(*joint, oldOllama, nextLLM)
@@ -1070,11 +1036,62 @@ func (s *Server) updateLLMConfig(w http.ResponseWriter, r *http.Request, req LLM
 		base, _ := nextOllama.Resolve(s.ollamaBaseURL)
 		mutationProof.targetRevision = nextOllama.TargetRevision
 		mutationProof.targetDigest = nextOllama.Digest(base)
+	} else {
+		nextOllama = reconcileOllamaProviderAssociations(oldOllama, &nextLLM)
+	}
+	// 联合目标更新完成后只解析一次最终执行快照；声明和回执投影始终分离。
+	effectiveLLM := nextLLM
+	effectiveLLM.Providers = make(map[string]config.LLMProviderConfig, len(nextLLM.Providers))
+	for name, provider := range nextLLM.Providers {
+		effective := s.ResolveEffectiveProviderModelSpecs(r.Context(), name, provider)
+		effectiveLLM.Providers[name] = effective
+		if provider.Model != "" && !config.ModelHasCapability(effective, provider.Model, config.LLMModelCapabilityText) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": fmt.Sprintf("provider %q model %q does not have text capability for the current configuration", name, provider.Model),
+			})
+			return
+		}
+	}
+	if req.Default == "" && req.Providers != nil {
+		provider, exists := effectiveLLM.Providers[nextLLM.Default]
+		if !exists || (provider.Enabled != nil && !*provider.Enabled) ||
+			!config.ModelHasCapability(provider, provider.Model, config.LLMModelCapabilityText) {
+			nextLLM.Default = ""
+			names := make([]string, 0, len(effectiveLLM.Providers))
+			for name := range effectiveLLM.Providers {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			for _, name := range names {
+				candidate := effectiveLLM.Providers[name]
+				if candidate.Enabled != nil && !*candidate.Enabled {
+					continue
+				}
+				if config.ModelHasCapability(candidate, candidate.Model, config.LLMModelCapabilityText) {
+					nextLLM.Default = name
+					break
+				}
+			}
+		}
+	}
+	effectiveLLM.Default = nextLLM.Default
+	if err := reconcileReasoningSelection(oldLLM, &effectiveLLM, req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	nextLLM.ReasoningProvider, nextLLM.ReasoningModel = effectiveLLM.ReasoningProvider, effectiveLLM.ReasoningModel
+	if defaultProvider, exists := effectiveLLM.Providers[nextLLM.Default]; exists {
+		if defaultProvider.Model == "" || !config.ModelHasCapability(defaultProvider, defaultProvider.Model, config.LLMModelCapabilityText) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": fmt.Sprintf("default provider %q 必须选择包含 text capability 的 model", nextLLM.Default),
+			})
+			return
+		}
+	}
+	if joint != nil {
 		before, _ := digestLLMConfig(oldLLM)
 		after, _ := digestLLMConfig(nextLLM)
 		mutationProof.preserveRevision = before == after
-	} else {
-		nextOllama = reconcileOllamaProviderAssociations(oldOllama, &nextLLM)
 	}
 	mutationResponse, err := finalizeLLMConfigMutation(oldLLM, &nextLLM, mutationProof)
 	if err != nil {

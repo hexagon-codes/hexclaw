@@ -333,7 +333,8 @@ func (c *Config) Validate() error {
 		}
 	}
 	if defaultProvider, exists := c.LLM.Providers[c.LLM.Default]; exists {
-		if defaultProvider.Model == "" || !ModelHasCapability(defaultProvider, defaultProvider.Model, LLMModelCapabilityText) {
+		if defaultProvider.Model == "" || (!ModelHasCapability(defaultProvider, defaultProvider.Model, LLMModelCapabilityText) &&
+			!deferSelectedTextCapabilityValidation(defaultProvider, defaultProvider.Model)) {
 			errs = append(errs, &ValidationError{
 				Field:   "llm.default",
 				Value:   c.LLM.Default,

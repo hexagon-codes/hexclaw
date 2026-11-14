@@ -176,7 +176,8 @@ func resolveProviderCapabilitySources(providerKey string, candidate *config.LLMP
 	for index := range candidate.ModelSpecs {
 		spec := &candidate.ModelSpecs[index]
 		previous, existed := oldSpecs[spec.ID]
-		if existed && reflect.DeepEqual(spec.Capabilities, previous.Capabilities) && previous.CapabilitiesMetadataPresent {
+		if existed && (spec.CapabilitiesSource == "" || spec.CapabilitiesSource == previous.CapabilitiesSource) &&
+			reflect.DeepEqual(spec.Capabilities, previous.Capabilities) && previous.CapabilitiesMetadataPresent {
 			spec.CapabilitiesMetadataPresent = true
 		}
 		if spec.CapabilitiesSource == "" {
@@ -191,13 +192,7 @@ func resolveProviderCapabilitySources(providerKey string, candidate *config.LLMP
 			}
 		}
 		automatic := spec.CapabilitiesSource == config.LLMModelCapabilitiesSourceCatalog || spec.CapabilitiesSource == config.LLMModelCapabilitiesSourcePreset
-		if existed && automatic && (previous.CapabilitiesSource == config.LLMModelCapabilitiesSourceManual || previous.CapabilitiesSource == config.LLMModelCapabilitiesSourceLegacyUnknown) {
-			spec.CapabilitiesSource = previous.CapabilitiesSource
-			spec.CapabilitiesSourceFingerprint = previous.CapabilitiesSourceFingerprint
-			spec.Capabilities = append([]string{}, previous.Capabilities...)
-			spec.CapabilitiesMetadataPresent = previous.CapabilitiesMetadataPresent
-			automatic = false
-		}
+		// 非空来源随显式模型规格一起提交，表示调用方明确替换声明；缺省来源仍沿上方保留旧值。
 		if automatic {
 			if spec.CapabilitiesSourceFingerprint == "" {
 				spec.CapabilitiesSourceFingerprint = ModelCapabilityProbeConfigFingerprint(providerKey, *candidate, spec.ID)

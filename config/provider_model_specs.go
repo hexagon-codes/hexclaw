@@ -520,10 +520,27 @@ func ValidateProviderModelSpecs(provider LLMProviderConfig) error {
 		}
 	}
 
-	if provider.Model != "" && !ModelHasCapability(provider, provider.Model, LLMModelCapabilityText) {
+	if provider.Model != "" && !ModelHasCapability(provider, provider.Model, LLMModelCapabilityText) &&
+		!deferSelectedTextCapabilityValidation(provider, provider.Model) {
 		return fmt.Errorf("model %q 必须指向包含 text capability 的模型", provider.Model)
 	}
 	return nil
+}
+
+// 自动来源的未知声明可保存已有选择；配置加载不读取 SQLite 回执，不能将其误判为结构错误。
+// 这不授予文本能力，配置提交及实际执行仍需当前来源匹配的有效能力。
+func deferSelectedTextCapabilityValidation(provider LLMProviderConfig, modelID string) bool {
+	if _, embeddingOnly := MigrateOpenRouterEmbeddingModelSpec(modelID); embeddingOnly {
+		return false
+	}
+	_, specs := NormalizeProviderModelSpecs(provider)
+	for _, spec := range specs {
+		if spec.ID != modelID || len(spec.Capabilities) != 0 || strings.TrimSpace(spec.CapabilitiesSourceFingerprint) == "" {
+			continue
+		}
+		return spec.CapabilitiesSource == LLMModelCapabilitiesSourceCatalog || spec.CapabilitiesSource == LLMModelCapabilitiesSourcePreset
+	}
+	return false
 }
 
 // normalizeReasoningSupport 只处理旧配置缺省值，不从 provider 或 model 名称推断能力。
