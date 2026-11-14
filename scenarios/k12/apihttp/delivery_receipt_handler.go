@@ -13,6 +13,7 @@ type tutoringTipsSendReq struct {
 	Agent               string `json:"agent"`
 	FinalArtifactID     string `json:"final_artifact_id"`
 	FinalArtifactDigest string `json:"final_artifact_digest,omitempty"`
+	SourceReceiptID     string `json:"source_receipt_id,omitempty"`
 }
 
 // sendTutoringTips sends only the canonical frozen grading final_artifact.
@@ -27,6 +28,21 @@ func (h *handler) sendTutoringTips(w http.ResponseWriter, r *http.Request) {
 	req.FinalArtifactDigest = strings.TrimSpace(req.FinalArtifactDigest)
 	if req.Agent == "" || req.FinalArtifactID == "" {
 		writeErr(w, http.StatusBadRequest, "agent / final_artifact_id required")
+		return
+	}
+	if strings.TrimSpace(req.SourceReceiptID) != "" {
+		owner, ok := h.authorizeImageTaskAgent(w, r, req.Agent)
+		if !ok {
+			return
+		}
+		batch, _, err := h.rt.Deps.PrepareAndSendInboundPhotoFinalExact(
+			r.Context(), owner, req.Agent, req.FinalArtifactID, req.FinalArtifactDigest, req.SourceReceiptID,
+		)
+		if err != nil {
+			writeDeliveryError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, batch)
 		return
 	}
 	batch, _, err := h.rt.Deps.PrepareAndSendGradingFinalArtifactExact(

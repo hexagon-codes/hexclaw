@@ -48,6 +48,59 @@ func (d Deps) PrepareAndSendGradingFinalArtifactExact(
 		finalArtifact.ArtifactID+":"+finalArtifact.ArtifactDigest, finalArtifact.ArtifactID, finalArtifact.ArtifactDigest, DeliveryMessage{}, nil)
 }
 
+// PrepareAndSendInboundPhotoFinalExact 接续原入站来源的精确终稿，只向原会话当前仍有效的物理绑定投递。
+// ownerScope 来自调用者认证；不修改原入站、旧批次或既有全目标发送合同，同一来源及终稿复用冻结批次。
+func (d Deps) PrepareAndSendInboundPhotoFinalExact(ctx context.Context, ownerScope, agentName, finalID, expectedDigest, sourceReceiptID string) (k12.DeliveryBatch, bool, error) {
+	ownerScope, agentName = strings.TrimSpace(ownerScope), strings.TrimSpace(agentName)
+	finalID, expectedDigest, sourceReceiptID = strings.TrimSpace(finalID), strings.TrimSpace(expectedDigest), strings.TrimSpace(sourceReceiptID)
+	if d.Records == nil || ownerScope == "" || agentName == "" || finalID == "" || expectedDigest == "" || sourceReceiptID == "" {
+		return k12.DeliveryBatch{}, false, fmt.Errorf("%w: source reply identity is incomplete", ErrInvalidInput)
+	}
+	bundle, err := d.Records.GetInboundPhoto(ctx, agentName, sourceReceiptID)
+	if err != nil {
+		return k12.DeliveryBatch{}, false, err
+	}
+	if bundle.Receipt.OwnerScope != ownerScope || bundle.Dispatch.ImageTaskID == "" {
+		return k12.DeliveryBatch{}, false, records.ErrNotFound
+	}
+	taskOwner, err := d.Records.GetImageTaskOwnerScope(ctx, agentName, bundle.Dispatch.ImageTaskID)
+	if err != nil {
+		return k12.DeliveryBatch{}, false, err
+	}
+	if taskOwner != ownerScope {
+		return k12.DeliveryBatch{}, false, records.ErrNotFound
+	}
+	artifact, err := d.getExactGradingFinalArtifact(ctx, agentName, finalID, expectedDigest)
+	if err != nil {
+		return k12.DeliveryBatch{}, false, err
+	}
+	job, err := d.GetGradingJob(ctx, agentName, artifact.JobID)
+	if err != nil {
+		return k12.DeliveryBatch{}, false, err
+	}
+	dispatchID, err := gradingFinalImageTaskDispatchID(job)
+	if err != nil || dispatchID != bundle.Dispatch.ImageTaskID {
+		return k12.DeliveryBatch{}, false, fmt.Errorf("%w: final artifact does not belong to the source image task", ErrInvalidInput)
+	}
+	transport, ok := d.Delivery.(BatchDeliveryTransport)
+	if !ok {
+		return k12.DeliveryBatch{}, false, ErrDeliveryUnavailable
+	}
+	targets, err := transport.ResolveTextTargets(ctx, agentName)
+	if err != nil {
+		return k12.DeliveryBatch{}, false, err
+	}
+	identity := bundle.Receipt.Identity
+	for _, target := range targets {
+		if target.Target.Platform == identity.Platform && target.Target.InstanceID == identity.InstanceID && target.Target.ChatID == identity.ChatID {
+			objectID := "source-reply:" + sourceReceiptID + ":" + artifact.ArtifactID + ":" + artifact.ArtifactDigest
+			return d.PrepareAndSendK12FinalReplyBatch(ctx, agentName, "dingtalk_photo_grading_reply", objectID,
+				artifact.ArtifactID, artifact.ArtifactDigest, DeliveryMessage{}, []ResolvedDeliveryTarget{target})
+		}
+	}
+	return k12.DeliveryBatch{}, false, ErrNoActiveDirectBindings
+}
+
 // K12FinalReplyReadableCharacters 只数用户可见字符，不把链接目标、图片字节或排版语法算作正文。
 func K12FinalReplyReadableCharacters(markdown string) int {
 	return utf8.RuneCountInString(mathtext.PlainMarkdownText(markdown))

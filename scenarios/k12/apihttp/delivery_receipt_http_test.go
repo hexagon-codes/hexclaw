@@ -193,3 +193,21 @@ func TestTutoringTipsSendUsesTheSameDurableReceiptProtocol(t *testing.T) {
 		t.Fatalf("tutoring-tips must freeze Markdown and annotated image receipts: sends=%d", len(delivery.sends))
 	}
 }
+
+func TestTutoringTipsSourceReceiptContract(t *testing.T) {
+	transport := &httpBatchTransport{}
+	h := newServerWithReceiptTransport(t, transport)
+	for _, tc := range []struct {
+		body string
+		code int
+	}{
+		{`{"agent":"mingming","final_artifact_id":"frozen-final","final_artifact_digest":"digest","source_receipt_id":"missing-source"}`, http.StatusNotFound},
+		{`{"agent":"mingming","final_artifact_id":"frozen-final","source_receipt_id":"missing-source"}`, http.StatusBadRequest},
+		{`{"agent":"mingming","final_artifact_id":"frozen-final","source_receipt_id":"missing-source","chat_id":"another-chat"}`, http.StatusBadRequest},
+	} {
+		rec, _ := do(t, h, http.MethodPost, "/tutoring-tips/send", tc.body)
+		if rec.Code != tc.code || len(transport.sends) != 0 {
+			t.Fatalf("source receipt contract: status=%d want=%d sends=%d", rec.Code, tc.code, len(transport.sends))
+		}
+	}
+}
