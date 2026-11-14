@@ -1826,6 +1826,10 @@ func (e *ReActEngine) completeObservedRuntimeFailure(ctx context.Context, sessio
 		}
 		observedBlocks = kept
 	}
+	// 私有推理剥离后没有可见观察时，只返回原执行错误，不制造空助手记录。
+	if content == "" && len(observedBlocks) == 0 && len(calls) == 0 {
+		return nil, executionErr
+	}
 	if nextCtx, nextContent, err := e.prepareMediaReply(finishCtx, msg, metadata, content); err == nil {
 		finishCtx, content = nextCtx, nextContent
 	} else {

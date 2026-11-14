@@ -65,7 +65,7 @@ func (e *ReActEngine) processDirectMedia(ctx context.Context, msg *adapter.Messa
 	}
 	if op.CancelRequested {
 		mediaflow.CancelRequest(ctx)
-		return nil, fmt.Errorf("media operation %s: cancel requested", op.ID)
+		return nil, fmt.Errorf("media operation %s: %w", op.ID, requestcancel.ErrUserCancelled)
 	}
 	if op.SaveState != "ready" {
 		return nil, fmt.Errorf("media operation %s: %s", op.ID, op.ErrorCode)
