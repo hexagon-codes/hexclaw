@@ -814,6 +814,9 @@ func recognizedQuestionRequiresGuardianConfirmationForInitialReadMode(question R
 			question.EvidenceTranscriptions = nil
 			question.OCRSignals = nil
 			for _, signal := range receipt.Evidence.OCRSignals {
+				if handwritingOnlySourceSignal(signal) {
+					continue
+				}
 				switch strings.ToLower(strings.TrimSpace(signal)) {
 				case "erasure", "erasure_detected", "unclear_handwriting", "source_gap_handwriting":
 				default:

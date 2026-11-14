@@ -11,6 +11,18 @@ func TestImageScopePrintedProofIgnoresUnrelatedHandwritingOnlyForSolve(t *testin
 	confidence := .72
 	q := NormalizeRecognizedQuestionForInitialReadMode(RecognizedQuestion{Question: "内金水河像玉带。", RawTranscription: "内金水河像玉带。", CanonicalMarkdown: "内金水河像玉带。", Subject: "语文", AnswerState: AnswerStateUnclear, StudentAnswer: "原有手写", AnswerRawTranscription: "原有手写", RecognitionConfidence: &confidence, EvidenceTranscriptions: []string{"内金水河像玉带。", "金水河像玉带。"}, AnswerEvidenceTranscriptions: []string{"甲", "乙"}, OCRSignals: []string{"evidence_conflict", "unclear_handwriting"}, ImageSourceContext: &k12.RecognitionImageSourceContextV1{Version: k12.RecognitionImageScopeVersionV1, Action: "solve", ScopeDigest: "plan", TargetIDs: []string{"target"}, PrintedQuestionReceipt: &k12.RecognitionPrintedQuestionReceiptV1{Evidence: k12.RecognitionPrintedQuestionEvidenceV1{RawTranscription: "内金水河像玉带。", Confidence: .99, MatchedQuestionPrior: "primary"}, PlanDigest: "plan", CandidateID: "target", AuthorizationID: "authorization", SettlementDigest: "settlement"}}}, k12.RecognitionLayoutManifestWithContentV1)
 	before := cloneRecognizedQuestions([]RecognizedQuestion{q})[0]
+	for _, action := range []string{"", "solve"} {
+		copy := cloneRecognizedQuestions([]RecognizedQuestion{q})[0]
+		copy.ImageSourceContext.Action = action
+		copy.ImageSourceContext.PrintedQuestionReceipt.Evidence.OCRSignals = []string{"第二处手写填空字形不清，无法可靠转写。"}
+		original := cloneRecognizedQuestions([]RecognizedQuestion{copy})[0]
+		if !independentReferenceAnswerEligible(PhotoGradeRequest{InitialReadMode: k12.RecognitionLayoutManifestWithContentV1}, copy) {
+			t.Fatalf("clear printed reference blocked by handwriting, action=%q", action)
+		}
+		if !recognizedQuestionRequiresGuardianConfirmationForInitialReadMode(copy, PhotoTaskCompletedHomework, k12.RecognitionLayoutManifestWithContentV1) || !reflect.DeepEqual(copy, original) {
+			t.Fatal("reference eligibility changed original answer or grading risk")
+		}
+	}
 	if recognizedQuestionRequiresGuardianConfirmationForInitialReadMode(q, PhotoTaskBlankWorksheet, k12.RecognitionLayoutManifestWithContentV1) {
 		t.Fatal("verified printed question blocked by handwriting")
 	}
@@ -34,6 +46,9 @@ func TestImageScopePrintedProofIgnoresUnrelatedHandwritingOnlyForSolve(t *testin
 		}
 		if !recognizedQuestionRequiresGuardianConfirmationForInitialReadMode(copy, PhotoTaskBlankWorksheet, k12.RecognitionLayoutManifestWithContentV1) {
 			t.Fatalf("%s passed", scenario)
+		}
+		if independentReferenceAnswerEligible(PhotoGradeRequest{InitialReadMode: k12.RecognitionLayoutManifestWithContentV1}, copy) {
+			t.Fatalf("%s authorized an independent reference", scenario)
 		}
 	}
 	for _, signal := range []string{"source_gap_instruction", "印刷题干右侧被裁切，缺少条件", "evidence_conflict"} {

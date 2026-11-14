@@ -15,6 +15,13 @@ const unclearHandwritingReferenceWarning = "The handwriting could not be reliabl
 
 // 只在求解评估副本中移除学生作答风险；题干、父材料与缺损来源仍须独立可靠。
 func independentReferenceAnswerEligible(req PhotoGradeRequest, q RecognizedQuestion) bool {
+	if q.Subject == "语文" && q.ImageSourceContext != nil && q.ImageSourceContext.PrintedQuestionReceipt != nil &&
+		(len(req.PracticeReferences) == 0 || req.practiceReference != nil) {
+		// 批改中的参考解复用已持久核验的印刷证明，原作答与批改风险保持。
+		printed := cloneRecognizedQuestions([]RecognizedQuestion{q})[0]
+		printed.ImageSourceContext.Action = "solve"
+		return !recognizedQuestionRequiresGuardianConfirmationForInitialReadMode(printed, PhotoTaskBlankWorksheet, req.InitialReadMode)
+	}
 	if q.parentSourceUnclear || q.RecognitionConfidence == nil || *q.RecognitionConfidence < ocrConfidenceConfirmationThreshold ||
 		strings.TrimSpace(q.RawTranscription) == "" || !CanonicalMarkdownValid(q.CanonicalMarkdown) ||
 		len(req.PracticeReferences) > 0 && req.practiceReference == nil {

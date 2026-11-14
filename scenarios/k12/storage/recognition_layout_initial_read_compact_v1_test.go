@@ -21,6 +21,9 @@ func compactInitialReadStorageFixtureV1(t *testing.T, raw string, executionPolic
 	var scope *k12.RecognitionImageScopeV1
 	if len(executionPolicies) > 1 && executionPolicies[1] == "upright_printed" {
 		scopeInput = &k12.RecognitionImageScopeInputV1{Version: k12.RecognitionImageScopeVersionV1, Action: "solve", SourceReviewPolicy: k12.RecognitionImageSourceUprightReviewPolicyV1, SourceComparisonPolicy: k12.RecognitionImageSourceComparisonPolicyV1}
+		if len(executionPolicies) > 2 && executionPolicies[2] == "automatic_grading" {
+			scopeInput.Action = ""
+		}
 		scope = &k12.RecognitionImageScopeV1{Version: k12.RecognitionImageScopeVersionV1, Source: "explicit", SelectedOrders: []int{1, 2}, Basis: "current request", Dependencies: []k12.RecognitionImageScopeDependencyV1{}, Excluded: []k12.RecognitionImageScopeExclusionV1{}}
 		var envelope map[string]json.RawMessage
 		if json.Unmarshal([]byte(raw), &envelope) != nil {

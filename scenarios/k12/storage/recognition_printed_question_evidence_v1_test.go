@@ -9,9 +9,9 @@ import (
 )
 
 func TestPrintedQuestionReceiptPreservesAnswerAndColdReplay(t *testing.T) {
-	for _, scenario := range []string{"verified", "incomplete source", "changed words", "source risk"} {
+	for _, scenario := range []string{"verified", "automatic grading", "incomplete source", "changed words", "source risk"} {
 		t.Run(scenario, func(t *testing.T) {
-			f := newFinalAnswerStorageFixtureV1(t, k12.RecognitionExecutionPolicyCompactDAGFinalAnswerV2, false, false, true)
+			f := newFinalAnswerStorageFixtureV1(t, k12.RecognitionExecutionPolicyCompactDAGFinalAnswerV2, false, false, true, scenario == "automatic grading")
 			raw := strings.ReplaceAll(finalAnswerStorageRawV1(t, f.question), "数学", "语文")
 			if scenario == "source risk" {
 				raw = strings.Replace(raw, `"ocr_signals":["中间步骤笔画不明确。"]`, `"ocr_signals":["source_gap_instruction","印刷题干右侧被裁切"]`, 1)
@@ -32,7 +32,7 @@ func TestPrintedQuestionReceiptPreservesAnswerAndColdReplay(t *testing.T) {
 			in := f.settlementInput(t, raw, nil)
 			in.PrintedQuestionEvidence = proof
 			_, created, err := f.store.SettleRecognitionLayoutAdjudicationV2(t.Context(), f.parent.AgentName, f.parent.InvocationID, in)
-			if scenario != "verified" && scenario != "source risk" {
+			if scenario != "verified" && scenario != "automatic grading" && scenario != "source risk" {
 				if err == nil || created {
 					t.Fatal("unproved printed text settled")
 				}

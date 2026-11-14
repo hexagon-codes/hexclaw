@@ -45,6 +45,9 @@ func newFinalAnswerStorageFixtureV1(t *testing.T, policy string, conflictingQues
 	if len(sameReadings) > 1 && sameReadings[1] {
 		raw = []byte(strings.ReplaceAll(string(raw), "数学", "语文"))
 		opts = append(opts, "upright_printed")
+		if len(sameReadings) > 2 && sameReadings[2] {
+			opts = append(opts, "automatic_grading")
+		}
 	}
 	f := compactInitialReadStorageFixtureV1(t, string(raw), opts...)
 	if policy == k12.RecognitionExecutionPolicyCompactDAGFinalAnswerV2 {
