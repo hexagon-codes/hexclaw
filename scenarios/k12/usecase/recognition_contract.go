@@ -742,6 +742,11 @@ func RecognitionSourceReadingsMatchForInitialReadMode(prior, review RecognizedQu
 	prior, review = normalizeRecognizedQuestionFacts(prior), normalizeRecognizedQuestionFacts(review)
 	prior.RawTranscription = k12.RecognitionQuestionSourceTextV1(prior.RawTranscription, prior.SourceNumberPath, prior.DisplayLabel)
 	review.RawTranscription = k12.RecognitionQuestionSourceTextV1(review.RawTranscription, review.SourceNumberPath, review.DisplayLabel)
+	if prior.Subject == "数学" && review.Subject == "数学" {
+		// 空列式线只表示未填写区域；比较副本保留真实算式、下标和原始观察。
+		prior.RawTranscription = mathWorkLineSuffix.ReplaceAllString(strings.TrimSpace(prior.RawTranscription), "$1")
+		review.RawTranscription = mathWorkLineSuffix.ReplaceAllString(strings.TrimSpace(review.RawTranscription), "$1")
+	}
 	question = strings.TrimSpace(prior.RawTranscription) != "" && strings.TrimSpace(review.RawTranscription) != "" &&
 		!evidenceTranscriptionsConflict(review.RawTranscription, []string{prior.RawTranscription, review.RawTranscription}, "")
 	if !question && strings.TrimSpace(prior.RawTranscription) != "" && strings.TrimSpace(review.RawTranscription) != "" &&

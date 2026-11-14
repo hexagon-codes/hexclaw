@@ -1,6 +1,7 @@
 package usecase
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"reflect"
@@ -11,6 +12,47 @@ import (
 )
 
 func float64Ptr(v float64) *float64 { return &v }
+
+func TestRecognitionMathWorkLineSourceComparisonPreservesMeaning(t *testing.T) {
+	const stem = "根据总容量是已用空间的（　）。\n列式："
+	for _, tc := range []struct {
+		name, subject, prior, review string
+		questionMatch, answerMatch   bool
+		present                      bool
+	}{
+		{"empty printed line", "数学", stem, stem + "________________", true, true, false},
+		{"different line lengths", "数学", stem + "________", stem + "________________", true, true, false},
+		{"fullwidth printed line", "数学", stem + "＿　", stem, true, true, false},
+		{"changed fraction", "数学", "占2/5\n列式：___", "占3/5\n列式：", false, true, false},
+		{"changed unit", "数学", "已用4.8 TB\n列式：___", "已用4.8 GB\n列式：", false, true, false},
+		{"changed operator", "数学", "2/5×2\n列式：___", "2/5÷2\n列式：", false, true, false},
+		{"changed negation", "数学", "不是总量\n列式：___", "是总量\n列式：", false, true, false},
+		{"real subscript", "数学", "x_1+x_2\n列式：___", "x1+x2\n列式：", false, true, false},
+		{"nonempty expression", "数学", "列式：4.8÷(2/5)____", "列式：4.8÷(2/5)", false, true, false},
+		{"shared condition remains", "数学", "已用4.8 TB\n" + stem + "___", stem, false, true, false},
+		{"other subject unchanged", "语文", stem + "___", stem, false, true, false},
+		{"different answer state", "数学", stem + "___", stem, true, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			prior := RecognizedQuestion{Subject: tc.subject, Question: tc.prior, RawTranscription: tc.prior,
+				SourceNumberPath: []string{"3", "3"}, DisplayLabel: "（3）", AnswerState: AnswerStateBlank}
+			review := prior
+			review.Question, review.RawTranscription = tc.review, tc.review
+			if tc.present {
+				review.AnswerState, review.StudentAnswer, review.AnswerRawTranscription = AnswerStatePresent, "1", "1"
+			}
+			before, _ := json.Marshal([]RecognizedQuestion{prior, review})
+			question, answer := RecognitionSourceReadingsMatchForInitialReadMode(prior, review, k12.RecognitionLayoutManifestWithContentV1)
+			if question != tc.questionMatch || answer != tc.answerMatch {
+				t.Fatalf("question/answer match=%v/%v want=%v/%v", question, answer, tc.questionMatch, tc.answerMatch)
+			}
+			after, _ := json.Marshal([]RecognizedQuestion{prior, review})
+			if !bytes.Equal(before, after) {
+				t.Fatal("comparison changed an original observation")
+			}
+		})
+	}
+}
 
 func TestRecognitionFrozenQuestionIdentityPreservesFractionGrouping(t *testing.T) {
 	const original = "9. (7/8)/(7/12)-(1/2)"
