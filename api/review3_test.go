@@ -11,6 +11,7 @@ import (
 
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/streamstate"
 )
 
 // ════════════════════════════════════════════════
@@ -489,6 +490,7 @@ func TestHandleChat_ContextCancellation(t *testing.T) {
 		cfg:          config.DefaultConfig(),
 		logCollector: NewLogCollector(10),
 		engine:       eng,
+		restStreams:  streamstate.NewRegistry(0),
 	}
 
 	body := strings.NewReader(`{"message": "hello"}`)
