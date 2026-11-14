@@ -172,6 +172,74 @@ func TestK12FinalPDFPolicyUsesVisibleCanonicalOnly(t *testing.T) {
 	}
 }
 
+func TestK12ShortFrozenDiagramRequiresExistingPDFProjection(t *testing.T) {
+	image := "![示意图](asset://mingming/" + strings.Repeat("a", 64) + ".svg)"
+	for _, artifact := range []k12.GradingFinalArtifact{
+		{CanonicalMarkdown: "# 指南\n\n" + image},
+		{CanonicalMarkdown: "# 指南", TeachingReport: &k12.TeachingReport{DeepSections: []k12.TeachingReportDeepSection{
+			{Diagrams: []k12.TeachingDiagramAsset{{AssetID: "asset://mingming/" + strings.Repeat("a", 64) + ".svg"}}},
+		}}},
+	} {
+		if K12FinalReplyReadableCharacters(artifact.CanonicalMarkdown) >= FinalReplyPDFMinCharacters {
+			t.Fatal("fixture is not a short reply")
+		}
+		if !k12FinalReplyUsesPDF(artifact, k12.ImageTaskIntentCompletedHomework) {
+			t.Fatal("required frozen diagram was left in a direct IM body")
+		}
+	}
+}
+
+func TestK12ShortFrozenDiagramPDFPreparesBeforeSendingSQLite(t *testing.T) {
+	for _, mode := range []string{"ready", "render_failed", "media_failed"} {
+		t.Run(mode, func(t *testing.T) {
+			svg := []byte(`<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><rect width="40" height="20"/></svg>`)
+			sum := sha256.Sum256(svg)
+			id := "asset://mingming/" + hex.EncodeToString(sum[:]) + ".svg"
+			d, artifact, _ := seedGradingFinalDeliveryArtifact(t, "# 作业批改结果\n\n完整讲法\n\n![容量图]("+id+")")
+			stored, err := d.Records.PutTeachingDiagramAsset(t.Context(), artifact.AnnotatedAssetOwnerScope, artifact.AgentName, svg, d.now())
+			if err != nil || stored != id {
+				t.Fatalf("store frozen diagram: %s %v", stored, err)
+			}
+			renderer := &finalReplyPDFRenderer{}
+			if mode == "render_failed" {
+				renderer.err = errors.New("required diagram PDF renderer unavailable")
+			}
+			d.Renderer = renderer
+			transport := newFinalReplyHTTPTransport(t, d.Records)
+			if mode == "media_failed" {
+				transport.uploadStatus = 400
+			}
+			d.Delivery = transport
+			batch, _, err := d.PrepareAndSendGradingFinalArtifactExact(t.Context(), artifact.AgentName, artifact.ArtifactID, artifact.ArtifactDigest)
+			if mode != "ready" {
+				if err == nil || len(transport.sends) != 0 {
+					t.Fatal("failed required rendering reached a visible send")
+				}
+				if mode == "media_failed" {
+					transport.uploadStatus = 200
+					retried, _, retryErr := d.PrepareAndSendGradingFinalArtifactExact(t.Context(), artifact.AgentName, artifact.ArtifactID, artifact.ArtifactDigest)
+					if retryErr != nil || retried.BatchID != batch.BatchID || retried.Status != k12.DeliveryBatchDelivered || len(transport.sends) != 3 || renderer.calls != 1 {
+						t.Fatalf("known media failure did not reuse its frozen PDF plan: %s %v", retried.Status, retryErr)
+					}
+				}
+				return
+			}
+			if err != nil || batch.Status != k12.DeliveryBatchDelivered || len(transport.sends) != 3 ||
+				transport.sends[0].PartKind != messagecontent.PartMarkdown || transport.sends[1].PartMIME != "image/png" || transport.sends[2].PartMIME != "application/pdf" {
+				t.Fatalf("short diagram delivery has an incomplete part set: %s %v", batch.Status, err)
+			}
+			if !strings.Contains(renderer.markdown, "data:image/svg+xml;base64,") || !strings.Contains(renderer.markdown, "data:image/png;base64,") {
+				t.Fatal("PDF preparation lost the frozen diagram or annotated original")
+			}
+			renders, sends := renderer.calls, len(transport.sends)
+			again, _, err := d.PrepareAndSendGradingFinalArtifactExact(t.Context(), artifact.AgentName, artifact.ArtifactID, artifact.ArtifactDigest)
+			if err != nil || again.BatchID != batch.BatchID || renderer.calls != renders || len(transport.sends) != sends {
+				t.Fatal("replay repeated visible work")
+			}
+		})
+	}
+}
+
 type finalReplyHTTPTransport struct {
 	gradingFinalDeliveryTransport
 	store          *k12storage.Store

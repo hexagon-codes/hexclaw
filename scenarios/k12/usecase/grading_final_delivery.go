@@ -54,10 +54,26 @@ func K12FinalReplyReadableCharacters(markdown string) int {
 }
 
 func k12FinalReplyUsesPDF(artifact k12.GradingFinalArtifact, intent k12.ImageTaskIntent) bool {
+	if k12FinalReplyHasTeachingDiagram(artifact) {
+		return true
+	}
 	if intent != k12.ImageTaskIntentBlankWorksheet && intent != k12.ImageTaskIntentCompletedHomework {
 		return false
 	}
 	return FinalReplyUsesPDF(artifact.CanonicalMarkdown, intent == k12.ImageTaskIntentBlankWorksheet && artifact.TotalCount > 1)
+}
+
+// 冻结教学图必须通过现有PDF资源投影，不能作为内部地址交给IM客户端。
+func k12FinalReplyHasTeachingDiagram(artifact k12.GradingFinalArtifact) bool {
+	if artifact.TeachingReport != nil {
+		for _, section := range artifact.TeachingReport.DeepSections {
+			if len(section.Diagrams) > 0 {
+				return true
+			}
+		}
+		return false
+	}
+	return frozenTeachingDiagramImage.MatchString(artifact.CanonicalMarkdown)
 }
 
 // K12FinalArtifactPDFTitle 由冻结标题与冻结日期派生文件名，不使用内部任务身份。
@@ -184,6 +200,15 @@ func (d Deps) PrepareAndSendK12FinalReplyBatch(ctx context.Context, agentName, o
 		return k12.DeliveryBatch{}, false, errors.New("final artifact digest mismatch")
 	}
 	existing, lookupErr := d.GetK12FinalReplyBatch(ctx, agentName, objectKind, objectID)
+	if lookupErr == nil && k12FinalReplyHasTeachingDiagram(artifact) && k12storage.PDFPreparationFallbackAllowed(existing) {
+		// 只有原计划零发送且准备已知失败时，才接续冻结PDF；不重排载荷或目标。
+		reset, resetErr := d.Records.RetryKnownFinalReplyPreparation(ctx, existing.AgentName, existing.BatchID)
+		if resetErr != nil {
+			return existing, false, resetErr
+		}
+		result, sendErr := d.sendDeliveryBatch(ctx, reset)
+		return result, false, sendErr
+	}
 	if lookupErr == nil && (strings.HasSuffix(existing.ObjectID, ":"+k12.DeliveryProjectionVersionIMFinalPDFV1) ||
 		!k12storage.PDFPreparationFallbackAllowed(existing)) {
 		return d.resumeFinalReplyBatch(ctx, existing)
@@ -235,13 +260,19 @@ func (d Deps) PrepareAndSendK12FinalReplyBatch(ctx context.Context, agentName, o
 		if err != nil {
 			return k12.DeliveryBatch{}, false, err
 		}
-		req := FinalReplyDeliveryRequest{AgentName: agentName, ObjectKind: objectKind, ObjectID: objectID, SourceKind: k12.PrintSourceGradingFinalArtifact, SourceRef: artifact.ArtifactID + ":" + artifact.ArtifactDigest, Title: K12FinalArtifactPDFTitle(artifact), Message: full, Producer: messagecontent.ProducerK12, Locale: locale, Document: explicitDocument || intent == k12.ImageTaskIntentBlankWorksheet && artifact.TotalCount > 1, Summary: k12FinalReplySummary(artifact, intent), DingTalkSuffix: disclosure}
+		req := FinalReplyDeliveryRequest{AgentName: agentName, ObjectKind: objectKind, ObjectID: objectID, SourceKind: k12.PrintSourceGradingFinalArtifact, SourceRef: artifact.ArtifactID + ":" + artifact.ArtifactDigest, Title: K12FinalArtifactPDFTitle(artifact), Message: full, Producer: messagecontent.ProducerK12, Locale: locale, Document: explicitDocument || k12FinalReplyUsesPDF(artifact, intent), Summary: k12FinalReplySummary(artifact, intent), DingTalkSuffix: disclosure}
 		hasDing := false
 		for _, target := range targets {
 			hasDing = hasDing || target.Target.Platform == "dingtalk"
 		}
 		if hasDing && FinalReplyUsesPDF(full.Content, req.Document) {
 			pdf, _, prepareErr := d.PrepareGradingFinalArtifactPDFExact(ctx, agentName, finalID, expectedDigest, req.Title)
+			if prepareErr != nil && k12FinalReplyHasTeachingDiagram(artifact) {
+				return k12.DeliveryBatch{}, false, prepareErr
+			}
+			if prepareErr == nil && k12FinalReplyHasTeachingDiagram(artifact) && len(pdf.Render.Payload) > messagecontent.DingTalkMaxOutboundPDFBytes {
+				return k12.DeliveryBatch{}, false, fmt.Errorf("%w: required teaching diagram PDF exceeds DingTalk file budget", ErrRenderUnavailable)
+			}
 			if prepareErr == nil {
 				req.PDF = &pdf
 				req.GradingImageInPDF = intent == k12.ImageTaskIntentCompletedHomework
@@ -274,6 +305,12 @@ func (d Deps) PrepareAndSendK12FinalReplyBatch(ctx context.Context, agentName, o
 	if allDing && (explicitDocument || k12FinalReplyUsesPDF(artifact, intent)) {
 		objectID += ":" + imageFinalPDFRenderContractVersion
 		pdf, _, prepareErr := d.PrepareGradingFinalArtifactPDFExact(ctx, agentName, finalID, expectedDigest, K12FinalArtifactPDFTitle(artifact))
+		if prepareErr != nil && k12FinalReplyHasTeachingDiagram(artifact) {
+			return k12.DeliveryBatch{}, false, prepareErr
+		}
+		if prepareErr == nil && k12FinalReplyHasTeachingDiagram(artifact) && len(pdf.Render.Payload) > messagecontent.DingTalkMaxOutboundPDFBytes {
+			return k12.DeliveryBatch{}, false, fmt.Errorf("%w: required teaching diagram PDF exceeds DingTalk file budget", ErrRenderUnavailable)
+		}
 		if prepareErr == nil && len(pdf.Render.Payload) <= messagecontent.DingTalkMaxOutboundPDFBytes {
 			message.Content = k12FinalReplySummary(artifact, intent)
 			if suffix := strings.TrimSpace(strings.TrimPrefix(full.Content, artifact.CanonicalMarkdown)); suffix != "" {
@@ -576,6 +613,10 @@ func deliveryBatchResolvedTargets(batch k12.DeliveryBatch) []ResolvedDeliveryTar
 }
 
 func (d Deps) sendK12FinalReplyFallback(ctx context.Context, source k12.DeliveryBatch, full DeliveryMessage, targets []ResolvedDeliveryTarget) (k12.DeliveryBatch, bool, error) {
+	if (source.ObjectKind == k12.PrintSourceGradingFinalArtifact || source.ObjectKind == "dingtalk_photo_grading_reply") && frozenTeachingDiagramImage.MatchString(full.Content) {
+		// 原全文仍含内部教学图时，不创建无法直投的退路；原PDF计划保留供已知失败重试。
+		return source, false, fmt.Errorf("%w: frozen teaching diagrams require their PDF delivery", ErrRenderUnavailable)
+	}
 	plan, err := d.buildPreparedMessageBatch(ctx, source.AgentName, source.ObjectKind, source.ObjectID, full, targets)
 	if err != nil {
 		return source, false, err
