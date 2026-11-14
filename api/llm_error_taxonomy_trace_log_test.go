@@ -16,6 +16,7 @@ import (
 	"github.com/hexagon-codes/hexagon/observe/trace"
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/streamstate"
 )
 
 const chatTraceRawProviderBody = `{"error":{"message":"provider-body-must-not-reach-chat-trace","prompt":"prompt-must-not-reach-chat-trace","completion":"model-content-must-not-reach-chat-trace"}}`
@@ -38,8 +39,9 @@ func TestChatHTTPTraceLogRedactsProviderError(t *testing.T) {
 	t.Cleanup(func() { slog.SetDefault(previousDefault) })
 
 	srv := &Server{
-		cfg:    config.DefaultConfig(),
-		engine: &mockEngine{err: chatTraceProviderError()},
+		cfg:         config.DefaultConfig(),
+		engine:      &mockEngine{err: chatTraceProviderError()},
+		restStreams: streamstate.NewRegistry(0),
 	}
 	w := httptest.NewRecorder()
 	srv.handleChat(w, httptest.NewRequest(http.MethodPost, "/api/v1/chat", strings.NewReader(`{"message":"hello"}`)))
