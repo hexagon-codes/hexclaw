@@ -6,12 +6,12 @@ import (
 	"testing"
 )
 
-// 渲染环境变化只建立新的打印身份，旧请求的身份不随时间变化。
-func TestPrintArtifactRenderSpecSeparatesNewIdentityAndPreservesLegacy(t *testing.T) {
+// 投影与渲染环境变化建立新身份，同一规格不随时间变化。
+func TestPrintArtifactProjectionAndRenderSpecSeparateNewIdentity(t *testing.T) {
 	legacy := PreparePrintableArtifactRequest{AgentName: "mingming", SourceKind: "grading_final_artifact", SourceRef: "final_artifact:final:source:teaching-report:bundle", Title: "报告", CanonicalMarkdown: "# 报告\n答案：2"}
 	old := buildPrintArtifact(legacy, 100)
-	if old.ArtifactID != "part-1a10829aa2a3e6248c320f74" {
-		t.Fatalf("pre-spec fixture identity changed: %s", old.ArtifactID)
+	if old.ArtifactID == "part-1a10829aa2a3e6248c320f74" {
+		t.Fatal("updated answer projection reused the prior frozen PDF identity")
 	}
 	if old.ArtifactID != buildPrintArtifact(legacy, 200).ArtifactID {
 		t.Fatal("legacy identity changed with rendering time")

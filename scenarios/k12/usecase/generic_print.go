@@ -25,7 +25,7 @@ const imageFinalPDFRenderContractVersion = k12storage.ImageFinalPDFRenderContrac
 
 func printArtifactRenderContract(sourceRef string) string {
 	if strings.Contains(sourceRef, ":teaching-report:") {
-		return "k12-teaching-report-v2"
+		return "k12-teaching-report-v3"
 	}
 	if strings.HasPrefix(sourceRef, "weekly-track:") && strings.HasSuffix(sourceRef, ":"+weeklyConsolidationWorkbookRenderVersion) {
 		return weeklyConsolidationWorkbookRenderVersion

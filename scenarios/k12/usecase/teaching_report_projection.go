@@ -99,7 +99,12 @@ func projectTeachingReportPDF(report k12.TeachingReport, branding TeachingReport
 			if value.Label != "" {
 				answer = append(answer, reportText(value.Label+"："))
 			}
-			answer = append(answer, b.value(value.Text, value.LaTeX)...)
+			text := value.Text
+			// 答案区已有加粗字重，只移除完整成对的外层标记，不解析其它正文。
+			if len(text) > 4 && strings.HasPrefix(text, "**") && strings.HasSuffix(text, "**") && strings.Count(text, "**") == 2 {
+				text = text[2 : len(text)-2]
+			}
+			answer = append(answer, b.value(text, value.LaTeX)...)
 			for _, condition := range value.Conditions {
 				answer = append(answer, reportText("（"+condition+"）"))
 			}
