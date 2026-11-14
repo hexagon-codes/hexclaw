@@ -38,7 +38,9 @@ func TestBug20260622_ManualTriggerAlwaysRuns(t *testing.T) {
 				t.Fatalf("GetJobHistory: %v", err)
 			}
 			n = len(h)
-			if n >= want {
+			// 历史写入后仍有世代校验与投递，下一次手动运行须等本次完整退出。
+			_, busy := s.running.Load(job.ID)
+			if n >= want && !busy {
 				return n
 			}
 			time.Sleep(50 * time.Millisecond)
@@ -60,6 +62,6 @@ func TestBug20260622_ManualTriggerAlwaysRuns(t *testing.T) {
 	}
 	got := waitHistory(2)
 	if got != 2 {
-		t.Errorf("第二次手动触发应再落一条历史 (共 2), got %d —— 手动触发被 claimJob 静默吞掉", got)
+		t.Errorf("second manual trigger must add another completed history (want 2), got %d", got)
 	}
 }
