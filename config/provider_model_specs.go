@@ -432,8 +432,9 @@ func modelSpecHasCapabilities(spec LLMProviderModelSpec, required []string) bool
 	return true
 }
 
-// ValidateProviderModelSpecs rejects ambiguous or internally inconsistent
-// capability declarations before config persistence or runtime hot reload.
+// ValidateProviderModelSpecs 校验能力声明的结构及已知能力一致性。
+// 自动来源的未知选择可延后文本能力判定；保存与执行入口仍须结合当前来源回执校验，
+// 本函数不会因结构校验通过而授予文本能力。
 func ValidateProviderModelSpecs(provider LLMProviderConfig) error {
 	switch strings.ToLower(strings.TrimSpace(provider.APIProtocol)) {
 	case "", "auto", "responses", "chat_completions":
