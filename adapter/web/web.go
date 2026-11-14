@@ -929,7 +929,11 @@ func (a *WebAdapter) handleWS(w http.ResponseWriter, r *http.Request) {
 				a.addSubscriber(incoming.RequestID, chatID)
 				chunks, err := a.streamHandler(ctx, msg)
 				if err != nil {
-					if a.streams != nil && (!errors.Is(err, context.Canceled) || !errors.Is(context.Cause(ctx), requestcancel.ErrUserCancelled)) {
+					if errors.Is(err, context.Canceled) && errors.Is(context.Cause(ctx), requestcancel.ErrUserCancelled) {
+						// 源已退出，由统一收口发布真实取消快照，不先发送普通失败帧。
+						return
+					}
+					if a.streams != nil {
 						a.streams.Fail(incoming.RequestID, err)
 					}
 					trace.L(ctx).Error("流式处理失败", "err", err)
@@ -1398,13 +1402,20 @@ func (a *WebAdapter) sendToTargets(ctx context.Context, chatID, requestID string
 	if requestID == "" {
 		return a.writeMessage(ctx, chatID, msg)
 	}
+	// 请求取消不能中断已开始的帧写入并关闭共享连接；原截止时间继续约束传输。
+	writeCtx := context.WithoutCancel(ctx)
+	if deadline, ok := ctx.Deadline(); ok {
+		var stop context.CancelFunc
+		writeCtx, stop = context.WithDeadline(writeCtx, deadline)
+		defer stop()
+	}
 	value, ok := a.requestConns.Load(requestID)
 	if !ok {
-		return a.writeMessage(ctx, chatID, msg)
+		return a.writeMessage(writeCtx, chatID, msg)
 	}
 	var firstErr error
 	for _, targetID := range value.(*requestSubscribers).Snapshot() {
-		if err := a.writeMessage(ctx, targetID, msg); err != nil && firstErr == nil {
+		if err := a.writeMessage(writeCtx, targetID, msg); err != nil && firstErr == nil {
 			if requestcancel.IsRetained(ctx) && !requestcancel.IsExplicit(ctx) {
 				continue
 			}

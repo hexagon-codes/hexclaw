@@ -1,11 +1,14 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,6 +19,37 @@ import (
 	"nhooyr.io/websocket"
 	"nhooyr.io/websocket/wsjson"
 )
+
+type frameWriteBarrierListener struct {
+	net.Listener
+	wrap func(net.Conn) net.Conn
+}
+
+func (l frameWriteBarrierListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return l.wrap(conn), nil
+}
+
+type frameWriteBarrierConn struct {
+	net.Conn
+	started chan struct{}
+	release <-chan struct{}
+	once    sync.Once
+}
+
+func (c *frameWriteBarrierConn) Write(data []byte) (int, error) {
+	n, err := c.Conn.Write(data)
+	if err == nil && bytes.Contains(data, []byte("首帧")) {
+		c.once.Do(func() {
+			close(c.started)
+			<-c.release
+		})
+	}
+	return n, err
+}
 
 func TestWebAdapter_ResumeRetainsEmptyCanonicalArtifact(t *testing.T) {
 	ref := messagecontent.AttachmentRef{AssetID: "stdout-ref", Name: "stdout.bin", MIME: "application/octet-stream", Digest: "sha256:" + strings.Repeat("b", 64), AltText: "stdout.bin"}
@@ -166,11 +200,15 @@ func TestWebAdapter_StreamChunkErrorIsSanitized(t *testing.T) {
 	}
 }
 
-func dialWebAdapter(t *testing.T, a *WebAdapter) (*websocket.Conn, context.Context, context.CancelFunc) {
+func dialWebAdapter(t *testing.T, a *WebAdapter, wrappers ...func(net.Conn) net.Conn) (*websocket.Conn, context.Context, context.CancelFunc) {
 	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		a.Handler().ServeHTTP(w, r.WithContext(skill.WithAuthenticatedUser(r.Context(), "desktop-user")))
 	}))
+	if len(wrappers) != 0 {
+		srv.Listener = frameWriteBarrierListener{Listener: srv.Listener, wrap: wrappers[0]}
+	}
+	srv.Start()
 	t.Cleanup(srv.Close)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -265,7 +303,13 @@ func TestWebAdapter_CancelSuppressesLateStreamTerminal(t *testing.T) {
 		return chunks, nil
 	})
 
-	conn, ctx, _ := dialWebAdapter(t, a)
+	writeStarted, releaseWrite := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseWrite) }) }
+	conn, ctx, _ := dialWebAdapter(t, a, func(conn net.Conn) net.Conn {
+		return &frameWriteBarrierConn{Conn: conn, started: writeStarted, release: releaseWrite}
+	})
+	t.Cleanup(release)
 	if err := wsjson.Write(ctx, conn, wsMessage{
 		Type: "message", Content: "cancel late", SessionID: "sess-cancel-late", RequestID: "req-cancel-late", UserID: "desktop-user",
 	}); err != nil {
@@ -279,6 +323,11 @@ func TestWebAdapter_CancelSuppressesLateStreamTerminal(t *testing.T) {
 	}
 	if first.Content != "首帧" || first.Done {
 		t.Fatalf("first chunk = %+v", first)
+	}
+	select {
+	case <-writeStarted:
+	case <-ctx.Done():
+		t.Fatal("first frame write did not reach the controlled return window")
 	}
 
 	if err := wsjson.Write(ctx, conn, wsMessage{
@@ -299,6 +348,7 @@ func TestWebAdapter_CancelSuppressesLateStreamTerminal(t *testing.T) {
 	// 源退出后只发布真实取消快照，迟到成功内容不能覆盖已接收的部分回复。
 	chunks <- &adapter.ReplyChunk{Content: "late success", Done: true}
 	close(chunks)
+	release()
 
 	readCtx, cancelRead := context.WithTimeout(context.Background(), time.Second)
 	defer cancelRead()
@@ -308,6 +358,35 @@ func TestWebAdapter_CancelSuppressesLateStreamTerminal(t *testing.T) {
 	}
 	if late.Type != "stream_snapshot" || !late.Done || late.Status != string(streamstate.StatusCancelled) || late.Content != "首帧" {
 		t.Fatalf("cancellation terminal = %+v", late)
+	}
+}
+
+func TestWebAdapter_CancelWhileOpeningStreamKeepsCancellationTerminal(t *testing.T) {
+	a := New()
+	started := make(chan struct{})
+	a.SetStreamHandler(func(ctx context.Context, _ *adapter.Message) (<-chan *adapter.ReplyChunk, error) {
+		close(started)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+	conn, ctx, _ := dialWebAdapter(t, a)
+	if err := wsjson.Write(ctx, conn, wsMessage{Type: "message", Content: "cancel before stream", SessionID: "sess-cancel-opening", RequestID: "req-cancel-opening"}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-ctx.Done():
+		t.Fatal("stream did not start")
+	}
+	if err := wsjson.Write(ctx, conn, wsMessage{Type: "cancel", SessionID: "sess-cancel-opening", RequestID: "req-cancel-opening"}); err != nil {
+		t.Fatal(err)
+	}
+	var terminal wsMessage
+	if err := wsjson.Read(ctx, conn, &terminal); err != nil {
+		t.Fatal(err)
+	}
+	if terminal.Type != "stream_snapshot" || terminal.Status != string(streamstate.StatusCancelled) || !terminal.Done {
+		t.Fatalf("user cancellation became an error frame: %+v", terminal)
 	}
 }
 
