@@ -677,8 +677,13 @@ func (o *GradingOrchestrator) runLoop(ctx context.Context, run *gradingRun, jobI
 			}
 			o.publishPhotoGradingCache(ctx, run, v)
 			return v, nil
+		case k12.GradingStageFailedRetryable, k12.GradingStageFailedTerminal:
+			if v.Fields.FailedStage == k12.GradingStageRendering && v.Fields.FailureKind == "annotated_image_render_failed" {
+				return v, fmt.Errorf("required annotated image is unavailable")
+			}
+			return v, nil
 		default:
-			// completed / cancelled / failed_retryable / failed_terminal：推进结束。
+			// cancelled / outcome_unknown 等停点只返回当前状态，不启动工作。
 			return v, nil
 		}
 	}

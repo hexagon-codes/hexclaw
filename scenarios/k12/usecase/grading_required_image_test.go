@@ -222,6 +222,33 @@ func TestRequiredAnnotatedImageRenderRetryUsesOnlyDurableAssessments(t *testing.
 	}
 }
 
+func TestRequiredAnnotatedImageFailedCheckpointKeepsErrorWithoutRerender(t *testing.T) {
+	rec := &countingRecognizer{questions: []RecognizedQuestion{{Question: "1+1=", Subject: "数学", StudentAnswer: "3"}}}
+	anchor := &photoAnchorerFake{boxes: map[int]BBox{0: {X: .2, Y: .3, W: .1, H: .05}}}
+	renderer := &requiredImageAnnotator{}
+	o := newOrchestrator(t, rec, anchor, renderer)
+	o.deps.GradingBudgetSnapshot = requiredImageBudgetForTest(t)
+	solver := &requiredImageSolverCounter{Solver: o.deps.Solver}
+	grader := &requiredImageGraderCounter{Grader: o.deps.Grader}
+	o.deps.Solver, o.deps.Grader = solver, grader
+	job := startOrchestratorJob(t, o, "required-render-checkpoint")
+	if _, err := o.RunGradingJob(t.Context(), job.Record.RecordID); err != nil {
+		t.Fatal(err)
+	}
+	failed, _ := o.ConfirmAndRun(t.Context(), job.Record.RecordID, nil)
+	if failed.Record.Status != k12.GradingStageFailedRetryable || renderer.calls != 1 {
+		t.Fatal("fixture did not reach the required image failure checkpoint")
+	}
+	beforeSolver, beforeGrader := solver.calls, grader.calls
+	observed, err := o.RunGradingJob(t.Context(), job.Record.RecordID)
+	if err == nil || observed.Record.Status != k12.GradingStageFailedRetryable || observed.Fields.FailureKind != "annotated_image_render_failed" {
+		t.Fatalf("known failed checkpoint lost its error: stage=%s err=%v", observed.Record.Status, err)
+	}
+	if renderer.calls != 1 || rec.calls != 1 || solver.calls != beforeSolver || grader.calls != beforeGrader {
+		t.Fatal("reading the failed checkpoint restarted physical work")
+	}
+}
+
 func requiredImageBudgetForTest(t *testing.T) k12.GradingBudgetSnapshot {
 	t.Helper()
 	raw, err := json.Marshal(orchestratorTestBudget())
