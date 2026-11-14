@@ -39,6 +39,40 @@ func TestPreprocessMarkdown_DataURLPreserved(t *testing.T) {
 	}
 }
 
+func TestPreprocessMarkdown_CodeExamplesRemainLiteral(t *testing.T) {
+	cases := []struct{ name, input string }{
+		{"fenced relative", "```markdown\n![example](./example.png)\n```\n"},
+		{"fenced file", "```markdown\n![example](file:///tmp/example.png)\n```\n"},
+		{"tilde fence", "~~~markdown\n![example](file:///tmp/example.png)\n~~~\n"},
+		{"unclosed fence", "```markdown\n![example](file:///tmp/example.png)\n"},
+		{"indented", "    ![example](file:///tmp/example.png)\n"},
+		{"inline", "Use `![example](file:///tmp/example.png)` as an example."},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := PreprocessMarkdown(context.Background(), tc.input, PreprocessConfig{})
+			if err != nil || got != tc.input {
+				t.Fatalf("code example changed: got %q, err %v, want %q", got, err, tc.input)
+			}
+		})
+	}
+	const input = "![outside](./example.png)\n\n```markdown\n![inside](./example.png)\n```\n"
+	const want = "outside\n\n```markdown\n![inside](./example.png)\n```\n"
+	got, err := PreprocessMarkdown(context.Background(), input, PreprocessConfig{})
+	if err != nil || got != want {
+		t.Fatalf("mixed image references = %q, %v; want %q", got, err, want)
+	}
+}
+
+func TestResolveImageReferences_CodeExamplesRemainLiteral(t *testing.T) {
+	const input = "![outside](example.png)\n\n```markdown\n![fenced](example.png)\n```\n\n`![inline](example.png)`\n\n    ![indented](example.png)\n"
+	const data = "data:image/png;base64,aGVsbG8="
+	const want = "![outside](" + data + ")\n\n```markdown\n![fenced](example.png)\n```\n\n`![inline](example.png)`\n\n    ![indented](example.png)\n"
+	if got := ResolveImageReferences(input, map[string]string{"example.png": data}); got != want {
+		t.Fatalf("resolved references = %q, want %q", got, want)
+	}
+}
+
 func TestPreprocessMarkdown_FileURLRejected(t *testing.T) {
 	cases := []string{
 		"![](file:///etc/passwd)",

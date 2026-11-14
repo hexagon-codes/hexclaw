@@ -10,11 +10,15 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/hexagon-codes/hexclaw/httpua"
 	"github.com/hexagon-codes/toolkit/net/ssrf"
+	"github.com/yuin/goldmark"
+	"github.com/yuin/goldmark/ast"
+	"github.com/yuin/goldmark/text"
 )
 
 // PreprocessConfig 预处理配置。
@@ -34,19 +38,70 @@ type PreprocessConfig struct {
 var imageRefPattern = regexp.MustCompile(
 	`!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)`)
 
+// markdownImageReferenceIndexes 保留源字节位置，排除代码中的图片示例。
+// 语法树只识别代码区间，不重新序列化正文、公式或图片标题。
+func markdownImageReferenceIndexes(content string) [][]int {
+	references := imageRefPattern.FindAllStringSubmatchIndex(content, -1)
+	if len(references) == 0 {
+		return nil
+	}
+	document := goldmark.New().Parser().Parse(text.NewReader([]byte(content)))
+	var code []text.Segment
+	_ = ast.Walk(document, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
+		if !entering {
+			return ast.WalkContinue, nil
+		}
+		switch node.(type) {
+		case *ast.CodeBlock, *ast.FencedCodeBlock:
+			if fence, ok := node.(*ast.FencedCodeBlock); ok && fence.Info != nil {
+				code = append(code, fence.Info.Segment)
+			}
+			for i := 0; i < node.Lines().Len(); i++ {
+				code = append(code, node.Lines().At(i))
+			}
+			return ast.WalkSkipChildren, nil
+		case *ast.CodeSpan:
+			for child := node.FirstChild(); child != nil; child = child.NextSibling() {
+				if value, ok := child.(*ast.Text); ok {
+					code = append(code, value.Segment)
+				}
+			}
+			return ast.WalkSkipChildren, nil
+		}
+		return ast.WalkContinue, nil
+	})
+	sort.Slice(code, func(i, j int) bool { return code[i].Start < code[j].Start })
+	result := references[:0]
+	position := 0
+	for _, reference := range references {
+		for position < len(code) && code[position].Stop <= reference[0] {
+			position++
+		}
+		if position < len(code) && code[position].Start <= reference[0] {
+			continue
+		}
+		result = append(result, reference)
+	}
+	return result
+}
+
 // ResolveImageReferences 只替换宿主已解析的精确图片别名，不读取文件或发起下载。
 func ResolveImageReferences(content string, sources map[string]string) string {
-	return imageRefPattern.ReplaceAllStringFunc(content, func(match string) string {
-		groups := imageRefPattern.FindStringSubmatchIndex(match)
-		if len(groups) < 6 {
-			return match
+	if len(sources) == 0 {
+		return content
+	}
+	var out strings.Builder
+	previous := 0
+	for _, reference := range markdownImageReferenceIndexes(content) {
+		start, end := reference[4], reference[5]
+		if resolved, ok := sources[content[start:end]]; ok {
+			out.WriteString(content[previous:start])
+			out.WriteString(resolved)
+			previous = end
 		}
-		start, end := groups[4], groups[5]
-		if resolved, ok := sources[match[start:end]]; ok {
-			return match[:start] + resolved + match[end:]
-		}
-		return match
-	})
+	}
+	out.WriteString(content[previous:])
+	return out.String()
 }
 
 // PreprocessMarkdown 对 markdown 中的图片引用做预处理：
@@ -70,30 +125,20 @@ func PreprocessMarkdown(ctx context.Context, content string, cfg PreprocessConfi
 		client = newSafeHTTPClient(cfg.PerImageTimeout)
 	}
 
-	// ReplaceAllStringFunc 不能传 error；用回调累积错误
-	var firstErr error
-	out := imageRefPattern.ReplaceAllStringFunc(content, func(match string) string {
-		if firstErr != nil {
-			return match
-		}
-		groups := imageRefPattern.FindStringSubmatch(match)
-		if len(groups) < 3 {
-			return match
-		}
-		alt, rawURL := groups[1], groups[2]
-
+	var out strings.Builder
+	previous := 0
+	for _, reference := range markdownImageReferenceIndexes(content) {
+		alt, rawURL := content[reference[2]:reference[3]], content[reference[4]:reference[5]]
 		replacement, err := processImageRef(ctx, alt, rawURL, client, cfg.MaxImageBytes)
 		if err != nil {
-			firstErr = err
-			return match
+			return "", err
 		}
-		return replacement
-	})
-
-	if firstErr != nil {
-		return "", firstErr
+		out.WriteString(content[previous:reference[0]])
+		out.WriteString(replacement)
+		previous = reference[1]
 	}
-	return out, nil
+	out.WriteString(content[previous:])
+	return out.String(), nil
 }
 
 // processImageRef 按图片来源类型分发处理。返回替换后的 markdown 片段。
