@@ -1,10 +1,40 @@
 package main
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 )
+
+func TestK12RecognizingDefaultKeepsNewAndFrozenBudgetsSeparate(t *testing.T) {
+	next := k12GradingBudgetSnapshotFromConfig(config.DefaultK12GradingBudget())
+	if err := next.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for _, count := range []int{2, 5, 8} {
+		_, millis, err := next.RecognizingBuckets.Select(count)
+		if err != nil || millis != 300_000 || next.StageSeconds.Recognizing != 300 {
+			t.Fatalf("new %d-item recognizing budget: %d, %v", count, millis, err)
+		}
+	}
+	_, single, _ := next.RecognizingBuckets.Select(1)
+	if single != 180_000 || next.PhysicalCallCapMillis != 120_000 || next.EffectiveConcurrency != 2 ||
+		next.RecognizingBuckets.UpTo16ProblemsMillis != 300_000 || next.RecognizingBuckets.UpTo32ProblemsMillis != 300_000 {
+		t.Fatal("unrelated recognizing limits changed")
+	}
+	prior := next
+	prior.RecognizingBuckets.UpTo8ProblemsMillis = 180_000
+	raw, err := json.Marshal(prior)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restored k12.GradingBudgetSnapshot
+	if err := json.Unmarshal(raw, &restored); err != nil || restored.Validate() != nil || restored.RecognizingBuckets.UpTo8ProblemsMillis != 180_000 {
+		t.Fatal("frozen prior recognizing budget was changed")
+	}
+}
 
 func TestK12GradingBudgetSnapshotFromConfigPreservesReleaseEvidence(t *testing.T) {
 	cfg := config.K12GradingBudgetConfig{
