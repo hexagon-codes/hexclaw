@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/hexagon-codes/hexclaw/config"
@@ -33,6 +34,9 @@ func TestLLMModelSelection_ConfigSaveUsesCurrentEffectiveCapability(t *testing.T
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
+			for _, name := range []string{"DEEPSEEK_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "QWEN_API_KEY", "GEMINI_API_KEY"} {
+				t.Setenv(name, "")
+			}
 			store := bug20260728OpenStore(t)
 			cfg := bug20260728ProviderConfig()
 			provider := cfg.LLM.Providers["custom"]
@@ -105,6 +109,53 @@ func TestLLMModelSelection_ConfigSaveUsesCurrentEffectiveCapability(t *testing.T
 				t.Fatal("saved selection lost its independently persisted current proof")
 			}
 		})
+	}
+}
+
+func TestLLMModelSelection_JointTargetCannotReusePreviousTargetProof(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store := bug20260728OpenStore(t)
+	cfg := bug20260728ProviderConfig()
+	provider := cfg.LLM.Providers["custom"]
+	provider.BaseURL, provider.OllamaTargetBaseURL = "http://127.0.0.1:11300/v1", "http://127.0.0.1:11300"
+	provider.Model, provider.Models = "pending", []string{"pending"}
+	provider.ModelSpecs = []config.LLMProviderModelSpec{{ID: "pending", Capabilities: []string{}, CapabilitiesSource: "catalog"}}
+	provider.ModelSpecs[0].CapabilitiesSourceFingerprint = ModelCapabilityProbeConfigFingerprint("custom", provider, "pending")
+	cfg.LLM.Providers["custom"] = provider
+	cfg.Ollama = config.OllamaTargetConfig{Mode: "custom", CustomBaseURL: provider.OllamaTargetBaseURL,
+		AssociatedProviderInstanceIDs: []string{provider.ProviderInstanceID}}
+	if _, err := store.SaveModelCapabilityProbeReceipt(context.Background(), &storage.ModelCapabilityProbeReceipt{
+		ProviderInstanceID: provider.ProviderInstanceID, ModelID: "pending", ProbeKind: "text",
+		ConfigFingerprint:  provider.ModelSpecs[0].CapabilitiesSourceFingerprint,
+		ProbePolicyVersion: ModelCapabilityProbePolicyVersion, Outcome: "passed", TestedAt: 1, ProbeStartedAt: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	srv := NewServer(cfg, &mockEngine{activeLLM: cfg.LLM}, nil, store)
+	if !config.ModelHasCapability(srv.ResolveEffectiveProviderModelSpecs(context.Background(), "custom", provider), "pending", "text") {
+		t.Fatal("previous target fixture must have a matching positive receipt")
+	}
+	revision := cfg.Ollama.TargetRevision
+	digest := cfg.Ollama.Digest(provider.OllamaTargetBaseURL)
+	configRevision := cfg.LLM.ConfigRevision
+	configDigest, err := digestLLMConfig(cfg.LLM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := cfg.Ollama
+	target.CustomBaseURL = "http://127.0.0.1:11301"
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/config", nil)
+	req.Header.Set("Idempotency-Key", "selected-model-target-update")
+	srv.updateLLMConfig(recorder, req, LLMConfigUpdateRequest{}, &ollamaTargetUpdateRequest{
+		Ollama: &target, ExpectedTargetRevision: &revision, ExpectedTargetDigest: &digest,
+		ExpectedConfigRevision: &configRevision, ExpectedConfigDigest: &configDigest,
+	})
+	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "text capability") {
+		t.Fatalf("changed target accepted previous target proof: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if cfg.Ollama.CustomBaseURL != provider.OllamaTargetBaseURL || cfg.LLM.Providers["custom"].BaseURL != provider.BaseURL {
+		t.Fatal("rejected joint target changed the active configuration")
 	}
 }
 

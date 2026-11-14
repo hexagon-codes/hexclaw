@@ -41,6 +41,9 @@ func TestProviderModelSelection_DeferredValidationPreservesUnknownCapability(t *
 }
 
 func TestProviderModelSelection_DeferredSelectionLoadsAndStagesWithoutChangingDeclaration(t *testing.T) {
+	for _, name := range []string{"DEEPSEEK_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "QWEN_API_KEY", "GEMINI_API_KEY"} {
+		t.Setenv(name, "")
+	}
 	cfg := DefaultConfig()
 	cfg.LLM.Default = "custom"
 	cfg.LLM.Providers = map[string]LLMProviderConfig{"custom": {
