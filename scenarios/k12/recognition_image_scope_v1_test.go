@@ -281,3 +281,54 @@ func TestRecognitionImageScopeV1PreservesGeometryAndExactSet(t *testing.T) {
 		t.Fatal("legacy projection contains new zero fields")
 	}
 }
+
+func TestRecognitionImageScopeHandwritingGapPreservesUnreadableObservation(t *testing.T) {
+	for _, tc := range []struct {
+		name, kind, before, after string
+		order                     int
+		valid                     bool
+	}{
+		{"whole handwriting unreadable", "handwriting", "", "", 1, true},
+		{"partial handwriting anchor", "handwriting", "visible fragment", "", 1, true},
+		{"instruction without anchors", "instruction", "", "", 1, false},
+		{"condition without anchors", "condition", " ", "", 1, false},
+		{"quotation without anchors", "quotation", "", "", 1, false},
+		{"visible printed anchor", "condition", "visible condition", "", 1, true},
+		{"unknown kind", "unknown", "visible", "", 1, false},
+		{"outside selected targets", "handwriting", "", "", 4, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gap := RecognitionImageSourceGapV1{Order: tc.order, Kind: tc.kind, Before: tc.before, After: tc.after}
+			input := RecognitionLayoutPlanInputV2{
+				PagePNG:  recognitionLayoutPlanTestPNG(t, 240, 220),
+				Manifest: RecognitionLayoutManifestSuccessV2{InvocationID: "three-question-page", ResultDigest: "sha256:" + strings.Repeat("a", 64)},
+				Targets:  recognitionLayoutPlanTestTargets(3), RecognitionFormat: RecognitionLayoutCompactV4,
+				InitialReadMode: RecognitionLayoutManifestWithContentV1, EnableSourceAdjudication: true,
+				ScopeInput: &RecognitionImageScopeInputV1{Version: RecognitionImageScopeVersionV1, Action: "grade"},
+				Scope: &RecognitionImageScopeV1{Version: RecognitionImageScopeVersionV1, Source: "inferred",
+					SelectedOrders: []int{1, 2, 3}, Basis: "One page contains three related questions.", Gaps: []RecognitionImageSourceGapV1{gap}},
+			}
+			plan, err := BuildRecognitionLayoutPlanV2(input)
+			if !tc.valid {
+				if err == nil {
+					t.Fatal("invalid source gap was accepted")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("source observation prevented the whole page plan: %v", err)
+			}
+			if len(plan.Targets) != 3 || len(plan.Scope.Gaps) != 1 || plan.Scope.Gaps[0] != gap {
+				t.Fatal("source gap or the other questions were changed")
+			}
+			raw, err := json.Marshal(plan)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var restored RecognitionLayoutPlanV2
+			if json.Unmarshal(raw, &restored) != nil || ValidateRecognitionLayoutPlanV2(restored) != nil || !reflect.DeepEqual(plan, restored) {
+				t.Fatal("unresolved source observation cannot survive plan restoration")
+			}
+		})
+	}
+}

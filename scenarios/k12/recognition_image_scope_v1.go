@@ -225,7 +225,8 @@ func validateRecognitionImageScopeV1(plan RecognitionLayoutPlanV2) error {
 		}
 	}
 	for _, gap := range plan.Scope.Gaps {
-		if !selected[gap.Order] || (gap.Kind != "quotation" && gap.Kind != "instruction" && gap.Kind != "condition" && gap.Kind != "handwriting") || strings.TrimSpace(gap.Before+gap.After) == "" {
+		// 整段笔迹可能没有可辨锚点，仍保留为未决观察；印刷缺口继续要求可见来源。
+		if !selected[gap.Order] || (gap.Kind != "quotation" && gap.Kind != "instruction" && gap.Kind != "condition" && gap.Kind != "handwriting") || (gap.Kind != "handwriting" && strings.TrimSpace(gap.Before+gap.After) == "") {
 			return fmt.Errorf("image source gap is invalid")
 		}
 	}
