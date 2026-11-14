@@ -60,6 +60,16 @@ def deployment_tools_digest():
     return digest.hexdigest()
 
 
+def previous_image_reference(container, configured_image):
+    """仅认领冻结配置中确实指向旧容器镜像的引用，保留其他仓库的共享标签。"""
+    if configured_image and image_repository(configured_image) is not None:
+        image = docker_json("image", "inspect", container["Image"])[0]
+        references = (image.get("RepoTags") or []) + (image.get("RepoDigests") or [])
+        if configured_image in references:
+            return configured_image
+    return container["Config"]["Image"]
+
+
 def pending_deployment(state_dir):
     """恢复未决状态不能被后来的部署当作健康基线。"""
     pending = []
@@ -468,6 +478,7 @@ def deploy(args):
             if (target_image["Config"].get("Labels") or {}).get("org.opencontainers.image.revision") != args.commit:
                 raise OperationError("The image revision does not match the requested commit")
             report["image_id"] = target_image["Id"]
+            previous_image = previous_image_reference(old, frozen_configuration["services"]["hexclaw"].get("image"))
             frozen_configuration["services"]["hexclaw"]["image"] = old["Image"]
             recovery_config = report_file.with_suffix(".compose.json")
             write_json(recovery_config, frozen_configuration)
@@ -492,7 +503,7 @@ def deploy(args):
             previous_image_file = image_file.read_bytes() if image_file.exists() else None
             active_compose = state_dir / "current.compose.json"
             previous_compose = active_compose.read_bytes() if active_compose.exists() else None
-            report.update(previous_image_id=old["Image"], previous_image=old["Config"]["Image"],
+            report.update(previous_image_id=old["Image"], previous_image=previous_image,
                           baseline=baseline, data_mount=list(data_mount))
             write_json(report_file, report)
             start_requested = False

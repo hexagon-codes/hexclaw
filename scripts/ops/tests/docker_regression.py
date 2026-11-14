@@ -15,6 +15,7 @@ import tarfile
 import tempfile
 import time
 import unittest
+from unittest import mock
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -433,6 +434,109 @@ print(json.dumps({'receipts':db.execute('SELECT id,state FROM receipts ORDER BY 
         self.assertEqual(before, self.read_data())
         self.assertTrue(archive.exists())
         self.assertEqual(digest, hashlib.sha256(archive.read_bytes()).hexdigest())
+
+
+class ImageRetention(unittest.TestCase):
+    """仅使用独立镜像和容器验证清理，不启动服务或创建 Git 引用。"""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix='hexclaw-image-retention-')
+        self.root = Path(self.temporary.name)
+        self.repository = 'hexclaw-retention-' + uuid.uuid4().hex[:10]
+        self.tags, self.images, self.containers = [], [], []
+        self.addCleanup(self.cleanup)
+        with mock.patch.object(sys, 'path', [str(ROOT), *sys.path]):
+            self.deploy = __import__('deploy')
+        self.old_tag = self.repository + '/application:old'
+        self.new_tag = self.repository + '/application:current'
+        for tag in (self.old_tag, self.new_tag):
+            (self.root / 'Dockerfile').write_text('FROM scratch\nLABEL fixture.identity=' + uuid.uuid4().hex + '\nCMD ["/unused"]\n')
+            command('docker', 'build', '--quiet', '--tag', tag, self.root)
+            self.tags.append(tag)
+            self.images.append(docker_json('image', 'inspect', tag)[0]['Id'])
+        self.old_id, self.new_id = self.images
+        identity = command('docker', 'create', self.old_id).stdout.decode().strip()
+        self.containers.append(identity)
+        self.old = docker_json('inspect', identity)[0]
+        self.assertEqual(self.old_id, self.old['Config']['Image'])
+        command('docker', 'rm', identity)
+
+    def cleanup(self):
+        for identity in self.containers:
+            command('docker', 'rm', identity, check=False)
+        for reference in self.tags + self.images:
+            command('docker', 'image', 'rm', reference, check=False)
+        self.temporary.cleanup()
+
+    def retain(self, reference):
+        args = type('Args', (), {'project_dir': self.root, 'include': []})()
+        state = self.root / '.hexclaw-deploy'
+        state.mkdir(exist_ok=True)
+        report_file = state / '20261114T000000Z-00000000.json'
+        report = {'commit': '0' * 40, 'image': self.new_tag, 'image_id': self.new_id,
+                  'previous_image_id': self.old_id, 'previous_image': reference, 'verification': {}}
+        real_run = self.deploy.run
+
+        def run(arguments, **kwargs):
+            if arguments == ['isolated-compose', 'config', '--format', 'json']:
+                return json.dumps({'services': {'hexclaw': {'image': self.new_tag}}}).encode()
+            return real_run(arguments, **kwargs)
+
+        def snapshot(arguments, **kwargs):
+            archive = arguments.output / 'fixture.tar'
+            archive.write_bytes(b'isolated snapshot')
+            return {'archive': archive.name, 'sha256': hashlib.sha256(archive.read_bytes()).hexdigest()}
+
+        # 快照端口使用合成字节；镜像查询、引用解除和删除全部经过真实 Docker。
+        with self.deploy.maintenance_lock(self.root), \
+                mock.patch.object(self.deploy, 'compose_args', return_value=['isolated-compose']), \
+                mock.patch.object(self.deploy, 'run', side_effect=run), \
+                mock.patch.object(self.deploy, 'backup', side_effect=snapshot), \
+                mock.patch.object(self.deploy, 'wait_service', return_value={}):
+            result = self.deploy.retain_development_state(
+                args, {'development_retention': 'current_only'}, report, report_file, self.new_id)
+        self.assertEqual(self.new_id, docker_json('image', 'inspect', self.new_tag)[0]['Id'])
+        return result
+
+    def test_raw_id_previous_service_is_removed_through_its_verified_reference(self):
+        reference = self.deploy.previous_image_reference(self.old, self.old_tag)
+        self.assertEqual(self.old_tag, reference)
+        result = self.retain(reference)
+        self.assertEqual(1, result['removed_images'])
+        self.assertEqual(0, result['preserved_shared_images'])
+        self.assertNotEqual(0, command('docker', 'image', 'inspect', self.old_id, check=False).returncode)
+
+    def test_other_repository_shared_reference_is_preserved(self):
+        shared = self.repository + '/other-service:shared'
+        command('docker', 'tag', self.old_id, shared)
+        self.tags.append(shared)
+        reference = self.deploy.previous_image_reference(self.old, self.old_tag)
+        result = self.retain(reference)
+        self.assertEqual(1, result['preserved_shared_images'])
+        self.assertEqual(self.old_id, docker_json('image', 'inspect', shared)[0]['Id'])
+        self.assertNotEqual(0, command('docker', 'image', 'inspect', self.old_tag, check=False).returncode)
+
+    def test_any_container_reference_keeps_the_old_image(self):
+        identity = command('docker', 'create', self.old_id).stdout.decode().strip()
+        self.containers.append(identity)
+        reference = self.deploy.previous_image_reference(self.old, self.old_tag)
+        result = self.retain(reference)
+        self.assertEqual(1, result['preserved_in_use_images'])
+        self.assertEqual(self.old_id, docker_json('image', 'inspect', self.old_tag)[0]['Id'])
+        self.assertEqual(self.old_id, docker_json('inspect', identity)[0]['Image'])
+
+    def test_moved_compose_tag_does_not_claim_the_previous_image(self):
+        shared = self.repository + '/other-service:shared'
+        command('docker', 'tag', self.old_id, shared)
+        self.tags.append(shared)
+        command('docker', 'tag', self.new_id, self.old_tag)
+        reference = self.deploy.previous_image_reference(self.old, self.old_tag)
+        self.assertEqual(self.old_id, reference)
+        result = self.retain(reference)
+        self.assertEqual(0, result['removed_images'])
+        self.assertEqual(1, result['preserved_shared_images'])
+        self.assertEqual(self.new_id, docker_json('image', 'inspect', self.old_tag)[0]['Id'])
+        self.assertEqual(self.old_id, docker_json('image', 'inspect', shared)[0]['Id'])
 
 
 if __name__ == '__main__':
