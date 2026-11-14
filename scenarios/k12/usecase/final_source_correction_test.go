@@ -18,6 +18,7 @@ type completedSourceReviewerFixture struct {
 	calls    int
 	fail     bool
 	verified bool
+	seen     []RecognizedQuestion
 }
 
 func (s *completedSourceReviewerFixture) Recognize(context.Context, []byte) ([]RecognizedQuestion, error) {
@@ -30,6 +31,7 @@ func (s *completedSourceReviewerFixture) ReviewCompletedSource(ctx context.Conte
 		return CompletedSourceReview{}, err
 	}
 	s.calls++
+	s.seen = append(s.seen, q)
 	if s.fail {
 		return CompletedSourceReview{}, context.DeadlineExceeded
 	}
@@ -236,6 +238,56 @@ func TestCompletedSourceCorrection_MissingRegionNeverSent(t *testing.T) {
 	}
 	if err == nil || commands != 0 || f.reviewer.calls != 0 {
 		t.Fatalf("missing region sent or claimed: commands=%d calls=%d err=%v", commands, f.reviewer.calls, err)
+	}
+}
+
+func TestCompletedSourceCorrectionRestoresExactFrozenContextBeforeReview(t *testing.T) {
+	f := prepareCompletedSourceFixture(t)
+	questions, err := f.o.deps.loadCurrentConfirmedQuestions(t.Context(), "mingming", f.job.Fields.SubmissionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range questions {
+		questions[i].ImageSourceContext = &k12.RecognitionImageSourceContextV1{Version: k12.RecognitionImageScopeVersionV1,
+			ScopeDigest: "frozen-page-material", TargetIDs: []string{questions[i].ProblemID},
+			Materials: []k12.RecognitionImageScopeDependencyV1{{Text: "本页计算题只填写答案。"}}}
+	}
+	audit := gradingRecognitionAuditFile{JobID: f.job.Record.RecordID, AgentName: "mingming", Questions: questions, CanonicalDigest: CanonicalRecognizedQuestionsDigest(questions)}
+	raw, err := json.Marshal(audit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	auditPath := f.o.recognitionAuditPath(f.job.Record.RecordID)
+	if err := os.MkdirAll(filepath.Dir(auditPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWriteFile(auditPath, raw); err != nil {
+		t.Fatal(err)
+	}
+	result, err := f.o.CorrectCompletedSource(t.Context(), "guardian-final", f.dispatch, "target", f.request)
+	if err != nil || result.Status != "completed" || len(f.reviewer.seen) != 1 {
+		t.Fatalf("source correction failed: %s %v", result.Status, err)
+	}
+	if source := f.reviewer.seen[0].ImageSourceContext; source == nil || len(source.Materials) != 1 || source.Materials[0].Text != "本页计算题只填写答案。" {
+		t.Fatal("source correction lost exact frozen shared material")
+	}
+	current, err := f.o.deps.loadCurrentConfirmedQuestions(t.Context(), "mingming", f.job.Fields.SubmissionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range current {
+		if q.ProblemID == "target" && (q.ConfirmedVersion != 2 || q.ImageSourceContext != nil) {
+			t.Fatal("corrected input retained the prior context proof")
+		}
+		if q.ProblemID == "target" {
+			f.request.InputRevision, f.request.InputDigest = q.ConfirmedVersion, q.InputDigest
+		}
+	}
+	f.request.IdempotencyKey = "next-source-revision"
+	f.request.ArtifactID, f.request.ArtifactDigest = result.Artifact.ArtifactID, result.Artifact.ArtifactDigest
+	next, err := f.o.CorrectCompletedSource(t.Context(), "guardian-final", f.dispatch, "target", f.request)
+	if err != nil || next.Status != "completed" || len(f.reviewer.seen) != 2 || f.reviewer.seen[1].ImageSourceContext != nil {
+		t.Fatalf("next revision lost its source region or borrowed old context: %s %v", next.Status, err)
 	}
 }
 

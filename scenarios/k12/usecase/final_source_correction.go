@@ -126,6 +126,7 @@ func (o *GradingOrchestrator) CorrectCompletedSource(ctx context.Context, owner,
 	if err != nil {
 		return out, err
 	}
+	o.restoreRecognitionSourceContexts(job, questions)
 	target := -1
 	for i, q := range questions {
 		if q.ProblemID == problemID {
@@ -249,6 +250,7 @@ func (o *GradingOrchestrator) CorrectCompletedSource(ctx context.Context, owner,
 	q.ConfirmedVersion = in.InputRevision + 1
 	q.CanonicalVersion = q.ConfirmedVersion
 	q.InputDigest = k12storage.FinalSourceInputDigest(command, problemID, q.ConfirmedVersion)
+	q.ImageSourceContext = nil
 	q.RecognitionConfidence = review.Question.RecognitionConfidence
 	questions[target] = q
 	assessments, err := store.ListEffectiveGradingAssessments(ctx, in.Agent, jobID)
