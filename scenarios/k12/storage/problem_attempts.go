@@ -397,24 +397,44 @@ func (s *Store) PutProblemAttemptSnapshot(ctx context.Context, snapshot k12.Prob
 // photo Submission 与 HomeworkSubmission 身份不同，只沿当前 Job 绑定和原图快照关联。
 func correctRecognizedHomeworkIntentTx(ctx context.Context, tx *sql.Tx, snapshot k12.ProblemAttemptSnapshot, at int64) error {
 	answeredPages := make(map[string]bool)
+	blankPages := make(map[string]bool)
+	allClearBlank := len(snapshot.Attempts) > 0
 	problems := make(map[string]k12.Problem, len(snapshot.Problems))
 	for _, problem := range snapshot.Problems {
 		problems[problem.ProblemID] = problem
+		if problem.ConfirmationRequired || len(problem.ConfirmationReasons) > 0 ||
+			(problem.ProblemKind != k12.ProblemKindCompoundParent && problem.Subject != "数学") {
+			allClearBlank = false
+		}
 	}
 	for _, attempt := range snapshot.Attempts {
 		problem := problems[attempt.ProblemID]
 		if problem.Subject == "数学" && attempt.AnswerState == "present" && attempt.AnswerMarkdown != "" {
 			answeredPages[problem.PageAssetID] = true
 		}
+		if attempt.AnswerState != "blank" || strings.TrimSpace(attempt.AnswerRaw) != "" ||
+			strings.TrimSpace(attempt.AnswerMarkdown) != "" || problem.PageAssetID == "" {
+			allClearBlank = false
+		} else {
+			blankPages[problem.PageAssetID] = true
+		}
 	}
+	sourceIntent, targetIntent := k12.ImageTaskIntentBlankWorksheet, k12.ImageTaskIntentCompletedHomework
+	matchingPages := answeredPages
 	if len(answeredPages) == 0 {
-		return nil
+		if !allClearBlank {
+			return nil
+		}
+		sourceIntent, targetIntent = k12.ImageTaskIntentCompletedHomework, k12.ImageTaskIntentBlankWorksheet
+		matchingPages = blankPages
 	}
 	owner, submissionID := snapshot.Problems[0].AgentName, snapshot.Problems[0].SubmissionID
 	var dispatchID, homeworkID, jobID, dispatchAssets, homeworkAssets string
+	var classificationRoute, jobStatus string
 	var dispatchVersion, homeworkVersion, candidates int
 	err := tx.QueryRowContext(ctx, `SELECT d.dispatch_id,h.submission_id,j.record_id,
-            d.version,h.version,d.source_asset_refs_json,h.source_asset_refs_json,COUNT(*) OVER ()
+            d.version,h.version,d.source_asset_refs_json,h.source_asset_refs_json,
+            d.classification_route_snapshot_json,j.status,COUNT(*) OVER ()
         FROM k12_grading_jobs j
         JOIN k12_homework_submissions h ON h.agent_name=j.agent_name AND h.grading_job_id=j.record_id
         JOIN k12_image_task_dispatches d ON d.agent_name=h.agent_name AND d.dispatch_id=h.dispatch_id
@@ -422,8 +442,8 @@ func correctRecognizedHomeworkIntentTx(ctx context.Context, tx *sql.Tx, snapshot
           AND j.confirmed_version=0 AND j.idempotency_key='image_task|' || d.dispatch_id || '|v0'
           AND (j.status='recognizing' OR (j.status='outcome_unknown' AND j.failed_stage='recognizing'))
           AND j.confirmation_state='pending' AND j.anchor_state='pending'
-          AND h.status='processing' AND h.task_intent='blank_worksheet'
-          AND d.status='routed' AND d.task_intent='blank_worksheet'
+          AND h.status='processing' AND h.task_intent=?
+          AND d.status='routed' AND d.task_intent=?
           AND d.routing_provenance='model_classified' AND d.creative_entry_json=''
           AND d.target_object_type='homework_submission' AND d.target_object_id=h.submission_id
           AND NOT EXISTS (SELECT 1 FROM k12_grading_assessment_items a
@@ -432,8 +452,9 @@ func correctRecognizedHomeworkIntentTx(ctx context.Context, tx *sql.Tx, snapshot
               WHERE a.agent_name=j.agent_name AND a.job_id=j.record_id)
           AND NOT EXISTS (SELECT 1 FROM k12_model_invocations i
               WHERE i.agent_name=j.agent_name AND i.job_id=j.record_id
-                AND i.stage IN ('locating','assessing','rendering','projecting'))`, owner, submissionID).
-		Scan(&dispatchID, &homeworkID, &jobID, &dispatchVersion, &homeworkVersion, &dispatchAssets, &homeworkAssets, &candidates)
+                AND i.stage IN ('locating','assessing','rendering','projecting'))`, owner, submissionID, sourceIntent, sourceIntent).
+		Scan(&dispatchID, &homeworkID, &jobID, &dispatchVersion, &homeworkVersion, &dispatchAssets, &homeworkAssets,
+			&classificationRoute, &jobStatus, &candidates)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
@@ -443,6 +464,19 @@ func correctRecognizedHomeworkIntentTx(ctx context.Context, tx *sql.Tx, snapshot
 	// 旧版内容摘要身份可能被多个来源共享，不能任取另一任务的绑定。
 	if candidates != 1 {
 		return nil
+	}
+	if targetIntent == k12.ImageTaskIntentBlankWorksheet {
+		var route k12.ImageTaskRouteSnapshot
+		if err := json.Unmarshal([]byte(classificationRoute), &route); err != nil {
+			return fmt.Errorf("k12storage: parse blank intent classification route: %w", err)
+		}
+		// 只让当前完整识题纠正自动观察；显式动作、选题、旧策略和未知回执不重新解释。
+		scope := route.ImageScope
+		if jobStatus != k12.GradingStageRecognizing || scope == nil || scope.Version != k12.RecognitionImageScopeVersionV1 ||
+			scope.SourceReviewPolicy != k12.RecognitionImageSourceUprightReviewPolicyV3 ||
+			strings.TrimSpace(scope.Action) != "" || strings.TrimSpace(scope.MessageIntent) != "" {
+			return nil
+		}
 	}
 	// 人工从 unknown 选择空白卷也保留 model_classified 来源，须核对原始分类决定。
 	classification, err := getLatestImageTaskInvocation(ctx, tx, owner, k12.ImageTaskOperationClassification, dispatchID, "")
@@ -456,7 +490,7 @@ func correctRecognizedHomeworkIntentTx(ctx context.Context, tx *sql.Tx, snapshot
 	if err := json.Unmarshal([]byte(classification.ResultJSON), &decision); err != nil {
 		return fmt.Errorf("k12storage: parse original homework classification: %w", err)
 	}
-	if decision.Intent != k12.ImageTaskIntentBlankWorksheet {
+	if decision.Intent != sourceIntent {
 		return nil
 	}
 	var dispatchRefs, homeworkRefs []string
@@ -466,14 +500,14 @@ func correctRecognizedHomeworkIntentTx(ctx context.Context, tx *sql.Tx, snapshot
 	if err := json.Unmarshal([]byte(homeworkAssets), &homeworkRefs); err != nil {
 		return fmt.Errorf("k12storage: parse homework source snapshot: %w", err)
 	}
-	if !reflect.DeepEqual(dispatchRefs, homeworkRefs) || len(dispatchRefs) != 1 || !answeredPages[dispatchRefs[0]] {
+	if !reflect.DeepEqual(dispatchRefs, homeworkRefs) || len(dispatchRefs) != 1 || !matchingPages[dispatchRefs[0]] {
 		return nil
 	}
 	res, err := tx.ExecContext(ctx, `UPDATE k12_image_task_dispatches
-        SET task_intent='completed_homework',version=version+1,updated_at=?
+        SET task_intent=?,version=version+1,updated_at=?
         WHERE agent_name=? AND dispatch_id=? AND version=? AND status='routed'
-          AND routing_provenance='model_classified' AND task_intent='blank_worksheet'`,
-		at, owner, dispatchID, dispatchVersion)
+          AND routing_provenance='model_classified' AND task_intent=?`,
+		targetIntent, at, owner, dispatchID, dispatchVersion, sourceIntent)
 	if err != nil {
 		return fmt.Errorf("k12storage: correct recognized dispatch intent: %w", err)
 	}
@@ -481,10 +515,10 @@ func correctRecognizedHomeworkIntentTx(ctx context.Context, tx *sql.Tx, snapshot
 		return ErrImageTaskVersionConflict
 	}
 	res, err = tx.ExecContext(ctx, `UPDATE k12_homework_submissions
-        SET task_intent='completed_homework',version=version+1,updated_at=?
+        SET task_intent=?,version=version+1,updated_at=?
         WHERE agent_name=? AND submission_id=? AND version=? AND grading_job_id=?
-          AND status='processing' AND task_intent='blank_worksheet'`,
-		at, owner, homeworkID, homeworkVersion, jobID)
+          AND status='processing' AND task_intent=?`,
+		targetIntent, at, owner, homeworkID, homeworkVersion, jobID, sourceIntent)
 	if err != nil {
 		return fmt.Errorf("k12storage: correct recognized homework intent: %w", err)
 	}

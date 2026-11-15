@@ -10,17 +10,24 @@ import (
 	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
 )
 
-func prepareRecognizedIntentFixture(t *testing.T, initialIntent k12.ImageTaskIntent) (*k12storage.Store, *sql.DB, k12.ImageTaskDispatch, k12.HomeworkSubmission, k12.ProblemAttemptSnapshot) {
+func prepareRecognizedIntentFixture(t *testing.T, initialIntent k12.ImageTaskIntent, scopes ...*k12.RecognitionImageScopeInputV1) (*k12storage.Store, *sql.DB, k12.ImageTaskDispatch, k12.HomeworkSubmission, k12.ProblemAttemptSnapshot) {
 	t.Helper()
 	ctx := context.Background()
 	store, db := setup(t)
 	dispatch := testImageTaskDispatch()
+	if len(scopes) > 0 {
+		dispatch.ClassificationRouteSnapshot.ImageScope = scopes[0]
+		dispatch.RoutePolicySnapshot.ImageScope = scopes[0]
+	}
 	invocation := k12.ImageTaskInvocation{
 		InvocationID: dispatch.ClassificationInvocationID, AgentName: dispatch.AgentName,
 		DispatchID: dispatch.DispatchID, Operation: k12.ImageTaskOperationClassification,
 		OperationKey: "dispatch:dispatch-1:classification", RequestDigest: "classification-request",
 		RouteSnapshot: testImageRoute(), Status: k12.ImageTaskInvocationPrepared, Attempt: 1,
 		CreatedAt: 100, UpdatedAt: 100,
+	}
+	if len(scopes) > 0 {
+		invocation.RouteSnapshot = dispatch.ClassificationRouteSnapshot
 	}
 	if _, _, err := store.PrepareImageTaskDispatch(ctx, dispatch, invocation); err != nil {
 		t.Fatal(err)
