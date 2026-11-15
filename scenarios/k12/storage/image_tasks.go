@@ -839,9 +839,8 @@ func getLatestImageTaskInvocation(
 	return getImageTaskInvocation(ctx, q, agentName, invocationID)
 }
 
-// CommitImageTaskRouting stores the classifier result and creates exactly one
-// target aggregate in the same transaction. An ambiguous decision only moves
-// to awaiting_confirmation and creates no target.
+// CommitImageTaskRouting 原样保存分类回执，并在同一事务中创建唯一目标。
+// 当前数学同类候选沿逐题识别消解，其它歧义仍保留原确认状态。
 func (s *Store) CommitImageTaskRouting(
 	ctx context.Context,
 	agentName, dispatchID string,
@@ -895,6 +894,11 @@ func (s *Store) CommitImageTaskRouting(
 		return dispatch, ImageTaskRouteTarget{}, err
 	}
 	decision.ImageTaskClassificationResponse = response
+	readMathFamily := !reparse && dispatch.Status == k12.ImageTaskStatusRouting &&
+		dispatch.RoutingProvenance == k12.ImageTaskRoutingModelClassified && dispatch.CreativeEntry == nil && activeInvocation.Attempt == 1 &&
+		activeInvocation.InvocationID == dispatch.ClassificationInvocationID &&
+		(activeInvocation.Status == k12.ImageTaskInvocationPrepared || activeInvocation.Status == k12.ImageTaskInvocationSent) &&
+		isMathFamilyReadingClassification(decision, dispatch.ClassificationRouteSnapshot)
 	statusCondition := "status IN ('prepared','sent')"
 	if reparse {
 		if dispatch.Status != k12.ImageTaskStatusFailed || activeInvocation.InvocationID != decision.ReparseInvocationID ||
@@ -936,6 +940,12 @@ func (s *Store) CommitImageTaskRouting(
 	dispatch.IntentConfidence = decision.Confidence
 	dispatch.ConfirmationCandidates = append([]k12.ImageTaskIntent(nil), decision.ConfirmationCandidates...)
 	dispatch.UpdatedAt = now
+	if readMathFamily {
+		// 这里只选择共用读题管道；是否空白由同次持久识题事实确定，原分类仍为 unknown。
+		dispatch.TaskIntent = k12.ImageTaskIntentCompletedHomework
+		dispatch.ConfirmationCandidates = nil
+		candidatesJSON = "[]"
+	}
 
 	var target ImageTaskRouteTarget
 	if dispatch.CreativeEntry != nil && dispatch.CreativeEntry.TaskIntent == k12.ImageTaskIntentUnknown &&
@@ -945,14 +955,14 @@ func (s *Store) CommitImageTaskRouting(
 		dispatch.FailureKind = "creative_type_unrecognized"
 		dispatch.ConfirmationCandidates = nil
 		candidatesJSON = "[]"
-	} else if len(decision.ConfirmationCandidates) >= 2 || decision.Intent == k12.ImageTaskIntentUnknown {
+	} else if len(dispatch.ConfirmationCandidates) >= 2 || dispatch.TaskIntent == k12.ImageTaskIntentUnknown {
 		dispatch.Status = k12.ImageTaskStatusAwaitingConfirmation
 		dispatch.AutomaticRemainingSeconds = remainingImageTaskAutomaticSeconds(dispatch, now)
 		dispatch.AutomaticDeadlineAt = 0
 	} else {
 		dispatch.Status = k12.ImageTaskStatusRouted
 		target, err = createImageTaskRouteTarget(
-			ctx, tx, &dispatch, decision.Intent,
+			ctx, tx, &dispatch, dispatch.TaskIntent,
 			decision.WorkTitleCandidate, decision.TaskRequirementCandidate, now,
 		)
 		if err != nil {
@@ -1010,6 +1020,18 @@ func (s *Store) CommitImageTaskRouting(
 		return dispatch, target, err
 	}
 	return dispatch, target, nil
+}
+
+func isMathFamilyReadingClassification(decision ImageTaskRoutingDecision, route k12.ImageTaskRouteSnapshot) bool {
+	scope := route.ImageScope
+	if decision.Intent != k12.ImageTaskIntentUnknown || len(decision.ConfirmationCandidates) != 2 ||
+		scope == nil || scope.Version != k12.RecognitionImageScopeVersionV1 ||
+		scope.SourceReviewPolicy != k12.RecognitionImageSourceUprightReviewPolicyV3 || strings.TrimSpace(scope.Action) != "" {
+		return false
+	}
+	first, second := decision.ConfirmationCandidates[0], decision.ConfirmationCandidates[1]
+	return (first == k12.ImageTaskIntentCompletedHomework && second == k12.ImageTaskIntentBlankWorksheet) ||
+		(first == k12.ImageTaskIntentBlankWorksheet && second == k12.ImageTaskIntentCompletedHomework)
 }
 
 func createImageTaskRouteTarget(

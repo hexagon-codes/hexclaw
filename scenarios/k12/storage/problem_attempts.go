@@ -430,11 +430,12 @@ func correctRecognizedHomeworkIntentTx(ctx context.Context, tx *sql.Tx, snapshot
 	}
 	owner, submissionID := snapshot.Problems[0].AgentName, snapshot.Problems[0].SubmissionID
 	var dispatchID, homeworkID, jobID, dispatchAssets, homeworkAssets string
-	var classificationRoute, jobStatus string
+	var classificationRoute, classificationInvocationID, confirmationCandidates, jobStatus string
 	var dispatchVersion, homeworkVersion, candidates int
 	err := tx.QueryRowContext(ctx, `SELECT d.dispatch_id,h.submission_id,j.record_id,
             d.version,h.version,d.source_asset_refs_json,h.source_asset_refs_json,
-            d.classification_route_snapshot_json,j.status,COUNT(*) OVER ()
+            d.classification_route_snapshot_json,d.classification_invocation_id,
+            d.confirmation_candidates_json,j.status,COUNT(*) OVER ()
         FROM k12_grading_jobs j
         JOIN k12_homework_submissions h ON h.agent_name=j.agent_name AND h.grading_job_id=j.record_id
         JOIN k12_image_task_dispatches d ON d.agent_name=h.agent_name AND d.dispatch_id=h.dispatch_id
@@ -454,7 +455,7 @@ func correctRecognizedHomeworkIntentTx(ctx context.Context, tx *sql.Tx, snapshot
               WHERE i.agent_name=j.agent_name AND i.job_id=j.record_id
                 AND i.stage IN ('locating','assessing','rendering','projecting'))`, owner, submissionID, sourceIntent, sourceIntent).
 		Scan(&dispatchID, &homeworkID, &jobID, &dispatchVersion, &homeworkVersion, &dispatchAssets, &homeworkAssets,
-			&classificationRoute, &jobStatus, &candidates)
+			&classificationRoute, &classificationInvocationID, &confirmationCandidates, &jobStatus, &candidates)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
@@ -464,19 +465,6 @@ func correctRecognizedHomeworkIntentTx(ctx context.Context, tx *sql.Tx, snapshot
 	// 旧版内容摘要身份可能被多个来源共享，不能任取另一任务的绑定。
 	if candidates != 1 {
 		return nil
-	}
-	if targetIntent == k12.ImageTaskIntentBlankWorksheet {
-		var route k12.ImageTaskRouteSnapshot
-		if err := json.Unmarshal([]byte(classificationRoute), &route); err != nil {
-			return fmt.Errorf("k12storage: parse blank intent classification route: %w", err)
-		}
-		// 只让当前完整识题纠正自动观察；显式动作、选题、旧策略和未知回执不重新解释。
-		scope := route.ImageScope
-		if jobStatus != k12.GradingStageRecognizing || scope == nil || scope.Version != k12.RecognitionImageScopeVersionV1 ||
-			scope.SourceReviewPolicy != k12.RecognitionImageSourceUprightReviewPolicyV3 ||
-			strings.TrimSpace(scope.Action) != "" || strings.TrimSpace(scope.MessageIntent) != "" {
-			return nil
-		}
 	}
 	// 人工从 unknown 选择空白卷也保留 model_classified 来源，须核对原始分类决定。
 	classification, err := getLatestImageTaskInvocation(ctx, tx, owner, k12.ImageTaskOperationClassification, dispatchID, "")
@@ -490,8 +478,28 @@ func correctRecognizedHomeworkIntentTx(ctx context.Context, tx *sql.Tx, snapshot
 	if err := json.Unmarshal([]byte(classification.ResultJSON), &decision); err != nil {
 		return fmt.Errorf("k12storage: parse original homework classification: %w", err)
 	}
-	if decision.Intent != sourceIntent {
+	var route k12.ImageTaskRouteSnapshot
+	if err := json.Unmarshal([]byte(classificationRoute), &route); err != nil {
+		return fmt.Errorf("k12storage: parse homework classification route: %w", err)
+	}
+	var remainingCandidates []k12.ImageTaskIntent
+	if err := json.Unmarshal([]byte(confirmationCandidates), &remainingCandidates); err != nil {
+		return fmt.Errorf("k12storage: parse homework confirmation candidates: %w", err)
+	}
+	// 人工选择保留原候选；只有首次分类直接进入读题的同类候选才由当前事实消解。
+	mathFamilyReading := len(remainingCandidates) == 0 && classification.Attempt == 1 &&
+		classification.InvocationID == classificationInvocationID && isMathFamilyReadingClassification(decision, route)
+	if decision.Intent != sourceIntent && !mathFamilyReading {
 		return nil
+	}
+	if targetIntent == k12.ImageTaskIntentBlankWorksheet {
+		// 只让当前完整识题纠正自动观察；显式动作、选题、旧策略和未知回执不重新解释。
+		scope := route.ImageScope
+		if jobStatus != k12.GradingStageRecognizing || scope == nil || scope.Version != k12.RecognitionImageScopeVersionV1 ||
+			scope.SourceReviewPolicy != k12.RecognitionImageSourceUprightReviewPolicyV3 ||
+			strings.TrimSpace(scope.Action) != "" || (!mathFamilyReading && strings.TrimSpace(scope.MessageIntent) != "") {
+			return nil
+		}
 	}
 	var dispatchRefs, homeworkRefs []string
 	if err := json.Unmarshal([]byte(dispatchAssets), &dispatchRefs); err != nil {
