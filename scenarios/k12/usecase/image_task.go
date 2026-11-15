@@ -1353,7 +1353,9 @@ func (c *ImageTaskCoordinator) recoverySafe(
 	case k12.CreativeWorkIntakeReady:
 		return true, nil
 	case k12.CreativeWorkIntakePromoted:
-		if view.CreativeFeedback == "feedback_ready" {
+		if view.CreativeFeedback == "feedback_ready" ||
+			view.CreativeFeedback == "feedback_failed" ||
+			view.CreativeFeedback == "feedback_outcome_unknown" {
 			return false, nil
 		}
 		if view.feedbackInvocation == nil {
@@ -1729,6 +1731,22 @@ func (c *ImageTaskCoordinator) projectTarget(
 			case !errors.Is(invocationErr, k12storage.ErrImageTaskNotFound):
 				return ImageTaskView{}, invocationErr
 			}
+			if view.CreativeFeedback == "feedback_failed" &&
+				generation.GenerationID == view.Creative.PromotedGenerationID &&
+				view.Dispatch.Status != k12.ImageTaskStatusCancelled {
+				// 点评的持久终态优先于父任务间隙期限，不能把已知失败覆盖成超时。
+				view.Dispatch.Status = k12.ImageTaskStatusFailed
+				view.Dispatch.FailureKind = "work_feedback_failed"
+				if strings.Contains(generation.FailureReason, k12.ErrModelCapabilityUnverified.Error()) {
+					view.Dispatch.FailureKind = k12.ErrModelCapabilityUnverified.Error()
+				} else if view.feedbackInvocation != nil && view.feedbackInvocation.ErrorKind != "" {
+					view.Dispatch.FailureKind = view.feedbackInvocation.ErrorKind
+				}
+				view.Dispatch.RetrySafe = view.CreativeFeedbackRetryable
+				view.Dispatch.AutomaticDeadlineAt = 0
+				view.Dispatch.AutomaticRemainingSeconds = 0
+				view.ActiveInvocationDeadlineAt = 0
+			}
 		}
 	}
 	return view, nil
@@ -1928,7 +1946,8 @@ func (c *ImageTaskCoordinator) continueTarget(
 	view ImageTaskView,
 	images [][]byte,
 ) (ImageTaskView, error) {
-	if view.homeworkCompleted {
+	if view.homeworkCompleted || view.CreativeFeedback == "feedback_failed" ||
+		view.CreativeFeedback == "feedback_outcome_unknown" {
 		return view, nil
 	}
 	if expired, yes, err := c.expireImageTaskGapIfDue(

@@ -224,13 +224,9 @@ func freezeK12WorkFeedbackRouteCapabilityReceipt(
 		}
 		return k12.NormalizeImageTaskRouteSnapshot(route), nil
 	}
-	var evidence k12CapabilityReceiptEvidence
-	var err error
-	if probeKind == config.LLMModelCapabilityVision {
-		evidence, err = ensureK12NewTaskVisionCapabilityReceipt(ctx, router, receipts, route.Provider, route.Model, probes)
-	} else {
-		evidence, err = k12CapabilityReceiptEvidenceForRoute(ctx, router, receipts, route.Provider, route.Model, probeKind)
-	}
+	evidence, err := ensureK12NewTaskCapabilityReceipt(
+		ctx, router, receipts, route.Provider, route.Model, probeKind, probes,
+	)
 	if err != nil {
 		return k12.ImageTaskRouteSnapshot{}, err
 	}

@@ -92,3 +92,46 @@ func TestK12NewTaskVisionProbeDoesNotResendCurrentFailedProbe(t *testing.T) {
 		t.Fatalf("failed probe was resent: calls=%d err=%v", calls, err)
 	}
 }
+
+func TestK12NewWritingTaskProbesTextOnceAndFreezesReceipt(t *testing.T) {
+	ctx := t.Context()
+	store, err := sqlitefixture.New(filepath.Join(t.TempDir(), "text-probe.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	provider := config.LLMProviderConfig{
+		ProviderInstanceID: "pvd_v1_00112233445566778899aabbccddeeff",
+		BaseURL:            "https://example.invalid/v1", APIKey: "fixture", Model: "text-v1",
+		Models: []string{"text-v1"}, ModelSpecsMode: config.LLMModelSpecsModeExplicit,
+		ModelSpecs: []config.LLMProviderModelSpec{{ID: "text-v1", Capabilities: []string{"text"}}},
+	}
+	fingerprint := api.ModelCapabilityProbeConfigFingerprint("hexclaw-gpt", provider, "text-v1")
+	calls := 0
+	probe := func(probeCtx context.Context, providerID, model, kind string) error {
+		calls++
+		if providerID != provider.ProviderInstanceID || model != "text-v1" || kind != "text" {
+			t.Fatalf("probe changed selection: %s/%s/%s", providerID, model, kind)
+		}
+		_, err := store.SaveModelCapabilityProbeReceipt(probeCtx, &storage.ModelCapabilityProbeReceipt{
+			ProviderInstanceID: providerID, ModelID: model, ProbeKind: kind,
+			ConfigFingerprint: fingerprint, ProbePolicyVersion: api.ModelCapabilityProbePolicyVersion,
+			Outcome: "passed", ProbeStartedAt: 100, TestedAt: 101,
+		})
+		return err
+	}
+	router := k12CapabilityReceiptTestRouter(provider)
+	route, err := resolveK12RequestedWorkFeedbackRouteWithCapabilityReceipt(ctx, router, store,
+		k12.WorkTypeWriting, k12.ImageTaskRouteSnapshot{Provider: "hexclaw-gpt", Model: "text-v1", SelectionSource: "explicit"}, probe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := resolveK12RequestedWorkFeedbackRouteWithCapabilityReceipt(ctx, router, store,
+		k12.WorkTypeWriting, route, probe)
+	if err != nil || calls != 1 || route.CapabilityReceiptDigest == "" || replayed.CapabilityReceiptDigest != route.CapabilityReceiptDigest {
+		t.Fatalf("text probe was missing, duplicated or changed frozen evidence: calls=%d route=%+v replayed=%+v err=%v", calls, route, replayed, err)
+	}
+}

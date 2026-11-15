@@ -30,6 +30,46 @@ type imageTaskClassifierStub struct {
 
 type definitiveImageTaskTestError struct{ message string }
 
+func TestImageTaskKnownFeedbackFailureStopsBeforeAutomaticDeadline(t *testing.T) {
+	ctx := t.Context()
+	classifier := &imageTaskClassifierStub{result: ImageTaskClassification{
+		Intent: k12.ImageTaskIntentWriting, IntentEvidence: []string{"visible writing"}, Confidence: .99,
+	}}
+	c, _ := newImageTaskCoordinatorForTest(t, classifier)
+	now := int64(1000)
+	c.Now = func() int64 { return now }
+	routeCalls := 0
+	c.ResolveWorkFeedbackRoute = func(context.Context, string, k12.ImageTaskRouteSnapshot) (k12.ImageTaskRouteSnapshot, error) {
+		routeCalls++
+		return k12.ImageTaskRouteSnapshot{}, k12.ErrModelCapabilityUnverified
+	}
+	view, created, err := createAndRunImageTask(t, c, testCreateImageTaskInput())
+	if !created || !errors.Is(err, k12.ErrModelCapabilityUnverified) {
+		t.Fatalf("known route failure was not retained: created=%v err=%v", created, err)
+	}
+	for _, afterDeadline := range []bool{false, true} {
+		if afterDeadline {
+			now += 1000
+		}
+		view, err = c.Run(ctx, "mingming", view.Dispatch.DispatchID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if view.Dispatch.Status != k12.ImageTaskStatusFailed ||
+			view.Dispatch.FailureKind != k12.ErrModelCapabilityUnverified.Error() ||
+			view.Dispatch.AutomaticDeadlineAt != 0 || !view.CreativeFeedbackRetryable {
+			t.Fatalf("known feedback failure masked as pending/deadline: %+v", view)
+		}
+		safe, err := c.recoverySafe(ctx, view.Dispatch)
+		if err != nil || safe {
+			t.Fatalf("known failure must remain parked: safe=%v err=%v", safe, err)
+		}
+	}
+	if routeCalls != 1 || c.WorkFeedback.(*Deps).Solver.(*imageTaskFeedbackSolver).calls != 0 {
+		t.Fatal("known route failure retried or sent feedback")
+	}
+}
+
 func (e definitiveImageTaskTestError) Error() string { return e.message }
 func (definitiveImageTaskTestError) ProviderResponseStatusCode() int {
 	return 503
