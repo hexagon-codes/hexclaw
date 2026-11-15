@@ -46,6 +46,8 @@ func TestImageTaskClassificationResponseReceipt(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fixture := newImageTaskHTTPFixture(t)
+			// 同类候选沿识题链自动推进；分类回执验证只装配下游端口，不执行模型。
+			fixture.coordinator.Grading = &problemGroundingResultGradingStub{jobID: "classification-response-job"}
 			calls := 0
 			fixture.coordinator.Classifier = engineadapter.NewImageTaskAdapter(func(_ context.Context, _ []byte, prompt string) (string, error) {
 				calls++
