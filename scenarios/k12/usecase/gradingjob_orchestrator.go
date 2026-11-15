@@ -601,6 +601,12 @@ func (o *GradingOrchestrator) runLoop(ctx context.Context, run *gradingRun, jobI
 				return v, err
 			}
 		case k12.GradingStageAwaitingConfirmation:
+			if run.req.TeachingReport != nil && v.Fields.ConfirmationState == k12.GradingConfirmationConfirmed {
+				if v, err = o.deps.confirmGradingJobWithReport(ctx, run.agentName, jobID, nil, run.req.TeachingReport); err != nil {
+					return v, err
+				}
+				continue
+			}
 			if v.Fields.SourceKind == "image_task" &&
 				run.req.TaskIntent == PhotoTaskCompletedHomework &&
 				run.req.ImageScope != nil && run.req.ImageScope.Action == "grade" &&
@@ -615,8 +621,7 @@ func (o *GradingOrchestrator) runLoop(ctx context.Context, run *gradingRun, jobI
 				}
 				return failed, cause
 			}
-			// 规则 1：识别冻结后，确认与锚点是两个独立分支。锚点模型调用在 Job 锁外
-			// 异步执行，主链立即返回确认停点；二者任意顺序到达，均由状态机显式汇合。
+			// 锚点在 Job 锁外增强几何；当前家长讲题不等待坐标，旧协议仍显式汇合。
 			if v.Fields.AnchorState == k12.GradingAnchorPending {
 				o.startAnchorAsync(jobID, run, v.Fields.ModelSnapshot)
 			}
@@ -918,11 +923,12 @@ func (o *GradingOrchestrator) autoFreezeRecognition(
 		return GradingJobView{}, fmt.Errorf("usecase: 自动冻结识别产物: %w", err)
 	}
 	canonicalDigest := CanonicalRecognizedQuestionsDigest(candidate.questions)
-	view, err := o.deps.ConfirmGradingJob(
+	view, err := o.deps.confirmGradingJobWithReport(
 		ctx,
 		run.agentName,
 		job.Record.RecordID,
 		[]string{"canonical-recognition:" + canonicalDigest},
+		run.req.TeachingReport,
 	)
 	if err != nil {
 		return view, err
@@ -991,7 +997,7 @@ func (o *GradingOrchestrator) ConfirmAndRun(ctx context.Context, jobID string, c
 	for _, correction := range corrections {
 		digestInputs = append(digestInputs, "legacy-note:"+correction)
 	}
-	if _, err := o.deps.ConfirmGradingJob(ctx, run.agentName, jobID, digestInputs); err != nil {
+	if _, err := o.deps.confirmGradingJobWithReport(ctx, run.agentName, jobID, digestInputs, run.req.TeachingReport); err != nil {
 		l.Unlock()
 		return GradingJobView{}, err
 	}
@@ -1028,11 +1034,11 @@ func (o *GradingOrchestrator) ConfirmAndRun(ctx context.Context, jobID string, c
 		v, err := o.runLoop(ctx, run, jobID)
 		if err != nil || v.Record.Status != k12.GradingStageAwaitingConfirmation ||
 			v.Fields.ConfirmationState != k12.GradingConfirmationConfirmed ||
-			v.Fields.AnchorState != k12.GradingAnchorPending {
+			v.Fields.AnchorState != k12.GradingAnchorPending || run.req.TeachingReport != nil {
 			l.Unlock()
 			return v, err
 		}
-		// IM 等同步入口保留“确认并跑完”的语义，但先释放 Job 锁再等 anchor：确认已经
+		// 旧协议同步入口保留“确认并跑完”的语义，但先释放 Job 锁再等 anchor：确认已经
 		// 持久化，HTTP/桌面读写不被模型延迟阻塞；锚点回位后重新读状态机继续主链。
 		done := o.anchorDoneChannel(jobID)
 		l.Unlock()
@@ -1890,9 +1896,9 @@ func (o *GradingOrchestrator) startAnchorAsync(jobID string, run *gradingRun, sn
 			err = o.persistRun(jobID, run)
 		}
 		if err == nil {
-			v, err = o.deps.AdvanceGradingStage(ctx, run.agentName, jobID, AdvanceGradingInput{
+			v, err = o.deps.advanceGradingAnchorWithReport(ctx, v, AdvanceGradingInput{
 				Outcome: GradingOutcomeAnchor, AnchorState: state, ArtifactDigest: digest,
-			})
+			}, run.req.TeachingReport)
 		}
 		l.Unlock()
 		if err != nil {
@@ -2046,8 +2052,14 @@ func (o *GradingOrchestrator) executeAnchorForTask(
 			invocation.InvocationID, "anchor_failed")
 		return anchored, k12.GradingAnchorDegraded, "anchor:failed", true
 	}
-	if _, err := o.deps.Records.MarkModelInvocationSucceeded(context.WithoutCancel(ctx), agentName,
-		invocation.InvocationID, modelInvocationResultDigest(anchored), ""); err != nil {
+	resultJSON, marshalErr := json.Marshal(anchored)
+	if marshalErr != nil {
+		_, _ = o.deps.Records.MarkModelInvocationFailed(context.WithoutCancel(ctx), agentName,
+			invocation.InvocationID, "anchor_result_encoding_failed")
+		return nil, k12.GradingAnchorDegraded, "anchor:invalid_result", true
+	}
+	if _, err := o.deps.Records.MarkModelInvocationSucceededWithResult(context.WithoutCancel(ctx), agentName,
+		invocation.InvocationID, modelInvocationDigest(resultJSON), string(resultJSON), ""); err != nil {
 		return nil, k12.GradingAnchorDegraded, "anchor:ledger_write_failed", true
 	}
 	return anchored, k12.GradingAnchorLocated, "anchor:located", false
@@ -2242,11 +2254,15 @@ func (o *GradingOrchestrator) runRender(ctx context.Context, run *gradingRun, jo
 	if err != nil {
 		return GradingJobView{}, err
 	}
+	job, err = o.adoptCompletedAnchorForRendering(ctx, run, job)
+	if err != nil {
+		return job, err
+	}
 	required, err := o.deps.gradingRequiresAnnotatedImage(ctx, job)
 	if err != nil {
 		return job, err
 	}
-	if required && (run.renderFailure != "" || run.result.AnnotatedImage == nil || len(run.result.AnnotatedImage.Data) == 0) {
+	if required && run.req.TeachingReport == nil && (run.renderFailure != "" || run.result.AnnotatedImage == nil || len(run.result.AnnotatedImage.Data) == 0) {
 		if job.Fields.FailedStage == k12.GradingStageRendering && job.Fields.AttemptCount > 0 {
 			previous := run.result
 			run.result = nil
@@ -2277,6 +2293,93 @@ func (o *GradingOrchestrator) runRender(ctx context.Context, run *gradingRun, jo
 		digest = "render:" + firstNonEmpty(run.result.AnnotatedImage.MIME, "image/png")
 	}
 	return o.advanceOK(ctx, run, jobID, digest)
+}
+
+// 优先核验已有识别几何，否则采纳持久成功定位；重放既有评估，不等待或重发模型。
+func (o *GradingOrchestrator) adoptCompletedAnchorForRendering(ctx context.Context, run *gradingRun, job GradingJobView) (GradingJobView, error) {
+	if run.req.TeachingReport == nil || job.Record.Status != k12.GradingStageRendering ||
+		job.Fields.AnchorState != k12.GradingAnchorPending || run.renderFailure != "" ||
+		run.result == nil || run.result.AnnotatedImage != nil {
+		return job, nil
+	}
+	var anchored []RecognizedQuestion
+	artifactDigest := "anchor:located"
+	if run.req.TaskIntent != PhotoTaskBlankWorksheet && hasAnswerCandidate(run.questions) {
+		if reuser, ok := o.deps.AnswerAnchorer.(interface {
+			ReuseRecognitionAnswerGeometry(context.Context, []byte, []RecognizedQuestion) ([]RecognizedQuestion, bool)
+		}); ok {
+			if reused, valid := reuser.ReuseRecognitionAnswerGeometry(k12.WithGradingModelSnapshot(ctx, job.Fields.ModelSnapshot), run.req.Image, cloneRecognizedQuestions(run.questions)); valid {
+				anchored = reused
+				artifactDigest = "anchor:recognition:" + modelInvocationResultDigest(reused)
+			}
+		}
+	}
+	if anchored == nil {
+		invocations, err := o.deps.Records.ListModelInvocations(ctx, run.agentName, job.Record.RecordID)
+		if err != nil {
+			return job, err
+		}
+		var latest *k12.ModelInvocation
+		for i := range invocations {
+			invocation := &invocations[i]
+			if invocation.Stage == k12.GradingStageLocating && (latest == nil || invocation.Attempt > latest.Attempt) {
+				latest = invocation
+			}
+		}
+		if latest == nil || latest.Status != k12.ModelInvocationSucceeded || latest.ResultJSON == "" ||
+			latest.RouteSnapshot.Route != job.Fields.ModelSnapshot.Route {
+			return job, nil
+		}
+		if latest.ResultDigest != modelInvocationDigest([]byte(latest.ResultJSON)) ||
+			json.Unmarshal([]byte(latest.ResultJSON), &anchored) != nil {
+			slog.Warn("K12 completed answer geometry payload is unavailable", "job_id", job.Record.RecordID, "invocation_id", latest.InvocationID)
+			return job, nil
+		}
+	}
+	if len(anchored) != len(run.questions) {
+		return job, nil
+	}
+	for i, q := range run.questions {
+		if anchored[i].ProblemID != q.ProblemID || anchored[i].AttemptID != q.AttemptID ||
+			anchored[i].PageAssetID != q.PageAssetID || !slices.Equal(anchored[i].SourceNumberPath, q.SourceNumberPath) {
+			return job, nil
+		}
+	}
+	candidate := *run
+	candidate.anchored, candidate.anchorFailed, candidate.result = mergeAnchorGeometry(run.questions, anchored), false, nil
+	var recorder *recordingAnnotator
+	var annotator PhotoAnnotator
+	if o.deps.PhotoAnnotator != nil {
+		recorder = &recordingAnnotator{inner: o.deps.PhotoAnnotator}
+		annotator = recorder
+	}
+	rebuilt, durable, err := o.durableAssessmentResult(ctx, &candidate, job, annotator)
+	if err != nil {
+		return job, err
+	}
+	if !durable {
+		return job, fmt.Errorf("durable assessments are unavailable for completed answer geometry")
+	}
+	candidate.result = rebuilt
+	if recorder != nil {
+		candidate.renderFailure = recorder.failure
+	}
+	if err := o.persistProblemAttemptFacts(ctx, run.agentName, job.Fields.SubmissionID, candidate.anchored, run.req.InitialReadMode); err != nil {
+		return job, err
+	}
+	if err := o.persistRun(job.Record.RecordID, &candidate); err != nil {
+		return job, err
+	}
+	job.Fields.AnchorState = k12.GradingAnchorLocated
+	job.Fields.StageCheckpoints = append(job.Fields.StageCheckpoints, k12.GradingStageCheckpoint{
+		Stage: k12.GradingStageLocating, ArtifactDigest: artifactDigest, RecordedAt: o.deps.now(),
+	})
+	updated, err := o.deps.saveGradingJob(ctx, job, job.Record.Status)
+	if err != nil {
+		return job, err
+	}
+	run.anchored, run.anchorFailed, run.result, run.renderFailure = candidate.anchored, candidate.anchorFailed, candidate.result, candidate.renderFailure
+	return updated, nil
 }
 
 // runProject is the only page-finalization entry. Completion is authorized by

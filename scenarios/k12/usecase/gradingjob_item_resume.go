@@ -511,9 +511,11 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 	independentReference := false
 	if mode == PhotoModeGrade && finalAnswerObservationUnresolved(req, q) {
 		item.Status = PhotoAnswerUnclear
-		item.Warning = "Unable to reliably recognize the handwriting. No correctness judgment was produced."
+		if !photoPracticeUnmatched(item) {
+			item.Warning = "Unable to reliably recognize the handwriting. No correctness judgment was produced."
+		}
 	}
-	if item.Status == PhotoAnswerUnclear && mode == PhotoModeGrade {
+	if item.Status == PhotoAnswerUnclear && mode == PhotoModeGrade && !photoPracticeUnmatched(item) {
 		finalAnswerSolution, finalAnswerOnly, err = o.verifiedFinalAnswerSolution(ctx, deps, job, req, q)
 		if err != nil {
 			return item, err
@@ -521,7 +523,9 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 	}
 	if mode == PhotoModeGrade && q.AnswerState == AnswerStateUnclear {
 		item.Status = PhotoAnswerUnclear
-		item.Warning = unclearHandwritingReferenceWarning
+		if !photoPracticeUnmatched(item) {
+			item.Warning = unclearHandwritingReferenceWarning
+		}
 	}
 	if item.Status == PhotoAnswerUnclear && !finalAnswerOnly {
 		eligible, referenceErr := o.independentReferenceAnswerEligible(ctx, job, req, q)
@@ -533,7 +537,9 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 				k12storage.GradingAssessmentEffects{})
 		}
 		mode, independentReference = PhotoModeSolve, true
-		item.Warning = unclearHandwritingReferenceWarning
+		if !photoPracticeUnmatched(item) {
+			item.Warning = unclearHandwritingReferenceWarning
+		}
 	}
 
 	gradeReq := photoItemGradeRequest(req, q)
@@ -670,7 +676,7 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 		if independentReference {
 			item.Status = PhotoAnswerUnclear
 		}
-		if !photoEvidenceTrusted(solved.Evidence) {
+		if !photoEvidenceTrusted(solved.Evidence) && !photoPracticeUnmatched(item) {
 			item.Warning = strings.TrimSpace(item.Warning + " Independent programmatic verification is unavailable for this answer.")
 		}
 		return commitGradingAssessmentItem(durableCtx, deps, job, q, item,

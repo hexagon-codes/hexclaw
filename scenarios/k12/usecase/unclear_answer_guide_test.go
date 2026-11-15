@@ -422,7 +422,7 @@ func TestUnclearReferenceAnswerDoesNotGuessPrintedFactsOrPracticeMatch(t *testin
 			if err != nil {
 				t.Fatal(err)
 			}
-			wantAnswer := scenario == "clear" || scenario == "cropped handwriting" || scenario == "restored handwriting-only risk"
+			wantAnswer := scenario == "clear" || scenario == "cropped handwriting" || scenario == "restored handwriting-only risk" || scenario == "unmatched practice"
 			if item.Status != PhotoAnswerUnclear || (item.ParentGuide != nil) != wantAnswer ||
 				grader.callCount("4.5×2=") != 0 || (solver.callCount("4.5×2=") > 0) != wantAnswer {
 				t.Fatalf("题干与学生作答风险必须分离，不能猜条件或判学生答案: %+v", item)

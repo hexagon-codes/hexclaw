@@ -844,7 +844,7 @@ func (o *GradingOrchestrator) confirmRegisteredGradingJob(
 		return GradingJobView{}, true, fmt.Errorf("usecase: 固化确认后的识别产物: %w", perr)
 	}
 	canonicalDigest := CanonicalRecognizedQuestionsDigest(candidate.questions)
-	v, err := o.deps.ConfirmGradingJob(ctx, run.agentName, jobID, []string{"canonical-recognition:" + canonicalDigest})
+	v, err := o.deps.confirmGradingJobWithReport(ctx, run.agentName, jobID, []string{"canonical-recognition:" + canonicalDigest}, run.req.TeachingReport)
 	if err == nil {
 		run.req = candidate.req
 		run.questions = candidate.questions
@@ -1112,6 +1112,7 @@ func (o *GradingOrchestrator) RecoverGradingJobs(ctx context.Context, agents []s
 				// 图片任务补跑自动冻结，内容风险随后形成无判分终态；锚点未回位时
 				// 同一次续跑也恢复独立锚点分支。旧直接入口保留显式确认。
 				if v.Fields.AnchorState == k12.GradingAnchorPending ||
+					(run.req.TeachingReport != nil && v.Fields.ConfirmationState == k12.GradingConfirmationConfirmed) ||
 					(automaticPhotoConfirmationSource(v.Fields.SourceKind) &&
 						v.Fields.ConfirmationState == k12.GradingConfirmationPending) {
 					o.StartAsync(jobID)

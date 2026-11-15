@@ -467,6 +467,10 @@ func (d Deps) advanceGradingFailed(ctx context.Context, v GradingJobView, in Adv
 }
 
 func (d Deps) advanceGradingAnchor(ctx context.Context, v GradingJobView, in AdvanceGradingInput) (GradingJobView, error) {
+	return d.advanceGradingAnchorWithReport(ctx, v, in, nil)
+}
+
+func (d Deps) advanceGradingAnchorWithReport(ctx context.Context, v GradingJobView, in AdvanceGradingInput, report *TeachingReportTaskSnapshot) (GradingJobView, error) {
 	switch in.AnchorState {
 	case k12.GradingAnchorLocated, k12.GradingAnchorDegraded:
 	default:
@@ -480,7 +484,7 @@ func (d Deps) advanceGradingAnchor(ctx context.Context, v GradingJobView, in Adv
 	if err != nil {
 		return GradingJobView{}, err
 	}
-	if required && in.AnchorState == k12.GradingAnchorDegraded {
+	if required && report == nil && in.AnchorState == k12.GradingAnchorDegraded {
 		invocations, err := d.Records.ListModelInvocations(ctx, v.Record.AgentName, v.Record.RecordID)
 		if err != nil {
 			return GradingJobView{}, err
@@ -509,9 +513,9 @@ func (d Deps) advanceGradingAnchor(ctx context.Context, v GradingJobView, in Adv
 		Stage: k12.GradingStageLocating, ArtifactDigest: in.ArtifactDigest, RecordedAt: d.now(),
 		Degraded: in.AnchorState == k12.GradingAnchorDegraded, // 超时降级：该题走 §4.9 文字结果降级
 	})
-	// 规则 1 汇合：确认已冻结 canonical 输入且锚点已回位（located 或 degraded）→ assessing。
+	// 当前讲题只等待题干冻结；旧公共协议继续等待锚点的确定终态。
 	next := stage
-	if gradingJoinReady(v.Fields) {
+	if (v.Fields.ConfirmationState == k12.GradingConfirmationConfirmed && report != nil) || gradingJoinReady(v.Fields) {
 		next = k12.GradingStageAssessing
 		if err := d.setGradingDeadline(ctx, v.Record.AgentName, &v.Fields, next); err != nil {
 			return GradingJobView{}, err
@@ -522,9 +526,14 @@ func (d Deps) advanceGradingAnchor(ctx context.Context, v GradingJobView, in Adv
 
 // ConfirmGradingJob 批量确认/修正识别结果（§6.7 公共命令③，completed 前的等待态确认）。
 // corrections 为家长的逐题确认/修正输入摘要；确认冻结 canonical 输入并写确认检查点。
-// 规则 1：进入 assessing 须与锚点汇合——锚点未回位（pending）时保持等待，
+// 旧公共协议进入 assessing 须与锚点汇合——锚点未回位（pending）时保持等待，
 // 锚点超时会显式 degraded（不阻塞）；只有 confirmed ∧ (located ∨ degraded) 才能批改。
 func (d Deps) ConfirmGradingJob(ctx context.Context, agentName, recordID string, corrections []string) (GradingJobView, error) {
+	return d.confirmGradingJobWithReport(ctx, agentName, recordID, corrections, nil)
+}
+
+// 家长讲题只等待题干冻结；报告快照由既有持久任务传入，不修改锚点或旧公共协议。
+func (d Deps) confirmGradingJobWithReport(ctx context.Context, agentName, recordID string, corrections []string, report *TeachingReportTaskSnapshot) (GradingJobView, error) {
 	v, err := d.GetGradingJob(ctx, agentName, recordID)
 	if err != nil {
 		return GradingJobView{}, err
@@ -532,15 +541,15 @@ func (d Deps) ConfirmGradingJob(ctx context.Context, agentName, recordID string,
 	if v.Record.Status != k12.GradingStageAwaitingConfirmation {
 		return GradingJobView{}, errGradingStageConflict("阶段 %s 不可确认（仅 awaiting_confirmation）", v.Record.Status)
 	}
+	if report == nil || v.Fields.ConfirmationState != k12.GradingConfirmationConfirmed {
+		v.Fields.StageCheckpoints = append(v.Fields.StageCheckpoints, k12.GradingStageCheckpoint{
+			Stage: k12.GradingStageAwaitingConfirmation, ArtifactDigest: gradingCorrectionsDigest(corrections), RecordedAt: d.now(),
+		})
+	}
 	v.Fields.ConfirmationState = k12.GradingConfirmationConfirmed
-	v.Fields.StageCheckpoints = append(v.Fields.StageCheckpoints, k12.GradingStageCheckpoint{
-		Stage:          k12.GradingStageAwaitingConfirmation,
-		ArtifactDigest: gradingCorrectionsDigest(corrections),
-		RecordedAt:     d.now(),
-	})
 	resumeParentAutomaticWindow(&v.Fields, d.now())
 	next := v.Record.Status
-	if gradingJoinReady(v.Fields) {
+	if report != nil || gradingJoinReady(v.Fields) {
 		next = k12.GradingStageAssessing
 		// §5.4：确认恢复后按剩余阶段预算重新起算 deadline。
 		if err := d.setGradingDeadline(ctx, v.Record.AgentName, &v.Fields, next); err != nil {
@@ -550,7 +559,7 @@ func (d Deps) ConfirmGradingJob(ctx context.Context, agentName, recordID string,
 	return d.saveGradingJob(ctx, v, next)
 }
 
-// gradingJoinReady 是确认分支与定位分支的唯一汇合判定。显式列出终止锚点态，避免
+// gradingJoinReady 保留旧公共协议的确认与定位汇合。显式列出终止锚点态，避免
 // 未知/损坏值被“非 pending”宽松判断误放行到 assessing。
 func gradingJoinReady(fields k12.GradingJobFields) bool {
 	if fields.ConfirmationState != k12.GradingConfirmationConfirmed {

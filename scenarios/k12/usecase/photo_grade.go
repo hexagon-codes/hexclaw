@@ -214,7 +214,8 @@ func (d Deps) gradeHomeworkPhotoWithAssessorInput(
 		hasUnclear = false
 	}
 	anchorVerified := false
-	if (hasPresent || hasUnclear) && d.AnswerAnchorer != nil {
+	_, frozenGeometry := d.AnswerAnchorer.(presetAnchorer)
+	if (hasPresent || hasUnclear) && d.AnswerAnchorer != nil && (req.TeachingReport == nil || frozenGeometry) {
 		anchored, anchorErr := d.anchorHomeworkGeometry(ctx, req.Image, questions)
 		if anchored != nil {
 			// 部分几何仍只补充可信 BBox，不改变失败定位的回执或冻结识读事实。
@@ -225,7 +226,7 @@ func (d Deps) gradeHomeworkPhotoWithAssessorInput(
 		} else {
 			if hasPresent {
 				imageWarning = "未能可靠定位作答位置，本次仅提供文字批改"
-			} else {
+			} else if req.TeachingReport == nil {
 				imageWarning = "未能独立核验疑似学生笔迹，为避免泄露答案，本次按批改卷处理"
 			}
 		}
@@ -239,10 +240,9 @@ func (d Deps) gradeHomeworkPhotoWithAssessorInput(
 	practiceReferences := practiceQuestionReferences(req.PracticeReferences, req.PracticePaperSize, questions)
 	mode := classifyPhotoMode(questions)
 	if mode == PhotoModeSolve && hasUnclear && !anchorVerified && req.TaskIntent != PhotoTaskBlankWorksheet {
-		// An unavailable evidence adapter must fail closed: a genuinely answered but unreadable page
-		// must never receive generated answers merely because the independent verifier did not run.
+		// 作答仍未可靠识读时不判对错；可靠印刷题干沿独立参考解提供家长讲法。
 		mode = PhotoModeGrade
-		if imageWarning == "" {
+		if imageWarning == "" && req.TeachingReport == nil {
 			imageWarning = "未配置疑似笔迹核验，为避免泄露答案，本次按批改卷处理"
 		}
 	}
@@ -408,7 +408,9 @@ func (d Deps) assessPhotoItem(
 			return item, nil
 		}
 		mode = PhotoModeSolve
-		item.Warning = unclearHandwritingReferenceWarning
+		if !photoPracticeUnmatched(item) {
+			item.Warning = unclearHandwritingReferenceWarning
+		}
 	}
 	gradeReq := photoItemGradeRequest(req, q)
 	if mode == PhotoModeGrade && q.AnswerState == AnswerStateUnclear {
@@ -459,7 +461,7 @@ func (d Deps) assessPhotoItem(
 	if independentReference {
 		item.Status = PhotoAnswerUnclear
 	}
-	if !photoEvidenceTrusted(blankResult.Solved.Evidence) {
+	if !photoEvidenceTrusted(blankResult.Solved.Evidence) && !photoPracticeUnmatched(item) {
 		item.Warning = strings.TrimSpace(item.Warning + " Independent programmatic verification is unavailable for this answer.")
 	}
 	return item, nil
@@ -1087,6 +1089,11 @@ func photoGradeMarkdown(result PhotoGradeResult) string {
 		for _, item := range result.Items {
 			if photoPracticeUnmatched(item) {
 				fmt.Fprintf(&b, "- %s：%s\n", photoQuestionReference(item.Recognized), photoInline(item.Warning, 240))
+				if item.ParentGuide != nil {
+					b.WriteString("\n")
+					writeParentTeachingGuideMarkdown(&b, *item.ParentGuide)
+					b.WriteString("\n\n")
+				}
 			}
 		}
 		b.WriteString("\n")
