@@ -7,6 +7,7 @@ package engineadapter
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -30,6 +31,12 @@ const reportSentinel = "\n\n```hexclaw-subagents"
 // 用接口而非具体类型，让 adapter 可脱离 engine 单测。
 type SolveExecutor interface {
 	Execute(ctx context.Context, args map[string]any) (*skill.Result, error)
+}
+
+type solveSourceImageIdentity struct {
+	ID     string `json:"id"`
+	MIME   string `json:"mime"`
+	Digest string `json:"digest"`
 }
 
 type unreconciledSolveCallError struct{ cause error }
@@ -162,14 +169,44 @@ func (a *SolveAdapter) withGradingPhysicalCallInterceptor(ctx context.Context) c
 				}
 				return next(callCtx, spec)
 			}
-			requestRaw, err := json.Marshal(struct {
-				Agent  string `json:"agent"`
-				Task   string `json:"task"`
-				Source string `json:"source"`
-				Mode   string `json:"mode"`
-			}{spec.Agent, spec.Task, spec.Source, spec.Mode})
+			request := struct {
+				Agent  string                     `json:"agent"`
+				Task   string                     `json:"task"`
+				Source string                     `json:"source"`
+				Mode   string                     `json:"mode"`
+				Images []solveSourceImageIdentity `json:"images,omitempty"`
+			}{Agent: spec.Agent, Task: spec.Task, Source: spec.Source, Mode: spec.Mode}
+			legacyRaw, err := json.Marshal(request)
 			if err != nil {
 				return engine.SubAgentResult{}, err
+			}
+			var images []skill.InputImage
+			_, gradingCall := k12.GradingModelSnapshotFromContext(callCtx)
+			if gradingCall && !spec.ProgramOnly && spec.Source == "solve" &&
+				(spec.Agent == "solver" || spec.Agent == "verifier") {
+				images = skill.InputImages(callCtx)
+			}
+			for _, image := range images {
+				data, decodeErr := base64.StdEncoding.DecodeString(image.Data)
+				if decodeErr != nil {
+					return engine.SubAgentResult{}, fmt.Errorf("decode solve source image: %w", decodeErr)
+				}
+				if image.URL != "" {
+					data = append(data, []byte("\x00"+image.URL)...)
+				}
+				digest := sha256.Sum256(data)
+				request.Images = append(request.Images, solveSourceImageIdentity{ID: image.ID, MIME: image.MIME,
+					Digest: hex.EncodeToString(digest[:])})
+			}
+			requestRaw := legacyRaw
+			legacyDigest := ""
+			if len(request.Images) > 0 {
+				legacyHash := sha256.Sum256(legacyRaw)
+				legacyDigest = hex.EncodeToString(legacyHash[:])
+				requestRaw, err = json.Marshal(request)
+				if err != nil {
+					return engine.SubAgentResult{}, err
+				}
 			}
 			digestRaw := sha256.Sum256(requestRaw)
 			var knownExecutionFailure func(string) error
@@ -191,6 +228,7 @@ func (a *SolveAdapter) withGradingPhysicalCallInterceptor(ctx context.Context) c
 				callCtx,
 				usecase.GradingPhysicalCallSpec{
 					Operation: operation, RequestDigest: hex.EncodeToString(digestRaw[:]),
+					LegacyRequestDigest:   legacyDigest,
 					KnownExecutionFailure: knownExecutionFailure,
 				},
 				func(providerCtx context.Context) (string, error) {

@@ -406,9 +406,20 @@ func verificationProgramJudgment(input *verificationInput, program verificationP
 func (e *ReActEngine) completeStandaloneVerification(ctx context.Context, sessionID string, msg *adapter.Message,
 	provider hexagon.Provider, providerName, modelName string, req hexagon.CompletionRequest, cacheInput string,
 	input *verificationInput) (reply *adapter.Reply, runErr error) {
-	// 保留系统指令与请求策略；独立节点只替换本次任务，不带工具往返或历史图片。
+	// 保留系统指令、请求策略和本次来源图；独立节点只替换本次任务文本。
 	req.Messages = append([]llm.Message(nil), req.Messages...)
-	req.Messages[len(req.Messages)-1] = llm.Message{Role: llm.RoleUser, Content: verificationProgramPrompt(input)}
+	current := req.Messages[len(req.Messages)-1]
+	prompt := verificationProgramPrompt(input)
+	message := llm.Message{Role: llm.RoleUser, Content: prompt}
+	for _, part := range current.MultiContent {
+		if part.Type == "image_url" && part.ImageURL != nil {
+			if len(message.MultiContent) == 0 {
+				message.MultiContent = []llm.ContentPart{{Type: "text", Text: prompt}}
+			}
+			message.MultiContent = append(message.MultiContent, part)
+		}
+	}
+	req.Messages[len(req.Messages)-1] = message
 	req.Tools, req.ToolChoice = nil, nil
 	req.ResponseFormat = &llm.ResponseFormat{Type: "json_object"}
 	trace.L(ctx).Info("standalone verification started", "provider", providerName, "model", modelName,

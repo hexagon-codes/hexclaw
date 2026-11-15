@@ -28,7 +28,9 @@ var (
 type GradingPhysicalCallSpec struct {
 	Operation     k12.GradingItemOperation
 	RequestDigest string
-	ExecutionKind k12.GradingExecutionKind `json:"execution_kind,omitempty"`
+	// LegacyRequestDigest 只用于识别旧文字请求，不能作为当前视觉请求的发送或成功身份。
+	LegacyRequestDigest string                   `json:"legacy_request_digest,omitempty"`
+	ExecutionKind       k12.GradingExecutionKind `json:"execution_kind,omitempty"`
 	// KnownExecutionFailure 由适配器识别同输入的明确失败执行回执；不用于一般格式或能力校验。
 	KnownExecutionFailure func(string) error `json:"-"`
 	// ReplayResultFailure 只拒绝业务未通过的旧成功回执；新返回值仍完整保存物理成功事实。
@@ -1090,7 +1092,8 @@ func ExecuteGradingPhysicalCall(
 }
 
 type gradingPhysicalNoRetryError struct {
-	cause error
+	cause     error
+	stopSolve bool
 }
 
 // 禁止自动重试不等于结果未知；失败类别与文案由原始错误决定。
@@ -1102,7 +1105,7 @@ func (e gradingPhysicalNoRetryError) SubAgentRetryable() bool { return false }
 
 // 结果未知或调用方取消必须停在原任务；已知候选失败不阻断独立的后续候选。
 func (e gradingPhysicalNoRetryError) SolveExecutionMustStop() bool {
-	return errors.Is(e.cause, ErrGradingPhysicalCallOutcomeUnknown) ||
+	return e.stopSolve || errors.Is(e.cause, ErrGradingPhysicalCallOutcomeUnknown) ||
 		errors.Is(e.cause, ErrModelInvocationRequiresReconciliation) ||
 		errors.Is(e.cause, k12storage.ErrTextSolveUnknown) ||
 		errors.Is(e.cause, context.Canceled) ||
@@ -1160,6 +1163,7 @@ func (e *durableGradingPhysicalCallExecutor) ExecuteGradingPhysicalCall(
 		return zero, err
 	}
 	spec.RequestDigest = strings.TrimSpace(spec.RequestDigest)
+	spec.LegacyRequestDigest = strings.TrimSpace(spec.LegacyRequestDigest)
 	if !spec.Operation.Valid() || spec.Operation == k12.GradingItemOperationSolve ||
 		spec.RequestDigest == "" {
 		return zero, fmt.Errorf("%w: invalid physical grading call identity", ErrInvalidInput)
@@ -1172,6 +1176,10 @@ func (e *durableGradingPhysicalCallExecutor) ExecuteGradingPhysicalCall(
 			[]byte(spec.RequestDigest),
 			[]byte(grounding.identityDigest),
 		)
+		if spec.LegacyRequestDigest != "" {
+			spec.LegacyRequestDigest = modelInvocationDigest([]byte("k12-grading-grounded-request-v1"),
+				[]byte(spec.LegacyRequestDigest), []byte(grounding.identityDigest))
+		}
 	}
 
 	commitCtx, cancelCommit := gradingDurableCommitContext(ctx)
@@ -1186,6 +1194,7 @@ func (e *durableGradingPhysicalCallExecutor) ExecuteGradingPhysicalCall(
 	currentBase := currentGeneration * 1000
 	nextOrdinal := 1
 	var matching *k12.GradingItemInvocation
+	var legacy *k12.GradingItemInvocation
 	for i := range invocations {
 		candidate := &invocations[i]
 		if candidate.ProblemID != e.q.ProblemID || candidate.Operation != spec.Operation {
@@ -1199,6 +1208,24 @@ func (e *durableGradingPhysicalCallExecutor) ExecuteGradingPhysicalCall(
 		if candidate.RequestDigest == spec.RequestDigest &&
 			(matching == nil || candidate.OperationAttempt > matching.OperationAttempt) {
 			matching = candidate
+		}
+		if spec.LegacyRequestDigest != "" && candidate.RequestDigest == spec.LegacyRequestDigest &&
+			candidate.AttemptID == e.q.AttemptID && candidate.InputDigest == e.q.InputDigest &&
+			(candidate.InputRevision == e.q.ConfirmedVersion || candidate.InputRevision == 0) &&
+			(legacy == nil || candidate.OperationAttempt > legacy.OperationAttempt) {
+			legacy = candidate
+		}
+	}
+	if legacy != nil {
+		switch legacy.Status {
+		case k12.ModelInvocationSent, k12.ModelInvocationOutcomeUnknown, k12.ModelInvocationReconciled:
+			return zero, gradingPhysicalNoRetryError{cause: fmt.Errorf("%w: stored text invocation=%s status=%s",
+				ErrModelInvocationRequiresReconciliation, legacy.InvocationID, legacy.Status)}
+		default:
+			if matching == nil {
+				return zero, gradingPhysicalNoRetryError{stopSolve: true, cause: fmt.Errorf("%w: %w: stored text invocation=%s cannot become a visual request",
+					ErrInvalidInput, k12storage.ErrGradingItemInvocationConflict, legacy.InvocationID)}
+			}
 		}
 	}
 	if matching != nil {
@@ -1537,6 +1564,11 @@ func executeUncachedDurableSolveOperation(
 		return SolveHomeworkResult{}, "", groundingErr
 	}
 	ctx = groundedCtx
+	ctx, imageErr := o.withGradingSolveSourceImages(ctx, job, q)
+	if imageErr != nil {
+		return SolveHomeworkResult{}, "", imageErr
+	}
+	qualityRequest := photoQuantityTargetRequest(gradeReq, q)
 	if !usesGradingPhysicalCalls(deps.Solver) {
 		if groundingRequired {
 			return SolveHomeworkResult{}, "", fmt.Errorf(
@@ -1552,7 +1584,11 @@ func executeUncachedDurableSolveOperation(
 				Request     GradeRequest `json:"request"`
 			}{q.InputDigest, gradeReq},
 			func(callCtx context.Context) (SolveHomeworkResult, error) {
-				return deps.solveHomeworkProblem(callCtx, gradeReq)
+				result, err := deps.solveHomeworkProblem(callCtx, gradeReq)
+				if err == nil {
+					err = validateVisualQuantitySolveResult(callCtx, deps, qualityRequest, result)
+				}
+				return result, err
 			})
 	}
 	if err := ctx.Err(); err != nil {
@@ -1563,6 +1599,9 @@ func executeUncachedDurableSolveOperation(
 	defer cancelItem()
 	itemCtx = withGradingPhysicalCallExecutor(itemCtx, executor)
 	result, err := deps.SolveHomeworkProblem(itemCtx, gradeReq)
+	if err == nil {
+		err = validateVisualQuantitySolveResult(itemCtx, deps, qualityRequest, result)
+	}
 	invocationID := executor.lastInvocation(
 		k12.GradingItemOperationSolveVerify,
 		k12.GradingItemOperationSolveGenerate,

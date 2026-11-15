@@ -411,13 +411,21 @@ func (d Deps) assessPhotoItem(
 		item.Warning = unclearHandwritingReferenceWarning
 	}
 	gradeReq := photoItemGradeRequest(req, q)
+	if mode == PhotoModeGrade && q.AnswerState == AnswerStateUnclear {
+		item.Status = PhotoAnswerUnclear
+		item.Warning = "Unable to reliably recognize the handwriting. No correctness judgment was produced."
+		return item, nil
+	}
+	ctx = skill.WithRoutedAgent(ctx, req.AgentName)
+	owner := skill.AuthenticatedUserID(ctx)
+	if owner == "" {
+		owner = d.TextbookOwnerID
+	}
+	ctx, imageErr := d.withPhotoSolveSourceImages(ctx, owner, q)
+	if imageErr != nil {
+		return item, imageErr
+	}
 	if mode == PhotoModeGrade && q.AnswerState != AnswerStateBlank {
-		switch q.AnswerState {
-		case AnswerStateUnclear:
-			item.Status = PhotoAnswerUnclear
-			item.Warning = "Unable to reliably recognize the handwriting. No correctness judgment was produced."
-			return item, nil
-		}
 		graded, err := d.GradeHomeworkProblem(ctx, gradeReq)
 		item.Grade = graded
 		if err != nil {
@@ -431,6 +439,9 @@ func (d Deps) assessPhotoItem(
 	blankResult, err := d.SolveBlankWorksheetProblem(ctx, gradeReq)
 	item.Solve = blankResult.Solved
 	if err != nil {
+		return item, err
+	}
+	if err := validateVisualQuantitySolveResult(ctx, d, photoQuantityTargetRequest(gradeReq, q), blankResult.Solved); err != nil {
 		return item, err
 	}
 	if blankResult.Solved.OutOfScope {
@@ -452,6 +463,15 @@ func (d Deps) assessPhotoItem(
 		item.Warning = strings.TrimSpace(item.Warning + " Independent programmatic verification is unavailable for this answer.")
 	}
 	return item, nil
+}
+
+// 数量目标只读取当前题的原文副本，公共材料仍留在实际求解输入中。
+func photoQuantityTargetRequest(req GradeRequest, q RecognizedQuestion) GradeRequest {
+	req.Problem = q.RawTranscription
+	if strings.TrimSpace(req.Problem) == "" {
+		req.Problem = q.Question
+	}
+	return req
 }
 
 const practiceUnmatchedWarning = "This content cannot be uniquely matched to the practice paper. No correctness judgment was produced."

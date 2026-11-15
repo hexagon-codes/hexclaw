@@ -13,12 +13,14 @@ func TestGradingNoRetryPreservesKnownFailureAndUnknownOutcome(t *testing.T) {
 		name        string
 		cause       error
 		wantUnknown bool
+		stopSolve   bool
 	}{
 		{name: "known audit rejection", cause: auditFailure},
 		{name: "unknown provider outcome", cause: unknown, wantUnknown: true},
+		{name: "known source identity conflict", cause: ErrInvalidInput, stopSolve: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := gradingPhysicalNoRetryError{cause: tc.cause}
+			err := gradingPhysicalNoRetryError{cause: tc.cause, stopSolve: tc.stopSolve}
 			if err.Error() != tc.cause.Error() {
 				t.Fatalf("no-retry marker changed the failure meaning: %q, want %q", err.Error(), tc.cause.Error())
 			}
@@ -28,8 +30,8 @@ func TestGradingNoRetryPreservesKnownFailureAndUnknownOutcome(t *testing.T) {
 			if err.SubAgentRetryable() {
 				t.Fatal("known failure and unknown outcome must not trigger an automatic model retry")
 			}
-			if err.SolveExecutionMustStop() != tc.wantUnknown {
-				t.Fatalf("whole solve stop=%v, want unknown=%v", err.SolveExecutionMustStop(), tc.wantUnknown)
+			if err.SolveExecutionMustStop() != (tc.wantUnknown || tc.stopSolve) {
+				t.Fatalf("whole solve stop=%v, want=%v", err.SolveExecutionMustStop(), tc.wantUnknown || tc.stopSolve)
 			}
 		})
 	}

@@ -1929,6 +1929,7 @@ func runServe(configFile, feishuAppID, feishuSecret, telegramToken string, deskt
 		engine.ApplySpecToMessage(msg, spec)
 		var providerAttempt *egress.ProviderAttempt
 		snapshot, gradingCall := k12.GradingModelSnapshotFromContext(ctx)
+		msg.Attachments = k12SolveSourceAttachments(ctx, spec)
 		if k12.IsMaterialPreparation(ctx) || gradingCall {
 			if msg.Metadata == nil {
 				msg.Metadata = map[string]string{}
