@@ -58,7 +58,7 @@ func (g k12UnitSummaryGenerator) completeJSON(ctx context.Context, instruction s
 	if finalUserText != "" {
 		messages = append(messages, llm.Message{Role: llm.RoleUser, Content: "Authoritative current parent instruction. Its substantive additions override unchanged template defaults; available application materials are not automatically selected sources:\n" + finalUserText})
 	}
-	response, err := provider.Complete(ctx, llm.CompletionRequest{
+	response, err := provider.Complete(k12NonIdempotentLLMContext(ctx), llm.CompletionRequest{
 		Model: snapshot.Model,
 		// 仅本领域结构化操作使用既有SDK响应格式；仍验证实际JSON与领域结构，不把提示词当协议保证。
 		ResponseFormat: &llm.ResponseFormat{Type: "json_object"},
