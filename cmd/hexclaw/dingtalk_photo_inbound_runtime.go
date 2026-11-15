@@ -25,6 +25,7 @@ import (
 
 const (
 	k12DingtalkPhotoRoutingObjectKind  = "dingtalk_photo_routing_confirmation"
+	k12DingtalkPhotoUnreadableKind     = "dingtalk_photo_unreadable_result"
 	k12DingtalkInboundRecoveryLimit    = 100
 	k12DingtalkInboundMaxRetryInterval = 30 * time.Second
 )
@@ -772,6 +773,21 @@ func (r *k12DingtalkPhotoInboundRuntime) advanceImageTask(
 	if err != nil {
 		return false, err
 	}
+	if result.Kind == "creative" && result.Creative != nil &&
+		result.Creative.Status == k12.CreativeWorkIntakeUnreadable {
+		// 无可靠正文也是内容终态，沿原接纳身份交付，不新建作品或重新派发识别。
+		if bundle.Dispatch.RoutingDecision == k12usecase.InboundPhotoRoutePending {
+			_, err := r.inbound.RecordRoutingDecision(ctx, bundle.Receipt.AgentName, bundle.Receipt.ReceiptID,
+				bundle.Dispatch.Version, k12usecase.InboundPhotoRouteNewSubmission)
+			return false, err
+		}
+		if bundle.Dispatch.RoutingDecision != k12usecase.InboundPhotoRouteNewSubmission || result.Creative.IntakeID == "" {
+			return false, fmt.Errorf("DingTalk unreadable creative routing is unresolved")
+		}
+		_, err := r.inbound.RecordFinalArtifact(ctx, bundle.Receipt.AgentName, bundle.Receipt.ReceiptID,
+			bundle.Dispatch.Version, result.Creative.IntakeID)
+		return false, err
+	}
 	if result.Kind == "creative" && result.CreativeWork != nil {
 		generation := result.CreativeWork.GenerationState.Latest
 		if generation == nil || generation.Status != k12.WorkFeedbackSucceeded || generation.Feedback == nil {
@@ -1097,7 +1113,11 @@ func (r *k12DingtalkPhotoInboundRuntime) completeBoundReply(
 	if queryErr != nil && !errors.Is(queryErr, k12usecase.ErrDeliveryQueryUnavailable) {
 		return false, queryErr
 	}
-	if batch.ObjectKind == "creative_work" && strings.HasSuffix(batch.ObjectID, ":"+k12.DeliveryProjectionVersionIMFinalPDFV1) {
+	if batch.ObjectKind == k12DingtalkPhotoUnreadableKind {
+		if err := validateK12UnreadableReplyBatch(batch, bundle, target); err != nil {
+			return false, err
+		}
+	} else if batch.ObjectKind == "creative_work" && strings.HasSuffix(batch.ObjectID, ":"+k12.DeliveryProjectionVersionIMFinalPDFV1) {
 		if err := k12.ValidateDeliveryProjectionTarget(batch, batch.Receipts); err != nil {
 			return false, err
 		}
@@ -1256,6 +1276,9 @@ func (r *k12DingtalkPhotoInboundRuntime) advanceFinalReply(
 			result, err := r.imageTasks.Result(ctx, bundle.Receipt.AgentName, bundle.Dispatch.ImageTaskID)
 			if err != nil {
 				return false, err
+			}
+			if result.Creative != nil && result.Creative.Status == k12.CreativeWorkIntakeUnreadable {
+				return r.advanceUnreadableCreativeFinalReply(ctx, bundle, result)
 			}
 			return r.advanceCreativeFinalReply(ctx, bundle, result)
 		}
@@ -1423,6 +1446,74 @@ func (r *k12DingtalkPhotoInboundRuntime) advanceFinalReply(
 		"part_count", len(batch.Receipts),
 	)
 	return true, nil
+}
+
+func validateK12UnreadableReplyBatch(batch k12.DeliveryBatch, bundle k12usecase.InboundPhotoBundle, target k12usecase.ResolvedDeliveryTarget) error {
+	if batch.BatchID == "" || batch.AgentName != bundle.Receipt.AgentName || batch.ObjectKind != k12DingtalkPhotoUnreadableKind ||
+		batch.ObjectID != bundle.Receipt.ReceiptID+":"+bundle.Dispatch.FinalArtifactID || len(batch.Receipts) != 1 {
+		return fmt.Errorf("DingTalk unreadable result batch identity mismatch")
+	}
+	receipt := batch.Receipts[0]
+	if receipt.DeliveryID == "" || receipt.PartKind != messagecontent.PartMarkdown || receipt.PartOrdinal != 1 ||
+		receipt.BindingID != target.BindingID || receipt.Target != target.Target {
+		return fmt.Errorf("DingTalk unreadable result receipt identity mismatch")
+	}
+	return nil
+}
+
+func (r *k12DingtalkPhotoInboundRuntime) advanceUnreadableCreativeFinalReply(ctx context.Context, bundle k12usecase.InboundPhotoBundle, result k12usecase.ImageTaskResult) (bool, error) {
+	intake := result.Creative
+	if result.Kind != "creative" || intake == nil || intake.Status != k12.CreativeWorkIntakeUnreadable ||
+		intake.IntakeID != bundle.Dispatch.FinalArtifactID || intake.AgentName != bundle.Receipt.AgentName ||
+		intake.DispatchID != bundle.Dispatch.ImageTaskID || result.Dispatch.DispatchID != bundle.Dispatch.ImageTaskID {
+		return false, fmt.Errorf("DingTalk unreadable result identity mismatch")
+	}
+	reply, err := k12CreativeWorkReply(result)
+	if err != nil {
+		return false, err
+	}
+	target, err := r.resolveInboundPhotoFrozenTarget(bundle)
+	if err != nil {
+		return false, err
+	}
+	objectID := bundle.Receipt.ReceiptID + ":" + intake.IntakeID
+	batch, lookupErr := r.replyBatches.GetDeliveryBatchForMessageIdentity(ctx, bundle.Receipt.AgentName,
+		k12DingtalkPhotoUnreadableKind, objectID, reply.Content, nil)
+	var deliveryErr error
+	if errors.Is(lookupErr, records.ErrNotFound) {
+		batch, _, deliveryErr = r.replyBatches.PrepareAndSendMessageBatchForTargets(ctx, bundle.Receipt.AgentName,
+			k12DingtalkPhotoUnreadableKind, objectID, k12usecase.DeliveryMessage{Content: reply.Content},
+			[]k12usecase.ResolvedDeliveryTarget{target})
+	} else if lookupErr != nil {
+		return false, lookupErr
+	} else {
+		if err := validateK12UnreadableReplyBatch(batch, bundle, target); err != nil {
+			return false, err
+		}
+		if len(batch.Receipts) == 1 && batch.Receipts[0].Status == k12.DeliveryPending {
+			port, ok := r.replyBatches.(k12DingtalkPhotoStatusBatchPort)
+			if !ok {
+				return false, fmt.Errorf("DingTalk unreadable result pending recovery is unavailable")
+			}
+			batch, deliveryErr = port.ResumePendingDeliveryBatch(ctx, bundle.Receipt.AgentName, batch.BatchID)
+		}
+	}
+	if err := validateK12UnreadableReplyBatch(batch, bundle, target); err != nil {
+		return false, errors.Join(deliveryErr, err)
+	}
+	// 发送回执已取得后先冻结批次；后续恢复只查询该批次，不重发内容结果。
+	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	bound, err := r.inbound.BindReplyBatch(persistCtx, bundle.Receipt.AgentName, bundle.Receipt.ReceiptID,
+		bundle.Dispatch.Version, batch.BatchID)
+	if err != nil {
+		return false, errors.Join(deliveryErr, err)
+	}
+	if deliveryErr != nil {
+		return false, deliveryErr
+	}
+	bundle.Dispatch = bound
+	return r.completeBoundReply(ctx, bundle)
 }
 
 type k12InboundPhotoCreativeFeedbackReader interface {
