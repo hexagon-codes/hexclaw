@@ -427,69 +427,61 @@ func (d Deps) GenerateWorkFeedbackCommand(
 			return CreativeWorkView{}, fmt.Errorf("%w: 作品点评生成失败: %v", ErrSolveFailed, err)
 		}
 	}
-	feedback := strings.TrimSpace(out.Feedback)
-	if feedback == "" {
-		if invocation != nil && replay == nil {
-			_ = d.Records.FailWorkFeedbackInvocation(
-				context.WithoutCancel(ctx), agentName, invocation.InvocationID,
-				"work_feedback_empty", false, true,
+	receiveResponse := func(failureKind string) error {
+		if invocation == nil || replay != nil {
+			return nil
+		}
+		resultJSON, err := json.Marshal(out)
+		if err != nil {
+			return err
+		}
+		// 完整响应已经取得，接收回执不再继承调用者取消；后续业务推进仍使用原上下文。
+		receiptCtx, cancelReceipt := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancelReceipt()
+		if failureKind != "" {
+			return d.Records.FailWorkFeedbackInvocationWithResult(
+				receiptCtx, agentName, invocation.InvocationID, failureKind, digestJSON(out), string(resultJSON),
 			)
 		}
+		return d.Records.CompleteWorkFeedbackInvocation(
+			receiptCtx, agentName, invocation.InvocationID, digestJSON(out), string(resultJSON),
+		)
+	}
+	feedback := strings.TrimSpace(out.Feedback)
+	if feedback == "" {
+		receiptErr := receiveResponse("work_feedback_empty")
 		_, _ = d.Records.FailWorkFeedbackGeneration(
 			context.WithoutCancel(ctx), agentName, generation.GenerationID,
 			"作品点评生成为空",
 		)
-		return CreativeWorkView{}, fmt.Errorf("%w: 作品点评生成为空", ErrSolveFailed)
+		return CreativeWorkView{}, errors.Join(fmt.Errorf("%w: 作品点评生成为空", ErrSolveFailed), receiptErr)
 	}
 	if reason := workFeedbackInvariantViolation(feedback, req.ContentMarkdown); reason != "" {
-		if invocation != nil && replay == nil {
-			_ = d.Records.FailWorkFeedbackInvocation(
-				context.WithoutCancel(ctx), agentName, invocation.InvocationID,
-				"work_feedback_contract_invalid", false, true,
-			)
-		}
+		receiptErr := receiveResponse("work_feedback_contract_invalid")
 		_, _ = d.Records.FailWorkFeedbackGeneration(
 			context.WithoutCancel(ctx), agentName, generation.GenerationID,
 			"作品点评违反 INV-011",
 		)
-		return CreativeWorkView{}, fmt.Errorf("%w: 生成点评违反 INV-011（%s），已拒绝入库", ErrSolveFailed, reason)
+		return CreativeWorkView{}, errors.Join(fmt.Errorf("%w: 生成点评违反 INV-011（%s），已拒绝入库", ErrSolveFailed, reason), receiptErr)
 	}
-	if invocation != nil && replay == nil {
-		resultJSON, marshalErr := json.Marshal(out)
-		if marshalErr != nil {
-			_, _ = d.Records.FailWorkFeedbackGeneration(
-				context.WithoutCancel(ctx), agentName, generation.GenerationID, marshalErr.Error(),
-			)
-			return CreativeWorkView{}, marshalErr
-		}
-		if err := d.Records.CompleteWorkFeedbackInvocation(
-			ctx, agentName, invocation.InvocationID, digestJSON(out), string(resultJSON),
-		); err != nil {
+	structured, err := structuredWorkFeedbackResponse(v.Fields.WorkType, last, req, out)
+	if err != nil {
+		receiptErr := receiveResponse("work_feedback_structure_invalid")
+		_, _ = d.Records.FailWorkFeedbackGeneration(
+			context.WithoutCancel(ctx), agentName, generation.GenerationID, err.Error(),
+		)
+		return CreativeWorkView{}, errors.Join(fmt.Errorf(
+			"%w: 结构化作品点评非法: %v", ErrInvalidInput, err,
+		), receiptErr)
+	}
+	if receiptErr := receiveResponse(""); receiptErr != nil {
+		if invocation != nil && replay == nil {
 			_ = d.Records.FailWorkFeedbackInvocation(
 				context.WithoutCancel(ctx), agentName, invocation.InvocationID,
 				"work_feedback_receipt_commit_failed", true, false,
 			)
-			return CreativeWorkView{}, err
 		}
-	}
-	structured, err := buildStructuredWorkFeedback(
-		v.Fields.WorkType, last, feedback, k12.FeedbackSourceAI,
-		strings.TrimSpace(out.SkillStamp), out.ProjectionContract,
-	)
-	if err == nil {
-		if req.PartialContent {
-			structured.Limitations = req.ContentLimitations
-			structured.ProjectionMarkdown = k12.ProjectWorkFeedbackMarkdownForContract(structured, out.ProjectionContract)
-		}
-		err = structured.Validate()
-	}
-	if err != nil {
-		_, _ = d.Records.FailWorkFeedbackGeneration(
-			context.WithoutCancel(ctx), agentName, generation.GenerationID, err.Error(),
-		)
-		return CreativeWorkView{}, fmt.Errorf(
-			"%w: 结构化作品点评非法: %v", ErrInvalidInput, err,
-		)
+		return CreativeWorkView{}, receiptErr
 	}
 	if _, err := d.Records.CompleteWorkFeedbackGeneration(
 		ctx, agentName, generation.GenerationID, structured,
@@ -497,6 +489,21 @@ func (d Deps) GenerateWorkFeedbackCommand(
 		return CreativeWorkView{}, err
 	}
 	return d.GetCreativeWork(ctx, agentName, recordID)
+}
+
+func structuredWorkFeedbackResponse(workType string, version k12.CreativeWorkVersion, req WorkFeedbackRequest, out WorkFeedbackOutput) (k12.WorkFeedback, error) {
+	structured, err := buildStructuredWorkFeedback(
+		workType, version, strings.TrimSpace(out.Feedback), k12.FeedbackSourceAI,
+		strings.TrimSpace(out.SkillStamp), out.ProjectionContract,
+	)
+	if err != nil {
+		return structured, err
+	}
+	if req.PartialContent {
+		structured.Limitations = req.ContentLimitations
+		structured.ProjectionMarkdown = k12.ProjectWorkFeedbackMarkdownForContract(structured, out.ProjectionContract)
+	}
+	return structured, structured.Validate()
 }
 
 func (d Deps) validatePromotedWritingFeedbackSnapshot(
@@ -620,13 +627,33 @@ func (d Deps) prepareWorkFeedbackInvocation(
 	if err == nil {
 		requestDigest = requestDigestWithParentInstructions(requestDigest, prior.RouteSnapshot.ParentInstructions)
 	}
-	switch {
-	case err == nil && prior.Status == k12.ImageTaskInvocationSucceeded:
+	if err == nil && prior.Status == k12.ImageTaskInvocationSucceeded {
 		var out WorkFeedbackOutput
 		if jsonErr := json.Unmarshal([]byte(prior.ResultJSON), &out); jsonErr != nil {
 			return nil, nil, k12storage.ErrImageTaskConflict
 		}
-		return &prior, &out, nil
+		if _, responseErr := structuredWorkFeedbackResponse(work.Fields.WorkType, version, *req, out); responseErr == nil {
+			return &prior, &out, nil
+		} else {
+			if prior.RequestDigest != requestDigest {
+				return nil, nil, k12storage.ErrImageTaskConflict
+			}
+			receiptCtx, cancelReceipt := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			receiptErr := d.Records.FailWorkFeedbackInvocationWithResult(receiptCtx, work.Record.AgentName,
+				prior.InvocationID, "work_feedback_structure_invalid", prior.ResultDigest, prior.ResultJSON)
+			cancelReceipt()
+			if receiptErr != nil {
+				return nil, nil, errors.Join(responseErr, receiptErr)
+			}
+			// 后台只收敛已知结构失败；只有进入命令前已失败的同代次才属于显式重试。
+			if work.GenerationState.Current == nil || work.GenerationState.Current.GenerationID != generation.GenerationID ||
+				work.GenerationState.Current.Status != k12.WorkFeedbackFailed {
+				return nil, nil, fmt.Errorf("%w: invalid stored work feedback response: %v", ErrInvalidInput, responseErr)
+			}
+			prior.Status, prior.RetrySafe = k12.ImageTaskInvocationFailed, true
+		}
+	}
+	switch {
 	case err == nil && prior.Status == k12.ImageTaskInvocationPrepared:
 		if prior.RequestDigest != requestDigest {
 			return nil, nil, k12storage.ErrImageTaskConflict

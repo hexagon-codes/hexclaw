@@ -234,3 +234,194 @@ func TestWorkFeedbackCoordinatorRestoresFrozenRegenerationAfterProfileChange(t *
 		})
 	}
 }
+
+func TestWorkFeedbackKnownResponseSurvivesCancellationAndRecoversWithoutResend(t *testing.T) {
+	for _, cancelAtReturn := range []bool{false, true} {
+		t.Run(map[bool]string{false: "normal", true: "cancel_at_known_response"}[cancelAtReturn], func(t *testing.T) {
+			d := newDataDeps(t)
+			parent, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			work, generation, _, err := d.CreateCurrentTextWork(parent, "xiaoming", "柳枝像绿色的丝带，随风轻轻摆动。", "known-response")
+			if err != nil {
+				t.Fatal(err)
+			}
+			calls := 0
+			d.Solver = feedbackSnapshotAdapter(t, "KNOWN_RESPONSE", func(_ context.Context, _, _, _ string) (string, error) {
+				calls++
+				if cancelAtReturn {
+					cancel()
+				}
+				return conciseWritingResponse, nil
+			})
+			_, callErr := d.GenerateWorkFeedbackCommand(parent, "xiaoming", work, generation)
+			invocation, err := d.Records.GetLatestWorkFeedbackInvocation(t.Context(), "xiaoming", work, "work:"+work+":version:"+generation+":feedback")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if invocation.Status != k12.ImageTaskInvocationSucceeded || !strings.Contains(invocation.ResultJSON, "具体肯定") {
+				t.Fatalf("known response must remain durable: status=%s response_bytes=%d call_err=%v", invocation.Status, len(invocation.ResultJSON), callErr)
+			}
+			runner := &usecase.CreativeWorkFeedbackCoordinator{Deps: &d, Records: d.Records}
+			if err := runner.Run(t.Context(), "xiaoming", generation); err != nil {
+				t.Fatal(err)
+			}
+			view, err := d.GetCreativeWork(t.Context(), "xiaoming", work)
+			if err != nil || view.GenerationState.Latest == nil || calls != 1 {
+				t.Fatalf("known response recovery must not resend: state=%+v calls=%d err=%v", view.GenerationState, calls, err)
+			}
+		})
+	}
+}
+
+func TestWorkFeedbackExplicitRetryAfterStructuredResponseFailure(t *testing.T) {
+	d := newDataDeps(t)
+	ctx := t.Context()
+	work, generation, _, err := d.CreateCurrentTextWork(ctx, "xiaoming", "柳枝像绿色的丝带，随风轻轻摆动。", "format-retry")
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	invalid := strings.Replace(conciseWritingResponse, "## 关键问题", "## 其他问题", 1)
+	d.Solver = feedbackSnapshotAdapter(t, "FORMAT_RETRY", func(_ context.Context, _, _, _ string) (string, error) {
+		calls++
+		if calls == 1 {
+			return invalid, nil
+		}
+		return conciseWritingResponse, nil
+	})
+	if _, err := d.GenerateWorkFeedbackCommand(ctx, "xiaoming", work, generation); err == nil {
+		t.Fatal("invalid initial section must fail")
+	}
+	view, err := d.GetCreativeWork(ctx, "xiaoming", work)
+	if err != nil || view.GenerationState.Current == nil || !view.GenerationState.Current.RetrySafe {
+		t.Fatalf("known invalid response must allow explicit retry: current=%+v err=%v", view.GenerationState.Current, err)
+	}
+	prior, err := d.Records.GetLatestWorkFeedbackInvocation(ctx, "xiaoming", work, "work:"+work+":version:"+generation+":feedback")
+	if err != nil || prior.Status != k12.ImageTaskInvocationFailed || !prior.RetrySafe ||
+		prior.StartedAt == 0 || prior.ProviderRequestKey == "" || prior.ResultDigest == "" ||
+		!strings.Contains(prior.ResultJSON, "其他问题") {
+		t.Fatalf("invalid original response must remain auditable: response=%s err=%v", prior.ResultJSON, err)
+	}
+	if _, err := d.GenerateWorkFeedbackCommand(ctx, "xiaoming", work, generation); err != nil || calls != 2 {
+		t.Fatalf("explicit retry must obtain a corrected attempt: calls=%d err=%v", calls, err)
+	}
+	if _, err := d.GenerateWorkFeedbackCommand(ctx, "xiaoming", work, generation); err != nil || calls != 2 {
+		t.Fatalf("successful replay must not generate again: calls=%d err=%v", calls, err)
+	}
+	stored, err := d.Records.GetImageTaskInvocation(ctx, "xiaoming", prior.InvocationID)
+	if err != nil || stored.ResultJSON != prior.ResultJSON || stored.ResultDigest != prior.ResultDigest {
+		t.Fatalf("retry changed the original response: err=%v", err)
+	}
+}
+
+func TestWorkFeedbackInvalidResponseReceiptDoesNotRewriteTerminalOutcomes(t *testing.T) {
+	for _, unknown := range []bool{false, true} {
+		t.Run(map[bool]string{false: "successful", true: "outcome_unknown"}[unknown], func(t *testing.T) {
+			d := newDataDeps(t)
+			ctx := t.Context()
+			work, generation, _, err := d.CreateCurrentTextWork(ctx, "xiaoming", "柳枝像绿色的丝带，随风轻轻摆动。", "terminal-receipt")
+			if err != nil {
+				t.Fatal(err)
+			}
+			d.Solver = feedbackSnapshotAdapter(t, "TERMINAL_RESPONSE", func(_ context.Context, _, _, _ string) (string, error) {
+				if unknown {
+					return "", errors.New("controlled response lost after send")
+				}
+				return conciseWritingResponse, nil
+			})
+			_, callErr := d.GenerateWorkFeedbackCommand(ctx, "xiaoming", work, generation)
+			if (callErr != nil) != unknown {
+				t.Fatalf("unexpected provider result: unknown=%v err=%v", unknown, callErr)
+			}
+			prior, err := d.Records.GetLatestWorkFeedbackInvocation(ctx, "xiaoming", work, "work:"+work+":version:"+generation+":feedback")
+			if err != nil {
+				t.Fatal(err)
+			}
+			sum := sha256.Sum256([]byte(`{}`))
+			response, digest := prior.ResultJSON, prior.ResultDigest
+			if unknown {
+				response, digest = `{}`, "sha256:"+hex.EncodeToString(sum[:])
+			}
+			if err := d.Records.FailWorkFeedbackInvocationWithResult(ctx, "xiaoming", prior.InvocationID,
+				"work_feedback_structure_invalid", digest, response); err == nil {
+				t.Fatal("known failure reception must not rewrite terminal outcomes")
+			}
+			stored, err := d.Records.GetImageTaskInvocation(ctx, "xiaoming", prior.InvocationID)
+			if err != nil || stored.Status != prior.Status || stored.RetrySafe != prior.RetrySafe ||
+				stored.ResultJSON != prior.ResultJSON || stored.ResultDigest != prior.ResultDigest {
+				t.Fatalf("terminal outcome changed: err=%v", err)
+			}
+		})
+	}
+}
+
+func TestWorkFeedbackLegacyInvalidSucceededResponseRequiresExplicitRetry(t *testing.T) {
+	for _, initialStatus := range []string{k12.WorkFeedbackFailed, k12.WorkFeedbackRunning} {
+		t.Run(initialStatus, func(t *testing.T) {
+			d := newDataDeps(t)
+			ctx := t.Context()
+			work, generation, _, err := d.CreateCurrentTextWork(ctx, "xiaoming", "柳枝像绿色的丝带，随风轻轻摆动。", "legacy-format")
+			if err != nil {
+				t.Fatal(err)
+			}
+			calls := 0
+			d.Solver = feedbackSnapshotAdapter(t, "LEGACY_FORMAT", func(_ context.Context, _, _, _ string) (string, error) {
+				calls++
+				if calls == 1 {
+					return strings.Replace(conciseWritingResponse, "## 关键问题", "## 其他问题", 1), nil
+				}
+				return conciseWritingResponse, nil
+			})
+			if _, err := d.GenerateWorkFeedbackCommand(ctx, "xiaoming", work, generation); err == nil {
+				t.Fatal("malformed response must fail")
+			}
+			prior, err := d.Records.GetLatestWorkFeedbackInvocation(ctx, "xiaoming", work, "work:"+work+":version:"+generation+":feedback")
+			if err != nil || prior.ResultJSON == "" || prior.ResultDigest == "" {
+				t.Fatalf("original response fixture is missing: %v", err)
+			}
+			// 历史实现先保存成功回执再校验结构；响应、摘要和冻结请求仍由正式入口生成。
+			if _, err := d.Records.DB().ExecContext(ctx, `UPDATE k12_image_task_invocations SET status='succeeded',retry_safe=0,error_kind='' WHERE invocation_id=?`, prior.InvocationID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := d.Records.DB().ExecContext(ctx, `UPDATE k12_work_feedback_generations SET status=?,failure_reason=CASE WHEN ?='running' THEN '' ELSE failure_reason END WHERE generation_id=?`, initialStatus, initialStatus, generation); err != nil {
+				t.Fatal(err)
+			}
+			if initialStatus == k12.WorkFeedbackRunning {
+				if _, err := d.Records.DB().ExecContext(ctx, `UPDATE k12_creative_works SET feedback_state='queued' WHERE record_id=? AND initial_feedback_generation_id=?`, work, generation); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, invalid := range []struct{ kind, digest, response string }{
+				{"work_feedback_empty", prior.ResultDigest, prior.ResultJSON},
+				{"work_feedback_structure_invalid", "sha256:" + strings.Repeat("a", 64), prior.ResultJSON},
+				{"work_feedback_structure_invalid", prior.ResultDigest, `{}`},
+			} {
+				if err := d.Records.FailWorkFeedbackInvocationWithResult(ctx, "xiaoming", prior.InvocationID, invalid.kind, invalid.digest, invalid.response); err == nil {
+					t.Fatal("legacy reclassification must require the original response, digest and structural failure")
+				}
+			}
+			if initialStatus == k12.WorkFeedbackRunning {
+				runner := &usecase.CreativeWorkFeedbackCoordinator{Deps: &d, Records: d.Records}
+				if err := runner.Run(ctx, "xiaoming", generation); err == nil {
+					t.Fatal("background recovery must retain the known structural failure")
+				}
+				failed, err := d.Records.GetWorkFeedbackGeneration(ctx, "xiaoming", generation)
+				if err != nil || failed.Status != k12.WorkFeedbackFailed || !failed.RetrySafe || calls != 1 {
+					t.Fatalf("background recovery must not resend: generation=%+v calls=%d err=%v", failed, calls, err)
+				}
+			}
+			if _, err := d.GenerateWorkFeedbackCommand(ctx, "xiaoming", work, generation); err != nil || calls != 2 {
+				t.Fatalf("explicit retry must obtain the corrected attempt: calls=%d err=%v", calls, err)
+			}
+			stored, err := d.Records.GetImageTaskInvocation(ctx, "xiaoming", prior.InvocationID)
+			if err != nil || stored.Status != k12.ImageTaskInvocationFailed || !stored.RetrySafe ||
+				stored.ResultJSON != prior.ResultJSON || stored.ResultDigest != prior.ResultDigest ||
+				stored.StartedAt != prior.StartedAt || stored.FinishedAt != prior.FinishedAt {
+				t.Fatalf("reclassification changed the original response: invocation=%+v err=%v", stored, err)
+			}
+			if _, err := d.GenerateWorkFeedbackCommand(ctx, "xiaoming", work, generation); err != nil || calls != 2 {
+				t.Fatalf("successful replay must not send: calls=%d err=%v", calls, err)
+			}
+		})
+	}
+}
