@@ -258,6 +258,27 @@ func (d Deps) GenerateCurrentDictationToBasket(
 	if err != nil {
 		return generation, "", false, err
 	}
+	persistedCommandKey := fmt.Sprintf("%s:v%d", commandKey, rowVersion)
+	prior, priorErr := d.Records.GetPracticeGenerationJob(ctx, agentName, persistedCommandKey)
+	if errors.Is(priorErr, records.ErrNotFound) {
+		prior, priorErr = d.Records.GetLatestPracticeGenerationBySource(
+			ctx, agentName, k12.PracticeGenerationSourceAccumulation, recordID, rowVersion,
+		)
+	}
+	if priorErr != nil && !errors.Is(priorErr, records.ErrNotFound) {
+		return generation, "", false, priorErr
+	}
+	var gradeTerm string
+	if priorErr == nil {
+		var frozen accumulationPracticeRequestSnapshot
+		if err := json.Unmarshal([]byte(prior.RequestSnapshot), &frozen); err != nil {
+			return generation, "", false, fmt.Errorf("%w: invalid frozen accumulation request: %v", ErrInvalidInput, err)
+		}
+		// 年级属于原任务的执行上下文；恢复时仍核对来源和显式意图，不重新读取当前档案。
+		gradeTerm = frozen.GradeTerm
+	} else {
+		gradeTerm = d.creationGradeTerm(ctx, agentName, "")
+	}
 	content := strings.TrimSpace(f.Content)
 	snapshot := accumulationPracticeRequestSnapshot{
 		AccumulationID: recordID, SourceVersion: rowVersion,
@@ -267,7 +288,7 @@ func (d Deps) GenerateCurrentDictationToBasket(
 		VerifierPolicy: "subject-verifier-gate-v1",
 		// 入口会话不属于稳定来源意图；列表与详情重放统一冻结积累自身的来源会话。
 		SourceSession: strings.TrimSpace(rec.SourceSession),
-		GradeTerm:     d.creationGradeTerm(ctx, agentName, ""),
+		GradeTerm:     gradeTerm,
 	}
 	sourceSnapshot, err := json.Marshal(snapshot)
 	if err != nil {
@@ -279,10 +300,7 @@ func (d Deps) GenerateCurrentDictationToBasket(
 	}
 	routeSnapshot := string(routeBytes)
 	requestDigest := singlePracticeDigest(string(sourceSnapshot), routeSnapshot)
-	persistedCommandKey := fmt.Sprintf("%s:v%d", commandKey, rowVersion)
-	if prior, getErr := d.Records.GetPracticeGenerationJob(
-		ctx, agentName, persistedCommandKey,
-	); getErr == nil {
+	if priorErr == nil {
 		if prior.Scope != "single" ||
 			prior.SourceKind != k12.PracticeGenerationSourceAccumulation ||
 			prior.SourceID != recordID || prior.SourceVersion != rowVersion ||
@@ -303,32 +321,6 @@ func (d Deps) GenerateCurrentDictationToBasket(
 			}
 		}
 		return accumulationGenerationFromPracticeJob(prior), prior.ResultSetID, false, nil
-	} else if !errors.Is(getErr, records.ErrNotFound) {
-		return generation, "", false, getErr
-	}
-	if latest, latestErr := d.Records.GetLatestPracticeGenerationBySource(
-		ctx, agentName, k12.PracticeGenerationSourceAccumulation,
-		recordID, rowVersion,
-	); latestErr == nil {
-		if latest.RequestDigest != requestDigest ||
-			latest.RequestSnapshot != string(sourceSnapshot) ||
-			latest.RouteSnapshot != routeSnapshot {
-			return generation, "", false, fmt.Errorf(
-				"%w: accumulation source is bound to another frozen request",
-				ErrInvalidInput,
-			)
-		}
-		if latest.Status == k12.PracticeGenerationFailed || latest.RetiredAt != 0 {
-			latest, err = d.Records.ReactivatePracticeGenerationJob(
-				ctx, agentName, latest.GenerationJobID,
-			)
-			if err != nil {
-				return generation, "", false, err
-			}
-		}
-		return accumulationGenerationFromPracticeJob(latest), latest.ResultSetID, false, nil
-	} else if !errors.Is(latestErr, records.ErrNotFound) {
-		return generation, "", false, latestErr
 	}
 	jobID := idgen.NanoID()
 	now := d.now()

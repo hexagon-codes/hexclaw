@@ -232,3 +232,70 @@ func TestSinglePracticeCoordinator_DispatchesAccumulationSourceJob(t *testing.T)
 		t.Fatalf("coordinator job=%+v err=%v", job, err)
 	}
 }
+
+func TestAccumulationDictationReAddKeepsFrozenGradeAfterProfileChange(t *testing.T) {
+	for _, changed := range []bool{false, true} {
+		t.Run(map[bool]string{false: "same_profile", true: "changed_profile"}[changed], func(t *testing.T) {
+			d := newDataDeps(t)
+			migrateSharedPracticeSources(t, d)
+			profiles := &feedbackGenerationProfileStore{profile: k12.ChildProfile{GradeTerm: "六年级上"}}
+			d.Profiles = profiles
+			ctx := t.Context()
+			accumulationID := createAccumulationForPractice(t, d, "a piece of cake", "create-frozen-grade")
+			pending, _, _, err := d.GenerateCurrentDictationToBasket(ctx, "xiaoming", "", accumulationID, false, "dictation:"+accumulationID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			committed, basketID, added, err := d.ProcessAccumulationPracticeGeneration(ctx, "xiaoming", pending.GenerationID)
+			if err != nil || !added {
+				t.Fatalf("initial generation commit: added=%v err=%v", added, err)
+			}
+			if err := d.RemoveFromBasket(ctx, "xiaoming", basketID, committed.PracticeItemID); err != nil {
+				t.Fatal(err)
+			}
+			if changed {
+				profiles.profile.GradeTerm = "六年级下"
+			}
+			for _, key := range []string{"dictation:" + accumulationID, "dictation:detail-entry"} {
+				replayed, _, _, err := d.GenerateCurrentDictationToBasket(ctx, "xiaoming", "", accumulationID, false, key)
+				if err != nil || replayed.GenerationID != pending.GenerationID || replayed.SourceSnapshot != pending.SourceSnapshot {
+					t.Fatalf("unchanged source must restore its frozen generation: changed=%v generation=%+v err=%v", changed, replayed, err)
+				}
+				if _, _, _, err := d.GenerateCurrentDictationToBasket(ctx, "xiaoming", "", accumulationID, true, key); err == nil {
+					t.Fatal("changed explicit dictation intent must conflict with the frozen request")
+				}
+			}
+		})
+	}
+}
+
+func TestDeletedLegacyAccumulationDoesNotReappearInReviewQueue(t *testing.T) {
+	d := newDataDeps(t)
+	ctx := t.Context()
+	id, _, err := d.AddAccumulation(ctx, "xiaoming", "legacy", k12.AccumFields{Subject: "英语", EntryType: "错词", Content: "necessary"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Now = func() int64 { return 1000 + usecase.FirstReviewInterval + 1 }
+	initial, err := d.ReviewQueue(ctx, "xiaoming")
+	if err != nil || len(initial) != 1 || initial[0].Record.RecordID != id {
+		t.Fatalf("due control=%+v err=%v", initial, err)
+	}
+	view, err := d.GetAccumulation(ctx, "xiaoming", id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := d.Records.TombstoneCurrentObject(ctx, "xiaoming", "accumulation", id, view.RowVersion, "delete-legacy")
+	if err != nil || !receipt.Deleted {
+		t.Fatalf("delete receipt=%+v err=%v", receipt, err)
+	}
+	after, err := d.ReviewQueue(ctx, "xiaoming")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range after {
+		if item.Record.RecordID == id {
+			t.Fatal("successfully deleted accumulation reappeared in the review queue")
+		}
+	}
+}
