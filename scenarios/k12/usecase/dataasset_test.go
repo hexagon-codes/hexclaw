@@ -60,8 +60,8 @@ func TestBackupRestore_RoundTripFieldConsistency(t *testing.T) {
 	}
 
 	// 新库（模拟清库/换机）→ 恢复
-	store2 := freshStore(t)
-	d2 := Deps{Records: store2}
+	store2, archiveRestorer := freshStoreWithArchiveRestorer(t)
+	d2 := Deps{Records: store2, ArchiveRestorer: archiveRestorer}
 	n, err := d2.Restore(ctx, bak)
 	if err != nil || n != 2 {
 		t.Fatalf("恢复应导入 2 条: n=%d err=%v", n, err)
@@ -105,10 +105,16 @@ func eqDue(a, b *int64) bool {
 
 // freshStore 建一个独立的空库 store（模拟换机恢复目标），注册 K12 schema。
 func freshStore(t *testing.T) *k12storage.Store {
+	store, _ := freshStoreWithArchiveRestorer(t)
+	return store
+}
+
+func freshStoreWithArchiveRestorer(t *testing.T) (*k12storage.Store, ArchiveRestorer) {
 	t.Helper()
 	db := openMigratedTestDB(t)
 	db.Exec(`INSERT INTO agents(name) VALUES('mingming')`)
 	reg := scenario.NewRegistry()
 	reg.Assemble(k12.Pack(k12.NewCurriculumStub()))
-	return k12storage.NewStore(db, reg.Records)
+	store := k12storage.NewStore(db, reg.Records)
+	return store, &recordArchiveSQLiteFixture{db: db, records: store}
 }

@@ -276,7 +276,8 @@ func materializeHexbakForRestore(source *Hexbak) (*Hexbak, error) {
 		return cloneHexbak(source), nil
 	}
 	out := cloneHexbak(source)
-	out.Version = HexbakVersion
+	// 只物化旧包已有的OCR事实，不把缺少后续投影的包提升为新版完整归档。
+	out.Version = 4
 	out.ArchiveID = ""
 	out.CreativeWorkOCR = evidence
 	if err := SealHexbak(out); err != nil {

@@ -91,6 +91,10 @@ func (a *ArchiveRestoreAdapter) RestoreArchiveAs(
 			if err != nil {
 				return fmt.Errorf("snapshot current creative works: %w", err)
 			}
+			snapshot.CurrentAccumulations, err = a.records.ExportAccumulationsArchiveV10Tx(ctx, tx, plan.TargetAgent)
+			if err != nil {
+				return fmt.Errorf("snapshot current accumulations: %w", err)
+			}
 			snapshot.TeachingDiagrams, err = a.records.ExportTeachingDiagramAssetsTx(ctx, tx, plan.TargetAgent)
 			if err != nil {
 				return fmt.Errorf("snapshot teaching diagrams: %w", err)
@@ -182,6 +186,11 @@ func (a *ArchiveRestoreAdapter) RestoreArchiveAs(
 			}
 			if err := a.records.ImportAgentRecordsTx(ctx, tx, plan.TargetAgent, migrated.Records); err != nil {
 				return fmt.Errorf("merge owner-rewritten records: %w", err)
+			}
+			if plan.OriginalArchive.Version >= 10 {
+				if err := a.records.ImportAccumulationsArchiveV10Tx(ctx, tx, plan.TargetAgent, migrated.CurrentAccumulations); err != nil {
+					return fmt.Errorf("restore migrated current accumulations: %w", err)
+				}
 			}
 			if err := a.records.ImportCreativeWorksArchiveV7Tx(ctx, tx, plan.TargetAgent, migrated.CurrentCreativeWorks); err != nil {
 				return fmt.Errorf("restore migrated current creative works: %w", err)
@@ -339,6 +348,15 @@ func (a *ArchiveRestoreAdapter) RollbackRestoreAs(
 			if err != nil {
 				return rollbackFailure(err, nil)
 			}
+			beforeAccumulations, err := a.records.ExportAccumulationsArchiveV10Tx(ctx, tx, req.TargetAgent)
+			if err != nil {
+				return rollbackFailure(err, nil)
+			}
+			if current.Snapshot.Version >= 10 {
+				if err := verifyRestoreAccumulationsUnchanged(beforeAccumulations, current.Snapshot, migrated, original.Version); err != nil {
+					return rollbackFailure(err, nil)
+				}
+			}
 			beforeReviewed, err := a.records.ExportReviewSourceArchiveTx(ctx, tx, req.TargetAgent)
 			if err != nil {
 				return rollbackFailure(err, nil)
@@ -395,6 +413,9 @@ func (a *ArchiveRestoreAdapter) RollbackRestoreAs(
 			if err := a.records.ReplaceAgentRecordsTx(ctx, tx, req.TargetAgent, current.Snapshot.Records); err != nil {
 				return rollbackFailure(fmt.Errorf("restore pre-migration records: %w", err), nil)
 			}
+			if err := a.records.ImportAccumulationsArchiveV10Tx(ctx, tx, req.TargetAgent, current.Snapshot.CurrentAccumulations); err != nil {
+				return rollbackFailure(fmt.Errorf("restore current accumulation snapshot: %w", err), nil)
+			}
 			if err := a.records.ImportCreativeWorksArchiveV7Tx(ctx, tx, req.TargetAgent, current.Snapshot.CurrentCreativeWorks); err != nil {
 				return rollbackFailure(fmt.Errorf("restore current creative snapshot: %w", err), nil)
 			}
@@ -447,15 +468,17 @@ func (a *ArchiveRestoreAdapter) RollbackRestoreAs(
 			}
 			at := time.Now().Unix()
 			beforeJSON, _ := json.Marshal(struct {
-				Records         []*records.AgentRecord            `json:"records"`
-				ProblemAttempts []k12.ProblemAttemptSnapshot      `json:"problem_attempts"`
-				ProblemSource   k12storage.ProblemSourceArchiveV6 `json:"problem_source"`
-			}{before, beforeProblemAttempts, beforeProblemSource})
+				Records              []*records.AgentRecord              `json:"records"`
+				ProblemAttempts      []k12.ProblemAttemptSnapshot        `json:"problem_attempts"`
+				ProblemSource        k12storage.ProblemSourceArchiveV6   `json:"problem_source"`
+				CurrentAccumulations []k12storage.AccumulationArchiveV10 `json:"current_accumulations,omitempty"`
+			}{before, beforeProblemAttempts, beforeProblemSource, beforeAccumulations})
 			afterJSON, _ := json.Marshal(struct {
-				Records         []*records.AgentRecord             `json:"records"`
-				ProblemAttempts []k12.ProblemAttemptSnapshot       `json:"problem_attempts"`
-				ProblemSource   *k12storage.ProblemSourceArchiveV6 `json:"problem_source,omitempty"`
-			}{current.Snapshot.Records, current.Snapshot.ProblemAttempts, current.Snapshot.ProblemSource})
+				Records              []*records.AgentRecord              `json:"records"`
+				ProblemAttempts      []k12.ProblemAttemptSnapshot        `json:"problem_attempts"`
+				ProblemSource        *k12storage.ProblemSourceArchiveV6  `json:"problem_source,omitempty"`
+				CurrentAccumulations []k12storage.AccumulationArchiveV10 `json:"current_accumulations,omitempty"`
+			}{current.Snapshot.Records, current.Snapshot.ProblemAttempts, current.Snapshot.ProblemSource, current.Snapshot.CurrentAccumulations})
 			var ordinal int
 			if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(ordinal),0)+1 FROM k12_restore_journal WHERE migration_id=?`, req.MigrationID).Scan(&ordinal); err != nil {
 				return rollbackFailure(fmt.Errorf("next rollback journal ordinal: %w", err), nil)
@@ -825,6 +848,45 @@ func appendRestoreAsJournal(
 		}
 	}
 	return len(entries), nil
+}
+
+// verifyRestoreAccumulationsUnchanged 防止回退覆盖迁移之后修改的来源事实。
+func verifyRestoreAccumulationsUnchanged(before []k12storage.AccumulationArchiveV10, snapshot, migrated *usecase.Hexbak, sourceVersion int) error {
+	expected := make(map[string]k12storage.AccumulationArchiveV10, len(snapshot.CurrentAccumulations)+len(migrated.CurrentAccumulations))
+	for _, item := range snapshot.CurrentAccumulations {
+		expected[item.AccumulationID] = item
+	}
+	if sourceVersion >= 10 {
+		for _, item := range migrated.CurrentAccumulations {
+			expected[item.AccumulationID] = item
+		}
+	}
+	// 未携带当前证据的迁移只给新增根保留空列，已有根沿用迁移前快照。
+	for _, rec := range migrated.Records {
+		if rec.Collection == k12.CollectionAccumulation {
+			if _, exists := expected[rec.RecordID]; !exists {
+				expected[rec.RecordID] = k12storage.AccumulationArchiveV10{AccumulationID: rec.RecordID, AgentName: migrated.AgentName, RowVersion: 1}
+			}
+		}
+	}
+	if len(before) != len(expected) {
+		return fmt.Errorf("%w: current accumulations changed after restore", records.ErrVersionConflict)
+	}
+	for _, item := range before {
+		prior, found := expected[item.AccumulationID]
+		actualJSON, err := json.Marshal(item)
+		if err != nil {
+			return err
+		}
+		expectedJSON, err := json.Marshal(prior)
+		if err != nil {
+			return err
+		}
+		if !found || string(actualJSON) != string(expectedJSON) {
+			return fmt.Errorf("%w: current accumulation source changed after restore", records.ErrVersionConflict)
+		}
+	}
+	return nil
 }
 
 func loadRestoreAsByIdempotency(ctx context.Context, tx *sql.Tx, target, key string) (usecase.RestoreAsResult, bool, error) {

@@ -167,6 +167,13 @@ func MigrateHexbakOwner(source *Hexbak, targetAgent string) (*Hexbak, error) {
 		}
 		rec.AgentName = targetAgent
 	}
+	for index := range migrated.CurrentAccumulations {
+		item := &migrated.CurrentAccumulations[index]
+		item.AgentName = targetAgent
+		if item.DeletedBy == source.AgentName {
+			item.DeletedBy = targetAgent
+		}
+	}
 	assets, err := migrateHexbakAssets(source, targetAgent, migrated.Records)
 	if err != nil {
 		return nil, err
@@ -361,6 +368,11 @@ func cloneHexbak(bak *Hexbak) *Hexbak {
 		raw, _ := json.Marshal(bak.CurrentCreativeWorks)
 		out.CurrentCreativeWorks = nil
 		_ = json.Unmarshal(raw, &out.CurrentCreativeWorks)
+	}
+	if bak.CurrentAccumulations != nil {
+		raw, _ := json.Marshal(bak.CurrentAccumulations)
+		out.CurrentAccumulations = nil
+		_ = json.Unmarshal(raw, &out.CurrentAccumulations)
 	}
 	out.ProblemAttempts = cloneProblemAttemptSnapshots(bak.ProblemAttempts)
 	if bak.ProblemSource != nil {
