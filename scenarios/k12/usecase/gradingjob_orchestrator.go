@@ -403,6 +403,12 @@ func (o *GradingOrchestrator) StartPhotoGradingJob(ctx context.Context, in Start
 			return GradingJobView{}, false, fmt.Errorf("%w: grading model snapshot resolver 未配置且 provider/model 不完整", ErrInvalidInput)
 		}
 		snap = k12.NormalizeGradingModelSnapshot(snap)
+		snap.QuantityAnswerPolicy = ""
+		if in.SourceKind == "image_task" && len(in.Photo.Image) > 0 &&
+			(in.Photo.TaskIntent == PhotoTaskBlankWorksheet || in.Photo.TaskIntent == PhotoTaskCompletedHomework) {
+			// 本分支仅创建新任务；来源预算与父自动窗口已在入口核验，旧任务重放不补策略。
+			snap.QuantityAnswerPolicy = k12.QuantityAnswerPolicySlotV1
+		}
 		if snap.Provider == "" || snap.Model == "" {
 			return GradingJobView{}, false, fmt.Errorf("%w: grading model snapshot 缺少 provider/model", ErrInvalidInput)
 		}

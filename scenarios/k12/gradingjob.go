@@ -60,8 +60,12 @@ const GradingMaxStageAttempts = 3
 const MathExecutionContractProgramFirst = "program-first-v1"
 const MathExecutionContractLegacy = "legacy"
 
+const QuantityAnswerPolicySlotV1 = "quantity_slot_answer_v1"
+
 type GradingModelSnapshot struct {
 	MathExecutionContract string `json:"math_execution_contract,omitempty"`
+	// QuantityAnswerPolicy 只由新照片任务冻结；旧快照空值保持原处理语义。
+	QuantityAnswerPolicy string `json:"quantity_answer_policy,omitempty"`
 	// ParentInstructions 只用于家长表达，不注入识别、求解和评分请求。
 	ParentInstructions config.AgentInstructionsSnapshot `json:"parent_instructions,omitzero"`
 	Provider           string                           `json:"provider"`
@@ -90,6 +94,7 @@ type GradingModelSnapshot struct {
 // callers that only supplied provider/model. Fallback is descriptive only;
 // retry code must never interpret it as permission to change route.
 func NormalizeGradingModelSnapshot(snapshot GradingModelSnapshot) GradingModelSnapshot {
+	snapshot.QuantityAnswerPolicy = strings.TrimSpace(snapshot.QuantityAnswerPolicy)
 	snapshot.Provider = strings.TrimSpace(snapshot.Provider)
 	snapshot.Model = strings.TrimSpace(snapshot.Model)
 	snapshot.Route = strings.TrimSpace(snapshot.Route)
