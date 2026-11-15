@@ -15,6 +15,40 @@ type inboundPhotoRepositoryFake struct {
 	lastLookupIdentity usecase.InboundPhotoIdentity
 }
 
+type pagedInboundPhotoRepository struct {
+	*inboundPhotoRepositoryFake
+	after string
+	limit int
+}
+
+func (f *pagedInboundPhotoRepository) ListRecoverableInboundPhotosAfter(_ context.Context, after string, limit int) ([]usecase.InboundPhotoBundle, error) {
+	f.after, f.limit = after, limit
+	return []usecase.InboundPhotoBundle{f.bundle}, nil
+}
+
+func TestInboundPhotoCoordinatorUsesOptionalRecoveryPagingAndPreservesLegacy(t *testing.T) {
+	ctx := t.Context()
+	legacy := &inboundPhotoRepositoryFake{bundle: usecase.InboundPhotoBundle{Dispatch: usecase.InboundPhotoDispatch{DispatchID: "dispatch-a"}}}
+	paged := &pagedInboundPhotoRepository{inboundPhotoRepositoryFake: legacy}
+	page, err := usecase.NewInboundPhotoCoordinator(paged).RecoverableAfter(ctx, "dispatch-previous", 2)
+	if err != nil || len(page) != 1 || paged.after != "dispatch-previous" || paged.limit != 2 {
+		t.Fatalf("paged repository did not receive its cursor: %s/%d count=%d err=%v", paged.after, paged.limit, len(page), err)
+	}
+	coordinator := usecase.NewInboundPhotoCoordinator(legacy)
+	first, err := coordinator.RecoverableAfter(ctx, "", 2)
+	if err != nil || len(first) != 1 {
+		t.Fatalf("legacy first page changed: %d %v", len(first), err)
+	}
+	next, err := coordinator.RecoverableAfter(ctx, first[0].Dispatch.DispatchID, 2)
+	if err != nil || len(next) != 0 {
+		t.Fatalf("legacy repository repeated its only page: %d %v", len(next), err)
+	}
+	old, err := coordinator.Recoverable(ctx, 2)
+	if err != nil || len(old) != 1 {
+		t.Fatalf("legacy entrypoint changed: %d %v", len(old), err)
+	}
+}
+
 func (f *inboundPhotoRepositoryFake) AdmitInboundPhoto(
 	context.Context, usecase.InboundPhotoAdmission,
 ) (usecase.InboundPhotoBundle, bool, error) {

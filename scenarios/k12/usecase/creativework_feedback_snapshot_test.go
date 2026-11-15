@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/engineadapter"
@@ -153,6 +154,82 @@ func TestWorkFeedbackFrozenContextSafeRetryAndUnknownNoResend(t *testing.T) {
 			restored, err := d.Records.GetWorkFeedbackGeneration(ctx, "xiaoming", generationID)
 			if err != nil || restored.RequestSnapshotJSON != original.RequestSnapshotJSON {
 				t.Fatalf("safe retry changed the persisted snapshot: %v", err)
+			}
+		})
+	}
+}
+
+type feedbackGenerationProfileStore struct{ profile k12.ChildProfile }
+
+func (p *feedbackGenerationProfileStore) GetProfile(context.Context, string) (k12.ChildProfile, error) {
+	return p.profile, nil
+}
+
+func (p *feedbackGenerationProfileStore) SaveProfile(_ context.Context, _ string, value k12.ChildProfile) error {
+	p.profile = value
+	return nil
+}
+
+func TestWorkFeedbackCoordinatorRestoresFrozenRegenerationAfterProfileChange(t *testing.T) {
+	for _, changeProfile := range []bool{false, true} {
+		t.Run(map[bool]string{false: "same profile", true: "changed profile"}[changeProfile], func(t *testing.T) {
+			d := newDataDeps(t)
+			ctx := t.Context()
+			const agent, content = "xiaoming", "柳枝像绿色的丝带，随风轻轻摆动。"
+			profiles := &feedbackGenerationProfileStore{profile: k12.ChildProfile{GradeTerm: "六年级上"}}
+			d.Profiles = profiles
+			calls, actualGrade := 0, ""
+			solver := feedbackSnapshotAdapter(t, "FROZEN_METHOD", func(_ context.Context, _, _, grade string) (string, error) {
+				calls++
+				actualGrade = grade
+				return conciseWritingResponse, nil
+			})
+			d.Solver = solver
+			work, initial, _, err := d.CreateCurrentTextWork(ctx, agent, content, "initial-work")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = d.GenerateWorkFeedbackCommand(ctx, agent, work, initial); err != nil {
+				t.Fatal(err)
+			}
+			view, err := d.GetCreativeWork(ctx, agent, work)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := usecase.WorkFeedbackRequest{WorkType: view.Fields.WorkType, Title: view.Fields.Title,
+				Task: view.Fields.Task, Intent: view.Fields.Intent, ContentMarkdown: content, Grade: "六年级上"}
+			raw, err := json.Marshal(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sum := sha256.Sum256(raw)
+			next, _, err := d.Records.PrepareWorkFeedbackGeneration(ctx, agent, work,
+				"explicit-regeneration", "sha256:"+hex.EncodeToString(sum[:]), time.Now().Unix())
+			if err != nil {
+				t.Fatal(err)
+			}
+			frozen, err := solver.FreezeWorkFeedbackContext(ctx, req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, err = json.Marshal(frozen)
+			if err != nil {
+				t.Fatal(err)
+			}
+			stored, err := d.Records.FreezeWorkFeedbackGenerationRequest(ctx, agent, next.GenerationID, string(raw))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if changeProfile {
+				profiles.profile.GradeTerm = "六年级下"
+			}
+			runner := &usecase.CreativeWorkFeedbackCoordinator{Deps: &d, Records: d.Records}
+			if err = runner.Run(ctx, agent, next.GenerationID); err != nil {
+				t.Fatalf("prepared generation did not resume: %v", err)
+			}
+			current, err := d.Records.GetWorkFeedbackGeneration(ctx, agent, next.GenerationID)
+			if err != nil || current.Status != k12.WorkFeedbackSucceeded || current.RequestSnapshotJSON != stored || calls != 2 || actualGrade != "六年级上" {
+				t.Fatalf("recovery changed the frozen request or duplicated work: status=%s calls=%d grade=%s err=%v", current.Status, calls, actualGrade, err)
 			}
 		})
 	}

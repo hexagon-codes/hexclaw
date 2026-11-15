@@ -54,6 +54,25 @@ func (c *InboundPhotoCoordinator) Recoverable(
 	return c.repository.ListRecoverableInboundPhotos(ctx, limit)
 }
 
+// RecoverableAfter 按不可变派发身份接续恢复扫描，不让停放任务占住后页。
+// 未实现分页扩展的旧仓储只提供一次原查询，后续游标不重复读取首屏。
+func (c *InboundPhotoCoordinator) RecoverableAfter(
+	ctx context.Context, afterDispatchID string, limit int,
+) ([]InboundPhotoBundle, error) {
+	if c == nil || c.repository == nil {
+		return nil, fmt.Errorf("usecase: inbound photo repository is unavailable")
+	}
+	if pager, ok := c.repository.(interface {
+		ListRecoverableInboundPhotosAfter(context.Context, string, int) ([]InboundPhotoBundle, error)
+	}); ok {
+		return pager.ListRecoverableInboundPhotosAfter(ctx, afterDispatchID, limit)
+	}
+	if afterDispatchID != "" {
+		return nil, nil
+	}
+	return c.repository.ListRecoverableInboundPhotos(ctx, limit)
+}
+
 func (c *InboundPhotoCoordinator) advance(
 	ctx context.Context,
 	agentName, receiptID string,

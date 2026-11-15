@@ -663,12 +663,33 @@ func (s *Store) CompareAndSwapInboundPhotoDispatch(
 func (s *Store) ListRecoverableInboundPhotos(
 	ctx context.Context, limit int,
 ) ([]InboundPhotoBundle, error) {
+	return s.listRecoverableInboundPhotos(ctx, limit, nil)
+}
+
+// ListRecoverableInboundPhotosAfter 使用不可变派发身份分页，状态时间变化不会改变扫描位置。
+// 空游标读取第一页；返回空页表示本次扫描没有后续可恢复记录。
+func (s *Store) ListRecoverableInboundPhotosAfter(
+	ctx context.Context, afterDispatchID string, limit int,
+) ([]InboundPhotoBundle, error) {
+	return s.listRecoverableInboundPhotos(ctx, limit, &afterDispatchID)
+}
+
+func (s *Store) listRecoverableInboundPhotos(
+	ctx context.Context, limit int, afterDispatchID *string,
+) ([]InboundPhotoBundle, error) {
 	if limit <= 0 || limit > 1000 {
 		return nil, fmt.Errorf("k12storage: inbound photo recovery limit is invalid")
 	}
-	rows, err := s.db.QueryContext(ctx, inboundPhotoBundleSelect+`
-		WHERE d.terminal_status='' AND d.reply_status!='delivered'
-		ORDER BY d.updated_at,d.dispatch_id LIMIT ?`, limit)
+	query := inboundPhotoBundleSelect + ` WHERE d.terminal_status='' AND d.reply_status!='delivered'`
+	args := []any{}
+	if afterDispatchID == nil {
+		query += ` ORDER BY d.updated_at,d.dispatch_id LIMIT ?`
+	} else {
+		query += ` AND d.dispatch_id>? ORDER BY d.dispatch_id LIMIT ?`
+		args = append(args, *afterDispatchID)
+	}
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("k12storage: list recoverable inbound photos: %w", err)
 	}

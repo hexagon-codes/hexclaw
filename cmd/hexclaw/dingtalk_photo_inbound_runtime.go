@@ -19,6 +19,7 @@ import (
 	"github.com/hexagon-codes/hexclaw/records"
 	agentrouter "github.com/hexagon-codes/hexclaw/router"
 	k12 "github.com/hexagon-codes/hexclaw/scenarios/k12"
+	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
 	k12usecase "github.com/hexagon-codes/hexclaw/scenarios/k12/usecase"
 )
 
@@ -453,14 +454,41 @@ func (r *k12DingtalkPhotoInboundRuntime) Recover(ctx context.Context) (int, erro
 	if r == nil || r.inbound == nil {
 		return 0, fmt.Errorf("DingTalk inbound photo runtime is unavailable")
 	}
-	bundles, err := r.inbound.Recoverable(ctx, k12DingtalkInboundRecoveryLimit)
-	if err != nil {
-		return 0, err
+	pager, paged := r.inbound.(interface {
+		RecoverableAfter(context.Context, string, int) ([]k12usecase.InboundPhotoBundle, error)
+	})
+	if !paged {
+		bundles, err := r.inbound.Recoverable(ctx, k12DingtalkInboundRecoveryLimit)
+		if err != nil {
+			return 0, err
+		}
+		for _, bundle := range bundles {
+			r.schedule(bundle.Receipt.AgentName, bundle.Receipt.ReceiptID)
+		}
+		return len(bundles), nil
 	}
-	for _, bundle := range bundles {
-		r.schedule(bundle.Receipt.AgentName, bundle.Receipt.ReceiptID)
+	count, after := 0, ""
+	for {
+		bundles, err := pager.RecoverableAfter(ctx, after, k12DingtalkInboundRecoveryLimit)
+		if err != nil {
+			return count, err
+		}
+		if len(bundles) == 0 {
+			return count, nil
+		}
+		next := after
+		for _, bundle := range bundles {
+			if bundle.Dispatch.DispatchID <= after {
+				return count, fmt.Errorf("DingTalk inbound photo recovery cursor did not advance")
+			}
+			next = max(next, bundle.Dispatch.DispatchID)
+		}
+		for _, bundle := range bundles {
+			r.schedule(bundle.Receipt.AgentName, bundle.Receipt.ReceiptID)
+		}
+		count += len(bundles)
+		after = next
 	}
-	return len(bundles), nil
 }
 
 func (r *k12DingtalkPhotoInboundRuntime) advance(
@@ -1397,6 +1425,71 @@ func (r *k12DingtalkPhotoInboundRuntime) advanceFinalReply(
 	return true, nil
 }
 
+type k12InboundPhotoCreativeFeedbackReader interface {
+	GetWorkFeedbackGeneration(context.Context, string, string) (k12.WorkFeedbackGeneration, error)
+	GetLatestWorkFeedbackInvocation(context.Context, string, string, string) (k12.ImageTaskInvocation, error)
+}
+
+// frozenCreativeReplyResult 只为原入站恢复其冻结代次，不改变作品当前点评。
+func (r *k12DingtalkPhotoInboundRuntime) frozenCreativeReplyResult(
+	ctx context.Context, bundle k12usecase.InboundPhotoBundle, result k12usecase.ImageTaskResult,
+) (k12usecase.ImageTaskResult, error) {
+	work := *result.CreativeWork
+	if latest := work.GenerationState.Latest; latest != nil && latest.GenerationID == bundle.Dispatch.FinalArtifactID {
+		return result, nil
+	}
+	reader, ok := r.artifacts.(k12InboundPhotoCreativeFeedbackReader)
+	if !ok {
+		return result, fmt.Errorf("DingTalk frozen creative feedback reader is unavailable")
+	}
+	generation, err := reader.GetWorkFeedbackGeneration(ctx, bundle.Receipt.AgentName, bundle.Dispatch.FinalArtifactID)
+	if err != nil {
+		return result, err
+	}
+	initial := work.GenerationState.Initial
+	if generation.GenerationID != bundle.Dispatch.FinalArtifactID || generation.AgentName != bundle.Receipt.AgentName ||
+		generation.WorkID != work.Record.RecordID || generation.Status != k12.WorkFeedbackSucceeded || generation.Feedback == nil ||
+		initial == nil || initial.AgentName != generation.AgentName || initial.WorkID != generation.WorkID || generation.Source != initial.Source {
+		return result, fmt.Errorf("DingTalk frozen creative feedback identity mismatch")
+	}
+	work.GenerationState.Latest, work.GenerationState.Current = &generation, &generation
+	work.Fields.WorkType, work.Fields.DisplayName, work.Fields.WorkTitle = generation.Source.WorkType, generation.Source.DisplayName, generation.Source.WorkTitle
+	work.Fields.Versions = append([]k12.CreativeWorkVersion(nil), work.Fields.Versions...)
+	if len(work.Fields.Versions) > 0 {
+		last := &work.Fields.Versions[len(work.Fields.Versions)-1]
+		last.StructuredFeedback, last.Feedback = generation.Feedback, generation.Feedback.ProjectionMarkdown
+		last.FeedbackSource, last.FeedbackSkill = generation.Feedback.SourceSnapshot.Source, generation.Feedback.SourceSnapshot.MethodRef
+	}
+	result.CreativeWork = &work
+	// 当前结果可能携带新代次回执；只保留同图的识别回执，再读取原代次的实际调用。
+	receipts := make([]k12usecase.ImageTaskOperationReceipt, 0, len(result.OperationReceipts))
+	for _, receipt := range result.OperationReceipts {
+		if receipt.Operation != string(k12.ImageTaskOperationWorkFeedback) {
+			receipts = append(receipts, receipt)
+		}
+	}
+	key := "work:" + generation.WorkID + ":version:" + generation.GenerationID + ":feedback"
+	invocation, err := reader.GetLatestWorkFeedbackInvocation(ctx, generation.AgentName, generation.WorkID, key)
+	if err != nil && !errors.Is(err, k12storage.ErrImageTaskNotFound) {
+		return result, err
+	}
+	if err == nil {
+		if invocation.AgentName != generation.AgentName || invocation.WorkRecordID != generation.WorkID || invocation.OperationKey != key ||
+			invocation.Operation != k12.ImageTaskOperationWorkFeedback || invocation.Status != k12.ImageTaskInvocationSucceeded ||
+			invocation.InvocationID == "" || invocation.ResultDigest == "" {
+			return result, fmt.Errorf("DingTalk frozen creative feedback invocation mismatch")
+		}
+		receipts = append(receipts, k12usecase.ImageTaskOperationReceipt{
+			InvocationID: invocation.InvocationID, Operation: string(invocation.Operation),
+			ExecutionKind: string(k12.GradingExecutionProvider), CanonicalInputDigest: result.Dispatch.SourceDigest,
+			Provider: invocation.RouteSnapshot.Provider, Model: invocation.RouteSnapshot.Model,
+			Status: string(invocation.Status), Attempt: invocation.Attempt, ResultDigest: invocation.ResultDigest,
+		})
+	}
+	result.OperationReceipts = receipts
+	return result, nil
+}
+
 func (r *k12DingtalkPhotoInboundRuntime) advanceCreativeFinalReply(
 	ctx context.Context,
 	bundle k12usecase.InboundPhotoBundle,
@@ -1405,6 +1498,10 @@ func (r *k12DingtalkPhotoInboundRuntime) advanceCreativeFinalReply(
 	if result.Kind != "creative" || result.CreativeWork == nil || result.CreativeWork.Record == nil ||
 		result.CreativeWork.Record.AgentName != bundle.Receipt.AgentName {
 		return false, fmt.Errorf("DingTalk creative work identity is incomplete")
+	}
+	result, err := r.frozenCreativeReplyResult(ctx, bundle, result)
+	if err != nil {
+		return false, err
 	}
 	generation := result.CreativeWork.GenerationState.Latest
 	if generation == nil || generation.Status != k12.WorkFeedbackSucceeded || generation.Feedback == nil ||

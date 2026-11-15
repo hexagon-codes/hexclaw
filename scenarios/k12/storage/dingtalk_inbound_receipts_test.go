@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"sort"
 	"testing"
 
 	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
@@ -84,6 +85,63 @@ func tableCount(t *testing.T, db *sql.DB, table string) int {
 		t.Fatal(err)
 	}
 	return count
+}
+
+func TestInboundPhotoRecoveryCursorSurvivesEarlierStateUpdates(t *testing.T) {
+	ctx := t.Context()
+	db, store := newInboundPhotoStore(t, filepath.Join(t.TempDir(), "recovery.sqlite"))
+	defer db.Close()
+	seedInboundAgent(t, db, "mingming")
+	var want []string
+	for _, message := range []string{"first", "second", "third"} {
+		bundle, _, err := store.AdmitInboundPhoto(ctx, inboundAdmission(message, []byte("immutable source")))
+		if err != nil {
+			t.Fatal(err)
+		}
+		want = append(want, bundle.Dispatch.DispatchID)
+	}
+	sort.Strings(want)
+	for i, id := range want {
+		if _, err := db.ExecContext(ctx, `UPDATE k12_im_inbound_dispatches SET updated_at=? WHERE dispatch_id=?`, 100+i, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var got []string
+	after := ""
+	for range want {
+		page, err := store.ListRecoverableInboundPhotosAfter(ctx, after, 1)
+		if err != nil || len(page) != 1 {
+			t.Fatalf("recovery page after %q: count=%d err=%v", after, len(page), err)
+		}
+		after = page[0].Dispatch.DispatchID
+		got = append(got, after)
+		// 已排程的停放任务仍未终结，其他恢复进展只改变状态时间。
+		if _, err := db.ExecContext(ctx, `UPDATE k12_im_inbound_dispatches SET updated_at=900 WHERE dispatch_id=?`, after); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(got) != len(want) {
+		t.Fatalf("recovery omitted records: %v", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("recovery duplicated or omitted a parked record: got=%v want=%v", got, want)
+		}
+	}
+	last, err := store.ListRecoverableInboundPhotosAfter(ctx, after, 1)
+	if err != nil || len(last) != 0 {
+		t.Fatalf("final recovery page: %d %v", len(last), err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE k12_im_inbound_dispatches SET updated_at=100 WHERE dispatch_id=?`, want[1]); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := store.ListRecoverableInboundPhotos(ctx, 1)
+	if err != nil || len(legacy) != 1 || legacy[0].Dispatch.DispatchID != want[1] {
+		t.Fatalf("legacy limited query changed: %d %v", len(legacy), err)
+	}
+	if _, err := store.ListRecoverableInboundPhotosAfter(ctx, "", 0); err == nil {
+		t.Fatal("paged recovery accepted an invalid limit")
+	}
 }
 
 func TestInboundPhotoAdmissionIsAtomicAndProviderIdentityIsTheDedupeOwner(t *testing.T) {

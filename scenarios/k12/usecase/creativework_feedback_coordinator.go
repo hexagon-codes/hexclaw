@@ -196,7 +196,7 @@ func (c *CreativeWorkFeedbackCoordinator) Run(
 		return err
 	}
 	_, err = c.Deps.GenerateWorkFeedbackCommand(
-		ctx, generation.AgentName, generation.WorkID, generation.CommandKey,
+		ctx, generation.AgentName, generation.WorkID, generation.GenerationID,
 	)
 	return err
 }

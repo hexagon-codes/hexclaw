@@ -14,7 +14,10 @@ import (
 
 	"github.com/hexagon-codes/hexclaw/messagecontent"
 	"github.com/hexagon-codes/hexclaw/records"
+	"github.com/hexagon-codes/hexclaw/scenario"
 	k12 "github.com/hexagon-codes/hexclaw/scenarios/k12"
+	"github.com/hexagon-codes/hexclaw/scenarios/k12/curriculum"
+	"github.com/hexagon-codes/hexclaw/scenarios/k12/engineadapter"
 	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
 	k12usecase "github.com/hexagon-codes/hexclaw/scenarios/k12/usecase"
 	"github.com/hexagon-codes/hexclaw/storage/migrate"
@@ -26,6 +29,112 @@ type statusNoticeTransport struct {
 	sends, queries []k12.DeliveryReceipt
 	status         k12.DeliveryReceiptStatus
 	prepareErr     error
+}
+
+type frozenCreativeReplyBatches struct {
+	finalReplyBatchFake
+	generation string
+	facts      messagecontent.ExecutionSummary
+	proven     bool
+}
+
+func (f *frozenCreativeReplyBatches) PrepareAndSendCreativeFinalReply(
+	ctx context.Context, view k12usecase.CreativeWorkView, message k12usecase.DeliveryMessage,
+	targets []k12usecase.ResolvedDeliveryTarget, _ string,
+) (k12.DeliveryBatch, bool, error) {
+	f.prepareCalls++
+	f.generation = view.GenerationState.Latest.GenerationID
+	f.lastMessage = message
+	_, f.facts, f.proven = k12usecase.CreativeWorkDeliveryExecutionSummary(ctx, message.Content)
+	f.existing = k12.DeliveryBatch{BatchID: "frozen-creative-reply", AgentName: view.Record.AgentName,
+		ObjectKind: "creative_work", ObjectID: "controlled-reply", Status: k12.DeliveryBatchDelivered,
+		Receipts: []k12.DeliveryReceipt{{DeliveryID: "frozen-reply-part", PartKind: messagecontent.PartMarkdown,
+			PartOrdinal: 1, BindingID: targets[0].BindingID, Target: targets[0].Target,
+			Status: k12.DeliveryDelivered, ExternalMessageID: "controlled-provider-receipt"}}}
+	return f.existing, true, nil
+}
+
+func TestDingTalkPhotoFrozenCreativeReplyKeepsOriginalGenerationAndModelReceipt(t *testing.T) {
+	d, _ := statusNoticeDeps(t)
+	ctx := t.Context()
+	cur := curriculum.New()
+	registry := scenario.NewRegistry()
+	if err := registry.Assemble(k12.Pack(cur)); err != nil {
+		t.Fatal(err)
+	}
+	d.Records, d.Constraint = k12storage.NewStore(d.Records.DB(), registry.Records), cur
+	model, provider, calls := "gpt-6-luna", "original-provider", 0
+	d.WorkFeedbackRoute = func(context.Context, string) (k12.ImageTaskRouteSnapshot, error) {
+		return k12.ImageTaskRouteSnapshot{Provider: provider, Model: model, Route: provider + "/" + model,
+			Capability: "text", SelectionSource: "auto", PolicyVersion: "test-feedback", PromptVersion: "writing-feedback-v1"}, nil
+	}
+	d.Solver = engineadapter.NewSolveAdapter(nil, engineadapter.WithWorkFeedbackGen(func(context.Context, string, string, string) (string, error) {
+		calls++
+		detail := "下一次只补一处声音。"
+		if calls > 1 {
+			detail = "下一次只补一处颜色。"
+		}
+		return "## 具体肯定\n“柳枝像绿色的丝带”让读者看到柳枝的样子。\n\n## 关键问题\n第二句缺少观察位置，读者不知道柳树在哪里。\n\n## 局部示范\n原句：柳枝像绿色的丝带。\n建议：保留这句，在前面补上实际观察到的位置。\n原因：位置清楚，读者更容易跟着看。\n\n## 孩子下一步\n" + detail, nil
+	}))
+	const agent = "child-tutor"
+	workID, firstID, _, err := d.CreateCurrentTextWork(ctx, agent, "柳枝像绿色的丝带，随风轻轻摆动。", "frozen-first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.GenerateWorkFeedbackCommand(ctx, agent, workID, firstID); err != nil {
+		t.Fatal(err)
+	}
+	first, err := d.Records.GetWorkFeedbackGeneration(ctx, agent, firstID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model, provider = "gpt-6.1-terra", "current-provider"
+	if _, err := d.GenerateWorkFeedbackCommand(ctx, agent, workID, "next-feedback"); err != nil {
+		t.Fatal(err)
+	}
+	current, err := d.GetCreativeWork(ctx, agent, workID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	latestID := current.GenerationState.Latest.GenerationID
+	if latestID == firstID {
+		t.Fatal("fixture did not create a distinct successful generation")
+	}
+	current.Fields.SourceIntakeID = "original-intake"
+	bundle := inboundPhotoBundleFixture([]byte("same original image"))
+	bundle.Receipt.AgentName = agent
+	bundle.Dispatch.ProcessingStatus = k12usecase.InboundPhotoFinalArtifactReady
+	bundle.Dispatch.ReplyStatus = k12usecase.InboundPhotoReplyReady
+	bundle.Dispatch.FinalArtifactID = firstID
+	result := k12usecase.ImageTaskResult{Kind: "creative", CreativeWork: &current,
+		Dispatch: k12.ImageTaskDispatch{AgentName: agent, DispatchID: "image-dispatch", TargetObjectID: "original-intake",
+			SourceDigest: bundle.Asset.Digest, OperationRouteRequest: k12.ImageTaskRouteSnapshot{MessageLocale: "zh-CN", Provider: "original-provider"}},
+		Creative: &k12.CreativeWorkIntake{AgentName: agent, IntakeID: "original-intake", DispatchID: "image-dispatch",
+			PromotedWorkID: workID, PromotedGenerationID: firstID, SourceDigest: bundle.Asset.Digest},
+		OperationReceipts: []k12usecase.ImageTaskOperationReceipt{{Operation: "work_feedback", Model: "gpt-6.1-terra",
+			Provider: "current-provider", InvocationID: "newer-invocation", Status: "succeeded", ResultDigest: "newer-result", CanonicalInputDigest: bundle.Asset.Digest}},
+	}
+	inbound := &inboundPhotoCoordinatorFake{bundle: bundle}
+	batches := &frozenCreativeReplyBatches{}
+	runtime := newK12DingtalkPhotoInboundRuntime(k12DingtalkPhotoInboundRuntimeConfig{Inbound: inbound, Artifacts: d.Records, ReplyBatches: batches})
+	done, err := runtime.advanceCreativeFinalReply(ctx, bundle, result)
+	if err != nil || !done || batches.prepareCalls != 1 || batches.generation != firstID || !strings.Contains(batches.lastMessage.Content, first.Feedback.ProjectionMarkdown) ||
+		strings.Contains(batches.lastMessage.Content, "下一次只补一处颜色") {
+		t.Fatalf("original inbound adopted a later generation: done=%v generation=%s err=%v", done, batches.generation, err)
+	}
+	if !batches.proven || len(batches.facts.Models) != 1 || batches.facts.Models[0].Model != "gpt-6-luna" || batches.facts.Models[0].Provider != "original-provider" {
+		t.Fatalf("original reply used a later execution receipt: %+v", batches.facts)
+	}
+	if result.CreativeWork.GenerationState.Latest.GenerationID != latestID || result.OperationReceipts[0].Model != "gpt-6.1-terra" {
+		t.Fatal("frozen reply projection mutated the current result")
+	}
+	if _, err := runtime.advanceFinalReply(ctx, inbound.bundle); err != nil || batches.prepareCalls != 1 {
+		t.Fatalf("bound reply was sent again: prepares=%d err=%v", batches.prepareCalls, err)
+	}
+	persisted, err := d.GetCreativeWork(ctx, agent, workID)
+	if err != nil || persisted.GenerationState.Latest.GenerationID != latestID || calls != 2 {
+		t.Fatalf("delivery changed the current work or regenerated feedback: calls=%d err=%v", calls, err)
+	}
 }
 
 func TestDingTalkPhotoFinalReplyRecallsOnlyItsAcceptedNotice(t *testing.T) {
