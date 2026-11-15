@@ -1229,8 +1229,9 @@ func (r *k12DingtalkPhotoInboundRuntime) openValidatedFinalArtifact(
 	if err != nil {
 		return k12.GradingFinalArtifact{}, k12.GradingFinalAnnotatedAsset{}, err
 	}
-	// 空白卷冻结的终稿只有逐题讲解；沿同一产物身份读取，不制造批注图。
-	if intent == k12.ImageTaskIntentBlankWorksheet {
+	// 讲题报告可冻结真实原图；沿原产物身份读取，不为其制造批注资产。
+	originalReport := !artifact.HasAnnotatedAsset() && artifact.ReportSnapshotJSON != ""
+	if intent == k12.ImageTaskIntentBlankWorksheet || originalReport {
 		if artifact.AgentName != bundle.Receipt.AgentName ||
 			artifact.ArtifactID != bundle.Dispatch.FinalArtifactID ||
 			artifact.ArtifactDigest != k12.ComputeGradingFinalArtifactDigest(artifact) {
@@ -1239,6 +1240,13 @@ func (r *k12DingtalkPhotoInboundRuntime) openValidatedFinalArtifact(
 		}
 		if err := artifact.Validate(); err != nil {
 			return k12.GradingFinalArtifact{}, k12.GradingFinalAnnotatedAsset{}, err
+		}
+		if originalReport {
+			if _, err := k12usecase.GradingTeachingReportOriginalImage(artifact, k12usecase.DeliveryAttachment{
+				MIME: bundle.Asset.MIME, Data: bundle.Asset.Bytes,
+			}); err != nil {
+				return k12.GradingFinalArtifact{}, k12.GradingFinalAnnotatedAsset{}, err
+			}
 		}
 		return artifact, k12.GradingFinalAnnotatedAsset{}, nil
 	}
@@ -1328,15 +1336,26 @@ func (r *k12DingtalkPhotoInboundRuntime) advanceFinalReply(
 		},
 	}
 	identities := []k12usecase.DeliveryAttachmentIdentity(nil)
+	imageMIME := ""
 	if taskIntent != k12.ImageTaskIntentBlankWorksheet {
-		command.Message.Attachments = []k12usecase.DeliveryAttachment{{
+		image := k12usecase.DeliveryAttachment{
 			Name: correctedPhotoFilename(asset.MIME), MIME: asset.MIME,
 			Data: append([]byte(nil), asset.Data...),
-		}}
+		}
+		if !artifact.HasAnnotatedAsset() && artifact.ReportSnapshotJSON != "" {
+			image, err = k12usecase.GradingTeachingReportOriginalImage(artifact, k12usecase.DeliveryAttachment{
+				MIME: bundle.Asset.MIME, Data: bundle.Asset.Bytes,
+			})
+			if err != nil {
+				return false, err
+			}
+		}
+		command.Message.Attachments = []k12usecase.DeliveryAttachment{image}
+		imageMIME = image.MIME
 		identities = []k12usecase.DeliveryAttachmentIdentity{{
 			Name:          command.Message.Attachments[0].Name,
-			MIME:          asset.MIME,
-			ContentDigest: "sha256:" + asset.Digest,
+			MIME:          image.MIME,
+			ContentDigest: fmt.Sprintf("sha256:%x", sha256.Sum256(image.Data)),
 		}}
 	}
 	objectID := k12DingtalkPhotoReplyObjectID(command)
@@ -1345,7 +1364,7 @@ func (r *k12DingtalkPhotoInboundRuntime) advanceFinalReply(
 		artifact.CanonicalMarkdown, identities,
 	)
 	if lookupErr == nil {
-		if err := validateK12DingtalkPhotoReplyBatch(existing, target, asset.MIME); err != nil {
+		if err := validateK12DingtalkPhotoReplyBatch(existing, target, imageMIME); err != nil {
 			return false, err
 		}
 		bound, err := r.inbound.BindReplyBatch(
@@ -1377,7 +1396,7 @@ func (r *k12DingtalkPhotoInboundRuntime) advanceFinalReply(
 			ctx, command.AgentName, k12DingtalkPhotoReplyObjectKind, objectID, command.Message.Content, identities,
 		)
 		if lookupErr == nil {
-			if err := validateK12DingtalkPhotoReplyBatch(existing, target, asset.MIME); err != nil {
+			if err := validateK12DingtalkPhotoReplyBatch(existing, target, imageMIME); err != nil {
 				return false, err
 			}
 			bound, err := r.inbound.BindReplyBatch(ctx, bundle.Receipt.AgentName, bundle.Receipt.ReceiptID, bundle.Dispatch.Version, existing.BatchID)

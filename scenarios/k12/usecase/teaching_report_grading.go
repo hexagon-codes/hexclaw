@@ -117,7 +117,12 @@ func (o *GradingOrchestrator) freezeGradingTeachingReport(ctx context.Context, r
 	if err != nil {
 		return err
 	}
+	originalImage, _, err := image.Decode(bytes.NewReader(source.Data))
+	if err != nil {
+		return fmt.Errorf("report original image: %w", err)
+	}
 	media := source
+	mediaImage := originalImage
 	id := run.req.SourcePageAssetID
 	if artifact.HasAnnotatedAsset() {
 		if run.result == nil || run.result.AnnotatedImage == nil {
@@ -125,15 +130,16 @@ func (o *GradingOrchestrator) freezeGradingTeachingReport(ctx context.Context, r
 		}
 		media = DeliveryAttachment{Data: run.result.AnnotatedImage.Data, MIME: artifact.AnnotatedMIME}
 		id = artifact.AnnotatedAssetID
+		mediaImage, _, err = image.Decode(bytes.NewReader(media.Data))
+		if err != nil {
+			return fmt.Errorf("report annotated image: %w", err)
+		}
 	}
 	if id == "" {
 		id = "grading-input:" + job.Record.RecordID
 	}
-	geometry, _, err := image.DecodeConfig(bytes.NewReader(media.Data))
-	if err != nil {
-		return fmt.Errorf("report source image: %w", err)
-	}
-	input.SourcePages = []k12.TeachingReportSourcePage{{AssetID: id, AssetDigest: teachingReportResourceDigest(media.Data), SourceDigest: teachingReportResourceDigest(source.Data), MIME: media.MIME, Width: geometry.Width, Height: geometry.Height}}
+	geometry := mediaImage.Bounds()
+	input.SourcePages = []k12.TeachingReportSourcePage{{AssetID: id, AssetDigest: teachingReportResourceDigest(media.Data), SourceDigest: teachingReportResourceDigest(source.Data), MIME: media.MIME, Width: geometry.Dx(), Height: geometry.Dy()}}
 	if run.result != nil {
 		if warning := photoAnnotationCoverageWarning(*run.result); warning != "" {
 			var ids []string

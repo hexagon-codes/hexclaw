@@ -257,6 +257,18 @@ func (d Deps) finalReplyFullMessage(ctx context.Context, artifact k12.GradingFin
 	if intent == k12.ImageTaskIntentBlankWorksheet {
 		return message, nil
 	}
+	if !artifact.HasAnnotatedAsset() && artifact.ReportSnapshotJSON != "" {
+		source, _, err := d.gradingFinalArtifactImageSource(ctx, artifact)
+		if err != nil {
+			return DeliveryMessage{}, err
+		}
+		original, err := GradingTeachingReportOriginalImage(artifact, source)
+		if err != nil {
+			return DeliveryMessage{}, err
+		}
+		message.Attachments = []DeliveryAttachment{original}
+		return message, nil
+	}
 	annotated, err := d.Records.OpenGradingFinalAnnotatedAsset(ctx, artifact.AgentName, artifact.ArtifactID)
 	if err != nil {
 		return DeliveryMessage{}, err
@@ -312,7 +324,19 @@ func (d Deps) PrepareAndSendK12FinalReplyBatch(ctx context.Context, agentName, o
 		return k12.DeliveryBatch{}, false, errors.New("blank worksheet final reply must not contain a grading image")
 	}
 	if intent != k12.ImageTaskIntentBlankWorksheet {
-		if len(full.Attachments) != 1 || full.Attachments[0].MIME != artifact.AnnotatedMIME || strings.TrimPrefix(deliveryDigest(string(full.Attachments[0].Data)), "sha256:") != artifact.AnnotatedDigest {
+		expectedMIME, expectedDigest := artifact.AnnotatedMIME, artifact.AnnotatedDigest
+		if !artifact.HasAnnotatedAsset() && artifact.ReportSnapshotJSON != "" {
+			source, _, sourceErr := d.gradingFinalArtifactImageSource(ctx, artifact)
+			if sourceErr != nil {
+				return k12.DeliveryBatch{}, false, sourceErr
+			}
+			original, originalErr := GradingTeachingReportOriginalImage(artifact, source)
+			if originalErr != nil {
+				return k12.DeliveryBatch{}, false, originalErr
+			}
+			expectedMIME, expectedDigest = original.MIME, teachingReportResourceDigest(original.Data)
+		}
+		if len(full.Attachments) != 1 || full.Attachments[0].MIME != expectedMIME || strings.TrimPrefix(deliveryDigest(string(full.Attachments[0].Data)), "sha256:") != expectedDigest {
 			return k12.DeliveryBatch{}, false, errors.New("final reply annotated image identity mismatch")
 		}
 	}

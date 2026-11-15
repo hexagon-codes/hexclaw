@@ -38,6 +38,10 @@ func (o *GradingOrchestrator) finalizeGradingPage(
 	if err != nil {
 		return k12.GradingFinalArtifact{}, err
 	}
+	// 冻结讲题报告可使用SourcePages原图，批注缺失不否决已取得的完整讲解。
+	if run != nil && run.req.TeachingReport != nil {
+		required = false
+	}
 	if required && (run == nil || run.result == nil || run.result.AnnotatedImage == nil || len(run.result.AnnotatedImage.Data) == 0) {
 		return k12.GradingFinalArtifact{}, fmt.Errorf("%w: required annotated image is unavailable", ErrGradingFinalizationIncomplete)
 	}
