@@ -412,9 +412,12 @@ func (s *Store) ListDue(ctx context.Context, agentName, collection string, befor
 	if err != nil {
 		return nil, err
 	}
-	return s.queryRecords(ctx, mp,
-		`WHERE agent_name = ? AND due_at IS NOT NULL AND due_at <= ? ORDER BY due_at ASC, record_id`,
-		agentName, before)
+	where := `WHERE agent_name = ? AND due_at IS NOT NULL AND due_at <= ?`
+	switch mp.(type) {
+	case creativeWorkMapper, accumMapper:
+		where += ` AND deleted_at IS NULL`
+	}
+	return s.queryRecords(ctx, mp, where+` ORDER BY due_at ASC, record_id`, agentName, before)
 }
 
 // UpdateStatus 乐观锁推进状态（version CAS；转移须在记录集状态机偏序内）。

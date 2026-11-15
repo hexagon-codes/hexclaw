@@ -7,6 +7,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/assetstore"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/usecase"
@@ -25,6 +26,87 @@ func saveReturnAsset(t *testing.T, agent string) string {
 		t.Fatalf("保存回传照片: %v", err)
 	}
 	return id
+}
+
+func TestPracticeSetConcludesAfterOriginalMistakeDeleted(t *testing.T) {
+	for _, mode := range []string{"system", "human"} {
+		for _, correct := range []bool{true, false} {
+			name := mode + "/wrong"
+			if correct {
+				name = mode + "/correct"
+			}
+			t.Run(name, func(t *testing.T) {
+				d, sourceID, setID := submittedSourcePracticeSet(t)
+				ctx := t.Context()
+				if err := d.DeleteMistake(ctx, "xiaoming", sourceID); err != nil {
+					t.Fatal(err)
+				}
+				results := []usecase.PracticeGradeResult{{ReturnID: "source-return", ItemID: "source-item", Correct: correct}}
+				var view usecase.PracticeSetView
+				var err error
+				if mode == "system" {
+					view, err = d.GradePracticeSetItems(ctx, "xiaoming", setID, results)
+				} else {
+					view, err = d.ConfirmPracticeSetItems(ctx, "xiaoming", setID, results)
+				}
+				if err != nil {
+					t.Fatalf("independent practice conclusion failed after source deletion: %v", err)
+				}
+				if view.Record.Status != k12.PracticeStatusGraded || view.Fields.Items[0].ResultCorrect == nil || *view.Fields.Items[0].ResultCorrect != correct || view.Fields.Items[0].PracticeProblemID == "" {
+					t.Fatalf("independent conclusion not persisted: %+v", view)
+				}
+				if _, err := d.Records.Get(ctx, sourceID); !errors.Is(err, records.ErrNotFound) {
+					t.Fatalf("deleted source was restored: %v", err)
+				}
+			})
+		}
+	}
+}
+
+func submittedSourcePracticeSet(t *testing.T) (usecase.Deps, string, string) {
+	t.Helper()
+	t.Setenv("HEXCLAW_ASSET_ROOT", t.TempDir())
+	d := newDataDeps(t)
+	sourceID := seedSinglePracticeMistake(t, d, "")
+	item := verifiedItem("source-item", "5÷0.5=?", "10")
+	item.SourceProblemID = sourceID
+	setID, _, err := d.CreatePracticeSet(t.Context(), "xiaoming", "independent-paper", k12.PracticeSetFields{Title: "Independent practice", SourceKind: k12.PracticeSourceManual, Items: []k12.PracticeItem{item}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := d.FinalizeBasket(t.Context(), "xiaoming", setID, "print"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.SubmitReturns(t.Context(), "xiaoming", setID, []usecase.PracticeReturnInput{{ReturnID: "source-return", AssetID: saveReturnAsset(t, "xiaoming"), ItemIDs: []string{"source-item"}}}); err != nil {
+		t.Fatal(err)
+	}
+	return d, sourceID, setID
+}
+
+func TestPracticeSetSourceWriteFailureRollsBackConclusion(t *testing.T) {
+	for _, mode := range []string{"database", "cas"} {
+		t.Run(mode, func(t *testing.T) {
+			d, sourceID, setID := submittedSourcePracticeSet(t)
+			statement := `CREATE TRIGGER reject_source_update BEFORE UPDATE ON k12_mistakes BEGIN SELECT RAISE(ABORT,'controlled source write failure'); END`
+			if mode == "cas" {
+				statement = `CREATE TRIGGER reject_source_update BEFORE UPDATE ON k12_mistakes BEGIN SELECT RAISE(IGNORE); END`
+			}
+			if _, err := d.Records.DB().Exec(statement); err != nil {
+				t.Fatal(err)
+			}
+			_, err := d.GradePracticeSetItems(t.Context(), "xiaoming", setID, []usecase.PracticeGradeResult{{ReturnID: "source-return", ItemID: "source-item", Correct: true}})
+			if err == nil || (mode == "cas" && !errors.Is(err, records.ErrVersionConflict)) {
+				t.Fatalf("source %s failure was swallowed: %v", mode, err)
+			}
+			view, readErr := d.GetPracticeSet(t.Context(), "xiaoming", setID)
+			if readErr != nil || view.Record.Status != k12.PracticeStatusSubmitted || view.Fields.Items[0].ResultCorrect != nil {
+				t.Fatalf("failed source transaction committed conclusion: %+v error=%v", view, readErr)
+			}
+			if _, err := d.Records.Get(t.Context(), sourceID); err != nil {
+				t.Fatalf("source disappeared after failed transaction: %v", err)
+			}
+		})
+	}
 }
 
 func finalizedReturnSet(t *testing.T, d usecase.Deps, agent string) string {

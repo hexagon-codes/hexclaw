@@ -1,6 +1,7 @@
 package apihttp_test
 
 import (
+	"net/http"
 	"testing"
 )
 
@@ -24,6 +25,23 @@ func TestDeleteMistakeEndpoint(t *testing.T) {
 	_, mist := do(t, h, "GET", "/mistakes?agent=mingming", "")
 	if items, _ := mist["items"].([]any); len(items) != 0 {
 		t.Fatalf("删除后错题本应清零, got %d", len(items))
+	}
+}
+
+func TestDeleteMistakeRejectsPracticeSetCollection(t *testing.T) {
+	h := newServer(t)
+	added, body := do(t, h, http.MethodPost, "/practice-sets/basket/items", `{"agent":"mingming","item":{"item_id":"safe-item","question_markdown":"2+2=?","expected_answer_markdown":"4","subject":"数学","verification_status":"verified","verification_evidence":"numeric_exec"}}`)
+	if added.Code != http.StatusOK {
+		t.Fatalf("prepare practice set status=%d body=%s", added.Code, added.Body.String())
+	}
+	id, _ := body["record_id"].(string)
+	if id == "" {
+		t.Fatal("missing practice set ID")
+	}
+	deleted, _ := do(t, h, http.MethodDelete, "/mistakes/"+id+"?agent=mingming", "")
+	loaded, _ := do(t, h, http.MethodGet, "/practice-sets/"+id+"?agent=mingming", "")
+	if deleted.Code != http.StatusNotFound || loaded.Code != http.StatusOK {
+		t.Fatalf("wrong collection delete status=%d practice readback=%d body=%s", deleted.Code, loaded.Code, loaded.Body.String())
 	}
 }
 

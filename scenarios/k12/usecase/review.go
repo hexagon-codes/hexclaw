@@ -184,6 +184,13 @@ func (d Deps) DeleteMistake(ctx context.Context, agentName, recordID string) err
 	if agentName == "" || recordID == "" {
 		return fmt.Errorf("%w: agentName / recordID 不可空", ErrInvalidInput)
 	}
+	rec, err := d.Records.Get(ctx, recordID)
+	if err != nil {
+		return err
+	}
+	if rec == nil || rec.AgentName != agentName || rec.Collection != k12.CollectionMistakes {
+		return records.ErrNotFound
+	}
 	return d.Records.Delete(ctx, agentName, recordID)
 }
 

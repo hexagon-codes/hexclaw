@@ -1028,6 +1028,10 @@ func (d Deps) applyHumanConfirmedRegradeOutcome(ctx context.Context, sourceID st
 		return d.applyRegradeOutcome(ctx, sourceID, false, d.now())
 	}
 	rec, err := d.Records.Get(ctx, sourceID)
+	// 来源已删除时不再联动，独立练习的结论仍正常保存。
+	if errors.Is(err, records.ErrNotFound) {
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("usecase: 取人工复批来源题 %s: %w", sourceID, err)
 	}
@@ -1091,6 +1095,10 @@ func allItemsConcluded(f k12.PracticeSetFields) bool {
 // 状态不变——回到本周复习队列由 due 驱动，不倒退状态机。
 func (d Deps) applyRegradeOutcome(ctx context.Context, sourceID string, correct bool, occurredAt int64) error {
 	rec, err := d.Records.Get(ctx, sourceID)
+	// 来源已删除时不再联动，独立练习的结论仍正常保存。
+	if errors.Is(err, records.ErrNotFound) {
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("usecase: 取复批来源题 %s: %w", sourceID, err)
 	}
