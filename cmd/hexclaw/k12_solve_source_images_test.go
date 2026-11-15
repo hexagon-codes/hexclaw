@@ -14,9 +14,13 @@ func TestK12SolveSourceAttachmentsStayInCurrentGradingCall(t *testing.T) {
 	image := skill.InputImage{ID: "source#region=0,0,5,5&scope=current", Name: "source.png", MIME: "image/png", Data: "cGl4ZWxz"}
 	plain := skill.WithInputImages(t.Context(), []skill.InputImage{image})
 	ctx := k12.WithGradingModelSnapshot(plain, k12.GradingModelSnapshot{Provider: "test", Model: "test"})
-	want := []adapter.Attachment{{ID: image.ID, Name: image.Name, Type: "image", Mime: image.MIME, Data: image.Data}}
+	want := []adapter.Attachment{{Name: image.Name, Type: "image", Mime: image.MIME, Data: image.Data}}
 	for _, agent := range []string{"solver", "verifier"} {
-		if got := k12SolveSourceAttachments(ctx, engine.SubAgentSpec{Agent: agent, Source: "solve"}); !reflect.DeepEqual(got, want) {
+		got := k12SolveSourceAttachments(ctx, engine.SubAgentSpec{Agent: agent, Source: "solve"})
+		if err := adapter.ValidateAttachments(got); err != nil {
+			t.Fatalf("%s source image cannot enter the shared engine: %v", agent, err)
+		}
+		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("%s lost current source image: %+v", agent, got)
 		}
 	}

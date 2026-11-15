@@ -18,7 +18,8 @@ func k12SolveSourceAttachments(ctx context.Context, spec engine.SubAgentSpec) []
 	images := skill.InputImages(ctx)
 	attachments := make([]adapter.Attachment, 0, len(images))
 	for _, image := range images {
-		attachments = append(attachments, adapter.Attachment{ID: image.ID, Type: "image", Name: image.Name,
+		// 来源身份已绑定物理请求；这里传内联像素，不能混用平台附件引用。
+		attachments = append(attachments, adapter.Attachment{Type: "image", Name: image.Name,
 			Mime: image.MIME, Data: image.Data, URL: image.URL})
 	}
 	return attachments
