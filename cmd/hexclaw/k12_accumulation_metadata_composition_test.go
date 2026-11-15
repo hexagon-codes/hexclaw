@@ -13,7 +13,7 @@ func TestProductionK12CompositionInjectsAccumulationMetadataDeriver(t *testing.T
 		t.Fatal(err)
 	}
 	for _, required := range []string{
-		"k12engineadapter.NewAccumulationMetadataAdapter(accumulationMetadataGenFn)",
+		"k12engineadapter.NewAccumulationMetadataAdapter(accumulationMetadataGenFn).WithBeforeSendHook()",
 		"k12assembly.WithAccumulationMetadataDeriver(",
 	} {
 		if got := strings.Count(string(source), required); got != 1 {

@@ -24,7 +24,8 @@ type AccumulationMetadataGenerateFunc func(
 
 // AccumulationMetadataAdapter 把模型 JSON 收敛为领域层允许的封闭分类与 provenance。
 type AccumulationMetadataAdapter struct {
-	generate AccumulationMetadataGenerateFunc
+	generate       AccumulationMetadataGenerateFunc
+	beforeSendHook bool
 }
 
 func NewAccumulationMetadataAdapter(
@@ -55,6 +56,25 @@ func (a *AccumulationMetadataAdapter) DeriveAccumulationMetadata(
 			providerResponseError(err),
 		)
 	}
+	if err := usecase.CaptureAccumulationMetadataRaw(ctx, raw); err != nil {
+		return k12.AccumulationDerivedMetadata{}, err
+	}
+	return a.DecodeAccumulationMetadata(raw)
+}
+
+// WithBeforeSendHook 仅供已连接 SDK complete 发送前钩子的生产生成器显式声明能力。
+func (a *AccumulationMetadataAdapter) WithBeforeSendHook() *AccumulationMetadataAdapter {
+	a.beforeSendHook = true
+	return a
+}
+
+// UsesAccumulationMetadataSendHook 普通生成器保持保守模式，不推断任意回调的发送边界。
+func (a *AccumulationMetadataAdapter) UsesAccumulationMetadataSendHook() bool {
+	return a != nil && a.beforeSendHook
+}
+
+// DecodeAccumulationMetadata 仅解释已有响应，恢复时不再次生成或调用模型。
+func (a *AccumulationMetadataAdapter) DecodeAccumulationMetadata(raw string) (k12.AccumulationDerivedMetadata, error) {
 	var response struct {
 		Subject   *string `json:"subject"`
 		EntryType *string `json:"entry_type"`

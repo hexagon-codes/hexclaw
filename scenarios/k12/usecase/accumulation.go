@@ -54,21 +54,12 @@ func (d Deps) CreateCurrentAccumulation(
 	} else if !errors.Is(err, records.ErrNotFound) {
 		return "", false, err
 	}
-	if d.AccumulationMetadata == nil {
-		return "", false, fmt.Errorf("%w: 未配置积累元数据派生能力", ErrSolveFailed)
-	}
-	metadata, err := d.AccumulationMetadata.DeriveAccumulationMetadata(ctx, content)
+	metadata, gradeTerm, err := d.deriveCurrentAccumulationMetadata(ctx, agentName, content, commandKey, requestDigest)
 	if err != nil {
-		return "", false, fmt.Errorf("%w: 积累元数据派生失败: %v", ErrSolveFailed, err)
-	}
-	metadata.Subject = strings.TrimSpace(metadata.Subject)
-	metadata.EntryType = strings.TrimSpace(metadata.EntryType)
-	metadata.Source = strings.TrimSpace(metadata.Source)
-	if err := metadata.Validate(); err != nil {
-		return "", false, fmt.Errorf("%w: 积累元数据派生结果非法: %v", ErrSolveFailed, err)
+		return "", false, err
 	}
 	rec, err := k12.NewAccumRecord(agentName, "", k12.AccumFields{
-		GradeTerm: d.creationGradeTerm(ctx, agentName, ""),
+		GradeTerm: gradeTerm,
 		Subject:   metadata.Subject, EntryType: metadata.EntryType,
 		Content: content,
 		// source_ref is legacy-only. The nullable current source and provenance
