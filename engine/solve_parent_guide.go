@@ -168,6 +168,17 @@ func TeachingReportGuideAuditInstructions() string {
 	return strings.Replace(contract, "with exactly one entry for each of the seven fields.", "with exactly one entry for each of the eight fields, including report_content.", 1)
 }
 
+func hasReportContentGuideAudit(candidates []guideAuditCandidate) bool {
+	for _, candidate := range candidates {
+		for _, field := range candidate.RequiredFields {
+			if field == "report_content" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // ParentGuideAuditVerdict 按实际审核原文判定给定解答来源的七字段合同。
 func ParentGuideAuditVerdict(output, sourceDigest string) string {
 	return parentGuideAuditVerdict(parentGuideAuditsFromOutput(output), sourceDigest)
@@ -185,18 +196,12 @@ func withParentGuideVerification(spec SubAgentSpec, candidates []guideAuditCandi
 	spec.verification.ParentGuides = candidates
 	raw, _ := json.Marshal(candidates)
 	contract := parentGuideAuditContract
-	for _, candidate := range candidates {
-		if len(candidate.RequiredFields) != 0 {
-			contract = TeachingReportGuideAuditInstructions()
-			break
-		}
+	if hasReportContentGuideAudit(candidates) {
+		contract = TeachingReportGuideAuditInstructions()
 	}
 	spec.Task += "\n\n" + contract + "\nCandidates:\n" + string(raw) + "\nAfter the four verdict lines, output one additional single line PARENT_GUIDE_AUDITS: <JSON array of audits>."
-	for _, candidate := range candidates {
-		if len(candidate.RequiredFields) != 0 {
-			spec.Task += "\nFor each candidate with required_fields, audit exactly those fields, including report_content. Check every answer, unit, condition, calculation, explanation and method note in its two-layer content against that candidate's solution. Missing report_content or omitted targets must be invalid; it is not numerical execution evidence."
-			break
-		}
+	if hasReportContentGuideAudit(candidates) {
+		spec.Task += "\nFor each candidate with required_fields, audit exactly those fields, including report_content. Check every answer, unit, condition, calculation, explanation and method note in its two-layer content against that candidate's solution. Missing report_content or omitted targets must be invalid; it is not numerical execution evidence."
 	}
 	return spec
 }
@@ -291,6 +296,19 @@ func parentGuideAuditVerdictForFields(audits []parentGuideAudit, digest string, 
 		return "INVALID"
 	}
 	return "VALID"
+}
+
+// declaredParentGuideAuditsProvided 只核对已声明的字段合同是否齐备；内容被否决仍保留INVALID。
+// 没有required_fields的旧讲法维持原语义，不因新报告字段增加调用。
+func declaredParentGuideAuditsProvided(output string, candidates []guideAuditCandidate) bool {
+	audits := parentGuideAuditsForCandidates(output, candidates)
+	for _, candidate := range candidates {
+		if len(candidate.RequiredFields) != 0 &&
+			parentGuideAuditVerdictForFields(audits, candidate.SourceDigest, candidate.RequiredFields) == "NOT_PROVIDED" {
+			return false
+		}
+	}
+	return true
 }
 
 func selectedSolverSolution(groups []answerGroup, verdict verifyVerdict, computed string, grounded bool, problem ...string) solverSolution {

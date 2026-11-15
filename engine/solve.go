@@ -851,7 +851,7 @@ func (o *SolveSkill) verifySolutionWithGuides(ctx context.Context, problem, solu
 	}
 	completeCandidate := completeVerificationAnswer(verificationAnswerProjection(problem, candidate))
 	result, usedSpec, err := o.runValidatedResult(ctx, spec, func(result SubAgentResult, attempt SubAgentSpec) bool {
-		if !verdictParseable(result.Output) {
+		if !verdictParseable(result.Output) || !declaredParentGuideAuditsProvided(result.Output, guides) {
 			return false
 		}
 		verdict, reported := parseVerdict(result.Output)
@@ -866,6 +866,11 @@ func (o *SolveSkill) verifySolutionWithGuides(ctx context.Context, problem, solu
 	// 已处理响应后的执行失败与未知停止都保留原错误，不能退化为缺少指南审计。
 	if err != nil {
 		return verdictUnverifiable, "", false, nil, nil, err
+	}
+	// 既有格式修复只有一次；再次缺字段是已收到响应的确定失败，不能借可识别verdict伪装完整审计。
+	if !declaredParentGuideAuditsProvided(result.Output, guides) {
+		return verdictUnverifiable, "", false, nil, nil, errors.Join(egress.ErrProviderResponseProcessed,
+			fmt.Errorf("verifier response is missing the declared parent guide audit fields"))
 	}
 	if strings.TrimSpace(result.Output) == "" {
 		return verdictUnverifiable, "", false, nil, nil, nil

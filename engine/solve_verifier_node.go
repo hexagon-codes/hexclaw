@@ -318,7 +318,11 @@ func verificationProgramPrompt(input *verificationInput) string {
 		guideContract += fmt.Sprintf("\nThe current task has %d ordered blanks. Independently compute every blank and print its complete quantity in original blank order, separated by commas, without replacing the quantities with variable assignments. If the task also asks for a named judgment, retain that judgment after a semicolon. Shared and canonical copies are not additional blanks.\n", count)
 	}
 	if len(input.ParentGuides) > 0 {
-		guideContract += "\n" + parentGuideAuditContract + "\nAdd parent_guide_audits as an array of these per-candidate audits to the JSON response.\n"
+		contract := parentGuideAuditContract
+		if hasReportContentGuideAudit(input.ParentGuides) {
+			contract = TeachingReportGuideAuditInstructions()
+		}
+		guideContract += "\n" + contract + "\nAdd parent_guide_audits as an array of these per-candidate audits to the JSON response.\n"
 	}
 	if _, labeled := parseLabeledAnswerQuantities(input.Candidate); labeled {
 		guideContract += "\nWhen the final answer has two named quantities, retain each object's label and unit in COMPUTED; print both labeled quantities on the same line.\n"
