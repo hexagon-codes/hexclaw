@@ -348,9 +348,7 @@ func TestImageReportTeachingFailureFreezesWithoutSecondProviderCall(t *testing.T
 			if _, err = o.RunGradingJob(t.Context(), job.Record.RecordID); err != nil {
 				t.Fatal(err)
 			}
-			waitGradingView(t, o, job.Record.RecordID, func(v GradingJobView) bool {
-				return v.Fields.AnchorState == k12.GradingAnchorLocated || v.Fields.AnchorState == k12.GradingAnchorDegraded
-			})
+			// 讲题报告以冻结终态验收，不要求可选锚点先收敛。
 			completed := waitGradingView(t, o, job.Record.RecordID, func(v GradingJobView) bool {
 				return v.Record.Status == k12.GradingStageCompleted || v.Record.Status == k12.GradingStageFailedRetryable || v.Record.Status == k12.GradingStageOutcomeUnknown
 			})
