@@ -3,11 +3,13 @@ package usecase
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"image"
 	"testing"
 	"time"
 
+	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/assetstore"
 	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
@@ -174,9 +176,29 @@ func TestPhotoGradingCacheImageTaskKeepsNewMessageIdentity(t *testing.T) {
 	c, _ := newImageTaskCoordinatorForTest(t, &imageTaskClassifierStub{})
 	c.Records, c.Grading, c.PageAssets, c.NewID = o.deps.Records, o, repo, nil
 	c.Now = func() int64 { return time.Now().Unix() }
+	transport := &gradingFinalDeliveryTransport{}
+	o.deps.Delivery, o.deps.Renderer = transport, &finalReplyPDFRenderer{}
+	sourceReceipt := func(dispatchID, messageID string) string {
+		t.Helper()
+		bundle, _, err := o.deps.Records.AdmitInboundPhoto(ctx, InboundPhotoAdmission{
+			OwnerScope: "cache-owner", AgentName: "mingming", BindingID: "grading-final-binding",
+			Identity:  InboundPhotoIdentity{Platform: "dingtalk", InstanceID: "grading-final-instance", ChatID: "grading-final-parent", ProviderMessageID: messageID},
+			AssetName: "photo.png", AssetMIME: "image/png", AssetBytes: original, CommandJSON: `{}`,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		state := bundle.Dispatch.State()
+		state.ProcessingStatus, state.RoutingDecision, state.ImageTaskID = InboundPhotoImageTaskSubmitted, InboundPhotoRouteNewSubmission, dispatchID
+		if _, err := o.deps.Records.CompareAndSwapInboundPhotoDispatch(ctx, "mingming", bundle.Receipt.ReceiptID, bundle.Dispatch.Version, state); err != nil {
+			t.Fatal(err)
+		}
+		return bundle.Receipt.ReceiptID
+	}
 	var firstJob, firstArtifact, firstDispatch string
 	for i := 0; i < 3; i++ {
 		input := testCreateImageTaskInput()
+		input.SourceKind = k12.ImageTaskSourceIM
 		input.OwnerScope, input.SourceAssetRefs = "cache-owner", []string{ready.Metadata.PageAssetID}
 		input.SourceRef = fmt.Sprintf("cache-real-message-%d", i)
 		if i == 2 {
@@ -203,6 +225,15 @@ func TestPhotoGradingCacheImageTaskKeepsNewMessageIdentity(t *testing.T) {
 			if !created || job.Record.RecordID == firstJob {
 				t.Fatal("changed delivery intent reused the old frozen message")
 			}
+			artifact, err := o.deps.Records.GetGradingFinalArtifactByJob(ctx, "mingming", firstJob)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := len(transport.sent)
+			_, _, err = o.deps.PrepareAndSendInboundPhotoFinalExact(ctx, "cache-owner", "mingming", artifact.ArtifactID, artifact.ArtifactDigest, sourceReceipt(dispatch.DispatchID, input.SourceRef))
+			if !errors.Is(err, ErrInvalidInput) || len(transport.sent) != before {
+				t.Fatalf("source without adoption used another final: err=%v", err)
+			}
 			continue
 		}
 		if _, err := c.Records.BindHomeworkSubmissionGradingJob(ctx, "mingming", target.HomeworkSubmission.SubmissionID, job.Record.RecordID, target.HomeworkSubmission.Version); err != nil {
@@ -228,6 +259,16 @@ func TestPhotoGradingCacheImageTaskKeepsNewMessageIdentity(t *testing.T) {
 			firstArtifact = result.FinalArtifact.ArtifactID
 		} else if result.FinalArtifact.ArtifactID != firstArtifact {
 			t.Fatal("new message did not reuse the same report")
+		}
+		receiptID := sourceReceipt(dispatch.DispatchID, input.SourceRef)
+		before := len(transport.sent)
+		_, _, err = o.deps.PrepareAndSendInboundPhotoFinalExact(ctx, "different-owner", "mingming", result.FinalArtifact.ArtifactID, result.FinalArtifact.ArtifactDigest, receiptID)
+		if !errors.Is(err, records.ErrNotFound) || len(transport.sent) != before {
+			t.Fatalf("source reply crossed owner: %v", err)
+		}
+		_, _, err = o.deps.PrepareAndSendInboundPhotoFinalExact(ctx, "cache-owner", "mingming", result.FinalArtifact.ArtifactID, result.FinalArtifact.ArtifactDigest, receiptID)
+		if err != nil {
+			t.Fatalf("matching source reply failed for cache hit=%v: %v", !created, err)
 		}
 		completed, err := c.Records.HasCompletedImageTaskHomework(ctx, "mingming", dispatch.DispatchID)
 		if err != nil || !completed {

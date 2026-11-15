@@ -79,8 +79,34 @@ func (d Deps) PrepareAndSendInboundPhotoFinalExact(ctx context.Context, ownerSco
 		return k12.DeliveryBatch{}, false, err
 	}
 	dispatchID, err := gradingFinalImageTaskDispatchID(job)
-	if err != nil || dispatchID != bundle.Dispatch.ImageTaskID {
+	if err != nil {
 		return k12.DeliveryBatch{}, false, fmt.Errorf("%w: final artifact does not belong to the source image task", ErrInvalidInput)
+	}
+	if dispatchID != bundle.Dispatch.ImageTaskID {
+		// 新消息可采用已完成的旧终稿，但必须具有该消息自己的持久采用回执。
+		reuse, reuseErr := d.Records.GetPhotoGradingReuse(ctx, agentName,
+			k12.BuildGradingIdempotencyKey("image_task", bundle.Dispatch.ImageTaskID, 0))
+		if reuseErr != nil && !errors.Is(reuseErr, records.ErrNotFound) {
+			return k12.DeliveryBatch{}, false, reuseErr
+		}
+		if reuseErr != nil || reuse.JobID != job.Record.RecordID ||
+			reuse.ArtifactID != artifact.ArtifactID || reuse.ArtifactDigest != artifact.ArtifactDigest {
+			return k12.DeliveryBatch{}, false, fmt.Errorf("%w: final artifact does not belong to the source image task", ErrInvalidInput)
+		}
+		source, sourceErr := d.Records.GetImageTaskDispatch(ctx, agentName, bundle.Dispatch.ImageTaskID)
+		if sourceErr != nil {
+			return k12.DeliveryBatch{}, false, sourceErr
+		}
+		if source.TargetObjectType != k12.ImageTaskTargetHomeworkSubmission {
+			return k12.DeliveryBatch{}, false, fmt.Errorf("%w: final artifact does not belong to the source image task", ErrInvalidInput)
+		}
+		homework, homeworkErr := d.Records.GetHomeworkSubmission(ctx, agentName, source.TargetObjectID)
+		if homeworkErr != nil {
+			return k12.DeliveryBatch{}, false, homeworkErr
+		}
+		if homework.GradingJobID != job.Record.RecordID || job.Record.Status != k12.GradingStageCompleted {
+			return k12.DeliveryBatch{}, false, fmt.Errorf("%w: final artifact does not belong to the source image task", ErrInvalidInput)
+		}
 	}
 	transport, ok := d.Delivery.(BatchDeliveryTransport)
 	if !ok {
