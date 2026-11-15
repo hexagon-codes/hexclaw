@@ -274,6 +274,8 @@ var mathPlainLiteralFraction = regexp.MustCompile(`\b([0-9]+(?:\.[0-9]+)?)/([0-9
 var mathRepeatedFractionGroup = regexp.MustCompile(`\(\(([0-9]+(?:\.[0-9]+)?/[0-9]+(?:\.[0-9]+)?)\)\)`)
 var mathDiagramReadingLabel = regexp.MustCompile(`(?m)^图(?:示|中标注)?[：:]`)
 
+var mathPrintedAreaUnitLayout = regexp.MustCompile(`\\+(?:mathrm|text)\s*\{([^{}]*)\}\s*\^\s*(?:2|\{2\})`)
+
 // 只在比较副本中剥离同一已冻结范围的完整材料前缀，保留局部题面与数学空位。
 func scopedMaterialReadingsEquivalent(q RecognizedQuestion, raw string, values []string) bool {
 	source := q.ImageSourceContext
@@ -286,6 +288,15 @@ func scopedMaterialReadingsEquivalent(q RecognizedQuestion, raw string, values [
 		value = strings.NewReplacer(`\square`, "□", `\Box`, "□").Replace(value)
 		value = mathDiagramReadingLabel.ReplaceAllString(value, "图：")
 		value = strings.ReplaceAll(value, "计算过程中“", "推算过程中“")
+		// 已知面积单位的字形排版等价；未知符号、单位值与原始观察不改写。
+		value = mathPrintedAreaUnitLayout.ReplaceAllStringFunc(value, func(layout string) string {
+			parts := mathPrintedAreaUnitLayout.FindStringSubmatch(layout)
+			unit := strings.TrimSpace(parts[1]) + "²"
+			if elementarymath.NormalizeUnit(unit) == "" {
+				return layout
+			}
+			return unit
+		})
 		// 空白分数框和横线都是未填写区域；数字分数按同一完整字面量比较。
 		value = mathEmptyFractionSlot.ReplaceAllString(value, "____")
 		value = mathLiteralFraction.ReplaceAllString(value, "($1/$2)")
