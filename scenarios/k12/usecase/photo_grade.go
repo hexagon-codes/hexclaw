@@ -258,7 +258,8 @@ func (d Deps) gradeHomeworkPhotoWithAssessorInput(
 		}
 		// 冻结的解题任务只生成解法，识别到的示例或作答仍保留为原始证据，
 		// 不参与学生批改，也不阻止用户请求的讲解。
-		if mode != expectedMode && req.TaskIntent != PhotoTaskBlankWorksheet {
+		// 教学报告保留冻结页级语义，空白条目沿既有参考解分支推进，不产生学生批改事实。
+		if mode != expectedMode && req.TaskIntent != PhotoTaskBlankWorksheet && req.TeachingReport == nil {
 			return PhotoGradeResult{}, fmt.Errorf(
 				"%w: frozen photo task intent %q 与识别到的作答证据冲突",
 				ErrInvalidInput, req.TaskIntent,
