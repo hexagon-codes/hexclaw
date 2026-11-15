@@ -1252,6 +1252,30 @@ func (c *ImageTaskCoordinator) beginTrackedWorkerContext(
 	}, true
 }
 
+// beginImageTaskOperation 让同步推进与异步推进共享同一任务的取消和关闭生命周期。
+func (c *ImageTaskCoordinator) beginImageTaskOperation(
+	ctx context.Context, agentName, dispatchID string,
+) (context.Context, func(), error) {
+	agentName, dispatchID = strings.TrimSpace(agentName), strings.TrimSpace(dispatchID)
+	key := agentName + "\x00" + dispatchID
+	if c.agentWorkers.ownsContext(ctx, key) {
+		return ctx, func() {}, nil
+	}
+	trackedCtx, finishTracked, accepted := c.beginTrackedWorkerContext(ctx)
+	if !accepted {
+		return nil, nil, ErrImageTaskCoordinatorShutdown
+	}
+	runCtx, finishWorker, accepted := c.agentWorkers.start(trackedCtx, agentName, key)
+	if !accepted {
+		finishTracked()
+		return nil, nil, k12storage.ErrImageTaskConflict
+	}
+	return runCtx, func() {
+		finishWorker()
+		finishTracked()
+	}, nil
+}
+
 // Recover scans only checkpoints that are safe to continue locally. Sent,
 // outcome-unknown, retryable-failed, and parent-confirmation states remain
 // parked and therefore cause zero provider calls after restart.
@@ -1294,10 +1318,10 @@ func (c *ImageTaskCoordinator) recoverySafe(
 	dispatch k12.ImageTaskDispatch,
 ) (bool, error) {
 	if dispatch.Status == k12.ImageTaskStatusRouting {
-		invocation, err := c.Records.GetImageTaskInvocation(
+		invocation, err := c.Records.GetLatestImageTaskClassificationInvocation(
 			ctx,
 			dispatch.AgentName,
-			dispatch.ClassificationInvocationID,
+			dispatch.DispatchID,
 		)
 		if err == nil && invocation.DeadlineAt > 0 &&
 			invocation.DeadlineAt <= c.now() &&
@@ -1391,6 +1415,11 @@ func (c *ImageTaskCoordinator) Run(
 	if err := c.validate(); err != nil {
 		return ImageTaskView{}, err
 	}
+	ctx, finish, err := c.beginImageTaskOperation(ctx, agentName, dispatchID)
+	if err != nil {
+		return ImageTaskView{}, err
+	}
+	defer finish()
 	dispatch, err := c.Records.GetImageTaskDispatch(
 		ctx, strings.TrimSpace(agentName), strings.TrimSpace(dispatchID),
 	)
@@ -1409,8 +1438,8 @@ func (c *ImageTaskCoordinator) Run(
 		if c.Classifier == nil {
 			return view, fmt.Errorf("usecase: image task classifier 未配置")
 		}
-		invocation, invocationErr := c.Records.GetImageTaskInvocation(
-			ctx, dispatch.AgentName, dispatch.ClassificationInvocationID,
+		invocation, invocationErr := c.Records.GetLatestImageTaskClassificationInvocation(
+			ctx, dispatch.AgentName, dispatch.DispatchID,
 		)
 		if invocationErr != nil {
 			return view, invocationErr
@@ -1563,10 +1592,10 @@ func (c *ImageTaskCoordinator) projectTarget(
 	if (dispatch.Status == k12.ImageTaskStatusRouting ||
 		dispatch.Status == k12.ImageTaskStatusFailed) &&
 		strings.TrimSpace(dispatch.ClassificationInvocationID) != "" {
-		invocation, invocationErr := c.Records.GetImageTaskInvocation(
+		invocation, invocationErr := c.Records.GetLatestImageTaskClassificationInvocation(
 			ctx,
 			dispatch.AgentName,
-			dispatch.ClassificationInvocationID,
+			dispatch.DispatchID,
 		)
 		if invocationErr != nil {
 			return ImageTaskView{}, invocationErr
@@ -2446,10 +2475,10 @@ func (c *ImageTaskCoordinator) Result(
 		ProblemGroundingReceipts:  []ProblemGroundingReceipt{},
 	}
 	if strings.TrimSpace(view.Dispatch.ClassificationInvocationID) != "" {
-		invocation, invocationErr := c.Records.GetImageTaskInvocation(
+		invocation, invocationErr := c.Records.GetLatestImageTaskClassificationInvocation(
 			ctx,
 			view.Dispatch.AgentName,
-			view.Dispatch.ClassificationInvocationID,
+			view.Dispatch.DispatchID,
 		)
 		if invocationErr != nil {
 			return ImageTaskResult{}, invocationErr
@@ -3127,6 +3156,11 @@ func (c *ImageTaskCoordinator) Retry(
 	if err := c.validate(); err != nil {
 		return ImageTaskView{}, err
 	}
+	ctx, finish, err := c.beginImageTaskOperation(ctx, agentName, dispatchID)
+	if err != nil {
+		return ImageTaskView{}, err
+	}
+	defer finish()
 	original, err := c.Records.GetImageTaskDispatch(ctx, agentName, dispatchID)
 	if err != nil {
 		return ImageTaskView{}, err
@@ -3457,6 +3491,7 @@ func (c *ImageTaskCoordinator) Cancel(
 		return ImageTaskView{}, err
 	}
 	if current.Dispatch.Status == k12.ImageTaskStatusCancelled {
+		c.agentWorkers.cancelWorker(strings.TrimSpace(agentName), strings.TrimSpace(agentName)+"\x00"+strings.TrimSpace(dispatchID))
 		return current, nil
 	}
 	if current.Dispatch.Version != expectedVersion {
@@ -3479,5 +3514,6 @@ func (c *ImageTaskCoordinator) Cancel(
 	if err != nil {
 		return ImageTaskView{}, err
 	}
+	c.agentWorkers.cancelWorker(strings.TrimSpace(agentName), strings.TrimSpace(agentName)+"\x00"+strings.TrimSpace(dispatchID))
 	return c.projectTarget(ctx, dispatch)
 }

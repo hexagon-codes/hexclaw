@@ -19,6 +19,14 @@ type agentWorkerRegistration struct {
 	done      chan struct{}
 }
 
+type agentWorkerContextKey struct{}
+
+type agentWorkerContext struct {
+	registry     *agentWorkerFenceRegistry
+	workerKey    string
+	registration *agentWorkerRegistration
+}
+
 // agentWorkerFenceRegistry is the single Agent-scoped lifecycle primitive shared
 // by K12 coordinators. Durable stores remain the queue/source of truth; this
 // registry only fences new local workers and drains already-owned contexts.
@@ -61,6 +69,9 @@ func (r *agentWorkerFenceRegistry) start(
 	}
 	r.workers[workerKey] = registration
 	r.mu.Unlock()
+	runCtx = context.WithValue(runCtx, agentWorkerContextKey{}, agentWorkerContext{
+		registry: r, workerKey: workerKey, registration: registration,
+	})
 
 	var finishOnce sync.Once
 	return runCtx, func() {
@@ -73,6 +84,30 @@ func (r *agentWorkerFenceRegistry) start(
 			r.mu.Unlock()
 		})
 	}, true
+}
+
+// ownsContext 只复用同一个仍在执行的登记，避免同步入口重复拥有异步工作者。
+func (r *agentWorkerFenceRegistry) ownsContext(ctx context.Context, workerKey string) bool {
+	if ctx == nil {
+		return false
+	}
+	owner, ok := ctx.Value(agentWorkerContextKey{}).(agentWorkerContext)
+	if !ok || owner.registry != r || owner.workerKey != workerKey {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.workers[workerKey] == owner.registration
+}
+
+// cancelWorker 只取消精确归属的执行句柄，不暂停同一孩子的其它任务。
+func (r *agentWorkerFenceRegistry) cancelWorker(agentName, workerKey string) {
+	r.mu.Lock()
+	worker := r.workers[workerKey]
+	r.mu.Unlock()
+	if worker != nil && worker.agentName == agentName {
+		worker.cancel(context.Canceled)
+	}
 }
 
 func (r *agentWorkerFenceRegistry) quiesceAgent(
