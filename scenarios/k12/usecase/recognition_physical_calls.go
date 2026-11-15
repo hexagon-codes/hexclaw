@@ -1221,9 +1221,24 @@ func (o *GradingOrchestrator) recognitionPhysicalSuccessSet(
 	parentImage []byte,
 ) ([]k12.ModelPhysicalInvocation, error) {
 	if parent.RequestPolicySnapshot.IsZero() {
-		// Legacy/non-DD-036 routes do not opt into the structured-recognition
-		// physical receipt contract.
-		return nil, nil
+		if o == nil || o.deps.Records == nil {
+			return nil, nil
+		}
+		children, err := o.deps.Records.ListModelPhysicalInvocations(ctx, parent.AgentName, parent.JobID)
+		if err != nil {
+			return nil, fmt.Errorf("%w: list recognizing physical receipts: %v", ErrModelInvocationRequiresReconciliation, err)
+		}
+		// 默认请求参数也可使用 V2；实际物理清单决定是否沿结构化识题合同对账。
+		hasV2 := false
+		for _, child := range children {
+			if child.ParentInvocationID == parent.InvocationID && child.RecognitionPlanVersion == k12.RecognitionPlanVersionV2 {
+				hasV2 = true
+				break
+			}
+		}
+		if !hasV2 {
+			return nil, nil
+		}
 	}
 	if len(parentImage) == 0 {
 		return nil, fmt.Errorf(

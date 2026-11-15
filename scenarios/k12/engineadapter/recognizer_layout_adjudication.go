@@ -130,6 +130,7 @@ func (a *RecognizerAdapter) recognizeLayoutAdjudicationV2(ctx context.Context, p
 	questionMatch, answerMatch := usecase.RecognitionSourceReadingsMatchForInitialReadMode(comparison(*initial.question), comparison(*reread.question), plan.InitialReadMode)
 	// 既定比较规则已消解排版差异时，不再把旧的泛化冲突原因当成第三读授权。
 	sameAnswerText := (initial.question.AnswerState == usecase.AnswerStateBlank && reread.question.AnswerState == usecase.AnswerStateBlank) ||
+		strings.TrimSpace(initial.question.AnswerRawTranscription) == strings.TrimSpace(reread.question.AnswerRawTranscription) ||
 		k12.RecognitionSourceQuestionsEqualV1(initial.question.AnswerRawTranscription, reread.question.AnswerRawTranscription)
 	if questionMatch && sameAnswerText && !recognitionUnresolvedSourceObservationsV1(initial.question, reread.question, runtime.Header.ExecutionPolicy) {
 		return nil
@@ -144,7 +145,7 @@ func (a *RecognizerAdapter) recognizeLayoutAdjudicationV2(ctx context.Context, p
 		}
 	case questionMatch && (!answerMatch || !sameAnswerText):
 		conflictKind = "answer"
-	case !questionMatch && answerMatch:
+	case !questionMatch && (answerMatch || sameAnswerText):
 		conflictKind = "question"
 	}
 	if initial.question.AnswerState != reread.question.AnswerState {
