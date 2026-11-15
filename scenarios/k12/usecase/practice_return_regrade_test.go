@@ -13,6 +13,82 @@ import (
 
 const practiceReturnOnePixelPNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 
+func TestPracticeReturnRecoverCompletedAutomaticCandidatesWithoutNewExecution(t *testing.T) {
+	d, _ := newPipeline(t, fakeSolver{}, fakeGrader{}, &fakeInsights{})
+	ctx := t.Context()
+	setID := seedRegradePaper(t, d, "", true)
+	set, err := d.GetPracticeSet(ctx, "mingming", setID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ret := set.Fields.ReturnAssets[0]
+	set, err = d.SubmitReturns(ctx, "mingming", setID, []PracticeReturnInput{{ReturnID: ret.ReturnID, AssetID: ret.AssetID, AutoMatch: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ret = set.Fields.ReturnAssets[0]
+	if len(ret.ItemIDs) != 0 || len(ret.CandidateItemIDs) != 2 {
+		t.Fatal("automatic return must freeze candidates before observed coverage")
+	}
+	route := k12.GradingModelSnapshot{Provider: "fixture", Model: "fixture", Route: "fixture/fixture"}
+	record, err := k12.NewGradingJobRecord("mingming", "", k12.GradingJobFields{
+		SubmissionID: "return-submission", SourceKind: PracticeReturnGradingSourceKind,
+		IdempotencyKey: "completed-auto-return", ModelSnapshot: route,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.Status = k12.GradingStageCompleted
+	if _, err := d.Records.Put(ctx, record); err != nil {
+		t.Fatal(err)
+	}
+	grading := &practiceReturnGradingFake{
+		job: GradingJobView{Record: record, Fields: k12.GradingJobFields{ModelSnapshot: route}},
+		result: PhotoGradeResult{Items: []PhotoGradeItem{
+			{Status: PhotoCorrect, Recognized: RecognizedQuestion{SourceNumberPath: []string{"1"}, DisplayLabel: "1"}},
+			{Status: PhotoCorrect, Recognized: RecognizedQuestion{SourceNumberPath: []string{"2"}, DisplayLabel: "2"}},
+		}},
+	}
+	references, paperSize, err := freezePracticeGradingReferences(set.Fields, ret.CandidateItemIDs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grading.started.Photo.PracticeReferences, grading.started.Photo.PracticePaperSize = references, paperSize
+	coordinator := &PracticeReturnRegradeCoordinator{Deps: &d, Grading: grading}
+	if err := coordinator.updateProjection(ctx, "mingming", setID, ret.ReturnID, practiceReturnRegradeProjection{
+		JobID: record.RecordID, Status: k12.PracticeRegradeOutcomeUnknown, RouteSnapshot: route,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if count, err := coordinator.Recover(ctx, []string{"mingming"}); err != nil || count != 1 {
+		t.Fatalf("completed automatic return recovery: count=%d error=%v", count, err)
+	}
+	recovered, err := d.GetPracticeSet(ctx, "mingming", setID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projected := recovered.Fields.ReturnAssets[0]
+	if projected.RegradeStatus != k12.PracticeRegradeCompleted || !reflect.DeepEqual(projected.ItemIDs, ret.CandidateItemIDs) ||
+		!reflect.DeepEqual(projected.CandidateItemIDs, ret.CandidateItemIDs) {
+		t.Fatalf("frozen candidates did not become observed coverage: %+v", projected)
+	}
+	for _, item := range recovered.Fields.Items {
+		if !item.Returned || item.ResultCorrect == nil || !*item.ResultCorrect || item.ResultEvidence != k12.PracticeResultSystemVerified {
+			t.Fatalf("completed result did not preserve its item assessment: %+v", item)
+		}
+	}
+	if count, err := coordinator.Recover(ctx, []string{"mingming"}); err != nil || count != 0 {
+		t.Fatalf("completed projection replay: count=%d error=%v", count, err)
+	}
+	replayed, err := d.GetPracticeSet(ctx, "mingming", setID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayed.Record.Version != recovered.Record.Version || grading.starts != 0 || grading.runs != 0 {
+		t.Fatalf("recovery repeated execution or projection: version=%d starts=%d runs=%d", replayed.Record.Version, grading.starts, grading.runs)
+	}
+}
+
 type practiceReturnGradingFake struct {
 	started        StartPhotoGradingInput
 	job            GradingJobView

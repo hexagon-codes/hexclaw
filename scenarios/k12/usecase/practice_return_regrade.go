@@ -147,11 +147,7 @@ func (c *PracticeReturnRegradeCoordinator) Process(
 	if ret.RegradeStatus == k12.PracticeRegradeCompleted {
 		return nil
 	}
-	matchingIDs := ret.ItemIDs
-	if ret.AutoMatch {
-		matchingIDs = ret.CandidateItemIDs
-	}
-	references, paperSize, err := freezePracticeGradingReferences(view.Fields, matchingIDs)
+	references, paperSize, err := freezePracticeGradingReferences(view.Fields, practiceReturnReferenceIDs(ret))
 	if err != nil {
 		return c.projectFailure(ctx, agentName, setID, returnID, ret,
 			k12.PracticeRegradeFailedTerminal, err)
@@ -414,6 +410,14 @@ func unresolvedPracticeReturnItems(
 	return unresolved
 }
 
+// 自动匹配在确认覆盖前始终读取冻结候选，正常执行与恢复共用同一来源集合。
+func practiceReturnReferenceIDs(ret k12.PracticeReturnAsset) []string {
+	if ret.AutoMatch {
+		return ret.CandidateItemIDs
+	}
+	return ret.ItemIDs
+}
+
 func freezePracticeGradingReferences(fields k12.PracticeSetFields, itemIDs []string) ([]PracticeGradingReference, int, error) {
 	selected := make(map[string]bool, len(itemIDs))
 	for _, id := range itemIDs {
@@ -641,7 +645,7 @@ func (c *PracticeReturnRegradeCoordinator) Recover(
 								return count, fmt.Errorf("completed grading result could not be loaded")
 							}
 						}
-						references, paperSize, err := freezePracticeGradingReferences(set.Fields, ret.ItemIDs)
+						references, paperSize, err := freezePracticeGradingReferences(set.Fields, practiceReturnReferenceIDs(ret))
 						if err != nil {
 							return count, err
 						}

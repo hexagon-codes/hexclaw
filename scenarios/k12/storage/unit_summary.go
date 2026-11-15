@@ -409,7 +409,18 @@ func (s *Store) ListUnitSummaryAttempts(ctx context.Context, owner, agent, sessi
 	return out, rows.Err()
 }
 func (s *Store) ListRecoverableUnitSummaryAttempts(ctx context.Context) ([]k12.UnitSummaryAttempt, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+unitAttemptColumns+` FROM k12_unit_summary_attempts WHERE state IN ('resolving','queued','generating','reconciling','rendering','publishing') AND lease_expires_at<=? ORDER BY updated_at LIMIT 100`, nowUnix())
+	// 没有新回执的停放调用不占恢复页；原任务与未知回执保持，已有结果仍可接续。
+	rows, err := s.db.QueryContext(ctx, `SELECT `+unitAttemptColumns+`
+        FROM k12_unit_summary_attempts a
+        WHERE state IN ('resolving','queued','generating','reconciling','rendering','publishing')
+          AND lease_expires_at<=?
+          AND NOT (state='reconciling' AND EXISTS (
+            SELECT 1 FROM k12_unit_summary_model_invocations i
+            WHERE i.agent_name=a.agent_name AND i.job_id=a.attempt_id
+              AND i.invocation_id=json_extract(a.payload_json,'$.invocation_ref')
+              AND i.status IN ('sent','outcome_unknown') AND trim(i.result_json)=''
+          ))
+        ORDER BY updated_at LIMIT 100`, nowUnix())
 	if err != nil {
 		return nil, err
 	}

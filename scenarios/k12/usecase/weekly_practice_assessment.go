@@ -32,7 +32,12 @@ func (a verifiedSolutionWeeklyAssessor) AssessWeeklyPracticeAnswer(
 	ctx context.Context,
 	req WeeklyPracticeAnswerRequest,
 ) (WeeklyPracticeAnswerAssessment, error) {
-	outcome, err := a.grader.GradeVerified(ctx, "数学", req.Item.PromptMarkdown,
+	subject := req.Item.Subject
+	if subject == "" {
+		// 旧快照缺少学科时保留原数学口径，新条目使用其冻结学科。
+		subject = "数学"
+	}
+	outcome, err := a.grader.GradeVerified(ctx, subject, req.Item.PromptMarkdown,
 		req.StudentAnswer, req.VerifiedSolution)
 	if err != nil {
 		return WeeklyPracticeAnswerAssessment{}, err
@@ -53,7 +58,7 @@ func (a verifiedSolutionWeeklyAssessor) AssessWeeklyPracticeAnswer(
 		AssessmentID:         "weekly-assessment-" + shortDigest(binding),
 		Result:               result,
 		VerificationEvidence: "verified_solution_grader:" + string(outcome.Verdict),
-		Subject:              "数学",
+		Subject:              subject,
 		KnowledgePoint:       strings.TrimSpace(outcome.KnowledgePoint),
 	}, nil
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"sync/atomic"
@@ -17,6 +18,112 @@ import (
 )
 
 type unitUnknownWaitGenerator struct{ calls atomic.Int32 }
+
+func TestUnitSummaryRecoverySkipsParkedUnknownAndKeepsKnownResultsSQLite(t *testing.T) {
+	ctx := t.Context()
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "queue.db")+"?_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	if err := migrate.Run(ctx, db, migrate.All); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("INSERT INTO agents(name) VALUES('unit-child')"); err != nil {
+		t.Fatal(err)
+	}
+	store := k12storage.NewStore(db, nil)
+	var parked k12.UnitSummaryAttempt
+	var parkedInvocation k12.ModelInvocation
+	var queuedID, knownID string
+	for index := 0; index < 102; index++ {
+		key := fmt.Sprintf("original-%03d", index)
+		attempt, _, err := store.CreateUnitSummaryAttempt(ctx, k12.UnitSummaryAttempt{
+			OwnerID: "unit-owner", AgentName: "unit-child", SessionID: "unit-session", SourceMessageID: key,
+			IdempotencyKey: key, RequestDigest: k12.UnitSummaryDigest(key), FinalUserText: "整理数学单元",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if index == 100 {
+			queuedID = attempt.AttemptID
+		} else {
+			invocation, _, err := store.PrepareUnitSummaryModelInvocation(ctx, k12.ModelInvocation{
+				InvocationID: "inv-" + key, AgentName: attempt.AgentName, JobID: attempt.AttemptID,
+				Stage: "unit_summary_generate", RequestDigest: k12.UnitSummaryDigest(key), Attempt: 1,
+				RouteSnapshot: k12.GradingModelSnapshot{Provider: "fixture", Model: "fixture", Route: "fixture/fixture"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.MarkUnitSummaryModelInvocationSent(ctx, attempt.AgentName, invocation.InvocationID, "sent-"+key); err != nil {
+				t.Fatal(err)
+			}
+			if index == 101 {
+				if _, err := store.MarkUnitSummaryModelInvocationSucceededWithResult(ctx, attempt.AgentName, invocation.InvocationID,
+					modelInvocationResultDigest(struct{}{}), "{}", "known-result"); err != nil {
+					t.Fatal(err)
+				}
+				knownID = attempt.AttemptID
+			} else if index%2 == 0 {
+				if _, err := store.MarkUnitSummaryModelInvocationOutcomeUnknown(ctx, attempt.AgentName, invocation.InvocationID, "provider_outcome_unknown"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			next := attempt
+			next.State, next.Stage, next.InvocationRef = "reconciling", "generate", invocation.InvocationID
+			attempt, err = store.CheckpointUnitSummaryAttempt(ctx, attempt, next)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if index == 0 {
+				parked = attempt
+				parkedInvocation, err = store.GetUnitSummaryModelInvocation(ctx, attempt.AgentName, invocation.InvocationID)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		// 冻结扫描排序的时间，使停放项稳定早于后续正常任务。
+		if _, err := db.Exec("UPDATE k12_unit_summary_attempts SET created_at=?,updated_at=? WHERE attempt_id=?", 1000+index, 1000+index, attempt.AttemptID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	parked, err = store.GetUnitSummaryAttempt(ctx, parked.OwnerID, parked.AgentName, parked.AttemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generator := &unitUnknownWaitGenerator{}
+	coordinator := NewUnitSummaryCoordinator(Deps{Records: store}, generator, nil)
+	for scan := 0; scan < 2; scan++ {
+		items, err := store.ListRecoverableUnitSummaryAttempts(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := make(map[string]bool, len(items))
+		for _, item := range items {
+			found[item.AttemptID] = true
+		}
+		if len(items) != 2 || !found[queuedID] || !found[knownID] {
+			t.Fatalf("parked calls blocked recoverable work: count=%d queued=%v known=%v", len(items), found[queuedID], found[knownID])
+		}
+		if err := coordinator.process(ctx, parked); err != nil {
+			t.Fatal(err)
+		}
+	}
+	after, err := store.GetUnitSummaryAttempt(ctx, parked.OwnerID, parked.AgentName, parked.AttemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterInvocation, err := store.GetUnitSummaryModelInvocation(ctx, parked.AgentName, parkedInvocation.InvocationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(parked, after) || !reflect.DeepEqual(parkedInvocation, afterInvocation) || generator.calls.Load() != 0 {
+		t.Fatal("parked attempt or original invocation changed during recovery")
+	}
+}
 
 func (g *unitUnknownWaitGenerator) ResolveUnitSummary(context.Context, UnitSummaryResolveInput) (UnitSummaryResolution, error) {
 	g.calls.Add(1)
