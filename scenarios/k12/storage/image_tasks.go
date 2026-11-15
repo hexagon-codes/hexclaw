@@ -611,6 +611,17 @@ func (s *Store) GetImageTaskDispatchByIdempotency(
 	return getImageTaskDispatch(ctx, s.db, agentName, "", idempotencyKey)
 }
 
+// 已删除作品不再是恢复目标；仅排除同一孩子真实存在的墓碑，缺行或损坏仍由原读取报错。
+const imageTaskDeletedCreativeRecoveryFilter = ` AND NOT EXISTS (
+    SELECT 1 FROM k12_creative_work_intakes AS intake
+    JOIN k12_creative_works AS work
+      ON work.agent_name=intake.agent_name AND work.record_id=intake.promoted_work_id
+    WHERE k12_image_task_dispatches.target_object_type='creative_work_intake'
+      AND intake.agent_name=k12_image_task_dispatches.agent_name
+      AND intake.intake_id=k12_image_task_dispatches.target_object_id
+      AND work.deleted_at IS NOT NULL
+)`
+
 // ListImageTaskDispatchesForRecovery returns only non-terminal automatic
 // checkpoints. Awaiting parent confirmation and explicit retry failures are
 // intentionally excluded: recovery must never turn a restart into consent or
@@ -622,8 +633,8 @@ func (s *Store) ListImageTaskDispatchesForRecovery(
 	rows, err := s.db.QueryContext(
 		ctx,
 		imageTaskDispatchSelect+
-			` WHERE agent_name=? AND status IN ('routing','routed')
-			  ORDER BY created_at,dispatch_id`,
+			` WHERE agent_name=? AND status IN ('routing','routed')`+
+			imageTaskDeletedCreativeRecoveryFilter+` ORDER BY created_at,dispatch_id`,
 		strings.TrimSpace(agentName),
 	)
 	if err != nil {
@@ -662,8 +673,8 @@ func (s *Store) ListImageTaskDispatchesForSession(
 	rows, err := s.db.QueryContext(
 		ctx,
 		imageTaskDispatchSelect+
-			` WHERE agent_name=? AND source_session_id=?
-			  ORDER BY created_at,dispatch_id`,
+			` WHERE agent_name=? AND source_session_id=?`+
+			imageTaskDeletedCreativeRecoveryFilter+` ORDER BY created_at,dispatch_id`,
 		agentName,
 		sourceSessionID,
 	)
@@ -709,8 +720,7 @@ func (s *Store) ListImageTaskDispatchesForOwnerSession(
 			        WHERE owner_binding.dispatch_id=k12_image_task_dispatches.dispatch_id
 			          AND owner_binding.agent_name=k12_image_task_dispatches.agent_name
 			          AND owner_binding.owner_scope=?
-			    )
-			  ORDER BY created_at,dispatch_id`,
+			    )`+imageTaskDeletedCreativeRecoveryFilter+` ORDER BY created_at,dispatch_id`,
 		agentName,
 		sourceSessionID,
 		ownerScope,
@@ -738,6 +748,19 @@ func (s *Store) GetImageTaskInvocation(
 	agentName, invocationID string,
 ) (k12.ImageTaskInvocation, error) {
 	return getImageTaskInvocation(ctx, s.db, agentName, invocationID)
+}
+
+// GetLatestImageTaskClassificationInvocation 读取当前分类尝试，保留原始分类锚点和历史回执。
+func (s *Store) GetLatestImageTaskClassificationInvocation(
+	ctx context.Context,
+	agentName, dispatchID string,
+) (k12.ImageTaskInvocation, error) {
+	agentName, dispatchID = strings.TrimSpace(agentName), strings.TrimSpace(dispatchID)
+	if agentName == "" || dispatchID == "" {
+		return k12.ImageTaskInvocation{}, ErrImageTaskNotFound
+	}
+	return getLatestImageTaskInvocation(ctx, s.db, agentName,
+		k12.ImageTaskOperationClassification, dispatchID, "")
 }
 
 func (s *Store) GetLatestWritingOCRInvocation(
@@ -2080,6 +2103,43 @@ func (s *Store) FailWorkFeedbackInvocation(
 	return nil
 }
 
+// FailWorkFeedbackInvocationWithResult 接收已返回但不符合点评合同的完整响应。
+// 已发送事实和原响应均保留；只有已知失败才允许显式重试新 attempt，未知结果不在此转换。
+// 历史成功回执仅在同代次未发布反馈且原载荷完全一致时允许补记结构失败。
+func (s *Store) FailWorkFeedbackInvocationWithResult(
+	ctx context.Context,
+	agentName, invocationID, failureKind, resultDigest, resultJSON string,
+) error {
+	failureKind = strings.TrimSpace(failureKind)
+	if failureKind == "" || resultDigest == "" || !json.Valid([]byte(resultJSON)) {
+		return ErrImageTaskInvalidState
+	}
+	now := nowUnix()
+	res, err := s.db.ExecContext(ctx, `UPDATE k12_image_task_invocations
+		SET status='failed',result_digest=?,result_json=?,error_kind=?,
+		    retry_safe=1,finished_at=CASE WHEN status='succeeded' THEN finished_at ELSE ? END,updated_at=?
+		WHERE agent_name=? AND invocation_id=? AND operation='work_feedback'
+		  AND (status IN ('prepared','sent') OR (
+		    status='succeeded' AND ?='work_feedback_structure_invalid'
+		    AND result_digest=? AND result_json=?
+		    AND EXISTS (SELECT 1 FROM k12_work_feedback_generations g
+		      WHERE g.agent_name=k12_image_task_invocations.agent_name
+		        AND g.work_id=k12_image_task_invocations.work_record_id
+		        AND k12_image_task_invocations.operation_key=
+		            'work:'||g.work_id||':version:'||g.generation_id||':feedback'
+		        AND g.status IN ('queued','running','failed') AND g.feedback_json='')
+		  ))`,
+		resultDigest, resultJSON, failureKind, now, now, agentName, invocationID,
+		failureKind, resultDigest, resultJSON)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return ErrImageTaskInvalidState
+	}
+	return nil
+}
+
 // FailImageTaskInvocation atomically parks the invocation and its owning
 // aggregate. outcomeUnknown is never retry-safe because a blind resend could
 // duplicate an already accepted provider operation.
@@ -2141,6 +2201,26 @@ func (s *Store) FailImageTaskInvocation(
 		return err
 	}
 	if n, _ := res.RowsAffected(); n != 1 {
+		// 已发请求的取消仍需保留未知回执，但不能覆盖已经提交的取消终态。
+		if outcomeUnknown && invocation.Status == k12.ImageTaskInvocationSent {
+			var dispatch k12.ImageTaskDispatch
+			switch invocation.Operation {
+			case k12.ImageTaskOperationClassification:
+				dispatch, err = getImageTaskDispatch(ctx, tx, agentName, invocation.DispatchID, "")
+			case k12.ImageTaskOperationWritingOCR:
+				var intake k12.CreativeWorkIntake
+				intake, err = getCreativeWorkIntake(ctx, tx, agentName, invocation.IntakeID)
+				if err == nil && intake.Status == k12.CreativeWorkIntakeCancelled {
+					dispatch, err = getImageTaskDispatch(ctx, tx, agentName, intake.DispatchID, "")
+				}
+			}
+			if err != nil {
+				return err
+			}
+			if dispatch.Status == k12.ImageTaskStatusCancelled {
+				return tx.Commit()
+			}
+		}
 		return ErrImageTaskInvalidState
 	}
 	if invocation.Operation == k12.ImageTaskOperationWritingOCR && outcomeUnknown {
