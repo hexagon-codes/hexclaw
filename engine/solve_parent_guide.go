@@ -126,6 +126,8 @@ func decodeSolveGeneration(result SubAgentResult) (SubAgentResult, error) {
 		Schema   string          `json:"schema"`
 		Solution string          `json:"solution"`
 		Guide    json.RawMessage `json:"parent_guide"`
+		// 兼容模型附带的字符串观察；null等同未提供，不能据此构造可信执行回执。
+		ExecutionObservation *string `json:"execution_evidence,omitempty"`
 	}
 	decoder := json.NewDecoder(strings.NewReader(text))
 	decoder.DisallowUnknownFields()
@@ -138,6 +140,11 @@ func decodeSolveGeneration(result SubAgentResult) (SubAgentResult, error) {
 	result.Output = envelope.Solution
 	result.Generation = &SolveGenerationAttachment{OutputVersion: envelope.Schema, RawResponse: raw, ParentGuideJSON: string(envelope.Guide)}
 	return result, nil
+}
+
+// ReparseSolveGenerationResult 只解释已返回的生成响应；可信执行证据仍完整沿用宿主回执。
+func ReparseSolveGenerationResult(result SubAgentResult) (SubAgentResult, error) {
+	return decodeSolveGeneration(result)
 }
 
 func guideCandidates(sols []solverSolution) []guideAuditCandidate {
