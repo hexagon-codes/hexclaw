@@ -927,6 +927,21 @@ func (s *Store) UpdateSession(ctx context.Context, session *storage.Session) err
 	return err
 }
 
+func (s *Store) CompareAndSetSessionTitle(ctx context.Context, sessionID, owner, expectedTitle, title string) (bool, error) {
+	result, err := s.db.ExecContext(ctx, `UPDATE sessions SET title=?,updated_at=?
+		WHERE id=? AND user_id=? AND status>=0 AND title=?`, title, time.Now(), sessionID, owner, expectedTitle)
+	if err != nil {
+		return false, err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil || rows == 0 {
+		return false, err
+	}
+	s.invalidateSearchCache()
+	s.invalidateForkCache()
+	return true, nil
+}
+
 // SetSessionPersona 仅更新人设字段，避免标题和其他元数据的并发写入相互覆盖。
 func (s *Store) SetSessionPersona(ctx context.Context, id, skillName string) error {
 	query := `UPDATE sessions SET meta = json_set(CASE WHEN meta IS NULL OR meta = '' THEN '{}' ELSE meta END, '$.persona_skill', ?), updated_at = ? WHERE id = ? AND (meta IS NULL OR meta = '' OR json_type(meta) = 'object')`

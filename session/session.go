@@ -659,8 +659,9 @@ func (m *Manager) autoUpdateDefaultTitle(ctx context.Context, sessionID, content
 	if newTitle == "" {
 		return
 	}
-	sess.Title = newTitle
-	_ = m.store.UpdateSession(ctx, sess)
+	if writer, ok := m.store.(storage.SessionTitleWriter); ok {
+		_, _ = writer.CompareAndSetSessionTitle(ctx, sess.ID, sess.UserID, sess.Title, newTitle)
+	}
 }
 
 // generateTitle 从消息内容生成会话标题

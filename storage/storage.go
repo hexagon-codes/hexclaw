@@ -20,6 +20,11 @@ import (
 // ErrNotFound 表示请求的资源不存在
 var ErrNotFound = errors.New("not found")
 
+// SessionTitleWriter 原子提交自动标题，保留期间已修改的标题。
+type SessionTitleWriter interface {
+	CompareAndSetSessionTitle(ctx context.Context, sessionID, owner, expectedTitle, title string) (bool, error)
+}
+
 // ActiveSessionMessageWriter 为显式要求会话仍可写的运行收口提供可选原子能力。
 // 检查沿 GetSession 的可见语义（status >= 0），与消息及其完成器在同一事务提交；
 // 已删除或不存在的会话返回 ErrNotFound，且不提交任何消息或完成器副作用。

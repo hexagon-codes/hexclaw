@@ -667,6 +667,47 @@ func TestSuggestSessionTitle_DoesNotOverrideManualRename(t *testing.T) {
 	}
 }
 
+type sessionTitleDuringSuggestionEngine struct {
+	*mockEngine
+	duringSuggestion func()
+}
+
+func (e sessionTitleDuringSuggestionEngine) SuggestSessionTitle(context.Context, []*storage.MessageRecord) (string, error) {
+	e.duringSuggestion()
+	return "Automatic title", nil
+}
+
+func TestSuggestSessionTitle_RereadsRenameDuringGeneration(t *testing.T) {
+	ctx := t.Context()
+	store := newTestStoreForAPI(t)
+	const id = "renamed-during-generation"
+	if err := store.CreateSession(ctx, &storage.Session{ID: id, UserID: "test", Platform: "web", Title: "First title"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveMessage(ctx, &storage.MessageRecord{ID: "title-source-message", SessionID: id, Role: "user", Content: "Question"}); err != nil {
+		t.Fatal(err)
+	}
+	engine := sessionTitleDuringSuggestionEngine{mockEngine: &mockEngine{}, duringSuggestion: func() {
+		if err := store.UpdateSession(ctx, &storage.Session{ID: id, Title: "Manual title"}); err != nil {
+			t.Fatal(err)
+		}
+	}}
+	server := NewServer(config.DefaultConfig(), engine, nil, store)
+	defer server.attachmentStaging.Close()
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+id+"/suggest-title?user_id=test", nil)
+	request.SetPathValue("id", id)
+	response := httptest.NewRecorder()
+	server.handleSuggestSessionTitle(response, request)
+	var result struct {
+		Title   string
+		Updated bool
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil || response.Code != http.StatusOK ||
+		result.Updated || result.Title != "Manual title" {
+		t.Fatalf("rename during title suggestion was not preserved: %d %s", response.Code, response.Body.String())
+	}
+}
+
 // 测试 ChatResponse 中 Usage 的序列化
 func TestChatResponse_UsageSerialization(t *testing.T) {
 	cfg := config.DefaultConfig()

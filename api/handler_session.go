@@ -506,8 +506,9 @@ func (s *Server) handleSuggestSessionTitle(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	suggester, ok := s.engine.(sessionTitleSuggester)
-	if !ok || len(messages) == 0 {
+	suggester, canSuggest := s.engine.(sessionTitleSuggester)
+	writer, canWrite := s.store.(storage.SessionTitleWriter)
+	if !canSuggest || !canWrite || len(messages) == 0 {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"id":         sess.ID,
 			"title":      sess.Title,
@@ -517,41 +518,27 @@ func (s *Server) handleSuggestSessionTitle(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	title, err := suggester.SuggestSessionTitle(r.Context(), messages)
+	title, suggestErr := suggester.SuggestSessionTitle(r.Context(), messages)
 	title = strings.TrimSpace(title)
-	if err != nil || title == "" || title == sess.Title {
-		writeJSON(w, http.StatusOK, map[string]any{
-			"id":         sess.ID,
-			"title":      sess.Title,
-			"updated":    false,
-			"updated_at": sess.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"),
-		})
-		return
+	applied := false
+	if suggestErr == nil && title != "" && title != sess.Title {
+		applied, err = writer.CompareAndSetSessionTitle(r.Context(), id, sess.UserID, sess.Title, title)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "更新会话失败: " + err.Error()})
+			return
+		}
 	}
 
-	sess.Title = title
-	if err := s.store.UpdateSession(r.Context(), sess); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{
-			"error": "更新会话失败: " + err.Error(),
-		})
-		return
-	}
-
-	updated, err := s.store.GetSession(r.Context(), id)
+	updated, err := s.getOwnedSession(r, id, userID)
 	if err != nil {
-		writeJSON(w, http.StatusOK, map[string]any{
-			"id":         sess.ID,
-			"title":      sess.Title,
-			"updated":    true,
-			"updated_at": sess.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"),
-		})
+		writeSessionLookupError(w, err)
 		return
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":         updated.ID,
 		"title":      updated.Title,
-		"updated":    true,
+		"updated":    applied && updated.Title == title,
 		"updated_at": updated.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"),
 	})
 }
