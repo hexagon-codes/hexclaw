@@ -26,6 +26,20 @@ type TeachingReportBundleSnapshot struct {
 	Resources   map[string][]byte      `json:"resources"`
 }
 
+// 显式检查冻结模板声明的能力；历史模板和历史任务继续使用原展示语义。
+func (s TeachingReportBundleSnapshot) supportsWorksheetIntent() bool {
+	var schema struct {
+		Properties map[string]struct {
+			Properties map[string]json.RawMessage `json:"properties"`
+		} `json:"properties"`
+	}
+	if json.Unmarshal(s.Resources["assets/report.schema.json"], &schema) != nil {
+		return false
+	}
+	_, ok := schema.Properties["document"].Properties["task_intent"]
+	return ok
+}
+
 // FreezeTeachingReportBundle 核对同一清单的版本与字节，返回独立持有的任务资源。
 func FreezeTeachingReportBundle(ctx context.Context, reader TeachingReportResourceReader) (TeachingReportBundleSnapshot, error) {
 	if reader == nil {

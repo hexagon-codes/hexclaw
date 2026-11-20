@@ -2,7 +2,7 @@
 name: homework-pdf
 display_name: 作业讲解报告
 description: 将已有的小学作业结果组织为快速解答与深度讲解，引用宿主的确定性 PDF 渲染能力。
-version: "1.1.7"
+version: "1.1.8"
 schema_version: 1
 author: hexclaw
 license: Apache-2.0

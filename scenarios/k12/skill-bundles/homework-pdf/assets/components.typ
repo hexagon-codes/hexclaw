@@ -86,12 +86,12 @@
   } else { candidate }
 })
 
-#let quick-question(q, formulas, first: false, source-kind: "grading") = {
+#let quick-question(q, formulas, first: false, source-kind: "grading", blank-worksheet: false) = {
   let content = [
   #block(sticky: true)[
     #grid(columns: (1fr, auto), align: horizon, column-gutter: 8pt,
       [#if q.number != "" { label(q.number, size: 12pt, fill: blue); h(6pt) }#label(q.title, size: 11.5pt)],
-      [#text(font: sans, size: 8.5pt, fill: muted, if source-kind == "text_solve" { "解题状态：" } else { "批改状态：" })#badge(q.status)],
+      [#text(font: sans, size: 8.5pt, fill: muted, if blank-worksheet or source-kind == "text_solve" { "解题状态：" } else { "批改状态：" })#badge(q.status)],
     )
     #v(5pt)
   ]
@@ -118,14 +118,14 @@
   ]
   #v(5pt)
   #set par(leading: 0.5em, spacing: 0pt)
-  #text(size: 9pt, fill: muted)[
+  #if not blank-worksheet { text(size: 9pt, fill: muted)[
     #text(font: sans)[原始作答：]
     #for (index, part) in q.original_answer.enumerate() {
       if index > 0 { [；] }
       if part.at("label", default: "") != "" { [#part.label：] }
       original-inlines(part.content, formulas)
     }
-  ]
+  ] }
   ]
   layout(size => {
     // 短题连同答案、算式与原答整体移页；超过整页正文的长题继续自然分页。
@@ -247,7 +247,8 @@
   show math.equation.where(block: false): set text(top-edge: "bounds", bottom-edge: "bounds")
   show math.equation.where(block: true): set block(above: 4pt, below: 4pt)
   let source-kind = doc.source_kind
-  let date-label = if source-kind == "text_solve" { "生成日期：" } else { "批改日期：" }
+  let blank-worksheet = doc.at("task_intent", default: "") == "blank_worksheet"
+  let date-label = if blank-worksheet or source-kind == "text_solve" { "生成日期：" } else { "批改日期：" }
   let metadata = (doc.grade_term, doc.subject, if doc.date == "" { "" } else { date-label + doc.date }).filter(value => value != "").join(" · ")
   let heading-content = [
     #report-heading(doc.title, metadata)
@@ -274,7 +275,7 @@
     for node in data.source_text { block-content(node, formulas) }
   }
   section("一、快速解答")
-  for (index, q) in data.questions.enumerate() { quick-question(q, formulas, first: index == 0, source-kind: source-kind) }
+  for (index, q) in data.questions.enumerate() { quick-question(q, formulas, first: index == 0, source-kind: source-kind, blank-worksheet: blank-worksheet) }
   if data.deep.steps.len() > 0 {
     // 两层自然续排；不把少量内容强推到新页或强制固定页数。
     section("二、深度讲解")

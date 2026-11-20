@@ -21,6 +21,9 @@ func (r TeachingReport) Validate() error {
 	if strings.TrimSpace(r.Metadata.Title) == "" {
 		return teachingReportInvalid("report title is missing")
 	}
+	if r.Metadata.TaskIntent != "" && (r.Metadata.TaskIntent != ImageTaskIntentBlankWorksheet || r.Source.Kind != TeachingReportSourceGrading) {
+		return teachingReportInvalid("report intent does not match its source")
+	}
 	if r.Metadata.ReportDate != "" {
 		if _, err := time.Parse("2006-01-02", r.Metadata.ReportDate); err != nil {
 			return teachingReportInvalid("report date is invalid")

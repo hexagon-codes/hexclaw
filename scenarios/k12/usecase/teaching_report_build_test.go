@@ -171,6 +171,37 @@ func TestBuildGradingTeachingReportRejectsMismatchedSources(t *testing.T) {
 	}
 }
 
+func TestWorksheetReportRetainsOriginAcrossRenderContracts(t *testing.T) {
+	report, err := BuildGradingTeachingReport(teachingReportBuildFixture(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Items[2].OriginalAnswer.State != k12.TeachingReportAnswerBlank {
+		t.Fatal("expected the fixture's unanswered photo question")
+	}
+	report.Items = report.Items[2:]
+	report.ProblemSources = report.ProblemSources[2:]
+	report.DeepSections = nil
+	report.Metadata.Title = "解题报告"
+	for _, intent := range []k12.ImageTaskIntent{"", k12.ImageTaskIntentBlankWorksheet} {
+		report.Metadata.TaskIntent = intent
+		projection, err := ProjectTeachingReportPDFV2(report, TeachingReportBranding{}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var payload struct {
+			Document map[string]string `json:"document"`
+		}
+		if err := json.Unmarshal(projection.Document, &payload); err != nil {
+			t.Fatal(err)
+		}
+		observed, hasIntent := payload.Document["task_intent"]
+		if payload.Document["source_kind"] != string(k12.TeachingReportSourceGrading) || hasIntent != (intent != "") || observed != string(intent) {
+			t.Fatalf("frozen intent %q changed origin or purpose: %v", intent, payload.Document)
+		}
+	}
+}
+
 func TestBuildGradingTeachingReportSnapshotDoesNotAliasInput(t *testing.T) {
 	input := teachingReportBuildFixture(t)
 	report, err := BuildGradingTeachingReport(input)

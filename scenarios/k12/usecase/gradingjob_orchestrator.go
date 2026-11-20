@@ -343,6 +343,9 @@ func (o *GradingOrchestrator) StartPhotoGradingJob(ctx context.Context, in Start
 				if err != nil {
 					return GradingJobView{}, false, err
 				}
+				if snapshot != nil && in.Photo.TaskIntent == PhotoTaskBlankWorksheet && snapshot.Bundle.supportsWorksheetIntent() {
+					snapshot.Metadata.TaskIntent = k12.ImageTaskIntentBlankWorksheet
+				}
 				in.Photo.TeachingReport = snapshot
 			}
 			if freezer, ok := o.deps.Solver.(ReportSolveTeachingContextFreezer); ok && in.Photo.TeachingReport != nil {

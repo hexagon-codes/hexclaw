@@ -138,7 +138,7 @@ func projectTeachingReportPDF(report k12.TeachingReport, branding TeachingReport
 			}
 			original = append(original, map[string]any{"content": b.value(text, "")})
 		}
-		label, tone := teachingReportItemStatus(report.Source.Kind, item)
+		label, tone := teachingReportItemStatus(report, item)
 		columns := 1
 		if len(calculations) == 2 {
 			columns = 2
@@ -228,6 +228,9 @@ func projectTeachingReportPDF(report k12.TeachingReport, branding TeachingReport
 		document["schema_version"] = "homework-report-render-v2"
 		document["source_text"] = sourceText
 		document["document"].(map[string]string)["source_kind"] = string(report.Source.Kind)
+		if report.Metadata.TaskIntent != "" {
+			document["document"].(map[string]string)["task_intent"] = string(report.Metadata.TaskIntent)
+		}
 	}
 	raw, err := json.Marshal(document)
 	if err != nil {
@@ -310,8 +313,11 @@ func (b *reportProjectionBuilder) value(text, latex string) []any {
 	return parts
 }
 
-func teachingReportItemStatus(kind k12.TeachingReportSourceKind, item k12.TeachingReportItem) (string, string) {
-	if kind == k12.TeachingReportSourceTextSolve && item.Assessment.Status == "" {
+func teachingReportItemStatus(report k12.TeachingReport, item k12.TeachingReportItem) (string, string) {
+	if report.Metadata.TaskIntent == k12.ImageTaskIntentBlankWorksheet && item.Assessment.Status == k12.GradingAssessmentAnswerUnclear {
+		return "无法识别", "amber"
+	}
+	if report.Source.Kind == k12.TeachingReportSourceTextSolve && item.Assessment.Status == "" {
 		if item.AnswerAnalysis.State == k12.TeachingReportReferenceUnavailable {
 			return "待核对", "amber"
 		}

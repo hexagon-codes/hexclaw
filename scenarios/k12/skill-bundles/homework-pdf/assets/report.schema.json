@@ -47,6 +47,9 @@
         "example_label": {
           "type": "string"
         },
+        "task_intent": {
+          "const": "blank_worksheet"
+        },
         "source_kind": {
           "enum": [
             "grading",

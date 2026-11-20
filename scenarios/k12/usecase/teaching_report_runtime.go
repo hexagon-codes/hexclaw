@@ -173,9 +173,9 @@ func TeachingReportMarkdown(report k12.TeachingReport) (string, error) {
 		return text
 	}
 	for _, item := range report.Items {
-		status, _ := teachingReportItemStatus(report.Source.Kind, item)
+		status, _ := teachingReportItemStatus(report, item)
 		label := "批改状态"
-		if report.Source.Kind == k12.TeachingReportSourceTextSolve {
+		if report.Source.Kind == k12.TeachingReportSourceTextSolve || report.Metadata.TaskIntent == k12.ImageTaskIntentBlankWorksheet {
 			label = "解题状态"
 		}
 		fmt.Fprintf(&out, "### %s %s · %s：%s\n\n", item.DisplayLabel, item.ShortTitle, label, status)
@@ -198,6 +198,9 @@ func TeachingReportMarkdown(report k12.TeachingReport) (string, error) {
 			} else {
 				out.WriteString(step.Text + "\n\n")
 			}
+		}
+		if report.Metadata.TaskIntent == k12.ImageTaskIntentBlankWorksheet {
+			continue
 		}
 		answer := item.OriginalAnswer.CanonicalText
 		if answer == "" {

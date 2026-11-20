@@ -27,12 +27,13 @@ type TeachingReportSource struct {
 
 // TeachingReportMetadata 来自本次任务快照，领域对象不读取当前配置或时钟。
 type TeachingReportMetadata struct {
-	Title            string `json:"title"`
-	AgentDisplayName string `json:"agent_display_name"`
-	GradeTerm        string `json:"grade_term"`
-	Subject          string `json:"subject"`
-	ReportDate       string `json:"report_date"`
-	Timezone         string `json:"timezone"`
+	TaskIntent       ImageTaskIntent `json:"task_intent,omitempty"`
+	Title            string          `json:"title"`
+	AgentDisplayName string          `json:"agent_display_name"`
+	GradeTerm        string          `json:"grade_term"`
+	Subject          string          `json:"subject"`
+	ReportDate       string          `json:"report_date"`
+	Timezone         string          `json:"timezone"`
 }
 
 type TeachingReportAnswerState string

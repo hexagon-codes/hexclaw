@@ -14,7 +14,7 @@
 
 ```text
 schema_version: homework-report-render-v2
-document: title, agent_name, grade_term, subject, date, source_kind, example_label?
+document: title, agent_name, grade_term, subject, date, source_kind, task_intent?, example_label?
 branding: logo_path?, name, tagline, website_url, website_label,
           wechat_id, github_url, github_label
 source_images: [{path, alt}]
@@ -50,7 +50,7 @@ deep: {method?: {name, application}, steps: [{number, title, blocks: Block[]}]}
 
 ## 来源与兼容
 
-- `document.source_kind` 是 `grading/text_solve`，由宿主真实来源确定，不由教学模型选择。图片保持定版整图及批改标签；纯文字在标题后用普通正文保留完整原题，采用解题状态与生成日期。
+- `document.source_kind` 由宿主按实际来源填 `grading` 或 `text_solve`。新空白卷另有 `document.task_intent=blank_worksheet`，保留整图，使用解题状态和生成日期，省略学生作答栏。已作答作业继续显示批改状态及作答。纯文字在标题后保留完整原题，使用解题状态与生成日期。没有用途字段的旧版报告按冻结合同渲染。
 - 未提供作答时由宿主明确投影“未提供”，不能变成未作答、判错或空字段。纯求解不生成批改事实。
 - 内容包1.1.3使用profile API 2与v2输入；宿主同时支持v1/v2，已接纳任务仍读自己的冻结资源。v0.0.11中原1.0.0包、1.1.0快照及旧PDF不重写。
 
