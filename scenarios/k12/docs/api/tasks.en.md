@@ -216,6 +216,10 @@ Correct source reading after completion。
 
 Independently rereads one original problem only after completion and when artifact and per-problem input identities match; it never invents a new student answer. The body key freezes command identity: new commands return 201 and replay returns 200. A 201 may still contain sent/outcome_unknown/failed; a new final artifact requires status=completed and artifact. Explicit recovery of an unknown correction requires recovery_of, its recovery_response_digest and accept_duplicate_execution=true with the same frozen input; only one recovery child is allowed.
 
+A completed source correction can be continued with a new idempotency_key, the current artifact and input identities, recovery_of and the exact recovery_response_digest only while its own revision remains current, blank, unanswered and without a reference solution. This branch does not require accept_duplicate_execution=true: it adopts the known source response without another source-reading request. The new input must obtain a complete reference answer and parent guide satisfying the existing solve and independent-verification contract before a new final artifact is published. The old command, response and report remain unchanged, and the old key still returns its original result. A changed source, problem text, student answer or current revision is rejected.
+
+When source review succeeded and reference solving received a definitive HTTP 503, both the initial failure and a replay can return `502` with `recovery.recovery_of` and `recovery.recovery_response_digest`. Use those values, the same artifact and problem-input identities, and a new `idempotency_key` to request one explicit continuation. Leave `accept_duplicate_execution` unset or `false`. The continuation reuses the successful source review and matching solved steps. An unresolved outcome blocks this continuation. The new final artifact includes an annotated image only if trustworthy marks remain.
+
 | Location | Parameter | Required | Type / contract |
 | --- | --- | --- | --- |
 | path | `id` | Yes | string；Current resource identity |

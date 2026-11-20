@@ -35,6 +35,8 @@ type GradingPhysicalCallSpec struct {
 	KnownExecutionFailure func(string) error `json:"-"`
 	// ReplayResultFailure 只拒绝业务未通过的旧成功回执；新返回值仍完整保存物理成功事实。
 	ReplayResultFailure func(string) error `json:"-"`
+	// ReparseProcessedResult 只重解释已返回但本地解析失败的候选，不发送请求或执行工具。
+	ReparseProcessedResult func(string) (string, error) `json:"-"`
 }
 
 type GradingPhysicalCallResult struct {
@@ -1168,6 +1170,13 @@ func (e *durableGradingPhysicalCallExecutor) ExecuteGradingPhysicalCall(
 		spec.RequestDigest == "" {
 		return zero, fmt.Errorf("%w: invalid physical grading call identity", ErrInvalidInput)
 	}
+	reference, sourceReference := ctx.Value(finalSourceReferenceContextKey{}).(finalSourceReferenceScope)
+	if sourceReference {
+		spec.RequestDigest = modelInvocationDigest([]byte("k12-final-source-reference-v1"), []byte(reference.digest), []byte(spec.RequestDigest))
+		if spec.LegacyRequestDigest != "" {
+			spec.LegacyRequestDigest = modelInvocationDigest([]byte("k12-final-source-reference-v1"), []byte(reference.digest), []byte(spec.LegacyRequestDigest))
+		}
+	}
 	var expectedGrounding *gradingProviderGrounding
 	if grounding, ok := gradingProviderGroundingFromContext(ctx); ok {
 		expectedGrounding = &grounding
@@ -1263,7 +1272,13 @@ func (e *durableGradingPhysicalCallExecutor) ExecuteGradingPhysicalCall(
 		case k12.ModelInvocationPrepared:
 			// Claim below.
 		case k12.ModelInvocationFailed:
-			if matching.OperationAttempt/1000 >= currentGeneration {
+			if spec.Operation == k12.GradingItemOperationSolveGenerate && spec.ReparseProcessedResult != nil && matching.ExecutionKind == k12.GradingExecutionProvider && matching.FailureClass == "local" && matching.FailureCode == "provider_response_processed" {
+				candidate, reusable, err := e.reparseProcessedGradingCandidate(ctx, spec, *matching, expectedGrounding)
+				if err != nil || reusable {
+					return candidate, err
+				}
+			}
+			if matching.OperationAttempt/1000 >= currentGeneration && (!sourceReference || !reference.command.CanRetryReferenceInvocation(matching.InvocationID)) {
 				return GradingPhysicalCallResult{Payload: matching.ResultJSON, InvocationID: matching.InvocationID}, fmt.Errorf("%w: invocation=%s class=%s code=%s",
 					ErrGradingItemInvocationFailed, matching.InvocationID,
 					matching.FailureClass, matching.FailureCode)
@@ -1441,6 +1456,39 @@ func (e *durableGradingPhysicalCallExecutor) ExecuteGradingPhysicalCall(
 	return GradingPhysicalCallResult{
 		Payload: returnedPayload, InvocationID: stored.InvocationID,
 	}, nil
+}
+
+func (e *durableGradingPhysicalCallExecutor) reparseProcessedGradingCandidate(ctx context.Context, spec GradingPhysicalCallSpec, invocation k12.GradingItemInvocation, expectedGrounding *gradingProviderGrounding) (GradingPhysicalCallResult, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return GradingPhysicalCallResult{}, false, err
+	}
+	if err := validateGradingItemInvocationIdentity(invocation, e.job, e.q, spec.RequestDigest, k12.GradingExecutionProvider); err != nil {
+		return GradingPhysicalCallResult{}, false, err
+	}
+	digest := sha256.Sum256([]byte(invocation.ResultJSON))
+	if k12.NormalizeGradingModelSnapshot(invocation.RouteSnapshot) != k12.NormalizeGradingModelSnapshot(e.job.Fields.ModelSnapshot) || invocation.ResultJSON == "" || invocation.ResultDigest != hex.EncodeToString(digest[:]) {
+		return GradingPhysicalCallResult{}, false, ErrModelInvocationRequiresReconciliation
+	}
+	payload, _, _, err := decodeGroundedPhysicalPayload(invocation.ResultJSON, expectedGrounding)
+	if err != nil {
+		return GradingPhysicalCallResult{}, false, err
+	}
+	if spec.KnownExecutionFailure != nil {
+		if executionErr := spec.KnownExecutionFailure(payload); executionErr != nil {
+			return GradingPhysicalCallResult{}, false, nil
+		}
+	}
+	parsed, err := spec.ReparseProcessedResult(payload)
+	if err != nil || !json.Valid([]byte(parsed)) {
+		return GradingPhysicalCallResult{}, false, nil
+	}
+	if spec.ReplayResultFailure != nil {
+		if validationErr := spec.ReplayResultFailure(parsed); validationErr != nil {
+			return GradingPhysicalCallResult{}, false, nil
+		}
+	}
+	// 仅返回可继续独立核验的候选，不改旧失败，也不把其ID记为本次成功来源。
+	return GradingPhysicalCallResult{Payload: parsed, InvocationID: invocation.InvocationID}, true, nil
 }
 
 func stableGradingPhysicalInvocationID(

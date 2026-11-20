@@ -12035,6 +12035,8 @@ paths:
       summary: 纠正已完成任务的原题来源
       description: 仅原任务已completed且artifact_id/digest、逐题input_revision/digest都匹配时，独立复核同一道原题；不重新生成学生作答。body
         idempotency_key冻结本次身份，同键重放200，新命令201；201可能是sent/outcome_unknown/failed，只有status=completed且artifact存在才是新终稿。显式恢复未知纠正须同时提供recovery_of、其recovery_response_digest、accept_duplicate_execution=true，并保持原冻结输入；只允许一个恢复子命令。
+        已completed但当前仍是其同源空白未答且缺参考解修订时，可用新幂等键、当前artifact/输入身份及recovery_of/recovery_response_digest接续，无需accept_duplicate_execution=true；只采用原来源响应，不重发识别，参考解与家长讲解满足原求解及独立核验合同后才追加终稿，旧命令/响应/报告保持。
+        来源复核成功但参考求解明确返回HTTP 503时，首次失败及同键重放的502响应可携带recovery。将其中的recovery_of和recovery_response_digest、同一终稿和输入身份、新幂等键提交给原接口，可显式续跑一次。省略accept_duplicate_execution或为false。已成功步骤可复用。未知结果不提供此凭据。无可信剩余批注时，新终稿不携带批注图。
       tags:
         - k12-tasks
       x-source:
@@ -12100,11 +12102,11 @@ paths:
               schema:
                 $ref: "#/components/schemas/MessageError"
         "502":
-          description: 下游生成或渲染失败；不是内容无法识别
+          description: 下游生成或渲染失败。确定可接续的参考求解失败携带 recovery。
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/MessageError"
+                $ref: "#/components/schemas/K12TasksFinalSourceCorrectionError"
         "503":
           description: 该路由依赖的运行时不可用
           content:
@@ -32599,7 +32601,7 @@ components:
           type: string
         recovery_response_digest:
           type: string
-          description: 显式恢复未知来源纠正时与 recovery_of、accept_duplicate_execution=true 一起提供原已知回复摘要；当前普通纠正响应不返回此上下文字段。
+          description: 与 recovery_of 一起提供原来源响应的精确摘要。已知参考求解 503 可从错误响应 recovery 读取该摘要。未知纠正的其他恢复方式仍遵循各自的明确授权规则。
       required:
         - agent
         - idempotency_key
@@ -32625,6 +32627,25 @@ components:
         - correction_id
         - status
         - replayed
+      type: object
+    K12TasksFinalSourceCorrectionError:
+      additionalProperties: false
+      properties:
+        error:
+          type: string
+        recovery:
+          type: object
+          additionalProperties: false
+          properties:
+            recovery_of:
+              type: string
+            recovery_response_digest:
+              type: string
+          required:
+            - recovery_of
+            - recovery_response_digest
+      required:
+        - error
       type: object
     K12TasksGradeResp:
       additionalProperties: false

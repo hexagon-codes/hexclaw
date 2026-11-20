@@ -509,6 +509,7 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 	finalAnswerSolution := ""
 	finalAnswerOnly := false
 	independentReference := false
+	referenceQuestion := ""
 	if mode == PhotoModeGrade && finalAnswerObservationUnresolved(req, q) {
 		item.Status = PhotoAnswerUnclear
 		if !photoPracticeUnmatched(item) {
@@ -528,7 +529,7 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 		}
 	}
 	if item.Status == PhotoAnswerUnclear && !finalAnswerOnly {
-		eligible, referenceErr := o.independentReferenceAnswerEligible(ctx, job, req, q)
+		question, eligible, referenceErr := o.independentReferenceQuestion(ctx, job, req, q)
 		if referenceErr != nil {
 			return item, referenceErr
 		}
@@ -537,12 +538,16 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 				k12storage.GradingAssessmentEffects{})
 		}
 		mode, independentReference = PhotoModeSolve, true
+		referenceQuestion = question
 		if !photoPracticeUnmatched(item) {
 			item.Warning = unclearHandwritingReferenceWarning
 		}
 	}
 
 	gradeReq := photoItemGradeRequest(req, q)
+	if referenceQuestion != "" {
+		gradeReq.Problem, gradeReq.SourceProblem = referenceQuestion, referenceQuestion
+	}
 	if finalAnswerOnly {
 		receipt := *q.FinalAnswerReceipt
 		gradeReq.FinalAnswerReceipt = &receipt
@@ -591,96 +596,12 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 	}
 
 	if mode == PhotoModeSolve {
-		// 求解及家长讲解只使用题目，识别到的作答保留在原题事实中。
-		gradeReq.StudentAnswer = ""
-		solved, solveInvocationID, err := executeDurableSolveOperation(
-			ctx, o, deps, job, q, gradeReq,
-		)
-		item.assetPublication = solved.assetPublication
-		item.AnswerSource = solved.AnswerSource
-		item.Solve = solved
-		if err != nil {
-			return item, err
+		staged, err := o.stageDurablePhotoReference(ctx, deps, job, q, gradeReq, item, independentReference)
+		if err != nil || staged.skipped {
+			return staged.item, err
 		}
-		skipped, err := currentProblemSkipMatchesInput(ctx, deps, job, q)
-		if err != nil {
-			return item, err
-		}
-		if skipped {
-			return item, nil
-		}
-		durableCtx := context.WithoutCancel(ctx)
-		if solved.OutOfScope {
-			item.Status = PhotoOutOfScope
-			return commitGradingAssessmentItem(durableCtx, deps, job, q, item,
-				solveInvocationID, "", "", k12storage.GradingAssessmentEffects{})
-		}
-		if historical, _ := ctx.Value(historicalAssetCorrectionContextKey{}).(bool); historical && !photoEvidenceTrusted(solved.Evidence) {
-			return item, fmt.Errorf("historical answer feedback requires verified solve evidence")
-		}
-		if solved.hasDeterministicProblemIssue() {
-			item.Status = PhotoUntrusted
-			item.Warning = "The question contains contradictory conditions; no answer or correctness judgment was produced."
-			return commitGradingAssessmentItem(durableCtx, deps, job, q, item,
-				solveInvocationID, "", "", k12storage.GradingAssessmentEffects{})
-		}
-		guideRequest := deps.parentTeachingGuideRequest(ctx, gradeReq, solved, GradeOutcome{})
-		guideExecutionKind := k12.GradingExecutionProvider
-		var deterministicGuide *ParentTeachingGuide
-		if guide, ok := degradedReportParentGuide(solved); ok {
-			guideExecutionKind = k12.GradingExecutionLocalDeterministic
-			deterministicGuide = &guide
-		} else if solveTeachingVersionSupported(gradeReq.SolveOutputVersion) && solved.Generation != nil {
-			guideExecutionKind = k12.GradingExecutionLocalDeterministic
-		} else if guide, ok := deterministicParentTeachingGuideForEvidence(guideRequest, solved.Evidence); ok {
-			guideExecutionKind = k12.GradingExecutionLocalDeterministic
-			deterministicGuide = &guide
-		}
-		originalGuideRequest := struct {
-			ExecutionKind k12.GradingExecutionKind   `json:"execution_kind"`
-			InputDigest   string                     `json:"input_digest"`
-			Request       ParentTeachingGuideRequest `json:"request"`
-			Generation    *SolveGeneration           `json:"generation,omitempty"`
-		}{guideExecutionKind, q.InputDigest, guideRequest, parentGuideGenerationForRequest(gradeReq, solved)}
-		rawGuide, parentGuideInvocationID, repaired, err := executeDurableParentTeachingGuideRepair(
-			ctx, o, deps, job, q, gradeReq, solved, originalGuideRequest,
-		)
-		if err != nil {
-			return item, err
-		}
-		if !repaired {
-			rawGuide, parentGuideInvocationID, err = executeGradingItemOperationWithKind(ctx, o, job, q,
-				k12.GradingItemOperationParentGuide, guideExecutionKind, originalGuideRequest,
-				func(callCtx context.Context) (ParentTeachingGuide, error) {
-					if deterministicGuide != nil {
-						return *deterministicGuide, nil
-					}
-					if solveTeachingVersionSupported(gradeReq.SolveOutputVersion) && solved.Generation != nil {
-						return auditedSolveParentTeachingGuide(solved)
-					}
-					return deps.generateParentTeachingGuide(callCtx, guideRequest)
-				})
-		}
-		if err != nil {
-			return item, err
-		}
-		guide := rawGuide
-		if !repaired {
-			guide, err = finalizeSolveParentTeachingGuide(rawGuide, solved)
-		}
-		if err != nil {
-			return item, err
-		}
-		item.ParentGuide = &guide
-		item.Status = PhotoBlankSolved
-		if independentReference {
-			item.Status = PhotoAnswerUnclear
-		}
-		if !photoEvidenceTrusted(solved.Evidence) && !photoPracticeUnmatched(item) {
-			item.Warning = strings.TrimSpace(item.Warning + " Independent programmatic verification is unavailable for this answer.")
-		}
-		return commitGradingAssessmentItem(durableCtx, deps, job, q, item,
-			solveInvocationID, "", parentGuideInvocationID, k12storage.GradingAssessmentEffects{})
+		return commitGradingAssessmentItem(context.WithoutCancel(ctx), deps, job, q, staged.item,
+			staged.solveInvocationID, "", staged.parentGuideInvocationID, k12storage.GradingAssessmentEffects{})
 	}
 
 	var solved SolveHomeworkResult
@@ -846,6 +767,94 @@ func currentProblemSkipMatchesInput(
 	}
 }
 
+type stagedDurablePhotoReference struct {
+	item                    PhotoGradeItem
+	solveInvocationID       string
+	parentGuideInvocationID string
+	skipped                 bool
+}
+
+// stageDurablePhotoReference 只取得持久求解与讲题回执；评估和终稿由调用方在完整后提交。
+func (o *GradingOrchestrator) stageDurablePhotoReference(ctx context.Context, deps Deps, job GradingJobView, q RecognizedQuestion, gradeReq GradeRequest, item PhotoGradeItem, independentReference bool) (stagedDurablePhotoReference, error) {
+	staged := stagedDurablePhotoReference{item: item}
+	gradeReq.StudentAnswer = ""
+	solved, solveInvocationID, err := executeDurableSolveOperation(ctx, o, deps, job, q, gradeReq)
+	staged.item.assetPublication, staged.item.AnswerSource, staged.item.Solve = solved.assetPublication, solved.AnswerSource, solved
+	staged.solveInvocationID = solveInvocationID
+	if err != nil {
+		return staged, err
+	}
+	staged.skipped, err = currentProblemSkipMatchesInput(ctx, deps, job, q)
+	if err != nil || staged.skipped {
+		return staged, err
+	}
+	if solved.OutOfScope {
+		staged.item.Status = PhotoOutOfScope
+		return staged, nil
+	}
+	if historical, _ := ctx.Value(historicalAssetCorrectionContextKey{}).(bool); historical && !photoEvidenceTrusted(solved.Evidence) {
+		return staged, fmt.Errorf("historical answer feedback requires verified solve evidence")
+	}
+	if solved.hasDeterministicProblemIssue() {
+		staged.item.Status = PhotoUntrusted
+		staged.item.Warning = "The question contains contradictory conditions; no answer or correctness judgment was produced."
+		return staged, nil
+	}
+	guideRequest := deps.parentTeachingGuideRequest(ctx, gradeReq, solved, GradeOutcome{})
+	guideExecutionKind := k12.GradingExecutionProvider
+	var deterministicGuide *ParentTeachingGuide
+	if guide, ok := degradedReportParentGuide(solved); ok {
+		guideExecutionKind = k12.GradingExecutionLocalDeterministic
+		deterministicGuide = &guide
+	} else if solveTeachingVersionSupported(gradeReq.SolveOutputVersion) && solved.Generation != nil {
+		guideExecutionKind = k12.GradingExecutionLocalDeterministic
+	} else if guide, ok := deterministicParentTeachingGuideForEvidence(guideRequest, solved.Evidence); ok {
+		guideExecutionKind = k12.GradingExecutionLocalDeterministic
+		deterministicGuide = &guide
+	}
+	originalGuideRequest := struct {
+		ExecutionKind k12.GradingExecutionKind   `json:"execution_kind"`
+		InputDigest   string                     `json:"input_digest"`
+		Request       ParentTeachingGuideRequest `json:"request"`
+		Generation    *SolveGeneration           `json:"generation,omitempty"`
+	}{guideExecutionKind, q.InputDigest, guideRequest, parentGuideGenerationForRequest(gradeReq, solved)}
+	rawGuide, parentGuideInvocationID, repaired, err := executeDurableParentTeachingGuideRepair(ctx, o, deps, job, q, gradeReq, solved, originalGuideRequest)
+	if err != nil {
+		return staged, err
+	}
+	if !repaired {
+		rawGuide, parentGuideInvocationID, err = executeGradingItemOperationWithKind(ctx, o, job, q,
+			k12.GradingItemOperationParentGuide, guideExecutionKind, originalGuideRequest,
+			func(callCtx context.Context) (ParentTeachingGuide, error) {
+				if deterministicGuide != nil {
+					return *deterministicGuide, nil
+				}
+				if solveTeachingVersionSupported(gradeReq.SolveOutputVersion) && solved.Generation != nil {
+					return auditedSolveParentTeachingGuide(solved)
+				}
+				return deps.generateParentTeachingGuide(callCtx, guideRequest)
+			})
+	}
+	if err != nil {
+		return staged, err
+	}
+	guide := rawGuide
+	if !repaired {
+		guide, err = finalizeSolveParentTeachingGuide(rawGuide, solved)
+	}
+	if err != nil {
+		return staged, err
+	}
+	staged.parentGuideInvocationID, staged.item.ParentGuide, staged.item.Status = parentGuideInvocationID, &guide, PhotoBlankSolved
+	if independentReference {
+		staged.item.Status = PhotoAnswerUnclear
+	}
+	if !photoEvidenceTrusted(solved.Evidence) && !photoPracticeUnmatched(staged.item) {
+		staged.item.Warning = strings.TrimSpace(staged.item.Warning + " Independent programmatic verification is unavailable for this answer.")
+	}
+	return staged, nil
+}
+
 func executeGradingItemOperation[T any](
 	ctx context.Context,
 	o *GradingOrchestrator,
@@ -975,7 +984,8 @@ func executeGradingItemOperationWithKind[T any](
 			// The durable before-send point exists, but no external request can have
 			// escaped yet. Sending this exact frozen request is safe.
 		case k12.ModelInvocationFailed:
-			if jobOperationAttempt <= latest.OperationAttempt {
+			reference, sourceReference := ctx.Value(finalSourceReferenceContextKey{}).(finalSourceReferenceScope)
+			if jobOperationAttempt <= latest.OperationAttempt && (!sourceReference || !reference.command.CanRetryReferenceInvocation(latest.InvocationID)) {
 				return zero, latest.InvocationID, fmt.Errorf("%w: invocation=%s class=%s code=%s",
 					ErrGradingItemInvocationFailed, latest.InvocationID, latest.FailureClass, latest.FailureCode)
 			}

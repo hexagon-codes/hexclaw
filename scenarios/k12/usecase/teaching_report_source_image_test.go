@@ -31,6 +31,10 @@ func (originalReportFixtureRenderer) RenderTeachingReport(context.Context, rende
 }
 
 func originalTeachingReportFixture(t *testing.T, sources ...[]byte) (Deps, *ImageTaskCoordinator, *GradingOrchestrator, k12.GradingFinalArtifact, []byte) {
+	return originalTeachingReportFixtureWithRegion(t, nil, sources...)
+}
+
+func originalTeachingReportFixtureWithRegion(t *testing.T, region *k12.SourcePixelRegion, sources ...[]byte) (Deps, *ImageTaskCoordinator, *GradingOrchestrator, k12.GradingFinalArtifact, []byte) {
 	t.Helper()
 	t.Setenv("HEXCLAW_ASSET_ROOT", t.TempDir())
 	d, _, _ := reportResilienceDeps(t)
@@ -63,6 +67,7 @@ func originalTeachingReportFixture(t *testing.T, sources ...[]byte) (Deps, *Imag
 		CanonicalMarkdown:      reportResilienceProblem,
 		EvidenceTranscriptions: []string{reportResilienceProblem, reportResilienceProblem}, RecognitionConfidence: &confidence,
 		Subject: "数学", AnswerState: AnswerStateUnclear, SourceWidth: geometry.Width, SourceHeight: geometry.Height,
+		SourceRegion: cloneProblemSourceRegion(region),
 	}}}
 	d.Recognizer = recognizer
 	req := orchestratorPhotoRequest()

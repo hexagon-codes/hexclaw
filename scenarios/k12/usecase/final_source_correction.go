@@ -1,6 +1,7 @@
 package usecase
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -25,6 +26,18 @@ type CompletedSourceReviewer interface {
 	ReviewCompletedSource(context.Context, []byte, RecognizedQuestion) (CompletedSourceReview, error)
 }
 
+// CompletedSourceReviewParser 只解释已有原始响应，不能触发新的视觉请求。
+type CompletedSourceReviewParser interface {
+	ParseCompletedSourceReview(string, RecognizedQuestion) (CompletedSourceReview, error)
+}
+
+type finalSourceReferenceContextKey struct{}
+
+type finalSourceReferenceScope struct {
+	digest  string
+	command k12storage.FinalSourceCorrection
+}
+
 type FinalSourceCorrectionInput struct {
 	Agent                    string `json:"agent"`
 	IdempotencyKey           string `json:"idempotency_key"`
@@ -38,10 +51,23 @@ type FinalSourceCorrectionInput struct {
 }
 
 type FinalSourceCorrectionResult struct {
-	CorrectionID string                    `json:"correction_id"`
-	Status       string                    `json:"status"`
-	Replayed     bool                      `json:"replayed"`
-	Artifact     *k12.GradingFinalArtifact `json:"artifact,omitempty"`
+	CorrectionID string                         `json:"correction_id"`
+	Status       string                         `json:"status"`
+	Replayed     bool                           `json:"replayed"`
+	Artifact     *k12.GradingFinalArtifact      `json:"artifact,omitempty"`
+	Recovery     *FinalSourceCorrectionRecovery `json:"recovery,omitempty"`
+}
+
+// FinalSourceCorrectionRecovery 提供原请求方显式接续确定失败的冻结身份。
+type FinalSourceCorrectionRecovery struct {
+	RecoveryOf             string `json:"recovery_of"`
+	RecoveryResponseDigest string `json:"recovery_response_digest"`
+}
+
+func finalSourceCorrectionRecovery(command k12storage.FinalSourceCorrection) *FinalSourceCorrectionRecovery {
+	return &FinalSourceCorrectionRecovery{
+		RecoveryOf: command.Request.CorrectionID, RecoveryResponseDigest: command.ResponseDigest,
+	}
 }
 
 // CorrectCompletedSource 只追加来源、评估和终稿修订，不重新生成学生作答。
@@ -144,12 +170,13 @@ func (o *GradingOrchestrator) CorrectCompletedSource(ctx context.Context, owner,
 	if len(dispatch.SourceAssetRefs) != 1 {
 		return out, fmt.Errorf("%w: one original page required", ErrInvalidInput)
 	}
-	page, err := (&PageAssetRepository{Records: store}).OpenReady(ctx, owner, in.Agent, dispatch.SourceAssetRefs[0])
+	sourcePage, err := store.ResolveGradingFinalSourcePage(ctx, owner, in.Agent, dispatchID, original.ArtifactID)
 	if err != nil {
 		return out, err
 	}
-	if page.Metadata.ContentDigest != original.OriginalSourceDigest {
-		return out, records.ErrVersionConflict
+	page, err := (&PageAssetRepository{Records: store}).OpenReady(ctx, owner, in.Agent, sourcePage.PageAssetID)
+	if err != nil {
+		return out, err
 	}
 	// 旧结构投影没有保存区域时，只从同题的冻结识别回执取回原始坐标。
 	if q.SourceRegion == nil && q.ConfirmedVersion == 1 {
@@ -175,7 +202,7 @@ func (o *GradingOrchestrator) CorrectCompletedSource(ctx context.Context, owner,
 		return out, err
 	}
 	if command.Status == "" {
-		request := k12storage.FinalSourceCorrectionRequest{CorrectionID: id, AgentName: in.Agent, JobID: jobID, DispatchID: dispatchID, OwnerScope: owner, SubmissionID: job.Fields.SubmissionID, ProblemID: problemID, InputRevision: in.InputRevision, InputDigest: in.InputDigest, StructureVersion: original.StructureVersion, OriginalArtifactID: original.ArtifactID, OriginalArtifactDigest: original.ArtifactDigest, SourceDigest: original.OriginalSourceDigest, Model: job.Fields.ModelSnapshot}
+		request := k12storage.FinalSourceCorrectionRequest{CorrectionID: id, AgentName: in.Agent, JobID: jobID, DispatchID: dispatchID, OwnerScope: owner, SubmissionID: job.Fields.SubmissionID, ProblemID: problemID, InputRevision: in.InputRevision, InputDigest: in.InputDigest, StructureVersion: original.StructureVersion, OriginalArtifactID: original.ArtifactID, OriginalArtifactDigest: original.ArtifactDigest, SourceDigest: sourcePage.ContentDigest, Model: job.Fields.ModelSnapshot}
 		request.RecoveryOf = in.RecoveryOf
 		request.RecoveryResponseDigest = in.RecoveryResponseDigest
 		request.AcceptDuplicateExecution = in.AcceptDuplicateExecution
@@ -232,9 +259,39 @@ func (o *GradingOrchestrator) CorrectCompletedSource(ctx context.Context, owner,
 	if err = json.Unmarshal([]byte(command.ResponseJSON), &review); err != nil {
 		return out, err
 	}
+	var reviewed json.RawMessage
+	if parser, ok := o.deps.Recognizer.(CompletedSourceReviewParser); ok && command.Status == "succeeded" && review.Raw != "" {
+		parsed, parseErr := parser.ParseCompletedSourceReview(review.Raw, q)
+		if parseErr != nil {
+			return out, parseErr
+		}
+		priorQuestion, _ := json.Marshal(review.Question)
+		parsedQuestion, _ := json.Marshal(parsed.Question)
+		if parsed.Raw != review.Raw || !bytes.Equal(priorQuestion, parsedQuestion) {
+			return out, records.ErrVersionConflict
+		}
+		review = parsed
+		reviewed, err = json.Marshal(parsed)
+		if err != nil {
+			return out, err
+		}
+	}
 	if !review.Verified || review.Question.AnswerState != AnswerStateBlank {
 		out.Status = command.Status
 		return out, fmt.Errorf("source review did not establish a reliably blank answer")
+	}
+	if out.Replayed {
+		retryRequired, unresolved, err := store.FinalSourceReferenceReplayState(ctx, command)
+		if err != nil {
+			return out, err
+		}
+		if unresolved {
+			return out, ErrModelInvocationRequiresReconciliation
+		}
+		if retryRequired {
+			out.Recovery = finalSourceCorrectionRecovery(command)
+			return out, fmt.Errorf("%w: %w: reference provider returned 503; explicit recovery is required", ErrSolveFailed, ErrGradingItemInvocationFailed)
+		}
 	}
 	// 独立响应存于回执；当前题干保持原值，只撤回误归属的作答。
 	q.AnswerState = AnswerStateBlank
@@ -265,15 +322,66 @@ func (o *GradingOrchestrator) CorrectCompletedSource(ctx context.Context, owner,
 	if !ok {
 		return out, records.ErrNotFound
 	}
-	item := PhotoGradeItem{Recognized: q, Status: PhotoUnanswered, ResultKind: PhotoItemUnanswered}
+	frozenRun, err := o.ensureRun(ctx, jobID)
+	if err != nil {
+		return out, err
+	}
+	run := &gradingRun{req: frozenRun.req, result: &PhotoGradeResult{}, questions: questions}
+	run.req.SourcePageAssetID, run.req.AgentName, run.req.SourceSession = sourcePage.PageAssetID, in.Agent, job.Record.SourceSession
+	var previousReport TeachingReportFrozenSnapshot
+	if original.ReportSnapshotJSON != "" {
+		if err = json.Unmarshal([]byte(original.ReportSnapshotJSON), &previousReport); err != nil {
+			return out, err
+		}
+		run.req.TeachingReport = &TeachingReportTaskSnapshot{Metadata: previousReport.Report.Metadata, Bundle: previousReport.Bundle}
+		run.req.Grade, run.req.Subject = previousReport.Report.Metadata.GradeTerm, previousReport.Report.Metadata.Subject
+		run.req.SolveOutputVersion = SolveOutputWithTeachingReportV2
+	}
+	referenceCtx := k12.WithGradingModelSnapshot(ctx, command.Request.Model)
+	referenceCtx = context.WithValue(referenceCtx, finalSourceReferenceContextKey{}, finalSourceReferenceScope{
+		digest: modelInvocationDigest([]byte(command.ReferenceRequestDigest()), []byte(q.InputDigest)), command: command,
+	})
+	solveQuestion, err := o.finalSourceReferenceQuestion(job, q)
+	if err != nil {
+		return out, err
+	}
+	// 仅求解副本使用已冻结的父题公共材料，落盘的子题仍保持自己的题面。
+	if q.ProblemKind == ProblemKindSubproblem {
+		for _, scoped := range RecognizedQuestionsForAssessmentForInitialReadMode(questions, run.req.InitialReadMode) {
+			if scoped.ProblemID != q.ProblemID {
+				continue
+			}
+			if scoped.assessmentSource == nil || !scoped.assessmentSource.parentComplete {
+				return out, fmt.Errorf("%w: confirmed shared question source is required", ErrInvalidInput)
+			}
+			scoped.ImageSourceContext = solveQuestion.ImageSourceContext
+			solveQuestion = scoped
+			break
+		}
+	}
+	staged, err := o.stageDurablePhotoReference(referenceCtx, o.deps, job, solveQuestion, photoItemGradeRequest(run.req, solveQuestion), photoItemWithPracticeReference(run.req, q), false)
+	if err != nil {
+		if retryRequired, unresolved, readErr := store.FinalSourceReferenceReplayState(ctx, command); readErr == nil && retryRequired && !unresolved {
+			out.Recovery = finalSourceCorrectionRecovery(command)
+		}
+		return out, err
+	}
+	if staged.skipped {
+		return out, ErrGradingFinalizationIncomplete
+	}
+	item := staged.item
 	canonical := gradingAssessmentCanonicalResult(item)
 	raw, err := json.Marshal(canonical)
 	if err != nil {
 		return out, err
 	}
 	now := o.deps.now()
-	receipt := k12.GradingAssessmentItem{AgentName: in.Agent, JobID: jobID, ProblemID: problemID, AttemptID: previous.AttemptID, ConfirmedVersion: q.ConfirmedVersion, InputRevision: q.ConfirmedVersion, PublishedRevision: previous.PublishedRevision + 1, CurrentDisposition: k12.GradingAssessmentDispositionCurrent, StructureVersion: previous.StructureVersion, InputDigest: q.InputDigest, Status: k12.GradingAssessmentUnanswered, ResultJSON: string(raw), ResultDigest: modelInvocationResultDigest(canonical), ProjectionStatus: k12.GradingProjectionCommitted, CreatedAt: now, UpdatedAt: now}
-	if err = receipt.Validate(); err != nil {
+	status, err := gradingAssessmentStatus(item.Status)
+	if err != nil {
+		return out, err
+	}
+	receipt := k12.GradingAssessmentItem{AgentName: in.Agent, JobID: jobID, ProblemID: problemID, AttemptID: previous.AttemptID, ConfirmedVersion: q.ConfirmedVersion, InputRevision: q.ConfirmedVersion, PublishedRevision: previous.PublishedRevision + 1, CurrentDisposition: k12.GradingAssessmentDispositionCurrent, StructureVersion: previous.StructureVersion, InputDigest: q.InputDigest, Status: status, ResultJSON: string(raw), ResultDigest: modelInvocationResultDigest(canonical), AnswerSource: item.AnswerSource, SolveInvocationID: staged.solveInvocationID, ParentGuideInvocationID: staged.parentGuideInvocationID, ProjectionStatus: k12.GradingProjectionCommitted, CreatedAt: now, UpdatedAt: now}
+	if err = validateGradingAssessmentTerminalItem(item, receipt); err != nil {
 		return out, err
 	}
 	byProblem[problemID] = receipt
@@ -309,13 +417,6 @@ func (o *GradingOrchestrator) CorrectCompletedSource(ctx context.Context, owner,
 		}
 		entries = append(entries, entry)
 	}
-	if o.deps.PhotoAnnotator == nil {
-		return out, fmt.Errorf("photo annotator unavailable")
-	}
-	rendered, err := o.deps.PhotoAnnotator.Annotate(ctx, page.Data, trustedPhotoMarks(items))
-	if err != nil {
-		return out, err
-	}
 	ordered, _ := json.Marshal(digests)
 	taskIntent, err := o.persistedImageTaskPhotoIntent(ctx, in.Agent, job.Fields, "")
 	if err != nil {
@@ -328,20 +429,30 @@ func (o *GradingOrchestrator) CorrectCompletedSource(ctx context.Context, owner,
 	artifact.OrderedCurrentDigestsJSON = string(ordered)
 	artifact.CreatedAt = now
 	artifact.UpdatedAt = now
-	run := &gradingRun{result: &PhotoGradeResult{AnnotatedImage: &rendered}}
-	if err = o.freezeGradingFinalAnnotatedAsset(ctx, run, job, &artifact); err != nil {
-		return out, err
+	if original.HasAnnotatedAsset() {
+		marks := trustedPhotoMarks(items)
+		if len(marks) == 0 {
+			// 最后一处批注撤回后，原图继续作为来源，旧批注仅留在原终稿。
+			artifact.AnnotatedAssetOwnerScope = ""
+			artifact.AnnotatedAssetID = ""
+			artifact.AnnotatedMIME = ""
+			artifact.AnnotatedDigest = ""
+			artifact.OriginalSourceDigest = ""
+		} else {
+			if o.deps.PhotoAnnotator == nil {
+				return out, fmt.Errorf("photo annotator unavailable")
+			}
+			rendered, err := o.deps.PhotoAnnotator.Annotate(ctx, page.Data, marks)
+			if err != nil {
+				return out, err
+			}
+			run.result.AnnotatedImage = &rendered
+			if err = o.freezeGradingFinalAnnotatedAsset(ctx, run, job, &artifact); err != nil {
+				return out, err
+			}
+		}
 	}
 	if original.ReportSnapshotJSON != "" {
-		var previousReport TeachingReportFrozenSnapshot
-		if err = json.Unmarshal([]byte(original.ReportSnapshotJSON), &previousReport); err != nil {
-			return out, err
-		}
-		run.req.TeachingReport = &TeachingReportTaskSnapshot{Metadata: previousReport.Report.Metadata, Bundle: previousReport.Bundle}
-		run.req.Grade = previousReport.Report.Metadata.GradeTerm
-		run.req.Subject = previousReport.Report.Metadata.Subject
-		run.req.SolveOutputVersion = SolveOutputWithTeachingReportV2
-		run.questions = questions
 		current := make([]k12.GradingAssessmentItem, 0, len(byProblem))
 		for _, assessment := range byProblem {
 			current = append(current, assessment)
@@ -352,13 +463,36 @@ func (o *GradingOrchestrator) CorrectCompletedSource(ctx context.Context, owner,
 	}
 	artifact.ArtifactDigest = k12.ComputeGradingFinalArtifactDigest(artifact)
 	source, _ := json.Marshal(q)
-	artifact, err = store.CommitFinalBlankSourceCorrection(ctx, id, artifact, source, receipt)
+	artifact, err = store.CommitFinalSourceReferenceCorrection(ctx, id, artifact, source, receipt, command.ResponseDigest, reviewed, item.assetPublication)
 	if err != nil {
 		return out, err
 	}
 	out.Status = "completed"
 	out.Artifact = &artifact
 	return out, nil
+}
+
+func (o *GradingOrchestrator) finalSourceReferenceQuestion(job GradingJobView, q RecognizedQuestion) (RecognizedQuestion, error) {
+	if q.ImageSourceContext != nil {
+		return q, nil
+	}
+	// 来源修订只撤回作答；原题与原页严格相同时，求解副本仍可读取其冻结印刷材料。
+	for _, frozen := range o.frozenRecognitionSourceQuestions(job) {
+		if frozen.ImageSourceContext == nil || frozen.ProblemID != q.ProblemID || frozen.AttemptID != q.AttemptID || frozen.PageAssetID != q.PageAssetID || frozen.RawTranscription != q.RawTranscription || frozen.CanonicalMarkdown != q.CanonicalMarkdown {
+			continue
+		}
+		raw, err := json.Marshal(frozen.ImageSourceContext)
+		if err != nil {
+			return q, err
+		}
+		var source k12.RecognitionImageSourceContextV1
+		if err := json.Unmarshal(raw, &source); err != nil {
+			return q, err
+		}
+		q.ImageSourceContext = &source
+		break
+	}
+	return q, nil
 }
 
 func (d Deps) overlayFinalSourceQuestions(ctx context.Context, agent, submission string, questions []RecognizedQuestion) ([]RecognizedQuestion, error) {

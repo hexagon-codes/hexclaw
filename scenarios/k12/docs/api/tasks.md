@@ -216,6 +216,10 @@ POST 使用刚读取的 fingerprint，显式接受可能重复计费。Idempoten
 
 仅原任务已completed且artifact_id/digest、逐题input_revision/digest都匹配时，独立复核同一道原题；不重新生成学生作答。body idempotency_key冻结本次身份，同键重放200，新命令201；201可能是sent/outcome_unknown/failed，只有status=completed且artifact存在才是新终稿。显式恢复未知纠正须同时提供recovery_of、其recovery_response_digest、accept_duplicate_execution=true，并保持原冻结输入；只允许一个恢复子命令。
 
+若原来源纠正已completed，但当前仍为该命令生成的同源空白、未作答且缺参考解修订，可用新idempotency_key、当前artifact及逐题输入身份、recovery_of和精确recovery_response_digest接续。该分支无需accept_duplicate_execution=true，只引用已成功返回的来源响应，不重发来源识别；新输入的参考解和家长讲解满足原求解及独立核验合同后才追加终稿。旧命令、原响应及旧报告保持，原key仍返回原结果。来源、题文、学生作答或当前修订不再匹配时拒绝。
+
+来源复核成功而同一次参考求解明确收到 HTTP 503 时，首次失败和同键重放的 `502` 回包可携带 `recovery.recovery_of` 及 `recovery.recovery_response_digest`。使用这两个值、新 `idempotency_key`、同一终稿及逐题输入身份可显式接续一次。省略 `accept_duplicate_execution` 或保留为 `false`。已成功识图与匹配的参考解步骤继续复用，结果未知时拒绝此续跑。只有存在可信剩余批注时，新终稿才含批注图。
+
 | 位置 | 参数 | 必填 | 类型 / 契约 |
 | --- | --- | --- | --- |
 | path | `id` | 是 | string；当前资源身份 |

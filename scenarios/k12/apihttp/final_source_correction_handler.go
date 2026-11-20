@@ -1,8 +1,9 @@
 package apihttp
 
 import (
-	"github.com/hexagon-codes/hexclaw/scenarios/k12/usecase"
 	"net/http"
+
+	"github.com/hexagon-codes/hexclaw/scenarios/k12/usecase"
 )
 
 func (h *handler) correctCompletedSource(w http.ResponseWriter, r *http.Request) {
@@ -20,7 +21,10 @@ func (h *handler) correctCompletedSource(w http.ResponseWriter, r *http.Request)
 	}
 	result, err := h.rt.Grading.CorrectCompletedSource(r.Context(), owner, r.PathValue("id"), r.PathValue("problem_id"), req)
 	if err != nil {
-		writeErr(w, httpStatusForK12Error(err, http.StatusConflict), err.Error())
+		writeJSON(w, httpStatusForK12Error(err, http.StatusConflict), struct {
+			Error    string                                 `json:"error"`
+			Recovery *usecase.FinalSourceCorrectionRecovery `json:"recovery,omitempty"`
+		}{Error: err.Error(), Recovery: result.Recovery})
 		return
 	}
 	status := http.StatusCreated

@@ -7,6 +7,7 @@ import (
 
 	"github.com/hexagon-codes/hexclaw/egress"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
+	"github.com/hexagon-codes/hexclaw/skill"
 )
 
 func TestTextSolveObservedFailureRetainsPayloadWithoutResending(t *testing.T) {
@@ -19,8 +20,12 @@ func TestTextSolveObservedFailureRetainsPayloadWithoutResending(t *testing.T) {
 	spec := GradingPhysicalCallSpec{Operation: k12.GradingItemOperationSolveGenerate, ExecutionKind: k12.GradingExecutionProvider, RequestDigest: "observed-response-with-local-failure"}
 	payload := `{"Output":"Observed but unverified answer","execution_receipt":{"input_digest":"input","run_id":"actual-execution","status":"failed","exit_code":1}}`
 	calls := 0
-	result, err := executor.ExecuteGradingPhysicalCall(t.Context(), spec, func(_ context.Context) (string, error) {
+	result, err := executor.ExecuteGradingPhysicalCall(t.Context(), spec, func(ctx context.Context) (string, error) {
 		calls++
+		identity := skill.CurrentInvocation(ctx)
+		if identity.AuthenticatedUserID != run.OwnerID || identity.RoutedAgentName != run.AgentName || identity.RequestID != run.RunID || identity.ToolCallID != textSolveInvocationID(run, spec) || identity.SessionID != run.SourceSessionID || identity.SourceMessageID != run.SourceMessageID {
+			t.Fatal("physical execution did not inherit its frozen text solve identity")
+		}
 		return payload, errors.Join(egress.ErrProviderResponseProcessed, errors.New("local validation failed"))
 	})
 	if err == nil || result.Payload != payload {

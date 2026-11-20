@@ -140,6 +140,25 @@ func (a *SolveAdapter) FailedVerificationPayload(payload string) error {
 	return result.ExecutionReceipt.KnownExecutionFailure(result.ExecutionReceipt.InputDigest)
 }
 
+func reparseSolveGenerationPayload(payload, version string) (string, error) {
+	var original engine.SubAgentResult
+	if err := json.Unmarshal([]byte(payload), &original); err != nil {
+		return "", err
+	}
+	if original.Generation != nil || original.Output == "" {
+		return "", fmt.Errorf("solve adapter: stored generation is not an unparsed response")
+	}
+	parsed, err := engine.ReparseSolveGenerationResult(original)
+	if err != nil {
+		return "", err
+	}
+	if parsed.Generation == nil || parsed.Generation.OutputVersion != version {
+		return "", fmt.Errorf("solve adapter: stored generation version does not match the frozen request")
+	}
+	raw, err := json.Marshal(parsed)
+	return string(raw), err
+}
+
 func (a *SolveAdapter) withGradingPhysicalCallInterceptor(ctx context.Context) context.Context {
 	if !usecase.HasGradingPhysicalCallExecutor(ctx) {
 		return ctx
@@ -220,6 +239,13 @@ func (a *SolveAdapter) withGradingPhysicalCallInterceptor(ctx context.Context) c
 					return result.ExecutionReceipt.KnownExecutionFailure(hex.EncodeToString(inputDigest[:]))
 				}
 			}
+			var reparseProcessedResult func(string) (string, error)
+			version, _ := usecase.SolveTeachingRequest(callCtx)
+			if operation == k12.GradingItemOperationSolveGenerate && (version == usecase.SolveOutputWithParentGuideV1 || version == usecase.SolveOutputWithTeachingReportV2) {
+				reparseProcessedResult = func(payload string) (string, error) {
+					return reparseSolveGenerationPayload(payload, version)
+				}
+			}
 			execute := usecase.ExecuteGradingPhysicalCall
 			if spec.ProgramOnly {
 				execute = usecase.ExecuteGradingProgramCall
@@ -228,8 +254,9 @@ func (a *SolveAdapter) withGradingPhysicalCallInterceptor(ctx context.Context) c
 				callCtx,
 				usecase.GradingPhysicalCallSpec{
 					Operation: operation, RequestDigest: hex.EncodeToString(digestRaw[:]),
-					LegacyRequestDigest:   legacyDigest,
-					KnownExecutionFailure: knownExecutionFailure,
+					LegacyRequestDigest:    legacyDigest,
+					KnownExecutionFailure:  knownExecutionFailure,
+					ReparseProcessedResult: reparseProcessedResult,
 				},
 				func(providerCtx context.Context) (string, error) {
 					result, callErr := next(providerCtx, spec)

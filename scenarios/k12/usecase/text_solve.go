@@ -108,7 +108,15 @@ func (e *textSolvePhysicalExecutor) ExecuteGradingPhysicalCall(ctx context.Conte
 		}
 		return GradingPhysicalCallResult{}, gradingPhysicalNoRetryError{cause: fmt.Errorf("%w: solve_run_id=%s invocation=%s", k12storage.ErrTextSolveUnknown, e.run.RunID, inv.InvocationID)}
 	}
-	payload, callErr := next(k12.WithGradingModelSnapshot(ctx, e.run.RouteSnapshot))
+	// 程序验算和模型子调用沿用已认领的持久回执，重启或直接 HTTP 调用也有稳定归属。
+	callCtx := skill.WithAuthenticatedUser(ctx, inv.OwnerID)
+	callCtx = skill.WithRoutedAgent(callCtx, inv.AgentName)
+	identity := skill.CurrentInvocation(callCtx)
+	identity.AuthenticatedUserID, identity.RoutedAgentName = inv.OwnerID, inv.AgentName
+	identity.RequestID, identity.ToolCallID = inv.RunID, inv.InvocationID
+	identity.SessionID, identity.SourceMessageID = inv.SourceSessionID, inv.SourceMessageID
+	callCtx = skill.WithInvocationContext(callCtx, identity)
+	payload, callErr := next(k12.WithGradingModelSnapshot(callCtx, e.run.RouteSnapshot))
 	status := k12.ModelInvocationSucceeded
 	failureClass, failureCode := "", ""
 	if callErr != nil {
