@@ -208,8 +208,11 @@ func (d Deps) resolveWeeklyPracticeAssessment(
 			if err != nil {
 				return command, WeeklyPracticeAnswerAssessment{}, err
 			}
+			// 已收到完整判定，先保留回执；后续提交和副作用仍跟随原请求。
+			receiptCtx, cancelReceipt := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 			command, err = d.Records.MarkWeeklyPracticeAssessmentSucceeded(
-				ctx, command, string(payload), digestValue(assessment), d.now())
+				receiptCtx, command, string(payload), digestValue(assessment), d.now())
+			cancelReceipt()
 			if err != nil {
 				return command, WeeklyPracticeAnswerAssessment{}, err
 			}

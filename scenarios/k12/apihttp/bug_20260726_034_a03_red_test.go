@@ -91,6 +91,47 @@ func TestBUG20260726034A03MissingAssessorFailsClosedWithoutPseudoAttempt(t *test
 	}
 }
 
+type cancelAfterWeeklyAssessment struct {
+	cancel context.CancelFunc
+	calls  int
+}
+
+func (a *cancelAfterWeeklyAssessment) AssessWeeklyPracticeAnswer(
+	_ context.Context, req usecase.WeeklyPracticeAnswerRequest,
+) (usecase.WeeklyPracticeAnswerAssessment, error) {
+	a.calls++
+	a.cancel()
+	return usecase.WeeklyPracticeAnswerAssessment{
+		AssessmentID:         "weekly-checked-" + req.Item.ItemID,
+		Result:               k12.WeeklyAttemptCorrect,
+		VerificationEvidence: "known_success_response",
+		Subject:              "数学",
+	}, nil
+}
+
+func TestWeeklyAssessmentRetainsKnownResultAfterClientCancellation(t *testing.T) {
+	setup, deps, _ := newWeeklyBundleContractServer(t)
+	path, body, _ := prepareA03Snapshot(t, setup)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	assessor := &cancelAfterWeeklyAssessment{cancel: cancel}
+	deps.WeeklyAssessment = assessor
+	h := apihttp.NewHandler(apihttp.Runtime{Records: deps.Records, Deps: deps})
+	first := httptest.NewRecorder()
+	h.ServeHTTP(first, httptest.NewRequestWithContext(ctx, http.MethodPost, path, strings.NewReader(body)))
+
+	retry, result := do(t, h, http.MethodPost, path, body)
+	if retry.Code >= http.StatusMultipleChoices || assessor.calls != 1 {
+		t.Fatalf("resume assessment: first=%d retry=%d provider calls=%d body=%s",
+			first.Code, retry.Code, assessor.calls, retry.Body.String())
+	}
+	attempt, ok := result["attempt"].(map[string]any)
+	if !ok || attempt["result"] != k12.WeeklyAttemptCorrect ||
+		attempt["verification_evidence"] != "known_success_response" {
+		t.Fatalf("retry must use the already received assessment: %v", result)
+	}
+}
+
 type a03SlowWrongAssessor struct {
 	calls atomic.Int64
 }
