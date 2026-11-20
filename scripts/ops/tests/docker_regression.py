@@ -302,8 +302,41 @@ print(json.dumps({'receipts':db.execute('SELECT id,state FROM receipts ORDER BY 
         image = docker_json('image', 'inspect', tag)[0]
         self.images['retention-old'] = {'id': image['Id'], 'digest': image['RepoDigests'][0]}
         self.start('retention-old')
+        legacy = self.project / 'retired' / 'backups'
+        archived = json.loads(command(*self.backup_command('--output', legacy)).stdout)
+        pending = json.loads(command(*self.backup_command('--output', legacy)).stdout)
+        state = legacy.parent / '.hexclaw-deploy'
+        state.mkdir()
+        (state / '20261115T000000Z-00000000.json').write_text(json.dumps({
+            'status': 'recovery_required', 'backup': pending,
+        }))
+        unmanaged = self.project / 'backups'
+        unmanaged.mkdir()
+        for filename in (archived['archive'], Path(archived['archive']).with_suffix('.json').name):
+            shutil.copyfile(legacy / filename, unmanaged / filename)
+        unrelated = legacy / 'other-service.tar'
+        unrelated.write_bytes(b'independent backup')
+        foreign = legacy / 'hexclaw-20261115T000001Z-00000001.tar'
+        with tarfile.open(legacy / archived['archive'], 'r:') as snapshot:
+            files = {entry.name: snapshot.extractfile(entry).read() for entry in snapshot if entry.isfile()}
+        foreign_compose = json.loads(files['compose.json'])
+        foreign_compose['name'] = 'other-compose-project'
+        files['compose.json'] = json.dumps(foreign_compose).encode()
+        manifest = json.loads(files['manifest.json'])
+        manifest['snapshot_id'] = foreign.stem
+        manifest['files']['compose.json'] = hashlib.sha256(files['compose.json']).hexdigest()
+        files['manifest.json'] = json.dumps(manifest).encode()
+        with tarfile.open(foreign, 'w') as snapshot:
+            for name, content in files.items():
+                entry = tarfile.TarInfo(name)
+                entry.size = len(content)
+                snapshot.addfile(entry, io.BytesIO(content))
+        foreign.with_suffix('.json').write_text(json.dumps(dict(
+            archived, snapshot_id=foreign.stem, archive=foreign.name, sha256=hashlib.sha256(foreign.read_bytes()).hexdigest(),
+        )))
         configuration = json.loads(self.settings.read_text())
         configuration['development_retention'] = 'current_only'
+        configuration['legacy_backup_directories'] = ['retired/backups']
         self.settings.write_text(json.dumps(configuration))
         old_container = self.container()['Id']
         before = self.read_data()
@@ -313,14 +346,43 @@ print(json.dumps({'receipts':db.execute('SELECT id,state FROM receipts ORDER BY 
         self.assertNotEqual(0, command('docker', 'inspect', old_container, check=False).returncode)
         self.assertNotEqual(0, command('docker', 'image', 'inspect', image['Id'], check=False).returncode)
         self.assertEqual(before, self.read_data())
-        self.assertEqual(['latest-deployment.tar'], [p.name for p in (self.project/'backups').glob('*.tar')])
-        current_container = self.container()['Id']
+        self.assertFalse((legacy / archived['archive']).exists(), 'completed legacy backup was missed')
+        self.assertFalse((legacy / archived['archive']).with_suffix('.json').exists())
+        self.assertTrue((legacy / pending['archive']).is_file())
+        self.assertTrue((legacy / pending['archive']).with_suffix('.json').is_file())
+        self.assertEqual(b'independent backup', unrelated.read_bytes())
+        self.assertTrue(foreign.is_file())
+        self.assertTrue(foreign.with_suffix('.json').is_file())
+        self.assertEqual(1, result['retention']['removed_legacy_archives'])
+        self.assertEqual({archived['archive'], 'latest-deployment.tar'}, {p.name for p in unmanaged.glob('*.tar')})
+        late = json.loads(command(*self.backup_command('--output', legacy)).stdout)
+        latest = unmanaged / 'latest-deployment.tar'
+        snapshot_stat = latest.stat()
+        current_container = self.container()
         invocation = self.deploy_command()
         invocation[-1] = 'manual-verification'
+        with (legacy.parent / '.hexclaw-maintenance.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            blocked = command(*invocation, check=False)
+            self.assertNotEqual(0, blocked.returncode)
+            self.assertIn(b'under maintenance', blocked.stderr)
+            self.assertTrue((legacy / late['archive']).is_file())
+            current = self.project / '.hexclaw-deploy' / 'current.json'
+            self.assertEqual(result['actions_run'], json.loads(current.read_text())['actions_run'])
         reused = json.loads(command(*invocation).stdout)
         self.assertTrue(reused['reused'])
         self.assertEqual('manual-verification', reused['actions_run'])
-        self.assertEqual(current_container, self.container()['Id'])
+        self.assertFalse((legacy / late['archive']).exists(), 'reuse missed a completed legacy backup')
+        self.assertFalse((legacy / late['archive']).with_suffix('.json').exists())
+        self.assertEqual(2, reused['retention']['removed_legacy_archives'])
+        self.assertTrue((legacy / pending['archive']).is_file())
+        self.assertTrue(foreign.is_file())
+        repeated = json.loads(command(*invocation).stdout)
+        self.assertEqual(reused['retention'], repeated['retention'])
+        after = self.container()
+        self.assertEqual(current_container['Id'], after['Id'])
+        self.assertEqual(current_container['State']['StartedAt'], after['State']['StartedAt'])
+        self.assertEqual(snapshot_stat.st_mtime_ns, latest.stat().st_mtime_ns)
         self.assertEqual(before, self.read_data())
 
     def test_successful_deployment_retains_identity_and_data(self):
@@ -355,32 +417,30 @@ print(json.dumps({'receipts':db.execute('SELECT id,state FROM receipts ORDER BY 
         image = docker_json('image', 'inspect', tag)[0]
         self.images['retry-old'] = {'id': image['Id'], 'digest': image['RepoDigests'][0]}
         self.start('retry-old')
+        legacy = self.project / 'retired' / 'backups'
+        archived = json.loads(command(*self.backup_command('--output', legacy)).stdout)
         configuration = json.loads(self.settings.read_text())
         configuration['development_retention'] = 'current_only'
+        configuration['legacy_backup_directories'] = ['retired/backups']
         self.settings.write_text(json.dumps(configuration))
         before = self.read_data()
-        boundary = self.project / 'retention-boundary'
-        boundary.mkdir()
-        real_docker = shutil.which('docker')
-        wrapper = ('#!' + sys.executable + '\nimport os,pathlib,sys\n'
-                   'marker=pathlib.Path(__file__).with_name("failed-once")\n'
-                   'if sys.argv[1:3]==["image","rm"] and not marker.exists():\n'
-                   ' marker.write_text("failed");sys.exit(73)\n'
-                   'os.execv(' + repr(real_docker) + ',[' + repr(real_docker) + ']+sys.argv[1:])\n')
-        (boundary/'docker').write_text(wrapper)
-        (boundary/'docker').chmod(0o755)
-        env = dict(os.environ, PATH=str(boundary)+os.pathsep+os.environ['PATH'])
-        result = command(*self.deploy_command(), env=env, check=False)
-        self.assertNotEqual(0, result.returncode)
-        self.assertEqual('deployed_retention_pending', self.receipt()['status'])
-        current_container = self.container()['Id']
-        self.assertTrue(self.ready())
-        self.assertEqual(before, self.read_data())
+        with (legacy.parent / '.hexclaw-maintenance.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            result = command(*self.deploy_command(), check=False)
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn(b'backup directory\'s project is under maintenance', result.stderr)
+            self.assertEqual('deployed_retention_pending', self.receipt()['status'])
+            self.assertTrue((legacy / archived['archive']).is_file())
+            current_container = self.container()['Id']
+            self.assertTrue(self.ready())
+            self.assertEqual(before, self.read_data())
         resumed = json.loads(command(*self.deploy_command()).stdout)
         self.assertEqual('deployed', resumed['status'])
         self.assertTrue(resumed['resumed'])
         self.assertEqual(current_container, self.container()['Id'])
         self.assertEqual(before, self.read_data())
+        self.assertEqual(1, resumed['retention']['removed_legacy_archives'])
+        self.assertFalse((legacy / archived['archive']).exists())
         self.assertNotEqual(0, command('docker','image','inspect',image['Id'],check=False).returncode)
 
     def test_prestart_failure_restores_old_program_on_original_data(self):

@@ -2,6 +2,7 @@
 """按固定镜像摘要更新单个 Compose 服务，保留部署回执和发布前完整备份。"""
 
 import argparse
+from contextlib import nullcontext
 import copy
 import datetime
 import hashlib
@@ -14,12 +15,17 @@ import shutil
 import signal
 import socket
 import sys
+import tarfile
 import tempfile
 import time
 import uuid
 import urllib.parse
 
 from backup import OperationError, backup, complete_service_command, compose_args, deployment_paths, docker_json, maintenance_lock, run, sha256, write_json
+
+
+LEGACY_ARCHIVE_NAME = re.compile(r"hexclaw-\d{8}T\d{6}Z-[0-9a-f]{8}\.tar")
+MAX_BACKUP_METADATA = 1024 * 1024
 
 
 def atomic_bytes(path, content):
@@ -164,14 +170,88 @@ def copy_state_file(source, destination):
             os.unlink(temporary)
 
 
-def retain_development_state(args, configuration, report, report_file, current_image):
-    """仅处理有本项目部署回执归属的历史，独立业务备份不参与清理。"""
-    if configuration.get("development_retention") != "current_only":
-        return None
-    output = (args.project_dir / configuration.get("backup_directory", "backups")).resolve()
-    output.mkdir(parents=True, exist_ok=True)
-    state_dir = report_file.parent
+def receipt_backup_names(receipt):
+    return {(receipt.get(key) or {}).get("archive") for key in ("backup", "current_backup")} - {None, ""}
+
+
+def legacy_backup_directories(project, configuration, output, data_mount):
+    configured = configuration.get("legacy_backup_directories", [])
+    if not isinstance(configured, list) or any(not isinstance(path, str) or not path.strip() for path in configured):
+        raise OperationError("legacy_backup_directories must be a list of directory paths")
+    if not configured:
+        return []
+    data_path = Path(data_mount[1]).resolve()
+    directories = sorted({(project / path).resolve() for path in configured})
+    for directory in directories:
+        for current in (output, data_path):
+            if directory == current or directory in current.parents or current in directory.parents:
+                raise OperationError("A legacy backup directory overlaps current snapshots or data")
+        if directory.exists() and not directory.is_dir():
+            raise OperationError("A legacy backup path is not a directory")
+    return [path for path in directories if path.is_dir()]
+
+
+def read_archive_metadata(archive, name):
+    member = archive.getmember(name)
+    if not member.isfile() or member.size > MAX_BACKUP_METADATA:
+        raise ValueError("Invalid backup metadata")
+    with archive.extractfile(member) as source:
+        return source.read()
+
+
+def is_completed_project_backup(path, sidecar, project_name, data_reference):
+    if path.is_symlink() or sidecar.is_symlink() or not path.is_file() or not sidecar.is_file():
+        return False
+    try:
+        if sidecar.stat().st_size > MAX_BACKUP_METADATA:
+            return False
+        receipt = json.loads(sidecar.read_bytes())
+        if (receipt["snapshot_id"] != path.stem or receipt["archive"] != path.name
+                or receipt["local_complete"] is not True or receipt["service_restored"] is not True
+                or not re.fullmatch(r"[0-9a-f]{64}", receipt["sha256"])):
+            return False
+        with tarfile.open(path, "r:") as archive:
+            manifest = json.loads(read_archive_metadata(archive, "manifest.json"))
+            compose_bytes = read_archive_metadata(archive, "compose.json")
+            payload = ("home.tar.gz", "deployment.tar.gz", "deployment-paths.json")
+            if (manifest["schema"] != 1 or manifest["snapshot_id"] != path.stem
+                    or manifest["files"]["compose.json"] != hashlib.sha256(compose_bytes).hexdigest()
+                    or any(name not in manifest["files"] or not archive.getmember(name).isfile() for name in payload)):
+                return False
+        compose = json.loads(compose_bytes)
+        return compose["name"] == project_name and configured_data_reference(compose)[:2] == data_reference
+    except (ValueError, KeyError, TypeError, tarfile.TarError, OperationError):
+        # 无法证实属于该部署的归档保留给运维确认。
+        return False
+
+
+def remove_legacy_backups(project, directories, current_configuration, protected_archives):
+    if not directories:
+        return 0
+    project_name = current_configuration["name"]
+    data_reference = configured_data_reference(current_configuration)[:2]
+    removed = 0
+    for directory in directories:
+        # 当前部署锁已持有，旧目录的生产者还可能使用旧项目目录的锁。
+        parent = directory.parent
+        lock = nullcontext() if parent == project else maintenance_lock(parent, blocking=False)
+        with lock:
+            pending = pending_deployment(parent / ".hexclaw-deploy") if parent != project else None
+            protected = protected_archives | (receipt_backup_names(pending[1]) if pending else set())
+            for archive in sorted(directory.glob("hexclaw-*.tar")):
+                if archive.name in protected or not LEGACY_ARCHIVE_NAME.fullmatch(archive.name):
+                    continue
+                sidecar = archive.with_suffix(".json")
+                if is_completed_project_backup(archive, sidecar, project_name, data_reference):
+                    archive.unlink()
+                    sidecar.unlink()
+                    removed += 1
+    return removed
+
+
+def history_for_retention(state_dir, report_file=None):
     history = []
+    protected_archives = {"latest-deployment.tar"}
     terminal = {"deployed", "preflight_failed", "failed_before_start", "superseded"}
     for path in state_dir.glob("*.json"):
         if path == report_file or not re.fullmatch(r"\d{8}T\d{6}Z-[0-9a-f]{8}\.json", path.name):
@@ -181,8 +261,22 @@ def retain_development_state(args, configuration, report, report_file, current_i
         recoverable = status == "failed_before_start" and not saved.get("original_service_restored")
         if ((status in terminal and not recoverable) or saved.get("resolved")) and "commit" in saved and "image" in saved:
             history.append((path, saved))
+        else:
+            protected_archives.update(receipt_backup_names(saved))
+    return history, protected_archives
+
+
+def retain_development_state(args, configuration, report, report_file, current_image):
+    """清理部署回执及显式归属的旧部署备份，保留未决恢复材料。"""
+    if configuration.get("development_retention") != "current_only":
+        return None
+    output = (args.project_dir / configuration.get("backup_directory", "backups")).resolve()
+    output.mkdir(parents=True, exist_ok=True)
+    state_dir = report_file.parent
+    history, protected_archives = history_for_retention(state_dir, report_file)
     report["retention_stage"] = "snapshot"
     write_json(report_file, report)
+    legacy_directories = legacy_backup_directories(args.project_dir, configuration, output, report.get("data_mount"))
     current_configuration = json.loads(run(compose_args(args) + ["config", "--format", "json"], cwd=args.project_dir))
     current_compose = state_dir / "current.compose.json"
     write_json(current_compose, current_configuration)
@@ -206,7 +300,10 @@ def retain_development_state(args, configuration, report, report_file, current_i
     report["retention_stage"] = "cleanup"
     write_json(report_file, report)
 
-    removed_archives = 0
+    removed_legacy_archives = remove_legacy_backups(
+        args.project_dir, legacy_directories, current_configuration, protected_archives,
+    )
+    removed_archives = removed_legacy_archives
     images = {report.get("previous_image_id")}
     references = {}
     for _, saved in history + [(report_file, report)]:
@@ -215,10 +312,8 @@ def retain_development_state(args, configuration, report, report_file, current_i
                                     (saved.get("image_id"), saved.get("image"))):
             if image_id and reference:
                 references.setdefault(image_id, set()).add(reference)
-        for key in ("backup", "current_backup"):
-            entry = saved.get(key) or {}
-            name = entry.get("archive", "")
-            if not name or Path(name).name != name or name == "latest-deployment.tar":
+        for name in receipt_backup_names(saved):
+            if Path(name).name != name or name in protected_archives:
                 continue
             archive = output / name
             if archive.is_file():
@@ -271,7 +366,8 @@ def retain_development_state(args, configuration, report, report_file, current_i
         report["backup"]["retained"] = False
     report.pop("retention_stage", None)
     return {"policy": "current_only", "current_archive": "latest-deployment.tar",
-            "removed_archives": removed_archives, "removed_images": removed_images,
+            "removed_archives": removed_archives, "removed_legacy_archives": removed_legacy_archives,
+            "removed_images": removed_images,
             "preserved_in_use_images": retained_images, "preserved_shared_images": shared_images}
 
 
@@ -301,7 +397,7 @@ def mounted_data(container):
     return item["Type"], item["Source"], item.get("RW", True)
 
 
-def configured_data(configuration):
+def configured_data_reference(configuration):
     mounts = [item for item in configuration["services"]["hexclaw"].get("volumes", [])
               if item["target"] == "/data"]
     if len(mounts) != 1:
@@ -309,9 +405,15 @@ def configured_data(configuration):
     item = mounts[0]
     source = item["source"]
     if item["type"] == "volume":
-        name = configuration["volumes"][source]["name"]
-        source = docker_json("volume", "inspect", name)[0]["Mountpoint"]
+        source = configuration["volumes"][source]["name"]
     return item["type"], source, not item.get("read_only", False)
+
+
+def configured_data(configuration):
+    mount_type, source, writable = configured_data_reference(configuration)
+    if mount_type == "volume":
+        source = docker_json("volume", "inspect", source)[0]["Mountpoint"]
+    return mount_type, source, writable
 
 
 def only_container(command, project):
@@ -456,6 +558,17 @@ def deploy(args):
                     and previous.get("verification", {}).get("backend_id") == baseline["backend_id"]):
                 existing_image = docker_json("image", "inspect", args.image)[0]
                 if old["Image"] == existing_image["Id"] and old["HostConfig"].get("Init") is True:
+                    if configuration.get("development_retention") == "current_only":
+                        output = (args.project_dir / configuration.get("backup_directory", "backups")).resolve()
+                        directories = legacy_backup_directories(args.project_dir, configuration, output, data_mount)
+                        if directories:
+                            _, protected_archives = history_for_retention(state_dir)
+                            removed = remove_legacy_backups(
+                                args.project_dir, directories, frozen_configuration, protected_archives,
+                            )
+                            if removed:
+                                previous["retention"]["removed_legacy_archives"] += removed
+                                previous["retention"]["removed_archives"] += removed
                     previous["original_actions_run"] = previous.get("original_actions_run", previous.get("actions_run"))
                     previous["actions_run"] = args.run_id
                     previous["verification"] = baseline

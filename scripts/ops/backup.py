@@ -54,10 +54,13 @@ def sha256(path):
 
 
 @contextlib.contextmanager
-def maintenance_lock(project):
+def maintenance_lock(project, *, blocking=True):
     # 与后续部署工具共用锁文件；锁随进程退出释放，不按 PID 猜测清理。
     with (project / ".hexclaw-maintenance.lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise OperationError("The backup directory's project is under maintenance") from error
         yield
 
 
