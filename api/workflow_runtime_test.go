@@ -333,6 +333,55 @@ func getRunSnapshot(t *testing.T, s *Server, runID string) WorkflowRun {
 	return run
 }
 
+func TestWorkflowArtifactSnapshotUsesStoreLock(t *testing.T) {
+	s := workflowDeliveryServer(t)
+	ref, attachment := workflowArtifactFixture(t, "workflow.txt", "text/plain", []byte("synthetic workflow report"))
+	canonical, err := messagecontent.New(messagecontent.ProducerWorkflow, "en", "Report", []messagecontent.AttachmentRef{ref})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	s.engine = &workflowContractEngine{process: func(ctx context.Context, _ *adapter.Message) (*adapter.Reply, error) {
+		close(entered)
+		select {
+		case <-release:
+			return &adapter.Reply{Content: canonical.Markdown, MessageContent: &canonical, Attachments: []adapter.Attachment{attachment}}, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}}
+	wf := contractWorkflow(contractNode("agent", "agent", nil), contractNode("out", "output", nil))
+	run, err := s.launchWorkflow(wf, RunWorkflowRequest{Input: "worksheet"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		close(release)
+		t.Fatal("Workflow did not enter the Agent node")
+	}
+
+	// 按详情查询的读锁约定释放 Agent，再读同一快照；附件必须等待读锁释放才可发布。
+	s.workflowStore.mu.RLock()
+	shared := s.workflowStore.runs[run.ID]
+	before := len(shared.ArtifactSnapshots)
+	close(release)
+	time.Sleep(250 * time.Millisecond)
+	during := len(shared.ArtifactSnapshots)
+	s.workflowStore.mu.RUnlock()
+
+	waitForRunCompletion(t, s, run.ID)
+	final := getRunSnapshot(t, s, run.ID)
+	if final.Status != "completed" || final.ArtifactSnapshots[ref.AssetID].FilePath == "" {
+		t.Fatalf("Completed run %s is missing its frozen attachment: %s", final.ID, final.Status)
+	}
+	if before != 0 || during != before {
+		t.Fatalf("Attachment published while a run reader held the store lock: before=%d during=%d", before, during)
+	}
+}
+
 // 失败回复的已观察附件必须随运行快照保留，原失败分类与下游停止语义不变。
 func TestWorkflowRunFailurePreservesObservedArtifact(t *testing.T) {
 	for _, tc := range []struct {

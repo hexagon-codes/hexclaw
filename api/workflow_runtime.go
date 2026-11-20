@@ -582,15 +582,19 @@ func (e *workflowExecutor) executeAgent(ctx context.Context, node *workflowNode,
 		defer cancel()
 	}
 	artifacts := e.server.freezeWorkflowArtifacts(freezeCtx, reply)
-	e.mu.Lock()
 	if len(artifacts) > 0 {
+		// 运行快照由存储锁保护，详情查询和持久化也通过同一把锁读取附件。
+		store := e.server.workflowStore
+		store.mu.Lock()
 		if e.run.ArtifactSnapshots == nil {
 			e.run.ArtifactSnapshots = map[string]WorkflowArtifactSnapshot{}
 		}
 		for id, snapshot := range artifacts {
 			e.run.ArtifactSnapshots[id] = snapshot
 		}
+		store.mu.Unlock()
 	}
+	e.mu.Lock()
 	result := e.ensureNodeRun(node)
 	result.MessageContent, result.RenderManifest = reply.MessageContent, reply.RenderManifest
 	if reply.Metadata != nil {
