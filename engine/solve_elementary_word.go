@@ -75,6 +75,15 @@ func solveElementaryWordProblem(problem string) (worked, answer string, ok bool)
 }
 
 func solveElementaryWordProblemDetailed(problem string) (elementaryWordSolution, bool) {
+	if source, ok := elementarymath.ParseUniformTravelProblem(problem); ok {
+		hours, _ := new(big.Rat).SetString(source.Hours)
+		distance, _ := new(big.Rat).SetString(source.Distance)
+		answer := formatArithmeticRat(distance.Quo(distance, hours))
+		worked := fmt.Sprintf("速度相同，路程随时间成正比。用已走的路程除以用时，就能求出1小时走的路程。\n%s÷(%s) = %s（%s）\n\n答案：%s%s",
+			source.Distance, source.Hours, answer, source.Unit, answer, source.Unit)
+		return elementaryWordSolution{worked: worked, value: answer, unit: source.Unit, knowledgePoint: "分数除法",
+			program: wordProgram([]string{"(" + source.Distance + ")/(" + source.Hours + ")"}, []string{source.Unit})}, true
+	}
 	if solution, ok := solveFractionQuantityProblem(problem); ok {
 		return solution, true
 	}
@@ -598,6 +607,9 @@ func elementaryWordAllowedByConstraint(problem, constraint string) bool {
 	c := strings.TrimSpace(constraint)
 	if c == "" {
 		return true
+	}
+	if _, ok := elementarymath.ParseUniformTravelProblem(problem); ok {
+		return strings.Contains(c, "分数除法")
 	}
 	if lengthSegmentCountRe.MatchString(normalizeFractionQuantityProblem(problem)) {
 		return strings.Contains(c, "分数除法")

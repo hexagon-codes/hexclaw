@@ -14,6 +14,31 @@ import (
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 )
 
+func TestTravelReferencePreservesAllCorroboratedWorksheetQuestions(t *testing.T) {
+	const main = "小宁3/5小时走了6千米，按相同的速度，她每小时走多少千米？"
+	const diagram = "1小时走了？km；1/5小时走了？km；3/5小时走了6km。"
+	const blanks = "从上图看出：已知（ ）份是6千米，可以先求出这样的1份是多少，也就是6÷3；再求这样的（ ）份是多少。"
+	const chain = "由此推算出：6÷3×5=6×1/3×5=6×(1/3×5)"
+	const reason = "（km）。推算过程中把后两个因数先乘的依据是（ ）。"
+	full := main + diagram + blanks + chain + "=10" + reason
+	short := main + diagram + blanks + chain + reason
+	for _, tc := range []struct{ name, read, want string }{
+		{"equivalent final calculation", full, full},
+		{"different operator", strings.Replace(full, "6÷3；", "6×3；", 1), main},
+		{"different condition", strings.Replace(full, "份是6千米", "份是8千米", 1), main},
+		{"different unit", strings.Replace(full, "（km）", "（m）", 1), main},
+		{"incorrect additional calculation", strings.Replace(full, "=10", "=12", 1), main},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q := RecognizedQuestion{RawTranscription: short, EvidenceTranscriptions: []string{short, tc.read}}
+			got, ok := verifiedLeadingTravelQuestion(q)
+			if !ok || got != tc.want {
+				t.Fatalf("reference = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestIndependentReferenceLatestAnswerOnlyObservation(t *testing.T) {
 	raw, err := os.ReadFile("testdata/scoped-reference-adjudication.json")
 	if err != nil {
@@ -50,7 +75,10 @@ func TestIndependentReferenceLatestAnswerOnlyObservation(t *testing.T) {
 	if !independentReferenceAnswerEligible(request, current) {
 		t.Fatalf("latest answer-only observation blocked reference: printed_conflict=%t signals=%q", questionEvidenceTranscriptionsConflictForInitialReadMode(current, request.InitialReadMode), current.OCRSignals)
 	}
-	for _, scenario := range []string{"latest clear question", "question denied", "ownership denied", "changed distance", "printed risk", "missing handwriting scope"} {
+	for _, scenario := range []string{
+		"latest clear question", "question denied", "ownership denied", "changed distance", "printed risk", "missing handwriting scope",
+		"answer frame occluded", "typed handwriting gap", "frame belongs to another slot", "frame and printed damage", "frame and mixed handwriting note", "frame and changed unit",
+	} {
 		t.Run(scenario, func(t *testing.T) {
 			q := cloneRecognizedQuestions([]RecognizedQuestion{fixture.Question})[0]
 			before, _ := json.Marshal(q)
@@ -60,6 +88,10 @@ func TestIndependentReferenceLatestAnswerOnlyObservation(t *testing.T) {
 			}
 			verification := envelope["verification"].(map[string]any)
 			observed := envelope["items"].([]any)[0].(map[string]any)["recognition"].(map[string]any)
+			if strings.Contains(scenario, "frame") || scenario == "typed handwriting gap" {
+				verification["question_complete_and_legible"] = false
+				observed["ocr_signals"] = []string{"末尾“的依据是”后的印刷填空左边界部分被遮挡，空内手写笔画无法辨认。"}
+			}
 			switch scenario {
 			case "question denied":
 				verification["question_complete_and_legible"] = false
@@ -76,12 +108,27 @@ func TestIndependentReferenceLatestAnswerOnlyObservation(t *testing.T) {
 			case "missing handwriting scope":
 				q.ImageSourceContext.Recoveries = nil
 				before, _ = json.Marshal(q)
+			case "typed handwriting gap":
+				observed["ocr_signals"] = []string{"source_gap_handwriting"}
+			case "frame belongs to another slot":
+				observed["ocr_signals"] = []string{"末尾“应写的单位”后的填空框被遮挡。"}
+			case "frame and printed damage":
+				observed["ocr_signals"] = append(observed["ocr_signals"].([]string), "起始数量条件缺失。")
+			case "frame and mixed handwriting note":
+				observed["ocr_signals"] = []string{"末尾“的依据是”后的印刷填空左边界部分被遮挡，空内手写笔画和题面原有乘号无法辨认。"}
+			case "frame and changed unit":
+				prior := observed["question"].(string)
+				observed["question"] = strings.Replace(prior, "走了2千米", "走了2米", 1)
+				if observed["question"] == prior {
+					t.Fatal("unit fixture did not change")
+				}
 			}
 			payload, encodeErr := json.Marshal(envelope)
 			if encodeErr != nil {
 				t.Fatal(encodeErr)
 			}
-			if got := independentReferenceFromAdjudication(request, q, string(payload)); got != (scenario == "latest clear question") {
+			want := scenario == "latest clear question" || scenario == "answer frame occluded" || scenario == "typed handwriting gap"
+			if question, got := independentReferenceFromAdjudication(request, q, string(payload)); got != want || question != "" {
 				t.Fatalf("reference eligibility=%t", got)
 			}
 			after, _ := json.Marshal(q)
@@ -116,6 +163,30 @@ func TestParentGuidePreservesUnclearAnswerObservation(t *testing.T) {
 	}
 	if string(before) != string(after) {
 		t.Fatal("observation projection changed durable request identity")
+	}
+}
+
+func TestVerifiedLeadingTravelQuestionKeepsIndependentConditions(t *testing.T) {
+	const primary = "小宁3/4小时步行了6千米，按相同的速度，她每小时步行多少千米？"
+	const tail = "图示：1小时步行多少千米？先求一份，再求整段。"
+	for _, tc := range []struct {
+		name, latest string
+		want         bool
+	}{
+		{"different worked example", "4." + primary + "\n1小时……后半部裁切", true},
+		{"changed printed quantity", strings.Replace(primary, "6千米", "5千米", 1) + tail, false},
+		{"changed requested unit", strings.Replace(primary, "多少千米", "多少米", 1) + tail, false},
+		{"changed instruction", strings.Replace(primary, "按相同的速度", "速度改变后", 1) + tail, false},
+		{"no independent primary", "根据下图回答，步行多少千米？" + tail, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q := RecognizedQuestion{RawTranscription: primary + tail, SourceNumberPath: []string{"4"}, DisplayLabel: "4.",
+				EvidenceTranscriptions: []string{primary + tail, "4. " + primary + tail, tc.latest}}
+			question, ok := verifiedLeadingTravelQuestion(q)
+			if ok != tc.want || ok && question != primary {
+				t.Fatalf("independent source=%q, eligible=%t", question, ok)
+			}
+		})
 	}
 }
 

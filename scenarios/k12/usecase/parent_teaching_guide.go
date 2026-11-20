@@ -7,6 +7,7 @@ import (
 	"unicode"
 
 	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/internal/elementarymath"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	"github.com/hexagon-codes/hexclaw/skill"
 )
@@ -309,7 +310,10 @@ func deterministicParentTeachingGuideForEvidence(
 	req ParentTeachingGuideRequest,
 	evidence SolveEvidence,
 ) (ParentTeachingGuide, bool) {
-	if evidence.EvidenceType != EvidenceNumericExec || !parentGuidePureArithmetic(req.Problem) {
+	if evidence.EvidenceType != EvidenceNumericExec {
+		return ParentTeachingGuide{}, false
+	}
+	if _, ok := elementarymath.ParseUniformTravelProblem(req.Problem); !ok && !parentGuidePureArithmetic(req.Problem) {
 		return ParentTeachingGuide{}, false
 	}
 	return deterministicNumericParentTeachingGuide(req)

@@ -242,6 +242,7 @@ func parseQuantityRelationAnswer(answer string) (quantityRelationAnswer, bool) {
 // verificationAnswersEqual 比较完整数量、关系填空及原题同一目标的重复结论。
 // 仅对唯一明确份数空格补单位；原候选、stdout及多空答案始终保留。
 func verificationAnswersEqual(problem, computed, candidate string) (equal, comparable bool) {
+	problem = elementarymath.PhotoVerificationProblem(problem)
 	computed = verificationAnswerProjection(problem, computed)
 	candidate = verificationAnswerProjection(problem, candidate)
 	if equal, comparable, scoped := orderedVerificationAnswersEqual(problem, computed, candidate); scoped {

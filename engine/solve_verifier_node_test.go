@@ -14,10 +14,41 @@ import (
 	"github.com/hexagon-codes/hexagon"
 	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/egress"
+	"github.com/hexagon-codes/hexclaw/internal/elementarymath"
 	"github.com/hexagon-codes/hexclaw/skill"
 	"github.com/hexagon-codes/hexclaw/skill/builtin"
 	"github.com/hexagon-codes/toolkit/os/sandbox"
 )
+
+func TestPhotoMaterialVerificationCountsOnlyCurrentBlanks(t *testing.T) {
+	const material = "大圆半径3厘米，小圆直径4厘米，图①与图②共用这些条件。"
+	for _, tc := range []struct {
+		question, answer string
+		ordered          bool
+	}{
+		{"图②中涂色部分的面积是（ ）cm²。", "15.7 cm²", false},
+		{"图②中的大圆半径是（ ）厘米，小圆半径是（ ）厘米。", "3厘米，2厘米", true},
+	} {
+		problem := elementarymath.WithPhotoAnswerRequirements(tc.question+elementarymath.PhotoMaterialSeparator+material, tc.question)
+		spec := verifierSpecWithSolution(problem, "", tc.answer, "")
+		prompt := verificationProgramPrompt(spec.verification)
+		if strings.Contains(prompt, "2 ordered blanks") != tc.ordered || !strings.Contains(prompt, material) || !strings.Contains(spec.Task, problem) {
+			t.Fatalf("incorrect target scope or changed frozen request for %s", tc.question)
+		}
+		if equal, comparable := verificationAnswersEqual(problem, tc.answer, tc.answer); !equal || !comparable {
+			t.Fatalf("current answers not comparable for %s", tc.question)
+		}
+		if tc.ordered {
+			if _, comparable := verificationAnswersEqual(problem, tc.answer, "3厘米"); comparable {
+				t.Fatal("incomplete multi-blank answer accepted")
+			}
+		}
+		changed := elementarymath.WithPhotoAnswerRequirements(tc.question+elementarymath.PhotoMaterialSeparator+material, "另一个题目（ ）")
+		if elementarymath.PhotoVerificationProblem(changed) != changed {
+			t.Fatal("conflicting source and restatement were collapsed")
+		}
+	}
+}
 
 func TestStandaloneVerificationRequiresTrustedInputAndCodeExec(t *testing.T) {
 	for _, tc := range []struct {

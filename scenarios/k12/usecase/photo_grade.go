@@ -2,7 +2,6 @@ package usecase
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"math"
 	"regexp"
@@ -512,8 +511,7 @@ func photoItemGradeRequest(req PhotoGradeRequest, q RecognizedQuestion) GradeReq
 		ParentTeachingSkillSnapshot: req.ParentTeachingSkillSnapshot,
 	}
 	if q.ImageSourceContext != nil && (len(q.ImageSourceContext.Materials) > 0 || len(q.ImageSourceContext.Recoveries) > 0) {
-		current, _ := json.Marshal(q.Question)
-		input.Problem += "\n\nCurrent question and answer requirements: " + string(current) + ". The read-only materials supply the shared conditions and any explicitly printed common main problem. When this item specifies a method, relationship or multiplier for that common problem, complete both its own intermediate answers and the common requested final quantity, including the capacity calculation line; do not stop at a ratio conversion. Do not answer other numbered items. Answer every requested blank, relationship, multiplier, intermediate quantity and final expression. Put ALL required reference answers in the Answer section, with the conditions for alternative valid fillings; a final scalar alone is insufficient when the current question asks for other answers. Preserve the printed equation template's sides, operations and fixed coefficients when filling blanks. A rearranged equation can explain a relationship but cannot replace the filling of a different printed template. These completeness requirements apply to the reference solution; a student may give any one valid alternative rather than enumerate all alternatives."
+		input.Problem = elementarymath.WithPhotoAnswerRequirements(input.Problem, q.Question)
 	}
 	// 可读投影可能把上下分式写成斜杠；只在完整作答一致时保留原分式作为计算输入，
 	// 避免将除以分数误解为连续除法。识读、展示和持久身份仍使用原字段。
@@ -559,7 +557,7 @@ func photoQuestionProblemTexts(q RecognizedQuestion) (problem, sourceProblem str
 	}
 	sourceFragments := []string{q.Question}
 	for _, material := range q.ImageSourceContext.Materials {
-		problem += "\n\nRead-only source material (do not answer as another question):\n" + material.Text
+		problem += elementarymath.PhotoMaterialSeparator + material.Text
 		sourceFragments = append(sourceFragments, material.Text)
 	}
 	for _, recovery := range q.ImageSourceContext.Recoveries {
