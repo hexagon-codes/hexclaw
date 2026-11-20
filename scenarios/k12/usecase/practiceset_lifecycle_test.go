@@ -2,14 +2,18 @@ package usecase_test
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/hexagon-codes/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/records"
+	"github.com/hexagon-codes/hexclaw/router"
 	"github.com/hexagon-codes/hexclaw/scenario"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/curriculum"
+	"github.com/hexagon-codes/hexclaw/scenarios/k12/engineadapter"
 	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/usecase"
 )
@@ -137,6 +141,70 @@ func TestPracticeSetFullLifecycle(t *testing.T) {
 	}
 	if final.Fields.DeliveryBatchID == "" {
 		t.Fatal("发送后的练习卷应关联冻结的 delivery batch")
+	}
+}
+
+func TestPracticeSetReadsArchivedDeliveryWithoutResending(t *testing.T) {
+	t.Setenv("HEXCLAW_ASSET_ROOT", t.TempDir())
+	ctx := t.Context()
+	source, target := newDataDeps(t), newDataDeps(t)
+	attachDeliveredPracticeTransport(&source, 1)
+	const agent = "xiaoming"
+	id, _, err := source.CreatePracticeSet(ctx, agent, "practice-archive", k12.PracticeSetFields{
+		SourceKind: k12.PracticeSourceWeekly, Title: "练习卷",
+		Items: []k12.PracticeItem{verifiedItem("q1", "1+1=?", "2")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sent, _, err := source.FinalizeBasket(ctx, agent, id, "send")
+	if err != nil || sent.Fields.DeliveryStatus != k12.PracticeDeliveryDelivered || sent.Fields.DeliveryBatchID == "" {
+		t.Fatalf("seeded delivery: status=%q error=%v", sent.Fields.DeliveryStatus, err)
+	}
+	archive, err := source.Backup(ctx, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agents := router.NewSQLiteStore(target.Records.DB())
+	if err := agents.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	dispatcher := router.New()
+	cfg := router.AgentConfig{Name: agent}
+	if err := dispatcher.Register(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := agents.SaveAgent(ctx, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	target.ArchiveRestorer = engineadapter.NewArchiveRestoreAdapter(target.Records.DB(), target.Records, dispatcher, agents)
+	if n, err := target.Restore(ctx, archive); err != nil || n != 1 {
+		t.Fatalf("restore practice set: count=%d error=%v", n, err)
+	}
+	restored, err := target.GetPracticeSet(ctx, agent, id)
+	if err != nil || restored.Record.Status != k12.PracticeStatusAssigned ||
+		restored.Fields.DeliveryStatus != k12.PracticeDeliveryDelivered ||
+		restored.Fields.DeliveryBatchID != sent.Fields.DeliveryBatchID {
+		t.Fatalf("archived practice set detail: view=%+v error=%v", restored, err)
+	}
+	sets, err := target.ListPracticeSets(ctx, agent, k12.PracticeStatusAssigned)
+	if err != nil || len(sets) != 1 || sets[0].Record.RecordID != id ||
+		sets[0].Fields.DeliveryStatus != k12.PracticeDeliveryDelivered {
+		t.Fatalf("archived practice set list: count=%d error=%v", len(sets), err)
+	}
+	if _, err := target.Records.GetDeliveryBatch(ctx, agent, sent.Fields.DeliveryBatchID); !errors.Is(err, records.ErrNotFound) {
+		t.Fatalf("restore must not create a live batch: %v", err)
+	}
+
+	// 旧归档可能在投递收口前冻结，只保存了 pending 投影和批次标识。
+	if _, err := target.Records.DB().ExecContext(ctx, `UPDATE k12_practice_sets
+		SET delivery_status=? WHERE record_id=?`, k12.PracticeDeliveryPending, id); err != nil {
+		t.Fatal(err)
+	}
+	replay, _, err := target.FinalizeBasket(ctx, agent, id, "send")
+	if err != nil || replay.Fields.DeliveryStatus != k12.PracticeDeliveryOutcomeUnknown ||
+		replay.Fields.DeliveryBatchID != sent.Fields.DeliveryBatchID {
+		t.Fatalf("old pending batch must remain unknown on replay: status=%q error=%v", replay.Fields.DeliveryStatus, err)
 	}
 }
 

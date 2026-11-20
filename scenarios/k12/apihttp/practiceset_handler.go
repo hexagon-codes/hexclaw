@@ -64,6 +64,7 @@ type practiceSetDTO struct {
 	AnswerSheet         string                   `json:"answer_artifact_id,omitempty"`
 	DeliveryStatus      string                   `json:"delivery_status"`
 	DeliveryBatchID     string                   `json:"delivery_batch_id,omitempty"`
+	DeliveryRetryable   bool                     `json:"delivery_retryable"`
 	SkippedBlockedCount int                      `json:"skipped_blocked_count,omitempty"`
 	PaperNo             string                   `json:"paper_no,omitempty"`
 	FinalizedAt         int64                    `json:"finalized_at,omitempty"`
@@ -176,7 +177,8 @@ func toPracticeSetDTO(v usecase.PracticeSetView) practiceSetDTO {
 		PaperNo:             v.Fields.PaperNo, FinalizedAt: v.Fields.FinalizedAt, FinalizedVia: v.Fields.FinalizedVia,
 		QuestionSheet: v.Fields.QuestionArtifact, AnswerSheet: v.Fields.AnswerArtifact,
 		DeliveryStatus: v.Fields.DeliveryStatus, DeliveryBatchID: v.Fields.DeliveryBatchID,
-		Items: items, ReturnAssets: returnAssets,
+		DeliveryRetryable: v.DeliveryRetryable,
+		Items:             items, ReturnAssets: returnAssets,
 	}
 }
 

@@ -651,6 +651,9 @@ List practice sets
 
 Returns practice sets and visible ready items; generation placeholders not yet ready are omitted from public items.
 
+Restored practice sets retain the original delivery batch ID and stored terminal status. Records whose batch is unavailable and whose delivery was still pending return `delivery_status=outcome_unknown`.
+`delivery_retryable` is true for an available batch in `failed` or `partial_failed` state. A retained archive batch ID is a historical reference. When an older server omits this field, query the batch to establish eligibility.
+
 | Parameter | Location | Type / constraints | Required | Meaning |
 | --- | --- | --- | --- | --- |
 | `agent` | query | string；minLength=1 | Yes | K12 agent name |
@@ -677,6 +680,8 @@ Implementation: [listPracticeSets](../../../../scenarios/k12/apihttp/practiceset
 Read a practice set
 
 Includes items/result_correct and returned-photo/regrade projections. Absent or null result_correct means no conclusion, not false.
+
+Delivery status follows the same rule as the list endpoint. Reading a historical batch does not send a message.
 
 | Parameter | Location | Type / constraints | Required | Meaning |
 | --- | --- | --- | --- | --- |
@@ -2545,6 +2550,7 @@ Source: [scenarios/k12/practice_candidate_review.go](../../../../scenarios/k12/p
 | `answer_artifact_id` | string | No | JSON projection field; omitted when absent if optional. |
 | `delivery_status` | string (`not_sent`, `pending`, `sending`, `delivered`, `failed`, `partial_failed`, `outcome_unknown`) | Yes | JSON projection field; omitted when absent if optional. |
 | `delivery_batch_id` | string | No | JSON projection field; omitted when absent if optional. |
+| `delivery_retryable` | boolean | No | Whether the original batch can retry its definitively failed receipts. |
 | `skipped_blocked_count` | integer | No | Count of non-publishable items skipped during finalization |
 | `paper_no` | string | No | Reserved/formal paper number; native receipts determine whether printing completed |
 | `finalized_at` | integer | No | JSON projection field; omitted when absent if optional. |

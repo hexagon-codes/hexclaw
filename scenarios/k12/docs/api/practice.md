@@ -651,6 +651,9 @@ curl -fS -X POST "$HEXCLAW_BASE_URL/api/k12/mistakes/mistake-demo-1/defer-this-w
 
 返回练习集和可见就绪题；生成尚未 ready 的占位项不进入公开 items。
 
+从备份恢复的练习集仍返回原批次标识及已保存的投递终态。缺少活批次且原状态尚未收口时，返回 `delivery_status=outcome_unknown`。
+`delivery_retryable` 只在原批次仍可查询且整体失败或部分失败时为 true。归档中的原批次标识可用于历史查证。未提供该字段的旧服务可查询原批次判断资格。
+
 | 参数 | 位置 | 类型 / 约束 | 必填 | 说明 |
 | --- | --- | --- | --- | --- |
 | `agent` | query | string；minLength=1 | 是 | K12 Agent 名称 |
@@ -677,6 +680,8 @@ curl -fS "$HEXCLAW_BASE_URL/api/k12/practice-sets?agent=tutor-demo" \
 读取练习集详情
 
 返回 item/result_correct、回传照片及复批投影。result_correct 缺省或 null 表示尚无结论，不能按 false 处理。
+
+投递状态按列表接口的同一规则读取。读取历史批次不会发起投递。
 
 | 参数 | 位置 | 类型 / 约束 | 必填 | 说明 |
 | --- | --- | --- | --- | --- |
@@ -2545,6 +2550,7 @@ curl -fS -X POST "$HEXCLAW_BASE_URL/api/k12/weekly-practice/plans/resource-demo-
 | `answer_artifact_id` | string | 否 | JSON 投影字段；可选字段在无值时可能省略。 |
 | `delivery_status` | string (`not_sent`, `pending`, `sending`, `delivered`, `failed`, `partial_failed`, `outcome_unknown`) | 是 | JSON 投影字段；可选字段在无值时可能省略。 |
 | `delivery_batch_id` | string | 否 | JSON 投影字段；可选字段在无值时可能省略。 |
+| `delivery_retryable` | boolean | 否 | 当前是否可用原批次重试明确失败的子投递。 |
 | `skipped_blocked_count` | integer | 否 | 固化时跳过的未达发布条件题数 |
 | `paper_no` | string | 否 | 预占或正式卷号；是否已打印以原生回执为准 |
 | `finalized_at` | integer | 否 | JSON 投影字段；可选字段在无值时可能省略。 |

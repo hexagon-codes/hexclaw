@@ -14587,10 +14587,12 @@ paths:
       summary: 查询练习集 / List practice sets
       description: >-
         返回练习集和可见就绪题；生成尚未 ready 的占位项不进入公开 items。
+        从归档恢复且当前缺投递批次时，保留原批次身份及冻结终态；旧 pending/sending 显示为 outcome_unknown。
 
 
         Returns practice sets and visible ready items; generation placeholders not yet ready are omitted from
-        public items.
+        public items. For a restored set with no local delivery batch, the original batch identity and any
+        frozen terminal state are preserved. Prior pending or sending status is projected as outcome_unknown.
       tags:
         - k12-practice
       x-source:
@@ -14649,10 +14651,11 @@ paths:
       summary: 读取练习集详情 / Read a practice set
       description: >-
         返回 item/result_correct、回传照片及复批投影。result_correct 缺省或 null 表示尚无结论，不能按 false 处理。
+        归档恢复的投递状态与列表同源，不重新发送。
 
 
         Includes items/result_correct and returned-photo/regrade projections. Absent or null result_correct
-        means no conclusion, not false.
+        means no conclusion, not false. Restored delivery state is derived as in the list endpoint, with no resend.
       tags:
         - k12-practice
       x-source:
@@ -35565,6 +35568,9 @@ components:
             - outcome_unknown
         delivery_batch_id:
           type: string
+        delivery_retryable:
+          type: boolean
+          description: 原批次仍可查询且有明确失败的目标时为 true / True for an available batch with definite failures that can be retried
         skipped_blocked_count:
           type: integer
           description: 固化时跳过的未达发布条件题数 / Count of non-publishable items skipped during finalization

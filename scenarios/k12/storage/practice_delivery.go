@@ -2,7 +2,9 @@ package k12storage
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -16,6 +18,44 @@ type PracticeDeliveryBatchFactory func(
 	context.Context,
 	k12.PracticeSetFields,
 ) (k12.DeliveryBatch, error)
+
+// SnapshotPracticeDeliveryStatusesTx 把同一快照下的投递事实写入导出记录的既有字段。
+// 备份不携带投递批次和回执，磁盘练习集仍由回执作权威投影。
+func (s *Store) SnapshotPracticeDeliveryStatusesTx(
+	ctx context.Context, tx *sql.Tx, agentName string, recs []*records.AgentRecord,
+) error {
+	if tx == nil {
+		return fmt.Errorf("k12storage: nil practice delivery snapshot transaction")
+	}
+	for _, record := range recs {
+		if record.Collection != k12.CollectionPracticeSet {
+			continue
+		}
+		fields, err := k12.ParsePracticeSetFields(record.Fields)
+		if err != nil {
+			return err
+		}
+		if fields.DeliveryBatchID == "" {
+			continue
+		}
+		batch, err := getDeliveryBatchVia(ctx, tx, agentName, fields.DeliveryBatchID)
+		if errors.Is(err, records.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if batch.ObjectKind != "practice_set_question" || batch.ObjectID != record.RecordID {
+			return fmt.Errorf("%w: practice set delivery snapshot object mismatch", ErrDeliveryBatchConflict)
+		}
+		fields.DeliveryStatus = string(batch.Status)
+		record.Fields, err = marshalFields(fields)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 // FinalizePracticeSetWithDeliveryBatch makes the PracticeSet finalization,
 // paper-number reservation, DeliveryBatch root and every child receipt one

@@ -18,8 +18,9 @@ import (
 
 // PracticeSetItem 练习集条目（记录 + 领域字段）。
 type PracticeSetView struct {
-	Record *records.AgentRecord
-	Fields k12.PracticeSetFields
+	Record            *records.AgentRecord
+	Fields            k12.PracticeSetFields
+	DeliveryRetryable bool
 }
 
 // CreatePracticeSet 新建练习集草稿（PRD §3.8）。幂等去重：同来源+标题+题目内容命中已存在则不重复入库。
@@ -65,14 +66,26 @@ func (d Deps) GetPracticeSet(ctx context.Context, agentName, recordID string) (P
 		return PracticeSetView{}, fmt.Errorf("usecase: 练习集不存在或不属于该实例")
 	}
 	f, _ := k12.ParsePracticeSetFields(rec.Fields)
+	retryable := false
 	if f.DeliveryBatchID != "" {
 		batch, batchErr := d.Records.GetDeliveryBatch(ctx, agentName, f.DeliveryBatchID)
-		if batchErr != nil {
+		switch {
+		case batchErr == nil:
+			f.DeliveryStatus = string(batch.Status)
+			retryable = batch.ObjectID == rec.RecordID && rec.Status != k12.PracticeStatusCancelled &&
+				(batch.Status == k12.DeliveryBatchFailed || batch.Status == k12.DeliveryBatchPartialFailed)
+		case errors.Is(batchErr, records.ErrNotFound):
+			// 归档保存练习集的批次标识和已知状态。活跃批次未随归档恢复，
+			// 保留原标识阻止重发；没有终态的旧投递只能按结果未知读取。
+			switch f.DeliveryStatus {
+			case "", k12.PracticeDeliveryPending, k12.PracticeDeliverySending:
+				f.DeliveryStatus = k12.PracticeDeliveryOutcomeUnknown
+			}
+		default:
 			return PracticeSetView{}, fmt.Errorf("usecase: 取练习集投递批次: %w", batchErr)
 		}
-		f.DeliveryStatus = string(batch.Status)
 	}
-	return PracticeSetView{Record: rec, Fields: f}, nil
+	return PracticeSetView{Record: rec, Fields: f, DeliveryRetryable: retryable}, nil
 }
 
 // VerifyPracticeItem 标记某练习项的验证状态（PRD §4.7）。verified 必须带验证方式证据，
