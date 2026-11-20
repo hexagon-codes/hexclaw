@@ -621,6 +621,17 @@ WHERE status IN ('confirmed','assigned','submitted','graded','closed','cancelled
 	K12PhotoGradingCacheV147,
 	ExternalToolExecutionsV148,
 	K12AccumulationMetadataCommandsV149,
+	{
+		Version:     150,
+		Description: "Keep request identities of replaced conversation replies",
+		SQL: `CREATE TABLE chat_superseded_requests (
+			owner_id TEXT NOT NULL,
+			request_id TEXT NOT NULL,
+			session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+			PRIMARY KEY(owner_id, request_id)
+		);
+		CREATE INDEX idx_chat_superseded_requests_session ON chat_superseded_requests(session_id);`,
+	},
 }
 
 const k12PrintJobsV13DDL = `CREATE TABLE IF NOT EXISTS k12_paper_no_counters (
