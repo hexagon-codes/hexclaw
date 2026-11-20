@@ -11,6 +11,7 @@ import (
 	"image/color"
 	"image/draw"
 	"image/png"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -338,6 +339,18 @@ func BuildRecognitionLayoutPlanV2(input RecognitionLayoutPlanInputV2) (Recogniti
 		if input.EnableSourceAdjudication {
 			original := originalByRef[target.ManifestRef]
 			contextRegion := recognitionLayoutAdjudicationRegion(target.Region, pageBounds)
+			if input.InitialReadMode == RecognitionLayoutManifestWithContentV1 && input.ScopeInput != nil && input.ScopeInput.IncludeSharedReviewRegions &&
+				input.Scope != nil && len(input.Scope.Excluded) == 0 && len(input.Scope.SelectedOrders) == len(input.Targets) {
+				// 只补本目标引用的原图像素。独立核验仍按原框和题号定位，不把公共图示拆成新问题。
+				for _, dep := range input.Scope.Dependencies {
+					if len(dep.ForOrders) > 1 && slices.Contains(dep.ForOrders, target.ManifestOrder) && strings.ContainsAny(dep.Text, "图①②③④⑤⑥⑦⑧⑨⑩") {
+						r := dep.Region
+						combined := image.Rect(contextRegion.X, contextRegion.Y, contextRegion.X+contextRegion.Width, contextRegion.Y+contextRegion.Height).
+							Union(image.Rect(r.X, r.Y, r.X+r.Width, r.Y+r.Height)).Intersect(pageBounds)
+						contextRegion = SourcePixelRegion{X: combined.Min.X, Y: combined.Min.Y, Width: combined.Dx(), Height: combined.Dy()}
+					}
+				}
+			}
 			if input.InitialReadMode == RecognitionLayoutManifestWithContentV1 && input.Scope != nil && input.PageOrientation != nil && input.PageOrientation.ClockwiseDegrees != 0 {
 				// 横拍页的近似紧框可能切断纵向题干与父材料；独立核验保留整页像素，仍按目标身份区分作答。
 				// 低可信方向只触发补充上下文，不据此旋转原像素。

@@ -23,11 +23,12 @@ func RecognitionImageSourceUprightReviewEnabled(policy string) bool {
 
 // 范围输入随任务冻结；缺少版本的历史任务继续使用原有整页合同。
 type RecognitionImageScopeInputV1 struct {
-	Version                string `json:"version"`
-	MessageIntent          string `json:"message_intent,omitempty"`
-	Action                 string `json:"action,omitempty"`
-	SourceReviewPolicy     string `json:"source_review_policy,omitempty"`
-	SourceComparisonPolicy string `json:"source_comparison_policy,omitempty"`
+	Version                    string `json:"version"`
+	MessageIntent              string `json:"message_intent,omitempty"`
+	Action                     string `json:"action,omitempty"`
+	SourceReviewPolicy         string `json:"source_review_policy,omitempty"`
+	SourceComparisonPolicy     string `json:"source_comparison_policy,omitempty"`
+	IncludeSharedReviewRegions bool   `json:"include_shared_review_regions,omitempty"`
 }
 
 type RecognitionImageScopeDependencyV1 struct {

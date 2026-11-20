@@ -431,6 +431,7 @@ func scopedMaterialReadingsEquivalent(q RecognizedQuestion, raw string, values [
 			}
 			value = strings.TrimSpace(strings.TrimPrefix(value, longest))
 		}
+		value = scopedDiagramQuestionText(q, value)
 		// 首读把印刷编号放在元数据，复读可能再次写入正文；只去掉本题括号编号
 		// 后紧接明确指令词的前缀，不把算式中的括号数或其他题号当作编号。
 		value = stripPrintedInstructionNumber(q, value)

@@ -4,9 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
+	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/usecase"
 )
@@ -324,11 +328,10 @@ func parseRecognitionLayoutAdjudication(raw string, target k12.RecognitionLayout
 // ReviewCompletedSource 沿用独立归属复核协议，不发送旧作答或已算出的答案。
 func (a *RecognizerAdapter) ReviewCompletedSource(ctx context.Context, image []byte, q usecase.RecognizedQuestion) (usecase.CompletedSourceReview, error) {
 	out := usecase.CompletedSourceReview{}
-	if q.SourceRegion == nil || q.SourceWidth <= 0 || q.SourceHeight <= 0 {
-		return out, fmt.Errorf("original source region unavailable")
+	target, err := completedSourceReviewTarget(q)
+	if err != nil {
+		return out, err
 	}
-	whole := k12.SourcePixelRegion{X: 0, Y: 0, Width: q.SourceWidth, Height: q.SourceHeight}
-	target := k12.RecognitionLayoutTargetV2{TargetID: "t1", SourceNumberPath: q.SourceNumberPath, DisplayLabel: q.DisplayLabel, SourceSectionPath: q.SourceSectionPath, SourceSectionLabel: q.SourceSectionLabel, Region: whole, OriginalRegion: q.SourceRegion, AdjudicationRegion: &whole}
 	prompt, err := buildRecognitionLayoutAdjudicationPrompt(target, k12.RecognitionLayoutCompactV4)
 	if err != nil {
 		return out, err
@@ -338,12 +341,76 @@ func (a *RecognizerAdapter) ReviewCompletedSource(ctx context.Context, image []b
 	if err != nil {
 		return out, err
 	}
+	return a.ParseCompletedSourceReview(raw, q)
+}
+
+// ParseCompletedSourceReview 仅重解释已返回的原始响应，不调用视觉模型或改写已冻结的题干。
+func (a *RecognizerAdapter) ParseCompletedSourceReview(raw string, q usecase.RecognizedQuestion) (usecase.CompletedSourceReview, error) {
+	out := usecase.CompletedSourceReview{Raw: raw}
+	target, err := completedSourceReviewTarget(q)
+	if err != nil {
+		return out, err
+	}
 	_, review, verified := parseRecognitionLayoutAdjudication(raw, target, k12.RecognitionLayoutCompactV4)
 	if review == nil || review.question == nil {
 		return out, nil
 	}
 	out.Question = *review.question
-	sameQuestion, _ := usecase.RecognitionSourceReadingsMatch(q, out.Question)
-	out.Verified = verified && sameQuestion
+	out.Verified = verified && completedSourceLeafRetained(q, out.Question)
 	return out, nil
+}
+
+func completedSourceReviewTarget(q usecase.RecognizedQuestion) (k12.RecognitionLayoutTargetV2, error) {
+	if q.SourceRegion == nil || q.SourceWidth <= 0 || q.SourceHeight <= 0 {
+		return k12.RecognitionLayoutTargetV2{}, fmt.Errorf("original source region unavailable")
+	}
+	whole := k12.SourcePixelRegion{X: 0, Y: 0, Width: q.SourceWidth, Height: q.SourceHeight}
+	return k12.RecognitionLayoutTargetV2{TargetID: "t1", SourceNumberPath: q.SourceNumberPath, DisplayLabel: q.DisplayLabel, SourceSectionPath: q.SourceSectionPath, SourceSectionLabel: q.SourceSectionLabel, Region: whole, OriginalRegion: q.SourceRegion, AdjudicationRegion: &whole}, nil
+}
+
+func completedSourceLeafRetained(prior, review usecase.RecognizedQuestion) bool {
+	reading := func(q usecase.RecognizedQuestion) string {
+		text := q.RawTranscription
+		if strings.TrimSpace(text) == "" {
+			text = q.Question
+		}
+		text = completedSourceWhitespaceView(text)
+		text = k12.RecognitionQuestionSourceTextV1(text, q.SourceNumberPath, q.DisplayLabel)
+		return strings.TrimSpace(adapter.NormalizeMathText(text))
+	}
+	leaf, whole := reading(prior), reading(review)
+	if leaf == "" || whole == "" {
+		return false
+	}
+	// 公共条件只能在完整叶题前；候选必须从句界开始并一直延续到整份读数末尾。
+	for start := range whole {
+		if start != 0 {
+			prefix := strings.TrimRightFunc(whole[:start], func(r rune) bool { return unicode.IsSpace(r) && r != '\n' && r != '\r' })
+			last, _ := utf8.DecodeLastRuneInString(prefix)
+			if !strings.ContainsRune("。！？!?；;\n\r", last) {
+				continue
+			}
+		}
+		if k12.RecognitionSourceQuestionsEqualV1(leaf, whole[start:]) {
+			return true
+		}
+	}
+	return false
+}
+
+func completedSourceWhitespaceView(text string) string {
+	var out strings.Builder
+	for i := 0; i < len(text); {
+		if text[i] == '\\' && (i == 0 || text[i-1] != '\\') && len(text)-i >= 6 && text[i+1] == 'u' {
+			value, err := strconv.ParseUint(text[i+2:i+6], 16, 16)
+			if err == nil && unicode.IsSpace(rune(value)) {
+				out.WriteRune(rune(value))
+				i += 6
+				continue
+			}
+		}
+		out.WriteByte(text[i])
+		i++
+	}
+	return out.String()
 }

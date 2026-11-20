@@ -340,3 +340,78 @@ func TestCompletedSourceReview_OriginalTargetAndFullReceipt(t *testing.T) {
 		t.Fatalf("review=%+v err=%v calls=%d", result, err, calls)
 	}
 }
+
+func TestCompletedSourceReview_ReparsesHistoricalSucceededJSON(t *testing.T) {
+	const persisted = `{"question":{"problem_id":"t1","problem_kind":"standalone","source_number_path":["1","（1）"],"display_label":"（1）","raw_transcription":"如下图，有大小两个圆。\\(r=3\\mathrm{cm}\\)，\\(d=4\\mathrm{cm}\\)。将这两个圆按如图①所示放置，涂色部分的面积是（ ）\\(\\mathrm{cm}^2\\)。","canonical_markdown":"如下图，有大小两个圆。r=3cm，d=4cm。将这两个圆按如图①所示放置，涂色部分的面积是（ ）cm²。","canonical_version":1,"recognition_confidence":0.99,"Question":"如下图，有大小两个圆。r=3cm，d=4cm。将这两个圆按如图①所示放置，涂色部分的面积是（ ）cm²。","KnowledgePoints":null,"AnswerState":"blank","StudentAnswer":"","Subject":"数学","BBox":null},"verified":false,"raw":"{\"verification\":{\"target_ownership_confirmed\":true,\"active_answer_complete\":true},\"items\":[{\"target_id\":\"t1\",\"kind\":\"question\",\"recognition\":{\"question\":\"如下图，有大小两个圆。\\\\(r=3\\\\mathrm{cm}\\\\)，\\\\(d=4\\\\mathrm{cm}\\\\)。将这两个圆按如图①所示放置，涂色部分的面积是（ ）\\\\(\\\\mathrm{cm}^2\\\\)。\",\"subject\":\"数学\",\"answer_state\":\"blank\",\"student_answer\":\"\",\"recognition_confidence\":0.99,\"ocr_signals\":[],\"answer_bbox\":null}}]}"}`
+	var previous usecase.CompletedSourceReview
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(persisted), &previous); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(persisted), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if previous.Verified || previous.Raw == "" {
+		t.Fatal("historical receipt must retain the original false derived conclusion")
+	}
+	region := k12.SourcePixelRegion{X: 0, Y: 279, Width: 954, Height: 69}
+	leaf := `将这两个圆按如图①所示放置，涂色部分的面积是（\u3000）cm²。`
+	q := usecase.RecognizedQuestion{Question: leaf, RawTranscription: leaf, CanonicalMarkdown: leaf, Subject: "数学", SourceNumberPath: []string{"1", "（1）"}, DisplayLabel: "（1）", SourceWidth: 966, SourceHeight: 416, SourceRegion: &region}
+	adapter := NewRecognizerAdapter(func(context.Context, []byte, string) (string, error) {
+		t.Fatal("a succeeded source receipt must not dispatch vision again")
+		return "", nil
+	})
+	parsed, err := adapter.ParseCompletedSourceReview(previous.Raw, q)
+	question, marshalErr := json.Marshal(parsed.Question)
+	if err != nil || marshalErr != nil || !parsed.Verified || parsed.Raw != previous.Raw || string(question) != string(envelope["question"]) || previous.Verified {
+		t.Fatalf("historical source parsing drifted: verified=%t question_equal=%t err=%v marshal=%v", parsed.Verified, string(question) == string(envelope["question"]), err, marshalErr)
+	}
+}
+
+func TestCompletedSourceReview_PreservesLeafWithinSharedContext(t *testing.T) {
+	const leaf = `将这两个圆按如图①所示放置，涂色部分的面积是（\u3000）cm²。`
+	const full = `如下图，有大小两个圆。\\(r=3\\mathrm{cm}\\)，\\(d=4\\mathrm{cm}\\)。将这两个圆按如图①所示放置，涂色部分的面积是（ ）\\(\\mathrm{cm}^2\\)。`
+	for _, tc := range []struct {
+		name, prior, observed string
+		want                  bool
+	}{
+		{"shared material before complete leaf", leaf, full, true},
+		{"unicode whitespace only", leaf, `将这两个圆按如图①所示放置，涂色部分的面积是（ ）cm²。`, true},
+		{"different diagram", leaf, strings.Replace(full, "图①", "图②", 1), false},
+		{"necessary word changed", leaf, strings.Replace(full, "涂色部分", "未涂色部分", 1), false},
+		{"extra target after leaf", leaf, full + `再求两个圆的周长。`, false},
+		{"leaf attached inside another sentence", leaf, `请勿` + strings.ReplaceAll(leaf, `\u3000`, " "), false},
+		{"leaf number changed", `计算5+6=（ ）`, `共同条件。计算5+7=（ ）`, false},
+		{"leaf operator changed", `计算5+6=（ ）`, `共同条件。计算5-6=（ ）`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			region := k12.SourcePixelRegion{X: 0, Y: 279, Width: 954, Height: 69}
+			q := usecase.RecognizedQuestion{Question: tc.prior, RawTranscription: tc.prior, CanonicalMarkdown: tc.prior, Subject: "数学", SourceNumberPath: []string{"1", "（1）"}, DisplayLabel: "（1）", SourceWidth: 966, SourceHeight: 416, SourceRegion: &region}
+			raw, err := json.Marshal(map[string]any{
+				"verification": map[string]bool{"target_ownership_confirmed": true, "active_answer_complete": true},
+				"items":        []any{map[string]any{"target_id": "t1", "kind": "question", "recognition": map[string]any{"question": tc.observed, "subject": "数学", "answer_state": "blank", "student_answer": "", "recognition_confidence": 0.99, "ocr_signals": []string{}, "answer_bbox": nil}}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			calls := 0
+			adapter := NewRecognizerAdapter(func(context.Context, []byte, string) (string, error) {
+				calls++
+				return string(raw), nil
+			})
+			review, err := adapter.ReviewCompletedSource(t.Context(), []byte("original pixels"), q)
+			if err != nil || review.Verified != tc.want || review.Raw != string(raw) || calls != 1 {
+				t.Fatalf("verified=%t want=%t err=%v calls=%d", review.Verified, tc.want, err, calls)
+			}
+			if q.RawTranscription != tc.prior || q.Question != tc.prior {
+				t.Fatal("source review rewrote the frozen leaf")
+			}
+			replayed, err := adapter.ParseCompletedSourceReview(string(raw), q)
+			priorQuestion, _ := json.Marshal(review.Question)
+			replayedQuestion, _ := json.Marshal(replayed.Question)
+			if err != nil || replayed.Verified != tc.want || replayed.Raw != string(raw) || string(priorQuestion) != string(replayedQuestion) || calls != 1 {
+				t.Fatalf("pure source parsing changed the receipt or dispatched vision: verified=%t err=%v calls=%d", replayed.Verified, err, calls)
+			}
+		})
+	}
+}

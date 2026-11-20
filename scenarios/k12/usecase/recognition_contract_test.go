@@ -109,6 +109,28 @@ func TestRecognitionFrozenQuestionIdentityFormatting(t *testing.T) {
 	}
 }
 
+func TestFrozenDiagramDimensionsRepetitionPreservesTargetIdentity(t *testing.T) {
+	const leaf = "将这两个圆按如图①所示放置，涂色部分的面积是（ ）cm²。"
+	const intro = "如下图，有大小两个圆。"
+	const observed = intro + "r=5 cm，d=6 cm。\n（1）" + leaf
+	for _, tc := range []struct{ from, to string }{{"", ""}, {"r=5", "r=6"}, {"5 cm", "5 dm"}, {"图①", "图②"}, {"（1）", "（2）"}, {"涂色", "空白"}} {
+		text := strings.Replace(observed, tc.from, tc.to, 1)
+		q := RecognizedQuestion{Subject: "数学", SourceNumberPath: []string{"1", "（1）"}, DisplayLabel: "（1）", RawTranscription: text,
+			EvidenceTranscriptions: []string{intro + leaf, strings.Replace(text, "按如图", "按照图", 1)},
+			ImageSourceContext: &k12.RecognitionImageSourceContextV1{Version: k12.RecognitionImageScopeVersionV1, ScopeDigest: "frozen", TargetIDs: []string{"first"},
+				Materials: []k12.RecognitionImageScopeDependencyV1{{ForOrders: []int{1, 2}, Text: "r=5 cm；d=6 cm；图示①、②"}}}}
+		if conflict := questionEvidenceTranscriptionsConflict(q); conflict != (tc.from != "") {
+			t.Errorf("conflict for %q → %q: %t", tc.from, tc.to, conflict)
+		}
+		if tc.from == "" {
+			q.ImageSourceContext.Materials[0].Text += "；r=8 cm"
+			if !questionEvidenceTranscriptionsConflict(q) {
+				t.Fatal("two distinct radii in a shared diagram cannot prove a single local radius")
+			}
+		}
+	}
+}
+
 func TestScopedSharedMaterialPrefixDoesNotConflictWithLocalQuestion(t *testing.T) {
 	const shared = "一个硬盘，已用空间是总容量的2/5，正好用了4.8 TB。"
 	const child = "根据总容量是已用空间的（　）。列式：________"
