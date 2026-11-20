@@ -8,9 +8,36 @@ import (
 
 	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/hexclaw/engine"
+	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/usecase"
 	"github.com/hexagon-codes/hexclaw/skill"
 )
+
+func TestWeeklyVerifiedGraderUsesFrozenSubjectInProviderPrompt(t *testing.T) {
+	var spec engine.SubAgentSpec
+	var calls int
+	solver := engine.NewSolveSkill(func(_ context.Context, incoming engine.SubAgentSpec) (engine.SubAgentResult, error) {
+		spec = incoming
+		calls++
+		return engine.SubAgentResult{Output: "CORRECT: yes\nFINAL_ANSWER_CORRECT: yes\nWRONG_STEP:\nWRONG_STEP_SOURCE:\nMISCONCEPTION:\nGUIDANCE: Keep practising."}, nil
+	}, engine.NewSubAgentRegistry(""))
+	assessor := usecase.NewVerifiedSolutionWeeklyAssessor(NewSolveAdapter(solver))
+	result, err := assessor.AssessWeeklyPracticeAnswer(t.Context(), usecase.WeeklyPracticeAnswerRequest{
+		SnapshotID: "frozen-snapshot", StudentAnswer: "请坐。", VerifiedSolution: "答案：请坐。",
+		Item: k12.WeeklyPracticeItem{
+			ItemID: "frozen-item", Subject: "语文", PromptMarkdown: "写一句礼貌的邀请。",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Result != k12.WeeklyAttemptCorrect || result.Subject != "语文" || calls != 1 ||
+		!strings.Contains(spec.Task, "Subject: 语文") || !strings.Contains(spec.Task, "Reference solution: 答案：请坐。") ||
+		strings.Contains(spec.Task, "Unicode mathematical symbols") {
+		t.Fatalf("frozen subject and reference must reach only the grader: result=%+v calls=%d task=%q",
+			result, calls, spec.Task)
+	}
+}
 
 // fakeExec 按 args 是否含 student_answer 返回不同的 canned Result（模拟 solve skill）。
 type fakeExec struct {

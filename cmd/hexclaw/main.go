@@ -4044,6 +4044,14 @@ func (e classifiedSolveExecutor) GradeVerified(ctx context.Context, problem, ver
 	return fast.GradeVerified(ctx, problem, verifiedSolution, studentAnswer)
 }
 
+// GradeVerifiedForSubject 将冻结学科沿相同的请求归属传给生产批改器。
+func (e classifiedSolveExecutor) GradeVerifiedForSubject(ctx context.Context, subject, problem, verifiedSolution, studentAnswer string) (*skill.Result, error) {
+	if fast, ok := e.next.(k12engineadapter.SubjectVerifiedGradeExecutor); ok {
+		return fast.GradeVerifiedForSubject(e.classify(ctx), subject, problem, verifiedSolution, studentAnswer)
+	}
+	return e.GradeVerified(ctx, problem, verifiedSolution, studentAnswer)
+}
+
 // SupportsSubAgentCallInterceptor preserves the optional capability exposed by
 // the wrapped SolveSkill. SolveAdapter uses this exact method to select the
 // per-subagent durable physical-call ledger; composition wrappers must not

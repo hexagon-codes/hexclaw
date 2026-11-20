@@ -52,6 +52,11 @@ type VerifiedGradeExecutor interface {
 	GradeVerified(ctx context.Context, problem, verifiedSolution, studentAnswer string) (*skill.Result, error)
 }
 
+// SubjectVerifiedGradeExecutor 在复用验证过的解法时保留非数学的学科要求。
+type SubjectVerifiedGradeExecutor interface {
+	GradeVerifiedForSubject(ctx context.Context, subject, problem, verifiedSolution, studentAnswer string) (*skill.Result, error)
+}
+
 // CauseSummaryGenerateFunc 是「记一条错题」的轻量错因摘要闭包。必须与变式出题分开，避免
 // “必须出题”的系统提示覆盖“只输出错因”的用户提示。
 type CauseSummaryGenerateFunc func(ctx context.Context, subject, prompt, grade string) (string, error)
@@ -475,6 +480,10 @@ func (a *SolveAdapter) GradeVerified(ctx context.Context, subject, problem, stud
 		problem = gradingProblemWithGrounding(ctx, problem)
 		studentAnswer = usecase.CanonicalPlainTextFallback(studentAnswer)
 		ctx = a.withGradingPhysicalCallInterceptor(ctx)
+		if typed, ok := a.exec.(SubjectVerifiedGradeExecutor); ok {
+			res, err := typed.GradeVerifiedForSubject(ctx, subject, problem, verifiedSolution, studentAnswer)
+			return gradeOutcomeFromResult(res, err)
+		}
 		res, err := exec.GradeVerified(ctx, problem, verifiedSolution, studentAnswer)
 		return gradeOutcomeFromResult(res, err)
 	}

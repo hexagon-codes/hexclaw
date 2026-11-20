@@ -523,8 +523,20 @@ func (o *SolveSkill) Execute(ctx context.Context, args map[string]any) (*skill.R
 // solver+verifier 链验证，本方法只派 grader 对比学生作答，避免整套链重复执行。
 // 该方法刻意不暴露在 ToolDefinition 中，LLM/外部工具调用无法声明“已验证解法”绕过校验。
 func (o *SolveSkill) GradeVerified(ctx context.Context, problem, verifiedSolution, studentAnswer string) (*skill.Result, error) {
+	return o.GradeVerifiedForSubject(ctx, "", problem, verifiedSolution, studentAnswer)
+}
+
+// GradeVerifiedForSubject 使用冻结学科和已验证参考解法批改，空学科兼容原数学快路。
+func (o *SolveSkill) GradeVerifiedForSubject(ctx context.Context, subject, problem, verifiedSolution, studentAnswer string) (*skill.Result, error) {
 	if strings.TrimSpace(problem) == "" || strings.TrimSpace(verifiedSolution) == "" || strings.TrimSpace(studentAnswer) == "" {
 		return nil, fmt.Errorf("problem, verified solution and student answer are required")
+	}
+	subject = strings.TrimSpace(subject)
+	switch strings.ToLower(subject) {
+	case "", "数学", "math", "mathematics":
+	default:
+		// 语言题的标点、大小写及多行参考解可能就是题意，保留原文。
+		return o.gradeVerifiedAnswer(ctx, subject, problem, verifiedSolution, strings.TrimSpace(verifiedSolution), studentAnswer)
 	}
 	groundTruth := extractFinalAnswer(verifiedSolution)
 	if groundTruth == "" {
@@ -613,6 +625,10 @@ func (o *SolveSkill) GradeVerified(ctx context.Context, problem, verifiedSolutio
 		}
 	}
 
+	return o.gradeVerifiedAnswer(ctx, "", problem, verifiedSolution, groundTruth, studentAnswer)
+}
+
+func (o *SolveSkill) gradeVerifiedAnswer(ctx context.Context, subject, problem, verifiedSolution, groundTruth, studentAnswer string) (*skill.Result, error) {
 	runCtx, cancel := newSubAgentAttemptContext(ctx, orchestrateMaxWall)
 	defer cancel()
 	runID := "grade-verified-" + idgen.NanoID()
@@ -624,7 +640,7 @@ func (o *SolveSkill) GradeVerified(ctx context.Context, problem, verifiedSolutio
 	childCtx = context.WithValue(childCtx, solveEgressClassesKey{}, solveEgressClasses(ctx, map[string]any{
 		"problem": problem, "student_answer": studentAnswer,
 	}))
-	assess, gradeErr := o.grade(childCtx, problem, verifiedSolution, groundTruth, studentAnswer)
+	assess, gradeErr := o.gradeInSubject(childCtx, subject, problem, verifiedSolution, groundTruth, studentAnswer)
 	if gradeErr != nil {
 		o.registry.Finish(runID, subAgentStatusError, "", gradeErr.Error(), "")
 		return nil, gradeErr
@@ -998,20 +1014,37 @@ type gradeAssessment struct {
 
 // grade 只消费完整批改判定；调用失败或判定缺失不能转为学生答错的事实。
 func (o *SolveSkill) grade(ctx context.Context, problem, solution, groundTruth, studentAnswer string) (gradeAssessment, error) {
+	return o.gradeInSubject(ctx, "", problem, solution, groundTruth, studentAnswer)
+}
+
+func (o *SolveSkill) gradeInSubject(ctx context.Context, subject, problem, solution, groundTruth, studentAnswer string) (gradeAssessment, error) {
 	if err := ctx.Err(); err != nil {
 		return gradeAssessment{}, err
 	}
 	if o.executeFunc == nil {
 		return gradeAssessment{}, fmt.Errorf("grading executor unavailable")
 	}
-	out, err := o.runValidated(ctx, graderSpec(problem, solution, groundTruth, studentAnswer), gradingParseable)
+	spec := graderSpec(problem, solution, groundTruth, studentAnswer)
+	if subject != "" {
+		spec.Task = buildSubjectGraderPrompt(subject, problem, solution, studentAnswer)
+	}
+	out, err := o.runValidated(ctx, spec, gradingParseable)
 	if err != nil {
 		return gradeAssessment{}, err
 	}
 	if !gradingParseable(out) {
 		return gradeAssessment{}, fmt.Errorf("grading response has no valid judgment")
 	}
-	return groundGradingAssessment(parseGrading(out, studentAnswer, groundTruth), problem, studentAnswer, groundTruth), nil
+	assessment := parseGrading(out, studentAnswer, groundTruth)
+	if subject == "" {
+		return groundGradingAssessment(assessment, problem, studentAnswer, groundTruth), nil
+	}
+	if !assessment.correct && (assessment.wrongStepSource == "" || !strings.Contains(studentAnswer, assessment.wrongStepSource)) {
+		// 没有原作答引文时，只保留终答判定，不发布未经佐证的过程问题。
+		assessment.wrongStep, assessment.wrongStepSource, assessment.misconception = "", "", ""
+		assessment.unverifiable = assessment.finalAnswerCorrect
+	}
+	return assessment, nil
 }
 
 // graderSpec 构造批改子 Agent：可用 code_exec 核对学生算术；fresh-context、受信来源、leaf。
@@ -1044,14 +1077,27 @@ Decision rules:
 - WRONG_STEP_SOURCE must quote the actual student-written fragment supporting WRONG_STEP. Keep the source quote separate from your explanation. Never invent an intermediate step when the student supplied only a final answer. Leave the source empty when there is no observed process error.
 - For quantity-relationship blanks, evaluate equivalent conventions using quantity names, actual quantities, or a total normalized to unit 1. Do not call a valid proportional equality incorrect merely because it differs from the reference wording. Identify a missing requested calculation separately from a mathematically incorrect filled relationship, and do not infer an unwritten intention.
 
-Output exactly six lines in the following format:
+`+graderResponseFormat, problem, solution, groundTruth, studentAnswer)
+}
+
+func buildSubjectGraderPrompt(subject, problem, solution, studentAnswer string) string {
+	return fmt.Sprintf(`You are a teacher grading homework. Apply the criteria stated in the problem and the verified reference. Accept equivalent responses that meet those criteria. Preserve any required punctuation, capitalization, vocabulary and wording. Assess the final answer and any supplied reasoning separately. Quote the student's actual words to support any process error. Give a short guiding hint without writing a replacement answer.
+
+Subject: %s
+Problem: %s
+Reference solution: %s
+Student answer: %s
+
+`+graderResponseFormat, subject, problem, solution, studentAnswer)
+}
+
+const graderResponseFormat = `Output exactly six lines in the following format:
 CORRECT: yes or no
 FINAL_ANSWER_CORRECT: yes or no
 WRONG_STEP: <the first incorrect step, or empty when fully correct>
 WRONG_STEP_SOURCE: <an exact fragment of the student's supplied work, or empty when no process error is observed>
 MISCONCEPTION: <the underlying misconception, or empty when fully correct>
-GUIDANCE: <one guiding or encouraging sentence>`, problem, solution, groundTruth, studentAnswer)
-}
+GUIDANCE: <one guiding or encouraging sentence>`
 
 var (
 	gradeCorrectRe            = regexp.MustCompile(`(?im)^[ \t]*CORRECT[ \t]*[:：][ \t]*(yes|no|对|错|正确|错误|true|false)[ \t]*$`)
@@ -1176,7 +1222,7 @@ func verifierSpec(problem, candidate, constraint string) SubAgentSpec {
 
 func verifierSpecWithSolution(problem, solution, candidate, constraint string) SubAgentSpec {
 	return SubAgentSpec{
-		verification: &verificationInput{Problem: problem, Solution: solution, Candidate: candidate, Constraint: constraint},
+		verification: &verificationInput{Problem: elementarymath.PhotoVerificationProblem(problem), Solution: solution, Candidate: candidate, Constraint: constraint},
 		RunID:        "verifier-" + idgen.NanoID(),
 		Agent:        verifierAgentName,
 		Task:         buildVerifierPromptWithSolution(problem, solution, candidate, constraint),

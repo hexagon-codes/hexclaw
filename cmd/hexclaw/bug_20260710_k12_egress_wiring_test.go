@@ -53,6 +53,28 @@ func TestBUG20260714_K12ClassifiedSolveForwardsVerifiedGradeFastPath(t *testing.
 	}
 }
 
+type subjectCountingSolveExecutor struct {
+	countingSolveExecutor
+	subject string
+}
+
+func (e *subjectCountingSolveExecutor) GradeVerifiedForSubject(ctx context.Context, subject, _, _, _ string) (*skill.Result, error) {
+	e.subject, e.ctx = subject, ctx
+	return &skill.Result{Metadata: map[string]string{"grade_verdict": "agree", "grade_correct": "true"}}, nil
+}
+
+func TestK12ClassifiedSolveForwardsFrozenSubjectToVerifiedGrader(t *testing.T) {
+	next := &subjectCountingSolveExecutor{}
+	grader := k12engineadapter.NewSolveAdapter(classifiedSolveExecutor{next: next})
+	if _, err := grader.GradeVerified(t.Context(), "语文", "写一句邀请", "请坐。", "请坐。"); err != nil {
+		t.Fatal(err)
+	}
+	requests, _ := egress.RequestsFromContext(next.ctx)
+	if next.subject != "语文" || next.verifiedCalls != 0 || next.calls != 0 || len(requests) != 2 {
+		t.Fatalf("wrong verified grade dispatch: subject=%q math=%d solve=%d classifications=%d", next.subject, next.verifiedCalls, next.calls, len(requests))
+	}
+}
+
 // REG-P0: the production classification wrapper must preserve the capability
 // method used by SolveAdapter to select the durable per-physical-call ledger.
 // Erasing it silently falls back to the generic whole-operation sender.
