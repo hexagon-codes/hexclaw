@@ -210,10 +210,18 @@ func (s *Server) runWorkflowCron(ctx context.Context, job *cron.Job) (*cron.RunR
 	if wf == nil {
 		return nil, fmt.Errorf("Workflow not found")
 	}
-	run, err := s.launchWorkflow(wf, RunWorkflowRequest{Input: stringValue(job.Spec.Inputs["input"]), UserID: job.UserID, Platform: job.Platform, ChatID: job.ChatID,
-		IdempotencyKey: fmt.Sprintf("cron:%s:%s:%s", job.ID, job.Generation, job.NextRunAt.UTC().Format(time.RFC3339Nano))}, nil)
+	manualKey := job.ManualWorkflowTriggerKey()
+	triggerKey := manualKey
+	if triggerKey == "" {
+		triggerKey = fmt.Sprintf("cron:%s:%s:%s", job.ID, job.Generation, job.NextRunAt.UTC().Format(time.RFC3339Nano))
+	}
+	run, created, err := s.launchWorkflowRun(wf, RunWorkflowRequest{Input: stringValue(job.Spec.Inputs["input"]), UserID: job.UserID, Platform: job.Platform, ChatID: job.ChatID,
+		IdempotencyKey: triggerKey}, nil)
 	if err != nil {
 		return nil, err
+	}
+	if manualKey != "" && !created {
+		return nil, cron.ErrWorkflowTriggerReplayed
 	}
 	final, err := s.waitWorkflow(ctx, run)
 	if err != nil {

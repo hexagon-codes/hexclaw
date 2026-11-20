@@ -115,6 +115,13 @@ type Job struct {
 	// 执行失败 / 调度算不出 → LastError；投递失败 → LastDeliveryError。二者解耦，成功各自清零。
 	LastError         string `json:"last_error,omitempty"`
 	LastDeliveryError string `json:"last_delivery_error,omitempty"`
+
+	manualWorkflowTriggerKey string // 仅记录本次手动执行，不随任务定义持久化。
+}
+
+// ManualWorkflowTriggerKey 返回本次手动工作流执行的稳定键；自动刻度返回空串。
+func (j *Job) ManualWorkflowTriggerKey() string {
+	return j.manualWorkflowTriggerKey
 }
 
 // ScheduleLocation 返回任务实际使用的调度时区；空或无效 TZ 沿用服务本地时区。
@@ -1503,9 +1510,11 @@ func (s *Scheduler) ResumeJobForOwner(ctx context.Context, jobID, ownerID string
 
 // ListJobs 列出所有任务
 func (s *Scheduler) ListJobs(ctx context.Context, userID string) ([]*Job, error) {
-	query := `SELECT id, name, type, schedule, spec_json, source_prompt, user_id, platform, chat_id, status,
-	          last_run_at, next_run_at, run_count, created_at, meta
-	          FROM cron_jobs WHERE user_id = ? ORDER BY next_run_at`
+	query := `SELECT j.id, j.name, j.type, j.schedule, j.spec_json, j.source_prompt, j.user_id, j.platform, j.chat_id, j.status,
+	          j.last_run_at, j.next_run_at, j.run_count, j.created_at, j.meta, latest.run_at
+	          FROM cron_jobs j LEFT JOIN cron_job_runs latest ON latest.id = (
+	              SELECT id FROM cron_job_runs WHERE job_id = j.id ORDER BY run_at DESC, id DESC LIMIT 1
+	          ) WHERE j.user_id = ? ORDER BY j.next_run_at`
 	rows, err := s.db.QueryContext(ctx, query, userID)
 	if err != nil {
 		return nil, err
@@ -1514,9 +1523,14 @@ func (s *Scheduler) ListJobs(ctx context.Context, userID string) ([]*Job, error)
 
 	var jobs []*Job
 	for rows.Next() {
-		job, err := scanJobRow(rows)
+		var completed sql.NullTime
+		job, err := scanJobRow(rows, &completed)
 		if err != nil {
 			return nil, err
+		}
+		// 工作流的上次完成时间含手动运行；调度仍使用独立的领取游标。
+		if job.Spec != nil && job.Spec.Runtime == "workflow" && completed.Valid {
+			job.LastRunAt = completed.Time
 		}
 		jobs = append(jobs, job)
 	}
@@ -1530,7 +1544,7 @@ func (s *Scheduler) ListJobs(ctx context.Context, userID string) ([]*Job, error)
 //	platform, chat_id, status, last_run_at, next_run_at, run_count, created_at
 func scanJobRow(row interface {
 	Scan(dest ...any) error
-}) (*Job, error) {
+}, extraColumns ...any) (*Job, error) {
 	job := &Job{}
 	var (
 		specJSON  sql.NullString
@@ -1538,12 +1552,13 @@ func scanJobRow(row interface {
 		lastRun   sql.NullTime
 		meta      sql.NullString
 	)
-	if err := row.Scan(
+	columns := []any{
 		&job.ID, &job.Name, &job.Type, &job.Schedule,
 		&specJSON, &srcPrompt,
 		&job.UserID, &job.Platform, &job.ChatID, &job.Status,
 		&lastRun, &job.NextRunAt, &job.RunCount, &job.CreatedAt, &meta,
-	); err != nil {
+	}
+	if err := row.Scan(append(columns, extraColumns...)...); err != nil {
 		return nil, err
 	}
 	if meta.Valid {
@@ -1720,24 +1735,31 @@ var (
 	ErrCronJobPaused = fmt.Errorf("cron job paused")
 	// ErrCronExecutorUnavailable 表示脚本任务执行器未配置。
 	ErrCronExecutorUnavailable = fmt.Errorf("cron executor unavailable")
+	// ErrWorkflowTriggerReplayed 表示工作流已接纳这个手动触发，无须再次记录或投递。
+	ErrWorkflowTriggerReplayed = errors.New("workflow trigger already accepted")
 )
 
 // TriggerJob 手动触发任务执行（fire-and-forget，不等结果）。
 //
 // v2：不依赖 executor callback，直接 dispatch 到 executeJob，由 ScriptExecutor 跑沙箱。
 func (s *Scheduler) TriggerJob(ctx context.Context, jobID string) error {
-	return s.triggerJob(ctx, jobID, "", false)
+	return s.triggerJob(ctx, jobID, "", false, "")
 }
 
 // TriggerJobForOwner 仅允许任务所属用户触发，并对不存在与跨用户任务返回相同错误。
 func (s *Scheduler) TriggerJobForOwner(ctx context.Context, jobID, ownerID string) error {
+	return s.TriggerJobForOwnerWithKey(ctx, jobID, ownerID, "")
+}
+
+// TriggerJobForOwnerWithKey 保留调用方手动触发工作流的幂等键，空键视为一次新触发。
+func (s *Scheduler) TriggerJobForOwnerWithKey(ctx context.Context, jobID, ownerID, key string) error {
 	if strings.TrimSpace(ownerID) == "" {
 		return ErrCronJobNotFound
 	}
-	return s.triggerJob(ctx, jobID, ownerID, true)
+	return s.triggerJob(ctx, jobID, ownerID, true, key)
 }
 
-func (s *Scheduler) triggerJob(ctx context.Context, jobID, ownerID string, ownerScoped bool) error {
+func (s *Scheduler) triggerJob(ctx context.Context, jobID, ownerID string, ownerScoped bool, key string) error {
 	s.mu.RLock()
 	job, ok := s.jobs[jobID]
 	var j Job
@@ -1786,6 +1808,13 @@ func (s *Scheduler) triggerJob(ctx context.Context, jobID, ownerID string, owner
 			return ErrCronExecutorUnavailable
 		}
 		return fmt.Errorf("脚本执行器未就绪")
+	}
+	if j.Spec != nil && j.Spec.Runtime == "workflow" {
+		identity := "key:" + key
+		if key == "" {
+			identity = "occurrence:" + idgen.MediumID()
+		}
+		j.manualWorkflowTriggerKey = fmt.Sprintf("cron-manual:%s:%s:%x", j.ID, j.Generation, sha256.Sum256([]byte(identity)))
 	}
 
 	go s.executeJob(&j)
@@ -2203,10 +2232,16 @@ func (s *Scheduler) claimJob(job *Job) bool {
 
 // executeJob 执行单个任务（v2: 走 ScriptExecutor 沙箱，零 LLM）。
 func (s *Scheduler) executeJob(job *Job) {
-	if _, loaded := s.running.LoadOrStore(job.ID, true); loaded {
+	manualWorkflow := job.manualWorkflowTriggerKey != ""
+	var runningKey any = job.ID
+	if manualWorkflow {
+		type manualTriggerKey string
+		runningKey = manualTriggerKey(job.manualWorkflowTriggerKey)
+	}
+	if _, loaded := s.running.LoadOrStore(runningKey, true); loaded {
 		return // 上一次执行尚未完成（进程内去重）
 	}
-	defer s.running.Delete(job.ID)
+	defer s.running.Delete(runningKey)
 	executeStarted := time.Now()
 	runtime := ""
 	if job.Spec != nil {
@@ -2216,15 +2251,20 @@ func (s *Scheduler) executeJob(job *Job) {
 		}
 	}
 
-	// 跨副本去重：进程内 sync.Map 只防单实例重入，多副本部署时同一到期刻度会被多个
-	// 实例同时触发。claimJob 用 DB 原子领取保证一个到期刻度只跑一个副本。
-	if !s.claimJob(job) {
+	// 自动刻度由数据库领取；手动工作流由工作流运行记录去重，不占用到期刻度。
+	var claimed bool
+	if manualWorkflow {
+		claimed = s.jobGenerationCurrentFresh(job)
+	} else {
+		claimed = s.claimJob(job)
+	}
+	if !claimed {
 		slog.Info("[cron] job lifecycle",
 			"source", "cron", "job", job.ID, "job_name", job.Name, "job_type", job.Type,
 			"generation", job.Generation, "source_key", job.SourceKey, "runtime", runtime,
 			"schedule", job.Schedule, "user_id", job.UserID, "platform", job.Platform, "chat_id", job.ChatID,
 			"stage", "execute", "elapsed_ms", time.Since(executeStarted).Milliseconds(), "status", "not_claimed")
-		return // 另一副本已领取本到期刻度
+		return
 	}
 	slog.Info("[cron] job lifecycle",
 		"source", "cron", "job", job.ID, "job_name", job.Name, "job_type", job.Type,
@@ -2308,6 +2348,11 @@ func (s *Scheduler) executeJob(job *Job) {
 			runErr = fmt.Errorf("Workflow executor is unavailable")
 		} else {
 			result, runErr = handler(runCtx, job)
+		}
+		if manualWorkflow && errors.Is(runErr, ErrWorkflowTriggerReplayed) {
+			stopHeartbeat()
+			<-heartbeatStopped
+			return
 		}
 	} else if job.Spec.Runtime == RuntimeAgent {
 		if job.Continuous {
@@ -2431,7 +2476,7 @@ func (s *Scheduler) executeJob(job *Job) {
 	defer dbCancel()
 	now = time.Now()
 	var next time.Time
-	if job.Type != JobTypeOnce {
+	if !manualWorkflow && job.Type != JobTypeOnce {
 		next, nextErr = nextRunTime(job.Schedule, job.Type, now.In(jobLocation(job.TZ)))
 		if nextErr != nil {
 			// H4 不静默失效：next_run_at 算不出 → loud + 保持 active（绝不静默
@@ -2449,6 +2494,11 @@ func (s *Scheduler) executeJob(job *Job) {
 		var res sql.Result
 		var err error
 		switch {
+		case manualWorkflow:
+			// last_run_at 同时是自动触发的领取游标，手动运行只计次数和历史。
+			res, err = s.db.ExecContext(dbCtx,
+				`UPDATE cron_jobs SET run_count = run_count + 1 WHERE id = ? AND meta = ?`,
+				job.ID, serializeJobMeta(job))
 		case job.Type == JobTypeOnce:
 			res, err = s.db.ExecContext(dbCtx,
 				`UPDATE cron_jobs SET status = 'done', last_run_at = ?, run_count = run_count + 1 WHERE id = ? AND meta = ?`,
@@ -2498,19 +2548,21 @@ func (s *Scheduler) executeJob(job *Job) {
 		return
 	}
 	if j, ok := s.jobs[job.ID]; ok {
-		j.LastRunAt = now
 		j.RunCount++
 		if result.Status == "success" {
 			j.LastError = ""
 		} else {
 			j.LastError = result.Error
 		}
-		if job.Type == JobTypeOnce {
-			j.Status = StatusDone
-		} else if nextErr != nil {
-			j.LastError = nextErr.Error()
-		} else {
-			j.NextRunAt = next
+		if !manualWorkflow {
+			j.LastRunAt = now
+			if job.Type == JobTypeOnce {
+				j.Status = StatusDone
+			} else if nextErr != nil {
+				j.LastError = nextErr.Error()
+			} else {
+				j.NextRunAt = next
+			}
 		}
 	}
 	s.mu.Unlock()

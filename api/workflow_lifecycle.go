@@ -163,22 +163,29 @@ func (e *workflowExecutor) publishCheckpoint(state hexagon.MapState) error {
 }
 
 func (s *Server) launchWorkflow(wf *WorkflowData, req RunWorkflowRequest, prior *WorkflowRun) (*WorkflowRun, error) {
+	run, _, err := s.launchWorkflowRun(wf, req, prior)
+	return run, err
+}
+
+// launchWorkflowRun 同时返回这次是否真正接纳了新运行，供触发方区分重放。
+func (s *Server) launchWorkflowRun(wf *WorkflowData, req RunWorkflowRequest, prior *WorkflowRun) (*WorkflowRun, bool, error) {
 	if err := validateWorkflowImportReview(wf); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if req.SessionID == "" {
 		req.SessionID = req.Metadata["session_id"]
 	}
 	ws := s.workflowStore
 	ws.mu.Lock()
+	var triggerKey string
 	if req.IdempotencyKey != "" {
 		identity, _ := json.Marshal([]string{wf.ID, req.UserID, req.Platform, req.InstanceID, req.ChatID, req.IdempotencyKey})
 		sum := sha256.Sum256(identity)
-		key := hex.EncodeToString(sum[:])
-		if existing := ws.latestRunByTriggerLocked(key); existing != nil {
+		triggerKey = hex.EncodeToString(sum[:])
+		if existing := ws.latestRunByTriggerLocked(triggerKey); existing != nil {
 			result := cloneWorkflowRun(existing)
 			ws.mu.Unlock()
-			return result, nil
+			return result, false, nil
 		}
 	}
 	var resources map[string]map[string]any
@@ -191,16 +198,17 @@ func (s *Server) launchWorkflow(wf *WorkflowData, req RunWorkflowRequest, prior 
 	if resourceErr != nil {
 		ws.mu.Unlock()
 		if errors.Is(resourceErr, errWorkflowConfiguration) {
-			return nil, resourceErr
+			return nil, false, resourceErr
 		}
-		return nil, fmt.Errorf("%w: %v", errWorkflowResourcePreparation, resourceErr)
+		return nil, false, fmt.Errorf("%w: %v", errWorkflowResourcePreparation, resourceErr)
 	}
 	timeout, resourceErr := workflowRunTimeout(wf)
 	if resourceErr != nil {
 		ws.mu.Unlock()
-		return nil, resourceErr
+		return nil, false, resourceErr
 	}
 	run := s.newWorkflowRun(wf, req.Input, prior)
+	run.TriggerKey = triggerKey
 	run.ResourceSnapshots = resources
 	run.Request = &req
 	run.Checkpoint = &WorkflowCheckpoint{}
@@ -210,14 +218,9 @@ func (s *Server) launchWorkflow(wf *WorkflowData, req RunWorkflowRequest, prior 
 		run.NodeResults = cloneWorkflowRun(prior).NodeResults
 		run.ArtifactSnapshots = cloneWorkflowRun(prior).ArtifactSnapshots
 	}
-	if req.IdempotencyKey != "" {
-		identity, _ := json.Marshal([]string{wf.ID, req.UserID, req.Platform, req.InstanceID, req.ChatID, req.IdempotencyKey})
-		sum := sha256.Sum256(identity)
-		run.TriggerKey = hex.EncodeToString(sum[:])
-	}
 	if err := ws.addRun(run); err != nil {
 		ws.mu.Unlock()
-		return nil, fmt.Errorf("persist workflow run: %w", err)
+		return nil, false, fmt.Errorf("persist workflow run: %w", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	if ws.cancels == nil {
@@ -231,7 +234,7 @@ func (s *Server) launchWorkflow(wf *WorkflowData, req RunWorkflowRequest, prior 
 		defer func() { ws.mu.Lock(); delete(ws.cancels, run.ID); ws.mu.Unlock() }()
 		s.executeWorkflow(ctx, run.Definition, run, req)
 	}()
-	return snapshot, nil
+	return snapshot, true, nil
 }
 
 func (s *Server) handleListWorkflowRuns(w http.ResponseWriter, r *http.Request) {

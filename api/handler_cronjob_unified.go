@@ -400,7 +400,7 @@ func (s *Server) cronActionRun(ctx context.Context, req *CronJobRequest) (*CronJ
 	if err != nil {
 		return nil, status, err
 	}
-	if err := s.scheduler.TriggerJobForOwner(ctx, req.JobID, job.UserID); err != nil {
+	if err := s.scheduler.TriggerJobForOwnerWithKey(ctx, req.JobID, job.UserID, req.IdempotencyKey); err != nil {
 		status, mapped := classifyCronLifecycleError(err)
 		return nil, status, mapped
 	}

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -23,6 +24,7 @@ import (
 	agentrouter "github.com/hexagon-codes/hexclaw/router"
 	"github.com/hexagon-codes/hexclaw/storage/migrate"
 	"github.com/hexagon-codes/hexclaw/webhook"
+	"github.com/hexagon-codes/toolkit/util/idgen"
 )
 
 // 仅替换不可控模型边界；请求、执行图、持久化和查询均使用真实实现。
@@ -52,6 +54,168 @@ func contractWorkflow(nodes ...map[string]any) *WorkflowData {
 }
 func contractNode(id, kind string, config map[string]any) map[string]any {
 	return map[string]any{"id": id, "type": kind, "label": id, "config": config}
+}
+
+func TestWorkflowCronManualKeysAndScheduledTickUseSeparateRuns(t *testing.T) {
+	db, err := sqlitefixture.Memory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	if err = migrate.Run(t.Context(), db, migrate.All); err != nil {
+		t.Fatal(err)
+	}
+	s := newWorkflowTestServer()
+	s.workflowStore.runsFilePath = filepath.Join(t.TempDir(), "runs.json")
+	scheduler := cron.NewScheduler(db, nil, nil)
+	if err = scheduler.Init(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	s.SetCronScheduler(scheduler)
+	const token = "workflow-cron-fixture"
+	s.SetDesktopAPIToken(token)
+	wf := contractWorkflow(contractNode("agent", "agent", nil), contractNode("out", "output", nil))
+	s.workflowStore.workflows[wf.ID] = wf
+	entered := make(chan struct{}, 3)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseAgents := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseAgents()
+	s.engine = &workflowContractEngine{process: func(ctx context.Context, _ *adapter.Message) (*adapter.Reply, error) {
+		entered <- struct{}{}
+		select {
+		case <-release:
+			return &adapter.Reply{Content: "verified output"}, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}}
+	app := httptest.NewServer(s.routes())
+	defer app.Close()
+	request := func(method, path, body string, result any) http.Header {
+		t.Helper()
+		req, reqErr := http.NewRequestWithContext(t.Context(), method, app.URL+path, strings.NewReader(body))
+		if reqErr != nil {
+			t.Fatal(reqErr)
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		response, reqErr := app.Client().Do(req)
+		if reqErr != nil {
+			t.Fatal(reqErr)
+		}
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			var got json.RawMessage
+			_ = json.NewDecoder(response.Body).Decode(&got)
+			t.Fatalf("%s %s: status=%d body=%s", method, path, response.StatusCode, got)
+		}
+		if reqErr = json.NewDecoder(response.Body).Decode(result); reqErr != nil {
+			t.Fatal(reqErr)
+		}
+		return response.Header
+	}
+	base := "/api/v1/canvas/workflows/" + wf.ID
+	var job cron.Job
+	request(http.MethodPost, base+"/triggers", `{"kind":"cron","name":"scheduled","schedule":"0 0 1 1 *","input":"worksheet"}`, &job)
+	firstKey := "manual-" + idgen.MediumID()
+	secondKey := "manual-" + idgen.MediumID()
+	manualRun := func(key string) http.Header {
+		t.Helper()
+		body, marshalErr := json.Marshal(CronJobRequest{Action: "run", JobID: job.ID, IdempotencyKey: key})
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		var result CronJobResponse
+		headers := request(http.MethodPost, "/api/v1/cronjob", string(body), &result)
+		if !result.OK {
+			t.Fatalf("manual run was not accepted: %+v", result)
+		}
+		return headers
+	}
+	manualRun(firstKey)
+	manualRun(secondKey)
+	if got := manualRun(firstKey).Get("X-Idempotent-Replay"); got != "1" {
+		t.Fatalf("repeated key must replay the accepted reply: %q", got)
+	}
+	for range 2 {
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("both distinct manual trigger keys must reach workflow execution")
+		}
+	}
+	releaseAgents()
+	waitHistory := func(want int) {
+		t.Helper()
+		deadline := time.Now().Add(6 * time.Second)
+		for {
+			var result struct{ History []cron.JobHistory }
+			request(http.MethodGet, "/api/v1/cron/jobs/"+job.ID+"/history", "", &result)
+			if len(result.History) >= want || time.Now().After(deadline) {
+				if len(result.History) != want {
+					t.Fatalf("cron history count = %d, want %d", len(result.History), want)
+				}
+				for _, entry := range result.History {
+					if entry.Status != "success" || entry.Data != "verified output" {
+						t.Fatalf("cron did not persist successful workflow output: %+v", entry)
+					}
+				}
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	waitHistory(2)
+	current, found := scheduler.GetJob(t.Context(), job.ID)
+	if !found || current.RunCount != 2 || !current.NextRunAt.Equal(job.NextRunAt) || !current.LastRunAt.Equal(job.LastRunAt) {
+		t.Fatalf("manual runs changed the scheduled cursor or lost completion count: %+v", current)
+	}
+	var listed CronJobResponse
+	request(http.MethodPost, "/api/v1/cronjob", `{"action":"list"}`, &listed)
+	if len(listed.Jobs) != 1 || !listed.Jobs[0].LastRunAt.After(job.CreatedAt) || !listed.Jobs[0].NextRunAt.Equal(job.NextRunAt) {
+		t.Fatalf("job list lost its latest manual completion time: %+v", listed.Jobs)
+	}
+
+	// 用已到期的游标启动新调度器，覆盖重启并绕过 HTTP 层的短期响应缓存。
+	due := time.Now().UTC().Add(-time.Second)
+	if _, err = db.ExecContext(t.Context(), `UPDATE cron_jobs SET next_run_at = ? WHERE id = ?`, due, job.ID); err != nil {
+		t.Fatal(err)
+	}
+	restarted := cron.NewScheduler(db, nil, nil)
+	if err = restarted.Init(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	replayed := make(chan struct{}, 1)
+	restarted.SetWorkflowHandler(func(ctx context.Context, job *cron.Job) (*cron.RunResult, error) {
+		result, runErr := s.runWorkflowCron(ctx, job)
+		if errors.Is(runErr, cron.ErrWorkflowTriggerReplayed) {
+			replayed <- struct{}{}
+		}
+		return result, runErr
+	})
+	if err = restarted.TriggerJobForOwnerWithKey(t.Context(), job.ID, job.UserID, firstKey); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-replayed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("restarted scheduler did not reuse the durable workflow run")
+	}
+	restarted.Start(t.Context())
+	defer restarted.Stop()
+	waitHistory(3)
+	var result struct{ Runs []WorkflowRun }
+	request(http.MethodGet, base+"/runs", "", &result)
+	if len(result.Runs) != 3 {
+		t.Fatalf("want two manual runs and one scheduled run, got %d", len(result.Runs))
+	}
+	for _, run := range result.Runs {
+		if run.Status != "completed" || run.Output != "verified output" {
+			t.Fatalf("want completed workflow output, got %+v", run)
+		}
+	}
 }
 
 func TestWorkflowContractDirectPredecessorAndFinalOutput(t *testing.T) {
