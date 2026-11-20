@@ -23,6 +23,9 @@ paths:
         make unknown outcomes safe to replay. A complete durable assistant result for the same owner/session/request
         is read back without starting another run. An active identity, an incomplete result, or an existing external
         execution without a readable completed result returns 409, including after snapshot expiry or process restart.
+        With regenerate_from_message_id, run against the original user message and its earlier context. Remove the
+        old suffix and insert the completed replacement in one transaction. Failed, cancelled and unknown executions
+        leave the original history available. Check chat_regenerate in GET /api/v1/version before sending.
       tags:
         - chat-sessions-memory
       security:
@@ -56,7 +59,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ChatSessionError"
         "404":
-          description: Attachment reference is unavailable, conflicting or over the count limit during resolution
+          description: Attachment reference or the same-owner original user message is unavailable
           content:
             application/json:
               schema:
@@ -68,7 +71,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ChatSessionError"
         "409":
-          description: The request is already active or has an original receipt that cannot be safely rerun
+          description: The request already has a receipt, the idempotent identity conflicts or the original conversation changed
           content:
             application/json:
               schema:
@@ -1134,7 +1137,9 @@ paths:
         snapshots for two minutes, without restart durability. REST and WebSocket lookups both verify
         the authenticated owner; transport disconnection does not itself cancel retained external work.
         Specify source when both transports retain the same owner/request identity; an ambiguous unqualified
-        lookup returns 409 instead of choosing a different run silently.
+        lookup returns 409 instead of choosing a different run silently. An answer replaced in the
+        persisted conversation returns 404 with receipt_ref.outcome=superseded and the history
+        path, including when an earlier process snapshot is still retained.
       tags:
         - chat-sessions-memory
       security:
@@ -1155,11 +1160,27 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
-          description: No retained snapshot for this owner/request
+          description: No current snapshot for this owner/request. A superseded request includes its durable receipt.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ChatSessionError"
+                type: object
+                required: [error]
+                properties:
+                  error:
+                    type: string
+                  receipt_ref:
+                    type: object
+                    required: [request_id, session_id, outcome, history_url]
+                    properties:
+                      request_id:
+                        type: string
+                      session_id:
+                        type: string
+                      outcome:
+                        const: superseded
+                      history_url:
+                        type: string
         "409":
           description: Both REST and WebSocket snapshots exist; specify the original source
       x-source:
@@ -1240,7 +1261,29 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
-          description: No retained REST request for this authenticated owner
+          description: No current snapshot for this owner/request. A superseded request includes its durable receipt.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error]
+                properties:
+                  error:
+                    type: string
+                  receipt_ref:
+                    type: object
+                    required: [request_id, session_id, outcome, history_url]
+                    properties:
+                      request_id:
+                        type: string
+                      session_id:
+                        type: string
+                      outcome:
+                        const: superseded
+                      history_url:
+                        type: string
+        "500":
+          description: The persisted request identity could not be verified
       x-source:
         file: api/handler_streams.go
         handler: handleCancelStream
@@ -21751,7 +21794,7 @@ components:
       - model_invocations_added
     ChatRequest:
       type: object
-      description: 至少有非空 message 或有效 attachments，JSON 请求体上限 20 MiB；user_id/platform 仅兼容解码，不授予身份
+      description: 普通消息至少有非空 message 或有效 attachments。原轮重生成使用持久用户消息及附件。JSON 请求体上限 20 MiB。
       properties:
         message:
           type: string
@@ -21767,6 +21810,9 @@ components:
         request_id:
           type: string
           description: 请求关联和流式恢复标识
+        regenerate_from_message_id:
+          type: string
+          description: 同会话中原用户消息的持久 ID。必须同时提供 session_id 和本次 request_id，不传新附件。
         user_id:
           type: string
           deprecated: true
@@ -22967,6 +23013,9 @@ components:
           type: string
         done:
           type: boolean
+        cancel_requested:
+          type: boolean
+          description: Whether an explicit stop was accepted for this run. The producer's terminal state is separate. Optional for older servers.
         status:
           type: string
           enum:
@@ -23224,6 +23273,10 @@ components:
         request_id:
           type: string
           description: Correlation and recovery identity, not a durable admission/idempotency guarantee.
+        regenerate_from_message_id:
+          type: string
+          description: Durable original user-message ID in the supplied session. Requires session_id and a new request_id.
+            Leave message empty and omit attachments to use the stored input and original routing.
         temperature:
           type:
             - number
@@ -23997,6 +24050,10 @@ components:
           type: string
         request_id:
           type: string
+        regenerate_from_message_id:
+          type: string
+          description: Durable original user-message ID in the supplied session. Requires session_id and a new request_id.
+            Leave content empty and omit attachments. Use the terminal backend_message_id to recognize a committed replacement.
         provider:
           type: string
         model:
@@ -24034,8 +24091,9 @@ components:
           description: Ignored for authenticated identity
       required:
         - type
-      description: At least nonblank content or valid attachments. Empty request_id generates req-*; an existing
-        request_id is not a deduplication guarantee.
+      description: An ordinary message needs nonblank content or valid attachments. Empty request_id generates req-*.
+        Regeneration reuses the stored input and retains the original history until the successful terminal commit.
+        Resume snapshots carry the original user-message ID in metadata.regenerate_from_message_id.
     ChatSessionWebSocketResume:
       type: object
       properties:
@@ -25743,6 +25801,10 @@ components:
           const: Hexagon
         engine_version:
           type: string
+        chat_regenerate:
+          type: string
+          const: atomic_replace_v1
+          description: Present when the chat runtime supports atomic regeneration for REST and WebSocket.
       required:
         - version
         - engine

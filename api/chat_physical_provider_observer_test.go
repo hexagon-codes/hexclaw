@@ -4,14 +4,23 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/ai-core/llm/openai"
 	"github.com/hexagon-codes/hexclaw/adapter"
+	webadapter "github.com/hexagon-codes/hexclaw/adapter/web"
 	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
+	"nhooyr.io/websocket"
+	"nhooyr.io/websocket/wsjson"
 )
 
 type physicalProviderObserverEngine struct {
@@ -95,6 +104,100 @@ func TestHandleChatPhysicalProviderObserverPublishesOneStreamAttempt(t *testing.
 	}
 	if got := entries[0].Fields["physical_provider_calls"]; got != int64(1) && got != int32(1) && got != 1 {
 		t.Fatalf("physical_provider_calls = %#v, want 1", got)
+	}
+}
+
+func TestWebSocketChatDoesNotReplayProviderError(t *testing.T) {
+	var physicalCalls atomic.Int32
+	const acceptedReply = "Second explicit request accepted."
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if physicalCalls.Add(1) == 1 {
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = io.WriteString(w, `{"error":{"message":"Synthetic upstream response"}}`)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"id\":\"accepted\",\"choices\":[{\"delta\":{\"content\":\""+acceptedReply+"\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+	}))
+	defer upstream.Close()
+
+	cfg := apiCanonicalHistoryConfig()
+	cfg.LLM.Cache.Enabled = false
+	store, err := sqlitefixture.New(filepath.Join(t.TempDir(), "chat.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err = store.Init(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	eng := newAPICanonicalHistoryEngine(t, cfg, store, openai.New("synthetic-fixture", openai.WithBaseURL(upstream.URL)))
+	defer eng.Stop(context.Background())
+	srv := NewServer(cfg, eng, nil, store)
+	defer srv.attachmentStaging.Close()
+	wa := webadapter.New()
+	if err = wa.Start(t.Context(), eng.Process); err != nil {
+		t.Fatal(err)
+	}
+	defer wa.Stop(context.Background())
+	wa.SetStreamHandler(eng.ProcessStream)
+	srv.SetWebSocketHandler(wa.Handler())
+	srv.SetStreamStateProvider(wa)
+	app := httptest.NewServer(srv.routes())
+	defer app.Close()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(app.URL, "http")+"/ws", &websocket.DialOptions{HTTPHeader: http.Header{
+		"Origin":        {"tauri://localhost"},
+		"Authorization": {"Bearer " + cfg.Server.APIToken},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+
+	for _, tc := range []struct {
+		id, prompt, reply string
+		wantError         bool
+		wantCalls         int32
+	}{
+		{id: "ws-upstream-error", prompt: "First request", wantError: true, wantCalls: 1},
+		{id: "ws-explicit-next", prompt: "Second request", reply: acceptedReply, wantCalls: 2},
+	} {
+		if err = wsjson.Write(ctx, conn, map[string]string{
+			"type": "message", "request_id": tc.id, "content": tc.prompt, "provider": "test", "model": "mock-model",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		var content strings.Builder
+		for {
+			var frame struct {
+				Type, Content string
+				Done          bool
+				RequestID     string `json:"request_id"`
+			}
+			if err = wsjson.Read(ctx, conn, &frame); err != nil {
+				t.Fatalf("%s: %v", tc.id, err)
+			}
+			if frame.RequestID != tc.id {
+				continue
+			}
+			if frame.Type != "error" {
+				content.WriteString(frame.Content)
+			}
+			if frame.Type != "error" && !frame.Done {
+				continue
+			}
+			if got := physicalCalls.Load(); got != tc.wantCalls || (frame.Type == "error") != tc.wantError || content.String() != tc.reply {
+				t.Fatalf("%s: terminal=%s physical calls=%d content=%q", tc.id, frame.Type, got, content.String())
+			}
+			break
+		}
 	}
 }
 

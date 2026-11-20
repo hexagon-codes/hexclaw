@@ -648,6 +648,11 @@ func (s *Store) saveMessageTx(ctx context.Context, msg *storage.MessageRecord, r
 	if replayed {
 		return tx.Commit()
 	}
+	if completion, ok := storage.AssistantCompletionFromContext(ctx); ok && completion.BeforeInsert != nil {
+		if err := completion.BeforeInsert(ctx, tx, msg); err != nil {
+			return err
+		}
+	}
 	_, err = tx.ExecContext(ctx,
 		`INSERT INTO messages (`+messageCols+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		messageInsertArgs(msg)...,

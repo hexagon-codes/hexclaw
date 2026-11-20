@@ -38,6 +38,9 @@ func (s *Server) beginRESTChat(ctx context.Context, msg *adapter.Message) (*rest
 		requestID = msg.ID
 		msg.Metadata["request_id"] = requestID
 	}
+	if err := s.checkSupersededChatRequest(ctx, msg.UserID, requestID); err != nil {
+		return nil, err
+	}
 	if s.streamStates != nil {
 		if _, exists := s.streamStates.GetStreamSnapshot(msg.UserID, requestID); exists {
 			return nil, &originalChatRequest{reference: map[string]string{"source": "websocket", "snapshot_url": "/api/v1/streams/" + url.PathEscape(requestID) + "?source=websocket"}}
@@ -63,6 +66,7 @@ func (s *Server) beginRESTChat(ctx context.Context, msg *adapter.Message) (*rest
 		cancelRun(nil)
 		return nil, err
 	}
+	s.restStreams.SetRegenerationSource(requestID, msg.RegenerateFromMessageID)
 	return &restChatRun{ctx: runCtx, transport: ctx, registry: s.restStreams, control: control, requestID: requestID, closeSignals: func() { cancelSignal(nil); cancelRun(nil); closeOutput() }}, nil
 }
 
@@ -73,7 +77,8 @@ func (r *restChatRun) finish(err error) {
 func (r *restChatRun) finishWithChunk(err error, terminal *adapter.ReplyChunk) {
 	r.finishOnce.Do(func() {
 		status := streamstate.StatusCompleted
-		if requestcancel.IsExplicit(r.ctx) || errors.Is(err, context.Canceled) {
+		committedRegeneration := terminal != nil && terminal.BackendMessageID != "" && terminal.Metadata["regenerate_from_message_id"] != "" && terminal.Error == nil
+		if !committedRegeneration && (requestcancel.IsExplicit(r.ctx) || errors.Is(err, context.Canceled)) {
 			status = streamstate.StatusCancelled
 		} else if err != nil {
 			status = streamstate.StatusErrored
@@ -158,6 +163,26 @@ func (s restObservedStream) ProcessStream(_ context.Context, msg *adapter.Messag
 	return out, nil
 }
 
+func (s *Server) findSupersededChatSession(ctx context.Context, owner, requestID string) (string, error) {
+	reader, ok := s.store.(storage.SupersededChatRequestReader)
+	if !ok {
+		return "", nil
+	}
+	id, err := reader.FindSupersededChatRequest(ctx, owner, requestID)
+	if errors.Is(err, storage.ErrNotFound) {
+		return "", nil
+	}
+	return id, err
+}
+
+func (s *Server) checkSupersededChatRequest(ctx context.Context, owner, requestID string) error {
+	id, err := s.findSupersededChatSession(ctx, owner, requestID)
+	if err != nil || id == "" {
+		return err
+	}
+	return &originalChatRequest{reference: map[string]string{"session_id": id, "outcome": "superseded"}}
+}
+
 // checkDurableChatRequest 只按既有可信请求身份查证，不按消息或工具参数合并独立任务。
 func (s *Server) checkDurableChatRequest(ctx context.Context, owner, requestID string) error {
 	if provider, ok := s.store.(interface {
@@ -197,8 +222,12 @@ func (*originalChatRequest) Error() string {
 }
 func (*originalChatRequest) Unwrap() error { return streamstate.ErrRequestConflict }
 
-func writeChatRequestConflict(w http.ResponseWriter, msg *adapter.Message, err error) {
-	reference := map[string]string{"request_id": msg.Metadata["request_id"], "session_id": msg.SessionID}
+func writeChatRequestConflict(w http.ResponseWriter, requestID, sessionID string, err error) {
+	writeChatRequestReceipt(w, http.StatusConflict, "request identity is already in use or its original result is incomplete; read its original receipt", requestID, sessionID, err)
+}
+
+func writeChatRequestReceipt(w http.ResponseWriter, status int, message, requestID, sessionID string, err error) {
+	reference := map[string]string{"request_id": requestID, "session_id": sessionID}
 	var previous *originalChatRequest
 	if errors.As(err, &previous) {
 		for key, value := range previous.reference {
@@ -208,5 +237,5 @@ func writeChatRequestConflict(w http.ResponseWriter, msg *adapter.Message, err e
 	if reference["session_id"] != "" {
 		reference["history_url"] = "/api/v1/sessions/" + url.PathEscape(reference["session_id"]) + "/messages"
 	}
-	writeJSON(w, http.StatusConflict, map[string]any{"error": "request identity is already in use or its original result is incomplete; read its original receipt", "receipt_ref": reference})
+	writeJSON(w, status, map[string]any{"error": message, "receipt_ref": reference})
 }

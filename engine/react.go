@@ -1049,6 +1049,18 @@ func (e *ReActEngine) matchSkillFastPath(msg *adapter.Message) (skill.Skill, boo
 //  6. 保存助手回复
 //  7. 返回回复
 func (e *ReActEngine) Process(ctx context.Context, msg *adapter.Message) (reply *adapter.Reply, processErr error) {
+	if msg != nil && msg.RegenerateFromMessageID != "" {
+		if replay, err := e.loadDurableAssistantReply(ctx, msg, false); err != nil {
+			return nil, err
+		} else if replay != nil {
+			return replay.reply, nil
+		}
+	}
+	ctx, regeneration, releaseRegeneration, err := e.beginChatRegeneration(ctx, msg)
+	if err != nil {
+		return nil, err
+	}
+	defer releaseRegeneration()
 	defer func() { e.finalizeExternalRun(ctx, msg) }()
 	defer e.trackMediaRequest(msg)()
 	if e.mediaFlow != nil {
@@ -1100,6 +1112,20 @@ func (e *ReActEngine) Process(ctx context.Context, msg *adapter.Message) (reply 
 			reply = nil
 			processErr = fmt.Errorf("finalize producer reply: %w", err)
 			return
+		}
+		if regeneration != nil {
+			wire := adapter.NewRuntimeWire(canonicalAssistantMessageID(msg), reply.ReasoningDisclosure)
+			wire.Decorate(&adapter.ReplyChunk{Content: reply.Content, Done: true, Metadata: reply.Metadata, Blocks: reply.Blocks, ToolCalls: reply.ToolCalls})
+			snapshot := wire.Snapshot()
+			id, err := e.sessions.CommitChatRegeneration(ctx, regeneration, &snapshot)
+			if err != nil {
+				reply, processErr = nil, err
+				return
+			}
+			reply.Metadata = withAssistantMessageID(reply.Metadata, id)
+			reply.Metadata["regenerate_from_message_id"] = msg.RegenerateFromMessageID
+			reply.AssistantMessageID = id
+			reply.RuntimeEvents, reply.LastSequence = snapshot.RuntimeEvents, snapshot.LastSequence
 		}
 		if reply.AssistantMessageID == "" && reply.Metadata != nil {
 			reply.AssistantMessageID = reply.Metadata["assistant_message_id"]
@@ -1202,10 +1228,12 @@ func (e *ReActEngine) Process(ctx context.Context, msg *adapter.Message) (reply 
 	ctx = context.WithValue(ctx, ctxKeySessionID, sess.ID)
 
 	// 1.5 Session 锁: 串行化同一会话的并发请求 (对齐 OpenClaw Session Lane)
-	if unlock, err := e.acquireSessionLane(ctx, sess.ID, messageRequestID(msg)); err != nil {
-		return nil, fmt.Errorf("获取 session lane 失败: %w", err)
-	} else if unlock != nil {
-		defer unlock()
+	if regeneration == nil {
+		if unlock, err := e.acquireSessionLane(ctx, sess.ID, messageRequestID(msg)); err != nil {
+			return nil, fmt.Errorf("获取 session lane 失败: %w", err)
+		} else if unlock != nil {
+			defer unlock()
+		}
 	}
 	if replay, err := e.loadDurableAssistantReply(ctx, msg, false); err != nil {
 		return nil, err
@@ -2000,7 +2028,7 @@ func (e *ReActEngine) finalizeReply(
 	// 上下文压缩（异步，G3: 串行化后台写入）
 	// Fix: pass the resolved provider instead of nil to avoid nil pointer dereference
 	// when compaction triggers provider.Complete() for LLM-based summarization.
-	if e.compactor != nil {
+	if e.compactor != nil && msg.RegenerateFromMessageID == "" {
 		compactProvider := provider
 		e.bgWg.Add(1)
 		go func() {
@@ -2205,6 +2233,15 @@ func (e *ReActEngine) ProcessStream(ctx context.Context, msg *adapter.Message) (
 	if msg == nil {
 		return e.processStream(ctx, msg, nil)
 	}
+	if msg.RegenerateFromMessageID != "" {
+		if chunks, replay, err := e.ReplayCompletedStream(ctx, msg); err != nil || replay {
+			return chunks, err
+		}
+	}
+	ctx, regeneration, releaseRegeneration, err := e.beginChatRegeneration(ctx, msg)
+	if err != nil {
+		return nil, err
+	}
 	finishMediaRequest := e.trackMediaRequest(msg)
 	transportCtx := ctx
 	cleanup := func() {}
@@ -2228,6 +2265,7 @@ func (e *ReActEngine) ProcessStream(ctx context.Context, msg *adapter.Message) (
 	route := adapter.FrozenReasoningRoute{}
 	raw, err := e.processStream(ctx, msg, &route)
 	if err != nil {
+		releaseRegeneration()
 		e.finalizeExternalRun(ctx, msg)
 		cleanup()
 		finishMediaRequest()
@@ -2244,6 +2282,7 @@ func (e *ReActEngine) ProcessStream(ctx context.Context, msg *adapter.Message) (
 	out := make(chan *adapter.ReplyChunk, 16)
 	go func() {
 		defer close(out)
+		defer releaseRegeneration()
 		defer e.finalizeExternalRun(ctx, msg)
 		defer cleanup()
 		defer finishMediaRequest()
@@ -2296,6 +2335,15 @@ func (e *ReActEngine) ProcessStream(ctx context.Context, msg *adapter.Message) (
 			terminal = wire.Decorate(&adapter.ReplyChunk{Done: true, Error: ctx.Err()})
 		}
 		snapshot := wire.Snapshot()
+		if regeneration != nil {
+			persistedContent := content.String()
+			if terminal.MessageContent != nil {
+				persistedContent = terminal.MessageContent.Markdown
+			}
+			e.commitRegeneratedStream(ctx, msg, regeneration, terminal, snapshot, persistedContent)
+			emit(terminal)
+			return
+		}
 		failedObserved := terminal.Error != nil && (content.Len() > 0 || len(snapshot.ToolCalls) > 0 || len(snapshot.Blocks) > 0 || terminal.MessageContent != nil)
 		if e.sessions != nil && (terminal.Error == nil || failedObserved) {
 			saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
@@ -2450,11 +2498,13 @@ func (e *ReActEngine) processStream(
 	// unlock 存入 ctx，由 pipeStream/pipeStreamWithTools goroutine 在结束时释放。
 	// 对于提前 return 的路径（Skill/缓存/Stream 失败），必须在此 defer 兜底释放。
 	var sessionUnlock func()
-	if unlock, err := e.acquireSessionLane(ctx, sess.ID, messageRequestID(msg)); err != nil {
-		return nil, fmt.Errorf("获取 session lane 失败: %w", err)
-	} else if unlock != nil {
-		sessionUnlock = unlock
-		ctx = context.WithValue(ctx, ctxKeySessionUnlock, sessionUnlock)
+	if session.ChatRegenerationFromContext(ctx) == nil {
+		if unlock, err := e.acquireSessionLane(ctx, sess.ID, messageRequestID(msg)); err != nil {
+			return nil, fmt.Errorf("获取 session lane 失败: %w", err)
+		} else if unlock != nil {
+			sessionUnlock = unlock
+			ctx = context.WithValue(ctx, ctxKeySessionUnlock, sessionUnlock)
+		}
 	}
 	// unlockOnReturn 标记：goroutine 启动后设为 false，防止 defer 重复释放
 	goroutineLaunched := false
@@ -3598,7 +3648,7 @@ func (e *ReActEngine) finalizeRuntimeStreamResult(
 		e.autoExtractMemoryForRole(ctx, msg.Content, content, msgMeta["role"])
 	}
 
-	if e.compactor != nil {
+	if e.compactor != nil && msg.RegenerateFromMessageID == "" {
 		e.bgWg.Add(1)
 		go func() {
 			defer e.bgWg.Done()
@@ -4130,7 +4180,7 @@ func (e *ReActEngine) pipeStream(
 	}
 
 	// 上下文压缩（异步，G3: 串行化后台写入）
-	if e.compactor != nil {
+	if e.compactor != nil && msg.RegenerateFromMessageID == "" {
 		e.bgWg.Add(1)
 		go func() {
 			defer e.bgWg.Done()
@@ -5476,6 +5526,9 @@ func (e *ReActEngine) loadDurableAssistantReply(
 				metadata[key] = text
 			}
 		}
+	}
+	if metadata["regenerate_from_message_id"] != msg.RegenerateFromMessageID {
+		return nil, storage.ErrChatRegenerationConflict
 	}
 	delete(metadata, persistErrorMetaKey)
 	metadata["provider"] = persisted.Provider

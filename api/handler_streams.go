@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 	"sort"
 
@@ -49,6 +50,10 @@ func (s *Server) handleGetStreamSnapshot(w http.ResponseWriter, r *http.Request)
 	if s.streamStates != nil {
 		websocket, _ = s.streamStates.GetStreamSnapshot(userID, requestID)
 	}
+	// The persisted replacement is authoritative even while a completed snapshot is cached.
+	if s.writeStreamReplacement(w, r, userID, requestID) {
+		return
+	}
 	if source == "" && rest != nil && websocket != nil {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "stream source is ambiguous; specify rest or websocket"})
 		return
@@ -76,11 +81,15 @@ func (s *Server) handleCancelStream(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "request_id is required"})
 		return
 	}
+	userID := sessionUserIDFromRequest(r)
+	if s.writeStreamReplacement(w, r, userID, requestID) {
+		return
+	}
 	if s.restStreams == nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "stream not found"})
 		return
 	}
-	snapshot, requested, found := s.restStreams.RequestCancel(sessionUserIDFromRequest(r), requestID, requestcancel.ErrUserCancelled)
+	snapshot, requested, found := s.restStreams.RequestCancel(userID, requestID, requestcancel.ErrUserCancelled)
 	if !found {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "stream not found"})
 		return
@@ -91,4 +100,17 @@ func (s *Server) handleCancelStream(w http.ResponseWriter, r *http.Request) {
 		status = http.StatusAccepted
 	}
 	writeJSON(w, status, map[string]any{"request_id": requestID, "cancel_requested": requested, "snapshot": snapshot})
+}
+
+func (s *Server) writeStreamReplacement(w http.ResponseWriter, r *http.Request, userID, requestID string) bool {
+	err := s.checkSupersededChatRequest(r.Context(), userID, requestID)
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, streamstate.ErrRequestConflict) {
+		writeChatRequestReceipt(w, http.StatusNotFound, "stream not found", requestID, "", err)
+	} else {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "chat request identity could not be verified"})
+	}
+	return true
 }

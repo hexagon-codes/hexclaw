@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/hexagon/observe/trace"
 	"github.com/hexagon-codes/toolkit/util/idgen"
 	"nhooyr.io/websocket"
@@ -40,6 +41,7 @@ type WebAdapter struct {
 	streamHandler             adapter.StreamMessageHandler
 	attachmentResolver        func(context.Context, string, []adapter.Attachment) ([]adapter.Attachment, error)
 	requestAdmission          func(context.Context, *adapter.Message, func() error) error
+	supersededRequestLookup   func(context.Context, string, string) (string, error)
 	conns                     sync.Map // chatID → *websocket.Conn
 	connectionOwners          sync.Map // chatID → authenticated ownerID
 	sessionConns              sync.Map // sessionID → sessionConnectionBinding
@@ -155,6 +157,11 @@ func (a *WebAdapter) SetStreamHandler(h adapter.StreamMessageHandler) {
 // resume和已有连接的取消仍走原适配器，不进入新请求接纳。
 func (a *WebAdapter) SetRequestAdmission(admit func(context.Context, *adapter.Message, func() error) error) {
 	a.requestAdmission = admit
+}
+
+// SetSupersededRequestLookup supplies the owning service's durable replacement lookup.
+func (a *WebAdapter) SetSupersededRequestLookup(lookup func(context.Context, string, string) (string, error)) {
+	a.supersededRequestLookup = lookup
 }
 
 // SetAttachmentResolver installs the Sidecar-owned staging resolver. WebSocket
@@ -561,13 +568,14 @@ func (a *WebAdapter) sendStreamWithIDs(ctx context.Context, chatID, sessionID, r
 	reasoningCount := 0
 	var canonical strings.Builder
 	for chunk := range chunks {
+		committedRegeneration := chunk.Done && chunk.Error == nil && chunk.BackendMessageID != "" && chunk.Metadata["regenerate_from_message_id"] != ""
 		outputCtx := ctx
 		finishOutput := func() {}
 		if err := ctx.Err(); err != nil {
-			if !requestcancel.IsExplicit(ctx) {
+			if !requestcancel.IsExplicit(ctx) && !committedRegeneration {
 				return err
 			}
-			if !chunk.Done || chunk.Error == nil {
+			if !committedRegeneration && (!chunk.Done || chunk.Error == nil) {
 				// 停止后继续消费到真实失败终帧；中间事件和迟到成功不能冻结快照。
 				if !chunk.Done && requestID != "" && a.streams != nil {
 					// 已观察的序列与运行事件仍进入恢复账本，终帧会覆盖正文和工具终态。
@@ -618,8 +626,6 @@ func (a *WebAdapter) sendStreamWithIDs(ctx context.Context, chatID, sessionID, r
 			finishOutput()
 			return chunk.Error
 		}
-		finishOutput()
-
 		chunkCount++
 		canonical.WriteString(chunk.Content)
 		if chunk.Reasoning != "" {
@@ -631,7 +637,8 @@ func (a *WebAdapter) sendStreamWithIDs(ctx context.Context, chatID, sessionID, r
 		if requestID != "" && a.streams != nil {
 			a.streams.Append(requestID, chunk)
 		}
-		if err := ctx.Err(); err != nil {
+		if err := outputCtx.Err(); err != nil {
+			finishOutput()
 			if requestcancel.IsExplicit(ctx) {
 				continue
 			}
@@ -679,13 +686,16 @@ func (a *WebAdapter) sendStreamWithIDs(ctx context.Context, chatID, sessionID, r
 			}
 			a.sessionRequests.Store(msg.SessionID, requestID)
 		}
-		if err := ctx.Err(); err != nil {
+		if err := outputCtx.Err(); err != nil {
+			finishOutput()
 			if requestcancel.IsExplicit(ctx) {
 				continue
 			}
 			return err
 		}
-		if err := a.sendToTargets(ctx, chatID, requestID, msg); err != nil {
+		err := a.sendToTargets(outputCtx, chatID, requestID, msg)
+		finishOutput()
+		if err != nil {
 			if requestcancel.IsExplicit(ctx) && errors.Is(err, context.Canceled) {
 				continue
 			}
@@ -758,12 +768,26 @@ func (a *WebAdapter) handleWS(w http.ResponseWriter, r *http.Request) {
 			if requestID != "" && a.requestOwnedBy(requestID, ownerID) {
 				a.stopDisconnectTimer(requestID)
 				if cancelFn, ok := a.cancelFuncs.Load(requestID); ok {
+					if a.streams != nil {
+						a.streams.MarkCancelRequested(ownerID, requestID)
+					}
 					cancelFn.(*requestCancellation).cancel(requestcancel.ErrUserCancelled)
 				}
 			}
 			continue
 		case "resume":
 			snapshot, ok := a.GetStreamSnapshot(ownerID, incoming.RequestID)
+			if a.supersededRequestLookup != nil {
+				sessionID, err := a.supersededRequestLookup(r.Context(), ownerID, incoming.RequestID)
+				if err == nil && sessionID != "" {
+					_ = wsjson.Write(r.Context(), conn, wsMessage{
+						Type: "error", Content: "stream not found", RequestID: incoming.RequestID,
+						SessionID: sessionID, Metadata: map[string]string{"outcome": "superseded"},
+					})
+					continue
+				}
+				ok = ok && err == nil
+			}
 			if !ok {
 				_ = wsjson.Write(r.Context(), conn, wsMessage{
 					Type:      "error",
@@ -824,8 +848,16 @@ func (a *WebAdapter) handleWS(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		if incoming.Type != "message" || !adapter.HasMessageInput(incoming.Content, incoming.Attachments) {
+		incoming.RegenerateFromMessageID = strings.TrimSpace(incoming.RegenerateFromMessageID)
+		if incoming.Type != "message" || (incoming.RegenerateFromMessageID == "" && !adapter.HasMessageInput(incoming.Content, incoming.Attachments)) {
 			continue
+		}
+		if incoming.RegenerateFromMessageID != "" {
+			incoming.SessionID, incoming.RequestID = strings.TrimSpace(incoming.SessionID), strings.TrimSpace(incoming.RequestID)
+			if incoming.SessionID == "" || incoming.RequestID == "" || len(incoming.Attachments) != 0 || a.requestAdmission == nil {
+				_ = wsjson.Write(r.Context(), conn, wsMessage{Type: "error", Content: "conversation regeneration requires the original session and a request identity; stored attachments are reused", RequestID: incoming.RequestID, SessionID: incoming.SessionID})
+				continue
+			}
 		}
 		if err := adapter.ValidateAttachments(incoming.Attachments); err != nil {
 			// 本地输入校验错（确定性、非敏感、对用户有用）原样展示——不走 PublicMessage（AP-070 粒度修正：Validate* 帧白名单豁免）。
@@ -867,6 +899,7 @@ func (a *WebAdapter) handleWS(w http.ResponseWriter, r *http.Request) {
 
 		logger := trace.NewRequest(msg.UserID, msg.SessionID).With("source", "chat", "provider", incoming.Provider, "model", incoming.Model, "request_id", incoming.RequestID)
 		deadlineCtx, stopDeadline := context.WithTimeout(skill.WithAuthenticatedUser(context.Background(), ownerID), 10*time.Minute)
+		deadlineCtx = llm.WithOperationSafety(deadlineCtx, llm.OperationSafetyNonIdempotent)
 		signalCtx, cancelSignal := requestcancel.WithSignal(deadlineCtx)
 		ctx, cancel := context.WithCancelCause(signalCtx)
 		cancellation := &requestCancellation{transport: cancel, signal: cancelSignal, ctx: ctx}
@@ -881,6 +914,7 @@ func (a *WebAdapter) handleWS(w http.ResponseWriter, r *http.Request) {
 			a.cancelFuncs.Store(incoming.RequestID, cancellation)
 			if a.streamHandler != nil && a.streams != nil {
 				a.streams.Start(msg.UserID, msg.SessionID, incoming.RequestID)
+				a.streams.SetRegenerationSource(incoming.RequestID, msg.RegenerateFromMessageID)
 			}
 			return nil
 		}
@@ -929,7 +963,7 @@ func (a *WebAdapter) handleWS(w http.ResponseWriter, r *http.Request) {
 				a.addSubscriber(incoming.RequestID, chatID)
 				chunks, err := a.streamHandler(ctx, msg)
 				if err != nil {
-					if errors.Is(err, context.Canceled) && errors.Is(context.Cause(ctx), requestcancel.ErrUserCancelled) {
+					if errors.Is(err, context.Canceled) && errors.Is(ctx.Err(), context.Canceled) {
 						// 源已退出，由统一收口发布真实取消快照，不先发送普通失败帧。
 						return
 					}
@@ -1067,24 +1101,17 @@ func (a *WebAdapter) scheduleDisconnectCancel(requestID string, subs *requestSub
 		if !ok || current != subs {
 			return
 		}
-		retained := false
-		canceled := subs.IfEmpty(func() {
+		subs.IfEmpty(func() {
 			if cancelFn, ok := a.cancelFuncs.Load(requestID); ok {
 				cancellation := cancelFn.(*requestCancellation)
 				if requestcancel.IsRetained(cancellation.ctx) {
-					retained = true
 					return
 				}
+				// 等原执行排空并退出后再发布终态，期间允许重连继续观察。
 				cancellation.cancel(nil)
-			}
-			if a.streams != nil {
-				a.streams.Cancel(requestID)
+				slog.Info("WebSocket 请求因无订阅者取消", "request_id", requestID, "grace", grace)
 			}
 		})
-		if canceled && !retained {
-			a.requestConns.Delete(requestID)
-			slog.Info("WebSocket 请求因无订阅者取消", "request_id", requestID, "grace", grace)
-		}
 	})
 	if existing, loaded := a.disconnectTimers.LoadOrStore(requestID, timer); loaded {
 		timer.Stop()
@@ -1557,6 +1584,8 @@ type wsMessage struct {
 	RuntimeEvent        *adapter.RuntimeEvent           `json:"runtime_event,omitempty"`
 	RuntimeEvents       []adapter.SequencedRuntimeEvent `json:"runtime_events,omitempty"`
 	LastSequence        uint64                          `json:"last_sequence,omitempty"`
+
+	RegenerateFromMessageID string `json:"regenerate_from_message_id,omitempty"`
 }
 
 // attachLLMErrorTaxonomy 仅为已识别的模型错误附加稳定机器码。
@@ -1925,6 +1954,7 @@ func buildAdapterMessage(chatID, authenticatedOwnerID string, incoming wsMessage
 	// GO-3：WebSocket 入站是信任边界——剥除只能由受信内部派发器盖章的保留键，
 	// 否则客户端可伪造 source=cron + cron_job_id 盗用他人任务的授权（提权）。
 	adapter.StripReservedDispatchMetadata(metadata)
+	delete(metadata, "regenerate_from_message_id")
 	if err := adapter.ApplyRequestSamplingOverrides(metadata, incoming.Temperature, incoming.MaxTokens); err != nil {
 		return nil, err
 	}
@@ -1952,6 +1982,8 @@ func buildAdapterMessage(chatID, authenticatedOwnerID string, incoming wsMessage
 		Attachments: incoming.Attachments,
 		Timestamp:   time.Now(),
 		Metadata:    metadata,
+
+		RegenerateFromMessageID: incoming.RegenerateFromMessageID,
 	}, nil
 }
 

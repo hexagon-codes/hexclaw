@@ -16,6 +16,8 @@ type AssistantCompletion struct {
 	OwnsDelivery bool
 	// Commit 不提交或回滚外层事务；true 表示已存在同一终稿，可直接完成幂等读回。
 	Commit func(context.Context, *sql.Tx, *MessageRecord) (bool, error)
+	// BeforeInsert 在确认没有复用已有终稿后执行，同新消息共享一次提交。
+	BeforeInsert func(context.Context, *sql.Tx, *MessageRecord) error
 }
 
 type assistantCompletionKey struct{}

@@ -76,6 +76,8 @@ type Message struct {
 	Attachments []Attachment      // 附件列表（当前仅支持图片，可选）
 	Metadata    map[string]string // 平台特定的元数据
 	Timestamp   time.Time         // 消息时间
+	// 由聊天传输显式声明的原用户消息 ID，独立于不可信 metadata。
+	RegenerateFromMessageID string `json:"-"`
 }
 
 // Usage Token 使用统计

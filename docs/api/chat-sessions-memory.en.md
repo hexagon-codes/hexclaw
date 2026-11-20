@@ -229,6 +229,10 @@ Returns complete JSON by default, or SSE when Accept contains text/event-stream.
 
 Request body maximum: 20971520 bytes.
 
+When `GET /api/v1/version` reports `chat_regenerate: atomic_replace_v1`, REST and WebSocket can regenerate an existing turn. Supply the original `session_id`, a new `request_id`, and the durable user message ID in `regenerate_from_message_id`. Leave the body text empty and omit attachments. The model uses the stored input, attachments, route and earlier context. Successful completion replaces the old suffix in one transaction and returns the committed `backend_message_id`. Failed, cancelled and unknown requests preserve the original history. Recovery snapshots and the new assistant record carry `metadata.regenerate_from_message_id`.
+
+After a newer reply replaces the original turn, its predecessor's request identity remains bound to the session. A REST replay of the superseded request returns 409 with the original history URL. WebSocket rejects the same re-send. The history contains the current answer.
+
 Follow-ups use the same owned `session_id` under the authenticated identity. Ordinary agents and bound K12 agents retain their respective histories. Natural-language follow-ups with history reach the model context; fast-matched skills follow the same effective settings, permissions, and hooks. `full_access` removes application execution approval, but does not guarantee external-service success or turn retrieved text into user instructions.
 
 Context assembly follows existing compaction settings, vision routing policies, and model limits. Complete current input and its original images are protected; older tool media is compacted with its call group, and historical images follow the configured policy. Empty summaries or archive failures preserve original messages. Response caching includes effective request context and settings. Long-term person facts are separated by attribute, and a failed replacement preserves the previous fact.
@@ -263,6 +267,7 @@ JSON body (nested structures are documented under models):
 | `attachments` | [ChatSessionAttachment](#schema-chatsessionattachment)[] | No | maxItems=20 |
 | `metadata` | object | No | String map. Reserved internal dispatch/sampling keys are stripped. Explicit role/provider/model fields override corresponding metadata. |
 | `request_id` | string | No | Correlation and recovery identity, not a durable admission/idempotency guarantee. |
+| `regenerate_from_message_id` | string | No | Original user message ID. Requires `session_id` and the new `request_id`. |
 | `temperature` | number / null | No | minimum=0; maximum=2; Omitted/null follows the Agent/model; zero remains an explicit value. |
 | `max_tokens` | integer / null | No | minimum=1; maximum=1000000; Omitted/null follows the Agent/model. |
 
@@ -684,6 +689,8 @@ Get a stream snapshot
 Authentication: Bearer. Availability: Mounted only when s.streamStates != nil.
 
 Returns accumulated content/reasoning, status/done, message identity, runtime_events and last_sequence. Retention is process-local and registry-configured; the default keeps terminal snapshots for two minutes, without restart durability.
+A superseded answer returns HTTP 404 with `receipt_ref.outcome=superseded`, the original request and session IDs, and the history path. WebSocket `resume` returns the same identity and `metadata.outcome=superseded`. Session history provides the current answer.
+The snapshot's `cancel_requested` records whether the server accepted explicit cancellation. The `status` and `done` fields describe the actual terminal state. Older servers may omit the field.
 
 | Location | Field | Required | Type / rules |
 | --- | --- | --- | --- |
@@ -693,7 +700,7 @@ Body: not read / not required.
 
 Success: `200` [ChatSessionSnapshot](#schema-chatsessionsnapshot).
 
-Errors: 401 authentication failure; 400: Empty request_id; 404: No retained snapshot for this owner/request
+Error codes include 400 for invalid requests, 401 for authentication failures, 404 for unavailable snapshots, and 409 for an ambiguous transport source.
 
 Source: [api/handler_streams.go](../../api/handler_streams.go) — `handleGetStreamSnapshot`.
 
@@ -714,7 +721,7 @@ Body: not read / not required.
 
 Success: `202` means the cancellation signal was accepted; `200` means the original request is already terminal. Both return `request_id`, `cancel_requested`, and [ChatSessionSnapshot](#schema-chatsessionsnapshot).
 
-Errors: 401 authentication failure; 400: empty request_id; 404: no retained REST request for this authenticated owner
+Errors include 400 for an empty request ID, 401 for authentication failures, 404 for unavailable snapshots, and 500 when persisted request identity cannot be verified. Superseded requests return the same 404 and `receipt_ref` as the snapshot endpoint.
 
 Source: [api/handler_streams.go](../../api/handler_streams.go) — `handleCancelStream`.
 
@@ -1460,6 +1467,7 @@ Owner-scoped process-local accumulated stream state; not a durable request ledge
 | `content` | string | No | — |
 | `reasoning` | string | No | — |
 | `done` | boolean | Yes | — |
+| `cancel_requested` | boolean | No | The server accepted explicit cancellation for this run. Older servers may omit it. |
 | `status` | string | Yes | enum="pending", "streaming", "completed", "errored", "cancelled" |
 | `metadata` | object | No | — |
 | `usage` | [ChatSessionUsage](#schema-chatsessionusage) | No | — |

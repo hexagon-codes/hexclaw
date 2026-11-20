@@ -584,11 +584,15 @@ func (s *Server) getStatsJSON() []byte {
 // ─── Version: GET /api/v1/version ──
 
 func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{
+	response := map[string]string{
 		"version":        s.version,
 		"engine":         "Hexagon",
 		"engine_version": hexagon.Version,
-	})
+	}
+	if s.supportsChatRegeneration() {
+		response["chat_regenerate"] = "atomic_replace_v1"
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 // ─── Canvas Workflow CRUD + 执行 ──

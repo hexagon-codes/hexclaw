@@ -229,6 +229,10 @@ asyncio.run(main())
 
 请求体上限：20971520 bytes.
 
+新版后端在 `GET /api/v1/version` 返回 `chat_regenerate: atomic_replace_v1` 时支持原轮重生成。REST 和 WebSocket 均传原 `session_id`、本次新的 `request_id` 和持久原用户消息 ID `regenerate_from_message_id`，正文留空并省略附件。模型使用原用户正文、附件、原路由及之前的历史。成功时在同一事务替换原用户之后的旧尾段，终态返回已提交的 `backend_message_id`。失败、取消或结果未知时保留原历史。恢复快照和新助手记录的 `metadata.regenerate_from_message_id` 标识同一原用户消息。
+
+较新的回复替换原轮后，旧请求身份仍与原会话绑定。REST 重放旧请求返回 409 及原会话历史入口，WS 也会拒绝重发。读取当前历史可得到较新的答案。
+
 连续请求使用当前鉴权身份下的同一 `session_id`，普通 Agent 与 K12 绑定 Agent 均保留各自历史。带历史的自然语言追问进入模型上下文；快速匹配技能仍遵循同一用户设置、权限与 hook。`full_access` 省去应用执行审批，不代表外部服务必然成功，也不把检索材料中的文字提升为用户指令。
 
 上下文按现有压缩配置、视觉路由策略和模型上限组装；本轮完整文字与原始图片受到保护，旧工具媒体按所属调用组压缩，历史图片的取舍遵循既有设置。摘要为空或归档失败时保留原消息。回答缓存绑定有效请求上下文及设置，长期人物事实按属性区分，替换失败保留旧事实。
@@ -263,6 +267,7 @@ JSON body（字段如下；嵌套结构见模型）：
 | `attachments` | [ChatSessionAttachment](#schema-chatsessionattachment)[] | 否 | maxItems=20 |
 | `metadata` | object | 否 | String map. Reserved internal dispatch/sampling keys are stripped. Explicit role/provider/model fields override corresponding metadata. |
 | `request_id` | string | 否 | Correlation and recovery identity, not a durable admission/idempotency guarantee. |
+| `regenerate_from_message_id` | string | 否 | 同会话原用户消息 ID，须提供 `session_id` 与本次 `request_id`。 |
 | `temperature` | number / null | 否 | minimum=0; maximum=2; Omitted/null follows the Agent/model; zero remains an explicit value. |
 | `max_tokens` | integer / null | 否 | minimum=1; maximum=1000000; Omitted/null follows the Agent/model. |
 
@@ -685,6 +690,8 @@ Body: 不读取 / 不需要。
 认证：Bearer. 挂载：运行流状态管理器可用时挂载（s.streamStates != nil）.
 
 返回累计内容、reasoning、status/done、消息身份、runtime_events 和 last_sequence。进程内恢复窗口由注册器配置，默认终态保留 2 分钟；不承诺跨重启持久恢复。
+请求的答案已被替换时，返回 404 和 `receipt_ref.outcome=superseded`，含原请求 ID、会话 ID 和历史入口。WebSocket 的 `resume` 返回同一身份及 `metadata.outcome=superseded`。当前答案由会话历史提供。
+快照的 `cancel_requested` 表示服务器是否已接纳显式停止，实际终态以 `status` 和 `done` 为准。旧服务可能省略该字段。
 
 | 位置 | 字段 | 必填 | 类型 / 规则 |
 | --- | --- | --- | --- |
@@ -694,7 +701,7 @@ Body: 不读取 / 不需要。
 
 成功：`200` [ChatSessionSnapshot](#schema-chatsessionsnapshot).
 
-错误：401 认证失败；400: Empty request_id; 404: No retained snapshot for this owner/request
+错误状态包括 400 无效请求、401 鉴权失败、404 无可读快照及 409 传输来源冲突。
 
 源码：[api/handler_streams.go](../../api/handler_streams.go) — `handleGetStreamSnapshot`.
 
@@ -715,7 +722,7 @@ Body: 不读取 / 不需要。
 
 成功：`202` 表示取消信号已受理；`200` 表示原请求已终态。两者均返回 `request_id`、`cancel_requested` 和 [ChatSessionSnapshot](#schema-chatsessionsnapshot)。
 
-错误：401 认证失败；400: request_id 为空；404: 当前 owner 没有该 REST 请求的保留记录
+错误包括 400 请求 ID 为空、401 认证失败、404 无当前可读快照、500 无法核对已持久化的请求身份。已被替换的请求返回与查询接口相同的 404 和 `receipt_ref`。
 
 源码：[api/handler_streams.go](../../api/handler_streams.go) — `handleCancelStream`.
 
@@ -1461,6 +1468,7 @@ Owner-scoped process-local accumulated stream state; not a durable request ledge
 | `content` | string | 否 | — |
 | `reasoning` | string | 否 | — |
 | `done` | boolean | 是 | — |
+| `cancel_requested` | boolean | 否 | 服务器已接纳本次停止，旧服务可能省略。 |
 | `status` | string | 是 | enum="pending", "streaming", "completed", "errored", "cancelled" |
 | `metadata` | object | 否 | — |
 | `usage` | [ChatSessionUsage](#schema-chatsessionusage) | 否 | — |

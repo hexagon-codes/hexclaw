@@ -95,6 +95,9 @@ func shouldBypassSemanticCache(msg *adapter.Message) bool {
 	if msg == nil {
 		return false
 	}
+	if msg.RegenerateFromMessageID != "" {
+		return true
+	}
 	// 缓存只有最终文字，不能代替有持久资料引用或创建副作用的场景任务。
 	if msg.Metadata["k12_task_intent"] != "" || msg.Metadata["k12_active_material"] != "" {
 		return true

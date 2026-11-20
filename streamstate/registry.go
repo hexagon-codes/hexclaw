@@ -32,6 +32,7 @@ type Snapshot struct {
 	Reasoning           string                          `json:"reasoning,omitempty"`
 	Done                bool                            `json:"done"`
 	Status              Status                          `json:"status"`
+	CancelRequested     bool                            `json:"cancel_requested"`
 	Metadata            map[string]string               `json:"metadata,omitempty"`
 	Usage               *adapter.Usage                  `json:"usage,omitempty"`
 	ToolCalls           []adapter.ToolCall              `json:"tool_calls,omitempty"`
@@ -112,6 +113,21 @@ func (r *Registry) Start(userID, sessionID, requestID string) {
 	r.StartMessage(userID, sessionID, requestID, "")
 }
 
+// SetRegenerationSource 标记已核对归属的原用户消息，供同一运行断线恢复。
+func (r *Registry) SetRegenerationSource(requestID, sourceID string) {
+	if sourceID == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if item := r.items[requestID]; item != nil && !item.Done {
+		if item.Metadata == nil {
+			item.Metadata = make(map[string]string)
+		}
+		item.Metadata["regenerate_from_message_id"] = sourceID
+	}
+}
+
 func (r *Registry) StartMessage(userID, sessionID, requestID, assistantMessageID string) {
 	if requestID == "" {
 		return
@@ -129,6 +145,7 @@ func (r *Registry) startMessageLocked(userID, sessionID, requestID, assistantMes
 		existing.SessionID = sessionID
 		existing.Status = StatusPending
 		existing.Done = false
+		existing.CancelRequested = false
 		existing.UpdatedAt = now
 		if assistantMessageID != "" {
 			existing.AssistantMessageID = assistantMessageID
@@ -185,15 +202,26 @@ func (r *Registry) RequestCancel(userID, requestID string, cause error) (*Snapsh
 		r.mu.Unlock()
 		return nil, false, false
 	}
-	copy := cloneSnapshot(item)
 	control := r.controls[requestID]
-	if item.Done || control == nil {
-		r.mu.Unlock()
-		return &copy, false, true
+	requested := !item.Done && control != nil
+	if requested {
+		item.CancelRequested = true
 	}
+	copy := cloneSnapshot(item)
 	r.mu.Unlock()
-	control.cancel(cause)
-	return &copy, true, true
+	if requested {
+		control.cancel(cause)
+	}
+	return &copy, requested, true
+}
+
+// MarkCancelRequested 记录由传输层接纳的显式停止。原运行负责提交真实终态。
+func (r *Registry) MarkCancelRequested(userID, requestID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if item := r.items[requestID]; item != nil && item.UserID == userID && !item.Done {
+		item.CancelRequested = true
+	}
 }
 
 // Finish 只能在实际生产者退出后调用，释放句柄和提交终态在同一把锁下完成。
@@ -243,7 +271,9 @@ func (r *Registry) appendLocked(requestID string, chunk *adapter.ReplyChunk) *Sn
 	if chunkMessageID != "" {
 		if item.AssistantMessageID == "" {
 			item.AssistantMessageID = chunkMessageID
-			item.BackendMessageID = chunkMessageID
+			if item.Metadata["regenerate_from_message_id"] == "" {
+				item.BackendMessageID = chunkMessageID
+			}
 			item.MessageID = chunkMessageID
 		} else if item.AssistantMessageID != chunkMessageID {
 			copy := cloneSnapshot(item)
@@ -313,6 +343,9 @@ func (r *Registry) appendLocked(requestID string, chunk *adapter.ReplyChunk) *Sn
 		})
 	}
 	if chunk.Done {
+		if item.Metadata["regenerate_from_message_id"] != "" && chunk.Error == nil && chunk.BackendMessageID != "" {
+			item.BackendMessageID = chunk.BackendMessageID
+		}
 		item.Done = true
 		item.Status = StatusCompleted
 		if chunk.Error != nil {

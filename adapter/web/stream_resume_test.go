@@ -474,12 +474,16 @@ func TestBug20260717_DisconnectCancelsOrphanStreamAfterGrace(t *testing.T) {
 	a.disconnectGrace = 20 * time.Millisecond
 	started := make(chan struct{})
 	canceled := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(release) })
 	a.SetStreamHandler(func(ctx context.Context, _ *adapter.Message) (<-chan *adapter.ReplyChunk, error) {
 		chunks := make(chan *adapter.ReplyChunk)
 		close(started)
 		go func() {
 			<-ctx.Done()
 			close(canceled)
+			<-release
 			close(chunks)
 		}()
 		return chunks, nil
@@ -500,6 +504,26 @@ func TestBug20260717_DisconnectCancelsOrphanStreamAfterGrace(t *testing.T) {
 	case <-canceled:
 	case <-time.After(time.Second):
 		t.Fatal("orphan stream context was not canceled after all subscribers disconnected")
+	}
+
+	watcher, watcherCtx, _ := dialWebAdapter(t, a)
+	if err := wsjson.Write(watcherCtx, watcher, wsMessage{Type: "resume", RequestID: "req-orphan"}); err != nil {
+		t.Fatal(err)
+	}
+	var snapshot wsMessage
+	if err := wsjson.Read(watcherCtx, watcher, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Type != "stream_snapshot" || snapshot.RequestID != "req-orphan" || snapshot.Done {
+		t.Fatalf("orphan finished while the producer was still draining: %#v", snapshot)
+	}
+	releaseOnce.Do(func() { close(release) })
+	if err := wsjson.Read(watcherCtx, watcher, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Type != "stream_snapshot" || snapshot.RequestID != "req-orphan" ||
+		!snapshot.Done || snapshot.Status != string(streamstate.StatusCancelled) {
+		t.Fatalf("orphan did not publish its cancellation after leaving the producer: %#v", snapshot)
 	}
 }
 

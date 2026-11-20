@@ -331,13 +331,24 @@ func (s *Server) SetDesktopAPIToken(token string) { s.desktopAPIToken = token }
 // SetStreamStateProvider 设置流式 in-flight 状态提供器。
 func (s *Server) SetStreamStateProvider(p streamstate.Provider) {
 	s.streamStates = p
+	if snapshots, ok := p.(interface {
+		SetSupersededRequestLookup(func(context.Context, string, string) (string, error))
+	}); ok {
+		snapshots.SetSupersededRequestLookup(s.findSupersededChatSession)
+	}
 	if admission, ok := p.(interface {
 		SetRequestAdmission(func(context.Context, *adapter.Message, func() error) error)
 	}); ok {
 		admission.SetRequestAdmission(func(ctx context.Context, msg *adapter.Message, register func() error) error {
+			if err := s.readChatRegenerationInput(ctx, msg); err != nil {
+				return err
+			}
 			s.chatAdmissionMu.Lock()
 			defer s.chatAdmissionMu.Unlock()
 			requestID := msg.Metadata["request_id"]
+			if err := s.checkSupersededChatRequest(ctx, msg.UserID, requestID); err != nil {
+				return err
+			}
 			if _, exists := s.restStreams.GetStreamSnapshot(msg.UserID, requestID); exists {
 				return streamstate.ErrRequestConflict
 			}
@@ -1329,6 +1340,8 @@ type ChatRequest struct {
 	RequestID   string               `json:"request_id,omitempty"`  // 客户端请求 ID（用于幂等/流式恢复关联）
 	Temperature *float64             `json:"temperature,omitempty"` // 本次请求温度；nil=跟随 Agent/模型默认，0=确定性
 	MaxTokens   *int                 `json:"max_tokens,omitempty"`  // 本次请求最大输出 token；nil=跟随 Agent/模型默认
+
+	RegenerateFromMessageID string `json:"regenerate_from_message_id,omitempty"`
 }
 
 // ChatResponse 聊天回复
@@ -1375,6 +1388,15 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	req.RegenerateFromMessageID = strings.TrimSpace(req.RegenerateFromMessageID)
+	regenerating := req.RegenerateFromMessageID != ""
+	if regenerating {
+		req.SessionID, req.RequestID = strings.TrimSpace(req.SessionID), strings.TrimSpace(req.RequestID)
+		if req.SessionID == "" || req.RequestID == "" || len(req.Attachments) != 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "conversation regeneration requires the original session and a request identity; stored attachments are reused"})
+			return
+		}
+	}
 	// Resolve opaque staging IDs under the authenticated principal before any
 	// attachment metadata reaches validation or the engine. The request cannot
 	// provide filename, MIME, digest, or bytes for an ID reference.
@@ -1386,7 +1408,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Attachments = resolvedAttachments
 
-	if !adapter.HasMessageInput(req.Message, req.Attachments) {
+	if !regenerating && !adapter.HasMessageInput(req.Message, req.Attachments) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{
 			"error": "message 不能为空",
 		})
@@ -1409,12 +1431,15 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	// Validate an explicit provider before constructing/persisting a chat
 	// message. Invalid client input is 400 and must not leave a partial session.
-	mediaReplay, err := s.validateMediaReplayRequest(r, req)
-	if err != nil {
-		writeMediaError(w, nil, err)
-		return
+	var mediaReplay bool
+	if !regenerating {
+		mediaReplay, err = s.validateMediaReplayRequest(r, req)
+		if err != nil {
+			writeMediaError(w, nil, err)
+			return
+		}
 	}
-	if validator, ok := s.engine.(interface{ ValidateProvider(string) error }); ok && !mediaReplay {
+	if validator, ok := s.engine.(interface{ ValidateProvider(string) error }); ok && !mediaReplay && !regenerating {
 		if err := validator.ValidateProvider(req.Provider); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{
 				"error": upstreamerr.PublicMessage(err, "error"),
@@ -1422,7 +1447,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if !mediaReplay {
+	if !mediaReplay && !regenerating {
 		if err := s.validateRequestedConversationModel(req.Provider, req.Model, req.Metadata); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
@@ -1443,6 +1468,8 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		Attachments: req.Attachments,
 		Timestamp:   time.Now(),
 		Metadata:    make(map[string]string),
+
+		RegenerateFromMessageID: req.RegenerateFromMessageID,
 	}
 
 	for k, v := range req.Metadata {
@@ -1451,17 +1478,16 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	// GO-3：外部聊天入口是信任边界——剥除只能由受信内部派发器盖章的保留键，
 	// 否则客户端可伪造 source=cron + cron_job_id 盗用他人任务的授权（提权）。
 	engine.StripReservedDispatchMetadata(msg.Metadata)
-	metadataModel := strings.TrimSpace(msg.Metadata["model"])
-	if metadataModel == "" {
-		metadataModel = strings.TrimSpace(msg.Metadata["agent_model"])
-	}
-	if err := s.validateRequestedConversationModel(
-		msg.Metadata["provider"],
-		metadataModel,
-		msg.Metadata,
-	); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
+	delete(msg.Metadata, "regenerate_from_message_id")
+	if !regenerating {
+		metadataModel := strings.TrimSpace(msg.Metadata["model"])
+		if metadataModel == "" {
+			metadataModel = strings.TrimSpace(msg.Metadata["agent_model"])
+		}
+		if err := s.validateRequestedConversationModel(msg.Metadata["provider"], metadataModel, msg.Metadata); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
 	}
 	if err := adapter.ApplyRequestSamplingOverrides(msg.Metadata, req.Temperature, req.MaxTokens); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -1480,6 +1506,14 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Model != "" {
 		msg.Metadata["model"] = req.Model
+	}
+	if err := s.readChatRegenerationInput(r.Context(), msg); err != nil {
+		status := http.StatusServiceUnavailable
+		if errors.Is(err, storage.ErrNotFound) {
+			status = http.StatusNotFound
+		}
+		writeJSON(w, status, map[string]string{"error": "original user message is unavailable"})
+		return
 	}
 
 	// 请求级结构化日志
@@ -1546,7 +1580,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		var chunks <-chan *adapter.ReplyChunk
 		chunks, replayed, err = reader.ReplayCompletedStream(ctx, msg)
 		if err != nil {
-			writeChatRequestConflict(w, msg, err)
+			writeChatRequestConflict(w, msg.Metadata["request_id"], msg.SessionID, err)
 			return
 		}
 		if replayed {
@@ -1558,7 +1592,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		run, err = s.beginRESTChat(ctx, msg)
 		if err != nil {
 			if errors.Is(err, streamstate.ErrRequestConflict) {
-				writeChatRequestConflict(w, msg, err)
+				writeChatRequestConflict(w, msg.Metadata["request_id"], msg.SessionID, err)
 			} else {
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "chat request identity could not be verified"})
 			}
@@ -1672,6 +1706,10 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if observedErr != nil {
+		if errors.Is(observedErr, storage.ErrChatRegenerationConflict) {
+			writeChatRequestConflict(w, msg.Metadata["request_id"], msg.SessionID, observedErr)
+			return
+		}
 		writeChatLLMErrorResult(w, chatErrorStatus(req.Provider, observedErr), observedErr, reply, msg.SessionID)
 		return
 	}

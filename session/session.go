@@ -119,6 +119,9 @@ type messageMetadata struct {
 
 // SaveUserMessage 保存用户消息到会话。
 func (m *Manager) SaveUserMessage(ctx context.Context, sessionID string, msg *adapter.Message) error {
+	if ChatRegenerationFromContext(ctx).matches(sessionID, requestIDFromMetadata(msg.Metadata)) {
+		return nil // 原用户及其附件保留同一条持久记录。
+	}
 	metadata, err := encodeMessageMetadata(msg.Attachments, msg.Metadata["documents"], msg.Metadata["skills"], msg.Metadata)
 	if err != nil {
 		return fmt.Errorf("编码消息元数据失败: %w", err)
@@ -236,6 +239,10 @@ func (m *Manager) SaveAssistantMessageFull(ctx context.Context, sessionID, conte
 // 所有元数据（reasoning、duration、provider、model、agent）一次性写入 meta 字段。
 func (m *Manager) SaveAssistantReply(ctx context.Context, sessionID, content string, am AssistantMeta) (*storage.MessageRecord, error) {
 	metaMap := map[string]any{}
+	stage := ChatRegenerationFromContext(ctx)
+	if stage.matches(sessionID, am.RequestID) {
+		metaMap["regenerate_from_message_id"] = stage.snapshot.Source.ID
+	}
 	disclosure := am.ReasoningDisclosure
 	if disclosure.Visibility == "" {
 		disclosure = ReasoningDisclosureFromContext(ctx)
@@ -340,6 +347,10 @@ func (m *Manager) SaveAssistantReply(ctx context.Context, sessionID, content str
 	if err := persistProviderOutputHistory(ctx, msg); err != nil {
 		return nil, err
 	}
+	if stage.matches(sessionID, am.RequestID) {
+		stage.draft, stage.values = msg, ctx
+		return msg, nil
+	}
 	var saveErr error
 	if am.RequireActiveSession {
 		writer, ok := m.store.(storage.ActiveSessionMessageWriter)
@@ -427,13 +438,28 @@ func (m *Manager) persistAssistantRuntimeSnapshot(ctx context.Context, messageID
 	if err != nil {
 		return err
 	}
+	raw, err := encodeAssistantRuntimeSnapshot(record, snapshot)
+	if err != nil {
+		return err
+	}
+	if requireActiveSession {
+		writer, ok := m.store.(storage.ActiveSessionMessageMetadataWriter)
+		if !ok {
+			return fmt.Errorf("storage does not support atomic active-session metadata writes")
+		}
+		return writer.UpdateMessageMetadataIfSessionActive(ctx, messageID, raw)
+	}
+	return m.store.UpdateMessageMetadata(ctx, messageID, raw)
+}
+
+func encodeAssistantRuntimeSnapshot(record *storage.MessageRecord, snapshot adapter.RuntimeSnapshot) (string, error) {
 	meta := map[string]any{}
 	if record.Metadata != "" {
 		_ = json.Unmarshal([]byte(record.Metadata), &meta)
 	}
-	meta["assistant_message_id"] = messageID
-	meta["backend_message_id"] = messageID
-	meta["message_id"] = messageID
+	meta["assistant_message_id"] = record.ID
+	meta["backend_message_id"] = record.ID
+	meta["message_id"] = record.ID
 	disclosure := snapshot.ReasoningDisclosure
 	if disclosure.Visibility != adapter.ReasoningVisible {
 		disclosure = adapter.ReasoningDisclosure{Visibility: adapter.ReasoningNotExposed}
@@ -454,17 +480,7 @@ func (m *Manager) persistAssistantRuntimeSnapshot(ctx context.Context, messageID
 	}
 	meta["last_sequence"] = snapshot.LastSequence
 	raw, err := json.Marshal(meta)
-	if err != nil {
-		return err
-	}
-	if requireActiveSession {
-		writer, ok := m.store.(storage.ActiveSessionMessageMetadataWriter)
-		if !ok {
-			return fmt.Errorf("storage does not support atomic active-session metadata writes")
-		}
-		return writer.UpdateMessageMetadataIfSessionActive(ctx, messageID, string(raw))
-	}
-	return m.store.UpdateMessageMetadata(ctx, messageID, string(raw))
+	return string(raw), err
 }
 
 // saveMessage 持久化一条消息，并对 SQLite 写写冲突（SQLITE_BUSY/517）做有限退避重试。
@@ -504,15 +520,24 @@ func userMessageID(metadata map[string]string) string {
 // 从存储中加载最近 N 轮消息，转换为 hexagon.Message（即 llm.Message）格式。
 // 消息按时间正序排列，最新消息在最后。
 // 如果消息数超过 maxTurns，只返回最近的 maxTurns 条。
-func (m *Manager) BuildContext(ctx context.Context, sessionID string) ([]hexagon.Message, error) {
+func (m *Manager) contextMessageLimit() int {
 	maxTurns := m.cfg.Conversation.MaxTurns
 	if maxTurns <= 0 {
 		maxTurns = 50
 	}
+	return maxTurns
+}
 
-	records, err := storage.ListContextMessages(ctx, m.store, sessionID, maxTurns, 0)
-	if err != nil {
-		return nil, fmt.Errorf("加载消息历史失败: %w", err)
+func (m *Manager) BuildContext(ctx context.Context, sessionID string) ([]hexagon.Message, error) {
+	var records []*storage.MessageRecord
+	if stage := ChatRegenerationFromContext(ctx); stage != nil && stage.snapshot.Source.SessionID == sessionID {
+		records = stage.snapshot.Prefix
+	} else {
+		var err error
+		records, err = storage.ListContextMessages(ctx, m.store, sessionID, m.contextMessageLimit(), 0)
+		if err != nil {
+			return nil, fmt.Errorf("加载消息历史失败: %w", err)
+		}
 	}
 
 	messages := make([]hexagon.Message, 0, len(records))
