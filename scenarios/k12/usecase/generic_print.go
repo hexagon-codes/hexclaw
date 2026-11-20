@@ -588,13 +588,12 @@ func (d Deps) gradingFinalArtifactImageSource(ctx context.Context, artifact k12.
 	if err != nil {
 		return DeliveryAttachment{}, "", err
 	}
-	if imageBytesDigest([][]byte{image.Data}) != dispatch.SourceDigest {
-		// 历史任务冻结原始字节，当前 PageAsset 任务冻结规范 PNG；两者只核同一原图。
+	if err := verifyImageTaskSourceDigest(dispatch, [][]byte{image.Data}, true); err != nil {
 		canonical, err := canonicalProblemSourceImage(image)
 		if err != nil {
 			return DeliveryAttachment{}, "", err
 		}
-		if imageBytesDigest([][]byte{canonical.Data}) != dispatch.SourceDigest {
+		if err := verifyImageTaskSourceDigest(dispatch, [][]byte{canonical.Data}, true); err != nil {
 			return DeliveryAttachment{}, "", errors.New("final artifact image task digest mismatch")
 		}
 	}

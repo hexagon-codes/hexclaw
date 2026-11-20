@@ -13251,7 +13251,7 @@ paths:
       operationId: k12TasksUploadAssetPost
       summary: 上传原图资产
       description: 支持multipart/form-data的file字段或JSON标准data_base64，返回内容寻址asset_id及字节size。原图上限10MiB（10×1024×1024字节），支持PNG/JPEG/GIF/WebP且魔数与完整解码格式一致；HEIC不支持。空图/格式非法不生成ready资产；相同内容引用可用于稳定去重。
-        JSON分支另受1 MiB完整请求上限约束，Base64会计入该预算；multipart原图才可使用完整10 MiB图片上限。未知JSON/表单字段被忽略。
+        完整请求体上限为16 MiB，预算包括Base64膨胀、JSON字段和multipart封装。两种上传方式的解码后单张原图上限均为10 MiB。未知JSON/表单字段被忽略。
       tags:
         - k12-tasks
       x-source:
@@ -13326,7 +13326,7 @@ paths:
           application/json:
             schema:
               $ref: "#/components/schemas/K12TasksAssetUploadReq"
-            x-request-body-max-bytes: 1048576
+            x-request-body-max-bytes: 16777216
           multipart/form-data:
             schema:
               $ref: "#/components/schemas/K12TasksAssetMultipart"

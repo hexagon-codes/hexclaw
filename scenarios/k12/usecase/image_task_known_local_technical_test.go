@@ -247,10 +247,24 @@ func TestKnownLocalTechnicalRuntimeCount4EntersGeneration5(t *testing.T) {
 	assertKnownTechnicalRuntimeRecovery(t, 4, 5001)
 }
 
-func assertKnownTechnicalRuntimeRecovery(t *testing.T, failedCount, expectedOperationAttempt int) {
+func TestKnownLocalTechnicalPreAssessmentFailureKeepsLegacyItemRecovery(t *testing.T) {
+	assertKnownTechnicalRuntimeRecovery(t, 3, 4001, true)
+}
+
+func assertKnownTechnicalRuntimeRecovery(t *testing.T, failedCount, expectedOperationAttempt int, legacyInvalid ...bool) {
 	t.Helper()
 	f := newKnownTechnicalFixture(t, failedCount)
 	ctx := context.Background()
+	if len(legacyInvalid) > 0 && legacyInvalid[0] {
+		if _, err := f.o.deps.Records.DB().ExecContext(ctx, `UPDATE k12_grading_jobs SET failure_kind='assess_item_invalid' WHERE record_id=?`, f.job.Record.RecordID); err != nil {
+			t.Fatal(err)
+		}
+		var err error
+		f.job, err = f.o.deps.GetGradingJob(ctx, "mingming", f.job.Record.RecordID)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	if _, err := f.c.Retry(ctx, "mingming", f.dispatch.DispatchID, f.dispatch.Version); !errors.Is(err, k12storage.ErrImageTaskInvalidState) {
 		t.Fatalf("ordinary terminal retry: %v", err)
 	}
@@ -362,6 +376,224 @@ func TestKnownLocalTechnicalRuntimeUnavailableRejectsWithoutWrites(t *testing.T)
 			}
 			if f.generateCalls.Load() != 0 || f.verifyCalls.Load() != 0 {
 				t.Fatal("rejected recovery sent provider call")
+			}
+		})
+	}
+}
+
+type preAssessmentTechnicalFixture struct {
+	o        *GradingOrchestrator
+	c        *ImageTaskCoordinator
+	run      *gradingRun
+	dispatch k12.ImageTaskDispatch
+	job      GradingJobView
+	parent   k12.ModelInvocation
+	solver   *itemResumeSolver
+	grader   *itemResumeGrader
+}
+
+// 冻结真实输入与聚合失败，模拟逐题派发前的旧页级模式误判。
+func newPreAssessmentTechnicalFixture(t *testing.T) preAssessmentTechnicalFixture {
+	t.Helper()
+	ctx := t.Context()
+	t.Setenv("HEXCLAW_ASSET_ROOT", t.TempDir())
+	image := validPNGFixture(t, "pre-assessment-original")
+	assetID, err := assetstore.Save("mingming", image)
+	if err != nil {
+		t.Fatal(err)
+	}
+	solver := &itemResumeSolver{calls: map[string]int{}, solutions: map[string]string{"1+1=": "1+1=2\n答案：2"}}
+	grader := &itemResumeGrader{calls: map[string]int{}}
+	o := newItemResumeOrchestrator(t, t.TempDir(), []RecognizedQuestion{{Question: "1+1=", RawTranscription: "1+1=", CanonicalMarkdown: "1+1=", PageAssetID: assetID, Subject: "数学", AnswerState: AnswerStateBlank, RecognitionConfidence: float64Ptr(.99)}}, solver, grader)
+	o.deps.TextbookOwnerID = DefaultLocalOwnerScope
+	if _, err := (&PageAssetRepository{Records: o.deps.Records}).Persist(ctx, DefaultLocalOwnerScope, "mingming", image); err != nil {
+		t.Fatal(err)
+	}
+	request := orchestratorPhotoRequest()
+	request.Image, request.SourcePageAssetID = image, assetID
+	started, _, err := o.StartPhotoGradingJob(ctx, StartPhotoGradingInput{Photo: request, SourceKind: "im", SourceKey: "pre-assessment-original"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobID := started.Record.RecordID
+	freezeItemResumeBudget(t, o, jobID)
+	if _, err := o.RunGradingJob(ctx, jobID); err != nil {
+		t.Fatal(err)
+	}
+	if err := o.WaitForIdle(ctx); err != nil {
+		t.Fatal(err)
+	}
+	run, job := confirmItemResumeJobWithoutRun(t, o, jobID)
+	o.deps.TeachingReportResources = reportResilienceResources{}
+	run.req.TeachingReport, err = o.deps.freezeTeachingReportTask(ctx, "mingming", "数学", run.req.Grade, "作业批改结果")
+	if err != nil || run.req.TeachingReport == nil {
+		t.Fatalf("freeze report: report=%v err=%v", run.req.TeachingReport, err)
+	}
+	run.req.TaskIntent, run.req.SolveOutputVersion = PhotoTaskCompletedHomework, SolveOutputWithTeachingReportV2
+	if err := o.persistRun(jobID, run); err != nil {
+		t.Fatal(err)
+	}
+	c := &ImageTaskCoordinator{Records: o.deps.Records, Grading: o, Classifier: &imageTaskClassifierStub{},
+		ReadAsset: func(string, string) ([]byte, error) { return image, nil },
+		ResolveRoute: func(route k12.ImageTaskRouteSnapshot) (k12.ImageTaskRouteSnapshot, error) {
+			route.Route, route.Capability = route.Provider+"/"+route.Model, "vision"
+			route.PolicyVersion, route.PromptVersion = "image-task-routing-v1", "image-task-classifier-v1"
+			return route, nil
+		}}
+	created, _, err := c.Create(ctx, CreateImageTaskInput{OwnerScope: DefaultLocalOwnerScope, AgentName: "mingming", LearnerID: "mingming",
+		SourceKind: k12.ImageTaskSourceDesktop, SourceRef: "pre-assessment-image", SourceSessionID: "pre-assessment-session",
+		SourceAssetRefs: []string{assetID}, AttemptGeneration: 1,
+		RouteRequest: k12.ImageTaskRouteSnapshot{Provider: job.Fields.ModelSnapshot.Provider, Model: job.Fields.ModelSnapshot.Model}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatch, target, err := o.deps.Records.CommitImageTaskRouting(ctx, "mingming", created.Dispatch.DispatchID, created.Dispatch.Version,
+		k12storage.ImageTaskRoutingDecision{Intent: k12.ImageTaskIntentCompletedHomework, Confidence: .99,
+			Evidence: []string{"worksheet"}, InvocationResultDigest: "sha256:pre-assessment-classification"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := o.deps.Records.BindHomeworkSubmissionGradingJob(ctx, "mingming", target.HomeworkSubmission.SubmissionID, jobID, target.HomeworkSubmission.Version); err != nil {
+		t.Fatal(err)
+	}
+	job.Fields.SourceKind, job.Fields.AttemptCount = "image_task", 1
+	job.Fields.IdempotencyKey = k12.BuildGradingIdempotencyKey("image_task", dispatch.DispatchID, job.Fields.ConfirmedVersion)
+	job, err = o.deps.saveGradingJob(ctx, job, k12.GradingStageAssessing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent, err := o.beginFrozenAssessInvocation(ctx, run, job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent, err = o.deps.Records.MarkModelInvocationFailed(ctx, "mingming", parent.InvocationID, "assess_item_invalid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err = o.deps.AdvanceGradingStage(ctx, "mingming", jobID, AdvanceGradingInput{Outcome: GradingOutcomeFailed, FailureKind: "assess_item_invalid"})
+	if err != nil || job.Record.Status != k12.GradingStageFailedTerminal || job.Fields.AttemptCount != 2 {
+		t.Fatalf("pre-assessment failure: job=%+v err=%v", job, err)
+	}
+	job, err = o.deps.GetGradingJob(ctx, "mingming", jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return preAssessmentTechnicalFixture{o, c, run, dispatch, job, parent, solver, grader}
+}
+
+func TestKnownLocalTechnicalPreAssessmentBlankReportRecovery(t *testing.T) {
+	f := newPreAssessmentTechnicalFixture(t)
+	if proof, err := f.o.preAssessmentTechnicalRecoveryProof(t.Context(), f.run, f.job, DefaultLocalOwnerScope); err != nil || proof == nil {
+		t.Fatalf("frozen pre-assessment proof is unavailable: proof=%v err=%v", proof, err)
+	}
+	// 清除内存登记后，正式重试必须从原持久运行快照恢复同一输入。
+	f.o.mu.Lock()
+	delete(f.o.runs, f.job.Record.RecordID)
+	f.o.mu.Unlock()
+	before, err := f.o.deps.Records.ListModelInvocations(t.Context(), "mingming", f.job.Record.RecordID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 暂留既有worker槽位，直接观察CAS提交，不靠调度时序推断计数。
+	for range cap(f.o.sem) {
+		f.o.sem <- struct{}{}
+	}
+	defer func() {
+		for len(f.o.sem) > 0 {
+			<-f.o.sem
+		}
+	}()
+	if _, err := f.c.RetryWithIntent(t.Context(), "mingming", f.dispatch.DispatchID, f.dispatch.Version, DefaultLocalOwnerScope, ImageTaskRetryIntentKnownLocalTechnical); err != nil {
+		t.Fatalf("known pre-item local failure must recover original task: %v", err)
+	}
+	queued, err := f.o.deps.GetGradingJob(t.Context(), "mingming", f.job.Record.RecordID)
+	if err != nil || queued.Record.Status != k12.GradingStageQueued || queued.Fields.AttemptCount != 2 {
+		t.Fatalf("CAS must preserve failed attempt2: job=%+v err=%v", queued, err)
+	}
+	for range cap(f.o.sem) {
+		<-f.o.sem
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	if err := f.o.WaitForIdle(ctx); err != nil {
+		t.Fatal(err)
+	}
+	finished, err := f.o.deps.GetGradingJob(t.Context(), "mingming", f.job.Record.RecordID)
+	if err != nil || finished.Record.Status != k12.GradingStageCompleted {
+		t.Fatalf("recovered original task did not finish: status=%s failure=%s err=%v", finished.Record.Status, finished.Fields.FailureKind, err)
+	}
+	after, err := f.o.deps.Records.ListModelInvocations(t.Context(), "mingming", f.job.Record.RecordID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, old := range before {
+		var found bool
+		for _, row := range after {
+			if row.InvocationID == old.InvocationID {
+				found = reflect.DeepEqual(old, row)
+			}
+		}
+		if !found {
+			t.Fatalf("original invocation changed: %s", old.InvocationID)
+		}
+	}
+	var next bool
+	for _, row := range after {
+		if row.Stage == k12.GradingStageAssessing && row.Attempt == 3 && row.Status == k12.ModelInvocationSucceeded {
+			next = true
+		}
+	}
+	if !next || f.solver.callCount("1+1=") != 1 || f.grader.callCount("1+1=") != 0 {
+		t.Fatalf("allocator/reference flow: next=%v solves=%d grades=%d", next, f.solver.callCount("1+1="), f.grader.callCount("1+1="))
+	}
+}
+
+func TestKnownLocalTechnicalPreAssessmentRuntimeRejectsWithoutCalls(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		change func(*testing.T, preAssessmentTechnicalFixture)
+	}{
+		{"missing report", func(_ *testing.T, f preAssessmentTechnicalFixture) { f.run.req.TeachingReport = nil }},
+		{"damaged report resource", func(_ *testing.T, f preAssessmentTechnicalFixture) {
+			f.run.req.TeachingReport.Bundle.Manifest = []byte("{}")
+		}},
+		{"changed original image", func(_ *testing.T, f preAssessmentTechnicalFixture) { f.run.req.Image = []byte("damaged original") }},
+		{"nonblank runtime input", func(_ *testing.T, f preAssessmentTechnicalFixture) {
+			f.run.questions[0].AnswerState, f.run.questions[0].StudentAnswer = AnswerStatePresent, "2"
+		}},
+		{"persisted revision drift", func(t *testing.T, f preAssessmentTechnicalFixture) {
+			if _, err := f.o.deps.Records.DB().ExecContext(t.Context(), `UPDATE k12_attempts SET input_digest='sha256:changed-input' WHERE submission_id=?`, f.job.Fields.SubmissionID); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"aggregate outcome unknown", func(t *testing.T, f preAssessmentTechnicalFixture) {
+			if _, err := f.o.deps.Records.DB().ExecContext(t.Context(), `UPDATE k12_model_invocations SET status='outcome_unknown' WHERE invocation_id=?`, f.parent.InvocationID); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newPreAssessmentTechnicalFixture(t)
+			test.change(t, f)
+			before, err := f.o.deps.Records.ListModelInvocations(t.Context(), "mingming", f.job.Record.RecordID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.c.RetryWithIntent(t.Context(), "mingming", f.dispatch.DispatchID, f.dispatch.Version, DefaultLocalOwnerScope, ImageTaskRetryIntentKnownLocalTechnical); err == nil {
+				t.Fatal("ineligible pre-assessment runtime accepted")
+			}
+			job, err := f.o.deps.GetGradingJob(t.Context(), "mingming", f.job.Record.RecordID)
+			if err != nil || !reflect.DeepEqual(job.Record, f.job.Record) {
+				t.Fatalf("rejected recovery changed job: job=%+v err=%v", job.Record, err)
+			}
+			dispatch, err := f.o.deps.Records.GetImageTaskDispatch(t.Context(), "mingming", f.dispatch.DispatchID)
+			if err != nil || !reflect.DeepEqual(dispatch, f.dispatch) {
+				t.Fatalf("rejected recovery changed dispatch: dispatch=%+v err=%v", dispatch, err)
+			}
+			after, err := f.o.deps.Records.ListModelInvocations(t.Context(), "mingming", f.job.Record.RecordID)
+			items, itemErr := f.o.deps.Records.ListGradingItemInvocations(t.Context(), "mingming", f.job.Record.RecordID)
+			if err != nil || itemErr != nil || !reflect.DeepEqual(before, after) || len(items) != 0 || f.solver.callCount("1+1=") != 0 || f.grader.callCount("1+1=") != 0 {
+				t.Fatalf("rejected recovery issued calls or changed receipts: items=%d err=%v itemErr=%v", len(items), err, itemErr)
 			}
 		})
 	}

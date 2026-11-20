@@ -399,6 +399,51 @@ func imageBytesDigest(images [][]byte) string {
 	return "sha256:" + hex.EncodeToString(hash.Sum(nil))
 }
 
+const pageAssetSourceDigestPrefix = "page-assets-v1:"
+
+func pageAssetSourceDigest(refs []string) string {
+	return pageAssetSourceDigestPrefix + digestJSON(refs)
+}
+
+// 接纳摘要沿用两种原始字段名和顺序，供新任务接纳与旧来源校验共用。
+func imageTaskAdmissionDigest(dispatch k12.ImageTaskDispatch) string {
+	type source struct {
+		Agent, Learner, Source, Session, Message, SourceDigest string
+		Assets                                                 []string
+	}
+	identity := source{dispatch.AgentName, dispatch.LearnerID, dispatch.SourceRef, dispatch.SourceSessionID,
+		dispatch.MessageIntent, dispatch.SourceDigest, dispatch.SourceAssetRefs}
+	if dispatch.RoutingProvenance == k12.ImageTaskRoutingParentSelected {
+		return digestJSON(struct {
+			source
+			RouteRequest  k12.ImageTaskRouteSnapshot
+			CreativeEntry *k12.ImageTaskCreativeEntry
+		}{identity, dispatch.OperationRouteRequest, dispatch.CreativeEntry})
+	}
+	return digestJSON(struct {
+		source
+		Route         k12.ImageTaskRouteSnapshot
+		CreativeEntry *k12.ImageTaskCreativeEntry
+	}{identity, dispatch.ClassificationRouteSnapshot, dispatch.CreativeEntry})
+}
+
+// verifyImageTaskSourceDigest 在原始资产已逐页校验后核对冻结来源。
+// 编码器变化时旧 PNG 压缩字节可能不同，旧接纳摘要须能证明来源摘要与同一组资产一起冻结。
+func verifyImageTaskSourceDigest(dispatch k12.ImageTaskDispatch, images [][]byte, verifiedPageAssets bool) error {
+	if len(images) > 0 && imageBytesDigest(images) == dispatch.SourceDigest {
+		return nil
+	}
+	if verifiedPageAssets {
+		if dispatch.SourceDigest == pageAssetSourceDigest(dispatch.SourceAssetRefs) {
+			return nil
+		}
+		if validModelInvocationDigest(dispatch.SourceDigest) && dispatch.RequestDigest == imageTaskAdmissionDigest(dispatch) {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: immutable image task source digest mismatch", ErrInvalidInput)
+}
+
 // CreateMany 只按输入顺序包装既有单图创建，不建立另一套任务状态。
 // 返回的失败序号从零开始；已接纳项保留原身份，可沿同一入口继续。
 func (c *ImageTaskCoordinator) CreateMany(
@@ -526,7 +571,12 @@ func (c *ImageTaskCoordinator) Create(
 	if err != nil {
 		return ImageTaskView{}, false, err
 	}
-	sourceDigest := imageBytesDigest(images)
+	var sourceDigest string
+	if c.PageAssets != nil {
+		sourceDigest = pageAssetSourceDigest(in.SourceAssetRefs)
+	} else {
+		sourceDigest = imageBytesDigest(images)
+	}
 	if in.CreativeEntry != nil && in.CreativeEntry.TaskIntent != k12.ImageTaskIntentUnknown {
 		operationRouteRequest := in.RouteRequest
 		if c.ResolveRouteDisplay != nil {
@@ -535,16 +585,6 @@ func (c *ImageTaskCoordinator) Create(
 			operationRouteRequest.ProviderDisplayName,
 				operationRouteRequest.ModelID = c.ResolveRouteDisplay(in.RouteRequest)
 		}
-		requestDigest := digestJSON(struct {
-			Agent, Learner, Source, Session, Message, SourceDigest string
-			Assets                                                 []string
-			RouteRequest                                           k12.ImageTaskRouteSnapshot
-			CreativeEntry                                          *k12.ImageTaskCreativeEntry
-		}{
-			in.AgentName, in.LearnerID, in.SourceRef, in.SourceSessionID,
-			in.MessageIntent, sourceDigest, in.SourceAssetRefs, operationRouteRequest,
-			in.CreativeEntry,
-		})
 		now := c.now()
 		dispatch := k12.ImageTaskDispatch{
 			DispatchID: c.id("dispatch"), OwnerScope: in.OwnerScope,
@@ -554,12 +594,12 @@ func (c *ImageTaskCoordinator) Create(
 			MessageIntent: in.MessageIntent, TaskIntent: in.CreativeEntry.TaskIntent,
 			IntentEvidence:   []string{"parent_selected:" + string(in.CreativeEntry.TaskIntent)},
 			IntentConfidence: 1, Status: k12.ImageTaskStatusRouted,
-			TargetObjectType:      k12.ImageTaskTargetCreativeWorkIntake,
-			TargetObjectID:        c.id("creative_intake"),
-			RoutingProvenance:     k12.ImageTaskRoutingParentSelected,
-			CreativeEntry:         in.CreativeEntry,
-			OperationRouteRequest: operationRouteRequest,
-			IdempotencyKey:        idempotencyKey, RequestDigest: requestDigest,
+			TargetObjectType:          k12.ImageTaskTargetCreativeWorkIntake,
+			TargetObjectID:            c.id("creative_intake"),
+			RoutingProvenance:         k12.ImageTaskRoutingParentSelected,
+			CreativeEntry:             in.CreativeEntry,
+			OperationRouteRequest:     operationRouteRequest,
+			IdempotencyKey:            idempotencyKey,
 			AttemptGeneration:         in.AttemptGeneration,
 			AutomaticBudgetSeconds:    k12.ImageTaskAutomaticBudgetSeconds,
 			AutomaticStartedAt:        now,
@@ -567,6 +607,7 @@ func (c *ImageTaskCoordinator) Create(
 			AutomaticRemainingSeconds: k12.ImageTaskAutomaticBudgetSeconds,
 			Version:                   0, CreatedAt: now, UpdatedAt: now,
 		}
+		dispatch.RequestDigest = imageTaskAdmissionDigest(dispatch)
 		stored, intake, created, err := c.Records.PrepareParentSelectedCreativeDispatch(
 			ctx, dispatch,
 		)
@@ -583,7 +624,7 @@ func (c *ImageTaskCoordinator) Create(
 	}
 	// 展示语言属于接纳的请求事实，模型路由解析器只决定 Provider 与能力。
 	route.MessageLocale = in.RouteRequest.MessageLocale
-	route.ImageScope = &k12.RecognitionImageScopeInputV1{Version: k12.RecognitionImageScopeVersionV1, MessageIntent: in.MessageIntent, Action: explicitImageHomeworkAction(in.MessageIntent), SourceReviewPolicy: k12.RecognitionImageSourceUprightReviewPolicyV3, SourceComparisonPolicy: k12.RecognitionImageSourceComparisonPolicyV1}
+	route.ImageScope = &k12.RecognitionImageScopeInputV1{Version: k12.RecognitionImageScopeVersionV1, MessageIntent: in.MessageIntent, Action: explicitImageHomeworkAction(in.MessageIntent), SourceReviewPolicy: k12.RecognitionImageSourceUprightReviewPolicyV3, SourceComparisonPolicy: k12.RecognitionImageSourceComparisonPolicyV1, IncludeSharedReviewRegions: true}
 	route = k12.NormalizeImageTaskRouteSnapshot(route)
 	if (in.SourceKind == k12.ImageTaskSourceIM && in.CreativeEntry == nil) ||
 		(in.CreativeEntry != nil && in.CreativeEntry.Kind == k12.CreativeWorkEntryNewWork && in.CreativeEntry.TaskIntent == k12.ImageTaskIntentUnknown) {
@@ -595,15 +636,6 @@ func (c *ImageTaskCoordinator) Create(
 	if err := route.Validate(); err != nil {
 		return ImageTaskView{}, false, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 	}
-	requestDigest := digestJSON(struct {
-		Agent, Learner, Source, Session, Message, SourceDigest string
-		Assets                                                 []string
-		Route                                                  k12.ImageTaskRouteSnapshot
-		CreativeEntry                                          *k12.ImageTaskCreativeEntry
-	}{
-		in.AgentName, in.LearnerID, in.SourceRef, in.SourceSessionID,
-		in.MessageIntent, sourceDigest, in.SourceAssetRefs, route, in.CreativeEntry,
-	})
 	now := c.now()
 	dispatchID := c.id("dispatch")
 	invocationID := c.id("classification")
@@ -619,18 +651,19 @@ func (c *ImageTaskCoordinator) Create(
 		OperationRouteRequest:       in.RouteRequest,
 		ClassificationRouteSnapshot: route, ClassificationInvocationID: invocationID,
 		RoutePolicySnapshot: route, IdempotencyKey: idempotencyKey,
-		RequestDigest: requestDigest, AttemptGeneration: in.AttemptGeneration,
+		AttemptGeneration:         in.AttemptGeneration,
 		AutomaticBudgetSeconds:    k12.ImageTaskAutomaticBudgetSeconds,
 		AutomaticStartedAt:        now,
 		AutomaticDeadlineAt:       now + k12.ImageTaskAutomaticBudgetSeconds,
 		AutomaticRemainingSeconds: k12.ImageTaskAutomaticBudgetSeconds,
 		Version:                   0, CreatedAt: now, UpdatedAt: now,
 	}
+	dispatch.RequestDigest = imageTaskAdmissionDigest(dispatch)
 	invocation := k12.ImageTaskInvocation{
 		InvocationID: invocationID, AgentName: in.AgentName, DispatchID: dispatchID,
 		Operation:     k12.ImageTaskOperationClassification,
 		OperationKey:  "dispatch:" + dispatchID + ":classification",
-		RequestDigest: requestDigest, RouteSnapshot: route,
+		RequestDigest: dispatch.RequestDigest, RouteSnapshot: route,
 		Status: k12.ImageTaskInvocationPrepared, Attempt: 1,
 		DeadlineAt: dispatch.AutomaticDeadlineAt,
 		CreatedAt:  now, UpdatedAt: now,
@@ -2979,11 +3012,8 @@ func (c *ImageTaskCoordinator) readDispatchImages(
 	if err != nil {
 		return nil, err
 	}
-	if digest := imageBytesDigest(images); digest != dispatch.SourceDigest {
-		return nil, fmt.Errorf(
-			"%w: immutable source digest mismatch: frozen=%s actual=%s",
-			ErrInvalidInput, dispatch.SourceDigest, digest,
-		)
+	if err := verifyImageTaskSourceDigest(dispatch, images, c.PageAssets != nil); err != nil {
+		return nil, err
 	}
 	return images, nil
 }

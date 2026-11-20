@@ -13,7 +13,7 @@ import (
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 )
 
-func TestK12PhotoEXIF6ImageTaskUsesOneCanonicalPixelDigest(t *testing.T) {
+func TestK12PhotoEXIF6ImageTaskFreezesSourceAndUsesCanonicalPixels(t *testing.T) {
 	t.Setenv("HEXCLAW_ASSET_ROOT", t.TempDir())
 	ctx := context.Background()
 	raw := photoEXIF6JPEGFixture(t, 120, 80)
@@ -53,8 +53,8 @@ func TestK12PhotoEXIF6ImageTaskUsesOneCanonicalPixelDigest(t *testing.T) {
 	if err != nil || !created {
 		t.Fatalf("run EXIF 6 image task: created=%v err=%v", created, err)
 	}
-	if view.Dispatch.SourceDigest != expectedDigest {
-		t.Fatalf("frozen source digest=%q want canonical %q", view.Dispatch.SourceDigest, expectedDigest)
+	if want := pageAssetSourceDigest(input.SourceAssetRefs); view.Dispatch.SourceDigest != want {
+		t.Fatalf("frozen source digest=%q want %q for original asset", view.Dispatch.SourceDigest, want)
 	}
 	if !bytes.Equal(classifier.image, expected.Data) {
 		t.Fatal("classifier did not consume the canonical metadata-free pixels")
@@ -146,8 +146,8 @@ func TestK12PhotoEXIF6RestartedRetryReusesCanonicalPixels(t *testing.T) {
 	if !bytes.Equal(grading.input.Photo.Image, expected.Data) {
 		t.Fatal("restarted retry grading did not receive the canonical pixels")
 	}
-	if retried.Dispatch.SourceDigest != imageBytesDigest([][]byte{expected.Data}) {
-		t.Fatal("restarted retry changed the frozen canonical digest")
+	if retried.Dispatch.SourceDigest != prepared.Dispatch.SourceDigest {
+		t.Fatal("restarted retry changed the frozen source identity")
 	}
 }
 

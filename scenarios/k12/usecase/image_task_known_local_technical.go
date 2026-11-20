@@ -1,11 +1,14 @@
 package usecase
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
+	"github.com/hexagon-codes/hexclaw/scenarios/k12/assetstore"
 	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
 )
 
@@ -82,8 +85,14 @@ func (o *GradingOrchestrator) RetryPhotoGradingJobForKnownLocalTechnical(
 		return GradingJobView{}, false, err
 	}
 	if job.Record.Status != k12.GradingStageFailedTerminal ||
-		(job.Fields.FailedStage != k12.GradingStageAssessing && job.Fields.FailedStage != k12.GradingStageRecognizing) ||
-		job.Fields.AttemptCount < k12.GradingMaxStageAttempts {
+		(job.Fields.FailedStage != k12.GradingStageAssessing && job.Fields.FailedStage != k12.GradingStageRecognizing) {
+		return job, false, k12storage.ErrImageTaskInvalidState
+	}
+	proof, err := o.preAssessmentTechnicalRecoveryProof(ctx, run, job, ownerScope)
+	if err != nil {
+		return job, false, err
+	}
+	if job.Fields.AttemptCount < k12.GradingMaxStageAttempts && proof == nil {
 		return job, false, k12storage.ErrImageTaskInvalidState
 	}
 	now := o.deps.now()
@@ -103,6 +112,7 @@ func (o *GradingOrchestrator) RetryPhotoGradingJobForKnownLocalTechnical(
 			AgentName: agentName, OwnerScope: ownerScope, DispatchID: dispatchID, JobID: jobID,
 			ExpectedDispatchVersion: expectedDispatchVersion, ExpectedJobVersion: job.Record.Version,
 			Now: now, QueuedDeadline: fields.Deadline,
+			PreAssessment: proof,
 		})
 		if err != nil {
 			return err
@@ -118,4 +128,94 @@ func (o *GradingOrchestrator) RetryPhotoGradingJobForKnownLocalTechnical(
 		return job, false, k12storage.ErrImageTaskInvalidState
 	}
 	return job, true, nil
+}
+
+func (o *GradingOrchestrator) preAssessmentTechnicalRecoveryProof(
+	ctx context.Context, run *gradingRun, job GradingJobView, ownerScope string,
+) (*k12storage.ImageTaskPreAssessmentRecoveryProof, error) {
+	if job.Fields.FailedStage != k12.GradingStageAssessing || job.Fields.FailureKind != "assess_item_invalid" {
+		return nil, nil
+	}
+	items, err := o.deps.Records.ListGradingItemInvocations(ctx, run.agentName, job.Record.RecordID)
+	if err != nil {
+		return nil, err
+	}
+	if len(items) > 0 {
+		return nil, nil
+	}
+	invalid := k12storage.ErrImageTaskInvalidState
+	if run.textOnly || run.req.TeachingReport == nil || run.req.TaskIntent != PhotoTaskCompletedHomework ||
+		job.Fields.AttemptCount < 1 || !job.Fields.BudgetSnapshot.IsFrozen() ||
+		!photoSubmissionMatchesImage(job.Fields.SubmissionID, run.req.Image) {
+		return nil, invalid
+	}
+	if _, err := run.req.TeachingReport.Bundle.Resolve(); err != nil {
+		return nil, invalid
+	}
+	if _, err := o.deps.Records.GetReadyPageAsset(ctx, ownerScope, run.agentName, run.req.SourcePageAssetID); err != nil {
+		return nil, invalid
+	}
+	assetAgent, file, err := assetstore.Parse(run.req.SourcePageAssetID)
+	if err != nil || assetAgent != run.agentName {
+		return nil, invalid
+	}
+	image, _, err := assetstore.Read(assetAgent, file)
+	if err != nil || !bytes.Equal(image, run.req.Image) {
+		return nil, invalid
+	}
+	snapshot, err := o.deps.Records.GetProblemAttemptSnapshot(ctx, run.agentName, job.Fields.SubmissionID)
+	if err != nil {
+		return nil, err
+	}
+	questions, err := RecognizedQuestionsFromProblemAttemptSnapshotForInitialReadMode(snapshot, run.req.InitialReadMode)
+	if err != nil || CanonicalRecognizedQuestionsDigest(questions) != CanonicalRecognizedQuestionsDigest(run.questions) {
+		return nil, invalid
+	}
+	byProblem := make(map[string]RecognizedQuestion, len(run.questions))
+	for _, question := range run.questions {
+		byProblem[question.ProblemID] = question
+	}
+	if len(byProblem) != len(questions) {
+		return nil, invalid
+	}
+	for _, question := range questions {
+		original := byProblem[question.ProblemID]
+		if question.PageAssetID != original.PageAssetID || question.RawTranscription != original.RawTranscription ||
+			question.AttemptID != original.AttemptID || question.InputDigest != original.InputDigest ||
+			question.AnswerRawTranscription != original.AnswerRawTranscription {
+			return nil, invalid
+		}
+	}
+	leaves := RecognizedQuestionsForAssessmentForInitialReadMode(run.questions, run.req.InitialReadMode)
+	if len(leaves) == 0 || len(leaves) != len(snapshot.Attempts) {
+		return nil, invalid
+	}
+	for _, question := range leaves {
+		if question.AnswerState != AnswerStateBlank || strings.TrimSpace(question.AnswerRawTranscription) != "" ||
+			strings.TrimSpace(question.AnswerCanonicalMarkdown) != "" || strings.TrimSpace(question.StudentAnswer) != "" ||
+			question.ConfirmedVersion < 1 || question.InputDigest == "" || !CanonicalMarkdownValid(question.CanonicalMarkdown) {
+			return nil, invalid
+		}
+	}
+	parent, err := o.deps.Records.GetModelInvocationByAttempt(ctx, run.agentName, job.Record.RecordID,
+		k12.GradingStageAssessing, job.Fields.AttemptCount)
+	if err != nil {
+		return nil, err
+	}
+	requestRaw, err := json.Marshal(struct {
+		Request   PhotoGradeRequest    `json:"request"`
+		Questions []RecognizedQuestion `json:"questions"`
+		Anchored  []RecognizedQuestion `json:"anchored,omitempty"`
+	}{run.req, run.questions, run.anchored})
+	if err != nil {
+		return nil, err
+	}
+	if parent.Status != k12.ModelInvocationFailed || parent.FailureKind != "assess_item_invalid" ||
+		parent.RouteSnapshot != job.Fields.ModelSnapshot || parent.ResultDigest != "" || parent.ResultJSON != "" ||
+		parent.RequestDigest != modelInvocationDigest([]byte(k12.GradingStageAssessing), requestRaw) {
+		return nil, invalid
+	}
+	return &k12storage.ImageTaskPreAssessmentRecoveryProof{
+		InvocationID: parent.InvocationID, RequestDigest: parent.RequestDigest, Snapshot: snapshot,
+	}, nil
 }

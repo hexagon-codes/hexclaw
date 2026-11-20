@@ -705,3 +705,92 @@ func TestKnownLocalTechnicalRecoveryDualCASAndRollback(t *testing.T) {
 		assertKnownLocalSnapshotEqual(t, before, knownLocalDatabaseSnapshot(t, f.db))
 	})
 }
+
+func seedPreAssessmentTechnicalRecovery(t *testing.T) knownLocalRecoveryFixture {
+	t.Helper()
+	f := seedKnownLocalRecovery(t, false, 2)
+	knownLocalExec(t, f.db, `DELETE FROM k12_grading_assessment_items WHERE agent_name=? AND job_id=?`, f.command.AgentName, f.command.JobID)
+	knownLocalExec(t, f.db, `DELETE FROM k12_grading_item_invocations WHERE agent_name=? AND job_id=?`, f.command.AgentName, f.command.JobID)
+	knownLocalExec(t, f.db, `UPDATE k12_attempts SET answer_state='blank',answer_raw='',answer_markdown=''
+		WHERE agent_name=? AND submission_id=?`, f.command.AgentName, "photo-original")
+	knownLocalExec(t, f.db, `UPDATE k12_grading_jobs SET failure_kind='assess_item_invalid' WHERE record_id=?`, f.command.JobID)
+	fields, err := k12.ParseGradingJobFields(f.job.Fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent, _, err := f.store.PrepareModelInvocation(t.Context(), k12.ModelInvocation{
+		InvocationID: "pre-assessment-failed-parent", AgentName: f.command.AgentName, JobID: f.command.JobID,
+		Stage: k12.GradingStageAssessing, Attempt: 2, RequestDigest: "sha256:pre-assessment-request",
+		RouteSnapshot: fields.ModelSnapshot, CreatedAt: 150, UpdatedAt: 150,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.MarkModelInvocationSent(t.Context(), f.command.AgentName, parent.InvocationID, ""); err != nil {
+		t.Fatal(err)
+	}
+	parent, err = f.store.MarkModelInvocationFailed(t.Context(), f.command.AgentName, parent.InvocationID, "assess_item_invalid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := f.store.GetProblemAttemptSnapshot(t.Context(), f.command.AgentName, fields.SubmissionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.command.PreAssessment = &k12storage.ImageTaskPreAssessmentRecoveryProof{
+		InvocationID: parent.InvocationID, RequestDigest: parent.RequestDigest, Snapshot: snapshot,
+	}
+	f.job, err = f.store.Get(t.Context(), f.command.JobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+func TestKnownLocalTechnicalPreAssessmentRecoveryPreservesFailureAndInputs(t *testing.T) {
+	assertKnownLocalRecoveryOriginalHistory(t, seedPreAssessmentTechnicalRecovery(t))
+}
+
+func TestKnownLocalTechnicalPreAssessmentRecoveryRejectsWithoutMutation(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		change func(*testing.T, *knownLocalRecoveryFixture)
+	}{
+		{"missing runtime proof", func(_ *testing.T, f *knownLocalRecoveryFixture) { f.command.PreAssessment = nil }},
+		{"wrong owner", func(_ *testing.T, f *knownLocalRecoveryFixture) { f.command.OwnerScope = "another-parent" }},
+		{"stale job version", func(_ *testing.T, f *knownLocalRecoveryFixture) { f.command.ExpectedJobVersion-- }},
+		{"changed input after proof", func(t *testing.T, f *knownLocalRecoveryFixture) {
+			knownLocalExec(t, f.db, `UPDATE k12_attempts SET input_digest='sha256:changed' WHERE submission_id='photo-original'`)
+		}},
+		{"nonblank answer", func(t *testing.T, f *knownLocalRecoveryFixture) {
+			knownLocalExec(t, f.db, `UPDATE k12_attempts SET answer_state='present',answer_raw='2',answer_markdown='2' WHERE submission_id='photo-original'`)
+		}},
+		{"unknown aggregate", func(t *testing.T, f *knownLocalRecoveryFixture) {
+			knownLocalExec(t, f.db, `UPDATE k12_model_invocations SET status='outcome_unknown' WHERE invocation_id=?`, f.command.PreAssessment.InvocationID)
+		}},
+		{"aggregate has response", func(t *testing.T, f *knownLocalRecoveryFixture) {
+			knownLocalExec(t, f.db, `UPDATE k12_model_invocations SET result_json='{}',result_digest='sha256:response' WHERE invocation_id=?`, f.command.PreAssessment.InvocationID)
+		}},
+		{"request proof mismatch", func(_ *testing.T, f *knownLocalRecoveryFixture) {
+			f.command.PreAssessment.RequestDigest = "sha256:other-request"
+		}},
+		{"newer aggregate", func(t *testing.T, f *knownLocalRecoveryFixture) {
+			knownLocalExec(t, f.db, `UPDATE k12_model_invocations SET attempt=3 WHERE invocation_id=?`, f.command.PreAssessment.InvocationID)
+		}},
+		{"any item invocation", func(t *testing.T, f *knownLocalRecoveryFixture) {
+			if _, _, err := f.store.PrepareGradingItemInvocation(t.Context(), f.failedItem); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := seedPreAssessmentTechnicalRecovery(t)
+			test.change(t, &f)
+			before := knownLocalDatabaseSnapshot(t, f.db)
+			if _, _, err := f.store.RestoreImageTaskKnownLocalTechnical(t.Context(), f.command); err == nil {
+				t.Fatal("ineligible pre-assessment recovery succeeded")
+			}
+			assertKnownLocalSnapshotEqual(t, before, knownLocalDatabaseSnapshot(t, f.db))
+		})
+	}
+}

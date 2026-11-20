@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 
 	"github.com/hexagon-codes/hexclaw/records"
@@ -17,6 +18,14 @@ type ImageTaskKnownLocalTechnicalRecovery struct {
 	AgentName, OwnerScope, DispatchID, JobID    string
 	ExpectedDispatchVersion, ExpectedJobVersion int
 	Now, QueuedDeadline                         int64
+	PreAssessment                               *ImageTaskPreAssessmentRecoveryProof
+}
+
+// ImageTaskPreAssessmentRecoveryProof 由原运行对象生成，绑定派发前失败及已核实的冻结输入。
+// 该证明只在进程内传递，不作为 HTTP 输入或新的持久状态。
+type ImageTaskPreAssessmentRecoveryProof struct {
+	InvocationID, RequestDigest string
+	Snapshot                    k12.ProblemAttemptSnapshot
 }
 
 // RestoreImageTaskKnownLocalTechnical 在同一短事务中核对原归属、当前失败回执并恢复父子窗口。
@@ -85,7 +94,7 @@ func (s *Store) RestoreImageTaskKnownLocalTechnical(
 	}
 	recognizing := fields.FailedStage == k12.GradingStageRecognizing
 	if job.Status != k12.GradingStageFailedTerminal || (!recognizing && fields.FailedStage != k12.GradingStageAssessing) ||
-		fields.AttemptCount < k12.GradingMaxStageAttempts || fields.SourceKind != "image_task" ||
+		(fields.AttemptCount < k12.GradingMaxStageAttempts && command.PreAssessment == nil) || fields.SourceKind != "image_task" ||
 		fields.IdempotencyKey != k12.BuildGradingIdempotencyKey("image_task", dispatch.DispatchID, fields.ConfirmedVersion) ||
 		(!recognizing && fields.ConfirmationState != k12.GradingConfirmationConfirmed) ||
 		(recognizing && fields.ConfirmationState != k12.GradingConfirmationPending) ||
@@ -115,7 +124,12 @@ func (s *Store) RestoreImageTaskKnownLocalTechnical(
 		return k12.ImageTaskDispatch{}, nil, ErrImageTaskInvalidState
 	}
 	eligible := false
-	if recognizing {
+	if command.PreAssessment != nil {
+		eligible, err = preAssessmentRecoveryEligibleVia(ctx, tx, command, dispatch, homework, fields)
+		if err != nil {
+			return k12.ImageTaskDispatch{}, nil, err
+		}
+	} else if recognizing {
 		eligible, err = recognitionProjectionRecoveryEligibleVia(ctx, tx, command.AgentName, command.JobID, fields)
 		if err != nil {
 			return k12.ImageTaskDispatch{}, nil, err
@@ -194,6 +208,86 @@ func (s *Store) RestoreImageTaskKnownLocalTechnical(
 		return k12.ImageTaskDispatch{}, nil, fmt.Errorf("commit known local technical recovery: %w", err)
 	}
 	return dispatch, job, nil
+}
+
+func preAssessmentRecoveryEligibleVia(
+	ctx context.Context, q dbQueryer, command ImageTaskKnownLocalTechnicalRecovery,
+	dispatch k12.ImageTaskDispatch, homework k12.HomeworkSubmission, fields k12.GradingJobFields,
+) (bool, error) {
+	proof := command.PreAssessment
+	if proof == nil || proof.InvocationID == "" || proof.RequestDigest == "" ||
+		fields.FailedStage != k12.GradingStageAssessing || fields.FailureKind != "assess_item_invalid" ||
+		fields.AttemptCount < 1 || !fields.BudgetSnapshot.IsFrozen() ||
+		dispatch.TaskIntent != k12.ImageTaskIntentCompletedHomework || homework.TaskIntent != dispatch.TaskIntent ||
+		len(proof.Snapshot.Problems) == 0 || len(proof.Snapshot.Attempts) == 0 {
+		return false, nil
+	}
+	parent, err := scanModelInvocation(q.QueryRowContext(ctx, `SELECT `+modelInvocationColumns+`
+		FROM k12_model_invocations WHERE agent_name=? AND job_id=? AND stage='assessing'
+		ORDER BY attempt DESC LIMIT 1`, command.AgentName, command.JobID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if parent.InvocationID != proof.InvocationID || parent.RequestDigest != proof.RequestDigest ||
+		parent.Attempt != fields.AttemptCount || parent.Status != k12.ModelInvocationFailed ||
+		parent.FailureKind != "assess_item_invalid" || parent.ResultJSON != "" || parent.ResultDigest != "" ||
+		parent.ExternalRequestID != "" || parent.RouteSnapshot != fields.ModelSnapshot {
+		return false, nil
+	}
+	var blocked int
+	if err := q.QueryRowContext(ctx, `SELECT
+		EXISTS(SELECT 1 FROM k12_grading_item_invocations WHERE agent_name=? AND job_id=?)
+		OR EXISTS(SELECT 1 FROM k12_grading_assessment_items WHERE agent_name=? AND job_id=?)`,
+		command.AgentName, command.JobID, command.AgentName, command.JobID).Scan(&blocked); err != nil {
+		return false, err
+	}
+	if blocked != 0 {
+		return false, nil
+	}
+	// 在同一事务内重读全部题干及作答，防止运行时取证后发生来源修订。
+	current := k12.ProblemAttemptSnapshot{Problems: []k12.Problem{}, Attempts: []k12.Attempt{}}
+	rows, err := q.QueryContext(ctx, `SELECT `+problemColumns+` FROM k12_problems
+		WHERE agent_name=? AND submission_id=? ORDER BY ordinal,problem_id`, command.AgentName, fields.SubmissionID)
+	if err != nil {
+		return false, err
+	}
+	for rows.Next() {
+		problem, scanErr := scanProblem(rows)
+		if scanErr != nil {
+			rows.Close()
+			return false, scanErr
+		}
+		current.Problems = append(current.Problems, problem)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return false, err
+	}
+	rows, err = q.QueryContext(ctx, `SELECT `+attemptColumns+` FROM k12_attempts
+		WHERE agent_name=? AND submission_id=? ORDER BY problem_id,attempt_id`, command.AgentName, fields.SubmissionID)
+	if err != nil {
+		return false, err
+	}
+	for rows.Next() {
+		attempt, scanErr := scanAttempt(rows)
+		if scanErr != nil {
+			rows.Close()
+			return false, scanErr
+		}
+		if attempt.AnswerState != "blank" || strings.TrimSpace(attempt.AnswerRaw) != "" || strings.TrimSpace(attempt.AnswerMarkdown) != "" ||
+			attempt.InputDigest == "" || attempt.ConfirmedVersion < 1 {
+			rows.Close()
+			return false, nil
+		}
+		current.Attempts = append(current.Attempts, attempt)
+	}
+	err = rows.Err()
+	rows.Close()
+	return err == nil && reflect.DeepEqual(current, proof.Snapshot), err
 }
 
 // 当前识题只有已收到的唯一观察错层响应可恢复，不能用历史失败或未结算的其他内容授权发送。

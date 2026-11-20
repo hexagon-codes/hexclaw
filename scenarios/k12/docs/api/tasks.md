@@ -9,7 +9,7 @@
 - 业务请求使用所连接服务的 `Authorization: Bearer <token>`。本机 Sidecar 的 owner 由服务组合状态解析；云端 owner 由已认证上下文解析，不能从 body/query/header 自报 owner。
 - 图片任务与资产显式校验 owner→agent；云端查询已有图片任务还核验持久 owner。逐题 source-actions / answer-feedback 从 dispatch/problem 推导 agent，越 owner 404，已归属后的命令权限拒绝 403。资料准备以 owner/document 为边界。
 - `creative-works` 的直接创建、列表、详情、生成、删除 handler 按请求 agent 和作品记录作用域操作，当前没有独立 owner→agent 授权检查；带图片的发送分支另校验资产 owner。这里描述实际 handler 边界，不承诺这些直接入口具有与图片 facade 相同的云端归属检查。
-- JSON 命令通常严格拒绝未知字段及多个 JSON 值，体积上限 1 MiB。资料恢复 POST 是例外：当前 handler 只解码首个 JSON 值，忽略未知字段，也没有设置专门请求体上限或检查尾随 JSON。资产上传的 JSON 分支仍有 1 MiB 信封上限；multipart 原图上限为 10 MiB。错误体为 `{"error":"说明"}`，不能假定另有统一 `code/message`。
+- JSON 命令通常严格拒绝未知字段及多个 JSON 值，体积上限 1 MiB。资料恢复 POST 是例外：当前 handler 只解码首个 JSON 值，忽略未知字段，也没有设置专门请求体上限或检查尾随 JSON。图片上传的完整请求体上限为 16 MiB，解码后的 JSON 或 multipart 单张原图上限为 10 MiB。错误体为 `{"error":"说明"}`，不能假定另有统一 `code/message`。
 - 时间字段为 Unix 秒，`timeout_override_ms` 为毫秒，图片 `size` 为字节。版本/摘要/ID应从当前查询结果读取，不自行推导。
 - 低频恢复命令需要原已知恢复上下文。当前普通 dispatch/作业投影未公开 `job_version`，来源纠正响应也未公开其未知回复的 `recovery_response_digest`；缺少这些上下文时不能用 dispatch.version 替代或猜测摘要。这里不承诺公开 API 已提供原始内部账本的全部查询。
 - 图片默认自动分类、识别、判定和推进，返回批注原图或相应内容终态；明确不可辨认只属于内容事实，不代表技术失败。`routed`、HTTP 200/202、模型接纳都不是最终产物成功。[图片任务终态规则](../../API.md#image-task-completion)仍适用。
@@ -511,7 +511,7 @@ action=correct_text/select_region/retake/skip/resume，structure_version和expec
 
 上传原图资产。
 
-支持multipart/form-data的file字段或JSON标准data_base64，返回内容寻址asset_id及字节size。multipart 原图上限为 10 MiB（10×1024×1024 字节）；JSON 分支经过通用 decode，整个 JSON 信封上限为 1 MiB，包含 Base64 膨胀及其他字段，不能用它上传 10 MiB 原图。JSON 未知字段和 multipart 额外表单字段当前被忽略。支持 PNG/JPEG/GIF/WebP 且魔数与完整解码格式一致；HEIC 不支持。空图/格式非法不生成 ready 资产；相同内容引用可用于稳定去重。
+支持multipart/form-data的file字段或JSON标准data_base64，返回内容寻址asset_id及字节size。完整请求体上限为 16 MiB（16×1024×1024 字节），其中包括 JSON 字段、Base64 膨胀或 multipart 封装。两种方式解码后的单张原图上限均为 10 MiB（10×1024×1024 字节）。JSON 未知字段和 multipart 额外表单字段当前被忽略。支持 PNG/JPEG/GIF/WebP 且魔数与完整解码格式一致；HEIC 不支持。空图/格式非法不生成 ready 资产；相同内容引用可用于稳定去重。
 
 | 位置 | 参数 | 必填 | 类型 / 契约 |
 | --- | --- | --- | --- |
