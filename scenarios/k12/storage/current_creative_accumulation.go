@@ -1429,6 +1429,32 @@ func expirePreparedWorkFeedbackGenerations(
 		return 0, err
 	}
 	count += unknownCount
+
+	// 文本点评可能在保存已知失败回执后退出。仅当前重试代次的最新回执可收口；
+	// generation.attempt 从 0 起计数，物理回执 attempt 从 1 起计数。
+	result, err = tx.ExecContext(ctx, `UPDATE k12_work_feedback_generations AS g
+		SET status='failed',failure_reason=i.error_kind,updated_at=?
+		FROM k12_image_task_invocations i
+		WHERE g.agent_name=? AND g.work_id=? AND g.status='running'
+		  AND i.agent_name=g.agent_name AND i.work_record_id=g.work_id
+		  AND i.operation='work_feedback'
+		  AND i.operation_key='work:'||g.work_id||':version:'||g.generation_id||':feedback'
+		  AND i.status='failed' AND i.attempt=g.attempt+1
+		  AND i.error_kind<>'' AND i.result_digest<>'' AND i.result_json<>''
+		  AND NOT EXISTS (SELECT 1 FROM k12_image_task_invocations newer
+		      WHERE newer.agent_name=i.agent_name AND newer.operation_key=i.operation_key
+		        AND newer.attempt>i.attempt)
+		  AND EXISTS (SELECT 1 FROM k12_creative_works w
+		      WHERE w.agent_name=g.agent_name AND w.record_id=g.work_id
+		        AND w.deleted_at IS NULL AND COALESCE(w.source_intake_id,'')='')`, now, agentName, workID)
+	if err != nil {
+		return 0, err
+	}
+	failedCount, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	count += failedCount
 	if count > 0 {
 		if _, err := tx.ExecContext(ctx, `UPDATE k12_creative_works
 			SET feedback_state='failed',row_version=row_version+1

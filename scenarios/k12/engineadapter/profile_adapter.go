@@ -2,12 +2,14 @@ package engineadapter
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"sync"
 
 	"github.com/hexagon-codes/hexclaw/router"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
+	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/usecase"
 )
 
@@ -98,6 +100,14 @@ func (a *ProfileAdapter) GetProfile(_ context.Context, agentName string) (k12.Ch
 		return k12.ChildProfile{}, fmt.Errorf("profile: 实例 %q 不存在", agentName)
 	}
 	return k12.ProfileFromMeta(cfg.Metadata), nil
+}
+
+// GetArchiveProfileTx 读取归档事务中的档案，避免把路由内存快照混入持久记录。
+func (a *ProfileAdapter) GetArchiveProfileTx(ctx context.Context, tx *sql.Tx, agentName string) (k12.ChildProfile, error) {
+	if _, sqlite := a.store.(*router.SQLiteStore); !sqlite {
+		return a.GetProfile(ctx, agentName)
+	}
+	return k12storage.ReadArchiveProfileTx(ctx, tx, agentName)
 }
 
 // SaveProfile 只改 K12 档案键（保留其他 metadata），read-modify-write。

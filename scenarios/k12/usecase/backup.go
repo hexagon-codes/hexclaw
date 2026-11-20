@@ -3,6 +3,7 @@ package usecase
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -66,58 +67,16 @@ func (d Deps) Backup(ctx context.Context, agentName string) (*Hexbak, error) {
 	if agentName == "" {
 		return nil, fmt.Errorf("usecase: agentName 不可空")
 	}
-	recs, err := d.Records.ExportAgent(ctx, agentName)
+	bak, err := d.readHexbakSnapshot(ctx, agentName)
 	if err != nil {
-		return nil, fmt.Errorf("usecase: 导出档案: %w", err)
+		return nil, err
 	}
-	bak := &Hexbak{
-		Version: HexbakVersion, AgentName: agentName, ExportedAt: d.now(),
-		Records: recs,
-	}
-	bak.CurrentCreativeWorks, err = d.Records.ExportCreativeWorksArchiveV7(ctx, agentName)
-	if err != nil {
-		return nil, fmt.Errorf("export current creative works: %w", err)
-	}
-	bak.CurrentAccumulations, err = d.Records.ExportAccumulationsArchiveV10(ctx, agentName)
-	if err != nil {
-		return nil, fmt.Errorf("export current accumulations: %w", err)
-	}
-	bak.TeachingDiagrams, err = d.Records.ExportTeachingDiagramAssets(ctx, agentName)
-	if err != nil {
-		return nil, fmt.Errorf("export teaching diagrams: %w", err)
-	}
-	bak.ReviewSources, err = d.Records.ExportReviewSourceArchive(ctx, agentName)
-	if err != nil {
-		return nil, fmt.Errorf("export reviewed sources: %w", err)
-	}
-	// T2.6 全量导出：附孩子档案（有档案存储且档案存在时）。
-	if d.Profiles != nil {
-		p, perr := d.Profiles.GetProfile(ctx, agentName)
-		if perr != nil && !errors.Is(perr, records.ErrNotFound) {
-			return nil, fmt.Errorf("usecase: 导出孩子档案: %w", perr)
-		}
-		if perr == nil && p != (k12.ChildProfile{}) {
-			pc := p
-			bak.Profile = &pc
-		}
-	}
-	problemAttempts, err := PackHexbakProblemAttempts(ctx, d.Records, agentName)
-	if err != nil {
-		return nil, fmt.Errorf("usecase: 打包 Problem/Attempt ledger: %w", err)
-	}
-	bak.ProblemAttempts = problemAttempts
-	problemSource, err := d.Records.ExportProblemSourceArchiveV6(ctx, agentName)
-	if err != nil {
-		return nil, fmt.Errorf("usecase: 打包 source-action durability closure: %w", err)
-	}
-	if !problemSourceArchiveEmpty(problemSource) {
-		bak.ProblemSource = &problemSource
-	}
-	recordAssets, err := PackHexbakAssets(agentName, recs)
+	// 已冻结引用的内容寻址资产在结束读事务后打包，避免长时间占用数据库快照。
+	recordAssets, err := PackHexbakAssets(agentName, bak.Records)
 	if err != nil {
 		return nil, fmt.Errorf("usecase: 打包档案资产: %w", err)
 	}
-	problemAssets, err := PackHexbakProblemAttemptAssets(agentName, problemAttempts)
+	problemAssets, err := PackHexbakProblemAttemptAssets(agentName, bak.ProblemAttempts)
 	if err != nil {
 		return nil, fmt.Errorf("usecase: 打包 Problem 页面资产: %w", err)
 	}
@@ -137,13 +96,85 @@ func (d Deps) Backup(ctx context.Context, agentName string) (*Hexbak, error) {
 	if err != nil {
 		return nil, fmt.Errorf("usecase: 合并档案资产: %w", err)
 	}
-	ocrEvidence, err := PackHexbakCreativeWorkOCR(ctx, d.Records, agentName, recs)
+	if err := SealHexbak(bak); err != nil {
+		return nil, err
+	}
+	return bak, nil
+}
+
+func (d Deps) readHexbakSnapshot(ctx context.Context, agentName string) (*Hexbak, error) {
+	profiles, _ := d.Profiles.(interface {
+		GetArchiveProfileTx(context.Context, *sql.Tx, string) (k12.ChildProfile, error)
+	})
+	var profile k12.ChildProfile
+	var profileErr error
+	if d.Profiles != nil && profiles == nil {
+		// 自定义档案端口如不共享 SQLite，仍通过原端口读取；不把它放入读事务。
+		profile, profileErr = d.Profiles.GetProfile(ctx, agentName)
+		if profileErr != nil && !errors.Is(profileErr, records.ErrNotFound) {
+			return nil, fmt.Errorf("usecase: 导出孩子档案: %w", profileErr)
+		}
+	}
+	tx, err := d.Records.DB().BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, fmt.Errorf("usecase: begin backup snapshot: %w", err)
+	}
+	defer tx.Rollback()
+
+	bak := &Hexbak{Version: HexbakVersion, AgentName: agentName, ExportedAt: d.now()}
+	bak.Records, err = d.Records.ExportAgentTx(ctx, tx, agentName)
+	if err != nil {
+		return nil, fmt.Errorf("usecase: 导出档案: %w", err)
+	}
+	if err := d.Records.SnapshotPracticeDeliveryStatusesTx(ctx, tx, agentName, bak.Records); err != nil {
+		return nil, fmt.Errorf("usecase: snapshot practice delivery statuses: %w", err)
+	}
+	if profiles != nil {
+		profile, profileErr = profiles.GetArchiveProfileTx(ctx, tx, agentName)
+		if profileErr != nil && !errors.Is(profileErr, records.ErrNotFound) {
+			return nil, fmt.Errorf("usecase: 导出孩子档案: %w", profileErr)
+		}
+	}
+	if profileErr == nil && profile != (k12.ChildProfile{}) {
+		bak.Profile = &profile
+	}
+	bak.CurrentCreativeWorks, err = d.Records.ExportCreativeWorksArchiveV7Tx(ctx, tx, agentName)
+	if err != nil {
+		return nil, fmt.Errorf("export current creative works: %w", err)
+	}
+	bak.CurrentAccumulations, err = d.Records.ExportAccumulationsArchiveV10Tx(ctx, tx, agentName)
+	if err != nil {
+		return nil, fmt.Errorf("export current accumulations: %w", err)
+	}
+	bak.TeachingDiagrams, err = d.Records.ExportTeachingDiagramAssetsTx(ctx, tx, agentName)
+	if err != nil {
+		return nil, fmt.Errorf("export teaching diagrams: %w", err)
+	}
+	bak.ReviewSources, err = d.Records.ExportReviewSourceArchiveTx(ctx, tx, agentName)
+	if err != nil {
+		return nil, fmt.Errorf("export reviewed sources: %w", err)
+	}
+	bak.ProblemAttempts, err = d.Records.ExportProblemAttemptSnapshotsTx(ctx, tx, agentName)
+	if err != nil {
+		return nil, fmt.Errorf("usecase: 打包 Problem/Attempt ledger: %w: export: %v", ErrHexbakProblemAttempt, err)
+	}
+	problemSource, err := d.Records.ExportProblemSourceArchiveV6Tx(ctx, tx, agentName)
+	if err != nil {
+		return nil, fmt.Errorf("usecase: 打包 source-action durability closure: %w", err)
+	}
+	if !problemSourceArchiveEmpty(problemSource) {
+		bak.ProblemSource = &problemSource
+	}
+	bak.CreativeWorkOCR, err = PackHexbakCreativeWorkOCRWithResolver(ctx, agentName, bak.Records,
+		func(ctx context.Context, agent, jobID string, version int) (k12.CreativeWorkOCRArchiveEvidence, error) {
+			return d.Records.GetCreativeWorkOCRArchiveEvidenceTx(ctx, tx, agent, jobID, version)
+		},
+	)
 	if err != nil {
 		return nil, fmt.Errorf("usecase: 打包作文 OCR 确认证据: %w", err)
 	}
-	bak.CreativeWorkOCR = ocrEvidence
-	if err := SealHexbak(bak); err != nil {
-		return nil, err
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("usecase: commit backup snapshot: %w", err)
 	}
 	return bak, nil
 }

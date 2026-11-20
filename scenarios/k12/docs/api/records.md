@@ -1112,7 +1112,7 @@ v9 追加 `review_sources`：保存同题来源关联、原已提交来源快照
 
 读取完整家庭学习档案备份。
 
-JSON 响应不是附件下载；将完整响应保存为 .hexbak。当前 version=9，保留 archive_id/checksum/记录/图片/确认OCR/题目作答/source-action/当前作品档案原值。当前备份不含完整模型配置与全部长期记忆。任一引用资产缺失或损坏会使整份备份失败，不能丢字段后自行改 checksum。
+JSON 响应不是附件下载；将完整响应保存为 .hexbak。当前 version=10，保留 archive_id/checksum、记录与原始证据字段。v10 同时保存当前积累来源与派生依据。孩子档案、记录及关联数据来自同一持久快照。当前备份不含完整模型配置与全部长期记忆。任一引用资产缺失或损坏会使整份备份失败，不能丢字段后自行改 checksum。
 
 依赖：K12 module, record store and the dependencies described for this operation.
 
@@ -1294,6 +1294,8 @@ JSON 正文：
 导出当前学期完整学习档案。
 
 md/省略返回 Markdown JSON；无Renderer也返回同一JSON。PDF/DOCX渲染成功返回对应二进制附件及 X-HexClaw-Artifact-ID/Source-Digest/Object-Counts。渲染失败仍200，但返回同一canonical快照的 Markdown JSON 与 render_error；根据 Content-Type 和实际内容识别格式，不能把200直接保存为PDF。五类对象来自同一scope/as_of/source_digest。
+
+积累导出使用当前已存来源，历史记录保留原来源。没有当前点评代次的旧作品使用已存原稿及最后一份实际点评。
 
 依赖：K12 records; optional PDF/DOCX Renderer.
 

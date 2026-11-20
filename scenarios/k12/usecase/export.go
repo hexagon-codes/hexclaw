@@ -143,7 +143,7 @@ func (d Deps) ExportLearningArchiveMarkdown(
 func packLearningArchiveAttachments(agent string, works []k12storage.LearningArchiveCreativeWork) ([]k12.LearningArchiveAttachment, error) {
 	seen := map[string]bool{}
 	for _, work := range works {
-		if id := work.Initial.Source.SourceAssetID; id != "" {
+		if _, id := learningArchiveWorkOriginal(work); id != "" {
 			seen[id] = true
 		}
 	}
@@ -187,7 +187,7 @@ type learningArchiveRecordDigest struct {
 
 type learningArchiveWorkDigest struct {
 	Record  learningArchiveRecordDigest      `json:"record"`
-	Initial learningArchiveGenerationDigest  `json:"initial_generation"`
+	Initial *learningArchiveGenerationDigest `json:"initial_generation,omitempty"`
 	Latest  *learningArchiveGenerationDigest `json:"latest_generation,omitempty"`
 }
 
@@ -225,7 +225,11 @@ func learningArchiveSourceDigest(
 		CreativeWorks: make([]learningArchiveWorkDigest, 0, len(snapshot.CreativeWorks)),
 	}
 	for _, work := range snapshot.CreativeWorks {
-		initial := learningArchiveGenerationSourceDigest(*work.Initial)
+		var initial *learningArchiveGenerationDigest
+		if work.Initial != nil {
+			value := learningArchiveGenerationSourceDigest(*work.Initial)
+			initial = &value
+		}
 		var latest *learningArchiveGenerationDigest
 		if work.Latest != nil {
 			value := learningArchiveGenerationSourceDigest(*work.Latest)
@@ -282,19 +286,19 @@ func learningArchiveArtifactID(scope LearningArchiveScope, digest string) string
 
 func validateLearningArchiveWorks(works []k12storage.LearningArchiveCreativeWork) error {
 	for _, work := range works {
-		if work.Record == nil || work.Initial == nil {
+		if work.Record == nil || (work.Initial == nil && len(work.Fields.Versions) == 0) {
 			return fmt.Errorf("usecase: learning archive creative work is missing its initial source")
 		}
-		initial := work.Initial
-		if initial.WorkID != work.Record.RecordID || initial.AgentName != work.Record.AgentName ||
-			initial.Source.WorkType != work.Fields.WorkType {
+		if initial := work.Initial; initial != nil &&
+			(initial.WorkID != work.Record.RecordID || initial.AgentName != work.Record.AgentName ||
+				initial.Source.WorkType != work.Fields.WorkType) {
 			return fmt.Errorf("usecase: learning archive creative work source identity is invalid")
 		}
-		if initial.Source.WorkType == k12.WorkTypeWriting &&
-			initial.Source.ContentMarkdown == "" && initial.Source.SourceAssetID == "" {
+		content, assetID := learningArchiveWorkOriginal(work)
+		if work.Fields.WorkType == k12.WorkTypeWriting && content == "" && assetID == "" {
 			return fmt.Errorf("usecase: learning archive writing source is empty")
 		}
-		if initial.Source.WorkType == k12.WorkTypeArt && initial.Source.SourceAssetID == "" {
+		if work.Fields.WorkType == k12.WorkTypeArt && assetID == "" {
 			return fmt.Errorf("usecase: learning archive art source is empty")
 		}
 		if work.Latest != nil &&
@@ -303,6 +307,35 @@ func validateLearningArchiveWorks(works []k12storage.LearningArchiveCreativeWork
 		}
 	}
 	return nil
+}
+
+func learningArchiveWorkOriginal(work k12storage.LearningArchiveCreativeWork) (content, assetID string) {
+	if work.Initial != nil {
+		source := work.Initial.Source
+		return source.ContentMarkdown, source.SourceAssetID
+	}
+	original := work.Fields.Versions[0]
+	return original.ContentMarkdown, original.SourceAssetID
+}
+
+func learningArchiveWorkFeedback(work k12storage.LearningArchiveCreativeWork) string {
+	if work.Initial != nil {
+		if work.Latest != nil && work.Latest.Feedback != nil {
+			return work.Latest.Feedback.ProjectionMarkdown
+		}
+		return ""
+	}
+	// 旧版本可能只有原点评正文。保留已有点评和原稿，不构造新的点评代次。
+	for i := len(work.Fields.Versions) - 1; i >= 0; i-- {
+		version := work.Fields.Versions[i]
+		if feedback := version.StructuredFeedback; feedback != nil && feedback.ProjectionMarkdown != "" {
+			return feedback.ProjectionMarkdown
+		}
+		if version.Feedback != "" {
+			return version.Feedback
+		}
+	}
+	return ""
 }
 
 func renderLearningArchiveMarkdown(
@@ -389,17 +422,16 @@ func renderLearningArchiveMarkdown(
 		fmt.Fprintf(&b, "### %d\n\n", i+1)
 		writeLearningArchiveMeta(&b, "标题", work.Fields.WorkTitle)
 		b.WriteByte('\n')
-		writeLearningArchiveBlock(&b, work.Initial.Source.ContentMarkdown)
-		if id := work.Initial.Source.SourceAssetID; id != "" {
-			_, file, err := assetstore.Parse(id)
+		content, assetID := learningArchiveWorkOriginal(work)
+		writeLearningArchiveBlock(&b, content)
+		if assetID != "" {
+			_, file, err := assetstore.Parse(assetID)
 			if err != nil {
 				return "", fmt.Errorf("usecase: learning archive source attachment: %w", err)
 			}
 			fmt.Fprintf(&b, "![原图](attachments/%s)\n\n", file)
 		}
-		if work.Latest != nil && work.Latest.Feedback != nil {
-			writeLearningArchiveBlock(&b, work.Latest.Feedback.ProjectionMarkdown)
-		}
+		writeLearningArchiveBlock(&b, learningArchiveWorkFeedback(work))
 		writeLearningArchiveMeta(&b, "状态", work.Record.Status)
 		b.WriteByte('\n')
 	}

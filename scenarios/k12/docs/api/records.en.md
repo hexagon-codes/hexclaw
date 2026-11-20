@@ -1112,7 +1112,7 @@ v9 adds `review_sources`: reviewed relationships, their committed source snapsho
 
 `snapshots[].source` and `pages[]` retain the frozen projection's PascalCase field names; clients must transfer them unchanged. `active` records the exported source state, not confidence or an exemption from current identity checks. Relationships that no longer match the original question remain invalid during cross-Tutor migration.
 
-Returns JSON, not a download attachment; save the whole response as .hexbak. Current version is 9. Preserve archive_id/checksum/records/assets/confirmed OCR/problem attempts/source-action/current creative-work archives unchanged. It does not include the complete model configuration or all long-term memory. Missing/corrupt referenced assets fail the backup; do not drop fields and recompute a checksum.
+Save the complete JSON response as .hexbak, preserving archive_id, checksum, records, and all evidence fields. The current version is 10 and includes current accumulation sources and their provenance. The profile, records, and related data come from one persistent snapshot. It does not include the complete model configuration or all long-term memory. Missing or corrupt referenced assets fail the backup.
 
 Availability: K12 module, record store and the dependencies described for this operation.
 
@@ -1294,6 +1294,8 @@ Success: `200` `application/json`.
 Export the current-term learning archive.
 
 Omitted/md returns Markdown JSON; a missing Renderer does the same. Successful PDF/DOCX rendering returns a binary attachment with X-HexClaw-Artifact-ID/Source-Digest/Object-Counts. Render failure still returns 200, but as Markdown JSON from the same canonical snapshot with render_error. Inspect Content-Type/content before saving a PDF. All five object counts share scope/as_of/source_digest.
+
+The export includes the stored accumulation source, including legacy source values. Older creative works without feedback generations use their stored original version and most recent available feedback.
 
 Availability: K12 records; optional PDF/DOCX Renderer.
 

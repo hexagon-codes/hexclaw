@@ -2,6 +2,8 @@ package usecase_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"testing"
 	"time"
 
@@ -9,6 +11,71 @@ import (
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/usecase"
 )
+
+func TestCreativeWorkRecoverySettlesRetainedFailedResponse(t *testing.T) {
+	ctx := t.Context()
+	d := newDataDeps(t)
+	solver := &fakeWorkFeedbackSolver{}
+	d.Solver = solver
+	const agent = "xiaoming"
+	work, generation, _, err := d.CreateCurrentTextWork(ctx, agent, "窗外的树叶在风中摇动。", "known-response")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Records.MarkWorkFeedbackGenerationRunning(ctx, agent, generation); err != nil {
+		t.Fatal(err)
+	}
+	key := "work:" + work + ":version:" + generation + ":feedback"
+	invocation, _, err := d.Records.PrepareImageTaskInvocation(ctx, k12.ImageTaskInvocation{
+		InvocationID: "retained-failed-response", AgentName: agent, WorkRecordID: work,
+		Operation: k12.ImageTaskOperationWorkFeedback, OperationKey: key,
+		RequestDigest: "sha256:feedback-input", RouteSnapshot: currentFeedbackRoute(),
+		Attempt: 1, DeadlineAt: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, claimed, err := d.Records.ClaimImageTaskInvocationSend(ctx, agent, invocation.InvocationID,
+		"feedback-provider-key", 0); err != nil || !claimed {
+		t.Fatalf("claim invocation: claimed=%v err=%v", claimed, err)
+	}
+	raw := `{"feedback":"incomplete"}`
+	digest := fmt.Sprintf("%x", sha256.Sum256([]byte(raw)))
+	const reason = "work_feedback_structure_invalid"
+	if err := d.Records.FailWorkFeedbackInvocationWithResult(ctx, agent, invocation.InvocationID, reason, digest, raw); err != nil {
+		t.Fatal(err)
+	}
+
+	started := &usecase.CreativeWorkFeedbackCoordinator{Deps: &d, Records: d.Records, BaseContext: ctx}
+	if recovered, err := started.Recover(ctx, []string{agent}); err != nil || recovered != 0 {
+		t.Fatalf("recovery must settle local failure without a worker: recovered=%d err=%v", recovered, err)
+	}
+	view, err := d.GetCreativeWork(ctx, agent, work)
+	if err != nil || view.GenerationState.Current == nil {
+		t.Fatalf("read work after recovery: %v", err)
+	}
+	current := view.GenerationState.Current
+	if current.Status != k12.WorkFeedbackFailed || !current.RetrySafe || current.FailureReason != reason || solver.calls != 0 {
+		t.Fatalf("work status=%s retry=%v reason=%q model calls=%d", current.Status, current.RetrySafe, current.FailureReason, solver.calls)
+	}
+	retained, err := d.Records.GetLatestWorkFeedbackInvocation(ctx, agent, work, key)
+	if err != nil || retained.ResultJSON != raw || retained.ResultDigest != digest {
+		t.Fatalf("original response must remain retained: %v", err)
+	}
+	if _, _, err := d.Records.PrepareWorkFeedbackGeneration(ctx, agent, work, "explicit-retry", "retry-request"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Records.MarkWorkFeedbackGenerationRunning(ctx, agent, generation); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Records.ExpirePreparedWorkFeedbackGenerations(ctx, agent, work, time.Now().Unix()); err != nil {
+		t.Fatal(err)
+	}
+	retry, err := d.Records.GetWorkFeedbackGeneration(ctx, agent, generation)
+	if err != nil || retry.Status != k12.WorkFeedbackRunning {
+		t.Fatalf("older failed receipt cannot complete a fresh explicit retry: status=%q err=%v", retry.Status, err)
+	}
+}
 
 func currentFeedbackRoute() k12.ImageTaskRouteSnapshot {
 	return k12.ImageTaskRouteSnapshot{

@@ -13,7 +13,7 @@ import (
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 )
 
-// LearningArchiveCreativeWork 冻结作品根与 current generation；不读取 legacy Versions。
+// LearningArchiveCreativeWork 冻结作品根与点评代次。旧作品保留实际存储的原稿和点评版本。
 type LearningArchiveCreativeWork struct {
 	Record  *records.AgentRecord
 	Fields  k12.CreativeWorkFields
@@ -30,6 +30,28 @@ type LearningArchiveSourceSnapshot struct {
 	PracticeSets  []*records.AgentRecord
 	Accumulations []*records.AgentRecord
 	CreativeWorks []LearningArchiveCreativeWork
+}
+
+// ReadArchiveProfileTx 从调用方的归档快照读取已落库的档案。
+func ReadArchiveProfileTx(ctx context.Context, tx *sql.Tx, agentName string) (k12.ChildProfile, error) {
+	if tx == nil {
+		return k12.ChildProfile{}, fmt.Errorf("k12storage: nil archive profile transaction")
+	}
+	return readAgentProfileVia(ctx, tx, agentName)
+}
+
+// learningArchiveAccumMapper 只改变档案读取的来源投影，备份和写入仍保留两种来源字段。
+type learningArchiveAccumMapper struct{ accumMapper }
+
+func (m learningArchiveAccumMapper) domainCols() []string {
+	cols := m.accumMapper.domainCols()
+	for i, col := range cols {
+		if col == "source_ref" {
+			cols[i] = "COALESCE(derived_source_ref, source_ref)"
+			break
+		}
+	}
+	return cols
 }
 
 // ReadLearningArchiveSourceSnapshot 在同一读事务中冻结当前 Tutor/学期的五对象。
@@ -105,7 +127,7 @@ func (s *Store) ReadLearningArchiveSourceSnapshot(
 	if err != nil {
 		return snapshot, fmt.Errorf("k12storage: read learning archive practice sets: %w", err)
 	}
-	snapshot.Accumulations, err = s.queryRecordsVia(ctx, tx, accumMapper{},
+	snapshot.Accumulations, err = s.queryRecordsVia(ctx, tx, learningArchiveAccumMapper{},
 		`WHERE agent_name=? AND grade_term=? AND deleted_at IS NULL ORDER BY created_at,record_id`,
 		agentName, profile.GradeTerm)
 	if err != nil {
@@ -202,10 +224,27 @@ func (s *Store) readLearningArchiveCreativeWorksTx(
 
 	out := make([]LearningArchiveCreativeWork, 0, len(roots))
 	for _, root := range roots {
-		if root.initialID == "" {
-			return nil, fmt.Errorf("k12storage: learning archive creative work %s has no initial generation", root.record.RecordID)
-		}
 		work := LearningArchiveCreativeWork{Record: root.record, Fields: root.fields}
+		if root.initialID == "" {
+			if root.latestID != "" {
+				return nil, fmt.Errorf("k12storage: learning archive creative work %s has no initial generation", root.record.RecordID)
+			}
+			fieldsJSON, err := mapper.attachChildren(ctx, tx, root.record.RecordID, root.record.Fields)
+			if err != nil {
+				return nil, fmt.Errorf("k12storage: read learning archive legacy work versions: %w", err)
+			}
+			fields, err := k12.ParseCreativeWorkFields(fieldsJSON)
+			if err != nil {
+				return nil, err
+			}
+			if len(fields.Versions) == 0 {
+				return nil, fmt.Errorf("k12storage: learning archive creative work %s has no initial generation or original version", root.record.RecordID)
+			}
+			work.Record.Fields = fieldsJSON
+			work.Fields = fields
+			out = append(out, work)
+			continue
+		}
 		initial, err := getWorkFeedbackGenerationVia(ctx, tx, agentName, root.initialID)
 		if err != nil {
 			return nil, fmt.Errorf("k12storage: read learning archive initial generation: %w", err)

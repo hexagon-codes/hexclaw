@@ -115,6 +115,7 @@ func TestGenerateWorkFeedback_Writing_AI(t *testing.T) {
 
 	feedbackStartedAt := time.Now()
 	v, err := d.GenerateWorkFeedback(ctx, "xiaoming", id)
+	feedbackFinishedAt := time.Now()
 	if err != nil {
 		t.Fatalf("生成点评: %v", err)
 	}
@@ -137,9 +138,10 @@ func TestGenerateWorkFeedback_Writing_AI(t *testing.T) {
 		t.Fatal(err)
 	}
 	providerDeadline, hasDeadline := gen.lastCtx.Deadline()
+	budget := 300 * time.Second
 	if !hasDeadline || providerDeadline.Unix() != invocation.DeadlineAt ||
-		invocation.DeadlineAt < feedbackStartedAt.Add(299*time.Second).Unix() ||
-		invocation.DeadlineAt > feedbackStartedAt.Add(300*time.Second).Unix() {
+		invocation.DeadlineAt < feedbackStartedAt.Add(budget).Unix() ||
+		invocation.DeadlineAt > feedbackFinishedAt.Add(budget).Unix() {
 		t.Fatalf("independent feedback budget is not frozen in its invocation: deadline=%v invocation=%+v", providerDeadline, invocation)
 	}
 	if v.Record.Status != k12.WorkStatusFeedbackReady {

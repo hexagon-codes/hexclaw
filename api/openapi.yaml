@@ -19339,7 +19339,8 @@ paths:
       operationId: k12RecordsBackup
       summary: Read a complete learner backup
       description: >-
-        Returns JSON, not a download attachment; save the whole response as .hexbak. Current version is 8.
+        Returns JSON, not a download attachment; save the whole response as .hexbak. The current format is v10.
+        Records, the learner profile, and source evidence come from the same read snapshot.
         Preserve archive_id/checksum/records/assets/confirmed OCR/problem attempts/source-action/current
         creative-work archives unchanged. It does not include the complete model configuration or all
         long-term memory. Missing/corrupt referenced assets fail the backup; do not drop fields and recompute
@@ -19615,6 +19616,8 @@ paths:
         returns a binary attachment with X-HexClaw-Artifact-ID/Source-Digest/Object-Counts. Render failure
         still returns 200, but as Markdown JSON from the same canonical snapshot with render_error. Inspect
         Content-Type/content before saving a PDF. All five object counts share scope/as_of/source_digest.
+        The canonical archive includes retained accumulation sources and the available original text and feedback
+        of legacy restored writing records.
 
 
         Authentication: current service Bearer token. agent selects the learner scope; request user_id cannot
