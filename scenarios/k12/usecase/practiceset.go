@@ -901,15 +901,6 @@ func (d Deps) GradePracticeSetItems(ctx context.Context, agentName, recordID str
 // spaced-review schedule so a truthful parent check is useful, but records
 // human_confirmed and can never promote a source record to system mastery.
 func (d Deps) ConfirmPracticeSetItems(ctx context.Context, agentName, recordID string, results []PracticeGradeResult) (PracticeSetView, error) {
-	view, err := d.GetPracticeSet(ctx, agentName, recordID)
-	if err != nil {
-		return PracticeSetView{}, err
-	}
-	if view.Record.Status == k12.PracticeStatusAssigned {
-		if err := d.savePracticeFields(ctx, view, k12.PracticeStatusSubmitted); err != nil {
-			return PracticeSetView{}, err
-		}
-	}
 	return d.gradePracticeSetItems(ctx, agentName, recordID, results, k12.PracticeResultHumanConfirmed)
 }
 
@@ -919,10 +910,22 @@ func (d Deps) gradePracticeSetItems(
 	results []PracticeGradeResult,
 	evidence string,
 ) (PracticeSetView, error) {
+	seen := make(map[string]PracticeGradeResult, len(results))
+	unique := make([]PracticeGradeResult, 0, len(results))
+	for _, r := range results {
+		if previous, exists := seen[r.ItemID]; exists {
+			if previous != r {
+				return PracticeSetView{}, fmt.Errorf("%w: conflicting conclusions for practice item %q", ErrInvalidInput, r.ItemID)
+			}
+			continue
+		}
+		seen[r.ItemID] = r
+		unique = append(unique, r)
+	}
 	var view PracticeSetView
 	err := d.Records.WithPracticeSetTransaction(ctx, agentName, recordID, func(txCtx context.Context) error {
 		var err error
-		view, err = d.gradePracticeSetItemsInTransaction(txCtx, agentName, recordID, results, evidence)
+		view, err = d.gradePracticeSetItemsInTransaction(txCtx, agentName, recordID, unique, evidence)
 		return err
 	})
 	if err != nil {
@@ -944,6 +947,15 @@ func (d Deps) gradePracticeSetItemsInTransaction(
 	if err != nil {
 		return PracticeSetView{}, err
 	}
+	if evidence == k12.PracticeResultHumanConfirmed && v.Record.Status == k12.PracticeStatusAssigned {
+		if err := d.savePracticeFields(ctx, v, k12.PracticeStatusSubmitted); err != nil {
+			return PracticeSetView{}, err
+		}
+		v, err = d.GetPracticeSet(ctx, agentName, recordID)
+		if err != nil {
+			return PracticeSetView{}, err
+		}
+	}
 	if v.Record.Status != k12.PracticeStatusSubmitted && v.Record.Status != k12.PracticeStatusGraded {
 		return PracticeSetView{}, fmt.Errorf("usecase: 练习集状态须为 submitted/graded 才能逐题复批，当前 %s", v.Record.Status)
 	}
@@ -959,6 +971,7 @@ func (d Deps) gradePracticeSetItemsInTransaction(
 	for i := range v.Fields.Items {
 		byID[v.Fields.Items[i].ItemID] = i
 	}
+	changed := false
 	for _, res := range results {
 		i, ok := byID[res.ItemID]
 		if !ok {
@@ -990,6 +1003,7 @@ func (d Deps) gradePracticeSetItemsInTransaction(
 			continue
 		}
 		it.ResultCorrect = &correct
+		changed = true
 		it.ResultEvidence = evidence
 		it.ResultReturnID = res.ReturnID
 		it.LearningEvidence = learningEvidence
@@ -1022,6 +1036,9 @@ func (d Deps) gradePracticeSetItemsInTransaction(
 	newStatus := v.Record.Status
 	if allItemsConcluded(v.Fields) {
 		newStatus = k12.PracticeStatusGraded
+	}
+	if evidence == k12.PracticeResultHumanConfirmed && !changed && newStatus == v.Record.Status {
+		return v, nil
 	}
 	if err := d.savePracticeFields(ctx, v, newStatus); err != nil {
 		return PracticeSetView{}, err

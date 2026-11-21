@@ -847,7 +847,7 @@ type gradeResultsReq struct {
 	Agent   string `json:"agent"`
 	Results []struct {
 		ItemID  string `json:"item_id"`
-		Correct bool   `json:"correct"`
+		Correct *bool  `json:"correct"`
 	} `json:"results,omitempty"`
 }
 
@@ -873,7 +873,11 @@ func (h *handler) gradePracticeSet(w http.ResponseWriter, r *http.Request) {
 	}
 	results := make([]usecase.PracticeGradeResult, 0, len(req.Results))
 	for _, res := range req.Results {
-		results = append(results, usecase.PracticeGradeResult{ItemID: res.ItemID, Correct: res.Correct})
+		if res.Correct == nil {
+			writeErr(w, http.StatusBadRequest, "each item requires an explicit correct value")
+			return
+		}
+		results = append(results, usecase.PracticeGradeResult{ItemID: res.ItemID, Correct: *res.Correct})
 	}
 	v, err := h.rt.Deps.ConfirmPracticeSetItems(r.Context(), req.Agent, r.PathValue("id"), results)
 	if err != nil {

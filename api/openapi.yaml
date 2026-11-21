@@ -16037,7 +16037,7 @@ paths:
       summary: 手动记录逐题结果 / Record manual item results
       description: >-
         results=[{item_id,correct}] 只写 human_confirmed，可推进复习间隔但不构成系统掌握证据。省略或空 results
-        保留旧整卷推进行为，不联动错题；新调用应始终提供逐题 results。照片系统复批由内部协调器处理。
+        保留旧整卷推进行为。每条逐题结果必须明确给出布尔值。同题相反结论返回 400，同一结论只应用一次。失败请求不会改变卷或来源错题。
 
 
         results=[{item_id,correct}] records human_confirmed and can advance review intervals without
@@ -37637,13 +37637,11 @@ components:
               item_id:
                 type: string
               correct:
-                type:
-                  - boolean
-                  - "null"
-                default: false
-                description: 客户端应明确提交判定；省略或null实际解码为false，不表示未判定。
+                type: boolean
+                description: 家长明确确认的逐题结论。
             required:
               - item_id
+              - correct
             additionalProperties: true
       required:
         - agent
