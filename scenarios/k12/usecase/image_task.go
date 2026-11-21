@@ -1656,15 +1656,19 @@ func (c *ImageTaskCoordinator) projectTarget(
 	if err != nil {
 		return ImageTaskView{}, err
 	}
-	if view.Creative != nil &&
-		(view.Creative.Status == k12.CreativeWorkIntakePreparing ||
-			view.Creative.Status == k12.CreativeWorkIntakeFailed) {
+	if view.Creative != nil && (view.Creative.Status == k12.CreativeWorkIntakePreparing ||
+		view.Creative.Status == k12.CreativeWorkIntakeFailed || view.Creative.Status == k12.CreativeWorkIntakePromoted) {
 		invocation, invocationErr := c.Records.GetLatestWritingOCRInvocation(
 			ctx,
 			dispatch.AgentName,
 			view.Creative.IntakeID,
 		)
 		switch {
+		case invocationErr == nil && view.Creative.Status == k12.CreativeWorkIntakePromoted:
+			// 已推广作品仅披露原 intake 实际完成的转写，终态无需再调度。
+			if invocation.Status == k12.ImageTaskInvocationSucceeded {
+				view.ocrInvocation = &invocation
+			}
 		case invocationErr == nil && invocation.Status == k12.ImageTaskInvocationOutcomeUnknown:
 			view.ocrInvocation = &invocation
 			// 旧父任务可能已被期限处理误标可重试；投影只采用实际 OCR 回执，不改写历史。
