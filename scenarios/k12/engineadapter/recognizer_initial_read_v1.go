@@ -503,9 +503,9 @@ func recognitionReviewRequestV1(pagePNG []byte, plan k12.RecognitionLayoutPlanV2
 		return nil, "", request, err
 	}
 	if layout := k12.SharedRecognitionReviewLayout(plan, targets); layout != nil {
-		positions, err := json.Marshal(layout.Crops)
-		if err != nil {
-			return nil, "", request, err
+		positions, encodeErr := json.Marshal(layout.Crops)
+		if encodeErr != nil {
+			return nil, "", request, encodeErr
 		}
 		prompt += "\nThese authorized crops share original pixels on this sheet. In the listed target order their rectangles in sheet coordinates are " + string(positions) + ". Read shared material once. For each target use its question_focus_in_crop and return answer_bbox relative to that crop's own origin."
 	}

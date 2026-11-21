@@ -29,6 +29,8 @@ func TestIndependentReviewIncludesOnlyReferencedSharedRegionsOfCompleteSelection
 		{"new dimensions", true, false, RecognitionSharedReviewByReference, "r=3 cm；d=4 cm", true},
 		{"new shared text", true, false, RecognitionSharedReviewByReference, "两人用时相同", true},
 		{"shared in review and adjudication", true, false, RecognitionSharedReviewWithBatch, "r=3 cm；d=4 cm", true},
+		{"single shared view", true, false, RecognitionSharedReviewSingleView, "r=3 cm；d=4 cm", true},
+		{"partial single view", true, true, RecognitionSharedReviewSingleView, "r=3 cm；d=4 cm", false},
 		{"partial batch review", true, true, RecognitionSharedReviewWithBatch, "r=3 cm；d=4 cm", false},
 		{"legacy no sharing", false, false, "", "图①的尺寸", false},
 		{"partial selection", true, true, RecognitionSharedReviewByReference, "r=3 cm；d=4 cm", false},
@@ -55,7 +57,7 @@ func TestIndependentReviewIncludesOnlyReferencedSharedRegionsOfCompleteSelection
 			for _, target := range plan.Targets {
 				region := target.AdjudicationRegion
 				visible := region != nil && region.Y <= diagram.Y && region.X <= diagram.X && region.X+region.Width >= diagram.X+diagram.Width
-				sharedInBatch := tc.policy == RecognitionSharedReviewWithBatch && tc.shared && target.ManifestOrder <= 2
+				sharedInBatch := (tc.policy == RecognitionSharedReviewWithBatch || tc.policy == RecognitionSharedReviewSingleView) && tc.shared && target.ManifestOrder <= 2
 				if (target.Region.Y <= diagram.Y) != sharedInBatch || (target.ReviewFocusRegion != nil) != sharedInBatch {
 					t.Fatalf("wrong batch crop/focus for target %d: %+v", target.ManifestOrder, target)
 				}
@@ -65,6 +67,21 @@ func TestIndependentReviewIncludesOnlyReferencedSharedRegionsOfCompleteSelection
 			}
 			if err := ValidateRecognitionLayoutPlanV2(plan); err != nil {
 				t.Fatal(err)
+			}
+			pair := plan.Targets[:2]
+			sheet := SharedRecognitionReviewLayout(plan, pair)
+			if (sheet != nil) != (tc.policy == RecognitionSharedReviewSingleView && !tc.partial) {
+				t.Fatalf("unexpected shared sheet for %s", tc.name)
+			}
+			if sheet != nil {
+				data, err := BuildRecognitionLayoutReviewBatchImageV1(pngData.Bytes(), plan, []string{pair[0].TargetID, pair[1].TargetID})
+				if err != nil {
+					t.Fatal(err)
+				}
+				size, err := png.DecodeConfig(bytes.NewReader(data))
+				if err != nil || size.Height != sheet.Height || sheet.Crops[0].Y-pair[0].Region.Y != sheet.Crops[1].Y-pair[1].Region.Y || size.Height >= pair[0].Region.Height+pair[1].Region.Height {
+					t.Fatalf("shared pixels were duplicated or displaced: %+v", sheet)
+				}
 			}
 		})
 	}
