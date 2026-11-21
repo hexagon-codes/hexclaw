@@ -206,6 +206,14 @@ func (o *GradingOrchestrator) independentReferenceQuestion(ctx context.Context, 
 		}
 	}
 	if independentReferenceAnswerEligible(req, q) {
+		if job.Fields.ModelSnapshot.QuantityAnswerPolicy == k12.QuantityAnswerPolicySlotV2 && req.practiceReference == nil &&
+			q.Subject == "数学" && q.ProblemKind == ProblemKindStandalone && q.ImageSourceContext != nil && len(q.ImageSourceContext.Materials) == 0 {
+			original, known := elementarymath.ParseTravelWorksheet(q.RawTranscription)
+			canonical, complete := elementarymath.ParseTravelWorksheet(q.Question)
+			if known && complete && original == canonical && !slices.ContainsFunc(q.ImageSourceContext.Recoveries, func(r k12.RecognitionImageSourceRecoveryV1) bool { return r.Gap.Kind != "handwriting" }) {
+				return q.RawTranscription, true, nil
+			}
+		}
 		return "", true, nil
 	}
 	if o.deps.Records == nil || q.Subject != "数学" || q.SourceRegion == nil {
@@ -264,6 +272,10 @@ func (o *GradingOrchestrator) independentReferenceQuestion(ctx context.Context, 
 			proof = physical
 		}
 	}
+	reviewWorksheet := job.Fields.ModelSnapshot.QuantityAnswerPolicy == k12.QuantityAnswerPolicySlotV2 && req.practiceReference == nil
+	if proof == nil && reviewWorksheet {
+		return o.referenceFromReviewedWorksheet(ctx, runtime, physicalCalls, q, "")
+	}
 	if proof == nil || proof.Stage != k12.GradingStageRecognizing || proof.Status != k12.ModelInvocationSucceeded ||
 		proof.PlanDigest != plan.AuthorizedPlanDigest || proof.CandidateExactSetDigest != runtime.CandidateExactSetDigest || !validModelInvocationDigest(proof.RequestDigest) {
 		return "", false, nil
@@ -272,9 +284,154 @@ func (o *GradingOrchestrator) independentReferenceQuestion(ctx context.Context, 
 	if err != nil {
 		return "", false, err
 	}
+	if reviewWorksheet {
+		if question, eligible, err := o.referenceFromReviewedWorksheet(ctx, runtime, physicalCalls, q, payload); eligible || err != nil {
+			return question, eligible, err
+		}
+	}
 	question, eligible := independentReferenceFromAdjudication(req, q, payload)
 	return question, eligible, nil
 }
+
+// 按已冻结的目标取首读与复读。各次阅读均能独立证明题面时，只给参考解，不修改学生判定。
+func (o *GradingOrchestrator) referenceFromReviewedWorksheet(ctx context.Context, runtime k12.RecognitionLayoutPlanRuntimeV2, calls []k12.ModelPhysicalInvocation, q RecognizedQuestion, adjudication string) (string, bool, error) {
+	plan := runtime.AuthorizedPlan
+	if plan == nil || plan.Scope == nil || plan.InitialReadMode != k12.RecognitionLayoutManifestWithContentV1 || len(plan.Targets) != 1 ||
+		len(plan.ObservedTargets) != 1 || len(plan.Scope.Excluded) != 0 || len(plan.Scope.Dependencies) != 0 || len(runtime.ReviewBatches) != 1 ||
+		q.parentSourceUnclear || q.ProblemKind != ProblemKindStandalone {
+		return "", false, nil
+	}
+	for _, gap := range plan.Scope.Gaps {
+		if gap.Kind != "handwriting" {
+			return "", false, nil
+		}
+	}
+	target, batch := plan.Targets[0], runtime.ReviewBatches[0]
+	if len(batch.Members) != 1 || batch.Members[0].CandidateID != target.TargetID || batch.PlanDigest != plan.AuthorizedPlanDigest {
+		return "", false, nil
+	}
+	primary, travel, ok := elementarymath.TravelQuestionPrefix(q.RawTranscription)
+	if !ok {
+		return "", false, nil
+	}
+	mainOnly := elementarymath.TravelWorksheet{UniformTravelProblem: travel}
+	expected, complete := elementarymath.ParseTravelWorksheet(q.RawTranscription)
+	if adjudication != "" {
+		if q.SourceRegion == nil {
+			return "", false, nil
+		}
+		observed, err := k12.ParseRecognitionFinalAnswerResponseV1(adjudication, *q.SourceRegion)
+		if err != nil || !observed.TargetOwnershipConfirmed || !observed.QuestionCompleteAndLegible && len(plan.Scope.Gaps) == 0 {
+			return "", false, nil
+		}
+		if !worksheetReadingMatches(observed.QuestionRawTranscription, mainOnly) {
+			return "", false, nil
+		}
+		complete = complete && worksheetReadingMatches(observed.QuestionRawTranscription, expected)
+	}
+	var initial, reviewed string
+	for _, call := range calls {
+		if call.ParentInvocationID != runtime.Header.ParentInvocationID || call.Stage != k12.GradingStageRecognizing {
+			continue
+		}
+		first := call.PhysicalInvocationID == runtime.ManifestPhysicalInvocationID && call.ResultDigest == runtime.ManifestResultDigest
+		if !first && call.PhysicalUnit != batch.PhysicalUnit {
+			continue
+		}
+		if call.Status != k12.ModelInvocationSucceeded || call.ReusedFromPhysicalInvocationID != "" || !validModelInvocationDigest(call.RequestDigest) ||
+			(!first && (call.PlanDigest != plan.AuthorizedPlanDigest || call.CandidateExactSetDigest != runtime.CandidateExactSetDigest)) {
+			return "", false, nil
+		}
+		payload, err := o.deps.Records.LoadSucceededModelPhysicalInvocationResultContent(ctx, runtime.Header.AgentName, call.PhysicalInvocationID, call.ResultDigest)
+		if err != nil {
+			return "", false, err
+		}
+		if first {
+			if initial != "" {
+				return "", false, nil
+			}
+			initial = payload
+		} else {
+			if reviewed != "" {
+				return "", false, nil
+			}
+			reviewed = payload
+		}
+	}
+	handwritingGap := len(plan.Scope.Gaps) > 0
+	if complete && worksheetObservationsAgree(initial, reviewed, target, expected, handwritingGap) {
+		return q.RawTranscription, true, nil
+	}
+	if worksheetObservationsAgree(initial, reviewed, target, mainOnly, handwritingGap) {
+		return primary, true, nil
+	}
+	return "", false, nil
+}
+
+func worksheetReadingMatches(source string, expected elementarymath.TravelWorksheet) bool {
+	if expected.Parts == "" {
+		_, actual, ok := elementarymath.TravelQuestionPrefix(source)
+		return ok && actual == expected.UniformTravelProblem
+	}
+	actual, ok := elementarymath.ParseTravelWorksheet(source)
+	return ok && actual == expected
+}
+
+// 印刷的括号或方框属于答题载体。提到载体并不表示印刷题干有缺损，原观察仍完整冻结。
+var worksheetPrintedAnswerFrame = regexp.MustCompile(`(?:预印|印刷)(?:的)?(?:答题框|作答框|填空框|方框|括号|横线|分数线|空格)`)
+var worksheetHandwritingTerms = strings.NewReplacer("可辨认的填字", "可辨认的手写答案", "是否有填写", "是否有手写作答", "填写内容", "手写作答内容")
+
+func worksheetObservationsAgree(initial, reviewed string, target k12.RecognitionLayoutTargetV2, expected elementarymath.TravelWorksheet, handwritingGap bool) bool {
+	type reading struct {
+		Kind        string `json:"kind"`
+		TargetID    string `json:"target_id"`
+		Recognition struct {
+			Question string   `json:"question"`
+			Subject  string   `json:"subject"`
+			Signals  []string `json:"ocr_signals"`
+		} `json:"recognition"`
+	}
+	entries, err := k12.CanonicalRecognitionLayoutInitialReadEntriesV1(initial)
+	if err != nil || len(entries) != 1 {
+		return false
+	}
+	var original struct {
+		Number []string `json:"source_number_path"`
+		Read   reading  `json:"initial_read"`
+	}
+	var batch struct {
+		Items []reading `json:"items"`
+	}
+	if json.Unmarshal(entries[0], &original) != nil || !slices.Equal(original.Number, target.SourceNumberPath) ||
+		json.Unmarshal([]byte(reviewed), &batch) != nil || len(batch.Items) != 1 ||
+		(batch.Items[0].TargetID != target.TargetID && batch.Items[0].TargetID != "t1") {
+		return false
+	}
+	for _, read := range []reading{original.Read, batch.Items[0]} {
+		if read.Kind != "question" || read.Recognition.Subject != "数学" {
+			return false
+		}
+		source := strings.TrimSpace(read.Recognition.Question)
+		if source != "" && source[0] >= '0' && source[0] <= '9' && (len(target.SourceNumberPath) != 1 ||
+			!strings.HasPrefix(source, target.SourceNumberPath[0]+".") && !strings.HasPrefix(source, target.SourceNumberPath[0]+"、")) {
+			return false
+		}
+		for _, signal := range read.Recognition.Signals {
+			observation := worksheetHandwritingTerms.Replace(worksheetPrintedAnswerFrame.ReplaceAllString(signal, "方框"))
+			if worksheetPrintedRisk.MatchString(observation) || !handwritingGap && !handwritingOnlySourceSignal(observation) {
+				return false
+			}
+		}
+		if !worksheetReadingMatches(source, expected) {
+			return false
+		}
+	}
+	return true
+}
+
+// 结构化缺口已明确属于笔迹、且独立来源通过同一数学核对时，笼统的低清晰度备注只影响学生判定。
+// 指向印刷条件、单位、运算和题面冲突的观察仍阻止相应参考解。
+var worksheetPrintedRisk = regexp.MustCompile(`(?i)题干|题意|原题|主问|条件|印刷|运算符|算式|单位|数量关系|题号|冲突|不一致|printed|question|condition|operator|unit|conflict|source_gap`)
 
 // 参考解只采用同目标裁决的印刷观察，不结算学生作答。
 func independentReferenceFromAdjudication(req PhotoGradeRequest, q RecognizedQuestion, payload string) (string, bool) {

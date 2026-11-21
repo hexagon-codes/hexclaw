@@ -9,10 +9,59 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hexagon-codes/hexclaw/internal/elementarymath"
 	"github.com/hexagon-codes/hexclaw/internal/mathtext"
 
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 )
+
+func TestWorksheetReferenceRequiresTwoIndependentCompletePrintedReadings(t *testing.T) {
+	const source = "小明2/3小时走了2千米，照这样的速度，他每小时行走多少千米？图示文字：1小时走了？km；1/3小时走了？km；2/3小时走了2km。" +
+		"从上图看出：已知（ ）份是2千米，可以先求出这样的1份是多少，也就是2÷2=2×（ ）；再求这样的（ ）份是多少，也就是2×（ ）×3。" +
+		"由此推算出：2÷(2/3)=2÷2×3=2×1/2×3=2×（1/2×3）=2×3/2=3（km）。推算过程中“2×1/2×3=2×（1/2×3）”的依据是（ ）。"
+	reading := func(question, signal string) map[string]any {
+		return map[string]any{"kind": "question", "recognition": map[string]any{"subject": "数学", "question": question, "ocr_signals": []string{signal}}}
+	}
+	initial, _ := json.Marshal(map[string]any{"targets": []any{map[string]any{"source_number_path": []string{"1"}, "initial_read": reading(source, "手写答案不清楚")}}})
+	target := k12.RecognitionLayoutTargetV2{TargetID: "target", SourceNumberPath: []string{"1"}}
+	expected, ok := elementarymath.ParseTravelWorksheet(source)
+	if !ok {
+		t.Fatal("fixture did not identify every printed relationship")
+	}
+	// 只变更演算中的运算符，原始主问与用时、路程仍可独立核实。
+	changedWork := reading(strings.Replace(source, "2÷2=2", "2×2=2", 1), "末尾笔迹不清")
+	changedWork["target_id"] = "t1"
+	work, _ := json.Marshal(map[string]any{"items": []any{changedWork}})
+	mainOnly := elementarymath.TravelWorksheet{UniformTravelProblem: expected.UniformTravelProblem}
+	if worksheetObservationsAgree(string(initial), string(work), target, expected, true) || !worksheetObservationsAgree(string(initial), string(work), target, mainOnly, true) {
+		t.Fatal("a disputed worked step changed the independently confirmed rate question")
+	}
+	for _, tc := range []struct {
+		name, question, signal, ref string
+		ok                          bool
+	}{
+		{"handwriting only", "1. " + source, "未发现可辨认的填字", "t1", true},
+		{"printed answer frame", source, "个别手写数字与印刷方框重叠", "t1", true},
+		{"printed operand", source, "印刷数值受手写数字遮挡，无法确认", "t1", false},
+		{"printed risk", source, "题干和手写答案都缺损", "t1", false},
+		{"different quantity", strings.Replace(source, "走了2千米", "走了4千米", 1), "手写答案模糊", "t1", false},
+		{"other numbered question", "2. " + source, "笔迹不清", "t1", false},
+		{"other target", source, "笔迹不清", "t2", false},
+	} {
+		read := reading(tc.question, tc.signal)
+		read["target_id"] = tc.ref
+		review, _ := json.Marshal(map[string]any{"items": []any{read}})
+		if worksheetObservationsAgree(string(initial), string(review), target, expected, true) != tc.ok {
+			t.Errorf("%s: unexpected reference eligibility", tc.name)
+		}
+	}
+	generic := reading(source, "最后一格边缘不够清楚")
+	generic["target_id"] = "t1"
+	uncertain, _ := json.Marshal(map[string]any{"items": []any{generic}})
+	if worksheetObservationsAgree(string(initial), string(uncertain), target, expected, false) || !worksheetObservationsAgree(string(initial), string(uncertain), target, expected, true) {
+		t.Fatal("generic observation lost its frozen handwriting scope")
+	}
+}
 
 func TestTravelReferencePreservesAllCorroboratedWorksheetQuestions(t *testing.T) {
 	const main = "小宁3/5小时走了6千米，按相同的速度，她每小时走多少千米？"
