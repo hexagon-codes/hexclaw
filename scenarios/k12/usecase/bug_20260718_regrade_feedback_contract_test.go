@@ -147,6 +147,9 @@ func TestGradeResults_RejectUnknownAndBlockedItems(t *testing.T) {
 	if _, err := d.GradePracticeSetItems(ctx, "mingming", setID, []PracticeGradeResult{{ItemID: "item-a", Correct: true}, {ItemID: "no-such", Correct: true}}); err == nil {
 		t.Error("卷外题给结论应被拒")
 	}
+	if _, err = d.ConfirmPracticeSetItems(ctx, "mingming", setID, []PracticeGradeResult{{ItemID: "item-a", Correct: true}, {ItemID: "item-a", Correct: false}}); err == nil {
+		t.Error("同一项的相反结论不能写入来源复习记录")
+	}
 	// 卷仍是 submitted，未被部分失败污染成 graded。
 	v, _ := d.GetPracticeSet(ctx, "mingming", setID)
 	if v.Record.Status != k12.PracticeStatusSubmitted {
