@@ -215,6 +215,10 @@ func (s *Store) Put(ctx context.Context, r *records.AgentRecord) (created bool, 
 	}
 	defer tx.Rollback()
 
+	r.DedupeKey, err = mistakeKeyForWrite(ctx, tx, r)
+	if err != nil {
+		return false, err
+	}
 	cols := mp.domainCols()
 	q := fmt.Sprintf(`INSERT INTO %s (%s, %s) VALUES (%s)
         ON CONFLICT(agent_name, dedupe_key) DO NOTHING`,
@@ -721,7 +725,11 @@ func (s *Store) importRecordVia(ctx context.Context, ex dbHandle, r *records.Age
         WHERE %s.agent_name = excluded.agent_name`,
 		mp.table(), baseCols, strings.Join(cols, ", "), placeholders(11+len(cols)),
 		strings.Join(assigns, ", "), mp.table())
-	args := append([]any{r.RecordID, r.AgentName, r.SchemaVersion, r.Status, r.DedupeKey, r.Tags,
+	dedupe, err := mistakeKeyForWrite(ctx, ex, r)
+	if err != nil {
+		return err
+	}
+	args := append([]any{r.RecordID, r.AgentName, r.SchemaVersion, r.Status, dedupe, r.Tags,
 		r.DueAt, r.SourceSession, r.Version, r.CreatedAt, r.UpdatedAt}, domainVals...)
 	res, err := ex.ExecContext(ctx, q, args...)
 	if err != nil {

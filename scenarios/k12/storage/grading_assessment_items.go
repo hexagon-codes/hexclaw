@@ -594,6 +594,11 @@ func (s *Store) commitAssessmentMistakeTx(ctx context.Context, tx *sql.Tx, agent
 	}
 	record.Status = schema.InitialStatus
 	record.DedupeKey = schema.DedupeKey(record)
+	key, keyErr := mistakeKeyForWrite(ctx, tx, record)
+	if keyErr != nil {
+		return "", false, false, keyErr
+	}
+	record.DedupeKey = key
 	record.SchemaVersion = schema.Version
 	record.RecordID = idgen.NanoID()
 	record.Tags = "[]"

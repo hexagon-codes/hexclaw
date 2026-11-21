@@ -14,7 +14,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
+	"unicode"
 
 	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/scenario"
@@ -192,14 +194,47 @@ func MistakeSchema() *records.RecordSchema {
 func mistakeDedupeKey(r *records.AgentRecord) string {
 	var f MistakeFields
 	_ = json.Unmarshal([]byte(r.Fields), &f)
-	sum := sha1.Sum([]byte(r.SourceSession + "|" + NormalizeQuestion(f.Question)))
-	return hex.EncodeToString(sum[:])
+	key, _ := MistakeQuestionKeys(r.SourceSession, f.Question)
+	return key
 }
 
-// NormalizeQuestion 题干规范化：去空白 + 小写，抵抗 OCR 微差。去重键与「同题匹配」共用同一规范化
-// （T2.4：讲解完成推进 explained 时按此匹配同题错题），避免两处规范化口径漂移。
-func NormalizeQuestion(q string) string {
-	return strings.ToLower(strings.Join(strings.Fields(q), ""))
+// NormalizeQuestion 用于学题身份比较。忽略排版差异，保留相邻数字的词界。
+func NormalizeQuestion(question string) string {
+	var key strings.Builder
+	var previous rune
+	space := false
+	for _, r := range question {
+		if unicode.IsSpace(r) {
+			space = true
+			continue
+		}
+		if space && unicode.IsDigit(previous) && unicode.IsDigit(r) {
+			key.WriteByte(' ')
+		}
+		key.WriteRune(unicode.ToLower(r))
+		previous, space = r, false
+	}
+	return key.String()
+}
+
+var adjacentQuestionDigits = regexp.MustCompile(`\p{Nd}{2}`)
+
+// MistakeQuestionKeys 返回自动去重键。只有旧算法可能合并数字时才返回兼容查询键。
+func MistakeQuestionKeys(session, question string) (current, legacy string) {
+	digest := func(text string) string {
+		sum := sha1.Sum([]byte(session + "|" + text))
+		return hex.EncodeToString(sum[:])
+	}
+	text := NormalizeQuestion(question)
+	current = digest(text)
+	compact := strings.ReplaceAll(text, " ", "")
+	if !adjacentQuestionDigits.MatchString(compact) {
+		return current, ""
+	}
+	if compact == text {
+		return current, current
+	}
+	return current, digest(compact)
 }
 
 func validateMistakeFields(fieldsJSON string) error {

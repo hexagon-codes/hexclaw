@@ -6,9 +6,11 @@ package k12storage_test
 
 import (
 	"context"
+	"crypto/sha1"
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/hexagon-codes/hexclaw/internal/testutil/sqlitefixture"
@@ -80,6 +82,42 @@ func TestTyped_DedupeIdempotent(t *testing.T) {
 	r3 := newMistake(t, "lele", "s1", "3.8×3=?")
 	if created, err = s.Put(ctx, r3); err != nil || !created {
 		t.Fatalf("跨实例同题应各自成立: created=%v err=%v", created, err)
+	}
+}
+
+func TestLegacyMixedFractionKeepsMistakeIdentity(t *testing.T) {
+	s, db := setup(t)
+	ctx := t.Context()
+	const agent, session = "mingming", "worksheet"
+	const mixed, joined = "1 1/2小时走6千米", "11/2小时走6千米"
+	original := newMistake(t, agent, session, mixed)
+	if _, err := s.Put(ctx, original); err != nil {
+		t.Fatal(err)
+	}
+	legacy := fmt.Sprintf("%x", sha1.Sum([]byte("worksheet|11/2小时走6千米")))
+	if _, err := db.ExecContext(ctx, "UPDATE k12_mistakes SET dedupe_key=? WHERE record_id=?", legacy, original.RecordID); err != nil {
+		t.Fatal(err)
+	}
+	other := newMistake(t, agent, session, joined)
+	if created, err := s.Put(ctx, other); err != nil || !created || other.RecordID == original.RecordID {
+		t.Fatalf("different problem collapsed into old record: %s %v", other.RecordID, err)
+	}
+	repeat := newMistake(t, agent, session, mixed)
+	if created, err := s.Put(ctx, repeat); err != nil || created || repeat.RecordID != original.RecordID {
+		t.Fatalf("legacy identity changed: %s %v", repeat.RecordID, err)
+	}
+	rec, err := s.Get(ctx, original.RecordID)
+	if err != nil || rec.Version != original.Version || rec.Fields != original.Fields {
+		t.Fatalf("rekey changed learning history: %+v %v", rec, err)
+	}
+	explicit := *rec
+	explicit.RecordID, explicit.DedupeKey, explicit.SourceSession = "imported-mistake", "existing-source-key", "other-sheet"
+	if err = s.ImportRecord(ctx, &explicit); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := s.Get(ctx, explicit.RecordID)
+	if err != nil || stored.DedupeKey != explicit.DedupeKey {
+		t.Fatalf("explicit import identity changed: %+v %v", stored, err)
 	}
 }
 
