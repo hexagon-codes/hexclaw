@@ -598,11 +598,7 @@ func samePracticeItem(a, b k12.PracticeItem) bool {
 	if a.SourceProblemID != "" && a.SourceProblemID == b.SourceProblemID {
 		return true
 	}
-	return normalizeQuestion(a.QuestionMarkdown) == normalizeQuestion(b.QuestionMarkdown)
-}
-
-func normalizeQuestion(q string) string {
-	return strings.ToLower(strings.Join(strings.Fields(q), ""))
+	return k12.PracticeQuestionKey(a.QuestionMarkdown) == k12.PracticeQuestionKey(b.QuestionMarkdown)
 }
 
 func normalizeBasketItem(it k12.PracticeItem, idx int) k12.PracticeItem {
@@ -616,7 +612,7 @@ func normalizeBasketItem(it k12.PracticeItem, idx int) k12.PracticeItem {
 }
 
 func normalizeQuestionDigest(q string) string {
-	sum := sha1.Sum([]byte(normalizeQuestion(q)))
+	sum := sha1.Sum([]byte(k12.PracticeQuestionKey(q)))
 	return hex.EncodeToString(sum[:4])
 }
 

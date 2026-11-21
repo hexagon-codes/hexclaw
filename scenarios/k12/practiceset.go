@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/hexagon-codes/hexclaw/records"
 )
@@ -389,6 +390,25 @@ func PracticeSetSchema() *records.RecordSchema {
 	}
 }
 
+// PracticeQuestionKey 忽略排版空白，但相邻数字之间的分隔是题面的一部分。
+func PracticeQuestionKey(question string) string {
+	var key strings.Builder
+	var previous rune
+	space := false
+	for _, r := range question {
+		if unicode.IsSpace(r) {
+			space = true
+			continue
+		}
+		if space && unicode.IsDigit(previous) && unicode.IsDigit(r) {
+			key.WriteByte(' ')
+		}
+		key.WriteRune(unicode.ToLower(r))
+		previous, space = r, false
+	}
+	return key.String()
+}
+
 func practiceSetDedupeKey(r *records.AgentRecord) string {
 	var f PracticeSetFields
 	_ = json.Unmarshal([]byte(r.Fields), &f)
@@ -398,7 +418,7 @@ func practiceSetDedupeKey(r *records.AgentRecord) string {
 	b.WriteString(f.Title)
 	for _, it := range f.Items {
 		b.WriteString("|")
-		b.WriteString(strings.ToLower(strings.Join(strings.Fields(it.QuestionMarkdown), "")))
+		b.WriteString(PracticeQuestionKey(it.QuestionMarkdown))
 	}
 	sum := sha1.Sum([]byte(b.String()))
 	return hex.EncodeToString(sum[:])

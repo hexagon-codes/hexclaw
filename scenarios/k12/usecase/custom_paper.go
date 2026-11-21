@@ -193,7 +193,7 @@ func (d Deps) GenerateCustomPaper(ctx context.Context, agentName string, req Cus
 	var excludedHashes []string
 	if basket != nil {
 		for _, item := range basket.Fields.Items {
-			seenQuestions[normalizeQuestion(item.QuestionMarkdown)] = struct{}{}
+			seenQuestions[k12.PracticeQuestionKey(item.QuestionMarkdown)] = struct{}{}
 			hash, _, _ := k12.StablePracticeProblemHash(k12.PracticeCandidateProblem{Subject: item.Subject, QuestionMarkdown: item.QuestionMarkdown})
 			excludedHashes = append(excludedHashes, hash)
 		}
@@ -207,7 +207,7 @@ func (d Deps) GenerateCustomPaper(ctx context.Context, agentName string, req Cus
 				d.recordCustomPaperFailure(ctx, job, genErr)
 				return CustomPaperResult{}, genErr
 			}
-			key := normalizeQuestion(candidate.QuestionMarkdown)
+			key := k12.PracticeQuestionKey(candidate.QuestionMarkdown)
 			if _, exists := seenQuestions[key]; exists {
 				deduplicated++
 				continue
