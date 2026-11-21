@@ -163,26 +163,57 @@ func isForeignKeyErr(err error) bool {
 //
 // 返回 created：true=新建，false=去重命中（回填既有 record_id）。
 func (s *Store) Put(ctx context.Context, r *records.AgentRecord) (created bool, err error) {
+	mp, domainVals, err := s.prepareRecordPut(r)
+	if err != nil {
+		return false, err
+	}
+	// 归属校验放事务外：SQLite 延迟事务的首条 SQL 应直接取得写锁。
+	if err := ensureAgentRegistered(ctx, s.db, r.AgentName); err != nil {
+		return false, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("k12storage: 开启写事务: %w", err)
+	}
+	defer tx.Rollback()
+	created, err = putPreparedRecordTx(ctx, tx, r, mp, domainVals)
+	if err != nil {
+		return false, err
+	}
+	emitted, err := appendDomainEvents(ctx, tx, r, created)
+	if err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("k12storage: 提交写事务: %w", err)
+	}
+	if emitted && s.notifyOutbox != nil {
+		s.notifyOutbox()
+	}
+	return created, nil
+}
+
+func (s *Store) prepareRecordPut(r *records.AgentRecord) (rowMapper, []any, error) {
 	if r.AgentName == "" {
-		return false, fmt.Errorf("records: AgentName 不可空（隔离键）")
+		return nil, nil, fmt.Errorf("records: AgentName 不可空（隔离键）")
 	}
 	schema, err := s.registry.Get(r.Collection)
 	if err != nil {
-		return false, err
+		return nil, nil, err
 	}
 	mp, err := s.mapperFor(r.Collection)
 	if err != nil {
-		return false, err
+		return nil, nil, err
 	}
 	if schema.ValidateFields != nil {
 		if err := schema.ValidateFields(r.Fields); err != nil {
-			return false, fmt.Errorf("%w: 记录集 %q: %v", records.ErrInvalidFields, r.Collection, err)
+			return nil, nil, fmt.Errorf("%w: 记录集 %q: %v", records.ErrInvalidFields, r.Collection, err)
 		}
 	}
 	if r.Status == "" {
 		r.Status = schema.InitialStatus
 	} else if !schemaHasStatus(schema, r.Status) {
-		return false, fmt.Errorf("%w: %q 不在记录集 %q 的状态机内", records.ErrInvalidStatus, r.Status, r.Collection)
+		return nil, nil, fmt.Errorf("%w: %q 不在记录集 %q 的状态机内", records.ErrInvalidStatus, r.Status, r.Collection)
 	}
 	r.DedupeKey = schema.DedupeKey(r)
 	r.SchemaVersion = schema.Version
@@ -199,22 +230,11 @@ func (s *Store) Put(ctx context.Context, r *records.AgentRecord) (created bool, 
 	}
 
 	domainVals, err := mp.encode(r.Fields)
-	if err != nil {
-		return false, err
-	}
+	return mp, domainVals, err
+}
 
-	// 归属校验放事务外（autocommit 读）：事务首语句必须是写——SQLite 延迟事务
-	// 先读后写会在锁升级处死锁式 SQLITE_BUSY（busy handler 不等待），并发写全挂。
-	if err := ensureAgentRegistered(ctx, s.db, r.AgentName); err != nil {
-		return false, err
-	}
-
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return false, fmt.Errorf("k12storage: 开启写事务: %w", err)
-	}
-	defer tx.Rollback()
-
+// 记录与子项在调用者事务内按原业务键去重，创建记录与登记消费回执可一同提交。
+func putPreparedRecordTx(ctx context.Context, tx *sql.Tx, r *records.AgentRecord, mp rowMapper, domainVals []any) (created bool, err error) {
 	r.DedupeKey, err = mistakeKeyForWrite(ctx, tx, r)
 	if err != nil {
 		return false, err
@@ -249,22 +269,14 @@ func (s *Store) Put(ctx context.Context, r *records.AgentRecord) (created bool, 
 		r.RecordID = existingID
 	}
 
-	// Transactional Outbox：错题域写与事件同事务（§6.9）。
-	emitted, err := appendDomainEvents(ctx, tx, r, created)
-	if err != nil {
-		return false, err
-	}
-	if err := tx.Commit(); err != nil {
-		return false, fmt.Errorf("k12storage: 提交写事务: %w", err)
-	}
-	if emitted && s.notifyOutbox != nil {
-		s.notifyOutbox()
-	}
 	return created, nil
 }
 
 // FindDuplicate 按去重键查找既有记录（无则 ErrNotFound）。
 func (s *Store) FindDuplicate(ctx context.Context, r *records.AgentRecord) (*records.AgentRecord, error) {
+	if r.Collection == k12.CollectionMistakes {
+		return s.findDuplicateMistake(ctx, r)
+	}
 	schema, err := s.registry.Get(r.Collection)
 	if err != nil {
 		return nil, err

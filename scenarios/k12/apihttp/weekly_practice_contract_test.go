@@ -473,10 +473,21 @@ func TestWeeklyPracticeHTTPContract_K12Weekly016To023(t *testing.T) {
 	exactKeys(t, saved, "receipt", "replayed")
 	exactKeys(t, saved["receipt"].(map[string]any), "save_receipt_id", "plan_id",
 		"plan_revision", "snapshot_id", "practice_set_id", "created_at")
+	setID := saved["receipt"].(map[string]any)["practice_set_id"].(string)
+	rec, _ = do(t, h, http.MethodPost, "/practice-sets/"+setID+"/finalize",
+		`{"agent":"mingming","via":"print"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("finalize saved weekly set: %s", rec.Body.String())
+	}
 	rec, replaySave := do(t, h, http.MethodPost,
 		"/weekly-practice/plans/"+planID+"/save-to-practice-set", saveBody)
-	if rec.Code != http.StatusOK || replaySave["replayed"] != true {
+	if rec.Code != http.StatusOK || replaySave["replayed"] != true ||
+		replaySave["receipt"].(map[string]any)["practice_set_id"] != setID {
 		t.Fatalf("save replay status=%d body=%v", rec.Code, replaySave)
+	}
+	rec, afterSave := do(t, h, http.MethodGet, "/practice-sets?agent=mingming", "")
+	if rec.Code != http.StatusOK || len(afterSave["items"].([]any)) != 1 {
+		t.Fatalf("replayed save created another draft: %s", rec.Body.String())
 	}
 
 	clock.now += 8 * 86400

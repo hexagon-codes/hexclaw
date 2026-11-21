@@ -1351,22 +1351,22 @@ func (d Deps) SaveWeeklyPracticeToPracticeSet(ctx context.Context, agent, planID
 	if len(items) == 0 {
 		return k12.WeeklyPracticeSaveReceipt{}, false, records.ErrIllegalTransition
 	}
-	practiceSetID, _, err := d.CreatePracticeSet(ctx, agent,
+	draft, err := k12.NewPracticeSetRecord(agent,
 		fmt.Sprintf("weekly:%s:%d", planID, expectedRevision),
-		k12.PracticeSetFields{SourceKind: k12.PracticeSourceWeekly, Title: "本周该练", Items: items})
+		k12.PracticeSetFields{GradeTerm: d.creationGradeTerm(ctx, agent, ""), SourceKind: k12.PracticeSourceWeekly, Title: "本周该练", Items: items})
 	if err != nil {
 		return k12.WeeklyPracticeSaveReceipt{}, false, err
 	}
 	receipt := k12.WeeklyPracticeSaveReceipt{
 		SaveReceiptID: "wsave-" + shortDigest(fmt.Sprintf("%s\x00%d", planID, expectedRevision)),
 		PlanID:        planID, PlanRevision: expectedRevision, SnapshotID: snapshot.SnapshotID,
-		PracticeSetID: practiceSetID, CreatedAt: d.now(),
+		CreatedAt: d.now(),
 	}
 	requestDigest := digestValue(struct {
 		Agent, Plan string
 		Revision    int
 	}{agent, planID, expectedRevision})
-	return d.Records.PutWeeklyPracticeSave(ctx, agent, idempotencyKey, requestDigest, receipt)
+	return d.Records.SaveWeeklyPracticeDraft(ctx, draft, idempotencyKey, requestDigest, receipt)
 }
 
 func digestValue(v any) string {

@@ -1482,13 +1482,35 @@ func (s *Store) PutWeeklySendCommand(ctx context.Context, agentName, key, snapsh
 
 func (s *Store) PutWeeklyPracticeSave(ctx context.Context, agentName,
 	idempotencyKey, requestDigest string, receipt k12.WeeklyPracticeSaveReceipt) (k12.WeeklyPracticeSaveReceipt, bool, error) {
+	return s.putWeeklyPracticeSave(ctx, agentName, idempotencyKey, requestDigest, receipt, nil)
+}
+
+// SaveWeeklyPracticeDraft 把冻结卷与存档回执放在同一事务。已有回执即使指向已固化的练习集也直接复用。
+func (s *Store) SaveWeeklyPracticeDraft(ctx context.Context, draft *records.AgentRecord,
+	idempotencyKey, requestDigest string, receipt k12.WeeklyPracticeSaveReceipt) (k12.WeeklyPracticeSaveReceipt, bool, error) {
+	if draft == nil || draft.Collection != k12.CollectionPracticeSet || draft.Status != k12.PracticeStatusDraft {
+		return k12.WeeklyPracticeSaveReceipt{}, false, records.ErrInvalidRecord
+	}
+	return s.putWeeklyPracticeSave(ctx, draft.AgentName, idempotencyKey, requestDigest, receipt, draft)
+}
+
+func (s *Store) putWeeklyPracticeSave(ctx context.Context, agentName, idempotencyKey, requestDigest string,
+	receipt k12.WeeklyPracticeSaveReceipt, draft *records.AgentRecord) (k12.WeeklyPracticeSaveReceipt, bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return k12.WeeklyPracticeSaveReceipt{}, false, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `UPDATE k12_weekly_practice_plans SET revision=revision
+		WHERE agent_name=? AND plan_id=?`, agentName, receipt.PlanID); err != nil {
+		return k12.WeeklyPracticeSaveReceipt{}, false, err
+	}
 	var existingJSON, existingDigest string
-	err := s.db.QueryRowContext(ctx, `SELECT receipt_json,request_digest
+	err = tx.QueryRowContext(ctx, `SELECT receipt_json,request_digest
         FROM k12_weekly_practice_saves
-        WHERE (plan_id=? AND plan_revision=?) OR (agent_name=? AND idempotency_key=?)
-        ORDER BY CASE WHEN plan_id=? AND plan_revision=? THEN 0 ELSE 1 END LIMIT 1`,
-		receipt.PlanID, receipt.PlanRevision, agentName, idempotencyKey,
-		receipt.PlanID, receipt.PlanRevision).Scan(&existingJSON, &existingDigest)
+        WHERE agent_name=? AND ((plan_id=? AND plan_revision=?) OR idempotency_key=?)
+        ORDER BY CASE WHEN idempotency_key=? THEN 0 ELSE 1 END LIMIT 1`,
+		agentName, receipt.PlanID, receipt.PlanRevision, idempotencyKey, idempotencyKey).Scan(&existingJSON, &existingDigest)
 	if err == nil {
 		if existingDigest != requestDigest {
 			return k12.WeeklyPracticeSaveReceipt{}, false, records.ErrVersionConflict
@@ -1502,14 +1524,38 @@ func (s *Store) PutWeeklyPracticeSave(ctx context.Context, agentName,
 	if err != sql.ErrNoRows {
 		return k12.WeeklyPracticeSaveReceipt{}, false, err
 	}
+	if draft != nil {
+		// 锁定后再核对当前计划仍是调用方读取的冻结版本。
+		var frozen bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM k12_weekly_practice_plans p
+			JOIN k12_weekly_practice_snapshots s ON s.plan_id=p.plan_id AND s.plan_revision=p.revision
+			WHERE p.agent_name=? AND p.plan_id=? AND p.revision=? AND p.status='frozen' AND s.snapshot_id=?)`,
+			agentName, receipt.PlanID, receipt.PlanRevision, receipt.SnapshotID).Scan(&frozen); err != nil {
+			return k12.WeeklyPracticeSaveReceipt{}, false, err
+		}
+		if !frozen {
+			return k12.WeeklyPracticeSaveReceipt{}, false, records.ErrVersionConflict
+		}
+		mp, values, err := s.prepareRecordPut(draft)
+		if err != nil {
+			return k12.WeeklyPracticeSaveReceipt{}, false, err
+		}
+		if _, err := putPreparedRecordTx(ctx, tx, draft, mp, values); err != nil {
+			return k12.WeeklyPracticeSaveReceipt{}, false, err
+		}
+		receipt.PracticeSetID = draft.RecordID
+	}
 	payload, _ := json.Marshal(receipt)
-	_, err = s.db.ExecContext(ctx, `INSERT INTO k12_weekly_practice_saves
+	_, err = tx.ExecContext(ctx, `INSERT INTO k12_weekly_practice_saves
         (save_receipt_id,agent_name,plan_id,plan_revision,snapshot_id,practice_set_id,
          idempotency_key,request_digest,receipt_json,created_at)
         VALUES(?,?,?,?,?,?,?,?,?,?)`, receipt.SaveReceiptID, agentName, receipt.PlanID,
 		receipt.PlanRevision, receipt.SnapshotID, receipt.PracticeSetID, idempotencyKey,
 		requestDigest, string(payload), receipt.CreatedAt)
 	if err != nil {
+		return k12.WeeklyPracticeSaveReceipt{}, false, err
+	}
+	if err := tx.Commit(); err != nil {
 		return k12.WeeklyPracticeSaveReceipt{}, false, err
 	}
 	return receipt, false, nil
