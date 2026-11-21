@@ -496,7 +496,7 @@ func gradingProblemWithGrounding(ctx context.Context, problem string) string {
 	if shared, current, canonical, scoped := elementarymath.ParseMathSubproblem(problem); scoped {
 		shared = usecase.CanonicalPlainTextFallback(shared)
 		if evidence, ok := usecase.GradingGroundingForProvider(ctx); ok {
-			shared += "\n\nVerified textbook evidence (use it only to constrain the solution and grading; it is not the student's answer; do not expose internal source identifiers). Respond in Chinese:\n" + strings.TrimSpace(evidence)
+			shared += elementarymath.TextbookEvidenceSeparator + strings.TrimSpace(evidence)
 		}
 		if projected, ok := elementarymath.BuildMathSubproblem(shared, current, canonical); ok {
 			return projected
@@ -506,7 +506,7 @@ func gradingProblemWithGrounding(ctx context.Context, problem string) string {
 	if shared, current, canonical, scoped := elementarymath.ParsePartCountSlotProblemSources(problem); scoped {
 		shared = usecase.CanonicalPlainTextFallback(shared)
 		if evidence, ok := usecase.GradingGroundingForProvider(ctx); ok {
-			shared += "\n\nVerified textbook evidence (use it only to constrain the solution and grading; it is not the student's answer; do not expose internal source identifiers). Respond in Chinese:\n" + strings.TrimSpace(evidence)
+			shared += elementarymath.TextbookEvidenceSeparator + strings.TrimSpace(evidence)
 		}
 		if projected, ok := elementarymath.BuildPartCountSlotProblemFromSources(shared, current, canonical); ok {
 			return projected
@@ -519,7 +519,7 @@ func gradingProblemWithGrounding(ctx context.Context, problem string) string {
 			current = usecase.CanonicalPlainTextFallback(current)
 		}
 		if evidence, ok := usecase.GradingGroundingForProvider(ctx); ok {
-			shared += "\n\nVerified textbook evidence (use it only to constrain the solution and grading; it is not the student's answer; do not expose internal source identifiers). Respond in Chinese:\n" + strings.TrimSpace(evidence)
+			shared += elementarymath.TextbookEvidenceSeparator + strings.TrimSpace(evidence)
 		}
 		if projected, ok := elementarymath.BuildFractionSlotProblemFromSources(shared, current, canonical); ok {
 			return projected

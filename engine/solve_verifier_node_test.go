@@ -50,6 +50,23 @@ func TestPhotoMaterialVerificationCountsOnlyCurrentBlanks(t *testing.T) {
 	}
 }
 
+func TestPhotoVerificationKeepsNumberedAndRecoveredTarget(t *testing.T) {
+	const question = "涂色部分的面积是（ ）cm²。"
+	for _, entry := range []struct{ echoed, source string }{
+		{"1. " + question, elementarymath.PhotoMaterialSeparator + "大圆半径3厘米"},
+		{question, elementarymath.PhotoRecoverySeparator + "condition gap (use only this fragment; do not infer other missing content or student handwriting):\n半径3厘米"},
+		{"1. " + question, ""},
+	} {
+		wire := elementarymath.WithPhotoAnswerRequirements(question+entry.source, entry.echoed) + elementarymath.TextbookEvidenceSeparator + "复核图示条件。"
+		spec := verifierSpecWithSolution(wire, "", "15.7 cm²", "")
+		prompt := verificationProgramPrompt(spec.verification)
+		equal, comparable := verificationAnswersEqual(wire, "15.70 cm²", "15.7 cm²")
+		if strings.Contains(prompt, "2 ordered blanks") || !strings.Contains(prompt, "复核图示条件") || !equal || !comparable || !strings.Contains(spec.Task, wire) {
+			t.Fatal("verification changed the source request or counted a duplicate target")
+		}
+	}
+}
+
 func TestStandaloneVerificationRequiresTrustedInputAndCodeExec(t *testing.T) {
 	for _, tc := range []struct {
 		name      string

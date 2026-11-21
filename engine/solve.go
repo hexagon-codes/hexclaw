@@ -860,6 +860,8 @@ func (o *SolveSkill) verifySolutionWithGuides(ctx context.Context, problem, solu
 		return verdictUnverifiable, "", false, nil, nil, nil
 	}
 	spec := withParentGuideVerification(verifierSpecWithSolution(problem, solution, candidate, constraint), guides)
+	problem = elementarymath.PhotoVerificationFor(ctx, problem)
+	spec.verification.Problem = problem
 	if proof, _ := ctx.Value(solverExecutionProofKey{}).(*solverExecutionProof); proof != nil {
 		spec.verification.SolverExecution = proof
 		raw, _ := json.Marshal(proof)

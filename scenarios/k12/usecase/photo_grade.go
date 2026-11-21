@@ -7,7 +7,6 @@ import (
 	"regexp"
 	"strings"
 	"sync"
-	"unicode"
 	"unicode/utf8"
 
 	"github.com/hexagon-codes/hexclaw/internal/elementarymath"
@@ -562,7 +561,7 @@ func photoQuestionProblemTexts(q RecognizedQuestion) (problem, sourceProblem str
 	}
 	for _, recovery := range q.ImageSourceContext.Recoveries {
 		if recovery.State == "verified" && recovery.AdoptedText != "" {
-			problem += "\n\nVerified source fragment for the declared " + recovery.Gap.Kind + " gap (use only this fragment; do not infer other missing content or student handwriting):\n" + recovery.Gap.Before + recovery.AdoptedText + recovery.Gap.After
+			problem += elementarymath.PhotoRecoverySeparator + recovery.Gap.Kind + " gap (use only this fragment; do not infer other missing content or student handwriting):\n" + recovery.Gap.Before + recovery.AdoptedText + recovery.Gap.After
 			sourceFragments = append(sourceFragments, recovery.Gap.Before+recovery.AdoptedText+recovery.Gap.After)
 		}
 	}
@@ -576,27 +575,7 @@ func photoQuestionComputationText(q RecognizedQuestion) string {
 		strings.Trim(q.SourceNumberPath[0], "0123456789") != "" {
 		return q.Question
 	}
-	view := strings.TrimSpace(q.Question)
-	open, close := "", ""
-	if strings.HasPrefix(view, `\(`) && strings.HasSuffix(view, `\)`) {
-		open, close = `\(`, `\)`
-		view = strings.TrimSpace(view[len(open) : len(view)-len(close)])
-	}
-	if rest, ok := strings.CutPrefix(view, q.SourceNumberPath[0]+"、"); ok {
-		return open + strings.TrimSpace(rest) + close
-	}
-	if q.DisplayLabel == q.SourceNumberPath[0]+"." {
-		if rest, ok := strings.CutPrefix(view, q.DisplayLabel); ok && rest != "" {
-			for _, layout := range []string{"", `\qquad`, `\quad`, `\`} {
-				if body, found := strings.CutPrefix(rest, layout); found && body != "" {
-					if unspaced := strings.TrimLeftFunc(body, unicode.IsSpace); unspaced != body {
-						return open + unspaced + close
-					}
-				}
-			}
-		}
-	}
-	return q.Question
+	return elementarymath.PhotoComputationQuestion(q.Question, q.SourceNumberPath[0], q.DisplayLabel)
 }
 
 func classifyPhotoMode(questions []RecognizedQuestion) PhotoMode {
