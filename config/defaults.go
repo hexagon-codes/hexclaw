@@ -1,5 +1,8 @@
 package config
 
+// DefaultSkillsHubRef pins the skill and MCP catalogs to the same published release.
+const DefaultSkillsHubRef = "v0.1.1"
+
 // DefaultConfig 返回安全的默认配置
 //
 // 默认配置开启主要内置能力，但默认关闭会直接在宿主机执行的 legacy code/shell；
@@ -151,7 +154,7 @@ func DefaultConfig() *Config {
 			AutoLoad: true,
 			Hub: SkillsHubConfig{
 				RepoURL: "https://github.com/hexagon-codes/hexclaw-hub",
-				Branch:  "v0.1.0",
+				Branch:  DefaultSkillsHubRef,
 			},
 		},
 		Heartbeat: HeartbeatConfig{

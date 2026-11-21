@@ -1,6 +1,6 @@
 {
   "version": "2.0.0",
-  "updated_at": "2026-11-02T08:05:25Z",
+  "updated_at": "2026-11-20T14:08:54Z",
   "generated_by": "scripts/generate-index.py",
   "count": 78,
   "skills": [
@@ -805,7 +805,7 @@
       "name": "homework-pdf",
       "display_name": "作业讲解报告",
       "description": "将已有的小学作业结果组织为快速解答与深度讲解，引用宿主的确定性 PDF 渲染能力。",
-      "version": "1.1.7",
+      "version": "1.1.8",
       "author": "hexclaw",
       "category": "education",
       "type": "skill",
@@ -823,9 +823,9 @@
         "homework-report"
       ],
       "file": "skills/homework-pdf/SKILL.md",
-      "sha256": "f3882714feef2540d4a1625692ebe356c4ea5fe5dc017714dda189bb1bafb099",
+      "sha256": "f50ffeffec256d2fb9e1ebb292f6fb344d34f0508118a9069d2b12eb37e2901e",
       "size": 2852,
-      "bundle_sha256": "e28cdc6fd4f2bb6de86ea78c3dc6cbc885837b7409807e7aaf3f3e9a0f84577e",
+      "bundle_sha256": "9cf9a515f1a0031188497a935ae4139b7fa1b4526e0b2240a9c5821bccca1e97",
       "downloads": 0,
       "rating": 0,
       "license": "Apache-2.0",
