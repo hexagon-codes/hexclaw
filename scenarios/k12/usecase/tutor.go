@@ -85,17 +85,28 @@ func (d Deps) TutorTurn(ctx context.Context, req TutorTurnRequest, problem, grad
 	dir := PlanTutorTurn(req)
 	res := TutorTurnResult{Directive: dir}
 	if strings.TrimSpace(problem) != "" && d.Solver != nil {
-		sr, err := d.Solver.Solve(ctx, problem, grade, d.constraintFor(ctx, grade))
+		solution, evidence, err := d.solveTutorQuestion(ctx, req.AgentName, problem, grade)
 		if err != nil {
 			return res, err
 		}
-		res.Solution = sr.Solution
-		res.Evidence = sr.Evidence
+		res.Solution, res.Evidence = solution, evidence
 		// T2.4：完整讲解完成 → 若该题在错题本(new) 自动推进 explained（PRD §5.3.1）。
 		// best-effort：推进失败不影响辅导产物（讲解已给出）。
-		d.advanceMistakeToExplained(ctx, req.AgentName, problem)
+		if solution != "" && evidence.Verdict != VerdictOutOfScope {
+			d.advanceMistakeToExplained(ctx, req.AgentName, problem)
+		}
 	}
 	return res, nil
+}
+
+func (d Deps) solveTutorQuestion(ctx context.Context, agent, problem, grade string) (string, SolveEvidence, error) {
+	input := GradeRequest{AgentName: agent, Grade: grade, Problem: problem}
+	if origin, ok := d.textSolveOrigin(ctx, input); ok && agent != "" && d.Records != nil && !HasGradingPhysicalCallExecutor(ctx) {
+		solved, err := d.SolveTextProblem(ctx, origin, input)
+		return solved.Solution, solved.Evidence, err
+	}
+	solved, err := d.Solver.Solve(ctx, problem, grade, d.constraintFor(ctx, grade))
+	return solved.Solution, solved.Evidence, err
 }
 
 // advanceMistakeToExplained 讲解完成时把同题的 new 错题推进 explained（按题干规范化匹配定位；

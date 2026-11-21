@@ -1551,7 +1551,16 @@ func (h *handler) tutorTurn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	grade := h.resolveGrade(r.Context(), req.Agent, req.Grade)
-	res, err := h.rt.Deps.TutorTurn(r.Context(), usecase.TutorTurnRequest{
+	ctx := r.Context()
+	if strings.TrimSpace(req.Agent) != "" && strings.TrimSpace(req.Problem) != "" {
+		owner, scopeErr := h.authorizedTextSolveOwnerScope(ctx, req.Agent)
+		if scopeErr != nil {
+			writeErr(w, http.StatusNotFound, "agent not found")
+			return
+		}
+		ctx = usecase.WithAuthorizedTextSolveOrigin(ctx, k12.TextSolveOrigin{OwnerID: owner}, req.Agent)
+	}
+	res, err := h.rt.Deps.TutorTurn(ctx, usecase.TutorTurnRequest{
 		AgentName:     req.Agent,
 		PriorStage:    usecase.TutorStage(req.PriorStage),
 		ParentMessage: req.ParentMessage,

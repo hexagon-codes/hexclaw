@@ -20342,7 +20342,7 @@ paths:
       description: >-
         agent selects the learner scope. An empty problem produces guidance/emotional support only. stage is
         currently 3. Emotional support does not block solving. When a problem and Solver are present, it is
-        solved/verified; badge appears only with a solution, and a matching new mistake can advance to
+        solved and verified using the authenticated learner's text-solve run. A badge appears only with a solution, and a matching new mistake can advance to
         explained. Omitted grade is filled from the stored profile. prior_stage is a historical compatibility
         input, not a required stepped confirmation.
 
