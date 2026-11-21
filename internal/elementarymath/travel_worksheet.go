@@ -16,7 +16,7 @@ type TravelWorksheet struct {
 	UniformTravelProblem
 	Parts, HourParts, Reciprocal, PartDistance, Rate string
 	FactorSlots                                      [2]FractionSlot
-	ReasonRequested                                  bool
+	DerivationPrinted, ReasonRequested                bool
 }
 
 // FractionSlot 表示原纸上实际留给学生书写的部分。
@@ -105,9 +105,9 @@ func ParseTravelWorksheet(source string) (TravelWorksheet, bool) {
 	if start < 0 || !travelDiagramMatches(tail[:start], printedTime, q, d, unit) {
 		return TravelWorksheet{}, false
 	}
-	blanks, tail, ok := strings.Cut(tail[start:], "由此推算出:")
+	blanks, tail, hasDerivation := strings.Cut(tail[start:], "由此推算出:")
 	slots := travelPartCountBlanks.FindStringSubmatch(blanks)
-	if !ok || slots == nil || slots[1] != d || slots[2] != unit || slots[3] != d || slots[4] != p || slots[5] != d || slots[7] != d || slots[9] != q {
+	if slots == nil || slots[1] != d || slots[2] != unit || slots[3] != d || slots[4] != p || slots[5] != d || slots[7] != d || slots[9] != q {
 		return TravelWorksheet{}, false
 	}
 	var factors [2]FractionSlot
@@ -123,6 +123,10 @@ func ParseTravelWorksheet(source string) (TravelWorksheet, bool) {
 			return TravelWorksheet{}, false
 		}
 	}
+	sheet := TravelWorksheet{UniformTravelProblem: primary, Parts: p, HourParts: q, Reciprocal: new(big.Rat).Inv(parts).RatString(), PartDistance: part.RatString(), Rate: rate.RatString(), FactorSlots: factors, DerivationPrinted: hasDerivation}
+	if !hasDerivation {
+		return sheet, true
+	}
 	equation := fmt.Sprintf("%s×1/%s×%s=%s×(1/%s×%s)", d, p, q, d, p, q)
 	chain := fmt.Sprintf("%s÷%s=%s÷%s×%s=%s=%s×%s/%s", d, printedTime, d, p, q, equation, d, q, p)
 	// 排版器可能给作为除数的整个分数加括号，数学关系不变。
@@ -137,7 +141,8 @@ func ParseTravelWorksheet(source string) (TravelWorksheet, bool) {
 	if tail != chain+unitSuffix && tail != chain+"="+rate.RatString()+unitSuffix {
 		return TravelWorksheet{}, false
 	}
-	return TravelWorksheet{UniformTravelProblem: primary, Parts: p, HourParts: q, Reciprocal: new(big.Rat).Inv(parts).RatString(), PartDistance: part.RatString(), Rate: rate.RatString(), FactorSlots: factors, ReasonRequested: withReason}, true
+	sheet.ReasonRequested = withReason
+	return sheet, true
 }
 
 func travelDiagramMatches(diagram, hours, hourParts, distance, unit string) bool {
@@ -182,6 +187,8 @@ func (s TravelWorksheet) Corroborate(other TravelWorksheet) (TravelWorksheet, bo
 	other.FactorSlots = s.FactorSlots
 	s.ReasonRequested = s.ReasonRequested && other.ReasonRequested
 	other.ReasonRequested = s.ReasonRequested
+	s.DerivationPrinted = s.DerivationPrinted && other.DerivationPrinted
+	other.DerivationPrinted = s.DerivationPrinted
 	if s != other {
 		return TravelWorksheet{}, false
 	}

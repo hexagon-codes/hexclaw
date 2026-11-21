@@ -526,7 +526,11 @@ func corroboratedPrintedReference(source string, target k12.RecognitionLayoutTar
 		}
 	}
 	if complete {
-		if !sheet.ReasonRequested {
+		if !sheet.DerivationPrinted {
+			if at := travelDerivationHeading.FindStringIndex(source); at != nil {
+				source = strings.TrimSpace(source[:at[0]])
+			}
+		} else if !sheet.ReasonRequested {
 			if at := travelReasonHeading.FindStringIndex(source); at != nil {
 				source = strings.TrimSpace(source[:at[0]])
 			}
