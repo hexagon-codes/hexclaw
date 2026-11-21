@@ -62,6 +62,99 @@ func assertBundleVersion(t *testing.T, mp *marketplace.Marketplace, version stri
 	}
 }
 
+func TestSeedBundleUpgradesOnlyIntactFactoryInstall(t *testing.T) {
+	const name = "homework-pdf"
+	old, next := t.TempDir(), t.TempDir()
+	oldFiles := bundleFixture(t, old, name, "1.1.7", 1)
+	nextFiles := bundleFixture(t, next, name, "1.1.8", 1)
+	factory := func(files map[string][]byte, legacy bool) fstest.MapFS {
+		source := fstest.MapFS{}
+		for file, body := range files {
+			source["bundles/"+name+"/"+file] = &fstest.MapFile{Data: body}
+		}
+		if legacy {
+			data := fmt.Sprintf(`{"homework-pdf":{"1.1.7":"%x"}}`, sha256.Sum256(oldFiles["bundle.json"]))
+			source["bundles/seed-predecessors.json"] = &fstest.MapFile{Data: []byte(data)}
+		}
+		return source
+	}
+	for _, tc := range []string{"known", "recorded", "unknown", "modified", "extra", "empty-directory", "manifest-edit", "disabled", "uninstalled"} {
+		t.Run(tc, func(t *testing.T) {
+			dir := t.TempDir()
+			mp := marketplace.NewMarketplace(dir)
+			if tc == "recorded" {
+				if _, err := mp.SeedBundlesFromFS(factory(oldFiles, false), "bundles"); err != nil {
+					t.Fatal(err)
+				}
+			} else if _, err := mp.Install(old); err != nil {
+				t.Fatal(err)
+			}
+			file := filepath.Join(dir, name, "templates/report.typ")
+			want := []byte("user data")
+			var err error
+			switch tc {
+			case "modified":
+				err = os.WriteFile(file, want, 0644)
+			case "extra":
+				file = filepath.Join(dir, name, "custom.txt")
+				err = os.WriteFile(file, want, 0644)
+			case "empty-directory":
+				err = os.Mkdir(filepath.Join(dir, name, "custom"), 0755)
+			case "manifest-edit":
+				file = filepath.Join(dir, name, "bundle.json")
+				want = append(append([]byte(nil), oldFiles["bundle.json"]...), '\n')
+				err = os.WriteFile(file, want, 0644)
+			case "disabled":
+				err = mp.SetEnabled(name, false)
+			case "uninstalled":
+				err = mp.Uninstall(name)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			reopened := marketplace.NewMarketplace(dir)
+			source := factory(nextFiles, tc != "unknown" && tc != "recorded")
+			n, err := reopened.SeedBundlesFromFS(source, "bundles")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc == "known" || tc == "recorded" {
+				if n != 1 {
+					t.Fatalf("upgraded %d packages, want one", n)
+				}
+				assertBundleVersion(t, reopened, "1.1.8")
+				n, err = reopened.SeedBundlesFromFS(factory(oldFiles, true), "bundles")
+				if err != nil || n != 0 {
+					t.Fatalf("downgrade: %d, %v", n, err)
+				}
+				assertBundleVersion(t, reopened, "1.1.8")
+				return
+			}
+			if n != 0 {
+				t.Fatalf("unexpected package update: %d", n)
+			}
+			switch tc {
+			case "modified", "extra", "manifest-edit":
+				if got, err := os.ReadFile(file); err != nil || string(got) != string(want) {
+					t.Fatalf("custom content changed: %v", err)
+				}
+			case "empty-directory":
+				if _, err := os.Stat(filepath.Join(dir, name, "custom")); err != nil {
+					t.Fatal(err)
+				}
+			case "uninstalled":
+				if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+					t.Fatal("uninstalled skill reappeared")
+				}
+			case "disabled":
+				if reopened.IsEnabled(name) {
+					t.Fatal("skill unexpectedly enabled")
+				}
+			}
+		})
+	}
+}
+
 // 目录中的真实 rename 状态复现旧安装器被中止后的磁盘边界，不复用进程内注册表。
 func TestBundleInstallRecoversInterruptedRename(t *testing.T) {
 	for _, seedFirst := range []bool{false, true} {

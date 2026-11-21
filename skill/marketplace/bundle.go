@@ -154,6 +154,11 @@ func ReadBundleManifest(root string) (BundleManifest, error) {
 }
 
 func (m *Marketplace) installBundle(source string) (*MarkdownSkill, error) {
+	return m.installBundleIf(source, nil)
+}
+
+// 自动升级在交换目录前再次核对安装归属，手工安装沿用原合同。
+func (m *Marketplace) installBundleIf(source string, eligible func() bool) (*MarkdownSkill, error) {
 	manifest, err := ReadBundleManifest(source)
 	if err != nil {
 		return nil, err
@@ -205,6 +210,9 @@ func (m *Marketplace) installBundle(source string) (*MarkdownSkill, error) {
 	defer m.mu.Unlock()
 	if err := m.recoverBundleInstallsLocked(); err != nil {
 		return nil, err
+	}
+	if eligible != nil && !eligible() {
+		return nil, nil
 	}
 	if err := writeBundleInstallRecord(stage, manifest); err != nil {
 		return nil, err
