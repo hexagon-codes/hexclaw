@@ -90,6 +90,8 @@ type RecognitionLayoutTargetV2 struct {
 	CropDigest         string            `json:"crop_digest"`
 	// 原始目标与独立核验上下文分别冻结，周边像素不改变题目归属。
 	OriginalRegion *SourcePixelRegion `json:"original_region,omitempty"`
+	// 并入共享材料前的本题视野，用于批次提示及原图投影。
+	ReviewFocusRegion *SourcePixelRegion `json:"review_focus_region,omitempty"`
 	// 首读已声明的本题作答区域只用于派生视野，不替代独立识别与判定。
 	ObservedAnswerRegion *SourcePixelRegion `json:"observed_answer_region,omitempty"`
 	AdjudicationRegion   *SourcePixelRegion `json:"adjudication_region,omitempty"`
@@ -309,6 +311,25 @@ func BuildRecognitionLayoutPlanV2(input RecognitionLayoutPlanInputV2) (Recogniti
 			// 复读同样需要完整横拍原页；不能等裁决阶段才补回已经截断的印刷题干。
 			target.Region = SourcePixelRegion{Width: pageBounds.Dx(), Height: pageBounds.Dy()}
 		}
+		focus := target.Region
+		var reviewFocus *SourcePixelRegion
+		contextRegion := recognitionLayoutAdjudicationRegion(focus, pageBounds)
+		if input.InitialReadMode == RecognitionLayoutManifestWithContentV1 && input.ScopeInput != nil && input.ScopeInput.IncludeSharedReviewRegions &&
+			input.Scope != nil && len(input.Scope.Excluded) == 0 && len(input.Scope.SelectedOrders) == len(input.Targets) {
+			policy := input.ScopeInput.SharedReviewPolicy
+			for _, dep := range input.Scope.Dependencies {
+				if len(dep.ForOrders) < 2 || !slices.Contains(dep.ForOrders, target.ManifestOrder) {
+					continue
+				}
+				if policy == RecognitionSharedReviewWithBatch {
+					target.Region = unionRecognitionRegions(target.Region, dep.Region, pageBounds)
+				}
+				if policy == RecognitionSharedReviewWithBatch || policy == RecognitionSharedReviewByReference || strings.ContainsAny(dep.Text, "图①②③④⑤⑥⑦⑧⑨⑩") {
+					contextRegion = unionRecognitionRegions(contextRegion, dep.Region, pageBounds)
+				}
+			}
+			if focus != target.Region { reviewFocus = &focus }
+		}
 		crop, cropErr := recognitionLayoutCropPNG(page, target.Region)
 		if cropErr != nil {
 			return RecognitionLayoutPlanV2{}, cropErr
@@ -317,7 +338,7 @@ func BuildRecognitionLayoutPlanV2(input RecognitionLayoutPlanInputV2) (Recogniti
 			TargetID: recognitionLayoutTargetIDV2(
 				pageDigest,
 				index+1,
-				target.Region,
+				focus,
 			),
 			SourceNumberPath:   append([]string{}, target.SourceNumberPath...),
 			DisplayLabel:       target.DisplayLabel,
@@ -325,6 +346,7 @@ func BuildRecognitionLayoutPlanV2(input RecognitionLayoutPlanInputV2) (Recogniti
 			SourceSectionLabel: target.SourceSectionLabel,
 			Region:             target.Region,
 			CropDigest:         recognitionLayoutSHA256(crop),
+			ReviewFocusRegion: reviewFocus,
 		})
 		if input.Scope != nil {
 			plan.Targets[len(plan.Targets)-1].ManifestOrder = target.ManifestOrder
@@ -338,20 +360,6 @@ func BuildRecognitionLayoutPlanV2(input RecognitionLayoutPlanInputV2) (Recogniti
 		}
 		if input.EnableSourceAdjudication {
 			original := originalByRef[target.ManifestRef]
-			contextRegion := recognitionLayoutAdjudicationRegion(target.Region, pageBounds)
-			if input.InitialReadMode == RecognitionLayoutManifestWithContentV1 && input.ScopeInput != nil && input.ScopeInput.IncludeSharedReviewRegions &&
-				input.Scope != nil && len(input.Scope.Excluded) == 0 && len(input.Scope.SelectedOrders) == len(input.Targets) {
-				// 新任务按冻结归属补原像素。旧策略保留原裁片以便恢复相同的物理调用。
-				for _, dep := range input.Scope.Dependencies {
-					inScope := input.ScopeInput.SharedReviewPolicy == RecognitionSharedReviewByReference || strings.ContainsAny(dep.Text, "图①②③④⑤⑥⑦⑧⑨⑩")
-					if inScope && len(dep.ForOrders) > 1 && slices.Contains(dep.ForOrders, target.ManifestOrder) {
-						r := dep.Region
-						combined := image.Rect(contextRegion.X, contextRegion.Y, contextRegion.X+contextRegion.Width, contextRegion.Y+contextRegion.Height).
-							Union(image.Rect(r.X, r.Y, r.X+r.Width, r.Y+r.Height)).Intersect(pageBounds)
-						contextRegion = SourcePixelRegion{X: combined.Min.X, Y: combined.Min.Y, Width: combined.Dx(), Height: combined.Dy()}
-					}
-				}
-			}
 			if input.InitialReadMode == RecognitionLayoutManifestWithContentV1 && input.Scope != nil && input.PageOrientation != nil && input.PageOrientation.ClockwiseDegrees != 0 {
 				// 横拍页的近似紧框可能切断纵向题干与父材料；独立核验保留整页像素，仍按目标身份区分作答。
 				// 低可信方向只触发补充上下文，不据此旋转原像素。
@@ -691,6 +699,12 @@ func BuildRecognitionLayoutAdjudicationImageV2(pagePNG []byte, plan RecognitionL
 }
 
 // 核验保留完整边缘上下文，不以相邻题框截断伸出的手写；归属由原目标及印刷身份限定。
+func unionRecognitionRegions(a, b SourcePixelRegion, page image.Rectangle) SourcePixelRegion {
+	r := image.Rect(a.X, a.Y, a.X+a.Width, a.Y+a.Height).
+		Union(image.Rect(b.X, b.Y, b.X+b.Width, b.Y+b.Height)).Intersect(page)
+	return SourcePixelRegion{X: r.Min.X, Y: r.Min.Y, Width: r.Dx(), Height: r.Dy()}
+}
+
 func recognitionLayoutAdjudicationRegion(region SourcePixelRegion, bounds image.Rectangle) SourcePixelRegion {
 	horizontal := min(160, max(96, region.Height))
 	vertical := min(64, max(32, region.Height/4))

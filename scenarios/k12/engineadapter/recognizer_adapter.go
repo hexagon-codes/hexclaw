@@ -1195,6 +1195,7 @@ func RecognizedQuestionsFromLayoutFinalizationV2(
 				return fail("candidate %q question: %v", target.TargetID, parseErr)
 			}
 			region := target.Region
+			if target.ReviewFocusRegion != nil { region = *target.ReviewFocusRegion }
 			question.SourceRegion = &region
 			if plan.Scope != nil {
 				question.ImageSourceContext = &k12.RecognitionImageSourceContextV1{Version: k12.RecognitionImageScopeVersionV1, Action: plan.ScopeInput.Action, SourceComparisonPolicy: plan.ScopeInput.SourceComparisonPolicy, ScopeDigest: plan.AuthorizedPlanDigest, TargetIDs: []string{target.TargetID}}
@@ -1765,6 +1766,7 @@ func buildRecognitionLayoutBatchPromptV2(
 			Height       int    `json:"height"`
 			DisplayLabel string `json:"display_label,omitempty"`
 			Section      string `json:"section,omitempty"`
+			QuestionFocus *k12.SourcePixelRegion `json:"question_focus_in_crop,omitempty"`
 		}
 		descriptors := make([]descriptor, 0, len(targets))
 		for index, target := range targets {
@@ -1772,7 +1774,14 @@ func buildRecognitionLayoutBatchPromptV2(
 			if format[0] != k12.RecognitionLayoutCompactV1 {
 				modelRef = fmt.Sprintf("t%d", index+1)
 			}
-			descriptors = append(descriptors, descriptor{modelRef, target.Region.Width, target.Region.Height, target.DisplayLabel, target.SourceSectionLabel})
+			var focus *k12.SourcePixelRegion
+			if target.ReviewFocusRegion != nil {
+				r := *target.ReviewFocusRegion
+				r.X -= target.Region.X
+				r.Y -= target.Region.Y
+				focus = &r
+			}
+			descriptors = append(descriptors, descriptor{modelRef, target.Region.Width, target.Region.Height, target.DisplayLabel, target.SourceSectionLabel, focus})
 		}
 		encoded, err := json.Marshal(descriptors)
 		if err != nil {

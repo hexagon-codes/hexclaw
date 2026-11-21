@@ -16,6 +16,7 @@ const RecognitionImageSourceUprightReviewPolicyV2 = "upright_context_v2"
 const RecognitionImageSourceUprightReviewPolicyV3 = "upright_answer_context_v3"
 const RecognitionImageSourceComparisonPolicyV1 = "chinese_blank_layout_v1"
 const RecognitionSharedReviewByReference = "by_reference_v1"
+const RecognitionSharedReviewWithBatch = "by_reference_v2"
 
 // RecognitionImageSourceUprightReviewEnabled 让新几何策略沿用原直立视图与来源证明。
 func RecognitionImageSourceUprightReviewEnabled(policy string) bool {
