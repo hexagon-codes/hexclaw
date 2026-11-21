@@ -131,6 +131,30 @@ func TestFrozenDiagramDimensionsRepetitionPreservesTargetIdentity(t *testing.T) 
 	}
 }
 
+func TestSharedDiagramLegendAndRestatedLabels(t *testing.T) {
+	const intro = "如下图，有大小两个圆。"
+	const leaf = "将这两个圆按如图①所示放置，涂色部分的面积是（ ）cm²。"
+	for _, tc := range []struct {
+		restatement string
+		equivalent  bool
+	}{
+		{`大圆：r=3\,\mathrm{cm}；小圆：d=4 cm。`, true},
+		{`大圆 r=3\ \mathrm{cm}；小圆 d=4\ \mathrm{cm}。`, true},
+		{`小圆 r=3\ \mathrm{cm}；大圆 d=4\ \mathrm{cm}。`, false},
+		{"小圆：r=3 cm；大圆：d=4 cm。", false},
+		{"r=3 dm；d=4 cm。", false},
+		{"r=3 cm；d=4 cm。②①", false},
+	} {
+		q := RecognizedQuestion{Subject: "数学", SourceNumberPath: []string{"1", "1"}, DisplayLabel: "（1）",
+			RawTranscription:   intro + "r=3 cm，d=4 cm。① ②\n" + leaf,
+			ImageSourceContext: &k12.RecognitionImageSourceContextV1{Version: k12.RecognitionImageScopeVersionV1, ScopeDigest: "scope", TargetIDs: []string{"first"}, Materials: []k12.RecognitionImageScopeDependencyV1{{ForOrders: []int{1, 2}, Text: "r=3 cm；d=4 cm"}}}}
+		other := intro + tc.restatement + leaf
+		if scopedMaterialReadingsEquivalent(q, q.RawTranscription, []string{q.RawTranscription, other}) != tc.equivalent {
+			t.Fatalf("restatement %q", tc.restatement)
+		}
+	}
+}
+
 func TestScopedSharedMaterialPrefixDoesNotConflictWithLocalQuestion(t *testing.T) {
 	const shared = "一个硬盘，已用空间是总容量的2/5，正好用了4.8 TB。"
 	const child = "根据总容量是已用空间的（　）。列式：________"

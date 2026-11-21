@@ -1,7 +1,6 @@
 package usecase
 
 import (
- "github.com/hexagon-codes/hexclaw/internal/elementarymath"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +11,7 @@ import (
 
 	"github.com/hexagon-codes/hexclaw/config"
 	"github.com/hexagon-codes/hexclaw/egress"
+	"github.com/hexagon-codes/hexclaw/internal/elementarymath"
 	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
@@ -535,12 +535,20 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 			return item, referenceErr
 		}
 		if !eligible {
+			for _, signal := range q.OCRSignals {
+				if worksheetObstruction.MatchString(signal) && !worksheetSignalsAllowReference([]string{signal}, true) {
+					item.Solve.ReportUnavailableReason = signal
+					break
+				}
+			}
 			return commitGradingAssessmentItem(ctx, deps, job, q, item, "", "", "",
 				k12storage.GradingAssessmentEffects{})
 		}
 		mode, independentReference = PhotoModeSolve, true
 		referenceQuestion = question.question
-		if question.worksheet != nil { ctx = elementarymath.WithWorksheetEvidence(ctx, question.question, *question.worksheet) }
+		if question.worksheet != nil {
+			ctx = elementarymath.WithWorksheetEvidence(ctx, question.question, *question.worksheet)
+		}
 		if !photoPracticeUnmatched(item) {
 			item.Warning = unclearHandwritingReferenceWarning
 		}

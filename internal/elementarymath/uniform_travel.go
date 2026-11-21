@@ -22,6 +22,7 @@ func exactTravelActor(s string) bool {
 	name := []rune(s)
 	return s != "小于" && (travelActor.MatchString(s) || len(name) == 2 && name[0] == name[1])
 }
+
 var uniformTravelFractionLayout = regexp.MustCompile(`(^|[^0-9.])\(([0-9]+)\)\s*/\s*\(([0-9]+)\)`)
 var mixedFractionBoundary = regexp.MustCompile(`([0-9])((?:\\\(|\\\[|\$)?\\(?:d|t)?frac\s*\{[0-9]+\}\s*\{[0-9]+\})`)
 var travelDecimal = regexp.MustCompile(`^[0-9]+(?:\.[0-9]+)?$`)

@@ -36,7 +36,7 @@ type ParentTeachingGuide struct {
 // answer, but the usecase accepts it only when it is anchored in that verified
 // solution and never lets the generator rewrite the full method.
 type ParentTeachingGuideRequest struct {
-	verifiedWorksheet *elementarymath.TravelWorksheet
+	verifiedWorksheet           *elementarymath.TravelWorksheet
 	FrozenReportContent         *TeachingReportContentDraft `json:"-"`
 	ReportRequired              bool                        `json:"report_required,omitempty"`
 	ObservedAnswerState         AnswerState                 `json:"-"`
@@ -91,9 +91,11 @@ func (d Deps) parentTeachingGuideRequest(
 	outcome GradeOutcome,
 ) ParentTeachingGuideRequest {
 	var worksheet *elementarymath.TravelWorksheet
-	if sheet, ok := elementarymath.TravelWorksheetFor(ctx, req.Problem); ok { worksheet = &sheet }
+	if sheet, ok := elementarymath.TravelWorksheetFor(ctx, req.Problem); ok {
+		worksheet = &sheet
+	}
 	return ParentTeachingGuideRequest{
-		verifiedWorksheet: worksheet,
+		verifiedWorksheet:   worksheet,
 		FrozenReportContent: solved.ReportContent,
 		ReportRequired:      req.SolveOutputVersion == SolveOutputWithTeachingReportV2,
 		ObservedAnswerState: req.ObservedAnswerState, ObservedStudentAnswer: req.ObservedStudentAnswer,

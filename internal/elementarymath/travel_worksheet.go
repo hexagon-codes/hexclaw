@@ -15,7 +15,8 @@ import (
 type TravelWorksheet struct {
 	UniformTravelProblem
 	Parts, HourParts, Reciprocal, PartDistance, Rate string
-	FactorSlots [2]FractionSlot
+	FactorSlots                                      [2]FractionSlot
+	ReasonRequested                                  bool
 }
 
 // FractionSlot 表示原纸上实际留给学生书写的部分。
@@ -70,8 +71,10 @@ func ParseTravelWorksheet(source string) (TravelWorksheet, bool) {
 	source = TravelFractionBlankLayout(source)
 	source, _ = mathtext.ProjectReadable(source)
 	end := strings.IndexAny(source, "？?")
-	if end < 0 { return TravelWorksheet{}, false }
-	main := travelWorksheetNumber.ReplaceAllString(strings.TrimSpace(source[:end]), "$1")+"？"
+	if end < 0 {
+		return TravelWorksheet{}, false
+	}
+	main := travelWorksheetNumber.ReplaceAllString(strings.TrimSpace(source[:end]), "$1") + "？"
 	primary, literal, ok := parseUniformTravel(main)
 	if !ok {
 		return TravelWorksheet{}, false
@@ -124,12 +127,17 @@ func ParseTravelWorksheet(source string) (TravelWorksheet, bool) {
 	chain := fmt.Sprintf("%s÷%s=%s÷%s×%s=%s=%s×%s/%s", d, printedTime, d, p, q, equation, d, q, p)
 	// 排版器可能给作为除数的整个分数加括号，数学关系不变。
 	tail = strings.Replace(tail, d+"÷("+printedTime+")=", d+"÷"+printedTime+"=", 1)
-	reason := fmt.Sprintf("(%s)。推算过程中\"%s\"的依据是()", unit, equation)
+	reason := fmt.Sprintf("。推算过程中\"%s\"的依据是()", equation)
 	tail = strings.TrimRight(tail, "。.")
-	if tail != chain+reason && tail != chain+"="+rate.RatString()+reason {
+	if strings.HasSuffix(tail, "的依据是□") {
+		tail = strings.TrimSuffix(tail, "□") + "()"
+	}
+	tail, withReason := strings.CutSuffix(tail, reason)
+	unitSuffix := "(" + unit + ")"
+	if tail != chain+unitSuffix && tail != chain+"="+rate.RatString()+unitSuffix {
 		return TravelWorksheet{}, false
 	}
-	return TravelWorksheet{UniformTravelProblem: primary, Parts: p, HourParts: q, Reciprocal: new(big.Rat).Inv(parts).RatString(), PartDistance: part.RatString(), Rate: rate.RatString(), FactorSlots: factors}, true
+	return TravelWorksheet{UniformTravelProblem: primary, Parts: p, HourParts: q, Reciprocal: new(big.Rat).Inv(parts).RatString(), PartDistance: part.RatString(), Rate: rate.RatString(), FactorSlots: factors, ReasonRequested: withReason}, true
 }
 
 func travelDiagramMatches(diagram, hours, hourParts, distance, unit string) bool {
@@ -154,7 +162,7 @@ func travelDiagramMatches(diagram, hours, hourParts, distance, unit string) bool
 type worksheetEvidenceKey struct{}
 type worksheetEvidence struct {
 	source string
-	sheet TravelWorksheet
+	sheet  TravelWorksheet
 }
 
 func WithWorksheetEvidence(ctx context.Context, source string, sheet TravelWorksheet) context.Context {
@@ -172,9 +180,15 @@ func TravelWorksheetFor(ctx context.Context, source string) (TravelWorksheet, bo
 func (s TravelWorksheet) Corroborate(other TravelWorksheet) (TravelWorksheet, bool) {
 	slots := other.FactorSlots
 	other.FactorSlots = s.FactorSlots
-	if s != other { return TravelWorksheet{}, false }
+	s.ReasonRequested = s.ReasonRequested && other.ReasonRequested
+	other.ReasonRequested = s.ReasonRequested
+	if s != other {
+		return TravelWorksheet{}, false
+	}
 	for i, slot := range slots {
-		if s.FactorSlots[i] != slot { s.FactorSlots[i] = UncertainFractionSlot }
+		if s.FactorSlots[i] != slot {
+			s.FactorSlots[i] = UncertainFractionSlot
+		}
 	}
 	return s, true
 }
@@ -199,7 +213,11 @@ func (s TravelWorksheet) Answer() string {
 			values[2*i+1] = fmt.Sprintf("%s（整格写分数，只空分子填1，只空分母填%s）", s.Reciprocal, s.Parts)
 		}
 	}
-	return fmt.Sprintf("每小时走%s%s。按题面四个空依次填写 %s。等式的依据是乘法结合律。", s.Rate, s.Unit, strings.Join(values[:], "、"))
+	answer := fmt.Sprintf("每小时走%s%s。按题面四个空依次填写 %s。", s.Rate, s.Unit, strings.Join(values[:], "、"))
+	if s.ReasonRequested {
+		answer += "等式的依据是乘法结合律。"
+	}
+	return answer
 }
 
 func (s TravelWorksheet) Worked() string {
@@ -208,7 +226,11 @@ func (s TravelWorksheet) Worked() string {
 		fmt.Sprintf("每份走%s÷%s=%s%s。除以%s等于乘它的倒数%s。", s.Distance, s.Parts, s.PartDistance, s.Unit, s.Parts, s.Reciprocal),
 		fmt.Sprintf("乘数要写成分数时，分子是1，分母是%[1]s。分母已印就填分子1，分子已印就填分母%[1]s。", s.Parts),
 		fmt.Sprintf("1小时有%s份，每小时走%s×%s=%s%s。把两步合起来是%s×%s×%s。", s.HourParts, s.PartDistance, s.HourParts, s.Rate, s.Unit, s.Distance, s.Reciprocal, s.HourParts),
-		fmt.Sprintf("乘法结合律允许先乘后两个因数。代回原题，%s×(%s)=%s%s。", s.Rate, s.Hours, s.Distance, s.Unit),
 	}
+	check := fmt.Sprintf("代回原题，%s×(%s)=%s%s。", s.Rate, s.Hours, s.Distance, s.Unit)
+	if s.ReasonRequested {
+		check = "乘法结合律允许先乘后两个因数。" + check
+	}
+	steps = append(steps, check)
 	return strings.Join(steps, "\n") + "\n\n答案：" + s.Answer()
 }

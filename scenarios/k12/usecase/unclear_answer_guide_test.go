@@ -23,7 +23,7 @@ func TestWorksheetReferenceRequiresTwoIndependentCompletePrintedReadings(t *test
 		return map[string]any{"kind": "question", "recognition": map[string]any{"subject": "数学", "question": question, "ocr_signals": []string{signal}}}
 	}
 	initial, _ := json.Marshal(map[string]any{"targets": []any{map[string]any{"source_number_path": []string{"1"}, "initial_read": reading(source, "手写答案不清楚")}}})
-	target := k12.RecognitionLayoutTargetV2{TargetID: "target", ManifestOrder: 1, DisplayLabel:"1.", SourceNumberPath: []string{"1"}}
+	target := k12.RecognitionLayoutTargetV2{TargetID: "target", ManifestOrder: 1, DisplayLabel: "1.", SourceNumberPath: []string{"1"}}
 	expected, ok := elementarymath.ParseTravelWorksheet(source)
 	if !ok {
 		t.Fatal("fixture did not identify every printed relationship")
@@ -32,25 +32,30 @@ func TestWorksheetReferenceRequiresTwoIndependentCompletePrintedReadings(t *test
 	changedWork := reading(strings.Replace(source, "2÷2=2", "2×2=2", 1), "末尾笔迹不清")
 	changedWork["target_id"] = "t1"
 	work, _ := json.Marshal(map[string]any{"items": []any{changedWork}})
-	check := func(review []byte, gap bool) (printedReference,bool) {
-		readings, ok := worksheetTargetReadings(string(initial),string(review),target,"t1",gap)
-		if !ok { return printedReference{},false }
-		return corroboratedPrintedReference(source,target,readings,true)
+	check := func(review []byte, gap bool) (printedReference, bool) {
+		readings, found := worksheetTargetReadings(string(initial), string(review), target, "t1", gap)
+		if !found {
+			return printedReference{}, false
+		}
+		return corroboratedPrintedReference(source, target, readings, true)
 	}
-	short, ok := check(work,true)
+	short, ok := check(work, true)
 	main, _, _ := elementarymath.TravelQuestionPrefix(source)
-	if !ok || short.question!=main || short.worksheet!=nil {
+	if !ok || short.question != main || short.worksheet != nil {
 		t.Fatal("a disputed worked step changed the independently confirmed rate question")
 	}
 	for _, tc := range []struct {
 		name, question, signal, ref string
 		ok                          bool
 	}{
-		{"printed affirmative", source,"印刷题干清晰，只有最后一空的手写答案无法辨认。","t1",true},
-		{"mixed source",source,"题干清晰但主要条件看不清","t1",false},
+		{"printed dimensions affirmative", source, "题干、图示和单位均清晰可辨，最后一格的笔迹模糊", "t1", true},
+		{"printed affirmative", source, "印刷题干清晰，只有最后一空的手写答案无法辨认。", "t1", true},
+		{"mixed source", source, "题干清晰但主要条件看不清", "t1", false},
 		{"handwriting only", "1. " + source, "未发现可辨认的填字", "t1", true},
 		{"printed answer frame", source, "个别手写数字与印刷方框重叠", "t1", true},
 		{"printed operand", source, "印刷数值受手写数字遮挡，无法确认", "t1", false},
+		{"writing hides distance", source, "手写笔迹盖住了路程数字，无法确定是2千米还是7千米。", "t1", false},
+		{"distance hidden by writing", source, "路程数字被手写笔迹遮住，无法确定是2千米还是7千米。", "t1", false},
 		{"printed risk", source, "题干和手写答案都缺损", "t1", false},
 		{"different quantity", strings.Replace(source, "走了2千米", "走了4千米", 1), "手写答案模糊", "t1", false},
 		{"other numbered question", "2. " + source, "笔迹不清", "t1", false},
@@ -59,7 +64,7 @@ func TestWorksheetReferenceRequiresTwoIndependentCompletePrintedReadings(t *test
 		read := reading(tc.question, tc.signal)
 		read["target_id"] = tc.ref
 		review, _ := json.Marshal(map[string]any{"items": []any{read}})
-		actual, valid := check(review,true)
+		actual, valid := check(review, true)
 		if (valid && actual.worksheet != nil && *actual.worksheet == expected) != tc.ok {
 			t.Errorf("%s: unexpected reference eligibility", tc.name)
 		}
@@ -67,10 +72,51 @@ func TestWorksheetReferenceRequiresTwoIndependentCompletePrintedReadings(t *test
 	generic := reading(source, "最后一格边缘不够清楚")
 	generic["target_id"] = "t1"
 	uncertain, _ := json.Marshal(map[string]any{"items": []any{generic}})
-	_, without := check(uncertain,false)
-	_, with := check(uncertain,true)
+	_, without := check(uncertain, false)
+	_, with := check(uncertain, true)
 	if without || !with {
 		t.Fatal("generic observation lost its frozen handwriting scope")
+	}
+}
+
+func TestPrintedReferenceTargetScope(t *testing.T) {
+	const original = "一盒有24支铅笔，平均分给6人，每人几支？"
+	target := k12.RecognitionLayoutTargetV2{TargetID: "second", ManifestOrder: 2, SourceNumberPath: []string{"3"}, DisplayLabel: "3."}
+	entry := map[string]any{"kind": "question", "recognition": map[string]any{"subject": "数学", "question": original}}
+	initial, _ := json.Marshal(map[string]any{"targets": []any{map[string]any{"source_number_path": []string{}}, map[string]any{"source_number_path": []string{"3"}, "initial_read": entry}}})
+	entry["target_id"] = "t2"
+	review, _ := json.Marshal(map[string]any{"items": []any{map[string]any{"kind": "non_question", "target_id": "t1"}, entry}})
+	reads, ok := worksheetTargetReadings(string(initial), string(review), target, "t2", false)
+	if !ok {
+		t.Fatal("excluded title blocked target")
+	}
+	ref, ok := corroboratedPrintedReference(original, target, reads, true)
+	if !ok || ref.question != original || ref.worksheet != nil {
+		t.Fatal("source proof should admit a general math question")
+	}
+	if _, ok := corroboratedPrintedReference(original, target, append(reads, strings.Replace(original, "24", "25", 1)), true); ok {
+		t.Fatal("disputed condition entered general solver")
+	}
+	for _, tc := range []struct {
+		source string
+		path   []string
+		ok     bool
+	}{
+		{"2. 小明", []string{"1"}, false}, {"2、题目", []string{"2"}, true}, {"（2）将两圆放置", []string{"1", "（1）"}, false},
+		{"（2）将两圆放置", []string{"1", "（2）"}, true}, {"1.（2）将两圆放置", []string{"1", "2"}, true},
+		{"2.5千米", []string{"1"}, true}, {"(2)÷3", []string{"1"}, true},
+	} {
+		if printedNumberMatches(tc.source, tc.path) != tc.ok {
+			t.Errorf("number: %q %v", tc.source, tc.path)
+		}
+	}
+	for _, note := range []string{"末尾“依据是”后的填空区域受遮挡或不清晰，无法确认是否有可辨认的手写答案。", "末尾“依据是（ ）”处是否有可辨认的填字不确定；未将模糊痕迹转写。"} {
+		if !worksheetSignalsAllowReference([]string{note}, false) {
+			t.Errorf("answer-slot clauses lost their scope: %s", note)
+		}
+	}
+	if worksheetSignalsAllowReference([]string{"笔迹不清，整页左侧缺损"}, true) {
+		t.Fatal("page defect interpreted as handwriting")
 	}
 }
 
