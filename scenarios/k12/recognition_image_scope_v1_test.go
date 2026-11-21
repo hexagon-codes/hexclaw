@@ -11,6 +11,36 @@ import (
 	"testing"
 )
 
+func TestRecognitionScopeOptionalGapsSurvivePlanRoundTrip(t *testing.T) {
+	const fields = `"version":"image_scope_v1","source":"explicit","selected_orders":[12],"basis":"只解第12题","dependencies":[],"excluded":[]`
+	parse := func(fields string) *RecognitionImageScopeV1 {
+		t.Helper()
+		scope, err := ParseRecognitionImageScopeV1(`{"scope":{` + fields + `}}`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, err := json.Marshal(scope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var stored RecognitionImageScopeV1
+		if err := json.Unmarshal(raw, &stored); err != nil || !reflect.DeepEqual(*scope, stored) {
+			t.Fatalf("accepted scope changed during persistence: before=%#v after=%#v err=%v", *scope, stored, err)
+		}
+		return scope
+	}
+	omitted := parse(fields)
+	empty := parse(fields + `,"gaps":[]`)
+	if !reflect.DeepEqual(omitted, empty) || empty.Dependencies == nil || empty.Excluded == nil {
+		t.Fatal("optional empty gaps differ or required arrays lost their representation")
+	}
+	gap := RecognitionImageSourceGapV1{Order: 12, Kind: "handwriting", Before: "填", After: "千米"}
+	observed := parse(fields + `,"gaps":[{"order":12,"kind":"handwriting","before":"填","after":"千米"}]`)
+	if len(observed.Gaps) != 1 || observed.Gaps[0] != gap || reflect.DeepEqual(empty, parse(strings.Replace(fields, "[12]", "[11]", 1))) {
+		t.Fatal("a real source gap or a different selection lost its identity")
+	}
+}
+
 func TestIndependentReviewIncludesOnlyReferencedSharedRegionsOfCompleteSelection(t *testing.T) {
 	canvas := image.NewRGBA(image.Rect(0, 0, 960, 420))
 	var pngData bytes.Buffer

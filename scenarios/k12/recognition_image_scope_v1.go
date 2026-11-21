@@ -142,6 +142,10 @@ func ParseRecognitionImageScopeV1(raw string) (*RecognitionImageScopeV1, error) 
 	if scope.Version != RecognitionImageScopeVersionV1 || (scope.Source != "explicit" && scope.Source != "inferred") || strings.TrimSpace(scope.Basis) == "" || len(scope.SelectedOrders) == 0 {
 		return nil, fmt.Errorf("image scope identity is invalid")
 	}
+	// 可选缺口列表沿用冻结计划的 omitempty 表示，持久化前后的授权值必须一致。
+	if len(scope.Gaps) == 0 {
+		scope.Gaps = nil
+	}
 	return &scope, nil
 }
 
