@@ -317,18 +317,21 @@ func BuildRecognitionLayoutPlanV2(input RecognitionLayoutPlanInputV2) (Recogniti
 		if input.InitialReadMode == RecognitionLayoutManifestWithContentV1 && input.ScopeInput != nil && input.ScopeInput.IncludeSharedReviewRegions &&
 			input.Scope != nil && len(input.Scope.Excluded) == 0 && len(input.Scope.SelectedOrders) == len(input.Targets) {
 			policy := input.ScopeInput.SharedReviewPolicy
+			includeInReview := policy == RecognitionSharedReviewWithBatch || policy == RecognitionSharedReviewSingleView
 			for _, dep := range input.Scope.Dependencies {
 				if len(dep.ForOrders) < 2 || !slices.Contains(dep.ForOrders, target.ManifestOrder) {
 					continue
 				}
-				if policy == RecognitionSharedReviewWithBatch {
+				if includeInReview {
 					target.Region = unionRecognitionRegions(target.Region, dep.Region, pageBounds)
 				}
-				if policy == RecognitionSharedReviewWithBatch || policy == RecognitionSharedReviewByReference || strings.ContainsAny(dep.Text, "图①②③④⑤⑥⑦⑧⑨⑩") {
+				if includeInReview || policy == RecognitionSharedReviewByReference || strings.ContainsAny(dep.Text, "图①②③④⑤⑥⑦⑧⑨⑩") {
 					contextRegion = unionRecognitionRegions(contextRegion, dep.Region, pageBounds)
 				}
 			}
-			if focus != target.Region { reviewFocus = &focus }
+			if focus != target.Region {
+				reviewFocus = &focus
+			}
 		}
 		crop, cropErr := recognitionLayoutCropPNG(page, target.Region)
 		if cropErr != nil {
@@ -346,7 +349,7 @@ func BuildRecognitionLayoutPlanV2(input RecognitionLayoutPlanInputV2) (Recogniti
 			SourceSectionLabel: target.SourceSectionLabel,
 			Region:             target.Region,
 			CropDigest:         recognitionLayoutSHA256(crop),
-			ReviewFocusRegion: reviewFocus,
+			ReviewFocusRegion:  reviewFocus,
 		})
 		if input.Scope != nil {
 			plan.Targets[len(plan.Targets)-1].ManifestOrder = target.ManifestOrder
@@ -603,6 +606,12 @@ func BuildRecognitionLayoutReviewBatchImageV1(pagePNG []byte, plan RecognitionLa
 		if !found {
 			return nil, fmt.Errorf("%w: review target is not authorized", ErrRecognitionLayoutPlanInvalid)
 		}
+	}
+	if layout := SharedRecognitionReviewLayout(plan, targets); layout != nil {
+		if layout.Height > recognitionLayoutCompactHeightV1 {
+			return nil, fmt.Errorf("%w: shared review image exceeds height limit", ErrRecognitionLayoutPlanInvalid)
+		}
+		return layout.render(page, targets)
 	}
 	result, err := recognitionLayoutContactSheetPNG(page, targets)
 	if err != nil {

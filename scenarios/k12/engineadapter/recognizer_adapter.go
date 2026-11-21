@@ -1195,7 +1195,9 @@ func RecognizedQuestionsFromLayoutFinalizationV2(
 				return fail("candidate %q question: %v", target.TargetID, parseErr)
 			}
 			region := target.Region
-			if target.ReviewFocusRegion != nil { region = *target.ReviewFocusRegion }
+			if target.ReviewFocusRegion != nil {
+				region = *target.ReviewFocusRegion
+			}
 			question.SourceRegion = &region
 			if plan.Scope != nil {
 				question.ImageSourceContext = &k12.RecognitionImageSourceContextV1{Version: k12.RecognitionImageScopeVersionV1, Action: plan.ScopeInput.Action, SourceComparisonPolicy: plan.ScopeInput.SourceComparisonPolicy, ScopeDigest: plan.AuthorizedPlanDigest, TargetIDs: []string{target.TargetID}}
@@ -1761,11 +1763,11 @@ func buildRecognitionLayoutBatchPromptV2(
 ) (string, error) {
 	if len(format) > 0 && (format[0] == k12.RecognitionLayoutCompactV1 || format[0] == k12.RecognitionLayoutCompactV2 || format[0] == k12.RecognitionLayoutCompactV3 || format[0] == k12.RecognitionLayoutCompactV4) {
 		type descriptor struct {
-			TargetID     string `json:"target_id"`
-			Width        int    `json:"width"`
-			Height       int    `json:"height"`
-			DisplayLabel string `json:"display_label,omitempty"`
-			Section      string `json:"section,omitempty"`
+			TargetID      string                 `json:"target_id"`
+			Width         int                    `json:"width"`
+			Height        int                    `json:"height"`
+			DisplayLabel  string                 `json:"display_label,omitempty"`
+			Section       string                 `json:"section,omitempty"`
 			QuestionFocus *k12.SourcePixelRegion `json:"question_focus_in_crop,omitempty"`
 		}
 		descriptors := make([]descriptor, 0, len(targets))

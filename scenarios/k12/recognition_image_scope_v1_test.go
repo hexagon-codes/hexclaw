@@ -28,6 +28,8 @@ func TestIndependentReviewIncludesOnlyReferencedSharedRegionsOfCompleteSelection
 		{"legacy dimension text", true, false, "", "r=3 cm；d=4 cm", false},
 		{"new dimensions", true, false, RecognitionSharedReviewByReference, "r=3 cm；d=4 cm", true},
 		{"new shared text", true, false, RecognitionSharedReviewByReference, "两人用时相同", true},
+		{"shared in review and adjudication", true, false, RecognitionSharedReviewWithBatch, "r=3 cm；d=4 cm", true},
+		{"partial batch review", true, true, RecognitionSharedReviewWithBatch, "r=3 cm；d=4 cm", false},
 		{"legacy no sharing", false, false, "", "图①的尺寸", false},
 		{"partial selection", true, true, RecognitionSharedReviewByReference, "r=3 cm；d=4 cm", false},
 	} {
@@ -53,6 +55,10 @@ func TestIndependentReviewIncludesOnlyReferencedSharedRegionsOfCompleteSelection
 			for _, target := range plan.Targets {
 				region := target.AdjudicationRegion
 				visible := region != nil && region.Y <= diagram.Y && region.X <= diagram.X && region.X+region.Width >= diagram.X+diagram.Width
+				sharedInBatch := tc.policy == RecognitionSharedReviewWithBatch && tc.shared && target.ManifestOrder <= 2
+				if (target.Region.Y <= diagram.Y) != sharedInBatch || (target.ReviewFocusRegion != nil) != sharedInBatch {
+					t.Fatalf("wrong batch crop/focus for target %d: %+v", target.ManifestOrder, target)
+				}
 				if visible != (tc.shared && target.ManifestOrder <= 2) || *target.OriginalRegion != input.Targets[target.ManifestOrder-1].Region {
 					t.Fatalf("target %d review=%+v focus=%+v", target.ManifestOrder, region, target.OriginalRegion)
 				}

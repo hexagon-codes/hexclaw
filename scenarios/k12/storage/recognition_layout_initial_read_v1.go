@@ -436,7 +436,7 @@ func (s *Store) AuthorizeRecognitionLayoutReviewBatchV1(ctx context.Context, own
 		if len(in.Members) > len(remaining) {
 			return ErrModelPhysicalInvocationConflict
 		}
-		width, height := 0, 0
+		var targets []k12.RecognitionLayoutTargetV2
 		for i, member := range in.Members {
 			if member != remaining[i] {
 				return ErrModelPhysicalInvocationConflict
@@ -444,8 +444,7 @@ func (s *Store) AuthorizeRecognitionLayoutReviewBatchV1(ctx context.Context, own
 			found := false
 			for _, target := range authority.Plan.Targets {
 				if target.TargetID == member.CandidateID {
-					width = max(width, target.Region.Width)
-					height += target.Region.Height
+					targets = append(targets, target)
 					found = true
 					break
 				}
@@ -454,14 +453,8 @@ func (s *Store) AuthorizeRecognitionLayoutReviewBatchV1(ctx context.Context, own
 				return ErrModelPhysicalInvocationConflict
 			}
 		}
-		if len(in.Members) > 1 {
-			width += 16
-			height += 16 + 8*(len(in.Members)-1)
-			if height > 768 {
-				return ErrModelPhysicalInvocationConflict
-			}
-		}
-		if in.ImageWidth != width || in.ImageHeight != height {
+		width, height, fits := k12.RecognitionReviewBatchSize(authority.Plan, targets)
+		if !fits || in.ImageWidth != width || in.ImageHeight != height {
 			return ErrModelPhysicalInvocationConflict
 		}
 		var deadline int64

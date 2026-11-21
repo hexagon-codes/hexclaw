@@ -443,24 +443,18 @@ func authorizeRecognitionReviewGroupsV1(ctx context.Context, pagePNG []byte, pla
 	}
 	// 所有新分组先冻结，随后才进入有界调用；已冻结成员从不按当前剩余集合重分组。
 	for start := 0; start < len(remaining); {
-		end, height := start, 16
+		end := start
+		var group []k12.RecognitionLayoutTargetV2
 		for end < len(remaining) && end-start < 4 {
 			target, err := recognitionLayoutTargetV2(plan, remaining[end].CandidateID)
 			if err != nil {
 				return nil, err
 			}
-			nextHeight := height + target.Region.Height
-			if end > start {
-				nextHeight += 8
-			}
-			if end > start && nextHeight > 768 {
+			group = append(group, target)
+			if _, _, fits := k12.RecognitionReviewBatchSize(plan, group); !fits {
 				break
 			}
-			height = nextHeight
 			end++
-			if height > 768 {
-				break
-			}
 		}
 		unit, err := k12.RecognitionLayoutReviewUnitV1(len(batches) + 1)
 		if err != nil {
@@ -507,6 +501,13 @@ func recognitionReviewRequestV1(pagePNG []byte, plan k12.RecognitionLayoutPlanV2
 	prompt, err := buildRecognitionReviewPromptV1(targets)
 	if err != nil {
 		return nil, "", request, err
+	}
+	if layout := k12.SharedRecognitionReviewLayout(plan, targets); layout != nil {
+		positions, err := json.Marshal(layout.Crops)
+		if err != nil {
+			return nil, "", request, err
+		}
+		prompt += "\nThese authorized crops share original pixels on this sheet. In the listed target order their rectangles in sheet coordinates are " + string(positions) + ". Read shared material once. For each target use its question_focus_in_crop and return answer_bbox relative to that crop's own origin."
 	}
 	request.ImageDigest, request.ImageWidth, request.ImageHeight = recognitionInitialReadDigestV1(image), width, height
 	request.PromptDigest = recognitionInitialReadDigestV1([]byte(prompt))
