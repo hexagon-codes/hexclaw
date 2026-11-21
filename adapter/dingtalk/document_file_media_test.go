@@ -100,3 +100,26 @@ func TestDingTalkExportedDocumentPreparationAndSend(t *testing.T) {
 		})
 	}
 }
+
+func TestGeneratedFileLinkRequiresTheCurrentAttachmentAndDigest(t *testing.T) {
+	const text = "original text"
+	digest := sha256.Sum256([]byte(text))
+	hexDigest := fmt.Sprintf("%x", digest)
+	url := "/api/v1/files/generated/202611/" + hexDigest + ".txt"
+	file := adapter.Attachment{ID: "original", Name: "stdout.txt", Mime: "text/plain", URL: url, ContentDigest: "sha256:" + hexDigest,
+		Source: &adapter.AttachmentSource{OpenReader: func(context.Context) (io.ReadCloser, error) { return io.NopCloser(strings.NewReader(text)), nil }}}
+	for _, prefix := range []string{"", "sandbox:"} {
+		link := "[结果](" + prefix + url + ")"
+		body, _ := ProjectMarkdownTextWithAttachments(link, "", []adapter.Attachment{file})
+		if body != "结果" {
+			t.Fatalf("unusable link survived: %s", body)
+		}
+		wrong := file
+		wrong.ContentDigest = "sha256:" + strings.Repeat("a", 64)
+		for _, attachments := range [][]adapter.Attachment{nil, {wrong}} {
+			if got, _ := ProjectMarkdownTextWithAttachments(link, "", attachments); got != link {
+				t.Fatal("a link unrelated to the supplied bytes was consumed")
+			}
+		}
+	}
+}

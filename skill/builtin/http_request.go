@@ -70,6 +70,11 @@ func (s *BrowserSkill) SetArtifactWriter(writer BrowserArtifactWriter) {
 	s.artifactWriter = writer
 }
 
+// SetObservationWriter keeps response bytes available to the agent and its execution receipt.
+func (s *BrowserSkill) SetObservationWriter(writer BrowserArtifactWriter) {
+	s.observationWriter = writer
+}
+
 // SetFileOpener 在启动装配阶段接通本轮权限与附件解析，不与 Execute 并发调用。
 func (s *BrowserSkill) SetFileOpener(opener BrowserFileOpener) {
 	s.fileOpener = opener
@@ -137,6 +142,14 @@ func (s *BrowserSkill) doRequest(ctx context.Context, target string, args map[st
 	if err != nil || parsed.Hostname() == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
 		return nil, fmt.Errorf("invalid HTTP URL")
 	}
+	var asAttachment *bool
+	if value, supplied := args["as_attachment"]; supplied {
+		selected, ok := value.(bool)
+		if !ok {
+			return nil, fmt.Errorf("as_attachment must be a boolean")
+		}
+		asAttachment = &selected
+	}
 	query := parsed.Query()
 	if rawQuery, exists := args["query"]; exists {
 		pairs, err := httpQueryPairs(rawQuery)
@@ -194,7 +207,7 @@ func (s *BrowserSkill) doRequest(ctx context.Context, target string, args map[st
 	if httpOrigin(req.URL) != initialOrigin {
 		authSource = "redirect_target"
 	}
-	return s.readAPIResponse(req.Context(), req, resp, authSource)
+	return s.readAPIResponse(req.Context(), req, resp, authSource, asAttachment)
 }
 
 func stringHTTPArg(args map[string]any, name string) string {
@@ -581,7 +594,7 @@ func (r *httpResponseCapture) Read(p []byte) (int, error) {
 	return n, err
 }
 
-func (s *BrowserSkill) readAPIResponse(ctx context.Context, req *http.Request, resp *http.Response, authSource string) (*skill.Result, error) {
+func (s *BrowserSkill) readAPIResponse(ctx context.Context, req *http.Request, resp *http.Response, authSource string, asAttachment *bool) (*skill.Result, error) {
 	detail := httpExecutionDetail(req.URL.String(), strings.ToLower(req.Method), resp)
 	contentType := resp.Header.Get("Content-Type")
 	mediaType, _, _ := mime.ParseMediaType(contentType)
@@ -591,22 +604,31 @@ func (s *BrowserSkill) readAPIResponse(ctx context.Context, req *http.Request, r
 	result := &skill.Result{Data: data, Metadata: map[string]string{"url": safeHTTPRequestURL(req.URL), "method": req.Method, "status": strconv.Itoa(resp.StatusCode), "content_type": contentType}, Detail: &detail}
 	var persistErr error
 	var registeredArtifact map[string]any
-	if s.artifactWriter != nil {
-		// 先区分无正文响应与待保存文件；缓冲在 capture 外，文件保存仍能核对实际消费字节。
+	disposition, params, _ := mime.ParseMediaType(resp.Header.Get("Content-Disposition"))
+	explicitFile := disposition == "attachment" || params["filename"] != ""
+	bodyForbidden := req.Method == http.MethodHead || resp.StatusCode == http.StatusNoContent ||
+		resp.StatusCode == http.StatusResetContent || resp.StatusCode == http.StatusNotModified
+	deliver := disposition == "attachment"
+	if asAttachment != nil {
+		deliver = *asAttachment
+	}
+	deliver = deliver && !bodyForbidden && resp.StatusCode >= 200 && resp.StatusCode < 300
+	writer := s.artifactWriter
+	if !deliver && s.observationWriter != nil {
+		writer = s.observationWriter
+	}
+	if writer != nil {
+		// 先区分无正文响应与待保存文件；缓冲在 capture 外，保存时核对实际消费字节。
 		buffered := bufio.NewReader(resp.Body)
 		capture.reader = buffered
 		_, peekErr := buffered.Peek(1)
-		disposition, dispositionParams, _ := mime.ParseMediaType(resp.Header.Get("Content-Disposition"))
-		explicitFile := disposition == "attachment" || dispositionParams["filename"] != ""
-		bodyForbidden := req.Method == http.MethodHead || resp.StatusCode == http.StatusNoContent ||
-			resp.StatusCode == http.StatusResetContent || resp.StatusCode == http.StatusNotModified
-		if errors.Is(peekErr, io.EOF) && (!explicitFile || bodyForbidden) {
+		if errors.Is(peekErr, io.EOF) && ((!explicitFile && !deliver) || bodyForbidden) {
 			capture.eof = true
 		} else if peekErr != nil && !errors.Is(peekErr, io.EOF) {
 			capture.readErr = peekErr
 		} else {
 			name := httpResponseFilename(req.URL, resp.Header, textual)
-			ref, err := s.artifactWriter(ctx, name, contentType, capture)
+			ref, err := writer(ctx, name, contentType, capture)
 			persistErr = err
 			if err == nil {
 				if ref == nil {
@@ -628,7 +650,9 @@ func (s *BrowserSkill) readAPIResponse(ctx context.Context, req *http.Request, r
 		}
 	} else {
 		body, err := io.ReadAll(io.LimitReader(capture, maxBodySize+1))
-		if err == nil && len(body) <= maxBodySize && textual {
+		if err == nil && deliver {
+			persistErr = errors.New("response artifact storage is required for file delivery")
+		} else if err == nil && len(body) <= maxBodySize && textual {
 			data["body"] = string(body)
 		} else if err == nil && len(body) > 0 {
 			persistErr = fmt.Errorf("response artifact storage is required for binary or oversized content")

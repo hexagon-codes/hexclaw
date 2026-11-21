@@ -16,7 +16,7 @@ import (
 type externalShellOutput struct{ service *externaltools.Service }
 
 func (s externalShellOutput) SaveShellOutput(ctx context.Context, _ skill.InvocationContext, stream string, input io.Reader) (map[string]any, error) {
-	return s.service.SaveArtifact(ctx, stream+".txt", "text/plain; charset=utf-8", input)
+	return s.service.SaveObservation(ctx, stream+".txt", "text/plain; charset=utf-8", input)
 }
 
 // configureExternalToolIO 对原实例注入同一持久存储，不重新注册另一个工具。
@@ -38,6 +38,7 @@ func configureExternalToolIO(registry *skill.DefaultRegistry, deps *builtin.Skil
 	if s, ok := registry.Get("browser"); ok {
 		if browser, ok := builtin.UnwrapConfigured(s).(*builtin.BrowserSkill); ok {
 			browser.SetArtifactWriter(service.SaveArtifact)
+			browser.SetObservationWriter(service.SaveObservation)
 			if deps.FileAccess != nil {
 				browser.SetFileOpener(func(ctx context.Context, path string) (io.ReadCloser, error) {
 					if resolved, err := builtin.ResolveToolPath(ctx, deps.Workspace, path); err == nil {

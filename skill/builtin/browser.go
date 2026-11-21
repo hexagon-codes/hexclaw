@@ -30,6 +30,7 @@ type BrowserSkill struct {
 	authResolver      BrowserAuthResolver
 	fileOpener        BrowserFileOpener
 	artifactWriter    BrowserArtifactWriter
+	observationWriter BrowserArtifactWriter
 	attemptObserver   BrowserAttemptObserver
 }
 
@@ -57,6 +58,7 @@ func (s *BrowserSkill) ToolDefinition() llm.ToolDefinition {
 		Properties: map[string]*llm.Schema{
 			"url":           {Type: "string", Description: "目标网页 URL"},
 			"action":        {Type: "string", Description: "Operation; defaults to fetch", Enum: []any{"fetch", "extract", "post", "request"}},
+			"as_attachment": {Type: "boolean", Description: "For request: set true when the user wants the successful response as a file, false to inspect it only. If omitted, only a successful HTTP attachment is delivered."},
 			"data":          {Type: "object", Description: "Form fields required for action=post. Values are encoded as strings. Omit for read actions."},
 			"selector":      {Type: "string", Description: "For extract: title, links, meta, or text"},
 			"method":        {Type: "string", Description: "HTTP method for request", Enum: []any{"GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"}},

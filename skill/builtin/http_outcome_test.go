@@ -133,6 +133,11 @@ func TestBrowserRequestArtifactModelProjection(t *testing.T) {
 				}
 				return registered, nil
 			})
+			observations := 0
+			s.SetObservationWriter(func(ctx context.Context, name, ct string, r io.Reader) (map[string]any, error) {
+				observations++
+				return s.artifactWriter(ctx, name, ct, r)
+			})
 			result, err := s.Execute(t.Context(), map[string]any{"action": "request", "method": "GET", "url": server.URL + "/response"})
 			if tc.status >= 400 {
 				var failure *skill.ExecutionError
@@ -141,6 +146,9 @@ func TestBrowserRequestArtifactModelProjection(t *testing.T) {
 				}
 			} else if err != nil {
 				t.Fatal(err)
+			}
+			if (observations == 0) != (tc.attachment && tc.status >= 200 && tc.status < 300) {
+				t.Fatalf("observation registration count = %d", observations)
 			}
 			if writes != 1 || result == nil {
 				t.Fatalf("response was not registered once: writes=%d result=%+v", writes, result)
@@ -186,6 +194,19 @@ func TestBrowserRequestArtifactModelProjection(t *testing.T) {
 				t.Errorf("model file size changed: %+v", refs[0])
 			}
 		})
+	}
+}
+
+func TestRequestedInlineFileNeedsStorage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"count":17}`)
+	}))
+	defer server.Close()
+	result, err := NewBrowserSkill().Execute(t.Context(), map[string]any{"action": "request", "url": server.URL, "as_attachment": true})
+	var failure *skill.ExecutionError
+	if result == nil || !errors.As(err, &failure) || failure.Detail.Reason != "artifact_store" {
+		t.Fatalf("unregistered requested file: %+v %v", result, err)
 	}
 }
 

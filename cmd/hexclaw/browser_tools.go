@@ -952,11 +952,11 @@ func (w *browserToolRuntime) captureOutputs(ctx context.Context, profile *browse
 			continue
 		}
 		name := filepath.Base(path)
-		if strings.HasSuffix(name, ".crdownload") || strings.HasSuffix(name, ".part") {
-			continue
-		}
-		if strings.HasPrefix(name, "console-") && strings.HasSuffix(name, ".log") {
-			continue
+		if path != explicitFile {
+			if strings.HasSuffix(name, ".crdownload") || strings.HasSuffix(name, ".part") ||
+				strings.HasPrefix(name, "console-") && strings.HasSuffix(name, ".log") {
+				continue
+			}
 		}
 		// 文件选择模态允许自动快照为空；原模态文本仍保留在工具响应中。
 		if current.size == 0 && observationFiles[path] && path != explicitFile {

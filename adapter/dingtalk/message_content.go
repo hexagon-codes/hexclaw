@@ -197,16 +197,22 @@ func ensureDingTalkRenderEvidence(reply *adapter.Reply) error {
 	return nil
 }
 
-// 当前原请求拥有的文档由实际文件卡交付，渠道正文保留链接标签而非应用内部下载地址。
+var dingTalkGeneratedFileURL = regexp.MustCompile(`^/api/v1/files/generated/[0-9]{6}/([0-9a-f]{64})(?:\.[A-Za-z0-9]+)?$`)
+
+// 当前回复所附的原文件由文件卡交付，正文中的同源下载链接保留其可读标签。
 func projectDingTalkDocumentAttachmentLinks(content string, attachments []adapter.Attachment) string {
 	for _, attachment := range attachments {
-		if !isDingTalkDocumentAttachment(attachment) || attachment.Source == nil || attachment.Source.OpenReader == nil ||
-			!strings.HasPrefix(attachment.ID, "document-") ||
-			!validDingTalkSHA256Digest("sha256:"+strings.TrimPrefix(attachment.ID, "document-")) ||
-			attachment.URL != "/api/v1/document-artifacts/"+attachment.ID+"/content" {
+		if attachment.Source == nil || attachment.Source.OpenReader == nil || attachment.ID == "" {
 			continue
 		}
-		link := regexp.MustCompile(`(^|[^!\\])\[([^\[\]\r\n]+)\]\(` + regexp.QuoteMeta(attachment.URL) + `\)`)
+		document := isDingTalkDocumentAttachment(attachment) && strings.HasPrefix(attachment.ID, "document-") &&
+			validDingTalkSHA256Digest("sha256:"+strings.TrimPrefix(attachment.ID, "document-")) &&
+			attachment.URL == "/api/v1/document-artifacts/"+attachment.ID+"/content"
+		generated := dingTalkGeneratedFileURL.FindStringSubmatch(attachment.URL)
+		if !document && (generated == nil || attachment.ContentDigest != "sha256:"+generated[1]) {
+			continue
+		}
+		link := regexp.MustCompile(`(^|[^!\\])\[([^\[\]\r\n]+)\]\((?:sandbox:)?` + regexp.QuoteMeta(attachment.URL) + `\)`)
 		content = link.ReplaceAllString(content, "${1}${2}")
 	}
 	return content
