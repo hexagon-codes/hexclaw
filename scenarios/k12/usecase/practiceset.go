@@ -948,7 +948,7 @@ func (d Deps) gradePracticeSetItemsInTransaction(
 		return PracticeSetView{}, err
 	}
 	if evidence == k12.PracticeResultHumanConfirmed && v.Record.Status == k12.PracticeStatusAssigned {
-		if err := d.savePracticeFields(ctx, v, k12.PracticeStatusSubmitted); err != nil {
+		if err = d.savePracticeFields(ctx, v, k12.PracticeStatusSubmitted); err != nil {
 			return PracticeSetView{}, err
 		}
 		v, err = d.GetPracticeSet(ctx, agentName, recordID)
