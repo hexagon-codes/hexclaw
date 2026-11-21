@@ -14,7 +14,7 @@ var (
 	pdfHeadingDateSuffix = regexp.MustCompile(`^[ \t]*(?:·[ \t]*答案卷)?[ \t]*(?:\r?\n|$)`)
 )
 
-// FormatPDFMarkdown 仅在PDF副本中把可靠的裸数字分数排成上下分数。
+// FormatPDFMarkdown 仅在 PDF 副本中把可靠的数字分数排成上下分数。
 // 代码、链接、URL、日期和已有数学定界符保持，原始规范Markdown不修改。
 func FormatPDFMarkdown(source string) string {
 	var out strings.Builder
@@ -54,6 +54,13 @@ func formatPDFFractionSegment(source string) string {
 			i = end
 			continue
 		}
+		if source[i] == '\\' && !isEscapedAt(source, i) {
+			if formula, next, ok := pdfNumericTeXFraction(source, i); ok {
+				out.WriteString(formula)
+				i = next
+				continue
+			}
+		}
 		if source[i] >= '0' && source[i] <= '9' && (i == 0 || !pdfFractionBoundary(source[i-1])) && !pdfDateLabel.MatchString(source[:i]) {
 			numeratorEnd := i
 			for numeratorEnd < len(source) && source[numeratorEnd] >= '0' && source[numeratorEnd] <= '9' {
@@ -80,6 +87,43 @@ func formatPDFFractionSegment(source string) string {
 		i++
 	}
 	return out.String()
+}
+
+// 只接纳两个完整数字参数，与已有文本分数使用相同的数学节点。例如 \frac14x 中的 x
+// 仍是后继变量。路径、代码和原本已定界的公式保留它们自己的语义。
+func pdfNumericTeXFraction(s string, at int) (string, int, bool) {
+	if at > 0 && (isASCIILetter(s[at-1]) || strings.ContainsRune(`/\.:_`, rune(s[at-1]))) {
+		return "", 0, false
+	}
+	for _, cmd := range [...]string{`\frac`, `\dfrac`, `\tfrac`} {
+		if !strings.HasPrefix(s[at:], cmd) {
+			continue
+		}
+		const separators = " \t\r\n，。；！？（(【[「“\"'"
+		start := max(0, strings.LastIndexAny(s[:at], separators))
+		word := strings.TrimLeft(s[start:at], separators)
+		if strings.Contains(word, `:\`) || strings.Contains(word, ":/") || strings.HasPrefix(word, "/") ||
+			strings.HasPrefix(word, "./") || strings.HasPrefix(word, "../") || strings.HasPrefix(word, `\\`) {
+			break
+		}
+		n, next, ok := parseBraceArg(s, at+len(cmd), true)
+		n = strings.TrimSpace(n)
+		if !ok || n == "" || strings.Trim(n, "0123456789") != "" {
+			break
+		}
+		d, end, ok := parseBraceArg(s, next, true)
+		d = strings.TrimSpace(d)
+		if !ok || d == "" || strings.Trim(d, "0123456789") != "" {
+			break
+		}
+		ambiguousDigits := end < len(s) && s[end] >= '0' && s[end] <= '9' && s[end-1] != '}'
+		fileOrDecimalSuffix := end+1 < len(s) && s[end] == '.' && (isASCIILetter(s[end+1]) || s[end+1] >= '0' && s[end+1] <= '9')
+		if ambiguousDigits || fileOrDecimalSuffix {
+			break
+		}
+		return "$" + cmd + "{" + n + "}{" + d + "}$", end, true
+	}
+	return "", 0, false
 }
 
 func pdfLiteralNumberPair(source string, start, slash, end int) bool {

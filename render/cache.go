@@ -110,7 +110,7 @@ func (c *Cache) Key(content string, format Format, opts RenderOptions) string {
 		optMap["PDFHeaderFooter"] = opts.pdfHeaderFooterEnabled()
 		optMap["PDFMetadata"] = opts.PDFMetadata
 		optMap["Locale"] = opts.effectiveLocale(c.defaultLocale)
-		h.Write([]byte("pdf-text:numeric-fractions-v2|"))
+		h.Write([]byte("pdf-text:numeric-fractions-v3|"))
 	}
 	keys := mapx.Keys(optMap)
 	sort.Strings(keys)
