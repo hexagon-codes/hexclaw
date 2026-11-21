@@ -350,7 +350,7 @@ func hasOnlyTrailingSourceRisk(signals []string) bool {
 // 参考解采用各次读取共同证明的最大题面；页尾无法核实的内容不进入求解或判分。
 func verifiedLeadingTravelQuestion(q RecognizedQuestion) (string, bool) {
 	leading := func(value string) (string, string, bool) {
-		value = k12.RecognitionQuestionSourceTextV1(value, q.SourceNumberPath, q.DisplayLabel)
+		value = k12.RecognitionQuestionSourceTextV1(elementarymath.SeparateMixedFraction(value), q.SourceNumberPath, q.DisplayLabel)
 		if len(q.SourceNumberPath) == 1 && q.DisplayLabel == q.SourceNumberPath[0]+"." {
 			if rest, found := strings.CutPrefix(value, q.DisplayLabel); found {
 				first, _ := utf8.DecodeRuneInString(rest)
@@ -378,23 +378,14 @@ func verifiedLeadingTravelQuestion(q RecognizedQuestion) (string, bool) {
 		return "", false
 	}
 	travel, _ := elementarymath.ParseUniformTravelProblem(primary)
-	worksheet, full := readTravelWorksheetTail(tail, travel)
-	selected := q.RawTranscription
+	originals := append([]string{q.RawTranscription}, q.EvidenceTranscriptions...)
+	tails := []string{tail}
 	for _, observed := range q.EvidenceTranscriptions {
 		prefix, observedTail, ok := leading(observed)
 		if !ok || !k12.RecognitionSourceQuestionsEqualV1(primary, prefix) {
 			return "", false
 		}
-		if full {
-			other, read := readTravelWorksheetTail(observedTail, travel)
-			full = read && worksheet.sameQuestions(other)
-			if full && other.hasFinalValue && !worksheet.hasFinalValue {
-				selected, worksheet = observed, other
-			}
-		}
+		tails = append(tails, observedTail)
 	}
-	if full {
-		return selected, true
-	}
-	return primary, true
+	return corroboratedTravelSource(primary, originals, tails, travel), true
 }

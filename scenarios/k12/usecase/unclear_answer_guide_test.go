@@ -22,12 +22,34 @@ func TestTravelReferencePreservesAllCorroboratedWorksheetQuestions(t *testing.T)
 	const reason = "（km）。推算过程中把后两个因数先乘的依据是（ ）。"
 	full := main + diagram + blanks + chain + "=10" + reason
 	short := main + diagram + blanks + chain + reason
+	confirmedDiagram := main + "\n" + diagram
+	confirmedBlanks := confirmedDiagram + "\n" + blanks
+	if contract := travelReportTargets(full); !strings.Contains(contract, "2 fill-in values") || !strings.Contains(contract, "justification") {
+		t.Fatalf("missing printed worksheet targets: %q", contract)
+	}
+	withFraction := strings.Replace(full, "也就是6÷3；", `也就是6÷3=6×\frac{\square}{3}；`, 1)
+	if contract := travelReportTargets(withFraction); !strings.Contains(contract, "3 fill-in values") {
+		t.Fatalf("an empty numerator is one additional target: %q", contract)
+	}
+	if travelReportTargets(main+diagram) != "" || strings.Contains(travelReportTargets(confirmedBlanks), "justification") {
+		t.Fatal("instructions included targets absent from the verified source")
+	}
+	const quote = "推算过程中“6×1/3×5＝6×(1/3×5)”的依据是（ ）。"
+	quotedA := diagram + blanks + chain + "（km）。" + quote
+	quotedB := strings.Replace(quotedA, "份是6千米", "份是8千米", 1)
+	travel, _ := elementarymath.ParseUniformTravelProblem(main)
+	preserved := corroboratedTravelSource(main, []string{main + quotedA, main + quotedB}, []string{quotedA, quotedB}, travel)
+	if preserved != confirmedDiagram+"\n"+quote {
+		t.Fatalf("independent printed equation lost or conflicting condition accepted: %s", preserved)
+	}
 	for _, tc := range []struct{ name, read, want string }{
 		{"equivalent final calculation", full, full},
-		{"different operator", strings.Replace(full, "6÷3；", "6×3；", 1), main},
-		{"different condition", strings.Replace(full, "份是6千米", "份是8千米", 1), main},
-		{"different unit", strings.Replace(full, "（km）", "（m）", 1), main},
-		{"incorrect additional calculation", strings.Replace(full, "=10", "=12", 1), main},
+		{"wrapped heading", strings.Replace(short, "由此推算出", "由此推\n算出", 1), short},
+		{"different operator", strings.Replace(full, "6÷3；", "6×3；", 1), confirmedDiagram},
+		{"different condition", strings.Replace(full, "份是6千米", "份是8千米", 1), confirmedDiagram},
+		{"different unit", strings.Replace(full, "（km）", "（m）", 1), confirmedBlanks},
+		{"incorrect additional calculation", strings.Replace(full, "=10", "=12", 1), confirmedBlanks},
+		{"missing reason", strings.Split(short, "推算过程中")[0], confirmedBlanks + "\n" + chain + "（km）。"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			q := RecognizedQuestion{RawTranscription: short, EvidenceTranscriptions: []string{short, tc.read}}

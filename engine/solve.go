@@ -206,7 +206,10 @@ func (o *SolveSkill) Execute(ctx context.Context, args map[string]any) (*skill.R
 	deterministicProblem := deterministicProblemStem(problem)
 	if o.programFunc != nil && solveProgramEnabled(ctx) && !methodDiversity && samples == 1 {
 		plan, ok, frozen := compileFrozenSolveProgram(ctx, deterministicProblem)
-		if !frozen {
+		if worksheet, found := ctx.Value(travelProgramKey{}).(solveProgramPlan); !frozen && found && worksheet.Problem == problem && !gradingMode &&
+			(strings.TrimSpace(constraint) == "" || strings.Contains(constraint, "分数除法")) {
+			plan, ok = worksheet, true
+		} else if !frozen {
 			plan, ok = compileSolveProgram(deterministicProblem, constraint)
 		}
 		if !ok && !frozen {

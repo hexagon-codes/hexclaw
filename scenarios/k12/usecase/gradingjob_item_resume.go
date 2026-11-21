@@ -548,6 +548,9 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 	if referenceQuestion != "" {
 		gradeReq.Problem, gradeReq.SourceProblem = referenceQuestion, referenceQuestion
 	}
+	if job.Fields.ModelSnapshot.QuantityAnswerPolicy == k12.QuantityAnswerPolicySlotV2 && gradeReq.SolveOutputVersion == SolveOutputWithTeachingReportV2 && gradeReq.Subject == "数学" {
+		gradeReq.ParentTeachingContract += travelReportTargets(firstNonEmpty(gradeReq.SourceProblem, gradeReq.Problem))
+	}
 	if finalAnswerOnly {
 		receipt := *q.FinalAnswerReceipt
 		gradeReq.FinalAnswerReceipt = &receipt

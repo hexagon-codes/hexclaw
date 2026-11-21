@@ -305,7 +305,15 @@ func (a *SolveAdapter) SolveSubject(ctx context.Context, subject, problem, grade
 	// 不注入 self_consistency 默认值：由 solve 自适应 triage。纯数字四则算式走本机精确求值器并给
 	// numeric_exec 强证据；复杂题仍走 solver + verifier。只有真正由调用方显式指定校验力度时，
 	// engine 才禁用快速路径。
-	problem = gradingProblemWithGrounding(ctx, problem)
+	verificationProblem := elementarymath.PhotoVerificationProblem(problem)
+	modelProblem := gradingProblemWithGrounding(ctx, problem)
+	if snapshot, ok := k12.GradingModelSnapshotFromContext(ctx); ok && snapshot.QuantityAnswerPolicy == k12.QuantityAnswerPolicySlotV2 && subject == "数学" {
+		ctx = engine.WithTravelWorksheetCalculation(ctx, modelProblem, problem)
+	}
+	if verificationProblem != problem {
+		ctx = elementarymath.WithPhotoVerificationCopy(ctx, modelProblem, gradingProblemWithGrounding(ctx, verificationProblem))
+	}
+	problem = modelProblem
 	ctx = engine.WithSolveProgramExecution(ctx, usecase.GradingProgramExecutionEnabled(ctx))
 	args := map[string]any{"problem": problem}
 	if subject != "" {
@@ -527,13 +535,13 @@ func gradingProblemWithGrounding(ctx context.Context, problem string) string {
 		// 规范化不应丢失已冻结的空位；保持原输入而不回退为父题任务。
 		return problem
 	}
-	problem = usecase.CanonicalPlainTextFallback(problem)
+	problem = usecase.CanonicalPlainTextFallback(elementarymath.SeparateMixedFraction(problem))
 	evidence, ok := usecase.GradingGroundingForProvider(ctx)
 	if !ok {
 		return problem
 	}
 	return strings.TrimSpace(problem) +
-		"\n\nVerified textbook evidence (use it only to constrain the solution and grading; it is not the student's answer; do not expose internal source identifiers). Respond in Chinese:\n" +
+		elementarymath.TextbookEvidenceSeparator +
 		strings.TrimSpace(evidence)
 }
 

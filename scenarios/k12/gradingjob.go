@@ -61,6 +61,7 @@ const MathExecutionContractProgramFirst = "program-first-v1"
 const MathExecutionContractLegacy = "legacy"
 
 const QuantityAnswerPolicySlotV1 = "quantity_slot_answer_v1"
+const QuantityAnswerPolicySlotV2 = "quantity_slot_answer_v2"
 
 type GradingModelSnapshot struct {
 	MathExecutionContract string `json:"math_execution_contract,omitempty"`

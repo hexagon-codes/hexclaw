@@ -65,7 +65,7 @@ func TestPhotoQuantityPolicyFreezesOnlyNewImageTaskJobs(t *testing.T) {
 	d.GradingBudgetSnapshot = orchestratorTestBudget()
 	o := trackGradingOrchestrator(t, NewGradingOrchestrator(d, orchestratorSnapshotResolver))
 	job, _, _ := prepareInitiallyBlankImageTaskJob(t, d, o, "quantity-policy")
-	if job.Fields.ModelSnapshot.QuantityAnswerPolicy != k12.QuantityAnswerPolicySlotV1 {
+	if job.Fields.ModelSnapshot.QuantityAnswerPolicy != k12.QuantityAnswerPolicySlotV2 {
 		t.Fatalf("new image task has no frozen quantity policy: %+v", job.Fields.ModelSnapshot)
 	}
 	// 历史快照没有该可选字段，同一来源重放不得按当前策略补写。

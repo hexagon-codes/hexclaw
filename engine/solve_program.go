@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"go/ast"
 	"go/parser"
+	"math/big"
 	"strings"
 
 	"github.com/hexagon-codes/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/internal/elementarymath"
 	"github.com/hexagon-codes/hexclaw/skill"
 )
 
@@ -18,6 +20,25 @@ type SolveSkillOption func(*SolveSkill)
 type solveProgramContractKey struct{}
 type solveUserProblemKey struct{}
 type solveFrozenMathConstraintKey struct{}
+type travelProgramKey struct{}
+
+// WithTravelWorksheetCalculation 绑定本次核实的原题与执行副本。调用方只为采用新计算策略的任务启用。
+func WithTravelWorksheetCalculation(ctx context.Context, wire, source string) context.Context {
+	sheet, ok := elementarymath.ParseTravelWorksheet(source)
+	if !ok {
+		return ctx
+	}
+	values := []string{sheet.Rate, sheet.Parts, sheet.Reciprocal, sheet.HourParts, sheet.Reciprocal}
+	for i, v := range values {
+		n, _ := new(big.Rat).SetString(v)
+		values[i] = formatArithmeticRat(n)
+	}
+	values[0] += sheet.Unit
+	expressions := []string{sheet.Distance + "/(" + sheet.Hours + ")", sheet.Parts, "1/" + sheet.Parts, sheet.HourParts, "1/" + sheet.Parts}
+	plan := solveProgramPlan{Problem: wire, Worked: sheet.Worked(), Mode: "deterministic_elementary_word", Answer: strings.Join(values, "；"),
+		Code: solveProgramPrelude + wordProgram(expressions, []string{sheet.Unit, "", "", "", ""})}
+	return context.WithValue(ctx, travelProgramKey{}, plan)
+}
 
 // 课程依据只由已路由场景冻结，每轮覆盖，不能继承其他请求的方法范围。
 func withSolveFrozenMathConstraint(ctx context.Context, constraint string) context.Context {

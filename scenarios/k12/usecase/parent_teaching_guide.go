@@ -313,6 +313,9 @@ func deterministicParentTeachingGuideForEvidence(
 	if evidence.EvidenceType != EvidenceNumericExec {
 		return ParentTeachingGuide{}, false
 	}
+	if sheet, ok := elementarymath.ParseTravelWorksheet(req.Problem); ok && strings.Contains(req.VerifiedSolution, sheet.Answer()) {
+		return deterministicNumericParentTeachingGuide(req)
+	}
 	if _, ok := elementarymath.ParseUniformTravelProblem(req.Problem); !ok && !parentGuidePureArithmetic(req.Problem) {
 		return ParentTeachingGuide{}, false
 	}

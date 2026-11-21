@@ -12,9 +12,18 @@ import (
 
 	"github.com/hexagon-codes/toolkit/util/logger"
 
+	"github.com/hexagon-codes/hexclaw/internal/elementarymath"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
 )
+
+const travelAnswerPolicyKey = "travel_quantity_policy"
+
+func applyTravelAnswerPolicy(facts *k12.ProblemAssetFacts, policy string) {
+	if policy == k12.QuantityAnswerPolicySlotV2 && facts.Subject == "数学" && elementarymath.IsTravelRateSource(facts.Stem) {
+		facts.AnswerContext[travelAnswerPolicyKey] = policy
+	}
+}
 
 // gradingProblemAssetFacts 为可靠冻结的完整求解输入建立精确身份。
 // 子题须已实际合并清晰公共材料；图表依赖仍沿原求解链，不以相似片段复用答案。
@@ -52,6 +61,9 @@ func executeDurableSolveSource(ctx context.Context, o *GradingOrchestrator, deps
 	job GradingJobView, q RecognizedQuestion, req GradeRequest,
 ) (SolveHomeworkResult, string, error) {
 	facts, eligible := gradingProblemAssetFacts(q, req)
+	if eligible {
+		applyTravelAnswerPolicy(&facts, job.Fields.ModelSnapshot.QuantityAnswerPolicy)
+	}
 	owner, ownerErr := resolveGradingGroundingTextbookOwner(ctx, deps, job)
 	if !eligible || deps.Records == nil || ownerErr != nil || owner == "" {
 		return executeUncachedDurableSolveOperation(ctx, o, deps, job, q, req)
