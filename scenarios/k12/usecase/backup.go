@@ -20,7 +20,7 @@ import (
 // ledger 与其 page asset；v6 纳入 V50/V51/V72/V73 source-action durability
 // closure；v7 纳入当前作品来源、点评与调用停点；v8 纳入教学图；v9 纳入复习来源；
 // v10 纳入当前积累来源及派生依据。旧版校验字节契约继续兼容。
-const HexbakVersion = 10
+const HexbakVersion = 11
 
 // ErrChecksumMismatch 恢复时校验和不符（归档损坏或载荷不一致）。
 var ErrChecksumMismatch = errors.New("hexbak checksum mismatch")
@@ -55,7 +55,8 @@ type Hexbak struct {
 	// ReviewSources v9保留来源关联与恢复所需的冻结来源，不恢复运行任务。
 	ReviewSources *k12storage.ReviewSourceArchive `json:"review_sources,omitempty"`
 	// CurrentAccumulations v10保留当前来源及派生依据；nil表示历史归档未携带。
-	CurrentAccumulations []k12storage.AccumulationArchiveV10 `json:"current_accumulations,omitempty"`
+	CurrentAccumulations []k12storage.AccumulationArchiveV10          `json:"current_accumulations,omitempty"`
+	ReviewSchedules      map[string]k12storage.ArchivedReviewSchedule `json:"review_schedules,omitempty"`
 	// Profile 孩子档案（T2.6 全量导出 PRD §3.12.4-1：不止 records，还含档案）。可空（老归档/无档案）。
 	// 注：学情记忆 + 实例配置的导出需跨子系统新 port（Insights 目前只写不可导），属后续。
 	Profile  *k12.ChildProfile `json:"profile,omitempty"`
@@ -142,6 +143,10 @@ func (d Deps) readHexbakSnapshot(ctx context.Context, agentName string) (*Hexbak
 	if err != nil {
 		return nil, fmt.Errorf("export current creative works: %w", err)
 	}
+	bak.ReviewSchedules, err = d.Records.ExportReviewSchedulesTx(ctx, tx, agentName)
+	if err != nil {
+		return nil, fmt.Errorf("export mistake review schedules: %w", err)
+	}
 	bak.CurrentAccumulations, err = d.Records.ExportAccumulationsArchiveV10Tx(ctx, tx, agentName)
 	if err != nil {
 		return nil, fmt.Errorf("export current accumulations: %w", err)
@@ -224,7 +229,7 @@ func (d Deps) Restore(ctx context.Context, bak *Hexbak) (int, error) {
 		// boundary; compensation cannot close a process-crash window.
 		if d.ArchiveRestorer == nil && (d.Profiles != nil || restoreBak.Profile != nil ||
 			len(restoreBak.CreativeWorkOCR) > 0 || len(restoreBak.ProblemAttempts) > 0 ||
-			restoreBak.ProblemSource != nil || len(restoreBak.CurrentCreativeWorks) > 0 || len(restoreBak.TeachingDiagrams) > 0 || restoreBak.ReviewSources != nil || len(restoreBak.CurrentAccumulations) > 0) {
+			restoreBak.ProblemSource != nil || len(restoreBak.CurrentCreativeWorks) > 0 || len(restoreBak.TeachingDiagrams) > 0 || restoreBak.ReviewSources != nil || len(restoreBak.CurrentAccumulations) > 0 || len(restoreBak.ReviewSchedules) > 0) {
 			return 0, fmt.Errorf("%w: 未配置 records/profile 原子恢复能力", ErrInvalidInput)
 		}
 		if d.ArchiveRestorer != nil {
@@ -236,7 +241,7 @@ func (d Deps) Restore(ctx context.Context, bak *Hexbak) (int, error) {
 					return len(restoreBak.Records), nil
 				}
 				if len(restoreBak.Assets) > 0 || len(restoreBak.CreativeWorkOCR) > 0 ||
-					len(restoreBak.ProblemAttempts) > 0 || restoreBak.ProblemSource != nil || len(restoreBak.CurrentCreativeWorks) > 0 || len(restoreBak.TeachingDiagrams) > 0 || len(restoreBak.CurrentAccumulations) > 0 {
+					len(restoreBak.ProblemAttempts) > 0 || restoreBak.ProblemSource != nil || len(restoreBak.CurrentCreativeWorks) > 0 || len(restoreBak.TeachingDiagrams) > 0 || len(restoreBak.CurrentAccumulations) > 0 || len(restoreBak.ReviewSchedules) > 0 {
 					return 0, fmt.Errorf("%w: 未配置 v%d 内容文件/OCR/Problem-Attempt 原子恢复能力", ErrInvalidInput, restoreBak.Version)
 				}
 			}
@@ -447,6 +452,22 @@ func VerifyHexbak(bak *Hexbak) error {
 	}
 	if sum != bak.Checksum {
 		return ErrChecksumMismatch
+	}
+	if len(bak.ReviewSchedules) != 0 {
+		if bak.Version < 11 {
+			return fmt.Errorf("mistake review schedules are not covered by this archive version")
+		}
+		roots := make(map[string]bool)
+		for _, r := range bak.Records {
+			if r != nil && r.AgentName == bak.AgentName && r.Collection == k12.CollectionMistakes {
+				roots[r.RecordID] = true
+			}
+		}
+		for id, schedule := range bak.ReviewSchedules {
+			if !roots[id] || !schedule.Valid() {
+				return fmt.Errorf("invalid mistake review schedule or archive root %q", id)
+			}
+		}
 	}
 	if bak.Version < 10 && len(bak.CurrentAccumulations) != 0 {
 		return fmt.Errorf("current accumulation archive is not covered by this version")

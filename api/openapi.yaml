@@ -19342,7 +19342,7 @@ paths:
       operationId: k12RecordsBackup
       summary: Read a complete learner backup
       description: >-
-        Returns JSON, not a download attachment; save the whole response as .hexbak. The current format is v10.
+        Returns JSON, not a download attachment; save the whole response as .hexbak. Format v11 includes each mistake's review schedule and the schedule saved when it was paused.
         Records, the learner profile, and source evidence come from the same read snapshot.
         Preserve archive_id/checksum/records/assets/confirmed OCR/problem attempts/source-action/current
         creative-work archives unchanged. It does not include the complete model configuration or all
@@ -41846,6 +41846,19 @@ components:
       type: object
     K12Recordsscenarios_k12_usecase_Hexbak:
       properties:
+        review_schedules:
+          type: object
+          description: v11 起按归档内错题 ID 保存复习安排，包含暂停前的计划。
+          additionalProperties:
+            type: object
+            required: [state, prior_schedule_json, revision, updated_at]
+            properties:
+              state: {type: string, enum: [scheduled, deferred_this_week, suppressed, mastered]}
+              deferred_iso_year: {type: integer}
+              deferred_iso_week: {type: integer}
+              prior_schedule_json: {type: string}
+              revision: {type: integer}
+              updated_at: {type: integer}
         teaching_diagrams:
           type: array
           items:

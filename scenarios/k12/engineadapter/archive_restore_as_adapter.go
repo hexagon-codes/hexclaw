@@ -91,6 +91,10 @@ func (a *ArchiveRestoreAdapter) RestoreArchiveAs(
 			if err != nil {
 				return fmt.Errorf("snapshot current creative works: %w", err)
 			}
+			snapshot.ReviewSchedules, err = a.records.ExportReviewSchedulesTx(ctx, tx, plan.TargetAgent)
+			if err != nil {
+				return err
+			}
 			snapshot.CurrentAccumulations, err = a.records.ExportAccumulationsArchiveV10Tx(ctx, tx, plan.TargetAgent)
 			if err != nil {
 				return fmt.Errorf("snapshot current accumulations: %w", err)
@@ -186,6 +190,11 @@ func (a *ArchiveRestoreAdapter) RestoreArchiveAs(
 			}
 			if err := a.records.ImportAgentRecordsTx(ctx, tx, plan.TargetAgent, migrated.Records); err != nil {
 				return fmt.Errorf("merge owner-rewritten records: %w", err)
+			}
+			if plan.OriginalArchive.Version >= 11 {
+				if err := a.records.RestoreReviewSchedulesTx(ctx, tx, plan.TargetAgent, migrated.Records, migrated.ReviewSchedules); err != nil {
+					return err
+				}
 			}
 			if plan.OriginalArchive.Version >= 10 {
 				if err := a.records.ImportAccumulationsArchiveV10Tx(ctx, tx, plan.TargetAgent, migrated.CurrentAccumulations); err != nil {
@@ -334,6 +343,15 @@ func (a *ArchiveRestoreAdapter) RollbackRestoreAs(
 			if err != nil {
 				return rollbackFailure(fmt.Errorf("snapshot current restore state: %w", err), nil)
 			}
+			if current.Snapshot.Version >= 11 {
+				live, err := a.records.ExportReviewSchedulesTx(ctx, tx, req.TargetAgent)
+				if err != nil {
+					return rollbackFailure(err, nil)
+				}
+				if err := verifyRestoreReviewSchedules(before, live, current.Snapshot, migrated); err != nil {
+					return rollbackFailure(err, nil)
+				}
+			}
 			beforeProblemAttempts, err := a.records.ExportProblemAttemptSnapshotsTx(ctx, tx, req.TargetAgent)
 			if err != nil {
 				return rollbackFailure(fmt.Errorf("snapshot current Problem/Attempt state: %w", err), nil)
@@ -412,6 +430,11 @@ func (a *ArchiveRestoreAdapter) RollbackRestoreAs(
 			}
 			if err := a.records.ReplaceAgentRecordsTx(ctx, tx, req.TargetAgent, current.Snapshot.Records); err != nil {
 				return rollbackFailure(fmt.Errorf("restore pre-migration records: %w", err), nil)
+			}
+			if current.Snapshot.Version >= 11 {
+				if err := a.records.RestoreReviewSchedulesTx(ctx, tx, req.TargetAgent, current.Snapshot.Records, current.Snapshot.ReviewSchedules); err != nil {
+					return rollbackFailure(err, nil)
+				}
 			}
 			if err := a.records.ImportAccumulationsArchiveV10Tx(ctx, tx, req.TargetAgent, current.Snapshot.CurrentAccumulations); err != nil {
 				return rollbackFailure(fmt.Errorf("restore current accumulation snapshot: %w", err), nil)
@@ -848,6 +871,38 @@ func appendRestoreAsJournal(
 		}
 	}
 	return len(entries), nil
+}
+
+// 复习命令同时递增根记录版本；旧包未携带的安排只核根版本，不虚构旧选择。
+func verifyRestoreReviewSchedules(before []*records.AgentRecord, live map[string]k12storage.ArchivedReviewSchedule, snapshot, migrated *usecase.Hexbak) error {
+	expected := make(map[string]*records.AgentRecord)
+	schedules := make(map[string]k12storage.ArchivedReviewSchedule)
+	for _, archive := range []*usecase.Hexbak{snapshot, migrated} {
+		for _, record := range archive.Records {
+			if record.Collection == k12.CollectionMistakes {
+				expected[record.RecordID] = record
+				delete(schedules, record.RecordID)
+			}
+		}
+		for id, schedule := range archive.ReviewSchedules {
+			schedules[id] = schedule
+		}
+	}
+	for _, record := range before {
+		if record.Collection != k12.CollectionMistakes {
+			continue
+		}
+		previous := expected[record.RecordID]
+		schedule, known := schedules[record.RecordID]
+		if previous == nil || record.Version != previous.Version || known && schedule != live[record.RecordID] {
+			return fmt.Errorf("%w: mistake review changed after restore", records.ErrVersionConflict)
+		}
+		delete(expected, record.RecordID)
+	}
+	if len(expected) != 0 {
+		return fmt.Errorf("%w: restored mistake is missing", records.ErrVersionConflict)
+	}
+	return nil
 }
 
 // verifyRestoreAccumulationsUnchanged 防止回退覆盖迁移之后修改的来源事实。

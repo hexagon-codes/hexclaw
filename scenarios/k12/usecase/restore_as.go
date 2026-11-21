@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 
 	"github.com/hexagon-codes/hexclaw/records"
@@ -374,6 +375,7 @@ func cloneHexbak(bak *Hexbak) *Hexbak {
 		out.CurrentAccumulations = nil
 		_ = json.Unmarshal(raw, &out.CurrentAccumulations)
 	}
+	out.ReviewSchedules = maps.Clone(bak.ReviewSchedules)
 	out.ProblemAttempts = cloneProblemAttemptSnapshots(bak.ProblemAttempts)
 	if bak.ProblemSource != nil {
 		cloned := k12storageCloneProblemSourceArchive(*bak.ProblemSource)
