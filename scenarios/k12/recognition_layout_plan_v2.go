@@ -341,9 +341,10 @@ func BuildRecognitionLayoutPlanV2(input RecognitionLayoutPlanInputV2) (Recogniti
 			contextRegion := recognitionLayoutAdjudicationRegion(target.Region, pageBounds)
 			if input.InitialReadMode == RecognitionLayoutManifestWithContentV1 && input.ScopeInput != nil && input.ScopeInput.IncludeSharedReviewRegions &&
 				input.Scope != nil && len(input.Scope.Excluded) == 0 && len(input.Scope.SelectedOrders) == len(input.Targets) {
-				// 只补本目标引用的原图像素。独立核验仍按原框和题号定位，不把公共图示拆成新问题。
+				// 新任务按冻结归属补原像素。旧策略保留原裁片以便恢复相同的物理调用。
 				for _, dep := range input.Scope.Dependencies {
-					if len(dep.ForOrders) > 1 && slices.Contains(dep.ForOrders, target.ManifestOrder) && strings.ContainsAny(dep.Text, "图①②③④⑤⑥⑦⑧⑨⑩") {
+					inScope := input.ScopeInput.SharedReviewPolicy == RecognitionSharedReviewByReference || strings.ContainsAny(dep.Text, "图①②③④⑤⑥⑦⑧⑨⑩")
+					if inScope && len(dep.ForOrders) > 1 && slices.Contains(dep.ForOrders, target.ManifestOrder) {
 						r := dep.Region
 						combined := image.Rect(contextRegion.X, contextRegion.Y, contextRegion.X+contextRegion.Width, contextRegion.Y+contextRegion.Height).
 							Union(image.Rect(r.X, r.Y, r.X+r.Width, r.Y+r.Height)).Intersect(pageBounds)

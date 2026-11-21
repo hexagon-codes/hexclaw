@@ -15,6 +15,7 @@ const RecognitionImageSourceUprightReviewPolicyV1 = "upright_context_v1"
 const RecognitionImageSourceUprightReviewPolicyV2 = "upright_context_v2"
 const RecognitionImageSourceUprightReviewPolicyV3 = "upright_answer_context_v3"
 const RecognitionImageSourceComparisonPolicyV1 = "chinese_blank_layout_v1"
+const RecognitionSharedReviewByReference = "by_reference_v1"
 
 // RecognitionImageSourceUprightReviewEnabled 让新几何策略沿用原直立视图与来源证明。
 func RecognitionImageSourceUprightReviewEnabled(policy string) bool {
@@ -29,6 +30,7 @@ type RecognitionImageScopeInputV1 struct {
 	SourceReviewPolicy         string `json:"source_review_policy,omitempty"`
 	SourceComparisonPolicy     string `json:"source_comparison_policy,omitempty"`
 	IncludeSharedReviewRegions bool   `json:"include_shared_review_regions,omitempty"`
+	SharedReviewPolicy         string `json:"shared_review_policy,omitempty"`
 }
 
 type RecognitionImageScopeDependencyV1 struct {

@@ -21,7 +21,16 @@ func TestIndependentReviewIncludesOnlyReferencedSharedRegionsOfCompleteSelection
 	for _, tc := range []struct {
 		name             string
 		enabled, partial bool
-	}{{"new group", true, false}, {"legacy", false, false}, {"only first", true, true}} {
+		policy, text     string
+		shared           bool
+	}{
+		{"legacy diagram", true, false, "", "图①的尺寸", true},
+		{"legacy dimension text", true, false, "", "r=3 cm；d=4 cm", false},
+		{"new dimensions", true, false, RecognitionSharedReviewByReference, "r=3 cm；d=4 cm", true},
+		{"new shared text", true, false, RecognitionSharedReviewByReference, "两人用时相同", true},
+		{"legacy no sharing", false, false, "", "图①的尺寸", false},
+		{"partial selection", true, true, RecognitionSharedReviewByReference, "r=3 cm；d=4 cm", false},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
 			input := RecognitionLayoutPlanInputV2{PagePNG: pngData.Bytes(), Manifest: RecognitionLayoutManifestSuccessV2{InvocationID: "page", ResultDigest: "sha256:" + strings.Repeat("a", 64)},
 				Targets: []RecognitionLayoutManifestTargetV2{
@@ -30,9 +39,9 @@ func TestIndependentReviewIncludesOnlyReferencedSharedRegionsOfCompleteSelection
 					{ManifestRef: "manifest_0003", ManifestOrder: 3, Region: SourcePixelRegion{X: 850, Y: 350, Width: 75, Height: 40}},
 				},
 				RecognitionFormat: RecognitionLayoutCompactV4, InitialReadMode: RecognitionLayoutManifestWithContentV1, EnableSourceAdjudication: true,
-				ScopeInput: &RecognitionImageScopeInputV1{Version: RecognitionImageScopeVersionV1, SourceReviewPolicy: RecognitionImageSourceUprightReviewPolicyV3, IncludeSharedReviewRegions: tc.enabled},
+				ScopeInput: &RecognitionImageScopeInputV1{Version: RecognitionImageScopeVersionV1, SourceReviewPolicy: RecognitionImageSourceUprightReviewPolicyV3, IncludeSharedReviewRegions: tc.enabled, SharedReviewPolicy: tc.policy},
 				Scope: &RecognitionImageScopeV1{Version: RecognitionImageScopeVersionV1, Source: "inferred", SelectedOrders: []int{1, 2, 3}, Basis: "visible question group",
-					Dependencies: []RecognitionImageScopeDependencyV1{{ForOrders: []int{1, 2}, Region: diagram, Text: "图①的尺寸"}}}}
+					Dependencies: []RecognitionImageScopeDependencyV1{{ForOrders: []int{1, 2}, Region: diagram, Text: tc.text}}}}
 			if tc.partial {
 				input.Scope.SelectedOrders = []int{1, 2}
 				input.Scope.Excluded = []RecognitionImageScopeExclusionV1{{Order: 3, Reason: "outside requested selection"}}
@@ -44,7 +53,7 @@ func TestIndependentReviewIncludesOnlyReferencedSharedRegionsOfCompleteSelection
 			for _, target := range plan.Targets {
 				region := target.AdjudicationRegion
 				visible := region != nil && region.Y <= diagram.Y && region.X <= diagram.X && region.X+region.Width >= diagram.X+diagram.Width
-				if visible != (tc.enabled && !tc.partial && target.ManifestOrder <= 2) || *target.OriginalRegion != input.Targets[target.ManifestOrder-1].Region {
+				if visible != (tc.shared && target.ManifestOrder <= 2) || *target.OriginalRegion != input.Targets[target.ManifestOrder-1].Region {
 					t.Fatalf("target %d review=%+v focus=%+v", target.ManifestOrder, region, target.OriginalRegion)
 				}
 			}
