@@ -387,11 +387,16 @@ func (o *GradingOrchestrator) referenceFromReviewedWorksheet(ctx context.Context
 			if disputedWorksheetQuantity(signals) {
 				return printedReference{}, false, nil
 			}
-			thirdLegible = observation.QuestionCompleteAndLegible || len(signals) > 0 && worksheetSignalsAllowReference(signals, false)
-			if !thirdLegible && !handwritingGap && !hasOnlyTrailingSourceRisk(signals) {
-				return printedReference{}, false, nil
+			reading := observation.QuestionRawTranscription
+			thirdLegible = observation.QuestionCompleteAndLegible || len(signals) > 0 && worksheetReadingAllowsReference(reading, signals, false)
+			if !thirdLegible {
+				if prefix, ok := worksheetBeforeObscuredLastBlank(reading, signals); ok {
+					reading = prefix
+				} else if !handwritingGap && !hasOnlyTrailingSourceRisk(signals) {
+					return printedReference{}, false, nil
+				}
 			}
-			readings = append(readings, observation.QuestionRawTranscription)
+			readings = append(readings, reading)
 		}
 	}
 	ref, ok := corroboratedPrintedReference(q.RawTranscription, target, readings, thirdLegible)
@@ -488,9 +493,15 @@ func worksheetTargetReadings(initial, reviewed string, target k12.RecognitionLay
 	var readings []string
 	for _, read := range pair {
 		value := strings.TrimSpace(read.Recognition.Question)
-		if read.Kind != "question" || read.Recognition.Subject != "数学" || value == "" || !printedNumberMatches(value, target.SourceNumberPath) ||
-			!worksheetSignalsAllowReference(read.Recognition.Signals, handwritingGap) {
+		if read.Kind != "question" || read.Recognition.Subject != "数学" || value == "" || !printedNumberMatches(value, target.SourceNumberPath) {
 			return nil, false
+		}
+		if !worksheetReadingAllowsReference(value, read.Recognition.Signals, handwritingGap) {
+			var ok bool
+			value, ok = worksheetBeforeObscuredLastBlank(value, read.Recognition.Signals)
+			if !ok {
+				return nil, false
+			}
 		}
 		readings = append(readings, value)
 	}
@@ -513,25 +524,8 @@ func corroboratedPrintedReference(source string, target k12.RecognitionLayoutTar
 		}
 		return s
 	}
-	sheet, complete := elementarymath.ParseTravelWorksheet(source)
-	main, travel, rate := elementarymath.TravelQuestionPrefix(source)
-	sameText := thirdLegible
-	for _, text := range readings {
-		sameText = sameText && k12.RecognitionSourceQuestionsEqualV1(plain(text), plain(source))
-		if complete {
-			other, ok := elementarymath.ParseTravelWorksheet(text)
-			var agrees bool
-			if ok {
-				sheet, agrees = sheet.Corroborate(other)
-			}
-			complete = ok && agrees
-		}
-		if rate {
-			_, other, ok := elementarymath.TravelQuestionPrefix(text)
-			rate = ok && other == travel
-		}
-	}
-	if complete {
+	if sheet, confirmedSource, ok := elementarymath.CorroboratedTravelWorksheet(source, readings); ok {
+		source = confirmedSource
 		if !sheet.DerivationPrinted {
 			if at := travelDerivationHeading.FindStringIndex(source); at != nil {
 				source = strings.TrimSpace(source[:at[0]])
@@ -542,6 +536,15 @@ func corroboratedPrintedReference(source string, target k12.RecognitionLayoutTar
 			}
 		}
 		return printedReference{question: source, worksheet: &sheet}, true
+	}
+	main, travel, rate := elementarymath.TravelQuestionPrefix(source)
+	sameText := thirdLegible
+	for _, text := range readings {
+		sameText = sameText && k12.RecognitionSourceQuestionsEqualV1(plain(text), plain(source))
+		if rate {
+			_, other, ok := elementarymath.TravelQuestionPrefix(text)
+			rate = ok && other == travel
+		}
 	}
 	if sameText {
 		return printedReference{question: source}, true
@@ -562,16 +565,154 @@ var worksheetWritingMention = regexp.MustCompile(`(?i)手写|笔迹|笔画|填�
 var worksheetOccludedObject = regexp.MustCompile(`(?:盖住|遮住|覆盖|挡住|遮挡)(?:了|住)?(.+)$`)
 var worksheetObstruction = regexp.MustCompile(`盖住|遮住|覆盖|挡住|遮挡`)
 var worksheetKnownAnswerObject = regexp.MustCompile(`^(?:了)?(?:原有的|部分|该|这个)?(?:手写|笔迹|填字|作答|答案栏|答案框|方框|填空框|横线)`)
-var worksheetAlternativeValues = regexp.MustCompile(`(?i)[0-9][^，。；,;]{0,16}(?:还是|或(?:者)?|\bor\b)[^，。；,;]{0,8}[0-9]`)
+
+// 两种候选读数可以使用不同的数词写法。判断的是原文观察所指的对象，不能据此猜一个值。
+const worksheetNumerals = `\p{Nd}零〇两兩一二三四五六七八九十百千万萬亿億半`
+
+var worksheetAlternativeValues = regexp.MustCompile(`(?i)[` + worksheetNumerals + `]+[^` + worksheetNumerals + `，。；,;]{0,16}(?:还是|或(?:者)?|\bor\b)[^，。；,;]{0,8}[` + worksheetNumerals + `]+`)
+var worksheetOperandOwner = regexp.MustCompile(`路程|距离|速度|用时|时长|单价|总价|长度|面积|体积|半径|直径`)
 var worksheetAnswerOwner = regexp.MustCompile(`(?i)手写(?:的)?(?:答案|数[字值]|分数|结果)|学生(?:写|填|的答案)|作答|填字|答案[栏框]|写的是|filled answer|handwritten answer`)
-var worksheetObservationContinuation = regexp.MustCompile(`^(?:未将|未能|无法|不能|难以|不确定|是否|辨认不出|以\s*[?？]\s*保留)`)
+var worksheetObservationContinuation = regexp.MustCompile(`^(?:(?:填空内容|空内内容)?(?:无法|不能|难以|不确定)|未将|未能|是否|辨认不出|以\s*[?？]\s*保留)`)
 var worksheetReadableRemainder = regexp.MustCompile(`^(?:分母|分子|其余|余下)[^，。；]*(?:可读|可辨|清晰可辨)$`)
 var worksheetClauseBreak = regexp.MustCompile(`[，,。；;！!]+|但是|不过|但`)
+
+var quotedWorksheetSlot = regexp.MustCompile(`“[^”\n]+”|"[^"\n]+"|「[^」\n]+」`)
+var worksheetSlotLabel = regexp.MustCompile(`^([\p{Han}]{2,16})(?:\(\)|□)$`)
+
+func quotesFrozenAnswerSlot(source, label string) bool {
+	match := worksheetSlotLabel.FindStringSubmatch(label)
+	if match == nil || worksheetPrintedRisk.MatchString(match[1]) {
+		return false
+	}
+	_, tail, found := strings.Cut(source, match[1])
+	if !found || strings.Contains(tail, match[1]) {
+		return false
+	}
+	after, blank := strings.CutPrefix(tail, "()")
+	if !blank {
+		after, blank = strings.CutPrefix(tail, "□")
+	}
+	return blank && !strings.HasPrefix(after, "/")
+}
+
+// 复读中引用的空位标签属于作答位置。只在原题精确出现一次、确有空框、观察明确指向填入
+// 内容时才合并引用，避免引号里的句号被拆成另一条风险，也不吞掉引用外的数值或印刷风险。
+func worksheetReadingAllowsReference(question string, signals []string, handwritingGap bool) bool {
+	compact := func(s string) string {
+		return strings.Map(func(r rune) rune {
+			switch {
+			case unicode.IsSpace(r):
+				return -1
+			case r == '（':
+				return '('
+			case r == '）':
+				return ')'
+			}
+			return r
+		}, s)
+	}
+	source := compact(question)
+	for _, signal := range signals {
+		if strings.Contains(signal, "填空内容") || worksheetWritingMention.MatchString(signal) {
+			signal = quotedWorksheetSlot.ReplaceAllStringFunc(signal, func(quote string) string {
+				label := strings.TrimRight(compact(strings.Trim(quote, "“”\"「」")), "。.")
+				if quotesFrozenAnswerSlot(source, label) {
+					return "作答空位"
+				}
+				return quote
+			})
+		}
+		if !worksheetSignalsAllowReference([]string{signal}, handwritingGap) {
+			return false
+		}
+	}
+	return true
+}
+
+// 将页尾观察绑定到题面的演算或算理问项。只把有风险的部分截去，前面的图示与各空仍须独立读数一致。
+func worksheetBeforeObscuredLastBlank(question string, signals []string) (string, bool) {
+	end := len(question)
+	for _, signal := range signals {
+		if worksheetReadingAllowsReference(question, []string{signal}, false) {
+			continue
+		}
+		located := false
+		for _, part := range worksheetClauseBreak.Split(signal, -1) {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			if worksheetOperandOwner.MatchString(part) || worksheetAlternativeValues.MatchString(part) || worksheetEarlierPrintRisk.MatchString(part) {
+				return "", false
+			}
+			if worksheetEndPosition.MatchString(part) {
+				heading := travelReasonHeading
+				switch {
+				case worksheetReasonSlot.MatchString(part):
+				case worksheetEndEquation.MatchString(part):
+					heading = travelDerivationHeading
+				default:
+					return "", false
+				}
+				at := heading.FindStringIndex(question)
+				if at == nil {
+					return "", false
+				}
+				located, end = true, min(end, at[0])
+				continue
+			}
+			if !located || !worksheetWritingMention.MatchString(part) && !worksheetObservationContinuation.MatchString(part) {
+				return "", false
+			}
+		}
+		if !located {
+			return "", false
+		}
+	}
+	if end == len(question) {
+		return "", false
+	}
+	prefix := strings.TrimSpace(question[:end])
+	sheet, ok := elementarymath.ParseTravelWorksheet(prefix)
+	return prefix, ok && sheet.BlankCount == 4
+}
+
+var worksheetEndPosition = regexp.MustCompile(`末尾|最后|底部|下(?:边)?缘|题末`)
+var worksheetReasonSlot = regexp.MustCompile(`依据|算理|理由|填空|空格|空位|括号`)
+var worksheetEndEquation = regexp.MustCompile(`推算式|计算式|演算|算式|等式|等号链`)
+var worksheetEarlierPrintRisk = regexp.MustCompile(`主问|首行|题干|上部|条件|单位|运算符|图示|尺寸|整页`)
 
 const worksheetPrintedSubject = `(?:印刷(?:的)?(?:题干|题面|原文|文字|条件|内容|部分|数值)?|题干|题意|题面|原题|主问|主要条件|题目条件|条件|图示|尺寸|运算符|算式|单位|数量关系|题号)`
 
 var worksheetPrintedClear = regexp.MustCompile(`^` + worksheetPrintedSubject + `(?:(?:、|和|及|与)` + worksheetPrintedSubject + `)*(?:均|都|仍|完整|完全)?(?:清晰可辨|完整清晰|清晰完整|清晰|清楚|完整|可辨认|可读|明确)$`)
 var worksheetPrintedRisk = regexp.MustCompile(`(?i)题干|题意|题面|原题|主问|条件|印刷|运算符|算式|单位|数量关系|题号|图示|尺寸|整页|半页|冲突|不一致|printed|question|condition|operator|unit|conflict|source_gap`)
+
+// 只继承候选数值自己的主语。“学生写的路程”属于作答；另一观察中的路程仍属于题面。
+func worksheetAnswerOwnsAlternatives(clause string, inherited bool) bool {
+	for _, pair := range worksheetAlternativeValues.FindAllStringIndex(clause, -1) {
+		before := clause[:pair[0]]
+		answers := worksheetAnswerOwner.FindAllStringIndex(before, -1)
+		operands := worksheetOperandOwner.FindAllStringIndex(before, -1)
+		if len(operands) == 0 {
+			if len(answers) == 0 && !inherited && !worksheetAnswerSlotLocation.MatchString(before) {
+				return false
+			}
+			continue
+		}
+		if len(answers) == 0 {
+			return false
+		}
+		answer, operand := answers[len(answers)-1], operands[len(operands)-1]
+		if answer[0] < operand[0] {
+			switch strings.TrimSpace(before[answer[1]:operand[0]]) {
+			case "", "的", "中的", "里的", "中", "里":
+			default:
+				return false
+			}
+		}
+	}
+	return true
+}
 
 func worksheetSignalsAllowReference(signals []string, handwritingGap bool) bool {
 	for _, signal := range signals {
@@ -597,12 +738,13 @@ func worksheetSignalsAllowReference(signals []string, handwritingGap bool) bool 
 			if worksheetObscuresSource(clause) {
 				return false
 			}
-			explicitAnswer := worksheetAnswerOwner.MatchString(clause) || worksheetAnswerSlotLocation.MatchString(clause)
-			if worksheetAlternativeValues.MatchString(clause) && !explicitAnswer && !answerOwner {
+			writtenAnswer := worksheetAnswerOwner.MatchString(clause)
+			explicitAnswer := writtenAnswer || worksheetAnswerSlotLocation.MatchString(clause)
+			if !worksheetAnswerOwnsAlternatives(clause, answerOwner) {
 				return false
 			}
 			answerOwner = answerOwner || explicitAnswer
-			if worksheetWritingMention.MatchString(clause) ||
+			if writtenAnswer || worksheetWritingMention.MatchString(clause) ||
 				worksheetAnswerSlotLocation.MatchString(clause) && worksheetWritingMention.MatchString(observation) {
 				handwritingScope = true
 				continue

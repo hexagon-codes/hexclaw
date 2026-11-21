@@ -29,7 +29,7 @@ func WithTravelWorksheetCalculation(ctx context.Context, wire, source string) co
 		return ctx
 	}
 	slots := sheet.WrittenValues()
-	values := append([]string{sheet.Rate}, slots[:]...)
+	values := append([]string{sheet.Rate}, slots[:sheet.BlankCount]...)
 	for i, v := range values {
 		n, _ := new(big.Rat).SetString(v)
 		values[i] = formatArithmeticRat(n)
@@ -45,7 +45,7 @@ func WithTravelWorksheetCalculation(ctx context.Context, wire, source string) co
 		}
 	}
 	plan := solveProgramPlan{Problem: wire, Worked: sheet.Worked(), Mode: "deterministic_elementary_word", Answer: strings.Join(values, "；"),
-		Code: solveProgramPrelude + wordProgram(expressions, []string{sheet.Unit, "", "", "", ""})}
+		Code: solveProgramPrelude + wordProgram(expressions[:len(values)], append([]string{sheet.Unit}, make([]string, sheet.BlankCount)...))}
 	return context.WithValue(ctx, travelProgramKey{}, plan)
 }
 

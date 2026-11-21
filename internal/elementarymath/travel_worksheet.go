@@ -11,11 +11,12 @@ import (
 	"github.com/hexagon-codes/hexclaw/internal/mathtext"
 )
 
-// TravelWorksheet 是由图示、四个印刷空和带括号的乘法等式共同确定的份数题。
+// TravelWorksheet 保存匀速份数题的主问，以及实际读到的连续印刷问项。
 type TravelWorksheet struct {
 	UniformTravelProblem
 	Parts, HourParts, Reciprocal, PartDistance, Rate string
 	FactorSlots                                      [2]FractionSlot
+	BlankCount                                       int
 	DerivationPrinted, ReasonRequested               bool
 }
 
@@ -35,7 +36,14 @@ var travelEmptyFractionText = regexp.MustCompile(`(?:\(\s*□\s*\)|□)\s*/\s*(?
 var travelDiagramCaption = regexp.MustCompile(`^(?:线段|示意)?图(?:示|中)?(?:文字|标注)?:`)
 var travelDiagramMeasurement = regexp.MustCompile(`^([0-9]+(?:/[0-9]+)?)小时(?:行走|走|步行|行驶|骑行)了?(\?|[0-9]+)(km|m|米)`)
 var figureConclusion = regexp.MustCompile(`^(?:(?:从|由|根据)(?:上图|图中|图示|线段图)(?:中)?(?:可以|可|能)?(?:看出|得出|得到|知道|知|见|得):?)?$`)
-var travelPartCountBlanks = regexp.MustCompile(`^已知(?:\(\)|□)份(?:是|对应)([0-9]+)(km|米|m)[,。](?:可以)?先求(?:出)?(?:这样的)?(?:1|一(?:\(\)|□))份(?:是)?多少[,。](?:也就是|即)([0-9]+)÷([0-9]+)=([0-9]+)×([^;。]+)[;。]再求(?:出)?(?:这样的)?一?(?:\(\)|□)份(?:是)?多少[,。](?:也就是|即)([0-9]+)×([^×。]+)×([0-9]+)。?$`)
+var travelKnownParts = regexp.MustCompile(`^已知(?:\(\)|□)份(?:是|对应)([0-9]+)(km|米|m)`)
+var travelOnePart = regexp.MustCompile(`^[,。](?:可以)?先求(?:出)?(?:这样的)?(?:1|一(?:\(\)|□))份(?:是)?多少`)
+
+const travelFractionSlot = `(□/[0-9]+|[0-9]+/□|\(\)|□)`
+
+var travelPartEquation = regexp.MustCompile(`^[,。](?:也就是|即)([0-9]+)÷([0-9]+)=([0-9]+)×` + travelFractionSlot)
+var travelHourParts = regexp.MustCompile(`^[;。]再求(?:出)?(?:这样的)?一?(?:\(\)|□)份(?:是)?多少`)
+var travelHourEquation = regexp.MustCompile(`^[,。](?:也就是|即)([0-9]+)×` + travelFractionSlot + `×([0-9]+)$`)
 var travelWorksheetPunctuation = strings.NewReplacer("（", "(", "）", ")", "：", ":", "；", ";", "，", ",", "？", "?", "＝", "=", "“", "\"",
 	"”", "\"", "这样的一1份", "这样的1份", "这样的一份", "这样的1份", "公里", "km", "千米", "km")
 
@@ -91,39 +99,18 @@ func ParseTravelWorksheet(source string) (TravelWorksheet, bool) {
 	part := new(big.Rat).Quo(distance, parts)
 	rate := new(big.Rat).Quo(distance, time)
 	unit := travelWorksheetPunctuation.Replace(primary.Unit)
-	tail := strings.Map(func(r rune) rune {
-		if unicode.IsSpace(r) {
-			return -1
-		}
-		return r
-	}, travelWorksheetPunctuation.Replace(source[end:]))
-	tail = strings.ReplaceAll(tail, "(□)", "()")
+	tail := compactTravelWorksheet(source[end:])
 	_, tail, _ = strings.Cut(tail, "?")
-	tail = travelDiagramCaption.ReplaceAllString(tail, "")
 	// 以“已知……份”的实际问项分界。图后可以有承接词，也可以直接开始提问。
 	start := strings.Index(tail, "已知")
 	if start < 0 || !travelDiagramMatches(tail[:start], printedTime, q, d, unit) {
 		return TravelWorksheet{}, false
 	}
 	blanks, tail, hasDerivation := strings.Cut(tail[start:], "由此推算出:")
-	slots := travelPartCountBlanks.FindStringSubmatch(blanks)
-	if slots == nil || slots[1] != d || slots[2] != unit || slots[3] != d || slots[4] != p || slots[5] != d || slots[7] != d || slots[9] != q {
+	sheet := TravelWorksheet{UniformTravelProblem: primary, Parts: p, HourParts: q, Reciprocal: new(big.Rat).Inv(parts).RatString(), PartDistance: part.RatString(), Rate: rate.RatString(), DerivationPrinted: hasDerivation}
+	if !sheet.readPrintedBlanks(blanks, unit) || hasDerivation && sheet.BlankCount != 4 {
 		return TravelWorksheet{}, false
 	}
-	var factors [2]FractionSlot
-	for i, factor := range []string{slots[6], slots[8]} {
-		switch factor {
-		case "()", "□":
-			factors[i] = WholeFraction
-		case "□/" + p:
-			factors[i] = NumeratorOnly
-		case "1/□":
-			factors[i] = DenominatorOnly
-		default:
-			return TravelWorksheet{}, false
-		}
-	}
-	sheet := TravelWorksheet{UniformTravelProblem: primary, Parts: p, HourParts: q, Reciprocal: new(big.Rat).Inv(parts).RatString(), PartDistance: part.RatString(), Rate: rate.RatString(), FactorSlots: factors, DerivationPrinted: hasDerivation}
 	if !hasDerivation {
 		return sheet, true
 	}
@@ -145,8 +132,144 @@ func ParseTravelWorksheet(source string) (TravelWorksheet, bool) {
 	return sheet, true
 }
 
+func compactTravelWorksheet(text string) string {
+	text = strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) {
+			return -1
+		}
+		return r
+	}, travelWorksheetPunctuation.Replace(text))
+	return strings.ReplaceAll(text, "(□)", "()")
+}
+
+// CorroboratedTravelWorksheet 取各份独立读数的共同问项。转写较长的一份只提供前缀比对基准，
+// 不能增加短读数所未确认的问项；被选为展示原文的那份也参加核对。
+func CorroboratedTravelWorksheet(source string, readings []string) (TravelWorksheet, string, bool) {
+	texts := append([]string{source}, readings...)
+	var sheet TravelWorksheet
+	var reference string
+	for _, text := range texts {
+		if parsed, ok := ParseTravelWorksheet(text); ok && parsed.BlankCount > sheet.BlankCount {
+			sheet, reference = parsed, text
+		}
+	}
+	if reference == "" {
+		return TravelWorksheet{}, "", false
+	}
+	confirmed := reference
+	for _, text := range texts {
+		other, excerpt, ok := travelWorksheetReading(reference, text)
+		if !ok {
+			return TravelWorksheet{}, "", false
+		}
+		if other.BlankCount < sheet.BlankCount || text == source && other.BlankCount == sheet.BlankCount {
+			confirmed = excerpt
+		}
+		if sheet, ok = sheet.Corroborate(other); !ok {
+			return TravelWorksheet{}, "", false
+		}
+	}
+	return sheet, confirmed, true
+}
+
+// 允许复读在下一问的句中结束。只有余下文字确实是参考原文的前缀，
+// 才能截到上一完整分句。任何新增条件、操作数或运算符差异仍交给原来的分歧处理。
+func travelWorksheetReading(reference, reading string) (TravelWorksheet, string, bool) {
+	if sheet, ok := ParseTravelWorksheet(reading); ok {
+		return sheet, reading, true
+	}
+	tail := func(s string) string {
+		_, s, found := strings.Cut(s, "已知")
+		if !found {
+			return ""
+		}
+		s, _ = mathtext.ProjectReadable(TravelFractionBlankLayout(s))
+		return compactTravelWorksheet(s)
+	}
+	observed, complete := tail(reading), tail(reference)
+	if observed == "" || len(observed) >= len(complete) || !strings.HasPrefix(complete, observed) {
+		return TravelWorksheet{}, "", false
+	}
+	// 四个空最多分作两次份数和两次算式。只枚举问项间已有的句界，保留原文作为求解输入。
+	start := strings.Index(reading, "已知")
+	for end := len(reading); end > start; {
+		cut := strings.LastIndexAny(reading[start:end], "；;。，,")
+		if cut < 0 {
+			break
+		}
+		end = start + cut
+		if sheet, ok := ParseTravelWorksheet(reading[:end]); ok {
+			return sheet, strings.TrimSpace(reading[:end]), true
+		}
+	}
+	return TravelWorksheet{}, "", false
+}
+
+// 只在完整的印刷分句边界接受截短的读数。现存字符与算式有冲突时不能按截短处理。
+func (s *TravelWorksheet) readPrintedBlanks(source, unit string) bool {
+	tail := strings.TrimRight(source, ";。,")
+	consume := func(pattern *regexp.Regexp) []string {
+		fields := pattern.FindStringSubmatch(tail)
+		if fields != nil {
+			tail = tail[len(fields[0]):]
+		}
+		return fields
+	}
+	known := consume(travelKnownParts)
+	if known == nil || known[1] != s.Distance || known[2] != unit {
+		return false
+	}
+	s.BlankCount = 1
+	if tail == "" {
+		return true
+	}
+	if consume(travelOnePart) == nil {
+		return false
+	}
+	if tail == "" {
+		return true
+	}
+	first := consume(travelPartEquation)
+	if first == nil || first[1] != s.Distance || first[2] != s.Parts || first[3] != s.Distance || !s.readFactor(0, first[4]) {
+		return false
+	}
+	s.BlankCount = 2
+	if tail == "" {
+		return true
+	}
+	if consume(travelHourParts) == nil {
+		return false
+	}
+	s.BlankCount = 3
+	if tail == "" {
+		return true
+	}
+	last := consume(travelHourEquation)
+	if last == nil || last[1] != s.Distance || last[3] != s.HourParts || !s.readFactor(1, last[2]) {
+		return false
+	}
+	s.BlankCount = 4
+	return true
+}
+
+func (s *TravelWorksheet) readFactor(index int, printed string) bool {
+	switch printed {
+	case "()", "□":
+		s.FactorSlots[index] = WholeFraction
+	case "□/" + s.Parts:
+		s.FactorSlots[index] = NumeratorOnly
+	case "1/□":
+		s.FactorSlots[index] = DenominatorOnly
+	default:
+		return false
+	}
+	return true
+}
+
 func travelDiagramMatches(diagram, hours, hourParts, distance, unit string) bool {
 	type measurement struct{ time, distance string }
+	diagram, wrapped := strings.CutPrefix(diagram, "(")
+	diagram = travelDiagramCaption.ReplaceAllString(diagram, "")
 	expected := map[measurement]bool{{"1", "?"}: true, {"1/" + hourParts, "?"}: true, {hours, distance}: true}
 	for len(expected) != 0 {
 		parts := travelDiagramMeasurement.FindStringSubmatch(diagram)
@@ -159,6 +282,13 @@ func travelDiagramMatches(diagram, hours, hourParts, distance, unit string) bool
 		}
 		delete(expected, m)
 		diagram = strings.TrimLeft(diagram[len(parts[0]):], ";。")
+	}
+	if wrapped {
+		var closed bool
+		diagram, closed = strings.CutPrefix(diagram, ")")
+		if !closed {
+			return false
+		}
 	}
 	return figureConclusion.MatchString(diagram)
 }
@@ -185,6 +315,8 @@ func TravelWorksheetFor(ctx context.Context, source string) (TravelWorksheet, bo
 func (s TravelWorksheet) Corroborate(other TravelWorksheet) (TravelWorksheet, bool) {
 	slots := other.FactorSlots
 	other.FactorSlots = s.FactorSlots
+	s.BlankCount = min(s.BlankCount, other.BlankCount)
+	other.BlankCount = s.BlankCount
 	s.ReasonRequested = s.ReasonRequested && other.ReasonRequested
 	other.ReasonRequested = s.ReasonRequested
 	s.DerivationPrinted = s.DerivationPrinted && other.DerivationPrinted
@@ -193,7 +325,9 @@ func (s TravelWorksheet) Corroborate(other TravelWorksheet) (TravelWorksheet, bo
 		return TravelWorksheet{}, false
 	}
 	for i, slot := range slots {
-		if s.FactorSlots[i] != slot {
+		if 2*i+2 > s.BlankCount {
+			s.FactorSlots[i] = WholeFraction
+		} else if s.FactorSlots[i] != slot {
 			s.FactorSlots[i] = UncertainFractionSlot
 		}
 	}
@@ -220,7 +354,8 @@ func (s TravelWorksheet) Answer() string {
 			values[2*i+1] = fmt.Sprintf("%s（整格写分数，只空分子填1，只空分母填%s）", s.Reciprocal, s.Parts)
 		}
 	}
-	answer := fmt.Sprintf("每小时走%s%s。按题面四个空依次填写 %s。", s.Rate, s.Unit, strings.Join(values[:], "、"))
+	labels := [...]string{"", "第一个空填写", "前两个空依次填写", "前三个空依次填写", "按题面四个空依次填写"}
+	answer := fmt.Sprintf("每小时走%s%s。%s %s。", s.Rate, s.Unit, labels[s.BlankCount], strings.Join(values[:s.BlankCount], "、"))
 	if s.ReasonRequested {
 		answer += "等式的依据是乘法结合律。"
 	}

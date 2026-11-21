@@ -44,6 +44,36 @@ func TestWorksheetReferenceRequiresTwoIndependentCompletePrintedReadings(t *test
 	if !ok || short.question != main || short.worksheet != nil {
 		t.Fatal("a disputed worked step changed the independently confirmed rate question")
 	}
+	prefix, _, _ := strings.Cut(source, "；再求")
+	ref, ok := corroboratedPrintedReference(source, target, []string{source, prefix + "；再求"}, true)
+	if !ok || ref.worksheet == nil || ref.worksheet.BlankCount != 2 || ref.question != prefix {
+		t.Fatal("a matching unfinished next prompt hid the two complete blanks")
+	}
+	ref, ok = corroboratedPrintedReference(prefix+"；再求", target, []string{source, prefix + "；再求"}, false)
+	if !ok || ref.worksheet == nil || ref.worksheet.BlankCount != 2 || ref.question != prefix {
+		t.Fatal("selecting the truncated reread as the canonical source hid the complete blanks")
+	}
+	ref, ok = corroboratedPrintedReference(source, target, []string{source, prefix + "；另外增加6份"}, true)
+	if !ok || ref.worksheet != nil || ref.question != main {
+		t.Fatal("unexpected added conditions were trimmed as a matching prefix")
+	}
+	for _, note := range []string{"末尾“依据是”后的填空被图像下边缘截断，无法可靠辨认。", "目标下缘处的印刷内容及最后填空被图像裁切；该处可能还有主动手写内容。"} {
+		before, safe := worksheetBeforeObscuredLastBlank(source, []string{note})
+		if !safe || strings.Contains(before, "推算过程中") {
+			t.Fatal("a cropped final prompt obscured the independent earlier blanks")
+		}
+		ref, ok = corroboratedPrintedReference(source, target, []string{source, before}, false)
+		if !ok || ref.worksheet == nil || ref.worksheet.BlankCount != 4 || ref.worksheet.ReasonRequested {
+			t.Fatal("incorrect extent for an obscured last prompt")
+		}
+		if _, safe = worksheetBeforeObscuredLastBlank(source, []string{note, "图上的路程也不清楚。"}); safe {
+			t.Fatal("unreadable distance accepted because another risk concerned the last blank")
+		}
+	}
+	before, safe := worksheetBeforeObscuredLastBlank(source, []string{"末尾依据处被遮挡，无法确定是否有填写内容。", "推算式末尾的数字及其是否为手写填入不清楚。"})
+	if !safe || strings.Contains(before, "由此推算出") || !strings.Contains(before, "再求") {
+		t.Fatal("a late annotation about the printed calculation should only restrict that calculation and its justification")
+	}
 	for _, tc := range []struct {
 		name, question, signal, ref string
 		ok                          bool
@@ -57,6 +87,15 @@ func TestWorksheetReferenceRequiresTwoIndependentCompletePrintedReadings(t *test
 		{"writing hides distance", source, "手写笔迹盖住了路程数字，无法确定是2千米还是7千米。", "t1", false},
 		{"distance hidden by writing", source, "路程数字被手写笔迹遮住，无法确定是2千米还是7千米。", "t1", false},
 		{"two unattributed values", source, "笔迹较乱，无法确定路程是2千米还是7千米。", "t1", false},
+		{"Chinese quantity alternatives", source, "笔迹较乱，无法确定路程是两千米还是七千米。", "t1", false},
+		{"different object after student observation", source, "手写答案模糊，无法确定路程是两千米还是7千米。", "t1", false},
+		{"different object in one clause", source, "手写答案模糊且无法确定路程是两千米还是7千米。", "t1", false},
+		{"distance as student's answer", source, "学生写的路程是两千米还是七千米，手写答案无法确认。", "t1", true},
+		{"two handwritten Chinese values", source, "手写答案模糊，无法确定是两千米还是七千米。", "t1", true},
+		{"quoted printed blank at crop edge", source, "底部“依据是（ ）。”处在裁切边缘，填空内容无法确认。", "t1", true},
+		{"quoted blank and disputed distance", source, "底部“依据是（ ）。”处在裁切边缘，填空内容无法确认，无法确定路程是两或七千米。", "t1", false},
+		{"quoted blank absent from the source", source, "底部“面积是（ ）。”处在裁切边缘，填空内容无法确认。", "t1", false},
+		{"equivalent empty box", strings.Replace(source, "依据是（ ）", "依据是□", 1), "底部“依据是（ ）。”处在裁切边缘，填空内容无法确认。", "t1", true},
 		{"two student values", source, "手写答案模糊，无法确定是2千米还是7千米。", "t1", true},
 		{"printed risk", source, "题干和手写答案都缺损", "t1", false},
 		{"different quantity", strings.Replace(source, "走了2千米", "走了4千米", 1), "手写答案模糊", "t1", false},

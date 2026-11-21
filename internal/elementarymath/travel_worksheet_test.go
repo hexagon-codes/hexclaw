@@ -21,11 +21,23 @@ func TestTravelWorksheetSeparatesPartCountFromElapsedTime(t *testing.T) {
 			t.Fatalf("partial reading lost known blanks or invented the final prompt: %+v", confirmed)
 		}
 	}
+	for count, end := range []string{"，可以先求", "；再求这样的", "，也就是6×（ ）×5"} {
+		partial, _, found := strings.Cut(src, end)
+		read, ok := ParseTravelWorksheet(partial)
+		known, agrees := sheet.Corroborate(read)
+		if !found || !ok || !agrees || known.BlankCount != count+1 || known.ReasonRequested || strings.Contains(known.Answer(), "四个空") {
+			t.Fatalf("lost verified prefix at slot %d: %+v", count+1, known)
+		}
+		if count == 1 && !strings.Contains(known.Answer(), "前两个空依次填写 3、1/3") {
+			t.Fatalf("partial answer: %s", known.Answer())
+		}
+	}
 	fractions := strings.ReplaceAll(src, "×（ ）", `×\frac{\square}{\square}`)
 	for _, text := range []string{
 		fractions,
 		strings.ReplaceAll(fractions, `\frac{\square}{\square}`, "□/□"),
 		strings.Replace(fractions, "图示：", "图：", 1),
+		strings.Replace(strings.Replace(fractions, "图示：", "（图示文字：", 1), "从上图看出", "）从上图看出", 1),
 		strings.Replace(fractions, "从上图看出：", "从上图得出：", 1),
 		strings.Replace(fractions, "从上图看出：", "", 1),
 	} {
