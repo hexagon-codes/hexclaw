@@ -310,9 +310,10 @@ type runtimeToolExecutor struct {
 	// 流式请求用现有工具心跳续传活动帧；非流式调用不绑定回调。
 	onActivity func(context.Context) error
 
-	mu             sync.Mutex
-	repeatGuard    hruntime.ToolRepeatGuard
-	unknownActions map[string]hruntime.ToolResult
+	mu                sync.Mutex
+	repeatGuard       hruntime.ToolRepeatGuard
+	unknownActions    map[string]hruntime.ToolResult
+	missingAttachment map[string]bool
 	// 只记录本次运行已经观察到的可信浏览器身份，不能代替真实目标绑定。
 	browserObservations []runtimeBrowserObservation
 	browserRepeats      map[string]*runtimeBrowserRepeatSegment
@@ -358,6 +359,7 @@ func (e *runtimeToolExecutor) Execute(ctx context.Context, call llm.ToolCall) (o
 	}
 	sourceIdentity := e.browserSourceIdentity(sourceServer)
 	mediaOrdinal := ""
+	recheckingAttachment := false
 	e.mu.Lock()
 	previous, unknown := e.unknownActions[unknownKey]
 	e.mu.Unlock()
@@ -386,7 +388,13 @@ func (e *runtimeToolExecutor) Execute(ctx context.Context, call llm.ToolCall) (o
 		if count > limit && guardName == "media_generate" {
 			mediaOrdinal = e.repeatedMediaOrdinal(ctx, unknownKey, count)
 		}
-		if count > limit && mediaOrdinal == "" {
+		if count > limit && guardName == "file_ops" && guardArgs["action"] == "attach" {
+			e.mu.Lock()
+			recheckingAttachment = e.missingAttachment[unknownKey]
+			delete(e.missingAttachment, unknownKey)
+			e.mu.Unlock()
+		}
+		if count > limit && mediaOrdinal == "" && !recheckingAttachment {
 			trace.L(ctx).Warn("tool-loop repeat guard tripped",
 				"stage", "tool_execute", "tool", call.Name, "tool_call_id", call.ID, "arguments", argumentsForLog,
 				"reason", "repeat_guard", "err", repeatToolCallBlockedError, "identical_calls", count, "elapsed_ms", time.Since(started).Milliseconds())
@@ -458,6 +466,20 @@ func (e *runtimeToolExecutor) Execute(ctx context.Context, call llm.ToolCall) (o
 		}
 		msg = toolExecutionExplanation(msg, raw)
 		outcome := hruntime.ToolResult{Content: msg, Raw: raw, Error: err.Error(), Status: hruntime.ToolStatusError, DurationMs: time.Since(started).Milliseconds()}
+		var fileErr *skill.ExecutionError
+		if guardName == "file_ops" && guardArgs["action"] == "attach" && errors.As(err, &fileErr) &&
+			fileErr.Detail.Reason == skill.AttachmentSourceMissing {
+			if recheckingAttachment {
+				outcome.Stop = true
+			} else {
+				e.mu.Lock()
+				if e.missingAttachment == nil {
+					e.missingAttachment = make(map[string]bool)
+				}
+				e.missingAttachment[unknownKey] = true
+				e.mu.Unlock()
+			}
+		}
 		if detail := toolExecutionDetail(raw); detail != nil && detail.Outcome == "unknown" && sideEffect != hruntime.SideEffectReadOnly {
 			e.mu.Lock()
 			e.unknownActions[unknownKey] = outcome

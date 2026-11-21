@@ -118,6 +118,9 @@ func (s *FileOpsSkill) attachFile(ctx context.Context, path string) (*skill.Resu
 	}
 	file, err := os.Open(resolved)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, &skill.ExecutionError{Detail: skill.ToolExecutionDetail{Phase: "open_file", Action: "attach", Outcome: "failure", Reason: skill.AttachmentSourceMissing}, Err: err}
+		}
 		return nil, fmt.Errorf("open file for attachment: %w", err)
 	}
 	defer file.Close()

@@ -10,7 +10,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -24,6 +27,7 @@ import (
 	"github.com/hexagon-codes/hexclaw/adapter"
 	hexmcp "github.com/hexagon-codes/hexclaw/mcp"
 	"github.com/hexagon-codes/hexclaw/skill"
+	"github.com/hexagon-codes/hexclaw/skill/builtin"
 )
 
 func TestBug20260613_ToolRepeatGuardShortCircuits(t *testing.T) {
@@ -625,5 +629,42 @@ func TestToolRepeatGuardOldBrowserObservationCannotReplaceNewGeneration(t *testi
 	before := probe.calls
 	if repeated := runRepeatBrowserCall(t, runtime, click, false); !repeated.Stop || probe.calls != before {
 		t.Fatalf("the new generation's first completed action count was lost: %+v", repeated)
+	}
+}
+
+func TestAttachmentRechecksOnlyWhenSourceWasMissing(t *testing.T) {
+	for _, create := range []bool{false, true} {
+		t.Run(fmt.Sprintf("created_%t", create), func(t *testing.T) {
+			root := t.TempDir()
+			files := builtin.NewFileOpsSkill(root)
+			registrations := 0
+			files.SetArtifactWriter(func(_ context.Context, _, _ string, _ io.Reader) (map[string]any, error) {
+				registrations++
+				return map[string]any{"artifact_id": "test-file", "path": "generated/requested.txt"}, nil
+			})
+			registry := skill.NewRegistry()
+			if err := registry.Register(files); err != nil {
+				t.Fatal(err)
+			}
+			runner := newRuntimeToolExecutor(NewToolExecutor(registry, nil))
+			call := llm.ToolCall{Name: "file_ops", Arguments: `{"action":"attach","path":"requested.txt"}`}
+			first, err := runner.Execute(t.Context(), call)
+			if err != nil || first.Stop || first.Status != hruntime.ToolStatusError || registrations != 0 {
+				t.Fatalf("missing source: %+v %v", first, err)
+			}
+			if create {
+				if writeErr := os.WriteFile(filepath.Join(root, "requested.txt"), []byte("requested"), 0600); writeErr != nil {
+					t.Fatal(writeErr)
+				}
+			}
+			second, err := runner.Execute(t.Context(), call)
+			if err != nil || second.Stop == create || (second.Status == hruntime.ToolStatusSuccess) != create {
+				t.Fatalf("recheck: %+v %v", second, err)
+			}
+			again, err := runner.Execute(t.Context(), call)
+			if err != nil || !again.Stop || registrations != map[bool]int{true: 1, false: 0}[create] {
+				t.Fatalf("duplicate file registration: %+v %d", again, registrations)
+			}
+		})
 	}
 }
