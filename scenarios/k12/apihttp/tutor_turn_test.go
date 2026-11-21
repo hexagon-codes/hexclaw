@@ -2,7 +2,29 @@ package apihttp_test
 
 import (
 	"testing"
+
+	"github.com/hexagon-codes/hexclaw/scenarios/k12/apihttp"
 )
+
+func TestTutorTurnUsesLearnerTextSolveOnlyForAProblem(t *testing.T) {
+	rt := newRuntimeWithSolver(t, fakeSolveExec{})
+	rt.PrincipalMode, rt.OwnerScope = "local_loopback", "parent"
+	h := apihttp.NewHandler(rt)
+	for _, item := range []struct {
+		body string
+		runs int
+	}{
+		{`{"agent":"mingming","parent_message":"孩子有点急"}`, 0},
+		{`{"agent":"mingming","problem":"3.8×3","grade":"五年级上"}`, 1},
+	} {
+		reply, _ := do(t, h, "POST", "/tutor-turn", item.body)
+		var count int
+		err := rt.Records.DB().QueryRowContext(t.Context(), `SELECT COUNT(*) FROM k12_text_solve_runs WHERE agent_name='mingming' AND owner_id='parent'`).Scan(&count)
+		if err != nil || reply.Code != 200 || count != item.runs {
+			t.Fatalf("tutor status=%d runs=%d expected=%d err=%v", reply.Code, count, item.runs, err)
+		}
+	}
+}
 
 func TestTutorTurn_FirstTurnHasSolution(t *testing.T) {
 	h := newServer(t)
