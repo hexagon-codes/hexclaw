@@ -196,7 +196,10 @@ func (d Deps) solveTextProblem(ctx context.Context, origin k12.TextSolveOrigin, 
 		return SolveHomeworkResult{}, err
 	}
 	req.Subject = subject
-	if subject == "" {
+	if req.SubjectUnresolved {
+		// 题目身份必须有学科分区。明确未定科的辅导只使用通用讲法，不进入数学资产复用。
+		subject = "未确定"
+	} else if subject == "" {
 		subject = "数学"
 	}
 	req.SourceSession = origin.SourceSessionID
@@ -386,7 +389,7 @@ func (d Deps) finalizeAdoptedTextSolve(ctx context.Context, run k12.TextSolveRun
 }
 
 func textSolveAssetEligible(req GradeRequest) bool {
-	if req.Subject != "" && req.Subject != "数学" {
+	if req.SubjectUnresolved || req.Subject != "" && req.Subject != "数学" {
 		return false
 	}
 	for _, marker := range []string{"如图", "下图", "上图", "图中", "图示", "表中", "下表", "上表", "![", "<img", "根据材料"} {

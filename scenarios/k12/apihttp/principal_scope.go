@@ -5,7 +5,11 @@ import (
 	"errors"
 	"strings"
 
+	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
+	"github.com/hexagon-codes/hexclaw/scenarios/k12/usecase"
+	"github.com/hexagon-codes/hexclaw/skill"
+	"github.com/hexagon-codes/toolkit/util/idgen"
 )
 
 var errAgentScopeNotFound = errors.New("agent scope not found")
@@ -74,6 +78,28 @@ func (h *handler) authorizedTextSolveOwnerScope(ctx context.Context, agentName s
 		return h.authorizedAgentOwnerScope(ctx, agentName)
 	}
 	return owner, nil
+}
+
+// 未选择孩子的辅导仅绑定当前调用者及请求，由工具执行器为每次实际派发登记自己的回执。
+func (h *handler) tutorSolveContext(ctx context.Context, agent string) (context.Context, error) {
+	if agent != "" {
+		owner, err := h.authorizedTextSolveOwnerScope(ctx, agent)
+		if err != nil {
+			return ctx, err
+		}
+		return usecase.WithAuthorizedTextSolveOrigin(ctx, k12.TextSolveOrigin{OwnerID: owner}, agent), nil
+	}
+	owner, err := h.ownerScope(ctx)
+	if err != nil {
+		return ctx, err
+	}
+	ctx = skill.WithAuthenticatedUser(ctx, owner)
+	identity := skill.CurrentInvocation(ctx)
+	if identity.RequestID == "" {
+		identity.RequestID = "tutor-" + idgen.NanoID()
+		ctx = skill.WithInvocationContext(ctx, identity)
+	}
+	return ctx, nil
 }
 
 func (h *handler) textbookScope(

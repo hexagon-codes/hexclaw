@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 )
 
 func TestPlanTutorTurn_StartsWithFullParentReference(t *testing.T) {
@@ -103,5 +105,51 @@ func TestTutorTurn_EmotionDoesNotSkipSolver(t *testing.T) {
 	}
 	if res.Solution != "解：11.4" {
 		t.Errorf("安抚轮也应给家长完整解, got %q", res.Solution)
+	}
+}
+
+func TestTutorQuestionRespectsDeclaredAndRecordedSubjects(t *testing.T) {
+	d, store := newPipeline(t, fakeSolver{}, fakeGrader{}, &fakeInsights{})
+	ctx := t.Context()
+	const stem = "请解释这个词的含义。"
+	add := func(agent, subject string) {
+		t.Helper()
+		row, err := k12.NewMistakeRecord(agent, subject, k12.MistakeFields{Question: stem, Subject: subject})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.Put(ctx, row); err != nil {
+			t.Fatal(err)
+		}
+	}
+	add("eval-agent", "语文")
+	request := TutorTurnRequest{AgentName: "mingming"}
+	if subject, target := d.tutorQuestionContext(ctx, request, stem); subject != "" || target != nil {
+		t.Fatal("an unlabelled question borrowed another child's subject")
+	}
+	if subject, _ := d.tutorQuestionContext(ctx, request, "这道英语题中，短语“a part”是什么意思？"); subject != "英语" {
+		t.Fatalf("explicit subject was lost: %q", subject)
+	}
+	add("mingming", "英语")
+	subject, target := d.tutorQuestionContext(ctx, request, stem)
+	if subject != "英语" || target == nil {
+		t.Fatal("exact recorded question lost its known subject")
+	}
+	if err := store.UpdateStatus(ctx, target.RecordID, k12.StatusExplained, target.DueAt, target.Version); err != nil {
+		t.Fatal(err)
+	}
+	if subject, target = d.tutorQuestionContext(ctx, request, stem); subject != "英语" || target != nil {
+		t.Fatal("explained subject must still be known without advancing it twice")
+	}
+	add("mingming", "语文")
+	if subject, target = d.tutorQuestionContext(ctx, request, stem); subject != "" || target != nil {
+		t.Fatal("ambiguous subjects picked an arbitrary mistake")
+	}
+	request.ParentMessage = "请讲解语文。"
+	if subject, target = d.tutorQuestionContext(ctx, request, stem); subject != "语文" || target == nil {
+		t.Fatal("declared course should select only the matching mistake")
+	}
+	if subject, target = d.tutorQuestionContext(ctx, request, "这道英语题怎么理解？"); subject != "" || target != nil {
+		t.Fatal("conflicting declarations should not freeze a subject")
 	}
 }

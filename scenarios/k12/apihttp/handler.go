@@ -1525,7 +1525,7 @@ func (h *handler) mistakeSheet(w http.ResponseWriter, r *http.Request) {
 }
 
 type tutorTurnReq struct {
-	// agent 必填；省略 grade 时从孩子档案取生效年级，供求解链携带年级边界。
+	// 指定孩子时可读取档案年级并推进错题；独立辅导仅归属当前调用者。
 	Agent         string `json:"agent"`
 	PriorStage    int    `json:"prior_stage"`    // 历史阶段兼容字段
 	ParentMessage string `json:"parent_message"` // 家长本轮消息
@@ -1550,16 +1550,17 @@ func (h *handler) tutorTurn(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	grade := h.resolveGrade(r.Context(), req.Agent, req.Grade)
+	req.Agent = strings.TrimSpace(req.Agent)
 	ctx := r.Context()
-	if strings.TrimSpace(req.Agent) != "" && strings.TrimSpace(req.Problem) != "" {
-		owner, scopeErr := h.authorizedTextSolveOwnerScope(ctx, req.Agent)
+	if strings.TrimSpace(req.Problem) != "" {
+		var scopeErr error
+		ctx, scopeErr = h.tutorSolveContext(ctx, req.Agent)
 		if scopeErr != nil {
 			writeErr(w, http.StatusNotFound, "agent not found")
 			return
 		}
-		ctx = usecase.WithAuthorizedTextSolveOrigin(ctx, k12.TextSolveOrigin{OwnerID: owner}, req.Agent)
 	}
+	grade := h.resolveGrade(ctx, req.Agent, req.Grade)
 	res, err := h.rt.Deps.TutorTurn(ctx, usecase.TutorTurnRequest{
 		AgentName:     req.Agent,
 		PriorStage:    usecase.TutorStage(req.PriorStage),

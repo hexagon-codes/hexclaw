@@ -2,8 +2,11 @@ package usecase
 
 import (
 	"context"
+	"regexp"
 	"strings"
 
+	"github.com/hexagon-codes/hexclaw/internal/elementarymath"
+	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 )
 
@@ -85,46 +88,100 @@ func (d Deps) TutorTurn(ctx context.Context, req TutorTurnRequest, problem, grad
 	dir := PlanTutorTurn(req)
 	res := TutorTurnResult{Directive: dir}
 	if strings.TrimSpace(problem) != "" && d.Solver != nil {
-		solution, evidence, err := d.solveTutorQuestion(ctx, req.AgentName, problem, grade)
+		subject, mistake := d.tutorQuestionContext(ctx, req, problem)
+		input := GradeRequest{AgentName: req.AgentName, Grade: grade, Problem: problem, Subject: subject, SubjectUnresolved: subject == ""}
+		solution, evidence, err := d.solveTutorQuestion(ctx, input)
 		if err != nil {
 			return res, err
 		}
 		res.Solution, res.Evidence = solution, evidence
 		// T2.4：完整讲解完成 → 若该题在错题本(new) 自动推进 explained（PRD §5.3.1）。
 		// best-effort：推进失败不影响辅导产物（讲解已给出）。
-		if solution != "" && evidence.Verdict != VerdictOutOfScope {
-			d.advanceMistakeToExplained(ctx, req.AgentName, problem)
+		if mistake != nil && solution != "" && evidence.Verdict != VerdictOutOfScope {
+			_ = d.Records.UpdateStatus(ctx, mistake.RecordID, k12.StatusExplained, mistake.DueAt, mistake.Version)
 		}
 	}
 	return res, nil
 }
 
-func (d Deps) solveTutorQuestion(ctx context.Context, agent, problem, grade string) (string, SolveEvidence, error) {
-	input := GradeRequest{AgentName: agent, Grade: grade, Problem: problem}
-	if origin, ok := d.textSolveOrigin(ctx, input); ok && agent != "" && d.Records != nil && !HasGradingPhysicalCallExecutor(ctx) {
-		solved, err := d.SolveTextProblem(ctx, origin, input)
-		return solved.Solution, solved.Evidence, err
-	}
-	solved, err := d.Solver.Solve(ctx, problem, grade, d.constraintFor(ctx, grade))
-	return solved.Solution, solved.Evidence, err
-}
+// 明示的学科和可精确解析的算式可作为学科事实；仅出现在题目故事里的课程名称不足以定科。
+var tutorDeclaredSubject = regexp.MustCompile(`(?:^|[：:，,。；;！？!?\n]|这道|一道|这是|本题是|科目为|学科为|讲解|辅导|年级[上下]?册?)(数学|英语|语文|科学|信息科技|物理|化学)(?:题|课|作业|练习|试卷|[：:，,。；;！？!?\n]|$)`)
 
-// advanceMistakeToExplained 讲解完成时把同题的 new 错题推进 explained（按题干规范化匹配定位；
-// tutor 不带 source_session，故用「同实例内题干规范化相等的 new 错题」匹配，取第一条推进）。
-func (d Deps) advanceMistakeToExplained(ctx context.Context, agentName, problem string) {
-	if d.Records == nil || agentName == "" || strings.TrimSpace(problem) == "" {
-		return
-	}
-	news, err := d.Records.ListByScope(ctx, agentName, k12.CollectionMistakes, k12.StatusNew)
-	if err != nil {
-		return
-	}
-	want := k12.NormalizeQuestion(problem)
-	for _, r := range news {
-		f, _ := k12.ParseMistakeFields(r.Fields)
-		if k12.NormalizeQuestion(f.Question) == want {
-			_ = d.Records.UpdateStatus(ctx, r.RecordID, k12.StatusExplained, r.DueAt, r.Version)
-			return
+func tutorQuestionSubject(parentMessage, problem string) (string, bool) {
+	subject := ""
+	for _, source := range []string{parentMessage, problem} {
+		for _, match := range tutorDeclaredSubject.FindAllStringSubmatch(strings.TrimSpace(source), -1) {
+			if subject != "" && subject != match[1] {
+				return "", false
+			}
+			subject = match[1]
 		}
 	}
+	if subject != "" {
+		return subject, true
+	}
+	if _, ok := elementarymath.ParseUniformTravelProblem(problem); ok || parentGuidePureArithmetic(problem) {
+		return "数学", true
+	}
+	return "", true
+}
+
+// 用同一孩子、同一题面的记录确定学科和原版本。跨学科同名题只能按已确定的学科匹配。
+func (d Deps) tutorQuestionContext(ctx context.Context, req TutorTurnRequest, problem string) (string, *records.AgentRecord) {
+	subject, consistent := tutorQuestionSubject(req.ParentMessage, problem)
+	if !consistent || d.Records == nil || req.AgentName == "" {
+		return subject, nil
+	}
+	rows, err := d.Records.ListByScope(ctx, req.AgentName, k12.CollectionMistakes, "")
+	if err != nil {
+		return subject, nil
+	}
+	want := k12.NormalizeQuestion(problem)
+	matches := make(map[string]*records.AgentRecord)
+	for _, row := range rows {
+		fields, err := k12.ParseMistakeFields(row.Fields)
+		if err != nil || row.Status == k12.StatusArchived || k12.NormalizeQuestion(fields.Question) != want {
+			continue
+		}
+		course, err := normalizeSubject(fields.Subject)
+		if err != nil {
+			continue
+		}
+		if _, found := matches[course]; !found {
+			matches[course] = nil
+		}
+		if row.Status == k12.StatusNew && matches[course] == nil {
+			matches[course] = row
+		}
+	}
+	if subject == "" {
+		for course := range matches {
+			if course == "" {
+				continue
+			}
+			if subject != "" {
+				return "", nil
+			}
+			subject = course
+		}
+	}
+	if target, found := matches[subject]; found {
+		return subject, target
+	}
+	if len(matches) == 1 {
+		return subject, matches[""]
+	}
+	return subject, nil
+}
+
+func (d Deps) solveTutorQuestion(ctx context.Context, input GradeRequest) (string, SolveEvidence, error) {
+	if input.AgentName != "" && d.Records != nil && !HasGradingPhysicalCallExecutor(ctx) {
+		if origin, ok := d.textSolveOrigin(ctx, input); ok {
+			// 辅导回合直接交付同一持久解答和验算证据，打印正文由其独立交付入口投影。
+			solved, err := d.solveTextProblem(ctx, origin, input)
+			return solved.Solution, solved.Evidence, err
+		}
+	}
+	solved, err := d.solveHomeworkSubject(ctx, input, input.Problem)
+	return solved.Solution, solved.Evidence, err
 }

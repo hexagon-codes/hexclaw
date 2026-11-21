@@ -1,10 +1,44 @@
 package apihttp_test
 
 import (
+	"context"
 	"testing"
 
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/apihttp"
+	"github.com/hexagon-codes/hexclaw/skill"
 )
+
+type tutorExecutionProbe struct{ calls []skill.InvocationContext }
+
+func (p *tutorExecutionProbe) Execute(ctx context.Context, args map[string]any) (*skill.Result, error) {
+	p.calls = append(p.calls, skill.CurrentInvocation(ctx))
+	return (fakeSolveExec{}).Execute(ctx, args)
+}
+
+func TestTutorTurnWithoutChildPassesTheCallerToIndependentVerification(t *testing.T) {
+	probe := &tutorExecutionProbe{}
+	rt := newRuntimeWithSolver(t, probe)
+	rt.PrincipalMode, rt.OwnerScope = "local_loopback", "parent"
+	h := apihttp.NewHandler(rt)
+	do(t, h, "POST", "/tutor-turn", `{"parent_message":"请给我一个提示"}`)
+	for range 2 {
+		reply, _ := do(t, h, "POST", "/tutor-turn", `{"problem":"3.8×3","grade":"五年级上"}`)
+		if reply.Code != 200 {
+			t.Fatalf("standalone tutor status=%d", reply.Code)
+		}
+	}
+	if len(probe.calls) != 2 {
+		t.Fatalf("expected exactly two solve calls, got %d", len(probe.calls))
+	}
+	for _, call := range probe.calls {
+		if call.AuthenticatedUserID != "parent" || call.RoutedAgentName != "" || call.RequestID == "" {
+			t.Fatalf("standalone tutor invocation has incorrect scope: %+v", call)
+		}
+	}
+	if probe.calls[0].RequestID == probe.calls[1].RequestID {
+		t.Fatal("separate tutoring requests shared an execution identity")
+	}
+}
 
 func TestTutorTurnUsesLearnerTextSolveOnlyForAProblem(t *testing.T) {
 	rt := newRuntimeWithSolver(t, fakeSolveExec{})

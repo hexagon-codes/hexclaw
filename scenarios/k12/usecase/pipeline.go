@@ -214,6 +214,7 @@ type GradeRequest struct {
 	SourceProblem               string `json:"-"`
 	AgentName                   string
 	Subject                     string // 小学作业学科及旧物理/化学兼容值；空时由 solver 默认路由
+	SubjectUnresolved           bool   `json:"subject_unresolved,omitempty"` // 本题没有可靠学科，不沿用旧文字接口的默认数学学科
 	Grade                       string // 生效年级
 	SourceSession               string
 	Problem                     string
@@ -325,7 +326,7 @@ func (d Deps) solveHomeworkProblem(ctx context.Context, req GradeRequest) (Solve
 			}
 		}
 	}
-	sr, err := d.solveProblem(ctx, req.Subject, problem, req.Grade)
+	sr, err := d.solveHomeworkSubject(ctx, req, problem)
 	if err != nil {
 		return SolveHomeworkResult{}, fmt.Errorf("%w: 解题: %w", ErrSolveFailed, err)
 	}
@@ -369,7 +370,7 @@ func (r SolveHomeworkResult) hasDeterministicProblemIssue() bool {
 // 硬拦截对其不生效，必须向上透出显性提示，不得静默跳过（bug 2026-07-18：初中题挂词表外
 // KP 名即可绕过超纲门被正常批改）。
 func (d Deps) outOfScope(ctx context.Context, req GradeRequest) (bool, string, []string) {
-	if d.Constraint == nil || !isMathSubject(req.Subject) {
+	if d.Constraint == nil || req.SubjectUnresolved || !isMathSubject(req.Subject) {
 		return false, "", nil
 	}
 	var unmapped []string
@@ -825,6 +826,13 @@ func isSelfCheckLine(t string) bool {
 }
 
 func isMathSubject(subject string) bool { return subject == "" || subject == "数学" }
+
+func (d Deps) solveHomeworkSubject(ctx context.Context, req GradeRequest, problem string) (SolveResult, error) {
+	if req.SubjectUnresolved {
+		return d.Solver.Solve(ctx, problem, req.Grade, "")
+	}
+	return d.solveProblem(ctx, req.Subject, problem, req.Grade)
+}
 
 func (d Deps) solveProblem(ctx context.Context, subject, problem, grade string) (SolveResult, error) {
 	var err error
