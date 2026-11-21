@@ -1656,16 +1656,16 @@ func (c *ImageTaskCoordinator) projectTarget(
 	if err != nil {
 		return ImageTaskView{}, err
 	}
-	if view.Creative != nil && (view.Creative.Status == k12.CreativeWorkIntakePreparing ||
-		view.Creative.Status == k12.CreativeWorkIntakeFailed || view.Creative.Status == k12.CreativeWorkIntakePromoted) {
+	if view.Creative != nil && view.Creative.WorkType == k12.WorkTypeWriting {
+		tracksOCR := view.Creative.Status == k12.CreativeWorkIntakePreparing || view.Creative.Status == k12.CreativeWorkIntakeFailed
 		invocation, invocationErr := c.Records.GetLatestWritingOCRInvocation(
 			ctx,
 			dispatch.AgentName,
 			view.Creative.IntakeID,
 		)
 		switch {
-		case invocationErr == nil && view.Creative.Status == k12.CreativeWorkIntakePromoted:
-			// 已推广作品仅披露原 intake 实际完成的转写，终态无需再调度。
+		case invocationErr == nil && !tracksOCR:
+			// 转写已结束的作品只读该 intake 的完成回执，进度及重试仍由当前阶段决定。
 			if invocation.Status == k12.ImageTaskInvocationSucceeded {
 				view.ocrInvocation = &invocation
 			}
@@ -2525,21 +2525,10 @@ func (c *ImageTaskCoordinator) Result(
 			imageTaskInvocationReceipt(invocation, view.Dispatch.SourceDigest),
 		)
 	}
-	if view.solveInvocation != nil {
-		result.OperationReceipts = append(
-			result.OperationReceipts,
-			imageTaskInvocationReceipt(*view.solveInvocation, view.Dispatch.SourceDigest),
-		)
-	}
-	if view.feedbackInvocation != nil {
-		result.OperationReceipts = append(
-			result.OperationReceipts,
-			imageTaskInvocationReceipt(*view.feedbackInvocation, view.Dispatch.SourceDigest),
-		)
-	}
-	if view.ocrInvocation != nil {
-		result.OperationReceipts = append(result.OperationReceipts,
-			imageTaskInvocationReceipt(*view.ocrInvocation, view.Dispatch.SourceDigest))
+	for _, invocation := range []*k12.ImageTaskInvocation{view.ocrInvocation, view.solveInvocation, view.feedbackInvocation} {
+		if invocation != nil {
+			result.OperationReceipts = append(result.OperationReceipts, imageTaskInvocationReceipt(*invocation, view.Dispatch.SourceDigest))
+		}
 	}
 	if view.Dispatch.Status == k12.ImageTaskStatusAwaitingConfirmation ||
 		(view.Creative != nil && view.Creative.Status == k12.CreativeWorkIntakeAwaitingConfirmation) {
