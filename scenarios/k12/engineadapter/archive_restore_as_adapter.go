@@ -52,7 +52,15 @@ func (a *ArchiveRestoreAdapter) RestoreArchiveAs(
 				return err
 			}
 			if found {
-				if existing.SourceAgent != plan.SourceAgent || existing.OriginalArchiveDigest != plan.OriginalArchiveDigest || existing.MigratedChecksum != migrated.Checksum {
+				comparison := *migrated
+				// 已成功迁移的回执按创建时的格式核对，升级不产生新的迁移命令。
+				if existing.Snapshot != nil && existing.Snapshot.Version != comparison.Version {
+					comparison.Version, comparison.ArchiveID = existing.Snapshot.Version, ""
+					if err := usecase.SealHexbak(&comparison); err != nil {
+						return err
+					}
+				}
+				if existing.SourceAgent != plan.SourceAgent || existing.OriginalArchiveDigest != plan.OriginalArchiveDigest || existing.MigratedChecksum != comparison.Checksum {
 					return fmt.Errorf("%w: restore-as idempotency key 已绑定其他归档", records.ErrVersionConflict)
 				}
 				existing.Idempotent = true
