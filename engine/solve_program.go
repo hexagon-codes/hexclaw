@@ -24,17 +24,26 @@ type travelProgramKey struct{}
 
 // WithTravelWorksheetCalculation 绑定本次核实的原题与执行副本。调用方只为采用新计算策略的任务启用。
 func WithTravelWorksheetCalculation(ctx context.Context, wire, source string) context.Context {
-	sheet, ok := elementarymath.ParseTravelWorksheet(source)
+	sheet, ok := elementarymath.TravelWorksheetFor(ctx, source)
 	if !ok {
 		return ctx
 	}
-	values := []string{sheet.Rate, sheet.Parts, sheet.Reciprocal, sheet.HourParts, sheet.Reciprocal}
+	slots := sheet.WrittenValues()
+	values := append([]string{sheet.Rate}, slots[:]...)
 	for i, v := range values {
 		n, _ := new(big.Rat).SetString(v)
 		values[i] = formatArithmeticRat(n)
 	}
 	values[0] += sheet.Unit
 	expressions := []string{sheet.Distance + "/(" + sheet.Hours + ")", sheet.Parts, "1/" + sheet.Parts, sheet.HourParts, "1/" + sheet.Parts}
+	for i, slot := range sheet.FactorSlots {
+		switch slot {
+		case elementarymath.NumeratorOnly:
+			expressions[2*i+2] = "1"
+		case elementarymath.DenominatorOnly:
+			expressions[2*i+2] = sheet.Parts
+		}
+	}
 	plan := solveProgramPlan{Problem: wire, Worked: sheet.Worked(), Mode: "deterministic_elementary_word", Answer: strings.Join(values, "；"),
 		Code: solveProgramPrelude + wordProgram(expressions, []string{sheet.Unit, "", "", "", ""})}
 	return context.WithValue(ctx, travelProgramKey{}, plan)

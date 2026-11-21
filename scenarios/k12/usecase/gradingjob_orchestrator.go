@@ -410,7 +410,7 @@ func (o *GradingOrchestrator) StartPhotoGradingJob(ctx context.Context, in Start
 		if in.SourceKind == "image_task" && len(in.Photo.Image) > 0 &&
 			(in.Photo.TaskIntent == PhotoTaskBlankWorksheet || in.Photo.TaskIntent == PhotoTaskCompletedHomework) {
 			// 本分支仅创建新任务；来源预算与父自动窗口已在入口核验，旧任务重放不补策略。
-			snap.QuantityAnswerPolicy = k12.QuantityAnswerPolicySlotV2
+			snap.QuantityAnswerPolicy = k12.QuantityAnswerPolicySlotV3
 		}
 		if snap.Provider == "" || snap.Model == "" {
 			return GradingJobView{}, false, fmt.Errorf("%w: grading model snapshot 缺少 provider/model", ErrInvalidInput)

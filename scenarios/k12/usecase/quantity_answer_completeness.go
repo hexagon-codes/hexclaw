@@ -17,7 +17,7 @@ type QuantityAnswerCompletenessChecker interface {
 
 func validateVisualQuantitySolveResult(ctx context.Context, deps Deps, req GradeRequest, solved SolveHomeworkResult) error {
 	snapshot, found := k12.GradingModelSnapshotFromContext(ctx)
-	if !found || (snapshot.QuantityAnswerPolicy != k12.QuantityAnswerPolicySlotV1 && snapshot.QuantityAnswerPolicy != k12.QuantityAnswerPolicySlotV2) ||
+	if !found || (snapshot.QuantityAnswerPolicy != k12.QuantityAnswerPolicySlotV1 && !k12.UsesWorksheetQuantities(snapshot.QuantityAnswerPolicy)) ||
 		req.Subject != "数学" || len(skill.InputImages(ctx)) == 0 || solved.OutOfScope {
 		return nil
 	}

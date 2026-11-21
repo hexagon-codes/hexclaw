@@ -18,13 +18,20 @@ func TestTravelWorksheetSeparatesPartCountFromElapsedTime(t *testing.T) {
 		fractions,
 		strings.ReplaceAll(fractions, `\frac{\square}{\square}`, "□/□"),
 		strings.Replace(fractions, "图示：", "图：", 1),
-		strings.Replace(fractions, `\frac{\square}{\square}`, `\frac{\square}{3}`, 1),
 		strings.Replace(fractions, "从上图看出：", "从上图得出：", 1),
 		strings.Replace(fractions, "从上图看出：", "", 1),
 	} {
 		if withBoxes, ok := ParseTravelWorksheet(text); !ok || withBoxes != sheet {
 			t.Fatal("printed diagram or fraction boxes lost their target")
 		}
+	}
+	for _, tc := range []struct{printed, written string}{
+		{`\frac{\square}{3}`, "1"}, {`\frac{1}{\square}`, "3"},
+	} {
+		variant, ok := ParseTravelWorksheet(strings.Replace(fractions, `\frac{\square}{\square}`, tc.printed, 1))
+		if !ok || variant.WrittenValues() != [4]string{"3",tc.written,"5","1/3"} { t.Fatalf("wrong written value for %s: %+v",tc.printed,variant) }
+		merged, agrees := sheet.Corroborate(variant)
+		if !agrees || merged.FactorSlots != [2]FractionSlot{UncertainFractionSlot,WholeFraction} || !strings.Contains(merged.Answer(),"只空分母填3") { t.Fatalf("unresolved slot treated as certain: %+v",merged) }
 	}
 	for _, other := range []string{
 		strings.Replace(fractions, `\frac{\square}{\square}`, `\frac{2}{\square}`, 1),

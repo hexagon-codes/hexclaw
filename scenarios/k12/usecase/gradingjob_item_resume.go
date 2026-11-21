@@ -1,6 +1,7 @@
 package usecase
 
 import (
+ "github.com/hexagon-codes/hexclaw/internal/elementarymath"
 	"context"
 	"encoding/json"
 	"errors"
@@ -538,7 +539,8 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 				k12storage.GradingAssessmentEffects{})
 		}
 		mode, independentReference = PhotoModeSolve, true
-		referenceQuestion = question
+		referenceQuestion = question.question
+		if question.worksheet != nil { ctx = elementarymath.WithWorksheetEvidence(ctx, question.question, *question.worksheet) }
 		if !photoPracticeUnmatched(item) {
 			item.Warning = unclearHandwritingReferenceWarning
 		}
@@ -548,7 +550,7 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 	if referenceQuestion != "" {
 		gradeReq.Problem, gradeReq.SourceProblem = referenceQuestion, referenceQuestion
 	}
-	if job.Fields.ModelSnapshot.QuantityAnswerPolicy == k12.QuantityAnswerPolicySlotV2 && gradeReq.SolveOutputVersion == SolveOutputWithTeachingReportV2 && gradeReq.Subject == "数学" {
+	if k12.UsesWorksheetQuantities(job.Fields.ModelSnapshot.QuantityAnswerPolicy) && gradeReq.SolveOutputVersion == SolveOutputWithTeachingReportV2 && gradeReq.Subject == "数学" {
 		gradeReq.ParentTeachingContract += travelReportTargets(firstNonEmpty(gradeReq.SourceProblem, gradeReq.Problem))
 	}
 	if finalAnswerOnly {

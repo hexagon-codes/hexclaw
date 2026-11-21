@@ -307,7 +307,7 @@ func (a *SolveAdapter) SolveSubject(ctx context.Context, subject, problem, grade
 	// engine 才禁用快速路径。
 	verificationProblem := elementarymath.PhotoVerificationProblem(problem)
 	modelProblem := gradingProblemWithGrounding(ctx, problem)
-	if snapshot, ok := k12.GradingModelSnapshotFromContext(ctx); ok && snapshot.QuantityAnswerPolicy == k12.QuantityAnswerPolicySlotV2 && subject == "数学" {
+	if snapshot, ok := k12.GradingModelSnapshotFromContext(ctx); ok && k12.UsesWorksheetQuantities(snapshot.QuantityAnswerPolicy) && subject == "数学" {
 		ctx = engine.WithTravelWorksheetCalculation(ctx, modelProblem, problem)
 	}
 	if verificationProblem != problem {

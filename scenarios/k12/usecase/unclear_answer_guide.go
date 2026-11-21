@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+ "log/slog"
+ "strconv"
 	"regexp"
 	"slices"
 	"strings"
@@ -19,6 +21,10 @@ const unclearHandwritingReferenceWarning = "The handwriting could not be reliabl
 
 // 只在求解评估副本中移除学生作答风险；题干、父材料与缺损来源仍须独立可靠。
 func independentReferenceAnswerEligible(req PhotoGradeRequest, q RecognizedQuestion) bool {
+	if q.Subject == "数学" && (!printedNumberMatches(q.RawTranscription,q.SourceNumberPath) ||
+		slices.ContainsFunc(q.EvidenceTranscriptions, func(text string) bool { return !printedNumberMatches(text,q.SourceNumberPath) })) {
+		return false
+	}
 	if q.Subject == "语文" && q.ImageSourceContext != nil && q.ImageSourceContext.PrintedQuestionReceipt != nil {
 		// 批改中的参考解复用已持久核验的印刷证明，原作答与批改风险保持。
 		printed := cloneRecognizedQuestions([]RecognizedQuestion{q})[0]
@@ -188,8 +194,13 @@ func handwritingOnlySourceSignal(signal string) bool {
 	return true
 }
 
+type printedReference struct {
+	question string
+	worksheet *elementarymath.TravelWorksheet
+}
+
 // 类型化恢复未复制观察明细时，只读取同任务同输入的冻结审计用于风险分离。
-func (o *GradingOrchestrator) independentReferenceQuestion(ctx context.Context, job GradingJobView, req PhotoGradeRequest, q RecognizedQuestion) (string, bool, error) {
+func (o *GradingOrchestrator) independentReferenceQuestion(ctx context.Context, job GradingJobView, req PhotoGradeRequest, q RecognizedQuestion) (printedReference, bool, error) {
 	if len(q.EvidenceTranscriptions) < 2 {
 		for _, prior := range o.frozenRecognitionSourceQuestions(job) {
 			if prior.ProblemID == q.ProblemID && prior.AttemptID == q.AttemptID && prior.InputDigest != "" && prior.InputDigest == q.InputDigest &&
@@ -206,232 +217,248 @@ func (o *GradingOrchestrator) independentReferenceQuestion(ctx context.Context, 
 		}
 	}
 	if independentReferenceAnswerEligible(req, q) {
-		if job.Fields.ModelSnapshot.QuantityAnswerPolicy == k12.QuantityAnswerPolicySlotV2 && req.practiceReference == nil &&
+		if k12.UsesWorksheetQuantities(job.Fields.ModelSnapshot.QuantityAnswerPolicy) && req.practiceReference == nil &&
 			q.Subject == "数学" && q.ProblemKind == ProblemKindStandalone && q.ImageSourceContext != nil && len(q.ImageSourceContext.Materials) == 0 {
 			original, known := elementarymath.ParseTravelWorksheet(q.RawTranscription)
 			canonical, complete := elementarymath.ParseTravelWorksheet(q.Question)
 			if known && complete && original == canonical && !slices.ContainsFunc(q.ImageSourceContext.Recoveries, func(r k12.RecognitionImageSourceRecoveryV1) bool { return r.Gap.Kind != "handwriting" }) {
-				return q.RawTranscription, true, nil
+				return printedReference{question: q.RawTranscription}, true, nil
 			}
 		}
-		return "", true, nil
+		return printedReference{}, true, nil
 	}
 	if o.deps.Records == nil || q.Subject != "数学" || q.SourceRegion == nil {
-		return "", false, nil
+		return printedReference{}, false, nil
 	}
 	receipt, ok := o.readRecognitionReceipt(job.Record.RecordID)
 	if !ok || receipt.AgentName != job.Record.AgentName {
-		return "", false, nil
+		return printedReference{}, false, nil
 	}
 	questionIndex := slices.IndexFunc(receipt.Questions, func(prior RecognizedQuestion) bool {
 		return prior.ProblemID == q.ProblemID && prior.AttemptID == q.AttemptID
 	})
 	if questionIndex < 0 || q.ImageSourceContext == nil || len(q.ImageSourceContext.TargetIDs) != 1 {
-		return "", false, nil
+		return printedReference{}, false, nil
 	}
 	prior := receipt.Questions[questionIndex]
 	// 布局页标识与绑定后的资产 URI 分属不同投影，像素归属由原计划和目标核对。
 	if !slices.Equal(prior.SourceNumberPath, q.SourceNumberPath) || prior.ImageSourceContext == nil ||
 		prior.ImageSourceContext.ScopeDigest != q.ImageSourceContext.ScopeDigest || !slices.Equal(prior.ImageSourceContext.TargetIDs, q.ImageSourceContext.TargetIDs) || prior.RawTranscription != q.RawTranscription ||
 		prior.CanonicalMarkdown != q.CanonicalMarkdown || prior.AnswerRawTranscription != q.AnswerRawTranscription || prior.AnswerCanonicalMarkdown != q.AnswerCanonicalMarkdown {
-		return "", false, nil
+		return printedReference{}, false, nil
 	}
 	runtime, err := o.deps.Records.LoadRecognitionLayoutPlanRuntimeV2(ctx, job.Record.AgentName, receipt.InvocationID)
 	if errors.Is(err, records.ErrNotFound) {
-		return "", false, nil
+		return printedReference{}, false, nil
 	}
 	if err != nil {
-		return "", false, err
+		return printedReference{}, false, err
 	}
 	plan := runtime.AuthorizedPlan
 	if plan == nil || !plan.SourceAdjudication || plan.AuthorizedPlanDigest != q.ImageSourceContext.ScopeDigest ||
 		runtime.Header.JobID != job.Record.RecordID {
-		return "", false, nil
+		return printedReference{}, false, nil
 	}
 	targetIndex := slices.IndexFunc(plan.Targets, func(target k12.RecognitionLayoutTargetV2) bool {
 		return target.TargetID == q.ImageSourceContext.TargetIDs[0] && slices.Equal(target.SourceNumberPath, q.SourceNumberPath)
 	})
 	if targetIndex < 0 {
-		return "", false, nil
+		return printedReference{}, false, nil
 	}
 	unit, err := k12.RecognitionLayoutAdjudicationUnitV2(targetIndex + 1)
 	if err != nil {
-		return "", false, err
+		return printedReference{}, false, err
 	}
 	physicalCalls, err := o.deps.Records.ListModelPhysicalInvocations(ctx, job.Record.AgentName, job.Record.RecordID)
 	if err != nil {
-		return "", false, err
+		return printedReference{}, false, err
 	}
 	var proof *k12.ModelPhysicalInvocation
 	for i := range physicalCalls {
 		physical := &physicalCalls[i]
 		if physical.ParentInvocationID == receipt.InvocationID && physical.PhysicalUnit == unit {
 			if proof != nil {
-				return "", false, nil
+				return printedReference{}, false, nil
 			}
 			proof = physical
 		}
 	}
-	reviewWorksheet := job.Fields.ModelSnapshot.QuantityAnswerPolicy == k12.QuantityAnswerPolicySlotV2 && req.practiceReference == nil
+	reviewWorksheet := k12.UsesWorksheetQuantities(job.Fields.ModelSnapshot.QuantityAnswerPolicy) && req.practiceReference == nil
 	if proof == nil && reviewWorksheet {
-		return o.referenceFromReviewedWorksheet(ctx, runtime, physicalCalls, q, "")
+		return o.referenceFromReviewedWorksheet(ctx, runtime, physicalCalls, q, targetIndex, "", "")
 	}
 	if proof == nil || proof.Stage != k12.GradingStageRecognizing || proof.Status != k12.ModelInvocationSucceeded ||
 		proof.PlanDigest != plan.AuthorizedPlanDigest || proof.CandidateExactSetDigest != runtime.CandidateExactSetDigest || !validModelInvocationDigest(proof.RequestDigest) {
-		return "", false, nil
+		return printedReference{}, false, nil
 	}
 	payload, err := o.deps.Records.LoadSucceededModelPhysicalInvocationResultContent(ctx, job.Record.AgentName, proof.PhysicalInvocationID, proof.ResultDigest)
 	if err != nil {
-		return "", false, err
+		return printedReference{}, false, err
 	}
 	if reviewWorksheet {
-		if question, eligible, err := o.referenceFromReviewedWorksheet(ctx, runtime, physicalCalls, q, payload); eligible || err != nil {
+		if question, eligible, err := o.referenceFromReviewedWorksheet(ctx, runtime, physicalCalls, q, targetIndex, proof.PhysicalInvocationID, payload); eligible || err != nil {
 			return question, eligible, err
 		}
 	}
 	question, eligible := independentReferenceFromAdjudication(req, q, payload)
-	return question, eligible, nil
+	return printedReference{question:question}, eligible, nil
 }
 
-// 按已冻结的目标取首读与复读。各次阅读均能独立证明题面时，只给参考解，不修改学生判定。
-func (o *GradingOrchestrator) referenceFromReviewedWorksheet(ctx context.Context, runtime k12.RecognitionLayoutPlanRuntimeV2, calls []k12.ModelPhysicalInvocation, q RecognizedQuestion, adjudication string) (string, bool, error) {
+// 只采用本题的印刷证据。标题、邻题及其它批次不参与当前题的准入。
+func (o *GradingOrchestrator) referenceFromReviewedWorksheet(ctx context.Context, runtime k12.RecognitionLayoutPlanRuntimeV2, calls []k12.ModelPhysicalInvocation, q RecognizedQuestion, targetIndex int, adjudicationID, adjudication string) (printedReference, bool, error) {
 	plan := runtime.AuthorizedPlan
-	if plan == nil || plan.Scope == nil || plan.InitialReadMode != k12.RecognitionLayoutManifestWithContentV1 || len(plan.Targets) != 1 ||
-		len(plan.ObservedTargets) != 1 || len(plan.Scope.Excluded) != 0 || len(plan.Scope.Dependencies) != 0 || len(runtime.ReviewBatches) != 1 ||
-		q.parentSourceUnclear || q.ProblemKind != ProblemKindStandalone {
-		return "", false, nil
+	if plan == nil || plan.Scope == nil || plan.InitialReadMode != k12.RecognitionLayoutManifestWithContentV1 || targetIndex < 0 || targetIndex >= len(plan.Targets) ||
+		q.parentSourceUnclear || q.ParentProblemID != "" || q.ProblemKind != ProblemKindStandalone {
+		return printedReference{}, false, nil
 	}
+	target := plan.Targets[targetIndex]
+	for _, dep := range plan.Scope.Dependencies {
+		if slices.Contains(dep.ForOrders, target.ManifestOrder) { return printedReference{}, false, nil }
+	}
+	handwritingGap := false
 	for _, gap := range plan.Scope.Gaps {
-		if gap.Kind != "handwriting" {
-			return "", false, nil
+		if gap.Order != target.ManifestOrder { continue }
+		if gap.Kind != "handwriting" { return printedReference{}, false, nil }
+		handwritingGap = true
+	}
+	var batch *k12.RecognitionLayoutReviewBatchAuthorizationV1
+	var alias string
+	for i := range runtime.ReviewBatches {
+		b := &runtime.ReviewBatches[i]
+		for index, member := range b.Members {
+			if member.CandidateID != target.TargetID { continue }
+			if batch != nil || b.PlanDigest != plan.AuthorizedPlanDigest { return printedReference{}, false, nil }
+			batch, alias = b, "t"+strconv.Itoa(index+1)
 		}
 	}
-	target, batch := plan.Targets[0], runtime.ReviewBatches[0]
-	if len(batch.Members) != 1 || batch.Members[0].CandidateID != target.TargetID || batch.PlanDigest != plan.AuthorizedPlanDigest {
-		return "", false, nil
-	}
-	primary, travel, ok := elementarymath.TravelQuestionPrefix(q.RawTranscription)
-	if !ok {
-		return "", false, nil
-	}
-	mainOnly := elementarymath.TravelWorksheet{UniformTravelProblem: travel}
-	expected, complete := elementarymath.ParseTravelWorksheet(q.RawTranscription)
-	if adjudication != "" {
-		if q.SourceRegion == nil {
-			return "", false, nil
-		}
-		observed, err := k12.ParseRecognitionFinalAnswerResponseV1(adjudication, *q.SourceRegion)
-		if err != nil || !observed.TargetOwnershipConfirmed || !observed.QuestionCompleteAndLegible && len(plan.Scope.Gaps) == 0 {
-			return "", false, nil
-		}
-		if !worksheetReadingMatches(observed.QuestionRawTranscription, mainOnly) {
-			return "", false, nil
-		}
-		complete = complete && worksheetReadingMatches(observed.QuestionRawTranscription, expected)
-	}
+	if batch == nil { return printedReference{}, false, nil }
 	var initial, reviewed string
 	for _, call := range calls {
-		if call.ParentInvocationID != runtime.Header.ParentInvocationID || call.Stage != k12.GradingStageRecognizing {
-			continue
-		}
+		if call.ParentInvocationID != runtime.Header.ParentInvocationID || call.Stage != k12.GradingStageRecognizing { continue }
 		first := call.PhysicalInvocationID == runtime.ManifestPhysicalInvocationID && call.ResultDigest == runtime.ManifestResultDigest
-		if !first && call.PhysicalUnit != batch.PhysicalUnit {
-			continue
-		}
+		if !first && call.PhysicalUnit != batch.PhysicalUnit { continue }
 		if call.Status != k12.ModelInvocationSucceeded || call.ReusedFromPhysicalInvocationID != "" || !validModelInvocationDigest(call.RequestDigest) ||
 			(!first && (call.PlanDigest != plan.AuthorizedPlanDigest || call.CandidateExactSetDigest != runtime.CandidateExactSetDigest)) {
-			return "", false, nil
+			return printedReference{}, false, nil
 		}
+		dest := &reviewed
+		if first { dest = &initial }
+		if *dest != "" { return printedReference{}, false, nil }
 		payload, err := o.deps.Records.LoadSucceededModelPhysicalInvocationResultContent(ctx, runtime.Header.AgentName, call.PhysicalInvocationID, call.ResultDigest)
-		if err != nil {
-			return "", false, err
-		}
-		if first {
-			if initial != "" {
-				return "", false, nil
-			}
-			initial = payload
+		if err != nil { return printedReference{}, false, err }
+		*dest = payload
+	}
+	readings, ok := worksheetTargetReadings(initial, reviewed, target, alias, handwritingGap)
+	if !ok || !printedNumberMatches(q.RawTranscription, target.SourceNumberPath) { return printedReference{}, false, nil }
+	thirdLegible := true
+	if adjudication != "" {
+		if q.SourceRegion == nil { return printedReference{}, false, nil }
+		observation, err := k12.ParseRecognitionFinalAnswerResponseV1(adjudication, *q.SourceRegion)
+		if err != nil || !observation.TargetOwnershipConfirmed { return printedReference{}, false, nil }
+		var result struct { Items []worksheetReading `json:"items"` }
+		if json.Unmarshal(observation.LegacyEnvelope, &result) != nil || len(result.Items) != 1 || result.Items[0].Kind != "question" || result.Items[0].Recognition.Subject != q.Subject { return printedReference{}, false, nil }
+		if !printedNumberMatches(observation.QuestionRawTranscription, target.SourceNumberPath) {
+			slog.WarnContext(ctx, "K12 reference excluded a different printed question number", "job_id", runtime.Header.JobID, "target_id", target.TargetID, "excluded_invocation_id", adjudicationID,
+				"manifest_invocation_id", runtime.ManifestPhysicalInvocationID, "review_unit", batch.PhysicalUnit)
 		} else {
-			if reviewed != "" {
-				return "", false, nil
-			}
-			reviewed = payload
+			if !observation.QuestionCompleteAndLegible && !handwritingGap { return printedReference{}, false, nil }
+			thirdLegible = observation.QuestionCompleteAndLegible || worksheetSignalsAllowReference(result.Items[0].Recognition.Signals, false)
+			readings = append(readings, observation.QuestionRawTranscription)
 		}
 	}
-	handwritingGap := len(plan.Scope.Gaps) > 0
-	if complete && worksheetObservationsAgree(initial, reviewed, target, expected, handwritingGap) {
-		return q.RawTranscription, true, nil
-	}
-	if worksheetObservationsAgree(initial, reviewed, target, mainOnly, handwritingGap) {
-		return primary, true, nil
-	}
-	return "", false, nil
+	ref, ok := corroboratedPrintedReference(q.RawTranscription, target, readings, thirdLegible)
+	return ref, ok, nil
 }
 
-func worksheetReadingMatches(source string, expected elementarymath.TravelWorksheet) bool {
-	if expected.Parts == "" {
-		_, actual, ok := elementarymath.TravelQuestionPrefix(source)
-		return ok && actual == expected.UniformTravelProblem
-	}
-	actual, ok := elementarymath.ParseTravelWorksheet(source)
-	return ok && actual == expected
+type worksheetReading struct {
+	Kind string `json:"kind"`
+	TargetID string `json:"target_id"`
+	Recognition struct {
+		Question string `json:"question"`
+		Subject string `json:"subject"`
+		Signals []string `json:"ocr_signals"`
+	} `json:"recognition"`
 }
 
-// 印刷的括号或方框属于答题载体。提到载体并不表示印刷题干有缺损，原观察仍完整冻结。
+// 小数及正文中的数字不是题号。印在子题前的短标签按冻结路径的末级核对。
+var leadingPrintedNumber = regexp.MustCompile(`^(?:第([0-9]+)题|[（(]([0-9]+)[）)]|([0-9]+)(?:[、．]|\.(?:[^0-9]|$)))`)
+
+func printedNumberMatches(text string, path []string) bool {
+	match := leadingPrintedNumber.FindStringSubmatch(strings.TrimSpace(text))
+	if match == nil { return true }
+	number := firstNonEmpty(match[1], firstNonEmpty(match[2],match[3]))
+	return len(path)>0 && number == path[len(path)-1]
+}
+
+func worksheetTargetReadings(initial, reviewed string, target k12.RecognitionLayoutTargetV2, alias string, handwritingGap bool) ([]string, bool) {
+	entries, err := k12.CanonicalRecognitionLayoutInitialReadEntriesV1(initial)
+	if err != nil || target.ManifestOrder < 1 || target.ManifestOrder > len(entries) { return nil, false }
+	var entry struct {
+		Number []string `json:"source_number_path"`
+		Read worksheetReading `json:"initial_read"`
+	}
+	var batch struct { Items []worksheetReading `json:"items"` }
+	if json.Unmarshal(entries[target.ManifestOrder-1], &entry) != nil || !slices.Equal(entry.Number, target.SourceNumberPath) ||
+		json.Unmarshal([]byte(reviewed), &batch) != nil { return nil, false }
+	pair := []worksheetReading{entry.Read}
+	for _, item := range batch.Items {
+		if item.TargetID == target.TargetID || item.TargetID == alias { pair = append(pair,item) }
+	}
+	if len(pair)!=2 { return nil,false }
+	var readings []string
+	for _, read := range pair {
+		value := strings.TrimSpace(read.Recognition.Question)
+		if read.Kind != "question" || read.Recognition.Subject != "数学" || value == "" || !printedNumberMatches(value, target.SourceNumberPath) ||
+			!worksheetSignalsAllowReference(read.Recognition.Signals, handwritingGap) { return nil, false }
+		readings = append(readings, value)
+	}
+	return readings, true
+}
+
+func corroboratedPrintedReference(source string, target k12.RecognitionLayoutTargetV2, readings []string, thirdLegible bool) (printedReference, bool) {
+	if len(readings)<2 { return printedReference{}, false }
+	plain := func(s string) string { return k12.RecognitionQuestionSourceTextV1(s,target.SourceNumberPath,target.DisplayLabel) }
+	sheet, complete := elementarymath.ParseTravelWorksheet(source)
+	main, travel, rate := elementarymath.TravelQuestionPrefix(source)
+	sameText := thirdLegible
+	for _, text := range readings {
+		sameText = sameText && k12.RecognitionSourceQuestionsEqualV1(plain(text),plain(source))
+		if complete {
+			other, ok := elementarymath.ParseTravelWorksheet(text)
+			var agrees bool
+			if ok { sheet, agrees = sheet.Corroborate(other) }
+			complete = ok && agrees
+		}
+		if rate {
+			_, other, ok := elementarymath.TravelQuestionPrefix(text)
+			rate = ok && other == travel
+		}
+	}
+	if complete { return printedReference{question:source, worksheet:&sheet},true }
+	if sameText { return printedReference{question:source},true }
+	if rate { return printedReference{question:main},true }
+	return printedReference{}, false
+}
+
+// 仅肯定印刷内容清楚的完整分句可忽略。剩余分句按各自的题面和笔迹来源判断。
 var worksheetPrintedAnswerFrame = regexp.MustCompile(`(?:预印|印刷)(?:的)?(?:答题框|作答框|填空框|方框|括号|横线|分数线|空格)`)
 var worksheetHandwritingTerms = strings.NewReplacer("可辨认的填字", "可辨认的手写答案", "是否有填写", "是否有手写作答", "填写内容", "手写作答内容")
+var worksheetClauseBreak = regexp.MustCompile(`[，,。；;！!]+|但是|不过|但`)
+var worksheetPrintedClear = regexp.MustCompile(`^(?:印刷(?:的)?(?:题干|题面|原文|文字|条件|内容|部分)?|题干|题面|原题|主要条件|题目条件)(?:均|都|仍|完整|完全)?(?:清晰可辨|完整清晰|清晰完整|清晰|清楚|完整|可辨认|可读|明确)$`)
+var worksheetPrintedRisk = regexp.MustCompile(`(?i)题干|题意|题面|原题|主问|条件|印刷|运算符|算式|单位|数量关系|题号|冲突|不一致|printed|question|condition|operator|unit|conflict|source_gap`)
 
-func worksheetObservationsAgree(initial, reviewed string, target k12.RecognitionLayoutTargetV2, expected elementarymath.TravelWorksheet, handwritingGap bool) bool {
-	type reading struct {
-		Kind        string `json:"kind"`
-		TargetID    string `json:"target_id"`
-		Recognition struct {
-			Question string   `json:"question"`
-			Subject  string   `json:"subject"`
-			Signals  []string `json:"ocr_signals"`
-		} `json:"recognition"`
-	}
-	entries, err := k12.CanonicalRecognitionLayoutInitialReadEntriesV1(initial)
-	if err != nil || len(entries) != 1 {
-		return false
-	}
-	var original struct {
-		Number []string `json:"source_number_path"`
-		Read   reading  `json:"initial_read"`
-	}
-	var batch struct {
-		Items []reading `json:"items"`
-	}
-	if json.Unmarshal(entries[0], &original) != nil || !slices.Equal(original.Number, target.SourceNumberPath) ||
-		json.Unmarshal([]byte(reviewed), &batch) != nil || len(batch.Items) != 1 ||
-		(batch.Items[0].TargetID != target.TargetID && batch.Items[0].TargetID != "t1") {
-		return false
-	}
-	for _, read := range []reading{original.Read, batch.Items[0]} {
-		if read.Kind != "question" || read.Recognition.Subject != "数学" {
-			return false
-		}
-		source := strings.TrimSpace(read.Recognition.Question)
-		if source != "" && source[0] >= '0' && source[0] <= '9' && (len(target.SourceNumberPath) != 1 ||
-			!strings.HasPrefix(source, target.SourceNumberPath[0]+".") && !strings.HasPrefix(source, target.SourceNumberPath[0]+"、")) {
-			return false
-		}
-		for _, signal := range read.Recognition.Signals {
-			observation := worksheetHandwritingTerms.Replace(worksheetPrintedAnswerFrame.ReplaceAllString(signal, "方框"))
-			if worksheetPrintedRisk.MatchString(observation) || !handwritingGap && !handwritingOnlySourceSignal(observation) {
-				return false
-			}
-		}
-		if !worksheetReadingMatches(source, expected) {
-			return false
+func worksheetSignalsAllowReference(signals []string, handwritingGap bool) bool {
+	for _, signal := range signals {
+		observation := worksheetHandwritingTerms.Replace(worksheetPrintedAnswerFrame.ReplaceAllString(signal, "方框"))
+		hasHandwriting := handwritingOnlySourceSignal(observation)
+		for _, part := range worksheetClauseBreak.Split(observation,-1) {
+			clause := strings.TrimSpace(part)
+			if clause == "" || worksheetPrintedClear.MatchString(clause) { continue }
+			if worksheetPrintedRisk.MatchString(clause) || !handwritingGap && !hasHandwriting && !handwritingOnlySourceSignal(clause) { return false }
 		}
 	}
 	return true
 }
-
-// 结构化缺口已明确属于笔迹、且独立来源通过同一数学核对时，笼统的低清晰度备注只影响学生判定。
-// 指向印刷条件、单位、运算和题面冲突的观察仍阻止相应参考解。
-var worksheetPrintedRisk = regexp.MustCompile(`(?i)题干|题意|原题|主问|条件|印刷|运算符|算式|单位|数量关系|题号|冲突|不一致|printed|question|condition|operator|unit|conflict|source_gap`)
 
 // 参考解只采用同目标裁决的印刷观察，不结算学生作答。
 func independentReferenceFromAdjudication(req PhotoGradeRequest, q RecognizedQuestion, payload string) (string, bool) {
@@ -446,7 +473,7 @@ func independentReferenceFromAdjudication(req PhotoGradeRequest, q RecognizedQue
 		}
 	}
 	observed, err := k12.ParseRecognitionFinalAnswerResponseV1(payload, *q.SourceRegion)
-	if err != nil || !observed.TargetOwnershipConfirmed || observed.ActiveAnswerComplete {
+	if err != nil || !observed.TargetOwnershipConfirmed || observed.ActiveAnswerComplete || !printedNumberMatches(observed.QuestionRawTranscription, q.SourceNumberPath) {
 		return "", false
 	}
 	var envelope struct {

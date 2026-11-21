@@ -14,8 +14,14 @@ type UniformTravelProblem struct {
 	Hours, Distance, Unit string
 }
 
-// 精算只识别语法明确的主语和计时起点；其余题面交回通用求解，不把条件吞进人名。
-var uniformTravelQuestion = regexp.MustCompile(`(?s)^(小[\p{Han}]|[他她它我]|(?:一名|一位|一个)?(?:学生|同学|行人|运动员)|(?:一辆)?(?:汽车|自行车))\s*(?:用时|用了|用|花了)?\s*(.+?)\s*小时(?:走|行走|步行|行驶|骑行)了?\s*(.+?)\s*(千米|公里|米|km|m)\s*[，,]\s*(?:照这样的速度|按相同的速度|按同样的速度)\s*[，,]\s*(?:他|她|它)?每小时(?:走|行走|步行|行驶|骑行)多少\s*(千米|公里|米|km|m)\s*[？?]$`)
+// 主语与计时短语分开验证，修饰时长的词不能被当成人名的一部分。
+var uniformTravelQuestion = regexp.MustCompile(`(?s)^([\p{Han}]+?)\s*(?:用时|用了|用|花了)?\s*([0-9零一二两三四五六七八九十].*?)\s*小时(?:走|行走|步行|行驶|骑行)了?\s*(.+?)\s*(千米|公里|米|km|m)\s*[，,]\s*(?:照这样的速度|按相同的速度|按同样的速度)\s*[，,]\s*(?:他|她|它)?每小时(?:走|行走|步行|行驶|骑行)多少\s*(千米|公里|米|km|m)\s*[？?]$`)
+var travelActor = regexp.MustCompile(`^(?:小[\p{Han}]|[他她它我]|(?:[\p{Han}]{1,3}同学)|(?:一名|一位|一个)?(?:学生|同学|行人|运动员)|(?:一辆)?(?:汽车|自行车))$`)
+
+func exactTravelActor(s string) bool {
+	name := []rune(s)
+	return s != "小于" && (travelActor.MatchString(s) || len(name) == 2 && name[0] == name[1])
+}
 var uniformTravelFractionLayout = regexp.MustCompile(`(^|[^0-9.])\(([0-9]+)\)\s*/\s*\(([0-9]+)\)`)
 var mixedFractionBoundary = regexp.MustCompile(`([0-9])((?:\\\(|\\\[|\$)?\\(?:d|t)?frac\s*\{[0-9]+\}\s*\{[0-9]+\})`)
 var travelDecimal = regexp.MustCompile(`^[0-9]+(?:\.[0-9]+)?$`)
@@ -65,19 +71,25 @@ func exactTravelNumber(s string) (*big.Rat, bool) {
 
 // ParseUniformTravelProblem 只接受自带用时、路程、匀速条件和所求单位的完整主问。
 func ParseUniformTravelProblem(question string) (UniformTravelProblem, bool) {
+	problem, _, ok := parseUniformTravel(question)
+	return problem, ok
+}
+
+// 同一段题面提供两种事实，数值用于算速度，印刷时长用于核对原图按几份计数。
+func parseUniformTravel(question string) (UniformTravelProblem, string, bool) {
 	question, _ = mathtext.ProjectReadable(strings.TrimSpace(question))
 	question = vulgarFraction.ReplaceAllStringFunc(question, func(f string) string {
 		return " " + strings.ReplaceAll(norm.NFKC.String(f), "⁄", "/")
 	})
 	question = uniformTravelFractionLayout.ReplaceAllString(question, "${1}${2}/${3}")
 	match := uniformTravelQuestion.FindStringSubmatch(question)
-	if match == nil || match[1] == "小于" || NormalizeUnit(match[4]) != NormalizeUnit(match[5]) {
-		return UniformTravelProblem{}, false
+	if match == nil || !exactTravelActor(match[1]) || NormalizeUnit(match[4]) != NormalizeUnit(match[5]) {
+		return UniformTravelProblem{}, "", false
 	}
 	hours, hoursOK := exactTravelNumber(match[2])
 	distance, distanceOK := exactTravelNumber(match[3])
 	if !hoursOK || !distanceOK || hours.Sign() <= 0 || distance.Sign() < 0 {
-		return UniformTravelProblem{}, false
+		return UniformTravelProblem{}, "", false
 	}
-	return UniformTravelProblem{Hours: hours.RatString(), Distance: distance.RatString(), Unit: match[5]}, true
+	return UniformTravelProblem{Hours: hours.RatString(), Distance: distance.RatString(), Unit: match[5]}, strings.TrimSpace(match[2]), true
 }

@@ -62,6 +62,12 @@ const MathExecutionContractLegacy = "legacy"
 
 const QuantityAnswerPolicySlotV1 = "quantity_slot_answer_v1"
 const QuantityAnswerPolicySlotV2 = "quantity_slot_answer_v2"
+const QuantityAnswerPolicySlotV3 = "quantity_slot_answer_v3"
+
+// UsesWorksheetQuantities distinguishes snapshots that freeze the worksheet calculation contract.
+func UsesWorksheetQuantities(policy string) bool {
+	return policy == QuantityAnswerPolicySlotV2 || policy == QuantityAnswerPolicySlotV3
+}
 
 type GradingModelSnapshot struct {
 	MathExecutionContract string `json:"math_execution_contract,omitempty"`

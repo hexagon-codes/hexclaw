@@ -20,7 +20,7 @@ import (
 const travelAnswerPolicyKey = "travel_quantity_policy"
 
 func applyTravelAnswerPolicy(facts *k12.ProblemAssetFacts, policy string) {
-	if policy == k12.QuantityAnswerPolicySlotV2 && facts.Subject == "数学" && elementarymath.IsTravelRateSource(facts.Stem) {
+	if k12.UsesWorksheetQuantities(policy) && facts.Subject == "数学" && elementarymath.IsTravelRateSource(facts.Stem) {
 		facts.AnswerContext[travelAnswerPolicyKey] = policy
 	}
 }

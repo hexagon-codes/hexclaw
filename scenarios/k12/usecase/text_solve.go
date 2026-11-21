@@ -247,7 +247,7 @@ func (d Deps) solveTextProblem(ctx context.Context, origin k12.TextSolveOrigin, 
 		}
 	}
 	facts := k12.ProblemAssetFacts{Subject: subject, Stem: req.Problem, AnswerContext: map[string]string{"grade_term": req.Grade}}
-	policy := k12.QuantityAnswerPolicySlotV2
+	policy := k12.QuantityAnswerPolicySlotV3
 	if priorErr == nil {
 		policy = prior.Facts.AnswerContext[travelAnswerPolicyKey]
 	}
