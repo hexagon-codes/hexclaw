@@ -903,6 +903,44 @@ func (s *Store) ReplaceAgentRecordsTx(ctx context.Context, tx *sql.Tx, agentName
 	return s.replaceAgentRecordsVia(ctx, tx, agentName, recs)
 }
 
+// RollbackImportedRecordsTx 仅撤销迁移写入的根。未参与合并的目标记录及其外键回执始终留在原位。
+func (s *Store) RollbackImportedRecordsTx(ctx context.Context, tx *sql.Tx, agent string, previous, imported []*records.AgentRecord) error {
+	if tx == nil {
+		return fmt.Errorf("nil restore rollback transaction")
+	}
+	type key struct{ collection, id string }
+	pre := make(map[key]*records.AgentRecord, len(previous))
+	for _, root := range previous {
+		pre[key{root.Collection, root.RecordID}] = root
+	}
+	var restore []*records.AgentRecord
+	for _, root := range imported {
+		if root.AgentName != agent {
+			return records.ErrNotFound
+		}
+		mp, err := s.mapperFor(root.Collection)
+		if err != nil {
+			return err
+		}
+		original := pre[key{root.Collection, root.RecordID}]
+		// 作品代次和调用是单独导入的，回退后由原作品快照恢复；一般根的原有命令继续引用原行。
+		_, creative := mp.(creativeWorkMapper)
+		if original != nil {
+			restore = append(restore, original)
+			if !creative {
+				continue
+			}
+		}
+		if err := deleteChildren(ctx, tx, mp, root.RecordID, agent); err != nil {
+			return err
+		}
+		if _, err = tx.ExecContext(ctx, "DELETE FROM "+mp.table()+" WHERE agent_name=? AND record_id=?", agent, root.RecordID); err != nil {
+			return err
+		}
+	}
+	return s.ImportAgentRecordsTx(ctx, tx, agent, restore)
+}
+
 // ReplaceAgentRecords 单事务替换实例全部记录（整批先校验，不合法不动现有数据）。
 func (s *Store) ReplaceAgentRecords(ctx context.Context, agentName string, recs []*records.AgentRecord) error {
 	if err := s.ValidateAgentRecords(agentName, recs); err != nil {

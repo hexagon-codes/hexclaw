@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/router"
@@ -67,6 +68,9 @@ func (a *ArchiveRestoreAdapter) RestoreHexbak(ctx context.Context, bak *usecase.
 				if err = a.records.RestoreReviewSchedulesTx(ctx, tx, bak.AgentName, bak.Records, bak.ReviewSchedules); err != nil {
 					return err
 				}
+			}
+			if err := a.records.ImportWeeklyHistoryTx(ctx, tx, bak.AgentName, bak.WeeklyHistory, time.Now().Unix()); err != nil {
+				return fmt.Errorf("restore archived weekly output: %w", err)
 			}
 			if err := a.records.ImportAccumulationsArchiveV10Tx(ctx, tx, bak.AgentName, bak.CurrentAccumulations); err != nil {
 				return fmt.Errorf("restore current accumulations: %w", err)

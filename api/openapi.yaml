@@ -19342,8 +19342,8 @@ paths:
       operationId: k12RecordsBackup
       summary: Read a complete learner backup
       description: >-
-        Returns JSON, not a download attachment; save the whole response as .hexbak. Format v11 includes each mistake's review schedule and the schedule saved when it was paused.
-        Records, the learner profile, and source evidence come from the same read snapshot.
+        Returns JSON, not a download attachment; save the whole response as .hexbak. Format v12 also includes archived weekly plans, snapshots, completed attempts and original PDF bytes. Version 11 includes each mistake’s review schedule and the schedule saved when it was paused.
+        Published papers from previous weeks are included before the first history read. Records, the learner profile, and source evidence come from the same read snapshot.
         Preserve archive_id/checksum/records/assets/confirmed OCR/problem attempts/source-action/current
         creative-work archives unchanged. It does not include the complete model configuration or all
         long-term memory. Missing/corrupt referenced assets fail the backup; do not drop fields and recompute
@@ -19365,7 +19365,7 @@ paths:
       responses:
         "200":
           description: Read a complete learner backup; Returns JSON, not a download attachment; save the whole response
-            as .hexbak. Current version is 8. Preserve archive_id/checksum/records/assets/confirmed
+            as .hexbak. Current version is 12. Preserve archive_id/checksum/records/assets/confirmed
             OCR/problem attempts/source-action/current creative-work archives unchanged. It does not include
             the complete model configuration or all long-term memory. Missing/corrupt referenced assets fail
             the backup; do not drop fields and recompute a checksum.
@@ -19467,7 +19467,7 @@ paths:
         Keep original archive identity/checksum unchanged. source_agent must match the original owner;
         target_agent must differ and identify the rebuilt Tutor. guardian_confirmed=true and a
         1..200-character idempotency_key are required. Accepts supported backups from v2 through the current
-        v7. Original archive, target pre-restore snapshot, owner-rewrite journal and domain writes commit in
+        v12. Original archive, target pre-restore snapshot, owner-rewrite journal and domain writes commit in
         one SQLite transaction. The result contains migration_id; identical commands replay durable receipts.
 
 
@@ -19482,7 +19482,7 @@ paths:
           description: Migrate a backup to another Tutor; Keep original archive identity/checksum unchanged.
             source_agent must match the original owner; target_agent must differ and identify the rebuilt
             Tutor. guardian_confirmed=true and a 1..200-character idempotency_key are required. Accepts
-            supported backups from v2 through the current v8. Original archive, target pre-restore snapshot,
+            supported backups from v2 through the current v12. Original archive, target pre-restore snapshot,
             owner-rewrite journal and domain writes commit in one SQLite transaction. The result contains
             migration_id; identical commands replay durable receipts.
           content:
@@ -19540,7 +19540,7 @@ paths:
       description: >-
         Body requires target_agent and guardian_confirmed=true; migration_id is path-owned (any body value is
         overwritten). Limit: 1 MiB. Restores the immutable pre-migration snapshot exactly and appends a
-        journal fact. Repeated calls return the same rolled_back receipt.
+        journal fact. Changes to records being replaced return 409 and keep later work. Repeated calls return the same rolled_back receipt.
 
 
         Authentication: current service Bearer token. agent selects the learner scope; request user_id cannot
@@ -41846,6 +41846,57 @@ components:
       type: object
     K12Recordsscenarios_k12_usecase_Hexbak:
       properties:
+        weekly_history:
+          type: array
+          description: Immutable archived weekly papers in v12. Restore the whole object, including the original PDF bytes.
+          items:
+            type: object
+            required: [plan, plan_source_digest, snapshot, artifact, render, pdf]
+            properties:
+              plan: { $ref: "#/components/schemas/K12PracticeWeeklyPracticePlan" }
+              plan_source_digest: { type: string }
+              plan_answer_keys: { type: object, additionalProperties: { type: string } }
+              snapshot: { $ref: "#/components/schemas/K12PracticeWeeklyPracticeSnapshot" }
+              snapshot_answer_keys: { type: object, additionalProperties: { type: string } }
+              artifact:
+                type: object
+                required: [artifact_id, agent_name, source_kind, source_ref, title, canonical_markdown, source_digest, created_at]
+                properties:
+                  artifact_id: {type: string}
+                  agent_name: {type: string}
+                  source_kind: {const: weekly_practice_snapshot}
+                  source_ref: {type: string}
+                  title: {type: string}
+                  canonical_markdown: {type: string}
+                  source_digest: {type: string}
+                  render_spec_digest: {type: string}
+                  created_at: {type: integer}
+              render:
+                type: object
+                required: [artifact_id, format, render_contract_version, content_type, byte_digest, byte_size, created_at]
+                properties:
+                  artifact_id: {type: string}
+                  format: {const: pdf}
+                  render_contract_version: {type: string}
+                  content_type: {const: application/pdf}
+                  byte_digest: {type: string}
+                  byte_size: {type: integer}
+                  render_spec_digest: {type: string}
+                  render_spec_json: {type: string}
+                  layout_check: {type: string}
+                  created_at: {type: integer}
+              pdf: {type: string, contentEncoding: base64, contentMediaType: application/pdf}
+              attempts:
+                type: array
+                items:
+                  type: object
+                  required: [attempt, idempotency_key, request_digest, updated_at]
+                  properties:
+                    attempt: { $ref: "#/components/schemas/K12PracticeWeeklyPracticeAttempt" }
+                    request_snapshot_id: {type: string, description: Original snapshot used by the settled request digest after owner migration.}
+                    idempotency_key: {type: string}
+                    request_digest: {type: string}
+                    updated_at: {type: integer}
         review_schedules:
           type: object
           description: v11 起按归档内错题 ID 保存复习安排，包含暂停前的计划。
@@ -41917,7 +41968,7 @@ components:
             - type: "null"
         version:
           type: integer
-          description: Current backup version is 9; restoration supports versioned checksum contracts through 9.
+          description: Current backup version is 12. Restoration supports the original checksums of versions 1 through 12.
             Preserve this complete envelope unchanged.
       required:
         - version

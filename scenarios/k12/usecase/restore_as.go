@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 
 	"github.com/hexagon-codes/hexclaw/records"
@@ -162,6 +163,27 @@ func MigrateHexbakOwner(source *Hexbak, targetAgent string) (*Hexbak, error) {
 	migrated.Version = HexbakVersion
 	migrated.ArchiveID = ""
 	migrated.AgentName = targetAgent
+	for i := range migrated.WeeklyHistory {
+		item := &migrated.WeeklyHistory[i]
+		p, snap := &item.Plan, &item.Snapshot
+		p.PlanID = weeklyPlanID(targetAgent, p.ISOWeekYear, p.ISOWeekNumber, p.Timezone)
+		p.AgentName, snap.AgentName, snap.PlanID = targetAgent, targetAgent, p.PlanID
+		snap.SnapshotID = weeklySnapshotID(p.PlanID, snap.PlanRevision)
+		snap.SnapshotDigest = weeklySnapshotDigest(*snap)
+		item.Artifact = archivedWeeklyArtifact(targetAgent, snap.SnapshotID, item.Artifact)
+		item.Render.ArtifactID, snap.ArtifactID = item.Artifact.ArtifactID, item.Artifact.ArtifactID
+		for j := range item.Attempts {
+			attempt := &item.Attempts[j]
+			if attempt.RequestSnapshotID == "" {
+				attempt.RequestSnapshotID = attempt.Attempt.SnapshotID
+			}
+			attempt.Attempt.SnapshotID = snap.SnapshotID
+			attempt.Attempt.AttemptID = weeklyAttemptID(snap.SnapshotID, attempt.Attempt.ItemID, attempt.Key)
+		}
+		slices.SortFunc(item.Attempts, func(a, b k12storage.WeeklyHistoryAttempt) int {
+			return strings.Compare(a.Attempt.AttemptID, b.Attempt.AttemptID)
+		})
+	}
 	for _, rec := range migrated.Records {
 		if rec == nil {
 			return nil, fmt.Errorf("%w: archive record 不可为 nil", ErrInvalidInput)
@@ -376,6 +398,16 @@ func cloneHexbak(bak *Hexbak) *Hexbak {
 		_ = json.Unmarshal(raw, &out.CurrentAccumulations)
 	}
 	out.ReviewSchedules = maps.Clone(bak.ReviewSchedules)
+	if bak.WeeklyHistory != nil {
+		out.WeeklyHistory = make([]k12storage.WeeklyHistoryArchive, len(bak.WeeklyHistory))
+		for i, item := range bak.WeeklyHistory {
+			pdf := item.PDF
+			item.PDF = nil
+			raw, _ := json.Marshal(item)
+			_ = json.Unmarshal(raw, &out.WeeklyHistory[i])
+			out.WeeklyHistory[i].PDF = slices.Clone(pdf)
+		}
+	}
 	out.ProblemAttempts = cloneProblemAttemptSnapshots(bak.ProblemAttempts)
 	if bak.ProblemSource != nil {
 		cloned := k12storageCloneProblemSourceArchive(*bak.ProblemSource)

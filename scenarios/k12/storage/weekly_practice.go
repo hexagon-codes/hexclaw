@@ -671,6 +671,8 @@ func upsertWeeklySettings(ctx context.Context, tx *sql.Tx, v k12.WeeklyPracticeS
 	return err
 }
 
+const otherWeeklyPeriodSQL = `NOT (iso_week_year=? AND iso_week_number=? AND timezone=?)`
+
 func (s *Store) ReconcileWeeklyPracticeBoundary(ctx context.Context, agentName string,
 	year, week int, timezone string, at int64) error {
 	agentName = strings.TrimSpace(agentName)
@@ -687,7 +689,7 @@ func (s *Store) ReconcileWeeklyPracticeBoundary(ctx context.Context, agentName s
             WHERE s.plan_id=k12_weekly_practice_plans.plan_id
         ) THEN 'archived' ELSE 'expired_unused' END,updated_at=?
         WHERE agent_name=? AND status IN ('draft','frozen')
-          AND NOT (iso_week_year=? AND iso_week_number=? AND timezone=?)`,
+          AND `+otherWeeklyPeriodSQL,
 		at, agentName, year, week, timezone)
 	return err
 }
@@ -1336,6 +1338,13 @@ func (s *Store) GetWeeklyPracticeSnapshotForPlan(ctx context.Context, agentName,
 		`plan_id=? AND plan_revision=?`, strings.TrimSpace(planID), revision)
 }
 
+// 家庭归档与历史列表共用已发布卷面的边界。仅冻结了题目而未登记打印产物的计划尚未交付。
+const weeklyHistorySources = ` FROM k12_weekly_practice_snapshots s
+        JOIN k12_weekly_practice_plans p ON p.plan_id=s.plan_id AND p.agent_name=s.agent_name
+        JOIN k12_print_artifacts artifact
+          ON artifact.agent_name=s.agent_name AND artifact.source_kind='weekly_practice_snapshot'
+         AND artifact.source_ref=s.snapshot_id `
+
 func (s *Store) ListWeeklyPracticeHistory(ctx context.Context, agentName, cursor string,
 	limit int) ([]k12.WeeklyPracticeHistorySummary, *string, error) {
 	offset := 0
@@ -1349,13 +1358,7 @@ func (s *Store) ListWeeklyPracticeHistory(ctx context.Context, agentName, cursor
 	rows, err := s.db.QueryContext(ctx, `SELECT s.snapshot_json,p.updated_at,artifact.artifact_id,
         COALESCE(SUM(CASE WHEN json_extract(a.attempt_json,'$.result')='correct' THEN 1 ELSE 0 END),0),
         COALESCE(SUM(CASE WHEN json_extract(a.attempt_json,'$.result')='wrong' THEN 1 ELSE 0 END),0),
-        COALESCE(SUM(CASE WHEN json_extract(a.attempt_json,'$.result')='needs_review' THEN 1 ELSE 0 END),0)
-        FROM k12_weekly_practice_snapshots s
-        JOIN k12_weekly_practice_plans p ON p.plan_id=s.plan_id
-        JOIN k12_print_artifacts artifact
-          ON artifact.agent_name=s.agent_name
-         AND artifact.source_kind='weekly_practice_snapshot'
-         AND artifact.source_ref=s.snapshot_id
+        COALESCE(SUM(CASE WHEN json_extract(a.attempt_json,'$.result')='needs_review' THEN 1 ELSE 0 END),0)`+weeklyHistorySources+`
         LEFT JOIN (
           SELECT attempt_id,agent_name,snapshot_id,item_id,attempt_json FROM (
             SELECT attempt_id,agent_name,snapshot_id,item_id,attempt_json,
@@ -1440,7 +1443,9 @@ func (s *Store) UpdateWeeklyPracticeAttempt(ctx context.Context, agentName strin
 	attempt k12.WeeklyPracticeAttempt, at int64) error {
 	payload, _ := json.Marshal(attempt)
 	res, err := s.db.ExecContext(ctx, `UPDATE k12_weekly_practice_attempts
-        SET attempt_json=?,updated_at=? WHERE attempt_id=? AND agent_name=?`,
+        SET attempt_json=CASE WHEN json_extract(attempt_json,'$.archive_request_snapshot_id') IS NULL THEN ?1
+			ELSE json_set(?1,'$.archive_request_snapshot_id',json_extract(attempt_json,'$.archive_request_snapshot_id')) END,
+		updated_at=?2 WHERE attempt_id=?3 AND agent_name=?4`,
 		string(payload), at, attempt.AttemptID, agentName)
 	if err != nil {
 		return err

@@ -36,6 +36,18 @@ func (s *Store) PrepareWeeklyPracticeAssessmentCommand(
 	ctx context.Context,
 	command k12.WeeklyPracticeAssessmentCommand,
 ) (k12.WeeklyPracticeAssessmentCommand, bool, error) {
+	return s.prepareWeeklyAssessment(ctx, command, "")
+}
+
+// PrepareWeeklyPracticeAnswer 只在比对改名归档的旧摘要时使用原答案，数据库不再保存一份作答。
+func (s *Store) PrepareWeeklyPracticeAnswer(ctx context.Context, command k12.WeeklyPracticeAssessmentCommand, answer string) (k12.WeeklyPracticeAssessmentCommand, bool, error) {
+	if answer == "" || command.RequestDigest != k12.WeeklyAssessmentRequestDigest(command.SnapshotID, command.ItemID, answer) {
+		return k12.WeeklyPracticeAssessmentCommand{}, false, records.ErrInvalidFields
+	}
+	return s.prepareWeeklyAssessment(ctx, command, answer)
+}
+
+func (s *Store) prepareWeeklyAssessment(ctx context.Context, command k12.WeeklyPracticeAssessmentCommand, answer string) (k12.WeeklyPracticeAssessmentCommand, bool, error) {
 	if strings.TrimSpace(command.CommandID) == "" ||
 		strings.TrimSpace(command.AgentName) == "" ||
 		strings.TrimSpace(command.SnapshotID) == "" ||
@@ -47,8 +59,11 @@ func (s *Store) PrepareWeeklyPracticeAssessmentCommand(
 		return k12.WeeklyPracticeAssessmentCommand{}, false,
 			fmt.Errorf("%w: incomplete weekly assessment command", records.ErrInvalidFields)
 	}
+	// 归档包含已完成的作答，恢复后同一命令不能再次认领模型调用或推进学习状态。
 	res, err := s.db.ExecContext(ctx, `INSERT INTO k12_weekly_assessment_commands
-        (`+weeklyAssessmentCommandColumns+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+        (`+weeklyAssessmentCommandColumns+`) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?
+		WHERE NOT EXISTS(SELECT 1 FROM k12_weekly_practice_attempts
+			WHERE agent_name=?2 AND snapshot_id=?3 AND item_id=?4 AND idempotency_key=?5)
         ON CONFLICT(agent_name,snapshot_id,item_id,idempotency_key) DO NOTHING`,
 		command.CommandID, command.AgentName, command.SnapshotID, command.ItemID,
 		command.IdempotencyKey, command.RequestDigest, command.Status,
@@ -63,6 +78,24 @@ func (s *Store) PrepareWeeklyPracticeAssessmentCommand(
 	}
 	stored, err := s.GetWeeklyPracticeAssessmentCommand(ctx, command.AgentName,
 		command.SnapshotID, command.ItemID, command.IdempotencyKey, command.RequestDigest)
+	if errors.Is(err, records.ErrNotFound) {
+		var digest, original string
+		err = s.db.QueryRowContext(ctx, `SELECT request_digest, attempt_id, COALESCE(json_extract(attempt_json,'$.archive_request_snapshot_id'),'')
+			FROM k12_weekly_practice_attempts
+			WHERE agent_name=? AND snapshot_id=? AND item_id=? AND idempotency_key=?`,
+			command.AgentName, command.SnapshotID, command.ItemID, command.IdempotencyKey).Scan(&digest, &command.AttemptID, &original)
+		if err == nil {
+			expected := command.RequestDigest
+			if original != "" && answer != "" {
+				expected = k12.WeeklyAssessmentRequestDigest(original, command.ItemID, answer)
+			}
+			if digest != expected {
+				return k12.WeeklyPracticeAssessmentCommand{}, false, records.ErrVersionConflict
+			}
+			command.Status = k12.WeeklyAssessmentCommitted
+			return command, false, nil
+		}
+	}
 	if err != nil {
 		return k12.WeeklyPracticeAssessmentCommand{}, false, err
 	}

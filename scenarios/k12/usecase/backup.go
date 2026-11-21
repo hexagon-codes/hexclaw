@@ -19,8 +19,8 @@ import (
 // canonical evidence 纳入 checksum；v5 纳入 V19 Problem/Attempt canonical
 // ledger 与其 page asset；v6 纳入 V50/V51/V72/V73 source-action durability
 // closure；v7 纳入当前作品来源、点评与调用停点；v8 纳入教学图；v9 纳入复习来源；
-// v10 纳入当前积累来源及派生依据。旧版校验字节契约继续兼容。
-const HexbakVersion = 11
+// v10 纳入当前积累来源及派生依据；v11 保留复习安排；v12 保存往期周练和原 PDF。
+const HexbakVersion = 12
 
 // ErrChecksumMismatch 恢复时校验和不符（归档损坏或载荷不一致）。
 var ErrChecksumMismatch = errors.New("hexbak checksum mismatch")
@@ -57,6 +57,7 @@ type Hexbak struct {
 	// CurrentAccumulations v10保留当前来源及派生依据；nil表示历史归档未携带。
 	CurrentAccumulations []k12storage.AccumulationArchiveV10          `json:"current_accumulations,omitempty"`
 	ReviewSchedules      map[string]k12storage.ArchivedReviewSchedule `json:"review_schedules,omitempty"`
+	WeeklyHistory        []k12storage.WeeklyHistoryArchive            `json:"weekly_history,omitempty"`
 	// Profile 孩子档案（T2.6 全量导出 PRD §3.12.4-1：不止 records，还含档案）。可空（老归档/无档案）。
 	// 注：学情记忆 + 实例配置的导出需跨子系统新 port（Insights 目前只写不可导），属后续。
 	Profile  *k12.ChildProfile `json:"profile,omitempty"`
@@ -147,6 +148,10 @@ func (d Deps) readHexbakSnapshot(ctx context.Context, agentName string) (*Hexbak
 	if err != nil {
 		return nil, fmt.Errorf("export mistake review schedules: %w", err)
 	}
+	bak.WeeklyHistory, err = d.Records.ExportWeeklyHistoryTx(ctx, tx, agentName, bak.ExportedAt)
+	if err != nil {
+		return nil, fmt.Errorf("export weekly history: %w", err)
+	}
 	bak.CurrentAccumulations, err = d.Records.ExportAccumulationsArchiveV10Tx(ctx, tx, agentName)
 	if err != nil {
 		return nil, fmt.Errorf("export current accumulations: %w", err)
@@ -229,7 +234,7 @@ func (d Deps) Restore(ctx context.Context, bak *Hexbak) (int, error) {
 		// boundary; compensation cannot close a process-crash window.
 		if d.ArchiveRestorer == nil && (d.Profiles != nil || restoreBak.Profile != nil ||
 			len(restoreBak.CreativeWorkOCR) > 0 || len(restoreBak.ProblemAttempts) > 0 ||
-			restoreBak.ProblemSource != nil || len(restoreBak.CurrentCreativeWorks) > 0 || len(restoreBak.TeachingDiagrams) > 0 || restoreBak.ReviewSources != nil || len(restoreBak.CurrentAccumulations) > 0 || len(restoreBak.ReviewSchedules) > 0) {
+			restoreBak.ProblemSource != nil || len(restoreBak.CurrentCreativeWorks) > 0 || len(restoreBak.TeachingDiagrams) > 0 || restoreBak.ReviewSources != nil || len(restoreBak.CurrentAccumulations) > 0 || len(restoreBak.ReviewSchedules) > 0 || len(restoreBak.WeeklyHistory) > 0) {
 			return 0, fmt.Errorf("%w: 未配置 records/profile 原子恢复能力", ErrInvalidInput)
 		}
 		if d.ArchiveRestorer != nil {
@@ -241,7 +246,7 @@ func (d Deps) Restore(ctx context.Context, bak *Hexbak) (int, error) {
 					return len(restoreBak.Records), nil
 				}
 				if len(restoreBak.Assets) > 0 || len(restoreBak.CreativeWorkOCR) > 0 ||
-					len(restoreBak.ProblemAttempts) > 0 || restoreBak.ProblemSource != nil || len(restoreBak.CurrentCreativeWorks) > 0 || len(restoreBak.TeachingDiagrams) > 0 || len(restoreBak.CurrentAccumulations) > 0 || len(restoreBak.ReviewSchedules) > 0 {
+					len(restoreBak.ProblemAttempts) > 0 || restoreBak.ProblemSource != nil || len(restoreBak.CurrentCreativeWorks) > 0 || len(restoreBak.TeachingDiagrams) > 0 || len(restoreBak.CurrentAccumulations) > 0 || len(restoreBak.ReviewSchedules) > 0 || len(restoreBak.WeeklyHistory) > 0 {
 					return 0, fmt.Errorf("%w: 未配置 v%d 内容文件/OCR/Problem-Attempt 原子恢复能力", ErrInvalidInput, restoreBak.Version)
 				}
 			}
@@ -452,6 +457,18 @@ func VerifyHexbak(bak *Hexbak) error {
 	}
 	if sum != bak.Checksum {
 		return ErrChecksumMismatch
+	}
+	if len(bak.WeeklyHistory) > 0 && bak.Version < 12 {
+		return fmt.Errorf("%w: weekly history is not covered by this archive version", ErrInvalidInput)
+	}
+	if err := k12storage.ValidateWeeklyHistoryArchive(bak.AgentName, bak.WeeklyHistory); err != nil {
+		return err
+	}
+	for _, week := range bak.WeeklyHistory {
+		if week.Snapshot.SnapshotDigest != weeklySnapshotDigest(week.Snapshot) ||
+			!samePrintArtifact(week.Artifact, archivedWeeklyArtifact(bak.AgentName, week.Snapshot.SnapshotID, week.Artifact)) {
+			return fmt.Errorf("%w: frozen weekly questions or artifact identity differ", ErrInvalidInput)
+		}
 	}
 	if len(bak.ReviewSchedules) != 0 {
 		if bak.Version < 11 {

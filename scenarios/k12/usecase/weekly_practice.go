@@ -619,7 +619,7 @@ func (d Deps) EnsureWeeklyPracticePlan(ctx context.Context,
 		return k12.WeeklyPracticePlan{}, false, err
 	}
 	freezer, production := d.WeeklyCandidates.(weeklyCandidateRequestFreezer)
-	planID := "wplan-" + shortDigest(fmt.Sprintf("%s\x00%d\x00%d\x00%s", req.AgentName, window.Year, window.Week, settings.Timezone))
+	planID := weeklyPlanID(req.AgentName, window.Year, window.Week, settings.Timezone)
 	current, currentErr := d.Records.GetWeeklyPracticePlan(ctx, req.AgentName, planID)
 	if currentErr != nil && !errors.Is(currentErr, records.ErrNotFound) {
 		return k12.WeeklyPracticePlan{}, false, currentErr
@@ -1070,7 +1070,7 @@ func (d Deps) PrepareWeeklyPracticeOutput(ctx context.Context, agent, planID str
 		}
 	} else {
 		snapshot = k12.WeeklyPracticeSnapshot{
-			SnapshotID: "wsnap-" + shortDigest(fmt.Sprintf("%s\x00%d", plan.PlanID, plan.Revision)),
+			SnapshotID: weeklySnapshotID(plan.PlanID, plan.Revision),
 			PlanID:     plan.PlanID, PlanRevision: plan.Revision, AgentName: plan.AgentName,
 			ISOWeekYear: plan.ISOWeekYear, ISOWeekNumber: plan.ISOWeekNumber,
 			Timezone: plan.Timezone, WeekStart: plan.WeekStart, WeekEnd: plan.WeekEnd,
@@ -1080,12 +1080,7 @@ func (d Deps) PrepareWeeklyPracticeOutput(ctx context.Context, agent, planID str
 			Tracks:                     plan.Tracks, RenderVersion: "practice-paper-v1", CreatedAt: at,
 			AnswerKeys: plan.AnswerKeys,
 		}
-		snapshot.SnapshotDigest = digestValue(struct {
-			PlanID        string
-			PlanRevision  int
-			Tracks        []k12.WeeklyPracticeTrack
-			RenderVersion string
-		}{snapshot.PlanID, snapshot.PlanRevision, snapshot.Tracks, snapshot.RenderVersion})
+		snapshot.SnapshotDigest = weeklySnapshotDigest(snapshot)
 	}
 	artifactReq, err := normalizePrintableArtifactRequest(PreparePrintableArtifactRequest{
 		AgentName: agent, SourceKind: k12.PrintSourceWeeklyPracticeSnapshot,
@@ -1373,6 +1368,32 @@ func digestValue(v any) string {
 	payload, _ := json.Marshal(v)
 	sum := sha256.Sum256(payload)
 	return hex.EncodeToString(sum[:])
+}
+
+func weeklyPlanID(agent string, year, week int, timezone string) string {
+	return "wplan-" + shortDigest(fmt.Sprintf("%s\x00%d\x00%d\x00%s", agent, year, week, timezone))
+}
+
+func weeklySnapshotID(plan string, revision int) string {
+	return "wsnap-" + shortDigest(fmt.Sprintf("%s\x00%d", plan, revision))
+}
+
+func weeklySnapshotDigest(s k12.WeeklyPracticeSnapshot) string {
+	return digestValue(struct {
+		PlanID        string
+		PlanRevision  int
+		Tracks        []k12.WeeklyPracticeTrack
+		RenderVersion string
+	}{s.PlanID, s.PlanRevision, s.Tracks, s.RenderVersion})
+}
+
+// 家庭档案按打印时的规范正文核对或重建归属，始终保留已经冻结的 PDF。
+func archivedWeeklyArtifact(agent, snapshotID string, original k12.PrintArtifact) k12.PrintArtifact {
+	return buildPrintArtifact(PreparePrintableArtifactRequest{
+		AgentName: agent, SourceKind: k12.PrintSourceWeeklyPracticeSnapshot,
+		SourceRef: snapshotID, Title: original.Title, CanonicalMarkdown: original.CanonicalMarkdown,
+		RenderSpecDigest: original.RenderSpecDigest,
+	}, original.CreatedAt)
 }
 
 func shortDigest(value string) string {

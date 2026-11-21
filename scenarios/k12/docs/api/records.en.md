@@ -1112,7 +1112,7 @@ v9 adds `review_sources`: reviewed relationships, their committed source snapsho
 
 `snapshots[].source` and `pages[]` retain the frozen projection's PascalCase field names; clients must transfer them unchanged. `active` records the exported source state, not confidence or an exemption from current identity checks. Relationships that no longer match the original question remain invalid during cross-Tutor migration.
 
-Save the complete JSON response as .hexbak, preserving archive_id, checksum, records, and all evidence fields. The current version is 10 and includes current accumulation sources and their provenance. The profile, records, and related data come from one persistent snapshot. It does not include the complete model configuration or all long-term memory. Missing or corrupt referenced assets fail the backup.
+Save the complete JSON response as `.hexbak`, retaining the original archive ID, checksum and evidence. Version 12 adds `weekly_history` with archived plans, frozen questions, answer keys, completed attempts and the original PDF bytes. A published paper from a previous week is included even if the family has never opened weekly history. Version 11 added mistake review schedules, including the schedule saved at pause. Version 10 added accumulation provenance. All learner data comes from one persistent snapshot. A missing or corrupt required artifact fails the backup. Full model configuration and long-term memory are managed separately.
 
 Availability: K12 module, record store and the dependencies described for this operation.
 
@@ -1130,12 +1130,13 @@ Success: `200` `application/json`.
 | `checksum` | string | Yes | Versioned archive checksum; preserve unchanged. |
 | `creative_work_ocr` | array<`CreativeWorkOCRArchiveEvidence`> / null | No |  |
 | `current_creative_works` | array<`CreativeWorkArchiveV7`> / null | No |  |
+| `weekly_history` | array / null | No | Archived weekly outputs in v12. The `pdf` field holds the original PDF bytes in Base64. Restoring different frozen contents for the same week returns 409 and preserves existing data. |
 | `exported_at` | integer | Yes | Backup time in Unix seconds. |
 | `problem_attempts` | array<`ProblemAttemptSnapshot`> / null | No |  |
 | `problem_source` | `ProblemSourceArchiveV6` / null | No |  |
 | `profile` | `ChildProfile` / null | No |  |
 | `records` | array<`AgentRecord` / null> / null | Yes |  |
-| `version` | integer | Yes | Current backup version is 7; restoration supports versioned checksum contracts through 7. Preserve this complete envelope unchanged. |
+| `version` | integer | Yes | Current version is 12. Preserve the original version, checksum and complete envelope. |
 
 
 | Status | Error meaning |
@@ -1165,12 +1166,13 @@ JSON body:
 | `checksum` | string | Yes | Versioned archive checksum; preserve unchanged. |
 | `creative_work_ocr` | array<`CreativeWorkOCRArchiveEvidence`> / null | No |  |
 | `current_creative_works` | array<`CreativeWorkArchiveV7`> / null | No |  |
+| `weekly_history` | array / null | No | Archived weekly outputs in v12. The `pdf` field holds the original PDF bytes in Base64. Restoring different frozen contents for the same week returns 409 and preserves existing data. |
 | `exported_at` | integer | Yes | Backup time in Unix seconds. |
 | `problem_attempts` | array<`ProblemAttemptSnapshot`> / null | No |  |
 | `problem_source` | `ProblemSourceArchiveV6` / null | No |  |
 | `profile` | `ChildProfile` / null | No |  |
 | `records` | array<`AgentRecord` / null> / null | Yes |  |
-| `version` | integer | Yes | Current backup version is 7; restoration supports versioned checksum contracts through 7. Preserve this complete envelope unchanged. |
+| `version` | integer | Yes | Current version is 12. Preserve the original version, checksum and complete envelope. |
 
 Success: `200` `application/json`.
 
@@ -1195,7 +1197,7 @@ Success: `200` `application/json`.
 
 Migrate a backup to another Tutor.
 
-Keep original archive identity/checksum unchanged. source_agent must match the original owner; target_agent must differ and identify the rebuilt Tutor. guardian_confirmed=true and a nonblank idempotency_key of at most 200 UTF-8 bytes after trimming are required. Accepts supported backups from v2 through the current v9. Original archive, target pre-restore snapshot, owner-rewrite journal and domain writes commit in one SQLite transaction. The result contains migration_id; identical commands replay durable receipts.
+Keep original archive identity/checksum unchanged. source_agent must match the original owner; target_agent must differ and identify the rebuilt Tutor. guardian_confirmed=true and a nonblank idempotency_key of at most 200 UTF-8 bytes after trimming are required. Accepts supported backups from v2 through the current v12. Original archive, target pre-restore snapshot, owner-rewrite journal and domain writes commit in one SQLite transaction. The result contains migration_id; identical commands replay durable receipts.
 
 Availability: K12 module, record store and the dependencies described for this operation.
 
@@ -1243,7 +1245,7 @@ Success: `200` `application/json`.
 
 Roll back a cross-Tutor migration.
 
-Body requires target_agent and guardian_confirmed=true; migration_id is path-owned (any body value is overwritten). Limit: 1 MiB. Restores the immutable pre-migration snapshot exactly and appends a journal fact. Repeated calls return the same rolled_back receipt.
+Body requires target_agent and guardian_confirmed=true; migration_id is path-owned (any body value is overwritten). Limit: 1 MiB. A successful rollback appends a journal entry, and repeated calls return the same rolled_back receipt. If a record to be replaced has changed since migration, the server returns 409 and preserves the learner’s later work. Rollback removes only weekly papers introduced by this migration.
 
 Availability: K12 module, record store and the dependencies described for this operation.
 

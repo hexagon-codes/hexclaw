@@ -12,6 +12,7 @@ import (
 	"github.com/hexagon-codes/hexclaw/router"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/assetstore"
+	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/usecase"
 )
 
@@ -119,6 +120,12 @@ func TestArchiveRestoreAsPersistsOriginalSnapshotJournalAndRollsBackIdempotently
 	if _, err := f.records.Put(ctx, targetOld); err != nil {
 		t.Fatal(err)
 	}
+	command := k12storage.MistakeReviewCommandInput{AgentName: "target-child", MistakeRecordID: targetOld.RecordID, ExpectedVersion: targetOld.Version,
+		IdempotencyKey: "before-migration", CommandType: k12.MistakeReviewCommandSuppress}
+	priorChoice, err := f.records.ApplyMistakeReviewCommand(ctx, command)
+	if err != nil || priorChoice.State != k12.MistakeReviewSuppressed {
+		t.Fatalf("prior review choice: %+v %v", priorChoice, err)
+	}
 
 	d := usecase.Deps{ArchiveMigrator: f.restore, Now: func() int64 { return 500 }}
 	bak := archiveForRestoreAs(t, 2)
@@ -202,6 +209,10 @@ func TestArchiveRestoreAsPersistsOriginalSnapshotJournalAndRollsBackIdempotently
 	targetRecords, _ = f.records.ExportAgent(ctx, "target-child")
 	if len(targetRecords) != 1 || targetRecords[0].RecordID != targetOld.RecordID {
 		t.Fatalf("rollback did not exactly restore pre-state: %+v", targetRecords)
+	}
+	same, err := f.records.ApplyMistakeReviewCommand(ctx, command)
+	if err != nil || !same.Replayed || same.State != priorChoice.State || same.MistakeVersion != priorChoice.MistakeVersion {
+		t.Fatalf("target's independent review command was removed by rollback: %+v %v", same, err)
 	}
 	targetCfg, _ = f.dispatcher.GetAgent("target-child")
 	if targetCfg.Metadata[k12.MetaKeyChildName] != "小红" || targetCfg.Metadata[k12.MetaKeyGradeTerm] != "四年级下" {

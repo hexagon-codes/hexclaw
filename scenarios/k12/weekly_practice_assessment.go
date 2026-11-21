@@ -1,16 +1,29 @@
 package k12
 
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+)
+
+// WeeklyAssessmentRequestDigest 按最初冻结的快照、题项与原答案绑定命令。
+func WeeklyAssessmentRequestDigest(snapshot, item, answer string) string {
+	raw, _ := json.Marshal(struct{ Snapshot, Item, Answer string }{snapshot, item, answer})
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
+}
+
 // WeeklyPracticeAssessmentCommandStatus is the crash-durable ownership and
 // recovery state for one physical answer-assessment call.
 type WeeklyPracticeAssessmentCommandStatus string
 
 const (
-	WeeklyAssessmentPrepared      WeeklyPracticeAssessmentCommandStatus = "prepared"
-	WeeklyAssessmentSent          WeeklyPracticeAssessmentCommandStatus = "sent"
-	WeeklyAssessmentSucceeded     WeeklyPracticeAssessmentCommandStatus = "succeeded"
-	WeeklyAssessmentFailed        WeeklyPracticeAssessmentCommandStatus = "failed"
+	WeeklyAssessmentPrepared       WeeklyPracticeAssessmentCommandStatus = "prepared"
+	WeeklyAssessmentSent           WeeklyPracticeAssessmentCommandStatus = "sent"
+	WeeklyAssessmentSucceeded      WeeklyPracticeAssessmentCommandStatus = "succeeded"
+	WeeklyAssessmentFailed         WeeklyPracticeAssessmentCommandStatus = "failed"
 	WeeklyAssessmentOutcomeUnknown WeeklyPracticeAssessmentCommandStatus = "outcome_unknown"
-	WeeklyAssessmentCommitted     WeeklyPracticeAssessmentCommandStatus = "committed"
+	WeeklyAssessmentCommitted      WeeklyPracticeAssessmentCommandStatus = "committed"
 )
 
 // WeeklyPracticeAssessmentCommand persists both the immutable request binding

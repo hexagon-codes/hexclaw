@@ -1112,7 +1112,7 @@ v9 追加 `review_sources`：保存同题来源关联、原已提交来源快照
 
 读取完整家庭学习档案备份。
 
-JSON 响应不是附件下载；将完整响应保存为 .hexbak。当前 version=10，保留 archive_id/checksum、记录与原始证据字段。v10 同时保存当前积累来源与派生依据。孩子档案、记录及关联数据来自同一持久快照。当前备份不含完整模型配置与全部长期记忆。任一引用资产缺失或损坏会使整份备份失败，不能丢字段后自行改 checksum。
+将完整 JSON 响应保存为 `.hexbak`。v12 的 `weekly_history` 保存已归档周练的计划、冻结题面、答案键、已结算作答和原 PDF 字节。已发布的卷跨过孩子的周界后即可备份，家庭无需先打开历史页。v11 起保留错题复习安排和暂停前的安排，v10 起保留积累来源与派生依据。家庭档案、关联记录与周练取自同一持久快照。保留原 `archive_id`、`checksum` 及全部字段。引用的原件缺失或损坏时备份失败。长期记忆和完整模型配置另行管理。
 
 依赖：K12 module, record store and the dependencies described for this operation.
 
@@ -1130,12 +1130,13 @@ JSON 响应不是附件下载；将完整响应保存为 .hexbak。当前 versio
 | `checksum` | string | 是 | 版本化完整归档checksum；原样保留。 |
 | `creative_work_ocr` | array<`CreativeWorkOCRArchiveEvidence`> / null | 否 |  |
 | `current_creative_works` | array<`CreativeWorkArchiveV7`> / null | 否 |  |
+| `weekly_history` | array / null | 否 | v12 已归档周练。`pdf` 为原 PDF 的 Base64 字节。相同期已有不同冻结内容时，恢复返回 409 并保留现有数据。 |
 | `exported_at` | integer | 是 | 备份时间，Unix秒。 |
 | `problem_attempts` | array<`ProblemAttemptSnapshot`> / null | 否 |  |
 | `problem_source` | `ProblemSourceArchiveV6` / null | 否 |  |
 | `profile` | `ChildProfile` / null | 否 |  |
 | `records` | array<`AgentRecord` / null> / null | 是 |  |
-| `version` | integer | 是 | Current backup version is 7; restoration supports versioned checksum contracts through 7. Preserve this complete envelope unchanged. |
+| `version` | integer | 是 | 当前版本 12。保留完整归档及原版本校验和。 |
 
 
 | 状态 | 错误含义 |
@@ -1165,12 +1166,13 @@ JSON 正文：
 | `checksum` | string | 是 | 版本化完整归档checksum；原样保留。 |
 | `creative_work_ocr` | array<`CreativeWorkOCRArchiveEvidence`> / null | 否 |  |
 | `current_creative_works` | array<`CreativeWorkArchiveV7`> / null | 否 |  |
+| `weekly_history` | array / null | 否 | v12 已归档周练。`pdf` 为原 PDF 的 Base64 字节。相同期已有不同冻结内容时，恢复返回 409 并保留现有数据。 |
 | `exported_at` | integer | 是 | 备份时间，Unix秒。 |
 | `problem_attempts` | array<`ProblemAttemptSnapshot`> / null | 否 |  |
 | `problem_source` | `ProblemSourceArchiveV6` / null | 否 |  |
 | `profile` | `ChildProfile` / null | 否 |  |
 | `records` | array<`AgentRecord` / null> / null | 是 |  |
-| `version` | integer | 是 | Current backup version is 7; restoration supports versioned checksum contracts through 7. Preserve this complete envelope unchanged. |
+| `version` | integer | 是 | 当前版本 12。保留完整归档及原版本校验和。 |
 
 成功：`200` `application/json`.
 
@@ -1195,7 +1197,7 @@ JSON 正文：
 
 经监护人确认迁移到另一辅导实例。
 
-archive 完整保存源身份与checksum；source_agent 必须等于原归属，target_agent 必须不同且为重建目标；guardian_confirmed=true；idempotency_key 经trim后须非空，且最多200个UTF-8字节。仅接受v2及以上兼容档案，当前上限v9。原档案、目标恢复前快照、owner改写journal与领域写入同一SQLite事务，结果带 migration_id。重复同键返回持久收据，修改内容须新键。
+archive 完整保存源身份与checksum；source_agent 必须等于原归属，target_agent 必须不同且为重建目标；guardian_confirmed=true；idempotency_key 经trim后须非空，且最多200个UTF-8字节。仅接受v2及以上兼容档案，当前上限v12。原档案、目标恢复前快照、owner改写journal与领域写入同一SQLite事务，结果带 migration_id。重复同键返回持久收据，修改内容须新键。
 
 依赖：K12 module, record store and the dependencies described for this operation.
 
@@ -1243,7 +1245,7 @@ JSON 正文：
 
 回退一次跨实例迁移。
 
-正文 target_agent 与 guardian_confirmed=true；migration_id 由路径决定，即使正文带同名字段也由路径覆盖。请求上限1MiB。精确回退不可变恢复前快照并追加journal；重复调用返回同一 rolled_back 收据。
+正文 target_agent 与 guardian_confirmed=true；migration_id 由路径决定，即使正文带同名字段也由路径覆盖。请求上限1MiB。回退成功后追加 journal，重复调用返回同一 `rolled_back` 回执。将被替换的记录在迁移后有变更时返回 409，保留目标孩子后来保存的工作。已归档周练只撤回本次新增的卷。
 
 依赖：K12 module, record store and the dependencies described for this operation.
 

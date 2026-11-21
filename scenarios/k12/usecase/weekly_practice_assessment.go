@@ -63,6 +63,10 @@ func (a verifiedSolutionWeeklyAssessor) AssessWeeklyPracticeAnswer(
 	}, nil
 }
 
+func weeklyAttemptID(snapshotID, itemID, key string) string {
+	return "wattempt-" + shortDigest(snapshotID+"\x00"+itemID+"\x00"+key)
+}
+
 func (d Deps) submitWeeklyPracticeAttemptDurable(
 	ctx context.Context,
 	agent, snapshotID, itemID, studentAnswer, idempotencyKey string,
@@ -106,9 +110,7 @@ func (d Deps) submitWeeklyPracticeAttemptDurable(
 		return k12.WeeklyPracticeAttempt{}, false,
 			fmt.Errorf("%w: frozen answer key unavailable", ErrSolveFailed)
 	}
-	requestDigest := digestValue(struct{ Snapshot, Item, Answer string }{
-		snapshotID, itemID, studentAnswer,
-	})
+	requestDigest := k12.WeeklyAssessmentRequestDigest(snapshotID, itemID, studentAnswer)
 	now := d.now()
 	command := k12.WeeklyPracticeAssessmentCommand{
 		CommandID:      "wassessment-command-" + shortDigest(snapshotID+"\x00"+itemID+"\x00"+idempotencyKey),
@@ -121,7 +123,7 @@ func (d Deps) submitWeeklyPracticeAttemptDurable(
 		CreatedAt:      now,
 		UpdatedAt:      now,
 	}
-	command, _, err = d.Records.PrepareWeeklyPracticeAssessmentCommand(ctx, command)
+	command, _, err = d.Records.PrepareWeeklyPracticeAnswer(ctx, command, studentAnswer)
 	if err != nil {
 		return k12.WeeklyPracticeAttempt{}, false, err
 	}
@@ -139,7 +141,7 @@ func (d Deps) submitWeeklyPracticeAttemptDurable(
 		return attempt, true, getErr
 	}
 	attempt := k12.WeeklyPracticeAttempt{
-		AttemptID:            "wattempt-" + shortDigest(snapshotID+"\x00"+itemID+"\x00"+idempotencyKey),
+		AttemptID:            weeklyAttemptID(snapshotID, itemID, idempotencyKey),
 		SnapshotID:           snapshotID,
 		ItemID:               itemID,
 		AssessmentID:         assessment.AssessmentID,

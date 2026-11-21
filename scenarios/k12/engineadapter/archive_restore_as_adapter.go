@@ -103,6 +103,10 @@ func (a *ArchiveRestoreAdapter) RestoreArchiveAs(
 			if err != nil {
 				return err
 			}
+			snapshot.WeeklyHistory, err = a.records.ExportWeeklyHistoryTx(ctx, tx, plan.TargetAgent, plan.RequestedAt)
+			if err != nil {
+				return err
+			}
 			snapshot.CurrentAccumulations, err = a.records.ExportAccumulationsArchiveV10Tx(ctx, tx, plan.TargetAgent)
 			if err != nil {
 				return fmt.Errorf("snapshot current accumulations: %w", err)
@@ -203,6 +207,9 @@ func (a *ArchiveRestoreAdapter) RestoreArchiveAs(
 				if err = a.records.RestoreReviewSchedulesTx(ctx, tx, plan.TargetAgent, migrated.Records, migrated.ReviewSchedules); err != nil {
 					return err
 				}
+			}
+			if err := a.records.ImportWeeklyHistoryTx(ctx, tx, plan.TargetAgent, migrated.WeeklyHistory, plan.RequestedAt); err != nil {
+				return err
 			}
 			if plan.OriginalArchive.Version >= 10 {
 				if err := a.records.ImportAccumulationsArchiveV10Tx(ctx, tx, plan.TargetAgent, migrated.CurrentAccumulations); err != nil {
@@ -331,6 +338,9 @@ func (a *ArchiveRestoreAdapter) RollbackRestoreAs(
 			if err != nil {
 				return fmt.Errorf("rebuild immutable migrated assets for rollback: %w", err)
 			}
+			if k12.ProfileFromMeta(updated.Metadata) != k12.ProfileFromMeta(k12.ReplaceProfileInMeta(nil, migrated.Profile)) {
+				return fmt.Errorf("%w: learner profile changed after restore", records.ErrVersionConflict)
+			}
 			reinstalledSnapshot, err := ensureArchiveAssets(current.Snapshot)
 			if err != nil {
 				return fmt.Errorf("restore snapshot assets: %w", err)
@@ -351,14 +361,18 @@ func (a *ArchiveRestoreAdapter) RollbackRestoreAs(
 			if err != nil {
 				return rollbackFailure(fmt.Errorf("snapshot current restore state: %w", err), nil)
 			}
+			var schedules map[string]k12storage.ArchivedReviewSchedule
 			if current.Snapshot.Version >= 11 {
-				live, reviewErr := a.records.ExportReviewSchedulesTx(ctx, tx, req.TargetAgent)
-				if reviewErr != nil {
-					return rollbackFailure(reviewErr, nil)
-				}
-				if err = verifyRestoreReviewSchedules(before, live, current.Snapshot, migrated); err != nil {
+				schedules, err = a.records.ExportReviewSchedulesTx(ctx, tx, req.TargetAgent)
+				if err != nil {
 					return rollbackFailure(err, nil)
 				}
+			}
+			if err = verifyRestoreRecordVersions(before, schedules, current.Snapshot, migrated); err != nil {
+				return rollbackFailure(err, nil)
+			}
+			if err := a.records.RollbackWeeklyHistoryTx(ctx, tx, req.TargetAgent, current.Snapshot.WeeklyHistory, migrated.WeeklyHistory); err != nil {
+				return rollbackFailure(err, nil)
 			}
 			beforeProblemAttempts, err := a.records.ExportProblemAttemptSnapshotsTx(ctx, tx, req.TargetAgent)
 			if err != nil {
@@ -436,7 +450,7 @@ func (a *ArchiveRestoreAdapter) RollbackRestoreAs(
 			); err != nil {
 				return rollbackFailure(fmt.Errorf("remove migrated problem-source closure: %w", err), nil)
 			}
-			if err := a.records.ReplaceAgentRecordsTx(ctx, tx, req.TargetAgent, current.Snapshot.Records); err != nil {
+			if err := a.records.RollbackImportedRecordsTx(ctx, tx, req.TargetAgent, current.Snapshot.Records, migrated.Records); err != nil {
 				return rollbackFailure(fmt.Errorf("restore pre-migration records: %w", err), nil)
 			}
 			if current.Snapshot.Version >= 11 {
@@ -881,14 +895,15 @@ func appendRestoreAsJournal(
 	return len(entries), nil
 }
 
-// 复习命令同时递增根记录版本；旧包未携带的安排只核根版本，不虚构旧选择。
-func verifyRestoreReviewSchedules(before []*records.AgentRecord, live map[string]k12storage.ArchivedReviewSchedule, snapshot, migrated *usecase.Hexbak) error {
-	expected := make(map[string]*records.AgentRecord)
+// 整批回退前在同一事务校验所有将被替换的根；历史包也携带根版本。
+func verifyRestoreRecordVersions(before []*records.AgentRecord, live map[string]k12storage.ArchivedReviewSchedule, snapshot, migrated *usecase.Hexbak) error {
+	type recordKey struct{ collection, id string }
+	expected := make(map[recordKey]*records.AgentRecord)
 	schedules := make(map[string]k12storage.ArchivedReviewSchedule)
 	for _, archive := range []*usecase.Hexbak{snapshot, migrated} {
 		for _, record := range archive.Records {
+			expected[recordKey{record.Collection, record.RecordID}] = record
 			if record.Collection == k12.CollectionMistakes {
-				expected[record.RecordID] = record
 				delete(schedules, record.RecordID)
 			}
 		}
@@ -897,18 +912,19 @@ func verifyRestoreReviewSchedules(before []*records.AgentRecord, live map[string
 		}
 	}
 	for _, record := range before {
-		if record.Collection != k12.CollectionMistakes {
-			continue
+		key := recordKey{record.Collection, record.RecordID}
+		previous := expected[key]
+		if previous == nil || record.Version != previous.Version || record.Status != previous.Status {
+			return fmt.Errorf("%w: %s record changed after restore", records.ErrVersionConflict, record.Collection)
 		}
-		previous := expected[record.RecordID]
 		schedule, known := schedules[record.RecordID]
-		if previous == nil || record.Version != previous.Version || known && schedule != live[record.RecordID] {
+		if record.Collection == k12.CollectionMistakes && known && live != nil && schedule != live[record.RecordID] {
 			return fmt.Errorf("%w: mistake review changed after restore", records.ErrVersionConflict)
 		}
-		delete(expected, record.RecordID)
+		delete(expected, key)
 	}
 	if len(expected) != 0 {
-		return fmt.Errorf("%w: restored mistake is missing", records.ErrVersionConflict)
+		return fmt.Errorf("%w: a restored record is missing", records.ErrVersionConflict)
 	}
 	return nil
 }
