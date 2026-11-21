@@ -203,6 +203,9 @@ func (o *GradingOrchestrator) independentReferenceQuestion(ctx context.Context, 
 			}
 		}
 	}
+	if q.Subject == "数学" && disputedWorksheetQuantity(q.OCRSignals) {
+		return printedReference{}, false, nil
+	}
 	if independentReferenceAnswerEligible(req, q) {
 		if k12.UsesWorksheetQuantities(job.Fields.ModelSnapshot.QuantityAnswerPolicy) && req.practiceReference == nil &&
 			q.Subject == "数学" && q.ProblemKind == ProblemKindStandalone && q.ImageSourceContext != nil && len(q.ImageSourceContext.Materials) == 0 {
@@ -381,6 +384,9 @@ func (o *GradingOrchestrator) referenceFromReviewedWorksheet(ctx context.Context
 				"manifest_invocation_id", runtime.ManifestPhysicalInvocationID, "review_unit", batch.PhysicalUnit)
 		} else {
 			signals := result.Items[0].Recognition.Signals
+			if disputedWorksheetQuantity(signals) {
+				return printedReference{}, false, nil
+			}
 			thirdLegible = observation.QuestionCompleteAndLegible || len(signals) > 0 && worksheetSignalsAllowReference(signals, false)
 			if !thirdLegible && !handwritingGap && !hasOnlyTrailingSourceRisk(signals) {
 				return printedReference{}, false, nil
@@ -551,10 +557,13 @@ var worksheetPrintedAnswerFrame = regexp.MustCompile(`(?:预印|印刷)(?:的)?(
 var worksheetHandwritingTerms = strings.NewReplacer("可辨认的填字", "可辨认的手写答案", "是否有填写", "是否有手写作答", "填写内容", "手写作答内容")
 var worksheetAnswerSlotLocation = regexp.MustCompile(`(?:末尾|题末|底部|最后)[^，。；,;]*(?:填空|答题框|作答栏|空格|一格)`)
 var worksheetWritingMention = regexp.MustCompile(`(?i)手写|笔迹|笔画|填字|填写|填答|作答|墨迹|填空[中内]|答案[栏框]|handwrit|filled answer|answer box`)
+
 // 遮挡的施事可以是笔迹，真正需要归属的是被遮挡的对象。
 var worksheetOccludedObject = regexp.MustCompile(`(?:盖住|遮住|覆盖|挡住|遮挡)(?:了|住)?(.+)$`)
 var worksheetObstruction = regexp.MustCompile(`盖住|遮住|覆盖|挡住|遮挡`)
 var worksheetKnownAnswerObject = regexp.MustCompile(`^(?:了)?(?:原有的|部分|该|这个)?(?:手写|笔迹|填字|作答|答案栏|答案框|方框|填空框|横线)`)
+var worksheetAlternativeValues = regexp.MustCompile(`(?i)[0-9][^，。；,;]{0,16}(?:还是|或(?:者)?|\bor\b)[^，。；,;]{0,8}[0-9]`)
+var worksheetAnswerOwner = regexp.MustCompile(`(?i)手写(?:的)?(?:答案|数[字值]|分数|结果)|学生(?:写|填|的答案)|作答|填字|答案[栏框]|写的是|filled answer|handwritten answer`)
 var worksheetObservationContinuation = regexp.MustCompile(`^(?:未将|未能|无法|不能|难以|不确定|是否|辨认不出|以\s*[?？]\s*保留)`)
 var worksheetReadableRemainder = regexp.MustCompile(`^(?:分母|分子|其余|余下)[^，。；]*(?:可读|可辨|清晰可辨)$`)
 var worksheetClauseBreak = regexp.MustCompile(`[，,。；;！!]+|但是|不过|但`)
@@ -566,8 +575,12 @@ var worksheetPrintedRisk = regexp.MustCompile(`(?i)题干|题意|题面|原题|�
 
 func worksheetSignalsAllowReference(signals []string, handwritingGap bool) bool {
 	for _, signal := range signals {
+		if strings.EqualFold(strings.TrimSpace(signal), "source_gap_handwriting") {
+			continue
+		}
 		observation := worksheetHandwritingTerms.Replace(worksheetPrintedAnswerFrame.ReplaceAllString(signal, "方框"))
 		handwritingScope := false
+		answerOwner := false
 		for _, part := range worksheetClauseBreak.Split(observation, -1) {
 			clause := strings.TrimSpace(part)
 			if clause == "" {
@@ -575,6 +588,7 @@ func worksheetSignalsAllowReference(signals []string, handwritingGap bool) bool 
 			}
 			if worksheetPrintedClear.MatchString(clause) {
 				handwritingScope = false
+				answerOwner = false
 				continue
 			}
 			if worksheetPrintedRisk.MatchString(clause) {
@@ -583,6 +597,11 @@ func worksheetSignalsAllowReference(signals []string, handwritingGap bool) bool 
 			if worksheetObscuresSource(clause) {
 				return false
 			}
+			explicitAnswer := worksheetAnswerOwner.MatchString(clause) || worksheetAnswerSlotLocation.MatchString(clause)
+			if worksheetAlternativeValues.MatchString(clause) && !explicitAnswer && !answerOwner {
+				return false
+			}
+			answerOwner = answerOwner || explicitAnswer
 			if worksheetWritingMention.MatchString(clause) ||
 				worksheetAnswerSlotLocation.MatchString(clause) && worksheetWritingMention.MatchString(observation) {
 				handwritingScope = true
@@ -607,6 +626,13 @@ func worksheetObscuresSource(clause string) bool {
 		return worksheetWritingMention.MatchString(clause[:m[0]]) && !worksheetKnownAnswerObject.MatchString(clause[m[2]:m[3]])
 	}
 	return false
+}
+
+// 同一来源仍给出两个可能的数值时，识别置信度或整题可读标志不能消除这个分歧。
+func disputedWorksheetQuantity(signals []string) bool {
+	return slices.ContainsFunc(signals, func(signal string) bool {
+		return worksheetAlternativeValues.MatchString(signal) && !worksheetSignalsAllowReference([]string{signal}, true)
+	})
 }
 
 // 参考解只采用同目标裁决的印刷观察，不结算学生作答。
@@ -635,6 +661,9 @@ func independentReferenceFromAdjudication(req PhotoGradeRequest, q RecognizedQue
 		} `json:"items"`
 	}
 	if json.Unmarshal(observed.LegacyEnvelope, &envelope) != nil || len(envelope.Items) != 1 || envelope.Items[0].Recognition.Subject != q.Subject {
+		return "", false
+	}
+	if disputedWorksheetQuantity(envelope.Items[0].Recognition.OCRSignals) {
 		return "", false
 	}
 	printed := cloneRecognizedQuestions([]RecognizedQuestion{q})[0]

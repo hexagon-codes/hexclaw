@@ -536,7 +536,7 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 		}
 		if !eligible {
 			for _, signal := range q.OCRSignals {
-				if worksheetObstruction.MatchString(signal) && !worksheetSignalsAllowReference([]string{signal}, true) {
+				if (worksheetObstruction.MatchString(signal) || worksheetAlternativeValues.MatchString(signal)) && !worksheetSignalsAllowReference([]string{signal}, true) {
 					item.Solve.ReportUnavailableReason = signal
 					break
 				}

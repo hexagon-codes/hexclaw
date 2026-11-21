@@ -56,6 +56,8 @@ func TestWorksheetReferenceRequiresTwoIndependentCompletePrintedReadings(t *test
 		{"printed operand", source, "印刷数值受手写数字遮挡，无法确认", "t1", false},
 		{"writing hides distance", source, "手写笔迹盖住了路程数字，无法确定是2千米还是7千米。", "t1", false},
 		{"distance hidden by writing", source, "路程数字被手写笔迹遮住，无法确定是2千米还是7千米。", "t1", false},
+		{"two unattributed values", source, "笔迹较乱，无法确定路程是2千米还是7千米。", "t1", false},
+		{"two student values", source, "手写答案模糊，无法确定是2千米还是7千米。", "t1", true},
 		{"printed risk", source, "题干和手写答案都缺损", "t1", false},
 		{"different quantity", strings.Replace(source, "走了2千米", "走了4千米", 1), "手写答案模糊", "t1", false},
 		{"other numbered question", "2. " + source, "笔迹不清", "t1", false},
@@ -94,8 +96,18 @@ func TestPrintedReferenceTargetScope(t *testing.T) {
 	if !ok || ref.question != original || ref.worksheet != nil {
 		t.Fatal("source proof should admit a general math question")
 	}
-	if _, ok := corroboratedPrintedReference(original, target, append(reads, strings.Replace(original, "24", "25", 1)), true); ok {
+	if _, ok = corroboratedPrintedReference(original, target, append(reads, strings.Replace(original, "24", "25", 1)), true); ok {
 		t.Fatal("disputed condition entered general solver")
+	}
+	const named = "王思远2/3小时走了2千米，照这样的速度，他每小时行走多少千米？"
+	source := named + "图示文字：1小时走了？km。从上图看出：求这样的1份。"
+	formatted := named + "\n1小时走了？km\n从上图看出：求这样的一1份。"
+	ref, ok = corroboratedPrintedReference(source, target, []string{source, formatted}, true)
+	if !ok || ref.question != source || ref.worksheet != nil {
+		t.Fatal("named subject blocked a corroborated source from general solving")
+	}
+	if _, ok := corroboratedPrintedReference(source, target, []string{source, strings.ReplaceAll(formatted, "2千米", "3千米")}, true); ok {
+		t.Fatal("conflicting printed values entered general solving")
 	}
 	for _, tc := range []struct {
 		source string

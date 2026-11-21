@@ -16,7 +16,7 @@ type TravelWorksheet struct {
 	UniformTravelProblem
 	Parts, HourParts, Reciprocal, PartDistance, Rate string
 	FactorSlots                                      [2]FractionSlot
-	DerivationPrinted, ReasonRequested                bool
+	DerivationPrinted, ReasonRequested               bool
 }
 
 // FractionSlot 表示原纸上实际留给学生书写的部分。

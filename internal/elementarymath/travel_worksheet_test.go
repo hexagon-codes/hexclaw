@@ -13,6 +13,14 @@ func TestTravelWorksheetSeparatesPartCountFromElapsedTime(t *testing.T) {
 	if !ok || sheet.Parts != "3" || sheet.HourParts != "5" || sheet.Reciprocal != "1/3" || sheet.PartDistance != "2" || sheet.Rate != "10" || !strings.Contains(sheet.Worked(), sheet.Answer()) {
 		t.Fatalf("wrong worksheet targets: %+v", sheet)
 	}
+	for _, heading := range []string{"推算过程中", "由此推\n算出"} {
+		prefix, _, _ := strings.Cut(src, heading)
+		read, ok := ParseTravelWorksheet(prefix)
+		confirmed, agrees := sheet.Corroborate(read)
+		if !ok || !agrees || confirmed.ReasonRequested || confirmed.WrittenValues() != [4]string{"3", "1/3", "5", "1/3"} || strings.Contains(confirmed.Answer(), "结合律") {
+			t.Fatalf("partial reading lost known blanks or invented the final prompt: %+v", confirmed)
+		}
+	}
 	fractions := strings.ReplaceAll(src, "×（ ）", `×\frac{\square}{\square}`)
 	for _, text := range []string{
 		fractions,
