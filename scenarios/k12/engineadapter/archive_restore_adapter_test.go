@@ -207,6 +207,52 @@ func validIncomingMistake(t *testing.T) *records.AgentRecord {
 	return r
 }
 
+func TestArchiveRestoresPausedReviewAndPriorWeek(t *testing.T) {
+	ctx := t.Context()
+	src, dst := newArchiveRestoreFixture(t), newArchiveRestoreFixture(t)
+	const agent = "mingming"
+	if err := dst.records.ReplaceAgentRecords(ctx, agent, nil); err != nil {
+		t.Fatal(err)
+	}
+	id := src.oldRecordID
+	rec, err := src.records.Get(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deferred, err := src.records.ApplyMistakeReviewCommand(ctx, k12storage.MistakeReviewCommandInput{
+		AgentName: agent, MistakeRecordID: id, CommandType: k12.MistakeReviewCommandDeferThisWeek,
+		ExpectedVersion: rec.Version, IdempotencyKey: "defer", ISOYear: 2026, ISOWeek: 47,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	paused, err := src.records.ApplyMistakeReviewCommand(ctx, k12storage.MistakeReviewCommandInput{
+		AgentName: agent, MistakeRecordID: id, CommandType: k12.MistakeReviewCommandSuppress,
+		ExpectedVersion: deferred.MistakeVersion, IdempotencyKey: "pause",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backup, err := (usecase.Deps{Records: src.records}).Backup(ctx, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = dst.restore.RestoreHexbak(ctx, backup); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := dst.records.GetMistakeReviewState(ctx, agent, id)
+	if err != nil || restored != paused.Review {
+		t.Fatalf("restored schedule=%+v, want %+v: %v", restored, paused.Review, err)
+	}
+	resumed, err := dst.records.ApplyMistakeReviewCommand(ctx, k12storage.MistakeReviewCommandInput{
+		AgentName: agent, MistakeRecordID: id, CommandType: k12.MistakeReviewCommandRestore,
+		ExpectedVersion: paused.MistakeVersion, IdempotencyKey: "resume",
+	})
+	if err != nil || resumed.State != k12.MistakeReviewDeferredThisWeek || resumed.Review.DeferredISOWeek != 47 {
+		t.Fatalf("resumed schedule=%+v: %v", resumed.Review, err)
+	}
+}
+
 func TestArchiveRestoreAdapter_CommitsRecordsAndExactProfileDurably(t *testing.T) {
 	f := newArchiveRestoreFixture(t)
 	ctx := context.Background()

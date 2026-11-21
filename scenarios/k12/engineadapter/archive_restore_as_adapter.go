@@ -56,7 +56,7 @@ func (a *ArchiveRestoreAdapter) RestoreArchiveAs(
 				// 已成功迁移的回执按创建时的格式核对，升级不产生新的迁移命令。
 				if existing.Snapshot != nil && existing.Snapshot.Version != comparison.Version {
 					comparison.Version, comparison.ArchiveID = existing.Snapshot.Version, ""
-					if err := usecase.SealHexbak(&comparison); err != nil {
+					if err = usecase.SealHexbak(&comparison); err != nil {
 						return err
 					}
 				}
@@ -200,7 +200,7 @@ func (a *ArchiveRestoreAdapter) RestoreArchiveAs(
 				return fmt.Errorf("merge owner-rewritten records: %w", err)
 			}
 			if plan.OriginalArchive.Version >= 11 {
-				if err := a.records.RestoreReviewSchedulesTx(ctx, tx, plan.TargetAgent, migrated.Records, migrated.ReviewSchedules); err != nil {
+				if err = a.records.RestoreReviewSchedulesTx(ctx, tx, plan.TargetAgent, migrated.Records, migrated.ReviewSchedules); err != nil {
 					return err
 				}
 			}
@@ -352,11 +352,11 @@ func (a *ArchiveRestoreAdapter) RollbackRestoreAs(
 				return rollbackFailure(fmt.Errorf("snapshot current restore state: %w", err), nil)
 			}
 			if current.Snapshot.Version >= 11 {
-				live, err := a.records.ExportReviewSchedulesTx(ctx, tx, req.TargetAgent)
-				if err != nil {
-					return rollbackFailure(err, nil)
+				live, reviewErr := a.records.ExportReviewSchedulesTx(ctx, tx, req.TargetAgent)
+				if reviewErr != nil {
+					return rollbackFailure(reviewErr, nil)
 				}
-				if err := verifyRestoreReviewSchedules(before, live, current.Snapshot, migrated); err != nil {
+				if err = verifyRestoreReviewSchedules(before, live, current.Snapshot, migrated); err != nil {
 					return rollbackFailure(err, nil)
 				}
 			}
@@ -440,7 +440,7 @@ func (a *ArchiveRestoreAdapter) RollbackRestoreAs(
 				return rollbackFailure(fmt.Errorf("restore pre-migration records: %w", err), nil)
 			}
 			if current.Snapshot.Version >= 11 {
-				if err := a.records.RestoreReviewSchedulesTx(ctx, tx, req.TargetAgent, current.Snapshot.Records, current.Snapshot.ReviewSchedules); err != nil {
+				if err = a.records.RestoreReviewSchedulesTx(ctx, tx, req.TargetAgent, current.Snapshot.Records, current.Snapshot.ReviewSchedules); err != nil {
 					return rollbackFailure(err, nil)
 				}
 			}

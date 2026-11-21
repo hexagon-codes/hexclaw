@@ -64,7 +64,7 @@ func (a *ArchiveRestoreAdapter) RestoreHexbak(ctx context.Context, bak *usecase.
 				return fmt.Errorf("merge hexbak records: %w", err)
 			}
 			if bak.Version >= 11 {
-				if err := a.records.RestoreReviewSchedulesTx(ctx, tx, bak.AgentName, bak.Records, bak.ReviewSchedules); err != nil {
+				if err = a.records.RestoreReviewSchedulesTx(ctx, tx, bak.AgentName, bak.Records, bak.ReviewSchedules); err != nil {
 					return err
 				}
 			}

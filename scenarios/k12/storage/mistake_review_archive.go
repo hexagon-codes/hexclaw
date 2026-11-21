@@ -46,7 +46,7 @@ func (s *Store) ExportReviewSchedulesTx(ctx context.Context, tx *sql.Tx, agent s
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	result := make(map[string]ArchivedReviewSchedule)
 	for rows.Next() {
 		var id string
