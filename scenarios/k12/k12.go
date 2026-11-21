@@ -14,7 +14,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"strings"
 	"unicode"
 
@@ -194,12 +193,20 @@ func MistakeSchema() *records.RecordSchema {
 func mistakeDedupeKey(r *records.AgentRecord) string {
 	var f MistakeFields
 	_ = json.Unmarshal([]byte(r.Fields), &f)
-	key, _ := MistakeQuestionKeys(r.SourceSession, f.Question)
-	return key
+	return currentMistakeKey(r.SourceSession, f.Question)
 }
 
-// NormalizeQuestion 用于学题身份比较。忽略排版差异，保留相邻数字的词界。
+// NormalizeQuestion 保留词、变量和数字的边界及大小写。算符周围和汉字间的排版空白不参与同题比较。
 func NormalizeQuestion(question string) string {
+	return normalizeQuestion(question, true)
+}
+
+func questionTokenRune(r rune) bool {
+	return unicode.IsDigit(r) || unicode.IsMark(r) ||
+		unicode.IsLetter(r) && !unicode.In(r, unicode.Han, unicode.Hiragana, unicode.Katakana, unicode.Hangul)
+}
+
+func normalizeQuestion(question string, keepWords bool) string {
 	var key strings.Builder
 	var previous rune
 	space := false
@@ -208,33 +215,46 @@ func NormalizeQuestion(question string) string {
 			space = true
 			continue
 		}
-		if space && unicode.IsDigit(previous) && unicode.IsDigit(r) {
+		if space && (unicode.IsDigit(previous) && unicode.IsDigit(r) ||
+			keepWords && questionTokenRune(previous) && questionTokenRune(r)) {
 			key.WriteByte(' ')
 		}
-		key.WriteRune(unicode.ToLower(r))
+		if !keepWords {
+			r = unicode.ToLower(r)
+		}
+		key.WriteRune(r)
 		previous, space = r, false
 	}
 	return key.String()
 }
 
-var adjacentQuestionDigits = regexp.MustCompile(`\p{Nd}{2}`)
+func mistakeQuestionDigest(session, normalized string) string {
+	sum := sha1.Sum([]byte(session + "|" + normalized))
+	return hex.EncodeToString(sum[:])
+}
 
-// MistakeQuestionKeys 返回自动去重键。只有旧算法可能合并数字时才返回兼容查询键。
+// 版本前缀隔离旧索引。会话按 UTF-8 字节长度分帧，题干或会话中的分隔符不会改变身份。
+func currentMistakeKey(session, question string) string {
+	sum := sha1.Sum([]byte(fmt.Sprintf("%d:%s%s", len(session), session, NormalizeQuestion(question))))
+	return "q3:" + hex.EncodeToString(sum[:])
+}
+
+// MistakeQuestionKeys 返回当前自动键和最早的无分词索引，供已有调用者核对历史记录。
 func MistakeQuestionKeys(session, question string) (current, legacy string) {
-	digest := func(text string) string {
-		sum := sha1.Sum([]byte(session + "|" + text))
-		return hex.EncodeToString(sum[:])
-	}
-	text := NormalizeQuestion(question)
-	current = digest(text)
+	current, _, legacy = MistakeQuestionIndexVersions(session, question)
+	return current, legacy
+}
+
+// MistakeQuestionIndexVersions 按新到旧返回索引。旧键只用来定位候选，须用原题确认。
+func MistakeQuestionIndexVersions(session, question string) (current, v2, v1 string) {
+	text := normalizeQuestion(question, false)
+	v2 = mistakeQuestionDigest(session, text)
 	compact := strings.ReplaceAll(text, " ", "")
-	if !adjacentQuestionDigits.MatchString(compact) {
-		return current, ""
+	v1 = v2
+	if compact != text {
+		v1 = mistakeQuestionDigest(session, compact)
 	}
-	if compact == text {
-		return current, current
-	}
-	return current, digest(compact)
+	return currentMistakeKey(session, question), v2, v1
 }
 
 func validateMistakeFields(fieldsJSON string) error {

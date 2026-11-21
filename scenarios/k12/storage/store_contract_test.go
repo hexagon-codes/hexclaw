@@ -121,6 +121,51 @@ func TestLegacyMixedFractionKeepsMistakeIdentity(t *testing.T) {
 	}
 }
 
+func TestHistoricalMistakeKeysPreserveWordBoundariesAndCase(t *testing.T) {
+	s, db := setup(t)
+	ctx := t.Context()
+	for _, tc := range []struct{ session, original, other, historicalText string }{
+		{"compact", "求 A 的 1 1/2 倍", "求 a 的 11/2 倍", "求a的11/2倍"},
+		{"digit-aware", "求 A 的 1 1/2 倍", "求 a 的 1 1/2 倍", "求a的1 1/2倍"},
+		{"words", "解释 a part", "解释 apart", "解释apart"},
+	} {
+		t.Run(tc.session, func(t *testing.T) {
+			original := newMistake(t, "mingming", tc.session, tc.original)
+			if _, err := s.Put(ctx, original); err != nil {
+				t.Fatal(err)
+			}
+			oldKey := fmt.Sprintf("%x", sha1.Sum([]byte(tc.session+"|"+tc.historicalText)))
+			if _, err := db.ExecContext(ctx, "UPDATE k12_mistakes SET dedupe_key=? WHERE record_id=?", oldKey, original.RecordID); err != nil {
+				t.Fatal(err)
+			}
+			other := newMistake(t, "mingming", tc.session, tc.other)
+			if _, err := s.FindDuplicate(ctx, other); !errors.Is(err, records.ErrNotFound) {
+				t.Fatalf("an unrelated question matched the historical row: %v", err)
+			}
+			if found, err := s.FindDuplicate(ctx, original); err != nil || found.RecordID != original.RecordID {
+				t.Fatalf("historical question lost before its next write: %+v %v", found, err)
+			}
+			if created, err := s.Put(ctx, other); err != nil || !created || other.RecordID == original.RecordID {
+				t.Fatalf("distinct input collapsed: %+v %v", other, err)
+			}
+			replay := newMistake(t, "mingming", tc.session, tc.original)
+			if created, err := s.Put(ctx, replay); err != nil || created || replay.RecordID != original.RecordID {
+				t.Fatalf("historical ID changed on replay: %+v %v", replay, err)
+			}
+		})
+	}
+	left := newMistake(t, "mingming", "scope|ab", "x+1")
+	right := newMistake(t, "mingming", "scope", "ab|x+1")
+	for _, rec := range []*records.AgentRecord{left, right} {
+		if created, err := s.Put(ctx, rec); err != nil || !created {
+			t.Fatalf("source separator merged two independent questions: %v", err)
+		}
+	}
+	if left.RecordID == right.RecordID {
+		t.Fatal("different source sessions share a mistake ID")
+	}
+}
+
 // TestTyped_StateMachine 状态机：合法阶梯放行、倒退/离开终态拒绝（ErrIllegalTransition）。
 func TestTyped_StateMachine(t *testing.T) {
 	s, _ := setup(t)
