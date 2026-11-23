@@ -592,6 +592,10 @@ func (o *SolveSkill) GradeVerifiedForSubject(ctx context.Context, subject, probl
 	if _, computed, ok := solveLinearEquation(deterministicProblem); ok {
 		verifiedValue, verifiedOK := arithmeticAnswerValue(strings.NewReplacer("$", "", `\times`, "×").Replace(groundTruth))
 		comparisonAnswer := normalizeArithmeticAnswerMarkup(studentAnswer)
+		if curriculum := elementarymath.ObservedEquationCurriculum(ctx); curriculum != "" && strings.ContainsAny(studentAnswer, "\r\n") &&
+			verifiedEquivalentEquationWork(deterministicProblem, groundTruth, studentAnswer, computed, curriculum) {
+			return deterministicGradeResult(studentAnswer, "x = "+computed, "grading_deterministic_linear_equation", deterministicGradeAssessment(true, true, "")), nil
+		}
 		if verifiedOK && verifiedValue == computed && !strings.ContainsAny(comparisonAnswer, "\r\n") {
 			if studentValue, answerOK := arithmeticAnswerValue(comparisonAnswer); answerOK {
 				finalAnswerCorrect := studentValue == computed

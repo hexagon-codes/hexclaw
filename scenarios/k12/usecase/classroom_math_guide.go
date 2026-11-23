@@ -3,8 +3,10 @@ package usecase
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
+	"github.com/hexagon-codes/hexclaw/internal/elementarymath"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 )
 
@@ -14,18 +16,62 @@ type classroomMathGuideReader interface {
 
 // 新任务才按当前原题重算课堂步骤。材料、课程和完整答案有任一项没对上，就沿用原教学链。
 func (d Deps) currentClassroomMathGuide(ctx context.Context, req ParentTeachingGuideRequest, solved SolveHomeworkResult) (ParentTeachingGuide, bool) {
-	snap, _ := k12.GradingModelSnapshotFromContext(ctx)
-	if snap.MathExecutionContract != k12.MathExecutionContractClassroom || req.customExpression || !req.ReportRequired ||
-		!isMathSubject(req.Subject) || solved.OutOfScope || solved.ProblemIssue != "" ||
-		solved.Evidence.Verdict != VerdictAgree || solved.Evidence.EvidenceType != EvidenceNumericExec {
-		return ParentTeachingGuide{}, false
-	}
 	source := solved.AnswerSource
 	if source != nil {
 		if source.Kind != k12.ProblemAnswerAsset || source.AdoptionID == "" || source.AssetID == "" || source.AssetVersion < 1 || source.AssetRevision < 1 || source.FactsDigest == "" {
 			return ParentTeachingGuide{}, false
 		}
 	} else if solved.Generation != nil || solved.Evidence.SolverOutputDigest == "" || solved.Evidence.VerificationInputDigest == "" || solved.Evidence.VerificationRunID == "" {
+		return ParentTeachingGuide{}, false
+	}
+	return d.classroomGuideFromVerifiedProblem(ctx, req, solved)
+}
+
+// 末值证据只证明这个学生终答与原算式的精确值不同。讲法仅使用同次已核原解，
+// 不把未确认的过程或错因带入，也不将来源升级为通用求解执行证明。
+func (d Deps) finalAnswerClassroomGuide(ctx context.Context, req ParentTeachingGuideRequest, solved SolveHomeworkResult, q RecognizedQuestion, confirmed bool, reference string) (ParentTeachingGuide, bool) {
+	if !confirmed || reference == "" || solved.Solution != reference || q.FinalAnswerReceipt == nil || !currentSingleObservedAnswer(q) {
+		return ParentTeachingGuide{}, false
+	}
+	req.WrongStep, req.ErrorCause = "", ""
+	return d.classroomGuideFromVerifiedProblem(ctx, req, solved)
+}
+
+func currentSingleObservedAnswer(q RecognizedQuestion) bool {
+	source := q.ImageSourceContext
+	return source != nil && source.Version == k12.RecognitionImageScopeVersionV1 && source.SourceComparisonPolicy == k12.RecognitionImageSourceComparisonPolicyV2 &&
+		source.ScopeDigest != "" && len(source.TargetIDs) == 1
+}
+
+func (d Deps) withObservedEquationCurriculum(ctx context.Context, job GradingJobView, q RecognizedQuestion, req GradeRequest, solved SolveHomeworkResult) (context.Context, error) {
+	if elementarymath.ObservedEquationCurriculum(ctx) != "" {
+		ctx = elementarymath.WithObservedEquationCurriculum(ctx, "")
+	}
+	if d.Records == nil || job.Record == nil || job.Fields.ModelSnapshot.MathExecutionContract != k12.MathExecutionContractClassroom || !currentSingleObservedAnswer(q) ||
+		q.ConfirmationRequired || q.AnswerState != AnswerStatePresent || req.PracticeReference != nil || !isMathSubject(req.Subject) ||
+		!strings.ContainsAny(req.StudentAnswer, "\r\n") || !strings.ContainsAny(req.Problem, "xX") || !strings.ContainsAny(req.Problem, "=＝") ||
+		solved.OutOfScope || solved.Evidence.EvidenceType != EvidenceNumericExec || solved.Evidence.Verdict != VerdictAgree {
+		return ctx, nil
+	}
+	calls, err := d.Records.ListGradingItemInvocations(ctx, job.Record.AgentName, job.Record.RecordID)
+	if err != nil {
+		return ctx, err
+	}
+	// 已有模型评分始终走原回执；本地评分重放则由同输入的本地账本返回旧结果。
+	if slices.ContainsFunc(calls, func(call k12.GradingItemInvocation) bool {
+		return call.Operation == k12.GradingItemOperationGrade && call.ExecutionKind == k12.GradingExecutionProvider && call.ProblemID == q.ProblemID &&
+			(call.InputRevision == 0 || call.InputRevision == q.ConfirmedVersion && call.InputDigest == q.InputDigest)
+	}) {
+		return ctx, nil
+	}
+	return elementarymath.WithObservedEquationCurriculum(ctx, d.constraintFor(ctx, req.Grade)), nil
+}
+
+func (d Deps) classroomGuideFromVerifiedProblem(ctx context.Context, req ParentTeachingGuideRequest, solved SolveHomeworkResult) (ParentTeachingGuide, bool) {
+	snap, _ := k12.GradingModelSnapshotFromContext(ctx)
+	if snap.MathExecutionContract != k12.MathExecutionContractClassroom || req.customExpression || !req.ReportRequired ||
+		!isMathSubject(req.Subject) || solved.OutOfScope || solved.ProblemIssue != "" ||
+		solved.Evidence.Verdict != VerdictAgree || solved.Evidence.EvidenceType != EvidenceNumericExec {
 		return ParentTeachingGuide{}, false
 	}
 	reader, ok := d.Solver.(classroomMathGuideReader)

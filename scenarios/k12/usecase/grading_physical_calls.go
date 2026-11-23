@@ -1731,6 +1731,10 @@ func executeDurableGradeOperation(
 	itemCtx, cancelItem := gradingIndependentCallContext(ctx, job.Fields.ModelSnapshot.TimeoutMS)
 	defer cancelItem()
 	itemCtx = withGradingPhysicalCallExecutor(itemCtx, executor)
+	itemCtx, err := deps.withObservedEquationCurriculum(itemCtx, job, q, gradeReq, solved)
+	if err != nil {
+		return GradeResult{}, "", err
+	}
 	result, err := deps.gradeSolvedHomeworkProblem(itemCtx, gradeReq, solved)
 	invocationID := executor.lastInvocation(k12.GradingItemOperationGrade)
 	if err == nil && invocationID == "" {

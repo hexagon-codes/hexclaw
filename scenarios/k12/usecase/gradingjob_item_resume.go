@@ -712,6 +712,9 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 		if guide, ok := degradedReportParentGuide(solved); ok {
 			guideExecutionKind = k12.GradingExecutionLocalDeterministic
 			deterministicGuide = &guide
+		} else if guide, ok := deps.finalAnswerClassroomGuide(ctx, guideRequest, solved, q, finalAnswerOnly, finalAnswerSolution); ok {
+			guideExecutionKind = k12.GradingExecutionLocalDeterministic
+			deterministicGuide, classroomGuide = &guide, &guide
 		} else if guide, ok := deps.currentClassroomMathGuide(ctx, guideRequest, solved); ok {
 			guideExecutionKind = k12.GradingExecutionLocalDeterministic
 			deterministicGuide = &guide

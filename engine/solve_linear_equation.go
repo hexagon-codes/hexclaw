@@ -3,6 +3,7 @@ package engine
 import (
 	"fmt"
 	"math/big"
+	"regexp"
 	"strings"
 	"unicode"
 )
@@ -154,6 +155,77 @@ func solveLinearEquation(problem string) (worked, answer string, ok bool) {
 	fmt.Fprintf(&b, "左边 = %s，右边 = %s，左右相等。\n\n", formatArithmeticRat(leftValue), formatArithmeticRat(rightValue))
 	fmt.Fprintf(&b, "答案：x = %s", answer)
 	return b.String(), answer, true
+}
+
+// 两条在同一域上都有唯一解的一元一次方程，只要解相同就等价。
+// 有效错步或无法完整解析的行交还原批改器；只验最后一行不能证明过程成立。
+func verifiedEquivalentEquationWork(problem, verifiedAnswer, work, computed, curriculum string) bool {
+	if curriculum == "" || separatedArithmeticNumberRe.MatchString(problem) || answerMixedFractionRe.MatchString(problem) ||
+		!linearEquationAllowedByConstraint(problem, curriculum) || classroomMethodExcluded(curriculum, "方程", "等式的性质") {
+		return false
+	}
+	want, ok := new(big.Rat).SetString(computed)
+	if !ok || !explicitLinearAnswerEquals(verifiedAnswer, want) {
+		return false
+	}
+	lines := strings.Split(strings.TrimSpace(strings.ReplaceAll(work, "\r\n", "\n")), "\n")
+	if len(lines) < 2 || !explicitLinearAnswerEquals(lines[len(lines)-1], want) {
+		return false
+	}
+	steps := 0
+	for _, line := range lines[:len(lines)-1] {
+		line = observedEquationNotation(line)
+		if line == "" {
+			continue
+		}
+		// splitLinearEquation 可为原题剥离标题；学生步骤不能丢掉附加陈述。
+		if strings.HasPrefix(line, "解方程") || separatedArithmeticNumberRe.MatchString(line) || answerMixedFractionRe.MatchString(line) || !linearEquationAllowedByConstraint(line, curriculum) {
+			return false
+		}
+		lhs, rhs, ok := splitLinearEquation(line)
+		if !ok {
+			return false
+		}
+		left, leftOK := parseLinearExpression(lhs)
+		right, rightOK := parseLinearExpression(rhs)
+		if !leftOK || !rightOK || left.a.Cmp(right.a) == 0 || evalLinearForm(left, want).Cmp(evalLinearForm(right, want)) != 0 {
+			return false
+		}
+		steps++
+	}
+	return steps > 0
+}
+
+func explicitLinearAnswerEquals(line string, want *big.Rat) bool {
+	left, right, ok := strings.Cut(observedEquationNotation(line), "=")
+	if !ok || !strings.EqualFold(strings.TrimSpace(left), "x") {
+		return false
+	}
+	right = strings.TrimSpace(right)
+	for strings.HasPrefix(right, "(") && strings.HasSuffix(right, ")") {
+		right = strings.TrimSpace(right[1 : len(right)-1])
+	}
+	for _, pattern := range []*regexp.Regexp{answerLatexFractionRe, answerLatexCompactFractionRe} {
+		if m := pattern.FindStringSubmatch(right); len(m) == 3 && m[0] == right {
+			right = m[1] + "/" + m[2]
+			break
+		}
+	}
+	value, ok := new(big.Rat).SetString(right)
+	return ok && bareQuantityRe.MatchString(right) && value.Cmp(want) == 0
+}
+
+// 只剥去整行成对的数学定界。数量之间的空格和括号保留原义，
+// 不应用普通数值答案对带分数的改写。
+func observedEquationNotation(line string) string {
+	line = strings.TrimSpace(line)
+	for _, pair := range [][2]string{{`\(`, `\)`}, {`\[`, `\]`}, {"$$", "$$"}, {"$", "$"}} {
+		if len(line) >= len(pair[0])+len(pair[1]) && strings.HasPrefix(line, pair[0]) && strings.HasSuffix(line, pair[1]) {
+			line = strings.TrimSpace(line[len(pair[0]) : len(line)-len(pair[1])])
+			break
+		}
+	}
+	return strings.NewReplacer("＝", "=", "−", "-").Replace(line)
 }
 
 func splitLinearEquation(problem string) (left, right string, ok bool) {
