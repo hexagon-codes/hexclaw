@@ -35,6 +35,8 @@ var errK12InboundPhotoRoutingSnapshotUnavailable = errors.New(
 	"DingTalk inbound photo routing snapshot is unavailable",
 )
 
+const k12InboundPhotoCancelled = "image_task_canceled"
+
 type k12InboundPhotoCoordinatorPort interface {
 	Admit(context.Context, k12usecase.InboundPhotoAdmission) (k12usecase.InboundPhotoBundle, bool, error)
 	Resume(context.Context, string, string) (k12usecase.InboundPhotoBundle, error)
@@ -466,6 +468,9 @@ func (r *k12DingtalkPhotoInboundRuntime) advance(
 	bundle k12usecase.InboundPhotoBundle,
 ) (bool, error) {
 	if bundle.Dispatch.TerminalStatus == k12usecase.InboundPhotoTerminalFailed {
+		if bundle.Dispatch.FailureKind == k12InboundPhotoCancelled {
+			return true, nil
+		}
 		err := r.sendStatusNotice(ctx, bundle, "failed")
 		return err == nil, err
 	}
@@ -601,10 +606,7 @@ func (r *k12DingtalkPhotoInboundRuntime) advanceImageTask(
 		)
 		return err == nil, err
 	}
-	if view.Dispatch.Status == k12.ImageTaskStatusFailed &&
-		!homeworkCompleted &&
-		view.Dispatch.RetrySafe &&
-		bundle.Dispatch.RoutingDecision == k12usecase.InboundPhotoRouteNewSubmission {
+	if !homeworkCompleted && inboundPhotoAutomaticallyRetries(view, bundle.Dispatch.RoutingDecision) {
 		retryStartedAt := time.Now()
 		slog.Info("K12 DingTalk inbound photo image task retry started",
 			"agent", bundle.Receipt.AgentName,
@@ -696,6 +698,15 @@ func (r *k12DingtalkPhotoInboundRuntime) advanceImageTask(
 			return false, fmt.Errorf("DingTalk inbound photo image task failed")
 		}
 	case k12.ImageTaskStatusCancelled:
+		var command k12DingtalkInboundPhotoCommand
+		if decodeErr := json.Unmarshal([]byte(bundle.Receipt.CommandJSON), &command); decodeErr != nil {
+			return false, fmt.Errorf("decode DingTalk inbound photo command: %w", decodeErr)
+		}
+		if command.StatusNoticeVersion == k12DingtalkSharedPhotoStatusNoticeVersion {
+			_, terminalErr := r.inbound.FailTerminal(ctx, bundle.Receipt.AgentName, bundle.Receipt.ReceiptID, bundle.Dispatch.Version,
+				k12usecase.InboundPhotoTerminalStageImageTask, k12InboundPhotoCancelled)
+			return terminalErr == nil, terminalErr
+		}
 		return true, nil
 	case k12.ImageTaskStatusAwaitingConfirmation:
 		switch bundle.Dispatch.RoutingDecision {
@@ -1484,14 +1495,19 @@ func (r *k12DingtalkPhotoInboundRuntime) earlierPhotoPagesSettled(ctx context.Co
 		if err != nil {
 			return false, err
 		}
-		if !inboundPhotoPageParked(view) {
+		if !inboundPhotoPageParked(view, page.RoutingDecision) {
 			return false, nil
 		}
 	}
 	return true, nil
 }
 
-func inboundPhotoPageParked(view k12usecase.ImageTaskView) bool {
+func inboundPhotoAutomaticallyRetries(view k12usecase.ImageTaskView, route k12usecase.InboundPhotoRoutingDecision) bool {
+	return view.Dispatch.Status == k12.ImageTaskStatusFailed &&
+		view.Dispatch.RetrySafe && route == k12usecase.InboundPhotoRouteNewSubmission
+}
+
+func inboundPhotoPageParked(view k12usecase.ImageTaskView, route k12usecase.InboundPhotoRoutingDecision) bool {
 	if view.HomeworkProjection != nil {
 		switch view.HomeworkProjection.Stage {
 		case k12.GradingStageCompleted:
@@ -1500,12 +1516,18 @@ func inboundPhotoPageParked(view k12usecase.ImageTaskView) bool {
 			return true
 		}
 	}
+	// 结果未知的分类或派发先停放，只有 worker 真会自动重试的前页才继续占用顺序。
+	if view.ClassificationInvocationStatus == k12.ImageTaskInvocationOutcomeUnknown || view.Dispatch.OutcomeUnknown() {
+		return true
+	}
+	if inboundPhotoAutomaticallyRetries(view, route) {
+		return false
+	}
 	switch view.Dispatch.Status {
 	case k12.ImageTaskStatusAwaitingConfirmation, k12.ImageTaskStatusCancelled, k12.ImageTaskStatusFailed:
 		return true
 	}
-	return view.ClassificationInvocationStatus == k12.ImageTaskInvocationOutcomeUnknown ||
-		view.CreativeFeedback == "feedback_failed" || view.CreativeFeedback == "feedback_outcome_unknown" ||
+	return view.CreativeFeedback == "feedback_failed" || view.CreativeFeedback == "feedback_outcome_unknown" ||
 		(view.Creative != nil && view.Creative.Status == k12.CreativeWorkIntakeAwaitingConfirmation)
 }
 

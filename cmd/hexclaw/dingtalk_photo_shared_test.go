@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/hexagon-codes/hexclaw/adapter"
@@ -19,6 +20,85 @@ func TestSharedK12PhotoFreezesBeforeDownloadAndCompletesAllPages(t *testing.T) {
 		t.Run(string(outcome), func(t *testing.T) {
 			verifySharedK12PhotoPages(t, outcome)
 		})
+	}
+}
+
+func TestSharedK12PhotoCancellationSettlesOnRecovery(t *testing.T) {
+	ctx := t.Context()
+	deps, transport := statusNoticeDeps(t)
+	inbound := k12usecase.NewInboundPhotoCoordinator(deps.Records)
+	runtime := newK12DingtalkPhotoInboundRuntime(k12DingtalkPhotoInboundRuntimeConfig{
+		Inbound: inbound, ReplyBatches: deps, Router: k12PhotoTestRouter(t, true, k12TutorScenario),
+		ResolveSharedRoute: func(k12.ImageTaskRouteSnapshot) (k12.ImageTaskRouteSnapshot, error) {
+			return k12.ImageTaskRouteSnapshot{Provider: "isolated", Model: "vision"}, nil
+		},
+	})
+	msg := k12PhotoTestMessage()
+	route, handled, err := runtime.PrepareSharedPhoto(ctx, msg, msg)
+	if err != nil || !handled {
+		t.Fatalf("prepare handled=%v, err=%v", handled, err)
+	}
+	if admitErr := runtime.AdmitSharedPhoto(ctx, msg, route); admitErr != nil {
+		t.Fatal(admitErr)
+	}
+	identity, err := k12DingtalkInboundIdentity(msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, err := inbound.ResumeByIdentity(ctx, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	classifier := &terminalProjectionClassifier{}
+	imageTasks := &k12usecase.ImageTaskCoordinator{
+		Records: deps.Records, Classifier: classifier,
+		ReadAsset: func(string, string) ([]byte, error) { return original.Asset.Bytes, nil },
+		ResolveRoute: func(snapshot k12.ImageTaskRouteSnapshot) (k12.ImageTaskRouteSnapshot, error) {
+			snapshot.Route = snapshot.Provider + "/" + snapshot.Model
+			snapshot.Capability = "vision"
+			snapshot.PolicyVersion = "image-task-routing-v1"
+			snapshot.PromptVersion = "image-task-classifier-v1"
+			snapshot.SelectionSource = "explicit"
+			snapshot.TimeoutMS = 120000
+			return snapshot, nil
+		},
+	}
+	runtime.imageTasks = imageTasks
+	agent := route.AgentName
+	receiptID := original.Receipt.ReceiptID
+	asset := "asset://" + agent + "/" + strings.TrimPrefix(original.Asset.Digest, "sha256:") + ".png"
+	view, created, err := runtime.imageTasks.Create(ctx, k12usecase.CreateImageTaskInput{
+		AgentName: agent, LearnerID: agent, SourceKind: k12.ImageTaskSourceIM,
+		SourceRef: "dingtalk-inbound:" + receiptID, SourceSessionID: route.SessionID,
+		SourceAssetRefs: []string{asset}, MessageIntent: "grade homework", AttemptGeneration: 1,
+		RouteRequest: k12.ImageTaskRouteSnapshot{Provider: route.Provider, Model: route.Model, SelectionSource: "explicit"},
+	})
+	if err != nil || !created {
+		t.Fatalf("create task created=%v, err=%v", created, err)
+	}
+	dispatch := view.Dispatch
+	original.Dispatch, err = inbound.RecordImageTask(ctx, agent, receiptID, original.Dispatch.Version, dispatch.DispatchID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, cancelErr := imageTasks.Cancel(ctx, agent, dispatch.DispatchID, dispatch.Version); cancelErr != nil {
+		t.Fatal(cancelErr)
+	}
+	if done, advanceErr := runtime.advanceImageTask(ctx, original); advanceErr != nil || !done {
+		t.Fatalf("advance canceled task done=%v, err=%v", done, advanceErr)
+	}
+	for range 2 {
+		current, readErr := inbound.ResumeByIdentity(ctx, identity)
+		if readErr != nil || current.Dispatch.FailureKind != k12InboundPhotoCancelled {
+			t.Fatalf("read inbound cancellation kind=%q, err=%v", current.Dispatch.FailureKind, readErr)
+		}
+		if done, recoverErr := runtime.advance(ctx, current); recoverErr != nil || !done {
+			t.Fatalf("recover canceled task done=%v, err=%v", done, recoverErr)
+		}
+	}
+	outcome, err := runtime.SharedPhotoOutcome(ctx, msg, route)
+	if err != nil || outcome != adapter.DeliveryFailed || len(transport.sends) != 0 || classifier.calls != 0 {
+		t.Fatalf("outcome=%q, err=%v, sends=%d, classifier=%d", outcome, err, len(transport.sends), classifier.calls)
 	}
 }
 

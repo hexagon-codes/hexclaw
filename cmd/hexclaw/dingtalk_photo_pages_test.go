@@ -15,6 +15,20 @@ import (
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/usecase"
 )
 
+func TestDingTalkPhotoPageIsNotParkedWhileAutomaticRetryIsAvailable(t *testing.T) {
+	view := usecase.ImageTaskView{Dispatch: k12.ImageTaskDispatch{Status: k12.ImageTaskStatusFailed, RetrySafe: true}}
+	if inboundPhotoPageParked(view, usecase.InboundPhotoRouteNewSubmission) {
+		t.Fatal("a later page can overtake an automatically retried page")
+	}
+	if !inboundPhotoPageParked(view, usecase.InboundPhotoRoutePending) {
+		t.Fatal("a failure without an automatic route should release later pages")
+	}
+	view.ClassificationInvocationStatus = k12.ImageTaskInvocationOutcomeUnknown
+	if !inboundPhotoPageParked(view, usecase.InboundPhotoRouteNewSubmission) {
+		t.Fatal("an unresolved provider call is parked")
+	}
+}
+
 func TestDingTalkPhotoPagesKeepOnePhysicalSourceAndSeparateImages(t *testing.T) {
 	ctx := t.Context()
 	deps, _ := statusNoticeDeps(t)
