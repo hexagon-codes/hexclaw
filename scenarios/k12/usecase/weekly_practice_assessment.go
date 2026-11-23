@@ -63,10 +63,6 @@ func (a verifiedSolutionWeeklyAssessor) AssessWeeklyPracticeAnswer(
 	}, nil
 }
 
-func weeklyAttemptID(snapshotID, itemID, key string) string {
-	return "wattempt-" + shortDigest(snapshotID+"\x00"+itemID+"\x00"+key)
-}
-
 func (d Deps) submitWeeklyPracticeAttemptDurable(
 	ctx context.Context,
 	agent, snapshotID, itemID, studentAnswer, idempotencyKey string,
@@ -141,7 +137,7 @@ func (d Deps) submitWeeklyPracticeAttemptDurable(
 		return attempt, true, getErr
 	}
 	attempt := k12.WeeklyPracticeAttempt{
-		AttemptID:            weeklyAttemptID(snapshotID, itemID, idempotencyKey),
+		AttemptID:            k12.WeeklyPracticeAttemptID(snapshotID, itemID, idempotencyKey),
 		SnapshotID:           snapshotID,
 		ItemID:               itemID,
 		AssessmentID:         assessment.AssessmentID,

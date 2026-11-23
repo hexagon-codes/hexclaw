@@ -186,11 +186,9 @@ func MigrateHexbakOwnerWithRecordIDs(source *Hexbak, targetAgent string, ids Res
 				attempt.RequestSnapshotID = attempt.Attempt.SnapshotID
 			}
 			// 同秒作答沿用迁移前的排序键，不能让新归属的 ID 改正误统计。
-			if attempt.OrderID == "" {
-				attempt.OrderID = attempt.Attempt.AttemptID
-			}
+			attempt.FreezeMigrationOrder()
 			attempt.Attempt.SnapshotID = snap.SnapshotID
-			attempt.Attempt.AttemptID = weeklyAttemptID(snap.SnapshotID, attempt.Attempt.ItemID, attempt.Key)
+			attempt.Attempt.AttemptID = k12.WeeklyPracticeAttemptID(snap.SnapshotID, attempt.Attempt.ItemID, attempt.Key)
 		}
 		slices.SortFunc(item.Attempts, func(a, b k12storage.WeeklyHistoryAttempt) int {
 			return strings.Compare(a.Attempt.AttemptID, b.Attempt.AttemptID)

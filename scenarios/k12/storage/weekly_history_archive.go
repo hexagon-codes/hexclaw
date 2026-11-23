@@ -1,6 +1,7 @@
 package k12storage
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -8,6 +9,7 @@ import (
 	"fmt"
 	"maps"
 	"reflect"
+	"slices"
 	"time"
 
 	"github.com/hexagon-codes/hexclaw/records"
@@ -34,6 +36,19 @@ type WeeklyHistoryAttempt struct {
 	Key               string                    `json:"idempotency_key"`
 	Digest            string                    `json:"request_digest"`
 	Updated           int64                     `json:"updated_at"`
+
+	inferredOrderID string // 仅供本次迁移核对，归档和数据库不保存。
+}
+
+// FreezeMigrationOrder must run before rewriting the source attempt's identity.
+func (a *WeeklyHistoryAttempt) FreezeMigrationOrder() {
+	if a.OrderID != "" {
+		return
+	}
+	a.OrderID = a.Attempt.AttemptID
+	if a.OrderID == k12.WeeklyPracticeAttemptID(a.Attempt.SnapshotID, a.Attempt.ItemID, a.Key) {
+		a.inferredOrderID = a.OrderID
+	}
 }
 
 type storedWeeklyHistoryAttempt struct {
@@ -268,7 +283,53 @@ func sameArchivedWeek(a, b WeeklyHistoryArchive) bool {
 		return false
 	}
 	a.PlanKeys, b.PlanKeys, a.AnswerKeys, b.AnswerKeys = nil, nil, nil, nil
-	return reflect.DeepEqual(a, b)
+	if len(a.Attempts) != len(b.Attempts) {
+		return false
+	}
+	aAttempts, bAttempts := a.Attempts, b.Attempts
+	a.Attempts, b.Attempts = nil, nil
+	if !reflect.DeepEqual(a, b) {
+		return false
+	}
+	checkOrder := false
+	for i, prior := range aAttempts {
+		incoming := bAttempts[i]
+		// 旧目标没有排序键时，兼容原请求 ID 和本次迁移从源快照推导的中转 ID。
+		if prior.OrderID == "" && prior.RequestSnapshotID != "" &&
+			(incoming.OrderID == incoming.inferredOrderID ||
+				incoming.OrderID == k12.WeeklyPracticeAttemptID(prior.RequestSnapshotID, prior.Attempt.ItemID, prior.Key)) {
+			checkOrder = checkOrder || incoming.OrderID != ""
+			incoming.OrderID = ""
+		}
+		incoming.inferredOrderID, prior.inferredOrderID = "", ""
+		if !reflect.DeepEqual(prior, incoming) {
+			return false
+		}
+	}
+	return !checkOrder || sameArchivedAttemptOrder(aAttempts, bAttempts)
+}
+
+func sameArchivedAttemptOrder(prior, incoming []WeeklyHistoryAttempt) bool {
+	indices := make([]int, len(prior))
+	for i := range indices {
+		indices[i] = i
+	}
+	slices.SortFunc(indices, func(i, j int) int {
+		return compareArchivedAttemptOrder(&prior[i], &prior[j])
+	})
+	return slices.IsSortedFunc(indices, func(i, j int) int {
+		return compareArchivedAttemptOrder(&incoming[i], &incoming[j])
+	})
+}
+
+// 与周练历史查询使用相同的分组、作答时刻、冻结排序键与 ID 兜底。
+func compareArchivedAttemptOrder(a, b *WeeklyHistoryAttempt) int {
+	return cmp.Or(
+		cmp.Compare(a.Attempt.ItemID, b.Attempt.ItemID),
+		cmp.Compare(a.Updated, b.Updated),
+		cmp.Compare(cmp.Or(a.OrderID, a.Attempt.AttemptID), cmp.Or(b.OrderID, b.Attempt.AttemptID)),
+		cmp.Compare(a.Attempt.AttemptID, b.Attempt.AttemptID),
+	)
 }
 
 // RollbackWeeklyHistoryTx 仅撤回原迁移新增的周；迁移后产生的作答、打印和投递记录必须保留。

@@ -6,6 +6,13 @@ import (
 	"encoding/json"
 )
 
+// WeeklyPracticeAttemptID identifies the original attempt both when it is
+// submitted and when a weekly archive is restored to a different learner.
+func WeeklyPracticeAttemptID(snapshotID, itemID, key string) string {
+	sum := sha256.Sum256([]byte(snapshotID + "\x00" + itemID + "\x00" + key))
+	return "wattempt-" + hex.EncodeToString(sum[:12])
+}
+
 // WeeklyAssessmentRequestDigest 按最初冻结的快照、题项与原答案绑定命令。
 func WeeklyAssessmentRequestDigest(snapshot, item, answer string) string {
 	raw, _ := json.Marshal(struct{ Snapshot, Item, Answer string }{snapshot, item, answer})
