@@ -2302,7 +2302,7 @@ func (o *GradingOrchestrator) runRender(ctx context.Context, run *gradingRun, jo
 func (o *GradingOrchestrator) adoptCompletedAnchorForRendering(ctx context.Context, run *gradingRun, job GradingJobView) (GradingJobView, error) {
 	if run.req.TeachingReport == nil || job.Record.Status != k12.GradingStageRendering ||
 		job.Fields.AnchorState != k12.GradingAnchorPending || run.renderFailure != "" ||
-		run.result == nil || run.result.AnnotatedImage != nil {
+		run.result == nil {
 		return job, nil
 	}
 	var anchored []RecognizedQuestion
@@ -2339,17 +2339,13 @@ func (o *GradingOrchestrator) adoptCompletedAnchorForRendering(ctx context.Conte
 			return job, nil
 		}
 	}
-	if len(anchored) != len(run.questions) {
+	previous := renderedAnswerBoxes(run.result)
+	geometry := extendRenderedAnswerGeometry(run.questions, anchored, previous)
+	if geometry == nil {
 		return job, nil
 	}
-	for i, q := range run.questions {
-		if anchored[i].ProblemID != q.ProblemID || anchored[i].AttemptID != q.AttemptID ||
-			anchored[i].PageAssetID != q.PageAssetID || !slices.Equal(anchored[i].SourceNumberPath, q.SourceNumberPath) {
-			return job, nil
-		}
-	}
 	candidate := *run
-	candidate.anchored, candidate.anchorFailed, candidate.result = mergeAnchorGeometry(run.questions, anchored), false, nil
+	candidate.anchored, candidate.anchorFailed, candidate.result = geometry, false, nil
 	var recorder *recordingAnnotator
 	var annotator PhotoAnnotator
 	if o.deps.PhotoAnnotator != nil {
@@ -2362,6 +2358,18 @@ func (o *GradingOrchestrator) adoptCompletedAnchorForRendering(ctx context.Conte
 	}
 	if !durable {
 		return job, fmt.Errorf("durable assessments are unavailable for completed answer geometry")
+	}
+	if previous != nil {
+		// 重叠、缩图或渲染失败可能使笔画不可见。只有保留原作答标记且实际补上新标记才替换。
+		drawn := renderedAnswerBoxes(rebuilt)
+		if len(drawn) <= len(previous) {
+			return job, nil
+		}
+		for id, box := range previous {
+			if drawn[id] != box {
+				return job, nil
+			}
+		}
 	}
 	candidate.result = rebuilt
 	if recorder != nil {
@@ -2383,6 +2391,62 @@ func (o *GradingOrchestrator) adoptCompletedAnchorForRendering(ctx context.Conte
 	}
 	run.anchored, run.anchorFailed, run.result, run.renderFailure = candidate.anchored, candidate.anchorFailed, candidate.result, candidate.renderFailure
 	return updated, nil
+}
+
+type renderedAnswerIdentity struct {
+	problemID, attemptID, pageAssetID, inputDigest string
+}
+
+func answerBoxIdentity(q RecognizedQuestion) renderedAnswerIdentity {
+	return renderedAnswerIdentity{q.ProblemID, q.AttemptID, q.PageAssetID, q.InputDigest}
+}
+
+// 题目区域上的问号也能生成非空图片。保留已经落笔的位置，只为同一份作答补充可信新框。
+func extendRenderedAnswerGeometry(questions, anchored []RecognizedQuestion, previous map[renderedAnswerIdentity]BBox) []RecognizedQuestion {
+	if len(anchored) != len(questions) {
+		return nil
+	}
+	merged := mergeAnchorGeometry(questions, anchored)
+	addsBox := false
+	for i := range merged {
+		q, observed := &merged[i], &anchored[i]
+		if observed.ProblemID != q.ProblemID || observed.AttemptID != q.AttemptID ||
+			observed.PageAssetID != q.PageAssetID || !slices.Equal(observed.SourceNumberPath, q.SourceNumberPath) {
+			return nil
+		}
+		if box, drawn := previous[answerBoxIdentity(*q)]; drawn {
+			q.BBox = &box
+			continue
+		}
+		if q.BBox == nil {
+			continue
+		}
+		if observed.Question != q.Question || observed.StudentAnswer != q.StudentAnswer || observed.AnswerState != q.AnswerState ||
+			observed.SourceWidth != q.SourceWidth || observed.SourceHeight != q.SourceHeight ||
+			!photoAnnotationHasTrustedBBox(PhotoAnnotation{BBox: *q.BBox}) {
+			q.BBox = nil
+			continue
+		}
+		addsBox = true
+	}
+	if !addsBox {
+		return nil
+	}
+	return merged
+}
+
+func renderedAnswerBoxes(result *PhotoGradeResult) map[renderedAnswerIdentity]BBox {
+	if result == nil || result.AnnotatedImage == nil {
+		return nil
+	}
+	boxes := make(map[renderedAnswerIdentity]BBox)
+	for _, mark := range renderedPhotoMarks(result.Items, result.AnnotatedImage) {
+		q := result.Items[mark.QuestionNumber-1].Recognized
+		if q.BBox != nil {
+			boxes[answerBoxIdentity(q)] = mark.BBox
+		}
+	}
+	return boxes
 }
 
 // runProject is the only page-finalization entry. Completion is authorized by
