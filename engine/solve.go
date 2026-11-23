@@ -509,6 +509,11 @@ func (o *SolveSkill) Execute(ctx context.Context, args map[string]any) (*skill.R
 		"solve_evidence": evidenceKind(numericGrounded),
 	}
 	selected := selectedSolverSolution(groups, verdict, computed, numericGrounded, problem)
+	if outputVersion == solveWithTeachingReportV2 && !numericGrounded && verdict == verdictAgree {
+		if alternative, ok := auditedReportAlternative(selected, sols, guideAudits); ok {
+			selected, content = alternative, alternative.output
+		}
+	}
 	if solveTeachingVersionSupported(outputVersion) {
 		addParentGuideMetadata(metadata, selected, guideAudits)
 	}
@@ -935,7 +940,16 @@ func (o *SolveSkill) verifySolutionWithGuides(ctx context.Context, problem, solu
 	trace.L(ctx).Info("solve execution evidence evaluated", "input_digest", executionInputDigest(usedSpec.Task),
 		"executed", executed, "computed", computed, "candidate", candidate, "process", process,
 		"verdict", verdictString(verdict), "evidence", evidenceKind(numericGrounded))
-	return verdict, computed, numericGrounded, result.ExecutionReceipt, parentGuideAuditsForCandidates(result.Output, guides), nil
+	audits = parentGuideAuditsForCandidates(result.Output, guides)
+	if len(guides) > 1 && !numericGrounded && executed && process == "VALID" && verdict == verdictAgree {
+		if strict := strictFinalGuideAudits(result.Output, guides); strict != nil {
+			audits = strict
+			for i := range audits {
+				audits[i].verifiedQuantity = actualComputed
+			}
+		}
+	}
+	return verdict, computed, numericGrounded, result.ExecutionReceipt, audits, nil
 }
 
 // strictFormatReminder 在校验重试时附加，逼模型只吐固定格式。

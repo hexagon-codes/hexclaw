@@ -7,7 +7,7 @@ import (
 )
 
 // migrateTeachingReportSnapshotReferences 仅翻译既有归档映射中的引用，不改模板、题目或答案。
-func migrateTeachingReportSnapshotReferences(raw string, assets, receipts map[string]string) (string, k12.TeachingReport, error) {
+func migrateTeachingReportSnapshotReferences(raw string, assets, receipts, jobs map[string]string) (string, k12.TeachingReport, error) {
 	var envelope map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(raw), &envelope); err != nil {
 		return "", k12.TeachingReport{}, err
@@ -22,8 +22,15 @@ func migrateTeachingReportSnapshotReferences(raw string, assets, receipts map[st
 		}
 		return value
 	}
+	sourceID := typed.Source.SourceID
+	if typed.Source.Kind == k12.TeachingReportSourceGrading {
+		typed.Source.SourceID = mapRef(sourceID, jobs)
+	}
 	for i := range typed.SourcePages {
 		typed.SourcePages[i].AssetID = mapRef(typed.SourcePages[i].AssetID, assets)
+		if typed.SourcePages[i].AssetID == "grading-input:"+sourceID {
+			typed.SourcePages[i].AssetID = "grading-input:" + typed.Source.SourceID
+		}
 	}
 	for i := range typed.Items {
 		typed.Items[i].AnswerAnalysis.Evidence.ReceiptRef = mapRef(typed.Items[i].AnswerAnalysis.Evidence.ReceiptRef, receipts)

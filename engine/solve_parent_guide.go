@@ -5,10 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/hexagon"
+	"github.com/hexagon-codes/hexclaw/adapter"
 	"github.com/hexagon-codes/hexclaw/egress"
 )
 
@@ -83,6 +86,8 @@ type parentGuideAudit struct {
 	SourceDigest string            `json:"source_digest"`
 	Scope        string            `json:"scope"`
 	Fields       []guideFieldAudit `json:"fields"`
+	// 仅由同次独立验算的真实 stdout 与过程结论设置，不从模型 JSON 读取。
+	verifiedQuantity string
 }
 
 var parentGuideFields = [...]string{"answer", "full_solution_steps", "grade_level_method", "likely_mistakes", "parent_teaching_sequence", "follow_up_questions", "checking_method"}
@@ -188,12 +193,53 @@ func hasReportContentGuideAudit(candidates []guideAuditCandidate) bool {
 
 // ParentGuideAuditVerdict 按实际审核原文判定给定解答来源的七字段合同。
 func ParentGuideAuditVerdict(output, sourceDigest string) string {
-	return parentGuideAuditVerdict(parentGuideAuditsFromOutput(output), sourceDigest)
+	audits := parentGuideAuditsForCandidates(output, []guideAuditCandidate{{SourceDigest: sourceDigest}})
+	return parentGuideAuditVerdict(audits, sourceDigest)
 }
 
 // TeachingReportGuideAuditVerdict 额外要求同次审核双层报告内容，不改变旧七字段审核。
 func TeachingReportGuideAuditVerdict(output, sourceDigest string) string {
-	return parentGuideAuditVerdictForFields(parentGuideAuditsFromOutput(output), sourceDigest, append(append([]string(nil), parentGuideFields[:]...), "report_content"))
+	return TeachingReportGuideAuditVerdictForSources(output, sourceDigest, []string{sourceDigest})
+}
+
+// TeachingReportCoreApproved 只读取单个候选已明确通过的答案与完整步骤。
+// 另有字段被否决时，整份指南仍为 INVALID。
+func TeachingReportCoreApproved(output, sourceDigest string) bool {
+	if sourceDigest == "" || !strings.HasPrefix(strings.TrimSpace(output), "PARENT_GUIDE_AUDITS:") {
+		return false
+	}
+	required := append(append([]string(nil), parentGuideFields[:]...), "report_content")
+	audits := strictFinalGuideAudits(output, []guideAuditCandidate{{SourceDigest: sourceDigest, RequiredFields: required}})
+	if len(audits) != 1 || audits[0].Scope != "IN_SCOPE" || guideAuditVerdict(audits[0], required) != "INVALID" {
+		return false
+	}
+	return guideAuditAcceptsFields(audits[0], "answer", "full_solution_steps")
+}
+
+func guideAuditAcceptsFields(audit parentGuideAudit, first, second string) bool {
+	var firstValid, secondValid bool
+	for _, field := range audit.Fields {
+		switch field.Field {
+		case first:
+			firstValid = field.Valid != nil && *field.Valid
+		case second:
+			secondValid = field.Valid != nil && *field.Valid
+		}
+	}
+	return firstValid && secondValid
+}
+
+// TeachingReportGuideAuditVerdictForSources 用同题生成回执中的来源集合解释冻结的联合审核。
+func TeachingReportGuideAuditVerdictForSources(output, sourceDigest string, sources []string) string {
+	if sourceDigest == "" || !slices.Contains(sources, sourceDigest) {
+		return "NOT_PROVIDED"
+	}
+	required := append(append([]string(nil), parentGuideFields[:]...), "report_content")
+	candidates := make([]guideAuditCandidate, len(sources))
+	for i, source := range sources {
+		candidates[i] = guideAuditCandidate{SourceDigest: source, RequiredFields: required}
+	}
+	return parentGuideAuditVerdictForFields(parentGuideAuditsForCandidates(output, candidates), sourceDigest, required)
 }
 
 func withParentGuideVerification(spec SubAgentSpec, candidates []guideAuditCandidate) SubAgentSpec {
@@ -213,51 +259,103 @@ func withParentGuideVerification(spec SubAgentSpec, candidates []guideAuditCandi
 	return spec
 }
 
-func parentGuideAuditsFromOutput(output string) []parentGuideAudit {
-	for _, line := range strings.Split(output, "\n") {
-		if raw, ok := strings.CutPrefix(strings.TrimSpace(line), "PARENT_GUIDE_AUDITS:"); ok {
-			var audits []parentGuideAudit
-			if json.Unmarshal([]byte(strings.TrimSpace(raw)), &audits) == nil {
-				return audits
-			}
-			return nil
-		}
-	}
-	return nil
+// 仅在全部预期来源及审核字段都已收到时，在读取副本补最外层数组结束符。
+func parentGuideAuditsForCandidates(output string, candidates []guideAuditCandidate) []parentGuideAudit {
+	return readParentGuideAudits(output, candidates, false)
 }
 
-// 单一候选的完整审核对象只缺最外层数组结束符时，可无损恢复语法；
-// 不补对象、字段或审核结论，多候选及来源不匹配仍保持未提供。
-func parentGuideAuditsForCandidates(output string, candidates []guideAuditCandidate) []parentGuideAudit {
-	if audits := parentGuideAuditsFromOutput(output); audits != nil {
-		return audits
-	}
-	if len(candidates) != 1 || candidates[0].SourceDigest == "" {
-		return nil
-	}
-	for _, line := range strings.Split(output, "\n") {
+func strictFinalGuideAudits(output string, candidates []guideAuditCandidate) []parentGuideAudit {
+	return readParentGuideAudits(output, candidates, true)
+}
+
+func readParentGuideAudits(output string, candidates []guideAuditCandidate, exact bool) []parentGuideAudit {
+	for output != "" {
+		var line string
+		line, output, _ = strings.Cut(output, "\n")
 		raw, found := strings.CutPrefix(strings.TrimSpace(line), "PARENT_GUIDE_AUDITS:")
 		if !found {
 			continue
 		}
 		raw = strings.TrimSpace(raw)
-		if !strings.HasPrefix(raw, "[") || !strings.HasSuffix(raw, "}") {
-			return nil
-		}
 		var audits []parentGuideAudit
-		if json.Unmarshal([]byte(raw+"]"), &audits) != nil || len(audits) != 1 {
-			return nil
-		}
-		verdict := parentGuideAuditVerdict(audits, candidates[0].SourceDigest)
-		if len(candidates[0].RequiredFields) != 0 {
-			verdict = parentGuideAuditVerdictForFields(audits, candidates[0].SourceDigest, candidates[0].RequiredFields)
-		}
-		if verdict == "VALID" || verdict == "INVALID" {
+		if !exact && json.Unmarshal([]byte(raw), &audits) == nil {
 			return audits
 		}
-		return nil
+		if strings.TrimSpace(output) != "" || len(candidates) == 0 {
+			return nil
+		}
+		if !json.Valid([]byte(raw)) && strings.HasPrefix(raw, "[") && strings.HasSuffix(raw, "}") {
+			raw += "]"
+		}
+		return strictGuideAuditSet(raw, candidates)
 	}
 	return nil
+}
+
+func strictGuideAuditSet(raw string, candidates []guideAuditCandidate) []parentGuideAudit {
+	var audits []parentGuideAudit
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&audits) != nil || decoder.Decode(new(any)) != io.EOF || len(audits) != len(candidates) {
+		return nil
+	}
+	if !uniqueGuideAuditMembers(json.NewDecoder(strings.NewReader(raw))) || !completeGuideAuditSet(audits, candidates) {
+		return nil
+	}
+	return audits
+}
+
+// JSON 默认以同名成员的最后一个值为准。修复排版时不能据此覆盖来源或否决结论。
+func uniqueGuideAuditMembers(decoder *json.Decoder) bool {
+	token, err := decoder.Token()
+	if err != nil {
+		return false
+	}
+	if token != json.Delim('{') && token != json.Delim('[') {
+		return true
+	}
+	var keys map[string]bool
+	if token == json.Delim('{') {
+		keys = make(map[string]bool)
+	}
+	for decoder.More() {
+		if keys != nil {
+			keyToken, tokenErr := decoder.Token()
+			key, ok := keyToken.(string)
+			key = strings.ToLower(key)
+			if tokenErr != nil || !ok || keys[key] {
+				return false
+			}
+			keys[key] = true
+		}
+		if !uniqueGuideAuditMembers(decoder) {
+			return false
+		}
+	}
+	_, err = decoder.Token()
+	return err == nil
+}
+
+func completeGuideAuditSet(audits []parentGuideAudit, candidates []guideAuditCandidate) bool {
+	expected := make(map[string][]string, len(candidates))
+	for _, candidate := range candidates {
+		if _, duplicate := expected[candidate.SourceDigest]; duplicate || candidate.SourceDigest == "" {
+			return false
+		}
+		required := candidate.RequiredFields
+		if len(required) == 0 {
+			required = parentGuideFields[:]
+		}
+		expected[candidate.SourceDigest] = required
+	}
+	for _, audit := range audits {
+		required, ok := expected[audit.SourceDigest]
+		if !ok || guideAuditVerdict(audit, required) == "NOT_PROVIDED" {
+			return false
+		}
+		delete(expected, audit.SourceDigest)
+	}
+	return len(expected) == 0
 }
 
 func parentGuideAuditVerdict(audits []parentGuideAudit, digest string) string {
@@ -277,15 +375,20 @@ func parentGuideAuditVerdictForFields(audits []parentGuideAudit, digest string, 
 	if found == nil {
 		return "NOT_PROVIDED"
 	}
-	if found.Scope == "OUT_OF_SCOPE" {
+	return guideAuditVerdict(*found, required)
+}
+
+func guideAuditVerdict(audit parentGuideAudit, required []string) string {
+	// 明确超纲始终是否决；采用任何讲法则要求全部声明字段的审核均通过。
+	if audit.Scope == "OUT_OF_SCOPE" {
 		return "INVALID"
 	}
-	if found.Scope != "IN_SCOPE" || len(found.Fields) != len(required) {
+	if audit.Scope != "IN_SCOPE" || len(audit.Fields) != len(required) {
 		return "NOT_PROVIDED"
 	}
 	seen := make(map[string]bool, len(required))
 	invalid := false
-	for _, field := range found.Fields {
+	for _, field := range audit.Fields {
 		known := false
 		for _, name := range required {
 			if field.Field == name {
@@ -325,6 +428,100 @@ func selectedSolverSolution(groups []answerGroup, verdict verifyVerdict, compute
 		}
 	}
 	return groups[0].sols[0]
+}
+
+// 单个独立执行量不能证明整份多空答案。只有两份候选各自执行了完整答案，
+// 并共享唯一、同名同单位的独立核验量时，才优先采用整份通过审核的原候选。
+func auditedReportAlternative(primary solverSolution, candidates []solverSolution, audits []parentGuideAudit) (solverSolution, bool) {
+	required := append(append([]string(nil), parentGuideFields[:]...), "report_content")
+	auditFor := func(s solverSolution) *parentGuideAudit {
+		digest := executionInputDigest(s.output)
+		var matching *parentGuideAudit
+		for i := range audits {
+			if audits[i].SourceDigest == digest {
+				if matching != nil {
+					return nil
+				}
+				matching = &audits[i]
+			}
+		}
+		return matching
+	}
+	current := auditFor(primary)
+	if current == nil || current.Scope != "IN_SCOPE" || current.verifiedQuantity == "" || guideAuditVerdict(*current, required) != "INVALID" ||
+		!guideAuditAcceptsFields(*current, "answer", "report_content") {
+		return solverSolution{}, false
+	}
+	label := verifiedReportQuantityLabel(primary, current.verifiedQuantity)
+	if label == "" {
+		return solverSolution{}, false
+	}
+	var selected solverSolution
+	for _, candidate := range candidates {
+		audit := auditFor(candidate)
+		if audit == nil || guideAuditVerdict(*audit, required) != "VALID" {
+			continue
+		}
+		if audit.verifiedQuantity != current.verifiedQuantity || verifiedReportQuantityLabel(candidate, current.verifiedQuantity) != label {
+			return solverSolution{}, false
+		}
+		if selected.output != "" && selected.output != candidate.output {
+			return solverSolution{}, false
+		}
+		selected = candidate
+	}
+	return selected, selected.output != ""
+}
+
+var reportEmbeddedQuantity = regexp.MustCompile(`(?i)` + answerQuantityNumberPattern + `\s*(?:[（(]\s*)?(?:` + answerQuantityUnitPattern + `)`)
+
+func verifiedReportQuantityLabel(s solverSolution, computed string) string {
+	if s.generation == nil || s.generation.OutputVersion != solveWithTeachingReportV2 || !answerMarker.MatchString(s.output) {
+		return ""
+	}
+	own, executed := s.executionReceipt.computedOutput(s.executionTask)
+	if !executed || normalizeAnswer(own) != s.answer {
+		return ""
+	}
+	q, ok := completeVerificationQuantity(computed)
+	if !ok || q.unit == "" {
+		return ""
+	}
+	var g struct {
+		Report struct {
+			Version string `json:"version"`
+			Items   []struct {
+				ID      string `json:"problem_id"`
+				Answers []struct {
+					Label, Text, Latex string
+					Conditions         []string
+				} `json:"answers"`
+			} `json:"items"`
+		} `json:"report_content"`
+	}
+	if json.Unmarshal([]byte(s.generation.ParentGuideJSON), &g) != nil || g.Report.Version != "teaching-report-content-v1" ||
+		len(g.Report.Items) != 1 || g.Report.Items[0].ID != "current" {
+		return ""
+	}
+	var label string
+	for _, answer := range g.Report.Items[0].Answers {
+		if (strings.TrimSpace(answer.Text) == "") == (strings.TrimSpace(answer.Latex) == "") {
+			return ""
+		}
+		text := adapter.NormalizeMathText(answer.Text + answer.Latex)
+		value, numeric := completeVerificationQuantity(text)
+		if !numeric {
+			if reportEmbeddedQuantity.MatchString(text) {
+				return ""
+			}
+			continue
+		}
+		if label != "" || len(answer.Conditions) != 0 || strings.TrimSpace(answer.Label) == "" || !quantitiesEqual(value, q) {
+			return ""
+		}
+		label = strings.TrimSpace(answer.Label)
+	}
+	return label
 }
 
 func addParentGuideMetadata(metadata map[string]string, selected solverSolution, audits []parentGuideAudit) {

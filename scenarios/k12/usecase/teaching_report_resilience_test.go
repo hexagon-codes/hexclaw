@@ -448,3 +448,26 @@ func TestTeachingReportDegradationPreservesEveryExplicitAnswer(t *testing.T) {
 		t.Fatal("an unanswered requested quantity was hidden by the final answer")
 	}
 }
+
+func TestPartialTeachingCannotCoverUnknownOrChangedAnswer(t *testing.T) {
+	solved := SolveHomeworkResult{Solution: reportResilienceSolution, Evidence: SolveEvidence{Verdict: VerdictAgree, EvidenceType: EvidenceHeuristic}}
+	teaching := &reportResilienceTeaching{validContent: true, auditErr: context.DeadlineExceeded}
+	d := Deps{ParentTeachingGuide: teaching, ParentTeachingGuideAudit: teaching}
+	req := GradeRequest{AgentName: "mingming", Subject: "数学", Grade: "五年级上", Problem: reportResilienceProblem, SolveOutputVersion: SolveOutputWithTeachingReportV2}
+	result, err := d.adaptReusedReportTeaching(t.Context(), req, solved)
+	if !errors.Is(err, context.DeadlineExceeded) || teaching.audited != 1 || result.ReportContent != nil || result.ReportDegradationReason != "" {
+		t.Fatalf("unknown audit changed the weak solution: err=%v result=%+v", err, result)
+	}
+	solved.ReportDegradationReason = teachingAuditCoreOnly
+	solved.Generation = &SolveGeneration{OutputVersion: SolveOutputWithTeachingReportV2, GuideAudit: "INVALID", SourceSolutionDigest: teachingReportResourceDigest([]byte(solved.Solution)),
+		AdaptationGenerationID: "source-guide", AdaptationAuditID: "source-audit", ParentGuideCandidate: &ParentTeachingGuide{
+			Answer: "4支。", FullSolutionSteps: verifiedFullSolutionSteps(solved.Solution)}}
+	guide, ok := auditedCoreReportGuide(solved)
+	if !ok || guide.Answer != "4支。" || guide.GradeLevelMethod != "" || guide.ReportContent == nil {
+		t.Fatalf("original audited core was not isolated: %+v", guide)
+	}
+	solved.Generation.ParentGuideCandidate.Answer = "5支。"
+	if _, ok := auditedCoreReportGuide(solved); ok {
+		t.Fatal("the audit was used for a different answer")
+	}
+}

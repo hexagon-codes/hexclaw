@@ -78,13 +78,21 @@ func (d Deps) adaptReusedReportTeaching(ctx context.Context, req GradeRequest, s
 		sourceDigest = teachingReportResourceDigest([]byte(solved.Solution))
 	}
 	auditRequest := ParentTeachingGuideAuditRequest{Request: request, Guide: guide, SourceSolutionDigest: sourceDigest}
+	coreReader, _ := d.ParentTeachingGuideAudit.(interface {
+		TeachingReportCoreApproved(ParentTeachingGuideAudit) bool
+	})
+	acceptsCore := func(audit ParentTeachingGuideAudit) bool {
+		return !photoEvidenceTrusted(solved.Evidence) && solved.Evidence.Verdict == VerdictAgree && solved.AnswerSource == nil &&
+			audit.Verdict == "INVALID" && audit.SourceSolutionDigest == sourceDigest &&
+			coreReader != nil && coreReader.TeachingReportCoreApproved(audit)
+	}
 	failureReason = "teaching_audit_failed"
 	audited, err := ExecuteGradingPhysicalCall(ctx, GradingPhysicalCallSpec{Operation: k12.GradingItemOperationParentGuide, ReplayResultFailure: func(payload string) error {
 		var prior ParentTeachingGuideAudit
 		if err := json.Unmarshal([]byte(payload), &prior); err != nil {
 			return err
 		}
-		if prior.Verdict != "VALID" || prior.SourceSolutionDigest != sourceDigest {
+		if (prior.Verdict != "VALID" || prior.SourceSolutionDigest != sourceDigest) && !acceptsCore(prior) {
 			return fmt.Errorf("report teaching audit did not accept the candidate")
 		}
 		return nil
@@ -108,6 +116,17 @@ func (d Deps) adaptReusedReportTeaching(ctx context.Context, req GradeRequest, s
 	}
 	if audit.Verdict != "VALID" || audit.SourceSolutionDigest != sourceDigest {
 		failureReason = "teaching_audit_rejected"
+		if acceptsCore(audit) {
+			projected := solved
+			projected.ReportDegradationReason = teachingAuditCoreOnly
+			projected.Generation = &SolveGeneration{OutputVersion: SolveOutputWithTeachingReportV2, GuideAudit: audit.Verdict, SourceSolutionDigest: sourceDigest,
+				AdaptationGenerationID: generated.InvocationID, AdaptationAuditID: audited.InvocationID,
+				ParentGuideCandidate: &ParentTeachingGuide{Answer: guide.Answer, FullSolutionSteps: guide.FullSolutionSteps}}
+			if core, ok := auditedCoreReportGuide(projected); ok {
+				projected.ReportContent = core.ReportContent
+				return projected, nil
+			}
+		}
 		return solved, fmt.Errorf("report teaching audit did not accept the candidate")
 	}
 	solved.Generation = &SolveGeneration{OutputVersion: SolveOutputWithTeachingReportV2, ParentGuideCandidate: &guide, GuideAudit: audit.Verdict, SourceSolutionDigest: sourceDigest,

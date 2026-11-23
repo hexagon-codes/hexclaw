@@ -284,6 +284,11 @@ func (a *SolveAdapter) AuditParentTeachingGuide(ctx context.Context, req usecase
 	}, nil
 }
 
+// TeachingReportCoreApproved 在恢复时也按原审核协议读取已保存的逐字段结论。
+func (*SolveAdapter) TeachingReportCoreApproved(audit usecase.ParentTeachingGuideAudit) bool {
+	return audit.Verdict == "INVALID" && engine.TeachingReportCoreApproved(audit.Output, audit.SourceSolutionDigest)
+}
+
 func buildParentTeachingSkillMethodology(subject string, loader SkillContentLoader) string {
 	methodology, _ := buildParentTeachingSkillContext(subject, loader)
 	return methodology
