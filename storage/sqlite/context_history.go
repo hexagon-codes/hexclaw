@@ -55,3 +55,9 @@ func (s *txStore) MarkContextCompacted(ctx context.Context, sessionID string, me
 func (s *Store) FindAssistantReplies(ctx context.Context, sessionID, requestID string) ([]*storage.MessageRecord, error) {
 	return readMessageRows(ctx, s.db, `SELECT `+messageCols+` FROM messages WHERE session_id=? AND request_id=? AND role='assistant' LIMIT 2`, sessionID, requestID)
 }
+
+func (s *Store) FindIMPhotoReplies(ctx context.Context, scope storage.Session, requestID string) ([]*storage.MessageRecord, error) {
+	return readMessageRows(ctx, s.db, `SELECT `+messageCols+` FROM messages WHERE role='assistant' AND request_id=?
+AND session_id IN (SELECT id FROM sessions WHERE user_id=? AND platform=? AND instance_id=? AND chat_id=?
+ AND status>=0 AND (?='' OR id=?)) LIMIT 2`, requestID, scope.UserID, scope.Platform, scope.InstanceID, scope.ChatID, scope.ID, scope.ID)
+}

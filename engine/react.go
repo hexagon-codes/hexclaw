@@ -464,6 +464,7 @@ type ReActEngine struct {
 	mediaFlow             *mediaflow.Service
 	mediaRequests         map[string]int
 	replyArtifactResolver ReplyArtifactResolver
+	imPhotoDocumentReader func(context.Context, *storage.MessageRecord) ([]adapter.Attachment, error)
 }
 
 // SetMediaServices 注入图片/视频生成服务（ai-core/media）。
@@ -5504,6 +5505,10 @@ func (e *ReActEngine) loadDurableAssistantReply(
 	if match == nil {
 		return nil, nil
 	}
+	return e.restoreDurableAssistantRecord(ctx, msg, match, requireRuntimeTerminal, false)
+}
+
+func (e *ReActEngine) restoreDurableAssistantRecord(ctx context.Context, msg *adapter.Message, match *storage.MessageRecord, requireRuntimeTerminal, imPhoto bool) (*durableAssistantReply, error) {
 	if _, err := e.ValidateMediaReplay(ctx, msg); err != nil {
 		return nil, err
 	}
@@ -5584,20 +5589,34 @@ func (e *ReActEngine) loadDurableAssistantReply(
 		RuntimeEvents:       append([]adapter.SequencedRuntimeEvent(nil), persisted.RuntimeEvents...),
 	}
 	// 重放只查询原登记数据，不进入完成器、生成器或文件读取。
-	readCtx := skill.WithInvocationContext(ctx, skill.InvocationContext{AuthenticatedUserID: msg.UserID, RequestID: requestID, SessionID: sessionID})
+	readCtx := skill.WithInvocationContext(ctx, skill.InvocationContext{AuthenticatedUserID: msg.UserID, RequestID: match.RequestID, SessionID: match.SessionID})
 	readCtx = storage.WithAssistantCompletion(readCtx, storage.AssistantCompletion{})
 	mediaAttachments, mediaErr := e.mediaAttachments(readCtx, msg, metadata)
 	if mediaErr != nil {
+		if imPhoto {
+			return nil, mediaErr
+		}
 		mediaAttachments = nil
 	}
-	available := append([]adapter.Attachment(nil), mediaAttachments...)
 	e.mu.RLock()
 	executor := e.toolExecutor
+	documents := e.imPhotoDocumentReader
 	e.mu.RUnlock()
+	committed := mediaAttachments
+	if imPhoto && documents != nil {
+		files, err := documents(readCtx, match)
+		if err != nil {
+			return nil, err
+		}
+		committed = append(committed, files...)
+	}
+	available := append([]adapter.Attachment(nil), committed...)
 	if executor != nil && executor.externalTools != nil {
 		if resolved, resolveErr := executor.externalTools.ResolveReply(readCtx, msg, metadata); resolveErr == nil {
 			completion, _ := storage.AssistantCompletionFromContext(resolved)
 			available = append(available, completion.Attachments...)
+		} else if imPhoto {
+			return nil, resolveErr
 		}
 	}
 	var savedAttachments struct {
@@ -5607,7 +5626,11 @@ func (e *ReActEngine) loadDurableAssistantReply(
 		var decoded struct {
 			Attachments []adapter.Attachment `json:"attachments"`
 		}
-		if json.Unmarshal([]byte(raw), &decoded) == nil && len(decoded.Attachments) > 0 {
+		if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
+			if imPhoto && raw != "" {
+				return nil, fmt.Errorf("decode frozen IM reply attachments: %w", err)
+			}
+		} else if len(decoded.Attachments) > 0 {
 			savedAttachments = decoded
 			break
 		}
@@ -5652,11 +5675,13 @@ func (e *ReActEngine) loadDurableAssistantReply(
 					break
 				}
 			}
+		} else if imPhoto {
+			return nil, fmt.Errorf("frozen IM reply attachment %q is unavailable", assetID)
 		}
 	}
 	if len(savedAttachments.Attachments) == 0 {
-		reply.Attachments = append(reply.Attachments, mediaAttachments...)
-		refs = append(refs, canonicalAttachmentRefs(mediaAttachments)...)
+		reply.Attachments = append(reply.Attachments, committed...)
+		refs = append(refs, canonicalAttachmentRefs(committed)...)
 		for _, artifact := range prints {
 			if ref, found := knownRefs[artifact.ArtifactID]; found {
 				refs = append(refs, ref)
@@ -5669,6 +5694,7 @@ func (e *ReActEngine) loadDurableAssistantReply(
 		if contractErr != nil {
 			return nil, contractErr
 		}
+		var err error
 		reply.MessageContent, reply.RenderManifest, err = canonicalProducerProjection(producer, reply.Content, locale, refs)
 		if err != nil {
 			return nil, err

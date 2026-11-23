@@ -17,6 +17,11 @@ type AssistantReplyReader interface {
 	FindAssistantReplies(context.Context, string, string) ([]*MessageRecord, error)
 }
 
+// IMPhotoReplyReader 在原入站会话范围读取终稿。Session.ID 可为空，归档会话仍可查询。
+type IMPhotoReplyReader interface {
+	FindIMPhotoReplies(context.Context, Session, string) ([]*MessageRecord, error)
+}
+
 // ListContextMessages 兼容未提供独立上下文索引的存储读取实现。
 func ListContextMessages(ctx context.Context, store Store, sessionID string, limit, offset int) ([]*MessageRecord, error) {
 	if reader, ok := store.(ContextHistoryReader); ok {

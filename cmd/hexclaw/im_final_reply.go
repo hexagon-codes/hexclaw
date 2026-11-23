@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/hexagon-codes/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/instances"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	k12usecase "github.com/hexagon-codes/hexclaw/scenarios/k12/usecase"
 )
@@ -126,6 +127,9 @@ func maybeDeliverIMFinalReply(ctx context.Context, msg *adapter.Message, reply *
 		slog.WarnContext(ctx, "IM final reply delivery failed", "batch_id", batch.BatchID, "error", sendErr)
 	}
 	if accepted || batch.BatchID != "" {
+		if batch.BatchID != "" {
+			instances.NoteDelegatedPhotoReply(ctx, msg, "batch:"+batch.BatchID)
+		}
 		return nil, nil
 	}
 	// 未形成可见发送批次时保留完整原回复，准备失败不能丢失业务正文。
