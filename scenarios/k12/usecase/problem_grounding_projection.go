@@ -201,9 +201,15 @@ func (o *GradingOrchestrator) projectProblemGroundingReceipts(
 				return nil, resolveErr
 			}
 			if !invocation.enveloped {
+				// 同一输入修订的本机算术回执不消费教材，其真实结果必须已通过上面的身份和摘要校验。
+				linked := invocations[ref.invocationID]
+				if linked.ExecutionKind == k12.GradingExecutionLocalDeterministic &&
+					linked.InputRevision == item.InputRevision && linked.InputDigest == item.InputDigest &&
+					localDeterministicGradingInvocation(linked) {
+					continue
+				}
 				itemDirect = true
 				directOperations++
-				resolved = append(resolved, invocation)
 				continue
 			}
 			itemEnveloped = true
@@ -223,9 +229,6 @@ func (o *GradingOrchestrator) projectProblemGroundingReceipts(
 			return nil, fmt.Errorf("usecase: problem grounding envelope exact-set is incomplete")
 		}
 		for _, invocation := range resolved {
-			if !invocation.enveloped {
-				continue
-			}
 			for _, receipt := range invocation.grounding.Receipts {
 				out = append(out, ProblemGroundingReceipt{
 					ProblemID:                problemID,
