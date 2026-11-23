@@ -3192,6 +3192,7 @@ Set source only when the material explicitly names a work, title, or another rel
 		srv.SetRenderService(renderSvc)
 		srv.SetDocumentFlow(documentFlow)
 		eng.AddReplyArtifactResolver(documentFlow.ReplyResolver)
+		eng.SetIMPhotoDocumentReader(documentFlow.ResolveMessageAttachments)
 		logger.Info("[info] 文档渲染服务已启用",
 			"engine", "pandoc",
 			"endpoint", "/api/v1/render")
@@ -3217,6 +3218,9 @@ Set source only when the material explicitly names a work, title, or another rel
 	_ = voiceSvc
 
 	messageHandler := func(ctx context.Context, msg *adapter.Message) (*adapter.Reply, error) {
+		if route, admitted := instances.AdmittedPhotoRoute(ctx, msg); admitted {
+			return processAdmittedOrdinaryPhoto(ctx, msg, route, agentRouter, eng.Process)
+		}
 		if msg != nil && msg.Platform == "dingtalk" {
 			if msg.Metadata == nil {
 				msg.Metadata = make(map[string]string)
@@ -3304,7 +3308,15 @@ Set source only when the material explicitly names a work, title, or another rel
 				ResolveInstanceID:  instanceMgr.ResolveRunningInstanceID,
 				RecallStatusNotice: instanceMgr.RecallMessage,
 				ResolveRoute:       k12ImageTasks.ResolveRoute,
-				Inbound:            k12InboundPhotos, ImageTasks: k12ImageTasks,
+				ResolveSharedRoute: func(requested k12.ImageTaskRouteSnapshot) (k12.ImageTaskRouteSnapshot, error) {
+					selection, err := resolveK12GradingModelSnapshot(router, k12.GradingModelSnapshot{Provider: requested.Provider, Model: requested.Model})
+					if err != nil {
+						return k12.ImageTaskRouteSnapshot{}, err
+					}
+					requested.Provider, requested.Model = selection.Provider, selection.Model
+					return requested, nil
+				},
+				Inbound: k12InboundPhotos, ImageTasks: k12ImageTasks,
 				PracticeSets: practiceReturns, PracticeReturns: practiceReturns,
 				Artifacts: k12Runtime.Records, ReplyBatches: &k12Runtime.Deps,
 			},
@@ -3312,6 +3324,31 @@ Set source only when the material explicitly names a work, title, or another rel
 		k12ImageTasks.IMCompletedHomeworkRoutingGate = k12DingtalkPhotos
 		instanceMgr.SetDingTalkInboundPhotoAdmissionPort(k12DingtalkPhotos)
 	}
+	var k12PhotoBridge k12PhotoIntakeBridge
+	if k12DingtalkPhotos != nil {
+		k12PhotoBridge = k12DingtalkPhotos
+	}
+	photoRoutes := dingtalkPhotoRoutes(agentRouter, gw.Check, srv.DisplayLocale, k12PhotoBridge)
+	photoReplies := photoReplyObserver{media: store.MediaRepository()}
+	if k12Runtime != nil {
+		photoReplies.reports = &k12Runtime.Deps
+	}
+	photoRoutes.OrdinaryOutcome = photoReplies.outcome
+	photoRoutes.RecoverOrdinary = func(recoveryCtx context.Context, msg *adapter.Message, route instances.PhotoIntakeRoute) (*adapter.Reply, string, error) {
+		reply, err := eng.ReplayCompletedIMPhotoReply(recoveryCtx, msg)
+		if err != nil || reply == nil {
+			return nil, "", err
+		}
+		ref, err := photoReplies.existing(recoveryCtx, msg, route, reply)
+		if err != nil || ref != "" {
+			return nil, ref, err
+		}
+		if err := appendIMToolDigestAndRebuildCanonical(reply, string(msg.Platform)); err != nil {
+			return nil, "", err
+		}
+		return reply, "", nil
+	}
+	instanceMgr.SetPhotoRoutes(photoRoutes)
 	if disabled := parseDisabledIMProviders(os.Getenv("HEXCLAW_DISABLE_IM")); len(disabled) > 0 {
 		instanceMgr.SetDisabledProviders(disabled...)
 		logger.Warn("[instances] IM provider startup disabled by HEXCLAW_DISABLE_IM", "providers", strings.Join(disabled, ","))
@@ -3355,6 +3392,7 @@ Set source only when the material explicitly names a work, title, or another rel
 					return nil, fmt.Errorf("print reply origin mismatch")
 				}
 				k12Runtime.Outbox.Nudge()
+				instances.NoteDelegatedPhotoReply(ctx, msg, "print:"+reply.AssistantMessageID)
 				return nil, nil
 			}
 			if !errors.Is(getErr, sql.ErrNoRows) && !errors.Is(getErr, records.ErrNotFound) {
@@ -3362,6 +3400,7 @@ Set source only when the material explicitly names a work, title, or another rel
 			}
 		}
 		if err == nil && reply != nil && mediaSvc != nil && reply.Metadata["media_delivery_id"] != "" {
+			instances.NoteDelegatedPhotoReply(ctx, msg, "media:"+reply.Metadata["media_delivery_id"])
 			if deliveryErr := mediaSvc.Deliver(context.WithoutCancel(ctx), msg.UserID, reply.Metadata["media_delivery_id"]); deliveryErr != nil {
 				logger.Warn("media reply delivery remains pending", "error", deliveryErr)
 			}
@@ -3544,6 +3583,9 @@ Set source only when the material explicitly names a work, title, or another rel
 	}
 	if err := instanceMgr.StartEnabled(ctx); err != nil {
 		return fmt.Errorf("启动平台实例失败: %w", err)
+	}
+	if err := instanceMgr.RecoverPhotos(ctx); err != nil {
+		logger.Warn("IM 图片收件恢复失败", "error", err)
 	}
 	// 平台实例就绪后恢复工作流投递；未知发送结果只对账，不重新发送。
 	go func() {

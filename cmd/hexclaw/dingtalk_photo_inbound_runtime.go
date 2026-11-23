@@ -89,6 +89,7 @@ type k12DingtalkPhotoInboundRuntimeConfig struct {
 	ResolveInstanceID  func(string, string) (string, error)
 	RecallStatusNotice func(context.Context, string, string) error
 	ResolveRoute       func(k12.ImageTaskRouteSnapshot) (k12.ImageTaskRouteSnapshot, error)
+	ResolveSharedRoute func(k12.ImageTaskRouteSnapshot) (k12.ImageTaskRouteSnapshot, error)
 	Inbound            k12InboundPhotoCoordinatorPort
 	ImageTasks         k12InboundPhotoImageTaskPort
 	PracticeSets       k12InboundPhotoPracticeSetReader
@@ -112,6 +113,7 @@ type k12DingtalkPhotoInboundRuntime struct {
 	resolveInstanceID  func(string, string) (string, error)
 	recallStatusNotice func(context.Context, string, string) error
 	resolveRoute       func(k12.ImageTaskRouteSnapshot) (k12.ImageTaskRouteSnapshot, error)
+	resolveSharedRoute func(k12.ImageTaskRouteSnapshot) (k12.ImageTaskRouteSnapshot, error)
 	inbound            k12InboundPhotoCoordinatorPort
 	imageTasks         k12InboundPhotoImageTaskPort
 	practiceSets       k12InboundPhotoPracticeSetReader
@@ -153,6 +155,7 @@ func newK12DingtalkPhotoInboundRuntime(
 		resolveInstanceID:  config.ResolveInstanceID,
 		recallStatusNotice: config.RecallStatusNotice,
 		resolveRoute:       config.ResolveRoute,
+		resolveSharedRoute: config.ResolveSharedRoute,
 		messageLocale:      config.MessageLocale,
 		inbound:            config.Inbound, imageTasks: config.ImageTasks,
 		practiceSets: config.PracticeSets, practiceReturns: config.PracticeReturns,
@@ -227,18 +230,9 @@ func (r *k12DingtalkPhotoInboundRuntime) AdmitInboundPhoto(
 	if err != nil {
 		return false, err
 	}
-	pages := make([]k12usecase.InboundPhotoAdmission, len(msg.Attachments))
-	for i, attachment := range msg.Attachments {
-		data, decodeErr := decodeK12PhotoAttachment(attachment)
-		if decodeErr != nil {
-			return false, decodeErr
-		}
-		name := strings.TrimSpace(attachment.Name)
-		if name == "" {
-			name = "dingtalk-picture"
-		}
-		pages[i] = k12usecase.InboundPhotoAdmission{AssetName: name,
-			AssetMIME: strings.ToLower(strings.TrimSpace(attachment.Mime)), AssetBytes: data}
+	pages, err := k12DingtalkAdmissionPages(msg.Attachments)
+	if err != nil {
+		return false, err
 	}
 
 	// 完整 provider identity 的首次冻结值优先于当前可变路由。
@@ -274,61 +268,11 @@ func (r *k12DingtalkPhotoInboundRuntime) AdmitInboundPhoto(
 		return false, resumeErr
 	}
 
-	routed, routingMessage := lookupK12DingtalkTutorRoute(msg, originalMessage, r.router)
-	if routed == nil {
-		return false, nil
+	route, handled, err := r.prepareDingtalkPhotoRoute(ctx, originalMessage, msg, k12DingtalkPhotoStatusNoticeVersion, r.check)
+	if err != nil || !handled {
+		return handled, err
 	}
-	if r.check != nil {
-		if err := r.check(ctx, msg); err != nil {
-			return false, err
-		}
-	}
-	if r.bindDirect != nil {
-		if err := r.bindDirect(ctx, routingMessage); err != nil {
-			return false, fmt.Errorf("bind DingTalk direct K12 target: %w", err)
-		}
-		// 绑定会把实例级 catchall 提升为发送者精确规则。
-		// 重新路由，使耐久入站回执冻结具体 binding ID。
-		rebound, _ := lookupK12DingtalkTutorRoute(msg, originalMessage, r.router)
-		if rebound == nil || rebound.Rule == nil || strings.TrimSpace(rebound.Rule.ChatID) == "" {
-			return false, fmt.Errorf("DingTalk direct K12 target binding did not produce an exact route")
-		}
-		routed = rebound
-	}
-	provider, model, exactRoute := normalizeK12DingtalkInboundPhotoRoute(
-		routed.AgentConfig.Provider, routed.AgentConfig.Model,
-	)
-	if !exactRoute && r.resolveRoute != nil {
-		// 未独立选模型的助手沿用桌面图片任务的唯一默认路由解析器。
-		resolved, resolveErr := r.resolveRoute(k12.ImageTaskRouteSnapshot{
-			Provider: provider, Model: model,
-		})
-		if resolveErr != nil {
-			return false, fmt.Errorf("resolve DingTalk inbound photo route: %w", resolveErr)
-		}
-		provider, model, exactRoute = normalizeK12DingtalkInboundPhotoRoute(resolved.Provider, resolved.Model)
-	}
-	if !exactRoute {
-		return false, fmt.Errorf("DingTalk inbound TutorAgent route is incomplete")
-	}
-	locale := ""
-	if r.messageLocale != nil {
-		locale = r.messageLocale()
-	}
-	commandJSON, err := json.Marshal(k12DingtalkInboundPhotoCommand{
-		StatusNoticeVersion: k12DingtalkPhotoStatusNoticeVersion,
-		MessageLocale:       locale,
-		SchemaVersion:       2, SourceSessionID: k12PhotoSourceSession(msg),
-		MessageIntent: strings.TrimSpace(msg.Content), Provider: provider, Model: model,
-	})
-	if err != nil {
-		return false, fmt.Errorf("encode DingTalk inbound photo command: %w", err)
-	}
-	return r.admitPhotoPages(ctx, pages, k12usecase.InboundPhotoReceipt{
-		OwnerScope: k12usecase.DefaultLocalOwnerScope,
-		AgentName:  routed.AgentName, BindingID: stableBindingID(*routed.Rule),
-		Identity: identity, CommandJSON: string(commandJSON),
-	}, originalMessage.InstanceID, startedAt)
+	return r.admitPhotoPages(ctx, pages, k12PhotoReceiptForRoute(identity, route), originalMessage.InstanceID, startedAt)
 }
 
 func (r *k12DingtalkPhotoInboundRuntime) admitPhotoPages(

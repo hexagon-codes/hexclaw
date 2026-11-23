@@ -48,7 +48,7 @@ func k12DingtalkPhotoStatusText(locale, state string) string {
 	}
 	switch state {
 	case "accepted":
-		return "📷 已收到图片，正在识别和处理。通常预计 2–5 分钟；题量或图片内容较多时约 5–10 分钟。完成后会把处理结果（如有批改图）发回当前对话。"
+		return "📷 已收到图片，正在识别和处理。" + k12PhotoNoticeEstimateZH
 	case "failed":
 		return "这张图片处理失败，暂未生成完整结果。"
 	case "outcome_unknown":
@@ -71,7 +71,11 @@ func (r *k12DingtalkPhotoInboundRuntime) sendStatusNotice(ctx context.Context, b
 	if command.StatusNoticeVersion == "" {
 		return nil
 	}
-	if command.StatusNoticeVersion != k12DingtalkPhotoStatusNoticeVersion {
+	if command.StatusNoticeVersion == k12DingtalkSharedPhotoStatusNoticeVersion {
+		if state == "accepted" {
+			return nil
+		}
+	} else if command.StatusNoticeVersion != k12DingtalkPhotoStatusNoticeVersion {
 		return fmt.Errorf("DingTalk photo status notice version is unsupported")
 	}
 	port, ok := r.replyBatches.(k12DingtalkPhotoStatusBatchPort)
@@ -140,7 +144,7 @@ func (r *k12DingtalkPhotoInboundRuntime) recallAcceptedStatusNotice(ctx context.
 	if err := json.Unmarshal([]byte(bundle.Receipt.CommandJSON), &command); err != nil {
 		return fmt.Errorf("decode DingTalk photo status command: %w", err)
 	}
-	if command.StatusNoticeVersion == "" {
+	if command.StatusNoticeVersion == "" || command.StatusNoticeVersion == k12DingtalkSharedPhotoStatusNoticeVersion {
 		return nil
 	}
 	port, ok := r.replyBatches.(k12DingtalkPhotoStatusBatchPort)
