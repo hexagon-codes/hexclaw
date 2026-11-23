@@ -13,6 +13,39 @@ import (
 
 func float64Ptr(v float64) *float64 { return &v }
 
+func TestCircleDiagramLegendArrowPreservesDimensionsAndTarget(t *testing.T) {
+	const intro = "如下图，有大小两个圆。\n"
+	const dimensions = `\(r=3\ \mathrm{cm}\)　\(d=4\ \mathrm{cm}\)　`
+	const question = "将这两个圆按如图①所示放置，涂色部分的面积是（　）。"
+	prior := RecognizedQuestion{Subject: "数学", SourceNumberPath: []string{"1", "1"},
+		DisplayLabel: "1.（1）", AnswerState: AnswerStateBlank,
+		RawTranscription: intro + dimensions + "①　②\n" + question}
+	for _, tc := range []struct {
+		name, reading string
+		want          bool
+	}{
+		{"arrow", intro + dimensions + "→　①　②\n" + question, true},
+		{"double arrow", intro + dimensions + "⇒　①　②\n" + question, true},
+		{"changed radius", intro + strings.Replace(dimensions, "r=3", "r=5", 1) + "→　①　②\n" + question, false},
+		{"changed diagram", intro + dimensions + "→　①　②\n" + strings.Replace(question, "图①", "图②", 1), false},
+		{"changed marker order", intro + dimensions + "→　②　①\n" + question, false},
+		{"arrow in actual relation", prior.RawTranscription + "\nA→B", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			review := prior
+			review.RawTranscription = tc.reading
+			q, a := RecognitionSourceReadingsMatchForInitialReadMode(prior, review, k12.RecognitionLayoutManifestWithContentV1)
+			if q != tc.want || !a {
+				t.Fatalf("question=%v answer=%v want question=%v", q, a, tc.want)
+			}
+			review.EvidenceTranscriptions = []string{tc.reading, prior.RawTranscription}
+			if conflict := questionEvidenceTranscriptionsConflict(review); conflict == tc.want {
+				t.Fatalf("unexpected recognition conflict=%v", conflict)
+			}
+		})
+	}
+}
+
 func TestRecognitionMathWorkLineSourceComparisonPreservesMeaning(t *testing.T) {
 	const stem = "根据总容量是已用空间的（　）。\n列式："
 	for _, tc := range []struct {

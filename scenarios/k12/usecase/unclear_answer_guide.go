@@ -21,10 +21,6 @@ const unclearHandwritingReferenceWarning = "The handwriting could not be reliabl
 
 // 只在求解评估副本中移除学生作答风险；题干、父材料与缺损来源仍须独立可靠。
 func independentReferenceAnswerEligible(req PhotoGradeRequest, q RecognizedQuestion) bool {
-	if q.Subject == "数学" && (!referenceNumberMatches(q, q.RawTranscription) ||
-		slices.ContainsFunc(q.EvidenceTranscriptions, func(text string) bool { return !referenceNumberMatches(q, text) })) {
-		return false
-	}
 	if q.Subject == "语文" && q.ImageSourceContext != nil && q.ImageSourceContext.PrintedQuestionReceipt != nil {
 		// 批改中的参考解复用已持久核验的印刷证明，原作答与批改风险保持。
 		printed := cloneRecognizedQuestions([]RecognizedQuestion{q})[0]
@@ -36,6 +32,11 @@ func independentReferenceAnswerEligible(req PhotoGradeRequest, q RecognizedQuest
 		return false
 	}
 	printed := cloneRecognizedQuestions([]RecognizedQuestion{q})[0]
+	projectReferencePrintReadings(&printed)
+	if printed.Subject == "数学" && (!referenceNumberMatches(printed, printed.RawTranscription) ||
+		slices.ContainsFunc(printed.EvidenceTranscriptions, func(text string) bool { return !referenceNumberMatches(printed, text) })) {
+		return false
+	}
 	printed.AnswerState = AnswerStateBlank
 	printed.StudentAnswer, printed.AnswerRawTranscription, printed.AnswerCanonicalMarkdown = "", "", ""
 	printed.AnswerEvidenceTranscriptions = nil
@@ -72,6 +73,97 @@ func independentReferenceAnswerEligible(req PhotoGradeRequest, q RecognizedQuest
 		printed.ImageSourceContext.Action = "solve"
 	}
 	return !NormalizeRecognizedQuestionForInitialReadMode(printed, req.InitialReadMode).ConfirmationRequired
+}
+
+// 参考解比较的是当前小问。仅从比较副本移除同题冻结的、完整核实的共享材料，
+// 保留局部算式、单位和数字分界；模型求解仍接收原题及全部共享材料。
+func projectReferencePrintReadings(q *RecognizedQuestion) {
+	source := q.ImageSourceContext
+	if q.Subject != "数学" || len(q.SourceNumberPath) < 2 || source == nil ||
+		source.Version != k12.RecognitionImageScopeVersionV1 || source.ScopeDigest == "" || len(source.TargetIDs) != 1 {
+		return
+	}
+	parentheses := strings.NewReplacer("（", "(", "）", ")")
+	project := func(text string) string {
+		lines := strings.Split(strings.TrimSpace(text), "\n")
+		for _, material := range source.Materials {
+			if len(material.ForOrders) < 2 {
+				continue
+			}
+			frozen := strings.TrimSpace(material.Text)
+			unlabelled := stripReviewMaterialParentNumber(*q, frozen)
+			key := k12.RecognitionSourceComparisonV1(unlabelled)
+			var prefix strings.Builder
+			for i := 0; i+1 < len(lines) && prefix.Len() < len(key); i++ {
+				line := lines[i]
+				if i == 0 && unlabelled != frozen {
+					line = stripReviewMaterialParentNumber(*q, line)
+				}
+				prefix.WriteString(k12.RecognitionSourceComparisonV1(line))
+				if !strings.HasPrefix(key, prefix.String()) {
+					break
+				}
+				if prefix.Len() == len(key) {
+					reading := strings.Join(lines[:i+1], "\n")
+					if unlabelled != frozen {
+						reading = stripReviewMaterialParentNumber(*q, reading)
+					}
+					if k12.RecognitionSourceQuestionsEqualV1(reading, unlabelled) {
+						lines = lines[i+1:]
+					}
+				}
+			}
+		}
+		local := mathEmptyPrintedSlot.ReplaceAllString(parentheses.Replace(strings.Join(lines, "\n")), "()")
+		local = referenceTypesetWorkLine.ReplaceAllString(local, "$1")
+		return mathWorkLineSuffix.ReplaceAllString(local, "$1")
+	}
+	q.RawTranscription = project(q.RawTranscription)
+	for i, reading := range q.EvidenceTranscriptions {
+		q.EvidenceTranscriptions[i] = project(reading)
+	}
+}
+
+// 横线的排版宽度只在算式标签后的空作答区域有效，实际印出的尺寸、数字和算式照常比较。
+var referenceTypesetWorkLine = regexp.MustCompile(`((?:列式|算式)[：:])[ \t\x{3000}]*(?:\\\(\\underline\{\\hspace\{[0-9]+(?:\.[0-9]+)?(?:cm|mm|in|pt|em|ex)\}\}\\\))[ \t\x{3000}]*$`)
+
+// FrozenSharedBlankReadingsAgree 比较已独立核实完整作答区域的三次读数。
+// 只投影当前小问实际归属的共享材料，原题、学生作答和每份物理观察均保持原样。
+func FrozenSharedBlankReadingsAgree(plan k12.RecognitionLayoutPlanV2, target k12.RecognitionLayoutTargetV2, readings [3]RecognizedQuestion) bool {
+	if plan.Scope == nil || plan.AuthorizedPlanDigest == "" || target.TargetID == "" || len(target.SourceNumberPath) < 2 ||
+		slices.ContainsFunc(plan.Scope.Gaps, func(gap k12.RecognitionImageSourceGapV1) bool { return gap.Order == target.ManifestOrder }) {
+		return false
+	}
+	source := &k12.RecognitionImageSourceContextV1{
+		Version: k12.RecognitionImageScopeVersionV1, ScopeDigest: plan.AuthorizedPlanDigest, TargetIDs: []string{target.TargetID},
+	}
+	for _, dep := range plan.Scope.Dependencies {
+		if len(dep.ForOrders) >= 2 && slices.Contains(dep.ForOrders, target.ManifestOrder) {
+			source.Materials = append(source.Materials, dep)
+		}
+	}
+	if len(source.Materials) == 0 {
+		return false
+	}
+	var original string
+	for i, q := range readings {
+		if q.Subject != "数学" || !slices.Equal(q.SourceNumberPath, target.SourceNumberPath) || q.AnswerState != AnswerStateBlank ||
+			q.StudentAnswer != "" || q.AnswerRawTranscription != "" || q.AnswerCanonicalMarkdown != "" || len(q.OCRSignals) != 0 ||
+			q.RecognitionConfidence == nil || *q.RecognitionConfidence < ocrConfidenceConfirmationThreshold {
+			return false
+		}
+		q.ImageSourceContext, q.EvidenceTranscriptions = source, nil
+		projectReferencePrintReadings(&q)
+		if !referenceNumberMatches(q, q.RawTranscription) {
+			return false
+		}
+		if i == 0 {
+			original = q.RawTranscription
+		} else if !k12.RecognitionSourceQuestionsEqualV1(original, q.RawTranscription) {
+			return false
+		}
+	}
+	return true
 }
 
 // 只在参考解的副本统一已定位手写区的未知占位，不替换任何已识别的字词、数值或条件。
@@ -277,8 +369,7 @@ func (o *GradingOrchestrator) independentReferenceQuestion(ctx context.Context, 
 	if proof == nil && reviewWorksheet {
 		return o.referenceFromReviewedWorksheet(ctx, runtime, physicalCalls, q, targetIndex, "", "")
 	}
-	if proof == nil || proof.Stage != k12.GradingStageRecognizing || proof.Status != k12.ModelInvocationSucceeded || proof.ReusedFromPhysicalInvocationID != "" ||
-		proof.PlanDigest != plan.AuthorizedPlanDigest || proof.CandidateExactSetDigest != runtime.CandidateExactSetDigest || !validModelInvocationDigest(proof.RequestDigest) {
+	if !referenceAdjudicationMatchesTarget(proof, plan.AuthorizedPlanDigest, plan.Targets[targetIndex].TargetID) {
 		return printedReference{}, false, nil
 	}
 	payload, err := o.deps.Records.LoadSucceededModelPhysicalInvocationResultContent(ctx, job.Record.AgentName, proof.PhysicalInvocationID, proof.ResultDigest)
@@ -292,6 +383,16 @@ func (o *GradingOrchestrator) independentReferenceQuestion(ctx context.Context, 
 	}
 	question, eligible := independentReferenceFromAdjudication(req, q, payload)
 	return printedReference{question: question}, eligible, nil
+}
+
+// 裁决只授权当前一题，整页计划摘要与单题目标集合分别核对。
+func referenceAdjudicationMatchesTarget(proof *k12.ModelPhysicalInvocation, planDigest, targetID string) bool {
+	if proof == nil || proof.Stage != k12.GradingStageRecognizing || proof.Status != k12.ModelInvocationSucceeded ||
+		proof.ReusedFromPhysicalInvocationID != "" || proof.PlanDigest != planDigest || !validModelInvocationDigest(proof.RequestDigest) {
+		return false
+	}
+	digest, err := k12.RecognitionLayoutTargetExactSetDigestV2([]string{targetID})
+	return err == nil && proof.CandidateExactSetDigest == digest
 }
 
 // 只采用本题的印刷证据。标题、邻题及其它批次不参与当前题的准入。
@@ -344,7 +445,7 @@ func (o *GradingOrchestrator) referenceFromReviewedWorksheet(ctx context.Context
 			continue
 		}
 		if call.Status != k12.ModelInvocationSucceeded || call.ReusedFromPhysicalInvocationID != "" || !validModelInvocationDigest(call.RequestDigest) ||
-			(!first && (call.PlanDigest != plan.AuthorizedPlanDigest || call.CandidateExactSetDigest != runtime.CandidateExactSetDigest)) {
+			(!first && (call.PlanDigest != plan.AuthorizedPlanDigest || call.CandidateExactSetDigest != batch.ExactSetDigest)) {
 			return printedReference{}, false, nil
 		}
 		dest := &reviewed
@@ -565,6 +666,7 @@ var worksheetWritingMention = regexp.MustCompile(`(?i)手写|笔迹|笔画|填�
 var worksheetOccludedObject = regexp.MustCompile(`(?:盖住|遮住|覆盖|挡住|遮挡)(?:了|住)?(.+)$`)
 var worksheetObstruction = regexp.MustCompile(`盖住|遮住|覆盖|挡住|遮挡`)
 var worksheetKnownAnswerObject = regexp.MustCompile(`^(?:了)?(?:原有的|部分|该|这个)?(?:手写|笔迹|填字|作答|答案栏|答案框|方框|填空框|横线)`)
+var worksheetObscuredWritingNoun = regexp.MustCompile(`^的(?:手写(?:答案|作答|内容|数字)|笔迹|笔画|字迹|墨迹)$`)
 
 // 两种候选读数可以使用不同的数词写法。判断的是原文观察所指的对象，不能据此猜一个值。
 const worksheetNumerals = `\p{Nd}零〇两兩一二三四五六七八九十百千万萬亿億半`
@@ -762,6 +864,11 @@ func worksheetObscuresSource(clause string) bool {
 	if i := strings.IndexAny(clause, "被受"); i >= 0 && worksheetObstruction.MatchString(clause[i:]) {
 		// 被动句中，笔迹可能是遮挡物，归属取决于被遮挡的主语。
 		subject := clause[:i]
+		if obscured := worksheetOccludedObject.FindStringSubmatch(clause[i:]); obscured != nil &&
+			strings.Contains(subject, "有") && worksheetObscuredWritingNoun.MatchString(obscured[1]) {
+			// 在“有被遮挡的笔迹”这类定语结构中，被遮挡的对象是末尾名词。
+			return false
+		}
 		return !worksheetWritingMention.MatchString(subject) && !worksheetAnswerSlotLocation.MatchString(subject) && !strings.Contains(subject, "方框")
 	}
 	if m := worksheetOccludedObject.FindStringSubmatchIndex(clause); m != nil {
@@ -812,10 +919,29 @@ func independentReferenceFromAdjudication(req PhotoGradeRequest, q RecognizedQue
 	printed.EvidenceTranscriptions = append(printed.EvidenceTranscriptions, observed.QuestionRawTranscription)
 	printed.RecognitionConfidence = envelope.Items[0].Recognition.Confidence
 	printed.OCRSignals = envelope.Items[0].Recognition.OCRSignals
-	if len(source.Recoveries) > 0 {
-		if questionEvidenceTranscriptionsConflictForInitialReadMode(printed, req.InitialReadMode) {
+	if len(source.Recoveries) == 0 && observed.QuestionCompleteAndLegible && req.practiceReference == nil &&
+		q.ProblemKind == ProblemKindStandalone && len(q.SourceNumberPath) >= 2 && !q.parentSourceUnclear &&
+		q.RecognitionConfidence != nil && *q.RecognitionConfidence >= ocrConfidenceConfirmationThreshold &&
+		slices.ContainsFunc(source.Materials, func(m k12.RecognitionImageScopeDependencyV1) bool { return len(m.ForOrders) >= 2 }) {
+		// 独立裁决已确认本题印刷完整且学生作答不完整。只采用三次完整题面一致的证明；
+		// 明确涉及印刷事实的旧疑点仍须保留，笔迹和原始批改记录也不参与改写。
+		for _, prior := range q.OCRSignals {
+			if !worksheetWritingMention.MatchString(prior) || worksheetPrintedRisk.MatchString(prior) || disputedWorksheetQuantity([]string{prior}) {
+				return "", false
+			}
+		}
+		if !worksheetSignalsAllowReference(printed.OCRSignals, false) {
 			return "", false
 		}
+		projectReferencePrintReadings(&printed)
+		for _, reading := range printed.EvidenceTranscriptions {
+			if !k12.RecognitionSourceQuestionsEqualV1(printed.RawTranscription, reading) {
+				return "", false
+			}
+		}
+		return "", independentReferenceAnswerEligible(req, printed)
+	}
+	if len(source.Recoveries) > 0 {
 		if observed.QuestionCompleteAndLegible {
 			return "", independentReferenceAnswerEligible(req, printed)
 		}

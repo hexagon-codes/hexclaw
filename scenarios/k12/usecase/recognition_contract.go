@@ -215,6 +215,14 @@ func questionEvidenceTranscriptionsConflict(q RecognizedQuestion) bool {
 
 func questionEvidenceTranscriptionsConflictForInitialReadMode(q RecognizedQuestion, initialReadMode string) bool {
 	conflicts := func(raw string, values []string) bool {
+		if q.Subject == "数学" && len(q.SourceNumberPath) >= 2 {
+			raw = ignoreCircleDiagramLegendArrow(q, raw)
+			normalized := make([]string, len(values))
+			for i, value := range values {
+				normalized[i] = ignoreCircleDiagramLegendArrow(q, value)
+			}
+			values = normalized
+		}
 		if q.Subject == "数学" && scopedMaterialReadingsEquivalent(q, raw, values) {
 			return false
 		}
@@ -758,6 +766,8 @@ func RecognitionSourceReadingsMatchForInitialReadMode(prior, review RecognizedQu
 		// 空列式线只表示未填写区域；比较副本保留真实算式、下标和原始观察。
 		prior.RawTranscription = mathWorkLineSuffix.ReplaceAllString(strings.TrimSpace(prior.RawTranscription), "$1")
 		review.RawTranscription = mathWorkLineSuffix.ReplaceAllString(strings.TrimSpace(review.RawTranscription), "$1")
+		prior.RawTranscription = ignoreCircleDiagramLegendArrow(prior, prior.RawTranscription)
+		review.RawTranscription = ignoreCircleDiagramLegendArrow(review, review.RawTranscription)
 	}
 	question = strings.TrimSpace(prior.RawTranscription) != "" && strings.TrimSpace(review.RawTranscription) != "" &&
 		!evidenceTranscriptionsConflict(review.RawTranscription, []string{prior.RawTranscription, review.RawTranscription}, "")

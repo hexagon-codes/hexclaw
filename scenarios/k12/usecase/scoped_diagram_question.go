@@ -13,11 +13,38 @@ var diagramFigureReference = regexp.MustCompile(`(?:按如图|按照图|按图)(
 var diagramNamedDimension = regexp.MustCompile(`^([rRdD])\s*=\s*([0-9]+(?:\.[0-9]+)?)\s*(mm|cm|dm|km|m|毫米|厘米|分米|千米|米)$`)
 var diagramUnitTypesetting = regexp.MustCompile(`\\(?:mathrm|text)\s*\{\s*(mm|cm|dm|km|m)\s*\}`)
 
+var circleDiagramLegend = regexp.MustCompile(`^[rR]\s*=\s*[0-9]+(?:\.[0-9]+)?\s*(?:mm|cm|dm|km|m|毫米|厘米|分米|千米|米)[\s\p{Zs}]+[dD]\s*=\s*[0-9]+(?:\.[0-9]+)?\s*(?:mm|cm|dm|km|m|毫米|厘米|分米|千米|米)[\s\p{Zs}]*([→⇒])[\s\p{Zs}]*([①-⑳](?:[\s\p{Zs}]+[①-⑳])+)$`)
+
+// 尺寸行末指向整组图例的箭头属于排版。保留尺寸、标记顺序及子问引用。
+func ignoreCircleDiagramLegendArrow(q RecognizedQuestion, value string) string {
+	if q.Subject != "数学" || len(q.SourceNumberPath) < 2 {
+		return value
+	}
+	lines := strings.Split(value, "\n")
+	for i := 1; i+1 < len(lines); i++ {
+		if !strings.HasSuffix(strings.TrimSpace(lines[i-1]), "有大小两个圆。") {
+			continue
+		}
+		figure := diagramFigureReference.FindStringSubmatch(lines[i+1])
+		if figure == nil {
+			continue
+		}
+		plain := k12.RecognitionSourcePlainTextV1(lines[i])
+		plain = diagramUnitTypesetting.ReplaceAllString(strings.NewReplacer(`\,`, " ", `\ `, " ").Replace(plain), "$1")
+		legend := circleDiagramLegend.FindStringSubmatch(strings.TrimSpace(plain))
+		if legend != nil && strings.Contains(legend[2], figure[1]) {
+			lines[i] = strings.Replace(lines[i], legend[1], "", 1)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
 // 复核可能在当前子问前重述公共图上的尺寸。只消去同一范围内完整匹配的尺寸声明。
 func scopedDiagramQuestionText(q RecognizedQuestion, value string) string {
 	if len(q.SourceNumberPath) < 2 || q.ImageSourceContext == nil || len(q.ImageSourceContext.Materials) == 0 {
 		return value
 	}
+	value = ignoreCircleDiagramLegendArrow(q, value)
 	value = diagramUnitTypesetting.ReplaceAllString(strings.NewReplacer(`\,`, " ", `\ `, " ").Replace(value), "$1")
 	before, rest, ok := strings.Cut(value, "将")
 	figure := diagramFigureReference.FindStringSubmatch(rest)

@@ -214,6 +214,9 @@ func (a *RecognizerAdapter) recognizeLayoutAdjudicationV2(ctx context.Context, p
 	if verified && reviewed != nil && reviewed.question != nil {
 		qp, ap := usecase.RecognitionSourceReadingsMatchForInitialReadMode(comparison(*initial.question), comparison(*reviewed.question), plan.InitialReadMode)
 		qr, ar := usecase.RecognitionSourceReadingsMatchForInitialReadMode(comparison(*reread.question), comparison(*reviewed.question), plan.InitialReadMode)
+		if (!qp || !qr) && ap && ar && usecase.FrozenSharedBlankReadingsAgree(plan, target, [3]usecase.RecognizedQuestion{*initial.question, *reread.question, *reviewed.question}) {
+			qp, qr = true, true
+		}
 		settlement.MatchedQuestionPrior = matchedRecognitionPrior(qp, qr)
 		settlement.MatchedAnswerPrior = matchedRecognitionPrior(ap, ar)
 		settlement.Adopted = settlement.MatchedQuestionPrior != "" && settlement.MatchedAnswerPrior != ""
