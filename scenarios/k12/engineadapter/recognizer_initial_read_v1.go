@@ -194,7 +194,7 @@ func (a *RecognizerAdapter) recognizeLayoutInitialReadV1(ctx context.Context, so
 		}
 		var scope *k12.RecognitionImageScopeV1
 		if scopeInput != nil {
-			scope, err = k12.ParseRecognitionImageScopeV1(whole.Payload)
+			scope, err = k12.RecognitionImageScopeForInputV1(whole.Payload, scopeInput)
 			if err != nil || scope == nil {
 				return nil, fmt.Errorf("%w: image scope response is missing or invalid", k12.ErrRecognitionProtocolInvalid)
 			}

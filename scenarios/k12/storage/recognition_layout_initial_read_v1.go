@@ -158,7 +158,7 @@ func validateInitialReadSourceV1(ctx context.Context, q dbQueryer, owner, parent
 			return ErrModelPhysicalInvocationConflict
 		}
 		expectedObservations = len(plan.ObservedTargets)
-		scope, scopeErr := k12.ParseRecognitionImageScopeV1(content)
+		scope, scopeErr := k12.RecognitionImageScopeForInputV1(content, plan.ScopeInput)
 		a, _ := json.Marshal(scope)
 		b, _ := json.Marshal(plan.Scope)
 		if scopeErr != nil || !bytes.Equal(a, b) {

@@ -65,6 +65,74 @@ func TestRecognitionInitialReadCompactV1PreservesNonQuestionObservations(t *test
 	}
 }
 
+func TestInferredFullPageScopeRequiresUnambiguousNonQuestions(t *testing.T) {
+	raw, err := os.ReadFile("testdata/initial_read_compact_footer_v1.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := RecognitionImageScopeInputV1{Version: RecognitionImageScopeVersionV1, ExcludeObservedNonQuestions: true}
+	for _, tc := range []struct {
+		name       string
+		change     func(map[string]any, map[string]any, *RecognitionImageScopeInputV1)
+		wantFooter bool
+	}{
+		{name: "full page omits typed footer", wantFooter: true},
+		{name: "no prose or confidence required", change: func(_ map[string]any, footer map[string]any, _ *RecognitionImageScopeInputV1) {
+			footer["ownership"], footer["confidence"] = "", nil
+		}, wantFooter: true},
+		{name: "legacy snapshot", change: func(_ map[string]any, _ map[string]any, in *RecognitionImageScopeInputV1) {
+			in.ExcludeObservedNonQuestions = false
+		}},
+		{name: "explicit model selection", change: func(e map[string]any, _ map[string]any, _ *RecognitionImageScopeInputV1) {
+			e["scope"].(map[string]any)["source"] = "explicit"
+		}},
+		{name: "explicit user selection", change: func(_ map[string]any, _ map[string]any, in *RecognitionImageScopeInputV1) {
+			in.MessageIntent = "只选第12题"
+		}},
+		{name: "another actual question left out", change: func(e map[string]any, _ map[string]any, _ *RecognitionImageScopeInputV1) {
+			targets := e["targets"].([]any)
+			e["targets"] = append(targets, targets[0])
+		}},
+		{name: "missing kind", change: func(_ map[string]any, footer map[string]any, _ *RecognitionImageScopeInputV1) { delete(footer, "kind") }},
+		{name: "printed content in footer", change: func(_ map[string]any, footer map[string]any, _ *RecognitionImageScopeInputV1) {
+			footer["question"] = "有多少本？"
+		}},
+		{name: "student answer in footer", change: func(_ map[string]any, footer map[string]any, _ *RecognitionImageScopeInputV1) {
+			footer["student_answer"] = "24"
+		}},
+		{name: "uncertain ownership", change: func(_ map[string]any, footer map[string]any, _ *RecognitionImageScopeInputV1) {
+			footer["risks"] = []string{"uncertain ownership"}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := current
+			var e map[string]any
+			if err := json.Unmarshal(raw, &e); err != nil {
+				t.Fatal(err)
+			}
+			e["scope"].(map[string]any)["excluded"] = []any{}
+			if tc.change != nil {
+				tc.change(e, e["targets"].([]any)[1].(map[string]any), &in)
+			}
+			input, err := json.Marshal(e)
+			if err != nil {
+				t.Fatal(err)
+			}
+			scope, err := RecognitionImageScopeForInputV1(string(input), &in)
+			if err != nil || !reflect.DeepEqual(scope.SelectedOrders, []int{1}) {
+				t.Fatalf("existing scope projection changed: scope=%+v err=%v", scope, err)
+			}
+			want := []RecognitionImageScopeExclusionV1{}
+			if tc.wantFooter {
+				want = append(want, RecognitionImageScopeExclusionV1{Order: 2, Reason: "non_question"})
+			}
+			if !reflect.DeepEqual(want, scope.Excluded) {
+				t.Fatalf("excluded = %+v, want %+v", scope.Excluded, want)
+			}
+		})
+	}
+}
+
 func TestRecognitionInitialReadCompactV1PreservesSourceObservations(t *testing.T) {
 	raw, err := os.ReadFile("testdata/initial_read_compact_v1.json")
 	if err != nil {

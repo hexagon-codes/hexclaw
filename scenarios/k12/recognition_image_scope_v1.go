@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"reflect"
 	"slices"
 	"strings"
@@ -26,13 +27,14 @@ func RecognitionImageSourceUprightReviewEnabled(policy string) bool {
 
 // 范围输入随任务冻结；缺少版本的历史任务继续使用原有整页合同。
 type RecognitionImageScopeInputV1 struct {
-	Version                    string `json:"version"`
-	MessageIntent              string `json:"message_intent,omitempty"`
-	Action                     string `json:"action,omitempty"`
-	SourceReviewPolicy         string `json:"source_review_policy,omitempty"`
-	SourceComparisonPolicy     string `json:"source_comparison_policy,omitempty"`
-	IncludeSharedReviewRegions bool   `json:"include_shared_review_regions,omitempty"`
-	SharedReviewPolicy         string `json:"shared_review_policy,omitempty"`
+	Version                     string `json:"version"`
+	MessageIntent               string `json:"message_intent,omitempty"`
+	Action                      string `json:"action,omitempty"`
+	SourceReviewPolicy          string `json:"source_review_policy,omitempty"`
+	SourceComparisonPolicy      string `json:"source_comparison_policy,omitempty"`
+	IncludeSharedReviewRegions  bool   `json:"include_shared_review_regions,omitempty"`
+	SharedReviewPolicy          string `json:"shared_review_policy,omitempty"`
+	ExcludeObservedNonQuestions bool   `json:"exclude_observed_non_questions,omitempty"`
 }
 
 type RecognitionImageScopeDependencyV1 struct {
@@ -121,12 +123,18 @@ func RecognitionImageScopeInputFromContextV1(ctx context.Context) (RecognitionIm
 }
 
 func ParseRecognitionImageScopeV1(raw string) (*RecognitionImageScopeV1, error) {
+	return RecognitionImageScopeForInputV1(raw, nil)
+}
+
+// RecognitionImageScopeForInputV1 使用接纳时冻结的策略生成同一物理回包的执行范围。
+func RecognitionImageScopeForInputV1(raw string, input *RecognitionImageScopeInputV1) (*RecognitionImageScopeV1, error) {
 	start, end := strings.Index(raw, "{"), strings.LastIndex(raw, "}")
 	if start < 0 || end <= start {
 		return nil, fmt.Errorf("image scope envelope is missing")
 	}
 	var envelope map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(sanitizeInitialReadModelJSONV1(raw[start:end+1])), &envelope); err != nil {
+	payload := []byte(sanitizeInitialReadModelJSONV1(raw[start : end+1]))
+	if err := json.Unmarshal(payload, &envelope); err != nil {
 		return nil, err
 	}
 	data, exists := envelope["scope"]
@@ -146,7 +154,69 @@ func ParseRecognitionImageScopeV1(raw string) (*RecognitionImageScopeV1, error) 
 	if len(scope.Gaps) == 0 {
 		scope.Gaps = nil
 	}
+	if input != nil && input.Version == RecognitionImageScopeVersionV1 && input.ExcludeObservedNonQuestions &&
+		strings.TrimSpace(input.MessageIntent) == "" && scope.Source == "inferred" && len(scope.Excluded) == 0 {
+		if excluded := inferredNonQuestionExclusions(payload, envelope, scope.SelectedOrders); len(excluded) > 0 {
+			scope.Excluded = excluded
+		}
+	}
 	return &scope, nil
+}
+
+// 仅当每个选中目标都是题、每个遗漏目标都是无题号且无作答事实的装饰项时补全范围。
+// 任一项归属不明即保留原范围，由正常的完整性校验返回错误。
+func inferredNonQuestionExclusions(rawEnvelope json.RawMessage, envelope map[string]json.RawMessage, selected []int) []RecognitionImageScopeExclusionV1 {
+	var format string
+	var targets []json.RawMessage
+	if json.Unmarshal(envelope["format"], &format) != nil || format != RecognitionLayoutInitialReadCompactFormatV1 ||
+		json.Unmarshal(envelope["targets"], &targets) != nil || len(targets) <= len(selected) || len(targets) > recognitionLayoutTargetLimitV2 {
+		return nil
+	}
+	var scopeFields map[string]json.RawMessage
+	if _, err := recognitionFinalAnswerObjectV1(rawEnvelope, slices.Collect(maps.Keys(envelope))); err != nil ||
+		json.Unmarshal(envelope["scope"], &scopeFields) != nil {
+		return nil
+	}
+	var declared []RecognitionImageScopeExclusionV1
+	if _, err := recognitionFinalAnswerObjectV1(envelope["scope"], slices.Collect(maps.Keys(scopeFields))); err != nil ||
+		json.Unmarshal(scopeFields["excluded"], &declared) != nil || declared == nil || len(declared) != 0 {
+		return nil
+	}
+	included := make([]bool, len(targets))
+	for _, order := range selected {
+		if order < 1 || order > len(targets) || included[order-1] {
+			return nil
+		}
+		included[order-1] = true
+	}
+	var excluded []RecognitionImageScopeExclusionV1
+	for index, raw := range targets {
+		fields, err := recognitionFinalAnswerObjectV1(raw, initialReadCompactTargetFieldsV1)
+		var target struct {
+			Kind, Label   string
+			Number, Risks []string
+			Confidence    *float64
+		}
+		if err != nil || json.Unmarshal(raw, &target) != nil {
+			return nil
+		}
+		if included[index] {
+			if target.Kind != "question" {
+				return nil
+			}
+			continue
+		}
+		if target.Kind != "non_question" || len(target.Number) != 0 || target.Label != "" || len(target.Risks) != 0 ||
+			target.Confidence != nil && *target.Confidence < 0.90 {
+			return nil
+		}
+		// 不提供 section 或 shared 可引用对象；既有解码器同时验证题干、作答和框均为 null。
+		if _, err := expandRecognitionInitialReadCompactTargetV1(fields, index, nil, nil); err != nil {
+			return nil
+		}
+		excluded = append(excluded, RecognitionImageScopeExclusionV1{Order: index + 1, Reason: target.Kind})
+	}
+	return excluded
 }
 
 // 全部观察与原响应逐项对照；选中精确集合不能代替原始候选完整性。

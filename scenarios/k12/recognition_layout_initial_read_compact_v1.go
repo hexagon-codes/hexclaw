@@ -9,6 +9,8 @@ import (
 
 const RecognitionLayoutInitialReadCompactFormatV1 = "initial_read_compact_v1"
 
+var initialReadCompactTargetFieldsV1 = []string{"number", "label", "section", "shared", "region", "kind", "question", "subject", "answer_state", "student_answer", "confidence", "risks", "answer_bbox", "ownership"}
+
 type recognitionInitialReadCompactSectionV1 struct {
 	Path  []string
 	Label string
@@ -88,7 +90,7 @@ func expandRecognitionInitialReadCompactTargetV1(
 	target map[string]json.RawMessage, index int,
 	sections []recognitionInitialReadCompactSectionV1, conditions []string,
 ) (json.RawMessage, error) {
-	if !initialReadCompactExactFieldsV1(target, "number", "label", "section", "shared", "region", "kind", "question", "subject", "answer_state", "student_answer", "confidence", "risks", "answer_bbox", "ownership") {
+	if !initialReadCompactExactFieldsV1(target, initialReadCompactTargetFieldsV1...) {
 		return nil, fmt.Errorf("target fields are invalid")
 	}
 	var number []string
