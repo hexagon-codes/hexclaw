@@ -7,6 +7,9 @@ info:
 
 
     安装包与标签使用其对应源码和文档。规范校验不代表全部接口已做业务验收；异步接纳、运行、冻结结果和投递须按接口各自的状态及产物判断。
+
+
+    从 v0.4.9 升级的 Go 调用方请移除旧 `hexclaw/runtime` 包及 `engine.ToolApprovalGate`、`engine.BuildQuestionConfirmPayload` 等入口，使用本文件声明的服务接口；变更见 CHANGELOG.md。
   version: 0.5.2
 servers:
   - url: http://127.0.0.1:16060
