@@ -3,6 +3,7 @@ package dingtalk
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -54,6 +55,31 @@ func (p *inboundPhotoAdmissionProbe) captured() []*adapter.Message {
 func TestDingTalkInboundPhotoAdmissionPortCanBeInstalled(t *testing.T) {
 	a := newTestAdapter()
 	a.SetInboundPhotoAdmissionPort(&inboundPhotoAdmissionProbe{})
+}
+
+func TestDingTalkPhotoCreationTimeOnlyMeasuresPlatformMilliseconds(t *testing.T) {
+	received := time.UnixMilli(1_795_400_000_050)
+	for _, tc := range []struct {
+		name string
+		wire string
+		want int64
+	}{
+		{"created", `{"createAt":1795400000007}`, 1_795_400_000_007},
+		{"missing", `{}`, 0},
+		{"seconds", `{"createAt":1795400000}`, 0},
+		{"future", `{"createAt":1795400000051}`, 0},
+		{"unrecognized", `{"createAt":{"s":1795400000}}`, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var event dtEvent
+			if err := json.Unmarshal([]byte(tc.wire), &event); err != nil {
+				t.Fatal(err)
+			}
+			if got := event.photoCreatedMillis(received); got != tc.want {
+				t.Errorf("platform timestamp = %d, want %d", got, tc.want)
+			}
+		})
+	}
 }
 
 func TestDingTalkStreamACKWaitsForDurablePhotoAdmissionAndSkipsLegacyWorker(t *testing.T) {

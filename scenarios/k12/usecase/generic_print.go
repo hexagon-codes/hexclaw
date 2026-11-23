@@ -9,14 +9,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/hexagon-codes/toolkit/util/logger"
+	"log/slog"
 	"mime"
 	"strings"
+	"time"
 
 	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/render"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
+	"github.com/hexagon-codes/toolkit/util/logger"
 )
 
 const printPDFRenderContractVersion = "k12-pdf-v2"
@@ -736,7 +738,14 @@ func (d Deps) PrepareGradingFinalArtifactPDF(
 func (d Deps) PrepareGradingFinalArtifactPDFExact(
 	ctx context.Context,
 	agentName, finalArtifactID, expectedDigest, title string,
-) (PrintableArtifactView, bool, error) {
+) (view PrintableArtifactView, replay bool, err error) {
+	started := time.Now()
+	defer func() {
+		artifactRef := sha256.Sum256([]byte(strings.TrimSpace(finalArtifactID)))
+		slog.Info("K12 final artifact PDF preparation finished",
+			"final_artifact_ref", hex.EncodeToString(artifactRef[:]), "replayed", replay,
+			"ready", err == nil, "started_at_ms", started.UnixMilli(), "elapsed_ms", time.Since(started).Milliseconds())
+	}()
 	finalArtifact, err := d.getExactGradingFinalArtifact(
 		ctx, agentName, finalArtifactID, expectedDigest,
 	)

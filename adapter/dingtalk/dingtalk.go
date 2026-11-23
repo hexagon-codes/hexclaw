@@ -19,11 +19,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"mime/multipart"
 	"net/http"
 	"net/url"
 	"os"
 	"path"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1177,6 +1179,7 @@ func (a *DingtalkAdapter) onChatBotMessage(ctx context.Context, data *dtchatbot.
 	}
 	event := dtEvent{
 		MsgID:            data.MsgId,
+		CreateAt:         strconv.AppendInt(nil, data.CreateAt, 10),
 		ConversationId:   data.ConversationId,
 		ConversationType: data.ConversationType,
 		SenderStaffId:    data.SenderStaffId,
@@ -2242,6 +2245,13 @@ func (a *DingtalkAdapter) admitInboundPhotoBeforeACK(
 	if len(codes) == 0 {
 		codes = []string{event.Content.DownloadCode}
 	}
+	receivedAt := time.Now()
+	slog.Info("DingTalk inbound photo received",
+		"source_instance_ref", dingtalkIdentityHash(a.Name()),
+		"chat_ref", dingtalkIdentityHash(event.SenderStaffId),
+		"provider_message_ref", dingtalkIdentityHash(event.MsgID),
+		"received_at_ms", receivedAt.UnixMilli(),
+		"platform_created_at_ms", event.photoCreatedMillis(receivedAt), "pages", len(codes))
 	attachments := make([]adapter.Attachment, 0, len(codes))
 	for _, code := range codes {
 		attachment, err := a.downloadPictureAttachment(ctx, code)
@@ -2595,11 +2605,12 @@ func (a *DingtalkAdapter) Health(_ context.Context) error {
 
 // dtEvent 钉钉消息事件
 type dtEvent struct {
-	MsgID            string `json:"msgId"`
-	ConversationId   string `json:"conversationId"`
-	ConversationType string `json:"conversationType"`
-	SenderStaffId    string `json:"senderStaffId"`
-	SenderNick       string `json:"senderNick"`
+	MsgID            string          `json:"msgId"`
+	CreateAt         json.RawMessage `json:"createAt,omitempty"`
+	ConversationId   string          `json:"conversationId"`
+	ConversationType string          `json:"conversationType"`
+	SenderStaffId    string          `json:"senderStaffId"`
+	SenderNick       string          `json:"senderNick"`
 	Text             struct {
 		Content    string `json:"content"`
 		IsReplyMsg bool   `json:"isReplyMsg"`
@@ -2622,6 +2633,15 @@ type dtEvent struct {
 	} `json:"content"`
 	Attachments          []adapter.Attachment `json:"-"`
 	PictureDownloadCodes []string             `json:"-"`
+}
+
+// photoCreatedMillis 仅观测平台毫秒时间；缺失、单位不符或时钟超前均不参与用户端耗时。
+func (event dtEvent) photoCreatedMillis(received time.Time) int64 {
+	ms, err := strconv.ParseInt(string(event.CreateAt), 10, 64)
+	if err != nil || ms < 1_000_000_000_000 || ms > received.UnixMilli() {
+		return 0
+	}
+	return ms
 }
 
 // normalizeRichText 将明确的图片节点投影到既有图片接纳路径，正文和消息身份保持独立。

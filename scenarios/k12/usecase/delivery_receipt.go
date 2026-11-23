@@ -750,7 +750,7 @@ func (d Deps) prepareDeliveryBatchResources(
 				current, getErr := d.GetDeliveryBatch(ctx, batch.AgentName, batch.BatchID)
 				return current, errors.Join(getErr, errors.New("PDF preparation is already in progress or unknown"))
 			}
-			resourceID, prepareErr := preparer.PrepareDeliveryPartResource(ctx, receipt)
+			resourceID, prepareErr := prepareDeliveryPartResource(ctx, preparer, receipt)
 			resourceID = strings.TrimSpace(resourceID)
 			if prepareErr != nil || resourceID == "" {
 				var outcome interface{ ResourcePreparationKnown() bool }
@@ -793,15 +793,7 @@ func (d Deps) prepareDeliveryBatchResources(
 			failures = append(failures, fmt.Sprintf("part %d media preparation is unavailable", receipt.BatchOrdinal))
 			continue
 		}
-		resourceStartedAt := time.Now()
-		slog.Info("K12 delivery resource preparation started", "agent_id", receipt.AgentName,
-			"batch_id", batch.BatchID, "delivery_id", receipt.DeliveryID, "part_kind", receipt.PartKind,
-			"platform", receipt.Target.Platform, "instance_id", receipt.Target.InstanceID)
-		resourceID, err := preparer.PrepareDeliveryPartResource(ctx, receipt)
-		slog.Info("K12 delivery resource preparation finished", "agent_id", receipt.AgentName,
-			"batch_id", batch.BatchID, "delivery_id", receipt.DeliveryID,
-			"resource_available", strings.TrimSpace(resourceID) != "",
-			"elapsed_ms", time.Since(resourceStartedAt).Milliseconds(), "error", err)
+		resourceID, err := prepareDeliveryPartResource(ctx, preparer, receipt)
 		resourceID = strings.TrimSpace(resourceID)
 		if err != nil || resourceID == "" {
 			detail := "media preparation returned no resource id"
@@ -831,6 +823,20 @@ func (d Deps) prepareDeliveryBatchResources(
 		return current, errors.New(detail)
 	}
 	return current, nil
+}
+
+// 两种批次在实际调用渠道上传端口时计时，复用冻结媒体不会产生上传样本。
+func prepareDeliveryPartResource(ctx context.Context, preparer DeliveryPartResourcePreparer, receipt k12.DeliveryReceipt) (string, error) {
+	started := time.Now()
+	slog.Info("K12 delivery resource preparation started", "agent_id", receipt.AgentName,
+		"batch_id", receipt.BatchID, "delivery_id", receipt.DeliveryID, "part_kind", receipt.PartKind,
+		"platform", receipt.Target.Platform, "instance_id", receipt.Target.InstanceID)
+	resource, err := preparer.PrepareDeliveryPartResource(ctx, receipt)
+	slog.Info("K12 delivery resource preparation finished", "agent_id", receipt.AgentName,
+		"batch_id", receipt.BatchID, "delivery_id", receipt.DeliveryID, "part_mime", receipt.PartMIME,
+		"resource_available", strings.TrimSpace(resource) != "",
+		"elapsed_ms", time.Since(started).Milliseconds(), "error", err)
+	return resource, err
 }
 
 func isK12PDFReplyBatch(batch k12.DeliveryBatch) bool {
@@ -1711,6 +1717,8 @@ func (d Deps) sendPreparedDelivery(ctx context.Context, receipt k12.DeliveryRece
 		"delivery_id", receipt.DeliveryID)
 	ack, sendErr := d.Delivery.SendPrepared(ctx, started)
 	slog.Info("K12 delivery part provider finished", "agent_id", receipt.AgentName,
+		"batch_id", receipt.BatchID, "part_kind", receipt.PartKind, "part_mime", receipt.PartMIME,
+		"observed_at_ms", time.Now().UnixMilli(), "request_ok", sendErr == nil,
 		"delivery_id", receipt.DeliveryID, "elapsed_ms", time.Since(providerStartedAt).Milliseconds(),
 		"status", ack.Status, "external_message_id", ack.ExternalMessageID, "detail", ack.Detail, "error", sendErr)
 	return d.persistDeliverySendOutcome(context.WithoutCancel(ctx), started, ack, sendErr)
@@ -1802,6 +1810,8 @@ func (d Deps) QueryDeliveryReceipt(ctx context.Context, agentName, deliveryID st
 		"delivery_id", receipt.DeliveryID, "external_message_id", receipt.ExternalMessageID)
 	ack, queryErr := d.Delivery.QueryPrepared(ctx, receipt)
 	slog.Info("K12 delivery part query finished", "agent_id", receipt.AgentName,
+		"batch_id", receipt.BatchID, "part_kind", receipt.PartKind, "part_mime", receipt.PartMIME,
+		"observed_at_ms", time.Now().UnixMilli(), "request_ok", queryErr == nil,
 		"delivery_id", receipt.DeliveryID, "elapsed_ms", time.Since(queryStartedAt).Milliseconds(),
 		"status", ack.Status, "external_message_id", ack.ExternalMessageID, "detail", ack.Detail, "error", queryErr)
 	if ack.ExternalMessageID == "" {

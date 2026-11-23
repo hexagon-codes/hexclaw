@@ -268,7 +268,7 @@ func (r *k12DingtalkPhotoInboundRuntime) AdmitInboundPhoto(
 		}
 		pages[0].AssetName = existing.Asset.Name
 		pages[0].AssetMIME = existing.Asset.MIME
-		return r.admitPhotoPages(ctx, pages, existing.Receipt, startedAt)
+		return r.admitPhotoPages(ctx, pages, existing.Receipt, originalMessage.InstanceID, startedAt)
 	}
 	if !errors.Is(resumeErr, records.ErrNotFound) {
 		return false, resumeErr
@@ -328,11 +328,12 @@ func (r *k12DingtalkPhotoInboundRuntime) AdmitInboundPhoto(
 		OwnerScope: k12usecase.DefaultLocalOwnerScope,
 		AgentName:  routed.AgentName, BindingID: stableBindingID(*routed.Rule),
 		Identity: identity, CommandJSON: string(commandJSON),
-	}, startedAt)
+	}, originalMessage.InstanceID, startedAt)
 }
 
 func (r *k12DingtalkPhotoInboundRuntime) admitPhotoPages(
-	ctx context.Context, pages []k12usecase.InboundPhotoAdmission, receipt k12usecase.InboundPhotoReceipt, startedAt time.Time,
+	ctx context.Context, pages []k12usecase.InboundPhotoAdmission, receipt k12usecase.InboundPhotoReceipt,
+	sourceInstanceID string, startedAt time.Time,
 ) (bool, error) {
 	for i := range pages {
 		pages[i].OwnerScope, pages[i].AgentName = receipt.OwnerScope, receipt.AgentName
@@ -340,10 +341,11 @@ func (r *k12DingtalkPhotoInboundRuntime) admitPhotoPages(
 		pages[i].CommandJSON = receipt.CommandJSON
 	}
 	var bundles []k12usecase.InboundPhotoBundle
+	var created bool
 	var err error
 	if len(pages) == 1 {
 		var bundle k12usecase.InboundPhotoBundle
-		bundle, _, err = r.inbound.Admit(ctx, pages[0])
+		bundle, created, err = r.inbound.Admit(ctx, pages[0])
 		bundles = []k12usecase.InboundPhotoBundle{bundle}
 	} else {
 		group, ok := r.inbound.(interface {
@@ -352,7 +354,7 @@ func (r *k12DingtalkPhotoInboundRuntime) admitPhotoPages(
 		if !ok {
 			return false, errors.New("DingTalk multi-page photo admission is unavailable")
 		}
-		bundles, _, err = group.AdmitPages(ctx, pages)
+		bundles, created, err = group.AdmitPages(ctx, pages)
 	}
 	if err != nil {
 		return false, err
@@ -362,9 +364,13 @@ func (r *k12DingtalkPhotoInboundRuntime) admitPhotoPages(
 	}
 	for _, bundle := range bundles {
 		slog.Info("K12 DingTalk inbound photo admitted", "stage", "admitted",
+			"source_instance_ref", k12DingtalkPhotoRestartCheckpointValueDigest(sourceInstanceID),
+			"chat_ref", k12DingtalkPhotoRestartCheckpointValueDigest(bundle.Receipt.Identity.ChatID),
+			"provider_message_ref", k12DingtalkPhotoRestartCheckpointValueDigest(bundle.Receipt.Identity.ProviderMessageID),
 			"agent_ref", k12DingtalkPhotoRestartCheckpointValueDigest(bundle.Receipt.AgentName),
 			"receipt_ref", k12DingtalkPhotoRestartCheckpointValueDigest(bundle.Receipt.ReceiptID),
-			"resumed", receipt.ReceiptID != "", "pages", len(bundles), "elapsed_ms", time.Since(startedAt).Milliseconds())
+			"resumed", !created, "page_index", bundle.Receipt.Identity.PageIndex,
+			"pages", len(bundles), "admitted_at_ms", time.Now().UnixMilli(), "elapsed_ms", time.Since(startedAt).Milliseconds())
 		r.schedule(bundle.Receipt.AgentName, bundle.Receipt.ReceiptID)
 	}
 	return true, nil
@@ -1234,12 +1240,18 @@ func (r *k12DingtalkPhotoInboundRuntime) finishDeliveredPhotoReply(
 	); err != nil {
 		return false, err
 	}
+	// 已送达子回执的时间由首次终态写入；重启后的收尾和撤回提示不重置计时。
+	var confirmedAt int64
+	for _, part := range batch.Receipts {
+		confirmedAt = max(confirmedAt, part.UpdatedAt)
+	}
 	slog.Info("K12 DingTalk inbound photo reply delivered",
 		"stage", "reply_delivered",
 		"agent_ref", k12DingtalkPhotoRestartCheckpointValueDigest(bundle.Receipt.AgentName),
 		"receipt_ref", k12DingtalkPhotoRestartCheckpointValueDigest(bundle.Receipt.ReceiptID),
 		"delivery_batch_ref", k12DingtalkPhotoRestartCheckpointValueDigest(bundle.Dispatch.DeliveryBatchID),
 		"delivery_status", batch.Status,
+		"last_part_confirmed_unix", confirmedAt,
 		"part_count", len(batch.Receipts),
 	)
 	return true, nil
