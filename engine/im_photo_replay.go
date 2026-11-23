@@ -38,13 +38,18 @@ func (e *ReActEngine) ReplayCompletedIMPhotoReply(ctx context.Context, msg *adap
 	if err != nil || len(records) == 0 {
 		return nil, err
 	}
-	if len(records) != 1 || records[0].ID != canonicalAssistantMessageID(msg) {
+	if len(records) != 1 {
 		return nil, errors.New("ambiguous IM photo assistant reply identity")
 	}
+	record := records[0]
+	if record == nil || record.Role != "assistant" || record.RequestID != requestID || record.ID != canonicalAssistantMessageID(msg) ||
+		record.SessionID == "" || (scope.ID != "" && record.SessionID != scope.ID) {
+		return nil, errors.New("invalid IM photo assistant reply identity")
+	}
 	original := *msg
-	original.SessionID = records[0].SessionID
+	original.SessionID = record.SessionID
 	original.Metadata = maps.Clone(msg.Metadata)
-	replay, err := e.restoreDurableAssistantRecord(ctx, &original, records[0], false, true)
+	replay, err := e.restoreDurableAssistantRecord(ctx, &original, record, false, true)
 	if err != nil {
 		return nil, err
 	}

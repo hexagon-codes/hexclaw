@@ -5554,7 +5554,7 @@ func (e *ReActEngine) restoreDurableAssistantRecord(ctx context.Context, msg *ad
 	if terminal != nil && terminal.TerminalStatus != adapter.RuntimeTerminalCompleted {
 		return nil, fmt.Errorf("durable assistant reply terminal is not completed")
 	}
-	if requireRuntimeTerminal && terminal == nil {
+	if terminal == nil && (requireRuntimeTerminal || imPhoto && (len(persisted.RuntimeEvents) > 0 || persisted.LastSequence > 0)) {
 		return nil, fmt.Errorf("durable assistant reply terminal is incomplete")
 	}
 	// 回放恢复原终稿的 Agent，原生入站不需要再次携带路由派生字段。

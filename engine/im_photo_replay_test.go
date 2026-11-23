@@ -119,3 +119,43 @@ func TestIMPhotoReplayRestoresOriginalScopedSessionAndDocument(t *testing.T) {
 		t.Fatal("a changed document was silently dropped or delivered")
 	}
 }
+
+func TestIMPhotoReplayUnfinishedRequestDoesNotRunOrCreateSession(t *testing.T) {
+	store, err := sqlitefixture.New(filepath.Join(t.TempDir(), "unfinished.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	eng := &ReActEngine{store: store}
+	ctx := adapter.WithPlatformInstanceIdentity(t.Context(), "physical", "dingtalk")
+	msg := adapter.Message{ID: "unknown", Platform: adapter.PlatformDingtalk, InstanceID: "physical", UserID: "parent", ChatID: "parent",
+		Metadata: map[string]string{"request_id": storage.IMRequestIDForEvent("dingtalk", "physical", "unknown")}}
+	if reply, err := eng.ReplayCompletedIMPhotoReply(ctx, &msg); err != nil || reply != nil || msg.SessionID != "" {
+		t.Fatalf("unobserved request was replayed: %v, %v", reply, err)
+	}
+	scoped, err := store.ListSessions(ctx, msg.UserID, 1, 0)
+	if err != nil || len(scoped) != 0 {
+		t.Fatal("looking up an unknown request created a session")
+	}
+	if err := store.CreateSession(ctx, &storage.Session{ID: "partial", UserID: msg.UserID, Platform: "dingtalk", InstanceID: msg.InstanceID, ChatID: msg.ChatID}); err != nil {
+		t.Fatal(err)
+	}
+	for _, status := range []string{"failed", "cancelled", "missing"} {
+		msg.ID = status
+		requestID := storage.IMRequestIDForEvent("dingtalk", "physical", msg.ID)
+		msg.Metadata["request_id"] = requestID
+		metadata := `{"last_sequence":1}`
+		if status != "missing" {
+			events := []adapter.SequencedRuntimeEvent{{Sequence: 1, Event: adapter.RuntimeEvent{Kind: adapter.RuntimeEventTerminal, TerminalStatus: adapter.RuntimeTerminalStatus(status)}}}
+			raw, _ := json.Marshal(map[string]any{"runtime_events": events})
+			metadata = string(raw)
+		}
+		if err := store.SaveMessage(ctx, &storage.MessageRecord{ID: canonicalAssistantMessageID(&msg), SessionID: "partial", Role: "assistant", RequestID: requestID,
+			Content: "模型中间输出", Metadata: metadata}); err != nil {
+			t.Fatal(err)
+		}
+		if reply, err := eng.ReplayCompletedIMPhotoReply(ctx, &msg); reply != nil || err == nil || msg.SessionID != "" {
+			t.Fatalf("%s assistant result accepted as complete", status)
+		}
+	}
+}
