@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 
 	"github.com/hexagon-codes/toolkit/util/idgen"
@@ -202,7 +203,7 @@ func (s *Store) PrepareImageTaskDispatch(
 	if invocation.AgentName != dispatch.AgentName ||
 		invocation.DispatchID != dispatch.DispatchID ||
 		invocation.InvocationID != dispatch.ClassificationInvocationID ||
-		invocation.RouteSnapshot != dispatch.ClassificationRouteSnapshot {
+		!reflect.DeepEqual(invocation.RouteSnapshot, dispatch.ClassificationRouteSnapshot) {
 		return k12.ImageTaskDispatch{}, false, fmt.Errorf("%w: classification invocation 与 dispatch 不一致", ErrImageTaskConflict)
 	}
 	if err := ensureAgentRegistered(ctx, s.db, dispatch.AgentName); err != nil {
@@ -302,8 +303,8 @@ func (s *Store) PrepareImageTaskDispatch(
 		if stored.RequestDigest != dispatch.RequestDigest ||
 			stored.SourceDigest != dispatch.SourceDigest ||
 			stored.AttemptGeneration != dispatch.AttemptGeneration ||
-			stored.ClassificationRouteSnapshot != dispatch.ClassificationRouteSnapshot ||
-			stored.RoutePolicySnapshot != dispatch.RoutePolicySnapshot {
+			!reflect.DeepEqual(stored.ClassificationRouteSnapshot, dispatch.ClassificationRouteSnapshot) ||
+			!reflect.DeepEqual(stored.RoutePolicySnapshot, dispatch.RoutePolicySnapshot) {
 			return k12.ImageTaskDispatch{}, false, fmt.Errorf("%w: idempotency key %q already bound to another input/route",
 				ErrImageTaskConflict, dispatch.IdempotencyKey)
 		}

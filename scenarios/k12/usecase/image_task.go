@@ -357,6 +357,7 @@ func normalizeCreateImageTaskInput(in CreateImageTaskInput) (CreateImageTaskInpu
 	default:
 		return in, fmt.Errorf("%w: source_kind 非法", ErrInvalidInput)
 	}
+	in.SourceAssetRefs = slices.Clone(in.SourceAssetRefs)
 	for i := range in.SourceAssetRefs {
 		in.SourceAssetRefs[i] = strings.TrimSpace(in.SourceAssetRefs[i])
 		if in.SourceAssetRefs[i] == "" {
@@ -464,11 +465,8 @@ func (c *ImageTaskCoordinator) CreateMany(
 		}
 		return []CreatedImageTask{{View: view, Created: created}}, -1, nil
 	}
-	// 旧版整组接纳的请求只能查询原记录，不能拆成新命令重发未知调用。
-	legacyKey := fmt.Sprintf("%s:%s:g%d", in.SourceKind, in.SourceRef, in.AttemptGeneration)
-	if _, err := c.Records.GetImageTaskDispatchByIdempotency(ctx, in.AgentName, legacyKey); err == nil {
-		return nil, 0, k12storage.ErrImageTaskConflict
-	} else if !errors.Is(err, k12storage.ErrImageTaskNotFound) {
+	command, err := c.imageTaskSourceCommand(ctx, in)
+	if err != nil {
 		return nil, 0, err
 	}
 	// 在创建或启动任何一页之前核对整组资产，避免后一页无效时先处理前页。
@@ -484,9 +482,9 @@ func (c *ImageTaskCoordinator) CreateMany(
 	accepted := make([]CreatedImageTask, 0, len(in.SourceAssetRefs))
 	for index, ref := range in.SourceAssetRefs {
 		page := in
-		page.SourceRef = fmt.Sprintf("%s:image:%d", in.SourceRef, index+1)
+		page.SourceRef = imageTaskPageRef(in.SourceRef, index)
 		page.SourceAssetRefs = []string{ref}
-		view, created, err := c.Create(ctx, page)
+		view, created, err := c.createImageTaskPage(ctx, page, command, index)
 		if err != nil {
 			return accepted, index, err
 		}
@@ -512,6 +510,14 @@ func (c *ImageTaskCoordinator) Create(
 	if len(in.SourceAssetRefs) != 1 {
 		return ImageTaskView{}, false, fmt.Errorf("%w: one image is required for each task", ErrInvalidInput)
 	}
+	command, err := c.imageTaskSourceCommand(ctx, in)
+	if err != nil {
+		return ImageTaskView{}, false, err
+	}
+	return c.createImageTaskPage(ctx, in, command, 0)
+}
+
+func (c *ImageTaskCoordinator) createImageTaskPage(ctx context.Context, in CreateImageTaskInput, command imageTaskSourceCommand, page int) (ImageTaskView, bool, error) {
 	if (in.CreativeEntry == nil || in.CreativeEntry.TaskIntent == k12.ImageTaskIntentUnknown) && (c.Classifier == nil || c.ResolveRoute == nil) {
 		return ImageTaskView{}, false, fmt.Errorf("usecase: image task classifier/route resolver 未配置")
 	}
@@ -530,20 +536,17 @@ func (c *ImageTaskCoordinator) Create(
 			)
 		}
 	}
-	idempotencyKey := fmt.Sprintf("%s:%s:g%d", in.SourceKind, in.SourceRef, in.AttemptGeneration)
+	idempotencyKey := command.pageKey(in, page)
 	existing, lookupErr := c.Records.GetImageTaskDispatchByIdempotency(
 		ctx, in.AgentName, idempotencyKey,
 	)
 	if lookupErr == nil {
-		if existing.LearnerID != in.LearnerID ||
-			existing.SourceKind != in.SourceKind ||
-			existing.SourceRef != in.SourceRef ||
-			existing.SourceSessionID != in.SourceSessionID ||
-			!slices.Equal(existing.SourceAssetRefs, in.SourceAssetRefs) ||
-			existing.MessageIntent != in.MessageIntent ||
-			existing.AttemptGeneration != in.AttemptGeneration ||
-			!sameCreativeEntry(existing.CreativeEntry, in.CreativeEntry) ||
-			!sameCreateImageTaskRouteRequest(existing, in) {
+		// 同时首建时，组身份必须在最新一次查得的根回执上再次核对。
+		if !command.legacyPages && command.pageCount > 1 &&
+			existing.RequestDigest != imageTaskPageRequestDigest(existing, command.orderedDigest) {
+			return ImageTaskView{}, false, k12storage.ErrImageTaskConflict
+		}
+		if !sameImageTaskCreateInput(existing, in) {
 			return ImageTaskView{}, false, k12storage.ErrImageTaskConflict
 		}
 		if c.PageAssets != nil {
@@ -561,6 +564,9 @@ func (c *ImageTaskCoordinator) Create(
 	}
 	if !errors.Is(lookupErr, k12storage.ErrImageTaskNotFound) {
 		return ImageTaskView{}, false, lookupErr
+	}
+	if command.legacyPages {
+		return ImageTaskView{}, false, k12storage.ErrImageTaskConflict
 	}
 	images, err := c.readSourceImages(
 		ctx,
@@ -607,7 +613,7 @@ func (c *ImageTaskCoordinator) Create(
 			AutomaticRemainingSeconds: k12.ImageTaskAutomaticBudgetSeconds,
 			Version:                   0, CreatedAt: now, UpdatedAt: now,
 		}
-		dispatch.RequestDigest = imageTaskAdmissionDigest(dispatch)
+		dispatch.RequestDigest = imageTaskPageRequestDigest(dispatch, command.orderedDigest)
 		stored, intake, created, err := c.Records.PrepareParentSelectedCreativeDispatch(
 			ctx, dispatch,
 		)
@@ -658,7 +664,7 @@ func (c *ImageTaskCoordinator) Create(
 		AutomaticRemainingSeconds: k12.ImageTaskAutomaticBudgetSeconds,
 		Version:                   0, CreatedAt: now, UpdatedAt: now,
 	}
-	dispatch.RequestDigest = imageTaskAdmissionDigest(dispatch)
+	dispatch.RequestDigest = imageTaskPageRequestDigest(dispatch, command.orderedDigest)
 	invocation := k12.ImageTaskInvocation{
 		InvocationID: invocationID, AgentName: in.AgentName, DispatchID: dispatchID,
 		Operation:     k12.ImageTaskOperationClassification,
@@ -2348,8 +2354,11 @@ func photoTaskIntentForImageDispatch(dispatch k12.ImageTaskDispatch) PhotoTaskIn
 	return photoTaskIntentFromDispatch(EffectiveImageTaskHomeworkIntent(dispatch))
 }
 
-// EffectiveImageTaskHomeworkIntent 供处理与交付共同消费冻结动作；旧任务保留原分类。
+// EffectiveImageTaskHomeworkIntent 只对已识别的作业应用冻结动作，保留原分类作为证据。
 func EffectiveImageTaskHomeworkIntent(dispatch k12.ImageTaskDispatch) k12.ImageTaskIntent {
+	if dispatch.TaskIntent != k12.ImageTaskIntentCompletedHomework && dispatch.TaskIntent != k12.ImageTaskIntentBlankWorksheet {
+		return dispatch.TaskIntent
+	}
 	if scope := dispatch.ClassificationRouteSnapshot.ImageScope; scope != nil && scope.Version == k12.RecognitionImageScopeVersionV1 {
 		switch scope.Action {
 		case "solve":
@@ -2599,7 +2608,6 @@ func (c *ImageTaskCoordinator) Result(
 			ctx, agentName, view.Homework.GradingJobID,
 		)
 		if finalArtifactErr == nil {
-			result.Kind = string(view.Dispatch.TaskIntent)
 			result.FinalArtifact = &finalArtifact
 		} else if !errors.Is(finalArtifactErr, records.ErrNotFound) {
 			return ImageTaskResult{}, finalArtifactErr
@@ -2607,12 +2615,11 @@ func (c *ImageTaskCoordinator) Result(
 		if result.FinalArtifact == nil {
 			return result, nil
 		}
-		intent := photoTaskIntentForImageDispatch(view.Dispatch)
 		mode := PhotoModeGrade
-		if intent == PhotoTaskBlankWorksheet && view.Dispatch.ClassificationRouteSnapshot.ImageScope != nil && view.Dispatch.ClassificationRouteSnapshot.ImageScope.Version == k12.RecognitionImageScopeVersionV1 {
+		if EffectiveImageTaskHomeworkIntent(view.Dispatch) == k12.ImageTaskIntentBlankWorksheet {
 			mode = PhotoModeSolve
 		}
-		_, surface := photoTaskSemantics(mode)
+		intent, surface := photoTaskSemantics(mode)
 		photo := PhotoGradeResult{
 			Mode:          mode,
 			TaskIntent:    intent,
@@ -2657,10 +2664,6 @@ func (c *ImageTaskCoordinator) Result(
 				"usecase: final image task result assessment exact-set mismatch",
 			)
 		}
-		if view.Dispatch.TaskIntent == k12.ImageTaskIntentBlankWorksheet {
-			photo.Mode = PhotoModeSolve
-			photo.ResultSurface = PhotoSurfaceParentTeachingGuide
-		}
 		if result.FinalArtifact.HasAnnotatedAsset() {
 			result.OperationReceipts = append(
 				result.OperationReceipts,
@@ -2677,11 +2680,21 @@ func (c *ImageTaskCoordinator) Result(
 			}
 		}
 		// 已冻结的 aggregate 结果同时证明当时的几何和实际图；旧无正文回执不回填。
-		restoreFinalPhotoGeometry(&photo, *result.FinalArtifact, invocations, assessments, assessmentDigests)
-		if photo.ImageWarning == "" || photo.ImageWarning == "未能可靠定位作答位置，本次仅提供文字批改" {
-			photo.ImageWarning = photoAnnotationCoverageWarning(photo)
+		if !restoreDrawnAnswerBoxes(&photo, *result.FinalArtifact, assessments) {
+			matched := restoreFinalPhotoGeometry(&photo, *result.FinalArtifact, invocations, assessments, assessmentDigests)
+			if matched {
+				if photo.ImageWarning == "" || photo.ImageWarning == "未能可靠定位作答位置，本次仅提供文字批改" {
+					photo.ImageWarning = photoAnnotationCoverageWarning(photo)
+				}
+			} else {
+				// 没有与终稿图片匹配的绘制记录，不能用早期作答框或空集合推断覆盖数量。
+				for i := range photo.Items {
+					photo.Items[i].Recognized.BBox = nil
+				}
+				photo.ImageWarning = frozenAnnotationWarning(*result.FinalArtifact)
+			}
 		}
-		result.Kind = string(view.Dispatch.TaskIntent)
+		result.Kind = string(photo.TaskIntent)
 		result.Photo = &photo
 		result.SkillContextReceipts = photoSkillContextReceipts(photo)
 		if err := c.registerTutorResult(ctx, result, assessments); err != nil {
@@ -2721,13 +2734,13 @@ func restoreFinalPhotoGeometry(
 	invocations []k12.ModelInvocation,
 	assessments []k12.GradingAssessmentItem,
 	assessmentDigests []string,
-) {
+) bool {
 	if artifact.SkippedCount != 0 {
-		return
+		return false
 	}
 	ordered, err := json.Marshal(assessmentDigests)
 	if err != nil || string(ordered) != artifact.OrderedCurrentDigestsJSON {
-		return
+		return false
 	}
 	for _, invocation := range invocations {
 		complete := invocation.Status == k12.ModelInvocationSucceeded ||
@@ -2763,6 +2776,13 @@ func restoreFinalPhotoGeometry(
 		if !matches {
 			continue
 		}
+		if frozen.AnnotatedImage != nil {
+			if boxes := freezeGradingMarks(&frozen, artifact); boxes != nil {
+				restoreRenderedAnswerBoxes(photo, boxes)
+				photo.ImageWarning = photoAnnotationCoverageWarning(*photo)
+				return true
+			}
+		}
 		for i, item := range frozen.Items {
 			photo.Items[i].Recognized.BBox = nil
 			if item.Recognized.BBox != nil {
@@ -2771,8 +2791,9 @@ func restoreFinalPhotoGeometry(
 			}
 		}
 		photo.ImageWarning = frozen.ImageWarning
-		return
+		return true
 	}
+	return false
 }
 
 func gradingItemInvocationReceipt(

@@ -211,7 +211,9 @@ func publicImageTask(view usecase.ImageTaskView) publicImageTaskDispatch {
 		frozenRoute = dispatch.OperationRouteRequest
 	}
 	out := publicImageTaskDispatch{
-		DispatchID: dispatch.DispatchID, TaskIntent: dispatch.TaskIntent, Status: dispatch.Status,
+		DispatchID:             dispatch.DispatchID,
+		TaskIntent:             usecase.EffectiveImageTaskHomeworkIntent(dispatch),
+		Status:                 dispatch.Status,
 		ProviderDisplayName:    optionalPublicImageTaskString(frozenRoute.ProviderDisplayName),
 		ModelID:                optionalPublicImageTaskString(frozenRoute.ModelID),
 		Retryable:              dispatch.RetrySafe,
@@ -351,11 +353,13 @@ func publicImageTask(view usecase.ImageTaskView) publicImageTaskDispatch {
 	if dispatch.Status == k12.ImageTaskStatusFailed {
 		out.Retryable = dispatch.RetrySafe
 		out.FailureKind = publicImageTaskFailureKind(dispatch)
+		if dispatch.OutcomeUnknown() {
+			out.Retryable = false
+			out.Progress.State = "recovering"
+			return out
+		}
 		if out.Progress.Operation == "classification" {
 			out.Progress.State = "failed"
-			if strings.Contains(dispatch.FailureKind, "outcome_unknown") {
-				out.Progress.State = "recovering"
-			}
 		} else if view.Creative != nil {
 			// 外层 dispatch 失败优先于旧的创作点评进行态，避免已终止任务继续显示处理中。
 			if view.Creative.Status == k12.CreativeWorkIntakePromoted && out.Progress.Operation == "promotion" {
@@ -376,7 +380,7 @@ func publicImageTask(view usecase.ImageTaskView) publicImageTaskDispatch {
 func publicImageTaskFailureKind(dispatch k12.ImageTaskDispatch) *string {
 	if dispatch.Status != k12.ImageTaskStatusFailed ||
 		strings.TrimSpace(dispatch.FailureKind) == "" ||
-		strings.Contains(dispatch.FailureKind, "outcome_unknown") {
+		dispatch.OutcomeUnknown() {
 		return nil
 	}
 	failureKind := dispatch.FailureKind
@@ -538,14 +542,15 @@ type recoverableImageTask struct {
 }
 
 func imageTaskProjectionTerminal(dispatch publicImageTaskDispatch) bool {
+	state := strings.TrimSpace(dispatch.Progress.State)
 	switch dispatch.Status {
 	case k12.ImageTaskStatusCancelled:
 		return true
 	case k12.ImageTaskStatusFailed:
-		return !dispatch.Retryable
+		return !dispatch.Retryable && state != "recovering"
 	}
-	switch strings.TrimSpace(dispatch.Progress.State) {
-	case "completed", "cancelled", "failed_terminal", "feedback_ready":
+	switch state {
+	case k12.GradingStageCompleted, k12.GradingStageCancelled, k12.GradingStageFailedTerminal, "feedback_ready", string(k12.CreativeWorkIntakeUnreadable):
 		return true
 	default:
 		return false
@@ -854,9 +859,10 @@ func (h *handler) getImageTaskResult(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var projection any
+	intent := usecase.EffectiveImageTaskHomeworkIntent(result.Dispatch)
 	if result.Photo != nil {
 		projection = map[string]any{
-			"kind":    string(result.Dispatch.TaskIntent),
+			"kind":    result.Kind,
 			"payload": h.photoResultWithReuse(r.Context(), ownerScope, result.GradingJobID, *result.Photo),
 		}
 	} else if result.Kind == "creative" && result.Creative != nil {
@@ -898,7 +904,7 @@ func (h *handler) getImageTaskResult(w http.ResponseWriter, r *http.Request) {
 	}
 	response := map[string]any{
 		"dispatch_id":        result.Dispatch.DispatchID,
-		"task_intent":        result.Dispatch.TaskIntent,
+		"task_intent":        intent,
 		"status":             result.Dispatch.Status,
 		"source_digest":      result.Dispatch.SourceDigest,
 		"source_attachments": result.SourceAttachments,

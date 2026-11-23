@@ -246,6 +246,11 @@ type ImageTaskDispatch struct {
 	UpdatedAt                   int64                      `json:"updated_at"`
 }
 
+// OutcomeUnknown 表示已发送的调用没有确定回执，不能按不可重试的终止失败处理。
+func (d ImageTaskDispatch) OutcomeUnknown() bool {
+	return d.Status == ImageTaskStatusFailed && strings.Contains(d.FailureKind, string(ImageTaskInvocationOutcomeUnknown))
+}
+
 // SourcePixelRegion is a rectangle in the PageAsset's verified, orientation-
 // normalized source-pixel coordinate system. It is deliberately distinct from
 // the normalized answer BBox used for annotation.
