@@ -71,6 +71,9 @@ type Manager struct {
 	buildAdapter                  func(*Instance) (adapter.Adapter, error)
 	disabledProviders             map[string]bool
 	dingtalkInboundPhotoAdmission dingtalk.InboundPhotoAdmissionPort
+	photoRoutes                   PhotoRoutes
+	photoReceivers                map[string]*instancePhotoReceiver
+	photoRecoveryEnabled          bool
 
 	// box 负责 config_json 的静态加密/解密。可为 nil（部分测试不注入）：
 	// 此时凭据按明文直存直读，全链路退化为旧行为，不 crash。
@@ -99,6 +102,7 @@ func NewManager(db *sql.DB) *Manager {
 		inbound:           make(map[string]http.Handler),
 		metadata:          make(map[string]*Instance),
 		disabledProviders: make(map[string]bool),
+		photoReceivers:    make(map[string]*instancePhotoReceiver),
 	}
 }
 
@@ -527,12 +531,15 @@ func (m *Manager) Delete(ctx context.Context, name string) error {
 		return err
 	}
 	adp := m.running[name]
+	photos := m.photoReceivers[name]
+	delete(m.photoReceivers, name)
 	delete(m.metadata, name)
 	delete(m.inbound, name)
 	delete(m.running, name)
 	m.mu.Unlock()
 
 	// Stop adapter outside lock (may take time)
+	photos.stop(ctx)
 	if adp != nil {
 		_ = adp.Stop(ctx)
 	}
@@ -575,6 +582,7 @@ func (m *Manager) Start(ctx context.Context, name string) error {
 	buildAdapter := m.buildAdapter
 	disabled := m.disabledProviders[strings.ToLower(inst.Provider)]
 	dingtalkInboundPhotoAdmission := m.dingtalkInboundPhotoAdmission
+	photoRoutes := m.photoRoutes
 	m.mu.RUnlock()
 	if alreadyRunning || alreadyInbound {
 		return nil
@@ -604,9 +612,15 @@ func (m *Manager) Start(ctx context.Context, name string) error {
 		}
 	}
 	wrapped := m.wrapHandler(inst, handler)
+	var photos *instancePhotoReceiver
+	if configurable, ok := adp.(interface{ SetPhotoIntake(adapter.PhotoIntake) }); ok && photoRoutes.Prepare != nil {
+		photos = newInstancePhotoReceiver(m, inst, adp, handler, photoRoutes)
+		configurable.SetPhotoIntake(photos)
+	}
 
 	if wa, ok := adp.(adapter.WebhookAdapter); ok {
 		if err := wa.Attach(wrapped); err != nil {
+			photos.stop(ctx)
 			_ = m.setStatus(ctx, name, StatusError, err.Error())
 			return err
 		}
@@ -614,7 +628,14 @@ func (m *Manager) Start(ctx context.Context, name string) error {
 		m.running[name] = adp
 		m.inbound[name] = wa.Handler()
 		m.metadata[name] = inst
+		if photos != nil {
+			m.photoReceivers[name] = photos
+		}
+		resumePhotos := m.photoRecoveryEnabled && photos != nil
 		m.mu.Unlock()
+		if resumePhotos {
+			photos.resumeAttached()
+		}
 		return m.setStatus(ctx, name, StatusRunning, "")
 	}
 
@@ -622,6 +643,7 @@ func (m *Manager) Start(ctx context.Context, name string) error {
 	// 每条入站消息由适配器建立平台身份，连接仍由 Manager.Stop → Adapter.Stop 负责取消。
 	lifecycleCtx := context.Background()
 	if err := safeStartAdapter(lifecycleCtx, adp, wrapped); err != nil {
+		photos.stop(ctx)
 		_ = m.setStatus(ctx, name, StatusError, err.Error())
 		return err
 	}
@@ -629,6 +651,10 @@ func (m *Manager) Start(ctx context.Context, name string) error {
 	m.mu.Lock()
 	m.running[name] = adp
 	m.metadata[name] = inst
+	if photos != nil {
+		m.photoReceivers[name] = photos
+	}
+	resumePhotos := m.photoRecoveryEnabled && photos != nil
 	// 钉钉兼容 HTTP 入站复用已启动的 Stream 实例及消息处理器。
 	if strings.EqualFold(inst.Provider, "dingtalk") {
 		if inbound, ok := adp.(interface{ Handler() http.Handler }); ok {
@@ -636,6 +662,9 @@ func (m *Manager) Start(ctx context.Context, name string) error {
 		}
 	}
 	m.mu.Unlock()
+	if resumePhotos {
+		photos.resumeAttached()
+	}
 	return m.setStatus(ctx, name, StatusRunning, "")
 }
 
@@ -651,11 +680,14 @@ func safeStartAdapter(ctx context.Context, adp adapter.Adapter, handler adapter.
 func (m *Manager) Stop(ctx context.Context, name string) error {
 	m.mu.Lock()
 	adp := m.running[name]
+	photos := m.photoReceivers[name]
+	delete(m.photoReceivers, name)
 	delete(m.running, name)
 	delete(m.inbound, name)
 	delete(m.metadata, name)
 	m.mu.Unlock()
 
+	photos.stop(ctx)
 	if adp != nil {
 		if err := adp.Stop(ctx); err != nil {
 			_ = m.setStatus(ctx, name, StatusError, err.Error())
@@ -674,6 +706,20 @@ func (m *Manager) Stop(ctx context.Context, name string) error {
 // Deterministic ordering at each step avoids routing to a random instance when
 // several share a provider. Returns an error if no running adapter matches.
 func (m *Manager) Send(ctx context.Context, target, chatID string, reply *adapter.Reply) error {
+	if c, ok := ctx.Value(admittedPhotoKey{}).(admittedPhoto); ok && c.delegation != nil && c.delegation.receiver.manager == m {
+		d := photoDelegationFor(ctx, c.message)
+		if d != nil {
+			d.mu.Lock()
+			partial := d.partialPrepared
+			if partial {
+				d.partialPrepared = false
+			}
+			d.mu.Unlock()
+			if partial {
+				return d.receiver.sendPartialPhotoDocuments(ctx, d.key, target, chatID, reply)
+			}
+		}
+	}
 	adp := m.resolveRunningAdapter(target)
 	if adp == nil {
 		return fmt.Errorf("no running adapter for target %q", target)
@@ -694,6 +740,11 @@ func (m *Manager) PrepareReplyDelivery(ctx context.Context, msg *adapter.Message
 		return false, errors.New("original inbound delivery claim is unavailable")
 	}
 	if claim.owned {
+		if d := photoDelegationFor(ctx, msg); d != nil && d.receiver.manager == m {
+			d.mu.Lock()
+			d.partialPrepared = true
+			d.mu.Unlock()
+		}
 		return true, nil
 	}
 	seen, err := m.recordEvent(ctx, claim.instanceName, claim.eventID)
@@ -1089,9 +1140,10 @@ func (m *Manager) wrapHandler(inst *Instance, next adapter.MessageHandler) adapt
 			msg.InstanceID = inst.Name
 		}
 		claim := &replyDeliveryClaim{manager: m, instanceName: inst.Name, eventID: msg.ID}
+		_, sharedPhoto := AdmittedPhotoRoute(ctx, msg)
 		if msg.ID != "" {
 			seen, err := m.recordEvent(ctx, inst.Name, msg.ID)
-			if err == nil && seen {
+			if err == nil && seen && !sharedPhoto {
 				return nil, nil
 			}
 			claim.owned = err == nil
@@ -1104,7 +1156,7 @@ func (m *Manager) wrapHandler(inst *Instance, next adapter.MessageHandler) adapt
 			// so the platform's redelivery of the same event_id can be retried
 			// instead of being silently dropped.
 			// 原事件已开始发送必要产物时保留去重，未知发送结果不能随原处理错误重放。
-			if msg.ID != "" && claim.owned && !reply.DeliveryAttempted(msg) {
+			if msg.ID != "" && claim.owned && !sharedPhoto && !reply.DeliveryAttempted(msg) {
 				_ = m.deleteEvent(ctx, inst.Name, msg.ID)
 			}
 			_ = m.setStatus(ctx, inst.Name, StatusError, err.Error())
