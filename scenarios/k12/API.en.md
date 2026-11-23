@@ -10,7 +10,7 @@ This document describes current source contracts. Releases use their matching do
 
 | Module | Contents |
 | --- | --- |
-| [Image tasks, creative work, and materials](docs/api/tasks.en.md) | Image facade, results and recovery, source actions and feedback, works, assets, and material preparation |
+| [Image tasks, creative work, and materials](docs/api/tasks.en.md) | Image tasks and recovery, sources and feedback, works and assets, material preparation, unit summaries, and the host’s DingTalk inbound diagnostic |
 | [Practice, weekly plans, and printing](docs/api/practice.en.md) | Mistake practice generation, candidate selection, practice sets, attempts and grading, weekly plans, and native print receipts |
 | [Profiles, textbooks, and learning records](docs/api/records.en.md) | View descriptors, single-question processing, profiles and progress, accumulation and insights, export/backup, tutoring, and IM automation |
 
@@ -120,7 +120,7 @@ This is the shared contract for creating, editing, and previewing progress.
 4. Confirmed progress requires a catalog `volume/unit_id`. AI input may leave unit_id empty; the backend computes it while retaining explicit lesson/page values. An explicit non-null AI selection that cannot match a real textbook catalog for the current profile returns `400` for both creation and editing, without saving changes.
 5. Estimates never overwrite confirmed progress in the same scope. PUT omission allows automatic processing; explicit null clears progress for this operation. An old empty progress lifecycle does not disable later suggestions.
 6. `GET /api/k12/curriculum-progress?mode=estimate` is a read-only preview returning `{"progress":null or object,"revision":...}`. Creation needs no agent; parameters are `grade_term/textbook_edition` and optional `textbook_manifest_id/lesson_id/page_from/page_to`. Existing instances may include agent, allowing persisted profile values to fill omitted grade and edition fields.
-7. `GET /api/k12/textbook-binding-options?mode=create` reads the current trusted owner's math textbook candidates before registration, without an agent or binding writes, returning `{"items":[...]}`. Without creation mode, existing Agent-scoped queries and ownership checks remain.
+7. `GET /api/k12/textbook-binding-options?mode=create` lists the current trusted owner’s math textbook candidates before registration and returns `{"items":[...]}`. For an existing tutor, supply `agent` and `subject=math`. A missing or unsupported subject in this mode returns 400.
 8. Grade matching uses persisted cover evidence, not filenames; ambiguous catalogs are not picked arbitrarily. confirmed_at remains a Unix number and is `0` for AI suggestions. estimate_basis stores the date, reference window, weight method, and optional evidence receipt hash.
 9. Reference windows are September 1 through January 31 and March 1 through June 30. Using the Shanghai date, the service chooses the nearest matching cycle and estimates a unit from weekday ratios, catalog lesson counts, and default page spans. These are suggestions, not an actual school calendar or evidence of learning or mastery.
 10. Read-only previews do not write. Only new business requests adopt suggestions through CAS. Frozen results are not regenerated because of new suggestions; missing textbooks or progress do not block real questions.

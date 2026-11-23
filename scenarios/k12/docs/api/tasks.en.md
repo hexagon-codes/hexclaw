@@ -1,4 +1,4 @@
-# Image tasks, material preparation and creative works API
+# Unit materials, image tasks and creative works API
 
 [中文](tasks.md) · [K12 API overview](../../API.en.md) · [Complete OpenAPI contract](../../../../api/openapi.yaml)
 
@@ -19,6 +19,12 @@ Scope: current mainline and working-tree source. Check the actual service versio
 
 | Method | Path | Operation |
 | --- | --- | --- |
+| POST | `/api/k12/unit-summary-jobs` | [Accept a unit-summary job](#op-post-api-k12-unit-summary-jobs) |
+| GET | `/api/k12/unit-summary-jobs/{id}` | [Read a unit-summary job](#op-get-api-k12-unit-summary-jobs-id) |
+| POST | `/api/k12/unit-summary-jobs/{id}/resume` | [Resume a unit-summary job](#op-post-api-k12-unit-summary-jobs-id-resume) |
+| GET | `/api/k12/unit-summary-documents` | [List published materials and outstanding jobs](#op-get-api-k12-unit-summary-documents) |
+| GET | `/api/k12/unit-summary-documents/{id}` | [Read a material revision](#op-get-api-k12-unit-summary-documents-id) |
+| GET | `/api/k12/dingtalk-inbound` | [Inspect a DingTalk photo receipt](#op-get-api-k12-dingtalk-inbound) |
 | GET | `/api/k12/materials/{document_id}/preparation` | [Read material preparation details](#op-get-api-k12-materials-document-id-preparation) |
 | GET | `/api/k12/materials/preparations` | [Read preparation overviews](#op-get-api-k12-materials-preparations) |
 | GET | `/api/k12/materials/{document_id}/preparation/{task_id}/recovery` | [Read a material recovery plan](#op-get-api-k12-materials-document-id-preparation-task-id-recovery) |
@@ -46,6 +52,48 @@ Scope: current mainline and working-tree source. Check the actual service versio
 | DELETE | `/api/k12/creative-works/{id}` | [Delete the current work by version](#op-delete-api-k12-creative-works-id) |
 | POST | `/api/k12/assets` | [Upload a source image](#op-post-api-k12-assets) |
 | GET | `/api/k12/assets/{file}` | [Download a source image](#op-get-api-k12-assets-file) |
+
+<a id="op-post-api-k12-unit-summary-jobs"></a>
+
+## `POST /api/k12/unit-summary-jobs`
+
+Submit one JSON object of up to 1 MiB. Supply `agent`, `session_id`, `source_message_id`, `idempotency_key`, and `final_user_text`. First persist the user message in the session, then reference its ID and exact text. Optional fields are `prompt_invocation`, `active_revision_id`, `subject`, `intent`, `unit_id`, `unit_title`, `material_document_ids`, `format`, and `model_snapshot`. The service resolves and freezes the text-model route at admission. Replaying the same command for this learner returns the original attempt. A changed request digest or different stored message text returns 409.
+
+`202` returns `job.id`, `job.state`, `job.revision` and the current view. Replaying a command that has already stopped automatic processing (for example after success, failure or a request for input) returns `200`. Read `material` and `delivery.complete` to determine whether a revision is available.
+
+<a id="op-get-api-k12-unit-summary-jobs-id"></a>
+
+## `GET /api/k12/unit-summary-jobs/{id}`
+
+Use `agent` and `job.id` to read `job`, optional `document` and `material`, `delivery`, and `replayed`. `needs_input` can include `job.clarification` and `failed` can include `failure_kind` and `failure_detail`. `reconciling` means the service is checking the original call. Reading the job makes no model call.
+
+<a id="op-post-api-k12-unit-summary-jobs-id-resume"></a>
+
+## `POST /api/k12/unit-summary-jobs/{id}/resume`
+
+Use the original `job.id` in the path. Include `agent`, `expected_revision`, and `idempotency_key` in the JSON body. When the job needs information, persist the user's follow-up in the same session and supply its `followup_message_id`. An existing resolution receipt may also provide enough evidence to resume. Replaying the original resume command uses its original key, revision and payload. Acceptance returns `202`. Replaying a command that has stopped automatic processing returns `200`. An ineligible state or stale revision returns `409`. The revision-conflict response includes `current` when the service can read back the job.
+
+<a id="op-get-api-k12-unit-summary-documents"></a>
+
+## `GET /api/k12/unit-summary-documents`
+
+Supply `agent` and optionally filter by `session_id`. `limit` defaults to 30 and accepts 1–100. `documents` lists published document views in ascending document ID order. Pass the returned `next_cursor` with the same filter for the next page. An empty cursor marks the end. `jobs` separately returns up to 100 outstanding attempts in the same scope, most recently updated first, including known failures. The document cursor applies only to `documents`.
+
+<a id="op-get-api-k12-unit-summary-documents-id"></a>
+
+## `GET /api/k12/unit-summary-documents/{id}`
+
+Use `document.document_id` in the path and supply `agent` in the query. With no `revision_id` the service reads the current revision. Supplying `revision_id` reads the specified frozen revision of that document. Published `material` includes `revision_id`, `content`, `canonical_markdown`, source snapshots, `artifact`, file digest, and byte count. Download the PDF via `GET /api/k12/print-artifacts/{id}/content?agent=...` using `material.artifact.artifact_id`, then compare `byte_digest` and `byte_size`. Unavailable documents or revisions in this scope return 404.
+
+<a id="op-get-api-k12-dingtalk-inbound"></a>
+
+## `GET /api/k12/dingtalk-inbound`
+
+The K12 host mounts this read-only diagnostic with its inbound receipt query port. Supply `agent`, `platform=dingtalk`, `instance_id`, `chat_id`, and `provider_message_id` from the original inbound event. The service looks up that physical identity and verifies the mounted owner scope and learner.
+
+For multiple images in one direct message, keep the same `provider_message_id` and select the page with the optional zero-based `page_index`. The default is page 0. Multi-image receipts include both `receipt.identity.page_index` and `page_count`. Single-image receipts keep their original fields. A negative or noninteger page index returns 400. An absent page returns 404.
+
+`200` returns `receipt` (message identity, receipt ID, binding and command digest), `asset` (ID, MIME, byte count and digest), and `dispatch` (processing, routing, confirmation and reply states, revision and available downstream IDs). Use `reply_status`, `delivery_batch_id` and the original batch's part receipts to check delivery. Missing or out-of-scope receipts return `404`. A method mismatch or missing query port returns `405`. A lookup failure returns `500`. Errors from this diagnostic handler use `text/plain`.
 
 <a id="op-get-api-k12-materials-document-id-preparation"></a>
 
@@ -126,7 +174,9 @@ Accept image tasks。
 
 Durable deduplication uses agent + source_kind + source_ref + attempt_generation. Session, images, contextual intent, creative_entry and route selection must match on replay. Automatic processing starts asynchronously. Multiple images are prevalidated and accepted per page in order; a partial error may include accepted tasks and a zero-based failed_index. Preserve accepted identities. Omit creative_entry for automatic intake; an explicit new-work entry uses kind=new_work and writing/artwork/unknown, with its explicit_commit projection.
 
-Body: [K12TasksCreateImageTaskReq](#schema-k12taskscreateimagetaskreq) (`application/json`)。
+One submission is identified by `agent`, `source_kind`, `source_ref`, and `attempt_generation`. Admission freezes the ordered `source_asset_refs`. Replay the same session, intent, `creative_entry`, model selection, and complete ordered image list to retrieve the existing page tasks. Adding, removing, replacing, or reordering images in the same generation returns `409`, including a change between one and multiple images. An explicit edit can be submitted with a new `attempt_generation`.
+
+The service validates the entire list of source assets before accepting page tasks in order and processing them asynchronously. On a partial failure, `tasks` contains the accepted pages and `failed_index` is zero-based. Omit `creative_entry` for automatic intake. An explicit new work uses `kind=new_work`, `task_intent=writing/artwork/unknown`, and the `explicit_commit` workflow.
 
 Success: `200` → [K12TasksImageTaskAccepted](#schema-k12tasksimagetaskaccepted) / [K12TasksImageTaskBatchAccepted](#schema-k12tasksimagetaskbatchaccepted)。
 
@@ -306,6 +356,8 @@ Errors: `400` Invalid JSON, fields, command identity or format; `401` Service to
 <a id="op-get-api-k12-image-tasks-id-result"></a>
 
 ## `GET /api/k12/image-tasks/{id}/result`
+
+For a classified homework photo, the frozen action determines the public `dispatch.task_intent`, the result envelope’s `task_intent` and `result.kind`, and the payload’s `task_intent`, `mode`, and `result_surface`. An answered worksheet explicitly submitted for solving yields `blank_worksheet / solve / parent_teaching_guide`. The service preserves the original classification and model receipts. Pending classification, writing, artwork, and historical jobs without a frozen action keep their classification semantics.
 
 Read image results and receipts。
 

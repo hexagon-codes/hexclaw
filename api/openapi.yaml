@@ -11428,6 +11428,355 @@ paths:
             type: string
       x-reference-module: automation-connections
       x-visibility: public
+  /api/k12/unit-summary-jobs:
+    post:
+      operationId: k12UnitSummaryStart
+      summary: 接纳单元学习资料任务
+      description: 引用当前孩子及已持久化的会话用户消息，接纳后异步解析、生成或复用已发布的资料。同键同请求读取原尝试，已存在的活动尝试可从其安全检查点接续。
+      tags:
+        - k12-tasks
+      x-source:
+        file: scenarios/k12/apihttp/unit_summary_handler.go
+        handler: startUnitSummary
+      x-availability: K12 场景已挂载且单元资料运行时可用
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/K12UnitSummaryRequest"
+      responses:
+        "200":
+          description: 原命令重放时已处于本次尝试的终止状态。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/K12UnitSummaryView"
+        "202":
+          description: 命令已接纳，使用 job.id 查询实际结果。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/K12UnitSummaryView"
+        "400":
+          $ref: "#/components/responses/UnitSummaryInvalid"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/UnitSummaryNotFound"
+        "409":
+          description: 请求身份、正文、任务修订或状态冲突。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageError"
+        "413":
+          $ref: "#/components/responses/UnitSummaryTooLarge"
+        "500":
+          $ref: "#/components/responses/UnitSummaryUnavailableResult"
+        "503":
+          $ref: "#/components/responses/UnitSummaryUnavailableService"
+      x-reference-module: k12-tasks
+      x-visibility: public
+  /api/k12/unit-summary-jobs/{id}:
+    get:
+      operationId: k12UnitSummaryGet
+      summary: 读取单元资料任务
+      description: 在已认证归属与指定孩子范围内读取任务、已绑定文档及已发布版本的材料。
+      tags:
+        - k12-tasks
+      x-source:
+        file: scenarios/k12/apihttp/unit_summary_handler.go
+        handler: getUnitSummary
+      x-availability: K12 场景已挂载且单元资料运行时可用
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+          description: 任务返回的 job.id。
+        - name: agent
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+          description: 当前已获准访问的辅导实例名称。
+      responses:
+        "200":
+          description: 当前任务视图。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/K12UnitSummaryView"
+        "400":
+          $ref: "#/components/responses/UnitSummaryInvalid"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/UnitSummaryNotFound"
+        "500":
+          $ref: "#/components/responses/UnitSummaryUnavailableResult"
+        "503":
+          $ref: "#/components/responses/UnitSummaryUnavailableService"
+      x-reference-module: k12-tasks
+      x-visibility: public
+  /api/k12/unit-summary-jobs/{id}/resume:
+    post:
+      operationId: k12UnitSummaryResume
+      summary: 接续一次单元资料尝试
+      description: 用原 job.id、当前 revision 和独立恢复命令键接续。需要补充时引用原会话的用户消息。在现有回执上处理 reconciling 状态，同命令重放读取已接纳的结果。
+      tags:
+        - k12-tasks
+      x-source:
+        file: scenarios/k12/apihttp/unit_summary_handler.go
+        handler: resumeUnitSummary
+      x-availability: K12 场景已挂载且单元资料运行时可用
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+          description: 任务返回的 job.id。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/K12UnitSummaryResumeRequest"
+      responses:
+        "200":
+          description: 原命令重放时已处于本次尝试的终止状态。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/K12UnitSummaryView"
+        "202":
+          description: 命令已接纳，使用 job.id 查询实际结果。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/K12UnitSummaryView"
+        "400":
+          $ref: "#/components/responses/UnitSummaryInvalid"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/UnitSummaryNotFound"
+        "409":
+          description: 恢复时版本或状态不适用，或同键内容冲突。修订冲突能重新读到任务时 current 携带最新视图。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/K12UnitSummaryResumeConflict"
+        "413":
+          $ref: "#/components/responses/UnitSummaryTooLarge"
+        "500":
+          $ref: "#/components/responses/UnitSummaryUnavailableResult"
+        "503":
+          $ref: "#/components/responses/UnitSummaryUnavailableService"
+      x-reference-module: k12-tasks
+      x-visibility: public
+  /api/k12/unit-summary-documents:
+    get:
+      operationId: k12UnitSummaryListDocuments
+      summary: 列出已发布的单元资料及待处理任务
+      description: documents 按文档 ID 升序分页，可按原会话筛选。jobs 单独列出该筛选范围内最近更新的至多 100 项待处理尝试，含已知失败；只有文档页使用 next_cursor。
+      tags:
+        - k12-tasks
+      x-source:
+        file: scenarios/k12/apihttp/unit_summary_handler.go
+        handler: listUnitSummaryDocuments
+      x-availability: K12 场景已挂载且单元资料运行时可用
+      parameters:
+        - name: agent
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+          description: 当前已获准访问的辅导实例名称。
+        - name: session_id
+          in: query
+          required: false
+          schema:
+            type: string
+          description: 可选的已授权原会话。
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+          description: 上一页返回的 next_cursor。
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 30
+      responses:
+        "200":
+          description: 当前页文档、任务及下一页游标。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/K12UnitSummaryDocumentsView"
+        "400":
+          $ref: "#/components/responses/UnitSummaryInvalid"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/UnitSummaryNotFound"
+        "500":
+          $ref: "#/components/responses/UnitSummaryUnavailableResult"
+        "503":
+          $ref: "#/components/responses/UnitSummaryUnavailableService"
+      x-reference-module: k12-tasks
+      x-visibility: public
+  /api/k12/unit-summary-documents/{id}:
+    get:
+      operationId: k12UnitSummaryGetDocument
+      summary: 读取单元资料的当前或指定版本
+      description: 省略 revision_id 时读取文档当前版本。已发布版本的 material 包含规范 Markdown、来源快照和实际 PDF 产物引用。
+      tags:
+        - k12-tasks
+      x-source:
+        file: scenarios/k12/apihttp/unit_summary_handler.go
+        handler: getUnitSummaryDocument
+      x-availability: K12 场景已挂载且单元资料运行时可用
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+          description: 已发布资料的 document_id。
+        - name: agent
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+          description: 当前已获准访问的辅导实例名称。
+        - name: revision_id
+          in: query
+          required: false
+          schema:
+            type: string
+          description: 该文档返回的冻结版本 ID。
+      responses:
+        "200":
+          description: 文档视图及可用版本的资料。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/K12UnitSummaryView"
+        "400":
+          $ref: "#/components/responses/UnitSummaryInvalid"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/UnitSummaryNotFound"
+        "500":
+          $ref: "#/components/responses/UnitSummaryUnavailableResult"
+        "503":
+          $ref: "#/components/responses/UnitSummaryUnavailableService"
+      x-reference-module: k12-tasks
+      x-visibility: public
+  /api/k12/dingtalk-inbound:
+    get:
+      operationId: k12DingTalkInboundGet
+      summary: 查询已接纳的钉钉图片入站回执
+      description: 只读宿主诊断。以原平台、实例、私聊及平台消息 ID 精确读取持久回执，并核对挂载作用域和 agent。响应仅投影接纳、媒体摘要及处理／投递身份与状态。
+      tags:
+        - k12-tasks
+      x-source:
+        file: cmd/hexclaw/dingtalk_photo_inbound_runtime.go
+        handler: newK12DingtalkPhotoInboundQueryHandler
+      x-availability: K12 宿主挂载及入站诊断端口就绪
+      parameters:
+        - name: agent
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+          description: 当前已获准访问的辅导实例名称。
+        - name: platform
+          in: query
+          required: true
+          schema:
+            type: string
+            enum:
+              - dingtalk
+          description: 平台标识。
+        - name: instance_id
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+          description: 接纳时使用的实例身份。
+        - name: chat_id
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+          description: 原私聊身份。
+        - name: provider_message_id
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+          description: 原平台消息 ID。
+        - name: page_index
+          in: query
+          required: false
+          description: 同一原消息中要读取的页序，从 0 开始。省略时读取首页。
+          schema: { type: integer, minimum: 0, default: 0 }
+      responses:
+        "200":
+          description: 原入站回执的公开投影。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/K12DingTalkInboundBundle"
+        "400":
+          description: 页序为负数或不是整数。
+          content:
+            text/plain:
+              schema: { type: string }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: 找不到匹配的原消息、页或当前作用域中的回执。
+          content:
+            text/plain:
+              schema:
+                type: string
+        "405":
+          description: 方法不受支持或宿主没有提供查询端口。
+          content:
+            text/plain:
+              schema:
+                type: string
+        "500":
+          description: 查询旧回执失败，包括传入不完整的物理消息身份。
+          content:
+            text/plain:
+              schema:
+                type: string
+      x-reference-module: k12-tasks
+      x-visibility: internal
   /api/k12/materials/{document_id}/preparation:
     get:
       operationId: k12TasksMaterialPreparationGet
@@ -11668,8 +12017,10 @@ paths:
     post:
       operationId: k12TasksCreateImageTaskPost
       summary: 接纳图片任务
-      description: 稳定去重身份为agent + source_kind + source_ref +
-        attempt_generation；同身份必须保持会话、图片、意图上下文、creative_entry和模型选择一致。自动分类/处理异步启动。多图整组预校验后按输入顺序逐页接纳；中途失败可带tasks与零起始failed_index，已接纳页保留，不盲重发。默认省略creative_entry；档案手工新建作品可用kind=new_work，task_intent=writing/artwork/unknown，并按explicit_commit投影操作。
+      description: >-
+        同一 agent、source_kind、source_ref 与 attempt_generation 的完整有序 source_asset_refs、会话、意图、creative_entry 和模型选择在接纳时冻结。
+        原样重放读取逐页任务。相同代次换序、替换、增减图片（含单图与多图互换）返回 409。用户明确调整输入时使用新的 attempt_generation。
+        多图整组预校验后依序接纳，中途错误可包含已接纳 tasks 和从零起算的 failed_index。默认自动分类，手工新建作品使用 creative_entry.kind=new_work。
       tags:
         - k12-tasks
       x-source:
@@ -11691,7 +12042,7 @@ paths:
             application/json:
               schema:
                 oneOf:
-                  - $ref: "#/components/schemas/MessageError"
+                  - $ref: "#/components/schemas/K12TasksImageTaskSingleError"
                   - $ref: "#/components/schemas/K12TasksImageTaskBatchError"
         "401":
           description: 当前服务令牌/已认证 principal 不可用
@@ -11705,7 +12056,7 @@ paths:
             application/json:
               schema:
                 oneOf:
-                  - $ref: "#/components/schemas/MessageError"
+                  - $ref: "#/components/schemas/K12TasksImageTaskSingleError"
                   - $ref: "#/components/schemas/K12TasksImageTaskBatchError"
         "409":
           description: 版本、状态、幂等身份或原始证据冲突
@@ -11713,7 +12064,7 @@ paths:
             application/json:
               schema:
                 oneOf:
-                  - $ref: "#/components/schemas/MessageError"
+                  - $ref: "#/components/schemas/K12TasksImageTaskSingleError"
                   - $ref: "#/components/schemas/K12TasksImageTaskBatchError"
         "413":
           description: 超过请求/图片大小上限
@@ -11727,7 +12078,7 @@ paths:
             application/json:
               schema:
                 oneOf:
-                  - $ref: "#/components/schemas/MessageError"
+                  - $ref: "#/components/schemas/K12TasksImageTaskSingleError"
                   - $ref: "#/components/schemas/K12TasksImageTaskBatchError"
         "503":
           description: 该路由依赖的运行时不可用
@@ -11811,7 +12162,7 @@ paths:
     get:
       operationId: k12TasksGetImageTaskGet
       summary: 读取图片任务投影
-      description: 轮询同一dispatch。routed仅表示分类路由成立；实际处理需看progress以及target_projection，终稿需另取result。
+      description: 轮询同一 dispatch。routed 表示分类已路由。作业用途按冻结动作投影，原始分类留在服务端。通过 progress 和 target_projection 观察处理进度，通过 result 读取终稿。
       tags:
         - k12-tasks
       x-source:
@@ -12425,7 +12776,10 @@ paths:
     get:
       operationId: k12TasksGetImageTaskResultGet
       summary: 读取图片结果和执行回执
-      description: 查询是只读，200可以result=null（未就绪），也可以只有作品不可识别终态说明。完成作业结果包含result.payload.annotated_image（mime/data_base64/digest）批注原图；空白题走parent_teaching_guide。真正无法辨认仅标对应内容，不把Provider超时/未知/故障伪装为无法识别。operation_receipts保存模型/物理执行身份；source_attachments只返回摘要/大小。
+      description: >-
+        只读结果可为待处理的 result=null 或不可读作品的内容终态。完成分类的作业用同一冻结动作确定 task_intent、result.kind 及 payload 的 task_intent、mode、result_surface。
+        有笔迹照片若明确求解，投影为 blank_worksheet、solve、parent_teaching_guide。原始分类和调用回执保留。
+        可用批注图带 MIME、原字节的 Base64 及摘要。operation_receipts 关联执行身份，source_attachments 投影资产摘要与大小。
       tags:
         - k12-tasks
       x-source:
@@ -19464,11 +19818,11 @@ paths:
       operationId: k12RecordsRestoreAs
       summary: Migrate a backup to another Tutor
       description: >-
-        Keep original archive identity/checksum unchanged. source_agent must match the original owner;
-        target_agent must differ and identify the rebuilt Tutor. guardian_confirmed=true and a
-        1..200-character idempotency_key are required. Accepts supported backups from v2 through the current
-        v12. Original archive, target pre-restore snapshot, owner-rewrite journal and domain writes commit in
-        one SQLite transaction. The result contains migration_id; identical commands replay durable receipts.
+        Provide the original source_agent, a different target_agent, guardian_confirmed=true, and a nonblank idempotency_key
+        of at most 200 UTF-8 bytes after trimming. Supports hexbak v2 through v12. Ordinary record IDs remain unchanged
+        when available in the target database. A collision with another tutor maps the ID and its imported references
+        for the target only. The original archive, pre-restore snapshot, journal and domain writes commit in one transaction.
+        Replay returns the original migration_id and uses the durable mapping for the same command.
 
 
         Authentication: current service Bearer token. agent selects the learner scope; request user_id cannot
@@ -19479,12 +19833,7 @@ paths:
       parameters: []
       responses:
         "200":
-          description: Migrate a backup to another Tutor; Keep original archive identity/checksum unchanged.
-            source_agent must match the original owner; target_agent must differ and identify the rebuilt
-            Tutor. guardian_confirmed=true and a 1..200-character idempotency_key are required. Accepts
-            supported backups from v2 through the current v12. Original archive, target pre-restore snapshot,
-            owner-rewrite journal and domain writes commit in one SQLite transaction. The result contains
-            migration_id; identical commands replay durable receipts.
+          description: The committed migration receipt includes migration_id. Identical command replay returns its durable receipt.
           content:
             application/json:
               schema:
@@ -19840,8 +20189,8 @@ paths:
       operationId: k12RecordsListTextbookBindingOptions
       summary: Read textbook manifest candidates
       description: >-
-        mode=create reads owner-scoped math candidates without creating an Agent or binding. Existing-scope
-        mode requires agent/subject, validates scope and may reconcile candidate/binding state. catalog is the
+        Creation mode lists math candidates for the authenticated owner. Existing-tutor requests require agent
+        and subject=math. The service validates scope and may reconcile candidate/binding state. catalog is the
         real manifest catalog or null; fields report indexing failures/retryability. See the canonical
         textbook contract.
 
@@ -19871,18 +20220,12 @@ paths:
           required: false
           schema:
             type: string
-            enum:
-              - math
-              - chinese
-              - english
-              - science
-              - information_technology
-              - art
-          description: Required in existing-scope mode. mode=create fixes the subject to math.
+            enum: [math]
+          description: Existing-tutor queries require math. Creation mode fixes the subject to math and accepts omission.
       responses:
         "200":
-          description: Read textbook manifest candidates; mode=create reads owner-scoped math candidates without
-            creating an Agent or binding. Existing-scope mode requires agent/subject, validates scope and may
+          description: Creation mode lists owner-scoped math manifest candidates. Existing-tutor mode requires
+            agent and subject=math, validates scope and may
             reconcile candidate/binding state. catalog is the real manifest catalog or null; fields report
             indexing failures/retryability. See the canonical textbook contract.
           content:
@@ -19897,7 +20240,7 @@ paths:
                 required:
                   - items
         "400":
-          description: Invalid owner/agent/subject.
+          description: The existing-tutor query omitted the subject or supplied an unsupported subject.
           content:
             application/json:
               schema:
@@ -21531,6 +21874,36 @@ components:
             $ref: "#/components/schemas/MessageError"
           example:
             error: Valid access token required
+    UnitSummaryInvalid:
+      description: 请求格式或参数不符合合同。
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/MessageError"
+    UnitSummaryNotFound:
+      description: 目标、用户消息或当前作用域不可用。
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/MessageError"
+    UnitSummaryTooLarge:
+      description: JSON 请求超过 1 MiB。
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/MessageError"
+    UnitSummaryUnavailableResult:
+      description: 持久化、运行时或投影出错。
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/MessageError"
+    UnitSummaryUnavailableService:
+      description: K12 单元资料服务或会话作用域解析器未就绪。
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/MessageError"
   schemas:
     AgentsResourceState:
       type: object
@@ -23892,7 +24265,8 @@ components:
         - action
     ChatSessionWebSocketFrame:
       type: object
-      description: An error terminal keeps the public error in content. Existing message_content, tool_calls,
+      description: Required fields depend on the frame type. See x-websocket-client-frames and
+        x-websocket-server-frames on GET /ws. An error terminal keeps the public error in content. Existing message_content, tool_calls,
         metadata and blocks may carry the same execution's observed partial output and artifact references.
         An explicit stop remains cancelled; it does not clear the result or close the live WebSocket connection.
       properties:
@@ -24043,8 +24417,6 @@ components:
         - type
         - content
         - reasoning_disclosure
-      description: Union transport envelope; required fields depend on frame type. See x-websocket-client-frames and
-        x-websocket-server-frames on GET /ws.
     ChatSessionWebSocketClientMessage:
       type: object
       properties:
@@ -33378,6 +33750,481 @@ components:
         - version
         - model
       type: object
+    K12UnitSummarySource:
+      type: object
+      required: [ ref, origin, label, locator, source_digest ]
+      properties:
+        kind: { type: string }
+        ref: { type: string }
+        origin: { type: string }
+        label: { type: string }
+        locator: { type: string }
+        page: { type: string }
+        page_count: { type: integer }
+        document_id: { type: string }
+        manifest_id: { type: string }
+        generation: { type: integer }
+        source_digest: { type: string }
+        segment_refs:
+          type: array
+          items: { type: string }
+    K12UnitSummaryRequirements:
+      type: object
+      required: [ format ]
+      properties:
+        format: { type: string }
+        instructions: { type: string }
+    K12UnitSummaryGoal:
+      type: object
+      required: [ id, text, source_refs ]
+      properties:
+        id: { type: string }
+        text: { type: string }
+        source_refs:
+          type:
+            - array
+            - "null"
+          items: { type: string }
+    K12UnitSummaryKnowledge:
+      type: object
+      required: [ id, kind, title, body_md, source_refs ]
+      properties:
+        id: { type: string }
+        kind: { type: string }
+        title: { type: string }
+        body_md: { type: string }
+        source_refs:
+          type:
+            - array
+            - "null"
+          items: { type: string }
+    K12UnitSummaryParentGuide:
+      type: object
+      required: [ ask, explain, hint ]
+      properties:
+        ask: { type: string }
+        explain: { type: string }
+        hint: { type: string }
+        alternative: { type: string }
+    K12UnitSummaryExample:
+      type: object
+      required: [ id, goal_ids, origin, prompt_md, demonstration_md, parent_guide, source_refs ]
+      properties:
+        id: { type: string }
+        goal_ids:
+          type:
+            - array
+            - "null"
+          items: { type: string }
+        origin: { type: string }
+        prompt_md: { type: string }
+        demonstration_md: { type: string }
+        parent_guide:
+          $ref: "#/components/schemas/K12UnitSummaryParentGuide"
+        source_refs:
+          type:
+            - array
+            - "null"
+          items: { type: string }
+    K12UnitSummaryTransferCheck:
+      type: object
+      required: [ id, example_id, question_md ]
+      properties:
+        id: { type: string }
+        example_id: { type: string }
+        question_md: { type: string }
+    K12UnitSummaryReferenceExplanation:
+      type: object
+      required: [ check_id, explanation_md ]
+      properties:
+        check_id: { type: string }
+        explanation_md: { type: string }
+    K12UnitSummaryPersonalGuidance:
+      type: object
+      required: [ text, evidence_refs ]
+      properties:
+        text: { type: string }
+        evidence_refs:
+          type:
+            - array
+            - "null"
+          items: { type: string }
+    K12UnitSummaryCoverage:
+      type: object
+      required: [ level, covered, missing ]
+      properties:
+        level: { type: string }
+        covered:
+          type:
+            - array
+            - "null"
+          items: { type: string }
+        missing:
+          type:
+            - array
+            - "null"
+          items: { type: string }
+    K12UnitSummaryContentV1:
+      type: object
+      required:
+        - schema_version
+        - subject
+        - title
+        - parent_plan
+        - goals
+        - knowledge
+        - examples
+        - transfer_checks
+        - reference_explanations
+        - common_pitfalls
+        - personal_guidance
+        - coverage
+        - sources
+      properties:
+        schema_version: { type: integer }
+        subject: { type: string }
+        title: { type: string }
+        parent_plan:
+          type:
+            - array
+            - "null"
+          items: { type: string }
+        goals:
+          type:
+            - array
+            - "null"
+          items:
+            $ref: "#/components/schemas/K12UnitSummaryGoal"
+        knowledge:
+          type:
+            - array
+            - "null"
+          items:
+            $ref: "#/components/schemas/K12UnitSummaryKnowledge"
+        examples:
+          type:
+            - array
+            - "null"
+          items:
+            $ref: "#/components/schemas/K12UnitSummaryExample"
+        transfer_checks:
+          type:
+            - array
+            - "null"
+          items:
+            $ref: "#/components/schemas/K12UnitSummaryTransferCheck"
+        reference_explanations:
+          type:
+            - array
+            - "null"
+          items:
+            $ref: "#/components/schemas/K12UnitSummaryReferenceExplanation"
+        common_pitfalls:
+          type:
+            - array
+            - "null"
+          items: { type: string }
+        personal_guidance:
+          type:
+            - array
+            - "null"
+          items:
+            $ref: "#/components/schemas/K12UnitSummaryPersonalGuidance"
+        coverage:
+          $ref: "#/components/schemas/K12UnitSummaryCoverage"
+        sources:
+          type:
+            - array
+            - "null"
+          items:
+            $ref: "#/components/schemas/K12UnitSummarySource"
+    K12UnitSummaryDocument:
+      type: object
+      required: [ document_id, agent, subject, scope_key, head_version, created_at, updated_at ]
+      properties:
+        document_id: { type: string }
+        agent: { type: string }
+        subject: { type: string }
+        scope_key: { type: string }
+        current_revision_id: { type: string }
+        head_version: { type: integer }
+        created_at: { type: integer }
+        updated_at: { type: integer }
+    K12UnitSummaryAttempt:
+      type: object
+      required:
+        - id
+        - agent
+        - session_id
+        - source_message_id
+        - intent
+        - state
+        - stage
+        - requirements
+        - revision
+        - created_at
+        - updated_at
+      properties:
+        id: { type: string }
+        agent: { type: string }
+        document_id: { type: string }
+        session_id: { type: string }
+        source_message_id: { type: string }
+        intent: { type: string }
+        state: { type: string }
+        stage: { type: string }
+        requirements:
+          $ref: "#/components/schemas/K12UnitSummaryRequirements"
+        content:
+          $ref: "#/components/schemas/K12UnitSummaryContentV1"
+        content_digest: { type: string }
+        revision_id: { type: string }
+        artifact_id: { type: string }
+        failure_kind: { type: string }
+        failure_detail: { type: string }
+        clarification: { type: string }
+        revision: { type: integer }
+        created_at: { type: integer }
+        updated_at: { type: integer }
+    K12UnitSummaryRevision:
+      type: object
+      required:
+        - revision_id
+        - document_id
+        - agent
+        - version
+        - attempt_id
+        - content
+        - canonical_markdown
+        - content_digest
+        - source_snapshot
+        - personal_snapshot
+        - requirements
+        - generated_at
+        - generated_timezone
+        - generated_date
+        - filename
+        - artifact_id
+        - byte_digest
+        - byte_size
+      properties:
+        revision_id: { type: string }
+        document_id: { type: string }
+        agent: { type: string }
+        version: { type: integer }
+        attempt_id: { type: string }
+        content:
+          $ref: "#/components/schemas/K12UnitSummaryContentV1"
+        canonical_markdown: { type: string }
+        content_digest: { type: string }
+        source_snapshot:
+          type:
+            - array
+            - "null"
+          items:
+            $ref: "#/components/schemas/K12UnitSummarySource"
+        personal_snapshot:
+          type:
+            - array
+            - "null"
+          items:
+            $ref: "#/components/schemas/K12UnitSummarySource"
+        requirements:
+          $ref: "#/components/schemas/K12UnitSummaryRequirements"
+        generated_at: { type: integer }
+        generated_timezone: { type: string }
+        generated_date: { type: string }
+        filename: { type: string }
+        artifact_id: { type: string }
+        byte_digest: { type: string }
+        byte_size: { type: integer }
+    K12UnitSummaryArtifact:
+      type: object
+      required: [ artifact_id, source_kind, content_type, byte_digest, byte_size ]
+      properties:
+        artifact_id: { type: string }
+        source_kind: { type: string }
+        content_type: { type: string }
+        byte_digest: { type: string }
+        byte_size: { type: integer }
+    K12UnitSummaryMaterialView:
+      allOf:
+        - $ref: "#/components/schemas/K12UnitSummaryRevision"
+        - type: object
+          required: [ subject, title, artifact ]
+          properties:
+            subject: { type: string }
+            title: { type: string }
+            artifact:
+              $ref: "#/components/schemas/K12UnitSummaryArtifact"
+            grade_term: { type: string }
+            textbook_edition: { type: string }
+            unit_number: { type: string }
+            unit_title: { type: string }
+    K12UnitSummaryView:
+      type: object
+      required: [ job, delivery, replayed ]
+      properties:
+        job:
+          $ref: "#/components/schemas/K12UnitSummaryAttempt"
+        document:
+          $ref: "#/components/schemas/K12UnitSummaryDocument"
+        material:
+          $ref: "#/components/schemas/K12UnitSummaryMaterialView"
+        delivery:
+          type: object
+          required: [ complete ]
+          properties:
+            complete:
+              type: boolean
+              description: 本版本资料与文件已发布，可从原产物接口读取。
+        replayed: { type: boolean }
+    K12UnitSummaryDocumentsView:
+      type: object
+      required: [ documents, jobs, next_cursor ]
+      properties:
+        documents:
+          type: array
+          items:
+            $ref: "#/components/schemas/K12UnitSummaryView"
+        jobs:
+          type: array
+          items:
+            $ref: "#/components/schemas/K12UnitSummaryAttempt"
+        next_cursor:
+          type: string
+          description: 下一页游标，空字符串表示已到末页。
+    K12UnitSummaryRequest:
+      type: object
+      required: [ agent, session_id, source_message_id, idempotency_key, final_user_text ]
+      properties:
+        agent:
+          type: string
+          minLength: 1
+        session_id:
+          type: string
+          minLength: 1
+        source_message_id:
+          type: string
+          minLength: 1
+          description: 同一会话已持久化的用户消息 ID。
+        idempotency_key:
+          type: string
+          minLength: 1
+          description: 同一 owner 和 agent 范围内的请求键。相同键要求相同请求摘要。
+        final_user_text:
+          type: string
+          minLength: 1
+          description: 必须与被引用消息保存的正文相同。
+        prompt_invocation:
+          description: 原提示调用的 JSON 元数据，由服务端结合会话正文解释。
+        active_revision_id: { type: string }
+        subject: { type: string }
+        intent: { type: string }
+        unit_id: { type: string }
+        unit_title: { type: string }
+        material_document_ids:
+          type: array
+          items: { type: string }
+        format: { type: string }
+        model_snapshot:
+          type: object
+          properties:
+            provider: { type: string }
+            model: { type: string }
+          description: 可选的文本路由偏好。接纳时从当前配置冻结实际提供方、模型与能力。
+    K12UnitSummaryResumeRequest:
+      type: object
+      required: [ agent, expected_revision, idempotency_key ]
+      properties:
+        agent:
+          type: string
+          minLength: 1
+        expected_revision:
+          type: integer
+          description: 最近读取的 job.revision。原恢复命令重放时沿用该命令原值。
+        idempotency_key: { type: string }
+        followup_message_id:
+          type: string
+          description: 需要家长补充信息时引用同一会话已保存的用户消息。
+    K12UnitSummaryResumeConflict:
+      allOf:
+        - $ref: "#/components/schemas/MessageError"
+        - type: object
+          properties:
+            current:
+              $ref: "#/components/schemas/K12UnitSummaryView"
+    K12DingTalkInboundIdentity:
+      type: object
+      required: [ platform, instance_id, chat_id, provider_message_id ]
+      dependentRequired:
+        page_index: [ page_count ]
+        page_count: [ page_index ]
+      properties:
+        platform: { type: string }
+        instance_id: { type: string }
+        chat_id: { type: string }
+        provider_message_id: { type: string }
+        page_index:
+          type: integer
+          minimum: 0
+          description: 多图消息的实际页序，小于 page_count。从 0 计，单图消息省略。
+        page_count:
+          type: integer
+          minimum: 2
+          description: 接纳时记录的多图总页数。单图消息省略。
+    K12DingTalkInboundReceipt:
+      type: object
+      required: [ identity, agent_name, receipt_id, binding_id, command_digest ]
+      properties:
+        identity:
+          $ref: "#/components/schemas/K12DingTalkInboundIdentity"
+        agent_name: { type: string }
+        receipt_id: { type: string }
+        binding_id: { type: string }
+        command_digest: { type: string }
+    K12DingTalkInboundAsset:
+      type: object
+      required: [ asset_id, receipt_id, mime, size, digest ]
+      properties:
+        asset_id: { type: string }
+        receipt_id: { type: string }
+        mime: { type: string }
+        size: { type: integer }
+        digest: { type: string }
+    K12DingTalkInboundDispatch:
+      type: object
+      required:
+        [
+          receipt_id,
+          dispatch_id,
+          processing_status,
+          routing_decision,
+          confirmation_status,
+          reply_status,
+          version
+        ]
+      properties:
+        receipt_id: { type: string }
+        dispatch_id: { type: string }
+        processing_status: { type: string }
+        routing_decision: { type: string }
+        confirmation_status: { type: string }
+        reply_status: { type: string }
+        version: { type: integer }
+        image_task_id: { type: string }
+        final_artifact_id: { type: string }
+        delivery_batch_id: { type: string }
+    K12DingTalkInboundBundle:
+      type: object
+      required: [ receipt, asset, dispatch ]
+      properties:
+        receipt:
+          $ref: "#/components/schemas/K12DingTalkInboundReceipt"
+        asset:
+          $ref: "#/components/schemas/K12DingTalkInboundAsset"
+        dispatch:
+          $ref: "#/components/schemas/K12DingTalkInboundDispatch"
     K12TasksMaterialPreparationItem:
       additionalProperties: false
       properties:
@@ -34959,6 +35806,12 @@ components:
       additionalProperties: false
       required:
         - tasks
+    K12TasksImageTaskSingleError:
+      type: object
+      required: [ error ]
+      additionalProperties: false
+      properties:
+        error: { type: string }
     K12TasksImageTaskBatchError:
       type: object
       properties:

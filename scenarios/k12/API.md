@@ -10,7 +10,7 @@
 
 | 模块 | 内容 |
 | --- | --- |
-| [图片任务、创作与材料](docs/api/tasks.md) | 图片 facade、结果与恢复、逐题来源与反馈、作品和资产、材料准备 |
+| [图片任务、创作与资料](docs/api/tasks.md) | 图片接纳与恢复、逐题来源、作品与资产、材料准备、单元梳理及条件装配的钉钉入站诊断 |
 | [练习、周练与打印](docs/api/practice.md) | 错题练习生成、候选选择、练习集、作答与批改、周练、原生打印回执 |
 | [档案、教材与学习记录](docs/api/records.md) | 展示描述、单题处理、档案与课程进度、积累与学情、导出备份、辅导与 IM 自动化 |
 
@@ -139,7 +139,7 @@ curl --fail-with-body "$HEXCLAW_API_BASE/api/k12/profile-bundle" \
 4. 人工进度须提供目录内的 `volume/unit_id`。AI 输入允许 unit_id 为空，后端重算并保留显式课时、页码。显式非空 AI 选择无法匹配当前档案的真实教材目录时，创建与编辑均返回 `400`，不保存任何变更。
 5. 同 scope 人工进度不被推算覆盖。PUT 省略表示自动处理，显式 null 表示本次清除；旧空进度生命周期不关闭后续建议。
 6. `GET /api/k12/curriculum-progress?mode=estimate` 只读预览，返回 `{"progress":null或对象,"revision":...}`。创建前无需 agent；参数为 `grade_term/textbook_edition` 和可选 `textbook_manifest_id/lesson_id/page_from/page_to`。已有实例可带 agent，由持久档案补齐缺省年级与教材。
-7. `GET /api/k12/textbook-binding-options?mode=create` 在创建前只读当前可信 owner 的数学教材候选，无需 agent、不创建绑定，返回 `{"items":[...]}`。未指定创建模式时保留已有实例的候选查询与归属校验。
+7. `GET /api/k12/textbook-binding-options?mode=create` 在创建前只读当前可信 owner 的数学教材候选，返回 `{"items":[...]}`。已有实例查询需提供 `agent` 和 `subject=math`。该模式下缺少或不支持的学科返回 400。
 8. 年级来自持久封面证据，不从文件名猜测；多个匹配目录不任取首项。confirmed_at 保持 Unix 数字，AI 建议为 `0`；estimate_basis 保存推算日期、参考窗口、权重方法和可选引用回执哈希。
 9. 推算参考窗口为上学期 9 月 1 日至次年 1 月 31 日、下学期 3 月 1 日至 6 月 30 日；按服务端上海日期选择最近对应周期，结合工作日比例、目录课时数与缺省页跨度估计单元。这是建议参考，不是真实学校校历或已学、掌握证据。
 10. 只读预览不写入；仅新业务请求通过 CAS 采用建议。已冻结成果不会因新建议重新生成，无教材或进度不阻断真实题目处理。

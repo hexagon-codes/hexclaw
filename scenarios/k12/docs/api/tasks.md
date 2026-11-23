@@ -1,4 +1,4 @@
-# 图片任务、资料准备与作品 API
+# 单元资料、图片任务与创作 API
 
 [English](tasks.en.md) · [K12 API 总览](../../API.md) · [OpenAPI 完整契约](../../../../api/openapi.yaml)
 
@@ -19,6 +19,12 @@
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
+| POST | `/api/k12/unit-summary-jobs` | [接纳单元学习资料任务](#op-post-api-k12-unit-summary-jobs) |
+| GET | `/api/k12/unit-summary-jobs/{id}` | [读取单元资料任务](#op-get-api-k12-unit-summary-jobs-id) |
+| POST | `/api/k12/unit-summary-jobs/{id}/resume` | [接续单元资料任务](#op-post-api-k12-unit-summary-jobs-id-resume) |
+| GET | `/api/k12/unit-summary-documents` | [列出已发布资料及待处理任务](#op-get-api-k12-unit-summary-documents) |
+| GET | `/api/k12/unit-summary-documents/{id}` | [读取单元资料版本](#op-get-api-k12-unit-summary-documents-id) |
+| GET | `/api/k12/dingtalk-inbound` | [查询宿主的钉钉图片入站回执](#op-get-api-k12-dingtalk-inbound) |
 | GET | `/api/k12/materials/{document_id}/preparation` | [读取资料准备明细](#op-get-api-k12-materials-document-id-preparation) |
 | GET | `/api/k12/materials/preparations` | [批量读取资料准备概况](#op-get-api-k12-materials-preparations) |
 | GET | `/api/k12/materials/{document_id}/preparation/{task_id}/recovery` | [读取一次资料恢复计划](#op-get-api-k12-materials-document-id-preparation-task-id-recovery) |
@@ -46,6 +52,48 @@
 | DELETE | `/api/k12/creative-works/{id}` | [按版本删除当前作品](#op-delete-api-k12-creative-works-id) |
 | POST | `/api/k12/assets` | [上传原图资产](#op-post-api-k12-assets) |
 | GET | `/api/k12/assets/{file}` | [下载原图资产](#op-get-api-k12-assets-file) |
+
+<a id="op-post-api-k12-unit-summary-jobs"></a>
+
+## `POST /api/k12/unit-summary-jobs`
+
+创建命令接受一个 JSON 对象，最多 1 MiB。必填 `agent`、`session_id`、`source_message_id`、`idempotency_key`、`final_user_text`。先保存会话中的用户消息，再引用其 ID 及原正文。可传 `prompt_invocation`、`active_revision_id`、`subject`、`intent`、`unit_id`、`unit_title`、`material_document_ids`、`format` 和 `model_snapshot`。接纳时由服务解析并冻结实际文本路由。相同孩子范围及命令键重放沿用原任务，改变请求摘要或所传正文与原消息不符时返回 409。
+
+`202` 返回 `job.id`、`job.state`、`job.revision` 及当前视图。相同命令重放时，若该尝试已经停止自动推进（例如成功、失败或需要补充），返回 `200`。有可用资料时读取 `material` 和 `delivery.complete`。
+
+<a id="op-get-api-k12-unit-summary-jobs-id"></a>
+
+## `GET /api/k12/unit-summary-jobs/{id}`
+
+以 `agent` 和 `job.id` 读取 `job`、可选的 `document` 和 `material`、`delivery`、`replayed`。`needs_input` 可带 `job.clarification`；`failed` 可带 `failure_kind` 和 `failure_detail`；`reconciling` 表示原调用仍在对账。读取不会触发新的模型调用。
+
+<a id="op-post-api-k12-unit-summary-jobs-id-resume"></a>
+
+## `POST /api/k12/unit-summary-jobs/{id}/resume`
+
+路径 ID 使用原 `job.id`。JSON 命令包含 `agent`、`expected_revision` 和 `idempotency_key`。缺资料时先将用户补答写入原会话，再传 `followup_message_id`。若服务能从已取得的解析回执恢复，则可直接接续原尝试。原恢复命令重放使用最初的键、修订与正文。受理返回 `202`，已停止自动推进的原命令重放返回 `200`。不可接续的状态或修订冲突返回 `409`，能读回原任务时修订冲突响应包含 `current`。
+
+<a id="op-get-api-k12-unit-summary-documents"></a>
+
+## `GET /api/k12/unit-summary-documents`
+
+必传 `agent`。可用 `session_id` 筛选原会话，`limit` 默认为 30，范围 1～100。`documents` 按文档 ID 升序返回已发布的版本视图。下一页沿用筛选条件并传入上一页的 `next_cursor`，空字符串表示末页。`jobs` 独立返回相同范围内最近更新的至多 100 个待处理尝试，包含已知失败，文档游标不影响此列表。
+
+<a id="op-get-api-k12-unit-summary-documents-id"></a>
+
+## `GET /api/k12/unit-summary-documents/{id}`
+
+路径使用 `document.document_id`，query 必传 `agent`。默认读当前版本，传 `revision_id` 可读取该文档的指定冻结版本。已发布的 `material` 包含 `revision_id`、`content`、`canonical_markdown`、来源快照、`artifact`、文件摘要和大小。通过已有 `GET /api/k12/print-artifacts/{id}/content?agent=...` 下载 `material.artifact.artifact_id` 对应的 PDF，按 `byte_digest` 和 `byte_size` 核对。文档或版本在当前作用域不可用时返回 404。
+
+<a id="op-get-api-k12-dingtalk-inbound"></a>
+
+## `GET /api/k12/dingtalk-inbound`
+
+此只读入口随具备相应诊断端口的 K12 宿主装配。query 提供 `agent`、`platform=dingtalk`、`instance_id`、`chat_id` 与 `provider_message_id`，全部从原入站身份取得。服务按完整物理身份取回执，核对宿主挂载的 owner scope 和孩子。
+
+同一条私聊消息包含多张图时，沿用同一个 `provider_message_id`，通过可选的 `page_index` 逐页查询。页序从 0 开始，缺省读首页。多图的 `receipt.identity` 同时包含 `page_index` 与 `page_count`，单图保持原有字段。负数或非整数页序返回 400，不存在的页返回 404。
+
+`200` 返回 `receipt`（原消息身份、接纳 ID、绑定和命令摘要）、`asset`（ID、MIME、大小及摘要）与 `dispatch`（处理、路由、确认、投递状态、版本及已有下游 ID）。核对 `reply_status`、`delivery_batch_id` 及原批次各部件回执可判断投递进度。缺少匹配记录或孩子不符时返回 `404`，方法错误或缺少查询端口时返回 `405`，查询失败时返回 `500`。此诊断的 handler 错误为 `text/plain`。
 
 <a id="op-get-api-k12-materials-document-id-preparation"></a>
 
@@ -126,7 +174,9 @@ POST 使用刚读取的 fingerprint，显式接受可能重复计费。Idempoten
 
 稳定去重身份为agent + source_kind + source_ref + attempt_generation；同身份必须保持会话、图片、意图上下文、creative_entry和模型选择一致。自动分类/处理异步启动。多图整组预校验后按输入顺序逐页接纳；中途失败可带tasks与零起始failed_index，已接纳页保留，不盲重发。默认省略creative_entry；档案手工新建作品可用kind=new_work，task_intent=writing/artwork/unknown，并按explicit_commit投影操作。
 
-请求体：[K12TasksCreateImageTaskReq](#schema-k12taskscreateimagetaskreq) (`application/json`)。
+同一 `agent`、`source_kind`、`source_ref` 和 `attempt_generation` 标识一次提交。首次接纳冻结有序 `source_asset_refs`。重放时沿用原会话、意图、`creative_entry`、模型选择及完整有序图片列表，逐页取回已有任务。相同代次增加、移除、替换或调换图片都返回 `409`，包括单图与多图之间的转换。用户明确修改输入后可使用新的 `attempt_generation` 提交。
+
+多图先整组检查原件，再依次创建单页任务并异步处理。中途失败时 `tasks` 列出已接纳的页，`failed_index` 从 0 开始。自动分流可省略 `creative_entry`。手工录入作品使用 `kind=new_work` 及 `task_intent=writing/artwork/unknown`，按 `explicit_commit` 保存。
 
 成功响应：`200` → [K12TasksImageTaskAccepted](#schema-k12tasksimagetaskaccepted) / [K12TasksImageTaskBatchAccepted](#schema-k12tasksimagetaskbatchaccepted)。
 
@@ -306,6 +356,8 @@ POST 使用刚读取的 fingerprint，显式接受可能重复计费。Idempoten
 <a id="op-get-api-k12-image-tasks-id-result"></a>
 
 ## `GET /api/k12/image-tasks/{id}/result`
+
+作业完成分类后，公开的 `dispatch.task_intent`、结果的 `task_intent` 与 `result.kind` 均按冻结动作投影。`result.payload.task_intent`、`mode` 和 `result_surface` 对应同一用途。有笔迹照片明确要求解题时，结果为 `blank_worksheet / solve / parent_teaching_guide`。服务端保留首次分类和模型回执。尚未完成的分类、作文、美术及没有冻结动作的历史任务沿用原分类语义。
 
 读取图片结果和执行回执。
 

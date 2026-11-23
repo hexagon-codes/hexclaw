@@ -343,6 +343,8 @@ Read-only; includes mistakes and corrective accumulations. review_kind is verify
 
 Availability: K12 module, record store and the dependencies described for this operation.
 
+Ordinary learning records keep their original `record_id` when available in the target database. If another tutor already owns an ID, as when the source child still exists on the same service, the migration maps that ID for the target and updates references in the imported data in the same transaction. Replay and rollback use the mapping from the migration journal. The source records and their references retain their original IDs.
+
 | Parameter | Location | Required | Type / constraint |
 | --- | --- | --- | --- |
 | `agent` | query | Yes | string Tutor Agent name; selects the learner scope, not the authenticated owner. |
@@ -1413,7 +1415,7 @@ Deprecated: every call returns 405 with Allow: GET.
 
 Read textbook manifest candidates.
 
-mode=create reads owner-scoped math candidates without creating an Agent or binding. Existing-scope mode requires agent/subject, validates scope and may reconcile candidate/binding state. catalog is the real manifest catalog or null; fields report indexing failures/retryability. See the canonical textbook contract.
+`mode=create` lists the authenticated owner’s math textbook candidates before registration. Existing-tutor queries require `agent` and `subject=math`, check ownership, and may reconcile candidate and binding state. `catalog` contains the manifest catalog or `null`. Each candidate reports its indexing state and retryability.
 
 Availability: K12 module, record store and the dependencies described for this operation.
 
@@ -1421,7 +1423,7 @@ Availability: K12 module, record store and the dependencies described for this o
 | --- | --- | --- | --- |
 | `mode` | query | No | `create` create selects the owner-scoped pre-creation preview; omitted uses the existing Tutor scope. |
 | `agent` | query | No | string Required when mode is omitted; unnecessary for mode=create. |
-| `subject` | query | No | `math` / `chinese` / `english` / `science` / `information_technology` / `art` Required in existing-scope mode. mode=create fixes the subject to math. |
+| `subject` | query | Conditional | Required as `math` for an existing tutor. Creation mode always uses math. |
 
 Success: `200` `application/json`.
 
@@ -1432,7 +1434,7 @@ Success: `200` `application/json`.
 
 | Status | Error meaning |
 | --- | --- |
-| `400` | Invalid owner/agent/subject. |
+| `400` | The existing-tutor query omitted the subject or supplied an unsupported subject. |
 | `404` | Agent scope unavailable. |
 | `500` | Records/principal/candidate read failed. |
 

@@ -343,6 +343,8 @@ JSON 正文：
 
 依赖：K12 module, record store and the dependencies described for this operation.
 
+普通学习记录在目标数据库中沿用可用的原 `record_id`。若某个 ID 已归其他孩子，例如同一后端仍保有源孩子的错题，服务为目标孩子映射该记录 ID，并在同一事务调整导入数据中引用该记录的位置。重放和回退沿迁移日志复用此映射。源记录及其引用保持原值。
+
 | 参数 | 位置 | 必填 | 类型 / 约束 |
 | --- | --- | --- | --- |
 | `agent` | query | 是 | string Tutor Agent name; selects the learner scope, not the authenticated owner. |
@@ -1413,7 +1415,7 @@ md/省略返回 Markdown JSON；无Renderer也返回同一JSON。PDF/DOCX渲染�
 
 读取真实教材候选。
 
-mode=create 在可信owner范围只读数学候选，不创建Agent或绑定；普通模式需agent/subject并校验归属，读取时可协调已有候选与绑定状态。catalog 为真实manifest目录或null；索引失败、可重试性按各字段表达。共同规则链接权威教材章节。
+`mode=create` 在创建前读取已认证 owner 的数学教材候选。已有实例查询需提供 `agent` 和 `subject=math`，服务校验归属并可协调已有候选和绑定状态。`catalog` 为教材目录或 `null`，索引和重试状态随候选返回。
 
 依赖：K12 module, record store and the dependencies described for this operation.
 
@@ -1421,7 +1423,7 @@ mode=create 在可信owner范围只读数学候选，不创建Agent或绑定；�
 | --- | --- | --- | --- |
 | `mode` | query | 否 | `create` create selects the owner-scoped pre-creation preview; omitted uses the existing Tutor scope. |
 | `agent` | query | 否 | string Required when mode is omitted; unnecessary for mode=create. |
-| `subject` | query | 否 | `math` / `chinese` / `english` / `science` / `information_technology` / `art` Required in existing-scope mode. mode=create fixes the subject to math. |
+| `subject` | query | 依模式 | 已有实例必传 `math`。`mode=create` 内部固定为数学。 |
 
 成功：`200` `application/json`.
 
@@ -1432,7 +1434,7 @@ mode=create 在可信owner范围只读数学候选，不创建Agent或绑定；�
 
 | 状态 | 错误含义 |
 | --- | --- |
-| `400` | Invalid owner/agent/subject. |
+| `400` | 已有实例的学科参数缺失或不是 `math`。 |
 | `404` | Agent scope unavailable. |
 | `500` | Records/principal/candidate read failed. |
 
