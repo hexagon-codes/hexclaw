@@ -279,6 +279,9 @@ func readParentGuideAudits(output string, candidates []guideAuditCandidate, exac
 		raw = strings.TrimSpace(raw)
 		var audits []parentGuideAudit
 		if !exact && json.Unmarshal([]byte(raw), &audits) == nil {
+			if len(candidates) > 1 {
+				return strictGuideAuditSet(raw, candidates)
+			}
 			return audits
 		}
 		if strings.TrimSpace(output) != "" || len(candidates) == 0 {

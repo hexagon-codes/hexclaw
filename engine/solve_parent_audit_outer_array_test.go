@@ -31,9 +31,11 @@ func TestTeachingReportRecoversOnlyCompleteSourceBoundAuditArray(t *testing.T) {
 		sources                   []string
 	}{
 		{"complete without closing bracket", complete, first, "VALID", want},
+		{"complete JSON", complete + "]", first, "VALID", want},
 		{"negative stays negative", complete, second, "INVALID", want},
 		{"explicit scope veto", line(audit(first, true), outOfScope), second, "INVALID", want},
 		{"missing other review", line(audit(first, true)), first, "NOT_PROVIDED", want},
+		{"complete JSON missing other review", line(audit(first, true)) + "]", first, "NOT_PROVIDED", want},
 		{"missing other field", line(audit(first, true), missing), first, "NOT_PROVIDED", want},
 		{"different source", line(audit(first, true), audit("unexpected", true)), first, "NOT_PROVIDED", want},
 		{"duplicate source", line(audit(first, true), audit(first, true)), first, "NOT_PROVIDED", want},
