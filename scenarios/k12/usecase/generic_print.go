@@ -14,11 +14,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hexagon-codes/toolkit/util/logger"
+
 	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/render"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	k12storage "github.com/hexagon-codes/hexclaw/scenarios/k12/storage"
-	"github.com/hexagon-codes/toolkit/util/logger"
 )
 
 const printPDFRenderContractVersion = "k12-pdf-v2"
