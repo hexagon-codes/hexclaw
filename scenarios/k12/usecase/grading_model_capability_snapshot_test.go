@@ -44,7 +44,7 @@ func TestGradingRetryKeepsFrozenCapabilityEvidence(t *testing.T) {
 		v.Fields.ModelSnapshot.CapabilityReceiptDigest != frozen.CapabilityReceiptDigest ||
 		v.Fields.ModelSnapshot.ProbePolicyVersion != frozen.ProbePolicyVersion ||
 		v.Fields.ModelSnapshot.ParentInstructions != frozen.ParentInstructions ||
-		v.Fields.ModelSnapshot.MathExecutionContract != k12.MathExecutionContractProgramFirst {
+		v.Fields.ModelSnapshot.MathExecutionContract != k12.MathExecutionContractClassroom {
 		t.Fatalf("created job did not freeze the configured route and current contracts: %+v", v.Fields.ModelSnapshot)
 	}
 	// 后续每次调用必须与正式创建阶段的完整持久快照相同，不能只比较旧字段。

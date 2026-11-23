@@ -2616,7 +2616,7 @@ Set source only when the material explicitly names a work, title, or another rel
 				}
 				resolved, err := resolveK12PracticeModelSnapshotWithCapabilityReceipt(requestCtx, router, k12ModelCapabilityReceipts, requested, k12AutoTextProbe)
 				if err == nil && resolved.MathExecutionContract == "" {
-					resolved.MathExecutionContract = k12.MathExecutionContractProgramFirst
+					resolved.MathExecutionContract = k12.MathExecutionContractClassroom
 				}
 				return resolved, err
 			}
@@ -2669,7 +2669,7 @@ Set source only when the material explicitly names a work, title, or another rel
 					ctx, router, k12ModelCapabilityReceipts, requested, k12AutoVisionProbe,
 				)
 				if err == nil && !requested.HasFrozenCapabilityProbeEvidence() && resolved.MathExecutionContract == "" {
-					resolved.MathExecutionContract = k12.MathExecutionContractProgramFirst
+					resolved.MathExecutionContract = k12.MathExecutionContractClassroom
 				}
 				return resolved, err
 			}
@@ -2682,7 +2682,7 @@ Set source only when the material explicitly names a work, title, or another rel
 					k12AutoTextProbe,
 				)
 				if err == nil && !requested.HasFrozenCapabilityProbeEvidence() && resolved.MathExecutionContract == "" {
-					resolved.MathExecutionContract = k12.MathExecutionContractProgramFirst
+					resolved.MathExecutionContract = k12.MathExecutionContractClassroom
 				}
 				return resolved, err
 			}

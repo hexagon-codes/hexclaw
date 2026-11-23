@@ -50,6 +50,8 @@ var (
 )
 
 type elementaryWordSolution struct {
+	teaching        *ExactMathTeaching
+	teachingTarget  string
 	worked          string
 	value           string
 	unit            string
@@ -270,7 +272,12 @@ func solveFractionQuantityProblem(problem string) (elementaryWordSolution, bool)
 		expression := "(" + field("total") + ")/(" + field("each") + ")"
 		reciprocal := new(big.Rat).Inv(each).RatString()
 		worked := fmt.Sprintf("求总长度中有多少个每段长度，用总长度除以每段长度。\n(%s)÷(%s) = %s 段\n\n答案：%s 段", field("total"), field("each"), answer, answer)
-		return elementaryWordSolution{worked: worked, value: answer, unit: "段", knowledgePoint: "分数除法", program: wordProgram([]string{expression}, []string{"段"}), workExpressions: [][]string{{expression}, {"(" + field("total") + ")*(" + reciprocal + ")"}}}, true
+		lesson := &ExactMathTeaching{Method: fmt.Sprintf("把整根%s按每段 %s%s 分组，段数等于总长除以每段长度。", field("item"), field("each"), field("unit")),
+			Mistake:  fmt.Sprintf("所求是段数，把 %s%s 除以 %s%s；把这两个长度写反就变成每段占全长的比例。", field("total"), field("unit"), field("each"), field("unit")),
+			Prompt:   fmt.Sprintf("先画一条表示 %s%s 的线段，让孩子按 %s%s 一段分组。", field("total"), field("unit"), field("each"), field("unit")),
+			Question: fmt.Sprintf("%s 段都一样长，怎样拼回原来的长度？", answer),
+			Check:    fmt.Sprintf("%s × (%s) = %s（%s），各段长度相加正好等于总长。", answer, field("each"), field("total"), field("unit"))}
+		return elementaryWordSolution{worked: worked, value: answer, unit: "段", knowledgePoint: "分数除法", teaching: lesson, program: wordProgram([]string{expression}, []string{"段"}), workExpressions: [][]string{{expression}, {"(" + field("total") + ")*(" + reciprocal + ")"}}}, true
 	}
 	if m := remainingFractionQuantityRe.FindStringSubmatch(p); m != nil {
 		field := func(name string) string { return m[remainingFractionQuantityRe.SubexpIndex(name)] }
@@ -292,7 +299,12 @@ func solveFractionQuantityProblem(problem string) (elementaryWordSolution, bool)
 		expression := t + "*(1-" + f + ")"
 		used := formatArithmeticRat(new(big.Rat).Mul(total, fraction))
 		worked := fmt.Sprintf("把总量看作 1，用去了 %s/%s，剩下的分率是 1−%s/%s。\n%s×(1−%s/%s) = %s %s\n\n答案：%s %s", field("numerator"), field("denominator"), field("numerator"), field("denominator"), field("total"), field("numerator"), field("denominator"), answer, unit, answer, unit)
-		return elementaryWordSolution{worked: worked, value: answer, unit: unit, knowledgePoint: "分数乘法", program: wordProgram([]string{expression}, []string{unit}), workExpressions: [][]string{{expression}, {t + "-" + t + "*" + f}, {t + "*(" + remaining.RatString() + ")"}, {t + "*" + f, t + "-(" + used + ")"}}}, true
+		lesson := &ExactMathTeaching{Method: fmt.Sprintf("以全部 %s%s 为单位“1”。先从 1 中减去用掉的 %s，再求剩下的 %s。", field("total"), unit, fraction.RatString(), remaining.RatString()),
+			Mistake:  fmt.Sprintf("直接乘 %s 算出的是已用的 %s%s；题目问的是剩余量。", fraction.RatString(), used, unit),
+			Prompt:   fmt.Sprintf("让孩子在一条线段上标出全部 %s%s，分开已用的 %s 和剩下的 %s。", field("total"), unit, fraction.RatString(), remaining.RatString()),
+			Question: fmt.Sprintf("剩下 %s%s 与用掉的 %s%s 合起来是多少？", answer, unit, used, unit),
+			Check:    fmt.Sprintf("%s + %s = %s（%s），剩余量与已用量合计等于全部。", answer, used, field("total"), unit)}
+		return elementaryWordSolution{worked: worked, value: answer, unit: unit, knowledgePoint: "分数乘法", teaching: lesson, program: wordProgram([]string{expression}, []string{unit}), workExpressions: [][]string{{expression}, {t + "-" + t + "*" + f}, {t + "*(" + remaining.RatString() + ")"}, {t + "*" + f, t + "-(" + used + ")"}}}, true
 	}
 	return elementaryWordSolution{}, false
 }
@@ -413,7 +425,12 @@ func solveTotalFractionCountProblem(problem string) (elementaryWordSolution, boo
 	worked := fmt.Sprintf("%s占总数的 %s/%s，就是把 %s %s平均分成 %s 份，取其中 %s 份。\n%s÷%s×%s = %s %s\n\n答案：%s %s",
 		field("part"), field("numerator"), field("denominator"), field("total"), unit,
 		field("denominator"), field("numerator"), field("total"), field("denominator"), field("numerator"), answer, unit, answer, unit)
-	return elementaryWordSolution{worked: worked, value: answer, unit: unit, knowledgePoint: "分数乘法", program: wordProgram([]string{field("total") + "/" + field("denominator") + "*" + field("numerator")}, []string{unit})}, true
+	lesson := &ExactMathTeaching{Method: fmt.Sprintf("%s占总数的 %s/%s。先求把 %s%s 平均分成 %s 份时每一份的量，再取 %s 份。", field("part"), field("numerator"), field("denominator"), field("total"), unit, field("denominator"), field("numerator")),
+		Mistake:  fmt.Sprintf("分母 %s 是总份数，分子 %s 是要取的份数，不能对调。", field("denominator"), field("numerator")),
+		Prompt:   fmt.Sprintf("画出代表 %s%s 的线段，均分成 %s 格，把属于%s的 %s 格涂色。", field("total"), unit, field("denominator"), field("part"), field("numerator")),
+		Question: fmt.Sprintf("怎样检查 %s%s 确实占全部的 %s/%s？", answer, unit, field("numerator"), field("denominator")),
+		Check:    fmt.Sprintf("交叉相乘：%s × %s = %s × %s，部分与总量的关系成立。", answer, field("denominator"), field("total"), field("numerator"))}
+	return elementaryWordSolution{worked: worked, value: answer, unit: unit, knowledgePoint: "分数乘法", teaching: lesson, teachingTarget: field("part"), program: wordProgram([]string{field("total") + "/" + field("denominator") + "*" + field("numerator")}, []string{unit})}, true
 }
 
 // 只让完整直接式或两步份数式进入本地批改；数值成立但与题干无关的式子仍由 grader 判断。

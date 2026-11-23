@@ -343,6 +343,13 @@ func (d Deps) solveHomeworkProblem(ctx context.Context, req GradeRequest) (Solve
 	}
 	if req.SolveOutputVersion == SolveOutputWithTeachingReportV2 && result.Generation == nil {
 		request := d.parentTeachingGuideRequest(ctx, req, result, GradeOutcome{})
+		if request.customExpression && result.Evidence.Verdict == VerdictAgree && HasGradingPhysicalCallExecutor(ctx) {
+			return d.adaptReusedReportTeaching(ctx, req, result)
+		}
+		if guide, ok := d.currentClassroomMathGuide(ctx, request, result); ok {
+			result.ReportContent = guide.ReportContent
+			return result, nil
+		}
 		request.ReportRequired = false
 		if guide, ok := deterministicParentTeachingGuideForEvidence(request, result.Evidence); ok {
 			result.ReportContent = deterministicReportContent(guide)

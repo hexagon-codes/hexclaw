@@ -289,6 +289,17 @@ func (*SolveAdapter) TeachingReportCoreApproved(audit usecase.ParentTeachingGuid
 	return audit.Verdict == "INVALID" && engine.TeachingReportCoreApproved(audit.Output, audit.SourceSolutionDigest)
 }
 
+// VerifiedClassroomGuide 用原题重算当前讲法；此端口没有模型、存储或工具执行能力。
+func (*SolveAdapter) VerifiedClassroomGuide(problem, constraint, answer string) (usecase.ParentTeachingGuide, bool) {
+	method, ok := engine.VerifiedClassroomMath(problem, constraint, answer)
+	if !ok {
+		return usecase.ParentTeachingGuide{}, false
+	}
+	return usecase.ParentTeachingGuide{Answer: answer, FullSolutionSteps: method.Steps, GradeLevelMethod: method.Method,
+		LikelyMistakes: []string{method.Mistake}, ParentTeachingSequence: []string{method.Prompt},
+		FollowUpQuestions: []string{method.Question}, CheckingMethod: method.Check}, true
+}
+
 func buildParentTeachingSkillMethodology(subject string, loader SkillContentLoader) string {
 	methodology, _ := buildParentTeachingSkillContext(subject, loader)
 	return methodology

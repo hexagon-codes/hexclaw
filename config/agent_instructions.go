@@ -22,6 +22,13 @@ type AgentInstructionsSnapshot struct {
 	Source  string `json:"source"`
 }
 
+// UsesBundledDefaults 核对实际冻结的正文和摘要；文件里的原始模板与内嵌模板等价。
+func (s AgentInstructionsSnapshot) UsesBundledDefaults() bool {
+	content := strings.TrimSpace(defaultAgentInstructions)
+	sum := sha256.Sum256([]byte(content))
+	return s.Content == content && s.Digest == "sha256:"+hex.EncodeToString(sum[:])
+}
+
 type agentInstructionsContextKey struct{}
 
 func AgentInstructionsPath() (string, error) {

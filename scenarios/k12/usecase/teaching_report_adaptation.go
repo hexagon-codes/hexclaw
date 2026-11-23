@@ -29,6 +29,12 @@ func (d Deps) adaptReusedReportTeaching(ctx context.Context, req GradeRequest, s
 	if req.SolveOutputVersion != SolveOutputWithTeachingReportV2 || solved.OutOfScope || solved.Solution == "" {
 		return solved, nil
 	}
+	if guide, ok := d.currentClassroomMathGuide(ctx, d.parentTeachingGuideRequest(ctx, req, solved, GradeOutcome{}), solved); ok {
+		solved.Generation = nil
+		solved.ReportContent = guide.ReportContent
+		solved.ReportDegradationReason = ""
+		return solved, nil
+	}
 	if solved.reportLocalSource {
 		request := d.parentTeachingGuideRequest(ctx, req, solved, GradeOutcome{})
 		request.ReportRequired = false

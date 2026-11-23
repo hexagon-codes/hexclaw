@@ -315,6 +315,8 @@ func (a *SolveAdapter) SolveSubject(ctx context.Context, subject, problem, grade
 	}
 	problem = modelProblem
 	ctx = engine.WithSolveProgramExecution(ctx, usecase.GradingProgramExecutionEnabled(ctx))
+	snapshot, _ := k12.GradingModelSnapshotFromContext(ctx)
+	ctx = engine.WithClassroomMath(ctx, snapshot.MathExecutionContract == k12.MathExecutionContractClassroom)
 	args := map[string]any{"problem": problem}
 	if subject != "" {
 		args["subject"] = subject

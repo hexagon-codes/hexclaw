@@ -85,7 +85,7 @@ func (o *GradingOrchestrator) photoGradingCacheKey(ctx context.Context, in Start
 	}
 	snap.ParentInstructions = config.ReadAgentInstructions()
 	if snap.MathExecutionContract == "" {
-		snap.MathExecutionContract = k12.MathExecutionContractProgramFirst
+		snap.MathExecutionContract = k12.MathExecutionContractClassroom
 	}
 	// 报告复用原日期；当前日期不是重新调用模型的理由。模板语义摘要仍参与身份。
 	var report any

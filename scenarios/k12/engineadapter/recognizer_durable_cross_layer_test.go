@@ -397,7 +397,7 @@ func (h *dd036CrossLayerHarness) start(
 		job.Fields.ModelSnapshot.TimeoutMS != configured.TimeoutMS ||
 		job.Fields.ModelSnapshot.RecognizingRequestPolicy != configured.RecognizingRequestPolicy ||
 		job.Fields.ModelSnapshot.ParentInstructions.Digest == "" ||
-		job.Fields.ModelSnapshot.MathExecutionContract != k12.MathExecutionContractProgramFirst {
+		job.Fields.ModelSnapshot.MathExecutionContract != k12.MathExecutionContractClassroom {
 		t.Fatalf("created job did not freeze the configured route and current contracts: %+v", job.Fields.ModelSnapshot)
 	}
 	h.probe.snapshot = job.Fields.ModelSnapshot

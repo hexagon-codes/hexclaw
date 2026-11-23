@@ -114,10 +114,11 @@ func HasGradingPhysicalCallExecutor(ctx context.Context) bool {
 // GradingProgramExecutionEnabled 不给旧任务补写当前算法合同。
 func GradingProgramExecutionEnabled(ctx context.Context) bool {
 	if executor, ok := ctx.Value(gradingPhysicalCallContextKey{}).(*durableGradingPhysicalCallExecutor); ok {
-		return executor.job.Fields.ModelSnapshot.MathExecutionContract == k12.MathExecutionContractProgramFirst
+		contract := executor.job.Fields.ModelSnapshot.MathExecutionContract
+		return contract == k12.MathExecutionContractProgramFirst || contract == k12.MathExecutionContractClassroom
 	}
 	if snapshot, ok := k12.GradingModelSnapshotFromContext(ctx); ok {
-		return snapshot.MathExecutionContract == k12.MathExecutionContractProgramFirst
+		return snapshot.MathExecutionContract == k12.MathExecutionContractProgramFirst || snapshot.MathExecutionContract == k12.MathExecutionContractClassroom
 	}
 	return !GradingPhysicalCallsReplayOnly(ctx)
 }

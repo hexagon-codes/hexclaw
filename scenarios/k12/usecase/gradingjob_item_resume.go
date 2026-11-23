@@ -708,9 +708,14 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 		guideRequest := deps.parentTeachingGuideRequest(ctx, gradeReq, solved, graded.Outcome)
 		guideExecutionKind := k12.GradingExecutionProvider
 		var deterministicGuide *ParentTeachingGuide
+		var classroomGuide *ParentTeachingGuide
 		if guide, ok := degradedReportParentGuide(solved); ok {
 			guideExecutionKind = k12.GradingExecutionLocalDeterministic
 			deterministicGuide = &guide
+		} else if guide, ok := deps.currentClassroomMathGuide(ctx, guideRequest, solved); ok {
+			guideExecutionKind = k12.GradingExecutionLocalDeterministic
+			deterministicGuide = &guide
+			classroomGuide = &guide
 		} else if gradeReq.SolveOutputVersion == SolveOutputWithTeachingReportV2 && solved.Generation != nil {
 			guide, err := auditedSolveParentTeachingGuide(solved)
 			if err != nil {
@@ -739,7 +744,7 @@ func (o *GradingOrchestrator) assessDurablePhotoItem(
 		if guideErr != nil {
 			return item, guideErr
 		}
-		guide, guideErr := finalizeSolveParentTeachingGuide(rawGuide, solved)
+		guide, guideErr := finalizeCurrentClassroomGuide(rawGuide, solved, classroomGuide)
 		if guideErr != nil {
 			return item, guideErr
 		}
@@ -816,9 +821,14 @@ func (o *GradingOrchestrator) stageDurablePhotoReference(ctx context.Context, de
 	guideRequest := deps.parentTeachingGuideRequest(ctx, gradeReq, solved, GradeOutcome{})
 	guideExecutionKind := k12.GradingExecutionProvider
 	var deterministicGuide *ParentTeachingGuide
+	var classroomGuide *ParentTeachingGuide
 	if guide, ok := degradedReportParentGuide(solved); ok {
 		guideExecutionKind = k12.GradingExecutionLocalDeterministic
 		deterministicGuide = &guide
+	} else if guide, ok := deps.currentClassroomMathGuide(ctx, guideRequest, solved); ok {
+		guideExecutionKind = k12.GradingExecutionLocalDeterministic
+		deterministicGuide = &guide
+		classroomGuide = &guide
 	} else if solveTeachingVersionSupported(gradeReq.SolveOutputVersion) && solved.Generation != nil {
 		guideExecutionKind = k12.GradingExecutionLocalDeterministic
 	} else if guide, ok := deterministicParentTeachingGuideForEvidence(guideRequest, solved.Evidence); ok {
@@ -853,7 +863,7 @@ func (o *GradingOrchestrator) stageDurablePhotoReference(ctx context.Context, de
 	}
 	guide := rawGuide
 	if !repaired {
-		guide, err = finalizeSolveParentTeachingGuide(rawGuide, solved)
+		guide, err = finalizeCurrentClassroomGuide(rawGuide, solved, classroomGuide)
 	}
 	if err != nil {
 		return staged, err

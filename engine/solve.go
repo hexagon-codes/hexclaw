@@ -210,7 +210,7 @@ func (o *SolveSkill) Execute(ctx context.Context, args map[string]any) (*skill.R
 			(strings.TrimSpace(constraint) == "" || strings.Contains(constraint, "分数除法")) {
 			plan, ok = worksheet, true
 		} else if !frozen {
-			plan, ok = compileSolveProgram(deterministicProblem, constraint)
+			plan, ok = compileCurrentSolveProgram(ctx, deterministicProblem, constraint)
 		}
 		if !ok && !frozen {
 			original, _ := ctx.Value(solveUserProblemKey{}).(string)
@@ -218,7 +218,7 @@ func (o *SolveSkill) Execute(ctx context.Context, args map[string]any) (*skill.R
 				// 句号或换行隔开的讲解要求不进入原数学 AST；数值延长不匹配此边界。
 				suffix := strings.TrimLeft(strings.TrimPrefix(deterministicProblem, original), " \t")
 				if strings.HasPrefix(suffix, "。") || strings.HasPrefix(suffix, "\n") {
-					plan, ok = compileSolveProgram(original, constraint)
+					plan, ok = compileCurrentSolveProgram(ctx, original, constraint)
 				}
 			}
 		}

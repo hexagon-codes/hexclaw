@@ -58,6 +58,7 @@ const GradingMaxStageAttempts = 3
 
 // GradingModelSnapshot 实际模型路由快照（§5.4 model_snapshot：provider/model/capability/timeout/fallback）。
 const MathExecutionContractProgramFirst = "program-first-v1"
+const MathExecutionContractClassroom = "program-first-v2"
 const MathExecutionContractLegacy = "legacy"
 
 const QuantityAnswerPolicySlotV1 = "quantity_slot_answer_v1"
@@ -398,7 +399,7 @@ func validateGradingJobFields(fieldsJSON string) error {
 // NewGradingJobRecord 从领域字段构造一条批改任务记录（初始 queued）。
 func NewGradingJobRecord(agentName, sourceSession string, f GradingJobFields) (*records.AgentRecord, error) {
 	if f.ModelSnapshot.MathExecutionContract == "" {
-		f.ModelSnapshot.MathExecutionContract = MathExecutionContractProgramFirst
+		f.ModelSnapshot.MathExecutionContract = MathExecutionContractClassroom
 	}
 	if f.ConfirmationState == "" {
 		f.ConfirmationState = GradingConfirmationPending

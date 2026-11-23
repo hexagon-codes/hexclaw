@@ -36,6 +36,7 @@ type ParentTeachingGuide struct {
 // answer, but the usecase accepts it only when it is anchored in that verified
 // solution and never lets the generator rewrite the full method.
 type ParentTeachingGuideRequest struct {
+	customExpression            bool
 	verifiedWorksheet           *elementarymath.TravelWorksheet
 	FrozenReportContent         *TeachingReportContentDraft `json:"-"`
 	ReportRequired              bool                        `json:"report_required,omitempty"`
@@ -90,11 +91,14 @@ func (d Deps) parentTeachingGuideRequest(
 	solved SolveHomeworkResult,
 	outcome GradeOutcome,
 ) ParentTeachingGuideRequest {
+	snapshot, _ := k12.GradingModelSnapshotFromContext(ctx)
+	_, classroomAvailable := d.Solver.(classroomMathGuideReader)
 	var worksheet *elementarymath.TravelWorksheet
 	if sheet, ok := elementarymath.TravelWorksheetFor(ctx, req.Problem); ok {
 		worksheet = &sheet
 	}
 	return ParentTeachingGuideRequest{
+		customExpression:    classroomAvailable && snapshot.MathExecutionContract == k12.MathExecutionContractClassroom && !snapshot.ParentInstructions.UsesBundledDefaults(),
 		verifiedWorksheet:   worksheet,
 		FrozenReportContent: solved.ReportContent,
 		ReportRequired:      req.SolveOutputVersion == SolveOutputWithTeachingReportV2,
@@ -132,6 +136,10 @@ func (d Deps) SolveBlankWorksheetProblem(
 	}
 	req.Subject = subject
 	guideRequest := d.parentTeachingGuideRequest(ctx, req, solved, GradeOutcome{})
+	if guide, ok := d.currentClassroomMathGuide(ctx, guideRequest, solved); ok {
+		result.Guide = guide
+		return result, nil
+	}
 	guide, deterministic := deterministicParentTeachingGuideForEvidence(guideRequest, solved.Evidence)
 	// 联合输出已有本题候选时必须保留其审计结果，不能用通用数值讲法覆盖。
 	if solveTeachingVersionSupported(req.SolveOutputVersion) && solved.Generation != nil {
@@ -316,7 +324,7 @@ func deterministicParentTeachingGuideForEvidence(
 	req ParentTeachingGuideRequest,
 	evidence SolveEvidence,
 ) (ParentTeachingGuide, bool) {
-	if evidence.EvidenceType != EvidenceNumericExec {
+	if req.customExpression || evidence.EvidenceType != EvidenceNumericExec {
 		return ParentTeachingGuide{}, false
 	}
 	if req.verifiedWorksheet != nil && strings.Contains(req.VerifiedSolution, req.verifiedWorksheet.Answer()) {

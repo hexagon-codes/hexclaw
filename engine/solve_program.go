@@ -18,6 +18,7 @@ import (
 type SolveSkillOption func(*SolveSkill)
 
 type solveProgramContractKey struct{}
+type classroomMathKey struct{}
 type solveUserProblemKey struct{}
 type solveFrozenMathConstraintKey struct{}
 type travelProgramKey struct{}
@@ -79,13 +80,27 @@ func compileFrozenSolveProgram(ctx context.Context, problem string) (solveProgra
 	if suffix != "" && !strings.HasPrefix(suffix, "。") && !strings.HasPrefix(suffix, "\n") {
 		return solveProgramPlan{}, false, false
 	}
-	plan, ok := compileSolveProgram(original, constraint)
+	plan, ok := compileCurrentSolveProgram(ctx, original, constraint)
 	return plan, ok, true
 }
 
 // WithSolveProgramExecution 仅供内部场景按已冻结合同选择计算路径。
 func WithSolveProgramExecution(ctx context.Context, enabled bool) context.Context {
 	return context.WithValue(ctx, solveProgramContractKey{}, enabled)
+}
+
+// WithClassroomMath 仅在本轮输入已冻结新版课堂方法合同时启用。
+func WithClassroomMath(ctx context.Context, enabled bool) context.Context {
+	return context.WithValue(ctx, classroomMathKey{}, enabled)
+}
+
+func compileCurrentSolveProgram(ctx context.Context, problem, constraint string) (solveProgramPlan, bool) {
+	if enabled, _ := ctx.Value(classroomMathKey{}).(bool); enabled && classroomRatioAllowed(constraint) {
+		if plan, _, ok := ratioShareTeaching(problem); ok {
+			return plan, true
+		}
+	}
+	return compileSolveProgram(problem, constraint)
 }
 
 func solveProgramEnabled(ctx context.Context) bool {
