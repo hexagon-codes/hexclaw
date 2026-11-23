@@ -15,6 +15,7 @@
 - 默认技能和 MCP 市场更新至 HexClaw Hub `v0.1.1`，离线技能目录同步到该标签，包含 `homework-pdf 1.1.8`。
 - 浏览器 Computer Use、MCP 内容投影和运行流状态支撑同一任务生命周期：取消、断连与外部工具在途结果分别记录，未知结果不自动重放。
 - 模型与媒体路由继续使用已发布依赖版本；源码版本仍为 `v0.5.2`，上述变更尚未创建新 Tag 或发布。
+- 从 v0.4.9 升级的 Go 调用方请移除对旧 `hexclaw/runtime` 包及 `engine.ToolApprovalGate`、`engine.BuildQuestionConfirmPayload` 的直接依赖。这些入口已移除。会话和 Agent 集成可使用 `api/openapi.yaml` 声明的服务接口。
 
 ## v0.5.2（2026-10-29）
 

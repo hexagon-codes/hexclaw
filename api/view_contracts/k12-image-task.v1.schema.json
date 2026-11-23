@@ -112,6 +112,10 @@
       },
       "additionalProperties": false
     },
+    "imageTaskSourceDigest": {
+      "type": "string",
+      "pattern": "^(?:page-assets-v1:)?sha256:[0-9a-f]{64}$"
+    },
     "operationReceipt": {
       "type": "object",
       "required": [
@@ -130,8 +134,7 @@
         "operation": { "type": "string", "minLength": 1 },
         "execution_kind": { "enum": ["provider", "local_deterministic"] },
         "canonical_input_digest": {
-          "type": "string",
-          "pattern": "^sha256:[0-9a-f]{64}$"
+          "$ref": "#/$defs/imageTaskSourceDigest"
         },
         "provider": { "type": "string", "minLength": 1 },
         "model": { "type": "string", "minLength": 1 },
@@ -279,8 +282,7 @@
           ]
         },
         "source_digest": {
-          "type": "string",
-          "pattern": "^sha256:[0-9a-f]{64}$"
+          "$ref": "#/$defs/imageTaskSourceDigest"
         },
         "source_attachments": { "type": "array", "items": { "type": "object" } },
         "operation_receipts": {

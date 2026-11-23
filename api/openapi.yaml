@@ -35979,6 +35979,46 @@ components:
       required:
         - kind
         - payload
+    K12TasksSkillTeachingMethod:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          type: string
+        display_names:
+          type: object
+          additionalProperties:
+            type: string
+        structure:
+          type: object
+          additionalProperties:
+            type: string
+    K12TasksSkillContextReceipt:
+      type: object
+      additionalProperties: false
+      required: [name, version, status, content_digest]
+      properties:
+        name:
+          type: string
+        version:
+          type: string
+        status:
+          type: string
+          const: loaded
+        content_digest:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
+        display_name:
+          type: string
+        display_names:
+          type: object
+          additionalProperties:
+            type: string
+        methods:
+          type: array
+          items:
+            $ref: "#/components/schemas/K12TasksSkillTeachingMethod"
     K12TasksImageTaskResult:
       type: object
       properties:
@@ -35998,6 +36038,10 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/K12TasksImageTaskOperationReceipt"
+        skill_context_receipts:
+          type: array
+          items:
+            $ref: "#/components/schemas/K12TasksSkillContextReceipt"
         result:
           oneOf:
             - $ref: "#/components/schemas/K12TasksPhotoResultProjection"
