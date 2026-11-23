@@ -245,7 +245,7 @@ func (r *instancePhotoReceiver) ReceivePhotos(ctx context.Context, arrival adapt
 	}
 	route := receipt.Route
 	if missing {
-		seen, err := r.legacyEvent(ctx, msg.ID)
+		seen, err := r.legacyEvent(ctx, &msg)
 		if err != nil || seen {
 			return true, err
 		}
@@ -327,16 +327,28 @@ func photoPageSignatures(a adapter.PhotoArrival) ([]string, error) {
 	return result, nil
 }
 
-func (r *instancePhotoReceiver) legacyEvent(ctx context.Context, eventID string) (bool, error) {
+func (r *instancePhotoReceiver) legacyEvent(ctx context.Context, msg *adapter.Message) (bool, error) {
 	var created time.Time
-	err := r.manager.db.QueryRowContext(ctx, "SELECT created_at FROM platform_events WHERE instance_name=? AND event_id=?", r.inst.Name, eventID).Scan(&created)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
+	err := r.manager.db.QueryRowContext(ctx, "SELECT created_at FROM platform_events WHERE instance_name=? AND event_id=?", r.inst.Name, msg.ID).Scan(&created)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return false, err
 	}
-	return r.inst.CreatedAt.IsZero() || !created.Before(r.inst.CreatedAt), nil
+	if err == nil && (r.inst.CreatedAt.IsZero() || !created.Before(r.inst.CreatedAt)) {
+		var shared bool
+		if err = r.manager.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM im_photo_intakes WHERE platform=? AND instance_id=? AND provider_message_id=? AND committed_at_ms<=?)`,
+			r.inst.Provider, r.inst.ID, msg.ID, created.UnixMilli()).Scan(&shared); err != nil {
+			return false, err
+		}
+		if !shared {
+			return true, nil
+		}
+	}
+	var saved bool
+	err = r.manager.db.QueryRowContext(ctx, `SELECT EXISTS(
+		SELECT 1 FROM messages m JOIN sessions s ON s.id=m.session_id
+		WHERE m.request_id=? AND m.role='assistant' AND s.user_id=? AND s.platform=?
+		 AND s.chat_id=? AND s.instance_id IN (?,?))`, msg.Metadata["request_id"], msg.UserID, r.inst.Provider, msg.ChatID, r.inst.ID, r.inst.Name).Scan(&saved)
+	return saved, err
 }
 
 func (r *instancePhotoReceiver) message(ctx context.Context, receipt PhotoIntakeReceipt, withImages bool) (*adapter.Message, error) {

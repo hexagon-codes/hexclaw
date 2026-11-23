@@ -61,7 +61,7 @@ func photoRuntimeSetup(t *testing.T) (*Manager, *Instance) {
 	t.Helper()
 	m, closeDB := newTestManager(t)
 	t.Cleanup(closeDB)
-	if err := migrate.Run(t.Context(), m.db, []migrate.Migration{migrate.IMPhotoIntakesV152}); err != nil {
+	if err := migrate.Run(t.Context(), m.db, []migrate.Migration{migrate.All[0], migrate.IMPhotoIntakesV152}); err != nil {
 		t.Fatal(err)
 	}
 	inst := &Instance{Provider: "dingtalk", ID: "stable", Name: "family-bot", Enabled: true, Config: []byte(`{"app_key":"qa-only","app_secret":"qa-only","robot_code":"qa-only"}`)}
