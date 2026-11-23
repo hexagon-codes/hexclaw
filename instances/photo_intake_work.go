@@ -209,6 +209,11 @@ func (r *instancePhotoReceiver) processOrdinary(ctx context.Context, row PhotoIn
 			reply = &adapter.Reply{Content: "处理消息时出现错误，请稍后重试。"}
 		}
 	}
+	if reply==nil {
+		// 没有回传正文也没有可核对的交付引用时，留存原请求给只读恢复。
+		_,err=r.change(resCtx,row.Key,"work","running",PhotoIntakeState{Status:"unknown",FailureKind:"reply_unconfirmed"})
+		return nil,err
+	}
 	next := PhotoIntakeState{Status: "completed", ResultRef: freezeOrdinaryPhoto(reply)}
 	if handleErr != nil {
 		next.FailureKind = "original_handler_failed"
