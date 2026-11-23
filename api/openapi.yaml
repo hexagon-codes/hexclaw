@@ -19823,6 +19823,7 @@ paths:
         when available in the target database. A collision with another tutor maps the ID and its imported references
         for the target only. The original archive, pre-restore snapshot, journal and domain writes commit in one transaction.
         Replay returns the original migration_id and uses the durable mapping for the same command.
+        A new command returns 409 when an existing weekly archive has a different effective attempt order.
 
 
         Authentication: current service Bearer token. agent selects the learner scope; request user_id cannot

@@ -1201,6 +1201,8 @@ Migrate a backup to another Tutor.
 
 Keep original archive identity/checksum unchanged. source_agent must match the original owner; target_agent must differ and identify the rebuilt Tutor. guardian_confirmed=true and a nonblank idempotency_key of at most 200 UTF-8 bytes after trimming are required. Accepts supported backups from v2 through the current v12. Original archive, target pre-restore snapshot, owner-rewrite journal and domain writes commit in one SQLite transaction. The result contains migration_id; identical commands replay durable receipts.
 
+A new import of an existing weekly archive returns 409 if the effective attempt order differs. Target records remain intact. If the original migration can still be rolled back, use its receipt to roll it back before importing again.
+
 Availability: K12 module, record store and the dependencies described for this operation.
 
 JSON body:

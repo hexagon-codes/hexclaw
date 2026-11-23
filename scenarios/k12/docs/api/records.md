@@ -1201,6 +1201,8 @@ JSON 正文：
 
 archive 完整保存源身份与checksum；source_agent 必须等于原归属，target_agent 必须不同且为重建目标；guardian_confirmed=true；idempotency_key 经trim后须非空，且最多200个UTF-8字节。仅接受v2及以上兼容档案，当前上限v12。原档案、目标恢复前快照、owner改写journal与领域写入同一SQLite事务，结果带 migration_id。重复同键返回持久收据，修改内容须新键。
 
+换新键导入已有的周练归档时，实际作答顺序不同会返回 409，保留目标记录。原迁移仍可回退时，可使用原回执回退后再导入。
+
 依赖：K12 module, record store and the dependencies described for this operation.
 
 JSON 正文：
