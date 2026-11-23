@@ -222,6 +222,28 @@ func trackItem(
 	return nil
 }
 
+func TestTextbookBindingOptionsValidatesExistingTutorParameters(t *testing.T) {
+	h, _, _ := newWeeklyContractServer(t)
+	for _, tc := range []struct {
+		query string
+		want  int
+	}{
+		{"agent=mingming", http.StatusBadRequest},
+		{"agent=mingming&subject=english", http.StatusBadRequest},
+		{"subject=math", http.StatusBadRequest},
+		{"agent=mingming&subject=math", http.StatusOK},
+		{"mode=create", http.StatusOK},
+		{"agent=ghost&subject=math", http.StatusNotFound},
+	} {
+		t.Run(tc.query, func(t *testing.T) {
+			rec, _ := do(t, h, http.MethodGet, "/textbook-binding-options?"+tc.query, "")
+			if rec.Code != tc.want {
+				t.Fatalf("status=%d, want %d: %s", rec.Code, tc.want, rec.Body.String())
+			}
+		})
+	}
+}
+
 func TestWeeklyPracticeHTTPContract_K12Weekly016To023(t *testing.T) {
 	h, deps, clock := newWeeklyBundleContractServer(t)
 

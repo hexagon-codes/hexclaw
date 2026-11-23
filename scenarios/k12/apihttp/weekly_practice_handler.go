@@ -212,10 +212,18 @@ func (h *handler) listTextbookBindingOptions(w http.ResponseWriter, r *http.Requ
 		writeJSON(w, http.StatusOK, map[string]any{"items": items})
 		return
 	}
-	scope, err := h.textbookScope(
-		r.Context(), r.URL.Query().Get("agent"), r.URL.Query().Get("subject"),
-	)
+	agent := strings.TrimSpace(r.URL.Query().Get("agent"))
+	subject := strings.TrimSpace(r.URL.Query().Get("subject"))
+	if agent == "" || subject != "math" {
+		writeErr(w, http.StatusBadRequest, "agent and subject=math required")
+		return
+	}
+	scope, err := h.textbookScope(r.Context(), agent, subject)
 	if err != nil {
+		if errors.Is(err, errAgentScopeNotFound) {
+			writeErr(w, http.StatusNotFound, err.Error())
+			return
+		}
 		writeErr(w, httpStatusForK12Error(err, http.StatusInternalServerError), err.Error())
 		return
 	}
