@@ -4,13 +4,20 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"time"
 
 	"github.com/hexagon-codes/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/storage"
 )
 
 func (r *instancePhotoReceiver) change(ctx context.Context, k PhotoIntakeKey, lane, from string, next PhotoIntakeState) (bool, error) {
-	return r.store.Transition(ctx, k, lane, from, next, time.Now().UnixMilli())
+	at := time.Now().UnixMilli()
+	won, err := r.store.Transition(ctx, k, lane, from, next, at)
+	if won && err == nil {
+		slog.Info("IM photo progress", "source_ref", storage.IMRequestIDForEvent(k.Platform, k.InstanceID, k.ProviderMessageID), "operation", lane, "status", next.Status, "at_ms", at)
+	}
+	return won, err
 }
 
 func photoWait(ctx context.Context, delay time.Duration) error {

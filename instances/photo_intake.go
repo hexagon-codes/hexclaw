@@ -269,9 +269,14 @@ func (r *instancePhotoReceiver) ReceivePhotos(ctx context.Context, arrival adapt
 		InstanceName: r.inst.Name, ConversationID: msg.Metadata["conversation_id"], ConversationType: msg.Metadata["conversation_type"],
 		QuotedHomework: msg.Metadata["quoted_homework_id"], QuotedHomeworkAmbiguous: msg.Metadata["quoted_homework_ambiguous"] == "true",
 		Route: route, PlatformCreatedAtMS: photoMillis(arrival.ProviderCreatedAt), ReceivedAtMS: photoMillis(arrival.ReceivedAt), PageSignatures: signatures}
-	receipt, _, err = r.store.Register(ctx, input)
+	var created bool
+	receipt, created, err = r.store.Register(ctx, input)
 	if err != nil {
 		return true, err
+	}
+	if created {
+		ref := sha256.Sum256([]byte(key.ProviderMessageID))
+		slog.Info("IM photo intake committed", "source_ref", route.RequestID, "provider_message_ref", hex.EncodeToString(ref[:]), "route", route.Kind, "pages", len(receipt.Pages), "received_at_ms", receipt.ReceivedAtMS, "committed_at_ms", receipt.CommittedAtMS)
 	}
 	r.launch(key, "notice", r.advanceNotice)
 	for i, page := range receipt.Pages {
