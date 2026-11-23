@@ -565,7 +565,7 @@ func chinesePrintedBlankComparisonV1(value string) string {
 // 新策略下仿写指令末尾的答题横线只是书写区，不省略题内空位或指令文字。
 func scopedChinesePrintedQuestionComparisonV1(q RecognizedQuestion, value string) string {
 	source := q.ImageSourceContext
-	if source == nil || source.Version != k12.RecognitionImageScopeVersionV1 || source.Action != "solve" || source.SourceComparisonPolicy != k12.RecognitionImageSourceComparisonPolicyV1 {
+	if source == nil || source.Version != k12.RecognitionImageScopeVersionV1 || source.Action != "solve" || !k12.RecognitionChineseBlankLayoutEnabled(source.SourceComparisonPolicy) {
 		return chinesePrintedBlankComparisonV1(value)
 	}
 	return k12.RecognitionChineseSolvePrintedComparisonV1(value)
@@ -775,7 +775,7 @@ func RecognitionSourceReadingsMatchForInitialReadMode(prior, review RecognizedQu
 		prior.Subject == "语文" && review.Subject == "语文" &&
 		prior.ImageSourceContext != nil && review.ImageSourceContext != nil &&
 		prior.ImageSourceContext.Version == k12.RecognitionImageScopeVersionV1 && review.ImageSourceContext.Version == k12.RecognitionImageScopeVersionV1 &&
-		prior.ImageSourceContext.SourceComparisonPolicy == k12.RecognitionImageSourceComparisonPolicyV1 && review.ImageSourceContext.SourceComparisonPolicy == k12.RecognitionImageSourceComparisonPolicyV1 &&
+		k12.RecognitionChineseBlankLayoutEnabled(prior.ImageSourceContext.SourceComparisonPolicy) && prior.ImageSourceContext.SourceComparisonPolicy == review.ImageSourceContext.SourceComparisonPolicy &&
 		prior.ImageSourceContext.Action == "solve" && review.ImageSourceContext.Action == "solve" {
 		// 仅比较填空线和排版，字词、数字、否定及学生作答仍逐项核验。
 		question = scopedChinesePrintedQuestionComparisonV1(prior, prior.RawTranscription) == scopedChinesePrintedQuestionComparisonV1(review, review.RawTranscription)

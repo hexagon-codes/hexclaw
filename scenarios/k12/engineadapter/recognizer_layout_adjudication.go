@@ -126,7 +126,7 @@ func (a *RecognizerAdapter) recognizeLayoutAdjudicationV2(ctx context.Context, p
 		return fmt.Errorf("%w: adjudication repair source cannot be parsed", k12.ErrRecognitionProtocolInvalid)
 	}
 	comparison := func(q usecase.RecognizedQuestion) usecase.RecognizedQuestion {
-		if plan.ScopeInput != nil && plan.ScopeInput.Version == k12.RecognitionImageScopeVersionV1 && plan.ScopeInput.Action == "solve" && plan.ScopeInput.SourceComparisonPolicy == k12.RecognitionImageSourceComparisonPolicyV1 {
+		if plan.ScopeInput != nil && plan.ScopeInput.Version == k12.RecognitionImageScopeVersionV1 && plan.ScopeInput.Action == "solve" && k12.RecognitionChineseBlankLayoutEnabled(plan.ScopeInput.SourceComparisonPolicy) {
 			q.ImageSourceContext = &k12.RecognitionImageSourceContextV1{Version: plan.ScopeInput.Version, Action: plan.ScopeInput.Action, SourceComparisonPolicy: plan.ScopeInput.SourceComparisonPolicy}
 		}
 		return q
@@ -184,6 +184,10 @@ func (a *RecognizerAdapter) recognizeLayoutAdjudicationV2(ctx context.Context, p
 	if plan.ScopeInput != nil && k12.RecognitionImageSourceUprightReviewEnabled(plan.ScopeInput.SourceReviewPolicy) {
 		prompt += "\nTranscribe printed text verbatim, character by character, including short words, modifiers and full proper names. Do not abbreviate, paraphrase, substitute familiar textbook wording, or complete clipped text from memory. Preserve visible wording even when another edition differs. Report uncertain or missing characters through the existing uncertainty fields rather than silently omitting them.\n"
 	}
+	if plan.ScopeInput != nil && plan.ScopeInput.SourceComparisonPolicy == k12.RecognitionImageSourceComparisonPolicyV2 &&
+		initial.question.Subject == "数学" && reread.question.Subject == "数学" {
+		prompt += adjudicatedActiveWorkPrompt
+	}
 	physicalCtx, cancel, err := recognitionLayoutPhysicalCallContextV2(ctx, time.UnixMilli(runtime.StageDeadlineAtUnixMillis), runtime.Header.PhysicalCallCapMillis)
 	if err != nil {
 		return err
@@ -222,6 +226,10 @@ func (a *RecognizerAdapter) recognizeLayoutAdjudicationV2(ctx context.Context, p
 		settlement.Adopted = settlement.MatchedQuestionPrior != "" && settlement.MatchedAnswerPrior != ""
 		if settlement.Adopted {
 			settlement.ResultKind, settlement.ResultJSON = candidate.ResultKind, candidate.ResultJSON
+			if plan.ScopeInput != nil && plan.ScopeInput.SourceComparisonPolicy == k12.RecognitionImageSourceComparisonPolicyV2 &&
+				qp && qr && ar && settlement.FinalAnswerEvidence != nil {
+				settlement.ResultJSON = projectAdjudicatedActiveAnswer(candidate.ResultJSON, *initial.question, *reread.question, *reviewed.question, settlement.FinalAnswerEvidence.RawTranscription)
+			}
 		}
 	}
 	if !settlement.Adopted {

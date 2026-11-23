@@ -49,7 +49,7 @@ func RecognitionChineseSolvePrintedComparisonV1(value string) string {
 
 func ValidateRecognitionPrintedQuestionEvidenceV1(e RecognitionPrintedQuestionEvidenceV1, plan RecognitionLayoutPlanV2, priors []string) error {
 	if plan.ScopeInput == nil || plan.ScopeInput.Version != RecognitionImageScopeVersionV1 || (plan.ScopeInput.Action != "" && plan.ScopeInput.Action != "solve") ||
-		!RecognitionImageSourceUprightReviewEnabled(plan.ScopeInput.SourceReviewPolicy) || plan.ScopeInput.SourceComparisonPolicy != RecognitionImageSourceComparisonPolicyV1 ||
+		!RecognitionImageSourceUprightReviewEnabled(plan.ScopeInput.SourceReviewPolicy) || !RecognitionChineseBlankLayoutEnabled(plan.ScopeInput.SourceComparisonPolicy) ||
 		plan.InitialReadMode != RecognitionLayoutManifestWithContentV1 || !plan.SourceAdjudication || len(priors) != 2 ||
 		strings.TrimSpace(e.RawTranscription) == "" || math.IsNaN(e.Confidence) || math.IsInf(e.Confidence, 0) || e.Confidence < .90 || e.Confidence > 1 {
 		return fmt.Errorf("%w: printed question evidence is invalid", ErrRecognitionProtocolInvalid)

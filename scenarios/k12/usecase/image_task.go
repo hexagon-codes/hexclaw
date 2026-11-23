@@ -632,7 +632,7 @@ func (c *ImageTaskCoordinator) createImageTaskPage(ctx context.Context, in Creat
 	route.MessageLocale = in.RouteRequest.MessageLocale
 	route.ImageScope = &k12.RecognitionImageScopeInputV1{
 		Version: k12.RecognitionImageScopeVersionV1, MessageIntent: in.MessageIntent, Action: explicitImageHomeworkAction(in.MessageIntent),
-		SourceReviewPolicy: k12.RecognitionImageSourceUprightReviewPolicyV3, SourceComparisonPolicy: k12.RecognitionImageSourceComparisonPolicyV1,
+		SourceReviewPolicy: k12.RecognitionImageSourceUprightReviewPolicyV3, SourceComparisonPolicy: k12.RecognitionImageSourceComparisonPolicyV2,
 		IncludeSharedReviewRegions: true, SharedReviewPolicy: k12.RecognitionSharedReviewSingleView,
 		ExcludeObservedNonQuestions: strings.TrimSpace(in.MessageIntent) == "",
 	}

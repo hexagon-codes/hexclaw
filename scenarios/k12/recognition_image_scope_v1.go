@@ -16,9 +16,15 @@ const RecognitionImageSourceUprightReviewPolicyV1 = "upright_context_v1"
 const RecognitionImageSourceUprightReviewPolicyV2 = "upright_context_v2"
 const RecognitionImageSourceUprightReviewPolicyV3 = "upright_answer_context_v3"
 const RecognitionImageSourceComparisonPolicyV1 = "chinese_blank_layout_v1"
+const RecognitionImageSourceComparisonPolicyV2 = "scoped_transcription_v2"
 const RecognitionSharedReviewByReference = "by_reference_v1"
 const RecognitionSharedReviewWithBatch = "by_reference_v2"
 const RecognitionSharedReviewSingleView = "by_reference_v3"
+
+// RecognitionChineseBlankLayoutEnabled 让新来源策略保留原中文题面排版比较。
+func RecognitionChineseBlankLayoutEnabled(policy string) bool {
+	return policy == RecognitionImageSourceComparisonPolicyV1 || policy == RecognitionImageSourceComparisonPolicyV2
+}
 
 // RecognitionImageSourceUprightReviewEnabled 让新几何策略沿用原直立视图与来源证明。
 func RecognitionImageSourceUprightReviewEnabled(policy string) bool {
