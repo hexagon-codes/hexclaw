@@ -10,8 +10,8 @@ import (
 //
 // 设计原则：
 //   - 所有 DDL 集中在此文件，不再分散到各模块 Init()
-//   - 每个迁移必须幂等（IF NOT EXISTS / IF NOT EXISTS 列名检查）
-//   - ALTER TABLE ADD COLUMN 在 SQLite 中天然幂等（列已存在时报错，被 migrate.Run 捕获跳过）
+//   - 普通 SQL 迁移与版本记录在同一事务提交。已有版本记录会跳过整条迁移。
+//   - ALTER TABLE ADD COLUMN 遇到重复列会失败并回滚。不确定列是否已存在时须在迁移中检查实际结构。
 //   - 时间戳统一为 DATETIME（Go time.Time 兼容），索引和比较在 SQLite 中高效
 //   - 所有列显式 NOT NULL + DEFAULT，避免隐式 NULL
 //   - 每个表有 meta TEXT 字段用于扩展（参考生产表的 JSON meta 列）

@@ -47,10 +47,17 @@ type Migration struct {
 //
 // 工作流程：
 //  1. 确保 schema_migrations 表存在
-//  2. 读取当前已应用的最高版本
-//  3. 按顺序执行所有更高版本的迁移（每个迁移在独立事务中）
+//  2. 核对已登记版本，拒绝从旧缺口跨过已执行的后续迁移
+//  3. 按声明顺序执行未迁移的版本
 //  4. 记录每个迁移的执行时间
 func Run(ctx context.Context, db *sql.DB, migrations []Migration) error {
+	previous := 0
+	for _, m := range migrations {
+		if m.Version <= previous {
+			return fmt.Errorf("迁移版本必须严格递增: v%d 在 v%d 之后", m.Version, previous)
+		}
+		previous = m.Version
+	}
 	// 确保迁移跟踪表存在
 	if _, err := db.ExecContext(ctx, `
 		CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -62,17 +69,20 @@ func Run(ctx context.Context, db *sql.DB, migrations []Migration) error {
 		return fmt.Errorf("创建 schema_migrations 表失败: %w", err)
 	}
 
-	// 读取当前版本
-	var currentVersion int
-	row := db.QueryRowContext(ctx, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations")
-	if err := row.Scan(&currentVersion); err != nil {
-		return fmt.Errorf("读取当前迁移版本失败: %w", err)
+	versions, currentVersion, err := appliedMigrationVersions(ctx, db)
+	if err != nil {
+		return err
+	}
+	for _, m := range migrations {
+		if m.Version < currentVersion && !versions[m.Version] {
+			return fmt.Errorf("迁移记录缺少 v%d，但已应用后续版本 v%d", m.Version, currentVersion)
+		}
 	}
 
 	// 执行未应用的迁移
 	applied := 0
 	for _, m := range migrations {
-		if m.Version <= currentVersion {
+		if versions[m.Version] {
 			continue
 		}
 
@@ -87,6 +97,25 @@ func Run(ctx context.Context, db *sql.DB, migrations []Migration) error {
 		logger.Info("[migrate] 共应用", "applied", applied, "currentVersion", currentVersion, "version", migrations[len(migrations)-1].Version)
 	}
 	return nil
+}
+
+func appliedMigrationVersions(ctx context.Context, db *sql.DB) (map[int]bool, int, error) {
+	rows, err := db.QueryContext(ctx, "SELECT version FROM schema_migrations")
+	if err != nil {
+		return nil, 0, fmt.Errorf("读取迁移版本失败: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	versions := make(map[int]bool)
+	latest := 0
+	for rows.Next() {
+		var version int
+		if err := rows.Scan(&version); err != nil {
+			return nil, 0, fmt.Errorf("读取迁移版本失败: %w", err)
+		}
+		versions[version] = true
+		latest = max(latest, version)
+	}
+	return versions, latest, rows.Err()
 }
 
 func applyMigration(ctx context.Context, db *sql.DB, m Migration) error {
