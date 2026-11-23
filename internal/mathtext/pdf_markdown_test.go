@@ -9,6 +9,8 @@ func TestPDFNumericFractionsPreserveMeaningAndProtectedContent(t *testing.T) {
 		{"braced numeric TeX", `比较\frac{12}{25}和\tfrac1{2}。`, `比较$\frac{12}{25}$和$\tfrac{1}{2}$。`},
 		{"bare arguments must be unambiguous", `\frac123，\frac14.5，\frac{ 12 }{ 25 }。`, `\frac123，\frac14.5，$\frac{12}{25}$。`},
 		{"non-ASCII file paths", `C:\题目\frac14  /tmp/题目\frac14.png  ./课程/题目\frac14`, `C:\题目\frac14  /tmp/题目\frac14.png  ./课程/题目\frac14`},
+		{"paths with quoted spaces and nearby math", `“C:\家庭 作业\frac14” 与 '/tmp/家庭 作业\frac14'，把\frac14x代回。`, `“C:\家庭 作业\frac14” 与 '/tmp/家庭 作业\frac14'，把$\frac{1}{4}$x代回。`},
+		{"relative paths and adjacent numeric expressions", `目录：课程/分数\frac14；docs/lesson/分数\tfrac14；把2/3\frac14x代回。`, `目录：课程/分数\frac14；docs/lesson/分数\tfrac14；把2/3$\frac{1}{4}$x代回。`},
 		{"protected and incomplete TeX", "\x60\\frac14\x60 https://example.test/\\frac14 " + `C:\docs\frac14 \\frac14 \fracture \frac1，\frac{x}{4}，$\frac14$。`, "\x60\\frac14\x60 https://example.test/\\frac14 " + `C:\docs\frac14 \\frac14 \fracture \frac1，\frac{x}{4}，$\frac14$。`},
 		{"code", "`1/2`\n\n```python\nx = 3/4\n```", "`1/2`\n\n```python\nx = 3/4\n```"},
 		{"url", "https://example.test/3/4 [链接](https://example.test/1/2)", "https://example.test/3/4 [链接](https://example.test/1/2)"},

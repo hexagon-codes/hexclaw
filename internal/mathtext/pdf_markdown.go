@@ -12,6 +12,8 @@ var (
 	pdfPageNumberSuffix  = regexp.MustCompile(`^[ \t]*页`)
 	pdfHeadingDatePrefix = regexp.MustCompile(`(?m)^#{1,6}[ \t]+[^\r\n]+·[ \t]*$`)
 	pdfHeadingDateSuffix = regexp.MustCompile(`^[ \t]*(?:·[ \t]*答案卷)?[ \t]*(?:\r?\n|$)`)
+	pdfQuotedPathPrefix  = regexp.MustCompile(`["'“‘「『](?:[A-Za-z]:[\\/]|\.{0,2}/|\\\\)[^"'“”‘’「」『』\r\n]*$`)
+	pdfRelativePath      = regexp.MustCompile(`^(?:[\p{L}_][\p{L}\p{N}_.-]*/)+[\p{L}\p{N}_.-]*[\p{L}_][\p{L}\p{N}_.-]*$`)
 )
 
 // FormatPDFMarkdown 仅在 PDF 副本中把可靠的数字分数排成上下分数。
@@ -99,11 +101,12 @@ func pdfNumericTeXFraction(s string, at int) (string, int, bool) {
 		if !strings.HasPrefix(s[at:], cmd) {
 			continue
 		}
-		const separators = " \t\r\n，。；！？（(【[「“\"'"
+		const separators = " \t\r\n，。；：！？（(【[「“\"'"
 		start := max(0, strings.LastIndexAny(s[:at], separators))
 		word := strings.TrimLeft(s[start:at], separators)
 		if strings.Contains(word, `:\`) || strings.Contains(word, ":/") || strings.HasPrefix(word, "/") ||
-			strings.HasPrefix(word, "./") || strings.HasPrefix(word, "../") || strings.HasPrefix(word, `\\`) {
+			strings.HasPrefix(word, "./") || strings.HasPrefix(word, "../") || strings.HasPrefix(word, `\\`) ||
+			pdfQuotedPathPrefix.MatchString(s[:at]) || pdfRelativePath.MatchString(word) {
 			break
 		}
 		n, next, ok := parseBraceArg(s, at+len(cmd), true)
