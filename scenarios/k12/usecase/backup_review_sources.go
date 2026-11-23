@@ -37,7 +37,7 @@ func reviewMemberArchiveKey(member k12.ReviewSourceGroupMember) string {
 }
 
 // migrateReviewSourceArchive 只重定位冻结来源中的资产归属，不迁移或重建模型执行身份。
-func migrateReviewSourceArchive(source, bak *Hexbak, assets map[string]string) error {
+func migrateReviewSourceArchive(source, bak *Hexbak, assets map[string]string, ids RestoreRecordIDs) error {
 	if bak.ReviewSources == nil {
 		return nil
 	}
@@ -51,7 +51,7 @@ func migrateReviewSourceArchive(source, bak *Hexbak, assets map[string]string) e
 		if err := json.Unmarshal([]byte(record.Fields), &fields); err != nil {
 			return err
 		}
-		originalQuestions[record.RecordID] = k12.ReviewSourceTextDigest(fields.Question)
+		originalQuestions[ids.resolve(k12.CollectionMistakes, record.RecordID)] = k12.ReviewSourceTextDigest(fields.Question)
 	}
 	for _, record := range bak.Records {
 		if record == nil || record.Collection != k12.CollectionMistakes {
@@ -82,6 +82,10 @@ func migrateReviewSourceArchive(source, bak *Hexbak, assets map[string]string) e
 	for i := range bak.ReviewSources.Snapshots {
 		snapshot := &bak.ReviewSources.Snapshots[i]
 		key := reviewMemberArchiveKey(snapshot.Member)
+		snapshot.Member.RecordID = ids.resolve(k12.CollectionMistakes, snapshot.Member.RecordID)
+		snapshot.Source.RecordID = snapshot.Member.RecordID
+		snapshot.Member.JobID = ids.resolve(k12.CollectionGradingJob, snapshot.Member.JobID)
+		snapshot.Source.JobID = snapshot.Member.JobID
 		snapshot.Source.AgentName = bak.AgentName
 		for _, id := range []string{snapshot.Source.PageAssetID, snapshot.Source.ParentPageAssetID} {
 			if id != "" && strings.HasPrefix(id, "asset://") && assets[id] == "" {
@@ -105,12 +109,18 @@ func migrateReviewSourceArchive(source, bak *Hexbak, assets map[string]string) e
 	for i := range bak.ReviewSources.Groups {
 		group := &bak.ReviewSources.Groups[i]
 		group.AgentName, group.GroupID, group.CanonicalStatementDigest = bak.AgentName, "", ""
+		group.CanonicalRecordID = ids.resolve(k12.CollectionMistakes, group.CanonicalRecordID)
 		group.CanonicalStatement = rewrite(group.CanonicalStatement)
 		for j, member := range group.Members {
 			if migrated, found := members[reviewMemberArchiveKey(member)]; found {
 				group.Members[j] = migrated
-			} else if digest := questions[member.RecordID]; digest != "" && originalQuestions[member.RecordID] == member.QuestionDigest {
-				group.Members[j].QuestionDigest = digest
+			} else {
+				id := ids.resolve(k12.CollectionMistakes, member.RecordID)
+				group.Members[j].RecordID = id
+				group.Members[j].JobID = ids.resolve(k12.CollectionGradingJob, member.JobID)
+				if digest := questions[id]; digest != "" && originalQuestions[id] == member.QuestionDigest {
+					group.Members[j].QuestionDigest = digest
+				}
 			}
 		}
 		normalized, err := group.Normalized()

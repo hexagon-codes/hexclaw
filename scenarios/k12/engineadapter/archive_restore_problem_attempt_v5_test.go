@@ -128,7 +128,7 @@ func TestArchiveRestoreAsV5MigratesStableProblemAttemptIDsAndRollbackIsExact(t *
 	}
 }
 
-func TestArchiveRestoreAsSourceStillInDatabaseFailsClosedWithoutPartialV19Writes(t *testing.T) {
+func TestArchiveRestoreAsOccupiedCopyIDFailsWithoutPartialV19Writes(t *testing.T) {
 	t.Setenv("HEXCLAW_ASSET_ROOT", t.TempDir())
 	f := newArchiveRestoreFixture(t)
 	registerRestoreTarget(t, f)
@@ -143,11 +143,15 @@ func TestArchiveRestoreAsSourceStillInDatabaseFailsClosedWithoutPartialV19Writes
 	if err := f.records.PutProblemAttemptSnapshot(ctx, sourceProblem); err != nil {
 		t.Fatal(err)
 	}
-	// f already contains a source-owned AgentRecord. Its globally unique record_id
-	// cannot coexist with a target-owner copy in the same database.
 	dSource := usecase.Deps{Records: f.records, Now: func() int64 { return 600 }}
 	archive, err := dSource.Backup(ctx, "mingming")
 	if err != nil {
+		t.Fatal(err)
+	}
+	// 已有无关记录占用目标副本的 ID 时，不允许覆盖它或部分导入试题资产。
+	root := archive.Records[0]
+	collidingID := restoreTargetRecordID("mingming", "target-child", root.Collection, root.RecordID)
+	if _, err = f.records.Put(ctx, validTargetMistake(t, collidingID, "独立目标原题")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -166,7 +170,7 @@ func TestArchiveRestoreAsSourceStillInDatabaseFailsClosedWithoutPartialV19Writes
 		Archive: archive, SourceAgent: "mingming", TargetAgent: "target-child",
 		GuardianConfirmed: true, IdempotencyKey: "source-live-global-record-conflict",
 	}); err == nil {
-		t.Fatal("source-owned global record IDs must fail closed while source is still in this database")
+		t.Fatal("occupied target copy identity was overwritten")
 	}
 	after, err := f.records.ExportProblemAttemptSnapshots(ctx, "target-child")
 	if err != nil || len(after) != 1 || !reflect.DeepEqual(after[0], targetBefore) {

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"time"
 
@@ -51,6 +52,19 @@ func (a *ArchiveRestoreAdapter) RestoreArchiveAs(
 			if err != nil {
 				return err
 			}
+			if found && (existing.SourceAgent != plan.SourceAgent || existing.OriginalArchiveDigest != plan.OriginalArchiveDigest) {
+				return fmt.Errorf("%w: restore-as idempotency key 已绑定其他归档", records.ErrVersionConflict)
+			}
+			ids, err := a.restoreRecordIDs(ctx, tx, plan.OriginalArchive, plan.TargetAgent, existing.MigrationID)
+			if err != nil {
+				return err
+			}
+			if len(ids) > 0 {
+				migrated, err = usecase.MigrateHexbakOwnerWithRecordIDs(plan.OriginalArchive, plan.TargetAgent, ids)
+				if err != nil {
+					return err
+				}
+			}
 			if found {
 				comparison := *migrated
 				// 已成功迁移的回执按创建时的格式核对，升级不产生新的迁移命令。
@@ -60,7 +74,14 @@ func (a *ArchiveRestoreAdapter) RestoreArchiveAs(
 						return err
 					}
 				}
-				if existing.SourceAgent != plan.SourceAgent || existing.OriginalArchiveDigest != plan.OriginalArchiveDigest || existing.MigratedChecksum != comparison.Checksum {
+				comparisonArchive := &comparison
+				if len(comparison.WeeklyHistory) > 0 && comparison.Checksum != existing.MigratedChecksum {
+					comparisonArchive, err = restoreLegacyWeeklyAttemptOrder(&comparison, existing.MigratedChecksum)
+					if err != nil {
+						return err
+					}
+				}
+				if existing.MigratedChecksum != comparisonArchive.Checksum {
 					return fmt.Errorf("%w: restore-as idempotency key 已绑定其他归档", records.ErrVersionConflict)
 				}
 				existing.Idempotent = true
@@ -334,9 +355,19 @@ func (a *ArchiveRestoreAdapter) RollbackRestoreAs(
 			if err != nil {
 				return err
 			}
-			migrated, err := usecase.MigrateHexbakOwner(original, req.TargetAgent)
+			ids, err := a.restoreRecordIDs(ctx, tx, original, req.TargetAgent, req.MigrationID)
+			if err != nil {
+				return err
+			}
+			migrated, err := usecase.MigrateHexbakOwnerWithRecordIDs(original, req.TargetAgent, ids)
 			if err != nil {
 				return fmt.Errorf("rebuild immutable migrated assets for rollback: %w", err)
+			}
+			if len(migrated.WeeklyHistory) != 0 && migrated.Checksum != current.MigratedChecksum {
+				migrated, err = restoreLegacyWeeklyAttemptOrder(migrated, current.MigratedChecksum)
+				if err != nil {
+					return err
+				}
 			}
 			if k12.ProfileFromMeta(updated.Metadata) != k12.ProfileFromMeta(k12.ReplaceProfileInMeta(nil, migrated.Profile)) {
 				return fmt.Errorf("%w: learner profile changed after restore", records.ErrVersionConflict)
@@ -421,9 +452,16 @@ func (a *ArchiveRestoreAdapter) RollbackRestoreAs(
 				return rollbackFailure(fmt.Errorf("%w: reviewed sources changed after restore", records.ErrVersionConflict), nil)
 			}
 			if migrated.ReviewSources != nil {
+				// 回退校验实际迁移时封存的来源 ID，不能用当前归档版本重新派生。
+				var migratedID string
+				if err = tx.QueryRowContext(ctx, `SELECT entity_id FROM k12_restore_journal
+					WHERE migration_id=? AND operation='seal_migrated' AND entity_kind='hexbak' AND after_json=?`,
+					req.MigrationID, current.MigratedChecksum).Scan(&migratedID); err != nil {
+					return rollbackFailure(fmt.Errorf("read sealed migrated archive identity: %w", err), nil)
+				}
 				for _, source := range migrated.ReviewSources.Snapshots {
 					var origin string
-					if err := tx.QueryRowContext(ctx, `SELECT archive_id FROM k12_review_source_archive WHERE agent_name=? AND record_id=?`, req.TargetAgent, source.Member.RecordID).Scan(&origin); err != nil || origin != migrated.ArchiveID {
+					if err = tx.QueryRowContext(ctx, `SELECT archive_id FROM k12_review_source_archive WHERE agent_name=? AND record_id=?`, req.TargetAgent, source.Member.RecordID).Scan(&origin); err != nil || origin != migratedID {
 						return rollbackFailure(fmt.Errorf("%w: reviewed source selection changed after restore", records.ErrVersionConflict), nil)
 					}
 				}
@@ -823,6 +861,27 @@ func (a *ArchiveRestoreAdapter) validateRestoreAsPlan(plan usecase.RestoreAsPlan
 func restoreMigrationID(plan usecase.RestoreAsPlan) string {
 	sum := sha256.Sum256([]byte(plan.TargetAgent + "\x00" + plan.IdempotencyKey + "\x00" + plan.OriginalArchiveDigest))
 	return "restore-" + hex.EncodeToString(sum[:16])
+}
+
+// 旧迁移没有冻结排序键；仅在重建结果严格匹配原回执时使用旧视图回退。
+func restoreLegacyWeeklyAttemptOrder(migrated *usecase.Hexbak, checksum string) (*usecase.Hexbak, error) {
+	legacy := *migrated
+	legacy.ArchiveID = ""
+	legacy.WeeklyHistory = slices.Clone(migrated.WeeklyHistory)
+	for i := range legacy.WeeklyHistory {
+		week := &legacy.WeeklyHistory[i]
+		week.Attempts = slices.Clone(week.Attempts)
+		for j := range week.Attempts {
+			week.Attempts[j].OrderID = ""
+		}
+	}
+	if err := usecase.SealHexbak(&legacy); err != nil {
+		return nil, err
+	}
+	if legacy.Checksum == checksum {
+		return &legacy, nil
+	}
+	return migrated, nil
 }
 
 func appendRestoreAsJournal(

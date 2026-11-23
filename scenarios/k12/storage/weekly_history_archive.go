@@ -30,6 +30,7 @@ type WeeklyHistoryArchive struct {
 type WeeklyHistoryAttempt struct {
 	Attempt           k12.WeeklyPracticeAttempt `json:"attempt"`
 	RequestSnapshotID string                    `json:"request_snapshot_id,omitempty"`
+	OrderID           string                    `json:"order_id,omitempty"`
 	Key               string                    `json:"idempotency_key"`
 	Digest            string                    `json:"request_digest"`
 	Updated           int64                     `json:"updated_at"`
@@ -38,6 +39,7 @@ type WeeklyHistoryAttempt struct {
 type storedWeeklyHistoryAttempt struct {
 	k12.WeeklyPracticeAttempt
 	RequestSnapshotID string `json:"archive_request_snapshot_id,omitempty"`
+	OrderID           string `json:"archive_order_id,omitempty"`
 }
 
 func weeklyArchivePeriod(ctx context.Context, tx *sql.Tx, agent string, at int64) (year, week int, zone string, err error) {
@@ -135,6 +137,7 @@ func readArchivedWeek(ctx context.Context, tx *sql.Tx, agent, id string) (Weekly
 			return out, err
 		}
 		attempt.Attempt, attempt.RequestSnapshotID = stored.WeeklyPracticeAttempt, stored.RequestSnapshotID
+		attempt.OrderID = stored.OrderID
 		out.Attempts = append(out.Attempts, attempt)
 	}
 	return out, rows.Err()
@@ -239,7 +242,9 @@ func (s *Store) ImportWeeklyHistoryTx(ctx context.Context, tx *sql.Tx, agent str
 			return fmt.Errorf("%w: target has a different frozen weekly PDF", records.ErrVersionConflict)
 		}
 		for _, r := range item.Attempts {
-			encoded, err := json.Marshal(storedWeeklyHistoryAttempt{r.Attempt, r.RequestSnapshotID})
+			encoded, err := json.Marshal(storedWeeklyHistoryAttempt{
+				WeeklyPracticeAttempt: r.Attempt, RequestSnapshotID: r.RequestSnapshotID, OrderID: r.OrderID,
+			})
 			if err != nil {
 				return err
 			}

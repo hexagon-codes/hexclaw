@@ -1364,7 +1364,7 @@ func (s *Store) ListWeeklyPracticeHistory(ctx context.Context, agentName, cursor
             SELECT attempt_id,agent_name,snapshot_id,item_id,attempt_json,
               ROW_NUMBER() OVER (
                 PARTITION BY agent_name,snapshot_id,item_id
-                ORDER BY updated_at DESC,attempt_id DESC
+                ORDER BY updated_at DESC,COALESCE(json_extract(attempt_json,'$.archive_order_id'),attempt_id) DESC,attempt_id DESC
               ) AS latest_rank
             FROM k12_weekly_practice_attempts
           ) latest WHERE latest_rank=1
@@ -1443,8 +1443,9 @@ func (s *Store) UpdateWeeklyPracticeAttempt(ctx context.Context, agentName strin
 	attempt k12.WeeklyPracticeAttempt, at int64) error {
 	payload, _ := json.Marshal(attempt)
 	res, err := s.db.ExecContext(ctx, `UPDATE k12_weekly_practice_attempts
-        SET attempt_json=CASE WHEN json_extract(attempt_json,'$.archive_request_snapshot_id') IS NULL THEN ?1
-			ELSE json_set(?1,'$.archive_request_snapshot_id',json_extract(attempt_json,'$.archive_request_snapshot_id')) END,
+        SET attempt_json=json_patch(?1,json_object(
+			'archive_request_snapshot_id',json_extract(attempt_json,'$.archive_request_snapshot_id'),
+			'archive_order_id',json_extract(attempt_json,'$.archive_order_id'))),
 		updated_at=?2 WHERE attempt_id=?3 AND agent_name=?4`,
 		string(payload), at, attempt.AttemptID, agentName)
 	if err != nil {

@@ -685,6 +685,25 @@ func (s *Store) exportAgentVia(ctx context.Context, q dbQueryer, agentName strin
 
 // —— 导入 / 恢复（.hexbak 契约：原样保留 record_id/status/version/时间戳）——
 
+// ArchiveRecordIDOccupiedTx 核对 Get 跨表读取的完整身份空间，包含软删除的根记录。
+// 只有指定归属和记录集的已有根允许原样合并；空归属查询该 ID 是否已被占用。
+func (s *Store) ArchiveRecordIDOccupiedTx(ctx context.Context, tx *sql.Tx, collection, owner, id string) (bool, error) {
+	var queries []string
+	var args []any
+	for _, mp := range allMappers() {
+		query := "SELECT 1 FROM " + mp.table() + " WHERE record_id=?"
+		args = append(args, id)
+		if mp.collection() == collection && owner != "" {
+			query += " AND agent_name<>?"
+			args = append(args, owner)
+		}
+		queries = append(queries, query)
+	}
+	var occupied bool
+	err := tx.QueryRowContext(ctx, "SELECT EXISTS("+strings.Join(queries, " UNION ALL ")+")", args...).Scan(&occupied)
+	return occupied, err
+}
+
 func (s *Store) validateImportRecord(r *records.AgentRecord, expectedAgent string) error {
 	if r == nil {
 		return fmt.Errorf("%w: 导入记录不可为 nil", records.ErrInvalidRecord)

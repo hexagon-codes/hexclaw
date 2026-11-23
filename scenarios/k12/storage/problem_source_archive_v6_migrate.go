@@ -29,6 +29,13 @@ func MigrateProblemSourceArchiveV6Owner(
 	source ProblemSourceArchiveV6,
 	assetIDs map[string]string,
 ) (ProblemSourceArchiveV6, error) {
+	return MigrateProblemSourceArchiveV6OwnerWithJobs(sourceAgent, targetAgent, source, assetIDs, nil)
+}
+
+// MigrateProblemSourceArchiveV6OwnerWithJobs 保留逻辑题目及作答身份，把批改任务根定位到目标记录。
+func MigrateProblemSourceArchiveV6OwnerWithJobs(
+	sourceAgent, targetAgent string, source ProblemSourceArchiveV6, assetIDs, jobIDs map[string]string,
+) (ProblemSourceArchiveV6, error) {
 	sourceAgent = strings.TrimSpace(sourceAgent)
 	targetAgent = strings.TrimSpace(targetAgent)
 	if sourceAgent == "" || targetAgent == "" || sourceAgent == targetAgent {
@@ -53,6 +60,12 @@ func MigrateProblemSourceArchiveV6Owner(
 	}
 
 	out := cloneProblemSourceArchiveV6(source)
+	targetJobID := func(sourceID string) string {
+		if targetID, ok := jobIDs[sourceID]; ok {
+			return targetID
+		}
+		return sourceID
+	}
 	dispatchIDs := make(map[string]string, len(out.Dispatches))
 	homeworkIDs := make(map[string]string, len(out.HomeworkSubmissions))
 	receiptIDs := make(map[string]string, len(out.ActionReceipts))
@@ -152,6 +165,7 @@ func MigrateProblemSourceArchiveV6Owner(
 	}
 	for index := range out.HomeworkSubmissions {
 		item := &out.HomeworkSubmissions[index]
+		item.GradingJobID = targetJobID(item.GradingJobID)
 		oldID := item.SubmissionID
 		item.SubmissionID = homeworkIDs[oldID]
 		item.DispatchID = dispatchIDs[item.DispatchID]
@@ -185,6 +199,7 @@ func MigrateProblemSourceArchiveV6Owner(
 	receiptResultRevision := make(map[string]int, len(out.ActionReceipts))
 	for index := range out.ActionReceipts {
 		item := &out.ActionReceipts[index]
+		item.JobID = targetJobID(item.JobID)
 		oldReceiptID := item.CommandReceiptID
 		oldDispatchID := item.DispatchID
 		request, payload, err := migrateProblemSourceActionRequest(
@@ -245,6 +260,7 @@ func MigrateProblemSourceArchiveV6Owner(
 	workByID := make(map[string]ProblemSourceReprocessJob, len(out.ReprocessJobs))
 	for index := range out.ReprocessJobs {
 		item := &out.ReprocessJobs[index]
+		item.JobID = targetJobID(item.JobID)
 		oldWorkID := item.WorkID
 		oldReceiptID := item.CommandReceiptID
 		request, _, err := migrateProblemSourceActionRequest(
@@ -273,13 +289,15 @@ func MigrateProblemSourceArchiveV6Owner(
 	modelByID := make(map[string]int, len(out.ModelInvocations))
 	for index := range out.ModelInvocations {
 		item := &out.ModelInvocations[index]
+		sourceJobID := item.JobID
+		item.JobID = targetJobID(sourceJobID)
 		item.InvocationID = parentIDs[item.InvocationID]
 		item.AgentName = targetAgent
 		if item.ResultJSON != "" {
 			migratedResult, migrateErr := migratedProblemSourceSummaryResult(
 				item.ResultJSON,
 				item.JobID,
-				authoritativeSubmissions[item.JobID],
+				authoritativeSubmissions[sourceJobID],
 			)
 			if migrateErr != nil {
 				return ProblemSourceArchiveV6{}, migrateErr
@@ -298,6 +316,7 @@ func MigrateProblemSourceArchiveV6Owner(
 	}
 	for index := range out.ModelPhysicalInvocations {
 		item := &out.ModelPhysicalInvocations[index]
+		item.JobID = targetJobID(item.JobID)
 		oldRequestDigest := item.RequestDigest
 		item.PhysicalInvocationID = physicalIDs[item.PhysicalInvocationID]
 		item.ParentInvocationID = parentIDs[item.ParentInvocationID]
@@ -315,6 +334,7 @@ func MigrateProblemSourceArchiveV6Owner(
 	for index := range out.FinalizationGenerations {
 		state := &out.FinalizationGenerations[index]
 		state.AgentName = targetAgent
+		state.JobID = targetJobID(state.JobID)
 		if state.Artifact == nil {
 			continue
 		}
@@ -337,9 +357,10 @@ func MigrateProblemSourceArchiveV6Owner(
 			)
 		}
 		artifact.AgentName = targetAgent
+		artifact.JobID = targetJobID(artifact.JobID)
 		artifact.CanonicalMarkdown = migratedMarkdown
 		if hasReport {
-			migrated, report, err := migrateTeachingReportSnapshotReferences(artifact.ReportSnapshotJSON, assetIDs, parentIDs)
+			migrated, report, err := migrateTeachingReportSnapshotReferences(artifact.ReportSnapshotJSON, assetIDs, parentIDs, jobIDs)
 			if err != nil {
 				return ProblemSourceArchiveV6{}, err
 			}
@@ -398,6 +419,7 @@ func MigrateProblemSourceArchiveV6Owner(
 	}
 	for index := range out.RecognitionResults {
 		item := &out.RecognitionResults[index]
+		item.JobID = targetJobID(item.JobID)
 		item.WorkID = workIDs[item.WorkID]
 		item.CommandReceiptID = receiptIDs[item.CommandReceiptID]
 		item.AgentName = targetAgent

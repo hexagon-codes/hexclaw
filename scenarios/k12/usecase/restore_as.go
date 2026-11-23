@@ -139,6 +139,11 @@ func (d Deps) RestoreAs(ctx context.Context, req RestoreAsRequest) (RestoreAsRes
 // The persistence adapter calls this again inside its transaction;
 // the usecase copy is only an immutable preflight plan and never mutates the source archive.
 func MigrateHexbakOwner(source *Hexbak, targetAgent string) (*Hexbak, error) {
+	return MigrateHexbakOwnerWithRecordIDs(source, targetAgent, nil)
+}
+
+// MigrateHexbakOwnerWithRecordIDs 依照本次事务确定的根 ID 翻译可导航引用，原归档保持冻结。
+func MigrateHexbakOwnerWithRecordIDs(source *Hexbak, targetAgent string, ids RestoreRecordIDs) (*Hexbak, error) {
 	targetAgent = strings.TrimSpace(targetAgent)
 	if source == nil || targetAgent == "" {
 		return nil, fmt.Errorf("%w: source archive / target_agent 不可空", ErrInvalidInput)
@@ -163,6 +168,9 @@ func MigrateHexbakOwner(source *Hexbak, targetAgent string) (*Hexbak, error) {
 	migrated.Version = HexbakVersion
 	migrated.ArchiveID = ""
 	migrated.AgentName = targetAgent
+	if err = ids.relinkLearningRecords(migrated); err != nil {
+		return nil, err
+	}
 	for i := range migrated.WeeklyHistory {
 		item := &migrated.WeeklyHistory[i]
 		p, snap := &item.Plan, &item.Snapshot
@@ -176,6 +184,10 @@ func MigrateHexbakOwner(source *Hexbak, targetAgent string) (*Hexbak, error) {
 			attempt := &item.Attempts[j]
 			if attempt.RequestSnapshotID == "" {
 				attempt.RequestSnapshotID = attempt.Attempt.SnapshotID
+			}
+			// 同秒作答沿用迁移前的排序键，不能让新归属的 ID 改正误统计。
+			if attempt.OrderID == "" {
+				attempt.OrderID = attempt.Attempt.AttemptID
 			}
 			attempt.Attempt.SnapshotID = snap.SnapshotID
 			attempt.Attempt.AttemptID = weeklyAttemptID(snap.SnapshotID, attempt.Attempt.ItemID, attempt.Key)
@@ -303,8 +315,8 @@ func MigrateHexbakOwner(source *Hexbak, targetAgent string) (*Hexbak, error) {
 		return nil, err
 	}
 	if source.ProblemSource != nil {
-		problemSource, migrateErr := k12storage.MigrateProblemSourceArchiveV6Owner(
-			source.AgentName, targetAgent, *source.ProblemSource, assetMapping,
+		problemSource, migrateErr := k12storage.MigrateProblemSourceArchiveV6OwnerWithJobs(
+			source.AgentName, targetAgent, *source.ProblemSource, assetMapping, ids[k12.CollectionGradingJob],
 		)
 		if migrateErr != nil {
 			if errors.Is(migrateErr, k12storage.ErrProblemSourceArchiveLiveWork) {
@@ -316,7 +328,7 @@ func MigrateHexbakOwner(source *Hexbak, targetAgent string) (*Hexbak, error) {
 	} else {
 		migrated.ProblemSource = nil
 	}
-	if err := migrateReviewSourceArchive(source, migrated, assetMapping); err != nil {
+	if err := migrateReviewSourceArchive(source, migrated, assetMapping, ids); err != nil {
 		return nil, err
 	}
 	if err := SealHexbak(migrated); err != nil {
