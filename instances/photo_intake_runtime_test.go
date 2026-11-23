@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync/atomic"
@@ -43,6 +44,10 @@ func (p *photoRuntimeTransport) QueryReceipt(_ context.Context, id string) (adap
 	}
 	p.queries.Add(1)
 	return adapter.DeliveryAck{Status: adapter.DeliveryDelivered, ExternalMessageID: id}, nil
+}
+func (p *photoRuntimeTransport) SendPhotoReplyWithReceipts(ctx context.Context, chat string, reply *adapter.Reply) ([]adapter.DeliveryAck, error) {
+	ack, err := p.SendWithReceipt(ctx, chat, reply)
+	return []adapter.DeliveryAck{ack}, err
 }
 func (p *photoRuntimeTransport) RecallMessage(_ context.Context, id string) error {
 	if id != "notice" {
@@ -224,5 +229,104 @@ func TestSharedPhotoUnknownNoticeAndUnknownBusinessDoNotResendAfterRestart(t *te
 	waitPhotoRuntime(t, func() bool { return lookups.Load() > 0 })
 	if first.notices.Load() != 1 || second.notices.Load() != 0 || modelCalls.Load() != 1 || second.finals.Load() != 0 {
 		t.Fatalf("unknown operations were replayed: %d %d %d %d", first.notices.Load(), second.notices.Load(), modelCalls.Load(), second.finals.Load())
+	}
+}
+
+func TestSharedPhotoRecoverDelegatedDeliveryBeforeSendingSavedReply(t *testing.T) {
+	m, inst := photoRuntimeSetup(t)
+	key, arrival := runtimeArrival(inst, "delegated")
+	var actual atomic.Int32
+	routes := PhotoRoutes{Prepare: func(context.Context, *adapter.Message, *adapter.Message) (PhotoIntakeRoute, error) {
+		return PhotoIntakeRoute{Kind: "ordinary", AgentName: "qa", NoticeText: "收件"}, nil
+	},
+		RecoverOrdinary: func(ctx context.Context, msg *adapter.Message, route PhotoIntakeRoute) (*adapter.Reply, string, error) {
+			if actual.Load() == 0 {
+				return nil, "", nil
+			}
+			source, bound := adapter.PlatformInstanceIdentityFromContext(ctx)
+			if !bound || source.ID != inst.ID || msg.InstanceID != inst.Name || route.AgentName != "qa" {
+				return nil, "", errors.New("lost frozen scope")
+			}
+			return &adapter.Reply{Content: "已保存的答复"}, "batch:original", nil
+		}, OrdinaryOutcome: func(_ context.Context, _ *adapter.Message, _ PhotoIntakeRoute, ref string) (adapter.DeliveryStatus, error) {
+			if ref != "batch:original" {
+				return "", errors.New("wrong domain batch")
+			}
+			return adapter.DeliveryFailed, nil
+		}}
+	var calls atomic.Int32
+	h := func(context.Context, *adapter.Message) (*adapter.Reply, error) {
+		calls.Add(1)
+		return nil, context.DeadlineExceeded
+	}
+	first := runtimePhoto(t, m, inst, routes, h, adapter.DeliveryAck{Status: adapter.DeliveryAccepted, ExternalMessageID: "notice"})
+	_, err := first.intake.ReceivePhotos(t.Context(), arrival, func(context.Context, int) (adapter.Attachment, error) {
+		return adapter.Attachment{Type: "image", Mime: "image/png", Data: "eA=="}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := NewPhotoIntakeStore(m.db)
+	waitPhotoRuntime(t, func() bool {
+		row, e := s.Get(t.Context(), key)
+		return e == nil && row.Work.Status == "unknown" && row.Notice.Status == "delivered"
+	})
+	if err = m.Stop(t.Context(), inst.Name); err != nil {
+		t.Fatal(err)
+	}
+	actual.Store(1)
+	second := runtimePhoto(t, m, inst, routes, h, adapter.DeliveryAck{Status: adapter.DeliveryDelivered})
+	if err = m.RecoverPhotos(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	waitPhotoRuntime(t, func() bool {
+		row, e := s.Get(t.Context(), key)
+		return e == nil && row.Final.Status == "failed" && row.Notice.Status == "recalled"
+	})
+	if calls.Load() != 1 || second.finals.Load() != 0 || second.notices.Load() != 0 || second.recalls.Load() != 1 {
+		t.Fatalf("recovery dispatched new work or bypassed original batch: %d %d %d %d", calls.Load(), second.finals.Load(), second.notices.Load(), second.recalls.Load())
+	}
+}
+
+func TestSharedPhotoClaimsOriginalPartialDocumentsOnce(t *testing.T) {
+	m, inst := photoRuntimeSetup(t)
+	var calls atomic.Int32
+	routes := PhotoRoutes{Prepare: func(context.Context, *adapter.Message, *adapter.Message) (PhotoIntakeRoute, error) {
+		return PhotoIntakeRoute{Kind: "ordinary", NoticeText: "收件"}, nil
+	}}
+	h := func(ctx context.Context, msg *adapter.Message) (*adapter.Reply, error) {
+		calls.Add(1)
+		msg.SessionID = "created-by-engine"
+		reply := &adapter.Reply{AssistantMessageID: "assistant", Attachments: []adapter.Attachment{{ID: "document-1", Name: "结果.pdf", Mime: "application/pdf", Type: "file"}}}
+		prepared, err := m.PrepareReplyDelivery(ctx, msg)
+		if !prepared || err != nil {
+			return nil, errors.New("missing original delivery claim")
+		}
+		reply.MarkDeliveryAttempted(msg)
+		if err = m.Send(ctx, inst.ID, msg.ChatID, reply); err != nil {
+			return nil, err
+		}
+		return reply, errors.New("later model response failed")
+	}
+	first := runtimePhoto(t, m, inst, routes, h, adapter.DeliveryAck{Status: adapter.DeliveryOutcomeUnknown})
+	key, arrival := runtimeArrival(inst, "partial-document")
+	_, err := first.intake.ReceivePhotos(t.Context(), arrival, func(context.Context, int) (adapter.Attachment, error) {
+		return adapter.Attachment{Type: "image", Mime: "image/png", Data: "eA=="}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := NewPhotoIntakeStore(m.db)
+	waitPhotoRuntime(t, func() bool {
+		row, e := s.Get(t.Context(), key)
+		return e == nil && row.Work.Status == "completed" && row.Final.Status == "delivered"
+	})
+	row, err := s.Get(t.Context(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output ordinaryPhotoOutput
+	if err = json.Unmarshal([]byte(row.Work.ResultRef), &output); err != nil || len(output.DocumentIDs) != 1 || output.DocumentIDs[0] != "document-1" || first.finals.Load() != 1 || calls.Load() != 1 {
+		t.Fatalf("partial document was changed or resent: %#v sends=%d calls=%d err=%v", output, first.finals.Load(), calls.Load(), err)
 	}
 }

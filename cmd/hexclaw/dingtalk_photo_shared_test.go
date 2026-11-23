@@ -15,6 +15,15 @@ import (
 )
 
 func TestSharedK12PhotoFreezesBeforeDownloadAndCompletesAllPages(t *testing.T) {
+	for _, outcome := range []adapter.DeliveryStatus{adapter.DeliveryDelivered, adapter.DeliveryFailed} {
+		t.Run(string(outcome), func(t *testing.T) {
+			verifySharedK12PhotoPages(t, outcome)
+		})
+	}
+}
+
+func verifySharedK12PhotoPages(t *testing.T, outcome adapter.DeliveryStatus) {
+	t.Helper()
 	ctx := t.Context()
 	deps, _ := statusNoticeDeps(t)
 	coordinator := k12usecase.NewInboundPhotoCoordinator(deps.Records)
@@ -89,17 +98,17 @@ func TestSharedK12PhotoFreezesBeforeDownloadAndCompletesAllPages(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if i == 0 {
+		if i == 0 || outcome == adapter.DeliveryDelivered {
 			id := current.Receipt.ReceiptID
 			decided, err := coordinator.RecordRoutingDecision(ctx, receipt.AgentName, id, submitted.Version, k12usecase.InboundPhotoRouteNewSubmission)
 			if err != nil {
 				t.Fatal(err)
 			}
-			artifact, err := coordinator.RecordFinalArtifact(ctx, receipt.AgentName, id, decided.Version, "final-artifact")
+			artifact, err := coordinator.RecordFinalArtifact(ctx, receipt.AgentName, id, decided.Version, "final-artifact-"+id)
 			if err != nil {
 				t.Fatal(err)
 			}
-			bound, err := coordinator.BindReplyBatch(ctx, receipt.AgentName, id, artifact.Version, "delivery-batch")
+			bound, err := coordinator.BindReplyBatch(ctx, receipt.AgentName, id, artifact.Version, "delivery-batch-"+id)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -107,12 +116,15 @@ func TestSharedK12PhotoFreezesBeforeDownloadAndCompletesAllPages(t *testing.T) {
 			if _, err = coordinator.CompleteReply(ctx, receipt.AgentName, id, bound.Version); err != nil {
 				t.Fatal(err)
 			}
-			checkDone("")
 		} else {
 			if _, err = coordinator.FailTerminal(ctx, receipt.AgentName, current.Receipt.ReceiptID, submitted.Version, k12usecase.InboundPhotoTerminalStageImageTask, "known_failure"); err != nil {
 				t.Fatal(err)
 			}
-			checkDone(adapter.DeliveryFailed)
+		}
+		if i == 0 {
+			checkDone("")
+		} else {
+			checkDone(outcome)
 		}
 	}
 	drifted := route
