@@ -345,6 +345,96 @@ func TestParentGuidePreservesUnclearAnswerObservation(t *testing.T) {
 	}
 }
 
+func TestIndependentSharedReferenceUsesPrintedEvidence(t *testing.T) {
+	const local = "先求一份是多少，再求总容量是多少。\n列式：________"
+	const shared = "3. 用不同方法解题。\n已用空间是总容量的2/5，已知用了4.8 TB。\n示意图：已用空间、剩余空间"
+	const sharedSuffix = "已用空间是总容量的2/5，已知用了4.8 TB。\n示意图：已用空间、剩余空间"
+	const sharedUnits = "本题用 TB 表示容量。"
+	const handwritten = "第二个括号内的笔迹无法可靠辨认，也无法确定是否已经擦除。"
+	confidence := .99
+	req := PhotoGradeRequest{InitialReadMode: k12.RecognitionLayoutManifestWithContentV1}
+	for _, tc := range []struct {
+		name, printed, risk  string
+		answerComplete, deny bool
+		mutate               func(*RecognizedQuestion)
+	}{
+		{name: "current target only", printed: local},
+		{name: "complete shared repeat", printed: shared + "\n" + local},
+		{name: "partial shared repeat and complete answer", printed: sharedSuffix + "\n" + local, answerComplete: true},
+		{name: "multiple frozen materials", printed: sharedSuffix + "\n" + sharedUnits + "\n" + local, mutate: func(q *RecognizedQuestion) {
+			q.ImageSourceContext.Materials = append(q.ImageSourceContext.Materials, k12.RecognitionImageScopeDependencyV1{Text: sharedUnits, ForOrders: []int{1, 3}})
+		}},
+		{name: "handwriting wording", printed: local, risk: handwritten},
+		{name: "blank observation", printed: local, mutate: func(q *RecognizedQuestion) { q.AnswerState = AnswerStateBlank }},
+		{name: "printed source not legible", printed: local, deny: true},
+		{name: "target not owned", printed: local, deny: true},
+		{name: "shared material without current question", printed: sharedSuffix, deny: true},
+		{name: "extra unfrozen material", printed: sharedSuffix + "\n" + sharedUnits + "\n" + local, deny: true},
+		{name: "changed shared number", printed: strings.Replace(sharedSuffix, "4.8", "5.8", 1) + "\n" + local, deny: true},
+		{name: "changed shared unit", printed: strings.Replace(sharedSuffix, "TB", "GB", 1) + "\n" + local, deny: true},
+		{name: "changed operation", printed: strings.Replace(sharedSuffix, "2/5", "2×5", 1) + "\n" + local, deny: true},
+		{name: "different subquestion", printed: "（2）" + local, deny: true},
+		{name: "different printed request", printed: strings.Replace(local, "总容量", "剩余容量", 1), deny: true},
+		{name: "unresolved printed note", printed: local, risk: "印刷题干的条件被遮挡。", deny: true},
+		{name: "unattributed unit alternatives", printed: local, risk: "可能是4.8 TB或5.8 TB。", deny: true},
+		{name: "prior printed note", printed: local, deny: true, mutate: func(q *RecognizedQuestion) {
+			q.OCRSignals = []string{"手写模糊，且题面的条件无法确认。"}
+		}},
+		{name: "prior reading disagrees", printed: local, deny: true, mutate: func(q *RecognizedQuestion) {
+			q.EvidenceTranscriptions[0] = strings.Replace(q.EvidenceTranscriptions[0], "4.8", "5.8", 1)
+		}},
+		{name: "partial repeat in prior reading", printed: local, deny: true, mutate: func(q *RecognizedQuestion) {
+			q.EvidenceTranscriptions[0] = sharedSuffix + "\n" + local
+		}},
+		{name: "frozen recognition confidence below threshold", printed: local, deny: true, mutate: func(q *RecognizedQuestion) {
+			low := .80
+			q.RecognitionConfidence = &low
+		}},
+		{name: "typed printed gap", printed: local, deny: true, mutate: func(q *RecognizedQuestion) {
+			q.ImageSourceContext.Recoveries = []k12.RecognitionImageSourceRecoveryV1{{Gap: k12.RecognitionImageSourceGapV1{Kind: "printed"}}}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q := RecognizedQuestion{
+				Subject: "数学", ProblemKind: ProblemKindStandalone, SourceNumberPath: []string{"3", "1"},
+				SourceRegion:     &k12.SourcePixelRegion{Width: 800, Height: 400},
+				RawTranscription: local, CanonicalMarkdown: local, RecognitionConfidence: &confidence,
+				EvidenceTranscriptions: []string{shared + "\n" + local, local},
+				AnswerState:            AnswerStatePresent, StudentAnswer: "1/5", AnswerRawTranscription: "1/5",
+				OCRSignals: []string{"末尾分数的分子附近有标记遮挡。"},
+				ImageSourceContext: &k12.RecognitionImageSourceContextV1{
+					Version: k12.RecognitionImageScopeVersionV1, ScopeDigest: "frozen-plan", TargetIDs: []string{"subquestion-1"},
+					Materials: []k12.RecognitionImageScopeDependencyV1{{Text: shared, ForOrders: []int{1, 2}}},
+				},
+			}
+			if tc.mutate != nil {
+				tc.mutate(&q)
+			}
+			before, _ := json.Marshal(q)
+			var signals []string
+			if tc.risk != "" {
+				signals = []string{tc.risk}
+			}
+			payload, err := json.Marshal(map[string]any{
+				"verification": map[string]any{"target_ownership_confirmed": tc.name != "target not owned", "active_answer_complete": tc.answerComplete, "question_complete_and_legible": tc.name != "printed source not legible"},
+				"items": []any{map[string]any{"target_id": "t1", "kind": "question", "recognition": map[string]any{
+					"question": tc.printed, "subject": "数学", "answer_state": "present", "student_answer": "1/5", "recognition_confidence": .99, "ocr_signals": signals, "answer_bbox": nil,
+				}}}, "final_answer": nil,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if source, eligible := independentReferenceFromAdjudication(req, q, string(payload)); eligible == tc.deny || source != "" {
+				t.Fatalf("reference eligible=%t, projected source=%q", eligible, source)
+			}
+			after, _ := json.Marshal(q)
+			if !bytes.Equal(before, after) {
+				t.Fatal("reference decision changed the frozen assessment input")
+			}
+		})
+	}
+}
+
 func TestVerifiedLeadingTravelQuestionKeepsIndependentConditions(t *testing.T) {
 	const primary = "小宁3/4小时步行了6千米，按相同的速度，她每小时步行多少千米？"
 	const tail = "图示：1小时步行多少千米？先求一份，再求整段。"
