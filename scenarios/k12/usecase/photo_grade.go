@@ -379,7 +379,7 @@ func photoAnnotationCoverageWarning(result PhotoGradeResult) string {
 	}
 	annotated := 0
 	if result.AnnotatedImage != nil && len(result.AnnotatedImage.Data) > 0 {
-		for _, mark := range trustedPhotoMarks(result.Items) {
+		for _, mark := range renderedPhotoMarks(result.Items, result.AnnotatedImage) {
 			if mark.Status != PhotoAnswerUnclear && mark.Status != PhotoUntrusted {
 				annotated++
 			}
@@ -716,6 +716,22 @@ func trustedPhotoMarks(items []PhotoGradeItem) []PhotoAnnotation {
 		}
 	}
 	return marks
+}
+
+func renderedPhotoMarks(items []PhotoGradeItem, rendered *RenderedPhoto) []PhotoAnnotation {
+	marks := trustedPhotoMarks(items)
+	if rendered.VisibleMarkIndexes == nil {
+		return marks
+	}
+	visible := make([]PhotoAnnotation, 0, len(rendered.VisibleMarkIndexes))
+	previous := -1
+	for _, index := range rendered.VisibleMarkIndexes {
+		if index > previous && index >= 0 && index < len(marks) {
+			visible = append(visible, marks[index])
+			previous = index
+		}
+	}
+	return visible
 }
 
 func photoAnnotations(items []PhotoGradeItem) []PhotoAnnotation {

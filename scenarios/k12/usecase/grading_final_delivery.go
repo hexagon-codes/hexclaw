@@ -630,7 +630,7 @@ func (d Deps) finalReplyHasCurrentNumericExecution(ctx context.Context, artifact
 		if !ok || !current(solved) {
 			continue
 		}
-		if solved.Operation == k12.GradingItemOperationSolveVerify && finalReplyNumericReceiptMatches(solved, evidence) {
+		if solved.Operation == k12.GradingItemOperationSolveVerify && numericExecutionReceiptMatches(solved, evidence) {
 			return true
 		}
 		if solved.Operation != k12.GradingItemOperationSolve || solved.ExecutionKind != k12.GradingExecutionLocalDeterministic {
@@ -642,7 +642,7 @@ func (d Deps) finalReplyHasCurrentNumericExecution(ctx context.Context, artifact
 			continue
 		}
 		for _, invocation := range invocations {
-			if current(invocation) && invocation.Operation == k12.GradingItemOperationSolveVerify && finalReplyNumericReceiptMatches(invocation, evidence) {
+			if current(invocation) && invocation.Operation == k12.GradingItemOperationSolveVerify && numericExecutionReceiptMatches(invocation, evidence) {
 				return true
 			}
 		}
@@ -650,7 +650,7 @@ func (d Deps) finalReplyHasCurrentNumericExecution(ctx context.Context, artifact
 	return false
 }
 
-func finalReplyNumericReceiptMatches(invocation k12.GradingItemInvocation, evidence SolveEvidence) bool {
+func numericExecutionReceiptMatches(invocation k12.GradingItemInvocation, evidence SolveEvidence) bool {
 	payload, _, _, err := decodeGroundedPhysicalPayload(invocation.ResultJSON, nil)
 	if err != nil {
 		return false

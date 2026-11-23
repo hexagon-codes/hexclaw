@@ -467,6 +467,8 @@ func (a PhotoAnnotation) EffectiveStatus() PhotoItemStatus {
 type RenderedPhoto struct {
 	Data []byte
 	MIME string
+	// VisibleMarkIndexes 是原 marks 切片中在成图中仍有笔画的索引。nil 表示旧渲染器未提供这一事实。
+	VisibleMarkIndexes []int `json:"visible_mark_indexes,omitzero"`
 }
 
 // PhotoAnnotator 在原图上确定性绘制勾/叉/过程警示。实现只负责像素合成，不参与识题和判分。

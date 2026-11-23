@@ -23,6 +23,8 @@ type TeachingReportTaskSnapshot struct {
 type TeachingReportFrozenSnapshot struct {
 	Report k12.TeachingReport           `json:"report"`
 	Bundle TeachingReportBundleSnapshot `json:"bundle"`
+	// 题目归属和修订使用同一报告的 ProblemSources。nil 表示旧报告未记录；空集合表示实际没有落笔。
+	DrawnMarks map[string]frozenGradingMark `json:"drawn_marks,omitzero"`
 }
 
 type TeachingReportRenderer interface {

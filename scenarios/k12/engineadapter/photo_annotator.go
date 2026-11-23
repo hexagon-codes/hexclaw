@@ -10,6 +10,7 @@ import (
 	"image/jpeg"
 	"image/png"
 	"math"
+	"slices"
 
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/usecase"
 )
@@ -48,12 +49,14 @@ func (*PhotoAnnotator) Annotate(ctx context.Context, raw []byte, marks []usecase
 	bounds := src.Bounds()
 	dst := image.NewRGBA(image.Rect(0, 0, bounds.Dx(), bounds.Dy()))
 	draw.Draw(dst, image.Rect(0, 0, bounds.Dx(), bounds.Dy()), src, bounds.Min, draw.Src)
+	canvas := &photoMarkCanvas{RGBA: dst, ink: make(map[image.Point]int)}
 	for _, placement := range layoutPhotoMarks(dst.Bounds(), marks) {
 		if err := ctx.Err(); err != nil {
 			return usecase.RenderedPhoto{}, err
 		}
+		canvas.markIndex = placement.markIndex
 		drawAssessmentGlyph(
-			dst,
+			canvas,
 			placement.cx,
 			placement.cy,
 			placement.radius,
@@ -62,18 +65,60 @@ func (*PhotoAnnotator) Annotate(ctx context.Context, raw []byte, marks []usecase
 			placement.base,
 		)
 	}
-	rendered, err := encodeAnnotatedPhoto(dst, maxRenderedPhotoBytes)
+	rendered, err := encodeAnnotatedPhoto(dst, maxRenderedPhotoBytes, canvas.resizeInk)
 	if err != nil {
 		return usecase.RenderedPhoto{}, fmt.Errorf("photo annotator: 编码批改图: %w", err)
 	}
+	rendered.VisibleMarkIndexes = canvas.visibleMarkIndexes()
 	return rendered, nil
+}
+
+// 只追踪批注本身的彩色像素。后画的底描、重叠笔画和缩图采样都会改变实际可见的批注集合。
+type photoMarkCanvas struct {
+	*image.RGBA
+	markIndex int
+	ink       map[image.Point]int
+}
+
+func (c *photoMarkCanvas) setPixel(p image.Point, paint color.RGBA) {
+	c.SetRGBA(p.X, p.Y, paint)
+	if paint == (color.RGBA{255, 255, 255, 255}) {
+		delete(c.ink, p)
+	} else {
+		c.ink[p] = c.markIndex
+	}
+}
+
+func (c *photoMarkCanvas) resizeInk(from, to image.Point) {
+	next := make(map[image.Point]int, len(c.ink))
+	for p, mark := range c.ink {
+		// 与 resizePhotoNearest 取同一原像素。未被采样的笔画不计入最终图片。
+		q := image.Pt((p.X*to.X+from.X-1)/from.X, (p.Y*to.Y+from.Y-1)/from.Y)
+		if q.X < to.X && q.Y < to.Y && q.X*from.X/to.X == p.X && q.Y*from.Y/to.Y == p.Y {
+			next[q] = mark
+		}
+	}
+	c.ink = next
+}
+
+func (c *photoMarkCanvas) visibleMarkIndexes() []int {
+	seen := make(map[int]bool)
+	for _, mark := range c.ink {
+		seen[mark] = true
+	}
+	indexes := make([]int, 0, len(seen))
+	for mark := range seen {
+		indexes = append(indexes, mark)
+	}
+	slices.Sort(indexes)
+	return indexes
 }
 
 // encodeAnnotatedPhoto prefers lossless PNG for worksheets. Noisy high-resolution
 // phone photos can expand dramatically when converted from JPEG to PNG, so it
 // falls back to a bounded JPEG and, only when necessary, progressively scales
 // down the image. This keeps the final media below DingTalk's upload ceiling.
-func encodeAnnotatedPhoto(src image.Image, maxBytes int) (usecase.RenderedPhoto, error) {
+func encodeAnnotatedPhoto(src image.Image, maxBytes int, resized func(image.Point, image.Point)) (usecase.RenderedPhoto, error) {
 	if src == nil || maxBytes <= 0 {
 		return usecase.RenderedPhoto{}, fmt.Errorf("图片或输出上限无效")
 	}
@@ -99,6 +144,9 @@ func encodeAnnotatedPhoto(src image.Image, maxBytes int) (usecase.RenderedPhoto,
 	for current.Bounds().Dx() > 320 || current.Bounds().Dy() > 320 {
 		newWidth := maxInt(1, current.Bounds().Dx()*4/5)
 		newHeight := maxInt(1, current.Bounds().Dy()*4/5)
+		if resized != nil {
+			resized(current.Bounds().Size(), image.Pt(newWidth, newHeight))
+		}
 		current = resizePhotoNearest(current, newWidth, newHeight)
 		data, err := encodePhotoJPEG(current, 78)
 		if err != nil {
@@ -147,23 +195,25 @@ func resizePhotoNearest(src *image.RGBA, width, height int) *image.RGBA {
 }
 
 type photoMarkPlacement struct {
-	cx     int
-	cy     int
-	radius int
-	stroke int
-	status usecase.PhotoItemStatus
-	base   color.RGBA
-	bounds image.Rectangle
+	markIndex int
+	cx        int
+	cy        int
+	radius    int
+	stroke    int
+	status    usecase.PhotoItemStatus
+	base      color.RGBA
+	bounds    image.Rectangle
 }
 
 func layoutPhotoMarks(bounds image.Rectangle, marks []usecase.PhotoAnnotation) []photoMarkPlacement {
 	placements := make([]photoMarkPlacement, 0, len(marks))
 	occupied := make([]image.Rectangle, 0, len(marks))
-	for _, mark := range marks {
+	for index, mark := range marks {
 		base, ok := basePhotoMarkPlacement(bounds, mark)
 		if !ok {
 			continue
 		}
+		base.markIndex = index
 		candidates := photoMarkPlacementCandidates(bounds, base)
 		selected := candidates[0]
 		bestOverlap := photoMarkOverlapArea(selected.bounds, occupied)
@@ -335,7 +385,7 @@ func photoMarkOverlapArea(candidate image.Rectangle, occupied []image.Rectangle)
 }
 
 func drawAssessmentGlyph(
-	dst *image.RGBA,
+	dst *photoMarkCanvas,
 	cx, cy, radius int,
 	status usecase.PhotoItemStatus,
 	stroke int,
@@ -383,7 +433,7 @@ func validPhotoBBox(b usecase.BBox) bool {
 	return b.X >= 0 && b.Y >= 0 && b.W > 0 && b.H > 0 && b.X+b.W <= 1.005 && b.Y+b.H <= 1.005
 }
 
-func drawThickLine(dst *image.RGBA, x0, y0, x1, y1 int, c color.RGBA, thick int) {
+func drawThickLine(dst *photoMarkCanvas, x0, y0, x1, y1 int, c color.RGBA, thick int) {
 	dx, dy := x1-x0, y1-y0
 	steps := maxInt(absInt(dx), absInt(dy))
 	if steps == 0 {
@@ -396,7 +446,7 @@ func drawThickLine(dst *image.RGBA, x0, y0, x1, y1 int, c color.RGBA, thick int)
 		for oy := -r; oy <= r; oy++ {
 			for ox := -r; ox <= r; ox++ {
 				if ox*ox+oy*oy <= r*r && image.Pt(x+ox, y+oy).In(dst.Bounds()) {
-					dst.SetRGBA(x+ox, y+oy, c)
+					dst.setPixel(image.Pt(x+ox, y+oy), c)
 				}
 			}
 		}

@@ -68,7 +68,7 @@ func (o *GradingOrchestrator) freezeGradingTeachingReport(ctx context.Context, r
 			var ok bool
 			guide, ok = deterministicParentTeachingGuideForEvidence(o.deps.parentTeachingGuideRequest(ctx, photoItemGradeRequest(run.req, q), solved, item.Grade.Outcome), solved.Evidence)
 			if !ok {
-				guide, sourceDigest, restoredReceipt, err = o.restoreTeachingReportGuide(ctx, job, q, solved)
+				guide, sourceDigest, restoredReceipt, err = o.restoreTeachingReportGuide(ctx, job, q, assessment, solved)
 				if err != nil {
 					return fmt.Errorf("restore report teaching for problem %s: %w", q.ProblemID, err)
 				}
@@ -164,7 +164,7 @@ func (o *GradingOrchestrator) freezeGradingTeachingReport(ctx context.Context, r
 	if err != nil {
 		return err
 	}
-	snapshot := TeachingReportFrozenSnapshot{Report: report, Bundle: run.req.TeachingReport.Bundle}
+	snapshot := TeachingReportFrozenSnapshot{Report: report, Bundle: run.req.TeachingReport.Bundle, DrawnMarks: freezeGradingMarks(run.result, *artifact)}
 	if _, err := snapshot.Bundle.Resolve(); err != nil {
 		return err
 	}

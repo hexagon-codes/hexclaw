@@ -422,6 +422,7 @@ func (o *GradingOrchestrator) CorrectCompletedSource(ctx context.Context, owner,
 	if err != nil {
 		return out, err
 	}
+	run.result.Items, run.result.TaskIntent = items, taskIntent
 	artifact := original
 	artifact.ArtifactID = "final-" + id
 	artifact.CanonicalMarkdown = renderCanonicalFinalForTask(entries, taskIntent, original.CoverageStatus)

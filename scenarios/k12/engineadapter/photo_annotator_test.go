@@ -9,10 +9,37 @@ import (
 	"image/jpeg"
 	"image/png"
 	"math"
+	"slices"
 	"testing"
 
 	"github.com/hexagon-codes/hexclaw/scenarios/k12/usecase"
 )
+
+func TestPhotoAnnotatorReportsOnlyVisibleMarks(t *testing.T) {
+	src := image.NewRGBA(image.Rect(0, 0, 960, 300))
+	draw.Draw(src, src.Bounds(), image.White, image.Point{}, draw.Src)
+	var raw bytes.Buffer
+	if err := png.Encode(&raw, src); err != nil {
+		t.Fatal(err)
+	}
+	answer := usecase.BBox{X: .074, Y: .667, W: .122, H: .103}
+	marks := []usecase.PhotoAnnotation{
+		{QuestionNumber: 12, Status: usecase.PhotoCorrect, BBox: answer},
+		{QuestionNumber: 15, Status: usecase.PhotoCorrect, BBox: answer}, // 后一枚勾完全盖住前一枚。
+		{QuestionNumber: 16, Status: usecase.PhotoWrong, BBox: usecase.BBox{X: .5, Y: .5, W: .00001, H: .00001}},
+		{QuestionNumber: 19, Status: usecase.PhotoWrong, BBox: usecase.BBox{X: .6, Y: .4, W: .1, H: .2}},
+		{QuestionNumber: 22, Status: usecase.PhotoAnswerUnclear, BBox: usecase.BBox{X: .25, Y: .3, W: .1, H: .1}},
+	}
+	got, err := NewPhotoAnnotator().Annotate(t.Context(), raw.Bytes(), marks)
+	if err != nil || !slices.Equal(got.VisibleMarkIndexes, []int{1, 3, 4}) {
+		t.Fatalf("visible drawing indices = %v, err = %v", got.VisibleMarkIndexes, err)
+	}
+	canvas := photoMarkCanvas{ink: map[image.Point]int{image.Pt(1, 1): 0, image.Pt(2, 2): 1}}
+	canvas.resizeInk(image.Pt(4, 4), image.Pt(2, 2))
+	if visible := canvas.visibleMarkIndexes(); !slices.Equal(visible, []int{1}) {
+		t.Fatalf("nearest-neighbor reduction retained an unsampled mark: %v", visible)
+	}
+}
 
 func TestPhotoAnnotator_DrawsTrustedMarksAndKeepsDimensions(t *testing.T) {
 	src := image.NewRGBA(image.Rect(0, 0, 200, 300))
@@ -387,7 +414,7 @@ func TestPhotoAnnotator_FallsBackToBoundedJPEGWhenPhotoPNGIsTooLarge(t *testing.
 		}
 	}
 	const budget = 100 << 10
-	got, err := encodeAnnotatedPhoto(img, budget)
+	got, err := encodeAnnotatedPhoto(img, budget, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
