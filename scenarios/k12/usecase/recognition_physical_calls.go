@@ -293,6 +293,15 @@ func (e *durableRecognitionPhysicalCallExecutor) ExecuteRecognitionPhysicalCall(
 				"reused_from", reused.ReusedFromPhysicalInvocationID, "unit", reused.PhysicalUnit, "provider_requests", 0)
 			return k12.RecognitionPhysicalCallResult{Payload: payload, InvocationID: reused.PhysicalInvocationID, ResultDigest: reused.ResultDigest}, nil
 		}
+		if call.Unit == k12.RecognitionPhysicalUnitWholePage && e.parent.Attempt == 2 {
+			prior, priorErr := e.o.deps.Records.GetModelInvocationByAttempt(ctx, invocation.AgentName, invocation.JobID, invocation.Stage, 1)
+			if (priorErr != nil && !errors.Is(priorErr, records.ErrNotFound)) || prior.FailureKind == recognitionReviewGatewayRetry {
+				closeCtx, cancelClose := gradingDurableCommitContext(ctx)
+				_, ledgerErr := e.o.deps.Records.MarkModelPhysicalInvocationNotSent(closeCtx, invocation.AgentName, invocation.PhysicalInvocationID)
+				cancelClose()
+				return zero, errors.Join(fmt.Errorf("%w: review recovery requires its original whole-page receipt", ErrRecognitionPhysicalCallBeforeSend), priorErr, ledgerErr)
+			}
+		}
 	}
 
 	transportBinder, transportBoundary :=
@@ -2270,6 +2279,85 @@ func recognitionPhysicalFailureRetryable(failureKind string) bool {
 	default:
 		return statusCode >= 500 && statusCode <= 599
 	}
+}
+
+const recognitionReviewGatewayRetry = "recognition_review_gateway_retry"
+
+func recognitionReviewGatewayStatus(status int) bool {
+	return status == 502 || status == 503 || status == 504
+}
+
+// 只承认可回放首读及复核已明确失败的组合；未结算请求和裁决均不在自动恢复范围内。
+func settledRecognitionReviewGatewayFailure(children []k12.ModelPhysicalInvocation, parentID string) bool {
+	whole, failed := false, false
+	for _, child := range children {
+		if child.ParentInvocationID != parentID {
+			continue
+		}
+		if child.RecognitionPlanVersion != k12.RecognitionPlanVersionV2 ||
+			(child.Status == k12.ModelInvocationSucceeded && !validModelInvocationDigest(child.ResultDigest)) {
+			return false
+		}
+		if child.PhysicalUnit == k12.RecognitionPhysicalUnitWholePage && child.Status == k12.ModelInvocationSucceeded {
+			whole = true
+			continue
+		}
+		if !strings.HasPrefix(string(child.PhysicalUnit), "layout_review_batch_") {
+			return false
+		}
+		if child.Status == k12.ModelInvocationSucceeded {
+			continue
+		}
+		const prefix = "provider_response_http_"
+		code, err := strconv.Atoi(strings.TrimPrefix(child.FailureKind, prefix))
+		if failed || child.Status != k12.ModelInvocationFailed || !strings.HasPrefix(child.FailureKind, prefix) || err != nil || !recognitionReviewGatewayStatus(code) {
+			return false
+		}
+		failed = true
+	}
+	return whole && failed
+}
+
+// 第一次复核发生明确网关失败时，保留任务及原截止，按持久计数接续一次。
+// 运行中和崩溃恢复都使用同一证据，因此父调用结算与任务 CAS 之间中断也可安全接续。
+func (o *GradingOrchestrator) resumeRecognitionReviewAfterGatewayFailure(ctx context.Context, run *gradingRun, job GradingJobView) (GradingJobView, bool, error) {
+	if ctx.Err() != nil || job.Record.Status != k12.GradingStageRecognizing ||
+		job.Fields.SourceKind != "image_task" || job.Fields.AttemptCount != 0 ||
+		job.Fields.BudgetSnapshot.RecognitionPlanVersion != k12.RecognitionPlanVersionV2 || run.req.InitialReadMode != k12.RecognitionLayoutManifestWithContentV1 {
+		return job, false, nil
+	}
+	parent, err := o.deps.Records.GetModelInvocationByAttempt(ctx, job.Record.AgentName, job.Record.RecordID, k12.GradingStageRecognizing, 1)
+	if errors.Is(err, records.ErrNotFound) {
+		return job, false, nil
+	}
+	if err != nil || (parent.Status != k12.ModelInvocationSent &&
+		(parent.Status != k12.ModelInvocationFailed || parent.FailureKind != recognitionReviewGatewayRetry)) {
+		return job, false, err
+	}
+	children, err := o.deps.Records.ListModelPhysicalInvocations(ctx, parent.AgentName, parent.JobID)
+	if err != nil || !settledRecognitionReviewGatewayFailure(children, parent.InvocationID) {
+		return job, false, err
+	}
+	plan, err := o.deps.Records.LoadRecognitionLayoutPlanRuntimeV2(ctx, parent.AgentName, parent.InvocationID)
+	if err != nil || plan.AuthorizedPlan == nil {
+		return job, false, err
+	}
+	now := o.deps.now()
+	expired := job.Fields.Deadline <= now || parentAutomaticDeadlineExceeded(job.Fields, now)
+	if parent.Status == k12.ModelInvocationSent {
+		if _, closeErr := o.deps.Records.MarkModelInvocationFailed(ctx, parent.AgentName, parent.InvocationID, recognitionReviewGatewayRetry); closeErr != nil {
+			return job, false, closeErr
+		}
+	}
+	if expired {
+		failed, advanceErr := o.deps.AdvanceGradingStage(ctx, parent.AgentName, parent.JobID, AdvanceGradingInput{
+			Outcome: GradingOutcomeFailed, FailureKind: gradingFailureInteractiveDeadlineExceeded, Retryable: true,
+		})
+		return failed, true, errors.Join(context.DeadlineExceeded, advanceErr)
+	}
+	job.Fields.AttemptCount++
+	next, err := o.deps.saveGradingJob(ctx, job, k12.GradingStageRecognizing)
+	return next, true, err
 }
 
 func (o *GradingOrchestrator) finishConclusiveRecognitionRecovery(

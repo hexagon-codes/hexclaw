@@ -186,7 +186,17 @@ func (o *GradingOrchestrator) validCachedPhotoResult(ctx context.Context, agent 
 	if err != nil {
 		return job, false, err
 	}
+	var reviewRetrySource, recognitionSuccess k12.ModelInvocation
 	for _, call := range parents {
+		if call.Stage == k12.GradingStageRecognizing {
+			if call.Status == k12.ModelInvocationSucceeded {
+				recognitionSuccess = call
+			}
+			if call.Attempt == 1 && call.Status == k12.ModelInvocationFailed && call.FailureKind == recognitionReviewGatewayRetry {
+				reviewRetrySource = call
+				continue
+			}
+		}
 		if call.Status != k12.ModelInvocationSucceeded && !(call.Status == k12.ModelInvocationReconciled && call.ResultJSON != "") {
 			return job, false, nil
 		}
@@ -196,7 +206,15 @@ func (o *GradingOrchestrator) validCachedPhotoResult(ctx context.Context, agent 
 	if err != nil {
 		return job, false, err
 	}
+	// 原复核失败回执保留。仅在同一请求的后续识题已明确成功时，允许采用完整终稿。
+	if reviewRetrySource.InvocationID != "" && (recognitionSuccess.Attempt != 2 || recognitionSuccess.RequestDigest != reviewRetrySource.RequestDigest ||
+		!settledRecognitionReviewGatewayFailure(physical, reviewRetrySource.InvocationID)) {
+		return job, false, nil
+	}
 	for _, call := range physical {
+		if reviewRetrySource.InvocationID != "" && call.ParentInvocationID == reviewRetrySource.InvocationID {
+			continue
+		}
 		if call.Status != k12.ModelInvocationSucceeded {
 			return job, false, nil
 		}

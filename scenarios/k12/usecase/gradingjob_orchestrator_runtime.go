@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hexagon-codes/hexclaw/records"
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 	"github.com/hexagon-codes/hexclaw/skill"
 )
@@ -1140,6 +1141,16 @@ func (o *GradingOrchestrator) RecoverGradingJobs(ctx context.Context, agents []s
 				if parentAutomaticDeadlineExceeded(v.Fields, o.deps.now()) {
 					// 父自动窗口已过期时保留原失败信息，等待显式新窗口重试。
 					continue
+				}
+				if v.Fields.FailedStage == k12.GradingStageRecognizing && v.Fields.AttemptCount == 2 {
+					first, readErr := o.deps.Records.GetModelInvocationByAttempt(ctx, agent, jobID, k12.GradingStageRecognizing, 1)
+					if readErr != nil && !errors.Is(readErr, records.ErrNotFound) {
+						slog.Warn("K12 recovery could not verify recognition retry history", "job", jobID, "err", readErr)
+						continue
+					}
+					if first.FailureKind == recognitionReviewGatewayRetry {
+						continue // 网关自动补试已用过，重启仍等待显式重试。
+					}
 				}
 				l := o.jobLock(jobID)
 				l.Lock()

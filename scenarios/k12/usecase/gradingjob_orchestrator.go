@@ -580,6 +580,12 @@ func (o *GradingOrchestrator) runLoop(ctx context.Context, run *gradingRun, jobI
 		// DD-018: every model boundary receives the immutable route stored on
 		// this Job. Mutable global defaults are only consulted for new Jobs.
 		ctx = k12.WithGradingModelSnapshot(ctx, v.Fields.ModelSnapshot)
+		if next, handled, retryErr := o.resumeRecognitionReviewAfterGatewayFailure(ctx, run, v); handled || retryErr != nil {
+			if retryErr != nil {
+				return next, retryErr
+			}
+			continue
+		}
 		if parentAutomaticDeadlineExceeded(v.Fields, o.deps.now()) &&
 			gradingStageMayStartPhysicalWork(v.Record.Status) {
 			handled, expired, expiryErr := o.expireParentAutomaticStageBeforeSend(ctx, run, v)
@@ -1406,6 +1412,11 @@ func (o *GradingOrchestrator) runRecognize(ctx context.Context, run *gradingRun,
 				return v, aerr
 			}
 			return v, err
+		}
+		if status, ok := definitiveProviderResponseStatus(err); ok && recognitionReviewGatewayStatus(status) {
+			if next, retry, retryErr := o.resumeRecognitionReviewAfterGatewayFailure(ctx, run, job); retry || retryErr != nil {
+				return next, retryErr
+			}
 		}
 		failureKind := "recognize_failed"
 		if beforePhysicalSend {

@@ -9,6 +9,50 @@ import (
 	"github.com/hexagon-codes/hexclaw/scenarios/k12"
 )
 
+func TestRecognitionReviewGatewayRecoveryRequiresSettledV2Receipts(t *testing.T) {
+	digest := fmt.Sprintf("sha256:%064x", 1)
+	whole := k12.ModelPhysicalInvocation{
+		ParentInvocationID: "parent", RecognitionPlanVersion: k12.RecognitionPlanVersionV2,
+		PhysicalUnit: k12.RecognitionPhysicalUnitWholePage, Status: k12.ModelInvocationSucceeded, ResultDigest: digest,
+	}
+	failed := k12.ModelPhysicalInvocation{
+		ParentInvocationID: "parent", RecognitionPlanVersion: k12.RecognitionPlanVersionV2,
+		PhysicalUnit: "layout_review_batch_0001", Status: k12.ModelInvocationFailed, FailureKind: "provider_response_http_502",
+	}
+	for _, tc := range []struct {
+		name   string
+		change func([]k12.ModelPhysicalInvocation) []k12.ModelPhysicalInvocation
+	}{
+		{"missing initial receipt", func(c []k12.ModelPhysicalInvocation) []k12.ModelPhysicalInvocation { return c[1:] }},
+		{"invalid initial digest", func(c []k12.ModelPhysicalInvocation) []k12.ModelPhysicalInvocation { c[0].ResultDigest = ""; return c }},
+		{"unresolved transport", func(c []k12.ModelPhysicalInvocation) []k12.ModelPhysicalInvocation {
+			c[1].Status = k12.ModelInvocationOutcomeUnknown
+			return c
+		}},
+		{"authentication error", func(c []k12.ModelPhysicalInvocation) []k12.ModelPhysicalInvocation {
+			c[1].FailureKind = "provider_response_http_401"
+			return c
+		}},
+		{"other parent", func(c []k12.ModelPhysicalInvocation) []k12.ModelPhysicalInvocation {
+			c[1].ParentInvocationID = "other"
+			return c
+		}},
+		{"outside review", func(c []k12.ModelPhysicalInvocation) []k12.ModelPhysicalInvocation {
+			c[1].PhysicalUnit = "layout_adjudicate_0001"
+			return c
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if settledRecognitionReviewGatewayFailure(tc.change([]k12.ModelPhysicalInvocation{whole, failed}), "parent") {
+				t.Fatal("unsafe recognition recovery was admitted")
+			}
+		})
+	}
+	if !settledRecognitionReviewGatewayFailure([]k12.ModelPhysicalInvocation{whole, failed}, "parent") {
+		t.Fatal("definitive review failure with its successful initial read was rejected")
+	}
+}
+
 type dd036RecoveryEvidenceProviderSpy struct {
 	recognizerCalls int
 	providerCalls   int
