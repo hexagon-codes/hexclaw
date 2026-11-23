@@ -2686,7 +2686,8 @@ func (c *ImageTaskCoordinator) Result(
 		}
 		// 已冻结的 aggregate 结果同时证明当时的几何和实际图；旧无正文回执不回填。
 		if !restoreDrawnAnswerBoxes(&photo, *result.FinalArtifact, assessments) {
-			matched := restoreFinalPhotoGeometry(&photo, *result.FinalArtifact, invocations, assessments, assessmentDigests)
+			matched := canRestoreLegacyAnswerBoxes(result.FinalArtifact.ReportSnapshotJSON) &&
+				restoreFinalPhotoGeometry(&photo, *result.FinalArtifact, invocations, assessments, assessmentDigests)
 			if matched {
 				if photo.ImageWarning == "" || photo.ImageWarning == "未能可靠定位作答位置，本次仅提供文字批改" {
 					photo.ImageWarning = photoAnnotationCoverageWarning(photo)

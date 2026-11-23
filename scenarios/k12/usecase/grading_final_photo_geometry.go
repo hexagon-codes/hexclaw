@@ -91,6 +91,19 @@ func restoreDrawnAnswerBoxes(photo *PhotoGradeResult, artifact k12.GradingFinalA
 	return true
 }
 
+// Only an older snapshot without drawn_marks may fall back to the aggregate.
+// When a snapshot explicitly records marks, failed validation must not recover
+// possibly unrelated rectangles from an earlier stage.
+func canRestoreLegacyAnswerBoxes(snapshot string) bool {
+	if snapshot == "" {
+		return true
+	}
+	var markField struct {
+		Boxes json.RawMessage `json:"drawn_marks"`
+	}
+	return json.Unmarshal([]byte(snapshot), &markField) == nil && len(markField.Boxes) == 0
+}
+
 func restoreRenderedAnswerBoxes(photo *PhotoGradeResult, boxes map[string]frozenGradingMark) {
 	for i := range photo.Items {
 		q := &photo.Items[i].Recognized

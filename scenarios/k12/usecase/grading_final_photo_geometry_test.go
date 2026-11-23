@@ -62,3 +62,14 @@ func TestFrozenQuestionRegionMarkIsNotAnAnswerBox(t *testing.T) {
 		t.Fatal("region-only question mark claimed student handwriting coordinates")
 	}
 }
+
+func TestLegacyGeometryFallbackRequiresAnAbsentDrawingField(t *testing.T) {
+	for snapshot, want := range map[string]bool{
+		"": true, "{}": true, `{"drawn_marks":{}}`: false,
+		`{"drawn_marks":null}`: false, `{"drawn_marks":{"x":"invalid"}}`: false, "{": false,
+	} {
+		if got := canRestoreLegacyAnswerBoxes(snapshot); got != want {
+			t.Errorf("snapshot %q: legacy fallback = %v, want %v", snapshot, got, want)
+		}
+	}
+}
