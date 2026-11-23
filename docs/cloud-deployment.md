@@ -2,7 +2,7 @@
 
 适用于本仓库包含云端连接支持的源码构建。当前镜像为 Linux amd64，包含 Pandoc、Typst、Poppler、中文和数学字体、Python 及 SymPy。Poppler 提供 PDF 页数读取、文本提取及原页渲染。服务存储使用 SQLite；同一数据目录只运行一个实例。单机日常运行推荐 Docker Compose；已有 Kubernetes 集群使用相同镜像和独立 PVC。
 
-本次源码与文档版本为 `v0.5.2`；版本标识不表示已创建对应 Tag、完成 GitHub Release、发布版本镜像或更新当前服务器，实际状态以对应 Actions 记录及产物为准。Desktop 当前固定引用已有的后端 `refs/tags/v0.5.1`；后端 `v0.5.2` 的 CI、部署与 Tag 完成后，再同步该引用并构建 Desktop。部署入口仅接纳 main push 的完整 CI 成功事件；Tag Release 不自动更新测试服务器。
+本次源码与文档版本为 `v0.5.2`。Tag、GitHub Release、版本镜像及当前服务的状态以对应 Actions 记录及产物为准。Desktop 当前固定引用已有的后端 `refs/tags/v0.5.1`，后端 `v0.5.2` 的 CI、部署与 Tag 完成后再同步该引用并构建 Desktop。GitHub 自动部署入口接纳 main push 的完整 CI 成功事件。Tag Release 不自动更新测试服务器。
 
 ## Docker Compose
 
@@ -150,7 +150,9 @@ GitHub 配置项：
 
 main push 的完整 CI 成功后，构建对应 SHA 并推送 `sha-<commit>` 镜像，部署传递该构建返回的 digest。构建可取消过期任务，服务器变更不被下一次提交自动取消。服务端在 `.hexclaw-maintenance.lock` 内读取目标配置、校验原数据挂载、拉取镜像并冻结完整 Compose 配置；正常替换和启动前恢复使用同一冻结配置。目标已前进时记录 `superseded`，不会伪称该候选已部署。
 
-手工发布同样调用该脚本，使用已经核实的提交和 digest，不另起绕过锁的自动更新命令：
+云端开发测试环境供本机联调和 CI/CD 共用。人工上传的工作树构建按经过验证的镜像 ID、二进制摘要和原数据卷接管。GitHub 自动部署使用该次 CI 的提交和构建输出 digest。两个入口均保留，后发起的部署可以接管先前验收过的服务。验收结果记录取样时的运行镜像。
+
+手工部署已发布的镜像时同样调用部署脚本，传入已核实的提交和 digest。
 
 ```bash
 python3 scripts/ops/deploy.py \
@@ -159,9 +161,11 @@ python3 scripts/ops/deploy.py \
   --commit <完整提交SHA> --run-id <发布记录编号>
 ```
 
-脚本在锁内核对原项目、原卷及配置，再拉取镜像并核对 OCI revision；停止旧进程、完整备份、只重建 HexClaw，再启动唯一的新进程。就绪检查包含健康端点、受保护配置／知识库读取、原 backend ID 和配置摘要，记录前后 schema 版本。该检查不发送模型或 IM 请求，不能替代实际批改、图片附件和语义召回验收。
+脚本在锁内核对原项目、原卷及配置，再拉取镜像并核对 OCI revision；停止旧进程、完整备份、只重建 HexClaw，再启动唯一的新进程。接管就绪检查包含健康端点、受保护配置／知识库读取、原 backend ID 和配置摘要，记录前后 schema 版本。接管后恢复运行时，复核原镜像、数据挂载、backend ID、运行配置身份及 schema。当前配置摘要若与接管时不同，模型配置修订必须已持久化且由现用服务读回。快照摘要仍对应冻结时点。该检查不发送模型或 IM 请求，不能替代实际批改、图片附件和语义召回验收。
 
-自动和手动使用同一版本的 `deploy.py/backup.py`、相同镜像 digest 与同一目标配置。正常维护不重新构建同 SHA 镜像，也不直接向运行容器覆盖二进制。配置和工具摘要匹配、当前容器仍运行同一镜像且原最终回执完整时，重复入口只核验并复用现用结果，返回 `reused=true`，不会再次停机替换；这可用于恢复结果交接失败的同一候选。
+部署命令入场时记录预期旧镜像的 Docker image ID，取得维护锁后与实际容器的 `.Image` 比较。若调用方在编译、上传或排队前已取得该值，可直接传入可选参数 `--expected-previous-image-id sha256:<64位摘要>`。旧镜像在等待期间被其他构建替换时，这次交接返回 `superseded` 和 `superseded_reason=previous_image_changed`。回执同时记录预期和实见的旧镜像 ID，当前服务继续运行。需要主动切换时，从当前镜像发起新的部署即可。
+
+人工和自动部署按各自候选的不可变镜像身份核验。配置和工具摘要匹配、当前容器运行同一候选镜像且最终回执完整时，重复调用核验并复用现用结果，返回 `reused=true`。
 
 未解决的 `starting`、`recovery_required` 或未恢复的启动前失败，会阻止后续任务把异常现状当作健康基线，也不会被成功清理函数删除。只有 `deployed_retention_pending` 且候选 SHA/digest 匹配时，可在同一入口继续快照/清理，返回 `resumed=true`；不再次替换健康容器。恢复结论必须依据现场和数据，不能直接改状态掩盖问题。
 

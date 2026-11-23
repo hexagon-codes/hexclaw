@@ -293,6 +293,43 @@ print(json.dumps({'receipts':db.execute('SELECT id,state FROM receipts ORDER BY 
         self.assertEqual(original, self.container()['Id'])
         self.assertTrue(self.ready())
 
+    def test_waiting_deployment_preserves_new_image_at_the_same_revision(self):
+        self.start()
+        initial = self.container()['Image']
+        local_tag = self.repository + ':worktree-' + self.name
+        self.tags.append(local_tag)
+        command('docker', 'build', '--quiet', '--tag', local_tag,
+                '--build-arg', 'REVISION=' + self.next,
+                '--build-arg', 'FIXTURE_VARIANT=' + self.name, self.build, timeout=180)
+        local_image = docker_json('image', 'inspect', local_tag)[0]['Id']
+        self.assertNotEqual(local_image, self.images['next']['id'])
+
+        with (self.project / '.hexclaw-maintenance.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            invocation, marker = self.observed_deploy_command()
+            with subprocess.Popen(invocation, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as queued:
+                try:
+                    wait_for(marker.exists)
+                    command(*self.compose, 'up', '-d', '--no-build', '--no-deps', '--pull', 'never',
+                            'hexclaw', env=dict(os.environ, HEXCLAW_IMAGE=local_tag))
+                    wait_for(self.ready)
+                    local_container = self.container()['Id']
+                finally:
+                    fcntl.flock(lock, fcntl.LOCK_UN)
+                stdout, stderr = queued.communicate(timeout=60)
+                self.assertEqual(0, queued.returncode, stderr.decode())
+        skipped = json.loads(stdout)
+        self.assertEqual(('superseded', 'previous_image_changed', initial, local_image),
+                         (skipped['status'], skipped['superseded_reason'],
+                          skipped['expected_previous_image_id'], skipped['observed_previous_image_id']))
+        self.assertEqual(local_container, self.container()['Id'])
+
+        before = self.read_data()
+        accepted = json.loads(command(*self.deploy_command(), '--expected-previous-image-id', local_image).stdout)
+        self.assertEqual(('deployed', local_image, self.images['next']['id']),
+                         (accepted['status'], accepted['previous_image_id'], self.container()['Image']))
+        self.assertEqual(before, self.read_data())
+
     def test_current_only_cleanup_preserves_data_and_reuses_final_result(self):
         tag = self.repository + ':retention-old'
         self.tags.append(tag)

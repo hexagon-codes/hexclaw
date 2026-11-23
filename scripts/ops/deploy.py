@@ -296,7 +296,9 @@ def retain_development_state(args, configuration, report, report_file, current_i
         latest["retained"] = True
         write_json(output / "latest-deployment.json", latest)
     report["current_backup"] = latest
-    report["post_snapshot_verification"] = wait_service(compose_args(args), args.project_dir, current_image, report["verification"])
+    report["post_snapshot_verification"] = wait_service(
+        compose_args(args), args.project_dir, current_image, report["verification"], accepted_mount=report["data_mount"],
+    )
     report["retention_stage"] = "cleanup"
     write_json(report_file, report)
 
@@ -423,11 +425,12 @@ def only_container(command, project):
     return docker_json("inspect", ids[0])[0]
 
 
-def inspect_service(container):
+def inspect_service(container, accepted_config_sha=None):
     # 令牌只在容器内部读取并用于请求，不进入宿主参数、stdout 或部署记录。
     script = r'''
 import hashlib, json, pathlib, sqlite3, sys, urllib.request, yaml
 arguments = json.loads(sys.argv[1])
+accepted_config_sha = sys.argv[2]
 path = pathlib.Path.home() / '.hexclaw/hexclaw.yaml'
 for index, arg in enumerate(arguments):
     if arg == '--config' and index + 1 < len(arguments): path = pathlib.Path(arguments[index + 1])
@@ -449,29 +452,77 @@ if not isinstance(documents, dict): raise RuntimeError('Invalid knowledge respon
 database = pathlib.Path(cfg.get('storage', {}).get('sqlite', {}).get('path') or str(pathlib.Path.home() / '.hexclaw/data.db')).expanduser().resolve()
 with sqlite3.connect(database.as_uri() + '?mode=ro', uri=True, timeout=5) as connection:
     schema = connection.execute('SELECT COALESCE(MAX(version),0) FROM schema_migrations').fetchone()[0]
-print(json.dumps({'backend_id': identity, 'config_sha256': hashlib.sha256(body).hexdigest(),
-                  'protected_read': True, 'schema_version': schema}))
+config_sha = hashlib.sha256(body).hexdigest()
+llm_revision = cfg.get('llm', {}).get('config_revision', 0)
+if accepted_config_sha and config_sha != accepted_config_sha:
+    if read('/api/v1/config/llm', True).get('config_revision') != llm_revision:
+        raise RuntimeError('The running LLM configuration does not match the saved revision')
+runtime = [str(path.resolve()), str(database), cfg.get('storage', {}).get('driver', 'sqlite'),
+           server.get('host', '0.0.0.0'), server.get('port', 16060), server.get('api_token')]
+print(json.dumps({'backend_id': identity, 'config_sha256': config_sha,
+                  'runtime_config_sha256': hashlib.sha256(json.dumps(runtime).encode()).hexdigest(),
+                  'llm_revision': llm_revision, 'protected_read': True, 'schema_version': schema}))
 '''
     raw = run(["docker", "exec", container["Id"], "python3", "-c", script,
-               json.dumps(container["Config"].get("Cmd") or [])])
+               json.dumps(container["Config"].get("Cmd") or []), accepted_config_sha or ""])
     return json.loads(raw)
 
 
-def wait_service(command, project, image_id, baseline):
+def wait_service(command, project, image_id, baseline, *, accepted_mount=None):
     deadline = time.monotonic() + 120
     while True:
         container = only_container(command, project)
         if container["Image"] != image_id:
             raise OperationError("The started container does not use the requested image")
+        if accepted_mount is not None and mounted_data(container) != tuple(accepted_mount):
+            raise OperationError("The accepted service no longer uses the original data mount")
         try:
-            state = inspect_service(container)
-            if any(state[key] != baseline[key] for key in ("backend_id", "config_sha256", "protected_read")):
+            state = inspect_service(container, baseline["config_sha256"] if accepted_mount is not None else None)
+            if any(state[key] != baseline[key] for key in ("backend_id", "protected_read")):
                 raise OperationError("Backend identity or persistent configuration changed")
+            if accepted_mount is not None and state["schema_version"] != baseline["schema_version"]:
+                raise OperationError("The accepted service schema version changed")
+            if state["config_sha256"] != baseline["config_sha256"]:
+                # 接管前必须与旧配置字节一致；接管后只承认现用服务已读回的正常配置修订。
+                if (accepted_mount is None or state["runtime_config_sha256"] != baseline.get("runtime_config_sha256")
+                        or state["llm_revision"] <= baseline.get("llm_revision", state["llm_revision"])):
+                    raise OperationError("Backend identity or persistent configuration changed")
             return state
         except OperationError:
             if not container["State"]["Running"] or time.monotonic() >= deadline:
                 raise
             time.sleep(1)
+
+
+def deployment_compose(args, configuration, image_file):
+    args.compose_file = [args.project_dir / item for item in configuration.get("compose_files", [])]
+    args.env_file = [args.project_dir / item for item in configuration.get("env_files", [])]
+    if not args.env_file and (args.project_dir / ".env").is_file():
+        args.env_file.append(args.project_dir / ".env")
+    if image_file.is_file():
+        args.env_file.append(image_file)
+    args.project_name = configuration.get("project_name")
+    return compose_args(args)
+
+
+def deployment_predecessor(args, settings_path, image_file):
+    expected = getattr(args, "expected_previous_image_id", None)
+    if expected is not None:
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", expected):
+            raise OperationError("A full Docker image ID is required for the expected previous image")
+        return expected
+    # 锁外只记录交接意图；实际配置和容器仍须在获得维护锁后重新读取。
+    command = deployment_compose(args, json.loads(settings_path.read_text()), image_file)
+    try:
+        return only_container(command, args.project_dir)["Image"]
+    except OperationError:
+        # Compose 正在重建的短窗口可能暂时没有容器；使用上一次已确认的镜像。
+        current_file = args.project_dir / ".hexclaw-deploy" / "current.json"
+        if current_file.is_file():
+            saved = json.loads(current_file.read_text())
+            if saved.get("status") == "deployed" and re.fullmatch(r"sha256:[0-9a-f]{64}", saved.get("image_id") or ""):
+                return saved["image_id"]
+        raise
 
 
 def deploy(args):
@@ -485,17 +536,11 @@ def deploy(args):
     args.remote_host = None
     args.remote_dir = None
 
+    image_file = args.project_dir / ".hexclaw-image.env"
+    expected_previous_image = deployment_predecessor(args, settings_path, image_file)
     with maintenance_lock(args.project_dir):
         configuration = json.loads(settings_path.read_text())
-        image_file = args.project_dir / ".hexclaw-image.env"
-        args.compose_file = [args.project_dir / item for item in configuration.get("compose_files", [])]
-        args.env_file = [args.project_dir / item for item in configuration.get("env_files", [])]
-        if not args.env_file and (args.project_dir / ".env").is_file():
-            args.env_file.append(args.project_dir / ".env")
-        if image_file.is_file():
-            args.env_file.append(image_file)
-        args.project_name = configuration.get("project_name")
-        command = compose_args(args)
+        command = deployment_compose(args, configuration, image_file)
         original_files = list(args.compose_file) + list(args.env_file)
         state_dir = args.project_dir / ".hexclaw-deploy"
         state_dir.mkdir(exist_ok=True)
@@ -509,7 +554,11 @@ def deploy(args):
             target_image = docker_json("image", "inspect", args.image)[0]
             if mounted_data(current) != configured_data(json.loads(run(command + ["config", "--format", "json"], cwd=args.project_dir))):
                 raise OperationError("The pending deployment no longer uses the configured data mount")
-            saved["verification"] = wait_service(command, args.project_dir, target_image["Id"], saved["baseline"])
+            accepted = saved.get("verification")
+            saved["verification"] = wait_service(
+                command, args.project_dir, target_image["Id"], accepted or saved["baseline"],
+                accepted_mount=saved.get("data_mount") if accepted else None,
+            )
             args.output = args.project_dir / configuration.get("backup_directory", "backups")
             recovery_config = pending_file.with_suffix(".compose.json")
             args.include = [settings_path] + original_files + args.include
@@ -578,9 +627,15 @@ def deploy(args):
 
         report_file = state_dir / (datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8] + ".json")
         report = {"commit": args.commit, "image": args.image, "actions_run": args.run_id,
+                  "expected_previous_image_id": expected_previous_image,
                   "status": "preparing", "configuration_sha256": desired_digest, "tools_sha256": tools_digest}
         write_json(report_file, report)
         try:
+            if old["Image"] != expected_previous_image:
+                report.update(status="superseded", superseded_reason="previous_image_changed",
+                              observed_previous_image_id=old["Image"])
+                write_json(report_file, report)
+                return report
             if current_target(configuration) != args.commit:
                 report["status"] = "superseded"
                 write_json(report_file, report)
@@ -667,9 +722,10 @@ def deploy(args):
             except BaseException as error:
                 report["error_type"] = type(error).__name__
                 report["status"] = "recovery_required" if start_requested else "failed_before_start"
-                if report.get("retention_stage"):
+                if report.get("retention_stage") and report.get("verification"):
                     try:
-                        wait_service(command, args.project_dir, target_image["Id"], baseline)
+                        wait_service(command, args.project_dir, target_image["Id"], report["verification"],
+                                     accepted_mount=data_mount)
                         report["status"] = "deployed_retention_pending"
                     except (OperationError, OSError, ValueError):
                         pass
@@ -718,6 +774,7 @@ def main():
     parser.add_argument("--project-dir", type=Path, required=True)
     parser.add_argument("--target-config", type=Path, required=True)
     parser.add_argument("--image", required=True)
+    parser.add_argument("--expected-previous-image-id", help="Docker image ID observed before this handoff")
     parser.add_argument("--commit", required=True)
     parser.add_argument("--run-id", required=True)
     args = parser.parse_args()
