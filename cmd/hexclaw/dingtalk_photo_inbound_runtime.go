@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -213,18 +214,31 @@ func (r *k12DingtalkPhotoInboundRuntime) AdmitInboundPhoto(
 	if r == nil || r.inbound == nil {
 		return false, fmt.Errorf("DingTalk inbound photo runtime is unavailable")
 	}
-	if msg == nil || msg.Metadata["conversation_type"] == "2" ||
-		len(msg.Attachments) != 1 || strings.TrimSpace(msg.Attachments[0].Type) != "image" {
+	if msg == nil || msg.Metadata["conversation_type"] == "2" || len(msg.Attachments) == 0 {
 		return false, nil
+	}
+	for _, attachment := range msg.Attachments {
+		if strings.TrimSpace(attachment.Type) != "image" {
+			return false, nil
+		}
 	}
 	originalMessage := msg
 	identity, err := k12DingtalkInboundIdentity(msg)
 	if err != nil {
 		return false, err
 	}
-	raw, err := decodeK12PhotoAttachment(msg.Attachments[0])
-	if err != nil {
-		return false, err
+	pages := make([]k12usecase.InboundPhotoAdmission, len(msg.Attachments))
+	for i, attachment := range msg.Attachments {
+		data, decodeErr := decodeK12PhotoAttachment(attachment)
+		if decodeErr != nil {
+			return false, decodeErr
+		}
+		name := strings.TrimSpace(attachment.Name)
+		if name == "" {
+			name = "dingtalk-picture"
+		}
+		pages[i] = k12usecase.InboundPhotoAdmission{AssetName: name,
+			AssetMIME: strings.ToLower(strings.TrimSpace(attachment.Mime)), AssetBytes: data}
 	}
 
 	// 完整 provider identity 的首次冻结值优先于当前可变路由。
@@ -252,24 +266,9 @@ func (r *k12DingtalkPhotoInboundRuntime) AdmitInboundPhoto(
 				return false, err
 			}
 		}
-		bundle, _, err := r.inbound.Admit(ctx, k12usecase.InboundPhotoAdmission{
-			OwnerScope: existing.Receipt.OwnerScope, AgentName: existing.Receipt.AgentName,
-			BindingID: existing.Receipt.BindingID, Identity: existing.Receipt.Identity,
-			AssetName: existing.Asset.Name, AssetMIME: existing.Asset.MIME,
-			AssetBytes: raw, CommandJSON: existing.Receipt.CommandJSON,
-		})
-		if err != nil {
-			return false, err
-		}
-		slog.Info("K12 DingTalk inbound photo admitted",
-			"stage", "admitted",
-			"agent_ref", k12DingtalkPhotoRestartCheckpointValueDigest(bundle.Receipt.AgentName),
-			"receipt_ref", k12DingtalkPhotoRestartCheckpointValueDigest(bundle.Receipt.ReceiptID),
-			"resumed", true,
-			"elapsed_ms", time.Since(startedAt).Milliseconds(),
-		)
-		r.schedule(bundle.Receipt.AgentName, bundle.Receipt.ReceiptID)
-		return true, nil
+		pages[0].AssetName = existing.Asset.Name
+		pages[0].AssetMIME = existing.Asset.MIME
+		return r.admitPhotoPages(ctx, pages, existing.Receipt, startedAt)
 	}
 	if !errors.Is(resumeErr, records.ErrNotFound) {
 		return false, resumeErr
@@ -325,29 +324,49 @@ func (r *k12DingtalkPhotoInboundRuntime) AdmitInboundPhoto(
 	if err != nil {
 		return false, fmt.Errorf("encode DingTalk inbound photo command: %w", err)
 	}
-	attachment := msg.Attachments[0]
-	assetName := strings.TrimSpace(attachment.Name)
-	if assetName == "" {
-		assetName = "dingtalk-picture"
-	}
-	bundle, _, err := r.inbound.Admit(ctx, k12usecase.InboundPhotoAdmission{
+	return r.admitPhotoPages(ctx, pages, k12usecase.InboundPhotoReceipt{
 		OwnerScope: k12usecase.DefaultLocalOwnerScope,
 		AgentName:  routed.AgentName, BindingID: stableBindingID(*routed.Rule),
-		Identity: identity, AssetName: assetName,
-		AssetMIME:  strings.ToLower(strings.TrimSpace(attachment.Mime)),
-		AssetBytes: raw, CommandJSON: string(commandJSON),
-	})
+		Identity: identity, CommandJSON: string(commandJSON),
+	}, startedAt)
+}
+
+func (r *k12DingtalkPhotoInboundRuntime) admitPhotoPages(
+	ctx context.Context, pages []k12usecase.InboundPhotoAdmission, receipt k12usecase.InboundPhotoReceipt, startedAt time.Time,
+) (bool, error) {
+	for i := range pages {
+		pages[i].OwnerScope, pages[i].AgentName = receipt.OwnerScope, receipt.AgentName
+		pages[i].BindingID, pages[i].Identity = receipt.BindingID, receipt.Identity
+		pages[i].CommandJSON = receipt.CommandJSON
+	}
+	var bundles []k12usecase.InboundPhotoBundle
+	var err error
+	if len(pages) == 1 {
+		var bundle k12usecase.InboundPhotoBundle
+		bundle, _, err = r.inbound.Admit(ctx, pages[0])
+		bundles = []k12usecase.InboundPhotoBundle{bundle}
+	} else {
+		group, ok := r.inbound.(interface {
+			AdmitPages(context.Context, []k12usecase.InboundPhotoAdmission) ([]k12usecase.InboundPhotoBundle, bool, error)
+		})
+		if !ok {
+			return false, errors.New("DingTalk multi-page photo admission is unavailable")
+		}
+		bundles, _, err = group.AdmitPages(ctx, pages)
+	}
 	if err != nil {
 		return false, err
 	}
-	slog.Info("K12 DingTalk inbound photo admitted",
-		"stage", "admitted",
-		"agent_ref", k12DingtalkPhotoRestartCheckpointValueDigest(bundle.Receipt.AgentName),
-		"receipt_ref", k12DingtalkPhotoRestartCheckpointValueDigest(bundle.Receipt.ReceiptID),
-		"resumed", false,
-		"elapsed_ms", time.Since(startedAt).Milliseconds(),
-	)
-	r.schedule(bundle.Receipt.AgentName, bundle.Receipt.ReceiptID)
+	if len(bundles) != len(pages) {
+		return false, errors.New("DingTalk photo admission returned an incomplete page set")
+	}
+	for _, bundle := range bundles {
+		slog.Info("K12 DingTalk inbound photo admitted", "stage", "admitted",
+			"agent_ref", k12DingtalkPhotoRestartCheckpointValueDigest(bundle.Receipt.AgentName),
+			"receipt_ref", k12DingtalkPhotoRestartCheckpointValueDigest(bundle.Receipt.ReceiptID),
+			"resumed", receipt.ReceiptID != "", "pages", len(bundles), "elapsed_ms", time.Since(startedAt).Milliseconds())
+		r.schedule(bundle.Receipt.AgentName, bundle.Receipt.ReceiptID)
+	}
 	return true, nil
 }
 
@@ -611,8 +630,8 @@ func (r *k12DingtalkPhotoInboundRuntime) advanceImageTask(
 			return r.waitWithStatusNotice(ctx, bundle, "outcome_unknown")
 		}
 	}
-	if !homeworkCompleted &&
-		view.ClassificationInvocationStatus == k12.ImageTaskInvocationOutcomeUnknown {
+	if !homeworkCompleted && (view.ClassificationInvocationStatus == k12.ImageTaskInvocationOutcomeUnknown ||
+		view.Dispatch.OutcomeUnknown()) {
 		return r.waitWithStatusNotice(ctx, bundle, "outcome_unknown")
 	}
 	if view.Dispatch.Status == k12.ImageTaskStatusFailed &&
@@ -1140,9 +1159,14 @@ func (r *k12DingtalkPhotoInboundRuntime) completeBoundReply(
 			if err != nil {
 				return false, err
 			}
-			pdfWithGradingImage := len(batch.Receipts) == 2 && view.Dispatch.TaskIntent == k12.ImageTaskIntentCompletedHomework
-			if (view.Dispatch.TaskIntent != k12.ImageTaskIntentBlankWorksheet && !pdfWithGradingImage) ||
-				bundle.Dispatch.RoutingDecision != k12usecase.InboundPhotoRouteNewSubmission {
+			intent := k12usecase.EffectiveImageTaskHomeworkIntent(view.Dispatch)
+			route := bundle.Dispatch.RoutingDecision
+			if route == k12usecase.InboundPhotoRouteRegrade {
+				intent = k12.ImageTaskIntentCompletedHomework
+			}
+			gradingPDF := len(batch.Receipts) == 2 && intent == k12.ImageTaskIntentCompletedHomework
+			if (route != k12usecase.InboundPhotoRouteNewSubmission && route != k12usecase.InboundPhotoRouteRegrade) ||
+				(intent != k12.ImageTaskIntentBlankWorksheet && !gradingPDF) {
 				return false, fmt.Errorf("DingTalk photo bound reply batch is invalid")
 			}
 		} else if (len(batch.Receipts) == 2 || len(batch.Receipts) == 3) && strings.HasPrefix(batch.Receipts[1].PartMIME, "image/") {
@@ -1187,6 +1211,13 @@ func (r *k12DingtalkPhotoInboundRuntime) completeBoundReply(
 	if batch.Status != k12.DeliveryBatchDelivered {
 		return false, nil
 	}
+	return r.finishDeliveredPhotoReply(ctx, bundle, batch)
+}
+
+// 首次发送和重启回读共用同一收尾：只清理原提示，不再准备已送达的部件。
+func (r *k12DingtalkPhotoInboundRuntime) finishDeliveredPhotoReply(
+	ctx context.Context, bundle k12usecase.InboundPhotoBundle, batch k12.DeliveryBatch,
+) (bool, error) {
 	// 清理失败只重读已经送达的批次；不会再走模型或终稿发送路径。
 	if err := r.recallAcceptedStatusNotice(ctx, bundle); err != nil {
 		return false, err
@@ -1272,6 +1303,12 @@ func (r *k12DingtalkPhotoInboundRuntime) advanceFinalReply(
 	// V88 已绑定批次后只允许读冻结批次并查询回执，不再打开 V89 字节。
 	if strings.TrimSpace(bundle.Dispatch.DeliveryBatchID) != "" {
 		return r.completeBoundReply(ctx, bundle)
+	}
+	if bundle.Receipt.Identity.PageIndex > 0 {
+		ready, err := r.earlierPhotoPagesSettled(ctx, bundle)
+		if err != nil || !ready {
+			return false, err
+		}
 	}
 	taskIntent := k12.ImageTaskIntent("")
 	if r.imageTasks != nil {
@@ -1443,28 +1480,77 @@ func (r *k12DingtalkPhotoInboundRuntime) advanceFinalReply(
 	if batch.Status != k12.DeliveryBatchDelivered {
 		return false, nil
 	}
-	completed, err := r.inbound.CompleteReply(
-		ctx, bundle.Receipt.AgentName, bundle.Receipt.ReceiptID, bundle.Dispatch.Version,
-	)
+	return r.finishDeliveredPhotoReply(ctx, bundle, batch)
+}
+
+// 各页可以独立识题，正常终稿按页序发送。已明确停放的前页不会阻断后页。
+func (r *k12DingtalkPhotoInboundRuntime) earlierPhotoPagesSettled(ctx context.Context, bundle k12usecase.InboundPhotoBundle) (bool, error) {
+	reader, ok := r.inbound.(interface {
+		PendingEarlierPages(context.Context, k12usecase.InboundPhotoIdentity) ([]k12usecase.InboundPhotoDispatch, error)
+	})
+	if !ok {
+		return false, errors.New("DingTalk photo page order is unavailable")
+	}
+	pages, err := reader.PendingEarlierPages(ctx, bundle.Receipt.Identity)
 	if err != nil {
 		return false, err
 	}
-	bundle.Dispatch = completed
-	if err := r.reachRestartCheckpoint(
-		ctx, k12DingtalkPhotoRestartCheckpointAfterDeliverySend, bundle, "",
-	); err != nil {
-		return false, err
+	for _, page := range pages {
+		if page.DeliveryBatchID != "" {
+			// 排序只读本地回执，不代表另一页查询平台、重发或完成其入站。
+			batches, ok := r.replyBatches.(interface {
+				GetDeliveryBatch(context.Context, string, string) (k12.DeliveryBatch, error)
+			})
+			if !ok {
+				return false, errors.New("DingTalk photo delivery receipt is unavailable")
+			}
+			batch, err := batches.GetDeliveryBatch(ctx, bundle.Receipt.AgentName, page.DeliveryBatchID)
+			if err != nil {
+				return false, err
+			}
+			switch batch.Status {
+			case k12.DeliveryBatchDelivered, k12.DeliveryBatchFailed, k12.DeliveryBatchPartialFailed, k12.DeliveryBatchOutcomeUnknown:
+				continue
+			default:
+				return false, nil
+			}
+		}
+		if page.ConfirmationStatus == k12usecase.InboundPhotoConfirmationWaiting {
+			continue
+		}
+		if page.ImageTaskID == "" || page.ProcessingStatus == k12usecase.InboundPhotoFinalArtifactReady {
+			return false, nil
+		}
+		if r.imageTasks == nil {
+			return false, errors.New("DingTalk image task reader is unavailable")
+		}
+		view, err := r.imageTasks.Get(ctx, bundle.Receipt.AgentName, page.ImageTaskID)
+		if err != nil {
+			return false, err
+		}
+		if !inboundPhotoPageParked(view) {
+			return false, nil
+		}
 	}
-	slog.Info("K12 DingTalk inbound photo reply delivered",
-		"stage", "reply_delivered",
-		"agent_ref", k12DingtalkPhotoRestartCheckpointValueDigest(bundle.Receipt.AgentName),
-		"receipt_ref", k12DingtalkPhotoRestartCheckpointValueDigest(bundle.Receipt.ReceiptID),
-		"final_artifact_ref", k12DingtalkPhotoRestartCheckpointValueDigest(artifact.ArtifactID),
-		"delivery_batch_ref", k12DingtalkPhotoRestartCheckpointValueDigest(bundle.Dispatch.DeliveryBatchID),
-		"delivery_status", batch.Status,
-		"part_count", len(batch.Receipts),
-	)
 	return true, nil
+}
+
+func inboundPhotoPageParked(view k12usecase.ImageTaskView) bool {
+	if view.HomeworkProjection != nil {
+		switch view.HomeworkProjection.Stage {
+		case k12.GradingStageCompleted:
+			return false
+		case k12.GradingStageFailedRetryable, k12.GradingStageFailedTerminal, k12.GradingStageOutcomeUnknown, k12.GradingStageCancelled:
+			return true
+		}
+	}
+	switch view.Dispatch.Status {
+	case k12.ImageTaskStatusAwaitingConfirmation, k12.ImageTaskStatusCancelled, k12.ImageTaskStatusFailed:
+		return true
+	}
+	return view.ClassificationInvocationStatus == k12.ImageTaskInvocationOutcomeUnknown ||
+		view.CreativeFeedback == "feedback_failed" || view.CreativeFeedback == "feedback_outcome_unknown" ||
+		(view.Creative != nil && view.Creative.Status == k12.CreativeWorkIntakeAwaitingConfirmation)
 }
 
 func validateK12UnreadableReplyBatch(batch k12.DeliveryBatch, bundle k12usecase.InboundPhotoBundle, target k12usecase.ResolvedDeliveryTarget) error {
@@ -1906,6 +1992,8 @@ type k12InboundPhotoIdentityProjection struct {
 	InstanceID        string `json:"instance_id"`
 	ChatID            string `json:"chat_id"`
 	ProviderMessageID string `json:"provider_message_id"`
+	PageIndex         *int   `json:"page_index,omitempty"`
+	PageCount         int    `json:"page_count,omitempty"`
 }
 
 type k12InboundPhotoReceiptProjection struct {
@@ -1945,12 +2033,14 @@ type k12InboundPhotoBundleProjection struct {
 
 func projectK12InboundPhotoBundle(bundle k12usecase.InboundPhotoBundle) k12InboundPhotoBundleProjection {
 	identity := bundle.Receipt.Identity
+	projected := k12InboundPhotoIdentityProjection{Platform: identity.Platform, InstanceID: identity.InstanceID,
+		ChatID: identity.ChatID, ProviderMessageID: identity.ProviderMessageID}
+	if bundle.Receipt.PageCount > 1 {
+		projected.PageIndex, projected.PageCount = &identity.PageIndex, bundle.Receipt.PageCount
+	}
 	return k12InboundPhotoBundleProjection{
 		Receipt: k12InboundPhotoReceiptProjection{
-			Identity: k12InboundPhotoIdentityProjection{
-				Platform: identity.Platform, InstanceID: identity.InstanceID,
-				ChatID: identity.ChatID, ProviderMessageID: identity.ProviderMessageID,
-			},
+			Identity:  projected,
 			AgentName: bundle.Receipt.AgentName, ReceiptID: bundle.Receipt.ReceiptID,
 			BindingID: bundle.Receipt.BindingID, CommandDigest: bundle.Receipt.CommandDigest,
 		},
@@ -1992,6 +2082,14 @@ func newK12DingtalkPhotoInboundQueryHandler(
 			InstanceID:        req.URL.Query().Get("instance_id"),
 			ChatID:            req.URL.Query().Get("chat_id"),
 			ProviderMessageID: req.URL.Query().Get("provider_message_id"),
+		}
+		if req.URL.Query().Has("page_index") {
+			index, err := strconv.Atoi(req.URL.Query().Get("page_index"))
+			if err != nil || index < 0 {
+				http.Error(w, "invalid page_index", http.StatusBadRequest)
+				return
+			}
+			identity.PageIndex = index
 		}
 		bundle, err := query.ResumeByIdentity(req.Context(), identity)
 		if errors.Is(err, records.ErrNotFound) || err == nil &&

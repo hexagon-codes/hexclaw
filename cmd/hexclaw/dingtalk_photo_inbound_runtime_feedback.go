@@ -60,6 +60,9 @@ func k12DingtalkPhotoStatusText(locale, state string) string {
 
 // 状态通知单独冻结，不占用终稿批次；重启优先读取原载荷，不能由新语言或错误正文另发一份。
 func (r *k12DingtalkPhotoInboundRuntime) sendStatusNotice(ctx context.Context, bundle k12usecase.InboundPhotoBundle, state string) error {
+	if state == "accepted" && bundle.Receipt.Identity.PageIndex > 0 {
+		return nil
+	}
 	var command k12DingtalkInboundPhotoCommand
 	if err := json.Unmarshal([]byte(bundle.Receipt.CommandJSON), &command); err != nil {
 		return fmt.Errorf("decode DingTalk photo status command: %w", err)
@@ -130,6 +133,9 @@ func (r *k12DingtalkPhotoInboundRuntime) waitWithStatusNotice(ctx context.Contex
 
 // 终稿完整送达后撤回原接纳提示；发送回执仍保留其原始事实，不改成清理状态。
 func (r *k12DingtalkPhotoInboundRuntime) recallAcceptedStatusNotice(ctx context.Context, bundle k12usecase.InboundPhotoBundle) error {
+	if bundle.Receipt.Identity.PageIndex > 0 {
+		return nil
+	}
 	var command k12DingtalkInboundPhotoCommand
 	if err := json.Unmarshal([]byte(bundle.Receipt.CommandJSON), &command); err != nil {
 		return fmt.Errorf("decode DingTalk photo status command: %w", err)

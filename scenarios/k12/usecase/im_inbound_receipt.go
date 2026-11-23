@@ -71,6 +71,12 @@ type InboundPhotoRepository interface {
 	ListRecoverableInboundPhotos(context.Context, int) ([]InboundPhotoBundle, error)
 }
 
+// InboundPhotoPageRepository 扩展原单页端口，按有序整组接纳并读回先前页的交付状态。
+type InboundPhotoPageRepository interface {
+	AdmitInboundPhotoPages(context.Context, []InboundPhotoAdmission) ([]InboundPhotoBundle, bool, error)
+	PendingEarlierInboundPhotoPages(context.Context, InboundPhotoIdentity) ([]InboundPhotoDispatch, error)
+}
+
 // InboundPhotoRoutingSnapshotRepository 是多候选确认的可选扩展；保持旧 port 不变，
 // 使无候选/测试装配仍可复用既有 V88 协议。
 type InboundPhotoRoutingSnapshotRepository interface {

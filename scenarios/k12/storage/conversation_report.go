@@ -83,13 +83,14 @@ func (s *Store) GetLatestConversationImageReportSource(ctx context.Context, scop
 		}
 		query = `SELECT o.owner_scope,d.agent_name,d.dispatch_id,d.source_session_id,r.provider_message_id,h.grading_job_id` + base + `
  JOIN k12_im_inbound_dispatches inbound ON inbound.image_task_id=d.dispatch_id
- JOIN k12_im_inbound_receipts r ON r.receipt_id=inbound.receipt_id AND r.agent_name=d.agent_name AND r.owner_scope=o.owner_scope
+ JOIN k12_im_inbound_pages p ON p.receipt_id=inbound.receipt_id
+ JOIN k12_im_inbound_receipts r ON r.receipt_id=p.source_receipt_id AND r.agent_name=d.agent_name AND r.owner_scope=o.owner_scope
  WHERE d.agent_name=? AND d.source_kind=? AND r.platform=? AND r.instance_id=? AND r.chat_id=?
  AND h.status='completed' AND g.status='completed' AND o.owner_scope<>''
  AND EXISTS(SELECT 1 FROM sessions session WHERE session.id=? AND session.user_id=?)
  AND (?='' OR EXISTS(SELECT 1 FROM messages previous WHERE previous.id=? AND previous.session_id=?
    AND previous.role='assistant' AND r.created_at>CAST(strftime('%s',previous.created_at) AS INTEGER)))
- ORDER BY r.created_at DESC,r.rowid DESC,d.attempt_generation DESC LIMIT 1`
+ ORDER BY r.created_at DESC,r.rowid DESC,p.page_index DESC,d.attempt_generation DESC LIMIT 1`
 		args = []any{scope.AgentName, k12.ImageTaskSourceIM, scope.Platform, scope.InstanceID, scope.ChatID, scope.SessionID, scope.UserID, scope.AfterMessageID, scope.AfterMessageID, scope.SessionID}
 	}
 	err := s.db.QueryRowContext(ctx, query, args...).Scan(&source.OwnerScope, &source.AgentName, &source.DispatchID, &source.SourceSessionID, &source.SourceMessageID, &source.JobID)

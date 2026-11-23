@@ -148,6 +148,35 @@ func TestDingTalkPhotoWorkerDoesNotMisclassifyRetryOrReconciliationStates(t *tes
 	}
 }
 
+func TestDingTalkWritingOCRUnknownKeepsInboundOpenAfterClassification(t *testing.T) {
+	d, transport := statusNoticeDeps(t)
+	bundle := terminalImageTaskBundle()
+	inbound := &inboundPhotoCoordinatorFake{bundle: bundle}
+	images := &pollingImageTaskFacade{
+		fakeK12ImageTaskFacade: &fakeK12ImageTaskFacade{},
+		view: k12usecase.ImageTaskView{
+			Dispatch: k12.ImageTaskDispatch{
+				Status: k12.ImageTaskStatusFailed, TaskIntent: k12.ImageTaskIntentWriting,
+				FailureKind: "writing_ocr_outcome_unknown",
+			},
+			ClassificationInvocationStatus: k12.ImageTaskInvocationSucceeded,
+			Creative:                       &k12.CreativeWorkIntake{WorkType: k12.WorkTypeWriting, Status: k12.CreativeWorkIntakeFailed},
+		},
+	}
+	for range 2 {
+		r := newK12DingtalkPhotoInboundRuntime(k12DingtalkPhotoInboundRuntimeConfig{Inbound: inbound, ImageTasks: images, ReplyBatches: d})
+		if done, err := r.advanceImageTask(t.Context(), inbound.bundle); done || !errors.Is(err, errK12DingtalkPhotoWaiting) {
+			t.Fatalf("unknown OCR response did not remain pending: done=%v err=%v", done, err)
+		}
+	}
+	if len(transport.sends) != 1 || inbound.terminalCalls != 0 || images.retryCalls != 0 || images.startCalls != 0 {
+		t.Fatalf("sends=%d terminal=%d retries=%d starts=%d", len(transport.sends), inbound.terminalCalls, images.retryCalls, images.startCalls)
+	}
+	if !strings.Contains(transport.sends[0].PayloadJSON, k12DingtalkPhotoStatusText("", "outcome_unknown")) {
+		t.Fatal("status notice did not report the unknown OCR outcome")
+	}
+}
+
 func TestDingTalkPhotoWorkerReadsPersistedClassificationOutcomeUnknownBeforeTerminalDecision(
 	t *testing.T,
 ) {

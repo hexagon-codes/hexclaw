@@ -35,6 +35,40 @@ func (c *InboundPhotoCoordinator) Resume(
 	)
 }
 
+// AdmitPages 沿同一事务冻结同一条消息的原图，旧单图仓储仍可处理单图。
+func (c *InboundPhotoCoordinator) AdmitPages(ctx context.Context, inputs []InboundPhotoAdmission) ([]InboundPhotoBundle, bool, error) {
+	if len(inputs) == 1 {
+		bundle, created, err := c.Admit(ctx, inputs[0])
+		if err != nil {
+			return nil, false, err
+		}
+		return []InboundPhotoBundle{bundle}, created, nil
+	}
+	if c == nil || c.repository == nil {
+		return nil, false, fmt.Errorf("inbound photo repository is unavailable")
+	}
+	pages, ok := c.repository.(InboundPhotoPageRepository)
+	if !ok {
+		return nil, false, fmt.Errorf("inbound photo page admission is unavailable")
+	}
+	return pages.AdmitInboundPhotoPages(ctx, inputs)
+}
+
+// PendingEarlierPages 返回同一物理消息尚未送达或明确终止的前页。
+func (c *InboundPhotoCoordinator) PendingEarlierPages(ctx context.Context, identity InboundPhotoIdentity) ([]InboundPhotoDispatch, error) {
+	if identity.PageIndex == 0 {
+		return nil, nil
+	}
+	if c == nil || c.repository == nil {
+		return nil, fmt.Errorf("inbound photo repository is unavailable")
+	}
+	pages, ok := c.repository.(InboundPhotoPageRepository)
+	if !ok {
+		return nil, fmt.Errorf("inbound photo page ordering is unavailable")
+	}
+	return pages.PendingEarlierInboundPhotoPages(ctx, identity)
+}
+
 // ResumeByIdentity 按完整提供方消息身份恢复首个冻结入站聚合。
 func (c *InboundPhotoCoordinator) ResumeByIdentity(
 	ctx context.Context, identity InboundPhotoIdentity,

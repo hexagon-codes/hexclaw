@@ -316,9 +316,17 @@ func TestDingTalkPhotoWorkerPollsHomeworkStatusUntilFinalArtifactReady(t *testin
 					{DeliveryID: "image-1", BindingID: bundle.Receipt.BindingID, Target: target, PartKind: messagecontent.PartArtifact, PartOrdinal: 2, PartMIME: "image/png"},
 				},
 			}}
+			recalls := 0
 			runtime := newK12DingtalkPhotoInboundRuntime(k12DingtalkPhotoInboundRuntimeConfig{
 				BaseContext: context.Background(), Inbound: inbound, ImageTasks: images,
 				Artifacts: finalArtifactReaderFake{artifact: artifact, asset: annotated}, ReplyBatches: batches,
+				RecallStatusNotice: func(_ context.Context, instance, external string) error {
+					if instance != target.InstanceID || external != bundle.Receipt.ReceiptID+":accepted-platform" {
+						t.Fatalf("cleared an unrelated notice: %s %s", instance, external)
+					}
+					recalls++
+					return nil
+				},
 			})
 			waitingForRecovery := false
 			switch scenario {
@@ -364,8 +372,12 @@ func TestDingTalkPhotoWorkerPollsHomeworkStatusUntilFinalArtifactReady(t *testin
 			ready.Dispatch.FinalArtifactID = inbound.recordedFinalArtifactID
 			ready.Dispatch.ReplyStatus = k12usecase.InboundPhotoReplyReady
 			done, err = runtime.advanceFinalReply(context.Background(), ready)
-			if err != nil || !done || !inbound.completed {
-				t.Fatalf("final reply did not converge delivered: done=%v completed=%v err=%v", done, inbound.completed, err)
+			expectedRecalls := 0
+			if scenario == "routed" || scenario == "completed_child_before_parent_failure" {
+				expectedRecalls = 1
+			}
+			if err != nil || !done || !inbound.completed || recalls != expectedRecalls {
+				t.Fatalf("final reply did not converge delivered: done=%v completed=%v recalls=%d err=%v", done, inbound.completed, recalls, err)
 			}
 			if batches.prepareCalls != 1 || len(batches.lastMessage.Attachments) != 1 ||
 				!bytes.Equal(batches.lastMessage.Attachments[0].Data, annotated.Data) ||

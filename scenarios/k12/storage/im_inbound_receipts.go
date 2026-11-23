@@ -64,6 +64,7 @@ type InboundPhotoIdentity struct {
 	InstanceID        string
 	ChatID            string
 	ProviderMessageID string
+	PageIndex         int
 }
 
 // InboundPhotoAdmission 是 ACK 之前必须原子持久化的完整输入。
@@ -80,6 +81,7 @@ type InboundPhotoAdmission struct {
 
 type InboundPhotoReceipt struct {
 	ReceiptID     string
+	PageCount     int
 	OwnerScope    string
 	AgentName     string
 	BindingID     string
@@ -169,13 +171,13 @@ func normalizeInboundPhotoIdentity(identity InboundPhotoIdentity) (InboundPhotoI
 	identity.ChatID = strings.TrimSpace(identity.ChatID)
 	identity.ProviderMessageID = strings.TrimSpace(identity.ProviderMessageID)
 	if identity.Platform == "" || identity.InstanceID == "" || identity.ChatID == "" ||
-		identity.ProviderMessageID == "" {
+		identity.ProviderMessageID == "" || identity.PageIndex < 0 {
 		return InboundPhotoIdentity{}, fmt.Errorf("k12storage: inbound photo identity is incomplete")
 	}
 	return identity, nil
 }
 
-func normalizeInboundPhotoAdmission(input InboundPhotoAdmission) (InboundPhotoBundle, error) {
+func normalizeInboundPhotoAdmission(input InboundPhotoAdmission, receiptID string, receivedAt int64) (InboundPhotoBundle, error) {
 	input.OwnerScope = strings.TrimSpace(input.OwnerScope)
 	input.AgentName = strings.TrimSpace(input.AgentName)
 	input.BindingID = strings.TrimSpace(input.BindingID)
@@ -194,20 +196,18 @@ func normalizeInboundPhotoAdmission(input InboundPhotoAdmission) (InboundPhotoBu
 	if input.CommandJSON == "" || !json.Valid([]byte(input.CommandJSON)) {
 		return InboundPhotoBundle{}, fmt.Errorf("k12storage: inbound photo command is not valid JSON")
 	}
-	now := nowUnix()
-	receiptID := idgen.NanoID()
 	assetBytes := append([]byte(nil), input.AssetBytes...)
 	return InboundPhotoBundle{
 		Receipt: InboundPhotoReceipt{
 			ReceiptID: receiptID, OwnerScope: input.OwnerScope, AgentName: input.AgentName,
 			BindingID: input.BindingID, Identity: identity,
 			CommandDigest: inboundPhotoDigest([]byte(input.CommandJSON)),
-			CommandJSON:   input.CommandJSON, CreatedAt: now, UpdatedAt: now,
+			CommandJSON:   input.CommandJSON, CreatedAt: receivedAt, UpdatedAt: receivedAt,
 		},
 		Asset: InboundPhotoAsset{
 			AssetID: idgen.NanoID(), ReceiptID: receiptID, Name: input.AssetName,
 			MIME: input.AssetMIME, Size: len(assetBytes),
-			Digest: inboundPhotoDigest(assetBytes), Bytes: assetBytes, CreatedAt: now,
+			Digest: inboundPhotoDigest(assetBytes), Bytes: assetBytes, CreatedAt: receivedAt,
 		},
 		Dispatch: InboundPhotoDispatch{
 			DispatchID: idgen.NanoID(), ReceiptID: receiptID,
@@ -217,46 +217,50 @@ func normalizeInboundPhotoAdmission(input InboundPhotoAdmission) (InboundPhotoBu
 				ConfirmationStatus: InboundPhotoConfirmationNotRequired,
 				ReplyStatus:        InboundPhotoReplyPending,
 			},
-			CreatedAt: now, UpdatedAt: now,
+			CreatedAt: receivedAt, UpdatedAt: receivedAt,
 		},
 	}, nil
 }
 
+const inboundPhotoDispatchColumns = `d.dispatch_id,d.receipt_id,d.processing_status,d.routing_decision,
+	d.confirmation_status,d.image_task_id,d.final_artifact_id,d.reply_status,
+	d.delivery_batch_id,d.terminal_status,d.terminal_stage,d.failure_kind,
+	d.version,d.created_at,d.updated_at`
+
+func inboundPhotoDispatchScanArgs(d *InboundPhotoDispatch) []any {
+	return []any{&d.DispatchID, &d.ReceiptID, &d.ProcessingStatus, &d.RoutingDecision,
+		&d.ConfirmationStatus, &d.ImageTaskID, &d.FinalArtifactID, &d.ReplyStatus,
+		&d.DeliveryBatchID, &d.TerminalStatus, &d.TerminalStage, &d.FailureKind,
+		&d.Version, &d.CreatedAt, &d.UpdatedAt}
+}
+
 const inboundPhotoBundleSelect = `SELECT
-	r.receipt_id,r.owner_scope,r.agent_name,r.binding_id,
-	r.platform,r.instance_id,r.chat_id,r.provider_message_id,
+	p.receipt_id,r.owner_scope,r.agent_name,r.binding_id,
+	r.platform,r.instance_id,r.chat_id,r.provider_message_id,p.page_index,r.page_count,
 	r.command_digest,r.command_json,r.created_at,r.updated_at,
 	a.asset_id,a.receipt_id,a.asset_name,a.asset_mime,a.byte_size,
 	a.content_digest,a.asset_bytes,a.created_at,
-	d.dispatch_id,d.receipt_id,d.processing_status,d.routing_decision,
-	d.confirmation_status,d.image_task_id,d.final_artifact_id,d.reply_status,
-	d.delivery_batch_id,d.terminal_status,d.terminal_stage,d.failure_kind,
-	d.version,d.created_at,d.updated_at
+	` + inboundPhotoDispatchColumns + `
 	FROM k12_im_inbound_receipts AS r
-	JOIN k12_im_inbound_assets AS a ON a.receipt_id=r.receipt_id
-	JOIN k12_im_inbound_dispatches AS d ON d.receipt_id=r.receipt_id`
+	JOIN k12_im_inbound_pages AS p ON p.source_receipt_id=r.receipt_id
+	JOIN k12_im_inbound_assets AS a ON a.receipt_id=p.receipt_id
+	JOIN k12_im_inbound_dispatches AS d ON d.receipt_id=p.receipt_id`
 
 func scanInboundPhotoBundle(row rowScanner) (InboundPhotoBundle, error) {
 	var bundle InboundPhotoBundle
-	if err := row.Scan(
+	args := []any{
 		&bundle.Receipt.ReceiptID, &bundle.Receipt.OwnerScope,
 		&bundle.Receipt.AgentName, &bundle.Receipt.BindingID,
 		&bundle.Receipt.Identity.Platform, &bundle.Receipt.Identity.InstanceID,
 		&bundle.Receipt.Identity.ChatID, &bundle.Receipt.Identity.ProviderMessageID,
+		&bundle.Receipt.Identity.PageIndex, &bundle.Receipt.PageCount,
 		&bundle.Receipt.CommandDigest, &bundle.Receipt.CommandJSON,
 		&bundle.Receipt.CreatedAt, &bundle.Receipt.UpdatedAt,
 		&bundle.Asset.AssetID, &bundle.Asset.ReceiptID, &bundle.Asset.Name,
 		&bundle.Asset.MIME, &bundle.Asset.Size, &bundle.Asset.Digest,
 		&bundle.Asset.Bytes, &bundle.Asset.CreatedAt,
-		&bundle.Dispatch.DispatchID, &bundle.Dispatch.ReceiptID,
-		&bundle.Dispatch.ProcessingStatus, &bundle.Dispatch.RoutingDecision,
-		&bundle.Dispatch.ConfirmationStatus, &bundle.Dispatch.ImageTaskID,
-		&bundle.Dispatch.FinalArtifactID, &bundle.Dispatch.ReplyStatus,
-		&bundle.Dispatch.DeliveryBatchID, &bundle.Dispatch.TerminalStatus,
-		&bundle.Dispatch.TerminalStage, &bundle.Dispatch.FailureKind,
-		&bundle.Dispatch.Version,
-		&bundle.Dispatch.CreatedAt, &bundle.Dispatch.UpdatedAt,
-	); err != nil {
+	}
+	if err := row.Scan(append(args, inboundPhotoDispatchScanArgs(&bundle.Dispatch)...)...); err != nil {
 		return InboundPhotoBundle{}, err
 	}
 	bundle.Asset.Bytes = append([]byte(nil), bundle.Asset.Bytes...)
@@ -271,8 +275,8 @@ func getInboundPhotoByIdentity(
 	ctx context.Context, q inboundPhotoQueryer, identity InboundPhotoIdentity,
 ) (InboundPhotoBundle, error) {
 	return scanInboundPhotoBundle(q.QueryRowContext(ctx, inboundPhotoBundleSelect+`
-		WHERE r.platform=? AND r.instance_id=? AND r.chat_id=? AND r.provider_message_id=?`,
-		identity.Platform, identity.InstanceID, identity.ChatID, identity.ProviderMessageID,
+		WHERE r.platform=? AND r.instance_id=? AND r.chat_id=? AND r.provider_message_id=? AND p.page_index=?`,
+		identity.Platform, identity.InstanceID, identity.ChatID, identity.ProviderMessageID, identity.PageIndex,
 	))
 }
 
@@ -280,7 +284,7 @@ func getInboundPhotoByReceipt(
 	ctx context.Context, q inboundPhotoQueryer, agentName, receiptID string,
 ) (InboundPhotoBundle, error) {
 	return scanInboundPhotoBundle(q.QueryRowContext(ctx, inboundPhotoBundleSelect+`
-		WHERE r.agent_name=? AND r.receipt_id=?`, agentName, receiptID))
+		WHERE r.agent_name=? AND p.receipt_id=?`, agentName, receiptID))
 }
 
 func sameInboundPhotoContent(stored, candidate InboundPhotoBundle) bool {
@@ -288,94 +292,134 @@ func sameInboundPhotoContent(stored, candidate InboundPhotoBundle) bool {
 		bytes.Equal(stored.Asset.Bytes, candidate.Asset.Bytes)
 }
 
-// AdmitInboundPhoto 原子写入收据、原始图片和恢复调度；成功返回后调用方才可 ACK。
-func (s *Store) AdmitInboundPhoto(
-	ctx context.Context, input InboundPhotoAdmission,
-) (InboundPhotoBundle, bool, error) {
-	candidate, err := normalizeInboundPhotoAdmission(input)
+// AdmitInboundPhoto 保留单图的零页序和原始收据身份。
+func (s *Store) AdmitInboundPhoto(ctx context.Context, input InboundPhotoAdmission) (InboundPhotoBundle, bool, error) {
+	pages, created, err := s.AdmitInboundPhotoPages(ctx, []InboundPhotoAdmission{input})
 	if err != nil {
 		return InboundPhotoBundle{}, false, err
+	}
+	return pages[0], created, nil
+}
+
+// AdmitInboundPhotoPages 在一个事务中接纳整条物理消息；仅已完整提交的页可以被 worker 恢复。
+func (s *Store) AdmitInboundPhotoPages(ctx context.Context, inputs []InboundPhotoAdmission) ([]InboundPhotoBundle, bool, error) {
+	if len(inputs) == 0 {
+		return nil, false, fmt.Errorf("inbound photo admission requires at least one page")
+	}
+	sourceReceiptID := idgen.NanoID()
+	receivedAt := nowUnix()
+	pages := make([]InboundPhotoBundle, len(inputs))
+	for i, input := range inputs {
+		if input.Identity.PageIndex != 0 && input.Identity.PageIndex != i {
+			return nil, false, fmt.Errorf("%w: invalid page order", ErrInboundPhotoConflict)
+		}
+		input.Identity.PageIndex = 0
+		pageID := sourceReceiptID
+		if len(inputs) > 1 {
+			// 单图沿用物理收据的原 ID；组内每页使用独立的内部 ID，不会与旧单图的 NanoID 相等。
+			pageID = fmt.Sprintf("%s:page:%d", sourceReceiptID, i)
+		}
+		page, err := normalizeInboundPhotoAdmission(input, pageID, receivedAt)
+		if err != nil {
+			return nil, false, err
+		}
+		if i > 0 {
+			first := pages[0].Receipt
+			if page.Receipt.Identity != first.Identity || page.Receipt.OwnerScope != first.OwnerScope ||
+				page.Receipt.AgentName != first.AgentName || page.Receipt.BindingID != first.BindingID ||
+				page.Receipt.CommandJSON != first.CommandJSON {
+				return nil, false, fmt.Errorf("%w: pages must have the same message and route", ErrInboundPhotoConflict)
+			}
+		}
+		page.Receipt.Identity.PageIndex = i
+		page.Receipt.PageCount = len(inputs)
+		pages[i] = page
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return InboundPhotoBundle{}, false, fmt.Errorf("k12storage: begin inbound photo admission: %w", err)
+		return nil, false, fmt.Errorf("begin inbound photo admission: %w", err)
 	}
 	defer tx.Rollback()
-	stored, getErr := getInboundPhotoByIdentity(ctx, tx, candidate.Receipt.Identity)
-	if getErr == nil {
-		if !sameInboundPhotoContent(stored, candidate) {
-			return InboundPhotoBundle{}, false, fmt.Errorf(
-				"%w: platform=%s instance=%s chat=%s provider_message_id=%s",
-				ErrInboundPhotoConflict, candidate.Receipt.Identity.Platform,
-				candidate.Receipt.Identity.InstanceID, candidate.Receipt.Identity.ChatID,
-				candidate.Receipt.Identity.ProviderMessageID,
-			)
+	created, err := insertInboundPhotoSource(ctx, tx, sourceReceiptID, pages[0].Receipt)
+	if err != nil {
+		return nil, false, err
+	}
+	for i, page := range pages {
+		if created {
+			if err := insertInboundPhotoPage(ctx, tx, sourceReceiptID, page); err != nil {
+				return nil, false, err
+			}
+			continue
 		}
-		return stored, false, nil
+		stored, err := getInboundPhotoByIdentity(ctx, tx, page.Receipt.Identity)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, false, records.ErrScopeNotFound
+		}
+		if err != nil {
+			return nil, false, fmt.Errorf("read replayed inbound photo: %w", err)
+		}
+		if stored.Receipt.PageCount != len(inputs) || !sameInboundPhotoContent(stored, page) {
+			return nil, false, fmt.Errorf("%w: different page count or content at page %d", ErrInboundPhotoConflict, i)
+		}
+		pages[i] = stored
 	}
-	if !errors.Is(getErr, sql.ErrNoRows) {
-		return InboundPhotoBundle{}, false, fmt.Errorf("k12storage: read inbound photo admission: %w", getErr)
+	if err := tx.Commit(); err != nil {
+		return nil, false, fmt.Errorf("commit inbound photo admission: %w", err)
 	}
-	if err := ensureAgentRegistered(ctx, tx, candidate.Receipt.AgentName); err != nil {
-		return InboundPhotoBundle{}, false, err
-	}
+	return pages, created, nil
+}
+
+func insertInboundPhotoSource(ctx context.Context, tx *sql.Tx, sourceReceiptID string, receipt InboundPhotoReceipt) (bool, error) {
+	identity := receipt.Identity
+	// 首个数据库操作取得写锁。重复回调使用原消息已冻结的归属和路由。
 	result, err := tx.ExecContext(ctx, `INSERT INTO k12_im_inbound_receipts(
 		receipt_id,owner_scope,agent_name,binding_id,platform,instance_id,chat_id,
-		provider_message_id,command_digest,command_json,created_at,updated_at
-	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+		provider_message_id,page_count,command_digest,command_json,created_at,updated_at
+	) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM agents WHERE name=?)
 	ON CONFLICT(platform,instance_id,chat_id,provider_message_id) DO NOTHING`,
-		candidate.Receipt.ReceiptID, candidate.Receipt.OwnerScope,
-		candidate.Receipt.AgentName, candidate.Receipt.BindingID,
-		candidate.Receipt.Identity.Platform, candidate.Receipt.Identity.InstanceID,
-		candidate.Receipt.Identity.ChatID, candidate.Receipt.Identity.ProviderMessageID,
-		candidate.Receipt.CommandDigest, candidate.Receipt.CommandJSON,
-		candidate.Receipt.CreatedAt, candidate.Receipt.UpdatedAt,
-	)
+		sourceReceiptID, receipt.OwnerScope, receipt.AgentName, receipt.BindingID,
+		identity.Platform, identity.InstanceID, identity.ChatID, identity.ProviderMessageID,
+		receipt.PageCount, receipt.CommandDigest, receipt.CommandJSON,
+		receipt.CreatedAt, receipt.UpdatedAt, receipt.AgentName)
 	if err != nil {
-		return InboundPhotoBundle{}, false, fmt.Errorf("k12storage: insert inbound photo receipt: %w", err)
+		return false, fmt.Errorf("insert inbound photo source: %w", err)
 	}
-	created, _ := result.RowsAffected()
-	if created == 0 {
-		stored, getErr = getInboundPhotoByIdentity(ctx, tx, candidate.Receipt.Identity)
-		if getErr != nil {
-			return InboundPhotoBundle{}, false, fmt.Errorf("k12storage: read replayed inbound photo: %w", getErr)
+	created, err := result.RowsAffected()
+	return created == 1, err
+}
+
+func insertInboundPhotoPage(ctx context.Context, tx *sql.Tx, sourceReceiptID string, candidate InboundPhotoBundle) error {
+	receipt := candidate.Receipt
+	if receipt.PageCount > 1 {
+		// 单图页关联由消息表的 INSERT 触发器建立，包含旧版本程序写入的消息。
+		if _, err := tx.ExecContext(ctx, `INSERT INTO k12_im_inbound_pages(receipt_id,source_receipt_id,page_index) VALUES(?,?,?)`,
+			receipt.ReceiptID, sourceReceiptID, receipt.Identity.PageIndex); err != nil {
+			return fmt.Errorf("insert inbound photo page: %w", err)
 		}
-		if !sameInboundPhotoContent(stored, candidate) {
-			return InboundPhotoBundle{}, false, fmt.Errorf(
-				"%w: platform=%s instance=%s chat=%s provider_message_id=%s",
-				ErrInboundPhotoConflict, candidate.Receipt.Identity.Platform,
-				candidate.Receipt.Identity.InstanceID, candidate.Receipt.Identity.ChatID,
-				candidate.Receipt.Identity.ProviderMessageID,
-			)
-		}
-		return stored, false, nil
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO k12_im_inbound_assets(
 		asset_id,receipt_id,asset_name,asset_mime,byte_size,content_digest,asset_bytes,created_at
 	) VALUES(?,?,?,?,?,?,?,?)`,
-		candidate.Asset.AssetID, candidate.Asset.ReceiptID, candidate.Asset.Name,
+		candidate.Asset.AssetID, receipt.ReceiptID, candidate.Asset.Name,
 		candidate.Asset.MIME, candidate.Asset.Size, candidate.Asset.Digest,
 		candidate.Asset.Bytes, candidate.Asset.CreatedAt,
 	); err != nil {
-		return InboundPhotoBundle{}, false, fmt.Errorf("k12storage: insert inbound photo asset: %w", err)
+		return fmt.Errorf("insert inbound photo asset: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO k12_im_inbound_dispatches(
 		dispatch_id,receipt_id,processing_status,routing_decision,confirmation_status,
 		image_task_id,final_artifact_id,reply_status,delivery_batch_id,version,created_at,updated_at
 	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
-		candidate.Dispatch.DispatchID, candidate.Dispatch.ReceiptID,
+		candidate.Dispatch.DispatchID, receipt.ReceiptID,
 		candidate.Dispatch.ProcessingStatus, candidate.Dispatch.RoutingDecision,
 		candidate.Dispatch.ConfirmationStatus, candidate.Dispatch.ImageTaskID,
 		candidate.Dispatch.FinalArtifactID, candidate.Dispatch.ReplyStatus,
 		candidate.Dispatch.DeliveryBatchID, candidate.Dispatch.Version,
 		candidate.Dispatch.CreatedAt, candidate.Dispatch.UpdatedAt,
 	); err != nil {
-		return InboundPhotoBundle{}, false, fmt.Errorf("k12storage: insert inbound photo dispatch: %w", err)
+		return fmt.Errorf("insert inbound photo dispatch: %w", err)
 	}
-	if err := tx.Commit(); err != nil {
-		return InboundPhotoBundle{}, false, fmt.Errorf("k12storage: commit inbound photo admission: %w", err)
-	}
-	return candidate, true, nil
+	return nil
 }
 
 func (s *Store) GetInboundPhotoByIdentity(
@@ -411,6 +455,35 @@ func (s *Store) GetInboundPhoto(
 		return InboundPhotoBundle{}, fmt.Errorf("k12storage: get inbound photo: %w", err)
 	}
 	return bundle, nil
+}
+
+// PendingEarlierInboundPhotoPages 仅读同一来源先前各页的调度状态，供按页投递使用。
+func (s *Store) PendingEarlierInboundPhotoPages(ctx context.Context, identity InboundPhotoIdentity) ([]InboundPhotoDispatch, error) {
+	identity, err := normalizeInboundPhotoIdentity(identity)
+	if err != nil {
+		return nil, err
+	}
+	if identity.PageIndex == 0 {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT `+inboundPhotoDispatchColumns+`
+		FROM k12_im_inbound_receipts r JOIN k12_im_inbound_pages p ON p.source_receipt_id=r.receipt_id
+		JOIN k12_im_inbound_dispatches d ON d.receipt_id=p.receipt_id
+		WHERE r.platform=? AND r.instance_id=? AND r.chat_id=? AND r.provider_message_id=? AND p.page_index<?
+		AND d.reply_status!='delivered' AND d.terminal_status='' ORDER BY p.page_index`,
+		identity.Platform, identity.InstanceID, identity.ChatID, identity.ProviderMessageID, identity.PageIndex)
+	if err != nil {
+		return nil, err
+	}
+	var pending []InboundPhotoDispatch
+	for rows.Next() {
+		var dispatch InboundPhotoDispatch
+		if err := rows.Scan(inboundPhotoDispatchScanArgs(&dispatch)...); err != nil {
+			return nil, errors.Join(err, rows.Close())
+		}
+		pending = append(pending, dispatch)
+	}
+	return pending, errors.Join(rows.Err(), rows.Close())
 }
 
 func inboundPhotoProcessingRank(status InboundPhotoProcessingStatus) int {
@@ -641,8 +714,8 @@ func (s *Store) CompareAndSwapInboundPhotoDispatch(
 		final_artifact_id=?,reply_status=?,delivery_batch_id=?,terminal_status=?,terminal_stage=?,
 		failure_kind=?,version=version+1,updated_at=?
 		WHERE receipt_id=? AND version=? AND EXISTS(
-			SELECT 1 FROM k12_im_inbound_receipts AS receipt
-			WHERE receipt.receipt_id=k12_im_inbound_dispatches.receipt_id AND receipt.agent_name=?
+			SELECT 1 FROM k12_im_inbound_pages p JOIN k12_im_inbound_receipts r ON r.receipt_id=p.source_receipt_id
+			WHERE p.receipt_id=k12_im_inbound_dispatches.receipt_id AND r.agent_name=?
 		)`, next.ProcessingStatus, next.RoutingDecision, next.ConfirmationStatus,
 		next.ImageTaskID, next.FinalArtifactID, next.ReplyStatus, next.DeliveryBatchID,
 		next.TerminalStatus, next.TerminalStage, next.FailureKind, updatedAt,

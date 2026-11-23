@@ -142,7 +142,8 @@ func tutorSourceIdentityVia(ctx context.Context, q dbQueryer, dispatch k12.Image
 	case k12.ImageTaskSourceIM:
 		var platform, instance, chat string
 		err = q.QueryRowContext(ctx, `SELECT r.platform,r.instance_id,r.chat_id,r.provider_message_id
-			FROM k12_im_inbound_receipts r JOIN k12_im_inbound_dispatches d ON d.receipt_id=r.receipt_id
+			FROM k12_im_inbound_receipts r JOIN k12_im_inbound_pages p ON p.source_receipt_id=r.receipt_id
+			JOIN k12_im_inbound_dispatches d ON d.receipt_id=p.receipt_id
 			WHERE d.image_task_id=? AND r.owner_scope=? AND r.agent_name=?`,
 			dispatch.DispatchID, owner, dispatch.AgentName).Scan(&platform, &instance, &chat, &ref.MessageID)
 		if errors.Is(err, sql.ErrNoRows) {

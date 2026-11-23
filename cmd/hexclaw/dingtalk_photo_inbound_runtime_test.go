@@ -698,7 +698,8 @@ func (f *finalReplyBatchFake) PrepareAndSendMessageBatchForTargets(
 			f.statusNotices = make(map[string]k12.DeliveryBatch)
 		}
 		batch := k12.DeliveryBatch{BatchID: objectID, AgentName: agent, ObjectKind: objectKind, ObjectID: objectID, Status: k12.DeliveryBatchDelivered,
-			Receipts: []k12.DeliveryReceipt{{PartKind: messagecontent.PartMarkdown, Status: k12.DeliveryDelivered, Target: targets[0].Target}}}
+			Receipts: []k12.DeliveryReceipt{{PartKind: messagecontent.PartMarkdown, PartOrdinal: 1, Status: k12.DeliveryDelivered,
+				BindingID: targets[0].BindingID, Target: targets[0].Target, DeliveryID: objectID, ExternalMessageID: objectID + "-platform"}}}
 		f.statusNotices[agent+"/"+objectKind+"/"+objectID] = batch
 		return batch, true, nil
 	}

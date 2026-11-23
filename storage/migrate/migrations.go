@@ -632,6 +632,7 @@ WHERE status IN ('confirmed','assigned','submitted','graded','closed','cancelled
 		);
 		CREATE INDEX idx_chat_superseded_requests_session ON chat_superseded_requests(session_id);`,
 	},
+	K12IMInboundPagesV151,
 }
 
 const k12PrintJobsV13DDL = `CREATE TABLE IF NOT EXISTS k12_paper_no_counters (
