@@ -19,7 +19,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"mime/multipart"
 	"net/http"
 	"net/url"
@@ -43,13 +42,14 @@ import (
 	dtpayload "github.com/open-dingtalk/dingtalk-stream-sdk-go/payload"
 	dtutils "github.com/open-dingtalk/dingtalk-stream-sdk-go/utils"
 
-	"github.com/hexagon-codes/hexclaw/adapter"
-	"github.com/hexagon-codes/hexclaw/config"
-	"github.com/hexagon-codes/hexclaw/messagecontent"
 	sign_ "github.com/hexagon-codes/toolkit/crypto/sign"
 	"github.com/hexagon-codes/toolkit/lang/stringx"
 	"github.com/hexagon-codes/toolkit/util/logger"
 	"github.com/hexagon-codes/toolkit/util/retry"
+
+	"github.com/hexagon-codes/hexclaw/adapter"
+	"github.com/hexagon-codes/hexclaw/config"
+	"github.com/hexagon-codes/hexclaw/messagecontent"
 )
 
 // InboundPhotoAdmissionPort 在平台 ACK 之前接收已经下载完成的 direct 图片消息。
@@ -65,6 +65,7 @@ type DingtalkAdapter struct {
 	queue   *adapter.SendQueue
 
 	inboundPhotoAdmission InboundPhotoAdmissionPort // mu 守护
+	photoIntake           adapter.PhotoIntake       // mu 守护
 
 	mu          sync.RWMutex
 	accessToken string
@@ -235,13 +236,20 @@ func (a *DingtalkAdapter) SetInboundPhotoAdmissionPort(port InboundPhotoAdmissio
 	a.mu.Unlock()
 }
 
-func (a *DingtalkAdapter) currentInboundPhotoAdmissionPort() InboundPhotoAdmissionPort {
+// SetPhotoIntake 设置下载前的共享图片接单入口。
+func (a *DingtalkAdapter) SetPhotoIntake(port adapter.PhotoIntake) {
 	if a == nil {
-		return nil
+		return
 	}
+	a.mu.Lock()
+	a.photoIntake = port
+	a.mu.Unlock()
+}
+
+func (a *DingtalkAdapter) photoAdmissionPorts() (adapter.PhotoIntake, InboundPhotoAdmissionPort) {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	return a.inboundPhotoAdmission
+	return a.photoIntake, a.inboundPhotoAdmission
 }
 
 // dingtalkThinkingFeedback 是「收到消息、正在处理」的占位提示。发送前先发它给用户即时反馈，
@@ -1148,12 +1156,13 @@ func (a *DingtalkAdapter) Handler() http.Handler {
 
 // onChatBotFrame 保留平台明确给出的引用；SDK 的文本投影只包含正文。
 func (a *DingtalkAdapter) onChatBotFrame(ctx context.Context, frame *dtpayload.DataFrame) (*dtpayload.DataFrameResponse, error) {
+	receivedAt := time.Now()
 	if frame == nil {
 		return nil, errors.New("dingtalk inbound frame is required")
 	}
 	raw := []byte(frame.Data)
 	a.logCallbackFrameReceived(raw, frame.GetMessageId())
-	var event dtEvent
+	event := dtEvent{receivedAt: receivedAt}
 	if err := json.Unmarshal(raw, &event); err != nil {
 		logger.Warn("[dingtalk] callback frame parse failed", "error_type", fmt.Sprintf("%T", err))
 		return nil, err
@@ -1174,10 +1183,12 @@ func (a *DingtalkAdapter) onChatBotFrame(ctx context.Context, frame *dtpayload.D
 // 普通消息在启动异步处理后立即返回成功 ACK（空串）。注入图片耐久接纳端口时，direct 图片只在
 // 下载和耐久接纳成功后 ACK；完整 LLM 往返仍由恢复型 worker 执行，绝不进入 ACK 同步路径。
 func (a *DingtalkAdapter) onChatBotMessage(ctx context.Context, data *dtchatbot.BotCallbackDataModel) ([]byte, error) {
+	receivedAt := time.Now()
 	if data == nil {
 		return []byte(""), nil
 	}
 	event := dtEvent{
+		receivedAt:       receivedAt,
 		MsgID:            data.MsgId,
 		CreateAt:         strconv.AppendInt(nil, data.CreateAt, 10),
 		ConversationId:   data.ConversationId,
@@ -1228,6 +1239,7 @@ func (a *DingtalkAdapter) onChatBotEvent(ctx context.Context, event dtEvent) ([]
 
 // handleWebhook 处理钉钉回调（向后兼容 HTTP Webhook）
 func (a *DingtalkAdapter) handleWebhook(w http.ResponseWriter, r *http.Request) {
+	receivedAt := time.Now()
 	// BUG-20260611: cap webhook body to 1 MiB — external callers must not
 	// be able to OOM the sidecar with an unbounded payload.
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
@@ -1250,7 +1262,7 @@ func (a *DingtalkAdapter) handleWebhook(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	var event dtEvent
+	event := dtEvent{receivedAt: receivedAt}
 	if err := json.Unmarshal(body, &event); err != nil {
 		http.Error(w, "error", http.StatusBadRequest)
 		return
@@ -1300,16 +1312,12 @@ func (a *DingtalkAdapter) Send(ctx context.Context, chatID string, reply *adapte
 	if _, isGroup := parseGroupQueueTarget(chatID); isGroup {
 		return errors.New("DingTalk v0.5 supports direct messages only")
 	}
-	adapter.MaybeApplyTextFallback(ctx, reply)
-	if err := ensureDingTalkRenderEvidence(reply); err != nil {
-		return fmt.Errorf("钉钉渲染协议校验失败: %w", err)
+	if err := prepareDingTalkReply(ctx, reply); err != nil {
+		return err
 	}
-	if reply != nil {
-		for _, attachment := range reply.Attachments {
-			if isDingTalkDocumentAttachment(attachment) {
-				return a.sendPreparedDocumentReply(ctx, chatID, reply)
-			}
-		}
+	if hasDingTalkDocument(reply) {
+		_, err := a.sendPreparedDocumentReply(ctx, chatID, reply)
+		return err
 	}
 	if a.queue == nil {
 		return a.sendReplyNow(ctx, chatID, reply)
@@ -1317,14 +1325,49 @@ func (a *DingtalkAdapter) Send(ctx context.Context, chatID string, reply *adapte
 	return a.queue.Send(ctx, chatID, reply)
 }
 
+func prepareDingTalkReply(ctx context.Context, reply *adapter.Reply) error {
+	adapter.MaybeApplyTextFallback(ctx, reply)
+	if err := ensureDingTalkRenderEvidence(reply); err != nil {
+		return fmt.Errorf("钉钉渲染协议校验失败: %w", err)
+	}
+	return nil
+}
+
+func hasDingTalkDocument(reply *adapter.Reply) bool {
+	if reply != nil {
+		for _, attachment := range reply.Attachments {
+			if isDingTalkDocumentAttachment(attachment) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// SendPhotoReplyWithReceipts 由普通会话发送原图片请求的终稿，按实际发送顺序返回平台回执。
+// 部分发送失败时，此前已受理的回执和本次失败状态一并交给持久接续方。
+func (a *DingtalkAdapter) SendPhotoReplyWithReceipts(ctx context.Context, chatID string, reply *adapter.Reply) ([]adapter.DeliveryAck, error) {
+	if !hasDingTalkDocument(reply) {
+		ack, err := a.SendWithReceipt(ctx, chatID, reply)
+		return []adapter.DeliveryAck{ack}, err
+	}
+	if _, isGroup := parseGroupQueueTarget(chatID); isGroup {
+		return nil, errors.New("DingTalk v0.5 supports direct messages only")
+	}
+	if err := prepareDingTalkReply(ctx, reply); err != nil {
+		return nil, err
+	}
+	return a.sendPreparedDocumentReply(ctx, chatID, reply)
+}
+
 // sendPreparedDocumentReply 沿冻结清单发送普通文件回复，所有资源准备完成后才发送可见部分。
 // 普通 Send 不合并多条平台回执；部分发送后的错误交回调用方，不在此重发。
-func (a *DingtalkAdapter) sendPreparedDocumentReply(ctx context.Context, chatID string, reply *adapter.Reply) error {
+func (a *DingtalkAdapter) sendPreparedDocumentReply(ctx context.Context, chatID string, reply *adapter.Reply) ([]adapter.DeliveryAck, error) {
 	attachments := make(map[string]adapter.Attachment, len(reply.Attachments))
 	for index, attachment := range reply.Attachments {
 		digest, _, err := dingTalkAttachmentIdentity(attachment)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		ref := reply.MessageContent.Attachments[index]
 		mime := strings.TrimSpace(attachment.Mime)
@@ -1332,7 +1375,7 @@ func (a *DingtalkAdapter) sendPreparedDocumentReply(ctx context.Context, chatID 
 			mime = "application/octet-stream"
 		}
 		if ref.Digest != digest || ref.MIME != mime || ref.Name != safeDingTalkAttachmentName(attachment.Name) {
-			return errors.New("DingTalk reply attachment does not match canonical content")
+			return nil, errors.New("DingTalk reply attachment does not match canonical content")
 		}
 		attachment.Mime, attachment.Name = ref.MIME, ref.Name
 		attachments[ref.AssetID] = attachment
@@ -1346,28 +1389,30 @@ func (a *DingtalkAdapter) sendPreparedDocumentReply(ctx context.Context, chatID 
 		if projected.Kind == messagecontent.PartArtifact {
 			attachment, ok := attachments[projected.ArtifactRef]
 			if !ok {
-				return errors.New("DingTalk reply artifact attachment is unavailable")
+				return nil, errors.New("DingTalk reply artifact attachment is unavailable")
 			}
 			part.Digest, part.MIME, part.Attachment = projected.ArtifactDigest, attachment.Mime, &attachment
 		} else {
 			part.Text = projected.Text
 		}
 		if err := validateDingTalkDeliveryPartCanonicalEvidence(part, true); err != nil {
-			return err
+			return nil, err
 		}
 		parts = append(parts, part)
 	}
 	for index := range parts {
 		resource, err := a.PrepareDeliveryPartResource(ctx, parts[index])
 		if err != nil {
-			return err
+			return nil, err
 		}
 		parts[index].PreparedResourceID = resource
 	}
+	acks := make([]adapter.DeliveryAck, 0, len(parts))
 	for _, part := range parts {
 		ack, err := a.SendPreparedPartWithReceipt(ctx, chatID, part)
+		acks = append(acks, ack)
 		if err != nil {
-			return err
+			return acks, err
 		}
 		logger.Info("[dingtalk] reply part accepted",
 			"instance_sha256", dingtalkIdentityHash(a.Name()),
@@ -1377,7 +1422,7 @@ func (a *DingtalkAdapter) sendPreparedDocumentReply(ctx context.Context, chatID 
 			"external_message_id", ack.ExternalMessageID,
 		)
 	}
-	return nil
+	return acks, nil
 }
 
 // SendWithReceipt sends through the same per-adapter queue as ordinary
@@ -1390,9 +1435,8 @@ func (a *DingtalkAdapter) SendWithReceipt(ctx context.Context, chatID string, re
 	if reply == nil {
 		return adapter.DeliveryAck{Status: adapter.DeliveryFailed}, errors.New("dingtalk: reply is required")
 	}
-	adapter.MaybeApplyTextFallback(ctx, reply)
-	if err := ensureDingTalkRenderEvidence(reply); err != nil {
-		return adapter.DeliveryAck{Status: adapter.DeliveryFailed}, fmt.Errorf("钉钉渲染协议校验失败: %w", err)
+	if err := prepareDingTalkReply(ctx, reply); err != nil {
+		return adapter.DeliveryAck{Status: adapter.DeliveryFailed}, err
 	}
 	var externalID string
 	var providerSendStarted atomic.Bool
@@ -2228,46 +2272,6 @@ func (a *DingtalkAdapter) handleMessage(event dtEvent) {
 	a.handleMessageContext(context.Background(), event)
 }
 
-// admitInboundPhotoBeforeACK 只在注入耐久端口时接管 direct 图片：先下载一次并构造
-// canonical Message，再同步完成耐久接纳。未匹配消息保留预下载附件交给旧 worker。
-func (a *DingtalkAdapter) admitInboundPhotoBeforeACK(
-	ctx context.Context, event *dtEvent,
-) (bool, error) {
-	port := a.currentInboundPhotoAdmissionPort()
-	if port == nil || event == nil || event.MsgType != dtMsgTypePicture ||
-		strings.TrimSpace(event.Content.DownloadCode) == "" {
-		return false, nil
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	codes := event.PictureDownloadCodes
-	if len(codes) == 0 {
-		codes = []string{event.Content.DownloadCode}
-	}
-	receivedAt := time.Now()
-	slog.Info("DingTalk inbound photo received",
-		"source_instance_ref", dingtalkIdentityHash(a.Name()),
-		"chat_ref", dingtalkIdentityHash(event.SenderStaffId),
-		"provider_message_ref", dingtalkIdentityHash(event.MsgID),
-		"received_at_ms", receivedAt.UnixMilli(),
-		"platform_created_at_ms", event.photoCreatedMillis(receivedAt), "pages", len(codes))
-	attachments := make([]adapter.Attachment, 0, len(codes))
-	for _, code := range codes {
-		attachment, err := a.downloadPictureAttachment(ctx, code)
-		if err != nil {
-			return false, fmt.Errorf("DingTalk inbound photo download before durable admission: %w", err)
-		}
-		attachments = append(attachments, attachment)
-	}
-	event.Attachments = attachments
-	handled, err := port.AdmitInboundPhoto(ctx, a.messageFromEvent(*event, event.Attachments))
-	if err != nil {
-		return false, fmt.Errorf("DingTalk inbound photo durable admission failed: %w", err)
-	}
-	return handled, nil
-}
-
 func (a *DingtalkAdapter) messageFromEvent(
 	event dtEvent, attachments []adapter.Attachment,
 ) *adapter.Message {
@@ -2382,20 +2386,14 @@ func (a *DingtalkAdapter) handleMessageContext(baseCtx context.Context, event dt
 			return
 		}
 		if len(attachments) == 0 {
-			codes := event.PictureDownloadCodes
-			if len(codes) == 0 {
-				codes = []string{event.Content.DownloadCode}
-			}
-			for _, code := range codes {
-				att, err := a.downloadPictureAttachment(ctx, code)
-				if err != nil {
-					logger.Error("钉钉: 下载图片消息失败", "error", err)
-					errCtx, errCancel := terminalNotifyCtx()
-					defer errCancel()
-					_ = a.sendReplyToEvent(errCtx, event, &adapter.Reply{Content: "⚠️ 图片获取失败，请重新发送一次。"})
-					return
-				}
-				attachments = append(attachments, att)
+			var err error
+			attachments, err = a.downloadLegacyPhotoPages(ctx, event)
+			if err != nil {
+				logger.Error("钉钉: 下载图片消息失败", "error", err)
+				errCtx, errCancel := terminalNotifyCtx()
+				defer errCancel()
+				_ = a.sendReplyToEvent(errCtx, event, &adapter.Reply{Content: "⚠️ 图片获取失败，请重新发送一次。"})
+				return
 			}
 		}
 	}
@@ -2444,19 +2442,19 @@ func (a *DingtalkAdapter) handleMessageContext(baseCtx context.Context, event dt
 func (a *DingtalkAdapter) downloadPictureAttachment(ctx context.Context, downloadCode string) (adapter.Attachment, error) {
 	token, err := a.getAccessToken(ctx)
 	if err != nil {
-		return adapter.Attachment{}, fmt.Errorf("获取 Access Token 失败: %w", err)
+		return adapter.Attachment{}, photoTransportError("获取 Access Token 失败", err)
 	}
 	api, err := a.apiClient()
 	if err != nil {
-		return adapter.Attachment{}, fmt.Errorf("初始化钉钉官方 SDK 失败: %w", err)
+		return adapter.Attachment{}, photoTransportError("初始化钉钉官方 SDK 失败", err)
 	}
 	downloadURL, err := api.DownloadMessageFile(ctx, token, a.cfg.RobotCode, downloadCode)
 	if err != nil {
-		return adapter.Attachment{}, fmt.Errorf("换取下载 URL 失败: %w", err)
+		return adapter.Attachment{}, photoTransportError("换取下载 URL 失败", err)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
 	if err != nil {
-		return adapter.Attachment{}, fmt.Errorf("构造下载请求失败: %w", err)
+		return adapter.Attachment{}, photoTransportError("构造下载请求失败", err)
 	}
 	// 图片下载独立选择出口，保留其他业务及钉钉 OpenAPI 的客户端配置。
 	downloadClient := http.DefaultClient
@@ -2478,7 +2476,7 @@ func (a *DingtalkAdapter) downloadPictureAttachment(ctx context.Context, downloa
 	}
 	resp, err := downloadClient.Do(req)
 	if err != nil {
-		return adapter.Attachment{}, fmt.Errorf("下载图片失败: %w", err)
+		return adapter.Attachment{}, photoTransportError("下载图片失败", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
@@ -2488,7 +2486,7 @@ func (a *DingtalkAdapter) downloadPictureAttachment(ctx context.Context, downloa
 	// 静默截断产生坏 base64；现在超限返回明确错误，走"图片获取失败"用户反馈路径。
 	data, err := io.ReadAll(io.LimitReader(resp.Body, dtMaxPictureBytes+1))
 	if err != nil {
-		return adapter.Attachment{}, fmt.Errorf("读取图片字节失败: %w", err)
+		return adapter.Attachment{}, photoTransportError("读取图片字节失败", err)
 	}
 	if len(data) > dtMaxPictureBytes {
 		return adapter.Attachment{}, fmt.Errorf("图片超过 %d MiB 上限，拒绝截断收取", dtMaxPictureBytes>>20)
@@ -2504,6 +2502,7 @@ func (a *DingtalkAdapter) downloadPictureAttachment(ctx context.Context, downloa
 		Type: "image",
 		Mime: mime,
 		Name: "dingtalk-picture",
+		Size: int64(len(data)),
 		Data: base64.StdEncoding.EncodeToString(data),
 	}, nil
 }
@@ -2605,6 +2604,7 @@ func (a *DingtalkAdapter) Health(_ context.Context) error {
 
 // dtEvent 钉钉消息事件
 type dtEvent struct {
+	receivedAt       time.Time
 	MsgID            string          `json:"msgId"`
 	CreateAt         json.RawMessage `json:"createAt,omitempty"`
 	ConversationId   string          `json:"conversationId"`
@@ -2650,7 +2650,6 @@ func (event *dtEvent) normalizeRichText() error {
 		return nil
 	}
 	var texts, codes []string
-	seen := make(map[string]bool)
 	for _, item := range event.Content.RichText {
 		if text := strings.TrimSpace(item.Text); text != "" {
 			texts = append(texts, text)
@@ -2665,10 +2664,7 @@ func (event *dtEvent) normalizeRichText() error {
 		if code == "" {
 			return errors.New("dingtalk rich text picture is missing download code")
 		}
-		if !seen[code] {
-			codes = append(codes, code)
-			seen[code] = true
-		}
+		codes = append(codes, code)
 	}
 	if strings.TrimSpace(event.Text.Content) == "" {
 		event.Text.Content = strings.Join(texts, "\n")
